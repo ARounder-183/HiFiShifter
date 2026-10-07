@@ -2407,7 +2407,6 @@ export function usePianoRollInteractions(args: {
             setParamViewport,
             invalidate,
             syncScrollLeft,
-            applyEdgeScrollLeft,
             horizontalZoomChainRef,
             onHorizontalZoom,
             syncTimelineEnabled,
@@ -3013,6 +3012,11 @@ export function usePianoRollInteractions(args: {
                 },
                 // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
                 getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
+                // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
+                // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
+                // 视图在两处往复即用户看到的"闪现"。
+                getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
                 onScrolled: (clientX) => onEdgeScrolled?.(clientX),
             });
 

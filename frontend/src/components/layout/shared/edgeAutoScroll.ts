@@ -128,8 +128,8 @@ export function resolveEdgeScrollDeltaPx(args: {
 /**
  * 视口能滚到的**最右**位置（`scrollLeft` 的上界）。
  *
- * 内容宽度由「工程末帧 × 每帧像素」给出（内容不可能比工程更长），减去视口宽度即
- * 可滚距离；同步时间轴时内容层整体右移一个偏移量，上界随之平移。
+ * 内容宽度由「工程末帧 × 每帧像素」给出（内容不可能比工程更长）；同步时间轴时
+ * 内容层整体右移一个偏移量，上界随之平移。
  *
  * 特殊说明 1：**结果不为负**。上界为负意味着"连内容起点都滚不到"，那是无意义的
  * 状态，写入它会让原生 `scrollLeft` 落到非法区间。
@@ -137,10 +137,20 @@ export function resolveEdgeScrollDeltaPx(args: {
  * 特殊说明 2：任一输入非有限 → 返回 0（视为不可滚）。自动滚屏停住比把视口写到
  * 未定义位置安全得多。
  *
+ * 特殊说明 3：**不减视口宽**。`scrollLeft` 的上界是内容宽，而不是「内容宽 − 视口宽」
+ * —— 两个内核的 `ScrollKernel` 都把上界定义成**内容宽**（原生容器比视口宽出一整屏，
+ * 视口只是窗口）。曾经这里减去视口宽，于是自动滚屏的右界比内核真值小了一整个视口：
+ * 指针停在右缘时每帧写 `max`、内核回写更大的值，视图在两处往复 —— 即"闪现"。
+ * `viewportWidthPx` 现在只用于"内容比视口还窄时归零"。
+ *
+ * 【偏移的符号】`nativeOffsetPx` 按「原生 = 绘制 + 偏移」投影（与
+ * `timelineViewportStateToNative` 同一约定）：原生上界 = 内容宽，故**绘制**上界 =
+ * 内容宽 − 偏移。写成 `+ 偏移` 会让右界超出内核真值一个偏移量，触发同一类往复。
+ *
  * @param args.pxPerSec 当前横向缩放（像素/秒）。
  * @param args.framePeriodMs 帧周期（毫秒）。
  * @param args.maxFrame 工程末帧（帧号，半开区间右端）。
- * @param args.viewportWidthPx 视口宽度（`clientWidth`）。
+ * @param args.viewportWidthPx 视口宽度（`clientWidth`），仅用于"内容比视口窄时归零"。
  * @param args.nativeOffsetPx 内容层偏移（同步时间轴时非 0，否则 0）。
  * @returns `scrollLeft` 的上界（CSS px，≥ 0）。
  */
@@ -164,6 +174,9 @@ export function edgeScrollMaxLeftPx(args: {
     // 负缩放 / 负帧周期没有物理意义，按 0 处理而不是让内容宽度变成负数。
     const pxPerFrame = (Math.max(0, pxPerSec) * Math.max(0, framePeriodMs)) / 1000;
     const contentWidthPx = Math.max(0, maxFrame) * pxPerFrame;
-    const drawingMax = Math.max(0, contentWidthPx - Math.max(0, viewportWidthPx));
-    return Math.max(0, drawingMax + nativeOffsetPx);
+    // 内容比视口还窄（或缩放尚未就绪）→ 没有可滚余地，上界归 0。
+    // 其余情况：`scrollLeft` 上界 = 内容宽（与两个内核 ScrollKernel 同口径，见
+    // 函数文档的特殊说明 3），再按 `nativeOffsetPx` 投影到调用方所在的坐标系。
+    if (contentWidthPx <= Math.max(0, viewportWidthPx)) return 0;
+    return Math.max(0, contentWidthPx - nativeOffsetPx);
 }

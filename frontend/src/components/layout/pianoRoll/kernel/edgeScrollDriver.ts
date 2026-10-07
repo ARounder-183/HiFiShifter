@@ -58,6 +58,15 @@ export interface EdgeScrollDriverOptions {
     /** 滚动位置上界（每次滚动前重新求值：缩放 / 工程长度 / 同步偏移都会变）。 */
     getMaxScrollLeft: () => number;
     /**
+     * 滚动位置**下界**。
+     *
+     * 【为什么不能假定是 0】开启"同步到时间轴"时，参数编辑器的绘制域是
+     * `[-偏移, 内容宽 − 偏移]` —— 左侧那片预留的对齐留白就是**负区间**，是用户可以
+     * 滚到的合法位置。把它当成越界并按 0 钳制，会与内核自己的下界（−偏移）打架：
+     * 每帧写 0、内核回写 −偏移，视图在两个位置之间往复 —— 即"闪现"而非滚动。
+     */
+    getMinScrollLeft: () => number;
+    /**
      * 本帧确实滚动了。
      *
      * 【为什么带 clientX】调用方要用**同一个指针位置**重新投影：视图滚了，指针
@@ -164,8 +173,17 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         }
 
         const current = options.getScrollLeft();
-        const max = Math.max(0, options.getMaxScrollLeft());
-        const next = Math.min(max, Math.max(0, current + deltaPx));
+        // 上界由调用方给出；下界同样必须由调用方给出 ——
+        //
+        // ★ 下界**未必是 0**：参数编辑器开启"同步到时间轴"时，绘制域是
+        // `[−偏移, 内容宽 − 偏移]`（左侧预留的对齐留白就是负区间，是用户可以滚到的
+        // 合法位置）。此前这里把下界写死成 0，于是每次向左滚都被夹回 0，而内核随后
+        // 又按自己的下界（−偏移）回写 —— 视图在两个位置之间往复，表现为**闪现**
+        // 而不是滚动。
+        const max = options.getMaxScrollLeft();
+        const min = options.getMinScrollLeft();
+        // 退化保护：上界小于下界（视口比内容还宽等）时，按下界落定而不是产生区间反转。
+        const next = min >= max ? min : Math.min(max, Math.max(min, current + deltaPx));
         if (Math.abs(next - current) < MIN_STEP_PX) {
             blockedAtLimit = true;
             return false;

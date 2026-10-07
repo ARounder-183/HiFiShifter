@@ -148,7 +148,7 @@ describe("resolveEdgeScrollDeltaPx", () => {
 });
 
 describe("edgeScrollMaxLeftPx", () => {
-    /** 1000 帧 × 5ms/帧 = 5s，缩放 100px/s ⇒ 内容 500px；视口 300px ⇒ 可滚 200px。 */
+    /** 1000 帧 × 5ms/帧 = 5s，缩放 100px/s ⇒ 内容宽 500px。 */
     const BASE = {
         pxPerSec: 100,
         framePeriodMs: 5,
@@ -157,21 +157,35 @@ describe("edgeScrollMaxLeftPx", () => {
         nativeOffsetPx: 0,
     };
 
-    it("内容宽减视口宽", () => {
-        expect(edgeScrollMaxLeftPx(BASE)).toBeCloseTo(200, 9);
+    it("★ 上界 = 内容宽（不减视口），再按『绘制 = 原生 − 偏移』投影", () => {
+        // 不减视口宽：两个内核都把上界定义成内容宽（原生容器比视口宽出一整屏，
+        // 视口只是窗口）。曾经这里减去视口宽，于是自动滚屏的右界比内核真值小了
+        // 一整个视口 —— 指针停在右缘时每帧写上界、内核回写更大值，视图往复闪现。
+        expect(edgeScrollMaxLeftPx(BASE)).toBeCloseTo(500, 9);
+        // 偏移按「原生 = 绘制 + 偏移」投影：原生上界 = 内容宽 ⇒ 绘制上界 = 内容宽 − 偏移。
+        // 写成 + 偏移会超出内核真值一个偏移量，触发同一类往复。
+        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: 200 })).toBeCloseTo(300, 9);
+        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: -200 })).toBeCloseTo(700, 9);
     });
 
-    it("同步时间轴的偏移把上界整体右移", () => {
-        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: 200 })).toBeCloseTo(400, 9);
+    it("★ 上界与视口宽无关（视口只是窗口，不改变可滚范围）", () => {
+        // 只在"视口仍窄于内容"的前提下成立；视口宽到装下全部内容时归 0（见下一条）。
+        for (const vw of [100, 300, 499]) {
+            expect(edgeScrollMaxLeftPx({ ...BASE, viewportWidthPx: vw })).toBeCloseTo(500, 9);
+        }
     });
 
     it("内容比视口窄 → 不可滚（0，而不是负数）", () => {
+        // 内容 500px、视口 900px：没有可滚余地。
+        expect(edgeScrollMaxLeftPx({ ...BASE, viewportWidthPx: 900 })).toBe(0);
         expect(edgeScrollMaxLeftPx({ ...BASE, maxFrame: 10 })).toBe(0);
         expect(edgeScrollMaxLeftPx({ ...BASE, pxPerSec: 0 })).toBe(0);
     });
 
-    it("负偏移不会把上界压成负数", () => {
-        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: -5000 })).toBe(0);
+    it("负偏移不会把上界压成负数（只会把绘制域整体右移）", () => {
+        // 偏移为负 ⇒ 绘制上界 = 内容宽 − (负) = 更大，绝不为负。
+        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: -5000 })).toBeGreaterThanOrEqual(0);
+        expect(edgeScrollMaxLeftPx({ ...BASE, nativeOffsetPx: -200 })).toBeCloseTo(700, 9);
     });
 
     it("任一输入非有限 → 0（宁可停住，也不把视口写到未定义位置）", () => {

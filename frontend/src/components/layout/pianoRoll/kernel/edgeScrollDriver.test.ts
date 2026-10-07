@@ -36,9 +36,15 @@ const NEAR_RIGHT = 1100 - 4;
  * rAF 不自动执行 —— 用例显式调用 `flushFrame()` 推进一帧，从而能断言"循环是否
  * 继续"而不受真实帧率影响。
  */
-function createHarness(initialScrollLeft = 0, maxScrollLeft = 10_000) {
+function createHarness(
+    initialScrollLeft = 0,
+    maxScrollLeft = 10_000,
+    /** 下界。默认 0；负下界用于模拟"同步时间轴"预留的左侧留白。 */
+    minScrollLeft = 0,
+) {
     let scrollLeft = initialScrollLeft;
     let max = maxScrollLeft;
+    let min = minScrollLeft;
     let clockMs = 0;
     let nextHandle = 1;
     const pending = new Map<number, () => void>();
@@ -51,6 +57,7 @@ function createHarness(initialScrollLeft = 0, maxScrollLeft = 10_000) {
             scrollLeft = next;
         },
         getMaxScrollLeft: () => max,
+        getMinScrollLeft: () => min,
         onScrolled,
         maxSpeedPxPerSec: SPEED,
         now: () => clockMs,
@@ -290,9 +297,61 @@ describe("createEdgeScrollDriver.stop", () => {
             getScrollLeft: () => 0,
             setScrollLeft: () => {},
             getMaxScrollLeft: () => 1000,
+            getMinScrollLeft: () => 0,
         });
         expect(() => driver.track(NEAR_RIGHT)).not.toThrow();
         expect(driver.isRunning()).toBe(false);
         expect(driver.step(NEAR_RIGHT)).toBe(false);
+    });
+});
+
+/**
+ * 负下界：开启"同步到时间轴"后，参数编辑器左缘的预留留白是**合法的可滚区间**。
+ *
+ * 【为什么单列一组】该场景的坐标系下界不是 0 而是 `−偏移`。此前驱动把下界写死成
+ * 0，于是每次向左滚都被夹回 0，而内核随后按自己的下界（−偏移）回写 —— 视图在
+ * 两个位置之间往复，用户看到的是**闪现**而不是滚动。这与"上下限取反"是同一类
+ * 缺陷：坐标系的下界必须由调用方给出，不能被驱动假定。
+ */
+describe("createEdgeScrollDriver · 负下界（同步留白）", () => {
+    /** 同步偏移 200 ⇒ 绘制域下界 −200。 */
+    const MIN = -200;
+
+    it("★ 向左滚可以进入负区间，而不是被夹在 0", () => {
+        const h = createHarness(0, 10_000, MIN);
+        h.driver.step(NEAR_LEFT);
+        expect(h.getScrollLeft()).toBeLessThan(0);
+    });
+
+    it("★ 连续向左滚是**逐帧推进**，不会每帧回到同一个值（闪现的根因）", () => {
+        const h = createHarness(0, 10_000, MIN);
+        h.driver.track(NEAR_LEFT);
+        const positions: number[] = [];
+        for (let i = 0; i < 4; i += 1) {
+            h.flushFrame();
+            positions.push(h.getScrollLeft());
+        }
+        // 每一步都必须比上一步更靠左，且严格递减。
+        for (let i = 1; i < positions.length; i += 1) {
+            expect(positions[i]).toBeLessThan(positions[i - 1]);
+        }
+        // 若下界被错当成 0，每帧都会被夹回 0 —— 这里断言确实进了负区间。
+        expect(positions.at(-1)).toBeLessThan(0);
+    });
+
+    it("滚到下界后停住（不越过预留留白）", () => {
+        const h = createHarness(0, 10_000, MIN);
+        for (let i = 0; i < 200; i += 1) {
+            h.driver.step(NEAR_LEFT);
+            h.advanceClock(FRAME_MS);
+        }
+        expect(h.getScrollLeft()).toBeGreaterThanOrEqual(MIN);
+        expect(h.getScrollLeft()).toBeCloseTo(MIN, 6);
+    });
+
+    it("下界为 0 时行为不变（未同步的常规场景）", () => {
+        const h = createHarness(0, 10_000, 0);
+        h.driver.step(NEAR_LEFT);
+        expect(h.getScrollLeft()).toBe(0);
     });
 });
