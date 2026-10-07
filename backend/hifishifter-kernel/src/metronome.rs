@@ -22,9 +22,11 @@
 //! - 混音导出（离线 mixdown）不含节拍器 —— 本模块仅存在于实时回调路径。
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
+
+use crate::rt_retirement::RetirementKeeper;
 
 /// 单个响点：`frame` 相对工程 0 点（输出设备采样率域，升序），`accent` =
 /// 该响点是否落在小节线（强网格）上。
@@ -95,6 +97,10 @@ pub struct MetronomeRt {
     generation: AtomicU64,
     /// 响点表（升序）。None = 尚未构建 / 工程为空。
     schedule: ArcSwapOption<Vec<MetronomeClick>>,
+    /// 被换下的响点表暂存区：见 [`crate::rt_retirement`]。**只被发布线程触碰**
+    /// （`store_schedule` 的调用方），音频回调永远不读它 —— 因此这里的 `Mutex`
+    /// 不在实时路径上。
+    retired_schedules: Mutex<RetirementKeeper<Arc<Vec<MetronomeClick>>>>,
 }
 
 impl MetronomeRt {
@@ -106,6 +112,7 @@ impl MetronomeRt {
             sound: AtomicU8::new(MetronomeSound::default().to_u8()),
             generation: AtomicU64::new(0),
             schedule: ArcSwapOption::from_pointee(Vec::new()),
+            retired_schedules: Mutex::new(RetirementKeeper::new(2)),
         }
     }
 
@@ -126,7 +133,19 @@ impl MetronomeRt {
     pub fn store_schedule(&self, clicks: Arc<Vec<MetronomeClick>>) {
         // 先存表再推进世代（Release）：RT 读到新世代必见新表 —— 换表后
         // 绝无"修改前 + 修改后"的响点叠加。
-        self.schedule.store(Some(clicks));
+        //
+        // 用 `swap` 而不是 `store`：`store` 等价于 `drop(swap(v))`，会在**本线程**
+        // 立刻丢掉旧表；而旧表此刻仍被音频回调持有（它要等到下一个块才发现世代
+        // 变了），于是"最后一个持有者"就变成了回调 —— 数万条的响点表会在实时
+        // 线程上析构。改为把旧表交给暂存区，由本线程稍后释放。详见
+        // [`crate::rt_retirement`]。
+        let previous = self.schedule.swap(Some(clicks));
+        if let Some(previous) = previous {
+            self.retired_schedules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .retire(previous);
+        }
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -909,6 +928,33 @@ mod tests {
             voices.active.len(),
             1,
             "same click frame must not spawn a second overlapping voice"
+        );
+    }
+
+    /// 换表后旧表必须仍被**发布侧**持有。
+    ///
+    /// 【为什么值得一条测试】`ArcSwap::store` 等价于 `drop(swap(v))` —— 用它换表
+    /// 会在发布线程上立刻丢掉旧表，而此刻音频回调仍持有旧表（它要等到下一个块
+    /// 才发现世代变了）。于是回调成了最后一个持有者，数万条的响点表就在实时
+    /// 线程上析构。这条断言钉住"发布侧多留一份"这个修复。
+    #[test]
+    fn store_schedule_keeps_the_previous_table_alive() {
+        let metro = MetronomeRt::new();
+        let first: Arc<Vec<MetronomeClick>> = Arc::new(Vec::new());
+
+        metro.store_schedule(first.clone());
+        assert_eq!(
+            Arc::strong_count(&first),
+            2,
+            "换入后：ArcSwap 一份 + 调用方一份"
+        );
+
+        // 再换一次表：旧表仍应被暂存区持有（keep = 2），不得在发布线程上被释放。
+        metro.store_schedule(Arc::new(Vec::new()));
+        assert_eq!(
+            Arc::strong_count(&first),
+            2,
+            "被换下的旧表必须仍被暂存区持有，否则析构会落到实时线程上"
         );
     }
 }

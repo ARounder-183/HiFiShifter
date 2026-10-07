@@ -49,6 +49,57 @@ impl TrackMeterScratch {
     }
 }
 
+/// RT 侧登记、meter 线程输出的故障码。
+///
+/// 【为什么要有它】cpal 的流错误回调与 `catch_unwind` 的 panic 分支都在**音频
+/// 线程**上执行。若在那里直接 `log::error!`，就会取全局日志限流锁、再取 stderr
+/// 锁并写管道 —— 而这条路恰好在音频已经出问题时才会走，tee 线程一旦阻塞、
+/// 管道写满，音频线程就被拖住，把一次故障放大成一次卡死。因此回调里**只写一个
+/// 原子量**，字符串与 I/O 全部留给 meter 线程（它本就是为此存在的，见本模块
+/// 顶部对 `TrackMeterBus` 的说明）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RtFault {
+    /// f32 流的音频回调 panic。
+    PanicF32,
+    /// i16 流的音频回调 panic。
+    PanicI16,
+    /// u16 流的音频回调 panic。
+    PanicU16,
+    /// cpal 上报的流错误。
+    StreamError,
+}
+
+impl RtFault {
+    fn code(self) -> u64 {
+        match self {
+            Self::PanicF32 => 1,
+            Self::PanicI16 => 2,
+            Self::PanicU16 => 3,
+            Self::StreamError => 4,
+        }
+    }
+
+    fn from_code(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::PanicF32),
+            2 => Some(Self::PanicI16),
+            3 => Some(Self::PanicU16),
+            4 => Some(Self::StreamError),
+            _ => None,
+        }
+    }
+
+    /// meter 线程上的日志文本。
+    pub(crate) fn log_message(self) -> &'static str {
+        match self {
+            Self::PanicF32 => "AudioEngine: panic in audio callback (f32); silencing output",
+            Self::PanicI16 => "AudioEngine: panic in audio callback (i16); silencing output",
+            Self::PanicU16 => "AudioEngine: panic in audio callback (u16); silencing output",
+            Self::StreamError => "AudioEngine: stream error reported by the audio backend",
+        }
+    }
+}
+
 /// Lock-free handoff of per-track block peaks from the audio callback to
 /// the meter thread. The RT side only writes fixed atomic slots (no locks,
 /// no allocation); the meter thread polls `generation` and publishes the
@@ -65,6 +116,9 @@ pub(crate) struct TrackMeterBus {
     /// Position of the last block that rendered silence while a clip was
     /// still pending synthesis. Debug aid, drained by the meter thread.
     pending_pos: AtomicU64,
+    /// RT 侧登记的故障码（0 = 无）；见 [`RtFault`]。Drained + logged by the
+    /// meter thread.
+    rt_fault: AtomicU64,
 }
 
 impl TrackMeterBus {
@@ -74,7 +128,18 @@ impl TrackMeterBus {
             generation: AtomicU64::new(0),
             transport_wait_pos: AtomicU64::new(0),
             pending_pos: AtomicU64::new(0),
+            rt_fault: AtomicU64::new(0),
         }
+    }
+
+    /// RT 侧：登记一次故障。**不分配、不加锁、不写 I/O** —— 只有一次原子写。
+    pub(crate) fn record_rt_fault(&self, fault: RtFault) {
+        self.rt_fault.store(fault.code(), Ordering::Relaxed);
+    }
+
+    /// meter 线程：取走故障码（取走即清零，同一次故障只记一条日志）。
+    pub(crate) fn take_rt_fault(&self) -> Option<RtFault> {
+        RtFault::from_code(self.rt_fault.swap(0, Ordering::Relaxed))
     }
 
     pub(crate) fn generation(&self) -> u64 {

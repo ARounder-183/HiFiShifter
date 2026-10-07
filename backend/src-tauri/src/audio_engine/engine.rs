@@ -13,6 +13,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::state::TimelineState;
 use crate::time_stretch::time_stretch_interleaved;
+use hifishifter_kernel::rt_retirement::RetirementKeeper;
 
 /// Maximum stretch cache entries to prevent unbounded RAM growth.
 const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
@@ -28,8 +29,8 @@ const METER_BUS_CAPACITY: usize = 512;
 
 use super::metronome;
 use super::mix::{
-    render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
-    TrackMeterBus, TrackMeterScratch, U16_SILENCE,
+    render_callback_f32, render_callback_i16, render_callback_u16, RtFault,
+    SnapshotTransitionState, TrackMeterBus, TrackMeterScratch, U16_SILENCE,
 };
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
@@ -277,6 +278,12 @@ impl AudioEngine {
                         }
                     }
 
+                    // RT 侧登记的音频线程故障（panic / 流错误）在这里落地成日志：
+                    // 回调里只做了一次原子写（见 `mix::RtFault`）。
+                    if let Some(fault) = meter_bus.take_rt_fault() {
+                        log::error!("{}", fault.log_message());
+                    }
+
                     let bus_generation = meter_bus.generation();
                     let map_generation = meter_generation.load(Ordering::Relaxed);
                     let bus_advanced = bus_generation != last_bus_generation;
@@ -409,7 +416,12 @@ impl AudioEngine {
             worker_ready_thread.store(true, Ordering::Release);
 
             // Re-initialize the shared snapshot to the actual output sample rate.
-            snapshot_for_thread.store(Arc::new(EngineSnapshot::empty(sr)));
+            //
+            // 用 `swap` 取回旧值而不是 `store`：此刻音频回调可能已经在跑并持有
+            // 旧快照，若在这里就地丢弃，回调稍后的释放就成了最后一次 —— 析构会
+            // 落到实时线程上（见 `crate::rt_retirement`）。
+            let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+            retired_snapshots.retire(snapshot_for_thread.swap(Arc::new(EngineSnapshot::empty(sr))));
             let snapshot_for_cb = snapshot_for_thread.clone();
 
             // Async resource manager for decoded/resampled PCM.
@@ -571,7 +583,15 @@ impl AudioEngine {
             let play_start_wait_cb = play_start_wait_thread.clone();
             let position_frames_cb = position_frames_thread.clone();
             let duration_frames_cb = duration_frames_thread.clone();
-            let err_fn = |err| log_error_limited!("AudioEngine stream error: {err}");
+            // cpal 的流错误回调可能在**音频线程**上执行，因此这里只登记故障码，
+            // 日志由 meter 线程输出（见 `mix::RtFault`）。
+            //
+            // 【为什么每个分支各写一份】原实现是一个不捕获任何东西的闭包，因而
+            // 是 `Copy`，可以同时交给三个 `build_output_stream` 分支。一旦它捕获
+            // 了 `meter_bus` 就不再是 `Copy`，必须逐分支构造。
+            let err_fn = |bus: Arc<TrackMeterBus>| {
+                move |_err: cpal::StreamError| bus.record_rt_fault(RtFault::StreamError)
+            };
 
             let stream = match sample_format {
                 cpal::SampleFormat::F32 => {
@@ -603,14 +623,12 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    log::error!(
-                                        "AudioEngine: panic in audio callback (f32); silencing output"
-                                    );
+                                    meter_bus.record_rt_fault(RtFault::PanicF32);
                                     data.fill(0.0);
                                     is_playing_cb.store(false, Ordering::Relaxed);
                                 }
                             },
-                            err_fn,
+                            err_fn(meter_bus_for_cb.clone()),
                             None,
                         )
                         .ok()
@@ -644,14 +662,12 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    log::error!(
-                                        "AudioEngine: panic in audio callback (i16); silencing output"
-                                    );
+                                    meter_bus.record_rt_fault(RtFault::PanicI16);
                                     data.fill(0);
                                     is_playing_cb.store(false, Ordering::Relaxed);
                                 }
                             },
-                            err_fn,
+                            err_fn(meter_bus_for_cb.clone()),
                             None,
                         )
                         .ok()
@@ -685,14 +701,12 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    log::error!(
-                                        "AudioEngine: panic in audio callback (u16); silencing output"
-                                    );
+                                    meter_bus.record_rt_fault(RtFault::PanicU16);
                                     data.fill(U16_SILENCE);
                                     is_playing_cb.store(false, Ordering::Relaxed);
                                 }
                             },
-                            err_fn,
+                            err_fn(meter_bus_for_cb.clone()),
                             None,
                         )
                         .ok()
@@ -786,6 +800,7 @@ impl AudioEngine {
                     tx: &tx_for_worker,
                     last_timeline: &mut last_timeline,
                     last_play_file: &mut last_play_file,
+                    retired_snapshots: &mut retired_snapshots,
                     app_handle: app_handle_for_worker.clone(),
                     meter_state: &meter_state,
                     meter_generation: &meter_generation,
@@ -1029,6 +1044,9 @@ struct EngineWorkerState<'a> {
     tx: &'a mpsc::Sender<EngineCommand>,
     last_timeline: &'a mut Option<TimelineState>,
     last_play_file: &'a mut Option<(PathBuf, f64, String)>,
+    /// 被换下的快照暂存区（见 [`crate::rt_retirement`]）。换快照时必须把旧值交给
+    /// 它，而不是让 `ArcSwap::store` 就地丢弃 —— 否则析构会落到音频回调上。
+    retired_snapshots: &'a mut RetirementKeeper<Arc<EngineSnapshot>>,
     /// 可选的 Tauri app handle，用于向前端推送事件
     app_handle: Option<tauri::AppHandle>,
     meter_state: &'a Arc<Mutex<HashMap<String, TrackMeterValue>>>,
@@ -1098,7 +1116,7 @@ fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.snapshot.store(Arc::new(snap));
+    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
@@ -1671,7 +1689,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.snapshot.store(Arc::new(snap));
+    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
@@ -1711,7 +1729,7 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
         let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.snapshot.store(Arc::new(snap));
+        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
         idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
@@ -1760,7 +1778,7 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.snapshot.store(Arc::new(snap));
+        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
         idle_track_meter_state(s.meter_state, s.meter_generation);
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
 
@@ -1857,13 +1875,13 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
         let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.snapshot.store(Arc::new(snap));
+        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
         idle_track_meter_state(s.meter_state, s.meter_generation);
     } else if let Some((path, offset_sec, _target)) = s.last_play_file.as_ref() {
         let snap = build_snapshot_for_file(path.as_path(), s.sr, *offset_sec, s.cache);
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.snapshot.store(Arc::new(snap));
+        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
         idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
@@ -1879,7 +1897,7 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
     let snap = build_snapshot_for_file(&path, s.sr, offset_sec, s.cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.snapshot.store(Arc::new(snap));
+    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
     // File playback reports absolute position via base_sec + position_sec.
     let base = (offset_sec.max(0.0) * s.sr as f64).round().max(0.0) as u64;
     s.base_frames.store(base, Ordering::Relaxed);
@@ -2312,6 +2330,7 @@ mod tests {
         let meter_generation = Arc::new(AtomicU64::new(0));
         let mut last_timeline = Some(timeline);
         let mut last_play_file = None;
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
@@ -2330,6 +2349,7 @@ mod tests {
             tx: &engine_tx,
             last_timeline: &mut last_timeline,
             last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
             app_handle: None,
             meter_state: &meter_state,
             meter_generation: &meter_generation,
@@ -2372,6 +2392,7 @@ mod tests {
         let meter_generation = Arc::new(AtomicU64::new(0));
         let mut last_timeline = Some(timeline.clone());
         let mut last_play_file = None;
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
@@ -2390,6 +2411,7 @@ mod tests {
             tx: &engine_tx,
             last_timeline: &mut last_timeline,
             last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
             app_handle: None,
             meter_state: &meter_state,
             meter_generation: &meter_generation,
@@ -2407,6 +2429,19 @@ mod tests {
         assert_ne!(
             before_ptr, after_ptr,
             "a render result push must swap in a freshly built snapshot"
+        );
+
+        // 被换下的快照必须仍被暂存区持有。
+        //
+        // 【为什么是回归锚点】`ArcSwap::store` 等价于 `drop(swap(v))`：它会在
+        // **本线程**立刻丢掉旧快照。而旧快照此刻仍被音频回调持有（回调要等到
+        // 下一个块才发现换代），于是回调成了最后一个持有者 —— `EngineSnapshot`
+        // （含 `Arc<Vec<f32>>` PCM）的析构就落到实时线程上。引用计数 ≥ 2 正是
+        // "暂存区还留着它"的证据；若退回 `store`，这里会掉到 1。
+        // 见 `crate::rt_retirement`。
+        assert!(
+            Arc::strong_count(&before) >= 2,
+            "retired snapshot must stay retained by the worker instead of being dropped on swap"
         );
 
         // 无时间线时是安全的空操作（不崩溃、不替换快照）。

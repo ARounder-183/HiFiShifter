@@ -31,6 +31,7 @@ pub mod events;
 pub mod host;
 pub mod log_limiter;
 pub mod model_paths;
+pub mod rt_retirement;
 pub mod util;
 
 // 模型路径的读取函数直接挂到 crate 根：声码器与 FCPE 模块里写的是
