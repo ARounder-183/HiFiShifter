@@ -2098,6 +2098,7 @@ export const enUS = {
         "Clip edits and fade widths sync to REAPER · REAPER renders fade audio · Reverse playback unsupported",
     plugin_transport_stop: "Stop playback in REAPER",
     plugin_transport_play: "Play or pause in REAPER",
+    plugin_standalone_only: "Only available in the standalone app",
     plugin_daw_controlled_reason:
         "Controlled by REAPER; manage files, clip geometry and playback in the host",
 

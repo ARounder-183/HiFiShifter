@@ -1406,7 +1406,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_open_log_folder")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        disabled={diagnosticsExporting}
+                        // 【为什么在插件里禁用】诊断导出要读系统信息、跑推理设备基准并
+                        // 打包 zip，这些只有独立 App 有实现。插件里原先只是"点了报错"，
+                        // 用户拿到的是一句内部措辞；禁用它并说明原因才是有用的反馈。
+                        disabled={diagnosticsExporting || isPluginMode()}
+                        title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
                         onSelect={() => void handleExportDiagnostics()}
                     >
                         {tf("menu_export_diagnostics")}

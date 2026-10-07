@@ -2040,6 +2040,7 @@ export const zhTW = {
     plugin_apply_hint: "片段編輯與漸變寬度同步 REAPER · 漸變聲音由 REAPER 處理 · 倒放暫不支援",
     plugin_transport_stop: "控制 REAPER 停止播放",
     plugin_transport_play: "控制 REAPER 播放/暫停",
+    plugin_standalone_only: "僅在獨立 App 中可用",
     plugin_daw_controlled_reason: "由 REAPER 控制；請在宿主中操作檔案、片段幾何與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

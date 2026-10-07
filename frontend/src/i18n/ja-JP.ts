@@ -2112,6 +2112,7 @@ export const jaJP = {
         "クリップ編集とフェード幅は REAPER に同期 · フェード音声は REAPER が処理 · 逆再生は未対応",
     plugin_transport_stop: "REAPER の再生を停止",
     plugin_transport_play: "REAPER の再生/一時停止",
+    plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_daw_controlled_reason:
         "REAPER が制御します。ファイル、クリップのジオメトリ、再生はホスト側で操作してください",
 

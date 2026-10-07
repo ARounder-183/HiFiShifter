@@ -2037,6 +2037,7 @@ export const zhCN = {
     plugin_apply_hint: "片段编辑与渐变宽度同步 REAPER · 渐变声音由 REAPER 处理 · 倒放暂不支持",
     plugin_transport_stop: "控制 REAPER 停止播放",
     plugin_transport_play: "控制 REAPER 播放/暂停",
+    plugin_standalone_only: "仅在独立 App 中可用",
     plugin_daw_controlled_reason: "由 REAPER 控制；在宿主中操作文件、片段几何与播放",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────

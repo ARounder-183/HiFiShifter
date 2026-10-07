@@ -2083,6 +2083,7 @@ export const koKR = {
         "클립 편집과 페이드 너비는 REAPER에 동기화 · 페이드 오디오는 REAPER가 처리 · 역재생은 미지원",
     plugin_transport_stop: "REAPER에서 재생 정지",
     plugin_transport_play: "REAPER에서 재생/일시 정지",
+    plugin_standalone_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     plugin_daw_controlled_reason:
         "REAPER가 제어합니다. 파일, 클립 지오메트리, 재생은 호스트에서 조작하세요",
 
