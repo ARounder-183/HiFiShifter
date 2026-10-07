@@ -12,7 +12,7 @@ import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
-import { PluginApplyPanel } from "./features/ara/PluginApplyPanel";
+import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { isPluginMode, pluginAllowsAction, pluginAllowsEditChannel } from "./services/hostCapabilities";
 import { loadStandaloneWindowApi } from "./services/hostWindow";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
@@ -4284,9 +4284,6 @@ function AppInner() {
                 onLoopNewClipsChange={handleLoopNewClipsChange}
             />
             <ActionBar />
-            {isPluginMode() ? <PluginApplyPanel
-                onTimelineChanged={async () => { await dispatch(fetchTimeline()).unwrap(); }}
-            /> : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。
@@ -4342,6 +4339,20 @@ function AppInner() {
                         {errorText}
                     </span>
                 </Flex>
+                {/*
+                  状态栏右侧槽位：插件宿主的「自动应用」状态。
+                  它曾经是 `ActionBar` 与工作区之间的一整行横条 —— 在插件那个小窗口里
+                  一整行高度很贵，而这段内容本来就是状态读数，归状态栏。
+                  （见 `PluginApplyStatus`：片独立订阅外部 store，250 ms 的轮询不会
+                  带动本组件重渲染。）
+                */}
+                {isPluginMode() ? (
+                    <PluginApplyStatus
+                        onTimelineChanged={async () => {
+                            await dispatch(fetchTimeline()).unwrap();
+                        }}
+                    />
+                ) : null}
             </Flex>
         </Flex>
     );
