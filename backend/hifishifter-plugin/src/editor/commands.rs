@@ -241,6 +241,18 @@ pub(super) fn dispatch(
             ));
         }
         "plugin_get_apply_state" => return Ok(session.state()),
+        // Help 菜单的「打开日志目录」在插件里原先会抛 `Command unavailable` ——
+        // 那个命令只存在于 App 侧。插件不弹资源管理器（没有 Tauri opener，也不该在
+        // 宿主进程里拉起外部程序），只回报路径，由前端显示给用户。
+        "open_log_folder" => {
+            let dir = crate::diagnostics::log_directory();
+            return Ok(json!({"ok":true,"path":dir.to_string_lossy()}));
+        }
+        // 诊断导出与基准测试是 App 侧的完整实现（系统信息 / 基准 / 打包 zip）。
+        // 明确回报"不支持"，而不是让前端拿着 `Command unavailable` 这种内部措辞去猜。
+        "pick_diagnostics_output_path" | "export_diagnostics" | "run_vocoder_benchmark" => {
+            return Err("diagnostics export is not available in ARA plugin mode".into())
+        }
         "plugin_history_barrier" => {
             session.suppress_history.store(false, Ordering::Release);
             return Ok(json!({"ok":true}));

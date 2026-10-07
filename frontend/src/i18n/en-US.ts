@@ -770,6 +770,7 @@ export const enUS = {
     menu_open_log_folder: "Open Log Folder",
     menu_export_diagnostics: "Export Diagnostics...",
     menu_open_log_folder_failed: "Could not open the log folder",
+    menu_open_log_folder_path: "Logs are in {path}",
     menu_export_diagnostics_failed: "Failed to export diagnostics",
     menu_export_diagnostics_running:
         "Exporting diagnostics. This includes a benchmark and may take 20–60 seconds, please wait...",

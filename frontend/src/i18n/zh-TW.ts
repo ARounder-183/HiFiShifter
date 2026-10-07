@@ -613,6 +613,7 @@ export const zhTW = {
     menu_open_log_folder: "開啟日誌資料夾",
     menu_export_diagnostics: "匯出診斷資訊...",
     menu_open_log_folder_failed: "無法開啟日誌資料夾",
+    menu_open_log_folder_path: "日誌位於 {path}",
     menu_export_diagnostics_failed: "匯出診斷資訊失敗",
     menu_export_diagnostics_running: "正在匯出診斷資訊。包含基準測試，可能需要 20–60 秒，請稍候...",
     menu_about: "關於 HiFiShifter",

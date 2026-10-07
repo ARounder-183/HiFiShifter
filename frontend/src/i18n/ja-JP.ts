@@ -641,6 +641,7 @@ export const jaJP = {
     menu_open_log_folder: "ログフォルダーを開く",
     menu_export_diagnostics: "診断情報をエクスポート...",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
+    menu_open_log_folder_path: "ログの場所: {path}",
     menu_export_diagnostics_failed: "診断情報のエクスポートに失敗しました",
     menu_export_diagnostics_running:
         "診断情報をエクスポート中。ベンチマークを含むため 20〜60 秒かかる場合があります。しばらくお待ちください...",

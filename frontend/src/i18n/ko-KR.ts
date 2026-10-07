@@ -701,6 +701,7 @@ export const koKR = {
     menu_open_log_folder: "로그 폴더 열기",
     menu_export_diagnostics: "진단 정보 내보내기...",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",
+    menu_open_log_folder_path: "로그 위치: {path}",
     menu_export_diagnostics_failed: "진단 정보 내보내기 실패",
     menu_export_diagnostics_running:
         "진단 정보를 내보내는 중. 벤치마크가 포함되어 20~60초 정도 걸릴 수 있습니다. 잠시만 기다려 주세요...",

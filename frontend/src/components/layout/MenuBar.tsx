@@ -1384,6 +1384,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         title: tf("status_error_prefix"),
                                         message: res.error || tf("menu_open_log_folder_failed"),
                                     });
+                                } else if (isPluginMode() && res.path) {
+                                    // 插件不弹资源管理器（宿主进程里不该拉起外部程序），
+                                    // 所以只把路径告诉用户 —— 静默什么都不做会让人以为
+                                    // 菜单坏了。
+                                    setNotice({
+                                        title: tf("menu_open_log_folder"),
+                                        message: tVars("menu_open_log_folder_path", {
+                                            path: res.path,
+                                        }),
+                                    });
                                 }
                             } catch (e) {
                                 setNotice({
