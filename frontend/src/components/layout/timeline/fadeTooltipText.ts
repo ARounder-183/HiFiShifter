@@ -141,9 +141,9 @@ export function buildSingleFadeInfoText(args: {
         type: args.t("fade_type_label"),
     });
     if (args.hostFades && args.hostFades.curve_mode !== "legacy" && args.hostFades.curve_mode !== "hifishifter") {
-        return [labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut)),
+        return [labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut, args.t)),
             labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
-            "HiFiShifter 示意曲线；声音由 REAPER 控制"].join("\n");
+            args.t("fade_info_host_curve_note")].join("\n");
     }
     return [
         labelValue(args.t, typeLabel, name),

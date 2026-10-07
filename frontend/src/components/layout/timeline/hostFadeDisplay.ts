@@ -33,10 +33,15 @@ export function visualFadeGain(metadata:HostFadeMetadata|undefined,shape:number,
     return power+(sigmoid-power)*Math.abs(s);
 }
 
-/** 直接报告宿主两个原始轴；问号表示版本语义不可用，不沿用过时shape名称。 */
-export function hostFadeLabel(metadata:HostFadeMetadata,isOut:boolean):string {
+/**
+ * 直接报告宿主两个原始轴；问号表示版本语义不可用，不沿用过时shape名称。
+ *
+ * `t` 只用于"轴不可用"这一种状态：`c=`/`S=` 是数值读数，语言中立，不进词表。
+ * 品牌名 `HiFiShifter` 同理保持原样。
+ */
+export function hostFadeLabel(metadata:HostFadeMetadata,isOut:boolean,t:(key:string)=>string):string {
     if (metadata.curve_mode==="hifishifter") return "HiFiShifter";
-    if (metadata.curve_mode==="unknown") return "REAPER ?";
+    if (metadata.curve_mode==="unknown") return t("fade_info_host_unknown");
     const curvature=isOut?metadata.out_curvature:metadata.in_curvature;
     const s=isOut?metadata.out_s:metadata.in_s;
     return `REAPER c=${curvature.toFixed(2)} S=${s.toFixed(2)}`;

@@ -5,6 +5,8 @@ import {fadeGainSigned} from "./reaperFade";
 import type {HostFadeMetadata} from "../../../types/api";
 
 const metadata:HostFadeMetadata={curve_mode:"reaper_new",in_curvature:-0.2,out_curvature:0,in_s:0.65,out_s:0};
+/** 只查得到 unknown 标记的极简词表；其余键原样返回，便于断言"没走硬编码"。 */
+const label=(key:string)=>key==="fade_info_host_unknown"?"REAPER curve unknown":key;
 test("HFS-owned envelope displays the same shape/curvature family used by audio, not host c/S",()=>{
     const owned={...metadata,curve_mode:"hifishifter" as const};
     for(const mode of ["in","out"] as const) for(const t of [0,0.15,0.5,0.85,1]) {
@@ -14,9 +16,15 @@ test("HFS-owned envelope displays the same shape/curvature family used by audio,
 });
 test("new axes preserve both values and use an explicit HFS visual style",()=>{
     expect(hostFadeDisplay(metadata,false)).toBe("hifishifter");
-    expect(hostFadeLabel(metadata,false)).toBe("REAPER c=-0.20 S=0.65");
+    expect(hostFadeLabel(metadata,false,label)).toBe("REAPER c=-0.20 S=0.65");
     expect(hostFadeDisplay(metadata,true)).toBe("hifishifter");
     expect(hostFadeDisplay({...metadata,curve_mode:"unknown"},true)).toBe("hifishifter");
+});
+
+test("the unknown-axes marker comes from the catalog instead of a literal",()=>{
+    const unknown={...metadata,curve_mode:"unknown" as const};
+    expect(hostFadeLabel(unknown,false,label)).toBe("REAPER curve unknown");
+    expect(hostFadeLabel(unknown,false,label)).not.toContain("fade_info_host_unknown");
 });
 
 test("HFS visuals are bounded monotone with exact in/out endpoints for both axes",()=>{
