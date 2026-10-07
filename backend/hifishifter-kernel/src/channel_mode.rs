@@ -93,7 +93,7 @@ impl TakeChannelMode {
 pub fn effective_channels(source_channels: u16, mode: TakeChannelMode) -> u16 {
     match mode {
         TakeChannelMode::MonoMix | TakeChannelMode::MonoLeft | TakeChannelMode::MonoRight => 1,
-        _ => source_channels.max(1).min(2),
+        _ => source_channels.clamp(1, 2),
     }
 }
 

@@ -316,8 +316,8 @@ fn nonloop_pitch_curve_places_leading_silence_before_media_start() {
 
     let out = trim_and_resample_midi(&full, 10.0, -0.5, 0.5, 1.0, 1.0, false, None, false);
     assert_eq!(out.len(), 100, "curve must cover the clip length");
-    for i in 0..50 {
-        assert_eq!(out[i], 0.0, "frame {i} must be leading silence");
+    for (i, sample) in out.iter().take(50).enumerate() {
+        assert_eq!(*sample, 0.0, "frame {i} must be leading silence");
     }
     for i in 50..100 {
         assert!(

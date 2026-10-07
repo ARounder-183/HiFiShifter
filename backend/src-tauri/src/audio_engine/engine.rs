@@ -896,14 +896,6 @@ impl AudioEngine {
         });
     }
 
-    /// 请求 worker 侧提交「动态（DYN）」的后台电平分析任务。
-    ///
-    /// 与 pitch 的调度分离：动态不受 `compose_enabled` 门控，因此不能挂在
-    /// pitch 的调度时机上（那条路径在"未开启合成"时会被整体跳过）。
-    pub fn request_dyn_level_analysis(&self) {
-        let _ = self.tx.send(EngineCommand::ScheduleDynLevelAnalysis);
-    }
-
     pub fn update_timeline(&self, timeline: TimelineState) {
         let _ = self.tx.send(EngineCommand::UpdateTimeline(timeline));
     }

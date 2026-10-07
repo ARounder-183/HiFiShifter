@@ -1296,7 +1296,7 @@ mod tests {
 
     /// 预填充解码缓存（绕过磁盘 I/O），与 volume 测试同型。
     fn pad_test_caches(
-        path: &PathBuf,
+        path: &Path,
     ) -> (
         Arc<Mutex<DecodeCache>>,
         Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
@@ -1313,7 +1313,7 @@ mod tests {
         cache
             .lock()
             .unwrap()
-            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
+            .insert((path.to_path_buf(), out_rate), decoded, 44_100 * 2 * 4);
         let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
             Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
         (cache, stretch_cache)

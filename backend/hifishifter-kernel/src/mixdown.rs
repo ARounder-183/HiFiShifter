@@ -734,7 +734,7 @@ fn validate_host_pcm(source: &MixdownPcm) -> Result<(), String> {
         return Err("invalid host PCM channels".into());
     }
     let channels = source.channels as usize;
-    if source.samples.len() < channels * 2 || source.samples.len() % channels != 0 {
+    if source.samples.len() < channels * 2 || !source.samples.len().is_multiple_of(channels) {
         return Err("invalid host PCM length".into());
     }
     if source.samples.iter().any(|sample| !sample.is_finite()) {

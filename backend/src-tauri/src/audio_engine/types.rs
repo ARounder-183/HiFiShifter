@@ -10,11 +10,9 @@
 
 pub(crate) use hifishifter_kernel::engine_command::{AudioKey, EngineCommand, StretchKey};
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::state::TimelineState;
-use crate::time_stretch::{StretchAlgorithm, UserStretchAlgorithm};
+use crate::time_stretch::StretchAlgorithm;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StretchJob {

@@ -616,9 +616,7 @@ mod tests {
                 2 => timeline.clips[0].gain = 0.5,
                 _ => timeline.tracks[0].name = "local rename".into(),
             }
-            let error = build_commit(&current, timeline)
-                .err()
-                .expect("未支持编辑必须拒绝");
+            let error = build_commit(&current, timeline).expect_err("未支持编辑必须拒绝");
             assert!(error.contains("REAPER"), "{error}");
         }
         baseline.tracks[0].volume = 0.5;

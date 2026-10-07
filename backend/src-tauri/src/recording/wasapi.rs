@@ -298,7 +298,7 @@ impl NativeDecoder {
                 .iter()
                 .map(|v| (*v as f64 / 9_223_372_036_854_775_808.0) as f32)
                 .collect(),
-            NativeDecoder::U8 => slice::from_raw_parts(data as *const u8, count)
+            NativeDecoder::U8 => slice::from_raw_parts(data, count)
                 .iter()
                 .map(|v| (*v as f32 - 128.0) / 128.0)
                 .collect(),

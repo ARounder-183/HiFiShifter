@@ -729,7 +729,12 @@ mod tests {
     #[test]
     fn separation_requires_the_switch_because_curves_are_stripped() {
         // 阈值口径：曲线需真正偏离默认才算活跃。
-        assert!(TENSION_ACTIVE_EPSILON > 0.0);
+        //
+        // 【为什么是编译期断言】`TENSION_ACTIVE_EPSILON` 是常量，运行时断言是恒真式
+        // （clippy 的 `assertions_on_constants` 报的正是这一点），写在这里只会被当成
+        // "测过了"。改成 `const _` 后，它变成**编译期**契约：阈值一旦被改成 0 或负数，
+        // 构建直接失败。
+        const _: () = assert!(TENSION_ACTIVE_EPSILON > 0.0);
         assert!(!(0.0f32).gt(&TENSION_ACTIVE_EPSILON));
         // 边界：恰好等于阈值不算活跃（口径与渲染键一致）
         assert!(!TENSION_ACTIVE_EPSILON.gt(&TENSION_ACTIVE_EPSILON));

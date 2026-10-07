@@ -2389,7 +2389,7 @@ pub(super) fn close_track_gaps(
 fn ripple_settings(state: &State<'_, AppState>) -> (crate::state::RippleMode, bool) {
     let settings = state.ui_settings_snapshot();
     (
-        crate::state::RippleMode::from_str(&settings.ripple_mode),
+        crate::state::RippleMode::from_persisted(&settings.ripple_mode),
         settings.lock_param_lines,
     )
 }

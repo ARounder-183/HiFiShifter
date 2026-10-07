@@ -1690,9 +1690,7 @@ pub fn compute_clip_export_pitch_offsets(
 
     if entry.pitch_orig.is_empty() {
         // 未分析：回退 pending（REAPER 导入的待应用偏移）；缺失帧 = 0。
-        let Some(pending) = entry.pending_pitch_offset.as_ref() else {
-            return None;
-        };
+        let pending = entry.pending_pitch_offset.as_ref()?;
         for frame_idx in start_frame..end_frame {
             let value = pending
                 .get(frame_idx)

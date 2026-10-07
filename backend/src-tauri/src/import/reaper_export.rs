@@ -158,7 +158,7 @@ fn fill_reaper_take(
     is_item_default: bool,
     output_playback_rate: f32,
 ) -> bool {
-    let rate = output_playback_rate.max(0.01).min(100.0) as f64;
+    let rate = output_playback_rate.clamp(0.01, 100.0) as f64;
     dest.name = take.name.clone();
     // REAPER 的字段语义：
     // - Item 默认 take：`VOLPAN <item trim> <pan> <take volume> <pan law>`。

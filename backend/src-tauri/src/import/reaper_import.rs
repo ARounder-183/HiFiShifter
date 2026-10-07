@@ -960,9 +960,7 @@ fn build_tempo_map_from_reaper(
 
     push(0.0, initial_bpm, initial_numerator, initial_denominator);
 
-    let Some(envelope) = data.tempo_envelope.as_ref() else {
-        return None;
-    };
+    let envelope = data.tempo_envelope.as_ref()?;
     if envelope.points.is_empty() {
         return None;
     }

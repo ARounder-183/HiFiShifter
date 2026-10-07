@@ -132,15 +132,17 @@ jobs:
       - name: Install pinned ARA and VST3 SDKs
         run: ./tools/prepare-plugin-sdks.ps1
 
-      # 【为什么暂时不加 `-D warnings`】清仓时本 workspace 有 190 条 clippy 告警
-      # （src-tauri 99 / hifishifter-kernel 91）。一次性打开 `-D warnings` 会让 CI
-      # 立刻全红、且没人能分辨"哪条是我改坏的"。因此先只**报告**，等告警清零后
-      # 再切到 `-D warnings` —— 切换点是本仓 clippy 清仓提交。
+      # 告警已清零（清仓时是 190 条），因此这里判死：**告警即失败**。
+      #
+      # 【为什么现在可以判死】此前 CI 用 `RUSTFLAGS: "-Awarnings"` 把整个 workspace
+      # 的告警一起静音，190 条长期不可见（其中含死代码与恒真断言）。现在改成分层：
+      # 有意识接受的风格类 lint 逐条写在两个 crate 根部的 `#![allow(…)]` 里并附理由，
+      # 其余一律默认告警 —— 于是 `-D warnings` 拦到的都是真问题。
       - name: Run clippy
         run: |
           . ./tools/msvc-env.ps1
-          cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets --message-format short
-          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed (compilation error, not a warning).' }
+          cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy reported warnings or errors.' }
 
   rust-test:
     name: Rust tests (workspace)

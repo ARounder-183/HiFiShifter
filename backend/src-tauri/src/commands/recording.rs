@@ -137,11 +137,10 @@ fn import_finished_recording(
     let imported_clip_id = timeline
         .clips
         .iter()
-        .filter(|clip| {
+        .rfind(|clip| {
             clip.track_id == target_track_id
                 && clip.source_path.as_deref() == Some(finished.output_path.as_str())
         })
-        .next_back()
         .map(|clip| clip.id.clone());
 
     if settings.auto_normalize {

@@ -1585,8 +1585,10 @@ fn start_background_render_inner(
         );
     })));
 
-    // Explicitly drop app_clone's state borrow before moving app into the thread
-    drop(state);
+    // 【为什么不需要显式 `drop(state)`】`state` 是 `State<'_, AppState>`，一个
+    // 借用守卫而不是拥有所有权的值 —— `drop` 对它只是提前结束借用，而 NLL 在
+    // 最后一次使用处就结束了（clippy 的 `drop_non_drop` 报的正是这一点：那个调用
+    // 什么也没做）。`app_clone` 是真值，保留它的 drop 表达"交给线程之前先释放"。
     drop(app_clone);
 
     // 后台渲染线程
@@ -1916,7 +1918,6 @@ fn render_background_pass(
                 let state = app.state::<AppState>();
                 let changed =
                     state.timeline_version.load(Ordering::Acquire) != render_timeline_version;
-                drop(state);
                 if changed {
                     cancelled = true;
                     break;

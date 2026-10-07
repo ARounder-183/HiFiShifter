@@ -24,6 +24,42 @@
 //! 内核是 app 的依赖。app 侧 `backend/src-tauri/src/lib.rs` 用 `pub use`
 //! 把这些模块再接回 crate 根，于是 app 里 `crate::mixdown::…` 这类**既有路径完全不变**。
 
+// ── clippy 策略 ─────────────────────────────────────────────────────────────
+//
+// 【为什么要有这一块】CI 曾用 `RUSTFLAGS: "-Awarnings"` 把**整个 workspace 的
+// 告警一起静音**，于是 190 条 clippy 告警长期不可见（其中若干是死代码与恒真断言）。
+// 那个做法已移除；取而代之的是把"有意识接受的风格类 lint"逐条写在这里，让
+// **缺陷类** lint 保持默认告警级别、不再被噪声淹没。
+//
+// 每一条都是判断，不是省事：
+#![allow(
+    // 音频/DSP 的许多函数天然需要一组同源的参数（缓冲、长度、采样率、增益…）。
+    // 硬抽成结构体只会把调用点变成构造字面量，不增加任何表达力。
+    clippy::too_many_arguments,
+    // 同上：闭包/迭代器签名的类型确实复杂，但抽 `type` 别名会让"它到底是什么"
+    // 更难读（尤其是 `impl Fn` 嵌套）。逐处抽别名的收益不抵可读性损失。
+    clippy::type_complexity,
+    // `!(x > 0.0)` 这类写法**是刻意的 NaN 语义**：NaN 参与比较一律为 false，
+    // 取反后为 true，正是"非法值按不活跃处理"想要的结果。改成 `partial_cmp`
+    // 会把一行直白的表达式变成三段匹配，更容易写错。
+    clippy::neg_cmp_op_on_partial_ord,
+    // 逐元素数值循环里索引是**语义的一部分**（相邻样本、跨通道步长、原地读写），
+    // 改成迭代器往往要引入 `windows()` / `zip()` 反而更难核对边界。
+    clippy::needless_range_loop,
+    // `let mut x = X::default(); x.a = 1;` 与结构体更新语法等价；后者在字段多、
+    // 默认值集中定义时更难读（要来回对照 Default 实现）。
+    clippy::field_reassign_with_default,
+    // 文档续行缩进是纯排版；本仓注释以中文长句为主，rustfmt/clippy 的续行规则
+    // 与中文标点的组合并不总是更易读。
+    clippy::doc_lazy_continuation,
+    // `if d != 0 { a / d }` 与 `a.checked_div(d)` 等价；前者在数值代码里与
+    // 周围的显式边界判断同一风格。
+    clippy::manual_checked_ops,
+    // `len()` 无 `is_empty()`：这些缓存结构不实现 `Default`/`is_empty` 语义，
+    // 补一个 `is_empty` 只是为了满足 lint。
+    clippy::len_without_is_empty,
+)]
+
 // ── 出口与基础设施 ──────────────────────────────────────────────────────────
 pub mod byte_budget_cache;
 pub mod engine_command;
@@ -57,18 +93,6 @@ macro_rules! log_warn_limited {
     ($($arg:tt)*) => {
         $crate::log_limiter::emit_limited(
             log::Level::Warn,
-            file!(),
-            line!(),
-            format_args!($($arg)*),
-        )
-    };
-}
-
-/// 限流错误：语义同 [`log_warn_limited!`]，级别为 error。
-macro_rules! log_error_limited {
-    ($($arg:tt)*) => {
-        $crate::log_limiter::emit_limited(
-            log::Level::Error,
             file!(),
             line!(),
             format_args!($($arg)*),

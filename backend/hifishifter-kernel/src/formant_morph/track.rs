@@ -197,7 +197,7 @@ pub fn extract_tracks(cands: &[Option<FormantCandidate>]) -> Vec<TrackPoint> {
 /// 轨迹平滑：先 5 帧中值（消除孤立跳点），再每帧 ±15% 限速（消除连续漂移）。
 ///
 /// 中值窗口对边界做 clamp；限速基于平滑后的前一帧输出值（累积钳制）。
-pub fn smooth_tracks(tracks: &mut Vec<TrackPoint>) {
+pub fn smooth_tracks(tracks: &mut [TrackPoint]) {
     if tracks.is_empty() {
         return;
     }

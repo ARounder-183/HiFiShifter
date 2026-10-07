@@ -750,16 +750,12 @@ pub async fn get_waveform_mipmap_binary(
     source_path: String,
     level: u8,
 ) -> String {
-    match tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         waveform::get_waveform_mipmap_binary(state, source_path, level)
     })
     .await
-    {
-        Ok(result) => result,
-        // 与同步实现的 Err 分支一致：失败返回空字符串。
-        Err(_) => String::new(),
-    }
+    .unwrap_or_default()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -784,16 +780,12 @@ pub async fn batch_get_waveform_mipmap(
     source_paths: Vec<String>,
     levels: Option<Vec<u8>>,
 ) -> std::collections::HashMap<String, [String; 3]> {
-    match tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         waveform::batch_get_waveform_mipmap(state, source_paths, levels)
     })
     .await
-    {
-        Ok(result) => result,
-        // 与同步实现一致：失败时对应文件返回 3 个空字符串。
-        Err(_) => std::collections::HashMap::new(),
-    }
+    .unwrap_or_default()
 }
 
 // ===================== timeline =====================

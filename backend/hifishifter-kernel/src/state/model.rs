@@ -2225,7 +2225,12 @@ pub enum RippleMode {
 
 impl RippleMode {
     /// 从持久化字符串解析；未知值回退为 `Off`。
-    pub fn from_str(value: &str) -> Self {
+    ///
+    /// 【为什么不叫 `from_str`】那会与 `std::str::FromStr::from_str` 同名
+    /// （`clippy::should_implement_trait`）。本函数返回 `Self` 而不是 `Result`，
+    /// 语义上就不是 `FromStr`（"解析失败"在这里被刻意定义为回退到 `Off`），
+    /// 因此改名而不是实现 trait。
+    pub fn from_persisted(value: &str) -> Self {
         match value {
             "track" => Self::Track,
             "all" => Self::All,
@@ -10111,9 +10116,7 @@ impl TimelineState {
     }
 
     pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
-        let Some(idx) = self.clips.iter().position(|c| c.id == clip_id) else {
-            return None;
-        };
+        let idx = self.clips.iter().position(|c| c.id == clip_id)?;
 
         // 分割是 Clip 容器级操作：无论“同步编辑所有 Take”是否启用，
         // 都必须把每个 Take 的 source 窗口 / MIDI 内容切到对应侧。

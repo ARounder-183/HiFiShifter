@@ -560,8 +560,7 @@ pub fn build_tempo_map_points_from_midi(
     };
 
     let mut points: Vec<crate::state::TempoPointData> = Vec::new();
-    let mut index = 0usize;
-    for event in &merged {
+    for (index, event) in merged.iter().enumerate() {
         if let Some(bpm) = event.bpm {
             current_bpm = bpm.clamp(10.0, 960.0);
         }
@@ -586,7 +585,6 @@ pub fn build_tempo_map_points_from_midi(
                     notes: None,
                 }),
         });
-        index += 1;
     }
 
     // 确保 0 位置点存在。

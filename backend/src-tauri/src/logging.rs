@@ -13,11 +13,9 @@
 //! - panic hook 会把 panic 详情写入日志（含 backtrace），保证 `panic = "abort"`
 //!   下用户仍能提交带现场信息的日志。
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 
 /// 与 tauri.conf.json 的 `identifier` 保持一致（用于推导默认日志目录）。
 const APP_IDENTIFIER: &str = "com.arounder.hifishifter";

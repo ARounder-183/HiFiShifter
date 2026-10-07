@@ -36,6 +36,16 @@ pub(crate) fn guard_json_command(
     }
 }
 
+/// 波形命令的 panic 守卫。
+///
+/// 【为什么保留而未删除】它是 `guard_command` 的同款守卫，只是返回值类型不同
+/// （`WaveformPeaksSegmentPayload` 而不是 `serde_json::Value`）。目前**没有调用点**
+/// —— 也就是说波形命令实际上没有这层遏制。这是"写了安全网但没接线"，删除它等于
+/// 把这个事实埋掉；保留 + 本注解把它留在明面上，等一次专门的判断（接线或明确删除）。
+#[allow(
+    dead_code,
+    reason = "已实现但尚未接线的 panic 守卫；保留以暴露该缺口，见上方说明"
+)]
 pub(crate) fn guard_waveform_command(
     name: &str,
     f: impl FnOnce() -> super::waveform::WaveformPeaksSegmentPayload,

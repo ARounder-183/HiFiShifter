@@ -103,6 +103,12 @@ pub struct MetronomeRt {
     retired_schedules: Mutex<RetirementKeeper<Arc<Vec<MetronomeClick>>>>,
 }
 
+impl Default for MetronomeRt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetronomeRt {
     pub fn new() -> Self {
         Self {

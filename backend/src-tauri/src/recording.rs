@@ -144,33 +144,30 @@ fn write_wav_thread(
     let mut writer =
         WavWriter::create(path, spec).map_err(|err| format!("recording_error_create_wav:{err}"))?;
 
-    loop {
-        match rx.recv() {
-            Ok(WriterMsg::Data(chunk)) => {
-                if bit_depth == 32 {
-                    for sample in &chunk {
-                        writer
-                            .write_sample(sample.clamp(-1.0, 1.0))
-                            .map_err(|err| format!("recording_error_write_wav:{err}"))?;
-                    }
-                } else if bit_depth == 16 {
-                    for sample in &chunk {
-                        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                        writer
-                            .write_sample(value)
-                            .map_err(|err| format!("recording_error_write_wav:{err}"))?;
-                    }
-                } else {
-                    let scale = ((1i64 << 23) - 1) as f32;
-                    for sample in &chunk {
-                        let value = (sample.clamp(-1.0, 1.0) * scale).round() as i32;
-                        writer
-                            .write_sample(value)
-                            .map_err(|err| format!("recording_error_write_wav:{err}"))?;
-                    }
-                }
+    // `Ok(WriterMsg::Finish)` 与通道关闭都终止循环 —— 与原先的
+    // `loop { match … }` 逐字等价，只是少了一层匹配。
+    while let Ok(WriterMsg::Data(chunk)) = rx.recv() {
+        if bit_depth == 32 {
+            for sample in &chunk {
+                writer
+                    .write_sample(sample.clamp(-1.0, 1.0))
+                    .map_err(|err| format!("recording_error_write_wav:{err}"))?;
             }
-            Ok(WriterMsg::Finish) | Err(_) => break,
+        } else if bit_depth == 16 {
+            for sample in &chunk {
+                let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                writer
+                    .write_sample(value)
+                    .map_err(|err| format!("recording_error_write_wav:{err}"))?;
+            }
+        } else {
+            let scale = ((1i64 << 23) - 1) as f32;
+            for sample in &chunk {
+                let value = (sample.clamp(-1.0, 1.0) * scale).round() as i32;
+                writer
+                    .write_sample(value)
+                    .map_err(|err| format!("recording_error_write_wav:{err}"))?;
+            }
         }
     }
 

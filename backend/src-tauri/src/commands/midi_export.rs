@@ -424,7 +424,7 @@ impl TempoTickConverter {
         }
         points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         if points.is_empty() || points[0].0 > 1e-9 {
-            points.insert(0, (0.0, fallback_bpm.max(10.0).min(960.0)));
+            points.insert(0, (0.0, fallback_bpm.clamp(10.0, 960.0)));
         }
 
         let mut cumulative_ticks = Vec::with_capacity(points.len());
@@ -511,7 +511,7 @@ fn make_conductor_track(
 
     let Some(map) = timeline.tempo_map.as_ref() else {
         // 与 TempoTickConverter::new 的钳制保持一致（10-960）。
-        let fallback_bpm = fallback_bpm.max(10.0).min(960.0);
+        let fallback_bpm = fallback_bpm.clamp(10.0, 960.0);
         let tempo_us_per_beat = (60_000_000.0 / fallback_bpm.max(1.0)).round() as u32;
         let (sharps_flats, major_minor) = scale_to_key_signature(fallback_base_scale);
         push_meta(
@@ -886,10 +886,10 @@ fn read_pitch_for_export(
         .unwrap_or(false);
 
     if entry.clip_id.is_some() && (!compose_enabled || !track_has_pitch) {
-        match read_pitch_for_clip(timeline, entry) {
-            Ok(values) => return Ok(values),
-            // clip 级读取失败时继续尝试 track 级数据，避免丢失已有的音高编辑。
-            Err(_) => {}
+        // clip 级读取失败时继续尝试 track 级数据，避免丢失已有的音高编辑
+        // （因此这里刻意只处理 `Ok`，失败落到下面的 track 级路径）。
+        if let Ok(values) = read_pitch_for_clip(timeline, entry) {
+            return Ok(values);
         }
     }
 
