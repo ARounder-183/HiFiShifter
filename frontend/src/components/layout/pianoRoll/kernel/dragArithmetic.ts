@@ -6,6 +6,9 @@
  * 1. 选区的帧区间 → 采样下标（`selectionIndexRange`，含 clamp）；
  * 2. 帧号 → 采样下标（`frameToIndex`）。
  *
+ * （边缘自动滚屏的几何曾在这里，现已与时间轴内核共用
+ * `components/layout/shared/edgeAutoScroll.ts`，见文件末尾的说明。）
+ *
  * 【单位】选区本身已经是**帧**（见 `paramSelection.ts`），所以这里不再有
  * beat → 帧的换算：那一层（`selectionFrameRange` / `beatToFrameDelta` /
  * `frameDeltaToBeat`）随单位改造一并删除。附带好处是"拍 → 帧两端取整不对称"这类
@@ -145,48 +148,21 @@ export function selectionIndexRange(args: {
     return { startIdx, endIdx };
 }
 
-/** 边缘自动滚动的边缘带宽（CSS px）。 */
-export const EDGE_SCROLL_BAND_PX = 32;
-
-/** 边缘自动滚动的单帧最大步长（CSS px）。 */
-export const EDGE_SCROLL_MAX_STEP_PX = 18;
+// ─── 边缘自动滚屏 ─────────────────────────────────────────────────────────────
+//
+// 步长公式、边缘带宽与比例上限在 `components/layout/shared/edgeAutoScroll.ts`，
+// 与时间轴内核共用同一份实现（此前两边各写一份副本）。
+// 本面板的**速度**留在这里：它是有意与时间轴不同的手感参数，见下方常量说明。
 
 /**
- * 把「指针离画布边缘的距离」换算为每帧滚动像素。
+ * 参数编辑器边缘自动滚屏的最大速度（CSS px/秒）。
  *
- * 流程：指针落在左/右边缘带内时，按「进入带宽的比例」线性加速，
- * 比例上限 1.5（即带外仍可加速到 1.5 倍），再乘以单帧最大步长；
- * 带外返回 0。
+ * 等于本功能旧实现里"每帧 18px"在 60Hz 下的值 —— 换成按秒表达是为了让速度与
+ * 刷新率、指针事件频率解耦：旧实现按 pointermove **事件**计步，1000Hz 轮询率的
+ * 鼠标会把 18px/事件放大到 18000 px/秒，同一手势在不同设备上快慢相差一个数量级。
+ * 在 60Hz 的参考帧率下，手感与改动前完全一致。
  *
- * 特殊说明 1：**方向符号**——左缘返回负值（内容向左滚 = 看到更早的时间），
- * 右缘返回正值。与 `scrollLeft` 增大方向一致，调用方直接相加即可。
- *
- * 特殊说明 2：指针被 pointer capture 拖到视口外时会超出 `[left, right]`，
- * 此时比例被 clamp 到 1.5，因此**不会**继续加速；这是刻意的上限，
- * 否则拖得越远滚得越快，用户很难停在想看的位置。
- *
- * @param args 指针与画布横向边界。
- * @returns 每帧滚动像素（左负右正）；非有限输入返回 0。
+ * 比时间轴的 720 px/秒快，是因为曲线编辑常需要一次拖过很长的工程区间，
+ * 而 clip 拖拽更看重落点精度（见 `timeline/kernel/input/dragAutoScroll.ts`）。
  */
-export function edgeAutoScrollDeltaPx(args: {
-    /** 指针的视口 x（clientX）。 */
-    readonly clientX: number;
-    /** 画布左边界（getBoundingClientRect().left）。 */
-    readonly leftPx: number;
-    /** 画布右边界（getBoundingClientRect().right）。 */
-    readonly rightPx: number;
-}): number {
-    const { clientX, leftPx, rightPx } = args;
-    if (!Number.isFinite(clientX) || !Number.isFinite(leftPx) || !Number.isFinite(rightPx)) {
-        return 0;
-    }
-    if (clientX < leftPx + EDGE_SCROLL_BAND_PX) {
-        const ratio = (leftPx + EDGE_SCROLL_BAND_PX - clientX) / EDGE_SCROLL_BAND_PX;
-        return -clampTo(ratio, 0, 1.5) * EDGE_SCROLL_MAX_STEP_PX;
-    }
-    if (clientX > rightPx - EDGE_SCROLL_BAND_PX) {
-        const ratio = (clientX - (rightPx - EDGE_SCROLL_BAND_PX)) / EDGE_SCROLL_BAND_PX;
-        return clampTo(ratio, 0, 1.5) * EDGE_SCROLL_MAX_STEP_PX;
-    }
-    return 0;
-}
+export const EDGE_SCROLL_MAX_SPEED_PX_PER_SEC = 1080;

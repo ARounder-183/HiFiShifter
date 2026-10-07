@@ -52,7 +52,9 @@ import {
     SELECTION_EDGE_HIT_PX,
     SELECTION_EDGE_MIN_WIDTH_PX,
 } from "./kernel/gestureHitTest";
-import { edgeAutoScrollDeltaPx, selectionIndexRange } from "./kernel/dragArithmetic";
+import { selectionIndexRange } from "./kernel/dragArithmetic";
+import { createEdgeScrollDriver } from "./kernel/edgeScrollDriver";
+import { edgeScrollMaxLeftPx } from "../shared/edgeAutoScroll";
 import type { MutableRefObject as MutRef } from "react";
 import {
     firstBinding,
@@ -2919,6 +2921,86 @@ export function usePianoRollInteractions(args: {
 
             if (!rootTrackId) return;
 
+            // ── 拖拽边缘自动滚屏（手势级驱动）──────────────────────────────────
+            //
+            // 【为什么每个手势新建一个】驱动的时钟在构造时归零，于是"新手势第一步"
+            // 必然按 1/60 秒起步；跨手势复用会让两次拖拽之间的空闲被算进"本帧时长"，
+            // 新手势第一下就跳一大步（纯函数虽把时长夹到 100ms，那仍是上百像素）。
+            // 每个手势一个实例，这条约束由构造方式保证，不依赖调用方记得复位。
+            //
+            // 【为什么用 getter 而不是先算好】边界、缩放、滚动位置、可滚上界都在
+            // 拖拽期间变化（缩放可被滚轮改、上界随 paramView 窗口变），逐次求值才能
+            // 用到当帧的真值。
+            //
+            // 【为什么 onScrolled 经一个可变槽转发】选择工具与绘制类工具对"滚动之后
+            // 该做什么"的需求不同：选择工具按新的轴重算选区（它自己就会做，无需回调），
+            // 绘制类必须按**同一个指针位置**重跑一次采样 —— 视图滚了、指针屏幕坐标
+            // 没变，但它对应的帧号变了；不重算，笔画就会在滚动处跳变。槽在分支里赋值，
+            // 避免驱动去理解"当前是哪个工具"。
+            let onEdgeScrolled: ((clientX: number) => void) | null = null;
+
+            /**
+             * 滚动上界：工程末端与**已取数窗口末端**取小。
+             *
+             * 【为什么绘制类要额外受窗口约束】`usePianoRollData` 的取数窗口是
+             * "可见区 ± 一个可见时长"，而笔画期间取数被 `liveEditDeferral` 推迟到
+             * pointer-up（换窗口会让正在画的轨迹消失，见
+             * docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。滚出窗口后
+             * 提交仍会写进后端，但**画面上什么都不会出现** —— 用户对着空白拖一条
+             * 看不见的线。窗口自带一整个视口宽的余量，因此这个上限足够一次边缘
+             * 滚屏走完一屏，用户感知不到限制。
+             *
+             * 选择工具不受此限：选区是纯视觉范围，不依赖已取数的曲线。
+             */
+            const maxScrollLeftFor = (limitToLoadedWindow: boolean): number => {
+                const scroller = scrollerRef.current;
+                if (!scroller) return 0;
+                const axis = axisFromRefs();
+                const nativeOffsetPx = syncTimelineEnabled ? timelineOffsetRef.current : 0;
+                const projectEndFrame = Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs));
+                const projectMax = edgeScrollMaxLeftPx({
+                    pxPerSec: axis.pxPerSec,
+                    framePeriodMs,
+                    maxFrame: projectEndFrame,
+                    viewportWidthPx: scroller.clientWidth,
+                    nativeOffsetPx,
+                });
+                if (!limitToLoadedWindow) return projectMax;
+
+                const pv = paramViewRef.current;
+                if (!pv || pv.edit.length === 0) return 0;
+                const stride = Math.max(1, Math.floor(pv.stride));
+                const windowEndFrame = pv.startFrame + (pv.edit.length - 1) * stride;
+                const windowMax = edgeScrollMaxLeftPx({
+                    pxPerSec: axis.pxPerSec,
+                    framePeriodMs,
+                    maxFrame: windowEndFrame,
+                    viewportWidthPx: scroller.clientWidth,
+                    nativeOffsetPx,
+                });
+                return Math.min(projectMax, windowMax);
+            };
+
+            const edgeScroll = createEdgeScrollDriver({
+                getBounds: () => {
+                    const scroller = scrollerRef.current;
+                    if (!scroller) return null;
+                    const rect = scroller.getBoundingClientRect();
+                    return { left: rect.left, right: rect.right };
+                },
+                getScrollLeft: () => scrollerRef.current?.scrollLeft ?? 0,
+                setScrollLeft: (next) => {
+                    const scroller = scrollerRef.current;
+                    if (!scroller) return;
+                    scroller.scrollLeft = next;
+                    // 采纳进渲染内核：各图层按内核真值绘制，只写原生 DOM 会让
+                    // 画面与"指针 → 帧"的投影分叉（见 `syncScrollLeft` 的说明）。
+                    syncScrollLeft(scroller);
+                },
+                getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                onScrolled: (clientX) => onEdgeScrolled?.(clientX),
+            });
+
             // Middle mouse: pan (time axis)
             if (e.button === 1) {
                 e.preventDefault();
@@ -3290,38 +3372,15 @@ export function usePianoRollInteractions(args: {
                     const bounds = scroller.getBoundingClientRect();
 
                     if (allowAutoScroll) {
-                        // 边缘自动滚动的映射抽到 `kernel/dragArithmetic`
-                        // （纯函数，有单测）：含边缘带宽、单帧步长与比例上限
-                        // 三个魔法数，原来的内联版本无法单测。
-                        const deltaPx = edgeAutoScrollDeltaPx({
-                            clientX,
-                            leftPx: bounds.left,
-                            rightPx: bounds.right,
-                        });
-
-                        if (Math.abs(deltaPx) > 0.01) {
-                            // 上限必须用**同一个投影**的 pxPerSec 算（不能用可能滞后的
-                            // ref）：否则自动滚动的可达右界与实际内容宽不一致。
-                            const pxPerFrameNow = (axis.pxPerSec * framePeriodMs) / 1000;
-                            const drawingMaxScrollLeft = Math.max(
-                                0,
-                                maxSelectableFrame * Math.max(1e-6, pxPerFrameNow) -
-                                    scroller.clientWidth,
-                            );
-                            const nativeOffset = syncTimelineEnabled
-                                ? timelineOffsetRef.current
-                                : 0;
-                            const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
-                            const nextScrollLeft = clamp(
-                                scroller.scrollLeft + deltaPx,
-                                0,
-                                nativeMaxScrollLeft,
-                            );
-                            if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.01) {
-                                scroller.scrollLeft = nextScrollLeft;
-                                syncScrollLeft(scroller);
-                            }
-                        }
+                        // 边缘自动滚动收口在 `edgeScroll` 驱动里（几何是
+                        // `shared/edgeAutoScroll` 的纯函数，驱动本身有单测）。
+                        // 这里只需"按当前指针位置滚一帧"：滚动量、可达上界、方向
+                        // 符号、帧时长归一都由它负责，本函数不再自己算一遍。
+                        //
+                        // 【为什么选择工具不启用持续滚动】它的语义是"指针到哪选到哪"，
+                        // 松手即定型 —— 停在边缘不动没有意义。持续滚动只服务绘制类
+                        // 工具（笔画必须跟着视图继续延伸）。
+                        edgeScroll.step(clientX);
                     }
 
                     const clampedClientX = clamp(clientX, bounds.left, bounds.right);
@@ -5333,6 +5392,24 @@ export function usePianoRollInteractions(args: {
                 // 队列里**最后一个**采样点即可得到正确结果。
                 let lineRafId: number | null = null;
                 let pendingLineEvent: globalThis.PointerEvent | null = null;
+                // 最近一次处理的采样：边缘自动滚屏之后按**同一个**指针位置重跑一次
+                // 端点式预览（视图滚了，指针屏幕坐标没变，对应的帧号却变了）。
+                let lastLineSample: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                } | null = null;
+                // 直线 / 颤音同样启用**持续**边缘滚屏：端点必须跟着视图继续延伸。
+                // 端点式预览每帧整段重算，因此这里重跑一次天然正确 ——
+                // 没有自由绘制那种"补一笔"的语义问题。
+                onEdgeScrolled = (clientX) => {
+                    const base = lastLineSample;
+                    if (base === null) return;
+                    processLineEvent({ ...base, clientX });
+                };
+
                 const processLineEvent = (ev: {
                     clientX: number;
                     clientY: number;
@@ -5342,6 +5419,13 @@ export function usePianoRollInteractions(args: {
                 }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
+                    lastLineSample = {
+                        clientX: ev.clientX,
+                        clientY: ev.clientY,
+                        ctrlKey: ev.ctrlKey,
+                        shiftKey: ev.shiftKey,
+                        altKey: ev.altKey,
+                    };
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                     const f2 = timeToFrame(pointerSec(adjusted.clientX), fp);
                     const yDragEnabled = currentDragDir !== "x-only";
@@ -5413,6 +5497,9 @@ export function usePianoRollInteractions(args: {
                     }
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
+                    // 边缘自动滚屏：立刻滚一帧并维持 rAF 循环（指针停在边缘不动时
+                    // 也继续滚）。滚动引发的端点重算由 `onEdgeScrolled` 负责。
+                    edgeScroll.track(ev.clientX);
                     // 端点式预览：只保留最新采样（含同帧 coalesced 末点）。
                     const coalesced = coalescedEventsOf(ev);
                     pendingLineEvent = coalesced[coalesced.length - 1] ?? ev;
@@ -5448,6 +5535,9 @@ export function usePianoRollInteractions(args: {
                     }
                     disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
+                    // 停掉边缘自动滚屏：松手后视图绝不能继续滚（见 driver 的 `stop`）。
+                    onEdgeScrolled = null;
+                    edgeScroll.stop();
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
                     window.removeEventListener("pointercancel", onCancel);
@@ -5506,6 +5596,9 @@ export function usePianoRollInteractions(args: {
                     setVibratoDragCaptureActive(false);
                     disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
+                    // 取消路径同样必须停掉自动滚屏（否则视图会一直滚下去）。
+                    onEdgeScrolled = null;
+                    edgeScroll.stop();
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
                     window.removeEventListener("pointercancel", onCancel);
@@ -5623,6 +5716,31 @@ export function usePianoRollInteractions(args: {
                     e.nativeEvent,
                     e.currentTarget as HTMLCanvasElement,
                 );
+                // 最近一次处理的采样（含修饰键）。边缘自动滚屏之后要按**同一个**
+                // 指针位置重跑一次：视图滚了、指针屏幕坐标没变，但它对应的帧号变了。
+                // 不重跑，笔画就会在滚动处跳变（视图过去了、线没跟上）。
+                let lastStrokeSample: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                } | null = null;
+                // 绘制类工具启用**持续**边缘滚屏（指针停在边缘不动也继续滚），
+                // 见 `kernel/edgeScrollDriver` 的模块头说明。
+                onEdgeScrolled = (clientX) => {
+                    const base = lastStrokeSample;
+                    if (base === null) return;
+                    // 用"当前指针 x + 最后一次采样的其余字段"重跑：修饰键 / 拖动方向
+                    // 等手势状态必须与用户最后一次真实输入一致，而 x 取回调带过来的
+                    // 最新值（比队列里那份可能还新一个事件）。
+                    processStrokeEvent({ ...base, clientX });
+                    // 自由绘制的 `processStrokeEvent` 只调 `invalidate()`（主画布）——
+                    // 波形面的重绘一向由外层的合帧循环统一发出。这里绕过了那层循环，
+                    // 必须自己补一次，否则滚屏期间波形面按旧动态值显示。
+                    requestWaveformRepaint();
+                };
+
                 // 逐事件处理的主体从 onMove 拆出：onMove 只把事件压进待处理
                 // 队列并请求 rAF，真正的 dense 构建 + live 写入 + 重绘合帧到
                 // 每渲染帧一次。pen 采样率（133–266Hz+）高于渲染帧率，逐事件
@@ -5637,6 +5755,13 @@ export function usePianoRollInteractions(args: {
                 }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
+                    lastStrokeSample = {
+                        clientX: ev.clientX,
+                        clientY: ev.clientY,
+                        ctrlKey: ev.ctrlKey,
+                        shiftKey: ev.shiftKey,
+                        altKey: ev.altKey,
+                    };
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                     const last = st.points[st.points.length - 1];
                     const f2 = timeToFrame(pointerSec(adjusted.clientX), fp);
@@ -5722,6 +5847,10 @@ export function usePianoRollInteractions(args: {
                     }
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
+                    // 边缘自动滚屏：`track` 会立刻滚一帧并维持 rAF 循环（指针停在
+                    // 边缘不动时也继续滚）。**不在这里读坐标做处理** —— 事件仍走
+                    // 下面的合帧队列，滚动引发的重算由 `onEdgeScrolled` 负责。
+                    edgeScroll.track(ev.clientX);
                     pendingMoveEvents.push(ev);
                     if (strokeRafId == null) {
                         strokeRafId = requestAnimationFrame(flushPendingMoves);
@@ -5765,6 +5894,9 @@ export function usePianoRollInteractions(args: {
                     }
                     disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
+                    // 停掉边缘自动滚屏：松手后视图绝不能继续滚（见 driver 的 `stop`）。
+                    onEdgeScrolled = null;
+                    edgeScroll.stop();
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
                     window.removeEventListener("pointercancel", onCancel);
@@ -5801,6 +5933,9 @@ export function usePianoRollInteractions(args: {
                     setVibratoDragCaptureActive(false);
                     disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
+                    // 取消路径同样必须停掉自动滚屏（否则视图会一直滚下去）。
+                    onEdgeScrolled = null;
+                    edgeScroll.stop();
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
                     window.removeEventListener("pointercancel", onCancel);

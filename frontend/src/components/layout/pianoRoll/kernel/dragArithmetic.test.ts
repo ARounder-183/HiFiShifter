@@ -21,7 +21,11 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { edgeAutoScrollDeltaPx, frameToIndex, selectionIndexRange } from "./dragArithmetic";
+import {
+    EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+    frameToIndex,
+    selectionIndexRange,
+} from "./dragArithmetic";
 
 /**
  * 断言非空并收窄类型。
@@ -131,45 +135,15 @@ describe("frameToIndex", () => {
 /**
  * 边缘自动滚动（框选拖到画布边缘时自动平移视图）。
  *
- * 【为什么抽出来】这段算术把"指针离边缘多远"映射为"每帧滚动多少像素"，
- * 内含三处魔法数（边缘带宽 32px、单帧最大步长 18px、距离比例上限 1.5）与一次
- * `scrollLeft` 的二次钳制。它是纯算术，但此前埋在 pointermove 闭包里，
- * 无法单测，改动风险只能靠手拖复现。
+ * 【覆盖已迁移】步长公式、边缘带宽与比例上限的用例随实现一起搬到了
+ * `components/layout/shared/edgeAutoScroll.test.ts` —— 几何现在由时间轴内核与
+ * 参数编辑器内核共用，单测也跟着实现走，避免"实现共享、用例只盖一半"。
  */
-describe("edgeAutoScrollDeltaPx", () => {
-    const view = { leftPx: 100, rightPx: 900 };
-
-    it("远离边缘 → 0", () => {
-        expect(edgeAutoScrollDeltaPx({ clientX: 500, ...view })).toBe(0);
-        expect(edgeAutoScrollDeltaPx({ clientX: 132, ...view })).toBe(0);
-        expect(edgeAutoScrollDeltaPx({ clientX: 868, ...view })).toBe(0);
-    });
-
-    it("靠近左缘 → 负向滚动，越靠越快；到边缘时比例恰为 1", () => {
-        const half = edgeAutoScrollDeltaPx({ clientX: 116, ...view }); // 带内一半
-        const atEdge = edgeAutoScrollDeltaPx({ clientX: 100, ...view }); // 恰在边界
-        expect(half).toBeCloseTo(-9, 9); // 0.5 × 18
-        expect(atEdge).toBeCloseTo(-18, 9); // 1.0 × 18，不是 27
-        expect(atEdge).toBeLessThan(half);
-    });
-
-    it("靠近右缘 → 正向滚动，对称于左缘", () => {
-        expect(edgeAutoScrollDeltaPx({ clientX: 884, ...view })).toBeCloseTo(
-            -edgeAutoScrollDeltaPx({ clientX: 116, ...view }),
-            9,
-        );
-        expect(edgeAutoScrollDeltaPx({ clientX: 900, ...view })).toBeCloseTo(18, 9);
-    });
-
-    it("超出视口（指针已被 capture 到外面）仍取满速，不越界", () => {
-        expect(edgeAutoScrollDeltaPx({ clientX: 0, ...view })).toBeCloseTo(-27, 9);
-        expect(edgeAutoScrollDeltaPx({ clientX: 2000, ...view })).toBeCloseTo(27, 9);
-    });
-
-    it("非有限输入返回 0", () => {
-        for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
-            expect(edgeAutoScrollDeltaPx({ clientX: bad, ...view })).toBe(0);
-            expect(edgeAutoScrollDeltaPx({ clientX: 100, leftPx: bad, rightPx: 900 })).toBe(0);
-        }
+describe("EDGE_SCROLL_MAX_SPEED_PX_PER_SEC", () => {
+    it("等于旧的「每帧 18px」在 60Hz 下的速度（手感零变化）", () => {
+        // 旧实现按 pointermove 事件计步：18px × 60 事件/秒 = 1080 px/秒。
+        // 改成按秒表达后，参考帧率下的滚屏速度必须与改动前逐值相同 ——
+        // 这次改动的目的是让速度与帧率/事件频率解耦，不是改手感。
+        expect(EDGE_SCROLL_MAX_SPEED_PX_PER_SEC).toBe(18 * 60);
     });
 });
