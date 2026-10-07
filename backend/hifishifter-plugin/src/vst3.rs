@@ -1252,7 +1252,7 @@ unsafe extern "system" fn edit_controller_initialize(
 }
 
 unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {
-    unsafe { let controller=&*(this as *mut EditController); controller.editor_link.clear(); controller.connection.close(); }
+    unsafe { let controller=&*(this as *mut EditController); controller.editor_link.clear(); let _=controller.editor_link.set_component_handler(std::ptr::null_mut()); controller.connection.close(); }
     crate::log_line("IEditController::terminate");
     K_RESULT_OK
 }
@@ -1340,9 +1340,13 @@ unsafe extern "system" fn edit_controller_set_param_normalized(
 }
 
 unsafe extern "system" fn edit_controller_set_component_handler(
-    _this: *mut c_void,
-    _handler: *mut c_void,
+    this: *mut c_void,
+    handler: *mut c_void,
 ) -> TResult {
+    if this.is_null() {return K_INVALID_ARGUMENT;}
+    let controller=unsafe {&*(this as *const EditController)};
+    if controller.editor_link.set_component_handler(handler).is_err() {return K_RESULT_FALSE;}
+    crate::log_line(&format!("IEditController::setComponentHandler({})",if handler.is_null(){"null"}else{"connected"}));
     K_RESULT_OK
 }
 

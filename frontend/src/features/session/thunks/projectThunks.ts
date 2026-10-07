@@ -1,4 +1,7 @@
+// 工程与历史命令：插件参数面板使用参数历史，宿主clip几何不由本地快照撤销。
 import { createAsyncThunk } from "@reduxjs/toolkit";
+import { getPluginHost } from "../../../services/pluginHost";
+import type { TimelineState } from "../../../types/api";
 import { webApi } from "../../../services/webviewApi";
 import { coreApi } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
@@ -32,13 +35,17 @@ export type SaveProjectResponse = SaveVersionConflict | Record<string, unknown>;
  * 消失的 trackId 上导 clip，后端 `add_clip` 会凭空造出一条 "Track"，撤销栈就此被
  * 写坏），并通知 UI 复位那些"描述旧时间线"的瞬时状态（音高分析进度）。详见该函数。
  */
-export const undoRemote = createAsyncThunk("session/undoRemote", async () => {
+export const undoRemote = createAsyncThunk("session/undoRemote", async (options?: { parametersOnly?: boolean }) => {
     await notifyHistoryJump();
+    const plugin=getPluginHost();
+    if (options?.parametersOnly && plugin) return plugin.invoke<TimelineState>("undo_parameter_edit", {});
     return webApi.undoTimeline();
 });
 
-export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
+export const redoRemote = createAsyncThunk("session/redoRemote", async (options?: { parametersOnly?: boolean }) => {
     await notifyHistoryJump();
+    const plugin=getPluginHost();
+    if (options?.parametersOnly && plugin) return plugin.invoke<TimelineState>("redo_parameter_edit", {});
     return webApi.redoTimeline();
 });
 

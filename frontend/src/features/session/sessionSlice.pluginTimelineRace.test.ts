@@ -3,7 +3,7 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { afterEach, expect, test, vi } from "vitest";
 import reducer, { beginInteraction, endInteraction, fetchTimeline } from "./sessionSlice";
-import { moveClipRemote, setClipsStateBulkRemote } from "./thunks/timelineThunks";
+import { moveClipRemote, moveTrackRemote, pasteTimelineClipboardRemote, setClipsStateBulkRemote, splitClipsAtRemote } from "./thunks/timelineThunks";
 import { webApi } from "../../services/webviewApi";
 import { seekPlayhead, syncPlaybackState } from "./thunks/transportThunks";
 import { importAudioFileAtPosition } from "./thunks/importThunks";
@@ -24,6 +24,43 @@ function initial() {
     return reducer(undefined, fetchTimeline.fulfilled(timeline(0), "initial", undefined));
 }
 afterEach(() => { delete window.__HFS_PLUGIN_BOOTSTRAP__; vi.restoreAllMocks(); });
+
+test("private track group acknowledgement cannot be flattened by an older host read",()=>{
+    let state=initial();const args={trackId:"child",targetIndex:0,parentTrackId:"host-track"};
+    const grouped=timeline(0);grouped.tracks.push({...grouped.tracks[0],id:"child",parent_id:"host-track"});
+    state=reducer(state,fetchTimeline.pending("before-group",undefined));state=reducer(state,moveTrackRemote.pending("group",args));
+    state=reducer(state,moveTrackRemote.fulfilled(grouped,"group",args));
+    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-group",undefined));
+    expect(state.tracks.find(track=>track.id==="child")?.parentId).toBe("host-track");expect(state._pluginClipEditRequests).toEqual({});
+});
+
+test("paste receipt displays new clip in the current UI and releases the refresh guard",()=>{
+    let state=initial();state=reducer(state,fetchTimeline.pending("before-paste",undefined));
+    state=reducer(state,pasteTimelineClipboardRemote.pending("paste","selected"));
+    const pasted=timeline(0);pasted.clips.push({...pasted.clips[0],id:"pasted",start_sec:3});
+    state=reducer(state,pasteTimelineClipboardRemote.fulfilled({ok:true,timeline:pasted,newClipIds:["pasted"],pasteEndSec:4,
+        sourceProject:undefined,importedTrackCount:undefined,importedClipCount:undefined},"paste","selected"));
+    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-paste",undefined));
+    expect(state.clips.map(clip=>clip.id)).toEqual(["host-clip","pasted"]);
+    expect(state.selectedClipId).toBe("pasted");expect(state._pluginClipEditRequests).toEqual({});
+    const external={...pasted,clips:[pasted.clips[1]]};
+    state=reducer(state,fetchTimeline.pending("after-paste",undefined));
+    state=reducer(state,fetchTimeline.fulfilled(external,"after-paste",undefined));
+    expect(state.clips.map(clip=>clip.id)).toEqual(["pasted"]);
+});
+
+test("split receipt keeps both clips when an old one-clip refresh arrives late",()=>{
+    let state=initial();const arg={clipIds:["host-clip"],splitSec:0.5};
+    state=reducer(state,fetchTimeline.pending("before-split",undefined));
+    state=reducer(state,splitClipsAtRemote.pending("split",arg));
+    const split=timeline(0);split.clips[0].length_sec=0.5;
+    split.clips.push({...split.clips[0],id:"right",start_sec:0.5,source_start_sec:0.5});
+    const payload={...split,created_clip_ids:["right"]};
+    state=reducer(state,splitClipsAtRemote.fulfilled(payload,"split",arg));
+    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-split",undefined));
+    expect(state.clips.map(clip=>clip.id)).toEqual(["host-clip","right"]);
+    expect(state.selectedClipId).toBe("right");expect(state._pluginClipEditRequests).toEqual({});
+});
 
 test("plugin seek ignores old-position polls during request and old polls after acknowledgement", () => {
     let state = { ...initial(), playheadSec: 5 };

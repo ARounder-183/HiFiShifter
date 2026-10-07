@@ -10,6 +10,12 @@ export function isPluginMode(): boolean { return hostMode() === "plugin"; }
 export function canControlHostTransport(): boolean {return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.transportControl===true;}
 /** 只有本次原生入口明确具备REAPER写API，才打开片段拖拽/裁切/线性拉伸。 */
 export function canEditHostClips(): boolean {return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipEditing===true;}
+/** 分割有独立原生能力门，不因允许拖拽就放开未实现的片段命令。 */
+export function canSplitHostClips(): boolean {return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipSplitting===true;}
+/** 原生完整item剪贴板及创建/删除接口已接通时开放，旧插件不会误发App私有媒体命令。 */
+export function canClipboardHostClips():boolean {return isPluginMode()&&window.__HFS_PLUGIN_BOOTSTRAP__?.clipClipboard===true;}
+/** 只允许插件私有参数分组，不代表能重排或创建REAPER的轨道/folder。 */
+export function canGroupPluginTracks():boolean {return isPluginMode()&&window.__HFS_PLUGIN_BOOTSTRAP__?.trackGrouping===true;}
 /** 独立App保留原几何编辑；旧插件或其它宿主缺写接口时保持只读。 */
 export function isHostGeometryReadOnly(): boolean {return isPluginMode()&&!canEditHostClips();}
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
@@ -21,11 +27,17 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
     if (!isPluginMode()) return true;
     if (["playback.toggle","playback.stop"].includes(action)) return canControlHostTransport();
     if (action==="project.importMedia") return canImportHostAudio();
+    if (action==="clip.split") return canSplitHostClips();
+    if (action==="clip.delete"||action==="edit.pasteTracks") return canClipboardHostClips();
+    // 归一化只改HFS音频处理参数，不改REAPER item几何，可在插件中继续使用。
+    if (action==="clip.normalize") return true;
+    if (["clip.group","clip.ungroup"].includes(action)) return canEditHostClips();
     if (action.startsWith("project.") || action.startsWith("transport.") || action.startsWith("recording.")
         || ["playback.toggle", "playback.stop", "playback.metronome"].includes(action)) return false;
     if (action.startsWith("track.") && !["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(action)) return false;
     // 共享剪贴板键的别名不决定目标；换轨后clip.paste也可能粘贴参数线。
     // 必须先解析内容/选区，再按实际事件通道拒绝宿主几何操作。
+    // 共享快捷键先按剪贴板内容路由；参数剪贴板在没有clipClipboard时仍必须可用。
     if (["clip.copy", "clip.cut", "clip.paste"].includes(action)) return true;
     if (action.startsWith("clip.") && surface !== "pianoRoll") return false;
     if (action.startsWith("edit.") && surface !== "pianoRoll") {
@@ -36,6 +48,9 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
 }
 
 /** 插件共享编辑快捷键只允许发给参数面板；不向宿主轨道派发几何写操作。 */
-export function pluginAllowsEditChannel(channel: string | null): channel is string {
-    return channel !== null && (!isPluginMode() || channel === "hifi:editOp");
+export function pluginAllowsEditChannel(channel: string | null, op?: string): channel is string {
+    return channel !== null && (!isPluginMode() || channel === "hifi:editOp"
+        || (channel === "hifi:timelineEditOp" && op === "split" && canSplitHostClips())
+        || (channel === "hifi:timelineEditOp" && ["copy","cut","paste","pasteTracks","delete"].includes(op??"") && canClipboardHostClips())
+        || (channel === "hifi:timelineEditOp" && ["group","ungroup"].includes(op??"") && canEditHostClips()));
 }

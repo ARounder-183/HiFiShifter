@@ -32,7 +32,7 @@ pub(crate) struct HostTrackTarget {host:Arc<ReaperHost>,project:usize,track:usiz
 struct OwnedSource {pointer:*mut c_void,destroy:DestroySource}
 impl Drop for OwnedSource {fn drop(&mut self) {if !self.pointer.is_null() {unsafe {(self.destroy)(self.pointer)};}}}
 /// 只回滚自己新建且GUID仍相同的item；地址重用或项目销毁时不误删用户数据。
-struct CreatedItem {target:HostTrackTarget,item:usize,guid:String,committed:bool}
+struct CreatedItem {target:HostTrackTarget,item:usize,guid:String,state_guid:Option<String>,committed:bool}
 /// 失败时只有仍为空且仅含自己新增FX的轨道才回滚，不能删除重入添加的用户内容。
 pub(crate) struct CreatedTrack {pub target:HostTrackTarget,fx:Option<[u8;16]>,committed:bool}
 impl CreatedTrack {pub(crate) fn commit(&mut self) {self.committed=true;}}
@@ -54,8 +54,11 @@ fn fx_guid(api:&NewTrackApi,track:*mut c_void,index:i32)->Option<[u8;16]> {
 impl CreatedItem {
     fn verify(&self,authorized:&impl Fn()->bool)->Result<(),String> {
         self.target.verify(authorized)?;let api=self.target.host.geometry.as_ref().unwrap();
-        if !checked(authorized,||unsafe {(api.validate)(self.target.project as *mut c_void,self.item as *mut c_void,c"MediaItem*".as_ptr())})?
-            ||read_guid(api.item_guid,self.item as *mut c_void,authorized)?!=self.guid
+        if !checked(authorized,||unsafe {(api.validate)(self.target.project as *mut c_void,self.item as *mut c_void,c"MediaItem*".as_ptr())})? {
+            return Err("created item no longer valid".into());
+        }
+        let guid=read_guid(api.item_guid,self.item as *mut c_void,authorized)?;
+        if (guid!=self.guid&&self.state_guid.as_ref()!=Some(&guid))
             ||checked(authorized,||unsafe {(self.target.host.write.as_ref().unwrap().item_track)(self.item as *mut c_void)})? as usize!=self.target.track {
             return Err("created item identity/parent changed during import".into());
         }Ok(())
@@ -81,6 +84,23 @@ fn read_guid(getter:Guid,object:*mut c_void,authorized:&impl Fn()->bool)->Result
 }
 
 impl ReaperHost {
+    /// 媒体剪贴板要求完整创建/删除/历史和状态API；不借clipEditing宣称全部命令可用。
+    pub(crate) fn can_clipboard_items(&self)->bool {
+        self.can_import_audio()&&self.item_state.is_some()&&self.split.is_some()
+    }
+    /// 只生成宿主GUID和解析状态，不创建对象；整批可在Undo/首个setter之前完成预检。
+    pub(crate) fn prepare_copied_item(&self,chunk:&str,position:f64,authorized:&impl Fn()->bool)->Result<super::RewrittenItem,String> {
+        self.project(authorized)?;
+        let api=self.item_state.as_ref().ok_or("host item state API unavailable")?;
+        super::item_chunk::rewrite_item(chunk,position,|| {
+            let mut guid=super::item_chunk::NativeGuid::default();
+            checked(authorized,||unsafe {(api.generate)(&mut guid)})?;
+            let mut bytes=[0_u8;64];
+            checked(authorized,||unsafe {(api.stringify)(&guid,bytes.as_mut_ptr().cast())})?;
+            let end=bytes.iter().position(|value|*value==0).ok_or("unterminated generated GUID")?;
+            String::from_utf8(bytes[..end].to_vec()).map_err(|_|"generated GUID is not UTF-8".into())
+        })
+    }
     pub(crate) fn can_import_audio(&self)->bool {self.media.is_some()&&self.has_project_history()}
     pub(crate) fn can_create_audio_track(&self)->bool {self.can_import_audio()&&self.extended_media.as_ref().is_some_and(|m|m.tracks.is_some())}
     /// 现代宿主选择器支持多选，返回完整UTF-8路径列表；旧宿主仍回退单文件。
@@ -148,6 +168,32 @@ impl ReaperHost {
     }
 }
 impl HostTrackTarget {
+    /// 从已重建身份的真实item状态创建；SOURCE/take/FX所有权由宿主state loader管理。
+    pub(crate) fn create_copied_item(&self,state:&super::RewrittenItem,authorized:&impl Fn()->bool)->Result<crate::host::geometry::HostClipGeometry,String> {
+        self.verify(authorized)?;
+        if !self.host.can_clipboard_items() {return Err("host clip clipboard capability unavailable".into());}
+        let bytes=CString::new(state.text.as_str()).map_err(|_|"item state contains NUL")?;
+        let media=self.host.media.as_ref().unwrap();let api=self.host.geometry.as_ref().unwrap();
+        let state_api=self.host.item_state.as_ref().unwrap();let write=self.host.write.as_ref().unwrap();
+        let item=checked(authorized,||unsafe {(media.create_item)(self.track as *mut c_void)})?;
+        if item.is_null() {return Err("host copied item creation failed".into());}
+        let guid=read_guid(api.item_guid,item,authorized)?;
+        let mut created=CreatedItem {target:self.clone(),item:item as usize,guid,state_guid:Some(state.item_guid.clone()),committed:false};
+        created.verify(authorized)?;
+        if !checked(authorized,||unsafe {(state_api.set)(item,bytes.as_ptr(),false)})? {return Err("host rejected copied item state".into());}
+        created.verify(authorized)?;
+        if read_guid(api.item_guid,item,authorized)?!=state.item_guid {return Err("copied item identity differs from prepared GUID".into());}
+        let take=checked(authorized,||unsafe {(self.host.split.as_ref().unwrap().active_take)(item)})?;
+        if take.is_null() {return Err("copied item has no active take".into());}
+        let geometry=self.host.geometry_for_take(take,authorized)?;
+        if geometry.item_id!=state.item_guid||!state.take_guids.contains(&geometry.take_id) {
+            return Err("copied active take identity differs from prepared state".into());
+        }
+        created.verify(authorized)?;
+        checked(authorized,||unsafe {(write.update)(item)})?;
+        checked(authorized,||unsafe {(write.arrange)()})?;
+        created.committed=true;Ok(geometry)
+    }
     /// parent轨道的GUID用于GUI去重，不用名称或轨道序号猜对象。
     pub(crate) fn inventory_guid(&self)->&str {&self.guid}
     fn verify(&self,authorized:&impl Fn()->bool)->Result<(),String> {
@@ -172,7 +218,7 @@ impl HostTrackTarget {
         let item=checked(authorized,||unsafe {(media.create_item)(self.track as *mut c_void)})?;
         if item.is_null() {return Err("host item creation failed".into());}
         let guid=read_guid(api.item_guid,item,authorized)?;
-        let mut created=CreatedItem {target:self.clone(),item:item as usize,guid:guid.clone(),committed:false};
+        let mut created=CreatedItem {target:self.clone(),item:item as usize,guid:guid.clone(),state_guid:None,committed:false};
         created.verify(authorized)?;let take=checked(authorized,||unsafe {(media.create_take)(item)})?;
         if take.is_null() {return Err("host take creation failed".into());}
         let take_guid=read_guid(api.take_guid,take,authorized)?;

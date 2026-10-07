@@ -48,6 +48,9 @@ pub struct Response {
     pub timeline: Option<Value>,
     #[serde(default)]
     pub sources: Vec<HostPcm>,
+    /// 只读现场诊断；旧客户端忽略该可选字段，不改变Snapshot/Commit协议语义。
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub diagnostics:Option<Value>,
 }
 
 #[derive(Serialize, Deserialize)]

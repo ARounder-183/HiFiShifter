@@ -22,6 +22,7 @@ import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarSeparator } from "../../ui/Toolbar";
 import { AppIconButton } from "../../ui";
+import { TimelinePanelToggle } from "./TimelinePanelToggle";
 
 import {
     playOriginal,
@@ -1164,6 +1165,7 @@ export function ActionBar() {
             <AppToolbarSeparator />
 
             {/* Transport */}
+            <TimelinePanelToggle />
             <Flex gap="1" className="shrink-0">
                 <Button
                     variant="soft"

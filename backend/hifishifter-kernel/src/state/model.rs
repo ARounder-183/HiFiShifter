@@ -1752,6 +1752,9 @@ pub struct ClipStatePatch {
     /// "同步编辑所有 Take"（全局设置 [`crate::config::sync_edits_across_takes`]）。
     #[serde(default)]
     pub channel_mode: Option<i32>,
+    /// 插件宿主适配的REAPER item I_GROUPID；独立App不会填此字段。
+    #[serde(default, rename="hostGroupId")]
+    pub host_group_id: Option<i32>,
 }
 
 
@@ -9087,6 +9090,7 @@ impl TimelineState {
                 color: None,
                 formant_morph: None,
                 channel_mode: None,
+                host_group_id: None,
             },
         );
     }
@@ -9390,6 +9394,7 @@ impl TimelineState {
                     // 模板不带声道模式；导入策略由命令层在锁外判定后应用
                     //（见 commands::timeline::create_clips_bulk）。
                     channel_mode: None,
+                    host_group_id: None,
                 },
             );
 

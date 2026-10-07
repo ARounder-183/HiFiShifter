@@ -18,6 +18,9 @@ pub(crate) struct EditState {
     /// REAPER稳定item GUID对应的HFS自有形状；不写回宿主shape/c/S字段。
     #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
     pub fades:BTreeMap<String,crate::fade::FadeStyle>,
+    /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
+    #[serde(default,skip_serializing_if="crate::editor::private_groups::TrackGroups::is_empty")]
+    pub groups:crate::editor::private_groups::TrackGroups,
     /// 组件恢复时延迟到完整ARA图ready后再关联，禁止逐对象创建时误套新序号。
     #[serde(skip)]
     pub needs_rebind: bool,
@@ -70,6 +73,8 @@ impl EditState {
         })).collect();
         candidate.bindings = mapping.values().cloned().collect();
         for record in candidate.atlas.regions.values_mut() {if let Some((root,_))=mapping.get(&record.root) {record.root=root.clone();}}
+        for record in candidate.atlas.copy_seeds.values_mut() {if let Some((root,_))=mapping.get(&record.root) {record.root=root.clone();}}
+        candidate.atlas.gaps=self.atlas.gaps.iter().filter_map(|(root,params)|mapping.get(root).map(|(new,_)|(new.clone(),params.clone()))).collect();
         candidate.needs_rebind = false;
         *self = candidate;
         Ok(())
@@ -125,20 +130,23 @@ impl EditState {
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        self.groups.validate()?;
         self.atlas.validate()?;
         self.validate_fades()?;
         for id in self.tracks.iter().map(|t| &t.id).chain(self.params.keys()) {
             if self.bindings.get(id).is_none_or(Vec::is_empty) { return Err("ARA edit identity missing; cannot save edits".into()); }
         }
-        serde_json::to_vec(&serde_json::json!({"version":if !self.fades.is_empty() {4} else if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())
+        let bytes=serde_json::to_vec(&serde_json::json!({"version":if !self.groups.is_empty() {5} else if !self.fades.is_empty() {4} else if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())?;
+        if bytes.len()>hifishifter_ara_ipc::MAX_FRAME {return Err("state exceeds transport budget".into());}Ok(bytes)
     }
     /// 恢复使乐观并发revision前进，防止旧GUI再次覆盖宿主undo/恢复。
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() { return Ok(()); }
         if bytes.len() > hifishifter_ara_ipc::MAX_FRAME { return Err("state too large".into()); }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 && value["version"] != 4 { return Err("unsupported state version".into()); }
+        if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 && value["version"] != 4 && value["version"] != 5 { return Err("unsupported state version".into()); }
         let mut restored: Self = serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
+        restored.groups.validate()?;
         restored.validate_fades()?;
         restored.atlas=restored.atlas.reserve_restored()?;
         if value["version"] == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
@@ -234,7 +242,10 @@ mod tests {
             let mut timeline=host(); restored.apply(&mut timeline); assert_eq!(timeline.tracks[0].volume,1.0,"未解决身份不套用临时序号");
             assert!(restored.needs_rebind);
         }
-        assert!(state.reconcile(&BTreeMap::from([("track".into(),vec![])])).is_err());
+        // live 空轨可能是 mute，沿已确认的身份保留；上述冷恢复仍拒绝空/歧义身份。
+        state.reconcile(&BTreeMap::from([("track".into(),vec![])])).unwrap();
+        assert_eq!(state.bindings,original);
+        assert_eq!(state.tracks[0].volume,0.25);
     }
 
     #[test]

@@ -22,9 +22,10 @@ impl HostEditPlan {
                 ("track_id",serde_json::json!(format!("{namespace}{}",edit.destination_track)))];
             for (value,key) in [(edit.patch.fade_in_sec,"fade_in_sec"),(edit.patch.fade_out_sec,"fade_out_sec"),
                 (edit.patch.auto_fade_in_sec,"auto_fade_in_sec"),(edit.patch.auto_fade_out_sec,"auto_fade_out_sec"),
-                (edit.patch.snap_offset_sec,"snap_offset_sec")] {
+                (edit.patch.snap_offset_sec,"snap_offset_sec"),(edit.patch.gain.map(f64::from),"gain")] {
                 if let Some(value)=value {fields.push((key,serde_json::json!(value)));}
             }
+            if let Some(group)=edit.patch.host_group_id {fields.push(("group_id",if group==0 {serde_json::Value::Null} else {serde_json::json!(format!("reaper-group-{group}"))}));}
             (edit.before.id.clone(),fields)
         }).collect()}
     }
@@ -51,9 +52,10 @@ fn patch(input:&Value)->Result<ClipStatePatch,String> {
     let object=input.as_object().ok_or("clip patch must be an object")?;
     for (key,value) in object {
         if value.is_null() {continue;}
-        if !matches!(key.as_str(),"clipId"|"checkpoint"|"startSec"|"lengthSec"|"sourceStartSec"|"sourceEndSec"|"playbackRate"|"clipPlaybackRate"|"muted"|"snapOffsetSec"|"fadeInSec"|"fadeOutSec"|"autoFadeInSec"|"autoFadeOutSec"|"fadeInShape"|"fadeOutShape"|"fadeInDir"|"fadeOutDir"|"reversed"|"loopEnabled"|"channelMode") {
+        if !matches!(key.as_str(),"clipId"|"checkpoint"|"name"|"startSec"|"lengthSec"|"sourceStartSec"|"sourceEndSec"|"playbackRate"|"clipPlaybackRate"|"gain"|"muted"|"snapOffsetSec"|"fadeInSec"|"fadeOutSec"|"autoFadeInSec"|"autoFadeOutSec"|"fadeInShape"|"fadeOutShape"|"fadeInDir"|"fadeOutDir"|"reversed"|"loopEnabled"|"channelMode"|"hostGroupId") {
             return Err(format!("host clip property is not yet writable: {key}"));
         }
+        if key=="name" {if value.as_str().is_none_or(|name|name.len()>8192||name.contains('\0')) {return Err("invalid take name".into());}continue;}
         if !matches!(key.as_str(),"clipId"|"checkpoint"|"muted"|"reversed"|"loopEnabled") {
             let number=value.as_f64().filter(|v|v.is_finite()).ok_or("finite numeric clip edit required")?;
             if matches!(key.as_str(),"fadeInDir"|"fadeOutDir") {if !(-1.0..=1.0).contains(&number) {return Err("fade curvature outside -1..1".into());}}
@@ -61,6 +63,8 @@ fn patch(input:&Value)->Result<ClipStatePatch,String> {
             if matches!(key.as_str(),"fadeInShape"|"fadeOutShape")&&number>=7. {return Err("unknown fade shape".into());}
             if matches!(key.as_str(),"lengthSec"|"playbackRate"|"clipPlaybackRate")&&number<=0. {return Err("positive clip length/rate required".into());}
             if key=="channelMode"&&(number.fract()!=0.||number>4.) {return Err("invalid host channel mode".into());}
+            if key=="gain"&&number>4. {return Err("clip volume outside original GUI range 0..4".into());}
+            if key=="hostGroupId"&&(!(0.0..=2_000_000_000.0).contains(&number)||number.fract()!=0.) {return Err("invalid host item group id".into());}
         }
     }
     let patch:ClipStatePatch=serde_json::from_value(input.clone()).map_err(|e|e.to_string())?;
@@ -164,11 +168,17 @@ pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,autho
             if (before.start_sec-after.start_sec).abs()>1e-9 {target.set_item(c"D_POSITION",after.start_sec,&authorized)?;}
             if (before.length_sec-after.length_sec).abs()>1e-9 {target.set_item(c"D_LENGTH",after.length_sec,&authorized)?;}
             if let Some(value)=edit.patch.muted {target.set_item(c"B_MUTE",if value {1.} else {0.},&authorized)?;}
+            if let Some(value)=edit.patch.gain {target.set_item(c"D_VOL",value as f64,&authorized)?;}
             if edit.patch.loop_enabled==Some(false) {target.set_item(c"B_LOOPSRC",0.,&authorized)?;}
             if let Some(value)=edit.patch.channel_mode {
                 if !(0..=4).contains(&value) {return Err("invalid host channel mode".into());}
                 target.set_take(c"I_CHANMODE",value as f64,&authorized)?;
             }
+            if let Some(value)=edit.patch.host_group_id {
+                if !(0..=2_000_000_000).contains(&value) {return Err("invalid host item group id".into());}
+                target.set_item(c"I_GROUPID",value as f64,&authorized)?;
+            }
+            if let Some(value)=edit.patch.name.as_deref().filter(|value|*value!=before.name) {target.set_take_name(value,&authorized)?;}
             if let Some(value)=edit.patch.snap_offset_sec {target.set_item(c"D_SNAPOFFSET",value,&authorized)?;}
             for (value,name) in [(edit.patch.fade_in_sec,c"D_FADEINLEN"),(edit.patch.fade_out_sec,c"D_FADEOUTLEN"),
                 (edit.patch.auto_fade_in_sec,c"D_FADEINLEN_AUTO"),(edit.patch.auto_fade_out_sec,c"D_FADEOUTLEN_AUTO")] {
@@ -199,6 +209,27 @@ pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,autho
 mod tests {
     use super::*;
     use serde_json::json;
+    /// clip音量写真实item D_VOL，支持零；不能写take音量/极性或靠本地gain冒充成功。
+    #[test]
+    fn host_clip_gain_writes_item_volume_and_preserves_take_polarity() {
+        let (model,owner,_id)=super::super::session::tests::fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();host.set_take_volume(-0.25);
+        host.set_value("D_POSITION",0.);host.set_value("D_LENGTH",4./44100.);host.set_value("D_PLAYRATE",1.);
+        unsafe {owner.bind_reaper_host(host.context());}owner.refresh_reaper_transport();
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        for gain in [0.5,0.] {
+            let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"gain":gain})).unwrap();let receipt=plan.receipt(&editor.namespace);
+            host.reset();execute(&owner,plan,||document.is_alive()).unwrap();
+            let native=clip.id.strip_prefix(&editor.namespace).unwrap();let g=owner.host_edit_target(native).unwrap().geometry;
+            assert_eq!(g.item_gain,gain);assert_eq!(g.take_gain,-0.25);
+            assert!(host.calls().contains(&"write-item:D_VOL".into()));assert!(!host.calls().iter().any(|call|call=="write-take:D_VOL"));
+            let payload=json!({"clips":[{"id":clip.id,"start_sec":clip.start_sec,"length_sec":clip.length_sec,
+                "source_start_sec":clip.source_start_sec,"playback_rate":clip.playback_rate,"track_id":clip.track_id,"gain":gain}]});
+            assert!(receipt.matches(&payload));let mut stale=payload;stale["clips"][0]["gain"]=json!(1.);assert!(!receipt.matches(&stale));
+        }
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"gain":-1.})).is_err());
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"gain":5.})).is_err());document.close();
+    }
     /// 规划复用原Clip×Take倍率，且未开始宿主写之前整批拒绝非法/未知字段。
     #[test]
     fn host_edit_planning_preserves_effective_rate_and_rejects_unknown_batch_fields() {
@@ -207,6 +238,8 @@ mod tests {
         let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"lengthSec":1.,"clipPlaybackRate":2.})).unwrap();
         assert_eq!(plan.edits[0].after.playback_rate,2.);assert_eq!(plan.edits[0].after.length_sec,1.);
         assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"reversed":true})).is_err());
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"hostGroupId":1234})).is_ok());
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"name":"renamed active take"})).is_ok());
         assert!(editor.plan_host_edit("set_clips_state_bulk",&json!({"updates":[{"clipId":clip.id,"startSec":1.},{"clipId":"other","lengthSec":-1.}]})).is_err());
         assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":99.})).is_err());
         assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec,clip.start_sec,"纯规划不得修改actor私有几何");editor.close();

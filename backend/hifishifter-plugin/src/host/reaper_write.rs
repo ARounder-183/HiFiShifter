@@ -5,7 +5,10 @@ use std::ffi::{c_char,c_void,CStr};
 use std::sync::Arc;
 
 pub(super) type SetValue=unsafe extern "C" fn(*mut c_void,*const c_char,f64)->bool;
+pub(super) type SetString=unsafe extern "C" fn(*mut c_void,*const c_char,*mut c_char,bool)->bool;
 pub(super) type Track=unsafe extern "C" fn(*mut c_void)->*mut c_void;
+pub(super) type Split=unsafe extern "C" fn(*mut c_void,f64)->*mut c_void;
+pub(super) struct SplitApi {pub split:Split,pub active_take:Track}
 pub(super) type Move=unsafe extern "C" fn(*mut c_void,*mut c_void)->bool;
 pub(super) type Begin=unsafe extern "C" fn(*mut c_void);
 pub(super) type End=unsafe extern "C" fn(*mut c_void,*const c_char,i32);
@@ -17,7 +20,7 @@ pub(super) type UndoEntry=unsafe extern "C" fn(*mut c_void,i32)->*const c_char;
 pub(super) struct HistoryApi {pub undo:UndoAction,pub redo:UndoAction,pub can_undo:UndoLabel,pub can_redo:UndoLabel,pub current:UndoAction,pub count:UndoAction,pub entry:UndoEntry}
 
 pub(super) struct WriteApi {
-    pub set_item:SetValue,pub set_take:SetValue,pub item_track:Track,pub move_item:Move,
+    pub set_item:SetValue,pub set_take:SetValue,pub set_take_string:SetString,pub item_track:Track,pub move_item:Move,
     pub begin:Begin,pub end:End,pub update:Update,pub arrange:Arrange,
 }
 
@@ -32,6 +35,38 @@ pub(super) fn inventory_target(host:Arc<ReaperHost>,project:usize,track:usize,it
     let target=HostClipTarget {host,project,track,item,take,geometry};target.verify(authorized)?;Ok(target)
 }
 impl HostClipTarget {
+    /// 删除前核对project/item/take/GUID；删除后不再对已失效对象调用UpdateItem。
+    pub(crate) fn delete_item(&self,authorized:&impl Fn()->bool)->Result<(),String> {
+        self.verify(authorized)?;
+        let api=self.host.media.as_ref().ok_or("host item deletion API unavailable")?;
+        if !checked(authorized,||unsafe {(api.delete_item)(self.track as *mut c_void,self.item as *mut c_void)})? {
+            return Err("REAPER rejected item deletion".into());
+        }
+        checked(authorized,||unsafe {(self.api().1.arrange)()})
+    }
+    /// 复制捕获真实item状态；宿主变化/对象租约失效即拒绝，不保存指针充当剪贴板。
+    pub(crate) fn capture_item_state(&self,authorized:&impl Fn()->bool)->Result<String,String> {
+        self.verify(authorized)?;
+        let api=self.host.item_state.as_ref().ok_or("host item state API unavailable")?;
+        let version=self.host.geometry_revision(authorized)?;
+        let mut capacity=16*1024;
+        while capacity<=super::item_chunk::MAX_ITEM_CHUNK_BYTES {
+            self.verify(authorized)?;
+            let mut bytes=vec![0_u8;capacity];
+            let read=checked(authorized,||unsafe {(api.get)(self.item as *mut c_void,bytes.as_mut_ptr().cast(),capacity as i32,false)})?;
+            if read {
+                let end=bytes.iter().position(|value|*value==0).ok_or("unterminated item state")?;
+                if end==0 {return Err("empty host item state".into());}
+                self.verify(authorized)?;
+                if self.host.geometry_revision(authorized)?!=version {return Err("host item changed during clipboard capture".into());}
+                bytes.truncate(end);
+                return String::from_utf8(bytes).map_err(|_|"host item state is not UTF-8".into());
+            }
+            capacity*=2;
+        }
+        Err("host item state exceeds clipboard budget".into())
+    }
+
     /// 冻结UI对象不保活item，写入前按GUID查验并重新读取当前几何。
     pub(crate) fn current(&self,authorized:&impl Fn()->bool)->Result<Self,String> {
         self.verify(authorized)?;let mut result=self.clone();result.geometry=self.host.geometry_for_take(self.take as *mut c_void,authorized)?;Ok(result)
@@ -54,6 +89,8 @@ impl Drop for HostUndoBlock {
 impl ReaperHost {
     /// 可选写能力与只读几何独立；缺setter时GUI保持只读，不调用未查到的函数。
     pub(crate) fn can_edit_clips(&self)->bool {self.write.is_some()&&self.geometry.is_some()}
+    /// 原生分割和取active take两项均存在，才向GUI声明分割能力。
+    pub(crate) fn can_split_clips(&self)->bool {self.can_edit_clips()&&self.split.is_some()}
     pub(crate) fn has_project_history(&self)->bool {self.history.is_some()&&self.can_edit_clips()}
     /// 参数和几何共用所属project历史；没有item时也能为首次导入/参数编辑开启Undo。
     pub(crate) fn begin_project_undo(self:&Arc<Self>,authorized:&impl Fn()->bool)->Result<HostUndoBlock,String> {
@@ -129,6 +166,24 @@ impl ReaperHost {
 }
 
 impl HostClipTarget {
+    /// 按已验证item在绝对项目秒域分割；返回两个真实GUID与几何，不猜新片段身份。
+    pub(crate) fn split_at(&self,position:f64,authorized:&impl Fn()->bool)->Result<(HostClipGeometry,HostClipGeometry),String> {
+        let current=self.current(authorized)?;let api=self.host.split.as_ref().ok_or("REAPER split API unavailable")?;
+        if !position.is_finite()||position<=current.geometry.start_sec+1e-6
+            ||position>=current.geometry.start_sec+current.geometry.duration_sec-1e-6 {
+            return Err("split position must be inside the item".into());
+        }
+        let right=checked(authorized,||unsafe {(api.split)(self.item as *mut c_void,position)})?;
+        if right.is_null() {return Err("REAPER rejected item split".into());}
+        current.valid(right as usize,c"MediaItem*",authorized)?;
+        let take=checked(authorized,||unsafe {(api.active_take)(right)})?;
+        if take.is_null() {return Err("split item has no active take; host Undo remains available".into());}
+        let right_geometry=self.host.geometry_for_take(take,authorized)?;
+        let right_target=HostClipTarget {host:self.host.clone(),project:self.project,item:right as usize,
+            take:take as usize,track:self.track,geometry:right_geometry};
+        right_target.verify(authorized)?;current.update(authorized)?;right_target.update(authorized)?;
+        Ok((current.current(authorized)?.geometry,right_target.current(authorized)?.geometry))
+    }
     /// 同批所有对象须来自同一project，不以“当前活动项目”或相同轨名推断。
     pub(crate) fn same_project(&self,other:&Self)->bool {self.project==other.project}
     pub(crate) fn track_key(&self)->usize {self.track}
@@ -171,8 +226,9 @@ impl HostClipTarget {
     /// 仅明确白名单的数值字段可写；重入撤销租约后停止后续setter。
     pub(crate) fn set_item(&self,name:&CStr,value:f64,authorized:&impl Fn()->bool)->Result<(),String> {
         self.verify(authorized)?;
-        if !matches!(name.to_bytes(),b"D_POSITION"|b"D_LENGTH"|b"B_MUTE"|b"B_LOOPSRC"|b"D_SNAPOFFSET"|b"D_FADEINLEN"|b"D_FADEOUTLEN"|b"D_FADEINLEN_AUTO"|b"D_FADEOUTLEN_AUTO"|b"C_FADEINSHAPE"|b"C_FADEOUTSHAPE"|b"D_FADEINDIR"|b"D_FADEOUTDIR"|b"D_FADEINDIR_NEW"|b"D_FADEOUTDIR_NEW"|b"D_FADEINDIR2_NEW"|b"D_FADEOUTDIR2_NEW") {return Err("unsupported host item field".into());}
+        if !matches!(name.to_bytes(),b"D_POSITION"|b"D_LENGTH"|b"D_VOL"|b"B_MUTE"|b"B_LOOPSRC"|b"I_GROUPID"|b"D_SNAPOFFSET"|b"D_FADEINLEN"|b"D_FADEOUTLEN"|b"D_FADEINLEN_AUTO"|b"D_FADEOUTLEN_AUTO"|b"C_FADEINSHAPE"|b"C_FADEOUTSHAPE"|b"D_FADEINDIR"|b"D_FADEOUTDIR"|b"D_FADEINDIR_NEW"|b"D_FADEOUTDIR_NEW"|b"D_FADEINDIR2_NEW"|b"D_FADEOUTDIR2_NEW") {return Err("unsupported host item field".into());}
         if !value.is_finite() {return Err("nonfinite host item edit".into());}
+        if name==c"D_VOL"&&value<0. {return Err("negative item volume is not supported".into());}
         if !checked(authorized,||unsafe {(self.api().1.set_item)(self.item as *mut c_void,name.as_ptr(),value)})? {
             return Err(format!("REAPER rejected item field {}",name.to_string_lossy()));
         }Ok(())
@@ -184,6 +240,12 @@ impl HostClipTarget {
         if !checked(authorized,||unsafe {(self.api().1.set_take)(self.take as *mut c_void,name.as_ptr(),value)})? {
             return Err(format!("REAPER rejected take field {}",name.to_string_lossy()));
         }Ok(())
+    }
+    /// 只重命名当前真实active take；字符串通过REAPER官方setter写入，不改HFS孤立名称。
+    pub(crate) fn set_take_name(&self,name:&str,authorized:&impl Fn()->bool)->Result<(),String> {
+        self.verify(authorized)?;if name.len()>8192||name.contains('\0') {return Err("take name budget or NUL rejected".into());}
+        let mut bytes=std::ffi::CString::new(name).map_err(|_|"take name contains NUL")?.into_bytes_with_nul();
+        if !checked(authorized,||unsafe {(self.api().1.set_take_string)(self.take as *mut c_void,c"P_NAME".as_ptr(),bytes.as_mut_ptr().cast(),true)})? {return Err("REAPER rejected take name".into());}Ok(())
     }
     /// 目标轨道由另一真实region的直接绑定证明，不接受任意JS指针/轨道编号。
     pub(crate) fn move_to(&self,destination:&Self,authorized:&impl Fn()->bool)->Result<(),String> {

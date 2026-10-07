@@ -2699,7 +2699,7 @@ function AppInner() {
                     const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
                     if (pasteKb) {
                         beginHoldRepeat(pasteKb, () => {
-                            if (channel === "hifi:timelineEditOp" && pluginAllowsEditChannel(channel)) {
+                            if (channel === "hifi:timelineEditOp" && pluginAllowsEditChannel(channel, "paste")) {
                                 window.dispatchEvent(
                                     new CustomEvent(channel, { detail: { op: "paste" } }),
                                 );
@@ -2714,7 +2714,7 @@ function AppInner() {
                             // 探测失败不阻塞粘贴。
                         }
                         channel = resolvePasteRoute(kind, getActiveSurface());
-                        if (pluginAllowsEditChannel(channel)) {
+                        if (pluginAllowsEditChannel(channel, "paste")) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),
                             );
@@ -2735,7 +2735,7 @@ function AppInner() {
                         paramSelectionActive: session.paramSelectionActive,
                         selectionContext: session.selectionContext,
                     });
-                    if (pluginAllowsEditChannel(channel)) {
+                    if (pluginAllowsEditChannel(channel, editOp)) {
                         window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
                     }
                     return;
@@ -2758,7 +2758,7 @@ function AppInner() {
                     editOp,
                     store.getState().session.toolMode,
                 );
-                if (pluginAllowsEditChannel(channel)) {
+                if (pluginAllowsEditChannel(channel, editOp)) {
                     window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
                 }
                 return;
@@ -2841,7 +2841,7 @@ function AppInner() {
                     // 仅用于撤到空栈后停止长按重复。
                     const fire = () => {
                         const hasUndoableStep = store.getState().session.historyUndoDepth > 0;
-                        void dispatch(undoRemote());
+                        void dispatch(undoRemote({ parametersOnly: isPluginMode() && getActiveSurface() === "pianoRoll" }));
                         return hasUndoableStep;
                     };
                     if (fire()) {
@@ -2856,7 +2856,7 @@ function AppInner() {
                     // 空栈时同样静默失败；长按 Ctrl+Y = 连续重做（同上）。
                     const fire = () => {
                         const hasRedoableStep = store.getState().session.historyRedoDepth > 0;
-                        void dispatch(redoRemote());
+                        void dispatch(redoRemote({ parametersOnly: isPluginMode() && getActiveSurface() === "pianoRoll" }));
                         return hasRedoableStep;
                     };
                     if (fire()) {

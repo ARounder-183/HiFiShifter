@@ -30,7 +30,7 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { isPluginMode, isHostGeometryReadOnly, canImportHostAudio } from "../../services/hostCapabilities";
+import { isPluginMode, isHostGeometryReadOnly, canImportHostAudio, canGroupPluginTracks } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -2271,7 +2271,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         ]),
                     ),
                     initialTrackIndexById: Object.fromEntries(
-                        origin.participants.map((item) => [item.clipId, item.trackIndex]),
+                        origin.participants.map((item) => [item.trackId, item.trackIndex]),
                     ),
                     // 用**吸附后**的共享位移，与 ghost 预览的位置一致
                     // （用内核原始位移会绕开吸附，表现为"预览吸附、落库不吸附"）。
@@ -4381,6 +4381,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 });
                 return;
             }
+            // 插件仍保留空白区菜单；各动作由菜单按真实宿主能力分别准入。
             if (sessionRef.current.selectedTrackId !== args.trackId) {
                 // 轨道区空白右键 = "把这条轨道设为当前轨道"（随后弹粘贴/建轨菜单）：
                 // 只切焦点，不得让后端把全局记住的 `selected_clip_id` 恢复回来。
@@ -4635,7 +4636,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             const clip = session.clips.find(
                                 (item) => item.id === participant.clipId,
                             );
-                            return [participant.clipId, Number(clip?.gain ?? 1) || 1] as const;
+                            return [participant.clipId, Number(clip?.gain ?? 1)] as const;
                         }),
                     ),
                     // 轴向状态以「相对按下点的位移」为 raw：状态内部只比较增量，
@@ -4732,9 +4733,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 setClipsStateBulkRemote({
                     updates: origin.clipIds.map((clipId) => ({
                         clipId,
-                        gain:
-                            Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1) ||
-                            1,
+                        gain: Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1),
                     })),
                 }),
             )
@@ -5533,7 +5532,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
-            onContextMenu: isPluginMode() ? undefined : handleKernelContextMenu,
+            onContextMenu: handleKernelContextMenu,
             onFadeContextMenu: isPluginMode() ? undefined : handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
@@ -5699,7 +5698,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleMoveTrack = React.useCallback(
         (payload: { trackId: string; targetIndex: number; parentTrackId: string | null }) => {
-            if (isPluginMode()) return;
+            if (isPluginMode()&&!canGroupPluginTracks()) return;
             dispatch(
                 moveTrackRemote({
                     trackId: payload.trackId,

@@ -200,6 +200,8 @@ mod bound_tests {
         let raw=editor.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
         unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,(&*ids[0] as *const u8).cast_mut().cast());}
         let host=crate::host::reaper::ReaperFixture::new();unsafe {owners[0].bind_reaper_host(host.context());}
+        // assignment 回调会提前缓存“无宿主接口”的 Err；只观测这次被撤销的读取批次。
+        for owner in &owners {owner.host_geometry.lock().unwrap().take();}
         host.reset();let weak=Arc::downgrade(&editor);
         *host.hook.borrow_mut()=Some(("D_LENGTH".into(),Box::new(move||weak.upgrade().unwrap().stop_editor())));
         editor.refresh_reaper_transport();let calls=host.calls();
@@ -1190,11 +1192,20 @@ impl ExtensionOwner {
         let Some(saved)=pending.as_ref() else {return Ok(());};
         if !document.ready.load(Ordering::Acquire) {return Ok(());}
         let host=self.assigned_timeline(document)?;
-        if host.tracks.is_empty() {return Ok(());}
+        if host.tracks.is_empty() {
+            // 空轨组件仍能恢复私有参数分组；不借零音频scope恢复其它轨的源曲线。
+            if saved.params.is_empty()&&saved.tracks.is_empty()&&saved.atlas.is_empty() {
+                let mut edits=document.edits.lock().unwrap();edits.groups=saved.groups.clone();
+                edits.revision=edits.revision.checked_add(1).ok_or("edit revision exhausted")?;
+                *pending=None;
+            }
+            return Ok(());
+        }
         let allowed:BTreeSet<_>=host.tracks.iter().map(|t|t.id.clone()).collect();
         let bindings=document.track_bindings.lock().unwrap().iter().filter(|(id,_)|allowed.contains(*id))
             .map(|(id,identity)|(id.clone(),identity.clone())).collect();
         let mut restored=saved.clone();restored.reconcile(&bindings)?;
+        restored.atlas.migrate_legacy_gaps(&restored.params)?;
         let mut changed_geometry=false;
         if !restored.atlas.is_empty() {
             let rebound=restored.atlas.rebind(&host,&document.parameter_identities_locked(&host)?)?;
@@ -1210,8 +1221,11 @@ impl ExtensionOwner {
         }
         let mut edits=document.edits.lock().unwrap();
         let mut merged=edits.merge(&host,&client,edits.revision)?;
+        merged.groups=restored.groups.clone();
         let clip_ids=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();
         merged.atlas.regions.retain(|id,_|!clip_ids.contains(id));merged.atlas.regions.extend(restored.atlas.regions);
+        merged.atlas.copy_seeds.retain(|_,seed|!allowed.contains(&seed.root));merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
+        merged.atlas.gaps.retain(|root,_|!allowed.contains(root));merged.atlas.gaps.extend(restored.atlas.gaps);
         let items=document.fade_items_locked(&clip_ids);
         if !merged.fades.is_empty()&&items.is_empty()&&!clip_ids.is_empty() {return Err("fade ownership metadata pending for restore".into());}
         merged.fades.retain(|item,_|!items.contains(item));
@@ -1235,6 +1249,8 @@ impl ExtensionOwner {
             let mut local=edits.clone();
             local.params.retain(|id,_|allowed.contains(id));local.tracks.retain(|t|allowed.contains(&t.id));
             let clips=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();local.atlas.regions.retain(|id,_|clips.contains(id));
+            local.atlas.copy_seeds.retain(|_,seed|allowed.contains(&seed.root));
+            local.atlas.gaps.retain(|root,_|allowed.contains(root));
             if !local.fades.is_empty() {let items=document.fade_items_locked(&clips);
                 if items.is_empty()&&!clips.is_empty() {return Err("fade ownership metadata pending for save".into());}
                 local.fades.retain(|item,_|items.contains(item));}
@@ -1268,7 +1284,16 @@ impl ExtensionOwner {
                         sources.push(HostPcm { persistent_id: id.clone(), sample_rate: pcm.sample_rate,
                             fingerprint: pcm_fingerprint(pcm), planes: pcm.planes.clone() });
                     }
-                    Ok(Response { ok: true, timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?), sources, ..Default::default() })
+                    let mut clips=timeline.clips.iter().collect::<Vec<_>>();clips.sort_by(|a,b|a.start_sec.total_cmp(&b.start_sec));
+                    let ranges=clips.iter().take(8).map(|clip|(clip.id.clone(),clip.start_sec,clip.length_sec)).collect::<Vec<_>>();
+                    let diagnostics=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
+                        let (busy,error)=owner.local_preparation_state();
+                        let prepared=owner.prepared.lock().unwrap().as_ref().map(|version|serde_json::json!({"model":version.model,"edit":version.edit,"epoch":version.epoch,"scope":version.scope,"regions":version.keys.len()}));
+                        serde_json::json!({"busy":busy,"error":error,"prepared":prepared,
+                            "outputs":owner.snapshots.iter().map(|snapshot|snapshot.diagnose(&ranges)).collect::<Vec<_>>()})
+                    }).collect::<Vec<_>>();
+                    Ok(Response { ok: true, timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?), sources,
+                        diagnostics:Some(serde_json::json!({"renderers":diagnostics})),..Default::default() })
                 }
                 Request::Commit {..}=>unreachable!("commit dispatched before snapshot transaction"),
             }
@@ -1338,6 +1363,12 @@ impl ExtensionOwner {
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock().unwrap())?;
         resolved.apply(&mut timeline);
+        if !resolved.groups.is_empty() {
+            // 空父轨也能承载参数组算法；不加入其音频clip，更不混入其它renderer的区域。
+            let mut grouped_view=timeline.clone();document.project_private_group_view(&mut grouped_view,&resolved)?;
+            timeline.tracks=grouped_view.tracks;for track in &mut timeline.tracks {track.parent_id=None;}
+            resolved.groups.processing_settings(&mut timeline,&document.group_aliases(""));
+        }
         let geometry = document.regions.lock().unwrap();
         let regions = keys.iter().map(|key| geometry.get(key).cloned().ok_or("assigned region disappeared"))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1345,7 +1376,7 @@ impl ExtensionOwner {
         let stretch=regions.iter().any(|region|(region.duration_in_modification_time-region.duration_in_playback_time).abs()>1e-9);
         let owned_fade=regions.iter().any(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail);
         if owned_fade {document.project_audio_fades_locked(&mut timeline,&resolved)?;}
-        let kernel_render=edited||stretch||owned_fade;
+        let kernel_render=edited||stretch||owned_fade||!resolved.groups.is_empty();
         let clip_parameters=if resolved.atlas.is_empty() {Default::default()} else {
             resolved.atlas.project_local(&timeline,&document.parameter_identities_locked(&timeline)?)?
         };

@@ -5,9 +5,60 @@ use hifishifter_kernel::state::TimelineState;
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
+/// gain在原GUI是active-take扁平投影；插件显示item音量，两份显示字段必须一致且不送DSP。
+fn display_item_gain(clip:&mut hifishifter_kernel::state::Clip,gain:f64) {
+    clip.gain=gain as f32;for take in &mut clip.takes {take.gain=gain as f32;}
+}
+/// JSON装饰与actor投影同源；host_gain额外保留真实take音量/极性用于现场排查。
+fn decorate_item_gain(clip:&mut serde_json::Value,g:&crate::host::geometry::HostClipGeometry) {
+    clip["gain"]=serde_json::json!(g.item_gain);
+    if let Some(takes)=clip["takes"].as_array_mut() {for take in takes {take["gain"]=serde_json::json!(g.item_gain);}}
+    clip["host_gain"]=serde_json::json!({"item":g.item_gain,"take":g.take_gain});
+}
+
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(crate) struct WorkspaceScope {pub regions:BTreeSet<u64>}
 impl DocumentSession {
+    /// 参数分组只沿宿主已校验的轨道GUID关联；namespace仅用于当前WebView显示身份。
+    pub(crate) fn group_aliases(&self,namespace:&str)->std::collections::BTreeMap<String,String> {
+        self.ui_tracks.lock().unwrap().values().map(|track|(track.guid.clone(),format!("{namespace}{}",track.id))).collect()
+    }
+    /// GUI清单刷新不覆盖插件私有父级和顺序；新轨未出现在私有表中时保持根级。
+    pub(crate) fn present_private_groups(&self,timeline:&mut TimelineState,namespace:&str) {
+        self.edits.lock().unwrap().groups.apply(timeline,&self.group_aliases(namespace));
+    }
+    /// 显示参数根可包含无播放区域的空父轨；不创建任何clip或未经授权的源。
+    fn add_group_view_tracks(&self,timeline:&mut TimelineState) {
+        for host in self.ui_tracks.lock().unwrap().values() {
+            if !timeline.tracks.iter().any(|track|track.id==host.id) {
+                timeline.tracks.push(serde_json::from_value(serde_json::json!({"id":host.id,"name":host.name,"order":host.order,
+                    "compose_enabled":true,"pitch_analysis_algo":"nsf_hifigan_onnx"})).unwrap());
+            }
+        }
+    }
+    /// 音频状态仍按物理轨道/区域保存；分组只改变GUI参数根投影。
+    pub(crate) fn project_private_group_view(&self,timeline:&mut TimelineState,edits:&crate::state_channel::EditState)->Result<(),String> {
+        self.add_group_view_tracks(timeline);
+        edits.groups.apply(timeline,&self.group_aliases(""));
+        if !edits.atlas.is_empty() {timeline.params_by_root_track.extend(edits.atlas.project_roots(timeline,&self.parameter_identities_locked(timeline)?)?);}
+        let roots=timeline.tracks.iter().filter(|track|track.parent_id.is_none()).map(|track|track.id.clone()).collect::<BTreeSet<_>>();
+        timeline.params_by_root_track.retain(|root,_|roots.contains(root));
+        Ok(())
+    }
+    /// 为一次分组编辑冻结物理旧参数与分组旧投影；复制delta而非全父轨数组，保护独立子轨曲线。
+    pub(crate) fn private_parameter_views(&self,selected:Option<String>,groups:Option<&super::private_groups::TrackGroups>)->Result<(TimelineState,TimelineState),String> {
+        let _transaction=self.transaction.lock().unwrap();let mut flat=self.workspace_timeline_locked()?;
+        flat.selected_clip_id=selected;
+        let edits=self.edits.lock().unwrap();edits.apply(&mut flat);
+        self.add_group_view_tracks(&mut flat);
+        if !edits.atlas.is_empty() {flat.params_by_root_track.extend(edits.atlas.project_roots(&flat,&self.parameter_identities_locked(&flat)?)?);}
+        let mut grouped=flat.clone();
+        groups.unwrap_or(&edits.groups).apply(&mut grouped,&self.group_aliases(""));
+        if !edits.atlas.is_empty() {grouped.params_by_root_track.extend(edits.atlas.project_roots(&grouped,&self.parameter_identities_locked(&grouped)?)?);}
+        let roots=grouped.tracks.iter().filter(|track|track.parent_id.is_none()).map(|track|track.id.clone()).collect::<BTreeSet<_>>();
+        grouped.params_by_root_track.retain(|root,_|roots.contains(root));
+        Ok((flat,grouped))
+    }
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
     pub(crate) fn present_host_inventory(&self,timeline:&mut TimelineState,namespace:&str) {
         let prefix=|id:&str|format!("{namespace}{id}");
@@ -27,7 +78,9 @@ impl DocumentSession {
                     clip.normalize_takes();timeline.clips.push(clip);
                 }
                 let clip=timeline.clips.iter_mut().find(|clip|clip.id==id).unwrap();
+                display_item_gain(clip,g.item_gain);
                 clip.track_id=track_id.clone();clip.name=item.name.clone();clip.muted=g.muted;clip.start_sec=g.start_sec;clip.length_sec=g.duration_sec;
+                clip.group_id=if g.group_id==0 {None} else {Some(format!("reaper-group-{}",g.group_id))};
                 clip.snap_offset_sec=g.snap_offset_sec;clip.fade_in_sec=g.fade_in_sec;clip.fade_out_sec=g.fade_out_sec;
                 clip.auto_fade_in_sec=g.auto_fade_in_sec;clip.auto_fade_out_sec=g.auto_fade_out_sec;
                 clip.fade_in_shape=g.fade_in_shape;clip.fade_out_shape=g.fade_out_shape;clip.fade_in_dir=g.fade_in_dir;clip.fade_out_dir=g.fade_out_dir;
@@ -59,12 +112,19 @@ impl DocumentSession {
             if bound.geometry.item_id==item {return identities.get(&bound.region_key).cloned();}
         }None
     }
+    /// 静音分割也等待真实GUI清单中的item；没有播放区域不等同片段不存在。
+    pub(crate) fn gui_clip_for_host_item(&self,item:&str)->Option<String> {
+        if let Some(id)=self.clip_for_host_item(item) {return Some(id);}
+        self.ui_tracks.lock().unwrap().values().any(|track|track.items.iter().any(|entry|entry.geometry.item_id==item))
+            .then(||format!("ara-item-{item}"))
+    }
     /// UI专用原始曲率不写进kernel状态或参数权威；普通fade最终声音仍由宿主负责。
     pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str,fades:&std::collections::BTreeMap<String,crate::fade::FadeStyle>) {
         let identities=self.clip_ids.lock().unwrap().clone();
         let Some(clips)=payload["clips"].as_array_mut() else {return;};
         for track in self.ui_tracks.lock().unwrap().values() {for item in &track.items {
             if let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==format!("{namespace}ara-item-{}",item.geometry.item_id)) {
+                decorate_item_gain(clip,&item.geometry);
                 let g=&item.geometry;clip["host_fades"]=serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
                     "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,"in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
             }
@@ -73,6 +133,7 @@ impl DocumentSession {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};let ui_id=format!("{namespace}{id}");
             let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==ui_id) else {continue;};let g=bound.geometry;
+            decorate_item_gain(clip,&g);
             clip["snap_offset_sec"]=serde_json::json!(g.snap_offset_sec);
             let delegated=self.regions.lock().unwrap().get(&bound.region_key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail);
             if delegated {
@@ -98,6 +159,7 @@ impl DocumentSession {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};
             let Some(clip)=timeline.clips.iter_mut().find(|clip|&clip.id==id) else {continue;};let geometry=bound.geometry;
+            display_item_gain(clip,geometry.item_gain);
             clip.snap_offset_sec=geometry.snap_offset_sec;
             clip.fade_in_sec=geometry.fade_in_sec;clip.fade_out_sec=geometry.fade_out_sec;
             clip.auto_fade_in_sec=geometry.auto_fade_in_sec;clip.auto_fade_out_sec=geometry.auto_fade_out_sec;

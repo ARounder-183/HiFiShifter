@@ -21,6 +21,7 @@ pub(crate) struct WorkspaceSnapshot {
     pub sources:Vec<(String,Arc<super::source::SourcePcm>)>,
     pub revision:u64,
     pub model_revision:u64,
+    pub audio_revision:u64,
 }
 
 #[derive(Default)]
@@ -38,6 +39,8 @@ pub(crate) struct DocumentSession {
     pub ui_inventory_stamp:Mutex<Option<(i32,u64,u64)>>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
+    /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
+    pub editor_audio_revision:AtomicU64,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
@@ -114,6 +117,12 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
 }
 
 impl DocumentSession {
+    pub(crate) fn publish_source_pcm(&self,id:String,pcm:Arc<super::source::SourcePcm>) {
+        let _transaction=self.transaction.lock().unwrap();
+        self.edit_sources.lock().unwrap().insert(id.clone(),pcm.clone());
+        self.sources.lock().unwrap().insert(id,pcm);
+        self.editor_audio_revision.fetch_add(1,Ordering::AcqRel);
+    }
     /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
     pub(crate) fn parameter_identities_locked(&self,timeline:&hifishifter_kernel::state::TimelineState)
         ->Result<std::collections::BTreeMap<String,crate::editor::parameter_atlas::RegionIdentity>,String> {
@@ -147,7 +156,7 @@ impl DocumentSession {
     }
     fn workspace_projection_locked(&self,edits:&crate::state_channel::EditState)->Result<String,String> {
         let mut timeline=self.workspace_timeline_locked()?;edits.apply(&mut timeline);
-        let bytes=serde_json::to_vec(&(timeline.params_by_root_track,timeline.tracks,&edits.fades)).map_err(|e|e.to_string())?;
+        let bytes=serde_json::to_vec(&(timeline.params_by_root_track,timeline.tracks,&edits.fades,&edits.groups)).map_err(|e|e.to_string())?;
         Ok(format!("{}:{}",self.scope_revision.load(Ordering::Acquire),blake3::hash(&bytes).to_hex()))
     }
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
@@ -159,7 +168,10 @@ impl DocumentSession {
         ->Result<std::collections::BTreeMap<String,hifishifter_kernel::state::TrackParamsState>,String> {
         let _transaction=self.transaction.lock().unwrap();if !self.is_alive() {return Err("document closed".into());}
         let host=self.workspace_timeline_locked()?;Self::validate_workspace_geometry(&host,selection)?;
-        let identities=self.parameter_identities_locked(&host)?;self.edits.lock().unwrap().atlas.project_roots(selection,&identities)
+        let edits=self.edits.lock().unwrap();let mut grouped=host;
+        edits.apply(&mut grouped);
+        grouped.selected_clip_id=selection.selected_clip_id.clone();self.project_private_group_view(&mut grouped,&edits)?;
+        Ok(grouped.params_by_root_track)
     }
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
     pub(crate) fn workspace_snapshot(&self)->Result<(WorkspaceSnapshot,u64,String),String> {
@@ -177,8 +189,10 @@ impl DocumentSession {
         }).collect::<Result<Vec<_>,String>>()?;
         let projection=self.workspace_projection_locked(&edits)?;
         self.project_ui_fades_locked(&mut timeline,&edits.fades);
+        self.project_private_group_view(&mut timeline,&edits)?;
         Ok((WorkspaceSnapshot {timeline,sources,
-            revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire)},self.scope_revision.load(Ordering::Acquire),projection))
+            revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire),
+            audio_revision:self.editor_audio_revision.load(Ordering::Acquire)},self.scope_revision.load(Ordering::Acquire),projection))
     }
     /// 原分析副本可补媒体元信息，除此之外clip、take及轨道结构全部必须与宿主一致。
     fn validate_workspace_geometry(host:&hifishifter_kernel::state::TimelineState,client:&hifishifter_kernel::state::TimelineState)->Result<(),String> {
@@ -199,6 +213,12 @@ impl DocumentSession {
     /// 全工作区在单事务校验scope/模型/曲线并接受；未知范围或几何不静默忽略。
     pub(crate) fn accept_workspace_edits(&self,base_edit:u64,base_model:u64,
         client:&hifishifter_kernel::state::TimelineState,previous:&str)->Result<(u64,u64,String),String> {
+        self.accept_workspace_edits_with_groups(base_edit,base_model,client,previous,None)
+    }
+    /// 组根处理设置与参数delta同一事务提交，避免空父轨设置在音频准备时退回默认值。
+    pub(crate) fn accept_workspace_edits_with_groups(&self,base_edit:u64,base_model:u64,
+        client:&hifishifter_kernel::state::TimelineState,previous:&str,
+        groups:Option<crate::editor::private_groups::TrackGroups>)->Result<(u64,u64,String),String> {
         let _transaction=self.transaction.lock().unwrap();
         let model=self.revision.load(Ordering::Acquire);
         if model!=base_model {return Err("Conflict: host model changed; local curves preserved".into());}
@@ -211,6 +231,7 @@ impl DocumentSession {
         if !edits.atlas.is_empty() {let mut selected=host.clone();selected.selected_clip_id=client.selected_clip_id.clone();
             previous_view.extend(edits.atlas.project_roots(&selected,&identities)?);}
         candidate.atlas=edits.atlas.capture_changes(client,&identities,&previous_view)?;
+        if let Some(groups)=groups {groups.validate()?;candidate.groups=groups;}
         let projection=self.workspace_projection_locked(&candidate)?;*edits=candidate;
         Ok((edits.revision,model,projection))
     }

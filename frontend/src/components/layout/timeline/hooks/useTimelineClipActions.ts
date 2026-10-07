@@ -346,8 +346,8 @@ export function useTimelineClipActions(
     const [clipboardAvailable, setClipboardAvailable] = useState(false);
 
     useEffect(() => {
-        // 插件时间轴由宿主拥有，不轮询或粘贴独立项目clip剪贴板。
-        if (window.__HFS_PLUGIN_BOOTSTRAP__) return;
+        // 新插件查询原生宿主剪贴板，旧插件仍不发未实现的App媒体命令。
+        if (window.__HFS_PLUGIN_BOOTSTRAP__ && !window.__HFS_PLUGIN_BOOTSTRAP__.clipClipboard) return;
         let cancelled = false;
         const refresh = () => {
             void webApi

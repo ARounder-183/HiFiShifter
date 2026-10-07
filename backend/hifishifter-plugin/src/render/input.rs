@@ -349,6 +349,30 @@ mod tests {
             let hz=44100.0/lag as f64;assert!((hz-220.0).abs()<2.0,"必须保调而不是普通重采样: {hz}");
         }
     }
+    /// 现场ka/n几何的源尾比真实PCM多一帧：REAPER秒域取整不得把整段元音拒绝为无声。
+    #[test]
+    fn source_eof_one_frame_rounding_keeps_ka_and_n_regions_audible() {
+        for (name,source_frames,start,source_start,duration,rate) in [
+            ("ka",8073,3.27272727272727,0.03853961089064,0.20538156546032998,0.703784167766571),
+            ("n",8084,4.63636363635305,0.,0.22229856611387003,0.8247166872024536),
+        ] {
+            let pcm=(0..source_frames).map(|frame|(std::f32::consts::TAU*220.*frame as f32/44100.).sin()*0.2).collect();
+            let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![pcm],version:0,_reservation:None});
+            let source_duration=duration*rate;
+            let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+                "tracks":[{"id":"a","name":"A","order":0,"compose_enabled":false}],"bpm":120,"project_sec":start+duration,
+                "clips":[{"id":name,"name":name,"track_id":"a","start_sec":start,"length_sec":duration,
+                    "takes":[{"id":"take","source_path":"source","source_start_sec":source_start,
+                        "source_end_sec":source_start+source_duration,"playback_rate":rate}]}]
+            })).unwrap();timeline.clips[0].normalize_takes();
+            let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),start_in_modification_time:source_start,
+                duration_in_modification_time:source_duration,start_in_playback_time:start,duration_in_playback_time:duration,
+                is_timestretch_enabled:true,..Default::default()};
+            let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),source)]),clip_parameters:BTreeMap::new()};
+            let output=input.render(Arc::new(AtomicBool::new(false))).expect("一帧源尾取整不得拒绝整个renderer");
+            for snapshot in output {assert!(snapshot.left.iter().any(|sample|sample.abs()>0.01),"{name}必须有实际播放PCM");}
+        }
+    }
     /// 源表替换不能改变已捕获的输入；取消必须拒绝计算，不靠旧模型裸引用。
     #[test]
     fn frozen_pcm_is_independent_of_replacement_and_cancel_is_respected() {

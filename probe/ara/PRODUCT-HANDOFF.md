@@ -1,5 +1,122 @@
 # ARA 产品开发当前交接
 
+## 最新目标：延迟／插件私有参数分组／App与插件共用折叠
+
+用户明确父子轨仅在插件内建立，不同步REAPER folder，新进轨道根级。本轮源码已接
+TrackGroups GUID父级/排序、原App拖动命令、分组根参数delta向物理成员展开、根合成
+算法/开关继承（含空父轨），组件v5存轻量共享关系、源atlas继续按renderer范围裁剪。
+媒体GUI回执改为真实清单结构确认，不再等待ARA/PCM，host_audio_pending明确区分音频
+未就绪；选中新占位不等物化，后台补音频保留选择。折叠按钮接入两模式共用ActionBar，
+Dock隐藏/恢复Timeline、保证参数面板可见，不改session。
+Rust定向3项及前端首轮16项/tsc通过，未做实际鼠标操作或真实延迟测量，统一包待构建。
+完整方案、证据和未完成门见PRIVATE-GROUPS-AND-LATENCY-2026-10-07.md，取代旧folder评估。
+
+## 最新：粘贴宿主成功但当前窗口未刷新（覆盖下方旧状态）
+
+用户确认feedback-undo-copy-01能在REAPER创建新clip，HFS需重开UI才出现。新增清单独立
+同步，在ensure_loaded模型缓存早退前处理inventory版本，不把结构通知依赖于ARA fade
+投影成功；媒体写完强制重新枚举清单、结束native Undo请求，回执只读继续核对ARA音频。
+同一session的inventory-only新增/删除、曲线/历史保留Rust用例通过，前端回流8项通过。
+首轮Rust测试缺fake I_GROUPID字段，补齐后通过。feedback-paste-refresh-02 Release已构建，
+确认REAPER退出后安装D:\VST，35文件SHA256一致；旧包可恢复备份
+`.build-tmp/vst-install-backups/feedback-paste-refresh-02-5194dd09`，GUI尚未实测。
+详情以CLIP-FEEDBACK-2026-10-07.md最新节为准，不重做创建、不用强制reload掩盖。
+
+## 最新用户实测失败（取代下文旧“仅缺验收”）
+
+参数Ctrl+Z、Ctrl拖动复制、clip复制粘贴仍不生效；父子轨拖动仅低优可行性评估。
+详见CLIP-FEEDBACK-2026-10-07.md。已修源码：clipboard_kind识别clips、decode从
+Take恢复源起点/倍率、接duplicate_clips_bulk宿主路径和前端读取代次；4项解码/
+路由回归及tsc通过。通知Undo tick前flush dirty，并记录宿主支持/返回值。
+未出新包，D:\VST仍editor-parity-05。参数Undo还未闭合，不重复声称只有验收缺口。
+
+最新反馈源码批次补充：App的copy/cut/paste最终通道检查漏op，已修；参数面板Ctrl+Z/
+Redo按焦点走HFS参数历史专用命令，只恢复参数与轨道控制不恢复clip几何，轨道/全局
+仍宿主历史（替换旧全入口REAPER栈的语义，见CLIP-FEEDBACK）。分组曲线Undo/Redo
+actor用例通过。Ctrl拖动duplicate已接native，同轨/映射/新轨span路径俱有；新轨不用
+App add_track，原初始轨道索引错误clipId键改trackId。tsc/cargo check通过，未出包。
+
+最新实际安装包为`feedback-undo-copy-01`：Release构建exit0，REAPER实际退出后35文件
+整包部署D:\VST并逐项SHA256一致，旧05备份`.build-tmp/vst-install-backups/feedback-undo-copy-01`。
+前三项源码/定向回归已修，但真实GUI新反馈验收尚未进行；父子轨仅评估，不修改folder。
+
+## 最新目标：编辑问题排查 + clip操作恢复
+
+用户把目标扩展为恢复clip绝大部分操作（包括复制粘贴）。参数面板右键正常，
+轨道头允许禁用，轨道空白菜单必须保留。只恢复显示不算功能实现。
+新设计/计划：`docs/superpowers/{specs,plans}/2026-10-06-ara-editor-parity*.md`。
+四项排查详情在GUI-EDIT-DIAGNOSTICS.md；真实宿主Undo录入/回流仍未闭合。
+空白菜单源码已恢复（6项定向前端测试），没有新Release或安装；粘贴/关闭间隙
+暂时禁用，后续必须按新范围接通，不把临时门禁当最终交付。
+原生item state捕获/GUID安全重建、创建/删除、结构化剪贴板与原GUI copy/cut/paste/
+delete路由已连接源码；新clipClipboard能力门，旧插件不误发媒体命令。剪切先复制
+成功再删除；粘贴保留相对位置/轨道关系，按新GUID保存曲线seed并等待ARA/GUI回流。
+新增host_clipboard.rs，复制经过actor写入屏障但不在UI等待DSP；仍可能等待已运行
+的同步DSP，需后续渲染解耦。媒体Undo请求在回流完成或错误之后才收尾。
+3项parser/seed检查通过；新增2项解码测试修正fixture缺name后通过；前端13项/tsc
+通过。未验证真实REAPER媒体API和完整GUI流程，没有新安装包。静音复制波形/冷恢复、
+混合Undo、其它clip菜单和整轨曲线问题仍待做，不把这一批称全部完成。
+当前REAPER6252仍开着，不热替换D:\VST。
+后续按五批计划推进，不再重复已完成的短元音EOF或默认算法验收，不自动push。
+
+### 2026-10-07 曲线批次 2A
+
+ParameterAtlas新增按项目绝对时间保存的稀疏空白层gaps，clip仍使用源basis。
+显示合并仅复制真正覆盖的网格点；源曲线首尾外侧哨兵夹到真实边界，避免默认零。
+新增连续60/非网格边界、移动后空白保留/原clip不留假源曲线、旧布局迁移检查。
+state scope过滤/根映射包含gaps，旧v3/v4缺字段可读；state encode新增传输预算检查。
+插件同scope paramsEpoch刷新不先清空曲线，切参数/轨道与独立App维持原规则。
+Atlas模块首轮11项通过、1项恢复测试漏真实rebind步骤；补上rebind后3个新增gap用例
+通过，前端刷新策略/笔画推迟9项及tsc通过。未出包或实机验收。
+同步DSP仍在actor内：参数读取和媒体屏障可能等待渲染，下一步需解耦。完全空轨与
+静音素材的编辑/冷恢复矩阵仍未闭合，不能把此批称完整整轨生命周期已验证。
+
+### 2026-10-07 曲线批次 2B：DSP与actor解耦
+
+自动apply移到单个hfs-editor-dsp任务；原线缓存组装仍在actor，DSP线程只持文档/
+版本票据，完成结果由actor收取。新写入/历史/宿主变化取消旧任务，进度和发布检查
+ticket/generation/edit/model/epoch/scope；关闭先取消，再join actor与DSP，不遗留卸载线程。
+原同步apply仅保留cfg(test)供已有诊断使用。2项受控调度/取消、1项历史屏障、2项
+实际PCM与持续只读请求检查通过。最后补了瞬时superseded静默重试、启动失败结束
+progress及state.pending包含DSP任务；这些小收尾分支随最终统一构建验证，不复跑全套。
+未出包、未进行真实GUI神经渲染或宿主Undo验收。下一步统一历史/其余clip操作。
+
+### 2026-10-07 撤销批次 3A
+
+修复 `editor/commands.rs` 的分组入口提前return：现在begin_undo_group会进入已加载
+分支并写入真实本地基线checkpoint，组内操作由suppress_history合并；end只关闭组。
+分组/非分组本地undoDepth与state往返定向检查通过。REAPER宿主Undo写块仍走
+HostUndo；IEditController::setComponentHandler尚未保存handler/调用IComponentHandler2
+setDirty，真实宿主历史录入和冷恢复仍未闭合，未出包。
+
+## 2026-10-06 当前待安装批次：元音EOF / 分割 / clip音量 / HiFiGAN默认
+
+最新用户目标是排查丢音、插件分割、clip音量；另明确新默认算法用HiFiGAN。
+用户现场确认ka/n是元音；独立App粘贴有声，旁路HFS FX有声，启用无声。
+已定位并复现完整ARA RenderInput的源尾门禁拒绝：ka 8073帧却窗口约8074，n 8084帧却
+窗口约8085。按源网格round允许最多一帧零尾，起点在EOF/越界更多仍拒绝，几何不改。
+直接kernel诊断绕过该门禁，因此之前“kernel有声”不足以排除插件问题。
+
+本批已实现S/精简右键/多选分割，原生item两GUID+源域参数继承，Undo仍走REAPER；
+clip增益徽章拖动/双击/多选写item D_VOL，读真实item/take音量，take极性不改，GUI
+gain不交给kernel二次烘焙。新宿主轨道默认HiFiGAN，已有明确覆盖仍通过edits恢复。
+Snapshot新增可选只读diagnostics，含准备错误/版本和前8clip的实际发布PCM RMS/峰值。
+
+统一Release包：`.build-tmp/deliveries/vowel-eof-split-gain-01/HiFiShifter.vst3`，构建正常。
+sourceFingerprint=`77F890FA0790347EA72474AC178A19EF838237E9905F76094766E90DA1F9C346`。
+EOF2项、gain2项、split3项、默认算法1项、前端13项及tsc通过；不跑全量/review。
+当前REAPER PID19916仍运行且工程未保存，**尚未安装D:\VST**，不热替换。已请求用户
+保存并完全退出；退出后用ignored install-sync-fix.ps1部署整包并核验SHA256/保留备份。
+manifest nativeAcceptance=false。仍需一次真实ka/n有声、分割Undo/Redo、gain声音只施加一次
+及保存重开验收，goal不能标complete。
+
+本机MCP普通TEMP写入/锁权限被拒。固定Python服务端tempfile到Lua TEMP能避免错误地
+回落cwd，但ipc.mutex依然拒绝；没有改ACL或删锁。用户普通终端可运行只读
+`probe/ara/live_ka_diagnostic.py`。当前现场只读读取用既有认证插件Snapshot，明确不是MCP。
+重启后capture_live_ka.py要传实际REAPER PID；旧19916仅为默认一次性目标。
+这次错误TEMP落在worktree产生的两小文件已移至ignored failed-mcp-root-20261006，可恢复。
+详情见SHORT-CLIP-FINDINGS.md及新增split design末节。源码未push，原有未跟踪文件未动。
+
 ## 2026-10-06 当前最终源码与安装包（覆盖下方历史状态）
 
 本批合并静音clip/空轨独立GUI清单、GUID参数归属、250ms兜底同步、live空轨曲线
@@ -285,3 +402,30 @@ Task 13 全部完成或产品发布**。新 DLL 尚未部署到 REAPER。
 脚本，不使用 -nonewinst。REAPER 会补扫系统 VST3；用已有隔离扫描缓存避免激活弹窗。
 38 条插件测试与 6 条验证脚本回归无失败；本批不改 kernel/app，没重跑其完整测试，
 四条既有 Windows /tmp 失败不修。既有未用 macro/mut/sequence index 警告保留。
+
+2026-10-07撤销补充：分组checkpoint提前return已修复，分组/非分组本地历史与state
+往返回归通过；宿主handler桥已保存IComponentHandler2引用，actor置dirty、UI timer
+调用setDirty并在terminate/drop释放；真实REAPER历史条目与Undo后setState冷恢复仍
+未闭合。本轮 focused frontend 16项、tsc、plugin cargo check通过，未打包或安装。
+
+2026-10-07 `editor-parity-01` Release 构建成功，完整35文件部署到 `D:\VST\HiFiShifter.vst3`，
+旧包备份在 `.build-tmp/vst-install-backups/editor-parity-01`，逐文件 SHA256 零差异。
+隔离 REAPER smoke PID36088 扫描/加载插件并输出 GetPluginFactory、3 classes、host
+extension available 日志，随后已关闭；这只证明包能被扫描加载，不是GUI交互或Undo验收。
+随后同包隔离实例可见打开VST3 HiFiShifter窗口，UI树确认菜单、播放控制、两段clip
+时间轴和nsf-hifigan；WebView子区域右键输入被Computer Use目标保护拒绝，按规则停止
+重试，故未宣称空白/clip菜单实机通过。隔离PID20844已关闭。
+
+2026-10-07 `editor-parity-02` 已重新 Release 构建并部署到 `D:\VST\HiFiShifter.vst3`，
+包含 REAPER I_GROUPID 编组/解组桥；旧包备份在 `.build-tmp/vst-install-backups/editor-parity-02`，
+35文件 SHA256 零差异。该包尚未重新做交互验收。
+
+2026-10-07 `editor-parity-03` 又重新构建并部署，包含关闭间隙到宿主 `move_clips` 的桥；
+旧包备份在 `.build-tmp/vst-install-backups/editor-parity-03`，35文件 SHA256 零差异。
+
+随后修正编组回流receipt等待 `group_id` 后，构建 `editor-parity-04` 并重新部署；旧包备份
+在 `.build-tmp/vst-install-backups/editor-parity-04`，35文件 SHA256 零差异。
+
+最新 `editor-parity-05` 增加 active Take 重命名（REAPER P_NAME setter），重新构建并部署
+到 `D:\VST\HiFiShifter.vst3`；旧包备份在 `.build-tmp/vst-install-backups/editor-parity-05`，
+35文件 SHA256 零差异。

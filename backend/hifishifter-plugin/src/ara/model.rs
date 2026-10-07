@@ -182,7 +182,7 @@ impl ModelHandle {
             Ok(mut timeline) => {
                 for track in &mut timeline.tracks {
                     track.compose_enabled = true;
-                    track.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::WorldDll;
+                    track.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
                 }
                 // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
                 let keys = self.region_keys.iter().enumerate().filter(|(slot, _)| !self.destroyed_regions.contains(slot));
@@ -492,8 +492,7 @@ impl ModelHandle {
                 Ok(pcm) => {
                     log::info!("[ara] host PCM ready source={index} frames={} version={}", source.sample_count, pcm.version);
                     let pcm = Arc::new(pcm);
-                    self.session.edit_sources.lock().unwrap().insert(source.persistent_id.clone(), pcm.clone());
-                    self.session.sources.lock().unwrap().insert(source.persistent_id.clone(), pcm);
+                    self.session.publish_source_pcm(source.persistent_id.clone(),pcm);
                 }
                 Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
             }
@@ -950,6 +949,7 @@ mod tests {
         assert_eq!(clip.source_start_sec, 0.25);
         assert_eq!(clip.playback_rate, 0.5);
         assert_eq!(clip.name, "moved");
+        assert!(timeline.tracks.iter().all(|track|track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx),"插件新宿主轨道默认HiFiGAN");
     }
 
     /// 删除区域后摘要和时间线只能包含存活区域，避免切片或撤销留下幽灵 clip。

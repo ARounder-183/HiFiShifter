@@ -4,6 +4,8 @@
 use crate::editor::connection::UnknownVtbl;
 use crate::vst3::{uid_guid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
+#[path="item_chunk.rs"]pub(super) mod item_chunk;
+pub(crate) use item_chunk::RewrittenItem;
 #[path="reaper_write.rs"]mod write;
 pub(crate) use write::{HostClipTarget,HostUndoBlock};
 #[path="reaper_media.rs"]mod media;
@@ -69,6 +71,8 @@ pub(crate) struct ReaperHost {
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
     write:Option<write::WriteApi>,
+    split:Option<write::SplitApi>,
+    item_state:Option<item_chunk::ItemStateApi>,
     history:Option<write::HistoryApi>,
     media:Option<media::MediaApi>,
     extended_media:Option<media::ExtendedMedia>,
@@ -179,13 +183,19 @@ impl ReaperHost {
             (Some(undo),Some(redo),Some(can_undo),Some(can_redo),Some(current),Some(count),Some(entry))=>
                 Some(write::HistoryApi {undo,redo,can_undo,can_redo,current,count,entry}),_=>None,
         };
+        let split=lookup!(c"SplitMediaItem",write::Split).zip(lookup!(c"GetActiveTake",write::Track))
+            .map(|(split,active_take)|write::SplitApi {split,active_take});
+        let item_state=match (lookup!(c"GetItemStateChunk",item_chunk::GetChunk),lookup!(c"SetItemStateChunk",item_chunk::SetChunk),
+            lookup!(c"genGuid",item_chunk::GenGuid),lookup!(c"guidToString",item_chunk::GuidString)) {
+            (Some(get),Some(set),Some(generate),Some(stringify))=>Some(item_chunk::ItemStateApi {get,set,generate,stringify}),_=>None,
+        };
         let write=match (
-            lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),
+            lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),lookup!(c"GetSetMediaItemTakeInfo_String",write::SetString),
             lookup!(c"GetMediaItem_Track",write::Track),lookup!(c"MoveMediaItemToTrack",write::Move),
             lookup!(c"Undo_BeginBlock2",write::Begin),lookup!(c"Undo_EndBlock2",write::End),
             lookup!(c"UpdateItemInProject",write::Update),lookup!(c"UpdateArrange",write::Arrange)) {
-            (Some(set_item),Some(set_take),Some(item_track),Some(move_item),Some(begin),Some(end),Some(update),Some(arrange))=>
-                Some(write::WriteApi {set_item,set_take,item_track,move_item,begin,end,update,arrange}),
+            (Some(set_item),Some(set_take),Some(set_take_string),Some(item_track),Some(move_item),Some(begin),Some(end),Some(update),Some(arrange))=>
+                Some(write::WriteApi {set_item,set_take,set_take_string,item_track,move_item,begin,end,update,arrange}),
             _=>None,
         };
         let geometry = match (
@@ -224,6 +234,8 @@ impl ReaperHost {
             transport,
             geometry,
             write,
+            split,
+            item_state,
             history,
             media,
             extended_media,
@@ -395,6 +407,9 @@ impl ReaperHost {
         let duration_sec = iv(c"D_LENGTH")?;
         let snap_offset_sec = iv(c"D_SNAPOFFSET")?;
         let source_start_sec = tv(c"D_STARTOFFS")?;
+        let item_gain=iv(c"D_VOL")?;
+        let take_gain=tv(c"D_VOL")?;
+        if item_gain<0. {return Err("invalid REAPER item volume".into());}
         let playback_rate = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. || playback_rate <= 0. {
             return Err("invalid REAPER length/playback rate".into());
@@ -415,6 +430,7 @@ impl ReaperHost {
         };
         let preserve_pitch = boolean(tv(c"B_PPITCH")?)?;
         let channel_mode = integer(tv(c"I_CHANMODE")?)?;
+        let group_id = integer(iv(c"I_GROUPID")?)?;
         let take_pitch = tv(c"D_PITCH")?;
         let item_timebase = integer(iv(c"C_BEATATTACHMODE")?)?;
         let auto_stretch = boolean(iv(c"C_AUTOSTRETCH")?)?;
@@ -487,10 +503,13 @@ impl ReaperHost {
             playback_rate,
             preserve_pitch,
             channel_mode,
+            group_id,
             take_pitch,
             item_timebase,
             auto_stretch,
             muted,
+            item_gain,
+            take_gain,
             markers,
             fade_in_sec,
             fade_out_sec,

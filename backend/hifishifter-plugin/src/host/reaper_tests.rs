@@ -13,7 +13,9 @@ pub(crate) struct Fixture {
     take_token: u8,
     item_token: u8,
     track_token:u8,
+    right_item_token:u8,right_take_token:u8,split_enabled:Cell<bool>,right_values:RefCell<Option<BTreeMap<&'static str,f64>>>,
     writer_enabled:Cell<bool>,
+    take_volume:Cell<f64>,
     pub inventory_enabled:Cell<bool>,pub inventory_empty:Cell<bool>,
     undo_records:RefCell<Vec<std::ffi::CString>>,undo_position:Cell<i32>,
     media_enabled:Cell<bool>,media_sources:RefCell<Vec<Box<u8>>>,take_source:Cell<usize>,fail_media_take:Cell<bool>,media_path:RefCell<String>,
@@ -43,6 +45,8 @@ impl Fixture {
             take_token: 1,
             item_token: 2,
             track_token:3,writer_enabled:Cell::new(false),
+            take_volume:Cell::new(1.),
+            right_item_token:4,right_take_token:5,split_enabled:Cell::new(false),right_values:RefCell::new(None),
             inventory_enabled:Cell::new(false),inventory_empty:Cell::new(false),
             undo_records:RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),undo_position:Cell::new(0),
             media_enabled:Cell::new(false),media_sources:RefCell::new(Vec::new()),take_source:Cell::new(0),fail_media_take:Cell::new(false),media_path:RefCell::new(String::new()),
@@ -58,8 +62,10 @@ impl Fixture {
             bad_type: Cell::new(None),
             values: RefCell::new(BTreeMap::from([
                 ("D_POSITION", 1.),
+                ("D_VOL", 1.),
                 ("D_LENGTH", 4.),
                 ("D_SNAPOFFSET", 0.),
+                ("I_GROUPID", 0.),
                 ("D_STARTOFFS", 0.),
                 ("D_PLAYRATE", 0.5),
                 ("B_PPITCH", 1.),
@@ -95,6 +101,12 @@ impl Fixture {
     pub fn context(&self) -> *mut c_void {
         (self as *const Self as *mut Self).cast()
     }
+    /// 仅分割定向夹具启用；不改变其余宿主fixture的可选能力。
+    pub(crate) fn enable_split(&self) {self.split_enabled.set(true);self.writer_enabled.set(true);}
+    /// take音量独立于item，允许用负号验证极性不被clip音量修改覆盖。
+    pub(crate) fn set_take_volume(&self,value:f64) {self.take_volume.set(value);self.change.set(self.change.get().wrapping_add(1));}
+    fn right_item(&self)->*mut c_void {(&self.right_item_token as *const u8 as *mut u8).cast()}
+    fn right_take(&self)->*mut c_void {(&self.right_take_token as *const u8 as *mut u8).cast()}
     fn project(&self) -> *mut c_void {
         self.context()
     }
@@ -232,6 +244,8 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "SetMediaItemTakeInfo_Value" if f.writer_enabled.get()=>set_take as *const (),
         "GetMediaItem_Track" if f.writer_enabled.get()=>item_track as *const (),
         "MoveMediaItemToTrack" if f.writer_enabled.get()=>move_item as *const (),
+        "SplitMediaItem" if f.split_enabled.get()=>split_item as *const (),
+        "GetActiveTake" if f.split_enabled.get()=>split_active_take as *const (),
         "Undo_BeginBlock2" if f.writer_enabled.get()=>undo_begin as *const (),
         "Undo_EndBlock2" if f.writer_enabled.get()=>undo_end as *const (),
         "UpdateItemInProject" if f.writer_enabled.get()=>update_item as *const (),
@@ -333,20 +347,25 @@ unsafe extern "C" fn validate(
     }
     match kind {
         "ReaProject*" => object == f.project(),
-        "MediaItem_Take*" => object == f.take(),
-        "MediaItem*" => object == f.item(),
+        "MediaItem_Take*" => object == f.take()||(f.right_values.borrow().is_some()&&object==f.right_take()),
+        "MediaItem*" => object == f.item()||(f.right_values.borrow().is_some()&&object==f.right_item()),
         "MediaTrack*"=>object==f.track()||f.extra_tracks.borrow().iter().any(|track|(&**track as *const u8) as usize==object as usize),
         _ => false,
     }
 }
 unsafe extern "C" fn item(take: *mut c_void) -> *mut c_void {
     let f = fixture();
+    if take==f.right_take() {f.record("right-item");return f.right_item();}
     assert_eq!(take, f.take());
     f.record("item");
     f.item()
 }
 fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
     let f = fixture();
+    if is_take&&unsafe {CStr::from_ptr(name)}==c"D_VOL" {f.record("D_VOL");return f.take_volume.get();}
+    if object==if is_take {f.right_take()} else {f.right_item()} {
+        let name=unsafe {CStr::from_ptr(name)}.to_str().unwrap();f.record(name);return f.right_values.borrow().as_ref().unwrap()[name];
+    }
     assert_eq!(object, if is_take { f.take() } else { f.item() });
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     f.record(name);
@@ -371,7 +390,15 @@ unsafe extern "C" fn set_take(object:*mut c_void,name:*const c_char,value:f64)->
     let mut values=f.values.borrow_mut();let key=values.keys().find(|key|**key==name).copied();
     if let Some(key)=key {values.insert(key,value);}f.change.set(f.change.get().wrapping_add(1));true
 }
-unsafe extern "C" fn item_track(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.item());f.record("item-track");f.track()}
+unsafe extern "C" fn item_track(item:*mut c_void)->*mut c_void {let f=fixture();assert!(item==f.item()||item==f.right_item());f.record("item-track");f.track()}
+/// 模拟官方分割语义：左item保持GUID，右item拥有新GUID与按倍率推进的源起点。
+unsafe extern "C" fn split_item(item:*mut c_void,position:f64)->*mut c_void {
+    let f=fixture();assert_eq!(item,f.item());f.record("split-item");let mut left=f.values.borrow_mut();
+    let delta=position-left["D_POSITION"];let mut right=left.clone();right.insert("D_POSITION",position);
+    right.insert("D_LENGTH",left["D_LENGTH"]-delta);right.insert("D_STARTOFFS",left["D_STARTOFFS"]+delta*left["D_PLAYRATE"]);
+    left.insert("D_LENGTH",delta);*f.right_values.borrow_mut()=Some(right);f.change.set(f.change.get().wrapping_add(1));f.right_item()
+}
+unsafe extern "C" fn split_active_take(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.right_item());f.record("split-active-take");f.right_take()}
 unsafe extern "C" fn move_item(item:*mut c_void,track:*mut c_void)->bool {let f=fixture();assert_eq!(item,f.item());assert_eq!(track,f.track());f.record("move-item");true}
 unsafe extern "C" fn undo_begin(project:*mut c_void) {let f=fixture();assert_eq!(project,f.project());f.record("undo-begin");}
 unsafe extern "C" fn undo_end(project:*mut c_void,label:*const c_char,flags:i32) {
@@ -458,7 +485,7 @@ fn host_media_import_failure_removes_only_created_item_and_frees_unattached_sour
     assert!(f.calls().contains(&"media-item-delete".into()));assert_eq!(f.calls().iter().filter(|s|s.as_str()=="media-source-destroy").count(),1);
     assert!(f.media_sources.borrow().is_empty());
 }
-unsafe extern "C" fn update_item(item:*mut c_void) {let f=fixture();assert_eq!(item,f.item());f.record("update-item");}
+unsafe extern "C" fn update_item(item:*mut c_void) {let f=fixture();assert!(item==f.item()||item==f.right_item());f.record("update-item");}
 unsafe extern "C" fn update_arrange() {fixture().record("update-arrange");}
 
 /// 已捕获地址被宿主重用后，GUID核对失败必须发生在任何setter之前。
@@ -490,12 +517,15 @@ fn guid(
     is_take: bool,
 ) -> bool {
     let f = fixture();
-    assert_eq!(object, if is_take { f.take() } else { f.item() });
+    let right=object==if is_take {f.right_take()} else {f.right_item()};
+    assert!(right||object==if is_take {f.take()} else {f.item()});
     assert!(!write, "GUID must remain read-only");
     assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"GUID");
     f.record(if is_take { "take_guid" } else { "item_guid" });
     let text = if f.bad_guid.get() {
         c"bad"
+    } else if right&&is_take {c"{44444444-4444-4444-4444-444444444444}"
+    } else if right {c"{33333333-3333-3333-3333-333333333333}"
     } else if is_take {
         c"{22222222-2222-2222-2222-222222222222}"
     } else {
@@ -514,6 +544,7 @@ unsafe extern "C" fn take_guid(o: *mut c_void, n: *const c_char, b: *mut c_char,
 }
 unsafe extern "C" fn count(take: *mut c_void) -> i32 {
     let f = fixture();
+    if take==f.right_take() {f.record("right-count");return 0;}
     assert_eq!(take, f.take());
     f.record("count");
     f.count_override

@@ -20,6 +20,7 @@
  */
 
 import type React from "react";
+import { isPluginMode } from "../../../../services/hostCapabilities";
 
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
@@ -116,8 +117,9 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
 
     await webApi.beginUndoGroup("duplicate_clips");
     try {
+        const nativeNewTracks = isPluginMode() && dropToNewTrack;
         const targetTrackIdByClipId = new Map<string, string>();
-        if (dropToNewTrack) {
+        if (dropToNewTrack && !nativeNewTracks) {
             if (hasMixedTrackSelection) {
                 const spanInfo = computeSelectedTrackSpan({
                     clipIds: [...deps.sourceClipIds],
@@ -173,7 +175,7 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
         }
         if (trackMapping.size === 0) return;
 
-        const trackMode = Array.from(trackMapping.entries()).every(
+        let trackMode: Record<string, unknown> = Array.from(trackMapping.entries()).every(
             ([sourceTrackId, targetTrackId]) => sourceTrackId === targetTrackId,
         )
             ? { kind: "same_track" as const }
@@ -181,6 +183,13 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
                   kind: "explicit_mapping" as const,
                   mapping: Object.fromEntries(trackMapping),
               };
+        if (nativeNewTracks) {
+            const span = computeSelectedTrackSpan({ clipIds: [...sourceClipIds], initialById, trackIndexById: initialTrackIndexById });
+            if (!span) throw new Error("create_track_failed");
+            trackMode = { kind: "new_tracks", span: span.span, mapping: Object.fromEntries(sourceClipIds.map(id => {
+                const initial=initialById[id];return [initial.trackId,initialTrackIndexById[initial.trackId]-span.minTrackIndex];
+            })) };
+        }
 
         const payload = await dispatch(
             duplicateClipsBulkRemote(

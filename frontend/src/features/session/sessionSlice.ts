@@ -7000,7 +7000,10 @@ const sessionSlice = createSlice({
         };
         // 宿主写入开始/结束都废弃旧刷新，覆盖键盘编辑（没有拖动锁）的同类竞态。
         builder
-            .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending,
+            .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending, moveTrackRemote.pending,
+                pasteTimelineClipboardRemote.pending, removeClipRemote.pending, removeClipsRemote.pending,
+                duplicateClipsBulkRemote.pending,
+                splitClipRemote.pending, splitClipsAtRemote.pending,
                 importAudioAtPosition.pending, importAudioFileAtPosition.pending,
                 setClipStateRemote.pending, setClipsStateBulkRemote.pending,
                 undoRemote.pending, redoRemote.pending, setHistoryPositionRemote.pending), (state, action) => {
@@ -7008,7 +7011,12 @@ const sessionSlice = createSlice({
                 state._pluginTimelineEpoch += 1;
                 state._pluginClipEditRequests[action.meta.requestId] = true;
             })
-            .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected,
+            .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected, moveTrackRemote.fulfilled, moveTrackRemote.rejected,
+                pasteTimelineClipboardRemote.fulfilled, pasteTimelineClipboardRemote.rejected,
+                duplicateClipsBulkRemote.fulfilled, duplicateClipsBulkRemote.rejected,
+                removeClipRemote.fulfilled, removeClipRemote.rejected, removeClipsRemote.fulfilled, removeClipsRemote.rejected,
+                splitClipRemote.fulfilled, splitClipRemote.rejected,
+                splitClipsAtRemote.fulfilled, splitClipsAtRemote.rejected,
                 importAudioAtPosition.fulfilled, importAudioAtPosition.rejected,
                 importAudioFileAtPosition.fulfilled, importAudioFileAtPosition.rejected,
                 moveClipsRemote.fulfilled, moveClipsRemote.rejected,

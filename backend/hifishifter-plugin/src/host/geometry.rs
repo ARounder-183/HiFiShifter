@@ -25,6 +25,12 @@ pub(crate) struct HostClipGeometry {
     pub auto_stretch: bool,
     /// 宿主B_MUTE包含item solo覆盖；用于有效播放状态，不等同原始mute开关。
     pub muted: bool,
+    /// 宿主item音量仅用于GUI/原生写口；避免在ARA源PCM上再烘焙一次宿主增益。
+    pub item_gain:f64,
+    /// REAPER item I_GROUPID，0表示未编组；不等同HFS私有groupId字符串。
+    pub group_id:i32,
+    /// 原样保留take音量及负号极性，GUI改item音量不改此值。
+    pub take_gain:f64,
     pub markers: Vec<HostStretchMarker>,
     pub fade_in_sec: f64,
     pub fade_out_sec: f64,

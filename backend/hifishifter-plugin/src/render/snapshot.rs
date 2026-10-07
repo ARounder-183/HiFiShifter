@@ -93,11 +93,16 @@ pub(crate) fn validate_regions_with_fades(regions:&[AraPlaybackRegion],sources:&
                 .planes
                 .iter()
                 .any(|plane| plane.len() != source.planes[0].len())
-            || region.start_in_modification_time + region.duration_in_modification_time
-                > source.planes[0].len() as f64 / source.sample_rate as f64 + 1e-9
         {
             return Err(SnapshotError::InvalidGeometry);
         }
+        // REAPER的秒域item尾可按源采样网格向上取整一帧（现场ka/n恰好如此）。
+        // 按同一源采样网格round后最多允许一帧零尾。倍率跨f32/f64会留下很小的分数帧，
+        // 不能仅用f64 epsilon拒绝合法的网格边界；不改宿主几何，不绕回源头。
+        let available=source.planes[0].len() as f64;
+        let source_start=region.start_in_modification_time*source.sample_rate as f64;
+        let source_end=(region.start_in_modification_time+region.duration_in_modification_time)*source.sample_rate as f64;
+        if source_start>=available||source_end.round()>available+1. {return Err(SnapshotError::InvalidGeometry);}
         let start = region.start_in_playback_time * sample_rate as f64;
         let stop =
             (region.start_in_playback_time + region.duration_in_playback_time) * sample_rate as f64;
@@ -180,6 +185,29 @@ impl Default for SnapshotPublisher {
 }
 
 impl SnapshotPublisher {
+    /// IPC/诊断线程有界读当前实际发布的PCM；不复制音频、不调用宿主、不在实时回调执行。
+    pub(crate) fn diagnose(&self,ranges:&[(String,f64,f64)])->serde_json::Value {
+        let _read=self.enter();let pointer=self.current.load(Ordering::SeqCst);
+        if pointer.is_null() {return serde_json::json!({"ready":false,"misses":self.misses.load(Ordering::Relaxed)});}
+        // SAFETY: 与copy_block相同读区契约，退休缓冲在本方法返回前不会释放。
+        let snapshot=unsafe {&*pointer};
+        let clips=ranges.iter().take(8).map(|(id,start,duration)| {
+            let lo=((*start*snapshot.sample_rate as f64).round() as i64).checked_sub(snapshot.origin_sample);
+            let frames=(*duration*snapshot.sample_rate as f64).round().max(0.).min(snapshot.sample_rate as f64*2.) as usize;
+            let mut energy=0.;let mut peak=0_f32;let mut nonzero=0;let mut covered=0;
+            for frame in 0..frames {
+                let Some(index)=lo.and_then(|lo|lo.checked_add(frame as i64)).and_then(|n|usize::try_from(n).ok()) else {continue;};
+                let Some(left)=snapshot.left.get(index) else {continue;};
+                let right=snapshot.right.get(index).unwrap_or(left);covered+=1;
+                peak=peak.max(left.abs()).max(right.abs());energy+=(*left as f64).powi(2)+(*right as f64).powi(2);
+                if *left!=0.||*right!=0. {nonzero+=1;}
+            }
+            serde_json::json!({"clip_id":id,"covered_frames":covered,"inspected_frames":frames,"nonzero_frames":nonzero,
+                "peak":peak,"rms":(energy/(covered.max(1)*2) as f64).sqrt()})
+        }).collect::<Vec<_>>();
+        serde_json::json!({"ready":true,"sample_rate":snapshot.sample_rate,"origin_sample":snapshot.origin_sample,
+            "frames":snapshot.left.len(),"misses":self.misses.load(Ordering::Relaxed),"clips":clips})
+    }
     /// 只读原子指针，不解引用/持锁，用于离线setup在版本事务内核对两输出率。
     pub fn is_ready(&self)->bool {!self.current.load(Ordering::SeqCst).is_null()}
     /// 发布前在非实时线程预检，两个采样率必须都可容纳才替换编辑状态。
@@ -309,6 +337,19 @@ impl Drop for ReadSection<'_> {fn drop(&mut self) {self.0.fetch_sub(1,Ordering::
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 一帧源尾允许有界补零；超过一帧或全窗口已在EOF之外仍必须拒绝。
+    #[test]
+    fn source_eof_rounding_does_not_allow_real_out_of_bounds_windows() {
+        let mut r=region();r.start_in_modification_time=0.;r.duration_in_modification_time=5./44100.;
+        r.start_in_playback_time=0.;r.duration_in_playback_time=5./44100.;
+        let sources=HashMap::from([(r.audio_source_persistent_id.clone(),Arc::new(SourcePcm {sample_rate:44100,
+            planes:vec![vec![0.1;4]],version:0,_reservation:None}))]);
+        assert!(validate_regions(&[r.clone()],&sources,44100,false).is_ok());
+        r.duration_in_modification_time=5.5/44100.;r.duration_in_playback_time=r.duration_in_modification_time;
+        assert_eq!(validate_regions(&[r.clone()],&sources,44100,false),Err(SnapshotError::InvalidGeometry));
+        r.start_in_modification_time=4./44100.;r.duration_in_modification_time=0.5/44100.;r.duration_in_playback_time=0.5/44100.;
+        assert_eq!(validate_regions(&[r],&sources,44100,false),Err(SnapshotError::InvalidGeometry));
+    }
 
     /// 归并只减少相同平面存储，stereo双侧仍逐bit读取；有符号零和真正不同声道不合并。
     #[test]

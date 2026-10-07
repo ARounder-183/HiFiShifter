@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 // 不需要手工维护一份副本。
 import backendLibSource from "../../../backend/src-tauri/src/lib.rs?raw";
 import pluginCommandSource from "../../../backend/hifishifter-plugin/src/editor/commands.rs?raw";
+import pluginWebviewSource from "../../../backend/hifishifter-plugin/src/editor/webview.rs?raw";
 import invokeSource from "./invoke.ts?raw";
 
 import { buildTauriArgs } from "./invoke";
@@ -16,6 +17,8 @@ function extractPluginHandlers(source: string): string[] {
     for (const match of source.matchAll(pattern)) {
         for (const literal of match[1].matchAll(/"([a-z_0-9]+)"/g)) result.add(literal[1]);
     }
+    // WebView 的媒体附件入口在 UI 线程先处理，不进入 actor match。
+    for (const match of source.matchAll(/(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g)) result.add(match[1]);
     return [...result];
 }
 
@@ -81,7 +84,8 @@ describe("invoke wiring", () => {
         }) as Record<string, string>;
 
         // 提取 invoke / invoke<T,...>( "cmd" 调用的命令名（跨行 + 泛型兼容）。
-        const callPattern = /invoke\s*<[^>]*>?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
+        // PluginHost.invoke 自己接收命名参数/附件，不经过 buildTauriArgs。
+        const callPattern = /(?<![.\w])invoke\s*<[^>]*>?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
         const invoked = new Set<string>();
         const fileCount = Object.keys(sources).length;
         for (const [file, text] of Object.entries(sources)) {
@@ -141,7 +145,8 @@ describe("invoke wiring", () => {
             }
         }
 
-        const backend = new Set([...extractBackendHandlers(backendLibSource),...extractPluginHandlers(pluginCommandSource)]);
+        const backend = new Set([...extractBackendHandlers(backendLibSource),...extractPluginHandlers(pluginCommandSource),
+            ...extractPluginHandlers(pluginWebviewSource)]);
         const referenced = new Set<string>([
             ...invoked,
             ...extractSwitchCases(invokeSource),

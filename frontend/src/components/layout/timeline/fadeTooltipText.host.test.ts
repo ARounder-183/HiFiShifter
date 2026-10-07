@@ -5,7 +5,9 @@ import {createElement,Fragment} from "react";
 import {buildSingleFadeInfoText,buildSingleFadeInfoContent} from "./fadeTooltipText";
 
 test("host tooltip reports both raw axes and HFS visual/audio ownership",()=>{
-    const args={isOut:false,shape:6,dir:0.8,lengthSec:0.75,t:(key:string)=>key,
+    const args={isOut:false,shape:6,dir:0.8,lengthSec:0.75,t:(key:string)=>({
+        common_label_value:"{label}: {value}",fade_info_side_type_label:"{side} {type}",
+    } as Record<string,string>)[key]??key,
         formatCtx:{primaryTimeUnit:"seconds" as const,secondaryTimeUnit:"none" as const,bpm:120,beatsPerBar:4,grid:"1/4"},
         hostFades:{curve_mode:"reaper_new" as const,in_curvature:-0.2,out_curvature:0,in_s:0.65,out_s:0}};
     const text=buildSingleFadeInfoText(args);expect(text).toContain("REAPER c=-0.20 S=0.65");

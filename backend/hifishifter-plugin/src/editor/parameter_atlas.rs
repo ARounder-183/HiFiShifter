@@ -55,17 +55,66 @@ pub(crate) struct RegionParameters {
     template:TrackParamsState,curves:BTreeMap<String,SourceCurve>,
 }
 fn default_live()->bool {true}
+/// 项目绝对时间的空白编辑；只保存有效片段，clip源曲线不会被旧位置的整轨数组冒充。
+#[derive(Clone,Debug,Serialize,Deserialize)]
+struct GapSpan {
+    first_frame:usize,
+    #[serde(with="arc_values")] values:Arc<Vec<f32>>,
+    #[serde(skip)] reservation:Option<Arc<crate::render::budget::Reservation>>,
+}
+#[derive(Clone,Debug,Serialize,Deserialize)]
+struct GapCurve {frame_ms:f64,spans:Vec<GapSpan>}
+#[derive(Clone,Debug,Serialize,Deserialize)]
+pub(crate) struct GapParameters {template:TrackParamsState,curves:BTreeMap<String,GapCurve>}
 #[derive(Clone,Default,Debug,Serialize,Deserialize)]
 pub(crate) struct ParameterAtlas {
     pub regions:BTreeMap<String,RegionParameters>,
+    /// 仅由原生SplitMediaItem回执登记，不允许GUI按源路径伪造分割继承关系。
+    #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
+    split_parents:BTreeMap<String,String>,
+    /// 原生复制回执确认的新item GUID；剪切后原region可销毁，seed仍独立保留源basis。
+    #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
+    pub(crate) copy_seeds:BTreeMap<String,RegionParameters>,
+    /// 与源basis并存的整轨空白编辑；根轨道身份由同一冷恢复映射重绑定。
+    #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
+    pub(crate) gaps:BTreeMap<String,GapParameters>,
 }
 impl ParameterAtlas {
-    pub fn is_empty(&self)->bool {self.regions.is_empty()}
+    /// 剪贴板反序列化的seed必须复验并登记内存额度，不能让外部数据绕过source curve预算。
+    pub(crate) fn reserve_copy_seed(seed:RegionParameters)->Result<RegionParameters,String> {
+        let mut atlas=Self::default();atlas.regions.insert("clipboard-seed".into(),seed);
+        let mut checked=atlas.reserve_restored()?;
+        Ok(checked.regions.remove("clipboard-seed").unwrap())
+    }
+    /// 在原生加载新item前登记确切GUID谱系，支持跨root与新的source/modification身份。
+    pub(crate) fn register_copy(&mut self,item:&str,root:&str,current:RegionGeometry,seed:Option<RegionParameters>)->Result<(),String> {
+        if item.len()!=38||!item.starts_with('{')||!item.ends_with('}')||root.is_empty() {return Err("invalid host copy identity/root".into());}
+        current.map()?;
+        if let Some(mut seed)=seed {
+            if self.copy_seeds.contains_key(item)||self.copy_seeds.len()>=16384 {return Err("duplicate or excessive pending copy identity".into());}
+            seed.identity.item=Some(item.to_owned());seed.identity.key=0;seed.root=root.to_owned();seed.current=current;seed.live=false;
+            self.copy_seeds.insert(item.to_owned(),seed);
+            if let Err(error)=self.validate() {self.copy_seeds.remove(item);return Err(error);}
+        }Ok(())
+    }
+    /// 确切item谱系用于同源重叠曲线的无歧义继承；既有basis仍共享且不重新采样。
+    pub(crate) fn split_seed(&self,parent:&str)->Option<RegionParameters> {
+        self.regions.values().find(|record|record.live&&record.identity.item.as_deref()==Some(parent)).cloned()
+    }
+    /// 宿主分割可同步重入ARA回流、先缩短左段；保留调用前的父basis供右段继承。
+    pub(crate) fn register_split(&mut self,parent:&str,right:&str,seed:Option<RegionParameters>)->Result<(),String> {
+        if parent==right||parent.len()!=38||right.len()!=38 {return Err("invalid host split GUID pair".into());}
+        if self.split_parents.len()>=16384||self.regions.len()>=16384 {return Err("split lineage budget exceeded".into());}
+        if let Some(mut seed)=seed {seed.live=false;self.regions.insert(format!("split-basis:{right}"),seed);}
+        self.split_parents.insert(right.to_owned(),parent.to_owned());Ok(())
+    }
+    pub fn is_empty(&self)->bool {self.regions.is_empty()&&self.copy_seeds.is_empty()&&self.gaps.is_empty()}
     /// 同一源曲线可由历史/区域共享，额度按reservation身份去重，而不是按序列化值重复计数。
     pub fn accounted_curve_bytes(&self)->usize {
         let mut seen=std::collections::BTreeSet::new();
-        self.regions.values().flat_map(|region|region.curves.values()).filter_map(|curve|curve.reservation.as_ref())
-            .filter(|reservation|seen.insert(Arc::as_ptr(reservation) as usize)).map(|reservation|reservation.bytes()).sum()
+        let source=self.regions.values().chain(self.copy_seeds.values()).flat_map(|region|region.curves.values()).filter_map(|curve|curve.reservation.as_ref());
+        let gaps=self.gaps.values().flat_map(|root|root.curves.values()).flat_map(|curve|&curve.spans).filter_map(|span|span.reservation.as_ref());
+        source.chain(gaps).filter(|reservation|seen.insert(Arc::as_ptr(reservation) as usize)).map(|reservation|reservation.bytes()).sum()
     }
     /// 冷绑定布局完全相同时保留GUI原整轨数组（含无音频处编辑），音频仍用区域源basis。
     pub fn same_layout(&self,other:&Self)->bool {
@@ -76,9 +125,12 @@ impl ParameterAtlas {
     /// 有界state解码后为源曲线重新登记共享512MiB预算；clone共享Arc收费，不按renderer重复收费。
     pub fn reserve_restored(mut self)->Result<Self,String> {
         self.validate()?;
-        for record in self.regions.values_mut() {for curve in record.curves.values_mut() {if curve.reservation.is_none() {
+        for record in self.regions.values_mut().chain(self.copy_seeds.values_mut()) {for curve in record.curves.values_mut() {if curve.reservation.is_none() {
             curve.reservation=Some(Arc::new(crate::render::budget::global_budget().reserve(curve.values.len()*4).ok_or("source parameter memory budget exceeded")?));
-        }}}Ok(self)
+        }}}
+        for root in self.gaps.values_mut() {for curve in root.curves.values_mut() {for span in &mut curve.spans {if span.reservation.is_none() {
+            span.reservation=Some(Arc::new(crate::render::budget::global_budget().reserve(span.values.len()*4).ok_or("gap parameter memory budget exceeded")?));
+        }}}}Ok(self)
     }
     /// 只换活图投影与真实key，源basis保持；拆分同modification的新region可继承唯一父范围。
     pub fn follow_geometry(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<Self,String> {
@@ -90,11 +142,19 @@ impl ParameterAtlas {
             if let Some(previous)=self.find(identity,&root,&geometry)? {
                 let mut record=previous.clone();record.identity=identity.clone();record.root=root;record.current=geometry;record.live=true;followed.regions.insert(clip.id.clone(),record);
             }
-        }followed.validate()?;Ok(followed)
+        }
+        // 两段已经绑定后不再保留临时父副本，避免反复分割累计收费/序列化体积。
+        let bound=followed.regions.values().filter(|record|record.live).filter_map(|record|record.identity.item.clone()).collect::<std::collections::BTreeSet<_>>();
+        followed.regions.retain(|id,_|id.strip_prefix("split-basis:").is_none_or(|right|!bound.contains(right)));
+        followed.split_parents.retain(|right,_|!bound.contains(right));
+        followed.copy_seeds.retain(|item,_|!bound.contains(item));
+        followed.validate()?;Ok(followed)
     }
     /// 冷恢复只在本组件真实范围内绑定；重复持久身份且源窗口相同仍拒绝，不能按旧key猜。
     pub fn rebind(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<Self,String> {
         let mut bound=Self::default();
+        bound.copy_seeds=self.copy_seeds.clone();
+        bound.gaps=self.gaps.clone();
         for record in self.regions.values().filter(|record|record.live) {
             let candidates=timeline.clips.iter().filter(|clip|identities.get(&clip.id).is_some_and(|id|
                 id.source==record.identity.source&&id.modification==record.identity.modification
@@ -110,10 +170,16 @@ impl ParameterAtlas {
     /// GUI仍用原track网格：显示投影可选重叠区，音频始终保留每region自己的参数。
     pub fn project_roots(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<BTreeMap<String,TrackParamsState>,String> {
         let clips=self.project(timeline,identities)?;let mut roots=BTreeMap::<String,TrackParamsState>::new();
+        for (root,gaps) in &self.gaps {
+            if !timeline.tracks.iter().any(|track|&track.id==root) {continue;}
+            let mut params=gaps.template.clone();
+            for (key,curve) in &gaps.curves {set_curve(&mut params,key,gap_values(curve,key,gaps.template.frame_period_ms)?);}
+            roots.insert(root.clone(),params);
+        }
         let mut order=timeline.clips.iter().collect::<Vec<_>>();order.sort_by_key(|clip|Some(&clip.id)==timeline.selected_clip_id.as_ref());
         for clip in order {
             let Some(params)=clips.get(&clip.id) else {continue;};let root=timeline.resolve_root_track_id(&clip.track_id).ok_or("unknown parameter root")?;
-            let geometry=geometry(clip)?;let (begin,end)=frame_range(&geometry,params.frame_period_ms)?;
+            let geometry=geometry(clip)?;let Some((begin,end))=covered_frame_range(&geometry,params.frame_period_ms)? else {continue;};
             let entry=roots.entry(root).or_insert_with(||{let mut entry=params.clone();clear_curves(&mut entry);entry});
             if entry.frame_period_ms!=params.frame_period_ms {return Err("Conflict: source parameter frame periods differ within root".into());}
             for (key,values) in parameter_curves(params) {
@@ -134,6 +200,7 @@ impl ParameterAtlas {
     /// 只把相对旧GUI投影的delta送回源authority；重叠选区外保留该region自己的值。
     fn capture_inner(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>,previous_view:Option<&BTreeMap<String,TrackParamsState>>)->Result<Self,String> {
         let mut candidate=self.clone();
+        candidate.capture_gaps(timeline,previous_view)?;
         for clip in &timeline.clips {
             let identity=identities.get(&clip.id).ok_or("missing actual ARA parameter identity")?;
             if identity.key==0||identity.source.is_empty()||identity.modification.is_empty()
@@ -174,6 +241,7 @@ impl ParameterAtlas {
             }
             let mut template=params.clone();clear_curves(&mut template);
             candidate.regions.insert(clip.id.clone(),RegionParameters {identity:identity.clone(),root,current:geometry,live:true,template,curves});
+            if let Some(item)=&identity.item {candidate.copy_seeds.remove(item);}
         }
         candidate.validate()?;Ok(candidate)
     }
@@ -199,11 +267,22 @@ impl ParameterAtlas {
     }
     /// 原region key优先；拆分新key只能沿同modification/source与同root的唯一父源范围继承。
     fn find(&self,identity:&RegionIdentity,root:&str,geometry:&RegionGeometry)->Result<Option<&RegionParameters>,String> {
+        // 新GUID只能来自真实原生复制回执；不依赖新source/modification是否沿用旧身份。
+        if let Some(seed)=identity.item.as_ref().and_then(|item|self.copy_seeds.get(item)) {return Ok(Some(seed));}
         let related=self.regions.values().filter(|record|record.identity.source==identity.source&&record.identity.modification==identity.modification);
         if let Some(item)=&identity.item {
             let matches=related.clone().filter(|record|record.identity.item.as_ref()==Some(item)).collect::<Vec<_>>();
             if let Some(record)=matches.iter().copied().find(|record|record.live) {return Ok(Some(record));}
             if let Some(record)=matches.first() {return Ok(Some(record));}
+            if let Some(parent)=self.split_parents.get(item) {
+                let candidates=self.regions.values().filter(|record|record.identity.item.as_ref()==Some(parent)
+                    &&record.identity.source==identity.source&&record.root==root
+                    &&geometry.source_start>=record.current.source_start-1e-6
+                    &&geometry.source_start+geometry.source_duration<=record.current.source_start+record.current.source_duration+1e-6).collect::<Vec<_>>();
+                let live=candidates.iter().copied().filter(|record|record.live).collect::<Vec<_>>();
+                let candidates=if live.is_empty() {candidates} else {live};
+                match candidates.as_slice() {[]=>{},[record]=>return Ok(Some(*record)),_=>return Err("Conflict: ambiguous confirmed split ancestry".into())}
+            }
         }
         if identity.key!=0 {if let Some(record)=related.clone().find(|record|record.live&&record.identity.key==identity.key) {return Ok(Some(record));}}
         let candidates=related.filter(|record|record.identity.key!=0&&record.root==root
@@ -216,8 +295,24 @@ impl ParameterAtlas {
     /// 当前先保持原安全数量边界；source basis可序列化，但反序列化后也必须复验。
     pub fn validate(&self)->Result<(),String> {
         if self.regions.len()>16384 {return Err("parameter atlas region budget exceeded".into());}
+        if self.copy_seeds.len()>16384||self.copy_seeds.iter().any(|(item,seed)|item.len()!=38||seed.identity.item.as_deref()!=Some(item)) {return Err("invalid pending copy lineage".into());}
+        if self.split_parents.len()>16384||self.split_parents.iter().any(|(right,parent)|right==parent||right.len()!=38||parent.len()!=38) {return Err("invalid split lineage".into());}
         let mut bytes=0_usize;
-        for record in self.regions.values() {
+        if self.gaps.len()>16384 {return Err("gap parameter root budget exceeded".into());}
+        for (root,gaps) in &self.gaps {
+            if root.is_empty()||!gaps.template.frame_period_ms.is_finite() {return Err("invalid gap parameter root".into());}
+            for curve in gaps.curves.values() {
+                if !curve.frame_ms.is_finite()||!(0.1..=1000.).contains(&curve.frame_ms)||curve.spans.len()>16384 {return Err("invalid gap parameter frame domain".into());}
+                let mut last=0;
+                for span in &curve.spans {
+                    let end=span.first_frame.checked_add(span.values.len()).ok_or("gap frame overflow")?;
+                    if span.values.is_empty()||span.first_frame<last||end>1_000_000||span.values.iter().any(|value|!value.is_finite()||value.abs()>10000.) {return Err("invalid gap parameter samples".into());}
+                    last=end;bytes=bytes.checked_add(span.values.len()*4).ok_or("gap byte overflow")?;
+                    if bytes>64*1024*1024 {return Err("parameter atlas exceeds 64MiB".into());}
+                }
+            }
+        }
+        for record in self.regions.values().chain(self.copy_seeds.values()) {
             if record.identity.source.is_empty()||record.identity.modification.is_empty()||record.root.is_empty()
                 ||!record.template.frame_period_ms.is_finite()||record.template.frame_period_ms<0.1||record.template.frame_period_ms>1000.
                 ||record.template.extra_params.values().any(|value|!value.is_finite()) {return Err("invalid source parameter record".into());}
@@ -229,6 +324,60 @@ impl ParameterAtlas {
                 bytes=bytes.checked_add(curve.values.len()*4).ok_or("parameter atlas byte overflow")?;
                 if bytes>64*1024*1024 {return Err("parameter atlas exceeds 64MiB".into());}
             }
+        }Ok(())
+    }
+
+    /// 只捕获clip外的用户delta；被移动clip遮住的旧空白编辑保持隐藏，移开后仍存在。
+    fn capture_gaps(&mut self,timeline:&TimelineState,previous:Option<&BTreeMap<String,TrackParamsState>>)->Result<(),String> {
+        let mut coverage=BTreeMap::<String,Vec<RegionGeometry>>::new();
+        for clip in &timeline.clips {let root=timeline.resolve_root_track_id(&clip.track_id).ok_or("unknown gap parameter root")?;
+            coverage.entry(root).or_default().push(geometry(clip)?);}
+        self.capture_gap_roots(&timeline.params_by_root_track,&coverage,previous)
+    }
+    /// 旧归档整轨数组按保存时布局分离空白层，不能用冷重开后的移动位置猜旧归属。
+    pub(crate) fn migrate_legacy_gaps(&mut self,params:&BTreeMap<String,TrackParamsState>)->Result<(),String> {
+        if !self.gaps.is_empty()||self.regions.is_empty() {return Ok(());}
+        let mut coverage=BTreeMap::<String,Vec<RegionGeometry>>::new();
+        for record in self.regions.values().filter(|record|record.live) {coverage.entry(record.root.clone()).or_default().push(record.current.clone());}
+        self.capture_gap_roots(params,&coverage,None)?;self.validate()
+    }
+    fn capture_gap_roots(&mut self,params_by_root:&BTreeMap<String,TrackParamsState>,coverage:&BTreeMap<String,Vec<RegionGeometry>>,
+        previous:Option<&BTreeMap<String,TrackParamsState>>)->Result<(),String> {
+        for (root,params) in params_by_root {
+            let mut template=params.clone();clear_curves(&mut template);
+            let old=self.gaps.get(root);
+            let mut curves=old.map(|old|old.curves.clone()).unwrap_or_default();
+            let count=parameter_curves(params).iter().map(|(_,values)|values.len()).max().unwrap_or(0);
+            if count>1_000_000 {return Err("gap parameter frame budget exceeded".into());}
+            let mut owned=vec![false;count];
+            for geometry in coverage.get(root).into_iter().flatten() {
+                if let Some((begin,end))=covered_frame_range(geometry,params.frame_period_ms)? {
+                    if begin<count {owned[begin..=end.min(count-1)].fill(true);}
+                }
+            }
+            for (key,values) in parameter_curves(params) {
+                let prior=previous.and_then(|previous|previous.get(root)).filter(|prior|prior.frame_period_ms==params.frame_period_ms)
+                    .and_then(|prior|parameter_curves(prior).into_iter().find(|(name,_)|name==&key).map(|(_,values)|values));
+                if prior==Some(values)&&curves.contains_key(&key) {continue;}
+                if values.is_empty() {curves.remove(&key);continue;}
+                let (mut samples,mut valid)=if let Some(curve)=curves.get(&key) {dense_gap(curve,&key,params.frame_period_ms,values.len())?}
+                    else {(vec![pad(&key);values.len()],vec![false;values.len()])};
+                if samples.len()<values.len() {samples.resize(values.len(),pad(&key));valid.resize(values.len(),false);}
+                for (frame,incoming) in values.iter().copied().enumerate() {
+                    if owned[frame] {continue;}
+                    let changed=prior.is_none_or(|prior|incoming!=prior.get(frame).copied().unwrap_or_else(||pad(&key)));
+                    if changed {samples[frame]=incoming;valid[frame]=true;}
+                }
+                let mut spans=Vec::new();let mut frame=0;
+                while frame<valid.len() {
+                    if !valid[frame] {frame+=1;continue;}
+                    let first=frame;while frame<valid.len()&&valid[frame] {frame+=1;}
+                    let reservation=crate::render::budget::global_budget().reserve((frame-first)*4).ok_or("gap parameter memory budget exceeded")?;
+                    spans.push(GapSpan {first_frame:first,values:Arc::new(samples[first..frame].to_vec()),reservation:Some(Arc::new(reservation))});
+                }
+                curves.insert(key,GapCurve {frame_ms:params.frame_period_ms,spans});
+            }
+            self.gaps.insert(root.clone(),GapParameters {template,curves});
         }Ok(())
     }
 }
@@ -245,14 +394,40 @@ fn frame_range(geometry:&RegionGeometry,frame_ms:f64)->Result<(usize,usize),Stri
     let first=(geometry.project_start*1000./frame_ms).floor();let last=((geometry.project_start+geometry.project_duration)*1000./frame_ms).ceil();
     if last>=1_000_000.||!last.is_finite() {return Err("source parameter projection frame budget exceeded".into());}Ok((first as usize,last as usize))
 }
-fn pad(key:&str)->f32 {if key=="extra:volume"||key=="extra:breath_gain" {1.} else if key=="extra:dyn" {-1.} else {0.}}
-fn parameter_curves(params:&TrackParamsState)->Vec<(String,&[f32])> {
+/// 显示合并只拥有实际落在clip内的格点；向外取整的哨兵不能覆盖空白或重叠编辑。
+fn covered_frame_range(geometry:&RegionGeometry,frame_ms:f64)->Result<Option<(usize,usize)>,String> {
+    frame_range(geometry,frame_ms)?;
+    let begin=(geometry.project_start*1000./frame_ms).ceil() as usize;
+    let end=((geometry.project_start+geometry.project_duration)*1000./frame_ms).floor() as usize;
+    Ok((begin<=end).then_some((begin,end)))
+}
+fn gap_values(curve:&GapCurve,key:&str,frame_ms:f64)->Result<Vec<f32>,String> {Ok(dense_gap(curve,key,frame_ms,0)?.0)}
+/// 空白层只在每个已保存片段内部按绝对时间重采样，不跨过原clip占用区插值。
+fn dense_gap(curve:&GapCurve,key:&str,frame_ms:f64,count:usize)->Result<(Vec<f32>,Vec<bool>),String> {
+    if !frame_ms.is_finite()||!(0.1..=1000.).contains(&frame_ms) {return Err("invalid gap frame period".into());}
+    let duration=curve.spans.last().map(|span|(span.first_frame+span.values.len()-1) as f64*curve.frame_ms).unwrap_or(0.);
+    let extent=if curve.spans.is_empty() {0} else {(duration/frame_ms).ceil() as usize+1};let count=count.max(extent);
+    if count>1_000_000 {return Err("gap projection frame budget exceeded".into());}
+    let mut values=vec![pad(key);count];let mut valid=vec![false;count];
+    for span in &curve.spans {
+        let begin=(span.first_frame as f64*curve.frame_ms/frame_ms).ceil() as usize;
+        let end=((span.first_frame+span.values.len()-1) as f64*curve.frame_ms/frame_ms).floor() as usize;
+        if begin>end {continue;}
+        for frame in begin..=end {
+            let index=(frame as f64*frame_ms/curve.frame_ms-span.first_frame as f64).clamp(0.,(span.values.len()-1) as f64);
+            let lo=index.floor() as usize;let hi=(lo+1).min(span.values.len()-1);let fraction=(index-lo as f64) as f32;
+            values[frame]=span.values[lo]+(span.values[hi]-span.values[lo])*fraction;valid[frame]=true;
+        }
+    }Ok((values,valid))
+}
+pub(super) fn pad(key:&str)->f32 {if key=="extra:volume"||key=="extra:breath_gain" {1.} else if key=="extra:dyn" {-1.} else {0.}}
+pub(super) fn parameter_curves(params:&TrackParamsState)->Vec<(String,&[f32])> {
     let mut curves=vec![("pitch_orig".into(),params.pitch_orig.as_slice()),("pitch_edit".into(),params.pitch_edit.as_slice()),
         ("tension_orig".into(),params.tension_orig.as_slice()),("tension_edit".into(),params.tension_edit.as_slice()),("dyn_orig".into(),params.dyn_orig.as_slice())];
     curves.extend(params.extra_curves.iter().map(|(key,values)|(format!("extra:{key}"),values.as_slice())));curves
 }
 fn clear_curves(params:&mut TrackParamsState) {params.pitch_orig.clear();params.pitch_edit.clear();params.tension_orig.clear();params.tension_edit.clear();params.dyn_orig.clear();params.extra_curves.clear();}
-fn set_curve(params:&mut TrackParamsState,key:&str,values:Vec<f32>) {
+pub(super) fn set_curve(params:&mut TrackParamsState,key:&str,values:Vec<f32>) {
     match key {"pitch_orig"=>params.pitch_orig=values,"pitch_edit"=>params.pitch_edit=values,"tension_orig"=>params.tension_orig=values,
         "tension_edit"=>params.tension_edit=values,"dyn_orig"=>params.dyn_orig=values,_=>{if let Some(key)=key.strip_prefix("extra:") {params.extra_curves.insert(key.into(),values);}}}
 }
@@ -262,7 +437,8 @@ impl SourceCurve {
         let (begin,end)=frame_range(geometry,frame_ms)?;let current=geometry.map()?;let basis=self.basis.map()?;
         let mut result=vec![pad(key);end+1];
         for frame in begin..=end {
-            let project=frame as f64*frame_ms/1000.;
+            // 音频/显示的外侧网格哨兵使用真实边界值，不能把未落在clip内的格点置零后插入尾部。
+            let project=(frame as f64*frame_ms/1000.).clamp(geometry.project_start,geometry.project_start+geometry.project_duration);
             let Some(previous)=current.previous_project_time(&basis,project) else {continue;};
             let index=previous*1000./self.frame_ms-self.first_frame as f64;
             if !index.is_finite()||index<0.||self.values.is_empty() {continue;}
@@ -276,6 +452,74 @@ impl SourceCurve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn continuous_track()->TimelineState {
+        let mut timeline=host(1.003,0.197,0.,0.197);timeline.project_sec=4.;
+        timeline.params_by_root_track.insert("a".into(),TrackParamsState {frame_period_ms:5.,pitch_edit_user_modified:true,
+            pitch_edit:vec![60.;801],tension_edit:vec![60.;801],
+            extra_curves:std::collections::HashMap::from([("hifigan_tension".into(),vec![60.;801])]),..Default::default()});timeline
+    }
+    /// 空白编辑参与保存/回流；非网格clip两侧不能重新变成零，局部音频哨兵也保持边界值。
+    #[test]
+    fn gap_layer_keeps_continuous_curves_and_non_grid_boundary_samples() {
+        let timeline=continuous_track();let ids=identities();
+        let atlas=ParameterAtlas::default().capture(&timeline,&ids).unwrap();
+        let bytes=serde_json::to_vec(&atlas).unwrap();let restored:ParameterAtlas=serde_json::from_slice(&bytes).unwrap();
+        let restored=restored.reserve_restored().unwrap().rebind(&timeline,&ids).unwrap();
+        let view=restored.project_roots(&timeline,&ids).unwrap();
+        assert_eq!(view["a"].tension_edit.len(),801);
+        for (frame,value) in view["a"].tension_edit.iter().enumerate() {assert_eq!(*value,60.,"legacy tension frame {frame}");}
+        for (frame,value) in view["a"].extra_curves["hifigan_tension"].iter().enumerate() {assert_eq!(*value,60.,"HiFiGAN tension frame {frame}");}
+        let local=restored.project_local(&timeline,&ids).unwrap();
+        assert_eq!(local["clip"].tension_edit.last(),Some(&60.));
+    }
+    /// 空白层留在项目绝对时间，源曲线随clip移动；原clip占用区不留下假的旧源曲线。
+    #[test]
+    fn gap_layer_preserves_gap_edits_after_clip_moves_and_new_gap_edit_deltas() {
+        let initial=continuous_track();let ids=identities();
+        let atlas=ParameterAtlas::default().capture(&initial,&ids).unwrap();
+        let mut moved=host(2.203,0.197,0.,0.197);moved.project_sec=4.;
+        let followed=atlas.follow_geometry(&moved,&ids).unwrap();
+        let before=followed.project_roots(&moved,&ids).unwrap();
+        assert_eq!(before["a"].tension_edit[200],60.);
+        assert_eq!(before["a"].tension_edit[210],0.);
+        assert_eq!(before["a"].tension_edit[450],60.);
+        moved.params_by_root_track=before.clone();moved.params_by_root_track.get_mut("a").unwrap().tension_edit[210]=45.;
+        let changed=followed.capture_changes(&moved,&ids,&before).unwrap();
+        assert_eq!(changed.project_roots(&moved,&ids).unwrap()["a"].tension_edit[210],45.);
+        assert_eq!(changed.project_local(&moved,&ids).unwrap()["clip"].tension_edit.last(),Some(&60.));
+    }
+    /// 旧归档迁移使用保存时的源布局，而不是用当前已移动布局误吞旧空白编辑。
+    #[test]
+    fn gap_layer_migrates_legacy_track_arrays_using_saved_layout() {
+        let initial=continuous_track();let ids=identities();
+        let mut legacy=ParameterAtlas::default().capture(&initial,&ids).unwrap();legacy.gaps.clear();
+        legacy.migrate_legacy_gaps(&initial.params_by_root_track).unwrap();
+        let moved=host(2.203,0.197,0.,0.197);
+        let projected=legacy.project_roots(&moved,&ids).unwrap();
+        assert_eq!(projected["a"].tension_edit[200],60.);
+        assert_eq!(projected["a"].tension_edit[210],0.);
+        assert_eq!(projected["a"].tension_edit[450],60.);
+    }
+    /// 剪切可销毁原region；新source/modification与跨root仍按真实新GUID继承，而非路径猜父。
+    #[test]
+    fn copied_item_seed_survives_original_removal_and_new_host_identities() {
+        let original=edited();let ids=identities();
+        let atlas=ParameterAtlas::default().capture(&original,&ids).unwrap();
+        let expected=atlas.project_local(&original,&ids).unwrap()["clip"].clone();
+        let seed=atlas.regions["clip"].clone();
+        let mut copied=host(3.125,1.,0.,1.);copied.tracks[0].id="b".into();copied.clips[0].track_id="b".into();copied.clips[0].id="copy".into();
+        let item="{11111111-2222-3333-4444-555555555555}";
+        let new_ids=BTreeMap::from([("copy".into(),RegionIdentity {key:99,item:Some(item.into()),source:"new-source".into(),modification:"new-mod".into()})]);
+        let mut pending=ParameterAtlas::default();
+        pending.register_copy(item,"b",geometry(&copied.clips[0]).unwrap(),Some(seed)).unwrap();
+        let serialized=serde_json::to_vec(&pending).unwrap();
+        let restored:ParameterAtlas=serde_json::from_slice(&serialized).unwrap();let restored=restored.reserve_restored().unwrap();
+        let followed=restored.follow_geometry(&copied,&new_ids).unwrap();
+        assert!(followed.copy_seeds.is_empty());
+        assert_eq!(followed.regions["copy"].root,"b");
+        assert_eq!(followed.project_local(&copied,&new_ids).unwrap()["copy"].pitch_edit,expected.pitch_edit);
+        assert_eq!(followed.project_local(&copied,&new_ids).unwrap()["copy"].extra_curves["volume"],expected.extra_curves["volume"]);
+    }
     /// 连续拆分只沿最近活图的唯一父范围，保留历史父记录但不让它阻塞第二次拆分。
     #[test]
     fn nested_splits_follow_live_ancestry_without_losing_history_or_guessing_overlaps() {
@@ -378,5 +622,24 @@ mod tests {
     fn unrelated_modification_cannot_inherit_curves_from_a_shared_source_path() {
         let atlas=ParameterAtlas::default().capture(&edited(),&identities()).unwrap();let mut ids=identities();ids.get_mut("clip").unwrap().modification="other".into();
         let projected=atlas.project(&host(1.,1.,0.,1.),&ids).unwrap();assert!(projected.is_empty());
+    }
+    /// 同源同窗口的不同编辑重叠时，原生分割谱系只能继承确切父item；序列化仍保留归属。
+    #[test]
+    fn host_split_confirmed_lineage_preserves_right_pitch_with_overlapping_source_ancestry() {
+        let parent="{11111111-1111-1111-1111-111111111111}";let right="{33333333-3333-3333-3333-333333333333}";
+        let mut initial=edited();let mut other=initial.clips[0].clone();other.id="other".into();other.start_sec=3.;initial.clips.push(other);initial.project_sec=4.;
+        let params=initial.params_by_root_track.get_mut("a").unwrap();params.pitch_edit.resize(17,0.);params.pitch_orig.resize(17,57.);params.pitch_edit[12..17].fill(72.);
+        let mut ids=identities();ids.get_mut("clip").unwrap().item=Some(parent.into());
+        ids.insert("other".into(),RegionIdentity {key:42,item:Some("{55555555-5555-5555-5555-555555555555}".into()),source:"source".into(),modification:"mod".into()});
+        let mut atlas=ParameterAtlas::default().capture(&initial,&ids).unwrap();let seed=atlas.split_seed(parent);
+        // 模拟宿主在SplitMediaItem返回前已经同步缩短左段，不能事后再从左段猜右段basis。
+        let left=host(1.,0.5,0.,0.5);atlas=atlas.follow_geometry(&left,&ids).unwrap();
+        atlas.register_split(parent,right,seed).unwrap();
+        let mut split=host(1.5,0.5,0.5,0.5);split.clips[0].id="right".into();
+        let right_ids=BTreeMap::from([("right".into(),RegionIdentity {key:43,item:Some(right.into()),source:"source".into(),modification:"new-mod".into()})]);
+        let followed=atlas.follow_geometry(&split,&right_ids).unwrap();let local=followed.project_local(&split,&right_ids).unwrap();
+        assert_eq!(&local["right"].pitch_edit[..3],&[62.,63.,64.]);
+        assert!(followed.split_parents.is_empty());assert!(!followed.regions.keys().any(|id|id.starts_with("split-basis:")));
+        let restored:ParameterAtlas=serde_json::from_slice(&serde_json::to_vec(&followed).unwrap()).unwrap();assert!(restored.rebind(&split,&right_ids).is_ok());
     }
 }

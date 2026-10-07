@@ -9,8 +9,13 @@ use base64::Engine as _;
 
 pub(super) fn mutates_audio(command:&str)->bool {
     matches!(command,"set_param_frames"|"restore_param_frames"|"set_static_param"|"convert_mix_param"|
-        "set_track_state"|"undo_timeline"|"redo_timeline"|"set_history_position")
+        "set_track_state"|"move_track"|"undo_timeline"|"redo_timeline"|"undo_parameter_edit"|"redo_parameter_edit"|"set_history_position")
 }
+
+// 回归诊断测试仅在cfg(test)编译；产品分组历史路径由已加载分支实际执行。
+#[cfg(test)]
+#[path="../../../../probe/ara/undo_group_diagnostic.rs"]
+mod undo_group_diagnostic;
 fn value<T:serde::Serialize>(input:T)->Result<Value,String> {serde_json::to_value(input).map_err(|e|e.to_string())}
 fn args<T:serde::de::DeserializeOwned>(input:Value)->Result<T,String> {serde_json::from_value(input).map_err(|e|format!("invalid editor arguments: {e}"))}
 #[derive(Deserialize)]
@@ -30,6 +35,9 @@ struct Segment {track_id:String,start_sec:f64,duration_sec:f64,columns:usize}
 #[serde(rename_all="camelCase")]
 struct TrackPatch {track_id:String,volume:Option<f32>,muted:Option<bool>,solo:Option<bool>,
     compose_enabled:Option<bool>,pitch_analysis_algo:Option<PitchAnalysisAlgo>}
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct PrivateTrackMove {track_id:String,target_index:usize,parent_track_id:Option<String>}
 
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
 pub(super) fn payload(session:&EditorSession,lite:bool)->Result<Value,String> {
@@ -85,8 +93,6 @@ fn peaks(session:&EditorSession,path:&str)->Result<std::sync::Arc<hifishifter_ke
 pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<Value,String> {
     match command {
         "list_directory"|"stat_paths"|"get_audio_file_info"|"search_files_recursive"=>return session.browser_command(command,&input),
-        "begin_undo_group"=>{session.suppress_history.store(true,Ordering::Release);return Ok(json!({"ok":true}));},
-        "end_undo_group"=>{session.suppress_history.store(false,Ordering::Release);return Ok(json!({"ok":true}));},
         "get_ui_settings"=>return value(session.settings.lock().unwrap().clone()),
         "save_ui_settings"=>{
             let mut current=session.settings.lock().unwrap();
@@ -97,6 +103,31 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "get_about_info"=>return Ok(json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"})),
         "plugin_get_apply_state"=>return Ok(session.state()),
         "plugin_history_barrier"=>{session.suppress_history.store(false,Ordering::Release);return Ok(json!({"ok":true}));},
+        "plugin_editor_barrier"=>return Ok(json!({"ok":true})),
+        "get_timeline_inventory"=>{
+            // 媒体写入回执只取结构，不为显示新GUID先物化整份宿主PCM或跑分析。
+            if let Some(document)=session.document.upgrade() {session.refresh_ui_geometry(&document);}
+            return payload(session,false);
+        },
+        "select_track"|"select_clip"=>{
+            // 选择已确认的GUI对象不必等PCM；新粘贴片段先选中，再由后台补音频/波形。
+            if let Some(document)=session.document.upgrade() {session.refresh_ui_geometry(&document);}
+            if command=="select_track" {
+                let id=input["trackId"].as_str().ok_or("trackId missing")?;track_exists(session,id)?;
+                session.timeline.lock().unwrap().select_track(id);
+            } else {
+                let id=input["clipId"].as_str().map(str::to_owned);
+                let mut timeline=session.timeline.lock().unwrap();
+                if let Some(id)=&id {if !timeline.clips.iter().any(|clip|&clip.id==id) {return Err("unknown host clip".into());}}
+                timeline.select_clip(id);
+            }
+            // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本机原文件。
+            let authorized={let timeline=session.timeline.lock().unwrap();timeline.selected_clip_id.as_ref().is_none_or(|id|timeline.clips.iter().any(|clip|&clip.id==id&&clip.source_path.is_some()))};
+            if authorized {
+                session.select_source_projection()?;
+            }
+            session.notify_timeline();return payload(session,false);
+        },
         "get_playback_state"=>{
             // 宿主播放态不依赖曲线载入；Unsupported/Conflict也必须还能观察播放并暂停。
             return Ok(session.playback_state());
@@ -130,7 +161,7 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         },
         "clipboard_kind"=>{
             let kind=hifishifter_clipboard::read_bytes()?.and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
-                .filter(|p|p["kind"]=="param").map(|_|"param");
+                .and_then(|payload|super::host_clipboard::clipboard_kind(&payload));
             return Ok(json!({"ok":true,"kind":kind}));
         },
         "emit_ui_event"=>{let event=input["event"].as_str().ok_or("event missing")?;session.emit(event,input["payload"].clone());return Ok(Value::Null);},
@@ -147,6 +178,11 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
     }
     match command {
         "get_timeline_state"=>payload(session,false),
+        "move_track"=>{
+            let request:PrivateTrackMove=args(input)?;
+            session.move_private_track(&request.track_id,request.target_index,request.parent_track_id)?;
+            after_write(session,json!({"ok":true}))?;payload(session,false)
+        },
         "get_timeline_state_lite"=>payload(session,true),
         "get_project_meta"=>Ok(payload(session,true)?["project"].clone()),
         "get_runtime_info"=>{
@@ -163,15 +199,6 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             session.suppress_history.store(true,Ordering::Release);drop(timeline);session.emit("history_state",history_state(session));payload(session,false)
         },
         "end_undo_group"=>{session.suppress_history.store(false,Ordering::Release);Ok(json!({"ok":true}))},
-        "select_track"=>{
-            let id=input["trackId"].as_str().ok_or("trackId missing")?;track_exists(session,id)?;
-            session.timeline.lock().unwrap().select_track(id);session.select_source_projection()?;session.notify_timeline();payload(session,false)
-        },
-        "select_clip"=>{
-            let id=input["clipId"].as_str().map(str::to_owned);
-            if let Some(id)=&id {if !session.timeline.lock().unwrap().clips.iter().any(|c|&c.id==id) {return Err("unknown host clip".into());}}
-            session.timeline.lock().unwrap().select_clip(id);session.select_source_projection()?;session.notify_timeline();payload(session,false)
-        },
         "set_transport"=>{
             if input["bpm"].is_number() {return Err("tempo is controlled by REAPER".into());}
             if let Some(position)=input["playheadSec"].as_f64() {if position.is_finite() {session.timeline.lock().unwrap().playhead_sec=position.max(0.);}}
@@ -229,15 +256,23 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             session.mark_dirty();session.publish_timeline(timeline.clone());drop(timeline);
             after_write(session,json!({"ok":true}))?;payload(session,false)
         },
-        "undo_timeline"|"redo_timeline"|"set_history_position"=>{
+        "undo_timeline"|"redo_timeline"|"undo_parameter_edit"|"redo_parameter_edit"|"set_history_position"=>{
             let mut timeline=session.timeline.lock().unwrap();let mut recorded=session.history.lock().unwrap();
             let (target,intent)=match command {
-                "undo_timeline"=>(recorded.position.saturating_sub(1),HistoryJumpIntent::Undo),
-                "redo_timeline"=>(recorded.position.saturating_add(1),HistoryJumpIntent::Redo),
+                "undo_timeline"|"undo_parameter_edit"=>(recorded.position.saturating_sub(1),HistoryJumpIntent::Undo),
+                "redo_timeline"|"redo_parameter_edit"=>(recorded.position.saturating_add(1),HistoryJumpIntent::Redo),
                 _=>(input["position"].as_u64().ok_or("history position missing")? as usize,HistoryJumpIntent::Jump),
             };
             if let Some((next,_,selection))=history::jump(&mut recorded,&timeline,target,intent,None) {
-                *timeline=next;drop(recorded);session.mark_dirty();session.publish_timeline(timeline.clone());drop(timeline);
+                if matches!(command,"undo_parameter_edit"|"redo_parameter_edit") {
+                    // 参数快照只恢复控制数据，绝不把旧clip位置/源窗口写回或覆盖当前宿主几何。
+                    timeline.params_by_root_track=next.params_by_root_track;
+                    for track in &mut timeline.tracks {if let Some(old)=next.tracks.iter().find(|old|old.id==track.id) {
+                        track.volume=old.volume;track.muted=old.muted;track.solo=old.solo;
+                        track.compose_enabled=old.compose_enabled;track.pitch_analysis_algo=old.pitch_analysis_algo.clone();
+                    }}
+                } else {*timeline=next;}
+                drop(recorded);session.mark_dirty();session.publish_timeline(timeline.clone());drop(timeline);
                 session.emit("history_state",history_state(session));
                 session.notify_timeline();
                 let mut payload=payload(session,false)?;

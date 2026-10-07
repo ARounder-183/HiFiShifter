@@ -5,9 +5,12 @@ pub(crate) mod connection;
 pub(crate) mod session;
 pub(crate) mod workspace;
 pub(crate) mod parameter_atlas;
+pub(crate) mod private_groups;
 mod commands;
 mod browser_files;
 pub(crate) mod host_edit;
+pub(crate) mod host_split;
+mod host_clipboard;
 mod events;
 pub(crate) mod resources;
 #[cfg(windows)]

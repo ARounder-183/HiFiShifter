@@ -1068,4 +1068,124 @@ Task 60: Ruling: 用户续报mute波形消失、导入GUI需重开、seek ABAB �
 
 Task 60: Ruling: 最终同源waveform-import-seek-fix-01 Release正常构建，部署前实际无REAPER — 完整包安装D:\VST，35文件SHA256逐项校验并保留旧包备份，仅本地提交不push；主体继续共享frontend/kernel，App/插件仅外壳和宿主接口分开 — 不将定向测试/安装当完整GUI验收；系统拒绝在旧未完成目标上新建第二目标，按新spec继续真实任务，不为换目标虚报complete。
 
+Task 61: Ruling: 用户目标新增插件分割；锁定官方SDK确认SplitMediaItem保留左item并返回新右item — 接独立clipSplitting能力、S/精简右键、多选、真实宿主Undo与两GUID几何回执；显式参数谱系和调用前basis抵御同步重入，绑定后清理临时副本，写入前后废弃旧GUI读取 — native3项/前端13项及统一Release clip-split-02通过；fixture不是REAPER鼠标验收，manifest保持nativeAcceptance=false，当前REAPER已开，未热替换D:\VST。
+
+Task 62: Ruling: 用户明确App也偶发无声且至少0.1秒；合成信号尾部有能量损失，但用户原RPP76个可读短源CPU/DirectML均非零 — 不把不足一hop的独立边界或尾部衰减当本次根因，不改声码器；结论/限制写SHORT-CLIP-FINDINGS — 若把近静音与全静音混淆，或忽略用户实际编辑与缓存，会交付无关修复；原RPP没有当前HFS状态。
+
+Task 62: Ruling: 当前MCP初始化成功但实际ipc.mutex权限拒绝；已确认REAPER19916与Lua心跳在线 — 不改ACL/删锁/重启用户工程，改读已授权插件Snapshot并明确它不是MCP；3.272727273秒ka(3)未mute、无fade、宿主PCM非零，实际全局曲线host-PCM重建RMS0.11967332 — 没有实时已发布快照/atlas局部参数或宿主FX链，不能宣布已定位/修好；需普通终端只读MCP查询item音量/FX后继续单点排查。
+
+Task 63: Ruling: 用户最新目标新增插件clip音量调整 — 登记为待实现宿主能力，不把现有私有gain编辑当已同步；当前先完成指定ka(3)现场诊断 — 若未经宿主增益责任核对直接烘焙gain，可能与REAPER重复施加；本条不声称功能已完成。
+
+Task 62: Ruling: 用户删去有声片段后Snapshot从114/35变为81片段/26源，model14→106、edit16→116，前ka及两个n均无mute/fade — 确认宿主删除已进入当前模型，不再归咎整张模型冻结；仍需D_VOL/FX与实际renderer输出区分后级处理和缓存 — Snapshot默认take gain=1不是宿主D_VOL实测，CPU全局曲线重建非零也不是实时输出验收。
+
+Task 62: Ruling: 用户确认元音、独立App有声且旁路HFS FX恢复；原ARA源尾检查仅容1e-9秒，而现场ka/n窗口各比8073/8084真实帧数多约一帧 — 完整RenderInput修前必现InvalidGeometry；按源采样网格round允许最多一帧零尾，保持宿主几何，拒绝源起点EOF与更大越界；新增已发布PCM只读诊断 — EOF两率音频及越界2项通过，仍需REAPER新包实测；初版f64 epsilon不足以覆盖倍率跨f32/f64的约0.0002分数帧，不能把内核有声误作ARA门禁已过。
+
+Task 63: Ruling: Clip gain原GUI既有徽章接口，但native白名单未接且item/take D_VOL未读 — 接item D_VOL真实写入/回流/Undo，多选与0值保留；GUI扁平gain/take显示一致、参数提交恢复源域gain，不写take负号极性；新轨默认HiFiGAN而恢复明确覆盖不改 — native gain2项、split3项、默认1项、前端13项/tsc通过；声音只施加一次仍待REAPER oracle，不把typed fixture当实际宿主效果。
+
+Task 63: Ruling: vowel-eof-split-gain-01统一Release exit0，指纹77F890FA0790347EA72474AC178A19EF838237E9905F76094766E90DA1F9C346，但实际REAPER19916仍开着且工程未保存 — 仅保留完整待安装包，请用户保存退出后整包部署D:\VST；nativeAcceptance保持false，目标保留全部范围 — 热替换会混版/损伤当前工程，不能为了结束goal伪报实际元音、分割、音量验收；错误TEMP的两个生成文件可恢复移动到ignored备份，用户REAPER通信目录未改。
+
+Task 63: Ruling: 用户保存退出后实际无REAPER，01包整包安装D:\VST、35文件SHA256一致，旧包备份vowel-eof-split-gain-01-f2adb812；重开保存的用户工程43160后新Snapshot对应ka播放数据RMS0.119392、9057帧ready，全部119 renderer无准备错误，MCP在明确共享的worktree TEMP连通 — 用户随后明确本批验证没问题，记录丢音/分割/clip gain/默认算法通过，但提出Undo新缺陷，旧完整GUI总验收标记不伪改 — 后续目标由用户改为四项GUI编辑排查，不继续无关旧工作。
+
+Task 64: Ruling: 当前Ctrl+Z明确走REAPER历史、controller.setComponentHandler却忽略handler；参数publish已立即保存doc控制数据，不能归因flush等渲染 — 定位宿主通知/历史桥缺口，继续区别私有参数录入与真实几何组收尾；右键有select模式、plugin空白和bootstrap限制，但全部区域缺菜单仍不能只凭源码归因 — 当前只排查，不改产品或打包；fixture不证明真实host Undo或DOM事件正常。
+
+Task 64: Ruling: 同scope paramsEpoch清空paramView且读参排在actor同步apply之后，解释各参数绘制后消失；真实ParameterAtlas恒定60诊断在非网格clip首尾与空白回流0 — 确认只按clip存储及floor/ceil默认帧覆盖造成连续曲线丢失/尖跳，要求保留整轨空白编辑同时维持源basis — 不用GUI连线掩盖真实数据丢失，不把张力当唯一受影响参数；一次性诊断在probe目录，无产品行为变化，详情GUI-EDIT-DIAGNOSTICS.md。
+
+Task 64: Ruling: 用户澄清参数面板正常，故障仅为轨道头/空白/clip菜单；源码分别在TrackList插件提前返回、TimelinePanel空白提前返回、ClipContextMenu仅渲染分割 — 将结论纠正为插件菜单主动裁剪，不再追查所有DOM右键失效；恢复必须按真实宿主能力逐项开放，本轮仅更新排查记录 — 若全删插件门禁会使未接宿主写口的App操作产生双权威；不能把参数选择模式规则说成用户报告的轨道菜单根因。
+
+Task 64: Ruling: 真实actor定向对照证明分组编辑本地undoDepth为0、非分组大于0，前置begin_undo_group提前返回使后续checkpoint不可达 — 记录本地分组历史确定缺陷，同时保留REAPER私有FX状态录入/恢复尚未实测的边界，不重跑全量或打包 — 若把本地对照外推宿主Undo验收会夸大证据；测试仅cfg(test)与probe产物，不改变产品运行行为。
+
+Task 64: Ruling: 本轮Computer Use激活并刷新后WebView鼠标仍被跨进程目标检查拒绝，按技能重试一次后停止输入；用户自行确认参数选择模式菜单正常 — 保留已启动用户REAPER，不绕过保护、不改工程或热替换包；本轮轨道菜单采用逐项源码证据 — 若绕过进程保护或继续重复点击可能操作错误窗口，不把工具输入阻塞当ARA技术不可实现。
+
+Task 64: Ruling: 新单项真实actor分组state往返诊断通过：DSP暂缓时encode_state已含volume0.5，恢复前后state分别回流原值和0.5 — 排除该已就绪单组件场景的控制数据等DSP才保存/owner恢复必然失效，将Undo后续收窄到宿主录入/回调和真实几何组收尾；仅probe诊断，无产品运行变更或出包 — 不将owner入口对照等同REAPER真实历史验收，不外推多组件或宿主过渡态。
+
+Task 64: Ruling: Computer Use原生菜单只读采集发生缓存几何/元素错误，刷新后报告用户输入，随后观察到用户打开媒体对象属性 — 停止该轮输入，未关闭用户窗口、未Undo或保存，不把无法读取当前Undo标签当宿主没有HFS条目 — 若继续争夺焦点可能打断用户操作；真实宿主录入/恢复仍缺证据，目标保持active，本轮已补state往返证据而非空转。
+
+Task 64: Ruling: 用户允许轨道头菜单禁用、要求保留空白区；原空白菜单含粘贴/分割/关闭间隙，仅分割已接宿主写口 — 保持轨道头，恢复空白菜单入口及三项显示，分割按clipSplitting准入，另外两项禁用并解释宿主管理；回调再次守卫，独立App不变 — 单文件6项通过，未打包或安装；若因恢复显示直接调用App私有粘贴/关闭间隙会造成双权威，不能宣称这两项插件功能已经实现。
+
+Task 64: Ruling: 当前已安装REAPER MCP的Lua/工具源码仅在执行project_undo/redo/group时返回Undo标签，没有只读历史getter，project_get_info/overview也不返回Undo条目 — 不用写入型工具伪装查询、不注入运行中脚本或修改其它仓库，真实宿主历史证据继续保持未决 — 若为了读标签调用Undo会修改当前工程，MCP配置存在不代表提供所需只读能力。
+
+Task 65: Ruling: 用户将goal扩为恢复clip绝大部分操作（含复制粘贴），覆盖旧仅分割/不加删除胶合的范围；轨道头允许禁用、空白菜单必须保留 — 写完整操作清单和五批设计/计划，真实item/ARA回流/参数继承/Undo/保存为完成门，倒放与非线性仍按先前要求不做，不再把显示菜单或永久禁用复制粘贴当交付 — 若继续只排查或只放开App私有命令会偏离新目标并产生双权威；最终集中验证/部署，不新增review或自动push。
+
+Task 65: Ruling: 锁定官方SDK确认Get/SetItemStateChunk、genGuid、guidToString ABI，用户RPP只读样本确认IGUID与take GUID层级 — 增加原生有界item state捕获及单ITEM重建基础，重建item/take/FX实例GUID但保留SOURCE与FX不透明载荷，拒绝结构/身份/预算错误；两项定向基础测试exit0 — 这不是复制粘贴实机验收，剪贴板、创建回流和曲线seed尚未连接；若先加载重复GUID再改身份可能污染宿主ARA图，不能仅保存原item指针使剪切后失效。
+
+Task 65: Ruling: 最新只读Computer Use观察仍是REAPER6252与用户媒体属性/FX窗口，主窗未打开Undo菜单；新增实现范围已有安全代码工作可做 — 停止该轮窗口输入，继续操作层实现，不把旧自动化阻塞当新增目标技术不可行或完成；无工程修改/保存/热替换 — 如果在用户窗口上隐藏试验会侵扰资产，若用fixture冒充host历史仍无法闭合撤销证据。
+
+Task 65: Ruling: 只存原item引用会使剪切后不能粘贴，原菜单/快捷键和媒体回流也不能由clipEditing总开关代替 — 接真实item chunk创建/删除、独立结构化剪贴板、相对位置/轨道、多选/新轨与copy seed新GUID谱系；原GUI新增clipClipboard能力门及copy/cut/paste/delete/空白粘贴，旧插件和独立App保持原准入 — 3项parser/跨新source与root的seed检查通过，2项解码测试修正fixture缺name后通过，前端13项/tsc通过；未验证真实REAPER媒体API或出包，静音复制波形/冷恢复仍未闭合，不能声称完整复制粘贴验收。
+
+Task 65: Ruling: copy在UI直接读actor可能漏掉在途参数尾笔；媒体创建只出现GUI外壳也不能证明ARA供源，提前结束Undo请求可能在回流前保存状态 — 新媒体命令先排非破坏性actor屏障，UI执行外部API时不持BrowserState/document锁，回流确认或错误后才结束媒体Undo；未静音新item必须有真实ARA/source，删除还核对旧GUI id消失 — 源码/编译通过而非实机验收；DSP仍同步时屏障可能等当前渲染，不能把此批说成参数读取解耦或宿主Undo根因已完全解决。
+
+Task 66: Ruling: 仅源basis无法保存clip外编辑，floor/ceil默认哨兵会覆盖整轨边界；简单保存整轨数组又会让移动后的旧clip位置残留假曲线 — 新增项目时间稀疏空白层，clip仍源域跟随，捕获仅取clip外delta，显示只写实际覆盖格点，外侧哨兵夹真实边界；旧归档按保存布局迁移并按组件scope过滤 — Atlas首轮11项通过、恢复测试漏rebind的1项失败，补真实绑定后3个新gap用例通过；不把完全空轨/静音编辑/真实宿主冷恢复称已验证，未出包。
+
+Task 66: Ruling: 同scope提交后的强制清窗与同步DSP队列共同造成曲线等待渲染才出现 — 插件同scope保留已提交可见窗口仍强制取数，切参数/轨道继续清窗，独立App原规则不变；刷新策略和笔画推迟9项/tsc通过 — 此批只解决清窗环节，actor/DSP尚未解耦，不能声称参数读取/媒体屏障延迟或全部原GUI问题已经解决。
+
+Task 67: Ruling: actor同步apply使参数读取/getState/媒体复制屏障排在神经计算后，单改清窗不能消除此等待 — 自动DSP移到单个可取消线程，缓存组装与权威写入仍actor，完成结果回actor，进度/发布核对票据与代次，关闭取消并join不遗留DLL线程 — 2项受控调度/取消、1项历史屏障及2项实际PCM/持续只读请求通过；最后瞬时重试/progress/pending收尾随统一构建验证，不将测试gate当神经模型或真实宿主GUI验收，未出包或push。
+
+Task 68: Ruling: commands.rs的前置begin/end_undo_group提前return使checkpoint分支不可达，导致分组编辑本地undoDepth为0 — 删除前置return，复测分组/非分组本地历史与owner state往返均通过；宿主几何仍用REAPER HostUndo块，IEditController setComponentHandler未保存handler/通知setDirty，真实REAPER历史录入/冷恢复不作已验收 — 若把本地修复外推宿主Undo会夸大完成，仍需后续宿主回调实现和一次集中实机验收。
+
+Task 68: Ruling: focused frontend 16项、tsc、plugin cargo check及撤销2项回归均通过；IEditController::setComponentHandler仍未保存宿主handler或调用setDirty — 保留为真实REAPER Undo未闭合的明确风险，不伪造宿主实机证据；本轮未打包/安装。
+
+Task 68: Ruling: setComponentHandler已通过IComponentHandler2查询保存独立COM引用，actor/DSP只置dirty，WebView UI timer调用setDirty，terminate/drop释放；plugin cargo check通过 — 闭合源码接口缺口但真实REAPER历史条目/Undo后setState冷恢复仍未实机验证，不把源码证据外推为宿主验收。
+
+Task 68: Ruling: pluginAllowsAction此前无条件放行clip.copy/cut/paste，会让不具备宿主媒体能力的旧插件误入App几何命令 — 改为clipClipboard能力门并补前端回归断言；独立App保持原路径，已接通宿主能力才显示/发送这些操作 — 若沿旧准入会产生私有timeline与REAPER双权威，若把能力门当实机功能会夸大完成。
+
+Task 68: Ruling: 复制/剪切/粘贴共享快捷键还必须保留参数剪贴板路径，不能在pluginAllowsAction层一刀切 — 恢复动作层先放行、最终timeline通道再按clipClipboard准入；同时在插件clip菜单开放归一化（只改HFS处理参数）并保留宿主几何操作能力门 — 前端16项/tsc通过，未打包或实机验收。
+
+Task 68: Ruling: handler桥新增fake COM ABI回归，验证查询/独立引用、dirty只在flush_dirty UI边界调用、重复flush不重复通知、清空释放，测试通过 — 证明Rust桥生命周期与线程策略，不证明REAPER接受历史条目或Undo冷恢复；保留真实宿主集中验收门。
+
+Task 69: Ruling: `editor-parity-01` Release完整构建exit0，旧D:\VST包备份后整包部署，35文件逐项SHA256零差异；隔离REAPER smoke扫描到3 classes、创建组件并报告host extension available，测试PID随后关闭 — 确认交付包可加载，不外推GUI交互/Undo/媒体回流完成；当前安装包未热替换运行实例、未push。
+
+Task 69: Ruling: group/ungroup现在复用set_clips_state_bulk与同一宿主Undo块，通过REAPER I_GROUPID写入，宿主inventory回流为reaper-group-*；channel/mute/rate等原有set_clip_state字段继续复用 — plugin cargo check通过前先修复2个kernel ClipStatePatch显式构造缺host_group_id；真实GUI/REAPER编组交互仍待集中验收。
+
+Task 70: Ruling: group/ungroup改动后重新构建 `editor-parity-02` Release，REAPER关闭时整包替换D:\VST，旧包备份、35文件SHA256零差异 — 安装包包含最新I_GROUPID桥；未重复做UI交互验收，不把部署当功能通过，不push。
+
+Task 71: Ruling: close gaps桥通过plugin cargo check、前端tsc/16项后重新构建 `editor-parity-03` Release并部署D:\VST，旧包备份、35文件SHA256零差异 — 新包包含复用kernel gap计算、宿主move_clips和参数线跟随；未做真实GUI交互验收，不把部署当完成。
+
+Task 71: Ruling: host_edit规划回归确认hostGroupId被接受且未知字段/反向仍拒绝，测试通过；编组/解组和关闭间隙依旧以真实宿主GUID/几何回流为最终验收门 — 不把规划测试或安装包等同REAPER交互完成。
+
+Task 72: Ruling: 编组回流receipt新增group_id核对后，`editor-parity-04` Release构建exit0，REAPER关闭时整包部署D:\VST，旧包备份、35文件SHA256零差异 — 安装包是当前工作树最新版本；真实GUI交互/Undo/媒体回流仍未验收，不push。
+
+Task 72: Ruling: active Take rename now reuses set_clip_state host edit with official GetSetMediaItemTakeInfo_String(P_NAME), only rewrites when requested take is active; non-active take is not silently claimed as host success — cargo check pending before next package.
+
+Task 70: Ruling: close gaps now reuses the existing kernel close_track_gaps_moves calculation and rewrites to host move_clips with moveLinkedParams, no-op returns timeline without host write — keeps App ripple semantics while using real clip setters in plugin; cargo check still required before packaging, GUI interaction remains pending.
+
+Task 69: Ruling: 同一隔离包可见打开VST3 HiFiShifter窗口，UI树显示插件菜单、REAPER播放控制、两段clip时间轴和nsf-hifigan默认算法；Computer Use对WebView子区域右键命中被目标保护拒绝，按技能停止重试，未把截图加载写成菜单/Undo交互验收 — 隔离PID20844已关闭，用户工程未改。
+
+Task 73: Ruling: active Take rename接入官方GetSetMediaItemTakeInfo_String(P_NAME)，仅active take重写为set_clip_state host edit，非active take不静默声称宿主成功；cargo check通过，`editor-parity-05` Release重新构建部署D:\VST、旧包备份、35文件SHA256零差异 — 交互验收仍待集中完成。
+
+Task 73: Ruling: host_edit规划回归补充active take name字段可接受；字符串长度/NUL仍受预算校验，实际setter只在宿主主线程调用 — 保持独立App take命名路径不变，未把规划检查当REAPER实机回流。
+
+Task 74: Ruling: 用户实测参数Undo/Ctrl拖动/clip粘贴仍失败，发现clipboard_kind仅识别param、Clip反序列化未normalize_takes、duplicate_clips_bulk未接native — 一次修媒体路由、Take源起点/倍率和原生直接复制/GUID/seed/回流路径，Ctrl复制不覆盖系统剪贴板；新复制请求纳入前端读取代次 — 非零2.75秒源起点/2.5倍率及类型路由等4项、tsc通过，未打包或实测，不把旧加载smoke当成功；新轨落点/参数Undo仍待闭合。
+
+Task 74: Ruling: Dirty通知位于可能结束Undo块的tick之后且无宿主返回证据 — 改为先UI flush再tick，并记录IComponentHandler2支持/返回值，继续查真实宿主录入，未宣告参数Ctrl+Z修好 — setDirty仅有源码/编译不保证REAPER录入私有状态，不能再次以规划测试代替用户操作。
+
+Task 74: Ruling: 父子轨可用官方I_FOLDERDEPTH/P_PARTRACK与ReorderSelectedTracks，但后者不带project参数且操作全局选择；HFS参数根组不等同REAPER音频路由 — 本轮只记录可行性与GUID/工程/选择/folder深度风险，保持插件move_track禁用，优先前三项 — 若只放开App父子轨会形成GUI/宿主双权威，若使用活动工程兜底会操作错误工程。
+
+Task 75: Ruling: App键盘copy/cut/paste最终能力检查未传动作op，新媒体通道仍被拒；参数面板Ctrl+Z继续无条件交宿主，违背本轮针对参数编辑的意图 — 补op，按焦点新增参数Undo/Redo专用命令，只恢复参数/轨道控制，不覆盖clip几何，轨道/全局仍宿主历史；这替换旧全入口共栈方案，不再宣称混合统一顺序 — 真实actor分组曲线Undo/Redo且位置不变通过，实际GUI焦点未验收，不能用本地结果假报REAPER历史回调。
+
+Task 75: Ruling: Ctrl拖动新轨落点还调用插件未接App add_track，TimelinePanel初始轨序映射以clipId键却按trackId读取 — 改native新轨span/显式映射并修键，复制不改系统剪贴板，复用宿主新item/seed/回流 — cargo check/tsc通过，真实同轨/跨轨/新轨拖动未验证，未构建新包，不再为一处代码改动反复打包。
+
+Task 76: Ruling: 本轮参数焦点Undo、键盘clip路由、Take投影恢复、Ctrl拖动原生复制合并为feedback-undo-copy-01，Release exit0且构建指纹不变，实际无REAPER后完整部署D:\VST，35文件/SHA256一致、旧05包可恢复备份 — 只交一个合并包，不把回归和部署当真实用户CtrlZ/Ctrl拖动/粘贴成功，父子轨保留低优评估不实施；不push。
+
+Task 77: Ruling: 用户实测REAPER已创建粘贴clip但HFS要重开UI，模型缓存早退未检查inventory代次、后台结构通知依赖fade投影成功，native Undo请求持续等待ARA音频 — 提取独立清单刷新并在缓存早退前同步，写完媒体作废枚举缓存并收尾native请求，回执仍核对真实GUID/几何/授权音频而不重复创建；保留现有曲线/历史，不强制reload — inventory-only同session新增/删除及历史/曲线保留1项、前端回流8项通过；真实GUI尚未验收，若只显示占位就声称完整粘贴会掩盖ARA授权失败。
+
+Task 77: Ruling: 定向Rust首轮在fake宿主I_GROUPID getter因缺默认值abort，产品源码实际读取该字段 — 补齐夹具默认未编组值0后同用例通过，不归因于真实REAPER崩溃，不扩跑全量 — 若忽略夹具不完整会把回归崩溃误报产品故障或跳过必要检查。
+
+Task 77: Ruling: feedback-paste-refresh-02 Release构建exit0，确认REAPER未运行后完整安装D:\VST，35文件逐项SHA256一致、旧包备份feedback-paste-refresh-02-5194dd09 — 交付单一合并修复包，保留nativeAcceptance=false；构建前补齐前端测试回执的3个undefined元数据字段以通过tsc，不改产品协议，不push — 若把部署/fixture当真实GUI验收会再次误报粘贴已完成；参数Undo/Ctrl拖动及真实粘贴仍待用户实测。
+
+Task 78: Ruling: 用户反馈复制/Ctrl拖动界面延迟，结构成功仍被PCM准备门禁拖住 — 媒体回执单独使用get_timeline_inventory，确认真实GUID/目标轨道/几何后立即显示，host_audio_pending与自动应用pending保留音频未就绪事实；选择新占位不等PCM，后台补资源保留选择 — 无PCM结构回执定向用例通过，但不把结构成功说成音频合成成功，也不把fixture耗时当REAPER真实延迟。
+
+Task 78: Ruling: 用户明确私有父子轨而非REAPER folder — 使用真实轨道GUID保存插件TrackGroups，初始/新增轨道根级，复用App拖动但不调用宿主setter；参数delta展开到物理成员、根算法/开关继承、空父轨控制私有保存，v5元数据共享但源atlas仍scoped — GUID/无环/delta保留及两owner actor统一改参/解组/保存冷恢复通过；若直接复制父轨全数组会抹子轨旧线，若改folder会违背用户边界，真实鼠标交互仍待验收。
+
+Task 78: Ruling: 用户将轨道面板折叠扩展到App和插件 — 共享ActionBar入口，Dock隐藏/恢复Timeline且参数面板保持可见，不新增独立布局布尔量/不改session — 两模式DOM点击、布局显隐、会话和挂载记录保留用例通过；不声称已在两个原生窗口实测尺寸和实际WebGL状态。
+
+Task 79: Ruling: 接手 feature/ara-plugin 当前交付；确认 REAPER 完全退出后使用 install-sync-fix.ps1 将 private-groups-latency-04 完整部署到 D:\VST\HiFiShifter.vst3，35文件 SHA256 匹配并独立复核，旧包备份 private-groups-latency-04-9020605c，机器证据 installation-verification.json — 安装后发现 REAPER PID15592 已启动，未向其发送输入；未使用 Computer Use、未修改主工作区、未重复构建；真实复制延迟/私有分组/保存重开/两端折叠集中验收仍待确认，不将安装成功或旧fixture当作目标完成。
+
+Task 80: Ruling: 用户实测 04 包复制后波形缺失、折叠展开改变布局 — PCM 发布新增独立 editor_audio_revision，后台补资源同时保留选择/参数历史；折叠记录保存原停靠树，展开恢复比例与位置且不回滚沟槽设置 — 新增晚到 PCM 与两模式/嵌套布局回归通过；真实新包复验只聚焦这两处，不将旧测试通过说成用户现象已消失。
+
+Task 81: Ruling: 用户要求合并最新 develop — fetch 到 origin/develop 5bf04262，以 291b23b2 合并；逐处保留共享 kernel 适配、原生宿主桥和 develop 新修复，恢复已有未提交工作，留 stash 7cab7cfa89e309bf9f54da92713497b847bd532c 可恢复 — 无未解决冲突，App cargo check、TypeScript 及私有分组/清单/快速回执/授权显示定向回归通过；未改主工作区源文件，未 push，统一交付构建中。
+
+Task 82: Ruling: waveform-layout-develop-05 统一 App/插件 Release 构建成功且产品指纹不变；前端全量365文件/3260项、TypeScript/Vite及本轮Rust定向回归通过 — 确认全部 reaper* 已退出后完整部署 D:\VST\HiFiShifter.vst3，35文件安装核对和独立SHA256复核一致，旧04包备份 waveform-layout-develop-05-61befb8f，机器证据 installation-verification.json — 未使用 Computer Use、未push，复制后波形及折叠展开的真实用户复验仍pending，不把全量测试/Release/安装说成已实机验收。
+
+Task 83: Ruling: 用户确认继续并授权合并 develop、增加 GitHub Actions VST3 打包、主工作区可修改且工作树可移除 — 当前源码与私有父子轨/复制波形/折叠修复进入提交；全量插件 208 passed/2 ignored，修复失去全部 renderer 时保留曲线的真实生命周期缺口，另两旧断言分别按 assignment 预缓存与 live 空轨保留身份契约更新；前端全量3260通过，lint无错误 — ZIP和NSIS setup.exe已用真实Release包生成，SDK按锁定SHA从空目录下载并校验通过，快速打包支持App/Plugin/All及SkipBuild/NoZip/Installer；后续合并推送及工作树移除另记实际结果。
+
 
