@@ -8,38 +8,7 @@
 
 use crate::config::UiSettings;
 use crate::state::AppState;
-use std::sync::{Mutex, OnceLock};
 use tauri::State;
-
-/// Last `(ort_ep, ort_device_id)` pair pushed down to the ONNX modules.
-///
-/// `get_ui_settings()` is a *read* path and is invoked often (app start,
-/// settings panel mounts).  Re-applying the EP settings unconditionally tore
-/// down all three ORT sessions on every read, forcing a full model reload.
-static APPLIED_EP: OnceLock<Mutex<Option<(String, Option<i32>)>>> = OnceLock::new();
-
-/// Push the EP settings down to the three ONNX model modules, but only when
-/// they differ from what is already applied.
-///
-/// Returns `true` when the sessions were invalidated (i.e. the caller may need
-/// to invalidate render caches).  Dropping a session forces a rebuild; on
-/// CoreML that means recompiling the model, so this must not happen on every
-/// settings read.
-fn apply_ort_ep_settings(ep: &str, device_id: Option<i32>) -> bool {
-    let slot = APPLIED_EP.get_or_init(|| Mutex::new(None));
-    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-    let key = (ep.to_string(), device_id);
-    if guard.as_ref() == Some(&key) {
-        return false;
-    }
-    *guard = Some(key);
-    drop(guard);
-
-    crate::nsf_hifigan_onnx::update_ort_ep(ep, device_id);
-    crate::hnsep_onnx::update_ort_ep(ep, device_id);
-    crate::fcpe_onnx::update_ort_ep(ep, device_id);
-    true
-}
 
 /// 需要做**深度合并**（逐个嵌套子键覆盖）的顶层键。
 ///
@@ -105,26 +74,14 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // 不应被前端原样展示或写回。
     settings.render_cache = settings.render_cache.normalized();
     settings.channel_import_policy = settings.channel_import_policy.normalized();
-    crate::time_stretch::update_global_stretch_defaults(
-        settings.default_stretch_algorithm,
-        settings.default_hifigan_mel_stretch,
-    );
-    // Apply EP settings on load — all three ONNX models.  No-op when the
-    // values are unchanged, so repeated settings reads do not rebuild sessions.
-    apply_ort_ep_settings(&settings.ort_ep, settings.ort_device_id);
-    // Sync background render setting
+    // 下发到进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略 / 渲染缓存）。
+    // 取值未变时是空操作，因此重复读设置不会重建任何会话。
+    hifishifter_kernel::ui_settings_apply::apply(&settings);
+    // 以下两项是 App 独有的：插件没有后台渲染队列，也没有这份进程内设置缓存。
     crate::commands::playback::AUTO_BG_RENDER_ENABLED.store(
         settings.auto_background_render,
         std::sync::atomic::Ordering::Relaxed,
     );
-    // Sync "loop for new clips" default (used by importers / legacy project migration)
-    crate::config::set_loop_new_clips_default(settings.loop_new_clips);
-    crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
-    // Sync the import channel policy (used by importers / legacy project migration)
-    crate::config::set_channel_import_policy(&settings.channel_import_policy);
-    // 同步渲染缓存配置（总开关 / 容量 / 超龄…）：应用设置是幂等的，写入或
-    // 缓存目录变化时才会触发目录准备与回收。
-    crate::render_cache::apply_settings(&settings.render_cache);
     // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
     state.store_ui_settings_cache(&settings);
     settings
@@ -154,31 +111,22 @@ pub(super) fn save_ui_settings(
     settings.normalize_time_display();
     settings.render_cache = settings.render_cache.normalized();
     settings.channel_import_policy = settings.channel_import_policy.normalized();
-    let prev_ep = prev_settings.ort_ep.clone();
 
     if let Some(dir) = state.config_dir.get() {
         crate::config::save_ui_settings(dir, &settings);
     }
+    // 下发到进程级消费方；返回值说明这次真的变了什么。
+    let applied = hifishifter_kernel::ui_settings_apply::apply(&settings);
     // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
     state.store_ui_settings_cache(&settings);
-    crate::time_stretch::update_global_stretch_defaults(
-        settings.default_stretch_algorithm,
-        settings.default_hifigan_mel_stretch,
-    );
     crate::commands::playback::AUTO_BG_RENDER_ENABLED.store(
         settings.auto_background_render,
         std::sync::atomic::Ordering::Relaxed,
     );
-    crate::config::set_loop_new_clips_default(settings.loop_new_clips);
-    crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
-    crate::config::set_channel_import_policy(&settings.channel_import_policy);
-    // 渲染缓存配置变化（开关 / 上限 / 超龄 / 目录）→ 立即生效并触发回收。
-    crate::render_cache::apply_settings(&settings.render_cache);
 
-    // Both fields matter: changing only the DirectML device ID must also
-    // rebuild the sessions, otherwise the new device is silently ignored.
-    let ep_changed =
-        prev_ep != settings.ort_ep || prev_settings.ort_device_id != settings.ort_device_id;
+    // 推理设备是否变化由内核按 (ep, device_id) 去重后告知：只比较 EP 字符串会让
+    // "换一张显卡"（仅 device_id 变）静默失效。
+    let ep_changed = applied.inference_device_changed;
 
     // Changing the global stretch defaults only affects the current project when
     // the project inherits the corresponding setting. Compute the effective value
@@ -199,10 +147,6 @@ pub(super) fn save_ui_settings(
             .unwrap_or(settings.default_hifigan_mel_stretch);
         algorithm_before != algorithm_after || mel_before != mel_after
     };
-
-    if ep_changed {
-        apply_ort_ep_settings(&settings.ort_ep, settings.ort_device_id);
-    }
 
     if ep_changed || effective_stretch_changed {
         let timeline = state
