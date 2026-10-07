@@ -5,6 +5,7 @@ import {
     computeTimelineFadeShadeRange,
     formatPlaybackRateLabel,
     parsePlaybackRateInput,
+    timelineLaneBackgroundCss,
 } from "./timelineCanvasStyle.js";
 
 test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted checks", async () => {
@@ -234,4 +235,99 @@ test("buildTimelineClipVisualStyle exposes label pixel widths", () => {
     // 窄 clip 隐藏标签时宽度归零（与 trailingReservePx 的既有语义一致）。
     const narrow = buildTimelineClipVisualStyle({ ...base, widthPx: 40 });
     assert(narrow.gainLabelWidth === 0, "标签不可见时 gainLabelWidth 应为 0");
+});
+
+/** rgba(...) 与泳道底色合成后的 RGB。 */
+function compositedRgb(fill: string, darkMode: boolean): { r: number; g: number; b: number } {
+    const fillMatch = fill.match(/^rgba\((\d+), (\d+), (\d+), ([\d.]+)\)$/);
+    if (!fillMatch) throw new Error(`unparseable fill: ${fill}`);
+    const [, rs, gs, bs, as] = fillMatch;
+    const alpha = Number(as);
+    const bgMatch = timelineLaneBackgroundCss(darkMode).match(/rgb\((\d+), (\d+), (\d+)\)/);
+    if (!bgMatch) throw new Error(`unparseable lane background for darkMode=${darkMode}`);
+    const mix = (channel: string, index: number) =>
+        Number(channel) * alpha + Number(bgMatch[index]) * (1 - alpha);
+    return { r: mix(rs, 1), g: mix(gs, 2), b: mix(bs, 3) };
+}
+
+/** 感知亮度（Rec.601），与样式模块同口径。 */
+function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
+    return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
+}
+
+/** WCAG 2.x 相对亮度（通道先线性化），用于对比度比。 */
+function relativeLuminance(rgb: { r: number; g: number; b: number }): number {
+    const linear = (channel: number): number => {
+        const c = channel / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b);
+}
+
+test("the clip header reads as a separate control bar, not part of the audio surface", () => {
+    // Issue 141 第二点：顶部控件条与下方音频体此前只差一档 HSL 明度 + 0.03–0.04
+    // alpha，合成后明度差只有 0.047–0.064，读起来像"同一块表面的高光"。而它实际
+    // 是控件条，且**不接受渐变手势** —— 用户因此以为顶部也能拉渐变，非常反直觉。
+    //
+    // 门禁在**合成之后**比：色块是半透明的，用户看到的是与泳道底色合成的结果，
+    // 比较未合成的 rgb 等于没测他真正看到的东西。
+    const MIN_HEADER_BODY_STEP = 0.09;
+    const TRACK_COLORS = [
+        "#ff7a00",
+        "#ff0000",
+        "#00ff00",
+        "#0000ff",
+        "#ffffff",
+        "#000000",
+        "#808080",
+        "#74787e",
+    ];
+    // 阈值取自实测：当前最坏组合（浅色主题 + 纯黑轨道色）为 0.107，留约 19% 裕量。
+    for (const darkMode of [false, true]) {
+        for (const trackColor of TRACK_COLORS) {
+            const style = buildTimelineClipVisualStyle({
+                widthPx: 160,
+                trackColor,
+                selected: false,
+                muted: false,
+                gain: 1,
+                playbackRate: 1,
+                name: "x",
+                darkMode,
+            });
+            const step = Math.abs(
+                perceivedLuminance(compositedRgb(style.headerFill, darkMode)) -
+                    perceivedLuminance(compositedRgb(style.bodyFill, darkMode)),
+            );
+            if (step < MIN_HEADER_BODY_STEP) {
+                throw new Error(
+                    `darkMode=${darkMode} trackColor=${trackColor}: header/body composited step ${step.toFixed(4)} < ${MIN_HEADER_BODY_STEP} — the control bar reads as part of the audio surface (Issue 141)`,
+                );
+            }
+        }
+    }
+
+    // 名称与右侧标签都画在 header 上：新色调不得把它们变得难读。
+    // 旧实现的明度位移方向**指向文字色**，文字对比反而下降；现在两个主题都
+    // 背离文字色，因此这里钉住 WCAG AA 的 4.5:1。
+    for (const darkMode of [false, true]) {
+        const style = buildTimelineClipVisualStyle({
+            widthPx: 160,
+            trackColor: "#74787e",
+            selected: false,
+            muted: false,
+            gain: 1,
+            playbackRate: 1,
+            name: "x",
+            darkMode,
+        });
+        const header = relativeLuminance(compositedRgb(style.headerFill, darkMode));
+        const text = relativeLuminance(compositedRgb(style.textFill, darkMode));
+        const ratio = (Math.max(header, text) + 0.05) / (Math.min(header, text) + 0.05);
+        if (ratio < 4.5) {
+            throw new Error(
+                `darkMode=${darkMode}: header text contrast ${ratio.toFixed(2)}:1 is below WCAG AA (4.5:1)`,
+            );
+        }
+    }
 });

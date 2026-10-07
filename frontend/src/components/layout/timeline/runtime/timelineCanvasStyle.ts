@@ -312,6 +312,29 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
     return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
 }
 
+/**
+ * 把 RGB 的整体感知亮度平移 `delta`（-1..1）。
+ *
+ * 三通道同加同减：`perceivedLuminance` 是通道的加权和（权重和为 1），因此三通道
+ * 同加 `d` 恰好让感知亮度加 `d` —— 步长与轨道色**无关**，是定值。通道按 [0,255]
+ * 夹取，所以极暗/极亮的色块上实际步长会略小于请求值。
+ *
+ * 【为什么不用 HSL 明度位移】HSL 的 l 与感知亮度不成比例（蓝紫色在 l=0.48 时
+ * 感知亮度远低于黄色），同一档明度位移在不同色相上得到明显不同的可见步长——
+ * 视觉门禁因此会在某些轨道色上莫名变红。这里直接在感知亮度上做加法。
+ */
+function shiftLuminance(
+    rgb: { r: number; g: number; b: number },
+    delta: number,
+): { r: number; g: number; b: number } {
+    const offset = Math.round(delta * 255);
+    return {
+        r: clamp(Math.round(rgb.r + offset), 0, 255),
+        g: clamp(Math.round(rgb.g + offset), 0, 255),
+        b: clamp(Math.round(rgb.b + offset), 0, 255),
+    };
+}
+
 /** 默认轨道色：中性灰（偏深）。未设色/异常色的轨道呈现安静的灰块。 */
 export const DEFAULT_TRACK_COLOR = "#74787e";
 
@@ -328,6 +351,34 @@ const CLIP_LUMINANCE_BAND = {
 /** 轨道色饱和度带：块面大、常驻视野，高饱和会喧宾夺主（"糖果感"）。
  * 两主题共用同一低饱和带 —— 靠明度和前景色方向区分主题。 */
 const CLIP_SATURATION_BAND = { min: 0.12, max: 0.22 } as const;
+
+/**
+ * 泳道底色的 RGB 分量（clip 背后的轨道区背景）。
+ *
+ * 半透明色块最终都要与它合成，所以"顶部控件条与音频体分不分得开"必须在
+ * 合成之后判断；渲染端的相邻 clip 分隔缝画的也是同一个色。
+ */
+const LANE_BACKGROUND_RGB = {
+    light: { r: 237, g: 240, b: 245 },
+    dark: { r: 31, g: 31, b: 31 },
+} as const;
+
+/**
+ * 顶部控件条相对音频主体的感知亮度步长（正数；方向按主题取）。
+ *
+ * 【为什么是"背离文字色"而不是"提亮/压深一档"】旧实现按主题给 header 一档 HSL
+ * 明度位移（深色 +0.06 / 浅色 −0.05），两个问题：
+ * 1. 位移方向**指向文字色** —— 深色主题配浅色文字却把 header 提亮、浅色主题配
+ *    深色文字却把 header 压深，文字对比不升反降。现在反过来：深色主题把 header
+ *    压深、浅色主题把 header 提亮，两个主题的文字对比都变好（深色主题约 4.4:1
+ *    → 12:1，浅色主题约 4.1:1 → 8:1）；
+ * 2. 合成后的明度差只有 0.047–0.064，读起来像"同一块表面的高光"而不是"另一块
+ *    UI 区域"，于是用户以为顶部也能拉渐变（实际不能）——Issue 141 的第二点。
+ *
+ * 0.16 由视觉门禁（`timelineCanvasStyle.test.ts`）的合成明度差下限钉住：门禁要求
+ * 步长 ≥0.09，实测最坏组合（浅色主题 + 纯黑轨道色）约 0.10。
+ */
+const HEADER_LUMINANCE_STEP = 0.16;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -390,6 +441,20 @@ function shadeHsl(base: Hsl, lightnessDelta: number, saturationDelta = 0): Hsl {
         s: clamp(base.s + saturationDelta, 0, 1),
         l: clamp(base.l + lightnessDelta, 0, 1),
     };
+}
+
+/**
+ * 泳道底色（clip 背后的轨道区背景）。
+ *
+ * 【为什么由样式模块给出】色块是半透明的（深色 ~18% / 浅色 ~24% 透明），最终
+ * 呈现的颜色是它与泳道底色的**合成结果**。因此"顶部控件条与音频体分不分得开"
+ * 只能在合成之后判断，视觉门禁（`timelineCanvasStyle.test.ts`）需要这个底色做
+ * 合成。渲染端的相邻 clip 分隔缝画的也是同一个色（见 `timelineCanvasRenderer`），
+ * 两处共用一个来源，而不是各写一份字面量——两份常量迟早漂移。
+ */
+export function timelineLaneBackgroundCss(darkMode: boolean): string {
+    const { r, g, b } = LANE_BACKGROUND_RGB[darkMode ? "dark" : "light"];
+    return `rgb(${r}, ${g}, ${b})`;
 }
 
 /**
@@ -524,8 +589,9 @@ export function buildTimelineClipVisualStyle(args: {
           ? shadeHsl(baseHsl, 0.04)
           : baseHsl;
     const bodyRgb = hslToRgb(clipHsl);
-    // header 条带：浅色主题压深、深色主题提亮（光源方向与主题一致）。
-    const headerRgb = hslToRgb(shadeHsl(clipHsl, darkMode ? 0.06 : -0.05));
+    // header 条带：整体亮度**背离文字色**一档，读作独立的控件条（chrome），
+    // 而不是色块上的一道高光。见 HEADER_LUMINANCE_STEP 的推导。
+    const headerRgb = shiftLuminance(bodyRgb, darkMode ? -HEADER_LUMINANCE_STEP : HEADER_LUMINANCE_STEP);
 
     const isPitchAdj = args.isPitchAdjustment === true;
     const {

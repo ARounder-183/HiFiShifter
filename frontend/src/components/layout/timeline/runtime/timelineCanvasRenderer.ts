@@ -24,6 +24,7 @@ import {
     CLIP_CORNER_RADIUS_PX,
     resolveFontFamily,
     resolveThemeColor,
+    timelineLaneBackgroundCss,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
 import {
@@ -515,8 +516,8 @@ export function drawTimelineCanvas(
         barrier: boolean;
     }
 
-    /** 相邻 clip 分隔缝颜色（泳道底色）。 */
-    const seamColor = darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)";
+    /** 相邻 clip 分隔缝颜色（泳道底色）。取自样式模块，与视觉门禁的合成底色同源。 */
+    const seamColor = timelineLaneBackgroundCss(darkMode);
 
     /**
      * 计算一个 clip 的几何、样式与合批矩形。
@@ -618,10 +619,15 @@ export function drawTimelineCanvas(
             });
         }
 
-        // header/body 分隔线：亮色块上的细深线，仅做分区提示。
+        // header/body 分隔线：一条细深线，把控件条与音频体的分界画实。
         // 它落在 headerHeight 上，远在圆角弧线之下，因此整宽可见、无需收角。
+        //
+        // 色调分工（Issue 141）：控件条整体亮度**背离文字色**一档 —— 深色主题里比
+        // body 暗、浅色主题里比 body 亮。深线因此总能在**较亮的那一侧**留下可见的
+        // 边界：深色主题靠 body 侧可见，浅色主题靠 header 侧可见。深色主题需要更大
+        // 的 alpha，因为那里的 header 本身已经很暗。
         fills.push({
-            style: "rgba(0, 0, 0, 0.14)",
+            style: darkMode ? "rgba(0, 0, 0, 0.38)" : "rgba(0, 0, 0, 0.22)",
             alpha: baseAlpha,
             x: clipLeft,
             y: clipTop + headerHeight,
