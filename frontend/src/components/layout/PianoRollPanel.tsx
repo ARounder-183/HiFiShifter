@@ -3105,6 +3105,31 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      * @param drawingScrollLeft 目标水平位置（绘制坐标）。
      */
     /**
+     * 把绘制坐标的水平滚动落到 DOM（无宿主时的回退路径）。
+     *
+     * 【为什么必须是 `useCallback`】它原先是一个函数**声明** —— 组件每次渲染都会
+     * 产生一个新的函数对象，于是把 `applyEdgeScrollLeft` 的依赖数组每帧都改掉，
+     * `react-hooks/exhaustive-deps` 报的正是这一点（而 `applyEdgeScrollLeft` 又
+     * 挂在拖拽的 rAF 循环上，每帧重建回调会连带重建整条调用链）。
+     * 函数体只读 ref，依赖为空数组即可，身份因此恒定。
+     */
+    const applyHorizontalScrollPosition = useCallback(function applyHorizontalScrollPosition(
+        drawingScrollLeft: number,
+    ): void {
+        const host = hostRef.current;
+        if (host) {
+            host.setScrollLeft(drawingScrollLeft);
+            return;
+        }
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+        const native = timelineViewportStateToNative(drawingScrollLeft, offset);
+        scroller.scrollLeft = native;
+        lastMirroredScrollLeftRef.current = native;
+    }, []);
+
+    /**
      * **拖拽边缘自动滚屏**的落点：写内核 + 推共享视口，**不自己重绘**。
      *
      * 【为什么不复用 `syncScrollLeft`】那条路径为"原生滚动事件驱动"设计，必须同任务
@@ -3148,20 +3173,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         },
         [applyHorizontalScrollPosition, applyScrollLayers],
     );
-
-    function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
-        const host = hostRef.current;
-        if (host) {
-            host.setScrollLeft(drawingScrollLeft);
-            return;
-        }
-        const scroller = scrollerRef.current;
-        if (!scroller) return;
-        const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
-        const native = timelineViewportStateToNative(drawingScrollLeft, offset);
-        scroller.scrollLeft = native;
-        lastMirroredScrollLeftRef.current = native;
-    }
 
     /**
      * **立即**提交一帧（有宿主时同任务提交，否则退回标脏 rAF）。

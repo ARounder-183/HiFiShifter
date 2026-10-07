@@ -6007,6 +6007,13 @@ export function usePianoRollInteractions(args: {
             toolMode,
             straightVibratoPreset,
             scrollerRef,
+            // 边缘自动滚屏与视口真值：`applyEdgeScrollLeft` / `getViewportTruth`
+            // 在调用方都是稳定引用（前者是 `useCallback`，后者的依赖已在本数组
+            // 里），`scrollLeftRef` 是 ref —— 列入依赖不会让本回调每帧重建，
+            // 只是把"确实读到的值"如实登记。
+            applyEdgeScrollLeft,
+            getViewportTruth,
+            scrollLeftRef,
             canvasRef,
             viewSizeRef,
             panRef,
