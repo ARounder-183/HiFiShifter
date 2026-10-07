@@ -125,7 +125,11 @@ export function findTypeAheadIndex(names: readonly string[], query: string, star
     const needle = query.toLowerCase();
     if (!needle || names.length === 0) return -1;
     for (let step = 0; step < names.length; step++) {
-        const index = (start + step) % names.length;
+        // 【为什么不能只写 `%`】JS 的 `%` 保留符号：`start = -1` 会算出
+        // `index = -1`，`names[-1]` 是 `undefined`，下一行的 `.toLowerCase()`
+        // 直接抛 TypeError。本函数导出的契约是"`start` 超界自动回绕"，负值也是
+        // 超界，因此这里取正模。
+        const index = (((start + step) % names.length) + names.length) % names.length;
         if (names[index].toLowerCase().startsWith(needle)) return index;
     }
     return -1;

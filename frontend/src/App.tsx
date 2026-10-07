@@ -3487,9 +3487,18 @@ function AppInner() {
                     dispatchedAtMs,
                 }),
             ) as unknown as Promise<unknown>;
-            p.finally(() => {
-                playbackSyncInFlightRef.current = false;
-            });
+            // 【为什么先 `catch` 再 `finally`】`finally` 会**原样抛出** rejection，
+            // 而这里没有人接 —— IPC 失败会变成未处理拒绝，被全局处理器当成崩溃
+            // 上报（"进程已崩溃"的假警报）。先吞掉拒绝，再由 `finally` 复位在途
+            // 标志，与其它在途守卫的语义一致（见 `hooks/*Listener` 的 inFlightRef）。
+            void p
+                .catch(() => {
+                    // 失败由 syncPlaybackState 自身记录；这里只负责让下一次轮询
+                    // 能重新发起，不重复上报。
+                })
+                .finally(() => {
+                    playbackSyncInFlightRef.current = false;
+                });
         }, intervalMs);
         return () => window.clearInterval(id);
     }, [dispatch, runtimeIsPlaying, rendering.blocking]);
