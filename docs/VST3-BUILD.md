@@ -1,11 +1,15 @@
 # HiFiShifter VST3
 
-GitHub Actions 的 **HiFiShifter VST3 (Windows x64)** 流程在 main/develop 推送、目标为
-main/develop 的 PR、v* 标签及手动触发时构建。当前打包平台为 Windows x64；插件的
+GitHub Actions 的 **HiFiShifter VST3 (Windows x64)** 流程与 App 打包保持一致：目标为
+main/develop 的 PR 及手动触发时构建。当前打包平台为 Windows x64；插件的
 原生 WebView 编辑器尚未提供 macOS/Linux 交付流程。
 
-下载 Actions 中的 `HiFiShifter-windows-x86_64-vst3` artifact，使用其中的 `-setup.exe`
-安装器，或解开产品 ZIP 手动安装。安装器默认放入系统 VST3 目录，也可选择 D:\VST；
+Actions 分别提供两个独立 artifact，按需下载：
+
+- `HiFiShifter-windows-x86_64-vst3-zip`：插件 ZIP 和它的 SHA256。
+- `HiFiShifter-windows-x86_64-vst3-installer`：setup.exe 和它的 SHA256。
+
+使用安装器，或解开产品 ZIP 手动安装。安装器默认放入系统 VST3 目录，也可选择 D:\VST；
 写入前会检查 REAPER 和它的插件宿主进程已退出。
 将完整 `HiFiShifter.vst3` 目录放入宿主扫描的 VST3 目录，例如 `D:\VST` 或
 `C:\Program Files\Common Files\VST3`。安装或替换前完全退出 REAPER。

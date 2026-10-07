@@ -1,5 +1,39 @@
 # ARA 产品开发当前交接
 
+## 当前工作位置与交付（2026-10-07，优先于下方历史记录）
+
+用户允许修改主工作区，并要求合并 develop、增加 VST3 Actions 与快速打包支持，
+随后移除当前工作树。代码已合并并推送：feature/ara-plugin 的源码/打包提交为
+bf96b4d0 / 61b07319，主工作区 develop 的合并提交为 e834ef54；后续 CI 路径修正和
+诊断增强已推送。当前在 `E:\code\HiFiShifter` 的 develop 工作，
+`E:\code\HiFiShifter\.worktrees\ara-plugin` 已移除，不再使用旧目录。
+
+最新本地统一交付迁入 `.build-tmp/deliveries/develop-vst3-packaging-06`，05 包和最新
+VST 安装备份也已迁入主工作区；一次性诊断源码保存在 `.build-tmp/retired-ara-plugin`。
+主工作区原有 `.dsh-plugin-inspect/` 保留。`dist` 现有完整 VST3 ZIP、NSIS setup.exe、
+各自 SHA256 和同批 App 便携 ZIP。规范插件安装内容仍是完整 .vst3 目录；安装器默认
+系统 VST3 目录，可改 D:\VST，且写入前检查 REAPER 和插件宿主已退出。
+
+快速入口 `pack-portable.bat` / `scripts/pack-portable.ps1` 支持 PackageTarget
+App/Plugin/All、SkipBuild、NoZip、Installer、指定 DeliveryDirectory；All 复用同批
+App/插件交付，不混入插件或 App 专用运行库。说明见 docs/VST3-BUILD.md。
+
+最新 Actions 定义按用户要求与 App 触发一致：仅手动及目标为 main/develop 的 PR。
+插件 ZIP 与安装器已拆为 `HiFiShifter-windows-x86_64-vst3-zip`、
+`HiFiShifter-windows-x86_64-vst3-installer` 两个独立 artifact，各自附 SHA256。
+下面成功 run 的单个 artifact 是此前交付记录，不代表新版仍将两种格式合并下载。
+
+本地前端全量 365 文件/3260 项通过，插件全量 208 passed/2 ignored，lint 无错误。
+本地 SDK 从空目录下载/身份校验及 ZIP/NSIS 生成、摘要和目录结构已验证。
+干净 checkout 暴露的旧 state.rs 测试路径、Rust action 默认 -D warnings、外置未提交
+撤销回归源码已修正；分组回归现在位于插件 crate 的 commands_tests.rs。
+GitHub 首次完整成功已确认，源码 ed1bdd92，run：
+https://github.com/ARounder-183/HiFiShifter/actions/runs/37576171760 。
+前端、插件测试、Release、ZIP/NSIS 打包及上传全部 success，artifact
+HiFiShifter-windows-x86_64-vst3（id 11463257884，335650274 bytes，未过期）。
+机器记录在 `.build-tmp/retired-ara-plugin/github-actions-success.json`。
+此结果确认云端构建/打包流程，不扩大为额外的 REAPER GUI 验收证据。
+
 ## 最新目标：延迟／插件私有参数分组／App与插件共用折叠
 
 用户明确父子轨仅在插件内建立，不同步REAPER folder，新进轨道根级。本轮源码已接

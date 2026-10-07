@@ -14,7 +14,7 @@ pub(super) fn mutates_audio(command:&str)->bool {
 
 // 回归诊断测试仅在cfg(test)编译；产品分组历史路径由已加载分支实际执行。
 #[cfg(test)]
-#[path="../../../../probe/ara/undo_group_diagnostic.rs"]
+#[path="commands_tests.rs"]
 mod undo_group_diagnostic;
 fn value<T:serde::Serialize>(input:T)->Result<Value,String> {serde_json::to_value(input).map_err(|e|e.to_string())}
 fn args<T:serde::de::DeserializeOwned>(input:Value)->Result<T,String> {serde_json::from_value(input).map_err(|e|format!("invalid editor arguments: {e}"))}
