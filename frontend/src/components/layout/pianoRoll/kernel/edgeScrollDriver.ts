@@ -117,6 +117,14 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     let lastClientX: number | null = null;
     /** 上一次滚动发生的时刻；`null` 表示尚未滚过（或已被 stop 复位）。 */
     let lastStepAtMs: number | null = null;
+    /**
+     * 上一次 `step` 是否**被滚动边界挡住**（指针还在边缘带内，但没有可滚余量）。
+     *
+     * 与"指针不在边缘带内"是两回事：前者意味着"继续排帧也没用"，后者意味着
+     * "用户已经离开边缘"。rAF 循环据此停下 —— 否则停在边界按住不动时，每帧都会
+     * 白读一次 `getBoundingClientRect` / `clientWidth`（强制布局），却什么都不做。
+     */
+    let blockedAtLimit = false;
     const maxSpeedPxPerSec = options.maxSpeedPxPerSec ?? EDGE_SCROLL_MAX_SPEED_PX_PER_SEC;
 
     /** 本帧应使用的时长：新手势 / 长间隔按 1/60 秒起步，否则用真实间隔。 */
@@ -132,7 +140,10 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const step = (clientX: number): boolean => {
         lastClientX = clientX;
         const bounds = options.getBounds();
-        if (!bounds) return false;
+        if (!bounds) {
+            blockedAtLimit = false;
+            return false;
+        }
 
         const atMs = now();
         const frameMs = frameMsFor(atMs);
@@ -143,16 +154,24 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
             frameMs,
             maxSpeedPxPerSec,
         });
-        // 记账放在"是否在带内"判定之后、位置写入之前：即使这一帧因为已到上界而
-        // 没有位移，间隔也必须被消费掉 —— 否则下一步会把这段时间又算一遍。
+        // 记账放在位置写入之前：即使这一帧没有位移，间隔也必须被消费掉 ——
+        // 否则下一步会把这段时间又算一遍。
         lastStepAtMs = atMs;
-        if (Math.abs(deltaPx) < MIN_STEP_PX) return false;
+        if (Math.abs(deltaPx) < MIN_STEP_PX) {
+            // 指针不在边缘带内：没有"滚动意图"，不算被边界挡住。
+            blockedAtLimit = false;
+            return false;
+        }
 
         const current = options.getScrollLeft();
         const max = Math.max(0, options.getMaxScrollLeft());
         const next = Math.min(max, Math.max(0, current + deltaPx));
-        if (Math.abs(next - current) < MIN_STEP_PX) return false;
+        if (Math.abs(next - current) < MIN_STEP_PX) {
+            blockedAtLimit = true;
+            return false;
+        }
 
+        blockedAtLimit = false;
         options.setScrollLeft(next);
         options.onScrolled?.(clientX);
         return true;
@@ -178,10 +197,12 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         const clientX = lastClientX;
         if (clientX === null) return;
         step(clientX);
-        // 指针已离开边缘带 → 结束循环。指针仍在带内则继续：即便这一刻已到滚动
-        // 上界（step 无位移），上界也可能随缩放 / 编辑而变化，保持循环比"停下来
-        // 等下一次 pointermove"更符合用户预期（他还在边缘按着）。
-        if (pointerInBand(clientX)) {
+        // 两种情况都结束循环：
+        // - 指针已离开边缘带 → 用户不再要求滚动；
+        // - 指针仍在带内但已被滚动边界挡住 → 再排帧也没有位移，只会白读布局。
+        //   （边界在笔画期间是固定的：取数窗口的换入被 `liveEditDeferral` 推迟到
+        //   pointer-up，工程长度也不会在手势中途变化。）
+        if (pointerInBand(clientX) && !blockedAtLimit) {
             rafId = requestFrame(tick);
         }
     };
@@ -204,6 +225,7 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         }
         lastClientX = null;
         lastStepAtMs = null;
+        blockedAtLimit = false;
     };
 
     return {

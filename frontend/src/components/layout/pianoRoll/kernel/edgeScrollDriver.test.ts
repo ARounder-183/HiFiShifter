@@ -217,15 +217,30 @@ describe("createEdgeScrollDriver.track（rAF 驱动，绘制类工具用）", ()
         }
     });
 
-    it("到达滚动上界后不再回调（没有位移就没有重算）", () => {
+    it("到达滚动上界后不再回调，循环也自行结束（不停白读布局）", () => {
         const h = createHarness(0, 5);
         h.driver.track(NEAR_RIGHT);
-        h.flushFrame();
+        h.flushFrame(); // 第 1 帧：滚到上界，本帧确有位移 → 还会再排一帧
         expect(h.getScrollLeft()).toBe(5);
+        expect(h.driver.isRunning()).toBe(true);
+
+        h.flushFrame(); // 第 2 帧：已无余量 → 循环结束
         const callsAtLimit = h.onScrolled.mock.calls.length;
+        expect(h.driver.isRunning()).toBe(false);
+
+        // 停在边界按住不动：没有位移就不该继续排帧，也不该再回调。
         h.flushFrame();
         h.flushFrame();
         expect(h.onScrolled).toHaveBeenCalledTimes(callsAtLimit);
+        expect(h.getScrollLeft()).toBe(5);
+    });
+
+    it("已在左界、指针停在左缘：同样不空转", () => {
+        const h = createHarness(0);
+        h.driver.track(NEAR_LEFT);
+        h.flushFrame();
+        expect(h.getScrollLeft()).toBe(0);
+        expect(h.driver.isRunning()).toBe(false);
     });
 });
 
