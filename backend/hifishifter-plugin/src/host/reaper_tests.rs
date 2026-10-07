@@ -411,7 +411,7 @@ unsafe extern "C" fn validate(
                 || f.extra_tracks
                     .borrow()
                     .iter()
-                    .any(|track| (&**track as *const u8) as usize == object as usize)
+                    .any(|track| std::ptr::eq(&**track as *const u8, object as *const u8))
         }
         _ => false,
     }
@@ -616,7 +616,7 @@ unsafe extern "C" fn media_destroy(pointer: *mut c_void) {
     let mut sources = f.media_sources.borrow_mut();
     let index = sources
         .iter()
-        .position(|source| (&**source as *const u8) as usize == pointer as usize)
+        .position(|source| std::ptr::eq(&**source as *const u8, pointer as *const u8))
         .expect("source must be owned and destroyed once");
     sources.remove(index);
 }
@@ -695,7 +695,7 @@ unsafe extern "C" fn media_track_guid(
         let tracks = f.extra_tracks.borrow();
         let index = tracks
             .iter()
-            .position(|t| (&**t as *const u8) as usize == track as usize)
+            .position(|t| std::ptr::eq(&**t as *const u8, track as *const u8))
             .unwrap();
         std::ffi::CString::new(format!("{{44444444-4444-4444-4444-{:012}}}", index + 1)).unwrap()
     };
@@ -784,7 +784,7 @@ unsafe extern "C" fn delete_track(track: *mut c_void) {
     let mut tracks = f.extra_tracks.borrow_mut();
     let index = tracks
         .iter()
-        .position(|t| (&**t as *const u8) as usize == track as usize)
+        .position(|t| std::ptr::eq(&**t as *const u8, track as *const u8))
         .unwrap();
     tracks.remove(index);
     f.new_fx.borrow_mut().remove(&(track as usize));

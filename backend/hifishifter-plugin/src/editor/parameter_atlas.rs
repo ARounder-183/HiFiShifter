@@ -189,6 +189,8 @@ impl ParameterAtlas {
         self.regions.is_empty() && self.copy_seeds.is_empty() && self.gaps.is_empty()
     }
     /// 同一源曲线可由历史/区域共享，额度按reservation身份去重，而不是按序列化值重复计数。
+    // 额度统计诊断入口，保留供预算核对。
+    #[allow(dead_code)]
     pub fn accounted_curve_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let source = self
@@ -960,7 +962,7 @@ fn near(a: f64, b: f64) -> bool {
         && (a - b).abs() <= 8. * f64::EPSILON * a.abs().max(b.abs()).max(1.)
 }
 fn frame_range(geometry: &RegionGeometry, frame_ms: f64) -> Result<(usize, usize), String> {
-    if !frame_ms.is_finite() || frame_ms < 0.1 || frame_ms > 1000. || geometry.project_start < 0. {
+    if !frame_ms.is_finite() || !(0.1..=1000.).contains(&frame_ms) || geometry.project_start < 0. {
         return Err("invalid source parameter frame domain".into());
     }
     let first = (geometry.project_start * 1000. / frame_ms).floor();

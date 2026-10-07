@@ -2036,7 +2036,7 @@ pub(crate) mod tests {
         let editor = owners[0].editor_session().unwrap();
         let leases = owners
             .iter()
-            .map(|owner| super::super::routing::RouteLease::new(owner))
+            .map(super::super::routing::RouteLease::new)
             .collect::<Vec<_>>();
         let links = leases
             .iter()
@@ -2370,7 +2370,7 @@ pub(crate) mod tests {
         let editor = owners[0].editor_session().unwrap();
         let leases = owners
             .iter()
-            .map(|owner| super::super::routing::RouteLease::new(owner))
+            .map(super::super::routing::RouteLease::new)
             .collect::<Vec<_>>();
         let mut sinks = Vec::new();
         let mut receivers = Vec::new();
@@ -2557,7 +2557,7 @@ pub(crate) mod tests {
         };
         let leases = owners
             .iter()
-            .map(|owner| super::super::routing::RouteLease::new(owner))
+            .map(super::super::routing::RouteLease::new)
             .collect::<Vec<_>>();
         let links = leases
             .iter()
@@ -2687,7 +2687,7 @@ pub(crate) mod tests {
         link.clear();
         link.bind(std::process::id() as i64, rb.token()).unwrap();
         drop(held);
-        let mut results = vec![
+        let mut results = [
             receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
             receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
         ];

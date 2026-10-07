@@ -255,7 +255,7 @@ impl RenderInput {
                 let (_, channels, _, mut samples) = run(&view, lo, hi)?;
                 // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
                 for sample in &mut samples {
-                    *sample = 0_f32 + *sample;
+                    *sample += 0_f32;
                 }
                 (channels, samples)
             } else {

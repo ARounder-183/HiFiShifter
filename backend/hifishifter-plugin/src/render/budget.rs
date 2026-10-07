@@ -21,6 +21,8 @@ impl Drop for Reservation {
 }
 impl Reservation {
     /// 已转交该持有者的实际额度，用于非实时诊断；不是重新读取全局used。
+    // 非实时诊断读取入口，保留。
+    #[allow(dead_code)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -43,6 +45,8 @@ impl MemoryBudget {
         self.used.load(Ordering::Acquire)
     }
     /// 额度高水位用于诊断，不能冒充进程WorkingSet峰值。
+    // 高水位诊断读取入口，保留。
+    #[allow(dead_code)]
     pub fn peak(&self) -> usize {
         self.peak.load(Ordering::Acquire)
     }

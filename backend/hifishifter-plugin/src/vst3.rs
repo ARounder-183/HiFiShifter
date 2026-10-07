@@ -429,7 +429,7 @@ unsafe extern "system" fn factory_get_class_info(
     index: i32,
     info: *mut PClassInfo,
 ) -> TResult {
-    if info.is_null() || index < 0 || index > 2 {
+    if info.is_null() || !(0..=2).contains(&index) {
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: info 是宿主提供的可写 PClassInfo。
@@ -443,7 +443,7 @@ unsafe extern "system" fn factory_get_class_info2(
     index: i32,
     info: *mut PClassInfo2,
 ) -> TResult {
-    if info.is_null() || index < 0 || index > 2 {
+    if info.is_null() || !(0..=2).contains(&index) {
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: info 是宿主提供的可写 PClassInfo2。
@@ -2191,6 +2191,8 @@ mod audio_boundary_tests {
     }
 
     /// 相同bus/相同plane的in-place不能先清零；silent或inactive输入则明确补零。
+    // 测试故意把plane置空来模拟inactive输入，赋值本身不被读取。
+    #[allow(unused_assignments)]
     #[test]
     fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
         let model = crate::ara::model::ModelHandle::new();

@@ -401,6 +401,8 @@ impl HostClipTarget {
     pub(crate) fn same_project(&self, other: &Self) -> bool {
         self.project == other.project
     }
+    // 轨道键访问器保留，供对象身份核对。
+    #[allow(dead_code)]
     pub(crate) fn track_key(&self) -> usize {
         self.track
     }

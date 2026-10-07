@@ -12,11 +12,10 @@ mod write;
 pub(crate) use write::{HostClipTarget, HostUndoBlock};
 #[path = "reaper_media.rs"]
 mod media;
-pub(crate) use media::CreatedTrack;
 pub(crate) use media::HostTrackTarget;
 #[path = "ui_inventory.rs"]
 mod ui_inventory;
-pub(crate) use ui_inventory::{UiItem, UiTrack};
+pub(crate) use ui_inventory::UiTrack;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -835,6 +834,8 @@ mod tests {
         );
     }
     /// 通过真实QI/函数表适配测试所属project、pause/stop区别、引用平衡和跨线程拒绝。
+    // 测试故意改写fixture的state来验证transport读取，旧值不再读取。
+    #[allow(unused_assignments)]
     #[test]
     fn bound_project_transport_uses_actual_position_and_never_calls_from_a_worker() {
         let mut project = Project {

@@ -49,7 +49,7 @@ fn pin_analysis_code() -> Result<(), String> {
 fn model_directory() -> Result<PathBuf, String> {
     #[cfg(test)]
     {
-        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/models"));
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/models"))
     }
     #[cfg(all(windows, not(test)))]
     {

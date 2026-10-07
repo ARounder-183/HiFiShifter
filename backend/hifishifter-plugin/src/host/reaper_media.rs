@@ -1,6 +1,6 @@
 //! 官方REAPER媒体创建接口：宿主创建item/take/source，PCM与region仍等真实ARA回流授权。
 use super::{checked, Guid, HostVtbl, ReaperHost};
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::sync::Arc;
 
 pub(super) type CreateSource = unsafe extern "C" fn(*const c_char, bool) -> *mut c_void;

@@ -995,7 +995,7 @@ fn configure_browser(
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                     document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                    let outcome=super::host_edit::execute_managed(&owner,plan,&allowed,true);
+                    let outcome=super::host_edit::execute_managed(&owner,plan,allowed,true);
                     document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry,split:None,media:None,action:None})

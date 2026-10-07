@@ -4,6 +4,9 @@ use ara2_bridge::core::ApiGeneration;
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::sync::{Arc, Mutex};
 
+/// 分配观察器事件：`(role bits, 区域键列表)`。
+type AssignmentEvents = Arc<Mutex<Vec<(i32, Vec<usize>)>>>;
+
 /// editor sequence 也是实际分配输入，新增/删除必须通知而非只有 region 通知。
 #[test]
 fn editor_sequences_notify_without_affecting_playback_roles() {
@@ -75,7 +78,7 @@ fn observer_runs_after_assignment_locks_are_released() {
 fn native_assignments_notify_each_renderer_independently() {
     let events_a = Arc::new(Mutex::new(Vec::new()));
     let events_b = Arc::new(Mutex::new(Vec::new()));
-    let make = |events: Arc<Mutex<Vec<(i32, Vec<usize>)>>>| {
+    let make = |events: AssignmentEvents| {
         ExtensionBinding::new_with_assignment_observer(
             ApiGeneration::V2Final,
             ExtensionRoles::all(),

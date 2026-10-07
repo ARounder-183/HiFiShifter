@@ -160,7 +160,7 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 if !(-1.0..=1.0).contains(&number) {
                     return Err("fade curvature outside -1..1".into());
                 }
-            } else if number < 0. || number > 1_000_000. {
+            } else if !(0. ..=1_000_000.).contains(&number) {
                 return Err("clip edit outside supported finite range".into());
             }
             if matches!(key.as_str(), "fadeInShape" | "fadeOutShape") && number >= 7. {
@@ -296,6 +296,8 @@ impl EditorSession {
 }
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
+// 保留无undo上下文的一次性执行入口，当前调用方统一走execute_managed。
+#[allow(dead_code)]
 pub(crate) fn execute(
     owner: &Arc<ExtensionOwner>,
     plan: HostEditPlan,

@@ -437,6 +437,8 @@ impl DocumentSession {
         Ok((self.ui_geometry_revision.load(Ordering::Acquire), timeline))
     }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
+    // 非实时诊断入口，保留供授权范围核对。
+    #[allow(dead_code)]
     pub(crate) fn workspace_scope(&self) -> Result<WorkspaceScope, String> {
         let _transaction = self.transaction.lock().unwrap();
         self.workspace_scope_locked()

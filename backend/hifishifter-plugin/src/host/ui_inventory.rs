@@ -16,6 +16,8 @@ pub(crate) struct UiTrack {
     pub name: String,
     pub order: i32,
     pub items: Vec<UiItem>,
+    // 宿主 change 代次字段保留，随 UiTrack 一起快照。
+    #[allow(dead_code)]
     pub change: i32,
     pub target: HostTrackTarget,
 }

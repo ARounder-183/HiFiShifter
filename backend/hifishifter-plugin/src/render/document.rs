@@ -310,6 +310,8 @@ impl DocumentSession {
         Ok(())
     }
     /// 全工作区在单事务校验scope/模型/曲线并接受；未知范围或几何不静默忽略。
+    // 整批接受入口保留，供不分组调用方使用。
+    #[allow(dead_code)]
     pub(crate) fn accept_workspace_edits(
         &self,
         base_edit: u64,
@@ -362,6 +364,8 @@ impl DocumentSession {
         Ok((edits.revision, model, projection))
     }
     /// 合成只在短事务外计算；最终再次核对文档、scope、assignment与编辑代次。
+    // 无进度回调的合成入口保留，供简单调用方使用。
+    #[allow(dead_code)]
     pub(crate) fn apply_workspace_edits(
         &self,
         base_edit: u64,

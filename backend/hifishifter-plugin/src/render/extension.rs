@@ -831,7 +831,7 @@ mod bound_tests {
         document.prepare_renderers();
         let accepted = document.edits.lock().unwrap().clone();
         assert!(
-            accepted.params.get("track").is_none(),
+            !accepted.params.contains_key("track"),
             "旧A无曲线，不能借旧轨序号取到B曲线"
         );
         assert_eq!(accepted.params["b"].pitch_edit.len(), 800);
@@ -2001,6 +2001,8 @@ impl ExtensionOwner {
         })
     }
     /// actor/worker只可消费UI冻结的Rust值，不沿此访问器调用host；代次变化明确不可用。
+    // 只读几何元数据访问器保留，供worker消费冻结值。
+    #[allow(dead_code)]
     pub(crate) fn host_geometry_metadata(
         &self,
     ) -> Result<crate::host::geometry::BoundHostGeometry, String> {
@@ -2089,7 +2091,7 @@ impl ExtensionOwner {
             return;
         };
         let allowed = || self.host_query_authorized(&stamp);
-        let Ok(change) = host.geometry_revision(&allowed) else {
+        let Ok(change) = host.geometry_revision(allowed) else {
             return;
         };
         let token = (change, stamp.1, stamp.2);
@@ -2153,7 +2155,7 @@ impl ExtensionOwner {
             }
             tracks.insert(track.guid.clone(), track);
         }
-        if !allowed() || host.geometry_revision(&allowed).ok() != Some(change) {
+        if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
         }
         let _transaction = stamp.0.transaction.lock().unwrap();
@@ -2560,6 +2562,8 @@ impl ExtensionOwner {
     }
 
     /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
+    // 组件state访问器保留，供未绑定路径读取。
+    #[allow(dead_code)]
     pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
         self.document
             .lock()
@@ -3159,7 +3163,7 @@ impl ExtensionOwner {
         if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
             let _ = self
                 .preparation
-                .get_or_init(|| super::preparation::PreparationQueue::new());
+                .get_or_init(super::preparation::PreparationQueue::new);
         }
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock().unwrap() = Some(weak);
