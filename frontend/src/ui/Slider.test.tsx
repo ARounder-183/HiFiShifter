@@ -94,3 +94,18 @@ test("包装盒仍然铺满可用宽度（收住溢出不等于改变布局）",
     expect(box.className).toContain("flex-1");
     expect(box.className).toContain("items-center");
 });
+
+/*
+ * 包装盒必须是**块级** flex 容器。
+ *
+ * `flex-1` / `min-w-0` 只在 flex 行里生效；浮窗（如 Clip 共振峰窗口的「强度」）
+ * 把滑块直接放进普通块级卡片，那里没有 flex 上下文 —— inline-flex 会收缩到内容
+ * 宽度，内层 Radix 滑块的 `width: 100%` 随之塌成很小一截（用户报告：滑块缩在
+ * 左边一小块）。块级 flex 容器在块级父元素里按 `width: auto` 铺满，因此这里钉住
+ * "不得退回 inline-flex"。jsdom 没有布局引擎量不出宽度，只能静态核对类名。
+ */
+test("包装盒是块级 flex 容器，非 flex 父元素里也能铺满", () => {
+    const tokens = renderSlider("form").className.split(/\s+/);
+    expect(tokens).toContain("flex");
+    expect(tokens).not.toContain("inline-flex");
+});
