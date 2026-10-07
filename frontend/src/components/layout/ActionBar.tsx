@@ -21,7 +21,7 @@ import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarSeparator } from "../../ui/Toolbar";
-import { AppIconButton } from "../../ui";
+import { AppIconButton, AppSlider, AppSliderReadout } from "../../ui";
 
 import {
     playOriginal,
@@ -65,7 +65,6 @@ import {
 } from "../../utils/tempoMap";
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useRangeWheelGuard } from "../../utils/useRangeWheelGuard";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
 import {
@@ -239,9 +238,6 @@ export function ActionBar() {
     const redoShortcutKb = useAppSelector((state: RootState) =>
         selectKeybindings(state, "edit.redo"),
     );
-    // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
-    // （React onWheel 的 preventDefault 是 passive no-op，见 useRangeWheelGuard）。
-    const metronomeVolumeWheelGuard = useRangeWheelGuard<HTMLInputElement>();
 
     // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
     // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
@@ -673,43 +669,34 @@ export function ActionBar() {
                             >
                                 <div className="hs-menu__label">{t("metronome_volume")}</div>
                                 <div className="hs-menu__body flex items-center gap-2">
-                                    <input
-                                        type="range"
-                                        ref={metronomeVolumeWheelGuard}
+                                    {/*
+                                     * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
+                                     * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
+                                     * 内建，`percent` 单位语义给出的正是这两个步长。
+                                     *
+                                     * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
+                                     * 关闭"监听在 window 捕获阶段，且已经先判 `contains(target)`
+                                     * 直接放行菜单内部的指针事件（见上方 effect）。
+                                     *
+                                     * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
+                                     * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
+                                     * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
+                                     */}
+                                    <AppSlider
+                                        value={Math.round(s.metronomeGain * 100)}
+                                        unit="percent"
                                         min={0}
                                         max={100}
-                                        step={5}
-                                        value={Math.round(s.metronomeGain * 100)}
-                                        onChange={(e) => {
-                                            void dispatch(
-                                                updateMetronome({
-                                                    metronomeGain: Number(e.target.value) / 100,
-                                                }),
-                                            );
-                                        }}
-                                        onWheel={(e) => {
-                                            // 阻止默认滚动由滑块上的原生非被动守卫完成
-                                            // （React onWheel 的 preventDefault 是 no-op）。
-                                            // 粗步长 = 滑块步长 5%；按住“精细调整”修饰键时步长 1%。
-                                            const fine = isModifierActive(paramFineAdjustKb, e);
-                                            const delta = (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : 5);
-                                            const next = Math.min(
-                                                100,
-                                                Math.max(
-                                                    0,
-                                                    Math.round(s.metronomeGain * 100) + delta,
-                                                ),
-                                            );
+                                        ariaLabel={t("metronome_volume")}
+                                        onChange={(next) => {
                                             void dispatch(
                                                 updateMetronome({ metronomeGain: next / 100 }),
                                             );
                                         }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                        className="qt-range flex-1"
                                     />
-                                    <span className="hs-type-caption w-8 text-right">
-                                        {Math.round(s.metronomeGain * 100)}
-                                    </span>
+                                    <AppSliderReadout>
+                                        {Math.round(s.metronomeGain * 100)}%
+                                    </AppSliderReadout>
                                 </div>
                                 <div className="hs-menu__separator" role="separator" />
                                 <div className="hs-menu__label">{t("metronome_mode")}</div>
