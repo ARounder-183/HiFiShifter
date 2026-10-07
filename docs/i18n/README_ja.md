@@ -15,6 +15,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 - **3 種類のボコーダーアルゴリズム**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib。詳細は[アルゴリズム](#アルゴリズム)を参照。
 - **相互運用性**：REAPER（`.rpp`）および VocalShifter（`.vshp` / `.vsp`）プロジェクトのインポート、REAPER / VocalShifter クリップボードとの双方向の読み書きに対応。MIDI は音高リファレンスブロック / 音高パラメータ / テンポマップとしてインポートでき、クリップとピッチラインは MIDI としてエクスポートできます。
 - **インポート / エクスポート**：一般的なオーディオ / 動画フォーマットをインポート（動画からは自動で音声トラックを抽出）。プロジェクトと分離トラックを `wav` / `mp3` / `flac` でエクスポート。
+- **VST3 / ARA プラグイン**：スタンドアロン版とは別に、Windows x64 向けの VST3（ARA）プラグインも提供しており、REAPER 内で同じ編集インターフェースを直接開けます。ホストがクリップのジオメトリ、BPM、フェード音声を担当し、HiFiShifter がパラメータ曲線を担当します。編集は自動的にホストへ適用されます。詳細はユーザーマニュアルの [VST3 / ARA プラグイン](USERMANUAL_ja.md#八vst3--ara-プラグインreaper)の章を参照してください。
 - **その他**：内蔵ファイルブラウザーとクイック検索、ノート、自動バックアップ、多言語 UI（简体中文 / 繁體中文 / English / 日本語 / 한국어）、ライト / ダークテーマ、推論デバイスの選択とベンチマーク。
 
 ## インストール
@@ -24,6 +25,8 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 - **Windows**：NSIS インストーラー（`installer`）またはポータブル版 ZIP（`portable`）。x86_64 と arm64 の両アーキテクチャを提供しています。
 - **macOS**：未署名の dmg（Apple Silicon は `arm64`、Intel は `x86_64`）。初回起動時は手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従って対処してください。
 - **Linux**：AppImage（x86_64 / arm64）。
+
+**VST3 / ARA プラグイン**：Windows x64 には VST3（ARA）プラグイン形態もあり、REAPER 内で埋め込みインターフェースとして使用できます（現在は REAPER でのみ検証済み）。インストール方法、実行時依存、使用上の制限はユーザーマニュアルの [VST3 / ARA プラグイン](USERMANUAL_ja.md#八vst3--ara-プラグインreaper)の章を参照してください。
 
 GPU アクセラレーション：Windows では DirectML（DirectX 12）、macOS（Apple Silicon）では CoreML + WebGPU、Linux x86_64 では WebGPU（Dawn/Vulkan）を使用し、その他のプラットフォームでは CPU にフォールバックします。アプリ内の `オプション → 推論デバイス` からデバイスを切り替えて、ベンチマークを実行できます。
 
@@ -39,6 +42,8 @@ HiFiShifterは統一されたレンダリングインターフェースを提供
 
 1. 他のDAWやスライシングソフトウェアを使用して、人力ボーカルに必要な短いクリップソースを準備する。
 2. HiFiShifterでオーディオのスプライシングとチューニングを完了する。
+
+すでに REAPER で作業している場合は、[VST3 / ARA プラグイン](USERMANUAL_ja.md#八vst3--ara-プラグインreaper)を使って REAPER プロジェクト内でそのままスプライシングとチューニングを完了でき、オーディオをスタンドアロン版へインポートし直す必要はありません。
 
 HiFiShifterは他のソフトウェアからのプロジェクト移行を容易にする以下の操作もサポートしています：
 
@@ -191,7 +196,12 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows ポータブル ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
+
+# Windows VST3 ZIP + インストーラー（完全な Release 交付あり）
+.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
+
+`pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/pack-portable.ps1` と `tools/` 配下のビルドスクリプトを参照してください。
 
 `TAURI_UI_MODE` 環境変数でフロントエンドの起動モードを切り替えられます：
 
@@ -260,6 +270,9 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 ## ドキュメント
 
 - ユーザーマニュアル：[简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
+
+開発者向け：
+
 - 拡張（Extension）API：[docs/extension-api.md](../../docs/extension-api.md)
 - i18n スタイルガイド：[docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
 

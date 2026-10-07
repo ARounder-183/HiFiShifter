@@ -15,6 +15,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **三種聲碼器演算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，詳見[演算法](#演算法)。
 - **互操作性**：匯入 REAPER（`.rpp`）與 VocalShifter（`.vshp` / `.vsp`）專案，雙向讀寫 REAPER 與 VocalShifter 剪貼簿；MIDI 可匯入為音高參考塊 / 音高參數 / 速度映射，音訊塊與音高線可匯出為 MIDI。
 - **匯入匯出**：常見音訊 / 視訊格式匯入（視訊檔自動提取音訊軌），專案與分軌匯出為 `wav` / `mp3` / `flac`。
+- **VST3 / ARA 外掛**：除獨立 App 外，另提供 Windows x64 的 VST3（ARA）外掛，可在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。詳見使用手冊的 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)章節。
 - **其他**：內建檔案瀏覽器與快速搜尋、記事本、自動備份、多語言介面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深淺色主題、推理裝置選擇與基準測試。
 
 ## 安裝
@@ -24,6 +25,8 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。
 - **macOS**：未簽名 dmg（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`）。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
 - **Linux**：AppImage（x86_64 / arm64）。
+
+**VST3 / ARA 外掛**：Windows x64 另有 VST3（ARA）外掛形態，可在 REAPER 中以嵌入介面使用（目前僅針對 REAPER 驗證）。安裝方式、執行依賴與使用限制見使用手冊的 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)章節。
 
 GPU 加速：Windows 使用 DirectML（DirectX 12），macOS（Apple Silicon）使用 CoreML + WebGPU，Linux x86_64 使用 WebGPU（Dawn/Vulkan），其餘平台回退 CPU。可在應用內 `選項 → 推理裝置` 中切換裝置並執行基準測試。
 
@@ -39,6 +42,8 @@ HiFiShifter 提供了一個統一的渲染介面，以便未來增添更多的�
 
 1. 透過其他 DAW 或切片軟體準備好人力所需的短片段音源。
 2. 在 HiFiShifter 中完成音訊的拼貼和調音。
+
+如果你已經在 REAPER 裡工作，也可以直接用 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)在 REAPER 專案內完成拼貼與調音，不必再把音訊匯入獨立 App。
 
 當然，HiFiShifter 也支援以下操作方便從其他軟體的專案遷移：
 
@@ -191,7 +196,12 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows 可攜版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
+
+# Windows VST3 ZIP + 安裝程式（已有完整 Release 交付）
+.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
+
+雙擊 `pack-portable.bat` 可選擇 App、VST3 或兩者；可用參數見 `scripts/pack-portable.ps1` 與 `tools/` 下的構建腳本。
 
 前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
 
@@ -260,6 +270,9 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 ## 文件
 
 - 使用手冊：[简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
+
+面向開發者：
+
 - 擴充功能（Extension）API：[docs/extension-api.md](../../docs/extension-api.md)
 - 介面文案風格指南（i18n Style Guide）：[docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
 

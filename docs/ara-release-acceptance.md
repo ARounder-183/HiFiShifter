@@ -41,7 +41,9 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 
 ## 后续使用与开发
 
-用户操作见 `hifishifter-vst-使用说明.md`；构建及App/插件共享功能修改入口见
-`ara-build-and-sync.md`。只维护同一份frontend/kernel，宿主权限与生命周期留在适配层。
+用户操作见用户手册的插件章节（[简体中文](i18n/USERMANUAL.md#八vst3--ara-插件reaper)，
+另有英/日/韩/繁中四语）；构建入口见 `tools/build-hifishifter.ps1`，打包见
+`tools/package-vst3.ps1` 与 `scripts/pack-portable.ps1`。只维护同一份frontend/kernel，
+宿主权限与生命周期留在适配层。
 用户已明确授权把当前分支改名为 `feature/ara-plugin` 并推送origin；不改名或删除其它
 远程分支，不强推，不自动创建PR。

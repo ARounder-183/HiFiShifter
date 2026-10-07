@@ -37,6 +37,8 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
+**About the VST3 / ARA Plugin**: Besides the standalone app, HiFiShifter is also available as a VST3 (ARA) plugin, which opens the same editing interface directly inside a REAPER project. The plugin is currently a Windows x64 build and has only been verified against REAPER; see the [VST3 / ARA Plugin](#8-vst3--ara-plugin-reaper) chapter for installation and usage.
+
 ## 2. Menu
 
 The menu bar consists of six menus from left to right — `File`, `Edit`, `Track`, `View`, `Options` and `Help` — plus a `Language` switcher at the far right, which switches the interface language between English / 简体中文 / 繁體中文 / 日本語 / 한국어.
@@ -104,7 +106,7 @@ The `View` menu contains options related to the interface display:
 - `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
 - `Theme: Auto / Dark / Light`: Switch the current theme. With `Auto`, HiFiShifter follows your operating system's light/dark appearance and switches automatically (this is the default).
 - `Appearance Settings...`: Open the appearance settings panel.
-- `Connect to ARA Host...`: Connect to a running ARA host (REAPER) instance to edit the host's audio from the standalone app. Shown in the standalone app only; it opens a floating session panel where you can submit, refresh or disconnect.
+- `Connect to ARA Host...`: Connect to a running ARA host (REAPER) instance to edit the host's audio from the standalone app. Shown in the standalone app only; it opens a floating session panel where you can submit, refresh or disconnect. See the [VST3 / ARA Plugin](#8-vst3--ara-plugin-reaper) chapter for details.
 - `Refresh`: Reload runtime information.
 - `Clear Waveform Cache`: Clear the cached waveform data; it is regenerated the next time it is displayed.
 
@@ -127,7 +129,7 @@ The `Options` menu allows you to modify various settings of HiFiShifter:
 
 The `Help` menu provides diagnostics and support entries:
 
-- `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#8-logs-and-troubleshooting) section.
+- `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#9-logs-and-troubleshooting) section.
 - `Export Diagnostics...`: Lets you pick a save location, then generates a diagnostics package (system info + all logs + inference-device benchmark results) that you can attach to an issue.
 - `About HiFiShifter`: Opens an About dialog showing the project introduction, the current version, and the project homepage link.
 
@@ -440,6 +442,8 @@ Holding a shortcut down performs one step immediately, then repeats continuously
 
 Left-drag on a selected curve to move it vertically, horizontally, or freely, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
+When you drag near the left/right edge of the view, the parameter editor scrolls horizontally automatically (the Select tool only advances while the pointer moves — parking the pointer at the edge does not keep it scrolling). See the [Draw Tool](#3-draw-tool) chapter for details.
+
 Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease, all the way to fully flattened. For the pitch parameter, amplitude adjustment only strengthens or weakens vibrato and other fine detail — the overall note contour and intervals are preserved, so the pitch is never "lifted" as a whole. The result is previewed live while you drag.
 
 Right-click in the parameter editor to open a context menu with operations such as `Initialize`, `Transpose by Cents...`, `Transpose by Degrees...` (shown for pitch parameters only), `Set To...`, `Average...`, `Smooth...`, `Add Vibrato...`, `Quantize...`, `Mean Quantize...`, etc.; when the parameter is Volume or Dynamics, `Convert to Dynamics` / `Convert to Volume` also appear (a loudness-equivalent conversion, not a simple copy); when the parameter is Pitch, `Save as Pitch Reference Clip` and `Export as MIDI` appear as well.
@@ -459,6 +463,8 @@ Hold the Multi-Range Select modifier (default `Ctrl`, `Command` on macOS; config
 The Draw tool lets you draw parameter curves by hand. Default shortcut: `F8`.
 
 Left-drag to draw freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
+
+When you drag near the left/right edge of the view, the view scrolls horizontally automatically, faster the closer you are to the edge, so you can draw in one stroke into places you cannot see. The Draw, Line and Vibrato tools scroll continuously while the drag is held; the Select tool only advances while the pointer moves — parking the pointer at the edge does not keep it scrolling. The vertical direction never auto-scrolls. This behavior needs no setting and cannot be turned off.
 
 Right-drag resets the current curve.
 
@@ -725,7 +731,59 @@ Open the recording settings via `File -> Recording...`:
 3. Click the record button again to stop recording; timeline playback stops with it.
 4. If the selected track has no clips within the recording range, the recording is imported directly onto that track. Otherwise a new `Recording` track is created immediately below the selected track, the recording is imported there, and the new track and the new clip are selected automatically.
 
-## 8. Logs and Troubleshooting
+## 8. VST3 / ARA Plugin (REAPER)
+
+Besides the standalone app, HiFiShifter also ships in a VST3 (ARA) plugin form: load it into REAPER and the same HiFiShifter editing interface opens directly inside the REAPER project. The plugin shares the same editing and rendering logic as the standalone app, but **does not require the standalone app to be started first**, and edits are saved together with the REAPER project.
+
+The plugin is currently a Windows x64 build and has only been verified against REAPER; there is no plugin delivery for Linux / macOS yet.
+
+### Installation and Connection
+
+1. Close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. Windows requires the WebView2 runtime and the VC++ x64 runtime to be installed.
+2. Restart REAPER and let it scan plugins, then add the VST3 plugin HiFiShifter on a track that has a vocal audio item and connect it via the host's ARA mechanism (rather than importing the audio into the standalone app). Trying it on a copy of the project first is recommended.
+3. To work on several tracks, add a plugin instance on each track. Opening any one HiFiShifter window lets you edit every track already connected in the same project — these windows are different views of one workspace, not independent editing copies; edits are not shared between different projects.
+4. Before using shortcuts, click the plugin window once so keyboard focus enters the interface (the plugin forwards `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`, and the remaining shortcuts are handled by the interface itself).
+
+### Division of Labor in Plugin Mode
+
+In plugin mode, **the host handles** audio import, item position / trimming / linear stretching, BPM and fade audio; **HiFiShifter handles** editing of parameter curves such as pitch, breath, tension and formant.
+
+- The `File` menu keeps only `Import Media File...` and a disabled `Save · REAPER`; saving the project, exporting and recording all happen in REAPER.
+- Entries taken over by the host — the `Track` menu, the `Record` button, `Options → Inference Device`, etc. — are disabled; hovering explains why (`Controlled by REAPER; manage files, clip geometry and playback in the host`).
+- When the host exposes transport control, the `Stop` and `Play / Pause` buttons control REAPER's playback; the playhead follows the REAPER project's position, and the BPM is decided by REAPER as well.
+- Fade audio on items is handled by REAPER; what the interface shows is HiFiShifter's own schematic envelope (the hover text says `HiFiShifter schematic curve; REAPER renders the audio`), and it is not required to match REAPER's curve point by point.
+
+### Editing and Automatic Apply
+
+Parameter editing works exactly as in the standalone app (see the [Parameter Editor](#5-parameter-editor) chapter). After every edit, the plugin renders in the background and applies the result back to the host automatically, with the current progress shown on the right of the status bar:
+
+- `Waiting for host audio`: the host has not handed audio to the plugin yet.
+- `Applying automatically...`: an edit is rendering; the first pass on a heavy model may be slow.
+- `Applied`: there are no pending edits. Hovering shows the revision count (`Edits {edits} / Audio {audio}`).
+- Only fully rendered audio replaces the current output; an unfinished render is never treated as a success.
+- On failure it shows `Not applied: {error}`. Follow the hint to troubleshoot first, and do not force a reload repeatedly.
+- Once ready, a `Reload from Host` button appears: use it to re-read the host state when models / permissions conflict. **It asks for confirmation while unapplied edits remain**, because reloading replaces the local curves with the host state; it is usually not meant to be your everyday "submit" button.
+
+### Saving and Limitations
+
+- Just save the project in REAPER; the plugin parameters are saved with the project. Closing the plugin window does not lose edits, and the standalone app does not need to stay running.
+- After reopening the project, the plugin must fetch the audio from the host again and finish its background preparation; the status bar first returns to `Waiting for host audio`.
+- Before upgrading the plugin, save the project and fully quit REAPER; do not overwrite the loaded plugin folder while the host is running.
+- Only forward, **linear** stretching is supported: reverse and non-linear stretching are out of scope, and the interface clearly marks `Reverse playback unsupported`.
+- Harmonic Separation (HNSEP) processes the whole region, so very long material can use a lot of memory once `Harmonic Separation` is enabled; HiFiGAN inference, by contrast, runs in chunks.
+
+### Troubleshooting
+
+- The plugin cannot be found in REAPER: make sure you copied the **entire** `HiFiShifter.vst3` folder (not a single file inside it), that its parent directory is in REAPER's VST scan path, and that the WebView2 runtime and VC++ x64 runtime are installed.
+- It keeps showing `Waiting for host audio` or cannot analyse: check that the track has valid audio, that the plugin is connected through the host's ARA mode, and the automatic-apply status at the right of the status bar.
+- Parameters did not take effect, or differ after reopening the project: keep a copy of the project and the error text shown in the status bar; do not overwrite the project or force a reload repeatedly.
+- An out-of-memory notice appears: it means the harmonic separation did not run this time, and the `Harmonic Separation`-related results are not silently dropped; use shorter material or turn `Harmonic Separation` off first.
+
+### Connecting to the Host from the Standalone App
+
+If you are used to editing in the standalone app, you can also let it connect to a running REAPER: first connect the plugin in REAPER as described above, then open the standalone app, choose `View → Connect to ARA Host...`, and in the floating session panel (titled `ARA / REAPER`) `Refresh Instances` → select an instance → `Connect`; afterwards you can `Submit to REAPER`, `Refresh Host` or `Disconnect`. The status shows `Not connected` / `Connected` / `Refreshed` / `Submitted` / `Disconnected`, and hovering shows the revision (`Revision {revision} · Model {model}`). When the current project has unsaved changes, connecting or refreshing first asks whether to replace it with the host snapshot.
+
+## 9. Logs and Troubleshooting
 
 HiFiShifter automatically writes its run log to the platform-standard log directory — no command-line flags required. When you run into a problem, attaching the log file(s) to an issue helps a lot with diagnosis:
 
