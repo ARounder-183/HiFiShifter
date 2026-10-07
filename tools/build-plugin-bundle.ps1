@@ -86,6 +86,14 @@ try {
         if (!(Test-Path -LiteralPath $pluginBundleModelSource)) { throw "Missing original model resources: $pluginBundleModel" }
         Copy-Item -LiteralPath $pluginBundleModelSource -Destination $pluginBundleModels -Recurse -Force
     }
+    # 模型清单必须一起进 bundle：运行时要靠它判断共享模型库里的那一份是否可用、以及
+    # 是否需要从本 bundle 建立共享库。漏了它，插件永远退回自带副本 —— 用户就又会为
+    # 两个形态各付一次 150 MB，而症状只是"磁盘占用没变"。
+    $pluginBundleModelManifest = Join-Path $pluginBundleRoot 'backend\src-tauri\resources\models\models.json'
+    if (!(Test-Path -LiteralPath $pluginBundleModelManifest)) {
+        throw "Missing $pluginBundleModelManifest; run tools/write-models-manifest.ps1"
+    }
+    Copy-Item -LiteralPath $pluginBundleModelManifest -Destination $pluginBundleModels -Force
 
     # 原生 loader：VST3 宿主加载的是这个薄 DLL，它再按绝对路径拉起邻接的 Rust 引擎。
     & cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 'backend\hifishifter-plugin\native\module_loader.cpp' "/Fo:$pluginBundleTemp\module_loader.obj" /link "/OUT:$pluginBundleModule\HiFiShifter.vst3" "/IMPLIB:$pluginBundleTemp\HiFiShifterLoader.lib"

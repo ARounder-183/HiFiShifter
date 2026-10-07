@@ -106,7 +106,38 @@ Test-Consistency '产品版本在全部来源中一致' {
     "全部来源 = $($distinct[0])"
 }
 
-# ── 3. 安装器文案与词表一致 ────────────────────────────────────────────
+# ── 3. 含非 ASCII 的 PowerShell 脚本必须带 UTF-8 BOM ───────────────────
+#
+# 【为什么这条最要紧】Windows PowerShell 5.1 读无 BOM 的文件时按 ANSI（中文系统上是
+# GBK）解码。UTF-8 的中文注释被当成 GBK 之后，最后一个字节可能与行尾的换行符配成一个
+# 双字节字符 —— **换行被吃掉，下一行代码变成注释的一部分**。症状是"某个变量莫名其妙
+# 是 null"，报错指向的是再下一行，与真正的原因隔着两层。
+#
+# 这个坑本仓库已经踩过两次（一次是 `ff432086`，一次是给 `tools/package-vst3.ps1` 加中文
+# 注释却忘了补 BOM）。纯 ASCII 的脚本不需要 BOM，因此判据是"含非 ASCII 且没有 BOM"。
+Test-Consistency '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
+    $offenders = @()
+    foreach ($scanRoot in @('tools', 'scripts', 'probe')) {
+        $full = Join-Path $checkRoot $scanRoot
+        if (!(Test-Path -LiteralPath $full)) { continue }
+        foreach ($file in Get-ChildItem -LiteralPath $full -Recurse -File |
+            Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1') -and $_.FullName -notlike '*\.third-party\*' }) {
+            $bytes = [IO.File]::ReadAllBytes($file.FullName)
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { continue }
+            # 无 BOM：只要有一个字节 > 0x7F 就会被 PowerShell 5.1 误读。
+            $hasNonAscii = $false
+            foreach ($byte in $bytes) { if ($byte -gt 0x7F) { $hasNonAscii = $true; break } }
+            if ($hasNonAscii) { $offenders += $file.FullName.Substring($checkRoot.Length + 1) }
+        }
+    }
+    if ($offenders.Count) {
+        throw ("以下脚本含非 ASCII 却没有 UTF-8 BOM，PowerShell 5.1 会吃掉换行把下一行变成注释：`n         " +
+            ($offenders -join "`n         "))
+    }
+    'tools/ scripts/ probe/'
+}
+
+# ── 4. 安装器文案与词表一致 ────────────────────────────────────────────
 Test-Consistency '安装器文案与五语词表一致' {
     & node (Join-Path $checkRoot 'tools/build-installer-strings.mjs') --check
     if ($LASTEXITCODE -ne 0) { throw 'installer_strings.nsh 与词表不一致（跑 node tools/build-installer-strings.mjs）' }
