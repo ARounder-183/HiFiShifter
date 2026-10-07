@@ -5,7 +5,45 @@ on:
   pull_request:
     branches: [main, develop]
 
+# 与 vst3.yml 保持同一套策略：同一分支上的新推送取消旧运行（六平台矩阵很贵），
+# 且只申请只读内容权限 —— 构建不需要写仓库。
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── 产品一致性守卫 ──────────────────────────────────────────────────────
+  #
+  # 【为什么单独一个 job 且不依赖任何构建】它检查的是**跨文件**约定：版本号在四个
+  # 文件里一致、安装器文案与词表一致、模型清单与真实文件一致、交付链路不引用一次性
+  # 探针目录……这些都没有编译期保护，破坏了只会在用户那里表现为"版本显示不对""设置
+  # 丢了""多占 150 MB"。几十秒跑完，因此每次 PR 都跑，而不是等到打包时才炸。
+  product-consistency:
+    name: Product consistency
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps (installer string generator uses esbuild)
+        run: npm --prefix frontend ci
+
+      - name: Check product consistency
+        run: ./scripts/check-product-consistency.ps1
+
   frontend-build:
     name: Build Frontend
     runs-on: ubuntu-latest

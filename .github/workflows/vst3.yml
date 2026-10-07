@@ -53,8 +53,15 @@ jobs:
 
       - name: Install frontend and check regressions
         run: |
+          # 与 build.yml 的 frontend job 同一组门禁：插件复用的是同一份 frontend/dist，
+          # 因此那边能拦下的问题这里也必须拦下 —— 否则一次格式化违规可以在 VST3 流水线
+          # 全绿的情况下合入。
           npm --prefix frontend ci
           if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+          npm --prefix frontend run lint
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend lint failed.' }
+          npm --prefix frontend run format:check
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend formatting check failed.' }
           npm --prefix frontend test
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
 
@@ -88,6 +95,19 @@ jobs:
             throw 'Plugin tests failed; see the error annotation and diagnostics artifact.'
           }
 
+      - name: Run plugin integration contracts
+        run: |
+          # 四个契约测试（ARA 映射 / renderer 分配 / VST3 导出 / 依赖树无 Tauri）此前只在
+          # 本地 `-Verify` 里跑，CI 从不执行 —— 也就是说插件最容易出问题的 ABI 与依赖
+          # 边界在流水线上是无人值守的。这里显式跑一遍。
+          . ./tools/msvc-env.ps1
+          cargo build --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin ABI regression prerequisite build failed.' }
+          foreach ($contract in @('ara_mapping', 'renderer_assignments', 'vst3_exports', 'no_tauri_in_dependency_tree')) {
+            cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --test $contract -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw "Plugin integration contract failed: $contract" }
+          }
+
       - name: Build complete VST3 Release delivery
         run: ./tools/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
 
@@ -95,31 +115,57 @@ jobs:
         run: |
           ./tools/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
 
+      # ── Artifact 命名 ──────────────────────────────────────────────────
+      #
+      # 【为什么要跟 App 一样带版本号】这里原名固定为 `HiFiShifter-windows-x86_64-vst3-zip`
+      # —— 没有版本号，两次构建的产物在下载列表里长得一模一样，用户无从分辨自己下的是
+      # 哪一版。App 侧的命名一直是 `HiFiShifter_v<版本>_<os>-<arch>-<kind>`，插件这边
+      # 现在对齐同一套规则（分隔符、段序、版本前缀）。
+      - name: Determine artifact name
+        id: artifact-name
+        run: |
+          $prod = 'HiFiShifter'
+          $ver = '0.0.0'
+          $conf = 'backend/src-tauri/tauri.conf.json'
+          if (Test-Path $conf) {
+            try {
+              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
+              if ($j.productName) { $prod = $j.productName }
+              if ($j.version) { $ver = $j.version }
+            } catch { }
+          }
+          $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
+          $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "base=${prodSafe}_v${verSafe}_windows-x86_64-vst3"
+
       - name: Upload VST3 ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: HiFiShifter-windows-x86_64-vst3-zip
+          name: ${{ steps.artifact-name.outputs.base }}-zip
           path: |
             .build-tmp/vst3-artifacts/*.zip
           if-no-files-found: error
           include-hidden-files: true
-          retention-days: 14
+          # 与 App 侧一致：保留期不按流水线分家（原先是 14 天）。
+          retention-days: 30
 
       - name: Upload VST3 installer
         uses: actions/upload-artifact@v7
         with:
-          name: HiFiShifter-windows-x86_64-vst3-installer
+          name: ${{ steps.artifact-name.outputs.base }}-installer
           path: |
             .build-tmp/vst3-artifacts/*-setup.exe
           if-no-files-found: error
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 30
 
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: vst3-build-diagnostics
+          # 兜底名：失败可能发生在"确定产物名"之前，那时该 step 的输出是空的，
+          # 而 artifact 名不能为空。
+          name: ${{ steps.artifact-name.outputs.base || 'HiFiShifter-windows-x86_64-vst3' }}-diagnostics
           path: .build-tmp/*.log
           if-no-files-found: ignore
           include-hidden-files: true
