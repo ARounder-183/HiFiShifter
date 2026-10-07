@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "hifishifter-plugin"
-version = "0.1.0"
+version = "0.1.0-beta.15"
 dependencies = [
  "ara2-bridge",
  "base64 0.22.1",
