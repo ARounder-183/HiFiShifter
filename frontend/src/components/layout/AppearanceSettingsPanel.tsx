@@ -1401,6 +1401,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         The quick brown fox jumps over the lazy dog.
                                     </div>
                                     <div className="hs-type-body mb-1.5">
+                                        {/* hs-text-exempt: 字体预览样本必须含中文字形，否则预览不出中文字体 */}
                                         中文字体预览：你好世界 1234567890
                                     </div>
                                     <div className="hs-type-caption">
@@ -1516,6 +1517,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                                 className={`flex-1 truncate ${isActive ? "text-qt-highlight/60" : "text-qt-text-muted/60"}`}
                                                                 style={{ fontFamily: f }}
                                                             >
+                                                                {/* hs-text-exempt: 字体预览样本必须含中文字形 */}
                                                                 AaBbCc 你好 123
                                                             </span>
                                                             {isActive && (
