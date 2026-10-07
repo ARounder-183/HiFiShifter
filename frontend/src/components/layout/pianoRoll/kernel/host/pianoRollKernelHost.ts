@@ -396,8 +396,26 @@ export interface PianoRollKernelHost {
          */
         readonly liveView: LiveGridView | null;
     };
-    /** 标脏：请求下一帧提交。 */
+    /** 标脏：请求下一帧提交（完整失效：场景 / 键盘 / 曲线 / 叠加层都会重绘）。 */
     invalidate(): void;
+    /**
+     * **播放头专用**标脏：只重绘动态叠加层，跳过网格 / 键盘 / 曲线层。
+     *
+     * 【为什么需要】播放头每帧前进时，曲线的**几何完全不变** —— 它是视口坐标，
+     * 而视口没动。原实现里 `onFrame` 每帧调 `invalidate()`，于是每个播放帧都要
+     * 重建全部曲线几何：本文件自己的文档块实测抽稀后仍有约 20 万顶点 / 3 MB，
+     * 约 3 ms/帧 —— 播放期间纯属浪费，还会持续制造 GC 压力。
+     *
+     * 【与 `invalidate()` 的关系】两者走**同一条** `draw()`；区别只是本方法把
+     * "本帧只需叠加层"告诉绘制路径，让它跳过不需要重绘的图层。这与
+     * `timelineKernelHost` 的 `invalidatePlayhead()` 是同一套做法（那边注释写的
+     * "几何重建是 60fps 不可承受的成本"正是这里的同一笔账）。
+     *
+     * 【前提】调用方必须保证**视口与数据都没变** —— 滚动、缩放、尺寸变化、dpr
+     * 变化、曲线数据变化都必须走 `invalidate()`（它们都会重建几何）。尺寸 / dpr
+     * 变化由本文件内部的订阅走完整失效，不经过本方法。
+     */
+    invalidatePlayhead(): void;
     /**
      * **立即**提交一帧（不等待下一帧；未标脏时不做任何事）。
      *
@@ -530,7 +548,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 尺寸变化会改变横向上限（视口宽影响滚动条几何）与竖向上限的组成项，
             // 必须按新边界重新钳制，否则已提交位置可能越界。
             scroll.reclamp();
-            loop.invalidate();
+            invalidateFull();
         });
         observer.observe(container);
         teardown.push(() => observer.disconnect());
@@ -541,7 +559,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     // 依赖 dpr。这里只负责标脏：下一帧重新光栅化，并按 `glyphAtlasDpr` 重建字形图集。
     teardown.push(
         subscribeDevicePixelRatio(() => {
-            loop.invalidate();
+            invalidateFull();
         }),
     );
 
@@ -693,6 +711,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let glGeometryUploaded = false;
     /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridGeometrySignature`）。 */
     let lastGridSignature = "";
+    /**
+     * 本帧是否**只需要**叠加层。由 `invalidatePlayhead()` 置位、`invalidate()`
+     * （以及尺寸 / dpr / 滚动订阅）清位；`draw()` 读取后立即复位。
+     */
+    let playheadOnlyFrame = false;
 
     /**
      * 解析**本帧的实时视口**（中心与跨度都取自实时来源，不用 render 期快照）。
@@ -1701,10 +1724,21 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         // 面板帧提交：写 DOM / Canvas2D，并**填充本帧的曲线图层描述符**。
         // 必须在曲线 GL 之前（见上方特殊说明 2）。
+        //
+        // 【即使本帧只画叠加层也要跑】`onFrame` 负责刷新本帧的图层描述符与
+        // DOM/Canvas2D 侧内容；叠加层要用到 `data().overlay`，跳过它会让播放头
+        // 读到上一帧的描述符。它本身不做曲线几何重建（那是 `drawGlCurves` 的事）。
         onFrame?.(currentAxis());
 
+        // 【本帧只需叠加层？】`invalidatePlayhead()` 置位、`draw()` 读取后立即复位。
+        // 播放头前进不改变曲线几何（几何是视口坐标，视口没动），因此这些图层可以
+        // 整层跳过 —— GL 画布保留上一帧内容，与 timeline host 的 `invalidatePlayhead`
+        // 同一机制。见接口处 `invalidatePlayhead` 的说明。
+        const playheadOnly = playheadOnlyFrame;
+        playheadOnlyFrame = false;
+
         // GL 几何重建：只在内容签名变化时做（滚动 / 播放不触发重建）。
-        if (glProgram !== null) {
+        if (!playheadOnly && glProgram !== null) {
             const spec = data().grid;
             const signature = gridSignature(spec);
             if (signature !== lastGridSignature) {
@@ -1715,7 +1749,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
 
         // 键盘 / 数值轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
-        if (glAxisProgram !== null) {
+        if (!playheadOnly && glAxisProgram !== null) {
             // dpr 变化（浏览器缩放 / 换显示器）必须整体重建字形图集：字形位图与
             // 物理像素一一对应，旧图集在新 dpr 下会被采样成模糊字形。图集换了，
             // 文字四边形的度量也随之改变，故作废键盘签名强制重走重建分支。
@@ -1747,13 +1781,19 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         // 选区块层（**必须在曲线之前**）：它是曲线之下的半透明底色。见
         // `drawGlSelectionBand` 与 `PianoRollSelectionBandSpec` 的层序说明。
-        if (glSelectionProgram !== null) {
+        if (!playheadOnly && glSelectionProgram !== null) {
             drawGlSelectionBand();
         }
 
-        // 曲线层（阶段 3）：在网格之上、播放头之下。每帧重建几何——滚动/缩放会
-        // 改变每个点的视口位置，没有零重建路径（见 drawGlCurves 说明）。
-        if (glCurveProgram !== null) {
+        // 曲线层（阶段 3）：在网格之上、播放头之下。
+        //
+        // 【什么时候才重建几何】曲线的几何是**视口坐标**（`drawGlCurves` 里
+        // `u_viewOrigin` 传 (0,0)），所以滚动 / 缩放确实会改变它 —— 但那两件事都会
+        // 走 `invalidateFull()`（滚动订阅 / 尺寸 / dpr / 面板的 `invalidate()`）。
+        // 播放头前进**不**改变视口，因此 `invalidatePlayhead()` 的那些帧整层跳过，
+        // 画布保留上一帧的曲线内容。原实现无条件重建，等于每播放帧白做约 20 万
+        // 顶点的投影 + 抽稀 + 顶点构建（约 3 MB 分配）。
+        if (!playheadOnly && glCurveProgram !== null) {
             drawGlCurves();
         }
 
@@ -1988,20 +2028,33 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     }
     registerListener(container, "keydown", onKeyDown as EventListener);
 
+    /**
+     * 完整失效：本帧要重绘**全部**图层。
+     *
+     * 【为什么所有内部订阅都走它】尺寸变化会重置 GL 画布（内容被清空）、dpr 变化
+     * 会重建字形图集、滚动会改变曲线几何 —— 这些都必须走完整绘制，不能走
+     * `invalidatePlayhead()` 的"只画叠加层"。把"清位"收敛到这一个入口，新增订阅
+     * 时不会漏。
+     */
+    function invalidateFull(): void {
+        playheadOnlyFrame = false;
+        loop.invalidate();
+    }
+
     const loop = createRenderLoop({
         draw,
         requestFrame: args.requestFrame,
         cancelFrame: args.cancelFrame,
     });
     loop.start();
-    const unsubscribeScroll = scroll.subscribe(() => loop.invalidate());
+    const unsubscribeScroll = scroll.subscribe(() => invalidateFull());
     // 倒序释放：先停循环，再断订阅（顺序对结果无影响，但先停循环可确保
     // 释放过程中不会再有帧回调写 DOM）。
     teardown.push(() => unsubscribeScroll());
     teardown.push(() => loop.stop());
 
     // 首帧：与旧实现一样在挂载后立即画出内容（不等用户交互）。
-    loop.invalidate();
+    invalidateFull();
 
     return {
         setScrollLeft(px) {
@@ -2105,6 +2158,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         invalidate() {
             if (disposed) return;
+            invalidateFull();
+        },
+
+        invalidatePlayhead() {
+            if (disposed) return;
+            // 卸载后无需自查：`dispose` 会 `loop.stop()`，其后的 `invalidate()`
+            // 因 `running === false` 不再调度（与 timeline host 同一约定）。
+            playheadOnlyFrame = true;
             loop.invalidate();
         },
 

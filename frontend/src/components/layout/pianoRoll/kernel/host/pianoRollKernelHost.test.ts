@@ -242,6 +242,32 @@ describe("createPianoRollKernelHost", () => {
         expect(rebuiltLine.style.left).toBe(firstLeft);
     });
 
+    /**
+     * 回归：**播放头专用失效仍然要跑 `onFrame`**。
+     *
+     * 【为什么值得一条测试】`invalidatePlayhead()` 会跳过网格 / 键盘 / 选区 /
+     * 曲线四层 —— 这是播放期间省掉每帧约 20 万顶点几何重建的关键。但面板帧提交
+     * （`onFrame`）**不能**跟着跳过：叠加层（播放头）读的正是它写下的图层描述符，
+     * 跳过后播放头会读到上一帧的描述符（表现为播放头卡住 / 滞后一帧）。
+     *
+     * 无 WebGL 的单测观察不到"曲线有没有重画"，但能观察到"面板帧提交有没有发生"
+     * —— 这恰好是本改动最容易改坏的那一侧。
+     */
+    it("★ 播放头专用失效仍然跑 onFrame（叠加层描述符必须刷新）", () => {
+        const t = makeHost();
+        t.flush();
+        const paintedBefore = t.paintedAxes.length;
+
+        t.setPlayheadSec(40);
+        t.host.invalidatePlayhead();
+        t.flush();
+
+        expect(
+            t.paintedAxes.length,
+            "播放头专用失效必须仍提交面板帧（onFrame），否则叠加层拿到的是旧描述符",
+        ).toBeGreaterThan(paintedBefore);
+    });
+
     it("倒三角与标尺竖线取同一个视口左缘（不因去重而错位）", () => {
         const t = makeHost();
         t.flush();

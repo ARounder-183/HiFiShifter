@@ -880,6 +880,26 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, []);
 
     /**
+     * 播放头专用标脏：只重绘 GL 叠加层，跳过网格 / 键盘 / 曲线层。
+     *
+     * 【为什么不复用 `invalidate`】播放头每帧前进时视口没变，曲线几何完全不变；
+     * 走完整失效等于每个播放帧白做一次全部曲线几何的重建（本仓实测约 20 万顶点 /
+     * 3 MB 分配 / 帧）。宿主侧有专门的轻量入口（与 `timelineKernelHost` 同一机制）。
+     *
+     * 【无宿主时退回完整路径】回退分支是面板自己的 rAF 画 Canvas2D，没有"只画
+     * 叠加层"的粒度；那种情况本就罕见（宿主尚未创建），退回 `invalidate` 不会
+     * 造成每帧浪费 —— 该分支下曲线也不走 GL。
+     */
+    const invalidatePlayhead = useCallback(() => {
+        const host = hostRef.current;
+        if (host != null) {
+            host.invalidatePlayhead();
+            return;
+        }
+        invalidate();
+    }, [invalidate]);
+
+    /**
      * DPR 变化必须重绘主画布。
      *
      * `rasterize` 会按新 dpr 重设 backing store 与 CSS 尺寸，但**没有任何东西**
@@ -2995,6 +3015,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 // 这里曾用面板的 `pxPerSecRef` 写同一条线 —— 面板缩放与内核缩放
                 // 一旦不一致（面板宽度变化时内核会重新钳制缩放），两条线就会相差
                 // `播放头秒数 × 缩放差`，也就是用户报告的"标尺线与主体线分离"。
+                let followed = false;
                 if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
                     if (scroller) {
@@ -3008,10 +3029,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             scroller.scrollLeft = next;
                             lastMirroredScrollLeftRef.current = next;
                             syncScrollLeft(scroller);
+                            followed = true;
                         }
                     }
                 }
-                invalidate();
+                // 【为什么区分两种失效】自动跟随滚动改变了视口，曲线几何必须重建，
+                // 因此那一帧仍走完整失效；而"视口没动的纯播放头前进"帧几何完全不变
+                // —— 走 `invalidatePlayhead()` 只重绘叠加层，省掉每帧约 20 万顶点的
+                // 曲线几何重建（约 3 MB 分配 / 帧）。见宿主接口处的说明。
+                if (followed) {
+                    invalidate();
+                } else {
+                    invalidatePlayhead();
+                }
             },
             // syncScrollLeft reads the latest scroll state through refs and is called
             // imperatively; including the plain render-scope function would defeat memoization.
@@ -3019,6 +3049,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             [
                 contentWidth,
                 invalidate,
+                invalidatePlayhead,
                 s.paramEditorSyncTimeline,
                 s.autoScrollEnabled,
                 s.runtime.isPlaying,
