@@ -1,5 +1,30 @@
 # ARA 产品开发当前交接
 
+## 当前工作位置与交付（2026-10-07，优先于下方历史记录）
+
+用户允许修改主工作区，并要求合并 develop、增加 VST3 Actions 与快速打包支持，
+随后移除当前工作树。代码已合并并推送：feature/ara-plugin 的源码/打包提交为
+bf96b4d0 / 61b07319，主工作区 develop 的合并提交为 e834ef54；后续 CI 路径修正和
+诊断增强已推送。当前在 `E:\code\HiFiShifter` 的 develop 工作，
+`E:\code\HiFiShifter\.worktrees\ara-plugin` 已移除，不再使用旧目录。
+
+最新本地统一交付迁入 `.build-tmp/deliveries/develop-vst3-packaging-06`，05 包和最新
+VST 安装备份也已迁入主工作区；一次性诊断源码保存在 `.build-tmp/retired-ara-plugin`。
+主工作区原有 `.dsh-plugin-inspect/` 保留。`dist` 现有完整 VST3 ZIP、NSIS setup.exe、
+各自 SHA256 和同批 App 便携 ZIP。规范插件安装内容仍是完整 .vst3 目录；安装器默认
+系统 VST3 目录，可改 D:\VST，且写入前检查 REAPER 和插件宿主已退出。
+
+快速入口 `pack-portable.bat` / `scripts/pack-portable.ps1` 支持 PackageTarget
+App/Plugin/All、SkipBuild、NoZip、Installer、指定 DeliveryDirectory；All 复用同批
+App/插件交付，不混入插件或 App 专用运行库。说明见 docs/VST3-BUILD.md。
+
+本地前端全量 365 文件/3260 项通过，插件全量 208 passed/2 ignored，lint 无错误。
+本地 SDK 从空目录下载/身份校验及 ZIP/NSIS 生成、摘要和目录结构已验证。
+GitHub 首次 frontend 失败为旧 state.rs 源码扫描路径，已改为共享 kernel model 并
+复跑通过。云端插件测试又失败，正在通过新增日志/公开错误摘要定位；当前 run：
+https://github.com/ARounder-183/HiFiShifter/actions/runs/37574960116 。
+Actions 定义已经启用，云端首次完整成功尚未确认，不能写成 CI 已全部通过。
+
 ## 最新目标：延迟／插件私有参数分组／App与插件共用折叠
 
 用户明确父子轨仅在插件内建立，不同步REAPER folder，新进轨道根级。本轮源码已接
