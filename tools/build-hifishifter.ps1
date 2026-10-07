@@ -110,8 +110,9 @@ try {
     if ($buildTaskIncludesPlugin) {
         $buildTaskPluginArgs=@{SkipFrontend=$true;BundleDirectory=$buildTaskBundleName}
         if ($Configuration -eq 'Release') {$buildTaskPluginArgs.Release=$true}
-        # 复用已实测的规范loader/resources打包，所有源码仍唯一；以后可将helper提升到tools。
-        & .\probe\ara\build_embedded_editor.ps1 @buildTaskPluginArgs
+        # bundle 组装在 tools/ 下（原先借用 probe/ara 的一次性探针脚本，而那个目录
+        # 声明自己是可丢弃的 —— 交付链路不该建在它上面）。
+        & .\tools\build-plugin-bundle.ps1 @buildTaskPluginArgs
         $buildTaskPlugin=Join-Path $buildTaskRoot ".build-tmp\$buildTaskBundleName\HiFiShifter.vst3"
         $buildTaskPluginTarget=[IO.Path]::GetFullPath((Join-Path $buildTaskDelivery 'HiFiShifter.vst3'))
         $buildTaskPluginSource=[IO.Path]::GetFullPath($buildTaskPlugin)

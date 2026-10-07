@@ -1,53 +1,15 @@
-﻿# 内嵌原GUI开发bundle构建；只在当前worktree生成，不安装到系统VST目录，不运行测试。
-param([switch]$SkipFrontend, [switch]$Release,
-    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
+﻿# 【已搬迁】插件 bundle 构建已提升为产品脚本 `tools/build-plugin-bundle.ps1`。
+#
+# 保留本文件是为了让 `probe/ara/` 下的历史运行记录（EMBEDDED-EDITOR-RUN.md 等）
+# 里写的命令仍然可用；它不含任何逻辑，只做转发。新代码请直接调用 tools/ 下的那份 ——
+# 本目录按 `probe/ara/README.md` 的说明是可整体删除的一次性探针产物。
+[CmdletBinding()]
+param(
+    [switch]$SkipFrontend,
+    [switch]$Release,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory = 'embedded-vst3'
+)
 $ErrorActionPreference = 'Stop'
-$araEmbeddedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$araEmbeddedOutput = Join-Path $araEmbeddedRoot ".build-tmp\$BundleDirectory"
-if ((Get-Process reaper -ErrorAction SilentlyContinue) -and
-    ($BundleDirectory -eq 'embedded-vst3' -or (Test-Path -LiteralPath $araEmbeddedOutput))) {
-    throw 'REAPER is running: only a new, non-existing bundle directory may be built; never replace a loaded bundle.'
-}
-$araEmbeddedBundle = Join-Path $araEmbeddedOutput 'HiFiShifter.vst3'
-$araEmbeddedModule = Join-Path $araEmbeddedBundle 'Contents\x86_64-win'
-$araEmbeddedResources = Join-Path $araEmbeddedBundle 'Contents\Resources\frontend'
-Push-Location $araEmbeddedRoot
-try {
-    . .\tools\msvc-env.ps1
-    $araEmbeddedTemp = Join-Path $araEmbeddedRoot ('.build-tmp\embedded-build-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $araEmbeddedTemp -Force | Out-Null
-    $env:TEMP = $araEmbeddedTemp
-    $env:TMP = $araEmbeddedTemp
-    $env:ARA_VST3_SDK_DIR = Join-Path $PSScriptRoot 'rust-path\.third-party\vst3sdk'
-    $env:ARA_SDK_DIR = Join-Path $PSScriptRoot 'rust-path\.third-party\ARA_SDK'
-    if (!$SkipFrontend) {
-        Push-Location frontend
-        try { & npm run build; if ($LASTEXITCODE -ne 0) { throw 'frontend build failed' } }
-        finally { Pop-Location }
-    }
-    if (!(Test-Path -LiteralPath 'frontend\dist\plugin.html')) { throw 'Build the plugin.html frontend entry first.' }
-    # 不把app和plugin放在同一次cargo调用，避免默认vslib feature合并进插件。
-    $araEmbeddedCargoArgs = @('build', '--manifest-path', 'backend\Cargo.toml', '--offline', '--jobs', '1', '-p', 'hifishifter-plugin')
-    $araEmbeddedProfile = if ($Release) { 'release' } else { 'debug' }
-    if ($Release) { $araEmbeddedCargoArgs += '--release' }
-    & cargo @araEmbeddedCargoArgs
-    if ($LASTEXITCODE -ne 0) { throw 'plugin engine build failed' }
-    New-Item -ItemType Directory -Force -Path $araEmbeddedModule,$araEmbeddedResources | Out-Null
-    Copy-Item -LiteralPath "backend\target\$araEmbeddedProfile\hifishifter_plugin.dll" -Destination (Join-Path $araEmbeddedModule 'HiFiShifterEngine.dll') -Force
-    foreach ($araEmbeddedDll in @('onnxruntime.dll','DirectML.dll','SoundTouchDLL.dll')) {
-        $araEmbeddedDllPath = Join-Path $araEmbeddedRoot "backend\target\$araEmbeddedProfile\$araEmbeddedDll"
-        if (Test-Path -LiteralPath $araEmbeddedDllPath) { Copy-Item -LiteralPath $araEmbeddedDllPath -Destination (Join-Path $araEmbeddedModule $araEmbeddedDll) -Force }
-    }
-    Get-ChildItem -LiteralPath 'frontend\dist' | Copy-Item -Destination $araEmbeddedResources -Recurse -Force
-    # 原GUI分析管线需要FCPE，WORLD声码器不能替代它；模型沿用独立app权威副本。
-    $araEmbeddedModels = Join-Path $araEmbeddedBundle 'Contents\Resources\models'
-    New-Item -ItemType Directory -Force -Path $araEmbeddedModels | Out-Null
-    foreach ($araEmbeddedModel in @('fcpe','nsf_hifigan','hnsep')) {
-        $araEmbeddedModelSource = Join-Path $araEmbeddedRoot "backend\src-tauri\resources\models\$araEmbeddedModel"
-        if (!(Test-Path -LiteralPath $araEmbeddedModelSource)) {throw "Missing original model resources: $araEmbeddedModel"}
-        Copy-Item -LiteralPath $araEmbeddedModelSource -Destination $araEmbeddedModels -Recurse -Force
-    }
-    & cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 'backend\hifishifter-plugin\native\module_loader.cpp' "/Fo:$araEmbeddedTemp\module_loader.obj" /link "/OUT:$araEmbeddedModule\HiFiShifter.vst3" "/IMPLIB:$araEmbeddedTemp\HiFiShifterLoader.lib"
-    if ($LASTEXITCODE -ne 0) { throw 'native VST3 loader build failed' }
-    Write-Output "Built isolated $araEmbeddedProfile bundle: $araEmbeddedBundle (not installed; tests and REAPER acceptance pending)."
-} finally { Pop-Location }
+& (Join-Path $PSScriptRoot '..\..\tools\build-plugin-bundle.ps1') `
+    -SkipFrontend:$SkipFrontend -Release:$Release -BundleDirectory $BundleDirectory
+if ($LASTEXITCODE -ne 0) { throw "tools/build-plugin-bundle.ps1 failed with exit code $LASTEXITCODE" }
