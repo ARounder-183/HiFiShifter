@@ -6,6 +6,7 @@
  * 导入时向后兼容 v1（仅颜色覆盖）。
  */
 
+import { readUiValue, writeUiValue } from "../services/uiStorage";
 import type {
     AppearanceSettings,
     CustomTheme,
@@ -34,7 +35,7 @@ const LEGACY_THEME_KEY = "hifishifter.theme";
 /** 读取外观设置（带旧版兼容） */
 export function loadAppearance(): AppearanceSettings {
     try {
-        const raw = localStorage.getItem(APPEARANCE_KEY);
+        const raw = readUiValue(APPEARANCE_KEY);
         if (raw) {
             const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
             const settings = { ...DEFAULT_APPEARANCE, ...parsed };
@@ -49,7 +50,7 @@ export function loadAppearance(): AppearanceSettings {
     }
 
     // 兼容旧版 hifishifter.theme
-    const legacyMode = localStorage.getItem(LEGACY_THEME_KEY);
+    const legacyMode = readUiValue(LEGACY_THEME_KEY);
     if (legacyMode === "light" || legacyMode === "dark") {
         return { ...DEFAULT_APPEARANCE, mode: legacyMode };
     }
@@ -65,9 +66,9 @@ export function loadAppearance(): AppearanceSettings {
  */
 export function saveAppearance(settings: AppearanceSettings): void {
     try {
-        localStorage.setItem(APPEARANCE_KEY, JSON.stringify(settings));
+        writeUiValue(APPEARANCE_KEY, JSON.stringify(settings));
         // 同步旧版 key（兼容其他可能直接读取的代码）
-        localStorage.setItem(LEGACY_THEME_KEY, settings.mode);
+        writeUiValue(LEGACY_THEME_KEY, settings.mode);
     } catch (err) {
         console.warn("[theme] failed to persist appearance settings", err);
     }
@@ -78,7 +79,7 @@ export function saveAppearance(settings: AppearanceSettings): void {
 /** 读取自定义主题列表 */
 export function loadCustomThemes(): CustomTheme[] {
     try {
-        const raw = localStorage.getItem(CUSTOM_THEMES_KEY);
+        const raw = readUiValue(CUSTOM_THEMES_KEY);
         if (raw) {
             return JSON.parse(raw) as CustomTheme[];
         }
@@ -91,7 +92,7 @@ export function loadCustomThemes(): CustomTheme[] {
 /** 保存自定义主题列表（持久化失败只记录告警，见 saveAppearance）。 */
 export function saveCustomThemes(themes: CustomTheme[]): void {
     try {
-        localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
+        writeUiValue(CUSTOM_THEMES_KEY, JSON.stringify(themes));
     } catch (err) {
         console.warn("[theme] failed to persist custom themes", err);
     }

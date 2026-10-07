@@ -1,6 +1,7 @@
 // hs-interaction-exempt: 边缘平滑度裸 range（约 7429 行）与 attachEdgeSmoothnessWheel 原生滚轮监听、松开落盘逻辑耦合，按迁移范围刻意保留；本文件其余取值控件已走能力层原语。
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { loadStandaloneWindowApi } from "../../services/hostWindow";
+import { readUiValue, writeUiValue } from "../../services/uiStorage";
 import React, {
     type CSSProperties,
     useCallback,
@@ -1653,7 +1654,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.paramPxPerSec"));
+        const stored = Number(readUiValue("hifishifter.paramPxPerSec"));
         return Number.isFinite(stored) && stored > 0
             ? Math.min(MAX_PX_PER_SEC, Math.max(MIN_PX_PER_SEC, stored))
             : DEFAULT_PX_PER_SEC;
@@ -1854,7 +1855,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     useEffect(() => {
         const timer = setTimeout(() => {
-            localStorage.setItem("hifishifter.paramPxPerSec", String(pxPerSec));
+            writeUiValue("hifishifter.paramPxPerSec", String(pxPerSec));
         }, 500);
         return () => clearTimeout(timer);
     }, [pxPerSec]);

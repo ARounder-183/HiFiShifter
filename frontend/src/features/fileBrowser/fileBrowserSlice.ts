@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
+import { readUiValue, writeUiValue } from "../../services/uiStorage";
 import type { SearchOptionsPayload } from "../search/searchSettings";
 
 /**
@@ -52,7 +53,7 @@ const STORAGE_KEY = "hifishifter.fileBrowser.lastPath";
  */
 function readStoredPath(): string {
     try {
-        return localStorage.getItem(STORAGE_KEY) || "";
+        return readUiValue(STORAGE_KEY) || "";
     } catch {
         return "";
     }
@@ -60,7 +61,7 @@ function readStoredPath(): string {
 
 function writeStoredPath(path: string): void {
     try {
-        localStorage.setItem(STORAGE_KEY, path);
+        writeUiValue(STORAGE_KEY, path);
     } catch {
         /* 存储不可用：本次会话仍然正常工作，只是下次启动不记得 */
     }

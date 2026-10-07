@@ -20,6 +20,7 @@ import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
+import { readUiValue } from "../../../../services/uiStorage";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { createTickAxis } from "../runtime/tickAxis.js";
@@ -398,7 +399,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     const [scrollLeft, setScrollLeft] = useState(0);
     const setScrollLeftState = setScrollLeft;
     const [pxPerSec, setPxPerSec] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.pxPerSec"));
+        const stored = Number(readUiValue("hifishifter.pxPerSec"));
         return Number.isFinite(stored) && stored > 0
             ? Math.min(MAX_PX_PER_SEC, Math.max(MIN_PX_PER_SEC, stored))
             : DEFAULT_PX_PER_SEC;
@@ -438,7 +439,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
 
     // ── rowHeight ────────────────────────────────────────────
     const [rowHeight, setRowHeight] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.rowHeight"));
+        const stored = Number(readUiValue("hifishifter.rowHeight"));
         return Number.isFinite(stored)
             ? Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, stored))
             : DEFAULT_ROW_HEIGHT;

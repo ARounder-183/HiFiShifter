@@ -22,6 +22,7 @@ import {
     subscribeExtensionMessages,
 } from "./extensionMessages";
 import { coreApi } from "../services/api/core";
+import { readUiValue, writeUiValue } from "../services/uiStorage";
 
 interface I18nContextValue {
     locale: Locale;
@@ -60,7 +61,7 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 const STORAGE_KEY = "hifishifter.locale";
 
 function getDefaultLocale(): Locale {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = readUiValue(STORAGE_KEY);
     // 用 hasOwnProperty 而不是 `in`：`in` 会命中 `Object.prototype` 上的继承键
     // （"toString" / "constructor" 等），一个损坏的存储值会让 locale 变成一个
     // 查不到任何文案的"语言"，整个界面静默回落到 en-US。
@@ -125,7 +126,7 @@ export function I18nProvider({ children }: PropsWithChildren) {
             locale: localeState,
             setLocale: (nextLocale: Locale) => {
                 setLocaleState(nextLocale);
-                localStorage.setItem(STORAGE_KEY, nextLocale);
+                writeUiValue(STORAGE_KEY, nextLocale);
             },
             t: lookup,
             tVars: (key, vars) => formatTemplate(lookup(key), vars),

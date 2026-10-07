@@ -1,3 +1,4 @@
+import { readUiValue, removeUiValue, writeUiValue } from "../../services/uiStorage";
 import type { Keybinding, KeybindingOverrides } from "./types";
 
 const STORAGE_KEY = "hifishifter.keybindings";
@@ -46,7 +47,7 @@ function stripMetaKeys(raw: Record<string, unknown>): StoredKeybindingOverrides 
 /** 读取 localStorage 原始对象（含元数据键）；不可用时返回 null。 */
 function readRaw(): Record<string, unknown> | null {
     try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw = readUiValue(STORAGE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
@@ -184,9 +185,9 @@ export function saveKeybindingOverrides(
         const flags = { ...metaFlagsFrom(readRaw()), ...(opts?.flags ?? {}) };
         const payload: Record<string, unknown> = { ...cleaned, ...flags };
         if (Object.keys(cleaned).length === 0 && Object.keys(flags).length === 0) {
-            localStorage.removeItem(STORAGE_KEY);
+            removeUiValue(STORAGE_KEY);
         } else {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+            writeUiValue(STORAGE_KEY, JSON.stringify(payload));
         }
     } catch {
         // localStorage 不可用时静默失败

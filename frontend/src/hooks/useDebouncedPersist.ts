@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import { writeUiValue } from "../services/uiStorage";
 
 /**
  * 默认防抖延迟（毫秒）。
@@ -38,7 +39,7 @@ export type PersistableValue = string | number | boolean;
  */
 function writePersist(key: string, value: PersistableValue): void {
     try {
-        localStorage.setItem(key, String(value));
+        writeUiValue(key, String(value));
     } catch {
         // 忽略：持久化失败不应打断交互。
     }
