@@ -194,18 +194,30 @@ pub(crate) fn schedule_stretch_jobs(
             }
         }
 
-        // 利用 HashSet 本身的机制，取代之前的 9 行锁判断
-        let _should_enqueue = inflight
-            .lock()
-            .map(|mut s| {
-                if s.contains(&key) {
-                    false
-                } else {
-                    s.insert(key.clone());
-                    true
-                }
-            })
-            .unwrap_or(false);
+        // 利用 HashSet 本身的机制，取代之前的 9 行锁判断。
+        //
+        // 【为什么必须早退】这个结果以前被绑给 `_should_enqueue` 却**从未被读**，
+        // 于是去重形同虚设：每个 clip 每次 `UpdateTimeline` 都重新投递同一个拉伸
+        // 作业，单个拉伸 worker 反复对同一缓冲跑 SoundTouch/Signalsmith。变量名
+        // 以 `_` 开头，`unused_variables` 也看不见它 —— 守住它的是
+        // `schedule_stretch_jobs_enqueues_each_key_only_once`。
+        // 同一模式在 `resource_manager.rs` 的 `should_enqueue` 处写法正确，可对照。
+        //
+        // 锁中毒时按本仓既有约定容忍（`into_inner`）而不是退化成"不投递"：
+        // 去重集合里没有任何用户代码，中毒在这里不可能发生；真发生了也不该
+        // 让整个 clip 悄悄退化成 varispeed 播放。
+        let should_enqueue = {
+            let mut in_flight = inflight.lock().unwrap_or_else(|err| err.into_inner());
+            if in_flight.contains(&key) {
+                false
+            } else {
+                in_flight.insert(key.clone());
+                true
+            }
+        };
+        if !should_enqueue {
+            continue;
+        }
 
         // 只有确实需要 enqueue 的时候，才去消耗 CPU 分配字符串
         let clip_name = clip
@@ -1399,6 +1411,36 @@ mod tests {
             !crate::synth_clip_cache::is_pad_suppressed("clip-pad"),
             "current render landed: pad suppression must be released so later \
              mid-playback edits pad normally"
+        );
+    }
+
+    /// 同一个拉伸键在 in-flight 期间只能投递一次。
+    ///
+    /// 【为什么值得一条测试】原实现把去重结果绑给 `_should_enqueue` 之后**从未使用**，
+    /// 于是每个 clip 每次 `UpdateTimeline` 都会重新投递同一个拉伸作业，单个拉伸
+    /// worker 便反复对同一缓冲跑 SoundTouch/Signalsmith，挤掉真正需要的工作。
+    /// 变量名以 `_` 开头，`unused_variables` 也看不见它 —— 只有行为断言能守住。
+    #[test]
+    fn schedule_stretch_jobs_enqueues_each_key_only_once() {
+        let path = snapshot_test_source();
+        let mut tl = timeline_with_volume_curve(&path);
+        // `None` 算法 → `PitchEditAlgorithm::Bypass`，才会走**外部**拉伸路径；
+        // NsfHifiganOnnx 在 playback_rate != 1 时把拉伸交给处理器内部，该 clip
+        // 根本不会被调度（见 `processor_should_handle_stretch`），测不到去重。
+        tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::None;
+        tl.clips[0].playback_rate = 0.75;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let inflight = Mutex::new(std::collections::HashSet::new());
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+
+        super::schedule_stretch_jobs(&tl, 44_100, &tx, &inflight, &stretch_cache, None);
+        super::schedule_stretch_jobs(&tl, 44_100, &tx, &inflight, &stretch_cache, None);
+
+        let enqueued = rx.try_iter().count();
+        assert_eq!(
+            enqueued, 1,
+            "同一个拉伸键在 in-flight 期间被重复投递：去重守卫（`_should_enqueue`）没有生效"
         );
     }
 }
