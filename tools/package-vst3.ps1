@@ -57,8 +57,14 @@ if ($Installer) {
         }
     }
     if (!$packageTaskNsis) { throw 'NSIS is required for -Installer. Install NSIS or package ZIP without that switch.' }
+    # 安装器文案由五语词表生成：先重新生成一次，保证打出来的安装器与当前词表一致
+    # （漏翻译会在这里直接失败，而不是让用户看到半截翻译的向导）。
+    & node (Join-Path $PSScriptRoot 'build-installer-strings.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Installer string generation failed.' }
     $packageTaskSetup = Join-Path $packageTaskOutput ($packageTaskName + '-setup.exe')
-    & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
+    # LICENSE 用绝对路径传入：`vst3-installer.nsi` 里的默认值 `..\LICENSE` 只在从
+    # 仓库的 tools\ 目录编译时成立。
+    & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" "/DHFS_LICENSE=$(Join-Path $packageTaskRoot 'LICENSE')" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $packageTaskSetup)) { throw 'VST3 installer compilation failed.' }
     Write-Output "Installer: $packageTaskSetup"
 }

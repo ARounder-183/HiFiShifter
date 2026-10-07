@@ -71,6 +71,13 @@ try {
     Copy-Item -LiteralPath 'frontend\dist\plugin.html' -Destination $pluginBundleResources -Force
     Copy-Item -LiteralPath 'frontend\dist\assets' -Destination $pluginBundleResources -Recurse -Force
 
+    # 图标：安装器把它写进「程序和功能」的 DisplayIcon。放在 bundle 里而不是让安装器
+    # 从源码树取，是为了让"装好的目录"自带它需要的一切。
+    $pluginBundleIcon = Join-Path $pluginBundleRoot 'backend\src-tauri\icons\icon.ico'
+    if (Test-Path -LiteralPath $pluginBundleIcon) {
+        Copy-Item -LiteralPath $pluginBundleIcon -Destination (Join-Path $pluginBundleResources 'icon.ico') -Force
+    }
+
     # 原 GUI 分析管线需要 FCPE，WORLD 声码器不能替代它；模型沿用独立 App 的权威副本。
     $pluginBundleModels = Join-Path $pluginBundleBundle 'Contents\Resources\models'
     New-Item -ItemType Directory -Force -Path $pluginBundleModels | Out-Null
