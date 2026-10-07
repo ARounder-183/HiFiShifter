@@ -72,8 +72,13 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
 
     // 单 clip 分割：选中右段，取消左段。
     {
-        const next = reducer(
+        // 先派发 pending 登记请求 id（fulfilled 有乱序守卫，见 sessionSlice）。
+        const pending = reducer(
             createState(),
+            splitClipRemote.pending("req", { clipId: "clip-a", splitSec: 5 }),
+        );
+        const next = reducer(
+            pending,
             splitClipRemote.fulfilled(splitPayload(["clip-a-right"]), "req", {
                 clipId: "clip-a",
                 splitSec: 5,
@@ -92,8 +97,12 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
     {
         const state = createState();
         state.multiSelectedClipIds = ["clip-a", "clip-b"];
-        const next = reducer(
+        const pending = reducer(
             state,
+            splitClipsAtRemote.pending("req", { clipIds: ["clip-a", "clip-b"], splitSec: 5 }),
+        );
+        const next = reducer(
+            pending,
             splitClipsAtRemote.fulfilled(
                 splitPayload(["clip-a-right", "clip-b-right"], [makeClip("clip-b", 8)]),
                 "req",
@@ -112,8 +121,12 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
     {
         const state = createState();
         state.multiSelectedClipIds = ["clip-a", "clip-z"];
-        const next = reducer(
+        const pending = reducer(
             state,
+            splitClipsAtRemote.pending("req", { clipIds: ["clip-a"], splitSec: 5 }),
+        );
+        const next = reducer(
+            pending,
             splitClipsAtRemote.fulfilled(splitPayload(["clip-a-right"]), "req", {
                 clipIds: ["clip-a"],
                 splitSec: 5,
@@ -134,8 +147,12 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
             selected_clip_id: "clip-a",
             clips: [makeClip("clip-a", 4)],
         } as unknown as TimelineResult;
-        const next = reducer(
+        const pending = reducer(
             createState(),
+            splitClipsAtRemote.pending("req", { clipIds: ["clip-a"], splitSec: 5 }),
+        );
+        const next = reducer(
+            pending,
             splitClipsAtRemote.fulfilled(payload, "req", { clipIds: ["clip-a"], splitSec: 5 }),
         );
         assertEqual(next.selectedClipId, "clip-a", "no right half keeps current selection");

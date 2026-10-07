@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useAppSelector } from "../../app/hooks";
-import { selectMergedKeybindings } from "./keybindingsSlice";
+import { firstBinding, selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
 import type { RootState } from "../../app/store";
@@ -14,7 +14,10 @@ import { consumeHoldRepeatKeyDown } from "./holdRepeat";
 import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
     matchesKeybinding,
+    matchesAnyKeybinding,
+    matchKeybinding,
     matchesKeybindingAllowingFineModifier,
+    matchKeybindingAllowingFineModifier,
     normalizeEventKey,
 } from "./keybindingMatch";
 const REPEATABLE_ACTIONS = new Set<ActionId>([
@@ -150,11 +153,16 @@ const TYPEAHEAD_OWNED_KEYS = new Set([
  *
  * 未修饰时：可打印字符（打字跳转，空格也在内）+ 上表。
  * 带修饰时：**只让出面板实现了的那三个组合**（全选 / 复制路径 / 新建文件夹），
- * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S…）照常走全局。
+ * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S、Shift+T、Shift+V…）照常走全局。
  */
 function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
     if (e.altKey || e.metaKey) return false;
-    if (!e.ctrlKey) return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
+    // 只有**真正未修饰**的按键才是"打字跳转"。Shift+字母会产出可打印字符
+    // （Shift+T → "T"），但它属于"带修饰"的一类：全局绑定里的 Shift+T/Shift+V
+    // 不能被面板截走。若面板没有对应绑定，事件仍会照常流到面板（这里只决定
+    // 全局分发器是否提前让路），因此大小写不敏感的 type-ahead 不受影响。
+    if (!e.ctrlKey && !e.shiftKey && !e.altKey)
+        return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
     const letter = e.key.toLowerCase();
     if (letter === "a" || letter === "c") return !e.shiftKey;
     return letter === "n" && e.shiftKey;
@@ -259,6 +267,28 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             }
 
             /*
+             * 弹出表面打开时，**激活键**（Enter / Space）也归那一层。
+             *
+             * 【为什么单列一条，不并进 `COMPOSITE_WIDGET_KEYS`】那一组键对**所有**
+             * 复合控件让路（标签条 / 单选组 / 滑杆…），语义是"控件自己处理方向键"；
+             * 而 Enter/Space 对常驻控件是浏览器原生的按钮激活，全局绑定不该替它让路。
+             * 只有**弹出表面**才需要独占激活键 —— 它是模态的：用户此刻只能在它里面选。
+             *
+             * 【少了这条会怎样】裸 Enter 全局绑的是 `playback.stop`。菜单开着按回车，
+             * 全局绑定先命中并 `preventDefault`，`AppContextMenu` 的激活处理器见到
+             * `defaultPrevented` 就让路 —— 表现是**菜单项纹丝不动，播放却停了**。
+             * 键盘用户因此根本无法用回车选中任何菜单项（含子菜单的触发项）。
+             * 手写菜单（`ClipContextMenu` 等）同理：它们的项靠原生按钮激活，而原生
+             * 激活正是 keydown 的默认行为，会被同一个 `preventDefault` 一并挡掉。
+             *
+             * 【为什么不会误伤】`POPUP_SURFACE_SELECTOR` 只认 `role="menu"` /
+             * `menubar` / `listbox`：Radix 的 Select 与 DropdownMenu 自己处理 Enter；
+             * 文件列表用的是 `data-hs-typeahead`（不在其中）；快速搜索有自己的
+             * keydown 分支 —— 三者都不受影响。
+             */
+            if (hasOpenPopupSurface() && (key === "enter" || key === "space")) return;
+
+            /*
              * 输入式快速跳转：标记了 `data-hs-typeahead` 的列表拥有**它自己实现了的**
              * 那些键（见 `TYPEAHEAD_OWNER_SELECTOR` / `isOwnedByTypeAhead`）。
              *
@@ -283,13 +313,16 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 }
             }
 
-            // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
+            // 颤音拖拽期间（直线工具同路），命中振幅/频率方向键时，交给参数编辑器
+            // 本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
-                const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
+                const fineAdjustKb = firstBinding(
+                    keybindingsRef.current["modifier.paramFineAdjust"],
+                );
                 for (const actionId of VIBRATO_DRAG_KEYBOARD_ACTIONS) {
-                    const kb = keybindingsRef.current[actionId];
-                    if (!kb || kb.modifierOnly) continue;
-                    if (matchesKeybindingAllowingFineModifier(e, kb, fineAdjustKb)) {
+                    const bindings = keybindingsRef.current[actionId];
+                    if (!bindings || firstBinding(bindings).modifierOnly) continue;
+                    if (matchKeybindingAllowingFineModifier(e, bindings, fineAdjustKb)) {
                         return;
                     }
                 }
@@ -300,12 +333,14 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             // - 避免同一按键既走全局派发（重复步进设置）、又在本地再切一次；
             // - 避免叠按「精细调整」修饰键时命中其它全局兜底（如 Ctrl+D 克隆轨道）。
             if (document.body.hasAttribute("data-piano-roll-param-drag-active")) {
-                const cycleKb = keybindingsRef.current["pianoRoll.cycleDragDirection"];
-                const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
+                const cycleBindings = keybindingsRef.current["pianoRoll.cycleDragDirection"];
+                const fineAdjustKb = firstBinding(
+                    keybindingsRef.current["modifier.paramFineAdjust"],
+                );
                 if (
-                    cycleKb &&
-                    !cycleKb.modifierOnly &&
-                    matchesKeybindingAllowingFineModifier(e, cycleKb, fineAdjustKb)
+                    cycleBindings &&
+                    !firstBinding(cycleBindings).modifierOnly &&
+                    matchKeybindingAllowingFineModifier(e, cycleBindings, fineAdjustKb)
                 ) {
                     return;
                 }
@@ -373,6 +408,9 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 export {
     isEditableTarget,
     matchesKeybinding,
+    matchesAnyKeybinding,
+    matchKeybinding,
     normalizeEventKey,
     matchesKeybindingAllowingFineModifier,
+    matchKeybindingAllowingFineModifier,
 };

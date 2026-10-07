@@ -51,8 +51,10 @@ export {
     type AppSegmentedOption,
 } from "./SegmentedControl";
 export {
+    AppAnchoredMenu,
     AppContextMenu,
     AppSubMenu,
+    type AppAnchoredMenuProps,
     type AppContextMenuProps,
     type AppMenuItemSpec,
     type AppSubMenuProps,

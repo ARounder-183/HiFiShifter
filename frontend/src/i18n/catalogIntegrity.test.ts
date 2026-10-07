@@ -226,6 +226,36 @@ describe("文本风格", () => {
     });
 
     /*
+     * 值内多余空白。历史上 en/ko 的标签片段靠**首尾空格**与相邻译文拼接
+     * （`" (unavailable)"`、`"Position: "`），空格就是拼接逻辑本身 —— 换一个
+     * 消费端或者换一行布局就会悄悄坏掉。正确做法是把整行写进词典模板，
+     * 用 `tVars` 回填（见 style-guide §2.2 / §3.3）。
+     *
+     * 允许项：
+     * - `\n`：多行 tooltip 的换行本身是内容；
+     * - 纯标点/符号/空白值：那是"布局分隔符"资产（如 `common_value_sep` 的
+     *   `": "`），空格就是它的全部内容。
+     */
+    test("值内无多余空白（首尾空格 / 连续空格 / 制表符 / 全角空格）", () => {
+        const violations: string[] = [];
+        for (const locale of LOCALES) {
+            for (const [key, value] of entriesOf(locale)) {
+                if (/^[\s\p{P}\p{S}]+$/u.test(value)) continue;
+                if (value !== value.trim()) {
+                    violations.push(`${locale}.${key} 首尾空白 ${JSON.stringify(value)}`);
+                }
+                if (/ {2,}/.test(value)) {
+                    violations.push(`${locale}.${key} 连续空格 ${JSON.stringify(value)}`);
+                }
+                if (/[\t\u3000]/.test(value)) {
+                    violations.push(`${locale}.${key} 制表符/全角空格 ${JSON.stringify(value)}`);
+                }
+            }
+        }
+        expect(violations, "拼接交给 tVars 模板（见 style-guide §2.2 / §3.3）").toEqual([]);
+    });
+
+    /*
      * 全大写英文标签。en-US 里 `tracks: "TRACKS"`、`recapture_missing_media_col_*`
      * 用全大写，而 zh-CN / ja-JP / ko-KR 都是正常大小写 —— 只有英文在喊。
      *
@@ -329,6 +359,7 @@ describe("文本风格", () => {
             "algo_label::Algo": "`algo_label_short` 是 `algo_label` 的短版，长/短变体刻意同值",
             "custom_scale::Custom Scale": "标签 / 对话框标题 / 默认名三处都该是「自定义音阶」",
             "tempo_map::Tempo Map": "面板名与「清除速度图」对话框标题共用同一个名词",
+            "tempo_map::Scale": "`tempo_map_scale`（面板列名）与 `tempo_map_tooltip_scale`（变化点提示行）都是「音阶」这个名词本身",
         };
 
         /** 取前两段作为命名族（`param_btn_breath` → `param_btn`）。 */
@@ -375,5 +406,28 @@ describe("CJK 排版", () => {
             }
         }
         expect(violations).toEqual([]);
+    });
+
+    /*
+     * §2.2 的另一半：CJK 行文里的**其余**半角标点（冒号/逗号/分号/问叹号）。
+     * 此前只拦了括号，于是 `benchmark_providers_label: "可用提供者:"` 这类
+     * 半角冒号长期与全角冒号并存。规则取宽：**值里只要含汉字**，半角
+     * `，；：？！,;:?!` 一律不允许 —— 冒号跟在拉丁词后（`"ONNX Runtime:"`）
+     * 也算中文行文的一部分，与相邻键的全角写法保持一致。
+     *
+     * 豁免：时间格式掩码（`时:分:秒.毫秒`）里的冒号是格式分隔符，不是行文标点。
+     */
+    test("简繁中文行文不使用半角冒号/逗号/分号/问叹号", () => {
+        const FORMAT_MASKS = new Set(["time_unit_clock"]);
+        const violations: string[] = [];
+        for (const locale of ["zh-CN", "zh-TW"] as const) {
+            for (const [key, value] of entriesOf(locale)) {
+                if (FORMAT_MASKS.has(key)) continue;
+                if (/[\u4e00-\u9fff]/.test(value) && /[,;:?!]/.test(value)) {
+                    violations.push(`${locale}.${key} = ${value}`);
+                }
+            }
+        }
+        expect(violations, "CJK 行文用全角标点（见 style-guide §2.2）").toEqual([]);
     });
 });

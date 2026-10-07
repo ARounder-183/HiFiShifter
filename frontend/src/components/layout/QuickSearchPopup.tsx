@@ -4,7 +4,7 @@ import { ChevronDownIcon, ChevronUpIcon, MagnifyingGlassIcon } from "@radix-ui/r
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
-import { selectMergedKeybindings, matchesKeybinding } from "../../features/keybindings";
+import { selectMergedKeybindings, matchesAnyKeybinding } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
 import {
     searchFilesRecursive,
@@ -88,6 +88,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const inputRef = useRef<HTMLInputElement>(null);
     const listRef = useRef<HTMLDivElement>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // 搜索请求序号：每次发起搜索自增，在途的旧请求据此作废（见 `doSearch`）。
+    const seqRef = useRef(0);
     const popupRef = useRef<HTMLDivElement>(null);
     const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -115,6 +117,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         );
 
         // 重置状态
+        // 顺带作废上一次打开期间可能在途的搜索，避免它落地到这一轮的列表里。
+        seqRef.current += 1;
         setQuery("");
         setResults([]);
         setSelectedIndex(0);
@@ -152,6 +156,15 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     // 搜索逻辑（带防抖）
     const doSearch = useCallback(
         (q: string) => {
+            /*
+             * 每次发起搜索都自增序号，作废所有在途请求。
+             *
+             * 【为什么必须有】`dispatch` 的先后与 resolve 的先后无关：慢的旧查询可能
+             * 在新查询之后落地，把 `results` 覆盖成旧查询的匹配（例如切换正则触发的
+             * 立即重搜，与上一次防抖查询同时在飞），而列表会一直错到下一次按键。
+             * 只认最新序号的结果。
+             */
+            const seq = ++seqRef.current;
             if (debounceRef.current) clearTimeout(debounceRef.current);
             if (!q.trim() || !currentPath || currentPath === FILE_BROWSER_COMPUTER_PATH) {
                 setResults([]);
@@ -169,6 +182,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             options: searchOptions,
                         }),
                     );
+                    if (seq !== seqRef.current) return;
                     if (searchFilesRecursive.fulfilled.match(action)) {
                         // 与文件浏览器开启「仅显示媒体文件」时**同一判据**
                         // （`isMediaFile` = 音频/视频 + MIDI）：两个界面对同一份目录
@@ -195,7 +209,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 } catch {
                     // 忽略搜索错误
                 } finally {
-                    setLoading(false);
+                    // 只有最新请求能收敛 loading：否则旧请求会把新请求的加载态提前关掉。
+                    if (seq === seqRef.current) setLoading(false);
                 }
             }, 200);
         },
@@ -310,8 +325,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     // 将原生 React.KeyboardEvent 适配为 DOM KeyboardEvent 进行匹配
     const matchKey = useCallback(
-        (e: React.KeyboardEvent<HTMLInputElement>, kb: Keybinding): boolean => {
-            return matchesKeybinding(e.nativeEvent, kb);
+        (e: React.KeyboardEvent<HTMLInputElement>, bindings: readonly Keybinding[]): boolean => {
+            return matchesAnyKeybinding(e.nativeEvent, bindings);
         },
         [],
     );

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { isPluginMode, canImportHostAudio, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -55,8 +56,7 @@ import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
     selectMergedKeybindings,
-    formatKeybinding,
-    isNoneBinding,
+    formatKeybindingList,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
 import {
@@ -64,6 +64,7 @@ import {
     resolveEditOpRoute,
     resolvePasteRoute,
 } from "../../features/keybindings/focusRouting";
+import { IS_WINDOWS } from "../../utils/platform";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 import { KeybindingsDialog } from "./KeybindingsDialog";
@@ -182,7 +183,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     loopNewClips,
     onLoopNewClipsChange,
 }) => {
-    const { t, tf, setLocale, plural } = useI18n();
+    const { t, tf, tVars, setLocale, plural } = useI18n();
     const dispatch = useAppDispatch();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
@@ -215,6 +216,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     // Fetch DML adapters on mount for GPU device selector
     useEffect(() => {
+        if (isPluginMode()) return;
         import("../../services/api/core")
             .then(({ coreApi }) => coreApi.getDmlAdapters())
             .then((result) => {
@@ -325,8 +327,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return tf("project_scale_tempo_map_hint");
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [s.tempoMap, s.projectSec, s.project, tf, selectionVersion]);
+    // 标签与括号提示的拼接（含空格/全角括号的语系差异）交给词典模板。
     const projectScaleLabelWithHint = tempoMapScaleHint
-        ? `${projectScaleLabel} ${tempoMapScaleHint}`
+        ? tVars("project_scale_label_with_tempo_hint", {
+              label: projectScaleLabel,
+              hint: tempoMapScaleHint,
+          })
         : projectScaleLabel;
     const effectiveProjectStretchAlgorithm =
         s.project.stretchAlgorithmOverride ?? s.defaultStretchAlgorithm;
@@ -385,11 +391,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return () => window.removeEventListener("hifi:openEditDialog", handler);
     }, []);
 
-    /** 获取某个操作的快捷键显示文本（"None" 绑定时返回空字符串，不显示） */
+    /**
+     * 获取某个操作的快捷键显示文本（未绑定 / 无绑定时返回空字符串，不显示）。
+     *
+     * 【绑了多个键就显示多个】用户既然绑了 `Ctrl+Shift+Z` 与 `Ctrl+Y` 两个，
+     * 菜单里就必须让他看见两个 —— 只显示主绑定会让他以为备用键没生效。
+     * 多个文本用 `;` 连接（与右键菜单、tooltip 走同一个 `formatKeybindingList`）。
+     */
     function shortcutLabel(actionId: ActionId): string {
-        const kb = keybindings[actionId];
-        if (!kb || isNoneBinding(kb)) return "";
-        return formatKeybinding(kb, "");
+        return formatKeybindingList(keybindings[actionId], "");
     }
 
     /**
@@ -530,8 +540,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              * Use Trigger as the actual button element to avoid nesting <button>.
              */}
             {/* File Menu */}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+            {isPluginMode() ? <DropdownMenu.Root>
+                <DropdownMenu.Trigger disabled={!canImportHostAudio()} title={!canImportHostAudio() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                    <span>{t("menu_file")}</span>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content variant="soft" color="gray">
+                    <DropdownMenu.Item onSelect={()=>void handleImportAudioFromMenu()}>{t("menu_import_media")}
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">{shortcutLabel("project.importMedia")}</div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item disabled>{t("menu_save_project")} · REAPER</DropdownMenu.Item>
+                </DropdownMenu.Content>
+            </DropdownMenu.Root> : <DropdownMenu.Root>
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -659,7 +680,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("menu_exit")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
-            </DropdownMenu.Root>
+            </DropdownMenu.Root>}
 
             {/* Edit Menu */}
             <DropdownMenu.Root>
@@ -714,14 +735,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.pasteTracks")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    {/* 外部剪贴板交换 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
-                        {t("menu_paste_vocalshifter_clipboard")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteVocalShifter")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {/*
+                        外部剪贴板交换：VocalShifter 只在 Windows 上写
+                        %TEMP%/vocalshifter_tmp，其它平台点了必然 clipboard_not_found。
+                        分隔线收进条件块内部 —— 否则隐藏后会留下一条孤立的分隔线
+                        （与下方 `ortEp === "gpu"` 处的写法同一约定）。
+                        快捷键绑定保持不变：隐藏菜单项 ≠ 移除功能。
+                    */}
+                    {IS_WINDOWS && (
+                        <>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
+                                {t("menu_paste_vocalshifter_clipboard")}
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.pasteVocalShifter")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </>
+                    )}
                     <DropdownMenu.Separator />
                     {/* 选择 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
@@ -759,7 +790,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Track Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -1148,7 +1179,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Inference Device */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger disabled={isPluginMode()}>
                             {`${t("menu_inference_device")}: ${
                                 s.ortEp === "auto"
                                     ? `${t("menu_inference_auto")}${gpuBackend ? ` (${gpuBackend})` : ""}`

@@ -196,9 +196,43 @@ node_modules/
 # Git worktrees for isolated feature work (see using-git-worktrees)
 .worktrees/
 
+# Local build scratch created while setting up a worktree (never source)
+.npm-cache/
+.build-tmp/
+.tmp-build/
+frontend/.esbuild-tmp/
+
+# SDD plan workspace for this branch (ledger/briefs; scratch, not source).
+# Committed here rather than on develop so the main working tree stays clean.
+.superpowers/
+
+# ARA probe: cloned third-party SDKs and their build output (~93 MB). Reproduce
+# with the commands in probe/ara/README.md; never commit them.
+probe/ara/ARA_SDK/
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
 # AppImage build artifacts (may be generated in CWD by linuxdeploy)
 *.AppImage
 .codebuddy
+# ARA probe: staged plug-in binary (rebuilt from probe/ara/README.md).
+# NOTE: probe/ara/captures/ is deliberately NOT ignored -- the captured ARA model
+# is Task 1's actual deliverable and is consumed by Task 3 as a test fixture.
+probe/ara/vst3/
+
+
+# ARA probe: REAPER resource dir it generates on first launch (thousands of
+# theme/icon/JSFX files). Runtime artifact, never source.
+probe/ara/reaper-profile/
+
+
+# ARA probe: REAPER peak-cache files generated next to the fixtures
+probe/ara/fixtures/peaks/
+
+
+# ARA probe Task 2: Rust dependency build + locked SDK checkouts (large)
+probe/ara/rust-path/target/
+probe/ara/rust-path/.third-party/
+probe/ara/rust-path/.build-tmp/
+

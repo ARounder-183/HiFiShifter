@@ -1,0 +1,16 @@
+{
+  "_probe": "HiFiShifter ARA probe dump",
+  "documentName": "",
+  "audioSources": [
+    {"persistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\fixtures\\tone44100.wav", "name": "tone44100.wav", "sampleRate": 44100, "sampleCount": 88200, "durationSeconds": 2, "channelCount": 1, "merits64BitSamples": true, "sampleAccessEnabled": false, "deactivatedForUndoHistory": false, "modificationCount": 1}
+  ],
+  "musicalContexts": [
+    {"name": null, "orderIndex": 0, "regionSequences": [{"name": "probe-44k", "orderIndex": 0, "playbackRegionCount": 1}]}
+  ],
+  "audioModifications": [
+    {"persistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\fixtures\\tone44100.wav", "name": null, "audioSourcePersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\fixtures\\tone44100.wav", "playbackRegionCount": 1}
+  ],
+  "playbackRegions": [
+    {"name": "tone44100.wav", "audioSourcePersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\fixtures\\tone44100.wav", "audioModificationPersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\fixtures\\tone44100.wav", "startInModificationTime": 0, "durationInModificationTime": 2, "startInPlaybackTime": 0, "durationInPlaybackTime": 2, "isTimestretchEnabled": false, "isTimeStretchReflectingTempo": false, "hasContentBasedFadeAtHead": false, "hasContentBasedFadeAtTail": false}
+  ]
+}

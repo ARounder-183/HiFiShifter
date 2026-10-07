@@ -22,6 +22,13 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
                 midiCurve: [60, 61, 62],
                 framePeriodMs: 5,
             },
+            // 已从时间线删除的 clip 仍留在曲线 map 里：导入快照应用后必须被
+            // 剪掉，不能把整包旧 map 原样恢复回来。
+            "clip-orphan": {
+                curveStartSec: 0,
+                midiCurve: [40, 41, 42],
+                framePeriodMs: 5,
+            },
         },
     } as unknown as ReturnType<typeof reducer>;
 
@@ -49,6 +56,29 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
                         },
                     ],
                     clips: [
+                        {
+                            // 快照里仍然存在的既有 clip：它的曲线必须被保留。
+                            id: "clip-a",
+                            track_id: "track_main",
+                            name: "Existing Clip",
+                            start_sec: 0,
+                            length_sec: 1,
+                            color: "emerald",
+                            source_path: "voice.wav",
+                            duration_sec: 1,
+                            gain: 1,
+                            muted: false,
+                            source_start_sec: 0,
+                            source_end_sec: 1,
+                            playback_rate: 1,
+                            reversed: false,
+                            fade_in_sec: 0,
+                            fade_out_sec: 0,
+                            fade_in_shape: 5,
+                            fade_out_shape: 5,
+                            fade_in_dir: 0,
+                            fade_out_dir: 0,
+                        },
                         {
                             id: "clip-b",
                             track_id: "track_main",
@@ -88,7 +118,7 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
     assertEqual(next.paramsEpoch, 7, "import keeps param epoch stable");
     assertEqual(
         next.clipPitchCurves,
-        baseState.clipPitchCurves,
-        "import keeps detected pitch curves stable",
+        { "clip-a": baseState.clipPitchCurves["clip-a"] },
+        "import keeps pitch curves of surviving clips and prunes deleted ones",
     );
 });

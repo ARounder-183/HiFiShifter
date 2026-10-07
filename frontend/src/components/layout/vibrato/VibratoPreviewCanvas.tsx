@@ -15,6 +15,8 @@
 
 import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
+import { subscribeDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { coalescedEventsOf } from "../../../utils/penInput";
 import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
 import {
@@ -268,26 +270,40 @@ export function VibratoPreviewCanvas({
         if (!canvas || !container) return;
 
         const draw = () => {
-            const width = container.clientWidth;
-            if (width <= 0) return;
+            const cssWidth = container.clientWidth;
+            if (cssWidth <= 0) return;
             const dpr = readDevicePixelRatio();
-            canvas.width = Math.round(width * dpr);
-            canvas.height = Math.round(height * dpr);
-            canvas.style.width = `${width}px`;
-            canvas.style.height = `${height}px`;
-
+            // 统一走 `rasterize` 契约：物理尺寸 = `round(css × dpr)`，CSS 尺寸回算为
+            // `physical / dpr`。回算保证布局盒与 backing store 严格 1:1 —— 否则浏览器
+            // 会把 physical 个像素铺到 `css × dpr` 个像素的盒上做非整数倍重采样，整块
+            // 预览发虚（且随宽度奇偶变化）。清屏同理必须按物理尺寸做，不能沿用
+            // `clearRect(0,0,cssW,cssH)`（round 向上取整时底部会残留 0~0.5 物理行）。
+            const target = rasterize(canvas, cssWidth, height, dpr);
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            ctx.clearRect(0, 0, width, height);
+            ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+            clearCanvasPhysical(ctx, target);
+
+            // 绘制坐标系 = 回算后的 CSS 尺寸（与画布样式逐值相等）。
+            const width = target.cssWidthPx;
+            const drawHeight = target.cssHeightPx;
+            /**
+             * 1 物理像素横线的中心 y：落在设备像素的半格上，线体恰好覆盖一整行。
+             *
+             * 旧的 `y + 0.5` 只在 dpr=1 下成立；分数 dpr 下 0.5 CSS px 不是半格，
+             * 线会跨在两行设备像素之间按位置忽粗忽细。
+             */
+            const hairlineY = (cssY: number): number => (Math.round(cssY * dpr) + 0.5) / dpr;
+            /** 1 物理像素的线宽（CSS 单位）。 */
+            const hairlineWidth = 1 / dpr;
 
             const accent = tokenColor("--qt-accent", "#6aa9ff");
             const muted = tokenColor("--qt-text-muted", "#8a8a8a");
             const divider = tokenColor("--qt-divider", "#3a3a3a");
             const panel = tokenColor("--qt-panel", "#1e1e1e");
 
-            const midY = height / 2;
-            const verticalReach = height / 2 - 6;
+            const midY = drawHeight / 2;
+            const verticalReach = drawHeight / 2 - 6;
             // 显式纵轴（半幅 cents）优先：它由调用方**一次性拟合**，编辑期间保持不变，
             // 于是波形高度直接等于深度，用户能直观判断大小。省略时回落到按峰值自适应
             // （缩略图 / 无手势的只读预览用得上）。
@@ -298,7 +314,7 @@ export function VibratoPreviewCanvas({
             const toY = (cents: number) => midY - (cents / halfCents) * verticalReach;
             geometryRef.current = {
                 width,
-                height,
+                height: drawHeight,
                 centsPerPx: halfCents / Math.max(1, verticalReach),
             };
 
@@ -317,7 +333,7 @@ export function VibratoPreviewCanvas({
                 ctx.save();
                 ctx.globalAlpha = 0.45;
                 ctx.strokeStyle = muted;
-                ctx.lineWidth = 1;
+                ctx.lineWidth = hairlineWidth;
                 ctx.setLineDash([4, 3]);
                 strokeFinitePolyline(ctx, contour, toX, toY);
                 ctx.restore();
@@ -326,7 +342,7 @@ export function VibratoPreviewCanvas({
             // 刻度网格 + 读数：没有它，"波形占画布多少"仍然只是相对量；有了它，
             // 用户能直接把波峰高度读成 cents。上下边缘各标一次，中间画到 1/4 的细线。
             ctx.strokeStyle = divider;
-            ctx.lineWidth = 1;
+            ctx.lineWidth = hairlineWidth;
             ctx.font = "10px sans-serif";
             ctx.textBaseline = "middle";
             for (const fraction of [1, 0.5]) {
@@ -335,8 +351,8 @@ export function VibratoPreviewCanvas({
                     const y = toY(cents);
                     ctx.globalAlpha = fraction === 1 ? 0.55 : 0.28;
                     ctx.beginPath();
-                    ctx.moveTo(0, y + 0.5);
-                    ctx.lineTo(width, y + 0.5);
+                    ctx.moveTo(0, hairlineY(y));
+                    ctx.lineTo(width, hairlineY(y));
                     ctx.stroke();
                     if (fraction === 1) {
                         ctx.globalAlpha = 0.75;
@@ -352,10 +368,10 @@ export function VibratoPreviewCanvas({
 
             // 零基线：波形围绕它摆动，视觉上是"音高中心"。
             ctx.strokeStyle = divider;
-            ctx.lineWidth = 1;
+            ctx.lineWidth = hairlineWidth;
             ctx.beginPath();
-            ctx.moveTo(0, midY + 0.5);
-            ctx.lineTo(width, midY + 0.5);
+            ctx.moveTo(0, hairlineY(midY));
+            ctx.lineTo(width, hairlineY(midY));
             ctx.stroke();
 
             /*
@@ -432,7 +448,13 @@ export function VibratoPreviewCanvas({
         // 宽度随停靠面板 / 对话框变化，需要跟着重画（画布不会自己缩放）。
         const observer = new ResizeObserver(draw);
         observer.observe(container);
-        return () => observer.disconnect();
+        // dpr 变化同样要重画：画布物理尺寸与半像素吸附都依赖 dpr，而 ResizeObserver
+        // 观察的是 CSS 布局盒 —— 纯 dpr 变化（浏览器缩放 / 换显示器）不会触发它。
+        const unsubscribeDpr = subscribeDevicePixelRatio(draw);
+        return () => {
+            observer.disconnect();
+            unsubscribeDpr();
+        };
     }, [samples, height, handles, explicitHalfCents]);
 
     const localPoint = (event: React.PointerEvent<HTMLDivElement>) => {

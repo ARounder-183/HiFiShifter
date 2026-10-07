@@ -374,8 +374,8 @@ mod tests {
         let sr = 44100.0f64;
         write_test_wav(dir, name, 44100, (3.0 * sr) as usize, move |i| {
             let t = i as f64 / sr;
-            if (t < 1.0 || (2.0..3.0).contains(&t)) {
-                (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t) as f32)
+            if t < 1.0 || (2.0..3.0).contains(&t) {
+                0.5 * (2.0 * std::f64::consts::PI * 440.0 * t) as f32
             } else {
                 0.0
             }

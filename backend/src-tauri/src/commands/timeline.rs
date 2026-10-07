@@ -142,6 +142,18 @@ fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayloa
     payload
 }
 
+/// 持久化的「导入媒体」目录（`<config_dir>/imported_media/`）。
+///
+/// 【为什么不用临时目录】拖放导入走 `import_audio_bytes`：浏览器只给字节流，
+/// 落盘后的文件就是该 clip 的**唯一**副本。`%TEMP%/hifishifter/` 在每次启动时
+/// 被清理，会让「导入 → 保存工程 → 重启」直接丢掉素材（源文件无从恢复）。
+/// 因此这里落到持久目录，启动清理不再触碰这些文件。
+fn persistent_import_dir(state: &AppState) -> Option<std::path::PathBuf> {
+    let dir = state.config_dir.get()?.join("imported_media");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 pub(super) fn import_audio_bytes(
     state: State<'_, AppState>,
     file_name: String,
@@ -175,13 +187,15 @@ pub(super) fn import_audio_bytes(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    let tmp_dir = ensure_temp_dir().ok();
-    let path = tmp_dir.unwrap_or_else(std::env::temp_dir).join(format!(
-        "{}_{}.{}",
-        "import",
-        Uuid::new_v4().simple(),
-        ext
-    ));
+    // 优先落持久目录：这里的文件是 clip 的唯一副本，不能放进启动即清理的临时目录。
+    // 仅当 config_dir 不可用（极端降级）时才退回临时目录。
+    let path = match persistent_import_dir(&state) {
+        Some(dir) => dir.join(format!("import_{}.{}", Uuid::new_v4().simple(), ext)),
+        None => ensure_temp_dir()
+            .ok()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("import_{}.{}", Uuid::new_v4().simple(), ext)),
+    };
 
     if let Err(e) = fs::write(&path, &bytes) {
         return import_audio_bytes_error(&format!(
@@ -451,15 +465,9 @@ pub(super) fn set_track_state(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTrack);
-    let algo = pitch_analysis_algo.as_deref().map(|s| match s {
-        "world_dll" | "world" => crate::state::PitchAnalysisAlgo::WorldDll,
-        "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => {
-            crate::state::PitchAnalysisAlgo::NsfHifiganOnnx
-        }
-        "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
-        "none" => crate::state::PitchAnalysisAlgo::None,
-        _ => crate::state::PitchAnalysisAlgo::Unknown,
-    });
+    let algo = pitch_analysis_algo
+        .as_deref()
+        .map(crate::state::PitchAnalysisAlgo::from_id);
     tl.set_track_state(
         &track_id,
         muted,
@@ -480,7 +488,7 @@ pub(super) fn set_track_state(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -677,7 +685,7 @@ pub(super) fn remove_clips(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in affected_root_tracks {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -797,7 +805,7 @@ pub(super) fn move_clips(
         drop(tl);
 
         for root_id in affected_root_tracks {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
         }
         payload
     };
@@ -836,7 +844,6 @@ pub(super) fn apply_clip_linked_params(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(super) fn set_clip_state(
     state: State<'_, AppState>,
     clip_id: String,
@@ -900,6 +907,8 @@ pub(super) fn set_clip_state(
             // 单 Clip 的声道模式走 `set_clip_take_channel_mode`（可靶向具体
             // Take）；批量场景走 `set_clips_state_bulk` 的 patch 字段。
             channel_mode: None,
+            // 宿主item编组字段仅用于插件桥；独立App保留原有编组语义，不发送宿主group ID。
+            host_group_id: None,
         },
     );
     // 波纹编辑（自动跟进）：当起点/长度改变（右边缘位移）时，平移后续剪辑。
@@ -953,10 +962,10 @@ pub(super) fn set_clip_state(
     drop(tl);
 
     if let Some(root_id) = root_track_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     for root_id in ripple_root_track_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     if let Some(next_clip) = next_clip {
         if clip_formant_rebuild_needs_refresh(previous_clip.as_ref(), &next_clip) {
@@ -1072,10 +1081,10 @@ pub(super) fn set_clips_state_bulk(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in &root_track_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root);
     }
     for root in ripple_roots {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
     payload
 }
@@ -1192,7 +1201,7 @@ pub(super) fn set_clip_active_take(
     drop(tl);
 
     if let Some(root_id) = root_track_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -1246,7 +1255,7 @@ pub(super) fn cycle_clip_takes(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in roots {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
     payload
 }
@@ -1281,7 +1290,7 @@ pub(super) fn pack_clips_into_takes(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root) = root_track_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
     payload
 }
@@ -1319,7 +1328,7 @@ pub(super) fn explode_clip_takes(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in roots {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
     payload
 }
@@ -1416,7 +1425,7 @@ pub(super) fn remove_clip_take(
     drop(tl);
     if schedule_pitch {
         if let Some(root) = root_track_id {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
         }
     }
     payload
@@ -1500,7 +1509,7 @@ pub(super) fn set_clip_take_reversed(
     drop(tl);
     if flipped_active {
         if let Some(root) = root_track_id {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
         }
     }
     payload
@@ -1551,7 +1560,7 @@ pub(super) fn set_clip_take_channel_mode(
     drop(tl);
     if active_changed {
         if let Some(root) = root_track_id {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
         }
     }
     payload
@@ -1700,7 +1709,7 @@ pub(super) fn scan_and_convert_fake_stereo(
             .collect()
     };
     for root in &root_tracks {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root);
     }
 
     log::info!(
@@ -1987,7 +1996,7 @@ pub(super) fn import_media_files_as_takes(
     };
     drop(tl);
     if let Some(root) = root_for_pitch {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
     payload
 }
@@ -2290,7 +2299,7 @@ pub(super) fn split_clip(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_track_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -2332,7 +2341,7 @@ pub(super) fn split_clips_at(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -2365,7 +2374,7 @@ pub(super) fn close_track_gaps(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -2446,7 +2455,7 @@ pub(super) fn glue_clips(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -2476,7 +2485,7 @@ pub(super) fn convert_clips_to_pitch_reference(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }
@@ -2506,7 +2515,7 @@ pub(super) fn update_pitch_reference(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_id);
     }
     payload
 }

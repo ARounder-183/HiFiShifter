@@ -25,114 +25,55 @@ macro_rules! log_error_limited {
 
 #[cfg(test)]
 mod build_git;
+// 跨 app / 内核边界的测试：它们要同时看见两侧，所以住在 app。
+// 详见各自的文件头注释。
+#[cfg(test)]
+mod project_tests;
+#[cfg(test)]
+mod renderer_cross_checks;
 mod build_info;
+// app 层的事件出口：把 Tauri 的 `AppHandle` 包成内核认识的 `EventSink`，
+// 并给 app 层自己留一个 `AppHandle` 出口。内核模块不再直接引用 `tauri::`。
+mod app_events;
 pub mod logging;
 mod zip_util;
 
 mod audio_engine;
-#[path = "audio/audio_utils.rs"]
-mod audio_utils;
-#[path = "audio/channel_decision.rs"]
-pub(crate) mod channel_decision;
-#[path = "audio/channel_mode.rs"]
-pub(crate) mod channel_mode;
-#[path = "import/channel_policy.rs"]
-pub(crate) mod channel_policy;
-#[path = "pitch/clip_rendering_state.rs"]
-mod clip_rendering_state;
+mod ara_bridge;
 pub(crate) mod commands;
-#[path = "audio/encode/mod.rs"]
-mod encode;
-mod fade_curves;
-mod formant_cache;
-#[path = "audio/formant_morph/mod.rs"]
-mod formant_morph;
-#[path = "audio/glottal_rd.rs"]
-mod glottal_rd;
-#[path = "audio/rd_tension.rs"]
-mod rd_tension;
 mod launch_args;
-mod media;
-#[path = "audio/mixdown.rs"]
-mod mixdown;
-mod models;
-mod pitch_analysis;
-#[path = "pitch/pitch_clip.rs"]
-mod pitch_clip;
-#[path = "pitch/pitch_config.rs"]
-mod pitch_config;
-mod pitch_editing;
 mod recording;
-mod render_cache;
-mod render_key;
-mod renderer;
 mod search;
 #[path = "audio/silence_detect.rs"]
 mod silence_detect;
-#[path = "audio/stereo_detect.rs"]
-pub(crate) mod stereo_detect;
-#[path = "pitch/streaming_pitch.rs"]
-mod streaming_pitch;
-mod synth_clip_cache;
-
-#[cfg(feature = "onnx")]
-#[path = "vocoder/ort_session.rs"]
-mod vocoder_ort_session;
-
-#[cfg(target_os = "windows")]
-#[path = "vocoder/gpu_info.rs"]
-mod gpu_info;
-
-#[cfg(not(target_os = "windows"))]
-#[path = "vocoder/gpu_info_stub.rs"]
-mod gpu_info;
-
-#[cfg(target_os = "windows")]
-#[path = "vocoder/dml_adapters.rs"]
-mod dml_adapters;
-
-#[cfg(not(target_os = "windows"))]
-#[path = "vocoder/dml_adapters_stub.rs"]
-mod dml_adapters;
-
-#[cfg(feature = "onnx")]
-#[path = "vocoder/mel_utils.rs"]
-mod mel_utils;
-
-#[cfg(feature = "onnx")]
-#[path = "vocoder/nsf_hifigan_onnx.rs"]
-mod nsf_hifigan_onnx;
-#[cfg(not(feature = "onnx"))]
-#[path = "vocoder/nsf_hifigan_onnx_stub.rs"]
-mod nsf_hifigan_onnx_stub;
-#[cfg(not(feature = "onnx"))]
-use nsf_hifigan_onnx_stub as nsf_hifigan_onnx;
-
-#[cfg(feature = "onnx")]
-#[path = "vocoder/hnsep_dsp.rs"]
-mod hnsep_dsp;
-#[cfg(feature = "onnx")]
-#[path = "vocoder/hnsep_onnx.rs"]
-mod hnsep_onnx;
-#[cfg(not(feature = "onnx"))]
-#[path = "vocoder/hnsep_onnx_stub.rs"]
-mod hnsep_onnx_stub;
-#[cfg(not(feature = "onnx"))]
-use hnsep_onnx_stub as hnsep_onnx;
-
-#[cfg(feature = "onnx")]
-#[path = "vocoder/fcpe_onnx.rs"]
-mod fcpe_onnx;
-#[cfg(not(feature = "onnx"))]
-#[path = "vocoder/fcpe_onnx_stub.rs"]
-mod fcpe_onnx_stub;
-#[cfg(not(feature = "onnx"))]
-use fcpe_onnx_stub as fcpe_onnx;
-
-mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
-mod vibrato;
+
+// ── 内核模块：接回路径 ──────────────────────────────────────────────────────
+//
+// 它们已经搬进 `hifishifter-kernel`。这里用 `pub(crate) use` 再接回 crate 根，
+// 于是 app 里 `crate::mixdown::…` / `crate::state::Clip` 这类**既有路径完全不变** ——
+// 搬迁因此不需要改动任何调用点。可见性也照旧（原本是私有或 `pub(crate)` 的，
+// 不会因为搬走而变成对外公开）。
+//
+// 判据与理由见 `docs/superpowers/specs/2026-10-04-ara-plugin-v1-design.md` §4.2。
+pub use hifishifter_kernel::fade_curves;
+pub(crate) use hifishifter_kernel::{
+    audio_utils, byte_budget_cache, channel_decision, channel_mode, channel_policy,
+    clip_rendering_state, config, dml_adapters, encode, formant_cache, formant_morph,
+    glottal_rd, gpu_info, hnsep_dsp, media, metronome, midi_import, mixdown, models,
+    notebook_assets, pitch_analysis, pitch_clip, pitch_config, pitch_editing, project,
+    rd_tension, render_cache, render_key, renderer, stereo_detect, streaming_pitch,
+    streaming_world, synth_clip_cache, temp_manager, vibrato, world_vocoder,
+};
+
+// 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
+#[cfg(feature = "onnx")]
+pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, mel_utils, nsf_hifigan_onnx, vocoder_ort_session};
+#[cfg(not(feature = "onnx"))]
+pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, nsf_hifigan_onnx};
+#[cfg(all(feature = "vslib", target_os = "windows"))]
+pub(crate) use hifishifter_kernel::vslib;
 
 // ── 测试专用的分配计量 ───────────────────────────────────────────────────────
 //
@@ -213,10 +154,6 @@ static TEST_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::CountingAll
 
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
-#[path = "import/midi_import.rs"]
-mod midi_import;
-mod notebook_assets;
-mod project;
 mod project_fragment;
 #[path = "import/reaper_export.rs"]
 mod reaper_export;
@@ -224,26 +161,19 @@ mod reaper_export;
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
-#[path = "audio/soundtouch.rs"]
-mod soundtouch;
-#[path = "audio/sstretch.rs"]
-mod sstretch;
+// `soundtouch` / `sstretch` / `time_stretch` 已迁到 `hifishifter-kernel`。
+// 再导出，app 侧 `crate::time_stretch::…` 的路径保持不变。
+//
+// 【为什么这三个一起走】前两个是后者的原生后端（FFI），而它们的原生构建
+// 也已随之内核化 —— 否则插件单独链接内核时会链接失败。设计 §4.9。
+pub use hifishifter_kernel::{soundtouch, sstretch, time_stretch};
 mod state;
-#[path = "vocoder/streaming_world.rs"]
-mod streaming_world;
 mod system_clipboard;
-mod temp_manager;
-#[path = "audio/time_stretch.rs"]
-mod time_stretch;
 #[path = "import/vocalshifter_clipboard.rs"]
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
-#[cfg(all(feature = "vslib", target_os = "windows"))]
-#[path = "vocoder/vslib.rs"]
-mod vslib;
-#[path = "vocoder/world_vocoder.rs"]
-mod world_vocoder;
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 
 #[cfg(target_os = "windows")]
 mod webview2_accelerators;
@@ -283,25 +213,36 @@ pub mod __test_internals {
     }
 }
 
+/// HiFiShifter 离线内核的对外窗口。
+///
+/// 为什么需要它：ARA 插件（`hifishifter-plugin`）必须**复用**本 crate 已有的
+/// 混音 / 拉伸 / 编码内核，而不是另写一套；但 `lib.rs` 里的模块大多是私有的
+/// （形如 `#[path = "audio/mixdown.rs"] mod mixdown;`），外部 crate 看不到它们。
+///
+/// 这个模块**只做再导出**：不改变任何模块的可见性，也不改变任何行为。
+/// 列在这里的都是不依赖 Tauri、不依赖 cpal 音频设备的离线入口 —— 与设计文档
+/// §5.1「复用 backend_lib 内核（不依赖 Tauri / cpal）」是同一件事。
+///
+/// 边界：这里**不含**设备边界（`audio_engine` 的 cpal 流）与 IPC 包装
+/// （`commands`）；插件侧用宿主回调替代它们。
+pub mod kernel {
+    pub use crate::encode::OutputSpec;
+    pub use crate::mixdown::{render_mixdown_interleaved, MixdownOptions, QualityPreset};
+    pub use crate::state::{Clip, TimelineState, Track, TrackParamsState};
+    pub use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;
 
-static NSF_HIFIGAN_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
-static HNSEP_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
-static FCPE_ONNX_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-pub fn nsf_hifigan_model_dir() -> Option<&'static Path> {
-    NSF_HIFIGAN_MODEL_DIR.get().map(|p| p.as_path())
-}
-
-pub fn hnsep_model_dir() -> Option<&'static Path> {
-    HNSEP_MODEL_DIR.get().map(|p| p.as_path())
-}
-
-pub fn fcpe_onnx_path() -> Option<&'static Path> {
-    FCPE_ONNX_PATH.get().map(|p| p.as_path())
-}
+// 模型路径的登记处已迁到 `hifishifter-kernel`：声码器与 FCPE 在内核侧，
+// 它们用时来读；而"模型装在哪"是宿主才知道的事（app 从 `resource_dir` 找），
+// 所以内核只提供只写一次的登记处，不认识 Tauri 的 `path()`。
+pub use hifishifter_kernel::model_paths::{
+    fcpe_onnx_path, hnsep_model_dir, nsf_hifigan_model_dir, set_fcpe_onnx_path,
+    set_hnsep_model_dir, set_nsf_hifigan_model_dir,
+};
 
 pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     // Probe ONNX model availability.
@@ -334,6 +275,7 @@ pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::default())
+        .manage(ara_bridge::AraBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // ── AppImage Mesa/EGL driver path ──────────────────────────
@@ -355,21 +297,21 @@ pub fn run() {
                 let has_model = p.join("pc_nsf_hifigan.onnx").exists()
                     || p.join("pc_nsf_hifigan_coreml.onnx").exists();
                 if has_model && p.join("config.json").exists() {
-                    let _ = NSF_HIFIGAN_MODEL_DIR.set(p);
+                    let _ = set_nsf_hifigan_model_dir(p);
                 }
             }
 
             if let Ok(res_dir) = app.path().resource_dir() {
                 let p = res_dir.join("models").join("hnsep");
                 if p.join("hnsep.onnx").exists() {
-                    let _ = HNSEP_MODEL_DIR.set(p);
+                    let _ = set_hnsep_model_dir(p);
                 }
             }
 
             if let Ok(res_dir) = app.path().resource_dir() {
                 let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
                 if p.exists() {
-                    let _ = FCPE_ONNX_PATH.set(p);
+                    let _ = set_fcpe_onnx_path(p);
                 }
             }
 
@@ -383,8 +325,17 @@ pub fn run() {
             // Expose app handle for background workers.
             let _ = state.app_handle.set(app.handle().clone());
 
-            // 将 app_handle 传递给 audio engine worker，使其能向前端推送事件。
-            state.audio_engine.set_app_handle(app.handle().clone());
+            // app 层自己的 AppHandle 出口（窗口/路径/state）+ 内核事件出口。
+            app_events::install(app.handle());
+            if let Some(sink) = app_events::event_sink() {
+                let _ = state.events.set(sink);
+            }
+            // 内核找宿主的出口（后台渲染开关 / 请求）。必须在任何内核 worker 启动前装配。
+            let _ = app_events::install_host_callbacks();
+
+            // 不再把 app_handle 经命令通道送给 audio engine worker ——
+            // `EngineCommand` 已是内核的纯数据类型。worker 会在自己的循环里
+            // 惰性从 `app_events::app_handle()` 取（见 engine.rs 的说明）。
 
             // ── 模型会话后台预热（绝不阻塞 UI 线程）────────────────────────
             // 会话构建 + 首次推理烟测在 GPU（DirectML）下需数秒（实测开启
@@ -646,6 +597,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::ara_list_instances,
+            commands::ara_connect,
+            commands::ara_submit,
+            commands::ara_refresh,
+            commands::ara_disconnect,
             commands::ping,
             commands::get_about_info,
             commands::analyze_clip_formants,
@@ -795,7 +751,6 @@ pub fn run() {
             commands::get_playback_state,
             commands::start_background_render,
             commands::cancel_background_render,
-            commands::debug_realtime_render_stats,
             commands::get_pitch_analysis_progress,
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
@@ -806,11 +761,10 @@ pub fn run() {
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
+            commands::get_vslib_status,
             commands::run_vocoder_benchmark,
             commands::get_gpu_devices,
             commands::get_dml_adapters,
-            commands::clear_pitch_cache,
-            commands::get_pitch_cache_stats,
             commands::list_directory,
             commands::stat_paths,
             commands::collect_folder_media,

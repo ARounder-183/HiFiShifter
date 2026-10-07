@@ -1,0 +1,25 @@
+{
+  "baseline_plain_max_abs_difference": 5.960464477539063E-08,
+  "first_clip_start_sec": 1.0,
+  "edited_rms": 0.14089130872863612,
+  "mean_absolute_difference": 0.16143372499032715,
+  "gap_max_abs": 0.0,
+  "baseline_pitch_hz": [
+    220.5,
+    220.5,
+    220.5,
+    220.5
+  ],
+  "edited_pitch_hz": [
+    260.94674556213016,
+    260.94674556213016,
+    260.94674556213016,
+    260.94674556213016
+  ],
+  "pitch_changed_windows": 4,
+  "reopen_checked": false,
+  "reopen_max_abs_difference": 0.0,
+  "baseline_sha256": "A5D037BB6CC04FC7F1CB7C25201C3536105656C7BEA96C08015CF22C494419A6",
+  "source_sha256": "C411C14FEC76A3142388FBC7B570F90E92870CAC5AC0C55349034B9411BBC9BD",
+  "edited_sha256": "045DD969BB5F2E6F6B5B56E3D15534697F7142DDF622A209E8D4560E9C977D9E"
+}

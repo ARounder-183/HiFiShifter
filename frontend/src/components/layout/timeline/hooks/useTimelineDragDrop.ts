@@ -119,7 +119,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/window");
+                const mod = await (await import("../../../../services/hostWindow")).loadStandaloneWindowApi();
                 const win = mod.getCurrentWindow();
 
                 if (debugDnd) {
@@ -543,10 +543,29 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     // 右键松开后浏览器会立即触发 contextmenu 事件；若不拦截，
                     // 该事件会被菜单 backdrop 的 onContextMenu 捕获，导致刚
                     // 弹出的菜单立刻被关闭。注册一次性 capturing 拦截器吞掉它。
+                    //
+                    // 【拦截器绝不能长生】若只靠 contextmenu 事件自我注销，一旦
+                    // 本次右键释放没有产生该事件（窗口外释放 / 手势取消 / 平台
+                    // 差异），它会滞留并吞掉用户**下一次**任意位置的右键。因此
+                    // 额外挂 pointerdown / blur / 超时三条兜底，任一先到即注销
+                    // （注销幂等）。
+                    let suppressCtxTimer = 0;
+                    const cleanupSuppressCtx = () => {
+                        window.removeEventListener("contextmenu", suppressCtx, true);
+                        window.removeEventListener("pointerdown", cleanupSuppressCtx, true);
+                        window.removeEventListener("blur", cleanupSuppressCtx);
+                        window.clearTimeout(suppressCtxTimer);
+                    };
                     const suppressCtx = (ev: Event) => {
                         ev.preventDefault();
                         ev.stopImmediatePropagation();
-                        window.removeEventListener("contextmenu", suppressCtx, true);
+                        cleanupSuppressCtx();
+                    };
+                    const armSuppressCtx = () => {
+                        window.addEventListener("contextmenu", suppressCtx, true);
+                        window.addEventListener("pointerdown", cleanupSuppressCtx, true);
+                        window.addEventListener("blur", cleanupSuppressCtx);
+                        suppressCtxTimer = window.setTimeout(cleanupSuppressCtx, 1000);
                     };
 
                     // 目录：面板拖拽时**类型是已知的**（`dirPaths` 由行的 `isDir` 得来），
@@ -554,7 +573,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const dirPaths = new Set(detail.dirPaths ?? []);
                     const folderPaths = filePaths.filter((path) => dirPaths.has(path));
                     if (folderPaths.length > 0) {
-                        if (isRightDrag) window.addEventListener("contextmenu", suppressCtx, true);
+                        if (isRightDrag) armSuppressCtx();
                         emitFolderImportRequest({
                             dirs: folderPaths,
                             // 同时拖入的媒体文件一并交给宿主，别让它们走另一条路。
@@ -575,7 +594,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     if (actionKind === "openProject") {
                         // 拖入 HiFiShifter 工程（hshp/hsp）：始终弹出
                         // 「打开工程 / 导入工程」操作菜单，不直接执行打开。
-                        window.addEventListener("contextmenu", suppressCtx, true);
+                        armSuppressCtx();
                         setProjectActionMenu?.({
                             x: detail.clientX,
                             y: detail.clientY,
@@ -591,7 +610,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     ) {
                         // 右键拖拽媒体文件 → 弹出导入模式菜单
                         // （跨时间添加 / 跨轨道添加 / 作为 Take 添加）。
-                        window.addEventListener("contextmenu", suppressCtx, true);
+                        armSuppressCtx();
                         setImportModeMenu({
                             x: detail.clientX,
                             y: detail.clientY,

@@ -26,6 +26,12 @@
     --qt-button-hover: #484848;
     --qt-border: #505050;
     --qt-hover: #484848;
+    /* 上下文菜单的项级语义色（表面与结构见下方「上下文菜单样式模型」块）。
+       与 `--qt-hover` / `--qt-button-hover` 分开，是因为后两者当前**恰好同值**
+       却语义不同：菜单的悬停底色不该随按钮的悬停底色一起改。 */
+    --qt-menu-item-hover: var(--qt-hover, #484848);
+    --qt-menu-item-active: var(--qt-highlight, #3b82f6);
+    --qt-menu-item-disabled: var(--qt-text-muted, #909090);
     --qt-danger-bg: #4a1a1a;
     --qt-danger-text: #fca5a5;
     --qt-danger-border: #ef4444;
@@ -94,6 +100,10 @@
     --qt-button-hover: #d7dbe4;
     --qt-border: #b8bdc9;
     --qt-hover: #dde1e8;
+    /* 上下文菜单的项级语义色（见深色主题同名令牌的说明）。 */
+    --qt-menu-item-hover: var(--qt-hover, #dde1e8);
+    --qt-menu-item-active: var(--qt-highlight, #4b68d1);
+    --qt-menu-item-disabled: var(--qt-text-muted, #666d79);
     --qt-danger-bg: #ffe6ea;
     --qt-danger-text: #b53a49;
     --qt-danger-border: #df6674;
@@ -279,6 +289,30 @@
     --qt-icon-sm: 12px;
     --qt-icon-md: 14px;
     --qt-icon-lg: 15px;
+
+    /*
+     * 上下文菜单的度量（样式见下方「上下文菜单样式模型」块）。
+     *
+     * 【最小宽度为什么必须成令牌】统一前有 140 / 190 / 200 / 220 / 248 五档 ——
+     * 同一个"右键弹出的菜单"在不同位置宽度不同，用户看到的是不稳定。现在只有
+     * 一档；需要更宽的表单型菜单（如倍率编辑器）显式给 `width`，而不是把最小
+     * 宽度调大。
+     *
+     * 【最大高度为什么是 60vh】长菜单（颤音预设、文件浏览器位置列表）此前没有
+     * 上限：条目多到超过视口时，定位夹紧会把它整体推回视口内，于是顶部条目被
+     * 推到视口之外且永远够不到。壳自己滚动是唯一能让"测量 → 夹紧"保持确定的做法
+     * —— 壳的高度恒为 `min(内容高, max-h)`，不随内容变化。
+     *
+     * 【阴影为什么是字面量】它就是 Tailwind `shadow-lg` 的既有取值（两条投影
+     * 叠加）。收进令牌只是让"菜单阴影"有一个可改的地方，观感与统一前完全一致。
+     */
+    --qt-menu-min-w: 190px;
+    --qt-menu-max-h: 60vh;
+    --qt-menu-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    /* 项高复用控件高度：菜单项与工具栏按钮同高，菜单与周围 chrome 的行距才对齐 */
+    --qt-menu-item-h: var(--qt-ctl-md, 24px);
+    /* 前导图标列宽：有图标才占位，保证"有的项有图标、有的没有"时文字仍左对齐 */
+    --qt-menu-icon-w: 16px;
 
     /*
      * 层级阶梯。原来是 index.css 里一段注释约定 + 各处的 z-[999]/z-[9999]
@@ -725,6 +759,254 @@ textarea {
     line-height: var(--qt-lh-tight);
     font-variant-numeric: tabular-nums;
     color: var(--qt-text);
+}
+
+/* ===========================================================================
+ * 上下文菜单样式模型（menu surface）
+ *
+ * 【为什么是一组 CSS 类，而不是一个菜单项组件】菜单的**内容**差异是产品决定
+ * 的、不是缺陷：淡入淡出菜单要双列 + 可拖拽的曲率预览，节拍器菜单要一个夹在
+ * 两组单选之间的音量滑杆，倍率编辑器要三个联动的输入框，颤音菜单要波形缩略图。
+ * 用 props 表达这些内容只能一路加逃生舱（`children`、`renderRow`…），最终比
+ * 类名更难用；而"壳长什么样、一行多高、悬停什么色"**本来就是挂在同一个元素上
+ * 的类名**。所以本层只固定壳与项，内容（`.hs-menu__body`）留给调用方。
+ *
+ * 【与 .hs-type-* 同构】调用方只说"这是菜单项"，不说"这是 12px、悬停 #484848"。
+ * 层级与取值写死在这里，而不是靠每个作者的自觉 —— 与 `.hs-type-*` 角色层、
+ * `AppButton` 的 intent 收掉 Radix 变体词汇表是同一个做法。
+ *
+ * 【统一前实测的漂移】最小宽度 5 档（140/190/200/220/248）、层级 3 档
+ * （z-qt-menu / z-qt-popover / z-30）、悬停两套令牌（--qt-hover 与
+ * --qt-button-hover）、禁用态两种表达（opacity-40 与弱化色）、分组标题三种写法
+ * （heading / uppercase 手写 / `disabled: true` 冒充）。全部收敛到本块。
+ *
+ * 【本块不锁字重】`index.css` 在未分层的样式表里晚于 Tailwind utilities，锁死
+ * 字重会把调用方的 `font-semibold` 静默吃掉（`index.css` 的排版角色层记录过这个
+ * 教训）。需要加粗的地方由调用方用工具类表达。
+ * ======================================================================== */
+
+/*
+ * 菜单表面。
+ *
+ * 【为什么定位是 fixed】菜单是**视口级**弹出面，必须相对视口定位 —— 见下方
+ * `.hs-menu--submenu` 对"留在布局盒里会被裁掉"的说明。
+ *
+ * 【为什么壳自己滚动，而不是让内容块各自滚动】菜单的定位夹紧（在 layout effect
+ * 里测 `getBoundingClientRect`）依赖壳的最终尺寸。内容块各自滚动时壳的高度随内容
+ * 变化，夹紧结果不稳定；壳滚动时高度恒为 `min(内容高, --qt-menu-max-h)`，测量与
+ * 夹紧都是确定的。
+ *
+ * 【为什么不预留滚动条槽位】条目自带 12px 横向内边距，滚动条压上来时文字与它之间
+ * 仍有那 12px 呼吸，因此不需要额外让位（与 `.hs-scroll-gutter-flush` 的判据同源：
+ * 容器本来就有留白）。反过来若写 `scrollbar-gutter: stable`，**每一张菜单**都会在
+ * 不滚动时也空出一条槽位的宽度，左右内边距立刻不对称。
+ */
+.hs-menu {
+    position: fixed;
+    z-index: var(--qt-z-menu);
+    min-width: var(--qt-menu-min-w);
+    max-height: var(--qt-menu-max-h);
+    overflow-y: auto;
+    padding: var(--qt-space-2) 0;
+    background: var(--qt-window);
+    color: var(--qt-text);
+    border: 1px solid var(--qt-border);
+    border-radius: var(--qt-radius-sm);
+    box-shadow: var(--qt-menu-shadow);
+}
+
+/*
+ * 子菜单面板：挂在父菜单壳**内部**、贴着触发项展开（翻转与收宽由 `AppSubMenu`
+ * 实测决定，见 `ui/Menu.tsx`）。
+ *
+ * 【为什么只有它留在文档流里】它是唯一需要相对触发项做百分比定位的面板，必须
+ * 留在父壳里；代价是**父壳不得裁切内容**，所以挂子菜单的壳要用 `--no-scroll`。
+ *
+ * 【其余菜单一律挂到 `document.body`，不得留在布局盒里】弹出面只要留在触发它的
+ * 布局盒内，就会被沿途**任何一层** `overflow: hidden` 裁掉。实测参数编辑器工具栏
+ * 的工具按钮下拉要穿过 9 层 `overflow: hidden`（面板工具栏 → 停靠
+ * slot/tabset/pane/split/root → 应用外壳 → body）：菜单被排布在 y 483–541，而裁切
+ * 窗口止于 y 484 —— 可视高度 **0px**，用户看到的就是"右键完全没反应"。
+ * 因此"锚定在某个控件下方"是**坐标算法**（由 `AppAnchoredMenu` 按锚点矩形算），
+ * 不是一种 CSS 定位变体 —— 把它当成变体正是那个 bug 的来源。
+ */
+.hs-menu--submenu {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+
+/*
+ * 壳不接管滚动的例外。
+ *
+ * 两种情形用同一条：① 菜单内部自带滚动区，且需要固定页脚不随列表滚动（颤音
+ * 预设菜单的「管理预设…」）；② 内容本身就是一张紧凑表单，不会溢出（倍率
+ * 编辑器）。此时若壳仍然 `overflow-y: auto`，前者会叠出两层滚动条、且壳预留的
+ * 滚动条槽位把内部内容再往左挤一次，后者则可能因为内部绝对定位的隐藏元素
+ * （Radix 复选框的 `<input>` 等）长出一条滚不动的滚动条。
+ */
+.hs-menu--no-scroll {
+    max-height: none;
+    overflow: visible;
+    scrollbar-gutter: auto;
+}
+
+/*
+ * 表单型菜单（倍率编辑器）：内容是一列带标签的输入框，需要横向内边距。
+ * 与条目型菜单的区别**只在壳的内边距** —— 表面、边框、圆角、阴影仍然共用。
+ */
+.hs-menu--form {
+    padding: var(--qt-space-2) var(--qt-space-5);
+}
+
+/* 顶部自定义区（内联重命名输入框等）。与 `.hs-menu__body` 的分工：这里是
+   菜单的"头部"（贴顶、带下边框），后者是条目之间的内容块。 */
+.hs-menu__header {
+    padding: var(--qt-space-2) var(--qt-space-5);
+    border-bottom: 1px solid var(--qt-border);
+}
+
+/*
+ * 分组标题 / 非交互标签行（"已选择 3 项""排序"这类）。
+ *
+ * 【为什么不大写】11px + 弱化色已经是比正文低两档的层级，再加大写与字距会让它
+ * 变成第三种视觉重量，比它下面的项更抢眼；而且大写对中文 locale 完全无效果、
+ * 只让英文 locale 变成喊叫 —— 是 locale 之间的不一致来源。
+ */
+.hs-menu__label {
+    padding: var(--qt-space-1) var(--qt-space-5);
+    font-size: var(--qt-fs-xs);
+    line-height: var(--qt-lh-tight);
+    font-weight: 600;
+    color: var(--qt-text-muted);
+    user-select: none;
+}
+
+/*
+ * 脚注 / 行为说明（"切换形状会重置曲率"这类）。
+ *
+ * 【与 `.hs-menu__label` 的分工】标题是**分组名**（半粗，用字重与下方条目分层）；
+ * 脚注是一句**说明**，不该比它解释的条目更抢眼，因此不加粗、贴底、无上边距。
+ */
+.hs-menu__hint {
+    padding: 0 var(--qt-space-5) var(--qt-space-1);
+    font-size: var(--qt-fs-xs);
+    line-height: var(--qt-lh-tight);
+    color: var(--qt-text-muted);
+    user-select: none;
+}
+
+/*
+ * 一条可点击的菜单项。
+ *
+ * 【为什么字号/行高写在这里，而不是要求调用方再挂 `.hs-type-label`】菜单项的字号
+ * 是菜单的一部分。要求每处菜单项都记得再挂一个角色类，漏一处就分叉 —— 而"漏一处"
+ * 正是本次要消除的问题（统一前有 text-qt-sm / text-qt-md / hs-type-label /
+ * hs-type-body 四种）。
+ *
+ * 【为什么同时支持 :disabled 与 [aria-disabled]】原语用真实 `<button disabled>`，
+ * 而带尾随按钮的复合行（Take 行）整行是 `<div>`，只能用 `aria-disabled` 表达。
+ * 两者必须同款，否则"禁用"在同一张菜单里长成两样。
+ *
+ * 【为什么禁用态是弱化色而不是 opacity】不透明度会同时削弱文字与底色的对比度，
+ * 浅色主题下不可控；直接给弱化色是"这一项不可点"的诚实表达。
+ */
+.hs-menu__item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--qt-space-5);
+    width: 100%;
+    min-height: var(--qt-menu-item-h);
+    padding: 0 var(--qt-space-5);
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
+    color: inherit;
+    text-align: left;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    outline: none;
+    cursor: pointer;
+}
+
+/* 悬停、键盘高亮、键盘焦点**同色**：鼠标划过去、方向键走过去、键盘焦点落上去，
+   必须是同一种反馈，否则键盘用户看到的是另一套界面。
+
+   `:focus-visible`（而不是 `:focus`）这一条是给**子菜单**用的：`AppSubMenu` 的子
+   面板由 `useMenuKeyboard` 导航，而它用真实 DOM 焦点表示"当前项"（外层
+   `AppContextMenu` 用的是 `data-active`）。少了它，子菜单里按方向键会
+   **焦点在动、界面毫无反应**。
+
+   必须是 `:focus-visible` 而不是 `:focus`：鼠标点击也会让按钮获得 `:focus`，
+   而它**不会自己消失** —— 点过的触发项从此一直亮着，指针再划到别的项上就是
+   两条同时高亮（实测：点「格式」后划进它的子菜单，「格式」与子项一起亮）。
+   `:focus-visible` 只在键盘交互导致的焦点上生效，鼠标点击不匹配。 */
+.hs-menu__item:hover:not(:disabled):not([aria-disabled="true"]),
+.hs-menu__item:focus-visible,
+.hs-menu__item[data-active="1"] {
+    background: var(--qt-menu-item-hover);
+}
+
+.hs-menu__item:disabled,
+.hs-menu__item[aria-disabled="true"] {
+    color: var(--qt-menu-item-disabled);
+    cursor: default;
+}
+
+.hs-menu__item[data-danger="1"]:hover:not(:disabled):not([aria-disabled="true"]),
+.hs-menu__item[data-danger="1"][data-active="1"] {
+    background: var(--qt-danger-bg);
+    color: var(--qt-danger-text);
+}
+
+/* 项内三栏：图标列（有图标才占位）/ 文字列（可截断）/ 尾部列（勾选、快捷键、箭头） */
+.hs-menu__icon {
+    display: flex;
+    flex: none;
+    width: var(--qt-menu-icon-w);
+    align-items: center;
+    justify-content: center;
+}
+
+.hs-menu__label-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hs-menu__trail {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: var(--qt-space-4);
+    color: var(--qt-text-muted);
+}
+
+/* 勾选标记用强调色：它是"当前选中项"的唯一视觉凭据，必须比快捷键提示更显眼。
+   放在 `.hs-menu__trail` 之后，同特异度下由后者让位。 */
+.hs-menu__check {
+    color: var(--qt-menu-item-active);
+}
+
+/* 条目之间的内容块（滑杆、输入框、波形行、双列面板…）。不参与键盘导航 ——
+   里面的控件自己负责方向键与 Enter。 */
+.hs-menu__body {
+    padding: var(--qt-space-2) var(--qt-space-5);
+}
+
+/*
+ * 组分隔线。
+ *
+ * 【为什么是独立元素而不是给首项加边框】统一前是 `mt-1 border-t pt-2.5` 加在
+ * **项自己**身上：分隔线下面那一项因此比别的项高一截（4 + 1 + 10px 对比 6px），
+ * 整张菜单的行距在分隔处鼓包。独立元素让两侧行距对称，而且"组"成为结构、
+ * 不再是某一项的私有属性。
+ */
+.hs-menu__separator {
+    margin: var(--qt-space-2) 0;
+    border-top: 1px solid var(--qt-border);
 }
 
 /*

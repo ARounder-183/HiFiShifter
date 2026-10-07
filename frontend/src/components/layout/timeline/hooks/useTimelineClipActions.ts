@@ -4,7 +4,6 @@
  * 从 TimelinePanel.tsx 拆分而来，负责：
  * - multiSelectedClipIds 管理（Redux ↔ local ref）
  * - contextMenu / trackAreaMenu / importModeMenu / renamingClipId 状态
- * - selectionRect hook 桥接
  * - clipboard (copy / cut / paste)
  * - normalizeClips / replaceClipSources / splitClips / glueClips
  * - TrackLane 操作回调（ensureSelected, selectClip, toggleMuted, rename, gain ...）
@@ -42,9 +41,9 @@ import { webApi } from "../../../../services/webviewApi";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
-import { useTimelineSelectionRect } from "../";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
+import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
@@ -67,7 +66,6 @@ export interface UseTimelineClipActionsArgs {
     lastClickedClientXRef: React.MutableRefObject<number | null>;
     pxPerSec: number;
     pxPerBeat: number;
-    rowHeight: number;
     ignoreGrouping: boolean;
     disabledGroupIds: string[];
 }
@@ -135,15 +133,6 @@ export interface UseTimelineClipActionsResult {
     >;
     renamingClipId: string | null;
     setRenamingClipId: React.Dispatch<React.SetStateAction<string | null>>;
-
-    // Selection rect
-    selectionRect: {
-        x1: number;
-        y1: number;
-        x2: number;
-        y2: number;
-    } | null;
-    onSelectionRectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 
     // Clipboard
     clipboardAvailable: boolean;
@@ -228,7 +217,6 @@ export function useTimelineClipActions(
         lastClickedClipIdRef,
         lastClickedClientXRef,
         pxPerSec,
-        rowHeight,
         dispatch,
         sameSourceConfirmResolverRef,
         setSameSourceConfirmOpen,
@@ -354,28 +342,12 @@ export function useTimelineClipActions(
         [dispatch],
     );
 
-    // ── Selection rect ───────────────────────────────────────
-    const handleSelectionRectSingleSelect = React.useCallback(
-        (clipId: string) => {
-            void dispatch(selectClipRemote(clipId));
-        },
-        [dispatch],
-    );
-
-    const { selectionRect, onPointerDown: onSelectionRectPointerDown } = useTimelineSelectionRect({
-        scrollRef,
-        sessionRef,
-        pxPerSec,
-        rowHeight,
-        clearContextMenu,
-        setMultiSelectedClipIds,
-        onSingleSelect: handleSelectionRectSingleSelect,
-    });
-
     // ── Clipboard ────────────────────────────────────────────
     const [clipboardAvailable, setClipboardAvailable] = useState(false);
 
     useEffect(() => {
+        // 新插件查询原生宿主剪贴板，旧插件仍不发未实现的App媒体命令。
+        if (window.__HFS_PLUGIN_BOOTSTRAP__ && !window.__HFS_PLUGIN_BOOTSTRAP__.clipClipboard) return;
         let cancelled = false;
         const refresh = () => {
             void webApi
@@ -551,8 +523,15 @@ export function useTimelineClipActions(
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
-    const splitClipIdsAtPlayhead = React.useCallback(
-        (clipIds: string[]) => {
+
+    /**
+     * 本次分割在时间线上的落点（秒）：播放头位置，按需应用 razor 吸附。
+     *
+     * `selectedClipIds` 参与吸附候选的过滤（`snapTimelinePosition` 的入参），
+     * 因此由调用方给出"这次要切哪些 Clip"。
+     */
+    const resolveSplitSec = React.useCallback(
+        (selectedClipIds: readonly string[]) => {
             const session = sessionRef.current;
             let splitSec = Math.max(0, Number(session.playheadSec ?? 0) || 0);
             if (session.timelineSnap.enabled && session.timelineSnap.snapRazorEdits) {
@@ -566,7 +545,7 @@ export function useTimelineClipActions(
                         pxPerSec: Math.max(1e-9, pxPerSec),
                         clips: session.clips,
                         tracks: session.tracks,
-                        selectedClipIds: clipIds,
+                        selectedClipIds,
                         playheadSec: splitSec,
                         object: "cursor",
                         anchorTrackId: session.selectedTrackId,
@@ -575,6 +554,14 @@ export function useTimelineClipActions(
                 );
                 splitSec = snapped.sec;
             }
+            return splitSec;
+        },
+        [pxPerSec, sessionRef],
+    );
+
+    const splitClipIdsAtPlayhead = React.useCallback(
+        (clipIds: string[], splitSecOverride?: number) => {
+            const splitSec = splitSecOverride ?? resolveSplitSec(clipIds);
 
             // Expand to include all group members of any input clip
             const expandedIds = new Set(clipIds);
@@ -594,26 +581,41 @@ export function useTimelineClipActions(
             const eligibleIds = Array.from(expandedIds).filter((id) => {
                 const c = sessionRef.current.clips.find((clip) => clip.id === id);
                 if (!c) return false;
-                return splitSec > c.startSec + 1e-6 && splitSec < c.startSec + c.lengthSec - 1e-6;
+                return isClipSplittableAtSec(c, splitSec);
             });
             if (eligibleIds.length > 0) {
                 void dispatch(splitClipsAtRemote({ clipIds: eligibleIds, splitSec }));
             }
             return eligibleIds;
         },
-        [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
+        [dispatch, resolveSplitSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
+    /**
+     * 「在播放头处分割」。
+     *
+     * 操作数由 `resolveSplitTargetsWithSnap` 统一解析：有选区时与既有行为完全
+     * 一致；**无选区**时分割播放头处的所有可分割 Clip —— 此前这里是一个静默
+     * no-op，用户按 `S` 或点菜单都没有任何反馈。
+     *
+     * 两趟解析（先取吸附上下文、再按落点重取操作数）的原因见该函数的注释。
+     */
     const splitSelectedAtPlayhead = React.useCallback(() => {
-        const selectedIds =
-            multiSelectedClipIdsRef.current.length > 0
-                ? [...multiSelectedClipIdsRef.current]
-                : sessionRef.current.selectedClipId
-                  ? [sessionRef.current.selectedClipId]
-                  : [];
-        if (selectedIds.length === 0) return;
-        splitClipIdsAtPlayhead(selectedIds);
-    }, [splitClipIdsAtPlayhead, sessionRef]);
+        const session = sessionRef.current;
+        const { ids, splitSec } = resolveSplitTargetsWithSnap({
+            clips: session.clips,
+            playheadSec: session.playheadSec,
+            selectedIds:
+                multiSelectedClipIdsRef.current.length > 0
+                    ? multiSelectedClipIdsRef.current
+                    : session.selectedClipId
+                      ? [session.selectedClipId]
+                      : [],
+            snap: resolveSplitSec,
+        });
+        if (ids.length === 0) return;
+        splitClipIdsAtPlayhead(ids, splitSec);
+    }, [resolveSplitSec, splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
     const recordLastClickPosition = React.useCallback(
@@ -1145,9 +1147,6 @@ export function useTimelineClipActions(
         setImportModeMenu,
         renamingClipId,
         setRenamingClipId,
-
-        selectionRect,
-        onSelectionRectPointerDown,
 
         clipboardAvailable,
         copyClips,

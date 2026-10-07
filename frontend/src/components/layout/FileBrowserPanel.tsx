@@ -1,3 +1,4 @@
+// 文件浏览器复用App界面；插件原生目录选择失败也要显示原因。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Flex, IconButton, TextField } from "@radix-ui/themes";
 import {
@@ -18,6 +19,7 @@ import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
     loadDirectory,
+    setFileBrowserError,
     setPreviewVolume,
     setSearchQuery,
     searchFilesRecursive,
@@ -28,6 +30,7 @@ import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import {
     fileBrowserSearchOptions,
+    fileBrowserSearchRequest,
     visibleFileBrowserEntries,
 } from "../../features/fileBrowser/fileBrowserSearchOptions";
 import {
@@ -368,17 +371,49 @@ export const FileBrowserPanel: React.FC = () => {
             if (result.ok && !result.canceled && result.path) {
                 navigateTo(result.path);
             }
-        } catch {
-            // 忽略错误
+        } catch (error) {
+            dispatch(setFileBrowserError(String(error)));
         }
-    }, [navigateTo]);
+    }, [navigateTo, dispatch]);
+
+    /**
+     * 重新拉取**列表当前显示的内容**（刷新按钮 / 写操作之后）。
+     *
+     * 【为什么不能只 reload 当前目录】搜索模式下列表来自 `fb.searchResults`，
+     * 而 `loadDirectory` 只更新 `fb.entries` —— 被删掉的项会**继续留在列表里**，
+     * 用户看到的就是"确认了删除，但文件夹还在"（再点一次才报"找不到"），
+     * 甚至按了刷新也还在。因此搜索模式下必须用同一个查询重跑一次搜索。
+     */
+    const refreshListing = useCallback(async () => {
+        // 没有当前目录（首次启动、还没选过文件夹）时什么都不做 —— 直接
+        // `loadDirectory("")` 会被后端拒绝，把面板推进错误态。
+        if (!fb.currentPath) return;
+        await dispatch(loadDirectory(fb.currentPath));
+        if (!isSearchMode || isComputerLevel) return;
+        await dispatch(
+            searchFilesRecursive(
+                fileBrowserSearchRequest({
+                    dirPath: fb.currentPath,
+                    query: trimmedSearchQuery,
+                    regexEnabled: fb.regexEnabled,
+                    options: searchOptions,
+                }),
+            ),
+        );
+    }, [
+        dispatch,
+        fb.currentPath,
+        fb.regexEnabled,
+        isComputerLevel,
+        isSearchMode,
+        searchOptions,
+        trimmedSearchQuery,
+    ]);
 
     // 刷新当前目录
     const handleRefresh = useCallback(() => {
-        if (fb.currentPath) {
-            void dispatch(loadDirectory(fb.currentPath));
-        }
-    }, [dispatch, fb.currentPath]);
+        void refreshListing();
+    }, [refreshListing]);
 
     // 返回上级目录
     const handleParentDir = useCallback(() => {
@@ -1108,13 +1143,13 @@ export const FileBrowserPanel: React.FC = () => {
             try {
                 const newPath = await fileBrowserApi.renamePath(entry.path, trimmed);
                 setSelectedPaths(new Set([newPath]));
-                await dispatch(loadDirectory(fb.currentPath));
+                await refreshListing();
             } catch {
                 // 后端已把非法名 / 重名 / 受保护路径拒绝掉了，这里只需让用户看到结果。
                 setError(tf("fb_rename_failed"));
             }
         },
-        [dispatch, fb.currentPath, tf],
+        [refreshListing, tf],
     );
 
     const handleNewFolderCommit = useCallback(
@@ -1125,12 +1160,12 @@ export const FileBrowserPanel: React.FC = () => {
             try {
                 const created = await fileBrowserApi.createDirectory(fb.currentPath, trimmed);
                 setSelectedPaths(new Set([created]));
-                await dispatch(loadDirectory(fb.currentPath));
+                await refreshListing();
             } catch {
                 setError(tf("fb_create_folder_failed"));
             }
         },
-        [dispatch, fb.currentPath, tf],
+        [refreshListing, fb.currentPath, tf],
     );
 
     const handleDelete = useCallback(
@@ -1140,14 +1175,29 @@ export const FileBrowserPanel: React.FC = () => {
             if (!paths || paths.length === 0) return;
             try {
                 const result = await fileBrowserApi.deletePaths(paths, permanent);
-                if (!result.ok) setError(tf("fb_delete_failed"));
+                if (!result.ok) {
+                    /*
+                     * 把后端的**具体原因**带出来。后端逐条汇总失败原因
+                     * （`protected path: …` / `not found: …` / 系统错误原文），
+                     * 只显示"删除失败"会让用户无从判断是权限、占用还是路径不对 ——
+                     * 而这三者的处理方式完全不同。
+                     */
+                    setError(
+                        result.error
+                            ? tVars("common_label_value", {
+                                  label: tf("fb_delete_failed"),
+                                  value: result.error,
+                              })
+                            : tf("fb_delete_failed"),
+                    );
+                }
             } catch {
                 setError(tf("fb_delete_failed"));
             }
             setSelectedPaths(new Set());
-            await dispatch(loadDirectory(fb.currentPath));
+            await refreshListing();
         },
-        [deleteRequest, dispatch, fb.currentPath, tf],
+        [deleteRequest, refreshListing, tf, tVars],
     );
 
     /** 菜单动作集合：菜单只决定"显示什么"，这里决定"做什么"。 */
@@ -1409,14 +1459,37 @@ export const FileBrowserPanel: React.FC = () => {
          * 左键拖拽中按右键打断时，平台随后会派发 contextmenu；不吞掉的话，
          * "打断"就换来了一个菜单。命中一次即自卸（与 `useTimelineDragDrop`
          * 的 `suppressCtx` 同款）。
+         *
+         * 【必须有有效期】平台要么在右键松开后立刻派发 contextmenu、要么根本
+         * 不派发（如在窗口外松开）。监听器若只等下一次 contextmenu 自卸，
+         * 那次"不来"之后它会一直挂着，把用户之后**任意位置的下一次右键菜单**
+         * 吞掉。给它一个远大于平台派发延迟的短超时兜底自卸。注意不能用本
+         * effect 的 cleanup 兜底：打断收尾会让依赖变化、cleanup 先于平台
+         * 派发 contextmenu 跑，会吞不掉该吞的那一次。
          */
+        let activeSwallow: ((ev: Event) => void) | null = null;
+        let swallowExpiryTimer: number | null = null;
+        function removeSwallow() {
+            if (swallowExpiryTimer != null) {
+                window.clearTimeout(swallowExpiryTimer);
+                swallowExpiryTimer = null;
+            }
+            if (activeSwallow) {
+                window.removeEventListener("contextmenu", activeSwallow, true);
+                activeSwallow = null;
+            }
+        }
         function suppressNextContextMenu() {
+            if (activeSwallow) return;
             const swallow = (ev: Event) => {
                 ev.preventDefault();
                 ev.stopImmediatePropagation();
-                window.removeEventListener("contextmenu", swallow, true);
+                removeSwallow();
             };
+            activeSwallow = swallow;
             window.addEventListener("contextmenu", swallow, true);
+            // 与 useTimelineDragDrop 的 suppressCtx 同款超时兜底。
+            swallowExpiryTimer = window.setTimeout(removeSwallow, 1000);
         }
 
         function onInterruptPointerDown(e: PointerEvent) {
@@ -1573,6 +1646,33 @@ export const FileBrowserPanel: React.FC = () => {
         };
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    /*
+     * 卸载即收尾。
+     *
+     * 【为什么单开一个空依赖 effect】上面的拖拽 effect 以 `dragState !== null` 为
+     * 依赖 —— 拖拽**开始**时它也会重跑一次清理，若在清理里补发 `cancel` 会立刻把
+     * 刚开始的拖拽取消掉。空依赖的清理只在**真正卸载**时执行，语义精确。
+     *
+     * 【不补发会怎样】面板一旦卸载，pointerup / pointercancel / blur 都不再派发，
+     * 而监听 `hifi-file-drag` 的**时间轴仍然挂载** —— 它手里的落点预览与吸附竖线
+     * 会永久留在画面上（正是"高亮没清掉"那一类）。
+     */
+    useEffect(
+        () => () => {
+            const ds = dragStateRef.current;
+            if (!ds?.active) return;
+            window.dispatchEvent(
+                new CustomEvent("hifi-file-drag", {
+                    detail: buildFileDragFinishDetail(ds, "cancel", ds.startX, ds.startY),
+                }),
+            );
+            // 全局拖拽态存在 store 里（不在本组件），卸载后仍需复位，否则文件
+            // 浏览器再次挂载时行会以"正在拖拽"的样式出现。
+            setFileBrowserDragActive(false);
+        },
+        [],
+    );
+
     // 列表真正渲染出条目时，容器才承担 listbox 语义（加载/错误/空态不是列表）。
     const showEntries =
         !fb.loading &&
@@ -1680,15 +1780,14 @@ export const FileBrowserPanel: React.FC = () => {
                             dispatch(setSearchQuery(q));
                             if (debounceRef.current) clearTimeout(debounceRef.current);
                             if (q.trim() && fb.currentPath && !isComputerLevel) {
-                                const backendQuery = fb.regexEnabled ? "" : q.trim();
+                                const request = fileBrowserSearchRequest({
+                                    dirPath: fb.currentPath,
+                                    query: q.trim(),
+                                    regexEnabled: fb.regexEnabled,
+                                    options: searchOptions,
+                                });
                                 debounceRef.current = setTimeout(() => {
-                                    void dispatch(
-                                        searchFilesRecursive({
-                                            dirPath: fb.currentPath,
-                                            query: backendQuery,
-                                            options: searchOptions,
-                                        }),
-                                    );
+                                    void dispatch(searchFilesRecursive(request));
                                 }, 300);
                             }
                         }}
@@ -1724,13 +1823,18 @@ export const FileBrowserPanel: React.FC = () => {
 
                             if (trimmedSearchQuery && fb.currentPath && !isComputerLevel) {
                                 void dispatch(
-                                    searchFilesRecursive({
-                                        dirPath: fb.currentPath,
-                                        query: nextRegexEnabled ? "" : trimmedSearchQuery,
-                                        options: nextRegexEnabled
-                                            ? { ...searchOptions, mode: "off" }
-                                            : searchOptions,
-                                    }),
+                                    searchFilesRecursive(
+                                        fileBrowserSearchRequest({
+                                            dirPath: fb.currentPath,
+                                            query: trimmedSearchQuery,
+                                            regexEnabled: nextRegexEnabled,
+                                            // 正则模式下匹配模式降为 off（与 searchOptions 同源，
+                                            // 但这里用的是**切换后**的取值，所以显式给一份）。
+                                            options: nextRegexEnabled
+                                                ? { ...searchOptions, mode: "off" }
+                                                : searchOptions,
+                                        }),
+                                    ),
                                 );
                             }
                         }}
@@ -1819,7 +1923,13 @@ export const FileBrowserPanel: React.FC = () => {
                     </span>
                 )}
                 {transientError && (
-                    <span className="hs-type-label" style={{ color: "var(--qt-danger-text)" }}>
+                    /* 失败原因可能很长（后端逐条汇总路径 + 系统错误原文）：
+                       单行截断显示，完整内容走 tooltip，避免把这一屏撑破。 */
+                    <span
+                        className="hs-type-label truncate block"
+                        style={{ color: "var(--qt-danger-text)" }}
+                        data-tooltip={transientError}
+                    >
                         {transientError}
                     </span>
                 )}
@@ -2156,7 +2266,6 @@ export const FileBrowserPanel: React.FC = () => {
                 <AppContextMenu
                     x={locationsAt.x}
                     y={locationsAt.y}
-                    minWidth={220}
                     ariaLabel={t("fb_locations")}
                     items={locationItems}
                     onClose={() => setLocationsAt(null)}

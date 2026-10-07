@@ -110,6 +110,9 @@ export interface DockState {
      * 只应铺满那个面板，而不是整片主工作区。
      */
     maximized: { rootId: string; tree: DockNode } | null;
+    /** 临时折叠保存原位置与比例；不进入工程历史或持久化布局。 */
+    collapsedForms: Record<string, { rootId: string | null; tree: DockNode | null;
+        hiddenTree: DockNode | null; floating: boolean }>;
 }
 
 const initialState: DockState = {
@@ -119,6 +122,7 @@ const initialState: DockState = {
     hydrated: false,
     mountedFormIds: [],
     maximized: null,
+    collapsedForms: {},
 };
 
 /**
@@ -156,6 +160,7 @@ const dockSlice = createSlice({
         ) {
             const raw = action.payload ?? {};
             state.layout = installLayout(normalizeDockLayout(raw.layout));
+            state.collapsedForms = {};
             state.settings = normalizeDockSettings(raw.settings);
             state.hydrated = true;
         },
@@ -179,8 +184,10 @@ const dockSlice = createSlice({
         },
         setDockLayout(state, action: PayloadAction<unknown>) {
             state.layout = installLayout(normalizeDockLayout(action.payload));
+            state.collapsedForms = {};
         },
         resetDockLayout(state) {
+            state.collapsedForms = {};
             // 重置 = 回到出厂排布。**预设是用户的资产，不属于"被重置的排布"**
             // —— 确认对话框承诺"已保存的预设会保留"，重置后用户仍能一键回到
             // 自己的排布。activePreset 同步清空：此刻是出厂布局，不属于任何
@@ -220,11 +227,14 @@ const dockSlice = createSlice({
                             findTabsetOfForm(tree, formId),
                         );
                         if (stillDocked) continue;
+                        // 落回**最大化时记录的那个根**：最大化期间停进来的窗体只
+                        // 出现在临时树里，它们属于那个面板的树，而不是主根。用
+                        // MAIN_ROOT_ID 会把它们从面板里搬出去（窗体还在，位置错）。
                         layout = {
                             ...layout,
                             roots: {
                                 ...layout.roots,
-                                [MAIN_ROOT_ID]: placeForm(layout, formId, { side: "center" }),
+                                [rootId]: placeForm(layout, formId, { side: "center", rootId }),
                             },
                         };
                     }
@@ -271,6 +281,35 @@ const dockSlice = createSlice({
                     findMainTabset(state.layout)?.active ??
                     null;
             }
+        },
+        collapseForm(state, action: PayloadAction<string>) {
+            const formId = action.payload;
+            const form = state.layout.forms[formId];
+            if (!form) return;
+            const rootId = rootOfForm(state.layout, formId);
+            const tree = rootId ? state.layout.roots[rootId] : null;
+            const next = closeFormInLayout(state.layout, formId);
+            if (next === state.layout) return;
+            state.collapsedForms[formId] = { rootId, tree,
+                hiddenTree: rootId ? next.roots[rootId] ?? null : null, floating: form.floating === true };
+            updateLayout(state, next);
+        },
+        restoreCollapsedForm(state, action: PayloadAction<string>) {
+            const formId = action.payload;
+            const saved = state.collapsedForms[formId];
+            const form = state.layout.forms[formId];
+            if (!form) return;
+            if (saved?.rootId && saved.tree &&
+                JSON.stringify(state.layout.roots[saved.rootId] ?? null) === JSON.stringify(saved.hiddenTree)) {
+                updateLayout(state, { ...state.layout, roots: { ...state.layout.roots, [saved.rootId]: saved.tree } });
+            } else if (saved?.floating && form.float) {
+                updateLayout(state, { ...state.layout, forms: { ...state.layout.forms, [formId]: { ...form, floating: true } },
+                    floatOrder: [...state.layout.floatOrder.filter(id => id !== formId), formId] });
+            } else {
+                updateLayout(state, openPanelInLayout(state.layout, form.panelId));
+            }
+            delete state.collapsedForms[formId];
+            state.activeFormId = formId;
         },
         focusForm(state, action: PayloadAction<string>) {
             const formId = action.payload;
@@ -587,6 +626,7 @@ const dockSlice = createSlice({
                 order: state.layout.order,
                 floatOrder: state.layout.floatOrder,
                 gutters: state.layout.gutters,
+                tabPosition: state.layout.tabPosition,
                 createdAtMs: Date.now(),
             };
             state.layout = {
@@ -605,6 +645,7 @@ const dockSlice = createSlice({
                 order: preset.order,
                 floatOrder: preset.floatOrder,
                 gutters: preset.gutters,
+                tabPosition: preset.tabPosition,
                 presets: state.layout.presets,
                 activePreset: preset.name,
             });
@@ -1165,6 +1206,8 @@ export const {
     resetDockLayout,
     openPanel,
     closeForm,
+    collapseForm,
+    restoreCollapsedForm,
     focusForm,
     setActiveTabOf,
     dockFormTo,

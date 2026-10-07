@@ -1,4 +1,7 @@
+// 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isPluginMode } from "../../../services/hostCapabilities";
+import { shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -223,11 +226,14 @@ export function usePianoRollData(args: {
         const scopeChanged = lastParamScopeRef.current !== scope;
         lastParamScopeRef.current = scope;
         if (!scopeChanged && liveEditDeferral.defer({ force: true })) return;
-        setParamView(null);
-        setSecondaryParamViews({});
-        setReferencePitchViews({});
-        setPitchEditUserModified(null);
-        setPitchEditBackendAvailable(null);
+        // 同scope提交保留当前可见数据，仍强制取权威数据；切参数/轨道必须清除旧scope。
+        if (shouldClearParamRefresh(scopeChanged, isPluginMode())) {
+            setParamView(null);
+            setSecondaryParamViews({});
+            setReferencePitchViews({});
+            setPitchEditUserModified(null);
+            setPitchEditBackendAvailable(null);
+        }
         setForceParamFetchToken((x) => x + 1);
     }, [paramsEpoch, rootTrackId, editParam, liveEditDeferral]);
 
@@ -243,7 +249,7 @@ export function usePianoRollData(args: {
             if (!pitchEnabled) return;
             if (!rootTrackId) return;
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
 
                 type PitchOrigUpdatedPayload = { rootTrackId?: string };
 
@@ -294,7 +300,7 @@ export function usePianoRollData(args: {
         async function setup() {
             if (!rootTrackId) return;
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
                 type DynOrigUpdatedPayload = { rootTrackId?: string };
                 unlisten = await mod.listen<DynOrigUpdatedPayload>("dyn_orig_updated", (event) => {
                     if (disposed) return;
@@ -712,6 +718,10 @@ export function usePianoRollData(args: {
                         startFrame,
                         frameCount,
                         stride,
+                        true,
+                        // dyn 的「未画」位图随同一路取数返回（与 refreshNow 同口径，
+                        // 见 ParamViewSegment 的字段说明）；非 dyn 显式不请求。
+                        isDynParam(editParam),
                     );
                     if (fetchReqIdRef.current !== reqId) return;
                     // 【参数切换的兜底】请求 id 只拦得住"被新请求取代"的响应；参数
@@ -783,6 +793,14 @@ export function usePianoRollData(args: {
                         referenceKind: payload.reference_kind ?? "source_curve",
                         orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                         edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                        // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
+                        // 的字段说明）；非 dyn 显式不携带。与 refreshNow 同口径 ——
+                        // 本函数是主取数路径（挂载 / 去抖滚动缩放 / 编辑后重取），
+                        // 缺了它 restoreDynSentinelsFromParamView 会成为静默空操作，
+                        // 拉伸 / morph 编辑会把「沿用原声」物化成显式基线。
+                        editSentinel: isDynParam(editParam)
+                            ? (payload.edit_sentinel ?? undefined)
+                            : undefined,
                     });
                     lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                     invalidate();
@@ -977,6 +995,10 @@ export function usePianoRollData(args: {
                 }
                 setReferencePitchViews(nextReferenceViews);
             }
+        } catch {
+            // 传输层失败（invoke 拒绝）：保留旧数据静默降级，与 refreshVisible
+            // 的取数分支同一处理。本函数多为 fire-and-forget 调用，不接住会把
+            // 拒绝漏成 unhandledrejection。
         } finally {
             setIsRefreshing(false);
             endLoading();
@@ -1106,6 +1128,9 @@ export function usePianoRollData(args: {
                 setReferencePitchViews(nextReferenceViews);
             }
             invalidate();
+        } catch {
+            // 传输层失败：保留旧数据静默降级（与 refreshNow / refreshVisible 同一
+            // 处理；fire-and-forget 调用下不接住就是 unhandledrejection）。
         } finally {
             endLoading();
         }

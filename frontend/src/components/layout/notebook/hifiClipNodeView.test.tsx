@@ -222,8 +222,11 @@ test("参数线载荷的动作文案是「应用到参数编辑器」，且不�
         await act(async () => {
             mounted.host.querySelector<HTMLButtonElement>(".hs-notebook-clip-more")?.click();
         });
-        const menu = mounted.host.querySelector('[role="menu"]');
+        const menu = document.querySelector('[role="menu"]');
         expect(menu, "⋯ 菜单没有打开").not.toBeNull();
+        // 菜单**挂在 `document.body`**（见 `NotebookContextMenu` 的 portal 说明）：
+        // 留在面板布局盒里会被沿途的 `overflow` 裁掉。顺便把这条契约钉住。
+        expect(mounted.host.contains(menu), "菜单留在了面板容器里，会被 overflow 裁掉").toBe(false);
         const menuText = menu?.textContent ?? "";
         expect(menuText).toContain("Apply to parameter editor");
         expect(menuText).not.toContain("Insert as new tracks");

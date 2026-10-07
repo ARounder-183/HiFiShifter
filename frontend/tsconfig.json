@@ -1,3 +1,26 @@
+/*
+ * 解决方案（solution）配置：只列出子项目，自己不含任何文件。
+ *
+ * 【注意 `"files": []` 的副作用 —— 它会让 `tsc --noEmit` 变成一次空操作】
+ * 这是 Vite 模板的标准写法，但有个很容易踩的坑：本文件不含任何文件，因此
+ *
+ *     npx tsc --noEmit            # ← 退出码 0，**一个文件都没检查**
+ *
+ * 会**静默成功**。真正的检查必须走构建模式（`-b`），由它去构建下面两个引用项目：
+ *
+ *     npm run typecheck           # ← 正确入口（= tsc -b + SDK 声明检查）
+ *     npx tsc -b                  # 等价的核心命令
+ *
+ * 这不是"配错了"，而是 TypeScript 的固有行为：解决方案配置本身没有可检查的内容。
+ * 加 `"include": ["src"]` 也救不了 —— 那会让引用项目被当成声明依赖，报一片
+ * TS6305（"Output file ... has not been built from source file"），因为子项目是
+ * `noEmit` 的。
+ *
+ * 兜底还有一层：`src/buildGates.test.ts` 会在 `npm test` / `npx vitest run` 里跑
+ * 一遍 `npm run typecheck`，因此**测试通过就不可能构建失败** —— 无论跑测试的人
+ * 用的是哪个命令。类型错误曾在 3138 条测试全绿的情况下让构建挂掉过一次，那正是
+ * 这道门禁存在的理由。
+ */
 {
     "files": [],
     "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]

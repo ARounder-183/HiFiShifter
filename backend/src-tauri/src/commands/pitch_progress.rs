@@ -23,5 +23,5 @@ pub(super) fn get_pitch_analysis_progress(
         .read()
         .map_err(|e| format!("Failed to read progress: {}", e))?;
 
-    Ok(progress.as_ref().map(|p| PitchProgressPayload::from(p)))
+    Ok(progress.as_ref().map(PitchProgressPayload::from))
 }

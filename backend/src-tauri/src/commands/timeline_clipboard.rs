@@ -316,11 +316,11 @@ fn paste_fragment(
         // pasted pitch edits render correctly even before the next reopen.
         if fragment.kind == ProjectFragmentKind::Clips {
             for root_id in &affected_roots {
-                crate::pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+                crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
             }
         }
         for root_id in &midi_root_tracks {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
         }
         if let Some(handle) = state.app_handle.get() {
             crate::commands::playback::request_background_render(handle);

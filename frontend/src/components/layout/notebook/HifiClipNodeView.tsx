@@ -11,7 +11,7 @@
  */
 
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -27,7 +27,13 @@ import {
     type HifiClipBlockAttrs,
 } from "./hifiClipBlock";
 import { insertClipPayload, restoreClipPayload } from "./notebookClipboard";
-import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
+import { writeNotebookSelection } from "./notebookClipboardWrite";
+import { NotebookContextMenu, type AppMenuItemSpec } from "./NotebookContextMenu";
+import {
+    buildNotebookContextMenu,
+    type NotebookMenuActions,
+    type NotebookMenuDisabled,
+} from "./notebookMenu";
 import { AppConfirmDialog } from "../../../ui";
 
 interface ClipPreviewRow {
@@ -45,7 +51,7 @@ interface ParamPreview {
 }
 
 export function HifiClipNodeView(props: NodeViewProps) {
-    const { node, updateAttributes, deleteNode, selected, editor } = props;
+    const { node, updateAttributes, deleteNode, selected, editor, getPos } = props;
     const { t, tf, plural } = useI18n();
     const dispatch = useAppDispatch();
     const settings = useAppSelector((state) => state.notebook.settings);
@@ -75,6 +81,28 @@ export function HifiClipNodeView(props: NodeViewProps) {
     const [titleDraft, setTitleDraft] = useState("");
     const [busy, setBusy] = useState(false);
     const [notice, setNotice] = useState<string | null>(null);
+
+    /**
+     * 打开菜单前先把本节点选中。
+     *
+     * 菜单里的复制组作用于**当前选区**：不选中就复制，拿到的是上一次的选区
+     * （甚至空），用户会以为"复制了这块载荷"却粘出别的东西。`⋯` 与右键都走
+     * 它，两条入口的语义因此一致。
+     *
+     * 【必须放在 `if (!attrs)` 之前】本组件在正文被改坏（缺 id）时有一个提前
+     * return，钩子不能落在它后面。
+     */
+    const selectSelf = useCallback(() => {
+        // `getPos()` 的返回类型是 `number | undefined`：节点已被删除时它是 undefined，
+        // 而 `setNodeSelection` 只接受数字。必须先挡住，否则不是"选择失败"而是抛错。
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        try {
+            editor.commands.setNodeSelection(pos);
+        } catch {
+            // 位置已失效（节点刚被删）：菜单仍可打开，只是复制会拿到空选区。
+        }
+    }, [editor, getPos]);
 
     const entry = attrs ? assetIndex[attrs.id] : undefined;
     // 内嵌模型下"条目在"就等于"内容在"；只有工程被手工编辑过、
@@ -145,63 +173,46 @@ export function HifiClipNodeView(props: NodeViewProps) {
     /** 设置里的"插入/使用后保留暂存块"：关掉时动作成功即移除该块。 */
     const removeAfterInsert = !settings.keepClipAfterInsert;
 
-    const menuItems: NotebookMenuItem[] = [
-        {
-            key: "restore",
-            label: t("notebook_clip_restore"),
-            disabled: missing || busy,
-            onSelect: () => {
+    /**
+     * 菜单内容走共享 builder（`notebookMenu.ts`）—— 与正文菜单同一份规则。
+     *
+     * 只提供本卡片真正做得到的动作：没有"插入播放头时间"、没有"加粗"，因为
+     * 那两件事对一块暂存载荷没有意义，而 builder 只发出"动作存在"的项。
+     * 复制组（剪切 / 复制 / 复制为 Markdown）是唯一从正文那边借来的东西 ——
+     * 它作用于 NodeSelection，对卡片同样成立。
+     */
+    const menuItems: AppMenuItemSpec[] = (() => {
+        if (settings.contextMenu === "off") return [];
+        const actions: NotebookMenuActions = {
+            clipRestore: () => {
                 void run(() => restoreClipPayload(attrs.id), t("notebook_clip_restored"));
             },
-        },
-        {
-            key: "insert",
-            label: applyLabel,
-            disabled: missing || busy,
-            onSelect: () => {
+            clipInsert: () => {
                 void run(() => insertClipPayload(attrs.id, insertMode), appliedNotice, {
                     removeOnSuccess: removeAfterInsert,
                 });
             },
-        },
-        // 参数线载荷与轨道无关："插入为新轨道"对它没有意义（路由上 param 固定
-        // 走参数编辑器通道，这个入口只会让用户以为能把曲线变成轨道）。
-        ...(isParam
-            ? []
-            : [
-                  {
-                      key: "insert-new-tracks",
-                      label: t("notebook_clip_insert_new_tracks"),
-                      disabled: missing || busy,
-                      onSelect: () => {
+            // 参数线载荷与轨道无关："插入为新轨道"对它没有意义（路由上 param 固定
+            // 走参数编辑器通道，这个入口只会让用户以为能把曲线变成轨道）。
+            // 不提供动作 = 该项不出现，因此这里用条件展开而不是 `disabled`。
+            ...(isParam
+                ? {}
+                : {
+                      clipInsertNewTracks: () => {
                           void run(() => insertClipPayload(attrs.id, "newTracks"), appliedNotice, {
                               removeOnSuccess: removeAfterInsert,
                           });
                       },
-                  } satisfies NotebookMenuItem,
-              ]),
-        {
-            key: "rename",
-            label: t("notebook_clip_rename"),
-            separatorBefore: true,
-            onSelect: () => {
+                  }),
+            clipRename: () => {
                 setTitleDraft(attrs.title);
                 setRenaming(true);
             },
-        },
-        {
-            key: "copy-fence",
-            label: t("notebook_clip_copy_markdown"),
-            onSelect: () => {
+            clipCopyMarkdown: () => {
                 void navigator.clipboard.writeText(serializeHifiClipFence(attrs));
                 setNotice(t("notebook_clip_copied"));
             },
-        },
-        {
-            key: "save-payload",
-            label: t("notebook_clip_save_payload"),
-            disabled: missing,
-            onSelect: () => {
+            clipSavePayload: () => {
                 // 建议文件名要过一遍 Windows 非法字符：标题是自由文本
                 //（`AC/DC: mix` 之类）会直接让保存对话框拒收。后端还会再
                 // 收口一次，这里保证给出去的名字本身合法。
@@ -210,16 +221,55 @@ export function HifiClipNodeView(props: NodeViewProps) {
                     .saveAssetAs(attrs.id, `${base}.${entry?.ext ?? "hsf"}`)
                     .catch(() => {});
             },
-        },
-        {
-            key: "remove",
-            label: t("notebook_clip_remove"),
-            danger: true,
-            separatorBefore: true,
             // 不立即删除：先置位，由常驻的确认框在菜单卸载后询问。
-            onSelect: () => setRemoveConfirmOpen(true),
-        },
-    ];
+            clipRemove: () => setRemoveConfirmOpen(true),
+            // 通用复制组：右键时该块已被设为 NodeSelection（见 onContextMenu）。
+            cut: () => {
+                void (async () => {
+                    const ok = await writeNotebookSelection(editor, settings);
+                    if (ok) editor.chain().focus().deleteSelection().run();
+                })();
+            },
+            copy: () => void writeNotebookSelection(editor, settings),
+            copyMarkdown: () => void writeNotebookSelection(editor, settings, "markdown"),
+            copyPlain: () => void writeNotebookSelection(editor, settings, "text"),
+            selectAll: () => {
+                editor.chain().focus().selectAll().run();
+            },
+        };
+        const unavailable = t("notebook_clip_missing_payload");
+        const disabled: NotebookMenuDisabled = {};
+        if (missing || busy) {
+            disabled.clipRestore = unavailable;
+            disabled.clipInsert = unavailable;
+            disabled.clipInsertNewTracks = unavailable;
+        }
+        if (missing) disabled.clipSavePayload = unavailable;
+        return buildNotebookContextMenu({
+            surface: "rich",
+            scope: settings.contextMenu === "compact" ? "compact" : "full",
+            context: {
+                // `param` 决定主操作的文案：参数线载荷没有时间轴几何。
+                target: { kind: "clip", param: isParam },
+                flags: {
+                    selectionEmpty: false,
+                    editable,
+                    canUndo: false,
+                    canRedo: false,
+                    isBold: false,
+                    isItalic: false,
+                    isStrike: false,
+                    isCode: false,
+                    hasMarks: false,
+                    headingLevel: null,
+                    canIndent: false,
+                },
+            },
+            translate: t,
+            actions,
+            disabled,
+        });
+    })();
 
     return (
         <NodeViewWrapper
@@ -235,7 +285,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
                     // 只是不再提供任何操作。
                     event.preventDefault();
                     event.stopPropagation();
-                    if (editable) setMenu({ x: event.clientX, y: event.clientY });
+                    if (!editable) return;
+                    selectSelf();
+                    setMenu({ x: event.clientX, y: event.clientY });
                 }}
             >
                 <span className={`hs-notebook-clip-badge hs-notebook-clip-badge-${attrs.kind}`}>
@@ -278,6 +330,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
                             const rect = (
                                 event.currentTarget as HTMLElement
                             ).getBoundingClientRect();
+                            // `⋯` 与右键等价：都先选中本节点，菜单里的
+                            // "复制"才有作用对象。
+                            selectSelf();
                             setMenu({ x: rect.left, y: rect.bottom + 2 });
                         }}
                         data-tooltip={t("notebook_clip_actions")}

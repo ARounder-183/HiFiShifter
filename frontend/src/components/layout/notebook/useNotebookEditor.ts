@@ -43,6 +43,37 @@ export interface NotebookEditorBridge {
     redo: () => void;
 }
 
+/**
+ * 链接浮层的入口（Ctrl/⌘+K）。
+ *
+ * 与 `NotebookEditorBridge` 同一约定：**对象身份必须稳定**（调用方用 `useMemo`
+ * 包一层），否则 `useEditor` 的依赖会变、整个编辑器被重建（ProseMirror 历史
+ * 清零）。
+ */
+export interface NotebookLinkBridge {
+    /** 打开链接地址编辑浮层。 */
+    open: () => void;
+}
+
+/**
+ * 撤销一步：先编辑器内历史，耗尽再回落应用级。
+ *
+ * 【为什么抽成导出函数】这条"先细后粗"的规则此前只写在键盘快捷键的闭包里，
+ * 于是**只有键盘能用**。右键菜单的"撤销"需要同一条规则，若在菜单里再抄一份，
+ * 两份迟早会漂移（例如某天给应用级撤销加上"先 seal 再撤"的前置动作，只会改到
+ * 其中一处）。这里把它变成唯一实现，键盘扩展与菜单都调它。
+ */
+export function runNotebookUndo(editor: Editor, bridge: NotebookEditorBridge): void {
+    if (editor.commands.undo()) return;
+    bridge.undo();
+}
+
+/** 重做一步。语义与 `runNotebookUndo` 对称（同样"先细后粗"）。 */
+export function runNotebookRedo(editor: Editor, bridge: NotebookEditorBridge): void {
+    if (editor.commands.redo()) return;
+    bridge.redo();
+}
+
 /** Ctrl+Z 的"先细后粗"桥接扩展。 */
 function createUndoBridge(bridge: NotebookEditorBridge) {
     return Extension.create({
@@ -50,18 +81,43 @@ function createUndoBridge(bridge: NotebookEditorBridge) {
         addKeyboardShortcuts() {
             return {
                 "Mod-z": () => {
-                    if (this.editor.commands.undo()) return true;
-                    bridge.undo();
+                    runNotebookUndo(this.editor, bridge);
                     return true;
                 },
                 "Mod-Shift-z": () => {
-                    if (this.editor.commands.redo()) return true;
-                    bridge.redo();
+                    runNotebookRedo(this.editor, bridge);
                     return true;
                 },
                 "Mod-y": () => {
-                    if (this.editor.commands.redo()) return true;
-                    bridge.redo();
+                    runNotebookRedo(this.editor, bridge);
+                    return true;
+                },
+            };
+        },
+    });
+}
+
+/**
+ * Ctrl/⌘+K 打开链接编辑浮层。
+ *
+ * 【为什么是编辑器快捷键而不是面板上的 keydown 监听】
+ *   1. `Mod-` 由 ProseMirror 的 keymap 按平台展开（macOS 是 ⌘、其余是 Ctrl），
+ *      与加粗 / 斜体这些内建快捷键同一套，不必自己判平台；
+ *   2. 它只在**编辑器持有焦点时**触发 —— 面板上的监听会连"焦点在查找框 / 链接
+ *      输入框里"的 Ctrl+K 一起吃掉（原生监听先于 React 合成事件，输入框里的
+ *      `stopPropagation` 拦不住它）。
+ *
+ * 【为什么不与加粗共用 `addKeyboardShortcuts` 的位置】加粗 / 斜体来自
+ * StarterKit，链接是记事本自己接的动作；这里给它单独一个扩展，避免再去 extend
+ * StarterKit。
+ */
+function createLinkShortcut(bridge: NotebookLinkBridge) {
+    return Extension.create({
+        name: "notebookLinkShortcut",
+        addKeyboardShortcuts() {
+            return {
+                "Mod-k": () => {
+                    bridge.open();
                     return true;
                 },
             };
@@ -80,6 +136,8 @@ export interface UseNotebookEditorArgs {
     persist: (markdown: string) => void;
     /** 编辑停顿到阈值时另起撤销步。 */
     onIdleSplit: () => void;
+    /** 链接浮层入口（Ctrl/⌘+K）。 */
+    linkBridge: NotebookLinkBridge;
 }
 
 export interface UseNotebookEditorResult {
@@ -91,7 +149,7 @@ export interface UseNotebookEditorResult {
 }
 
 export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEditorResult {
-    const { markdown, settings, bridge, onMarkdownChange, persist, onIdleSplit } = args;
+    const { markdown, settings, bridge, onMarkdownChange, persist, onIdleSplit, linkBridge } = args;
 
     // 回调与设置在 ref 里取最新值：编辑器实例不应因为回调身份变化而重建。
     // 赋值必须放在 effect 里（而非渲染期）—— 渲染期写 ref 会破坏并发渲染的
@@ -99,11 +157,17 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     const onMarkdownChangeRef = useRef(onMarkdownChange);
     const persistRef = useRef(persist);
     const onIdleSplitRef = useRef(onIdleSplit);
+    // 运行时设置也必须走 ref：`useEditor` 的依赖只有 extensions / undoBridge
+    // （稳定），`onUpdate` 闭包只捕获**首次渲染**的 settings —— 直接在闭包里读
+    // `settings.autosaveDebounceMs` / `historySplitIdleMs` 会让设置对话框里改的
+    // 值直到应用重启才生效。
+    const settingsRef = useRef(settings);
     useEffect(() => {
         onMarkdownChangeRef.current = onMarkdownChange;
         persistRef.current = persist;
         onIdleSplitRef.current = onIdleSplit;
-    }, [onIdleSplit, onMarkdownChange, persist]);
+        settingsRef.current = settings;
+    }, [onIdleSplit, onMarkdownChange, persist, settings]);
 
     /** 最近一次"由本编辑器写出"的 Markdown，用于识别外来更新。 */
     const lastEmittedRef = useRef(markdown);
@@ -123,6 +187,14 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     );
 
     const undoBridge = useMemo(() => createUndoBridge(bridge), [bridge]);
+
+    /*
+     * 链接快捷键扩展。回调经 `bridge` 对象转发（而不是在这里读 ref）：
+     * React Compiler 的引用规则会拒绝"渲染期把读 ref 的闭包传给函数"，而
+     * `bridge` 的身份由调用方用 `useMemo` 固定，因此这个扩展只建一次 ——
+     * 与上面 `createUndoBridge` 同一套。
+     */
+    const linkShortcut = useMemo(() => createLinkShortcut(linkBridge), [linkBridge]);
 
     const clearTimers = useCallback(() => {
         if (debounceTimerRef.current !== null) {
@@ -154,7 +226,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
 
     const editor = useEditor(
         {
-            extensions: [...extensions, undoBridge],
+            extensions: [...extensions, undoBridge, linkShortcut],
             content: markdown,
             editable: true,
             editorProps: {
@@ -183,7 +255,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                 onMarkdownChangeRef.current(next);
                 pendingRef.current = next;
 
-                const delay = settings.autosaveDebounceMs;
+                const delay = settingsRef.current.autosaveDebounceMs;
                 if (debounceTimerRef.current !== null) {
                     window.clearTimeout(debounceTimerRef.current);
                 }
@@ -195,15 +267,31 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                 }, delay);
 
                 // 停顿分节：连续打字时不触发，停手一段时间后让下一步另起。
-                if (settings.historySplitIdleMs > 0) {
+                const idleDelay = settingsRef.current.historySplitIdleMs;
+                if (idleDelay > 0) {
                     if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
                     idleTimerRef.current = window.setTimeout(() => {
                         idleTimerRef.current = null;
                         onIdleSplitRef.current();
-                    }, settings.historySplitIdleMs);
+                    }, idleDelay);
                 }
             },
-            onBlur: () => {
+            onBlur: ({ event }) => {
+                /*
+                 * 焦点进了**我们自己刚打开的菜单**时不算"离开编辑器"。
+                 *
+                 * 【为什么看 `relatedTarget` 而不是 `document.activeElement`】
+                 * 焦点切换的事件顺序是"旧元素 blur → 新元素 focus"，在 blur 处理器
+                 * 里 `document.activeElement` 可能还停在旧元素上，判据会漏。而
+                 * `relatedTarget` 就是即将获得焦点的那个元素，确定。
+                 *
+                 * 【为什么必须跳过】菜单（`AppContextMenu` 的 `autoFocus`）要收焦点
+                 * 才能用方向键导航。若不跳过，每次右键都会走一遍收尾：把待写内容立刻
+                 * 落盘并**关掉后端的撤销合并窗口** —— 用户只是右键复制一段文字，回到
+                 * 编辑器继续打字，撤销步却已经被切成两段。
+                 */
+                const next = event.relatedTarget as HTMLElement | null;
+                if (next?.closest?.('[data-hs-context-menu="1"]')) return;
                 // 失焦即收尾：把待写内容落盘并关掉合并窗口，这样用户切去时间轴
                 // 操作后，撤销不会再和"刚才那一段笔记"合并成同一步。
                 seal();
@@ -214,7 +302,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
         // 都销毁并新建一个编辑器（ProseMirror 历史清零、StrictMode 下还会
         // 多泄漏一个实例），而源码视图里的改动已由下面的"外来更新"effect
         // 通过 `setContent` 同步回来。
-        [extensions, undoBridge],
+        [extensions, undoBridge, linkShortcut],
     );
 
     /**

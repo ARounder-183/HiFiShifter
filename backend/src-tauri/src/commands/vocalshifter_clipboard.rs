@@ -434,6 +434,19 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         .cloned()
         .collect();
 
+    // 逐 take 的指纹 / 头探测是磁盘 IO：在取 timeline 锁**之前**克隆并补齐，
+    // 避免持锁做 O(takes) 次 IO、冻结其他命令与 UI 轮询。
+    let prepared_clips: Vec<_> = result
+        .timeline
+        .clips
+        .iter()
+        .map(|clip| {
+            let mut c = clip.clone();
+            crate::state::TimelineState::populate_clip_file_metadata(&mut c);
+            c
+        })
+        .collect();
+
     // 应用到 AppState
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -443,9 +456,8 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         // （共用入口见 append_imported_tracks）。
         tl.append_imported_tracks(result.timeline.tracks.clone());
 
-        for clip in &result.timeline.clips {
-            let mut c = clip.clone();
-            crate::state::TimelineState::populate_clip_file_metadata(&mut c);
+        // 合并 clips（文件元数据已在锁外补齐）
+        for c in prepared_clips {
             tl.clips.push(c);
         }
 
@@ -528,7 +540,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
             .collect();
         drop(tl);
         for root_id in &midi_root_tracks {
-            pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+            pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
         }
     }
 

@@ -7,6 +7,8 @@ import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
+import { formatPositionText } from "./timeValueText";
+import { formatTemplate } from "../../../i18n/format";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
 import { SCALE_LABELS } from "../../../utils/musicalScales.ts";
@@ -34,7 +36,9 @@ import {
     verticalHairlineGeometry,
     wholeDevicePxLength,
 } from "../../../utils/devicePixelLine.ts";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
+import { tickWindowRangePx } from "./runtime/tickWindow.js";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
@@ -72,7 +76,11 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
         if (!Number.isFinite(viewportWidth) || viewportWidth == null || viewportWidth <= 0) {
             return labeled;
         }
-        const bufferPx = Math.max(320, viewportWidth * 0.5);
+        // 与 `buildTimelineTicks` 的生成窗口**共用同一入口**（`tickWindowRangePx`）：
+        // 两处一旦分叉，切片就会比生成窗口更窄，切掉**真实视口内**的刻度
+        // （标尺露白）。注意缓冲按**含步长补偿**的宽度算 —— 真实视口相对锚点最多
+        // 右移 `TICK_WINDOW_STEP_PX + TICK_WINDOW_LAG_PX`，缓冲必须吸收两者之和。
+        const { bufferPx } = tickWindowRangePx(viewportWidth);
         const leftPx = Math.max(0, scrollLeft - bufferPx);
         const rightPx = scrollLeft + viewportWidth + bufferPx;
         // 按内容坐标二分：坐标已由 axis 投影好，Tempo Map 下也无需再换算。
@@ -372,10 +380,12 @@ function TimeRulerContextMenu({
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
-    // 分区标题：原语没有「非交互标签行」，用 disabled 项承载（不可选、
-    // 方向键跳过、悬停无反应），保留原有分组文字与顺序。
+    // 分区标题走原语的 `heading`：它是**非交互标签行**（不可选、方向键跳过、
+    // 悬停无反应）。此前用 `disabled: true` 冒充 —— 那对屏幕阅读器是"一个禁用的
+    // 菜单项"、对键盘是不可达项，语义是错的，也和文件浏览器菜单的同类标题
+    // 长得不一样。
     const items: AppMenuItemSpec[] = [
-        { key: "tempoMapHeader", label: t("tempo_map"), disabled: true, onSelect: () => {} },
+        { key: "tempoMapHeader", label: t("tempo_map"), heading: true },
         {
             key: "addTempoPoint",
             label: t("tempo_map_add_point"),
@@ -411,9 +421,8 @@ function TimeRulerContextMenu({
         {
             key: "primaryHeader",
             label: t("time_unit_primary"),
-            disabled: true,
+            heading: true,
             separatorBefore: true,
-            onSelect: () => {},
         },
         ...TIME_UNITS.map((unit) => ({
             key: `primary-${unit}`,
@@ -424,9 +433,8 @@ function TimeRulerContextMenu({
         {
             key: "secondaryHeader",
             label: t("time_unit_secondary"),
-            disabled: true,
+            heading: true,
             separatorBefore: true,
-            onSelect: () => {},
         },
         ...TIME_UNIT_CHOICES.map((unit) => ({
             key: `secondary-${unit}`,
@@ -571,6 +579,11 @@ const TimeRulerInner: React.FC<{
     subscribeViewport,
 }) => {
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
+    /**
+     * 当前 dpr（React 形态）：供渲染期写出的**物理像素线宽**使用，并在 dpr 变化时
+     * 触发重渲染（`readDevicePixelRatio()` 只读一次不会重渲染，线宽会停在旧值）。
+     */
+    const dpr = useDevicePixelRatio();
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
     /**
@@ -686,10 +699,12 @@ const TimeRulerInner: React.FC<{
         const leftSec = Math.max(0, scrollLeft / Math.max(1e-9, pxPerSec));
         const idx = pointIndexAtSec(tempoMap, leftSec);
         const point = tempoMap.points[idx];
-        const cursor = formatCursorTime(primaryUnit, secondaryUnit, point.positionSec, timeContext);
-        const positionLine = cursor.secondaryLabel
-            ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
-            : cursor.primaryLabel;
+        // 绝对时刻口径（感知 Tempo Map），与变化点提示 / 播放头同一格式化器。
+        const positionLine = formatPositionText(point.positionSec, {
+            ...timeContext,
+            primaryTimeUnit: primaryUnit,
+            secondaryTimeUnit: secondaryUnit,
+        });
         const sig = effectiveTimeSignatureAt(tempoMap, idx);
         const effScale = effectiveScaleAtSec(
             tempoMap,
@@ -702,11 +717,14 @@ const TimeRulerInner: React.FC<{
         } else if (Array.isArray(effScale)) {
             effScaleLabel = projectScaleName || "…";
         }
+        // 冒号/空格的语系差异由 `common_label_value` 模板决定，不在代码里写死。
+        const line = (label: string, value: string) =>
+            formatTemplate(tAny("common_label_value"), { label, value });
         return [
-            `${tAny("tempo_map_tooltip_position")}${positionLine}`,
-            `${tAny("tempo_map_tooltip_bpm")}${formatTempoBpm(point.bpm)}`,
-            `${tAny("tempo_map_tooltip_time_signature")}${formatTimeSignature(sig)}`,
-            `${tAny("tempo_map_tooltip_scale")}${effScaleLabel}`,
+            line(tAny("tempo_map_tooltip_position"), positionLine),
+            line(tAny("tempo_map_tooltip_bpm"), formatTempoBpm(point.bpm)),
+            line(tAny("tempo_map_tooltip_time_signature"), formatTimeSignature(sig)),
+            line(tAny("tempo_map_tooltip_scale"), effScaleLabel),
         ].join("\n");
     }, [
         tempoMap,
@@ -904,7 +922,9 @@ const TimeRulerInner: React.FC<{
                     className="absolute left-0 right-0 pointer-events-none"
                     style={{
                         top: RULER_BASE_HEIGHT_PX,
-                        height: 1,
+                        // 分隔线取整数个物理像素：1 CSS px 在 dpr=1.25/1.5 下是
+                        // 1.25/1.5 物理像素，边缘发虚且随位置忽粗忽细。
+                        height: wholeDevicePxLength(1, dpr),
                         backgroundColor: "var(--qt-border)",
                         opacity: 0.6,
                     }}

@@ -8,19 +8,23 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { createModifierOnlyBinding } from "./keybindingsSlice";
+import { createModifierOnlyBinding, firstBinding } from "./keybindingsSlice";
 import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
 import { KEYBINDING_PRESETS, KEYBINDING_PRESET_IDS } from "./keybindingPresets";
+import type { Keybinding } from "./types";
 
 const STRETCH_ACTIONS = ["modifier.clipStretch", "modifier.paramStretch"] as const;
 
-/** 从修饰键绑定中读出按下的修饰键（"ctrl" / "alt" / "shift" / "none"）。 */
-function modifierOf(binding: {
-    ctrl?: boolean;
-    alt?: boolean;
-    shift?: boolean;
-    key: string;
-}): "ctrl" | "alt" | "shift" | "none" {
+/**
+ * 从修饰键绑定**列表**中读出按下的修饰键（"ctrl" / "alt" / "shift" / "none"）。
+ *
+ * 修饰键手势只有一个槽位，因此取主绑定（下标 0）即可 —— 见 types.ts 的
+ * `KeybindingMap`。
+ */
+function modifierOf(
+    bindings: readonly Keybinding[] | undefined,
+): "ctrl" | "alt" | "shift" | "none" {
+    const binding = firstBinding(bindings);
     if (binding.key === "__none__") return "none";
     if (binding.ctrl) return "ctrl";
     if (binding.alt) return "alt";
@@ -31,14 +35,14 @@ function modifierOf(binding: {
 describe("默认拉伸修饰键", () => {
     it("两个拉伸动作默认均为 Alt", () => {
         for (const action of STRETCH_ACTIONS) {
-            expect(DEFAULT_KEYBINDINGS[action]).toEqual(
+            expect(DEFAULT_KEYBINDINGS[action]).toEqual([
                 createModifierOnlyBinding({ ctrl: false, shift: false, alt: true }),
-            );
+            ]);
         }
     });
 
     it("两个动作是彼此独立的绑定项（改绑互不牵连）", () => {
-        // 同一对象引用会让 `setKeybinding` 的「与默认相同则删覆盖」判定串台。
+        // 同一数组引用会让 `setKeybindings` 的「与默认相同则删覆盖」判定串台。
         expect(DEFAULT_KEYBINDINGS["modifier.clipStretch"]).not.toBe(
             DEFAULT_KEYBINDINGS["modifier.paramStretch"],
         );

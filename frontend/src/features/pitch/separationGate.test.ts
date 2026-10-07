@@ -13,6 +13,8 @@ import {
     SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    firstGatedParamId,
+    gatedParamHideOrder,
     paramNeedingVisibilityOnGate,
     isGatedByCompose,
     isEffectParamGated,
@@ -84,17 +86,13 @@ describe("separationGate", () => {
             expect(paramNeedingVisibilityOnGate("hifigan_tension", false, "pitch")).toBe(
                 "hifigan_tension",
             );
-            expect(paramNeedingVisibilityOnGate("breath_gain", false, "pitch")).toBe(
-                "breath_gain",
-            );
+            expect(paramNeedingVisibilityOnGate("breath_gain", false, "pitch")).toBe("breath_gain");
         });
 
         it("未发生回退时不需要改动可见性", () => {
             expect(paramNeedingVisibilityOnGate("hifigan_tension", true, "pitch")).toBeNull();
             expect(paramNeedingVisibilityOnGate("pitch", false, "pitch")).toBeNull();
-            expect(
-                paramNeedingVisibilityOnGate("formant_shift_cents", false, "pitch"),
-            ).toBeNull();
+            expect(paramNeedingVisibilityOnGate("formant_shift_cents", false, "pitch")).toBeNull();
         });
 
         it("与回退判据同源：需要回退 ⇔ 需要恢复可见性", () => {
@@ -102,14 +100,12 @@ describe("separationGate", () => {
             for (const on of [true, false]) {
                 for (const id of params) {
                     const needsFallback = findBlockedEditParam(id, on, "pitch") !== null;
-                    const needsVisibility =
-                        paramNeedingVisibilityOnGate(id, on, "pitch") !== null;
+                    const needsVisibility = paramNeedingVisibilityOnGate(id, on, "pitch") !== null;
                     expect(needsVisibility).toBe(needsFallback);
                 }
             }
         });
     });
-
 
     describe("Compose 门禁（只影响合成参数，不影响混音参数）", () => {
         it("Compose 关闭时，共振峰/气声/张力都不可用", () => {
@@ -148,4 +144,66 @@ describe("separationGate", () => {
         });
     });
 
+    describe("firstGatedParamId（分离开关渲染在被门禁组的组首）", () => {
+        it("按工具栏顺序取最左的被门禁参数", () => {
+            // nsf-hifigan 的实际顺序：音高、共振峰、气声、张力、音量、声像。
+            // 开关应落在「气声」之前 —— 即这一组的组首，而不是算法下拉之前。
+            const ordered = [
+                "formant_shift_cents",
+                "breath_gain",
+                "hifigan_tension",
+                "volume",
+                "dyn",
+                "pan",
+            ];
+            expect(firstGatedParamId(ordered)).toBe("breath_gain");
+        });
+
+        it("组内顺序变化时跟随最左者（而非写死 breath_gain）", () => {
+            expect(firstGatedParamId(["hifigan_tension", "breath_gain"])).toBe("hifigan_tension");
+        });
+
+        it("组内只剩一个参数时取它", () => {
+            expect(firstGatedParamId(["formant_shift_cents", "hifigan_tension"])).toBe(
+                "hifigan_tension",
+            );
+        });
+
+        it("没有可门禁参数时返回 null（world / vslib 下开关不渲染）", () => {
+            expect(firstGatedParamId(["formant_shift_cents", "volume", "dyn", "pan"])).toBeNull();
+            expect(firstGatedParamId([])).toBeNull();
+        });
+
+        it("只认被门禁的参数，混音级参数不参与", () => {
+            // 音量 / 声像 / 动态永远排在右侧固定序列里，不能被当成组首。
+            expect(firstGatedParamId(["volume", "dyn", "pan"])).toBeNull();
+            expect(firstGatedParamId(["volume", "breath_gain"])).toBe("breath_gain");
+        });
+    });
+
+    describe("gatedParamHideOrder（逐个让位的顺序：先张力后气声）", () => {
+        it("按工具栏顺序取逆序 —— 先隐藏右侧的张力，再隐藏气声", () => {
+            // 气声药丸左侧挂着分离开关（不能隐藏），先让气声会让开关独自悬空。
+            const ordered = [
+                "formant_shift_cents",
+                "breath_gain",
+                "hifigan_tension",
+                "volume",
+                "pan",
+            ];
+            expect(gatedParamHideOrder(ordered)).toEqual(["hifigan_tension", "breath_gain"]);
+        });
+
+        it("只有一个被门禁参数时就是它自己", () => {
+            expect(gatedParamHideOrder(["breath_gain", "volume"])).toEqual(["breath_gain"]);
+            expect(gatedParamHideOrder(["formant_shift_cents", "hifigan_tension"])).toEqual([
+                "hifigan_tension",
+            ]);
+        });
+
+        it("没有可门禁参数时为空数组", () => {
+            expect(gatedParamHideOrder(["formant_shift_cents", "volume", "pan"])).toEqual([]);
+            expect(gatedParamHideOrder([])).toEqual([]);
+        });
+    });
 });

@@ -27,27 +27,35 @@ function keyEvent(
     } as unknown as KeyboardEvent;
 }
 
+/**
+ * 测试夹具用**单绑定**书写（可读性优先），调用前经 `lists()` 包装成模型要求的
+ * 列表形状（见 types.ts 的 `KeybindingMap`）。
+ */
 type TestMap = Record<string, Keybinding>;
 
-const CTRL_T: TestMap = {
+function lists(map: TestMap): Record<string, readonly Keybinding[]> {
+    return Object.fromEntries(Object.entries(map).map(([id, kb]) => [id, [kb]]));
+}
+
+const CTRL_T: Record<string, readonly Keybinding[]> = lists({
     // 故意让 track.add 声明在 edit.setPitch 之前 —— 路由结果必须与声明顺序无关
     "track.add": { key: "t", ctrl: true },
     "mode.toggle": { key: "tab" },
-};
+});
 
 // 用完整真实元数据（ACTION_META）构造场景键位表
-const FULL_CTRL_T: TestMap = {
+const FULL_CTRL_T: Record<string, readonly Keybinding[]> = lists({
     "track.add": { key: "t", ctrl: true },
     "edit.setPitch": { key: "t", ctrl: true },
-};
+});
 
-const DELETE_SHARED: TestMap = {
+const DELETE_SHARED: Record<string, readonly Keybinding[]> = lists({
     "clip.delete": { key: "delete" },
     // 用户把「删除选中轨道」重绑为裸 Delete：与「删除音频块」共用按键，
     // 由焦点裁决（轨道头 → 删除轨道；时间轴 → 删除音频块）。
     "track.delete": { key: "delete" },
     "track.clone": { key: "d", ctrl: true },
-};
+});
 
 describe("resolveActionByFocus — 焦点感知路由", () => {
     it("参数编辑器 + select 工具：paramEditorSelect 操作优先于全局操作", () => {
@@ -160,10 +168,10 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
 
     it("与键位表声明顺序无关（反向声明仍由焦点裁决）", () => {
         // 声明顺序：track.add 在前 vs edit.setPitch 在前 —— 结果一致
-        const reversed: TestMap = {
+        const reversed = lists({
             "edit.setPitch": { key: "t", ctrl: true },
             "track.add": { key: "t", ctrl: true },
-        };
+        });
         expect(
             resolveActionByFocus(keyEvent("t", { ctrl: true }), reversed, "pianoRoll", "select"),
         ).toBe("edit.setPitch");
@@ -173,10 +181,10 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
     });
 
     it("quickSearch 作用域操作始终硬排除（由弹窗自身处理）", () => {
-        const map: TestMap = {
+        const map = lists({
             "quickSearch.navigate.up": { key: "arrowup" },
             "track.selectUp": { key: "arrowup" },
-        };
+        });
         for (const domain of ["pianoRoll", "timeline", "trackHeader", null] as const) {
             const result = resolveActionByFocus(keyEvent("arrowup"), map, domain, "select");
             expect(result).toBe("track.selectUp");
@@ -341,5 +349,70 @@ describe("resolvePasteRoute（粘贴的内容路由，last-copy-wins）", () => 
     it("未知 kind 视同外来源（表面兜底）", () => {
         expect(resolvePasteRoute("reaper", "timeline")).toBe("hifi:timelineEditOp");
         expect(resolvePasteRoute("weird", "pianoRoll")).toBe("hifi:editOp");
+    });
+});
+
+describe("resolveActionByFocus — 一个动作可绑多个键", () => {
+    /** 重做式夹具：主绑定 Ctrl+Shift+Z，备用键 Ctrl+Y。 */
+    const REDO_TWO_KEYS: Record<string, readonly Keybinding[]> = lists({
+        "edit.redo": { key: "z", ctrl: true, shift: true },
+    });
+    REDO_TWO_KEYS["edit.redo"] = [
+        { key: "z", ctrl: true, shift: true },
+        { key: "y", ctrl: true },
+    ];
+
+    it("主绑定命中", () => {
+        expect(
+            resolveActionByFocus(
+                keyEvent("z", { ctrl: true, shift: true }),
+                REDO_TWO_KEYS,
+                null,
+                "select",
+            ),
+        ).toBe("edit.redo");
+    });
+
+    it("备用绑定同样命中（这正是「绑定多个快捷键」的意义）", () => {
+        expect(
+            resolveActionByFocus(keyEvent("y", { ctrl: true }), REDO_TWO_KEYS, null, "select"),
+        ).toBe("edit.redo");
+    });
+
+    it("未绑定的组合仍然不命中", () => {
+        expect(
+            resolveActionByFocus(
+                keyEvent("y", { ctrl: true, shift: true }),
+                REDO_TWO_KEYS,
+                null,
+                "select",
+            ),
+        ).toBeNull();
+    });
+
+    it("多绑定不改变作用域裁决：焦点域仍决定谁胜出", () => {
+        const map = lists({
+            "track.add": { key: "t", ctrl: true },
+            "edit.setPitch": { key: "t", ctrl: true },
+        });
+        // 给 track.add 追加第二个键，不影响它在时间轴焦点下的胜出。
+        map["track.add"] = [
+            { key: "t", ctrl: true },
+            { key: "n", ctrl: true, alt: true },
+        ];
+        expect(resolveActionByFocus(keyEvent("t", { ctrl: true }), map, "timeline", "select")).toBe(
+            "track.add",
+        );
+        expect(
+            resolveActionByFocus(
+                keyEvent("n", { ctrl: true, alt: true }),
+                map,
+                "timeline",
+                "select",
+            ),
+        ).toBe("track.add");
+        expect(
+            resolveActionByFocus(keyEvent("t", { ctrl: true }), map, "pianoRoll", "select"),
+        ).toBe("edit.setPitch");
     });
 });

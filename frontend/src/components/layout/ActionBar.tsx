@@ -1,5 +1,7 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
+import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
@@ -20,6 +22,7 @@ import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarSeparator } from "../../ui/Toolbar";
 import { AppIconButton } from "../../ui";
+import { TimelinePanelToggle } from "./TimelinePanelToggle";
 
 import {
     playOriginal,
@@ -67,9 +70,10 @@ import { useRangeWheelGuard } from "../../utils/useRangeWheelGuard";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
 import {
-    formatKeybinding,
+    formatKeybindingList,
     isModifierActive,
     selectKeybinding,
+    selectKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 import { openPanelById, selectPanelVisible, togglePanelVisible } from "../../features/dock/dockApi";
 import {
@@ -229,11 +233,12 @@ export function ActionBar() {
         );
     }, [dispatch]);
     // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
+    // 重做默认绑了两个键，tooltip 要把两个都写出来（`;` 连接）。
     const undoShortcutKb = useAppSelector((state: RootState) =>
-        selectKeybinding(state, "edit.undo"),
+        selectKeybindings(state, "edit.undo"),
     );
     const redoShortcutKb = useAppSelector((state: RootState) =>
-        selectKeybinding(state, "edit.redo"),
+        selectKeybindings(state, "edit.redo"),
     );
     // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
     // （React onWheel 的 preventDefault 是 passive no-op，见 useRangeWheelGuard）。
@@ -659,122 +664,146 @@ export function ActionBar() {
                             setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
                         }}
                     />
-                    {metronomeMenuPos && (
-                        <div
-                            ref={metronomeMenuRef}
-                            data-hs-context-menu
-                            className="fixed z-qt-popover min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                            style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
-                        >
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_volume")}
-                            </div>
-                            <div className="px-3 py-1.5 flex items-center gap-2">
-                                <input
-                                    type="range"
-                                    ref={metronomeVolumeWheelGuard}
-                                    min={0}
-                                    max={100}
-                                    step={5}
-                                    value={Math.round(s.metronomeGain * 100)}
-                                    onChange={(e) => {
+                    {metronomeMenuPos &&
+                        createPortal(
+                            <div
+                                ref={metronomeMenuRef}
+                                data-hs-context-menu="1"
+                                className="hs-menu hs-menu--no-scroll"
+                                style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
+                            >
+                                <div className="hs-menu__label">{t("metronome_volume")}</div>
+                                <div className="hs-menu__body flex items-center gap-2">
+                                    <input
+                                        type="range"
+                                        ref={metronomeVolumeWheelGuard}
+                                        min={0}
+                                        max={100}
+                                        step={5}
+                                        value={Math.round(s.metronomeGain * 100)}
+                                        onChange={(e) => {
+                                            void dispatch(
+                                                updateMetronome({
+                                                    metronomeGain: Number(e.target.value) / 100,
+                                                }),
+                                            );
+                                        }}
+                                        onWheel={(e) => {
+                                            // 阻止默认滚动由滑块上的原生非被动守卫完成
+                                            // （React onWheel 的 preventDefault 是 no-op）。
+                                            // 粗步长 = 滑块步长 5%；按住“精细调整”修饰键时步长 1%。
+                                            const fine = isModifierActive(paramFineAdjustKb, e);
+                                            const delta = (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : 5);
+                                            const next = Math.min(
+                                                100,
+                                                Math.max(
+                                                    0,
+                                                    Math.round(s.metronomeGain * 100) + delta,
+                                                ),
+                                            );
+                                            void dispatch(
+                                                updateMetronome({ metronomeGain: next / 100 }),
+                                            );
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        className="qt-range flex-1"
+                                    />
+                                    <span className="hs-type-caption w-8 text-right">
+                                        {Math.round(s.metronomeGain * 100)}
+                                    </span>
+                                </div>
+                                <div className="hs-menu__separator" role="separator" />
+                                <div className="hs-menu__label">{t("metronome_mode")}</div>
+                                {(
+                                    [
+                                        ["grid", "metronome_mode_grid"],
+                                        ["beat", "metronome_mode_beat"],
+                                        ["bar", "metronome_mode_bar"],
+                                    ] as const
+                                ).map(([mode, key]) => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        className="hs-menu__item"
+                                        onClick={() => {
+                                            void dispatch(updateMetronome({ metronomeMode: mode }));
+                                            setMetronomeMenuPos(null);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span className="hs-menu__label-text">{t(key)}</span>
+                                        <span className="hs-menu__trail">
+                                            {s.metronomeMode === mode ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
+                                    </button>
+                                ))}
+                                <div className="hs-menu__separator" role="separator" />
+                                <div className="hs-menu__label">{t("metronome_sound")}</div>
+                                {(
+                                    [
+                                        ["click", "metronome_sound_click"],
+                                        ["woodblock", "metronome_sound_woodblock"],
+                                        ["beep", "metronome_sound_beep"],
+                                    ] as const
+                                ).map(([sound, key]) => (
+                                    <button
+                                        key={sound}
+                                        type="button"
+                                        className="hs-menu__item"
+                                        onClick={() => {
+                                            void dispatch(
+                                                updateMetronome({ metronomeSound: sound }),
+                                            );
+                                            setMetronomeMenuPos(null);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span className="hs-menu__label-text">{t(key)}</span>
+                                        <span className="hs-menu__trail">
+                                            {s.metronomeSound === sound ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
+                                    </button>
+                                ))}
+                                <div className="hs-menu__separator" role="separator" />
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
                                         void dispatch(
                                             updateMetronome({
-                                                metronomeGain: Number(e.target.value) / 100,
+                                                metronomeAccent: !s.metronomeAccent,
                                             }),
                                         );
                                     }}
-                                    onWheel={(e) => {
-                                        // 阻止默认滚动由滑块上的原生非被动守卫完成
-                                        // （React onWheel 的 preventDefault 是 no-op）。
-                                        // 粗步长 = 滑块步长 5%；按住“精细调整”修饰键时步长 1%。
-                                        const fine = isModifierActive(paramFineAdjustKb, e);
-                                        const delta = (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : 5);
-                                        const next = Math.min(
-                                            100,
-                                            Math.max(0, Math.round(s.metronomeGain * 100) + delta),
-                                        );
-                                        void dispatch(
-                                            updateMetronome({ metronomeGain: next / 100 }),
-                                        );
-                                    }}
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                    className="qt-range flex-1"
-                                />
-                                <span className="text-qt-xs tabular-nums w-8 text-right opacity-70">
-                                    {Math.round(s.metronomeGain * 100)}
-                                </span>
-                            </div>
-                            <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_mode")}
-                            </div>
-                            {(
-                                [
-                                    ["grid", "metronome_mode_grid"],
-                                    ["beat", "metronome_mode_beat"],
-                                    ["bar", "metronome_mode_bar"],
-                                ] as const
-                            ).map(([mode, key]) => (
-                                <button
-                                    key={mode}
-                                    type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                    onClick={() => {
-                                        void dispatch(updateMetronome({ metronomeMode: mode }));
-                                        setMetronomeMenuPos(null);
-                                    }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <span>{t(key)}</span>
-                                    {s.metronomeMode === mode ? <CheckIcon /> : null}
+                                    <span className="hs-menu__label-text">
+                                        {t("metronome_accent")}
+                                    </span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeAccent ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
                                 </button>
-                            ))}
-                            <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_sound")}
-                            </div>
-                            {(
-                                [
-                                    ["click", "metronome_sound_click"],
-                                    ["woodblock", "metronome_sound_woodblock"],
-                                    ["beep", "metronome_sound_beep"],
-                                ] as const
-                            ).map(([sound, key]) => (
-                                <button
-                                    key={sound}
-                                    type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                    onClick={() => {
-                                        void dispatch(updateMetronome({ metronomeSound: sound }));
-                                        setMetronomeMenuPos(null);
-                                    }}
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                >
-                                    <span>{t(key)}</span>
-                                    {s.metronomeSound === sound ? <CheckIcon /> : null}
-                                </button>
-                            ))}
-                            <div className="my-1 border-t border-qt-border" />
-                            <button
-                                type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                onClick={() => {
-                                    void dispatch(
-                                        updateMetronome({ metronomeAccent: !s.metronomeAccent }),
-                                    );
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span>{t("metronome_accent")}</span>
-                                {s.metronomeAccent ? <CheckIcon /> : null}
-                            </button>
-                        </div>
-                    )}
+                            </div>,
+                            document.body,
+                        )}
                 </Box>
                 <span className="hs-type-muted">{t("common_bpm")}:</span>
                 <TextField.Root
                     ref={attachBpmWheel}
+                    disabled={isPluginMode()}
                     size="1"
                     value={bpmText}
                     data-tooltip={
@@ -1031,6 +1060,7 @@ export function ActionBar() {
                 <span className="hs-type-muted">{t("base_scale")}:</span>
                 <Select.Root
                     value={displayScaleSelectValue}
+                    disabled={isPluginMode()}
                     size="1"
                     onValueChange={(v) => {
                         if (v === "__custom_dialog__") {
@@ -1135,6 +1165,7 @@ export function ActionBar() {
             <AppToolbarSeparator />
 
             {/* Transport */}
+            <TimelinePanelToggle />
             <Flex gap="1" className="shrink-0">
                 <Button
                     variant="soft"
@@ -1144,6 +1175,8 @@ export function ActionBar() {
                         dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     }}
                     data-tooltip={t("action_stop")}
+                    disabled={isPluginMode() && !canControlHostTransport()}
+                    title={isPluginMode() ? "控制 REAPER 停止播放" : undefined}
                 >
                     <StopIcon />
                 </Button>
@@ -1158,6 +1191,8 @@ export function ActionBar() {
                         dispatch(playOriginal());
                     }}
                     data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
+                    disabled={isPluginMode() && !canControlHostTransport()}
+                    title={isPluginMode() ? "控制 REAPER 播放/暂停" : undefined}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
@@ -1169,7 +1204,7 @@ export function ActionBar() {
                         variant={recording.active ? "solid" : "soft"}
                         color="red"
                         data-tooltip={recordingTooltip}
-                        disabled={recording.busy && recording.countdownRemaining === 0}
+                        disabled={isPluginMode() || (recording.busy && recording.countdownRemaining === 0)}
                         onClick={() => {
                             if (recording.active) {
                                 void dispatch(stopRecordingFlow());
@@ -1181,6 +1216,7 @@ export function ActionBar() {
                         }}
                         onContextMenu={(event) => {
                             event.preventDefault();
+                            if (isPluginMode()) return;
                             setRecordingMenuPos({ x: event.clientX, y: event.clientY });
                             void dispatch(loadRecordingSettings());
                             // 每次打开菜单都强制重新枚举设备/应用，
@@ -1203,7 +1239,6 @@ export function ActionBar() {
                         <AppContextMenu
                             x={recordingMenuPos.x}
                             y={recordingMenuPos.y}
-                            minWidth={220}
                             ariaLabel={tf("recording_source_mode")}
                             onClose={() => setRecordingMenuPos(null)}
                             items={[
@@ -1412,7 +1447,7 @@ export function ActionBar() {
                     variant="ghost"
                     disabled={s.historyUndoDepth <= 0}
                     tabIndex={-1}
-                    data-tooltip={`${t("menu_undo")} (${formatKeybinding(undoShortcutKb, "")})`}
+                    data-tooltip={`${t("menu_undo")} (${formatKeybindingList(undoShortcutKb, "")})`}
                     onClick={() => {
                         void dispatch(undoRemote());
                     }}
@@ -1428,7 +1463,7 @@ export function ActionBar() {
                     variant="ghost"
                     disabled={s.historyRedoDepth <= 0}
                     tabIndex={-1}
-                    data-tooltip={`${t("menu_redo")} (${formatKeybinding(redoShortcutKb, "")})`}
+                    data-tooltip={`${t("menu_redo")} (${formatKeybindingList(redoShortcutKb, "")})`}
                     onClick={() => {
                         void dispatch(redoRemote());
                     }}

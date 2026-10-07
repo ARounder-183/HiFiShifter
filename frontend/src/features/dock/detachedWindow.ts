@@ -15,6 +15,7 @@
  */
 
 import type { GeometryRect, MainWindowFrame } from "./detachedGeometry";
+import { isPluginMode } from "../../services/hostCapabilities";
 
 /** 独立窗口的 label 前缀（与主窗口的 `main` 区分）。 */
 const DETACHED_LABEL_PREFIX = "hs-detached-";
@@ -60,6 +61,7 @@ export type DetachedWindowResult = { ok: true } | { ok: false; reason: string };
 async function loadWebviewWindowApi(): Promise<{
     WebviewWindow: typeof import("@tauri-apps/api/webviewWindow").WebviewWindow;
 } | null> {
+    if (isPluginMode()) return null;
     try {
         const mod = await import("@tauri-apps/api/webviewWindow");
         return { WebviewWindow: mod.WebviewWindow };
@@ -75,6 +77,7 @@ async function loadWebviewWindowApi(): Promise<{
  * 属于窗口模块 —— 拆成两个加载器比在一个里塞两件事清楚。
  */
 async function loadWindowApi(): Promise<typeof import("@tauri-apps/api/window") | null> {
+    if (isPluginMode()) return null;
     try {
         return await import("@tauri-apps/api/window");
     } catch {

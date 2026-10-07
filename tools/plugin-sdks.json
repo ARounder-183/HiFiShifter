@@ -1,0 +1,18 @@
+{
+  "ara": {
+    "repository": "https://github.com/Celemony/ARA_SDK.git",
+    "commit": "a2b1aac1d1d5c4eed387db85a9c0cdb7d460254c",
+    "tree": "305a0dc9ba4759963c1e974353a999c3810b2319",
+    "submodule": "ARA_API",
+    "submoduleCommit": "65ec5c43b943a48cb5446f448a0492db6af8534b",
+    "submoduleTree": "2e3b0455f61314068d34501c5f71407d6ed0051b"
+  },
+  "vst3": {
+    "repository": "https://github.com/steinbergmedia/vst3sdk.git",
+    "commit": "9fad9770f2ae8542ab1a548a68c1ad1ac690abe0",
+    "tree": "2b7fc6abf314f6a16e57cc8ef71529d74a4ecce9",
+    "submodule": "pluginterfaces",
+    "submoduleCommit": "31d6eeba6daaa3e2a8bfbe3e7a90ca0b7fbfbc1c",
+    "submoduleTree": "ebffbe4eb40bbf1f6fec030feeed30da47e6c719"
+  }
+}

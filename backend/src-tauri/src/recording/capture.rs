@@ -501,11 +501,9 @@ fn decode_input_data(data: &cpal::Data, channels_in: usize, channels_out: usize)
         Some(samples.iter().map(|s| s.to_float_sample() as f32).collect())
     } else if let Some(samples) = data.as_slice::<u64>() {
         Some(samples.iter().map(|s| s.to_float_sample() as f32).collect())
-    } else if let Some(samples) = data.as_slice::<f64>() {
-        Some(samples.iter().map(|s| s.to_float_sample() as f32).collect())
     } else {
-        // Unsupported sample format: stay silent to avoid feeding garbage.
-        None
+        data.as_slice::<f64>()
+            .map(|samples| samples.iter().map(|s| s.to_float_sample() as f32).collect())
     };
     decoded
         .map(|samples| convert_channels(&samples, channels_in, channels_out))
@@ -825,7 +823,7 @@ fn enumerate_cpal_loopback_devices() -> Vec<AudioDeviceInfo> {
 pub fn enumerate_applications() -> Vec<AppAudioInfo> {
     #[cfg(target_os = "windows")]
     {
-        return super::wasapi::enumerate_applications();
+        super::wasapi::enumerate_applications()
     }
     #[cfg(target_os = "linux")]
     {

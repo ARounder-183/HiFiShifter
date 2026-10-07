@@ -9,7 +9,11 @@
 import { describe, expect, test } from "vitest";
 
 import type { FolderMediaGroup } from "../../services/api/fileBrowser";
-import { buildFolderImportPlan, hasImportableMedia, needsRecursiveAdmissionProbe } from "./folderImportPlan";
+import {
+    buildFolderImportPlan,
+    hasImportableMedia,
+    needsRecursiveAdmissionProbe,
+} from "./folderImportPlan";
 import {
     DEFAULT_FOLDER_IMPORT_OPTIONS,
     FOLDER_IMPORT_MODES,
@@ -198,9 +202,9 @@ describe("buildFolderImportPlan：目录树", () => {
 describe("hasImportableMedia", () => {
     test("空扫描 / 只有空目录 → 没有可导入的媒体", () => {
         expect(hasImportableMedia(buildFolderImportPlan([]))).toBe(false);
-        expect(
-            hasImportableMedia(buildFolderImportPlan([group("C:\\music\\Empty", [])])),
-        ).toBe(false);
+        expect(hasImportableMedia(buildFolderImportPlan([group("C:\\music\\Empty", [])]))).toBe(
+            false,
+        );
     });
 
     test("目录里有文件 → 有可导入的媒体", () => {

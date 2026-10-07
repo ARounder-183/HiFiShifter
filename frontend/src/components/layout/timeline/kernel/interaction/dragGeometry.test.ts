@@ -3,10 +3,39 @@ import { describe, expect, it } from "vitest";
 import {
     isContentYBelowTracks,
     resolveDragDelta,
+    resolveDragDeltaSec,
     resolveFadeDrag,
     resolveTargetTrackIndex,
     resolveTrimEdge,
 } from "./dragGeometry";
+
+describe("resolveDragDeltaSec", () => {
+    it("★ 向左位移**不受** startSec ≥ 0 的钳制（Slip 依赖它）", () => {
+        // 缺陷形态：Slip 复用了 `resolveDragDelta` 的 `deltaSec`，而后者为了
+        // "clip 不能从负时间开始"把位移一起钳住了。于是 `startSec = 0` 的 clip
+        // 完全无法向左 slip、`startSec = 5` 的 clip 向左最多 5 秒 —— 现场表现即
+        // 「Slip 只能往一个方向拖」。
+        const args = { deltaContentXPx: -3000, pxPerSec: 150, startSec: 1 };
+        expect(resolveDragDeltaSec(args)).toBeCloseTo(-20, 6);
+        // 对照：位置换算仍然把位移钳到 -1（移动手势需要这个下界）。
+        expect(resolveDragDelta(args).deltaSec).toBeCloseTo(-1, 6);
+        // 未钳位移与 startSec 无关。
+        expect(resolveDragDeltaSec({ ...args, startSec: 0 })).toBeCloseTo(-20, 6);
+        expect(resolveDragDeltaSec({ ...args, startSec: 999 })).toBeCloseTo(-20, 6);
+    });
+
+    it("向右位移同样无上界", () => {
+        expect(
+            resolveDragDeltaSec({ deltaContentXPx: 100000, pxPerSec: 150, startSec: 0 }),
+        ).toBeCloseTo(100000 / 150, 6);
+    });
+
+    it("pxPerSec 非法时退化为 0（不产生 NaN / Infinity）", () => {
+        for (const pxPerSec of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(resolveDragDeltaSec({ deltaContentXPx: 300, pxPerSec, startSec: 0 })).toBe(0);
+        }
+    });
+});
 
 describe("resolveDragDelta", () => {
     it("按 pxPerSec 把水平位移换算为秒", () => {
@@ -27,6 +56,8 @@ describe("resolveDragDelta", () => {
         });
         expect(out.startSec).toBe(0);
         expect(out.deltaSec).toBe(-1);
+        // 未钳位移保留真实指针位移（Slip 用它，见 `resolveDragDeltaSec`）。
+        expect(out.rawDeltaSec).toBeCloseTo(-20, 6);
     });
 
     it("【回归】右移不受工程末端钳制（拖到工程末尾之外不再卡住）", () => {

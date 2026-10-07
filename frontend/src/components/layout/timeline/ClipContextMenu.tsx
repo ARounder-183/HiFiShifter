@@ -1,4 +1,7 @@
+// 片段菜单共用原GUI；插件只显示已接通的宿主操作，不能暴露独立App私有几何命令。
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { isPluginMode, canSplitHostClips, canClipboardHostClips, canEditHostClips } from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
@@ -6,9 +9,8 @@ import { AppSubMenu } from "../../../ui";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
-import { useAppDispatch, useAppSelector } from "../../../app/hooks";
-import { selectKeybinding, formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
-import type { ActionId } from "../../../features/keybindings/types";
+import { useAppDispatch } from "../../../app/hooks";
+import { useMenuShortcut } from "../../../ui/useMenuShortcut";
 import {
     addClipTakeFromMediaRemote,
     cycleClipTakesRemote,
@@ -32,6 +34,9 @@ import { webApi } from "../../../services/webviewApi";
 import { sharedFadeShape, sortAndFilterFadedClips } from "./clipFadeContext";
 
 // ── 单条菜单项 ──────────────────────────────────────────────────────────────
+// 壳与项的取值全部来自共享样式模型（`.hs-menu*`，见 src/index.css）——本文件只
+// 提供结构与内容。此前这里是一套独立的 class（`text-qt-sm`、`hover:bg-qt-button-hover`、
+// `opacity-40` 禁用态），与其它菜单各不相同。
 const MenuItem: React.FC<{
     label: string;
     shortcut?: string;
@@ -44,36 +49,21 @@ const MenuItem: React.FC<{
     <button
         role="menuitem"
         data-tooltip={title}
-        className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
-            ${
-                disabled
-                    ? "opacity-40 cursor-default"
-                    : danger
-                      ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
-                      : "hover:bg-qt-button-hover"
-            }`}
         disabled={disabled}
+        data-danger={danger ? "1" : undefined}
+        className="hs-menu__item"
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
             e.stopPropagation();
             onClick();
         }}
     >
-        <span>{label}</span>
-        {shortcut && <span className="text-qt-micro opacity-50 shrink-0">{shortcut}</span>}
+        <span className="hs-menu__label-text">{label}</span>
+        <span className="hs-menu__trail">{shortcut ? <span>{shortcut}</span> : null}</span>
     </button>
 );
 
-const Divider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
-
-/**
- * 读取动作当前生效的快捷键文本（跟随用户在快捷键设置中的自定义绑定）。
- * 未绑定（None binding）时返回 undefined，菜单项不显示快捷键。
- */
-function useMenuShortcut(actionId: ActionId): string | undefined {
-    const kb = useAppSelector((state) => selectKeybinding(state, actionId));
-    return formatKeybinding(kb, "") || undefined;
-}
+const Divider: React.FC = () => <div className="hs-menu__separator" role="separator" />;
 
 /**
  * Take 行菜单项：点击行切换 active take；行尾“倒放”小按钮翻转**该 Take
@@ -108,11 +98,12 @@ const TakeMenuItem: React.FC<{
     // 行内布局：标签 flex-1 + 尾随两个 shrink-0 按钮（flex 兄弟，绝不定
     // 位）—— 任何语言下按钮互不重叠、不挤压标签；标签超长时 truncate
     // 兜底（面板宽度已随内容展开，见 AppSubMenu 的 width:max-content）。
+    // 标签按钮自己就是一条菜单项（`.hs-menu__item`），因此悬停高亮只落在
+    // 标签上 —— 与迁移前一致：悬停尾随按钮不会连带高亮整行。
     <div className="flex items-center w-full gap-1 pr-1.5">
         <button
             role="menuitem"
-            className={`px-3 py-1.5 text-left flex-1 min-w-0 text-qt-sm transition-colors rounded
-                ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
+            className="hs-menu__item flex-1 min-w-0"
             disabled={disabled}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -120,7 +111,7 @@ const TakeMenuItem: React.FC<{
                 onSwitch();
             }}
         >
-            <span className="block truncate">{label}</span>
+            <span className="hs-menu__label-text">{label}</span>
         </button>
         {onCycleChannelMode != null && modeLabel != null && (
             <button
@@ -132,7 +123,7 @@ const TakeMenuItem: React.FC<{
                         (channelMode ?? 0) !== 0
                             ? "border-qt-highlight text-qt-highlight"
                             : "border-qt-border text-qt-text-muted opacity-70"
-                    } hover:bg-qt-button-hover`}
+                    } hover:bg-qt-menu-item-hover`}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                     e.stopPropagation();
@@ -151,7 +142,7 @@ const TakeMenuItem: React.FC<{
                     reversed
                         ? "border-qt-highlight text-qt-highlight"
                         : "border-qt-border text-qt-text-muted opacity-70"
-                } hover:bg-qt-button-hover`}
+                } hover:bg-qt-menu-item-hover`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
                 e.stopPropagation();
@@ -193,8 +184,8 @@ const FadeShapeRow: React.FC<{
     onSelect: (shape: number) => void;
     t: (key: MessageKey) => string;
 }> = ({ label, current, isOut = false, onSelect, t }) => (
-    <div className="px-3 py-1.5 flex items-center gap-1 flex-wrap">
-        <span className="text-qt-xs text-qt-text/60 mr-1 shrink-0">{label}</span>
+    <div className="hs-menu__body flex items-center gap-1 flex-wrap">
+        <span className="hs-type-caption mr-1 shrink-0">{label}</span>
         {FADE_SHAPE_OPTIONS.map((opt) => (
             <button
                 key={opt.key}
@@ -392,18 +383,55 @@ export const ClipContextMenu: React.FC<{
         return () => window.removeEventListener("keydown", onKey);
     }, [onClose]);
 
-    return (
+    if (isPluginMode()) return createPortal(
+        <div ref={menuRef} role="menu" data-hs-context-menu="1" data-hs-floating-menu="1"
+            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
+            <MenuItem label={isMulti ? t("ctx_delete_all") : t("ctx_delete")} shortcut={deleteShortcut} danger
+                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onDelete(ids); close(); }} />
+            <MenuItem label={allMuted ? (isMulti ? t("ctx_unmute_all") : t("clip_unmute")) : (isMulti ? t("ctx_mute_all") : t("clip_mute"))}
+                disabled={!canEditHostClips()} onClick={() => { if (canEditHostClips()) onMute(ids, !allMuted); close(); }} />
+            <Divider />
+            <MenuItem label={isMulti ? t("ctx_copy_all") : t("ctx_copy")} shortcut={copyShortcut}
+                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onCopy(ids); close(); }} />
+            <MenuItem label={isMulti ? t("ctx_cut_all") : t("ctx_cut")} shortcut={cutShortcut}
+                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onCut(ids); close(); }} />
+            <MenuItem label={t("ctx_split_at_playhead")} shortcut={splitShortcut}
+                disabled={!canSplitHostClips() || (isMulti ? !canSplitSelected : !playheadInClip)}
+                onClick={() => { onSplit(ids); close(); }} />
+            <MenuItem label={isMulti ? t("ctx_normalize_all") : t("ctx_normalize")} shortcut={normalizeShortcut}
+                onClick={() => { onNormalize(ids); close(); }} />
+            {onEditRate && <MenuItem label={t("ctx_edit_rate")} disabled={!canEditHostClips()}
+                onClick={() => { if (canEditHostClips()) onEditRate(clip.id, x, y); close(); }} />}
+            {onAddToParamSelection && <MenuItem label={t("ctx_add_to_param_selection")} shortcut={addToParamSelectionShortcut}
+                onClick={() => { onAddToParamSelection(ids); close(); }} />}
+            {onGroup && <MenuItem label={t("common_group")} disabled={!canEditHostClips()||isMulti===false}
+                onClick={() => { if (canEditHostClips()) onGroup(ids); close(); }} />}
+            {onUngroup && hasGroup && <MenuItem label={t("common_ungroup")} disabled={!canEditHostClips()}
+                onClick={() => { if (canEditHostClips()) onUngroup(ids); close(); }} />}
+        </div>
+        , document.body
+    );
+
+    // 菜单挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
+    // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
+    // 由组件自己 portal（而不是让调用方 portal）—— 表面归组件所有，这样
+    // "菜单表面必须挂到 body"这条不变量对每个菜单都成立、也能被门禁检查。
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
             data-hs-context-menu="1"
             data-hs-floating-menu="1"
-            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            // `--no-scroll`：本菜单里挂着 `AppSubMenu` 的子面板，而子面板是
+            // **绝对定位**的后代 —— 壳一旦 `overflow-y: auto` 就会把它裁掉
+            // （悬停「Take」展开的列表会被切成半截）。子面板自己会滚动。
+            className="hs-menu hs-menu--no-scroll"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >
             {isMulti && (
-                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
+                <div className="hs-menu__label">
                     {t("ctx_selected_n").replace("{n}", String(selectedClips.length))}
                 </div>
             )}
@@ -592,7 +620,10 @@ export const ClipContextMenu: React.FC<{
                             }}
                         />
                         {takeRenameDraft && (
-                            <div className="px-3 py-1.5" onPointerDown={(e) => e.stopPropagation()}>
+                            <div
+                                className="hs-menu__body"
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
                                 <input
                                     autoFocus
                                     role="menuitem"
@@ -975,7 +1006,7 @@ export const ClipContextMenu: React.FC<{
                         <>
                             <Divider />
                             {showHeader && (
-                                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
+                                <div className="hs-menu__label">
                                     {t("overlapping_clips_header").replace(
                                         "{n}",
                                         String(fadedClips.length),
@@ -985,7 +1016,7 @@ export const ClipContextMenu: React.FC<{
                             {fadedClips.map((fc) => (
                                 <React.Fragment key={fc.id}>
                                     {showHeader && (
-                                        <div className="px-3 pt-1 text-qt-micro text-qt-text/40 truncate">
+                                        <div className="hs-menu__label hs-menu__label-text">
                                             {fc.name || fc.id}
                                         </div>
                                     )}
@@ -1022,6 +1053,7 @@ export const ClipContextMenu: React.FC<{
                         </>
                     );
                 })()}
-        </div>
+        </div>,
+        document.body,
     );
 };

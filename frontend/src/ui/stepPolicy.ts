@@ -115,7 +115,27 @@ export type StepUnit =
      * 而这类设置最怕的正是"看到的数和存下的数不是一回事"。粗调 0.1 在 0..0.5 的
      * 死区上已经够细，精调 0.01 则能精确摆到出厂值附近。
      */
-    | "pressureFactor";
+    | "pressureFactor"
+    /**
+     * 以秒计量的**等待 / 停顿时长**（毫秒）。粗调 1000，精调 100。
+     *
+     * 【为什么不复用 `milliseconds`】那个是"毫秒"这个**符号**的通用档位（粗调
+     * 10ms），服务的是几十毫秒量级的参数（写入去抖、包络淡入淡出）。而"停手多久
+     * 之后另起一个撤销步"是**以秒计量**的：用户想设的典型值是 2s / 5s / 15s。
+     * 套用 10ms 的档位，从 0 滚到 2000 要滚 200 格 —— 等于没有滚轮。
+     * 一格 1 秒正好是用户心里的单位，100ms 的精调仍比手填快。
+     */
+    | "idleMilliseconds"
+    /**
+     * 图片尺寸（像素）。粗调 128，精调 8。
+     *
+     * 【为什么不复用 `pixels`】那个是**界面间距**量级（粗调 1px）：栅格间距、
+     * 最小间距这类值住在几十像素的范围内，一格 1px 是对的。图片长边上限则是
+     * 0–16384 的量级，常见档位 1280 / 2048 / 2560 —— 一格 1px 要从 1280 滚
+     * 768 格才到 2048。128 恰是这些档位之间的间隔（1280 → 1408），8 的精调
+     * 让落点仍是 8 的倍数。
+     */
+    | "imagePixels";
 
 export interface StepSpec {
     /** 无修饰键时的步长。 */
@@ -151,6 +171,9 @@ const STEPS: Record<StepUnit, StepSpec> = {
     vibratoHz: { coarse: 0.5, fine: 0.1, decimals: 2 },
     scaleDegree: { coarse: 0.5, fine: 0.1, decimals: 2 },
     pressureFactor: { coarse: 0.1, fine: 0.01, decimals: 3 },
+    // 以秒计量的等待时长与图片尺寸：各自一个量级，理由见 `StepUnit` 的对应条目。
+    idleMilliseconds: { coarse: 1000, fine: 100, decimals: 0 },
+    imagePixels: { coarse: 128, fine: 8, decimals: 0 },
 };
 
 export function stepFor(unit: StepUnit): StepSpec {

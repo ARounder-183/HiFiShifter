@@ -46,6 +46,29 @@ export function fileBrowserSearchOptions(input: FileBrowserSearchInput): SearchO
 }
 
 /**
+ * 组装一次 `search_files_recursive` 的完整参数。
+ *
+ * 【为什么必须共用】正则模式下后端不参与过滤：`query` 要传空串，由前端按正则筛
+ * `searchResults`（见面板的 `regexFilteredEntries`）。这条规则若在"输入时"与
+ * "写操作后刷新列表时"各写一遍，两者迟早分叉 —— 刷新会把正则原文发给后端，于是
+ * 刷新后的结果与输入时的不是同一批（用户看到列表"变了个样"）。
+ *
+ * @param input.query 用户输入的原文（本函数负责在正则模式下改写成空串）。
+ */
+export function fileBrowserSearchRequest(input: {
+    dirPath: string;
+    query: string;
+    regexEnabled: boolean;
+    options: SearchOptionsPayload;
+}): { dirPath: string; query: string; options: SearchOptionsPayload } {
+    return {
+        dirPath: input.dirPath,
+        query: input.regexEnabled ? "" : input.query,
+        options: input.options,
+    };
+}
+
+/**
  * 「仅显示媒体文件」在**目录列表**（非搜索）下的过滤。
  *
  * 【为什么搜索模式直接原样返回】搜索模式下目录是否出现已由后端的 `includeDirs`

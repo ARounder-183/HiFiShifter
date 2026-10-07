@@ -10,6 +10,7 @@ import type {
     ProcessAudioResult,
     RuntimeInfo,
     SynthesizeResult,
+    VslibStatusResult,
 } from "../../types/api";
 
 import { invoke } from "../invoke";
@@ -313,6 +314,8 @@ export const coreApi = {
 
     // ONNX status and diagnostics
     getOnnxStatus: () => invoke<OnnxStatusResult>("get_onnx_status"),
+    // vslib availability — drives whether the algorithm list offers vslib at all.
+    getVslibStatus: () => invoke<VslibStatusResult>("get_vslib_status"),
     getOnnxDiagnostic: () => invoke<OnnxDiagnosticResult>("get_onnx_diagnostic"),
     runVocoderBenchmark: () => invoke<BenchmarkResult>("run_vocoder_benchmark"),
     getGpuDevices: () => invoke<GpuEnumerationResult>("get_gpu_devices"),

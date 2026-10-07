@@ -54,6 +54,9 @@ import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
+import { createTickAxis } from "../../runtime/tickAxis";
+import { TICK_WINDOW_LAG_PX } from "../../runtime/tickWindow";
+import { shouldCommitViewport } from "../../runtime/viewportCommit";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -80,6 +83,7 @@ import { hitOverlapControl } from "../interaction/overlapControls";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { shouldNotifySharedViewport } from "../../runtime/sharedViewportNotify";
+import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
     CLIP_BODY_PADDING_Y,
@@ -183,6 +187,20 @@ export interface TimelineKernelData {
     readonly primaryTimeUnit: BuildTicksArgs["primaryUnit"];
     readonly secondaryTimeUnit: BuildTicksArgs["secondaryUnit"];
     readonly minLabelSpacingPx: number;
+    /**
+     * 用户配置的最小弱网格线像素间距。
+     *
+     * 必须与 DOM 标尺同源：它参与 `resolveGridLineSpacing` 的预算，内核漏传时
+     * GL 网格会按默认值 8 取步长，与标尺的档位分叉（网格线与标尺刻度错位）。
+     */
+    readonly minGridSpacingPx: number;
+    /**
+     * Swing 强度（0-100），作用于弱网格线的奇数格。
+     *
+     * 同上：内核漏传时 GL 网格不 swing，而标尺刻度按 swing 后的位置排布 ——
+     * 两者在 swing > 0 时整体错开最多半步。
+     */
+    readonly swingPercent: number;
     readonly tempoMap: BuildTicksArgs["tempoMap"];
     /**
      * 单条轨道高度（CSS px）。
@@ -475,8 +493,14 @@ export interface TimelineKernelHostArgs {
      *
      * 特殊说明：**它只负责 React 侧的对齐，不能承载"推给参数编辑器"这类逐帧
      * 同步**——256px 的死区会让对方滞后一跳一跳（见 `onScrollLeftFrame`）。
+     *
+     * 【为什么把 `pxPerSec` 一起给出】标尺的刻度窗口是 React 侧
+     * `(pxPerSec, scrollLeft)` 的函数，而屏幕位置由内核视口决定。若只提交位置，
+     * 任何"内核已换缩放、React 还不知道"的路径都会让窗口按**新缩放**换算**旧像素
+     * 位置**——锚点对应的时间错位，标尺某段既没有刻度线也没有文本。把缩放纳入同一
+     * 提交后，"内核换了缩放 ⇒ React 在同一帧收到成对视口"成为结构性保证。
      */
-    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    readonly onScrollLeftCommit?: (scrollLeftPx: number, pxPerSec: number) => void;
     /**
      * 水平滚动位置的**逐帧**通知（每个绘制帧一次，无死区）。
      *
@@ -506,6 +530,19 @@ export interface TimelineKernelHostArgs {
      */
     readonly onViewportWidthChange?: (widthPx: number) => void;
     /**
+     * 视口尺寸变化（宽或高，尺寸变化时一次）。
+     *
+     * 【为什么必须由内核统一发布，而不是各层各自量】内核 GL 画布、波形层、吸附
+     * 高亮层挂在同一个容器上。若各自用 `clientWidth` / `contentRect` /
+     * `getBoundingClientRect` 各量一次，同一个容器会得出不同的数（整数 vs 分数），
+     * 各层据此算出的物理尺寸可能相差一个设备像素，叠加后互相错位。此处量测一次并
+     * 广播，作为**唯一**来源。
+     *
+     * 与 `onViewportWidthChange` 并存：后者是标尺刻度窗口的既有契约（只关心宽度），
+     * 本回调面向需要完整尺寸的图层。
+     */
+    readonly onViewportSizeChange?: (widthPx: number, heightPx: number) => void;
+    /**
      * 交互回调：内核只做**命中与手势**，编辑语义（Redux action / 后端 thunk）
      * 一律交回 React 侧，避免 runtime 直接依赖 store。
      */
@@ -527,6 +564,10 @@ export interface KernelDragModifiers {
 }
 
 export interface TimelineKernelInteractions {
+    /** 插件由宿主拥有几何，内核仍显示原clip并允许选择和参数手势。 */
+    readonly geometryReadOnly?: boolean;
+    /** 宿主未委托渐变时只写宽度，不开放无法兑现的HFS形状/曲率编辑。 */
+    readonly fadeShapeReadOnly?: boolean;
     /**
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
      *
@@ -791,6 +832,16 @@ export interface TimelineKernelInteractions {
     readonly onDragPreview?: (args: {
         readonly clipId: string;
         readonly deltaSec: number;
+        /**
+         * **未钳制**的指针位移（秒，右为正）。
+         *
+         * 【为什么与 `deltaSec` 并存】`deltaSec` 是**位置**位移（下界 0：clip 不能
+         * 从负时间开始），移动手势用它。而 Slip 改的是 clip 内部的源窗口偏移，
+         * 其合法域是**任意符号、任意大小**（向左滑出媒体起点 = 前导静音）。用被钳的
+         * `deltaSec` 会让 Slip 单向卡死（`startSec = 0` 的 clip 完全无法向左滑）。
+         * 两个值都由内核一次算出，选哪个由面板按手势语义决定 —— 内核不解释修饰键。
+         */
+        readonly rawDeltaSec: number;
         readonly targetTrackId: string;
         /**
          * 修饰键快照。
@@ -1283,9 +1334,15 @@ const VERTICAL_ZOOM_SETTLE_TIMEOUT_MS = 250;
  * 水平滚动向 React 量化提交的步长（CSS px）。
  *
  * 与旧实现的 `REACT_SCROLL_STEP_PX` 取同一量级：步长越小，标尺越跟手，但 React
- * 重渲染越频繁；256px 在"标尺刻度不会明显滞后"与"滚动帧不进 React"之间取平衡。
+ * 重渲染越频繁。
+ *
+ * 【为什么不再就地写死 256】这个值同时是"刻度窗口必须吸收的滞后上界"：React 侧
+ * 的 scrollLeft 最多落后内核真值一个步长，而标尺里"有哪些刻度"是按 React 的位置
+ * 生成的。因此步长必须 ≤ 刻度窗口的缓冲（见 `tickWindow.tickWindowBufferPx`）。
+ * 两处各自写死 256 时这个约束没有任何地方表达 —— 单独调大任一处都会让标尺在滚动
+ * 或缩放后露出没有刻度的空白段。现在二者引用同一个常量，约束成为结构性的。
  */
-const SCROLL_COMMIT_STEP_PX = 256;
+const SCROLL_COMMIT_STEP_PX = TICK_WINDOW_LAG_PX;
 
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
@@ -1436,6 +1493,46 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
 }
 
 /**
+ * 「元素身份 + 值」双键去重的 DOM 写入器。
+ *
+ * 【为什么不能只按值去重】被同步的图层 / 滚动容器可能在宿主创建之后被 React
+ * 重建（面板停靠重排会搬动 DOM、标尺随视图出现）。若元素被重建而值未变，纯值
+ * 去重会判定「不必写」—— 新元素就停在静态位置（例如吸附高亮整层没有 transform、
+ * 轨道头容器 scrollTop 仍是 0），直到值下一次变化为止。键加入元素身份后，元素一换
+ * 就无条件写一次。与 `createPlayheadElementWriter` 同一契约，这里按值类型泛化。
+ *
+ * @param equals 值的相等判定（缺省 `Object.is`）。
+ * @returns `(slot, element, value, apply)`；element 为 null 时丢弃该槽位，
+ *          元素回来时无条件写一次。
+ */
+function createElementValueWriter<T>(
+    equals: (a: T, b: T) => boolean = Object.is,
+): (
+    slot: string,
+    element: HTMLElement | null,
+    value: T,
+    apply: (target: HTMLElement, value: T) => void,
+) => void {
+    const slots = new Map<string, { element: HTMLElement; value: T }>();
+    return (slot, element, value, apply) => {
+        if (element === null) {
+            slots.delete(slot);
+            return;
+        }
+        const previous = slots.get(slot);
+        if (
+            previous !== undefined &&
+            previous.element === element &&
+            equals(previous.value, value)
+        ) {
+            return;
+        }
+        slots.set(slot, { element, value });
+        apply(element, value);
+    };
+}
+
+/**
  * 创建内核宿主。
  *
  * 流程：
@@ -1467,6 +1564,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange,
         interactions,
     } = args;
 
@@ -1648,8 +1746,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     // 尺寸镜像：由 ResizeObserver 维护，供滚动内核与光栅化读取（O(1)，不触发布局）。
-    let viewportWidthPx = Math.max(1, container.clientWidth);
-    let viewportHeightPx = Math.max(1, container.clientHeight);
+    //
+    // 【唯一量测来源】一律用 `getBoundingClientRect()`（分数，信息量最大），与下方
+    // ResizeObserver 的 `contentRect` 同口径。旧实现此处用 `clientWidth`（整数）、
+    // 回调用 `contentRect`（分数），同一个容器量出两个数：GL 画布与波形层据此算出的
+    // 物理尺寸可能相差一个设备像素，叠加后互相错位。
+    let viewportWidthPx = Math.max(1, container.getBoundingClientRect().width);
+    let viewportHeightPx = Math.max(1, container.getBoundingClientRect().height);
 
     const scroll = createScrollKernel({
         // 初始缩放取 React 侧恢复的持久化值（旧实现从 localStorage 恢复，
@@ -1716,6 +1819,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtGrid = "";
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
+    // 刻度生成参数：变化必须触发场景重建，否则网格线会停留在旧档位
+    // （`minGridSpacingPx` 改预算、`swingPercent` 改线位置）。
+    let builtMinLabelSpacingPx = -1;
+    let builtMinGridSpacingPx = -1;
+    let builtSwingPercent = -1;
     let builtRowHeight = -1;
     /**
      * 诊断计数：**几何与视口不同源**的绘制帧数（`builtRowHeight !== view.rowHeight`）。
@@ -1836,6 +1944,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             builtGrid !== d.grid ||
             builtBpm !== d.bpm ||
             builtBeatsPerBar !== d.beatsPerBar ||
+            builtMinLabelSpacingPx !== d.minLabelSpacingPx ||
+            builtMinGridSpacingPx !== d.minGridSpacingPx ||
+            builtSwingPercent !== d.swingPercent ||
             builtSelectedClipId !== d.selectedClipId ||
             builtMultiSelectedRef !== d.multiSelectedClipIds
         );
@@ -1860,14 +1971,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         );
         const visibleTracks = d.tracks.slice(firstRow, Math.max(firstRow, lastRow));
 
+        // 取刻度用的轴：与 DOM 标尺（`useTimelineState` 的 `createTickAxis`）走
+        // **同一个入口**。此前这里直接用几何轴（`currentRenderAxis()`：未量化、
+        // 宽度不补量化步长），与标尺的 `viewportWidthPx` 不同 ⇒
+        // `resolveGridLineSpacing` 算出的预算不同 ⇒ 两者的 `stepBeats` 可能差一档，
+        // 表现为"网格线有、标尺数字没有"（或反之）。刻度位置本身与窗口无关
+        // （见 `buildTimelineTicks`），但**步长**依赖视口宽度，必须同源。
+        //
+        // 几何（clip / 波形 / 网格实例的窗口裁剪）仍用传入的 `axis` —— 那是每帧
+        // 绘制吸附后的原点，刻度轴只是"取刻度"用的投影。
+        const tickAxis = createTickAxis({
+            pxPerSec: view.pxPerSec,
+            scrollLeftPx: view.scrollLeft,
+            viewportWidthPx,
+            dpr: axis.dpr,
+        }).axis;
         const ticks: TimelineTick[] = buildTimelineTicks({
-            axis,
+            axis: tickAxis,
             bpm: d.bpm,
             beatsPerBar: d.beatsPerBar,
             grid: d.grid,
             primaryUnit: d.primaryTimeUnit,
             secondaryUnit: d.secondaryTimeUnit,
             minLabelSpacingPx: d.minLabelSpacingPx,
+            minGridSpacingPx: d.minGridSpacingPx,
+            swingPercent: d.swingPercent,
             tempoMap: d.tempoMap,
         });
 
@@ -1973,6 +2101,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         builtGrid = d.grid;
         builtBpm = d.bpm;
         builtBeatsPerBar = d.beatsPerBar;
+        builtMinLabelSpacingPx = d.minLabelSpacingPx;
+        builtMinGridSpacingPx = d.minGridSpacingPx;
+        builtSwingPercent = d.swingPercent;
         // 记**内核行高**而不是 React 镜像：判据（`shouldRebuildScene`）必须与几何
         // 构建所用行高同源，否则镜像滞后的那一帧会逃过重建（见该模块文件头）。
         builtRowHeight = view.rowHeight;
@@ -2156,10 +2287,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     // ── 外部 DOM 同步（标尺 / 轨道头 / 播放头）─────────────────────────
-    // 全部在 rAF 内命令式写入并做值去重：一次样式写入的成本与内容规模无关，
+    // 全部在 rAF 内命令式写入并做去重：一次样式写入的成本与内容规模无关，
     // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
+    // 去重键必须含**元素身份**——这些目标可能被 React 重建（面板停靠重排），
+    // 只用值会漏掉"新元素没收到过写入"（见 `createElementValueWriter`）。
     let lastRulerTranslateX = Number.NaN;
+    /** 上一次写入标尺平移的元素（身份变化时强制写一次）。 */
+    let lastRulerTranslateEl: HTMLElement | null = null;
     let lastTrackListScrollTop = Number.NaN;
+    /** 上一次写入 scrollTop 的轨道头容器（身份变化时强制写一次）。 */
+    let lastTrackListEl: HTMLElement | null = null;
     /**
      * 已提出、但 React 还没落地的竖直缩放请求（`null` = 没有待定请求）。
      *
@@ -2202,16 +2339,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * `createPlayheadElementWriter`。
      */
     const playheadWriter = createPlayheadElementWriter();
-    /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
-    let lastSnapTransform = "";
-    /** copy ghost 内容层的整层变换（去重方式同上）。 */
-    let lastGhostTransform = "";
-    /** 拖入预览内容层的整层变换（去重方式同上）。 */
-    let lastDropPreviewTransform = "";
-    /** 新建轨道幽灵行内容层的整层变换（去重方式同上）。 */
-    let lastNewTrackDropTransform = "";
+    /**
+     * 四个内容层（吸附高亮 / copy ghost / 拖入预览 / 新建轨道幽灵行）的整层变换
+     * 写入器。去重键 = 元素身份 + 变换字符串（同时含两轴，天然规避 NaN 初值问题）
+     * —— 只用字符串会漏掉"层被 React 重建而滚动值没变"，新层就停在静态位置。
+     */
+    const layerTransformWriter = createElementValueWriter<string>();
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
+    /**
+     * 上一次绘制使用的 dpr。
+     *
+     * 纯 dpr 变化（浏览器缩放 / 换显示器）不改变视口与几何，`viewChanged` 与
+     * `rebuilt` 都为假 —— 若只看这两者，GL 画布的 `resize` 会被整段跳过，
+     * backing store 停留在旧 dpr 上。把 dpr 纳入判据即可让下一帧重新光栅化。
+     */
+    let lastDrawnDpr = Number.NaN;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
     let lastDrawnPlayheadSec = Number.NaN;
     /** 上一次通知 React 的可见行窗口（去重：同窗口不重复回调）。 */
@@ -2219,6 +2362,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastVisibleRowCount = -1;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
+    let lastCommittedPxPerSec = Number.NaN;
     /** 上一次逐帧通知的水平滚动位置（NaN = 从未通知）；用于去重，避免空转。 */
     let lastFrameScrollLeft = Number.NaN;
     /**
@@ -2350,7 +2494,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // `draw()` 传入的 view 已经过 `snapRenderView`，这里用同一助手显式表达
             // 契约，避免以后有人把实参换成未吸附的值。
             const translateX = -rulerLayerTranslatePx(view.scrollLeft, readDpr());
-            if (shouldWrite(translateX, lastRulerTranslateX)) {
+            if (ruler !== lastRulerTranslateEl || shouldWrite(translateX, lastRulerTranslateX)) {
+                lastRulerTranslateEl = ruler;
                 lastRulerTranslateX = translateX;
                 ruler.style.transform = `translateX(${translateX}px)`;
             }
@@ -2362,9 +2507,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 旧行高，写入会被钳制并触发回声反灌。等 `settleVerticalZoom` 补写。
             if (verticalZoomInFlight == null) {
                 // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
-                if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+                // 元素身份参与去重：轨道头容器被 React 重建后 scrollTop 归零，
+                // 即使值没变也必须补写一次。
+                if (
+                    trackList !== lastTrackListEl ||
+                    shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)
+                ) {
                     trackList.scrollTop = view.scrollTop;
                     // 读回值作回声基准（与 `mirrorTrackListScrollTop` 同一约定）。
+                    lastTrackListEl = trackList;
                     lastTrackListScrollTop = trackList.scrollTop;
                 }
             }
@@ -2372,44 +2523,56 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         // 吸附高亮内容层：整层平移（内容坐标 → 视口坐标）。
         // 与细节层同一策略——层内元素全用内容坐标布局，滚动只写一次 transform。
-        // 用字符串去重（同时含两轴，天然规避 NaN 初值问题）。
+        // 去重键 = 元素身份 + 字符串（同时含两轴，天然规避 NaN 初值问题）。
         const snapContent = dom.snapHighlightContent;
         if (snapContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastSnapTransform) {
-                lastSnapTransform = transform;
-                snapContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "snap",
+                snapContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // copy ghost 内容层：与吸附高亮同一机制（内容坐标 + 整层平移）。
         const ghostContent = dom.ghostContent;
         if (ghostContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastGhostTransform) {
-                lastGhostTransform = transform;
-                ghostContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "ghost",
+                ghostContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 拖入预览内容层：同上。
         const dropPreviewContent = dom.dropPreviewContent;
         if (dropPreviewContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastDropPreviewTransform) {
-                lastDropPreviewTransform = transform;
-                dropPreviewContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "drop-preview",
+                dropPreviewContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 新建轨道幽灵行内容层：同上。
         const newTrackDropContent = dom.newTrackDropContent;
         if (newTrackDropContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastNewTrackDropTransform) {
-                lastNewTrackDropTransform = transform;
-                newTrackDropContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "new-track-drop",
+                newTrackDropContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 播放头：两条线**同为视口坐标**，且由同一个函数取左缘。
@@ -2476,11 +2639,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         const viewChanged = lastDrawnView !== view;
         lastDrawnView = view;
+        // dpr 参与 GL backing store 与网格吸附，变化时必须重新光栅化（见 lastDrawnDpr）。
+        const dpr = readDpr();
+        const dprChanged = dpr !== lastDrawnDpr;
+        lastDrawnDpr = dpr;
 
-        // GL 只在「视口变化」或「几何重建」时提交：播放头移动这类纯 DOM 更新
-        // 不需要重绘 canvas（播放中的每帧成本因此退化为几次样式写入）。
-        if (viewChanged || rebuilt) {
-            const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, readDpr());
+        // GL 只在「视口变化」「几何重建」或「dpr 变化」时提交：播放头移动这类纯
+        // DOM 更新不需要重绘 canvas（播放中的每帧成本因此退化为几次样式写入）。
+        if (viewChanged || rebuilt || dprChanged) {
+            const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, dpr);
             glCanvas!.clear();
             if (combinedCount > 0) {
                 if (sceneUploaded) {
@@ -2528,10 +2695,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         // 水平滚动量化提交：标尺的**刻度范围**由 React 按 scrollLeft 计算，
         // 只写内容层 transform 会让刻度停留在初始视口（滚动后刻度消失）。
+        //
+        // 【缩放变化也要提交】刻度窗口是 React 侧 `(pxPerSec, scrollLeft)` 的函数，
+        // 而屏幕位置由内核视口决定。若只提交位置，"内核已换缩放、React 还不知道"
+        // 的路径就会让窗口按新缩放换算旧像素位置（锚点对应的时间错位，标尺某段失去
+        // 刻度与文本）。把 pxPerSec 纳入同一判据后，任何改缩放的路径都会在同一帧把
+        // **成对**的视口交给 React —— 不变量由内核保证，不依赖各调用方自觉。
+        // 相对容差：pxPerSec 是比例量（与 scrollKernel 的 zoomEquals 同一口径）。
         if (onScrollLeftCommit !== undefined) {
-            if (shouldWrite(view.scrollLeft, lastCommittedScrollLeft, SCROLL_COMMIT_STEP_PX)) {
+            if (
+                shouldCommitViewport(
+                    { scrollLeftPx: view.scrollLeft, pxPerSec: view.pxPerSec },
+                    { scrollLeftPx: lastCommittedScrollLeft, pxPerSec: lastCommittedPxPerSec },
+                    SCROLL_COMMIT_STEP_PX,
+                )
+            ) {
                 lastCommittedScrollLeft = view.scrollLeft;
-                onScrollLeftCommit(view.scrollLeft);
+                lastCommittedPxPerSec = view.pxPerSec;
+                onScrollLeftCommit(view.scrollLeft, view.pxPerSec);
             }
         }
 
@@ -2581,12 +2762,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const trackList = sync?.trackListScroller?.() ?? null;
         if (trackList == null) return;
         const view = scroll.get();
-        if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+        if (
+            trackList !== lastTrackListEl ||
+            shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)
+        ) {
             trackList.scrollTop = view.scrollTop;
             // 记录**读回值**而非请求值：浏览器可能在内容高未及时更新时钳制写入
             // （轨道头 DOM 的内容高由 React 行渲染决定，未必与内核上限逐像素相等）。
             // 以读回值为回声基准，这次钳制就不会被误判成用户输入而把内核拽回 ——
             // 这是"防拽回"的最后一道防线（见 `timeline/scrollEcho`）。
+            // 元素身份同样参与去重：容器被重建后 scrollTop 归零，值没变也要补写。
+            lastTrackListEl = trackList;
             lastTrackListScrollTop = trackList.scrollTop;
         }
     }
@@ -3103,6 +3289,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               /** 最近一次派发的预览值（去重：同值不重复回调，避免空重建）。 */
               lastDeltaSec: number;
+              /**
+               * 最近一次派发的**未钳制**位移（见 `onDragPreview.rawDeltaSec`）。
+               *
+               * 【为什么去重必须同时看它】Slip 消费的是未钳制位移：clip 在
+               * `startSec = 0` 时向左拖，`deltaSec` 恒为 0 而 `rawDeltaSec` 持续变化。
+               * 只看 `deltaSec` 会把整段手势的预览全部去重掉 —— 现场表现就是
+               * "向左 slip 完全拖不动"。
+               */
+              lastRawDeltaSec: number;
               lastTargetTrackId: string;
           }
         | {
@@ -3334,6 +3529,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 反之亦然。
      */
     let lastClipHoverKey = "";
+
+    /**
+     * "签名已过期"哨兵：与任何真实键、以及空串都不相等。
+     *
+     * 【为什么不用空串】空串是"指针不在任何 clip 上"（`lastClipHoverKey`）/
+     * "无淡变浮标"（`lastFadeHoverKey`）的**合法**签名。手势结束后若把签名置空，
+     * 而指针恰好停在空白处（算出来的键也是空串），去重会认为"没变化"而不再回调
+     * —— 浮标清不掉。用一个不可能碰撞的哨兵，两种情形都能重发。
+     */
+    const HOVER_KEY_STALE = "\u0000stale";
 
     /**
      * 上一次 hover 命中的**指针签名**（坐标 + 按键 + 修饰键）。
@@ -3844,6 +4049,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
+        if (hit.kind === "clip" && interactions?.geometryReadOnly) {
+            const intercepted=interactions.onClipPointerDownIntercept?.({clipId:hit.clip.id,
+                clientX:event.clientX,clientY:event.clientY,pointerId:event.pointerId,
+                modifiers:dragModifiersOf(event),container});
+            if (!intercepted) interactions.onSelectClip?.(hit.clip.id,event.ctrlKey || event.metaKey,event.shiftKey,event.clientX);
+            return;
+        }
         if (hit.kind === "clip") {
             // 面板可在此整体接管（例如 `Alt + Shift` 竖直拖 = 调音高，复用旧实现的
             // 状态机）。返回 true 时内核不启动任何自己的手势。
@@ -3921,7 +4133,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         : hit.fadeIsLine === true
                           ? [{ clipId: hit.clip.id, isOut: hit.region === "fade-out-corner" }]
                           : null;
-                    if (sides !== null) {
+                    if (sides !== null && !interactions?.fadeShapeReadOnly) {
                         event.preventDefault();
                         interactions?.onResetFadeCurvature?.(sides);
                         return;
@@ -4128,7 +4340,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "none" || panPointerId !== null) {
             // 手势期间的移动不进悬停链；顺手清空指针签名，让手势结束后的第一次
             // 移动必然重算（手势已改变场景，旧签名对应的悬停结果是过期的）。
+            // 内容签名同理失效：手势期间发布的浮标是**拖动变体**（增益 / 吸附偏移 /
+            // 淡变带 `[增量]`），手势结束后必须重发一次悬停变体，否则增量会一直留在
+            // 气泡上。**两条通道都要失效**：淡变分支只在键变化时才发布，若不失效它
+            // 会先被"清淡变以外浮标"清空、又因键相同而不再重发 —— 表现为"松手后淡变
+            // ToolTip 直接消失"。用哨兵而不是空串 —— 理由见 `HOVER_KEY_STALE`。
             lastHoverPointerKey = "";
+            lastClipHoverKey = HOVER_KEY_STALE;
+            lastFadeHoverKey = HOVER_KEY_STALE;
             return;
         }
         const pointerKey = `${event.clientX},${event.clientY},${event.buttons},${event.altKey},${event.ctrlKey},${event.metaKey},${event.shiftKey}`;
@@ -4416,6 +4635,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 originTrackId: gesture.originTrackId,
                 lengthSec: gesture.lengthSec,
                 lastDeltaSec: 0,
+                lastRawDeltaSec: 0,
                 lastTargetTrackId: gesture.originTrackId,
             };
             applyDragPreview(event);
@@ -4815,18 +5035,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             updateVerticalLockOverlay();
         }
         const effectiveDeltaSec = trackLock.locked ? 0 : delta.deltaSec;
+        // 未钳制位移与 `effectiveDeltaSec` 同步受竖直换轨锁定（语义一致：锁定期间
+        // 水平方向"没有发生移动"）。Slip 消费它，见 `onDragPreview.rawDeltaSec`。
+        const effectiveRawDeltaSec = trackLock.locked ? 0 : delta.rawDeltaSec;
 
         if (
             effectiveDeltaSec === gesture.lastDeltaSec &&
+            effectiveRawDeltaSec === gesture.lastRawDeltaSec &&
             targetTrackId === gesture.lastTargetTrackId
         ) {
             return;
         }
         gesture.lastDeltaSec = effectiveDeltaSec;
+        gesture.lastRawDeltaSec = effectiveRawDeltaSec;
         gesture.lastTargetTrackId = targetTrackId;
         interactions?.onDragPreview?.({
             clipId: gesture.clipId,
             deltaSec: effectiveDeltaSec,
+            rawDeltaSec: effectiveRawDeltaSec,
             targetTrackId,
             modifiers: dragModifiersOf(event),
         });
@@ -4885,10 +5111,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 【为什么失焦必须走这里而不是取消路径】见 `onWindowBlur` 的说明：旧实现
      * `gestureFocusGuard` 的收尾与 pointerup **完全相同**（提交当前值），取消会把
      * 用户已完成的拖动回滚掉。pointerup 与 pointercancel 传入真实事件与各自的
-     * `cancelled`；失焦没有事件，传全 false 修饰键与零坐标（收尾不用坐标）。
+     * `cancelled`；失焦没有事件，传全 false 修饰键、零坐标，并置 `synthetic`
+     * （坐标是合成的，seek 类提交必须跳过）。
      *
      * @param event 抬起 / 取消的真实指针事件；失焦时为形状兼容的最小对象。
      * @param cancelled true = 回滚乐观值（pointercancel / Esc），false = 提交。
+     * @param synthetic true = 无真实指针事件（失焦 / 页面隐藏），坐标不可信。
      */
     function finalizeActiveGesture(
         event: {
@@ -4902,6 +5130,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         cancelled = false,
         /** 真实指针事件才有：失焦收尾没有，释放 pointer capture 时跳过。 */
         pointerId: number | null = null,
+        /**
+         * true = 失焦 / 页面隐藏等**无真实指针事件**的收尾（`event` 的坐标是合成
+         * 的 0，见 `onWindowBlur`）。此类收尾只能保留拖拽 / 修剪 / 淡变等"按下时
+         * 已定死语义、收尾不读坐标"的提交；**seek 类提交必须跳过** —— `secAt(0)`
+         * 会把播放头错误地拖到视口起点（或任意已滚动时间）。
+         */
+        synthetic = false,
     ): void {
         if (gesture.kind === "clip-drag") {
             interactions?.onDragCommit?.({
@@ -5038,9 +5273,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             //
             // 播放中这是**唯一**会写播放头的一拍（按下与拖拽都被面板按阶段挡掉），
             // 提交后引擎 seek 到该处且传输层保持播放 —— 即"延续播放状态"。
-            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`，坐标传 0），语义与旧实现
-            // 一致地按松手提交。
-            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), "release");
+            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`），但那时没有真实指针事件：
+            // 坐标是合成的 0（`synthetic`），跳过提交，否则 `secAt(0)` 会把播放头
+            // 拖到视口起点。只有真实 pointerup 才按松手位置提交。
+            if (!cancelled && !synthetic) {
+                interactions?.onSeek?.(secAt(event.clientX), "release");
+            }
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.headerControl !== null) {
@@ -5114,7 +5352,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 单击 = 同时把播放头带到该控件对应的位置（旧实现每个交互层都这么做）。
                 // 循环点击（`cycleHeld`）与 SnapOffset 手柄不进这个分支——它们的单击
                 // 不是"移动播放头"的语义。
-                const seekSec = resolveClickSeekSec(gesture, event);
+                // 失焦 / 页面隐藏收尾（`synthetic`）没有真实坐标：跳过 seek，否则
+                // `secAt(0)` 会把播放头拖到视口起点；选中 / Take 语义照常。
+                const seekSec = synthetic ? null : resolveClickSeekSec(gesture, event);
                 if (seekSec !== null) {
                     interactions?.onSeekTo?.(seekSec);
                 }
@@ -5392,7 +5632,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         return result;
     }
 
-    /** 指针离开轨道区：清掉自定义光标，交回默认值。 */
+    /** 指针离开轨道区：清掉自定义光标与所有悬停态。 */
     function onPointerLeave(): void {
         if (gesture.kind === "none" && panPointerId === null) container.style.cursor = "";
         // 指针离开轨道区：淡变浮标必须收起，否则它会因为没有后续 move 事件而
@@ -5400,6 +5640,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (lastFadeHoverKey !== "") {
             lastFadeHoverKey = "";
             interactions?.onFadeHover?.(null, 0, 0);
+        }
+        // **clip 悬停通道同理**：离开容器后不再有 pointermove，而悬停提示环与浮标
+        // 内容都只在"命中身份变化"时才更新 —— 不在这里收尾，环会一直亮在画面上
+        //（用户报告的那类"高亮没清掉"）。清掉去重键还能让**再次进入**同一个 clip
+        // 时重新发布一次，读数不会停在离开前的旧值上（淡变通道已是这个口径）。
+        if (lastClipHoverKey !== "") {
+            lastClipHoverKey = "";
+            interactions?.onClipHover?.(null);
+        }
+        if (hoveredClipId !== null) {
+            hoveredClipId = null;
+            sceneDirty = true;
+            loop.invalidate();
         }
     }
 
@@ -5695,18 +5948,30 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 后续所有远程快照被交互锁挡掉（旧 `gestureFocusGuard` 文件头记录的同一问题）。
      *
      * 失焦没有 PointerEvent 可读：提交路径只在 copy/slip 等按下时定死语义、
-     * 收尾不读修饰键，传全 false 即可；clientX/Y 只被 seek 分支使用，而失焦
-     * 时挂起的手势不可能是 seek（见下方过滤）。
+     * 收尾不读修饰键，传全 false 即可；clientX/Y 只被 seek 分支使用，但失焦时
+     * 挂起的手势**可能**正是 seek / pending-select（按下空白或 clip 后 Alt+Tab、
+     * 最小化）—— 合成坐标 0 不能当作用户意图，因此传 `synthetic = true` 让
+     * `finalizeActiveGesture` 跳过 seek 提交（见该参数说明）。
      */
     function onWindowBlur(): void {
-        finalizeActiveGesture({
-            clientX: 0,
-            clientY: 0,
-            ctrlKey: false,
-            shiftKey: false,
-            altKey: false,
-            metaKey: false,
-        });
+        // 中键平移也必须收尾：window 失焦后 pointerup 不会派发到本窗口，
+        // 悬挂的 panPointerId 会在重新聚焦后让"悬停移动"继续平移（没有按键
+        // 却在滚动），grabbing 光标 / 禁选中也会一直挂着 —— 与其他手势统一
+        // 走失焦收尾（endPan 自身有空值守卫，无平移时是空操作）。
+        endPan();
+        finalizeActiveGesture(
+            {
+                clientX: 0,
+                clientY: 0,
+                ctrlKey: false,
+                shiftKey: false,
+                altKey: false,
+                metaKey: false,
+            },
+            false,
+            null,
+            true,
+        );
     }
 
     /** 页面切到后台（切换标签 / 最小化）按失焦处理。 */
@@ -5754,29 +6019,47 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // ── 尺寸与 DPR 变化 ──────────────────────────────────────────────
     const resizeObserver = new ResizeObserver((entries) => {
         let widthChanged = false;
+        let sizeChanged = false;
         for (const entry of entries) {
             const nextWidth = Math.max(1, entry.contentRect.width);
-            if (nextWidth !== viewportWidthPx) widthChanged = true;
+            const nextHeight = Math.max(1, entry.contentRect.height);
+            if (nextWidth !== viewportWidthPx) {
+                widthChanged = true;
+                sizeChanged = true;
+            }
+            if (nextHeight !== viewportHeightPx) sizeChanged = true;
             viewportWidthPx = nextWidth;
-            viewportHeightPx = Math.max(1, entry.contentRect.height);
+            viewportHeightPx = nextHeight;
         }
         // 宽度变化会改变标尺的刻度窗口（React 侧按它算 ticks）。
         if (widthChanged) onViewportWidthChange?.(viewportWidthPx);
+        // 完整尺寸广播给各图层（波形 / 吸附高亮等），保证它们与 GL 层同尺寸。
+        if (sizeChanged) onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
         // 外部边界变化后必须重新钳制（见 ScrollKernel 的约束 1）。
         scroll.reclamp();
         sceneDirty = true;
         loop.invalidate();
     });
     resizeObserver.observe(container);
-    // 初始宽度回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的
-    // 刻度窗口（否则首屏标尺只画得出前一段）。
+    // 初始回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的刻度
+    // 窗口（否则首屏标尺只画得出前一段），各图层也需要首帧的尺寸。
     onViewportWidthChange?.(viewportWidthPx);
+    onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
 
     function onWindowResize(): void {
         sceneDirty = true;
         loop.invalidate();
     }
     window.addEventListener("resize", onWindowResize);
+
+    // DPR 变化（浏览器缩放 / 换显示器 / 改系统缩放）必须重绘并重新光栅化。
+    // `ResizeObserver` **不会**为此触发（它观察 CSS 布局盒，纯 dpr 变化不改 CSS
+    // 尺寸），而 GL 画布的物理尺寸、字形图集与网格吸附全部依赖 dpr。没有这条订阅，
+    // 换屏后画面会停留在旧 dpr 的 backing store 上直到下一次交互。
+    const unsubscribeDpr = subscribeDevicePixelRatio(() => {
+        sceneDirty = true;
+        loop.invalidate();
+    });
 
     // 首次标脏（尺寸与数据就绪后绘制第一帧）。
     loop.invalidate();
@@ -5998,6 +6281,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             window.removeEventListener("pointerup", endPan);
             window.removeEventListener("pointercancel", endPan);
             window.removeEventListener("resize", onWindowResize);
+            unsubscribeDpr();
             // 平移中途卸载：光标 / 选择态是写在 body 上的全局状态，必须复原。
             endPan();
             detailCanvas.remove();

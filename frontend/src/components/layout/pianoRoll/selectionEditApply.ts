@@ -174,18 +174,28 @@ export async function applySelectionEditWithEdgeSmoothing(
  * 「每段独立」是已确认语义：平均化取各段自己的均值、平滑化取各段自己的
  * 高斯上下文与边界、量化取各段自己的基准，段间统计量不混合。
  *
+ * 回调额外收到**当前段**：部分编辑（移调度数 / 量化 / 均值量化）要按本段起始帧
+ * 解析时间相关的基准（如 Tempo Map 音阶）。若只给值数组，回调只能拿到首段起点，
+ * 第二段起会用错时刻的音阶（音高吸附到错误音级）。
+ *
  * @returns 是否至少有一段实际写回（全段取数失败时为 false）。
  */
 export async function applySelectionEditOverRanges(
-    args: Omit<ApplySelectionEditArgs, "startFrame" | "frameCount" | "checkpoint"> & {
+    args: Omit<
+        ApplySelectionEditArgs,
+        "startFrame" | "frameCount" | "checkpoint" | "editSelection"
+    > & {
         ranges: readonly FrameRange[];
+        /** 选区内编辑：(当前选区值, 当前段) => 新选区值。 */
+        editSelection: (currentSelectionVals: number[], range: FrameRange) => number[];
     },
 ): Promise<boolean> {
-    const { ranges, ...rest } = args;
+    const { ranges, editSelection, ...rest } = args;
     let wrote = false;
     for (const range of ranges) {
         const ok = await applySelectionEditWithEdgeSmoothing({
             ...rest,
+            editSelection: (vals) => editSelection(vals, range),
             startFrame: range.startFrame,
             frameCount: range.frameCount,
             // 首段写入前打撤销点；此前若某段取数失败（未写回），撤销点顺延到

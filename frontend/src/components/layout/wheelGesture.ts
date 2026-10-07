@@ -68,7 +68,10 @@ function isLikelyTouchpadWheelGesture(input: {
     const absX = Math.abs(input.deltaX);
     const absY = Math.abs(input.deltaY);
 
-    if (absX > WHEEL_AXIS_EPSILON) {
+    // 横向分支与纵向分支同口径：倾斜滚轮（tilt wheel）发出的离散
+    // deltaX（±100/±120）是鼠标而非触摸板，不能因"存在横向分量"就判为触摸板，
+    // 否则 `getVibratoDragWheelTarget` 会走触摸板分支、忽略修饰键而误调速率。
+    if (absX > WHEEL_AXIS_EPSILON && !isLikelyDiscreteWheelStep(absX)) {
         return true;
     }
 

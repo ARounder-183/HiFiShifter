@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React from "react";
-import { registerDragAbort } from "../gestureFocusGuard";
+import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
 import { VOWEL_GUIDE_LINES, VOWEL_POINTS } from "./vowelChartLayout";
 import { formantChartPointerDownShouldPreventDefault } from "./clipFormantInteractionGuards";
 
@@ -115,10 +115,16 @@ export const VowelChart: React.FC<{
         };
         const onEnd = () => {
             draggingRef.current = false;
-            unregisterAbort();
         };
         // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
         // 复位拖拽布尔（否则切回后任何鼠标移动都会持续改写共振峰）。
+        //
+        // 【不要在这里 unregisterAbort】onEnd 同时挂在 window 的
+        // pointerup/pointercancel 上（窗口中任意一次松手都会触发），若在
+        // onEnd 里注销，则"打开浮窗的那次点击"就会把失焦守卫摘掉且此后
+        // 不再重注册（effect 依赖不变），后续拖拽被 blur 打断时
+        // draggingRef 会滞留为 true。守卫保留到 effect 清理即可（onEnd
+        // 幂等，重复调用无害）。
         const unregisterAbort = registerDragAbort(onEnd);
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerup", onEnd, true);

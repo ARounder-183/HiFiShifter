@@ -1,3 +1,4 @@
+//! 独立App的内存播放快照构建；测试夹具使用系统私有临时目录，保持跨平台。
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
@@ -10,7 +11,7 @@ use super::io::{decode_resampled_stereo, get_resampled_stereo_cached, is_audio_p
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
 use super::util::{quantize_i64, quantize_u32};
 
-pub(crate) fn compute_track_gains<'a>(tracks: &'a [Track]) -> HashMap<&'a str, (f32, bool, bool)> {
+pub(crate) fn compute_track_gains(tracks: &[Track]) -> HashMap<&str, (f32, bool, bool)> {
     let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
     let any_solo = tracks.iter().any(|t| t.solo);
 
@@ -304,7 +305,7 @@ pub(crate) fn build_snapshot(
             Some(v) => {
                 // ★ 运行时缓存有效性校验：对比 clip 记录的文件 mtime 与磁盘当前 mtime。
                 // 若不一致说明文件已被外部替换，缓存的解码数据已过时，需同步重新解码。
-                let cache_valid = clip.source_file_mtime.map_or(true, |expected_mtime| {
+                let cache_valid = clip.source_file_mtime.is_none_or(|expected_mtime| {
                     std::fs::metadata(path)
                         .ok()
                         .and_then(|m| m.modified().ok())
@@ -658,7 +659,7 @@ pub(crate) fn build_snapshot(
             dyn_orig_curve,
             dyn_curve_frame_period_ms,
         ) = processor_params
-            .and_then(|(_, _, frame_period_ms, _, entry, _, _)| {
+            .map(|(_, _, frame_period_ms, _, entry, _, _)| {
                 // 所有算法一律在 mix 阶段应用共通音量/声像/动态：合成输出里不含它们，
                 // 因此这里不存在任何「按算法跳过」的分支。
                 let volume_curve = crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
@@ -689,7 +690,7 @@ pub(crate) fn build_snapshot(
                         }
                         None => (None, None),
                     };
-                Some((
+                (
                     volume_curve,
                     frame_period_ms,
                     pan_curve,
@@ -697,7 +698,7 @@ pub(crate) fn build_snapshot(
                     dyn_curve,
                     dyn_orig_curve,
                     frame_period_ms,
-                ))
+                )
             })
             .unwrap_or((None, 5.0, None, 5.0, None, None, 5.0));
 
@@ -777,9 +778,7 @@ pub(crate) fn build_snapshot(
                                 // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
                                 compose_enabled: root_track_id
                                     .as_ref()
-                                    .and_then(|root| {
-                                        timeline.tracks.iter().find(|t| &t.id == root)
-                                    })
+                                    .and_then(|root| timeline.tracks.iter().find(|t| &t.id == root))
                                     .map(|t| t.compose_enabled)
                                     .unwrap_or(false),
                                 scale_signature: scale_signature.as_str(),
@@ -840,13 +839,11 @@ pub(crate) fn build_snapshot(
                         // （原地等待 + 自动恢复），绝不让用户先听到上一版参数的
                         // 结果再中途切换。抑制条目在本 clip 当前渲染命中时移除
                         //（见下方 else 分支），因此只覆盖"武装时未就绪"的窗口。
-                        let pad_suppressed =
-                            crate::synth_clip_cache::is_pad_suppressed(&clip.id);
+                        let pad_suppressed = crate::synth_clip_cache::is_pad_suppressed(&clip.id);
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
                         if !pad_suppressed {
-                            let needs_breath = processor_params.map_or(
-                                false,
+                            let needs_breath = processor_params.is_some_and(
                                 |(_, _, _, renderer_id, entry, _, _)| {
                                     renderer_id == "nsf_hifigan_onnx"
                                         && crate::pitch_editing::extra_param_enabled(
@@ -860,11 +857,13 @@ pub(crate) fn build_snapshot(
                             // `get_latest_rendered_pcm` 返回的就是按当前张力渲染的
                             // 结果（或上一版，供过渡使用）。
                             if fallback_pcm.is_none() {
-                                if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
-                                    &clip.id,
-                                    clip.active_take_id.as_deref(),
-                                    Some(length_frames),
-                                ) {
+                                if let Some((p, b)) =
+                                    crate::synth_clip_cache::get_latest_rendered_pcm(
+                                        &clip.id,
+                                        clip.active_take_id.as_deref(),
+                                        Some(length_frames),
+                                    )
+                                {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;
                                 }
@@ -957,10 +956,11 @@ pub(crate) fn build_snapshot(
             reversed: if clip.loop_enabled {
                 clip.reversed
             } else {
-                formant_params
-                    .is_some()
-                    .then_some(false)
-                    .unwrap_or(clip.reversed)
+                if formant_params.is_some() {
+                    false
+                } else {
+                    clip.reversed
+                }
             },
             playback_rate: playback_rate_render,
             local_src_offset_frames,
@@ -1027,310 +1027,6 @@ pub(crate) fn build_snapshot(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::build_snapshot;
-    use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
-    use crate::audio_engine::resource_manager::DecodeCache;
-    use crate::audio_engine::types::{ResampledStereo, StretchKey};
-    use crate::state::Clip;
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
-
-    #[test]
-    fn make_stretch_key_distinguishes_algorithm() {
-        let path = std::path::Path::new("demo.wav");
-        let linear = super::make_stretch_key(
-            path,
-            48_000,
-            crate::time_stretch::UserStretchAlgorithm::Linear,
-            0.0,
-            1.0,
-            0.75,
-        );
-        let soundtouch = super::make_stretch_key(
-            path,
-            48_000,
-            crate::time_stretch::UserStretchAlgorithm::Soundtouch,
-            0.0,
-            1.0,
-            0.75,
-        );
-        assert_ne!(linear, soundtouch);
-    }
-
-    fn timeline_with_volume_curve() -> crate::state::TimelineState {
-        let mut tl = crate::state::TimelineState::default();
-        let root = tl.tracks[0].id.clone();
-        tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
-        tl.clips.push(Clip {
-            takes: vec![],
-            active_take_id: None,
-            clip_playback_rate: 1.0,
-            id: "clip-volume".to_string(),
-            track_id: root.clone(),
-            name: "volume clip".to_string(),
-            start_sec: 0.0,
-            length_sec: 0.5,
-            color: "#ffffff".to_string(),
-            source_path: Some("/tmp/hifishifter-volume-test.aiff".to_string()),
-            source_path_relative: None,
-            duration_sec: Some(0.5),
-            duration_frames: Some(22_050),
-            source_sample_rate: Some(44_100),
-            source_file_mtime: None,
-            source_file_size: None,
-            source_file_fingerprint: None,
-            waveform_preview: None,
-            pitch_range: None,
-            gain: 1.0,
-            muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 0.5,
-            playback_rate: 1.0,
-            reversed: false,
-            channel_mode: 0,
-            source_channels: None,
-            loop_enabled: false,
-            snap_offset_sec: 0.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
-            fade_in_curve: "sine".to_string(),
-            fade_out_curve: "sine".to_string(),
-            fade_in_shape: 0.0,
-            fade_out_shape: 0.0,
-            fade_in_dir: 0.0,
-            fade_out_dir: 0.0,
-            auto_fade_in_sec: 0.0,
-            auto_fade_out_sec: 0.0,
-            extra_curves: None,
-            extra_params: None,
-            formant_morph: None,
-            group_id: None,
-            midi_fill_gaps: false,
-            midi_note_data: None,
-        });
-        let params = tl.params_by_root_track.entry(root).or_default();
-        params
-            .extra_curves
-            .insert("volume".to_string(), vec![0.25f32; 10]);
-        tl
-    }
-
-    #[test]
-    fn build_snapshot_attaches_volume_curve_to_rendered_and_raw_clips() {
-        let tl = timeline_with_volume_curve();
-        let out_rate = 44_100;
-        let path = PathBuf::from("/tmp/hifishifter-volume-test.aiff");
-        let source_path = path.clone();
-        std::fs::write(&source_path, b"stub").expect("create source stub");
-
-        // 预填充解码缓存，绕过磁盘 I/O；build_snapshot 只读缓存。
-        // 缓冲至少覆盖 1s；测试 clip 只消费 0.5s。
-        let pcm = vec![0.5f32; 44_100 * 2];
-        let decoded = ResampledStereo {
-            sample_rate: out_rate,
-            frames: pcm.len() / 2,
-            pcm: Arc::new(pcm),
-        };
-        let cache: Arc<Mutex<DecodeCache>> =
-            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
-        cache
-            .lock()
-            .unwrap()
-            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
-        let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
-            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
-
-        let snap = build_snapshot(&tl, out_rate, &cache, &stretch_cache);
-        std::fs::remove_file(&source_path).ok();
-        assert_eq!(snap.clips.len(), 1);
-        let engine_clip = &snap.clips[0];
-
-        let volume = engine_clip
-            .volume_curve
-            .as_ref()
-            .expect("volume curve must be attached");
-        assert_eq!(volume.as_slice(), &[0.25f32; 10]);
-        let fp = engine_clip.volume_curve_frame_period_ms;
-        assert!(fp > 0.0 && fp.is_finite(), "invalid frame period {fp}");
-        // volume 是混音级参数：即使 clip 不需要合成，也必须实时生效。
-        assert!(
-            !engine_clip.needs_synthesis,
-            "plain clip should use source PCM"
-        );
-        assert!(
-            engine_clip.breath_curve.is_none(),
-            "breath should not hijack plain clip volume"
-        );
-    }
-
-    // ── 起播等待期垫音抑制（pad suppression）回归测试 ─────────────────────────
-
-    /// 涉及全局渲染缓存 / pending keys / 垫音抑制集合的用例必须串行执行，
-    /// 并在结尾清理全局状态，避免并行用例互相污染。
-    static PAD_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    /// 与 timeline_with_volume_curve 相同的骨架，但轨道开启 Compose 且
-    /// pitch_edit 曲线非零 + user_modified：clip 因此需要处理器渲染，
-    /// 快照会查询整 Clip 渲染缓存（垫音 / 冻结判定的作用域）。
-    fn timeline_with_pending_render_clip() -> crate::state::TimelineState {
-        let mut tl = timeline_with_volume_curve();
-        {
-            let clip = &mut tl.clips[0];
-            clip.id = "clip-pad".to_string();
-            clip.name = "pad clip".to_string();
-            clip.source_path = Some("/tmp/hifishifter-pad-test.aiff".to_string());
-        }
-        let root = tl.resolve_root_track_id(&tl.clips[0].track_id).expect("root");
-        tl.tracks
-            .iter_mut()
-            .find(|t| t.id == root)
-            .expect("root track exists")
-            .compose_enabled = true;
-        let params = tl.params_by_root_track.get_mut(&root).unwrap();
-        params.pitch_edit = vec![72.0f32; 10];
-        params.pitch_edit_user_modified = true;
-        tl
-    }
-
-    /// 预填充解码缓存（绕过磁盘 I/O），与 volume 测试同型。
-    fn pad_test_caches(
-        path: &PathBuf,
-    ) -> (
-        Arc<Mutex<DecodeCache>>,
-        Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
-    ) {
-        let out_rate = 44_100;
-        let pcm = vec![0.5f32; 44_100 * 2];
-        let decoded = ResampledStereo {
-            sample_rate: out_rate,
-            frames: pcm.len() / 2,
-            pcm: Arc::new(pcm),
-        };
-        let cache: Arc<Mutex<DecodeCache>> = Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
-        cache
-            .lock()
-            .unwrap()
-            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
-        let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
-            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
-        (cache, stretch_cache)
-    }
-
-    /// 向全局渲染缓存插入一条指定 hash 的整 clip 渲染（0.5s @44.1k 立体声，
-    /// 样本值 = `level`，用于区分"旧渲染垫音"与"当前参数渲染"）。
-    fn insert_rendered_entry(clip_id: &str, param_hash: u64, level: f32) {
-        let entry = crate::synth_clip_cache::RenderedClipCacheEntry {
-            pcm_stereo: Arc::new(vec![level; 22_050 * 2]),
-            breath_noise_stereo: None,
-            frames: 22_050,
-            sample_rate: 44_100,
-            rendered_take_id: None,
-        };
-        crate::synth_clip_cache::global_rendered_clip_cache().lock().unwrap().insert(
-            crate::synth_clip_cache::RenderedClipCacheKey {
-                clip_id: clip_id.to_string(),
-                param_hash,
-            },
-            entry,
-        );
-    }
-
-    #[test]
-    fn build_snapshot_pads_from_previous_render_for_mid_playback_miss() {
-        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::synth_clip_cache::clear_pad_suppressed_clips();
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
-        std::fs::write(&path, b"stub").expect("create source stub");
-        let (cache, stretch_cache) = pad_test_caches(&path);
-
-        // 旧渲染条目（与当前参数不同的 hash）：播放中段的参数 miss 应垫音，
-        // 保证"边播边编"零中断（当前 miss 时旧渲染正是正在播放的内容）。
-        insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
-
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
-        std::fs::remove_file(&path).ok();
-        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
-        crate::synth_clip_cache::clear_pad_suppressed_clips();
-
-        assert_eq!(snap.clips.len(), 1);
-        let engine_clip = &snap.clips[0];
-        assert!(engine_clip.needs_synthesis, "clip needs processor render");
-        let rendered = engine_clip
-            .rendered_pcm
-            .as_ref()
-            .expect("mid-playback miss must pad from the previous render");
-        assert_eq!(rendered[0], 0.25, "pad content is the PREVIOUS render");
-    }
-
-    #[test]
-    fn build_snapshot_suppresses_pad_at_transport_arm() {
-        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 起播等待期：clip 由 play_original 登记进抑制集合 —— 当前参数渲染
-        // 未就绪时不得回退旧渲染垫音，必须诚实冻结（原地等待 + 自动恢复），
-        // 绝不让用户先听到上一版参数的结果再中途切换。
-        crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
-        std::fs::write(&path, b"stub").expect("create source stub");
-        let (cache, stretch_cache) = pad_test_caches(&path);
-
-        // 旧渲染条目存在 —— 若无抑制，快照会拿它垫音（见上一个用例）。
-        insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
-
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
-        std::fs::remove_file(&path).ok();
-        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
-        crate::synth_clip_cache::clear_pad_suppressed_clips();
-
-        assert_eq!(snap.clips.len(), 1);
-        let engine_clip = &snap.clips[0];
-        assert!(engine_clip.needs_synthesis);
-        assert!(
-            engine_clip.rendered_pcm.is_none(),
-            "arm-time pending clip must freeze, not play the stale render"
-        );
-    }
-
-    #[test]
-    fn build_snapshot_releases_pad_suppression_when_current_render_hits() {
-        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
-        std::fs::write(&path, b"stub").expect("create source stub");
-        let (cache, stretch_cache) = pad_test_caches(&path);
-
-        // 渲染线程完成当前参数渲染：经 pending key 传递（改法 C+D 路径）。
-        let current_key = crate::synth_clip_cache::RenderedClipCacheKey {
-            clip_id: "clip-pad".to_string(),
-            param_hash: 0x0F0F_0F0F_0F0F_0F0F,
-        };
-        crate::synth_clip_cache::register_pending_rendered_key("clip-pad", current_key);
-        insert_rendered_entry("clip-pad", 0x0F0F_0F0F_0F0F_0F0F, 0.75);
-
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
-        std::fs::remove_file(&path).ok();
-        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
-        crate::synth_clip_cache::clear_pad_suppressed_clips();
-
-        assert_eq!(snap.clips.len(), 1);
-        let engine_clip = &snap.clips[0];
-        let rendered = engine_clip
-            .rendered_pcm
-            .as_ref()
-            .expect("current render must be used once it lands");
-        assert_eq!(rendered[0], 0.75, "content is the CURRENT render");
-        assert!(
-            !crate::synth_clip_cache::is_pad_suppressed("clip-pad"),
-            "current render landed: pad suppression must be released so later \
-             mid-playback edits pad normally"
-        );
-    }
-}
-
 pub(crate) fn build_snapshot_for_file(
     path: &Path,
     out_rate: u32,
@@ -1387,5 +1083,319 @@ pub(crate) fn build_snapshot_for_file(
             dyn_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_snapshot;
+    use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
+    use crate::audio_engine::resource_manager::DecodeCache;
+    use crate::audio_engine::types::{ResampledStereo, StretchKey};
+    use crate::state::Clip;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn make_stretch_key_distinguishes_algorithm() {
+        let path = std::path::Path::new("demo.wav");
+        let linear = super::make_stretch_key(
+            path,
+            48_000,
+            crate::time_stretch::UserStretchAlgorithm::Linear,
+            0.0,
+            1.0,
+            0.75,
+        );
+        let soundtouch = super::make_stretch_key(
+            path,
+            48_000,
+            crate::time_stretch::UserStretchAlgorithm::Soundtouch,
+            0.0,
+            1.0,
+            0.75,
+        );
+        assert_ne!(linear, soundtouch);
+    }
+
+    /// 临时source只作缓存存在性夹具；每次唯一，不假定Unix /tmp或修改系统公共目录。
+    fn snapshot_test_source() -> PathBuf {
+        std::env::temp_dir().join(format!("hifishifter-snapshot-{}.aiff", uuid::Uuid::new_v4()))
+    }
+    /// 使用真实临时source路径构造音量曲线夹具，与解码cache保持同一身份。
+    fn timeline_with_volume_curve(source: &Path) -> crate::state::TimelineState {
+        let mut tl = crate::state::TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+        tl.clips.push(Clip {
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
+            id: "clip-volume".to_string(),
+            track_id: root.clone(),
+            name: "volume clip".to_string(),
+            start_sec: 0.0,
+            length_sec: 0.5,
+            color: "#ffffff".to_string(),
+            source_path: Some(source.to_string_lossy().into_owned()),
+            source_path_relative: None,
+            duration_sec: Some(0.5),
+            duration_frames: Some(22_050),
+            source_sample_rate: Some(44_100),
+            source_file_mtime: None,
+            source_file_size: None,
+            source_file_fingerprint: None,
+            waveform_preview: None,
+            pitch_range: None,
+            gain: 1.0,
+            muted: false,
+            source_start_sec: 0.0,
+            source_end_sec: 0.5,
+            playback_rate: 1.0,
+            reversed: false,
+            channel_mode: 0,
+            source_channels: None,
+            loop_enabled: false,
+            snap_offset_sec: 0.0,
+            fade_in_sec: 0.0,
+            fade_out_sec: 0.0,
+            fade_in_curve: "sine".to_string(),
+            fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
+            extra_curves: None,
+            extra_params: None,
+            formant_morph: None,
+            group_id: None,
+            midi_fill_gaps: false,
+            midi_note_data: None,
+        });
+        let params = tl.params_by_root_track.entry(root).or_default();
+        params
+            .extra_curves
+            .insert("volume".to_string(), vec![0.25f32; 10]);
+        tl
+    }
+
+    #[test]
+    fn build_snapshot_attaches_volume_curve_to_rendered_and_raw_clips() {
+        let path = snapshot_test_source();
+        let tl = timeline_with_volume_curve(&path);
+        let out_rate = 44_100;
+        let source_path = path.clone();
+        std::fs::write(&source_path, b"stub").expect("create source stub");
+
+        // 预填充解码缓存，绕过磁盘 I/O；build_snapshot 只读缓存。
+        // 缓冲至少覆盖 1s；测试 clip 只消费 0.5s。
+        let pcm = vec![0.5f32; 44_100 * 2];
+        let decoded = ResampledStereo {
+            sample_rate: out_rate,
+            frames: pcm.len() / 2,
+            pcm: Arc::new(pcm),
+        };
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        cache
+            .lock()
+            .unwrap()
+            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
+        let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+
+        let snap = build_snapshot(&tl, out_rate, &cache, &stretch_cache);
+        std::fs::remove_file(&source_path).ok();
+        assert_eq!(snap.clips.len(), 1);
+        let engine_clip = &snap.clips[0];
+
+        let volume = engine_clip
+            .volume_curve
+            .as_ref()
+            .expect("volume curve must be attached");
+        assert_eq!(volume.as_slice(), &[0.25f32; 10]);
+        let fp = engine_clip.volume_curve_frame_period_ms;
+        assert!(fp > 0.0 && fp.is_finite(), "invalid frame period {fp}");
+        // volume 是混音级参数：即使 clip 不需要合成，也必须实时生效。
+        assert!(
+            !engine_clip.needs_synthesis,
+            "plain clip should use source PCM"
+        );
+        assert!(
+            engine_clip.breath_curve.is_none(),
+            "breath should not hijack plain clip volume"
+        );
+    }
+
+    // ── 起播等待期垫音抑制（pad suppression）回归测试 ─────────────────────────
+
+    /// 涉及全局渲染缓存 / pending keys / 垫音抑制集合的用例必须串行执行，
+    /// 并在结尾清理全局状态，避免并行用例互相污染。
+    static PAD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 与 timeline_with_volume_curve 相同的骨架，但轨道开启 Compose 且
+    /// pitch_edit 曲线非零 + user_modified：clip 因此需要处理器渲染，
+    /// 快照会查询整 Clip 渲染缓存（垫音 / 冻结判定的作用域）。
+    fn timeline_with_pending_render_clip(source: &Path) -> crate::state::TimelineState {
+        let mut tl = timeline_with_volume_curve(source);
+        {
+            let clip = &mut tl.clips[0];
+            clip.id = "clip-pad".to_string();
+            clip.name = "pad clip".to_string();
+        }
+        let root = tl
+            .resolve_root_track_id(&tl.clips[0].track_id)
+            .expect("root");
+        tl.tracks
+            .iter_mut()
+            .find(|t| t.id == root)
+            .expect("root track exists")
+            .compose_enabled = true;
+        let params = tl.params_by_root_track.get_mut(&root).unwrap();
+        params.pitch_edit = vec![72.0f32; 10];
+        params.pitch_edit_user_modified = true;
+        tl
+    }
+
+    /// 预填充解码缓存（绕过磁盘 I/O），与 volume 测试同型。
+    fn pad_test_caches(
+        path: &PathBuf,
+    ) -> (
+        Arc<Mutex<DecodeCache>>,
+        Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
+    ) {
+        let out_rate = 44_100;
+        let pcm = vec![0.5f32; 44_100 * 2];
+        let decoded = ResampledStereo {
+            sample_rate: out_rate,
+            frames: pcm.len() / 2,
+            pcm: Arc::new(pcm),
+        };
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        cache
+            .lock()
+            .unwrap()
+            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
+        let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        (cache, stretch_cache)
+    }
+
+    /// 向全局渲染缓存插入一条指定 hash 的整 clip 渲染（0.5s @44.1k 立体声，
+    /// 样本值 = `level`，用于区分"旧渲染垫音"与"当前参数渲染"）。
+    fn insert_rendered_entry(clip_id: &str, param_hash: u64, level: f32) {
+        let entry = crate::synth_clip_cache::RenderedClipCacheEntry {
+            pcm_stereo: Arc::new(vec![level; 22_050 * 2]),
+            breath_noise_stereo: None,
+            frames: 22_050,
+            sample_rate: 44_100,
+            rendered_take_id: None,
+        };
+        crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .unwrap()
+            .insert(
+                crate::synth_clip_cache::RenderedClipCacheKey {
+                    clip_id: clip_id.to_string(),
+                    param_hash,
+                },
+                entry,
+            );
+    }
+
+    #[test]
+    fn build_snapshot_pads_from_previous_render_for_mid_playback_miss() {
+        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
+        std::fs::write(&path, b"stub").expect("create source stub");
+        let (cache, stretch_cache) = pad_test_caches(&path);
+
+        // 旧渲染条目（与当前参数不同的 hash）：播放中段的参数 miss 应垫音，
+        // 保证"边播边编"零中断（当前 miss 时旧渲染正是正在播放的内容）。
+        insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
+
+        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        std::fs::remove_file(&path).ok();
+        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+
+        assert_eq!(snap.clips.len(), 1);
+        let engine_clip = &snap.clips[0];
+        assert!(engine_clip.needs_synthesis, "clip needs processor render");
+        let rendered = engine_clip
+            .rendered_pcm
+            .as_ref()
+            .expect("mid-playback miss must pad from the previous render");
+        assert_eq!(rendered[0], 0.25, "pad content is the PREVIOUS render");
+    }
+
+    #[test]
+    fn build_snapshot_suppresses_pad_at_transport_arm() {
+        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 起播等待期：clip 由 play_original 登记进抑制集合 —— 当前参数渲染
+        // 未就绪时不得回退旧渲染垫音，必须诚实冻结（原地等待 + 自动恢复），
+        // 绝不让用户先听到上一版参数的结果再中途切换。
+        crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
+        std::fs::write(&path, b"stub").expect("create source stub");
+        let (cache, stretch_cache) = pad_test_caches(&path);
+
+        // 旧渲染条目存在 —— 若无抑制，快照会拿它垫音（见上一个用例）。
+        insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
+
+        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        std::fs::remove_file(&path).ok();
+        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+
+        assert_eq!(snap.clips.len(), 1);
+        let engine_clip = &snap.clips[0];
+        assert!(engine_clip.needs_synthesis);
+        assert!(
+            engine_clip.rendered_pcm.is_none(),
+            "arm-time pending clip must freeze, not play the stale render"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_releases_pad_suppression_when_current_render_hits() {
+        let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
+        std::fs::write(&path, b"stub").expect("create source stub");
+        let (cache, stretch_cache) = pad_test_caches(&path);
+
+        // 渲染线程完成当前参数渲染：经 pending key 传递（改法 C+D 路径）。
+        let current_key = crate::synth_clip_cache::RenderedClipCacheKey {
+            clip_id: "clip-pad".to_string(),
+            param_hash: 0x0F0F_0F0F_0F0F_0F0F,
+        };
+        crate::synth_clip_cache::register_pending_rendered_key("clip-pad", current_key);
+        insert_rendered_entry("clip-pad", 0x0F0F_0F0F_0F0F_0F0F, 0.75);
+
+        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        std::fs::remove_file(&path).ok();
+        crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+
+        assert_eq!(snap.clips.len(), 1);
+        let engine_clip = &snap.clips[0];
+        let rendered = engine_clip
+            .rendered_pcm
+            .as_ref()
+            .expect("current render must be used once it lands");
+        assert_eq!(rendered[0], 0.75, "content is the CURRENT render");
+        assert!(
+            !crate::synth_clip_cache::is_pad_suppressed("clip-pad"),
+            "current render landed: pad suppression must be released so later \
+             mid-playback edits pad normally"
+        );
     }
 }

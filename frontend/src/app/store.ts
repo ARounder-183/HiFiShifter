@@ -81,7 +81,7 @@ export function createAppStore() {
                         "fileBrowser.entries",
                         "fileBrowser.searchResults",
                     ],
-                    ignoredActions: ["session/setTimelineState", BRIDGE_SNAPSHOT_ACTION],
+                    ignoredActions: [BRIDGE_SNAPSHOT_ACTION],
                 },
                 // 同一组路径也要豁免不可变性检查：它同样是 dev 下的**每 action 深走**。
                 immutableCheck: {

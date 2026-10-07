@@ -588,9 +588,7 @@ impl Block {
             return None;
         }
         let after = &trimmed[1..]; // skip '<'
-        let end = after
-            .find(|c: char| c == ' ' || c == '\t')
-            .unwrap_or(after.len());
+        let end = after.find([' ', '\t']).unwrap_or(after.len());
         Some(after[..end].to_uppercase())
     }
 }
@@ -712,9 +710,7 @@ fn split_lines(data: &[u8]) -> Vec<String> {
 // ─── Token 解析辅助 ───
 
 fn split_tokens(line: &str) -> Vec<&str> {
-    line.split(|c: char| c == ' ' || c == '\t')
-        .filter(|s| !s.is_empty())
-        .collect()
+    line.split([' ', '\t']).filter(|s| !s.is_empty()).collect()
 }
 
 fn parse_double(s: &str) -> f64 {
@@ -950,7 +946,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
         }
         if tokens[0].to_uppercase() == "TEMPO" && tokens.len() >= 4 {
             data.tempo = Some(ReaperTempo {
-                bpm: parse_double(&tokens[1]),
+                bpm: parse_double(tokens[1]),
                 beats_per_bar: tokens[2].parse::<u32>().unwrap_or(4),
                 beat_note: tokens[3].parse::<u32>().unwrap_or(4),
             });
@@ -1065,7 +1061,7 @@ fn parse_track_block(block: &Block) -> ReaperTrack {
             "NAME" => track.name = parse_path_string(&tokens),
             "VOLPAN" => track.vol_pan = parse_double_array(&tokens),
             "MUTESOLO" => track.mute_solo = parse_int_array(&tokens),
-            "IPHASE" if tokens.len() >= 2 => track.iphase = parse_double(&tokens[1]) != 0.0,
+            "IPHASE" if tokens.len() >= 2 => track.iphase = parse_double(tokens[1]) != 0.0,
             "ISBUS" => track.isbus = parse_int_array(&tokens),
             _ => {}
         }
@@ -1102,28 +1098,28 @@ fn parse_item_block(block: &Block) -> ReaperItem {
         let key = tokens[0].to_uppercase();
         match key.as_str() {
             "POSITION" if tokens.len() >= 2 => {
-                item.position = parse_double(&tokens[1]);
+                item.position = parse_double(tokens[1]);
                 // 双时基（原生 `POSITION <sec> <qn>`）：第二值为 QN。
                 if tokens.len() >= 3 {
-                    item.position_qn = Some(parse_double(&tokens[2]));
+                    item.position_qn = Some(parse_double(tokens[2]));
                 }
             }
-            "SNAPOFFS" if tokens.len() >= 2 => item.snap_offs = parse_double(&tokens[1]),
+            "SNAPOFFS" if tokens.len() >= 2 => item.snap_offs = parse_double(tokens[1]),
             "LENGTH" if tokens.len() >= 2 => {
-                item.length = parse_double(&tokens[1]);
+                item.length = parse_double(tokens[1]);
                 if tokens.len() >= 3 {
-                    item.length_qn = Some(parse_double(&tokens[2]));
+                    item.length_qn = Some(parse_double(tokens[2]));
                 }
             }
             "LOOP" if tokens.len() >= 2 => {
-                item.is_loop = parse_bool(&tokens[1]);
+                item.is_loop = parse_bool(tokens[1]);
                 item.has_loop_token = true;
             }
-            "ALLTAKES" if tokens.len() >= 2 => item.all_takes = parse_bool(&tokens[1]),
+            "ALLTAKES" if tokens.len() >= 2 => item.all_takes = parse_bool(tokens[1]),
             "FADEIN" => item.fade_in = parse_fade_array(&tokens),
             "FADEOUT" => item.fade_out = parse_fade_array(&tokens),
             "MUTE" => item.mute = parse_int_array(&tokens),
-            "SEL" if tokens.len() >= 2 => item.selected = parse_bool(&tokens[1]),
+            "SEL" if tokens.len() >= 2 => item.selected = parse_bool(tokens[1]),
             "SM" => {
                 raw_markers.extend(parse_stretch_markers(&tokens));
             }
@@ -1150,7 +1146,7 @@ fn parse_item_block(block: &Block) -> ReaperItem {
                 }
             }
             "SOFFS" if tokens.len() >= 2 => {
-                let v = parse_double(&tokens[1]);
+                let v = parse_double(tokens[1]);
                 if let Some(take) = current_take_mut(&mut item, current_take_is_default) {
                     take.s_offs = v;
                 }
@@ -1162,13 +1158,13 @@ fn parse_item_block(block: &Block) -> ReaperItem {
                 }
             }
             "CHANMODE" if tokens.len() >= 2 => {
-                let v = parse_int(&tokens[1]);
+                let v = parse_int(tokens[1]);
                 if let Some(take) = current_take_mut(&mut item, current_take_is_default) {
                     take.chan_mode = v;
                 }
             }
             "GROUP" if tokens.len() >= 2 => {
-                let gid = parse_int(&tokens[1]);
+                let gid = parse_int(tokens[1]);
                 if gid > 0 {
                     item.group_id = Some(gid);
                 }
@@ -1225,7 +1221,7 @@ fn parse_item_block(block: &Block) -> ReaperItem {
     item
 }
 
-fn current_take_mut<'a>(item: &'a mut ReaperItem, is_default: bool) -> Option<&'a mut ReaperTake> {
+fn current_take_mut(item: &mut ReaperItem, is_default: bool) -> Option<&mut ReaperTake> {
     if is_default {
         Some(&mut item.default_take)
     } else {
@@ -1421,12 +1417,12 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
         if tokens[0].to_uppercase() != "PT" || tokens.len() < 4 {
             continue;
         }
-        let position_sec = parse_double(&tokens[1]).max(0.0);
-        let bpm = parse_double(&tokens[2]);
-        let shape = parse_int(&tokens[3]);
+        let position_sec = parse_double(tokens[1]).max(0.0);
+        let bpm = parse_double(tokens[2]);
+        let shape = parse_int(tokens[3]);
         // 拍号打包在第 4 个值（slowcurv）中；无第 4 个值时继承前一点的拍号。
         let (numerator, denominator) = if tokens.len() >= 5 {
-            match parse_tempo_env_time_signature(parse_double(&tokens[4])) {
+            match parse_tempo_env_time_signature(parse_double(tokens[4])) {
                 Some(ts) => (Some(ts.0), Some(ts.1)),
                 None => (None, None),
             }

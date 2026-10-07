@@ -12,10 +12,12 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
 import type { TempoMap } from "../../../utils/tempoMap";
@@ -23,10 +25,10 @@ import { parsePlaybackRateInput } from "./runtime/timelineCanvasStyle";
 import { formatEditNumber } from "./math";
 import {
     formatDurationUnit,
-    formatFadeLengthTooltip,
     parseDurationInput,
     type FadeLengthFormatContext,
 } from "./timeFormat";
+import { formatDurationText } from "./timeValueText";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 const FALLBACK_BEATS_PER_BAR = 4;
@@ -89,7 +91,7 @@ function ClipRateEditorFields({
     onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onClose: () => void;
 }) {
-    const { tf } = useI18n();
+    const { tf, tVars } = useI18n();
     const menuRef = useRef<HTMLDivElement | null>(null);
     useMenuKeyboard(menuRef);
     // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
@@ -229,13 +231,48 @@ function ClipRateEditorFields({
         };
     }, [onClose]);
 
-    return (
+    // 滚轮步进必须挂非被动原生监听：React root 上的 wheel 是 passive 的，
+    // 合成事件里的 preventDefault() 是空操作，调值会同时滚动祖先容器
+    // （与 FadeContextMenu 的曲率滑块同因同解）。
+    const attachRateWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setRateEdited(true);
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
+        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
+        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachOldBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(oldBpmText) ?? currentBpm;
+        updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachNewBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(newBpmText) ?? currentBpm;
+        updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+
+    // 挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
+    // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-qt-menu w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            // `--form`：这是表单型菜单（一列带标签的输入框），只有壳的内边距与
+            // 条目型菜单不同；`--no-scroll`：内容紧凑、不滚动，避免壳的滚动容器
+            // 被内部绝对定位的 Radix 隐藏元素撑出一条滚不动的滚动条。
+            // 宽度是**表单宽度**（248px），不是菜单最小宽度 —— 后者统一取令牌。
+            className="hs-menu hs-menu--form hs-menu--no-scroll w-[248px] flex flex-col gap-2"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
@@ -271,15 +308,7 @@ function ClipRateEditorFields({
                             onClose();
                         }
                     }}
-                    onWheel={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setRateEdited(true);
-                        const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
-                        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
-                        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                    }}
+                    ref={attachRateWheel}
                 />
             </label>
 
@@ -300,14 +329,7 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(oldBpmText) ?? currentBpm;
-                            updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachOldBpmWheel}
                     />
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
@@ -326,23 +348,17 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(newBpmText) ?? currentBpm;
-                            updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachNewBpmWheel}
                     />
                 </label>
             </div>
 
             <label className="flex flex-col gap-1">
                 <span className="text-qt-micro text-qt-text/60">
-                    {tf("clip_rate_editor_duration")}
-                    {": "}
-                    {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
+                    {tVars("common_label_value", {
+                        label: tf("clip_rate_editor_duration"),
+                        value: formatDurationText(Number(clip.lengthSec) || 0, formatCtx),
+                    })}
                 </span>
                 <input
                     className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
@@ -386,7 +402,7 @@ function ClipRateEditorFields({
                     }}
                 />
                 <span className="text-qt-micro text-qt-text/60 tabular-nums">
-                    {formatFadeLengthTooltip(previewSec, formatCtx)}
+                    {formatDurationText(previewSec, formatCtx)}
                 </span>
             </label>
 
@@ -400,15 +416,23 @@ function ClipRateEditorFields({
             </AppForm>
 
             <div className="text-qt-micro text-qt-text/60">
-                {tf("clip_rate_editor_result")}
-                {": "}
-                {formatFadeLengthTooltip(previewSec, formatCtx)}
-                {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
+                {(() => {
+                    const base = tVars("common_label_value", {
+                        label: tf("clip_rate_editor_result"),
+                        value: formatDurationText(previewSec, formatCtx),
+                    });
+                    return !autoLength && !durationChanged
+                        ? tVars("common_parenthetical", {
+                              value: base,
+                              note: tf("clip_rate_editor_keep_length"),
+                          })
+                        : base;
+                })()}
             </div>
 
             {targetCount > 1 ? (
                 <div className="text-qt-micro text-qt-text/60">
-                    {tf("clip_rate_editor_multi").replace("{count}", String(targetCount))}
+                    {tVars("clip_rate_editor_multi", { count: targetCount })}
                 </div>
             ) : null}
 
@@ -429,7 +453,8 @@ function ClipRateEditorFields({
                     {tf("clip_rate_editor_apply")}
                 </button>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }
 

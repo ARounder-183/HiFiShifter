@@ -39,10 +39,7 @@ export const SEPARATION_PARAM_ID = "breath_enabled";
  *
  * 必须与后端 `pitch_editing::HIFIGAN_SEPARATION_GATED_CURVES` 保持一致。
  */
-export const SEPARATION_GATED_PARAMS: readonly string[] = [
-    "breath_gain",
-    "hifigan_tension",
-];
+export const SEPARATION_GATED_PARAMS: readonly string[] = ["breath_gain", "hifigan_tension"];
 
 /**
  * 开关状态是否为"开"。
@@ -54,10 +51,7 @@ export const SEPARATION_GATED_PARAMS: readonly string[] = [
  * @param rawValue 开关的原始值；`undefined` 表示尚未加载，按描述符默认值处理
  * @param defaultValue 描述符声明的默认值（当前为 0 = 关）
  */
-export function isSeparationEnabled(
-    rawValue: number | undefined,
-    defaultValue: number,
-): boolean {
+export function isSeparationEnabled(rawValue: number | undefined, defaultValue: number): boolean {
     return (rawValue ?? defaultValue) >= 0.5;
 }
 
@@ -67,10 +61,7 @@ export function isSeparationEnabled(
  * @param paramId 参数 id
  * @param separationEnabled 分离开关是否为开
  */
-export function isGatedBySeparation(
-    paramId: string,
-    separationEnabled: boolean,
-): boolean {
+export function isGatedBySeparation(paramId: string, separationEnabled: boolean): boolean {
     return !separationEnabled && SEPARATION_GATED_PARAMS.includes(paramId);
 }
 
@@ -115,9 +106,7 @@ export function paramNeedingVisibilityOnGate(
     separationEnabled: boolean,
     fallback: string,
 ): string | null {
-    return findBlockedEditParam(editParam, separationEnabled, fallback) === null
-        ? null
-        : editParam;
+    return findBlockedEditParam(editParam, separationEnabled, fallback) === null ? null : editParam;
 }
 
 /**
@@ -155,7 +144,43 @@ export function isEffectParamGated(
     composeEnabled: boolean,
 ): boolean {
     return (
-        isGatedBySeparation(paramId, separationEnabled) ||
-        isGatedByCompose(paramId, composeEnabled)
+        isGatedBySeparation(paramId, separationEnabled) || isGatedByCompose(paramId, composeEnabled)
     );
+}
+
+/**
+ * 被分离门禁的参数组中**排在最左**的参数 id —— 分离开关应渲染在它之前。
+ *
+ * # 为什么需要它
+ * 开关是「气声 + 张力」两个参数**共同**的前提，因此在工具栏上应位于这一组的
+ * **组首（左端）**：既不是挂在某一个参数上（会让人误以为只属于气声），
+ * 也不是插到最右端的算法下拉之前 —— 后者会让切换算法（开关随描述符消失/出现）
+ * 把音量 / 声像 / 算法整段推移，破坏「音量 → 声像 → 算法」的右侧固定序列。
+ *
+ * 位置由**门禁列表 + 当前排序**推导，而非写死某个 id：将来新增一个排序更靠前的
+ * 被门禁参数时，开关会自动前移，不会留在原处与新组首脱节。
+ *
+ * @param orderedParamIds 已按工具栏顺序排好的参数 id（`orderedProcessorParams`）
+ * @returns 组首参数 id；该组为空时返回 `null`
+ */
+export function firstGatedParamId(orderedParamIds: readonly string[]): string | null {
+    for (const id of orderedParamIds) {
+        if (SEPARATION_GATED_PARAMS.includes(id)) return id;
+    }
+    return null;
+}
+
+/**
+ * 被门禁参数**逐个让位**时的隐藏顺序（先隐藏的排在前）。
+ *
+ * # 为什么是工具栏顺序的逆序
+ * 气声药丸左侧挂着分离开关，而开关**不能**隐藏（它是重新开启的唯一入口）。
+ * 若先隐藏气声，开关会独自悬空、看不出它管着什么；先隐藏它右侧的张力，
+ * 再隐藏气声，观感才是"这一组从右往左收拢"。
+ *
+ * @param orderedParamIds 已按工具栏顺序排好的参数 id（`orderedProcessorParams`）
+ * @returns 隐藏顺序下的被门禁参数 id；无可门禁参数时为空数组
+ */
+export function gatedParamHideOrder(orderedParamIds: readonly string[]): string[] {
+    return orderedParamIds.filter((id) => SEPARATION_GATED_PARAMS.includes(id)).reverse();
 }

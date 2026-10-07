@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compareFileNames } from "./fileNameCompare";
+import { compareFileNames, createFileNameComparator } from "./fileNameCompare";
 
 /** 把一组名字按本比较器排序（不修改入参）。 */
 function sorted(names: string[]): string[] {
@@ -43,7 +43,20 @@ describe("compareFileNames：与资源管理器对齐的规则", () => {
     it("CJK 之间按语系（拼音）顺序，不是码点顺序", () => {
         // 甲(jiǎ) 在 乙(yǐ) 之前，而码点顺序是 乙(U+4E59) < 甲(U+7532) —— 两者相反，
         // 因此这条能区分"走语系排序器"与"按码点排"。
-        expect(compareFileNames("甲.wav", "乙.wav")).toBeLessThan(0);
+        //
+        // 拼音序依赖运行区域的 ICU 排序数据，必须**固定区域**才稳定：CI runner 的
+        // 默认区域是 en-US，那里 ICU 对汉字退化为码点序，断言会反向失败。
+        const zh = createFileNameComparator("zh-CN");
+        expect(zh("甲.wav", "乙.wav")).toBeLessThan(0);
+        expect(zh("乙.wav", "甲.wav")).toBeGreaterThan(0);
+    });
+
+    it("默认比较器跟随系统区域（与运行时语系排序器对 CJK 的判断一致）", () => {
+        // 生产比较器刻意跟随系统区域（对齐资源管理器的"按系统区域排序"），因此这里
+        // 不写死某一区域的结果，而是断言它确实委派给了运行时的语系排序器。
+        const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+        const expected = Math.sign(collator.compare("甲", "乙"));
+        expect(Math.sign(compareFileNames("甲.wav", "乙.wav"))).toBe(expected);
     });
 
     it("数字按数值比较（2 在 10 之前）", () => {

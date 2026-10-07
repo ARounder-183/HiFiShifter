@@ -1,10 +1,11 @@
-// 统一封装 Tauri / pywebview 调用
+// 统一封装原生插件 / Tauri / pywebview 调用；插件复用原命名参数映射。
 // - Tauri: window.__TAURI__.core.invoke / window.__TAURI__.invoke (named args)
 // - pywebview: window.pywebview.api[method] (positional args)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { reportFrontendError } from "./frontendErrorLog";
+import { getPluginHost } from "./pluginHost";
 
 declare global {
     interface Window {
@@ -22,7 +23,7 @@ declare global {
 
 type PyWebviewApi = Record<string, (...args: any[]) => Promise<any>>;
 
-type InvokeMode = "tauri" | "pywebview";
+type InvokeMode = "plugin" | "tauri" | "pywebview";
 
 export class BackendInvokeError extends Error {
     public readonly mode: InvokeMode;
@@ -126,6 +127,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "set_ui_locale":
             return { locale: args[0] };
+
+        case "ara_connect":
+            return { instanceId: args[0], force: args[1] ?? false };
+
+        case "ara_refresh":
+            return { force: args[0] ?? false };
+        case "plugin_refresh":
+            return { force: args[0] ?? false };
+        case "emit_ui_event":
+            return {event:args[0],payload:args[1]};
 
         case "import_audio_item":
             return {
@@ -578,6 +589,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 frameCount: args[3],
                 stride: args[4],
                 binary: args[5],
+                // `withSentinel` 是 paramsApi.getParamFrames 的第 7 个位置参数，
+                // 对应后端 `with_sentinel: Option<bool>`（edit_sentinel"未画帧"
+                // 位图的开关）。漏映射会让 Tauri 侧永远收不到它，后端不返回
+                // edit_sentinel，下游把缺失标志当 false，把"未画"帧物化成显式
+                // 电平值（重分析后响度/基线漂移）。与 binary 同一类漏映射。
+                ...(args[6] !== undefined ? { withSentinel: args[6] } : {}),
             };
 
         case "set_param_frames":
@@ -856,6 +873,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
  * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
  */
 const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "plugin_get_apply_state",
+    "ara_list_instances",
+    "ara_submit",
+    "ara_disconnect",
     "cancel_background_render",
     "cancel_export_audio",
     "check_source_files_changed",
@@ -881,6 +902,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_runtime_info",
     "get_timeline_state",
     "get_ui_settings",
+    "get_vslib_status",
     "has_reaper_clipboard",
     "has_timeline_clipboard",
     "import_project_dialog",
@@ -914,6 +936,19 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
+    const plugin = getPluginHost();
+    if (plugin) {
+        const mapped = buildTauriArgs(method, args);
+        if (mapped && "__unwired" in mapped && args.length > 0) {
+            throw new Error(`Plugin backend: method not wired yet: ${method} (args: ${args.length})`);
+        }
+        const named = mapped && "__unwired" in mapped ? undefined : mapped;
+        try { return await plugin.invoke<T>(method, named); }
+        catch (cause) {
+            reportFrontendError(`Invoke failed: ${method}`, cause);
+            throw new BackendInvokeError({ mode: "plugin", method, args: named, cause });
+        }
+    }
     const tauriInvoke = getTauriInvoke();
     if (tauriInvoke) {
         const invokeArgs = buildTauriArgs(method, args);

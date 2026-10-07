@@ -1,16 +1,25 @@
+// 原轨道列表；插件保留选择/混音/算法控制，轨道结构与命名由宿主拥有。
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { registerDragAbort } from "./gestureFocusGuard";
+import { isPluginMode, canGroupPluginTracks } from "../../../services/hostCapabilities";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
 import { Flex, Box, IconButton } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
+import {
+    buildPitchAlgoOptions,
+    resolvePitchAlgoSelectValue,
+} from "../../../features/tracks/pitchAlgoOptions";
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
+import { formatTemplate } from "../../../i18n/format";
 import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
@@ -41,8 +50,6 @@ const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
     { value: "#d4bc55", key: "color_yellow" },
     { value: "#cf5252", key: "color_red" },
 ];
-const PITCH_ANALYSIS_ALGO_OPTIONS = ["nsf_hifigan_onnx", "world_dll", "vslib", "none"] as const;
-
 function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
     const parts: Array<{ text: string; digits: boolean }> = [];
     let current = "";
@@ -442,9 +449,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
     bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    /** 当前 dpr：渲染期写出的物理像素细线用它，并在 dpr 变化时触发重渲染。 */
+    const dpr = useDevicePixelRatio();
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
     const { mode, fontFamily } = useAppTheme();
     const darkMode = mode === "dark";
+    // vslib 可用性：不可用（或尚未探测到）时算法下拉里不出现 vslib。
+    const vslibAvailable = useAppSelector((state) => state.session.vslibAvailable);
     const rowHeightRef = useRef(rowHeight);
     const pendingVerticalZoomRef = useRef<{
         nextRowHeight: number;
@@ -1409,7 +1420,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         className="absolute left-1 right-1 pointer-events-none z-50"
                         style={{ top: dragUi.indicatorY }}
                     >
-                        <div className="h-px bg-qt-highlight" />
+                        <div
+                            className="bg-qt-highlight"
+                            // 重排落点指示线：取整数个物理像素，任意缩放下粗细恒定
+                            // （`h-px` 是 1 CSS px，在 dpr=1.25/1.5 下会渲染成 1.25/1.5
+                            // 物理像素，边缘发虚）。
+                            style={{ height: wholeDevicePxLength(1, dpr) }}
+                        />
                     </div>
                 ) : null}
                 <div
@@ -1445,6 +1462,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                     : (volumeDb / Math.abs(TRACK_GAIN_MIN_DB)) * 135;
                             const volumeTooltip = buildVolumeTooltip(track.id, volume);
 
+                            // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。
+                            // 当前值即使不可用也保留（标注"不可用"），避免下拉框
+                            // 回退显示成 nsf-hifigan 而谎报轨道真实算法。
+                            const algoOptions = buildPitchAlgoOptions({
+                                noneLabel: t("common_none"),
+                                vslibAvailable,
+                                formatUnavailable: (label) =>
+                                    formatTemplate(t("algo_unavailable_label"), { name: label }),
+                                currentValue: track.pitchAnalysisAlgo,
+                            });
+
                             const guideLines = depth > 0 ? Array.from({ length: depth }) : [];
 
                             return (
@@ -1458,6 +1486,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         onSelectTrack(track.id);
                                     }}
                                     onContextMenu={(e) => {
+                                        if (isPluginMode()) {e.preventDefault();return;}
                                         e.preventDefault();
                                         setTrackCtxMenu({
                                             x: e.clientX,
@@ -1466,6 +1495,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         });
                                     }}
                                     onPointerDown={(e) => {
+                                        if (isPluginMode()&&!canGroupPluginTracks()) return;
                                         // 数位笔 / 触摸不触发轨道拖动排序 / 嵌套：
                                         // 行高窄 + 3px 阈值，画线式滑动即重排轨道。
                                         if (shouldSuppressHoverSideEffects(e.nativeEvent)) {
@@ -1551,6 +1581,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // 复制拖动修饰键按住时：预览与放置都按
                                             // “源轨道不剔除”的复制索引计算。
                                             const copyMode = Boolean(
+                                                !isPluginMode() &&
                                                 copyDragKb &&
                                                 isModifierActive(copyDragKb, ev) &&
                                                 onDuplicateTrackTo,
@@ -1605,8 +1636,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         }
 
                                         function finish() {
+                                            // 无条件收尾：组件卸载时 unmount effect 会把
+                                            // dragRef 置空，若仍以"drag 存在"为收尾前提，
+                                            // window 监听与 body 光标将永久残留。因此先做
+                                            // 与 drag 无关的清理（幂等），drag 提交逻辑再按需早退。
                                             const drag = dragRef.current;
-                                            if (!drag) return;
                                             dragRef.current = null;
                                             unregisterAbort(); // 收尾第一步注销失焦守卫
                                             window.removeEventListener("pointermove", onMove);
@@ -1621,6 +1655,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             document.body.style.cursor = prevCursor;
                                             document.body.style.userSelect = prevSelect;
 
+                                            if (!drag) {
+                                                return;
+                                            }
+
                                             const moved = drag.hasMoved;
                                             setDragUi(null);
 
@@ -1632,6 +1670,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // （blur 收尾用最后一次已知指针位置；修饰键
                                             // 以按下瞬间的状态为准 —— 失焦时没有可信的实时按键）。
                                             const copyActive = Boolean(
+                                                !isPluginMode() &&
                                                 copyDragKb && isModifierActive(copyDragKb, e),
                                             );
                                             const spec = computeDropSpec(
@@ -1668,7 +1707,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
                                         function end(ev: PointerEvent) {
                                             const drag = dragRef.current;
-                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            if (!drag) {
+                                                // 组件已卸载：dragRef 被 unmount effect 清空，
+                                                // 但 window 监听仍在，这里兜底收尾摘除监听。
+                                                finish();
+                                                return;
+                                            }
+                                            if (drag.pointerId !== e.pointerId) return;
                                             lastClientX = ev.clientX;
                                             lastClientY = ev.clientY;
                                             finish();
@@ -1871,6 +1916,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }
                                                                 onDoubleClick={(e) => {
                                                                     e.stopPropagation();
+                                                                    if (isPluginMode()) return;
                                                                     setEditingTrackId(track.id);
                                                                     setEditingName(track.name);
                                                                     setTimeout(() => {
@@ -1892,41 +1938,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             <AppSelect
                                                                 // 轨道头内的紧凑控件
                                                                 density="compact"
-                                                                value={
-                                                                    PITCH_ANALYSIS_ALGO_OPTIONS.includes(
-                                                                        track.pitchAnalysisAlgo as
-                                                                            | "world_dll"
-                                                                            | "nsf_hifigan_onnx"
-                                                                            | "vslib"
-                                                                            | "none",
-                                                                    )
-                                                                        ? track.pitchAnalysisAlgo
-                                                                        : "nsf_hifigan_onnx"
-                                                                }
+                                                                value={resolvePitchAlgoSelectValue(
+                                                                    track.pitchAnalysisAlgo,
+                                                                    algoOptions,
+                                                                )}
                                                                 onValueChange={(v) => {
                                                                     onAlgoChange(track.id, v);
                                                                 }}
                                                                 fullWidth={false}
                                                                 className="min-w-[80px]"
                                                                 ariaLabel={t("algo_label")}
-                                                                options={[
-                                                                    {
-                                                                        value: "nsf_hifigan_onnx",
-                                                                        label: "nsf-hifigan",
-                                                                    },
-                                                                    {
-                                                                        value: "world_dll",
-                                                                        label: "world",
-                                                                    },
-                                                                    {
-                                                                        value: "vslib",
-                                                                        label: "vslib",
-                                                                    },
-                                                                    {
-                                                                        value: "none",
-                                                                        label: t("common_none"),
-                                                                    },
-                                                                ]}
+                                                                options={algoOptions}
                                                             />
                                                         </div>
                                                     ) : null}
@@ -1938,7 +1960,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         /* 默认 `opacity-0`：Tab 到它时必须显形，
                                                            否则焦点环画在一个透明元素上。 */
                                                         className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                                                        disabled={isLastRootTrack(track.id)}
+                                                        disabled={isPluginMode() || isLastRootTrack(track.id)}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();

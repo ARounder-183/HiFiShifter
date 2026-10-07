@@ -85,7 +85,7 @@ function buildRows(result: BenchmarkResult): EpRow[] {
 }
 
 export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
-    const { t } = useI18n();
+    const { t, tVars } = useI18n();
     const [phase, setPhase] = useState<BenchmarkPhase>("idle");
     const [result, setResult] = useState<BenchmarkResult | null>(null);
     const [errorText, setErrorText] = useState<string>("");
@@ -171,10 +171,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                 {phase === "done" && result && rows.length > 0 && (
                     <Flex direction="column" gap="2">
                         <span className="hs-type-label font-medium">
-                            {t("benchmark_results").replace(
-                                "{samples}",
-                                String(result.benchmarkSamples),
-                            )}
+                            {tVars("benchmark_results", { samples: result.benchmarkSamples })}
                         </span>
                         <div
                             style={{
@@ -274,8 +271,9 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                         </div>
                         <span className="hs-type-caption">{t("benchmark_rtf_hint")}</span>
                         {fastestRow && fastestRow.available && (
-                            <span className="hs-type-body">
-                                {t("benchmark_recommended")} <strong>{fastestRow.label}</strong>
+                            <span className="hs-type-body flex items-center gap-1">
+                                <span>{t("benchmark_recommended")}</span>
+                                <strong>{fastestRow.label}</strong>
                             </span>
                         )}
 
@@ -347,11 +345,16 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
 
                         {/* Available providers */}
                         <span className="hs-type-caption" style={{ marginTop: 4 }}>
-                            {t("benchmark_providers_label")}{" "}
-                            {result.availableProviders.join(", ") || "unknown"}
+                            {tVars("common_label_value", {
+                                label: t("benchmark_providers_label"),
+                                value: result.availableProviders.join(", ") || "unknown",
+                            })}
                         </span>
                         <span className="hs-type-caption">
-                            {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
+                            {tVars("common_label_value", {
+                                label: t("benchmark_ort_info_label"),
+                                value: result.ortBuildInfo || "unknown",
+                            })}
                         </span>
 
                         {/* GPU enumeration */}

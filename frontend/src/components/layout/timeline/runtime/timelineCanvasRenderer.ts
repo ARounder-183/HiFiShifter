@@ -32,49 +32,52 @@ import {
     CLIP_INSTANCE_FLOATS,
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
-import { fadeGainSigned } from "../reaperFade.js";
+import {hostFadeDisplay,visualFadeGain} from "../hostFadeDisplay.js";
 import { drawLoopMarkers } from "../../../../utils/loopRender.js";
 
-function drawFadeCurveStroke(
-    ctx: CanvasRenderingContext2D,
-    args: {
-        leftPx: number;
-        topPx: number;
-        widthPx: number;
-        heightPx: number;
-        shape: number;
-        dir: number;
-        mode: "in" | "out";
-    },
-): void {
-    const widthPx = Math.max(1, args.widthPx);
-    const heightPx = Math.max(1, args.heightPx);
-    const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
-    if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
-        // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
-        // y 轴向下：增益 1 → 屏幕上方（topPx）。
-        ctx.beginPath();
-        if (args.mode === "in") {
-            ctx.moveTo(args.leftPx, args.topPx + heightPx);
-            ctx.lineTo(args.leftPx + widthPx, args.topPx);
-        } else {
-            ctx.moveTo(args.leftPx, args.topPx);
-            ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
-        }
-        ctx.stroke();
-        return;
-    }
+/** 自适应细分产出的一段折线（端点按 `t0` 升序排列）。 */
+export interface FadeCurveSampleSegment {
+    readonly t0: number;
+    readonly t1: number;
+    readonly x0: number;
+    readonly y0: number;
+    readonly x1: number;
+    readonly y1: number;
+}
 
-    // ── 偏差驱动的自适应细分 ────────────────────────────────────────
-    // 固定采样数（此前 ≤96 点且按宽度均分）在极端缩放下相邻采样点相距
-    // 几十甚至上百像素，陡峭预设的末段"爆发区"在两采样点之间会被画成
-    // 一条直弦——视觉上曲线"没接到角上"。这里改为按【屏幕空间偏差】
-    // 递归细分：弦中点到真实曲线的偏差超过 0.6px 就继续拆分，直到
-    // 折线与真实曲线处处贴合。端点 t=0/1 始终包含（增益在两端被核心
-    // 函数精确钳制），因此曲线必然精确落在左下/右上（或反向）边角上。
-    const gainAt = (t: number): number => fadeGainSigned(args.shape, args.dir, args.mode, t);
-    const xAt = (t: number): number => args.leftPx + t * widthPx;
-    const yAt = (t: number): number => args.topPx + heightPx * (1 - gainAt(t));
+/**
+ * 偏差驱动的自适应细分采样：把淡变曲线离散成折线端点（按 `t0` 升序）。
+ *
+ * 【为什么自适应】固定采样数（此前 ≤96 点且按宽度均分）在极端缩放下相邻采样点
+ * 相距几十甚至上百像素，陡峭预设的末段"爆发区"在两采样点之间会被画成一条直弦
+ * ——视觉上曲线"没接到角上"。这里按【屏幕空间偏差】递归细分：弦中点到真实曲线
+ * 的偏差超过 `TOLERANCE_PX` 就继续拆分，直到折线与真实曲线处处贴合。端点
+ * `t=0/1` 始终包含（增益在两端被核心函数精确钳制），因此曲线必然精确落在
+ * 左下/右上（或反向）边角上。
+ *
+ * 【为什么用最大堆而不是每轮重扫】朴素实现每轮线性扫描偏差最大的段再 `splice`，
+ * 上限 1200 点时约 72 万次扫描 + 1200 次数组搬移；本函数在 clip 拖拽期间（乐观
+ * Redux 每帧改 `clips`）随场景重建每帧调用，多块淡变 clip 会叠加成卡顿。改用二叉
+ * 最大堆后取最坏段为 O(log n)，总代价 O(n log n)。
+ *
+ * 【输出与朴素实现逐点一致】堆键 = 偏差 `dev`，`dev` 相等时以**插入序号**小者优先。
+ * 朴素实现每轮扫描取「数组中第一个严格最大者」，而数组只做「尾部追加 + 任意位置
+ * 删除」，故其顺序恒等于各段的插入顺序 —— 因此「插入序号最小」精确复现了朴素扫描
+ * 的平局选择，两版产出的点集完全相同（见 `timelineCanvasRenderer.sampler.test.ts`）。
+ */
+export function sampleFadeCurveSegments(args: {
+    readonly leftPx: number;
+    readonly topPx: number;
+    readonly widthPx: number;
+    readonly heightPx: number;
+    readonly shape: number;
+    readonly dir: number;
+    readonly mode: "in" | "out";
+    readonly hostFades?: import("../../../../types/api").HostFadeMetadata;
+}): FadeCurveSampleSegment[] {
+    const gainAt = (t: number): number => visualFadeGain(args.hostFades, args.shape, args.dir, args.mode, t);
+    const xAt = (t: number): number => args.leftPx + t * args.widthPx;
+    const yAt = (t: number): number => args.topPx + args.heightPx * (1 - gainAt(t));
 
     const MAX_POINTS = 1200;
     const TOLERANCE_PX = 0.6;
@@ -90,6 +93,8 @@ function drawFadeCurveStroke(
         tm: number;
         xm: number;
         ym: number;
+        /** 插入序号：`dev` 相等时的稳定平局键（复现朴素扫描的"首个最大者"）。 */
+        seq: number;
     }
 
     const evaluateDeviation = (
@@ -120,7 +125,37 @@ function drawFadeCurveStroke(
         return { tm, xm, ym, dev };
     };
 
-    const segments: Segment[] = [];
+    /** 二叉最大堆（`heap[0]` = 当前偏差最大的段）。 */
+    const heap: Segment[] = [];
+    let nextSeq = 0;
+
+    /** a 是否应排在 b 之上：先比偏差，再比插入序号小者。 */
+    const above = (a: Segment, b: Segment): boolean =>
+        a.dev !== b.dev ? a.dev > b.dev : a.seq < b.seq;
+
+    const siftUp = (index: number): void => {
+        while (index > 0) {
+            const parent = (index - 1) >> 1;
+            if (!above(heap[index], heap[parent])) break;
+            [heap[index], heap[parent]] = [heap[parent], heap[index]];
+            index = parent;
+        }
+    };
+
+    const siftDown = (index: number): void => {
+        const size = heap.length;
+        for (;;) {
+            const left = index * 2 + 1;
+            const right = left + 1;
+            let best = index;
+            if (left < size && above(heap[left], heap[best])) best = left;
+            if (right < size && above(heap[right], heap[best])) best = right;
+            if (best === index) break;
+            [heap[index], heap[best]] = [heap[best], heap[index]];
+            index = best;
+        }
+    };
+
     const pushSegment = (
         t0: number,
         t1: number,
@@ -128,31 +163,78 @@ function drawFadeCurveStroke(
         y0: number,
         x1: number,
         y1: number,
-    ) => {
+    ): void => {
         const { tm, xm, ym, dev } = evaluateDeviation(t0, t1, x0, y0, x1, y1);
-        segments.push({ t0, t1, x0, y0, x1, y1, dev, tm, xm, ym });
+        heap.push({ t0, t1, x0, y0, x1, y1, dev, tm, xm, ym, seq: nextSeq });
+        nextSeq += 1;
+        siftUp(heap.length - 1);
     };
 
-    pushSegment(0, 1, args.leftPx, yAt(0), args.leftPx + widthPx, yAt(1));
+    pushSegment(0, 1, args.leftPx, yAt(0), args.leftPx + args.widthPx, yAt(1));
 
     // 始终细分偏差最大的段；上限保护极端缩放下的工作量。
-    while (segments.length < MAX_POINTS) {
-        let worstIndex = -1;
-        let worstDev = TOLERANCE_PX;
-        for (let i = 0; i < segments.length; i += 1) {
-            if (segments[i].dev > worstDev) {
-                worstDev = segments[i].dev;
-                worstIndex = i;
-            }
+    while (heap.length < MAX_POINTS) {
+        const worst = heap[0];
+        if (worst.dev <= TOLERANCE_PX) break;
+        // 移除根：末元素补位后下沉。
+        const last = heap.pop() as Segment;
+        if (heap.length > 0) {
+            heap[0] = last;
+            siftDown(0);
         }
-        if (worstIndex < 0) break;
-        const seg = segments[worstIndex];
-        segments.splice(worstIndex, 1);
-        pushSegment(seg.t0, seg.tm, seg.x0, seg.y0, seg.xm, seg.ym);
-        pushSegment(seg.tm, seg.t1, seg.xm, seg.ym, seg.x1, seg.y1);
+        pushSegment(worst.t0, worst.tm, worst.x0, worst.y0, worst.xm, worst.ym);
+        pushSegment(worst.tm, worst.t1, worst.xm, worst.ym, worst.x1, worst.y1);
     }
 
-    segments.sort((a, b) => a.t0 - b.t0);
+    heap.sort((a, b) => a.t0 - b.t0);
+    return heap;
+}
+
+function drawFadeCurveStroke(
+    ctx: CanvasRenderingContext2D,
+    args: {
+        leftPx: number;
+        topPx: number;
+        widthPx: number;
+        heightPx: number;
+        shape: number;
+        dir: number;
+        mode: "in" | "out";
+        hostFades?: import("../../../../types/api").HostFadeMetadata;
+    },
+): void {
+    const widthPx = Math.max(1, args.widthPx);
+    const heightPx = Math.max(1, args.heightPx);
+    const hostDisplay=hostFadeDisplay(args.hostFades,args.mode==="out");
+    const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
+    if (hostDisplay === "legacy" && shapeId === 0 && Math.abs(args.dir) < 1e-9) {
+        // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
+        // y 轴向下：增益 1 → 屏幕上方（topPx）。
+        ctx.beginPath();
+        if (args.mode === "in") {
+            ctx.moveTo(args.leftPx, args.topPx + heightPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx);
+        } else {
+            ctx.moveTo(args.leftPx, args.topPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
+        }
+        ctx.stroke();
+        return;
+    }
+
+    // ── 偏差驱动的自适应细分 ────────────────────────────────────────
+    // 采样逻辑抽到 `sampleFadeCurveSegments`（可单测，见该函数说明）；这里只落笔。
+    const segments = sampleFadeCurveSegments({
+        leftPx: args.leftPx,
+        topPx: args.topPx,
+        widthPx,
+        heightPx,
+        shape: args.shape,
+        dir: args.dir,
+        mode: args.mode,
+        hostFades: args.hostFades,
+    });
+
     ctx.beginPath();
     ctx.moveTo(segments[0].x0, segments[0].y0);
     for (const seg of segments) {
@@ -175,6 +257,7 @@ export function drawTimelineCanvas(
             heightPx: number;
             headerHeightPx: number;
             fadeInPx: number;
+            hostFades?: import("../../../../types/api").HostFadeMetadata;
             fadeOutPx: number;
             fadeInShape: number;
             fadeOutShape: number;
@@ -831,6 +914,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeInShape,
                 dir: clip.fadeInDir,
                 mode: "in",
+                hostFades:clip.hostFades,
             });
         }
         if (clip.fadeOutPx > 0) {
@@ -850,6 +934,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeOutShape,
                 dir: clip.fadeOutDir,
                 mode: "out",
+                hostFades:clip.hostFades,
             });
         }
 

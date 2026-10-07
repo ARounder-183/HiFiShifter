@@ -65,12 +65,14 @@ export interface TimelineKernelViewProps {
      */
     readonly onZoomRequest?: (next: { pxPerSec: number; scrollLeft: number }) => void;
     /**
-     * 水平滚动位置的量化提交（每 256px 一次）。
+     * 水平滚动位置的量化提交（每 256px 一次，**缩放变化时必定提交**）。
      *
-     * 标尺的**刻度范围**由 React 按 `scrollLeft` 计算（`timelineTicks`），内核只写
-     * 标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
+     * 标尺的**刻度范围**由 React 按 `(pxPerSec, scrollLeft)` 计算（`timelineTicks`），
+     * 内核只写标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
+     * 缩放也必须随同提交：只给位置会让刻度窗口按新缩放换算旧像素位置（见宿主
+     * 同名 option 的说明）。
      */
-    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    readonly onScrollLeftCommit?: (scrollLeftPx: number, pxPerSec: number) => void;
     /**
      * 水平滚动位置的逐帧通知（跨面板同步用）。
      *
@@ -370,6 +372,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const primaryTimeUnit = useAppSelector((state) => state.session.primaryTimeUnit);
     const secondaryTimeUnit = useAppSelector((state) => state.session.secondaryTimeUnit);
     const minLabelSpacingPx = useAppSelector((state) => state.session.rulerLabelSpacingPx);
+    // 网格密度 / Swing 与 DOM 标尺**同源**（`useTimelineState` 用同一对字段）。
+    // 内核此前漏传这两个值，GL 网格便按默认值取步长、且不做 swing 位移，与标尺
+    // 的刻度档位和位置分叉 —— 表现为"网格线与标尺刻度对不上"。
+    const timelineSnap = useAppSelector((state) => state.session.timelineSnap);
+    const minGridSpacingPx = timelineSnap.gridMinSpacingPx;
+    const swingPercent = timelineSnap.swingEnabled ? timelineSnap.swingPercent : 0;
     const tempoMap = useAppSelector((state) => state.session.tempoMap);
     const playheadZoomEnabled = useAppSelector((state) => state.session.playheadZoomEnabled);
     const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
@@ -428,6 +436,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         primaryTimeUnit,
         secondaryTimeUnit,
         minLabelSpacingPx,
+        minGridSpacingPx,
+        swingPercent,
         tempoMap,
         rowHeight,
         playheadSec: getPlayheadSec(),
@@ -437,12 +447,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             scrollHorizontal: scrollHorizontalKb,
             scrollVertical: scrollVerticalKb,
             scrollbarZoom: scrollbarZoomKb,
-            fadeShapeCycle: fadeShapeCycleKb,
+            fadeShapeCycle: interactions?.fadeShapeReadOnly ? null : fadeShapeCycleKb,
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
             clipRangeToParamSelection: clipRangeToParamKb,
             clipStretch: clipStretchKb,
-            fadeCurvatureDrag: fadeCurvatureKb,
+            fadeCurvatureDrag: interactions?.fadeShapeReadOnly ? null : fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -488,6 +498,20 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         );
     }, []);
 
+    /**
+     * 视口尺寸由内核统一量测并广播，本组件不再自行 `clientWidth` 量测。
+     *
+     * 【为什么】内核、GL 画布、波形层、吸附高亮层挂在同一个容器上。旧实现两处
+     * 量测：内核用 `contentRect`（分数），本组件用 `clientWidth`（整数）——同一个
+     * 容器得出两个数，各层算出的物理尺寸可能相差一个设备像素，叠加后互相错位。
+     * 现在只有内核一处量测（`getBoundingClientRect`，与 `contentRect` 同口径）。
+     */
+    const handleViewportSizeChange = React.useCallback((width: number, height: number) => {
+        setViewportSize((prev) =>
+            prev.width === width && prev.height === height ? prev : { width, height },
+        );
+    }, []);
+
     // 回调镜像：宿主持有的是稳定函数，函数内部读取最新回调，避免重建宿主。
     const callbacksRef = React.useRef({
         onRowHeightChange,
@@ -498,6 +522,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange: handleViewportSizeChange,
         onUnavailable,
     });
     callbacksRef.current = {
@@ -509,6 +534,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange: handleViewportSizeChange,
         onUnavailable,
     };
 
@@ -525,6 +551,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
      */
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
+            get geometryReadOnly() { return interactionsRef.current?.geometryReadOnly; },
+            get fadeShapeReadOnly() { return interactionsRef.current?.fadeShapeReadOnly; },
             onSeek: (sec, phase, trackId) => interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
@@ -621,18 +649,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         return map;
     }, [waveformTracks, clips]);
 
-    // 视口尺寸：波形画布与内核视口同尺寸（竖直由 axis.scrollTopPx 平移）。
-    React.useEffect(() => {
-        const container = containerRef.current;
-        if (!container) return;
-        const measure = () => {
-            setViewportSize({ width: container.clientWidth, height: container.clientHeight });
-        };
-        measure();
-        const observer = new ResizeObserver(measure);
-        observer.observe(container);
-        return () => observer.disconnect();
-    }, []);
+    // 视口尺寸由内核发布（见 handleViewportSizeChange）：波形画布与内核视口同尺寸
+    // （竖直由 axis.scrollTopPx 平移）。此处不再自行量测。
 
     // 挂载：创建宿主（GL 初始化失败时展示回退提示而不是崩溃）。
     React.useEffect(() => {
@@ -678,9 +696,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
-                onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
+                onScrollLeftCommit: (px, pxPerSec) =>
+                    callbacksRef.current.onScrollLeftCommit?.(px, pxPerSec),
                 onScrollLeftFrame: (px) => callbacksRef.current.onScrollLeftFrame?.(px),
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
+                onViewportSizeChange: (width, height) =>
+                    callbacksRef.current.onViewportSizeChange(width, height),
             });
         } catch (error) {
             // 内核没有 Canvas2D 等效绘制（GL 是唯一路径），本视图无法自行降级：
@@ -798,6 +819,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         primaryTimeUnit,
         secondaryTimeUnit,
         minLabelSpacingPx,
+        minGridSpacingPx,
+        swingPercent,
         tempoMap,
         mode,
         rowHeight,

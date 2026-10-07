@@ -78,6 +78,27 @@ export interface TempoAtSec {
 export interface TempoGridLine {
     sec: number;
     isBar: boolean;
+    /**
+     * 弱线的**全局单调**索引（沿时间递增，无 Tempo Map 时与均匀网格同义）。
+     *
+     * 【为什么必须由生成方给出】标尺标签的栅格必须按索引判定
+     * （`index % stride === 0`），不能按"秒 ÷ 步长是否整除"判定：
+     * - Swing 会把奇数索引的线整体平移最多半步，按秒判定时这些线的拍值不再是
+     *   整数，于是永远拿不到标签 —— 标签间距被悄悄放大一倍（实测 swing 50%
+     *   时出现 2.00× 的空洞）；
+     * - Tempo Map 下段内秒位与拍不是线性关系，按秒整除判定同样不可靠。
+     *
+     * 【为什么是全局而不是段内】网格虽然逐段局部对齐（每个变化点处重新起拍），
+     * 但索引若在每段重新从 0 编号，`index % stride === 0` 就会让**每个段起点**
+     * （index 恒为 0）无条件获得标签、完全忽略 `minLabelSpacingPx`：变化点区与
+     * 尾段的真实栅格首尾拼接，标尺在"某段之内"显得空白。索引全局单调后，段起点
+     * 只在其恰好落在栅格上时才带标签；变化点标签改由 `buildTimelineTicks` §4 显式
+     * 补充（见 `TempoGridLine` 的消费者）。
+     *
+     * 小节线（`isBar`）若恰好落在弱线栅格上，也带上等价的弱线索引；否则为
+     * `undefined`（不参与标签栅格，只作为网格强线）。
+     */
+    index?: number;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -830,9 +851,20 @@ export function buildTempoGridLines(args: {
     const strongStride = Math.max(1, Math.floor(args.strongStride ?? 1));
     const lines: TempoGridLine[] = [];
 
-    const add = (sec: number, isBar: boolean) => {
+    const add = (sec: number, isBar: boolean, index?: number) => {
         if (!Number.isFinite(sec) || sec < startSec - 1e-9 || sec > endSec + 1e-9) return;
-        lines.push({ sec, isBar });
+        lines.push(index === undefined ? { sec, isBar } : { sec, isBar, index });
+    };
+    /**
+     * 某个拍位若恰好落在弱线栅格上，返回它的弱线索引；否则 `undefined`。
+     *
+     * 小节线用：让"同时是小节起点"的弱线在合并后仍携带索引（标签栅格只认索引），
+     * 同时不让落在栅格之外的小节线混进标签序列。
+     */
+    const weakIndexOfBeat = (beat: number, step: number): number | undefined => {
+        const ratio = beat / step;
+        const rounded = Math.round(ratio);
+        return Math.abs(ratio - rounded) < 1e-9 ? rounded : undefined;
     };
     const swingAt = (segBpm: number, index: number) => {
         if (swingPercent <= 0 || index % 2 === 0) return 0;
@@ -848,7 +880,7 @@ export function buildTempoGridLines(args: {
         for (let index = firstIndex; index <= lastIndex; index += 1) {
             if (index < 0) continue;
             const beat = index * safeStep;
-            add(beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index), false);
+            add(beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index), false, index);
         }
         const bpb = Math.max(
             1,
@@ -857,7 +889,8 @@ export function buildTempoGridLines(args: {
         const firstBarIndex = Math.floor(startBeat / bpb + 1e-9);
         const lastBarIndex = Math.ceil(endBeat / bpb - 1e-9);
         for (let k = firstBarIndex; k <= lastBarIndex; k += 1) {
-            add(beatToSec(null, k * bpb, fallbackBpm), true);
+            const barBeat = k * bpb;
+            add(beatToSec(null, barBeat, fallbackBpm), true, weakIndexOfBeat(barBeat, safeStep));
         }
         lines.sort((a, b) => a.sec - b.sec);
         return lines;
@@ -879,13 +912,23 @@ export function buildTempoGridLines(args: {
 
         const localStartBeat = (clampedStart - segment.startSec) / segSecPerBeat;
         const localEndBeat = (clampedEnd - segment.startSec) / segSecPerBeat;
+        // 段起点在**全局拍**坐标上的位置。网格按段内局部对齐（每个变化点处重新
+        // 起拍），但索引必须全局单调 —— 若每段都从 0 重新编号，标尺标签判定
+        // `index % stride === 0` 会让每个段起点（index 恒为 0）无条件获得标签，
+        // 栅格在变化点处断裂（见 `TempoGridLine.index`）。
+        const segStartBeat = secToBeat(map, segment.startSec, fallbackBpm);
+        const segWeakOffset = Math.round(segStartBeat / safeStep);
 
         // 弱网格线（段内 stepBeats 的整数倍）。
         const firstWeak = Math.ceil(localStartBeat / safeStep - 1e-9);
         const lastWeak = Math.floor(localEndBeat / safeStep + 1e-9);
         for (let k = firstWeak; k <= lastWeak; k += 1) {
             if (k < 0) continue;
-            add(segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k), false);
+            add(
+                segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k),
+                false,
+                segWeakOffset + k,
+            );
         }
 
         // 强网格线（段内小节边界；段起点本身也是对齐点）。
@@ -894,7 +937,12 @@ export function buildTempoGridLines(args: {
         for (let k = firstBar; k <= lastBar; k += 1) {
             if (k < 0) continue;
             if (k % strongStride !== 0) continue;
-            add(segment.startSec + k * segBpb * segSecPerBeat, true);
+            const barBeat = k * segBpb;
+            add(
+                segment.startSec + barBeat * segSecPerBeat,
+                true,
+                weakIndexOfBeat(segStartBeat + barBeat, safeStep),
+            );
         }
     }
 

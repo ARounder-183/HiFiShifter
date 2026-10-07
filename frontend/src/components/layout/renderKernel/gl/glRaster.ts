@@ -6,10 +6,14 @@
  * 物理尺寸 = `round(css × dpr)`（画布真实像素），绘制坐标系尺寸 = `物理 / dpr`。
  *
  * 【作用】
- * 与既有 `runtime/canvasRaster.rasterize` 保持同一契约（向上取整到物理像素），
+ * 与既有 `runtime/canvasRaster.rasterize` 保持同一契约（物理尺寸取整到整数），
  * 但把「绘制坐标系尺寸」显式回算为 `物理 / dpr`：WebGL 的 `u_resolution` 必须用
  * 这个值，才能保证顶点坐标（CSS px）与物理像素 1:1 对应。若直接用传入的 CSS 尺寸，
  * 在分数 DPR 下会出现半个物理像素的累积偏移（网格线相位漂移）。
+ *
+ * 同一个回算值也用于写回 `canvas.style.width`（见 `cssWidthPx` 的说明）：
+ * 布局盒必须与 backing store 严格成 `dpr` 倍关系，否则合成器重采样会让整块
+ * 画面发虚。
  *
  * 【与其他模块的关系】
  * - 上游：宿主视图在 `ResizeObserver` 回调里调用；
@@ -28,8 +32,11 @@ export interface GlRasterTarget {
      * 绘制坐标系宽（= 物理宽 / dpr），供 `u_resolution`。
      *
      * 特殊说明：这是**回算值**，不等于入参的 CSS 宽度（非整数尺寸下会差最多
-     * `0.5 / dpr`）。**不要**用它回写 `canvas.style.width`——那会引入亚像素漂移；
-     * 回写样式请使用原始入参。
+     * `0.5 / dpr`）。它同时是**唯一**应当写回 `canvas.style.width` 的值：
+     * `cssWidthPx * dpr` 严格等于 `physicalWidthPx`，布局盒与 backing store
+     * 一一对应，合成器缩放比恒为 1。若改用入参的原始 CSS 宽，布局盒会与
+     * backing store 差最多半个物理像素，合成器做非整数倍重采样 —— 表现为
+     * "窗口拖到某些宽度画面发虚"，非整数 dpr 下按宽度奇偶交替。
      */
     readonly cssWidthPx: number;
     /** 绘制坐标系高（= 物理高 / dpr），供 `u_resolution`；与 cssWidthPx 同为回算值。 */

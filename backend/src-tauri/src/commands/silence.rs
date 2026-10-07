@@ -257,7 +257,7 @@ pub(super) fn remove_clip_silence(
 
     // 4) 受影响根轨道调度音高重分析。
     for root_id in &outcome.touched_root_track_ids {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
     }
 
     RemoveSilenceResultPayload {

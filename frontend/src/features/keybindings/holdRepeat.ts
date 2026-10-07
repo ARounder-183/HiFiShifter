@@ -33,7 +33,8 @@ export interface HoldRepeatOptions {
 }
 
 interface ActiveHold {
-    key: string;
+    /** 触发本动作的**全部**绑定主键（小写）。一个动作可绑多个键，任一个都维持长按。 */
+    keys: string[];
     fire: () => void;
     initialTimer: number | null;
     repeatTimer: number | null;
@@ -47,11 +48,13 @@ function isModifierKey(key: string): boolean {
     return k === "control" || k === "shift" || k === "alt" || k === "meta";
 }
 
-/** 事件主键是否就是长按主键（Shift 上档字符按物理键位归位后比较）。 */
+/** 事件主键是否属于长按的主键集合（Shift 上档字符按物理键位归位后比较）。 */
 function isHeldKey(e: Pick<KeyboardEvent, "key" | "code">): boolean {
     const a = active;
     if (!a) return false;
-    return e.key.toLowerCase() === a.key || physicalKeyFromEvent(e) === a.key;
+    const key = e.key.toLowerCase();
+    const physical = physicalKeyFromEvent(e);
+    return a.keys.some((candidate) => candidate === key || candidate === physical);
 }
 
 function stop(): void {
@@ -101,11 +104,13 @@ export function isHoldRepeatActive(): boolean {
  * 开始一次长按重复。调用方应先自行执行首次动作，再调用本函数
  * （与粘贴流程一致：先 onPaste()，再 beginHoldRepeat(kb, onPaste)）。
  *
- * @param binding 触发该动作的键位（用于识别同键自动重复与松开）。
- * @param fire    重复执行的回调；调用方需确保它读取最新状态。
+ * @param bindings 触发该动作的**全部**绑定（用于识别同键自动重复与松开）。
+ *   传整个列表而不是单个键：动作绑了多个键时，按住其中任一个都应维持重复，
+ *   松开任一个都应终止 —— 只认第一个会让"用备用键长按"半途失效。
+ * @param fire     重复执行的回调；调用方需确保它读取最新状态。
  */
 export function beginHoldRepeat(
-    binding: Keybinding,
+    bindings: readonly Keybinding[],
     fire: () => void,
     options?: HoldRepeatOptions,
 ): void {
@@ -114,7 +119,9 @@ export function beginHoldRepeat(
     const initialDelayMs = Math.max(0, options?.initialDelayMs ?? 400);
     const repeatIntervalMs = Math.max(1, options?.repeatIntervalMs ?? 50);
     const hold: ActiveHold = {
-        key: binding.key.toLowerCase(),
+        keys: bindings
+            .filter((binding) => binding.key !== "__none__")
+            .map((binding) => binding.key.toLowerCase()),
         fire,
         initialTimer: null,
         repeatTimer: null,

@@ -23,6 +23,7 @@
  *    内核每帧全量重绘，不依赖上一帧内容。
  */
 
+import { writeCanvasCssSize } from "../canvasRaster";
 import { resolveGlRasterTarget, type GlRasterTarget } from "./glRaster";
 
 /** 上下文句柄。 */
@@ -85,12 +86,15 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
             // 整个绘制状态（缓冲被清空），无谓写入会丢掉同帧已上传的实例数据。
             if (canvas.width !== target.physicalWidthPx) canvas.width = target.physicalWidthPx;
             if (canvas.height !== target.physicalHeightPx) canvas.height = target.physicalHeightPx;
-            // 与既有 rasterize 契约一致：显式写 CSS 尺寸。否则 `<canvas>` 无样式时
-            // 会按 width/height 属性当 CSS 尺寸显示，整块画布被放大 dpr 倍。
-            const styleWidth = `${cssWidthPx}px`;
-            const styleHeight = `${cssHeightPx}px`;
-            if (canvas.style.width !== styleWidth) canvas.style.width = styleWidth;
-            if (canvas.style.height !== styleHeight) canvas.style.height = styleHeight;
+            // 【必须用回算值（物理 / dpr），不能用入参的原始 CSS 尺寸】
+            // 物理尺寸取整后，若把未取整的 CSS 尺寸写回样式，浏览器会把
+            // `physical` 个物理像素铺到 `css * dpr` 个物理像素的布局盒上，
+            // 合成器做一次非整数倍重采样（缩放比 = css*dpr/physical ≠ 1），
+            // 整块画面发虚，且随窗口宽度的奇偶变化。回写 `physical / dpr`
+            // 后 style × dpr 严格等于 physical，缩放比恒为 1。
+            // 与 Canvas2D 路径共用同一写回策略（`writeCanvasCssSize`），
+            // 两条路径因此不会出现半像素级的层间错位。
+            writeCanvasCssSize(canvas, target.cssWidthPx, target.cssHeightPx);
             gl.viewport(0, 0, target.physicalWidthPx, target.physicalHeightPx);
             return target;
         },

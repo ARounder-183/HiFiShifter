@@ -1,3 +1,12 @@
+// ARA宿主UI载荷可附只读淡化轴；独立App不生成这些字段，音频仍由宿主淡化。
+export interface HostFadeMetadata {
+    curve_mode: "reaper_new" | "legacy" | "unknown" | "hifishifter";
+    in_curvature: number;
+    out_curvature: number;
+    in_s: number;
+    out_s: number;
+}
+
 export type ApiResult<T> =
     | ({ ok: true } & T)
     | {
@@ -100,6 +109,7 @@ export interface TimelineClip {
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
     snap_offset_sec?: number;
     fade_in_sec?: number;
+    host_fades?: HostFadeMetadata;
     fade_out_sec?: number;
     /** REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传保存）。 */
     fade_in_shape?: number;
@@ -429,6 +439,14 @@ export interface ParamFramesPayload {
      * 原声"物化成显式目标电平（基线重分析后不再跟随、响度漂移）。
      */
     edit_sentinel?: boolean[];
+    /**
+     * 本次 `orig`（DYN 原声基线）**所依据的 clip 几何**的溯源键（仅 dyn 返回）。
+     *
+     * 拖拽期间后端几何被冻结 ⇒ 这个键恒定，返回的基线一律对应"按下之前"的几何，
+     * 参数编辑器据此在本地把基线搬到新位置；提交写回后端后键必变 ⇒ 「键变了」就是
+     * 「这份基线已经反映新几何」的**事实**判据（详见 `LoudnessSnapshot.baselineKey`）。
+     */
+    dyn_orig_key?: string | null;
 }
 
 export interface PitchProgressPayload {
@@ -448,6 +466,19 @@ export interface OnnxStatusResult {
     available: boolean;
     error: string | null;
     ep_choice: string;
+}
+
+/**
+ * vslib 可用性（`get_vslib_status`）。
+ *
+ * 供算法列表按能力过滤：`available === false` 时前端隐藏 vslib 选项 ——
+ * 否则用户选中它只会静默回退到别的算法。
+ */
+export interface VslibStatusResult {
+    compiled: boolean;
+    available: boolean;
+    version: number | null;
+    error: string | null;
 }
 
 export interface OnnxDiagnosticResult {

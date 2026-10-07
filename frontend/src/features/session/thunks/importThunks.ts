@@ -15,6 +15,34 @@ import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
+import {isPluginMode} from "../../../services/hostCapabilities";
+import {getPluginHost} from "../../../services/pluginHost";
+import type {TimelineResult} from "../../../types/api";
+
+/** 插件多文件依原GUI模式导入；每次确认宿主ARA返回的确切new clip，不按位置猜目标。 */
+async function importHostBatch(args:{inputs:Array<string|File>;mode:"across-time"|"across-tracks";trackId?:string|null;startSec:number;
+    getSession:()=>SessionState;publish:(timeline:TimelineResult)=>void;cancelled:()=>boolean}) {
+    if(args.inputs.length>512) throw new Error("Host import batch exceeds 512 clips");
+    const roots=args.getSession().tracks.filter(track=>!track.parentId);
+    const first=args.trackId?Math.max(0,roots.findIndex(track=>track.id===args.trackId)):0;
+    let track:string|null|undefined=args.trackId;let cursor=args.startSec;let last:TimelineResult|undefined;const newClipIds:string[]=[];
+    await webApi.beginUndoGroup("import_media");
+    try {for(let i=0;i<args.inputs.length;i++) {
+        if(args.cancelled()) break;
+        if(args.mode==="across-tracks") track=args.trackId===null?null:roots[first+i]?.id??null;
+        if(i===0&&roots.length===0&&track===null) track=undefined;
+        const input=args.inputs[i];const before=new Set(args.getSession().clips.map(clip=>clip.id));
+        const timeline=typeof input==="string"?await webApi.importAudioItem(input,track,cursor):
+            await getPluginHost()!.invoke<TimelineResult>("import_native_audio_file",{trackId:track,startSec:cursor},[input]);
+        if(!timeline.ok) throw new Error("host audio import failed");
+        const exact=(timeline as TimelineResult&{imported_clip_id?:string}).imported_clip_id;
+        const clip=timeline.clips?.find(clip=>exact?clip.id===exact:!before.has(clip.id));
+        if(!clip) throw new Error("host import returned no matching clip");
+        newClipIds.push(clip.id);last=timeline;args.publish(timeline);
+        if(args.mode==="across-time") {track=clip.track_id;cursor=clip.start_sec+clip.length_sec;}
+    }} finally {await webApi.endUndoGroup();}
+    return args.cancelled()?{ok:true,canceled:true,newClipIds}:{ok:true,imported:last,newClipIds,preservePlayhead:true};
+}
 
 type RawTimelineClip = {
     id?: string;
@@ -106,6 +134,8 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
 
     const latestTimeline = await webApi.getTimelineState();
     const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
+    // 插件导入回执已确认新item；不能用更早的读快照把它从GUI再次删掉。
+    if (isPluginMode() && newClipIds.some(id => !allClips.some(clip => clip.id === id))) return null;
     const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
     if (fadeUpdates.length > 0) {
         const fadePromises = fadeUpdates.map((u) =>
@@ -122,7 +152,9 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
         // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
         // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
         // UI 上回滚掉（后端仍保留，前后端就此分叉）。
-        return await webApi.getTimelineState();
+        const refreshed = await webApi.getTimelineState();
+        return isPluginMode() && newClipIds.some(id => !refreshed.clips.some(clip => clip.id === id))
+            ? latestTimeline : refreshed;
     }
     return latestTimeline;
 }
@@ -188,13 +220,22 @@ export const importAudioFromDialog = createAsyncThunk(
         // Delegate to importAudioAtPosition so imported clips start at playhead
         // and selection/undo handling is consistent with other import flows.
         try {
-            const res = await dispatch(
+            const res = (await dispatch(
                 importAudioAtPosition({
                     audioPath: firstPath,
                     trackId,
                     startSec,
                 }),
-            ).unwrap();
+            ).unwrap()) as {
+                canceled?: boolean;
+                imported?: unknown;
+                newClipIds?: string[];
+            };
+            // 被委托的位置导入若因撤销 / 工程切换而取消，必须原样上报取消 ——
+            // 否则会被当成"导入失败"写进状态栏（见 importAudioAtPosition）。
+            if (res.canceled) {
+                return { ok: true, canceled: true };
+            }
             return {
                 ok: true,
                 canceled: false,
@@ -211,32 +252,46 @@ export const importAudioFromDialog = createAsyncThunk(
 export const importAudioFromPath = createAsyncThunk(
     "session/importAudioFromPath",
     async (audioPath: string, { dispatch, rejectWithValue, getState }) => {
-        dispatch(setAudioPathAction(audioPath));
-        // 在发起导入前捕获现有 clip id 集合：await 期间其他 thunk 的
-        // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集。
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
-        const imported = await webApi.importAudioItem(audioPath);
-        if (!(imported as { ok?: boolean }).ok) {
-            const failure = imported as {
-                error?: { message?: string };
-                missing_files?: string[];
-            };
-            return rejectWithValue(
-                failure.error?.message ?? failure.missing_files?.[0] ?? "import_audio_item_failed",
+        // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的导入命令落地时后端
+        // 可能凭空造出 Track（见 importCancellation）。登记在途直到收尾，
+        // 历史跳转前会等它（见 registerImportRun）。
+        const importGen = currentImportGeneration();
+        const importRun = registerImportRun();
+        try {
+            dispatch(setAudioPathAction(audioPath));
+            // 在发起导入前捕获现有 clip id 集合：await 期间其他 thunk 的
+            // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集。
+            const beforeClipIds = new Set(
+                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
             );
+            const imported = await webApi.importAudioItem(audioPath);
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
+            if (!(imported as { ok?: boolean }).ok) {
+                const failure = imported as {
+                    error?: { message?: string };
+                    missing_files?: string[];
+                };
+                return rejectWithValue(
+                    failure.error?.message ??
+                        failure.missing_files?.[0] ??
+                        "import_audio_item_failed",
+                );
+            }
+            const result = imported as { clips?: Array<{ id?: string }> };
+            const newClipIds = (result.clips ?? [])
+                .map((c) => c.id)
+                .filter((id): id is string => !!id && !beforeClipIds.has(id));
+            return {
+                ok: true,
+                path: audioPath,
+                imported,
+                newClipIds,
+            };
+        } finally {
+            importRun.finish();
         }
-        const result = imported as { clips?: Array<{ id?: string }> };
-        const newClipIds = (result.clips ?? [])
-            .map((c) => c.id)
-            .filter((id): id is string => !!id && !beforeClipIds.has(id));
-        return {
-            ok: true,
-            path: audioPath,
-            imported,
-            newClipIds,
-        };
     },
 );
 
@@ -254,10 +309,17 @@ export const importAudioAtPosition = createAsyncThunk(
     ) => {
         dispatch(setAudioPathAction(payload.audioPath));
 
+        // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的建轨 / 导入命令落地时
+        // 后端可能凭空造出 Track（见 importCancellation）。
+        const importGen = currentImportGeneration();
         await webApi.beginUndoGroup("import_media");
+        const importRun = registerImportRun();
         try {
-            let targetTrackId: string | undefined;
-            if (payload.trackId === null) {
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
+            let targetTrackId: string | null | undefined;
+            if (payload.trackId === null && !isPluginMode()) {
                 // "插入到新轨道"：新轨道以这个文件命名。
                 const createdId = await createTrackForImport({
                     dispatch: dispatch as unknown as TrackDispatch,
@@ -269,7 +331,11 @@ export const importAudioAtPosition = createAsyncThunk(
                 }
                 targetTrackId = createdId;
             } else {
-                targetTrackId = payload.trackId ?? undefined;
+                targetTrackId = isPluginMode()&&payload.trackId===null&&(getState() as {session:SessionState}).session.tracks.length>0?null:payload.trackId??undefined;
+            }
+            // 建轨在途期间被撤销：不要继续往即将消失的轨道上灌 clip。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
             const beforeClipIds = new Set(
@@ -282,6 +348,9 @@ export const importAudioAtPosition = createAsyncThunk(
                 payload.startSec,
                 payload.mediaAudioStreamIndex,
             );
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
             if (!(imported as { ok?: boolean }).ok) {
                 const failure = imported as {
                     error?: { message?: string };
@@ -306,6 +375,10 @@ export const importAudioAtPosition = createAsyncThunk(
                 getState,
                 newClipIds,
             });
+            // 自动交叉淡化 / 重取时间线在途期间被撤销：不得把快照带回去。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
 
             if (payload.normalizeAfterImport && newClipIds.length > 0) {
                 const timelineForNormalization = (latestTimeline ?? imported) as {
@@ -320,6 +393,14 @@ export const importAudioAtPosition = createAsyncThunk(
                     }>;
                 };
                 for (const clipId of newClipIds) {
+                    if (isImportCancelled(importGen)) {
+                        return {
+                            ok: true,
+                            canceled: true,
+                            imported: null,
+                            newClipIds: [] as string[],
+                        };
+                    }
                     const clip = timelineForNormalization.clips?.find(
                         (entry) => entry.id === clipId,
                     );
@@ -370,9 +451,10 @@ export const importAudioAtPosition = createAsyncThunk(
                 ok: true,
                 imported: importedResult,
                 newClipIds,
-                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
+                playheadSec: !isPluginMode() && typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } finally {
+            importRun.finish();
             void webApi.endUndoGroup();
         }
     },
@@ -384,10 +466,17 @@ export const importAudioFileAtPosition = createAsyncThunk(
         payload: { file: File; trackId?: string | null; startSec?: number },
         { dispatch, rejectWithValue, getState },
     ) => {
+        // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的建轨 / 导入命令落地时
+        // 后端可能凭空造出 Track（见 importCancellation）。
+        const importGen = currentImportGeneration();
         await webApi.beginUndoGroup("import_media");
+        const importRun = registerImportRun();
         try {
-            let targetTrackId: string | undefined;
-            if (payload.trackId === null) {
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
+            let targetTrackId: string | null | undefined;
+            if (payload.trackId === null && !isPluginMode()) {
                 // "插入到新轨道"：新轨道以这个文件命名。
                 const createdId = await createTrackForImport({
                     dispatch: dispatch as unknown as TrackDispatch,
@@ -399,7 +488,11 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 }
                 targetTrackId = createdId;
             } else {
-                targetTrackId = payload.trackId ?? undefined;
+                targetTrackId = isPluginMode()&&payload.trackId===null&&(getState() as {session:SessionState}).session.tracks.length>0?null:payload.trackId??undefined;
+            }
+            // 建轨在途期间被撤销：不要继续往即将消失的轨道上灌 clip。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
             const beforeClipIds = new Set(
@@ -407,22 +500,26 @@ export const importAudioFileAtPosition = createAsyncThunk(
             );
 
             const fileName = String(payload.file.name ?? "dropped-audio");
-            const dataUrl = await new Promise<string>((resolve, reject) => {
+            const host=getPluginHost();
+            const dataUrl = host?null:await new Promise<string>((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onerror = () => reject(new Error("read_failed"));
                 reader.onload = () => resolve(String(reader.result ?? ""));
                 reader.readAsDataURL(payload.file);
             });
 
-            const commaIdx = dataUrl.indexOf(",");
-            const base64 = commaIdx !== -1 ? dataUrl.substring(commaIdx + 1) : dataUrl;
+            const commaIdx = dataUrl?.indexOf(",")??-1;
+            const base64 = dataUrl?(commaIdx !== -1 ? dataUrl.substring(commaIdx + 1) : dataUrl):"";
 
-            const imported = await webApi.importAudioBytes(
+            const imported = host?await host.invoke<TimelineResult>("import_native_audio_file",{trackId:targetTrackId,startSec:payload.startSec},[payload.file]):await webApi.importAudioBytes(
                 fileName,
                 base64,
                 targetTrackId,
                 payload.startSec,
             );
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
             if (!(imported as { ok?: boolean }).ok) {
                 return rejectWithValue(
                     (imported as { error?: { message?: string } }).error?.message ??
@@ -442,6 +539,10 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 getState,
                 newClipIds,
             });
+            // 自动交叉淡化 / 重取时间线在途期间被撤销：不得把快照带回去。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
 
             // 导入后将光标定位到第一个音频块的起始位置（经独立字段交 reducer 采纳）。
             const importedResult = latestTimeline ?? imported;
@@ -450,13 +551,14 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 ok: true,
                 imported: importedResult,
                 newClipIds,
-                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
+                playheadSec: !isPluginMode() && typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } catch (err) {
             return rejectWithValue(
                 err instanceof Error ? err.message : "import_audio_bytes_failed",
             );
         } finally {
+            importRun.finish();
             void webApi.endUndoGroup();
         }
     },
@@ -481,6 +583,14 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
     ) => {
         const { audioPaths, mode, startSec = 0 } = payload;
         if (audioPaths.length === 0) return { ok: true };
+        if(isPluginMode()) {
+            if(mode==="as-takes") return rejectWithValue("Alternative take batch import is not implemented in plugin mode");
+            const generation=currentImportGeneration();const run=registerImportRun();
+            try {return await importHostBatch({inputs:audioPaths,mode,trackId:payload.trackId,startSec,
+                getSession:()=> (getState() as {session:SessionState}).session,
+                publish:timeline=>{dispatch(applyTimelinePayload(timeline));},cancelled:()=>isImportCancelled(generation)});
+            } catch(error) {return rejectWithValue(error instanceof Error?error.message:"host batch import failed");} finally {run.finish();}
+        }
 
         // Single file → delegate to importAudioAtPosition
         if (audioPaths.length === 1) {
@@ -894,6 +1004,13 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
     ) => {
         const { files, mode, startSec = 0 } = payload;
         if (!files || files.length === 0) return { ok: true };
+        if(isPluginMode()) {
+            const generation=currentImportGeneration();const run=registerImportRun();
+            try {return await importHostBatch({inputs:files,mode,trackId:payload.trackId,startSec,
+                getSession:()=> (getState() as {session:SessionState}).session,
+                publish:timeline=>{dispatch(applyTimelinePayload(timeline));},cancelled:()=>isImportCancelled(generation)});
+            } catch(error) {return rejectWithValue(error instanceof Error?error.message:"host File batch import failed");} finally {run.finish();}
+        }
 
         // Single file → delegate to importAudioFileAtPosition
         if (files.length === 1) {
@@ -1087,8 +1204,15 @@ export const importMidiAsClip = createAsyncThunk(
         },
         { dispatch, rejectWithValue, getState },
     ) => {
+        // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的建轨 / 导入命令落地时
+        // 后端可能凭空造出 Track（见 importCancellation）。
+        const importGen = currentImportGeneration();
         await webApi.beginUndoGroup("import_vocalshifter");
+        const importRun = registerImportRun();
         try {
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
             // 必须在发起导入前捕获现有 clip id 集合（契约见 openVocalShifterFromDialog）：
             // await 期间其他 thunk 的 fulfilled 可能已把新 clip 写进 state，
             // 事后取差集会漏掉真正新增的 clip。
@@ -1110,6 +1234,10 @@ export const importMidiAsClip = createAsyncThunk(
             } else {
                 targetTrackId = payload.trackId;
             }
+            // 建轨在途期间被撤销：不要继续往即将消失的轨道上灌 clip。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
 
             const imported = await webApi.importMidiAsClip(
                 payload.midiPath,
@@ -1128,6 +1256,9 @@ export const importMidiAsClip = createAsyncThunk(
                 payload.importTimeSignature,
                 payload.importKeySignature,
             );
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
             if (!(imported as { ok?: boolean }).ok) {
                 const errMsg =
                     (imported as { missing_files?: string[] }).missing_files?.[0] ??
@@ -1142,6 +1273,7 @@ export const importMidiAsClip = createAsyncThunk(
         } catch (err) {
             return rejectWithValue(err instanceof Error ? err.message : "import_midi_clip_failed");
         } finally {
+            importRun.finish();
             void webApi.endUndoGroup();
         }
     },

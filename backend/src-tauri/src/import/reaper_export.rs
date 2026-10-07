@@ -907,7 +907,7 @@ pub fn build_reaper_clipboard(
         }
         data.tracks.push(track);
         data.track_offsets
-            .push(track_index.saturating_sub(first_track_index) as usize);
+            .push(track_index.saturating_sub(first_track_index));
         if offset == 0 {
             data.track_offsets[0] = 0;
         }
@@ -1175,7 +1175,8 @@ mod tests {
         }
 
         let export =
-            build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
+            build_reaper_clipboard(&timeline, std::slice::from_ref(&clip_id), &BTreeMap::new())
+                .unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
@@ -1198,7 +1199,8 @@ mod tests {
             clip.sync_take_from_flat();
         }
         let export2 =
-            build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
+            build_reaper_clipboard(&timeline, std::slice::from_ref(&clip_id), &BTreeMap::new())
+                .unwrap();
         let parsed2 = parse_for_test(&export2.bytes);
         let item2 = &parsed2.tracks[0].items[0];
         assert!(!item2.is_loop, "short non-loop clip must not infer loop");

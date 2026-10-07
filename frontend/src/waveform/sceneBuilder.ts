@@ -30,6 +30,7 @@ import {
     viewportStartSec as axisViewportStartSec,
     type TimelineAxis,
 } from "../components/layout/renderKernel/timelineAxis.ts";
+import type {HostFadeMetadata} from "../types/api";
 
 export interface WaveformSceneClip {
     id: string;
@@ -48,6 +49,8 @@ export interface WaveformSceneClip {
     muted: boolean;
     fadeInSec: number;
     fadeOutSec: number;
+    /** 仅UI使用，曲线描边和波形使用同一HiFiShifter示意包络。 */
+    hostFades?: HostFadeMetadata;
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
     /** REAPER 风格淡入形状 id（同 ClipInfo.fadeInShape，见 reaperFade.ts）。 */
@@ -97,6 +100,7 @@ export interface WaveformSceneSegment {
     gain: number;
     fadeInSec: number;
     fadeOutSec: number;
+    hostFades?: HostFadeMetadata;
     /** REAPER 风格淡入形状 id（同 WaveformSceneClip，见 reaperFade.ts）。 */
     fadeInShape: number;
     fadeInDir: number;
@@ -118,6 +122,15 @@ export interface WaveformSceneMarker {
     yPx: number;
     heightPx: number;
     kind: "loop" | "media-boundary";
+    /**
+     * 所属 Clip 本体的水平边界（视口 CSS 像素，与 `xPx` 同一坐标系）。
+     *
+     * 【为什么需要】标记画成实心 ▽，半宽固定（≈ 4px），因此**贴着 Clip 边缘**
+     * 的标记会有一半探出 Clip 之外。几何层据此把每一扫描行裁到本体范围内，
+     * 让超出部分被边缘切断（而不是悬空画在外面）。
+     */
+    clipLeftPx: number;
+    clipRightPx: number;
     /** inactive take lane：几何层据此压暗标记颜色。 */
     inactive?: boolean;
 }
@@ -368,6 +381,8 @@ export function buildWaveformScene(args: {
                         yPx: rowTopCanvasPx + bandTopPx,
                         heightPx: bandHeightPx,
                         kind: "loop",
+                        clipLeftPx: secToViewportPx(axis, clip.startSec),
+                        clipRightPx: secToViewportPx(axis, clipEndSec),
                         inactive: Boolean(clip.inactive),
                     });
                 }
@@ -477,6 +492,7 @@ export function buildWaveformScene(args: {
                         gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
                         fadeInSec,
                         fadeOutSec,
+                        hostFades: clip.hostFades,
                         fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
                         fadeInDir: clip.fadeInDir ?? 0,
                         fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
@@ -516,6 +532,8 @@ export function buildWaveformScene(args: {
                         yPx: rowTopCanvasPx + bandTopPx,
                         heightPx: bandHeightPx,
                         kind: "media-boundary",
+                        clipLeftPx: secToViewportPx(axis, clip.startSec),
+                        clipRightPx: secToViewportPx(axis, clipEndSec),
                         inactive: Boolean(clip.inactive),
                     });
                 }
