@@ -63,6 +63,7 @@
 // ── 出口与基础设施 ──────────────────────────────────────────────────────────
 pub mod build_info;
 pub mod byte_budget_cache;
+pub mod config_location;
 pub mod engine_command;
 pub mod events;
 pub mod host;

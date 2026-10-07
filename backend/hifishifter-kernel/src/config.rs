@@ -2438,6 +2438,144 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── 前端偏好 ────────────────────────────────────────────────────────
+
+    /// 每个测试用独立临时目录：这些函数真的落盘，共用目录会让并行测试互相踩。
+    fn prefs_scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hfs-prefs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// 写入的前端偏好必须能原样读回（这就是"设置持久化"的最小契约）。
+    #[test]
+    fn frontend_prefs_round_trip() {
+        let dir = prefs_scratch("round-trip");
+        let mut patch = std::collections::BTreeMap::new();
+        patch.insert("hifishifter.locale".to_string(), "ja-JP".to_string());
+        patch.insert(
+            "hifishifter.keybindings".to_string(),
+            "{\"a\":1}".to_string(),
+        );
+
+        let saved = super::save_frontend_prefs(&dir, &patch);
+        assert_eq!(
+            saved.get("hifishifter.locale").map(String::as_str),
+            Some("ja-JP")
+        );
+
+        // 重新读盘（模拟宿主重启）：值必须还在。
+        let loaded = super::load_frontend_prefs(&dir);
+        assert_eq!(loaded, saved, "重启后前端偏好丢失");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 部分保存只覆盖给出的键 —— 前端一次只发变更项，抹掉其余等于"改一个设置丢一批"。
+    #[test]
+    fn frontend_prefs_patch_keeps_untouched_keys() {
+        let dir = prefs_scratch("patch");
+        let mut first = std::collections::BTreeMap::new();
+        first.insert("hifishifter.locale".to_string(), "ko-KR".to_string());
+        first.insert("hifishifter.pxPerSec".to_string(), "120".to_string());
+        super::save_frontend_prefs(&dir, &first);
+
+        let mut second = std::collections::BTreeMap::new();
+        second.insert("hifishifter.pxPerSec".to_string(), "240".to_string());
+        super::save_frontend_prefs(&dir, &second);
+
+        let loaded = super::load_frontend_prefs(&dir);
+        assert_eq!(
+            loaded.get("hifishifter.pxPerSec").map(String::as_str),
+            Some("240")
+        );
+        assert_eq!(
+            loaded.get("hifishifter.locale").map(String::as_str),
+            Some("ko-KR"),
+            "未参与本次保存的键不得丢失"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 删除键后读不回来（"重置为默认"的落点）。
+    #[test]
+    fn frontend_prefs_delete_removes_only_the_named_keys() {
+        let dir = prefs_scratch("delete");
+        let mut patch = std::collections::BTreeMap::new();
+        patch.insert("hifishifter.appearance".to_string(), "dark".to_string());
+        patch.insert("hifishifter.customThemes".to_string(), "[]".to_string());
+        super::save_frontend_prefs(&dir, &patch);
+
+        let after = super::delete_frontend_prefs(&dir, &["hifishifter.appearance".to_string()]);
+        assert!(!after.contains_key("hifishifter.appearance"));
+        assert!(
+            after.contains_key("hifishifter.customThemes"),
+            "只该删指定的键"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 前端偏好与 UI 设置互不干扰：写偏好不能重置 UI 设置，反之亦然。
+    ///
+    /// 【为什么单独钉这一条】两者共用一个文件。若偏好写走"整体替换"，用户每改一次
+    /// 缩放就会把整套 UI 设置打回默认 —— 而症状是"设置偶尔丢失"，极难复现。
+    #[test]
+    fn frontend_prefs_and_ui_settings_do_not_clobber_each_other() {
+        let dir = prefs_scratch("no-clobber");
+        let mut ui = super::load_ui_settings(&dir);
+        ui.auto_crossfade = true;
+        ui.ruler_label_spacing_px = 123;
+        super::save_ui_settings(&dir, &ui);
+
+        let mut patch = std::collections::BTreeMap::new();
+        patch.insert("hifishifter.locale".to_string(), "zh-TW".to_string());
+        super::save_frontend_prefs(&dir, &patch);
+
+        let ui_after = super::load_ui_settings(&dir);
+        assert!(ui_after.auto_crossfade, "写偏好不得重置 UI 设置");
+        assert_eq!(ui_after.ruler_label_spacing_px, 123);
+        assert_eq!(
+            super::load_frontend_prefs(&dir)
+                .get("hifishifter.locale")
+                .map(String::as_str),
+            Some("zh-TW")
+        );
+
+        // 反向：再写一次 UI 设置，偏好必须还在。
+        let mut ui2 = super::load_ui_settings(&dir);
+        ui2.auto_crossfade = false;
+        super::save_ui_settings(&dir, &ui2);
+        assert_eq!(
+            super::load_frontend_prefs(&dir)
+                .get("hifishifter.locale")
+                .map(String::as_str),
+            Some("zh-TW"),
+            "写 UI 设置不得丢掉前端偏好"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原子替换必须真的覆盖已存在的目标文件（Windows 上 `rename` 做不到，
+    /// 而"先删再改名"会留下一个目标文件不存在的窗口）。
+    #[test]
+    fn atomic_replace_overwrites_an_existing_file() {
+        let dir = prefs_scratch("atomic");
+        let target = dir.join("app_config.json");
+        let tmp = dir.join("app_config.json.tmp");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&tmp, b"new").unwrap();
+
+        super::replace_file_atomically(&tmp, &target).expect("replace must succeed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!tmp.exists(), "临时文件应已被改名消耗掉");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 持久化配置根结构。
@@ -2456,6 +2594,15 @@ struct AppConfig {
     /// 持久化的窗口状态（可选）。
     #[serde(default)]
     window: WindowState,
+    /// 前端偏好（原 `localStorage` 里的 `hifishifter.*` 键）。
+    ///
+    /// 【为什么是独立顶层字段而不是塞进 `ui`】这些值前端只按字符串读写，形状不由
+    /// `UiSettings` 约束。放进 `ui` 就得给 `UiSettings` 加一个 `BTreeMap`，而
+    /// `save_ui_settings` 的合并白名单（`DEEP_MERGE_KEYS`）是按对象做子键合并的 ——
+    /// 前端一次只发几个键的部分保存会把其余偏好整块抹掉。独立字段让两条写入路径
+    /// 互不干扰：`ui` 由 `save_ui_settings` 管，这里只由 KV 命令管。
+    #[serde(default)]
+    frontend_prefs: std::collections::BTreeMap<String, String>,
 }
 
 impl AppConfig {
@@ -2512,19 +2659,55 @@ fn load_config(config_dir: &Path) -> AppConfig {
     }
 }
 
+/// 把临时文件原子地替换为目标文件。
+///
+/// 【为什么不能直接 `fs::rename`】Windows 上 rename 拒绝覆盖已存在的目标，因此
+/// 原先的写法必须先 `remove_file` 再 rename —— 那中间的窗口里**目标文件是不存在
+/// 的**。两个进程同时保存（独立 App 与 REAPER 里的插件现在共用这一个文件）时，
+/// 恰好落在窗口里的那次读取会拿不到任何配置，等于用户设置被清空。删除也不原子：
+/// 删掉之后 rename 失败（磁盘满、被杀进程）就只剩 `.bak` 能救。
+///
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` 是同一卷内的原子替换，正是这里要的语义。
+/// 非 Windows 平台的 `fs::rename` 本身就是原子替换，保持原样。
+fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+
+        let wide =
+            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
+        let tmp_wide = wide(tmp);
+        let target_wide = wide(target);
+        // SAFETY: 两个缓冲区都是 NUL 结尾的宽字符串，且在本调用期间存活。
+        let moved = unsafe {
+            MoveFileExW(
+                PCWSTR(tmp_wide.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING,
+            )
+        };
+        if moved.is_ok() {
+            return Ok(());
+        }
+        // 目标不存在时 MOVEFILE_REPLACE_EXISTING 也可用，但仍回退一次 rename：
+        // 某些网络/可移动卷上的 MoveFileEx 会失败，而那里的 rename 通常可行。
+        return fs::rename(tmp, target);
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(tmp, target)
+    }
+}
+
 fn save_config(config_dir: &Path, cfg: &AppConfig) {
     let path = config_dir.join("app_config.json");
     if let Ok(data) = serde_json::to_string_pretty(cfg) {
         // 原子写：先写临时文件再替换，避免进程中断留下半截 JSON，
         // 下次启动解析失败导致全部设置静默回退默认值。
         let tmp = config_dir.join("app_config.json.tmp");
-        match fs::write(&tmp, &data).and_then(|()| {
-            // Windows 上 rename 不能覆盖已存在目标，先删旧文件。
-            if path.exists() {
-                let _ = fs::remove_file(&path);
-            }
-            fs::rename(&tmp, &path)
-        }) {
+        match fs::write(&tmp, &data).and_then(|()| replace_file_atomically(&tmp, &path)) {
             Ok(()) => {
                 // 保留上一份成功写入的副本，供解析失败时兜底恢复。
                 let _ = fs::write(config_dir.join("app_config.json.bak"), &data);
@@ -2694,6 +2877,51 @@ pub fn save_auto_backup_settings(config_dir: &Path, settings: &AutoBackupSetting
     let mut cfg = load_config(config_dir);
     cfg.auto_backup = settings.normalized();
     save_config(config_dir, &cfg);
+}
+
+// ── 前端偏好（原 localStorage 的 `hifishifter.*` 键）───────────────────────
+//
+// 【为什么搬到后端】这些值原先只存在 WebView 的 localStorage 里，而插件窗口的
+// WebView2 用户数据目录是**每进程**的临时目录 —— 退出 REAPER 即丢，连"上次选的
+// 语言"都留不住。搬到配置文件后两个形态共用同一份，用户在 App 里调好的外观与
+// 快捷键在插件里直接生效。
+//
+// 键名沿用原来的 `hifishifter.*` 字符串：迁移时不必做映射表，排查时也能直接把
+// 浏览器里看到的键名对上。
+
+/// 读取全部前端偏好。
+pub fn load_frontend_prefs(config_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    load_config(config_dir).frontend_prefs
+}
+
+/// 合并写入若干前端偏好（只覆盖给出的键，其余保持原样）。
+///
+/// 返回写入后的完整快照，调用方不必再读一次盘。
+pub fn save_frontend_prefs(
+    config_dir: &Path,
+    patch: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut cfg = load_config(config_dir);
+    for (key, value) in patch {
+        cfg.frontend_prefs.insert(key.clone(), value.clone());
+    }
+    let snapshot = cfg.frontend_prefs.clone();
+    save_config(config_dir, &cfg);
+    snapshot
+}
+
+/// 删除若干前端偏好键（"重置为默认"用）。
+pub fn delete_frontend_prefs(
+    config_dir: &Path,
+    keys: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut cfg = load_config(config_dir);
+    for key in keys {
+        cfg.frontend_prefs.remove(key);
+    }
+    let snapshot = cfg.frontend_prefs.clone();
+    save_config(config_dir, &cfg);
+    snapshot
 }
 
 /// 从 config dir 读取录音设置。

@@ -399,10 +399,14 @@ pub fn run() {
             let render_cache_base = base.join("hifishifter").join("render_cache");
             crate::render_cache::init(render_cache_base);
 
-            // 加载持久化的最近工程列表
-            if let Ok(cfg_base) = app.path().app_config_dir() {
-                let cfg_dir = cfg_base.join("HiFiShifter");
-                let _ = std::fs::create_dir_all(&cfg_dir);
+            // 加载持久化的最近工程列表。
+            //
+            // 【为什么不再用 `app.path().app_config_dir()`】路径改由内核统一计算：
+            // ARA 插件没有 Tauri（依赖树守卫禁止），它必须自己算出**同一个**目录，
+            // 否则两个形态各写一份设置 —— 用户在 App 里调好的外观、快捷键、语言
+            // 在插件里全部失效。让内核算一次、两边都调用，就没有第二处可以算错。
+            // 算出来的路径与 Tauri 的历史布局逐一对应（见 config_location 的模块注释）。
+            if let Ok(cfg_dir) = hifishifter_kernel::config_location::resolve_and_create(None) {
                 let recent = crate::config::load_recent(&cfg_dir);
                 {
                     let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
