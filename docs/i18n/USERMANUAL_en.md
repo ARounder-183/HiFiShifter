@@ -244,7 +244,7 @@ Every clip carries its own fade-in / fade-out envelope, and the interaction mode
 
 **Adjusting fade length**
 
-- Drag the fade envelope line (or the vertical edge line of the fade region) at the left / right end of a clip to change the fade-in / fade-out length. Dragging inward from a clip's top-left / top-right corner creates a fade from zero.
+- Drag the fade envelope line (or the vertical edge line of the fade region) at the left / right end of a clip to change the fade-in / fade-out length. To create a fade from zero, drag the small triangle at the top corner of the waveform area, *below* the name bar - that triangle is shown only while the side has no fade yet, and once a fade exists the envelope line itself becomes the handle. The knob and badges on the name bar are clip controls and do not accept fade gestures.
 - Clicking a fade control (without dragging) moves the playhead to the corresponding position: the envelope line addresses the inner edge of the fade region (fade-in → its right edge, fade-out → its left edge), the crossfade grip the clicked position, and a clip edge that edge's exact position.
 - Hovering over fade controls (envelope line, edge line, crossfade grip) shows a tooltip with the fade-in / fade-out type (curve icon), the length (in the primary / secondary time units from the time display settings), and the curvature.
 

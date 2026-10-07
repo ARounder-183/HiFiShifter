@@ -33,8 +33,8 @@ import {
 /**
  * 左右边缘（裁短 / 延长 / 拉伸）的命中宽度（CSS px）。
  *
- * 旧实现 `ClipEdgeHandles` 是 `w-[10px]`：比淡变角竖条（6px）宽，因此淡变角竖条
- * 所在的那条窄带之外、仍在 10px 内的部分**不**属于边缘——它落在 body 上。
+ * 旧实现 `ClipEdgeHandles` 是 `w-[10px]`，比淡变角横帽窄，因此横帽带**之下**的
+ * 10px 才是边缘；横帽带之内判渐变角（见 `fadeCornerReservePx` 的垂直切分）。
  */
 const EDGE_WIDTH_PX = 10;
 
