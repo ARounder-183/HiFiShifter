@@ -750,6 +750,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "save_ui_settings":
             return args[0] as Record<string, unknown>;
 
+        // 前端偏好（原 localStorage 的 `hifishifter.*` 键）：与 `save_ui_settings`
+        // 同形，位置参数已经是一个对象。
+        case "ui_kv_put":
+        case "ui_kv_delete":
+            return args[0] as Record<string, unknown>;
+
         case "save_auto_backup_settings":
             return { settings: args[0] };
 
@@ -902,6 +908,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_runtime_info",
     "get_timeline_state",
     "get_ui_settings",
+    "ui_kv_dump",
     "get_vslib_status",
     "has_reaper_clipboard",
     "has_timeline_clipboard",

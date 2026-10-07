@@ -32,6 +32,13 @@ import { installGlobalErrorReporting } from "./services/frontendErrorLog";
 installGlobalErrorReporting();
 
 /*
+ * 【为什么这里不做偏好 hydrate】独立窗口与主窗口同源，共用同一份 `localStorage`；
+ * 而它只会由主窗口创建，也就是说主窗口早已把后端偏好灌回缓存
+ * （见 `main.tsx` 与 `services/uiStorage.ts`）。在这里再灌一次要重排模块加载顺序
+ * （`store` 在模块加载期就读快捷键覆盖项），换不来任何正确性。
+ */
+
+/*
  * 独立窗口是**另一个 JS 上下文**：主窗口 `App.tsx` 里的模块级注册不会执行到这里，
  * 因此必须自己注册一次 —— 否则 `DetachedRoot` 查注册中心查不到任何面板，
  * 表现为"拆出去的面板是一片空白"。注册是幂等的（同 id 覆盖），两处调用无冲突。

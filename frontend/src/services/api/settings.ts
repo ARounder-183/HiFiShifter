@@ -570,4 +570,17 @@ export const settingsApi = {
         saveChain = run.catch(() => undefined);
         return run;
     },
+    /**
+     * 前端偏好（原 `localStorage` 的 `hifishifter.*` 键）。
+     *
+     * 【为什么与 `saveUiSettings` 分家】两者写的是配置文件里不同的顶层字段：
+     * `save_ui_settings` 管 `ui`（一层深合并的白名单对象），这里管
+     * `frontendPrefs`（纯字符串键值）。混在一起会让前者的部分保存把后者整块
+     * 覆盖掉。串行链也只服务 `save_ui_settings` —— 偏好是批量去抖提交的，
+     * 单笔之间没有相互依赖。
+     */
+    uiKvDump: () => invoke<Record<string, string>>("ui_kv_dump"),
+    uiKvPut: (patch: Record<string, string>) =>
+        invoke<Record<string, string>>("ui_kv_put", { patch }),
+    uiKvDelete: (keys: string[]) => invoke<Record<string, string>>("ui_kv_delete", { keys }),
 };

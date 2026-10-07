@@ -1,82 +1,35 @@
-/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { useEffect } from "react";
-import { Provider } from "react-redux";
-import "@radix-ui/themes/styles.css";
-import "./index.css";
-import App from "./App.tsx";
-import { store } from "./app/store";
-import { getDockDragState } from "./features/dock/dockDragStore";
-import { isFileBrowserDragActive } from "./features/fileBrowser/fileBrowserDragStore";
-import { AppTooltipProvider } from "./components/AppTooltip";
-import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
-import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
-import { I18nProvider } from "./i18n/I18nProvider";
-import { AppThemeProvider } from "./theme/AppThemeProvider";
-import { initModifierWatcher } from "./components/layout/timeline/hooks/modifierWatcher";
+/**
+ * 入口：先让用户偏好就位，再加载并挂载应用。
+ *
+ * 【为什么是"先 hydrate 再 import"】偏好（语言 / 快捷键 / 外观 / 时间轴缩放…）
+ * 由后端的共享配置文件持有，而它们的读取点大量是同步的、有些还发生在**模块加载期**
+ * （`keybindingsSlice` 建 store 时读覆盖项、`themeStorage` 读外观、
+ * `fileBrowserSlice` 读上次目录）。如果先静态 import 应用再 hydrate，那些读取已经
+ * 按空值定型了 —— 界面会以默认外观与默认快捷键起手，用户会看到"设置没保存"。
+ *
+ * 因此本文件**只做两件事**：灌数据、动态加载 `./mount`。所有应用模块都在
+ * `hydrateUiStorage()` 之后才被求值。顶层的 `await` 由构建目标支持
+ * （`import.meta.env` 与 `await import` 已在既有代码里使用）。
+ */
+
 import { installGlobalErrorReporting } from "./services/frontendErrorLog";
+import { hydrateUiStorage, installUiStorageFlushHooks } from "./services/uiStorage";
 
 // 全局兜底：未捕获异常 / 未处理的 Promise rejection 回传到后端统一日志。
 installGlobalErrorReporting();
 
-// dev-only 后端替身：URL 带 `?mock=1` 时在渲染前安装假后端，使前端可在纯浏览器
+// dev-only 后端替身：URL 带 `?mock=1` 时在灌数据之前安装假后端，使前端可在纯浏览器
 // 里独立运行（本工程默认依赖 pywebview / Tauri 后端）。生产构建不打包该模块。
 if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
     const { installMockBackend } = await import("./dev/mockBackend");
     installMockBackend();
 }
 
-/** 进程级全局手势基建：自愈式修饰键跟踪（淡化曲率等 modifierOnly 键位）。 */
-function GlobalGestureServices() {
-    useEffect(() => initModifierWatcher() ?? undefined, []);
-    return null;
-}
+// 写入是去抖的：关窗前的最后一次变更必须在 `pagehide` 补交。
+installUiStorageFlushHooks();
 
-// dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
-// 用法：`?perf=400`（clip 总数，按 10 轨均分）或 `?perf=10x40`（轨数 × 每轨
-// clip 数）冷启动即全览；运行时也可用控制台 `window.__hsPerf({...})` 重生成。
-if (import.meta.env.DEV) {
-    void import("./dev/perfProject").then((module) => module.installPerfProjectDevtools());
-    // dev-only 调试出口：把 store 挂到 window，便于在浏览器里读取**真实**运行期状态
-    // （选区来源标记 `multiSelectionIntentional` 这类"必须有 Redux 上下文才能验证"
-    // 的事实，从内核句柄读不到）。生产构建不挂载。
-    (window as unknown as { __hfsStore?: typeof store }).__hfsStore = store;
-}
+// 偏好就位（后端不可用时静默降级为本机缓存），此后加载的应用模块才能读到正确的值。
+await hydrateUiStorage();
 
-// 帧率探针不再自动挂载：它是排查滚动/缩放掉帧时的临时测量工具，瓶颈
-// 定位完成后已从打包版移除（右上角浮层）。dev 下仍可经 PERF 面板的
-// 「profiler」开关临时开启。
-
-createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-        <Provider store={store}>
-            <I18nProvider>
-                <AppThemeProvider>
-                    <AppTooltipProvider
-                        isSuppressedExternal={() =>
-                            // 停靠拖拽期间必须抑制悬停提示：它不再是原生 tooltip，
-                            // 不会自己消失，会正好盖住拖拽时给用户看的落点提示。
-                            //
-                            // 文件浏览器拖拽同理：行既带 `data-tooltip` 又是拖拽源，
-                            // 不抑制的话气泡会被钉住并一路跟着鼠标飘到时间轴上方。
-                            fadeToolTipSuppress.isSuppressed ||
-                            getDockDragState()?.started === true ||
-                            isFileBrowserDragActive()
-                        }
-                    >
-                        <GlobalGestureServices />
-                        {/*
-                          根级错误边界：兜住面板子树之外抛出的渲染异常。
-                          没有它时，任何非面板位置抛错都会卸载整棵树、留下空白窗口。
-                          放在 Provider 内侧以便用上主题与语言，包住 App 整体。
-                        */}
-                        <AppRootErrorBoundary>
-                            <App />
-                        </AppRootErrorBoundary>
-                    </AppTooltipProvider>
-                </AppThemeProvider>
-            </I18nProvider>
-        </Provider>
-    </StrictMode>,
-);
+const { mountApp } = await import("./mount");
+mountApp();
