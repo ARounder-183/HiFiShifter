@@ -205,16 +205,31 @@ pub(super) fn dispatch(
         "list_directory" | "stat_paths" | "get_audio_file_info" | "search_files_recursive" => {
             return session.browser_command(command, &input)
         }
-        "get_ui_settings" => return value(session.settings.lock().unwrap().clone()),
+        // 设置由进程级的 `settings_store` 持有：它属于用户，不属于某一个 ARA 文档，
+        // 并且与独立 App 共用同一份配置文件。此前这里是 `session.settings`（每个
+        // 文档一份、初始化为出厂默认），保存只改内存、不落盘。
+        "get_ui_settings" => return value(crate::settings_store::settings()),
         "save_ui_settings" => {
-            let mut current = session.settings.lock().unwrap();
-            let patched = hifishifter_kernel::editor::settings::merge(
-                serde_json::to_value(&*current).map_err(|e| e.to_string())?,
+            return value(crate::settings_store::save_settings_patch(
                 &input["settings"],
-            );
-            let settings: hifishifter_kernel::config::UiSettings = args(patched)?;
-            *current = settings;
-            return Ok(json!({"ok":true}));
+            )?)
+        }
+        // 前端偏好（原 localStorage 的 `hifishifter.*` 键）。批量接口：前端启动时
+        // 一次取走全部、写入时按去抖批量提交，避免一次设置变更产生多个往返。
+        "ui_kv_dump" => return value(crate::settings_store::frontend_prefs()),
+        "ui_kv_put" => {
+            let patch: std::collections::BTreeMap<String, String> = args(input["patch"].clone())?;
+            if patch.len() > 512 {
+                return Err("too many preference keys in one write".into());
+            }
+            return value(crate::settings_store::save_frontend_prefs(patch));
+        }
+        "ui_kv_delete" => {
+            let keys: Vec<String> = args(input["keys"].clone())?;
+            if keys.len() > 512 {
+                return Err("too many preference keys in one delete".into());
+            }
+            return value(crate::settings_store::delete_frontend_prefs(&keys));
         }
         "get_about_info" => {
             // 与独立 App **逐字段同形**：前端 `AboutDialog` 只认这一组键。
@@ -281,7 +296,15 @@ pub(super) fn dispatch(
             session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;
             return payload(session, false);
         }
-        "set_ui_locale" => return Ok(json!({"ok":true,"locale":input["locale"]})),
+        // 语言原先只是原样回显（"返回 ok 但什么也没做"）。现在记进与独立 App
+        // 共用的前端偏好，用户换回 App 时语言也跟着走。
+        "set_ui_locale" => {
+            let locale = input["locale"].as_str().ok_or("locale missing")?;
+            if locale.len() > 32 {
+                return Err("locale too long".into());
+            }
+            return Ok(json!({"ok":true,"locale":crate::settings_store::set_locale(locale)}));
+        }
         "consume_startup_project_path" => return Ok(Value::Null),
         "get_processor_params" => {
             return value(

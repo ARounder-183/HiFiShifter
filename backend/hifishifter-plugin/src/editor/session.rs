@@ -96,7 +96,9 @@ pub(crate) struct EditorSession {
     pub(super) timeline: Mutex<TimelineState>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
-    pub(super) settings: Mutex<hifishifter_kernel::config::UiSettings>,
+    // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
+    // 于是每个工程一份、初始化为出厂默认，换工程即丢。现在由进程级的
+    // `crate::settings_store` 持有（与独立 App 共用同一份配置文件）。
     loaded: Mutex<Loaded>,
     pub(super) namespace: String,
     pub(super) browser_roots: Mutex<Vec<PathBuf>>,
@@ -234,7 +236,6 @@ impl EditorSession {
             timeline: Mutex::new(TimelineState::default()),
             history: Mutex::new(Default::default()),
             project: Mutex::new(ProjectState::default()),
-            settings: Mutex::new(hifishifter_kernel::config::UiSettings::default()),
             loaded: Mutex::new(Default::default()),
             pcm_dir: std::env::temp_dir()
                 .join("hifishifter-plugin-pcm")

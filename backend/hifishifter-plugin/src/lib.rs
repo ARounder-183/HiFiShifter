@@ -58,6 +58,7 @@ mod editor;
 mod fade;
 pub mod render;
 mod runtime;
+mod settings_store;
 mod state_channel;
 mod state_stream;
 #[cfg(test)]
