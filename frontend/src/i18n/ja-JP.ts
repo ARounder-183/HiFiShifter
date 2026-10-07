@@ -2070,4 +2070,49 @@ export const jaJP = {
     vibrato_unit_degree: "音級",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "周期",
+
+    // ── ARA host session（スタンドアロン版のホスト接続セッション）──────
+    ara_panel_title: "ARA / REAPER",
+    ara_instance_label: "ARA インスタンス",
+    ara_no_instances: "インスタンスが見つかりません",
+    ara_refresh_instances: "インスタンスを更新",
+    ara_connect: "接続",
+    ara_submit: "REAPER に送信",
+    ara_refresh_host: "ホストを更新",
+    ara_disconnect: "切断",
+    ara_reverse_unsupported: "逆再生は未対応",
+    ara_busy: "処理中...",
+    ara_status_connected: "接続済み",
+    ara_status_refreshed: "更新済み",
+    ara_status_submitted: "送信済み",
+    ara_status_disconnected: "切断済み",
+    ara_error_connect: "ARA 接続に失敗しました",
+    ara_error_submit: "ARA 送信に失敗しました",
+    ara_error_disconnect: "ARA 切断に失敗しました",
+    ara_replace_dirty_message:
+        "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
+    ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",
+    ara_revisions: "リビジョン {revision} · モデル {model}",
+    menu_ara_host: "ARA ホストに接続...",
+
+    // ── プラグインホストの自動適用状態（ステータスバーのチップ）───────
+    plugin_apply_waiting_host: "ホストのオーディオを待機中",
+    plugin_apply_pending: "自動適用中...",
+    plugin_apply_applied: "適用済み",
+    plugin_apply_error: "未適用：{error}",
+    plugin_apply_generations: "編集 {edits} / オーディオ {audio}",
+    plugin_apply_reload_host: "ホストから再読み込み",
+    plugin_apply_reload_message:
+        "未適用の編集が残っています。再読み込みするとローカルのカーブが置き換わります。続行しますか？",
+    plugin_apply_reload_confirm: "再読み込みを実行",
+    plugin_apply_hint:
+        "クリップ編集とフェード幅は REAPER に同期 · フェード音声は REAPER が処理 · 逆再生は未対応",
+    plugin_transport_stop: "REAPER の再生を停止",
+    plugin_transport_play: "REAPER の再生/一時停止",
+    plugin_daw_controlled_reason:
+        "REAPER が制御します。ファイル、クリップのジオメトリ、再生はホスト側で操作してください",
+
+    // ── ホストフェードの tooltip 補足 ───────────────────────────────
+    fade_info_host_curve_note: "HiFiShifter の表示用カーブ。音声は REAPER が処理します",
+    fade_info_host_unknown: "REAPER カーブ不明",
 } as const;

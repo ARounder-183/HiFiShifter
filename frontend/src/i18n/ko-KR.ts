@@ -2041,4 +2041,49 @@ export const koKR = {
     vibrato_unit_degree: "음계",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "주기",
+
+    // ── ARA host session（독립 실행형 앱의 호스트 연결 세션）──────────
+    ara_panel_title: "ARA / REAPER",
+    ara_instance_label: "ARA 인스턴스",
+    ara_no_instances: "인스턴스를 찾을 수 없음",
+    ara_refresh_instances: "인스턴스 새로 고침",
+    ara_connect: "연결",
+    ara_submit: "REAPER로 전송",
+    ara_refresh_host: "호스트 새로 고침",
+    ara_disconnect: "연결 해제",
+    ara_reverse_unsupported: "역재생은 지원되지 않음",
+    ara_busy: "처리 중...",
+    ara_status_connected: "연결됨",
+    ara_status_refreshed: "새로 고침됨",
+    ara_status_submitted: "전송됨",
+    ara_status_disconnected: "연결 해제됨",
+    ara_error_connect: "ARA 연결 실패",
+    ara_error_submit: "ARA 전송 실패",
+    ara_error_disconnect: "ARA 연결 해제 실패",
+    ara_replace_dirty_message:
+        "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
+    ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",
+    ara_revisions: "리비전 {revision} · 모델 {model}",
+    menu_ara_host: "ARA 호스트 연결...",
+
+    // ── 플러그인 호스트의 자동 적용 상태（상태 표시줄 칩）─────────────
+    plugin_apply_waiting_host: "호스트 오디오 대기 중",
+    plugin_apply_pending: "자동 적용 중...",
+    plugin_apply_applied: "적용됨",
+    plugin_apply_error: "적용되지 않음: {error}",
+    plugin_apply_generations: "편집 {edits} / 오디오 {audio}",
+    plugin_apply_reload_host: "호스트에서 다시 로드",
+    plugin_apply_reload_message:
+        "적용되지 않은 편집이 남아 있습니다. 다시 로드하면 로컬 곡선이 교체됩니다. 계속할까요?",
+    plugin_apply_reload_confirm: "다시 로드 확인",
+    plugin_apply_hint:
+        "클립 편집과 페이드 너비는 REAPER에 동기화 · 페이드 오디오는 REAPER가 처리 · 역재생은 미지원",
+    plugin_transport_stop: "REAPER에서 재생 정지",
+    plugin_transport_play: "REAPER에서 재생/일시 정지",
+    plugin_daw_controlled_reason:
+        "REAPER가 제어합니다. 파일, 클립 지오메트리, 재생은 호스트에서 조작하세요",
+
+    // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
+    fade_info_host_curve_note: "HiFiShifter 표시용 곡선. 오디오는 REAPER가 처리합니다",
+    fade_info_host_unknown: "REAPER 곡선 알 수 없음",
 } as const;

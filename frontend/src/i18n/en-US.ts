@@ -2057,4 +2057,49 @@ export const enUS = {
     vibrato_unit_degree: "degree",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "cycles",
+
+    // ── ARA host session（独立 App 的宿主连接会话）─────────────────────
+    ara_panel_title: "ARA / REAPER",
+    ara_instance_label: "ARA instance",
+    ara_no_instances: "No instances found",
+    ara_refresh_instances: "Refresh Instances",
+    ara_connect: "Connect",
+    ara_submit: "Submit to REAPER",
+    ara_refresh_host: "Refresh Host",
+    ara_disconnect: "Disconnect",
+    ara_reverse_unsupported: "Reverse playback unsupported",
+    ara_busy: "Working...",
+    ara_status_connected: "Connected",
+    ara_status_refreshed: "Refreshed",
+    ara_status_submitted: "Submitted",
+    ara_status_disconnected: "Disconnected",
+    ara_error_connect: "ARA connection failed",
+    ara_error_submit: "ARA submit failed",
+    ara_error_disconnect: "ARA disconnect failed",
+    ara_replace_dirty_message:
+        "The project has unsaved changes. Replace it with the host snapshot?",
+    ara_replace_dirty_confirm: "Replace Unsaved Project",
+    ara_revisions: "Revision {revision} · Model {model}",
+    menu_ara_host: "Connect to ARA Host...",
+
+    // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
+    plugin_apply_waiting_host: "Waiting for host audio",
+    plugin_apply_pending: "Applying automatically...",
+    plugin_apply_applied: "Applied",
+    plugin_apply_error: "Not applied: {error}",
+    plugin_apply_generations: "Edits {edits} / Audio {audio}",
+    plugin_apply_reload_host: "Reload from Host",
+    plugin_apply_reload_message:
+        "There are still unapplied edits. Reloading will replace the local curves. Continue?",
+    plugin_apply_reload_confirm: "Reload Anyway",
+    plugin_apply_hint:
+        "Clip edits and fade widths sync to REAPER · REAPER renders fade audio · Reverse playback unsupported",
+    plugin_transport_stop: "Stop playback in REAPER",
+    plugin_transport_play: "Play or pause in REAPER",
+    plugin_daw_controlled_reason:
+        "Controlled by REAPER; manage files, clip geometry and playback in the host",
+
+    // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
+    fade_info_host_curve_note: "HiFiShifter schematic curve; REAPER renders the audio",
+    fade_info_host_unknown: "REAPER curve unknown",
 } as const;
