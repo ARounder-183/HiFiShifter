@@ -170,12 +170,7 @@ describe("fade corner handle affordance", () => {
         const rowHeight = SHADOWED_ROW_HEIGHTS[0];
         const box = boxFor(rowHeight, CLIP_WIDTH_PX, "in");
         expect(
-            regionAt(
-                rowHeight,
-                CLIP_WIDTH_PX,
-                box.left + box.width / 2,
-                box.top + box.height / 2,
-            ),
+            regionAt(rowHeight, CLIP_WIDTH_PX, box.left + box.width / 2, box.top + box.height / 2),
         ).toBe("snap-offset-handle");
     });
 

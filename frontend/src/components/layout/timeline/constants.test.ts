@@ -85,7 +85,9 @@ test("components/layout/timeline/constants.test.ts scripted checks", async () =>
     ] as const) {
         const reserve = fadeCornerReservePx(bodyHeight);
         if (reserve !== expected) {
-            throw new Error(`body ${bodyHeight}: expected reserve ${expected}, received ${reserve}`);
+            throw new Error(
+                `body ${bodyHeight}: expected reserve ${expected}, received ${reserve}`,
+            );
         }
     }
 

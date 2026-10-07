@@ -593,7 +593,10 @@ export function buildTimelineClipVisualStyle(args: {
     const bodyRgb = hslToRgb(clipHsl);
     // header 条带：整体亮度**背离文字色**一档，读作独立的控件条（chrome），
     // 而不是色块上的一道高光。见 HEADER_LUMINANCE_STEP 的推导。
-    const headerRgb = shiftLuminance(bodyRgb, darkMode ? -HEADER_LUMINANCE_STEP : HEADER_LUMINANCE_STEP);
+    const headerRgb = shiftLuminance(
+        bodyRgb,
+        darkMode ? -HEADER_LUMINANCE_STEP : HEADER_LUMINANCE_STEP,
+    );
 
     const isPitchAdj = args.isPitchAdjustment === true;
     const {
