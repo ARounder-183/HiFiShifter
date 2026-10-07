@@ -774,7 +774,7 @@ mod bound_tests {
         let mut chunks = Vec::new();
         let mut states = Vec::new();
         let mut inside = false;
-        for line in include_str!("../../../../probe/ara/captures/gui-keyboard-edited.RPP")
+        for line in include_str!("../../tests/fixtures/gui-keyboard-edited.RPP")
             .lines()
             .map(str::trim)
         {

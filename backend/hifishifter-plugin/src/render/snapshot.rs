@@ -499,7 +499,7 @@ mod tests {
 
     fn region() -> AraPlaybackRegion {
         crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap()
         .playback_regions

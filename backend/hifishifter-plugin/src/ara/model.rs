@@ -949,7 +949,7 @@ mod tests {
 
     fn identity_document(order: &[&str]) -> AraDocument {
         let mut doc = crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap();
         doc.musical_contexts[0].region_sequences.clear();
@@ -1070,7 +1070,7 @@ mod tests {
     fn region_sequence_update_moves_the_editor_membership() {
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap();
         let mut registry = Registry::<RegionSequenceKind, ()>::new(2);
@@ -1121,7 +1121,7 @@ mod tests {
         use ara2_bridge::plugin::{HostAudioSourceRef, HostClients};
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap();
         model.document.audio_sources[0].sample_count = 4;
@@ -1424,7 +1424,7 @@ mod tests {
     fn host_region_update_changes_the_mapped_clip() {
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap();
         let mut index = 0;
@@ -1464,7 +1464,7 @@ mod tests {
     fn destroying_a_region_removes_it_from_the_timeline() {
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
-            "../../../../probe/ara/captures/ara-model.reaper.json"
+            "../../tests/fixtures/ara-model.reaper.json"
         ))
         .unwrap();
         PlaybackRegions::destroy_playback_region(&mut model, 0);
