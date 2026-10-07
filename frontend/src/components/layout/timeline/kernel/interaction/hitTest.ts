@@ -23,9 +23,7 @@
  */
 
 import {
-    FADE_CORNER_CAP_HEIGHT_PX,
     FADE_CORNER_CAP_WIDTH_PX,
-    FADE_CORNER_EDGE_WIDTH_PX,
     SNAP_OFFSET_HANDLE_SIZE_PX,
     SNAP_OFFSET_HIT_HEIGHT_PX,
     fadeCornerReservePx,
@@ -100,7 +98,8 @@ export interface HitTestTrack {
  *   "三角拖不动"）。
  * - 淡变角（`fade-in-corner` / `fade-out-corner`）与 trim 边缘在水平方向**重叠**
  *   （都贴着左右边缘），靠**竖直方向切分**：body 顶部 `fadeCornerReservePx` 高度内
- *   归淡变角，其下归 trim——与既有 `constants.fadeCornerReservePx` 的几何切分一致。
+ *   归淡变角，其下归 trim。保留区恒等于横帽高度（见 `constants.fadeCornerReservePx`），
+ *   所以渐变角就是那块**定尺小横帽**，不随音频块高度长大——Issue 141 的落点。
  * - 边缘优先于 header / body：边缘是"窄条"，若让 header 先判，靠上的手柄会被
  *   header 抢走（表现为"顶部的 trim 手柄点不动"）。
  */
@@ -169,10 +168,10 @@ export interface HitTestArgs {
     /** clip header 高度（CSS px），用于区分 header / body 分区。 */
     readonly headerHeightPx: number;
     /**
-     * 左右边缘的命中宽度（CSS px，内容坐标）。缺省 6。
+     * 左右边缘的命中宽度（CSS px，内容坐标）。缺省 10。
      *
-     * 与既有 `FADE_CORNER_EDGE_WIDTH_PX` 同量级：trim 手柄必须够宽才好点中，
-     * 又不能宽到把短 clip 的整个 body 吞掉（因此判定时还会按 clip 宽度收敛）。
+     * trim 手柄必须够宽才好点中，又不能宽到把短 clip 的整个 body 吞掉
+     * （因此判定时还会按 clip 宽度收敛）。
      */
     readonly edgeWidthPx?: number;
 }
@@ -250,12 +249,15 @@ export function hitTest(args: HitTestArgs): HitResult {
         : EDGE_WIDTH_PX;
     const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
 
-    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分——切法逐条照搬旧实现
-    // （`ClipItem` 的角控件 + `ClipEdgeHandles` 的 yStyle）：
-    //   y ∈ [header, header+14)          → 角部**横帽**（宽 22）→ 淡变
-    //   y ∈ [header+14, header+reserve)  → 角部**竖条**（宽 6）→ 淡变；其余 x 是 body
-    //   y >= header+reserve              → 边缘条（宽 10）→ 裁短 / 拉伸
+    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分：
+    //   y ∈ [header, header + reserve)   → 角部**横帽**（宽 22）→ 淡变
+    //   y >= header + reserve            → 边缘条（宽 10）→ 裁短 / 拉伸
     //   y <  header                      → header 控件（**任何 x 都不是边缘**）
+    //
+    // `reserve` 恒等于横帽高度（见 `constants.fadeCornerReservePx`），所以淡变角就是
+    // 那块定尺横帽本身 —— 没有"横帽之下再挂一条竖条"的第二段。旧实现曾把保留区取成
+    // `body/3`，绝对高度随行高从 20px 长到 57px，用户在行高 192 的边缘中部按下想裁短
+    // 却命中渐变（Issue 141）。
     //
     // 最后一条是曾经的回归点：内核原先让边缘在任何 y 都优先于 header，于是 header
     // 左右两端各 6px 被裁切手势抢走——静音 / 锁链徽标与右对齐的增益 / 速率标签
@@ -264,13 +266,10 @@ export function hitTest(args: HitTestArgs): HitResult {
     const bodyHeightPx = Math.max(1, clipHeightPx - headerHeightPx);
     const reservePx = fadeCornerReservePx(bodyHeightPx);
     const localBodyY = localY - headerHeightPx;
-    const inCapBand = localBodyY >= 0 && localBodyY < FADE_CORNER_CAP_HEIGHT_PX;
-    const inStripBand = localBodyY >= FADE_CORNER_CAP_HEIGHT_PX && localBodyY < reservePx;
+    const inCapBand = localBodyY >= 0 && localBodyY < reservePx;
     const inEdgeBand = localBodyY >= reservePx;
     const nearLeftCorner = args.contentX - clipLeftPx <= FADE_CORNER_CAP_WIDTH_PX;
     const nearRightCorner = clipRightPx - args.contentX <= FADE_CORNER_CAP_WIDTH_PX;
-    const nearLeftStrip = args.contentX - clipLeftPx <= FADE_CORNER_EDGE_WIDTH_PX;
-    const nearRightStrip = clipRightPx - args.contentX <= FADE_CORNER_EDGE_WIDTH_PX;
     const inHeaderBand = localY < headerHeightPx;
     const localX = args.contentX - clipLeftPx;
 
@@ -301,9 +300,9 @@ export function hitTest(args: HitTestArgs): HitResult {
     }
 
     let region: ClipHitRegion;
-    if ((inCapBand && nearLeftCorner) || (inStripBand && nearLeftStrip)) {
+    if (inCapBand && nearLeftCorner) {
         region = "fade-in-corner";
-    } else if ((inCapBand && nearRightCorner) || (inStripBand && nearRightStrip)) {
+    } else if (inCapBand && nearRightCorner) {
         region = "fade-out-corner";
     } else if (inHeaderBand) {
         region = "header";

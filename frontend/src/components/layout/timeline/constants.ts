@@ -19,31 +19,40 @@ export const CLIP_BODY_PADDING_Y = 2;
 // ── 淡化角部手柄几何（左右边缘的垂直所有权切分）────────────────────
 //
 // 每条左/右边缘按高度分成两段、归属两种手势（几何级切分，非 z 竞争）：
-//   y ∈ [0, FADE_CORNER_RESERVE_PX)      → 淡入/淡出角部拖拽控件；
-//   y ∈ [FADE_CORNER_RESERVE_PX, 底部]   → ClipEdgeHandles 裁短/延长/拉伸。
+//   y ∈ [0, FADE_CORNER_RESERVE_PX)      → 淡入/淡出角部拖拽控件（= 横帽）；
+//   y ∈ [FADE_CORNER_RESERVE_PX, 底部]   → 裁短 / 延长 / 拉伸。
 /** 角部横帽：从边缘向内的宽度；位于 body 区顶部（header 之下）。 */
 export const FADE_CORNER_CAP_WIDTH_PX = 22;
 export const FADE_CORNER_CAP_HEIGHT_PX = 14;
-/** 边缘上部竖条宽度（骑在边缘线上，位于横帽正下方直至保留区下沿）。 */
-export const FADE_CORNER_EDGE_WIDTH_PX = 6;
 
 /**
- * 淡化角控件保留区 = body 高度的 1/3（按轨道高度换算，随行高缩放）。
+ * 淡化角控件保留区：**恒等于横帽高度**，不随音频块高度缩放。
  *
- * 历史实现按 `body × 0.38` 且**封顶 34px**：行高超过 ~96px 后拖拽区恒为
- * 34px，不随轨道高度缩放（"看着是定长"）。现改为 body/3、无全局封顶：
- * 行高 80→20px、96→25px、120→33px、192→57px；裁短区始终保住 2/3 ≥
- * 之前的 62% 下限，任意行高下都成立。
+ * 于是"渐变角命中区"就是横帽本身 —— 手柄即横帽，少一个概念。
  *
- * 角控件不得覆盖 header：header 上有旋钮 / badge / 名称等交互控件，
- * 角控件压在上面会让 header 无法点击。退化矮 body（< 3×横帽高）时
- * 回退为横帽高度本身（真边角必须有落点）。
+ * 【为什么是定值而不是 body 的比例】这条规则被改过三轮，每次的教训都留下：
+ *
+ * - 回归①：原先固定 **48px**，在典型 Clip 高度（74–90px）上吃掉 53%–65% 的边缘，
+ *   用户想裁短却在边缘偏上按下时命中的是淡化控件（"拉边界被判定成渐变"）。
+ * - 回归②：改为 `body × 0.38` 并**封顶 34px**，行高 >96px 后拖拽区不再随轨道高度
+ *   缩放（"看着是定长"）；当时的结论是"必须随高度增长、不得封顶"，遂改成 `body/3`。
+ * - 回归③（Issue 141，用户实测）：`body/3` 的比例虽然恒定，**绝对高度却随行高线性
+ *   放大** —— 行高 80→20px、96→25px、120→33px、192→57px，变化 2.85 倍。行高 192 时
+ *   57px 已接近音频块自身高度的三分之一，用户在边缘中部按下想裁短、命中却是渐变。
+ *   参考实现 REAPER 用的正是**贴着 body 顶角的小手柄**，不是比例区。
+ *
+ * 因此回归②的结论被 Issue 141 推翻：把"高度比例化"当目标，换来的是绝对尺寸过大与
+ * 与裁短手势争地。定值让裁短区在任意行高下都拿到 76%–92% 的边缘（`body/3` 时恒为
+ * 67%），回归①的意图被**加强**而非削弱。
+ *
+ * 角控件不得覆盖 header：header 上有旋钮 / badge / 名称等交互控件，压在上面会让
+ * header 无法点击。退化矮 body 时按 `body / 2` 收敛，保证真边角仍有落点。
  *
  * @param bodyHeightPx body 高度（= clip 高 - header 高）。
  */
 export function fadeCornerReservePx(bodyHeightPx: number): number {
     const bodyH = Number.isFinite(bodyHeightPx) ? Math.max(0, bodyHeightPx) : 0;
-    return Math.max(FADE_CORNER_CAP_HEIGHT_PX, Math.round(bodyH / 3));
+    return Math.min(FADE_CORNER_CAP_HEIGHT_PX, Math.max(1, Math.floor(bodyH / 2)));
 }
 
 /**

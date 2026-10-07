@@ -116,7 +116,7 @@ describe("hitTest", () => {
 
     it("命中淡变角横帽（body 顶部 14px 内、贴左边缘）", () => {
         // a1 = [1,3) → 内容 100..300；行高 80、header 18 → body 高 60，
-        // 保留区 = max(14, 20) = 20。y=23 → body 内 5px（横帽带 0..14）。
+        // 保留区 = 14（定值，与行高无关）。y=23 → body 内 5px（横帽带 0..14）。
         const result = hitTest(makeArgs({ contentX: 105, contentY: 23 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
@@ -138,22 +138,35 @@ describe("hitTest", () => {
         expect(result.region).toBe("body");
     });
 
-    it("竖条带内：6px 内是淡变角，6..10px 是 body（不是边缘）", () => {
-        // body 内 17px ∈ [14, 20) → 竖条带；距左缘 4px ≤ 6px → 淡变角。
-        const inStrip = hitTest(makeArgs({ contentX: 104, contentY: 35 }));
-        expect(inStrip.kind).toBe("clip");
-        if (inStrip.kind !== "clip") return;
-        expect(inStrip.region).toBe("fade-in-corner");
-        // 距左缘 8px：过了 6px 竖条、又还在保留区之上 → body（旧实现的 10px 边缘条
-        // 在这一带并不存在，它从保留区下沿才开始）。
-        const pastStrip = hitTest(makeArgs({ contentX: 108, contentY: 35 }));
-        expect(pastStrip.kind).toBe("clip");
-        if (pastStrip.kind !== "clip") return;
-        expect(pastStrip.region).toBe("body");
+    it("横帽之下不再有第二段：距左缘 4px / 8px 都落进裁短条（Issue 141）", () => {
+        // body 内 17px 曾是旧几何的"竖条带" [14, 20)：距左缘 ≤6px 判渐变角。
+        // 保留区固定为 14px 之后这一带消失，17px 已进入裁短带，而边缘条宽 10px
+        // 同时覆盖 4px 与 8px —— 两个位置都必须是 left-edge。
+        const regions = [104, 108].map((contentX) => {
+            const hit = hitTest(makeArgs({ contentX, contentY: 35 }));
+            return hit.kind === "clip" ? hit.region : hit.kind;
+        });
+        expect(regions).toEqual(["left-edge", "left-edge"]);
+    });
+
+    it("渐变角是定尺：同一 contentY 在行高 80 / 192 下命中同一分区（Issue 141）", () => {
+        // 旧几何保留区 = body/3（行高 80 → 20px、行高 192 → 57px），同一 contentY
+        // 在两档行高下会落到不同分区：body 内 42px（contentY = 60）在行高 192 下
+        // 是淡变角 —— 用户想裁短却拉到了渐变，正是 Issue 141 的复现点。
+        // 保留区固定为 14px 后，两档行高必须逐点同判。
+        const contentYs = [23, 35, 45, 60]; // body 内 5 / 17 / 27 / 42px
+        const regionsAt = (rowHeight: number) =>
+            contentYs.map((contentY) => {
+                const hit = hitTest(makeArgs({ contentX: 105, contentY, rowHeight }));
+                return hit.kind === "clip" ? hit.region : hit.kind;
+            });
+        const expected = ["fade-in-corner", "left-edge", "left-edge", "left-edge"];
+        expect(regionsAt(80)).toEqual(expected);
+        expect(regionsAt(192)).toEqual(expected);
     });
 
     it("body 深处贴左边缘 → trim 而非淡变角（按竖直方向切分）", () => {
-        // body 高 = 80 − 2 − 18 = 60 → 保留区 = max(14, 20) = 20；y=60 → body 内 42px。
+        // body 高 = 80 − 2 − 18 = 60 → 保留区 = 14（定值）；y=60 → body 内 42px。
         const result = hitTest(makeArgs({ contentX: 105, contentY: 60 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
