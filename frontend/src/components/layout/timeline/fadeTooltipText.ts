@@ -24,6 +24,8 @@
  */
 import type { ReactNode } from "react";
 import { createElement } from "react";
+import type {HostFadeMetadata} from "../../../types/api";
+import {hostFadeLabel} from "./hostFadeDisplay";
 
 import { formatTemplate } from "../../../i18n/format";
 import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueText";
@@ -129,6 +131,7 @@ export function buildSingleFadeInfoText(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
+    hostFades?:HostFadeMetadata;
     delta?: FadeInfoDelta;
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
@@ -137,6 +140,11 @@ export function buildSingleFadeInfoText(args: {
         side: sideLabel,
         type: args.t("fade_type_label"),
     });
+    if (args.hostFades && args.hostFades.curve_mode !== "legacy" && args.hostFades.curve_mode !== "hifishifter") {
+        return [labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut)),
+            labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
+            "HiFiShifter 示意曲线；声音由 REAPER 控制"].join("\n");
+    }
     return [
         labelValue(args.t, typeLabel, name),
         labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
@@ -152,8 +160,11 @@ export function buildSingleFadeInfoContent(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
-    delta?: FadeInfoDelta;
+    delta?: FadeInfoDelta; hostFades?:HostFadeMetadata;
 }): ReactNode {
+    if (args.hostFades&&args.hostFades.curve_mode!=="legacy"&&args.hostFades.curve_mode!=="hifishifter") {
+        return buildSingleFadeInfoText(args).split("\n").map((row,key)=>createElement("div",{key},row));
+    }
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
         side: sideLabel,
@@ -199,8 +210,8 @@ function dirLine(dir: number, delta: FadeInfoDelta | undefined): string {
  * 两侧各自带自己的增量 —— 反向模式下两侧淡变按比例缩放，位移量并不相同。
  */
 export function buildCrossfadeGripInfoContent(args: {
-    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
-    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
+    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
+    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): ReactNode {
@@ -242,8 +253,8 @@ export function publishFadeRichTooltip(element: Element | null, content: ReactNo
  * 两块之间空一行分隔（纯文本版本）。
  */
 export function buildCrossfadeGripInfoText(args: {
-    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
-    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
+    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
+    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): string {

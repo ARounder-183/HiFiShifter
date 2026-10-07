@@ -1,4 +1,6 @@
-import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
+// 原编辑会话状态；独立app保留默认Main，插件首帧等待真实宿主时间线。
+import { createSlice, createAsyncThunk, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
+import { isPluginMode } from "../../services/hostCapabilities";
 import type {
     HistoryRecordSummary,
     TimelineClip,
@@ -816,6 +818,10 @@ export interface SessionState {
      * 避免后端返回的过期快照覆盖前端乐观更新导致的闪烁。
      */
     _interactionLockCount: number;
+    /** 插件自动刷新只接纳同一交互代次的响应，不能覆盖在途宿主写入。 */
+    _pluginTimelineEpoch: number;
+    _pluginTimelineFetchEpochs: Record<string, number>;
+    _pluginClipEditRequests: Record<string, boolean>;
 
     /**
      * 最近一次 undo/redo 请求的 requestId。快速连续撤销/重做会产生多个
@@ -875,6 +881,8 @@ export interface SessionState {
      * `_latestHistoryOpRequestId` / seekPlayhead 的乱序防护同理。
      */
     _transportEpoch: number;
+    /** 插件seek写入未结束时不接纳同代但仍在旧位置的宿主轮询。 */
+    _pluginSeekRequestId: string | null;
 
     /**
      * 最近一次 stop/pause 命令**开始瞬间**的真实播放状态（由
@@ -1862,6 +1870,7 @@ function applyTimelineState(
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
+            hostFades: clip.host_fades,
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             // 后端未提供形状字段时（极旧开发版载荷），与新建默认一致取快起。
             fadeInShape: Number.isFinite(Number(clip.fade_in_shape))
@@ -2352,6 +2361,9 @@ const initialState: SessionState = {
     reaperSkippedFilesDialog: null,
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
+    _pluginTimelineEpoch: 0,
+    _pluginTimelineFetchEpochs: {},
+    _pluginClipEditRequests: {},
     _latestHistoryOpRequestId: null,
     historyUndoDepth: 0,
     historyRedoDepth: 0,
@@ -2360,6 +2372,7 @@ const initialState: SessionState = {
     _paramSelectionRestoreSeq: 0,
     _latestEditRequestId: null,
     _transportEpoch: 0,
+    _pluginSeekRequestId: null,
     _stopInterruptedPlayback: false,
 };
 
@@ -2557,7 +2570,10 @@ function applyToolMode(state: SessionState, mode: ToolMode): void {
 
 const sessionSlice = createSlice({
     name: "session",
-    initialState,
+    // bootstrap在创建store前由native注入；空宿主态不会触发虚构Main的参数请求。
+    initialState: () => isPluginMode()
+        ? { ...initialState, tracks: [], selectedTrackId: null }
+        : initialState,
     reducers: {
         /**
          * 标记连续交互开始（拖动/滑动等）。
@@ -2565,12 +2581,14 @@ const sessionSlice = createSlice({
          */
         beginInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount) + 1;
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
         },
         /**
          * 标记连续交互结束。计数器归零后恢复正常的后端状态同步。
          */
         endInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount - 1);
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
         },
         /** 乐观更新轨道名称（立即反映到 UI，不等后端响应） */
         setTrackName(state, action: PayloadAction<{ trackId: string; name: string }>) {
@@ -2618,6 +2636,7 @@ const sessionSlice = createSlice({
         },
         /** 供录音等后端直接导入时间轴的命令同步完整快照。 */
         applyTimelinePayload(state, action: PayloadAction<TimelineState>) {
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
             // 后端直接导入的权威快照（如录音导入）：采纳其后端播放头。
             applyTimelineState(state, action.payload, { force: true, adoptPlayhead: true });
         },
@@ -4569,6 +4588,7 @@ const sessionSlice = createSlice({
                     clipId?: string | null;
                     anchorSec?: number;
                     noop?: boolean;
+                    host_request?: boolean;
                 };
                 // 已在播放时的重复"播放"触发：thunk 已完全 no-op（未 seek、
                 // 未调用后端）——不得重置任何传输状态（等待标志 / 位置报告 /
@@ -4577,8 +4597,11 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const ok = Boolean(payload.ok);
-                state.runtime.isPlaying = ok;
-                state.runtime.playbackTarget = ok ? "original" : null;
+                // ARA的void请求只能确认已送达；实际播放态由宿主process时钟轮询确认。
+                if (!payload.host_request) {
+                    state.runtime.isPlaying = ok;
+                    state.runtime.playbackTarget = ok ? "original" : null;
+                }
                 // 新播放会话：清除上一场遗留的"起点等待"标志（引擎侧由
                 // set_playing 同步重置，此处保持两侧一致）。
                 state.runtime.playbackWaitingForRender = false;
@@ -4603,7 +4626,7 @@ const sessionSlice = createSlice({
                     // 短暂掐灭播放状态）。
                     state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
                 }
-                state.status = ok ? "Playing original" : "Play original failed";
+                state.status = payload.host_request ? "Playback requested" : ok ? "Playing original" : "Play original failed";
             })
             .addCase(playOriginal.rejected, setRejected)
 
@@ -4687,6 +4710,7 @@ const sessionSlice = createSlice({
                     base_sec?: number;
                     position_sec?: number;
                     duration_sec?: number;
+                    host_authoritative?: boolean;
                 };
                 if (!payload.ok) {
                     return;
@@ -4716,6 +4740,7 @@ const sessionSlice = createSlice({
                 if (arg && typeof arg.epoch === "number" && arg.epoch !== state._transportEpoch) {
                     return;
                 }
+                if (isPluginMode() && state._pluginSeekRequestId !== null) return;
 
                 const nextIsPlaying = Boolean(payload.is_playing);
                 const nextTarget = payload.target ?? null;
@@ -4759,7 +4784,8 @@ const sessionSlice = createSlice({
                 const sampledNowMs = performance.now();
                 const dispatchedAtMs = arg?.dispatchedAtMs;
                 const latencySec =
-                    nextIsPlaying && typeof dispatchedAtMs === "number"
+                    // 宿主值在回复时读取；排队等待合成不是采样年龄，不能把整段RTT加到DAW位置。
+                    nextIsPlaying && !payload.host_authoritative && typeof dispatchedAtMs === "number"
                         ? Math.max(0, (sampledNowMs - dispatchedAtMs) / 1000)
                         : 0;
 
@@ -4767,7 +4793,10 @@ const sessionSlice = createSlice({
                 const EPS_SEC = 0.0005;
 
                 let nextplayheadSec = state.playheadSec;
-                if (nextIsPlaying) {
+                if (payload.host_authoritative && !nextIsPlaying) {
+                    // DAW停播时的seek也有真实位置；独立app仍保留本地编辑游标。
+                    nextplayheadSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
+                } else if (nextIsPlaying) {
                     const absSec = (payload.base_sec ?? 0) + nextPositionSec + latencySec;
                     nextplayheadSec = Math.max(0, absSec);
                 } else if (state.runtime.isPlaying) {
@@ -4837,7 +4866,18 @@ const sessionSlice = createSlice({
                 }
             })
 
+            .addCase(fetchTimeline.pending, (state, action) => {
+                if (isPluginMode()) state._pluginTimelineFetchEpochs[action.meta.requestId] = state._pluginTimelineEpoch;
+            })
+            .addCase(fetchTimeline.rejected, (state, action) => {
+                delete state._pluginTimelineFetchEpochs[action.meta.requestId];
+            })
             .addCase(fetchTimeline.fulfilled, (state, action) => {
+                const epoch = state._pluginTimelineFetchEpochs[action.meta.requestId];
+                delete state._pluginTimelineFetchEpochs[action.meta.requestId];
+                if (isPluginMode() && (state._interactionLockCount > 0
+                    || Object.keys(state._pluginClipEditRequests).length > 0
+                    || (epoch !== undefined && epoch !== state._pluginTimelineEpoch))) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4849,7 +4889,7 @@ const sessionSlice = createSlice({
                     preserveProjectNotes: false,
                     // 启动同步采纳后端播放头；播放中的回滚式重取（如 Tempo Map
                     // 提交失败）保留本地播放头，避免跳回旧的起始位置。
-                    adoptPlayhead: !state.runtime.isPlaying,
+                    adoptPlayhead: !isPluginMode() && !state.runtime.isPlaying,
                 });
             })
 
@@ -6768,13 +6808,23 @@ const sessionSlice = createSlice({
                 }
             })
 
-            .addCase(seekPlayhead.pending, (state) => {
+            .addCase(seekPlayhead.pending, (state, action) => {
                 // seek 交接播放头所有权：seek 之前派发的在途播放轮询采样的是
                 // seek 前的引擎位置，其迟到响应会把光标拽回旧位置（先跳回再
                 // 被 seek 后的轮询拉回 —— 播放中点击标尺/拖拽时的可见跳变）。
                 state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+                if (isPluginMode()) state._pluginSeekRequestId = action.meta.requestId;
+            })
+            .addCase(seekPlayhead.rejected, (state, action) => {
+                if (isPluginMode() && state._pluginSeekRequestId === action.meta.requestId) {
+                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                }
             })
             .addCase(seekPlayhead.fulfilled, (state, action) => {
+                if (isPluginMode()) {
+                    if (state._pluginSeekRequestId !== action.meta.requestId) return;
+                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                     playhead_sec?: number;
@@ -6794,7 +6844,7 @@ const sessionSlice = createSlice({
                 const EPS = 0.001;
                 if (
                     Math.abs(state.playheadSec - requestedSec) <= EPS &&
-                    Math.abs(backendSec - requestedSec) > EPS
+                    Math.abs(backendSec - requestedSec) > EPS && !isPluginMode()
                 ) {
                     // 后端对位置做了修正（如 clamp），采纳后端值
                     state.playheadSec = Math.max(0, backendSec);
@@ -6948,6 +6998,36 @@ const sessionSlice = createSlice({
         const settleImport = (state: SessionState) => {
             state.importInFlight = Math.max(0, state.importInFlight - 1);
         };
+        // 宿主写入开始/结束都废弃旧刷新，覆盖键盘编辑（没有拖动锁）的同类竞态。
+        builder
+            .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending, moveTrackRemote.pending,
+                pasteTimelineClipboardRemote.pending, removeClipRemote.pending, removeClipsRemote.pending,
+                duplicateClipsBulkRemote.pending,
+                splitClipRemote.pending, splitClipsAtRemote.pending,
+                importAudioAtPosition.pending, importAudioFileAtPosition.pending,
+                setClipStateRemote.pending, setClipsStateBulkRemote.pending,
+                undoRemote.pending, redoRemote.pending, setHistoryPositionRemote.pending), (state, action) => {
+                if (!isPluginMode()) return;
+                state._pluginTimelineEpoch += 1;
+                state._pluginClipEditRequests[action.meta.requestId] = true;
+            })
+            .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected, moveTrackRemote.fulfilled, moveTrackRemote.rejected,
+                pasteTimelineClipboardRemote.fulfilled, pasteTimelineClipboardRemote.rejected,
+                duplicateClipsBulkRemote.fulfilled, duplicateClipsBulkRemote.rejected,
+                removeClipRemote.fulfilled, removeClipRemote.rejected, removeClipsRemote.fulfilled, removeClipsRemote.rejected,
+                splitClipRemote.fulfilled, splitClipRemote.rejected,
+                splitClipsAtRemote.fulfilled, splitClipsAtRemote.rejected,
+                importAudioAtPosition.fulfilled, importAudioAtPosition.rejected,
+                importAudioFileAtPosition.fulfilled, importAudioFileAtPosition.rejected,
+                moveClipsRemote.fulfilled, moveClipsRemote.rejected,
+                setClipStateRemote.fulfilled, setClipStateRemote.rejected,
+                setClipsStateBulkRemote.fulfilled, setClipsStateBulkRemote.rejected,
+                undoRemote.fulfilled, undoRemote.rejected, redoRemote.fulfilled, redoRemote.rejected,
+                setHistoryPositionRemote.fulfilled, setHistoryPositionRemote.rejected), (state, action) => {
+                if (!isPluginMode()) return;
+                delete state._pluginClipEditRequests[action.meta.requestId];
+                state._pluginTimelineEpoch += 1;
+            });
         builder
             .addMatcher(
                 (action: { type?: string }) => isAudioImportStep(action, "pending"),

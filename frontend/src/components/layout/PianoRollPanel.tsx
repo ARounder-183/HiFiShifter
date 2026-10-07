@@ -1,5 +1,6 @@
 // hs-interaction-exempt: 边缘平滑度裸 range（约 7429 行）与 attachEdgeSmoothnessWheel 原生滚轮监听、松开落盘逻辑耦合，按迁移范围刻意保留；本文件其余取值控件已走能力层原语。
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { loadStandaloneWindowApi } from "../../services/hostWindow";
 import React, {
     type CSSProperties,
     useCallback,
@@ -1527,7 +1528,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // （内部 this.listen），直接取方法引用会丢失绑定并静默失效。
         let disposed = false;
         let unlisten: null | (() => void) = null;
-        void import("@tauri-apps/api/window")
+        void loadStandaloneWindowApi()
             .then((mod) => mod.getCurrentWindow())
             .then((win) =>
                 win.onDragDropEvent((event: unknown) => {
@@ -6118,6 +6119,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                           : selectionFromFrames(startBound, endBound - startBound);
                 setSelectionUi(selectionRef.current);
                 setActiveSurfaceExplicit("pianoRoll");
+                // 单素材切入参数选区与批量入口一致，也交付画布本地快捷键的DOM焦点。
+                scrollerRef.current?.focus({ preventScroll: true });
                 invalidate();
                 return;
             }
@@ -6161,6 +6164,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 selectionRef.current = next;
                 setSelectionUi(next);
                 setActiveSurfaceExplicit("pianoRoll");
+                // 素材范围已转入参数编辑，DOM焦点也须转交，否则本地移调快捷键收不到事件。
+                scrollerRef.current?.focus({ preventScroll: true });
                 invalidate();
                 return;
             }

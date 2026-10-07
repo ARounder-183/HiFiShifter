@@ -1,0 +1,25 @@
+{
+  "baseline_plain_max_abs_difference": 5.960464477539063E-08,
+  "edited_rms": 0.1236275334354702,
+  "mean_absolute_difference": 0.09373518064088743,
+  "gap_max_abs": 0.0,
+  "baseline_pitch_hz": [
+    220.5,
+    220.5,
+    220.5,
+    220.5
+  ],
+  "edited_pitch_hz": [
+    393.75,
+    393.75,
+    393.75,
+    393.75
+  ],
+  "pitch_changed_windows": 4,
+  "reopen_checked": true,
+  "reopen_max_abs_difference": 0.0,
+  "baseline_sha256": "5388613D35EEB16E13D0472283BE2AD3552F894F5DFD457FE74B8E7E6FD6400C",
+  "source_sha256": "C411C14FEC76A3142388FBC7B570F90E92870CAC5AC0C55349034B9411BBC9BD",
+  "edited_sha256": "69FABFB9C338B4193063BE9C4A8304E6DEB64635A5DDAF604B85C035D2103732",
+  "reopened_sha256": "F3AFA2A09CA5B258CC791F05939191457851529BA87EDBF2D0C274EEE745AB1A"
+}

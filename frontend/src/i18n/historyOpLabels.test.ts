@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 // 直接读后端源码文本（`vite/client` 为 `?raw` 提供类型声明，无需 node 类型，
 // 与 invoke.wiring.test.ts 的源码扫描思路一致）。这样后端新增 HistoryOp 时
 // 本测试会自动覆盖到，不需要手工维护一份副本。
-import backendStateSource from "../../../backend/src-tauri/src/state.rs?raw";
+import backendStateSource from "../../../backend/hifishifter-kernel/src/state/model.rs?raw";
 
 import { messages, type Locale } from "./messages";
 

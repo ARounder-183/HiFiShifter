@@ -30,6 +30,7 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
+import { isPluginMode, isHostGeometryReadOnly, canImportHostAudio, canGroupPluginTracks } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -94,6 +95,7 @@ import {
     setClipMuted,
     importAudioAtPosition,
     importAudioFileAtPosition,
+    importMultipleAudioFilesAtPosition,
     importMidiAsClip,
     replaceMidiClipDataRemote,
     importMultipleAudioAtPosition,
@@ -1215,6 +1217,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      */
     const cycleOneFade = React.useCallback(
         (clipId: string, side: "in" | "out", checkpoint = true) => {
+            if (isPluginMode()) return;
             const targets = getBulkEditableClipIds({
                 activeClipId: clipId,
                 multiSelectedClipIds,
@@ -2268,7 +2271,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         ]),
                     ),
                     initialTrackIndexById: Object.fromEntries(
-                        origin.participants.map((item) => [item.clipId, item.trackIndex]),
+                        origin.participants.map((item) => [item.trackId, item.trackIndex]),
                     ),
                     // 用**吸附后**的共享位移，与 ghost 预览的位置一致
                     // （用内核原始位移会绕开吸附，表现为"预览吸附、落库不吸附"）。
@@ -4034,7 +4037,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率只作用于**锚点 clip 的该侧**（旧实现明确："曲率只作用于当前 clip
             // 的该侧：指针 Y 必须映射到该 clip 自己的 gain=1 基线"——各行 body 几何
             // 不同，无法跨 clip 共用同一指针 Y）。
-            if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
+            if (!isPluginMode() && isModifierActive(fadeCurvatureKb, args.modifiers)) {
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
                 const clipStart = Number(clip.startSec) || 0;
@@ -4378,6 +4381,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 });
                 return;
             }
+            // 插件仍保留空白区菜单；各动作由菜单按真实宿主能力分别准入。
             if (sessionRef.current.selectedTrackId !== args.trackId) {
                 // 轨道区空白右键 = "把这条轨道设为当前轨道"（随后弹粘贴/建轨菜单）：
                 // 只切焦点，不得让后端把全局记住的 `selected_clip_id` 恢复回来。
@@ -4452,6 +4456,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 if (clip === undefined) return null;
                 return {
                     shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
+                    hostFades:clip.hostFades,
                     dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
                     lengthSec: effectiveFadeSec(
                         isOut ? clip.fadeOutSec : clip.fadeInSec,
@@ -4631,7 +4636,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             const clip = session.clips.find(
                                 (item) => item.id === participant.clipId,
                             );
-                            return [participant.clipId, Number(clip?.gain ?? 1) || 1] as const;
+                            return [participant.clipId, Number(clip?.gain ?? 1)] as const;
                         }),
                     ),
                     // 轴向状态以「相对按下点的位移」为 raw：状态内部只比较增量，
@@ -4728,9 +4733,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 setClipsStateBulkRemote({
                     updates: origin.clipIds.map((clipId) => ({
                         clipId,
-                        gain:
-                            Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1) ||
-                            1,
+                        gain: Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1),
                     })),
                 }),
             )
@@ -5082,7 +5085,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 与旧实现 `useEditDrag` 的 `crossfade_edges` Alt 分支同一套：交叉点上的
             // 两条包络线**各自**解一条"经过指针点"的新曲率，边缘位置与长度都完全不动。
             // 求解从上一帧的解出发（`baseDir` 逐帧覆写），连续拖动才平滑。
-            if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
+            if (!isPluginMode() && isModifierActive(fadeCurvatureKb, args.modifiers)) {
                 const sides = origin.curveSides;
                 const ptA = resolveCurvePointer(
                     args.curveEnv,
@@ -5478,9 +5481,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
-    /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
+    /** 内核交互回调集合；插件保留选择/查看/参数动作，不编辑宿主clip几何。 */
     const kernelInteractions = React.useMemo(
         () => ({
+            geometryReadOnly: isHostGeometryReadOnly(),
+            fadeShapeReadOnly: isPluginMode(),
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
@@ -5515,7 +5520,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 重置曲率走既有总线（旧实现同样经它派发）：消费者在淡变相关的 hook 里，
             // 这条契约与渲染模式无关。内核只给「哪些侧」，请求包络由这里组装。
             onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) =>
-                requestResetFadeCurvature({ sides }),
+                { if (!isPluginMode()) requestResetFadeCurvature({ sides }); },
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
@@ -5528,7 +5533,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
             onContextMenu: handleKernelContextMenu,
-            onFadeContextMenu: handleKernelFadeContextMenu,
+            onFadeContextMenu: isPluginMode() ? undefined : handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,
@@ -5686,12 +5691,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleRemoveTrack = React.useCallback(
         (trackId: string) => {
+            if (isPluginMode()) return;
             dispatch(removeTrackRemote(trackId));
         },
         [dispatch],
     );
     const handleMoveTrack = React.useCallback(
         (payload: { trackId: string; targetIndex: number; parentTrackId: string | null }) => {
+            if (isPluginMode()&&!canGroupPluginTracks()) return;
             dispatch(
                 moveTrackRemote({
                     trackId: payload.trackId,
@@ -5762,10 +5769,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, setTrackVolumeUi],
     );
     const handleAddTrack = React.useCallback(() => {
+        if (isPluginMode()) return;
         dispatch(addTrackRemote({}));
     }, [dispatch]);
     const handleTrackColorChange = React.useCallback(
         (trackId: string, color: string) => {
+            if (isPluginMode()) return;
             dispatch(
                 setTrackStateRemote({
                     trackId,
@@ -5788,6 +5797,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleTrackNameChange = React.useCallback(
         (trackId: string, name: string) => {
+            if (isPluginMode()) return;
             dispatch(setTrackName({ trackId, name }));
             dispatch(
                 setTrackStateRemote({
@@ -6079,6 +6089,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     };
 
     const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
+        if (isPluginMode()&&!canImportHostAudio()) { e.preventDefault(); return; }
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;
@@ -6161,6 +6172,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
 
         const fallbackFile = dt.files?.[0] ?? null;
+        if(isPluginMode()&&dt.files?.length>1) {
+            const files=Array.from(dt.files).filter(isAcceptedDropFile);
+            if(files.length) void dispatch(importMultipleAudioFilesAtPosition({files,mode:"across-time",trackId,startSec:beat}));
+            return;
+        }
         // 无本地路径的兜底分支同样必须过准入判据：此前它**完全不做校验**就把任何
         // `File` 按音频导入（后端内容嗅探会放行，于是无关文件也变成 Clip）。
         if (fallbackFile && isAcceptedDropFile(fallbackFile)) {

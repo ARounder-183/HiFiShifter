@@ -1,21 +1,20 @@
+//! 设备层（cpal 流 / 快照）内部使用的数据类型。
+//!
+//! 【与内核的边界】命令词汇表（`EngineCommand` / `StretchKey` / `AudioKey`）已搬到
+//! `hifishifter-kernel`：内核 worker 要往这边投递命令，而内核不认识 Tauri，所以
+//! 那些类型必须是**纯数据**。这里只再导出，`crate::audio_engine::types::EngineCommand`
+//! 与模块内 `super::types::EngineCommand` 的路径都保持不变。
+//!
+//! 留在本文件的都是**设备层专有**的：`StretchJob`（带着 emit 用的 AppHandle）、
+//! `EngineClip` / `EngineSnapshot` / `ResampledStereo` / `TrackMeterValue`。
+
+pub(crate) use hifishifter_kernel::engine_command::{AudioKey, EngineCommand, StretchKey};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::state::TimelineState;
 use crate::time_stretch::{StretchAlgorithm, UserStretchAlgorithm};
-
-pub(crate) type AudioKey = (PathBuf, u32);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct StretchKey {
-    pub(crate) path: PathBuf,
-    pub(crate) out_rate: u32,
-    pub(crate) algorithm: UserStretchAlgorithm,
-    pub(crate) bpm_q: u32, // 保留字段以兼容 Hash，固定为 0
-    pub(crate) trim_start_q: i64,
-    pub(crate) trim_end_q: i64,
-    pub(crate) playback_rate_q: u32,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct StretchJob {
@@ -174,65 +173,4 @@ impl EngineSnapshot {
             clips: Arc::new(vec![]),
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) enum EngineCommand {
-    UpdateTimeline(TimelineState),
-    SeekSec {
-        sec: f64,
-    },
-    SetPlaying {
-        playing: bool,
-        target: Option<String>,
-    },
-    PlayFile {
-        path: PathBuf,
-        offset_sec: f64,
-        target: String,
-    },
-    StretchReady {
-        key: StretchKey,
-    },
-    AudioReady {
-        #[allow(dead_code)]
-        key: AudioKey,
-    },
-    /// clip pitch MIDI 异步预计算完成，触发 snapshot rebuild。
-    ClipPitchReady {
-        clip_id: String,
-    },
-    /// 请求 worker 侧为「动态（DYN）」提交后台分析任务。
-    ///
-    /// 为什么需要它：`schedule_clip_pitch_jobs` 需要 worker 持有的 sender，
-    /// 命令层拿不到；而动态是**混音级**参数，未开启合成的轨道同样需要它，
-    /// 因此不能挂在 pitch（受 compose_enabled 门控）的调度上。
-    ScheduleDynLevelAnalysis,
-    /// 设置 Tauri app handle，使 engine worker 能向前端推送事件。
-    SetAppHandle {
-        handle: tauri::AppHandle,
-    },
-    /// 使指定源路径的解码缓存和拉伸缓存失效（源文件被替换时调用）。
-    EvictSourcePath {
-        path: String,
-    },
-    /// 更新节拍器配置（开关 / 音量 / 细分模式 / 重音 / 音色）。
-    SetMetronome {
-        config: crate::audio_engine::metronome::MetronomeConfig,
-    },
-    /// 换入节拍器响点表（命令层按工程 Tempo Map + 网格预展开）。
-    SetMetronomeSchedule {
-        clicks: Arc<Vec<crate::audio_engine::metronome::MetronomeClick>>,
-    },
-    /// 渲染结果已变更（**发送方是渲染线程**）：每处理完一个 Clip（写入缓存
-    /// 或命中缓存并注册 key）后立即发送，worker 据此按当前 last_timeline
-    /// 重建快照。
-    ///
-    /// 这是"原地等待渲染"解除的**唯一**机制，取代了此前依赖
-    /// RT 上报 → 观察线程轮询比对 → 触发重建的被动链（任一环节漏掉都会让
-    /// 等待永久悬空）。推送模型下：产出者发布 → worker 换入新快照 → RT
-    /// 回调下一块自动重新判定（就绪即前进），不存在观测窗口与时序竞态。
-    RenderedClipsChanged,
-    Stop,
-    Shutdown,
 }

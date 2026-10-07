@@ -431,7 +431,7 @@ export function NotebookPanel() {
         let unlisten: (() => void) | null = null;
         void (async () => {
             try {
-                const mod = await import("@tauri-apps/api/window");
+                const mod = await (await import("../../../services/hostWindow")).loadStandaloneWindowApi();
                 const win = mod.getCurrentWindow();
                 const off = await win.onDragDropEvent((event) => {
                     if (disposed) return;

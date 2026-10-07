@@ -889,7 +889,7 @@ pub(super) fn import_midi_as_clip(
         payload.project = Some(state.project_meta_payload());
         drop(tl);
         if let Some(root) = root_track_id {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(state, &root);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
         }
         payload
     } else {
@@ -1058,7 +1058,7 @@ pub(super) fn import_midi_as_clip(
         payload.project = Some(state.project_meta_payload());
         drop(tl);
         for root in &root_track_ids {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(state, root);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root);
         }
 
         if let Some(ref guid) = clipboard_guid {
@@ -1261,7 +1261,7 @@ pub(super) fn replace_midi_clip_data(
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root) = root_track_id {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(state, &root);
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
 
     if let Some(ref guid) = clipboard_guid {

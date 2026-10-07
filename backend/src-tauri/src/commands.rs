@@ -5,6 +5,57 @@
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
+/// ARA 管道发现与交换均在阻塞池运行，避免阻塞 WebView 消息泵。
+#[tauri::command]
+pub async fn ara_list_instances() -> Result<Vec<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        hifishifter_ara_ipc::discover().map(|records| {
+            records.into_iter().map(|record| {
+                serde_json::json!({"instance_id": record.instance_id, "name": record.name, "pid": record.pid})
+            }).collect()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_connect(
+    app: tauri::AppHandle,
+    instance_id: String,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ara_bridge::import_snapshot(&app, Some(instance_id), force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_refresh(
+    app: tauri::AppHandle,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::import_snapshot(&app, None, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_submit(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::submit(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_disconnect(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::disconnect(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[path = "commands/cache.rs"]
 mod cache;
 #[path = "commands/channel_scan.rs"]
@@ -36,6 +87,10 @@ mod onnx_status;
 pub(crate) mod param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
+// 无GUI回归直接调用同一参数命令实现，避免伪造Tauri State或替换写入行为。
+#[cfg(test)]
+pub(crate) use params::{set_param_frames as write_param_frames_for_test, restore_param_frames as restore_param_frames_for_test,
+    set_static_param as set_static_param_for_test, stretch_track_linked_params as stretch_track_linked_params_for_test};
 #[path = "commands/pitch_cache.rs"]
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
@@ -1620,7 +1675,7 @@ pub fn set_param_frames(
     values: Vec<f32>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::set_param_frames(state, track_id, param, start_frame, values, checkpoint)
+    params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1632,16 +1687,11 @@ pub fn restore_param_frames(
     frame_count: u32,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::restore_param_frames(state, track_id, param, start_frame, frame_count, checkpoint)
+    params::restore_param_frames(&state, track_id, param, start_frame, frame_count, checkpoint)
 }
 
-/// 互转选区段（`startFrame` 起共 `frameCount` 帧，与前端 FrameRange 同口径）。
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConvertRange {
-    pub start_frame: u32,
-    pub frame_count: u32,
-}
+/// 互转选区段由共享编辑内核定义，独立app命令形状保持不变。
+pub use hifishifter_kernel::editor::ConvertRange;
 
 /// 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源归位 + 单撤销点）。
 ///
@@ -1674,7 +1724,7 @@ pub fn set_static_param(
     value: f64,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::set_static_param(state, track_id, param, value, checkpoint)
+    params::set_static_param(&state, track_id, param, value, checkpoint)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1684,7 +1734,7 @@ pub fn stretch_track_linked_params(
     mappings: Vec<crate::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::stretch_track_linked_params(state, track_id, mappings, checkpoint)
+    params::stretch_track_linked_params(&state, track_id, mappings, checkpoint)
 }
 
 // ===================== synth =====================

@@ -1,0 +1,152 @@
+//! 渲染器模块：统一的音高合成渲染接口。
+//!
+//! 通过 [`Renderer`] trait 将合成链路与调用方解耦，
+//! 未来新增渲染器只需实现该 trait 并在此处注册，
+//! 无需修改 `pitch_editing.rs` 等核心逻辑。
+//!
+//! `get_processor()` 返回统一的 `ClipProcessor` 实例，涵盖音高合成 +
+//! 时间拉伸 + 全部声码器参数曲线。
+
+pub mod chain;
+pub mod common_params;
+pub mod hifigan;
+pub mod progress;
+mod traits;
+mod utils;
+pub mod world;
+
+// vslib 处理器的编译条件必须与 `lib.rs` 的 `mod vslib` 逐字一致：模块内部
+// 直接引用 `crate::vslib` 的 FFI 声明，而那条 `#[link]` 只在 x86_64-Windows
+// 上被 `build.rs` 满足。少一个 `target_arch` 就会在 ARM64 上得到链接失败。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+pub mod vslib_processor;
+
+pub use chain::ProcessingStage;
+#[allow(unused_imports)]
+pub use chain::{ProcessorChain, StageContext};
+pub use chain::HIFIGAN_SEPARATION_PARAM_ID;
+pub use traits::{ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, Renderer};
+#[allow(unused_imports)]
+pub use traits::{ProcessorCapabilities, RenderContext, RendererCapabilities};
+#[allow(unused_imports)]
+pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none};
+
+use crate::state::SynthPipelineKind;
+
+// ─── 静态实例（Renderer，for backwards compat）────────────────────────────────
+
+static WORLD_RENDERER: world::WorldRenderer = world::WorldRenderer;
+static HIFIGAN_RENDERER: hifigan::HiFiGanRenderer = hifigan::HiFiGanRenderer;
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+static VSLIB_RENDERER: vslib_processor::VslibRenderer = vslib_processor::VslibRenderer;
+
+// ─── 注册表 ────────────────────────────────────────────────────────────────────
+
+/// 根据 [`SynthPipelineKind`] 返回对应的静态渲染器实例。
+///
+/// 使用静态分发（`&'static dyn Renderer`）避免堆分配，
+/// 渲染器数量固定，静态分发足够高效。
+pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
+    match kind {
+        SynthPipelineKind::WorldVocoder => &WORLD_RENDERER,
+        SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
+        #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+        SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
+        // 其余平台（含 Windows ARM64）：vslib 变体存在但无原生后端，回退到
+        // 工程默认算法 HiFiGAN（见 `PitchAnalysisAlgo` 的 `#[default]`）。
+        // 【注意】这只是**渲染器**层的回退；feature 关闭时 `from_track_algo`
+        // 根本不会产出这个 kind（那条路在 pitch edit 侧判为 Bypass），两者不是
+        // 同一个回退 —— 旧注释声称"同一语义"，与代码不符。
+        #[cfg(all(
+            feature = "vslib",
+            not(all(target_os = "windows", target_arch = "x86_64"))
+        ))]
+        SynthPipelineKind::VocalShifterVslib => &HIFIGAN_RENDERER,
+    }
+}
+
+/// 列出所有已注册的渲染器（供前端 UI 展示或调试）。
+#[allow(dead_code)]
+pub fn all_renderers() -> Vec<&'static dyn Renderer> {
+    vec![&WORLD_RENDERER, &HIFIGAN_RENDERER]
+}
+
+// ─── ClipProcessor 注册表 ──────────────────────────────────────────────────────
+
+/// 根据 [`SynthPipelineKind`] 创建对应的 [`ClipProcessor`] 实例（Box 分配）。
+///
+/// 对于 World / HiFiGAN，返回对应的 [`ProcessorChain`]（含 Signalsmith Stretch + 声码器 Stage）。
+/// 对于 vslib，返回 [`VslibProcessor`]（需 `feature = "vslib"`）。
+pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
+    match kind {
+        SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
+        SynthPipelineKind::NsfHifiganOnnx => Box::new(chain::hifigan_chain()),
+        #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+        SynthPipelineKind::VocalShifterVslib => Box::new(vslib_processor::VslibProcessor),
+        #[cfg(all(
+            feature = "vslib",
+            not(all(target_os = "windows", target_arch = "x86_64"))
+        ))]
+        SynthPipelineKind::VocalShifterVslib => Box::new(chain::hifigan_chain()),
+    }
+}
+
+pub fn processor_handles_time_stretch(kind: SynthPipelineKind, compose_enabled: bool) -> bool {
+    if !compose_enabled {
+        return false;
+    }
+    match kind {
+        SynthPipelineKind::NsfHifiganOnnx => crate::time_stretch::should_use_hifigan_mel_stretch(),
+        _ => get_processor(kind).capabilities().handles_time_stretch,
+    }
+}
+
+/// 列出某算法实际可编辑的全部自动化/静态参数：**共通混音级参数在前，算法专有在后**。
+///
+/// 这是「参数集合」的唯一对外口径：前端工具栏、默认值解析、能力查询都经由此处，
+/// 因此共通参数（volume / pan / dyn）对所有算法一律可见，无需各处理器重复声明。
+pub fn all_param_descriptors(kind: SynthPipelineKind) -> Vec<ParamDescriptor> {
+    let mut out = common_params::common_mix_params().to_vec();
+    out.extend(get_processor(kind).param_descriptors());
+    out
+}
+
+pub fn get_param_descriptor(kind: SynthPipelineKind, param_id: &str) -> Option<ParamDescriptor> {
+    all_param_descriptors(kind)
+        .into_iter()
+        .find(|descriptor| descriptor.id == param_id)
+}
+
+pub fn automation_curve_default_value(kind: SynthPipelineKind, param_id: &str) -> Option<f32> {
+    match get_param_descriptor(kind, param_id)?.kind {
+        ParamKind::AutomationCurve { default_value, .. } => Some(default_value),
+        _ => None,
+    }
+}
+
+pub fn static_enum_default_value(kind: SynthPipelineKind, param_id: &str) -> Option<i32> {
+    match get_param_descriptor(kind, param_id)?.kind {
+        ParamKind::StaticEnum { default_value, .. } => Some(default_value),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::processor_handles_time_stretch;
+    use crate::state::SynthPipelineKind;
+    use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
+
+    #[test]
+    fn hifigan_mel_stretch_requires_compose_enabled() {
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
+        assert!(!processor_handles_time_stretch(
+            SynthPipelineKind::NsfHifiganOnnx,
+            false,
+        ));
+        assert!(processor_handles_time_stretch(
+            SynthPipelineKind::NsfHifiganOnnx,
+            true,
+        ));
+    }
+}

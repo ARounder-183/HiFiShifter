@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import { isPluginMode } from "../services/hostCapabilities";
 import { projectApi, type AutoBackupSettings } from "../services/api/project";
 
 interface UseAutoBackupSchedulerParams {
@@ -56,6 +57,7 @@ export function useAutoBackupScheduler({
     }
 
     async function runTimedBackupNow() {
+        if (isPluginMode()) return;
         if (inFlightRef.current) return;
         inFlightRef.current = true;
 

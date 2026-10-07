@@ -1,0 +1,22 @@
+[package]
+name = "ara-mapping-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# HiFiShifter ARA 探针 / Task 3 —— ARA 文档 → TimelineState 映射原型（一次性）。
+#
+# 关键点：转换器落到**产品真实的** `TimelineState` / `Clip` 上，而不是探针自造的影子结构。
+# 可行的原因：`backend/src-tauri/src/lib.rs` 里已有 `pub mod __test_internals`
+# （`#[doc(hidden)]`，供 tests/ 集成目标使用），它公开 re-export 了
+# `state::{Clip, TimelineState}`。因此探针**不需要**给 backend 加任何 `pub`，
+# 也就不违反"不改 backend/"的约定。
+#
+# 已知边界：`render_mixdown_interleaved` **没有**经该钩子暴露，外部 crate 拿不到，
+# 所以 plan 的 Step 6 无法按原样做逐样本音频比对（见 FINDINGS.md）。
+[dependencies]
+# 依赖键取 `backend_lib`，与 backend 的 `[lib] name` 一致，这样代码里写
+# `use backend_lib::…`；`package` 指向真实的包名 `HiFiShifter`。
+backend_lib = { package = "HiFiShifter", path = "../../../backend/src-tauri" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

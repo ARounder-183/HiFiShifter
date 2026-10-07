@@ -119,7 +119,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/window");
+                const mod = await (await import("../../../../services/hostWindow")).loadStandaloneWindowApi();
                 const win = mod.getCurrentWindow();
 
                 if (debugDnd) {

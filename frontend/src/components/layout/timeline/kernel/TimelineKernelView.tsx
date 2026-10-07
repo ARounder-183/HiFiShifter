@@ -447,12 +447,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             scrollHorizontal: scrollHorizontalKb,
             scrollVertical: scrollVerticalKb,
             scrollbarZoom: scrollbarZoomKb,
-            fadeShapeCycle: fadeShapeCycleKb,
+            fadeShapeCycle: interactions?.fadeShapeReadOnly ? null : fadeShapeCycleKb,
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
             clipRangeToParamSelection: clipRangeToParamKb,
             clipStretch: clipStretchKb,
-            fadeCurvatureDrag: fadeCurvatureKb,
+            fadeCurvatureDrag: interactions?.fadeShapeReadOnly ? null : fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -551,6 +551,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
      */
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
+            get geometryReadOnly() { return interactionsRef.current?.geometryReadOnly; },
+            get fadeShapeReadOnly() { return interactionsRef.current?.fadeShapeReadOnly; },
             onSeek: (sec, phase, trackId) => interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>

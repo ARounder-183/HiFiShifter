@@ -58,6 +58,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
     const showCommit = Boolean(info?.commit && commitShort);
 
     async function openExternal(url: string) {
+        if (window.__HFS_PLUGIN_BOOTSTRAP__) return;
         try {
             const { openUrl } = await import("@tauri-apps/plugin-opener");
             await openUrl(url);

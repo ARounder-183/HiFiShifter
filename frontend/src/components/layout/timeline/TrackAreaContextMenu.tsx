@@ -1,7 +1,9 @@
+// 轨道空白区右键菜单：插件保留菜单显示，未接宿主写口的动作不执行App私有编辑。
 import React from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppContextMenu, useMenuShortcut } from "../../../ui";
+import { canClipboardHostClips, canSplitHostClips, DAW_CONTROLLED_REASON, isPluginMode } from "../../../services/hostCapabilities";
 
 export const TrackAreaContextMenu: React.FC<{
     x: number;
@@ -16,6 +18,11 @@ export const TrackAreaContextMenu: React.FC<{
     onClose: () => void;
 }> = ({ x, y, canPaste, canSplit, canCloseGaps, onPaste, onSplit, onCloseGaps, onClose }) => {
     const { t } = useI18n();
+    const plugin = isPluginMode();
+    // 显示菜单不等于放开全部几何操作：插件目前只接通这张菜单里的分割。
+    const pasteAllowed = canPaste && (!plugin || canClipboardHostClips());
+    const splitAllowed = canSplit && (!plugin || canSplitHostClips());
+    const closeGapsAllowed = canCloseGaps && !plugin;
     // 快捷键提示：从快捷键注册表读取当前生效的绑定（随用户自定义实时变化）。
     // 时间轴的右键菜单此前只有 label/onSelect，把 `shortcut` 整条信息丢了 ——
     // 于是同一张时间轴上，剪辑菜单有快捷键、轨道区域菜单没有（见 ui/useMenuShortcut）。
@@ -36,21 +43,24 @@ export const TrackAreaContextMenu: React.FC<{
                     key: "paste",
                     label: t("menu_paste"),
                     shortcut: pasteShortcut,
-                    disabled: !canPaste,
-                    onSelect: onPaste,
+                    disabled: !pasteAllowed,
+                    tooltip: plugin && !canClipboardHostClips() ? DAW_CONTROLLED_REASON : undefined,
+                    onSelect: () => { if (pasteAllowed) onPaste(); },
                 },
                 {
                     key: "split",
                     label: t("ctx_split_at_playhead"),
                     shortcut: splitShortcut,
-                    disabled: !canSplit,
-                    onSelect: onSplit,
+                    disabled: !splitAllowed,
+                    tooltip: plugin && !canSplitHostClips() ? DAW_CONTROLLED_REASON : undefined,
+                    onSelect: () => { if (splitAllowed) onSplit(); },
                 },
                 {
                     key: "closeGaps",
                     label: t("ctx_close_gaps"),
-                    disabled: !canCloseGaps,
-                    onSelect: onCloseGaps,
+                    disabled: !closeGapsAllowed,
+                    tooltip: plugin ? DAW_CONTROLLED_REASON : undefined,
+                    onSelect: () => { if (closeGapsAllowed) onCloseGaps(); },
                 },
             ]}
         />,

@@ -24,6 +24,15 @@
     when the build is invoked with `--target`. When omitted, the script
     detects the release directory automatically.
 
+.PARAMETER PackageTarget
+    App (default), Plugin, or All. The interactive entry offers all three.
+
+.PARAMETER DeliveryDirectory
+    Existing complete VST3 Release delivery to package with -SkipBuild.
+
+.PARAMETER Installer
+    Additionally create the plugin setup.exe using NSIS.
+
 .EXAMPLE
     .\scripts\pack-portable.ps1
     # Full build + packaging
@@ -35,6 +44,10 @@
 .EXAMPLE
     .\scripts\pack-portable.ps1 -OutputDir "C:\output"
     # Specify output directory
+
+.EXAMPLE
+    .\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+    # Package the latest plugin delivery as ZIP and setup.exe
 #>
 
 param(
@@ -42,7 +55,10 @@ param(
     [switch]$NoZip,
     [string]$OutputDir,
     [string]$Version,
-    [string]$TargetTriple
+    [string]$TargetTriple,
+    [ValidateSet('App', 'Plugin', 'All')][string]$PackageTarget = 'App',
+    [string]$DeliveryDirectory,
+    [switch]$Installer
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,8 +104,9 @@ function Get-ExeArchitecture {
 
 # ===== Path definitions =====
 $ProjectRoot = Resolve-Path "$PSScriptRoot\.."
+$UnifiedAppDirectory = $null
 $TauriDir = Join-Path $ProjectRoot "backend\src-tauri"
-$TauriTargetRoot = Join-Path $TauriDir "target"
+$TauriTargetRoot = Join-Path $ProjectRoot "backend\target"
 $SetVersionScript = Join-Path $ProjectRoot "scripts\set-version.ps1"
 
 function Resolve-TauriReleaseDir {
@@ -122,6 +139,12 @@ function Resolve-TauriReleaseDir {
                 $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $t $p)))
             }
         }
+    }
+    # 兼容 workspace 拆分前的独立 Tauri target 目录。
+    foreach ($p in $Profiles) {
+        $ReleaseCandidates.Add((Join-Path $script:TauriDir ("target\" + $p)))
+        foreach ($t in $Triples) { $ReleaseCandidates.Add((Join-Path $script:TauriDir ("target\" + $t + "\" + $p))) }
+        if ($script:TargetTriple) { $ExplicitDirs.Add((Join-Path $script:TauriDir ("target\" + $script:TargetTriple + "\" + $p))) }
     }
 
     $ResolvedRelease = $null
@@ -190,8 +213,53 @@ $TauriConf = Get-Content (Join-Path $TauriDir "tauri.conf.json") -Raw | ConvertF
 $ProductName = $TauriConf.productName
 $Version = $TauriConf.version
 
+# 双击快速入口可选择 App、插件或两者；CI 与 -SkipBuild 调用保持非交互默认 App。
+if (!$PSBoundParameters.ContainsKey('PackageTarget') -and !$SkipBuild) {
+    do { $packageChoice = Read-Host '打包目标：1 App，2 VST3 插件，3 两者' } while ($packageChoice -notin @('1','2','3'))
+    $PackageTarget = @{'1'='App';'2'='Plugin';'3'='All'}[$packageChoice]
+}
+if ($PackageTarget -ne 'App') {
+    if ($TargetTriple -and $TargetTriple -ne 'x86_64-pc-windows-msvc') { throw 'VST3 packaging currently supports Windows x64 only.' }
+    if (!$OutputDir) { $OutputDir = Join-Path $ProjectRoot 'dist' }
+    if (!$SkipBuild) {
+        do { $pluginBuildChoice = Read-Host '构建方式：1 构建并打包，2 仅打包已有交付' } while ($pluginBuildChoice -notin @('1','2'))
+        if ($pluginBuildChoice -eq '2') { $SkipBuild = $true }
+    }
+    if (!$SkipBuild) {
+        & (Join-Path $ProjectRoot 'tools\prepare-plugin-sdks.ps1')
+        & cargo fetch --manifest-path (Join-Path $ProjectRoot 'backend\Cargo.toml') --locked
+        if ($LASTEXITCODE -ne 0) { throw 'Cargo dependency fetch failed.' }
+        $pluginBuildName = 'portable-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6)
+        $pluginBuildTarget = if ($PackageTarget -eq 'All') { 'All' } else { 'Plugin' }
+        & (Join-Path $ProjectRoot 'tools\build-hifishifter.ps1') -Target $pluginBuildTarget -Configuration Release -BuildName $pluginBuildName
+        $DeliveryDirectory = Join-Path $ProjectRoot ('.build-tmp\deliveries\' + $pluginBuildName)
+    } elseif (!$DeliveryDirectory) {
+        $pluginDeliveries = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot '.build-tmp\deliveries') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'build-manifest.json') } |
+            Sort-Object LastWriteTime -Descending)
+        foreach ($pluginDelivery in $pluginDeliveries) {
+            $pluginManifest = Get-Content -LiteralPath (Join-Path $pluginDelivery.FullName 'build-manifest.json') -Raw | ConvertFrom-Json
+            if ($pluginManifest.configuration -eq 'Release' -and $pluginManifest.target -in @('Plugin','All') -and
+                ($PackageTarget -ne 'All' -or $pluginManifest.target -eq 'All') -and
+                (Test-Path -LiteralPath (Join-Path $pluginDelivery.FullName 'HiFiShifter.vst3'))) { $DeliveryDirectory = $pluginDelivery.FullName; break }
+        }
+    }
+    if (!$DeliveryDirectory) { throw 'No complete VST3 Release delivery found. Build first or provide -DeliveryDirectory.' }
+    if ($PackageTarget -eq 'All') {
+        $UnifiedAppDirectory = Join-Path $DeliveryDirectory 'app'
+        if (!(Test-Path -LiteralPath (Join-Path $UnifiedAppDirectory 'HiFiShifter.exe'))) {
+            throw 'All packaging requires a complete App + plugin delivery.'
+        }
+    }
+    & (Join-Path $ProjectRoot 'tools\package-vst3.ps1') -DeliveryDirectory $DeliveryDirectory -OutputDirectory $OutputDir -NoZip:$NoZip -Installer:$Installer
+    if ($PackageTarget -eq 'Plugin') { return }
+    # All 已由同一条构建流生成 App 与插件；下面只组装 App，避免再构建一次。
+    $SkipBuild = $true
+}
+
 $Resolved = Resolve-TauriReleaseDir
 $TargetRelease = $Resolved.ReleaseDir
+if ($UnifiedAppDirectory) { $TargetRelease = $UnifiedAppDirectory }
 $DetectedTriple = $Resolved.Triple
 
 # Output directory
@@ -201,6 +269,11 @@ if (-not $OutputDir) {
 
 $PortableDirName = "$ProductName"
 $TempDir = Join-Path $OutputDir $PortableDirName
+$OutputDir = [IO.Path]::GetFullPath($OutputDir)
+$TempDir = [IO.Path]::GetFullPath($TempDir)
+if (!$TempDir.StartsWith($OutputDir + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Portable package directory escaped its output directory.'
+}
 
 # Determine arch short name for filenames
 if ($DetectedTriple -like "*aarch64*") {
@@ -317,6 +390,9 @@ $Resources = @(
 if ($ArchShort -eq "x64") {
     $Resources += @{ Src = Join-Path $TauriDir "third_party\vslib\vslib_x64.dll"; Dst = "vslib_x64.dll" }
 }
+if ($UnifiedAppDirectory) {
+    foreach ($res in $Resources) { $res.Src = Join-Path $UnifiedAppDirectory $res.Dst }
+}
 
 # Check that all resource files exist
 $Missing = @()
@@ -371,7 +447,8 @@ if (Test-Path $LicensePath) {
 
 # Copy any DLLs from the release directory (SoundTouchDLL, ORT, etc.).
 # Exclude vslib_x64.dll which is handled separately above from the third_party source.
-Get-ChildItem -Path $TargetRelease -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+Get-ChildItem -Path $TargetRelease -Filter "*.dll" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notin @('hifishifter_plugin.dll', 'HiFiShifterEngine.dll') } | ForEach-Object {
     if ($_.Name -ne "vslib_x64.dll") {
         Copy-Item $_.FullName -Destination $TempDir
         Write-Host "  [OK] $($_.Name)" -ForegroundColor DarkGreen
@@ -407,6 +484,7 @@ else {
 }
 
 # ===== Step 5: Copy NSIS installer =====
+$AppInstallerCopied = $false
 if (-not $NoZip) {
     Write-Host "[5/5] Copying NSIS installer to dist..." -ForegroundColor Yellow
 
@@ -422,6 +500,7 @@ if (-not $NoZip) {
 
     if (Test-Path $NsisExePath) {
         Copy-Item $NsisExePath -Destination $OutputDir
+        $AppInstallerCopied = $true
         $NsisSize = (Get-Item (Join-Path $OutputDir $NsisPattern)).Length
         $NsisSizeMB = [math]::Round($NsisSize / 1MB, 2)
         Write-Host "[5/5] NSIS installer copied [OK] ($($NsisSizeMB) MB)" -ForegroundColor Green
@@ -440,7 +519,7 @@ if (-not $NoZip) {
     Write-Host "  Packaging successful!" -ForegroundColor Green
     Write-Host "  Portable: $ZipPath" -ForegroundColor Green
     Write-Host "  Size:     $($ZipSizeMB) MB" -ForegroundColor Green
-    if (Test-Path (Join-Path $OutputDir $NsisPattern)) {
+    if ($AppInstallerCopied) {
         Write-Host "  Installer: $(Join-Path $OutputDir $NsisPattern)" -ForegroundColor Green
         Write-Host "  Size:      $($NsisSizeMB) MB" -ForegroundColor Green
     }

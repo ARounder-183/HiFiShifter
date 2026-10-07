@@ -1,4 +1,6 @@
+// 原轨道列表；插件保留选择/混音/算法控制，轨道结构与命名由宿主拥有。
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { isPluginMode, canGroupPluginTracks } from "../../../services/hostCapabilities";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
@@ -1484,6 +1486,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         onSelectTrack(track.id);
                                     }}
                                     onContextMenu={(e) => {
+                                        if (isPluginMode()) {e.preventDefault();return;}
                                         e.preventDefault();
                                         setTrackCtxMenu({
                                             x: e.clientX,
@@ -1492,6 +1495,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         });
                                     }}
                                     onPointerDown={(e) => {
+                                        if (isPluginMode()&&!canGroupPluginTracks()) return;
                                         // 数位笔 / 触摸不触发轨道拖动排序 / 嵌套：
                                         // 行高窄 + 3px 阈值，画线式滑动即重排轨道。
                                         if (shouldSuppressHoverSideEffects(e.nativeEvent)) {
@@ -1577,6 +1581,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // 复制拖动修饰键按住时：预览与放置都按
                                             // “源轨道不剔除”的复制索引计算。
                                             const copyMode = Boolean(
+                                                !isPluginMode() &&
                                                 copyDragKb &&
                                                 isModifierActive(copyDragKb, ev) &&
                                                 onDuplicateTrackTo,
@@ -1665,6 +1670,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // （blur 收尾用最后一次已知指针位置；修饰键
                                             // 以按下瞬间的状态为准 —— 失焦时没有可信的实时按键）。
                                             const copyActive = Boolean(
+                                                !isPluginMode() &&
                                                 copyDragKb && isModifierActive(copyDragKb, e),
                                             );
                                             const spec = computeDropSpec(
@@ -1910,6 +1916,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }
                                                                 onDoubleClick={(e) => {
                                                                     e.stopPropagation();
+                                                                    if (isPluginMode()) return;
                                                                     setEditingTrackId(track.id);
                                                                     setEditingName(track.name);
                                                                     setTimeout(() => {
@@ -1953,7 +1960,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         /* 默认 `opacity-0`：Tab 到它时必须显形，
                                                            否则焦点环画在一个透明元素上。 */
                                                         className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                                                        disabled={isLastRootTrack(track.id)}
+                                                        disabled={isPluginMode() || isLastRootTrack(track.id)}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();

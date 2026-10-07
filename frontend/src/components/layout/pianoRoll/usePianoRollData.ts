@@ -1,4 +1,7 @@
+// 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isPluginMode } from "../../../services/hostCapabilities";
+import { shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -223,11 +226,14 @@ export function usePianoRollData(args: {
         const scopeChanged = lastParamScopeRef.current !== scope;
         lastParamScopeRef.current = scope;
         if (!scopeChanged && liveEditDeferral.defer({ force: true })) return;
-        setParamView(null);
-        setSecondaryParamViews({});
-        setReferencePitchViews({});
-        setPitchEditUserModified(null);
-        setPitchEditBackendAvailable(null);
+        // 同scope提交保留当前可见数据，仍强制取权威数据；切参数/轨道必须清除旧scope。
+        if (shouldClearParamRefresh(scopeChanged, isPluginMode())) {
+            setParamView(null);
+            setSecondaryParamViews({});
+            setReferencePitchViews({});
+            setPitchEditUserModified(null);
+            setPitchEditBackendAvailable(null);
+        }
         setForceParamFetchToken((x) => x + 1);
     }, [paramsEpoch, rootTrackId, editParam, liveEditDeferral]);
 
@@ -243,7 +249,7 @@ export function usePianoRollData(args: {
             if (!pitchEnabled) return;
             if (!rootTrackId) return;
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
 
                 type PitchOrigUpdatedPayload = { rootTrackId?: string };
 
@@ -294,7 +300,7 @@ export function usePianoRollData(args: {
         async function setup() {
             if (!rootTrackId) return;
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
                 type DynOrigUpdatedPayload = { rootTrackId?: string };
                 unlisten = await mod.listen<DynOrigUpdatedPayload>("dyn_orig_updated", (event) => {
                     if (disposed) return;

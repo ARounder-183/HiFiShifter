@@ -132,6 +132,8 @@ const fileBrowserSlice = createSlice({
     name: "fileBrowser",
     initialState,
     reducers: {
+        /** 原生选择器失败必须可见，不能让用户点击文件夹后没有任何反应。 */
+        setFileBrowserError(state, action: PayloadAction<string | null>) { state.error = action.payload; },
         setPreviewVolume(state, action: PayloadAction<number>) {
             state.previewVolume = Math.max(0, Math.min(1, action.payload));
         },
@@ -189,7 +191,7 @@ const fileBrowserSlice = createSlice({
     },
 });
 
-export const { setPreviewVolume, setPreviewingFile, setSearchQuery, toggleRegex } =
+export const { setPreviewVolume, setPreviewingFile, setSearchQuery, toggleRegex, setFileBrowserError } =
     fileBrowserSlice.actions;
 
 export default fileBrowserSlice.reducer;

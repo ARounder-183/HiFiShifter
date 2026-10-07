@@ -66,6 +66,7 @@ type SparseRenderClip = {
     midiNoteCount?: number;
     groupId?: string;
     fadeInSec: number;
+    hostFades?: import("../../../../types/api").HostFadeMetadata;
     fadeOutSec: number;
     fadeInShape: number;
     fadeOutShape: number;
@@ -109,6 +110,7 @@ export type TimelineCanvasClipModel = {
     heightPx: number;
     headerHeightPx: number;
     fadeInPx: number;
+    hostFades?: import("../../../../types/api").HostFadeMetadata;
     fadeOutPx: number;
     fadeInShape: number;
     fadeOutShape: number;
@@ -663,6 +665,7 @@ export function buildSparseClipRenderModel(args: {
                 (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec,
             ),
             fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+            hostFades: clip.hostFades,
             fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
             fadeInDir: clip.fadeInDir ?? 0,
             fadeOutDir: clip.fadeOutDir ?? 0,

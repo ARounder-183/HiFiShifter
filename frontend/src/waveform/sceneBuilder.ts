@@ -30,6 +30,7 @@ import {
     viewportStartSec as axisViewportStartSec,
     type TimelineAxis,
 } from "../components/layout/renderKernel/timelineAxis.ts";
+import type {HostFadeMetadata} from "../types/api";
 
 export interface WaveformSceneClip {
     id: string;
@@ -48,6 +49,8 @@ export interface WaveformSceneClip {
     muted: boolean;
     fadeInSec: number;
     fadeOutSec: number;
+    /** 仅UI使用，曲线描边和波形使用同一HiFiShifter示意包络。 */
+    hostFades?: HostFadeMetadata;
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
     /** REAPER 风格淡入形状 id（同 ClipInfo.fadeInShape，见 reaperFade.ts）。 */
@@ -97,6 +100,7 @@ export interface WaveformSceneSegment {
     gain: number;
     fadeInSec: number;
     fadeOutSec: number;
+    hostFades?: HostFadeMetadata;
     /** REAPER 风格淡入形状 id（同 WaveformSceneClip，见 reaperFade.ts）。 */
     fadeInShape: number;
     fadeInDir: number;
@@ -488,6 +492,7 @@ export function buildWaveformScene(args: {
                         gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
                         fadeInSec,
                         fadeOutSec,
+                        hostFades: clip.hostFades,
                         fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
                         fadeInDir: clip.fadeInDir ?? 0,
                         fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,

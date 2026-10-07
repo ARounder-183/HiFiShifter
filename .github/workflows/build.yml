@@ -319,7 +319,7 @@ jobs:
         run: |
           # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
           # linuxdeploy needs to find it to bundle it into the AppImage.
-          DEFAULT_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/dist"
+          DEFAULT_LIB_DIR="${{ github.workspace }}/backend/target/dist"
           echo "LD_LIBRARY_PATH=${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
         shell: bash
 
@@ -338,8 +338,8 @@ jobs:
         if: always()
         id: tauri-release-dir
         run: |
-          TRIPLE_DIR="backend/src-tauri/target/${{ matrix.cargo_target }}/dist"
-          DEFAULT_DIR="backend/src-tauri/target/dist"
+          TRIPLE_DIR="backend/target/${{ matrix.cargo_target }}/dist"
+          DEFAULT_DIR="backend/target/dist"
           if [ -d "$TRIPLE_DIR" ] && [ -d "$TRIPLE_DIR/bundle" ] && { [ ! -d "$DEFAULT_DIR/bundle" ] || [ "$TRIPLE_DIR/bundle" -nt "$DEFAULT_DIR/bundle" ]; }; then
             echo "release-dir=$TRIPLE_DIR" >> "$GITHUB_OUTPUT"
           else
@@ -497,7 +497,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           # Builds run natively without --target and use the dist profile, so
-          # artifacts land in backend/src-tauri/target/dist — no triple path.
+          # Workspace artifacts land in backend/target/dist — no triple path.
           # The script detects the artifact directory itself.
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
@@ -650,5 +650,5 @@ jobs:
           uname -a || true
           ldd --version || true
           echo "==== Candidate bundle dirs ===="
-          find backend/src-tauri/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
+          find backend/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
         shell: bash

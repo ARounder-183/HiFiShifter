@@ -1,3 +1,4 @@
+// 文件浏览器复用App界面；插件原生目录选择失败也要显示原因。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Flex, IconButton, TextField } from "@radix-ui/themes";
 import {
@@ -18,6 +19,7 @@ import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
     loadDirectory,
+    setFileBrowserError,
     setPreviewVolume,
     setSearchQuery,
     searchFilesRecursive,
@@ -369,10 +371,10 @@ export const FileBrowserPanel: React.FC = () => {
             if (result.ok && !result.canceled && result.path) {
                 navigateTo(result.path);
             }
-        } catch {
-            // 忽略错误
+        } catch (error) {
+            dispatch(setFileBrowserError(String(error)));
         }
-    }, [navigateTo]);
+    }, [navigateTo, dispatch]);
 
     /**
      * 重新拉取**列表当前显示的内容**（刷新按钮 / 写操作之后）。

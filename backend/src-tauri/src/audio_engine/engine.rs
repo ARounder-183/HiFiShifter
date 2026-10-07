@@ -132,10 +132,13 @@ impl AudioEngine {
         Self::with_app_handle(None)
     }
 
-    /// 在 Tauri setup 完成后调用，将 app_handle 传递给 engine worker，
-    /// 使其能够向前端推送事件（如 `clip_pitch_data`）。
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        let _ = self.tx.send(EngineCommand::SetAppHandle { handle });
+    /// 把一条引擎命令投递给 worker。
+    ///
+    /// 【为什么需要它】内核侧的宿主回调（`app_events::AppHostCallbacks`）拿不到
+    /// `AudioEngine` 的私有 channel，只能经由这个入口 —— 它取代了原来的
+    /// `set_app_handle`：句柄不再经命令通道传递（那条通道现在是纯数据的内核类型）。
+    pub fn send(&self, command: EngineCommand) {
+        let _ = self.tx.send(command);
     }
 
     fn with_app_handle(app_handle: Option<tauri::AppHandle>) -> Self {
@@ -728,6 +731,14 @@ impl AudioEngine {
             let mut stashed_cmd: Option<EngineCommand> = None;
 
             loop {
+                // 宿主句柄改为**惰性**获取：worker 可能早于 Tauri setup 启动
+                // （`AudioEngine::new()` 在 `AppState::default()` 里就跑起来了），
+                // 而句柄是 setup 时注册到 `app_events` 的进程级出口。
+                // 之前它靠 `EngineCommand::SetAppHandle` 送进来，而那条命令通道
+                // 现在是内核的纯数据类型，不能塞 `AppHandle`。
+                if app_handle_for_worker.is_none() {
+                    app_handle_for_worker = crate::app_events::app_handle().cloned();
+                }
                 let cmd = match stashed_cmd.take() {
                     Some(cmd) => cmd,
                     None => match rx.recv() {
@@ -806,19 +817,8 @@ impl AudioEngine {
                     // 由参数面板请求 dyn 参数时驱动（见 commands::params）。
                     EngineCommand::ScheduleDynLevelAnalysis => {
                         if let Some(tl) = state.last_timeline.clone() {
-                            schedule_clip_pitch_jobs(
-                                &tl,
-                                state.tx,
-                                state.app_handle.as_ref(),
-                                state.sr,
-                            );
+                            schedule_clip_pitch_jobs(&tl, state.tx, state.sr);
                         }
-                    }
-                    EngineCommand::SetAppHandle { handle } => {
-                        if let Ok(mut app) = meter_app_handle.lock() {
-                            *app = Some(handle.clone());
-                        }
-                        app_handle_for_worker = Some(handle);
                     }
                     EngineCommand::AudioReady { key } => handle_audio_ready(&mut state, key),
                     EngineCommand::PlayFile {
@@ -1598,7 +1598,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 }
             }
         }
-        schedule_clip_pitch_jobs(&tl, s.tx, s.app_handle.as_ref(), s.sr);
+        schedule_clip_pitch_jobs(&tl, s.tx, s.sr);
     }
 
     if !moved_clip_ids.is_empty() {
@@ -1640,7 +1640,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             {
                 if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
                     if emitted_roots.insert(root.clone()) {
-                        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+                        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                     }
                 }
             }
@@ -1662,7 +1662,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         for clip in &tl.clips {
             if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
                 if guarded_roots.insert(root.clone()) {
-                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                 }
             }
         }
@@ -1702,7 +1702,7 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
             }
             // 重新触发 pitch_orig 组装推送
             for rt in &root_track_ids {
-                crate::pitch_analysis::maybe_schedule_pitch_orig(&state, rt);
+                crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, rt);
             }
         }
     }
@@ -1741,7 +1741,7 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
                 let root_track_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
                 if !root_track_id.is_empty() {
                     let state = app.state::<crate::state::AppState>();
-                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_track_id);
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_track_id);
                     debug_eprintln!("[engine] maybe_schedule_pitch_orig called");
                 }
             }
@@ -2117,6 +2117,25 @@ fn clip_pitch_params_changed(old: &crate::state::Clip, new: &crate::state::Clip)
     old.source_path != new.source_path
         // 同路径文件替换：mtime 变化说明文件内容已变，必须重新分析 pitch
         || old.source_file_mtime != new.source_file_mtime
+}
+
+/// 命令状态回归的测试fixture，不启动CPAL/worker，不替换参数写入实现。
+#[cfg(test)]
+pub(crate) mod command_test_support {
+    use super::*;
+
+    /// 显式无设备fixture：保留真实引擎字段，仅把外部音频命令发送边界断开。
+    pub(crate) fn detached_engine() -> AudioEngine {
+        let (tx, _receiver)=mpsc::channel();
+        AudioEngine {
+            tx, snapshot:Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100))),
+            is_playing:Arc::new(AtomicBool::new(false)), play_start_wait:Arc::new(AtomicBool::new(false)),
+            target:Arc::new(Mutex::new(None)),base_frames:Arc::new(AtomicU64::new(0)),
+            position_frames:Arc::new(AtomicU64::new(0)),duration_frames:Arc::new(AtomicU64::new(0)),
+            sample_rate:Arc::new(AtomicU32::new(44100)),worker_ready:Arc::new(AtomicBool::new(true)),
+            meter_shutdown:Arc::new(AtomicBool::new(true)),
+        }
+    }
 }
 
 #[cfg(test)]

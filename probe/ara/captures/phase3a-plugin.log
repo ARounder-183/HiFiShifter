@@ -1,0 +1,228 @@
+[INFO] hifishifter_plugin: [vst3] ARA factory built; companion association ready
+[INFO] hifishifter_plugin: [vst3] GetPluginFactory called
+[INFO] hifishifter_plugin: [vst3] factory countClasses -> 3
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(1) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(2) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[INFO] hifishifter_plugin: [vst3] IComponent::initialize
+[INFO] hifishifter_plugin: [vst3] IComponent::terminate
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(1) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(2) ok
+[INFO] hifishifter_plugin: [vst3] ARA factory built; companion association ready
+[INFO] hifishifter_plugin: [vst3] GetPluginFactory called
+[INFO] hifishifter_plugin: [vst3] factory countClasses -> 3
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[INFO] hifishifter_plugin: [vst3] IComponent::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[INFO] hifishifter_plugin::ara::model: [ara] document controller created: apiGeneration=V2Final
+[INFO] hifishifter_plugin::ara::model: [ara] begin_editing
+[INFO] hifishifter_plugin::ara::model: ara: sources=0 modifications=0 regionSequences=0 playbackRegions=0 clips=0
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[]
+[INFO] hifishifter_plugin::ara_entry: [ara] bind document=1 known=0x7 assigned=0x6
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IEditController::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin::ara::model: [ara] begin_editing
+[INFO] hifishifter_plugin::render::extension: [ara] renderer assignment role=2 regions=0
+[INFO] hifishifter_plugin::ara::model: [ara] audio_source #0: persistentID=E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\phase3a-asymmetric.wav sampleRate=44100 sampleCount=88200
+[INFO] hifishifter_plugin::ara::model: [ara] audio_source samples_access enable=true
+[INFO] hifishifter_plugin::ara::model: [ara] host PCM ready source=0 frames=88200 version=0
+[INFO] hifishifter_plugin: [vst3] factory countClasses -> 3
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[INFO] hifishifter_plugin: [vst3] IComponent::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[INFO] hifishifter_plugin::ara_entry: [ara] bind document=1 known=0x7 assigned=0x1
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IEditController::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory countClasses -> 3
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[INFO] hifishifter_plugin: [vst3] IComponent::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[INFO] hifishifter_plugin::ara_entry: [ara] bind document=1 known=0x7 assigned=0x1
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IEditController::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory countClasses -> 3
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[INFO] hifishifter_plugin: [vst3] IComponent::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[INFO] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[INFO] hifishifter_plugin::ara_entry: [ara] bind document=1 known=0x7 assigned=0x1
+[INFO] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[INFO] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[INFO] hifishifter_plugin: [vst3] IEditController::initialize
+[INFO] hifishifter_plugin: [vst3] component queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=6F15A4706E6E2640989148BFAA60D8D1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[INFO] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #0: source=E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\phase3a-asymmetric.wav startMod=0.000000 durationMod=2.000000 startPlay=0.000000 durationPlay=2.000000 flags=0x1
+[INFO] hifishifter_plugin::render::extension: [ara] renderer assignment role=1 regions=1
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #1: source=E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\phase3a-asymmetric.wav startMod=0.250000 durationMod=1.000000 startPlay=3.000000 durationPlay=1.000000 flags=0x1
+[INFO] hifishifter_plugin::render::extension: [ara] renderer assignment role=1 regions=1
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #2: source=E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\phase3a-asymmetric.wav startMod=0.000000 durationMod=2.000000 startPlay=6.000000 durationPlay=2.000000 flags=0x1
+[INFO] hifishifter_plugin::render::extension: [ara] renderer assignment role=1 regions=1
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin::ara::model: ara: sources=1 modifications=1 regionSequences=1 playbackRegions=3 clips=3
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[0.000000,3.000000,6.000000]
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=44100 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=48000 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::ara::model: [ara] audio_source samples_access enable=true
+[INFO] hifishifter_plugin::ara::model: [ara] host PCM ready source=0 frames=88200 version=0
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=44100 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=48000 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[INFO] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing
+[INFO] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[INFO] hifishifter_plugin::ara::model: [ara] audio_source samples_access enable=false
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[WARN] hifishifter_plugin::render::extension: [ara] snapshot unavailable: MissingSource
+[INFO] hifishifter_plugin::ara::model: [ara] audio_source samples_access enable=true
+[INFO] hifishifter_plugin::ara::model: [ara] host PCM ready source=0 frames=88200 version=0
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=44100 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=2 rate=48000 regions=3
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=44100 regions=1
+[INFO] hifishifter_plugin::render::extension: [ara] snapshot ready role=1 rate=48000 regions=1

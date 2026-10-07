@@ -21,9 +21,10 @@ import { Provider } from "react-redux";
 import { afterAll, afterEach, expect, test } from "vitest";
 
 import keybindingsReducer from "./keybindingsSlice";
-import sessionReducer from "../session/sessionSlice";
+import sessionReducer, {setToolMode} from "../session/sessionSlice";
 import { useKeybindings } from "./useKeybindings";
 import type { ActionId } from "./types";
+import {createPluginHost,type WebViewMessagePort} from "../../services/pluginHost";
 import {
     installFocusSurfaceTracking,
     resetActiveSurfaceForTests,
@@ -377,6 +378,33 @@ test("DOM 焦点滞留在列表里、但活动表面是时间轴时，按键仍�
 
     press(row, "s");
     expect(fired).toEqual(["clip.split"]);
+});
+
+test("插件原生Ctrl+V只在对应view的keydown触发参数粘贴，keyup不再执行第二次",async()=>{
+    const {store}=await mount();
+    await act(async()=>{store.dispatch(setToolMode("select"));});
+    setActiveSurfaceExplicit("pianoRoll");
+    document.body.focus();
+    const listeners=new Set<(event:{data:unknown})=>void>();
+    const port:WebViewMessagePort={postMessage:()=>{},
+        addEventListener:(_name,fn)=>listeners.add(fn),removeEventListener:(_name,fn)=>listeners.delete(fn)};
+    const bridge=createPluginHost(port,{version:1,viewId:"keyboard-view"});
+    const deliver=(viewId:string,type:string,repeat=false)=>{
+        for(const fn of listeners) fn({data:{version:1,viewId,event:"plugin_keyboard",
+            payload:{type,key:"v",ctrlKey:true,shiftKey:false,repeat}}});
+    };
+    try {
+        deliver("other-view","keydown");expect(fired).toEqual([]);
+        deliver("keyboard-view","keydown");expect(fired).toEqual(["pianoRoll.paste"]);
+        deliver("keyboard-view","keyup");expect(fired).toEqual(["pianoRoll.paste"]);
+        deliver("keyboard-view","keydown",true);expect(fired).toEqual(["pianoRoll.paste"]);
+        const input=document.createElement("input");document.body.append(input);input.focus();
+        deliver("keyboard-view","keydown");expect(fired).toEqual(["pianoRoll.paste"]);
+        input.remove();
+        fired.length=0;
+        await act(async()=>{store.dispatch(setToolMode("draw"));});
+        deliver("keyboard-view","keydown");expect(fired).toEqual(["clip.paste"]);
+    } finally {bridge.dispose();}
 });
 
 /*

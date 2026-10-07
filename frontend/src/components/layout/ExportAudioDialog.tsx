@@ -598,7 +598,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../services/hostEvents") : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "export_audio_progress",
                     (event: {

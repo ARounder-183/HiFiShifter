@@ -1,10 +1,11 @@
-// 统一封装 Tauri / pywebview 调用
+// 统一封装原生插件 / Tauri / pywebview 调用；插件复用原命名参数映射。
 // - Tauri: window.__TAURI__.core.invoke / window.__TAURI__.invoke (named args)
 // - pywebview: window.pywebview.api[method] (positional args)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { reportFrontendError } from "./frontendErrorLog";
+import { getPluginHost } from "./pluginHost";
 
 declare global {
     interface Window {
@@ -22,7 +23,7 @@ declare global {
 
 type PyWebviewApi = Record<string, (...args: any[]) => Promise<any>>;
 
-type InvokeMode = "tauri" | "pywebview";
+type InvokeMode = "plugin" | "tauri" | "pywebview";
 
 export class BackendInvokeError extends Error {
     public readonly mode: InvokeMode;
@@ -126,6 +127,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "set_ui_locale":
             return { locale: args[0] };
+
+        case "ara_connect":
+            return { instanceId: args[0], force: args[1] ?? false };
+
+        case "ara_refresh":
+            return { force: args[0] ?? false };
+        case "plugin_refresh":
+            return { force: args[0] ?? false };
+        case "emit_ui_event":
+            return {event:args[0],payload:args[1]};
 
         case "import_audio_item":
             return {
@@ -862,6 +873,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
  * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
  */
 const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "plugin_get_apply_state",
+    "ara_list_instances",
+    "ara_submit",
+    "ara_disconnect",
     "cancel_background_render",
     "cancel_export_audio",
     "check_source_files_changed",
@@ -921,6 +936,19 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
+    const plugin = getPluginHost();
+    if (plugin) {
+        const mapped = buildTauriArgs(method, args);
+        if (mapped && "__unwired" in mapped && args.length > 0) {
+            throw new Error(`Plugin backend: method not wired yet: ${method} (args: ${args.length})`);
+        }
+        const named = mapped && "__unwired" in mapped ? undefined : mapped;
+        try { return await plugin.invoke<T>(method, named); }
+        catch (cause) {
+            reportFrontendError(`Invoke failed: ${method}`, cause);
+            throw new BackendInvokeError({ mode: "plugin", method, args: named, cause });
+        }
+    }
     const tauriInvoke = getTauriInvoke();
     if (tauriInvoke) {
         const invokeArgs = buildTauriArgs(method, args);

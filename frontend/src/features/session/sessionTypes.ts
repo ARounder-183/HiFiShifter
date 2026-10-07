@@ -287,6 +287,8 @@ export interface ClipInfo {
      */
     snapOffsetSec: number;
     fadeInSec: number;
+    /** 插件只读宿主轴，不作为本地可编辑/可烘焙fade。 */
+    hostFades?: import("../../types/api").HostFadeMetadata;
     fadeOutSec: number;
     /** 淡入形状：REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传）。 */
     fadeInShape: number;
