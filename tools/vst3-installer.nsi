@@ -58,6 +58,15 @@ ${UnStrStr}
   !define HFS_LICENSE "..\LICENSE"
 !endif
 
+; 共享模型库的两个参数由打包脚本传入（`/DHFS_MODELS=…` `/DHFS_MODELS_VERSION=…`）。
+; 空版本号表示"这个安装包不含模型"（例如从旧流程打出来的包），此时跳过模型安装。
+!ifndef HFS_MODELS
+  !define HFS_MODELS ""
+!endif
+!ifndef HFS_MODELS_VERSION
+  !define HFS_MODELS_VERSION ""
+!endif
+
 ; `SetCompressor` 必须在语言声明之前：语言文件一加载就已经有数据被压缩，
 ; 之后再改压缩器会直接报错。
 OutFile "${OUTPUT_FILE}"
@@ -272,6 +281,34 @@ Section "$(HFS_NAME)" SEC_PLUGIN
   ${If} ${FileExists} "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\icon.ico"
     WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "DisplayIcon" "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\icon.ico"
   ${EndIf}
+
+  ; ── 模型：装进全机共享库，bundle 里不留副本 ──────────────────────────
+  ;
+  ; 【为什么不在 bundle 里】独立 App 读的是同一批模型。两个形态各带一份，用户就要为
+  ; 完全相同的 152 MB 付两次磁盘。装进共享库后，后装的另一方直接复用
+  ; （见 backend/hifishifter-kernel/src/model_store.rs）。
+  ;
+  ; 【为什么用 $COMMONAPPDATA 而不是用户目录】安装器以管理员身份运行。写用户目录在
+  ; "标准用户 + 输入管理员密码"提权时会落到**管理员**的配置目录，而运行插件的是标准
+  ; 用户 —— 插件找不到模型，症状只是"推理不可用"。ProgramData 谁提权都写对位置。
+  ;
+  ; 【为什么目录名带版本号】版本由模型内容派生（tools/write-models-manifest.ps1）。
+  ; 升级时新版本落新目录，旧代码不会读到新权重；也正因为如此，同版本已存在就能安全
+  ; 跳过 —— 重装不必再写 152 MB。
+  !if "${HFS_MODELS_VERSION}" != ""
+    SetShellVarContext all
+    StrCpy $5 "$APPDATA\HiFiShifter\models\${HFS_MODELS_VERSION}"
+    SetShellVarContext current
+    IfFileExists "$5\models.json" hfs_models_ready
+      DetailPrint "Installing shared model library..."
+      CreateDirectory "$5"
+      SetOutPath "$5"
+      File /r "${HFS_MODELS}\*"
+    hfs_models_ready:
+    ; 回到 bundle 目录：后面的卸载信息写入依赖 `$INSTDIR`，与 `$OUTDIR` 无关，
+    ; 但保持 `$OUTDIR` 指向安装位置能避免后续误写。
+    SetOutPath "$INSTDIR\${PLUGIN_SUBDIR}"
+  !endif
 SectionEnd
 
 Section "Uninstall"
