@@ -84,6 +84,58 @@ pub fn resolve_and_create(explicit: Option<&Path>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// 平台默认的**本机**数据目录（缓存 / 临时工作文件），与漫游的配置目录分开。
+///
+/// 【为什么不能用 `%TEMP%`】WebView2 的用户数据目录与渲染用的 PCM 暂存原先都放在
+/// 系统临时目录里。那不是"临时"能形容的问题：
+/// - Windows 磁盘清理会在**会话进行中**删除 `%TEMP%` 下的内容 —— 正在运行的
+///   WebView2 用户数据目录被删掉是崩溃隐患，不只是"设置丢了"；
+/// - `%TEMP%` 可能被策略指向内存盘或每次登录重建的目录。
+///
+/// 放在本机数据目录下，这些文件的生命周期就由我们自己决定（见各调用点的清理）。
+///
+/// | 平台 | 路径 |
+/// | --- | --- |
+/// | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\HiFiShifter` |
+/// | macOS | `~/Library/Caches/com.arounder.hifishifter/HiFiShifter` |
+/// | Linux | `$XDG_CACHE_HOME/com.arounder.hifishifter/HiFiShifter`（缺省 `~/.cache`） |
+pub fn default_local_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(base).join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join(APP_IDENTIFIER)
+                .join(CONFIG_SUBDIR),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+        Some(base.join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
+    }
+}
+
+/// 本机数据目录下的一个子目录；解析不出来时退回系统临时目录。
+///
+/// 【为什么保留临时目录兜底】缺 `LOCALAPPDATA` 时宁可用临时目录也不能让插件起不来 ——
+/// 一个跑得起来但清理不完美的会话，好过一个打不开的窗口。
+pub fn local_data_subdir(name: &str) -> PathBuf {
+    match default_local_data_dir() {
+        Some(base) => base.join(name),
+        None => std::env::temp_dir().join("hifishifter").join(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,6 +129,23 @@ pub(crate) struct EditorSession {
     transport_probe_next: Mutex<Instant>,
     pub(super) suppress_history: AtomicBool,
 }
+
+impl Drop for EditorSession {
+    /// 会话结束时清掉自己的 PCM 暂存目录。
+    ///
+    /// 【为什么必须有】这个目录是按命名空间（含 pid 与序号）建的，宿主每次启动都会
+    /// 得到新目录；没有回收点就会在磁盘上无限累积渲染用的 PCM。清理失败只留日志，
+    /// 不影响关闭流程。
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.pcm_dir) {
+            // 目录可能从未被创建过（没有渲染发生）—— 那不算错误。
+            if error.kind() != std::io::ErrorKind::NotFound {
+                crate::log_line(&format!("plugin PCM scratch cleanup failed: {error}"));
+            }
+        }
+    }
+}
+
 impl EditorSession {
     /// 导入目标只接受当前原GUI已授权轨道；未指定时由native直接parent决定空轨首次导入。
     pub(super) fn host_track_id(&self, id: &str) -> Result<String, String> {
@@ -237,9 +254,10 @@ impl EditorSession {
             history: Mutex::new(Default::default()),
             project: Mutex::new(ProjectState::default()),
             loaded: Mutex::new(Default::default()),
-            pcm_dir: std::env::temp_dir()
-                .join("hifishifter-plugin-pcm")
-                .join(&namespace),
+            // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
+            // 文件会让正在进行的渲染失败。命名空间含 pid 与序号，多个宿主进程
+            // 之间不会互相覆盖。
+            pcm_dir: hifishifter_kernel::config_location::local_data_subdir("pcm").join(&namespace),
             namespace,
             browser_roots: Mutex::new(Vec::new()),
             display_waveforms: Mutex::new(HashMap::new()),

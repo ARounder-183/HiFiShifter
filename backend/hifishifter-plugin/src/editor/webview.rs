@@ -112,6 +112,13 @@ impl Drop for WindowData {
         if let Some(controller) = controller {
             let _ = unsafe { controller.Close() };
         }
+        // 尽力清理本次视图的用户数据目录：WebView2 在 Close 之后释放文件句柄，
+        // 但"释放"没有同步保证 —— 删不掉就留着（下次同名目录会复用），绝不因为
+        // 清理失败而影响关闭流程。放在本机数据目录而不是 `%TEMP%`，就是为了让
+        // 这些目录有一个由我们负责的回收点（见 config_location 的说明）。
+        let _ = std::fs::remove_dir_all(
+            hifishifter_kernel::config_location::local_data_subdir("webview").join(&view_id),
+        );
         let _ = unsafe { KillTimer(Some(self.state.borrow().hwnd), 0x4853) };
         unsafe {
             CoUninitialize();
@@ -701,9 +708,14 @@ fn begin_browser(state: &Rc<RefCell<BrowserState>>) -> Result<(), String> {
     let folder = assets()?;
     pin_callback_code()?;
     let id = state.borrow().view_id.clone();
-    let profile = std::env::temp_dir()
-        .join("hifishifter-plugin-webview")
-        .join(&id);
+    // 【为什么不再用 `%TEMP%`】磁盘清理会在会话进行中删掉 `%TEMP%` 下的内容，
+    // 正在运行的 WebView2 用户数据目录被删掉会直接崩 —— 而不只是"缓存丢了"。
+    // 放在本机数据目录下，生命周期由我们自己掌握。
+    //
+    // 【为什么仍然每进程一个目录】WebView2 不支持两个进程同时打开同一个用户数据
+    // 目录，而 REAPER 可能把插件放在独立的宿主进程里。耐久性早已不依赖它（设置
+    // 在配置文件里），所以这里只要"稳定且可清理"就够。
+    let profile = hifishifter_kernel::config_location::local_data_subdir("webview").join(&id);
     std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
     let profile = wide(&profile.to_string_lossy());
     let weak = Rc::downgrade(state);
