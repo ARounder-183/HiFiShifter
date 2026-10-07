@@ -26,7 +26,11 @@ import {
     resolveThemeColor,
     timelineLaneBackgroundCss,
 } from "./timelineCanvasStyle.js";
-import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
+import {
+    fadeCornerHandleBoxPx,
+    isFadeCornerBandReachable,
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+} from "../constants.js";
 import {
     buildClipBodyInstance,
     buildGuideInstance,
@@ -943,6 +947,55 @@ export function drawTimelineCanvas(
                 mode: "out",
                 hostFades: clip.hostFades,
             });
+        }
+
+        // ── 渐变角手柄角标 ──────────────────────────────────────
+        // 只在该侧**还没有淡变**时画：已有淡变的那一侧由包络线本身充当提示，
+        // 两侧都画会在 clip 上堆两套图形。
+        //
+        // 这是"看到的 = 可点的"的落点 —— 渐变角命中区是本仓唯一完全隐形的可点区，
+        // 而它正是 Issue 141 里被误触的那一块。角标的外接矩形由
+        // `fadeCornerHandleBoxPx` 给出，与 `hitTest` 的横帽带同源（契约测试逐行高
+        // 比对包含关系），因此不存在"画在这里、能点的在那里"的漂移。
+        //
+        // `isFadeCornerBandReachable` 再挡掉"画了却点不到"的两种情形：吸附偏移
+        // 手柄带盖住横帽（矮 clip），或淡出横帽被淡入横帽的判定范围吞掉（窄 clip）。
+        if (clipWidth >= 12 && clipHeight >= 14) {
+            for (const side of ["in", "out"] as const) {
+                if (side === "in" ? clip.fadeInPx > 0 : clip.fadeOutPx > 0) continue;
+                if (
+                    !isFadeCornerBandReachable({
+                        side,
+                        clipWidthPx: clipWidth,
+                        clipHeightPx: clipHeight,
+                        headerHeightPx: item.headerHeight,
+                        bodyHeightPx: bodyHeight,
+                    })
+                ) {
+                    continue;
+                }
+                const box = fadeCornerHandleBoxPx({
+                    side,
+                    clipWidthPx: clipWidth,
+                    bodyTopPx: item.headerHeight,
+                    bodyHeightPx: bodyHeight,
+                });
+                const handleLeft = clipLeft + box.left;
+                const handleTop = clipTop + box.top;
+                const handleRight = handleLeft + box.width;
+                const handleBottom = handleTop + box.height;
+                // 直角贴在该侧的 clip 边缘与 body 顶边上（淡入 ◤ / 淡出 ◥）。
+                ctx.beginPath();
+                ctx.moveTo(handleLeft, handleTop);
+                ctx.lineTo(handleRight, handleTop);
+                ctx.lineTo(side === "in" ? handleLeft : handleRight, handleBottom);
+                ctx.closePath();
+                ctx.fillStyle = style.fadeHandleFill;
+                ctx.fill();
+                ctx.strokeStyle = style.fadeHandleStroke;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
         }
 
         // ── SnapOffset（吸附偏移）三角标记 ────────────────────────

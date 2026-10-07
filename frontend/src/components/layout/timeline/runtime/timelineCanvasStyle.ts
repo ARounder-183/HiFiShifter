@@ -568,6 +568,8 @@ export function buildTimelineClipVisualStyle(args: {
     borderLineWidth: number;
     snapOffsetTriFill: string;
     snapOffsetTriStroke: string;
+    fadeHandleFill: string;
+    fadeHandleStroke: string;
 } {
     const fontFamily = args.fontFamily || resolveFontFamily();
     const trackColor = args.trackColor ?? DEFAULT_TRACK_COLOR;
@@ -697,15 +699,15 @@ export function buildTimelineClipVisualStyle(args: {
         Math.floor((args.widthPx - textStartPx - trailingReservePx) / avgCharWidth),
     );
 
-    // 吸附偏移三角（clip 左下角）：填充取与色块相反的深/浅，保证任意轨道
-    // 色上都可辨（写死的黄色在绿/黄轨道色块上会隐身）。深色主题一律浅色；
+    // 角标手柄（吸附偏移三角 / 渐变角三角）：填充取与色块相反的深/浅，保证任意
+    // 轨道色上都可辨（写死的黄色在绿/黄轨道色块上会隐身）。深色主题一律浅色；
     // 浅色主题按体感亮度切换（阈值 0.35 覆盖默认灰轨道）。
-    const snapOffsetTriFill = darkMode
+    const handleFill = darkMode
         ? "rgba(255, 255, 255, 0.92)"
         : perceivedLuminance(bodyRgb) >= 0.35
           ? "rgba(22, 26, 34, 0.88)"
           : "rgba(255, 255, 255, 0.92)";
-    const snapOffsetTriStroke = darkMode
+    const handleStroke = darkMode
         ? "rgba(0, 0, 0, 0.40)"
         : perceivedLuminance(bodyRgb) >= 0.35
           ? "rgba(255, 255, 255, 0.55)"
@@ -726,8 +728,10 @@ export function buildTimelineClipVisualStyle(args: {
               ? "rgba(235, 240, 248, 0.50)"
               : "rgba(22, 26, 34, 0.55)",
         borderLineWidth: args.selected ? 2 : 1,
-        snapOffsetTriFill,
-        snapOffsetTriStroke,
+        snapOffsetTriFill: handleFill,
+        snapOffsetTriStroke: handleStroke,
+        fadeHandleFill: handleFill,
+        fadeHandleStroke: handleStroke,
         textFill: darkMode ? "rgba(235, 240, 248, 0.95)" : "rgba(28, 32, 40, 0.92)",
         muteBadgeFill: args.muted
             ? "rgba(189, 54, 54, 0.95)"

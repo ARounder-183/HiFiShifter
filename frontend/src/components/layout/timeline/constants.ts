@@ -56,6 +56,95 @@ export function fadeCornerReservePx(bodyHeightPx: number): number {
 }
 
 /**
+ * 渐变角手柄角标（贴 body 顶角的小三角）的边长（px）。
+ *
+ * 【为什么要有这个角标】渐变角命中区是本仓唯一**完全隐形**的可点区：淡变为 0 时
+ * 屏幕上没有任何东西提示"这里能按"。本仓的核心不变式是"看到的 = 可点的"，这里
+ * 曾经缺失，于是用户只能靠试错建立肌肉记忆——而 Issue 141 正是这种试错的产物
+ * （误把边缘上部当裁短区）。参考实现 REAPER 也在 item 顶角画同样的角标。
+ *
+ * 7px 是"看得见"与"不喧宾夺主"之间的平衡：它只画在**该侧还没有淡变**时，
+ * 已有淡变的那一侧由包络线本身充当提示，因此不会在 clip 上堆两套图形。
+ */
+export const FADE_CORNER_HANDLE_SIZE_PX = 7;
+
+/**
+ * 渐变角手柄角标的外接矩形（相对 **clip 左上角**，与 header 控件同一坐标系）。
+ *
+ * 契约：角标必须**整体落在** `hitTest` 判为 `fade-in/out-corner` 的横帽带内
+ * （高 `fadeCornerReservePx`、距该侧边缘 `FADE_CORNER_CAP_WIDTH_PX` 内）。
+ * 这条包含关系由契约测试逐行高比对，是"看到的 = 可点的"在本模块的落点。
+ *
+ * @param side "in" = 贴左缘（淡入角）；"out" = 贴右缘（淡出角）。
+ * @param clipWidthPx clip 的像素宽度（角标不得宽过 clip 的一半）。
+ * @param bodyTopPx body 顶边相对 clip 顶边的 y（= `CLIP_HEADER_HEIGHT`）。
+ * @param bodyHeightPx body 高度（用于收敛保留区）。
+ */
+export function fadeCornerHandleBoxPx(args: {
+    side: "in" | "out";
+    clipWidthPx: number;
+    bodyTopPx: number;
+    bodyHeightPx: number;
+}): { left: number; top: number; width: number; height: number } {
+    const reserve = fadeCornerReservePx(args.bodyHeightPx);
+    const size = Math.max(
+        1,
+        Math.min(
+            FADE_CORNER_HANDLE_SIZE_PX,
+            reserve,
+            Math.max(1, Math.floor(Math.max(0, args.clipWidthPx) / 2)),
+        ),
+    );
+    // 内缩 1px：角标不压在 clip 描边与 header/body 分隔线上。退化矮 body 下
+    // 内缩收敛到 0，保证角标仍整体落在保留区内。
+    const inset = Math.min(1, Math.max(0, reserve - size));
+    return {
+        left: args.side === "in" ? inset : Math.max(inset, args.clipWidthPx - size - inset),
+        top: args.bodyTopPx + inset,
+        width: size,
+        height: size,
+    };
+}
+
+/**
+ * 渐变角命中带在该 clip 的该侧是否**真的可达**。
+ *
+ * 两种情况会让"画了角标"变成"画了却点不到"，都必须先判掉：
+ *
+ * 1. **纵向** —— 吸附偏移三角手柄的优先级高于渐变角（见 `hitTest` 的
+ *    `ClipHitRegion` 注释：握把贴在行底，若不先判就会被淡变角抢走），它的命中带
+ *    占 body 底部 `SNAP_OFFSET_HIT_HEIGHT_PX`。clip 矮到两条带重叠时，在横帽里
+ *    按下拿到的是手柄。
+ * 2. **横向（仅淡出侧）** —— 左右横帽带的宽度都固定为 `FADE_CORNER_CAP_WIDTH_PX`，
+ *    而判定顺序让**左侧先赢**；clip 比一个横帽宽不了多少时，淡出侧的横帽整个落在
+ *    淡入侧的判定范围内，于是淡出角不可达。角标必须整个落在左侧横帽带之外才算数。
+ *
+ * 受支持的行高（80–192）下纵向永远成立；只有退化矮 clip 会落到 false。
+ *
+ * @param side "in" = 贴左缘；"out" = 贴右缘。
+ * @param clipWidthPx clip 的像素宽度（判横向遮挡）。
+ * @param clipHeightPx clip 高度（= 行高 − `CLIP_BODY_PADDING_Y`）。
+ * @param headerHeightPx header 高度。
+ * @param bodyHeightPx body 高度（用于收敛保留区）。
+ */
+export function isFadeCornerBandReachable(args: {
+    side: "in" | "out";
+    clipWidthPx: number;
+    clipHeightPx: number;
+    headerHeightPx: number;
+    bodyHeightPx: number;
+}): boolean {
+    const reserve = fadeCornerReservePx(args.bodyHeightPx);
+    if (args.headerHeightPx + reserve > args.clipHeightPx - SNAP_OFFSET_HIT_HEIGHT_PX) {
+        return false;
+    }
+    if (args.side === "out") {
+        return args.clipWidthPx > FADE_CORNER_CAP_WIDTH_PX + FADE_CORNER_HANDLE_SIZE_PX;
+    }
+    return true;
+}
+
+/**
  * 拖拽“落到新轨道”时的哨兵 trackId（moveClipTrack 用它标记待创建轨道）。
  * 放在轻量 constants 中，供渲染层等无 Redux 依赖的模块引用。
  */
