@@ -579,25 +579,37 @@ const dockSlice = createSlice({
                 },
             };
         },
-        /** 把当前排布存为命名预设。 */
-        saveDockPreset(state, action: PayloadAction<string>) {
-            const name = action.payload.trim();
-            if (!name) return;
-            const preset: DockPreset = {
-                name,
-                roots: state.layout.roots,
-                forms: state.layout.forms,
-                order: state.layout.order,
-                floatOrder: state.layout.floatOrder,
-                gutters: state.layout.gutters,
-                tabPosition: state.layout.tabPosition,
-                createdAtMs: Date.now(),
-            };
-            state.layout = {
-                ...state.layout,
-                presets: { ...state.layout.presets, [name]: preset },
-                activePreset: name,
-            };
+        /**
+         * 把当前排布存为命名预设。
+         *
+         * 【为什么时间戳走 `prepare`】reducer 必须纯：卫星窗口会重放广播动作
+         * （见 `features/dock/detachBridge.ts`），在 reducer 里 `Date.now()` 会让
+         * 两个窗口为同一个动作算出不同的 `createdAtMs`，且不可测试。放进
+         * `prepare` 后时间戳随动作对象一起复制，两边一致。
+         */
+        saveDockPreset: {
+            reducer(state, action: PayloadAction<{ name: string; createdAtMs: number }>) {
+                const name = action.payload.name.trim();
+                if (!name) return;
+                const preset: DockPreset = {
+                    name,
+                    roots: state.layout.roots,
+                    forms: state.layout.forms,
+                    order: state.layout.order,
+                    floatOrder: state.layout.floatOrder,
+                    gutters: state.layout.gutters,
+                    tabPosition: state.layout.tabPosition,
+                    createdAtMs: action.payload.createdAtMs,
+                };
+                state.layout = {
+                    ...state.layout,
+                    presets: { ...state.layout.presets, [name]: preset },
+                    activePreset: name,
+                };
+            },
+            prepare(name: string) {
+                return { payload: { name, createdAtMs: Date.now() } };
+            },
         },
         applyDockPreset(state, action: PayloadAction<string>) {
             const preset = state.layout.presets?.[action.payload];

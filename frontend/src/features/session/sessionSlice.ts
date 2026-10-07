@@ -901,6 +901,27 @@ function createId(prefix: string): string {
     return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * 导入 clip 的 id：由源路径**确定性**导出。
+ *
+ * 【为什么不能随机】reducer 必须是纯函数。卫星窗口会把广播动作在本地 reducer
+ * 上**重放**（见 `features/dock/detachBridge.ts`），若 id 在 reducer 里现算，
+ * 主窗口与卫星窗口会为同一个动作算出不同的 id，`session.clips` 从此永久发散
+ * （快照只在卫星窗口启动时对齐一次）。由路径导出则两边必然一致。
+ *
+ * 【为什么不会撞 id】`upsertImportedClip` 开头就按 `sourcePath` 早退，同一路径
+ * 不会二次插入；不同路径再叠上长度参与哈希，实际碰撞概率可忽略。
+ */
+function importedClipId(audioPath: string): string {
+    // 32 位 FNV-1a。
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < audioPath.length; index += 1) {
+        hash ^= audioPath.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return `clip_import_${(hash >>> 0).toString(36)}_${audioPath.length.toString(36)}`;
+}
+
 function basenameFromPath(path: string): string {
     return path.split(/[\\/]/).filter(Boolean).pop() ?? "Audio.wav";
 }
@@ -1706,6 +1727,15 @@ const pendingTakeRollbacks = new Map<
     { activeTakeId: string | undefined; flat: TakeOptimisticFlat }
 >();
 
+/**
+ * take 快照要浅拷贝的字段。
+ *
+ * 【为什么带 `satisfies`】`TakeOptimisticFlat` 是 `Pick<ClipInfo, …>`，键集合
+ * 必须与它一致。原先只靠一句注释声称"由类型约束保证"，而下面那行
+ * `@ts-expect-error` 恰恰**禁用**了这个保证 —— `ClipInfo` 上某键改名或删除时，
+ * 回滚会静默写入 `undefined` 而不是编译失败。`satisfies` 把这条不变量交还给
+ * 编译器：键写错、写重、或指向已不存在的字段，都会在编译期报错。
+ */
 const TAKE_FLAT_KEYS = [
     "gain",
     "sourcePath",
@@ -1722,7 +1752,7 @@ const TAKE_FLAT_KEYS = [
     "midiNoteData",
     "midiNoteCount",
     "midiFillGaps",
-] as const;
+] as const satisfies readonly (keyof TakeOptimisticFlat)[];
 
 function snapshotTakeValue(value: unknown): unknown {
     // captureTakeRollback 在 Immer producer 内运行：对象/数组字段（如
@@ -1743,8 +1773,13 @@ function captureTakeRollback(state: SessionState, clipIds: readonly string[]): v
         if (pendingTakeRollbacks.has(clipId)) continue;
         const flat = {} as TakeOptimisticFlat;
         for (const key of TAKE_FLAT_KEYS) {
-            // @ts-expect-error -- 按同构键组浅拷贝，字段集合由类型约束保证一致
-            flat[key] = snapshotTakeValue(clip[key]);
+            // 【为什么这里是一次显式放宽，而不是 `@ts-expect-error`】TS 不做
+            // "联合键"的相关推理：`flat[key]` 与 `clip[key]` 在同一联合键下各自
+            // 展开成联合类型，赋值要求逐成员可赋值，编译器无法关联二者。
+            // `@ts-expect-error` 会连同**键拼错**这类真错误一起吞掉；这里只把目标
+            // 类型放宽成 `Record<string, unknown>`，键的合法性仍由上面的
+            // `satisfies` 在编译期守住。
+            (flat as Record<string, unknown>)[key] = snapshotTakeValue(clip[key]);
         }
         pendingTakeRollbacks.set(clipId, { activeTakeId: clip.activeTakeId, flat });
     }
@@ -2136,7 +2171,7 @@ function upsertImportedClip(
         0,
     );
     const startSec = Math.max(0, Math.ceil(maxEndSec));
-    const newClipId = createId("clip");
+    const newClipId = importedClipId(audioPath);
     const lengthSec = Math.max(1, meta?.durationSec ?? 4);
     state.clips.push({
         id: newClipId,
@@ -3478,36 +3513,51 @@ const sessionSlice = createSlice({
             if (!clip) return;
             clip.color = normalizeClipColor(action.payload.color);
         },
-        addClip(state, action: PayloadAction<{ trackId: string }>) {
-            markProjectDirty(state.project);
-            const newClipId = createId("clip");
-            state.clips.push({
-                id: newClipId,
-                trackId: action.payload.trackId,
-                name: "New Clip.wav",
-                startSec: Math.max(0, state.playheadSec),
-                lengthSec: 2,
-                color: "emerald",
-                gain: 1,
-                muted: false,
-                sourceStartSec: 0,
-                sourceEndSec: 2,
-                playbackRate: 1,
-                reversed: false,
-                loopEnabled: state.loopNewClipsEnabled !== false,
-                channelMode: 0,
-                sourceChannels: undefined,
-                snapOffsetSec: 0,
-                fadeInSec: 0,
-                fadeOutSec: 0,
-                fadeInShape: 1,
-                fadeOutShape: 1,
-                fadeInDir: 0,
-                fadeOutDir: 0,
-            });
-            state.selectedClipId = newClipId;
-            state.selectedTrackId = action.payload.trackId;
-            state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
+        /**
+         * 新建 clip。
+         *
+         * 【为什么用 `prepare` 生成 id】reducer 必须是**纯函数**：卫星窗口会把
+         * 广播动作在本地 reducer 上**重放**（见 `features/dock/detachBridge.ts`）。
+         * 若 id 在 reducer 里用 `Math.random()` 现算，主窗口与卫星窗口会为同一个
+         * `addClip` 算出**不同的 id**，`session.clips` 从此永久发散（快照只在
+         * 卫星窗口启动时对齐一次）。放进 `prepare` 后 id 随动作对象一起被复制，
+         * 两边必然一致；同时动作对象本身仍是可序列化的纯数据。
+         */
+        addClip: {
+            reducer(state, action: PayloadAction<{ trackId: string; clipId: string }>) {
+                const newClipId = action.payload.clipId;
+                markProjectDirty(state.project);
+                state.clips.push({
+                    id: newClipId,
+                    trackId: action.payload.trackId,
+                    name: "New Clip.wav",
+                    startSec: Math.max(0, state.playheadSec),
+                    lengthSec: 2,
+                    color: "emerald",
+                    gain: 1,
+                    muted: false,
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                    playbackRate: 1,
+                    reversed: false,
+                    loopEnabled: state.loopNewClipsEnabled !== false,
+                    channelMode: 0,
+                    sourceChannels: undefined,
+                    snapOffsetSec: 0,
+                    fadeInSec: 0,
+                    fadeOutSec: 0,
+                    fadeInShape: 1,
+                    fadeOutShape: 1,
+                    fadeInDir: 0,
+                    fadeOutDir: 0,
+                });
+                state.selectedClipId = newClipId;
+                state.selectedTrackId = action.payload.trackId;
+                state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
+            },
+            prepare(payload: { trackId: string }) {
+                return { payload: { ...payload, clipId: createId("clip") } };
+            },
         },
         removeSelectedClip(state) {
             const selectedId = state.selectedClipId;
