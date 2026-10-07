@@ -36,10 +36,14 @@ export function PluginApplyStatus({
     const [confirm, setConfirm] = useState(false);
     /*
      * 轮询要一个稳定的回调：把最新的 `onTimelineChanged` 放 ref 里，轮询本身
-     * 只在挂载时启动一次（与既有 `PluginApplyPanel` 同一手法）。
+     * 只在挂载时启动一次。写入发生在 **effect** 里而不是渲染期 —— 渲染期写 ref
+     * 会被 React 的引用规则拒绝，且本次提交的值本来就要等副作用跑完才可读
+     * （与 `ui/useFrameCommit.ts` 处理提交回调的方式一致）。
      */
     const refreshRef = useRef(onTimelineChanged);
-    refreshRef.current = onTimelineChanged;
+    useEffect(() => {
+        refreshRef.current = onTimelineChanged;
+    });
     useEffect(() => startPluginApplyPolling(() => refreshRef.current()), []);
 
     const refreshTimeline = () => refreshRef.current();

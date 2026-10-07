@@ -134,6 +134,8 @@ test("reloading with unapplied edits requires an explicit confirmation", async (
     invokeMock.mockResolvedValue(hostState({ pending: true }));
     await render();
     expect(text()).toContain(enUS.plugin_apply_pending);
+    // 首次轮询也会重取一次时间轴（宿主版本号第一次见到）；下面只看增量。
+    const before = refreshes;
 
     await click(button(enUS.plugin_apply_reload_host));
     // 还没确认：不允许发出强制重载。
@@ -148,6 +150,8 @@ test("reloading with unapplied edits requires an explicit confirmation", async (
         await vi.advanceTimersByTimeAsync(0);
     });
     expect(invokeMock).toHaveBeenCalledWith("plugin_refresh", true);
+    // 强制重载之后必须重取时间轴：宿主刚换掉了音频，本地时间轴已经过期。
+    expect(refreshes).toBe(before + 1);
 });
 
 test("reloading a clean host goes straight through without a dialog", async () => {

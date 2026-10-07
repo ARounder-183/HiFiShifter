@@ -1193,7 +1193,9 @@ export function ActionBar() {
                         variant={recording.active ? "solid" : "soft"}
                         color="red"
                         data-tooltip={recordingTooltip}
-                        disabled={isPluginMode() || (recording.busy && recording.countdownRemaining === 0)}
+                        disabled={
+                            isPluginMode() || (recording.busy && recording.countdownRemaining === 0)
+                        }
                         onClick={() => {
                             if (recording.active) {
                                 void dispatch(stopRecordingFlow());

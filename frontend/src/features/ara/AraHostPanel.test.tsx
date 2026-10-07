@@ -75,7 +75,10 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-async function render(dirty: boolean, onTimelineChanged: () => Promise<unknown> = async () => undefined) {
+async function render(
+    dirty: boolean,
+    onTimelineChanged: () => Promise<unknown> = async () => undefined,
+) {
     await act(async () =>
         root.render(
             <AppThemeProvider>
@@ -136,7 +139,9 @@ test("connect refreshes the timeline and exposes a submit conflict without disca
     });
     await click(enUS.ara_connect);
     expect(reloads).toBe(1);
-    expect(container.querySelector<HTMLElement>('[role="combobox"]')?.getAttribute("disabled")).not.toBeNull();
+    expect(
+        container.querySelector<HTMLElement>('[role="combobox"]')?.getAttribute("disabled"),
+    ).not.toBeNull();
     expect(calls.find((c) => c.command === "ara_connect")?.args).toEqual({
         instanceId: "instance",
         force: false,

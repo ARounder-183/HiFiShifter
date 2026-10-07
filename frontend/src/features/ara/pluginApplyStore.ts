@@ -91,9 +91,7 @@ export function resetPluginApplyStoreForTests(): void {
  * - `timelineInFlight` 重入保护：宿主版本连续前进时不能并发重取时间轴；
  * - 重取失败**不推进** `lastHostVersion`，于是下一次轮询会重试。
  */
-export function startPluginApplyPolling(
-    refreshTimeline: () => Promise<unknown>,
-): () => void {
+export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>): () => void {
     let disposed = false;
     let inFlight = false;
     let lastHostVersion: number | undefined;

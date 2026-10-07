@@ -127,7 +127,7 @@ export function AraHostPanel({
     }));
 
     return (
-        <div className="flex h-full flex-col gap-qt-4 overflow-auto p-qt-5">
+        <div className="hs-scroll-gutter-flush custom-scrollbar flex h-full flex-col gap-qt-4 overflow-y-auto p-qt-5">
             <AppForm labelWidth="auto">
                 <AppField label={t("ara_instance_label")}>
                     {/*
@@ -180,11 +180,7 @@ export function AraHostPanel({
                 >
                     {t("ara_refresh_host")}
                 </AppButton>
-                <AppButton
-                    size="sm"
-                    disabled={busy || !session}
-                    onClick={() => void disconnect()}
-                >
+                <AppButton size="sm" disabled={busy || !session} onClick={() => void disconnect()}>
                     {t("ara_disconnect")}
                 </AppButton>
             </Flex>
@@ -207,7 +203,11 @@ export function AraHostPanel({
             </Flex>
 
             {error && (
-                <span role="alert" className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
+                <span
+                    role="alert"
+                    className="hs-type-caption"
+                    style={{ color: "var(--qt-danger-text)" }}
+                >
                     {error}
                 </span>
             )}

@@ -44,7 +44,7 @@ function createHarness(
 ) {
     let scrollLeft = initialScrollLeft;
     let max = maxScrollLeft;
-    let min = minScrollLeft;
+    const min = minScrollLeft;
     let clockMs = 0;
     let nextHandle = 1;
     const pending = new Map<number, () => void>();

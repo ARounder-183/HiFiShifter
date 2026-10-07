@@ -199,13 +199,14 @@ describe("表单控件：走设计系统原语", () => {
      */
     const RADIX_FORM_PRIMITIVE_BASELINE = 15;
 
-    const RADIX_IMPORT_RE =
-        /import\s*\{([^}]*)\}\s*from\s*["']@radix-ui\/themes["']/g;
+    const RADIX_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*["']@radix-ui\/themes["']/g;
 
     function importsFormPrimitive(source: string): boolean {
         for (const match of source.matchAll(RADIX_IMPORT_RE)) {
             const names = match[1].split(",").map((name) => name.trim().split(/\s+as\s+/)[0]);
-            if (names.some((name) => ["Button", "IconButton", "Select", "TextField"].includes(name))) {
+            if (
+                names.some((name) => ["Button", "IconButton", "Select", "TextField"].includes(name))
+            ) {
                 return true;
             }
         }
@@ -247,7 +248,7 @@ describe("表单控件：走设计系统原语", () => {
         expect(offenders, "这些文件已改用 src/ui 原语，不得回退").toEqual([]);
     });
 
-    test("没有裸 <select> 或裸 <input type=\"range\">", () => {
+    test('没有裸 <select> 或裸 <input type="range">', () => {
         /*
          * 【为什么这两条单列】它们是"控件绕开原语"最直白的形式，而且既有门禁
          * 恰好只禁了 `<input type="checkbox">`（见 designSystemGates 的说明），
