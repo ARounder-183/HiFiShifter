@@ -98,7 +98,7 @@ import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
 import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
-import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
+import { PANEL_APPEARANCE, PANEL_ARA_HOST } from "../dock/registerBuiltinPanels";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
@@ -988,6 +988,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {tf("menu_appearance_settings")}
                     </DropdownMenu.Item>
+                    {/*
+                      ARA 宿主会话**只在独立 App**里出现：插件模式下宿主就是 REAPER
+                      自己，前端由原生 bootstrap 直接驱动，没有"连接哪个实例"这一步。
+                      它同样是浮出面板 + `togglePanelVisible`（见注册表声明）。
+                    */}
+                    {!isPluginMode() && (
+                        <DropdownMenu.Item
+                            onSelect={() =>
+                                togglePanelVisible(dispatch, store.getState, PANEL_ARA_HOST)
+                            }
+                        >
+                            {tf("menu_ara_host")}
+                        </DropdownMenu.Item>
+                    )}
                     <DropdownMenu.Separator />
 
                     {/* 刷新与缓存清理是维护性操作，沉底。 */}
