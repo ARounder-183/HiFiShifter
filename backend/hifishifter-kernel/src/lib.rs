@@ -69,6 +69,7 @@ pub mod events;
 pub mod host;
 pub mod log_limiter;
 pub mod model_paths;
+pub mod model_store;
 pub mod rt_retirement;
 pub mod ui_settings_apply;
 pub mod util;

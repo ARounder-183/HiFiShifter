@@ -36,7 +36,8 @@
             "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
             "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
-            "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx"
+            "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx",
+            "resources/models/models.json": "models/models.json"
         },
         "macOS": {
             "frameworks": [

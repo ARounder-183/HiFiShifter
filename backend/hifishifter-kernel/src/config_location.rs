@@ -136,6 +136,47 @@ pub fn local_data_subdir(name: &str) -> PathBuf {
     }
 }
 
+/// 平台默认的**全机共享**数据目录。
+///
+/// 【为什么共享模型库必须用它，而不是用户目录】安装器以管理员身份运行。若它把
+/// 152 MB 模型写进 `%LOCALAPPDATA%`，在"标准用户 + 输入管理员密码"这种提权方式下
+/// 写的就是**管理员**的配置目录，而真正运行插件的是标准用户 —— 插件找不到模型，
+/// 且失败方式只是"推理不可用"，极难归因。`%PROGRAMDATA%` 没有这个问题：谁提权都能
+/// 写对位置，所有用户都读得到。
+///
+/// 【非管理员也能建】`%PROGRAMDATA%` 默认允许 Users 创建子目录，因此运行时（App
+/// 首次启动时发布模型）不需要提权。
+///
+/// | 平台 | 路径 |
+/// | --- | --- |
+/// | Windows | `%PROGRAMDATA%\HiFiShifter` |
+/// | macOS | `/Library/Application Support/HiFiShifter`（不可写时调用方回退） |
+/// | Linux | `/var/lib/hifishifter`（同上） |
+pub fn default_shared_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("PROGRAMDATA")?;
+        Some(PathBuf::from(base).join(CONFIG_SUBDIR))
+    }
+    #[cfg(not(windows))]
+    {
+        // 非 Windows 平台没有插件的交付流程（ARA 侧只做 Windows x64），共享库仅作为
+        // 内核 API 存在；调用方会在不可写时退回用户目录。
+        None
+    }
+}
+
+/// 全机共享数据目录下的一个子目录；不可用时退回用户本机数据目录。
+///
+/// 【为什么回退是"用户目录"而不是临时目录】共享模型库可能很大（152 MB），落在临时
+/// 目录会被磁盘清理删掉，下次启动又得重建；退回用户目录至少是稳定的。
+pub fn shared_data_subdir(name: &str) -> PathBuf {
+    match default_shared_data_dir() {
+        Some(base) => base.join(name),
+        None => local_data_subdir(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

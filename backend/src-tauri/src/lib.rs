@@ -321,27 +321,31 @@ pub fn run() {
                 }
             }
 
-            // 打包后的应用：从 resource_dir 查找内嵌的 ONNX 模型
+            // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
+            // 库里没有就从本 bundle 的副本建立（同卷硬链接，零额外字节），最后才退回
+            // bundle 内的副本。此前这里直接登记 `resource_dir()/models`，于是"同时装
+            // App 与插件"必然有两份完全相同的模型。
             if let Ok(res_dir) = app.path().resource_dir() {
-                let p = res_dir.join("models").join("nsf_hifigan");
-                let has_model = p.join("pc_nsf_hifigan.onnx").exists()
-                    || p.join("pc_nsf_hifigan_coreml.onnx").exists();
-                if has_model && p.join("config.json").exists() {
-                    let _ = set_nsf_hifigan_model_dir(p);
-                }
-            }
-
-            if let Ok(res_dir) = app.path().resource_dir() {
-                let p = res_dir.join("models").join("hnsep");
-                if p.join("hnsep.onnx").exists() {
-                    let _ = set_hnsep_model_dir(p);
-                }
-            }
-
-            if let Ok(res_dir) = app.path().resource_dir() {
-                let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
-                if p.exists() {
-                    let _ = set_fcpe_onnx_path(p);
+                match hifishifter_kernel::model_store::resolve_and_register(&res_dir.join("models"))
+                {
+                    Ok(origin) => log::info!(
+                        "models: {:?} ({}{})",
+                        origin.dir,
+                        match origin.source {
+                            hifishifter_kernel::model_store::ModelSource::Override =>
+                                "HIFISHIFTER_MODELS_DIR",
+                            hifishifter_kernel::model_store::ModelSource::Shared => "shared store",
+                            hifishifter_kernel::model_store::ModelSource::Bundle => "bundle",
+                        },
+                        if origin.published {
+                            ", just published"
+                        } else {
+                            ""
+                        }
+                    ),
+                    // 模型不可用不该阻止应用启动：界面要能打开，用户才有机会看到
+                    // 诊断信息；推理相关的操作会各自报错。
+                    Err(error) => log::warn!("models unavailable: {error}"),
                 }
             }
 

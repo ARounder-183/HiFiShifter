@@ -1,0 +1,30 @@
+{
+    "version":  "cf0df3fff419",
+    "files":  [
+                  {
+                      "path":  "fcpe/fcpe.onnx",
+                      "bytes":  43340548,
+                      "sha256":  "013B507ACD406DE122B61EE497300AC6BE082511101BC2136B886E48D9737E5D"
+                  },
+                  {
+                      "path":  "hnsep/config.yaml",
+                      "bytes":  958,
+                      "sha256":  "744F79C7D9BE70E7C9D8C7503BF7974184895471817E38C5CFBEEF53A69259E6"
+                  },
+                  {
+                      "path":  "hnsep/hnsep.onnx",
+                      "bytes":  59046980,
+                      "sha256":  "0B46499D71799A3B47A060997F26E94C513776461BBBF9D592A4B5AF8DC8A80C"
+                  },
+                  {
+                      "path":  "nsf_hifigan/config.json",
+                      "bytes":  550,
+                      "sha256":  "C3C56EFAA5ABDF1862224AE8396B17680C78D0B95AB009A31EF5D2F873CF07C2"
+                  },
+                  {
+                      "path":  "nsf_hifigan/pc_nsf_hifigan.onnx",
+                      "bytes":  56589442,
+                      "sha256":  "C0D5D05B6CFE12E254C82ADEED6E52A31449A2D1398E05E1D7234F7DBFD720BB"
+                  }
+              ]
+}

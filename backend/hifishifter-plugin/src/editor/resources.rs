@@ -1,4 +1,8 @@
 //! 插件资源位置：先于ARA建图/分析登记原FCPE及声码器模型，不使用REAPER的resource_dir。
+//!
+//! 解析本身交给内核的共享模型库（`hifishifter_kernel::model_store`）：它优先用与独立
+//! App 共用的那一份，库里没有就从本 bundle 建立（同卷硬链接）。插件这边只负责回答
+//! "我的 bundle 在哪"。
 use std::path::PathBuf;
 /// 模型只登记一次，不初始化推理设备，不改变用户文件或系统路径。
 pub(crate) fn initialize_models() {
@@ -8,22 +12,25 @@ pub(crate) fn initialize_models() {
         crate::log_line(&format!("Plugin module pin failed: {error}"));
         return;
     }
-    let directory = model_directory();
-    if let Ok(directory) = directory {
-        let fcpe = directory.join("fcpe/fcpe.onnx");
-        if fcpe.is_file() {
-            hifishifter_kernel::model_paths::set_fcpe_onnx_path(fcpe);
-        } else {
-            crate::log_line("Plugin FCPE model missing; pitch analysis is unavailable");
-        }
-        let nsf = directory.join("nsf_hifigan");
-        if nsf.join("pc_nsf_hifigan.onnx").is_file() {
-            hifishifter_kernel::model_paths::set_nsf_hifigan_model_dir(nsf);
-        }
-        let hnsep = directory.join("hnsep");
-        if hnsep.join("hnsep.onnx").is_file() {
-            hifishifter_kernel::model_paths::set_hnsep_model_dir(hnsep);
-        }
+    let Ok(directory) = model_directory() else {
+        crate::log_line(
+            "Plugin model directory unavailable; pitch analysis and vocoder are unavailable",
+        );
+        return;
+    };
+    match hifishifter_kernel::model_store::resolve_and_register(&directory) {
+        Ok(origin) => crate::log_line(&format!(
+            "models: {} ({:?}{})",
+            origin.dir.display(),
+            origin.source,
+            if origin.published {
+                ", just published"
+            } else {
+                ""
+            }
+        )),
+        // 模型不可用不该让插件窗口起不来：编辑与界面照常，推理相关的操作各自报错。
+        Err(error) => crate::log_line(&format!("models unavailable: {error}")),
     }
 }
 /// 固定本引擎到REAPER退出；不保留UI/实例worker，不支持运行中热更新。
