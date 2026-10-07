@@ -11,7 +11,7 @@ import {
 import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
-import { AraConnectionPanel } from "./features/ara/AraConnectionPanel";
+import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { PluginApplyPanel } from "./features/ara/PluginApplyPanel";
 import { isPluginMode, pluginAllowsAction, pluginAllowsEditChannel } from "./services/hostCapabilities";
 import { loadStandaloneWindowApi } from "./services/hostWindow";
@@ -85,6 +85,7 @@ import { DockRoot } from "./components/dock/DockRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
+    PANEL_ARA_HOST,
     PANEL_FILE_BROWSER,
     PANEL_NOTEBOOK,
     PANEL_PARAM_EDITOR,
@@ -3618,6 +3619,16 @@ function AppInner() {
     // 外观设置：曾经是独立 OS 窗口（`appearance.html` + 独立 React 根），现在复用
     // 停靠机制 —— 居中浮出、不可停靠、不进「窗口」菜单（见注册表声明）。
     setPanelRenderer(PANEL_APPEARANCE, (form) => <AppearanceSettingsPanel formId={form.id} />);
+    // ARA 宿主会话（仅独立 App）：默认关闭的浮出面板，入口在「视图」菜单。
+    // 曾经是一整条常驻横条，一直占着工作区高度（见注册表声明里的取舍）。
+    setPanelRenderer(PANEL_ARA_HOST, () => (
+        <AraHostPanel
+            dirty={projectDirty}
+            onTimelineChanged={async () => {
+                await dispatch(fetchTimeline()).unwrap();
+            }}
+        />
+    ));
     // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
     setPanelRenderer(PANEL_NOTEBOOK, () => (
         <Suspense fallback={null}>
@@ -4275,12 +4286,7 @@ function AppInner() {
             <ActionBar />
             {isPluginMode() ? <PluginApplyPanel
                 onTimelineChanged={async () => { await dispatch(fetchTimeline()).unwrap(); }}
-            /> : <AraConnectionPanel
-                dirty={projectDirty}
-                onTimelineChanged={async () => {
-                    await dispatch(fetchTimeline()).unwrap();
-                }}
-            />}
+            /> : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。

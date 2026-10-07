@@ -2069,6 +2069,7 @@ export const enUS = {
     ara_disconnect: "Disconnect",
     ara_reverse_unsupported: "Reverse playback unsupported",
     ara_busy: "Working...",
+    ara_status_idle: "Not connected",
     ara_status_connected: "Connected",
     ara_status_refreshed: "Refreshed",
     ara_status_submitted: "Submitted",

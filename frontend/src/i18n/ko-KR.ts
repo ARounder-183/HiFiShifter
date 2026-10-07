@@ -2053,6 +2053,7 @@ export const koKR = {
     ara_disconnect: "연결 해제",
     ara_reverse_unsupported: "역재생은 지원되지 않음",
     ara_busy: "처리 중...",
+    ara_status_idle: "연결되지 않음",
     ara_status_connected: "연결됨",
     ara_status_refreshed: "새로 고침됨",
     ara_status_submitted: "전송됨",

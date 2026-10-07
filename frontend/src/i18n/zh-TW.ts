@@ -2013,6 +2013,7 @@ export const zhTW = {
     ara_disconnect: "中斷連線",
     ara_reverse_unsupported: "不支援倒放",
     ara_busy: "處理中...",
+    ara_status_idle: "未連線",
     ara_status_connected: "已連線",
     ara_status_refreshed: "已重新整理",
     ara_status_submitted: "已提交",

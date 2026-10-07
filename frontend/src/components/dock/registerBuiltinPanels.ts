@@ -20,6 +20,7 @@ export const PANEL_FILE_BROWSER = "fileBrowser";
 export const PANEL_NOTEBOOK = "notebook";
 export const PANEL_UNDO_HISTORY = "undoHistory";
 export const PANEL_APPEARANCE = "appearance";
+export const PANEL_ARA_HOST = "araHost";
 
 /**
  * 记事本默认浮窗尺寸。
@@ -169,6 +170,34 @@ export function registerBuiltinPanels(): void {
         detachable: false,
         // 排在最后：它是低频入口，顺序上也不该插进工作面板之间。
         order: 90,
+    });
+
+    registerPanel({
+        id: PANEL_ARA_HOST,
+        titleKey: "ara_panel_title",
+        singleton: true,
+        defaultWidth: 460,
+        defaultHeight: 260,
+        minWidth: 380,
+        /*
+         * 与「外观设置」同属"低频、打开、办完一轮、离开"的表面，因此同样居中浮出。
+         *
+         * 【为什么默认关闭】连接宿主是可选的高级工作流：独立 App 的多数用户从不
+         * 连宿主。它此前是一整条常驻横条，一直占着工作区高度 —— 面板化之后
+         * 需要时才从「视图 → ARA 宿主连接」打开。
+         */
+        openAsFloating: { width: 460, height: 260, anchor: "center" },
+        /*
+         * 不进「视图 → 窗口」：那个菜单列的是日常切换的工作面板，低频会话入口
+         * 混进去只会稀释常用项。入口留在「视图 → ARA 宿主连接」。
+         */
+        excludeFromWindowMenu: true,
+        // 不可停靠：把会话面板编入工作布局既没有意义（连完就走），也会污染用户的排布。
+        dockable: false,
+        // 已经是主窗口里的浮窗，再拆独立窗口对一个会话面板没有收益。
+        detachable: false,
+        // 排在「外观设置」之后：同为低频入口。
+        order: 95,
     });
 }
 

@@ -2010,6 +2010,7 @@ export const zhCN = {
     ara_disconnect: "断开",
     ara_reverse_unsupported: "不支持倒放",
     ara_busy: "处理中...",
+    ara_status_idle: "未连接",
     ara_status_connected: "已连接",
     ara_status_refreshed: "已刷新",
     ara_status_submitted: "已提交",

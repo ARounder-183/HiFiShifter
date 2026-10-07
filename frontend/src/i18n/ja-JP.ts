@@ -2082,6 +2082,7 @@ export const jaJP = {
     ara_disconnect: "切断",
     ara_reverse_unsupported: "逆再生は未対応",
     ara_busy: "処理中...",
+    ara_status_idle: "未接続",
     ara_status_connected: "接続済み",
     ara_status_refreshed: "更新済み",
     ara_status_submitted: "送信済み",
