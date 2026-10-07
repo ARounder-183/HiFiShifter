@@ -95,24 +95,22 @@ jobs:
         run: |
           ./tools/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
 
-      - name: Upload VST3 ZIP and SHA256
+      - name: Upload VST3 ZIP
         uses: actions/upload-artifact@v7
         with:
           name: HiFiShifter-windows-x86_64-vst3-zip
           path: |
             .build-tmp/vst3-artifacts/*.zip
-            .build-tmp/vst3-artifacts/*.zip.sha256
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
 
-      - name: Upload VST3 installer and SHA256
+      - name: Upload VST3 installer
         uses: actions/upload-artifact@v7
         with:
           name: HiFiShifter-windows-x86_64-vst3-installer
           path: |
             .build-tmp/vst3-artifacts/*-setup.exe
-            .build-tmp/vst3-artifacts/*-setup.exe.sha256
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14

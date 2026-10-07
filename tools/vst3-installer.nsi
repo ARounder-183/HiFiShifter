@@ -52,5 +52,4 @@ Section "HiFiShifter VST3" SEC_PLUGIN
   File /r "${PLUGIN_BUNDLE}\*"
   SetOutPath "$INSTDIR\HiFiShifter.vst3\Contents\Resources"
   File "..\LICENSE"
-  File "..\docs\VST3-BUILD.md"
 SectionEnd

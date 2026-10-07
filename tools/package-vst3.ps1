@@ -38,17 +38,13 @@ $packageTaskStage = Join-Path $packageTaskOutput ($packageTaskName + '-' + [Guid
 New-Item -ItemType Directory -Path $packageTaskStage -Force | Out-Null
 Copy-Item -LiteralPath $packageTaskBundle -Destination $packageTaskStage -Recurse
 Copy-Item -LiteralPath (Join-Path $packageTaskRoot 'LICENSE') -Destination $packageTaskStage
-Copy-Item -LiteralPath (Join-Path $packageTaskRoot 'docs\VST3-BUILD.md') -Destination $packageTaskStage
 $packageTaskManifest.target = 'Plugin'
 $packageTaskManifest.files = $packageTaskFiles
 $packageTaskManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $packageTaskStage 'build-manifest.json') -Encoding utf8
 $packageTaskArchive = Join-Path $packageTaskOutput ($packageTaskName + '.zip')
 if (!$NoZip) {
 Compress-Archive -LiteralPath (Join-Path $packageTaskStage 'HiFiShifter.vst3'), (Join-Path $packageTaskStage 'LICENSE'),
-    (Join-Path $packageTaskStage 'VST3-BUILD.md'), (Join-Path $packageTaskStage 'build-manifest.json') -DestinationPath $packageTaskArchive -Force
-Get-FileHash -LiteralPath $packageTaskArchive -Algorithm SHA256 | ForEach-Object {
-    "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" | Set-Content -LiteralPath ($packageTaskArchive + '.sha256') -Encoding ascii
-}
+    (Join-Path $packageTaskStage 'build-manifest.json') -DestinationPath $packageTaskArchive -Force
 Write-Output "Packaged: $packageTaskArchive"
 }
 if ($Installer) {
@@ -64,9 +60,6 @@ if ($Installer) {
     $packageTaskSetup = Join-Path $packageTaskOutput ($packageTaskName + '-setup.exe')
     & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $packageTaskSetup)) { throw 'VST3 installer compilation failed.' }
-    Get-FileHash -LiteralPath $packageTaskSetup -Algorithm SHA256 | ForEach-Object {
-        "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" | Set-Content -LiteralPath ($packageTaskSetup + '.sha256') -Encoding ascii
-    }
     Write-Output "Installer: $packageTaskSetup"
 }
 if ($NoZip) { Write-Output "Staged VST3 package: $packageTaskStage" }
