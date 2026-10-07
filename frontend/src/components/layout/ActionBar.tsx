@@ -1174,9 +1174,8 @@ export function ActionBar() {
                     onClick={() => {
                         dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     }}
-                    data-tooltip={t("action_stop")}
+                    data-tooltip={isPluginMode() ? t("plugin_transport_stop") : t("action_stop")}
                     disabled={isPluginMode() && !canControlHostTransport()}
-                    title={isPluginMode() ? "控制 REAPER 停止播放" : undefined}
                 >
                     <StopIcon />
                 </Button>
@@ -1190,9 +1189,14 @@ export function ActionBar() {
                         }
                         dispatch(playOriginal());
                     }}
-                    data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
+                    data-tooltip={
+                        isPluginMode()
+                            ? t("plugin_transport_play")
+                            : isPlaying
+                              ? tf("action_pause")
+                              : t("action_play_out")
+                    }
                     disabled={isPluginMode() && !canControlHostTransport()}
-                    title={isPluginMode() ? "控制 REAPER 播放/暂停" : undefined}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
