@@ -3,7 +3,12 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppContextMenu, useMenuShortcut } from "../../../ui";
-import { canClipboardHostClips, canSplitHostClips, dawControlledReason, isPluginMode } from "../../../services/hostCapabilities";
+import {
+    canClipboardHostClips,
+    canSplitHostClips,
+    dawControlledReason,
+    isPluginMode,
+} from "../../../services/hostCapabilities";
 
 export const TrackAreaContextMenu: React.FC<{
     x: number;
@@ -45,7 +50,9 @@ export const TrackAreaContextMenu: React.FC<{
                     shortcut: pasteShortcut,
                     disabled: !pasteAllowed,
                     tooltip: plugin && !canClipboardHostClips() ? dawControlledReason() : undefined,
-                    onSelect: () => { if (pasteAllowed) onPaste(); },
+                    onSelect: () => {
+                        if (pasteAllowed) onPaste();
+                    },
                 },
                 {
                     key: "split",
@@ -53,14 +60,18 @@ export const TrackAreaContextMenu: React.FC<{
                     shortcut: splitShortcut,
                     disabled: !splitAllowed,
                     tooltip: plugin && !canSplitHostClips() ? dawControlledReason() : undefined,
-                    onSelect: () => { if (splitAllowed) onSplit(); },
+                    onSelect: () => {
+                        if (splitAllowed) onSplit();
+                    },
                 },
                 {
                     key: "closeGaps",
                     label: t("ctx_close_gaps"),
                     disabled: !closeGapsAllowed,
                     tooltip: plugin ? dawControlledReason() : undefined,
-                    onSelect: () => { if (closeGapsAllowed) onCloseGaps(); },
+                    onSelect: () => {
+                        if (closeGapsAllowed) onCloseGaps();
+                    },
                 },
             ]}
         />,

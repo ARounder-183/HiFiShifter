@@ -72,9 +72,7 @@ describe("★ 回绕标记被 Clip 边缘裁断", () => {
     });
 
     it("★ 反证：边界放宽后同一个标记确实会探出（裁剪真的在起作用）", () => {
-        const xs = markerXs(
-            markerScene({ xPx: 0, clipLeftPx: -1000, clipRightPx: 1000 }),
-        );
+        const xs = markerXs(markerScene({ xPx: 0, clipLeftPx: -1000, clipRightPx: 1000 }));
         // 半宽 ≈ 4.34 ⇒ 底行左端约为 −3.84，确实在 Clip 左缘之外。
         expect(Math.min(...xs)).toBeLessThan(0);
     });

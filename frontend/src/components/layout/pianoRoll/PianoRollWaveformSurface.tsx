@@ -657,10 +657,8 @@ export function makeLoudnessAmplitudeMap(
                 const knot1 = Math.round((base1 - startFrame) / fadeStride);
                 if (knot1 - knot0 === 1) {
                     const ratio = base1 - base0;
-                    const cross =
-                        (startFrame + (knot0 + 0.5) * fadeStride - base0) / (ratio || 1);
-                    lutFadeCross[i] =
-                        cross >= 0 && cross <= 1 ? cross : Number.POSITIVE_INFINITY;
+                    const cross = (startFrame + (knot0 + 0.5) * fadeStride - base0) / (ratio || 1);
+                    lutFadeCross[i] = cross >= 0 && cross <= 1 ? cross : Number.POSITIVE_INFINITY;
                 } else {
                     // 一格内跨 0 次（两端同属一个采样帧）→ 用 i0 即可；跨 ≥2 次 →
                     // 一次阶跃表达不了，交回逐值路径。

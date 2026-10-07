@@ -87,7 +87,7 @@ async function openMetronomeMenu() {
             </Provider>,
         );
     });
-    const trigger = container.querySelector<HTMLElement>('[data-hs-context-menu][data-tooltip]');
+    const trigger = container.querySelector<HTMLElement>("[data-hs-context-menu][data-tooltip]");
     const buttons = Array.from(container.querySelectorAll<HTMLElement>("button"));
     // 节拍器按钮是那个带右键菜单标记的（见 ActionBar 的 metronome 按钮）。
     const metronome = buttons.find((b) => b.closest("[data-hs-context-menu]"));
@@ -123,7 +123,9 @@ test("wheel steps the metronome volume by 5 percent, and by 1 with the fine modi
 
     const wheel = (init: WheelEventInit) =>
         act(async () => {
-            slider!.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true, ...init }));
+            slider!.dispatchEvent(
+                new WheelEvent("wheel", { deltaY: -100, bubbles: true, ...init }),
+            );
         });
 
     await wheel({});

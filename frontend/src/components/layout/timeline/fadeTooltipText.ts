@@ -24,8 +24,8 @@
  */
 import type { ReactNode } from "react";
 import { createElement } from "react";
-import type {HostFadeMetadata} from "../../../types/api";
-import {hostFadeLabel} from "./hostFadeDisplay";
+import type { HostFadeMetadata } from "../../../types/api";
+import { hostFadeLabel } from "./hostFadeDisplay";
 
 import { formatTemplate } from "../../../i18n/format";
 import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueText";
@@ -131,7 +131,7 @@ export function buildSingleFadeInfoText(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
-    hostFades?:HostFadeMetadata;
+    hostFades?: HostFadeMetadata;
     delta?: FadeInfoDelta;
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
@@ -140,14 +140,28 @@ export function buildSingleFadeInfoText(args: {
         side: sideLabel,
         type: args.t("fade_type_label"),
     });
-    if (args.hostFades && args.hostFades.curve_mode !== "legacy" && args.hostFades.curve_mode !== "hifishifter") {
-        return [labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut, args.t)),
-            labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
-            args.t("fade_info_host_curve_note")].join("\n");
+    if (
+        args.hostFades &&
+        args.hostFades.curve_mode !== "legacy" &&
+        args.hostFades.curve_mode !== "hifishifter"
+    ) {
+        return [
+            labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut, args.t)),
+            labelValue(
+                args.t,
+                args.t("common_length"),
+                lengthLine(args.lengthSec, args.formatCtx, args.delta),
+            ),
+            args.t("fade_info_host_curve_note"),
+        ].join("\n");
     }
     return [
         labelValue(args.t, typeLabel, name),
-        labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
+        labelValue(
+            args.t,
+            args.t("common_length"),
+            lengthLine(args.lengthSec, args.formatCtx, args.delta),
+        ),
         labelValue(args.t, args.t("common_curvature"), dirLine(args.dir, args.delta)),
     ].join("\n");
 }
@@ -160,10 +174,17 @@ export function buildSingleFadeInfoContent(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
-    delta?: FadeInfoDelta; hostFades?:HostFadeMetadata;
+    delta?: FadeInfoDelta;
+    hostFades?: HostFadeMetadata;
 }): ReactNode {
-    if (args.hostFades&&args.hostFades.curve_mode!=="legacy"&&args.hostFades.curve_mode!=="hifishifter") {
-        return buildSingleFadeInfoText(args).split("\n").map((row,key)=>createElement("div",{key},row));
+    if (
+        args.hostFades &&
+        args.hostFades.curve_mode !== "legacy" &&
+        args.hostFades.curve_mode !== "hifishifter"
+    ) {
+        return buildSingleFadeInfoText(args)
+            .split("\n")
+            .map((row, key) => createElement("div", { key }, row));
     }
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
@@ -172,7 +193,13 @@ export function buildSingleFadeInfoContent(args: {
     });
     return [
         [typeLabel, args.t("common_value_sep"), fadeIconNode(args.shape, args.isOut)],
-        [labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta))],
+        [
+            labelValue(
+                args.t,
+                args.t("common_length"),
+                lengthLine(args.lengthSec, args.formatCtx, args.delta),
+            ),
+        ],
         [labelValue(args.t, args.t("common_curvature"), dirLine(args.dir, args.delta))],
     ].map((row, index) =>
         createElement(
@@ -210,8 +237,20 @@ function dirLine(dir: number, delta: FadeInfoDelta | undefined): string {
  * 两侧各自带自己的增量 —— 反向模式下两侧淡变按比例缩放，位移量并不相同。
  */
 export function buildCrossfadeGripInfoContent(args: {
-    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
-    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
+    earlier: {
+        shape: number;
+        dir: number;
+        lengthSec: number;
+        delta?: FadeInfoDelta;
+        hostFades?: HostFadeMetadata;
+    };
+    later: {
+        shape: number;
+        dir: number;
+        lengthSec: number;
+        delta?: FadeInfoDelta;
+        hostFades?: HostFadeMetadata;
+    };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): ReactNode {
@@ -253,8 +292,20 @@ export function publishFadeRichTooltip(element: Element | null, content: ReactNo
  * 两块之间空一行分隔（纯文本版本）。
  */
 export function buildCrossfadeGripInfoText(args: {
-    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
-    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta; hostFades?:HostFadeMetadata };
+    earlier: {
+        shape: number;
+        dir: number;
+        lengthSec: number;
+        delta?: FadeInfoDelta;
+        hostFades?: HostFadeMetadata;
+    };
+    later: {
+        shape: number;
+        dir: number;
+        lengthSec: number;
+        delta?: FadeInfoDelta;
+        hostFades?: HostFadeMetadata;
+    };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): string {

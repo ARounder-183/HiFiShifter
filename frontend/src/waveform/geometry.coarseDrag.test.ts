@@ -313,10 +313,7 @@ describe("粗缩放：Loop 瓦片边界列不得随亚桶相位收窄窗口", ()
         const columnCounts = new Set<number>();
         for (let step = 0; step <= 20; step += 1) {
             const x = step / 20; // 0..1，循环节跨过一次列边界
-            const { calls, geometry } = buildLoopScene(
-                makeLoopTilesScene([x, x + 4]),
-                flat,
-            );
+            const { calls, geometry } = buildLoopScene(makeLoopTilesScene([x, x + 4]), flat);
             widths.add(calls);
             columnCounts.add(coveredColumnIndexes(geometry.vertices).length);
         }
@@ -490,16 +487,13 @@ describe("粗档：上界窗口必须覆盖峰值来源的桶跨度", () => {
 
     it("★ coarseSpan = 1：每列的窗口宽度 = 该列的桶跨度（修复前恒为 0）", () => {
         const windows: Array<[number, number]> = [];
-        const map = Object.assign(
-            (value: number, gain: number) => value * gain,
-            {
-                factorAt: () => 1,
-                levelCeilingOverWindow: (lo: number, hi: number) => {
-                    windows.push([lo, hi]);
-                    return null;
-                },
+        const map = Object.assign((value: number, gain: number) => value * gain, {
+            factorAt: () => 1,
+            levelCeilingOverWindow: (lo: number, hi: number) => {
+                windows.push([lo, hi]);
+                return null;
             },
-        );
+        });
         buildWaveformGeometry({
             scene: makeScene(),
             color: "#ffffff",
@@ -520,16 +514,13 @@ describe("粗档：上界窗口必须覆盖峰值来源的桶跨度", () => {
         const segment = scene.segments[0] as { screenRect: { width: number } };
         segment.screenRect.width = 2;
         const windows: Array<[number, number]> = [];
-        const map = Object.assign(
-            (value: number, gain: number) => value * gain,
-            {
-                factorAt: () => 1,
-                levelCeilingOverWindow: (lo: number, hi: number) => {
-                    windows.push([lo, hi]);
-                    return null;
-                },
+        const map = Object.assign((value: number, gain: number) => value * gain, {
+            factorAt: () => 1,
+            levelCeilingOverWindow: (lo: number, hi: number) => {
+                windows.push([lo, hi]);
+                return null;
             },
-        );
+        });
         buildWaveformGeometry({
             scene,
             color: "#ffffff",

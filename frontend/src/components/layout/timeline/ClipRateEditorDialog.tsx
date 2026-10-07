@@ -23,11 +23,7 @@ import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
 import type { TempoMap } from "../../../utils/tempoMap";
 import { parsePlaybackRateInput } from "./runtime/timelineCanvasStyle";
 import { formatEditNumber } from "./math";
-import {
-    formatDurationUnit,
-    parseDurationInput,
-    type FadeLengthFormatContext,
-} from "./timeFormat";
+import { formatDurationUnit, parseDurationInput, type FadeLengthFormatContext } from "./timeFormat";
 import { formatDurationText } from "./timeValueText";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 

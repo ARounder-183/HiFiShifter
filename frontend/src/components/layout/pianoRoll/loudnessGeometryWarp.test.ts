@@ -400,20 +400,14 @@ describe("边界与退化", () => {
     });
 
     it("多段各自独立映射（编组联动 / 波纹跟随）", () => {
-        const warp = warpOf(
-            [geo("a", 0, 1), geo("b", 2, 1)],
-            [geo("a", 1, 1), geo("b", 4, 1)],
-        )!;
+        const warp = warpOf([geo("a", 0, 1), geo("b", 2, 1)], [geo("a", 1, 1), geo("b", 4, 1)])!;
         expect(warp.baselineFrame(200)).toBe(0);
         expect(warp.baselineFrame(800)).toBe(400);
         expect(warp.baselineFrame(600)).toBe(600);
     });
 
     it("新范围重叠时后者胜（复刻后端逐段写入的覆盖顺序）", () => {
-        const warp = warpOf(
-            [geo("a", 0, 2), geo("b", 4, 2)],
-            [geo("a", 2, 2), geo("b", 2, 2)],
-        )!;
+        const warp = warpOf([geo("a", 0, 2), geo("b", 4, 2)], [geo("a", 2, 2), geo("b", 2, 2)])!;
         // 帧 400..800 被两段同时覆盖，后一段（旧起点 4 s = 帧 800）胜出。
         expect(warp.baselineFrame(400)).toBe(800);
         expect(warp.baselineFrame(600)).toBe(1000);
@@ -603,9 +597,9 @@ describe("Loop：锚点回绕与后端同向（含倒放）", () => {
 
     it("非周期情形 wrapFrames 为 0（非 Loop / Loop 但媒体时长未知）", () => {
         expect(resolveClipConsumption(geo("c", 0, 1), FPS)!.wrapFrames).toBe(0);
-        expect(
-            resolveClipConsumption(geo("c", 0, 1, { loopEnabled: true }), FPS)!.wrapFrames,
-        ).toBe(0);
+        expect(resolveClipConsumption(geo("c", 0, 1, { loopEnabled: true }), FPS)!.wrapFrames).toBe(
+            0,
+        );
     });
 
     it("★ 周期段不得做整数帧插值（折返跳变会让线性插值造出不存在的中间值）", () => {
@@ -819,20 +813,20 @@ describe("Loop：锚点跨界时的基线映射（周期折返）", () => {
         const move = dragVsRelease(plain(), geo("c", 0.05, 1, {}));
         expect(move.unknown).toBe(0);
         expect(move.maxDiff).toBeLessThan(1e-6);
-        const slip = dragVsRelease(
-            plain(),
-            plain({ sourceStartSec: 0.05, sourceEndSec: 1.05 }),
-        );
+        const slip = dragVsRelease(plain(), plain({ sourceStartSec: 0.05, sourceEndSec: 1.05 }));
         expect(slip.maxDiff).toBeLessThan(1e-6);
         const trim = dragVsRelease(plain(), geo("c", 0, 1.05, {}));
         expect(trim.maxDiff).toBeLessThan(1e-6);
     });
 
     it("对照组：Loop 的 move / trim（锚点相位不变）逐值不变", () => {
-        const move = dragVsRelease(loopClip(), geo("c", 0.05, 1, {
-            loopEnabled: true,
-            mediaDurationSec: D,
-        }));
+        const move = dragVsRelease(
+            loopClip(),
+            geo("c", 0.05, 1, {
+                loopEnabled: true,
+                mediaDurationSec: D,
+            }),
+        );
         expect(move.unknown).toBe(0);
         expect(move.maxDiff).toBeLessThan(1e-6);
         const trim = dragVsRelease(

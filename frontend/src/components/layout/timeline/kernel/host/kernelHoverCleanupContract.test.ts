@@ -69,8 +69,8 @@ describe("指针离开时的悬停态复位", () => {
     it("★ 清掉去重键时必须同时收起浮标内容（否则键与内容分叉）", () => {
         const body = pointerLeaveBody();
         // 两个通道各要有一处 on*Hover(null) 与键的复位配对。
-        expect(body).toContain("lastFadeHoverKey = \"\"");
-        expect(body).toContain("lastClipHoverKey = \"\"");
+        expect(body).toContain('lastFadeHoverKey = ""');
+        expect(body).toContain('lastClipHoverKey = ""');
         expect(body).toContain("onFadeHover?.(null");
         expect(body).toContain("onClipHover?.(null");
     });

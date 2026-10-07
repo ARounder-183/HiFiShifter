@@ -60,16 +60,22 @@ export const updateMetronome = createAsyncThunk(
     },
 );
 
-export const fetchTimeline = createAsyncThunk("session/fetchTimeline", async (_, { getState, rejectWithValue }) => {
-    const session = () => (getState() as { session: SessionState }).session;
-    const epoch = session()._pluginTimelineEpoch;
-    const stale = () => isPluginMode() && (session()._pluginTimelineEpoch !== epoch
-        || session()._interactionLockCount > 0 || Object.keys(session()._pluginClipEditRequests).length > 0);
-    if (stale()) return rejectWithValue("Host timeline refresh deferred during clip edit");
-    const result = await webApi.getTimelineState();
-    // 自动刷新面板只在真正接纳快照后推进版本，拒绝后下次轮询继续补同步。
-    return stale() ? rejectWithValue("Stale host timeline refresh discarded") : result;
-});
+export const fetchTimeline = createAsyncThunk(
+    "session/fetchTimeline",
+    async (_, { getState, rejectWithValue }) => {
+        const session = () => (getState() as { session: SessionState }).session;
+        const epoch = session()._pluginTimelineEpoch;
+        const stale = () =>
+            isPluginMode() &&
+            (session()._pluginTimelineEpoch !== epoch ||
+                session()._interactionLockCount > 0 ||
+                Object.keys(session()._pluginClipEditRequests).length > 0);
+        if (stale()) return rejectWithValue("Host timeline refresh deferred during clip edit");
+        const result = await webApi.getTimelineState();
+        // 自动刷新面板只在真正接纳快照后推进版本，拒绝后下次轮询继续补同步。
+        return stale() ? rejectWithValue("Stale host timeline refresh discarded") : result;
+    },
+);
 
 // 传输命令串行化链：Tauri 命令在线程池上并发执行，快速连续的
 // 播放/停止/seek（播放停止连打）若不排序，后端可能以与派发相反的顺序

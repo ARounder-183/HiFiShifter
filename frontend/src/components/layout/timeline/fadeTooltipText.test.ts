@@ -123,7 +123,12 @@ describe("单侧淡变块", () => {
 
     it("★ 显示不出来的位移不出现方括号（不出现 `[+0.000]` / `[+0.00]`）", () => {
         for (const formatCtx of [ctx(), ctx({ secondaryTimeUnit: "seconds" })]) {
-            for (const delta of [{ lengthSec: 0 }, { lengthSec: 1e-9 }, { dir: 0 }, { dir: 0.004 }]) {
+            for (const delta of [
+                { lengthSec: 0 },
+                { lengthSec: 1e-9 },
+                { dir: 0 },
+                { dir: 0.004 },
+            ]) {
                 const text = buildSingleFadeInfoText({ ...base, formatCtx, delta });
                 expect(text, `${JSON.stringify(delta)} ${JSON.stringify(formatCtx)}`).not.toContain(
                     "[",
@@ -157,9 +162,7 @@ describe("交叉点抓手（双列）", () => {
     const later = { shape: 0, dir: -0.2, lengthSec: 0.75 };
 
     it("★ 悬停: 两块之间空一行，且各自只给当前值", () => {
-        expect(
-            buildCrossfadeGripInfoText({ earlier, later, formatCtx: ctx(), t: fakeT }),
-        ).toBe(
+        expect(buildCrossfadeGripInfoText({ earlier, later, formatCtx: ctx(), t: fakeT })).toBe(
             [
                 "Fade out type: Linear",
                 "Length: 0.1.000",

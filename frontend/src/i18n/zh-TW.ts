@@ -78,7 +78,8 @@ export const zhTW = {
     export_dialog_channel_stereo: "立體聲",
     export_dialog_channel_mono: "單聲道下混",
     export_dialog_sample_rate_autocorrected: "取樣率已自動調整為 MP3 支援的最近檔位：{rate} Hz。",
-    export_dialog_error_mp3_unsupported_sample_rate: "MP3 不支援目前的取樣率。請使用 8 kHz ~ 48 kHz 之間的 MPEG 表內檔位。",
+    export_dialog_error_mp3_unsupported_sample_rate:
+        "MP3 不支援目前的取樣率。請使用 8 kHz ~ 48 kHz 之間的 MPEG 表內檔位。",
     quick_export_format: "格式",
     export_conflict_exists_title: "匯出目標已存在",
     export_conflict_exists_desc: "以下匯出目標檔案已存在：",

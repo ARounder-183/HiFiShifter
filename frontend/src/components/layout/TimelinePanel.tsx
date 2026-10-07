@@ -30,7 +30,12 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { isPluginMode, isHostGeometryReadOnly, canImportHostAudio, canGroupPluginTracks } from "../../services/hostCapabilities";
+import {
+    isPluginMode,
+    isHostGeometryReadOnly,
+    canImportHostAudio,
+    canGroupPluginTracks,
+} from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -4456,7 +4461,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 if (clip === undefined) return null;
                 return {
                     shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
-                    hostFades:clip.hostFades,
+                    hostFades: clip.hostFades,
                     dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
                     lengthSec: effectiveFadeSec(
                         isOut ? clip.fadeOutSec : clip.fadeInSec,
@@ -5519,8 +5524,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onCrossfadeCycle: handleCrossfadeCycleClick,
             // 重置曲率走既有总线（旧实现同样经它派发）：消费者在淡变相关的 hook 里，
             // 这条契约与渲染模式无关。内核只给「哪些侧」，请求包络由这里组装。
-            onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) =>
-                { if (!isPluginMode()) requestResetFadeCurvature({ sides }); },
+            onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) => {
+                if (!isPluginMode()) requestResetFadeCurvature({ sides });
+            },
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
@@ -5698,7 +5704,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleMoveTrack = React.useCallback(
         (payload: { trackId: string; targetIndex: number; parentTrackId: string | null }) => {
-            if (isPluginMode()&&!canGroupPluginTracks()) return;
+            if (isPluginMode() && !canGroupPluginTracks()) return;
             dispatch(
                 moveTrackRemote({
                     trackId: payload.trackId,
@@ -6089,7 +6095,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     };
 
     const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
-        if (isPluginMode()&&!canImportHostAudio()) { e.preventDefault(); return; }
+        if (isPluginMode() && !canImportHostAudio()) {
+            e.preventDefault();
+            return;
+        }
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;
@@ -6172,9 +6181,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
 
         const fallbackFile = dt.files?.[0] ?? null;
-        if(isPluginMode()&&dt.files?.length>1) {
-            const files=Array.from(dt.files).filter(isAcceptedDropFile);
-            if(files.length) void dispatch(importMultipleAudioFilesAtPosition({files,mode:"across-time",trackId,startSec:beat}));
+        if (isPluginMode() && dt.files?.length > 1) {
+            const files = Array.from(dt.files).filter(isAcceptedDropFile);
+            if (files.length)
+                void dispatch(
+                    importMultipleAudioFilesAtPosition({
+                        files,
+                        mode: "across-time",
+                        trackId,
+                        startSec: beat,
+                    }),
+                );
             return;
         }
         // 无本地路径的兜底分支同样必须过准入判据：此前它**完全不做校验**就把任何

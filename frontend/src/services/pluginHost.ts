@@ -1,6 +1,15 @@
 // 原GUI的原生插件通信：不伪造Tauri，不让命令/事件串到其它FX实例。
 export type HostEvent<T> = { event: string; id: number; payload: T };
-export type PluginBootstrap = { version: 1; viewId: string; transportControl?: boolean; clipEditing?: boolean; clipSplitting?: boolean; clipClipboard?: boolean; audioImport?: boolean; trackGrouping?: boolean };
+export type PluginBootstrap = {
+    version: 1;
+    viewId: string;
+    transportControl?: boolean;
+    clipEditing?: boolean;
+    clipSplitting?: boolean;
+    clipClipboard?: boolean;
+    audioImport?: boolean;
+    trackGrouping?: boolean;
+};
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;
     postMessageWithAdditionalObjects?(message: unknown, objects: File[]): void;
@@ -29,24 +38,34 @@ type Pending = {
 function forwardPluginKeyboard(payload: unknown): void {
     if (!payload || typeof payload !== "object" || typeof document === "undefined") return;
     const key = payload as Record<string, unknown>;
-    if ((key.type !== "keydown" && key.type !== "keyup") || typeof key.key !== "string"
-        || !["c", "x", "v", "z", "y"].includes(key.key) || key.ctrlKey !== true) return;
+    if (
+        (key.type !== "keydown" && key.type !== "keyup") ||
+        typeof key.key !== "string" ||
+        !["c", "x", "v", "z", "y"].includes(key.key) ||
+        key.ctrlKey !== true
+    )
+        return;
     const target = document.activeElement ?? document.body;
-    target.dispatchEvent(new KeyboardEvent(key.type, {
-        key: key.key,
-        code: `Key${key.key.toUpperCase()}`,
-        ctrlKey: true,
-        shiftKey: key.shiftKey === true,
-        altKey: key.altKey === true,
-        metaKey: key.metaKey === true,
-        repeat: key.repeat === true,
-        bubbles: true,
-        cancelable: true,
-    }));
+    target.dispatchEvent(
+        new KeyboardEvent(key.type, {
+            key: key.key,
+            code: `Key${key.key.toUpperCase()}`,
+            ctrlKey: true,
+            shiftKey: key.shiftKey === true,
+            altKey: key.altKey === true,
+            metaKey: key.metaKey === true,
+            repeat: key.repeat === true,
+            bubbles: true,
+            cancelable: true,
+        }),
+    );
 }
 
 /** 用宿主注入的view身份关联有界请求；只能绑定原生WebView消息口。 */
-export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap): PluginHostBridge {
+export function createPluginHost(
+    port: WebViewMessagePort,
+    boot: PluginBootstrap,
+): PluginHostBridge {
     if (boot.version !== 1 || !boot.viewId || boot.viewId.length > 128) {
         throw new Error("Invalid plugin host bootstrap");
     }
@@ -66,8 +85,11 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
         if (typeof data.event === "string") {
             const notification = { event: data.event, id: eventId++, payload: data.payload };
             for (const handler of Array.from(listeners.get(data.event) ?? [])) {
-                try { handler(notification); }
-                catch (error) { console.error("Plugin event handler failed", error); }
+                try {
+                    handler(notification);
+                } catch (error) {
+                    console.error("Plugin event handler failed", error);
+                }
             }
             return;
         }
@@ -77,19 +99,32 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
         pending.delete(data.id);
         clearTimeout(slot.timer);
         if (data.ok === true) slot.resolve(data.value);
-        else slot.reject(new Error(typeof data.error === "string" ? data.error : "Invalid plugin response"));
+        else
+            slot.reject(
+                new Error(typeof data.error === "string" ? data.error : "Invalid plugin response"),
+            );
     }
     port.addEventListener("message", receive);
     return {
         kind: "plugin",
         invoke<T>(command: string, args?: Record<string, unknown>, files?: File[]): Promise<T> {
             if (closed) return Promise.reject(new Error("Plugin editor closed"));
-            if (pending.size >= 128) return Promise.reject(new Error("Too many pending plugin requests"));
+            if (pending.size >= 128)
+                return Promise.reject(new Error("Too many pending plugin requests"));
             if (!command || command.length > 128 || !Number.isSafeInteger(nextId)) {
-                return Promise.reject(new Error("Invalid plugin command or exhausted request identity"));
+                return Promise.reject(
+                    new Error("Invalid plugin command or exhausted request identity"),
+                );
             }
-            if (files && (!port.postMessageWithAdditionalObjects || command!=="import_native_audio_file" || files.length!==1)) {
-                return Promise.reject(new Error("Native File import unavailable; use File menu import"));
+            if (
+                files &&
+                (!port.postMessageWithAdditionalObjects ||
+                    command !== "import_native_audio_file" ||
+                    files.length !== 1)
+            ) {
+                return Promise.reject(
+                    new Error("Native File import unavailable; use File menu import"),
+                );
             }
             const id = nextId++;
             return new Promise<T>((resolve, reject) => {
@@ -99,10 +134,10 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
                 }, 30_000);
                 pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
                 try {
-                    const message={ version: 1, viewId: boot.viewId, id, command, args };
-                    if(files) port.postMessageWithAdditionalObjects!(message,files);else port.postMessage(message);
-                }
-                catch (error) {
+                    const message = { version: 1, viewId: boot.viewId, id, command, args };
+                    if (files) port.postMessageWithAdditionalObjects!(message, files);
+                    else port.postMessage(message);
+                } catch (error) {
                     clearTimeout(timer);
                     pending.delete(id);
                     reject(error instanceof Error ? error : new Error(String(error)));

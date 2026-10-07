@@ -2474,7 +2474,11 @@ export function usePianoRollInteractions(args: {
                     lineTool: vibratoStateRef.current.tool === "line",
                     currentPresetId: vibratoStateRef.current.working.preset.id,
                 });
-                const choice = cycleVibratoChoice(vibratoPresetCycleList, anchorId, switchDirection);
+                const choice = cycleVibratoChoice(
+                    vibratoPresetCycleList,
+                    anchorId,
+                    switchDirection,
+                );
                 if (choice) applyVibratoChoice(choice);
                 return;
             }

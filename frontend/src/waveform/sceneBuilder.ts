@@ -30,7 +30,7 @@ import {
     viewportStartSec as axisViewportStartSec,
     type TimelineAxis,
 } from "../components/layout/renderKernel/timelineAxis.ts";
-import type {HostFadeMetadata} from "../types/api";
+import type { HostFadeMetadata } from "../types/api";
 
 export interface WaveformSceneClip {
     id: string;

@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ClipInfo } from "../../../features/session/sessionTypes";
-import type {HostFadeMetadata} from "../../../types/api";
+import type { HostFadeMetadata } from "../../../types/api";
 import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 

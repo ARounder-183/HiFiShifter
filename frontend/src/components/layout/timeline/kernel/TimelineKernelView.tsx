@@ -551,8 +551,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
      */
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
-            get geometryReadOnly() { return interactionsRef.current?.geometryReadOnly; },
-            get fadeShapeReadOnly() { return interactionsRef.current?.fadeShapeReadOnly; },
+            get geometryReadOnly() {
+                return interactionsRef.current?.geometryReadOnly;
+            },
+            get fadeShapeReadOnly() {
+                return interactionsRef.current?.fadeShapeReadOnly;
+            },
             onSeek: (sec, phase, trackId) => interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>

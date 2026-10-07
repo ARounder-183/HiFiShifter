@@ -359,7 +359,8 @@ describe("文本风格", () => {
             "algo_label::Algo": "`algo_label_short` 是 `algo_label` 的短版，长/短变体刻意同值",
             "custom_scale::Custom Scale": "标签 / 对话框标题 / 默认名三处都该是「自定义音阶」",
             "tempo_map::Tempo Map": "面板名与「清除速度图」对话框标题共用同一个名词",
-            "tempo_map::Scale": "`tempo_map_scale`（面板列名）与 `tempo_map_tooltip_scale`（变化点提示行）都是「音阶」这个名词本身",
+            "tempo_map::Scale":
+                "`tempo_map_scale`（面板列名）与 `tempo_map_tooltip_scale`（变化点提示行）都是「音阶」这个名词本身",
         };
 
         /** 取前两段作为命名族（`param_btn_breath` → `param_btn`）。 */

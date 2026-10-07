@@ -1,7 +1,12 @@
 // 片段菜单共用原GUI；插件只显示已接通的宿主操作，不能暴露独立App私有几何命令。
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { isPluginMode, canSplitHostClips, canClipboardHostClips, canEditHostClips } from "../../../services/hostCapabilities";
+import {
+    isPluginMode,
+    canSplitHostClips,
+    canClipboardHostClips,
+    canEditHostClips,
+} from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
@@ -383,35 +388,124 @@ export const ClipContextMenu: React.FC<{
         return () => window.removeEventListener("keydown", onKey);
     }, [onClose]);
 
-    if (isPluginMode()) return createPortal(
-        <div ref={menuRef} role="menu" data-hs-context-menu="1" data-hs-floating-menu="1"
-            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-            style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
-            <MenuItem label={isMulti ? t("ctx_delete_all") : t("ctx_delete")} shortcut={deleteShortcut} danger
-                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onDelete(ids); close(); }} />
-            <MenuItem label={allMuted ? (isMulti ? t("ctx_unmute_all") : t("clip_unmute")) : (isMulti ? t("ctx_mute_all") : t("clip_mute"))}
-                disabled={!canEditHostClips()} onClick={() => { if (canEditHostClips()) onMute(ids, !allMuted); close(); }} />
-            <Divider />
-            <MenuItem label={isMulti ? t("ctx_copy_all") : t("ctx_copy")} shortcut={copyShortcut}
-                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onCopy(ids); close(); }} />
-            <MenuItem label={isMulti ? t("ctx_cut_all") : t("ctx_cut")} shortcut={cutShortcut}
-                disabled={!canClipboardHostClips()} onClick={() => { if (canClipboardHostClips()) onCut(ids); close(); }} />
-            <MenuItem label={t("ctx_split_at_playhead")} shortcut={splitShortcut}
-                disabled={!canSplitHostClips() || (isMulti ? !canSplitSelected : !playheadInClip)}
-                onClick={() => { onSplit(ids); close(); }} />
-            <MenuItem label={isMulti ? t("ctx_normalize_all") : t("ctx_normalize")} shortcut={normalizeShortcut}
-                onClick={() => { onNormalize(ids); close(); }} />
-            {onEditRate && <MenuItem label={t("ctx_edit_rate")} disabled={!canEditHostClips()}
-                onClick={() => { if (canEditHostClips()) onEditRate(clip.id, x, y); close(); }} />}
-            {onAddToParamSelection && <MenuItem label={t("ctx_add_to_param_selection")} shortcut={addToParamSelectionShortcut}
-                onClick={() => { onAddToParamSelection(ids); close(); }} />}
-            {onGroup && <MenuItem label={t("common_group")} disabled={!canEditHostClips()||isMulti===false}
-                onClick={() => { if (canEditHostClips()) onGroup(ids); close(); }} />}
-            {onUngroup && hasGroup && <MenuItem label={t("common_ungroup")} disabled={!canEditHostClips()}
-                onClick={() => { if (canEditHostClips()) onUngroup(ids); close(); }} />}
-        </div>
-        , document.body
-    );
+    if (isPluginMode())
+        return createPortal(
+            <div
+                ref={menuRef}
+                role="menu"
+                data-hs-context-menu="1"
+                data-hs-floating-menu="1"
+                className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                style={{ left: x, top: y }}
+                onPointerDown={(e) => e.stopPropagation()}
+            >
+                <MenuItem
+                    label={isMulti ? t("ctx_delete_all") : t("ctx_delete")}
+                    shortcut={deleteShortcut}
+                    danger
+                    disabled={!canClipboardHostClips()}
+                    onClick={() => {
+                        if (canClipboardHostClips()) onDelete(ids);
+                        close();
+                    }}
+                />
+                <MenuItem
+                    label={
+                        allMuted
+                            ? isMulti
+                                ? t("ctx_unmute_all")
+                                : t("clip_unmute")
+                            : isMulti
+                              ? t("ctx_mute_all")
+                              : t("clip_mute")
+                    }
+                    disabled={!canEditHostClips()}
+                    onClick={() => {
+                        if (canEditHostClips()) onMute(ids, !allMuted);
+                        close();
+                    }}
+                />
+                <Divider />
+                <MenuItem
+                    label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
+                    shortcut={copyShortcut}
+                    disabled={!canClipboardHostClips()}
+                    onClick={() => {
+                        if (canClipboardHostClips()) onCopy(ids);
+                        close();
+                    }}
+                />
+                <MenuItem
+                    label={isMulti ? t("ctx_cut_all") : t("ctx_cut")}
+                    shortcut={cutShortcut}
+                    disabled={!canClipboardHostClips()}
+                    onClick={() => {
+                        if (canClipboardHostClips()) onCut(ids);
+                        close();
+                    }}
+                />
+                <MenuItem
+                    label={t("ctx_split_at_playhead")}
+                    shortcut={splitShortcut}
+                    disabled={
+                        !canSplitHostClips() || (isMulti ? !canSplitSelected : !playheadInClip)
+                    }
+                    onClick={() => {
+                        onSplit(ids);
+                        close();
+                    }}
+                />
+                <MenuItem
+                    label={isMulti ? t("ctx_normalize_all") : t("ctx_normalize")}
+                    shortcut={normalizeShortcut}
+                    onClick={() => {
+                        onNormalize(ids);
+                        close();
+                    }}
+                />
+                {onEditRate && (
+                    <MenuItem
+                        label={t("ctx_edit_rate")}
+                        disabled={!canEditHostClips()}
+                        onClick={() => {
+                            if (canEditHostClips()) onEditRate(clip.id, x, y);
+                            close();
+                        }}
+                    />
+                )}
+                {onAddToParamSelection && (
+                    <MenuItem
+                        label={t("ctx_add_to_param_selection")}
+                        shortcut={addToParamSelectionShortcut}
+                        onClick={() => {
+                            onAddToParamSelection(ids);
+                            close();
+                        }}
+                    />
+                )}
+                {onGroup && (
+                    <MenuItem
+                        label={t("common_group")}
+                        disabled={!canEditHostClips() || isMulti === false}
+                        onClick={() => {
+                            if (canEditHostClips()) onGroup(ids);
+                            close();
+                        }}
+                    />
+                )}
+                {onUngroup && hasGroup && (
+                    <MenuItem
+                        label={t("common_ungroup")}
+                        disabled={!canEditHostClips()}
+                        onClick={() => {
+                            if (canEditHostClips()) onUngroup(ids);
+                            close();
+                        }}
+                    />
+                )}
+            </div>,
+            document.body,
+        );
 
     // 菜单挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
     // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。

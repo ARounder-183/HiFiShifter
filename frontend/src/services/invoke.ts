@@ -136,7 +136,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "plugin_refresh":
             return { force: args[0] ?? false };
         case "emit_ui_event":
-            return {event:args[0],payload:args[1]};
+            return { event: args[0], payload: args[1] };
 
         case "import_audio_item":
             return {
@@ -940,11 +940,14 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
     if (plugin) {
         const mapped = buildTauriArgs(method, args);
         if (mapped && "__unwired" in mapped && args.length > 0) {
-            throw new Error(`Plugin backend: method not wired yet: ${method} (args: ${args.length})`);
+            throw new Error(
+                `Plugin backend: method not wired yet: ${method} (args: ${args.length})`,
+            );
         }
         const named = mapped && "__unwired" in mapped ? undefined : mapped;
-        try { return await plugin.invoke<T>(method, named); }
-        catch (cause) {
+        try {
+            return await plugin.invoke<T>(method, named);
+        } catch (cause) {
             reportFrontendError(`Invoke failed: ${method}`, cause);
             throw new BackendInvokeError({ mode: "plugin", method, args: named, cause });
         }

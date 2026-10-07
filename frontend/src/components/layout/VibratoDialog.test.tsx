@@ -2035,9 +2035,7 @@ test("编辑系统预设：只在第一次生成副本，后续编辑落在同�
     expect(userPresets(store), "第二次编辑不该再生成一份").toHaveLength(1);
     // 后续编辑仍停在草稿上（照常由「保存」/ 离开这条预设落盘），
     // 但草稿已经是那份副本了 —— 输入框读到的就是新值。
-    expect(
-        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value,
-    ).toBe("88");
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value).toBe("88");
     expect(
         document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]')?.value,
         "编辑的仍是第一次生成的那份副本",

@@ -132,9 +132,7 @@ function sanitizeRate(rate: number): number {
  * @returns 新的 `{sourceStartSec, sourceEndSec}`；**Loop 的右缘或输入非法时返回
  *   `null`**（调用方只改 `lengthSec`，跳过源窗口写入）。
  */
-export function resolveTrimSourceWindow(
-    args: TrimSourceWindowArgs,
-): TrimSourceWindow | null {
+export function resolveTrimSourceWindow(args: TrimSourceWindowArgs): TrimSourceWindow | null {
     if (!Number.isFinite(args.deltaSec)) return null;
 
     const rate = sanitizeRate(args.rate);

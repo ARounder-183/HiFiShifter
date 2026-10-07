@@ -18,7 +18,10 @@ function extractPluginHandlers(source: string): string[] {
         for (const literal of match[1].matchAll(/"([a-z_0-9]+)"/g)) result.add(literal[1]);
     }
     // WebView 的媒体附件入口在 UI 线程先处理，不进入 actor match。
-    for (const match of source.matchAll(/(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g)) result.add(match[1]);
+    for (const match of source.matchAll(
+        /(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g,
+    ))
+        result.add(match[1]);
     return [...result];
 }
 
@@ -145,8 +148,11 @@ describe("invoke wiring", () => {
             }
         }
 
-        const backend = new Set([...extractBackendHandlers(backendLibSource),...extractPluginHandlers(pluginCommandSource),
-            ...extractPluginHandlers(pluginWebviewSource)]);
+        const backend = new Set([
+            ...extractBackendHandlers(backendLibSource),
+            ...extractPluginHandlers(pluginCommandSource),
+            ...extractPluginHandlers(pluginWebviewSource),
+        ]);
         const referenced = new Set<string>([
             ...invoked,
             ...extractSwitchCases(invokeSource),

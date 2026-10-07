@@ -35,19 +35,27 @@ export type SaveProjectResponse = SaveVersionConflict | Record<string, unknown>;
  * 消失的 trackId 上导 clip，后端 `add_clip` 会凭空造出一条 "Track"，撤销栈就此被
  * 写坏），并通知 UI 复位那些"描述旧时间线"的瞬时状态（音高分析进度）。详见该函数。
  */
-export const undoRemote = createAsyncThunk("session/undoRemote", async (options?: { parametersOnly?: boolean }) => {
-    await notifyHistoryJump();
-    const plugin=getPluginHost();
-    if (options?.parametersOnly && plugin) return plugin.invoke<TimelineState>("undo_parameter_edit", {});
-    return webApi.undoTimeline();
-});
+export const undoRemote = createAsyncThunk(
+    "session/undoRemote",
+    async (options?: { parametersOnly?: boolean }) => {
+        await notifyHistoryJump();
+        const plugin = getPluginHost();
+        if (options?.parametersOnly && plugin)
+            return plugin.invoke<TimelineState>("undo_parameter_edit", {});
+        return webApi.undoTimeline();
+    },
+);
 
-export const redoRemote = createAsyncThunk("session/redoRemote", async (options?: { parametersOnly?: boolean }) => {
-    await notifyHistoryJump();
-    const plugin=getPluginHost();
-    if (options?.parametersOnly && plugin) return plugin.invoke<TimelineState>("redo_parameter_edit", {});
-    return webApi.redoTimeline();
-});
+export const redoRemote = createAsyncThunk(
+    "session/redoRemote",
+    async (options?: { parametersOnly?: boolean }) => {
+        await notifyHistoryJump();
+        const plugin = getPluginHost();
+        if (options?.parametersOnly && plugin)
+            return plugin.invoke<TimelineState>("redo_parameter_edit", {});
+        return webApi.redoTimeline();
+    },
+);
 
 /**
  * 跳到「操作记录」中的第 `position` 个状态（窗口双击条目 / 点击跳转按钮）。

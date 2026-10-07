@@ -69,7 +69,7 @@ class RecordingContext {
     strokeCalls: RecordedStroke[] = [];
     /** 每次 fill/stroke 的调用序号，用于判断批次边界。 */
     opSequence: string[] = [];
-    linePoints: Array<[number,number]> = [];
+    linePoints: Array<[number, number]> = [];
 
     private pendingRects: RecordedRect[] = [];
     private pendingRect: RecordedRect | null = null;
@@ -87,7 +87,9 @@ class RecordingContext {
     arc(): void {}
     ellipse(): void {}
     moveTo(): void {}
-    lineTo(x:number,y:number): void {this.linePoints.push([x,y]);}
+    lineTo(x: number, y: number): void {
+        this.linePoints.push([x, y]);
+    }
     closePath(): void {}
     clip(): void {
         this.clipCount += 1;
@@ -201,16 +203,31 @@ describe("drawTimelineCanvas 合批", () => {
     }
 
     it("宿主新轴描绘HFS曲线，不再只画边界或被旧linear字段短路", async () => {
-        const {drawTimelineCanvas}=await load();
-        const run=(curvature:number,s:number)=>{
-            ctx=new RecordingContext();
-            drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D,{
-                width:400,height:90,fontFamily:"sans-serif",darkMode:true,
-                clips:[clip({fadeInPx:100,hostFades:{curve_mode:"reaper_new",in_curvature:curvature,in_s:s,out_curvature:0,out_s:0}})],
-            });return ctx.linePoints.length;
+        const { drawTimelineCanvas } = await load();
+        const run = (curvature: number, s: number) => {
+            ctx = new RecordingContext();
+            drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
+                width: 400,
+                height: 90,
+                fontFamily: "sans-serif",
+                darkMode: true,
+                clips: [
+                    clip({
+                        fadeInPx: 100,
+                        hostFades: {
+                            curve_mode: "reaper_new",
+                            in_curvature: curvature,
+                            in_s: s,
+                            out_curvature: 0,
+                            out_s: 0,
+                        },
+                    }),
+                ],
+            });
+            return ctx.linePoints.length;
         };
-        const linear=run(0,0);
-        expect(run(-0.6,0.5)).toBeGreaterThan(linear+2);
+        const linear = run(0, 0);
+        expect(run(-0.6, 0.5)).toBeGreaterThan(linear + 2);
     });
 
     it("不重叠的 clip 不产生任何 clip() 调用，且 fill/stroke 次数与 clip 数无关", async () => {

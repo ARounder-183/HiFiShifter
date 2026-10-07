@@ -44,8 +44,7 @@ const fakeT = (key: string, vars: Record<string, string>): string => {
     const templates: Record<string, string> = {
         clip_snap_offset: "吸附偏移",
         clip_snap_offset_value: "吸附偏移：{offset}\n位置：{position}",
-        clip_snap_offset_value_drag:
-            "吸附偏移：{offset} [{delta}]\n位置：{position} [{delta}]",
+        clip_snap_offset_value_drag: "吸附偏移：{offset} [{delta}]\n位置：{position} [{delta}]",
     };
     return (templates[key] ?? key).replace(/\{(\w+)\}/g, (m, name: string) =>
         Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : m,
@@ -145,7 +144,13 @@ describe("时长（零基点）与时刻（绝对）口径不同", () => {
     it("★ 时刻感知 Tempo Map：同一秒在第二段（60 BPM）下给出不同的标签", () => {
         const tempoMap: TempoMap = {
             points: [
-                { id: "a", positionSec: 0, bpm: 120, timeSignature: { numerator: 4, denominator: 4 }, scale: null },
+                {
+                    id: "a",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
                 { id: "b", positionSec: 4, bpm: 60, timeSignature: null, scale: null },
             ],
         };
@@ -162,13 +167,17 @@ describe("时长（零基点）与时刻（绝对）口径不同", () => {
     it("时长**不**感知 Tempo Map（零基点的静态折算，与既有约定一致）", () => {
         const tempoMap: TempoMap = {
             points: [
-                { id: "a", positionSec: 0, bpm: 120, timeSignature: { numerator: 4, denominator: 4 }, scale: null },
+                {
+                    id: "a",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
                 { id: "b", positionSec: 4, bpm: 60, timeSignature: null, scale: null },
             ],
         };
-        expect(formatDurationText(0.5, ctx({ tempoMap }))).toBe(
-            formatDurationText(0.5, ctx()),
-        );
+        expect(formatDurationText(0.5, ctx({ tempoMap }))).toBe(formatDurationText(0.5, ctx()));
     });
 });
 

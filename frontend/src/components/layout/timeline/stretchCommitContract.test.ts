@@ -43,7 +43,11 @@ describe("拉伸提交链的门禁", () => {
 
     it("★ 闸门合上必须早于落库派发（否则中间态取数已经发出）", () => {
         const holdIndexes: number[] = [];
-        for (let at = CODE.indexOf("holdLoudnessFetch()"); at >= 0; at = CODE.indexOf("holdLoudnessFetch()", at + 1)) {
+        for (
+            let at = CODE.indexOf("holdLoudnessFetch()");
+            at >= 0;
+            at = CODE.indexOf("holdLoudnessFetch()", at + 1)
+        ) {
             holdIndexes.push(at);
         }
         expect(holdIndexes).toHaveLength(2);

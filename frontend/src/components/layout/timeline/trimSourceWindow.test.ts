@@ -485,7 +485,10 @@ function trimFixture(over: Partial<WaveformSceneClip>): WaveformSceneClip {
 
 describe("★ 契约：被拖边缘的对侧在**渲染结果**上保持不变", () => {
     const cases: [string, Partial<WaveformSceneClip>][] = [
-        ["正放非 Loop", { reversed: false, loopEnabled: false, sourceStartSec: 2, sourceEndSec: 6 }],
+        [
+            "正放非 Loop",
+            { reversed: false, loopEnabled: false, sourceStartSec: 2, sourceEndSec: 6 },
+        ],
         ["倒放非 Loop", { reversed: true, loopEnabled: false, sourceStartSec: 2, sourceEndSec: 6 }],
         ["正放 Loop", { reversed: false, loopEnabled: true, sourceStartSec: 0, sourceEndSec: 8 }],
         ["倒放 Loop", { reversed: true, loopEnabled: true, sourceStartSec: 0, sourceEndSec: 8 }],
@@ -558,7 +561,12 @@ describe("★ resolveTrimSnapOffset：左缘保持偏移点的绝对位置", () 
 
     it("拖右缘 ⇒ 起点不动，相对偏移不变", () => {
         expect(
-            resolveTrimSnapOffset({ edge: "right", deltaSec: 1, snapOffsetSec: 2, newLengthSec: 5 }),
+            resolveTrimSnapOffset({
+                edge: "right",
+                deltaSec: 1,
+                snapOffsetSec: 2,
+                newLengthSec: 5,
+            }),
         ).toBe(2);
     });
 

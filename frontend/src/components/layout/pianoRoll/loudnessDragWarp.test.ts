@@ -17,7 +17,10 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { makeLoudnessAmplitudeMap, type LoudnessAutomationSource } from "./PianoRollWaveformSurface";
+import {
+    makeLoudnessAmplitudeMap,
+    type LoudnessAutomationSource,
+} from "./PianoRollWaveformSurface";
 import {
     createLoudnessGeometryWarp,
     type LoudnessGeometryWarp,
@@ -135,7 +138,10 @@ describe("拖拽期间基线跟随几何", () => {
 
     it("★ 平移的「形状不变」性质：新位置的因子等于旧位置的因子", () => {
         // 带起伏的曲线，避免"恒等"掩盖错误。
-        const baseline = Array.from({ length: 48 }, (_, f) => 0.2 + 0.5 * Math.abs(Math.sin(f * 0.4)));
+        const baseline = Array.from(
+            { length: 48 },
+            (_, f) => 0.2 + 0.5 * Math.abs(Math.sin(f * 0.4)),
+        );
         const target = baseline.map((b, f) => b * (0.3 + 1.5 * Math.abs(Math.cos(f * 0.31))));
         const src = source({
             volume: Array.from({ length: 48 }, (_, f) => 0.6 + 0.4 * Math.sin(f * 0.23)),
@@ -143,11 +149,7 @@ describe("拖拽期间基线跟随几何", () => {
             dynBaseline: baseline,
         });
         const delta = 12;
-        const warp = warpOf(
-            [geo("c1", 0, 0.24)],
-            [geo("c1", at(delta), 0.24)],
-            true,
-        );
+        const warp = warpOf([geo("c1", 0, 0.24)], [geo("c1", at(delta), 0.24)], true);
         const mapped = amplitudeMap(src, () => warp);
         const plain = amplitudeMap(src, () => null);
         for (let k = 0; k < 24; k += 1) {
@@ -159,7 +161,10 @@ describe("拖拽期间基线跟随几何", () => {
     });
 
     it("无映射时映射路径与既有行为逐值相同（稳态零影响）", () => {
-        const baseline = Array.from({ length: 32 }, (_, f) => 0.1 + 0.4 * Math.abs(Math.sin(f * 0.5)));
+        const baseline = Array.from(
+            { length: 32 },
+            (_, f) => 0.1 + 0.4 * Math.abs(Math.sin(f * 0.5)),
+        );
         const src = source({
             volume: new Array<number>(32).fill(1),
             dynTarget: baseline.map((b) => b * 0.7),
@@ -330,7 +335,10 @@ describe("手势几何 → 映射的整链", () => {
 describe("可达电平上界：揭示帧给出目标电平上界，而不是放弃钳制", () => {
     /** 有真实基线、目标与基线逐位相同（= 全部"未画"）。 */
     function undrawnSource(): LoudnessAutomationSource {
-        const baseline = Array.from({ length: 48 }, (_, f) => 0.3 + 0.2 * Math.abs(Math.sin(f * 0.3)));
+        const baseline = Array.from(
+            { length: 48 },
+            (_, f) => 0.3 + 0.2 * Math.abs(Math.sin(f * 0.3)),
+        );
         return source({
             volume: new Array<number>(48).fill(1),
             dynTarget: [...baseline],

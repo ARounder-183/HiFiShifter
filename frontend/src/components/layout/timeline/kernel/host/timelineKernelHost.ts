@@ -4050,10 +4050,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
-            const intercepted=interactions.onClipPointerDownIntercept?.({clipId:hit.clip.id,
-                clientX:event.clientX,clientY:event.clientY,pointerId:event.pointerId,
-                modifiers:dragModifiersOf(event),container});
-            if (!intercepted) interactions.onSelectClip?.(hit.clip.id,event.ctrlKey || event.metaKey,event.shiftKey,event.clientX);
+            const intercepted = interactions.onClipPointerDownIntercept?.({
+                clipId: hit.clip.id,
+                clientX: event.clientX,
+                clientY: event.clientY,
+                pointerId: event.pointerId,
+                modifiers: dragModifiersOf(event),
+                container,
+            });
+            if (!intercepted)
+                interactions.onSelectClip?.(
+                    hit.clip.id,
+                    event.ctrlKey || event.metaKey,
+                    event.shiftKey,
+                    event.clientX,
+                );
             return;
         }
         if (hit.kind === "clip") {

@@ -184,11 +184,25 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
                   mapping: Object.fromEntries(trackMapping),
               };
         if (nativeNewTracks) {
-            const span = computeSelectedTrackSpan({ clipIds: [...sourceClipIds], initialById, trackIndexById: initialTrackIndexById });
+            const span = computeSelectedTrackSpan({
+                clipIds: [...sourceClipIds],
+                initialById,
+                trackIndexById: initialTrackIndexById,
+            });
             if (!span) throw new Error("create_track_failed");
-            trackMode = { kind: "new_tracks", span: span.span, mapping: Object.fromEntries(sourceClipIds.map(id => {
-                const initial=initialById[id];return [initial.trackId,initialTrackIndexById[initial.trackId]-span.minTrackIndex];
-            })) };
+            trackMode = {
+                kind: "new_tracks",
+                span: span.span,
+                mapping: Object.fromEntries(
+                    sourceClipIds.map((id) => {
+                        const initial = initialById[id];
+                        return [
+                            initial.trackId,
+                            initialTrackIndexById[initial.trackId] - span.minTrackIndex,
+                        ];
+                    }),
+                ),
+            };
         }
 
         const payload = await dispatch(

@@ -1,7 +1,7 @@
 // 共享波形几何：UI包络与曲线描边同源；宿主示意fade不改变实际PCM。
 import { fadeGainIn, fadeGainOut } from "../components/layout/timeline/paths.ts";
-import {visualFadeGain} from "../components/layout/timeline/hostFadeDisplay.ts";
-import type {HostFadeMetadata} from "../types/api";
+import { visualFadeGain } from "../components/layout/timeline/hostFadeDisplay.ts";
+import type { HostFadeMetadata } from "../types/api";
 import {
     INACTIVE_TAKE_COLOR_ALPHA,
     INACTIVE_TAKE_RGB_SCALE,
@@ -416,13 +416,17 @@ function gainAtClipTime(
 ): number {
     let gain = 1;
     if (fadeInSec > 0 && clipTimeSec < fadeInSec) {
-        const t=clamp01(clipTimeSec/fadeInSec);
-        gain *= hostFades?visualFadeGain(hostFades,fadeInShape,fadeInDir,"in",t):fadeGainIn(fadeInShape,fadeInDir,t);
+        const t = clamp01(clipTimeSec / fadeInSec);
+        gain *= hostFades
+            ? visualFadeGain(hostFades, fadeInShape, fadeInDir, "in", t)
+            : fadeGainIn(fadeInShape, fadeInDir, t);
     }
     const fadeOutStart = totalDurationSec - fadeOutSec;
     if (fadeOutSec > 0 && clipTimeSec > fadeOutStart) {
-        const t=clamp01((clipTimeSec-fadeOutStart)/fadeOutSec);
-        gain *= hostFades?visualFadeGain(hostFades,fadeOutShape,fadeOutDir,"out",t):fadeGainOut(fadeOutShape,fadeOutDir,t);
+        const t = clamp01((clipTimeSec - fadeOutStart) / fadeOutSec);
+        gain *= hostFades
+            ? visualFadeGain(hostFades, fadeOutShape, fadeOutDir, "out", t)
+            : fadeGainOut(fadeOutShape, fadeOutDir, t);
     }
     return gain;
 }
@@ -977,8 +981,7 @@ export function buildWaveformGeometry(args: {
         // 标记是固定半宽的实心 ▽，贴着 Clip 边缘时会有一半探出本体之外。逐行把
         // 横向范围**裁到 Clip 本体**，超出的部分被边缘切断 —— 而不是悬空画在
         // Clip 外面。边界缺失（测试桩 / 旧调用方）时退化为不裁。
-        const hasBounds =
-            Number.isFinite(marker.clipLeftPx) && Number.isFinite(marker.clipRightPx);
+        const hasBounds = Number.isFinite(marker.clipLeftPx) && Number.isFinite(marker.clipRightPx);
         const boundsLo = hasBounds
             ? Math.min(marker.clipLeftPx, marker.clipRightPx)
             : Number.NEGATIVE_INFINITY;

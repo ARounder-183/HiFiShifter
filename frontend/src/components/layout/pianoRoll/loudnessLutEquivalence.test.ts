@@ -33,7 +33,11 @@ import { describe, expect, test } from "vitest";
 
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
-import { createLoudnessGeometryWarp, type LoudnessGeometryWarp, type WarpClipGeometry } from "./loudnessGeometryWarp";
+import {
+    createLoudnessGeometryWarp,
+    type LoudnessGeometryWarp,
+    type WarpClipGeometry,
+} from "./loudnessGeometryWarp";
 import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../waveform/geometry";
 
 const FRAME_MS = 5;
@@ -268,7 +272,10 @@ describe("查表路径与逐值路径逐值等价", () => {
         return warpFrom(
             [
                 // 平移：帧 100..400 → 帧 500..800（纯移动，源窗口不变）。
-                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
+                [
+                    { startSec: 0.5, lengthSec: 1.5 },
+                    { startSec: 2.5, lengthSec: 1.5 },
+                ],
                 // 压缩 + 增益：帧 600..1000 → 帧 200..400（速率 1→2，内容跨度守恒）。
                 [
                     { startSec: 3.0, lengthSec: 2.0, gain: 1 },
@@ -287,7 +294,10 @@ describe("查表路径与逐值路径逐值等价", () => {
         return warpFrom(
             [
                 // 平移：帧 100..400 → 帧 500..800。
-                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
+                [
+                    { startSec: 0.5, lengthSec: 1.5 },
+                    { startSec: 2.5, lengthSec: 1.5 },
+                ],
                 // 纯增益（时域不变）：帧 600..800，增益 ×1.25。
                 [
                     { startSec: 3.0, lengthSec: 1.0, gain: 1 },
@@ -329,10 +339,10 @@ describe("查表路径与逐值路径逐值等价", () => {
             lutMap.factors.beginWindow?.(0, 5.5);
 
             for (const t of times) {
-                expect(
-                    lutMap.factors.factorAt(t),
-                    `lock=${lockParamLines} t=${t}`,
-                ).toBeCloseTo(directMap.factors.factorAt(t) as number, 12);
+                expect(lutMap.factors.factorAt(t), `lock=${lockParamLines} t=${t}`).toBeCloseTo(
+                    directMap.factors.factorAt(t) as number,
+                    12,
+                );
             }
             for (const [a, b] of ceilingWindows()) {
                 expect(
@@ -391,7 +401,12 @@ describe("查表路径与逐值路径逐值等价", () => {
 
         // 换一份映射（把平移目标挪到别处），重建后取值必须随之改变。
         warp = warpFrom(
-            [[{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 1.0, lengthSec: 1.5 }]],
+            [
+                [
+                    { startSec: 0.5, lengthSec: 1.5 },
+                    { startSec: 1.0, lengthSec: 1.5 },
+                ],
+            ],
             false,
         );
         map.factors.beginWindow?.(0, 5.5);

@@ -13,7 +13,11 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
-import { isPluginMode, pluginAllowsAction, pluginAllowsEditChannel } from "./services/hostCapabilities";
+import {
+    isPluginMode,
+    pluginAllowsAction,
+    pluginAllowsEditChannel,
+} from "./services/hostCapabilities";
 import { loadStandaloneWindowApi } from "./services/hostWindow";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
@@ -1112,7 +1116,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "stretch_progress",
                     (event: { payload?: { active?: boolean; clipName?: string | null } }) => {
@@ -1151,7 +1157,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "track_meter",
                     (event: {
@@ -1232,7 +1240,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "waveform_analysis_progress",
                     (event: {
@@ -1389,7 +1399,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "playback_rendering_state",
                     (event: {
@@ -1528,7 +1540,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "render_cache_summary",
                     (event: {
@@ -1623,7 +1637,9 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("./services/hostEvents") : await import("@tauri-apps/api/event");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
+                    ? await import("./services/hostEvents")
+                    : await import("@tauri-apps/api/event");
                 unlisten = await mod.listen(
                     "channel_scan_progress",
                     (event: {
@@ -2729,7 +2745,10 @@ function AppInner() {
                     const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
                     if (pasteKb) {
                         beginHoldRepeat(pasteKb, () => {
-                            if (channel === "hifi:timelineEditOp" && pluginAllowsEditChannel(channel, "paste")) {
+                            if (
+                                channel === "hifi:timelineEditOp" &&
+                                pluginAllowsEditChannel(channel, "paste")
+                            ) {
                                 window.dispatchEvent(
                                     new CustomEvent(channel, { detail: { op: "paste" } }),
                                 );
@@ -2871,7 +2890,12 @@ function AppInner() {
                     // 仅用于撤到空栈后停止长按重复。
                     const fire = () => {
                         const hasUndoableStep = store.getState().session.historyUndoDepth > 0;
-                        void dispatch(undoRemote({ parametersOnly: isPluginMode() && getActiveSurface() === "pianoRoll" }));
+                        void dispatch(
+                            undoRemote({
+                                parametersOnly:
+                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                            }),
+                        );
                         return hasUndoableStep;
                     };
                     if (fire()) {
@@ -2886,7 +2910,12 @@ function AppInner() {
                     // 空栈时同样静默失败；长按 Ctrl+Y = 连续重做（同上）。
                     const fire = () => {
                         const hasRedoableStep = store.getState().session.historyRedoDepth > 0;
-                        void dispatch(redoRemote({ parametersOnly: isPluginMode() && getActiveSurface() === "pianoRoll" }));
+                        void dispatch(
+                            redoRemote({
+                                parametersOnly:
+                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                            }),
+                        );
                         return hasRedoableStep;
                     };
                     if (fire()) {

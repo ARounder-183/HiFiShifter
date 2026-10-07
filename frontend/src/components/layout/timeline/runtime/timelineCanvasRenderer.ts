@@ -32,7 +32,7 @@ import {
     CLIP_INSTANCE_FLOATS,
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
-import {hostFadeDisplay,visualFadeGain} from "../hostFadeDisplay.js";
+import { hostFadeDisplay, visualFadeGain } from "../hostFadeDisplay.js";
 import { drawLoopMarkers } from "../../../../utils/loopRender.js";
 
 /** 自适应细分产出的一段折线（端点按 `t0` 升序排列）。 */
@@ -75,7 +75,8 @@ export function sampleFadeCurveSegments(args: {
     readonly mode: "in" | "out";
     readonly hostFades?: import("../../../../types/api").HostFadeMetadata;
 }): FadeCurveSampleSegment[] {
-    const gainAt = (t: number): number => visualFadeGain(args.hostFades, args.shape, args.dir, args.mode, t);
+    const gainAt = (t: number): number =>
+        visualFadeGain(args.hostFades, args.shape, args.dir, args.mode, t);
     const xAt = (t: number): number => args.leftPx + t * args.widthPx;
     const yAt = (t: number): number => args.topPx + args.heightPx * (1 - gainAt(t));
 
@@ -205,7 +206,7 @@ function drawFadeCurveStroke(
 ): void {
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
-    const hostDisplay=hostFadeDisplay(args.hostFades,args.mode==="out");
+    const hostDisplay = hostFadeDisplay(args.hostFades, args.mode === "out");
     const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
     if (hostDisplay === "legacy" && shapeId === 0 && Math.abs(args.dir) < 1e-9) {
         // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
@@ -914,7 +915,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeInShape,
                 dir: clip.fadeInDir,
                 mode: "in",
-                hostFades:clip.hostFades,
+                hostFades: clip.hostFades,
             });
         }
         if (clip.fadeOutPx > 0) {
@@ -934,7 +935,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeOutShape,
                 dir: clip.fadeOutDir,
                 mode: "out",
-                hostFades:clip.hostFades,
+                hostFades: clip.hostFades,
             });
         }
 

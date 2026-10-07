@@ -49,11 +49,7 @@ interface PendingRequest {
 let pending: PendingRequest[] = [];
 
 /** 造一份最小载荷（含溯源键，模拟"新几何的基线"）。 */
-function payload(args: {
-    edit: number[];
-    orig?: number[];
-    key: string | null;
-}): unknown {
+function payload(args: { edit: number[]; orig?: number[]; key: string | null }): unknown {
     return {
         ok: true,
         edit: args.edit,
@@ -65,7 +61,12 @@ function payload(args: {
 }
 
 /** 让所有挂起请求返回同一份数据（volume / dyn 各一份载荷）。 */
-function resolveAll(snapshot: { volume: number[]; dyn: number[]; orig: number[]; key: string | null }) {
+function resolveAll(snapshot: {
+    volume: number[];
+    dyn: number[];
+    orig: number[];
+    key: string | null;
+}) {
     const requests = pending;
     pending = [];
     for (const request of requests) {

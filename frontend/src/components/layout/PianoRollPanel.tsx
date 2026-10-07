@@ -1358,7 +1358,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const drawToolButtonTitle =
         currentDrawTool === "vibrato"
             ? // 颤音工具下把当前预设一并报出来：预设按钮已经并进右键菜单，
-                // 工具按钮的 tooltip 是"接下来会画出什么"的最后一块可扫读信息。
+              // 工具按钮的 tooltip 是"接下来会画出什么"的最后一块可扫读信息。
               `${tf("vibrato_draw_tool")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`
             : currentDrawTool === "line"
               ? tf("line_draw_tool")
@@ -7650,12 +7650,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
         >
-            <path
-                d="M2 12L13 3"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-            />
+            <path d="M2 12L13 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
         </svg>
     );
 
@@ -7692,11 +7687,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
 
     const currentDrawToolIcon =
-        currentDrawTool === "vibrato"
-            ? vibratoToolIcon
-            : currentDrawTool === "line"
-              ? lineToolIcon
-              : <Pencil1Icon />;
+        currentDrawTool === "vibrato" ? (
+            vibratoToolIcon
+        ) : currentDrawTool === "line" ? (
+            lineToolIcon
+        ) : (
+            <Pencil1Icon />
+        );
 
     // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
     // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
@@ -7988,7 +7985,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 >
                                     <ScrollArea
                                         className="hs-scroll-area min-h-0"
-                                        style={{ flex: "1 1 auto", maxHeight: presetFlyoutMaxHeight }}
+                                        style={{
+                                            flex: "1 1 auto",
+                                            maxHeight: presetFlyoutMaxHeight,
+                                        }}
                                         scrollbars="vertical"
                                         type="auto"
                                     >
@@ -8011,9 +8011,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                             setToolModePersistent("vibrato"),
                                                         );
                                                         dispatch(
-                                                            setActiveVibratoPreset(
-                                                                choice.presetId,
-                                                            ),
+                                                            setActiveVibratoPreset(choice.presetId),
                                                         );
                                                         void dispatch(persistUiSettings());
                                                     }

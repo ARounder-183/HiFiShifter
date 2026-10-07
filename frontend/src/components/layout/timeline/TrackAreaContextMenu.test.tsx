@@ -137,7 +137,12 @@ test("缺分割能力的插件仍显示空白菜单，但不发送未实现的�
 });
 
 test("原生剪贴板接通后空白区粘贴启用，不误开放关闭间隙", async () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "blank-menu", clipSplitting: true, clipClipboard: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "blank-menu",
+        clipSplitting: true,
+        clipClipboard: true,
+    };
     const { disabled } = await mountMenu();
     expect(disabled).toEqual([false, false, true]);
 });

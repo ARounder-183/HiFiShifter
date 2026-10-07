@@ -392,10 +392,7 @@ export function resolveClipConsumption(
     };
 }
 
-function readConsumption(
-    clip: WarpClipGeometry,
-    fps: number,
-): ClipConsumption | null {
+function readConsumption(clip: WarpClipGeometry, fps: number): ClipConsumption | null {
     const startSec = Math.max(0, finiteOr(clip.startSec, 0));
     const lengthSec = Math.max(0, finiteOr(clip.lengthSec, 0));
     const rate = finiteOr(clip.playbackRate, 1);
@@ -460,7 +457,8 @@ export function createLoudnessGeometryWarp(args: {
         const oldEndF = oldC.startF + oldC.lenF;
 
         const gainScale =
-            Math.abs(oldC.gain) > 1e-6 && Math.abs(newC.gain - oldC.gain) > GAIN_EPSILON * Math.abs(oldC.gain)
+            Math.abs(oldC.gain) > 1e-6 &&
+            Math.abs(newC.gain - oldC.gain) > GAIN_EPSILON * Math.abs(oldC.gain)
                 ? newC.gain / oldC.gain
                 : 1;
 
@@ -489,7 +487,8 @@ export function createLoudnessGeometryWarp(args: {
         const slope = newC.rate / oldC.rate;
         const offset = oldC.startF + anchorDeltaF / oldC.rate - newStartF * slope;
 
-        const rateChanged = Math.abs(newC.rate - oldC.rate) > RATE_EPSILON * Math.max(1, Math.abs(oldC.rate));
+        const rateChanged =
+            Math.abs(newC.rate - oldC.rate) > RATE_EPSILON * Math.max(1, Math.abs(oldC.rate));
         const anchorChanged = Math.abs(newC.anchorF - oldC.anchorF) > ANCHOR_EPSILON_FRAMES;
         const lenChanged = oldC.lenF !== newC.lenF;
         const startChanged = oldC.startF !== newC.startF;
@@ -539,8 +538,7 @@ export function createLoudnessGeometryWarp(args: {
         // 就跳过整段，那些帧会被当作"未覆盖"而退回恒等取样，等于拿旧快照在那一处
         // 的残留值（通常是 0）当基线，波形会被"无内容淡出"压平。
         const sameRange = oldC.startF === newC.startF && oldC.lenF === newC.lenF;
-        const identityMapping =
-            Math.abs(slope - 1) <= 1e-12 && Math.abs(offset) <= 1e-9;
+        const identityMapping = Math.abs(slope - 1) <= 1e-12 && Math.abs(offset) <= 1e-9;
         if (identityMapping && sameRange && gainScale === 1 && curve.kind === "none") continue;
 
         segments.push({

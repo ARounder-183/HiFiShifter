@@ -1486,7 +1486,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         onSelectTrack(track.id);
                                     }}
                                     onContextMenu={(e) => {
-                                        if (isPluginMode()) {e.preventDefault();return;}
+                                        if (isPluginMode()) {
+                                            e.preventDefault();
+                                            return;
+                                        }
                                         e.preventDefault();
                                         setTrackCtxMenu({
                                             x: e.clientX,
@@ -1495,7 +1498,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         });
                                     }}
                                     onPointerDown={(e) => {
-                                        if (isPluginMode()&&!canGroupPluginTracks()) return;
+                                        if (isPluginMode() && !canGroupPluginTracks()) return;
                                         // 数位笔 / 触摸不触发轨道拖动排序 / 嵌套：
                                         // 行高窄 + 3px 阈值，画线式滑动即重排轨道。
                                         if (shouldSuppressHoverSideEffects(e.nativeEvent)) {
@@ -1671,7 +1674,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // 以按下瞬间的状态为准 —— 失焦时没有可信的实时按键）。
                                             const copyActive = Boolean(
                                                 !isPluginMode() &&
-                                                copyDragKb && isModifierActive(copyDragKb, e),
+                                                copyDragKb &&
+                                                isModifierActive(copyDragKb, e),
                                             );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
@@ -1960,7 +1964,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         /* 默认 `opacity-0`：Tab 到它时必须显形，
                                                            否则焦点环画在一个透明元素上。 */
                                                         className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                                                        disabled={isPluginMode() || isLastRootTrack(track.id)}
+                                                        disabled={
+                                                            isPluginMode() ||
+                                                            isLastRootTrack(track.id)
+                                                        }
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();

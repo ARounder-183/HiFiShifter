@@ -57,10 +57,7 @@ function joinUnits(primary: string, secondary: string | null): string {
 /**
  * **时长**（零基点，不做 Tempo Map 分段积分）→ `{主}` 或 `{主} / {副}`。
  */
-export function formatDurationText(
-    durationSec: number,
-    ctx: TimeValueFormatContext,
-): string {
+export function formatDurationText(durationSec: number, ctx: TimeValueFormatContext): string {
     const main = formatDurationUnit(ctx.primaryTimeUnit, durationSec, ctx);
     if (!hasSecondaryUnit(ctx)) return main;
     return joinUnits(main, formatDurationUnit(ctx.secondaryTimeUnit as TimeUnit, durationSec, ctx));
@@ -81,10 +78,7 @@ export function formatPositionText(sec: number, ctx: TimeValueFormatContext): st
  * 时长格式化器把负值钳到 0（时长不可为负），因此符号在这里单独处理：取绝对值走
  * 同一套主/副单位格式化，再前置 `+` / `-`。与 `formatGainDbValue` 的符号约定一致。
  */
-export function formatSignedDurationText(
-    deltaSec: number,
-    ctx: TimeValueFormatContext,
-): string {
+export function formatSignedDurationText(deltaSec: number, ctx: TimeValueFormatContext): string {
     const safe = Number.isFinite(deltaSec) ? deltaSec : 0;
     const sign = safe < 0 ? "-" : "+";
     return `${sign}${formatDurationText(Math.abs(safe), ctx)}`;
@@ -109,10 +103,7 @@ export function formatSignedDurationTextOrNull(
 }
 
 /** 取值器：与 `useI18n().tVars` 同形（`{name}` 插值，全部出现处都替换）。 */
-export type TimeValueLabelLookup = (
-    key: MessageKey,
-    vars: Record<string, string>,
-) => string;
+export type TimeValueLabelLookup = (key: MessageKey, vars: Record<string, string>) => string;
 
 /**
  * 吸附偏移的 Tooltip 文本（悬停 / 拖拽共用**唯一**判定点）。

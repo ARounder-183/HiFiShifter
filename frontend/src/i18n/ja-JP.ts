@@ -81,7 +81,8 @@ export const jaJP = {
     export_dialog_channel_mono: "モノラル（ダウンミックス）",
     export_dialog_sample_rate_autocorrected:
         "サンプルレートを MP3 が対応する近い値に自動調整しました：{rate} Hz。",
-    export_dialog_error_mp3_unsupported_sample_rate: "このサンプルレートは MP3 に対応していません。8 kHz ～ 48 kHz の MPEG 対応レートを使用してください。",
+    export_dialog_error_mp3_unsupported_sample_rate:
+        "このサンプルレートは MP3 に対応していません。8 kHz ～ 48 kHz の MPEG 対応レートを使用してください。",
     quick_export_format: "フォーマット",
     export_conflict_exists_title: "エクスポート先ファイルが既に存在します",
     export_conflict_exists_desc: "次のエクスポート先ファイルは既に存在しています：",

@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { isPluginMode, canImportHostAudio, dawControlledReason } from "../../services/hostCapabilities";
+import {
+    isPluginMode,
+    canImportHostAudio,
+    dawControlledReason,
+} from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -540,147 +544,164 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              * Use Trigger as the actual button element to avoid nesting <button>.
              */}
             {/* File Menu */}
-            {isPluginMode() ? <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={!canImportHostAudio()} title={!canImportHostAudio() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_file")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={()=>void handleImportAudioFromMenu()}>{t("menu_import_media")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">{shortcutLabel("project.importMedia")}</div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item disabled>{t("menu_save_project")} · REAPER</DropdownMenu.Item>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root> : <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_file")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={onNewProject}>
-                        {t("menu_new_project")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.new")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={onOpenProject}>
-                        {t("menu_open_project")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.open")}
-                        </div>
-                    </DropdownMenu.Item>
+            {isPluginMode() ? (
+                <DropdownMenu.Root>
+                    <DropdownMenu.Trigger
+                        disabled={!canImportHostAudio()}
+                        title={!canImportHostAudio() ? dawControlledReason() : undefined}
+                        className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
+                    >
+                        <span>{t("menu_file")}</span>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content variant="soft" color="gray">
+                        <DropdownMenu.Item onSelect={() => void handleImportAudioFromMenu()}>
+                            {t("menu_import_media")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.importMedia")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item disabled>
+                            {t("menu_save_project")} · REAPER
+                        </DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                </DropdownMenu.Root>
+            ) : (
+                <DropdownMenu.Root>
+                    <DropdownMenu.Trigger
+                        disabled={isPluginMode()}
+                        title={isPluginMode() ? dawControlledReason() : undefined}
+                        className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
+                    >
+                        <span>{t("menu_file")}</span>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content variant="soft" color="gray">
+                        <DropdownMenu.Item onSelect={onNewProject}>
+                            {t("menu_new_project")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.new")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={onOpenProject}>
+                            {t("menu_open_project")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.open")}
+                            </div>
+                        </DropdownMenu.Item>
 
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {t("menu_recent_projects")}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            {s.project.recent.length ? (
-                                s.project.recent.slice(0, 12).map((p) => (
-                                    <DropdownMenu.Item
-                                        key={p}
-                                        onSelect={() => onOpenRecentProject(p)}
-                                    >
-                                        {p}
+                        <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger>
+                                {t("menu_recent_projects")}
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.SubContent>
+                                {s.project.recent.length ? (
+                                    s.project.recent.slice(0, 12).map((p) => (
+                                        <DropdownMenu.Item
+                                            key={p}
+                                            onSelect={() => onOpenRecentProject(p)}
+                                        >
+                                            {p}
+                                        </DropdownMenu.Item>
+                                    ))
+                                ) : (
+                                    <DropdownMenu.Item disabled>
+                                        {t("menu_recent_empty")}
                                     </DropdownMenu.Item>
-                                ))
-                            ) : (
-                                <DropdownMenu.Item disabled>
-                                    {t("menu_recent_empty")}
+                                )}
+                            </DropdownMenu.SubContent>
+                        </DropdownMenu.Sub>
+
+                        <DropdownMenu.Item onSelect={onRecaptureMissingMedia}>
+                            {t("menu_recapture_missing_media")}
+                        </DropdownMenu.Item>
+
+                        <DropdownMenu.Separator />
+
+                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
+                            {t("menu_save_project")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.save")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
+                            {t("menu_save_project_as")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.saveAs")}
+                            </div>
+                        </DropdownMenu.Item>
+
+                        <DropdownMenu.Separator />
+
+                        <DropdownMenu.Item
+                            onSelect={() => {
+                                void handleImportAudioFromMenu();
+                            }}
+                        >
+                            {t("menu_import_media")}{" "}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.importMedia")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item
+                            onSelect={() => {
+                                void handleImportMidiFromMenu();
+                            }}
+                        >
+                            {t("menu_import_midi")}{" "}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.importMidi")}
+                            </div>
+                        </DropdownMenu.Item>
+                        {/* 导入外部工程（HiFiShifter / Reaper / VocalShifter）*/}
+                        <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger>
+                                {tf("menu_import_external_project")}
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.SubContent>
+                                <DropdownMenu.Item onSelect={onImportProject}>
+                                    {t("menu_import_hifishifter")}
+                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                        {shortcutLabel("project.importHifishifter")}
+                                    </div>
                                 </DropdownMenu.Item>
-                            )}
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-
-                    <DropdownMenu.Item onSelect={onRecaptureMissingMedia}>
-                        {t("menu_recapture_missing_media")}
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-
-                    <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
-                        {t("menu_save_project")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.save")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
-                        {t("menu_save_project_as")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.saveAs")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            void handleImportAudioFromMenu();
-                        }}
-                    >
-                        {t("menu_import_media")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.importMedia")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            void handleImportMidiFromMenu();
-                        }}
-                    >
-                        {t("menu_import_midi")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.importMidi")}
-                        </div>
-                    </DropdownMenu.Item>
-                    {/* 导入外部工程（HiFiShifter / Reaper / VocalShifter）*/}
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tf("menu_import_external_project")}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            <DropdownMenu.Item onSelect={onImportProject}>
-                                {t("menu_import_hifishifter")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("project.importHifishifter")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item
-                                onSelect={() => void dispatch(openReaperFromDialog())}
-                            >
-                                {t("menu_import_reaper")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("project.importReaper")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item
-                                onSelect={() => void dispatch(openVocalShifterFromDialog())}
-                            >
-                                {t("menu_import_vocalshifter")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("project.importVocalShifter")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-                    <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
-                        {t("menu_export_audio")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("project.export")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setAutoBackupDialogOpen(true)}>
-                        {tf("menu_auto_backup")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setRecordingDialogOpen(true)}>
-                        {tf("menu_recording_settings")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={onExit} color="red">
-                        {t("menu_exit")}
-                    </DropdownMenu.Item>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>}
+                                <DropdownMenu.Item
+                                    onSelect={() => void dispatch(openReaperFromDialog())}
+                                >
+                                    {t("menu_import_reaper")}
+                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                        {shortcutLabel("project.importReaper")}
+                                    </div>
+                                </DropdownMenu.Item>
+                                <DropdownMenu.Item
+                                    onSelect={() => void dispatch(openVocalShifterFromDialog())}
+                                >
+                                    {t("menu_import_vocalshifter")}
+                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                        {shortcutLabel("project.importVocalShifter")}
+                                    </div>
+                                </DropdownMenu.Item>
+                            </DropdownMenu.SubContent>
+                        </DropdownMenu.Sub>
+                        <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
+                            {t("menu_export_audio")}{" "}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.export")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item onSelect={() => setAutoBackupDialogOpen(true)}>
+                            {tf("menu_auto_backup")}
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => setRecordingDialogOpen(true)}>
+                            {tf("menu_recording_settings")}
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item onSelect={onExit} color="red">
+                            {t("menu_exit")}
+                        </DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                </DropdownMenu.Root>
+            )}
 
             {/* Edit Menu */}
             <DropdownMenu.Root>
@@ -790,7 +811,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Track Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger
+                    disabled={isPluginMode()}
+                    title={isPluginMode() ? dawControlledReason() : undefined}
+                    className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
+                >
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">

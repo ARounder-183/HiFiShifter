@@ -2,7 +2,10 @@
 import { getPluginHost, type HostEvent } from "./pluginHost";
 
 /** 订阅当前宿主事件；插件不会触碰Tauri内部回调与全局事件总线。 */
-export async function listen<T>(event: string, handler: (event: HostEvent<T>) => void): Promise<() => void> {
+export async function listen<T>(
+    event: string,
+    handler: (event: HostEvent<T>) => void,
+): Promise<() => void> {
     const host = getPluginHost();
     if (host) return host.listen(event, handler);
     const tauri = await import("@tauri-apps/api/event");

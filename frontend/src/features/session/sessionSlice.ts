@@ -2571,9 +2571,8 @@ function applyToolMode(state: SessionState, mode: ToolMode): void {
 const sessionSlice = createSlice({
     name: "session",
     // bootstrap在创建store前由native注入；空宿主态不会触发虚构Main的参数请求。
-    initialState: () => isPluginMode()
-        ? { ...initialState, tracks: [], selectedTrackId: null }
-        : initialState,
+    initialState: () =>
+        isPluginMode() ? { ...initialState, tracks: [], selectedTrackId: null } : initialState,
     reducers: {
         /**
          * 标记连续交互开始（拖动/滑动等）。
@@ -4626,7 +4625,11 @@ const sessionSlice = createSlice({
                     // 短暂掐灭播放状态）。
                     state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
                 }
-                state.status = payload.host_request ? "Playback requested" : ok ? "Playing original" : "Play original failed";
+                state.status = payload.host_request
+                    ? "Playback requested"
+                    : ok
+                      ? "Playing original"
+                      : "Play original failed";
             })
             .addCase(playOriginal.rejected, setRejected)
 
@@ -4785,7 +4788,9 @@ const sessionSlice = createSlice({
                 const dispatchedAtMs = arg?.dispatchedAtMs;
                 const latencySec =
                     // 宿主值在回复时读取；排队等待合成不是采样年龄，不能把整段RTT加到DAW位置。
-                    nextIsPlaying && !payload.host_authoritative && typeof dispatchedAtMs === "number"
+                    nextIsPlaying &&
+                    !payload.host_authoritative &&
+                    typeof dispatchedAtMs === "number"
                         ? Math.max(0, (sampledNowMs - dispatchedAtMs) / 1000)
                         : 0;
 
@@ -4867,7 +4872,9 @@ const sessionSlice = createSlice({
             })
 
             .addCase(fetchTimeline.pending, (state, action) => {
-                if (isPluginMode()) state._pluginTimelineFetchEpochs[action.meta.requestId] = state._pluginTimelineEpoch;
+                if (isPluginMode())
+                    state._pluginTimelineFetchEpochs[action.meta.requestId] =
+                        state._pluginTimelineEpoch;
             })
             .addCase(fetchTimeline.rejected, (state, action) => {
                 delete state._pluginTimelineFetchEpochs[action.meta.requestId];
@@ -4875,9 +4882,13 @@ const sessionSlice = createSlice({
             .addCase(fetchTimeline.fulfilled, (state, action) => {
                 const epoch = state._pluginTimelineFetchEpochs[action.meta.requestId];
                 delete state._pluginTimelineFetchEpochs[action.meta.requestId];
-                if (isPluginMode() && (state._interactionLockCount > 0
-                    || Object.keys(state._pluginClipEditRequests).length > 0
-                    || (epoch !== undefined && epoch !== state._pluginTimelineEpoch))) return;
+                if (
+                    isPluginMode() &&
+                    (state._interactionLockCount > 0 ||
+                        Object.keys(state._pluginClipEditRequests).length > 0 ||
+                        (epoch !== undefined && epoch !== state._pluginTimelineEpoch))
+                )
+                    return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6817,13 +6828,15 @@ const sessionSlice = createSlice({
             })
             .addCase(seekPlayhead.rejected, (state, action) => {
                 if (isPluginMode() && state._pluginSeekRequestId === action.meta.requestId) {
-                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                    state._pluginSeekRequestId = null;
+                    state._transportEpoch += 1;
                 }
             })
             .addCase(seekPlayhead.fulfilled, (state, action) => {
                 if (isPluginMode()) {
                     if (state._pluginSeekRequestId !== action.meta.requestId) return;
-                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                    state._pluginSeekRequestId = null;
+                    state._transportEpoch += 1;
                 }
                 const payload = action.payload as {
                     ok?: boolean;
@@ -6844,7 +6857,8 @@ const sessionSlice = createSlice({
                 const EPS = 0.001;
                 if (
                     Math.abs(state.playheadSec - requestedSec) <= EPS &&
-                    Math.abs(backendSec - requestedSec) > EPS && !isPluginMode()
+                    Math.abs(backendSec - requestedSec) > EPS &&
+                    !isPluginMode()
                 ) {
                     // 后端对位置做了修正（如 clamp），采纳后端值
                     state.playheadSec = Math.max(0, backendSec);
@@ -7000,34 +7014,72 @@ const sessionSlice = createSlice({
         };
         // 宿主写入开始/结束都废弃旧刷新，覆盖键盘编辑（没有拖动锁）的同类竞态。
         builder
-            .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending, moveTrackRemote.pending,
-                pasteTimelineClipboardRemote.pending, removeClipRemote.pending, removeClipsRemote.pending,
-                duplicateClipsBulkRemote.pending,
-                splitClipRemote.pending, splitClipsAtRemote.pending,
-                importAudioAtPosition.pending, importAudioFileAtPosition.pending,
-                setClipStateRemote.pending, setClipsStateBulkRemote.pending,
-                undoRemote.pending, redoRemote.pending, setHistoryPositionRemote.pending), (state, action) => {
-                if (!isPluginMode()) return;
-                state._pluginTimelineEpoch += 1;
-                state._pluginClipEditRequests[action.meta.requestId] = true;
-            })
-            .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected, moveTrackRemote.fulfilled, moveTrackRemote.rejected,
-                pasteTimelineClipboardRemote.fulfilled, pasteTimelineClipboardRemote.rejected,
-                duplicateClipsBulkRemote.fulfilled, duplicateClipsBulkRemote.rejected,
-                removeClipRemote.fulfilled, removeClipRemote.rejected, removeClipsRemote.fulfilled, removeClipsRemote.rejected,
-                splitClipRemote.fulfilled, splitClipRemote.rejected,
-                splitClipsAtRemote.fulfilled, splitClipsAtRemote.rejected,
-                importAudioAtPosition.fulfilled, importAudioAtPosition.rejected,
-                importAudioFileAtPosition.fulfilled, importAudioFileAtPosition.rejected,
-                moveClipsRemote.fulfilled, moveClipsRemote.rejected,
-                setClipStateRemote.fulfilled, setClipStateRemote.rejected,
-                setClipsStateBulkRemote.fulfilled, setClipsStateBulkRemote.rejected,
-                undoRemote.fulfilled, undoRemote.rejected, redoRemote.fulfilled, redoRemote.rejected,
-                setHistoryPositionRemote.fulfilled, setHistoryPositionRemote.rejected), (state, action) => {
-                if (!isPluginMode()) return;
-                delete state._pluginClipEditRequests[action.meta.requestId];
-                state._pluginTimelineEpoch += 1;
-            });
+            .addMatcher(
+                isAnyOf(
+                    moveClipRemote.pending,
+                    moveClipsRemote.pending,
+                    moveTrackRemote.pending,
+                    pasteTimelineClipboardRemote.pending,
+                    removeClipRemote.pending,
+                    removeClipsRemote.pending,
+                    duplicateClipsBulkRemote.pending,
+                    splitClipRemote.pending,
+                    splitClipsAtRemote.pending,
+                    importAudioAtPosition.pending,
+                    importAudioFileAtPosition.pending,
+                    setClipStateRemote.pending,
+                    setClipsStateBulkRemote.pending,
+                    undoRemote.pending,
+                    redoRemote.pending,
+                    setHistoryPositionRemote.pending,
+                ),
+                (state, action) => {
+                    if (!isPluginMode()) return;
+                    state._pluginTimelineEpoch += 1;
+                    state._pluginClipEditRequests[action.meta.requestId] = true;
+                },
+            )
+            .addMatcher(
+                isAnyOf(
+                    moveClipRemote.fulfilled,
+                    moveClipRemote.rejected,
+                    moveTrackRemote.fulfilled,
+                    moveTrackRemote.rejected,
+                    pasteTimelineClipboardRemote.fulfilled,
+                    pasteTimelineClipboardRemote.rejected,
+                    duplicateClipsBulkRemote.fulfilled,
+                    duplicateClipsBulkRemote.rejected,
+                    removeClipRemote.fulfilled,
+                    removeClipRemote.rejected,
+                    removeClipsRemote.fulfilled,
+                    removeClipsRemote.rejected,
+                    splitClipRemote.fulfilled,
+                    splitClipRemote.rejected,
+                    splitClipsAtRemote.fulfilled,
+                    splitClipsAtRemote.rejected,
+                    importAudioAtPosition.fulfilled,
+                    importAudioAtPosition.rejected,
+                    importAudioFileAtPosition.fulfilled,
+                    importAudioFileAtPosition.rejected,
+                    moveClipsRemote.fulfilled,
+                    moveClipsRemote.rejected,
+                    setClipStateRemote.fulfilled,
+                    setClipStateRemote.rejected,
+                    setClipsStateBulkRemote.fulfilled,
+                    setClipsStateBulkRemote.rejected,
+                    undoRemote.fulfilled,
+                    undoRemote.rejected,
+                    redoRemote.fulfilled,
+                    redoRemote.rejected,
+                    setHistoryPositionRemote.fulfilled,
+                    setHistoryPositionRemote.rejected,
+                ),
+                (state, action) => {
+                    if (!isPluginMode()) return;
+                    delete state._pluginClipEditRequests[action.meta.requestId];
+                    state._pluginTimelineEpoch += 1;
+                },
+            );
         builder
             .addMatcher(
                 (action: { type?: string }) => isAudioImportStep(action, "pending"),

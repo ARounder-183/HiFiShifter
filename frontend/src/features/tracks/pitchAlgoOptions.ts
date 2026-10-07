@@ -69,8 +69,7 @@ export function buildPitchAlgoOptions(args: {
         const label = FIXED_LABELS[id];
         options.push({
             value: id,
-            label:
-                id === "vslib" && !vslibUsable ? args.formatUnavailable(label) : label,
+            label: id === "vslib" && !vslibUsable ? args.formatUnavailable(label) : label,
         });
     }
     return options;

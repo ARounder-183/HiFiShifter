@@ -3,7 +3,13 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { afterEach, expect, test, vi } from "vitest";
 import reducer, { beginInteraction, endInteraction, fetchTimeline } from "./sessionSlice";
-import { moveClipRemote, moveTrackRemote, pasteTimelineClipboardRemote, setClipsStateBulkRemote, splitClipsAtRemote } from "./thunks/timelineThunks";
+import {
+    moveClipRemote,
+    moveTrackRemote,
+    pasteTimelineClipboardRemote,
+    setClipsStateBulkRemote,
+    splitClipsAtRemote,
+} from "./thunks/timelineThunks";
 import { webApi } from "../../services/webviewApi";
 import { seekPlayhead, syncPlaybackState } from "./thunks/transportThunks";
 import { importAudioFileAtPosition } from "./thunks/importThunks";
@@ -12,78 +18,158 @@ import type { TimelineResult } from "../../types/api";
 const move = { clipId: "host-clip", startSec: 5, trackId: "host-track", moveLinkedParams: true };
 /** 只造真实字段形状的最小快照，不把fake当REAPER验收。 */
 function timeline(start: number): TimelineResult {
-    return { ok: true, tracks: [{ id: "host-track", name: "Track", volume: 1,
-        muted: false, solo: false, compose_enabled: true, pitch_analysis_algo: "world", color: "#74787e" }],
-        clips: [{ id: "host-clip", track_id: "host-track", name: "clip", color: "#74787e", start_sec: start, length_sec: 1,
-            source_start_sec: 0, source_end_sec: 1, playback_rate: 1, gain: 1, muted: false }],
-        selected_track_id: "host-track", selected_clip_id: "host-clip", playhead_sec: 0,
-        project_sec: 10, bpm: 120, disabled_group_ids: [] } as TimelineResult;
+    return {
+        ok: true,
+        tracks: [
+            {
+                id: "host-track",
+                name: "Track",
+                volume: 1,
+                muted: false,
+                solo: false,
+                compose_enabled: true,
+                pitch_analysis_algo: "world",
+                color: "#74787e",
+            },
+        ],
+        clips: [
+            {
+                id: "host-clip",
+                track_id: "host-track",
+                name: "clip",
+                color: "#74787e",
+                start_sec: start,
+                length_sec: 1,
+                source_start_sec: 0,
+                source_end_sec: 1,
+                playback_rate: 1,
+                gain: 1,
+                muted: false,
+            },
+        ],
+        selected_track_id: "host-track",
+        selected_clip_id: "host-clip",
+        playhead_sec: 0,
+        project_sec: 10,
+        bpm: 120,
+        disabled_group_ids: [],
+    } as TimelineResult;
 }
 function initial() {
     window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "race", clipEditing: true };
     return reducer(undefined, fetchTimeline.fulfilled(timeline(0), "initial", undefined));
 }
-afterEach(() => { delete window.__HFS_PLUGIN_BOOTSTRAP__; vi.restoreAllMocks(); });
-
-test("private track group acknowledgement cannot be flattened by an older host read",()=>{
-    let state=initial();const args={trackId:"child",targetIndex:0,parentTrackId:"host-track"};
-    const grouped=timeline(0);grouped.tracks.push({...grouped.tracks[0],id:"child",parent_id:"host-track"});
-    state=reducer(state,fetchTimeline.pending("before-group",undefined));state=reducer(state,moveTrackRemote.pending("group",args));
-    state=reducer(state,moveTrackRemote.fulfilled(grouped,"group",args));
-    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-group",undefined));
-    expect(state.tracks.find(track=>track.id==="child")?.parentId).toBe("host-track");expect(state._pluginClipEditRequests).toEqual({});
+afterEach(() => {
+    delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    vi.restoreAllMocks();
 });
 
-test("paste receipt displays new clip in the current UI and releases the refresh guard",()=>{
-    let state=initial();state=reducer(state,fetchTimeline.pending("before-paste",undefined));
-    state=reducer(state,pasteTimelineClipboardRemote.pending("paste","selected"));
-    const pasted=timeline(0);pasted.clips.push({...pasted.clips[0],id:"pasted",start_sec:3});
-    state=reducer(state,pasteTimelineClipboardRemote.fulfilled({ok:true,timeline:pasted,newClipIds:["pasted"],pasteEndSec:4,
-        sourceProject:undefined,importedTrackCount:undefined,importedClipCount:undefined},"paste","selected"));
-    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-paste",undefined));
-    expect(state.clips.map(clip=>clip.id)).toEqual(["host-clip","pasted"]);
-    expect(state.selectedClipId).toBe("pasted");expect(state._pluginClipEditRequests).toEqual({});
-    const external={...pasted,clips:[pasted.clips[1]]};
-    state=reducer(state,fetchTimeline.pending("after-paste",undefined));
-    state=reducer(state,fetchTimeline.fulfilled(external,"after-paste",undefined));
-    expect(state.clips.map(clip=>clip.id)).toEqual(["pasted"]);
+test("private track group acknowledgement cannot be flattened by an older host read", () => {
+    let state = initial();
+    const args = { trackId: "child", targetIndex: 0, parentTrackId: "host-track" };
+    const grouped = timeline(0);
+    grouped.tracks.push({ ...grouped.tracks[0], id: "child", parent_id: "host-track" });
+    state = reducer(state, fetchTimeline.pending("before-group", undefined));
+    state = reducer(state, moveTrackRemote.pending("group", args));
+    state = reducer(state, moveTrackRemote.fulfilled(grouped, "group", args));
+    state = reducer(state, fetchTimeline.fulfilled(timeline(0), "before-group", undefined));
+    expect(state.tracks.find((track) => track.id === "child")?.parentId).toBe("host-track");
+    expect(state._pluginClipEditRequests).toEqual({});
 });
 
-test("split receipt keeps both clips when an old one-clip refresh arrives late",()=>{
-    let state=initial();const arg={clipIds:["host-clip"],splitSec:0.5};
-    state=reducer(state,fetchTimeline.pending("before-split",undefined));
-    state=reducer(state,splitClipsAtRemote.pending("split",arg));
-    const split=timeline(0);split.clips[0].length_sec=0.5;
-    split.clips.push({...split.clips[0],id:"right",start_sec:0.5,source_start_sec:0.5});
-    const payload={...split,created_clip_ids:["right"]};
-    state=reducer(state,splitClipsAtRemote.fulfilled(payload,"split",arg));
-    state=reducer(state,fetchTimeline.fulfilled(timeline(0),"before-split",undefined));
-    expect(state.clips.map(clip=>clip.id)).toEqual(["host-clip","right"]);
-    expect(state.selectedClipId).toBe("right");expect(state._pluginClipEditRequests).toEqual({});
+test("paste receipt displays new clip in the current UI and releases the refresh guard", () => {
+    let state = initial();
+    state = reducer(state, fetchTimeline.pending("before-paste", undefined));
+    state = reducer(state, pasteTimelineClipboardRemote.pending("paste", "selected"));
+    const pasted = timeline(0);
+    pasted.clips.push({ ...pasted.clips[0], id: "pasted", start_sec: 3 });
+    state = reducer(
+        state,
+        pasteTimelineClipboardRemote.fulfilled(
+            {
+                ok: true,
+                timeline: pasted,
+                newClipIds: ["pasted"],
+                pasteEndSec: 4,
+                sourceProject: undefined,
+                importedTrackCount: undefined,
+                importedClipCount: undefined,
+            },
+            "paste",
+            "selected",
+        ),
+    );
+    state = reducer(state, fetchTimeline.fulfilled(timeline(0), "before-paste", undefined));
+    expect(state.clips.map((clip) => clip.id)).toEqual(["host-clip", "pasted"]);
+    expect(state.selectedClipId).toBe("pasted");
+    expect(state._pluginClipEditRequests).toEqual({});
+    const external = { ...pasted, clips: [pasted.clips[1]] };
+    state = reducer(state, fetchTimeline.pending("after-paste", undefined));
+    state = reducer(state, fetchTimeline.fulfilled(external, "after-paste", undefined));
+    expect(state.clips.map((clip) => clip.id)).toEqual(["pasted"]);
+});
+
+test("split receipt keeps both clips when an old one-clip refresh arrives late", () => {
+    let state = initial();
+    const arg = { clipIds: ["host-clip"], splitSec: 0.5 };
+    state = reducer(state, fetchTimeline.pending("before-split", undefined));
+    state = reducer(state, splitClipsAtRemote.pending("split", arg));
+    const split = timeline(0);
+    split.clips[0].length_sec = 0.5;
+    split.clips.push({ ...split.clips[0], id: "right", start_sec: 0.5, source_start_sec: 0.5 });
+    const payload = { ...split, created_clip_ids: ["right"] };
+    state = reducer(state, splitClipsAtRemote.fulfilled(payload, "split", arg));
+    state = reducer(state, fetchTimeline.fulfilled(timeline(0), "before-split", undefined));
+    expect(state.clips.map((clip) => clip.id)).toEqual(["host-clip", "right"]);
+    expect(state.selectedClipId).toBe("right");
+    expect(state._pluginClipEditRequests).toEqual({});
 });
 
 test("plugin seek ignores old-position polls during request and old polls after acknowledgement", () => {
     let state = { ...initial(), playheadSec: 5 };
     state = reducer(state, seekPlayhead.pending("seek-b", 5));
     const epoch = state._transportEpoch;
-    const oldPoll = { ok: true as const, is_playing: false, target: null, base_sec: 0, position_sec: 1, playhead_sec: 1, duration_sec: 10 };
-    state = reducer(state, syncPlaybackState.fulfilled(oldPoll, "poll", { epoch, dispatchedAtMs: 0 }));
+    const oldPoll = {
+        ok: true as const,
+        is_playing: false,
+        target: null,
+        base_sec: 0,
+        position_sec: 1,
+        playhead_sec: 1,
+        duration_sec: 10,
+    };
+    state = reducer(
+        state,
+        syncPlaybackState.fulfilled(oldPoll, "poll", { epoch, dispatchedAtMs: 0 }),
+    );
     expect(state.playheadSec).toBe(5);
-    state = reducer(state, seekPlayhead.fulfilled({ok:true,playhead_sec:1}, "seek-b", 5));
+    state = reducer(state, seekPlayhead.fulfilled({ ok: true, playhead_sec: 1 }, "seek-b", 5));
     expect(state.playheadSec).toBe(5);
-    state = reducer(state, syncPlaybackState.fulfilled(oldPoll, "poll-late", { epoch, dispatchedAtMs: 0 }));
+    state = reducer(
+        state,
+        syncPlaybackState.fulfilled(oldPoll, "poll-late", { epoch, dispatchedAtMs: 0 }),
+    );
     expect(state.playheadSec).toBe(5);
     expect(state._pluginSeekRequestId).toBeNull();
 });
 
 test("import acknowledgement cannot be removed by a read started before import", () => {
-    let state = initial();state = reducer(state, fetchTimeline.pending("before-import", undefined));
-    const args={file:new File(["fixture"],"voice.wav"),trackId:"host-track",startSec:5};
+    let state = initial();
+    state = reducer(state, fetchTimeline.pending("before-import", undefined));
+    const args = { file: new File(["fixture"], "voice.wav"), trackId: "host-track", startSec: 5 };
     state = reducer(state, importAudioFileAtPosition.pending("import", args));
-    const imported=timeline(0);imported.clips.push({...imported.clips[0],id:"imported",start_sec:5});
-    state = reducer(state, importAudioFileAtPosition.fulfilled({ok:true,imported,newClipIds:["imported"],playheadSec:undefined},"import",args));
-    state = reducer(state, fetchTimeline.fulfilled(timeline(0),"before-import",undefined));
-    expect(state.clips.some(clip=>clip.id==="imported")).toBe(true);
+    const imported = timeline(0);
+    imported.clips.push({ ...imported.clips[0], id: "imported", start_sec: 5 });
+    state = reducer(
+        state,
+        importAudioFileAtPosition.fulfilled(
+            { ok: true, imported, newClipIds: ["imported"], playheadSec: undefined },
+            "import",
+            args,
+        ),
+    );
+    state = reducer(state, fetchTimeline.fulfilled(timeline(0), "before-import", undefined));
+    expect(state.clips.some((clip) => clip.id === "imported")).toBe(true);
 });
 
 test("old refresh is discarded during drag and after the B commit releases its lock", () => {
@@ -111,7 +197,10 @@ test("width edits without a gesture lock defer refresh; rejection releases the g
     state = reducer(state, fetchTimeline.pending("old", undefined));
     state = reducer(state, fetchTimeline.fulfilled(timeline(0), "old", undefined));
     expect(state.clips[0].fadeInSec).toBe(0.3);
-    state = reducer(state, setClipsStateBulkRemote.rejected(new Error("host changed"), "width", arg));
+    state = reducer(
+        state,
+        setClipsStateBulkRemote.rejected(new Error("host changed"), "width", arg),
+    );
     expect(state._pluginClipEditRequests).toEqual({});
     state = reducer(state, fetchTimeline.pending("recover", undefined));
     state = reducer(state, fetchTimeline.fulfilled(timeline(2), "recover", undefined));
@@ -119,9 +208,17 @@ test("width edits without a gesture lock defer refresh; rejection releases the g
 });
 
 test("async stale refresh rejects so the apply panel does not consume the host version", async () => {
-    const store = configureStore({ reducer: { session: reducer }, preloadedState: { session: initial() } });
+    const store = configureStore({
+        reducer: { session: reducer },
+        preloadedState: { session: initial() },
+    });
     let reply!: (value: TimelineResult) => void;
-    vi.spyOn(webApi, "getTimelineState").mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }));
+    vi.spyOn(webApi, "getTimelineState").mockImplementationOnce(
+        () =>
+            new Promise((resolve) => {
+                reply = resolve;
+            }),
+    );
     const refresh = store.dispatch(fetchTimeline());
     store.dispatch(moveClipRemote.pending("move", move));
     store.dispatch(moveClipRemote.fulfilled(timeline(5), "move", move));

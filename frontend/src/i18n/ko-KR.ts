@@ -79,7 +79,8 @@ export const koKR = {
     export_dialog_channel_mono: "모노(다운믹스)",
     export_dialog_sample_rate_autocorrected:
         "샘플 레이트를 MP3가 지원하는 가장 가까운 값으로 자동 조정했습니다: {rate} Hz.",
-    export_dialog_error_mp3_unsupported_sample_rate: "이 샘플 레이트는 MP3에서 지원하지 않습니다. 8 kHz~48 kHz 사이의 MPEG 지원 값을 사용하세요.",
+    export_dialog_error_mp3_unsupported_sample_rate:
+        "이 샘플 레이트는 MP3에서 지원하지 않습니다. 8 kHz~48 kHz 사이의 MPEG 지원 값을 사용하세요.",
     quick_export_format: "포맷",
     export_conflict_exists_title: "내보내기 대상 파일이 이미 존재합니다",
     export_conflict_exists_desc: "다음 내보내기 대상 파일이 이미 존재합니다:",
