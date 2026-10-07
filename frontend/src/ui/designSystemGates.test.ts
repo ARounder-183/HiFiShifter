@@ -39,11 +39,29 @@ const NO_CONSUMER_ALLOWED: Record<string, string> = {
  * 允许的都是"色相即语义"的域内表面 —— 颜色在这里表达类别（文件类型、电平档位），
  * 而不是主题角色，因此**必须**固定，不能跟随用户的强调色。
  */
+/**
+ * 允许直接使用 Radix 内部调色板变量的文件（见"不得使用 Radix 内部调色板变量"）。
+ * 与 `PALETTE_ALLOWED` 同一约定：每条都要写明理由，且是**已审计的记录**。
+ */
+const RADIX_VAR_ALLOWED: Record<string, string> = {
+    [join("src", "components", "layout", "PianoRollPanel.tsx")]:
+        "设备像素分隔线：`--gray-8` 是唯一与画布 1 设备像素对齐的灰阶，改用语义令牌会与" +
+        "画布内容脱节（该行有就地注释说明）。",
+};
+
 const PALETTE_ALLOWED: Record<string, string> = {
     [join("src", "components", "layout", "FileBrowserPanel.tsx")]:
         "文件类型图标：色相即类型标识（文件夹 / 视频 / 音频 / 工程），不随主题变化。",
     [join("src", "components", "layout", "timeline", "TrackList.tsx")]:
         "电平表：色相即电平档位（削顶 / 过载 / 偏高 / 正常），必须固定，否则读数失去意义。",
+    // 下面两条与 `FileBrowserPanel.tsx` 同一理由：它们就是那套"色相即文件类型"
+    // 的图标与行样式的实现处（图标组件与行组件从面板里拆出来后各占一个文件）。
+    // 这两条是**修好本规则后才被发现的既有违规** —— 规则此前因剥掉字符串而永远
+    // 匹配不到类名，所以它们从未被登记过（见规则内的说明）。
+    [join("src", "components", "layout", "fileBrowser", "fileIcons.tsx")]:
+        "文件类型图标：色相即类型标识（文件夹 / 视频 / 音频 / 工程），与 FileBrowserPanel 同源。",
+    [join("src", "components", "layout", "fileBrowser", "FileEntryRow.tsx")]:
+        "工程文件名高亮：色相即类型标识（工程文件用暖色），与同目录的文件类型图标同源。",
 };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -527,16 +545,61 @@ describe("抽象层不能空转（采用率）", () => {
             /\b(?:text|bg|border|from|to|via|ring|outline|fill|stroke|divide|placeholder|decoration|caret|shadow)-(?:gray|slate|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
 
         const offenders: string[] = [];
+        let scanned = 0;
         for (const file of sourceFiles(/\.tsx?$/)) {
             if (file in PALETTE_ALLOWED) continue;
-            const source = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            scanned += 1;
+            // 【为什么必须 `keepStrings = true`】Tailwind 类名**永远在字符串字面量
+            // 里**（`className="text-yellow-500"`）。默认的 `stripCommentsAndStrings`
+            // 会把字符串内容整段剥掉，于是这条正则**结构上不可能匹配** —— 规则曾经
+            // 就是这样一条"永远不会失败的门禁"：`fileIcons.tsx` 里有四处固定色阶、
+            // 且不在白名单里，规则照样通过。本文件另一条规则（`:845` 一带）的注释
+            // 早就写明"它会把字符串内容一并剥掉"，只是这条踩了同一个坑。
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
             const hits = source.match(PALETTE) ?? [];
             if (hits.length > 0) offenders.push(`${file}: ${[...new Set(hits)].join(", ")}`);
         }
+        // 扫描量下界：正则或扫描路径一旦失效，本规则会静默变绿（正是上面那次的
+        // 病因）。下界断言让"扫了个空"变成一次明确失败。
+        expect(scanned, "调色板门禁没有扫到任何文件，扫描路径已失效").toBeGreaterThan(500);
         expect(
             offenders,
             "请改用 `qt-*` 语义色（danger/warning/success/info/text/text-muted/border…）。" +
                 "确实需要固定色相时，把文件加进本测试的 ALLOWED 并写明理由",
+        ).toEqual([]);
+    });
+
+    test("不得使用 Radix 内部调色板变量（改用 --qt-* 语义令牌）", () => {
+        /*
+         * 【为什么禁止】`var(--accent-3)` / `var(--red-3)` / `var(--gray-6)` 这类
+         * 变量由 Radix Themes 定义在 `.radix-themes` 作用域上，值是**固定档位**，
+         * 不表达"这是危险底色 / 这是强调文字"这样的语义。本仓库为此有整套
+         * `--qt-*` 语义令牌（danger / success / info / subtle / accent…），主题
+         * 切换与外观设置只能通过它们生效。
+         *
+         * 【为什么必须保留字符串】这些变量就写在字符串字面量里
+         * （`style={{ background: "var(--accent-3)" }}`），剥掉字符串会让规则
+         * 永远匹配不到 —— 正是旁边那条调色板规则曾经踩过的坑。
+         *
+         * 【豁免】确实需要"与画布对齐的物理档位"的地方（例如设备像素分隔线）在
+         * `RADIX_VAR_ALLOWED` 里逐条登记。
+         */
+        const RADIX_VAR = /var\(--(?!qt-)(?:[a-z0-9]+-\d{1,2}|color-panel[a-z-]*|gray-a\d{1,2})\)/g;
+
+        const offenders: string[] = [];
+        let scanned = 0;
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (file in RADIX_VAR_ALLOWED) continue;
+            scanned += 1;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            const hits = source.match(RADIX_VAR) ?? [];
+            if (hits.length > 0) offenders.push(`${file}: ${[...new Set(hits)].join(", ")}`);
+        }
+        expect(scanned, "Radix 变量门禁没有扫到任何文件，扫描路径已失效").toBeGreaterThan(500);
+        expect(
+            offenders,
+            "请改用 `--qt-*` 语义令牌（danger-bg / danger-text / success-text / subtle-* / accent…）。" +
+                "确实需要固定物理档位时，把文件加进本测试的 RADIX_VAR_ALLOWED 并写明理由",
         ).toEqual([]);
     });
 

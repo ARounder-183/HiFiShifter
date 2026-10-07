@@ -2090,7 +2090,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     color:
                                                                         Math.abs(gainToDb(volume)) <
                                                                         0.05
-                                                                            ? "var(--accent-12)"
+                                                                            ? "var(--qt-accent-text)"
                                                                             : "var(--qt-text)",
                                                                 }}
                                                                 className="hs-type-label tabular-nums select-none"

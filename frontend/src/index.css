@@ -64,6 +64,12 @@
        注意这只是一个"就近声明"：真正能正确求值的位置在下方 `.radix-themes` 规则
        （本令牌引用了 `--accent-9`，必须在拥有该变量的元素上声明）。 */
     --qt-accent: var(--accent-9, var(--qt-highlight));
+    /* 强调色的**底色档**与**文字档**：`--qt-accent` 是强调色的中间档（accent-9），
+       不适合当文字色（偏暗）也不适合当大面积底色（偏亮）。这两条把"强调色的
+       低对比底"与"高对比文字"显式命名，替代直接写 `var(--accent-3)` /
+       `var(--accent-12)` —— 后者是 Radix 内部变量，不表达语义且不随主题令牌走。 */
+    --qt-accent-subtle: var(--accent-3, var(--qt-subtle-2));
+    --qt-accent-text: var(--accent-12, var(--qt-text));
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -124,6 +130,12 @@
     --qt-scrollbar-thumb: #b4bac7;
     --qt-scrollbar-thumb-hover: #9aa1b1;
     --qt-accent: var(--accent-9, var(--qt-highlight));
+    /* 强调色的**底色档**与**文字档**：`--qt-accent` 是强调色的中间档（accent-9），
+       不适合当文字色（偏暗）也不适合当大面积底色（偏亮）。这两条把"强调色的
+       低对比底"与"高对比文字"显式命名，替代直接写 `var(--accent-3)` /
+       `var(--accent-12)` —— 后者是 Radix 内部变量，不表达语义且不随主题令牌走。 */
+    --qt-accent-subtle: var(--accent-3, var(--qt-subtle-2));
+    --qt-accent-text: var(--accent-12, var(--qt-text));
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -173,6 +185,12 @@
  */
 .radix-themes {
     --qt-accent: var(--accent-9, var(--qt-highlight));
+    /* 强调色的**底色档**与**文字档**：`--qt-accent` 是强调色的中间档（accent-9），
+       不适合当文字色（偏暗）也不适合当大面积底色（偏亮）。这两条把"强调色的
+       低对比底"与"高对比文字"显式命名，替代直接写 `var(--accent-3)` /
+       `var(--accent-12)` —— 后者是 Radix 内部变量，不表达语义且不随主题令牌走。 */
+    --qt-accent-subtle: var(--accent-3, var(--qt-subtle-2));
+    --qt-accent-text: var(--accent-12, var(--qt-text));
     --qt-focus-ring: var(--accent-9, #3b82f6);
 }
 

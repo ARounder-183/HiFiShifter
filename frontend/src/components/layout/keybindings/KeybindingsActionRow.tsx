@@ -125,7 +125,7 @@ export function KeybindingsActionRow({
             data-hs-kb-row={meta.group}
             style={{
                 borderRadius: "var(--qt-radius-sm)",
-                background: isRecording ? "var(--accent-3)" : undefined,
+                background: isRecording ? "var(--qt-accent-subtle)" : undefined,
                 minHeight: 36,
             }}
         >

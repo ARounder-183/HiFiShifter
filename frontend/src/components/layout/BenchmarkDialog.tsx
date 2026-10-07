@@ -215,7 +215,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                 key={row.label}
                                                 style={{
                                                     background: isFastest
-                                                        ? "var(--accent-3)"
+                                                        ? "var(--qt-accent-subtle)"
                                                         : "transparent",
                                                     borderTop: "1px solid var(--qt-border)",
                                                 }}

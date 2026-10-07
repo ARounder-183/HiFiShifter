@@ -743,7 +743,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     px="3"
                     className="shrink-0"
                     style={{
-                        background: "var(--red-3)",
+                        background: "var(--qt-danger-bg)",
                         borderRadius: "var(--qt-radius-md)",
                         marginTop: 8,
                     }}
