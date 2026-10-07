@@ -1770,8 +1770,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 逐帧回报：把真值交给面板去广播共享视口。无条件调用（不做步长判定）——
         // 广播侧自己带变化判定（≥0.5px 才写），而漏报会让时间轴停在旧位置上。
         // 见 `onScrollLeftFrame` 的说明。
+        //
+        // 【为什么减偏移】`scroll.get()` 是**原生坐标**；面板对外（含共享视口换算
+        // `timelineViewportStateToNative`）一律用**绘制坐标**。开启同步时两者相差
+        // 整个偏移，直接上报会把时间轴推到一个偏了偏移量的位置。
         if (onScrollLeftFrame !== undefined) {
-            onScrollLeftFrame(view.scrollLeft);
+            onScrollLeftFrame(view.scrollLeft - horizontalOffsetPx());
         }
 
         // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现「滚动后

@@ -3104,6 +3104,51 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      *
      * @param drawingScrollLeft 目标水平位置（绘制坐标）。
      */
+    /**
+     * **拖拽边缘自动滚屏**的落点：写内核 + 推共享视口，**不自己重绘**。
+     *
+     * 【为什么不复用 `syncScrollLeft`】那条路径为"原生滚动事件驱动"设计，必须同任务
+     * 重绘（`paintNow`），否则画面会比原生滚动慢一帧。而自动滚屏发生在**笔画自己的
+     * rAF 合帧循环**里：那一帧本来就要绘制一次，再同步重绘一次等于**每帧两次全帧
+     * 提交**（重建 GL 场景 + 重绘所有图层）—— 即用户报告的"滚动时非常卡顿"。
+     *
+     * 这里只写内核（钳制 + 标脏）并广播，绘制交给那一帧本就要跑的绘制路径。
+     * 帧内合并且幂等，因此"标脏之后一定有人画"由现有帧循环保证。
+     *
+     * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     */
+    const applyEdgeScrollLeft = useCallback(
+        function applyEdgeScrollLeft(drawingScrollLeft: number) {
+            scrollLeftRef.current = drawingScrollLeft;
+            // `syncScrollLeft` 早退的判据：留着旧值时，镜像回写触发的 `scroll`
+            // 事件会被误判成"用户滚动"而再推一次共享视口。
+            lastScrollLeftRef.current = drawingScrollLeft;
+
+            const host = hostRef.current;
+            if (host) {
+                host.setScrollLeft(drawingScrollLeft);
+                host.invalidate(); // ★ 不 paintNow —— 见上方说明
+            } else {
+                applyHorizontalScrollPosition(drawingScrollLeft);
+                applyScrollLayers(drawingScrollLeft);
+            }
+
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: timelineViewportStateToNative(
+                            drawingScrollLeft,
+                            timelineOffsetRef.current,
+                        ),
+                        pxPerSec: pxPerSecRef.current,
+                    },
+                    PIANO_ROLL_SYNC_ORIGIN,
+                );
+            }
+        },
+        [applyHorizontalScrollPosition, applyScrollLayers],
+    );
+
     function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
         const host = hostRef.current;
         if (host) {
@@ -3392,7 +3437,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             // 与位置**同源**：取内核真值。用渲染期的 `pxPerSecRef` 会配出
                             // "新缩放 + 旧位置"这一对自相矛盾的视口（时间轴侧的
                             // `livePxPerSec` 就是为此存在）。
-                            pxPerSec: hostRef.current?.getViewport().pxPerSec ?? pxPerSecRef.current,
+                            pxPerSec:
+                                hostRef.current?.getViewport().pxPerSec ?? pxPerSecRef.current,
                         },
                         PIANO_ROLL_SYNC_ORIGIN,
                     );
@@ -5425,6 +5471,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         paramViewRef,
         bumpRefreshToken,
         syncScrollLeft,
+        applyEdgeScrollLeft,
         invalidate,
         yToViewportT,
         yToValue,

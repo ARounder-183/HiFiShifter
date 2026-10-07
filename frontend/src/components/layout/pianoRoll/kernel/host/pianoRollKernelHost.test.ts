@@ -96,6 +96,7 @@ function makeHost(options: { offsetPx?: number } = {}) {
     });
     const paintedAxes: number[] = [];
     const userScrolls: number[] = [];
+    const scrollLeftFrames: number[] = [];
     /**
      * 播放头秒数与两个播放头元素桩。
      *
@@ -147,6 +148,9 @@ function makeHost(options: { offsetPx?: number } = {}) {
             onScrollLeftCommit: () => {
                 scrollLeftCommits += 1;
             },
+            onScrollLeftFrame: (drawingScrollLeft) => {
+                scrollLeftFrames.push(drawingScrollLeft);
+            },
             onUserScrollLeft: (drawingScrollLeft) => {
                 userScrolls.push(drawingScrollLeft);
             },
@@ -190,6 +194,7 @@ function makeHost(options: { offsetPx?: number } = {}) {
         gridDrawOffsets,
         paintedAxes,
         userScrolls,
+        scrollLeftFrames,
         scrollLeftCommits: () => scrollLeftCommits,
         hasPendingFrame: () => pending !== null,
         /** 跑掉当前排队的帧（上限 8 次，防止自驱动的无限循环）。 */
@@ -525,6 +530,73 @@ describe("createPianoRollKernelHost · onUserScrollLeft", () => {
         // 偏移 200：回调给出的绘制坐标应比内核内部的原生坐标小 200。
         const reported = t.userScrolls.at(-1) as number;
         expect(reported).toBeCloseTo(t.host.getViewport().scrollLeft, 6);
+        t.host.dispose();
+    });
+});
+
+/**
+ * 逐帧回报：`onScrollLeftFrame` 每帧都把真值交给面板。
+ *
+ * 【为什么单列一组】它与 `onScrollLeftCommit` 长得很像但用途完全不同：后者按
+ * 256px 量化、只为给 React 提交标尺刻度范围；前者是"推给共享视口（时间轴）"的
+ * 唯一逐帧通道。本面板此前**只有**量化回报，于是自动滚屏 / 播放跟随这类直接写
+ * 内核的路径推不出去 —— 启用同步后表现为"参数编辑器滚了、时间轴滞后"。
+ *
+ * 时间轴侧早就有对应的 `syncScrollLeftFrame`（同一取舍：480px 的拖拽若走量化
+ * 通道只有 2 步、单次跳 260px）。这里补齐对称的一半。
+ */
+describe("createPianoRollKernelHost · onScrollLeftFrame", () => {
+    it("每帧都回报（不做步长判定）", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(10);
+        t.flush();
+        t.host.setScrollLeft(11);
+        t.flush();
+        // 两次都只挪动 1px —— 量化通道一次都不会报，逐帧通道必须两次都报。
+        expect(t.scrollLeftFrames.length).toBeGreaterThanOrEqual(2);
+        expect(t.scrollLeftFrames.at(-1)).toBeCloseTo(11, 6);
+        t.host.dispose();
+    });
+
+    it("报的是**绘制坐标**（已减去同步偏移），与时间轴侧口径一致", () => {
+        const t = makeHost({ offsetPx: 200 });
+        // setScrollLeft 收绘制坐标，宿主内部加回偏移交给内核（原生 = 700）。
+        t.host.setScrollLeft(500);
+        t.flush();
+        const reported = t.scrollLeftFrames.at(-1) as number;
+        // 宿主对外一律绘制坐标：原样报 500，且等于 getViewport().scrollLeft。
+        expect(reported).toBeCloseTo(t.host.getViewport().scrollLeft, 6);
+        expect(reported).toBeCloseTo(500, 6);
+        t.host.dispose();
+    });
+
+    it("★ 与量化通道互不干扰：同一 256px 步长内逐帧继续报、量化不再报", () => {
+        const t = makeHost();
+        // 先跨一大步让量化通道越过阈值（首次 0 → 300 必然触发一次）。
+        t.host.setScrollLeft(300);
+        t.flush();
+        const afterBigStep = t.scrollLeftCommits();
+        const framesAfterBigStep = t.scrollLeftFrames.length;
+        expect(afterBigStep).toBeGreaterThan(0);
+
+        // 之后连续小位移：仍在同一量化步长内。
+        t.host.setScrollLeft(303);
+        t.flush();
+        t.host.setScrollLeft(306);
+        t.flush();
+        // 逐帧：每次都报。
+        expect(t.scrollLeftFrames.length).toBeGreaterThan(framesAfterBigStep);
+        // 量化：不再触发 —— 这正是"滞后"的来源（时间轴只能看到这一步）。
+        expect(t.scrollLeftCommits()).toBe(afterBigStep);
+        t.host.dispose();
+    });
+
+    it("命令式写入（如自动滚屏）也会回报 —— 这正是此前漏掉的那条路径", () => {
+        const t = makeHost();
+        // 自动滚屏走的是 setScrollLeft（不是用户手势），必须同样能推出去。
+        t.host.setScrollLeft(420);
+        t.flush();
+        expect(t.scrollLeftFrames).toContain(420);
         t.host.dispose();
     });
 });

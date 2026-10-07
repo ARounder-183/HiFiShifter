@@ -672,6 +672,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     }, [
         s.paramEditorSyncTimeline,
         syncScrollLeft,
+        // 纯滚动快路径用它判定"缩放是否变化"，必须与位置同源（见 `livePxPerSec`
+        // 的说明）。它是 useCallback 稳定引用，加入不会引发重订阅。
+        livePxPerSec,
         // 两者均为稳定引用（ref 对象 / useMemo 一次创建），加入不会引发重订阅。
         kernelHostRef,
         viewportAccess,

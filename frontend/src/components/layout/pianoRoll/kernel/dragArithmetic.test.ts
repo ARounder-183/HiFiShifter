@@ -140,10 +140,20 @@ describe("frameToIndex", () => {
  * 参数编辑器内核共用，单测也跟着实现走，避免"实现共享、用例只盖一半"。
  */
 describe("EDGE_SCROLL_MAX_SPEED_PX_PER_SEC", () => {
-    it("等于旧的「每帧 18px」在 60Hz 下的速度（手感零变化）", () => {
-        // 旧实现按 pointermove 事件计步：18px × 60 事件/秒 = 1080 px/秒。
-        // 改成按秒表达后，参考帧率下的滚屏速度必须与改动前逐值相同 ——
-        // 这次改动的目的是让速度与帧率/事件频率解耦，不是改手感。
-        expect(EDGE_SCROLL_MAX_SPEED_PX_PER_SEC).toBe(18 * 60);
+    it("慢于时间轴：编辑曲线比搬 clip 更需要落点精度", () => {
+        // 那句 `toBe(18 * 60)` 的旧断言已作废：它锁的是"按事件计步的旧实现在 60Hz
+        // 下的表观值"，而那个量级本就不适合编辑场景（比时间轴还快 50%）。
+        // 现在锁的是**关系**，不是绝对数值 —— 调手感时改常量即可，不必改断言。
+        expect(EDGE_SCROLL_MAX_SPEED_PX_PER_SEC).toBeLessThan(720);
+    });
+
+    it("60Hz 下单帧位移落在肉眼可辨的量级", () => {
+        // 边缘带内的常规满速（比例 1.0）：约 7px —— 视图以像素级推进，
+        // 画出来的曲线不会因为"一下跳过一大段"而失真。
+        const perFrameInBand = EDGE_SCROLL_MAX_SPEED_PX_PER_SEC / 60;
+        expect(perFrameInBand).toBeLessThanOrEqual(8);
+        // 指针拖出窗外后的饱和速度（比例 1.5）也不能失控。
+        const perFrameSaturated = (EDGE_SCROLL_MAX_SPEED_PX_PER_SEC * 1.5) / 60;
+        expect(perFrameSaturated).toBeLessThanOrEqual(12);
     });
 });

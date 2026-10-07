@@ -341,6 +341,14 @@ export function usePianoRollInteractions(args: {
 
     bumpRefreshToken: () => void;
     syncScrollLeft: (scroller: HTMLDivElement) => void;
+    /**
+     * 拖拽边缘自动滚屏的落点（绘制坐标）。
+     *
+     * 与 `syncScrollLeft` 的区别：那条为"原生滚动事件驱动"设计，必须同任务重绘；
+     * 本条只写内核并标脏 —— 绘制由笔画自己的 rAF 合帧循环负责，避免每帧两次全帧
+     * 提交。见 `PianoRollPanel` 里 `applyEdgeScrollLeft` 的说明。
+     */
+    applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
     invalidate: () => void;
 
     yToViewportT: (y: number, h: number) => number;
@@ -556,6 +564,7 @@ export function usePianoRollInteractions(args: {
         paramViewRef,
         bumpRefreshToken,
         syncScrollLeft,
+        applyEdgeScrollLeft,
         invalidate,
         yToViewportT,
         yToValue,
@@ -2398,6 +2407,7 @@ export function usePianoRollInteractions(args: {
             setParamViewport,
             invalidate,
             syncScrollLeft,
+            applyEdgeScrollLeft,
             horizontalZoomChainRef,
             onHorizontalZoom,
             syncTimelineEnabled,
@@ -2988,15 +2998,20 @@ export function usePianoRollInteractions(args: {
                     const rect = scroller.getBoundingClientRect();
                     return { left: rect.left, right: rect.right };
                 },
-                getScrollLeft: () => scrollerRef.current?.scrollLeft ?? 0,
-                setScrollLeft: (next) => {
-                    const scroller = scrollerRef.current;
-                    if (!scroller) return;
-                    scroller.scrollLeft = next;
-                    // 采纳进渲染内核：各图层按内核真值绘制，只写原生 DOM 会让
-                    // 画面与"指针 → 帧"的投影分叉（见 `syncScrollLeft` 的说明）。
-                    syncScrollLeft(scroller);
+                // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
+                //
+                // 【为什么不能读原生】写入走 `applyEdgeScrollLeft` → `host.setScrollLeft`
+                //（内核），而原生 scroller 只是**镜像**，要到下一次帧提交才被回写。
+                // 若驱动读原生值，第二次 step 读到的仍是上一帧的旧位置，于是每一帧
+                // 都从同一个旧位置重新加一个增量 —— 滚动会"原地踏步"或严重偏慢。
+                // 这与面板其它地方"真值在内核"的约定一致（见 `getViewportTruth`）。
+                getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+                setScrollLeft: (nextDrawing) => {
+                    // 走自动滚屏专用落点：写内核 + 推共享视口 + **标脏**，
+                    // 不自己重绘（绘制由笔画的合帧循环负责，避免每帧两次全帧提交）。
+                    applyEdgeScrollLeft(nextDrawing);
                 },
+                // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
                 getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
                 onScrolled: (clientX) => onEdgeScrolled?.(clientX),
             });
