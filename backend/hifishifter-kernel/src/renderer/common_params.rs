@@ -173,10 +173,7 @@ pub fn is_common_mix_param(param_id: &str) -> bool {
 /// 电平），而「该帧无数据」应表达为沿用原声，即 `DYN_FOLLOW_ORIG`。若沿用
 /// 描述符默认值，移动/拉伸/复制片段会给新范围凭空写入 1.0，把原本的音量包络
 /// 整段压平 —— 这是静默的响度损坏。
-pub fn automation_curve_pad_value(
-    kind: crate::state::SynthPipelineKind,
-    param_id: &str,
-) -> f32 {
+pub fn automation_curve_pad_value(kind: crate::state::SynthPipelineKind, param_id: &str) -> f32 {
     if param_id == DYN_PARAM_ID {
         return DYN_FOLLOW_ORIG;
     }
@@ -236,11 +233,7 @@ pub fn sample_dyn_curve_at_frame(
 /// 与 [`sample_dyn_curve_at_frame`] 是同一份语义，只是入参单位不同。
 /// 两侧必须同步修改 —— 实时监听与离线导出不一致是最难排查的一类问题。
 #[inline]
-pub fn sample_dyn_curve_at_sec(
-    curve: Option<&[f32]>,
-    abs_sec: f64,
-    frame_period_ms: f64,
-) -> f32 {
+pub fn sample_dyn_curve_at_sec(curve: Option<&[f32]>, abs_sec: f64, frame_period_ms: f64) -> f32 {
     let Some(curve) = curve else {
         return DYN_FOLLOW_ORIG;
     };
@@ -594,7 +587,14 @@ mod tests {
     #[test]
     fn resample_dyn_keeps_unset_frames_unset() {
         // 两端各两个未画帧，中间四个显式目标（唯一显式值 = 0.5）。
-        let values = [DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG, 0.5, 0.5, DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG];
+        let values = [
+            DYN_FOLLOW_ORIG,
+            DYN_FOLLOW_ORIG,
+            0.5,
+            0.5,
+            DYN_FOLLOW_ORIG,
+            DYN_FOLLOW_ORIG,
+        ];
         for target_len in [3usize, 6, 12, 24] {
             let out = resample_dyn_curve(&values, target_len);
             assert_eq!(out.len(), target_len);
@@ -633,11 +633,15 @@ mod tests {
         for &v in &resample_dyn_curve(&all_unset, 5) {
             assert_eq!(v, DYN_FOLLOW_ORIG);
         }
-        assert!(resample_dyn_curve(&[], 4).iter().all(|&v| v == DYN_FOLLOW_ORIG));
+        assert!(resample_dyn_curve(&[], 4)
+            .iter()
+            .all(|&v| v == DYN_FOLLOW_ORIG));
         assert!(resample_dyn_curve(&all_unset, 0).is_empty());
         // 单帧输入：无论目标长度如何都只有那一个值。
         let single = [0.4f32];
-        assert!(resample_dyn_curve(&single, 4).iter().all(|&v| (v - 0.4).abs() < 1e-6));
+        assert!(resample_dyn_curve(&single, 4)
+            .iter()
+            .all(|&v| (v - 0.4).abs() < 1e-6));
     }
 
     /// 「未画」是**非数值**：非有限的输入同样按哨兵处理（不参与插值）。

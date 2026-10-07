@@ -423,7 +423,11 @@ mod tests {
         // 两个声道各 5 个采样点，但**声道交界处**的值（0.5）两边都会报一次，
         // 被严格递增的闸门合并成一条 —— 于是 10 次上报得到 9 条事件。
         // 这正是"两个声道之间不应出现停顿或重复"的体现。
-        assert_eq!(values.len(), 9, "交界处的重复值应被闸门合并，实际 {values:?}");
+        assert_eq!(
+            values.len(),
+            9,
+            "交界处的重复值应被闸门合并，实际 {values:?}"
+        );
         assert_eq!(*values.first().unwrap(), 0.0, "应从 0% 开始");
         assert_eq!(*values.last().unwrap(), 1.0, "最终必须到达 100%");
         for pair in values.windows(2) {

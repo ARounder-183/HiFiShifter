@@ -22,19 +22,19 @@
 //! 模块入口（`GetPluginFactory` / `InitDll` / `ExitDll`）与最小组件必须自备。
 
 pub mod ara;
-pub mod render;
-mod diagnostics;
-mod audio_abi;
 mod ara_entry;
-mod state_channel;
-mod fade;
-mod state_stream;
+mod audio_abi;
+mod diagnostics;
 mod editor;
-#[cfg(test)]
-mod test_host;
+mod fade;
+pub mod render;
+mod runtime;
+mod state_channel;
+mod state_stream;
 #[cfg(test)]
 mod test_allocator;
-mod runtime;
+#[cfg(test)]
+mod test_host;
 mod vst3;
 
 use std::ffi::c_void;

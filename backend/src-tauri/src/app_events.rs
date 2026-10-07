@@ -76,8 +76,7 @@ impl HostCallbacks for AppHostCallbacks {
     }
 
     fn auto_background_render_enabled(&self) -> bool {
-        crate::commands::playback::AUTO_BG_RENDER_ENABLED
-            .load(std::sync::atomic::Ordering::Relaxed)
+        crate::commands::playback::AUTO_BG_RENDER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn take_pitch_pending_flag(&self) -> bool {

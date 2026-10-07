@@ -203,8 +203,6 @@ fn build_frontend() {
     }
 }
 
-
-
 /// Create a placeholder for vslib_x64.dll on non-x86_64 Windows targets
 /// so tauri_build resource validation passes.  On x86_64 with the vslib
 /// feature active, the real DLL is linked by build_vslib().

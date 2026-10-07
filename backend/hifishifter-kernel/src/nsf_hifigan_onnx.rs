@@ -41,7 +41,7 @@ fn run_session_once(
             let mut session_guard = sess
                 .lock()
                 .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            NEURAL_RUNS.fetch_add(1,Ordering::Relaxed);
+            NEURAL_RUNS.fetch_add(1, Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![mel_tensor, f0_tensor])
                 .map_err(|e| format!("ort run failed: {e}"))?;
@@ -197,10 +197,12 @@ fn default_model_dir_guess() -> Option<PathBuf> {
     // 开发树兜底：模型仍放在 app crate 的 `resources/` 下（那才是打包时带的东西）。
     // 内核是从 app 里搬出来的，所以必须回看得到它 —— 否则内核自己的测试会因为
     // 「模型不在内核目录下」而失败，而那不是被测代码的问题。
-    if let Some(app_p) = manifest
-        .parent()
-        .map(|p| p.join("src-tauri").join("resources").join("models").join("nsf_hifigan"))
-    {
+    if let Some(app_p) = manifest.parent().map(|p| {
+        p.join("src-tauri")
+            .join("resources")
+            .join("models")
+            .join("nsf_hifigan")
+    }) {
         let has_model = app_p.join(vocoder_model_filename()).is_file()
             || app_p.join("pc_nsf_hifigan.onnx").is_file();
         if has_model && app_p.join("config.json").is_file() {
@@ -657,29 +659,47 @@ fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &m
 /// 进程级全局共享的 ORT Session 容器。
 /// 使用 Mutex 允许我们在运行时修改 Session 以切换 EPs。
 struct SharedVocoder {
-    runtime:Arc<Mutex<Session>>,
-    cfg:NsfHifiganConfig,
-    identity:blake3::Hash,
+    runtime: Arc<Mutex<Session>>,
+    cfg: NsfHifiganConfig,
+    identity: blake3::Hash,
 }
 static SHARED_SESSION: OnceLock<Mutex<Option<Arc<SharedVocoder>>>> = OnceLock::new();
 
 /// 流式哈希模型/config完整内容；只在worker建会话时运行，不靠路径/大小/首尾猜版本。
-fn digest_model_files(onnx:&Path,config:&Path)->Result<blake3::Hash,String> {
+fn digest_model_files(onnx: &Path, config: &Path) -> Result<blake3::Hash, String> {
     use std::io::Read;
-    let mut hash=blake3::Hasher::new();hash.update(b"hifigan-model-and-config-v1");
-    for path in [onnx,config] {
-        let mut file=std::fs::File::open(path).map_err(|e|format!("vocoder identity open failed: {e}"))?;
-        let length=file.metadata().map_err(|e|format!("vocoder identity metadata failed: {e}"))?.len();
-        hash.update(&length.to_le_bytes());let mut buffer=[0_u8;64*1024];
-        loop {let count=file.read(&mut buffer).map_err(|e|format!("vocoder identity read failed: {e}"))?;
-            if count==0 {break;}hash.update(&buffer[..count]);}
-    }Ok(hash.finalize())
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"hifigan-model-and-config-v1");
+    for path in [onnx, config] {
+        let mut file =
+            std::fs::File::open(path).map_err(|e| format!("vocoder identity open failed: {e}"))?;
+        let length = file
+            .metadata()
+            .map_err(|e| format!("vocoder identity metadata failed: {e}"))?
+            .len();
+        hash.update(&length.to_le_bytes());
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|e| format!("vocoder identity read failed: {e}"))?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+    }
+    Ok(hash.finalize())
 }
 
 /// 真实已加载model/config/EP的内容命名空间；调用方仅在离线worker进入处理器时读取。
-pub fn cache_identity()->Result<String,String> {Ok(get_or_init_shared_session()?.identity.to_hex().to_string())}
+pub fn cache_identity() -> Result<String, String> {
+    Ok(get_or_init_shared_session()?.identity.to_hex().to_string())
+}
 /// 实际模型run次数（包含失败尝试，不含建会话烟测），用于非实时性能验收。
-pub fn inference_runs()->u64 {NEURAL_RUNS.load(Ordering::Relaxed)}
+pub fn inference_runs() -> u64 {
+    NEURAL_RUNS.load(Ordering::Relaxed)
+}
 
 /// 递增此 Epoch 可以促使所有 Thread Local 重新加载 ONNX 实例以同步 EP 切换。
 static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -757,11 +777,19 @@ fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
     for _ in 0..3 {
         let generation_before = crate::vocoder_ort_session::ep_settings_generation();
         ensure_ort_init()?;
-        let (onnx_path,cfg_path) = resolve_model_paths()?;
-        let digest=digest_model_files(&onnx_path,&cfg_path)?;let cfg=read_config(&cfg_path)?;
-        let (session,ep)=crate::vocoder_ort_session::build_ort_session(&onnx_path,crate::vocoder_ort_session::OrtSessionRole::Vocoder)?;
-        if digest_model_files(&onnx_path,&cfg_path)?!=digest {return Err("vocoder model/config changed during session build".into());}
-        let mut identity=blake3::Hasher::new();identity.update(digest.as_bytes());identity.update(ep.as_bytes());
+        let (onnx_path, cfg_path) = resolve_model_paths()?;
+        let digest = digest_model_files(&onnx_path, &cfg_path)?;
+        let cfg = read_config(&cfg_path)?;
+        let (session, ep) = crate::vocoder_ort_session::build_ort_session(
+            &onnx_path,
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        )?;
+        if digest_model_files(&onnx_path, &cfg_path)? != digest {
+            return Err("vocoder model/config changed during session build".into());
+        }
+        let mut identity = blake3::Hasher::new();
+        identity.update(digest.as_bytes());
+        identity.update(ep.as_bytes());
         identity.update(&crate::synth_clip_cache::RENDER_PIPELINE_VERSION.to_le_bytes());
         identity.update(&chunk_max_frames().to_le_bytes());
         set_active_ep(&ep);
@@ -777,7 +805,11 @@ fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
         if let Some(existing) = guard.as_ref() {
             return Ok(existing.clone());
         }
-        let arc = Arc::new(SharedVocoder {runtime:Arc::new(Mutex::new(session)),cfg,identity:identity.finalize()});
+        let arc = Arc::new(SharedVocoder {
+            runtime: Arc::new(Mutex::new(session)),
+            cfg,
+            identity: identity.finalize(),
+        });
         *guard = Some(arc.clone());
         return Ok(arc);
     }
@@ -871,8 +903,8 @@ fn session_batch_pinned_to_one(session: &Arc<Mutex<Session>>) -> bool {
 impl NsfHifiganOnnx {
     fn load() -> Result<Self, String> {
         let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-        let shared=get_or_init_shared_session()?;
-        let cfg=shared.cfg.clone();
+        let shared = get_or_init_shared_session()?;
+        let cfg = shared.cfg.clone();
 
         if cfg.sampling_rate == 0 || cfg.num_mels == 0 || cfg.hop_size == 0 || cfg.n_fft == 0 {
             return Err("invalid NSF-HiFiGAN config.json".to_string());
@@ -1135,7 +1167,7 @@ impl NsfHifiganOnnx {
                 .session
                 .lock()
                 .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            NEURAL_RUNS.fetch_add(1,Ordering::Relaxed);
+            NEURAL_RUNS.fetch_add(1, Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![mel_tensor, f0_tensor])
                 .map_err(|e| format!("ort batch run failed: {e}"))?;
@@ -1476,34 +1508,57 @@ fn chunk_time_span(start_sec: f64, hop_sec: f64, mel_lo: usize, mel_hi: usize) -
 /// 固定数量的块查缓存/推理后立即拼入输出，不同时持有整段所有块的输入与输出副本。
 /// 缓存损坏按miss重算；新推理输出必须完整且有限，失败绝不写成功缓存。
 fn assemble_bounded_chunks(
-    frames:usize,hop:usize,chunk_frames:usize,batch_max:usize,
-    mut get:impl FnMut(usize,usize)->Option<Vec<f32>>,
-    mut infer:impl FnMut(&[(usize,usize)])->Result<Vec<Vec<f32>>,String>,
-    mut put:impl FnMut(usize,usize,Vec<f32>),
-) -> Result<Vec<f32>,String> {
-    if hop==0||chunk_frames==0||batch_max==0 {return Err("invalid HiFiGAN chunk geometry".into());}
-    let samples=frames.checked_mul(hop).ok_or("HiFiGAN output length overflow")?;
-    let mut out=vec![0_f32;samples];let mut offset=0;let mut completed=0;
-    let total=frames.div_ceil(chunk_frames);
-    while offset<frames {
-        let mut missing=Vec::with_capacity(batch_max);
+    frames: usize,
+    hop: usize,
+    chunk_frames: usize,
+    batch_max: usize,
+    mut get: impl FnMut(usize, usize) -> Option<Vec<f32>>,
+    mut infer: impl FnMut(&[(usize, usize)]) -> Result<Vec<Vec<f32>>, String>,
+    mut put: impl FnMut(usize, usize, Vec<f32>),
+) -> Result<Vec<f32>, String> {
+    if hop == 0 || chunk_frames == 0 || batch_max == 0 {
+        return Err("invalid HiFiGAN chunk geometry".into());
+    }
+    let samples = frames
+        .checked_mul(hop)
+        .ok_or("HiFiGAN output length overflow")?;
+    let mut out = vec![0_f32; samples];
+    let mut offset = 0;
+    let mut completed = 0;
+    let total = frames.div_ceil(chunk_frames);
+    while offset < frames {
+        let mut missing = Vec::with_capacity(batch_max);
         for _ in 0..batch_max {
-            if offset>=frames {break;}
-            let end=offset.saturating_add(chunk_frames).min(frames);let expected=(end-offset)*hop;
-            if let Some(cached)=get(offset,end).filter(|wf|wf.len()==expected&&wf.iter().all(|v|v.is_finite())) {
-                out[offset*hop..end*hop].copy_from_slice(&cached);completed+=1;
-            } else {missing.push((offset,end));}
-            offset=end;
+            if offset >= frames {
+                break;
+            }
+            let end = offset.saturating_add(chunk_frames).min(frames);
+            let expected = (end - offset) * hop;
+            if let Some(cached) = get(offset, end)
+                .filter(|wf| wf.len() == expected && wf.iter().all(|v| v.is_finite()))
+            {
+                out[offset * hop..end * hop].copy_from_slice(&cached);
+                completed += 1;
+            } else {
+                missing.push((offset, end));
+            }
+            offset = end;
         }
         if !missing.is_empty() {
-            let outputs=infer(&missing)?;
-            if outputs.len()!=missing.len() {return Err("HiFiGAN batch output count mismatch".into());}
+            let outputs = infer(&missing)?;
+            if outputs.len() != missing.len() {
+                return Err("HiFiGAN batch output count mismatch".into());
+            }
             // 先验证整批再写cache，不发布同一失败批的半成品。
-            if outputs.iter().zip(&missing).any(|(wf,(start,end))|wf.len()!=(end-start)*hop||wf.iter().any(|v|!v.is_finite())) {
+            if outputs.iter().zip(&missing).any(|(wf, (start, end))| {
+                wf.len() != (end - start) * hop || wf.iter().any(|v| !v.is_finite())
+            }) {
                 return Err("invalid HiFiGAN chunk output".into());
             }
-            for ((start,end),wf) in missing.into_iter().zip(outputs) {
-                out[start*hop..end*hop].copy_from_slice(&wf);put(start,end,wf);completed+=1;
+            for ((start, end), wf) in missing.into_iter().zip(outputs) {
+                out[start * hop..end * hop].copy_from_slice(&wf);
+                put(start, end, wf);
+                completed += 1;
             }
         }
         // 分块推进的进度上报。
@@ -1635,26 +1690,43 @@ pub fn infer_pitch_edit_chunked_optimized(
         // 输出长度 = 重建内容真实长度（t×hop）。mel 提取的尾部窗损失使
         // t×hop < 输入长度；尾部对齐（含斜坡收尾）在步骤 5 统一完成，
         // 若此处直接按输入长度初始化并留零，会预先制造"内容↔零"缺口。
-        let out=assemble_bounded_chunks(t,hop,chunk_max_frames(),CHUNK_BATCH_MAX,
-            |fi,end| {let (c0,c1)=chunk_time_span(start_sec,hop_sec,fi,end);chunk_cache_get(fi,end,c0,c1)},
+        let out = assemble_bounded_chunks(
+            t,
+            hop,
+            chunk_max_frames(),
+            CHUNK_BATCH_MAX,
+            |fi, end| {
+                let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, end);
+                chunk_cache_get(fi, end, c0, c1)
+            },
             |ranges| {
-                let batch_items:Vec<(Vec<f32>,Vec<f32>,usize)>=ranges.iter().map(|&(fi,chunk_end)| {
-                    let chunk_t = chunk_end - fi;
-                    let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
-                    for m in 0..sess.cfg.num_mels {
-                        let src = &mel_full[m * t + fi..m * t + chunk_end];
-                        let dst = &mut mel_seg[m * chunk_t..(m + 1) * chunk_t];
-                        dst.copy_from_slice(src);
-                    }
-                    let f0_seg = f0_full[fi..chunk_end].to_vec();
-                    (mel_seg, f0_seg, chunk_t)
-                })
-                .collect();
-                let began=std::time::Instant::now();let results=sess.run_model_batch(&batch_items)?;
-                debug_eprintln!("[nsf_hifigan] bounded_batch={}ms chunks={}",began.elapsed().as_millis(),results.len());
+                let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = ranges
+                    .iter()
+                    .map(|&(fi, chunk_end)| {
+                        let chunk_t = chunk_end - fi;
+                        let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
+                        for m in 0..sess.cfg.num_mels {
+                            let src = &mel_full[m * t + fi..m * t + chunk_end];
+                            let dst = &mut mel_seg[m * chunk_t..(m + 1) * chunk_t];
+                            dst.copy_from_slice(src);
+                        }
+                        let f0_seg = f0_full[fi..chunk_end].to_vec();
+                        (mel_seg, f0_seg, chunk_t)
+                    })
+                    .collect();
+                let began = std::time::Instant::now();
+                let results = sess.run_model_batch(&batch_items)?;
+                debug_eprintln!(
+                    "[nsf_hifigan] bounded_batch={}ms chunks={}",
+                    began.elapsed().as_millis(),
+                    results.len()
+                );
                 Ok(results)
             },
-            |fi,end,wf| {let (c0,c1)=chunk_time_span(start_sec,hop_sec,fi,end);chunk_cache_put(fi,end,c0,c1,wf)},
+            |fi, end, wf| {
+                let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, end);
+                chunk_cache_put(fi, end, c0, c1, wf)
+            },
         )?;
 
         // 5. 重采样回原始采样率
@@ -2639,79 +2711,193 @@ mod tests {
         for _ in 0..1000 {
             let _ = super::is_available();
         }
-        assert_eq!(super::PREWARM_STARTED.load(std::sync::atomic::Ordering::Acquire), started);
+        assert_eq!(
+            super::PREWARM_STARTED.load(std::sync::atomic::Ordering::Acquire),
+            started
+        );
         assert_eq!(super::SHARED_SESSION.get().is_some(), session_exists);
     }
 
     #[test]
     fn model_cache_digest_changes_for_equal_length_middle_bytes_and_configuration() {
-        let dir=std::env::temp_dir().join(format!("hfs-model-identity-{}",uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();let model=dir.join("model.onnx");let config=dir.join("config.json");
-        let mut bytes=vec![3_u8;1024];std::fs::write(&model,&bytes).unwrap();std::fs::write(&config,b"config-a").unwrap();
-        let before=super::digest_model_files(&model,&config).unwrap();bytes[512]=4;std::fs::write(&model,&bytes).unwrap();
-        let changed=super::digest_model_files(&model,&config).unwrap();assert_ne!(before,changed);
-        std::fs::write(&config,b"config-b").unwrap();assert_ne!(changed,super::digest_model_files(&model,&config).unwrap());
+        let dir = std::env::temp_dir().join(format!("hfs-model-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("model.onnx");
+        let config = dir.join("config.json");
+        let mut bytes = vec![3_u8; 1024];
+        std::fs::write(&model, &bytes).unwrap();
+        std::fs::write(&config, b"config-a").unwrap();
+        let before = super::digest_model_files(&model, &config).unwrap();
+        bytes[512] = 4;
+        std::fs::write(&model, &bytes).unwrap();
+        let changed = super::digest_model_files(&model, &config).unwrap();
+        assert_ne!(before, changed);
+        std::fs::write(&config, b"config-b").unwrap();
+        assert_ne!(changed, super::digest_model_files(&model, &config).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 字面序列验证长素材批数、混合命中、最后不足整块的样本及cache写回契约。
     #[test]
     fn bounded_chunks_cover_all_samples_and_never_collect_an_unbounded_batch() {
-        let calls=std::cell::RefCell::new(Vec::new());let saved=std::cell::RefCell::new(Vec::new());
-        let out=super::assemble_bounded_chunks(19,2,3,2,
-            |start,end|if start==6 {Some(vec![9.;(end-start)*2])} else {None},
-            |ranges| {calls.borrow_mut().push(ranges.to_vec());Ok(ranges.iter().map(|&(start,end)|vec![start as f32;(end-start)*2]).collect())},
-            |start,end,wf|saved.borrow_mut().push((start,end,wf.len())),
-        ).unwrap();
-        assert_eq!(calls.into_inner(),vec![vec![(0,3),(3,6)],vec![(9,12)],vec![(12,15),(15,18)],vec![(18,19)]]);
-        assert_eq!(out,vec![0.,0.,0.,0.,0.,0.,3.,3.,3.,3.,3.,3.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,12.,12.,12.,12.,12.,12.,15.,15.,15.,15.,15.,15.,18.,18.]);
-        assert_eq!(saved.borrow().last(),Some(&(18,19,2)));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let saved = std::cell::RefCell::new(Vec::new());
+        let out = super::assemble_bounded_chunks(
+            19,
+            2,
+            3,
+            2,
+            |start, end| {
+                if start == 6 {
+                    Some(vec![9.; (end - start) * 2])
+                } else {
+                    None
+                }
+            },
+            |ranges| {
+                calls.borrow_mut().push(ranges.to_vec());
+                Ok(ranges
+                    .iter()
+                    .map(|&(start, end)| vec![start as f32; (end - start) * 2])
+                    .collect())
+            },
+            |start, end, wf| saved.borrow_mut().push((start, end, wf.len())),
+        )
+        .unwrap();
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                vec![(0, 3), (3, 6)],
+                vec![(9, 12)],
+                vec![(12, 15), (15, 18)],
+                vec![(18, 19)]
+            ]
+        );
+        assert_eq!(
+            out,
+            vec![
+                0., 0., 0., 0., 0., 0., 3., 3., 3., 3., 3., 3., 9., 9., 9., 9., 9., 9., 9., 9., 9.,
+                9., 9., 9., 12., 12., 12., 12., 12., 12., 15., 15., 15., 15., 15., 15., 18., 18.
+            ]
+        );
+        assert_eq!(saved.borrow().last(), Some(&(18, 19, 2)));
     }
     #[test]
     fn bounded_chunks_rebuild_corrupt_cache_and_do_not_store_invalid_model_output() {
-        let writes=std::cell::Cell::new(0);
-        let err=super::assemble_bounded_chunks(6,2,3,2,|_,_|Some(vec![f32::NAN;6]),
-            |_|Ok(vec![vec![0.;6],vec![0.;5]]),|_,_,_|writes.set(writes.get()+1)).unwrap_err();
-        assert!(err.contains("invalid HiFiGAN chunk"));assert_eq!(writes.get(),0);
-        let out=super::assemble_bounded_chunks(1,2,3,2,|_,_|Some(vec![0.;1]),
-            |_|Ok(vec![vec![0.25,0.5]]),|_,_,_|writes.set(writes.get()+1)).unwrap();
-        assert_eq!(out,vec![0.25,0.5]);assert_eq!(writes.get(),1);
+        let writes = std::cell::Cell::new(0);
+        let err = super::assemble_bounded_chunks(
+            6,
+            2,
+            3,
+            2,
+            |_, _| Some(vec![f32::NAN; 6]),
+            |_| Ok(vec![vec![0.; 6], vec![0.; 5]]),
+            |_, _, _| writes.set(writes.get() + 1),
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid HiFiGAN chunk"));
+        assert_eq!(writes.get(), 0);
+        let out = super::assemble_bounded_chunks(
+            1,
+            2,
+            3,
+            2,
+            |_, _| Some(vec![0.; 1]),
+            |_| Ok(vec![vec![0.25, 0.5]]),
+            |_, _, _| writes.set(writes.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(out, vec![0.25, 0.5]);
+        assert_eq!(writes.get(), 1);
     }
     /// 真模型超过旧30秒限制，尾块/48k秒域/暖命中/接缝均验证，不将HNSEP切块。
     #[test]
     #[ignore = "真实CPU HiFiGAN长素材诊断：显式运行，不自动重复"]
     fn real_model_long_chunks_and_warm_cache_cover_the_complete_clip() {
         crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
-        let rate=48000u32;let seconds=35;let samples=seconds*rate as usize;
-        let input:Vec<f32>=(0..samples).map(|i| {
-            let phase=2.*std::f64::consts::PI*220.*i as f64/rate as f64;
-            (1..=12).map(|k|0.15/k as f64*(phase*k as f64).sin()).sum::<f64>() as f32
-        }).collect();
-        let cache=std::cell::RefCell::new(std::collections::BTreeMap::new());let writes=std::cell::RefCell::new(Vec::new());
-        let get=|start:usize,end:usize,_:f64,_:f64|cache.borrow().get(&(start,end)).cloned();
-        let put=|start,end,c0,c1,wf:Vec<f32>| {writes.borrow_mut().push((start,end,c0,c1));cache.borrow_mut().insert((start,end),wf);};
-        let began=std::time::Instant::now();
-        let cold=super::infer_pitch_edit_chunked_optimized(&input,rate,3.,|_|60.,|_|0.,&get,&put).unwrap();
-        let cold_ms=began.elapsed().as_millis();let chunks=writes.borrow().clone();let began=std::time::Instant::now();
-        let warm=super::infer_pitch_edit_chunked_optimized(&input,rate,3.,|_|60.,|_|0.,&get,&put).unwrap();
-        let warm_ms=began.elapsed().as_millis();assert_eq!(cold,warm);assert_eq!(writes.borrow().len(),chunks.len());
-        assert_eq!(cold.len(),samples);assert!(cold.iter().all(|v|v.is_finite()));assert!(chunks.len()>super::CHUNK_BATCH_MAX);
-        for (index,(start,end,c0,c1)) in chunks.iter().copied().enumerate() {
-            assert!(end-start<=super::chunk_max_frames());if index>0 {assert_eq!(start,chunks[index-1].1);}
-            assert!((c0-(3.+start as f64*512./44100.)).abs()<1e-10);assert!((c1-(3.+end as f64*512./44100.)).abs()<1e-10);
+        let rate = 48000u32;
+        let seconds = 35;
+        let samples = seconds * rate as usize;
+        let input: Vec<f32> = (0..samples)
+            .map(|i| {
+                let phase = 2. * std::f64::consts::PI * 220. * i as f64 / rate as f64;
+                (1..=12)
+                    .map(|k| 0.15 / k as f64 * (phase * k as f64).sin())
+                    .sum::<f64>() as f32
+            })
+            .collect();
+        let cache = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        let writes = std::cell::RefCell::new(Vec::new());
+        let get =
+            |start: usize, end: usize, _: f64, _: f64| cache.borrow().get(&(start, end)).cloned();
+        let put = |start, end, c0, c1, wf: Vec<f32>| {
+            writes.borrow_mut().push((start, end, c0, c1));
+            cache.borrow_mut().insert((start, end), wf);
+        };
+        let began = std::time::Instant::now();
+        let cold = super::infer_pitch_edit_chunked_optimized(
+            &input,
+            rate,
+            3.,
+            |_| 60.,
+            |_| 0.,
+            &get,
+            &put,
+        )
+        .unwrap();
+        let cold_ms = began.elapsed().as_millis();
+        let chunks = writes.borrow().clone();
+        let began = std::time::Instant::now();
+        let warm = super::infer_pitch_edit_chunked_optimized(
+            &input,
+            rate,
+            3.,
+            |_| 60.,
+            |_| 0.,
+            &get,
+            &put,
+        )
+        .unwrap();
+        let warm_ms = began.elapsed().as_millis();
+        assert_eq!(cold, warm);
+        assert_eq!(writes.borrow().len(), chunks.len());
+        assert_eq!(cold.len(), samples);
+        assert!(cold.iter().all(|v| v.is_finite()));
+        assert!(chunks.len() > super::CHUNK_BATCH_MAX);
+        for (index, (start, end, c0, c1)) in chunks.iter().copied().enumerate() {
+            assert!(end - start <= super::chunk_max_frames());
+            if index > 0 {
+                assert_eq!(start, chunks[index - 1].1);
+            }
+            assert!((c0 - (3. + start as f64 * 512. / 44100.)).abs() < 1e-10);
+            assert!((c1 - (3. + end as f64 * 512. / 44100.)).abs() < 1e-10);
         }
-        assert!(chunks.last().unwrap().1-chunks.last().unwrap().0<super::chunk_max_frames());
+        assert!(chunks.last().unwrap().1 - chunks.last().unwrap().0 < super::chunk_max_frames());
         for second in 0..seconds {
-            let lo=second*rate as usize;let rms=(cold[lo..lo+rate as usize].iter().map(|&v|(v as f64).powi(2)).sum::<f64>()/rate as f64).sqrt();
-            assert!(rms>1e-4,"第{second}秒整段静音: {rms}");
+            let lo = second * rate as usize;
+            let rms = (cold[lo..lo + rate as usize]
+                .iter()
+                .map(|&v| (v as f64).powi(2))
+                .sum::<f64>()
+                / rate as f64)
+                .sqrt();
+            assert!(rms > 1e-4, "第{second}秒整段静音: {rms}");
         }
-        let mut jumps=cold.windows(2).map(|v|(v[1]-v[0]).abs()).collect::<Vec<_>>();jumps.sort_by(f32::total_cmp);
-        let p99=jumps[jumps.len()*99/100];let mut boundary_max=0_f32;
-        for (_,_,_,c1) in chunks.iter().take(chunks.len()-1) {
-            let at=((c1-3.)*rate as f64).round() as usize;
-            boundary_max=boundary_max.max((cold[at]-cold[at-1]).abs());
+        let mut jumps = cold
+            .windows(2)
+            .map(|v| (v[1] - v[0]).abs())
+            .collect::<Vec<_>>();
+        jumps.sort_by(f32::total_cmp);
+        let p99 = jumps[jumps.len() * 99 / 100];
+        let mut boundary_max = 0_f32;
+        for (_, _, _, c1) in chunks.iter().take(chunks.len() - 1) {
+            let at = ((c1 - 3.) * rate as f64).round() as usize;
+            boundary_max = boundary_max.max((cold[at] - cold[at - 1]).abs());
         }
-        assert!(boundary_max<p99*8.+1e-4,"异常接缝: max={boundary_max}, p99={p99}");
+        assert!(
+            boundary_max < p99 * 8. + 1e-4,
+            "异常接缝: max={boundary_max}, p99={p99}"
+        );
         println!("HIFIGAN_LONG rate={rate} seconds={seconds} chunks={} batch_limit={} tail_frames={} cold_ms={cold_ms} warm_ms={warm_ms} warm_extra_runs=0 boundary_max={boundary_max:e} sample_jump_p99={p99:e}",
             chunks.len(),super::CHUNK_BATCH_MAX,chunks.last().unwrap().1-chunks.last().unwrap().0);
     }

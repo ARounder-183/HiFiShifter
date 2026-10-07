@@ -339,11 +339,7 @@ fn hz_to_midi(hz: f64) -> f32 {
 /// `round(220.5) = 221` 会让每帧多走 0.5 样本，累积成 2.27 ms/s 的漂移 ——
 /// 30 s 处已达 68 ms（≈ "检测值比真实值左偏 0.07 s"），且随时间线性增长，
 /// 与真实音频逐帧错位。取整只发生在换算**该帧的窗口边界**这一步。
-pub fn compute_frame_levels(
-    mono: &[f32],
-    sample_rate: u32,
-    frame_period_ms: f64,
-) -> Vec<f32> {
+pub fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Vec<f32> {
     const WINDOW_MS: f64 = 20.0;
     let fp = frame_period_ms.max(0.1);
     let sr = sample_rate.max(1) as f64;
@@ -657,7 +653,11 @@ pub fn schedule_clip_pitch_jobs(
     _out_rate: u32,
 ) {
     // 独立app保持原游离worker行为；插件使用下方可取消且可join的同一实现。
-    drop(schedule_clip_pitch_jobs_scoped(tl, engine_tx, Arc::new(std::sync::atomic::AtomicBool::new(false))));
+    drop(schedule_clip_pitch_jobs_scoped(
+        tl,
+        engine_tx,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    ));
 }
 
 /// 宿主拥有分析worker寿命；会话取消不推进进程全局generation，不取消另一FX。
@@ -911,8 +911,14 @@ pub fn schedule_clip_pitch_jobs_scoped(
 
         // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
         // 一直跑到结束（那正是内存峰值的来源）。
-        let cancelled = || scope_cancelled.load(AtomicOrdering::Acquire) || current_pitch_generation() != generation;
-        if cancelled() {release_inflight(&job.inflight_key);return;}
+        let cancelled = || {
+            scope_cancelled.load(AtomicOrdering::Acquire)
+                || current_pitch_generation() != generation
+        };
+        if cancelled() {
+            release_inflight(&job.inflight_key);
+            return;
+        }
         let analysis = analyze_clip_pitch_and_level_cancellable(
             tl_shared,
             &job.clip,
@@ -1006,9 +1012,8 @@ pub fn schedule_clip_pitch_jobs_scoped(
                 sharing_clip_ids.len()
             );
             for cid in sharing_clip_ids {
-        let _ = tx.send(crate::engine_command::EngineCommand::ClipPitchReady {
-                    clip_id: cid,
-                });
+                let _ =
+                    tx.send(crate::engine_command::EngineCommand::ClipPitchReady { clip_id: cid });
             }
         }
 

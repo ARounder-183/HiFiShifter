@@ -56,12 +56,20 @@ fn create_ara_temp_dir() -> Result<PathBuf, String> {
 }
 
 /// 写入应用私有 WAV，先验证全部源，绝不将 persistentID 当路径打开。
-fn materialize_snapshot(timeline:TimelineState,sources:&[HostPcm],dir:&Path)
-    ->Result<(TimelineState,HashMap<String,String>),String> {
-    let views:Vec<_>=sources.iter().map(|pcm|hifishifter_kernel::editor::host_pcm::PcmView {
-        persistent_id:&pcm.persistent_id,sample_rate:pcm.sample_rate,planes:&pcm.planes,
-    }).collect();
-    hifishifter_kernel::editor::host_pcm::materialize(timeline,&views,dir)
+fn materialize_snapshot(
+    timeline: TimelineState,
+    sources: &[HostPcm],
+    dir: &Path,
+) -> Result<(TimelineState, HashMap<String, String>), String> {
+    let views: Vec<_> = sources
+        .iter()
+        .map(|pcm| hifishifter_kernel::editor::host_pcm::PcmView {
+            persistent_id: &pcm.persistent_id,
+            sample_rate: pcm.sample_rate,
+            planes: &pcm.planes,
+        })
+        .collect();
+    hifishifter_kernel::editor::host_pcm::materialize(timeline, &views, dir)
 }
 
 fn guard_replace(state: &AppState, force: bool) -> Result<(), String> {
@@ -105,12 +113,30 @@ fn unsupported_projection(timeline: &TimelineState) -> Result<serde_json::Value,
     }
     let mut value = serde_json::to_value(normalized).map_err(|e| e.to_string())?;
     let object = value.as_object_mut().ok_or("invalid ARA timeline")?;
-    for key in ["params_by_root_track", "selected_track_id", "selected_clip_id", "playhead_sec", "next_track_order"] {
+    for key in [
+        "params_by_root_track",
+        "selected_track_id",
+        "selected_clip_id",
+        "playhead_sec",
+        "next_track_order",
+    ] {
         object.remove(key);
     }
-    for track in object.get_mut("tracks").and_then(serde_json::Value::as_array_mut).ok_or("missing ARA tracks")? {
+    for track in object
+        .get_mut("tracks")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("missing ARA tracks")?
+    {
         let track = track.as_object_mut().ok_or("invalid ARA track")?;
-        for key in ["compose_enabled", "pitch_analysis_algo", "volume", "muted", "solo"] { track.remove(key); }
+        for key in [
+            "compose_enabled",
+            "pitch_analysis_algo",
+            "volume",
+            "muted",
+            "solo",
+        ] {
+            track.remove(key);
+        }
     }
     Ok(value)
 }
@@ -129,23 +155,42 @@ fn project_projection(project: &crate::state::ProjectState) -> serde_json::Value
 
 /// 与实际IPC载荷一致的受支持投影；包含所有曲线/静态参数及被插件接受的轨道控制。
 fn supported_projection(timeline: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let tracks=timeline.get("tracks").and_then(serde_json::Value::as_array).ok_or("missing submitted ARA tracks")?;
+    let tracks = timeline
+        .get("tracks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("missing submitted ARA tracks")?;
     let controls: Vec<_>=tracks.iter().map(|track| serde_json::json!({
         "id":track["id"], "volume":track["volume"], "muted":track["muted"], "solo":track["solo"],
         "compose_enabled":track["compose_enabled"], "pitch_analysis_algo":track["pitch_analysis_algo"]
     })).collect();
-    Ok(serde_json::json!({"params":timeline.get("params_by_root_track").cloned().unwrap_or_else(||serde_json::json!({})),"tracks":controls}))
+    Ok(
+        serde_json::json!({"params":timeline.get("params_by_root_track").cloned().unwrap_or_else(||serde_json::json!({})),"tracks":controls}),
+    )
 }
 
 /// 清dirty须在timeline锁内确认当前支持参数仍等于实际送出的参数，不能依赖undo版本。
-fn clear_committed_parameter_dirty(state: &AppState, session: &Session, submitted_version: u64, submitted_parameters: &serde_json::Value) {
+fn clear_committed_parameter_dirty(
+    state: &AppState,
+    session: &Session,
+    submitted_version: u64,
+    submitted_parameters: &serde_json::Value,
+) {
     let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if state.timeline_version.load(Ordering::Acquire) != submitted_version
-        || unsupported_projection(&timeline).ok().as_ref() != Some(&session.unsupported_baseline) { return; }
-    let current_parameters=serde_json::to_value(&*timeline).ok().and_then(|timeline| supported_projection(&timeline).ok());
-    if current_parameters.as_ref()!=Some(submitted_parameters) { return; }
+        || unsupported_projection(&timeline).ok().as_ref() != Some(&session.unsupported_baseline)
+    {
+        return;
+    }
+    let current_parameters = serde_json::to_value(&*timeline)
+        .ok()
+        .and_then(|timeline| supported_projection(&timeline).ok());
+    if current_parameters.as_ref() != Some(submitted_parameters) {
+        return;
+    }
     let mut project = state.project.lock().unwrap_or_else(|e| e.into_inner());
-    if project_projection(&project) == session.project_baseline { project.dirty = false; }
+    if project_projection(&project) == session.project_baseline {
+        project.dirty = false;
+    }
 }
 
 /// 保留下载 WAV 到应用退出，避免断开后现有工程或分析线程失去音频。
@@ -339,7 +384,13 @@ pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String
         )
     };
     let request = build_commit(session, timeline)?;
-    let Request::Commit { timeline: sent_timeline, .. } = &request else { return Err("invalid ARA commit request".into()); };
+    let Request::Commit {
+        timeline: sent_timeline,
+        ..
+    } = &request
+    else {
+        return Err("invalid ARA commit request".into());
+    };
     let submitted_parameters = supported_projection(sent_timeline)?;
     let response = hifishifter_ara_ipc::exchange(&session.instance, &request)?;
     apply_commit_response(session, &response)?;
@@ -551,8 +602,11 @@ mod tests {
     #[test]
     fn commit_rejects_local_move_crop_gain_and_track_name_but_accepts_parameters() {
         let mut baseline = fixture();
-        baseline.clips[0].takes[0].source_path = Some("owned.wav".into()); baseline.clips[0].normalize_takes();
-        baseline.tracks = serde_json::from_value(serde_json::json!([{"id":"track","name":"host","order":0}])).unwrap();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        baseline.tracks =
+            serde_json::from_value(serde_json::json!([{"id":"track","name":"host","order":0}]))
+                .unwrap();
         let current = session();
         for change in 0..4 {
             let mut timeline = baseline.clone();
@@ -562,127 +616,325 @@ mod tests {
                 2 => timeline.clips[0].gain = 0.5,
                 _ => timeline.tracks[0].name = "local rename".into(),
             }
-            let error = build_commit(&current, timeline).err().expect("未支持编辑必须拒绝");
+            let error = build_commit(&current, timeline)
+                .err()
+                .expect("未支持编辑必须拒绝");
             assert!(error.contains("REAPER"), "{error}");
         }
         baseline.tracks[0].volume = 0.5;
-        baseline.params_by_root_track.insert("track".into(), hifishifter_kernel::state::TrackParamsState { frame_period_ms:5.0, pitch_edit: vec![62.0], ..Default::default() });
+        baseline.params_by_root_track.insert(
+            "track".into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![62.0],
+                ..Default::default()
+            },
+        );
         assert!(build_commit(&current, baseline).is_ok());
     }
 
     #[test]
-    fn parameter_success_clears_only_submitted_dirty_and_protects_notes_local_project_and_new_edits() {
-        let state=crate::state::command_test_state_without_audio_output(); let current=session(); let mut baseline=fixture();
-        baseline.clips[0].takes[0].source_path=Some("owned.wav".into()); baseline.clips[0].normalize_takes();
-        baseline.tracks[0].volume=0.5; *state.timeline.lock().unwrap()=baseline;
-        let version=state.timeline_version.load(Ordering::Acquire);
-        let sent_parameters=supported_projection(&serde_json::to_value(&*state.timeline.lock().unwrap()).unwrap()).unwrap();
-        state.project.lock().unwrap().dirty=true;
-        clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
+    fn parameter_success_clears_only_submitted_dirty_and_protects_notes_local_project_and_new_edits(
+    ) {
+        let state = crate::state::command_test_state_without_audio_output();
+        let current = session();
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        baseline.tracks[0].volume = 0.5;
+        *state.timeline.lock().unwrap() = baseline;
+        let version = state.timeline_version.load(Ordering::Acquire);
+        let sent_parameters =
+            supported_projection(&serde_json::to_value(&*state.timeline.lock().unwrap()).unwrap())
+                .unwrap();
+        state.project.lock().unwrap().dirty = true;
+        clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
         assert!(!state.project.lock().unwrap().dirty);
         for change in 0..4 {
-            let mut project=crate::state::ProjectState::default(); project.dirty=true;
-            match change { 0=>project.notes_markdown="unsaved notes".into(),1=>project.path=Some("local.hfs".into()),
-                2=>project.name="local name".into(),_=>project.base_scale="D".into() }
-            *state.project.lock().unwrap()=project;
-            clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
-            assert!(guard_replace(&state,false).is_err(),"本地工程变化仍须确认刷新");
+            let mut project = crate::state::ProjectState::default();
+            project.dirty = true;
+            match change {
+                0 => project.notes_markdown = "unsaved notes".into(),
+                1 => project.path = Some("local.hfs".into()),
+                2 => project.name = "local name".into(),
+                _ => project.base_scale = "D".into(),
+            }
+            *state.project.lock().unwrap() = project;
+            clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
+            assert!(
+                guard_replace(&state, false).is_err(),
+                "本地工程变化仍须确认刷新"
+            );
         }
-        *state.project.lock().unwrap()=crate::state::ProjectState::default(); state.project.lock().unwrap().dirty=true;
-        state.bump_timeline_version(); clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
-        assert!(guard_replace(&state,false).is_err(),"IPC期间新编辑仍须确认");
+        *state.project.lock().unwrap() = crate::state::ProjectState::default();
+        state.project.lock().unwrap().dirty = true;
+        state.bump_timeline_version();
+        clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
+        assert!(
+            guard_replace(&state, false).is_err(),
+            "IPC期间新编辑仍须确认"
+        );
     }
 
     fn parameter_command_state() -> AppState {
-        let state=crate::state::command_test_state_without_audio_output(); let mut timeline=fixture();
-        timeline.clips[0].takes[0].source_path=Some("owned.wav".into()); timeline.clips[0].normalize_takes();
+        let state = crate::state::command_test_state_without_audio_output();
+        let mut timeline = fixture();
+        timeline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        timeline.clips[0].normalize_takes();
         // dirty契约不需要推理：None避免build_root_pitch_key触发FCPE后台预热。
-        timeline.tracks[0].pitch_analysis_algo=hifishifter_kernel::state::PitchAnalysisAlgo::None;
-        let mut pitch=vec![69.0;201]; pitch[0]=62.0; pitch[1]=66.0;
-        timeline.params_by_root_track.insert("track".into(),hifishifter_kernel::state::TrackParamsState {
-            frame_period_ms:5.0,pitch_orig:vec![69.0;201],pitch_edit:pitch,pitch_edit_user_modified:true,..Default::default() });
-        *state.timeline.lock().unwrap()=timeline;
+        timeline.tracks[0].pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::None;
+        let mut pitch = vec![69.0; 201];
+        pitch[0] = 62.0;
+        pitch[1] = 66.0;
+        timeline.params_by_root_track.insert(
+            "track".into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![69.0; 201],
+                pitch_edit: pitch,
+                pitch_edit_user_modified: true,
+                ..Default::default()
+            },
+        );
+        *state.timeline.lock().unwrap() = timeline;
         state
     }
 
     /// 真实首块checkpoint=true，后续尾块/平滑false；不能用手动bump伪造写入。
     #[test]
     fn noncheckpoint_curve_write_during_successful_commit_keeps_unsent_parameters_dirty() {
-        for smoothing in [false,true] {
-            let state=parameter_command_state(); let mut current=session();
-            assert_eq!(crate::commands::write_param_frames_for_test(&state,"track".into(),"pitch".into(),0,vec![61.0],Some(true))["ok"],true);
-            let submitted=state.timeline.lock().unwrap().clone(); let version=state.timeline_version.load(Ordering::Acquire);
-            let Request::Commit { timeline: sent_timeline, .. }=build_commit(&current,submitted.clone()).unwrap() else { panic!("wrong request") };
-            let sent_parameters=supported_projection(&sent_timeline).unwrap();
-            let history=state.history_depths();
-            assert_eq!(crate::commands::write_param_frames_for_test(&state,"track".into(),"pitch".into(),if smoothing {0} else {1},vec![64.0],Some(false))["ok"],true);
-            assert_eq!(state.timeline_version.load(Ordering::Acquire),version,"真实false写入没有造版本变动");
-            assert_eq!(state.history_depths(),history,"尾块不能制造undo");
-            apply_commit_response(&mut current,&Response { ok:true,revision:8,model_revision:9,..Default::default() }).unwrap();
-            clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
-            assert!(guard_replace(&state,false).is_err(),"IPC中的未发送尾块/平滑仍须确认刷新");
+        for smoothing in [false, true] {
+            let state = parameter_command_state();
+            let mut current = session();
+            assert_eq!(
+                crate::commands::write_param_frames_for_test(
+                    &state,
+                    "track".into(),
+                    "pitch".into(),
+                    0,
+                    vec![61.0],
+                    Some(true)
+                )["ok"],
+                true
+            );
+            let submitted = state.timeline.lock().unwrap().clone();
+            let version = state.timeline_version.load(Ordering::Acquire);
+            let Request::Commit {
+                timeline: sent_timeline,
+                ..
+            } = build_commit(&current, submitted.clone()).unwrap()
+            else {
+                panic!("wrong request")
+            };
+            let sent_parameters = supported_projection(&sent_timeline).unwrap();
+            let history = state.history_depths();
+            assert_eq!(
+                crate::commands::write_param_frames_for_test(
+                    &state,
+                    "track".into(),
+                    "pitch".into(),
+                    if smoothing { 0 } else { 1 },
+                    vec![64.0],
+                    Some(false)
+                )["ok"],
+                true
+            );
+            assert_eq!(
+                state.timeline_version.load(Ordering::Acquire),
+                version,
+                "真实false写入没有造版本变动"
+            );
+            assert_eq!(state.history_depths(), history, "尾块不能制造undo");
+            apply_commit_response(
+                &mut current,
+                &Response {
+                    ok: true,
+                    revision: 8,
+                    model_revision: 9,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
+            assert!(
+                guard_replace(&state, false).is_err(),
+                "IPC中的未发送尾块/平滑仍须确认刷新"
+            );
         }
     }
 
     #[test]
     fn noncheckpoint_curve_tail_after_successful_commit_marks_dirty_without_new_undo() {
-        let state=parameter_command_state(); let mut current=session();
-        crate::commands::write_param_frames_for_test(&state,"track".into(),"pitch".into(),0,vec![61.0],Some(true));
-        let version=state.timeline_version.load(Ordering::Acquire); let history=state.history_depths();
-        let sent_parameters=supported_projection(&serde_json::to_value(&*state.timeline.lock().unwrap()).unwrap()).unwrap();
-        apply_commit_response(&mut current,&Response { ok:true,revision:8,model_revision:9,..Default::default() }).unwrap();
-        clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
-        assert!(!state.project.lock().unwrap().dirty,"已提交当前参数可清dirty");
-        assert_eq!(crate::commands::write_param_frames_for_test(&state,"track".into(),"pitch".into(),1,vec![64.0],Some(false))["ok"],true);
-        assert_eq!(state.timeline_version.load(Ordering::Acquire),version);
-        assert_eq!(state.history_depths(),history);
-        assert!(guard_replace(&state,false).is_err(),"成功后的false尾块必须重新标脏");
+        let state = parameter_command_state();
+        let mut current = session();
+        crate::commands::write_param_frames_for_test(
+            &state,
+            "track".into(),
+            "pitch".into(),
+            0,
+            vec![61.0],
+            Some(true),
+        );
+        let version = state.timeline_version.load(Ordering::Acquire);
+        let history = state.history_depths();
+        let sent_parameters =
+            supported_projection(&serde_json::to_value(&*state.timeline.lock().unwrap()).unwrap())
+                .unwrap();
+        apply_commit_response(
+            &mut current,
+            &Response {
+                ok: true,
+                revision: 8,
+                model_revision: 9,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
+        assert!(
+            !state.project.lock().unwrap().dirty,
+            "已提交当前参数可清dirty"
+        );
+        assert_eq!(
+            crate::commands::write_param_frames_for_test(
+                &state,
+                "track".into(),
+                "pitch".into(),
+                1,
+                vec![64.0],
+                Some(false)
+            )["ok"],
+            true
+        );
+        assert_eq!(state.timeline_version.load(Ordering::Acquire), version);
+        assert_eq!(state.history_depths(), history);
+        assert!(
+            guard_replace(&state, false).is_err(),
+            "成功后的false尾块必须重新标脏"
+        );
     }
 
     #[test]
     fn successful_commit_requires_all_supported_track_controls_to_match_sent_payload() {
-        for field in ["volume","muted","solo","compose_enabled","pitch_analysis_algo"] {
-            let state=parameter_command_state(); let current=session();
-            let submitted=state.timeline.lock().unwrap().clone(); let version=state.timeline_version.load(Ordering::Acquire);
-            let Request::Commit { timeline:sent_timeline,.. }=build_commit(&current,submitted).unwrap() else { panic!("wrong request") };
-            let sent_parameters=supported_projection(&sent_timeline).unwrap();
-            state.project.lock().unwrap().dirty=true;
-            let mut timeline=state.timeline.lock().unwrap(); let track=&mut timeline.tracks[0];
-            match field { "volume"=>track.volume=0.5,"muted"=>track.muted=true,"solo"=>track.solo=true,
-                "compose_enabled"=>track.compose_enabled=true,_=>track.pitch_analysis_algo=hifishifter_kernel::state::PitchAnalysisAlgo::WorldDll }
+        for field in [
+            "volume",
+            "muted",
+            "solo",
+            "compose_enabled",
+            "pitch_analysis_algo",
+        ] {
+            let state = parameter_command_state();
+            let current = session();
+            let submitted = state.timeline.lock().unwrap().clone();
+            let version = state.timeline_version.load(Ordering::Acquire);
+            let Request::Commit {
+                timeline: sent_timeline,
+                ..
+            } = build_commit(&current, submitted).unwrap()
+            else {
+                panic!("wrong request")
+            };
+            let sent_parameters = supported_projection(&sent_timeline).unwrap();
+            state.project.lock().unwrap().dirty = true;
+            let mut timeline = state.timeline.lock().unwrap();
+            let track = &mut timeline.tracks[0];
+            match field {
+                "volume" => track.volume = 0.5,
+                "muted" => track.muted = true,
+                "solo" => track.solo = true,
+                "compose_enabled" => track.compose_enabled = true,
+                _ => {
+                    track.pitch_analysis_algo =
+                        hifishifter_kernel::state::PitchAnalysisAlgo::WorldDll
+                }
+            }
             drop(timeline);
-            clear_committed_parameter_dirty(&state,&current,version,&sent_parameters);
-            assert!(guard_replace(&state,false).is_err(),"未发送轨道控制也不能清dirty: {field}");
+            clear_committed_parameter_dirty(&state, &current, version, &sent_parameters);
+            assert!(
+                guard_replace(&state, false).is_err(),
+                "未发送轨道控制也不能清dirty: {field}"
+            );
         }
     }
 
     #[test]
     fn noncheckpoint_restore_marks_clean_project_dirty_without_checkpoint() {
-        let state=parameter_command_state(); let version=state.timeline_version.load(Ordering::Acquire);
-        let response=crate::commands::restore_param_frames_for_test(&state,"track".into(),"pitch".into(),0,1,Some(false));
-        assert_eq!(response["ok"],true); assert_eq!(state.timeline.lock().unwrap().params_by_root_track["track"].pitch_edit[0],69.0);
-        assert_eq!(state.timeline_version.load(Ordering::Acquire),version); assert_eq!(state.history_depths(),(0,0));
-        assert!(guard_replace(&state,false).is_err(),"真实false恢复必须标脏");
+        let state = parameter_command_state();
+        let version = state.timeline_version.load(Ordering::Acquire);
+        let response = crate::commands::restore_param_frames_for_test(
+            &state,
+            "track".into(),
+            "pitch".into(),
+            0,
+            1,
+            Some(false),
+        );
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            state.timeline.lock().unwrap().params_by_root_track["track"].pitch_edit[0],
+            69.0
+        );
+        assert_eq!(state.timeline_version.load(Ordering::Acquire), version);
+        assert_eq!(state.history_depths(), (0, 0));
+        assert!(
+            guard_replace(&state, false).is_err(),
+            "真实false恢复必须标脏"
+        );
     }
 
     #[test]
     fn noncheckpoint_static_parameter_marks_clean_project_dirty_without_checkpoint() {
-        let state=parameter_command_state(); let version=state.timeline_version.load(Ordering::Acquire);
-        let response=crate::commands::set_static_param_for_test(&state,"track".into(),"synth_mode".into(),1.0,Some(false));
-        assert_eq!(response["ok"],true); assert_eq!(state.timeline.lock().unwrap().params_by_root_track["track"].extra_params["synth_mode"],1.0);
-        assert_eq!(state.timeline_version.load(Ordering::Acquire),version); assert_eq!(state.history_depths(),(0,0));
-        assert!(guard_replace(&state,false).is_err(),"真实false静态参数写入必须标脏");
+        let state = parameter_command_state();
+        let version = state.timeline_version.load(Ordering::Acquire);
+        let response = crate::commands::set_static_param_for_test(
+            &state,
+            "track".into(),
+            "synth_mode".into(),
+            1.0,
+            Some(false),
+        );
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            state.timeline.lock().unwrap().params_by_root_track["track"].extra_params["synth_mode"],
+            1.0
+        );
+        assert_eq!(state.timeline_version.load(Ordering::Acquire), version);
+        assert_eq!(state.history_depths(), (0, 0));
+        assert!(
+            guard_replace(&state, false).is_err(),
+            "真实false静态参数写入必须标脏"
+        );
     }
 
     #[test]
     fn noncheckpoint_linked_parameter_write_marks_clean_project_dirty_without_checkpoint() {
-        let state=parameter_command_state(); let version=state.timeline_version.load(Ordering::Acquire);
-        let before=state.timeline.lock().unwrap().params_by_root_track["track"].pitch_edit.clone();
-        let response=crate::commands::stretch_track_linked_params_for_test(&state,"track".into(),vec![crate::state::StretchLinkedRangeSec {
-            old_start_sec:0.0,old_length_sec:0.01,new_start_sec:0.0,new_length_sec:0.02 }],Some(false));
-        assert_eq!(response["ok"],true); assert_ne!(state.timeline.lock().unwrap().params_by_root_track["track"].pitch_edit,before);
-        assert_eq!(state.timeline_version.load(Ordering::Acquire),version); assert_eq!(state.history_depths(),(0,0));
-        assert!(guard_replace(&state,false).is_err(),"真实false关联参数写入必须标脏");
+        let state = parameter_command_state();
+        let version = state.timeline_version.load(Ordering::Acquire);
+        let before = state.timeline.lock().unwrap().params_by_root_track["track"]
+            .pitch_edit
+            .clone();
+        let response = crate::commands::stretch_track_linked_params_for_test(
+            &state,
+            "track".into(),
+            vec![crate::state::StretchLinkedRangeSec {
+                old_start_sec: 0.0,
+                old_length_sec: 0.01,
+                new_start_sec: 0.0,
+                new_length_sec: 0.02,
+            }],
+            Some(false),
+        );
+        assert_eq!(response["ok"], true);
+        assert_ne!(
+            state.timeline.lock().unwrap().params_by_root_track["track"].pitch_edit,
+            before
+        );
+        assert_eq!(state.timeline_version.load(Ordering::Acquire), version);
+        assert_eq!(state.history_depths(), (0, 0));
+        assert!(
+            guard_replace(&state, false).is_err(),
+            "真实false关联参数写入必须标脏"
+        );
     }
 
     #[test]

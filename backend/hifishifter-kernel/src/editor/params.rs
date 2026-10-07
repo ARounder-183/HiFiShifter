@@ -295,7 +295,8 @@ pub fn get_param_frames(
     // Schedule pitch_orig analysis in background; return current cached curve immediately.
     let analysis_pending = if param == "pitch" {
         Some(crate::pitch_analysis::maybe_schedule_pitch_orig(
-            &state.timeline(), &root,
+            &state.timeline(),
+            &root,
         ))
     } else {
         None
@@ -312,7 +313,8 @@ pub fn get_param_frames(
             roots.insert(root.clone());
         }
         Some(crate::pitch_analysis::maybe_schedule_dyn_orig(
-            &state.timeline(), &root,
+            &state.timeline(),
+            &root,
         ))
     } else {
         None

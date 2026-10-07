@@ -27,27 +27,27 @@ macro_rules! log_error_limited {
 mod build_git;
 // 跨 app / 内核边界的测试：它们要同时看见两侧，所以住在 app。
 // 详见各自的文件头注释。
+mod build_info;
 #[cfg(test)]
 mod project_tests;
 #[cfg(test)]
 mod renderer_cross_checks;
-mod build_info;
 // app 层的事件出口：把 Tauri 的 `AppHandle` 包成内核认识的 `EventSink`，
 // 并给 app 层自己留一个 `AppHandle` 出口。内核模块不再直接引用 `tauri::`。
 mod app_events;
 pub mod logging;
 mod zip_util;
 
-mod audio_engine;
 mod ara_bridge;
+mod audio_engine;
 pub(crate) mod commands;
+#[path = "audio/hfspeaks_v2.rs"]
+mod hfspeaks_v2;
 mod launch_args;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
 mod silence_detect;
-#[path = "audio/hfspeaks_v2.rs"]
-mod hfspeaks_v2;
 
 // ── 内核模块：接回路径 ──────────────────────────────────────────────────────
 //
@@ -60,20 +60,22 @@ mod hfspeaks_v2;
 pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
     audio_utils, byte_budget_cache, channel_decision, channel_mode, channel_policy,
-    clip_rendering_state, config, dml_adapters, encode, formant_cache, formant_morph,
-    glottal_rd, gpu_info, hnsep_dsp, media, metronome, midi_import, mixdown, models,
-    notebook_assets, pitch_analysis, pitch_clip, pitch_config, pitch_editing, project,
-    rd_tension, render_cache, render_key, renderer, stereo_detect, streaming_pitch,
-    streaming_world, synth_clip_cache, temp_manager, vibrato, world_vocoder,
+    clip_rendering_state, config, dml_adapters, encode, formant_cache, formant_morph, glottal_rd,
+    gpu_info, hnsep_dsp, media, metronome, midi_import, mixdown, models, notebook_assets,
+    pitch_analysis, pitch_clip, pitch_config, pitch_editing, project, rd_tension, render_cache,
+    render_key, renderer, stereo_detect, streaming_pitch, streaming_world, synth_clip_cache,
+    temp_manager, vibrato, world_vocoder,
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
-#[cfg(feature = "onnx")]
-pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, mel_utils, nsf_hifigan_onnx, vocoder_ort_session};
-#[cfg(not(feature = "onnx"))]
-pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, nsf_hifigan_onnx};
 #[cfg(all(feature = "vslib", target_os = "windows"))]
 pub(crate) use hifishifter_kernel::vslib;
+#[cfg(feature = "onnx")]
+pub(crate) use hifishifter_kernel::{
+    fcpe_onnx, hnsep_onnx, mel_utils, nsf_hifigan_onnx, vocoder_ort_session,
+};
+#[cfg(not(feature = "onnx"))]
+pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, nsf_hifigan_onnx};
 
 // ── 测试专用的分配计量 ───────────────────────────────────────────────────────
 //
@@ -174,7 +176,6 @@ mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
 #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
-
 #[cfg(target_os = "windows")]
 mod webview2_accelerators;
 

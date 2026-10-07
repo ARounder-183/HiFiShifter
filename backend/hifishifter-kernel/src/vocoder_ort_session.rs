@@ -1360,8 +1360,9 @@ fn cpu_intra_threads(role: OrtSessionRole) -> usize {
 
 /// 整段HNSEP尺寸随素材长度变化，CPU arena/pattern会留住整段巨型中间块。
 /// 其它模型保持原复用策略；Intel macOS的ort-tract不改原生ORT专用配置。
-fn cpu_memory_reuse(role:OrtSessionRole)->bool {
-    !matches!(role,OrtSessionRole::Separator)||cfg!(all(target_os="macos",target_arch="x86_64"))
+fn cpu_memory_reuse(role: OrtSessionRole) -> bool {
+    !matches!(role, OrtSessionRole::Separator)
+        || cfg!(all(target_os = "macos", target_arch = "x86_64"))
 }
 
 /// Build a pure CPU session (used for "cpu" choice or fallback).
@@ -1370,12 +1371,16 @@ fn build_cpu_session(
     role: OrtSessionRole,
     choice: &str,
 ) -> Result<(Session, String), String> {
-    build_cpu_session_with_memory_reuse(onnx_path,role,choice,cpu_memory_reuse(role))
+    build_cpu_session_with_memory_reuse(onnx_path, role, choice, cpu_memory_reuse(role))
 }
 
 /// 固定同一图优化/线程/模型，分离分配策略以便短输入oracle对照；生产入口按角色选择。
-fn build_cpu_session_with_memory_reuse(onnx_path:&Path,role:OrtSessionRole,choice:&str,memory_reuse:bool)
-    ->Result<(Session,String),String> {
+fn build_cpu_session_with_memory_reuse(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    choice: &str,
+    memory_reuse: bool,
+) -> Result<(Session, String), String> {
     let mut builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
@@ -1397,14 +1402,16 @@ fn build_cpu_session_with_memory_reuse(onnx_path:&Path,role:OrtSessionRole,choic
     if !memory_reuse {
         // 核对ort-rc.13 ep/cpu.rs：显式注册CPU(false)才会调用DisableCpuMemArena。
         // 不注册EP的默认CPU仍开arena；只关memory_pattern不能释放该大缓存。
-        builder=builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-            .map_err(|e|format!("disable separator CPU arena failed: {e}"))?;
+        builder = builder
+            .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+            .map_err(|e| format!("disable separator CPU arena failed: {e}"))?;
     }
-    if matches!(role,OrtSessionRole::Separator) {
+    if matches!(role, OrtSessionRole::Separator) {
         // 仅显式诊断启用；常规App/插件不生成ORT算子日志，路径由隔离探针提供。
-        if let Some(prefix)=std::env::var_os("HIFISHIFTER_HNSEP_ORT_PROFILE_PREFIX") {
-            builder=builder.with_profiling(std::path::PathBuf::from(prefix))
-                .map_err(|error|format!("enable separator operator profile failed: {error}"))?;
+        if let Some(prefix) = std::env::var_os("HIFISHIFTER_HNSEP_ORT_PROFILE_PREFIX") {
+            builder = builder
+                .with_profiling(std::path::PathBuf::from(prefix))
+                .map_err(|error| format!("enable separator operator profile failed: {error}"))?;
         }
     }
 
@@ -1642,36 +1649,82 @@ mod tests {
     /// 动态整段分离不复用巨型工作区；其它角色和Intel macOS原策略保持。
     #[test]
     fn cpu_allocator_reuse_is_role_specific() {
-        assert!(super::cpu_memory_reuse(OrtSessionRole::Vocoder));assert!(super::cpu_memory_reuse(OrtSessionRole::PitchDetector));
-        assert_eq!(super::cpu_memory_reuse(OrtSessionRole::Separator),cfg!(all(target_os="macos",target_arch="x86_64")));
+        assert!(super::cpu_memory_reuse(OrtSessionRole::Vocoder));
+        assert!(super::cpu_memory_reuse(OrtSessionRole::PitchDetector));
+        assert_eq!(
+            super::cpu_memory_reuse(OrtSessionRole::Separator),
+            cfg!(all(target_os = "macos", target_arch = "x86_64"))
+        );
     }
     /// 新旧CPU分配策略运行同一真实HNSEP mask，输出逐bit一致；不以更小内存改变DSP语义。
     #[test]
-    #[ignore="真实HNSEP CPU分配策略短输入oracle：显式运行"]
+    #[ignore = "真实HNSEP CPU分配策略短输入oracle：显式运行"]
     fn separator_cpu_allocator_policy_preserves_real_mask_bits() {
-        let model=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/models/hnsep/hnsep.onnx");
-        let samples=(0..2*1025*32).map(|index|(index%257) as f32/256.-0.5).collect::<Vec<_>>();
-        let run=|reuse| {
-            let (mut session,_)=super::build_cpu_session_with_memory_reuse(&model,OrtSessionRole::Separator,"cpu-oracle",reuse).unwrap();
-            let input=ort::value::Tensor::from_array(([1usize,2,1025,32],samples.clone().into_boxed_slice())).unwrap();
-            let output=session.run(ort::inputs![input]).unwrap().into_iter().next().unwrap().1;
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../src-tauri/resources/models/hnsep/hnsep.onnx");
+        let samples = (0..2 * 1025 * 32)
+            .map(|index| (index % 257) as f32 / 256. - 0.5)
+            .collect::<Vec<_>>();
+        let run = |reuse| {
+            let (mut session, _) = super::build_cpu_session_with_memory_reuse(
+                &model,
+                OrtSessionRole::Separator,
+                "cpu-oracle",
+                reuse,
+            )
+            .unwrap();
+            let input = ort::value::Tensor::from_array((
+                [1usize, 2, 1025, 32],
+                samples.clone().into_boxed_slice(),
+            ))
+            .unwrap();
+            let output = session
+                .run(ort::inputs![input])
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap()
+                .1;
             output.try_extract_tensor::<f32>().unwrap().1.to_vec()
         };
-        let old=run(true);let new=run(false);assert_eq!(old.len(),new.len());
-        assert!(old.iter().zip(&new).all(|(old,new)|old.to_bits()==new.to_bits()));
+        let old = run(true);
+        let new = run(false);
+        assert_eq!(old.len(), new.len());
+        assert!(old
+            .iter()
+            .zip(&new)
+            .all(|(old, new)| old.to_bits() == new.to_bits()));
     }
     /// 10秒整段输入记录真实ORT算子形状/输出大小，用于定位长源峰值，不修改模型或切块。
     #[test]
-    #[ignore="真实HNSEP算子资源profile：显式运行并提供隔离日志前缀"]
+    #[ignore = "真实HNSEP算子资源profile：显式运行并提供隔离日志前缀"]
     fn profile_full_separator_cpu_operators() {
         assert!(std::env::var_os("HIFISHIFTER_HNSEP_ORT_PROFILE_PREFIX").is_some());
-        let model=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/models/hnsep/hnsep.onnx");
-        let (mut session,_)=super::build_cpu_session_with_memory_reuse(&model,OrtSessionRole::Separator,"cpu-profile",false).unwrap();
-        let samples=(0..2*1025*864).map(|index|(index%257) as f32/256.-0.5).collect::<Vec<_>>();
-        let input=ort::value::Tensor::from_array(([1usize,2,1025,864],samples.into_boxed_slice())).unwrap();
-        let output=session.run(ort::inputs![input]).unwrap();let first=output.into_iter().next().unwrap().1;
-        assert!(first.try_extract_tensor::<f32>().unwrap().1.iter().all(|sample|sample.is_finite()));
-        let path=session.end_profiling().unwrap();println!("SEPARATOR_OPERATOR_PROFILE {path}");
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../src-tauri/resources/models/hnsep/hnsep.onnx");
+        let (mut session, _) = super::build_cpu_session_with_memory_reuse(
+            &model,
+            OrtSessionRole::Separator,
+            "cpu-profile",
+            false,
+        )
+        .unwrap();
+        let samples = (0..2 * 1025 * 864)
+            .map(|index| (index % 257) as f32 / 256. - 0.5)
+            .collect::<Vec<_>>();
+        let input =
+            ort::value::Tensor::from_array(([1usize, 2, 1025, 864], samples.into_boxed_slice()))
+                .unwrap();
+        let output = session.run(ort::inputs![input]).unwrap();
+        let first = output.into_iter().next().unwrap().1;
+        assert!(first
+            .try_extract_tensor::<f32>()
+            .unwrap()
+            .1
+            .iter()
+            .all(|sample| sample.is_finite()));
+        let path = session.end_profiling().unwrap();
+        println!("SEPARATOR_OPERATOR_PROFILE {path}");
     }
 
     /// 烟测探针的帧数必须按角色区分。

@@ -26,14 +26,36 @@ pub(super) fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Va
 // ===================== root mix waveform peaks =====================
 
 /// 原根轨mix波形薄适配，默认设备/文件工作区路径不变。
-pub(super) fn get_root_mix_waveform_peaks_segment(state:State<'_,AppState>,track_id:String,
-    start_sec:f64,duration_sec:f64,columns:usize)->WaveformPeaksSegmentPayload {
-    hifishifter_kernel::editor::waveform::get_root_mix_waveform_peaks_segment(&*state,track_id,start_sec,duration_sec,columns)
+pub(super) fn get_root_mix_waveform_peaks_segment(
+    state: State<'_, AppState>,
+    track_id: String,
+    start_sec: f64,
+    duration_sec: f64,
+    columns: usize,
+) -> WaveformPeaksSegmentPayload {
+    hifishifter_kernel::editor::waveform::get_root_mix_waveform_peaks_segment(
+        &*state,
+        track_id,
+        start_sec,
+        duration_sec,
+        columns,
+    )
 }
 /// 原轨道mix波形薄适配。
-pub(super) fn get_track_mix_waveform_peaks_segment(state:State<'_,AppState>,track_id:String,
-    start_sec:f64,duration_sec:f64,columns:usize)->WaveformPeaksSegmentPayload {
-    hifishifter_kernel::editor::waveform::get_track_mix_waveform_peaks_segment(&*state,track_id,start_sec,duration_sec,columns)
+pub(super) fn get_track_mix_waveform_peaks_segment(
+    state: State<'_, AppState>,
+    track_id: String,
+    start_sec: f64,
+    duration_sec: f64,
+    columns: usize,
+) -> WaveformPeaksSegmentPayload {
+    hifishifter_kernel::editor::waveform::get_track_mix_waveform_peaks_segment(
+        &*state,
+        track_id,
+        start_sec,
+        duration_sec,
+        columns,
+    )
 }
 /// 返回 Base64 编码的 String，避免 Tauri v2 将 Vec<u8> 序列化为 JSON number[]
 /// 导致的 3~5 倍传输膨胀。前端通过 atob() 解码后直接创建 Float32Array 视图。

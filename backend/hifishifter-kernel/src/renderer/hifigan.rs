@@ -39,29 +39,57 @@ pub struct ChunkCacheEntry {
 /// 同一处契约的两个方向。
 type Key = (String, u16, usize);
 
-const CHUNK_CACHE_BYTES:usize=128*1024*1024;
+const CHUNK_CACHE_BYTES: usize = 128 * 1024 * 1024;
 pub struct ChunkCache {
-    entries:lru::LruCache<Key,ChunkCacheEntry>,
-    bytes:usize,max_bytes:usize,
+    entries: lru::LruCache<Key, ChunkCacheEntry>,
+    bytes: usize,
+    max_bytes: usize,
 }
 impl ChunkCache {
-    fn new(max_bytes:usize)->Self {Self {entries:lru::LruCache::unbounded(),bytes:0,max_bytes}}
-    fn len(&self)->usize {self.entries.len()}
-    fn values(&self)->impl Iterator<Item=&ChunkCacheEntry> {self.entries.iter().map(|(_,entry)|entry)}
-    fn keys(&self)->impl Iterator<Item=&Key> {self.entries.iter().map(|(key,_)|key)}
-    fn get(&mut self,key:&Key)->Option<&ChunkCacheEntry> {self.entries.get(key)}
-    fn remove(&mut self,key:&Key) {if let Some(old)=self.entries.pop(key) {self.bytes-=old.waveform.len()*4;}}
-    /// 字节驱逐只释放缓存所有权；已取出的worker副本与当前就绪快照不受影响。
-    fn insert(&mut self,key:Key,entry:ChunkCacheEntry) {
-        let bytes=entry.waveform.len().saturating_mul(4);
-        if bytes>self.max_bytes||entry.waveform.is_empty() {return;}
-        self.remove(&key);
-        while self.bytes.saturating_add(bytes)>self.max_bytes {
-            let Some((_,old))=self.entries.pop_lru() else {break;};self.bytes-=old.waveform.len()*4;
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: lru::LruCache::unbounded(),
+            bytes: 0,
+            max_bytes,
         }
-        self.entries.put(key,entry);self.bytes+=bytes;
     }
-    fn clear(&mut self) {self.entries.clear();self.bytes=0;}
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn values(&self) -> impl Iterator<Item = &ChunkCacheEntry> {
+        self.entries.iter().map(|(_, entry)| entry)
+    }
+    fn keys(&self) -> impl Iterator<Item = &Key> {
+        self.entries.iter().map(|(key, _)| key)
+    }
+    fn get(&mut self, key: &Key) -> Option<&ChunkCacheEntry> {
+        self.entries.get(key)
+    }
+    fn remove(&mut self, key: &Key) {
+        if let Some(old) = self.entries.pop(key) {
+            self.bytes -= old.waveform.len() * 4;
+        }
+    }
+    /// 字节驱逐只释放缓存所有权；已取出的worker副本与当前就绪快照不受影响。
+    fn insert(&mut self, key: Key, entry: ChunkCacheEntry) {
+        let bytes = entry.waveform.len().saturating_mul(4);
+        if bytes > self.max_bytes || entry.waveform.is_empty() {
+            return;
+        }
+        self.remove(&key);
+        while self.bytes.saturating_add(bytes) > self.max_bytes {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes -= old.waveform.len() * 4;
+        }
+        self.entries.put(key, entry);
+        self.bytes += bytes;
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
 }
 static CHUNK_CACHE: OnceLock<Mutex<ChunkCache>> = OnceLock::new();
 
@@ -212,7 +240,11 @@ impl HiFiGanRenderer {
         // 用 clip_id + seg 范围 + pitch_edit 片段 计算 param_hash，
         // 实现离线渲染路径的推理结果复用。
         let sr = ctx.sample_rate;
-        let renderer_identity=format!("{}:{}",self.id(),crate::nsf_hifigan_onnx::cache_identity()?);
+        let renderer_identity = format!(
+            "{}:{}",
+            self.id(),
+            crate::nsf_hifigan_onnx::cache_identity()?
+        );
         let seg_start_frame = (ctx.seg_start_sec * sr as f64).round().max(0.0) as u64;
         let seg_end_frame = (ctx.seg_end_sec * sr as f64).round().max(0.0) as u64;
         // 直接引用上下文里的 pitch_edit，不再 to_vec()
@@ -518,16 +550,27 @@ mod tests {
 
     #[test]
     fn chunk_cache_byte_lru_is_bounded_and_accounts_replacement_and_invalidation() {
-        let mut cache=ChunkCache::new(32);
-        let entry=|n,value|ChunkCacheEntry {param_hash:1,waveform:vec![value;n]};
-        cache.insert(("a".into(),0,0),entry(4,0.25));cache.insert(("a".into(),1,0),entry(4,0.5));
-        assert_eq!(cache.bytes,32);cache.get(&("a".into(),0,0));
-        cache.insert(("b".into(),0,0),entry(4,0.75));
-        assert!(cache.get(&("a".into(),1,0)).is_none());assert_eq!(cache.bytes,32);
-        cache.insert(("a".into(),0,0),entry(2,1.));assert_eq!(cache.bytes,24);
-        cache.insert(("long".into(),0,0),entry(9,1.));assert_eq!(cache.bytes,24);
-        cache.remove(&("a".into(),0,0));assert_eq!(cache.bytes,16);
-        cache.clear();assert_eq!(cache.bytes,0);assert_eq!(cache.len(),0);
+        let mut cache = ChunkCache::new(32);
+        let entry = |n, value| ChunkCacheEntry {
+            param_hash: 1,
+            waveform: vec![value; n],
+        };
+        cache.insert(("a".into(), 0, 0), entry(4, 0.25));
+        cache.insert(("a".into(), 1, 0), entry(4, 0.5));
+        assert_eq!(cache.bytes, 32);
+        cache.get(&("a".into(), 0, 0));
+        cache.insert(("b".into(), 0, 0), entry(4, 0.75));
+        assert!(cache.get(&("a".into(), 1, 0)).is_none());
+        assert_eq!(cache.bytes, 32);
+        cache.insert(("a".into(), 0, 0), entry(2, 1.));
+        assert_eq!(cache.bytes, 24);
+        cache.insert(("long".into(), 0, 0), entry(9, 1.));
+        assert_eq!(cache.bytes, 24);
+        cache.remove(&("a".into(), 0, 0));
+        assert_eq!(cache.bytes, 16);
+        cache.clear();
+        assert_eq!(cache.bytes, 0);
+        assert_eq!(cache.len(), 0);
     }
 
     /// 一次 chunk 缓存的访问键。

@@ -2,9 +2,13 @@
 use crate::state::*;
 
 /// 登记操作前状态，截断redo分支并保留现有100步上限；notes只在旧实现需要时读取。
-pub fn checkpoint(h:&mut TimelineHistory,snapshot:&TimelineState,label:String,
-    mut notes:impl FnMut()->Option<String>) {
-    let now=now_unix_ms();
+pub fn checkpoint(
+    h: &mut TimelineHistory,
+    snapshot: &TimelineState,
+    label: String,
+    mut notes: impl FnMut() -> Option<String>,
+) {
+    let now = now_unix_ms();
     if h.started_at_ms == 0 {
         h.started_at_ms = now;
     }
@@ -38,8 +42,7 @@ pub fn checkpoint(h:&mut TimelineHistory,snapshot:&TimelineState,label:String,
         if let Some(current) = h.records.get_mut(position) {
             current.state = Some(snapshot.clone());
             if current.notes_markdown.is_none() {
-                current.notes_markdown =
-                    notes();
+                current.notes_markdown = notes();
             }
             current.param_selection = None;
         }
@@ -62,17 +65,26 @@ pub fn checkpoint(h:&mut TimelineHistory,snapshot:&TimelineState,label:String,
 }
 
 /// 历史跳转的纯状态部分；窗口、设备、dirty等副作用由各宿主执行。
-pub fn jump(h:&mut TimelineHistory,current:&TimelineState,target:usize,intent:HistoryJumpIntent,
-    notes:Option<String>)->Option<(TimelineState,Option<String>,Option<Vec<[f32;2]>>)> {
-    if target>=h.records.len() || target==h.position { return None; }
-    let position=h.position;
-    if let Some(record)=h.records.get_mut(position) {
-        record.state=Some(current.clone());
-        if record.notes_markdown.is_none() { record.notes_markdown=notes; }
+pub fn jump(
+    h: &mut TimelineHistory,
+    current: &TimelineState,
+    target: usize,
+    intent: HistoryJumpIntent,
+    notes: Option<String>,
+) -> Option<(TimelineState, Option<String>, Option<Vec<[f32; 2]>>)> {
+    if target >= h.records.len() || target == h.position {
+        return None;
     }
-    let next=h.records.get(target)?.state.clone()?;
-    h.position=target;
-    let notes=h.records.get(target).and_then(|r|r.notes_markdown.clone());
-    let selection=param_selection_restore_for(h,target,intent);
-    Some((next,notes,selection))
+    let position = h.position;
+    if let Some(record) = h.records.get_mut(position) {
+        record.state = Some(current.clone());
+        if record.notes_markdown.is_none() {
+            record.notes_markdown = notes;
+        }
+    }
+    let next = h.records.get(target)?.state.clone()?;
+    h.position = target;
+    let notes = h.records.get(target).and_then(|r| r.notes_markdown.clone());
+    let selection = param_selection_restore_for(h, target, intent);
+    Some((next, notes, selection))
 }

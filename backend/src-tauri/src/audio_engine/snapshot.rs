@@ -1120,7 +1120,10 @@ mod tests {
 
     /// 临时source只作缓存存在性夹具；每次唯一，不假定Unix /tmp或修改系统公共目录。
     fn snapshot_test_source() -> PathBuf {
-        std::env::temp_dir().join(format!("hifishifter-snapshot-{}.aiff", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "hifishifter-snapshot-{}.aiff",
+            uuid::Uuid::new_v4()
+        ))
     }
     /// 使用真实临时source路径构造音量曲线夹具，与解码cache保持同一身份。
     fn timeline_with_volume_curve(source: &Path) -> crate::state::TimelineState {

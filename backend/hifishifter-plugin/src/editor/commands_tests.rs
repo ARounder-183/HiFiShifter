@@ -1,26 +1,56 @@
 //! 参数分组编辑与组件状态回归；验证 actor/state，不代替真实宿主 GUI 验收。
 use super::*;
-use std::sync::{Arc,mpsc,atomic::AtomicBool};
+use std::sync::{atomic::AtomicBool, mpsc, Arc};
 
 /// 同一真实actor分派中，分组编辑与非分组编辑的本地历史深度对比。
 #[test]
 fn grouped_edits_preserve_local_undo_checkpoint() {
-    for grouped in [false,true] {
-        let (model,owner,_id)=crate::editor::session::tests::fixture();let document=model.session();
-        let editor=owner.editor_session().unwrap();let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(32);
-        let sink=crate::editor::session::UiSink {view_id:"undo-diagnostic".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
-        let call=|id,command:&str,args| {
-            editor.enqueue(crate::editor::session::UiRequest {id,command:command.into(),args,sink:sink.clone(),link:None}).unwrap();
-            let response:Value=rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();assert_eq!(response["ok"],true,"{response}");response["value"].clone()
+    for grouped in [false, true] {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        let (reply, rx) = mpsc::channel();
+        let (events, _) = mpsc::sync_channel(32);
+        let sink = crate::editor::session::UiSink {
+            view_id: "undo-diagnostic".into(),
+            reply,
+            events,
+            closed: Arc::new(AtomicBool::new(false)),
         };
-        let timeline=call(1,"get_timeline_state",json!({}));
-        if grouped {call(2,"begin_undo_group",json!({"label":"diagnostic"}));}
-        call(3,"set_track_state",json!({"trackId":timeline["tracks"][0]["id"],"volume":0.5}));
-        if grouped {call(4,"end_undo_group",json!({}));}
-        let history=call(5,"get_history_state",json!({}));let depth=history["undoDepth"].as_u64().unwrap();
+        let call = |id, command: &str, args| {
+            editor
+                .enqueue(crate::editor::session::UiRequest {
+                    id,
+                    command: command.into(),
+                    args,
+                    sink: sink.clone(),
+                    link: None,
+                })
+                .unwrap();
+            let response: Value = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            assert_eq!(response["ok"], true, "{response}");
+            response["value"].clone()
+        };
+        let timeline = call(1, "get_timeline_state", json!({}));
+        if grouped {
+            call(2, "begin_undo_group", json!({"label":"diagnostic"}));
+        }
+        call(
+            3,
+            "set_track_state",
+            json!({"trackId":timeline["tracks"][0]["id"],"volume":0.5}),
+        );
+        if grouped {
+            call(4, "end_undo_group", json!({}));
+        }
+        let history = call(5, "get_history_state", json!({}));
+        let depth = history["undoDepth"].as_u64().unwrap();
         println!("grouped={grouped} local_undo_depth={depth}");
-        if grouped {assert!(depth>0,"分组编辑必须创建一个本地检查点");}
-        else {assert!(depth>0,"非分组编辑的本地历史作为对照应存在");}
+        if grouped {
+            assert!(depth > 0, "分组编辑必须创建一个本地检查点");
+        } else {
+            assert!(depth > 0, "非分组编辑的本地历史作为对照应存在");
+        }
         document.close();
     }
 }
@@ -42,10 +72,18 @@ fn diagnostic_grouped_state_round_trip_without_host_history() {
         closed: Arc::new(AtomicBool::new(false)),
     };
     let call = |id, command: &str, args| {
-        editor.enqueue(crate::editor::session::UiRequest {
-            id, command: command.into(), args, sink: sink.clone(), link: None,
-        }).unwrap();
-        let response: Value = received.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        editor
+            .enqueue(crate::editor::session::UiRequest {
+                id,
+                command: command.into(),
+                args,
+                sink: sink.clone(),
+                link: None,
+            })
+            .unwrap();
+        let response: Value = received
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
         assert_eq!(response["ok"], true, "{response}");
         response["value"].clone()
     };
@@ -55,7 +93,11 @@ fn diagnostic_grouped_state_round_trip_without_host_history() {
     assert_ne!(initial_volume, json!(0.5));
     let before = owner.encode_state().unwrap();
     call(2, "begin_undo_group", json!({"label": "diagnostic"}));
-    call(3, "set_track_state", json!({"trackId": track, "volume": 0.5}));
+    call(
+        3,
+        "set_track_state",
+        json!({"trackId": track, "volume": 0.5}),
+    );
     call(4, "end_undo_group", json!({}));
     let after = owner.encode_state().unwrap();
     let saved: Value = serde_json::from_slice(&after).unwrap();
@@ -67,6 +109,8 @@ fn diagnostic_grouped_state_round_trip_without_host_history() {
     owner.restore_state(&after).unwrap();
     let reapplied = call(6, "get_timeline_state", json!({}));
     assert_eq!(reapplied["tracks"][0]["volume"], json!(0.5));
-    println!("state contains grouped edit before DSP; restore before/after reaches actor GUI timeline");
+    println!(
+        "state contains grouped edit before DSP; restore before/after reaches actor GUI timeline"
+    );
     document.close();
 }

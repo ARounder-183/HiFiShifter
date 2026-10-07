@@ -6,8 +6,8 @@
 //! `render_mixdown_interleaved` 暴露出来了。
 
 use hifishifter_plugin::ara::{
-    ara_document_from_json, ara_document_to_timeline, has_observed_time_stretch,
-    clip_starts_line, source_sample_rates, summary_line, AraDocument, LostField, LOST_FIELDS,
+    ara_document_from_json, ara_document_to_timeline, clip_starts_line, has_observed_time_stretch,
+    source_sample_rates, summary_line, AraDocument, LostField, LOST_FIELDS,
 };
 use hifishifter_plugin::render::render_timeline;
 use serde_json::json;
@@ -36,7 +36,8 @@ fn fixtures_dir() -> PathBuf {
 
 fn fixture_json(name: &str) -> String {
     let path = captures_dir().join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
 /// 样本里的素材路径是采集机器的绝对路径；把每条源重指到本工作树的同名素材，
@@ -58,8 +59,7 @@ fn localize(doc: &mut AraDocument) {
     }
     for region in &mut doc.playback_regions {
         region.audio_source_persistent_id = remap(&region.audio_source_persistent_id);
-        region.audio_modification_persistent_id =
-            remap(&region.audio_modification_persistent_id);
+        region.audio_modification_persistent_id = remap(&region.audio_modification_persistent_id);
     }
 }
 
@@ -331,8 +331,13 @@ fn reference_timeline(doc: &AraDocument) -> hifishifter_kernel::state::TimelineS
     let project_sec = clips
         .iter()
         .map(|clip| {
-            clip.get("start_sec").and_then(|v| v.as_f64()).unwrap_or(0.0)
-                + clip.get("length_sec").and_then(|v| v.as_f64()).unwrap_or(0.0)
+            clip.get("start_sec")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                + clip
+                    .get("length_sec")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
         })
         .fold(0.0_f64, f64::max);
 
@@ -365,7 +370,8 @@ fn ara_mapped_timeline_renders_identically_to_a_hand_built_reference() {
 
     let sample_rate = 44_100;
     let end_sec = 11.0;
-    let ara_audio = render_timeline(&mapped, sample_rate, 0.0, end_sec).expect("render ARA mapping");
+    let ara_audio =
+        render_timeline(&mapped, sample_rate, 0.0, end_sec).expect("render ARA mapping");
     let reference_audio =
         render_timeline(&reference, sample_rate, 0.0, end_sec).expect("render reference");
 

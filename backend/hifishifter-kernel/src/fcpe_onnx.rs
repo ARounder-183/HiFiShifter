@@ -84,9 +84,13 @@ fn default_model_guess() -> Option<PathBuf> {
 
     // 开发树兜底：模型仍放在 app crate 的 `resources/` 下（那才是打包时带的东西）。
     // 见 `nsf_hifigan_onnx.rs` 里同一处的说明。
-    let app_bundled = manifest
-        .parent()
-        .map(|p| p.join("src-tauri").join("resources").join("models").join("fcpe").join("fcpe.onnx"));
+    let app_bundled = manifest.parent().map(|p| {
+        p.join("src-tauri")
+            .join("resources")
+            .join("models")
+            .join("fcpe")
+            .join("fcpe.onnx")
+    });
     if let Some(app_bundled) = app_bundled {
         if app_bundled.is_file() {
             return Some(app_bundled);

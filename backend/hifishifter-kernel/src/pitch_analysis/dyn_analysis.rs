@@ -63,10 +63,7 @@ const DYN_ORIG_MAX: f32 = 8.0;
 /// 返回 `(curve, all_cache_hit)`：
 /// - `curve`：长度 = 工程参数帧数的 `dyn_orig`（绝对电平，1.0 = 0 dBFS）；
 /// - `all_cache_hit`：false 表示部分 clip 尚未分析完成，`curve` 是当前可得的部分。
-pub fn assemble_dyn_orig_from_cache(
-    tl: &TimelineState,
-    root_track_id: &str,
-) -> (Vec<f32>, bool) {
+pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> (Vec<f32>, bool) {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
 

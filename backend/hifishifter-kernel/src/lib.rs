@@ -76,10 +76,10 @@ macro_rules! log_error_limited {
 }
 
 // ── 时间线模型 ──────────────────────────────────────────────────────────────
-pub mod state;
 pub mod editor;
 pub mod hfspeaks_v2;
 pub mod search;
+pub mod state;
 
 // ── 曲线与参数 ──────────────────────────────────────────────────────────────
 pub mod fade_curves;
@@ -110,7 +110,7 @@ pub mod formant_cache;
 pub mod formant_morph;
 pub mod glottal_rd;
 pub mod hnsep_dsp;
-#[cfg(feature="onnx")]
+#[cfg(feature = "onnx")]
 mod hnsep_resources;
 pub mod host_pcm_cache;
 pub mod rd_tension;
@@ -170,8 +170,8 @@ pub mod channel_policy;
 pub mod stereo_detect;
 
 // ── 工程与杂项 ──────────────────────────────────────────────────────────────
-pub mod config;
 pub mod clip_rendering_state;
+pub mod config;
 pub mod notebook_assets;
 pub mod project;
 pub mod temp_manager;

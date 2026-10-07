@@ -11,9 +11,7 @@
 
 use crate::audio_utils::try_read_wav_info;
 use crate::midi_import::MidiNoteEvent;
-use crate::models::{
-    PitchRange, TimelineClip, TimelineStatePayload, TimelineTrack,
-};
+use crate::models::{PitchRange, TimelineClip, TimelineStatePayload, TimelineTrack};
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
@@ -1753,10 +1751,9 @@ pub struct ClipStatePatch {
     #[serde(default)]
     pub channel_mode: Option<i32>,
     /// 插件宿主适配的REAPER item I_GROUPID；独立App不会填此字段。
-    #[serde(default, rename="hostGroupId")]
+    #[serde(default, rename = "hostGroupId")]
     pub host_group_id: Option<i32>,
 }
-
 
 /// Tempo Map 变化点携带的音阶覆盖数据（None = 跟随工程音阶）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3152,7 +3149,6 @@ impl TimelineState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3222,7 +3218,6 @@ mod tests {
         );
     }
 
-
     fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
         timeline
             .clips
@@ -3231,8 +3226,6 @@ mod tests {
             .map(|clip| clip.start_sec)
             .unwrap_or(f64::NAN)
     }
-
-
 
     #[test]
     fn track_color_rotation_starts_with_gray_and_cycles() {
@@ -11710,7 +11703,6 @@ impl TimelineState {
     }
 }
 
-
 /// 检查所需的 take 元数据快照（锁内克隆，磁盘 IO 在锁外进行）。
 ///
 /// 【为什么在 model 而不是 app】它的消费者是 `TimelineState::source_file_check_list`
@@ -11801,4 +11793,3 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
 
     out
 }
-

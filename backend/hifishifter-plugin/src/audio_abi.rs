@@ -96,7 +96,9 @@ pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError>
     }
     // SAFETY: 调用者提供当前回调独占的 SDK 结构。
     let data = unsafe { &*data };
-    if data.num_samples < 0 || data.num_inputs < 0 || data.num_outputs < 0
+    if data.num_samples < 0
+        || data.num_inputs < 0
+        || data.num_outputs < 0
         || !(0..=2).contains(&data.process_mode)
     {
         return Err(BufferError::InvalidArgument);
@@ -129,11 +131,15 @@ pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError>
 /// 仅在完整校验后清输出；playback renderer失败/停播仍清零，纯editor不走此入口。
 /// # Safety
 /// 与validate相同，非空output plane必须有至少num_samples可写帧。
-pub(crate) unsafe fn clear_outputs(data:*mut ProcessData)->Result<(),BufferError> {
-    unsafe {validate(data)?;}
-    let data=unsafe {&*data};
-    if data.num_samples==0 || data.num_outputs==0 {return Ok(());}
-    let output=unsafe {&mut *data.outputs};
+pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferError> {
+    unsafe {
+        validate(data)?;
+    }
+    let data = unsafe { &*data };
+    if data.num_samples == 0 || data.num_outputs == 0 {
+        return Ok(());
+    }
+    let output = unsafe { &mut *data.outputs };
     if output.num_channels == 0 {
         output.silence_flags = 0;
         return Ok(());
@@ -152,33 +158,72 @@ pub(crate) unsafe fn clear_outputs(data:*mut ProcessData)->Result<(),BufferError
 /// 纯editor renderer按SDK透传宿主信号；输入/输出bus或对应plane相同也不能先清零。
 /// # Safety
 /// 与validate相同，输入非空plane可读、输出可写num_samples帧；不保留任何宿主指针。
-pub(crate) unsafe fn pass_through(data:*mut ProcessData)->Result<(),BufferError> {
-    unsafe {validate(data)?;}
-    let data=unsafe {&*data};if data.num_samples==0 || data.num_outputs==0 {return Ok(());}
+pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferError> {
+    unsafe {
+        validate(data)?;
+    }
+    let data = unsafe { &*data };
+    if data.num_samples == 0 || data.num_outputs == 0 {
+        return Ok(());
+    }
     // 先按值复制header，允许inputs/outputs指向同一个AudioBusBuffers，不制造共享/可变引用别名。
-    let input=if data.num_inputs>0 {Some(unsafe {std::ptr::read(data.inputs)})} else {None};
-    let output=unsafe {&mut *data.outputs};
-    if output.num_channels==0 {output.silence_flags=0;return Ok(());}
-    let sources:[*mut f32;2]=std::array::from_fn(|channel| {
-        match &input {
-            Some(bus) if bus.num_channels==2 && bus.silence_flags & (1<<channel)==0=>unsafe {*bus.channel_buffers.add(channel)},
-            _=>std::ptr::null_mut(),
-        }
+    let input = if data.num_inputs > 0 {
+        Some(unsafe { std::ptr::read(data.inputs) })
+    } else {
+        None
+    };
+    let output = unsafe { &mut *data.outputs };
+    if output.num_channels == 0 {
+        output.silence_flags = 0;
+        return Ok(());
+    }
+    let sources: [*mut f32; 2] = std::array::from_fn(|channel| match &input {
+        Some(bus) if bus.num_channels == 2 && bus.silence_flags & (1 << channel) == 0 => unsafe {
+            *bus.channel_buffers.add(channel)
+        },
+        _ => std::ptr::null_mut(),
     });
-    let targets=[unsafe {*output.channel_buffers},unsafe {*output.channel_buffers.add(1)}];
-    let bytes=data.num_samples as usize*std::mem::size_of::<f32>();
-    for source in sources {for target in targets {
-        if source.is_null()||target.is_null()||source==target {continue;}
-        let a=source as usize;let b=target as usize;
-        if a<b.saturating_add(bytes)&&b<a.saturating_add(bytes) {return Err(BufferError::UnsupportedFormat);}
-    }}
+    let targets = [unsafe { *output.channel_buffers }, unsafe {
+        *output.channel_buffers.add(1)
+    }];
+    let bytes = data.num_samples as usize * std::mem::size_of::<f32>();
+    for source in sources {
+        for target in targets {
+            if source.is_null() || target.is_null() || source == target {
+                continue;
+            }
+            let a = source as usize;
+            let b = target as usize;
+            if a < b.saturating_add(bytes) && b < a.saturating_add(bytes) {
+                return Err(BufferError::UnsupportedFormat);
+            }
+        }
+    }
     // 支持独立plane或整个plane的in-place/交换；部分偏移重叠明确拒绝且不写数据。
     // 每帧先读两个源再写两个输出，兼容对应in-place与两个完整plane的交换别名。
     for frame in 0..data.num_samples as usize {
-        let values=sources.map(|source|if source.is_null() {0.0} else {unsafe {*source.add(frame)}});
-        for channel in 0..2 {if !targets[channel].is_null() {unsafe {targets[channel].add(frame).write(values[channel]);}}}
+        let values = sources.map(|source| {
+            if source.is_null() {
+                0.0
+            } else {
+                unsafe { *source.add(frame) }
+            }
+        });
+        for channel in 0..2 {
+            if !targets[channel].is_null() {
+                unsafe {
+                    targets[channel].add(frame).write(values[channel]);
+                }
+            }
+        }
     }
-    output.silence_flags=(0..2).fold(0,|flags,channel|if sources[channel].is_null()||targets[channel].is_null() {flags|(1<<channel)} else {flags});
+    output.silence_flags = (0..2).fold(0, |flags, channel| {
+        if sources[channel].is_null() || targets[channel].is_null() {
+            flags | (1 << channel)
+        } else {
+            flags
+        }
+    });
     Ok(())
 }
 
@@ -205,14 +250,26 @@ mod layout_tests {
             .arg(format!("/Fo{}", scratch.join("vst3-layout.obj").display()))
             .arg(format!("/Fe{}", exe.display()))
             .arg(manifest.join("tests/vst3_layout.cpp"))
-            .output().expect("MSVC cl.exe required, load tools/msvc-env.ps1");
-        assert!(compile.status.success(), "native ABI oracle compile failed: {compile:?}");
+            .output()
+            .expect("MSVC cl.exe required, load tools/msvc-env.ps1");
+        assert!(
+            compile.status.success(),
+            "native ABI oracle compile failed: {compile:?}"
+        );
         let native = Command::new(exe).output().unwrap();
-        assert!(native.status.success(), "native ABI oracle failed: {native:?}");
+        assert!(
+            native.status.success(),
+            "native ABI oracle failed: {native:?}"
+        );
         let layout: serde_json::Value = serde_json::from_slice(&native.stdout).unwrap();
         macro_rules! check {
             ($name:expr, $value:expr) => {
-                assert_eq!(layout[$name].as_u64().unwrap(), $value as u64, "ABI {}", $name);
+                assert_eq!(
+                    layout[$name].as_u64().unwrap(),
+                    $value as u64,
+                    "ABI {}",
+                    $name
+                );
             };
         }
         macro_rules! kind {
@@ -223,7 +280,10 @@ mod layout_tests {
         }
         macro_rules! field {
             ($ty:ty, $rust:ident, $native:ident) => {
-                check!(concat!(stringify!($ty), ".", stringify!($native)), offset_of!($ty, $rust));
+                check!(
+                    concat!(stringify!($ty), ".", stringify!($native)),
+                    offset_of!($ty, $rust)
+                );
             };
         }
         kind!(ProcessSetup);
@@ -245,7 +305,11 @@ mod layout_tests {
         field!(ProcessData, inputs, inputs);
         field!(ProcessData, outputs, outputs);
         field!(ProcessData, input_parameter_changes, inputParameterChanges);
-        field!(ProcessData, output_parameter_changes, outputParameterChanges);
+        field!(
+            ProcessData,
+            output_parameter_changes,
+            outputParameterChanges
+        );
         field!(ProcessData, input_events, inputEvents);
         field!(ProcessData, output_events, outputEvents);
         field!(ProcessData, process_context, processContext);
@@ -254,7 +318,11 @@ mod layout_tests {
         field!(ProcessContext, sample_rate, sampleRate);
         field!(ProcessContext, project_time_samples, projectTimeSamples);
         field!(ProcessContext, system_time, systemTime);
-        field!(ProcessContext, continuous_time_samples, continousTimeSamples);
+        field!(
+            ProcessContext,
+            continuous_time_samples,
+            continousTimeSamples
+        );
         field!(ProcessContext, project_time_music, projectTimeMusic);
         field!(ProcessContext, bar_position_music, barPositionMusic);
         field!(ProcessContext, cycle_start_music, cycleStartMusic);

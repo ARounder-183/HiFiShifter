@@ -2,7 +2,6 @@
 // assemble_pitch_orig_from_cache: 从 per-clip 缓存同步拼装整体音高线。
 // maybe_schedule_pitch_orig: 对外公开的调度入口。
 
-
 use super::analysis::build_pitch_job;
 use super::{build_root_pitch_key, PitchOrigUpdatedEvent};
 
@@ -443,8 +442,7 @@ pub fn maybe_schedule_pitch_orig(
                     // 消费并补触发；禁用时保留标志给播放中的等待路径。
                     // 走内核的宿主出口，而不是直接够 `commands::playback`：
                     // 后者会把整条 `commands` 链（196 处 `tauri::`）拖进内核闭包。
-                    should_request_bg_render = crate::host::host()
-                        .auto_background_render_enabled()
+                    should_request_bg_render = crate::host::host().auto_background_render_enabled()
                         && crate::host::host().take_pitch_pending_flag();
                 } else {
                     // 部分命中：仅当曲线内容确实发生变化时才更新并通知前端。

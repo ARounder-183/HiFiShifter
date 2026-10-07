@@ -4,15 +4,19 @@
 use crate::editor::connection::UnknownVtbl;
 use crate::vst3::{uid_guid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
-#[path="item_chunk.rs"]pub(super) mod item_chunk;
+#[path = "item_chunk.rs"]
+pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
-#[path="reaper_write.rs"]mod write;
-pub(crate) use write::{HostClipTarget,HostUndoBlock};
-#[path="reaper_media.rs"]mod media;
-pub(crate) use media::HostTrackTarget;
+#[path = "reaper_write.rs"]
+mod write;
+pub(crate) use write::{HostClipTarget, HostUndoBlock};
+#[path = "reaper_media.rs"]
+mod media;
 pub(crate) use media::CreatedTrack;
-#[path="ui_inventory.rs"]mod ui_inventory;
-pub(crate) use ui_inventory::{UiTrack,UiItem};
+pub(crate) use media::HostTrackTarget;
+#[path = "ui_inventory.rs"]
+mod ui_inventory;
+pub(crate) use ui_inventory::{UiItem, UiTrack};
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -70,12 +74,12 @@ pub(crate) struct ReaperHost {
     project: std::sync::atomic::AtomicUsize,
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
-    write:Option<write::WriteApi>,
-    split:Option<write::SplitApi>,
-    item_state:Option<item_chunk::ItemStateApi>,
-    history:Option<write::HistoryApi>,
-    media:Option<media::MediaApi>,
-    extended_media:Option<media::ExtendedMedia>,
+    write: Option<write::WriteApi>,
+    split: Option<write::SplitApi>,
+    item_state: Option<item_chunk::ItemStateApi>,
+    history: Option<write::HistoryApi>,
+    media: Option<media::MediaApi>,
+    extended_media: Option<media::ExtendedMedia>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
 }
@@ -107,7 +111,10 @@ impl ReaperHost {
             ((**context.cast::<*const UnknownVtbl>()).query)(context, iid.as_ptr(), &mut pointer)
         };
         if result != K_RESULT_OK || pointer.is_null() {
-            crate::log_line(&format!("[reaper-host] QI result={result} interface={}",!pointer.is_null()));
+            crate::log_line(&format!(
+                "[reaper-host] QI result={result} interface={}",
+                !pointer.is_null()
+            ));
             return None;
         }
         let interface = Interface(pointer as usize);
@@ -119,7 +126,9 @@ impl ReaperHost {
         let project = checked(&authorized, || unsafe { (table.parent)(pointer, 3) }).ok()?;
         if project.is_null() {
             // 实测initialize尚未挂接project；保留拥有引用的接口，稍后只沿同一直接parent绑定。
-            crate::log_line("[reaper-host] initialization parent(project) pending; retaining host interface");
+            crate::log_line(
+                "[reaper-host] initialization parent(project) pending; retaining host interface",
+            );
         }
         let api = |name: &std::ffi::CStr| {
             checked(&authorized, || unsafe {
@@ -150,9 +159,11 @@ impl ReaperHost {
             });
         let validate = lookup!(c"ValidatePtr2", Validate);
         // 官方GetAppVersion返回静态版本字符串，只有已知版本才选择新/旧淡化轴。
-        let version=lookup!(c"GetAppVersion",AppVersion);
-        let fade_axes_new=version.and_then(|getter|checked(&authorized,||unsafe {getter()}).ok())
-            .filter(|value|!value.is_null()).and_then(|value|unsafe {std::ffi::CStr::from_ptr(value)}.to_str().ok())
+        let version = lookup!(c"GetAppVersion", AppVersion);
+        let fade_axes_new = version
+            .and_then(|getter| checked(&authorized, || unsafe { getter() }).ok())
+            .filter(|value| !value.is_null())
+            .and_then(|value| unsafe { std::ffi::CStr::from_ptr(value) }.to_str().ok())
             .and_then(new_fade_axes);
         let item = lookup!(c"GetMediaItemTake_Item", TakeItem);
         let item_value = lookup!(c"GetMediaItemInfo_Value", Value);
@@ -163,40 +174,155 @@ impl ReaperHost {
         let marker = lookup!(c"GetTakeStretchMarker", Marker);
         let slope = lookup!(c"GetTakeStretchMarkerSlope", Slope);
         let change = lookup!(c"GetProjectStateChangeCount", PlayState);
-        let tracks=match (lookup!(c"InsertTrackInProject",media::InsertTrack),lookup!(c"CountTracks",media::CountTracks),lookup!(c"GetTrack",media::GetTrack),
-            lookup!(c"TrackFX_AddByName",media::AddFx),lookup!(c"DeleteTrack",media::DeleteTrack),lookup!(c"CountTrackMediaItems",media::TrackCount),
-            lookup!(c"TrackFX_GetCount",media::TrackCount),lookup!(c"TrackFX_GetFXGUID",media::FxGuid)) {
-            (Some(insert),Some(count),Some(get),Some(add_fx),Some(delete),Some(item_count),Some(fx_count),Some(fx_guid))=>
-                Some(media::NewTrackApi {insert,count,get,add_fx,delete,item_count,fx_count,fx_guid}),_=>None,
+        let tracks = match (
+            lookup!(c"InsertTrackInProject", media::InsertTrack),
+            lookup!(c"CountTracks", media::CountTracks),
+            lookup!(c"GetTrack", media::GetTrack),
+            lookup!(c"TrackFX_AddByName", media::AddFx),
+            lookup!(c"DeleteTrack", media::DeleteTrack),
+            lookup!(c"CountTrackMediaItems", media::TrackCount),
+            lookup!(c"TrackFX_GetCount", media::TrackCount),
+            lookup!(c"TrackFX_GetFXGUID", media::FxGuid),
+        ) {
+            (
+                Some(insert),
+                Some(count),
+                Some(get),
+                Some(add_fx),
+                Some(delete),
+                Some(item_count),
+                Some(fx_count),
+                Some(fx_guid),
+            ) => Some(media::NewTrackApi {
+                insert,
+                count,
+                get,
+                add_fx,
+                delete,
+                item_count,
+                fx_count,
+                fx_guid,
+            }),
+            _ => None,
         };
-        let extended_media=Some(media::ExtendedMedia {picker:lookup!(c"GetUserFileName",media::MultiPicker),tracks});
-        let media=match (lookup!(c"PCM_Source_CreateFromFileEx",media::CreateSource),lookup!(c"PCM_Source_Destroy",media::DestroySource),
-            lookup!(c"GetMediaSourceLength",media::SourceLength),lookup!(c"AddMediaItemToTrack",media::CreateItem),lookup!(c"AddTakeToMediaItem",media::CreateTake),
-            lookup!(c"GetSetMediaItemTakeInfo",media::TakeInfo),lookup!(c"DeleteTrackMediaItem",media::DeleteItem),
-            lookup!(c"GetSetMediaTrackInfo_String",Guid),lookup!(c"GetUserFileNameForRead",media::FilePicker)) {
-            (Some(create_source),Some(destroy_source),Some(length),Some(create_item),Some(create_take),Some(take_info),Some(delete_item),Some(track_guid),Some(picker))=>
-                Some(media::MediaApi {create_source,destroy_source,length,create_item,create_take,take_info,delete_item,track_guid,picker}),_=>None,
+        let extended_media = Some(media::ExtendedMedia {
+            picker: lookup!(c"GetUserFileName", media::MultiPicker),
+            tracks,
+        });
+        let media = match (
+            lookup!(c"PCM_Source_CreateFromFileEx", media::CreateSource),
+            lookup!(c"PCM_Source_Destroy", media::DestroySource),
+            lookup!(c"GetMediaSourceLength", media::SourceLength),
+            lookup!(c"AddMediaItemToTrack", media::CreateItem),
+            lookup!(c"AddTakeToMediaItem", media::CreateTake),
+            lookup!(c"GetSetMediaItemTakeInfo", media::TakeInfo),
+            lookup!(c"DeleteTrackMediaItem", media::DeleteItem),
+            lookup!(c"GetSetMediaTrackInfo_String", Guid),
+            lookup!(c"GetUserFileNameForRead", media::FilePicker),
+        ) {
+            (
+                Some(create_source),
+                Some(destroy_source),
+                Some(length),
+                Some(create_item),
+                Some(create_take),
+                Some(take_info),
+                Some(delete_item),
+                Some(track_guid),
+                Some(picker),
+            ) => Some(media::MediaApi {
+                create_source,
+                destroy_source,
+                length,
+                create_item,
+                create_take,
+                take_info,
+                delete_item,
+                track_guid,
+                picker,
+            }),
+            _ => None,
         };
-        let history=match (lookup!(c"Undo_DoUndo2",write::UndoAction),lookup!(c"Undo_DoRedo2",write::UndoAction),
-            lookup!(c"Undo_CanUndo2",write::UndoLabel),lookup!(c"Undo_CanRedo2",write::UndoLabel),
-            lookup!(c"Undo_GetCurEntry",write::UndoAction),lookup!(c"Undo_GetNumEntries",write::UndoAction),lookup!(c"Undo_GetEntryDesc",write::UndoEntry)) {
-            (Some(undo),Some(redo),Some(can_undo),Some(can_redo),Some(current),Some(count),Some(entry))=>
-                Some(write::HistoryApi {undo,redo,can_undo,can_redo,current,count,entry}),_=>None,
+        let history = match (
+            lookup!(c"Undo_DoUndo2", write::UndoAction),
+            lookup!(c"Undo_DoRedo2", write::UndoAction),
+            lookup!(c"Undo_CanUndo2", write::UndoLabel),
+            lookup!(c"Undo_CanRedo2", write::UndoLabel),
+            lookup!(c"Undo_GetCurEntry", write::UndoAction),
+            lookup!(c"Undo_GetNumEntries", write::UndoAction),
+            lookup!(c"Undo_GetEntryDesc", write::UndoEntry),
+        ) {
+            (
+                Some(undo),
+                Some(redo),
+                Some(can_undo),
+                Some(can_redo),
+                Some(current),
+                Some(count),
+                Some(entry),
+            ) => Some(write::HistoryApi {
+                undo,
+                redo,
+                can_undo,
+                can_redo,
+                current,
+                count,
+                entry,
+            }),
+            _ => None,
         };
-        let split=lookup!(c"SplitMediaItem",write::Split).zip(lookup!(c"GetActiveTake",write::Track))
-            .map(|(split,active_take)|write::SplitApi {split,active_take});
-        let item_state=match (lookup!(c"GetItemStateChunk",item_chunk::GetChunk),lookup!(c"SetItemStateChunk",item_chunk::SetChunk),
-            lookup!(c"genGuid",item_chunk::GenGuid),lookup!(c"guidToString",item_chunk::GuidString)) {
-            (Some(get),Some(set),Some(generate),Some(stringify))=>Some(item_chunk::ItemStateApi {get,set,generate,stringify}),_=>None,
+        let split = lookup!(c"SplitMediaItem", write::Split)
+            .zip(lookup!(c"GetActiveTake", write::Track))
+            .map(|(split, active_take)| write::SplitApi { split, active_take });
+        let item_state = match (
+            lookup!(c"GetItemStateChunk", item_chunk::GetChunk),
+            lookup!(c"SetItemStateChunk", item_chunk::SetChunk),
+            lookup!(c"genGuid", item_chunk::GenGuid),
+            lookup!(c"guidToString", item_chunk::GuidString),
+        ) {
+            (Some(get), Some(set), Some(generate), Some(stringify)) => {
+                Some(item_chunk::ItemStateApi {
+                    get,
+                    set,
+                    generate,
+                    stringify,
+                })
+            }
+            _ => None,
         };
-        let write=match (
-            lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),lookup!(c"GetSetMediaItemTakeInfo_String",write::SetString),
-            lookup!(c"GetMediaItem_Track",write::Track),lookup!(c"MoveMediaItemToTrack",write::Move),
-            lookup!(c"Undo_BeginBlock2",write::Begin),lookup!(c"Undo_EndBlock2",write::End),
-            lookup!(c"UpdateItemInProject",write::Update),lookup!(c"UpdateArrange",write::Arrange)) {
-            (Some(set_item),Some(set_take),Some(set_take_string),Some(item_track),Some(move_item),Some(begin),Some(end),Some(update),Some(arrange))=>
-                Some(write::WriteApi {set_item,set_take,set_take_string,item_track,move_item,begin,end,update,arrange}),
-            _=>None,
+        let write = match (
+            lookup!(c"SetMediaItemInfo_Value", write::SetValue),
+            lookup!(c"SetMediaItemTakeInfo_Value", write::SetValue),
+            lookup!(c"GetSetMediaItemTakeInfo_String", write::SetString),
+            lookup!(c"GetMediaItem_Track", write::Track),
+            lookup!(c"MoveMediaItemToTrack", write::Move),
+            lookup!(c"Undo_BeginBlock2", write::Begin),
+            lookup!(c"Undo_EndBlock2", write::End),
+            lookup!(c"UpdateItemInProject", write::Update),
+            lookup!(c"UpdateArrange", write::Arrange),
+        ) {
+            (
+                Some(set_item),
+                Some(set_take),
+                Some(set_take_string),
+                Some(item_track),
+                Some(move_item),
+                Some(begin),
+                Some(end),
+                Some(update),
+                Some(arrange),
+            ) => Some(write::WriteApi {
+                set_item,
+                set_take,
+                set_take_string,
+                item_track,
+                move_item,
+                begin,
+                end,
+                update,
+                arrange,
+            }),
+            _ => None,
         };
         let geometry = match (
             validate, item, item_value, take_value, item_guid, take_guid, count, marker, slope,
@@ -245,15 +371,24 @@ impl ReaperHost {
     }
     /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。
     /// 一旦绑定，不因用户切换活动tab而重新绑定；原线程与外部调用授权检查仍然执行。
-    fn project(&self,authorized:&impl Fn()->bool)->Result<*mut c_void,String> {
-        if std::thread::current().id()!=self.thread {return Err("REAPER project queried outside its model/UI thread".into());}
-        let known=self.project.load(std::sync::atomic::Ordering::Acquire);
-        if known!=0 {return Ok(known as *mut c_void);}
-        let pointer=self._interface.0 as *mut c_void;let table=unsafe {&**pointer.cast::<*const HostVtbl>()};
-        let project=checked(authorized,||unsafe {(table.parent)(pointer,3)})?;
-        if project.is_null() {return Err("REAPER direct parent project not attached yet".into());}
-        self.project.store(project as usize,std::sync::atomic::Ordering::Release);
-        crate::log_line("[reaper-host] direct project attached on model/UI thread");Ok(project)
+    fn project(&self, authorized: &impl Fn() -> bool) -> Result<*mut c_void, String> {
+        if std::thread::current().id() != self.thread {
+            return Err("REAPER project queried outside its model/UI thread".into());
+        }
+        let known = self.project.load(std::sync::atomic::Ordering::Acquire);
+        if known != 0 {
+            return Ok(known as *mut c_void);
+        }
+        let pointer = self._interface.0 as *mut c_void;
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let project = checked(authorized, || unsafe { (table.parent)(pointer, 3) })?;
+        if project.is_null() {
+            return Err("REAPER direct parent project not attached yet".into());
+        }
+        self.project
+            .store(project as usize, std::sync::atomic::Ordering::Release);
+        crate::log_line("[reaper-host] direct project attached on model/UI thread");
+        Ok(project)
     }
     /// 原UI线程读取延迟补偿的实际听到位置；暂停保持play位置，完全停止才读edit cursor。
     pub fn sample(&self, authorized: impl Fn() -> bool) -> Result<(f64, bool), String> {
@@ -296,29 +431,42 @@ impl ReaperHost {
     }
 
     /// UI缓存只读变更token；负数/回绕合法，不假定单调，也不把counter当作take租约。
-    pub(crate) fn geometry_revision(&self, authorized: impl Fn()->bool)->Result<i32,String> {
-        if std::thread::current().id()!=self.thread {return Err("REAPER geometry queried outside its model/UI thread".into());}
-        let api=self.geometry.as_ref().ok_or("REAPER geometry API unavailable")?;
-        let project=self.project(&authorized)?;
+    pub(crate) fn geometry_revision(&self, authorized: impl Fn() -> bool) -> Result<i32, String> {
+        if std::thread::current().id() != self.thread {
+            return Err("REAPER geometry queried outside its model/UI thread".into());
+        }
+        let api = self
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let project = self.project(&authorized)?;
         // SAFETY: typed API来自核对过的官方头；每次查询前后重新检查调用者许可。
-        if !checked(&authorized,||unsafe {(api.validate)(project,project,c"ReaProject*".as_ptr())})? {
+        if !checked(&authorized, || unsafe {
+            (api.validate)(project, project, c"ReaProject*".as_ptr())
+        })? {
             return Err("invalid REAPER project/type ownership".into());
         }
-        checked(&authorized,||unsafe {(api.change)(project)})
+        checked(&authorized, || unsafe { (api.change)(project) })
     }
     /// 只接受直接parent(2) take；唯一ARA绑定由调用方冻结并在每个getter前后重检。
     pub fn geometry(
         &self,
         authorized: impl Fn() -> bool,
     ) -> Result<super::geometry::HostClipGeometry, String> {
-        if std::thread::current().id()!=self.thread {return Err("REAPER geometry queried outside its model/UI thread".into());}
-        let pointer=self._interface.0 as *mut c_void;
-        let table=unsafe {&**pointer.cast::<*const HostVtbl>()};
-        let take=checked(&authorized,||unsafe {(table.parent)(pointer,2)})?;
-        self.geometry_for_take(take,authorized)
+        if std::thread::current().id() != self.thread {
+            return Err("REAPER geometry queried outside its model/UI thread".into());
+        }
+        let pointer = self._interface.0 as *mut c_void;
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let take = checked(&authorized, || unsafe { (table.parent)(pointer, 2) })?;
+        self.geometry_for_take(take, authorized)
     }
     /// UI显示清单中的take必须由真实parent轨道枚举取得，不能由JS传地址。
-    fn geometry_for_take(&self,take:*mut c_void,authorized:impl Fn()->bool)->Result<super::geometry::HostClipGeometry,String> {
+    fn geometry_for_take(
+        &self,
+        take: *mut c_void,
+        authorized: impl Fn() -> bool,
+    ) -> Result<super::geometry::HostClipGeometry, String> {
         use super::geometry::{HostClipGeometry, HostStretchMarker};
         if std::thread::current().id() != self.thread {
             return Err("REAPER geometry queried outside its model/UI thread".into());
@@ -407,9 +555,11 @@ impl ReaperHost {
         let duration_sec = iv(c"D_LENGTH")?;
         let snap_offset_sec = iv(c"D_SNAPOFFSET")?;
         let source_start_sec = tv(c"D_STARTOFFS")?;
-        let item_gain=iv(c"D_VOL")?;
-        let take_gain=tv(c"D_VOL")?;
-        if item_gain<0. {return Err("invalid REAPER item volume".into());}
+        let item_gain = iv(c"D_VOL")?;
+        let take_gain = tv(c"D_VOL")?;
+        if item_gain < 0. {
+            return Err("invalid REAPER item volume".into());
+        }
         let playback_rate = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. || playback_rate <= 0. {
             return Err("invalid REAPER length/playback rate".into());
@@ -521,7 +671,7 @@ impl ReaperHost {
             fade_out_dir_new,
             fade_in_dir2_new,
             fade_out_dir2_new,
-            fade_axes_new:self.fade_axes_new,
+            fade_axes_new: self.fade_axes_new,
             auto_fade_in_sec,
             auto_fade_out_sec,
         })
@@ -531,11 +681,17 @@ impl ReaperHost {
 const MAX_MARKERS: i32 = 16_384;
 
 /// 比较官方版本的整数分量（7.100不能按浮点误判为7.10）。
-fn new_fade_axes(version:&str)->Option<bool> {
-    let numeric=version.split('/').next()?;let (major,minor)=numeric.split_once('.')?;
-    let major=major.parse::<u32>().ok()?;
-    let minor=minor.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().ok()?;
-    Some((major,minor)>=(7,81))
+fn new_fade_axes(version: &str) -> Option<bool> {
+    let numeric = version.split('/').next()?;
+    let (major, minor) = numeric.split_once('.')?;
+    let major = major.parse::<u32>().ok()?;
+    let minor = minor
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse::<u32>()
+        .ok()?;
+    Some((major, minor) >= (7, 81))
 }
 
 #[cfg(test)]
@@ -551,9 +707,11 @@ mod tests {
     /// 新旧版本边界与未知字符串明确区分，未来minor不能误按小数比较。
     #[test]
     fn fade_axis_version_boundary_does_not_guess_unknown_versions() {
-        assert_eq!(new_fade_axes("7.80/x64"),Some(false));assert_eq!(new_fade_axes("7.81/x64"),Some(true));
-        assert_eq!(new_fade_axes("7.100+dev1005/x64"),Some(true));assert_eq!(new_fade_axes("8.0"),Some(true));
-        assert_eq!(new_fade_axes("unknown"),None);
+        assert_eq!(new_fade_axes("7.80/x64"), Some(false));
+        assert_eq!(new_fade_axes("7.81/x64"), Some(true));
+        assert_eq!(new_fade_axes("7.100+dev1005/x64"), Some(true));
+        assert_eq!(new_fade_axes("8.0"), Some(true));
+        assert_eq!(new_fade_axes("unknown"), None);
     }
     struct Project {
         position: f64,

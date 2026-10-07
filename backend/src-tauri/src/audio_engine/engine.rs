@@ -1741,7 +1741,10 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
                 let root_track_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
                 if !root_track_id.is_empty() {
                     let state = app.state::<crate::state::AppState>();
-                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_track_id);
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(
+                        &state.timeline,
+                        &root_track_id,
+                    );
                     debug_eprintln!("[engine] maybe_schedule_pitch_orig called");
                 }
             }
@@ -2126,14 +2129,19 @@ pub(crate) mod command_test_support {
 
     /// 显式无设备fixture：保留真实引擎字段，仅把外部音频命令发送边界断开。
     pub(crate) fn detached_engine() -> AudioEngine {
-        let (tx, _receiver)=mpsc::channel();
+        let (tx, _receiver) = mpsc::channel();
         AudioEngine {
-            tx, snapshot:Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100))),
-            is_playing:Arc::new(AtomicBool::new(false)), play_start_wait:Arc::new(AtomicBool::new(false)),
-            target:Arc::new(Mutex::new(None)),base_frames:Arc::new(AtomicU64::new(0)),
-            position_frames:Arc::new(AtomicU64::new(0)),duration_frames:Arc::new(AtomicU64::new(0)),
-            sample_rate:Arc::new(AtomicU32::new(44100)),worker_ready:Arc::new(AtomicBool::new(true)),
-            meter_shutdown:Arc::new(AtomicBool::new(true)),
+            tx,
+            snapshot: Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100))),
+            is_playing: Arc::new(AtomicBool::new(false)),
+            play_start_wait: Arc::new(AtomicBool::new(false)),
+            target: Arc::new(Mutex::new(None)),
+            base_frames: Arc::new(AtomicU64::new(0)),
+            position_frames: Arc::new(AtomicU64::new(0)),
+            duration_frames: Arc::new(AtomicU64::new(0)),
+            sample_rate: Arc::new(AtomicU32::new(44100)),
+            worker_ready: Arc::new(AtomicBool::new(true)),
+            meter_shutdown: Arc::new(AtomicBool::new(true)),
         }
     }
 }

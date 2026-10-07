@@ -329,20 +329,20 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
         let source = sources
             .get(region.audio_source_persistent_id.as_str())
             .copied()
-            .ok_or_else(|| MappingError::UnknownSource(region.audio_source_persistent_id.clone()))?;
+            .ok_or_else(|| {
+                MappingError::UnknownSource(region.audio_source_persistent_id.clone())
+            })?;
         if !modifications.contains_key(region.audio_modification_persistent_id.as_str()) {
             return Err(MappingError::UnknownModification(
                 region.audio_modification_persistent_id.clone(),
             ));
         }
-        if !(region.duration_in_playback_time.is_finite()
-            && region.duration_in_playback_time > 0.0)
+        if !(region.duration_in_playback_time.is_finite() && region.duration_in_playback_time > 0.0)
         {
             return Err(MappingError::NonPositivePlaybackDuration);
         }
 
-        let playback_rate =
-            region.duration_in_modification_time / region.duration_in_playback_time;
+        let playback_rate = region.duration_in_modification_time / region.duration_in_playback_time;
         let clip_id = format!("ara-clip-{}", index + 1);
         let take_id = format!("{clip_id}-take-1");
         let clip_name = region
@@ -378,7 +378,10 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
         .iter()
         .map(|clip| {
             let start = clip.get("start_sec").and_then(Value::as_f64).unwrap_or(0.0);
-            let length = clip.get("length_sec").and_then(Value::as_f64).unwrap_or(0.0);
+            let length = clip
+                .get("length_sec")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
             start + length
         })
         .fold(0.0_f64, f64::max);

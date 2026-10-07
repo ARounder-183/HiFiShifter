@@ -53,23 +53,34 @@ impl Runtime {
             // 原kernel处理委托的边界包络，head/tail无额外延伸；tempo-reflecting仍不广告。
             .capabilities(
                 FactoryCapabilities::default().with_playback_transformations(
-                    PlaybackTransformationFlags::TIMESTRETCH|PlaybackTransformationFlags::CONTENT_FADES,
+                    PlaybackTransformationFlags::TIMESTRETCH
+                        | PlaybackTransformationFlags::CONTENT_FADES,
                 ),
             )
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
             // 共享一份会让两份文档的累积互相污染（设计 §4.1：v1 是"一实例一编辑轨"）。
             .document_controller(|| {
                 let model = crate::ara::model::ModelHandle::new();
-                let head_tail=model.head_tail();
+                let head_tail = model.head_tail();
                 let session = model.session();
-                let playback=session.clone();
-                PluginBuilder::new(model).realtime_head_tail(head_tail).controller_identity(move |key| session.register(key))
-                    .host_playback(move |handle| {crate::log_line(&format!("ARA host playback control available={}",handle.is_some()));*playback.playback.lock().unwrap()=handle;}).build()
+                let playback = session.clone();
+                PluginBuilder::new(model)
+                    .realtime_head_tail(head_tail)
+                    .controller_identity(move |key| session.register(key))
+                    .host_playback(move |handle| {
+                        crate::log_line(&format!(
+                            "ARA host playback control available={}",
+                            handle.is_some()
+                        ));
+                        *playback.playback.lock().unwrap() = handle;
+                    })
+                    .build()
             })
             .build()?;
         let factory: &'static Factory = Box::leak(Box::new(factory));
         // SAFETY: 工厂被泄漏到进程结束，`as_raw` 指向的 ARAFactory 与工厂同寿。
-        let companion = unsafe { CompanionFactory::from_raw(crate::CLASS_NAME, &*factory.as_raw())? };
+        let companion =
+            unsafe { CompanionFactory::from_raw(crate::CLASS_NAME, &*factory.as_raw())? };
         crate::log_line("ARA factory built; companion association ready");
         Ok(Runtime {
             factory: StaticFactory(factory),
@@ -103,8 +114,12 @@ mod tests {
     /// 原生工厂仅广告线性拉伸与本应用的委托渐变，不广告未实现的tempo-reflecting。
     #[test]
     fn native_factory_advertises_linear_stretch_and_owned_fades_without_tempo_reflection() {
-        let runtime=Runtime::init().unwrap();
-        let raw=unsafe {&*runtime.factory.0.as_raw()};
-        assert_eq!(raw.supportedPlaybackTransformationFlags as u32,(PlaybackTransformationFlags::TIMESTRETCH|PlaybackTransformationFlags::CONTENT_FADES).bits());
+        let runtime = Runtime::init().unwrap();
+        let raw = unsafe { &*runtime.factory.0.as_raw() };
+        assert_eq!(
+            raw.supportedPlaybackTransformationFlags as u32,
+            (PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::CONTENT_FADES)
+                .bits()
+        );
     }
 }

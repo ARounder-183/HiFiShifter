@@ -12,10 +12,12 @@ use crate::ara::mapping::{
     AraAudioModification, AraAudioSource, AraDocument, AraMusicalContext, AraPlaybackRegion,
     AraRegionSequence,
 };
+use crate::render::document::DocumentSession;
+use crate::render::ownership::{region_owners, DocumentId};
 use ara2_bridge::core::{
-    ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties,
-    ContentTimeRange, ContentUpdateScopes, DocumentProperties, MusicalContextProperties,
-    PlaybackRegionProperties, RegionSequenceProperties,
+    ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, ContentTimeRange,
+    ContentUpdateScopes, DocumentProperties, MusicalContextProperties, PlaybackRegionProperties,
+    RegionSequenceProperties,
 };
 use ara2_bridge::plugin::{
     AudioModifications, AudioSources, CreateContext, DocumentLifecycle, HostContentScope,
@@ -24,8 +26,6 @@ use ara2_bridge::plugin::{
 use hifishifter_kernel::state::TimelineState;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::render::ownership::{region_owners, DocumentId};
-use crate::render::document::DocumentSession;
 use std::sync::Arc;
 
 /// 句柄的可用作键的形式。
@@ -76,7 +76,7 @@ pub struct ModelHandle {
     document_id: DocumentId,
     session: Arc<DocumentSession>,
     region_keys: Vec<u64>,
-    head_tail:Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>,
+    head_tail: Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
     /// 映射好的时间线（`end_editing` 之后可用）。
@@ -111,7 +111,10 @@ impl Default for ModelHandle {
             document_id,
             session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
-            head_tail:Arc::new(ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192).expect("constant head/tail capacity")),
+            head_tail: Arc::new(
+                ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192)
+                    .expect("constant head/tail capacity"),
+            ),
             document: AraDocument::default(),
             timeline: None,
             generation: None,
@@ -127,15 +130,24 @@ impl Default for ModelHandle {
 }
 
 impl ModelHandle {
-    pub(crate) fn head_tail(&self)->Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter> {self.head_tail.clone()}
+    pub(crate) fn head_tail(&self) -> Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter> {
+        self.head_tail.clone()
+    }
     /// 本应用渐变位于clip边界内，没有额外head/tail；查询使用SDK的零分配快照接口。
-    fn publish_head_tail(&self)->Result<(),AraError> {
-        let entries=self.region_keys.iter().enumerate().filter(|(index,_)|!self.destroyed_regions.contains(index))
-            .map(|(_,key)|ara2_bridge::core::HeadTailEntry::new(*key,0.,0.)).collect::<Result<Vec<_>,_>>()?;
+    fn publish_head_tail(&self) -> Result<(), AraError> {
+        let entries = self
+            .region_keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.destroyed_regions.contains(index))
+            .map(|(_, key)| ara2_bridge::core::HeadTailEntry::new(*key, 0., 0.))
+            .collect::<Result<Vec<_>, _>>()?;
         self.head_tail.install(entries)
     }
     /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
-    pub(crate) fn session(&self) -> Arc<DocumentSession> { self.session.clone() }
+    pub(crate) fn session(&self) -> Arc<DocumentSession> {
+        self.session.clone()
+    }
     /// 新建一份空模型。
     pub fn new() -> Self {
         Self::default()
@@ -161,19 +173,23 @@ impl ModelHandle {
     /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
     fn remap_and_log(&mut self) {
-        let session=self.session.clone();
-        let transaction=session.transaction.lock().unwrap();
+        let session = self.session.clone();
+        let transaction = session.transaction.lock().unwrap();
         {
             let mut regions = self.session.regions.lock().unwrap();
             regions.clear();
             for (slot, region) in self.document.playback_regions.iter().enumerate() {
                 if !self.destroyed_regions.contains(&slot) {
-                    if let Some(key) = self.region_keys.get(slot) { regions.insert(*key, region.clone()); }
+                    if let Some(key) = self.region_keys.get(slot) {
+                        regions.insert(*key, region.clone());
+                    }
                 }
             }
         }
         let mut document = self.document.clone();
-        document.playback_regions = document.playback_regions.into_iter()
+        document.playback_regions = document
+            .playback_regions
+            .into_iter()
             .enumerate()
             .filter(|(index, _)| !self.destroyed_regions.contains(index))
             .map(|(_, region)| region)
@@ -182,10 +198,15 @@ impl ModelHandle {
             Ok(mut timeline) => {
                 for track in &mut timeline.tracks {
                     track.compose_enabled = true;
-                    track.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+                    track.pitch_analysis_algo =
+                        hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
                 }
                 // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
-                let keys = self.region_keys.iter().enumerate().filter(|(slot, _)| !self.destroyed_regions.contains(slot));
+                let keys = self
+                    .region_keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, _)| !self.destroyed_regions.contains(slot));
                 let mut identities = self.session.clip_ids.lock().unwrap();
                 identities.clear();
                 for (clip, (slot, key)) in timeline.clips.iter_mut().zip(keys) {
@@ -194,49 +215,73 @@ impl ModelHandle {
                 }
                 drop(identities);
                 // 身份仅由真实region→sequence边与宿主persistentID构建，不从名字/序号推断。
-                let mut bindings: crate::state_channel::TrackBindings = timeline.tracks.iter().map(|t| (t.id.clone(),vec![])).collect();
+                let mut bindings: crate::state_channel::TrackBindings = timeline
+                    .tracks
+                    .iter()
+                    .map(|t| (t.id.clone(), vec![]))
+                    .collect();
                 for region in &document.playback_regions {
                     if let Some(index) = region.region_sequence_index {
                         if let Some(track) = timeline.tracks.get(index) {
-                            bindings.get_mut(&track.id).unwrap().push((region.audio_modification_persistent_id.clone(), region.audio_source_persistent_id.clone()));
+                            bindings.get_mut(&track.id).unwrap().push((
+                                region.audio_modification_persistent_id.clone(),
+                                region.audio_source_persistent_id.clone(),
+                            ));
                         }
                     }
                 }
-                for members in bindings.values_mut() { members.sort(); members.dedup(); }
+                for members in bindings.values_mut() {
+                    members.sort();
+                    members.dedup();
+                }
                 *self.session.track_bindings.lock().unwrap() = bindings.clone();
                 // getter可能重入ARA：先发布真实基础图、释放事务，再采集稳定item GUID。
-                *self.session.timeline.lock().unwrap()=Some(timeline.clone());
+                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
                 drop(transaction);
-                for owner in self.session.renderer_owners() {owner.refresh_reaper_state_for_model();}
-                for owner in self.session.renderer_owners() {owner.refresh_ui_inventory();}
-                let transaction=session.transaction.lock().unwrap();
+                for owner in self.session.renderer_owners() {
+                    owner.refresh_reaper_state_for_model();
+                }
+                for owner in self.session.renderer_owners() {
+                    owner.refresh_ui_inventory();
+                }
+                let transaction = session.transaction.lock().unwrap();
                 {
-                    let items=self.session.region_items.lock().unwrap();let mut ids=self.session.clip_ids.lock().unwrap();
+                    let items = self.session.region_items.lock().unwrap();
+                    let mut ids = self.session.clip_ids.lock().unwrap();
                     for clip in &mut timeline.clips {
-                        if let Some((key,_))=ids.iter().find(|(_,id)|**id==clip.id) {
-                            if let Some(item)=items.get(key) {let key=*key;clip.id=format!("ara-item-{item}");ids.insert(key,clip.id.clone());}
+                        if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
+                            if let Some(item) = items.get(key) {
+                                let key = *key;
+                                clip.id = format!("ara-item-{item}");
+                                ids.insert(key, clip.id.clone());
+                            }
                         }
                     }
                 }
                 {
-                    let mut edits=self.session.edits.lock().unwrap();
-                    if !edits.atlas.is_empty()&&!edits.needs_rebind {
-                        let projection=(|| {
-                            let identities=self.session.parameter_identities_locked(&timeline)?;
-                            let roots=edits.atlas.project_roots(&timeline,&identities)?;
-                            let followed=edits.atlas.follow_geometry(&timeline,&identities)?;
-                            Ok::<_,String>((roots,followed))
+                    let mut edits = self.session.edits.lock().unwrap();
+                    if !edits.atlas.is_empty() && !edits.needs_rebind {
+                        let projection = (|| {
+                            let identities = self.session.parameter_identities_locked(&timeline)?;
+                            let roots = edits.atlas.project_roots(&timeline, &identities)?;
+                            let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
+                            Ok::<_, String>((roots, followed))
                         })();
                         match projection {
-                            Ok((roots,followed))=>{
+                            Ok((roots, followed)) => {
                                 // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
-                                edits.params.extend(roots);edits.atlas=followed;
-                                edits.tracks.retain(|track|bindings.contains_key(&track.id));
-                            },
-                            Err(error)=>{
+                                edits.params.extend(roots);
+                                edits.atlas = followed;
+                                edits
+                                    .tracks
+                                    .retain(|track| bindings.contains_key(&track.id));
+                            }
+                            Err(error) => {
                                 log::error!("[ara] source parameter projection conflict: {error}");
-                                *self.session.timeline.lock().unwrap()=Some(timeline.clone());self.timeline=Some(timeline);
-                                self.session.ready.store(false,Ordering::Release);return;
+                                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
+                                self.timeline = Some(timeline);
+                                self.session.ready.store(false, Ordering::Release);
+                                return;
                             }
                         }
                     }
@@ -299,7 +344,9 @@ impl DocumentLifecycle for ModelHandle {
 
     fn destroy_document(&mut self, _document: Self::Document) {
         self.session.close();
-        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+        region_owners()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .remove_document(self.document_id);
         log::info!("[ara] document destroyed");
     }
@@ -337,7 +384,12 @@ impl RegionSequences for ModelHandle {
                 region_sequences: Vec::new(),
             });
         }
-        let index = self.document.musical_contexts.iter().map(|context| context.region_sequences.len()).sum();
+        let index = self
+            .document
+            .musical_contexts
+            .iter()
+            .map(|context| context.region_sequences.len())
+            .sum();
         let context_index = self.document.musical_contexts.len() - 1;
         let sequences = &mut self.document.musical_contexts[context_index].region_sequences;
         sequences.push(AraRegionSequence {
@@ -350,7 +402,11 @@ impl RegionSequences for ModelHandle {
         }
         if let Some(key) = context.realtime_key() {
             self.sequence_index_by_model_ref.insert(key as usize, index);
-            self.session.sequence_regions.lock().unwrap().insert(key, HashSet::new());
+            self.session
+                .sequence_regions
+                .lock()
+                .unwrap()
+                .insert(key, HashSet::new());
         }
         Ok(index)
     }
@@ -360,11 +416,28 @@ impl AudioSources for ModelHandle {
     type AudioSource = usize;
 
     /// 源几何变化必须撤销旧 PCM；不把新的采样率/长度继续与旧内容混用。
-    fn update_audio_source(&mut self, state: &mut Self::AudioSource, properties: AudioSourceProperties, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
-        let source = self.document.audio_sources.get_mut(*state).ok_or(AraError::InvalidArgument("unknown source"))?;
+    fn update_audio_source(
+        &mut self,
+        state: &mut Self::AudioSource,
+        properties: AudioSourceProperties,
+        host: &HostContentScope<'_, '_>,
+    ) -> Result<(), AraError> {
+        let source = self
+            .document
+            .audio_sources
+            .get_mut(*state)
+            .ok_or(AraError::InvalidArgument("unknown source"))?;
         self.session.clear_renderers();
-        self.session.sources.lock().unwrap().remove(&source.persistent_id);
-        self.session.edit_sources.lock().unwrap().remove(&source.persistent_id);
+        self.session
+            .sources
+            .lock()
+            .unwrap()
+            .remove(&source.persistent_id);
+        self.session
+            .edit_sources
+            .lock()
+            .unwrap()
+            .remove(&source.persistent_id);
         source.persistent_id = properties.persistent_id().to_string();
         source.name = properties.name().map(str::to_owned);
         source.sample_rate = properties.sample_rate();
@@ -377,11 +450,24 @@ impl AudioSources for ModelHandle {
     }
 
     /// undo history 中停用源时立即撤销准备好的 PCM；恢复后等待宿主重新授予访问。
-    fn deactivate_audio_source(&mut self, state: &mut Self::AudioSource, deactivate: bool, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
+    fn deactivate_audio_source(
+        &mut self,
+        state: &mut Self::AudioSource,
+        deactivate: bool,
+        host: &HostContentScope<'_, '_>,
+    ) -> Result<(), AraError> {
         if deactivate {
             self.session.clear_renderers();
-            if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
-            if let Some(source) = self.document.audio_sources.get_mut(*state) { source.sample_access_enabled = false; }
+            if let Some(source) = self.document.audio_sources.get(*state) {
+                self.session
+                    .edit_sources
+                    .lock()
+                    .unwrap()
+                    .remove(&source.persistent_id);
+            }
+            if let Some(source) = self.document.audio_sources.get_mut(*state) {
+                source.sample_access_enabled = false;
+            }
             self.refresh_source_pcm(*state, host);
         }
         Ok(())
@@ -390,8 +476,16 @@ impl AudioSources for ModelHandle {
     /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
     fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
         self.session.clear_renderers();
-        if let Some(source) = self.document.audio_sources.get(state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
-        if let Some(source) = self.document.audio_sources.get_mut(state) { source.sample_access_enabled = false; }
+        if let Some(source) = self.document.audio_sources.get(state) {
+            self.session
+                .edit_sources
+                .lock()
+                .unwrap()
+                .remove(&source.persistent_id);
+        }
+        if let Some(source) = self.document.audio_sources.get_mut(state) {
+            source.sample_access_enabled = false;
+        }
         self.refresh_source_pcm(state, host);
     }
 
@@ -437,7 +531,13 @@ impl AudioSources for ModelHandle {
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
         self.session.clear_renderers();
-        if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
+        if let Some(source) = self.document.audio_sources.get(*state) {
+            self.session
+                .edit_sources
+                .lock()
+                .unwrap()
+                .remove(&source.persistent_id);
+        }
         self.source_content_version_bump(*state);
         self.refresh_source_pcm(*state, host);
         Ok(())
@@ -457,14 +557,21 @@ impl AudioSources for ModelHandle {
         if enable && std::env::var_os("HIFISHIFTER_ARA_PCM_PROBE").is_some() {
             // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
             let result = (|| {
-                let source = self.document.audio_sources.get(*state)
+                let source = self
+                    .document
+                    .audio_sources
+                    .get(*state)
                     .ok_or(AraError::InvalidArgument("unknown source"))?;
-                let source_ref = host.current_audio_source()
+                let source_ref = host
+                    .current_audio_source()
                     .ok_or(AraError::InvalidState("missing source scope"))?;
                 let channels = source.channel_count.max(1) as usize;
                 let mut reader = host.audio_reader::<f32>(source_ref, channels)?;
                 let mut samples = vec![vec![0.0_f32; 16]; channels];
-                let mut planes = samples.iter_mut().map(Vec::as_mut_slice).collect::<Vec<_>>();
+                let mut planes = samples
+                    .iter_mut()
+                    .map(Vec::as_mut_slice)
+                    .collect::<Vec<_>>();
                 reader.read(0, &mut planes)?;
                 log::info!("[ara] source PCM #{}: first16={:?}", state, samples[0]);
                 Ok::<(), AraError>(())
@@ -481,23 +588,45 @@ impl ModelHandle {
     /// 授权刷新撤销旧快照；内容/几何回调另行推进模型版本，仅从授权scope读取。
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
         self.session.revoke_renderers();
-        let Some(source) = self.document.audio_sources.get(index) else { return; };
-        self.session.sources.lock().unwrap().remove(&source.persistent_id);
+        let Some(source) = self.document.audio_sources.get(index) else {
+            return;
+        };
+        self.session
+            .sources
+            .lock()
+            .unwrap()
+            .remove(&source.persistent_id);
         if source.sample_access_enabled {
-            let result = usize::try_from(source.sample_count).ok()
+            let result = usize::try_from(source.sample_count)
+                .ok()
                 .filter(|_| source.sample_rate == source.sample_rate.round())
                 .ok_or(AraError::InvalidArgument("unsupported sample geometry"))
-                .and_then(|frames| crate::render::source::read_source_pcm(host, frames, source.channel_count as usize, source.sample_rate as u32, self.source_content_version(index)));
+                .and_then(|frames| {
+                    crate::render::source::read_source_pcm(
+                        host,
+                        frames,
+                        source.channel_count as usize,
+                        source.sample_rate as u32,
+                        self.source_content_version(index),
+                    )
+                });
             match result {
                 Ok(pcm) => {
-                    log::info!("[ara] host PCM ready source={index} frames={} version={}", source.sample_count, pcm.version);
+                    log::info!(
+                        "[ara] host PCM ready source={index} frames={} version={}",
+                        source.sample_count,
+                        pcm.version
+                    );
                     let pcm = Arc::new(pcm);
-                    self.session.publish_source_pcm(source.persistent_id.clone(),pcm);
+                    self.session
+                        .publish_source_pcm(source.persistent_id.clone(), pcm);
                 }
                 Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
             }
         }
-        if !self.editing { self.session.prepare_renderers(); }
+        if !self.editing {
+            self.session.prepare_renderers();
+        }
     }
 
     /// 内容版本自增。
@@ -510,7 +639,11 @@ impl ModelHandle {
             self.content_versions.resize(index + 1, 0);
         }
         self.content_versions[index] += 1;
-        log::info!("[ara] audio_source content_version #{}: {}", index, self.content_versions[index]);
+        log::info!(
+            "[ara] audio_source content_version #{}: {}",
+            index,
+            self.content_versions[index]
+        );
     }
 }
 
@@ -541,10 +674,12 @@ impl AudioModifications for ModelHandle {
             .map(|s| s.persistent_id.clone())
             .unwrap_or_default();
         let index = self.document.audio_modifications.len();
-        self.document.audio_modifications.push(AraAudioModification {
-            persistent_id,
-            audio_source_persistent_id,
-        });
+        self.document
+            .audio_modifications
+            .push(AraAudioModification {
+                persistent_id,
+                audio_source_persistent_id,
+            });
         if let Some(handle) = context.object_handle() {
             self.modification_index_by_handle.insert(handle, index);
         }
@@ -615,15 +750,24 @@ impl PlaybackRegions for ModelHandle {
         let has_content_based_fade_at_head = (flags & 8) != 0;
         let has_content_based_fade_at_tail = (flags & 4) != 0;
         let index = self.document.playback_regions.len();
-        let key = context.realtime_key().ok_or(AraError::InvalidState("missing region key"))?;
-        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+        let key = context
+            .realtime_key()
+            .ok_or(AraError::InvalidState("missing region key"))?;
+        region_owners()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .register(key, self.document_id, index)
             .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
         self.region_keys.push(key);
         self.publish_head_tail()?;
         if let Some(sequence) = properties.region_sequence() {
-            self.session.sequence_regions.lock().unwrap().entry(sequence.as_raw() as usize as u64)
-                .or_default().insert(key);
+            self.session
+                .sequence_regions
+                .lock()
+                .unwrap()
+                .entry(sequence.as_raw() as usize as u64)
+                .or_default()
+                .insert(key);
         }
         self.document.playback_regions.push(AraPlaybackRegion {
             name: properties.name().map(str::to_owned),
@@ -664,13 +808,20 @@ impl PlaybackRegions for ModelHandle {
             if let Some(index) = self.sequence_index_by_model_ref.get(&sequence_key).copied() {
                 if let Some(key) = self.region_keys.get(*state) {
                     let mut members = self.session.sequence_regions.lock().unwrap();
-                    for regions in members.values_mut() { regions.remove(key); }
+                    for regions in members.values_mut() {
+                        regions.remove(key);
+                    }
                     members.entry(sequence_key as u64).or_default().insert(*key);
                 }
-                if let Some(region) = self.document.playback_regions.get_mut(*state) { region.region_sequence_index = Some(index); }
+                if let Some(region) = self.document.playback_regions.get_mut(*state) {
+                    region.region_sequence_index = Some(index);
+                }
             }
         }
-        let region = self.document.playback_regions.get_mut(*state)
+        let region = self
+            .document
+            .playback_regions
+            .get_mut(*state)
             .ok_or(AraError::InvalidArgument("unknown playback region"))?;
         let flags = properties.transformation_flags();
         region.name = properties.name().map(str::to_owned);
@@ -681,7 +832,11 @@ impl PlaybackRegions for ModelHandle {
         region.is_timestretch_enabled = (flags & 1) != 0;
         region.has_content_based_fade_at_head = (flags & 8) != 0;
         region.has_content_based_fade_at_tail = (flags & 4) != 0;
-        log::info!("[ara] playback_region updated #{}: startPlay={:.6}", state, region.start_in_playback_time);
+        log::info!(
+            "[ara] playback_region updated #{}: startPlay={:.6}",
+            state,
+            region.start_in_playback_time
+        );
         Ok(())
     }
 
@@ -689,11 +844,18 @@ impl PlaybackRegions for ModelHandle {
     fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
         self.session.clear_renderers();
         if let Some(key) = self.region_keys.get(state) {
-            region_owners().lock().unwrap_or_else(|p| p.into_inner()).remove(*key);
-            for regions in self.session.sequence_regions.lock().unwrap().values_mut() { regions.remove(key); }
+            region_owners()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(*key);
+            for regions in self.session.sequence_regions.lock().unwrap().values_mut() {
+                regions.remove(key);
+            }
         }
         self.destroyed_regions.insert(state);
-        if let Err(error)=self.publish_head_tail() {log::error!("head/tail snapshot failed: {error}");}
+        if let Err(error) = self.publish_head_tail() {
+            log::error!("head/tail snapshot failed: {error}");
+        }
         log::info!("[ara] playback_region destroyed #{}", state);
     }
 }
@@ -702,7 +864,9 @@ impl Drop for ModelHandle {
     fn drop(&mut self) {
         self.session.close();
         // 初始化失败也可能直接释放模型而没有 destroy_document 回调。
-        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+        region_owners()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .remove_document(self.document_id);
     }
 }
@@ -713,37 +877,106 @@ mod tests {
     #[test]
     fn source_parameter_atlas_moves_and_stretches_in_real_document_transactions() {
         use ara2_bridge::plugin::ExtensionRoles;
-        let mut model=ModelHandle::new();model.document=identity_document(&["A"]);
-        let identity=Box::new(0_u8);let key=(&*identity as *const u8) as u64;
-        model.region_keys.push(key);region_owners().lock().unwrap().register(key,model.document_id,0).unwrap();model.remap_and_log();
-        let document=model.session();let owner=Arc::new(crate::render::extension::ExtensionOwner::default());
-        let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER,None).unwrap();
-        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
-        let host=document.workspace_timeline().unwrap();let mut client=host.clone();let root=client.tracks[0].id.clone();
-        client.params_by_root_track.insert(root.clone(),hifishifter_kernel::state::TrackParamsState {frame_period_ms:100.,pitch_edit_user_modified:true,
-            pitch_orig:vec![57.;6],pitch_edit:vec![60.,61.,62.,63.,64.,65.],..Default::default()});
-        let projection=document.workspace_projection().unwrap();document.accept_workspace_edits(0,document.revision.load(Ordering::Acquire),&client,&projection).unwrap();
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        model.region_keys.push(key);
+        region_owners()
+            .lock()
+            .unwrap()
+            .register(key, model.document_id, 0)
+            .unwrap();
+        model.remap_and_log();
+        let document = model.session();
+        let owner = Arc::new(crate::render::extension::ExtensionOwner::default());
+        let raw = owner
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .unwrap();
+        unsafe {
+            let ext = &*raw;
+            ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+                ext.playbackRendererRef,
+                key as *mut _,
+            );
+        }
+        let host = document.workspace_timeline().unwrap();
+        let mut client = host.clone();
+        let root = client.tracks[0].id.clone();
+        client.params_by_root_track.insert(
+            root.clone(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 100.,
+                pitch_edit_user_modified: true,
+                pitch_orig: vec![57.; 6],
+                pitch_edit: vec![60., 61., 62., 63., 64., 65.],
+                ..Default::default()
+            },
+        );
+        let projection = document.workspace_projection().unwrap();
+        document
+            .accept_workspace_edits(
+                0,
+                document.revision.load(Ordering::Acquire),
+                &client,
+                &projection,
+            )
+            .unwrap();
         assert!(!document.edits.lock().unwrap().atlas.is_empty());
-        model.document.playback_regions[0].start_in_playback_time=1.;model.document.playback_regions[0].duration_in_playback_time=1.;
-        model.document.playback_regions[0].is_timestretch_enabled=true;model.remap_and_log();
-        let pitch=document.edits.lock().unwrap().params[&root].pitch_edit.clone();document.close();
-        assert!(pitch.len()>=21,"authority仍停在旧项目数组: {pitch:?}");
-        assert_eq!(&pitch[10..21],&[60.,60.5,61.,61.5,62.,62.5,63.,63.5,64.,64.5,65.]);
-        assert_eq!(pitch[0],0.,"旧位置不能继续遗留编辑");
+        model.document.playback_regions[0].start_in_playback_time = 1.;
+        model.document.playback_regions[0].duration_in_playback_time = 1.;
+        model.document.playback_regions[0].is_timestretch_enabled = true;
+        model.remap_and_log();
+        let pitch = document.edits.lock().unwrap().params[&root]
+            .pitch_edit
+            .clone();
+        document.close();
+        assert!(pitch.len() >= 21, "authority仍停在旧项目数组: {pitch:?}");
+        assert_eq!(
+            &pitch[10..21],
+            &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.5, 65.]
+        );
+        assert_eq!(pitch[0], 0., "旧位置不能继续遗留编辑");
     }
     use super::*;
-    use ara2_bridge::core::{Registry, RegionSequenceKind};
+    use ara2_bridge::core::{RegionSequenceKind, Registry};
 
     fn identity_document(order: &[&str]) -> AraDocument {
-        let mut doc = crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
-        doc.musical_contexts[0].region_sequences.clear(); doc.playback_regions.clear(); doc.audio_modifications.clear();
+        let mut doc = crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        ))
+        .unwrap();
+        doc.musical_contexts[0].region_sequences.clear();
+        doc.playback_regions.clear();
+        doc.audio_modifications.clear();
         for (index, name) in order.iter().enumerate() {
-            doc.musical_contexts[0].region_sequences.push(AraRegionSequence { name: Some(name.to_string()), order_index:index as i32, playback_region_count:1 });
+            doc.musical_contexts[0]
+                .region_sequences
+                .push(AraRegionSequence {
+                    name: Some(name.to_string()),
+                    order_index: index as i32,
+                    playback_region_count: 1,
+                });
             let modification = format!("host-mod-{name}");
             let source = doc.audio_sources[0].persistent_id.clone();
-            doc.audio_modifications.push(AraAudioModification { persistent_id: modification.clone(), audio_source_persistent_id: source.clone() });
-            doc.playback_regions.push(AraPlaybackRegion { audio_source_persistent_id:source, audio_modification_persistent_id:modification,
-                region_sequence_index:Some(index), duration_in_modification_time:0.5, duration_in_playback_time:0.5, ..Default::default() });
+            doc.audio_modifications.push(AraAudioModification {
+                persistent_id: modification.clone(),
+                audio_source_persistent_id: source.clone(),
+            });
+            doc.playback_regions.push(AraPlaybackRegion {
+                audio_source_persistent_id: source,
+                audio_modification_persistent_id: modification,
+                region_sequence_index: Some(index),
+                duration_in_modification_time: 0.5,
+                duration_in_playback_time: 0.5,
+                ..Default::default()
+            });
         }
         doc
     }
@@ -751,57 +984,135 @@ mod tests {
     /// 保存后新建图的序号不可决定旧编辑归属；共同source由真正modification身份区分。
     #[test]
     fn persisted_b_edits_follow_host_identity_after_deleting_a_and_reordering_creation() {
-        let mut model = ModelHandle::new(); model.document = identity_document(&["A", "B"]); model.remap_and_log();
-        let host = model.timeline().unwrap().clone(); let mut client = host.clone();
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A", "B"]);
+        model.remap_and_log();
+        let host = model.timeline().unwrap().clone();
+        let mut client = host.clone();
         client.tracks[1].volume = 0.25;
-        client.params_by_root_track.insert("ara-track-1".into(), hifishifter_kernel::state::TrackParamsState {
-            frame_period_ms:5.0, pitch_edit:vec![62.0,64.0], ..Default::default() });
+        client.params_by_root_track.insert(
+            "ara-track-1".into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![62.0, 64.0],
+                ..Default::default()
+            },
+        );
         // 这里只保留已编辑B，模拟B renderer的局部视图。
-        client.tracks.remove(0); let mut view=host.clone(); view.tracks.remove(0);
-        *model.session.edits.lock().unwrap() = crate::state_channel::EditState::default().merge(&view,&client,0).unwrap();
+        client.tracks.remove(0);
+        let mut view = host.clone();
+        view.tracks.remove(0);
+        *model.session.edits.lock().unwrap() = crate::state_channel::EditState::default()
+            .merge(&view, &client, 0)
+            .unwrap();
         // 同live图中删A区间，但B的会话slot不压缩。
-        model.destroyed_regions.insert(0); model.remap_and_log();
+        model.destroyed_regions.insert(0);
+        model.remap_and_log();
         let bytes = model.session.edits.lock().unwrap().encode().unwrap();
-        for order in [vec!["B"], vec!["B","A"]] {
-            let mut reopened=ModelHandle::new(); reopened.document=identity_document(&order);
-            reopened.session.edits.lock().unwrap().restore(&bytes).unwrap(); reopened.remap_and_log();
-            let mut timeline=reopened.timeline().unwrap().clone(); reopened.session.edits.lock().unwrap().apply(&mut timeline);
-            assert_eq!(timeline.tracks[0].name,"B");
-            assert_eq!(timeline.tracks[0].volume,0.25,"B-first必须保留B音量而不依赖旧序号");
-            assert_eq!(timeline.params_by_root_track["ara-track-0"].pitch_edit,[62.0,64.0]);
-            if timeline.tracks.len()>1 { assert_eq!(timeline.tracks[1].volume,1.0,"不得串到A"); }
-            timeline.clips.retain(|clip| clip.track_id=="ara-track-0");
-            let pcm=std::collections::HashMap::from([(reopened.document.audio_sources[0].persistent_id.clone(), hifishifter_kernel::mixdown::MixdownPcm {
-                sample_rate:44100,channels:1,samples:Arc::new(vec![0.2;22050]) })]);
-            let options=hifishifter_kernel::mixdown::MixdownOptions { sample_rate:44100,start_sec:0.0,end_sec:Some(0.5),
-                stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::LinearResample,apply_pitch_edit:false,
-                output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:hifishifter_kernel::mixdown::QualityPreset::Export,
-                cancel_flag:None,progress:None,cache_stats:None };
-            let (_,_,_,samples)=hifishifter_kernel::mixdown::render_mixdown_with_pcm(&timeline,options,&pcm).unwrap();
-            assert!(samples.iter().all(|sample| (*sample-0.05).abs()<1e-6),"重建后B输出保留0.25音量");
+        for order in [vec!["B"], vec!["B", "A"]] {
+            let mut reopened = ModelHandle::new();
+            reopened.document = identity_document(&order);
+            reopened
+                .session
+                .edits
+                .lock()
+                .unwrap()
+                .restore(&bytes)
+                .unwrap();
+            reopened.remap_and_log();
+            let mut timeline = reopened.timeline().unwrap().clone();
+            reopened.session.edits.lock().unwrap().apply(&mut timeline);
+            assert_eq!(timeline.tracks[0].name, "B");
+            assert_eq!(
+                timeline.tracks[0].volume, 0.25,
+                "B-first必须保留B音量而不依赖旧序号"
+            );
+            assert_eq!(
+                timeline.params_by_root_track["ara-track-0"].pitch_edit,
+                [62.0, 64.0]
+            );
+            if timeline.tracks.len() > 1 {
+                assert_eq!(timeline.tracks[1].volume, 1.0, "不得串到A");
+            }
+            timeline.clips.retain(|clip| clip.track_id == "ara-track-0");
+            let pcm = std::collections::HashMap::from([(
+                reopened.document.audio_sources[0].persistent_id.clone(),
+                hifishifter_kernel::mixdown::MixdownPcm {
+                    sample_rate: 44100,
+                    channels: 1,
+                    samples: Arc::new(vec![0.2; 22050]),
+                },
+            )]);
+            let options = hifishifter_kernel::mixdown::MixdownOptions {
+                sample_rate: 44100,
+                start_sec: 0.0,
+                end_sec: Some(0.5),
+                stretch: hifishifter_kernel::time_stretch::StretchAlgorithm::LinearResample,
+                apply_pitch_edit: false,
+                output: hifishifter_kernel::encode::OutputSpec::wav_32f(),
+                quality_preset: hifishifter_kernel::mixdown::QualityPreset::Export,
+                cancel_flag: None,
+                progress: None,
+                cache_stats: None,
+            };
+            let (_, _, _, samples) =
+                hifishifter_kernel::mixdown::render_mixdown_with_pcm(&timeline, options, &pcm)
+                    .unwrap();
+            assert!(
+                samples.iter().all(|sample| (*sample - 0.05).abs() < 1e-6),
+                "重建后B输出保留0.25音量"
+            );
         }
     }
 
     /// move 到别的 sequence 时几何与成员表必须一起迁移，旧 editor 不能继续播放。
     #[test]
     fn region_sequence_update_moves_the_editor_membership() {
-        let mut model=ModelHandle::new();
-        model.document=crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
-        let mut registry=Registry::<RegionSequenceKind,()>::new(2);
-        let old_handle=registry.insert(()).unwrap(); let new_handle=registry.insert(()).unwrap();
-        let old=registry.model_ref(old_handle).unwrap(); let new=registry.model_ref(new_handle).unwrap();
-        let old_key=old.as_raw() as usize as u64; let new_key=new.as_raw() as usize as u64;
-        let region=Box::new(0_u8); let region_key=(&*region as *const u8) as u64;
+        let mut model = ModelHandle::new();
+        model.document = crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        ))
+        .unwrap();
+        let mut registry = Registry::<RegionSequenceKind, ()>::new(2);
+        let old_handle = registry.insert(()).unwrap();
+        let new_handle = registry.insert(()).unwrap();
+        let old = registry.model_ref(old_handle).unwrap();
+        let new = registry.model_ref(new_handle).unwrap();
+        let old_key = old.as_raw() as usize as u64;
+        let new_key = new.as_raw() as usize as u64;
+        let region = Box::new(0_u8);
+        let region_key = (&*region as *const u8) as u64;
         model.region_keys.push(region_key);
-        model.sequence_index_by_model_ref.insert(old_key as usize,0);
-        model.sequence_index_by_model_ref.insert(new_key as usize,1);
-        model.session.sequence_regions.lock().unwrap().insert(old_key,[region_key].into_iter().collect());
-        model.session.sequence_regions.lock().unwrap().insert(new_key,HashSet::new());
-        let properties=PlaybackRegionProperties::for_ara2(1,0.0,1.0,2.0,1.0,new,None,None).unwrap();
-        PlaybackRegions::update_playback_region(&mut model,&mut 0,properties).unwrap();
-        assert_eq!(model.document.playback_regions[0].region_sequence_index,Some(1));
+        model
+            .sequence_index_by_model_ref
+            .insert(old_key as usize, 0);
+        model
+            .sequence_index_by_model_ref
+            .insert(new_key as usize, 1);
+        model
+            .session
+            .sequence_regions
+            .lock()
+            .unwrap()
+            .insert(old_key, [region_key].into_iter().collect());
+        model
+            .session
+            .sequence_regions
+            .lock()
+            .unwrap()
+            .insert(new_key, HashSet::new());
+        let properties =
+            PlaybackRegionProperties::for_ara2(1, 0.0, 1.0, 2.0, 1.0, new, None, None).unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut 0, properties).unwrap();
+        assert_eq!(
+            model.document.playback_regions[0].region_sequence_index,
+            Some(1)
+        );
         assert!(model.session.sequence_regions.lock().unwrap()[&old_key].is_empty());
-        assert_eq!(model.session.sequence_regions.lock().unwrap()[&new_key],[region_key].into_iter().collect());
+        assert_eq!(
+            model.session.sequence_regions.lock().unwrap()[&new_key],
+            [region_key].into_iter().collect()
+        );
     }
 
     /// 实际授权/撤权回调必须更新源表，内容版本刷新后不能继续持旧 PCM。
@@ -809,90 +1120,258 @@ mod tests {
     fn source_grant_version_change_and_revocation_refresh_only_host_pcm() {
         use ara2_bridge::plugin::{HostAudioSourceRef, HostClients};
         let mut model = ModelHandle::new();
-        model.document = crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
+        model.document = crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        ))
+        .unwrap();
         model.document.audio_sources[0].sample_count = 4;
-        let mut fixture = crate::test_host::HostFixture::new(vec![vec![0.1,0.2,0.3,0.4]]);
+        let mut fixture = crate::test_host::HostFixture::new(vec![vec![0.1, 0.2, 0.3, 0.4]]);
         let host = fixture.instance();
         // SAFETY: 稳定 fixture 保留到 clients 与模型授权 scope 释放。
         let clients = unsafe { HostClients::from_raw(&host, ApiGeneration::V2Final) }.unwrap();
         let mut identity = 0_u8;
         // SAFETY: 仅作为不透明宿主源身份，存活到全部回调结束。
         let source = unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap();
-        let mut slot=0;
+        let mut slot = 0;
         let original_revision = model.session.revision.load(Ordering::Acquire);
-        clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, true, &scope)).unwrap();
-        assert_eq!(model.session.revision.load(Ordering::Acquire), original_revision, "授权不改变宿主模型版本");
-        let id=model.document.audio_sources[0].persistent_id.clone();
-        assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.1,0.2,0.3,0.4]);
-        fixture.planes[0]=vec![0.5,0.6,0.7,0.8];
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, true, &scope,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            model.session.revision.load(Ordering::Acquire),
+            original_revision,
+            "授权不改变宿主模型版本"
+        );
+        let id = model.document.audio_sources[0].persistent_id.clone();
+        assert_eq!(
+            model.session.sources.lock().unwrap()[&id].planes[0],
+            [0.1, 0.2, 0.3, 0.4]
+        );
+        fixture.planes[0] = vec![0.5, 0.6, 0.7, 0.8];
         let before_content = model.session.revision.load(Ordering::Acquire);
-        clients.with_audio_source_management(source, |scope| AudioSources::update_audio_source_content(&mut model,&mut slot,None,ContentUpdateScopes::empty(),&scope)).unwrap();
-        assert!(model.session.revision.load(Ordering::Acquire)>before_content,"真实内容通知推进模型版本");
-        assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
-        assert_eq!(model.session.sources.lock().unwrap()[&id].version,1);
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::update_audio_source_content(
+                    &mut model,
+                    &mut slot,
+                    None,
+                    ContentUpdateScopes::empty(),
+                    &scope,
+                )
+            })
+            .unwrap();
+        assert!(
+            model.session.revision.load(Ordering::Acquire) > before_content,
+            "真实内容通知推进模型版本"
+        );
+        assert_eq!(
+            model.session.sources.lock().unwrap()[&id].planes[0],
+            [0.5, 0.6, 0.7, 0.8]
+        );
+        assert_eq!(model.session.sources.lock().unwrap()[&id].version, 1);
         let before_revoke = model.session.revision.load(Ordering::Acquire);
-        clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, false, &scope)).unwrap();
-        assert_eq!(model.session.revision.load(Ordering::Acquire), before_revoke, "撤权不使GUI快照冲突");
-        assert_eq!(fixture.created.load(Ordering::Acquire), fixture.destroyed.load(Ordering::Acquire), "reader同步释放");
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, false, &scope,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            model.session.revision.load(Ordering::Acquire),
+            before_revoke,
+            "撤权不使GUI快照冲突"
+        );
+        assert_eq!(
+            fixture.created.load(Ordering::Acquire),
+            fixture.destroyed.load(Ordering::Acquire),
+            "reader同步释放"
+        );
         assert!(model.session.sources.lock().unwrap().is_empty());
-        assert_eq!(model.session.edit_sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
-        clients.with_audio_source_management(source, |scope| AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)).unwrap();
+        assert_eq!(
+            model.session.edit_sources.lock().unwrap()[&id].planes[0],
+            [0.5, 0.6, 0.7, 0.8]
+        );
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)
+            })
+            .unwrap();
         assert!(model.session.edit_sources.lock().unwrap().is_empty());
-        assert!(model.session.revision.load(Ordering::Acquire) > before_revoke, "停用确实改变模型");
+        assert!(
+            model.session.revision.load(Ordering::Acquire) > before_revoke,
+            "停用确实改变模型"
+        );
     }
 
     /// 同一GUI快照经历真实授权开关可提交；实际源几何/内容通知仍使旧提交失效。
     #[test]
     fn same_snapshot_commit_survives_access_toggle_but_not_real_source_changes() {
-        use ara2_bridge::plugin::{HostAudioSourceRef, HostClients, ExtensionRoles};
+        use ara2_bridge::plugin::{ExtensionRoles, HostAudioSourceRef, HostClients};
         use hifishifter_ara_ipc::{Request, Response};
-        let mut model=ModelHandle::new(); model.document=identity_document(&["B"]);
-        model.document.audio_sources[0].sample_count=4;
-        model.document.playback_regions[0].duration_in_modification_time=4.0/44100.0;
-        model.document.playback_regions[0].duration_in_playback_time=4.0/44100.0;
-        let region=Box::new(0_u8); let key=(&*region as *const u8) as u64;
-        model.region_keys.push(key); region_owners().lock().unwrap().register(key,model.document_id,0).unwrap(); model.remap_and_log();
-        let mut fixture=crate::test_host::HostFixture::new(vec![vec![0.1,0.2,0.3,0.4]]); let host=fixture.instance();
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["B"]);
+        model.document.audio_sources[0].sample_count = 4;
+        model.document.playback_regions[0].duration_in_modification_time = 4.0 / 44100.0;
+        model.document.playback_regions[0].duration_in_playback_time = 4.0 / 44100.0;
+        let region = Box::new(0_u8);
+        let key = (&*region as *const u8) as u64;
+        model.region_keys.push(key);
+        region_owners()
+            .lock()
+            .unwrap()
+            .register(key, model.document_id, 0)
+            .unwrap();
+        model.remap_and_log();
+        let mut fixture = crate::test_host::HostFixture::new(vec![vec![0.1, 0.2, 0.3, 0.4]]);
+        let host = fixture.instance();
         // SAFETY: fixture与不透明源身份保留到所有scope/renderer被释放。
-        let clients=unsafe { HostClients::from_raw(&host,ApiGeneration::V2Final) }.unwrap();
-        let mut identity=0_u8; let source=unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap(); let mut slot=0;
-        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
-        let owner=Arc::new(crate::render::extension::ExtensionOwner::default());
-        let raw=owner.bind_to_document(model.session.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        let clients = unsafe { HostClients::from_raw(&host, ApiGeneration::V2Final) }.unwrap();
+        let mut identity = 0_u8;
+        let source = unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap();
+        let mut slot = 0;
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, true, &scope,
+                )
+            })
+            .unwrap();
+        let owner = Arc::new(crate::render::extension::ExtensionOwner::default());
+        let raw = owner
+            .bind_to_document(
+                model.session.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .unwrap();
         // SAFETY: native扩展及region身份都仍存活。
-        unsafe { let ext=&*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _); }
-        let snapshot=owner.handle_request(Request::Snapshot); assert!(snapshot.ok,"{:?}",snapshot.error);
-        let request=|snapshot:Response| { let mut client=snapshot.timeline.unwrap(); client["tracks"][0]["volume"]=serde_json::json!(0.5);
-            Request::Commit { base_revision:snapshot.revision,model_revision:snapshot.model_revision,timeline:client } };
-        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,false,&scope)).unwrap();
-        let mut left=[9.0_f32;4]; let mut right=[9.0_f32;4]; let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=crate::audio_abi::AudioBusBuffers { num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr() };
-        assert!(!unsafe { owner.snapshots[0].copy_block(0,44100,&mut bus,4) },"撤权首先撤销实时旧快照");
-        assert_eq!(left,[0.0;4]);
-        assert_eq!(fixture.created.load(Ordering::Acquire),fixture.destroyed.load(Ordering::Acquire));
-        let committed=owner.handle_request(request(snapshot)); assert!(committed.ok,"{:?}",committed.error);
-        for change in 0..3 {
-            let old=owner.handle_request(Request::Snapshot); assert!(old.ok,"{:?}",old.error);
-            if change==0 {
-                let id=model.document.audio_sources[0].persistent_id.clone();
-                let properties=AudioSourceProperties::new(None,&id,4,44100.0,1,false.into()).unwrap();
-                clients.with_audio_source_management(source,|scope| AudioSources::update_audio_source(&mut model,&mut slot,properties,&scope)).unwrap();
-            } else if change==1 {
-                clients.with_audio_source_management(source,|scope| AudioSources::update_audio_source_content(&mut model,&mut slot,None,ContentUpdateScopes::empty(),&scope)).unwrap();
-            } else {
-                let mut registry=Registry::<RegionSequenceKind,()>::new(1); let handle=registry.insert(()).unwrap();
-                let properties=PlaybackRegionProperties::for_ara2(0,0.0,4.0/44100.0,1.0,4.0/44100.0,registry.model_ref(handle).unwrap(),None,None).unwrap();
-                PlaybackRegions::update_playback_region(&mut model,&mut 0,properties).unwrap(); model.remap_and_log();
-            }
-            let rejected=owner.handle_request(request(old)); assert!(!rejected.ok);
-            assert!(rejected.error.unwrap().contains("host model changed"));
-            clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
+        unsafe {
+            let ext = &*raw;
+            ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(
+                ext.editorRendererRef,
+                key as *mut _,
+            );
         }
-        DocumentLifecycle::begin_editing(&mut model,&mut ()).unwrap();
-        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,false,&scope)).unwrap();
-        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
-        assert!(!model.session.ready.load(Ordering::Acquire),"逐对象创建/授权中不能提前认为完整图ready");
-        clients.with_audio_source_management(source,|scope| DocumentLifecycle::end_editing(&mut model,&mut (),&scope)).unwrap();
+        let snapshot = owner.handle_request(Request::Snapshot);
+        assert!(snapshot.ok, "{:?}", snapshot.error);
+        let request = |snapshot: Response| {
+            let mut client = snapshot.timeline.unwrap();
+            client["tracks"][0]["volume"] = serde_json::json!(0.5);
+            Request::Commit {
+                base_revision: snapshot.revision,
+                model_revision: snapshot.model_revision,
+                timeline: client,
+            }
+        };
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, false, &scope,
+                )
+            })
+            .unwrap();
+        let mut left = [9.0_f32; 4];
+        let mut right = [9.0_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = crate::audio_abi::AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        assert!(
+            !unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) },
+            "撤权首先撤销实时旧快照"
+        );
+        assert_eq!(left, [0.0; 4]);
+        assert_eq!(
+            fixture.created.load(Ordering::Acquire),
+            fixture.destroyed.load(Ordering::Acquire)
+        );
+        let committed = owner.handle_request(request(snapshot));
+        assert!(committed.ok, "{:?}", committed.error);
+        for change in 0..3 {
+            let old = owner.handle_request(Request::Snapshot);
+            assert!(old.ok, "{:?}", old.error);
+            if change == 0 {
+                let id = model.document.audio_sources[0].persistent_id.clone();
+                let properties =
+                    AudioSourceProperties::new(None, &id, 4, 44100.0, 1, false.into()).unwrap();
+                clients
+                    .with_audio_source_management(source, |scope| {
+                        AudioSources::update_audio_source(&mut model, &mut slot, properties, &scope)
+                    })
+                    .unwrap();
+            } else if change == 1 {
+                clients
+                    .with_audio_source_management(source, |scope| {
+                        AudioSources::update_audio_source_content(
+                            &mut model,
+                            &mut slot,
+                            None,
+                            ContentUpdateScopes::empty(),
+                            &scope,
+                        )
+                    })
+                    .unwrap();
+            } else {
+                let mut registry = Registry::<RegionSequenceKind, ()>::new(1);
+                let handle = registry.insert(()).unwrap();
+                let properties = PlaybackRegionProperties::for_ara2(
+                    0,
+                    0.0,
+                    4.0 / 44100.0,
+                    1.0,
+                    4.0 / 44100.0,
+                    registry.model_ref(handle).unwrap(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                PlaybackRegions::update_playback_region(&mut model, &mut 0, properties).unwrap();
+                model.remap_and_log();
+            }
+            let rejected = owner.handle_request(request(old));
+            assert!(!rejected.ok);
+            assert!(rejected.error.unwrap().contains("host model changed"));
+            clients
+                .with_audio_source_management(source, |scope| {
+                    AudioSources::enable_audio_source_samples_access(
+                        &mut model, &mut slot, true, &scope,
+                    )
+                })
+                .unwrap();
+        }
+        DocumentLifecycle::begin_editing(&mut model, &mut ()).unwrap();
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, false, &scope,
+                )
+            })
+            .unwrap();
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, true, &scope,
+                )
+            })
+            .unwrap();
+        assert!(
+            !model.session.ready.load(Ordering::Acquire),
+            "逐对象创建/授权中不能提前认为完整图ready"
+        );
+        clients
+            .with_audio_source_management(source, |scope| {
+                DocumentLifecycle::end_editing(&mut model, &mut (), &scope)
+            })
+            .unwrap();
         assert!(model.session.ready.load(Ordering::Acquire));
     }
 
@@ -903,7 +1382,11 @@ mod tests {
         let key = (&*identity as *const u8) as u64;
         let mut model = ModelHandle::new();
         model.region_keys.push(key);
-        region_owners().lock().unwrap().register(key, model.document_id, 0).unwrap();
+        region_owners()
+            .lock()
+            .unwrap()
+            .register(key, model.document_id, 0)
+            .unwrap();
         PlaybackRegions::destroy_playback_region(&mut model, 0);
         assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
     }
@@ -914,13 +1397,24 @@ mod tests {
         let identity = Box::new(0_u8);
         let key = (&*identity as *const u8) as u64;
         let mut old = ModelHandle::new();
-        region_owners().lock().unwrap().register(key, old.document_id, 0).unwrap();
+        region_owners()
+            .lock()
+            .unwrap()
+            .register(key, old.document_id, 0)
+            .unwrap();
         DocumentLifecycle::destroy_document(&mut old, ());
         assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
         let replacement = ModelHandle::new();
-        region_owners().lock().unwrap().register(key, replacement.document_id, 0).unwrap();
+        region_owners()
+            .lock()
+            .unwrap()
+            .register(key, replacement.document_id, 0)
+            .unwrap();
         drop(old);
-        assert_eq!(region_owners().lock().unwrap().resolve(&[key]).unwrap(), (replacement.document_id, vec![0]));
+        assert_eq!(
+            region_owners().lock().unwrap().resolve(&[key]).unwrap(),
+            (replacement.document_id, vec![0])
+        );
         drop(replacement);
         assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
     }
@@ -931,14 +1425,23 @@ mod tests {
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
             "../../../../probe/ara/captures/ara-model.reaper.json"
-        )).unwrap();
+        ))
+        .unwrap();
         let mut index = 0;
         let mut sequences = Registry::<RegionSequenceKind, ()>::new(1);
         let handle = sequences.insert(()).unwrap();
         let sequence = sequences.model_ref(handle).unwrap();
         let properties = PlaybackRegionProperties::for_ara2(
-            1, 0.25, 1.5, 5.0, 3.0, sequence, Some("moved"), None,
-        ).unwrap();
+            1,
+            0.25,
+            1.5,
+            5.0,
+            3.0,
+            sequence,
+            Some("moved"),
+            None,
+        )
+        .unwrap();
         PlaybackRegions::update_playback_region(&mut model, &mut index, properties).unwrap();
         model.remap_and_log();
         let timeline = model.timeline().unwrap();
@@ -949,7 +1452,11 @@ mod tests {
         assert_eq!(clip.source_start_sec, 0.25);
         assert_eq!(clip.playback_rate, 0.5);
         assert_eq!(clip.name, "moved");
-        assert!(timeline.tracks.iter().all(|track|track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx),"插件新宿主轨道默认HiFiGAN");
+        assert!(
+            timeline.tracks.iter().all(|track| track.pitch_analysis_algo
+                == hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx),
+            "插件新宿主轨道默认HiFiGAN"
+        );
     }
 
     /// 删除区域后摘要和时间线只能包含存活区域，避免切片或撤销留下幽灵 clip。
@@ -958,7 +1465,8 @@ mod tests {
         let mut model = ModelHandle::new();
         model.document = crate::ara::ara_document_from_json(include_str!(
             "../../../../probe/ara/captures/ara-model.reaper.json"
-        )).unwrap();
+        ))
+        .unwrap();
         PlaybackRegions::destroy_playback_region(&mut model, 0);
         model.remap_and_log();
         assert!(model.timeline().unwrap().clips.is_empty());

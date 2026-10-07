@@ -112,10 +112,12 @@ fn default_model_dir_guess() -> Option<PathBuf> {
 
     // 开发树兜底：模型仍放在 app crate 的 `resources/` 下（那才是打包时带的东西）。
     // 见 `nsf_hifigan_onnx.rs` 里同一处的说明。
-    if let Some(app_p) = manifest
-        .parent()
-        .map(|p| p.join("src-tauri").join("resources").join("models").join("hnsep"))
-    {
+    if let Some(app_p) = manifest.parent().map(|p| {
+        p.join("src-tauri")
+            .join("resources")
+            .join("models")
+            .join("hnsep")
+    }) {
         if app_p.join("hnsep.onnx").is_file() {
             return Some(app_p);
         }
@@ -159,12 +161,17 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 /// 会话与实际模型完整摘要绑定；模型加载过程中变化就拒绝，不缓存不明版本stem。
 fn model_digest(path: &Path) -> Result<blake3::Hash, String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|e|format!("hnsep model open failed: {e}"))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("hnsep model open failed: {e}"))?;
     let mut digest = blake3::Hasher::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let count = file.read(&mut buffer).map_err(|e|format!("hnsep model read failed: {e}"))?;
-        if count == 0 {break;}
+        let count = file
+            .read(&mut buffer)
+            .map_err(|e| format!("hnsep model read failed: {e}"))?;
+        if count == 0 {
+            break;
+        }
         digest.update(&buffer[..count]);
     }
     Ok(digest.finalize())
@@ -177,12 +184,19 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<SeparatorSession, String> {
         crate::vocoder_ort_session::OrtSessionRole::Separator,
     )?;
     // Cache the EP name so diagnostics can report whether HNSEP is on GPU.
-    if model_digest(onnx_path)? != digest {return Err("hnsep model changed during session build".into());}
+    if model_digest(onnx_path)? != digest {
+        return Err("hnsep model changed during session build".into());
+    }
     let _ = SELECTED_EP.set(ep.clone());
     let mut identity = blake3::Hasher::new();
     // 资源策略也进入版本，旧保留arena的会话产物不借新策略的冷缓存身份。
-    identity.update(b"hnsep-mask-stft-v3-cpu-transient-workspace");identity.update(digest.as_bytes());identity.update(ep.as_bytes());
-    Ok(SeparatorSession {runtime:Mutex::new(session),identity:identity.finalize()})
+    identity.update(b"hnsep-mask-stft-v3-cpu-transient-workspace");
+    identity.update(digest.as_bytes());
+    identity.update(ep.as_bytes());
+    Ok(SeparatorSession {
+        runtime: Mutex::new(session),
+        identity: identity.finalize(),
+    })
 }
 
 /// Returns the EP that was actually selected for the HNSEP session (for diagnostics).
@@ -192,7 +206,9 @@ pub fn selected_ep_name() -> Option<&'static str> {
 }
 
 /// 持久内容缓存绑定实际已加载模型/EP，不把用户切换设备的历史次数当模型身份。
-pub fn cache_identity()->Result<String,String> {Ok(get_or_init_shared_session()?.identity.to_hex().to_string())}
+pub fn cache_identity() -> Result<String, String> {
+    Ok(get_or_init_shared_session()?.identity.to_hex().to_string())
+}
 
 fn get_or_init_shared_session() -> Result<Arc<SeparatorSession>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
@@ -371,7 +387,8 @@ pub fn probe_load() -> Result<String, String> {
                 mask_input.to_vec().into_boxed_slice(),
             ))
             .map_err(|e| format!("build spec tensor failed: {e}"))?;
-            let mut guard = session.runtime
+            let mut guard = session
+                .runtime
                 .lock()
                 .map_err(|e| format!("hnsep session lock poisoned: {e}"))?;
             let outputs = guard
@@ -412,28 +429,42 @@ struct HnsepCacheEntry {
     noise: Arc<Vec<f32>>,
 }
 
-type SeparationKey = [u8;32];
+type SeparationKey = [u8; 32];
 struct SeparationCache {
-    entries: LruCache<SeparationKey,HnsepCacheEntry>,
+    entries: LruCache<SeparationKey, HnsepCacheEntry>,
     bytes: usize,
     max_bytes: usize,
 }
 impl SeparationCache {
-    fn new(capacity:usize,max_bytes:usize)->Self {
-        Self {entries:LruCache::new(NonZeroUsize::new(capacity.max(1)).unwrap()),bytes:0,max_bytes}
+    fn new(capacity: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: LruCache::new(NonZeroUsize::new(capacity.max(1)).unwrap()),
+            bytes: 0,
+            max_bytes,
+        }
     }
-    fn entry_bytes(entry:&HnsepCacheEntry)->usize {
-        (entry.harmonic.len()+entry.noise.len()).saturating_mul(std::mem::size_of::<f32>())
+    fn entry_bytes(entry: &HnsepCacheEntry) -> usize {
+        (entry.harmonic.len() + entry.noise.len()).saturating_mul(std::mem::size_of::<f32>())
     }
     /// 成功stem仅以有界强引用缓存；超预算条目可返回给调用者，但不挤走其它有用缓存。
-    fn put(&mut self,key:SeparationKey,entry:HnsepCacheEntry) {
-        let bytes=Self::entry_bytes(&entry);
-        if bytes>self.max_bytes {return;}
-        if let Some(old)=self.entries.pop(&key) {self.bytes-=Self::entry_bytes(&old);}
-        while self.bytes.saturating_add(bytes)>self.max_bytes||self.entries.len()==self.entries.cap().get() {
-            let Some((_,old))=self.entries.pop_lru() else {break;};self.bytes-=Self::entry_bytes(&old);
+    fn put(&mut self, key: SeparationKey, entry: HnsepCacheEntry) {
+        let bytes = Self::entry_bytes(&entry);
+        if bytes > self.max_bytes {
+            return;
         }
-        self.entries.put(key,entry);self.bytes+=bytes;
+        if let Some(old) = self.entries.pop(&key) {
+            self.bytes -= Self::entry_bytes(&old);
+        }
+        while self.bytes.saturating_add(bytes) > self.max_bytes
+            || self.entries.len() == self.entries.cap().get()
+        {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes -= Self::entry_bytes(&old);
+        }
+        self.entries.put(key, entry);
+        self.bytes += bytes;
     }
 }
 static HNSEP_CACHE: OnceLock<Mutex<SeparationCache>> = OnceLock::new();
@@ -441,8 +472,10 @@ static HNSEP_CACHE: OnceLock<Mutex<SeparationCache>> = OnceLock::new();
 fn global_cache() -> &'static Mutex<SeparationCache> {
     HNSEP_CACHE.get_or_init(|| {
         let cap = hnsep_cache_initial_capacity();
-        log::warn!("[hnsep] LRU cache initialized with capacity={cap}, bytes={HNSEP_CACHE_BYTES_DEFAULT}");
-        Mutex::new(SeparationCache::new(cap,HNSEP_CACHE_BYTES_DEFAULT))
+        log::warn!(
+            "[hnsep] LRU cache initialized with capacity={cap}, bytes={HNSEP_CACHE_BYTES_DEFAULT}"
+        );
+        Mutex::new(SeparationCache::new(cap, HNSEP_CACHE_BYTES_DEFAULT))
     })
 }
 
@@ -466,7 +499,8 @@ pub fn ensure_cache_capacity(min_capacity: usize) {
 pub fn clear_separation_cache() {
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     let cleared = cache.entries.len();
-    cache.entries.clear();cache.bytes=0;
+    cache.entries.clear();
+    cache.bytes = 0;
     if cleared > 0 {
         log::warn!("[hnsep] separation cache cleared ({cleared} entries)");
     }
@@ -474,21 +508,29 @@ pub fn clear_separation_cache() {
 
 /// 分离仅由实际完整mono PCM、采样率与已加载model/EP决定，不由clip/view/轨道名决定。
 /// 相同内容跨组件共享；同路径等长换源（包括中间样本变化）必须失效。
-fn separation_cache_key(
-    audio: &[f32],
-    sample_rate: u32,
-    model: blake3::Hash,
-) -> SeparationKey {
-    let mut hash=blake3::Hasher::new();hash.update(b"hnsep-complete-mono-pcm-v2");
-    hash.update(model.as_bytes());hash.update(&sample_rate.to_le_bytes());hash.update(&(audio.len() as u64).to_le_bytes());
-    for sample in audio {hash.update(&sample.to_bits().to_le_bytes());}
+fn separation_cache_key(audio: &[f32], sample_rate: u32, model: blake3::Hash) -> SeparationKey {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"hnsep-complete-mono-pcm-v2");
+    hash.update(model.as_bytes());
+    hash.update(&sample_rate.to_le_bytes());
+    hash.update(&(audio.len() as u64).to_le_bytes());
+    for sample in audio {
+        hash.update(&sample.to_bits().to_le_bytes());
+    }
     *hash.finalize().as_bytes()
 }
 
 /// 只在非实时诊断/worker读取；次数不包含session构建的烟测。
-pub fn separation_cache_stats()->(u64,u64,usize) {
-    let bytes=global_cache().lock().unwrap_or_else(|e|e.into_inner()).bytes;
-    (CACHE_HITS.load(Ordering::Relaxed),INFERENCE_RUNS.load(Ordering::Relaxed),bytes)
+pub fn separation_cache_stats() -> (u64, u64, usize) {
+    let bytes = global_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .bytes;
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        INFERENCE_RUNS.load(Ordering::Relaxed),
+        bytes,
+    )
 }
 
 /// Get the noise stem for a clip, for use in computing breath_noise_stereo
@@ -528,12 +570,16 @@ pub fn infer_harmonic_noise_mono(
         return Err("hnsep: model unavailable".to_string());
     }
 
-    if sample_rate==0||audio_mono.iter().any(|v|!v.is_finite()) {return Err("hnsep: invalid PCM".into());}
+    if sample_rate == 0 || audio_mono.iter().any(|v| !v.is_finite()) {
+        return Err("hnsep: invalid PCM".into());
+    }
     let audio_len = audio_mono.len();
     let session = get_or_init_shared_session()?;
-    let cache_key = separation_cache_key(audio_mono,sample_rate,session.identity);
+    let cache_key = separation_cache_key(audio_mono, sample_rate, session.identity);
     // ORT本就串行使用唯一separator；把单飞边界前移到cache复查，避免并发重复STFT/推理。
-    let _flight=SEPARATION_FLIGHT.lock().map_err(|e|format!("hnsep flight lock poisoned: {e}"))?;
+    let _flight = SEPARATION_FLIGHT
+        .lock()
+        .map_err(|e| format!("hnsep flight lock poisoned: {e}"))?;
     {
         let mut cache = global_cache()
             .lock()
@@ -542,17 +588,19 @@ pub fn infer_harmonic_noise_mono(
             // Verify length consistency before returning cached result.
             // If the cached audio differs in length from the request, treat as miss
             // (can happen when clip is trimmed/stretched after caching).
-            if entry.harmonic.len()==audio_len&&entry.noise.len()==audio_len {
-                CACHE_HITS.fetch_add(1,Ordering::Relaxed);
+            if entry.harmonic.len() == audio_len && entry.noise.len() == audio_len {
+                CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                 return Ok((entry.harmonic.clone(), entry.noise.clone()));
             }
             // Cached result length mismatch → remove and re-infer below.
-            if let Some(old)=cache.entries.pop(&cache_key) {cache.bytes-=SeparationCache::entry_bytes(&old);}
+            if let Some(old) = cache.entries.pop(&cache_key) {
+                cache.bytes -= SeparationCache::entry_bytes(&old);
+            }
         }
     }
 
     // 成功cache命中无需再分配整段工作区；miss先核对系统资源，不等ORT把机器内存耗尽。
-    crate::hnsep_resources::preflight(audio_len,sample_rate)?;
+    crate::hnsep_resources::preflight(audio_len, sample_rate)?;
     let model_audio = if sample_rate == HNSEP_MODEL_SR {
         audio_mono.to_vec()
     } else {
@@ -577,10 +625,11 @@ pub fn infer_harmonic_noise_mono(
             ))
             .map_err(|e| format!("build hnsep spec tensor failed: {e}"))?;
 
-            let mut session_guard = session.runtime
+            let mut session_guard = session
+                .runtime
                 .lock()
                 .map_err(|e| format!("hnsep ort session lock poisoned: {e}"))?;
-            INFERENCE_RUNS.fetch_add(1,Ordering::Relaxed);
+            INFERENCE_RUNS.fetch_add(1, Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![spec_tensor])
                 .map_err(|e| format!("hnsep ort run failed: {e}"))?;
@@ -645,7 +694,11 @@ pub fn infer_harmonic_noise_mono(
 
     let harmonic_arc = Arc::new(harmonic);
     let noise_arc = Arc::new(noise);
-    if harmonic_arc.iter().chain(noise_arc.iter()).any(|v|!v.is_finite()) {
+    if harmonic_arc
+        .iter()
+        .chain(noise_arc.iter())
+        .any(|v| !v.is_finite())
+    {
         return Err("hnsep: non-finite separation output".into());
     }
     let entry = HnsepCacheEntry {
@@ -675,50 +728,113 @@ mod content_cache_tests {
         assert_eq!(PREWARM_STARTED.load(Ordering::Acquire), started);
         assert_eq!(SHARED_SESSION.get().is_some(), session_exists);
     }
-    fn entry(samples:usize,value:f32)->HnsepCacheEntry {
-        HnsepCacheEntry {harmonic:Arc::new(vec![value;samples]),noise:Arc::new(vec![0.;samples])}
+    fn entry(samples: usize, value: f32) -> HnsepCacheEntry {
+        HnsepCacheEntry {
+            harmonic: Arc::new(vec![value; samples]),
+            noise: Arc::new(vec![0.; samples]),
+        }
     }
     #[test]
     fn complete_content_and_loaded_model_define_separation_identity() {
-        let model=blake3::hash(b"model-a");let original=vec![0.25;1024];let mut changed=original.clone();changed[512]=0.5;
-        let key=separation_cache_key(&original,44100,model);
-        assert_ne!(key,separation_cache_key(&changed,44100,model),"等长换源中间变化不能命中旧stem");
-        assert_ne!(key,separation_cache_key(&original,48000,model));
-        assert_ne!(key,separation_cache_key(&original,44100,blake3::hash(b"model-b")));
-        assert_eq!(key,separation_cache_key(&original.clone(),44100,model),"身份不依赖轨道/view/clip名");
+        let model = blake3::hash(b"model-a");
+        let original = vec![0.25; 1024];
+        let mut changed = original.clone();
+        changed[512] = 0.5;
+        let key = separation_cache_key(&original, 44100, model);
+        assert_ne!(
+            key,
+            separation_cache_key(&changed, 44100, model),
+            "等长换源中间变化不能命中旧stem"
+        );
+        assert_ne!(key, separation_cache_key(&original, 48000, model));
+        assert_ne!(
+            key,
+            separation_cache_key(&original, 44100, blake3::hash(b"model-b"))
+        );
+        assert_eq!(
+            key,
+            separation_cache_key(&original.clone(), 44100, model),
+            "身份不依赖轨道/view/clip名"
+        );
     }
     #[test]
     fn stem_cache_evicts_by_bytes_and_preserves_referenced_audio() {
-        let mut cache=SeparationCache::new(128,32);let old=entry(2,0.25);let held=old.harmonic.clone();
-        cache.put([1;32],old);cache.put([2;32],entry(2,0.5));assert_eq!(cache.bytes,32);
-        cache.entries.get(&[1;32]);cache.put([3;32],entry(2,0.75));
-        assert!(cache.entries.contains(&[1;32]));assert!(!cache.entries.contains(&[2;32]));
-        cache.put([1;32],entry(1,1.));assert_eq!(cache.bytes,24);
-        cache.put([4;32],entry(5,2.));assert_eq!(cache.bytes,24,"超预算条目不冲掉已有缓存");
-        cache.put([5;32],entry(3,3.));assert_eq!(cache.bytes,32);
-        assert_eq!(held.as_slice(),&[0.25,0.25],"驱逐只释放缓存引用，不损坏活worker的Arc");
+        let mut cache = SeparationCache::new(128, 32);
+        let old = entry(2, 0.25);
+        let held = old.harmonic.clone();
+        cache.put([1; 32], old);
+        cache.put([2; 32], entry(2, 0.5));
+        assert_eq!(cache.bytes, 32);
+        cache.entries.get(&[1; 32]);
+        cache.put([3; 32], entry(2, 0.75));
+        assert!(cache.entries.contains(&[1; 32]));
+        assert!(!cache.entries.contains(&[2; 32]));
+        cache.put([1; 32], entry(1, 1.));
+        assert_eq!(cache.bytes, 24);
+        cache.put([4; 32], entry(5, 2.));
+        assert_eq!(cache.bytes, 24, "超预算条目不冲掉已有缓存");
+        cache.put([5; 32], entry(3, 3.));
+        assert_eq!(cache.bytes, 32);
+        assert_eq!(
+            held.as_slice(),
+            &[0.25, 0.25],
+            "驱逐只释放缓存引用，不损坏活worker的Arc"
+        );
     }
     #[test]
     #[ignore = "真实CPU模型诊断：显式运行，缺模型必须失败而非skip"]
     fn real_model_content_cache_is_single_flight_and_rejects_same_length_changed_source() {
         crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
         clear_separation_cache();
-        let input:Arc<Vec<f32>>=Arc::new((0..44100).map(|i| {
-            let phase=2.*std::f64::consts::PI*220.*i as f64/44100.;
-            (1..=12).map(|k|0.15/k as f64*(phase*k as f64).sin()).sum::<f64>() as f32
-        }).collect());
-        let before=separation_cache_stats();let began=std::time::Instant::now();
-        let jobs=(0..2).map(|index| {let input=input.clone();std::thread::spawn(move ||
-            infer_harmonic_noise_mono(&format!("owner-{index}"),&input,44100,index,Some(7)).unwrap())}).collect::<Vec<_>>();
-        let mut outputs=jobs.into_iter().map(|job|job.join().unwrap());let a=outputs.next().unwrap();let b=outputs.next().unwrap();
-        let cold=began.elapsed();let after=separation_cache_stats();
-        assert_eq!(after.1-before.1,1);assert_eq!(after.0-before.0,1);
-        assert!(Arc::ptr_eq(&a.0,&b.0));assert!(Arc::ptr_eq(&a.1,&b.1));
-        let reconstruction=a.0.iter().zip(a.1.iter()).zip(input.iter()).map(|((h,n),x)|(h+n-x).abs()).fold(0_f32,f32::max);
-        assert!(reconstruction<1e-5);assert_eq!(a.0.len(),44100);
-        let mut changed=input.as_ref().clone();changed[22050]+=0.1;
-        let c=infer_harmonic_noise_mono("owner-0",&changed,44100,0,Some(7)).unwrap();
-        assert!(!Arc::ptr_eq(&a.0,&c.0));assert_eq!(separation_cache_stats().1-after.1,1);
+        let input: Arc<Vec<f32>> = Arc::new(
+            (0..44100)
+                .map(|i| {
+                    let phase = 2. * std::f64::consts::PI * 220. * i as f64 / 44100.;
+                    (1..=12)
+                        .map(|k| 0.15 / k as f64 * (phase * k as f64).sin())
+                        .sum::<f64>() as f32
+                })
+                .collect(),
+        );
+        let before = separation_cache_stats();
+        let began = std::time::Instant::now();
+        let jobs = (0..2)
+            .map(|index| {
+                let input = input.clone();
+                std::thread::spawn(move || {
+                    infer_harmonic_noise_mono(
+                        &format!("owner-{index}"),
+                        &input,
+                        44100,
+                        index,
+                        Some(7),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut outputs = jobs.into_iter().map(|job| job.join().unwrap());
+        let a = outputs.next().unwrap();
+        let b = outputs.next().unwrap();
+        let cold = began.elapsed();
+        let after = separation_cache_stats();
+        assert_eq!(after.1 - before.1, 1);
+        assert_eq!(after.0 - before.0, 1);
+        assert!(Arc::ptr_eq(&a.0, &b.0));
+        assert!(Arc::ptr_eq(&a.1, &b.1));
+        let reconstruction =
+            a.0.iter()
+                .zip(a.1.iter())
+                .zip(input.iter())
+                .map(|((h, n), x)| (h + n - x).abs())
+                .fold(0_f32, f32::max);
+        assert!(reconstruction < 1e-5);
+        assert_eq!(a.0.len(), 44100);
+        let mut changed = input.as_ref().clone();
+        changed[22050] += 0.1;
+        let c = infer_harmonic_noise_mono("owner-0", &changed, 44100, 0, Some(7)).unwrap();
+        assert!(!Arc::ptr_eq(&a.0, &c.0));
+        assert_eq!(separation_cache_stats().1 - after.1, 1);
         println!("HNSEP_REAL cold_single_flight_ms={} runs={} hits={} cache_bytes={} reconstruction_max={reconstruction:e} changed_source_runs=1",
             cold.as_millis(),after.1-before.1,after.0-before.0,after.2);
     }

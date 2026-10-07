@@ -33,13 +33,12 @@ pub async fn ara_connect(
 }
 
 #[tauri::command]
-pub async fn ara_refresh(
-    app: tauri::AppHandle,
-    force: bool,
-) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::import_snapshot(&app, None, force))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn ara_refresh(app: tauri::AppHandle, force: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ara_bridge::import_snapshot(&app, None, force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -89,8 +88,11 @@ pub(crate) mod param_selection_window;
 mod params;
 // 无GUI回归直接调用同一参数命令实现，避免伪造Tauri State或替换写入行为。
 #[cfg(test)]
-pub(crate) use params::{set_param_frames as write_param_frames_for_test, restore_param_frames as restore_param_frames_for_test,
-    set_static_param as set_static_param_for_test, stretch_track_linked_params as stretch_track_linked_params_for_test};
+pub(crate) use params::{
+    restore_param_frames as restore_param_frames_for_test,
+    set_param_frames as write_param_frames_for_test, set_static_param as set_static_param_for_test,
+    stretch_track_linked_params as stretch_track_linked_params_for_test,
+};
 #[path = "commands/pitch_cache.rs"]
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
@@ -1687,7 +1689,14 @@ pub fn restore_param_frames(
     frame_count: u32,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::restore_param_frames(&state, track_id, param, start_frame, frame_count, checkpoint)
+    params::restore_param_frames(
+        &state,
+        track_id,
+        param,
+        start_frame,
+        frame_count,
+        checkpoint,
+    )
 }
 
 /// 互转选区段由共享编辑内核定义，独立app命令形状保持不变。

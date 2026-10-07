@@ -95,10 +95,11 @@ fn build_world_static() {
     println!("cargo:rerun-if-changed={}", world_src_dir);
 
     let mut world = cc::Build::new();
-    world
-        .cpp(true)
-        .include(&world_src_dir)
-        .files(required_files.iter().map(|f| format!("{}/{}", world_src_dir, f)));
+    world.cpp(true).include(&world_src_dir).files(
+        required_files
+            .iter()
+            .map(|f| format!("{}/{}", world_src_dir, f)),
+    );
 
     // C++ 标准旗标按编译器家族分发（与 sstretch 构建同一模式）：
     // MSVC 的 cl 不认识 GCC 风格的 `-std:c++11`，传入只会得到 D9002
@@ -358,7 +359,9 @@ fn build_soundtouch() {
                 if patched != content {
                     std::fs::write(&rc_file, &patched)
                         .expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
-                    println!("cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h");
+                    println!(
+                        "cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h"
+                    );
                 }
             }
         }

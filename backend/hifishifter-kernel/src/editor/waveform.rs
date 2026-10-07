@@ -1,15 +1,26 @@
 //! 原GUI根轨/轨道mix波形，完整复用原混音与极值算法；宿主只提供当前编辑timeline。
-use serde::{Serialize,Deserialize};
-const WAVEFORM_COLUMNS_MIN:usize=16;
-const WAVEFORM_COLUMNS_MAX:usize=65_536;
-#[derive(Debug,Clone,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub struct WaveformPeaksSegmentPayload {pub ok:bool,pub min:Vec<f32>,pub max:Vec<f32>}
+use serde::{Deserialize, Serialize};
+const WAVEFORM_COLUMNS_MIN: usize = 16;
+const WAVEFORM_COLUMNS_MAX: usize = 65_536;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WaveformPeaksSegmentPayload {
+    pub ok: bool,
+    pub min: Vec<f32>,
+    pub max: Vec<f32>,
+}
 /// 波形异常不跨宿主命令边界；保留原失败形状。
-fn guard_waveform_command(name:&str,f:impl FnOnce()->WaveformPeaksSegmentPayload)->WaveformPeaksSegmentPayload {
+fn guard_waveform_command(
+    name: &str,
+    f: impl FnOnce() -> WaveformPeaksSegmentPayload,
+) -> WaveformPeaksSegmentPayload {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
         log::error!("waveform command panicked: {name}");
-        WaveformPeaksSegmentPayload {ok:false,min:vec![],max:vec![]}
+        WaveformPeaksSegmentPayload {
+            ok: false,
+            min: vec![],
+            max: vec![],
+        }
     })
 }
 pub fn get_root_mix_waveform_peaks_segment(
@@ -26,7 +37,8 @@ pub fn get_root_mix_waveform_peaks_segment(
                 track_id, start_sec, duration_sec, columns
             );
         }
-        let tl0 = state.timeline()
+        let tl0 = state
+            .timeline()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -170,7 +182,8 @@ pub fn get_track_mix_waveform_peaks_segment(
                 track_id, start_sec, duration_sec, columns
             );
         }
-        let tl0 = state.timeline()
+        let tl0 = state
+            .timeline()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();

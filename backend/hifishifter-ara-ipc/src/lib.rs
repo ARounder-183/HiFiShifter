@@ -36,7 +36,11 @@ pub struct HostPcm {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Snapshot,
-    Commit { base_revision: u64, model_revision: u64, timeline: Value },
+    Commit {
+        base_revision: u64,
+        model_revision: u64,
+        timeline: Value,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -49,8 +53,8 @@ pub struct Response {
     #[serde(default)]
     pub sources: Vec<HostPcm>,
     /// 只读现场诊断；旧客户端忽略该可选字段，不改变Snapshot/Commit协议语义。
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub diagnostics:Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,8 +67,12 @@ struct Envelope {
 /// 编码有界小端长度帧，拒绝无法序列化的内容。
 pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
-    if bytes.is_empty() || bytes.len() > MAX_FRAME { return Err("frame too large".into()); }
-    writer.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(|e| e.to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_FRAME {
+        return Err("frame too large".into());
+    }
+    writer
+        .write_all(&(bytes.len() as u32).to_le_bytes())
+        .map_err(|e| e.to_string())?;
     writer.write_all(&bytes).map_err(|e| e.to_string())
 }
 
@@ -73,7 +81,9 @@ pub fn read_frame<T: for<'a> Deserialize<'a>>(reader: &mut impl Read) -> Result<
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).map_err(|e| e.to_string())?;
     let size = u32::from_le_bytes(prefix) as usize;
-    if size == 0 || size > MAX_FRAME { return Err("invalid frame length".into()); }
+    if size == 0 || size > MAX_FRAME {
+        return Err("invalid frame length".into());
+    }
     let mut bytes = vec![0; size];
     reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
@@ -82,14 +92,29 @@ pub fn read_frame<T: for<'a> Deserialize<'a>>(reader: &mut impl Read) -> Result<
 /// GUI只发现仍有心跳的本机实例，不删除其他会话记录。
 pub fn discover() -> Result<Vec<InstanceRecord>, String> {
     let root = instance_dir()?;
-    if !root.exists() { return Ok(Vec::new()); }
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
     let mut instances = Vec::new();
-    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())?.flatten() {
-        if entry.path().extension().is_none_or(|ext| ext != "json") { continue; }
-        if entry.metadata().is_ok_and(|m| m.len() > 8192) { continue; }
-        let Ok(bytes) = std::fs::read(entry.path()) else { continue; };
-        let Ok(instance) = serde_json::from_slice::<InstanceRecord>(&bytes) else { continue; };
-        if validate_record(&instance).is_ok() && now_ms().saturating_sub(instance.heartbeat_ms) < 15000 {
+    for entry in std::fs::read_dir(root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        if entry.path().extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        if entry.metadata().is_ok_and(|m| m.len() > 8192) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(instance) = serde_json::from_slice::<InstanceRecord>(&bytes) else {
+            continue;
+        };
+        if validate_record(&instance).is_ok()
+            && now_ms().saturating_sub(instance.heartbeat_ms) < 15000
+        {
             instances.push(instance);
         }
     }
@@ -101,26 +126,43 @@ pub fn discover() -> Result<Vec<InstanceRecord>, String> {
 pub fn exchange(instance: &InstanceRecord, request: &Request) -> Result<Response, String> {
     validate_record(instance)?;
     #[cfg(windows)]
-    { transport::exchange(instance, request) }
+    {
+        transport::exchange(instance, request)
+    }
     #[cfg(not(windows))]
-    { let _ = request; Err("ARA channel requires Windows".into()) }
+    {
+        let _ = request;
+        Err("ARA channel requires Windows".into())
+    }
 }
 
 /// 发现目录可在验收时定向到worktree，独立app与插件须使用同一个目录。
 pub fn instance_dir() -> Result<PathBuf, String> {
-    if let Some(root) = std::env::var_os("HIFISHIFTER_ARA_INSTANCE_DIR") { return Ok(root.into()); }
-    std::env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join("HiFiShifter/ara-instances"))
+    if let Some(root) = std::env::var_os("HIFISHIFTER_ARA_INSTANCE_DIR") {
+        return Ok(root.into());
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map(|root| PathBuf::from(root).join("HiFiShifter/ara-instances"))
         .ok_or_else(|| "LOCALAPPDATA unavailable".into())
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn validate_record(record: &InstanceRecord) -> Result<(), String> {
-    let expected = format!(r"\\.\pipe\HiFiShifter-ARA-{}-{}", record.pid, record.instance_id);
-    if record.protocol != PROTOCOL || uuid::Uuid::parse_str(&record.instance_id).is_err()
-        || uuid::Uuid::parse_str(&record.token).is_err() || record.pipe_name != expected {
+    let expected = format!(
+        r"\\.\pipe\HiFiShifter-ARA-{}-{}",
+        record.pid, record.instance_id
+    );
+    if record.protocol != PROTOCOL
+        || uuid::Uuid::parse_str(&record.instance_id).is_err()
+        || uuid::Uuid::parse_str(&record.token).is_err()
+        || record.pipe_name != expected
+    {
         return Err("invalid ARA instance record".into());
     }
     Ok(())
@@ -132,12 +174,20 @@ mod tests {
 
     #[test]
     fn bounded_frame_round_trip_preserves_edit_revision() {
-        let request = Request::Commit { base_revision: 7, model_revision: 9, timeline: serde_json::json!({"pitch": [60, 62]}) };
+        let request = Request::Commit {
+            base_revision: 7,
+            model_revision: 9,
+            timeline: serde_json::json!({"pitch": [60, 62]}),
+        };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &request).unwrap();
         let actual: Request = read_frame(&mut bytes.as_slice()).unwrap();
         match actual {
-            Request::Commit { base_revision, model_revision, timeline } => {
+            Request::Commit {
+                base_revision,
+                model_revision,
+                timeline,
+            } => {
                 assert_eq!((base_revision, model_revision), (7, 9));
                 assert_eq!(timeline["pitch"], serde_json::json!([60, 62]));
             }
@@ -158,8 +208,11 @@ mod tests {
     fn real_pipe_preserves_revision_and_rejects_wrong_token() {
         let root = std::env::temp_dir().join(format!("hfs-ipc-test-{}", uuid::Uuid::new_v4()));
         let server = Server::start_at("IPC test".into(), root.clone(), |request| Response {
-            ok: matches!(request, Request::Snapshot), revision: 17, ..Default::default()
-        }).unwrap();
+            ok: matches!(request, Request::Snapshot),
+            revision: 17,
+            ..Default::default()
+        })
+        .unwrap();
         let response = exchange(server.record(), &Request::Snapshot).unwrap();
         assert!(response.ok);
         assert_eq!(response.revision, 17);
@@ -177,11 +230,18 @@ mod tests {
     fn real_pipe_transfers_pcm_larger_than_the_kernel_pipe_buffer() {
         let root = std::env::temp_dir().join(format!("hfs-ipc-large-{}", uuid::Uuid::new_v4()));
         let server = Server::start_at("large PCM".into(), root, |_| Response {
-            ok: true, sources: vec![HostPcm { persistent_id:"ara://large".into(), sample_rate:44100,
-                planes:vec![vec![0.12345;88200]],fingerprint:"test".into() }], ..Default::default()
-        }).unwrap();
+            ok: true,
+            sources: vec![HostPcm {
+                persistent_id: "ara://large".into(),
+                sample_rate: 44100,
+                planes: vec![vec![0.12345; 88200]],
+                fingerprint: "test".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
         let response = exchange(server.record(), &Request::Snapshot).unwrap();
-        assert_eq!(response.sources[0].planes[0].len(),88200);
-        assert_eq!(response.sources[0].planes[0][88199],0.12345);
+        assert_eq!(response.sources[0].planes[0].len(), 88200);
+        assert_eq!(response.sources[0].planes[0][88199], 0.12345);
     }
 }

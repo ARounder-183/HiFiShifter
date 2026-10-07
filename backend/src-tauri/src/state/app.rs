@@ -658,9 +658,12 @@ impl AppState {
                 .timeline_history
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let mut supplied_notes=notes_markdown;
-            hifishifter_kernel::editor::history::checkpoint(&mut h,snapshot,label,
-                || supplied_notes.take().or_else(|| self.current_notes_markdown()));
+            let mut supplied_notes = notes_markdown;
+            hifishifter_kernel::editor::history::checkpoint(&mut h, snapshot, label, || {
+                supplied_notes
+                    .take()
+                    .or_else(|| self.current_notes_markdown())
+            });
         }
 
         self.bump_timeline_version();

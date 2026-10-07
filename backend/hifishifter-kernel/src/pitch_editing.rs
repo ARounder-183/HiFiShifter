@@ -1317,11 +1317,7 @@ pub fn scale_degree_to_midi(abs_degree: f64, offsets: &[i32]) -> f64 {
     lower + (upper - lower) * frac
 }
 
-pub fn transpose_midi_by_scale_steps(
-    midi: f64,
-    degree_steps: f64,
-    scale_notes: &[u8],
-) -> f64 {
+pub fn transpose_midi_by_scale_steps(midi: f64, degree_steps: f64, scale_notes: &[u8]) -> f64 {
     if !midi.is_finite() || degree_steps.abs() <= 1e-9 {
         return midi;
     }

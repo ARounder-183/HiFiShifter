@@ -533,11 +533,7 @@ fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
     out
 }
 
-pub fn clip_duration_sec_from_wav(
-    sample_rate: u32,
-    channels: u16,
-    pcm: &[f32],
-) -> Option<f64> {
+pub fn clip_duration_sec_from_wav(sample_rate: u32, channels: u16, pcm: &[f32]) -> Option<f64> {
     let ch = channels as usize;
     if sample_rate == 0 || ch == 0 {
         return None;
@@ -760,22 +756,37 @@ fn host_pcm_hash(source: &MixdownPcm) -> blake3::Hash {
 }
 
 /// 同实际DSP源内容在多个ARA renderer并发到达时共用单飞；不串行整个工程或持文档锁。
-fn host_processor_flight(content:blake3::Hash)->Arc<Mutex<()>> {
-    static FLIGHTS:OnceLock<Mutex<HashMap<blake3::Hash,Weak<Mutex<()>>>>>=OnceLock::new();
-    let mut flights=FLIGHTS.get_or_init(Default::default).lock().unwrap_or_else(|e|e.into_inner());
-    flights.retain(|_,flight|flight.strong_count()>0);
-    if let Some(flight)=flights.get(&content).and_then(Weak::upgrade) {return flight;}
-    let flight=Arc::new(Mutex::new(()));flights.insert(content,Arc::downgrade(&flight));flight
+fn host_processor_flight(content: blake3::Hash) -> Arc<Mutex<()>> {
+    static FLIGHTS: OnceLock<Mutex<HashMap<blake3::Hash, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut flights = FLIGHTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    if let Some(flight) = flights.get(&content).and_then(Weak::upgrade) {
+        return flight;
+    }
+    let flight = Arc::new(Mutex::new(()));
+    flights.insert(content, Arc::downgrade(&flight));
+    flight
 }
 /// 等待只发生在worker；取消最多等一个2ms轮次，不等另一个神经任务执行完。
-fn lock_host_processor_flight<'a>(flight:&'a Arc<Mutex<()>>,cancel:Option<&std::sync::atomic::AtomicBool>)
-    ->Result<std::sync::MutexGuard<'a,()>,String> {
+fn lock_host_processor_flight<'a>(
+    flight: &'a Arc<Mutex<()>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<std::sync::MutexGuard<'a, ()>, String> {
     loop {
-        if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) {return Err("export_cancelled".into());}
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return Err("export_cancelled".into());
+        }
         match flight.try_lock() {
-            Ok(guard)=>return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(_))=>return Err("host processor flight poisoned".into()),
-            Err(std::sync::TryLockError::WouldBlock)=>std::thread::sleep(std::time::Duration::from_millis(2)),
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("host processor flight poisoned".into())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(2))
+            }
         }
     }
 }
@@ -790,7 +801,7 @@ fn apply_host_pitch_edit(
     channels: u16,
     source_hash: blake3::Hash,
     pcm_stereo: &mut Vec<f32>,
-    cancel:Option<&std::sync::atomic::AtomicBool>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, String> {
     let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return Ok(false);
@@ -802,8 +813,7 @@ fn apply_host_pitch_edit(
         return Ok(false);
     };
     // 手工曲线在compose关闭时仍有效；与原GUI共用唯一的渲染门禁。
-    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip.start_sec)
-    {
+    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip.start_sec) {
         return Ok(false);
     }
 
@@ -888,7 +898,8 @@ fn apply_host_pitch_edit(
         hasher.update(&sample.to_bits().to_le_bytes());
     }
     let hash = hasher.finalize();
-    let flight=host_processor_flight(hash);let _flight=lock_host_processor_flight(&flight,cancel)?;
+    let flight = host_processor_flight(hash);
+    let _flight = lock_host_processor_flight(&flight, cancel)?;
     // actual mono/stereo DSP内容已含裁切/源版本；不同宿主region的相同输入应共用处理器缓存。
     let processor_id = format!("host-pcm:{}", hash.to_hex());
     let fingerprint = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
@@ -925,20 +936,37 @@ fn apply_host_pitch_edit(
             extra_curves: &extra_curves,
             extra_params,
         };
-        let persistent=if kind==crate::state::SynthPipelineKind::NsfHifiganOnnx {
-            let vocoder=crate::nsf_hifigan_onnx::cache_identity()?;
-            let separator=if crate::pitch_editing::extra_param_enabled(extra_params,"breath_enabled") {
-                Some(crate::hnsep_onnx::cache_identity()?)} else {None};
-            Some(crate::host_pcm_cache::key(&ctx,&vocoder,separator.as_deref()))
-        } else {None};
-        let cached=persistent.and_then(|key|crate::host_pcm_cache::load(key,sample_rate,out_frames));
-        let hit=cached.is_some();
-        let output = if let Some(cached)=cached {cached} else {processor.process(&ctx)?};
+        let persistent = if kind == crate::state::SynthPipelineKind::NsfHifiganOnnx {
+            let vocoder = crate::nsf_hifigan_onnx::cache_identity()?;
+            let separator =
+                if crate::pitch_editing::extra_param_enabled(extra_params, "breath_enabled") {
+                    Some(crate::hnsep_onnx::cache_identity()?)
+                } else {
+                    None
+                };
+            Some(crate::host_pcm_cache::key(
+                &ctx,
+                &vocoder,
+                separator.as_deref(),
+            ))
+        } else {
+            None
+        };
+        let cached =
+            persistent.and_then(|key| crate::host_pcm_cache::load(key, sample_rate, out_frames));
+        let hit = cached.is_some();
+        let output = if let Some(cached) = cached {
+            cached
+        } else {
+            processor.process(&ctx)?
+        };
         if output.len() != out_frames || output.iter().any(|v| !v.is_finite()) {
             return Err("invalid host pitch processor output".into());
         }
-        if !hit&&!cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) {
-            if let Some(key)=persistent {crate::host_pcm_cache::store(key,sample_rate,&output);}
+        if !hit && !cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            if let Some(key) = persistent {
+                crate::host_pcm_cache::store(key, sample_rate, &output);
+            }
         }
         outputs.push(output);
     }
@@ -1823,13 +1851,30 @@ mod tests {
 
         #[test]
         fn host_content_flight_is_shared_only_while_live_and_waiting_is_cancelable() {
-            let hash=blake3::hash(b"host-flight-test");let a=host_processor_flight(hash);let b=host_processor_flight(hash);
-            assert!(Arc::ptr_eq(&a,&b));assert!(!Arc::ptr_eq(&a,&host_processor_flight(blake3::hash(b"other"))));
-            let held=a.lock().unwrap();let cancel=Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let waiting=cancel.clone();let job=std::thread::spawn(move ||lock_host_processor_flight(&b,Some(&waiting)).map(|_|()).unwrap_err());
-            cancel.store(true,Ordering::Release);assert_eq!(job.join().unwrap(),"export_cancelled");drop(held);
-            let weak=Arc::downgrade(&a);drop(a);assert!(weak.upgrade().is_none());
-            let current=host_processor_flight(hash);assert!(current.try_lock().is_ok());
+            let hash = blake3::hash(b"host-flight-test");
+            let a = host_processor_flight(hash);
+            let b = host_processor_flight(hash);
+            assert!(Arc::ptr_eq(&a, &b));
+            assert!(!Arc::ptr_eq(
+                &a,
+                &host_processor_flight(blake3::hash(b"other"))
+            ));
+            let held = a.lock().unwrap();
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let waiting = cancel.clone();
+            let job = std::thread::spawn(move || {
+                lock_host_processor_flight(&b, Some(&waiting))
+                    .map(|_| ())
+                    .unwrap_err()
+            });
+            cancel.store(true, Ordering::Release);
+            assert_eq!(job.join().unwrap(), "export_cancelled");
+            drop(held);
+            let weak = Arc::downgrade(&a);
+            drop(a);
+            assert!(weak.upgrade().is_none());
+            let current = host_processor_flight(hash);
+            assert!(current.try_lock().is_ok());
         }
 
         /// 真正子进程没有RAM缓存；只读持久结果应零重推理，损坏后在worker重建正确PCM。
@@ -1837,38 +1882,99 @@ mod tests {
         #[ignore = "真实CPU磁盘冷恢复诊断：显式运行，父子进程均无UI"]
         fn real_model_host_cache_cold_process_and_corruption() {
             crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
-            let child=std::env::var("HIFISHIFTER_ARA_CACHE_TEST_PHASE").ok().as_deref()==Some("warm");
-            let previous_cache_dir=std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR");
-            let dir=if child {std::path::PathBuf::from(std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR").unwrap())}
-                else {std::env::temp_dir().join(format!("hfs-ara-cold-{}",uuid::Uuid::new_v4()))};
-            std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR",&dir);
-            let identity="ara://persistent-test";let mut tl=timeline(identity);tl.tracks[0].pitch_analysis_algo=crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
-            let root=tl.tracks[0].id.clone();let p=tl.params_by_root_track.get_mut(&root).unwrap();p.pitch_orig.fill(57.);p.pitch_edit.fill(60.);
-            p.pitch_edit_user_modified=true;p.extra_params.insert("breath_enabled".into(),1.);
-            let samples=tone(220.).chunks_exact(2).map(|pair|pair[0]).collect();
-            let src=HashMap::from([(identity.into(),MixdownPcm {sample_rate:44100,channels:1,samples:Arc::new(samples)})]);
-            let render=||render_mixdown_with_pcm(&tl,opts(true),&src).unwrap().3;
-            let hash=|pcm:&[f32]| {let mut hash=blake3::Hasher::new();for sample in pcm {hash.update(&sample.to_bits().to_le_bytes());}hash.finalize().to_hex().to_string()};
-            let before=crate::nsf_hifigan_onnx::inference_runs();let separation=crate::hnsep_onnx::separation_cache_stats().1;let began=Instant::now();
-            let first=render();let pcm_hash=hash(&first);
+            let child = std::env::var("HIFISHIFTER_ARA_CACHE_TEST_PHASE")
+                .ok()
+                .as_deref()
+                == Some("warm");
+            let previous_cache_dir = std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR");
+            let dir = if child {
+                std::path::PathBuf::from(std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR").unwrap())
+            } else {
+                std::env::temp_dir().join(format!("hfs-ara-cold-{}", uuid::Uuid::new_v4()))
+            };
+            std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR", &dir);
+            let identity = "ara://persistent-test";
+            let mut tl = timeline(identity);
+            tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            let root = tl.tracks[0].id.clone();
+            let p = tl.params_by_root_track.get_mut(&root).unwrap();
+            p.pitch_orig.fill(57.);
+            p.pitch_edit.fill(60.);
+            p.pitch_edit_user_modified = true;
+            p.extra_params.insert("breath_enabled".into(), 1.);
+            let samples = tone(220.).chunks_exact(2).map(|pair| pair[0]).collect();
+            let src = HashMap::from([(
+                identity.into(),
+                MixdownPcm {
+                    sample_rate: 44100,
+                    channels: 1,
+                    samples: Arc::new(samples),
+                },
+            )]);
+            let render = || render_mixdown_with_pcm(&tl, opts(true), &src).unwrap().3;
+            let hash = |pcm: &[f32]| {
+                let mut hash = blake3::Hasher::new();
+                for sample in pcm {
+                    hash.update(&sample.to_bits().to_le_bytes());
+                }
+                hash.finalize().to_hex().to_string()
+            };
+            let before = crate::nsf_hifigan_onnx::inference_runs();
+            let separation = crate::hnsep_onnx::separation_cache_stats().1;
+            let began = Instant::now();
+            let first = render();
+            let pcm_hash = hash(&first);
             if child {
-                assert_eq!(crate::nsf_hifigan_onnx::inference_runs(),before);assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separation);
-                assert_eq!(pcm_hash,std::env::var("HIFISHIFTER_ARA_EXPECT_PCM").unwrap());assert_eq!(crate::host_pcm_cache::stats().0,1);
-                println!("ARA_DISK_COLD_PROCESS hit=1 neural_runs=0 HNSEP_runs=0 pcm_exact=true elapsed_ms={}",began.elapsed().as_millis());return;
+                assert_eq!(crate::nsf_hifigan_onnx::inference_runs(), before);
+                assert_eq!(crate::hnsep_onnx::separation_cache_stats().1, separation);
+                assert_eq!(
+                    pcm_hash,
+                    std::env::var("HIFISHIFTER_ARA_EXPECT_PCM").unwrap()
+                );
+                assert_eq!(crate::host_pcm_cache::stats().0, 1);
+                println!("ARA_DISK_COLD_PROCESS hit=1 neural_runs=0 HNSEP_runs=0 pcm_exact=true elapsed_ms={}",began.elapsed().as_millis());
+                return;
             }
-            assert!(crate::nsf_hifigan_onnx::inference_runs()>before);assert!(crate::hnsep_onnx::separation_cache_stats().1>separation);
-            assert_eq!(crate::host_pcm_cache::stats().1,1);
-            let child=std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact","mixdown::tests::host_pcm::real_model_host_cache_cold_process_and_corruption","--ignored","--test-threads=1","--nocapture"])
-                .env("HIFISHIFTER_ARA_CACHE_TEST_PHASE","warm").env("HIFISHIFTER_ARA_EXPECT_PCM",&pcm_hash).status().unwrap();assert!(child.success());
-            let path=std::fs::read_dir(&dir).unwrap().map(|entry|entry.unwrap().path()).find(|path|path.extension().is_some_and(|ext|ext=="hfsara")).unwrap();
-            let mut bytes=std::fs::read(&path).unwrap();bytes[110]^=1;std::fs::write(&path,bytes).unwrap();
-            assert_eq!(hash(&render()),pcm_hash,"损坏磁盘必须miss重建，不能发布坏PCM");
-            assert_eq!(crate::host_pcm_cache::stats().1,2);
+            assert!(crate::nsf_hifigan_onnx::inference_runs() > before);
+            assert!(crate::hnsep_onnx::separation_cache_stats().1 > separation);
+            assert_eq!(crate::host_pcm_cache::stats().1, 1);
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mixdown::tests::host_pcm::real_model_host_cache_cold_process_and_corruption",
+                    "--ignored",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env("HIFISHIFTER_ARA_CACHE_TEST_PHASE", "warm")
+                .env("HIFISHIFTER_ARA_EXPECT_PCM", &pcm_hash)
+                .status()
+                .unwrap();
+            assert!(child.success());
+            let path = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "hfsara"))
+                .unwrap();
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[110] ^= 1;
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                hash(&render()),
+                pcm_hash,
+                "损坏磁盘必须miss重建，不能发布坏PCM"
+            );
+            assert_eq!(crate::host_pcm_cache::stats().1, 2);
             std::fs::remove_dir_all(&dir).unwrap();
-            if let Some(previous)=previous_cache_dir {std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR",previous);}
-            else {std::env::remove_var("HIFISHIFTER_ARA_CACHE_DIR");}
-            println!("ARA_DISK_PARENT corrupt_rebuilt=true stores=2 elapsed_ms={}",began.elapsed().as_millis());
+            if let Some(previous) = previous_cache_dir {
+                std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR", previous);
+            } else {
+                std::env::remove_var("HIFISHIFTER_ARA_CACHE_DIR");
+            }
+            println!(
+                "ARA_DISK_PARENT corrupt_rebuilt=true stores=2 elapsed_ms={}",
+                began.elapsed().as_millis()
+            );
         }
 
         fn timeline(identity: &str) -> TimelineState {
@@ -1927,39 +2033,104 @@ mod tests {
         fn real_model_host_hifigan_parameters_preserve_hnsep_and_breath_gain_contracts() {
             crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
             crate::hnsep_onnx::clear_separation_cache();
-            let identity="ara://hifigan-parameter-matrix";let mut tl=timeline(identity);
-            tl.tracks[0].pitch_analysis_algo=crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
-            let root=tl.tracks[0].id.clone();
-            {let params=tl.params_by_root_track.get_mut(&root).unwrap();params.pitch_orig.fill(57.);
-                params.pitch_edit.fill(60.);params.pitch_edit_user_modified=true;}
-            let stereo=tone(220.).chunks_exact(2).flat_map(|pair|[pair[0],pair[0]]).collect();
-            let src=sources(identity,stereo);let run=|tl:&TimelineState|render_mixdown_with_pcm(tl,opts(true),&src).unwrap().3;
-            let began=std::time::Instant::now();let before=crate::hnsep_onnx::separation_cache_stats();
-            let plain=run(&tl);
-            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.insert("breath_gain".into(),vec![2.;101]);
-                p.extra_curves.insert("hifigan_tension".into(),vec![80.;101]);}
-            assert_eq!(plain,run(&tl),"开关关闭时气声/张力曲线必须被门禁剥离");
-            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,before.1);
-            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_params.insert("breath_enabled".into(),1.);
-                p.extra_curves.clear();p.extra_curves.insert("breath_gain".into(),vec![0.;101]);}
-            let harmonic=run(&tl);let separated=crate::hnsep_onnx::separation_cache_stats();
-            assert_eq!(separated.1-before.1,1,"两个相同mono平面应共用一次整段分离");
-            tl.params_by_root_track.get_mut(&root).unwrap().extra_curves.insert("breath_gain".into(),vec![2.;101]);
-            let boosted=run(&tl);assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separated.1);
-            let mono=src[identity].samples.iter().step_by(2).copied().collect::<Vec<_>>();
-            let noise=crate::hnsep_onnx::infer_noise_mono("other-owner",&mono,44100,1,None).unwrap();
-            let max_error=boosted.chunks_exact(2).zip(harmonic.chunks_exact(2)).zip(noise.iter())
-                .map(|((wet,dry),noise)|(wet[0]-dry[0]-2.*noise).abs()).fold(0_f32,f32::max);
-            assert!(max_error<2e-5,"breath增益必须仅改变噪声混合: {max_error}");
-            let diff=|a:&[f32],b:&[f32]|a.iter().zip(b).map(|(a,b)|(a-b).abs()).sum::<f32>()/a.len() as f32;
-            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.insert("breath_gain".into(),vec![0.;101]);
-                p.extra_curves.insert("hifigan_tension".into(),vec![75.;101]);}
-            let tension=run(&tl);let tension_delta=diff(&harmonic,&tension);assert!(tension_delta>1e-4);
-            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.remove("hifigan_tension");
-                p.extra_curves.insert("formant_shift_cents".into(),vec![600.;101]);}
-            let formant=run(&tl);let formant_delta=diff(&harmonic,&formant);assert!(formant_delta>1e-4);
-            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separated.1,"改张力/共振峰只改变下游合成，HNSEP源stem仍有效");
-            assert!(plain.iter().chain(&harmonic).chain(&boosted).chain(&tension).chain(&formant).all(|v|v.is_finite()));
+            let identity = "ara://hifigan-parameter-matrix";
+            let mut tl = timeline(identity);
+            tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            let root = tl.tracks[0].id.clone();
+            {
+                let params = tl.params_by_root_track.get_mut(&root).unwrap();
+                params.pitch_orig.fill(57.);
+                params.pitch_edit.fill(60.);
+                params.pitch_edit_user_modified = true;
+            }
+            let stereo = tone(220.)
+                .chunks_exact(2)
+                .flat_map(|pair| [pair[0], pair[0]])
+                .collect();
+            let src = sources(identity, stereo);
+            let run = |tl: &TimelineState| render_mixdown_with_pcm(tl, opts(true), &src).unwrap().3;
+            let began = std::time::Instant::now();
+            let before = crate::hnsep_onnx::separation_cache_stats();
+            let plain = run(&tl);
+            {
+                let p = tl.params_by_root_track.get_mut(&root).unwrap();
+                p.extra_curves.insert("breath_gain".into(), vec![2.; 101]);
+                p.extra_curves
+                    .insert("hifigan_tension".into(), vec![80.; 101]);
+            }
+            assert_eq!(plain, run(&tl), "开关关闭时气声/张力曲线必须被门禁剥离");
+            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1, before.1);
+            {
+                let p = tl.params_by_root_track.get_mut(&root).unwrap();
+                p.extra_params.insert("breath_enabled".into(), 1.);
+                p.extra_curves.clear();
+                p.extra_curves.insert("breath_gain".into(), vec![0.; 101]);
+            }
+            let harmonic = run(&tl);
+            let separated = crate::hnsep_onnx::separation_cache_stats();
+            assert_eq!(
+                separated.1 - before.1,
+                1,
+                "两个相同mono平面应共用一次整段分离"
+            );
+            tl.params_by_root_track
+                .get_mut(&root)
+                .unwrap()
+                .extra_curves
+                .insert("breath_gain".into(), vec![2.; 101]);
+            let boosted = run(&tl);
+            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1, separated.1);
+            let mono = src[identity]
+                .samples
+                .iter()
+                .step_by(2)
+                .copied()
+                .collect::<Vec<_>>();
+            let noise =
+                crate::hnsep_onnx::infer_noise_mono("other-owner", &mono, 44100, 1, None).unwrap();
+            let max_error = boosted
+                .chunks_exact(2)
+                .zip(harmonic.chunks_exact(2))
+                .zip(noise.iter())
+                .map(|((wet, dry), noise)| (wet[0] - dry[0] - 2. * noise).abs())
+                .fold(0_f32, f32::max);
+            assert!(
+                max_error < 2e-5,
+                "breath增益必须仅改变噪声混合: {max_error}"
+            );
+            let diff = |a: &[f32], b: &[f32]| {
+                a.iter().zip(b).map(|(a, b)| (a - b).abs()).sum::<f32>() / a.len() as f32
+            };
+            {
+                let p = tl.params_by_root_track.get_mut(&root).unwrap();
+                p.extra_curves.insert("breath_gain".into(), vec![0.; 101]);
+                p.extra_curves
+                    .insert("hifigan_tension".into(), vec![75.; 101]);
+            }
+            let tension = run(&tl);
+            let tension_delta = diff(&harmonic, &tension);
+            assert!(tension_delta > 1e-4);
+            {
+                let p = tl.params_by_root_track.get_mut(&root).unwrap();
+                p.extra_curves.remove("hifigan_tension");
+                p.extra_curves
+                    .insert("formant_shift_cents".into(), vec![600.; 101]);
+            }
+            let formant = run(&tl);
+            let formant_delta = diff(&harmonic, &formant);
+            assert!(formant_delta > 1e-4);
+            assert_eq!(
+                crate::hnsep_onnx::separation_cache_stats().1,
+                separated.1,
+                "改张力/共振峰只改变下游合成，HNSEP源stem仍有效"
+            );
+            assert!(plain
+                .iter()
+                .chain(&harmonic)
+                .chain(&boosted)
+                .chain(&tension)
+                .chain(&formant)
+                .all(|v| v.is_finite()));
             println!("HIFIGAN_HOST_PARAMS elapsed_ms={} HNSEP_runs=1 breath_max_error={max_error:e} tension_mean_delta={tension_delta:e} formant_mean_delta={formant_delta:e}",began.elapsed().as_millis());
         }
 
@@ -2069,12 +2240,24 @@ mod tests {
             entry.pitch_edit.fill(69.0);
             entry.pitch_edit_user_modified = true;
             let src = sources("ara://manual-world", tone(220.0));
-            assert!(crate::pitch_editing::does_clip_need_processor_render(&tl, &tl.clips[0], 0.0));
+            assert!(crate::pitch_editing::does_clip_need_processor_render(
+                &tl,
+                &tl.clips[0],
+                0.0
+            ));
             let (_, _, _, dry) = render_mixdown_with_pcm(&tl, opts(false), &src).unwrap();
             let (_, _, _, wet) = render_mixdown_with_pcm(&tl, opts(true), &src).unwrap();
-            let rms = (wet.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / wet.len() as f64).sqrt();
-            let difference = wet.iter().zip(&dry).map(|(a,b)| (*a as f64 - *b as f64).abs()).sum::<f64>() / wet.len() as f64;
-            eprintln!("WORLD compose-off manual oracle: rms={rms:.6}, mean_abs_diff={difference:.6}");
+            let rms =
+                (wet.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / wet.len() as f64).sqrt();
+            let difference = wet
+                .iter()
+                .zip(&dry)
+                .map(|(a, b)| (*a as f64 - *b as f64).abs())
+                .sum::<f64>()
+                / wet.len() as f64;
+            eprintln!(
+                "WORLD compose-off manual oracle: rms={rms:.6}, mean_abs_diff={difference:.6}"
+            );
             assert!(rms > 0.02, "手工修音不能静音");
             assert!(difference > 0.03, "compose关闭时手工音高仍须改变音频");
         }

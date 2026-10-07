@@ -12,18 +12,18 @@
 //!
 //! 产品外壳从一次性探针迁入；尚未完成的渲染/生命周期事项见 Phase 3a 计划。
 
+use crate::ara_entry::HostEntry;
+use crate::render::extension::ExtensionOwner;
 use ara2_bridge::companion::vst3::ffi::{
     ara2_vst3_interface_id, ara2_vst3_main_factory_category, Ara2Vst3InterfaceId,
     Ara2Vst3InterfaceKind, ARA2_VST3_OK,
 };
 use ara2_bridge::companion::vst3::Vst3MainFactoryAdapter;
-use crate::ara_entry::HostEntry;
 use ara2_bridge::companion::{CompanionProcessorBinding, CompanionRoles};
 use std::ffi::{c_char, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use crate::render::extension::ExtensionOwner;
 
 /// VST3 `tresult`（HRESULT 风格）。
 pub type TResult = i32;
@@ -284,7 +284,8 @@ unsafe fn copy_str_ptr<const N: usize>(dst: &mut [c_char; N], src: *const c_char
 #[repr(C)]
 pub struct PluginFactoryVtbl {
     /// `FUnknown::queryInterface`。
-    pub query_interface: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
+    pub query_interface:
+        unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
     /// `FUnknown::addRef`。
     pub add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     /// `FUnknown::release`。
@@ -348,10 +349,9 @@ unsafe extern "system" fn factory_query_interface(
         unsafe { *obj = this };
         return K_RESULT_OK;
     }
-    crate::log_line(&format!(
-        "factory queryInterface miss iid={}",
-        unsafe { hex_iid(iid) }
-    ));
+    crate::log_line(&format!("factory queryInterface miss iid={}", unsafe {
+        hex_iid(iid)
+    }));
     K_NO_INTERFACE
 }
 
@@ -596,7 +596,8 @@ pub fn get_plugin_factory() -> *mut c_void {
 #[repr(C)]
 pub struct ComponentVtbl {
     /// `FUnknown::queryInterface`。
-    pub query_interface: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
+    pub query_interface:
+        unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
     /// `FUnknown::addRef`。
     pub add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     /// `FUnknown::release`。
@@ -612,7 +613,8 @@ pub struct ComponentVtbl {
     /// `IComponent::getBusCount`。
     pub get_bus_count: unsafe extern "system" fn(*mut c_void, i32, i32) -> i32,
     /// `IComponent::getBusInfo`。
-    pub get_bus_info: unsafe extern "system" fn(*mut c_void, i32, i32, i32, *mut BusInfo) -> TResult,
+    pub get_bus_info:
+        unsafe extern "system" fn(*mut c_void, i32, i32, i32, *mut BusInfo) -> TResult,
     /// `IComponent::getRoutingInfo`。
     pub get_routing_info:
         unsafe extern "system" fn(*mut c_void, *mut RoutingInfo, *mut RoutingInfo) -> TResult,
@@ -630,7 +632,8 @@ pub struct ComponentVtbl {
 #[repr(C)]
 pub struct AudioProcessorVtbl {
     /// `FUnknown::queryInterface`。
-    pub query_interface: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
+    pub query_interface:
+        unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
     /// `FUnknown::addRef`。
     pub add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     /// `FUnknown::release`。
@@ -667,9 +670,9 @@ struct Processor {
     entry: Option<HostEntry>,
     extension_owner: Arc<ExtensionOwner>,
     active: AtomicI32,
-    connection_vtbl:*const crate::editor::connection::ConnectionVtbl,
-    connection:crate::editor::connection::ConnectionState,
-    route:crate::editor::routing::RouteLease,
+    connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
+    connection: crate::editor::connection::ConnectionState,
+    route: crate::editor::routing::RouteLease,
 }
 
 impl Processor {
@@ -681,7 +684,7 @@ impl Processor {
             CompanionProcessorBinding::new([runtime.companion.clone()], CompanionRoles::all())
                 .ok()?;
         let extension_owner = Arc::new(ExtensionOwner::default());
-        let route=crate::editor::routing::RouteLease::new(&extension_owner);
+        let route = crate::editor::routing::RouteLease::new(&extension_owner);
         let entry = HostEntry::new(binding, crate::CLASS_NAME, extension_owner.clone()).ok()?;
         Some(Box::new(Processor {
             component_vtbl: &COMPONENT_VTBL,
@@ -690,8 +693,8 @@ impl Processor {
             entry: Some(entry),
             extension_owner,
             active: AtomicI32::new(0),
-            connection_vtbl:&PROCESSOR_CONNECTION_VTBL,
-            connection:Default::default(),
+            connection_vtbl: &PROCESSOR_CONNECTION_VTBL,
+            connection: Default::default(),
             route,
         }))
     }
@@ -726,8 +729,12 @@ unsafe fn processor_release(processor: *mut Processor) -> u32 {
     let previous = unsafe { (*processor).refcount.fetch_sub(1, Ordering::AcqRel) };
     let remaining = previous - 1;
     if remaining == 0 {
-        unsafe { (*processor).extension_owner.stop_channel(); }
-        unsafe { (*processor).extension_owner.stop_editor(); }
+        unsafe {
+            (*processor).extension_owner.stop_channel();
+        }
+        unsafe {
+            (*processor).extension_owner.stop_editor();
+        }
         // SAFETY: 引用计数归零，且没有其它持有者。
         unsafe { drop(Box::from_raw(processor)) };
     }
@@ -746,7 +753,10 @@ unsafe extern "system" fn component_query_interface(
     unsafe { *obj = std::ptr::null_mut() };
     let processor = this as *mut Processor;
     if unsafe { crate::editor::connection::is_connection(iid) } {
-        unsafe { processor_add_ref(processor); *obj=std::ptr::addr_of_mut!((*processor).connection_vtbl).cast(); }
+        unsafe {
+            processor_add_ref(processor);
+            *obj = std::ptr::addr_of_mut!((*processor).connection_vtbl).cast();
+        }
         return K_RESULT_OK;
     }
     // FUnknown / IPluginBase / IComponent 共用对象基址。
@@ -798,10 +808,9 @@ unsafe extern "system" fn component_query_interface(
             }
         }
     }
-    crate::log_line(&format!(
-        "component queryInterface miss iid={}",
-        unsafe { hex_iid(iid) }
-    ));
+    crate::log_line(&format!("component queryInterface miss iid={}", unsafe {
+        hex_iid(iid)
+    }));
     K_NO_INTERFACE
 }
 
@@ -815,28 +824,41 @@ unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {
     unsafe { processor_release(this as *mut Processor) }
 }
 
-unsafe extern "system" fn component_initialize(
-    this: *mut c_void,
-    context: *mut c_void,
-) -> TResult {
+unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut c_void) -> TResult {
     // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
     struct CallReference(*mut c_void);
     impl Drop for CallReference {
-        fn drop(&mut self) {unsafe {component_release(self.0);}}
+        fn drop(&mut self) {
+            unsafe {
+                component_release(self.0);
+            }
+        }
     }
-    unsafe {component_add_ref(this);}
-    let _call_reference=CallReference(this);
-    let owner=unsafe {(*this.cast::<Processor>()).extension_owner.clone()};
-    if owner.is_closed() {return K_RESULT_FALSE;}
-    unsafe { (*(this as *mut Processor)).connection.initialize(context); }
+    unsafe {
+        component_add_ref(this);
+    }
+    let _call_reference = CallReference(this);
+    let owner = unsafe { (*this.cast::<Processor>()).extension_owner.clone() };
     if owner.is_closed() {
-        // QI可能先重入close再返回新引用；拒绝初始化时不能把该引用留在closed connection。
-        unsafe {(*this.cast::<Processor>()).connection.close();}
         return K_RESULT_FALSE;
     }
-    unsafe {owner.bind_reaper_host(context);}
+    unsafe {
+        (*(this as *mut Processor)).connection.initialize(context);
+    }
     if owner.is_closed() {
-        unsafe {(*this.cast::<Processor>()).connection.close();}
+        // QI可能先重入close再返回新引用；拒绝初始化时不能把该引用留在closed connection。
+        unsafe {
+            (*this.cast::<Processor>()).connection.close();
+        }
+        return K_RESULT_FALSE;
+    }
+    unsafe {
+        owner.bind_reaper_host(context);
+    }
+    if owner.is_closed() {
+        unsafe {
+            (*this.cast::<Processor>()).connection.close();
+        }
         return K_RESULT_FALSE;
     }
     crate::log_line("IComponent::initialize");
@@ -844,7 +866,11 @@ unsafe extern "system" fn component_initialize(
 }
 
 unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {
-    unsafe {let processor=&*(this as *mut Processor);processor.connection.close();processor.extension_owner.stop_editor();}
+    unsafe {
+        let processor = &*(this as *mut Processor);
+        processor.connection.close();
+        processor.extension_owner.stop_editor();
+    }
     crate::log_line("IComponent::terminate");
     K_RESULT_OK
 }
@@ -928,31 +954,37 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
     K_RESULT_OK
 }
 
-unsafe extern "system" fn component_set_state(
-    this: *mut c_void,
-    state: *mut c_void,
-) -> TResult {
-    if this.is_null() { return K_INVALID_ARGUMENT; }
+unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_void) -> TResult {
+    if this.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let bytes = unsafe { crate::state_stream::read_state(state) }?;
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
         owner.restore_state(&bytes)?;
         Ok::<_, String>(())
     }));
-    if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
+    if matches!(outcome, Ok(Ok(()))) {
+        K_RESULT_OK
+    } else {
+        K_RESULT_FALSE
+    }
 }
 
-unsafe extern "system" fn component_get_state(
-    this: *mut c_void,
-    state: *mut c_void,
-) -> TResult {
-    if this.is_null() { return K_INVALID_ARGUMENT; }
+unsafe extern "system" fn component_get_state(this: *mut c_void, state: *mut c_void) -> TResult {
+    if this.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
         let bytes = owner.encode_state()?;
         unsafe { crate::state_stream::write_state(state, &bytes) }
     }));
-    if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
+    if matches!(outcome, Ok(Ok(()))) {
+        K_RESULT_OK
+    } else {
+        K_RESULT_FALSE
+    }
 }
 
 unsafe extern "system" fn audio_query_interface(
@@ -1029,25 +1061,33 @@ unsafe extern "system" fn audio_setup_processing(
     this: *mut c_void,
     setup: *mut ProcessSetup,
 ) -> TResult {
-    if this.is_null()||setup.is_null() {
+    if this.is_null() || setup.is_null() {
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: 宿主提供调用期间可读的 SDK setup 结构。
     let setup = unsafe { &*setup };
-    if !setup.sample_rate.is_finite() || setup.sample_rate <= 0.0
-        || setup.max_samples_per_block <= 0 || !(0..=2).contains(&setup.process_mode)
+    if !setup.sample_rate.is_finite()
+        || setup.sample_rate <= 0.0
+        || setup.max_samples_per_block <= 0
+        || !(0..=2).contains(&setup.process_mode)
     {
         return K_INVALID_ARGUMENT;
     }
     if setup.symbolic_sample_size != 0 || ![44100.0, 48000.0].contains(&setup.sample_rate) {
         return K_RESULT_FALSE;
     }
-    crate::log_line(&format!("IAudioProcessor::setupProcessing mode={} rate={}",setup.process_mode,setup.sample_rate));
-    if setup.process_mode==2 {
+    crate::log_line(&format!(
+        "IAudioProcessor::setupProcessing mode={} rate={}",
+        setup.process_mode, setup.sample_rate
+    ));
+    if setup.process_mode == 2 {
         // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
-        let owner=unsafe {&(*base_from_audio(this)).extension_owner};
-        if let Err(error)=owner.prepare_offline_until(std::time::Instant::now()+std::time::Duration::from_secs(180)) {
-            crate::log_line(&format!("Offline preparation failed: {error}"));return K_RESULT_FALSE;
+        let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+        if let Err(error) = owner
+            .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(180))
+        {
+            crate::log_line(&format!("Offline preparation failed: {error}"));
+            return K_RESULT_FALSE;
         }
     }
     K_RESULT_OK
@@ -1055,47 +1095,80 @@ unsafe extern "system" fn audio_setup_processing(
 
 unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {
     // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
-    if this.is_null() {return K_INVALID_ARGUMENT;}
-    if state==0 {unsafe {&(*base_from_audio(this)).extension_owner}.record_processing_stop();}
+    if this.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+    if state == 0 {
+        unsafe { &(*base_from_audio(this)).extension_owner }.record_processing_stop();
+    }
     K_RESULT_OK
 }
 
 /// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
     // SAFETY: VST3 宿主按 SDK 布局提供回调数据，函数内部处理空指针与非法字段。
-    if this.is_null() {return K_INVALID_ARGUMENT;}
+    if this.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
     match unsafe { crate::audio_abi::validate(data.cast()) } {
         Ok(()) => {
             // SAFETY: 宿主持有 Processor，validate已验证当前数据和音频总线。
             let data = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
-            if data.num_samples == 0 || data.num_outputs == 0 { return K_RESULT_OK; }
+            if data.num_samples == 0 || data.num_outputs == 0 {
+                return K_RESULT_OK;
+            }
             // SAFETY: this 是存活的音频接口子对象。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             if !data.process_context.is_null() {
-                owner.observe_transport(unsafe {&*data.process_context},data.process_mode);
+                owner.observe_transport(unsafe { &*data.process_context }, data.process_mode);
             }
             if owner.is_editor_only() {
                 // 纯编辑角色不是歌曲播放renderer；保留宿主已经处理的fade/gain/前级FX，包括停播监听。
-                return match unsafe {crate::audio_abi::pass_through(data)} {
-                    Ok(())=>K_RESULT_OK,Err(crate::audio_abi::BufferError::InvalidArgument)=>K_INVALID_ARGUMENT,
-                    Err(crate::audio_abi::BufferError::UnsupportedFormat)=>K_RESULT_FALSE,
+                return match unsafe { crate::audio_abi::pass_through(data) } {
+                    Ok(()) => K_RESULT_OK,
+                    Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
+                    Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
                 };
             }
-            unsafe {crate::audio_abi::clear_outputs(data).expect("validated audio buffers");}
-            if owner.host_item_muted() {return K_RESULT_OK;}
-            if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return if data.process_mode==2 {K_RESULT_FALSE} else {K_RESULT_OK}; }
+            unsafe {
+                crate::audio_abi::clear_outputs(data).expect("validated audio buffers");
+            }
+            if owner.host_item_muted() {
+                return K_RESULT_OK;
+            }
+            if data.process_context.is_null() {
+                owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed);
+                return if data.process_mode == 2 {
+                    K_RESULT_FALSE
+                } else {
+                    K_RESULT_OK
+                };
+            }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
-            if data.process_mode!=2 && context.state & (1<<1)==0 {return K_RESULT_OK;}
+            if data.process_mode != 2 && context.state & (1 << 1) == 0 {
+                return K_RESULT_OK;
+            }
             let publisher = match context.sample_rate {
-                44100.0 => &owner.snapshots[0], 48000.0 => &owner.snapshots[1], _ => return K_RESULT_FALSE,
+                44100.0 => &owner.snapshots[0],
+                48000.0 => &owner.snapshots[1],
+                _ => return K_RESULT_FALSE,
             };
             // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
-            let ready=unsafe { publisher.copy_block(context.project_time_samples, context.sample_rate as u32, &mut *data.outputs, data.num_samples as usize) };
-            if data.process_mode==2&&!ready {return K_RESULT_FALSE;}
+            let ready = unsafe {
+                publisher.copy_block(
+                    context.project_time_samples,
+                    context.sample_rate as u32,
+                    &mut *data.outputs,
+                    data.num_samples as usize,
+                )
+            };
+            if data.process_mode == 2 && !ready {
+                return K_RESULT_FALSE;
+            }
             K_RESULT_OK
-        },
+        }
         Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
         Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
     }
@@ -1174,9 +1247,9 @@ pub struct EditControllerVtbl {
 struct EditController {
     vtbl: *const EditControllerVtbl,
     refcount: AtomicI32,
-    connection_vtbl:*const crate::editor::connection::ConnectionVtbl,
-    connection:crate::editor::connection::ConnectionState,
-    editor_link:Arc<crate::editor::routing::EditorLink>,
+    connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
+    connection: crate::editor::connection::ConnectionState,
+    editor_link: Arc<crate::editor::routing::EditorLink>,
 }
 
 impl EditController {
@@ -1184,9 +1257,9 @@ impl EditController {
         Self {
             vtbl: &EDIT_CONTROLLER_VTBL,
             refcount: AtomicI32::new(1),
-            connection_vtbl:&CONTROLLER_CONNECTION_VTBL,
-            connection:Default::default(),
-            editor_link:Arc::new(Default::default()),
+            connection_vtbl: &CONTROLLER_CONNECTION_VTBL,
+            connection: Default::default(),
+            editor_link: Arc::new(Default::default()),
         }
     }
 }
@@ -1202,8 +1275,11 @@ unsafe extern "system" fn edit_controller_query_interface(
     // SAFETY: obj 是宿主提供的输出槽。
     unsafe { *obj = std::ptr::null_mut() };
     if unsafe { crate::editor::connection::is_connection(iid) } {
-        let controller=this as *mut EditController;
-        unsafe { edit_controller_add_ref(this); *obj=std::ptr::addr_of_mut!((*controller).connection_vtbl).cast(); }
+        let controller = this as *mut EditController;
+        unsafe {
+            edit_controller_add_ref(this);
+            *obj = std::ptr::addr_of_mut!((*controller).connection_vtbl).cast();
+        }
         return K_RESULT_OK;
     }
     if unsafe { iid_matches(iid, IID_FUNKNOWN) }
@@ -1217,10 +1293,9 @@ unsafe extern "system" fn edit_controller_query_interface(
         unsafe { *obj = this };
         return K_RESULT_OK;
     }
-    crate::log_line(&format!(
-        "controller queryInterface miss iid={}",
-        unsafe { hex_iid(iid) }
-    ));
+    crate::log_line(&format!("controller queryInterface miss iid={}", unsafe {
+        hex_iid(iid)
+    }));
     K_NO_INTERFACE
 }
 
@@ -1246,13 +1321,24 @@ unsafe extern "system" fn edit_controller_initialize(
     this: *mut c_void,
     context: *mut c_void,
 ) -> TResult {
-    unsafe { (*(this as *mut EditController)).connection.initialize(context); }
+    unsafe {
+        (*(this as *mut EditController))
+            .connection
+            .initialize(context);
+    }
     crate::log_line("IEditController::initialize");
     K_RESULT_OK
 }
 
 unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {
-    unsafe { let controller=&*(this as *mut EditController); controller.editor_link.clear(); let _=controller.editor_link.set_component_handler(std::ptr::null_mut()); controller.connection.close(); }
+    unsafe {
+        let controller = &*(this as *mut EditController);
+        controller.editor_link.clear();
+        let _ = controller
+            .editor_link
+            .set_component_handler(std::ptr::null_mut());
+        controller.connection.close();
+    }
     crate::log_line("IEditController::terminate");
     K_RESULT_OK
 }
@@ -1343,10 +1429,25 @@ unsafe extern "system" fn edit_controller_set_component_handler(
     this: *mut c_void,
     handler: *mut c_void,
 ) -> TResult {
-    if this.is_null() {return K_INVALID_ARGUMENT;}
-    let controller=unsafe {&*(this as *const EditController)};
-    if controller.editor_link.set_component_handler(handler).is_err() {return K_RESULT_FALSE;}
-    crate::log_line(&format!("IEditController::setComponentHandler({})",if handler.is_null(){"null"}else{"connected"}));
+    if this.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+    let controller = unsafe { &*(this as *const EditController) };
+    if controller
+        .editor_link
+        .set_component_handler(handler)
+        .is_err()
+    {
+        return K_RESULT_FALSE;
+    }
+    crate::log_line(&format!(
+        "IEditController::setComponentHandler({})",
+        if handler.is_null() {
+            "null"
+        } else {
+            "connected"
+        }
+    ));
     K_RESULT_OK
 }
 
@@ -1354,11 +1455,18 @@ unsafe extern "system" fn edit_controller_create_view(
     this: *mut c_void,
     name: *const c_char,
 ) -> *mut c_void {
-    if this.is_null() || name.is_null() || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor" {
+    if this.is_null()
+        || name.is_null()
+        || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor"
+    {
         return std::ptr::null_mut();
     }
     crate::log_line("IEditController::createView -> native editor");
-    crate::editor::create_view_with_link(unsafe { &*(this as *const EditController) }.editor_link.clone())
+    crate::editor::create_view_with_link(
+        unsafe { &*(this as *const EditController) }
+            .editor_link
+            .clone(),
+    )
 }
 
 static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
@@ -1383,74 +1491,128 @@ static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
 };
 
 /// 从真实connection子对象回到对应拥有者，所有接口共享同一个COM引用计数。
-unsafe fn processor_from_connection(this:*mut c_void)->*mut Processor {
-    unsafe { this.cast::<u8>().sub(offset_of!(Processor,connection_vtbl)).cast() }
+unsafe fn processor_from_connection(this: *mut c_void) -> *mut Processor {
+    unsafe {
+        this.cast::<u8>()
+            .sub(offset_of!(Processor, connection_vtbl))
+            .cast()
+    }
 }
-unsafe fn controller_from_connection(this:*mut c_void)->*mut EditController {
-    unsafe { this.cast::<u8>().sub(offset_of!(EditController,connection_vtbl)).cast() }
+unsafe fn controller_from_connection(this: *mut c_void) -> *mut EditController {
+    unsafe {
+        this.cast::<u8>()
+            .sub(offset_of!(EditController, connection_vtbl))
+            .cast()
+    }
 }
-unsafe extern "system" fn pc_query(this:*mut c_void,iid:*const u8,out:*mut *mut c_void)->TResult {
-    unsafe { component_query_interface(processor_from_connection(this).cast(),iid,out) }
+unsafe extern "system" fn pc_query(
+    this: *mut c_void,
+    iid: *const u8,
+    out: *mut *mut c_void,
+) -> TResult {
+    unsafe { component_query_interface(processor_from_connection(this).cast(), iid, out) }
 }
-unsafe extern "system" fn pc_add(this:*mut c_void)->u32 { unsafe { processor_add_ref(processor_from_connection(this)) } }
-unsafe extern "system" fn pc_release(this:*mut c_void)->u32 { unsafe { processor_release(processor_from_connection(this)) } }
-unsafe extern "system" fn pc_connect(this:*mut c_void,other:*mut c_void)->TResult {
-    let processor=unsafe { &*processor_from_connection(this) };
-    let result=unsafe { processor.connection.connect(other) };
-    if result==K_RESULT_OK {
-        let sent=processor.connection.send(Some(processor.route.token()));
+unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {
+    unsafe { processor_add_ref(processor_from_connection(this)) }
+}
+unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {
+    unsafe { processor_release(processor_from_connection(this)) }
+}
+unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> TResult {
+    let processor = unsafe { &*processor_from_connection(this) };
+    let result = unsafe { processor.connection.connect(other) };
+    if result == K_RESULT_OK {
+        let sent = processor.connection.send(Some(processor.route.token()));
         crate::log_line(&format!("processor connection route sent result={sent}"));
     }
     result
 }
-unsafe extern "system" fn pc_disconnect(this:*mut c_void,other:*mut c_void)->TResult {
-    unsafe { &*processor_from_connection(this) }.connection.disconnect(other)
+unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {
+    unsafe { &*processor_from_connection(this) }
+        .connection
+        .disconnect(other)
 }
-unsafe extern "system" fn pc_notify(this:*mut c_void,message:*mut c_void)->TResult {
-    let processor=unsafe { &*processor_from_connection(this) };
+unsafe extern "system" fn pc_notify(this: *mut c_void, message: *mut c_void) -> TResult {
+    let processor = unsafe { &*processor_from_connection(this) };
     match unsafe { crate::editor::connection::read(message) } {
-        Ok(crate::editor::connection::Message::RequestRoute)=>processor.connection.send(Some(processor.route.token())),
-        _=>K_RESULT_FALSE,
+        Ok(crate::editor::connection::Message::RequestRoute) => {
+            processor.connection.send(Some(processor.route.token()))
+        }
+        _ => K_RESULT_FALSE,
     }
 }
-unsafe extern "system" fn cc_query(this:*mut c_void,iid:*const u8,out:*mut *mut c_void)->TResult {
-    unsafe { edit_controller_query_interface(controller_from_connection(this).cast(),iid,out) }
+unsafe extern "system" fn cc_query(
+    this: *mut c_void,
+    iid: *const u8,
+    out: *mut *mut c_void,
+) -> TResult {
+    unsafe { edit_controller_query_interface(controller_from_connection(this).cast(), iid, out) }
 }
-unsafe extern "system" fn cc_add(this:*mut c_void)->u32 { unsafe { edit_controller_add_ref(controller_from_connection(this).cast()) } }
-unsafe extern "system" fn cc_release(this:*mut c_void)->u32 { unsafe { edit_controller_release(controller_from_connection(this).cast()) } }
-unsafe extern "system" fn cc_connect(this:*mut c_void,other:*mut c_void)->TResult {
-    let controller=unsafe { &*controller_from_connection(this) };
-    let result=unsafe { controller.connection.connect(other) };
-    if result==K_RESULT_OK {
-        let sent=controller.connection.send(None);
-        crate::log_line(&format!("controller connection route requested result={sent}"));
+unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {
+    unsafe { edit_controller_add_ref(controller_from_connection(this).cast()) }
+}
+unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {
+    unsafe { edit_controller_release(controller_from_connection(this).cast()) }
+}
+unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> TResult {
+    let controller = unsafe { &*controller_from_connection(this) };
+    let result = unsafe { controller.connection.connect(other) };
+    if result == K_RESULT_OK {
+        let sent = controller.connection.send(None);
+        crate::log_line(&format!(
+            "controller connection route requested result={sent}"
+        ));
     }
     result
 }
-unsafe extern "system" fn cc_disconnect(this:*mut c_void,other:*mut c_void)->TResult {
-    let controller=unsafe { &*controller_from_connection(this) };
-    let result=controller.connection.disconnect(other);
-    if result==K_RESULT_OK { controller.editor_link.clear(); }
+unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {
+    let controller = unsafe { &*controller_from_connection(this) };
+    let result = controller.connection.disconnect(other);
+    if result == K_RESULT_OK {
+        controller.editor_link.clear();
+    }
     result
 }
-unsafe extern "system" fn cc_notify(this:*mut c_void,message:*mut c_void)->TResult {
-    let controller=unsafe { &*controller_from_connection(this) };
+unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> TResult {
+    let controller = unsafe { &*controller_from_connection(this) };
     match unsafe { crate::editor::connection::read(message) } {
-        Ok(crate::editor::connection::Message::Route {pid,token})=>match controller.editor_link.bind(pid,&token) {
-            Ok(())=>{ crate::log_line("controller editor route bound to actual processor"); K_RESULT_OK },
-            Err(error)=>{ crate::log_line(&format!("controller editor route rejected: {error}")); K_RESULT_FALSE },
+        Ok(crate::editor::connection::Message::Route { pid, token }) => {
+            match controller.editor_link.bind(pid, &token) {
+                Ok(()) => {
+                    crate::log_line("controller editor route bound to actual processor");
+                    K_RESULT_OK
+                }
+                Err(error) => {
+                    crate::log_line(&format!("controller editor route rejected: {error}"));
+                    K_RESULT_FALSE
+                }
+            }
+        }
+        _ => K_RESULT_FALSE,
+    }
+}
+static PROCESSOR_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
+    crate::editor::connection::ConnectionVtbl {
+        base: crate::editor::connection::UnknownVtbl {
+            query: pc_query,
+            add: pc_add,
+            release: pc_release,
         },
-        _=>K_RESULT_FALSE,
-    }
-}
-static PROCESSOR_CONNECTION_VTBL:crate::editor::connection::ConnectionVtbl=crate::editor::connection::ConnectionVtbl {
-    base:crate::editor::connection::UnknownVtbl {query:pc_query,add:pc_add,release:pc_release},
-    connect:pc_connect,disconnect:pc_disconnect,notify:pc_notify,
-};
-static CONTROLLER_CONNECTION_VTBL:crate::editor::connection::ConnectionVtbl=crate::editor::connection::ConnectionVtbl {
-    base:crate::editor::connection::UnknownVtbl {query:cc_query,add:cc_add,release:cc_release},
-    connect:cc_connect,disconnect:cc_disconnect,notify:cc_notify,
-};
+        connect: pc_connect,
+        disconnect: pc_disconnect,
+        notify: pc_notify,
+    };
+static CONTROLLER_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
+    crate::editor::connection::ConnectionVtbl {
+        base: crate::editor::connection::UnknownVtbl {
+            query: cc_query,
+            add: cc_add,
+            release: cc_release,
+        },
+        connect: cc_connect,
+        disconnect: cc_disconnect,
+        notify: cc_notify,
+    };
 
 /// 建立 ARA 主工厂适配器（`ARA::IMainFactory`）。
 pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
@@ -1470,7 +1632,12 @@ mod lifetime_tests {
         let mut component = std::ptr::null_mut();
         // SAFETY: CID/IID 和输出槽均在同步工厂调用期间存活。
         let result = unsafe {
-            factory_create_instance(std::ptr::null_mut(), PROCESSOR_CID.as_ptr().cast(), iid.as_ptr().cast(), &raw mut component)
+            factory_create_instance(
+                std::ptr::null_mut(),
+                PROCESSOR_CID.as_ptr().cast(),
+                iid.as_ptr().cast(),
+                &raw mut component,
+            )
         };
         assert_eq!(result, K_RESULT_OK);
         component
@@ -1479,67 +1646,131 @@ mod lifetime_tests {
     /// 安全RED：只观察原生refcount，不在尚未保活的实现中重入最终release触发悬空。
     #[test]
     fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
-        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();
-        let observed=Arc::new(AtomicI32::new(0));let count=observed.clone();let raw=component as usize;
-        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
-            count.store(unsafe {(*((raw as *mut c_void).cast::<Processor>())).refcount.load(Ordering::Acquire)},Ordering::Release);
-        })));
-        let result=unsafe {component_initialize(component,host.context())};
-        let count=observed.load(Ordering::Acquire);assert_eq!(unsafe {component_release(component)},0);
-        assert_eq!(result,K_RESULT_OK);assert_eq!(count,2,"宿主owning引用之外，本次初始化应独立保活插件存储");
+        let component = create_component();
+        let host = crate::host::reaper::ReaperFixture::new();
+        let observed = Arc::new(AtomicI32::new(0));
+        let count = observed.clone();
+        let raw = component as usize;
+        *host.hook.borrow_mut() = Some((
+            "api:GetPlayPositionEx".into(),
+            Box::new(move || {
+                count.store(
+                    unsafe {
+                        (*((raw as *mut c_void).cast::<Processor>()))
+                            .refcount
+                            .load(Ordering::Acquire)
+                    },
+                    Ordering::Release,
+                );
+            }),
+        ));
+        let result = unsafe { component_initialize(component, host.context()) };
+        let count = observed.load(Ordering::Acquire);
+        assert_eq!(unsafe { component_release(component) }, 0);
+        assert_eq!(result, K_RESULT_OK);
+        assert_eq!(count, 2, "宿主owning引用之外，本次初始化应独立保活插件存储");
     }
 
     /// terminate撤销授权与最终release不同；初始化不得把closed组件伪报成成功或重装host引用。
     #[test]
     fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
-        for terminate in [true,false] {
-        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();let raw=component as usize;
-        let owner=unsafe {Arc::downgrade(&(*component.cast::<Processor>()).extension_owner)};
-        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
-            if terminate {unsafe {component_terminate(raw as *mut c_void);}} else {owner.upgrade().unwrap().stop_editor();}
-        })));
-        let result=unsafe {component_initialize(component,host.context())};
-        let closed=unsafe {(*component.cast::<Processor>()).extension_owner.is_closed()};
-        let references=host.references();let calls=host.calls();assert_eq!(unsafe {component_release(component)},0);
-        assert_eq!(result,K_RESULT_FALSE);assert!(closed);assert_eq!(references,1);
-        assert_eq!(calls.last().unwrap(),"api:GetPlayPositionEx");
+        for terminate in [true, false] {
+            let component = create_component();
+            let host = crate::host::reaper::ReaperFixture::new();
+            let raw = component as usize;
+            let owner =
+                unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
+            *host.hook.borrow_mut() = Some((
+                "api:GetPlayPositionEx".into(),
+                Box::new(move || {
+                    if terminate {
+                        unsafe {
+                            component_terminate(raw as *mut c_void);
+                        }
+                    } else {
+                        owner.upgrade().unwrap().stop_editor();
+                    }
+                }),
+            ));
+            let result = unsafe { component_initialize(component, host.context()) };
+            let closed = unsafe { (*component.cast::<Processor>()).extension_owner.is_closed() };
+            let references = host.references();
+            let calls = host.calls();
+            assert_eq!(unsafe { component_release(component) }, 0);
+            assert_eq!(result, K_RESULT_FALSE);
+            assert!(closed);
+            assert_eq!(references, 1);
+            assert_eq!(calls.last().unwrap(), "api:GetPlayPositionEx");
         }
     }
 
     /// 完成保活后才执行真正的重入最终release；调用结束不能泄漏该短引用。
     #[test]
     fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
-        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();let raw=component as usize;
-        let weak=unsafe {Arc::downgrade(&(*component.cast::<Processor>()).extension_owner)};let during=weak.clone();
-        let remaining=Arc::new(AtomicU32::new(99));let observed=remaining.clone();
-        let alive=Arc::new(std::sync::atomic::AtomicBool::new(false));let observed_alive=alive.clone();
-        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
-            let count=unsafe {component_release(raw as *mut c_void)};
-            observed.store(count,Ordering::Release);observed_alive.store(during.upgrade().is_some(),Ordering::Release);
-        })));
-        assert_eq!(unsafe {component_initialize(component,host.context())},K_RESULT_OK);
-        assert_eq!(remaining.load(Ordering::Acquire),1);assert!(alive.load(Ordering::Acquire));
-        assert!(weak.upgrade().is_none());assert_eq!(host.references(),1);
+        let component = create_component();
+        let host = crate::host::reaper::ReaperFixture::new();
+        let raw = component as usize;
+        let weak = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
+        let during = weak.clone();
+        let remaining = Arc::new(AtomicU32::new(99));
+        let observed = remaining.clone();
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_alive = alive.clone();
+        *host.hook.borrow_mut() = Some((
+            "api:GetPlayPositionEx".into(),
+            Box::new(move || {
+                let count = unsafe { component_release(raw as *mut c_void) };
+                observed.store(count, Ordering::Release);
+                observed_alive.store(during.upgrade().is_some(), Ordering::Release);
+            }),
+        ));
+        assert_eq!(
+            unsafe { component_initialize(component, host.context()) },
+            K_RESULT_OK
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 1);
+        assert!(alive.load(Ordering::Acquire));
+        assert!(weak.upgrade().is_none());
+        assert_eq!(host.references(), 1);
     }
 
     #[test]
     fn task38a_initialize_of_a_closed_component_does_not_call_host() {
-        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();
-        unsafe {component_terminate(component);}host.reset();
-        let result=unsafe {component_initialize(component,host.context())};
-        let calls=host.calls();assert_eq!(unsafe {component_release(component)},0);
-        assert_eq!(result,K_RESULT_FALSE);assert!(calls.is_empty());assert_eq!(host.references(),1);
+        let component = create_component();
+        let host = crate::host::reaper::ReaperFixture::new();
+        unsafe {
+            component_terminate(component);
+        }
+        host.reset();
+        let result = unsafe { component_initialize(component, host.context()) };
+        let calls = host.calls();
+        assert_eq!(unsafe { component_release(component) }, 0);
+        assert_eq!(result, K_RESULT_FALSE);
+        assert!(calls.is_empty());
+        assert_eq!(host.references(), 1);
     }
 
     /// IHostApplication QI itself可重入terminate；失败初始化不能留下后来才存入的host owning引用。
     #[test]
-    fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference() {
-        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();host.enable_connection_host();
-        let raw=component as usize;
-        *host.hook.borrow_mut()=Some(("QI".into(),Box::new(move || {unsafe {component_terminate(raw as *mut c_void);}})));
-        let result=unsafe {component_initialize(component,host.context())};let refs=host.references();let calls=host.calls();
-        assert_eq!(unsafe {component_release(component)},0);assert_eq!(result,K_RESULT_FALSE);
-        assert_eq!(refs,1,"关闭回调之后QI成功返回的引用也必须立即回收");assert_eq!(calls,["QI"]);
+    fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference()
+    {
+        let component = create_component();
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.enable_connection_host();
+        let raw = component as usize;
+        *host.hook.borrow_mut() = Some((
+            "QI".into(),
+            Box::new(move || unsafe {
+                component_terminate(raw as *mut c_void);
+            }),
+        ));
+        let result = unsafe { component_initialize(component, host.context()) };
+        let refs = host.references();
+        let calls = host.calls();
+        assert_eq!(unsafe { component_release(component) }, 0);
+        assert_eq!(result, K_RESULT_FALSE);
+        assert_eq!(refs, 1, "关闭回调之后QI成功返回的引用也必须立即回收");
+        assert_eq!(calls, ["QI"]);
     }
 
     /// 工厂不能遗留自己的初始引用，否则组件和扩展永远不会释放。
@@ -1560,15 +1791,25 @@ mod lifetime_tests {
         // SAFETY: 组件仍存活，query_interface 返回新 owning COM 引用。
         let (owner, entry) = unsafe {
             let processor = &*component.cast::<Processor>();
-            (Arc::downgrade(&processor.extension_owner), processor.entry.as_ref().unwrap()
-                .query_interface(Ara2Vst3InterfaceKind::PluginEntry2).unwrap())
+            (
+                Arc::downgrade(&processor.extension_owner),
+                processor
+                    .entry
+                    .as_ref()
+                    .unwrap()
+                    .query_interface(Ara2Vst3InterfaceKind::PluginEntry2)
+                    .unwrap(),
+            )
         };
         // SAFETY: 消耗宿主组件引用，entry 仍被单独持有。
         assert_eq!(unsafe { component_release(component) }, 0);
         assert!(owner.upgrade().is_some());
         let mut remaining = 0;
         // SAFETY: 最后消耗 entry owning COM 引用，不再访问其指针。
-        assert_eq!(unsafe { ara2_vst3_release(entry, &raw mut remaining) }, ARA2_VST3_OK);
+        assert_eq!(
+            unsafe { ara2_vst3_release(entry, &raw mut remaining) },
+            ARA2_VST3_OK
+        );
         assert_eq!(remaining, 0);
         assert!(owner.upgrade().is_none());
     }
@@ -1576,101 +1817,308 @@ mod lifetime_tests {
     /// 真COM组件、真实route租约与native entry同时持有；释放入口不能牵连同文档/另一文档actor。
     #[test]
     fn task34_real_processor_release_revokes_routes_without_retaining_document() {
-        use crate::editor::{routing::EditorLink,session::{UiRequest,UiSink}};
-        use ara2_bridge::{core::ApiGeneration,plugin::ExtensionRoles};
-        use std::sync::{mpsc,atomic::AtomicBool};
-        let model=crate::ara::model::ModelHandle::new();let document=model.session();let weak_document=Arc::downgrade(&document);
-        let other_model=crate::ara::model::ModelHandle::new();let other_document=other_model.session();
-        let components=[create_component(),create_component(),create_component()];
-        let mut links=Vec::new();let mut editors=Vec::new();let mut sinks=Vec::new();let mut receivers=Vec::new();
-        for (index,component) in components.iter().enumerate() {
+        use crate::editor::{
+            routing::EditorLink,
+            session::{UiRequest, UiSink},
+        };
+        use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
+        use std::sync::{atomic::AtomicBool, mpsc};
+        let model = crate::ara::model::ModelHandle::new();
+        let document = model.session();
+        let weak_document = Arc::downgrade(&document);
+        let other_model = crate::ara::model::ModelHandle::new();
+        let other_document = other_model.session();
+        let components = [create_component(), create_component(), create_component()];
+        let mut links = Vec::new();
+        let mut editors = Vec::new();
+        let mut sinks = Vec::new();
+        let mut receivers = Vec::new();
+        for (index, component) in components.iter().enumerate() {
             // SAFETY: 三个工厂返回的COM owning引用在循环期间均存活。
-            let processor=unsafe {&*component.cast::<Processor>()};
-            processor.extension_owner.bind_to_document(if index==2 {other_document.clone()} else {document.clone()},
-                ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
-            let link=Arc::new(EditorLink::default());link.bind(std::process::id() as i64,processor.route.token()).unwrap();
-            let editor=processor.extension_owner.editor_session().unwrap();let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(8);
-            let sink=UiSink {view_id:format!("task34-com-{index}"),reply,events,closed:Arc::new(AtomicBool::new(false))};
-            editor.enqueue(UiRequest {id:1,command:"get_ui_settings".into(),args:serde_json::json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
-            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap()["ok"],true);
-            links.push(link);editors.push(editor);sinks.push(sink);receivers.push(rx);
+            let processor = unsafe { &*component.cast::<Processor>() };
+            processor
+                .extension_owner
+                .bind_to_document(
+                    if index == 2 {
+                        other_document.clone()
+                    } else {
+                        document.clone()
+                    },
+                    ApiGeneration::V2Final,
+                    ExtensionRoles::all(),
+                    ExtensionRoles::EDITOR_RENDERER,
+                    None,
+                )
+                .unwrap();
+            let link = Arc::new(EditorLink::default());
+            link.bind(std::process::id() as i64, processor.route.token())
+                .unwrap();
+            let editor = processor.extension_owner.editor_session().unwrap();
+            let (reply, rx) = mpsc::channel();
+            let (events, _) = mpsc::sync_channel(8);
+            let sink = UiSink {
+                view_id: format!("task34-com-{index}"),
+                reply,
+                events,
+                closed: Arc::new(AtomicBool::new(false)),
+            };
+            editor
+                .enqueue(UiRequest {
+                    id: 1,
+                    command: "get_ui_settings".into(),
+                    args: serde_json::json!({}),
+                    sink: sink.clone(),
+                    link: Some(link.clone()),
+                })
+                .unwrap();
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap()["ok"],
+                true
+            );
+            links.push(link);
+            editors.push(editor);
+            sinks.push(sink);
+            receivers.push(rx);
         }
-        assert!(Arc::ptr_eq(&editors[0],&editors[1]));assert!(!Arc::ptr_eq(&editors[0],&editors[2]));
+        assert!(Arc::ptr_eq(&editors[0], &editors[1]));
+        assert!(!Arc::ptr_eq(&editors[0], &editors[2]));
         // ARA native entry保留owner，弱引用仍能升级也必须撤销processor入口。
-        let (weak_owner,entry)=unsafe {let processor=&*components[0].cast::<Processor>();
-            (Arc::downgrade(&processor.extension_owner),processor.entry.as_ref().unwrap().query_interface(Ara2Vst3InterfaceKind::PluginEntry2).unwrap())};
-        assert_eq!(unsafe {component_release(components[0])},0);assert!(weak_owner.upgrade().is_some());
-        assert!(links[0].owner().is_err());assert!(sinks[0].closed.load(Ordering::Acquire));assert!(!sinks[1].closed.load(Ordering::Acquire));
-        assert!(editors[0].enqueue(UiRequest {id:2,command:"get_ui_settings".into(),args:serde_json::json!({}),sink:sinks[0].clone(),link:Some(links[0].clone())}).is_err());
-        document.close();assert!(sinks[1].closed.load(Ordering::Acquire));
-        assert!(links[1].owner().is_err());assert!(links[2].owner().is_ok());
-        editors[2].enqueue(UiRequest {id:3,command:"get_ui_settings".into(),args:serde_json::json!({}),sink:sinks[2].clone(),link:Some(links[2].clone())}).unwrap();
-        assert_eq!(receivers[2].recv_timeout(std::time::Duration::from_secs(3)).unwrap()["ok"],true);
-        drop(document);drop(model);assert!(weak_document.upgrade().is_none(),"native entry/actor/route不能强持document");
-        let mut remaining=0;assert_eq!(unsafe {ara2_vst3_release(entry,&raw mut remaining)},ARA2_VST3_OK);assert_eq!(remaining,0);
+        let (weak_owner, entry) = unsafe {
+            let processor = &*components[0].cast::<Processor>();
+            (
+                Arc::downgrade(&processor.extension_owner),
+                processor
+                    .entry
+                    .as_ref()
+                    .unwrap()
+                    .query_interface(Ara2Vst3InterfaceKind::PluginEntry2)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(unsafe { component_release(components[0]) }, 0);
+        assert!(weak_owner.upgrade().is_some());
+        assert!(links[0].owner().is_err());
+        assert!(sinks[0].closed.load(Ordering::Acquire));
+        assert!(!sinks[1].closed.load(Ordering::Acquire));
+        assert!(editors[0]
+            .enqueue(UiRequest {
+                id: 2,
+                command: "get_ui_settings".into(),
+                args: serde_json::json!({}),
+                sink: sinks[0].clone(),
+                link: Some(links[0].clone())
+            })
+            .is_err());
+        document.close();
+        assert!(sinks[1].closed.load(Ordering::Acquire));
+        assert!(links[1].owner().is_err());
+        assert!(links[2].owner().is_ok());
+        editors[2]
+            .enqueue(UiRequest {
+                id: 3,
+                command: "get_ui_settings".into(),
+                args: serde_json::json!({}),
+                sink: sinks[2].clone(),
+                link: Some(links[2].clone()),
+            })
+            .unwrap();
+        assert_eq!(
+            receivers[2]
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()["ok"],
+            true
+        );
+        drop(document);
+        drop(model);
+        assert!(
+            weak_document.upgrade().is_none(),
+            "native entry/actor/route不能强持document"
+        );
+        let mut remaining = 0;
+        assert_eq!(
+            unsafe { ara2_vst3_release(entry, &raw mut remaining) },
+            ARA2_VST3_OK
+        );
+        assert_eq!(remaining, 0);
         assert!(weak_owner.upgrade().is_none());
-        assert_eq!(unsafe {component_release(components[1])},0);assert_eq!(unsafe {component_release(components[2])},0);
-        other_document.close();drop(other_document);drop(other_model);
+        assert_eq!(unsafe { component_release(components[1]) }, 0);
+        assert_eq!(unsafe { component_release(components[2]) }, 0);
+        other_document.close();
+        drop(other_document);
+        drop(other_model);
     }
 
     /// 实际IComponent getState/setState经过IBStream ABI；短读写也必须保存共享actor最新值的组件范围。
     #[test]
     fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
-        use crate::editor::{routing::EditorLink,session::{UiRequest,UiSink}};
-        use ara2_bridge::{core::ApiGeneration,plugin::ExtensionRoles};
-        use std::sync::{mpsc,atomic::AtomicBool};
-        #[repr(C)]
-        struct Stream {vtable:*const Vtable,bytes:Vec<u8>,position:usize}
-        #[repr(C)]
-        struct Vtable {query:usize,add_ref:usize,release:usize,
-            read:unsafe extern "system" fn(*mut c_void,*mut c_void,i32,*mut i32)->i32,
-            write:unsafe extern "system" fn(*mut c_void,*mut c_void,i32,*mut i32)->i32,seek:usize,tell:usize}
-        unsafe extern "system" fn read(this:*mut c_void,buffer:*mut c_void,count:i32,actual:*mut i32)->i32 {
-            let stream=unsafe {&mut *this.cast::<Stream>()};let size=(count as usize).min(13).min(stream.bytes.len()-stream.position);
-            unsafe {std::ptr::copy_nonoverlapping(stream.bytes.as_ptr().add(stream.position),buffer.cast(),size);*actual=size as i32;}
-            stream.position+=size;K_RESULT_OK
-        }
-        unsafe extern "system" fn write(this:*mut c_void,buffer:*mut c_void,count:i32,actual:*mut i32)->i32 {
-            let stream=unsafe {&mut *this.cast::<Stream>()};let size=(count as usize).min(11);
-            stream.bytes.extend_from_slice(unsafe {std::slice::from_raw_parts(buffer.cast::<u8>(),size)});
-            unsafe {*actual=size as i32;}K_RESULT_OK
-        }
-        let vtable=Vtable {query:0,add_ref:0,release:0,read,write,seek:0,tell:0};
-        let (model,old_owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
-        for owner in old_owners {owner.stop_editor();}
-        let components=[create_component(),create_component()];let mut links=Vec::new();
-        for (index,component) in components.iter().enumerate() {
-            // SAFETY: 工厂返回的processor COM owning引用仍由本测试持有。
-            let processor=unsafe {&*component.cast::<Processor>()};
-            let raw=processor.extension_owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
-            let key=(&*ids[index] as *const u8) as u64;
-            unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
-            let link=Arc::new(EditorLink::default());link.bind(std::process::id() as i64,processor.route.token()).unwrap();links.push(link);
-        }
-        let editor=document.editor_session().unwrap();let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
-        let sink=UiSink {view_id:"task34-state-stream".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
-        let request=|id,command:&str,args| {
-            editor.enqueue(UiRequest {id,command:command.into(),args,sink:sink.clone(),link:Some(links[0].clone())}).unwrap();
-            let response=rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();assert_eq!(response["ok"],true,"{response}");response["value"].clone()
+        use crate::editor::{
+            routing::EditorLink,
+            session::{UiRequest, UiSink},
         };
-        let timeline=request(1,"get_timeline_state",serde_json::json!({}));
-        for (index,volume) in [0.5,0.25].into_iter().enumerate() {
-            request(2,"set_track_state",serde_json::json!({"trackId":timeline["tracks"][index]["id"],"volume":volume}));
+        use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
+        use std::sync::{atomic::AtomicBool, mpsc};
+        #[repr(C)]
+        struct Stream {
+            vtable: *const Vtable,
+            bytes: Vec<u8>,
+            position: usize,
         }
-        for (index,id) in ["track","b"].into_iter().enumerate() {
-            let mut stream=Stream {vtable:&vtable,bytes:Vec::new(),position:0};
-            assert_eq!(unsafe {(COMPONENT_VTBL.get_state)(components[index],(&raw mut stream).cast())},K_RESULT_OK);
-            let length=u32::from_le_bytes(stream.bytes[..4].try_into().unwrap()) as usize;assert_eq!(stream.bytes.len(),length+4);
-            let saved:serde_json::Value=serde_json::from_slice(&stream.bytes[4..]).unwrap();
+        #[repr(C)]
+        struct Vtable {
+            query: usize,
+            add_ref: usize,
+            release: usize,
+            read: unsafe extern "system" fn(*mut c_void, *mut c_void, i32, *mut i32) -> i32,
+            write: unsafe extern "system" fn(*mut c_void, *mut c_void, i32, *mut i32) -> i32,
+            seek: usize,
+            tell: usize,
+        }
+        unsafe extern "system" fn read(
+            this: *mut c_void,
+            buffer: *mut c_void,
+            count: i32,
+            actual: *mut i32,
+        ) -> i32 {
+            let stream = unsafe { &mut *this.cast::<Stream>() };
+            let size = (count as usize)
+                .min(13)
+                .min(stream.bytes.len() - stream.position);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    stream.bytes.as_ptr().add(stream.position),
+                    buffer.cast(),
+                    size,
+                );
+                *actual = size as i32;
+            }
+            stream.position += size;
+            K_RESULT_OK
+        }
+        unsafe extern "system" fn write(
+            this: *mut c_void,
+            buffer: *mut c_void,
+            count: i32,
+            actual: *mut i32,
+        ) -> i32 {
+            let stream = unsafe { &mut *this.cast::<Stream>() };
+            let size = (count as usize).min(11);
+            stream.bytes.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(buffer.cast::<u8>(), size)
+            });
+            unsafe {
+                *actual = size as i32;
+            }
+            K_RESULT_OK
+        }
+        let vtable = Vtable {
+            query: 0,
+            add_ref: 0,
+            release: 0,
+            read,
+            write,
+            seek: 0,
+            tell: 0,
+        };
+        let (model, old_owners, ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        for owner in old_owners {
+            owner.stop_editor();
+        }
+        let components = [create_component(), create_component()];
+        let mut links = Vec::new();
+        for (index, component) in components.iter().enumerate() {
+            // SAFETY: 工厂返回的processor COM owning引用仍由本测试持有。
+            let processor = unsafe { &*component.cast::<Processor>() };
+            let raw = processor
+                .extension_owner
+                .bind_to_document(
+                    document.clone(),
+                    ApiGeneration::V2Final,
+                    ExtensionRoles::all(),
+                    ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
+                    None,
+                )
+                .unwrap();
+            let key = (&*ids[index] as *const u8) as u64;
+            unsafe {
+                let ext = &*raw;
+                ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+                    ext.playbackRendererRef,
+                    key as *mut _,
+                );
+            }
+            let link = Arc::new(EditorLink::default());
+            link.bind(std::process::id() as i64, processor.route.token())
+                .unwrap();
+            links.push(link);
+        }
+        let editor = document.editor_session().unwrap();
+        let (reply, rx) = mpsc::channel();
+        let (events, _) = mpsc::sync_channel(128);
+        let sink = UiSink {
+            view_id: "task34-state-stream".into(),
+            reply,
+            events,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let request = |id, command: &str, args| {
+            editor
+                .enqueue(UiRequest {
+                    id,
+                    command: command.into(),
+                    args,
+                    sink: sink.clone(),
+                    link: Some(links[0].clone()),
+                })
+                .unwrap();
+            let response = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(response["ok"], true, "{response}");
+            response["value"].clone()
+        };
+        let timeline = request(1, "get_timeline_state", serde_json::json!({}));
+        for (index, volume) in [0.5, 0.25].into_iter().enumerate() {
+            request(
+                2,
+                "set_track_state",
+                serde_json::json!({"trackId":timeline["tracks"][index]["id"],"volume":volume}),
+            );
+        }
+        for (index, id) in ["track", "b"].into_iter().enumerate() {
+            let mut stream = Stream {
+                vtable: &vtable,
+                bytes: Vec::new(),
+                position: 0,
+            };
+            assert_eq!(
+                unsafe { (COMPONENT_VTBL.get_state)(components[index], (&raw mut stream).cast()) },
+                K_RESULT_OK
+            );
+            let length = u32::from_le_bytes(stream.bytes[..4].try_into().unwrap()) as usize;
+            assert_eq!(stream.bytes.len(), length + 4);
+            let saved: serde_json::Value = serde_json::from_slice(&stream.bytes[4..]).unwrap();
             // source basis已随自动初始化进入v3；仍须证明IBStream仅保存当前组件范围。
-            assert_eq!(saved["version"],3);assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
-            assert_eq!(saved["edits"]["tracks"][0]["id"],id);assert_eq!(saved["edits"]["tracks"][0]["volume"],if index==0 {0.5} else {0.25});
-            assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(),1);
-            let regions=saved["edits"]["atlas"]["regions"].as_object().expect("v3 source basis");
-            assert_eq!(regions.len(),1);assert!(regions.values().all(|region|region["root"]==id));
-            assert_eq!(unsafe {(COMPONENT_VTBL.set_state)(components[index],(&raw mut stream).cast())},K_RESULT_OK);
+            assert_eq!(saved["version"], 3);
+            assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
+            assert_eq!(saved["edits"]["tracks"][0]["id"], id);
+            assert_eq!(
+                saved["edits"]["tracks"][0]["volume"],
+                if index == 0 { 0.5 } else { 0.25 }
+            );
+            assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
+            let regions = saved["edits"]["atlas"]["regions"]
+                .as_object()
+                .expect("v3 source basis");
+            assert_eq!(regions.len(), 1);
+            assert!(regions.values().all(|region| region["root"] == id));
+            assert_eq!(
+                unsafe { (COMPONENT_VTBL.set_state)(components[index], (&raw mut stream).cast()) },
+                K_RESULT_OK
+            );
         }
-        document.close();for component in components {assert_eq!(unsafe {component_release(component)},0);}
+        document.close();
+        for component in components {
+            assert_eq!(unsafe { component_release(component) }, 0);
+        }
     }
 }
 
@@ -1682,113 +2130,326 @@ mod audio_boundary_tests {
     /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
     #[test]
     fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_allocations() {
-        let model=crate::ara::model::ModelHandle::new();let mut processor=Processor::create().unwrap();
-        processor.extension_owner.bind_to_document(model.session(),ara2_bridge::core::ApiGeneration::V2Final,
-            ara2_bridge::plugin::ExtensionRoles::all(),ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,None).unwrap();
-        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
-            sample_rate:44100,origin_sample:0,left:vec![0.9;4],right:vec![0.9;4],_reservation:None}).unwrap();
-        for mode in [0,1,2] {
-            let mut source_left=[0.0,0.1,0.2,0.3];let mut source_right=[0.3,0.2,0.1,0.0];
-            let mut input_planes=[source_left.as_mut_ptr(),source_right.as_mut_ptr()];
-            let mut input=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:input_planes.as_mut_ptr()};
-            let mut left=[9.0;5];let mut right=[9.0;5];let mut output_planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-            let mut output=AudioBusBuffers {num_channels:2,silence_flags:3,channel_buffers:output_planes.as_mut_ptr()};
+        let model = crate::ara::model::ModelHandle::new();
+        let mut processor = Processor::create().unwrap();
+        processor
+            .extension_owner
+            .bind_to_document(
+                model.session(),
+                ara2_bridge::core::ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .unwrap();
+        processor.extension_owner.snapshots[0]
+            .publish(crate::render::snapshot::PlaybackSnapshot {
+                sample_rate: 44100,
+                origin_sample: 0,
+                left: vec![0.9; 4],
+                right: vec![0.9; 4],
+                _reservation: None,
+            })
+            .unwrap();
+        for mode in [0, 1, 2] {
+            let mut source_left = [0.0, 0.1, 0.2, 0.3];
+            let mut source_right = [0.3, 0.2, 0.1, 0.0];
+            let mut input_planes = [source_left.as_mut_ptr(), source_right.as_mut_ptr()];
+            let mut input = AudioBusBuffers {
+                num_channels: 2,
+                silence_flags: 0,
+                channel_buffers: input_planes.as_mut_ptr(),
+            };
+            let mut left = [9.0; 5];
+            let mut right = [9.0; 5];
+            let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+            let mut output = AudioBusBuffers {
+                num_channels: 2,
+                silence_flags: 3,
+                channel_buffers: output_planes.as_mut_ptr(),
+            };
             // context可选/停播也必须透传；preview为空时不能凭播放门禁覆盖宿主输入。
-            let mut data=ProcessData {process_mode:mode,num_samples:4,num_inputs:1,num_outputs:1,
-                inputs:&raw mut input,outputs:&raw mut output,..Default::default()};
+            let mut data = ProcessData {
+                process_mode: mode,
+                num_samples: 4,
+                num_inputs: 1,
+                num_outputs: 1,
+                inputs: &raw mut input,
+                outputs: &raw mut output,
+                ..Default::default()
+            };
             crate::test_allocator::begin();
-            let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-            let allocations=crate::test_allocator::end();assert_eq!(result,K_RESULT_OK);assert_eq!(allocations,0);
-            assert_eq!(left,[0.0,0.1,0.2,0.3,9.0]);assert_eq!(right,[0.3,0.2,0.1,0.0,9.0]);assert_eq!(output.silence_flags,0);
+            let result =
+                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+            let allocations = crate::test_allocator::end();
+            assert_eq!(result, K_RESULT_OK);
+            assert_eq!(allocations, 0);
+            assert_eq!(left, [0.0, 0.1, 0.2, 0.3, 9.0]);
+            assert_eq!(right, [0.3, 0.2, 0.1, 0.0, 9.0]);
+            assert_eq!(output.silence_flags, 0);
         }
     }
 
     /// 相同bus/相同plane的in-place不能先清零；silent或inactive输入则明确补零。
     #[test]
     fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
-        let model=crate::ara::model::ModelHandle::new();let mut processor=Processor::create().unwrap();
-        processor.extension_owner.bind_to_document(model.session(),ara2_bridge::core::ApiGeneration::V2Final,
-            ara2_bridge::plugin::ExtensionRoles::all(),ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,None).unwrap();
-        let mut left=[0.05,0.1,123.0];let mut right=[0.2,0.3,456.0];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut data=ProcessData {num_samples:2,num_inputs:1,num_outputs:1,inputs:&raw mut bus,outputs:&raw mut bus,..Default::default()};
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
-        assert_eq!(left,[0.05,0.1,123.0]);assert_eq!(right,[0.2,0.3,456.0]);
-        bus.silence_flags=1;planes[1]=std::ptr::null_mut();
-        let mut out_left=[9.0;3];let mut out_right=[9.0;3];let mut out_planes=[out_left.as_mut_ptr(),out_right.as_mut_ptr()];
-        let mut output=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:out_planes.as_mut_ptr()};data.inputs=&raw mut bus;data.outputs=&raw mut output;
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
-        assert_eq!(out_left,[0.0,0.0,9.0]);assert_eq!(out_right,[0.0,0.0,9.0]);assert_eq!(output.silence_flags,3);
-        bus.channel_buffers=std::ptr::null_mut();out_left=[7.0;3];data.inputs=&raw mut bus;
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_INVALID_ARGUMENT);
-        assert_eq!(out_left,[7.0;3]);
+        let model = crate::ara::model::ModelHandle::new();
+        let mut processor = Processor::create().unwrap();
+        processor
+            .extension_owner
+            .bind_to_document(
+                model.session(),
+                ara2_bridge::core::ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .unwrap();
+        let mut left = [0.05, 0.1, 123.0];
+        let mut right = [0.2, 0.3, 456.0];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut data = ProcessData {
+            num_samples: 2,
+            num_inputs: 1,
+            num_outputs: 1,
+            inputs: &raw mut bus,
+            outputs: &raw mut bus,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
+        assert_eq!(left, [0.05, 0.1, 123.0]);
+        assert_eq!(right, [0.2, 0.3, 456.0]);
+        bus.silence_flags = 1;
+        planes[1] = std::ptr::null_mut();
+        let mut out_left = [9.0; 3];
+        let mut out_right = [9.0; 3];
+        let mut out_planes = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: out_planes.as_mut_ptr(),
+        };
+        data.inputs = &raw mut bus;
+        data.outputs = &raw mut output;
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
+        assert_eq!(out_left, [0.0, 0.0, 9.0]);
+        assert_eq!(out_right, [0.0, 0.0, 9.0]);
+        assert_eq!(output.silence_flags, 3);
+        bus.channel_buffers = std::ptr::null_mut();
+        out_left = [7.0; 3];
+        data.inputs = &raw mut bus;
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+            K_INVALID_ARGUMENT
+        );
+        assert_eq!(out_left, [7.0; 3]);
     }
 
     /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
     #[test]
     fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
-        let mut processor=Processor::create().unwrap();
-        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
-            sample_rate:44100,origin_sample:10,left:vec![0.1,0.2],right:vec![0.3,0.4],_reservation:None,
-        }).unwrap();
-        let mut left=[8.0_f32;3]; let mut right=[8.0_f32;3];
-        let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {state:1<<1,sample_rate:44100.0,project_time_samples:11,..Default::default()};
-        let mut data=ProcessData {num_samples:2,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        let mut processor = Processor::create().unwrap();
+        processor.extension_owner.snapshots[0]
+            .publish(crate::render::snapshot::PlaybackSnapshot {
+                sample_rate: 44100,
+                origin_sample: 10,
+                left: vec![0.1, 0.2],
+                right: vec![0.3, 0.4],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [8.0_f32; 3];
+        let mut right = [8.0_f32; 3];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            state: 1 << 1,
+            sample_rate: 44100.0,
+            project_time_samples: 11,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            num_samples: 2,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
         crate::test_allocator::begin();
         // SAFETY: 实际 processor 音频子对象和完整 SDK 缓冲都在回调期间存活。
-        let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-        let allocations=crate::test_allocator::end();
-        assert_eq!(result,K_RESULT_OK);
-        assert_eq!(left,[0.2,0.0,8.0]); assert_eq!(right,[0.4,0.0,8.0]);
-        assert_eq!(bus.silence_flags,0);
-        assert_eq!(allocations,0);
+        let result =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let allocations = crate::test_allocator::end();
+        assert_eq!(result, K_RESULT_OK);
+        assert_eq!(left, [0.2, 0.0, 8.0]);
+        assert_eq!(right, [0.4, 0.0, 8.0]);
+        assert_eq!(bus.silence_flags, 0);
+        assert_eq!(allocations, 0);
     }
 
     /// 真实SDK入口验证离线setup等完整后台发布；普通setup不受doc事务/worker阻塞。
     #[test]
     fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_changes() {
         use std::sync::mpsc;
-        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
-        let pcm=document.edit_sources.lock().unwrap()["ara://source"].clone();document.sources.lock().unwrap().insert("ara://source".into(),pcm);
-        let mut processor=Processor::create().unwrap();processor.extension_owner=owners[0].clone();
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let pcm = document.edit_sources.lock().unwrap()["ara://source"].clone();
+        document
+            .sources
+            .lock()
+            .unwrap()
+            .insert("ara://source".into(), pcm);
+        let mut processor = Processor::create().unwrap();
+        processor.extension_owner = owners[0].clone();
         // SAFETY: Box保留稳定处理器地址到离线setup测试线程join。
-        let audio=unsafe {audio_ptr(&mut *processor)};let held=document.transaction.lock().unwrap();owners[0].prepare();
-        let mut normal=ProcessSetup {process_mode:0,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
-        assert_eq!(unsafe {(AUDIO_VTBL.setup_processing)(audio,&raw mut normal)},K_RESULT_OK,"普通setup不能等待doc/推理");
-        let pointer=audio as usize;let (done,rx)=mpsc::channel();
-        let job=std::thread::spawn(move || {let mut setup=ProcessSetup {process_mode:2,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
+        let audio = unsafe { audio_ptr(&mut *processor) };
+        let held = document.transaction.lock().unwrap();
+        owners[0].prepare();
+        let mut normal = ProcessSetup {
+            process_mode: 0,
+            symbolic_sample_size: 0,
+            max_samples_per_block: 1024,
+            sample_rate: 44100.,
+        };
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.setup_processing)(audio, &raw mut normal) },
+            K_RESULT_OK,
+            "普通setup不能等待doc/推理"
+        );
+        let pointer = audio as usize;
+        let (done, rx) = mpsc::channel();
+        let job = std::thread::spawn(move || {
+            let mut setup = ProcessSetup {
+                process_mode: 2,
+                symbolic_sample_size: 0,
+                max_samples_per_block: 1024,
+                sample_rate: 44100.,
+            };
             // SAFETY: 主测试保留稳定Box/接口/owner到join；此线程模拟SDK的非实时setup调用。
-            let result=unsafe {(AUDIO_VTBL.setup_processing)(pointer as *mut c_void,&raw mut setup)};done.send(result).unwrap();});
-        assert!(rx.recv_timeout(std::time::Duration::from_millis(20)).is_err(),"不能在后台未完成时成功返回");drop(held);
-        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),K_RESULT_OK);job.join().unwrap();
-        assert!(owners[0].snapshots.iter().all(|snapshot|snapshot.is_ready()));
-        {let _transaction=document.transaction.lock().unwrap();let mut edits=document.edits.lock().unwrap();edits.revision+=1;
-            let mut track=document.timeline.lock().unwrap().as_ref().unwrap().tracks[0].clone();track.volume=0.5;edits.tracks=vec![track];}
-        let mut setup=ProcessSetup {process_mode:2,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
-        assert_eq!(unsafe {(AUDIO_VTBL.setup_processing)(audio,&raw mut setup)},K_RESULT_OK);
-        let mut left=[9_f32;5];let mut right=[9_f32;5];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
-        let mut data=ProcessData {process_mode:2,num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio,(&raw mut data).cast())},K_RESULT_OK);
+            let result =
+                unsafe { (AUDIO_VTBL.setup_processing)(pointer as *mut c_void, &raw mut setup) };
+            done.send(result).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(20))
+                .is_err(),
+            "不能在后台未完成时成功返回"
+        );
+        drop(held);
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),
+            K_RESULT_OK
+        );
+        job.join().unwrap();
+        assert!(owners[0]
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.is_ready()));
+        {
+            let _transaction = document.transaction.lock().unwrap();
+            let mut edits = document.edits.lock().unwrap();
+            edits.revision += 1;
+            let mut track = document.timeline.lock().unwrap().as_ref().unwrap().tracks[0].clone();
+            track.volume = 0.5;
+            edits.tracks = vec![track];
+        }
+        let mut setup = ProcessSetup {
+            process_mode: 2,
+            symbolic_sample_size: 0,
+            max_samples_per_block: 1024,
+            sample_rate: 44100.,
+        };
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.setup_processing)(audio, &raw mut setup) },
+            K_RESULT_OK
+        );
+        let mut left = [9_f32; 5];
+        let mut right = [9_f32; 5];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            sample_rate: 44100.,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 2,
+            num_samples: 4,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio, (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
         document.close();
-        for (actual,want) in left[..4].iter().zip([0.05,0.1,0.15,0.2]) {assert!((*actual-want).abs()<1e-6);}
-        assert_eq!(left,right);assert_eq!(left[4],9.);
+        for (actual, want) in left[..4].iter().zip([0.05, 0.1, 0.15, 0.2]) {
+            assert!((*actual - want).abs() < 1e-6);
+        }
+        assert_eq!(left, right);
+        assert_eq!(left[4], 9.);
     }
     /// 离线缺快照/上下文必须显式失败；实时仍安全静音，全部回调保持零分配。
     #[test]
     fn offline_missing_snapshot_is_failure_not_successful_silence() {
-        let mut processor=Processor::create().unwrap();let mut left=[9_f32;4];let mut right=[9_f32;4];
-        let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
-        let mut data=ProcessData {process_mode:2,num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
-        crate::test_allocator::begin();let missing=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-        data.process_context=std::ptr::null_mut();let no_context=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-        data.process_mode=0;let realtime=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-        let allocations=crate::test_allocator::end();assert_eq!((missing,no_context,realtime),(K_RESULT_FALSE,K_RESULT_FALSE,K_RESULT_OK));
-        assert_eq!(allocations,0);assert_eq!(left,[0.;4]);assert_eq!(right,[0.;4]);
+        let mut processor = Processor::create().unwrap();
+        let mut left = [9_f32; 4];
+        let mut right = [9_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            sample_rate: 44100.,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 2,
+            num_samples: 4,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        crate::test_allocator::begin();
+        let missing =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        data.process_context = std::ptr::null_mut();
+        let no_context =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        data.process_mode = 0;
+        let realtime =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let allocations = crate::test_allocator::end();
+        assert_eq!(
+            (missing, no_context, realtime),
+            (K_RESULT_FALSE, K_RESULT_FALSE, K_RESULT_OK)
+        );
+        assert_eq!(allocations, 0);
+        assert_eq!(left, [0.; 4]);
+        assert_eq!(right, [0.; 4]);
     }
     /// 用真实接口子对象调用 process，避免测试绕过产品 vtable。
     fn run(data: *mut ProcessData) -> TResult {
@@ -1800,52 +2461,127 @@ mod audio_boundary_tests {
     /// 停播重复process同一帧必须静音；离线导出没有kPlaying也必须保留音频。
     #[test]
     fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
-        let mut processor=Processor::create().unwrap();
-        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
-            sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None,
-        }).unwrap();
-        let mut left=[9_f32;4];let mut right=[9_f32;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
-        let mut data=ProcessData {num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        let mut processor = Processor::create().unwrap();
+        processor.extension_owner.snapshots[0]
+            .publish(crate::render::snapshot::PlaybackSnapshot {
+                sample_rate: 44100,
+                origin_sample: 0,
+                left: vec![0.25; 4],
+                right: vec![0.5; 4],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [9_f32; 4];
+        let mut right = [9_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            sample_rate: 44100.,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            num_samples: 4,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
         for _ in 0..3 {
-            assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
-            assert_eq!(left,[0.;4],"停播不能循环输出光标位置的快照块");assert_eq!(right,[0.;4]);
+            assert_eq!(
+                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+                K_RESULT_OK
+            );
+            assert_eq!(left, [0.; 4], "停播不能循环输出光标位置的快照块");
+            assert_eq!(right, [0.; 4]);
         }
-        data.process_mode=2;
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
-        assert_eq!(left,[0.25;4]);assert_eq!(right,[0.5;4]);
+        data.process_mode = 2;
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
+        assert_eq!(left, [0.25; 4]);
+        assert_eq!(right, [0.5; 4]);
     }
 
     /// 宿主有效item mute即时门控真正VST3输出；同文档另一region不被静音，解除后复用原快照。
     #[test]
     fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
-        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
-        let host=crate::host::reaper::ReaperFixture::new();host.set_value("D_POSITION",0.);
-        host.set_value("D_LENGTH",4./44100.);host.set_value("B_MUTE",1.);
-        unsafe {owners[0].bind_reaper_host(host.context());}owners[0].refresh_reaper_transport();
-        let workspace=document.workspace_timeline().unwrap();
-        assert!(workspace.clips[0].muted);assert!(!workspace.clips[1].muted);
-        assert!(!owners[1].host_item_muted(),"静音只能影响直接绑定region");
-        let mut processor=Processor::create().unwrap();processor.extension_owner=owners[0].clone();
-        owners[0].snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
-            sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None,
-        }).unwrap();
-        let mut left=[9_f32;5];let mut right=[9_f32;5];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
-        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {state:1<<1,sample_rate:44100.,..Default::default()};
-        let mut data=ProcessData {num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
-        for mode in [0,2] {
-            data.process_mode=mode;crate::test_allocator::begin();
-            let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
-            let allocations=crate::test_allocator::end();
-            assert_eq!(result,K_RESULT_OK);assert_eq!(allocations,0);assert_eq!(&left[..4],&[0.;4]);
-            assert_eq!(&right[..4],&[0.;4]);assert_eq!((left[4],right[4]),(9.,9.));assert_eq!(bus.silence_flags,3);
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("B_MUTE", 1.);
+        unsafe {
+            owners[0].bind_reaper_host(host.context());
         }
-        host.set_value("B_MUTE",0.);host.set_value("B_MUTE_ACTUAL",1.);owners[0].refresh_reaper_transport();
-        assert!(!document.workspace_timeline().unwrap().clips[0].muted,"solo覆盖后的解除不丢原始mute");
-        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
-        assert_eq!(&left[..4],&[0.25;4]);assert_eq!(&right[..4],&[0.5;4]);document.close();
+        owners[0].refresh_reaper_transport();
+        let workspace = document.workspace_timeline().unwrap();
+        assert!(workspace.clips[0].muted);
+        assert!(!workspace.clips[1].muted);
+        assert!(!owners[1].host_item_muted(), "静音只能影响直接绑定region");
+        let mut processor = Processor::create().unwrap();
+        processor.extension_owner = owners[0].clone();
+        owners[0].snapshots[0]
+            .publish(crate::render::snapshot::PlaybackSnapshot {
+                sample_rate: 44100,
+                origin_sample: 0,
+                left: vec![0.25; 4],
+                right: vec![0.5; 4],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [9_f32; 5];
+        let mut right = [9_f32; 5];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            state: 1 << 1,
+            sample_rate: 44100.,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            num_samples: 4,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        for mode in [0, 2] {
+            data.process_mode = mode;
+            crate::test_allocator::begin();
+            let result =
+                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+            let allocations = crate::test_allocator::end();
+            assert_eq!(result, K_RESULT_OK);
+            assert_eq!(allocations, 0);
+            assert_eq!(&left[..4], &[0.; 4]);
+            assert_eq!(&right[..4], &[0.; 4]);
+            assert_eq!((left[4], right[4]), (9., 9.));
+            assert_eq!(bus.silence_flags, 3);
+        }
+        host.set_value("B_MUTE", 0.);
+        host.set_value("B_MUTE_ACTUAL", 1.);
+        owners[0].refresh_reaper_transport();
+        assert!(
+            !document.workspace_timeline().unwrap().clips[0].muted,
+            "solo覆盖后的解除不丢原始mute"
+        );
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
+        assert_eq!(&left[..4], &[0.25; 4]);
+        assert_eq!(&right[..4], &[0.5; 4]);
+        document.close();
     }
 
     /// 空实现留下旧音频；写错块长则越界覆盖尾哨兵。
@@ -1855,10 +2591,15 @@ mod audio_boundary_tests {
         let mut right = [-0.5_f32, -0.5, 456.0];
         let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut output = AudioBusBuffers {
-            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
         };
         let mut data = ProcessData {
-            num_samples: 2, num_outputs: 1, outputs: &raw mut output, ..Default::default()
+            num_samples: 2,
+            num_outputs: 1,
+            outputs: &raw mut output,
+            ..Default::default()
         };
         assert_eq!(run(&raw mut data), K_RESULT_OK);
         assert_eq!(left, [0.0, 0.0, 123.0]);
@@ -1871,11 +2612,28 @@ mod audio_boundary_tests {
     fn process_rejects_invalid_counts_and_missing_bus_storage() {
         assert_eq!(run(std::ptr::null_mut()), K_INVALID_ARGUMENT);
         for data in [
-            ProcessData { num_samples: -1, ..Default::default() },
-            ProcessData { num_outputs: -1, ..Default::default() },
-            ProcessData { num_inputs: -1, ..Default::default() },
-            ProcessData { num_samples: 1, num_outputs: 1, ..Default::default() },
-            ProcessData { num_samples: 1, num_inputs: 1, ..Default::default() },
+            ProcessData {
+                num_samples: -1,
+                ..Default::default()
+            },
+            ProcessData {
+                num_outputs: -1,
+                ..Default::default()
+            },
+            ProcessData {
+                num_inputs: -1,
+                ..Default::default()
+            },
+            ProcessData {
+                num_samples: 1,
+                num_outputs: 1,
+                ..Default::default()
+            },
+            ProcessData {
+                num_samples: 1,
+                num_inputs: 1,
+                ..Default::default()
+            },
         ] {
             let mut data = data;
             assert_eq!(run(&raw mut data), K_INVALID_ARGUMENT);
@@ -1885,9 +2643,15 @@ mod audio_boundary_tests {
     /// 零帧参数 flush 与无总线合法，不应解引用空地址。
     #[test]
     fn process_accepts_zero_frame_flush_and_no_output() {
-        let mut flush = ProcessData { num_outputs: 1, ..Default::default() };
+        let mut flush = ProcessData {
+            num_outputs: 1,
+            ..Default::default()
+        };
         assert_eq!(run(&raw mut flush), K_RESULT_OK);
-        let mut empty = ProcessData { num_samples: 32, ..Default::default() };
+        let mut empty = ProcessData {
+            num_samples: 32,
+            ..Default::default()
+        };
         assert_eq!(run(&raw mut empty), K_RESULT_OK);
     }
 
@@ -1897,11 +2661,16 @@ mod audio_boundary_tests {
         let mut samples = [0.25_f64, 0.5];
         let mut planes = [samples.as_mut_ptr(), samples.as_mut_ptr()];
         let mut output = AudioBusBuffers {
-            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr().cast(),
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr().cast(),
         };
         let mut data = ProcessData {
-            symbolic_sample_size: 1, num_samples: 2, num_outputs: 1,
-            outputs: &raw mut output, ..Default::default()
+            symbolic_sample_size: 1,
+            num_samples: 2,
+            num_outputs: 1,
+            outputs: &raw mut output,
+            ..Default::default()
         };
         assert_eq!(run(&raw mut data), K_RESULT_FALSE);
         assert_eq!(samples, [0.25, 0.5]);
@@ -1913,10 +2682,15 @@ mod audio_boundary_tests {
         let mut samples = [1.0_f32, 2.0];
         let mut planes = [samples.as_mut_ptr(), std::ptr::null_mut()];
         let mut output = AudioBusBuffers {
-            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
         };
         let mut data = ProcessData {
-            num_samples: 2, num_outputs: 1, outputs: &raw mut output, ..Default::default()
+            num_samples: 2,
+            num_outputs: 1,
+            outputs: &raw mut output,
+            ..Default::default()
         };
         assert_eq!(run(&raw mut data), K_RESULT_OK);
         assert_eq!(samples, [0.0, 0.0]);
@@ -1941,15 +2715,26 @@ mod audio_boundary_tests {
             let mut right = [0.75_f32, 1.0];
             let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
             let mut input = AudioBusBuffers {
-                num_channels: channels, silence_flags: 0,
-                channel_buffers: if missing_array { std::ptr::null_mut() } else { input_planes.as_mut_ptr() },
+                num_channels: channels,
+                silence_flags: 0,
+                channel_buffers: if missing_array {
+                    std::ptr::null_mut()
+                } else {
+                    input_planes.as_mut_ptr()
+                },
             };
             let mut output = AudioBusBuffers {
-                num_channels: 2, silence_flags: 0, channel_buffers: output_planes.as_mut_ptr(),
+                num_channels: 2,
+                silence_flags: 0,
+                channel_buffers: output_planes.as_mut_ptr(),
             };
             let mut data = ProcessData {
-                num_samples: 2, num_inputs: 1, num_outputs: 1,
-                inputs: &raw mut input, outputs: &raw mut output, ..Default::default()
+                num_samples: 2,
+                num_inputs: 1,
+                num_outputs: 1,
+                inputs: &raw mut input,
+                outputs: &raw mut output,
+                ..Default::default()
             };
             assert_eq!(run(&raw mut data), expected);
             if expected != K_RESULT_OK {
@@ -1972,10 +2757,22 @@ mod audio_boundary_tests {
         // SAFETY: 真实处理器和布局数组在协商期间存活。
         unsafe {
             let this = audio_ptr(&mut *processor);
-            assert_eq!(audio_set_bus_arrangements(this, &raw mut stereo, 1, &raw mut stereo, 1), K_RESULT_OK);
-            assert_eq!(audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1), K_RESULT_FALSE);
-            assert_eq!(audio_set_bus_arrangements(this, &raw mut stereo, 0, &raw mut stereo, 1), K_RESULT_FALSE);
-            assert_eq!(audio_set_bus_arrangements(this, std::ptr::null_mut(), 1, &raw mut stereo, 1), K_INVALID_ARGUMENT);
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut stereo, 1, &raw mut stereo, 1),
+                K_RESULT_OK
+            );
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1),
+                K_RESULT_FALSE
+            );
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut stereo, 0, &raw mut stereo, 1),
+                K_RESULT_FALSE
+            );
+            assert_eq!(
+                audio_set_bus_arrangements(this, std::ptr::null_mut(), 1, &raw mut stereo, 1),
+                K_INVALID_ARGUMENT
+            );
         }
     }
 
@@ -1986,7 +2783,10 @@ mod audio_boundary_tests {
         // SAFETY: 真实处理器和 setup POD 在调用期间存活。
         unsafe {
             let this = audio_ptr(&mut *processor);
-            assert_eq!(audio_setup_processing(this, std::ptr::null_mut()), K_INVALID_ARGUMENT);
+            assert_eq!(
+                audio_setup_processing(this, std::ptr::null_mut()),
+                K_INVALID_ARGUMENT
+            );
             for (rate, block, format, expected) in [
                 (44100.0, 512, 0, K_RESULT_OK),
                 (f64::NAN, 512, 0, K_INVALID_ARGUMENT),
@@ -1996,8 +2796,10 @@ mod audio_boundary_tests {
                 (96000.0, 512, 0, K_RESULT_FALSE),
             ] {
                 let mut setup = ProcessSetup {
-                    process_mode: 0, symbolic_sample_size: format,
-                    max_samples_per_block: block, sample_rate: rate,
+                    process_mode: 0,
+                    symbolic_sample_size: format,
+                    max_samples_per_block: block,
+                    sample_rate: rate,
                 };
                 assert_eq!(audio_setup_processing(this, &raw mut setup), expected);
             }
@@ -2018,7 +2820,9 @@ mod realtime_tests {
     struct ObservingLogger;
 
     impl log::Log for ObservingLogger {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
         fn log(&self, _: &log::Record<'_>) {
             if IN_REALTIME_CALLBACK.with(Cell::get) {
                 REALTIME_LOGS.with(|count| count.set(count.get() + 1));
@@ -2040,16 +2844,24 @@ mod realtime_tests {
         let mut right = [1.0_f32; 2];
         let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
         let mut bus = crate::audio_abi::AudioBusBuffers {
-            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
         };
         let mut data = crate::audio_abi::ProcessData {
-            num_samples: 2, num_outputs: 1, outputs: &raw mut bus, ..Default::default()
+            num_samples: 2,
+            num_outputs: 1,
+            outputs: &raw mut bus,
+            ..Default::default()
         };
         IN_REALTIME_CALLBACK.with(|flag| flag.set(true));
         // SAFETY: 处理器在两次状态回调期间存活。
         unsafe {
             assert_eq!(audio_set_processing(this, 1), K_RESULT_OK);
-            assert_eq!((AUDIO_VTBL.process)(this, (&raw mut data).cast()), K_RESULT_OK);
+            assert_eq!(
+                (AUDIO_VTBL.process)(this, (&raw mut data).cast()),
+                K_RESULT_OK
+            );
             assert_eq!(audio_set_processing(this, 0), K_RESULT_OK);
         }
         IN_REALTIME_CALLBACK.with(|flag| flag.set(false));

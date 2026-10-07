@@ -135,6 +135,10 @@ pub fn infer_pitch_edit_chunked_optimized(
     Ok(mono_pcm.to_vec())
 }
 /// 未编译ONNX时不提供模型缓存身份。
-pub fn cache_identity()->Result<String,String> {Err("onnx feature disabled".into())}
+pub fn cache_identity() -> Result<String, String> {
+    Err("onnx feature disabled".into())
+}
 /// 未编译模型时无神经推理。
-pub fn inference_runs()->u64 {0}
+pub fn inference_runs() -> u64 {
+    0
+}
