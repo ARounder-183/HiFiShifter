@@ -82,28 +82,25 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
     hasher.update(&quantize_u32(tl.frame_period_ms(), 1000.0).to_le_bytes());
 
     // Include track-level analysis config.
+    // 轨道不存在时按"默认配置"计（compose 关、默认算法）—— 不要用 `Unknown`
+    // 当哨兵：它现在是一个有明确执行语义的值（见 `PitchAnalysisAlgo::effective`），
+    // 拿来表达"没找到轨道"会让两件事共用一个名字。
     let (compose, algo) = tl
         .tracks
         .iter()
         .find(|t| t.id == root_track_id)
         .map(|t| (t.compose_enabled, t.pitch_analysis_algo.clone()))
-        .unwrap_or((false, PitchAnalysisAlgo::Unknown));
+        .unwrap_or((false, PitchAnalysisAlgo::default()));
     hasher.update(&[if compose { 1 } else { 0 }]);
-    hasher.update(match algo {
-        PitchAnalysisAlgo::WorldDll => b"world_dll",
-        PitchAnalysisAlgo::NsfHifiganOnnx => b"nsf_hifigan_onnx",
-        PitchAnalysisAlgo::VocalShifterVslib => b"vslib",
-        PitchAnalysisAlgo::None => b"none",
-        PitchAnalysisAlgo::Unknown => b"unknown",
-    });
+    // 键按**实际执行**的算法取：`Unknown` 与默认算法行为完全相同，键也必须相同，
+    // 否则同一份配置会因工程里的拼写不同而各自缓存一遍。
+    hasher.update(algo.effective().id().as_bytes());
 
     // Include detector availability so unavailable states can be cached and
     // recomputed when the detector becomes available.
     if matches!(
-        algo,
-        PitchAnalysisAlgo::WorldDll
-            | PitchAnalysisAlgo::NsfHifiganOnnx
-            | PitchAnalysisAlgo::Unknown
+        algo.effective(),
+        PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::NsfHifiganOnnx
     ) {
         hasher.update(&[if crate::fcpe_onnx::is_available() {
             1

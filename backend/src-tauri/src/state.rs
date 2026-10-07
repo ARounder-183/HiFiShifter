@@ -512,8 +512,60 @@ pub enum PitchAnalysisAlgo {
     #[serde(rename = "vslib")]
     VocalShifterVslib,
     None,
+    /// 工程里存着一个**本构建不认识**的算法名。
+    ///
+    /// 它只是反序列化的兜底变体（`#[serde(other)]`）：来自更早/更新的版本，
+    /// 或手改坏的工程。它不代表"没有算法"——真正的执行语义由 [`Self::effective`]
+    /// 统一决定（回退到默认算法），任何"按算法分支"的地方都必须先过那一层。
     #[serde(other)]
     Unknown,
+}
+
+impl PitchAnalysisAlgo {
+    /// 算法在**前后端之间以及工程文件里**的规范 id。
+    ///
+    /// 与 `#[serde(rename_all = "snake_case")]` 的取值逐字一致
+    ///（`VocalShifterVslib` 另有显式 `rename = "vslib"`），前端 `PITCH_ALGO_IDS`
+    /// 用的也是这一组。收成一处是因为该映射此前在 `algo_name` 与轨道序列化的
+    /// 内联 `match` 里各写了一遍。
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::WorldDll => "world_dll",
+            Self::NsfHifiganOnnx => "nsf_hifigan_onnx",
+            Self::VocalShifterVslib => "vslib",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 解析规范 id（容忍历史别名）。无法识别的字符串归入 [`Self::Unknown`]
+    /// 而**不是**直接给默认值——先把"不认识"这件事记下来，回退口径交给
+    /// [`Self::effective`] 一处决定。
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "world_dll" | "world" => Self::WorldDll,
+            "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => Self::NsfHifiganOnnx,
+            "vslib" | "vocalshifter_vslib" => Self::VocalShifterVslib,
+            "none" => Self::None,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 本构建**实际执行**的算法：未知算法回退到工程默认算法（`#[default]`）。
+    ///
+    /// 【为什么不是 WORLD】`Unknown` 只是"本构建不认识的字符串"。把它当成 WORLD
+    /// 会让工程静默换一种声音，而前端下拉按同一规则回退到 nsf-hifigan
+    ///（见 `pitchAlgoOptions.ts` 的 `resolveEffectivePitchAlgo`）——界面写着
+    /// nsf-hifigan、引擎跑 WORLD，两边对不上。
+    ///
+    /// 渲染键、参数表、pitch edit 链路都必须经过这里，否则同一条轨道会在不同层
+    /// 被当成不同算法。
+    pub fn effective(&self) -> Self {
+        match self {
+            Self::Unknown => Self::default(),
+            other => other.clone(),
+        }
+    }
 }
 
 /// 合成链路类型，独立于 PitchAnalysisAlgo，面向声码器选择。
@@ -529,12 +581,27 @@ pub enum SynthPipelineKind {
 
 impl SynthPipelineKind {
     /// 从 Track 的分析算法推断合成链路类型。
+    ///
+    /// 先经 [`PitchAnalysisAlgo::effective`] 归一，未知算法因此按工程默认算法
+    /// 处理（见该方法文档）。
+    ///
+    /// 【为什么穷举每个变体、不留 `_`】这里此前是 `_ => WorldVocoder`：`Unknown`
+    /// 被静默当成 WORLD，而新增算法变体也不会触发编译错误 —— "不认识的算法渲染
+    /// 成 WORLD"正是这样漏出去的。穷举之后，任何新变体都必须在此显式表态。
     pub fn from_track_algo(algo: &PitchAnalysisAlgo) -> Self {
-        match algo {
-            PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
+        match algo.effective() {
+            // `effective()` 已把 `Unknown` 归一为默认算法；此处列出只为穷举。
+            PitchAnalysisAlgo::NsfHifiganOnnx | PitchAnalysisAlgo::Unknown => Self::NsfHifiganOnnx,
             #[cfg(feature = "vslib")]
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
-            _ => Self::WorldVocoder,
+            // WORLD，以及 `None`（pitch edit 侧判为 Bypass）：`None` 的 clip 不会
+            // 进入处理器渲染路径（见 `does_clip_need_processor_render`），这里的
+            // kind 只影响渲染键与参数表，沿用既有的 WORLD 映射。
+            PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::None => Self::WorldVocoder,
+            // vslib 变体在本构建中不存在（feature 关闭）：pitch edit 侧判为 Bypass，
+            // 不会走处理器渲染，这里同样只影响参数表。
+            #[cfg(not(feature = "vslib"))]
+            PitchAnalysisAlgo::VocalShifterVslib => Self::WorldVocoder,
         }
     }
 }
@@ -4221,6 +4288,66 @@ mod tests {
     /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
     static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 算法 id 是前后端与工程文件共用的规范字符串：必须与 serde 的 wire 形式
+    /// 逐字一致，且能往返解析。
+    #[test]
+    fn pitch_algo_id_round_trips_and_accepts_historical_aliases() {
+        for algo in [
+            PitchAnalysisAlgo::WorldDll,
+            PitchAnalysisAlgo::NsfHifiganOnnx,
+            PitchAnalysisAlgo::VocalShifterVslib,
+            PitchAnalysisAlgo::None,
+            PitchAnalysisAlgo::Unknown,
+        ] {
+            assert_eq!(PitchAnalysisAlgo::from_id(algo.id()), algo);
+            assert_eq!(
+                serde_json::to_string(&algo).unwrap(),
+                format!("\"{}\"", algo.id()),
+                "规范 id 与 serde 取值必须一致（工程文件 / 前端都按它读写）"
+            );
+        }
+
+        // 历史别名（旧工程与前端都出现过）。
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("nsf_hifigan"),
+            PitchAnalysisAlgo::NsfHifiganOnnx
+        );
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("vocalshifter_vslib"),
+            PitchAnalysisAlgo::VocalShifterVslib
+        );
+
+        // 不认识的字符串归入 `Unknown` 而**不是**直接给默认值：先把"不认识"
+        // 记下来，回退口径由 `effective` 一处决定。
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("world_onnx_2027"),
+            PitchAnalysisAlgo::Unknown
+        );
+    }
+
+    /// 工程里存着一个本构建不认识的算法名时，必须按**工程默认算法**执行，
+    /// 而不是 WORLD。
+    ///
+    /// 回归对象：`SynthPipelineKind::from_track_algo` 曾用 `_ => WorldVocoder`
+    /// 兜底，于是未知算法被静默渲染成 WORLD 声码器，而前端下拉按同一规则
+    /// 显示的是 nsf-hifigan —— 界面与声音对不上。
+    #[test]
+    fn unknown_pitch_algo_degrades_to_the_default_not_to_world() {
+        let unknown = PitchAnalysisAlgo::Unknown;
+
+        assert_eq!(unknown.effective(), PitchAnalysisAlgo::default());
+        assert_eq!(
+            SynthPipelineKind::from_track_algo(&unknown),
+            SynthPipelineKind::from_track_algo(&PitchAnalysisAlgo::NsfHifiganOnnx),
+            "未知算法与默认算法必须走同一条合成链路"
+        );
+        assert_ne!(
+            SynthPipelineKind::from_track_algo(&unknown),
+            SynthPipelineKind::WorldVocoder,
+            "未知算法不得落到 WORLD"
+        );
+    }
 
     /// 记事本必须能被撤销/重做恢复，且**与记事本无关的撤销不得清空它**。
     ///
@@ -12914,16 +13041,6 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
         by_parent: &HashMap<Option<String>, Vec<Track>>,
         out: &mut Vec<TimelineTrack>,
     ) {
-        fn algo_name(a: &PitchAnalysisAlgo) -> String {
-            match a {
-                PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
-                PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
-                PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
-                PitchAnalysisAlgo::None => "none".to_string(),
-                PitchAnalysisAlgo::Unknown => "unknown".to_string(),
-            }
-        }
-
         let children = by_parent
             .get(&Some(t.id.clone()))
             .cloned()
@@ -12940,7 +13057,7 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
             solo: t.solo,
             volume: t.volume,
             compose_enabled: t.compose_enabled,
-            pitch_analysis_algo: algo_name(&t.pitch_analysis_algo),
+            pitch_analysis_algo: t.pitch_analysis_algo.id().to_string(),
             color: t.color.clone(),
         });
 
@@ -12971,13 +13088,7 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
                     solo: t.solo,
                     volume: t.volume,
                     compose_enabled: t.compose_enabled,
-                    pitch_analysis_algo: match t.pitch_analysis_algo {
-                        PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
-                        PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
-                        PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
-                        PitchAnalysisAlgo::None => "none".to_string(),
-                        PitchAnalysisAlgo::Unknown => "unknown".to_string(),
-                    },
+                    pitch_analysis_algo: t.pitch_analysis_algo.id().to_string(),
                     color: t.color.clone(),
                 });
             }

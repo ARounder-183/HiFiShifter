@@ -465,15 +465,9 @@ pub(super) fn set_track_state(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTrack);
-    let algo = pitch_analysis_algo.as_deref().map(|s| match s {
-        "world_dll" | "world" => crate::state::PitchAnalysisAlgo::WorldDll,
-        "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => {
-            crate::state::PitchAnalysisAlgo::NsfHifiganOnnx
-        }
-        "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
-        "none" => crate::state::PitchAnalysisAlgo::None,
-        _ => crate::state::PitchAnalysisAlgo::Unknown,
-    });
+    let algo = pitch_analysis_algo
+        .as_deref()
+        .map(crate::state::PitchAnalysisAlgo::from_id);
     tl.set_track_state(
         &track_id,
         muted,

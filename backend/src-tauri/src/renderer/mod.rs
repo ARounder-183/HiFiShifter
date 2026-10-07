@@ -52,8 +52,11 @@ pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
         SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
         #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
         SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
-        // 其余平台（含 Windows ARM64）：vslib 变体存在但无原生后端，回退
-        // HiFiGAN —— 与 `from_track_algo` 在 feature 关闭时的回退同一语义。
+        // 其余平台（含 Windows ARM64）：vslib 变体存在但无原生后端，回退到
+        // 工程默认算法 HiFiGAN（见 `PitchAnalysisAlgo` 的 `#[default]`）。
+        // 【注意】这只是**渲染器**层的回退；feature 关闭时 `from_track_algo`
+        // 根本不会产出这个 kind（那条路在 pitch edit 侧判为 Bypass），两者不是
+        // 同一个回退 —— 旧注释声称"同一语义"，与代码不符。
         #[cfg(all(
             feature = "vslib",
             not(all(target_os = "windows", target_arch = "x86_64"))

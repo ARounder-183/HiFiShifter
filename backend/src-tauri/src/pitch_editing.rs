@@ -610,9 +610,13 @@ impl PitchEditAlgorithm {
                 // fall through to track algo below
             }
         }
-        match algo {
-            PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::Unknown => Self::WorldVocoder,
-            PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
+        // 未知算法按工程默认算法处理（见 `PitchAnalysisAlgo::effective`）。
+        // 此前它与 `WorldDll` 并在一起走 WORLD：工程里存着一个本构建不认识的
+        // 算法名时，引擎会静默换成 WORLD 声码器，而界面显示的是 nsf-hifigan。
+        match algo.effective() {
+            // `effective()` 已把 `Unknown` 归一为默认算法；此处列出只为穷举。
+            PitchAnalysisAlgo::NsfHifiganOnnx | PitchAnalysisAlgo::Unknown => Self::NsfHifiganOnnx,
+            PitchAnalysisAlgo::WorldDll => Self::WorldVocoder,
             #[cfg(feature = "vslib")]
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
             #[cfg(not(feature = "vslib"))]
@@ -654,11 +658,30 @@ mod tests {
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
         does_clip_need_processor_render, extra_curve_for_clip, gate_hifigan_effect_curves,
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
-        processor_should_handle_stretch,
+        processor_should_handle_stretch, PitchEditAlgorithm,
     };
     use crate::state::SynthPipelineKind;
-    use crate::state::{Clip, TimelineState, TrackParamsState};
+    use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, TrackParamsState};
     use std::collections::HashMap;
+
+    /// 未知算法在 pitch edit 链路里同样按工程默认算法处理。
+    ///
+    /// 回归对象：`Unknown` 曾与 `WorldDll` 并在一起走 WORLD，于是工程里存着
+    /// 本构建不认识的算法名时，引擎静默换成 WORLD 声码器 —— 而界面显示的是
+    /// nsf-hifigan。两处（渲染链路与 pitch edit 链路）必须给出同一个答案。
+    #[test]
+    fn unknown_track_algo_edits_with_the_default_algorithm() {
+        assert_eq!(
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::Unknown),
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::default()),
+            "未知算法与默认算法必须走同一条 pitch edit 链路"
+        );
+        assert_ne!(
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::Unknown),
+            PitchEditAlgorithm::WorldVocoder,
+            "未知算法不得落到 WORLD"
+        );
+    }
 
     fn make_clip() -> Clip {
         Clip {

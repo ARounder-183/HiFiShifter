@@ -55,6 +55,7 @@ import {
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import {
     buildPitchAlgoOptions,
+    resolveEffectivePitchAlgo,
     resolvePitchAlgoSelectValue,
 } from "../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -485,7 +486,10 @@ function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, numb
  * - 中间参数随算法不同而变化。
  */
 function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
-    switch (algo) {
+    // 先归一：参数**集**来自后端，后端对未识别的算法按默认算法（nsf-hifigan）
+    // 处理（见 `PitchAnalysisAlgo::effective`）。这里若拿原始字符串分支，
+    // 未识别的轨道会"取到 nsf-hifigan 的参数、却按 world 的顺序排"。
+    switch (resolveEffectivePitchAlgo(algo)) {
         case "nsf_hifigan_onnx":
             // 音高、共振峰、气声音量、张力、音量、动态、声像
             switch (paramId) {
@@ -521,7 +525,8 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 50;
             }
         default:
-            // world / 其它：仅保证音量/动态/声像在右侧，其余保持后端顺序
+            // world / none（以及 `resolveEffectivePitchAlgo` 归一后的其余取值）：
+            // 仅保证音量/动态/声像在右侧，其余保持后端顺序
             switch (paramId) {
                 case "volume":
                     return 90;
@@ -2206,7 +2211,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const childFormantOffsetParam = useMemo(() => {
         if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
-        const algo = rootTrack?.pitchAnalysisAlgo;
+        // 归一后再判：未识别的算法在后端按默认算法（nsf-hifigan）渲染，而
+        // nsf-hifigan 链路是支持子轨道共振峰偏移的（见
+        // `does_clip_need_processor_render` 的 `has_child_formant_offset`）——
+        // 用原始字符串判断会把这个控件藏掉，功能在后端生效、界面却给不了入口。
+        const algo = resolveEffectivePitchAlgo(rootTrack?.pitchAnalysisAlgo);
         if (algo !== "nsf_hifigan_onnx" && algo !== "vslib") return null;
         return buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack, rootTrack?.pitchAnalysisAlgo]);

@@ -27,12 +27,14 @@ pub(crate) fn build_pitch_job(tl: &TimelineState, root_track_id: &str) -> Option
     let fp = tl.frame_period_ms();
     let target = tl.target_param_frames(fp);
 
+    // 轨道不存在时按"默认配置"计（compose 关、默认算法）—— 不要用 `Unknown`
+    // 当哨兵：它现在是一个有明确执行语义的值（见 `PitchAnalysisAlgo::effective`）。
     let (compose_enabled, algo) = tl
         .tracks
         .iter()
         .find(|t| t.id == root_track_id)
         .map(|t| (t.compose_enabled, t.pitch_analysis_algo.clone()))
-        .unwrap_or((false, PitchAnalysisAlgo::Unknown));
+        .unwrap_or((false, PitchAnalysisAlgo::default()));
 
     // 检查是否存在非静音的音高参考块（MIDI clip），若存在则即使 compose_enabled 为 false
     // 也需要触发 pitch_orig 组装，确保音高参考块的数据能写入 pitch_edit 并影响渲染。

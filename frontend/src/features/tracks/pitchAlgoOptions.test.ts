@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPitchAlgoOptions, resolvePitchAlgoSelectValue } from "./pitchAlgoOptions";
+import {
+    buildPitchAlgoOptions,
+    PITCH_ALGO_IDS,
+    resolveEffectivePitchAlgo,
+    resolvePitchAlgoSelectValue,
+} from "./pitchAlgoOptions";
 
 /** 造一份选项列表（默认 noneLabel / "不可用"标注固定，便于断言）。 */
 function options(args: { vslibAvailable: boolean | null; currentValue?: string }) {
@@ -75,5 +80,21 @@ describe("resolvePitchAlgoSelectValue", () => {
         const list = options({ vslibAvailable: true });
         expect(resolvePitchAlgoSelectValue("something_else", list)).toBe("nsf_hifigan_onnx");
         expect(resolvePitchAlgoSelectValue(undefined, list)).toBe("nsf_hifigan_onnx");
+    });
+});
+
+describe("resolveEffectivePitchAlgo", () => {
+    it("passes every known id through", () => {
+        for (const id of PITCH_ALGO_IDS) {
+            expect(resolveEffectivePitchAlgo(id)).toBe(id);
+        }
+    });
+
+    it("falls back to the project default for unrecognized values", () => {
+        // 后端 `PitchAnalysisAlgo::effective()` 对未知算法同样回退到默认算法；
+        // 前端任何按算法分支的地方都必须给出同一个答案，否则界面与声音对不上。
+        for (const raw of ["unknown", "world_onnx_2027", "", undefined, null]) {
+            expect(resolveEffectivePitchAlgo(raw)).toBe("nsf_hifigan_onnx");
+        }
     });
 });
