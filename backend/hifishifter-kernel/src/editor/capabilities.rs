@@ -79,13 +79,12 @@ pub fn get_processor_params(algo: String) -> Vec<ParamDescriptorDto> {
 }
 
 /// 将前端算法字符串映射到 `SynthPipelineKind`。
-/// 未知 algo 回退到 WorldVocoder（与 `SynthPipelineKind::from_track_algo` 保持一致）。
+///
+/// 复用 [`PitchAnalysisAlgo::from_id`] + [`SynthPipelineKind::from_track_algo`]，
+/// 不再自持一份映射：此前的副本漏掉了 `world_dll`（靠 `_` 兜底才碰巧正确），
+/// 又把未识别值兜成 WORLD —— 与 `from_track_algo` 的"未知 → 默认算法"不一致，
+/// 于是界面显示 nsf-hifigan 的参数集、轨道头却写着别的算法。
 fn algo_to_kind(algo: &str) -> crate::state::SynthPipelineKind {
-    use crate::state::SynthPipelineKind;
-    match algo {
-        "nsf_hifigan_onnx" => SynthPipelineKind::NsfHifiganOnnx,
-        #[cfg(feature = "vslib")]
-        "vslib" | "vocalshifter_vslib" => SynthPipelineKind::VocalShifterVslib,
-        _ => SynthPipelineKind::WorldVocoder,
-    }
+    use crate::state::{PitchAnalysisAlgo, SynthPipelineKind};
+    SynthPipelineKind::from_track_algo(&PitchAnalysisAlgo::from_id(algo))
 }

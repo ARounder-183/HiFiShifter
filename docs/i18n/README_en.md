@@ -8,17 +8,32 @@ HiFiShifter is a graphical vocal editing and synthesis tool. It supports multi-t
 
 ![Preview](../preview.png)
 
+## Features
+
+- **Track editing**: a DAW-like multi-track timeline with clip cropping, stretching, slip editing, fades and crossfades, grouping, take management, silence detection, ripple editing, tempo mapping (BPM / time signature / scale), metronome, recording and more.
+- **Parameter editing**: adjust parameter lines such as pitch, volume, dynamics, pan, formant, breath and tension per track group with a piano-roll style parameter editor; supports draw / line / vibrato tools, multi-range editing and vibrato preset management, and child tracks can stack `Cents offset` / `Degree offset` / `Formant offset` to build harmonies.
+- **Three vocoder algorithms**: nsf-hifigan (PC-NSF-HiFiGAN), World and VsLib — see [Algorithms](#algorithms).
+- **Interoperability**: import REAPER (`.rpp`) and VocalShifter (`.vshp` / `.vsp`) projects, with two-way read/write of the REAPER and VocalShifter clipboards; MIDI can be imported as pitch reference clips / pitch parameters / tempo maps, and audio clips and pitch lines can be exported to MIDI.
+- **Import & export**: import common audio / video formats (the audio track is extracted from videos automatically); export the project and stems as `wav` / `mp3` / `flac`.
+- **Miscellaneous**: built-in file browser and quick search, notepad, auto backup, multi-language UI (简体中文 / 繁體中文 / English / 日本語 / 한국어), light and dark themes, inference device selection and benchmarking.
+
 ## Installation
 
-Download and install the appropriate release version for your system from the sidebar of the repository.
+Download the package for your operating system and architecture from the [Releases](https://github.com/ARounder-183/HiFiShifter/releases) page:
 
-## Basic Principle
+- **Windows**: NSIS installer (`installer`) or portable zip archive (`portable`), available for x86_64 and arm64.
+- **macOS**: unsigned dmg (Apple Silicon → `arm64`, Intel → `x86_64`). The first launch requires manual approval; if macOS reports the file as "damaged", follow the steps in the [user manual](USERMANUAL_en.md#1-installation).
+- **Linux**: AppImage (x86_64 / arm64).
+
+GPU acceleration: Windows uses DirectML (DirectX 12), macOS (Apple Silicon) uses CoreML + WebGPU, and Linux x86_64 uses WebGPU (Dawn/Vulkan); other platforms fall back to CPU. You can switch the device and run the benchmark in-app via `Options → Inference Device`.
+
+## How it works
 
 HiFiShifter uses an offline rendering approach similar to UTAU, processing, rendering, and caching each audio clip on the timeline before feeding it into the playback system, resulting in faster processing for short clips.
 
 HiFiShifter provides a unified rendering interface to facilitate future algorithm additions.
 
-## Recommended Workflow
+## Recommended workflow
 
 Our recommended workflow is:
 
@@ -32,110 +47,59 @@ HiFiShifter also supports the following operations to facilitate migration from 
 3. Parse VocalShifter clipboard content, allowing parameters from VocalShifter to be pasted into HiFiShifter's parameter area.
 4. Parse Reaper clipboard content, allowing Reaper items to be pasted directly into HiFiShifter.
 
-## Feature Introduction
+## UI and algorithms
 
 ### Layout
 
-HiFiShifter can be roughly divided into two functional areas: the upper track panel and the lower parameter panel. The track panel is mainly responsible for editing and arranging audio clips, while the parameter panel handles parameter adjustments.
+HiFiShifter is roughly divided into the track panel at the top and the parameter panel at the bottom: the track panel handles clip editing and arrangement, while the parameter panel handles parameter tuning. Each panel can be docked, floated and rearranged (`View → Window / Layout`).
 
-### Track Panel
-
-HiFiShifter provides a fairly complete track panel and audio clip editing functionality, similar to most modern DAWs.
-
-#### Importing Media (Audio / Video)
-
-HiFiShifter supports three ways to import media files. Video files automatically use their audio track:
-
-1. Drag and drop audio or video files from the system file manager directly onto a track.
-2. Click the folder icon on the toolbar to open the built-in file browser and drag media files onto a track.
-3. Press `Ctrl + F` to open quick search, select media files, and import them onto a track (the quick search file path matches the built-in file browser's current path).
-
-#### Audio Editing
-
-- **Snap to Grid**: Clip movement/cropping snaps to grid by default; hold `Shift` to temporarily disable snap.
-- **Crop/Stretch Range**: Drag the left/right edges of a clip to crop or extend.
-- **Time Stretch**: Hold `Alt` + left mouse button and drag the left/right edges of a clip to stretch the audio.
-- **Slip-Edit**: Hold `Alt` + left mouse button and drag the main body of a clip to slide its internal content left or right.
-- **Fade In/Out**: Drag the top-left/top-right corner of a clip to adjust fade in/out duration.
-- **Gain (dB)**: Drag the knob at the top-left of a clip (up/down) to adjust gain; the current dB is displayed at the top-right.
-- **Clip Mute (M)**: Click the `M` button at the top-left of a clip to mute it; the clip will turn grey.
-- **Marquee Select**: Hold the right mouse button and drag in an empty area of the timeline to select multiple clips.
-- **Copy Drag**: Hold `Ctrl` while dragging a clip to create a copy at the target position (the original clip remains unchanged; copying takes effect upon release).
-- **Glue**: Right-click a clip and select "Glue" (requires at least 2 clips on the same track).
-- **Split**: Select a clip and press `S` to split it at the playhead position.
-- **Copy/Paste**: Select a clip and press `Ctrl + C` to copy it to the application clipboard. `Ctrl + V` aligns the leftmost start of the selected clips to the playhead position, preserving relative spacing. Copying also writes REAPERMedia data to the clipboard, so the selection can be pasted directly in REAPER.
-
-Note that tracks support nesting: you can drag a track under another track to form a track group, which will be very useful during parameter adjustment.
-
-### Parameter Panel
-
-HiFiShifter's parameter panel provides operation support similar to VocalShifter for convenient parameter adjustment.
-
-Note that there is a special `C` button on each track. Only when this button is pressed can audio on that track be processed by subsequent parameter adjustments.
-
-During parameter adjustment, HiFiShifter operates on track groups. The root track's `C` button determines the algorithm and parameter curve shared by the entire group. The parameter curve applies to each audio clip based on its position.
-
-Each algorithm in HiFiShifter offers different adjustable parameters; the common parameter is pitch.
-
-When first opened, HiFiShifter takes some time to analyze the pitch of clips. After analysis, the solid line in the panel represents the group's current overall pitch, the dashed line represents the original overall pitch, and the colored lines represent each clip's own original pitch.
-
-Other parameter panels are similar to the pitch panel but do not display individual clip original pitches.
-
-The small eye icon next to a panel toggles its visibility when not selected.
+Tracks support nesting: drag one track under another to form a track group (root track + child tracks). A track group shares a single algorithm and a single set of parameter lines, which apply to every audio clip in the group by position. Press the track's Compose button `C` before editing parameters.
 
 ### Algorithms
 
-HiFiShifter currently supports three algorithms.
+HiFiShifter currently supports three algorithms:
 
-#### World Algorithm
+- **World**: a classic vocoder. Supports editing of the `Pitch`, `Volume`, `Dynamics` and `Pan` parameters.
+- **PC-NSF-HiFiGAN** (displayed as `nsf-hifigan` in the in-app algorithm list): OpenVPI's open-source HiFi-GAN vocoder specialized for singing voices, and the default algorithm. Supports editing of the `Pitch`, `Formant Shift`, `Breath Gain`, `Tension`, `Volume`, `Dynamics` and `Pan` parameters. `Breath Gain` and `Tension` depend on the `Harmonic Separation` switch: when enabled, each audio clip is split into harmonic and noise parts (using the hnsep model), which **adds extra rendering cost** (the first pass performs a separation for every clip and can be slow); when disabled, no separation is performed at all — these two parameters are greyed out, their curves remain visible but cannot be edited, and they take no part in synthesis.
+- **VsLib** (displayed as `vslib` in the in-app algorithm list): the algorithm library provided by the official VocalShifter. Supports editing of the `Pitch`, `Formant Shift`, `Breathiness`, `Volume`, `Dynamics`, `Pan` and `Synth Mode` parameters. **Available only on Windows x86_64**; because the official DLL only supports file I/O, processing takes more time compared to VocalShifter itself.
 
-A classic vocoder.  
-Supports only `Pitch` editing.
+For detailed operations on the track and parameter panels (fade editing, snap settings, vibrato presets, export and recording, etc.), please read the [user manual](USERMANUAL_en.md).
 
-#### PC-NSF-HiFiGAN
+## Keyboard shortcuts
 
-OpenVPI's open-source hifigan vocoder specialized for singing voices.  
-Supports editing of `Pitch`, `Breath`, `Tension`, `Formant Shift`, and `Volume`.  
-Both `Breath` and `Tension` depend on the `Harmonic Separation` switch: enable it first, and it splits each audio clip into harmonic and noise parts (using the hnsep UVR model). **Enabling it adds rendering cost** — the first pass separates every clip and can take a while. While it is off, no separation runs at all: `Breath` and `Tension` are greyed out, their curves stay visible but cannot be edited, and they take no part in synthesis.
+> All shortcuts can be customized in-app under `Options → Keyboard Shortcuts...`; the table below lists the defaults. On macOS, `Ctrl` corresponds to `⌘` and `Alt` to `⌥`.
 
-#### Vslib
+| Action | Shortcut / Mouse |
+| :----------------------------------- | :----------------------------------------------------------- |
+| Play / Pause (does not return to the start point) | `Space` |
+| Play / Stop (returns to the start point) | `Enter` |
+| Toggle metronome | `K` |
+| Pan the view | Middle mouse button drag |
+| Scroll the timeline | Mouse wheel (free two-axis scrolling) |
+| Scroll horizontally / vertically | `Shift` / `Alt` + mouse wheel |
+| Zoom track height | `Ctrl` + mouse wheel |
+| Undo / Redo | `Ctrl + Z` / `Ctrl + Shift + Z` (or `Ctrl + Y`) |
+| Cut / Copy / Paste | `Ctrl + X` / `Ctrl + C` / `Ctrl + V` |
+| Delete selected clips | `Delete` |
+| Split clip (at playhead) | `S` |
+| Group / Ungroup | `G` / `U` |
+| Cycle takes | `T` (`Shift + T` for the previous one) |
+| Marquee multi-select | Hold the right mouse button and drag on empty timeline |
+| Copy-drag | Hold `Ctrl` while dragging a clip |
+| Stretch clip / Slip editing | Hold `Alt` and drag the clip's edge / body |
+| Temporarily toggle snap | Hold `Shift` while dragging |
+| New project / Open project | `Ctrl + N` / `Ctrl + Shift + O` |
+| Import media / Export audio | `Ctrl + O` / `Ctrl + E` |
+| Save / Save as | `Ctrl + S` / `Ctrl + Shift + S` |
+| New track / Record | `Ctrl + T` / `Ctrl + R` |
+| Mode toggle (select ↔ draw-type tools) | `Tab` |
+| Quick search | `Ctrl + F` |
+| Shift the whole param line up / down | `=` / `-` (`[` / `]` for the selected range), `Shift` for large steps, `Ctrl` for fine steps |
+| Multi-range selection in the param editor | Hold `Ctrl` and drag to add a range; click an existing range to remove it |
 
-Algorithm library provided by VocalShifter.  
-Supports editing of `Pitch`, `Pan`, `Formant Shift`, `Volume`, and `Breath`.  
-Because the official DLL only supports file I/O, processing takes longer compared to VocalShifter itself.
+For the complete list of shortcuts and modifier keys, see the [user manual](USERMANUAL_en.md#3-track-view) or the in-app shortcut settings.
 
-## Common Shortcut Keys
-
-| Action                              | Shortcut / Mouse                        |
-| :---------------------------------- | :-------------------------------------- |
-| Pan view (timeline)                 | Middle mouse button drag                |
-| Horizontal zoom (timeline)          | Mouse wheel (centered on cursor)        |
-| Vertical zoom (track height)        | Ctrl + Mouse wheel                      |
-| Vertical zoom (parameter axis)      | Ctrl + Mouse wheel (in parameter panel) |
-| Play / Pause                        | Space                                   |
-| Play / Stop                         | Enter                                   |
-| Toggle Metronome                    | K                                       |
-| Undo / Redo                         | Ctrl + Z / Ctrl + Y                     |
-| New Project                         | Ctrl + N                                |
-| Open Project                        | Ctrl + Shift + O                        |
-| Save                                | Ctrl + S                                |
-| Save As                             | Ctrl + Shift + S                        |
-| Export Audio                        | Ctrl + E                                |
-| Toggle Mode (Select/Draw)           | Tab                                     |
-| Delete Selected Clips               | Delete                                  |
-| Copy Selected Clips (app clipboard) | Ctrl + C                                |
-| Paste at Playhead                   | Ctrl + V                                |
-| Group / Ungroup                     | G / U                                   |
-| Cycle Take                          | T (Shift + T: previous)                 |
-| Copy Selection Curve (parameter)    | Ctrl + C (Select mode)                  |
-| Paste to Selection Start            | Ctrl + V (Select mode)                  |
-| Multi-range select (parameter)      | Ctrl + drag adds a range; Ctrl + click an existing range removes it (Select mode) |
-| Add clip ranges to param selection  | Ctrl + Shift + A (or the clip context menu) |
-| Split Clip                          | S (splits selected clip at playhead)    |
-| New Track                           | Ctrl + T                                |
-| Quick Search                        | Ctrl + F                                |
-
-## Development Environment Setup
+## Development
 
 This section is for developers; regular users can skip it.
 
@@ -152,12 +116,14 @@ cd HiFiShifter
 
 Make sure the following tools are installed:
 
-- **Node.js** (recommended 18+) and npm
+- **Node.js** (20+ recommended, CI uses 24) and npm
 - **Rust toolchain** (see `rust-toolchain.toml`)
 - **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
 - **CMake** (required to build the SoundTouch library)
 
 ONNX Runtime (DirectML) is automatically downloaded by the ort crate at build time — no extra configuration needed.
+
+Alternatively, run `scripts/install_deps_windows.ps1`, which installs NSIS / CMake / LLVM via Chocolatey and installs tauri-cli (Chocolatey must already be installed).
 
 Install frontend dependencies:
 
@@ -176,7 +142,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 Make sure the following tools are installed:
 
-- **Node.js** (recommended 20+) and npm
+- **Node.js** (20+ recommended, CI uses 24) and npm
 - **Rust toolchain** (see `rust-toolchain.toml` — the project auto-selects the correct platform stable toolchain)
 - **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
 - **CMake**, **pkg-config**, and system build tools
@@ -197,54 +163,18 @@ Install frontend dependencies (if not using the script):
 npm --prefix frontend ci
 ```
 
-#### Linux AppImage Build
+### 3. Third-party Sources
 
-The `vslib` algorithm is Windows-only, so Linux builds must disable the default feature:
+SoundTouch, WORLD and Signalsmith Stretch are all built from source at compile time. They are **auto-cloned** on first build — no manual steps required.
 
-```bash
-# Run from the backend/ directory (paths in tauri.conf.json are relative to it)
-cd backend
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
-```
-
-Or use the provided helper script:
-
-```bash
-bash scripts/build-linux-appimage.sh
-```
-
-> **Note:** On WSL2, the Tauri bundler's linuxdeploy step may fail due to missing FUSE support (error: `failed to run linuxdeploy`). This is a known WSL2 limitation and does not affect the actual AppImage output — the AppDir is correctly assembled at `target/release/bundle/appimage/`. Set `APPIMAGE_EXTRACT_AND_RUN=1` and run `appimagetool` manually to package. This issue does not exist on real Linux machines or in CI.
-
-### 3. SoundTouch Source
-
-The SoundTouch audio time stretching library is built from source at compile time. It is **auto-cloned** on first build - no manual steps required.
-
-For offline builds, you can pre-clone manually:
+For offline builds, you can pre-clone them manually, for example SoundTouch:
 
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU Acceleration
-
-HiFiShifter automatically enables GPU-accelerated inference on supported platforms. You can choose between Auto / CPU / GPU from the **Inference Device** menu in the menu bar, and compare per-device latency using **Run Benchmark**.
-
-| Platform                        | GPU Technology                        | Description                                                               |
-| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
-| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | Proven, stable GPU path; supports NVIDIA / AMD / Intel Arc                |
-| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML leverages the Apple Neural Engine; WebGPU as a supplementary GPU backend |
-| macOS x86_64 (Intel)            | —                                     | CPU only (uses the ort-tract alternative backend)                         |
-| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present |
-| Linux ARM64                     | —                                     | CPU only (no prebuilt WebGPU ONNX Runtime binary for this target)        |
-
-> **Note**: WebGPU is not enabled on Windows. Its Dawn/D3D12 backend can cause native crashes on some GPU/driver combinations. DirectML is the mature, stable GPU path for Windows.
->
-> **WSL2 users**: WSL2 does not expose hardware Vulkan to Linux guests. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration on WSL2, use the Windows native build with DirectML instead.
-
-#### All Platforms
-
-ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed. GPU providers (DirectML / WebGPU / CoreML) are enabled automatically at compile time for each target platform; no extra `--features` flags are required.
+### 4. Development and Build
 
 ```bash
 # Development mode (hot reload)
@@ -255,44 +185,57 @@ cargo tauri dev
 # Windows / macOS (default features: onnx + vslib)
 cargo tauri build
 
-# Linux (vslib is Windows-only; exclude default feature)
+# Linux AppImage (vslib is Windows-only; exclude the default feature)
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
+# Or use the helper script: bash scripts/build-linux-appimage.sh
 
 # Windows portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
 
-## Quick Start
+You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
 
-### Run Development Mode
-
-```bash
-cd backend/src-tauri
-cargo tauri dev
-```
-
-You can switch frontend startup mode via `TAURI_UI_MODE`:
-
-- `dev`: development mode (default, uses Vite dev server with hot reload)
-- `build`: build mode (build frontend static assets first, then start)
+- `dev`: development mode (default, uses the Vite dev server with hot reload)
+- `build`: build mode (builds the frontend static assets first, then starts)
 
 Linux/macOS (bash/zsh):
 
 ```bash
-cd backend/src-tauri
+cd backend
 TAURI_UI_MODE=build cargo tauri dev
 ```
 
 Windows PowerShell:
 
 ```powershell
-cd backend/src-tauri
+cd backend
 $env:TAURI_UI_MODE='build'; cargo tauri dev
 ```
 
 **Note:** The first compilation will take a long time. Please be patient.
 
-## Logs & Troubleshooting
+### 5. GPU Acceleration
+
+HiFiShifter automatically enables GPU-accelerated inference on supported platforms. You can choose between Auto / CPU / GPU from the **Inference Device** menu in the menu bar, and compare per-device latency using **Run Benchmark...**.
+
+| Platform                        | GPU Technology                        | Description                                                               |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | Proven, stable GPU path; supports NVIDIA / AMD / Intel Arc                |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML leverages the Apple Neural Engine; WebGPU as a supplementary GPU backend |
+| macOS x86_64 (Intel)            | —                                     | CPU only (uses the ort-tract alternative backend)                         |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present |
+| Linux ARM64                     | —                                     | CPU only (no prebuilt WebGPU ONNX Runtime binary for this target)        |
+
+> **Note**: WebGPU is not enabled on Windows. Its Dawn/D3D12 backend can cause native crashes on some GPU/driver combinations. DirectML is the mature, stable GPU path for Windows.
+
+ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed. GPU providers (DirectML / WebGPU / CoreML) are enabled automatically at compile time for each target platform; no extra `--features` flags are required.
+
+**WSL2 users**:
+
+- WSL2 does not expose hardware Vulkan to the Linux guest. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration, use the Windows native build (DirectML) instead.
+- Due to missing FUSE support, the Tauri bundler's linuxdeploy step may fail (error: `failed to run linuxdeploy`). This is a known WSL2 limitation and does not affect the actual AppImage output — the AppDir is correctly assembled at `target/release/bundle/appimage/`. You can set `APPIMAGE_EXTRACT_AND_RUN=1` and run `appimagetool` manually to package. This issue does not exist on real Linux machines or in CI.
+
+## Logs and Troubleshooting
 
 The app automatically writes its run log to the platform-standard log directory — no command-line flags required:
 
@@ -303,7 +246,7 @@ The app automatically writes its run log to the platform-standard log directory 
 | Linux | `~/.local/share/com.arounder.hifishifter/logs` |
 
 - Inside the app, use **Help → Open Log Folder** to jump straight to the logs, or **Help → Export Diagnostics** to generate a diagnostics package (system info + all logs + inference-device benchmark results) to attach to an issue.
-- Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` … `hifishifter.3.log`).
+- Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` ~ `hifishifter.3.log`).
   - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
 - Frontend and backend errors are written to the same log file, so a single file tells the whole story.
 
@@ -316,7 +259,9 @@ Advanced options:
 
 ## Documentation
 
-- [User Manual](USERMANUAL_en.md)
+- User manual: [简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
+- Extension API: [docs/extension-api.md](../../docs/extension-api.md)
+- UI text style guide (i18n Style Guide): [docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
 
 ## Acknowledgements
 
@@ -328,6 +273,7 @@ This project uses code or model architectures from the following open-source lib
 - [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - Voice analysis and synthesis library
 - [SingingVocoders](https://github.com/openvpi/SingingVocoders) - Singing voice vocoder (OpenVPI)
 - [HiFi-GAN](https://github.com/jik876/hifi-gan) - High-fidelity GAN vocoder
+- [vocal-remover (hnsep)](https://github.com/stakira/vocal-remover) - Harmonic / noise separation model (used for Harmonic Separation)
 
 ## License
 

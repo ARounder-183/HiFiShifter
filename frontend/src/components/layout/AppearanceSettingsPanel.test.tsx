@@ -101,3 +101,35 @@ test("圆角磁贴有可见文字，不再是无字图形", async () => {
         await mounted.unmount();
     }
 });
+
+/*
+ * 只是打开面板、什么都没改，不得改动已持久化的外观。
+ *
+ * 预览 effect 的每一次执行都会 `saveAppearance`，而它此前在挂载的第一次 pass 就
+ * 无条件跑一遍、把 `activeCustomThemeId` 写死为 null —— 于是"打开看一眼"就会把
+ * 正在启用的自定义主题停用并落盘；此时不点「应用」直接关，卸载清理又因草稿不脏
+ * 而跳过回滚，停用就永久留下。这条契约无法靠人眼在回归时稳定复验，必须钉住。
+ */
+test("打开面板（未编辑）不会停用正在使用的自定义主题", async () => {
+    localStorage.setItem(
+        "hifishifter.appearance",
+        JSON.stringify({ mode: "dark", activeCustomThemeId: "ct_test" }),
+    );
+    localStorage.setItem(
+        "hifishifter.customThemes",
+        JSON.stringify([
+            { id: "ct_test", name: "Test", base: "dark", colors: { "qt-highlight": "#ff0000" } },
+        ]),
+    );
+    const mounted = await mountPanel();
+    try {
+        const stored = JSON.parse(localStorage.getItem("hifishifter.appearance") ?? "{}") as {
+            activeCustomThemeId?: string | null;
+        };
+        expect(stored.activeCustomThemeId).toBe("ct_test");
+    } finally {
+        await mounted.unmount();
+        localStorage.removeItem("hifishifter.appearance");
+        localStorage.removeItem("hifishifter.customThemes");
+    }
+});

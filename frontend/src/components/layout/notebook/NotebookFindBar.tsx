@@ -34,13 +34,25 @@ export function NotebookFindBar({
     const [query, setQuery] = useState("");
     const [cursor, setCursor] = useState(0);
 
-    const richMatches = useMemo(
-        () =>
-            !sourceMode && editor && !editor.isDestroyed && query
-                ? findMatchesInDoc(editor, query)
-                : [],
-        [editor, query, sourceMode],
-    );
+    // 文档版本：打开查找条后用户仍可能在正文里继续编辑。不把文档变化纳入依赖，
+    // 匹配的位置/数量就会停留在旧文档上，Enter / ▲ / ▼ 会选中错位的文本。
+    const [docVersion, setDocVersion] = useState(0);
+    useEffect(() => {
+        if (!editor || editor.isDestroyed) return;
+        const onUpdate = () => setDocVersion((version) => version + 1);
+        editor.on("update", onUpdate);
+        return () => {
+            editor.off("update", onUpdate);
+        };
+    }, [editor]);
+
+    const richMatches = useMemo(() => {
+        // docVersion 只是"文档变了"的信号，用来强制重新扫描。
+        void docVersion;
+        return !sourceMode && editor && !editor.isDestroyed && query
+            ? findMatchesInDoc(editor, query)
+            : [];
+    }, [editor, query, sourceMode, docVersion]);
 
     const sourceMatches = useMemo(
         () => (sourceMode && query ? findMatchesInText(sourceValue, query) : ([] as TextMatch[])),

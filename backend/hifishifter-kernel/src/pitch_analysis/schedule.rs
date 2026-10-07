@@ -124,7 +124,7 @@ pub fn assemble_pitch_orig_from_cache(
                     note.end_sec,
                     fp,
                 ) {
-                    let note_value = note.note as f32;
+                    let note_value = note.note;
                     let mut cycle_offset = 0usize;
                     while cycle_offset < clip_visible_frames {
                         let write_start =
@@ -174,7 +174,7 @@ pub fn assemble_pitch_orig_from_cache(
                     ((effective_rel_start / pr_valid * 1000.0) / fp).round() as usize;
                 let note_end_frame =
                     ((effective_rel_end / pr_valid * 1000.0) / fp).round() as usize;
-                let note_value = note.note as f32;
+                let note_value = note.note;
                 // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
                 {
                     let write_start = clip_start_frame.saturating_add(note_start_frame);

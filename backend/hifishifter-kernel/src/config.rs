@@ -553,6 +553,12 @@ pub struct UiSettings {
     pub draw_drag_direction: String,
     #[serde(default = "default_draw_drag_direction")]
     pub line_vibrato_drag_direction: String,
+    /// 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
+    ///
+    /// `None` = 从未设置过（旧配置没有这一项），由前端回落出厂默认（绘制工具）。
+    /// 与拖动方向同属"本机记忆"，因此不需要配置迁移。
+    #[serde(default)]
+    pub param_editor_tool: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]
     pub smoothness_percent: u32,
     #[serde(default = "default_scale_highlight_mode")]
@@ -1229,7 +1235,7 @@ impl ChannelImportPolicy {
             default_detect_tolerance()
         };
         let mono_target_mode = match self.mono_target_mode {
-            2 | 3 | 4 => self.mono_target_mode,
+            2..=4 => self.mono_target_mode,
             _ => default_mono_target_mode(),
         };
 
@@ -1676,6 +1682,7 @@ impl Default for UiSettings {
             select_drag_direction: default_drag_direction(),
             draw_drag_direction: default_draw_drag_direction(),
             line_vibrato_drag_direction: default_draw_drag_direction(),
+            param_editor_tool: None,
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
@@ -2534,12 +2541,12 @@ fn save_config(config_dir: &Path, cfg: &AppConfig) {
 fn sanitize_window_state(mut ws: WindowState) -> WindowState {
     // 宽高校验：必须是有限数且不小于最小尺寸，过大的值视为异常
     if let Some(w) = ws.width {
-        if !w.is_finite() || w < MIN_WINDOW_WIDTH || w > 100_000.0 {
+        if !w.is_finite() || !(MIN_WINDOW_WIDTH..=100_000.0).contains(&w) {
             ws.width = None;
         }
     }
     if let Some(h) = ws.height {
-        if !h.is_finite() || h < MIN_WINDOW_HEIGHT || h > 100_000.0 {
+        if !h.is_finite() || !(MIN_WINDOW_HEIGHT..=100_000.0).contains(&h) {
             ws.height = None;
         }
     }

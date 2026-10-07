@@ -104,9 +104,7 @@ describe("多文件导入", () => {
                 startSec: 0,
             }),
         );
-        const names = addTrackNested.mock.calls.map(
-            (call) => (call[0] as { name?: string }).name,
-        );
+        const names = addTrackNested.mock.calls.map((call) => (call[0] as { name?: string }).name);
         expect(names).toEqual(["beta", "gamma"]);
     });
 });

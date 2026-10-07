@@ -1235,6 +1235,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     pending_pitch_offset: None,
                     dyn_orig: Vec::new(),
                     dyn_orig_key: None,
+                    dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
                 },
@@ -1468,9 +1469,9 @@ fn build_extra_curves_from_accumulators(
             // 不写 `dyn_*` 曲线：本项目的动态参数由「用户绘制的 `dyn` 目标电平
             // + 后台分析出的原声基线」表达，语义与 VS 的 dyn 字段不同源，
             // 直接搬运会与 volume 里的折算重复计入。
-            let avg_vol = (acc.vol_sum / w) as f64;
-            let avg_dyn_orig = (acc.dyn_orig_sum / w) as f64;
-            let avg_dyn_edit = (acc.dyn_edit_sum / w) as f64;
+            let avg_vol = acc.vol_sum / w;
+            let avg_dyn_orig = acc.dyn_orig_sum / w;
+            let avg_dyn_edit = acc.dyn_edit_sum / w;
             let multiplier = if avg_dyn_orig.abs() < 1e-12 {
                 1.0f64
             } else {
@@ -1973,10 +1974,11 @@ pub fn import_vsp_clipboard(
             let mut pitch_edit = vec![0.0f32; total_frames];
 
             for (frame_idx, acc) in points.iter().enumerate() {
-                if frame_idx < total_frames {
-                    if acc.weight > 0.0 {
-                        pitch_edit[frame_idx] = (acc.sum / acc.weight) as f32;
-                    }
+                if frame_idx >= total_frames {
+                    break;
+                }
+                if acc.weight > 0.0 {
+                    pitch_edit[frame_idx] = (acc.sum / acc.weight) as f32;
                 }
             }
 
@@ -2006,6 +2008,7 @@ pub fn import_vsp_clipboard(
                     pending_pitch_offset: None,
                     dyn_orig: Vec::new(),
                     dyn_orig_key: None,
+                    dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
                 },
@@ -2594,6 +2597,7 @@ fn import_vsp_clipboard_selected_tracks(
                     pending_pitch_offset: None,
                     dyn_orig: Vec::new(),
                     dyn_orig_key: None,
+                    dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
                 },

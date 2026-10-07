@@ -498,33 +498,6 @@ pub struct PlaybackStatePayload {
     pub duration_sec: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct DebugRealtimeRenderStatsPayload {
-    pub ok: bool,
-    pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stats: Option<RealtimeRenderStatsPayload>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct RealtimeRenderStatsPayload {
-    pub callbacks_total: u64,
-    pub callbacks_silenced_not_playing: u64,
-
-    pub pitch_callbacks_total: u64,
-    pub pitch_callbacks_silenced_waiting: u64,
-    pub pitch_callbacks_prime_waiting: u64,
-    pub pitch_callbacks_fallback_mixed: u64,
-
-    pub base_callbacks_total: u64,
-    pub base_callbacks_covered: u64,
-    pub base_callbacks_fallback_mixed: u64,
-
-    pub legacy_callbacks_mixed: u64,
-}
-
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamReferenceKind {
@@ -569,6 +542,19 @@ pub struct ParamFramesPayload {
     /// 哨兵**，避免把"沿用原声"物化成显式目标电平（基线重分析后不再跟随）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit_sentinel: Option<Vec<bool>>,
+
+    /// 本次返回的 `orig`（DYN 原声基线）**所依据的 clip 几何**的溯源键
+    /// （`build_root_dyn_key`；仅 `param == "dyn"` 且全量缓存命中时有值）。
+    ///
+    /// 【为什么前端需要它】拖拽期间 clip 几何只在**前端 Redux** 里乐观变化，后端
+    /// 侧几何被冻结，因此这段时间返回的基线一律是"按下之前"的几何。参数编辑器
+    /// 需要在本地把这份基线搬到新位置（见 `loudnessGeometryWarp`）。而"什么时候
+    /// 该停止搬运"不能靠取数序号猜（提交会先 `checkpointHistory` 递增
+    /// `paramsEpoch`，早于后端写入，序号水位必然错拍），只能靠**事实**：
+    /// 键变了 ⇔ 这份基线反映的几何变了。于是撤下映射与快照落地可以落在同一个
+    /// 渲染里，从结构上消除"松手闪一下"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dyn_orig_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

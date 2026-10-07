@@ -208,6 +208,13 @@ export interface UiSettings {
     selectDragDirection?: string;
     drawDragDirection?: string;
     lineVibratoDragDirection?: string;
+    /**
+     * 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
+     *
+     * 与拖动方向同一类"本机记忆"：不进工程文件，下次启动照原样恢复。未知取值
+     * （含旧配置里没有这一项）在读取时回落出厂默认（绘制工具），因此不需要迁移。
+     */
+    paramEditorTool?: string;
     smoothnessPercent?: number;
     /** 旧版边缘平滑字段名（读取兼容）。 */
     edgeSmoothnessPercent?: number;

@@ -81,8 +81,10 @@ pub(crate) fn get_timeline_state_from_ref(state: &AppState) -> crate::models::Ti
     payload
 }
 
-/// Lightweight timeline state for regular frontend polls.
-/// Skips waveform_preview, pitch_range, and midi_note_data to reduce clone+serialize cost.
+/// Lightweight timeline state — skips waveform_preview, pitch_range, and
+/// midi_note_data to reduce clone+serialize cost.
+///
+/// 当前前端未使用（仍轮询全量 `get_timeline_state`）；保留作为轮询瘦身入口。
 pub(super) fn get_timeline_state_lite(
     state: State<'_, AppState>,
 ) -> crate::models::TimelineStatePayload {

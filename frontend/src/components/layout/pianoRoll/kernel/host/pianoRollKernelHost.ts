@@ -46,6 +46,7 @@
  */
 
 import { readDevicePixelRatio } from "../../../../../utils/devicePixelLine";
+import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
 import { isStylusLike } from "../../../../../utils/penInput";
 import { invokeGridRedrawHandler } from "../../../timeline/gridRedrawBridge";
 import {
@@ -116,15 +117,21 @@ import {
     PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
 } from "../scroll/verticalValueScroll";
 import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
+import { TICK_WINDOW_LAG_PX } from "../../../timeline/runtime/tickWindow";
 import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelData";
 
 /**
  * 水平滚动向 React 量化提交的步长（CSS px）。
  *
- * 与时间轴内核取同一量级：标尺的**刻度范围**由 React 按当前视口计算，只写内容层
- * transform 会让刻度停留在初始视口。量化提交保证 React 不进滚动热路径。
+ * 标尺的**刻度范围**由 React 按当前视口计算，只写内容层 transform 会让刻度停留在
+ * 初始视口。量化提交保证 React 不进滚动热路径。
+ *
+ * 【与时间轴共用同一常量】本值同时是"刻度窗口必须吸收的滞后上界"：React 侧的
+ * scrollLeft 最多落后内核真值一个步长，而窗口缓冲（`tickWindow.tickWindowBufferPx`）
+ * 必须覆盖它。参数编辑器与时间轴消费同一份刻度源（`buildTimelineTicks`），因此
+ * 两处的提交步长不能各自取值 —— 各自写死时这个约束没有任何地方表达。
  */
-const SCROLL_COMMIT_STEP_PX = 256;
+const SCROLL_COMMIT_STEP_PX = TICK_WINDOW_LAG_PX;
 
 /**
  * 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。
@@ -502,6 +509,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         teardown.push(() => observer.disconnect());
     }
 
+    // DPR 变化（浏览器缩放 / 换显示器）不会触发 ResizeObserver（它观察 CSS 布局盒，
+    // 纯 dpr 变化不改 CSS 尺寸），但 GL backing store、网格半像素取向与字形图集全部
+    // 依赖 dpr。这里只负责标脏：下一帧重新光栅化，并按 `glyphAtlasDpr` 重建字形图集。
+    teardown.push(
+        subscribeDevicePixelRatio(() => {
+            loop.invalidate();
+        }),
+    );
+
     // ── GL 场景层（阶段 2）──────────────────────────────────────────
     //
     // 【职责】把**静态**图层（网格等）画到独立画布上：几何按内容坐标构建并常驻
@@ -558,10 +574,17 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     // 因此共用 `glAxisHandle` 的上下文，program 独立。
     let glGlyphProgram: GlyphProgram | null = null;
     let glGlyphs: PianoRollGlyphs | null = null;
+    /**
+     * 建当前字形图集时使用的 dpr。
+     *
+     * 字形位图与物理像素一一对应（`glyphRasterizer` 的显式契约：dpr 变化后必须整体
+     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时丢弃重建。
+     */
+    let glyphAtlasDpr = readDevicePixelRatio();
     if (glAxisHandle !== null) {
         try {
             glGlyphProgram = createGlyphProgram(glAxisHandle.gl);
-            glGlyphs = createPianoRollGlyphs({ dpr: readDevicePixelRatio() });
+            glGlyphs = createPianoRollGlyphs({ dpr: glyphAtlasDpr });
             if (glGlyphs === null) {
                 glGlyphProgram = null;
             }
@@ -1235,6 +1258,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         );
         for (const mark of marks) {
             const anchorY = mark.line.y + mark.line.h / 2 - 0.5;
+            // 【先判越界再夹取】夹取只该作用于"锚点本就落在绘图区内、但文字外缘会
+            // 出界"的边缘刻度。若锚点在绘图区**之外**（degrees 无条件补的 0 刻度
+            // 在视口不含 0 时正是如此：−14..14 的值域、视口 [5,12] 时 0 映射到画布
+            // 外），夹取会把一个幻影「0」标签钉在画布底/顶边 —— 而 legacy 的
+            // `fillText(0)` 会被画布裁掉、不可见。这里按 legacy 语义直接跳过。
+            if (anchorY < 0 || anchorY > viewportHeightPx) continue;
             requests.push({
                 text: mark.label,
                 fontKey: `${AXIS_TICK_LABEL_FONT_SIZE_PX}px ${family}`,
@@ -1660,6 +1689,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         // 键盘 / 数值轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
         if (glAxisProgram !== null) {
+            // dpr 变化（浏览器缩放 / 换显示器）必须整体重建字形图集：字形位图与
+            // 物理像素一一对应，旧图集在新 dpr 下会被采样成模糊字形。图集换了，
+            // 文字四边形的度量也随之改变，故作废键盘签名强制重走重建分支。
+            const currentDpr = readDevicePixelRatio();
+            if (currentDpr !== glyphAtlasDpr) {
+                glyphAtlasDpr = currentDpr;
+                glGlyphs?.dispose();
+                glGlyphs = createPianoRollGlyphs({ dpr: currentDpr });
+                uploadedAtlasPages.clear();
+                glTextQuads = [];
+                lastKeyboardSignature = "";
+            }
             const spec = data().grid;
             const signature = keyboardSignature(spec);
             if (signature !== lastKeyboardSignature) {
@@ -1718,6 +1759,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let dragAxis: "x" | "y" | null = null;
     let dragStartPointer = 0;
     let dragStartScroll = 0;
+    // 发起拖拽的指针 id：window 级 move/up 会收到**所有**指针的事件，
+    // 拖拽途中落下的第二指针（掌压触摸等）不得驱动 / 终止本次拖拽。
+    let dragPointerId: number | null = null;
 
     /**
      * 造一个 thumb 拖拽的按下处理器。
@@ -1740,6 +1784,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 无需二次命中判定（与时间轴内核同一约定）。
             event.stopPropagation();
             dragAxis = axis;
+            dragPointerId = event.pointerId;
             dragStartPointer = axis === "x" ? event.clientX : event.clientY;
             dragStartScroll = axis === "x" ? scroll.get().scrollLeft : scroll.get().scrollTop;
             (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
@@ -1783,10 +1828,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
     const onThumbPointerMove = (event: PointerEvent): void => {
         if (dragAxis === null) return;
+        if (event.pointerId !== dragPointerId) return;
         applyThumbDrag((dragAxis === "x" ? event.clientX : event.clientY) - dragStartPointer);
     };
-    const onThumbPointerUp = (): void => {
+    const onThumbPointerUp = (event: PointerEvent): void => {
+        if (dragAxis === null) return;
+        if (event.pointerId !== dragPointerId) return;
         dragAxis = null;
+        dragPointerId = null;
     };
 
     registerListener(hScrollbarThumb, "pointerdown", makeThumbPointerDown("x") as EventListener);

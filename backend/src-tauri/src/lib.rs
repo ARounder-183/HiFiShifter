@@ -173,7 +173,7 @@ mod system_clipboard;
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 
 #[cfg(target_os = "windows")]
 mod webview2_accelerators;
@@ -751,7 +751,6 @@ pub fn run() {
             commands::get_playback_state,
             commands::start_background_render,
             commands::cancel_background_render,
-            commands::debug_realtime_render_stats,
             commands::get_pitch_analysis_progress,
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
@@ -762,11 +761,10 @@ pub fn run() {
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
+            commands::get_vslib_status,
             commands::run_vocoder_benchmark,
             commands::get_gpu_devices,
             commands::get_dml_adapters,
-            commands::clear_pitch_cache,
-            commands::get_pitch_cache_stats,
             commands::list_directory,
             commands::stat_paths,
             commands::collect_folder_media,

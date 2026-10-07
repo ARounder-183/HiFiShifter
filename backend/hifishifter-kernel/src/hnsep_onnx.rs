@@ -363,12 +363,8 @@ pub fn probe_load() -> Result<String, String> {
     let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
     let bins = HNSEP_N_FFT / 2 + 1;
 
-    let harmonic = crate::hnsep_dsp::separate(
-        &audio,
-        HNSEP_N_FFT,
-        HNSEP_HOP,
-        &window,
-        |mask_input| {
+    let harmonic =
+        crate::hnsep_dsp::separate(&audio, HNSEP_N_FFT, HNSEP_HOP, &window, |mask_input| {
             let frames = mask_input.len() / 2 / bins;
             let tensor = Tensor::from_array((
                 [1usize, 2, bins, frames],
@@ -390,8 +386,7 @@ pub fn probe_load() -> Result<String, String> {
                 .try_extract_tensor::<f32>()
                 .map_err(|e| format!("hnsep mask extract failed: {e}"))?;
             Ok(mask.to_vec())
-        },
-    )?;
+        })?;
 
     if harmonic.len() != samples {
         return Err(format!(
@@ -551,7 +546,7 @@ pub fn infer_harmonic_noise_mono(
                 CACHE_HITS.fetch_add(1,Ordering::Relaxed);
                 return Ok((entry.harmonic.clone(), entry.noise.clone()));
             }
-            // Cached result too short → remove and re-infer below.
+            // Cached result length mismatch → remove and re-infer below.
             if let Some(old)=cache.entries.pop(&cache_key) {cache.bytes-=SeparationCache::entry_bytes(&old);}
         }
     }

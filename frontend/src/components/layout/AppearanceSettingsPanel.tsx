@@ -707,6 +707,20 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
      * 都依赖它（见 `applyPreviewFromStorage` 的语义）。
      */
     useEffect(() => {
+        /*
+         * 用户没编辑过就什么都不做。
+         *
+         * 这个 effect 的每一次执行都会**落盘**（`applySettings` → `saveAppearance`）。
+         * 它此前在挂载的第一次 pass 就无条件跑一遍：`activeCustomThemeId` 写死为
+         * `null`，于是"只是打开面板看一眼"就会把正在启用的自定义主题停用并落盘、
+         * 同时清掉 `<html>` 上所有 `--qt-*` 覆盖。此时若用户不点「应用」直接关
+         * （浮动窗 X / 布局重置），卸载清理又因 `draftDirtyRef` 仍为 false 而跳过
+         * 回滚 —— 停用就永久留下来了。
+         *
+         * 所有用户编辑都在改 state 之前先 `markDraftDirty()`，因此以它为闸门：
+         * 首次挂载（干净）被跳过，任何真实编辑照旧预览 + 落盘。
+         */
+        if (!draftDirtyRef.current) return;
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
@@ -1144,7 +1158,12 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                         ? "border-qt-highlight bg-qt-highlight/12"
                                                         : "border-qt-border bg-qt-base hover:bg-qt-hover")
                                                 }
-                                                onClick={() => theme.setMode(mode)}
+                                                onClick={() => {
+                                                    // 模式改动也是草稿：标记后上面的预览 effect
+                                                    // 才会落盘，卸载清理也才会回滚。
+                                                    markDraftDirty();
+                                                    theme.setMode(mode);
+                                                }}
                                             >
                                                 <div
                                                     className="w-full h-10 rounded-lg overflow-hidden relative"

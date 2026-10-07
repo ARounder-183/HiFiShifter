@@ -119,7 +119,7 @@ function dump(): void {
     console.log(
         // 高丢失率时整行标红：样式必须带 `%c` 占位才会被 console 当作格式，
         // 否则会作为第二个参数原样打印出来。
-        `  data: hit=${_hitCount} | miss(null)=${_missNullCount} miss(short)=${_missShortCount} | missRate=${missPct}%${missTotal > _hitCount * 0.1 ? ` %c${missStyle}` : ""}`,
+        `  data: hit=${_hitCount} | miss(null)=${_missNullCount} miss(short)=${_missShortCount} | missRate=${missPct}%${missTotal > _hitCount * 0.1 ? " %c" : ""}`,
         ...(missTotal > _hitCount * 0.1 ? [missStyle] : []),
     );
 

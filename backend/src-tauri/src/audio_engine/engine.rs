@@ -1135,6 +1135,33 @@ fn extra_curves_affect_render(
     })
 }
 
+/// 轨道级**渲染设置**是否变化 —— 合成算法与 Compose 都直接进入渲染键
+/// （见 `build_rendered_hash_input`：算法决定 `renderer_id`，Compose 决定是否
+/// 走声码器链路），任一项变化都必须让该轨道组重新渲染。
+///
+/// 【为什么单独成函数】这两项是 `Track` 上的字段，**不在** clip 级比较口径里
+/// （`render_shape_changed` 只看 clip，`track_params_affect_render` 只看
+/// `TrackParamsState`）。判定一旦漏项，切换算法就会被当成"无变化"：缓存不失效、
+/// 后台预渲染不启动，用户感知为"切了合成算法音频没变"。
+fn track_render_settings_differ(old: &crate::state::Track, new: &crate::state::Track) -> bool {
+    old.pitch_analysis_algo != new.pitch_analysis_algo || old.compose_enabled != new.compose_enabled
+}
+
+/// 使某个根轨道组下**所有** clip 的合成缓存失效。
+///
+/// 返回是否确有 clip 被失效：空轨道组返回 `false`，调用方据此决定是否需要请求
+/// 后台重渲染 —— 没有 clip 就没有可渲染的工作，不该空转一轮渲染 pass。
+fn invalidate_root_group_clips(tl: &TimelineState, root_id: Option<&str>) -> bool {
+    let mut invalidated = false;
+    for clip in &tl.clips {
+        if tl.resolve_root_track_id(&clip.track_id).as_deref() == root_id {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+            invalidated = true;
+        }
+    }
+    invalidated
+}
+
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // DYN 的原声电平基线组装需要对 timeline 的可变借用（见下方"动态"段）。
     let mut tl = tl;
@@ -1150,6 +1177,12 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // WORLD 和 ONNX 共享同一个 synth_clip_cache。
     // 用于后台预渲染自动触发：仅当本次 update 确实使缓存失效时才触发。
     let mut any_cache_invalidated = false;
+
+    // 轨道级渲染设置（合成算法 / Compose）是否变化。见 `track_render_settings_differ`
+    // 与下方"轨道级渲染设置变更"段：这两项决定渲染键，但不在 clip 级比较口径里。
+    // 无 last_timeline（首次更新）时按"全变"处理，与下方 `needs_pitch_schedule`
+    // 原先的 `is_none_or` 语义一致 —— 该结论在函数末尾复用，两处判定不会漂移。
+    let mut track_render_settings_changed = s.last_timeline.is_none();
 
     if let Some(old_tl) = s.last_timeline.as_ref() {
         use std::collections::HashSet;
@@ -1302,14 +1335,34 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     "[engine] extra_params changed for root_track={}, invalidating all clips on this track group",
                     root_id
                 );
-                for clip in &tl.clips {
-                    if tl.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_id.as_str())
-                    {
-                        crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
-                        any_cache_invalidated = true;
-                    }
-                }
+                any_cache_invalidated |= invalidate_root_group_clips(&tl, Some(root_id.as_str()));
             }
+        }
+
+        // ── 轨道级渲染设置变更（合成算法 / Compose）────────────────────────
+        // 与 extra_params 同属"轨道级、影响底层合成输出"的变更：使整组缓存失效，
+        // 让本次编辑立刻进入后台渲染。场景：用户切换轨道的合成算法
+        // （WORLD ↔ NSF-HiFiGAN ↔ vslib），或开关 Compose。
+        //
+        // 判据见 `track_render_settings_differ`：这两项都参与渲染键，但不在
+        // clip 级比较口径里 —— 不在此单独判定，切换算法时 `any_cache_invalidated`
+        // 会保持 false，后台预渲染根本不会启动。
+        for track in &tl.tracks {
+            let changed = match old_tl.tracks.iter().find(|t| t.id == track.id) {
+                Some(old_track) => track_render_settings_differ(old_track, track),
+                // 新增轨道没有旧值可比，按"已变化"处理（与旧判定一致）。
+                None => true,
+            };
+            if !changed {
+                continue;
+            }
+            debug_eprintln!(
+                "[engine] Track '{}' render settings changed (algo/compose), invalidating all clips on this track group",
+                track.id
+            );
+            track_render_settings_changed = true;
+            let root_id = tl.resolve_root_track_id(&track.id);
+            any_cache_invalidated |= invalidate_root_group_clips(&tl, root_id.as_deref());
         }
     }
 
@@ -1411,14 +1464,12 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
 
     // ── 4. 检测音高相关变化（必须在 last_timeline 更新之前）──────────────────
     // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
-    let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
+    let track_pitch_edit_changed = s.last_timeline.as_ref().is_some_and(|old_tl| {
         tl.params_by_root_track.iter().any(|(root_id, new_params)| {
             old_tl
                 .params_by_root_track
                 .get(root_id)
-                .map_or(true, |old_params| {
-                    old_params.pitch_edit != new_params.pitch_edit
-                })
+                .is_none_or(|old_params| old_params.pitch_edit != new_params.pitch_edit)
         })
     });
 
@@ -1435,7 +1486,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .iter()
         .filter_map(|clip| {
             old_clips_map.get(clip.id.as_str()).and_then(|old| {
-                if clip_pitch_params_changed(*old, clip) {
+                if clip_pitch_params_changed(old, clip) {
                     Some(clip.id.as_str()) // 优化：零拷贝
                 } else {
                     None
@@ -1444,24 +1495,12 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         })
         .collect();
 
-    // 检测 track 级别的变化
+    // 检测 track 级别的变化。
+    //
+    // 复用函数开头算出的 `track_render_settings_changed`（同一份"算法 / Compose
+    // 是否变化"的结论）：那里已经遍历过 tracks 并据此失效了缓存，这里再算一遍
+    // 只会多一次 O(tracks²) 查找，且两处判定可能漂移。
     let has_last_timeline = s.last_timeline.is_some();
-    let track_pitch_settings_changed = s.last_timeline.as_ref().map_or(true, |old_tl| {
-        tl.tracks.iter().any(|track| {
-            old_tl.tracks.iter()
-                .find(|t| t.id == track.id)
-                .map_or(true, |old_track| {
-                    let compose_changed = old_track.compose_enabled != track.compose_enabled;
-                    let algo_changed = old_track.pitch_analysis_algo != track.pitch_analysis_algo;
-                    if compose_changed || algo_changed {
-                        debug_eprintln!("[engine] Track '{}' pitch settings changed: compose {} -> {}, algo {:?} -> {:?}",
-                            track.id, old_track.compose_enabled, track.compose_enabled,
-                            old_track.pitch_analysis_algo, track.pitch_analysis_algo);
-                    }
-                    compose_changed || algo_changed
-                })
-        })
-    });
 
     if !has_last_timeline {
         debug_eprintln!(
@@ -1471,7 +1510,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
 
     // ── 动态（DYN）原声电平基线的组装/调度 ────────────────────────────────
     // 实际组装已在上方（`moved_clip_ids` 建立之前）完成，此处只并入调度判定。
-    let needs_pitch_schedule = clip_changed || track_pitch_settings_changed || dyn_needs_analysis;
+    let needs_pitch_schedule = clip_changed || track_render_settings_changed || dyn_needs_analysis;
 
     // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
     let midi_clips_needing_emit: std::collections::HashSet<String> = tl
@@ -1479,7 +1518,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .iter()
         .filter(|c| c.midi_note_data.is_some())
         .filter(|c| {
-            old_clips_map.get(c.id.as_str()).map_or(true, |old| {
+            old_clips_map.get(c.id.as_str()).is_none_or(|old| {
                 (old.start_sec - c.start_sec).abs() > 1e-9
                     || (old.source_start_sec - c.source_start_sec).abs() > 1e-6
                     || (old.source_end_sec - c.source_end_sec).abs() > 1e-6
@@ -1919,7 +1958,7 @@ fn emit_clip_pitch_data_for_clip(
             if let Some(placement) =
                 crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
             {
-                let note_value = note.note as f32;
+                let note_value = note.note;
                 let mut cycle_offset = 0usize;
                 while cycle_offset < clip_visible_frames {
                     let write_start = cycle_offset + placement.first_start_frame;
@@ -1962,7 +2001,7 @@ fn emit_clip_pitch_data_for_clip(
             }
             let note_start_frame = ((eff_start / pr_valid * 1000.0) / fp).round() as usize;
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
-            let note_value = note.note as f32;
+            let note_value = note.note;
             // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
             {
                 let write_end = note_end_frame.min(target_frames);
@@ -2183,6 +2222,57 @@ mod tests {
         new = old.clone();
         new.extra_params.insert("synth_mode".to_string(), 1.0);
         assert!(track_params_affect_render(&old, &new));
+    }
+
+    /// 切换合成算法 / Compose 必须被判成"渲染设置变化"。
+    ///
+    /// 这两项决定渲染键（`renderer_id` / `compose_enabled`），却不在 clip 级比较
+    /// 口径里 —— 漏判的后果是缓存不失效、后台预渲染不启动，用户切了算法音频没变。
+    #[test]
+    fn track_render_settings_differ_covers_algo_and_compose() {
+        let base = TimelineState::default().tracks[0].clone();
+        assert!(!track_render_settings_differ(&base, &base.clone()));
+
+        let mut algo_changed = base.clone();
+        algo_changed.pitch_analysis_algo = crate::state::PitchAnalysisAlgo::WorldDll;
+        assert!(
+            track_render_settings_differ(&base, &algo_changed),
+            "切换合成算法必须判定为渲染设置变化"
+        );
+
+        let mut compose_changed = base.clone();
+        compose_changed.compose_enabled = !base.compose_enabled;
+        assert!(
+            track_render_settings_differ(&base, &compose_changed),
+            "切换 Compose 必须判定为渲染设置变化"
+        );
+    }
+
+    /// 缓存失效按**根轨道组**生效：挂在子轨道上的 clip 也必须被根轨道的变化波及。
+    #[test]
+    fn invalidate_root_group_clips_resolves_child_tracks_to_their_root() {
+        let mut timeline = make_plain_stretch_timeline();
+        let root_id = timeline.tracks[0].id.clone();
+        let mut child = timeline.tracks[0].clone();
+        child.id = "child-track".to_string();
+        child.parent_id = Some(root_id.clone());
+        timeline.tracks.push(child);
+        timeline.clips[0].track_id = "child-track".to_string();
+
+        // clip 挂在子轨道上，但根轨道变化必须命中它。
+        assert!(invalidate_root_group_clips(
+            &timeline,
+            Some(root_id.as_str())
+        ));
+
+        // 子轨道 id 不是根 id —— 传入子轨道 id 不应命中（解析出的根不等于它）。
+        assert!(!invalidate_root_group_clips(&timeline, Some("child-track")));
+
+        // 空轨道组没有可渲染工作，返回 false，调用方据此不空转一轮渲染 pass。
+        assert!(!invalidate_root_group_clips(
+            &timeline,
+            Some("no-such-track")
+        ));
     }
 
     #[test]

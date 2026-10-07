@@ -90,7 +90,7 @@ pub struct AppState {
     pub waveform_inflight_cv: std::sync::Condvar,
 
     /// In-memory cache of clipboard MIDI bytes, keyed by GUID (first 8 bytes of blake3 hash as hex).
-    pub clipboard_midi_cache: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    pub clipboard_midi_cache: std::sync::Mutex<std::collections::VecDeque<(String, Vec<u8>)>>,
 
     /// 进程内 UI 设置缓存（`ripple_settings` / `split_transition_options`
     /// 在持有 timeline 锁的每个拖拽 tick 里读取；若每次都走磁盘读 +
@@ -174,7 +174,7 @@ impl AppState {
 
             waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             waveform_inflight_cv: std::sync::Condvar::new(),
-            clipboard_midi_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            clipboard_midi_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
             cached_ui_settings: std::sync::RwLock::new(None),
 
             app_handle: OnceLock::new(),

@@ -4,7 +4,7 @@
  * 主要内容：
  * - apply_formant_morph_mono / apply_formant_morph_interleaved：稳定公开 API
  *   （签名与 2026-04-30 设计 spec 保持兼容，调用方零改动）。
- * - vowel_formant_preset：元音预设（保留供 IPC 调用，不参与本模块算法）。
+ * - vowel_formant_preset：元音预设查表（纯工具，当前未接线，不参与本模块算法）。
  * - 共享常量表（分析速率 / LPC 阶数 / 候选区间 / 限幅等，调参入口集中在此）。
  *
  * 与其他模块的关系：
@@ -221,11 +221,14 @@ pub fn apply_formant_morph_mono(
             continue;
         }
 
-        // 帧中心时间 → 分析帧索引
-        let t_sec = ((start + fft_size / 2) as f32 - pad_left as f32)
-            .max(0.0)
-            .min(analysis_dur_sec)
-            / sample_rate as f32;
+        // 帧中心时间 → 分析帧索引。
+        // 注意单位：`start`/`pad_left` 是**输出采样**域（`sample_rate`），
+        // 必须先除以 `sample_rate` 换成秒，再与 `analysis_dur_sec`（秒）比较；
+        // 若先 clamp 再除，采样数会被秒数量级直接截断，导致 `af` 恒为 0
+        // （共振峰滤波器冻结在首帧）。
+        let t_sec = (((start + fft_size / 2) as f32 - pad_left as f32).max(0.0)
+            / sample_rate as f32)
+            .min(analysis_dur_sec);
         let af_f = (t_sec / ANALYSIS_HOP_SEC).clamp(0.0, tracks_max);
         let af = (af_f.round() as usize).min(frame_coeffs.len() - 1);
 
@@ -395,8 +398,8 @@ pub fn apply_formant_morph_interleaved(
 
 /// 元音 → 目标共振峰预设（F1, F2，单位 Hz）。
 ///
-/// 保留供前端 / IPC 在不知道精确共振峰参数时使用；本模块算法本身只看
-/// `params.target_f1_hz / target_f2_hz`，与本表无直接耦合。
+/// 当前**无任何调用方**（前端经 IPC 用的是显式 `target_f1_hz / target_f2_hz`）。
+/// 保留为纯查表工具，供将来接线；本模块算法不依赖它。
 #[allow(dead_code)]
 pub fn vowel_formant_preset(vowel: &str) -> Option<(f64, f64)> {
     match vowel.trim().to_ascii_lowercase().as_str() {
@@ -656,6 +659,40 @@ mod tests {
         assert!(
             (out_f2 - 2_300.0).abs() < (in_f2 - 2_300.0).abs(),
             "F2 必须向目标移动: in={in_f2:.1} out={out_f2:.1}"
+        );
+    }
+
+    /// 回归：帧中心时间的单位换算曾把「输出采样偏移」直接与「分析时长（秒）」
+    /// 比较（先 clamp 后除），导致采样数被秒数量级截断、分析帧索引恒为 0。
+    /// 素材开头是无声音段（呼吸 / 前奏，很常见）时，第 0 帧 `voiced = 0` 会让
+    /// 门控永远不打开 ⇒ 整段直通、共振峰迁移静默失效。
+    #[test]
+    fn leading_unvoiced_segment_does_not_freeze_formant_tracking() {
+        let vowel = synth_vowel(150.0, 800.0, 1_200.0, TEST_SR, 0.5);
+        let lead = vec![0.0_f32; TEST_SR as usize / 10]; // 100ms 静音前导
+        let mut input = lead.clone();
+        input.extend_from_slice(&vowel);
+
+        let params = ClipFormantMorph {
+            enabled: true,
+            target_f1_hz: 300.0,
+            target_f2_hz: 2_300.0,
+            strength: 0.9,
+        };
+        let out = apply_formant_morph_mono(&input, TEST_SR, &params).unwrap();
+        assert_eq!(out.len(), input.len());
+
+        // 只看元音段（跳过静音前导）的共振峰是否向目标移动。
+        let tail = &out[lead.len()..];
+        let (in_f1, in_f2) = measure_formants(&vowel, TEST_SR).expect("输入应可测出共振峰");
+        let (out_f1, out_f2) = measure_formants(tail, TEST_SR).expect("输出应可测出共振峰");
+        assert!(
+            (out_f1 - 300.0).abs() < (in_f1 - 300.0).abs(),
+            "带无声前导时 F1 仍须向目标移动: in={in_f1:.1} out={out_f1:.1}"
+        );
+        assert!(
+            (out_f2 - 2_300.0).abs() < (in_f2 - 2_300.0).abs(),
+            "带无声前导时 F2 仍须向目标移动: in={in_f2:.1} out={out_f2:.1}"
         );
     }
 

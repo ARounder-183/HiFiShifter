@@ -2,16 +2,12 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UserStretchAlgorithm {
     Linear,
+    #[default]
     Signalsmith,
     Soundtouch,
-}
-
-impl Default for UserStretchAlgorithm {
-    fn default() -> Self {
-        Self::Signalsmith
-    }
 }
 
 impl UserStretchAlgorithm {
@@ -366,6 +362,47 @@ pub fn time_stretch_interleaved(
     }
 }
 
+fn linear_time_stretch_interleaved(input: &[f32], channels: usize, out_frames: usize) -> Vec<f32> {
+    if input.is_empty() || channels == 0 {
+        return vec![];
+    }
+    let in_frames = input.len() / channels;
+    if in_frames == 0 {
+        return vec![];
+    }
+    if in_frames == out_frames {
+        return input.to_vec();
+    }
+    if out_frames <= 1 || in_frames <= 1 {
+        let mut out = vec![0.0f32; out_frames * channels];
+        let copy_frames = in_frames.min(out_frames);
+        out[..copy_frames * channels].copy_from_slice(&input[..copy_frames * channels]);
+        return out;
+    }
+
+    let mut out = vec![0.0f32; out_frames * channels];
+    let scale = (in_frames - 1) as f64 / (out_frames - 1) as f64;
+
+    for of in 0..out_frames {
+        let t_in = (of as f64) * scale;
+        let i0 = t_in as usize;
+        let i1 = (i0 + 1).min(in_frames - 1);
+        let frac = (t_in - (i0 as f64)) as f32;
+
+        let base0 = i0 * channels;
+        let base1 = i1 * channels;
+        let out_base = of * channels;
+
+        for ch in 0..channels {
+            let a = input[base0 + ch];
+            let b = input[base1 + ch];
+            out[out_base + ch] = a + (b - a) * frac;
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -422,45 +459,4 @@ mod tests {
         // Signalsmith）竞态。
         update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
     }
-}
-
-fn linear_time_stretch_interleaved(input: &[f32], channels: usize, out_frames: usize) -> Vec<f32> {
-    if input.is_empty() || channels == 0 {
-        return vec![];
-    }
-    let in_frames = input.len() / channels;
-    if in_frames == 0 {
-        return vec![];
-    }
-    if in_frames == out_frames {
-        return input.to_vec();
-    }
-    if out_frames <= 1 || in_frames <= 1 {
-        let mut out = vec![0.0f32; out_frames * channels];
-        let copy_frames = in_frames.min(out_frames);
-        out[..copy_frames * channels].copy_from_slice(&input[..copy_frames * channels]);
-        return out;
-    }
-
-    let mut out = vec![0.0f32; out_frames * channels];
-    let scale = (in_frames - 1) as f64 / (out_frames - 1) as f64;
-
-    for of in 0..out_frames {
-        let t_in = (of as f64) * scale;
-        let i0 = t_in as usize;
-        let i1 = (i0 + 1).min(in_frames - 1);
-        let frac = (t_in - (i0 as f64)) as f32;
-
-        let base0 = i0 * channels;
-        let base1 = i1 * channels;
-        let out_base = of * channels;
-
-        for ch in 0..channels {
-            let a = input[base0 + ch];
-            let b = input[base1 + ch];
-            out[out_base + ch] = a + (b - a) * frac;
-        }
-    }
-
-    out
 }

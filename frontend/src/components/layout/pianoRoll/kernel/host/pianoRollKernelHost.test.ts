@@ -482,7 +482,8 @@ describe("createPianoRollKernelHost · paintNow（同任务提交）", () => {
         const painted = t.paintedAxes.length;
         const move = t.windowHandlers.get("pointermove");
         expect(move).toBeDefined();
-        move?.({ clientX: 160 } as never);
+        // move 必须携带发起拖拽的同一 pointerId（宿主按它过滤第二指针）。
+        move?.({ clientX: 160, pointerId: 1 } as never);
         expect(t.paintedAxes.length).toBeGreaterThan(painted);
         t.host.dispose();
     });
@@ -518,7 +519,8 @@ describe("createPianoRollKernelHost · onUserScrollLeft", () => {
         } as never);
         const move = t.windowHandlers.get("pointermove");
         expect(move).toBeDefined();
-        move?.({ clientX: 180 } as never);
+        // move 必须携带发起拖拽的同一 pointerId（宿主按它过滤第二指针）。
+        move?.({ clientX: 180, pointerId: 1 } as never);
         expect(t.userScrolls.length).toBeGreaterThan(0);
         // 偏移 200：回调给出的绘制坐标应比内核内部的原生坐标小 200。
         const reported = t.userScrolls.at(-1) as number;

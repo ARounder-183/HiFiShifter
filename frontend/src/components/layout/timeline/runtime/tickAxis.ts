@@ -12,7 +12,7 @@
  */
 
 import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
-import { TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
+import { TICK_WINDOW_STEP_PX, tickWindowRangePx } from "./tickWindow.js";
 
 /** 把真实滚动位置量化到刻度窗口锚点（负数同样成立：锚点 ≤ 真值 < 锚点 + 步长）。 */
 export function quantizeTickAnchor(scrollLeftPx: number): number {
@@ -35,16 +35,21 @@ export function createTickAxis(args: {
     dpr?: number;
 }): { axis: TimelineAxis; anchorPx: number } {
     const anchorPx = quantizeTickAnchor(args.scrollLeftPx);
-    const viewportWidthPx = Number.isFinite(args.viewportWidthPx)
-        ? Math.max(0, args.viewportWidthPx)
-        : 0;
+    const { windowWidthPx } = tickWindowRangePx(args.viewportWidthPx);
     return {
         anchorPx,
         axis: createTimelineAxis({
             pxPerSec: args.pxPerSec,
             scrollLeftPx: anchorPx,
-            // 宽度补一个量化步长：锚点可以落后真值接近一个步长。
-            viewportWidthPx: viewportWidthPx + TICK_WINDOW_STEP_PX,
+            // 宽度补一个量化步长（见 `tickWindowRangePx`）：锚点可以落后真值接近
+            // 一个步长，真实视口因此相对锚点最多右移 `STEP + LAG`。该补偿与切片的
+            // 缓冲来自同一入口，窗口不可能分叉。
+            //
+            // 【为什么不必再补 `TICK_WINDOW_LAG_PX`】React 侧 scrollLeft 还落后内核
+            // 真值最多一个"提交步长"（= `TICK_WINDOW_LAG_PX`），那段滞后由
+            // `buildTimelineTicks` 的**两侧缓冲**吸收，而缓冲下界已覆盖 `STEP + LAG`。
+            // 该不变量由 `buildTimelineTicks.coverage.test.ts` 锁定。
+            viewportWidthPx: windowWidthPx,
             dpr: args.dpr,
         }),
     };

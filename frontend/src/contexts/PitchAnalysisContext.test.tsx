@@ -36,9 +36,11 @@ import { PitchAnalysisProvider, usePitchAnalysis } from "./PitchAnalysisContext"
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const handlers = (tauriEvent as unknown as {
-    __handlers: Map<string, Set<(event: unknown) => void>>;
-}).__handlers;
+const handlers = (
+    tauriEvent as unknown as {
+        __handlers: Map<string, Set<(event: unknown) => void>>;
+    }
+).__handlers;
 
 function emit(name: string, payload: unknown): void {
     for (const cb of handlers.get(name) ?? []) cb({ payload });

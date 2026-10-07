@@ -27,6 +27,8 @@ describe("stepFor", () => {
             "kilobytes",
             "days",
             "clipSeconds",
+            "idleMilliseconds",
+            "imagePixels",
         ] as StepUnit[]) {
             const spec = stepFor(unit);
             expect(spec.fine, `${unit} 的精调步长应小于粗调`).toBeLessThan(spec.coarse);
@@ -60,6 +62,20 @@ describe("stepFor", () => {
         expect(stepFor("percentFine").fine).toBeLessThan(stepFor("percent").fine);
     });
 
+    test("记事本的两个量级各有自己的档位（毫秒符号相同、刻度不同）", () => {
+        // 「撤销步分节」是以秒计量的等待时长：一格 1 秒。套用 `milliseconds`
+        // （粗调 10ms）时，从 0 滚到 2000 要 200 格 —— 用户报告的正是"滚不动"。
+        expect(stepFor("idleMilliseconds").coarse).toBe(1000);
+        expect(stepFor("idleMilliseconds").fine).toBe(100);
+        // 「图片长边上限」是 0–16384 的尺寸量级：一格 128px。套用 `pixels`
+        // （粗调 1px）时，1280 → 2048 要 768 格。
+        expect(stepFor("imagePixels").coarse).toBe(128);
+        expect(stepFor("imagePixels").fine).toBe(8);
+        // 同一个"毫秒 / 像素"符号下，刻度必须真的不同，否则拆分就落空了。
+        expect(stepFor("idleMilliseconds").coarse).toBeGreaterThan(stepFor("milliseconds").coarse);
+        expect(stepFor("imagePixels").coarse).toBeGreaterThan(stepFor("pixels").coarse);
+    });
+
     test("小数位与步长匹配（不会把 0.1 步长写成 0 位小数）", () => {
         expect(stepFor("bpm").decimals).toBe(1);
         expect(stepFor("rate").decimals).toBe(2);
@@ -89,6 +105,11 @@ describe("stepFor", () => {
             "kilobytes",
             "days",
             "clipSeconds",
+            "vibratoHz",
+            "scaleDegree",
+            "pressureFactor",
+            "idleMilliseconds",
+            "imagePixels",
         ];
         for (const unit of units) {
             const spec = stepFor(unit);

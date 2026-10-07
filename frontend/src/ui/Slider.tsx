@@ -135,8 +135,16 @@ export function AppSlider({
             style={{ minHeight: DECORATION_BOX_PX[size] }}
             // `hs-touch-none`：滑块自己实现拖拽，触摸设备上必须收回手势所有权，
             // 否则浏览器会把拖动解释成页面滚动并派发 pointercancel（拖到一半就断）。
+            //
+            // 【为什么是块级 `flex` 而不是 `inline-flex`】包装盒必须**铺满所在行**。
+            // 调用方多数把它放进 flex 行（那里 `flex-1` 生效），但浮窗里也有把它直接
+            // 放在普通块级卡片中的用法（如 Clip 共振峰窗口的「强度」）—— 那种父元素
+            // 不是 flex 容器，`flex-1` / `min-w-0` 全部失效，inline-flex 会收缩到内容
+            // 宽度，内层 Radix 滑块的 `width: 100%` 随之塌成很小一截（用户报告：滑块
+            // 缩在左边一小块）。块级 flex 容器在块级父元素里按 `width: auto` 铺满，在
+            // flex 行里则被 blockify 成 flex 项，与改动前完全一致 —— 两种上下文都铺满。
             className={cx(
-                "hs-slider-box hs-touch-none inline-flex min-w-0 flex-1 items-center",
+                "hs-slider-box hs-touch-none flex w-full min-w-0 flex-1 items-center",
                 className,
             )}
         >

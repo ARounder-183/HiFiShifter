@@ -712,6 +712,10 @@ export function usePianoRollData(args: {
                         startFrame,
                         frameCount,
                         stride,
+                        true,
+                        // dyn 的「未画」位图随同一路取数返回（与 refreshNow 同口径，
+                        // 见 ParamViewSegment 的字段说明）；非 dyn 显式不请求。
+                        isDynParam(editParam),
                     );
                     if (fetchReqIdRef.current !== reqId) return;
                     // 【参数切换的兜底】请求 id 只拦得住"被新请求取代"的响应；参数
@@ -783,6 +787,14 @@ export function usePianoRollData(args: {
                         referenceKind: payload.reference_kind ?? "source_curve",
                         orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                         edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                        // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
+                        // 的字段说明）；非 dyn 显式不携带。与 refreshNow 同口径 ——
+                        // 本函数是主取数路径（挂载 / 去抖滚动缩放 / 编辑后重取），
+                        // 缺了它 restoreDynSentinelsFromParamView 会成为静默空操作，
+                        // 拉伸 / morph 编辑会把「沿用原声」物化成显式基线。
+                        editSentinel: isDynParam(editParam)
+                            ? (payload.edit_sentinel ?? undefined)
+                            : undefined,
                     });
                     lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                     invalidate();
@@ -977,6 +989,10 @@ export function usePianoRollData(args: {
                 }
                 setReferencePitchViews(nextReferenceViews);
             }
+        } catch {
+            // 传输层失败（invoke 拒绝）：保留旧数据静默降级，与 refreshVisible
+            // 的取数分支同一处理。本函数多为 fire-and-forget 调用，不接住会把
+            // 拒绝漏成 unhandledrejection。
         } finally {
             setIsRefreshing(false);
             endLoading();
@@ -1106,6 +1122,9 @@ export function usePianoRollData(args: {
                 setReferencePitchViews(nextReferenceViews);
             }
             invalidate();
+        } catch {
+            // 传输层失败：保留旧数据静默降级（与 refreshNow / refreshVisible 同一
+            // 处理；fire-and-forget 调用下不接住就是 unhandledrejection）。
         } finally {
             endLoading();
         }

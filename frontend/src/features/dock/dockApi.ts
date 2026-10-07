@@ -618,6 +618,9 @@ export function exportLayoutJsonFromLayout(layout: DockLayout): string {
             order: layout.order,
             floatOrder: layout.floatOrder,
             gutters: layout.gutters,
+            // 标签行位置是布局级偏好，`normalizeDockLayout` 会读取它：漏掉它，
+            // 导出再导入会把用户的"标签在上"静默重置回默认的下方。
+            tabPosition: layout.tabPosition,
         },
         null,
         2,

@@ -21,6 +21,15 @@ import { AppTooltipProvider } from "./components/AppTooltip";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
+import { installGlobalErrorReporting } from "./services/frontendErrorLog";
+
+/*
+ * 全局兜底：独立窗口是另一个 JS 上下文，主入口的 `installGlobalErrorReporting()`
+ * 不会执行到这里 —— 缺了它，独立窗口里未捕获的异常 / 未处理的 Promise rejection
+ * 永远不会回传后端日志，与主窗口的契约静默分叉。`AppRootErrorBoundary` 只能兜住
+ * 渲染期错误，异步链路仍需这层监听。
+ */
+installGlobalErrorReporting();
 
 /*
  * 独立窗口是**另一个 JS 上下文**：主窗口 `App.tsx` 里的模块级注册不会执行到这里，

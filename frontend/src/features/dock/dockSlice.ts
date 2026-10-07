@@ -220,11 +220,14 @@ const dockSlice = createSlice({
                             findTabsetOfForm(tree, formId),
                         );
                         if (stillDocked) continue;
+                        // 落回**最大化时记录的那个根**：最大化期间停进来的窗体只
+                        // 出现在临时树里，它们属于那个面板的树，而不是主根。用
+                        // MAIN_ROOT_ID 会把它们从面板里搬出去（窗体还在，位置错）。
                         layout = {
                             ...layout,
                             roots: {
                                 ...layout.roots,
-                                [MAIN_ROOT_ID]: placeForm(layout, formId, { side: "center" }),
+                                [rootId]: placeForm(layout, formId, { side: "center", rootId }),
                             },
                         };
                     }
@@ -587,6 +590,7 @@ const dockSlice = createSlice({
                 order: state.layout.order,
                 floatOrder: state.layout.floatOrder,
                 gutters: state.layout.gutters,
+                tabPosition: state.layout.tabPosition,
                 createdAtMs: Date.now(),
             };
             state.layout = {
@@ -605,6 +609,7 @@ const dockSlice = createSlice({
                 order: preset.order,
                 floatOrder: preset.floatOrder,
                 gutters: preset.gutters,
+                tabPosition: preset.tabPosition,
                 presets: state.layout.presets,
                 activePreset: preset.name,
             });

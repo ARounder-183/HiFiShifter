@@ -37,7 +37,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("按下后先停顿 initialDelay，再按 repeatInterval 固定节奏重复", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
             initialDelayMs: 400,
             repeatIntervalMs: 50,
         });
@@ -54,7 +54,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("长按进行中：同键 OS 自动重复被吞掉并 preventDefault，不触发 fire", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
             initialDelayMs: 400,
             repeatIntervalMs: 50,
         });
@@ -70,7 +70,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("长按进行中：其它按键的自动重复同样被吞掉", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
             initialDelayMs: 400,
             repeatIntervalMs: 50,
         });
@@ -82,7 +82,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("长按进行中：其它按键的非重复按下视为意图变化，终止长按（粘贴语义）", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -103,7 +103,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         // 完成布防后，第二个监听对同一事件调用 consume —— 同键、非重复，
         // 必须放行，否则刚布防的长按被当场杀死（表现为四个动作完全无重复）。
         const fire = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -127,7 +127,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         const appListener = (e: KeyboardEvent) => {
             if (consumeHoldRepeatKeyDown(e)) return;
             fire(); // 动作首次执行
-            beginHoldRepeat({ key: "t", ctrl: true }, fire, {
+            beginHoldRepeat([{ key: "t", ctrl: true }], fire, {
                 initialDelayMs: 100,
                 repeatIntervalMs: 50,
             });
@@ -164,7 +164,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         const timelineListener = (e: KeyboardEvent) => {
             if (consumeHoldRepeatKeyDown(e)) return;
             fire(); // 粘贴首次执行
-            beginHoldRepeat({ key: "v", ctrl: true }, fire, {
+            beginHoldRepeat([{ key: "v", ctrl: true }], fire, {
                 initialDelayMs: 100,
                 repeatIntervalMs: 50,
             });
@@ -185,7 +185,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("stopHoldRepeat 立即终止并清空定时器", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "d", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "d", ctrl: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -205,11 +205,11 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
     it("重新 begin 会替换旧长按（不叠加定时器）", () => {
         const fireA = vi.fn();
         const fireB = vi.fn();
-        beginHoldRepeat({ key: "t", ctrl: true }, fireA, {
+        beginHoldRepeat([{ key: "t", ctrl: true }], fireA, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
-        beginHoldRepeat({ key: "d", ctrl: true }, fireB, {
+        beginHoldRepeat([{ key: "d", ctrl: true }], fireB, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -223,7 +223,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         // keydown 的 e.key 是 "+"（上档字符）。OS 自动重复事件必须按
         // e.code（Equal）归位后识别为同键：吞掉 + preventDefault。
         const fire = vi.fn();
-        beginHoldRepeat({ key: "=", shift: true }, fire, {
+        beginHoldRepeat([{ key: "=", shift: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -245,7 +245,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         // 回归：keyup 时 Shift 仍按住 → e.key 是 "+" 而非 "="；若只按
         // e.key 比较，先松主键不会终止长按（重复在松键后继续）。
         const fire = vi.fn();
-        beginHoldRepeat({ key: "=", shift: true }, fire, {
+        beginHoldRepeat([{ key: "=", shift: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -258,7 +258,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("Shift 变体：先松 Shift 再松主键（e.key='='）同样终止长按", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "=", shift: true }, fire, {
+        beginHoldRepeat([{ key: "=", shift: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -271,7 +271,7 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
 
     it("Ctrl 微调变体（字符不变形）：行为与普通长按一致", () => {
         const fire = vi.fn();
-        beginHoldRepeat({ key: "=", ctrl: true }, fire, {
+        beginHoldRepeat([{ key: "=", ctrl: true }], fire, {
             initialDelayMs: 100,
             repeatIntervalMs: 50,
         });
@@ -282,6 +282,75 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         expect(fire).toHaveBeenCalledTimes(1);
         const { ev } = keyEvent("=", { code: "Equal", ctrl: true });
         handleHoldRepeatKeyUp(ev);
+        expect(isHoldRepeatActive()).toBe(false);
+    });
+});
+
+describe("长按重复：一个动作绑多个键", () => {
+    /** 与重做一致的两键绑定：主键 Z，备用键 Y。 */
+    const TWO_KEYS = [
+        { key: "z", ctrl: true, shift: true },
+        { key: "y", ctrl: true },
+    ];
+
+    beforeEach(() => {
+        vi.useFakeTimers();
+        stopHoldRepeat();
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+        stopHoldRepeat();
+    });
+
+    it("按住主键维持重复", () => {
+        const fire = vi.fn();
+        beginHoldRepeat(TWO_KEYS, fire, { initialDelayMs: 100, repeatIntervalMs: 50 });
+        vi.advanceTimersByTime(200);
+        expect(fire).toHaveBeenCalledTimes(2);
+    });
+
+    it("按住**备用键**同样维持重复（只认主键会让备用键长按半途失效）", () => {
+        const fire = vi.fn();
+        beginHoldRepeat(TWO_KEYS, fire, { initialDelayMs: 100, repeatIntervalMs: 50 });
+        // 备用键 Y 的 keydown 自动重复被吞掉，节奏由计时器控制。
+        const { ev } = keyEvent("y", { repeat: true, ctrl: true });
+        expect(consumeHoldRepeatKeyDown(ev)).toBe(true);
+        vi.advanceTimersByTime(200);
+        expect(fire).toHaveBeenCalledTimes(2);
+    });
+
+    it("松开备用键终止长按", () => {
+        const fire = vi.fn();
+        beginHoldRepeat(TWO_KEYS, fire, { initialDelayMs: 100, repeatIntervalMs: 50 });
+        const { ev } = keyEvent("y", { ctrl: true });
+        handleHoldRepeatKeyUp(ev);
+        vi.advanceTimersByTime(300);
+        expect(fire).not.toHaveBeenCalled();
+        expect(isHoldRepeatActive()).toBe(false);
+    });
+
+    it("与两个键都无关的按键仍终止长按（意图变化）", () => {
+        const fire = vi.fn();
+        beginHoldRepeat(TWO_KEYS, fire, { initialDelayMs: 100, repeatIntervalMs: 50 });
+        const { ev } = keyEvent("q");
+        // 异键非重复事件：放行（不消费），但长按被终止。
+        expect(consumeHoldRepeatKeyDown(ev)).toBe(false);
+        vi.advanceTimersByTime(300);
+        expect(fire).not.toHaveBeenCalled();
+        expect(isHoldRepeatActive()).toBe(false);
+    });
+
+    it("「无」绑定不参与主键集合", () => {
+        const fire = vi.fn();
+        beginHoldRepeat([{ key: "__none__" }], fire, {
+            initialDelayMs: 100,
+            repeatIntervalMs: 50,
+        });
+        // 任何按键都不匹配"无"，因此都按"异键 = 意图变化"终止长按。
+        const { ev } = keyEvent("q");
+        expect(consumeHoldRepeatKeyDown(ev)).toBe(false);
+        vi.advanceTimersByTime(300);
+        expect(fire).not.toHaveBeenCalled();
         expect(isHoldRepeatActive()).toBe(false);
     });
 });

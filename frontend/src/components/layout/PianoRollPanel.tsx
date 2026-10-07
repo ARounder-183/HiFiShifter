@@ -38,7 +38,7 @@ import {
     setScaleHighlightMode,
     toggleLockParamLines,
     cycleDragDirection,
-    setToolMode,
+    setToolModePersistent,
     persistUiSettings,
     setActiveVibratoPreset,
     toggleParamAxisUnit,
@@ -54,6 +54,11 @@ import {
     setParamSelectionActive,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
+import {
+    buildPitchAlgoOptions,
+    resolveEffectivePitchAlgo,
+    resolvePitchAlgoSelectValue,
+} from "../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
@@ -76,10 +81,17 @@ import {
     timelineViewportNativeToState,
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
-import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
 import {
+    firstBinding,
+    isModifierActive,
+    isNoneBinding,
+} from "../../features/keybindings/keybindingsSlice";
+import {
+    SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    firstGatedParamId,
+    gatedParamHideOrder,
     paramNeedingVisibilityOnGate,
     isEffectParamGated,
     isSeparationEnabled,
@@ -134,6 +146,8 @@ import {
     listReferenceRootTracks,
 } from "./pianoRoll/referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRootTrackTrigger";
+import { TOOLBAR_MAX_TIER } from "./pianoRoll/toolbarOverflow";
+import { useToolbarOverflowTier } from "./pianoRoll/useToolbarOverflowTier";
 import {
     averageSelectionValues,
     smoothSelectionValues,
@@ -190,12 +204,21 @@ import {
     supportsParamAxisUnit,
 } from "./pianoRoll/paramAxisUnits";
 import { framesToTime, midiToLabel, timeToFrame } from "./pianoRoll/utils";
-import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
+import { useLoudnessCurves, type LoudnessSnapshot } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
     type LiveOverrideReader,
 } from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import {
+    createLoudnessGeometryWarp,
+    type LoudnessGeometryWarp,
+} from "./pianoRoll/loudnessGeometryWarp";
+import {
+    getClipGeometryPreviewOrigin,
+    subscribeClipGeometryPreview,
+    type ClipGeometrySnapshot,
+} from "./timeline/clipGeometryPreviewBus";
 import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import { createTickAxis } from "./timeline/runtime/tickAxis.js";
@@ -222,7 +245,10 @@ import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
+    chooseVibratoPreset,
+    systemVibratoPreset,
 } from "../../features/vibrato/vibratoPresetList";
+import { STRAIGHT_VIBRATO_PRESET_ID } from "../../features/vibrato/systemPresets";
 import {
     depthForParam,
     depthUnitLabelKey,
@@ -255,8 +281,9 @@ import { getParamEditorWheelAction } from "./pianoRoll/wheelGesture";
 import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio } from "../../utils/devicePixelLine";
+import { readDevicePixelRatio, wholeDevicePxLength } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
+import { subscribeDevicePixelRatio, useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import {
     getVisibleSecondaryParamIds,
     toggleSecondaryParamVisibility,
@@ -269,8 +296,10 @@ import type {
     ValueViewport,
 } from "./pianoRoll/types";
 import {
-    formatKeybinding,
+    formatKeybindingList,
+    isNoneBindingList,
     selectKeybinding,
+    selectKeybindings,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
@@ -281,7 +310,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppIconButton, AppSelect } from "../../ui";
+import { AppAnchoredMenu, AppIconButton, AppSelect, AppSubMenu } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -458,7 +487,10 @@ function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, numb
  * - 中间参数随算法不同而变化。
  */
 function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
-    switch (algo) {
+    // 先归一：参数**集**来自后端，后端对未识别的算法按默认算法（nsf-hifigan）
+    // 处理（见 `PitchAnalysisAlgo::effective`）。这里若拿原始字符串分支，
+    // 未识别的轨道会"取到 nsf-hifigan 的参数、却按 world 的顺序排"。
+    switch (resolveEffectivePitchAlgo(algo)) {
         case "nsf_hifigan_onnx":
             // 音高、共振峰、气声音量、张力、音量、动态、声像
             switch (paramId) {
@@ -494,7 +526,8 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 50;
             }
         default:
-            // world / 其它：仅保证音量/动态/声像在右侧，其余保持后端顺序
+            // world / none（以及 `resolveEffectivePitchAlgo` 归一后的其余取值）：
+            // 仅保证音量/动态/声像在右侧，其余保持后端顺序
             switch (paramId) {
                 case "volume":
                     return 90;
@@ -572,8 +605,6 @@ type ParamToolbarPillProps = {
     eyeTooltip?: string;
     /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
     eyeLabel?: string;
-    /** 可选尾部片段（如气声开关）：渲染在参数名之后、子参数下拉之前 */
-    trailing?: React.ReactNode;
     /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
     dropdown?: React.ReactNode;
     /**
@@ -589,7 +620,7 @@ type ParamToolbarPillProps = {
 };
 
 /**
- * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
+ * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 → 子参数下拉。
  * 各片段共享一块连续背景；激活参数统一铺全局强调色（--accent-9），
  * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
  *
@@ -606,7 +637,6 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     onToggleEye,
     eyeTooltip,
     eyeLabel,
-    trailing,
     dropdown,
     disabled = false,
     disabledTooltip,
@@ -650,7 +680,6 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
             >
                 {label}
             </button>
-            {trailing}
             {dropdown}
         </div>
     );
@@ -851,6 +880,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, []);
 
     /**
+     * DPR 变化必须重绘主画布。
+     *
+     * `rasterize` 会按新 dpr 重设 backing store 与 CSS 尺寸，但**没有任何东西**
+     * 会在纯 dpr 变化时触发重绘：`ResizeObserver` 观察的是 CSS 布局盒（dpr 变了
+     * 尺寸也没变），而本组件的 `viewSize` 也保持不变。缺这条订阅时，换显示器或改
+     * 系统缩放后主画布会一直用旧 dpr 的光栅化结果（发虚），直到某次滚动才恢复。
+     * 标脏转交宿主，与 GL 层同帧刷新（见 `invalidate` 的说明）。
+     */
+    React.useEffect(() => subscribeDevicePixelRatio(() => invalidate()), [invalidate]);
+
+    /**
      * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
      *
      * 【为什么挂载时要请求一帧】位置只由内核在帧提交里写，而元素可能在**播放头
@@ -868,7 +908,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         rulerPlayheadHeadRef.current = element;
         if (element !== null) hostRef.current?.invalidate();
     }, []);
-    const { t, tf } = useI18n();
+    const { t, tf, tVars } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
@@ -1029,6 +1069,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [resolvedVibratoPresets, activeVibratoPresetId],
     );
     /**
+     * 直线工具的固定起手预设。
+     *
+     * 从全量列表里找，**找不到就用出厂那份兜底**（`systemVibratoPreset` 自带构造）：
+     * 直线工具不依赖用户是否停用了直线预设 —— 停用只影响"怎么挑预设"，不该让
+     * 一个工具失去它唯一的工作方式。
+     */
+    const straightVibratoPreset = useMemo(
+        () =>
+            findVibratoPreset(resolvedVibratoPresets, STRAIGHT_VIBRATO_PRESET_ID) ??
+            systemVibratoPreset("straight"),
+        [resolvedVibratoPresets],
+    );
+    /**
      * 拖拽 HUD 的内容。`null` = 没在拖。
      *
      * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
@@ -1085,20 +1138,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [],
     );
 
-    /** 工具栏的颤音预设下拉是否展开。 */
-    const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
     /**
-     * 颤音预设下拉的最大高度。
+     * 工具菜单里「颤音预设」二级面板中**预设列表**的最大高度。
      *
-     * 按锚点在**本面板内**的位置算（见 `resolveMenuMaxHeight`）：面板可停靠在窗口
-     * 任意高度，菜单只在面板内向下铺开，既不会伸出面板、也不会向上翻转盖住工具栏。
+     * 预设列表从独立的下拉搬进子菜单后，高度仍需按锚点在**本面板内**的位置算
+     * （见 `resolveMenuMaxHeight`）：面板可停靠在窗口任意高度，按视口取上限会让
+     * 列表伸出面板之外。锚点用绘制类型工具按钮（预设入口就在它的菜单里）。
      */
-    const [vibratoPresetMenuMaxHeight, setVibratoPresetMenuMaxHeight] = useState(320);
-    const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
+    const [presetFlyoutMaxHeight, setPresetFlyoutMaxHeight] = useState(320);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
-        selectKeybinding(state, "pianoRoll.cycleDragDirection"),
+        selectKeybindings(state, "pianoRoll.cycleDragDirection"),
     );
+    // 工具菜单里三项各自的快捷键：把绑定显示在菜单上，用户不必去设置里查。
+    const drawToolKb = useAppSelector((state) => selectKeybindings(state, "mode.drawTool"));
+    const lineToolKb = useAppSelector((state) => selectKeybindings(state, "mode.lineTool"));
+    const vibratoToolKb = useAppSelector((state) => selectKeybindings(state, "mode.vibratoTool"));
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
     const [snapToggleHeld, setSnapToggleHeld] = useState(false);
@@ -1109,8 +1164,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
 
     useEffect(() => {
-        const kb = mergedKeybindings["modifier.clipNoSnap"];
-        if (!kb) return;
+        // 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+        const kb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
+        if (!kb || isNoneBinding(kb)) return;
         const onKey = (e: KeyboardEvent) => {
             const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
@@ -1156,47 +1212,52 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const midiDialogSourceRef = useRef<"reaperClipboard" | "paramEditor">("paramEditor");
     // 启动时从设置加载
     useEffect(() => {
-        settingsApi.getUiSettings().then((s) => {
-            if (s?.midiImportPosition) {
-                setImportPosition(s.midiImportPosition);
-            }
-            if (s?.midiFillGaps != null) {
-                setFillGaps(s.midiFillGaps);
-            }
-            if (s?.midiImportBpmAsProject != null) {
-                setImportBpmAsProject(s.midiImportBpmAsProject);
-            }
-            if (s?.midiNoteBpmMode != null) {
-                setNoteBpmMode(s.midiNoteBpmMode);
-            }
-            if (s?.midiSpecifiedBpm != null) {
-                setSpecifiedBpm(s.midiSpecifiedBpm);
-            }
-            if (s?.midiMultiTrackMerge != null) {
-                setMultiTrackMerge(s.midiMultiTrackMerge);
-            }
-            if (s?.midiCloseLeadingGap != null) {
-                setCloseLeadingGap(s.midiCloseLeadingGap);
-            }
-            if (s?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-            }
-            if (s?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-            }
-            if (s?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-            }
-            if (s?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-            }
-            if (s?.midiImportTargetReaperClipboard != null) {
-                setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            }
-            if (s?.midiImportTargetParamEditor != null) {
-                setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            }
-        });
+        settingsApi
+            .getUiSettings()
+            .then((s) => {
+                if (s?.midiImportPosition) {
+                    setImportPosition(s.midiImportPosition);
+                }
+                if (s?.midiFillGaps != null) {
+                    setFillGaps(s.midiFillGaps);
+                }
+                if (s?.midiImportBpmAsProject != null) {
+                    setImportBpmAsProject(s.midiImportBpmAsProject);
+                }
+                if (s?.midiNoteBpmMode != null) {
+                    setNoteBpmMode(s.midiNoteBpmMode);
+                }
+                if (s?.midiSpecifiedBpm != null) {
+                    setSpecifiedBpm(s.midiSpecifiedBpm);
+                }
+                if (s?.midiMultiTrackMerge != null) {
+                    setMultiTrackMerge(s.midiMultiTrackMerge);
+                }
+                if (s?.midiCloseLeadingGap != null) {
+                    setCloseLeadingGap(s.midiCloseLeadingGap);
+                }
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+                }
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+                }
+                if (s?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+                }
+                if (s?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+                }
+                if (s?.midiImportTargetReaperClipboard != null) {
+                    setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
+                }
+                if (s?.midiImportTargetParamEditor != null) {
+                    setImportTargetParamEditor(s.midiImportTargetParamEditor);
+                }
+            })
+            // 传输层失败（invoke 拒绝）按"保持出厂默认"降级：本 effect 是
+            // fire-and-forget，不接住会把拒绝漏成 unhandledrejection。
+            .catch(() => {});
     }, []);
     // 记录打开弹窗时的选区（拍数，多段），用于后续计算帧偏移。
     // 注意：MIDI 导入的「选区约束」只有单个时间窗接口，因此用包围区间
@@ -1206,8 +1267,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 右键编辑菜单状态
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
+    /**
+     * 工具栏下拉的**锚点**与**面板** ref 必须分开。
+     *
+     * 【为什么】面板经 `AppAnchoredMenu` 挂到 `document.body` 下，不再是锚点的
+     * DOM 后代 —— 用锚点的 ref 做 `contains` 判定会永远为假，于是"点菜单里的项"
+     * 会被当成"点了外面"，菜单在选中前就被关掉。
+     */
+    const drawToolMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const drawToolMenuRef = useRef<HTMLDivElement | null>(null);
     const [pitchSnapMenuOpen, setPitchSnapMenuOpen] = useState(false);
+    const pitchSnapMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const pitchSnapMenuRef = useRef<HTMLDivElement | null>(null);
     const [paramValuePreview, setParamValuePreview] = useState<{
         clientX: number;
@@ -1284,15 +1354,23 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [editParam, editParamAxisUnit],
     );
 
-    const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
+    const currentDrawTool = s.drawToolMode;
     const drawToolButtonTitle =
-        currentDrawTool === "vibrato" ? tf("vibrato_draw_tool") : tf("draw_tool");
+        currentDrawTool === "vibrato"
+            ? // 颤音工具下把当前预设一并报出来：预设按钮已经并进右键菜单，
+                // 工具按钮的 tooltip 是"接下来会画出什么"的最后一块可扫读信息。
+              `${tf("vibrato_draw_tool")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`
+            : currentDrawTool === "line"
+              ? tf("line_draw_tool")
+              : tf("draw_tool");
     const activeDragDirection =
         s.toolMode === "select"
             ? s.selectDragDirection
             : currentDrawTool === "draw"
               ? s.drawDragDirection
               : s.lineVibratoDragDirection;
+    // 直线与颤音共用同一份拖动方向（`lineVibratoDragDirection`）—— 它们是同一个
+    // "起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"成为新的困惑。
     const activeDragDirectionTool =
         s.toolMode === "select"
             ? ("select" as const)
@@ -1301,21 +1379,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen && !pitchSnapMenuOpen && !vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
             if (pitchSnapMenuRef.current?.contains(target)) return;
-            if (vibratoPresetMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
             setPitchSnapMenuOpen(false);
-            setVibratoPresetMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
                 setPitchSnapMenuOpen(false);
-                setVibratoPresetMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -1324,11 +1399,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
-    /** 量一次颤音预设下拉的最大高度（锚点 / 面板缺失时返回 null）。 */
-    const measureVibratoPresetMenuMaxHeight = useCallback((): number | null => {
-        const anchor = vibratoPresetMenuRef.current;
+    /** 量一次预设列表的最大高度（锚点 / 面板缺失时返回 null）。 */
+    const measurePresetFlyoutMaxHeight = useCallback((): number | null => {
+        const anchor = drawToolMenuAnchorRef.current;
         const container = paramEditorRef.current;
         if (!anchor || !container) return null;
         const anchorRect = anchor.getBoundingClientRect();
@@ -1340,21 +1415,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         });
     }, []);
 
-    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出面板。 */
-    const openVibratoPresetMenu = useCallback(() => {
-        const maxHeight = measureVibratoPresetMenuMaxHeight();
-        if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
-        setVibratoPresetMenuOpen(true);
-    }, [measureVibratoPresetMenuMaxHeight]);
-
-    // 菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算高度。setState 放在
-    // 回调里（而不是 effect 体内同步调用），避免级联渲染。
+    // 工具菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算预设列表的
+    // 可用高度。setState 放在回调里（而不是 effect 体内同步调用），避免级联渲染。
     useEffect(() => {
-        if (!vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen) return;
         const update = () => {
-            const maxHeight = measureVibratoPresetMenuMaxHeight();
-            if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
+            const maxHeight = measurePresetFlyoutMaxHeight();
+            if (maxHeight != null) setPresetFlyoutMaxHeight(maxHeight);
         };
+        update();
         window.addEventListener("resize", update);
         const observer = new ResizeObserver(update);
         if (paramEditorRef.current) observer.observe(paramEditorRef.current);
@@ -1362,7 +1431,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("resize", update);
             observer.disconnect();
         };
-    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuMaxHeight]);
+    }, [drawToolMenuOpen, measurePresetFlyoutMaxHeight]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -1763,25 +1832,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // 一次尺寸变化时才自愈）。因此布局一变就重测。
     }, [syncOffsetApplicable, dockLayout]);
 
-    // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
-    // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)
-    const prevBpmRef = useRef(s.bpm);
-    useEffect(() => {
-        const prevBpm = prevBpmRef.current;
-        prevBpmRef.current = s.bpm;
-        if (s.paramEditorSyncTimeline) return;
-        if (Math.abs(prevBpm - s.bpm) < 1e-9) return;
-        const ratio = prevBpm / Math.max(1e-6, s.bpm);
-        const newScrollLeft = scrollLeftRef.current * ratio;
-        // 先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），再同步面板
-        // state。宿主尚未创建（未挂载）时 `applyHorizontalScrollPosition` 是空操作，
-        // 仍同步 state，与迁移前无宿主时的收尾一致。
-        applyHorizontalScrollPosition(newScrollLeft);
-        scrollLeftRef.current = newScrollLeft;
-        lastScrollLeftRef.current = newScrollLeft;
-        setScrollLeft(newScrollLeft);
-    }, [s.bpm, s.paramEditorSyncTimeline]);
-
     useEffect(() => {
         const timer = setTimeout(() => {
             localStorage.setItem("hifishifter.paramPxPerSec", String(pxPerSec));
@@ -2146,9 +2196,27 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
 
+    // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。不可用时
+    // vslib 从列表消失；当前值已是 vslib 时保留并标注"不可用"，避免下拉框
+    // 回退显示成 nsf-hifigan 而谎报轨道真实算法。
+    const pitchAlgoOptions = useMemo(
+        () =>
+            buildPitchAlgoOptions({
+                noneLabel: t("common_none"),
+                vslibAvailable: s.vslibAvailable,
+                formatUnavailable: (label) => tVars("algo_unavailable_label", { name: label }),
+                currentValue: rootTrack?.pitchAnalysisAlgo,
+            }),
+        [t, tVars, s.vslibAvailable, rootTrack?.pitchAnalysisAlgo],
+    );
+
     const childFormantOffsetParam = useMemo(() => {
         if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
-        const algo = rootTrack?.pitchAnalysisAlgo;
+        // 归一后再判：未识别的算法在后端按默认算法（nsf-hifigan）渲染，而
+        // nsf-hifigan 链路是支持子轨道共振峰偏移的（见
+        // `does_clip_need_processor_render` 的 `has_child_formant_offset`）——
+        // 用原始字符串判断会把这个控件藏掉，功能在后端生效、界面却给不了入口。
+        const algo = resolveEffectivePitchAlgo(rootTrack?.pitchAnalysisAlgo);
         if (algo !== "nsf_hifigan_onnx" && algo !== "vslib") return null;
         return buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack, rootTrack?.pitchAnalysisAlgo]);
@@ -2368,8 +2436,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         (param: ProcessorParamDescriptor) => {
             switch (param.id) {
                 case "breath_enabled":
-                    // 语义是「是否做谐波/噪声分离」，不是「气声开关」——
-                    // 气声与张力都依赖它。见 `breath_separation_tooltip`。
+                    // 完整参数名。语义是「是否做谐波/噪声分离」，不是「气声开关」
+                    // —— 气声与张力都依赖它。工具栏上开关以**纯图标**呈现（见渲染处），
+                    // 全称只在需要完整名字的场合使用。
                     return t("breath_separation_label");
                 case "breath_gain":
                     return t("breath_gain_label");
@@ -2403,8 +2472,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             switch (param.id) {
                 case "breath_gain":
                     return t("param_btn_breath");
-                // `breath_enabled`（谐波/噪声分离）已独立成开关按钮，
-                // 不再走药丸的短标签路径 —— 它有自己的专用渲染分支。
+                // `breath_enabled`（谐波/噪声分离）不在这条短标签路径上 ——
+                // 它以**纯图标分段**渲染在被门禁组的组首（见工具栏渲染处），
+                // 不显示任何文字，因此没有"短标签"可返回。
                 case "hifigan_tension":
                 case "tension":
                     return t("param_btn_tension");
@@ -2430,10 +2500,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const getStaticOptionLabel = useCallback(
         (paramId: string, label: string, value: number) => {
-            if (paramId === "breath_enabled") {
-                if (value === 0) return t("switch_off");
-                if (value === 1) return t("switch_on");
-            }
+            // `breath_enabled` 不在此列：它以纯图标分段渲染在参数组内，
+            // 不再走"静态选项 → 文本"的路径（见工具栏渲染处）。
             if (paramId === "synth_mode") {
                 if (value === 0) return t("vslib_synth_mode_mono");
                 if (value === 1) return t("vslib_synth_mode_mono_formant");
@@ -2501,12 +2569,71 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 关闭时两者置灰、不可编辑，且不参与合成（后端在 `ClipProcessContext`
     // 构造点剥离这两条曲线，因此也不会走 HNSEP）。
     // 阈值语义见 `separationGate.ts`（与后端 `extra_param_enabled` 同口径）。
+    //
+    // `separationDesc` 同时决定开关**是否存在**：该描述符只挂在 nsf-hifigan 的
+    // 描述符表里（见 `renderer/chain.rs` 的 `HIFIGAN_PARAM_DESCRIPTORS`），
+    // 因此 world / vslib 下开关不渲染 —— 那两种算法本就没有气声 / 张力参数。
+    const separationDesc = useMemo(
+        () => processorStaticParams.find((sp) => sp.id === SEPARATION_PARAM_ID) ?? null,
+        [processorStaticParams],
+    );
     const separationEnabled = useMemo(() => {
-        const desc = processorStaticParams.find((sp) => sp.id === SEPARATION_PARAM_ID);
         const defaultValue =
-            desc && desc.kind.type === "static_enum" ? desc.kind.default_value : 0;
+            separationDesc && separationDesc.kind.type === "static_enum"
+                ? separationDesc.kind.default_value
+                : 0;
         return isSeparationEnabled(processorStaticValues[SEPARATION_PARAM_ID], defaultValue);
-    }, [processorStaticParams, processorStaticValues]);
+    }, [separationDesc, processorStaticValues]);
+
+    // 分离开关在工具栏上的落点：被门禁组（气声 + 张力）的**组首**。
+    //
+    // 【为什么是组首而不是"算法下拉之前"】开关只随 nsf-hifigan 出现；若把它放在
+    // 工具栏最右端（算法下拉左侧），切换算法时它整块消失 / 出现，会把音量、声像、
+    // 算法选项一起推来推去。放在参数组内部后，它右侧紧邻的就是固定的
+    // 「音量 → 动态 → 声像」，消失时右侧纹丝不动。
+    //
+    // 位置由 `firstGatedParamId` 从门禁列表推导（见该函数说明），不写死具体 id。
+    const separationSwitchAnchorParamId = useMemo(
+        () => (separationDesc ? firstGatedParamId(orderedProcessorParams.map((p) => p.id)) : null),
+        [separationDesc, orderedProcessorParams],
+    );
+
+    // ── 工具栏横向不足时的分级隐藏 ──────────────────────────────────────────
+    //
+    // 参数编辑器工具栏是**一整行**（标题 / 工具 / 平滑度在左，参数药丸 / 算法在右，
+    // 同属 `h-qt-bar-main` 这一个容器），因此只观察这一个容器：任一处放不下即升级。
+    // 完整层级见 `toolbarOverflow.ts` 的 `TOOLBAR_MAX_TIER`：
+    //   1 标题 · 2 算法文本 · 3 张力药丸 · 4 气声药丸（开关保留）· 5 平滑度文本 ·
+    //   6 平滑度数值 · 7 平滑度滑块 · 8 导入 MIDI · 9 参考轨道组文本
+    // 原则是**只砍冗余、不砍入口**：被隐藏项要么是纯装饰文字（旁边控件已表达同一信息），
+    // 要么功能另有入口；唯一入口（如参考轨道组、分离开关）只瘦身、不隐藏。
+    // 平滑度滑块是**控件**、数值只是读数，故数值（6）先于滑块（7）让位。
+    const toolbarRowRef = useRef<HTMLDivElement | null>(null);
+    const toolbarTier = useToolbarOverflowTier(toolbarRowRef, TOOLBAR_MAX_TIER);
+
+    // 被门禁的药丸逐个让位（第 3 / 4 级各让一个），顺序**先张力后气声**：
+    // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
+    // 组首的药丸让位时开关保留（见下方组首分支）；曲线仍会绘制（见
+    // `effectiveSecondaryParamVisible`）。
+    const gatedPillHideOrder = useMemo(
+        () => gatedParamHideOrder(orderedProcessorParams.map((p) => p.id)),
+        [orderedProcessorParams],
+    );
+    const gatedPillsHidden = separationEnabled
+        ? 0
+        : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
+
+    // 分离关闭时，气声 / 张力的药丸会在第 3 / 4 级逐个让位 —— 用户此刻点不到它们的"眼睛"。
+    // 但"关闭分离时曲线保持可见、只是不可编辑"是既有契约，因此这里在**渲染口径**上
+    // 强制把它们视为可见。不动真实 state：横向恢复后眼睛回到用户原先的设置。
+    const effectiveSecondaryParamVisible = useMemo(() => {
+        if (toolbarTier < 3 || separationEnabled) return secondaryParamVisible;
+        const next = { ...secondaryParamVisible };
+        for (const paramId of SEPARATION_GATED_PARAMS) {
+            next[paramId as ParamName] = true;
+        }
+        return next;
+    }, [toolbarTier, separationEnabled, secondaryParamVisible]);
 
     // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
     // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
@@ -2632,9 +2759,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return getVisibleSecondaryParamIds({
             editParam,
             processorParamIds: processorParams.map((p) => p.id as ParamName),
-            secondaryParamVisible,
+            // 用"渲染口径"的可见性（见 `effectiveSecondaryParamVisible`）：
+            // 药丸被第 3 级隐藏时也要让曲线继续绘制。
+            secondaryParamVisible: effectiveSecondaryParamVisible,
         });
-    }, [editParam, secondaryParamVisible, processorParams]);
+    }, [editParam, effectiveSecondaryParamVisible, processorParams]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
@@ -2746,6 +2875,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const viewSizeRef = useRef({ w: 1, h: 1 });
     const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
+    /**
+     * 当前 dpr（React 形态）：仅供**渲染期内联样式**里的物理像素线宽使用。
+     * 命令式绘制路径每帧现读 `readDevicePixelRatio()`，不经此值。
+     */
+    const devicePixelRatio = useDevicePixelRatio();
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
     // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
@@ -2771,6 +2905,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         const el = scrollerRef.current;
         if (!el) return;
         const ro = new ResizeObserver(() => {
+            // 【为什么用 clientWidth（整数）而不是 getBoundingClientRect（分数）】
+            // 这个值同时是下方 sticky 包裹层的 CSS `width`（`style={{ width: viewSize.w }}`）
+            // 与各画布 `rasterize` 的 CSS 尺寸入参。包裹层是 `overflow: hidden`，
+            // 画布被 `rasterize` 吸附到设备像素后最多比它宽 `0.5 / dpr` CSS px ——
+            // 这点亚像素差被裁掉、不产生滚动条；反过来若取分数宽度，包裹层与画布
+            // 会各自落在不同的亚像素相位上，投影锚点（left: 0）之外的边缘更容易露缝。
+            // 用整数是"最不易出错"的一侧；`Math.floor` 在此是恒等操作
+            //（clientWidth 已是整数），保留只为显式表达"这里要的是整数 CSS 宽"。
             const w = Math.max(1, Math.floor(el.clientWidth));
             const h = Math.max(1, Math.floor(el.clientHeight));
             viewSizeRef.current = { w, h };
@@ -3936,6 +4078,67 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
+     * 时间轴几何手势的「按下时几何」快照（见 `clipGeometryPreviewBus`）。
+     *
+     * 【为什么用 state 而不是 ref】手势起止是**离散**事件（每只手势各一次），
+     * 而它决定波形的乘数从哪儿来 —— 必须触发一次重渲染，让幅度映射挂上/撤下
+     * 几何映射。手势内部的逐帧变化不走 state（走 `loudnessWarpRef` + LUT 的
+     * 映射身份比较），否则整块面板会以指针频率重渲染。
+     */
+    const [clipGeometryPreviewOrigin, setClipGeometryPreviewOrigin] = useState<
+        readonly ClipGeometrySnapshot[] | null
+    >(() => getClipGeometryPreviewOrigin());
+
+    /**
+     * 收尾期的「基线溯源基准」：手势结束**之前**最后落地的那份快照的溯源键。
+     *
+     * 【为什么不能用取数序号】提交会先 `checkpointHistory()` 递增 `paramsEpoch`
+     * （早于后端写入），而取数序号在**发出**时（`useLoudnessCurves` 的
+     * `fetchReqIdRef`）就推进 —— 水位与"这份数据反映哪份几何"必然错拍，
+     * 于是映射时而提前撤下（闪一下）、时而过晚撤下（新基线被再搬一次）。
+     *
+     * 溯源键是**事实**：拖拽期间后端几何被冻结 ⇒ 键恒定；提交写回后端后键必变。
+     * 于是"键变了"当且仅当"这份基线反映新几何"。判定在**渲染期**完成（见
+     * `warpSettled`），撤下与快照落地因此落在同一个 React 提交里，
+     * 结构上不存在"新快照 × 旧映射"或"旧快照 × 无映射"的中间帧。
+     */
+    const warpBasisKeyRef = useRef<string | null>(null);
+    /** 键不可用时的退化基准（快照对象身份），见 `warpSettled`。 */
+    const warpBasisSnapshotRef = useRef<LoudnessSnapshot | null>(null);
+    /** 手势是否已结束、正在等权威快照追上。 */
+    const warpSettlingRef = useRef(false);
+
+    useEffect(() => {
+        setClipGeometryPreviewOrigin(getClipGeometryPreviewOrigin());
+        warpSettlingRef.current = false;
+        return subscribeClipGeometryPreview(() => {
+            const origin = getClipGeometryPreviewOrigin();
+            if (origin !== null) {
+                warpSettlingRef.current = false;
+                setClipGeometryPreviewOrigin(origin);
+                return;
+            }
+            // 手势结束：**不在这里**撤下映射。提交之后、权威快照回来之前，映射仍是
+            // 把基线搬到新位置的唯一正确来源（后端此刻正在算的正是同一件事）。
+            // 撤下交给 `warpSettled`（渲染期判定，与快照落地同批）。
+            //
+            // 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，
+            // 差分随之退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+            warpSettlingRef.current = true;
+        });
+    }, []);
+
+    /**
+     * 当前生效的几何映射（渲染期同步的 ref 镜像，见文件内既有的同款模式）。
+     *
+     * 幅度映射以 provider 惰性读取它，因此映射对象的**引用**保持不变（几何缓存与
+     * 组件 memo 不会因它而重建），而变化由查表键里的映射身份比较捕捉
+     * （见 `makeLoudnessAmplitudeMap` 的 `warp` 说明）。
+     */
+    const loudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    const readLoudnessWarp = useCallback(() => loudnessWarpRef.current, []);
+
+    /**
      * 波形重绘的**帧内合并**调度（与曲线层同用 `renderKernel/renderLoop` 语义）。
      *
      * 【为什么需要】一次全量重建要重算两千余列 × 16 切片的包络并上传数百 KB
@@ -4027,8 +4230,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 dyn: () => readLiveOverrideFor("dyn"),
             },
             () => loudnessWaveformRevisionRef.current,
+            // 拖拽期间的几何映射：把基线/曲线搬到 clip 的当前位置，消除
+            // 「旧位置的基线 × 新位置的峰值」造成的整段错位（见该模块的文件头）。
+            readLoudnessWarp,
         );
-    }, [loudnessSnapshot, readLiveOverrideFor]);
+    }, [loudnessSnapshot, readLiveOverrideFor, readLoudnessWarp]);
 
     const refreshSecondaryNowRef = useRef(refreshSecondaryNow);
     useEffect(() => {
@@ -4209,6 +4415,97 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         () => s.clips.filter((c) => groupTrackIds.has(c.trackId)),
         [s.clips, groupTrackIds],
     );
+
+    /**
+     * 拖拽期间的响度时域映射：把「快照所依据的几何」与当前几何的差分，应用到基线 /
+     * 曲线（见 `loudnessGeometryWarp` 的文件头）。
+     *
+     * 【为什么只取本轨道组的 clip】原声基线是**按根轨道组**组装的；别的轨道组的
+     * clip 与本组基线无关，把它们的映射算进来会错误地搬移本组曲线。`trackClips`
+     * 已按 `groupTrackIds` 过滤，正好是基线的参与集合。
+     *
+     * 【为什么在渲染期判定收尾】`warpSettled` 只依赖"当前快照的溯源键"这一个事实，
+     * 因此它翻转的那次渲染**就是**新快照生效的那次渲染：映射在同一次提交里变成
+     * `null`，`pianoRollAmplitudeMap` 也在同一次提交里换新 —— 不存在中间帧。
+     */
+    const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
+    // 非收尾期：基准跟随最新快照。拖拽期间后端几何被冻结，期间落地的快照同样是
+    // "按下之前"的几何，对它可以安全地继续套用映射（不 re-base 会让映射平白失效）。
+    if (!warpSettlingRef.current) {
+        warpBasisKeyRef.current = loudnessSnapshotKey;
+        warpBasisSnapshotRef.current = loudnessSnapshot;
+    }
+    /**
+     * 收尾是否已完成：手势结束**之后**才落地的一份快照带回了不同的溯源键
+     * （= 它反映的是新几何）。
+     *
+     * 键不可用（后端从未组装过基线）时退化为「快照换了对象即算追上」—— 该路径下
+     * 后端没有可比对的几何信息，且基线本身也多半为空（映射在画面上无作用）。
+     */
+    const warpSettled =
+        warpSettlingRef.current &&
+        (warpBasisKeyRef.current !== null && loudnessSnapshotKey !== null
+            ? loudnessSnapshotKey !== warpBasisKeyRef.current
+            : loudnessSnapshot !== warpBasisSnapshotRef.current);
+
+    const loudnessGeometryWarp = useMemo(() => {
+        if (clipGeometryPreviewOrigin === null || warpSettled) return null;
+        return createLoudnessGeometryWarp({
+            origin: clipGeometryPreviewOrigin,
+            clips: trackClips,
+            framePeriodMs: loudnessFpMs,
+            lockParamLines: s.lockParamLinesEnabled,
+        });
+    }, [
+        clipGeometryPreviewOrigin,
+        trackClips,
+        s.lockParamLinesEnabled,
+        loudnessFpMs,
+        // 快照对象本身**不是**依赖：映射只由"按下时几何 + 当前几何"决定，快照换了
+        // 对象而键没变（拖拽期间后端几何被冻结时的重取）不该让映射重算。
+        // 需要跟着快照变化的那一件事 —— 收尾判据 `warpSettled` —— 已在依赖里。
+        warpSettled,
+    ]);
+
+    // 收尾完成 ⇒ 可以安全丢掉基准几何：此时映射已是 `null`，且下一次手势会发布新的。
+    useEffect(() => {
+        if (!warpSettled || clipGeometryPreviewOrigin === null) return;
+        warpSettlingRef.current = false;
+        setClipGeometryPreviewOrigin(null);
+    }, [warpSettled, clipGeometryPreviewOrigin]);
+
+    /**
+     * 映射变化 ⇒ **渲染期**推进修订号。
+     *
+     * 【为什么必须在渲染期】映射引用在渲染期写入 `loudnessWarpRef`（读取方在绘制期
+     * 惰性读取），而修订号此前在被动 effect 里推进 —— 两者不同步：`WaveformSurface`
+     * 的 layout effect 会在同一次提交里同步全量重建，它读到的将是「新映射 / 旧修订号」，
+     * 几何缓存据此误判"可复用"从而画出上一帧的顶点。这里把修订号与引用一起在渲染期
+     * 更新，任何一次绘制看到的 `(amplitudeMap, revision)` 都与当前映射一致。
+     * 重绘**请求**仍交给下面的 effect（那只影响"什么时候画"，不影响"画得对不对"）。
+     */
+    const warpRevisionRef = useRef<LoudnessGeometryWarp | null>(null);
+    if (warpRevisionRef.current !== loudnessGeometryWarp) {
+        warpRevisionRef.current = loudnessGeometryWarp;
+        loudnessWaveformRevisionRef.current += 1;
+    }
+    // 渲染期同步镜像（本文件既有的取值新鲜度模式：读取方在绘制期惰性读取）。
+    loudnessWarpRef.current = loudnessGeometryWarp;
+
+    /**
+     * 映射变化 ⇒ 请求一次重绘。
+     *
+     * 【为什么不能只靠 rows 变化】拖拽期间 `rows` 确实每帧都换（几何跟着走），
+     * 但映射的变化源不止几何：手势结束、锁定参数线开关、以及"等权威快照追上"的
+     * 收尾，都可能在 `rows` 不变的情况下换掉映射。少了这一步，那些帧会停在旧映射
+     * 上（画面与数据不一致）。
+     */
+    const lastLoudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    useEffect(() => {
+        if (lastLoudnessWarpRef.current === loudnessGeometryWarp) return;
+        lastLoudnessWarpRef.current = loudnessGeometryWarp;
+        waveformRepaintLoopRef.current?.invalidate();
+    }, [loudnessGeometryWarp]);
 
     /**
      * 参数编辑器的统一坐标投影（渲染期）。
@@ -5130,7 +5427,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoPresetPrevKb,
         vibratoPresetNextKb,
         vibratoPreset: activeVibratoPreset,
-        vibratoPresetList: resolvedVibratoPresets,
+        straightVibratoPreset,
         vibratoPresetCycleList: enabledVibratoPresetList,
         onVibratoDragStateChange: setVibratoDragHud,
         onVibratoDragEnd: useCallback(() => {
@@ -5991,7 +6288,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     derivedPasteSelection = pasteTargetSelectionFromClipboard({
                         clipboard: pasteClipboard,
                         // 锚点 = 播放光标所在帧（与粘贴的帧制口径一致）。
-                        anchorFrame: timeToFrame(s.playheadSec, fp),
+                        // 【调用时现读】播放头高频前进，`s` 是回调重建时的快照
+                        // （依赖数组刻意不含它，见下方 eslint-disable 注释），
+                        // 从闭包里取会把粘贴锚定到上一次渲染时的旧光标位置。
+                        anchorFrame: timeToFrame(store.getState().session.playheadSec, fp),
                     });
                     if (!derivedPasteSelection) {
                         pasteReaperClipboardFallback();
@@ -6013,7 +6313,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (selFrameRanges.length === 0) return;
             const firstRange = selFrameRanges[0];
             const startFrame = firstRange.startFrame;
-            const frameCount = firstRange.frameCount;
 
             /**
              * 逐段执行「取数 → 变换 → 回写」。
@@ -6116,10 +6415,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
-            // 多选区逐段独立执行，整批只打一个撤销点。
-            // 平滑度解析顺序保持旧语义：对话框显式传入 → store 全局设置。
+            // 多选区**逐段独立**执行，整批只打一个撤销点。
+            //
+            // 回调收到**当前段**：移调度数 / 量化 / 均值量化要按本段起始帧解析
+            // Tempo Map 音阶（见 applySelectionEditOverRanges 的说明）。
             const runSelectionEdit = async (
-                editSelection: (currentSelectionVals: number[]) => number[],
+                editSelection: (currentSelectionVals: number[], range: FrameRange) => number[],
                 extension?: SelectionEditExtension,
                 options?: { preserveDynSentinels?: boolean },
             ) => {
@@ -6365,31 +6666,37 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 case "average": {
                     const strengthPercent = clamp(Number(data?.strength ?? 100) || 0, 0, 100);
                     if (strengthPercent <= 0) return;
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                        true,
-                        isDynParam(editParam),
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    if (vals.length === 0) return;
-                    const result = averageSelectionValues(vals, editParam, strengthPercent);
-                    // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
-                    if (isDynParam(editParam)) {
-                        restoreDynSentinels(result, payload.edit_sentinel);
-                    }
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
+                    // 多选区逐段独立：各段取自己的值、求自己的均值（与 smooth 同构），
+                    // 整批只打一个撤销点。旧实现只处理 selFrameRanges[0]，多段选区
+                    // 会静默地只拉平第一段。
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                            true,
+                            isDynParam(editParam),
+                        );
+                        if (!res?.ok) return false;
+                        const payload = res as ParamFramesPayload;
+                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (vals.length === 0) return false;
+                        const result = averageSelectionValues(vals, editParam, strengthPercent);
+                        // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(result, payload.edit_sentinel);
+                        }
+                        const written = await paramsApi.setParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            result,
+                            isFirstWrite,
+                        );
+                        return Boolean(written?.ok);
+                    });
                     bumpRefreshToken();
                     break;
                 }
@@ -6416,20 +6723,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     if (degreeSteps === 0) return;
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             return editParam === "pitch"
                                 ? vals.map((midi, i) => {
                                       if (midi === 0) return 0;
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   })
                                 : vals.map((midi, i) => {
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   });
@@ -6679,9 +6990,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const toleranceSemitone = toleranceCents / 100;
                     // project base scale is controlled from toolbar; do not change it here
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
-                    const scaleAt = (i: number): ScaleLike =>
-                        fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
-                    await runSelectionEdit((vals) =>
+                    const scaleAt = (i: number, range: FrameRange): ScaleLike =>
+                        fixedScale ??
+                        projectScaleAtSec(((range.startFrame + i) * fpMs) / 1000) ??
+                        "C";
+                    await runSelectionEdit((vals, range) =>
                         unit === "semitone"
                             ? vals.map((v) =>
                                   editParam === "pitch" && v === 0
@@ -6699,7 +7012,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                   editParam === "pitch" && v === 0
                                       ? 0
                                       : (() => {
-                                            const snapped = snapToScale(v, scaleAt(i));
+                                            const snapped = snapToScale(v, scaleAt(i, range));
                                             return Math.abs(v - snapped) <= toleranceSemitone
                                                 ? v
                                                 : snapped +
@@ -6755,7 +7068,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     let meanDelta = 0;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             // pitch=0 视为未编辑，不参与均值；全部未浊时 delta=0，
                             // 结果与输入逐帧相同（相比旧的直接 return 会多一个
                             // 无变化的撤销点，无副作用，可接受）。
@@ -6765,7 +7078,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const midScale =
                                 fixedScale ??
                                 projectScaleAtSec(
-                                    ((startFrame + Math.floor(vals.length / 2)) * fpMs) / 1000,
+                                    ((range.startFrame + Math.floor(vals.length / 2)) * fpMs) /
+                                        1000,
                                 ) ??
                                 "C";
                             const quantizedAvg =
@@ -7246,6 +7560,29 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
+    /**
+     * 直线工具的图标：一条斜线。
+     *
+     * 与颤音工具的波形图区分开 —— 两者若共用图标，工具栏上就只剩 tooltip 能说明
+     * "现在按下去画的是直线还是颤音"，而 tooltip 需要悬停才看得见。
+     */
+    const lineToolIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <path
+                d="M2 12L13 3"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+            />
+        </svg>
+    );
+
     const pitchSnapSemitoneIcon = (
         <svg
             width="15"
@@ -7278,7 +7615,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
-    const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
+    const currentDrawToolIcon =
+        currentDrawTool === "vibrato"
+            ? vibratoToolIcon
+            : currentDrawTool === "line"
+              ? lineToolIcon
+              : <Pencil1Icon />;
 
     // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
     // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
@@ -7374,7 +7716,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0 overflow-hidden whitespace-nowrap"
+                ref={toolbarRowRef}
+                /* 当前隐藏层级（0 = 全部显示）：观测与调试出口，见 toolbarOverflow.ts。 */
+                data-toolbar-tier={toolbarTier}
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <AppIconButton
@@ -7390,7 +7735,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         }}
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
-                    <span className="hs-type-label font-semibold">{tf("param_editor_short")}</span>
+                    {/* 第 1 级隐藏：面板身份已由 dock 标签 / 浮窗标题表达，
+                        这里是重复提示，横向不足时最先让位。 */}
+                    {toolbarTier < 1 ? (
+                        <span className="hs-type-label font-semibold">
+                            {tf("param_editor_short")}
+                        </span>
+                    ) : null}
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -7405,17 +7756,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             emphasis="accent"
                             tooltip={t("common_select")}
                             tabIndex={-1}
-                            onClick={() => dispatch(setToolMode("select"))}
+                            onClick={() => void dispatch(setToolModePersistent("select"))}
                             icon={<CursorArrowIcon />}
                         />
-                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                        {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu），
+                            这里只负责提供"菜单该贴在哪"的矩形。 */}
+                        <Box ref={drawToolMenuAnchorRef} data-hs-context-menu>
                             <AppIconButton
                                 active={s.toolModeGroup === "draw"}
                                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                                 emphasis="accent"
                                 tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
-                                onClick={() => dispatch(setToolMode(currentDrawTool))}
+                                onClick={() =>
+                                    void dispatch(setToolModePersistent(currentDrawTool))
+                                }
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     setDrawToolMenuOpen(true);
@@ -7463,162 +7818,175 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }
                             />
 
-                            {drawToolMenuOpen && (
-                                <Box
-                                    ref={drawToolMenuRef}
-                                    data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                                >
-                                    {[
-                                        {
-                                            mode: "draw" as const,
-                                            label: tf("draw_tool"),
-                                            icon: <Pencil1Icon />,
-                                        },
-                                        {
-                                            mode: "vibrato" as const,
-                                            label: tf("vibrato_draw_tool"),
-                                            icon: vibratoToolIcon,
-                                        },
-                                    ].map((item) => {
-                                        const active = currentDrawTool === item.mode;
-                                        return (
-                                            <button
-                                                key={item.mode}
-                                                type="button"
-                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover`}
-                                                onClick={() => {
-                                                    dispatch(setToolMode(item.mode));
-                                                    setDrawToolMenuOpen(false);
-                                                }}
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                            >
-                                                <Flex align="center" gap="2">
-                                                    <Box
-                                                        style={{
-                                                            display: "flex",
-                                                            width: 15,
-                                                            height: 15,
-                                                            alignItems: "center",
-                                                            justifyContent: "center",
-                                                        }}
-                                                    >
-                                                        {item.icon}
-                                                    </Box>
-                                                    <span className="hs-type-label">
-                                                        {item.label}
-                                                    </span>
-                                                </Flex>
-                                                {active ? <CheckIcon /> : null}
-                                            </button>
-                                        );
-                                    })}
-                                </Box>
-                            )}
-                        </Box>
-
-                        {/* 颤音预设选择器：紧贴颤音工具图标右侧 —— 同属"绘制工具"这一组，
-                            因此与它之间不放分隔线。样式按周围的图标按钮来做
-                            （15×15 波形图标 + tooltip），不再占一截文字宽度。 */}
-                        {activeDragDirectionTool === "vibrato" && (
-                            <Box
-                                ref={vibratoPresetMenuRef}
-                                style={{ position: "relative" }}
-                                data-hs-context-menu
+                            <AppAnchoredMenu
+                                open={drawToolMenuOpen}
+                                anchorRef={drawToolMenuAnchorRef}
+                                menuRef={drawToolMenuRef}
+                                // 菜单里挂着 `AppSubMenu` 的绝对定位子面板：壳一旦
+                                // `overflow-y: auto` 就会把它裁掉（与 `ClipContextMenu`
+                                // 同一理由，见 `.hs-menu--submenu` 的说明）。子面板自己滚动。
+                                className="hs-menu--no-scroll"
                             >
-                                <AppIconButton
-                                    active={vibratoPresetMenuOpen}
-                                    tooltip={`${tf("vibrato_toolbar_label")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`}
-                                    aria-haspopup="menu"
-                                    aria-expanded={vibratoPresetMenuOpen}
-                                    tabIndex={-1}
-                                    onClick={() =>
-                                        vibratoPresetMenuOpen
-                                            ? setVibratoPresetMenuOpen(false)
-                                            : openVibratoPresetMenu()
-                                    }
-                                    // 右键一步直达管理器：左键的下拉是"快速切换"，
-                                    // 右键的"进设置"与其它工具按钮的右键习惯一致，
-                                    // 不必先开下拉再点其中的「管理预设…」。
-                                    onContextMenu={(event) => {
-                                        event.preventDefault();
-                                        setVibratoPresetMenuOpen(false);
-                                        openVibratoDialog("manage");
-                                    }}
+                                {/* 三种绘制工具并列。直线与颤音在这里是**平级**的两项
+                                    —— 它们在类型与实现上也是两个工具，只是共用一条
+                                    "起点 → 终点"的拖拽路径。 */}
+                                {[
+                                    {
+                                        mode: "draw" as const,
+                                        label: tf("draw_tool"),
+                                        icon: <Pencil1Icon />,
+                                        shortcut: drawToolKb,
+                                    },
+                                    {
+                                        mode: "line" as const,
+                                        label: tf("line_draw_tool"),
+                                        icon: lineToolIcon,
+                                        shortcut: lineToolKb,
+                                    },
+                                    {
+                                        mode: "vibrato" as const,
+                                        label: tf("vibrato_draw_tool"),
+                                        icon: vibratoToolIcon,
+                                        shortcut: vibratoToolKb,
+                                    },
+                                ].map((item) => {
+                                    const active = currentDrawTool === item.mode;
+                                    return (
+                                        <button
+                                            key={item.mode}
+                                            type="button"
+                                            className="hs-menu__item"
+                                            onClick={() => {
+                                                void dispatch(setToolModePersistent(item.mode));
+                                                setDrawToolMenuOpen(false);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="flex min-w-0 items-center gap-2">
+                                                <Box className="hs-menu__icon">{item.icon}</Box>
+                                                <span className="hs-menu__label-text">
+                                                    {item.label}
+                                                </span>
+                                            </span>
+                                            <span className="hs-menu__trail">
+                                                {active ? (
+                                                    <span className="hs-menu__check">
+                                                        <CheckIcon />
+                                                    </span>
+                                                ) : null}
+                                                {isNoneBindingList(item.shortcut) ? null : (
+                                                    <span>
+                                                        {formatKeybindingList(item.shortcut, "")}
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+
+                                <Box className="hs-menu__separator shrink-0" />
+
+                                {/* 颤音工具的二级菜单 = 预设列表 + 管理器入口。
+                                    它紧跟在「颤音工具」下面：预设属于这个工具，摆到别处
+                                    会让"换一个颤音"多出一个说不清归属的入口。
+
+                                    行上带活动预设的波形缩略图与名字 —— 预设按钮从工具栏
+                                    撤掉之后，"现在用的是哪个预设"就靠这一行扫读。
+
+                                    【它始终是颤音工具的活动预设，与当前工具无关】这个入口
+                                    回答的是"**颤音工具**用哪个预设"，那是颤音工具的属性，不是
+                                    "当前这一笔画什么"。直线工具固定从直线预设起手（见
+                                    `straightVibratoPreset`），那是它自己的事，不该改掉这里显示的
+                                    值 —— 用户切回颤音工具时，看到的必须还是他挑的那个。 */}
+                                <AppSubMenu
+                                    label={tf("vibrato_toolbar_label")}
+                                    badge={vibratoPresetLabel(activeVibratoPreset, tf)}
                                     icon={
-                                        // 图标即**活动预设的波形缩略图**：切预设即换图，
-                                        // 看一眼工具栏就知道接下来画出来的会是什么。
                                         <VibratoPresetGlyph
                                             preset={activeVibratoPreset}
                                             width={15}
                                             height={15}
                                         />
                                     }
-                                />
-                                {vibratoPresetMenuOpen && (
-                                    <Box
-                                        data-hs-context-menu
-                                        // 永远向下展开：参数编辑器是停靠窗口，上方没有
-                                        // 展示区，翻上去只会盖住自己的工具栏。
-                                        className="absolute left-0 top-[calc(100%+4px)] z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
-                                        style={{ maxHeight: vibratoPresetMenuMaxHeight }}
+                                    panelClassName="hs-menu--no-scroll flex flex-col"
+                                >
+                                    <ScrollArea
+                                        className="hs-scroll-area min-h-0"
+                                        style={{ flex: "1 1 auto", maxHeight: presetFlyoutMaxHeight }}
+                                        scrollbars="vertical"
+                                        type="auto"
                                     >
-                                        <ScrollArea
-                                            className="hs-scroll-area min-h-0"
-                                            style={{ flex: "1 1 auto" }}
-                                            scrollbars="vertical"
-                                            type="auto"
-                                        >
-                                            {enabledVibratoPresetList.map((preset) => (
-                                                <button
-                                                    key={preset.id}
-                                                    type="button"
-                                                    className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
-                                                    onClick={() => {
-                                                        dispatch(setActiveVibratoPreset(preset.id));
+                                        {enabledVibratoPresetList.map((preset) => (
+                                            <button
+                                                key={preset.id}
+                                                type="button"
+                                                className="hs-menu__item"
+                                                onClick={() => {
+                                                    // 选中「直线」预设 = 切到直线工具 ——
+                                                    // 两者是同一件事，由 `VibratoChoice`
+                                                    // 统一裁决，这里不另写判断。
+                                                    const choice = chooseVibratoPreset(preset.id);
+                                                    if (choice.tool === "line") {
+                                                        void dispatch(
+                                                            setToolModePersistent("line"),
+                                                        );
+                                                    } else {
+                                                        void dispatch(
+                                                            setToolModePersistent("vibrato"),
+                                                        );
+                                                        dispatch(
+                                                            setActiveVibratoPreset(
+                                                                choice.presetId,
+                                                            ),
+                                                        );
                                                         void dispatch(persistUiSettings());
-                                                        setVibratoPresetMenuOpen(false);
-                                                    }}
-                                                    onPointerDown={(e) => e.stopPropagation()}
-                                                >
-                                                    <span className="flex items-center gap-2">
-                                                        <VibratoPresetGlyph
-                                                            preset={preset}
-                                                            width={26}
-                                                            height={10}
-                                                        />
-                                                        <span>
-                                                            {vibratoPresetLabel(preset, tf)}
-                                                        </span>
+                                                    }
+                                                    setDrawToolMenuOpen(false);
+                                                }}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                            >
+                                                <span className="flex min-w-0 items-center gap-2">
+                                                    <VibratoPresetGlyph
+                                                        preset={preset}
+                                                        width={26}
+                                                        height={10}
+                                                    />
+                                                    <span className="hs-menu__label-text">
+                                                        {vibratoPresetLabel(preset, tf)}
                                                     </span>
+                                                </span>
+                                                <span className="hs-menu__trail">
                                                     {preset.id === activeVibratoPresetId ? (
-                                                        <CheckIcon />
+                                                        <span className="hs-menu__check">
+                                                            <CheckIcon />
+                                                        </span>
                                                     ) : null}
-                                                </button>
-                                            ))}
-                                        </ScrollArea>
-                                        <Box
-                                            className="my-1 shrink-0"
-                                            style={{ height: 1, background: "var(--qt-divider)" }}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
-                                            onClick={() => {
-                                                setVibratoPresetMenuOpen(false);
-                                                openVibratoDialog("manage");
-                                            }}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </ScrollArea>
+                                    <Box className="hs-menu__separator shrink-0" />
+                                    <button
+                                        type="button"
+                                        className="hs-menu__item shrink-0"
+                                        onClick={() => {
+                                            setDrawToolMenuOpen(false);
+                                            openVibratoDialog("manage");
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span className="hs-menu__label-text">
                                             {tf("vibrato_manager_open")}
-                                        </button>
-                                    </Box>
-                                )}
-                            </Box>
-                        )}
+                                        </span>
+                                    </button>
+                                </AppSubMenu>
+                            </AppAnchoredMenu>
+                        </Box>
                         <Box
                             style={{
-                                width: 1,
+                                // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定
+                                // （1 CSS px 在 dpr=1.25 下是 1.25 物理像素，边缘必发虚）。
+                                width: wholeDevicePxLength(1, devicePixelRatio),
                                 height: 18,
                                 background: "var(--gray-8)",
                                 marginInline: 4,
@@ -7629,9 +7997,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <AppIconButton
                             active={activeDragDirection !== "free"}
                             tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
-                                isNoneBinding(cycleDragDirectionKb)
+                                isNoneBindingList(cycleDragDirectionKb)
                                     ? ""
-                                    : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
+                                    : ` (${formatKeybindingList(cycleDragDirectionKb, "")})`
                             }`}
                             tabIndex={-1}
                             onClick={() => {
@@ -7691,7 +8059,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             }
                         />
 
-                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                        {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu）。 */}
+                        <Box ref={pitchSnapMenuAnchorRef} data-hs-context-menu>
                             <AppIconButton
                                 active={effectivePitchSnapVisual}
                                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
@@ -7785,84 +8154,80 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }
                             />
 
-                            {pitchSnapMenuOpen && (
-                                <Box
-                                    ref={pitchSnapMenuRef}
-                                    data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            <AppAnchoredMenu
+                                open={pitchSnapMenuOpen}
+                                anchorRef={pitchSnapMenuAnchorRef}
+                                menuRef={pitchSnapMenuRef}
+                            >
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        dispatch(setPitchSnapUnit("semitone"));
+                                        if (!s.pitchSnapEnabled) {
+                                            dispatch(togglePitchSnap());
+                                        }
+                                        void dispatch(persistUiSettings());
+                                        setPitchSnapMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                        onClick={() => {
-                                            dispatch(setPitchSnapUnit("semitone"));
-                                            if (!s.pitchSnapEnabled) {
-                                                dispatch(togglePitchSnap());
-                                            }
-                                            void dispatch(persistUiSettings());
-                                            setPitchSnapMenuOpen(false);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
-                                                {pitchSnapSemitoneIcon}
-                                            </Box>
-                                            <span>{tf("pitch_snap_menu_semitone")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                        onClick={() => {
-                                            dispatch(setPitchSnapUnit("scale"));
-                                            if (!s.pitchSnapEnabled) {
-                                                dispatch(togglePitchSnap());
-                                            }
-                                            void dispatch(persistUiSettings());
-                                            setPitchSnapMenuOpen(false);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
-                                                {pitchSnapScaleIcon}
-                                            </Box>
-                                            <span>{tf("pitch_snap_menu_scale")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
-                                    </button>
-                                    <div className="my-1 border-t border-qt-border" />
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                        onClick={() => {
-                                            setPitchSnapMenuOpen(false);
-                                            setPitchSnapOpen(true);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span>{tf("pitch_snap_settings_action")}</span>
-                                    </button>
-                                </Box>
-                            )}
+                                    <span className="flex min-w-0 items-center gap-2">
+                                        <Box className="hs-menu__icon">{pitchSnapSemitoneIcon}</Box>
+                                        <span className="hs-menu__label-text">
+                                            {tf("pitch_snap_menu_semitone")}
+                                        </span>
+                                    </span>
+                                    <span className="hs-menu__trail">
+                                        {s.pitchSnapUnit === "semitone" ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        dispatch(setPitchSnapUnit("scale"));
+                                        if (!s.pitchSnapEnabled) {
+                                            dispatch(togglePitchSnap());
+                                        }
+                                        void dispatch(persistUiSettings());
+                                        setPitchSnapMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="flex min-w-0 items-center gap-2">
+                                        <Box className="hs-menu__icon">{pitchSnapScaleIcon}</Box>
+                                        <span className="hs-menu__label-text">
+                                            {tf("pitch_snap_menu_scale")}
+                                        </span>
+                                    </span>
+                                    <span className="hs-menu__trail">
+                                        {s.pitchSnapUnit === "scale" ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                                <div className="hs-menu__separator" role="separator" />
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        setPitchSnapMenuOpen(false);
+                                        setPitchSnapOpen(true);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="hs-menu__label-text">
+                                        {tf("pitch_snap_settings_action")}
+                                    </span>
+                                </button>
+                            </AppAnchoredMenu>
                         </Box>
                         <AppIconButton
                             active={s.scaleHighlightMode === "always"}
@@ -7973,64 +8338,78 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
-                                看起来是有意的降级，而不是渲染出错的半截字。 */}
-                            <span
-                                className="hs-type-label"
-                                data-tooltip={tf("edge_smoothness")}
-                                style={{
-                                    minWidth: 0,
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                }}
-                            >
-                                {tf("edge_smoothness_short")}:
-                            </span>
-                            <input
-                                ref={attachEdgeSmoothnessWheel}
-                                className="qt-range"
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(s.edgeSmoothnessPercent)}
-                                onChange={(e) => {
-                                    const next = Number(e.currentTarget.value);
-                                    dispatch(setEdgeSmoothnessPercent(next));
-                                }}
-                                onPointerUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                onKeyUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                style={{
-                                    // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
-                                    // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
-                                    // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
-                                    // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
-                                    // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
-                                    //
-                                    // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
-                                    // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
-                                    // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
-                                    // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
-                                    // （数值仍可读，滚轮调值照常可用）。
-                                    flex: "1 1 0",
-                                    // 非 flex 上下文（理论上不会发生）时的兜底宽度。
-                                    width: 120,
-                                    minWidth: 16,
-                                    maxWidth: 120,
-                                }}
-                            />
+                                看起来是有意的降级，而不是渲染出错的半截字。
+                                第 5 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
+                            {toolbarTier < 5 ? (
+                                <span
+                                    className="hs-type-label"
+                                    data-tooltip={tf("edge_smoothness")}
+                                    style={{
+                                        minWidth: 0,
+                                        whiteSpace: "nowrap",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                    }}
+                                >
+                                    {tf("edge_smoothness_short")}:
+                                </span>
+                            ) : null}
+                            {/* 第 7 级才隐藏滑块：它是**控件**，比只读的百分比数值（第 6 级）
+                                更该留到最后。悬停时用 ToolTip 报出当前百分比 —— 数值被隐藏
+                                （第 6 级）之后仍能读到；第二行沿用本项目的"动作"提示体裁。 */}
+                            {toolbarTier < 7 ? (
+                                <input
+                                    ref={attachEdgeSmoothnessWheel}
+                                    className="qt-range"
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    value={Math.round(s.edgeSmoothnessPercent)}
+                                    data-tooltip={`${tf("edge_smoothness")}: ${Math.round(
+                                        s.edgeSmoothnessPercent,
+                                    )}%\n${tf("edge_smoothness_adjust_hint")}`}
+                                    onChange={(e) => {
+                                        const next = Number(e.currentTarget.value);
+                                        dispatch(setEdgeSmoothnessPercent(next));
+                                    }}
+                                    onPointerUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    onKeyUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    style={{
+                                        // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
+                                        // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
+                                        // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
+                                        // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
+                                        // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                        //
+                                        // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
+                                        // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
+                                        // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
+                                        // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
+                                        // （数值仍可读，滚轮调值照常可用）。
+                                        flex: "1 1 0",
+                                        // 非 flex 上下文（理论上不会发生）时的兜底宽度。
+                                        width: 120,
+                                        minWidth: 16,
+                                        maxWidth: 120,
+                                    }}
+                                />
+                            ) : null}
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
-                                但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
-                            <span
-                                className="hs-type-label"
-                                style={{ minWidth: 28, textAlign: "right" }}
-                            >
-                                {Math.round(s.edgeSmoothnessPercent)}%
-                            </span>
+                                但不再是 36px 那种"宁可溢出也不缩"的宽度。
+                                第 6 级隐藏：它只是**读数**，比滑块（第 7 级）先让位。 */}
+                            {toolbarTier < 6 ? (
+                                <span
+                                    className="hs-type-label"
+                                    style={{ minWidth: 28, textAlign: "right" }}
+                                >
+                                    {Math.round(s.edgeSmoothnessPercent)}%
+                                </span>
+                            ) : null}
                         </Flex>
                     </Flex>
                 </Flex>
@@ -8056,13 +8435,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             color="gray"
                                             style={{ cursor: "pointer" }}
                                         >
-                                            {buildReferenceRootTrackTriggerElement(
-                                                `${tf("reference_root_tracks_short")}${
-                                                    visibleReferenceRootTrackIds.length > 0
-                                                        ? ` (${visibleReferenceRootTrackIds.length})`
-                                                        : ""
-                                                }`,
-                                            )}
+                                            {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
+                                                快捷键入口，是**唯一入口**，不能整块隐藏，
+                                                只能瘦身；全称仍在按钮的 ToolTip 里。 */}
+                                            {toolbarTier < 9
+                                                ? buildReferenceRootTrackTriggerElement(
+                                                      `${tf("reference_root_tracks_short")}${
+                                                          visibleReferenceRootTrackIds.length > 0
+                                                              ? ` (${visibleReferenceRootTrackIds.length})`
+                                                              : ""
+                                                      }`,
+                                                  )
+                                                : null}
                                             <ChevronDownIcon width="12" height="12" />
                                         </Button>
                                     </DropdownMenu.Trigger>
@@ -8128,21 +8512,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                                <span
-                                    className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
-                                >
-                                    <Button
-                                        size="1"
-                                        /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
-                                        variant="soft"
-                                        onClick={handleOpenMidiDialog}
-                                        disabled={!pitchEnabled}
-                                        style={{ cursor: "pointer" }}
+                                {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
+                                    （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
+                                {toolbarTier < 8 ? (
+                                    <span
+                                        className="inline-flex"
+                                        data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
                                     >
-                                        {tf("midi_import")}
-                                    </Button>
-                                </span>
+                                        <Button
+                                            size="1"
+                                            /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
+                                            variant="soft"
+                                            onClick={handleOpenMidiDialog}
+                                            disabled={!pitchEnabled}
+                                            style={{ cursor: "pointer" }}
+                                        >
+                                            {tf("midi_import")}
+                                        </Button>
+                                    </span>
+                                ) : null}
                             </React.Fragment>
                         ) : null}
                         {selectedIsChildTrack &&
@@ -8234,6 +8622,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         )}
                         {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                         {orderedProcessorParams.map((p) => {
+                            // 第 3 / 4 级：被门禁的药丸逐个让位（见 `gatedPillsHidden`）。
+                            // 组首除外 —— 它旁边挂着分离开关，那是唯一入口。
+                            const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
+                            const hideGatedPill =
+                                gatedHideIndex >= 0 && gatedHideIndex < gatedPillsHidden;
+                            if (hideGatedPill && p.id !== separationSwitchAnchorParamId) {
+                                return null;
+                            }
                             if (p.id === "formant_shift_cents") {
                                 return (
                                     <ParamGroupButton
@@ -8353,15 +8749,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 composeEnabled,
                             );
                             // 提示文案要指出**真正**的原因，否则用户会去开错开关。
+                            // 分离门禁按参数各给一句（与 `pitch_requires_compose`
+                            // 同一体裁：祈使句点名"开启什么、就能编辑什么"）；
+                            // 只有被分离门禁的两个参数会走到这里，故二选一即可。
                             const gateTooltip = !composeEnabled
                                 ? t("pitch_requires_compose")
-                                : t("separation_required_tooltip");
+                                : p.id === "hifigan_tension"
+                                  ? t("hifigan_tension_requires_separation")
+                                  : t("breath_gain_requires_separation");
 
-                            // 气声分离开关已独立成工具栏上的按钮组（见下方
-                            // processorStaticParams 渲染块）。这里不再把它融合进
-                            // breath_gain 药丸 —— 融合会让"分离"这一**全局前提**
-                            // 看起来像"气声音量"的附属属性，而张力同样依赖它。
-                            return (
+                            const paramPill = (
                                 <ParamToolbarPill
                                     key={p.id}
                                     label={getProcessorParamShortLabel(p)}
@@ -8384,6 +8781,52 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     }
                                 />
                             );
+
+                            // 气声分离开关：渲染在被门禁组（气声 + 张力）的**组首**，
+                            // 即「气声」药丸的左侧。纯图标、无文本 —— 非中文语系的
+                            // `Harmonic Separation` 比整套三字母缩写（PIT/FRM/BRE…）
+                            // 长一个数量级，写进工具栏会把这一排撑爆；开关名改由 ToolTip
+                            // 与无障碍标签承载。宽度恒定（`--breath` 段 min-width 22px），
+                            // 切换只换图标与配色，因此不会引起整排重排。
+                            //
+                            // 【为什么不放在算法下拉之前】开关只随 nsf-hifigan 出现；
+                            // 若位于最右端，切换算法时它整块消失 / 出现会把音量、声像、
+                            // 算法一起推移。放在参数组内部后，它右侧紧邻的就是固定的
+                            // 「音量 → 动态 → 声像」，消失时右侧纹丝不动。
+                            //
+                            // 【为什么开关自身永不置灰】它是开启「气声 / 张力」的
+                            // 唯一入口；若随这两个参数一起置灰就会死锁（关了再开不回来）。
+                            // 置灰只作用于那两个参数药丸的标签段。
+                            if (p.id !== separationSwitchAnchorParamId) return paramPill;
+                            return (
+                                <React.Fragment key={p.id}>
+                                    <span className="param-pill">
+                                        <button
+                                            type="button"
+                                            className="param-pill__seg param-pill__seg--breath"
+                                            data-tooltip={
+                                                separationEnabled
+                                                    ? t("breath_tooltip_on")
+                                                    : t("breath_tooltip_off")
+                                            }
+                                            aria-label={`${t("breath_separation_label")}: ${
+                                                separationEnabled ? t("switch_on") : t("switch_off")
+                                            }`}
+                                            onClick={() =>
+                                                void handleStaticParamChange(
+                                                    SEPARATION_PARAM_ID,
+                                                    separationEnabled ? 0 : 1,
+                                                )
+                                            }
+                                        >
+                                            <BreathAirIcon off={!separationEnabled} />
+                                        </button>
+                                    </span>
+                                    {/* 第 4 级：组首的药丸也让位，但**开关保留** ——
+                                        它是重新开启气声 / 张力的唯一入口。 */}
+                                    {hideGatedPill ? null : paramPill}
+                                </React.Fragment>
+                            );
                         })}
                     </Flex>
 
@@ -8394,44 +8837,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 const currentValue =
                                     processorStaticValues[param.id] ?? param.kind.default_value;
 
-                                // 气声分离（breath_enabled）：**独立**渲染，不融合进
-                                // 任何参数药丸。它是"是否做谐波/噪声分离"的全局前提，
-                                // 气声与张力都依赖它（见 getStaticOptionLabel 的图标化
-                                // 与下方 tooltip 说明），因此必须在 UI 上可见且独立。
-                                if (param.id === "breath_enabled") {
-                                    const breathOn = currentValue === 1;
-                                    return (
-                                        <Flex key={param.id} align="center" gap="1">
-                                            <span
-                                                className="hs-type-label"
-                                                data-tooltip={t("breath_separation_tooltip")}
-                                            >
-                                                {t("breath_separation_label")}
-                                            </span>
-                                            <Button
-                                                size="1"
-                                                variant={breathOn ? "solid" : "soft"}
-                                                color={breathOn ? "blue" : "gray"}
-                                                data-tooltip={t("breath_separation_tooltip")}
-                                                aria-label={`${t("breath_separation_label")}: ${
-                                                    breathOn ? t("switch_on") : t("switch_off")
-                                                }`}
-                                                onClick={() => {
-                                                    void handleStaticParamChange(
-                                                        "breath_enabled",
-                                                        breathOn ? 0 : 1,
-                                                    );
-                                                }}
-                                                style={{ cursor: "pointer" }}
-                                            >
-                                                <BreathAirIcon off={!breathOn} />
-                                                <span className="ml-1">
-                                                    {breathOn ? t("switch_on") : t("switch_off")}
-                                                </span>
-                                            </Button>
-                                        </Flex>
-                                    );
-                                }
+                                // 气声分离（breath_enabled）**不在本段渲染**：它已改在
+                                // 第一段（动态参数区）以纯图标分段渲染在被门禁组
+                                // （气声 + 张力）的组首 —— 见上方 `orderedProcessorParams`
+                                // 循环里的说明。留在本段（算法下拉之前）会让切换算法时
+                                // 把音量 / 声像 / 算法整段推移，那正是本次要修的病根。
+                                // 这里必须显式 `return null`：否则会落到下方的通用分支，
+                                // 又渲染出一个带文本的按钮。
+                                if (param.id === "breath_enabled") return null;
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。
                                 if (param.id === "synth_mode") {
@@ -8502,19 +8915,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <span className="hs-type-label" data-tooltip={tf("algo_label")}>
-                                {tf("algo_label_short")}
-                            </span>
+                            {/* 第 2 级隐藏：紧邻的下拉本身就显示当前算法名，
+                                "算法"二字只是重复提示（全称在 ToolTip 里）。 */}
+                            {toolbarTier < 2 ? (
+                                <span className="hs-type-label" data-tooltip={tf("algo_label")}>
+                                    {tf("algo_label_short")}
+                                </span>
+                            ) : null}
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"
-                                value={
-                                    ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
-                                        rootTrack.pitchAnalysisAlgo,
-                                    )
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
+                                value={resolvePitchAlgoSelectValue(
+                                    rootTrack.pitchAnalysisAlgo,
+                                    pitchAlgoOptions,
+                                )}
                                 onValueChange={(v) => {
                                     if (!rootTrackId) return;
                                     dispatch(
@@ -8527,12 +8941,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 fullWidth={false}
                                 className="min-w-[140px]"
                                 ariaLabel={tf("algo_label")}
-                                options={[
-                                    { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
-                                    { value: "world_dll", label: "world" },
-                                    { value: "vslib", label: "vslib" },
-                                    { value: "none", label: t("common_none") },
-                                ]}
+                                options={pitchAlgoOptions}
                             />
                         </Flex>
                     ) : null}

@@ -44,6 +44,7 @@ import { setGutterSize } from "../../features/dock/dockSlice";
 import { shallowEqual } from "react-redux";
 import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
+import { isClipSplittableAtSec, resolveSplitTargetsAtSec } from "./timeline/splitTargets";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
 import {
     createNewTrackForKernelDrop,
@@ -62,9 +63,14 @@ import {
     buildCrossfadeGripInfoContent,
     buildSingleFadeInfoContent,
     publishFadeRichTooltip,
+    type FadeInfoDelta,
     type FadeLabelLookup,
-    type FadeLengthFormatContext,
 } from "./timeline/fadeTooltipText";
+import {
+    buildSnapOffsetInfoText,
+    type TimeValueFormatContext,
+    type TimeValueLabelLookup,
+} from "./timeline/timeValueText";
 import { effectiveFadeSec } from "./timeline/kernel/interaction/fadeTargets";
 import type { ClipHitRegion } from "./timeline/kernel/interaction/hitTest";
 import type { ClipHeaderControl } from "./timeline/kernel/interaction/clipHeaderControls";
@@ -131,9 +137,16 @@ import { moveClipRemote, moveClipsRemote } from "../../features/session/thunks/t
 import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
-import { NEW_TRACK_SENTINEL } from "./timeline/hooks/useClipDrag";
+import { NEW_TRACK_SENTINEL } from "./timeline/constants";
+import {
+    beginClipGeometryPreview,
+    endClipGeometryPreview,
+} from "./timeline/clipGeometryPreviewBus";
+import { holdLoudnessFetch, releaseLoudnessFetch } from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
-import { registerDragAbort } from "./timeline/gestureFocusGuard";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
+import { resolveTrimSourceWindow, resolveTrimSnapOffset } from "./timeline/trimSourceWindow";
+import { resolveClipContentDurationSec } from "../../utils/loopRender";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
@@ -411,6 +424,15 @@ interface TimelinePanelProps {
     onImportTempoMapKeySignatureChange?: (v: boolean) => void;
 }
 
+/** 单侧淡变 Tooltip 的发布数据。`delta` 只在拖拽时给（悬停传 undefined）。 */
+type FadeSideInfo = {
+    isOut: boolean;
+    shape: number;
+    dir: number;
+    lengthSec: number;
+    delta?: FadeInfoDelta;
+};
+
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     midiClipDialogOpen,
     midiClipPath,
@@ -453,7 +475,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
-    const { t, tf } = useI18n();
+    const { t, tf, tVars } = useI18n();
     // 轨道头宽度是**布局状态**的一部分（用户调过的尺寸必须随布局持久化），
     // 取代了原先写死的 `w-64`。
     const trackHeaderWidthPx = useAppSelector(
@@ -739,10 +761,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 参数编辑器不跟随」。
      */
     const handleKernelScrollLeftCommit = React.useCallback(
-        (next: number) => {
+        (next: number, nextPxPerSec: number) => {
             syncScrollLeft(next);
+            if (Math.abs(nextPxPerSec - pxPerSec) > 1e-9) {
+                // 【缩放变化时位置必须**同批**进 React】标尺刻度窗口是 React 侧
+                // `(pxPerSec, scrollLeft)` 的函数（见 useTimelineState 的 `tickAxis`），
+                // 只改其中一项就会有一帧按**新缩放**换算**旧像素位置**——锚点对应的
+                // 时间错位，标尺某段既没有刻度线也没有文本。纯滚动仍走
+                // `syncScrollLeft` 的量化路径，保住"滚动帧不进 React"。
+                setPxPerSec(nextPxPerSec);
+                setScrollLeftState(next);
+            }
         },
-        [syncScrollLeft],
+        [syncScrollLeft, pxPerSec, setPxPerSec, setScrollLeftState],
     );
 
     /**
@@ -883,16 +914,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
-    // 淡化长度 ToolTips 的相对时长上下文：主/副时间单位 + 工程计时参数。
-    const fadeLengthFormatCtx = React.useMemo<FadeLengthFormatContext>(
+    // 时间量 ToolTips 的格式化上下文：主/副时间单位 + 工程计时参数 + Tempo Map。
+    //
+    // 一个对象同时服务两种口径（见 `timeValueText` 文件头）：
+    // - **时长**（淡化长度、吸附偏移）走 `formatDurationText`，按定义忽略 `tempoMap`；
+    // - **时刻**（吸附偏移的绝对位置）走 `formatPositionText`，必须感知 Tempo Map。
+    const timeValueFormatCtx = React.useMemo<TimeValueFormatContext>(
         () => ({
             primaryTimeUnit: s.primaryTimeUnit,
             secondaryTimeUnit: s.secondaryTimeUnit,
             bpm: s.bpm,
             beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
             grid: s.grid,
+            tempoMap: s.tempoMap,
         }),
-        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid],
+        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
     const projectScale = React.useMemo<ScaleLike | null>(
@@ -1087,7 +1123,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         lastClickedClientXRef,
         pxPerSec,
         pxPerBeat,
-        rowHeight,
         ignoreGrouping,
         disabledGroupIds,
         dispatch,
@@ -1722,11 +1757,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const beginKernelGestureInteraction = React.useCallback((): void => {
         if (kernelGestureInteractionActiveRef.current) return;
         kernelGestureInteractionActiveRef.current = true;
+        // 记录**按下时**的全量 clip 几何，供参数编辑器把响度基线/曲线搬到正确位置
+        //（见 `clipGeometryPreviewBus`）。时序要求：必须早于本次手势的任何乐观写入
+        // —— 本函数在首个真实位移帧、且在任何预览派发之前调用，满足该要求。
+        beginClipGeometryPreview(sessionRef.current.clips);
         dispatch(beginInteraction());
-    }, [dispatch]);
+    }, [dispatch, sessionRef]);
     const endKernelGestureInteraction = React.useCallback((): void => {
         if (!kernelGestureInteractionActiveRef.current) return;
         kernelGestureInteractionActiveRef.current = false;
+        // 只宣告手势结束；映射本身由消费方保留到"提交之后取的快照"落地（否则
+        // 松手瞬间会退回旧位置的基线，表现为闪一下）。
+        endClipGeometryPreview();
         dispatch(endInteraction());
     }, [dispatch]);
 
@@ -1807,6 +1849,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         (args: {
             clipId: string;
             deltaSec: number;
+            /** 未钳制的指针位移（秒）。Slip 用它 —— 见下方 `desiredTotal` 的说明。 */
+            rawDeltaSec: number;
             targetTrackId: string;
             modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
         }) => {
@@ -1920,7 +1964,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」驱动增量
                 // （与旧实现 `useSlipDrag` 同一算法，只是位移正负号约定相反）。
                 const timelineSnap = sessionRef.current.timelineSnap;
-                let desiredTotal = args.deltaSec;
+                // 【为什么 Slip 用未钳制位移】`args.deltaSec` 是**位置**位移（内核按
+                // "clip 不能从负时间开始"钳到 ≥0）；而 Slip 改的是 clip 内部的源窗口
+                // 偏移，合法域是任意符号任意大小（向左滑出媒体起点 = 前导静音）。
+                // 用被钳的值会让 Slip 单向卡死：`startSec = 0` 的 clip 完全无法向左滑。
+                let desiredTotal = args.rawDeltaSec;
                 {
                     const anchor = origin.slipAnchor;
                     const snapActive = computeEffectiveSnap(
@@ -2454,6 +2502,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sourceStartSec: number;
         sourceEndSec: number;
         /**
+         * 锚 clip 是否倒放 / 是否 Loop。
+         *
+         * 【为什么必须记下】裁切的源窗口换算对倒放是**镜像**的（时间轴右端对应
+         * `sourceStartSec`）、对 Loop 则完全不该动源字段 —— 见 `trimSourceWindow`。
+         * 此前 origin 只记 `sourceStartSec / sourceEndSec`，换算处无从判断方向，
+         * 于是倒放 Clip 拖右缘改到了左端。
+         */
+        reversed: boolean;
+        loopEnabled: boolean;
+        /**
          * 本次边缘手势的模式。
          *
          * `Alt`（`modifier.clipStretch`）按住 = **拉伸**（改播放速率、内容不被裁掉），
@@ -2463,6 +2521,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         mode: "trim" | "stretch";
         /** 拉伸所需的按下时基准（裁切模式不使用）。 */
         basePlaybackRate: number;
+        /**
+         * 裁切源位移用的**组合**消费速率（`clipPlaybackRate × take.playbackRate`）。
+         *
+         * 【为什么不能复用 `basePlaybackRate`】后者是 **clip 级**倍率，Alt 拉伸会把它
+         * 写回 `setClipPlaybackRate`（必须是 clip 级）。而裁切的源位移必须按后端消费
+         * 数学的组合速率折算（`state.rs:121` 的 `span = length × clip.playback_rate`，
+         * 后端 `playback_rate` 即组合值）—— 用 clip 级倍率会在 take 速率 ≠ 1 时算错。
+         */
+        baseConsumeRate: number;
+        /**
+         * Loop 回绕周期 D（秒）；`0` = 未知。仅用于把 Loop 的相位锚点环绕到
+         * `[0, D)`（见 `trimSourceWindow`）。
+         */
+        mediaDurationSec: number;
         baseFadeInSec: number;
         baseFadeOutSec: number;
         baseSnapOffsetSec: number;
@@ -2492,8 +2564,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 lengthSec: number;
                 sourceStartSec: number;
                 sourceEndSec: number;
-                /** 该 clip 的播放速率：源位移 = 时间轴位移 × 速率。 */
+                /**
+                 * 该 clip 的**组合**播放速率（`clipPlaybackRate × take.playbackRate`）：
+                 * 源位移 = 时间轴位移 × 速率。与后端消费数学（`state.rs:121` 的
+                 * `span = length × clip.playback_rate`）同一口径 —— 用 clip 级倍率会在
+                 * take 速率 ≠ 1 时算错源位移。
+                 */
                 playbackRate: number;
+                /** 倒放：时间轴左/右端与源字段的对应关系是镜像的（见 `trimSourceWindow`）。 */
+                reversed: boolean;
+                /** Loop：源字段是回绕锚点；右缘只改长度、左缘改锚点（见 `trimSourceWindow`）。 */
+                loopEnabled: boolean;
+                /** Loop 回绕周期 D（秒）；0 = 未知（见 `trimSourceWindow`）。 */
+                mediaDurationSec: number;
+                /** 按下时的吸附偏移（秒）：左缘拖拽要保持它的**绝对位置**不变。 */
+                snapOffsetSec: number;
             }
         >;
         /**
@@ -2620,6 +2705,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         sourceStartSec: number;
                         sourceEndSec: number;
                         playbackRate: number;
+                        reversed: boolean;
+                        loopEnabled: boolean;
+                        mediaDurationSec: number;
+                        snapOffsetSec: number;
                     }
                 >();
                 for (const participant of participants) {
@@ -2632,7 +2721,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         lengthSec: Math.max(0, Number(item.lengthSec) || 0),
                         sourceStartSec: Number(item.sourceStartSec ?? 0) || 0,
                         sourceEndSec: Number(item.sourceEndSec ?? 0) || 0,
+                        // 组合速率（clip × take）：与后端消费数学同一口径。
                         playbackRate: Number(item.playbackRate ?? 1) || 1,
+                        reversed: item.reversed === true,
+                        loopEnabled: item.loopEnabled === true,
+                        mediaDurationSec: resolveClipContentDurationSec(item) ?? 0,
+                        snapOffsetSec: Math.max(0, Number(item.snapOffsetSec) || 0),
                     });
                 }
                 // 自动交叉淡化：受影响集合 = 参与者；可调整侧按拖拽的边缘决定。
@@ -2669,6 +2763,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
                     mode: stretchMode ? "stretch" : "trim",
                     basePlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
+                    baseConsumeRate: Number(clip.playbackRate ?? 1) || 1,
+                    reversed: clip.reversed === true,
+                    loopEnabled: clip.loopEnabled === true,
+                    mediaDurationSec: resolveClipContentDurationSec(clip) ?? 0,
                     baseFadeInSec: Number(clip.fadeInSec) || 0,
                     baseFadeOutSec: Number(clip.fadeOutSec) || 0,
                     baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
@@ -2910,31 +3008,51 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(setClipLength({ clipId: args.clipId, lengthSec: nextLength }));
-                // 源位移 = 时间轴位移 × 该 clip 的播放速率（rate ≠ 1 时源域与时间轴
-                // 不同步；旧实现同样按 rate 折算）。
-                const anchorSourceDelta = deltaSec * origin.basePlaybackRate;
-                if (args.edge === "left") {
+                // 源窗口换算收口到 `resolveTrimSourceWindow`：它按 `reversed` 镜像方向
+                // （时间轴右端在倒放时对应 `sourceStartSec`），并对 Loop 返回 null
+                // （源字段是回绕锚点，裁切只改长度）。此前这里手写了"右缘动
+                // sourceEndSec"的分支且没有倒放/Loop 分支 —— 倒放 Clip 拖右缘改到
+                // 左端、拖左缘改到右端，固定的一侧整个颠倒。
+                const anchorWindow = resolveTrimSourceWindow({
+                    edge: args.edge,
+                    reversed: origin.reversed,
+                    loopEnabled: origin.loopEnabled,
+                    mediaDurationSec: origin.mediaDurationSec,
+                    deltaSec,
+                    rate: origin.baseConsumeRate,
+                    sourceStartSec: origin.sourceStartSec,
+                    sourceEndSec: origin.sourceEndSec,
+                });
+                if (anchorWindow !== null) {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceStartSec: origin.sourceStartSec + anchorSourceDelta,
-                        }),
-                    );
-                } else {
-                    dispatch(
-                        setClipSourceRange({
-                            clipId: args.clipId,
-                            sourceEndSec: origin.sourceEndSec + anchorSourceDelta,
+                            sourceStartSec: anchorWindow.sourceStartSec,
+                            sourceEndSec: anchorWindow.sourceEndSec,
                         }),
                     );
                 }
+                // 吸附偏移：它的语义是"素材内的一个点"（手柄绝对位置 =
+                // clipStart + offset），因此拖**左缘**改变 clipStart 时必须反向调整
+                // 相对值，该点才会留在同一处素材上。此前裁切完全不动它，于是它作为
+                // "相对起点的偏移"被保留、手柄跟着起点平移到了另一段素材。
+                dispatch(
+                    setClipSnapOffset({
+                        clipId: args.clipId,
+                        snapOffsetSec: resolveTrimSnapOffset({
+                            edge: args.edge,
+                            deltaSec,
+                            snapOffsetSec: origin.baseSnapOffsetSec,
+                            newLengthSec: nextLength,
+                        }),
+                    }),
+                );
                 // 多选批量：其余参与者按**锚点位移**（deltaSec）逐 clip 换算——与旧实现
                 // `useEditDrag` 同源（以锚点的实际位移为基准，不是各自重新吸附）。
                 for (const participant of origin.participants) {
                     if (participant.clipId === args.clipId) continue;
                     const base = origin.baseById.get(participant.clipId);
                     if (base === undefined) continue;
-                    const sourceDelta = deltaSec * base.playbackRate;
                     if (args.edge === "left") {
                         dispatch(
                             moveClipStart({
@@ -2948,12 +3066,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 lengthSec: Math.max(0, base.lengthSec - deltaSec),
                             }),
                         );
-                        dispatch(
-                            setClipSourceRange({
-                                clipId: participant.clipId,
-                                sourceStartSec: base.sourceStartSec + sourceDelta,
-                            }),
-                        );
                     } else {
                         dispatch(
                             setClipLength({
@@ -2961,13 +3073,43 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 lengthSec: Math.max(0, base.lengthSec + deltaSec),
                             }),
                         );
+                    }
+                    // 每个参与者按**自己**的倒放 / Loop / 组合速率换算源窗口
+                    // （混合多选里正放与倒放可以同时存在）。
+                    const window = resolveTrimSourceWindow({
+                        edge: args.edge,
+                        reversed: base.reversed,
+                        loopEnabled: base.loopEnabled,
+                        mediaDurationSec: base.mediaDurationSec,
+                        deltaSec,
+                        rate: base.playbackRate,
+                        sourceStartSec: base.sourceStartSec,
+                        sourceEndSec: base.sourceEndSec,
+                    });
+                    if (window !== null) {
                         dispatch(
                             setClipSourceRange({
                                 clipId: participant.clipId,
-                                sourceEndSec: base.sourceEndSec + sourceDelta,
+                                sourceStartSec: window.sourceStartSec,
+                                sourceEndSec: window.sourceEndSec,
                             }),
                         );
                     }
+                    // 吸附偏移同锚点：按各自的按下时偏移保持"素材内的点"不动。
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: participant.clipId,
+                            snapOffsetSec: resolveTrimSnapOffset({
+                                edge: args.edge,
+                                deltaSec,
+                                snapOffsetSec: base.snapOffsetSec,
+                                newLengthSec:
+                                    args.edge === "left"
+                                        ? Math.max(0, base.lengthSec - deltaSec)
+                                        : Math.max(0, base.lengthSec + deltaSec),
+                            }),
+                        }),
+                    );
                 }
             });
             // 波纹（自动跟进）实时预览：以编辑区域**右缘净位移**为准驱动跟随集，
@@ -3056,29 +3198,66 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 dispatch(checkpointHistory());
                 beginSnapGesture();
             }
+            // 手柄必须留在 Clip 内：**先把查询位置钳进** [clipStart, clipStart+clipLen]，
+            // 再把吸附候选限制在同一区间（`candidateRangeSec`）。
+            // 【为什么两件都要做】只钳位置不滤候选 ⇒ 最近的候选可能落在 Clip 外，
+            // 吸附把落点算到外面、调用方再钳回边界 —— 高亮线画在 Clip 外而手柄停在
+            // 边界，看起来像"范围外也产生吸附"（用户报告的现象）。
             const rawAbs = clipStart + args.rawOffsetSec;
+            const clampedAbs = Math.min(Math.max(rawAbs, clipStart), clipStart + clipLen);
             // 免吸附修饰键（默认 Shift）临时取反吸附总开关（与旧实现同一函数）。
             const snapActive = computeEffectiveSnap(
                 s.snapEnabled,
                 isModifierActive(noSnapKb, args.modifiers),
             );
             const nextAbs = snapActive
-                ? snapTimelineDetailed(rawAbs, "clip", {
-                      originSec: clipStart + (Number(clip.snapOffsetSec) || 0),
+                ? snapTimelineDetailed(clampedAbs, "clip", {
+                      // 拖动起点：必须用**按下时**的偏移（`kernelSnapOffsetBaseRef`），
+                      // 不能用被本手势逐帧改写的 `clip.snapOffsetSec` —— 后者会让
+                      // "相对网格吸附"每帧以自己上一步的落点为基准，逐步漂移。
+                      originSec:
+                          clipStart +
+                          (kernelSnapOffsetBaseRef.current?.snapOffsetSec ??
+                              (Number(clip.snapOffsetSec) || 0)),
                       anchorTrackId: clip.trackId,
                       excludeClipIds: new Set([args.clipId]),
+                      candidateRangeSec: { lo: clipStart, hi: clipStart + clipLen },
                       highlight: {
                           sources: [{ trackId: clip.trackId, clipId: args.clipId }],
                       },
                   }).sec
-                : rawAbs;
+                : clampedAbs;
             if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            const nextOffset = Math.min(Math.max(nextAbs - clipStart, 0), clipLen);
             dispatch(
                 setClipSnapOffset({
                     clipId: args.clipId,
-                    snapOffsetSec: Math.min(Math.max(nextAbs - clipStart, 0), clipLen),
+                    snapOffsetSec: nextOffset,
                 }),
             );
+            // 拖动中的实时浮标（与增益旋钮 `handleKernelGainDragPreview` 同构）：
+            // 两行都追加**本次拖拽的位移**。增量基准取按下时的偏移快照，不能用
+            // 逐帧改写的当前值（那会退化成"每帧归零"）。内容逐帧更新，浮标锚点
+            // 仍是内核容器，AppTooltip 自己跟随指针。
+            const anchor =
+                typeof document === "undefined"
+                    ? null
+                    : (document.querySelector(
+                          "[data-hs-fade-tooltip-anchor]",
+                      ) as HTMLElement | null);
+            if (anchor !== null) {
+                const baseOffset = kernelSnapOffsetBaseRef.current?.snapOffsetSec ?? nextOffset;
+                publishFadeRichTooltip(
+                    anchor,
+                    buildSnapOffsetInfoText({
+                        offsetSec: nextOffset,
+                        positionSec: clipStart + nextOffset,
+                        deltaSec: nextOffset - baseOffset,
+                        formatCtx: timeValueFormatCtx,
+                        t: tVars as TimeValueLabelLookup,
+                    }),
+                );
+            }
         },
         [
             beginKernelGestureInteraction,
@@ -3087,6 +3266,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.snapEnabled,
             sessionRef,
             snapTimelineDetailed,
+            tVars,
+            timeValueFormatCtx,
         ],
     );
 
@@ -3136,6 +3317,74 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .finally(endKernelGestureInteraction);
         },
         [dispatch, endKernelGestureInteraction, sessionRef],
+    );
+
+    /**
+     * 拉伸提交的公共收尾（单 clip 拉伸与组拉伸共用）。
+     *
+     * 【为什么必须共用】此前两条路径各写一遍，于是分叉：组路径在改写参数线后补了
+     * `bumpParamsEpoch()`，单路径漏了 —— 单 clip 拉伸松手后波形停在「新几何 × 旧曲线」
+     * 且只有再做一次别的操作才恢复（用户报告的现象）。收口到一处即从结构上杜绝再分叉。
+     *
+     * 【取数闸门】调用方在**落库派发之前** `holdLoudnessFetch()`（见
+     * `loudnessFetchGate`）：几何落库的 fulfilled handler 会 `applyTimelineState`
+     * 递增 paramsEpoch，触发一次「新几何 × 旧曲线」的中间态取数，必须压住。
+     * 本函数只负责改写曲线；闸门的**释放与补取数**由调用方的 `finally` 统一执行
+     * （保证持久化失败 / 改写抛错等任何路径都不会让闸门悬挂）。
+     */
+    const finishStretchWithParamLines = React.useCallback(
+        async (opts: {
+            /** 需要二次写回的速率（后端可能按自身计算覆盖速率，前端计算值才权威）。 */
+            rateWritebacks: ReadonlyArray<{ clipId: string; clipPlaybackRate: number }>;
+            /** 锁定参数线开启时改写曲线；`null` = 本次不搬曲线。 */
+            rewriteParamLines: (() => Promise<unknown>) | null;
+            xfadeClipIds: string[];
+            initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
+            editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
+        }): Promise<void> => {
+            for (const writeback of opts.rateWritebacks) {
+                dispatch(setClipPlaybackRate(writeback));
+            }
+            if (opts.rewriteParamLines !== null) {
+                await opts.rewriteParamLines();
+            }
+            // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关关闭时只清理
+            // 「已脱离重叠」的自动值）。
+            const latest = sessionRef.current;
+            if (s.autoCrossfadeEnabled) {
+                await applyAutoCrossfade(latest, opts.xfadeClipIds, dispatch, {
+                    affectedSides: opts.initialCrossfadeSides,
+                    editSides: opts.editSides,
+                });
+            } else {
+                await applyDetachedAutoCrossfadeClears(
+                    latest,
+                    opts.xfadeClipIds,
+                    dispatch,
+                    opts.initialCrossfadeSides,
+                    opts.editSides,
+                );
+            }
+        },
+        [dispatch, sessionRef, s.autoCrossfadeEnabled],
+    );
+
+    /**
+     * 拉伸提交链的收尾：打开取数闸门并补一次**权威取数**，然后释放交互锁。
+     *
+     * 闸门只有在"本次确实要搬曲线"（`lockParamLinesEnabled`）时才合上，因此释放
+     * 也只在那种情形下执行；否则释放是无意义的多余取数。释放后立刻 `bumpParamsEpoch()`
+     * —— 这是唯一一次带「新几何 + 改写后曲线」的取数（见 `loudnessFetchGate`）。
+     */
+    const finishStretchCommitChain = React.useCallback(
+        (lockParamLines: boolean): void => {
+            if (lockParamLines) {
+                releaseLoudnessFetch();
+                dispatch(bumpParamsEpoch());
+            }
+            endKernelGestureInteraction();
+        },
+        [dispatch, endKernelGestureInteraction],
     );
 
     const handleKernelTrimCommit = React.useCallback(
@@ -3203,6 +3452,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 origin.editSides,
                             );
                         }
+                        // 取消同样要归还交互锁：手势起手已 beginKernelGestureInteraction()
+                        // 增加锁计数，若不释放，锁计数长期 ≥1 会跳过非强制的
+                        // applyTimelineState（后端周期快照 / 普通命令响应停止落地）。
+                        endKernelGestureInteraction();
                         return;
                     }
                     dispatch(checkpointHistory());
@@ -3227,79 +3480,79 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         endKernelGestureInteraction();
                         return;
                     }
+                    // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
+                    const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                    // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
+                    if (lockParamLines) holdLoudnessFetch();
                     const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
                     void (async () => {
                         try {
                             await groupPersist;
-                        } finally {
-                            // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值
-                            // 才是权威（与旧实现 `reapplyRates` 同源，只回写非 1 的成员）。
-                            for (const update of updates) {
-                                if (update.clipPlaybackRate === 1) continue;
-                                dispatch(
-                                    setClipPlaybackRate({
+                            await finishStretchWithParamLines({
+                                // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值
+                                // 才是权威（与旧实现 `reapplyRates` 同源，只回写非 1 的成员）。
+                                rateWritebacks: updates
+                                    .filter((update) => update.clipPlaybackRate !== 1)
+                                    .map((update) => ({
                                         clipId: update.clipId,
                                         clipPlaybackRate: update.clipPlaybackRate,
-                                    }),
-                                );
-                            }
-                            // 锁定参数线：按**根轨道**聚合成员的时域映射，一次请求
-                            // 完成该轨道的曲线映射（与旧实现同源）。
-                            if (sessionRef.current.lockParamLinesEnabled) {
-                                const mappingsByRootTrack = new Map<
-                                    string,
-                                    StretchRangeMapping[]
-                                >();
-                                for (const clipId of group.clipIds) {
-                                    const initial = group.initialById[clipId];
-                                    const now = sessionRef.current.clips.find(
-                                        (item) => item.id === clipId,
-                                    );
-                                    if (initial === undefined || now === undefined) continue;
-                                    const rootTrackId = resolveRootTrackId(
-                                        sessionRef.current.tracks,
-                                        now.trackId,
-                                    );
-                                    if (rootTrackId === null || rootTrackId === undefined) {
-                                        continue;
-                                    }
-                                    const mappings = mappingsByRootTrack.get(rootTrackId) ?? [];
-                                    mappings.push({
-                                        oldStartSec: initial.startSec,
-                                        oldLengthSec: initial.lengthSec,
-                                        newStartSec: now.startSec,
-                                        newLengthSec: now.lengthSec,
-                                    });
-                                    mappingsByRootTrack.set(rootTrackId, mappings);
-                                }
-                                await Promise.allSettled(
-                                    Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
-                                        stretchTrackLinkedParams(trackId, mappings),
-                                    ),
-                                );
-                                dispatch(bumpParamsEpoch());
-                            }
-                            // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关
-                            // 关闭时只清理「已脱离重叠」的自动值）。
-                            const latest = sessionRef.current;
-                            if (s.autoCrossfadeEnabled) {
-                                await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
-                                    affectedSides: origin.initialCrossfadeSides,
-                                    editSides: origin.editSides,
-                                });
-                            } else {
-                                await applyDetachedAutoCrossfadeClears(
-                                    latest,
-                                    origin.xfadeClipIds,
-                                    dispatch,
-                                    origin.initialCrossfadeSides,
-                                    origin.editSides,
-                                );
-                            }
+                                    })),
+                                // 按**根轨道**聚合成员的时域映射，一次请求完成该轨道的曲线映射
+                                //（与旧实现同源）。
+                                rewriteParamLines: lockParamLines
+                                    ? () => {
+                                          const mappingsByRootTrack = new Map<
+                                              string,
+                                              StretchRangeMapping[]
+                                          >();
+                                          for (const clipId of group.clipIds) {
+                                              const initial = group.initialById[clipId];
+                                              const now = sessionRef.current.clips.find(
+                                                  (item) => item.id === clipId,
+                                              );
+                                              if (initial === undefined || now === undefined) {
+                                                  continue;
+                                              }
+                                              const rootTrackId = resolveRootTrackId(
+                                                  sessionRef.current.tracks,
+                                                  now.trackId,
+                                              );
+                                              if (
+                                                  rootTrackId === null ||
+                                                  rootTrackId === undefined
+                                              ) {
+                                                  continue;
+                                              }
+                                              const mappings =
+                                                  mappingsByRootTrack.get(rootTrackId) ?? [];
+                                              mappings.push({
+                                                  oldStartSec: initial.startSec,
+                                                  oldLengthSec: initial.lengthSec,
+                                                  newStartSec: now.startSec,
+                                                  newLengthSec: now.lengthSec,
+                                              });
+                                              mappingsByRootTrack.set(rootTrackId, mappings);
+                                          }
+                                          return Promise.allSettled(
+                                              Array.from(
+                                                  mappingsByRootTrack,
+                                                  ([trackId, mappings]) =>
+                                                      stretchTrackLinkedParams(trackId, mappings),
+                                              ),
+                                          );
+                                      }
+                                    : null,
+                                xfadeClipIds: origin.xfadeClipIds,
+                                initialCrossfadeSides: origin.initialCrossfadeSides,
+                                editSides: origin.editSides,
+                            });
+                        } catch {
+                            // 失败不产生 unhandled rejection；交互锁与闸门仍需释放
+                            //（闸门由 finishStretchCommitChain 统一释放）。
+                        } finally {
+                            finishStretchCommitChain(lockParamLines);
                         }
-                    })()
-                        .catch(() => undefined)
-                        .finally(endKernelGestureInteraction);
+                    })();
                     return;
                 }
                 if (args.cancelled) {
@@ -3350,52 +3603,43 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         Number(clip?.snapOffsetSec ?? origin.baseSnapOffsetSec) || 0,
                     ),
                 };
+                // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
+                const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
+                if (lockParamLines) holdLoudnessFetch();
                 const persist = dispatch(setClipsStateBulkRemote({ updates: [next] })).unwrap();
                 void (async () => {
                     try {
                         await persist;
+                        await finishStretchWithParamLines({
+                            rateWritebacks: [
+                                {
+                                    clipId: origin.clipId,
+                                    clipPlaybackRate: next.clipPlaybackRate,
+                                },
+                            ],
+                            // 把该轨道的曲线从旧时间范围映射到新范围
+                            //（与旧实现同源，复用抽出的 `stretchLinkedParams`）。
+                            rewriteParamLines: lockParamLines
+                                ? () =>
+                                      stretchLinkedParams(
+                                          origin.trackId,
+                                          origin.startSec,
+                                          origin.lengthSec,
+                                          next.startSec,
+                                          next.lengthSec,
+                                      )
+                                : null,
+                            xfadeClipIds: origin.xfadeClipIds,
+                            initialCrossfadeSides: origin.initialCrossfadeSides,
+                            editSides: origin.editSides,
+                        });
+                    } catch {
+                        // 失败不产生 unhandled rejection；交互锁与闸门仍需释放。
                     } finally {
-                        // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值才是
-                        // 权威（与旧实现 `reapplyRates` 同源）。
-                        dispatch(
-                            setClipPlaybackRate({
-                                clipId: origin.clipId,
-                                clipPlaybackRate: next.clipPlaybackRate,
-                            }),
-                        );
-                        // 锁定参数线：把该轨道的曲线从旧时间范围映射到新范围
-                        // （与旧实现同源，复用抽出的 `stretchLinkedParams`）。
-                        if (sessionRef.current.lockParamLinesEnabled) {
-                            await stretchLinkedParams(
-                                origin.trackId,
-                                origin.startSec,
-                                origin.lengthSec,
-                                next.startSec,
-                                next.lengthSec,
-                            );
-                        }
-                        // 自动交叉淡化：拉伸改变重叠 → 按落库后的关系写回自动 fade
-                        //（旧实现 `shouldApplyAutoCrossfade` 覆盖 stretch，开关关闭时
-                        // 只清理「已脱离重叠」的自动值）。
-                        const latest = sessionRef.current;
-                        if (s.autoCrossfadeEnabled) {
-                            await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
-                                affectedSides: origin.initialCrossfadeSides,
-                                editSides: origin.editSides,
-                            });
-                        } else {
-                            await applyDetachedAutoCrossfadeClears(
-                                latest,
-                                origin.xfadeClipIds,
-                                dispatch,
-                                origin.initialCrossfadeSides,
-                                origin.editSides,
-                            );
-                        }
+                        finishStretchCommitChain(lockParamLines);
                     }
-                })()
-                    .catch(() => undefined)
-                    .finally(endKernelGestureInteraction);
+                })();
                 return;
             }
 
@@ -3411,6 +3655,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 clipId,
                                 sourceStartSec: base.sourceStartSec,
                                 sourceEndSec: base.sourceEndSec,
+                            }),
+                        );
+                        // 吸附偏移也要还原：预览的左缘分支会按"素材内的点不动"
+                        // 改写它（见 `resolveTrimSnapOffset`），漏还原会让 Redux
+                        // 停在半途值、与后端分叉。
+                        dispatch(
+                            setClipSnapOffset({
+                                clipId,
+                                snapOffsetSec: base.snapOffsetSec,
                             }),
                         );
                     }
@@ -3444,6 +3697,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 源区间，这里取 Redux 当前值即可。
                         sourceStartSec: clip.sourceStartSec,
                         sourceEndSec: clip.sourceEndSec,
+                        // 吸附偏移同样必须提交：左缘裁切会按"素材内的点不动"改写它，
+                        // 漏提交会让权威快照把预览值回滚成按下前的相对偏移。
+                        snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     },
                 ];
             });
@@ -3478,7 +3734,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
+        [
+            dispatch,
+            endKernelGestureInteraction,
+            finishStretchCommitChain,
+            finishStretchWithParamLines,
+            sessionRef,
+            s.autoCrossfadeEnabled,
+        ],
     );
 
     /** 内核淡变角：按下时的原始值（用于回滚）。 */
@@ -3601,14 +3864,76 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     break;
                 default:
                     // SnapOffset 手柄没有 header 控件，用分区识别。
+                    //
+                    // 文案的三种形态（偏移为 0 只给标签 / 两行 / 拖拽带增量）由
+                    // `buildSnapOffsetInfoText` 一处判定，悬停这里只是"无位移"那一支。
+                    // 偏移是**时长**口径、位置是**时刻**口径（感知 Tempo Map），
+                    // 两者不可互换，见 `timeValueText` 文件头。
                     if (args.region === "snap-offset-handle") {
-                        text = t("clip_snap_offset");
+                        const offset = Math.max(0, Number(clip.snapOffsetSec) || 0);
+                        text = buildSnapOffsetInfoText({
+                            offsetSec: offset,
+                            positionSec: (Number(clip.startSec) || 0) + offset,
+                            deltaSec: null,
+                            formatCtx: timeValueFormatCtx,
+                            t: tVars as TimeValueLabelLookup,
+                        });
                     }
                     break;
             }
             publishFadeRichTooltip(anchor, text);
         },
-        [sessionRef, t],
+        [sessionRef, t, tVars, timeValueFormatCtx],
+    );
+
+    /** 淡变富 Tooltip 的锚点（内核容器；AppTooltip 自己跟随指针）。 */
+    const fadeTooltipAnchor = React.useCallback(
+        (): HTMLElement | null =>
+            typeof document === "undefined"
+                ? null
+                : (document.querySelector("[data-hs-fade-tooltip-anchor]") as HTMLElement | null),
+        [],
+    );
+
+    /**
+     * 淡变 Tooltip 的**唯一发布点**（悬停与两种拖拽共用）。
+     *
+     * 悬停只给当前值；拖拽传入 `delta`（当前值 − 按下时的值）后，长度与曲率两行
+     * 各追加 `[±增量]`，并随指针**逐帧刷新** —— 富内容经事件总线直接更新气泡，
+     * 不依赖元素属性变化被观察到，因此拖拽中的读数实时跟着走。
+     */
+    const publishFadeSideInfo = React.useCallback(
+        (anchor: HTMLElement | null, side: FadeSideInfo) => {
+            publishFadeRichTooltip(
+                anchor,
+                buildSingleFadeInfoContent({
+                    ...side,
+                    formatCtx: timeValueFormatCtx,
+                    t: t as unknown as FadeLabelLookup,
+                }),
+            );
+        },
+        [t, timeValueFormatCtx],
+    );
+
+    /** 交叉点抓手（双列）的发布：两侧各自带自己的增量。 */
+    const publishFadeGripInfo = React.useCallback(
+        (
+            anchor: HTMLElement | null,
+            earlier: Omit<FadeSideInfo, "isOut">,
+            later: Omit<FadeSideInfo, "isOut">,
+        ) => {
+            publishFadeRichTooltip(
+                anchor,
+                buildCrossfadeGripInfoContent({
+                    earlier,
+                    later,
+                    formatCtx: timeValueFormatCtx,
+                    t: t as unknown as FadeLabelLookup,
+                }),
+            );
+        },
+        [t, timeValueFormatCtx],
     );
 
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
@@ -3747,6 +4072,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         ? setClipFades({ clipId: args.clipId, fadeInDir: nextDir })
                         : setClipFades({ clipId: args.clipId, fadeOutDir: nextDir }),
                 );
+                // 曲率拖拽的实时浮标：曲率行带 `[±增量]`，长度行只给当前值。
+                // 增量基准必须取**按下时**的 dir（`origin.baseById`）—— `baseDir`
+                // 上面那个变量是本帧从 Redux 读的"上一帧值"，用它会让增量逐帧归零。
+                const curveBase = origin.baseById.get(args.clipId);
+                const curveIsOut = args.side === "out";
+                publishFadeSideInfo(fadeTooltipAnchor(), {
+                    isOut: curveIsOut,
+                    shape,
+                    dir: nextDir,
+                    lengthSec: widthSec,
+                    delta: {
+                        dir:
+                            nextDir -
+                            ((curveIsOut ? curveBase?.fadeOutDir : curveBase?.fadeInDir) ?? 0),
+                    },
+                });
                 return;
             }
 
@@ -3783,6 +4124,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     );
                 }
             });
+            // 长度拖拽的实时浮标：长度行带 `[±位移]`，曲率行只给当前值。
+            //
+            // 【位移基准取"按下时用户看到的长度"】绘制端按「自动 > 0 时自动赢」取值，
+            // 因此按下前显示的可能是自动交叉淡化长度而非手动字段 —— 拿 `fadeInSec`
+            // 当基准会让"从自动值拖走"那一下报出与实际不符的巨大位移。
+            const lenBase = origin.baseById.get(args.clipId);
+            const lenAutoBase = origin.autoBaseById.get(args.clipId);
+            const lenIsOut = args.side === "out";
+            const nextLength = Math.min(Math.max(args.fadeSec, 0), lenBase?.lengthSec ?? 0);
+            const baseLength = effectiveFadeSec(
+                lenIsOut ? lenBase?.fadeOutSec : lenBase?.fadeInSec,
+                lenIsOut ? lenAutoBase?.autoFadeOutSec : lenAutoBase?.autoFadeInSec,
+            );
+            publishFadeSideInfo(fadeTooltipAnchor(), {
+                isOut: lenIsOut,
+                shape: (lenIsOut ? lenBase?.fadeOutShape : lenBase?.fadeInShape) ?? 0,
+                dir: (lenIsOut ? lenBase?.fadeOutDir : lenBase?.fadeInDir) ?? 0,
+                lengthSec: nextLength,
+                delta: { lengthSec: nextLength - baseLength },
+            });
         },
         [
             beginKernelGestureInteraction,
@@ -3793,6 +4154,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             pxPerSecRef,
             multiSelectedClipIds,
             sessionRef,
+            fadeTooltipAnchor,
+            publishFadeSideInfo,
         ],
     );
 
@@ -4079,12 +4442,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 partnerClipId?: string;
             } | null,
         ) => {
-            const anchor =
-                typeof document === "undefined"
-                    ? null
-                    : (document.querySelector(
-                          "[data-hs-fade-tooltip-anchor]",
-                      ) as HTMLElement | null);
+            const anchor = fadeTooltipAnchor();
             if (anchor === null) return;
             if (args === null) {
                 // 收起：content 传 null → Provider 移除该元素的内容（浮标消失）。
@@ -4118,7 +4476,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     buildCrossfadeGripInfoContent({
                         earlier,
                         later,
-                        formatCtx: fadeLengthFormatCtx,
+                        formatCtx: timeValueFormatCtx,
                         t: t as unknown as FadeLabelLookup,
                     }),
                 );
@@ -4135,12 +4493,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 buildSingleFadeInfoContent({
                     isOut,
                     ...side,
-                    formatCtx: fadeLengthFormatCtx,
+                    formatCtx: timeValueFormatCtx,
                     t: t as unknown as FadeLabelLookup,
                 }),
             );
         },
-        [fadeLengthFormatCtx, sessionRef, t],
+        [timeValueFormatCtx, sessionRef, t, fadeTooltipAnchor],
     );
 
     /**
@@ -4556,6 +4914,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 fadeOutSec: number;
                 autoFadeInSec: number;
                 autoFadeOutSec: number;
+                /**
+                 * 形状 / 曲率的按下时快照。
+                 *
+                 * 【为什么放进快照】抓手 Tooltip 在拖拽期要显示两侧的**当前值**与
+                 * **位移量**。当前曲率由求解器逐帧给出，但增量基准必须是**按下时**的
+                 * 值 —— `curveSides.*.baseDir` 被求解器逐帧覆写以保持求解连续，不能
+                 * 当基准；从 Redux 现读又会拿到上一帧的值（增量逐帧归零）。
+                 */
+                fadeInShape: number;
+                fadeOutShape: number;
+                fadeInDir: number;
+                fadeOutDir: number;
             }
         >;
     } | null>(null);
@@ -4615,6 +4985,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         fadeOutSec: number;
                         autoFadeInSec: number;
                         autoFadeOutSec: number;
+                        /** 形状 / 曲率的按下时快照：抓手 Tooltip 的"当前值"与"增量基准"都要它们。 */
+                        fadeInShape: number;
+                        fadeOutShape: number;
+                        fadeInDir: number;
+                        fadeOutDir: number;
                     }
                 >();
                 for (const clip of [earlier, later]) {
@@ -4627,6 +5002,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         fadeOutSec: Number(clip.fadeOutSec) || 0,
                         autoFadeInSec: Number(clip.autoFadeInSec) || 0,
                         autoFadeOutSec: Number(clip.autoFadeOutSec) || 0,
+                        fadeInShape: Number(clip.fadeInShape) || 0,
+                        fadeOutShape: Number(clip.fadeOutShape) || 0,
+                        fadeInDir: Number(clip.fadeInDir) || 0,
+                        fadeOutDir: Number(clip.fadeOutDir) || 0,
                     });
                 }
                 kernelCrossfadeOriginRef.current = {
@@ -4748,6 +5127,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dispatch(setClipFades({ clipId: sides.a.clipId, fadeOutDir: dirA }));
                     dispatch(setClipFades({ clipId: sides.b.clipId, fadeInDir: dirB }));
                 });
+                // 曲率拖拽的实时浮标（双列）：曲率行各带 `[±增量]`，长度行只给当前值。
+                // 增量基准取按下时的 dir（`origin.baseById`）—— `sides.*.baseDir` 被
+                // 本分支逐帧覆写以保持求解连续，不能当基准。
+                const curveBaseA = origin.baseById.get(earlier.id);
+                const curveBaseB = origin.baseById.get(later.id);
+                publishFadeGripInfo(
+                    fadeTooltipAnchor(),
+                    {
+                        shape: curveBaseA?.fadeOutShape ?? 0,
+                        dir: dirA,
+                        lengthSec: origin.earlierFadeOutSec,
+                        delta: { dir: dirA - (curveBaseA?.fadeOutDir ?? 0) },
+                    },
+                    {
+                        shape: curveBaseB?.fadeInShape ?? 0,
+                        dir: dirB,
+                        lengthSec: origin.laterFadeInSec,
+                        delta: { dir: dirB - (curveBaseB?.fadeInDir ?? 0) },
+                    },
+                );
                 return;
             }
 
@@ -4887,8 +5286,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }
             });
+            // 抓手拖拽的实时浮标（双列）：两侧各带自己的长度位移。
+            //
+            // 默认模式下重叠不变、两侧淡变长度**不动**（只移动 clip 边缘），此时位移
+            // 为 0 ⇒ 不出现方括号，读数仍随边缘移动实时刷新；反向模式按比例缩放，
+            // 两侧位移各不相同，因此各自从自己的按下时生效长度算起。
+            const gripBaseA = origin.baseById.get(earlier.id);
+            const gripBaseB = origin.baseById.get(later.id);
+            const fadeOf = (clipId: string) => result.fades.find((fade) => fade.clipId === clipId);
+            const fadeA = fadeOf(earlier.id);
+            const fadeB = fadeOf(later.id);
+            const lengthA = fadeA?.fadeOutSec ?? fadeA?.autoFadeOutSec ?? origin.earlierFadeOutSec;
+            const lengthB = fadeB?.fadeInSec ?? fadeB?.autoFadeInSec ?? origin.laterFadeInSec;
+            publishFadeGripInfo(
+                fadeTooltipAnchor(),
+                {
+                    shape: gripBaseA?.fadeOutShape ?? 0,
+                    dir: gripBaseA?.fadeOutDir ?? 0,
+                    lengthSec: lengthA,
+                    delta: { lengthSec: lengthA - origin.earlierFadeOutSec },
+                },
+                {
+                    shape: gripBaseB?.fadeInShape ?? 0,
+                    dir: gripBaseB?.fadeInDir ?? 0,
+                    lengthSec: lengthB,
+                    delta: { lengthSec: lengthB - origin.laterFadeInSec },
+                },
+            );
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- s.snapEnabled 为设置态，加入会让交叉抓手预览回调随设置切换重建（既有热路径口径，手势中读创建时快照）
+        // 吸附总开关是设置态，但交叉抓手预览在拖拽中实时读取它：若不进依赖，
+        // 回调只在挂载时创建一次，之后切换吸附开关再拖抓手仍按挂载时的快照
+        // 吸附/免吸附，与 clip 拖拽 / trim 的实时口径不一致（同源处理见
+        // handleKernelDragPreview / handleKernelTrimPreview 的依赖表）。
         [
             beginKernelGestureInteraction,
             crossfadeGripKb,
@@ -4899,7 +5328,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率纵横比换算读实时 pxPerSec（缩放后创建时快照会算错）。
             pxPerSecRef,
             sessionRef,
+            s.snapEnabled,
             snapTimelineDetailed,
+            fadeTooltipAnchor,
+            publishFadeGripInfo,
         ],
     );
 
@@ -4919,6 +5351,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const origin = kernelCrossfadeOriginRef.current;
             kernelCrossfadeOriginRef.current = null;
             if (origin === null) return;
+            // 手势结束：清掉吸附高亮。
+            //
+            // 【为什么必须显式清】预览通过 `snapTimelineDetailed({ highlight })` 发布
+            // 高亮，而**只有再次带 `highlight` 调用**才会清除它 —— 松手后不再有预览帧，
+            // 没人来清。其它吸附手势的收尾各自负责：clip 拖拽 / 裁切在提交里
+            // `clearSnapHighlights`，吸附偏移走 `endSnapGesture()` 的深度归零兜底；
+            // 交叉点抓手此前两者都没有，于是拖拽中亮起的吸附竖线**一直留在画面上**
+            //（用户报告："按住交叉淡化反向模式拖抓手，松手后高亮线不消失"）。
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             if (args.cancelled) {
                 // 取消：两侧**全部字段**一起还原——预览改过源窗口与淡变（反向模式），
                 // 只还原起点 / 长度会让 Redux 停在半途、与后端分叉。
@@ -6184,12 +6625,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   explicitOverlappingClipIds: contextMenu.overlappingClipIds,
                               });
 
-                              const currentPlayheadSec = sessionRef.current.playheadSec;
-                              const playheadInClip =
-                                  currentPlayheadSec >= ctxClip.startSec &&
-                                  currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
+                              const currentPlayheadSec = Math.max(
+                                  0,
+                                  Number(sessionRef.current.playheadSec ?? 0) || 0,
+                              );
+                              // 用与执行端同一个开区间谓词：闭区间会让"播放头恰好
+                              // 落在 Clip 边缘"时菜单亮着、点下去却什么都不发生。
+                              const playheadInClip = isClipSplittableAtSec(
+                                  ctxClip,
+                                  currentPlayheadSec,
+                              );
 
-                              return createPortal(
+                              // 菜单自己 portal 到 `document.body`（见 ClipContextMenu），
+                              // 这里不再套一层 —— 表面归组件所有。
+                              return (
                                   <ClipContextMenu
                                       x={contextMenu.x}
                                       y={contextMenu.y}
@@ -6197,16 +6646,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       selectedClips={selectedClips}
                                       overlappingClips={overlappingFadeClips}
                                       playheadInClip={playheadInClip}
-                                      canSplitSelected={selectedClips.some((c) => {
-                                          const splitSec = Math.max(
-                                              0,
-                                              Number(sessionRef.current.playheadSec ?? 0) || 0,
-                                          );
-                                          return (
-                                              splitSec >= c.startSec &&
-                                              splitSec <= c.startSec + c.lengthSec
-                                          );
-                                      })}
+                                      canSplitSelected={selectedClips.some((c) =>
+                                          isClipSplittableAtSec(c, currentPlayheadSec),
+                                      )}
                                       onClose={() => setContextMenu(null)}
                                       onDelete={(ids) => {
                                           setContextMenu(null);
@@ -6422,8 +6864,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                  />,
-                                  document.body,
+                                  />
                               );
                           })()
                         : null}
@@ -6434,25 +6875,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   x={trackAreaMenu.x}
                                   y={trackAreaMenu.y}
                                   canPaste={clipboardAvailable}
-                                  canSplit={(multiSelectedClipIds.length > 0
-                                      ? multiSelectedClipIds
-                                      : sessionRef.current.selectedClipId
-                                        ? [sessionRef.current.selectedClipId]
-                                        : []
-                                  ).some((id) => {
-                                      const clip = sessionRef.current.clips.find(
-                                          (c) => c.id === id,
-                                      );
-                                      if (!clip) return false;
-                                      const splitSec = Math.max(
-                                          0,
-                                          Number(sessionRef.current.playheadSec ?? 0) || 0,
-                                      );
-                                      return (
-                                          splitSec >= clip.startSec &&
-                                          splitSec <= clip.startSec + clip.lengthSec
-                                      );
-                                  })}
+                                  // 与 `splitSelectedAtPlayhead` 共用同一个解析：
+                                  // 有选区时看选区，**无选区**时看播放头处有没有
+                                  // 可分割的 Clip —— 否则这条菜单项会在"能切但
+                                  // 没选东西"时被误判为不可用。
+                                  //
+                                  // 这里按**未吸附**的播放头判断（与改动前的谓词
+                                  // 同口径）：razor 吸附只在执行时发生，把整条吸附
+                                  // 管线搬进渲染只为消除"播放头偏离网格半格且跨过
+                                  // Clip 边缘"这一种罕见情形的可用性误差，不划算。
+                                  canSplit={
+                                      resolveSplitTargetsAtSec({
+                                          clips: sessionRef.current.clips,
+                                          splitSec: Math.max(
+                                              0,
+                                              Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                          ),
+                                          selectedIds:
+                                              multiSelectedClipIds.length > 0
+                                                  ? multiSelectedClipIds
+                                                  : sessionRef.current.selectedClipId
+                                                    ? [sessionRef.current.selectedClipId]
+                                                    : [],
+                                      }).ids.length > 0
+                                  }
                                   canCloseGaps={sessionRef.current.clips.some(
                                       (c) =>
                                           c.trackId === trackAreaMenu.trackId &&
@@ -6619,7 +7065,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 ? multiSelectedClipIds.length
                                 : 1
                         }
-                        formatCtx={fadeLengthFormatCtx}
+                        formatCtx={timeValueFormatCtx}
                         onApply={(rate, adjustLength, durationSec) => {
                             if (rateEditorClipId != null) {
                                 commitTrackLaneRate(rateEditorClipId, {

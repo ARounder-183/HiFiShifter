@@ -53,7 +53,8 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
-    setToolMode,
+    setToolModePersistent,
+    setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
     addTrackRemote,
@@ -231,7 +232,21 @@ const statusKey: Record<string, string> = {
     "Tempo map updated": "status_tempo_map_updated",
     "Waiting for import options": "status_waiting_import_options",
     "Waveform cache cleared": "status_waveform_cache_cleared",
+    // 各 thunk 的完成 / 失败结果状态（sessionSlice fulfilled 分支写出）
+    "Default model loaded": "status_default_model_loaded",
+    "Load default model failed": "status_load_default_model_failed",
+    "Model loaded": "status_model_loaded",
+    "Load model failed": "status_load_model_failed",
+    "Audio processed": "status_audio_processed",
+    "Process audio failed": "status_process_audio_failed",
+    "MIDI clip created": "status_midi_clip_created",
+    "MIDI import failed": "status_midi_import_failed",
+    "Pitch shift applied": "status_pitch_shift_applied",
+    "Pitch shift failed": "status_pitch_shift_failed",
+    "Synthesis done": "status_synthesis_done",
+    "Synthesis failed": "status_synthesis_failed",
     // 进行中状态（setPending）
+    "Importing folder...": "status_importing_folder",
     "Applying pitch shift...": "status_applying_pitch_shift",
     "Clearing waveform cache...": "status_clearing_waveform_cache",
     "Clearing render cache...": "status_clearing_render_cache",
@@ -503,7 +518,7 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 
 function AppInner() {
     const dispatch = useAppDispatch();
-    const { t, tf, plural } = useI18n();
+    const { t, tf, tVars, plural } = useI18n();
     const pitchAnalysis = usePitchAnalysis();
 
     const status = useAppSelector((state) => state.session.status);
@@ -553,6 +568,7 @@ function AppInner() {
     const dockLayout = useAppSelector((state) => state.dock.layout);
     const dockSettings = useAppSelector((state) => state.dock.settings);
     const dockHydrated = useAppSelector((state) => state.dock.hydrated);
+    const dockMaximized = useAppSelector((state) => Boolean(state.dock.maximized));
     const [autoBackupSettings, setAutoBackupSettings] = useState<AutoBackupSettings>(
         DEFAULT_AUTO_BACKUP_SETTINGS,
     );
@@ -679,6 +695,29 @@ function AppInner() {
             })
             .catch(() => {
                 // 读不到设置时保持出厂默认；sessionSlice 的 reducer 同样不会执行。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
+
+    /*
+     * vslib 能力探测：启动时问一次后端，供算法列表过滤掉不可用的 vslib。
+     *
+     * 【为什么是"一次"而不是轮询】可用性是编译期 + 链接期决定的静态事实，
+     * 运行期不会变（DLL 缺失会让进程根本起不来）。探测失败时保持 `null`
+     * （未知），算法列表按"不可用"处理 —— 详见 pitchAlgoOptions.ts。
+     */
+    useEffect(() => {
+        let cancelled = false;
+        void webApi
+            .getVslibStatus()
+            .then((status) => {
+                if (cancelled) return;
+                dispatch(setVslibAvailable(Boolean(status?.available)));
+            })
+            .catch(() => {
+                // 取不到状态：保持 null（未知 → 隐藏 vslib）。
             });
         return () => {
             cancelled = true;
@@ -1012,7 +1051,10 @@ function AppInner() {
     // （未收录的码回退显示原文，保留诊断信息）。
     const mappedErrorKey = error ? (errorCodeKey[error] ?? clipboardErrorKey(error)) : "";
     const errorText = error
-        ? `${t("status_error_prefix")}：${mappedErrorKey ? t(mappedErrorKey as MessageKey) : error}`
+        ? tVars("common_label_value", {
+              label: t("status_error_prefix"),
+              value: mappedErrorKey ? t(mappedErrorKey as MessageKey) : error,
+          })
         : statusText;
 
     // 构建 pitch 分析进度文本（分析中时显示在状态栏左侧）
@@ -1661,7 +1703,11 @@ function AppInner() {
     const runOrPromptUnsavedAction = useCallback(
         (mode: "switch" | "exit", action: () => Promise<void>) => {
             if (!projectDirty) {
-                void action();
+                // action 可能 reject（如 openProjectFromDialog().unwrap() 后端失败、
+                // closeWindowNow 双双失败）：干净工程这一支没有弹窗，若不接住，
+                // 拒绝会变成 unhandledrejection 被全局上报当成崩溃。错误状态已由
+                // Redux 呈现给用户，这里只需静默吞掉。
+                void action().catch(() => {});
                 return;
             }
             promptUnsavedAction(mode, action);
@@ -2881,20 +2927,23 @@ function AppInner() {
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
                     if (cur === "select") {
-                        dispatch(setToolMode(runtimeRef.current.drawToolMode));
+                        void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
                     } else {
-                        dispatch(setToolMode("select"));
+                        void dispatch(setToolModePersistent("select"));
                     }
                     break;
                 }
                 case "mode.selectTool":
-                    dispatch(setToolMode("select"));
+                    void dispatch(setToolModePersistent("select"));
                     break;
                 case "mode.drawTool":
-                    dispatch(setToolMode("draw"));
+                    void dispatch(setToolModePersistent("draw"));
                     break;
                 case "mode.lineTool":
-                    dispatch(setToolMode("vibrato"));
+                    void dispatch(setToolModePersistent("line"));
+                    break;
+                case "mode.vibratoTool":
+                    void dispatch(setToolModePersistent("vibrato"));
                     break;
                 case "quickSearch.open":
                     setQuickSearchOpen(true);
@@ -2989,12 +3038,12 @@ function AppInner() {
                     // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
                     // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
                     const ss = store.getState().session;
-                    const currentDrawTool =
-                        ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
+                    // 因此两者都归到 `"vibrato"` 这一路。
                     const tool =
                         ss.toolMode === "select"
                             ? ("select" as const)
-                            : currentDrawTool === "draw"
+                            : ss.drawToolMode === "draw"
                               ? ("draw" as const)
                               : ("vibrato" as const);
                     dispatch(cycleDragDirection(tool));
@@ -3471,13 +3520,19 @@ function AppInner() {
     // 【闸门】必须等 `hydrated` 为真：切片初始状态是出厂布局，若在读到磁盘
     // 内容之前就写回，用户的布局会被默认值覆盖 —— 也就是"打开应用发现界面
     // 被重置"这类最恼人的故障。
+    //
+    // 【最大化时也必须跳过】最大化把 `state.layout` 的某个根临时换成单组树，
+    // 而 `maximized` 本身刻意不持久化（重启后回到用户排好的布局）。若此刻仍
+    // 落盘，写下的就是那棵临时树；用户没还原就退出，原排布被永久覆盖且无从
+    // 恢复。`dockMaximized` 进入依赖：还原时它变回 false，effect 重新运行，
+    // 恢复后的真实布局随即被保存，去抖不会永久失效。
     useEffect(() => {
-        if (!dockHydrated) return;
+        if (!dockHydrated || dockMaximized) return;
         const timer = window.setTimeout(() => {
             void dispatch(persistDockSettings());
         }, dockSettings.saveDebounceMs);
         return () => window.clearTimeout(timer);
-    }, [dockLayout, dockSettings, dockHydrated, dispatch]);
+    }, [dockLayout, dockSettings, dockHydrated, dockMaximized, dispatch]);
 
     // ── 面板渲染函数登记 ─────────────────────────────────────────────
     //
@@ -4054,9 +4109,11 @@ function AppInner() {
                                                                 value={candidate.path}
                                                             >
                                                                 {candidate.exact_hash
-                                                                    ? `✓ ${t("recapture_missing_media_match_exact")} · `
-                                                                    : ""}
-                                                                {candidate.path}
+                                                                    ? tVars(
+                                                                          "recapture_missing_media_exact_option",
+                                                                          { path: candidate.path },
+                                                                      )
+                                                                    : candidate.path}
                                                             </option>
                                                         ))}
                                                     </WheelSelect>

@@ -64,8 +64,6 @@ pub(crate) mod channel_scan;
 mod common;
 #[path = "commands/core.rs"]
 mod core;
-#[path = "commands/debug.rs"]
-mod debug;
 #[path = "commands/diagnostics.rs"]
 mod diagnostics;
 #[path = "commands/dialogs.rs"]
@@ -131,6 +129,8 @@ pub(crate) mod undo_history_file;
 mod vocalshifter;
 #[path = "commands/vocalshifter_clipboard.rs"]
 mod vocalshifter_clipboard;
+#[path = "commands/vslib_status.rs"]
+mod vslib_status;
 #[path = "commands/waveform.rs"]
 mod waveform;
 
@@ -173,8 +173,12 @@ pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::Timeline
     core::get_timeline_state(state)
 }
 
-/// Lightweight timeline state for regular polls — skips waveform_preview,
-/// pitch_range, and midi_note_data to reduce clone+serialize overhead.
+/// Lightweight timeline state — skips waveform_preview, pitch_range, and
+/// midi_note_data to reduce clone+serialize overhead.
+///
+/// 【当前未接线】前端轮询走的是全量 `get_timeline_state`；本命令保留作为
+/// 轮询瘦身的现成入口（直接套用 lite payload 会清掉上述字段，需前端按字段
+/// 合并后才能启用）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_timeline_state_lite(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
     core::get_timeline_state_lite(state)
@@ -298,13 +302,38 @@ pub fn open_project_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_project(
-    state: State<'_, AppState>,
+pub async fn open_project(
+    app: tauri::AppHandle,
     window: Window,
     project_path: String,
     force: Option<bool>,
 ) -> crate::models::OpenProjectPayload {
-    project::open_project(state, window, project_path, force)
+    // 打开工程要读整个工程文件 + 完整解析 + 逐 take 指纹/头探测 + 历史记录
+    // 回填（可能数十 MB / 长撤销栈）：同步命令在主线程执行会冻结 UI，
+    // 卸载到阻塞线程池（与 save_project_to_path 对称）。
+    let fallback_app = app.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::open_project(state, window, project_path, force)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            // 阻塞任务 panic：沿用既有失败语义（返回**当前**时间线 + 错误），
+            // 让前端保留现有工程而不是清空。
+            let state: State<'_, AppState> = fallback_app.state();
+            let mut timeline = core::get_timeline_state(state);
+            timeline.ok = false;
+            crate::models::OpenProjectPayload {
+                timeline,
+                error: Some(format!("open project task failed: {error}")),
+                project_version_too_new: None,
+                project_file_version: None,
+                current_project_file_version: None,
+            }
+        }
+    }
 }
 
 /// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
@@ -1317,17 +1346,43 @@ pub async fn add_clip_take_from_media(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_media_files_as_takes(
+pub async fn import_media_files_as_takes(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     paths: Vec<String>,
     track_id: Option<String>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    let payload = timeline::import_media_files_as_takes(state, paths, track_id, start_sec);
+    // 多文件导入会逐个头探测 + 声道策略判定（smart 模式下可能解码音频）：
+    // 同步命令在主线程执行会冻结 UI，卸载到阻塞线程池（同 import_audio_item 系列）。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("import media files task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
     // 同 `import_audio_item`：容器素材的同步判定用的是短解码预算，长文件只拿到
     // "未定论"，这里补一轮完整预算的后台扫描把它收敛掉。
-    crate::commands::channel_scan::request_channel_scan(&app);
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
     payload
 }
 
@@ -1885,15 +1940,6 @@ pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
     playback::cancel_background_render(Some(&app))
 }
 
-// ===================== debug =====================
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn debug_realtime_render_stats(
-    state: State<'_, AppState>,
-) -> crate::models::DebugRealtimeRenderStatsPayload {
-    debug::debug_realtime_render_stats(state)
-}
-
 // ===================== diagnostics =====================
 //
 // 诊断包导出涉及日志读取、zip 压缩与推理基准测试（可能数十秒），
@@ -1991,11 +2037,17 @@ pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     onnx_status::get_onnx_diagnostic_info()
 }
 
+/// vslib 是否可用 —— 供前端算法列表按能力过滤（不可用时隐藏 vslib）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_vslib_status() -> vslib_status::VslibStatusPayload {
+    vslib_status::get_vslib_status()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
     // Offload the CPU/GPU-intensive benchmark to a blocking thread so the
     // async runtime stays responsive and the UI doesn't freeze.
-    tauri::async_runtime::spawn_blocking(move || onnx_status::run_vocoder_benchmark())
+    tauri::async_runtime::spawn_blocking(onnx_status::run_vocoder_benchmark)
         .await
         .map_err(|e| format!("benchmark task panicked: {e}"))?
 }
@@ -2010,18 +2062,6 @@ pub fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_dml_adapters() -> crate::dml_adapters::DmlAdapterList {
     onnx_status::get_dml_adapters()
-}
-
-// ===================== pitch_cache =====================
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn clear_pitch_cache(state: State<'_, AppState>) -> serde_json::Value {
-    pitch_cache::clear_pitch_cache(state)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn get_pitch_cache_stats(state: State<'_, AppState>) -> pitch_cache::PitchCacheStatsPayload {
-    pitch_cache::get_pitch_cache_stats(state)
 }
 
 // ===================== file_browser =====================
@@ -2136,11 +2176,17 @@ pub async fn get_media_audio_streams(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_audio_preview(
+pub async fn read_audio_preview(
     file_path: String,
     max_frames: Option<u32>,
 ) -> Result<file_browser::AudioPreviewData, String> {
-    file_browser::read_audio_preview(file_path, max_frames)
+    // 预览要解码音频前缀（最多约 48 万帧 ≈ 4MB PCM）：同步命令会冻结 UI，
+    // 卸载到阻塞线程池（与其余解码类命令一致）。
+    tauri::async_runtime::spawn_blocking(move || {
+        file_browser::read_audio_preview(file_path, max_frames)
+    })
+    .await
+    .map_err(|e| format!("read_audio_preview task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2427,11 +2473,24 @@ pub fn replace_midi_clip_data(
 // ===================== midi_export =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_pitch_to_midi(
-    state: State<'_, AppState>,
+pub async fn export_pitch_to_midi(
+    app: tauri::AppHandle,
     request: midi_export::MidiExportRequest,
 ) -> serde_json::Value {
-    midi_export::export_pitch_to_midi(state.inner(), request)
+    // 音高导出可能触发 FCPE 分析（长素材数分钟）：必须在阻塞线程池执行，
+    // 否则同步命令会占住主线程、冻结 UI 与其余 IPC。
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        midi_export::export_pitch_to_midi(state.inner(), request)
+    })
+    .await
+    {
+        Ok(payload) => payload,
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "error": format!("export_pitch_to_midi join failed: {e}"),
+        }),
+    }
 }
 
 // ===================== ui_settings =====================

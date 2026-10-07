@@ -68,6 +68,11 @@ test("components/layout/notebook/htmlToMarkdown.test.ts scripted checks", async 
     const withImage = htmlToMarkdown('<p><img src="https://x/y.png" alt="图" width="640"></p>');
     assertIncludes(withImage, "![图](https://x/y.png)", "image");
 
+    // src 里的圆括号必须转义：维基类 URL 常见 `Foo_(bar)`，不配对的括号会让
+    // 整条图片语法解析不回来（与 nodes/notebookImage.ts 的序列化器一致）。
+    const parenImage = htmlToMarkdown('<p><img src="https://x/a(1).png" alt="图"></p>');
+    assertIncludes(parenImage, "![图](https://x/a\\(1\\).png)", "parens in image src escaped");
+
     // 内嵌 data URI：超过上限的按解码体积丢弃，留语言无关的 `[image]` 占位
     //（base64 每 4 字符还原 3 字节，这里用 1600 字符 ≈ 1200 字节验证小阈值）。
     const oversized = htmlToMarkdown(

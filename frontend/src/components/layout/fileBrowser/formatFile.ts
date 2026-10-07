@@ -11,7 +11,10 @@ export function formatSize(bytes: number | null): string {
     if (bytes == null) return "";
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    // ≥1 GiB 之前一律显示成 "4096.0 MB"，大到读不出量级 —— 补上 GB / TB 档。
+    if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(1)} TB`;
 }
 
 /** 格式化修改时间（`FileEntry.modifiedTime` 是 Unix 秒）。 */

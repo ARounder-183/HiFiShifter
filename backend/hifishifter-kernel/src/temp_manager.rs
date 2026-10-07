@@ -44,12 +44,14 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
 /// 应用启动时清理遗留的临时文件。
 ///
 /// 清理范围：
-/// - `%TEMP%/hifishifter/synth_*.wav`（合成临时文件）
-/// - `%TEMP%/hifishifter/import_*.*`（导入临时文件）
-/// - `%TEMP%/hifishifter/glue_*.wav`（胶合烘焙文件，仅清理超过 7 天的：
-///   已保存的工程会直接引用 glue 文件作为 clip 源，无条件清理会弄坏
-///   最近的工程；按文件龄清理只限制无主的陈旧残留）
+/// - `%TEMP%/hifishifter/synth_*.wav`（合成临时文件，派生缓存，可无条件清理）
+/// - `%TEMP%/hifishifter/glue_*.wav`、`%TEMP%/hifishifter/import_*.*`
+///   （仅清理超过 7 天的：已保存的工程会直接引用它们作为 clip 源，无条件清理
+///   会弄坏最近的工程；按文件龄清理只限制无主的陈旧残留）
 /// - `%TEMP%/hs_vslib_*.wav`（vslib 崩溃残留）
+///
+/// 注意：新版本的拖放导入（`import_audio_bytes`）已改为落**持久目录**
+/// `<config_dir>/imported_media/`，不在此清理范围内。
 ///
 /// 此函数不会阻塞，内部 spawn 后台线程执行。
 pub fn cleanup_stale_temp_files() {
@@ -57,14 +59,20 @@ pub fn cleanup_stale_temp_files() {
         let mut total_removed = 0u64;
         let mut total_bytes = 0u64;
 
-        // 1. 清理 %TEMP%/hifishifter/ 下的 synth_*.wav、import_*.* 和
-        //    超过 7 天的 glue_*.wav
+        // 1. 清理 %TEMP%/hifishifter/ 下的 synth_*，以及超过 7 天的
+        //    glue_*.wav / import_*.*
         if let Ok(hs_dir) = hifishifter_temp_dir() {
-            let (removed, bytes) = cleanup_dir_by_prefix(&hs_dir, &["synth_", "import_"]);
+            // synth_* 是派生缓存（可从源重建），可无条件清理。
+            let (removed, bytes) = cleanup_dir_by_prefix(&hs_dir, &["synth_"]);
             total_removed += removed;
             total_bytes += bytes;
+            // glue_* 与 import_* 都可能被**已保存的工程**直接引用为 clip 源
+            // （glue 是烘焙文件；旧版本的拖放导入落在临时目录），无条件清理
+            // 会弄坏工程 —— 按文件龄清理，只限制无主的陈旧残留。
+            // 新版本的拖放导入已改落持久目录（见 `persistent_import_dir`），
+            // 这里只兜底清理历史遗留。
             let (removed, bytes) =
-                cleanup_dir_by_prefix_older_than(&hs_dir, &["glue_"], 7 * 24 * 3600);
+                cleanup_dir_by_prefix_older_than(&hs_dir, &["glue_", "import_"], 7 * 24 * 3600);
             total_removed += removed;
             total_bytes += bytes;
         }

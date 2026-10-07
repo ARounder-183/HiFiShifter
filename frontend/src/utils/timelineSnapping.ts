@@ -69,6 +69,16 @@ export interface TimelineSnapContext {
     extraCandidates?: readonly SnapCandidate[];
     /** 工程采样率；snapToProjectSampleRate 时使用，默认 48000。 */
     projectSampleRate?: number;
+    /**
+     * 只允许吸附到该区间内的候选（秒，顺序无关）。
+     *
+     * 【为什么需要】被吸附对象本身可能有**活动范围**。典型是 Clip 的吸附偏移
+     * 手柄：它必须留在 Clip 内部（`[clipStart, clipStart + clipLen]`）。若不过滤，
+     * 最近的候选可能落在 Clip 之外 —— 吸附会把"落点"算到外面，调用方再把它钳回
+     * 边界，于是**高亮线画在 Clip 外、手柄却停在边界**，看起来像"范围外也生效"。
+     * 过滤掉范围外候选后，命中即落点，高亮与实际位置一致。
+     */
+    candidateRangeSec?: { readonly lo: number; readonly hi: number };
 }
 
 export interface SnapResult {
@@ -335,30 +345,57 @@ export function clipSnapOffsetSec(clip: Pick<ClipInfo, "startSec" | "snapOffsetS
     return clampSec(Number(clip.startSec) + (Number.isFinite(offset) ? Math.max(0, offset) : 0));
 }
 
-function clipTrackDistance(ctx: TimelineSnapContext, clip: ClipInfo): number {
-    if (ctx.anchorTrackId == null) return 0;
-    const indexOf = (id: string) => ctx.tracks.findIndex((t) => t.id === id);
-    const a = indexOf(ctx.anchorTrackId);
-    const b = indexOf(clip.trackId);
-    if (a < 0 || b < 0) return Number.POSITIVE_INFINITY;
-    return Math.abs(a - b);
+/** 轨道 id → 下标（与 `Array.findIndex` 同语义：重复 id 取首次出现）。 */
+function buildTrackIndex(tracks: readonly TrackInfo[]): Map<string, number> {
+    const index = new Map<string, number>();
+    for (let i = 0; i < tracks.length; i += 1) {
+        if (!index.has(tracks[i].id)) index.set(tracks[i].id, i);
+    }
+    return index;
 }
 
-/** 轨道距离过滤后的可见 clip 列表（供各候选组共用）。 */
+function clipTrackDistance(
+    ctx: TimelineSnapContext,
+    clip: ClipInfo,
+    trackIndex: Map<string, number>,
+    anchorIndex: number,
+): number {
+    if (ctx.anchorTrackId == null) return 0;
+    const b = trackIndex.get(clip.trackId);
+    if (anchorIndex < 0 || b === undefined) return Number.POSITIVE_INFINITY;
+    return Math.abs(anchorIndex - b);
+}
+
+/**
+ * 轨道距离过滤后的可见 clip 列表（供各候选组共用）。
+ *
+ * 【为什么把轨道索引提出来】`snapAcrossTracks` 默认开启，于是每个 clip 都要
+ * 按轨道距离过滤；此前每个 clip 各做两次 `findIndex`（锚点轨道是**循环不变量**，
+ * 却每 clip 重算一次）。而 `snapTimelineClipMove` 每次指针移动最多调用 3 次
+ * `snapTimelinePosition`，每次又会两次调用本函数 —— clip/轨道多时是纯粹的
+ * 重复扫描。索引与锚点下标一次算好，候选结果也由调用方共用一份。
+ */
 function visibleClipsForSnap(ctx: TimelineSnapContext): ClipInfo[] {
     const excluded = ctx.excludeClipIds ?? new Set<string>();
+    const trackIndex = buildTrackIndex(ctx.tracks);
+    const anchorIndex = ctx.anchorTrackId == null ? -1 : (trackIndex.get(ctx.anchorTrackId) ?? -1);
     const out: ClipInfo[] = [];
     for (const clip of ctx.clips) {
         if (excluded.has(clip.id)) continue;
-        if (!settings_gateAcrossTracks(ctx, clip)) continue;
+        if (!settings_gateAcrossTracks(ctx, clip, trackIndex, anchorIndex)) continue;
         out.push(clip);
     }
     return out;
 }
 
-function settings_gateAcrossTracks(ctx: TimelineSnapContext, clip: ClipInfo): boolean {
+function settings_gateAcrossTracks(
+    ctx: TimelineSnapContext,
+    clip: ClipInfo,
+    trackIndex: Map<string, number>,
+    anchorIndex: number,
+): boolean {
     if (ctx.settings.snapAcrossTracks) {
-        const distance = clipTrackDistance(ctx, clip);
+        const distance = clipTrackDistance(ctx, clip, trackIndex, anchorIndex);
         return distance <= ctx.settings.snapTrackDistance;
     }
     return clip.trackId === (ctx.anchorTrackId ?? clip.trackId);
@@ -368,10 +405,11 @@ function settings_gateAcrossTracks(ctx: TimelineSnapContext, clip: ClipInfo): bo
 function addSelectionCandidates(
     ctx: TimelineSnapContext,
     out: SnapCandidate[],
+    visibleClips: readonly ClipInfo[],
     opts: { includeSelection?: boolean; excludeSelected?: boolean },
 ) {
     const selectedSet = new Set(ctx.selectedClipIds);
-    for (const clip of visibleClipsForSnap(ctx)) {
+    for (const clip of visibleClips) {
         const isSelected = selectedSet.has(clip.id);
         if (opts.excludeSelected && isSelected) continue;
         if (opts.includeSelection && !isSelected) {
@@ -396,9 +434,13 @@ function addSelectionCandidates(
  * Loop Clip 的媒体边界呈 mod-D 等差回绕族 —— 取 clip 内的前两个回绕点。
  * 投影落在 clip 可见范围之外的候选不生成（避免幻影目标）。
  */
-function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
+function addClipEdgeCandidates(
+    ctx: TimelineSnapContext,
+    out: SnapCandidate[],
+    visibleClips: readonly ClipInfo[],
+) {
     const { settings } = ctx;
-    for (const clip of visibleClipsForSnap(ctx)) {
+    for (const clip of visibleClips) {
         if (settings.snapClipEdges) {
             out.push({
                 sec: clampSec(clip.startSec),
@@ -534,14 +576,18 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
         return { sec: safeRaw, candidate: null, distancePx: 0, snapped: false };
     }
 
-    const candidates: SnapCandidate[] = [];
+    let candidates: SnapCandidate[] = [];
+
+    // 轨道过滤后的可见 clip 一次算好，选择族与 Clip 边缘族共用（两族候选顺序
+    // 都来自同一个 `ctx.clips` 过滤结果，合并后与各自独立过滤逐项一致）。
+    const visibleClips = visibleClipsForSnap(ctx);
 
     // ── 网格候选 ──
     const wantsGrid =
         (ctx.object === "clip" && settings.snapClipsToGrid) ||
         (ctx.object === "selection" && settings.snapSelectionToGrid) ||
         (ctx.object === "cursor" && settings.snapCursorToGrid);
-    const gridCandidates = wantsGrid ? collectGridCandidates(ctx, safeRaw) : [];
+    let gridCandidates = wantsGrid ? collectGridCandidates(ctx, safeRaw) : [];
     candidates.push(...gridCandidates);
 
     // ── 选择 / 标记 / 光标 ──
@@ -550,7 +596,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
         (ctx.object === "selection" && settings.snapSelectionToSelectionMarkersCursor) ||
         (ctx.object === "cursor" && settings.snapCursorToSelectionMarkersCursor);
     if (wantsSelMarkerCursor) {
-        addSelectionCandidates(ctx, candidates, {
+        addSelectionCandidates(ctx, candidates, visibleClips, {
             includeSelection: ctx.object !== "selection",
             excludeSelected: ctx.object === "selection",
         });
@@ -562,7 +608,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
     // ── Clip 边缘 / 内容起点 / 源素材首尾 ──
     // 三组各自独立的目标开关，不隶属于"选择/标记/光标"族：
     // 任意拖动对象在对应开关开启时都可吸附到这些候选。
-    addClipEdgeCandidates(ctx, candidates);
+    addClipEdgeCandidates(ctx, candidates, visibleClips);
     pushExtraCandidates(ctx, candidates);
 
     candidates.push(...collectSampleRateCandidates(ctx, safeRaw));
@@ -581,6 +627,17 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
                 swingPercent: 0,
             }) + offset;
         candidates.push({ sec: clampSec(snapped), kind: "grid", priority: 15 });
+    }
+
+    // ── 候选范围过滤（在"激进模式"与距离判定之前统一生效）──
+    // 见 `candidateRangeSec` 的说明：范围外的候选不参与吸附，保证"命中即落点"。
+    if (ctx.candidateRangeSec !== undefined) {
+        const lo = Math.min(ctx.candidateRangeSec.lo, ctx.candidateRangeSec.hi) - 1e-9;
+        const hi = Math.max(ctx.candidateRangeSec.lo, ctx.candidateRangeSec.hi) + 1e-9;
+        const inRange = (candidate: SnapCandidate): boolean =>
+            candidate.sec >= lo && candidate.sec <= hi;
+        candidates = candidates.filter(inRange);
+        gridCandidates = gridCandidates.filter(inRange);
     }
 
     if (candidates.length === 0) {

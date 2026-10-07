@@ -176,8 +176,7 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
             nvml_device_get_name(handle, name_buf.as_mut_ptr(), NVML_DEVICE_NAME_BUFFER_SIZE)
         };
         let name = if ret == NVML_SUCCESS {
-            let cstr = CStr::from_bytes_until_nul(&name_buf)
-                .unwrap_or(CStr::from_bytes_with_nul(b"Unknown\0").unwrap());
+            let cstr = CStr::from_bytes_until_nul(&name_buf).unwrap_or(c"Unknown");
             cstr.to_str().unwrap_or("Unknown").to_string()
         } else {
             "Unknown".to_string()

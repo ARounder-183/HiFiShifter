@@ -73,19 +73,27 @@ export const SCOPE_PRIORITY_MAX = Infinity;
  */
 export function resolveActionByFocus(
     e: KeyboardEvent,
-    keybindings: Readonly<Record<string, Keybinding>>,
+    keybindings: Readonly<Record<string, readonly Keybinding[]>>,
     domain: KeybindingFocusDomain,
     toolMode: string,
 ): ActionId | null {
     let best: ActionId | null = null;
     let bestPriority = Infinity;
-    for (const [actionId, kb] of Object.entries(keybindings) as [ActionId, Keybinding][]) {
-        if (kb.modifierOnly) continue;
-        if (!matchesKeybinding(e, kb)) continue;
-        const priority = scopePriority(ACTION_META[actionId]?.scopedContext, domain, toolMode);
-        if (priority < bestPriority) {
-            bestPriority = priority;
-            best = actionId;
+    // 一个动作可以绑多个键（见 types.ts 的 `KeybindingMap`），因此内层还要遍历
+    // 它的绑定列表 —— 任一槽位命中即视为该动作命中。优先级只看动作本身，
+    // 与命中的是哪一个槽位无关。
+    for (const [actionId, bindings] of Object.entries(keybindings) as [
+        ActionId,
+        readonly Keybinding[],
+    ][]) {
+        for (const kb of bindings) {
+            if (kb.modifierOnly) continue;
+            if (!matchesKeybinding(e, kb)) continue;
+            const priority = scopePriority(ACTION_META[actionId]?.scopedContext, domain, toolMode);
+            if (priority < bestPriority) {
+                bestPriority = priority;
+                best = actionId;
+            }
         }
     }
     return bestPriority === Infinity ? null : best;

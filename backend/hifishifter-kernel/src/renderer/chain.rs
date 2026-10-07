@@ -196,7 +196,7 @@ impl ProcessingStage for WorldVocoderStage {
             pitch_edit: cc.pitch_edit,
             clip_midi: cc.clip_midi,
             clip_id: cc.clip_id,
-            extra_params: &cc.extra_params,
+            extra_params: cc.extra_params,
         };
         crate::renderer::world::WorldRenderer.render(&render_ctx)
     }
@@ -387,7 +387,7 @@ impl ProcessingStage for HiFiGanStage {
             pitch_edit: cc.pitch_edit,
             clip_midi: cc.clip_midi,
             clip_id: cc.clip_id,
-            extra_params: &cc.extra_params,
+            extra_params: cc.extra_params,
         };
         let renderer = crate::renderer::hifigan::HiFiGanRenderer;
         if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
@@ -484,7 +484,7 @@ impl HiFiGanStage {
                 pitch_edit: cc.pitch_edit,
                 clip_midi: cc.clip_midi,
                 clip_id: cc.clip_id,
-                extra_params: &cc.extra_params,
+                extra_params: cc.extra_params,
             };
             let renderer = crate::renderer::hifigan::HiFiGanRenderer;
             if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
@@ -519,9 +519,8 @@ impl HiFiGanStage {
         // 【气声未开时不得走这条 fast path】`breath_gain` 曲线缺失 → `map_or(false)`
         // 为假 → 不会提前返回，正好落到下方"gain = 1.0"的常量分支，实现原样混回。
         // 若把"气声未开"也当成"跳过噪声"，就会重现上面那个缺陷。
-        let gain_is_zero = breath_curve.map_or(false, |c| {
-            c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON)
-        });
+        let gain_is_zero =
+            breath_curve.is_some_and(|c| c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON));
         if gain_is_zero {
             return Ok(processed_harmonic);
         }
@@ -538,7 +537,7 @@ impl HiFiGanStage {
         );
         let out_len = processed_harmonic.len();
 
-        let has_varying_curve = breath_curve.map_or(false, |c| {
+        let has_varying_curve = breath_curve.is_some_and(|c| {
             if c.len() <= 1 {
                 return false;
             }
@@ -650,8 +649,8 @@ impl HiFiGanStage {
         let mut source_f0 = Vec::with_capacity(frames);
         let mut target_f0 = Vec::with_capacity(frames);
         for m in 0..frames {
-            let abs_sec = cc.seg_start_sec
-                + (m * crate::rd_tension::HOP) as f64 / (sr as f64) / rate;
+            let abs_sec =
+                cc.seg_start_sec + (m * crate::rd_tension::HOP) as f64 / (sr as f64) / rate;
             let src = crate::renderer::utils::clip_midi_at_time(
                 cc.frame_period_ms,
                 cc.clip_start_sec,
@@ -681,8 +680,7 @@ impl HiFiGanStage {
         // 张力曲线：按样本位置查询（帧 m 的样本位置 = m * HOP）。
         let fp = cc.frame_period_ms.max(0.1);
         let tension_at = |sample_idx: usize| -> f64 {
-            let abs_sec =
-                cc.seg_start_sec + (sample_idx as f64) / (sr as f64) / rate;
+            let abs_sec = cc.seg_start_sec + (sample_idx as f64) / (sr as f64) / rate;
             sample_curve_at_abs_sec(Some(curve), abs_sec, fp, 0.0) as f64
         };
         let target_at = |sample_idx: usize| -> f64 {
@@ -690,13 +688,7 @@ impl HiFiGanStage {
             target_f0.get(m).copied().unwrap_or(0.0)
         };
 
-        crate::rd_tension::RdTension::apply(
-            harmonic,
-            &source_f0,
-            sr,
-            tension_at,
-            target_at,
-        )
+        crate::rd_tension::RdTension::apply(harmonic, &source_f0, sr, tension_at, target_at)
     }
 }
 

@@ -751,7 +751,7 @@ fn read_pitch_for_clip(
             if let Some(placement) =
                 crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
             {
-                let note_value = note.note as f32;
+                let note_value = note.note;
                 let mut cycle_offset = 0usize;
                 while cycle_offset < target_frames {
                     let write_start = cycle_offset + placement.first_start_frame;
@@ -795,7 +795,7 @@ fn read_pitch_for_clip(
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
             let write_end = note_end_frame.min(target_frames);
             if note_start_frame < write_end {
-                let note_value = note.note as f32;
+                let note_value = note.note;
                 for frame in note_start_frame..write_end {
                     let current = midi_curve[frame];
                     if note_value > current || current <= 0.0 {
@@ -898,12 +898,31 @@ fn read_pitch_for_export(
 
 // ── 主入口 ────────────────────────────────────────────────────────────────────
 
+/// 轨道名驻留：`midly` 的 `TrackEvent` 要求 `'static` 借用，无法直接借用局部
+/// 字符串。按名字驻留后，每个**不同**名字在进程内只泄漏一次 —— 否则每次导出都
+/// `Box::leak` 一遍，泄漏量随导出次数无界增长。
+fn intern_track_name(name: &str) -> &'static [u8] {
+    static INTERNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<&'static [u8]>>,
+    > = std::sync::OnceLock::new();
+    let set = INTERNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = set.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = guard.get(name.as_bytes()) {
+        return existing;
+    }
+    let leaked: &'static [u8] = Box::leak(name.as_bytes().to_vec().into_boxed_slice());
+    guard.insert(leaked);
+    leaked
+}
+
 pub(super) fn export_pitch_to_midi(
     state: &AppState,
     request: MidiExportRequest,
 ) -> serde_json::Value {
+    // 快照时间线：短锁克隆后**立即释放**。导出可能触发 FCPE 音高分析
+    // （长素材可达数分钟），若在锁内执行会冻结所有命令与 UI 轮询。
     let timeline = match state.timeline.lock() {
-        Ok(guard) => guard,
+        Ok(guard) => guard.clone(),
         Err(e) => {
             return serde_json::json!({"ok": false, "error": format!("lock_failed: {}", e)});
         }
@@ -927,8 +946,7 @@ pub(super) fn export_pitch_to_midi(
     for (idx, entry) in request.tracks.iter().enumerate() {
         let channel = channels[idx];
 
-        let name_bytes: &'static [u8] =
-            Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
+        let name_bytes: &'static [u8] = intern_track_name(&entry.name);
 
         let (pitch_values, fp) = match read_pitch_for_export(&timeline, entry) {
             Ok(v) => v,

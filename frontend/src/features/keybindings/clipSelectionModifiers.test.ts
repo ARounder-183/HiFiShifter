@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { resolveClipSelectionModifiers } from "./clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
+import { firstBinding } from "./keybindingsSlice";
 import type { Keybinding } from "./types";
 import { IS_MAC } from "../../utils/platform";
 
-const MULTI = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"];
-const RANGE = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"];
+// 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+const MULTI = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"]);
+const RANGE = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"]);
 const NONE: Keybinding = { key: "__none__", modifierOnly: true };
 
 function mods(

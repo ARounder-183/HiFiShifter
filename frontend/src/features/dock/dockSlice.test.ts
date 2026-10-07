@@ -555,6 +555,68 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         );
     }
 
+    // ── 在**面板根**里最大化时停进来的窗体：还原应回到那个面板，而非主根 ──
+    //
+    // 最大化把该根的树临时换成单组树，此时拖进来的窗体只出现在临时树里。还原
+    // 时它们要被补回**记录的那个根**；写死 MAIN_ROOT_ID 会把窗体从面板里搬走
+    // （窗体还在，但被移出了用户放它的那个面板）。
+    {
+        let state = reducer(
+            undefined,
+            setDockLayout({
+                schema: 2,
+                roots: {
+                    main: {
+                        t: "split",
+                        id: "m1",
+                        dir: "row",
+                        ratio: 0.5,
+                        fixed: null,
+                        a: { t: "tabset", id: "m2", tabs: ["timeline"], active: "timeline" },
+                        b: {
+                            t: "tabset",
+                            id: "m3",
+                            tabs: ["paramEditor"],
+                            active: "paramEditor",
+                        },
+                    },
+                    panelRoot: { t: "tabset", id: "p1", tabs: ["notebook"], active: "notebook" },
+                },
+                forms: {
+                    timeline: { id: "timeline", panelId: "timeline" },
+                    paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+                    notebook: { id: "notebook", panelId: "notebook" },
+                    __panel: { id: "__panel", panelId: "__panel", childRootId: "panelRoot" },
+                },
+                order: ["timeline", "paramEditor", "notebook", "__panel"],
+            }),
+        );
+        state = reducer(state, { type: "dock/focusForm", payload: "notebook" });
+        state = reducer(state, toggleMaximizeActive());
+        assertEqual(state.maximized?.rootId, "panelRoot", "maximized the panel root");
+
+        // 最大化期间把文件浏览器拖进临时单组树（那个面板的树）。
+        state = reducer(
+            state,
+            dockFormTo({
+                formId: "fileBrowser",
+                target: { kind: "tab", rootId: "panelRoot", tabsetId: "p1" },
+            }),
+        );
+
+        state = reducer(state, toggleMaximizeActive());
+        assertEqual(state.maximized, null, "restored");
+        assert(
+            findTabsetOfForm(state.layout.roots.panelRoot!, "fileBrowser") !== null,
+            "a form docked during maximize returns to the panel root",
+        );
+        assertEqual(
+            findTabsetOfForm(state.layout.roots.main, "fileBrowser"),
+            null,
+            "it is NOT relocated into the main root",
+        );
+    }
+
     // ── 沟槽尺寸 ────────────────────────────────────────────────
     {
         let state = reducer(undefined, { type: "@@INIT" });

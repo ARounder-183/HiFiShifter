@@ -63,3 +63,18 @@ export function isDefaultBinding(current: Keybinding, fallback: Keybinding): boo
         Boolean(current.modifierOnly) === Boolean(fallback.modifierOnly)
     );
 }
+
+/**
+ * 判断一个动作的绑定**列表**是否与默认列表一致（逐槽位 + 长度）。
+ *
+ * 【为什么顺序敏感】下标 0 是主绑定（菜单显示与长按重复的基准），因此
+ * `[A, B]` 与 `[B, A]` 是两次不同的配置 —— 与 `keybindingsSlice.keybindingsEqual`
+ * 同一约定。
+ */
+export function isDefaultBindings(
+    current: readonly Keybinding[],
+    fallback: readonly Keybinding[],
+): boolean {
+    if (current.length !== fallback.length) return false;
+    return current.every((binding, index) => isDefaultBinding(binding, fallback[index]));
+}

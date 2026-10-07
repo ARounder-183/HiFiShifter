@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 thread_local! {
-    static MONO_SCRATCH: RefCell<Vec<f32>> = RefCell::new(Vec::new());
+    static MONO_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
 }
 
 fn pitch_edit_algo_from_env() -> Option<String> {
@@ -581,8 +581,8 @@ pub fn processor_should_handle_stretch(
     let fx = hifigan_effect_flags(algo, track, entry, clip, clip.start_sec.max(0.0));
     let child_formant_offset =
         active_child_formant_offset_config(timeline, &clip.track_id).is_some();
-    let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && (fx.any() || child_formant_offset);
+    let effect_processing =
+        matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx) && (fx.any() || child_formant_offset);
     let rate = (clip.playback_rate as f64).max(1e-6);
     crate::renderer::processor_handles_time_stretch(
         algo.into_kind(),
@@ -610,9 +610,13 @@ impl PitchEditAlgorithm {
                 // fall through to track algo below
             }
         }
-        match algo {
-            PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::Unknown => Self::WorldVocoder,
-            PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
+        // 未知算法按工程默认算法处理（见 `PitchAnalysisAlgo::effective`）。
+        // 此前它与 `WorldDll` 并在一起走 WORLD：工程里存着一个本构建不认识的
+        // 算法名时，引擎会静默换成 WORLD 声码器，而界面显示的是 nsf-hifigan。
+        match algo.effective() {
+            // `effective()` 已把 `Unknown` 归一为默认算法；此处列出只为穷举。
+            PitchAnalysisAlgo::NsfHifiganOnnx | PitchAnalysisAlgo::Unknown => Self::NsfHifiganOnnx,
+            PitchAnalysisAlgo::WorldDll => Self::WorldVocoder,
             #[cfg(feature = "vslib")]
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
             #[cfg(not(feature = "vslib"))]
@@ -643,18 +647,41 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
-    // 插件禁用vslib仍运行WORLD/HiFiGAN共通混音回归，测试依赖不能随vslib一起隐藏。
+    // 这两项本身与 `vslib` feature 无关：`processor_bakes_common_mix_curves`
+    // 是无条件定义的，`SynthPipelineKind` 也只是**变体**受 feature 门控。
+    // 此前它们被错误地门控在 `feature = "vslib"` 下，于是关闭 vslib 的构建
+    // 整个测试模块编译不过（`cargo test --no-default-features` 报
+    // "cannot find function / type"）—— 而那正是没有 vslib DLL 时的构建方式。
     use super::processor_bakes_common_mix_curves;
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
         does_clip_need_processor_render, extra_curve_for_clip, gate_hifigan_effect_curves,
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
-        processor_should_handle_stretch,
+        processor_should_handle_stretch, PitchEditAlgorithm,
     };
     use crate::state::SynthPipelineKind;
-    use crate::state::{Clip, TimelineState, TrackParamsState};
+    use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, TrackParamsState};
     use std::collections::HashMap;
+
+    /// 未知算法在 pitch edit 链路里同样按工程默认算法处理。
+    ///
+    /// 回归对象：`Unknown` 曾与 `WorldDll` 并在一起走 WORLD，于是工程里存着
+    /// 本构建不认识的算法名时，引擎静默换成 WORLD 声码器 —— 而界面显示的是
+    /// nsf-hifigan。两处（渲染链路与 pitch edit 链路）必须给出同一个答案。
+    #[test]
+    fn unknown_track_algo_edits_with_the_default_algorithm() {
+        assert_eq!(
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::Unknown),
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::default()),
+            "未知算法与默认算法必须走同一条 pitch edit 链路"
+        );
+        assert_ne!(
+            PitchEditAlgorithm::from_track_algo(&PitchAnalysisAlgo::Unknown),
+            PitchEditAlgorithm::WorldVocoder,
+            "未知算法不得落到 WORLD"
+        );
+    }
 
     fn make_clip() -> Clip {
         Clip {
@@ -1134,7 +1161,10 @@ mod tests {
 
         let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), true);
 
-        assert_eq!(gated.get("breath_gain").map(|v| v.as_slice()), Some([0.5f32].as_slice()));
+        assert_eq!(
+            gated.get("breath_gain").map(|v| v.as_slice()),
+            Some([0.5f32].as_slice())
+        );
         assert_eq!(
             gated.get("hifigan_tension").map(|v| v.as_slice()),
             Some([80.0f32].as_slice())
@@ -1309,15 +1339,11 @@ pub fn transpose_midi_by_scale_steps(
         for (idx, offset) in offsets.iter().enumerate() {
             let candidate_midi = (oct * 12 + *offset) as f64;
             let abs_degree = oct * degree_count + idx as i32;
-            if candidate_midi <= midi {
-                if lower.map(|(_, v)| candidate_midi > v).unwrap_or(true) {
-                    lower = Some((abs_degree, candidate_midi));
-                }
+            if candidate_midi <= midi && lower.map(|(_, v)| candidate_midi > v).unwrap_or(true) {
+                lower = Some((abs_degree, candidate_midi));
             }
-            if candidate_midi >= midi {
-                if upper.map(|(_, v)| candidate_midi < v).unwrap_or(true) {
-                    upper = Some((abs_degree, candidate_midi));
-                }
+            if candidate_midi >= midi && upper.map(|(_, v)| candidate_midi < v).unwrap_or(true) {
+                upper = Some((abs_degree, candidate_midi));
             }
         }
     }
@@ -1344,9 +1370,7 @@ fn active_child_pitch_offset_config<'a>(
         .tracks
         .iter()
         .find(|track| track.id == clip_track_id)?;
-    if track.parent_id.is_none() {
-        return None;
-    }
+    track.parent_id.as_ref()?;
 
     let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
     let entry = timeline.params_by_root_track.get(&root_track_id);
@@ -1457,9 +1481,7 @@ fn active_child_formant_offset_config<'a>(
         .tracks
         .iter()
         .find(|track| track.id == clip_track_id)?;
-    if track.parent_id.is_none() {
-        return None;
-    }
+    track.parent_id.as_ref()?;
 
     let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
     // 只有支持逐帧 formant_shift_cents 的声码器链路才消费子轨共振峰差。

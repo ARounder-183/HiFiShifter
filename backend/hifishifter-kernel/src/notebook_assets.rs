@@ -30,17 +30,13 @@ use serde::{Deserialize, Serialize};
 /// 附件种类。决定前端用什么 UI 呈现。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NotebookAssetKind {
     /// 图片（Markdown 里是 `![alt](hifi-asset://<id>.<ext>)`）。
+    #[default]
     Image,
     /// HiFiShifter 剪贴板载荷的原始字节（Markdown 里是 ```hifi-clip 围栏）。
     ClipPayload,
-}
-
-impl Default for NotebookAssetKind {
-    fn default() -> Self {
-        NotebookAssetKind::Image
-    }
 }
 
 /// 一条附件：元数据 + 字节（base64）。

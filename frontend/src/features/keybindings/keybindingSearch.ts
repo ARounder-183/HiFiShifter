@@ -227,6 +227,30 @@ function termsFromKeybinding(binding: Keybinding): {
 }
 
 /**
+ * 一个动作的**全部**默认绑定的词条并集。
+ *
+ * 【为什么要并集而不是只看主绑定】动作可以绑多个键（如「重做」的
+ * `Ctrl+Shift+Z` 与 `Ctrl+Y`）。搜索的用法是"我记得它绑在某个键上，用那个键
+ * 找它" —— 只索引下标 0 会让按备用键搜索一无所获。
+ *
+ * 两组各自去重；主键与修饰键的**分组语义**（见 `termsFromKeybinding`）逐条
+ * 保留，因此并集不会把"手势主键"错算成"含 Ctrl"。
+ */
+function termsFromKeybindings(bindings: readonly Keybinding[]): {
+    primaryKeys: string[];
+    modifiers: string[];
+} {
+    const primaryKeys: string[] = [];
+    const modifiers: string[] = [];
+    for (const binding of bindings) {
+        const terms = termsFromKeybinding(binding);
+        for (const key of terms.primaryKeys) pushUnique(primaryKeys, key);
+        for (const modifier of terms.modifiers) pushUnique(modifiers, modifier);
+    }
+    return { primaryKeys, modifiers };
+}
+
+/**
  * 构建全量检索索引。
  *
  * @param resolveLabel 把 i18n 词典键解析成本地化文案。注入而非直接 import
@@ -268,7 +292,7 @@ export function buildKeybindingSearchEntries(
                 group: tokenizeText(resolveLabel(GROUP_LABEL_KEYS[meta.group])),
                 idParts,
                 translit,
-                ...termsFromKeybinding(DEFAULT_KEYBINDINGS[id]),
+                ...termsFromKeybindings(DEFAULT_KEYBINDINGS[id]),
             },
             label,
             group: meta.group,

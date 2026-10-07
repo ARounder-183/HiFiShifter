@@ -877,7 +877,13 @@ mod tests {
         let n = (rate as f64 * secs) as usize;
         let half = ((rate as f64 / period_hz) * 0.5).max(1.0) as usize;
         (0..n)
-            .map(|i| if (i / half) % 2 == 0 { 0.6 } else { -0.6 })
+            .map(|i| {
+                if (i / half).is_multiple_of(2) {
+                    0.6
+                } else {
+                    -0.6
+                }
+            })
             .collect()
     }
 

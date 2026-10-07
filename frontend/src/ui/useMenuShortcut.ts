@@ -11,9 +11,13 @@
  * 【契约】未绑定（`__none__`）返回 `undefined`，调用方据此**不渲染**那一列
  * （原语在 `shortcut` 为空时不占位）。这与 `MenuBar` 的约定一致：空绑定显示成
  * `—` 会被误读成"这个键就是短横线"。
+ *
+ * 【一个动作绑多个键时全部显示】用户既然绑了两个键，菜单里就得让他看见两个 ——
+ * 只显示主绑定会让他以为备用键没生效。多个文本用 `;` 连接（见
+ * `formatKeybindingList`）。
  */
 import { useAppSelector } from "../app/hooks";
-import { formatKeybinding, selectKeybinding } from "../features/keybindings/keybindingsSlice";
+import { formatKeybindingList, selectKeybindings } from "../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../features/keybindings/types";
 
 /**
@@ -22,9 +26,9 @@ import type { ActionId } from "../features/keybindings/types";
  * 走 `useAppSelector`，因此用户在「快捷键设置」里改绑后，所有菜单下次打开即是新值。
  *
  * @param actionId 动作 id。
- * @returns 展示用文本；未绑定时为 `undefined`。
+ * @returns 展示用文本（多绑定以 `;` 连接）；未绑定时为 `undefined`。
  */
 export function useMenuShortcut(actionId: ActionId): string | undefined {
-    const keybinding = useAppSelector((state) => selectKeybinding(state, actionId));
-    return formatKeybinding(keybinding, "") || undefined;
+    const bindings = useAppSelector((state) => selectKeybindings(state, actionId));
+    return formatKeybindingList(bindings, "") || undefined;
 }

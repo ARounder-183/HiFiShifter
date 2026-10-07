@@ -591,7 +591,7 @@ fn decode_model_output_to_f0_hz(
     }
 
     // Direct F0 output: [T], [1,T] or [B,T].
-    let dims: &[i64] = &**shape;
+    let dims: &[i64] = shape;
 
     if dims.len() <= 2 {
         return data
@@ -779,7 +779,7 @@ fn run_with_named_inputs(
         if first_name.eq_ignore_ascii_case("mel") && *rank == 3 {
             let mel_shape: Vec<i64> = session
                 .inputs()
-                .get(0)
+                .first()
                 .and_then(|o| o.dtype().tensor_shape())
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_else(|| vec![-1, -1, 128]);
@@ -840,7 +840,7 @@ fn run_with_named_inputs(
         if first_name.eq_ignore_ascii_case("mel") && *first_rank == 3 {
             let mel_shape: Vec<i64> = session
                 .inputs()
-                .get(0)
+                .first()
                 .and_then(|o| o.dtype().tensor_shape())
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_else(|| vec![-1, -1, 128]);

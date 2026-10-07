@@ -82,8 +82,10 @@ function getService(): TurndownService {
                 (options as unknown as { maxDataImageBytes?: number }).maxDataImageBytes ??
                 DEFAULT_MAX_DATA_IMAGE_BYTES;
             if (dataImageDecodedBytes(src) > limit) return "[image]";
-            // 标题里有括号会截断链接语法，折叠掉。
-            return `![${alt.replace(/[[\]()]/g, "")}](${src})`;
+            // 标题里有括号会截断链接语法，折叠掉；目标里的圆括号（维基类 URL
+            // 常见）同样要转义，否则不配对的括号会让整条图片语法解析不回来 ——
+            // 与本项目自己的序列化器（`nodes/notebookImage.ts`）保持一致。
+            return `![${alt.replace(/[[\]()]/g, "")}](${src.replace(/[()]/g, "\\$&")})`;
         },
     });
 

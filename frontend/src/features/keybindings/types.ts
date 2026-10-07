@@ -80,10 +80,10 @@ export type ActionId =
     | "pianoRoll.shiftParamDownSelectionLarge" // 选择范围内参数线大幅下移（Shift+[）
     | "pianoRoll.shiftParamUpSelectionSmall" // 选择范围内参数线微调上移（Ctrl+]）
     | "pianoRoll.shiftParamDownSelectionSmall" // 选择范围内参数线微调下移（Ctrl+[）
-    | "pianoRoll.vibratoDragAmplitudeIncrease" // 直线/颤音拖拽时增大振幅
-    | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
-    | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率
-    | "pianoRoll.vibratoDragFrequencyDecrease" // 直线/颤音拖拽时减小频率
+    | "pianoRoll.vibratoDragAmplitudeIncrease" // 颤音拖拽时增大振幅（直线工具同样可用）
+    | "pianoRoll.vibratoDragAmplitudeDecrease" // 颤音拖拽时减小振幅（直线工具同样可用）
+    | "pianoRoll.vibratoDragFrequencyIncrease" // 颤音拖拽时增大频率（直线工具同样可用）
+    | "pianoRoll.vibratoDragFrequencyDecrease" // 颤音拖拽时减小频率（直线工具同样可用）
     | "pianoRoll.vibratoPresetPrev" // 拖拽颤音时切换到上一个预设
     | "pianoRoll.vibratoPresetNext" // 拖拽颤音时切换到下一个预设
     | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
@@ -91,7 +91,8 @@ export type ActionId =
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具
     | "mode.drawTool" // 切换到绘制工具
-    | "mode.lineTool" // 切换到直线/颤音工具
+    | "mode.lineTool" // 切换到直线工具
+    | "mode.vibratoTool" // 切换到颤音工具
     // 修饰键行为
     | "modifier.clipMultiSelectToggle" // 按住并点击音频块：切换多选（macOS 为 ⌘）
     | "modifier.clipRangeSelect" // 按住并点击音频块：从锚点范围选择
@@ -117,6 +118,7 @@ export type ActionId =
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
+    | "modifier.notebookFontZoom" // 记事本编辑区字号缩放（按住 + 面板内滚轮）
     // 快速搜索
     | "quickSearch.open" // 打开快速搜索弹窗
     | "quickSearch.navigate.up" // 快速搜索：向上切换候选项
@@ -179,7 +181,7 @@ export type ModifierConflictScene =
     | "roll.morph"
     // 钢琴卷帘：参数选区边缘拉伸
     | "roll.paramEdge"
-    // 钢琴卷帘：直线/颤音拖拽期间的滚轮
+    // 钢琴卷帘：颤音拖拽期间的滚轮（直线工具同样可用）
     | "roll.vibratoWheel"
     // 时间轴画布滚轮
     | "wheel.timeline"
@@ -189,6 +191,8 @@ export type ModifierConflictScene =
     | "wheel.pianoKeys"
     // 悬停在原生滚动条上的滚轮（时间轴 / 参数编辑器等所有自定义滚轮面）
     | "wheel.scrollbar"
+    // 记事本面板滚轮（Ctrl/⌘ + 滚轮 = 编辑区字号缩放）
+    | "wheel.notebook"
     // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
     | "global.fine";
 
@@ -246,13 +250,32 @@ export interface ActionMeta {
      *   与全局操作（如 clip.*）共用按键时按焦点自动路由：
      *   焦点在轨道头 → 轨道操作；焦点在时间轴 → 音频块操作。
      * - `"quickSearch"`       — 快速搜索弹窗内的导航/确认键。
-     * - `"pianoRollVibratoDrag"` — 直线/颤音拖拽期间的振幅/频率调节键。
+     * - `"pianoRollVibratoDrag"` — 颤音拖拽期间的振幅/频率调节键（直线工具同样可用）。
      */
     scopedContext?: string;
 }
 
-/** 完整的快捷键映射：actionId → Keybinding */
-export type KeybindingMap = Record<ActionId, Keybinding>;
+/**
+ * 一个操作可以拥有的绑定数量上限。
+ *
+ * 有界即可枚举、UI 不失控。DAW 惯例是 1~2 个（主键 + 备用键），4 已足够宽松。
+ */
+export const MAX_BINDINGS_PER_ACTION = 4;
+
+/**
+ * 完整的快捷键映射：actionId → 绑定**列表**。
+ *
+ * 【为什么是数组而不是「主绑定 + 附加绑定」】后者会让同一个动作有两套读取
+ * 路径（`kb` 与 `[kb, ...extra]`），每处调用都要记得合并 —— bug 的温床，
+ * 且"哪一个是默认"变得模糊。统一成数组后只有一套形状：**下标 0 即主绑定**
+ * （菜单显示、长按重复的判定基准），其余是等价替补。顺序即语义。
+ *
+ * 数组内容的不变式（由 `normalizeBindings` 强制）：
+ * - 非空；
+ * - 无重复绑定；
+ * - `__none__` 至多一个，且仅当它是唯一元素时存在（"无绑定"的表达）。
+ */
+export type KeybindingMap = Record<ActionId, readonly Keybinding[]>;
 
 /** 用户覆盖项（只存储与默认不同的部分） */
-export type KeybindingOverrides = Partial<KeybindingMap>;
+export type KeybindingOverrides = Partial<Record<ActionId, readonly Keybinding[]>>;

@@ -2,22 +2,28 @@ import { describe, expect, test } from "vitest";
 
 import {
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    STRAIGHT_VIBRATO_PRESET_ID,
     SYSTEM_VIBRATO_PRESETS,
     builtinVibratoPresetId,
     BUILTIN_VIBRATO_ORDER,
 } from "./systemPresets";
 import {
     activeIdAfterRemoval,
+    chooseVibratoPreset,
+    cycleVibratoChoice,
     cycleVibratoPresetId,
     effectiveBuiltinPresetOrder,
     enabledVibratoPresets,
     findVibratoPreset,
+    isStraightVibratoPresetId,
     moveItemToIndex,
     reorderBuiltinPresetIds,
     reorderUserVibratoPresets,
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     systemVibratoPreset,
+    VIBRATO_LINE_CHOICE,
+    vibratoCycleAnchorId,
 } from "./vibratoPresetList";
 import { sanitizeVibratoPreset } from "./vibratoPresets";
 
@@ -63,10 +69,14 @@ describe("resolveVibratoPresets", () => {
         expect(new Set(ids).size).toBe(ids.length);
     });
 
-    test("「直线」排在出厂顺序首位，也是默认活动预设", () => {
+    test("「直线」排在出厂顺序首位（它是直线工具在序列里的位置）", () => {
         expect(BUILTIN_VIBRATO_ORDER[0]).toBe("straight");
         expect(SYSTEM_VIBRATO_PRESETS[0]?.id).toBe(builtinVibratoPresetId("straight"));
-        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).toBe(builtinVibratoPresetId("straight"));
+    });
+
+    test("默认活动预设是「自然」——直线已经独立成工具，不该再当默认音色", () => {
+        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).toBe(builtinVibratoPresetId("natural"));
+        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).not.toBe(STRAIGHT_VIBRATO_PRESET_ID);
     });
 });
 
@@ -85,7 +95,7 @@ describe("系统预设表", () => {
         ).toBeDefined();
     });
 
-    test("直线预设深度为 0（直线/颤音工具共用一条代码路径）", () => {
+    test("直线预设深度为 0（直线工具就是「颤音工具 + 这个预设」）", () => {
         expect(systemVibratoPreset("straight").depthCents).toBe(0);
     });
 
@@ -170,6 +180,72 @@ describe("cycleVibratoPresetId", () => {
         const single = [userPreset("custom_only")];
         expect(cycleVibratoPresetId(single, "custom_only", 1)).toBe("custom_only");
         expect(cycleVibratoPresetId(single, "custom_only", -1)).toBe("custom_only");
+    });
+});
+
+describe("VibratoChoice（直线预设 → 直线工具）", () => {
+    const { all } = resolveVibratoPresets([userPreset("custom_a")]);
+
+    test("isStraightVibratoPresetId 只认直线预设，缺省一律为否", () => {
+        expect(isStraightVibratoPresetId(STRAIGHT_VIBRATO_PRESET_ID)).toBe(true);
+        expect(isStraightVibratoPresetId(builtinVibratoPresetId("natural"))).toBe(false);
+        expect(isStraightVibratoPresetId(null)).toBe(false);
+        expect(isStraightVibratoPresetId(undefined)).toBe(false);
+    });
+
+    test("chooseVibratoPreset：直线 → 切工具；其它 → 切预设", () => {
+        expect(chooseVibratoPreset(STRAIGHT_VIBRATO_PRESET_ID)).toEqual(VIBRATO_LINE_CHOICE);
+        expect(chooseVibratoPreset(builtinVibratoPresetId("enka"))).toEqual({
+            tool: "vibrato",
+            presetId: builtinVibratoPresetId("enka"),
+        });
+        expect(chooseVibratoPreset("custom_a")).toEqual({ tool: "vibrato", presetId: "custom_a" });
+    });
+
+    test("cycleVibratoChoice：落在直线预设上就是切到直线工具", () => {
+        // 直线预设位于序列首位，从它往回一步会环绕到末尾，往后一步到第二项。
+        const back = cycleVibratoChoice(all, STRAIGHT_VIBRATO_PRESET_ID, -1);
+        expect(back).toEqual({ tool: "vibrato", presetId: all[all.length - 1].id });
+
+        // 从末尾往前一步落回直线预设 → 直线工具。
+        const toLine = cycleVibratoChoice(all, all[all.length - 1].id, 1);
+        expect(toLine).toEqual(VIBRATO_LINE_CHOICE);
+    });
+
+    test("cycleVibratoChoice：普通预设返回带 id 的颤音选择", () => {
+        expect(cycleVibratoChoice(all, STRAIGHT_VIBRATO_PRESET_ID, 1)).toEqual({
+            tool: "vibrato",
+            presetId: all[1].id,
+        });
+    });
+
+    test("cycleVibratoChoice：空列表返回 null", () => {
+        expect(cycleVibratoChoice([], STRAIGHT_VIBRATO_PRESET_ID, 1)).toBeNull();
+    });
+
+    test("vibratoCycleAnchorId：直线工具固定在直线预设，无视活动预设", () => {
+        expect(
+            vibratoCycleAnchorId({
+                lineTool: true,
+                currentPresetId: builtinVibratoPresetId("enka"),
+            }),
+        ).toBe(STRAIGHT_VIBRATO_PRESET_ID);
+        expect(
+            vibratoCycleAnchorId({
+                lineTool: false,
+                currentPresetId: builtinVibratoPresetId("enka"),
+            }),
+        ).toBe(builtinVibratoPresetId("enka"));
+        expect(vibratoCycleAnchorId({ lineTool: false, currentPresetId: null })).toBeNull();
+    });
+
+    test("从直线工具轮转一步 = 从直线预设轮转一步", () => {
+        const fromLine = cycleVibratoChoice(
+            all,
+            vibratoCycleAnchorId({ lineTool: true, currentPresetId: null }),
+            1,
+        );
+        expect(fromLine).toEqual(cycleVibratoChoice(all, STRAIGHT_VIBRATO_PRESET_ID, 1));
     });
 });
 

@@ -251,6 +251,18 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         );
         assertEqual(next.tracks[0].muted, true, "track mute updates on pending");
         assertEqual(next.tracks[0].color, "#00ffaa", "track color updates on pending");
+
+        // 失败：保留乐观值并给出可见反馈（不得静默吞掉）。
+        const rejected = reducer(
+            next,
+            setTrackStateRemote.rejected(new Error("boom"), "req-track-state", {
+                trackId: "track-a",
+                muted: true,
+                color: "#00ffaa",
+            }),
+        );
+        assertEqual(rejected.tracks[0].muted, true, "track mute stays optimistic on rejection");
+        assertEqual(rejected.status, "Track edit rejected", "track rejection is surfaced");
     }
 
     {

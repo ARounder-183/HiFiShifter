@@ -146,7 +146,8 @@ impl LfModel {
         let p0 = ret;
         let e = fzero(|x| Self::e_func(x, &p0), 1.0, 2.0 / (ret.ta + 1e-9));
         let e_te_t0 = (e * (ret.te - ret.t0)).exp();
-        ret.a_coef = (1.0 - e_te_t0) / (e * e * ret.ta) + (ret.te - ret.t0) * e_te_t0 / (e * ret.ta);
+        ret.a_coef =
+            (1.0 - e_te_t0) / (e * e * ret.ta) + (ret.te - ret.t0) * e_te_t0 / (e * ret.ta);
         ret.e = e;
         ret.a = Self::newton_search(&ret);
         ret.e0 = -model.ee / ((ret.a * ret.te).exp() * ret.sin_wg_te);
@@ -214,10 +215,7 @@ impl LfModel {
             } else {
                 let (x_re, x_im) = exp_complex(0.0, -omega * (t0 - te));
                 let one_minus = (1.0 - x_re, -x_im);
-                (
-                    e1e_ta * one_minus.0,
-                    e1e_ta * one_minus.1 - e * ta * omega,
-                )
+                (e1e_ta * one_minus.0, e1e_ta * one_minus.1 - e * ta * omega)
             };
 
             // G = P1*P2 + P3*P4
@@ -376,7 +374,13 @@ impl GlottalRd {
         shape
             .iter()
             .enumerate()
-            .map(|(k, &v)| if first > 0.0 { v / (k + 1) as f64 / first } else { 1.0 })
+            .map(|(k, &v)| {
+                if first > 0.0 {
+                    v / (k + 1) as f64 / first
+                } else {
+                    1.0
+                }
+            })
             .collect()
     }
 
@@ -416,7 +420,11 @@ impl GlottalRd {
 
         let mut distance = vec![0.0f64; Self::GRID_SIZE];
         for (g, model) in shapes.iter().enumerate() {
-            let gain = if model[0] > 0.0 { power[0] / model[0] } else { 0.0 };
+            let gain = if model[0] > 0.0 {
+                power[0] / model[0]
+            } else {
+                0.0
+            };
             let mut sum = 0.0;
             for k in 0..n {
                 let denom = model[k] * gain + 1e-30;
@@ -587,10 +595,6 @@ mod tests {
             down[9]
         );
     }
-
-
-
-
 
     /// `Fit` 必须能从已知 Rd 生成的谐波幅度还原出该 Rd。
     #[test]

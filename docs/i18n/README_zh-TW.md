@@ -8,9 +8,24 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 
 ![預覽圖](../preview.png)
 
+## 功能一覽
+
+- **軌道編輯**：類 DAW 的多軌時間軸，支援音訊塊的裁切、拉伸、Slip、淡入淡出與交叉淡化、編組、Take 管理、靜音偵測、波紋編輯、速度映射（BPM / 拍號 / 音階）、節拍器與錄音等。
+- **參數編輯**：以軌道群組為單位，透過鋼琴捲簾式參數編輯器調整音高、音量、動態、聲相、共振峰、氣聲、張力等參數線；支援繪製 / 直線 / 顫音工具、多選區編輯與顫音預設管理，子軌道可疊加 `音分差` / `度數差` / `共振峰差` 製作和聲。
+- **三種聲碼器演算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，詳見[演算法](#演算法)。
+- **互操作性**：匯入 REAPER（`.rpp`）與 VocalShifter（`.vshp` / `.vsp`）專案，雙向讀寫 REAPER 與 VocalShifter 剪貼簿；MIDI 可匯入為音高參考塊 / 音高參數 / 速度映射，音訊塊與音高線可匯出為 MIDI。
+- **匯入匯出**：常見音訊 / 視訊格式匯入（視訊檔自動提取音訊軌），專案與分軌匯出為 `wav` / `mp3` / `flac`。
+- **其他**：內建檔案瀏覽器與快速搜尋、記事本、自動備份、多語言介面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深淺色主題、推理裝置選擇與基準測試。
+
 ## 安裝
 
-請直接在倉庫側邊選擇適合自己系統的 Release 版本下載安裝。
+從 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) 頁面下載對應作業系統與架構的安裝包：
+
+- **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。
+- **macOS**：未簽名 dmg（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`）。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
+- **Linux**：AppImage（x86_64 / arm64）。
+
+GPU 加速：Windows 使用 DirectML（DirectX 12），macOS（Apple Silicon）使用 CoreML + WebGPU，Linux x86_64 使用 WebGPU（Dawn/Vulkan），其餘平台回退 CPU。可在應用內 `選項 → 推理裝置` 中切換裝置並執行基準測試。
 
 ## 基本原理
 
@@ -18,7 +33,7 @@ HiFiShifter 使用類似 UTAU 的離線渲染方式，對時間線中的每個�
 
 HiFiShifter 提供了一個統一的渲染介面，以便未來增添更多的演算法支援。
 
-## 工作流推薦
+## 推薦工作流
 
 我們推薦的工作流是：
 
@@ -32,110 +47,59 @@ HiFiShifter 提供了一個統一的渲染介面，以便未來增添更多的�
 3. 解析 VocalShifter 剪貼簿內容，支援將 VocalShifter 中的參數貼到 HiFiShifter 參數區中。
 4. 解析 Reaper 剪貼簿內容，支援直接將 Reaper 的 Items 貼到 HiFiShifter 中。
 
-## 功能介紹
+## 介面與演算法
 
-### 佈局介紹
+### 佈局
 
-HiFiShifter 可以大致分為兩個功能區，分別是上部的軌道面板和下部的參數面板。軌道面板主要負責音訊塊的編輯與編排，參數面板則負責對音訊進行調參處理。
+HiFiShifter 大致分為上部的軌道面板和下部的參數面板：軌道面板負責音訊塊的編輯與編排，參數面板負責對音訊進行調參處理。各面板可停靠、浮動與重排（`檢視 → 視窗 / 佈局`）。
 
-### 軌道面板
-
-HiFiShifter 提供了一個基本完備的軌道面板與音訊塊編輯功能。該功能與大多數現代 DAW 類似。
-
-#### 媒體匯入（音訊 / 視訊）
-
-HiFiShifter 支援三種方式匯入媒體檔案。視訊檔會自動使用其音訊軌：
-
-1. 直接從系統檔案管理器中拖曳音訊或視訊檔到軌道上。
-2. 點擊工具列的資料夾圖示，開啟內建檔案瀏覽器並拖曳媒體檔案到軌道上。
-3. 按下 `Ctrl + F` 開啟快速搜尋，選擇媒體檔案匯入到軌道上（快速搜尋的檔案路徑與內建檔案瀏覽器的目前路徑一致）。
-
-#### 音訊編輯
-
-- **吸附格線**：音訊塊移動/裁切預設吸附格線；按住 `Shift` 可暫時關閉吸附。
-- **裁切/伸縮範圍**：拖動音訊塊左右邊界進行裁切或延長。
-- **伸縮（Time Stretch）**：按住 `Alt` + 滑鼠左鍵拖動音訊塊左右邊界，可伸縮音訊。
-- **內部偏移（Slip-Edit）**：按住 `Alt` + 滑鼠左鍵拖動音訊塊主體，可左右滑移音訊塊的內部內容。
-- **淡入淡出**：拖動音訊塊左上角/右上角調整淡入/淡出時長。
-- **增益（dB）**：拖動音訊塊左上角的旋鈕（上下拖動）調整增益，音訊塊右上角會顯示目前 dB。
-- **音訊塊靜音（M）**：音訊塊左上角 `M` 按鈕可對該音訊塊靜音，靜音後音訊塊整體變灰。
-- **框選多選**：在時間線空白處按住滑鼠右鍵拖曳可框選多個音訊塊。
-- **複製拖動**：按住 `Ctrl` 後拖曳音訊塊，會在目標位置建立副本並保持原音訊塊不動（複製完成在鬆手時生效）。
-- **膠合**：右鍵音訊塊開啟選單，選擇「膠合」（要求同一軌道且至少 2 個音訊塊）。
-- **切分**：選中音訊塊後按 `S` 可在播放頭位置切分。
-- **複製貼上**：選中音訊塊後按 `Ctrl + C` 將選中音訊塊複製到應用內剪貼簿。`Ctrl + V` 會把「所選音訊塊中最靠左的起點」對齊到播放頭位置，其餘音訊塊保持相對間距。複製時剪貼簿會同時寫入 REAPERMedia 格式，可直接在 REAPER 中貼上。
-
-需要特別注意的，軌道支援巢狀，可以將軌道拖動到另一個軌道下成為該軌道的子軌道，形成一個軌道組。在接下來的調參過程中，軌道組將十分有用。
-
-### 參數面板
-
-HiFiShifter 的參數面板提供了類似 VocalShifter 的操作支援以方便使用者調整參數。
-
-需要注意的是，HiFiShifter 的軌道上有一個特殊的 `C` 按鈕，只有按下這個按鈕，該軌道上的音訊才能被後續調參處理。
-
-在調參中，HiFiShifter 以軌道組為單位，透過根軌道開啟 `C` 來決定，一個軌道組共用一個演算法和一套參數線。參數線會按位置作用到每一個音訊塊上。
-
-HiFiShifter 中的每個演算法都有不同的參數可供調整，其中通用參數為音高。
-
-在首次打開時，HiFiShifter 需要一些時間對音訊塊的音高進行分析。分析完成後，面板中的實線表示該軌道組的整體目前音高，虛線表示整體原始音高，彩線表示每個音訊塊自己的原始音高。
-
-其他面板與音高面板類似，只是不會顯示音訊塊自己的原始音高。
-
-面板旁邊的小眼睛可以開啟該面板在未選中下的可見性。
+軌道支援巢狀：將一個軌道拖曳到另一個軌道下，即可組成軌道群組（根軌道 + 子軌道）。軌道群組共用一個演算法和一套參數線，參數線會按位置作用到群組內每一個音訊塊上；調參前需要先按下軌道的合成按鈕 `C`。
 
 ### 演算法
 
-目前 HiFiShifter 支援三種演算法進行處理。
+目前 HiFiShifter 支援三種演算法進行處理：
 
-#### World 演算法
+- **World**：老牌聲碼器。支援 `音高`、`音量`、`動態`、`聲相` 參數的編輯。
+- **PC-NSF-HiFiGAN**（介面演算法清單中顯示為 `nsf-hifigan`）：OpenVPI 開源、為歌聲特化的 HiFi-GAN 聲碼器，也是預設演算法。支援 `音高`、`共振峰偏移`、`氣聲音量`、`張力`、`音量`、`動態`、`聲相` 參數的編輯。其中 `氣聲音量` 與 `張力` 依賴 `氣聲分離` 開關：開啟後會把音訊塊分離為諧波與噪聲兩部分（使用 hnsep 模型），**會增加額外的渲染成本**（首次每個音訊塊都要做一次分離，可能較慢）；關閉時則完全不進行分離，這兩個參數會被置灰、其曲線保持可見但不可編輯，也不參與合成。
+- **VsLib**（介面演算法清單中顯示為 `vslib`）：VocalShifter 官方提供的演算法庫。支援 `音高`、`共振峰偏移`、`氣聲強度`、`音量`、`動態`、`聲相` 與 `合成模式` 參數的編輯。**僅 Windows x86_64 版本可用**；由於官方提供的 dll 僅支援檔案 I/O，因此相對 VocalShifter 本體需要更多的時間處理。
 
-老牌聲碼器。  
-僅支援 `音高` 編輯。
-
-#### PC-NSF-HiFiGAN
-
-OpenVPI 開源的為歌聲特化的 hifigan 聲碼器。  
-支援 `音高`、`氣聲`、`張力`、`共振峰偏移`、`音量` 參數的編輯。  
-`氣聲` 與 `張力` 都依賴 `氣聲分離` 開關：需要先開啟該開關，它會把音訊塊分離為諧波與噪聲兩部分（使用 hnsep 的 UVR 模型）。**開啟會增加額外的渲染成本**（首次每個音訊塊都要做一次分離，可能較慢）；關閉時則完全不進行分離，`氣聲` 與 `張力` 兩個參數會被置灰、其曲線保持可見但不可編輯，也不參與合成。
-
-#### Vslib
-
-VocalShifter 提供的演算法庫。  
-支援 `音高`、`聲像`、`共振峰偏移`、`音量`、`氣聲` 參數的編輯。  
-由於官方提供的 dll 僅支援檔案 I/O，因此相對 VocalShifter 本體需要更多的時間處理。
+軌道面板與參數面板的詳細操作（淡化編輯、吸附設定、顫音預設、匯出與錄音等）請閱讀[使用手冊](USERMANUAL_zh-TW.md)。
 
 ## 常用快捷鍵速查
 
-| 操作                           | 快捷鍵 / 滑鼠                     |
-| :----------------------------- | :-------------------------------- |
-| 平移檢視（時間軸）             | 滑鼠中鍵拖曳                      |
-| 橫向縮放（時間軸）             | 滑鼠滾輪（以游標為中心）          |
-| 縱向縮放（軌道高度，時間軸）   | Ctrl + 滑鼠滾輪                   |
-| 縱向縮放（參數軸，參數面板）   | Ctrl + 滑鼠滾輪（參數面板內）     |
-| 播放/暫停                      | Space（空格鍵）                   |
-| 播放/停止                      | Enter                             |
-| 開關節拍器                     | K                                 |
-| 復原/重做                      | Ctrl + Z / Ctrl + Y               |
-| 新建專案                       | Ctrl + N                          |
-| 開啟專案                       | Ctrl + Shift + O                  |
-| 儲存                           | Ctrl + S                          |
-| 另存新檔                       | Ctrl + Shift + S                  |
-| 匯出音訊                       | Ctrl + E                          |
-| 模式切換（選取/繪製）          | Tab                               |
-| 刪除選中音訊塊                 | Delete                            |
-| 複製選中音訊塊（應用內剪貼簿） | Ctrl + C                          |
-| 貼到播放頭位置                 | Ctrl + V                          |
-| 編組 / 解組                    | G / U                             |
-| 循環切換 Take                  | T（`Shift + T` 切換上一個）       |
-| 參數面板複製選區曲線           | Ctrl + C（Select 模式）           |
-| 參數面板多選區（追加 / 取消）  | Ctrl + 拖曳追加、Ctrl + 點擊既有段取消（Select 模式） |
-| 音訊塊範圍加入參數選取區（批次） | Ctrl + Shift + A（或於音訊塊右鍵選單操作） |
-| 參數面板貼到選區起點           | Ctrl + V（Select 模式）           |
-| 分割音訊塊                     | S（在播放頭位置分割選中的音訊塊） |
-| 新建軌道                       | Ctrl + T                          |
-| 快速搜尋                       | Ctrl + F                          |
+> 快捷鍵均可在應用內 `選項 → 鍵盤快捷鍵...` 中自訂，下表為預設值；macOS 上 `Ctrl` 對應 `⌘`、`Alt` 對應 `⌥`。
 
-## 開發環境配置
+| 操作                           | 快捷鍵 / 滑鼠                                                |
+| :----------------------------- | :----------------------------------------------------------- |
+| 播放 / 暫停（不返回起播點）    | `Space`                                                      |
+| 播放 / 停止（返回起播點）      | `Enter`                                                      |
+| 開關節拍器                     | `K`                                                          |
+| 平移檢視                       | 滑鼠中鍵拖曳                                                 |
+| 滾動時間軸                     | 滑鼠滾輪（雙軸自由滾動）                                     |
+| 橫向 / 縱向滾動                | `Shift` / `Alt` + 滑鼠滾輪                                   |
+| 縮放軌道高度                   | `Ctrl` + 滑鼠滾輪                                            |
+| 復原 / 重做                    | `Ctrl + Z` / `Ctrl + Shift + Z`（或 `Ctrl + Y`）             |
+| 剪下 / 複製 / 貼上             | `Ctrl + X` / `Ctrl + C` / `Ctrl + V`                         |
+| 刪除選取音訊塊                 | `Delete`                                                     |
+| 分割音訊塊（播放頭處）         | `S`                                                          |
+| 編組 / 解組                    | `G` / `U`                                                    |
+| 循環切換 Take                  | `T`（`Shift + T` 切換上一個）                                |
+| 框選多選                       | 在時間軸空白處按住滑鼠右鍵拖曳                               |
+| 複製拖動                       | 按住 `Ctrl` 拖曳音訊塊                                       |
+| 拉伸音訊塊 / Slip 編輯         | 按住 `Alt` 拖曳音訊塊邊緣 / 主體                             |
+| 暫時切換吸附                   | 按住 `Shift` 拖曳                                            |
+| 新建專案 / 開啟專案            | `Ctrl + N` / `Ctrl + Shift + O`                              |
+| 匯入媒體檔案 / 匯出音訊        | `Ctrl + O` / `Ctrl + E`                                      |
+| 儲存 / 另存新檔                | `Ctrl + S` / `Ctrl + Shift + S`                              |
+| 新增軌道 / 錄音                | `Ctrl + T` / `Ctrl + R`                                      |
+| 模式切換（選取 ↔ 繪製類工具）  | `Tab`                                                        |
+| 快速搜尋                       | `Ctrl + F`                                                   |
+| 參數線整體上移 / 下移          | `=` / `-`（選取範圍用 `[` / `]`），`Shift` 大幅、`Ctrl` 微調 |
+| 參數編輯器多選區               | 按住 `Ctrl` 拖曳追加選區、點擊已有選區取消                   |
+
+完整快捷鍵與修飾鍵清單見[使用手冊](USERMANUAL_zh-TW.md#三軌道介面)或應用內快捷鍵設定。
+
+## 開發
 
 該部分內容為開發者提供，普通使用者可以跳過。
 
@@ -152,12 +116,14 @@ cd HiFiShifter
 
 請確保已安裝以下工具：
 
-- **Node.js**（建議 18+）及 npm
+- **Node.js**（建議 20+，CI 使用 24）及 npm
 - **Rust 工具鏈**（參見 `rust-toolchain.toml`）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**（用於編譯 SoundTouch 函式庫）
 
 ONNX Runtime (DirectML) 由 ort crate 在編譯時自動下載，無需額外設定。
+
+也可以執行 `scripts/install_deps_windows.ps1`，透過 Chocolatey 安裝 NSIS / CMake / LLVM 並安裝 tauri-cli（需要已安裝 Chocolatey）。
 
 安裝前端依賴：
 
@@ -176,7 +142,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 請確保已安裝以下工具：
 
-- **Node.js**（建議 20+）及 npm
+- **Node.js**（建議 20+，CI 使用 24）及 npm
 - **Rust 工具鏈**（參見 `rust-toolchain.toml`，專案會自動選擇對應平台的 stable 工具鏈）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**、**pkg-config** 及系統構建工具
@@ -197,36 +163,58 @@ bash ./scripts/install_deps_linux.sh
 npm --prefix frontend ci
 ```
 
-#### Linux AppImage 構建
+### 3. 第三方原始碼
 
-由於 `vslib` 演算法僅限 Windows，Linux 構建需要禁用預設 feature：
+SoundTouch、WORLD、Signalsmith Stretch 均在編譯時從原始碼構建，首次構建時會**自動克隆**，無需手動操作。
 
-```bash
-# 進入 backend 目錄執行（tauri.conf.json 中路徑相對於此目錄）
-cd backend
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
-```
-
-或使用提供的輔助腳本：
-
-```bash
-bash scripts/build-linux-appimage.sh
-```
-
-> **注意：** WSL2 環境下因缺少 FUSE 支援，Tauri bundler 的 linuxdeploy 步驟可能失敗（錯誤：`failed to run linuxdeploy`）。這是 WSL2 已知限制，不影響實際 AppImage 產出——AppDir 已正確組裝在 `target/release/bundle/appimage/` 中。可設定 `APPIMAGE_EXTRACT_AND_RUN=1` 後手動執行 `appimagetool` 打包。在真實 Linux 機器與 CI 中不存在此問題。
-
-### 3. SoundTouch 原始碼
-
-SoundTouch 音訊時間拉伸函式庫在編譯時從原始碼構建。首次構建時會**自動克隆**，無需手動操作。
-
-如需離線構建，可提前手動克隆：
+如需離線構建，可提前手動克隆，例如 SoundTouch：
 
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速
+### 4. 開發與構建
+
+```bash
+# 開發模式（熱更新）
+cd backend
+cargo tauri dev
+
+# 構建 Release
+# Windows / macOS（預設 features：onnx + vslib）
+cargo tauri build
+
+# Linux AppImage（vslib 僅限 Windows，需排除預設 feature）
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+# 或使用輔助腳本：bash scripts/build-linux-appimage.sh
+
+# Windows 可攜版 ZIP
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
+
+- `dev`：開發模式（預設，使用 Vite dev server，支援熱更新）
+- `build`：建置模式（先建置前端靜態資源，再啟動）
+
+Linux/macOS（bash/zsh）：
+
+```bash
+cd backend
+TAURI_UI_MODE=build cargo tauri dev
+```
+
+Windows PowerShell：
+
+```powershell
+cd backend
+$env:TAURI_UI_MODE='build'; cargo tauri dev
+```
+
+**注意：** 首次編譯需要很長的時間，請耐心等待。
+
+### 5. GPU 加速
 
 HiFiShifter 在支援的平台上自動啟用 GPU 推理加速。你可以在選單列的**推理裝置（Inference Device）**中選擇 Auto / CPU / GPU，並透過**執行基準測試（Run Benchmark）**比較各裝置的推理延遲。
 
@@ -239,58 +227,13 @@ HiFiShifter 在支援的平台上自動啟用 GPU 推理加速。你可以在選
 | Linux ARM64                 | —                            | 僅 CPU（此目標尚無預編譯的 WebGPU ONNX Runtime 二進位檔案） |
 
 > **注意**：Windows 平台未啟用 WebGPU。其 Dawn/D3D12 後端在部分 GPU/驅動組合上存在原生崩潰風險。DirectML 是 Windows 上成熟穩定的 GPU 路徑。
->
-> **WSL2 使用者**：WSL2 不向 Linux 子環境暴露硬體 Vulkan。WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本的 DirectML。
-
-#### 所有平台
 
 ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。GPU 提供程序（DirectML / WebGPU / CoreML）在編譯時根據目標平台自動啟用，無需額外的 `--features` 標誌。
 
-```bash
-# 開發模式（熱更新）
-cd backend
-cargo tauri dev
+**WSL2 使用者**：
 
-# 構建 Release
-# Windows / macOS（預設 features：onnx + vslib）
-cargo tauri build
-
-# Linux（vslib 僅限 Windows，需排除預設 feature）
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
-
-# Windows 可攜版 ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
-```
-
-## 快速開始
-
-### 執行開發模式
-
-```bash
-cd backend/src-tauri
-cargo tauri dev
-```
-
-前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
-
-- `dev`：開發模式（預設，使用 Vite dev server，支援熱更新）
-- `build`：建置模式（先建置前端靜態資源，再啟動）
-
-Linux/macOS（bash/zsh）：
-
-```bash
-cd backend/src-tauri
-TAURI_UI_MODE=build cargo tauri dev
-```
-
-Windows PowerShell：
-
-```powershell
-cd backend/src-tauri
-$env:TAURI_UI_MODE='build'; cargo tauri dev
-```
-
-**注意：** 首次編譯需要很長的時間，請耐心等待。
+- WSL2 不向 Linux 子環境暴露硬體 Vulkan。WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本的 DirectML。
+- 因缺少 FUSE 支援，Tauri bundler 的 linuxdeploy 步驟可能失敗（錯誤：`failed to run linuxdeploy`）。這是 WSL2 已知限制，不影響實際 AppImage 產出——AppDir 已正確組裝在 `target/release/bundle/appimage/` 中。可設定 `APPIMAGE_EXTRACT_AND_RUN=1` 後手動執行 `appimagetool` 打包。在真實 Linux 機器與 CI 中不存在此問題。
 
 ## 日誌與故障排除
 
@@ -303,7 +246,7 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 | Linux | `~/.local/share/com.arounder.hifishifter/logs` |
 
 - 在應用程式內透過 **說明 → 開啟日誌資料夾** 可以直接定位日誌；**說明 → 匯出診斷資訊** 可以一鍵產生診斷套件（系統資訊 + 全部日誌 + 推理裝置基準測試結果），提交 issue 時附上即可。
-- 日誌依大小自動輪替：單一檔案上限 8 MiB，預設保留 3 份歷史（`hifishifter.1.log` … `hifishifter.3.log`）。
+- 日誌依大小自動輪替：單一檔案上限 8 MiB，預設保留 3 份歷史（`hifishifter.1.log` ~ `hifishifter.3.log`）。
   - 高頻重複的錯誤 / 警告會自動限流：同一位置的日誌預設每 10 秒最多輸出一條，被抑制的條數會在下一條輸出前以 `[throttled]` 彙總行補記。
 - 前端與後端的錯誤都會統一記錄在同一份日誌檔案裡，方便按時間軸對照排查。
 
@@ -316,7 +259,9 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 ## 文件
 
-- [使用手冊](USERMANUAL_zh-TW.md)
+- 使用手冊：[简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
+- 擴充功能（Extension）API：[docs/extension-api.md](../../docs/extension-api.md)
+- 介面文案風格指南（i18n Style Guide）：[docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
 
 ## 致謝
 
@@ -328,6 +273,7 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 - [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - 語音解析與合成函式庫
 - [SingingVocoders](https://github.com/openvpi/SingingVocoders) - 歌聲合成聲碼器（OpenVPI）
 - [HiFi-GAN](https://github.com/jik876/hifi-gan) - 高保真生成對抗網路聲碼器
+- [vocal-remover (hnsep)](https://github.com/stakira/vocal-remover) - 諧波 / 噪聲分離模型（用於氣聲分離）
 
 ## 授權條款
 

@@ -415,9 +415,7 @@ mod tests {
         let window = periodic_hann(N_FFT);
         for &n in &[0usize, 1, 2, 511, 512] {
             let x = vec![0.1f32; n];
-            let r = separate(&x, N_FFT, HOP, &window, |inp| {
-                Ok(vec![1.0f32; inp.len()])
-            });
+            let r = separate(&x, N_FFT, HOP, &window, |inp| Ok(vec![1.0f32; inp.len()]));
             let y = r.unwrap();
             assert_eq!(y.len(), n, "length must be preserved for n={n}");
             assert!(y.iter().all(|v| v.is_finite()));
@@ -520,9 +518,12 @@ mod e2e_hnsep {
                 let t = i as f64 / sr as f64;
                 let mut s = 0.0;
                 for k in 1..=20 {
-                    s += (0.2 / k as f64) * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
+                    s += (0.2 / k as f64)
+                        * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
                 }
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let noise = ((state >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.3;
                 (s + noise) as f32
             })
@@ -537,32 +538,48 @@ mod e2e_hnsep {
                 let t = i as f64 / 48_000.0;
                 let mut s = 0.0;
                 for k in 1..=20 {
-                    s += (0.2 / k as f64) * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
+                    s += (0.2 / k as f64)
+                        * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
                 }
-                state48 = state48.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state48 = state48
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let noise = ((state48 >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.3;
                 (s + noise) as f32
             })
             .collect();
 
-        for (label, input, rate) in [
-            ("mono@44.1k", x.clone(), sr),
-            ("mono@48k", x48, 48_000u32),
-        ] {
+        for (label, input, rate) in [("mono@44.1k", x.clone(), sr), ("mono@48k", x48, 48_000u32)] {
             let (h, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
-                &format!("e2e-test-{label}"), &input, rate, 0, None,
-            ).expect("separation must succeed");
+                &format!("e2e-test-{label}"),
+                &input,
+                rate,
+                0,
+                None,
+            )
+            .expect("separation must succeed");
 
             assert_eq!(h.len(), input.len(), "{label}: harmonic length");
             assert_eq!(noise.len(), input.len(), "{label}: noise length");
             assert!(h.iter().all(|v| v.is_finite()), "{label}: harmonic finite");
             assert!(noise.iter().all(|v| v.is_finite()), "{label}: noise finite");
 
-            let max_res = h.iter().zip(noise.iter()).zip(input.iter())
-                .map(|((a,b),c)| (a + b - c).abs()).fold(0.0f32, f32::max);
-            let rms = |v: &[f32]| (v.iter().map(|&a| (a as f64).powi(2)).sum::<f64>()/v.len() as f64).sqrt();
-            println!("{label}: h_rms={:.6} n_rms={:.6} x_rms={:.6} max|h+n-x|={:.3e}",
-                     rms(&h), rms(&noise), rms(&input), max_res);
+            let max_res = h
+                .iter()
+                .zip(noise.iter())
+                .zip(input.iter())
+                .map(|((a, b), c)| (a + b - c).abs())
+                .fold(0.0f32, f32::max);
+            let rms = |v: &[f32]| {
+                (v.iter().map(|&a| (a as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+            };
+            println!(
+                "{label}: h_rms={:.6} n_rms={:.6} x_rms={:.6} max|h+n-x|={:.3e}",
+                rms(&h),
+                rms(&noise),
+                rms(&input),
+                max_res
+            );
 
             // 44.1 kHz 是模型原生采样率，走直通路径 ⇒ `h + n == x` 必须**精确**成立。
             //
@@ -639,10 +656,7 @@ mod e2e_hnsep {
             // 分离后的内容必须覆盖**整段**，不得出现尾部零填充。
             // 这是"是否重采样回原采样率"的直接判据：漏掉重采样时，
             // 内容只到 44100/rate，其余为零。
-            let last_loud = h
-                .iter()
-                .rposition(|v| v.abs() > 1e-4)
-                .unwrap_or(0);
+            let last_loud = h.iter().rposition(|v| v.abs() > 1e-4).unwrap_or(0);
             let coverage = last_loud as f64 / n as f64;
             assert!(
                 coverage > 0.999,
@@ -656,14 +670,11 @@ mod e2e_hnsep {
             let tail_rms = (h[tail..].iter().map(|&a| (a as f64).powi(2)).sum::<f64>()
                 / (n - tail) as f64)
                 .sqrt();
-            let full_rms =
-                (h.iter().map(|&a| (a as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
+            let full_rms = (h.iter().map(|&a| (a as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
             assert!(
                 tail_rms > full_rms * 0.05,
                 "rate={rate}: tail must not be silent (tail_rms={tail_rms:.3e}, full={full_rms:.6})"
             );
         }
     }
-
 }
-

@@ -17,6 +17,7 @@ import { useCallback, useRef, useState } from "react";
 import { resolveSplitDragTarget } from "../../features/dock/dockTree";
 import { DOCK_SPLITTER_PX, type DockSplitNode } from "../../features/dock/dockTypes";
 import { shouldSuppressHoverSideEffects } from "../../utils/penInput";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 
 export interface DockSplitterProps {
     dir: DockSplitNode["dir"];
@@ -94,15 +95,21 @@ export function DockSplitter({
             apply(event.clientX, event.clientY);
 
             const onMove = (moveEvent: PointerEvent) => apply(moveEvent.clientX, moveEvent.clientY);
+            // 失焦（Alt+Tab / 最小化）时 pointerup 不会送回本窗口：只挂
+            // pointerup/pointercancel 会让 `data-dragging` 与 `pointermove` 监听一起
+            // 留着，切回来后**不按键移动鼠标也会继续改尺寸**。
+            let unregisterAbort = () => {};
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
                 window.removeEventListener("pointercancel", onUp);
+                unregisterAbort();
                 setDragging(false);
                 // 不清空行内样式：`onLiveSize` 写入的就是 React 最终要写的值，
                 // 提交后 React 的差异更新会发现"无需改动"，DOM 保持正确。
                 if (latestRef.current) onCommit(latestRef.current);
             };
+            unregisterAbort = registerDragAbort(onUp);
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
             window.addEventListener("pointercancel", onUp);

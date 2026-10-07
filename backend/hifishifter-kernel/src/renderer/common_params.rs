@@ -340,6 +340,106 @@ pub struct AudioDynCurves {
     pub baseline: Vec<f32>,
 }
 
+/// 该帧的**显式**目标电平；`None` = 未画（哨兵 / 缺失 / 非有限）。
+///
+/// 这是 DYN 语义里唯一一处"什么算画过"的判定，其余两个入口都从它派生。
+#[inline]
+fn dyn_explicit_target(user_value: Option<f32>) -> Option<f32> {
+    user_value.filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// 「该帧是否未画」——哨兵 / 缺失 / 非有限都算未画。
+///
+/// 用途：`get_param_frames(with_sentinel)` 的位图。位图与目标电平的解析**必须
+/// 同源**：写回路径（平滑 / 量化 / 平均 / 拖拽提交 / 复制粘贴）依赖"哪些帧未画"
+/// 把哨兵原样写回，判定一旦与解析分叉，未画帧就会被物化成显式目标电平。
+#[inline]
+pub(crate) fn dyn_frame_is_unset(user_value: Option<f32>) -> bool {
+    dyn_explicit_target(user_value).is_none()
+}
+
+/// 单帧 DYN 目标电平的**唯一解析规则**。
+///
+/// 画过的帧（有限且 ≥ 0）原样返回；未画的帧 ⇒ 沿用该帧的**原声电平**
+/// （= 增益 1；无内容处仍由 [`no_content_fade`] 淡出）。
+///
+/// 【为什么必须只有一份实现】同一条判定同时决定三件事：
+/// 1. `get_param_frames(dyn)` 的 `edit` 出口 —— 前端画出的曲线；
+/// 2. `get_dyn_baseline_window` 的 `target` 出口 —— 拖拽期间的预览窗口；
+/// 3. [`resolve_dyn_curves_for_audio`] 的逐帧增益 —— 实际听到的声音。
+///
+/// 三者一旦分叉，就会出现「波形演示与实际播放不一致」（本项目的头号禁忌：
+/// 前端 `paramRanges::computeDynGain` 与后端 `compute_dyn_gain` 的同构约定同理）。
+/// 任何一处需要改动判定，都必须改在本函数里。
+#[inline]
+pub(crate) fn dyn_resolved_target_at(user_value: Option<f32>, baseline: f32) -> f32 {
+    dyn_explicit_target(user_value).unwrap_or(baseline)
+}
+
+/// DYN 曲线的线性时域重采样：**绝不跨越哨兵插值**。
+///
+/// 【为什么不能复用通用的线性重采样】`dyn` 的 `-1`（[`DYN_FOLLOW_ORIG`]）不是数值，
+/// 而是「沿用原声（增益 1）」的标记。在它与相邻的真实目标电平之间做
+/// `lo + (hi - lo) * frac`，会产出一串负数 / 近 0 的中间值，而 [`compute_dyn_gain`]
+/// 的语义是 `target < 0 ⇒ 1`、`target <= 0 ⇒ 0`：于是「整段未画」被解读成
+/// **压平到静音**，边界两侧还留下一次性增益的尾迹。
+///
+/// 【它在哪条路径上被触发】"锁定参数线"开启时的拉伸提交 →
+/// `TimelineState::stretch_linked_params_in_root_range` 的写入阶段。因为写的是
+/// **持久状态**，症状是"拖拽预览正常、松手后波形反而崩溃"，且撤销前不恢复。
+///
+/// 【判据】与 pitch 的"不跨 0 插值"同一手法，但方向取**就近采样**：
+/// - 两端都是显式目标 ⇒ 常规线性插值；
+/// - 否则取**更近的那一端原值**（`frac < 0.5` 取 lo，否则取 hi），并在该端是哨兵时
+///   归一化写回 [`DYN_FOLLOW_ORIG`]。
+///
+/// 保守方向是刻意选的：宁可把边界半格判成"未画"（= no-op，听感为增益 1），
+/// 也不可把"未画"物化成显式目标电平 —— 后者是静默的响度损坏。
+///
+/// @param values 旧范围的曲线切片（可含哨兵）。
+/// @param target_len 新范围帧数。
+pub(crate) fn resample_dyn_curve(values: &[f32], target_len: usize) -> Vec<f32> {
+    let mut out = vec![DYN_FOLLOW_ORIG; target_len];
+    if values.is_empty() || target_len == 0 {
+        return out;
+    }
+    let old_max_idx = values.len() - 1;
+    let new_max_idx: f32 = if target_len > 1 {
+        (target_len - 1) as f32
+    } else {
+        1.0
+    };
+    let ratio = old_max_idx as f32 / new_max_idx;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let old_idxf = i as f32 * ratio;
+        let lo = (old_idxf as usize).min(old_max_idx);
+        let hi = if lo < old_max_idx {
+            lo + 1
+        } else {
+            old_max_idx
+        };
+        let frac = old_idxf - lo as f32;
+        let lo_val = values[lo];
+        let hi_val = values[hi];
+        let lo_set = !dyn_frame_is_unset(Some(lo_val));
+        let hi_set = !dyn_frame_is_unset(Some(hi_val));
+        *slot = if lo_set && hi_set {
+            lo_val + (hi_val - lo_val) * frac
+        } else if frac < 0.5 {
+            if lo_set {
+                lo_val
+            } else {
+                DYN_FOLLOW_ORIG
+            }
+        } else if hi_set {
+            hi_val
+        } else {
+            DYN_FOLLOW_ORIG
+        };
+    }
+    out
+}
+
 /// 把存储形态的 DYN 曲线/基线转成**音频路径形态**。
 ///
 /// @param dyn_curve 存储的 DYN 曲线（可含哨兵）。
@@ -363,12 +463,8 @@ pub fn resolve_dyn_curves_for_audio(
 
     let mut target = Vec::with_capacity(dyn_curve.len() + 1);
     for (i, &value) in dyn_curve.iter().enumerate() {
-        // 与显示出口同一判定：`!(is_finite && >= 0)` = 未画（哨兵 / 缺失 / 非法）。
-        if value.is_finite() && value >= 0.0 {
-            target.push(value);
-        } else {
-            target.push(denominator_at(i));
-        }
+        // 与显示出口同一判定（唯一实现见 `dyn_resolved_target_at`）。
+        target.push(dyn_resolved_target_at(Some(value), denominator_at(i)));
     }
     // 末帧留一格（见上文 2）。
     target.push(denominator_at(dyn_curve.len()));
@@ -422,6 +518,59 @@ mod tests {
         assert_eq!(dyn_kind, (1.0, 0.0, 1.0));
     }
 
+    /// ★ 契约：DYN 目标电平的解析只有一份实现。
+    ///
+    /// 用 `dyn_resolved_target_at` 重建 `resolve_dyn_curves_for_audio` 的 `target`，
+    /// 守护「显示 == 播放」的前提（见该函数的说明）。
+    #[test]
+    fn dyn_target_resolution_is_single_sourced() {
+        // 覆盖四种帧：哨兵 / 显式目标 / 显式静音 / 非有限。
+        let user = [
+            DYN_FOLLOW_ORIG,
+            0.4,
+            0.0,
+            f32::NAN,
+            -0.7, // 负值 = 同一个哨兵语义
+        ];
+        let baseline = [0.5f32, 0.25, 0.0, 0.8, 1.0];
+        let audio = resolve_dyn_curves_for_audio(&user, Some(&baseline));
+        for i in 0..user.len() {
+            assert_eq!(
+                audio.target[i],
+                dyn_resolved_target_at(Some(user[i]), baseline[i]),
+                "frame {i} 的解析必须与音频路径逐值一致"
+            );
+        }
+        // 末帧留格：数组之外持有末值（与采样器一致）。
+        assert_eq!(audio.target[user.len()], *baseline.last().unwrap());
+
+        // 显式值原样返回，与基线无关（含"画静音"的 0）。
+        assert_eq!(dyn_resolved_target_at(Some(0.75), 0.2), 0.75);
+        assert_eq!(dyn_resolved_target_at(Some(0.0), 0.2), 0.0);
+        // 未画 ⇒ 沿用原声。
+        assert_eq!(dyn_resolved_target_at(None, 0.2), 0.2);
+        assert_eq!(dyn_resolved_target_at(Some(DYN_FOLLOW_ORIG), 0.2), 0.2);
+        assert_eq!(dyn_resolved_target_at(Some(f32::INFINITY), 0.2), 0.2);
+    }
+
+    /// 「未画」位图必须与目标电平解析同源：未画的帧必然解析成基线。
+    ///
+    /// 反命题不成立（用户可以把目标恰好画在基线上），因此只断言单向蕴含。
+    #[test]
+    fn unset_bitmap_agrees_with_resolution() {
+        let user = [DYN_FOLLOW_ORIG, 0.4, 0.0, f32::NAN, -0.7];
+        let baseline = 0.3f32;
+        for value in user {
+            let is_unset = dyn_frame_is_unset(Some(value));
+            let resolved = dyn_resolved_target_at(Some(value), baseline);
+            if is_unset {
+                assert_eq!(resolved, baseline, "未画帧必须沿用原声");
+            }
+        }
+        assert!(dyn_frame_is_unset(None));
+        assert!(!dyn_frame_is_unset(Some(0.0)), "画静音是显式目标，不是未画");
+    }
+
     #[test]
     fn pad_value_follows_orig_for_dyn() {
         let kind = SynthPipelineKind::WorldVocoder;
@@ -434,6 +583,74 @@ mod tests {
         assert_eq!(automation_curve_pad_value(kind, PAN_PARAM_ID), 0.0);
         // 未知参数（无描述符）回退 0.0，与旧行为一致。
         assert_eq!(automation_curve_pad_value(kind, "no_such_param"), 0.0);
+    }
+
+    /// ★ 回归：重采样 `dyn` 时**不得跨越哨兵**。
+    ///
+    /// 触发路径是"锁定参数线"开启时的拉伸提交（`stretch_linked_params_in_root_range`
+    /// 的写入阶段）。通用线性插值会在「未画」哨兵与相邻的真实目标电平之间插出一串
+    /// 中间值；其中落进 `(0, target)` 的那些会被增益语义当成**显式目标电平**，
+    /// 于是原本未画的整段被静默地压成静音 —— 症状是"拖拽正常、松手后波形崩溃"。
+    #[test]
+    fn resample_dyn_keeps_unset_frames_unset() {
+        // 两端各两个未画帧，中间四个显式目标（唯一显式值 = 0.5）。
+        let values = [DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG, 0.5, 0.5, DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG];
+        for target_len in [3usize, 6, 12, 24] {
+            let out = resample_dyn_curve(&values, target_len);
+            assert_eq!(out.len(), target_len);
+            for (i, &value) in out.iter().enumerate() {
+                assert!(
+                    value == DYN_FOLLOW_ORIG || (value - 0.5).abs() < 1e-6,
+                    "target_len={target_len} i={i}: 重采样产出了既非哨兵、也非\
+                     已有显式目标的值 {value}（说明跨哨兵插值把未画帧物化了）"
+                );
+            }
+        }
+    }
+
+    /// 两端都是显式目标时仍走常规线性插值（否则"不跨哨兵"就变成了"不插值"）。
+    #[test]
+    fn resample_dyn_still_interpolates_between_explicit_values() {
+        let values = [0.2f32, 0.2, 0.8, 0.8];
+        let out = resample_dyn_curve(&values, 9);
+        assert!((out[0] - 0.2).abs() < 1e-6);
+        assert!((out[8] - 0.8).abs() < 1e-6);
+        // 中间必须出现严格介于两端之间的值（插值确实发生了）。
+        assert!(
+            out.iter().any(|&v| v > 0.2 + 1e-6 && v < 0.8 - 1e-6),
+            "显式目标之间必须仍然线性插值，got {out:?}"
+        );
+        // 单调不减：插值不应制造反向折点。
+        for pair in out.windows(2) {
+            assert!(pair[1] + 1e-6 >= pair[0]);
+        }
+    }
+
+    /// 全哨兵 / 空输入 / 单帧等退化情形。
+    #[test]
+    fn resample_dyn_degenerate_inputs() {
+        let all_unset = [DYN_FOLLOW_ORIG; 8];
+        for &v in &resample_dyn_curve(&all_unset, 5) {
+            assert_eq!(v, DYN_FOLLOW_ORIG);
+        }
+        assert!(resample_dyn_curve(&[], 4).iter().all(|&v| v == DYN_FOLLOW_ORIG));
+        assert!(resample_dyn_curve(&all_unset, 0).is_empty());
+        // 单帧输入：无论目标长度如何都只有那一个值。
+        let single = [0.4f32];
+        assert!(resample_dyn_curve(&single, 4).iter().all(|&v| (v - 0.4).abs() < 1e-6));
+    }
+
+    /// 「未画」是**非数值**：非有限的输入同样按哨兵处理（不参与插值）。
+    #[test]
+    fn resample_dyn_treats_non_finite_as_unset() {
+        let values = [f32::NAN, 0.5f32, 0.5, f32::INFINITY];
+        let out = resample_dyn_curve(&values, 8);
+        for &v in &out {
+            assert!(
+                v == DYN_FOLLOW_ORIG || (v - 0.5).abs() < 1e-6,
+                "非有限输入不得被插值成显式目标，got {out:?}"
+            );
+        }
     }
 
     #[test]

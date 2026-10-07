@@ -665,6 +665,16 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         );
                     },
                 );
+                /*
+                 * `listen` 是异步的：cleanup 可能在它 resolve 之前就跑过（对话框在
+                 * 动态 import + 注册期间关闭 / effect 重跑）。那时 `unlisten` 还是
+                 * null，cleanup 无从注销，注册会跨开合周期累积泄漏。resolve 后补一次
+                 * 检查，已 disposed 就当场注销。
+                 */
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // 非 Tauri 环境下忽略。
             }

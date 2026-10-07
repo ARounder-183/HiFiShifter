@@ -352,7 +352,7 @@ pub fn compute_frame_levels(
     }
     // 实数 hop（样本/帧）：时间栅格的唯一真源，不取整。
     let hop_samples_f = (fp / 1000.0) * sr;
-    let window_samples = (((WINDOW_MS / 1000.0) * sr).round() as usize).max(1) as usize;
+    let window_samples = (((WINDOW_MS / 1000.0) * sr).round() as usize).max(1);
     // 帧数 = ceil(样本数 / 实数 hop)：同样不能先把 hop 取整（否则 40 s 素材会
     // 多算 19 帧）。减一个相对 epsilon 抵消浮点余量，避免整倍数时多出一帧。
     let total_hops = (((mono.len() as f64) / hop_samples_f) - 1e-9)
@@ -914,7 +914,7 @@ pub fn schedule_clip_pitch_jobs_scoped(
         let cancelled = || scope_cancelled.load(AtomicOrdering::Acquire) || current_pitch_generation() != generation;
         if cancelled() {release_inflight(&job.inflight_key);return;}
         let analysis = analyze_clip_pitch_and_level_cancellable(
-            &tl_shared,
+            tl_shared,
             &job.clip,
             &job.root_track_id,
             frame_period_ms,
@@ -996,7 +996,7 @@ pub fn schedule_clip_pitch_jobs_scoped(
                     let root = tl_shared
                         .resolve_root_track_id(&c.track_id)
                         .unwrap_or_default();
-                    build_clip_pitch_key(&tl_shared, c, &root, frame_period_ms)
+                    build_clip_pitch_key(tl_shared, c, &root, frame_period_ms)
                         .filter(|other_ck| other_ck.key == job.ck.key)
                         .map(|_| c.id.clone())
                 })
@@ -1734,13 +1734,13 @@ mod tests {
 
         let mut offsets: Vec<f64> = Vec::new();
         for &t in &pulses {
-            let expect = (t * 1000.0 / fp) as f64; // 例：5 s → 帧 1000
-                                                   // 电平重心（在期望帧附近的窗口内按电平加权）。
-                                                   //
-                                                   // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
-                                                   // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
-                                                   // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
-                                                   // 随 t 线性增长** —— 这正是要钉住的性质。
+            let expect = (t * 1000.0 / fp); // 例：5 s → 帧 1000
+                                            // 电平重心（在期望帧附近的窗口内按电平加权）。
+                                            //
+                                            // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
+                                            // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
+                                            // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
+                                            // 随 t 线性增长** —— 这正是要钉住的性质。
             let lo = ((expect - 8.0).max(0.0)) as usize;
             let hi = ((expect + 8.0) as usize).min(levels.len() - 1);
             let mut wsum = 0.0f64;

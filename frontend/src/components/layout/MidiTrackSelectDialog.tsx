@@ -155,7 +155,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     importTempoMapKeySignature = false,
     onImportTempoMapKeySignatureChange,
 }) => {
-    const { tf } = useI18n();
+    const { tf, tVars } = useI18n();
 
     // 导入目标（统一弹窗用）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数
     const isReplaceMode = mode === "replaceMidi";
@@ -720,9 +720,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             readOnly
                             value={
                                 effectiveClipboardGuid
-                                    ? tf("midi_clipboard_midi_prefix") +
-                                      effectiveClipboardGuid +
-                                      ".mid"
+                                    ? tVars("midi_clipboard_midi_file", {
+                                          file: effectiveClipboardGuid + ".mid",
+                                      })
                                     : effectivePath
                                       ? effectivePath
                                       : tf("midi_no_file_selected")

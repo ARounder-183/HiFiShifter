@@ -186,6 +186,54 @@ pub fn clip_pitch_trim_window_sec(clip: &Clip) -> (f64, f64) {
     }
 }
 
+/// 音符重映射所需的**源域上下文**：`(src_start, src_end, loop_cycle)`。
+///
+/// `loop_cycle = Some((周期D, 正放锚点, 倒放锚点末端))`，None = 非 Loop。
+///
+/// 【为什么必须是共享函数】写 `midi_note_data` 的路径有两条
+/// （`convert_clips_to_pitch_reference` 与
+/// `update_pitch_reference_from_track_params`），它们必须与
+/// `build_fallback_pitch_from_midi`、`remap_midi_note_times`、
+/// `place_note_occurrence_in_loop` 使用**逐字段一致**的坐标系 —— 否则
+/// 音符会被写进另一个域，渲染端按窗口求交时整体错位。此前这段计算内联在
+/// `update_pitch_reference_from_track_params` 里，转换路径只能自己重写一份
+/// （并且写错了，见不变式 PN）。
+pub(crate) fn midi_remap_context(clip: &Clip) -> (f64, f64, Option<(f64, f64, f64)>) {
+    let src_end = if clip.source_end_sec > 0.0 {
+        clip.source_end_sec
+    } else {
+        clip.length_sec
+    };
+    // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负，域外为静音）
+    // —— fallback 曲线与 remap 写回共用同一坐标系。
+    let src_start = if !clip.loop_enabled && clip.reversed {
+        let r = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+            clip.playback_rate as f64
+        } else {
+            1.0
+        };
+        src_end - clip.length_sec.max(0.0) * r
+    } else {
+        clip.source_start_sec
+    };
+    // 倒放锚点 clamp 规则与 place_note_occurrence_in_loop 一致：周期来自媒体
+    // 时长时 clamp 到媒体时长；周期退化为窗口跨度时保持原始 source_end
+    //（否则 slip 窗口的倒放相位被错误平移）。
+    let media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
+    let loop_cycle = clip_loop_cycle_span_sec(clip).map(|cycle| {
+        (
+            cycle,
+            clip.source_start_sec,
+            match media_total {
+                Some(d) => clip.source_end_sec.min(d),
+                None => clip.source_end_sec,
+            }
+            .max(0.0),
+        )
+    });
+    (src_start, src_end, loop_cycle)
+}
+
 /// 非 Loop Clip 存储字段的**加载期规范化**：使存储窗口 == 消费窗口。
 ///
 ///   正放：source_end := source_start + len·r
@@ -472,8 +520,60 @@ pub enum PitchAnalysisAlgo {
     #[serde(rename = "vslib")]
     VocalShifterVslib,
     None,
+    /// 工程里存着一个**本构建不认识**的算法名。
+    ///
+    /// 它只是反序列化的兜底变体（`#[serde(other)]`）：来自更早/更新的版本，
+    /// 或手改坏的工程。它不代表"没有算法"——真正的执行语义由 [`Self::effective`]
+    /// 统一决定（回退到默认算法），任何"按算法分支"的地方都必须先过那一层。
     #[serde(other)]
     Unknown,
+}
+
+impl PitchAnalysisAlgo {
+    /// 算法在**前后端之间以及工程文件里**的规范 id。
+    ///
+    /// 与 `#[serde(rename_all = "snake_case")]` 的取值逐字一致
+    ///（`VocalShifterVslib` 另有显式 `rename = "vslib"`），前端 `PITCH_ALGO_IDS`
+    /// 用的也是这一组。收成一处是因为该映射此前在 `algo_name` 与轨道序列化的
+    /// 内联 `match` 里各写了一遍。
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::WorldDll => "world_dll",
+            Self::NsfHifiganOnnx => "nsf_hifigan_onnx",
+            Self::VocalShifterVslib => "vslib",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 解析规范 id（容忍历史别名）。无法识别的字符串归入 [`Self::Unknown`]
+    /// 而**不是**直接给默认值——先把"不认识"这件事记下来，回退口径交给
+    /// [`Self::effective`] 一处决定。
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "world_dll" | "world" => Self::WorldDll,
+            "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => Self::NsfHifiganOnnx,
+            "vslib" | "vocalshifter_vslib" => Self::VocalShifterVslib,
+            "none" => Self::None,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 本构建**实际执行**的算法：未知算法回退到工程默认算法（`#[default]`）。
+    ///
+    /// 【为什么不是 WORLD】`Unknown` 只是"本构建不认识的字符串"。把它当成 WORLD
+    /// 会让工程静默换一种声音，而前端下拉按同一规则回退到 nsf-hifigan
+    ///（见 `pitchAlgoOptions.ts` 的 `resolveEffectivePitchAlgo`）——界面写着
+    /// nsf-hifigan、引擎跑 WORLD，两边对不上。
+    ///
+    /// 渲染键、参数表、pitch edit 链路都必须经过这里，否则同一条轨道会在不同层
+    /// 被当成不同算法。
+    pub fn effective(&self) -> Self {
+        match self {
+            Self::Unknown => Self::default(),
+            other => other.clone(),
+        }
+    }
 }
 
 /// 合成链路类型，独立于 PitchAnalysisAlgo，面向声码器选择。
@@ -489,12 +589,27 @@ pub enum SynthPipelineKind {
 
 impl SynthPipelineKind {
     /// 从 Track 的分析算法推断合成链路类型。
+    ///
+    /// 先经 [`PitchAnalysisAlgo::effective`] 归一，未知算法因此按工程默认算法
+    /// 处理（见该方法文档）。
+    ///
+    /// 【为什么穷举每个变体、不留 `_`】这里此前是 `_ => WorldVocoder`：`Unknown`
+    /// 被静默当成 WORLD，而新增算法变体也不会触发编译错误 —— "不认识的算法渲染
+    /// 成 WORLD"正是这样漏出去的。穷举之后，任何新变体都必须在此显式表态。
     pub fn from_track_algo(algo: &PitchAnalysisAlgo) -> Self {
-        match algo {
-            PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
+        match algo.effective() {
+            // `effective()` 已把 `Unknown` 归一为默认算法；此处列出只为穷举。
+            PitchAnalysisAlgo::NsfHifiganOnnx | PitchAnalysisAlgo::Unknown => Self::NsfHifiganOnnx,
             #[cfg(feature = "vslib")]
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
-            _ => Self::WorldVocoder,
+            // WORLD，以及 `None`（pitch edit 侧判为 Bypass）：`None` 的 clip 不会
+            // 进入处理器渲染路径（见 `does_clip_need_processor_render`），这里的
+            // kind 只影响渲染键与参数表，沿用既有的 WORLD 映射。
+            PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::None => Self::WorldVocoder,
+            // vslib 变体在本构建中不存在（feature 关闭）：pitch edit 侧判为 Bypass，
+            // 不会走处理器渲染，这里同样只影响参数表。
+            #[cfg(not(feature = "vslib"))]
+            PitchAnalysisAlgo::VocalShifterVslib => Self::WorldVocoder,
         }
     }
 }
@@ -551,8 +666,21 @@ pub struct TrackParamsState {
     pub dyn_orig: Vec<f32>,
 
     /// 原声电平基线的缓存键（= `build_root_dyn_key`），分析完成后写入。
+    ///
+    /// 【与 `dyn_orig_source_key` 的分工】本字段是**缓存有效性**标记：只有全量命中
+    /// 才写入，未写时下次调用会重新组装（见 `assemble_and_store`）。因此它**不能**
+    /// 用来回答"这份基线是哪份几何算出来的"——部分命中时它是空的，但基线数据是存在的。
     #[serde(skip)]
     pub dyn_orig_key: Option<String>,
+
+    /// 当前 `dyn_orig` **实际依据的几何**键（每次组装都写入，与是否全量命中无关）。
+    ///
+    /// 【为什么需要它】参数编辑器在拖拽期间把这份基线本地搬到新位置，需要知道
+    /// "什么时候该停"——判据是"后端返回的基线所依据的几何变了"（键变 ⇔ 几何变）。
+    /// 用取数序号猜会错拍：提交会先 `checkpointHistory` 递增 `paramsEpoch`（早于
+    /// 后端写入），而取数序号在**发出**时就推进，水位必然与"数据反映哪份几何"错位。
+    #[serde(skip)]
+    pub dyn_orig_source_key: Option<String>,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
@@ -800,6 +928,18 @@ pub struct ClipTake {
     pub channel_decision: Option<crate::channel_decision::ChannelDecisionRecord>,
 
     // ── MIDI 内容（无音频源时） ──
+    /// 音高线：音符事件列表（音高参考块 / MIDI 块的内容层）。
+    ///
+    /// **不变式 PN —— 音符是 Take 的媒体内容，坐标位于源域。**
+    /// 它跨越 `[0, D)`，其中 `D = clip_take_media_duration_sec(take)`
+    /// （纯音高参考块即"音符最大结束时间"，见 `clip_source_media_duration_sec`）；
+    /// 可见的那一段由消费窗口 `[source_start_sec, source_end_sec)` 选出 ——
+    /// 与选出音频的是同一个窗口。
+    ///
+    /// 因此**任何分割 / 修剪 / 变速都不得改写音符**：改的只能是窗口。
+    /// 对一个音频 Clip 分割时改的是窗口、媒体文件一个字节都不动，音高参考块
+    /// 必须与之同构。凡是写音符的路径，都必须写出源域坐标
+    /// （见 `remap_midi_note_times` 与 `midi_remap_context`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1003,8 +1143,12 @@ pub fn flip_take_playback_direction(take: &mut ClipTake, length_sec: f64, clip_r
 /// 对单个 Take 应用分割几何。
 ///
 /// `clip_rate` 是 Clip 级倍率；每个 Take 的实际消费速率为
-/// `clip_rate × take.playback_rate`。音频源窗口与 MIDI 音符都会按切割点
-/// 分成左右两段；该函数总是执行，不受“同步编辑所有 Take”设置影响。
+/// `clip_rate × take.playback_rate`。**只改消费窗口**（源域 `[source_start,
+/// source_end)` 与 Loop 锚点），不改任何媒体内容；该函数总是执行，不受
+/// "同步编辑所有 Take"设置影响。
+///
+/// 音高线（`midi_note_data`）同样属于"媒体内容"，因此这里**不触碰**它 ——
+/// 见函数末尾的说明与不变式 PN。
 fn split_clip_take_window(
     take: &mut ClipTake,
     clip_rate: f64,
@@ -1066,27 +1210,22 @@ fn split_clip_take_window(
         }
     }
 
-    // MIDI 音符坐标相对 Clip 起点；按对应侧保留并重定基。
-    if let Some(notes) = take.midi_note_data.as_mut() {
-        if is_right_side {
-            for note in notes.iter_mut() {
-                note.start_sec -= left_len_sec;
-                note.end_sec -= left_len_sec;
-            }
-            notes.retain(|note| note.end_sec > 1e-9 && note.start_sec < right_len_sec - 1e-9);
-        } else {
-            notes.retain(|note| note.start_sec < left_len_sec - 1e-9 && note.end_sec > 1e-9);
-        }
-        let bound = if is_right_side {
-            right_len_sec
-        } else {
-            left_len_sec
-        };
-        for note in notes.iter_mut() {
-            note.start_sec = note.start_sec.max(0.0);
-            note.end_sec = note.end_sec.min(bound.max(0.0));
-        }
-    }
+    // ── 音高线（MIDI 音符）**刻意不动** ──────────────────────────────────
+    //
+    // 不变式 PN（详见 `ClipTake::midi_note_data` 的文档）：音符是 Take 的
+    // **媒体内容**，坐标位于源域；可见的那一段由上面的消费窗口选出 —— 与
+    // 选出音频的是同一个窗口。
+    //
+    // 所以分割**只能改窗口，不能改音符**。旧实现在这里把音符平移到时间线
+    // 域（右段 `-= left_len`）并裁剪/丢弃越界音符，与同一函数前半段按源域
+    // 派生的窗口坐标系不一致：右段的音符整体落在自己的窗口之外，音高线
+    // 直接消失；Loop 下 `place_note_occurrence_in_loop` 的锚点回绕也随之
+    // 错相。此外内容时长 D（纯音高参考块 = 音符最大结束时间）会随裁剪变化，
+    // 分割一次就把 Loop 周期永久改一次；胶合也无法还原。
+    //
+    // 交给下游的窗口求交即可：`generateMidiCurveFromNotes`（前端）、
+    // `assemble_pitch_orig_from_cache` 的 MIDI 路径、`midi_export` 都按
+    // 「音符 ∩ 消费窗口」取可见内容 —— 这正是本函数前半段已经为音频做好的事。
 }
 
 /// 批量建轨道的一项请求（`add_track_tree` 的输入）。
@@ -1273,7 +1412,10 @@ pub struct Clip {
     pub formant_morph: Option<ClipFormantMorph>,
 
     /// MIDI 音符数据（active take 投影；仅用于 MIDI clip，无音频源）。
-    /// 音符时间相对于 clip 起点（0 = clip 起点）。
+    ///
+    /// 坐标语义见 [`ClipTake::midi_note_data`] 的不变式 PN：**源域**坐标，
+    /// 由消费窗口选出可见段。**不是**"相对 clip 起点"的局部坐标 ——
+    /// 只有当 `source_start_sec == 0` 且速率为 1 时两者才恰好重合。
     #[serde(default, skip_serializing)]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
 
@@ -2430,9 +2572,8 @@ impl TimelineState {
             let lo_val = values[lo];
             let hi_val = values[hi];
             *slot = if pitch_zero_semantics {
-                if lo_val == 0.0 && hi_val == 0.0 {
-                    0.0
-                } else if lo_val == 0.0 {
+                if lo_val == 0.0 {
+                    // lo 无声 ⇒ 结果无声（与 hi 同时无声的分支合并：二者等价）。
                     0.0
                 } else if hi_val == 0.0 {
                     if frac < 0.5 {
@@ -2633,8 +2774,17 @@ impl TimelineState {
             if curve.len() < required_len {
                 curve.resize(required_len, *default_value);
             }
+            // `dyn` 的 `-1` 是「沿用原声」哨兵而非数值：通用线性重采样会在它与
+            // 真实目标电平之间插出一串负数 / 近 0 的中间值，被增益语义读成
+            // "压平到静音"（详见 `resample_dyn_curve` 的说明）。两条路径在
+            // "两端都是显式目标"时逐值相同，只在跨越哨兵处分叉。
+            let is_dyn = key == crate::renderer::common_params::DYN_PARAM_ID;
             for (slice, &(.., new_start, new_count)) in slices.iter().zip(frame_mappings.iter()) {
-                let values = Self::resample_curve(slice, new_count, false);
+                let values = if is_dyn {
+                    crate::renderer::common_params::resample_dyn_curve(slice, new_count)
+                } else {
+                    Self::resample_curve(slice, new_count, false)
+                };
                 for (offset, value) in values.into_iter().enumerate() {
                     curve[new_start.saturating_add(offset)] = value;
                 }
@@ -2937,7 +3087,8 @@ impl TimelineState {
             curve.is_some_and(|c| {
                 c.iter().any(|v| {
                     v.is_finite()
-                        && (v - default_value).abs() > crate::renderer::chain::TENSION_ACTIVE_EPSILON
+                        && (v - default_value).abs()
+                            > crate::renderer::chain::TENSION_ACTIVE_EPSILON
                 })
             })
         }
@@ -3007,6 +3158,66 @@ mod tests {
     /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
     static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 算法 id 是前后端与工程文件共用的规范字符串：必须与 serde 的 wire 形式
+    /// 逐字一致，且能往返解析。
+    #[test]
+    fn pitch_algo_id_round_trips_and_accepts_historical_aliases() {
+        for algo in [
+            PitchAnalysisAlgo::WorldDll,
+            PitchAnalysisAlgo::NsfHifiganOnnx,
+            PitchAnalysisAlgo::VocalShifterVslib,
+            PitchAnalysisAlgo::None,
+            PitchAnalysisAlgo::Unknown,
+        ] {
+            assert_eq!(PitchAnalysisAlgo::from_id(algo.id()), algo);
+            assert_eq!(
+                serde_json::to_string(&algo).unwrap(),
+                format!("\"{}\"", algo.id()),
+                "规范 id 与 serde 取值必须一致（工程文件 / 前端都按它读写）"
+            );
+        }
+
+        // 历史别名（旧工程与前端都出现过）。
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("nsf_hifigan"),
+            PitchAnalysisAlgo::NsfHifiganOnnx
+        );
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("vocalshifter_vslib"),
+            PitchAnalysisAlgo::VocalShifterVslib
+        );
+
+        // 不认识的字符串归入 `Unknown` 而**不是**直接给默认值：先把"不认识"
+        // 记下来，回退口径由 `effective` 一处决定。
+        assert_eq!(
+            PitchAnalysisAlgo::from_id("world_onnx_2027"),
+            PitchAnalysisAlgo::Unknown
+        );
+    }
+
+    /// 工程里存着一个本构建不认识的算法名时，必须按**工程默认算法**执行，
+    /// 而不是 WORLD。
+    ///
+    /// 回归对象：`SynthPipelineKind::from_track_algo` 曾用 `_ => WorldVocoder`
+    /// 兜底，于是未知算法被静默渲染成 WORLD 声码器，而前端下拉按同一规则
+    /// 显示的是 nsf-hifigan —— 界面与声音对不上。
+    #[test]
+    fn unknown_pitch_algo_degrades_to_the_default_not_to_world() {
+        let unknown = PitchAnalysisAlgo::Unknown;
+
+        assert_eq!(unknown.effective(), PitchAnalysisAlgo::default());
+        assert_eq!(
+            SynthPipelineKind::from_track_algo(&unknown),
+            SynthPipelineKind::from_track_algo(&PitchAnalysisAlgo::NsfHifiganOnnx),
+            "未知算法与默认算法必须走同一条合成链路"
+        );
+        assert_ne!(
+            SynthPipelineKind::from_track_algo(&unknown),
+            SynthPipelineKind::WorldVocoder,
+            "未知算法不得落到 WORLD"
+        );
+    }
 
 
     fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
@@ -5244,8 +5455,144 @@ mod tests {
         assert_eq!(clip_loop_cycle_span_sec(&clip), Some(4.25));
     }
 
-    // ── split_clips_at tests ──────────────────────────────────────
+    // ── 音高参考块（Pitch Reference）的分割：不变式 PN ──────────────
 
+    /// 造一个纯音高参考块（无源媒体），音符铺满 `[0, length_sec]`。
+    /// 返回 `(timeline, clip_id, 原始音符)`。
+    fn make_pitch_reference_clip(length_sec: f64) -> (TimelineState, String, Vec<MidiNoteEvent>) {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let id = tl.add_clip(
+            Some(tid),
+            Some("ref".into()),
+            Some(0.0),
+            Some(length_sec),
+            None,
+        );
+        // 四个逐秒音符：60 / 61 / 62 / 63 —— 分割后能一眼看出左右两段各显示哪一半。
+        let notes: Vec<MidiNoteEvent> = (0..4)
+            .map(|i| MidiNoteEvent {
+                start_sec: i as f64,
+                end_sec: i as f64 + 1.0,
+                note: 60.0 + i as f32,
+                velocity: 100,
+                channel: 0,
+            })
+            .collect();
+        let clip = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
+        clip.midi_note_data = Some(notes.clone());
+        clip.midi_fill_gaps = true;
+        clip.color = "cyan".into();
+        clip.pitch_range = Some(PitchRange {
+            min: 0.0,
+            max: 127.0,
+        });
+        // 不变式 PN 的基准形态：窗口 == 音符内容域。
+        clip.source_start_sec = 0.0;
+        clip.source_end_sec = length_sec;
+        clip.playback_rate = 1.0;
+        clip.reversed = false;
+        clip.loop_enabled = false;
+        clip.sync_take_from_flat();
+        (tl, id, notes)
+    }
+
+    /// 分割音高参考块后，**两段都保留完整音符**，只有窗口按常规 Clip 的规则派生。
+    ///
+    /// 回归背景：旧实现在 `split_clip_take_window` 里把右段音符平移 `-left_len`
+    /// 并裁剪/丢弃越界音符，与同一函数按**源域**派生的窗口坐标系不一致 ——
+    /// 右段的音符整体落在自己的窗口之外，音高线直接消失；Loop 下还会让内容
+    /// 时长 D 漂移，永久改变回绕周期。
+    #[test]
+    fn split_pitch_reference_keeps_full_notes_in_both_halves() {
+        let (mut tl, clip_id, original) = make_pitch_reference_clip(4.0);
+        let right_id = tl
+            .split_clip(&clip_id, 2.0)
+            .expect("splitting inside the clip must succeed");
+
+        let left = tl
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("left half");
+        let right = tl
+            .clips
+            .iter()
+            .find(|c| c.id == right_id)
+            .expect("right half");
+
+        // 音符一个字节都没动（这是"完全不影响音高线数据"的字面含义）。
+        assert_eq!(left.midi_note_data.as_deref(), Some(original.as_slice()));
+        assert_eq!(right.midi_note_data.as_deref(), Some(original.as_slice()));
+
+        // 窗口/几何按常规 Clip 的规则派生。
+        assert!((left.length_sec - 2.0).abs() < 1e-9);
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        assert!((right.start_sec - 2.0).abs() < 1e-9);
+        assert!((right.length_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_end_sec - 4.0).abs() < 1e-9);
+    }
+
+    /// 右段显示的必须是音高线的**后半段**（而不是空白、也不是整条线）。
+    ///
+    /// 用生产路径 `build_fallback_pitch_from_midi`（引擎 / assemble / export
+    /// 共用的音符 → 可见曲线映射）来判定，避免在测试里复刻一份渲染数学。
+    #[test]
+    fn split_pitch_reference_right_half_shows_second_half_of_curve() {
+        let (mut tl, clip_id, _) = make_pitch_reference_clip(4.0);
+        let right_id = tl.split_clip(&clip_id, 2.0).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        let fp = 5.0;
+        let (src_start, src_end, loop_cycle) = midi_remap_context(right);
+        let curve = TimelineState::build_fallback_pitch_from_midi(
+            right.length_sec,
+            fp,
+            right.midi_note_data.as_deref().unwrap_or(&[]),
+            right.playback_rate,
+            right.reversed,
+            src_start,
+            src_end,
+            loop_cycle,
+        );
+
+        // 右段窗口 [2,4] → 只应出现 62 / 63；左半段的 60 / 61 一律不得出现。
+        assert!(
+            curve.iter().all(|&v| v == 0.0 || v >= 62.0),
+            "left-half pitches leaked into the right half: {:?}",
+            curve
+        );
+        assert_eq!(curve.first().copied(), Some(62.0));
+        assert_eq!(curve.get(200).copied(), Some(63.0));
+        // 4s 的音高线在右段里应当铺满 2s，而不是只剩零头。
+        assert!(curve.iter().filter(|&&v| v > 0.0).count() >= 380);
+    }
+
+    /// Loop 下分割不得改变内容时长 D（= 音符最大结束时间），否则回绕周期漂移。
+    #[test]
+    fn split_pitch_reference_loop_keeps_content_duration() {
+        let (mut tl, clip_id, _) = make_pitch_reference_clip(4.0);
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.sync_take_from_flat();
+        }
+        let right_id = tl.split_clip(&clip_id, 2.0).unwrap();
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 两段的内容时长仍是完整音符跨度 —— 裁剪音符会让它掉到 2.0。
+        assert_eq!(clip_source_media_duration_sec(left), Some(4.0));
+        assert_eq!(clip_source_media_duration_sec(right), Some(4.0));
+        // Loop 左段保留原锚点；右段锚点按左段消费量对 D 回绕。
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+    }
+
+    // ── split_clips_at tests ──────────────────────────────────────
     /// Split a grouped clip: left half keeps original group_id, right half gets new group_id.
     #[test]
     fn split_clips_at_basic() {
@@ -5270,7 +5617,7 @@ mod tests {
             .clone();
         assert!(orig_group.is_some());
 
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // Left half (start_sec ≈ 0.0) keeps original group
         let left = tl
@@ -5309,7 +5656,7 @@ mod tests {
         // Split c1 at 1.0. c2 starts at 0.5 < 1.0 so stays in original (left) group.
         // Left group: left half of c1 + c2 = 2 members → survives.
         // Right group: right half of c1 only → 1 member → dissolved.
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // Right half of c1 should have no group (dissolved)
         let right_half = tl
@@ -5364,7 +5711,7 @@ mod tests {
             .clone();
 
         // Split c1 at 1.0; c2 is at 2.5 > 1.0 so it goes to the right group
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // c2 should have moved to the new right group
         let c2_after = tl.clips.iter().find(|c| c.id == c2).unwrap();
@@ -5396,7 +5743,7 @@ mod tests {
             .clone();
 
         // Split c2 at 4.0; c1 is at 0.0 < 4.0 so it stays in original group
-        tl.split_clips_at(&[c2.clone()], 4.0);
+        tl.split_clips_at(std::slice::from_ref(&c2), 4.0);
 
         let c1_after = tl.clips.iter().find(|c| c.id == c1).unwrap();
         assert_eq!(c1_after.group_id, orig_group);
@@ -5448,8 +5795,8 @@ mod tests {
 
         // Split one clip from each group（切割点必须落在对应 clip 范围内，
         // 否则 split 是无操作、不会产生右组 —— 见 split_clips_at 的 clamp 规则）
-        tl.split_clips_at(&[a1.clone()], 1.0);
-        tl.split_clips_at(&[b1.clone()], 6.0);
+        tl.split_clips_at(std::slice::from_ref(&a1), 1.0);
+        tl.split_clips_at(std::slice::from_ref(&b1), 6.0);
 
         // Each group should have at least 2 distinct group_ids after split (original + new)
         let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -6147,6 +6494,127 @@ mod tests {
         );
     }
 
+    /// ★ 回归：拉伸**不得把 `dyn` 的未画帧物化成显式目标电平**。
+    ///
+    /// 症状（用户报告）：拉伸拖拽期间波形正常，**松手后反而崩溃**。原因是提交时
+    /// `stretch_linked_params_in_root_range` 用通用线性重采样处理 `dyn`，在
+    /// 「沿用原声」哨兵（−1）与相邻真实目标之间插出一串中间值；落进 `(0, 目标)`
+    /// 的那些被增益语义当成显式目标 ⇒ 该段被压成静音。因为写的是持久状态，
+    /// 撤销前不会恢复。
+    #[test]
+    fn stretch_linked_params_keeps_dyn_sentinels_unset() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        tl.add_clip(
+            Some(track_id.clone()),
+            Some("DynStretch".into()),
+            Some(1.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 1~3s（帧 200..600）里只在 [300, 500) 画了 0.6，其余全未画。
+        const DRAWN: f32 = 0.6;
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let len = entry.pitch_edit.len();
+            let mut dyn_curve = vec![crate::renderer::common_params::DYN_FOLLOW_ORIG; len];
+            for value in &mut dyn_curve[300..500] {
+                *value = DRAWN;
+            }
+            entry.extra_curves.insert("dyn".to_string(), dyn_curve);
+        }
+
+        // 压缩一半：[1.0s, 3.0s) → [1.0s, 2.0s)。
+        tl.stretch_linked_params_in_root_range(
+            &root_track_id,
+            &[StretchLinkedRangeSec {
+                old_start_sec: 1.0,
+                old_length_sec: 2.0,
+                new_start_sec: 1.0,
+                new_length_sec: 1.0,
+            }],
+        );
+
+        let curve = tl
+            .params_by_root_track
+            .get(&root_track_id)
+            .unwrap()
+            .extra_curves
+            .get("dyn")
+            .expect("dyn curve must exist");
+        for (idx, &value) in curve.iter().enumerate() {
+            assert!(
+                value == crate::renderer::common_params::DYN_FOLLOW_ORIG
+                    || (value - DRAWN).abs() < 1e-4,
+                "frame {idx}: 拉伸把未画帧物化成了显式目标电平 {value} \
+                 （跨哨兵插值的中间值）—— 这正是「松手后响度崩溃」的根因"
+            );
+        }
+        // 已画的段落仍应被搬到新范围里（修复不能变成"整条曲线不动"）。
+        assert!(
+            curve[..400].iter().any(|&v| (v - DRAWN).abs() < 1e-4),
+            "已画段落必须仍然被重采样进新范围"
+        );
+    }
+
+    /// 拉伸**已画满**的 `dyn` 曲线时，走的是常规线性插值（与其它 extra 曲线同口径）。
+    ///
+    /// 与上一条互为回归守护：只做"不跨哨兵"而不做插值会让曲线变成阶梯。
+    #[test]
+    fn stretch_linked_params_interpolates_drawn_dyn_curve() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        tl.add_clip(
+            Some(track_id.clone()),
+            Some("DynRamp".into()),
+            Some(1.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 在 clip 范围 [200, 600) 上画一条 0.2 → 1.0 的斜坡，范围外平延。全部是显式值
+        //（无哨兵），从而"两端都是显式 ⇒ 仍然线性插值"这一条能被真正检验。
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let len = entry.pitch_edit.len();
+            let mut dyn_curve = vec![0.2f32; len];
+            for (i, value) in dyn_curve.iter_mut().enumerate() {
+                let t = ((i as f32) - 200.0) / 400.0;
+                *value = 0.2 + 0.8 * t.clamp(0.0, 1.0);
+            }
+            entry.extra_curves.insert("dyn".to_string(), dyn_curve);
+        }
+
+        tl.stretch_linked_params_in_root_range(
+            &root_track_id,
+            &[StretchLinkedRangeSec {
+                old_start_sec: 1.0,
+                old_length_sec: 2.0,
+                new_start_sec: 1.0,
+                new_length_sec: 1.0,
+            }],
+        );
+
+        let curve = tl
+            .params_by_root_track
+            .get(&root_track_id)
+            .unwrap()
+            .extra_curves
+            .get("dyn")
+            .unwrap();
+        // 单调不减（插值未制造折点），且首尾仍落在原斜坡上。
+        for pair in curve[200..400].windows(2) {
+            assert!(pair[1] + 1e-5 >= pair[0], "已画曲线必须保持单调");
+        }
+        assert!((curve[200] - 0.2).abs() < 0.02, "got {}", curve[200]);
+        assert!((curve[399] - 1.0).abs() < 0.03, "got {}", curve[399]);
+    }
+
     /// 跨根轨道移动：曲线必须从旧 root 搬到新 root（旧 root 恢复默认）。
     #[test]
     fn move_clips_linked_params_cross_root_track() {
@@ -6517,7 +6985,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a non-default tension curve must enable separation on migration");
+        assert!(
+            on,
+            "a non-default tension curve must enable separation on migration"
+        );
     }
 
     /// 气声曲线非默认 + 开关未开 ⇒ 同样置位。
@@ -6540,7 +7011,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a non-default breath gain curve must enable separation on migration");
+        assert!(
+            on,
+            "a non-default breath gain curve must enable separation on migration"
+        );
     }
 
     /// 曲线**存在但全为默认值** ⇒ **不得**置位。
@@ -6595,14 +7069,11 @@ mod tests {
         let root = tl.tracks[0].id.clone();
         {
             let entry = tl.params_by_root_track.entry(root.clone()).or_default();
-            entry
-                .extra_params
-                .insert("breath_enabled".to_string(), 1.0);
+            entry.extra_params.insert("breath_enabled".to_string(), 1.0);
         }
 
         tl.migrate_legacy_breath_separation(5);
         tl.migrate_legacy_breath_separation(5); // 幂等
-
 
         assert_eq!(
             tl.params_by_root_track
@@ -6638,7 +7109,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a clip-level non-default tension curve must enable separation");
+        assert!(
+            on,
+            "a clip-level non-default tension curve must enable separation"
+        );
     }
 
     /// 非有限值（NaN/Inf）不算"非默认" —— 否则损坏的数据会无端打开开关。
@@ -7670,7 +8144,7 @@ impl TimelineState {
     pub fn remove_track(&mut self, track_id: &str) {
         // 守卫：如果目标是根轨道且只剩最后一个根轨道，禁止删除。
         let target = self.tracks.iter().find(|t| t.id == track_id);
-        let is_root = target.map_or(false, |t| t.parent_id.is_none());
+        let is_root = target.is_some_and(|t| t.parent_id.is_none());
         if is_root {
             let root_count = self.tracks.iter().filter(|t| t.parent_id.is_none()).count();
             if root_count <= 1 {
@@ -8146,7 +8620,7 @@ impl TimelineState {
             if edited.contains(clip.id.as_str()) {
                 continue;
             }
-            if let Some(ref tracks) = affected_tracks {
+            if let Some(tracks) = affected_tracks {
                 if !tracks.contains(&clip.track_id) {
                     continue;
                 }
@@ -8282,7 +8756,7 @@ impl TimelineState {
             if fully_silent {
                 if delete_silent_clips {
                     outcome.removed_clip_ids.push(clip_id.clone());
-                    self.remove_clips(&[clip_id.clone()]);
+                    self.remove_clips(std::slice::from_ref(clip_id));
                 } else {
                     outcome.kept_clip_ids.push(clip_id.clone());
                 }
@@ -9523,12 +9997,10 @@ impl TimelineState {
         // so duplicates are in independent groups from the originals.
         {
             let mut group_remap: HashMap<String, String> = HashMap::new();
-            for gid_opt in &original_group_ids {
-                if let Some(ref gid) = gid_opt {
-                    group_remap
-                        .entry(gid.clone())
-                        .or_insert_with(|| Uuid::new_v4().to_string());
-                }
+            for gid in original_group_ids.iter().flatten() {
+                group_remap
+                    .entry(gid.clone())
+                    .or_insert_with(|| Uuid::new_v4().to_string());
             }
             if !group_remap.is_empty() {
                 for clip in &mut self.clips {
@@ -9829,12 +10301,12 @@ impl TimelineState {
                             for take in &mut left.takes {
                                 take.source_start_sec -= left_grow * combined(take.playback_rate);
                             }
-                            left.source_start_sec = left.source_start_sec - left_grow * left_rate;
+                            left.source_start_sec -= left_grow * left_rate;
                         } else {
                             for take in &mut left.takes {
                                 take.source_end_sec += left_grow * combined(take.playback_rate);
                             }
-                            left.source_end_sec = left.source_end_sec + left_grow * left_rate;
+                            left.source_end_sec += left_grow * left_rate;
                         }
                     }
                     // 源窗口写在 active 投影上，立即写回 Take 权威数据；
@@ -9925,7 +10397,7 @@ impl TimelineState {
                             take.source_end_sec += right_grow * r;
                             take.source_start_sec = take.source_end_sec - right.length_sec * r;
                         }
-                        right.source_end_sec = right.source_end_sec + right_grow * right_rate;
+                        right.source_end_sec += right_grow * right_rate;
                         right.source_start_sec =
                             right.source_end_sec - right.length_sec * right_rate;
                     } else {
@@ -9937,7 +10409,7 @@ impl TimelineState {
                             take.source_start_sec -= right_grow * r;
                             take.source_end_sec = take.source_start_sec + right.length_sec * r;
                         }
-                        right.source_start_sec = right.source_start_sec - right_grow * right_rate;
+                        right.source_start_sec -= right_grow * right_rate;
                         right.source_end_sec =
                             right.source_start_sec + right.length_sec * right_rate;
                     }
@@ -10343,8 +10815,24 @@ impl TimelineState {
                     _ => continue,
                 };
 
-            // 将 pitch 曲线转换为 midiNoteData（合并相邻的相同音符）
+            // 将 pitch 曲线转换为 midiNoteData（合并相邻的相同音符）。
+            //
+            // 曲线是**时间线域**的（`compute_clip_pitch_midi` 返回可见区间），
+            // 而音符按不变式 PN 必须存**源域**坐标 —— 因此用与
+            // `update_pitch_reference_from_track_params` 完全相同的映射写回。
+            // 少了这一步，带速率 / 倒放 / Loop 的音频 Clip 转换出来的音高线
+            // 会落在错误的域里，渲染端按窗口求交时整体错位。
             let midi_notes = Self::pitch_curve_to_midi_notes(&pitch_midi, fp_sec, clip.length_sec);
+            let (src_start, src_end, loop_cycle) = midi_remap_context(clip);
+            let midi_notes = Self::remap_midi_note_times(
+                midi_notes,
+                clip.length_sec,
+                src_start,
+                src_end,
+                clip.playback_rate,
+                clip.reversed,
+                loop_cycle,
+            );
 
             // 更新 clip
             if let Some(clip) = self.clips.iter_mut().find(|c| c.id == *clip_id) {
@@ -10400,42 +10888,11 @@ impl TimelineState {
             .iter()
             .filter_map(|clip_id| {
                 let clip = self.clips.iter().find(|c| c.id == *clip_id)?;
-                if clip.midi_note_data.is_none() {
-                    return None;
-                }
+                clip.midi_note_data.as_ref()?;
                 let root = self.resolve_root_track_id(&clip.track_id)?;
-                let src_end = if clip.source_end_sec > 0.0 {
-                    clip.source_end_sec
-                } else {
-                    clip.length_sec
-                };
-                // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负，
-                // 域外为静音）—— fallback 曲线与 remap 写回共用同一坐标系。
-                let src_start = if !clip.loop_enabled && clip.reversed {
-                    let r = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
-                        clip.playback_rate as f64
-                    } else {
-                        1.0
-                    };
-                    src_end - clip.length_sec.max(0.0) * r
-                } else {
-                    clip.source_start_sec
-                };
-                // 倒放锚点 clamp 规则与 place_note_occurrence_in_loop 一致：
-                // 周期来自媒体时长时 clamp 到媒体时长；周期退化为窗口跨度时
-                // 保持原始 source_end（否则 slip 窗口的倒放相位被错误平移）。
-                let clip_media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
-                let loop_cycle = clip_loop_cycle_span_sec(clip).map(|cycle| {
-                    (
-                        cycle,
-                        clip.source_start_sec,
-                        match clip_media_total {
-                            Some(d) => clip.source_end_sec.min(d),
-                            None => clip.source_end_sec,
-                        }
-                        .max(0.0),
-                    )
-                });
+                // 源域上下文（消费窗口 + Loop 回绕描述）与转换路径共用同一份
+                // 实现，保证两条写音符的路径落在同一个坐标系里。
+                let (src_start, src_end, loop_cycle) = midi_remap_context(clip);
                 Some(ClipMeta {
                     clip_id: clip_id.clone(),
                     root,
@@ -10578,7 +11035,7 @@ impl TimelineState {
         let src_total = src_end - src_start;
 
         for note in midi_notes {
-            let note_value = note.note as f32;
+            let note_value = note.note;
 
             // Loop（循环源）：媒体时长锚点回绕放置（不能用窗口比较过滤可见性 ——
             // split 的环绕窗口 start > end 会把音符全部误判为越界）。
@@ -10691,7 +11148,7 @@ impl TimelineState {
                         out.push(MidiNoteEvent {
                             start_sec: s,
                             end_sec: e,
-                            ..note.clone()
+                            ..note
                         });
                     }
                 } else {
@@ -10702,7 +11159,7 @@ impl TimelineState {
                         out.push(MidiNoteEvent {
                             start_sec: s,
                             end_sec: e,
-                            ..note.clone()
+                            ..note
                         });
                     }
                 }
@@ -10828,7 +11285,7 @@ impl TimelineState {
                     channel: 0,
                 });
             }
-            filled_notes.push(note.clone());
+            filled_notes.push(*note);
             cursor = note.end_sec;
         }
 
@@ -11283,16 +11740,6 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
         by_parent: &HashMap<Option<String>, Vec<Track>>,
         out: &mut Vec<TimelineTrack>,
     ) {
-        fn algo_name(a: &PitchAnalysisAlgo) -> String {
-            match a {
-                PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
-                PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
-                PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
-                PitchAnalysisAlgo::None => "none".to_string(),
-                PitchAnalysisAlgo::Unknown => "unknown".to_string(),
-            }
-        }
-
         let children = by_parent
             .get(&Some(t.id.clone()))
             .cloned()
@@ -11309,7 +11756,7 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
             solo: t.solo,
             volume: t.volume,
             compose_enabled: t.compose_enabled,
-            pitch_analysis_algo: algo_name(&t.pitch_analysis_algo),
+            pitch_analysis_algo: t.pitch_analysis_algo.id().to_string(),
             color: t.color.clone(),
         });
 
@@ -11340,13 +11787,7 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
                     solo: t.solo,
                     volume: t.volume,
                     compose_enabled: t.compose_enabled,
-                    pitch_analysis_algo: match t.pitch_analysis_algo {
-                        PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
-                        PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
-                        PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
-                        PitchAnalysisAlgo::None => "none".to_string(),
-                        PitchAnalysisAlgo::Unknown => "unknown".to_string(),
-                    },
+                    pitch_analysis_algo: t.pitch_analysis_algo.id().to_string(),
                     color: t.color.clone(),
                 });
             }

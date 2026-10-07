@@ -61,7 +61,10 @@ const STORAGE_KEY = "hifishifter.locale";
 
 function getDefaultLocale(): Locale {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored && stored in messages) {
+    // 用 hasOwnProperty 而不是 `in`：`in` 会命中 `Object.prototype` 上的继承键
+    // （"toString" / "constructor" 等），一个损坏的存储值会让 locale 变成一个
+    // 查不到任何文案的"语言"，整个界面静默回落到 en-US。
+    if (stored && Object.prototype.hasOwnProperty.call(messages, stored)) {
         return stored as Locale;
     }
     const lang = navigator.language.toLowerCase();

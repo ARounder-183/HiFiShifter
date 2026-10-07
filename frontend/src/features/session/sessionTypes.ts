@@ -1,6 +1,21 @@
+/**
+ * 参数编辑器的绘制类型工具：自由手绘 / 直线 / 颤音。
+ *
+ * 【直线工具是什么】它就是"颤音工具 + 直线预设"（`STRAIGHT_VIBRATO_PRESET_ID`），
+ * 两者共用同一条拖拽与调参代码路径 —— 差别只在起手预设固定与否。
+ */
 export type DrawToolMode = "draw" | "line" | "vibrato";
 export type ToolModeGroup = "select" | "draw";
 export type ToolMode = "select" | DrawToolMode;
+
+/**
+ * 四种工具手势状态的**运行时常量**（与 `ToolMode` 同源）。
+ *
+ * 【为什么要有它】持久化设置是外部输入，读取时必须按白名单校验。把名单写死成
+ * 第二份字面量，加一种工具时就会漏改一处；从类型推导出常量则改不动。
+ */
+export const TOOL_MODES = ["select", "draw", "line", "vibrato"] as const;
+export const DRAW_TOOL_MODES = ["draw", "line", "vibrato"] as const;
 export type PitchSnapUnit = "semitone" | "scale";
 export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
@@ -381,8 +396,3 @@ export type ClipTemplate = Partial<Omit<ClipInfo, "id" | "color" | "groupId">> &
     waveformPreview?: WaveformPreview;
     linkedParams?: LinkedParamCurves;
 };
-export interface AutomationPoint {
-    id: string;
-    beat: number;
-    value: number;
-}

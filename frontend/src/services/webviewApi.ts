@@ -30,6 +30,7 @@ export const webApi = {
     openMidiDialog: coreApi.openMidiDialog,
     pickOutputPath: coreApi.pickOutputPath,
     closeWindow: coreApi.closeWindow,
+    getVslibStatus: coreApi.getVslibStatus,
 
     clearWaveformCache: coreApi.clearWaveformCache,
 

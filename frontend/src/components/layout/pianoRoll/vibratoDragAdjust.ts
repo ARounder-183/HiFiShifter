@@ -1,5 +1,9 @@
 /**
- * 直线/颤音拖拽时的调参映射与步进计算。
+ * 颤音拖拽时的调参映射与步进计算。
+ *
+ * 【直线工具也在本文件的管辖内】直线工具就是"颤音工具 + 直线预设"（见
+ * `STRAIGHT_VIBRATO_PRESET_ID`），因此它走的是同一套拖拽与调参逻辑，只是起手
+ * 预设固定。本文件不为它开第二套规则。
  *
  * 【本文件负责什么】把"滚轮 / 方向键 / 侧键 / 预设切换"这几个输入，映射成
  * 拖拽工作副本（`VibratoDragWorking`）上的深度、速率与预设变化。纯函数，
@@ -120,8 +124,8 @@ export function switchDragPreset(
  * 重置本次手势的振幅：回到**预设自带**的深度，并清掉"调过振幅"的记录。
  *
  * 【重置成什么】回到预设自带值，而不是归零 —— 归零是「重置到直线」的语义
- * （它换的是预设本身）。这里撤销的是"我对幅度的微调"，撤销之后本次手势的振幅
- * 就等于预设的振幅，记录自然也不必再留着。
+ * （它换的是工具本身，见 `VibratoDragResetIntent` 的 `"line"`）。这里撤销的是
+ * "我对幅度的微调"，撤销之后本次手势的振幅就等于预设的振幅，记录自然也不必再留着。
  */
 export function resetVibratoDragDepth(
     working: VibratoDragWorking,
@@ -311,8 +315,13 @@ export function matchedVibratoResetSlots(
     return slots;
 }
 
-/** 双键同时按下时的重置意图。 */
-export type VibratoDragResetIntent = "straight" | "depth" | "rate";
+/**
+ * 双键同时按下时的重置意图。
+ *
+ * `"line"` 是"把这一笔变回直线" —— 落在实现上就是切到直线工具（直线工具 ≡ 颤音
+ * 工具 + 直线预设），而不是把活动预设改成直线预设。工具与音色是两条独立的记忆。
+ */
+export type VibratoDragResetIntent = "line" | "depth" | "rate";
 
 /**
  * 一对绑定同时按下 → 重置。
@@ -323,7 +332,7 @@ export type VibratoDragResetIntent = "straight" | "depth" | "rate";
 export function resolveVibratoPairReset(
     held: ReadonlySet<VibratoDragResetSlot>,
 ): VibratoDragResetIntent | null {
-    if (held.has("presetPrev") && held.has("presetNext")) return "straight";
+    if (held.has("presetPrev") && held.has("presetNext")) return "line";
     if (held.has("amplitudeIncrease") && held.has("amplitudeDecrease")) return "depth";
     if (held.has("frequencyIncrease") && held.has("frequencyDecrease")) return "rate";
     return null;

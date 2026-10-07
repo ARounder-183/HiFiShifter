@@ -22,6 +22,8 @@ import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxi
 import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
+import { fitCssPxToDevicePx } from "../components/layout/renderKernel/canvasRaster.ts";
+import { subscribeDevicePixelRatio } from "../hooks/useDevicePixelRatio";
 import {
     buildWaveformGeometry,
     readAmplitudeRevision,
@@ -34,6 +36,7 @@ import {
     type WaveformReuseQuery,
 } from "./geometryCache";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
+import { computeWaveformWindow } from "./waveformWindow";
 import {
     Canvas2dWaveformRenderer,
     WebGl2WaveformRenderer,
@@ -133,14 +136,6 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      */
     const geometryCacheRef = React.useRef<WaveformGeometryAnchor | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
-    /**
-     * 当前 dpr 快照，**只**用于驱动下方 matchMedia 订阅的换绑。
-     *
-     * draw() 每帧直接读 `window.devicePixelRatio`（值永远新鲜），不经 state；
-     * 这里单独存一份是因为 `(resolution: N dppx)` 查询只在 dpr **离开** N 时
-     * 触发一次，必须用新 dpr 重新订阅才能收到下一次变化。
-     */
-    const [dpr, setDpr] = React.useState(() => window.devicePixelRatio || 1);
 
     // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
     // 旧渲染路径删除，同一手法现仍见于 TimelineKernelView 等命令式绘制组件）。
@@ -162,31 +157,25 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     /**
      * DPR 变化（浏览器缩放 / 显示器切换）必须触发一次重绘。
      *
-     * 【为什么需要】dpr 参与绘制结果的两处：包络列按设备像素网格枚举、dpr
+     * 【为什么需要】dpr 参与绘制结果的三处：包络列按设备像素网格枚举、dpr
      * 又是几何缓存键的一部分（`canReuseGeometry` 第 1 组），画布物理尺寸也
-     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化 ——
-     * 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与画布尺寸上
-     * （发虚/糊边），直到下一次滚动或缩放才有机会重画。
+     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化，
+     * 且 **`ResizeObserver` 不会触发**（它观察 CSS 布局盒，纯 dpr 变化不改
+     * CSS 尺寸）—— 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与
+     * 画布尺寸上（发虚/糊边），直到下一次滚动或缩放才有机会重画。
      *
-     * 【换绑模式】监听 `(resolution: N dppx)`（N = 订阅时的 dpr）：它只在
-     * dpr 离开 N 时触发；回调里作废几何缓存、请求重绘，并重读真实 dpr 写回
-     * state —— effect 依赖 [dpr] 随之重跑，用新 dpr 的 query 重新订阅。不换
-     * 绑的话旧 query 已永久失配，第二次缩放就会丢。
+     * `draw()` 每帧现读 `window.devicePixelRatio`，故回调里只需作废几何缓存
+     * 并请求重绘；换绑逻辑（`(resolution: N dppx)` 只在离开 N 时触发一次，
+     * 必须用新 dpr 重新订阅）由 `subscribeDevicePixelRatio` 统一承担。
      */
-    React.useEffect(() => {
-        const mql = window.matchMedia?.(`(resolution: ${dpr}dppx)`);
-        if (!mql) return;
-        const onChange = () => {
-            // dpr 参与几何缓存键、旧几何的列栅格按旧 dpr 枚举，必须作废后
-            // 全量重建（仅 invalidate 的 repaint 命不中重建路径的原因见
-            // canReuseGeometry 的锚点全等组）。
-            geometryCacheRef.current = null;
-            invalidate();
-            setDpr(window.devicePixelRatio || 1);
-        };
-        mql.addEventListener("change", onChange);
-        return () => mql.removeEventListener("change", onChange);
-    }, [dpr, invalidate]);
+    React.useEffect(
+        () =>
+            subscribeDevicePixelRatio(() => {
+                geometryCacheRef.current = null;
+                invalidate();
+            }),
+        [invalidate],
+    );
 
     /**
      * 绘制一帧波形。
@@ -228,13 +217,20 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const source = props.viewportSource;
         const axis = source ? source.getAxis() : props.axis;
         const pxPerSec = axis.pxPerSec;
-        const widthPx = Math.max(1, Math.floor(axis.viewportWidthPx));
-        const heightPx = Math.max(1, Math.ceil(props.heightPx));
+        const dpr = window.devicePixelRatio || 1;
+        // 绘制坐标系尺寸 = 整数设备像素 / dpr（`fitCssPxToDevicePx`）。两个作用：
+        // 1. 与 `rasterize` 写回画布样式的值**完全一致**，几何坐标与画布内容
+        //    严格 1:1，也与同容器上的 GL 网格层严格同尺寸（不再差 1 物理像素）；
+        // 2. 吸附到设备像素后，容器宽度的亚像素抖动被吸收，几何缓存键稳定。
+        // 【为什么不能 floor / ceil】旧实现宽取 floor、高取 ceil，方向相反且都不是
+        // `round`：物理尺寸与 GL 层系统性错开，叠加后互相错位。取整只允许发生在
+        // 设备像素空间（由 `rasterize` 统一完成），此处不再做任何 CSS 空间取整。
+        const widthPx = fitCssPxToDevicePx(axis.viewportWidthPx, dpr);
+        const heightPx = fitCssPxToDevicePx(props.heightPx, dpr);
         const scrollLeftPx = axis.scrollLeftPx;
         // 竖直锚点：行坐标是内容绝对值，滚动容器竖直滚动时必须同步平移，
         // 否则波形与 DOM Clip 在竖直方向分层。
         const scrollTopPx = source ? axis.scrollTopPx : (props.viewportTopPx ?? 0);
-        const dpr = window.devicePixelRatio || 1;
 
         const cache = geometryCacheRef.current;
 
@@ -281,18 +277,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         }
 
         // ── 全量重建 ──────────────────────────────────────────────
-        // 余量只给水平方向（WebGL 路径无内存成本；Canvas2D 回退没有顶点缓冲，
-        // 平移仍要重放 path，加宽窗口只会白白多建几何，故余量取 0）。
-        const marginPx =
-            rendererKind === "webgl2"
-                ? Math.min(512, Math.max(128, Math.round(widthPx * 0.25)))
-                : 0;
-        const windowStartPx = scrollLeftPx - marginPx;
-        const windowEndPx = scrollLeftPx + widthPx + marginPx;
-        // 竖直窗口 = 行数据覆盖的内容范围（行 topPx 是内容绝对坐标、按轨道
-        // 顺序升序）。注意**不能**用 `heightPx` 推竖直窗口：它是画布高度，
-        // 与行数据的实际覆盖无关（上游的轨道窗口化自带 overscan，两者不必
-        // 相等），拿它当界会得到与几何覆盖无关的条件。
+        // 几何窗口与渲染原点由 `computeWaveformWindow` 统一计算。那里保证
+        // **原点是整数个物理像素** —— 否则渲染器对原点的吸附会留下小数残差，
+        // 整幅波形相对网格 / Clip 平移最多半个物理像素；水平余量随视口宽度变化，
+        // 于是拖动窗口宽度时波形会反复跳变（详见该模块的文件头推导）。
         let firstRowTopPx = Number.POSITIVE_INFINITY;
         // 几何的**真实覆盖底端**：几何只画各行波形带，覆盖到
         // 「行顶 + 带内偏移 + 带高」为止。此前用「(末行 top − 首行 top) ÷ 行数」
@@ -305,10 +293,17 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             const bandBottomPx = row.topPx + row.waveformTopPx + row.waveformHeightPx;
             if (bandBottomPx > geometryBottomPx) geometryBottomPx = bandBottomPx;
         }
-        const windowTopPx = Number.isFinite(firstRowTopPx) ? firstRowTopPx : scrollTopPx;
-        const windowBottomPx = Number.isFinite(geometryBottomPx)
-            ? geometryBottomPx
-            : scrollTopPx + heightPx;
+        const geometryWindow = computeWaveformWindow({
+            scrollLeftPx,
+            scrollTopPx,
+            widthPx,
+            heightPx,
+            dpr,
+            horizontalOverscan: rendererKind === "webgl2",
+            firstRowTopPx,
+            geometryBottomPx,
+        });
+        const { windowStartPx, windowEndPx, windowTopPx, windowBottomPx } = geometryWindow;
 
         const scene = buildWaveformScene({
             axis: withAxis(axis, {
@@ -373,8 +368,11 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             dpr,
         });
 
-        const originXPx = scrollLeftPx - windowStartPx;
-        const originYPx = scrollTopPx - windowTopPx;
+        // 渲染原点取自 `computeWaveformWindow`（= 视口左上角的窗口局部坐标）。
+        // 它恒为整数个物理像素，渲染器对它的吸附因此是恒等操作 —— 波形不会随
+        // 视口宽度变化而整体平移（详见该模块的文件头）。
+        const originXPx = geometryWindow.originXPx;
+        const originYPx = geometryWindow.originYPx;
         const commitCache = (renderer: WaveformSurfaceRenderer): void => {
             geometryCacheRef.current = {
                 pxPerSec,

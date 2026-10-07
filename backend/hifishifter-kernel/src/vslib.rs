@@ -172,6 +172,16 @@ pub fn vslib_error_name(code: c_int) -> &'static str {
     }
 }
 
+/// 可用性探测：只调用不需要任何项目句柄的 `VslibGetVersion`。
+///
+/// DLL 在进程加载期就由导入库链入（见下方 `#[link(name = "vslib_x64")]`），
+/// 文件缺失会让进程根本起不来 —— 因此这里验证的是「符号可调用且返回了合法
+/// 版本号」，而不是「文件存在」。返回 `None` 表示探测失败（版本号非正）。
+pub fn probe() -> Option<c_int> {
+    let version = unsafe { VslibGetVersion() };
+    (version > 0).then_some(version)
+}
+
 //--------------------------------------------------------------
 // 外部函数声明 (Windows system ABI)
 //--------------------------------------------------------------

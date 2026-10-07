@@ -905,7 +905,7 @@ fn collect_folder_group(dir: &Path, label: String, depth: usize, state: &mut Fol
 
     // 子目录按小写名排序：`read_dir` 的顺序由文件系统决定，不排序会让"哪些组先
     // 建轨道"随机器而变，导入结果不可复现。
-    subdirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    subdirs.sort_by_key(|a| a.0.to_lowercase());
 
     let has_subdirs = !subdirs.is_empty();
     state.groups.push(FolderMediaGroup {
@@ -1181,7 +1181,7 @@ mod tests {
             .find(|entry| entry.name == "主歌_vocal01.wav")
             .expect("命中");
         let info = entry.match_info.as_ref().expect("转写命中应带说明");
-        assert_eq!(info.kind, crate::search::MatchKind::Pinyin);
+        assert_eq!(info.kind, crate::search::matcher::MatchKind::Pinyin);
         assert_eq!(info.form, "zhuge");
     }
 
@@ -1435,6 +1435,40 @@ mod tests {
         assert_eq!(result["deleted"], serde_json::json!(1));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 删除**目录**：整棵子树都要消失，同级条目不受影响。
+    ///
+    /// 【为什么要单独测目录】此前只测了文件 —— 而目录走的是另一条分支
+    /// （`remove_dir_all` / 回收站），且文件浏览器里"删除文件夹"正是用户最常做、
+    /// 最容易出问题的一步。
+    #[test]
+    fn delete_paths_removes_a_directory_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "hifishifter_delete_dir_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sub = root.join("Sub");
+        std::fs::create_dir_all(sub.join("Deep")).expect("tree");
+        std::fs::write(sub.join("Deep").join("a.wav"), b"x").expect("write");
+        std::fs::write(root.join("keep.wav"), b"x").expect("write");
+
+        let result = delete_paths(vec![sub.to_string_lossy().into_owned()], true, None);
+        assert_eq!(result["ok"], serde_json::json!(true));
+        assert_eq!(result["deleted"], serde_json::json!(1));
+        assert!(!sub.exists(), "子目录整棵应被删除");
+        assert!(root.join("keep.wav").exists(), "同级文件不应受影响");
+
+        // 不存在的路径必须报失败而不是静默成功（否则界面会显示"删除成功"但什么都没发生）。
+        let missing = delete_paths(vec![sub.to_string_lossy().into_owned()], true, None);
+        assert_eq!(missing["ok"], serde_json::json!(false));
+        assert_eq!(missing["deleted"], serde_json::json!(0));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

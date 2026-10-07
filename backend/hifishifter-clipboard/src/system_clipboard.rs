@@ -252,9 +252,7 @@ fn write_contents(
     // Format registration is cheap and does not require an open clipboard.
     let object_format =
         register_format(OBJECT_FORMAT).ok_or_else(|| "clipboard_format_not_found".to_string())?;
-    let reaper_format = reaper_bytes
-        .map(|_| register_format(REAPER_MEDIA_FORMAT))
-        .flatten();
+    let reaper_format = reaper_bytes.and_then(|_| register_format(REAPER_MEDIA_FORMAT));
 
     let mut last_error: Option<String> = None;
 

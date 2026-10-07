@@ -19,20 +19,111 @@
  * 4. 清屏必须覆盖整个物理 backing store（`clearCanvasPhysical`），不能沿用
  *    `clearRect(0,0,cssW,cssH)`：当 `round(cssH*dpr)` 向上取整时，底部
  *    0~0.5 物理行永远不被清除，贴底绘制的内容会永久残留在画布最底边。
+ * 5. **CSS 布局尺寸必须回算为 `physical / dpr`**，不能沿用入参的原始 CSS 尺寸。
  *
  * 推导：顶点在 CSS 空间 → NDC = `pos / (physical/dpr) * 2 - 1` → 物理像素
  * = `pos * dpr`，与 Canvas2D 的 `setTransform(dpr,…)` 严格等价。
+ *
+ * 【第 5 条为什么是硬要求（历史 bug 的根因）】
+ * 物理尺寸取整后若仍把**未取整**的 CSS 尺寸写回 `style.width`，浏览器会把
+ * `physical` 个物理像素的 backing store 铺到 `css * dpr` 个物理像素的布局盒上，
+ * 合成器据此做一次**非整数倍重采样**：
+ * ```
+ * 实际缩放比 = (css * dpr) / round(css * dpr)  ≠  1
+ * ```
+ * 误差最大 0.5 物理像素，且随 `frac(css * dpr)` 变化 —— 表现为"窗口拖到某些
+ * 宽度波形发虚、另一些宽度清晰"，dpr=1.25/1.5 时按宽度奇偶交替，dpr=2 时
+ * 恰好消失（用户报告过的现象）。回写 `physical / dpr` 后 `style × dpr` 严格
+ * 等于 `physical`，缩放比恒为 1，重采样与模糊一并消失。
+ *
+ * 代价是 CSS 布局尺寸与入参最多差 `0.5 / dpr` CSS px；调用方的画布均为
+ * 绝对定位且父容器 `overflow: hidden`，该亚像素差被裁掉，不产生滚动条、
+ * 不挤压兄弟元素。
  *
  * 【与其他模块的关系】
  * 被时间线 Clip 体画布、波形 WebGL2 与 Canvas2D 回退、参数编辑器主画布与轴
  * 画布共同使用；不依赖任何业务逻辑，可独立测试。
  */
 
+/**
+ * 上一次写入各画布的 CSS 尺寸（按元素身份，`WeakMap` 不阻止画布被回收）。
+ *
+ * 【为什么必须记住写入值，而不是回读 `style.width` 比较】浏览器会把内联长度
+ * 规范化后**回读**（Chromium 序列化到 6 位有效数字）。`physical / dpr` 在
+ * dpr = 1.5 / 1.75 / 1.1 这类分数比下是无限小数：
+ * ```
+ * 写入 1502 / 1.5 = 1001.3333333333334
+ * 回读              "1001.33px"   → 差 0.0033
+ * ```
+ * 拿回读值与期望值比较，任何小于该截断误差的容差都会判定"变了"，于是**每帧
+ * 重写样式**（触发样式重算，正是本函数要避免的）。记录自己写入的值即可精确
+ * 判等，与浏览器的序列化行为无关。
+ */
+const lastWrittenCssSize = {
+    width: new WeakMap<HTMLCanvasElement, number>(),
+    height: new WeakMap<HTMLCanvasElement, number>(),
+};
+
+/** 单条边的「与上次写入值比较、仅在变化时写入」。 */
+function writeCssSizeIfChanged(
+    canvas: HTMLCanvasElement,
+    key: "width" | "height",
+    valuePx: number,
+): void {
+    const previous = lastWrittenCssSize[key].get(canvas);
+    if (previous !== undefined && previous === valuePx) return;
+    canvas.style[key] = `${valuePx}px`;
+    lastWrittenCssSize[key].set(canvas, valuePx);
+}
+
+/**
+ * 仅在数值确实变化时写回画布的 CSS 尺寸。
+ *
+ * 热路径上必须避免无谓写入：`style.width` 赋值会触发样式重算。判等基准是**上一次
+ * 写入的值**（见 `lastWrittenCssSize`），不是回读的 `style.width` —— 后者已被
+ * 浏览器规范化，与之比较会在分数 dpr 下每帧都判定为"变了"。
+ *
+ * 导出供 GL 路径（`gl/glContext.ts`）复用，保证两条路径的写回策略完全一致。
+ */
+export function writeCanvasCssSize(
+    canvas: HTMLCanvasElement,
+    widthPx: number,
+    heightPx: number,
+): void {
+    writeCssSizeIfChanged(canvas, "width", widthPx);
+    writeCssSizeIfChanged(canvas, "height", heightPx);
+}
+
+/**
+ * 把 CSS 尺寸吸附到「整数物理像素 / dpr」的精确落点。
+ *
+ * 返回值 `v` 满足 `v * dpr` 为整数（在浮点精度内），即它对应的布局盒恰好覆盖
+ * 整数个设备像素。调用方用它作为**绘制坐标系宽度**时，画布内容与设备像素严格
+ * 1:1，不会出现半像素采样。
+ *
+ * 与 `rasterize` 内部回算的 `physical / dpr` 是同一个数；此处独立导出供不持有
+ * 画布、只需要"稳定尺寸键"的调用方使用（例如波形几何缓存锚点：直接把分数宽度
+ * 当缓存键会让亚像素抖动反复击穿缓存，吸附后键随设备像素稳定）。
+ *
+ * 非法输入回退 1（与 `rasterize` 的夹取规则一致）。
+ */
+export function fitCssPxToDevicePx(cssPx: number, dpr: number): number {
+    const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+    const css = Number.isFinite(cssPx) ? Math.max(1, cssPx) : 1;
+    return Math.max(1, Math.round(css * ratio)) / ratio;
+}
+
 /** 一次光栅化的结果：调用方据此设置变换或 uniform。 */
 export interface RasterTarget {
-    /** CSS 像素宽（绘制坐标系的宽度）。 */
+    /**
+     * CSS 像素宽（绘制坐标系的宽度）**回算值** = `physicalWidth / dpr`。
+     *
+     * 它同时是写回 `canvas.style.width` 的值：`cssWidthPx * dpr` 严格等于
+     * `physicalWidth`，因此布局盒与 backing store 一一对应（契约第 5 条）。
+     * 与入参的原始 CSS 宽最多差 `0.5 / dpr`。
+     */
     readonly cssWidthPx: number;
-    /** CSS 像素高（绘制坐标系的高度）。 */
+    /** CSS 像素高（绘制坐标系的高度）**回算值** = `physicalHeight / dpr`。 */
     readonly cssHeightPx: number;
     /** 物理像素宽 = `Math.round(cssWidthPx * dpr)`。 */
     readonly physicalWidth: number;
@@ -55,19 +146,16 @@ export interface RasterTarget {
  * 流程：
  * 1. 夹取 CSS 尺寸到 >= 1，dpr 到 >= 1；
  * 2. 物理尺寸取 `Math.round(css * dpr)`；
- * 3. **仅在变化时**写回 `canvas.width/height` 与 `style.width/height`
- *    （赋值会触发画布清屏与样式重算，热路径上必须避免无谓写入）；
- * 4. 返回给调用方设置变换 / uniform 所需的全部尺寸。
- *
- * 特殊说明：物理尺寸取整后与 `css * dpr` 最多差半个物理像素，这是栅格对齐的
- * 固有代价；关键是**所有画布使用同一个取整规则**，否则层与层之间会差一整个
- * 物理像素。
+ * 3. **仅在变化时**写回 `canvas.width/height`（赋值会触发画布清屏与样式重算，
+ *    热路径上必须避免无谓写入）；
+ * 4. CSS 尺寸回算为 `physical / dpr` 并写回（契约第 5 条，见文件头推导）；
+ * 5. 返回给调用方设置变换 / uniform 所需的全部尺寸。
  *
  * @param canvas 目标画布。
- * @param cssWidthPx CSS 像素宽。
- * @param cssHeightPx CSS 像素高。
+ * @param cssWidthPx 期望的 CSS 像素宽（布局量测值，可为小数）。
+ * @param cssHeightPx 期望的 CSS 像素高（布局量测值，可为小数）。
  * @param dpr 设备像素比，非法值回退为 1。
- * @returns 光栅化结果。
+ * @returns 光栅化结果；`cssWidthPx` / `cssHeightPx` 为**回算值**。
  */
 export function rasterize(
     canvas: HTMLCanvasElement,
@@ -85,19 +173,19 @@ export function rasterize(
     if (canvas.width !== physicalWidth) canvas.width = physicalWidth;
     if (canvas.height !== physicalHeight) canvas.height = physicalHeight;
 
-    const cssWidthStyle = `${cssWidth}px`;
-    const cssHeightStyle = `${cssHeight}px`;
-    if (canvas.style.width !== cssWidthStyle) canvas.style.width = cssWidthStyle;
-    if (canvas.style.height !== cssHeightStyle) canvas.style.height = cssHeightStyle;
+    // 回算：style × dpr 必须严格等于物理尺寸，否则合成器重采样（见文件头）。
+    const layoutWidthPx = physicalWidth / effectiveDpr;
+    const layoutHeightPx = physicalHeight / effectiveDpr;
+    writeCanvasCssSize(canvas, layoutWidthPx, layoutHeightPx);
 
     return {
-        cssWidthPx: cssWidth,
-        cssHeightPx: cssHeight,
+        cssWidthPx: layoutWidthPx,
+        cssHeightPx: layoutHeightPx,
         physicalWidth,
         physicalHeight,
         dpr: effectiveDpr,
-        resolutionWidth: physicalWidth / effectiveDpr,
-        resolutionHeight: physicalHeight / effectiveDpr,
+        resolutionWidth: layoutWidthPx,
+        resolutionHeight: layoutHeightPx,
     };
 }
 
