@@ -29,6 +29,9 @@ jobs:
       - name: Lint frontend
         run: npm --prefix frontend run lint
 
+      - name: Check frontend formatting
+        run: npm --prefix frontend run format:check
+
       - name: Run frontend unit tests
         run: npm --prefix frontend run test
 
@@ -43,12 +46,170 @@ jobs:
           name: frontend-dist
           path: frontend-dist.zip
 
+  # ── Rust 静态检查 ────────────────────────────────────────────────────────
+  #
+  # 【为什么与 backend 构建 job 分开】backend job 是六平台矩阵、单次数十分钟；
+  # 把 lint/test 塞进去会让"改一行前端文案"也等半小时。这两个 job 跑在单一平台上，
+  # 几分钟出结果。
+  #
+  # 【为什么 fmt 单独一个 ubuntu job】rustfmt 不需要编译，也不需要 ARA/VST3 SDK，
+  # 因此这一个 job 就覆盖了**全部五个 crate（含 hifishifter-plugin）**，成本却只有
+  # 几十秒。它是本仓唯一"零成本全覆盖"的检查。
+  #
+  # 【为什么 clippy/test 必须在 Windows】`hifishifter-plugin` 的 build.rs 要求
+  # `ARA_VST3_SDK_DIR` / `ARA_SDK_DIR`，且它本身是 Windows 的 ARA/VST3 目标 ——
+  # SDK 准备脚本 `tools/prepare-plugin-sdks.ps1` 与 `vst3.yml` 的整套流程都建在
+  # Windows 上。两个 job 共用一份 SDK 缓存，避免重复下载。
+  rust-fmt:
+    name: Check Rust formatting
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          # 该 action 默认 `-D warnings`；格式化检查与警告无关，置空以免被牵连。
+          rustflags: ''
+
+      - name: Check rustfmt
+        run: cargo fmt --all --check
+
+  rust-clippy:
+    name: Clippy (workspace)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
+      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # app crate 的 build.rs 需要 `frontend/dist`（存在则跳过构建，缺失则自己跑
+      # `npm run build`）。这里显式构建一次，避免把前端构建失败伪装成 clippy 失败。
+      - name: Build frontend dist
+        run: |
+          npm --prefix frontend ci
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+          npm --prefix frontend run build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: rust-checks-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: probe/ara/rust-path/.third-party
+          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./tools/prepare-plugin-sdks.ps1
+
+      # 【为什么暂时不加 `-D warnings`】清仓时本 workspace 有 190 条 clippy 告警
+      # （src-tauri 99 / hifishifter-kernel 91）。一次性打开 `-D warnings` 会让 CI
+      # 立刻全红、且没人能分辨"哪条是我改坏的"。因此先只**报告**，等告警清零后
+      # 再切到 `-D warnings` —— 切换点是本仓 clippy 清仓提交。
+      - name: Run clippy
+        run: |
+          . ./tools/msvc-env.ps1
+          cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets --message-format short
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed (compilation error, not a warning).' }
+
+  rust-test:
+    name: Rust tests (workspace)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
+      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend dist
+        run: |
+          npm --prefix frontend ci
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+          npm --prefix frontend run build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: rust-checks-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: probe/ara/rust-path/.third-party
+          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./tools/prepare-plugin-sdks.ps1
+
+      # `--test-threads=1`：本仓有进程级分配计量测试（`alloc_probe`），其前置条件
+      # 就是串行运行（见 `backend/src-tauri/src/lib.rs` 的 `measure_peak_alloc` 说明）。
+      - name: Run workspace tests
+        run: |
+          . ./tools/msvc-env.ps1
+          cargo test --manifest-path backend/Cargo.toml --workspace -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
+
   backend:
     name: Build Backend (${{ matrix.name }})
     needs: frontend-build
     runs-on: ${{ matrix.os }}
     env:
-      RUSTFLAGS: "-Awarnings"
+      # 【为什么不再设 RUSTFLAGS】这里原本是 `RUSTFLAGS: "-Awarnings"`，它确实让
+      # 构建日志安静了，代价却是**把本 workspace 自己的告警一起吞掉** —— 190 条
+      # clippy 告警因此在 CI 里完全不可见，其中 15 条是死代码/未使用导入。
+      # 安静由 `setup-rust-toolchain` 的 `rustflags: ''` 负责（见下方 Setup 步骤），
+      # 它只取消"把警告升级为错误"，不再屏蔽警告本身。
       HIFISHIFTER_SKIP_CARGO_CHECK: "1"
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
       HIFISHIFTER_WEBKIT_ABI: "4.1"
@@ -135,6 +296,10 @@ jobs:
         with:
           toolchain: stable-${{ matrix.cargo_target }}
           cache: false
+          # 该 action 默认把既有警告升级为错误（`-D warnings`）。构建 job 不该因为
+          # 依赖 crate 的告警而红，也不该把告警静音 —— 因此显式置空，让警告可见
+          # 但不判死。与 `vst3.yml` 的同一处理保持口径一致。
+          rustflags: ''
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
