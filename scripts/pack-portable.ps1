@@ -484,6 +484,7 @@ else {
 }
 
 # ===== Step 5: Copy NSIS installer =====
+$AppInstallerCopied = $false
 if (-not $NoZip) {
     Write-Host "[5/5] Copying NSIS installer to dist..." -ForegroundColor Yellow
 
@@ -499,6 +500,7 @@ if (-not $NoZip) {
 
     if (Test-Path $NsisExePath) {
         Copy-Item $NsisExePath -Destination $OutputDir
+        $AppInstallerCopied = $true
         $NsisSize = (Get-Item (Join-Path $OutputDir $NsisPattern)).Length
         $NsisSizeMB = [math]::Round($NsisSize / 1MB, 2)
         Write-Host "[5/5] NSIS installer copied [OK] ($($NsisSizeMB) MB)" -ForegroundColor Green
@@ -517,7 +519,7 @@ if (-not $NoZip) {
     Write-Host "  Packaging successful!" -ForegroundColor Green
     Write-Host "  Portable: $ZipPath" -ForegroundColor Green
     Write-Host "  Size:     $($ZipSizeMB) MB" -ForegroundColor Green
-    if (Test-Path (Join-Path $OutputDir $NsisPattern)) {
+    if ($AppInstallerCopied) {
         Write-Host "  Installer: $(Join-Path $OutputDir $NsisPattern)" -ForegroundColor Green
         Write-Host "  Size:      $($NsisSizeMB) MB" -ForegroundColor Green
     }

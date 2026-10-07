@@ -47,6 +47,7 @@ jobs:
         with:
           workspaces: backend -> target
           shared-key: vst3-windows-x64
+          cache-on-failure: true
 
       - name: Install pinned ARA and VST3 SDKs
         run: ./tools/prepare-plugin-sdks.ps1
@@ -70,9 +71,23 @@ jobs:
 
       - name: Run plugin unit tests
         run: |
-          . ./tools/msvc-env.ps1
-          cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --lib -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Plugin tests failed.' }
+          New-Item -ItemType Directory -Path .build-tmp -Force | Out-Null
+          $ciTestLog = Join-Path $PWD '.build-tmp/plugin-unit-tests.log'
+          try {
+            . ./tools/msvc-env.ps1
+            cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --lib -- --test-threads=1 *> $ciTestLog
+            $ciTestExitCode = $LASTEXITCODE
+          } catch {
+            $_ | Out-String | Set-Content -LiteralPath $ciTestLog
+            $ciTestExitCode = 1
+          }
+          Get-Content -LiteralPath $ciTestLog -Tail 100
+          if ($ciTestExitCode -ne 0) {
+            $ciFailure = (Get-Content -LiteralPath $ciTestLog -Tail 160) -join "`n"
+            $ciFailure = $ciFailure.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Plugin test failure::$ciFailure"
+            throw 'Plugin tests failed; see the error annotation and diagnostics artifact.'
+          }
 
       - name: Build complete VST3 Release delivery
         run: ./tools/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
@@ -90,4 +105,15 @@ jobs:
             .build-tmp/vst3-artifacts/*-setup.exe
             .build-tmp/vst3-artifacts/*.sha256
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vst3-build-diagnostics
+          path: .build-tmp/*.log
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
