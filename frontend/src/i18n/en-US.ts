@@ -2104,4 +2104,24 @@ export const enUS = {
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_info_host_curve_note: "HiFiShifter schematic curve; REAPER renders the audio",
     fade_info_host_unknown: "REAPER curve unknown",
+    // ── 安装器（NSIS）─────────────────────────────────────────────────────
+    //
+    // 【为什么安装器文案在这里】安装器原先硬编码简体中文，五语用户看到的是中文向导。
+    // 词表已经有五语齐全 + 格式合规的门禁，把文案放进来，"新增一种语言"就自动生效，
+    // 漏翻译也会在构建安装器时失败 —— 而不是等到用户看到半截翻译。
+    // `tools/build-installer-strings.mjs` 把这一组抽成 NSIS 的 `LangString`。
+    installer_name: "HiFiShifter VST3",
+    installer_publisher: "ARounder",
+    installer_welcome_title: "Welcome to the HiFiShifter VST3 Setup",
+    installer_welcome_text:
+        "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.\nSettings are shared with the standalone app.",
+    installer_dir_text:
+        "Choose the VST3 folder that REAPER scans. The plug-in is installed as a HiFiShifter.vst3 folder inside it.",
+    installer_installing: "Installing HiFiShifter VST3...",
+    installer_err_not_x64: "This plug-in requires 64-bit Windows.",
+    installer_err_reaper_open:
+        "Quit REAPER and its plug-in host processes before installing HiFiShifter VST3.",
+    installer_err_tasklist:
+        "Could not confirm that REAPER has exited. Close REAPER and run the installer again.",
+    installer_uninstall_reaper_open: "Quit REAPER before uninstalling HiFiShifter VST3.",
 } as const;

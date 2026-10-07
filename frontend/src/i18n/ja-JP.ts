@@ -2118,4 +2118,20 @@ export const jaJP = {
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_info_host_curve_note: "HiFiShifter の表示用カーブ。音声は REAPER が処理します",
     fade_info_host_unknown: "REAPER カーブ不明",
+    // ── インストーラー（NSIS）────────────────────────────────────────────
+    installer_name: "HiFiShifter VST3",
+    installer_publisher: "ARounder",
+    installer_welcome_title: "HiFiShifter VST3 セットアップへようこそ",
+    installer_welcome_text:
+        "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。\n設定は単体アプリと共有されます。",
+    installer_dir_text:
+        "REAPER がスキャンする VST3 フォルダーを選んでください。プラグインは HiFiShifter.vst3 フォルダーとしてインストールされます。",
+    installer_installing: "HiFiShifter VST3 をインストールしています...",
+    installer_err_not_x64: "このプラグインには 64 ビット版 Windows が必要です。",
+    installer_err_reaper_open:
+        "HiFiShifter VST3 をインストールする前に、REAPER とそのプラグインホストを終了してください。",
+    installer_err_tasklist:
+        "REAPER が終了したことを確認できませんでした。REAPER を閉じてからインストーラーを再実行してください。",
+    installer_uninstall_reaper_open:
+        "HiFiShifter VST3 をアンインストールする前に REAPER を終了してください。",
 } as const;

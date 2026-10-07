@@ -2089,4 +2089,19 @@ export const koKR = {
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_info_host_curve_note: "HiFiShifter 표시용 곡선. 오디오는 REAPER가 처리합니다",
     fade_info_host_unknown: "REAPER 곡선 알 수 없음",
+    // ── 설치 프로그램(NSIS) ─────────────────────────────────────────────
+    installer_name: "HiFiShifter VST3",
+    installer_publisher: "ARounder",
+    installer_welcome_title: "HiFiShifter VST3 설치를 시작합니다",
+    installer_welcome_text:
+        "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.\n설정은 독립 실행형 앱과 공유됩니다.",
+    installer_dir_text:
+        "REAPER가 검사하는 VST3 폴더를 선택하세요. 플러그인은 HiFiShifter.vst3 폴더로 설치됩니다.",
+    installer_installing: "HiFiShifter VST3 설치 중...",
+    installer_err_not_x64: "이 플러그인은 64비트 Windows가 필요합니다.",
+    installer_err_reaper_open:
+        "HiFiShifter VST3를 설치하기 전에 REAPER와 플러그인 호스트 프로세스를 종료하세요.",
+    installer_err_tasklist:
+        "REAPER가 종료되었는지 확인할 수 없습니다. REAPER를 닫고 설치 프로그램을 다시 실행하세요.",
+    installer_uninstall_reaper_open: "HiFiShifter VST3를 제거하기 전에 REAPER를 종료하세요.",
 } as const;

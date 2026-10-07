@@ -2045,4 +2045,17 @@ export const zhTW = {
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────
     fade_info_host_curve_note: "HiFiShifter 示意曲線；聲音由 REAPER 控制",
     fade_info_host_unknown: "REAPER 曲線未知",
+    // ── 安裝程式（NSIS）──────────────────────────────────────────────────
+    installer_name: "HiFiShifter VST3",
+    installer_publisher: "ARounder",
+    installer_welcome_title: "歡迎安裝 HiFiShifter VST3",
+    installer_welcome_text:
+        "安裝程式會把 HiFiShifter VST3/ARA 外掛放進你選擇的 VST3 資料夾。\n請先關閉 REAPER：安裝程式不會覆寫正在被載入的外掛。\n設定與獨立 App 共用。",
+    installer_dir_text:
+        "請選擇 REAPER 會掃描的 VST3 資料夾。外掛會以 HiFiShifter.vst3 資料夾的形式安裝在其中。",
+    installer_installing: "正在安裝 HiFiShifter VST3...",
+    installer_err_not_x64: "此外掛需要 64 位元 Windows。",
+    installer_err_reaper_open: "請先完全結束 REAPER 及其外掛裝載程序，再安裝 HiFiShifter VST3。",
+    installer_err_tasklist: "無法確認 REAPER 已結束。請關閉 REAPER 後重新執行安裝程式。",
+    installer_uninstall_reaper_open: "請先結束 REAPER，再卸載 HiFiShifter VST3。",
 } as const;
