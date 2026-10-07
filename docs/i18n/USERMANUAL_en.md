@@ -739,10 +739,26 @@ The plugin is currently a Windows x64 build and has only been verified against R
 
 ### Installation and Connection
 
-1. Close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. Windows requires the WebView2 runtime and the VC++ x64 runtime to be installed.
-2. Restart REAPER and let it scan plugins, then add the VST3 plugin HiFiShifter on a track that has a vocal audio item and connect it via the host's ARA mechanism (rather than importing the audio into the standalone app). Trying it on a copy of the project first is recommended.
-3. To work on several tracks, add a plugin instance on each track. Opening any one HiFiShifter window lets you edit every track already connected in the same project — these windows are different views of one workspace, not independent editing copies; edits are not shared between different projects.
-4. Before using shortcuts, click the plugin window once so keyboard focus enters the interface (the plugin forwards `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`, and the remaining shortcuts are handled by the interface itself).
+There are two ways to install the plugin; pick either one:
+
+- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-vst3-setup.exe`. The wizard follows the system UI language, lets you choose the VST3 directory, installs the models into the machine-wide shared library (see [Model Files and Sharing](#model-files-and-sharing)), and registers an uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and its plugin host process have exited.
+- **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
+
+Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
+
+Access steps (same for both ways):
+
+1. Restart REAPER and let it scan plugins, then add the VST3 plugin HiFiShifter on a track that has a vocal audio item and connect it via the host's ARA mechanism (rather than importing the audio into the standalone app). Trying it on a copy of the project first is recommended.
+2. To work on several tracks, add a plugin instance on each track. Opening any one HiFiShifter window lets you edit every track already connected in the same project — these windows are different views of one workspace, not independent editing copies; edits are not shared between different projects.
+3. Before using shortcuts, click the plugin window once so keyboard focus enters the interface (the plugin forwards `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`, and the remaining shortcuts are handled by the interface itself).
+
+### Model Files and Sharing
+
+The plugin needs three models — FCPE, HNSEP and HiFiGAN (about 150 MB in total). The installer puts the models into the **machine-wide shared library** (`%ProgramData%\HiFiShifter\models\<model version>`), which the standalone app reads as well — using both the plugin and the standalone app does not duplicate the 150 MB. The manual-copy version carries its own copy of the models and does not depend on the shared library.
+
+- The model version is derived from the model content: an upgrade lands in a new directory, and reinstalling the same version is skipped.
+- Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete `%ProgramData%\HiFiShifter\models` by hand.
+- The environment variable `HIFISHIFTER_MODELS_DIR` overrides the model directory and takes precedence over the shared library.
 
 ### Division of Labor in Plugin Mode
 
@@ -767,6 +783,8 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 ### Saving and Limitations
 
 - Just save the project in REAPER; the plugin parameters are saved with the project. Closing the plugin window does not lose edits, and the standalone app does not need to stay running.
+- **Interface settings are persisted**: the interface language, keybindings, appearance and custom themes, timeline and parameter-editor zoom, and the file browser's last directory all survive quitting REAPER.
+- These settings are **shared with the standalone app**: appearance and keybindings adjusted in the standalone app apply in the plugin and vice versa.
 - After reopening the project, the plugin must fetch the audio from the host again and finish its background preparation; the status bar first returns to `Waiting for host audio`.
 - Before upgrading the plugin, save the project and fully quit REAPER; do not overwrite the loaded plugin folder while the host is running.
 - Only forward, **linear** stretching is supported: reverse and non-linear stretching are out of scope, and the interface clearly marks `Reverse playback unsupported`.
@@ -778,6 +796,8 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 - It keeps showing `Waiting for host audio` or cannot analyse: check that the track has valid audio, that the plugin is connected through the host's ARA mode, and the automatic-apply status at the right of the status bar.
 - Parameters did not take effect, or differ after reopening the project: keep a copy of the project and the error text shown in the status bar; do not overwrite the project or force a reload repeatedly.
 - An out-of-memory notice appears: it means the harmonic separation did not run this time, and the `Harmonic Separation`-related results are not silently dropped; use shorter material or turn `Harmonic Separation` off first.
+- To submit logs or troubleshoot: the plugin log is written to `%LOCALAPPDATA%\HiFiShifter\logs\plugin.log`; the menu `Help → Open Log Folder` shows that path (the plugin does not open a file manager for you). `Help → Export Diagnostics...` and `Options → Inference Device Benchmark` belong to the standalone app and are not available in the plugin.
+- Uninstalling: if you installed via the installer, uninstall HiFiShifter VST3 from Windows "Programs and Features / Installed apps"; if you copied the folder by hand, just delete the `HiFiShifter.vst3` folder. In both cases the settings and the shared model library are kept (see [Model Files and Sharing](#model-files-and-sharing)).
 
 ### Connecting to the Host from the Standalone App
 
