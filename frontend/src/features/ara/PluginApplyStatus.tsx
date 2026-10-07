@@ -92,9 +92,14 @@ export function PluginApplyStatus({
                     role="alert"
                     className="hs-type-label min-w-0 truncate"
                     style={{ color: "var(--qt-danger-text)" }}
-                    title={error}
+                    // 【为什么套 `plugin_apply_error`】原先直接渲染后端原始串，
+                    // 用户看到的是一句没有上下文的外文/技术文本；而词表里
+                    // `plugin_apply_error`（"尚未应用：{error}"）就是为此准备的，
+                    // 却一直零引用（一处 i18n 绕过 + 一个死键）。错误内容本身来自
+                    // 后端，保持原样；**前缀**走词表。
+                    title={tVars("plugin_apply_error", { error })}
                 >
-                    {error}
+                    {tVars("plugin_apply_error", { error })}
                 </span>
             ) : null}
             {state?.ready ? (
