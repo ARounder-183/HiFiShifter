@@ -1127,6 +1127,22 @@ fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
+/// `TimelineState::resolve_root_track_id` 的**查表版**。
+///
+/// 【为什么需要】原函数每次调用都要沿 parent 链走一遍，每跳一次分配一个
+/// `String` 并对 `tracks` 线性扫描；而它在**按 clip** 的循环里被反复调用。
+/// 预先建好 `root_track_map` 之后查询是 O(1)。
+///
+/// 【为什么这样写才是等价】`resolve_root_track_id` 对未知 track_id 返回的是
+/// 它自己，因此这里用 `unwrap_or(track_id)` 补齐；空 id 返回 `None`。等价性由
+/// `hifishifter-kernel/tests/root_track_map.rs` 逐例对拍守住。
+fn root_of(roots: &HashMap<&str, &str>, track_id: &str) -> Option<String> {
+    if track_id.trim().is_empty() {
+        return None;
+    }
+    Some(roots.get(track_id).copied().unwrap_or(track_id).to_string())
+}
+
 /// 轨道参数变化是否会影响**底层合成输出**。
 ///
 /// 共通混音级曲线（volume / pan / dyn，含旧 `hifigan_volume`）被显式排除：
@@ -1226,6 +1242,16 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .as_ref()
         .map(|old_tl| old_tl.tracks.iter().map(|t| (t.id.as_str(), t)).collect())
         .unwrap_or_default();
+    // `track_id -> root_track_id` 的两份表（旧 / 新），供下面的按 clip 循环查表。
+    let old_root_by_track: HashMap<&str, &str> = s
+        .last_timeline
+        .as_ref()
+        .map(|old_tl| old_tl.root_track_map())
+        .unwrap_or_default();
+    // 只供下面这个"合成缓存失效"循环使用。它的借用必须在 DYN 段对 `tl` 的
+    // 可变借用之前结束（NLL 按最后一次使用判定），因此 DYN 段之后会另建一份
+    // 绑定到 `Arc` 上的同名表。
+    let new_root_by_track: HashMap<&str, &str> = tl.root_track_map();
 
     if let Some(old_tl) = s.last_timeline.as_ref() {
         use std::collections::HashSet;
@@ -1246,8 +1272,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             // 检查该 clip 所在 track 的 pitch_edit 是否发生变化
             let pitch_changed = {
                 // 先解析 root_track_id，否则子轨道中的 clip 无法正确失效缓存
-                let old_root = old_tl.resolve_root_track_id(&clip.track_id);
-                let new_root = tl.resolve_root_track_id(&clip.track_id);
+                let old_root = root_of(&old_root_by_track, &clip.track_id);
+                let new_root = root_of(&new_root_by_track, &clip.track_id);
 
                 let old_params = old_root.and_then(|r| old_tl.params_by_root_track.get(&r));
                 let new_params = new_root.and_then(|r| tl.params_by_root_track.get(&r));
@@ -1483,6 +1509,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // `last_timeline.clone()` 也从"每个渲染完成的 clip 深拷贝整份时间轴"
     // 变成同样的 +1。见字段说明。
     let tl = Arc::new(tl);
+    // 绑定到 `Arc` 上的 root 表：后面的按 clip 循环查它（借用 `Arc` 的目标，
+    // 与 `&tl.tracks` 等读取共存无碍）。
+    let new_root_by_track: HashMap<&str, &str> = tl.root_track_map();
 
     // ── 3. 收集需要重新推送 pitch data 的 clip ─────────────────────────────
     let moved_clip_ids: std::collections::HashSet<&str> = tl
@@ -1683,7 +1712,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 .iter()
                 .filter(|c| midi_clips_needing_emit.contains(c.id.as_str()))
             {
-                if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
+                if let Some(root) = root_of(&new_root_by_track, &clip.track_id) {
                     if emitted_roots.insert(root.clone()) {
                         crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                     }
@@ -1705,7 +1734,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         let state = app.state::<crate::state::AppState>();
         let mut guarded_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
         for clip in &tl.clips {
-            if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
+            if let Some(root) = root_of(&new_root_by_track, &clip.track_id) {
                 if guarded_roots.insert(root.clone()) {
                     crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                 }
@@ -1734,12 +1763,13 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
             let state = app.state::<crate::state::AppState>();
             let mut root_track_ids: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            let root_by_track = tl.root_track_map();
             for clip in &tl.clips {
                 if let Some(src) = clip.source_path.as_deref() {
                     if std::path::Path::new(src) == key.path.as_path() {
                         // 重新推送该 clip 的 pitch data（使用全量缓存截取+resample）
                         emit_clip_pitch_data_for_clip(app, tl, clip);
-                        if let Some(rt) = tl.resolve_root_track_id(&clip.track_id) {
+                        if let Some(rt) = root_of(&root_by_track, &clip.track_id) {
                             root_track_ids.insert(rt);
                         }
                     }

@@ -260,6 +260,9 @@ pub(crate) fn build_snapshot(
     let track_gain = compute_track_gains(&timeline.tracks);
     let tracks_by_id: HashMap<&str, &Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // `track_id -> root_track_id`：按 clip 的热循环里一次建表、全程 O(1) 查询
+    // （见下方 clip 循环与 `TimelineState::root_track_map` 的说明）。
+    let root_by_track = timeline.root_track_map();
     // 生效音阶签名：必须与渲染线程的按键口径一致（它遍历 Tempo Map，故在
     // 循环外算一次），否则快照自行算出的哈希永远对不上渲染线程写入的键。
     let scale_signature = timeline.render_scale_signature();
@@ -625,8 +628,25 @@ pub(crate) fn build_snapshot(
             None
         };
 
-        // 提前计算 root_track_id，避免后续冗余溯源
-        let root_track_id = timeline.resolve_root_track_id(&clip.track_id);
+        // 提前计算 root_track_id，避免后续冗余溯源。
+        //
+        // 查预建表而不是 `timeline.resolve_root_track_id(...)`：后者每次都要沿
+        // parent 链走一遍、每跳一次分配一个 `String` 并线性扫一遍 `tracks`，
+        // 而本函数按 clip 调用、又被"每渲染完一个 clip"的
+        // `handle_rendered_clips_changed` 整体调用一次 —— 成本会相乘。
+        // 表与逐次调用逐字等价（含"未知 id 返回自己"），由
+        // `hifishifter-kernel/tests/root_track_map.rs` 对拍守住。
+        let root_track_id = if clip.track_id.trim().is_empty() {
+            None
+        } else {
+            Some(
+                root_by_track
+                    .get(clip.track_id.as_str())
+                    .copied()
+                    .unwrap_or(clip.track_id.as_str())
+                    .to_string(),
+            )
+        };
         let processor_params = root_track_id.as_ref().and_then(|root| {
             let entry = timeline.params_by_root_track.get(root)?;
             let track = tracks_by_id.get(root.as_str())?;

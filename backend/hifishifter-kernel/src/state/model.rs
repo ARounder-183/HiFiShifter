@@ -2873,6 +2873,56 @@ impl TimelineState {
         }
     }
 
+    /// 一次性构建 `track_id -> root_track_id` 映射。
+    ///
+    /// 【为什么需要】[`Self::resolve_root_track_id`] 每次调用都要沿 parent 链走
+    /// 一遍，每跳一次 `to_string` 分配加一次对 `tracks` 的线性 `find`。它在
+    /// **按 clip** 的热循环里被反复调用（`build_snapshot`、
+    /// `handle_update_timeline`、`schedule_stretch_jobs`），于是整段成本是
+    /// O(clips × tracks × depth)。这里一次建表，后续查询 O(1)。
+    ///
+    /// 【与 `resolve_root_track_id` 的关系】两者语义**必须**一致，由
+    /// `tests/root_track_map.rs` 逐例对拍守住。注意 `resolve_root_track_id` 对
+    /// **未知** track_id 返回的是它自己（而不是 `None`），因此消费方要写
+    /// `map.get(id).copied().unwrap_or(id)` 才是逐字等价。
+    ///
+    /// 【环】parent 链成环时 `resolve_root_track_id` 靠 `safety > 2048` 才停下，
+    /// 落点取决于循环次数的奇偶，本身就没有可依赖的语义；本函数在**重访**时立即
+    /// 停在环内当前节点，保证构表一定终止。
+    pub fn root_track_map(&self) -> HashMap<&str, &str> {
+        let by_id: HashMap<&str, &Track> = self.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+        let mut roots: HashMap<&str, &str> = HashMap::with_capacity(self.tracks.len());
+        for track in &self.tracks {
+            // 沿 parent 链上行；路径上的每个节点都写进表里（共享同一根），
+            // 因此整棵树的构表成本是 O(tracks) 而不是 O(tracks × depth)。
+            let mut path: Vec<&str> = Vec::new();
+            let mut cur = track.id.as_str();
+            let root = loop {
+                if let Some(&known) = roots.get(cur) {
+                    break known;
+                }
+                if path.contains(&cur) {
+                    break cur;
+                }
+                path.push(cur);
+                match by_id.get(cur).and_then(|t| t.parent_id.as_deref()) {
+                    // 父节点**不需要真实存在**：`resolve_root_track_id` 会把
+                    // `parent_id` 直接当成下一个 cur，下一轮 `find` 找不到才停 ——
+                    // 于是"父缺失"时它返回的是**那个缺失父的 id**，而不是子节点自己。
+                    // 这里必须逐字复刻，否则子轨道参数会挂到不同的根上。
+                    Some(parent) if !parent.trim().is_empty() => {
+                        cur = parent;
+                    }
+                    _ => break cur,
+                }
+            };
+            for id in path {
+                roots.insert(id, root);
+            }
+        }
+        roots
+    }
+
     /// 轨道有效推子增益：沿 parent 链逐节点相乘（与渲染端
     /// `compute_track_gains` 的音量部分同款）。供 REAPER 包络导出的
     /// "绝对值 = 链式增益 × 曲线" 与导入的相对化除法使用。
