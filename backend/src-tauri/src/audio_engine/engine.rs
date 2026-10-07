@@ -736,7 +736,7 @@ impl AudioEngine {
                 return;
             }
 
-            let mut last_timeline: Option<TimelineState> = None;
+            let mut last_timeline: Option<Arc<TimelineState>> = None;
             let mut last_play_file: Option<(PathBuf, f64, String)> = None;
             let mut app_handle_for_worker: Option<tauri::AppHandle> = app_handle;
             // 合并连发推送时被 try_recv 取出的下一条命令：渲染线程可能以远快
@@ -1042,7 +1042,14 @@ struct EngineWorkerState<'a> {
     stretch_tx: &'a mpsc::Sender<StretchJob>,
     resources: &'a ResourceManager,
     tx: &'a mpsc::Sender<EngineCommand>,
-    last_timeline: &'a mut Option<TimelineState>,
+    /// 上一份时间轴。
+    ///
+    /// 【为什么是 `Arc`】它要被整份克隆的场合有两处，都是热路径：
+    /// `handle_rendered_clips_changed`（渲染线程**每完成一个 clip** 就推一次）
+    /// 与 `ScheduleDynLevelAnalysis`。存 `Arc` 后这些克隆退化成引用计数 +1，
+    /// 而 `TimelineState` 含全部 clips/takes 与 `params_by_root_track` 的
+    /// 音高/曲线向量，可达 MB 级 —— 原来每次都要深拷贝一份。
+    last_timeline: &'a mut Option<Arc<TimelineState>>,
     last_play_file: &'a mut Option<(PathBuf, f64, String)>,
     /// 被换下的快照暂存区（见 [`crate::rt_retirement`]）。换快照时必须把旧值交给
     /// 它，而不是让 `ArcSwap::store` 就地丢弃 —— 否则析构会落到音频回调上。
@@ -1202,6 +1209,24 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 原先的 `is_none_or` 语义一致 —— 该结论在函数末尾复用，两处判定不会漂移。
     let mut track_render_settings_changed = s.last_timeline.is_none();
 
+    // ── 0. 旧时间轴的索引 ────────────────────────────────────────────────
+    //
+    // 【为什么必须在最前面建】下面三处都要按 id 找旧值：删除 clip 的判定、
+    // clip 级参数比较、轨道级渲染设置比较。原实现用 `old_tl.clips.iter().find()`
+    // / `old_tl.tracks.iter().find()` 就地线性扫描，于是整个函数是 O(clips²) +
+    // O(tracks²)；而函数中段其实**已经**建过一份 `old_clips_map` 并注明"把后续
+    // 查询从 O(N²) 降维到 O(N)"，只是没覆盖到那两个循环。这里一次建好、全程复用。
+    let old_clips_map: HashMap<&str, &crate::state::Clip> = s
+        .last_timeline
+        .as_ref()
+        .map(|old_tl| old_tl.clips.iter().map(|c| (c.id.as_str(), c)).collect())
+        .unwrap_or_default();
+    let old_tracks_map: HashMap<&str, &crate::state::Track> = s
+        .last_timeline
+        .as_ref()
+        .map(|old_tl| old_tl.tracks.iter().map(|t| (t.id.as_str(), t)).collect())
+        .unwrap_or_default();
+
     if let Some(old_tl) = s.last_timeline.as_ref() {
         use std::collections::HashSet;
 
@@ -1216,7 +1241,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
 
         for clip in &tl.clips {
-            let old_clip = old_tl.clips.iter().find(|c| c.id == clip.id);
+            let old_clip = old_clips_map.get(clip.id.as_str()).copied();
 
             // 检查该 clip 所在 track 的 pitch_edit 是否发生变化
             let pitch_changed = {
@@ -1366,7 +1391,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         // clip 级比较口径里 —— 不在此单独判定，切换算法时 `any_cache_invalidated`
         // 会保持 false，后台预渲染根本不会启动。
         for track in &tl.tracks {
-            let changed = match old_tl.tracks.iter().find(|t| t.id == track.id) {
+            let changed = match old_tracks_map.get(track.id.as_str()) {
                 Some(old_track) => track_render_settings_differ(old_track, track),
                 // 新增轨道没有旧值可比，按"已变化"处理（与旧判定一致）。
                 None => true,
@@ -1416,12 +1441,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
     }
 
-    // 提前构建旧 Clip 的 Hash 表，将后续所有查询从 O(N^2) 降维到 O(N)
-    let old_clips_map: std::collections::HashMap<&str, &crate::state::Clip> = s
-        .last_timeline
-        .as_ref()
-        .map(|old_tl| old_tl.clips.iter().map(|c| (c.id.as_str(), c)).collect())
-        .unwrap_or_default();
+    // 旧 Clip 的 Hash 表已在函数开头建好（见"0. 旧时间轴的索引"），全程复用。
 
     // ── 动态（DYN）原声电平基线的组装/调度 ────────────────────────────────
     // 动态是**混音级**参数：即使未开 Compose 也要生效，因此它的分析触发条件
@@ -1456,6 +1476,13 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             }
         }
     }
+
+    // `tl` 的可变借用到此结束（上方 DYN 段是最后一位写者）。包进 `Arc` 之后，
+    // "存入 last_timeline" 与后面所有 `&tl` 的读取共享同一份数据，`tl.clone()`
+    // 退化成引用计数 +1；而 `handle_rendered_clips_changed` 里那次
+    // `last_timeline.clone()` 也从"每个渲染完成的 clip 深拷贝整份时间轴"
+    // 变成同样的 +1。见字段说明。
+    let tl = Arc::new(tl);
 
     // ── 3. 收集需要重新推送 pitch data 的 clip ─────────────────────────────
     let moved_clip_ids: std::collections::HashSet<&str> = tl
@@ -2328,7 +2355,7 @@ mod tests {
         let duration_frames = Arc::new(AtomicU64::new(0));
         let meter_state = Arc::new(Mutex::new(HashMap::new()));
         let meter_generation = Arc::new(AtomicU64::new(0));
-        let mut last_timeline = Some(timeline);
+        let mut last_timeline = Some(Arc::new(timeline));
         let mut last_play_file = None;
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
 
@@ -2390,7 +2417,7 @@ mod tests {
         let duration_frames = Arc::new(AtomicU64::new(0));
         let meter_state = Arc::new(Mutex::new(HashMap::new()));
         let meter_generation = Arc::new(AtomicU64::new(0));
-        let mut last_timeline = Some(timeline.clone());
+        let mut last_timeline = Some(Arc::new(timeline.clone()));
         let mut last_play_file = None;
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
 
@@ -2423,7 +2450,33 @@ mod tests {
         let before_ptr = Arc::as_ptr(&before) as usize;
 
         // 渲染线程推送 → 快照必须被替换（等待中的传输层据此恢复播放）。
+        //
+        // 记下推送前的时间轴分配，用来钉住"不得深拷贝"（见下方断言）。
+        let stored_timeline = worker
+            .last_timeline
+            .as_ref()
+            .expect("update_timeline must store a timeline")
+            .clone();
         handle_rendered_clips_changed(&mut worker);
+
+        // 时间轴必须是**共享**的同一份分配，而不是被深拷贝一份。
+        //
+        // 【为什么值得一条测试】`handle_rendered_clips_changed` 由渲染线程**每完成
+        // 一个 clip** 推送一次；原实现里 `s.last_timeline.clone()` 是整份
+        // `TimelineState` 的深拷贝（含全部 clips 与 params_by_clip 曲线，MB 级），
+        // 465 个 clip 的一轮渲染就是 465 次深拷贝。存 `Arc` 后退化为引用计数 +1 ——
+        // `Arc::ptr_eq` 正是"没有发生深拷贝"的直接证据。
+        assert!(
+            Arc::ptr_eq(
+                &stored_timeline,
+                worker
+                    .last_timeline
+                    .as_ref()
+                    .expect("timeline must survive the refresh")
+            ),
+            "handle_rendered_clips_changed must reuse the stored timeline allocation, not deep-clone it"
+        );
+
         let after = snapshot.load_full();
         let after_ptr = Arc::as_ptr(&after) as usize;
         assert_ne!(
