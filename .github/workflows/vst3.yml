@@ -41,6 +41,8 @@ jobs:
         with:
           toolchain: stable
           cache: false
+          # 与本地 Cargo 构建一致；该 action 默认会把现有警告升级为错误。
+          rustflags: ''
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
