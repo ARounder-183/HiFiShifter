@@ -1,4 +1,4 @@
-# 一次性 WAV 输出验收：解析 RIFF chunks 后比较普通/裁切/真倒放；不能凭非零声称通过。
+﻿# 一次性 WAV 输出验收：解析 RIFF chunks 后比较普通/裁切/真倒放；不能凭非零声称通过。
 param(
     [string]$SourcePath = "$PSScriptRoot\fixtures\phase3a-asymmetric.wav",
     [string]$OutputPath = "$PSScriptRoot\captures\phase3a-output.wav",

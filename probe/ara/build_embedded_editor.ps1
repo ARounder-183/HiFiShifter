@@ -1,4 +1,4 @@
-# 内嵌原GUI开发bundle构建；只在当前worktree生成，不安装到系统VST目录，不运行测试。
+﻿# 内嵌原GUI开发bundle构建；只在当前worktree生成，不安装到系统VST目录，不运行测试。
 param([switch]$SkipFrontend, [switch]$Release,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
 $ErrorActionPreference = 'Stop'

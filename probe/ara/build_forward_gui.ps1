@@ -1,4 +1,4 @@
-# 正向ARA开发包构建入口；仅此worktree，原GUI与插件分开构建，避免vslib特性污染插件。
+﻿# 正向ARA开发包构建入口；仅此worktree，原GUI与插件分开构建，避免vslib特性污染插件。
 param([switch]$SkipFrontend)
 $ErrorActionPreference = 'Stop'
 $araForwardRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))

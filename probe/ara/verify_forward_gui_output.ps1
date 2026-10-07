@@ -1,4 +1,4 @@
-# 一次性正向GUI音频验收：检查真实音高差异、间隙及保存重开一致性，不将音量变化视作修音。
+﻿# 一次性正向GUI音频验收：检查真实音高差异、间隙及保存重开一致性，不将音量变化视作修音。
 param(
     [string]$BaselinePath = "$PSScriptRoot\captures\forward-gui-baseline.wav",
     [string]$EditedPath = "$PSScriptRoot\captures\forward-gui-edited.wav",

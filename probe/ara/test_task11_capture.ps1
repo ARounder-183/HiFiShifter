@@ -1,4 +1,4 @@
-# 一次性验证脚本回归：有效采集必须通过，变异证据不得生成错误的 PASS。
+﻿# 一次性验证脚本回归：有效采集必须通过，变异证据不得生成错误的 PASS。
 $ErrorActionPreference = 'Stop'
 $verifier = Join-Path $PSScriptRoot 'verify_task11_capture.ps1'
 $original = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'captures\task11-plugin.log')

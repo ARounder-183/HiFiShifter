@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Pack HiFiShifter into a portable ZIP archive
 

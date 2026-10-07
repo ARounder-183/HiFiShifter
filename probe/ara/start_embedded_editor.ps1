@@ -1,4 +1,4 @@
-# 内嵌GUI隔离启动；绝不启动HiFiShifter.exe，不改系统PATH，也不向已有REAPER送脚本。
+﻿# 内嵌GUI隔离启动；绝不启动HiFiShifter.exe，不改系统PATH，也不向已有REAPER送脚本。
 param([switch]$Reopen,[switch]$TransportProbe,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$ScratchName='embedded-probe',
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3',

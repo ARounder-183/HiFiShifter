@@ -1,4 +1,4 @@
-# 正向ARA GUI本地启动入口；只启动隔离REAPER和本worktree的HiFiShifter，不安装到系统。
+﻿# 正向ARA GUI本地启动入口；只启动隔离REAPER和本worktree的HiFiShifter，不安装到系统。
 param([switch]$Reopen, [switch]$NoGui)
 $ErrorActionPreference = 'Stop'
 $araGuiRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))

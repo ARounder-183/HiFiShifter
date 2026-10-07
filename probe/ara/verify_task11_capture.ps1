@@ -1,4 +1,4 @@
-# 一次性 Task 11 采集核验：读取宿主日志并与夹具 WAV 的原始 PCM 比较，生成可审计 JSON。
+﻿# 一次性 Task 11 采集核验：读取宿主日志并与夹具 WAV 的原始 PCM 比较，生成可审计 JSON。
 param(
     [string]$LogPath = (Join-Path $PSScriptRoot 'captures\task11-plugin.log'),
     [string]$OutputPath = (Join-Path $PSScriptRoot 'captures\task11-stretch-reverse.json')

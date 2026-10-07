@@ -1,4 +1,4 @@
-# 产品插件的隔离构建入口；每次加载 MSVC 后重设临时目录，不修改 SDK 检出。
+﻿# 产品插件的隔离构建入口；每次加载 MSVC 后重设临时目录，不修改 SDK 检出。
 param([switch]$Test, [string]$Filter = '')
 $ErrorActionPreference = 'Stop'
 $araProductRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))

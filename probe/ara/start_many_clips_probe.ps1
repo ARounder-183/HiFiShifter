@@ -1,4 +1,4 @@
-# 中文一次性原生复现：全新profile/工程/日志，绝不-nonewinst或向已有REAPER发送脚本。
+﻿# 中文一次性原生复现：全新profile/工程/日志，绝不-nonewinst或向已有REAPER发送脚本。
 param([Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]{1,64}$')][string]$ScratchName,
       [ValidateRange(1,2000)][int]$Count=100,
       [switch]$EmptyFolder,

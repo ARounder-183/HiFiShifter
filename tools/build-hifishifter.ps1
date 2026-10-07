@@ -1,4 +1,4 @@
-# Windows统一产品构建流：同一frontend/kernel分别生成独立App和原GUI插件，绝不自动安装或启动。
+﻿# Windows统一产品构建流：同一frontend/kernel分别生成独立App和原GUI插件，绝不自动安装或启动。
 [CmdletBinding()]
 param(
     [ValidateSet('All','App','Plugin')][string]$Target='All',

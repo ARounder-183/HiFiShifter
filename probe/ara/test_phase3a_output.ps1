@@ -1,4 +1,4 @@
-# 一次性输出验证器回归：可通过的反向参考与五种实际错输出变异，不能伪报 PASS。
+﻿# 一次性输出验证器回归：可通过的反向参考与五种实际错输出变异，不能伪报 PASS。
 $ErrorActionPreference='Stop'
 $verifier=Join-Path $PSScriptRoot 'verify_phase3a_output.ps1'
 $scratch=Join-Path $PSScriptRoot '..\..\.build-tmp\phase3a-verifier-tests'

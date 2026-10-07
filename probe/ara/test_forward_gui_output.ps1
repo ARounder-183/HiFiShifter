@@ -1,4 +1,4 @@
-# 一次性正向GUI输出验证器回归；用真实音频数组证明不能把音量变化冒充音高验收。
+﻿# 一次性正向GUI输出验证器回归；用真实音频数组证明不能把音量变化冒充音高验收。
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\verify_forward_gui_output.ps1" -LibraryOnly
 

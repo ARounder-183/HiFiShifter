@@ -1,4 +1,4 @@
-# 与 ara2-bridge-companion 0.3.0 的 SDK 身份校验保持一致；只下载构建所需子模块。
+﻿# 与 ara2-bridge-companion 0.3.0 的 SDK 身份校验保持一致；只下载构建所需子模块。
 [CmdletBinding()]
 param([string]$SdkDirectory)
 $ErrorActionPreference = 'Stop'

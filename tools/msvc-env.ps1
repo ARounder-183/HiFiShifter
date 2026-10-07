@@ -1,4 +1,4 @@
-# tools/msvc-env.ps1
+﻿# tools/msvc-env.ps1
 #
 # 主要内容：把 MSVC（Visual Studio C++ 工具链）的环境变量导入当前 PowerShell 会话。
 #
