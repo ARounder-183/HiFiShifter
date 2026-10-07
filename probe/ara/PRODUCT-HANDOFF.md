@@ -18,6 +18,11 @@ VST 安装备份也已迁入主工作区；一次性诊断源码保存在 `.buil
 App/Plugin/All、SkipBuild、NoZip、Installer、指定 DeliveryDirectory；All 复用同批
 App/插件交付，不混入插件或 App 专用运行库。说明见 docs/VST3-BUILD.md。
 
+最新 Actions 定义按用户要求与 App 触发一致：仅手动及目标为 main/develop 的 PR。
+插件 ZIP 与安装器已拆为 `HiFiShifter-windows-x86_64-vst3-zip`、
+`HiFiShifter-windows-x86_64-vst3-installer` 两个独立 artifact，各自附 SHA256。
+下面成功 run 的单个 artifact 是此前交付记录，不代表新版仍将两种格式合并下载。
+
 本地前端全量 365 文件/3260 项通过，插件全量 208 passed/2 ignored，lint 无错误。
 本地 SDK 从空目录下载/身份校验及 ZIP/NSIS 生成、摘要和目录结构已验证。
 干净 checkout 暴露的旧 state.rs 测试路径、Rust action 默认 -D warnings、外置未提交
