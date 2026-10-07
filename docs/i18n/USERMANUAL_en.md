@@ -104,6 +104,7 @@ The `View` menu contains options related to the interface display:
 - `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
 - `Theme: Auto / Dark / Light`: Switch the current theme. With `Auto`, HiFiShifter follows your operating system's light/dark appearance and switches automatically (this is the default).
 - `Appearance Settings...`: Open the appearance settings panel.
+- `Connect to ARA Host...`: Connect to a running ARA host (REAPER) instance to edit the host's audio from the standalone app. Shown in the standalone app only; it opens a floating session panel where you can submit, refresh or disconnect.
 - `Refresh`: Reload runtime information.
 - `Clear Waveform Cache`: Clear the cached waveform data; it is regenerated the next time it is displayed.
 

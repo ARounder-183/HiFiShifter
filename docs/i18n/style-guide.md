@@ -141,6 +141,27 @@ notebook_toolbar_bold: "Bold ({modifier}+B)",
 用 `tVars` / `plural` / `shortcut`。尤其**不要**把译文与后端返回的英文原文
 拼接（`utils/statusText.ts` 曾如此）。
 
+### 3.4 组件里的文案必须走键，不能写字面量
+
+前面三条都在讲"怎么用键"；这一条讲**有没有用键**。
+
+历史上这一点完全没有门禁：`catalogIntegrity` 只校验**词典**，
+`keyReferenceIntegrity` 只校验**被引用的键存在**。于是硬编码中文对它完全隐形
+—— 合并 `e834ef54`（ARA 插件）时，整整两个新面板（ARA 宿主会话、插件应用状态）
+加一个工具栏按钮的文案全是中文字面量，五个语系**一个键都没加**，
+而 CI 全绿。
+
+现在由 `src/ui/araConformanceGates.test.ts` 守住：
+
+- 用户可见的 JSX 属性（`title` / `aria-label` / `placeholder` / `alt` / `label`）
+  与单行 JSX 文本节点里**不得出现中文**；
+- 确实必须保留中文的位置（典型：字体预览样本要渲染中文字形），
+  在**那一行**加 `hs-text-exempt` 标记并写明理由 —— 行级豁免，
+  同一个文件里新写的硬编码文案仍然会被拦下。
+
+**未覆盖**：`.ts` 文件里作为**普通字符串**存在的文案（如 `throw new Error("…")`、
+`console.warn("…")`）。这类字符串无法与"日志/协议标识"区分，需要 review。
+
 ---
 
 ## 4. 门禁测试覆盖范围
@@ -160,6 +181,12 @@ notebook_toolbar_bold: "Bold ({modifier}+B)",
 | 中文不用半角括号包中文 | CJK 排版混排 |
 | 中文行文不用半角 `,;:?!` | `可用提供者:` 与全角冒号并存 |
 | 值内无多余空白 | `" (unavailable)"` 式空格拼接 |
+
+`src/ui/araConformanceGates.test.ts`（文案部分）：
+
+| 检查 | 抓什么 |
+|---|---|
+| 用户可见属性 / JSX 文本里无中文 | 整个界面没走词表（见 §3.4） |
 
 `src/i18n/format.test.ts` 覆盖格式化层本身的边界行为。
 
