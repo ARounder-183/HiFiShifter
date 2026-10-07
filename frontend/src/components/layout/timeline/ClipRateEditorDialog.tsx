@@ -91,7 +91,7 @@ function ClipRateEditorFields({
     onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onClose: () => void;
 }) {
-    const { tf } = useI18n();
+    const { tf, tVars } = useI18n();
     const menuRef = useRef<HTMLDivElement | null>(null);
     useMenuKeyboard(menuRef);
     // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
@@ -355,9 +355,10 @@ function ClipRateEditorFields({
 
             <label className="flex flex-col gap-1">
                 <span className="text-qt-micro text-qt-text/60">
-                    {tf("clip_rate_editor_duration")}
-                    {": "}
-                    {formatDurationText(Number(clip.lengthSec) || 0, formatCtx)}
+                    {tVars("common_label_value", {
+                        label: tf("clip_rate_editor_duration"),
+                        value: formatDurationText(Number(clip.lengthSec) || 0, formatCtx),
+                    })}
                 </span>
                 <input
                     className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
@@ -415,15 +416,23 @@ function ClipRateEditorFields({
             </AppForm>
 
             <div className="text-qt-micro text-qt-text/60">
-                {tf("clip_rate_editor_result")}
-                {": "}
-                {formatDurationText(previewSec, formatCtx)}
-                {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
+                {(() => {
+                    const base = tVars("common_label_value", {
+                        label: tf("clip_rate_editor_result"),
+                        value: formatDurationText(previewSec, formatCtx),
+                    });
+                    return !autoLength && !durationChanged
+                        ? tVars("common_parenthetical", {
+                              value: base,
+                              note: tf("clip_rate_editor_keep_length"),
+                          })
+                        : base;
+                })()}
             </div>
 
             {targetCount > 1 ? (
                 <div className="text-qt-micro text-qt-text/60">
-                    {tf("clip_rate_editor_multi").replace("{count}", String(targetCount))}
+                    {tVars("clip_rate_editor_multi", { count: targetCount })}
                 </div>
             ) : null}
 

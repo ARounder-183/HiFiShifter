@@ -8,6 +8,7 @@ import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
 import { formatPositionText } from "./timeValueText";
+import { formatTemplate } from "../../../i18n/format";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
 import { SCALE_LABELS } from "../../../utils/musicalScales.ts";
@@ -716,11 +717,14 @@ const TimeRulerInner: React.FC<{
         } else if (Array.isArray(effScale)) {
             effScaleLabel = projectScaleName || "…";
         }
+        // 冒号/空格的语系差异由 `common_label_value` 模板决定，不在代码里写死。
+        const line = (label: string, value: string) =>
+            formatTemplate(tAny("common_label_value"), { label, value });
         return [
-            `${tAny("tempo_map_tooltip_position")}${positionLine}`,
-            `${tAny("tempo_map_tooltip_bpm")}${formatTempoBpm(point.bpm)}`,
-            `${tAny("tempo_map_tooltip_time_signature")}${formatTimeSignature(sig)}`,
-            `${tAny("tempo_map_tooltip_scale")}${effScaleLabel}`,
+            line(tAny("tempo_map_tooltip_position"), positionLine),
+            line(tAny("tempo_map_tooltip_bpm"), formatTempoBpm(point.bpm)),
+            line(tAny("tempo_map_tooltip_time_signature"), formatTimeSignature(sig)),
+            line(tAny("tempo_map_tooltip_scale"), effScaleLabel),
         ].join("\n");
     }, [
         tempoMap,

@@ -1182,7 +1182,10 @@ export const FileBrowserPanel: React.FC = () => {
                      */
                     setError(
                         result.error
-                            ? `${tf("fb_delete_failed")}：${result.error}`
+                            ? tVars("common_label_value", {
+                                  label: tf("fb_delete_failed"),
+                                  value: result.error,
+                              })
                             : tf("fb_delete_failed"),
                     );
                 }
@@ -1192,7 +1195,7 @@ export const FileBrowserPanel: React.FC = () => {
             setSelectedPaths(new Set());
             await refreshListing();
         },
-        [deleteRequest, refreshListing, tf],
+        [deleteRequest, refreshListing, tf, tVars],
     );
 
     /** 菜单动作集合：菜单只决定"显示什么"，这里决定"做什么"。 */

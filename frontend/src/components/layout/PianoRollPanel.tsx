@@ -902,7 +902,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         rulerPlayheadHeadRef.current = element;
         if (element !== null) hostRef.current?.invalidate();
     }, []);
-    const { t, tf } = useI18n();
+    const { t, tf, tVars } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
@@ -2198,10 +2198,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             buildPitchAlgoOptions({
                 noneLabel: t("common_none"),
                 vslibAvailable: s.vslibAvailable,
-                unavailableSuffix: t("algo_unavailable_suffix"),
+                formatUnavailable: (label) => tVars("algo_unavailable_label", { name: label }),
                 currentValue: rootTrack?.pitchAnalysisAlgo,
             }),
-        [t, s.vslibAvailable, rootTrack?.pitchAnalysisAlgo],
+        [t, tVars, s.vslibAvailable, rootTrack?.pitchAnalysisAlgo],
     );
 
     const childFormantOffsetParam = useMemo(() => {

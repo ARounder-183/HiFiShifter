@@ -25,6 +25,7 @@
 import type { ReactNode } from "react";
 import { createElement } from "react";
 
+import { formatTemplate } from "../../../i18n/format";
 import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueText";
 import type { FadeLengthFormatContext } from "./timeFormat";
 import { FadeShapeIcon } from "./FadeShapeIcon";
@@ -89,6 +90,14 @@ function withDelta(value: string, delta: string | null): string {
 /** 信息行内联图标的统一尺寸（与上下文菜单图标一致）。 */
 const TOOLTIP_ICON_SIZE = 16;
 
+/**
+ * `label: value` 信息行。冒号与空格的语系差异（en `": "` / CJK `：`）
+ * 由词典模板 `common_label_value` 决定 —— 不得在代码里硬编码任何一种冒号。
+ */
+function labelValue(t: FadeLabelLookup, label: string, value: string): string {
+    return formatTemplate(t("common_label_value"), { label, value });
+}
+
 /** 类型行的图标节点（垂直居中对齐文本基线）。 */
 function fadeIconNode(shape: number, isOut: boolean): ReactNode {
     return createElement(
@@ -124,12 +133,14 @@ export function buildSingleFadeInfoText(args: {
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const name = shapeName(args.shape, args.t);
-    const curvature = args.t("common_curvature");
-    const length = args.t("common_length");
+    const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
+        side: sideLabel,
+        type: args.t("fade_type_label"),
+    });
     return [
-        `${sideLabel}${args.t("fade_type_label")}：${name}`,
-        `${length}：${lengthLine(args.lengthSec, args.formatCtx, args.delta)}`,
-        `${curvature}：${dirLine(args.dir, args.delta)}`,
+        labelValue(args.t, typeLabel, name),
+        labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta)),
+        labelValue(args.t, args.t("common_curvature"), dirLine(args.dir, args.delta)),
     ].join("\n");
 }
 
@@ -144,12 +155,14 @@ export function buildSingleFadeInfoContent(args: {
     delta?: FadeInfoDelta;
 }): ReactNode {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
-    const curvature = args.t("common_curvature");
-    const length = args.t("common_length");
+    const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
+        side: sideLabel,
+        type: args.t("fade_type_label"),
+    });
     return [
-        [`${sideLabel}${args.t("fade_type_label")}：`, fadeIconNode(args.shape, args.isOut)],
-        [`${length}：${lengthLine(args.lengthSec, args.formatCtx, args.delta)}`],
-        [`${curvature}：${dirLine(args.dir, args.delta)}`],
+        [typeLabel, args.t("common_value_sep"), fadeIconNode(args.shape, args.isOut)],
+        [labelValue(args.t, args.t("common_length"), lengthLine(args.lengthSec, args.formatCtx, args.delta))],
+        [labelValue(args.t, args.t("common_curvature"), dirLine(args.dir, args.delta))],
     ].map((row, index) =>
         createElement(
             "div",

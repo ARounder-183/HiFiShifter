@@ -81,7 +81,7 @@ const FieldGroup: React.FC<{
 
 export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps) {
     const dispatch = useAppDispatch();
-    const { tf } = useI18n();
+    const { tf, tVars } = useI18n();
     const saved = useAppSelector((state) => state.session.renderCache);
 
     const [draft, setDraft] = useState<RenderCacheSettings>(saved);
@@ -246,7 +246,10 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         </AppButton>
                     </Flex>
                     <span className="hs-type-caption" style={{ wordBreak: "break-all" }}>
-                        {tf("render_cache_location_label")}：{stats?.dir ?? "…"}
+                        {tVars("common_label_value", {
+                            label: tf("render_cache_location_label"),
+                            value: stats?.dir ?? "...",
+                        })}
                     </span>
                 </div>
                 {stats && !stats.writable ? (

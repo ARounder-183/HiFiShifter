@@ -46,13 +46,14 @@ export interface PitchAlgoOption {
  *
  * @param args.noneLabel "无" 的本地化文案。
  * @param args.vslibAvailable vslib 可用性；`null` = 尚未取到后端状态。
- * @param args.unavailableSuffix 不可用标注（如"（不可用）"）。
+ * @param args.formatUnavailable 把算法名包装成"不可用"标注的本地化回调
+ *   （词典模板 `algo_unavailable_label`，如 `"{name}（不可用）"`）。
  * @param args.currentValue 当前轨道的算法值。
  */
 export function buildPitchAlgoOptions(args: {
     noneLabel: string;
     vslibAvailable: boolean | null;
-    unavailableSuffix: string;
+    formatUnavailable: (label: string) => string;
     currentValue?: string;
 }): PitchAlgoOption[] {
     const vslibUsable = args.vslibAvailable === true;
@@ -68,7 +69,8 @@ export function buildPitchAlgoOptions(args: {
         const label = FIXED_LABELS[id];
         options.push({
             value: id,
-            label: id === "vslib" && !vslibUsable ? `${label}${args.unavailableSuffix}` : label,
+            label:
+                id === "vslib" && !vslibUsable ? args.formatUnavailable(label) : label,
         });
     }
     return options;

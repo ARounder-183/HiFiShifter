@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { buildPitchAlgoOptions, resolvePitchAlgoSelectValue } from "./pitchAlgoOptions";
 
-/** 造一份选项列表（默认 noneLabel / 后缀固定，便于断言）。 */
+/** 造一份选项列表（默认 noneLabel / "不可用"标注固定，便于断言）。 */
 function options(args: { vslibAvailable: boolean | null; currentValue?: string }) {
     return buildPitchAlgoOptions({
         noneLabel: "None",
-        unavailableSuffix: " (unavailable)",
+        formatUnavailable: (label) => `${label} (unavailable)`,
         vslibAvailable: args.vslibAvailable,
         currentValue: args.currentValue,
     });

@@ -182,7 +182,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     loopNewClips,
     onLoopNewClipsChange,
 }) => {
-    const { t, tf, setLocale, plural } = useI18n();
+    const { t, tf, tVars, setLocale, plural } = useI18n();
     const dispatch = useAppDispatch();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
@@ -325,8 +325,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return tf("project_scale_tempo_map_hint");
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [s.tempoMap, s.projectSec, s.project, tf, selectionVersion]);
+    // 标签与括号提示的拼接（含空格/全角括号的语系差异）交给词典模板。
     const projectScaleLabelWithHint = tempoMapScaleHint
-        ? `${projectScaleLabel} ${tempoMapScaleHint}`
+        ? tVars("project_scale_label_with_tempo_hint", {
+              label: projectScaleLabel,
+              hint: tempoMapScaleHint,
+          })
         : projectScaleLabel;
     const effectiveProjectStretchAlgorithm =
         s.project.stretchAlgorithmOverride ?? s.defaultStretchAlgorithm;

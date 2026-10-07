@@ -514,7 +514,7 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 
 function AppInner() {
     const dispatch = useAppDispatch();
-    const { t, tf, plural } = useI18n();
+    const { t, tf, tVars, plural } = useI18n();
     const pitchAnalysis = usePitchAnalysis();
 
     const status = useAppSelector((state) => state.session.status);
@@ -1047,7 +1047,10 @@ function AppInner() {
     // （未收录的码回退显示原文，保留诊断信息）。
     const mappedErrorKey = error ? (errorCodeKey[error] ?? clipboardErrorKey(error)) : "";
     const errorText = error
-        ? `${t("status_error_prefix")}：${mappedErrorKey ? t(mappedErrorKey as MessageKey) : error}`
+        ? tVars("common_label_value", {
+              label: t("status_error_prefix"),
+              value: mappedErrorKey ? t(mappedErrorKey as MessageKey) : error,
+          })
         : statusText;
 
     // 构建 pitch 分析进度文本（分析中时显示在状态栏左侧）
@@ -4099,9 +4102,11 @@ function AppInner() {
                                                                 value={candidate.path}
                                                             >
                                                                 {candidate.exact_hash
-                                                                    ? `✓ ${t("recapture_missing_media_match_exact")} · `
-                                                                    : ""}
-                                                                {candidate.path}
+                                                                    ? tVars(
+                                                                          "recapture_missing_media_exact_option",
+                                                                          { path: candidate.path },
+                                                                      )
+                                                                    : candidate.path}
                                                             </option>
                                                         ))}
                                                     </WheelSelect>

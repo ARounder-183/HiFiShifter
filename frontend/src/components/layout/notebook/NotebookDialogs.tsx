@@ -217,7 +217,7 @@ export function NotebookSettingsDialog({
     projectName,
     getHtml,
 }: NotebookSettingsDialogProps) {
-    const { t, tf } = useI18n();
+    const { t, tf, tVars } = useI18n();
     const [exportNotice, setExportNotice] = useState<string | null>(null);
 
     /**
@@ -245,14 +245,17 @@ export function NotebookSettingsDialog({
                 setExportNotice(
                     errorKey
                         ? tf(errorKey)
-                        : `${tf("notebook_export_failed")}: ${result.error ?? ""}`,
+                        : tVars("common_label_value", {
+                              label: tf("notebook_export_failed"),
+                              value: result.error ?? "",
+                          }),
                 );
                 return;
             }
             const missing = result.missingAssets?.length ?? 0;
             setExportNotice(
                 missing > 0
-                    ? `${tf("notebook_export_done")} (${tf("notebook_export_missing")}: ${missing})`
+                    ? tVars("notebook_export_done_with_missing", { count: missing })
                     : tf("notebook_export_done"),
             );
         } catch {

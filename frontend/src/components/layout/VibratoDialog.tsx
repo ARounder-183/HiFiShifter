@@ -2509,7 +2509,7 @@ function PresetRow({
     onRenameCommit,
     onRenameCancel,
 }: PresetRowProps) {
-    const { t } = useI18n();
+    const { t, tVars } = useI18n();
     const description = vibratoPresetDescription(preset, t);
     const label = vibratoPresetLabel(preset, t);
     const summary = description ?? vibratoPresetSummary(preset, t);
@@ -2569,7 +2569,9 @@ function PresetRow({
                     // 可拖拽的行给一个"抓得住"的光标；不可拖的（系统预设）保持默认。
                     className={reorderable ? "cursor-grab" : undefined}
                     // 项目自定义气泡（不是浏览器原生 title）：样式与全应用一致。
-                    tooltip={enabled ? summary : `${summary} · ${t("vibrato_manager_disabled")}`}
+                    tooltip={
+                        enabled ? summary : tVars("vibrato_preset_tooltip_disabled", { summary })
+                    }
                 >
                     {/* `flex: 1` 让这一行铺满列表行：重命名时输入框才有可用的宽度去
                         撑开，而不是反过来把行撑宽（见输入框上的 `size` 说明）。 */}

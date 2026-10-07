@@ -13,6 +13,7 @@ import {
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
+import { formatTemplate } from "../../../i18n/format";
 import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
@@ -1465,7 +1466,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             const algoOptions = buildPitchAlgoOptions({
                                 noneLabel: t("common_none"),
                                 vslibAvailable,
-                                unavailableSuffix: t("algo_unavailable_suffix"),
+                                formatUnavailable: (label) =>
+                                    formatTemplate(t("algo_unavailable_label"), { name: label }),
                                 currentValue: track.pitchAnalysisAlgo,
                             });
 

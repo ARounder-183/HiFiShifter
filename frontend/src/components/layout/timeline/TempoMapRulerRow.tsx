@@ -34,6 +34,7 @@ import {
     updateTempoPoint,
 } from "../../../utils/tempoMap";
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
+import { formatTemplate } from "../../../i18n/format";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatPositionText, type TimeValueFormatContext } from "./timeValueText";
 import {
@@ -1660,11 +1661,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 projectScale ?? undefined,
             );
             const effScaleLabel = scaleLikeLabel(effScale, projectScaleName) ?? "—";
+            // 冒号/空格的语系差异由 `common_label_value` 模板决定，不在代码里写死。
+            const line = (label: string, value: string) =>
+                formatTemplate(t("common_label_value"), { label, value });
             return [
-                `${t("tempo_map_tooltip_position")}${positionLine}`,
-                `${t("tempo_map_tooltip_bpm")}${formatTempoBpm(point.bpm)}`,
-                `${t("tempo_map_tooltip_time_signature")}${formatTimeSignature(sig)}`,
-                `${t("tempo_map_tooltip_scale")}${effScaleLabel}`,
+                line(t("tempo_map_tooltip_position"), positionLine),
+                line(t("tempo_map_tooltip_bpm"), formatTempoBpm(point.bpm)),
+                line(t("tempo_map_tooltip_time_signature"), formatTimeSignature(sig)),
+                line(t("tempo_map_tooltip_scale"), effScaleLabel),
             ].join("\n");
         },
         [tempoMap, positionFormatCtx, projectScale, projectScaleName, t],
