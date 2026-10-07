@@ -1392,6 +1392,7 @@ function AppInner() {
                             active?: boolean;
                             progress?: number | null;
                             target?: string | null;
+                            pass?: number | null;
                         };
                     }) => {
                         if (disposed) return;
@@ -1399,6 +1400,7 @@ function AppInner() {
                             active?: boolean;
                             progress?: number | null;
                             target?: string | null;
+                            pass?: number | null;
                         };
                         const active = Boolean(payload?.active);
                         const pRaw = payload?.progress;
@@ -1407,6 +1409,11 @@ function AppInner() {
                                 ? Math.max(0, Math.min(1, pRaw))
                                 : null;
                         const target = typeof payload?.target === "string" ? payload.target : null;
+                        const passRaw = payload?.pass;
+                        const pass =
+                            typeof passRaw === "number" && Number.isFinite(passRaw)
+                                ? passRaw
+                                : null;
 
                         // 按 target 分 ref 跟踪两类渲染的活跃状态：前台（阻塞式）
                         // 与后台渲染线程会并发发射事件，单一布尔镜像会被互相覆盖
@@ -1444,7 +1451,21 @@ function AppInner() {
                                 blocking: originalRenderActiveRef.current,
                             }),
                         );
-                        appStatusProgressBus.setRenderingProgress(p);
+                        // 进度写入状态栏。两条放行条件（见 renderProgressRef 的说明）：
+                        // - 没有任何渲染在活跃（`!anyActive`）：上一次渲染已结束，
+                        //   高水位作废，下一次从头开始；
+                        // - pass 序号变化：后端开了新一轮 pass（打开大工程时音高
+                        //   分析逐批解锁，每批一轮），这一轮必须能从 0% 重新起始。
+                        // 其余情况一律要求单调不减 —— 回退对用户是纯粹的故障信号。
+                        const passChanged = pass != null && renderPassRef.current !== pass;
+                        if (pass != null) renderPassRef.current = pass;
+                        if (!anyActive || passChanged) renderProgressRef.current = 0;
+                        if (p == null) {
+                            appStatusProgressBus.setRenderingProgress(null);
+                        } else if (p >= renderProgressRef.current) {
+                            renderProgressRef.current = p;
+                            appStatusProgressBus.setRenderingProgress(p);
+                        }
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
                         // 使前端能感知后端已真正开始播放。跃迁按 target 判定：
@@ -1666,6 +1687,14 @@ function AppInner() {
     // "阻塞式前台预渲染"窗口的开关与后台渲染的生命周期解耦。
     const originalRenderActiveRef = useRef(false);
     const backgroundRenderActiveRef = useRef(false);
+    // 渲染进度的高水位与 pass 序号（见 playback_rendering_state 监听器）：
+    // 后端已保证同轮单调（renderer/progress 的单调闸门），这里再守一道是因为
+    // Tauri 事件是异步投递的 —— 旧代渲染线程的迟到事件有可能在 active=false
+    // 之后才到达。pass 序号用来区分"新一轮重新起始"与"同一轮回退"：
+    // 前者必须放行（打开大工程时每批各跑一轮，每轮都该从 0% 涨到 100%），
+    // 后者必须拦下。
+    const renderPassRef = useRef<number | null>(null);
+    const renderProgressRef = useRef(0);
 
     const closeWindowNow = useCallback(async () => {
         try {

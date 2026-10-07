@@ -2477,6 +2477,14 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
                         ctx.playback_rate,
                     );
                 }
+                // ★ 声明本声道是"clip 内 N 个并行单元"中的第几个。
+                //
+                // 【为什么必须在 process() 之前、且由这一层声明】处理器内部的进度
+                // 上报（mel chunk / WORLD 合成块）分母只含**本声道**的块数，它拿不到
+                // 扇出倍数。没有这个作用域，两个声道会各自把 0→1 当成本 clip 的
+                // 完成度上报，状态栏进度条就跑两遍（0%→50%→100%，再 50%→100%）。
+                // 折叠成 clip 级进度的公式在 `renderer::progress`，本层只声明事实。
+                let _unit = crate::renderer::progress::ClipUnitGuard::enter(channel, fanout_channels);
                 let out = processor.process(&ctx)?;
                 if is_vslib && channel == 0 {
                     let nonzero = out.iter().filter(|&&v| v.abs() > 1e-6).count();

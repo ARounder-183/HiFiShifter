@@ -1430,6 +1430,11 @@ fn start_background_render_inner(
     let engine_sr = state.audio_engine.sample_rate_hz();
     let sr = if engine_sr > 0 { engine_sr } else { 44100 };
 
+    // 本轮 pass 的标识：随进度事件一起下发，供前端识别"新一轮可以重新起始"。
+    // 取 pass 纪元 —— 它只在本轮收尾 / 工程切换时自增，因此本轮全程恒定、
+    // 跨轮必然不同（见 `PlaybackRenderingStateEvent::pass` 的说明）。
+    let render_pass_id = BG_RENDER_PASS_EPOCH.load(Ordering::Acquire);
+
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
     let unfiltered_total = clips_to_render.len();
     // 工程级汇总的分母：本工程需要渲染的 clip 总数。它只取决于时间线上需要
@@ -1509,6 +1514,7 @@ fn start_background_render_inner(
                 active: false,
                 progress: Some(1.0),
                 target: Some("background".to_string()),
+                pass: Some(render_pass_id),
             },
         );
 
@@ -1555,7 +1561,8 @@ fn start_background_render_inner(
     }
 
     // 进度追踪：clip 级进度由渲染循环推进（对所有处理器一视同仁）；HiFiGAN
-    // 推理 chunk / WORLD 合成块经 report_clip_progress 提供 clip 内细化。
+    // 推理 chunk / WORLD 合成块经 `report_unit_progress_current` 提供 clip 内
+    // 细化（真立体声的声道扇出会被折叠成 clip 级进度，见 `renderer::progress`）。
     crate::renderer::progress::reset(total);
 
     let app_for_progress = app.clone();
@@ -1566,12 +1573,14 @@ fn start_background_render_inner(
         if BG_RENDER_GENERATION.load(Ordering::Acquire) != progress_generation {
             return;
         }
+        // 回调收到的是**已过单调闸门**的值（`renderer::progress` 是唯一出口）。
         let _ = app_for_progress.emit(
             "playback_rendering_state",
             PlaybackRenderingStateEvent {
                 active: true,
                 progress: Some(progress),
                 target: Some("background".to_string()),
+                pass: Some(render_pass_id),
             },
         );
     })));
@@ -1594,6 +1603,7 @@ fn start_background_render_inner(
                 &timeline,
                 skipped_not_ready,
                 render_generation,
+                render_pass_id,
             );
         }));
         if outcome.is_err() {
@@ -1610,6 +1620,7 @@ fn start_background_render_inner(
                     active: false,
                     progress: Some(1.0),
                     target: Some("background".to_string()),
+                    pass: Some(render_pass_id),
                 },
             );
         }
@@ -1813,6 +1824,7 @@ fn render_background_pass(
     timeline: &crate::state::TimelineState,
     skipped_not_ready: usize,
     render_generation: u64,
+    render_pass_id: u64,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -2005,12 +2017,18 @@ fn render_background_pass(
                     rendering_started = true;
                     // 首个未命中才点亮进度条（全命中不闪进度条）。此时可能已有
                     // 若干 clip 命中缓存，直接报告真实整体进度而非硬编码 0。
+                    //
+                    // 进度值经单调闸门；闸门返回 None（本轮尚无新信息）时退回原始
+                    // 值 —— 这一条是"点亮徽标"事件，必须发出，不能被闸门吃掉。
+                    let progress = crate::renderer::progress::gated_fraction()
+                        .unwrap_or_else(crate::renderer::progress::current_fraction);
                     let _ = app.emit(
                         "playback_rendering_state",
                         PlaybackRenderingStateEvent {
                             active: true,
-                            progress: Some(crate::renderer::progress::current_fraction()),
+                            progress: Some(progress),
                             target: Some("background".to_string()),
+                            pass: Some(render_pass_id),
                         },
                     );
                 }
@@ -2123,16 +2141,23 @@ fn render_background_pass(
             // clip 边界推进整体进度（clip 级是所有处理器的权威进度来源 ——
             // WORLD / vslib 没有推理 chunk 回调，clip 粒度即其唯一进度）；
             // 进度条已点亮才发射事件，缓存全命中的 pass 不闪进度条。
+            //
+            // 过单调闸门：最后一个 clip 的单元内上报往往已经走到本 clip 的
+            // 100%，`advance_clip` 后数值与上一条事件**相同** —— 此时闸门返回
+            // None，跳过发送（进度没有前进，再发一条只是无谓的 IPC）。
             crate::renderer::progress::advance_clip();
             if rendering_started {
-                let _ = app.emit(
-                    "playback_rendering_state",
-                    PlaybackRenderingStateEvent {
-                        active: true,
-                        progress: Some(crate::renderer::progress::current_fraction()),
-                        target: Some("background".to_string()),
-                    },
-                );
+                if let Some(progress) = crate::renderer::progress::gated_fraction() {
+                    let _ = app.emit(
+                        "playback_rendering_state",
+                        PlaybackRenderingStateEvent {
+                            active: true,
+                            progress: Some(progress),
+                            target: Some("background".to_string()),
+                            pass: Some(render_pass_id),
+                        },
+                    );
+                }
             }
             // 默认只记"异常慢"的 clip：正常合成在数百毫秒量级，超过该阈值意味着
             // 用户会明显感到卡顿（也是"进度卡住"的直接线索）。逐 clip 的完整
@@ -2218,6 +2243,7 @@ fn render_background_pass(
                     active: false,
                     progress: Some(1.0),
                     target: Some("background".to_string()),
+                    pass: Some(render_pass_id),
                 },
             );
             return;
@@ -2324,6 +2350,7 @@ fn render_background_pass(
                 active: false,
                 progress: Some(1.0),
                 target: Some("background".to_string()),
+                pass: Some(render_pass_id),
             },
         );
 
@@ -2502,6 +2529,7 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
                 active: false,
                 progress: Some(1.0),
                 target: Some("background".to_string()),
+                pass: Some(BG_RENDER_PASS_EPOCH.load(Ordering::Acquire)),
             },
         );
     }

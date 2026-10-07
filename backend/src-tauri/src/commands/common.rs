@@ -12,6 +12,15 @@ pub(crate) struct PlaybackRenderingStateEvent {
     pub(crate) active: bool,
     pub(crate) progress: Option<f64>,
     pub(crate) target: Option<String>,
+    /// 本轮渲染 pass 的标识。
+    ///
+    /// 【为什么需要它】进度在**同一轮内**单调不减（见 `renderer::progress` 的
+    /// 单调闸门），但**跨轮允许重新起始** —— 打开大工程时音高分析逐批解锁，
+    /// 每批各跑一轮，每轮都从 0% 涨到 100% 才是正确反馈。前端只看到
+    /// `active`/`progress` 时无法区分"新一轮开始"与"同一轮回退"，
+    /// 于是要么误杀真实的重新起始，要么把回退显示给用户。带上 pass 序号后，
+    /// 前端按"pass 变了 ⇒ 允许重新起始"判定，不需要任何超时启发式。
+    pub(crate) pass: Option<u64>,
 }
 
 pub(crate) fn guard_json_command(

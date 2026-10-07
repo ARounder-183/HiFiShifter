@@ -1572,8 +1572,12 @@ pub fn infer_pitch_edit_chunked_optimized(
         );
 
         // Report progress for cached chunks
+        //
+        // 上报的是**本单元内**的进度（真立体声时本单元 = 一个声道，见
+        // `renderer::progress` 的文件头说明）：扇出倍数只有调用方知道，
+        // 折叠成 clip 级进度由 `ClipUnitGuard` 的作用域负责。
         if !cached_chunks.is_empty() {
-            crate::renderer::progress::report_clip_progress(
+            crate::renderer::progress::report_unit_progress_current(
                 cached_chunks.len() as f64 / total_chunks as f64,
             );
         }
@@ -1610,7 +1614,7 @@ pub fn infer_pitch_edit_chunked_optimized(
                 let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, chunk_end);
                 chunk_cache_put(fi, chunk_end, c0, c1, wf.clone());
                 cached_chunks.push((fi, wf));
-                crate::renderer::progress::report_clip_progress(
+                crate::renderer::progress::report_unit_progress_current(
                     (processed_before + i + 1) as f64 / total_chunks as f64,
                 );
             }

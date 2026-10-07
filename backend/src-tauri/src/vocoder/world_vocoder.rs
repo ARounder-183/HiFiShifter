@@ -998,7 +998,11 @@ where
 
         // 上报 clip 内渲染进度（WORLD 按 6s 合成块粒度）。仅当本轮渲染 pass
         // 注册了进度回调时生效（导出路径无回调，开销只有一次存在性检查）。
-        crate::renderer::progress::report_clip_progress(
+        //
+        // 上报的是**本单元内**的进度（真立体声时本单元 = 一个声道）：扇出倍数
+        // 只有调用方知道，折叠成 clip 级进度由 `ClipUnitGuard` 的作用域负责，
+        // 见 `renderer::progress` 的文件头说明。
+        crate::renderer::progress::report_unit_progress_current(
             chunk_end as f64 / total_frames.max(1) as f64,
         );
 
