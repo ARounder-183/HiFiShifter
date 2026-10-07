@@ -88,10 +88,19 @@ try {
     $buildTaskProfile=$Configuration.ToLowerInvariant()
     if ($buildTaskProfile -eq 'debug') {$buildTaskProfile='debug'}
     if ($buildTaskIncludesApp) {
+        # 把 --config 的内容写成文件再传路径，而不是内联 JSON。
+        #
+        # 【为什么不能内联】Windows PowerShell 5.1 把参数交给原生进程时不会替我们
+        # 转义内层引号：`'{"build":{"beforeBuildCommand":""}}'` 到 `cargo` 手里会变成
+        # `{build:{beforeBuildCommand:}}`，tauri 直接报
+        # `failed to parse config ... as JSON: key must be a string`。实测复现过。
+        # `--config` 本来就接受 JSON 文件路径，走文件既没有引号问题，也不依赖
+        # PowerShell 版本（7.2+ 的原生参数传递规则与 5.1 不同，内联写法两边不能兼顾）。
+        $buildTaskAppConfig=Join-Path $buildTaskTemp 'app-build-config.json'
+        [IO.File]::WriteAllText($buildTaskAppConfig,'{"build":{"beforeBuildCommand":""}}',[Text.UTF8Encoding]::new($false))
         Push-Location backend
         try {
-            # 已核对cargo tauri build --help：--config合并仅跳过刚执行过的前端构建。
-            $buildTaskAppArgs=@('tauri','build','--ci','--no-bundle','--config','{"build":{"beforeBuildCommand":""}}')
+            $buildTaskAppArgs=@('tauri','build','--ci','--no-bundle','--config',$buildTaskAppConfig)
             if ($Configuration -eq 'Debug') {$buildTaskAppArgs+='--debug'}
             $buildTaskAppArgs+=@('--','--offline','--jobs','1')
             & cargo @buildTaskAppArgs
