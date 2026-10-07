@@ -217,9 +217,13 @@ pub(super) fn dispatch(
             return Ok(json!({"ok":true}));
         }
         "get_about_info" => {
-            return Ok(
-                json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"}),
-            )
+            // 与独立 App **逐字段同形**：前端 `AboutDialog` 只认这一组键。
+            // 原先这里返回 `{name, version, host}`，于是插件里版本号显示错、
+            // commit 恒空、仓库链接恒走前端兜底值。
+            return Ok(hifishifter_kernel::build_info::about_payload(
+                "ARA plugin",
+                crate::VERSION,
+            ));
         }
         "plugin_get_apply_state" => return Ok(session.state()),
         "plugin_history_barrier" => {

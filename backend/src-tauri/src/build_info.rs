@@ -1,44 +1,23 @@
 //! 构建期注入的 git 信息（由 build.rs 通过 rustc-env 烘进二进制）。
 //!
-//! 非 git 构建（如 GitHub 源码 zip）时对应变量为空，各读取器返回 None，
-//! 调用方回退为纯版本号 / 固定仓库链接。
+//! 读取器住在 `hifishifter_kernel::build_info` —— 插件要报同一份构建身份，
+//! 两边各写一套必然会分叉（插件那边就因此长期缺 commit 与仓库链接）。
+//! 本模块只补上「这个 crate 自己的版本号」，其余一律转发。
+//!
+//! 【为什么版本号在这里读】`env!("CARGO_PKG_VERSION")` 取的是**当前 crate** 的
+//! 版本。内核里读它只会得到内核版本（`0.1.0`），而这里读到的才是产品版本
+//! （`0.1.0-beta.15`）。插件同理读自己的，两者相等由
+//! `hifishifter-plugin/tests/version_parity.rs` 保证。
 
-/// 版本号（Cargo.toml 的 package.version）。
+pub(crate) use hifishifter_kernel::build_info::{commit_full, commit_short, dirty, repo_url};
+
+/// 版本号（本 crate 的 Cargo.toml package.version）。
 pub(crate) fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
-    value.filter(|v| !v.trim().is_empty())
-}
-
-/// 完整 commit 哈希（40 位）；非 git 构建为 None。
-pub(crate) fn commit_full() -> Option<&'static str> {
-    non_empty(option_env!("HIFISHIFTER_GIT_COMMIT"))
-}
-
-/// 短 commit 哈希（≥9 位）；非 git 构建为 None。
-pub(crate) fn commit_short() -> Option<&'static str> {
-    non_empty(option_env!("HIFISHIFTER_GIT_COMMIT_SHORT"))
-}
-
-/// 构建时工作区是否脏（有未提交修改）。
-pub(crate) fn dirty() -> bool {
-    option_env!("HIFISHIFTER_GIT_DIRTY") == Some("true")
-}
-
-/// 构建时的 GitHub 仓库主页链接（由 remote.origin.url 归一化而来）；
-/// 上游不是 GitHub 或非 git 构建为 None。
-pub(crate) fn repo_url() -> Option<&'static str> {
-    non_empty(option_env!("HIFISHIFTER_GIT_REPO_URL"))
 }
 
 /// 用户可见的版本展示串：
 /// `0.1.0-beta.14` / `0.1.0-beta.14 (34d4ac89)` / `0.1.0-beta.14 (34d4ac89 dirty)`。
 pub(crate) fn display_version() -> String {
-    match commit_short() {
-        Some(short) if dirty() => format!("{} ({short} dirty)", version()),
-        Some(short) => format!("{} ({short})", version()),
-        None => version().to_string(),
-    }
+    hifishifter_kernel::build_info::display_version(version())
 }

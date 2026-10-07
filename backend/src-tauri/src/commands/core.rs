@@ -11,14 +11,12 @@ pub(super) fn get_runtime_info(state: State<'_, AppState>) -> crate::models::Run
 
 /// 关于对话框数据：版本号、commit（非 git 构建为 null）、脏标志与
 /// GitHub 仓库链接（上游非 GitHub 时为 null，前端回退固定链接）。
+///
+/// 形状由 `hifishifter_kernel::build_info::about_payload` 定义，与插件的
+/// `get_about_info` **同一份实现** —— 两边各拼一次 JSON 时，插件那边就少报了
+/// commit 与仓库链接（前端只当字段为空，不报错），因此不再给第二处可写歪的机会。
 pub(super) fn get_about_info() -> serde_json::Value {
-    serde_json::json!({
-        "version": crate::build_info::version(),
-        "commit": crate::build_info::commit_full(),
-        "commitShort": crate::build_info::commit_short(),
-        "dirty": crate::build_info::dirty(),
-        "repoUrl": crate::build_info::repo_url(),
-    })
+    hifishifter_kernel::build_info::about_payload("standalone", crate::build_info::version())
 }
 
 pub(super) fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {
