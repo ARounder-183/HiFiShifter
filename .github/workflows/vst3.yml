@@ -1,0 +1,93 @@
+name: HiFiShifter VST3 (Windows x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vst3-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vst3-windows:
+    name: Build and package VST3 (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
+      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: vst3-windows-x64
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./tools/prepare-plugin-sdks.ps1
+
+      - name: Install frontend and check regressions
+        run: |
+          npm --prefix frontend ci
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+          npm --prefix frontend test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+
+      - name: Fetch locked Rust dependencies
+        run: |
+          cargo fetch --manifest-path backend/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Locked Cargo dependency fetch failed.' }
+
+      - name: Install NSIS for the VST3 setup executable
+        run: |
+          choco install nsis -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed.' }
+
+      - name: Run plugin unit tests
+        run: |
+          . ./tools/msvc-env.ps1
+          cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --lib -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin tests failed.' }
+
+      - name: Build complete VST3 Release delivery
+        run: ./tools/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
+
+      - name: Package and verify VST3
+        run: |
+          ./tools/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
+
+      - name: Upload VST3 package and SHA256
+        uses: actions/upload-artifact@v7
+        with:
+          name: HiFiShifter-windows-x86_64-vst3
+          path: |
+            .build-tmp/vst3-artifacts/*.zip
+            .build-tmp/vst3-artifacts/*-setup.exe
+            .build-tmp/vst3-artifacts/*.sha256
+          if-no-files-found: error
+          retention-days: 14

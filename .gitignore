@@ -199,6 +199,7 @@ node_modules/
 # Local build scratch created while setting up a worktree (never source)
 .npm-cache/
 .build-tmp/
+.tmp-build/
 frontend/.esbuild-tmp/
 
 # SDD plan workspace for this branch (ledger/briefs; scratch, not source).

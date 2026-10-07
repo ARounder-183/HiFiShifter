@@ -191,7 +191,13 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows 便携版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
+
+# Windows VST3 ZIP + 安装器（已有完整 Release 交付）
+.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
+
+双击 `pack-portable.bat` 可选择 App、VST3 或两者。插件构建、安装目录及 GitHub Actions
+产物说明见 [VST3-BUILD.md](docs/VST3-BUILD.md)。
 
 前端启动模式可通过环境变量 `TAURI_UI_MODE` 切换：
 
