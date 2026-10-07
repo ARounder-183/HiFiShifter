@@ -3369,6 +3369,35 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     };
                 }
             },
+            onScrollLeftFrame: (drawingScrollLeft) => {
+                // 逐帧把真值推给共享视口（时间轴据此跟随）。
+                //
+                // 【为什么必须与 onScrollLeftCommit 分开做】后者按 256px 量化，只为把
+                // 标尺刻度范围提交给 React；用它的精度推同步会让时间轴"先不动、然后
+                // 跳一大段"。这条只做赋值 + 广播，不进 React —— 与时间轴的
+                // `syncScrollLeftFrame` 同一约定。
+                //
+                // 【为什么 lastScrollLeftRef 也要同步】它是 `syncScrollLeft` 早退的
+                // 判据；留着旧值时，镜像回写触发的 `scroll` 事件会被误判成"用户滚动"
+                // 而再推一次共享视口（`onFrame` 里已有同一处理）。
+                scrollLeftRef.current = drawingScrollLeft;
+                lastScrollLeftRef.current = drawingScrollLeft;
+                if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                    timelineViewportSync.setViewport(
+                        {
+                            scrollLeft: timelineViewportStateToNative(
+                                drawingScrollLeft,
+                                timelineOffsetRef.current,
+                            ),
+                            // 与位置**同源**：取内核真值。用渲染期的 `pxPerSecRef` 会配出
+                            // "新缩放 + 旧位置"这一对自相矛盾的视口（时间轴侧的
+                            // `livePxPerSec` 就是为此存在）。
+                            pxPerSec: hostRef.current?.getViewport().pxPerSec ?? pxPerSecRef.current,
+                        },
+                        PIANO_ROLL_SYNC_ORIGIN,
+                    );
+                }
+            },
             onScrollLeftCommit: () => {
                 // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现
                 // 「滚动后刻度消失」。注意 `px` 是**绘制坐标**（宿主对外统一口径）。

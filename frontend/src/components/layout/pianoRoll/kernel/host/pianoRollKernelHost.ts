@@ -266,6 +266,25 @@ export interface PianoRollKernelHostArgs {
     /** 水平滚动位置的量化提交（跨步长才回调）。 */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
     /**
+     * 水平滚动位置的**逐帧**回报（绘制坐标）。
+     *
+     * 【为什么必须与 `onScrollLeftCommit` 分开】后者按 `SCROLL_COMMIT_STEP_PX`
+     *（256px）量化，只为把标尺的刻度范围提交给 React；而"推给共享视口"经不起这个
+     * 精度 —— 时间轴侧早在 `syncScrollLeftFrame` 的注释里记下实测：拖 480px 时
+     * 只有 2 步、单次跳 260px，表现为"先不动、然后突然跳一大段"。
+     *
+     * 【为什么必须有这条通道】本面板此前**只有**量化回报，于是共享视口只在少数
+     * 显式入口（拖 thumb / 滚轮分支 / 缩放落地）被写入；而**自动滚屏、播放跟随**等
+     * 直接写内核的路径推不出去 —— 启用"同步到时间轴"时表现为"参数编辑器滚动了、
+     * 时间轴滞后"（反向正常，因为时间轴有专门的逐帧通道）。
+     *
+     * 特殊说明：每帧都可能触发；实现必须只做赋值 + 广播（不进 React），与时间轴
+     * 的 `syncScrollLeftFrame` 同一约定。
+     *
+     * @param scrollLeftPx 当前水平位置（绘制坐标）。
+     */
+    readonly onScrollLeftFrame?: (scrollLeftPx: number) => void;
+    /**
      * **用户手势**改变了水平滚动位置（绘制坐标）。
      *
      * 【为什么必须与 `onScrollLeftCommit` 分开】宿主每帧把真值写回原生 scroller
@@ -430,7 +449,15 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoRollKernelHost {
     const { container, hScrollbarThumb, vScrollbarThumb, hScrollbarTrack, vScrollbarTrack } = args;
-    const { data, sync, onFrame, onScrollLeftCommit, onUserScrollLeft, onScrollTopFrame } = args;
+    const {
+        data,
+        sync,
+        onFrame,
+        onScrollLeftCommit,
+        onScrollLeftFrame,
+        onUserScrollLeft,
+        onScrollTopFrame,
+    } = args;
 
     /** 待释放的资源（倒序执行；幂等由 `disposed` 保证）。 */
     const teardown: Array<() => void> = [];
@@ -1739,6 +1766,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         updateScrollbars(view);
         syncDom(view);
+
+        // 逐帧回报：把真值交给面板去广播共享视口。无条件调用（不做步长判定）——
+        // 广播侧自己带变化判定（≥0.5px 才写），而漏报会让时间轴停在旧位置上。
+        // 见 `onScrollLeftFrame` 的说明。
+        if (onScrollLeftFrame !== undefined) {
+            onScrollLeftFrame(view.scrollLeft);
+        }
 
         // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现「滚动后
         // 刻度消失」。按步长提交保证 React 不进滚动热路径。

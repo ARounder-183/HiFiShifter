@@ -589,6 +589,32 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             if (timelineViewportSync.getOrigin() === TIMELINE_SYNC_ORIGIN) return;
             const store = timelineViewportSync.get();
             const scroller = scrollRef.current;
+            const kernelHost = kernelHostRef.current;
+            // ★ 纯滚动（pxPerSec 未变）+ 内核模式：**同帧同步落地**。
+            //
+            // 【为什么可以绕过"先 React 再 layout effect"】那条路径是为**缩放**
+            // 设计的：缩放改变刻度窗口的换算，必须让 React 先按新 pxPerSec 重排
+            //（见下方内核分支的说明）。纯滚动不改 pxPerSec，刻度窗口不随
+            // scrollLeft 的 256px 量化而错位 —— 窗口本就带 buffer（见
+            // `REACT_SCROLL_STEP_PX` 的设计），唯一会变的是它落在工程的哪一段，
+            // 而那由内核真值直接给出即可。
+            //
+            // 【修的是什么】"参数编辑器 → 时间轴"方向的滞后。参数编辑器对纯滚动是
+            // **同帧**落地（`commitViewportNow`），本侧却要等一次 React 提交 + layout
+            // effect 的精确相等判定（差 0.5 就放弃）。连续滚动时这两帧的差距累积成
+            // 明显的拖尾感 —— 而反向正常，正是因为反向走的是这条同帧路径。
+            if (kernelHost !== null && Math.abs(store.pxPerSec - livePxPerSec()) <= 1e-9) {
+                timelineSyncApplyingRef.current = true;
+                kernelHost.setScrollLeft(store.scrollLeft);
+                // 读回生效值：内核可能按自己的上限钳制（两个面板视口宽不同）。
+                const applied = kernelHost.getViewport().scrollLeft;
+                // 同任务提交各图层（DOM / Canvas2D / GL），否则比原生滚动慢一帧。
+                kernelHost.paintNow();
+                // 推送标尺 / bus / 共享视口回写（回写被 applying 标志抑制）。
+                syncScrollLeft(applied);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——先写原生
             // scroller（DOM 内容层随之移动），再走完整同步链（标尺/bus/共享
             // 视口回写被 applying 标志抑制），两个面板严丝合缝。任何经
