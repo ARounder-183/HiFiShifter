@@ -1,7 +1,7 @@
 // 插件共享粘贴按最终目标授权：换轨不禁参数粘贴，但仍禁止宿主片段写操作。
 // @vitest-environment jsdom
 import {afterEach,expect,test} from "vitest";
-import {pluginAllowsAction,pluginAllowsEditChannel,isHostGeometryReadOnly,canEditHostClips,canImportHostAudio,canGroupPluginTracks} from "./hostCapabilities";
+import {pluginAllowsAction,pluginAllowsEditChannel,isHostGeometryReadOnly,canEditHostClips,canImportHostAudio,canGroupPluginTracks,dawControlledReason} from "./hostCapabilities";
 import {resolveActionByFocus,resolvePasteRoute} from "../features/keybindings/focusRouting";
 import {DEFAULT_KEYBINDINGS} from "../features/keybindings/defaultKeybindings";
 
@@ -71,4 +71,21 @@ test("native clipboard opens copy/cut/paste/delete only with its own host capabi
     for (const op of ["glue","cycleTake"]) expect(pluginAllowsEditChannel("hifi:timelineEditOp",op)).toBe(false);
     expect(pluginAllowsAction("clip.group","timeline")).toBe(true);
     expect(pluginAllowsAction("clip.ungroup","timeline")).toBe(true);
+});
+
+test("dawControlledReason follows the current locale instead of freezing at module load",()=>{
+    const stored=localStorage.getItem("hifishifter.locale");
+    try {
+        localStorage.setItem("hifishifter.locale","en-US");
+        const en=dawControlledReason();
+        localStorage.setItem("hifishifter.locale","zh-CN");
+        const zh=dawControlledReason();
+        // 查不到键时 translateOutsideReact 原样返回键名 —— 那种静默失败必须被拦下。
+        expect(en).not.toBe("plugin_daw_controlled_reason");
+        expect(zh).not.toBe("plugin_daw_controlled_reason");
+        expect(zh).not.toBe(en);
+    } finally {
+        if (stored===null) localStorage.removeItem("hifishifter.locale");
+        else localStorage.setItem("hifishifter.locale",stored);
+    }
 });

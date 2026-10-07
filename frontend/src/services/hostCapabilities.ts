@@ -1,4 +1,6 @@
 // 原GUI的运行模式与能力边界；独立app保持原窗口/文件/设备行为，插件由DAW供源。
+import { translateOutsideReact } from "../i18n/I18nProvider";
+
 export type HostMode = "standalone" | "plugin";
 /** 必须使用显式bootstrap，而不是把所有WebView2都误认为插件。 */
 export function hostMode(): HostMode {
@@ -20,7 +22,18 @@ export function canGroupPluginTracks():boolean {return isPluginMode()&&window.__
 export function isHostGeometryReadOnly(): boolean {return isPluginMode()&&!canEditHostClips();}
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
 export function canImportHostAudio():boolean {return isPluginMode()&&window.__HFS_PLUGIN_BOOTSTRAP__?.audioImport===true;}
-export const DAW_CONTROLLED_REASON = "由 REAPER 控制；在宿主中操作文件、片段几何与播放";
+
+/**
+ * 宿主接管范围的说明文案（被禁用项的 tooltip、以及"该窗口在插件里不可用"的异常）。
+ *
+ * 【为什么是函数而不是常量】常量在模块加载期取值，语言就冻在那一刻的
+ * localStorage 上 —— 用户切换语言后这串文案不会跟着变。调用点分散在菜单、
+ * 右键菜单与命令式异常里（都不是组件），因此走 `translateOutsideReact`：
+ * 它在无浏览器环境下回落英文词典，不会因为取一条文案而抛错。
+ */
+export function dawControlledReason(): string {
+    return translateOutsideReact("plugin_daw_controlled_reason");
+}
 
 /** 原编辑工具与查看操作保留；不将DAW几何操作发到独立app命令路径。 */
 export function pluginAllowsAction(action: string, surface: string | null): boolean {

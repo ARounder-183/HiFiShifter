@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { isPluginMode, canImportHostAudio, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
+import { isPluginMode, canImportHostAudio, dawControlledReason } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -541,7 +541,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              */}
             {/* File Menu */}
             {isPluginMode() ? <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={!canImportHostAudio()} title={!canImportHostAudio() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={!canImportHostAudio()} title={!canImportHostAudio() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -552,7 +552,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item disabled>{t("menu_save_project")} · REAPER</DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root> : <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -790,7 +790,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Track Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? dawControlledReason() : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
