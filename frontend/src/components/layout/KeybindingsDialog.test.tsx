@@ -345,11 +345,45 @@ describe("布局稳定性：录入态不移动已有元素", () => {
             const widths = new Set<string>();
             for (const chip of chips) {
                 expect(chip.style.width).not.toBe("");
-                expect(chip.style.textOverflow).toBe("ellipsis");
+                /*
+                 * 截断走 `truncate` 工具类（`overflow:hidden` + `text-overflow:ellipsis`
+                 * + `white-space:nowrap`），不再是三个内联属性 —— chip 已改用
+                 * `AppButton`，内联样式只保留"固定宽度"这一项（它没有对应令牌）。
+                 */
+                expect(chip.classList.contains("truncate"), chip.className).toBe(true);
                 widths.add(chip.style.width);
             }
             // 全表同一个宽度 —— 跨行也齐。
             expect(widths.size).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("chip 与追加按钮都走设计系统原语", () => {
+        /*
+         * 【回归背景】这一行控件曾经直用 Radix 的 `Button`/`IconButton`，还带写死的
+         * 调色板色（录入中蓝、自定义绿）与内联 `fontFamily: monospace`。项目里
+         * `AppButton`/`AppIconButton` 是按钮外观的唯一来源，且"自定义绑定"已经由
+         * 分组标题的提示说明，不需要再上一次色。
+         */
+        const { cleanup } = renderDialog();
+        try {
+            const chips = Array.from(
+                document.body.querySelectorAll<HTMLElement>("[data-hs-kb-slot]"),
+            );
+            expect(chips.length).toBeGreaterThan(0);
+            for (const chip of chips) {
+                expect(chip.className, chip.textContent ?? "").toContain("app-button");
+                expect(chip.style.fontFamily, "字体走 hs-type-mono 类").toBe("");
+            }
+            const addButtons = Array.from(
+                document.body.querySelectorAll<HTMLElement>("[data-hs-kb-add]"),
+            );
+            expect(addButtons.length).toBeGreaterThan(0);
+            for (const add of addButtons) {
+                expect(add.className).toContain("app-icon-button");
+            }
         } finally {
             cleanup();
         }

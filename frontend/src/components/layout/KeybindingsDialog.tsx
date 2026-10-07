@@ -540,7 +540,6 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     label={tf(meta.labelKey)}
                     meta={meta}
                     bindings={currentBindings}
-                    isDefault={isDefaultBindings(currentBindings, defaultBindings)}
                     recordingSlot={recording?.actionId === actionId ? recording.slot : null}
                     gestureLabel={gesture ? tf(gesture.labelKey) : undefined}
                     isModifierOnly={isModifierOnlyAction}

@@ -23,10 +23,10 @@
  * - `+` 的**位置常驻**（非修饰键动作永远占这一格），只在不能追加时禁用。
  * 于是进入 / 离开录入态、追加 / 删除槽位都不会移动任何已有元素。
  */
-import { Box, Button, Flex, IconButton } from "@radix-ui/themes";
+import { Box, Flex } from "@radix-ui/themes";
 import { PlusIcon } from "@radix-ui/react-icons";
 
-import { AppStatusChip } from "../../../ui";
+import { AppButton, AppIconButton, AppStatusChip } from "../../../ui";
 import type { ActionMeta, Keybinding } from "../../../features/keybindings/types";
 import { MAX_BINDINGS_PER_ACTION } from "../../../features/keybindings/types";
 import { formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
@@ -42,13 +42,14 @@ import { GESTURE_BADGES } from "./keybindingRowShared";
 const CHIP_WIDTH_PX = 132;
 
 /**
- * 追加槽位的边长（px），与 Radix `size="1"` 的 IconButton 一致。
+ * 追加槽位的边长。
  *
  * **这个值定义的是"槽位"，不是"按钮"**：槽位在每一行都存在（见下方 `Box` 的
  * 说明），按钮只是可能不画。对齐因此由槽位保证，不依赖按钮的渲染与否 ——
- * 也不依赖 Radix 内部的实际尺寸（万一它变了，所有行一起变，仍然齐）。
+ * 取值走 `--qt-ctl-md` 令牌（`AppIconButton` 的 `md` 档就是它），
+ * 于是 Radix 内部尺寸变了也不会与按钮失配。
  */
-const ADD_SLOT_PX = 24;
+const ADD_SLOT_SIZE = "var(--qt-ctl-md)";
 
 export interface KeybindingsActionRowProps {
     /** 本地化后的操作名。由调用方解析，本组件不接触 i18n。 */
@@ -56,8 +57,6 @@ export interface KeybindingsActionRowProps {
     meta: ActionMeta;
     /** 当前生效的**全部**绑定（已合并用户覆盖）；下标 0 是主绑定。 */
     bindings: readonly Keybinding[];
-    /** 是否为默认绑定列表 —— 非默认的行用绿色按钮标出。 */
-    isDefault: boolean;
     /** 正在录入的槽位下标；`null` = 本行未在录入。 */
     recordingSlot: number | null;
     /** 本地化后的手势徽章文案。有 `modifierOperationType` 时必填。 */
@@ -95,7 +94,6 @@ export function KeybindingsActionRow({
     label,
     meta,
     bindings,
-    isDefault,
     recordingSlot,
     gestureLabel,
     isModifierOnly,
@@ -145,7 +143,7 @@ export function KeybindingsActionRow({
                     </span>
                 )}
             </Flex>
-            <Flex align="center" gap="1" style={{ flexShrink: 0 }}>
+            <Flex align="center" gap="1" className="shrink-0">
                 {Array.from({ length: slotCount }, (_, slot) => {
                     const binding = bindings[slot];
                     const slotIsRecording = recordingSlot === slot;
@@ -155,7 +153,7 @@ export function KeybindingsActionRow({
                           ? formatKeybinding(binding, noneLabel)
                           : noneLabel;
                     return (
-                        <Button
+                        <AppButton
                             /*
                              * `data-hs-kb-bind` 是键盘导航（↑/↓ 从搜索框跳进行内）与测试选中
                              * 这一行的入口。挂在**主绑定**（槽位 0）上，行级定位因此不受槽位
@@ -164,19 +162,20 @@ export function KeybindingsActionRow({
                             key={`${meta.group}-${label}-${slot}`}
                             {...(slot === 0 ? { "data-hs-kb-bind": label } : {})}
                             data-hs-kb-slot={slot}
-                            variant={slotIsRecording ? "solid" : "soft"}
-                            color={slotIsRecording ? "blue" : !isDefault ? "green" : "gray"}
-                            size="1"
-                            /* 固定宽度：录入提示与键位文本宽度不同，不固定就会整行跳动。 */
-                            style={{
-                                width: CHIP_WIDTH_PX,
-                                flex: "0 0 auto",
-                                fontFamily: "monospace",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                            }}
-                            /* 省略号收尾时，完整文本仍可悬停查看。 */
+                            /*
+                             * 只有"正在录入"需要跳出来（实心强调色）。**不再给自定义绑定
+                             * 上色**：那原本是写死的绿色，而"这一组里有自定义绑定"已经由
+                             * 分组标题的 `kb_group_customized_hint` 说明 —— 同一件事说两遍，
+                             * 还用的是设计系统之外的调色板。
+                             */
+                            intent={slotIsRecording ? "primary" : "default"}
+                            size="sm"
+                            /*
+                             * 固定宽度 + 省略号：录入提示与键位文本宽度不同，不固定就会
+                             * 整行跳动（用户报告过"按钮不对齐"）。完整文本放 `title`。
+                             */
+                            className="hs-type-mono truncate"
+                            style={{ width: CHIP_WIDTH_PX, flex: "0 0 auto" }}
                             title={text}
                             onClick={() =>
                                 slotIsRecording ? onClearSlot(slot) : onStartRecording(slot)
@@ -187,7 +186,7 @@ export function KeybindingsActionRow({
                             }}
                         >
                             {text}
-                        </Button>
+                        </AppButton>
                     );
                 })}
                 {/*
@@ -205,25 +204,18 @@ export function KeybindingsActionRow({
                  */}
                 <Box
                     data-hs-kb-add-slot={label}
-                    style={{
-                        width: ADD_SLOT_PX,
-                        height: ADD_SLOT_PX,
-                        flex: "0 0 auto",
-                    }}
+                    style={{ width: ADD_SLOT_SIZE, height: ADD_SLOT_SIZE }}
+                    className="shrink-0"
                 >
                     {!isModifierOnly && (
-                        <IconButton
-                            size="1"
-                            variant="ghost"
-                            color="gray"
-                            aria-label={addBindingLabel}
+                        <AppIconButton
+                            icon={<PlusIcon />}
+                            tooltip={addBindingLabel}
                             data-hs-kb-add={label}
                             /* 录入中或已达上限时禁用，但位置常驻。 */
                             disabled={isRecording || atBindingLimit}
                             onClick={onAddBinding}
-                        >
-                            <PlusIcon />
-                        </IconButton>
+                        />
                     )}
                 </Box>
             </Flex>
