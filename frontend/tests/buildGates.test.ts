@@ -39,12 +39,18 @@
  * 应用自身的约定，留在原地；只有需要 node 能力的仓库级门禁才住在这里。
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { expect, test } from "vitest";
 
 /** `tsc -b` 冷启动在 CI 上可能要几十秒，给足余量。 */
 const TYPECHECK_TIMEOUT_MS = 300_000;
+
+/** Prettier 全量检查数秒级；给足余量以容忍 CI 的冷启动与杀毒软件扫描。 */
+const FORMAT_TIMEOUT_MS = 120_000;
+
+/** `src` 下的源文件数下界（见 `countSourceFiles` 的说明）。 */
+const MIN_SOURCE_FILES = 800;
 
 /**
  * 读 `tsconfig.app.json` 的 compilerOptions。
@@ -142,47 +148,68 @@ function readScripts(): Record<string, string> {
     return pkg.scripts ?? {};
 }
 
+/**
+ * 跑 `package.json` 里某个脚本的**正文**，不经过 `npm run`。
+ *
+ * 【为什么不嵌套 npm】`npm run` 会把 npm 自己的配置以 `npm_config_*` 导出给子进程，
+ * 子 npm 再把这些环境变量**重新读入**；若父子 npm 版本不同（例如父 12 认得
+ * `global-ignore-file`、子 11 不认得），子 npm 就会冒一句
+ * `Unknown env config "global-ignore-file"`。npm 自己在源码里也承认这条往返是刻意
+ * 留的兼容口子（"erroring here would break npm-invoked-npm"），而 npm 13 打算把它
+ * 变成错误。仓库脚本没有任何理由嵌套 npm。
+ *
+ * 【单一事实源怎么保住的】命令正文从 `package.json` 读，因此改了脚本这条门禁自动
+ * 跟着改 —— 门禁守的是"脚本跑得通"，不是"脚本长什么样"。
+ */
+function runScriptBody(scriptName: string): { status: number | null; output: string } {
+    const script = readScripts()[scriptName];
+    if (!script) throw new Error(`package.json 里没有 ${scriptName} 脚本`);
+
+    const binDir = join(process.cwd(), "node_modules", ".bin");
+    const result = spawnSync(script, {
+        // 与其它门禁一致：相对路径基于 vitest 的 cwd（frontend/）。
+        cwd: process.cwd(),
+        // `shell: true` 是跨平台必需的：脚本正文里是 `tsc` / `prettier`，
+        // Windows 上那是 `.cmd` 垫片。
+        shell: true,
+        encoding: "utf8",
+        // 脚本正文里的可执行文件由 npm 提供 PATH 才能找到，这里自己补上。
+        env: {
+            ...process.env,
+            PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
+    });
+
+    if (result.error) {
+        throw new Error(`无法启动 ${scriptName}：${result.error.message}`);
+    }
+    return {
+        status: result.status,
+        output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
+    };
+}
+
+/** 递归数 `src` 下的源文件（`.ts` / `.tsx` / `.css`），跳过 `node_modules`。 */
+function countSourceFiles(dir: string, out = { count: 0 }): number {
+    for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+            if (entry !== "node_modules") countSourceFiles(full, out);
+        } else if (/\.(ts|tsx|css)$/.test(entry)) {
+            out.count += 1;
+        }
+    }
+    return out.count;
+}
+
 test(
     "类型检查通过（npm run typecheck）",
     () => {
-        const script = readScripts().typecheck;
-        if (!script) throw new Error("package.json 里没有 typecheck 脚本");
-
-        /*
-         * 直接跑脚本正文，**不经过 `npm run`**。
-         *
-         * 【为什么不嵌套 npm】`npm run` 会把 npm 自己的配置以 `npm_config_*` 导出给
-         * 子进程，子 npm 再把这些环境变量**重新读入**；若父子 npm 版本不同（例如
-         * 父 12 认得 `global-ignore-file`、子 11 不认得），子 npm 就会冒一句
-         * `Unknown env config "global-ignore-file"`。npm 自己在源码里也承认这条
-         * 往返是刻意留的兼容口子（"erroring here would break npm-invoked-npm"），
-         * 而 npm 13 打算把它变成错误。仓库脚本没有任何理由嵌套 npm。
-         *
-         * 【单一事实源怎么保住的】命令正文仍从 `package.json` 的 `typecheck` 读，
-         * 因此改了脚本这条门禁自动跟着改；下面还有一条断言钉住 `build` 用的是同一段。
-         */
-        const binDir = join(process.cwd(), "node_modules", ".bin");
-        const result = spawnSync(script, {
-            // 与其它门禁一致：相对路径基于 vitest 的 cwd（frontend/）。
-            cwd: process.cwd(),
-            // `shell: true` 是跨平台必需的：脚本正文里是 `tsc`，Windows 上那是 tsc.cmd。
-            shell: true,
-            encoding: "utf8",
-            // 脚本正文里的 `tsc` 由 npm 提供 PATH 才能找到，这里自己补上。
-            env: {
-                ...process.env,
-                PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-            },
-        });
-
-        if (result.error) {
-            throw new Error(`无法启动类型检查：${result.error.message}`);
-        }
-        if (result.status === 0) return;
+        const { status, output } = runScriptBody("typecheck");
+        if (status === 0) return;
 
         // 把编译器的原始输出原样带出来：门禁失败时，用户要看到的是**哪一个文件
         // 哪一行**，而不是"类型检查失败"这一句话。
-        const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
         throw new Error(
             [
                 "类型检查失败。这曾经在 3138 条测试全绿的情况下让构建挂掉过一次 ——",
@@ -196,6 +223,67 @@ test(
         );
     },
     TYPECHECK_TIMEOUT_MS,
+);
+
+/*
+ * ── 格式门禁 ────────────────────────────────────────────────────────────────
+ *
+ * 【为什么需要】一次真实事故：`feature/ara-plugin` 分支在开发中从未跑过
+ * `prettier --write`，合并（e834ef54）把 78 个从未被格式化的前端文件带进了
+ * `develop`，而 **CI 恰好不检查格式** —— 于是漂移一路存活到被发现为止。这与
+ * 上面类型检查门禁要解决的问题是同一类：**看起来有保护，实际没有**。
+ *
+ * 【为什么放测试里而不是 CI 里】理由与类型检查门禁完全相同：钩子与 `pretest`
+ * 都能被绕过，而"跑测试"是无论用什么姿势都绕不开的一步。
+ *
+ * 【为什么还要数文件】`prettier --check` 在"一个文件都没匹配到"时同样退出 0。
+ * 若有人把范围收窄（例如把 `src` 的某个子树写进 `.prettierignore`、或把脚本
+ * 正文改成 `prettier src/features --check`），门禁会**静默变绿**而绝大多数文件
+ * 其实没被检查。因此这里除了跑脚本，还独立断言两件事：脚本的目标仍是仓库根，
+ * 且 `src` 下的源文件数没有塌缩。`designSystemGates.test.ts` 的调色板规则正是
+ * 因为缺少这类自检而变成一条永远不会失败的规则。
+ */
+test(
+    "格式检查通过（npm run format:check）",
+    () => {
+        // ① 脚本仍然指向整棵树。允许加 `--cache` 之类的开关，但不允许把目标
+        //    从 `.` 换成某个子目录 —— 那正是"门禁静默失效"的入口。
+        const script = readScripts()["format:check"];
+        expect(script, "缺少 format:check 脚本").toBeTruthy();
+        const nonFlagTokens = script
+            .split(/\s+/)
+            .filter((token) => token.length > 0 && !token.startsWith("-"));
+        expect(
+            nonFlagTokens,
+            "format:check 的目标必须仍是仓库根（`.`），否则被排除的目录不再受门禁保护",
+        ).toEqual(["prettier", "."]);
+        expect(script, "format:check 必须带 --check").toContain("--check");
+
+        // ② 源文件数下界：防止"扫描路径失效"或"源码树被误删"后门禁照样变绿。
+        const scanned = countSourceFiles(join(process.cwd(), "src"));
+        expect(
+            scanned,
+            "src 下扫到的源文件数异常偏少，扫描路径或源码树可能已经失效",
+        ).toBeGreaterThanOrEqual(MIN_SOURCE_FILES);
+
+        // ③ 真正跑一遍。
+        const { status, output } = runScriptBody("format:check");
+        if (status === 0) return;
+
+        throw new Error(
+            [
+                "格式检查失败。这些文件没有经过 Prettier —— 提交前请跑：",
+                "",
+                "    npm run format",
+                "",
+                "（只格式化本次改动的文件时：`npx prettier --write <路径>`）",
+                "",
+                "Prettier 输出：",
+                output,
+            ].join("\n"),
+        );
+    },
+    FORMAT_TIMEOUT_MS,
 );
 
 /*
