@@ -174,6 +174,44 @@ pub(super) fn save_ui_settings(
     serde_json::json!({ "ok": true })
 }
 
+// ── 前端偏好（原 localStorage 的 `hifishifter.*` 键）───────────────────────
+//
+// 与 `ui` 字段分开存放：`save_ui_settings` 对白名单键做子键合并，偏好若混在里面，
+// 一次"只改一个开关"的部分保存就会把其余偏好整块抹掉（见 `AppConfig` 的说明）。
+// 这里只读写 `frontendPrefs`，两条写入路径互不干扰。
+
+/// 配置目录不可用时退化为空集合：偏好存不下不该让界面起不来。
+fn prefs_dir(state: &State<'_, AppState>) -> Option<std::path::PathBuf> {
+    state.config_dir.get().cloned()
+}
+
+pub(super) fn ui_kv_dump(state: State<'_, AppState>) -> std::collections::BTreeMap<String, String> {
+    match prefs_dir(&state) {
+        Some(dir) => crate::config::load_frontend_prefs(&dir),
+        None => Default::default(),
+    }
+}
+
+pub(super) fn ui_kv_put(
+    state: State<'_, AppState>,
+    patch: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    match prefs_dir(&state) {
+        Some(dir) => crate::config::save_frontend_prefs(&dir, &patch),
+        None => patch,
+    }
+}
+
+pub(super) fn ui_kv_delete(
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+) -> std::collections::BTreeMap<String, String> {
+    match prefs_dir(&state) {
+        Some(dir) => crate::config::delete_frontend_prefs(&dir, &keys),
+        None => Default::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

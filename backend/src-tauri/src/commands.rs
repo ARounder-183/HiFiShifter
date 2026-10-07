@@ -2508,3 +2508,31 @@ pub fn save_ui_settings(
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }
+
+// ── 前端偏好（原 localStorage 的 `hifishifter.*` 键）──────────────────────
+//
+// 【为什么 App 也要走这条通道】这些偏好原先只写在 App 自己的 localStorage 里，
+// 插件读不到 —— 于是"在 App 里调好的外观与快捷键"进插件就没了。两边写同一份
+// 配置文件后，偏好随用户走而不是随形态走。localStorage 退化为本机缓存
+// （见 frontend/src/services/uiStorage.ts）。
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn ui_kv_dump(state: State<'_, AppState>) -> std::collections::BTreeMap<String, String> {
+    ui_settings::ui_kv_dump(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn ui_kv_put(
+    state: State<'_, AppState>,
+    patch: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    ui_settings::ui_kv_put(state, patch)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn ui_kv_delete(
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+) -> std::collections::BTreeMap<String, String> {
+    ui_settings::ui_kv_delete(state, keys)
+}

@@ -832,6 +832,9 @@ pub fn run() {
             commands::export_pitch_to_midi,
             commands::get_ui_settings,
             commands::save_ui_settings,
+            commands::ui_kv_dump,
+            commands::ui_kv_put,
+            commands::ui_kv_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
