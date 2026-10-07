@@ -1,5 +1,6 @@
 import { Flex } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -42,7 +43,18 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
         splitTransitionDurationPercent,
         splitTransitionCurve,
         splitTransitionOverlapCrossfade,
-    } = useAppSelector((state: RootState) => state.session);
+    } = useAppSelector(
+        (state: RootState) => ({
+            splitTransitionEnabled: state.session.splitTransitionEnabled,
+            splitTransitionMode: state.session.splitTransitionMode,
+            splitTransitionDurationUnit: state.session.splitTransitionDurationUnit,
+            splitTransitionDurationSec: state.session.splitTransitionDurationSec,
+            splitTransitionDurationPercent: state.session.splitTransitionDurationPercent,
+            splitTransitionCurve: state.session.splitTransitionCurve,
+            splitTransitionOverlapCrossfade: state.session.splitTransitionOverlapCrossfade,
+        }),
+        shallowEqual,
+    );
     const { tf } = useI18n();
 
     const isPercent = splitTransitionDurationUnit === "percent";

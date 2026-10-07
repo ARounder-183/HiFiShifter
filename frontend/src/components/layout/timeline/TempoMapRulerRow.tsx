@@ -52,7 +52,7 @@ import {
     publishSnapHighlights,
     snapHighlightKindFromCandidate,
 } from "../../../utils/snapHighlight";
-import { useAppSelector } from "../../../app/hooks";
+import { useAppSelector, useAppStore } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
 import { AppDialog } from "../../../ui/Dialog";
@@ -622,12 +622,19 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                   : [],
         shallowEqual,
     );
-    const playheadSec = useAppSelector((state) => state.session.playheadSec);
-    // 播放头经渲染期写入的 ref 读取（与 dragTempoMapRef 同一写法）：播放期间
-    // playheadSec 以 30Hz 提交，若作为 snapTempoPosition 的依赖，回调每帧重建，
-    // 拖拽主 effect 会随之每帧卸载/重挂 window 监听（间隙里的 move 全部丢失）。
-    const snapPlayheadSecRef = useRef(playheadSec);
-    snapPlayheadSecRef.current = playheadSec;
+    /**
+     * 播放头**不进 React**。
+     *
+     * 【为什么不订阅】它每 33 ms 变一次（播放轮询），而本组件有 2000+ 行、含 tempo
+     * flag、内联编辑器与多个 `useMemo` —— 只为把这个值转交给吸附计算而订阅它，
+     * 就会在播放期间以约 30 Hz 整体重渲染。
+     *
+     * 【为什么现读也不会重建回调】吸附发生在**事件回调**里，按需读 store 即可；
+     * `useAppStore()` 返回的是稳定引用，因此它进不进依赖数组都不影响回调身份，
+     * 拖拽主 effect 也不会每帧重挂 window 监听（那正是原先用 ref 想避免的事）。
+     * 同一手法见 `MenuBar` 的 `store.getState()` 读取。
+     */
+    const appStore = useAppStore();
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     /** 精细调整修饰键（与 BPM 输入框同一绑定：普通步进 1，按住后 0.1）。 */
     const paramFineAdjustKb = useAppSelector((state) =>
@@ -781,7 +788,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     clips: timelineClips,
                     tracks: timelineTracks,
                     selectedClipIds,
-                    playheadSec: snapPlayheadSecRef.current,
+                    playheadSec: appStore.getState().session.playheadSec,
                     object: "clip",
                     originSec,
                     anchorTrackId: null,
@@ -814,6 +821,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             timelineClips,
             timelineTracks,
             selectedClipIds,
+            // `useAppStore()` 返回稳定引用，列进来不会让回调每帧重建；它承载的是
+            // 回调内按需现读的播放头（见上方说明）。
+            appStore,
         ],
     );
 

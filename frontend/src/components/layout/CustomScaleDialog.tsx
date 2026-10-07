@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Flex, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -33,7 +34,17 @@ const CUSTOM_TEMPLATE_PREFIX = "custom:";
 export function CustomScaleDialog({ open, onOpenChange }: Props) {
     const dispatch = useAppDispatch();
     const { tf } = useI18n();
-    const s = useAppSelector((state: RootState) => state.session);
+    // 【为什么不用整片 `state.session`】这些设置对话框是**常驻挂载**的（只靠
+    // `open` 控制显隐），而 `session` 的对象引用每次 dispatch 都会变 —— 整片订阅
+    // 让它们在播放期间跟着 33 ms 的播放轮询一起重渲染。只选真正消费的字段，并用
+    // `shallowEqual` 比较（与 `ActionBar` / `MenuBar` 同口径）。
+    const s = useAppSelector(
+        (state: RootState) => ({
+            customScalePresets: state.session.customScalePresets,
+            project: state.session.project,
+        }),
+        shallowEqual,
+    );
 
     const [name, setName] = useState("");
     const [notes, setNotes] = useState<number[]>([]);
