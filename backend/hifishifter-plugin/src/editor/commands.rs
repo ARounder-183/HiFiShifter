@@ -14,6 +14,9 @@ pub(super) fn mutates_audio(command: &str) -> bool {
             | "restore_param_frames"
             | "set_static_param"
             | "convert_mix_param"
+            // 拉伸映射同样改写参数曲线，必须让在途渲染作废（否则拉伸后听到的是
+            // 旧曲线渲染出来的音频）。
+            | "stretch_track_linked_params"
             | "set_track_state"
             | "move_track"
             | "undo_timeline"
@@ -63,6 +66,13 @@ struct Mix {
     track_id: String,
     from: String,
     ranges: Vec<hifishifter_kernel::editor::ConvertRange>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StretchLinked {
+    track_id: String,
+    mappings: Vec<hifishifter_kernel::state::StretchLinkedRangeSec>,
+    checkpoint: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -600,7 +610,22 @@ pub(super) fn dispatch(
             after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
-        "get_pitch_analysis_progress" => Ok(Value::Null),
+        // 长分析的轮询兜底。事件通道（`pitch_orig_analysis_progress`）在正常情况下
+        // 就够了，但事件可能在窗口尚未挂载时发出 —— 那时前端只能靠轮询这条把
+        // "正在分析第 3/8 个片段"补回来。此前这里恒回 `null`，于是**首次**分析
+        // 期间界面完全没有进度，看起来像卡死。
+        "get_pitch_analysis_progress" => Ok(
+            match hifishifter_kernel::pitch_clip::get_clip_pitch_batch_progress() {
+                Some(batch) => json!({
+                    "rootTrackId": "",
+                    "progress": batch.progress,
+                    "currentClipName": batch.current_clip_name,
+                    "completedClips": batch.completed_clips,
+                    "totalClips": batch.total_clips,
+                }),
+                None => Value::Null,
+            },
+        ),
         "get_track_summary" => {
             let timeline = session.timeline.lock().unwrap();
             Ok(
@@ -681,6 +706,23 @@ pub(super) fn dispatch(
             after_write(
                 session,
                 params::convert_mix_param(session, a.track_id, a.from, a.ranges),
+            )
+        }
+        // 「拉伸时锁定参数线」的时域映射。
+        //
+        // 【为什么必须有】它是**无条件**被调用的：前端在 clip 拉伸手势收尾时总会
+        // 发它（见 `params.ts` 的调用点）。此前这条落到 `Command unavailable`，
+        // 于是拉伸后参数线与片段长度对不上 —— 而失败只留一行日志，用户看到的是
+        // "拉伸坏了"。它只改 HFS 自己的参数曲线、不碰宿主几何，所以插件里完全可用。
+        "stretch_track_linked_params" => {
+            let a: StretchLinked = args(input)?;
+            track_exists(session, &a.track_id)?;
+            if a.mappings.len() > 4096 {
+                return Err("stretch mapping budget exceeded".into());
+            }
+            after_write(
+                session,
+                params::stretch_track_linked_params(session, a.track_id, a.mappings, a.checkpoint),
             )
         }
         "set_track_state" => {
