@@ -611,6 +611,7 @@ export const zhTW = {
     import_audio_failed: "匯入媒體檔案失敗",
     status_project_version_confirmation: "工程檔案版本確認",
 
+    menu_copy_diagnostics_summary: "複製診斷摘要",
     menu_open_log_folder: "開啟日誌資料夾",
     menu_export_diagnostics: "匯出診斷資訊...",
     menu_open_log_folder_failed: "無法開啟日誌資料夾",

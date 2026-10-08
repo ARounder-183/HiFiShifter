@@ -260,10 +260,12 @@ pub(super) fn dispatch(
                 "opened": opened.is_ok(),
             }));
         }
-        // 诊断导出与基准测试是 App 侧的完整实现（系统信息 / 基准 / 打包 zip）。
-        // 明确回报"不支持"，而不是让前端拿着 `Command unavailable` 这种内部措辞去猜。
-        "pick_diagnostics_output_path" | "export_diagnostics" | "run_vocoder_benchmark" => {
-            return Err("diagnostics export is not available in ARA plugin mode".into())
+        // 诊断导出与基准测试：导出走 UI 线程的精简实现（见 `webview.rs`，命令名与
+        // 独立 App **相同**，前端不必按模式分支），基准测试在插件里**保持拒绝** ——
+        // `src-tauri` 的完整实现会初始化 ORT 会话，在 GPU/驱动异常的环境下可能硬崩，
+        // 而在 DAW 进程里崩会带走用户的整个会话。
+        "run_vocoder_benchmark" => {
+            return Err("the vocoder benchmark is not available in ARA plugin mode".into())
         }
         "plugin_history_barrier" => {
             session.suppress_history.store(false, Ordering::Release);

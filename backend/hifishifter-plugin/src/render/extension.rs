@@ -2866,12 +2866,28 @@ impl ExtensionOwner {
         }
         self.local_preparation_state()
     }
-    fn local_preparation_state(&self) -> (bool, Option<String>) {
+    pub(crate) fn local_preparation_state(&self) -> (bool, Option<String>) {
         match self.preparation.get() {
             Some(Ok(worker)) => worker.state(),
             Some(Err(error)) => (false, Some(error.clone())),
             None => (false, None),
         }
+    }
+    /// 渲染器的准备状态快照（诊断包用）：模型/编辑代次、作用域与区间数。
+    ///
+    /// 【为什么单独抽出来】`Snapshot` 里那段诊断需要当前分配区间才能算逐输出读数；
+    /// 诊断包在任意时刻被导出，不值得为它触发一次完整快照。这里只给"准备好了没有、
+    /// 准备的是哪一版"，那正是排查"渲染结果陈旧"时要看的东西。
+    pub(crate) fn prepared_snapshot(&self) -> Option<serde_json::Value> {
+        self.prepared.lock().unwrap().as_ref().map(|version| {
+            serde_json::json!({
+                "model": version.model,
+                "edit": version.edit,
+                "epoch": version.epoch,
+                "scope": version.scope,
+                "regions": version.keys.len(),
+            })
+        })
     }
     /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
     pub(crate) fn host_playback(&self) -> Option<ara2_bridge::plugin::PlaybackRequestHandle> {
@@ -3148,7 +3164,7 @@ impl ExtensionOwner {
                         .collect::<Vec<_>>();
                     let diagnostics=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
                         let (busy,error)=owner.local_preparation_state();
-                        let prepared=owner.prepared.lock().unwrap().as_ref().map(|version|serde_json::json!({"model":version.model,"edit":version.edit,"epoch":version.epoch,"scope":version.scope,"regions":version.keys.len()}));
+                        let prepared=owner.prepared_snapshot();
                         serde_json::json!({"busy":busy,"error":error,"prepared":prepared,
                             "outputs":owner.snapshots.iter().map(|snapshot|snapshot.diagnose(&ranges)).collect::<Vec<_>>()})
                     }).collect::<Vec<_>>();

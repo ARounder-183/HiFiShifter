@@ -768,6 +768,7 @@ export const enUS = {
     import_audio_failed: "Import media failed",
     status_project_version_confirmation: "Project version confirmation required",
 
+    menu_copy_diagnostics_summary: "Copy Diagnostics Summary",
     menu_open_log_folder: "Open Log Folder",
     menu_export_diagnostics: "Export Diagnostics...",
     menu_open_log_folder_failed: "Could not open the log folder",

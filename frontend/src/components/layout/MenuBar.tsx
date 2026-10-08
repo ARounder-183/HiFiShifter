@@ -540,6 +540,43 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         }
     }, [tf]);
 
+    /**
+     * 复制诊断摘要（纯文本，零依赖）。
+     *
+     * 【为什么要这个】多数"把日志发给开发者"的场景其实只要一段版本信息 + 日志路径，
+     * 为此导出一个 zip 再想办法发出去太重。这里只读**已经存在**的三条命令
+     * （`get_about_info` / `get_runtime_info` / `open_log_folder`），不新增后端通道。
+     */
+    const handleCopyDiagnosticsSummary = useCallback(async () => {
+        try {
+            const [{ coreApi }, { openLogFolder }, { copyTextToClipboard }] = await Promise.all([
+                import("../../services/api/core"),
+                import("../../services/api/diagnostics"),
+                import("../../utils/copyText"),
+            ]);
+            const [about, runtime, log] = await Promise.all([
+                coreApi.getAboutInfo().catch(() => null),
+                coreApi.getRuntimeInfo().catch(() => null),
+                openLogFolder().catch(() => null),
+            ]);
+            const lines = [
+                `HiFiShifter ${about?.version ?? "unknown"}`,
+                `commit: ${about?.commit ?? about?.commitShort ?? "unknown"}${
+                    about?.dirty ? " (dirty)" : ""
+                }`,
+                `host: ${runtime?.device ?? "unknown"}`,
+                `log: ${log?.file ?? log?.path ?? "unavailable"}`,
+            ];
+            const ok = await copyTextToClipboard(lines.join("\n"));
+            setNotice({
+                title: ok ? tf("menu_copy_diagnostics_summary") : tf("status_error_prefix"),
+                message: ok ? t("about_copied") : t("status_clipboard_copy_failed"),
+            });
+        } catch (e) {
+            setNotice({ title: tf("status_error_prefix"), message: String(e) });
+        }
+    }, [tf]);
+
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
         const handler = () => {
@@ -1458,15 +1495,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_open_log_folder")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        // 【为什么在插件里禁用】诊断导出要读系统信息、跑推理设备基准并
-                        // 打包 zip，这些只有独立 App 有实现。插件里原先只是"点了报错"，
-                        // 用户拿到的是一句内部措辞；禁用它并说明原因才是有用的反馈。
-                        disabled={diagnosticsExporting || isPluginMode()}
-                        title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
+                        // 插件里**也能导出** —— 走的是精简版（日志 + 构建身份 + 运行时 +
+                        // 宿主版本），不含推理设备基准测试：那条路径在 DAW 进程里崩掉会
+                        // 带走用户整个会话。详见 `editor/plugin_diagnostics.rs`。
+                        disabled={diagnosticsExporting}
                         onSelect={() => void handleExportDiagnostics()}
                     >
                         {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
+                    {isPluginMode() ? (
+                        <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
+                            {tf("menu_copy_diagnostics_summary")}
+                        </DropdownMenu.Item>
+                    ) : null}
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}

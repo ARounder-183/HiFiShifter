@@ -1048,6 +1048,52 @@ fn configure_browser(
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
+            // 精简诊断导出（Help 菜单）。命令名与独立 App **相同** —— 前端不需要按
+            // 模式分支，也不需要一个"插件能不能导出"的能力标志。
+            //
+            // 【为什么是精简版】App 的完整包会跑推理设备基准测试，而那条路径在
+            // GPU/驱动异常时可能硬崩；在 DAW 进程里崩会带走用户整个会话。基准测试
+            // 在插件里**保持拒绝**（见 `commands.rs`），这里只做不会崩的部分。
+            Some("pick_diagnostics_output_path")=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                (||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let name=super::plugin_diagnostics::default_file_name();
+                    let path=super::browser_files::pick_save_path(hwnd,&name,"zip")?;
+                    // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
+                    if link.authorize(&document)?!=lease {return Err("diagnostics picker editor lease changed".into());}
+                    match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":path.to_string_lossy()})),
+                        None=>Ok(serde_json::json!({"ok":false,"canceled":true}))}
+                })()
+            },
+            Some("export_diagnostics")=>{
+                let link=state.borrow().link.clone();
+                (||->Result<serde_json::Value,String>{
+                    let output=request["args"]["outputPath"].as_str().ok_or("diagnostics output path missing")?;
+                    let out=std::path::PathBuf::from(output);
+                    if !out.is_absolute() {return Err("diagnostics output path must be absolute".into());}
+                    let owner=link.owner()?;let document=owner.editor_document()?;
+                    let host=owner.project_history_host();
+                    let system=serde_json::json!({
+                        "product":"HiFiShifter ARA plugin",
+                        "about":hifishifter_kernel::build_info::about_payload("ARA plugin",crate::VERSION),
+                        "os":std::env::consts::OS,"arch":std::env::consts::ARCH,
+                        "generatedAt":chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                        // 用户报障时"你是哪个 REAPER"是第一个要问的问题。
+                        "host":{"appVersion":host.as_ref().and_then(|host|host.app_version())},
+                        "transport":document.clock.diagnostics(),
+                        "renderers":document.renderer_diagnostics(),
+                    });
+                    let settings=serde_json::json!({
+                        "plugin":crate::settings_store::settings(),
+                        "frontendPrefs":crate::settings_store::frontend_prefs(),
+                        "frontend":request["args"]["frontendSettings"].clone(),
+                    });
+                    super::plugin_diagnostics::write_package(&out,&system,&settings)?;
+                    crate::log_line(&format!("[diagnostics] plugin package exported: {}",out.display()));
+                    Ok(serde_json::json!({"ok":true,"path":output}))
+                })()
+            },
             Some(command @ ("play_original"|"play_synthesized"|"stop_audio"))=>{
                 // host callback可能同步重入；调用期间不持BrowserState/会话锁。
                 let link=state.borrow().link.clone();

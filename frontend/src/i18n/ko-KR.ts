@@ -699,6 +699,7 @@ export const koKR = {
     import_audio_failed: "미디어 가져오기에 실패했습니다",
     status_project_version_confirmation: "프로젝트 파일 버전 확인",
 
+    menu_copy_diagnostics_summary: "진단 요약 복사",
     menu_open_log_folder: "로그 폴더 열기",
     menu_export_diagnostics: "진단 정보 내보내기...",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",

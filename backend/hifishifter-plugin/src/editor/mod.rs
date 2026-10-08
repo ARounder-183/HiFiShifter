@@ -7,6 +7,7 @@ mod host_clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
 pub(crate) mod parameter_atlas;
+mod plugin_diagnostics;
 pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;

@@ -193,6 +193,66 @@ pub(super) fn pick_directory(
     }
 }
 
+/// 原生"另存为"对话框（诊断导出用），与 [`pick_directory`] 同一套 COM 模式。
+///
+/// 【为什么不用 rfd】插件不引入 Tauri，而 `IFileSaveDialog` 就在同一个
+/// `Win32_UI_Shell` 特性里 —— 只为弹一次窗多拉一个对话框库不值得。
+/// 取消（`0x800704c7`）返回 `Ok(None)`，与文件夹选择器同一约定。
+#[cfg(windows)]
+pub(super) fn pick_save_path(
+    hwnd: windows::Win32::Foundation::HWND,
+    file_name: &str,
+    extension: &str,
+) -> Result<Option<PathBuf>, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{
+        FileSaveDialog, IFileSaveDialog, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
+        SIGDN_FILESYSPATH,
+    };
+    unsafe {
+        let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| e.to_string())?;
+        dialog
+            .SetOptions(
+                dialog.GetOptions().map_err(|e| e.to_string())?
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_OVERWRITEPROMPT,
+            )
+            .map_err(|e| e.to_string())?;
+        dialog
+            .SetFileName(&HSTRING::from(file_name))
+            .map_err(|e| e.to_string())?;
+        dialog
+            .SetDefaultExtension(&HSTRING::from(extension))
+            .map_err(|e| e.to_string())?;
+        if let Err(error) = dialog.Show(Some(hwnd)) {
+            // 0x800704c7 = ERROR_CANCELLED。
+            if error.code().0 as u32 == 0x800704c7 {
+                return Ok(None);
+            }
+            return Err(error.to_string());
+        }
+        let item = dialog.GetResult().map_err(|e| e.to_string())?;
+        let value = item
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .map_err(|e| e.to_string())?;
+        let text = value.to_string().map_err(|e| e.to_string());
+        CoTaskMemFree(Some(value.0.cast()));
+        Ok(Some(PathBuf::from(text?)))
+    }
+}
+
+/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为用户取消了。
+#[cfg(not(windows))]
+pub(super) fn pick_save_path(
+    _hwnd: (),
+    _file_name: &str,
+    _extension: &str,
+) -> Result<Option<PathBuf>, String> {
+    Err("the save dialog is not implemented on this platform".into())
+}
+
 /// 在系统文件管理器中打开一个目录（Windows）。
 ///
 /// 【为什么这不是"宿主限制"】插件**已经**在 REAPER 进程里开过原生文件夹选择器

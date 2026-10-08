@@ -24,6 +24,11 @@ log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# 精简诊断导出：日志 + 构建身份 + 运行时 + 宿主版本，打包成 zip。
+# 与 App 侧同版本；刻意不开 `time` 特性（条目时间取 zip 默认值即可，
+# 不值得为此多拉一个 `time` 依赖）。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 # 二期仅原生WebView2，没有Tauri/wry主循环；版本复用workspace现有缓存。

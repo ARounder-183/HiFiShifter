@@ -106,6 +106,11 @@ pub(crate) struct ReaperHost {
     extended_media: Option<media::ExtendedMedia>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
+    /// 宿主原始版本串（`GetAppVersion`，如 `"7.81/x64"`）；读不出来时为 `None`。
+    ///
+    /// 【为什么保留原文】淡变轴只需要 `fade_axes_new` 那个布尔，但诊断包需要
+    /// **原始字符串** —— 用户报障时"你到底是哪个版本"是第一个要问的问题。
+    app_version: Option<String>,
     /// 多 take 枚举（可选）；缺省时清单只呈现 active take。
     take_enum: Option<TakeEnumApi>,
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
@@ -125,6 +130,11 @@ impl ReaperHost {
     /// 多 take 枚举入口；`None` = 宿主没提供，调用方退回单 active take。
     pub(super) fn take_enum(&self) -> Option<&TakeEnumApi> {
         self.take_enum.as_ref()
+    }
+
+    /// 宿主原始版本串（诊断包用）；读不出来时为 `None`。
+    pub(crate) fn app_version(&self) -> Option<&str> {
+        self.app_version.as_deref()
     }
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
@@ -204,11 +214,12 @@ impl ReaperHost {
         let validate = lookup!(c"ValidatePtr2", Validate);
         // 官方GetAppVersion返回静态版本字符串，只有已知版本才选择新/旧淡化轴。
         let version = lookup!(c"GetAppVersion", AppVersion);
-        let fade_axes_new = version
+        let app_version = version
             .and_then(|getter| checked(&authorized, || unsafe { getter() }).ok())
             .filter(|value| !value.is_null())
             .and_then(|value| unsafe { std::ffi::CStr::from_ptr(value) }.to_str().ok())
-            .and_then(new_fade_axes);
+            .map(str::to_owned);
+        let fade_axes_new = app_version.as_deref().and_then(new_fade_axes);
         let item = lookup!(c"GetMediaItemTake_Item", TakeItem);
         let item_value = lookup!(c"GetMediaItemInfo_Value", Value);
         let take_value = lookup!(c"GetMediaItemTakeInfo_Value", Value);
@@ -446,6 +457,7 @@ impl ReaperHost {
             extended_media,
             validate,
             fade_axes_new,
+            app_version,
             take_enum,
             folder,
         })

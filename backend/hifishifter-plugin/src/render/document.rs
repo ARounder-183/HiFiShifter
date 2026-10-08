@@ -612,6 +612,28 @@ impl DocumentSession {
             .collect()
     }
 
+    /// 播放渲染器的诊断快照（诊断包用）。
+    ///
+    /// 【为什么只要"准备状态"】逐输出的区间读数需要当前分配区间，而诊断包在任意
+    /// 时刻被导出 —— 不值得为它触发一次完整快照。这里给的是"忙不忙、有没有错、
+    /// 准备的是哪一版"，正好覆盖"渲染结果陈旧/一直没准备好"这两类报障。
+    pub fn renderer_diagnostics(&self) -> serde_json::Value {
+        let renderers = self
+            .renderer_owners()
+            .into_iter()
+            .filter(|owner| owner.renders_playback())
+            .map(|owner| {
+                let (busy, error) = owner.local_preparation_state();
+                serde_json::json!({
+                    "busy": busy,
+                    "error": error,
+                    "prepared": owner.prepared_snapshot(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "renderers": renderers })
+    }
+
     /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。
     pub fn clear_renderers(&self) {
         let _transaction = self.transaction.lock().unwrap();
