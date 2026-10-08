@@ -247,9 +247,18 @@ pub(super) fn dispatch(
         // Help 菜单的「打开日志目录」在插件里原先会抛 `Command unavailable` ——
         // 那个命令只存在于 App 侧。插件不弹资源管理器（没有 Tauri opener，也不该在
         // 宿主进程里拉起外部程序），只回报路径，由前端显示给用户。
+        //
+        // 【为什么同时回报文件路径】前端在插件模式下只能把路径显示成文本。目录与
+        // 具体文件都要给出去 —— 用户真正想复制给开发者的往往是 `plugin.log` 本身，
+        // 而不是它所在的目录。
         "open_log_folder" => {
             let dir = crate::diagnostics::log_directory();
-            return Ok(json!({"ok":true,"path":dir.to_string_lossy()}));
+            let file = crate::diagnostics::log_file();
+            return Ok(json!({
+                "ok": true,
+                "path": dir.to_string_lossy(),
+                "file": file.to_string_lossy(),
+            }));
         }
         // 诊断导出与基准测试是 App 侧的完整实现（系统信息 / 基准 / 打包 zip）。
         // 明确回报"不支持"，而不是让前端拿着 `Command unavailable` 这种内部措辞去猜。
