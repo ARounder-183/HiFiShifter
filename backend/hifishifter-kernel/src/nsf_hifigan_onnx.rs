@@ -817,6 +817,11 @@ fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
         identity.update(ep.as_bytes());
         identity.update(&crate::synth_clip_cache::RENDER_PIPELINE_VERSION.to_le_bytes());
         identity.update(&chunk_max_frames().to_le_bytes());
+        // 重叠长度必须入身份：它决定块的**起点网格**（`step = chunk - overlap`），
+        // 因而决定每个缓存条目覆盖哪段 mel。漏掉它，改重叠长度后新网格会与
+        // 旧网格的条目共用键 —— 缓存里存的仍是"原始块输出"（未加窗），
+        // 但键所指的区间已经不同，命中即错位。
+        identity.update(&chunk_overlap_frames().to_le_bytes());
         set_active_ep(&ep);
         if crate::vocoder_ort_session::ep_settings_generation() != generation_before {
             log::warn!("[nsf_hifigan] inference device changed during session build — rebuilding with the new EP");
@@ -1451,7 +1456,18 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
 
 // ─── 分块推理环境变量辅助（任务 2.5）──────────────────────────────────────────
 
-/// 从环境变量 `HIFISHIFTER_ONNX_CHUNK_SEC` 读取单块最大时长（秒），默认 10.0。
+/// `HIFISHIFTER_ONNX_CHUNK_SEC`：**mel-stretch（rate≠1）路径**的单块最大时长（秒），
+/// 默认 10.0。
+///
+/// # 作用域（易误读，务必看清）
+/// 只作用于 [`crate::renderer::hifigan::HiFiGanRenderer::render_mel_stretch_with_formant`]
+/// 在 **PCM 域**的分块（`infer_pitch_edit_chunked_mel_stretch`）。
+/// **主路径**（rate=1，`infer_pitch_edit_chunked_optimized`）走的是 **mel 帧域**的
+/// [`chunk_max_frames`]，与本函数**无关**。
+///
+/// 历史上这两个"秒"级开关与主路径的帧级开关并存，且名字看起来像是主路径的
+/// 旋钮 —— 于是很容易以为"已经配了 0.1s 重叠"，而主路径其实仍是硬拼接。
+/// 命名保留是为了不破坏既有环境变量，但作用域必须写清楚。
 pub fn env_chunk_sec() -> f64 {
     std::env::var("HIFISHIFTER_ONNX_CHUNK_SEC")
         .ok()
@@ -1460,7 +1476,11 @@ pub fn env_chunk_sec() -> f64 {
         .unwrap_or(10.0)
 }
 
-/// 从环境变量 `HIFISHIFTER_ONNX_OVERLAP_SEC` 读取相邻块重叠时长（秒），默认 0.1。
+/// `HIFISHIFTER_ONNX_OVERLAP_SEC`：**mel-stretch（rate≠1）路径**的相邻块重叠
+/// 时长（秒），默认 0.1。
+///
+/// 作用域同 [`env_chunk_sec`]：只作用于 PCM 域分块。主路径的对应旋钮是
+/// `HIFISHIFTER_ONNX_OVERLAP_FRAMES`（见 [`chunk_overlap_frames`]）。
 pub fn env_overlap_sec() -> f64 {
     std::env::var("HIFISHIFTER_ONNX_OVERLAP_SEC")
         .ok()
@@ -1518,6 +1538,38 @@ fn chunk_max_frames() -> usize {
     })
 }
 
+/// 相邻块重叠的 mel 帧数默认值（≈0.37s @ hop=512, sr=44100）。
+///
+/// # 为什么需要重叠
+/// 模型的时间轴语义是**全局**的（f0 源激励按累积相位生成，见
+/// `run_model_batch` 的说明），逐块切片必然在块边界留下相位/瞬态不连续 ——
+/// 这是分块推理的固有属性，无法消除。既然无法消除，就必须**掩埋**：
+/// 让相邻块重叠一段、在重叠区做交叉淡化，接缝落在淡化区中部。
+///
+/// 旧实现是**直接 `copy_from_slice` 覆盖**（既不重叠也不淡化），因此每
+/// `512 × 512 / 44100 ≈ 5.945s` 就有一个硬接缝 —— 这正是"约每 6s 一次杂音"。
+///
+/// # 取值
+/// 0.37s 的淡化区足以让相位差带来的干涉变成听不出的缓慢过渡，同时只增加
+/// `32 / 512 ≈ 6%` 的推理量。取值过小（如 8 帧）会把干涉压进很短的窗口内，
+/// 听感上仍是"抖一下"。
+///
+/// 可用 `HIFISHIFTER_ONNX_OVERLAP_FRAMES` 覆盖；**设为 0 即回到旧的硬拼接
+/// 行为**（用于 A/B 与回退）。
+const CHUNK_OVERLAP_FRAMES_DEFAULT: usize = 32;
+
+static CHUNK_OVERLAP_FRAMES_OVERRIDE: OnceLock<usize> = OnceLock::new();
+
+/// 相邻块重叠的 mel 帧数，可由 `HIFISHIFTER_ONNX_OVERLAP_FRAMES` 覆盖。
+fn chunk_overlap_frames() -> usize {
+    *CHUNK_OVERLAP_FRAMES_OVERRIDE.get_or_init(|| {
+        std::env::var("HIFISHIFTER_ONNX_OVERLAP_FRAMES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(CHUNK_OVERLAP_FRAMES_DEFAULT)
+    })
+}
+
 /// 把 mel 帧区间 `[mel_lo, mel_hi)` 换算成**绝对时间窗（秒）**。
 ///
 /// `mel_frame * hop / model_sr` 是模型域的时间轴（见本文件构建 f0 处
@@ -1530,12 +1582,54 @@ fn chunk_time_span(start_sec: f64, hop_sec: f64, mel_lo: usize, mel_hi: usize) -
     )
 }
 
+/// 把一个块的原始波形按窗口**叠加**进输出（不覆盖）。
+///
+/// 窗口是梯形：块首 `overlap*hop` 个样本渐入（首块无）、块尾 `overlap*hop`
+/// 个样本渐出（末块无）、中间恒 1。相邻块的核心区重叠 `overlap*hop` 个样本，
+/// 两块在同一位置的权重**严格互补**（见 [`crate::seam::chunk_window`]），
+/// 归一化后接缝处即精确重建。
+fn accumulate_chunk(
+    out: &mut [f32],
+    wsum: &mut [f32],
+    win: &mut Vec<f32>,
+    lo: usize,
+    hi: usize,
+    frames: usize,
+    overlap: usize,
+    hop: usize,
+    wf: &[f32],
+) {
+    let core_len = (hi - lo) * hop;
+    let ramp = overlap * hop;
+    let fade_in = if lo == 0 { 0 } else { ramp };
+    let fade_out = if hi >= frames { 0 } else { ramp };
+    crate::seam::chunk_window(
+        core_len,
+        fade_in,
+        fade_out,
+        crate::seam::FadeShape::EqualPower,
+        win,
+    );
+    crate::seam::overlap_add(out, wsum, lo * hop, wf, win);
+}
+
 /// 固定数量的块查缓存/推理后立即拼入输出，不同时持有整段所有块的输入与输出副本。
 /// 缓存损坏按miss重算；新推理输出必须完整且有限，失败绝不写成功缓存。
+///
+/// # 拼接：重叠 + 等功率交叉淡化（不是覆盖）
+/// 块按 `step = chunk_frames - overlap_frames` 推进，相邻块的核心区重叠
+/// `overlap_frames` 帧；每个块按 [`accumulate_chunk`] 的窗口叠加，最后按权重和
+/// 归一。`overlap_frames == 0` 时退化为"无重叠、权重恒 1"，与旧的直接覆盖
+/// **逐样本等价**（用于回退与 A/B）。
+///
+/// 缓存的仍是**块的原始输出**（未加窗）：交叉淡化发生在装配阶段，因此
+/// per-chunk 缓存与拼接方式解耦，换重叠长度不会让缓存语义错位
+/// （但仍需 `cache_identity()` 混入重叠长度，见该函数）。
 fn assemble_bounded_chunks(
     frames: usize,
     hop: usize,
     chunk_frames: usize,
+    overlap_frames: usize,
     batch_max: usize,
     mut get: impl FnMut(usize, usize) -> Option<Vec<f32>>,
     mut infer: impl FnMut(&[(usize, usize)]) -> Result<Vec<Vec<f32>>, String>,
@@ -1544,13 +1638,19 @@ fn assemble_bounded_chunks(
     if hop == 0 || chunk_frames == 0 || batch_max == 0 {
         return Err("invalid HiFiGAN chunk geometry".into());
     }
+    // 重叠必须**严格小于**块长，否则步进为 0 → 死循环。
+    let overlap = overlap_frames.min(chunk_frames - 1);
+    let step = (chunk_frames - overlap).max(1);
+
     let samples = frames
         .checked_mul(hop)
         .ok_or("HiFiGAN output length overflow")?;
     let mut out = vec![0_f32; samples];
+    let mut wsum = vec![0_f32; samples];
+    let mut win: Vec<f32> = Vec::with_capacity(chunk_frames * hop);
     let mut offset = 0;
     let mut completed = 0;
-    let total = frames.div_ceil(chunk_frames);
+    let total = frames.div_ceil(step);
     while offset < frames {
         let mut missing = Vec::with_capacity(batch_max);
         for _ in 0..batch_max {
@@ -1562,12 +1662,14 @@ fn assemble_bounded_chunks(
             if let Some(cached) = get(offset, end)
                 .filter(|wf| wf.len() == expected && wf.iter().all(|v| v.is_finite()))
             {
-                out[offset * hop..end * hop].copy_from_slice(&cached);
+                accumulate_chunk(
+                    &mut out, &mut wsum, &mut win, offset, end, frames, overlap, hop, &cached,
+                );
                 completed += 1;
             } else {
                 missing.push((offset, end));
             }
-            offset = end;
+            offset += step;
         }
         if !missing.is_empty() {
             let outputs = infer(&missing)?;
@@ -1581,7 +1683,9 @@ fn assemble_bounded_chunks(
                 return Err("invalid HiFiGAN chunk output".into());
             }
             for ((start, end), wf) in missing.into_iter().zip(outputs) {
-                out[start * hop..end * hop].copy_from_slice(&wf);
+                accumulate_chunk(
+                    &mut out, &mut wsum, &mut win, start, end, frames, overlap, hop, &wf,
+                );
                 put(start, end, wf);
                 completed += 1;
             }
@@ -1595,6 +1699,9 @@ fn assemble_bounded_chunks(
             completed as f64 / total.max(1) as f64,
         );
     }
+    // 按权重和归一。核心区并集覆盖整段且无空洞（`step <= chunk_frames`），
+    // 除首尾无配对处外 `wsum ≈ 1`；归一化同时兜住浮点误差。
+    crate::seam::normalize_by_wsum(&mut out, &wsum);
     Ok(out)
 }
 
@@ -1605,22 +1712,31 @@ fn assemble_bounded_chunks(
 /// 与旧版秒级分块实现的区别：
 /// - mel 只提取一次，按帧切片（而非每块独立提取）
 /// - 使用帧级常量 `chunk_max_frames()` 分块
+/// - 相邻块**重叠** `chunk_overlap_frames()` 帧并做等功率交叉淡化
 /// - 支持分块级缓存回调，参数变动时只重渲染脏 chunk
 ///
-/// # ⚠ 拼接方式：直接覆盖，**没有** overlap / crossfade
-/// 旧版本注释在此处声称"线性 crossfade"，但代码执行的是
-/// `out[base_out + i] = sample` —— 块之间既不重叠也不加权。
-/// 块边界因此存在轻微不连续，实测其跳变约为信号自身相邻跳变的 p99 的 0.3 倍
-/// **低于**正常信号起伏，听感上不构成 click。
+/// # 拼接方式：重叠 + 等功率交叉淡化
+/// 块按 `step = chunk_max_frames() - chunk_overlap_frames()` 推进，相邻块的核心区
+/// 重叠 `chunk_overlap_frames()` 帧，装配时按互补窗叠加、最后按权重和归一
+/// （实现见 [`assemble_bounded_chunks`] 与 [`accumulate_chunk`]）。
 ///
-/// **不要照搬本函数修 crossfade**：块大小一变，接缝位置就变，输出随之改变
-/// （实测不同块大小之间 rel_l2 6~9%）。也就是说"补 crossfade"会改变所有既有
-/// 工程的渲染结果，属于需要用户知情的行为变更。
-/// 需要 crossfade 的实现可参考 [`infer_pitch_edit_chunked_mel_stretch`]
-/// （rate≠1 路径，用 sin/cos 等功率加权）。
+/// 【为什么必须淡化而不是"把跳变调小"】模型的时间轴语义是全局的
+/// （f0 源激励按累积相位生成，见 `run_model_batch` 的说明），逐块切片必然在
+/// 块边界留下相位/瞬态不连续。这是分块推理的**固有属性**，无法消除，只能掩埋。
+/// 旧实现直接 `copy_from_slice` 覆盖，因此每 ≈5.945s 一个硬接缝 ——
+/// 正是"约每 6s 一次杂音"。`chunk_overlap_frames() == 0` 时退化为旧的直接
+/// 覆盖（逐样本等价），用于 A/B 与回退。
+///
+/// 【输出会变】重叠改变块的起点网格，因而改变输出 PCM。`RENDER_PIPELINE_VERSION`
+/// 已因此递增（v9），使磁盘缓存整体失效，避免新旧基准混用。
 ///
 /// `chunk_cache_get(mel_start, mel_end, chunk_start_sec, chunk_end_sec)` → 命中时返回缓存的 mono PCM，
 /// `chunk_cache_put(mel_start, mel_end, chunk_start_sec, chunk_end_sec, waveform)` → 写入波形到缓存。
+///
+/// 【缓存的是**原始块输出**（未加窗）】交叉淡化发生在装配阶段，因此缓存语义与
+/// 重叠长度解耦：改重叠长度不会让已缓存的内容"含义变了"。
+/// 但块的**起点网格**依赖重叠长度，所以 `cache_identity()` 必须混入它
+/// （已做，见该函数），否则新旧网格会共用键。
 ///
 /// # ⚠ 为什么必须把时间窗以**秒**传给回调（曾有真实 bug）
 /// mel 帧索引是**模型域**的（`hop`/`model_sr`，本工程为 512/44100），而调用方缓存的
@@ -1719,6 +1835,7 @@ pub fn infer_pitch_edit_chunked_optimized(
             t,
             hop,
             chunk_max_frames(),
+            chunk_overlap_frames(),
             CHUNK_BATCH_MAX,
             |fi, end| {
                 let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, end);
@@ -1954,7 +2071,10 @@ impl NsfHifiganOnnx {
 
         // 6. 分段推理（复用现有环境变量控制的段式推理逻辑）
         let seg_frames = Self::env_usize("HIFISHIFTER_NSF_HIFIGAN_SEGMENT_FRAMES").unwrap_or(0);
-        let overlap_frames = Self::env_usize("HIFISHIFTER_NSF_HIFIGAN_OVERLAP_FRAMES").unwrap_or(8);
+        // 默认重叠与主路径同源（`chunk_overlap_frames()`），不再各写一个数 ——
+        // 两条路径的重叠口径漂移过一次，就是"主路径修好了、拉伸路径还有杂音"。
+        let overlap_frames = Self::env_usize("HIFISHIFTER_NSF_HIFIGAN_OVERLAP_FRAMES")
+            .unwrap_or_else(chunk_overlap_frames);
 
         let y_vec: Vec<f32> = if seg_frames >= 16 && t_new > seg_frames {
             let overlap_frames = overlap_frames.min(seg_frames.saturating_sub(1));
@@ -1963,6 +2083,7 @@ impl NsfHifiganOnnx {
             let expected_total = t_new.saturating_mul(self.cfg.hop_size).max(1);
             let mut out = vec![0.0f32; expected_total];
             let mut wsum = vec![0.0f32; expected_total];
+            let mut win: Vec<f32> = Vec::new();
 
             let mut s = 0usize;
             while s < t_new {
@@ -1981,31 +2102,20 @@ impl NsfHifiganOnnx {
                 let seg_expected = seg_t.saturating_mul(self.cfg.hop_size).max(1);
                 let seg_samples = y_seg.len().min(seg_expected);
 
-                let overlap_samples = overlap_frames.saturating_mul(self.cfg.hop_size);
+                // 与主路径同一套窗与叠加（`crate::seam`）：等功率窗 + 按权重和
+                // 归一。此前是就地写的线性三角窗，与主路径不一致。
                 let base = s.saturating_mul(self.cfg.hop_size);
-
-                for i in 0..seg_samples {
-                    let g = base + i;
-                    if g >= out.len() {
-                        break;
-                    }
-                    let mut w = 1.0f32;
-                    if overlap_samples > 0 {
-                        if s > 0 && i < overlap_samples {
-                            w = (i as f32) / (overlap_samples as f32);
-                        }
-                        if end < t_new && seg_samples > overlap_samples {
-                            let tail = seg_samples.saturating_sub(1).saturating_sub(i);
-                            if tail < overlap_samples {
-                                let w_out = (tail as f32) / (overlap_samples as f32);
-                                w = w.min(w_out);
-                            }
-                        }
-                    }
-
-                    out[g] += y_seg[i] * w;
-                    wsum[g] += w;
-                }
+                let ramp = overlap_frames.saturating_mul(self.cfg.hop_size);
+                let fade_in = if s == 0 { 0 } else { ramp };
+                let fade_out = if end >= t_new { 0 } else { ramp };
+                crate::seam::chunk_window(
+                    seg_samples,
+                    fade_in,
+                    fade_out,
+                    crate::seam::FadeShape::EqualPower,
+                    &mut win,
+                );
+                crate::seam::overlap_add(&mut out, &mut wsum, base, &y_seg[..seg_samples], &win);
 
                 if end >= t_new {
                     break;
@@ -2013,12 +2123,7 @@ impl NsfHifiganOnnx {
                 s += step;
             }
 
-            for i in 0..out.len() {
-                let w = wsum[i];
-                if w > 1e-6 {
-                    out[i] /= w;
-                }
-            }
+            crate::seam::normalize_by_wsum(&mut out, &wsum);
             out
         } else {
             self.run_model(mel_stretched, f0, t_new)?
@@ -2793,6 +2898,7 @@ mod tests {
             19,
             2,
             3,
+            0,
             2,
             |start, end| {
                 if start == 6 {
@@ -2836,6 +2942,7 @@ mod tests {
             6,
             2,
             3,
+            0,
             2,
             |_, _| Some(vec![f32::NAN; 6]),
             |_| Ok(vec![vec![0.; 6], vec![0.; 5]]),
@@ -2848,6 +2955,7 @@ mod tests {
             1,
             2,
             3,
+            0,
             2,
             |_, _| Some(vec![0.; 1]),
             |_| Ok(vec![vec![0.25, 0.5]]),
@@ -2857,6 +2965,95 @@ mod tests {
         assert_eq!(out, vec![0.25, 0.5]);
         assert_eq!(writes.get(), 1);
     }
+    /// 重叠拼接在稳态输入下**不得**产生电平起伏。
+    ///
+    /// 每块都返回同一个常数（模拟"相邻块内容一致"）。若窗口互补且按权重和
+    /// 归一，输出应逐样本等于该常数；任何**未归一化**的等功率窗都会在重叠区
+    /// 给出 `cos+sin ∈ [1, √2]` 的抬升 —— 那正是"每 6s 一次电平鼓包"。
+    #[test]
+    fn overlapping_chunks_reconstruct_a_constant_without_level_bump() {
+        let (frames, hop, chunk, overlap) = (64usize, 4usize, 16usize, 8usize);
+        let out = super::assemble_bounded_chunks(
+            frames,
+            hop,
+            chunk,
+            overlap,
+            4,
+            |_, _| None,
+            |ranges| {
+                Ok(ranges
+                    .iter()
+                    .map(|&(s, e)| vec![0.5f32; (e - s) * hop])
+                    .collect())
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(out.len(), frames * hop);
+        for (i, v) in out.iter().enumerate() {
+            assert!(
+                (v - 0.5).abs() < 1e-5,
+                "sample {i} = {v}: the crossfade must not modulate a steady signal"
+            );
+        }
+    }
+
+    /// `overlap_frames == 0` 必须与旧的"直接覆盖拼接"**逐样本等价**。
+    ///
+    /// 这是回退与 A/B 的前提：关掉重叠就回到修复前的行为。
+    #[test]
+    fn zero_overlap_matches_the_legacy_direct_splice() {
+        let (frames, hop, chunk) = (19usize, 2usize, 3usize);
+        let out = super::assemble_bounded_chunks(
+            frames,
+            hop,
+            chunk,
+            0,
+            2,
+            |_, _| None,
+            |ranges| {
+                Ok(ranges
+                    .iter()
+                    .map(|&(s, e)| vec![s as f32; (e - s) * hop])
+                    .collect())
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        let expected: Vec<f32> = vec![
+            0., 0., 0., 0., 0., 0., 3., 3., 3., 3., 3., 3., 6., 6., 6., 6., 6., 6., 9., 9., 9., 9.,
+            9., 9., 12., 12., 12., 12., 12., 12., 15., 15., 15., 15., 15., 15., 18., 18.,
+        ];
+        assert_eq!(out, expected);
+    }
+
+    /// 重叠超过块长时必须收敛到"纯交叉淡化"，不得死循环或留下空洞。
+    #[test]
+    fn oversized_overlap_terminates_and_covers_every_sample() {
+        let (frames, hop, chunk) = (40usize, 2usize, 4usize);
+        // overlap > chunk：内部必须钳到 chunk-1，否则 step 归零 → 死循环
+        let out = super::assemble_bounded_chunks(
+            frames,
+            hop,
+            chunk,
+            999,
+            4,
+            |_, _| None,
+            |ranges| {
+                Ok(ranges
+                    .iter()
+                    .map(|&(s, e)| vec![1.0f32; (e - s) * hop])
+                    .collect())
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(out.len(), frames * hop);
+        for (i, v) in out.iter().enumerate() {
+            assert!((v - 1.0).abs() < 1e-5, "sample {i} = {v}: coverage hole");
+        }
+    }
+
     /// 真模型超过旧30秒限制，尾块/48k秒域/暖命中/接缝均验证，不将HNSEP切块。
     #[test]
     #[ignore = "真实CPU HiFiGAN长素材诊断：显式运行，不自动重复"]
@@ -2911,10 +3108,13 @@ mod tests {
         assert_eq!(cold.len(), samples);
         assert!(cold.iter().all(|v| v.is_finite()));
         assert!(chunks.len() > super::CHUNK_BATCH_MAX);
+        // 块按 `step = chunk - overlap` 推进（相邻块**重叠**，不再首尾相接）。
+        let step = super::chunk_max_frames()
+            - super::chunk_overlap_frames().min(super::chunk_max_frames() - 1);
         for (index, (start, end, c0, c1)) in chunks.iter().copied().enumerate() {
             assert!(end - start <= super::chunk_max_frames());
             if index > 0 {
-                assert_eq!(start, chunks[index - 1].1);
+                assert_eq!(start, chunks[index - 1].0 + step);
             }
             assert!((c0 - (3. + start as f64 * 512. / 44100.)).abs() < 1e-10);
             assert!((c1 - (3. + end as f64 * 512. / 44100.)).abs() < 1e-10);
@@ -2937,9 +3137,13 @@ mod tests {
         jumps.sort_by(f32::total_cmp);
         let p99 = jumps[jumps.len() * 99 / 100];
         let mut boundary_max = 0_f32;
-        for (_, _, _, c1) in chunks.iter().take(chunks.len() - 1) {
-            let at = ((c1 - 3.) * rate as f64).round() as usize;
-            boundary_max = boundary_max.max((cold[at] - cold[at - 1]).abs());
+        // 接缝位于"下一块的起点"（= 上一块起点 + step），而非上一块的终点 ——
+        // 加了重叠之后两者不再相等。
+        for w in chunks.windows(2) {
+            let at = ((w[1].2 - 3.) * rate as f64).round() as usize;
+            if at > 0 && at < cold.len() {
+                boundary_max = boundary_max.max((cold[at] - cold[at - 1]).abs());
+            }
         }
         assert!(
             boundary_max < p99 * 8. + 1e-4,
