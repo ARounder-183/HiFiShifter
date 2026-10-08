@@ -88,7 +88,6 @@ import {
     isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import {
-    SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
     firstGatedParamId,
@@ -2634,8 +2633,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     // 被门禁的药丸逐个让位（第 3 / 4 级各让一个），顺序**先张力后气声**：
     // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
-    // 组首的药丸让位时开关保留（见下方组首分支）；曲线仍会绘制（见
-    // `effectiveSecondaryParamVisible`）。
+    // 组首的药丸让位时开关保留（见下方组首分支）。
+    //
+    // 【让位就是让位：曲线跟着眼睛走，不再被强行点亮】这里曾额外在"渲染口径"上把
+    // 被让位的参数一律视为可见（`effectiveSecondaryParamVisible`），理由是"关闭分离时
+    // 曲线保持可见"。但那把两件不同的事混成了一件：**门禁**（开关关掉 → 参数置灰）
+    // 与**横向放不下**（药丸被让位）。后者会把用户从未打开过的参数曲线画出来 ——
+    // 表现为参数编辑器里凭空多出一条平直的副参数曲线（张力未编辑时默认值恒定，
+    // 于是就是一条横贯左右的直线），而用户没有任何开关能关掉它：药丸已经让位了。
+    // 现在只有真实的眼睛状态决定是否绘制；门禁那侧的"保持可见"由下面的
+    // `paramNeedingVisibilityOnGate` 负责（关掉开关时若正在编辑该参数才点亮它）。
     const gatedPillHideOrder = useMemo(
         () => gatedParamHideOrder(orderedProcessorParams.map((p) => p.id)),
         [orderedProcessorParams],
@@ -2643,18 +2650,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const gatedPillsHidden = separationEnabled
         ? 0
         : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
-
-    // 分离关闭时，气声 / 张力的药丸会在第 3 / 4 级逐个让位 —— 用户此刻点不到它们的"眼睛"。
-    // 但"关闭分离时曲线保持可见、只是不可编辑"是既有契约，因此这里在**渲染口径**上
-    // 强制把它们视为可见。不动真实 state：横向恢复后眼睛回到用户原先的设置。
-    const effectiveSecondaryParamVisible = useMemo(() => {
-        if (toolbarTier < 3 || separationEnabled) return secondaryParamVisible;
-        const next = { ...secondaryParamVisible };
-        for (const paramId of SEPARATION_GATED_PARAMS) {
-            next[paramId as ParamName] = true;
-        }
-        return next;
-    }, [toolbarTier, separationEnabled, secondaryParamVisible]);
 
     // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
     // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
@@ -2780,11 +2775,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return getVisibleSecondaryParamIds({
             editParam,
             processorParamIds: processorParams.map((p) => p.id as ParamName),
-            // 用"渲染口径"的可见性（见 `effectiveSecondaryParamVisible`）：
-            // 药丸被第 3 级隐藏时也要让曲线继续绘制。
-            secondaryParamVisible: effectiveSecondaryParamVisible,
+            // 只认真实眼睛状态：曲线画不画由用户的开关决定，横向空间不足而让位的
+            // 药丸不再把自己的曲线点亮（见 `gatedPillHideOrder` 处的说明）。
+            secondaryParamVisible,
         });
-    }, [editParam, effectiveSecondaryParamVisible, processorParams]);
+    }, [editParam, secondaryParamVisible, processorParams]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {

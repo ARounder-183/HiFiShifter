@@ -7,6 +7,7 @@
  * （用户画了没效果）或"UI 置灰但实际生效"（用户以为没效果却听到了）。
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -205,5 +206,39 @@ describe("separationGate", () => {
             expect(gatedParamHideOrder(["formant_shift_cents", "volume", "pan"])).toEqual([]);
             expect(gatedParamHideOrder([])).toEqual([]);
         });
+    });
+});
+
+describe("门禁不负责点亮曲线（渲染口径的回归护栏）", () => {
+    /*
+     * 【要钉死什么】曲线画不画只由用户的"眼睛"开关决定。曾经在 `PianoRollPanel`
+     * 里有一段"渲染口径"的可见性：工具栏横向放不下、气声/张力的药丸被让位时，
+     * 就把这两个参数一律视为可见，好让"关闭分离时曲线保持可见"继续成立。
+     *
+     * 但那是把**门禁**（开关关掉）与**横向放不下**（药丸让位）混成了一件事：它会把
+     * 用户从未打开过的参数曲线画出来。张力未编辑时是恒定默认值，于是画面上凭空多出
+     * 一条横贯左右的平直副曲线；而用户没有任何开关能关掉它 —— 药丸已经让位了。
+     *
+     * 【为什么用源码扫描而不是渲染测试】这条约束的破坏方式是"某个 memo 又被加回来"，
+     * 而它的症状只在**画布**上可见（参数编辑器没有可断言的 DOM 结构）。本仓库对
+     * "加回来就静默复发"的约定一贯用源码级护栏（见 buildGates / invoke.wiring）。
+     * 判据取 `SEPARATION_GATED_PARAMS`：该列表若出现在面板里，只可能是又拿它去改
+     * 渲染可见性 —— 面板其余的门禁判断都走 `isEffectParamGated` / `gatedParamHideOrder`。
+     */
+    const panelSource = readFileSync(
+        new URL("../../components/layout/PianoRollPanel.tsx", import.meta.url),
+        "utf8",
+    );
+
+    it("PianoRollPanel 不拿被门禁参数列表去决定曲线是否绘制", () => {
+        // 去掉注释再判断：说明里提到这个列表是允许的（而且正是本护栏的用意）。
+        const withoutComments = panelSource.replace(/^\s*(\/\/|\*|\/\*).*$/gm, "");
+        expect(withoutComments).not.toContain("SEPARATION_GATED_PARAMS");
+    });
+
+    it("副参数列表的可见性直接来自眼睛状态，不经过中间映射", () => {
+        const callSite = /getVisibleSecondaryParamIds\(\{([\s\S]*?)\}\)/.exec(panelSource);
+        expect(callSite, "没有找到 getVisibleSecondaryParamIds 的调用点").not.toBeNull();
+        expect(callSite![1]).toMatch(/secondaryParamVisible\s*,/);
     });
 });
