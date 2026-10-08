@@ -6,8 +6,23 @@
 //! - [`StreamingWorldSynthesizer`]：封装 WORLD 的 `WorldSynthesizer` C API，
 //!   通过 `push_frames` 送入参数帧，通过 `pull_samples` 取出合成 PCM。
 //!
-//! 两者组合可替代 `vocode_one` 中的批量 `Synthesis` 调用，
-//! 实现低延迟、低内存占用的流式音高变换。
+//! # ⚠ 已不在渲染路径上（保留但无调用方）
+//!
+//! [`vocode_pitch_shift_chunked`](crate::world_vocoder::vocode_pitch_shift_chunked)
+//! 曾用 [`StreamingWorldSynthesizer`] 逐块推送参数帧，指望跨块保持合成相位连续。
+//! 该用法有一个**结构性缺陷**，已改用批量 `Synthesis` + 交叉淡化：
+//!
+//! - 分块渲染的每块**含 pad 输入**，相邻块的 pad 窗口互相重叠（共 2×overlap）。
+//!   把两段重叠的时间轴依次推进同一个合成器，等于让它的时间轴**倒退** ——
+//!   内部相位/插值状态被污染，`pull_samples()` 返回的样本与"本块的时间位置"
+//!   不再对应，接缝处输出错位。
+//! - 叠加"流式输出不足时整机重建"（`vocode_one_streaming` 的旧逻辑），
+//!   每块实际都经历一次冷启动，宣称的相位连续性从未成立。
+//!
+//! 保留本模块是因为它是自洽的 C API 封装，且 [`StreamingWorldAnalyzer`] 的
+//! 重叠缓冲思路对将来真正做实时流式仍有参考价值。**新代码不要再用
+//! [`StreamingWorldSynthesizer`] 拼接分块渲染**；跨块一致性交给
+//! [`crate::seam`] 的加权叠加。
 
 use crate::world_vocoder::{
     AddParameters, CheapTrick, CheapTrickOption, D4COption, DestroySynthesizer,
