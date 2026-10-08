@@ -651,7 +651,14 @@ export function ActionBar() {
                         active={s.metronomeEnabled}
                         // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                         emphasis="accent"
-                        tooltip={t("action_metronome")}
+                        // 【为什么在插件里禁用】节拍器由宿主播放（REAPER 自己的
+                        // metronome 在主输出上），插件里没有 `set_metronome` 这条命令 ——
+                        // 此前点它只会写下一个没人读的值，并在控制台留一条错误。
+                        // 与菜单里其它插件禁用项同一套做法：禁用 + 说明原因。
+                        disabled={isPluginMode()}
+                        tooltip={
+                            isPluginMode() ? t("plugin_standalone_only") : t("action_metronome")
+                        }
                         icon={<MetronomeIcon />}
                         onClick={() => {
                             void dispatch(
@@ -660,6 +667,9 @@ export function ActionBar() {
                         }}
                         onContextMenu={(event) => {
                             event.preventDefault();
+                            // 禁用态不再弹右键菜单：一个能改音量、改音色却什么都
+                            // 不会发生的浮层，比一个禁用按钮更难理解。
+                            if (isPluginMode()) return;
                             setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
                         }}
                     />
