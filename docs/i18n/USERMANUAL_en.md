@@ -779,6 +779,7 @@ In plugin mode, **the host handles** audio import, item position / trimming / li
 - Entries taken over by the host — the `Track` menu, the `Record` button, `Options → Inference Device`, etc. — are disabled; hovering explains why (`Controlled by REAPER; manage files, clip geometry and playback in the host`).
 - When the host exposes transport control, the `Stop` and `Play / Pause` buttons control REAPER's playback; the playhead follows the REAPER project's position, and the BPM is decided by REAPER as well.
 - Fade audio on items is handled by REAPER; what the interface shows is HiFiShifter's own schematic envelope (the hover text says `HiFiShifter schematic curve; REAPER renders the audio`), and it is not required to match REAPER's curve point by point.
+- The tempo map is not auto-matched: REAPER does not hand tempo / time-signature content to ARA plug-ins (measured on this machine; see F-2 in `probe/ara/README.md`), so the plug-in does not fill its tempo map from the host, and the BPM and time-signature readings follow REAPER's transport.
 
 ### Editing and Automatic Apply
 
