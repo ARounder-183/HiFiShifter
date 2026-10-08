@@ -1,4 +1,5 @@
-//! 宿主GUI清单与ARA播放分配分离；只枚举当前FX真实parent轨道，静音item/空轨不消失。
+//! 宿主GUI清单与ARA播放分配分离；枚举FX真实parent轨道（若它是folder，连同其全部
+//! 后代轨道），静音item/空轨不消失。
 use super::*;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -16,6 +17,12 @@ pub(crate) struct UiTrack {
     pub name: String,
     pub order: i32,
     pub items: Vec<UiItem>,
+    /// 所属 folder 轨的 GUID（`None` = 根级）。
+    ///
+    /// 这是**宿主**给出的父子关系（`I_FOLDERDEPTH` 重建），不是插件的私有分组。
+    /// 时间线据此设置 `Track.parent_id`，于是参数根、合成开关与分析算法的既有继承
+    /// 逻辑零改动即可工作 —— 注意它只决定**参数根**，与 REAPER 的音频路由无关。
+    pub parent_guid: Option<String>,
     // 宿主 change 代次字段保留，随 UiTrack 一起快照。
     #[allow(dead_code)]
     pub change: i32,
@@ -32,6 +39,61 @@ impl ReaperHost {
             return Err("UI inventory queried outside host thread".into());
         }
         let project = self.project(authorized)?;
+        let pointer = self._interface.0 as *mut c_void;
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let track = checked(authorized, || unsafe { (table.parent)(pointer, 1) })?;
+        self.ui_track_at(project, track, None, authorized)
+    }
+
+    /// FX 所在轨道 +（若它是 folder）其全部后代轨道。
+    ///
+    /// 【为什么要展开】ARA 的 region sequence 之间没有父子边，folder 语义只能从宿主
+    /// 清单层取。FX 挂在 folder 轨上时，folder 轨自身通常没有 item —— 只枚举它会让
+    /// 整组"看不见"，用户以为插件坏了。
+    ///
+    /// folder 结构读不出来时（旧宿主、畸形嵌套、未经核对的深度值）**退回单轨**，
+    /// 与本次改动之前完全一致：可选增强不得拖垮整份清单。
+    pub(crate) fn ui_folder_tracks(
+        self: &Arc<Self>,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<Vec<UiTrack>, String> {
+        let own = self.ui_track(authorized)?;
+        let project = self.project(authorized)?;
+        let own_guid = own.guid.clone();
+        let tree = match self.folder_tree(authorized) {
+            Ok(tree) => tree,
+            Err(error) => {
+                // 退回单轨：与本次改动之前的行为完全一致，不让可选增强拖垮整份清单。
+                crate::log_line(&format!(
+                    "[reaper-folder] track group unavailable ({error}); showing the FX track only"
+                ));
+                return Ok(vec![own]);
+            }
+        };
+        let mut tracks = vec![own];
+        for node in tree.descendant_nodes(&own_guid) {
+            // 父级取自重建出的树，而不是一律挂到 FX 轨上 —— 否则嵌套 folder 会被压平。
+            let parent_guid = tree.parent_of(&node.guid).flatten();
+            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+                Ok(track) => tracks.push(track),
+                // 单条后代读不到不该让整组消失；如实记账并继续。
+                Err(error) => crate::log_line(&format!(
+                    "[reaper-folder] descendant {} unavailable: {error}",
+                    node.guid
+                )),
+            }
+        }
+        Ok(tracks)
+    }
+
+    /// 枚举一条轨道及其 item；project / track 由调用方取得（本函数不做线程与归属推断）。
+    pub(crate) fn ui_track_at(
+        self: &Arc<Self>,
+        project: *mut c_void,
+        track: *mut c_void,
+        parent_guid: Option<String>,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<UiTrack, String> {
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         macro_rules! api {
@@ -64,7 +126,6 @@ impl ReaperHost {
         let track_value = api!(c"GetMediaTrackInfo_Value", Value);
         let track_string = api!(c"GetSetMediaTrackInfo_String", Guid);
         let geometry = self.geometry.as_ref().ok_or("host geometry unavailable")?;
-        let track = checked(authorized, || unsafe { (table.parent)(pointer, 1) })?;
         let valid = |p: *mut c_void, kind: &CStr| -> Result<(), String> {
             if p.is_null()
                 || !checked(authorized, || unsafe {
@@ -159,6 +220,7 @@ impl ReaperHost {
             name,
             order,
             items,
+            parent_guid,
             change,
             target,
         })

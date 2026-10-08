@@ -16,6 +16,8 @@ pub(crate) use media::HostTrackTarget;
 #[path = "ui_inventory.rs"]
 mod ui_inventory;
 pub(crate) use ui_inventory::UiTrack;
+#[path = "folder.rs"]
+mod folder;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -81,6 +83,8 @@ pub(crate) struct ReaperHost {
     extended_media: Option<media::ExtendedMedia>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
+    /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
+    folder: Option<folder::FolderApi>,
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
 fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Result<T, String> {
@@ -352,6 +356,28 @@ impl ReaperHost {
             }),
             _ => None,
         };
+        // 轨道组只读入口：刻意**不**复用 `media::NewTrackApi` 的 CountTracks/GetTrack ——
+        // 那一束是"允许新建轨道"才齐备的，把读清单耦合上去会让只读能力随写能力一起消失。
+        let folder = match (
+            lookup!(c"CountTracks", folder::CountTracks),
+            lookup!(c"GetTrack", folder::GetTrack),
+            lookup!(c"GetMediaTrackInfo_Value", folder::TrackValue),
+            lookup!(c"GetSetMediaTrackInfo_String", folder::TrackText),
+            lookup!(c"ValidatePtr2", folder::Validate),
+            lookup!(c"GetProjectStateChangeCount", folder::ChangeCount),
+        ) {
+            (Some(count), Some(get), Some(value), Some(text), Some(validate), Some(change)) => {
+                Some(folder::FolderApi {
+                    count,
+                    get,
+                    value,
+                    text,
+                    validate,
+                    change,
+                })
+            }
+            _ => None,
+        };
         Some(Self {
             _interface: interface,
             thread: std::thread::current().id(),
@@ -366,6 +392,7 @@ impl ReaperHost {
             extended_media,
             validate,
             fade_axes_new,
+            folder,
         })
     }
     /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。

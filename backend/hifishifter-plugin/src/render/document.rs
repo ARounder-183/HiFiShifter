@@ -36,6 +36,16 @@ pub(crate) struct DocumentSession {
     pub region_items: Mutex<HashMap<u64, String>>,
     pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::reaper::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
+    /// 由 REAPER folder 结构**得到父级**的轨道 id（见 `host::folder`）。
+    ///
+    /// 这些轨道的父子边由宿主决定，插件私有分组**不得**改写 —— 否则同一个工程会
+    /// 出现两套父子关系：用户在 REAPER 里改了分组，插件却显示另一套，且无法诊断。
+    ///
+    /// 【为什么只记"有父级"的轨道，而不是"宿主呈现过的所有轨道"】宿主清单同时承载
+    /// 轨道身份（GUID↔id 绑定）与 folder 结构两件事。宿主**没有**给出父级的轨道
+    /// （folder 之外的普通轨）并不代表"宿主说它是根级"，只是没有那条边 —— 私有分组
+    /// 依然可以把它编进一个参数组。把整份清单都算作权威会静默废掉用户的私有分组。
+    pub host_folder_children: Mutex<std::collections::BTreeSet<String>>,
     pub ui_inventory_stamp: Mutex<Option<(i32, u64, u64)>>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,

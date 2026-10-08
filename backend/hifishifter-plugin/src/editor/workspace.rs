@@ -42,11 +42,13 @@ impl DocumentSession {
     }
     /// GUI清单刷新不覆盖插件私有父级和顺序；新轨未出现在私有表中时保持根级。
     pub(crate) fn present_private_groups(&self, timeline: &mut TimelineState, namespace: &str) {
-        self.edits
-            .lock()
-            .unwrap()
+        // 锁序固定为 edits → host_owned（见 `host_folder_children` 的说明）：
+        // `project_private_group_view` 等路径在持 edits 时读 host_owned，反向获取会死锁。
+        let edits = self.edits.lock().unwrap();
+        let host_owned = self.host_folder_children.lock().unwrap().clone();
+        edits
             .groups
-            .apply(timeline, &self.group_aliases(namespace));
+            .apply(timeline, &self.group_aliases(namespace), &host_owned);
     }
     /// 显示参数根可包含无播放区域的空父轨；不创建任何clip或未经授权的源。
     fn add_group_view_tracks(&self, timeline: &mut TimelineState) {
@@ -69,7 +71,11 @@ impl DocumentSession {
         edits: &crate::state_channel::EditState,
     ) -> Result<(), String> {
         self.add_group_view_tracks(timeline);
-        edits.groups.apply(timeline, &self.group_aliases(""));
+        // 锁序 edits（调用方已持）→ host_owned，与 `present_private_groups` 一致。
+        let host_owned = self.host_folder_children.lock().unwrap().clone();
+        edits
+            .groups
+            .apply(timeline, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
             timeline.params_by_root_track.extend(
                 edits
@@ -98,6 +104,8 @@ impl DocumentSession {
         let mut flat = self.workspace_timeline_locked()?;
         flat.selected_clip_id = selected;
         let edits = self.edits.lock().unwrap();
+        // 锁序 edits → host_owned（见 `present_private_groups` 的说明）。
+        let host_owned = self.host_folder_children.lock().unwrap().clone();
         edits.apply(&mut flat);
         self.add_group_view_tracks(&mut flat);
         if !edits.atlas.is_empty() {
@@ -110,7 +118,7 @@ impl DocumentSession {
         let mut grouped = flat.clone();
         groups
             .unwrap_or(&edits.groups)
-            .apply(&mut grouped, &self.group_aliases(""));
+            .apply(&mut grouped, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
             grouped.params_by_root_track.extend(
                 edits
@@ -139,14 +147,36 @@ impl DocumentSession {
         timeline.tracks.retain(|track| track.id != "track_main");
         let mut present = std::collections::BTreeSet::new();
         let mut owned = std::collections::BTreeSet::new();
+        // 由宿主 folder 得到父级的轨道；它们才是私有分组必须让路的那些（见
+        // `host_folder_children`）。
+        let mut folder_children = std::collections::BTreeSet::new();
         for host in tracks.values() {
             let track_id = prefix(&host.id);
             owned.insert(track_id.clone());
+            // 宿主 folder 父子 → 时间线参数根。
+            //
+            // 【为什么是参数根，而不是音频路由】REAPER 的 folder 会改变混音/路由语义，
+            // 而 HFS 的父子只决定参数根（合成开关、分析算法、参数曲线归属）。这里只设
+            // `parent_id`，不推断也不改动任何路由 —— 与既有私有分组同一条边界。
+            //
+            // 父轨必须真实存在于本次清单里才挂；否则保持根级，不凭空造一条不存在的轨。
+            let parent_id = host.parent_guid.as_deref().and_then(|guid| {
+                tracks
+                    .get(guid)
+                    .map(|parent| prefix(&parent.id))
+                    .filter(|id| *id != track_id)
+            });
+            if parent_id.is_some() {
+                folder_children.insert(track_id.clone());
+            }
             if let Some(track) = timeline.tracks.iter_mut().find(|t| t.id == track_id) {
                 track.name = host.name.clone();
                 track.order = host.order;
+                track.parent_id = parent_id;
             } else {
-                let track=serde_json::from_value(serde_json::json!({"id":track_id,"name":host.name,"order":host.order,"compose_enabled":true})).unwrap();
+                let mut track: hifishifter_kernel::state::Track =
+                    serde_json::from_value(serde_json::json!({"id":track_id,"name":host.name,"order":host.order,"compose_enabled":true})).unwrap();
+                track.parent_id = parent_id;
                 timeline.tracks.push(track);
             }
             for item in &host.items {
@@ -198,6 +228,10 @@ impl DocumentSession {
         timeline.tracks.retain(|track| {
             !known.iter().any(|id| prefix(id) == track.id) || owned.contains(&track.id)
         });
+        drop(known);
+        // 记下"父级由宿主 folder 决定"的轨道，供私有分组呈现时让路
+        // （见 `host_folder_children`）。
+        *self.host_folder_children.lock().unwrap() = folder_children;
         timeline.tracks.sort_by_key(|track| track.order);
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());

@@ -2119,41 +2119,49 @@ impl ExtensionOwner {
             let Ok(parent) = host.direct_track_target(&own_allowed) else {
                 continue;
             };
-            if !seen.insert(parent.inventory_guid().to_owned()) {
+            // 父轨已枚举过 ⇒ 它的全部后代也已经在 `tracks` 里，不必重走一遍。
+            if seen.contains(parent.inventory_guid()) {
                 continue;
             }
-            let Ok(mut track) = host.ui_track(&own_allowed) else {
+            // FX 挂在 folder 轨上时，folder 轨自身通常没有 item：连同后代一起枚举，
+            // 否则整组在插件里"看不见"（ARA 侧没有 folder 概念，只能从宿主清单取）。
+            let Ok(own_tracks) = host.ui_folder_tracks(&own_allowed) else {
                 continue;
             };
-            let ids = stamp.0.clip_ids.lock().unwrap();
-            let timeline = stamp.0.timeline.lock().unwrap();
-            for candidate in stamp.0.renderer_owners() {
-                if let Some(bound) = candidate.host_geometry_metadata_locked(&stamp.0) {
-                    if track
-                        .items
-                        .iter()
-                        .any(|item| item.geometry.item_id == bound.geometry.item_id)
-                    {
-                        if let Some(id) = ids.get(&bound.region_key) {
-                            if let Some(clip) = timeline
-                                .as_ref()
-                                .and_then(|t| t.clips.iter().find(|c| &c.id == id))
-                            {
-                                track.id = clip.track_id.clone();
-                                break;
+            for mut track in own_tracks {
+                if !seen.insert(track.guid.clone()) {
+                    continue;
+                }
+                let ids = stamp.0.clip_ids.lock().unwrap();
+                let timeline = stamp.0.timeline.lock().unwrap();
+                for candidate in stamp.0.renderer_owners() {
+                    if let Some(bound) = candidate.host_geometry_metadata_locked(&stamp.0) {
+                        if track
+                            .items
+                            .iter()
+                            .any(|item| item.geometry.item_id == bound.geometry.item_id)
+                        {
+                            if let Some(id) = ids.get(&bound.region_key) {
+                                if let Some(clip) = timeline
+                                    .as_ref()
+                                    .and_then(|t| t.clips.iter().find(|c| &c.id == id))
+                                {
+                                    track.id = clip.track_id.clone();
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
-            drop(timeline);
-            drop(ids);
-            if track.id.starts_with("host-track-") {
-                if let Some(old) = stamp.0.ui_tracks.lock().unwrap().get(&track.guid) {
-                    track.id = old.id.clone();
+                drop(timeline);
+                drop(ids);
+                if track.id.starts_with("host-track-") {
+                    if let Some(old) = stamp.0.ui_tracks.lock().unwrap().get(&track.guid) {
+                        track.id = old.id.clone();
+                    }
                 }
+                tracks.insert(track.guid.clone(), track);
             }
-            tracks.insert(track.guid.clone(), track);
         }
         if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
@@ -2982,9 +2990,11 @@ impl ExtensionOwner {
             for track in &mut timeline.tracks {
                 track.parent_id = None;
             }
-            resolved
-                .groups
-                .processing_settings(&mut timeline, &document.group_aliases(""));
+            resolved.groups.processing_settings(
+                &mut timeline,
+                &document.group_aliases(""),
+                &std::collections::BTreeSet::new(),
+            );
         }
         let geometry = document.regions.lock().unwrap();
         let regions = keys

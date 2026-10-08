@@ -60,26 +60,57 @@ impl TrackGroups {
         Ok(())
     }
     /// 新进来的轨道始终根级；仅应用用户在本插件存下的关系，缺失父级时自动显示为根。
-    pub fn apply(&self, timeline: &mut TimelineState, aliases: &BTreeMap<String, String>) {
+    ///
+    /// # 与宿主 folder 的裁决
+    /// `host_folder_children` 是"父级由 REAPER folder 结构给出"的轨道 id 集合（由
+    /// `present_host_inventory` 记下）。**宿主 folder 是权威**：这些轨道的父子边
+    /// 插件私有分组不得改写，否则同一个工程会出现两套父子关系 —— 用户在 REAPER 里
+    /// 改了分组，插件却显示另一套，且无从诊断。
+    ///
+    /// 私有分组补的是**其余**轨道，也就是"REAPER 里不是父子、但用户希望在插件里按
+    /// 一组处理"的场景。注意判据是"宿主是否给出了那条边"，不是"宿主是否呈现过这条
+    /// 轨"：folder 之外的普通轨没有宿主父级，用户完全可以自己把它们编成一组。
+    pub fn apply(
+        &self,
+        timeline: &mut TimelineState,
+        aliases: &BTreeMap<String, String>,
+        host_folder_children: &BTreeSet<String>,
+    ) {
         let ids = timeline
             .tracks
             .iter()
             .map(|track| track.id.clone())
             .collect::<BTreeSet<_>>();
         for track in &mut timeline.tracks {
-            track.parent_id = None;
-            if let Some(node) = aliases
+            let host_owns_parent = host_folder_children.contains(&track.id);
+            let node = aliases
                 .iter()
                 .find(|(_, id)| **id == track.id)
-                .and_then(|(guid, _)| self.nodes.get(guid))
-            {
-                track.parent_id = node
-                    .parent
-                    .as_ref()
-                    .and_then(|guid| aliases.get(guid))
-                    .filter(|id| ids.contains(*id))
-                    .cloned();
-                track.order = node.order;
+                .and_then(|(guid, _)| self.nodes.get(guid));
+            let private_parent = node
+                .and_then(|node| node.parent.as_ref())
+                .and_then(|guid| aliases.get(guid))
+                .filter(|id| ids.contains(*id))
+                .cloned();
+            if host_owns_parent {
+                // 保留 `present_host_inventory` 写下的边。
+                if private_parent.is_some() && private_parent != track.parent_id {
+                    // 冲突必须显式记账：静默二选一会让"为什么这条轨不在我分的组里"
+                    // 变成无法诊断的问题。
+                    crate::log_line(&format!(
+                        "[track-groups] host folder edge wins for track {}",
+                        track.id
+                    ));
+                }
+            } else {
+                track.parent_id = private_parent;
+            }
+            if let Some(node) = node {
+                // 宿主已覆盖的轨道，其顺序也由宿主决定（folder 内的实际次序）；
+                // 其余轨道仍允许用户在本插件里排序。
+                if !host_owns_parent {
+                    track.order = node.order;
+                }
                 if let Some(compose) = node.compose {
                     track.compose_enabled = compose;
                 }
@@ -95,9 +126,10 @@ impl TrackGroups {
         &self,
         timeline: &mut TimelineState,
         aliases: &BTreeMap<String, String>,
+        host_folder_children: &BTreeSet<String>,
     ) {
         let mut grouped = timeline.clone();
-        self.apply(&mut grouped, aliases);
+        self.apply(&mut grouped, aliases, host_folder_children);
         for track in &mut timeline.tracks {
             if let Some(root) = grouped
                 .resolve_root_track_id(&track.id)
@@ -327,7 +359,7 @@ mod tests {
             flat.params_by_root_track.insert(id.into(), params);
         }
         let mut grouped = flat.clone();
-        groups.apply(&mut grouped, &aliases);
+        groups.apply(&mut grouped, &aliases, &BTreeSet::new());
         assert_eq!(grouped.tracks[1].parent_id.as_deref(), Some("a"));
         assert!(grouped.tracks[2].parent_id.is_none());
         let mut edited = grouped.clone();
@@ -350,11 +382,99 @@ mod tests {
         decoded.apply(
             &mut cold,
             &BTreeMap::from([(a, "cold-a".into()), (b, "cold-b".into())]),
+            &BTreeSet::new(),
         );
         assert_eq!(cold.tracks[1].parent_id.as_deref(), Some("cold-a"));
         let mut cycle = decoded;
         cycle.nodes.values_mut().next().unwrap().parent =
             Some("{22222222-2222-2222-2222-222222222222}".into());
         assert!(cycle.validate().is_err());
+    }
+
+    fn host_folder_fixture() -> (TimelineState, BTreeMap<String, String>, TrackGroups) {
+        let a = "{11111111-1111-1111-1111-111111111111}".to_owned();
+        let b = "{22222222-2222-2222-2222-222222222222}".to_owned();
+        let c = "{33333333-3333-3333-3333-333333333333}".to_owned();
+        let timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [
+                {"id":"a","name":"A","order":0},
+                {"id":"host-root","name":"HOST","order":1},
+                {"id":"b","name":"B","order":2,"parent_id":"host-root"},
+                {"id":"c","name":"C","order":3}
+            ],
+            "clips": [], "bpm": 120, "project_sec": 1
+        }))
+        .unwrap();
+        let aliases = BTreeMap::from([
+            (a.clone(), "a".into()),
+            (b.clone(), "b".into()),
+            (c.clone(), "c".into()),
+        ]);
+        // 私有分组同时声明 b 与 c 的父级都是 a —— 其中 b 与宿主 folder 冲突。
+        let groups = TrackGroups {
+            nodes: BTreeMap::from([
+                (
+                    b.clone(),
+                    GroupNode {
+                        parent: Some(a.clone()),
+                        order: 0,
+                        compose: None,
+                        algo: None,
+                    },
+                ),
+                (
+                    c.clone(),
+                    GroupNode {
+                        parent: Some(a.clone()),
+                        order: 7,
+                        compose: None,
+                        algo: None,
+                    },
+                ),
+            ]),
+        };
+        (timeline, aliases, groups)
+    }
+
+    /// 宿主 folder 的父子边是权威：私有分组声明了不同的父级也不得改写。
+    #[test]
+    fn host_folder_edge_wins_over_the_private_group_edge() {
+        let (mut timeline, aliases, groups) = host_folder_fixture();
+        let host_folder_children = BTreeSet::from(["b".to_string()]);
+        groups.apply(&mut timeline, &aliases, &host_folder_children);
+        let b = timeline.tracks.iter().find(|t| t.id == "b").unwrap();
+        assert_eq!(
+            b.parent_id.as_deref(),
+            Some("host-root"),
+            "宿主 folder 边不得被私有分组改写"
+        );
+        // 顺序同理：宿主已覆盖的轨道由宿主决定（folder 内的实际次序）。
+        assert_eq!(b.order, 2);
+    }
+
+    /// 宿主没有给出 folder 父级的轨道，私有分组照常生效 —— 这是"REAPER 里不是父子、
+    /// 但用户希望在插件里按一组处理"的场景。
+    #[test]
+    fn private_group_fills_tracks_the_host_left_alone() {
+        let (mut timeline, aliases, groups) = host_folder_fixture();
+        let host_folder_children = BTreeSet::from(["b".to_string()]);
+        groups.apply(&mut timeline, &aliases, &host_folder_children);
+        let c = timeline.tracks.iter().find(|t| t.id == "c").unwrap();
+        assert_eq!(c.parent_id.as_deref(), Some("a"));
+        assert_eq!(c.order, 7, "私有分组的顺序对未被宿主覆盖的轨道仍然生效");
+    }
+
+    /// 宿主呈现过某条轨道、但**没有**给出 folder 父级时，私有分组必须照常生效。
+    ///
+    /// 这是回归防线：曾经把"宿主清单呈现过的轨道"整体当成权威，于是 folder 之外的
+    /// 普通轨也被剥夺了私有分组 —— 冷恢复后用户的参数组会凭空消失。
+    #[test]
+    fn tracks_outside_any_host_folder_can_still_be_grouped_privately() {
+        let (mut timeline, aliases, groups) = host_folder_fixture();
+        groups.apply(&mut timeline, &aliases, &BTreeSet::new());
+        for id in ["b", "c"] {
+            let track = timeline.tracks.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(track.parent_id.as_deref(), Some("a"), "track {id}");
+        }
     }
 }
