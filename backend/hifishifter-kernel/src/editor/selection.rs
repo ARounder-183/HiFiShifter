@@ -10,6 +10,10 @@
 //!
 //! 前端的对应实现是 `pianoRoll/paramSelection.beatRangesToFrameRanges`（把 beat
 //! 选区换算成帧区间），语义必须保持一致。
+//!
+//! 【为什么在 kernel】它不碰设备、不碰宿主，只把前端传来的选区段规范化成帧窗口；
+//! 而使用它的两条链路（剪贴板粘贴、MIDI 导入）在 App 与 ARA 插件里都要跑。语义
+//! 写两遍的代价是"同一个选区在两边落到不同帧上"。
 
 /// 一个目标选区段（帧单位）。字段名经 `rename_all = "camelCase"` 映射到
 /// 前端传入的 `startFrame` / `frameCount`。

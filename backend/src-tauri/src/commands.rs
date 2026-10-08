@@ -84,8 +84,9 @@ mod formant;
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
-#[path = "commands/param_selection_window.rs"]
-pub(crate) mod param_selection_window;
+// 多选区帧窗口已搬进内核（`hifishifter_kernel::editor::selection`）：MIDI 导入在
+// ARA 插件侧也要用同一套语义，不能只在 App 里成立。别名保留原模块路径，调用点不动。
+pub(crate) use hifishifter_kernel::editor::selection as param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
 // 无GUI回归直接调用同一参数命令实现，避免伪造Tauri State或替换写入行为。

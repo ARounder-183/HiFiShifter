@@ -2,10 +2,13 @@
 pub mod capabilities;
 pub mod history;
 pub mod host_pcm;
+pub mod midi_import;
 pub mod params;
+pub mod selection;
 pub mod settings;
 pub mod waveform;
 use crate::state::{HistoryOp, TimelineState};
+pub use selection::{ParamSelectionWindow, SelectionFrameRange};
 use std::sync::Mutex;
 
 /// 互转选区段，保持原Tauri命令JSON形状和帧语义。
