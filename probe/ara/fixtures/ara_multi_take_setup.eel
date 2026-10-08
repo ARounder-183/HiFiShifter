@@ -1,0 +1,34 @@
+// F-3 夹具：**一个 item 带三个 take**，每个 take 指向不同的音频文件。
+//
+// 【为什么要三个不同文件】"REAPER 到底把几个 take 交给 ARA"这个问题，只有让每个 take
+// 可辨认才回答得了：插件日志里的 `ara: sources=N modifications=N playbackRegions=N`
+// 是按 source 的 persistentID（即文件路径）去重的，三个不同文件就能把
+// "只发 active take"（N=1）与"全发"（N=3）区分开。
+//
+// 【为什么把 active take 设成第 2 个】若 REAPER 只发 active，那唯一那条 playback region
+// 的 source 应当指向 `tone48000.wav`（下标 1），而不是第一条 take 的 `tone44100.wav`。
+// 这样"只发 active"与"只发第 0 个"也能区分。
+//
+// 自证读数落在 `.build-tmp/f3-fixture.log`（takes / curtake），用来证明夹具真的搭成了
+// 三 take，而不是"加 take 失败所以只看到一条"。
+//
+// `__REPO_ROOT__` 由 run_probe_headless.ps1 替换成仓库根的绝对路径（正斜杠）。
+
+InsertTrackAtIndex(0, 1);
+tr = GetTrack(0, 0);
+SetOnlyTrackSelected(tr);
+InsertMedia("__REPO_ROOT__/probe/ara/fixtures/tone44100.wav", 0);
+it = GetMediaItem(0, 0);
+
+t2 = AddTakeToMediaItem(it);
+SetMediaItemTake_Source(t2, PCM_Source_CreateFromFile("__REPO_ROOT__/probe/ara/fixtures/tone48000.wav"));
+t3 = AddTakeToMediaItem(it);
+SetMediaItemTake_Source(t3, PCM_Source_CreateFromFile("__REPO_ROOT__/probe/ara/fixtures/embedded-editor-voice.wav"));
+SetMediaItemInfo_Value(it, "I_CURTAKE", 1);
+
+TrackFX_AddByName(tr, "HiFiShifter", 0, 1);
+
+vf = fopen("__REPO_ROOT__/.build-tmp/f3-fixture.log", "w");
+fprintf(vf, "takes=%.0f\n", GetMediaItemNumTakes(it));
+fprintf(vf, "curtake=%.0f\n", GetMediaItemInfo_Value(it, "I_CURTAKE"));
+fclose(vf);
