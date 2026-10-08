@@ -38,6 +38,20 @@ export function collectFrontendSettings(): Record<string, unknown> {
 export interface LogFolderResult {
     ok: boolean;
     path?: string;
+    /**
+     * 插件回报的日志文件完整路径。
+     *
+     * 【为什么与 `path` 并存】用户真正想复制给开发者的往往是 `plugin.log` 本身，
+     * 而不是它所在的目录。
+     */
+    file?: string;
+    /**
+     * 资源管理器是否真的被打开了。
+     *
+     * 【为什么要区分】独立 App 走 Tauri opener，成功即静默；插件是**尽力而为**地
+     * 调用系统 shell，失败时仍要把路径交给用户（可选中、可复制），不能假装打开成功。
+     */
+    opened?: boolean;
     error?: string;
 }
 

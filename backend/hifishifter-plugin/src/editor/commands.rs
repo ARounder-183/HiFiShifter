@@ -244,20 +244,20 @@ pub(super) fn dispatch(
             ));
         }
         "plugin_get_apply_state" => return Ok(session.state()),
-        // Help 菜单的「打开日志目录」在插件里原先会抛 `Command unavailable` ——
-        // 那个命令只存在于 App 侧。插件不弹资源管理器（没有 Tauri opener，也不该在
-        // 宿主进程里拉起外部程序），只回报路径，由前端显示给用户。
+        // Help 菜单的「打开日志目录」。
         //
-        // 【为什么同时回报文件路径】前端在插件模式下只能把路径显示成文本。目录与
-        // 具体文件都要给出去 —— 用户真正想复制给开发者的往往是 `plugin.log` 本身，
-        // 而不是它所在的目录。
+        // 【为什么同时回报路径】打开资源管理器是尽力而为（[`reveal_directory`]）；
+        // 无论成败都要把目录与文件路径交出去，前端才能在失败时让用户**复制**它，
+        // 而不是逼他手抄。
         "open_log_folder" => {
             let dir = crate::diagnostics::log_directory();
             let file = crate::diagnostics::log_file();
+            let opened = super::browser_files::reveal_directory(&dir);
             return Ok(json!({
                 "ok": true,
                 "path": dir.to_string_lossy(),
                 "file": file.to_string_lossy(),
+                "opened": opened.is_ok(),
             }));
         }
         // 诊断导出与基准测试是 App 侧的完整实现（系统信息 / 基准 / 打包 zip）。

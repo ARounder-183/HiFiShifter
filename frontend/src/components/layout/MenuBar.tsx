@@ -104,6 +104,8 @@ import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
 import { PANEL_APPEARANCE, PANEL_ARA_HOST } from "../dock/registerBuiltinPanels";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
+import { copyTextToClipboard } from "../../utils/copyText";
+import { logFolderNotice } from "./logFolderNotice";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -208,7 +210,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [diagnosticsExporting, setDiagnosticsExporting] = useState(false);
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
     // 纯通知对话框（取代此前的 window.alert）：错误报告用标题 + 正文两段。
-    const [notice, setNotice] = useState<{ title: string; message: string } | null>(null);
+    const [notice, setNotice] = useState<{
+        title: React.ReactNode;
+        message: React.ReactNode;
+        /**
+         * 设置后对话框多出一个「复制」动作。
+         *
+         * 【为什么正文是 ReactNode 而不是 string】插件里"打开日志文件夹"失败时
+         * 要展示的是一段路径，它必须**可选中**（`data-hs-selectable`）—— 全站默认
+         * `user-select: none`，纯字符串传不进去这个属性。
+         */
+        copyText?: string;
+    } | null>(null);
     const [renderCacheDialogOpen, setRenderCacheDialogOpen] = useState(false);
     /** 清空波形缓存确认框。缓存重建代价高，且下拉菜单关闭即卸载，故由常驻菜单栏托管。 */
     const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
@@ -1398,22 +1411,25 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 await import("../../services/api/diagnostics");
                             try {
                                 const res = await openLogFolder();
-                                if (!res.ok) {
+                                // 判定收在纯函数里（`logFolderNotice`）—— 这段逻辑
+                                // 恰恰是用户抱怨过的地方，抽出来才有回归测试。
+                                const outcome = logFolderNotice(res, isPluginMode());
+                                if (outcome.kind === "none") return;
+                                if (outcome.kind === "error") {
                                     setNotice({
                                         title: tf("status_error_prefix"),
-                                        message: res.error || tf("menu_open_log_folder_failed"),
+                                        message:
+                                            outcome.detail || tf("menu_open_log_folder_failed"),
                                     });
-                                } else if (isPluginMode() && res.path) {
-                                    // 插件不弹资源管理器（宿主进程里不该拉起外部程序），
-                                    // 所以只把路径告诉用户 —— 静默什么都不做会让人以为
-                                    // 菜单坏了。
-                                    setNotice({
-                                        title: tf("menu_open_log_folder"),
-                                        message: tVars("menu_open_log_folder_path", {
-                                            path: res.path,
-                                        }),
-                                    });
+                                    return;
                                 }
+                                // 打不开时把路径摆出来，并且**必须能复制**：路径最容易
+                                // 手抄错，而"打不开"正是用户最需要把它交给我们的时候。
+                                setNotice({
+                                    title: tf("menu_open_log_folder"),
+                                    message: <span data-hs-selectable="true">{outcome.path}</span>,
+                                    copyText: outcome.path,
+                                });
                             } catch (e) {
                                 setNotice({
                                     title: tf("status_error_prefix"),
@@ -1565,6 +1581,32 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 title={notice?.title ?? ""}
                 message={notice?.message ?? ""}
                 closeLabel={t("ok")}
+                extraActions={
+                    notice?.copyText
+                        ? [
+                              {
+                                  id: "copy",
+                                  label: tf("menu_open_log_folder_copy_path"),
+                                  onClick: () => {
+                                      void copyTextToClipboard(notice.copyText ?? "").then((ok) => {
+                                          if (ok) {
+                                              setNotice((current) =>
+                                                  current
+                                                      ? {
+                                                            ...current,
+                                                            title: tf(
+                                                                "menu_open_log_folder_copied",
+                                                            ),
+                                                        }
+                                                      : current,
+                                              );
+                                          }
+                                      });
+                                  },
+                              },
+                          ]
+                        : undefined
+                }
             />
 
             {/*

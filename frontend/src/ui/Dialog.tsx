@@ -641,6 +641,14 @@ export interface AppNoticeDialogProps {
     message: ReactNode;
     /** 唯一按钮（关闭）的文案。 */
     closeLabel: ReactNode;
+    /**
+     * 关闭按钮**之前**的附加动作。
+     *
+     * 【为什么需要】有些通知报告的是"你要的值在这里"，例如日志路径 —— 用户看完
+     * 就得把它复制走。只给一个「关闭」等于让他手抄路径，而路径恰恰最容易抄错。
+     * 具体动作由调用方决定，本组件不掺和业务。
+     */
+    extraActions?: AppDialogAction[];
 }
 
 export function AppNoticeDialog({
@@ -649,6 +657,7 @@ export function AppNoticeDialog({
     title,
     message,
     closeLabel,
+    extraActions,
 }: AppNoticeDialogProps) {
     return (
         <AppDialog
@@ -658,6 +667,7 @@ export function AppNoticeDialog({
             message={message}
             size="sm"
             actions={[
+                ...(extraActions ?? []),
                 {
                     id: "close",
                     label: closeLabel,

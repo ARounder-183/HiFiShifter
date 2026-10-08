@@ -702,6 +702,8 @@ export const koKR = {
     menu_export_diagnostics: "진단 정보 내보내기...",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",
     menu_open_log_folder_path: "로그 위치: {path}",
+    menu_open_log_folder_copy_path: "경로 복사",
+    menu_open_log_folder_copied: "클립보드에 복사됨",
     menu_export_diagnostics_failed: "진단 정보 내보내기 실패",
     menu_export_diagnostics_running:
         "진단 정보를 내보내는 중. 벤치마크가 포함되어 20~60초 정도 걸릴 수 있습니다. 잠시만 기다려 주세요...",
@@ -712,6 +714,9 @@ export const koKR = {
     about_commit: "Commit",
     about_dirty: "커밋되지 않은 로컬 변경 있음",
     about_open_repo: "GitHub 저장소 열기",
+    about_copy_repo_link: "저장소 링크 복사",
+    about_copy_commit_link: "Commit 링크 복사",
+    about_copied: "클립보드에 복사됨",
     clip_badge_rate_tip: "속도",
     clip_badge_gain_tip: "게인",
     clip_rate_editor_title: "재생 속도 편집",

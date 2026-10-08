@@ -192,3 +192,38 @@ pub(super) fn pick_directory(
         Ok(Some(PathBuf::from(text?)))
     }
 }
+
+/// 在系统文件管理器中打开一个目录（Windows）。
+///
+/// 【为什么这不是"宿主限制"】插件**已经**在 REAPER 进程里开过原生文件夹选择器
+/// （[`pick_directory`]，用的是同一个 `Win32_UI_Shell` 特性）。此前 Help 菜单只回报
+/// 路径、不打开，理由写的是"不该在宿主进程里拉起外部程序" —— 那条策略与已经在跑的
+/// 文件夹选择器自相矛盾，而且让用户不得不手抄路径。
+///
+/// 因此这里真的打开它；失败时调用方仍会把路径回报给用户（可选中、可复制）。
+#[cfg(windows)]
+pub(super) fn reveal_directory(path: &Path) -> Result<(), String> {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation = HSTRING::from("open");
+    let target = HSTRING::from(path.to_string_lossy().as_ref());
+    // SAFETY: 两个 HSTRING 在本调用期间存活；其余参数按文档传 NULL。
+    let result = unsafe { ShellExecuteW(None, &operation, &target, None, None, SW_SHOWNORMAL) };
+    // 微软文档：返回值 ≤ 32 表示失败（那是一个错误码而不是 HINSTANCE）。
+    if result.0 as usize <= 32 {
+        return Err(format!(
+            "could not open the file manager (code {})",
+            result.0 as usize
+        ));
+    }
+    Ok(())
+}
+
+/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为打开成功了。
+#[cfg(not(windows))]
+pub(super) fn reveal_directory(path: &Path) -> Result<(), String> {
+    let _ = path;
+    Err("opening the file manager is not implemented on this platform".into())
+}

@@ -642,6 +642,8 @@ export const jaJP = {
     menu_export_diagnostics: "診断情報をエクスポート...",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
     menu_open_log_folder_path: "ログの場所: {path}",
+    menu_open_log_folder_copy_path: "パスをコピー",
+    menu_open_log_folder_copied: "クリップボードにコピーしました",
     menu_export_diagnostics_failed: "診断情報のエクスポートに失敗しました",
     menu_export_diagnostics_running:
         "診断情報をエクスポート中。ベンチマークを含むため 20〜60 秒かかる場合があります。しばらくお待ちください...",
@@ -652,6 +654,9 @@ export const jaJP = {
     about_commit: "Commit",
     about_dirty: "未コミットの変更があります",
     about_open_repo: "GitHub リポジトリを開く",
+    about_copy_repo_link: "リポジトリのリンクをコピー",
+    about_copy_commit_link: "Commit のリンクをコピー",
+    about_copied: "クリップボードにコピーしました",
     clip_badge_rate_tip: "レート",
     clip_badge_gain_tip: "ゲイン",
     clip_rate_editor_title: "再生速度を編集",

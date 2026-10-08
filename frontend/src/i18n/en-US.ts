@@ -771,6 +771,8 @@ export const enUS = {
     menu_export_diagnostics: "Export Diagnostics...",
     menu_open_log_folder_failed: "Could not open the log folder",
     menu_open_log_folder_path: "Logs are in {path}",
+    menu_open_log_folder_copy_path: "Copy path",
+    menu_open_log_folder_copied: "Copied to clipboard",
     menu_export_diagnostics_failed: "Failed to export diagnostics",
     menu_export_diagnostics_running:
         "Exporting diagnostics. This includes a benchmark and may take 20–60 seconds, please wait...",
@@ -781,6 +783,9 @@ export const enUS = {
     about_commit: "Commit",
     about_dirty: "Uncommitted local changes",
     about_open_repo: "Open GitHub Repository",
+    about_copy_repo_link: "Copy repository link",
+    about_copy_commit_link: "Copy commit link",
+    about_copied: "Copied to clipboard",
     clip_badge_rate_tip: "Rate",
     clip_badge_gain_tip: "Gain",
     clip_rate_editor_title: "Edit Playback Rate",
