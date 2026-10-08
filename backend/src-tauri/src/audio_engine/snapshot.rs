@@ -973,6 +973,28 @@ pub(crate) fn build_snapshot(
             }
         };
 
+        // 气声支必须与谐波支**等长**。
+        //
+        // `mix.rs` 用同一个采样下标读两支（`rendered[idx]` 与 `breath_noise[idx]`），
+        // 长度不等时气声层会在越界点**突然消失**（那里只有一个 `if`，没有 else）——
+        // 叠加信号因此出现不连续，听感是咔哒。导出路径早已校验
+        // （`mixdown.rs` 的 `stem.len() == entry.pcm_stereo.len()`），实时路径此前没有。
+        //
+        // 处理方式是**整条丢弃**而不是截断：截断会让气声在另一个位置消失，同样不连续；
+        // 丢弃只是回到"没有气声层"，是明确的降级。
+        let breath_noise_pcm = match (rendered_pcm.as_ref(), breath_noise_pcm) {
+            (Some(harm), Some(stem)) if harm.len() != stem.len() => {
+                log::warn!(
+                    "[snapshot] dropping breath stem for clip {} — length {} != harmonic {}",
+                    clip.id,
+                    stem.len(),
+                    harm.len()
+                );
+                None
+            }
+            (_, other) => other,
+        };
+
         clips_out.push(EngineClip {
             clip_id: clip.id.clone(),
             track_id: clip.track_id.clone(),

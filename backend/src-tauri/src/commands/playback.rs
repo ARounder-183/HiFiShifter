@@ -866,13 +866,15 @@ fn render_single_clip(
         }
 
         // Loop（循环源）：平铺已提前到参数线阶段之前完成（见上方），
-        // 此处的输入已经覆盖整条 clip，只需截断/补零对齐长度。
-
-        if rendered.len() > clip_stereo_len {
-            rendered.truncate(clip_stereo_len);
-        } else if rendered.len() < clip_stereo_len {
-            rendered.resize(clip_stereo_len, 0.0);
-        }
+        // 此处的输入已经覆盖整条 clip，只需对齐长度。
+        //
+        // 【为什么不是裸 truncate / resize】声码器返回的帧数与
+        // `length_sec × sr` 存在舍入差，裸 `truncate` 会在**非过零点**切断，
+        // 裸 `resize(0.0)` 会让内容末端直接接上数字静音 —— 两者都是台阶（咔哒），
+        // 且每个 clip 边界都会发生。复用内核唯一的收尾实现：先在边界前做
+        // ~5ms 线性收尾，让切点落在 ≈0 上。
+        let ramp = ((0.005 * out_rate as f64).round() as usize).max(2) * 2;
+        crate::seam::smooth_tail_then_align(&mut rendered, clip_stereo_len, ramp);
 
         Ok(rendered)
     };
@@ -1146,12 +1148,10 @@ fn render_single_clip(
                 stereo.push(aligned[1].get(f).copied().unwrap_or(0.0));
             }
         }
-        // 长度兜底（重采样在极小输入下可能少一帧）
-        if stereo.len() < out_len {
-            stereo.resize(out_len, 0.0f32);
-        } else if stereo.len() > out_len {
-            stereo.truncate(out_len);
-        }
+        // 长度兜底（重采样在极小输入下可能少一帧）。与谐波支同样做收尾对齐 ——
+        // 裸截断/补零会让气声层在一个采样点处消失或接上静音，同样是不连续。
+        let ramp = ((0.005 * out_rate as f64).round() as usize).max(2) * 2;
+        crate::seam::smooth_tail_then_align(&mut stereo, out_len, ramp);
         stereo
     };
     let breath_noise_stereo = noise_stereo;
@@ -1812,6 +1812,14 @@ static LAST_IDLE_LOG_KEY: std::sync::atomic::AtomicU64 =
 /// 也是逐 clip 跟踪日志被降级为调试开关后，唯一值得打扰用户的单条信号。
 const SLOW_CLIP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 后台渲染期间推送引擎快照刷新的最小间隔（毫秒）。
+///
+/// 每次刷新都会让 worker 全量重建快照（O(clips)）并换入新快照（触发一次
+/// 20ms 交叉淡化）。逐 clip 推送在长工程里等于每几十毫秒重建一次 ——
+/// 白白让实时线程承受一串不必要的快照换代。等待中的传输层只需要"最终能
+/// 就绪"，因此节流；本轮结束时无条件补一次，保证不丢最后一次发布。
+const SNAPSHOT_REFRESH_MIN_MS: u128 = 200;
+
 /// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
 ///
 /// 本轮渲染**不按固定顺序遍历**：每个 clip 边界都按实时播放位置动态择优
@@ -1853,6 +1861,8 @@ fn render_background_pass(
         let mut disk_load_elapsed = std::time::Duration::ZERO;
         let mut cache_probe_elapsed = std::time::Duration::ZERO;
         let mut render_elapsed = std::time::Duration::ZERO;
+        // 引擎快照刷新的节流时间戳（见循环末尾的说明）。
+        let mut last_snapshot_refresh: Option<std::time::Instant> = None;
         let mut cancelled = false;
         let mut pending_clip_ids_written: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -2187,10 +2197,29 @@ fn render_background_pass(
             // `AudioEngine::refresh_rendered_snapshot`）：产出者主动发布，
             // 无需轮询 / 版本号比对 / 等待状态上报，等待中的传输层会在下一个
             // 音频块自动重新判定就绪性并继续播放。
-            {
+            //
+            // 【为什么节流】每次刷新都会让 worker **全量重建**快照（O(clips)），
+            // 并换入新快照触发一次 20ms 交叉淡化。逐 clip 推送在长工程里等于
+            // 每几十毫秒重建一次，纯属浪费；而等待中的传输层只需要"最终能就绪"。
+            // 节流到 `SNAPSHOT_REFRESH_MIN_MS`，并在本轮结束时**无条件**补一次，
+            // 保证最后一个 clip 的结果一定被发布。
+            let now = std::time::Instant::now();
+            let refresh_due = last_snapshot_refresh
+                .map(|prev| now.duration_since(prev).as_millis() >= SNAPSHOT_REFRESH_MIN_MS)
+                .unwrap_or(true);
+            if refresh_due {
+                last_snapshot_refresh = Some(now);
                 let engine = app.state::<AppState>().audio_engine.clone();
                 engine.refresh_rendered_snapshot();
             }
+        }
+
+        // 本轮结束：无条件补一次刷新，把最后若干 clip 的结果发布出去
+        // （它们可能落在节流窗口内而被跳过）。被取消的轮次同样执行 ——
+        // 已入库的 clip 依然是有效进展。
+        {
+            let engine = app.state::<AppState>().audio_engine.clone();
+            engine.refresh_rendered_snapshot();
         }
 
         // ── 本轮结束的公共收尾 ────────────────────────────────────────────────

@@ -89,7 +89,7 @@ pub(crate) use hifishifter_kernel::{
     audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
     dml_adapters, encode, formant_cache, gpu_info, media, midi_import, mixdown, models,
     notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache, render_key,
-    renderer, stereo_detect, synth_clip_cache, temp_manager,
+    renderer, seam, stereo_detect, synth_clip_cache, temp_manager,
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。

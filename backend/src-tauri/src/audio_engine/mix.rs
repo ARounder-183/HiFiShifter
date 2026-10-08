@@ -9,7 +9,26 @@ use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
 
-const SNAPSHOT_XFADE_FRAMES: usize = 256;
+/// 快照切换时新旧渲染的交叉淡化时长（毫秒）。
+///
+/// 【为什么按时间而不是固定帧数】固定 256 帧在 44.1k 只有 5.8ms，在 48k 更短。
+/// 新旧渲染之间可能存在直流 / 相位 / 增益差（编辑后重渲染必然如此），太短的
+/// 淡化遮不住，残留台阶就是咔哒。20ms 足以把这类差异摊平，又短到听不出
+/// "两段叠在一起"。
+const SNAPSHOT_XFADE_MS: f32 = 20.0;
+
+/// 冻结（等待渲染）时的淡出、以及恢复出声时的淡入时长（毫秒）。
+///
+/// 未就绪时若硬切到数字静音，就是一次教科书式的爆音 —— 而这恰恰是"每 6s
+/// 一次杂音"里最响的那一类。用一小段淡出把**已经播出的内容**收尾，恢复时
+/// 再用同样长度淡入。
+const WAIT_RAMP_MS: f32 = 5.0;
+
+/// 毫秒 → 帧数（至少 1 帧，避免斜坡长度为 0 时退化成硬切）。
+#[inline]
+fn ms_to_frames(ms: f32, sample_rate: u32) -> usize {
+    ((ms / 1000.0) * sample_rate.max(1) as f32).round().max(1.0) as usize
+}
 
 /// Unsigned 16-bit silence level (0x8000), keeping the waveform centered.
 // u16 输出格式的静音样本（f32 0.0 → i16/u16 中点）。pub 供 engine.rs 的
@@ -27,6 +46,20 @@ pub(crate) struct SnapshotTransitionState {
     current_snapshot: Option<Arc<EngineSnapshot>>,
     fade_from_snapshot: Option<Arc<EngineSnapshot>>,
     fade_remaining_frames: usize,
+    /// 本次交叉淡化的**总**帧数（按采样率换算），`fade_remaining_frames` 的初值。
+    fade_total_frames: usize,
+    /// 冻结前最后一个"就绪"块的尾部样本（立体声交错）。
+    ///
+    /// 【为什么要留这一小段】冻结时不能硬切到静音。把刚播出的尾部按斜坡收到 0
+    /// 一次，是标准的"停止去咔哒"手法；它**不是**播放陈旧内容 —— 位置不推进、
+    /// 也绝不使用编辑前的旧快照。见 `mix_into_scratch_stereo` 的冻结分支。
+    hold_tail: Vec<f32>,
+    /// `hold_tail` 是否有效（false 时冻结直接输出静音）。
+    hold_valid: bool,
+    /// 恢复淡入已完成的帧数。
+    resume_done_frames: usize,
+    /// 恢复淡入的总帧数（0 表示当前不在恢复中）。
+    resume_total_frames: usize,
 }
 
 /// RT-local per-track meter scratch. Lives entirely inside the audio
@@ -667,8 +700,9 @@ fn blend_snapshot_windows_in_place(
     current_and_out: &mut [f32],
     from: &[f32],
     fade_remaining_frames: usize,
+    fade_total_frames: usize,
 ) {
-    let total = SNAPSHOT_XFADE_FRAMES.max(1);
+    let total = fade_total_frames.max(1);
     let already_blended = total.saturating_sub(fade_remaining_frames);
     let frames = (current_and_out.len() / 2).min(from.len() / 2);
 
@@ -681,6 +715,61 @@ fn blend_snapshot_windows_in_place(
         current_and_out[base] = from[base] * from_gain + current_and_out[base] * to_gain;
         current_and_out[base + 1] =
             from[base + 1] * from_gain + current_and_out[base + 1] * to_gain;
+    }
+}
+
+/// 记住一个就绪块的尾部 `ramp_frames` 帧，供冻结时淡出收尾。
+fn record_hold_tail(scratch: &[f32], hold: &mut Vec<f32>, ramp_frames: usize) {
+    let frames = scratch.len() / 2;
+    let n = frames.min(ramp_frames);
+    hold.clear();
+    hold.extend_from_slice(&scratch[(frames - n) * 2..]);
+}
+
+/// 冻结时把上一块的尾部按线性斜坡收到 0，写进本块（本块原本已清零）。
+///
+/// `hold` 比块短时，斜坡只覆盖开头部分，其余保持静音 —— 那正是想要的：
+/// 淡出结束后就是静音。
+fn apply_hold_tail_fade_out(scratch: &mut [f32], hold: &[f32], valid: bool) {
+    if !valid {
+        return;
+    }
+    let frames = scratch.len() / 2;
+    let hold_frames = hold.len() / 2;
+    let n = frames.min(hold_frames);
+    if n == 0 {
+        return;
+    }
+    // 取 `hold` 的**末尾** n 帧（最接近冻结时刻的内容）。
+    let src_base = (hold_frames - n) * 2;
+    for f in 0..n {
+        let t = (f as f32 + 0.5) / n as f32;
+        let g = 1.0 - t;
+        let src = src_base + f * 2;
+        scratch[f * 2] = hold[src] * g;
+        scratch[f * 2 + 1] = hold[src + 1] * g;
+    }
+}
+
+/// 冻结恢复后，按斜坡把本块从 0 拉到 1。
+///
+/// `done` 是此前已完成的帧数，`total` 是斜坡总长。返回更新后的 `done`。
+fn apply_resume_fade_in(scratch: &mut [f32], done: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let frames = scratch.len() / 2;
+    let mut cursor = done;
+    for f in 0..frames {
+        let g = ((cursor + 1).min(total) as f32) / total as f32;
+        scratch[f * 2] *= g;
+        scratch[f * 2 + 1] *= g;
+        cursor = cursor.saturating_add(1);
+    }
+    if cursor >= total {
+        0
+    } else {
+        cursor
     }
 }
 
@@ -745,7 +834,10 @@ fn mix_into_scratch_stereo(
         .unwrap_or(0);
     if current_ptr != 0 && current_ptr != snap_ptr {
         transition.fade_from_snapshot = transition.current_snapshot.take();
-        transition.fade_remaining_frames = SNAPSHOT_XFADE_FRAMES;
+        // 淡化长度按**时间**换算（见 `SNAPSHOT_XFADE_MS`），而不是固定帧数：
+        // 固定 256 帧在不同设备采样率下时长不同，且在 48k 下更短。
+        transition.fade_total_frames = ms_to_frames(SNAPSHOT_XFADE_MS, snap.sample_rate);
+        transition.fade_remaining_frames = transition.fade_total_frames;
     }
     transition.current_snapshot = Some(snap.clone());
 
@@ -756,8 +848,8 @@ fn mix_into_scratch_stereo(
     // ── 原地等待渲染（Case A + Case B 统一）──────────────────────────────
     // 引擎快照是唯一真相，本回调是其**纯函数**：
     //   - 窗口未就绪（覆盖该位置的 Clip 尚在渲染）→ 冻结：保持 is_playing、
-    //     不推进位置、静音输出（pending 窗口的 scratch 已是全零），并丢弃
-    //     xfade 来源，等待期间绝不播放编辑前的陈旧内容；
+    //     不推进位置、静音输出，并丢弃 xfade 来源，等待期间绝不播放编辑前的
+    //     陈旧内容；
     //   - 窗口就绪 → 正常推进并出声。
     // 因此等待的解除无需任何主动信号：渲染线程把结果发布给引擎
     // （`RenderedClipsChanged`）→ worker 换入新快照 → 本判定在下一个音频块
@@ -767,6 +859,18 @@ fn mix_into_scratch_stereo(
         play_start_wait.store(true, Ordering::Relaxed);
         transition.fade_from_snapshot = None;
         transition.fade_remaining_frames = 0;
+        // 【绝不硬切到数字静音】`scratch` 此刻已是全零（未就绪窗口不会混音），
+        // 直接返回就是一次满幅跳变 → 爆音。这里把**上一块已播出的尾部**按
+        // 5ms 斜坡收到 0 再返回；恢复出声时由 `apply_resume_fade_in` 对称淡入。
+        //
+        // 【这不是"播放陈旧内容"】只重放刚播过的那几毫秒并把它收到 0，是标准的
+        // "停止去咔哒"手法：位置不推进，也绝不使用编辑前的旧快照 —— 那才是本
+        // 分支注释所禁止的事。
+        let ramp = ms_to_frames(WAIT_RAMP_MS, snap.sample_rate);
+        apply_hold_tail_fade_out(scratch, &transition.hold_tail, transition.hold_valid);
+        transition.hold_valid = false;
+        transition.resume_total_frames = ramp;
+        transition.resume_done_frames = 0;
         // stderr I/O must stay off the RT thread: report via the meter thread
         // (diagnostics only — the resume is driven by the render threads).
         bus.transport_wait_pos.store(pos0, Ordering::Relaxed);
@@ -788,6 +892,7 @@ fn mix_into_scratch_stereo(
                 scratch.as_mut_slice(),
                 scratch_fade_from.as_slice(),
                 transition.fade_remaining_frames,
+                transition.fade_total_frames,
             );
             transition.fade_remaining_frames =
                 transition.fade_remaining_frames.saturating_sub(frames);
@@ -800,9 +905,39 @@ fn mix_into_scratch_stereo(
         }
     }
 
+    // 冻结恢复后的淡入：必须**在**交叉淡化之后，否则会被淡化重新拉回非零电平。
+    if transition.resume_total_frames > 0 {
+        let done = apply_resume_fade_in(
+            scratch.as_mut_slice(),
+            transition.resume_done_frames,
+            transition.resume_total_frames,
+        );
+        transition.resume_done_frames = done;
+        if done == 0 {
+            // 斜坡走完：清掉总长，否则下一个块会从 0 再淡入一次。
+            transition.resume_total_frames = 0;
+        }
+    }
+
     // 节拍器与实际出声的块同步叠加：未播放 / 冻结等待的静音块已在上方早退，
     // 到达此处必然出声。
     metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
+
+    // 记住本块尾部，供下一次冻结时淡出收尾。
+    record_hold_tail(
+        scratch.as_slice(),
+        &mut transition.hold_tail,
+        ms_to_frames(WAIT_RAMP_MS, snap.sample_rate),
+    );
+    transition.hold_valid = true;
+
+    // 写出前的最后一道防线：净化 NaN / ±Inf 并夹到 [-1,1]。
+    //
+    // 【为什么必须在这里】`clamp11` 用的是 `f32::clamp`，遇 NaN 返回 NaN
+    // （不 panic、也不净化）。实时输出路径上只要有一个 NaN 泄漏到设备缓冲，
+    // 就是一次满量程爆音；声码器的 STFT/ISTFT 与 ONNX 推理都存在产生 NaN 的
+    // 路径。放在混音之后、节拍器之后，覆盖全部三种输出格式（f32/i16/u16）。
+    crate::seam::sanitize_finite_in_place(scratch.as_mut_slice());
 
     advance_playback_position(frames, is_playing, position_frames, duration_frames);
     Some(BlockRender { snapshot: snap })
@@ -1461,5 +1596,87 @@ mod tests {
         // idx 4.5 → 22.5ms（越界）→ no-op
         let (l, _r) = apply_mix_automation(&clip, (0.0225 * sr as f64) as u64, 1.0, 1.0);
         assert!((l - 1.0).abs() < 1e-6, "越界后不得污染，got {l}");
+    }
+
+    /// 冻结时的淡出必须从"上一块尾部"起步并收到 0 —— 硬切到静音就是爆音。
+    #[test]
+    fn hold_tail_fade_out_ramps_to_silence_without_a_step() {
+        let frames = 16usize;
+        // 上一块：恒定 1.0
+        let prev = vec![1.0f32; frames * 2];
+        let mut hold = Vec::new();
+        super::record_hold_tail(&prev, &mut hold, 8);
+        assert_eq!(hold.len(), 8 * 2, "只保留尾部 8 帧");
+
+        let mut scratch = vec![0.0f32; frames * 2];
+        super::apply_hold_tail_fade_out(&mut scratch, &hold, true);
+
+        // 首样本接近 1（不是 0），末样本接近 0：整段是斜坡而非台阶。
+        assert!(
+            scratch[0] > 0.9,
+            "淡出必须从已播出的电平起步: {}",
+            scratch[0]
+        );
+        assert!(scratch[7 * 2].abs() < 0.2, "斜坡末端应接近 0");
+        // 斜坡之后保持静音
+        assert!(scratch[8 * 2..].iter().all(|v| *v == 0.0));
+        // 单调淡出
+        for f in 0..7 {
+            assert!(scratch[f * 2] >= scratch[(f + 1) * 2]);
+        }
+    }
+
+    /// 无历史（首次冻结）时不得写入任何东西 —— scratch 已是静音。
+    #[test]
+    fn hold_tail_is_ignored_when_invalid() {
+        let mut scratch = vec![0.0f32; 8];
+        super::apply_hold_tail_fade_out(&mut scratch, &[1.0, 1.0], false);
+        assert!(scratch.iter().all(|v| *v == 0.0));
+    }
+
+    /// 恢复淡入从 0 爬到 1，并在斜坡走完后返回 0（调用方据此清除状态，
+    /// 否则下一个块会再从 0 淡入一次）。
+    #[test]
+    fn resume_fade_in_ramps_up_then_reports_completion() {
+        let total = 8usize;
+        let mut scratch = vec![1.0f32; 4 * 2];
+        let done = super::apply_resume_fade_in(&mut scratch, 0, total);
+        assert_eq!(done, 4, "斜坡尚未走完");
+        assert!(scratch[0] < 0.2, "首样本必须从接近静音起步: {}", scratch[0]);
+        assert!(scratch[3 * 2] > scratch[0]);
+
+        let mut scratch2 = vec![1.0f32; 4 * 2];
+        let done2 = super::apply_resume_fade_in(&mut scratch2, 4, total);
+        assert_eq!(done2, 0, "走完必须报 0");
+        assert!((scratch2[3 * 2] - 1.0).abs() < 1e-6);
+    }
+
+    /// 交叉淡化总长按采样率换算，不再是与采样率无关的固定 256 帧。
+    #[test]
+    fn crossfade_length_scales_with_sample_rate() {
+        assert_eq!(super::ms_to_frames(super::SNAPSHOT_XFADE_MS, 44_100), 882);
+        assert_eq!(super::ms_to_frames(super::SNAPSHOT_XFADE_MS, 48_000), 960);
+        // 极端输入不得产生 0 长度斜坡（那会退化成硬切）
+        assert!(super::ms_to_frames(0.0, 44_100) >= 1);
+    }
+
+    /// 设备块比淡化区更长时，淡化必须**在块内**单调走完，而不是一次跳变。
+    #[test]
+    fn snapshot_crossfade_is_monotonic_within_one_block() {
+        let total = 8usize;
+        let frames = 16usize;
+        let mut cur = vec![1.0f32; frames * 2];
+        let from = vec![0.0f32; frames * 2];
+        super::blend_snapshot_windows_in_place(&mut cur, &from, total, total);
+        for f in 0..total - 1 {
+            assert!(
+                cur[f * 2] <= cur[(f + 1) * 2] + 1e-6,
+                "淡化区必须单调: f={f}"
+            );
+        }
+        assert!(
+            (cur[(total + 1) * 2] - 1.0).abs() < 1e-6,
+            "淡化区之后保持新值"
+        );
     }
 }
