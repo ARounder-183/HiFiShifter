@@ -17,11 +17,21 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, Tag};
 use symphonia::core::units::{Duration, TimeBase};
 
+/// 可作为媒体导入的音频扩展名。
+///
+/// 【为什么必须与前端一致】目录导入（[`crate::folder_scan`]）与拖放准入都按扩展名
+/// 先筛，筛出来的路径随后交给导入流程。这份名单比前端宽，用户就会"导入一个不认识的
+/// 格式然后失败"；比前端窄，文件浏览器里能拖的文件、拖文件夹时却被漏掉。前端
+/// `fileBrowser/fileKinds.ts` 是唯一来源，app 侧的 `media_extensions_match_frontend`
+/// 测试直接读它的源码比对。
+///
+/// MIDI 不在其中：它走独立的导入对话框，塞进同一条批量管线会引入半配置状态。
 pub const AUDIO_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3",
     "ape", "wv", "mp2", "mpa", "dts", "amr",
 ];
 
+/// 可作为媒体导入的视频容器扩展名（按音轨导入）。与 [`AUDIO_EXTENSIONS`] 同一份口径。
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg",
     "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",

@@ -126,6 +126,7 @@ pub mod time_stretch;
 pub mod audio_utils;
 pub mod encode;
 pub mod media;
+pub mod midi_export;
 pub mod midi_import;
 
 // ── 渲染与缓存 ──────────────────────────────────────────────────────────────
@@ -203,6 +204,7 @@ pub mod stereo_detect;
 // ── 工程与杂项 ──────────────────────────────────────────────────────────────
 pub mod clip_rendering_state;
 pub mod config;
+pub mod folder_scan;
 pub mod notebook_assets;
 pub mod project;
 pub mod temp_manager;

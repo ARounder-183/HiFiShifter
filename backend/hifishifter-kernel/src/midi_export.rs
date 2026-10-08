@@ -1,6 +1,15 @@
+//! 把编辑后的音高曲线导出为 MIDI 文件（SMF）。
+//!
+//! 【为什么在内核】整条链路是纯粹的变换：读时间线里的音高数据 → 写文件。它不碰
+//! 任何宿主 API、不碰 Tauri，于是独立 App 与 ARA 插件可以共用同一份实现 —— 插件里
+//! "把编辑好的音高导出成 MIDI"因此不需要任何宿主写接口。
+//!
+//! 【入口为什么收时间线而不是 AppState】早先的签名要 `&AppState`，只为在内部
+//! `lock()` 一次再 clone。收 `&TimelineState` 让调用方决定怎么拿快照，本模块就与
+//! 应用状态彻底解耦（插件侧的快照来自它自己的会话）。
 use crate::pitch_clip;
 use crate::pitch_editing::transpose_midi_by_scale_steps;
-use crate::state::{AppState, TimelineState};
+use crate::state::TimelineState;
 
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
 use serde::Deserialize;
@@ -407,7 +416,11 @@ fn smooth_curve(values: &[f32], window: usize) -> Vec<f32> {
 /// 构建时一次性积分各段 BPM 得到每个变化点处的累计 tick 数（O(n)），
 /// 之后每次查询用二分查找定位所在段（O(log n)），避免在逐帧弯音导出
 /// 等热点路径中退化为 O(points × frames)。
-pub(crate) struct TempoTickConverter {
+///
+/// 【为什么是 `pub`】REAPER 工程导出（app 侧 `import/reaper_export.rs`）也用同一套
+/// QN 换算 —— 原生 REAPER 的 `POSITION` / `LENGTH` / `ENVSEG` 都按 Tempo Map 积分，
+/// 而不是"秒 × 固定 BPM"。两份实现会直接导致变速工程的包络错位。
+pub struct TempoTickConverter {
     /// (sec, bpm)，按 sec 升序，首点位于 0。
     points: Vec<(f64, f64)>,
     /// cumulative_ticks[i] = 从 0 到 points[i].sec 的累计 tick 数。
@@ -415,7 +428,7 @@ pub(crate) struct TempoTickConverter {
 }
 
 impl TempoTickConverter {
-    pub(crate) fn new(timeline: &crate::state::TimelineState, fallback_bpm: f64) -> Self {
+    pub fn new(timeline: &crate::state::TimelineState, fallback_bpm: f64) -> Self {
         let mut points: Vec<(f64, f64)> = Vec::new();
         if let Some(map) = timeline.tempo_map.as_ref() {
             for p in map {
@@ -466,7 +479,7 @@ impl TempoTickConverter {
     /// 同源积分）。REAPER 剪贴板的 ENVSEG `SEG_RANGE` QN 字段用此换算——
     /// 原生数据在变速工程下按 Tempo Map 积分（秒 × 常量 BPM 的线性换算
     /// 会产生节拍网格错位）。
-    pub(crate) fn sec_to_qn(&self, sec: f64) -> f64 {
+    pub fn sec_to_qn(&self, sec: f64) -> f64 {
         let sec = sec.max(0.0);
         let idx = self
             .points
@@ -915,18 +928,16 @@ fn intern_track_name(name: &str) -> &'static [u8] {
     leaked
 }
 
-pub(super) fn export_pitch_to_midi(
-    state: &AppState,
+/// 把一条时间线快照里的音高曲线导出成 MIDI 文件。
+///
+/// 【调用方必须先克隆一份时间线】导出可能触发 FCPE 音高分析（长素材可达数分钟）；
+/// 在持有时间线锁的情况下跑完，会冻结全部命令与 UI 轮询。签名收 `&TimelineState`
+/// 正是为了让这条纪律落在调用点上，而不是藏在本函数内部。
+pub fn export_pitch_to_midi(
+    timeline: &TimelineState,
     request: MidiExportRequest,
 ) -> serde_json::Value {
-    // 快照时间线：短锁克隆后**立即释放**。导出可能触发 FCPE 音高分析
-    // （长素材可达数分钟），若在锁内执行会冻结所有命令与 UI 轮询。
-    let timeline = match state.timeline.lock() {
-        Ok(guard) => guard.clone(),
-        Err(e) => {
-            return serde_json::json!({"ok": false, "error": format!("lock_failed: {}", e)});
-        }
-    };
+    let timeline = timeline.clone();
 
     let channels = assign_channels(request.tracks.len());
     let mut midi_tracks: Vec<Vec<TrackEvent<'static>>> =

@@ -73,9 +73,11 @@ mod file_browser;
 mod json_export;
 #[path = "commands/midi.rs"]
 mod midi;
-#[path = "commands/midi_export.rs"]
-mod midi_export;
-pub(crate) use midi_export::TempoTickConverter;
+// MIDI 导出已搬进内核（`hifishifter_kernel::midi_export`）：整条链路是纯粹的
+// "读音高曲线 → 写文件"，ARA 插件侧要共用同一份实现，不能再留在 app 里。
+pub(crate) use hifishifter_kernel::midi_export;
+// REAPER 工程导出（`import/reaper_export.rs`）沿用同一套 Tempo Map 积分换算。
+pub(crate) use hifishifter_kernel::midi_export::TempoTickConverter;
 #[path = "commands/formant.rs"]
 mod formant;
 #[path = "commands/notebook.rs"]
@@ -2482,7 +2484,18 @@ pub async fn export_pitch_to_midi(
     // 否则同步命令会占住主线程、冻结 UI 与其余 IPC。
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        midi_export::export_pitch_to_midi(state.inner(), request)
+        // 快照时间线：短锁克隆后**立即释放**。导出可能触发 FCPE 音高分析（长素材
+        // 可达数分钟），在锁内跑完会冻结所有命令与 UI 轮询。
+        let timeline = match state.timeline.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": format!("lock_failed: {e}"),
+                })
+            }
+        };
+        midi_export::export_pitch_to_midi(&timeline, request)
     })
     .await
     {
