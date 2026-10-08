@@ -208,6 +208,50 @@ pub fn sanitize_finite_in_place(buf: &mut [f32]) {
     }
 }
 
+/// 把一条 0/1 门控序列就地平滑成定长斜坡的增益。
+///
+/// # 为什么需要
+/// "把某段置零 / 乘 0"这类门控在**边界**必然产生台阶：门控从 1 跳到 0 的那一帧，
+/// 信号从满幅瞬间变成 0。只要被门控的信号有内容（不是真静音），那就是一次咔哒。
+/// 本工程至少有两处这样的门控：
+/// - WORLD 的干/湿混合（浊音 ↔ 非浊音切换）；
+/// - 时间拉伸的硬静音保护（把静音段置零）。
+///
+/// # 为什么是**居中**滑动平均
+/// 居中平滑的结果只依赖门控在 `[i - ramp/2, i + ramp/2]` 内的取值，因此是
+/// **位置的函数**。这一点在分块渲染里至关重要：同一个位置无论被哪个块、
+/// 哪一次调用处理，都得到同一个增益。历史上 WORLD 的混合用一个跨样本的状态机
+/// （`w_prev` / `ramp_left`），逐块调用时每块都从 0 重启，于是**每个块首被
+/// 强行淡入一次**，每 6s 一次。
+///
+/// `ramp < 2` 时不做任何事（没有可平滑的空间）。
+pub fn smooth_binary_gate(gate: &mut [f32], ramp: usize) {
+    let n = gate.len();
+    if ramp < 2 || n == 0 {
+        return;
+    }
+    let half = ramp / 2;
+    let tail = ramp - half;
+
+    // 前缀和：把每个样本的窗口求和从 O(ramp) 降到 O(1)。
+    let mut prefix = Vec::with_capacity(n + 1);
+    prefix.push(0.0f32);
+    let mut acc = 0.0f32;
+    for &g in gate.iter() {
+        acc += g;
+        prefix.push(acc);
+    }
+
+    for i in 0..n {
+        let lo = i.saturating_sub(half);
+        let hi = (i + tail).min(n);
+        let count = hi - lo;
+        if count > 0 {
+            gate[i] = (prefix[hi] - prefix[lo]) / count as f32;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +419,36 @@ mod tests {
         assert_eq!(tail_ramp_samples(512, 44_100, 48_000), 1116);
         // 极端值不 panic（saturating）
         assert!(tail_ramp_samples(usize::MAX, 1, u32::MAX) > 0);
+    }
+
+    /// 门控平滑：只在**过渡处**产生斜坡，远离边界保持原值，且单调。
+    #[test]
+    fn binary_gate_smoothing_ramps_only_at_transitions() {
+        let mut gate = vec![1.0f32; 40];
+        for g in gate.iter_mut().skip(20) {
+            *g = 0.0;
+        }
+        smooth_binary_gate(&mut gate, 8);
+
+        assert_eq!(gate[0], 1.0, "远离边界必须保持原值");
+        assert_eq!(gate[39], 0.0);
+        assert!(
+            gate.iter().any(|v| *v > 0.0 && *v < 1.0),
+            "过渡处必须出现中间值（斜坡）"
+        );
+        for i in 0..39 {
+            assert!(gate[i] >= gate[i + 1] - 1e-6, "斜坡必须单调: i={i}");
+        }
+    }
+
+    /// `ramp < 2` 时不产生任何改变（没有可平滑的空间）。
+    #[test]
+    fn binary_gate_smoothing_is_a_noop_for_tiny_ramps() {
+        let mut gate = vec![1.0f32, 1.0, 0.0, 0.0];
+        let before = gate.clone();
+        smooth_binary_gate(&mut gate, 1);
+        assert_eq!(gate, before);
+        smooth_binary_gate(&mut gate, 0);
+        assert_eq!(gate, before);
     }
 }

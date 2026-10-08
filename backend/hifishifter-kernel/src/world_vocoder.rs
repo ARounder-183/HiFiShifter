@@ -232,7 +232,7 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
     // 浊音帧恒为湿；非浊音帧若原始信号本身有能量（齿音/气声）则切回干，
     // 否则（真静音）保留合成 —— 合成的静音也是静音，切不切听感相同，
     // 保持湿可避免在"静音↔气声"的判定抖动处反复切换。
-    let mut target = vec![0.0f64; n];
+    let mut target = vec![0.0f32; n];
     for (si, t) in target.iter_mut().enumerate() {
         let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
         let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
@@ -270,26 +270,11 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
     // 居中滑动平均只依赖目标权重在 `[i-fade/2, i+fade/2]` 内的取值 ——
     // 而目标权重由 `voiced` 与 `dry` 决定，这两者在相邻块的**重叠区**
     // 是同一份数据。因此平滑结果是**位置的函数，与分块无关**，
-    // 逐块调用与整段调用给出同一个权重。
-    let w_at = |i: usize| -> f64 {
-        if fade_samples < 2 {
-            return target[i];
-        }
-        let half = fade_samples / 2;
-        let lo = i.saturating_sub(half);
-        let hi = (i + (fade_samples - half)).min(n);
-        if hi <= lo {
-            return target[i];
-        }
-        let mut acc = 0.0;
-        for &v in &target[lo..hi] {
-            acc += v;
-        }
-        acc / (hi - lo) as f64
-    };
+    // 逐块调用与整段调用给出同一个权重。实现见 `seam::smooth_binary_gate`。
+    crate::seam::smooth_binary_gate(&mut target, fade_samples);
 
     for si in 0..n {
-        let w = w_at(si);
+        let w = target[si] as f64;
         let wet = out[si];
         let dry_sample = dry[si];
         out[si] = wet * w + dry_sample * (1.0 - w);

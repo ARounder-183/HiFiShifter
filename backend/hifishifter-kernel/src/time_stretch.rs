@@ -138,6 +138,13 @@ pub fn should_use_hifigan_mel_stretch() -> bool {
 const STRETCH_SILENCE_WINDOW_MS: f64 = 10.0;
 const STRETCH_MIN_SILENCE_MS: f64 = 20.0;
 const STRETCH_SILENCE_RMS: f32 = 1.0e-4;
+/// 静音段边界的门控斜坡时长（毫秒）。
+///
+/// 旧实现把判定为静音的块**整体硬置零**：块边界处信号从满幅瞬间变 0，
+/// 是一次等于信号幅度的单帧台阶（咔哒）。`STRETCH_SILENCE_RMS = 1e-4`
+/// 在安静人声上会频繁触发，因此这类咔哒并不罕见。5ms 足以抹平台阶，
+/// 又短到不会吞掉静音段两侧的真实内容。
+const STRETCH_SILENCE_RAMP_MS: f64 = 5.0;
 
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name)
@@ -227,7 +234,13 @@ fn preserve_hard_silence_after_stretch(
         (in_frames - 1) as f64 / (out_frames - 1) as f64
     };
 
-    for out_frame in 0..out_frames {
+    // 逐输出帧求门控（0 = 静音段，1 = 保留），再平滑成斜坡。
+    //
+    // 【为什么不再就地置零】硬置零在静音段的**边界**留下一个等于信号幅度的
+    // 单帧台阶 —— 正是要消除的咔哒。改成"先求 0/1 门控、再居中平滑、最后相乘"：
+    // 静音段内部仍是精确 0，只有边界被一段斜坡抹平。
+    let mut gate = vec![1.0f32; out_frames];
+    for (out_frame, g) in gate.iter_mut().enumerate() {
         let source_frame = if out_frames <= 1 || in_frames <= 1 {
             0
         } else {
@@ -236,12 +249,23 @@ fn preserve_hard_silence_after_stretch(
                 .clamp(0.0, (in_frames - 1) as f64) as usize
         };
         let block_index = (source_frame / window_frames).min(silent_blocks.len() - 1);
-        if !silent_blocks[block_index] {
+        if silent_blocks[block_index] {
+            *g = 0.0;
+        }
+    }
+
+    let ramp = ((sample_rate.max(1) as f64) * (STRETCH_SILENCE_RAMP_MS / 1000.0))
+        .round()
+        .max(1.0) as usize;
+    crate::seam::smooth_binary_gate(&mut gate, ramp);
+
+    for (out_frame, &g) in gate.iter().enumerate() {
+        if g >= 1.0 {
             continue;
         }
         let base = out_frame * channels;
         for channel in 0..channels {
-            output[base + channel] = 0.0;
+            output[base + channel] *= g;
         }
     }
 }
@@ -290,14 +314,24 @@ pub fn time_stretch_interleaved(
 
             match result {
                 Ok(mut out) => {
-                    // 确保输出长度精确匹配请求
+                    // 先对齐长度并做收尾，再施加静音门控。
+                    //
+                    // 【为什么不能裸 resize】拉伸器少给几帧时，裸 `resize(0.0)`
+                    // 会在**非过零点**切断内容、再直接接上数字静音 —— 两处都是
+                    // 台阶。`smooth_tail_then_align` 在边界前做 ~5ms 线性收尾，
+                    // 让切点落在 ≈0 上。
+                    //
+                    // 顺序：先对齐、后门控。门控按 `output.len()` 推算输出帧数，
+                    // 放在对齐之后才能覆盖最终长度。
+                    let ramp = ((0.005 * sample_rate.max(1) as f64).round() as usize).max(2)
+                        * channels.max(1);
+                    crate::seam::smooth_tail_then_align(&mut out, out_frames * channels, ramp);
                     preserve_hard_silence_after_stretch(
                         input,
                         &mut out,
                         channels,
                         sample_rate.max(1),
                     );
-                    out.resize(out_frames * channels, 0.0);
                     out
                 }
                 Err(e) => {
@@ -337,13 +371,24 @@ pub fn time_stretch_interleaved(
 
             match result {
                 Ok(mut out) => {
+                    // 先对齐长度并做收尾，再施加静音门控。
+                    //
+                    // 【为什么不能裸 resize】拉伸器少给几帧时，裸 `resize(0.0)`
+                    // 会在**非过零点**切断内容、再直接接上数字静音 —— 两处都是
+                    // 台阶。`smooth_tail_then_align` 在边界前做 ~5ms 线性收尾，
+                    // 让切点落在 ≈0 上。
+                    //
+                    // 顺序：先对齐、后门控。门控按 `output.len()` 推算输出帧数，
+                    // 放在对齐之后才能覆盖最终长度。
+                    let ramp = ((0.005 * sample_rate.max(1) as f64).round() as usize).max(2)
+                        * channels.max(1);
+                    crate::seam::smooth_tail_then_align(&mut out, out_frames * channels, ramp);
                     preserve_hard_silence_after_stretch(
                         input,
                         &mut out,
                         channels,
                         sample_rate.max(1),
                     );
-                    out.resize(out_frames * channels, 0.0);
                     out
                 }
                 Err(e) => {
@@ -458,5 +503,43 @@ mod tests {
         // 生效算法永久留在 Linear，与并行测试（如 stretch 任务调度断言
         // Signalsmith）竞态。
         update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
+    }
+
+    /// 静音段边界必须有斜坡，不得是"等于信号幅度"的单帧台阶。
+    ///
+    /// 旧实现把静音块整体硬置零，边界处信号从满幅瞬间变 0 —— 一次咔哒。
+    /// `STRETCH_SILENCE_RMS = 1e-4` 在安静人声上频繁触发，所以这不是罕见路径。
+    #[test]
+    fn silence_gate_ramps_at_region_boundaries() {
+        let sr = 44_100u32;
+        let channels = 1usize;
+        let frames = sr as usize;
+        // 1 秒：前 0.4s 满幅正弦，中间 0.2s 真静音，后 0.4s 满幅正弦。
+        let mut input = vec![0.0f32; frames];
+        for (i, v) in input.iter_mut().enumerate() {
+            let t = i as f64 / sr as f64;
+            if !(0.4..0.6).contains(&t) {
+                *v = (2.0 * std::f64::consts::PI * 440.0 * t).sin() as f32 * 0.8;
+            }
+        }
+
+        let mut output = input.clone();
+        super::preserve_hard_silence_after_stretch(&input, &mut output, channels, sr);
+
+        // 静音段中部必须被真正清零（门控仍然生效，只是边界变缓）
+        let mid = (0.5 * sr as f64) as usize;
+        assert_eq!(output[mid], 0.0, "静音段内部必须是精确 0");
+
+        // 边界处不得出现"单帧从满幅跳到 0"：最大相邻跳变不应显著超过
+        // 信号自身的相邻跳变（440Hz @ 0.8 ≈ 0.05）。
+        let max_jump = output
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        let signal_jump = (2.0 * std::f64::consts::PI * 440.0 / sr as f64 * 0.8) as f32;
+        assert!(
+            max_jump < signal_jump * 1.5,
+            "门控不得制造台阶: max_jump={max_jump} signal_jump={signal_jump}"
+        );
     }
 }
