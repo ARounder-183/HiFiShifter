@@ -132,6 +132,7 @@ pub mod mixdown;
 pub mod render_cache;
 pub mod render_key;
 pub mod renderer;
+pub mod seam;
 pub mod synth_clip_cache;
 
 // ── 声码器 ──────────────────────────────────────────────────────────────────
