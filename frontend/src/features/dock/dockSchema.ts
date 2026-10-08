@@ -64,6 +64,15 @@ export const DEFAULT_GUTTER_SIZES: DockGutterSizes = {
     timelineTrackHeaderPx: 256,
 };
 
+/**
+ * ARA 插件形态**首次使用**时的轨道头宽度。
+ *
+ * 【为什么单独一个值】插件窗口下限是 640×400，而默认的 256px 会吃掉 **40%** 的宽度，
+ * 时间轴几乎看不见 —— 不是"挤一点"，是一开始就不能用。用户第一件事必然是把它拖小。
+ * 只在"插件还没有自己的布局"那一次生效；用户调过之后就跟随用户的值。
+ */
+export const PLUGIN_DEFAULT_TRACK_HEADER_PX = 140;
+
 /** 主编辑区面板的窗体 id（与 `registerBuiltinPanels` 的命名约定一致）。 */
 export const MAIN_FORM_TIMELINE = "timeline";
 export const MAIN_FORM_PARAM_EDITOR = "paramEditor";

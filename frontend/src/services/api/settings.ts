@@ -260,6 +260,14 @@ export interface UiSettings {
      * 配置文件"，一次写入同时落盘两者可以少一轮文件往返，也少一个并发窗口。
      */
     dock?: DockPersistedSettings;
+    /**
+     * ARA 插件形态的停靠布局。与 `dock` **同形**，但两者互不干扰。
+     *
+     * 【为什么分开】ARA 窗口下限 640×400，独立 App 是整屏。用户在插件里为了能用
+     * 必然折叠面板、把分隔条拖到极端比例；若与 App 共用同一个字段，两个形态会互相
+     * 覆盖对方的排布，谁都留不住（见 `hifishifter_kernel::config::UiSettings::dock_plugin`）。
+     */
+    dockPlugin?: DockPersistedSettings;
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy?: ChannelImportPolicy;
     /** 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。 */

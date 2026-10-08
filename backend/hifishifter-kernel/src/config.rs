@@ -724,6 +724,21 @@ pub struct UiSettings {
     /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
     #[serde(default)]
     pub dock: serde_json::Value,
+    /// ARA 插件形态的停靠布局（与 `dock` **同形**，但两者互不干扰）。
+    ///
+    /// 【为什么必须分开】ARA 窗口下限是 640×400，而独立 App 是整屏。用户在插件里
+    /// 为了能用必然折叠面板、把分隔条拖到极端比例；这份布局若与 App 共用同一个字段，
+    /// 下次在 2560×1440 上开 App 恢复的就是一个为小视口调过的排布，反之亦然 ——
+    /// 两个形态会互相覆盖对方的布局，谁都留不住。
+    ///
+    /// 【为什么新建字段而不是给 `dock` 加模式子键】`dock` 的值是一个扁平对象
+    /// （行为选项平铺 + 一份 `layout`），前端按字段名读写；加一层子键要同时改
+    /// 前端的两处 thunk 与深度合并语义，而新增顶层字段只需前端按 `hostMode()` 选名字。
+    ///
+    /// 判据：**凡是"正确取值取决于窗口有多少像素"的设置分模式，凡是"取决于用户是谁"
+    /// 的共享**（locale / 快捷键 / 主题 / 设备选择仍然共用）。
+    #[serde(default)]
+    pub dock_plugin: serde_json::Value,
     /// 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。
     ///
     /// 与 `notebook` / `dock` 同理：**后端只做透传存储**，字段语义、取值范围与
@@ -1736,6 +1751,7 @@ impl Default for UiSettings {
             channel_import_policy: ChannelImportPolicy::default(),
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
+            dock_plugin: serde_json::Value::Null,
             pen_input: serde_json::Value::Null,
         }
     }
@@ -1807,6 +1823,51 @@ impl UiSettings {
 mod tests {
     use super::UiSettings;
     use crate::time_stretch::UserStretchAlgorithm;
+
+    /// 共享布局在插件形态缺失时被**复制**一份过去，且原值留给独立 App。
+    ///
+    /// 【为什么复制而不是移动】文件里没有 provenance，区分不出当前的 `dock` 是谁写的。
+    /// 复制幂等且可逆；移动两者都不是。歧义值判给 App 是因为非对称损害：为小视口调过的
+    /// 布局在大窗口里"挤但能用"，反过来的布局在 640×400 里真的不能用。
+    #[test]
+    fn the_shared_layout_is_copied_to_the_plugin_scope_once() {
+        let mut settings = UiSettings {
+            dock: serde_json::json!({ "layout": { "roots": {} } }),
+            ..Default::default()
+        };
+        settings.migrate_plugin_dock_layout();
+        assert_eq!(
+            settings.dock_plugin, settings.dock,
+            "插件形态必须拿到一份副本"
+        );
+        assert!(!settings.dock.is_null(), "原值必须留给独立 App，不能被搬走");
+
+        // 幂等：再跑一次不会覆盖插件那边已经调好的布局。
+        settings.dock_plugin = serde_json::json!({ "layout": { "roots": { "plugin": 1 } } });
+        let plugin_before = settings.dock_plugin.clone();
+        settings.migrate_plugin_dock_layout();
+        assert_eq!(
+            settings.dock_plugin, plugin_before,
+            "已存在的插件布局被覆盖了"
+        );
+    }
+
+    /// 没有共享布局可复制时，插件形态保持缺失（由前端落回默认布局）。
+    #[test]
+    fn the_plugin_scope_stays_empty_without_a_shared_layout() {
+        let mut settings = UiSettings::default();
+        settings.migrate_plugin_dock_layout();
+        assert!(settings.dock_plugin.is_null());
+    }
+
+    /// 新旧配置都必须能反序列化出 `dockPlugin` 键（旧文件里没有它）。
+    #[test]
+    fn a_config_without_the_plugin_layout_still_loads() {
+        let settings: UiSettings =
+            serde_json::from_value(serde_json::json!({ "autoCrossfade": false }))
+                .expect("旧配置必须能读");
+        assert!(settings.dock_plugin.is_null());
+    }
 
     /// 旧配置（出厂时长下限 0.5 s 被序列化进文件、没有 policyVersion）必须被迁移。
     #[test]
@@ -2632,7 +2693,29 @@ impl AppConfig {
     fn migrated(mut self) -> Self {
         self.ui.render_cache.migrate_admission_policy();
         self.ui.channel_import_policy.migrate_tolerance();
+        self.ui.migrate_plugin_dock_layout();
         self
+    }
+}
+
+impl UiSettings {
+    /// 把共享布局复制一份给插件形态（幂等）。
+    ///
+    /// 【为什么是复制而不是移动】文件里没有 provenance，区分不出当前的 `dock` 是
+    /// App 写的还是插件写的。复制是幂等且可逆的，移动两者都不是。
+    ///
+    /// 【为什么把旧值留给独立 App】非对称损害：为小视口调过的布局在大窗口里是
+    /// "挤但能用"（分隔条能拖回来），为大窗口调过的布局在 640×400 里是**真的不能用**
+    /// （面板被裁到最小尺寸之下、gutter 超过视口宽度）。所以歧义值判给 App，
+    /// 插件拿到一份副本，用户不满意时重置一次即可（`resetDockLayout`）。
+    ///
+    /// 【为什么只在缺失时复制】已存在就不能覆盖 —— 那会把用户已经调好的插件布局
+    /// 每次启动都推回 App 的版本。
+    fn migrate_plugin_dock_layout(&mut self) {
+        if !self.dock_plugin.is_null() || self.dock.is_null() {
+            return;
+        }
+        self.dock_plugin = self.dock.clone();
     }
 }
 

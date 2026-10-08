@@ -14,6 +14,7 @@ import {
     PERSISTED_UI_KEYS,
     flushUiStorage,
     hydrateUiStorage,
+    modeKey,
     readUiValue,
     removeUiValue,
     setUiStorageTransportForTest,
@@ -247,5 +248,67 @@ describe("白名单", () => {
         ]) {
             expect(PERSISTED_UI_KEYS).not.toContain(key);
         }
+    });
+});
+
+describe("按形态分键", () => {
+    const ZOOM_KEY = "hifishifter.pxPerSec";
+
+    afterEach(() => {
+        delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    });
+
+    /** 独立 App 用基础键名，插件用 `.plugin` 后缀 —— 两者的值互不可见。 */
+    test("plugin mode stores viewport-dependent keys under their own name", () => {
+        expect(modeKey(ZOOM_KEY)).toBe(ZOOM_KEY);
+        expect(modeKey(LOCALE_KEY)).toBe(LOCALE_KEY);
+
+        window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "zoom" };
+        expect(modeKey(ZOOM_KEY)).toBe(`${ZOOM_KEY}.plugin`);
+        // 语言这类"取决于用户是谁"的偏好必须仍然共用同一个键。
+        expect(modeKey(LOCALE_KEY)).toBe(LOCALE_KEY);
+        expect(modeKey(KEYBINDINGS_KEY)).toBe(KEYBINDINGS_KEY);
+    });
+
+    /** 两个形态的缩放互不覆盖：这正是本次要修的故障。 */
+    test("the two modes keep separate zoom values", () => {
+        writeUiValue(ZOOM_KEY, "120");
+        window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "zoom" };
+        expect(readUiValue(ZOOM_KEY)).toBeNull();
+        writeUiValue(ZOOM_KEY, "40");
+        expect(readUiValue(ZOOM_KEY)).toBe("40");
+
+        delete window.__HFS_PLUGIN_BOOTSTRAP__;
+        expect(readUiValue(ZOOM_KEY)).toBe("120");
+    });
+
+    /** 分形态的键也要进白名单，否则既不同步后端、灌回时也会被跳过。 */
+    test("both variants are persisted", async () => {
+        // 待提交队列是模块级的，前一条测试的写入还排在队里 —— 先排空，
+        // 否则这条断言会把它的键也算进来（而它测的是别的事）。
+        setUiStorageTransportForTest(recordingTransport());
+        await flushUiStorage();
+
+        expect(PERSISTED_UI_KEYS).toContain(ZOOM_KEY);
+        window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "zoom" };
+        const transport = recordingTransport();
+        setUiStorageTransportForTest(transport);
+        writeUiValue(ZOOM_KEY, "40");
+        await flushUiStorage();
+        expect(transport.puts).toEqual([{ [`${ZOOM_KEY}.plugin`]: "40" }]);
+    });
+
+    /** 灌回时后端的两份值各归各位。 */
+    test("hydrate restores both variants without mixing them", async () => {
+        const transport = recordingTransport({
+            [ZOOM_KEY]: "120",
+            [`${ZOOM_KEY}.plugin`]: "40",
+        });
+        setUiStorageTransportForTest(transport);
+        await hydrateUiStorage();
+
+        expect(readUiValue(ZOOM_KEY)).toBe("120");
+        window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "zoom" };
+        expect(readUiValue(ZOOM_KEY)).toBe("40");
     });
 });

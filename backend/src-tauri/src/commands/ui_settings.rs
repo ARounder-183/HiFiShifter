@@ -23,6 +23,10 @@ const DEEP_MERGE_KEYS: &[&str] = &[
     "channelImportPolicy",
     "notebook",
     "dock",
+    // ARA 形态的布局与 `dock` 同形同语义（见 `UiSettings::dock_plugin`），因此同样
+    // 需要子键合并 —— 漏登记这一项，用户在插件里改一个行为开关就会把整份布局抹掉。
+    // 这份清单与 `hifishifter_kernel::editor::settings` 里的是**两份**，必须同时改。
+    "dockPlugin",
     "search",
     // 指针设备偏好：前端会把压感、捏合、读数等**逐项**部分保存
     // （如只改 `pressureMaxGain`）。漏登记这一项，用户改一个滑块就会把其余
@@ -249,6 +253,21 @@ mod tests {
             assert_eq!(merged[key]["kept"], json!(1), "{key} 的兄弟子键丢失");
             assert_eq!(merged[key]["changed"], json!(2), "{key} 的补丁未生效");
         }
+    }
+
+    /// 两份深度合并清单必须**逐字相同**。
+    ///
+    /// 【为什么需要这条】插件走 `hifishifter_kernel::editor::settings::merge`（用内核
+    /// 那份），独立 App 走本文件的 `DEEP_MERGE_KEYS`。两份清单是重复的、没有编译保护，
+    /// 漏改一处只会表现为"某个设置改一次就把兄弟字段全丢了" —— 很难被注意到。
+    /// 新增嵌套设置对象时，这条测试会立刻指出漏改的那一份。
+    #[test]
+    fn the_two_deep_merge_lists_stay_identical() {
+        assert_eq!(
+            DEEP_MERGE_KEYS,
+            hifishifter_kernel::editor::settings::DEEP_MERGE_KEYS,
+            "App 与内核的深度合并清单已经分叉：改一处必须同时改另一处"
+        );
     }
 
     #[test]

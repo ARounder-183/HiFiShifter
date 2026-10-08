@@ -25,6 +25,7 @@ import {
     type DockPlacement,
     normalizeFloatMode,
     normalizeTabPosition,
+    PLUGIN_DEFAULT_TRACK_HEADER_PX,
 } from "./dockSchema";
 import {
     addFormToTabset,
@@ -152,10 +153,29 @@ const dockSlice = createSlice({
         /** 从后端设置恢复：先归一化布局，再套用行为选项。 */
         hydrateDock(
             state,
-            action: PayloadAction<{ settings?: DockSettings | null; layout?: unknown }>,
+            action: PayloadAction<{
+                settings?: DockSettings | null;
+                layout?: unknown;
+                /**
+                 * 插件形态且还没有自己的布局：改用更小的轨道头默认宽度。
+                 *
+                 * 【为什么由载荷带进来而不是在这里读 `window`】本 reducer 保持纯粹；
+                 * 形态判断在 thunk 里做一次（那里已经调用了 `hostMode()`）。
+                 */
+                pluginFirstRun?: boolean;
+            }>,
         ) {
             const raw = action.payload ?? {};
             state.layout = installLayout(normalizeDockLayout(raw.layout));
+            if (raw.pluginFirstRun && raw.layout == null) {
+                state.layout = {
+                    ...state.layout,
+                    gutters: {
+                        ...state.layout.gutters,
+                        timelineTrackHeaderPx: PLUGIN_DEFAULT_TRACK_HEADER_PX,
+                    },
+                };
+            }
             state.settings = normalizeDockSettings(raw.settings);
             state.hydrated = true;
         },

@@ -16,16 +16,39 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 
 import type { AppDispatch, RootState } from "../../app/store";
 import { settingsApi } from "../../services/api/settings";
+import { hostMode } from "../../services/hostCapabilities";
 import { applyDockPreset, setDockLayout } from "./dockSlice";
 import { findMainTabset } from "./dockSchema";
 import { restoreDetachedWindows } from "./dockApi";
 import { insertForm } from "./dockTree";
 import { MAIN_ROOT_ID } from "./dockTypes";
 
+/**
+ * 布局字段名按形态选择。
+ *
+ * 【为什么两个形态各存一份】ARA 窗口下限 640×400，独立 App 是整屏。插件里为了能用
+ * 必然折叠面板、把分隔条拖到极端比例 —— 那份布局在大窗口里只是"挤"，但为大窗口
+ * 调好的布局在 640×400 里**真的不能用**（面板被裁到最小尺寸之下、gutter 超过视口）。
+ * 共用同一个字段时两个形态会互相覆盖，谁都留不住。
+ *
+ * 判据：**凡是"正确取值取决于窗口有多少像素"的设置分模式**；locale / 快捷键 / 主题 /
+ * 设备选择这些"取决于用户是谁"的仍然共用同一个键。
+ */
+function dockFieldKey(): "dock" | "dockPlugin" {
+    return hostMode() === "plugin" ? "dockPlugin" : "dock";
+}
+
 export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () => {
     const ui = await settingsApi.getUiSettings();
-    const dock = (ui.dock ?? null) as { layout?: unknown } | null;
-    return { settings: ui.dock ?? null, layout: dock?.layout ?? null };
+    const stored = ui[dockFieldKey()] ?? null;
+    return {
+        settings: stored,
+        // 布局的**取值**由前端的 `normalizeDockLayout` 收口，这里不做假设。
+        layout: (stored as { layout?: unknown } | null)?.layout ?? null,
+        // 插件形态第一次打开（还没有自己的布局）时改用更小的默认轨道头宽度：
+        // 默认的 256px 会吃掉 640px 窗口的 40%（见 `PLUGIN_DEFAULT_TRACK_HEADER_PX`）。
+        pluginFirstRun: stored === null && hostMode() === "plugin",
+    };
 });
 
 /** 把当前设置与布局整体写回后端。 */
@@ -33,11 +56,14 @@ export const persistDockSettings = createAsyncThunk(
     "dock/persistSettings",
     async (_: void, { getState }) => {
         const { dock } = getState() as RootState;
-        await settingsApi.saveUiSettings({
-            // 行为选项平铺 + 一份完整布局，一次写入同时落盘（见 `dockSettings`
-            // 里 `DockPersistedSettings` 的注释）。
-            dock: { ...dock.settings, layout: dock.layout },
-        });
+        // 行为选项平铺 + 一份完整布局，一次写入同时落盘（见 `dockSettings`
+        // 里 `DockPersistedSettings` 的注释）。
+        const payload = { ...dock.settings, layout: dock.layout };
+        // 显式分支而不是计算键：计算键在 `Partial<UiSettings>` 上会退化成索引签名，
+        // 写错字段名也不会被类型检查抓到。
+        await settingsApi.saveUiSettings(
+            hostMode() === "plugin" ? { dockPlugin: payload } : { dock: payload },
+        );
     },
 );
 
