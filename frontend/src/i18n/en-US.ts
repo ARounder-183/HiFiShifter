@@ -2082,6 +2082,16 @@ export const enUS = {
         "These host-owned fields were changed locally, so nothing was submitted. Change them in REAPER: {fields}",
     ara_submit_reconnect_required:
         "The host timeline changed since you connected. Reconnect to REAPER and try again.",
+    /*
+     * 措辞红线：**不要**写成"ARA 规范不支持跨轨"。ARA 2.0 规范允许一个实例服务多个
+     * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
+     * `render::extension::HostAudioState` 的说明）。
+     */
+    ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
+    ara_host_audio_folder_body:
+        "REAPER manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
+    ara_clip_waiting_for_host_audio:
+        "Waiting for REAPER to hand over audio (no ARA region assigned)",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",

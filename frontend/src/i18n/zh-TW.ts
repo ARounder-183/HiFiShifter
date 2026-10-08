@@ -2026,6 +2026,15 @@ export const zhTW = {
     ara_submit_blocked_host_fields:
         "以下由 REAPER 擁有的欄位被本機修改，因此沒有提交任何內容。請在 REAPER 中修改：{fields}",
     ara_submit_reconnect_required: "連線之後宿主時間軸已改變。請重新連線 REAPER 後再試。",
+    /*
+     * 措辭紅線：**不要**寫成「ARA 規範不支援跨軌」。ARA 2.0 規範允許一個實例服務多個
+     * region sequence；真正的原因是 REAPER 按軌道管理 ARA 外掛（見後端
+     * `render::extension::HostAudioState` 的說明）。
+     */
+    ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
+    ara_host_audio_folder_body:
+        "REAPER 按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
+    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊（未分配 ARA 區域）",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",

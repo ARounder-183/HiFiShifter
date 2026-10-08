@@ -2096,6 +2096,16 @@ export const jaJP = {
         "REAPER が所有する以下のフィールドがローカルで変更されたため、何も送信していません。REAPER 側で変更してください：{fields}",
     ara_submit_reconnect_required:
         "接続後にホストのタイムラインが変わりました。REAPER に再接続してからやり直してください。",
+    /*
+     * 措辞の注意：**「ARA 仕様はクロストラック非対応」と書かないこと**。ARA 2.0 の仕様は
+     * 1 つのインスタンスが複数の region sequence を扱うことを許しています。実際の理由は
+     * REAPER が ARA プラグインをトラック単位で管理していることです（バックエンドの
+     * `render::extension::HostAudioState` を参照）。
+     */
+    ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
+    ara_host_audio_folder_body:
+        "REAPER は ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
+    ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中（ARA リージョンが未割り当て）",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",

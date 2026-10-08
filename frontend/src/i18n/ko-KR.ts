@@ -2067,6 +2067,16 @@ export const koKR = {
         "REAPER가 소유한 다음 필드가 로컬에서 변경되어 아무것도 전송하지 않았습니다. REAPER에서 변경하세요: {fields}",
     ara_submit_reconnect_required:
         "연결한 뒤 호스트 타임라인이 변경되었습니다. REAPER에 다시 연결한 후 시도하세요.",
+    /*
+     * 표현 주의: **"ARA 규격은 크로스트랙을 지원하지 않는다"라고 쓰지 마세요.** ARA 2.0
+     * 규격은 하나의 인스턴스가 여러 region sequence를 담당하는 것을 허용합니다. 실제
+     * 이유는 REAPER가 ARA 플러그인을 트랙 단위로 관리하기 때문입니다(백엔드
+     * `render::extension::HostAudioState` 참조).
+     */
+    ara_host_audio_folder_title: "이 플러그인은 트랙 그룹(폴더)에 있습니다",
+    ara_host_audio_folder_body:
+        "REAPER는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",
+    ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중(ARA 리전 미할당)",
     ara_replace_dirty_message:
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",

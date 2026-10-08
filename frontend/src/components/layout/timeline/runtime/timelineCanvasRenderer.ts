@@ -278,6 +278,14 @@ export function drawTimelineCanvas(
             groupId?: string;
             name: string;
             isMidiClip?: boolean;
+            /**
+             * 该 clip 是**无源占位**：宿主尚未把音频交给插件（未分配 ARA region）。
+             *
+             * 模型侧由 `isAwaitingHostAudio` 判定（`source_path` 缺失且没有 MIDI
+             * 音符）。绘制端只画语言无关的斜纹底 —— 本地化文案在 DOM 侧（提示条与
+             * 悬停浮标），与 `muteBadgeLabel: "M"` 同一约定。
+             */
+            awaitingHostAudio?: boolean;
             trackColor?: string;
             isRenaming?: boolean;
             /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
@@ -741,6 +749,32 @@ export function drawTimelineCanvas(
         const radius = item.radius;
 
         ctx.globalAlpha = style.mutedAlpha;
+
+        /*
+         * 「等待宿主音频」占位：body 画斜纹底。
+         *
+         * 【为什么用纹样而不是文字】时间轴上的标记一律是**语言无关**的符号（见
+         * `muteBadgeLabel: "M"`），本地化文案在 DOM 侧（提示条 + 悬停浮标）。纹样让
+         * "没有内容"与"有内容但静音 / 负增益"一眼可分，又不随语系变化。
+         *
+         * 裁剪到 body 的圆角矩形：斜线不能溢到 header 或相邻 clip 上。
+         */
+        if (item.clip.awaitingHostAudio) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(clipLeft, bodyTop, clipWidth, bodyHeight, [0, 0, radius, radius]);
+            ctx.clip();
+            ctx.strokeStyle = darkMode ? "rgba(255, 255, 255, 0.18)" : "rgba(24, 28, 36, 0.14)";
+            ctx.lineWidth = 1;
+            const step = 7;
+            for (let x = clipLeft - bodyHeight; x < clipLeft + clipWidth; x += step) {
+                ctx.beginPath();
+                ctx.moveTo(x, bodyTop + bodyHeight);
+                ctx.lineTo(x + bodyHeight, bodyTop);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
 
         if (style.showGainKnob) {
             const knobCenterX = clipLeft + style.gainKnobCenterOffsetX;

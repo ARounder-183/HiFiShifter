@@ -160,6 +160,27 @@ export interface ProjectMeta {
     hifigan_mel_stretch_override?: boolean | null;
 }
 
+/**
+ * 宿主音频是否已经到达插件（REAPER / ARA）。
+ *
+ * 【为什么是分类而不是布尔】"插件挂在轨道组父轨上"与"宿主还没分配区域"在用户侧是
+ * 两种处境，处置方式不同：前者是用法问题、要给具体指引，后者只是等待。把两者压成
+ * 一个布尔，界面就只能给出一句对谁都不准的泛泛提示。
+ *
+ * 后端只给**语言无关**的分类名，文案按 catalog 本地化（与 `araApi.araErrorText`
+ * 同一原则）。
+ *
+ * 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务多个
+ * region sequence，是 **REAPER 选择按轨道管理 ARA 实例**。
+ */
+export type HostAudioState = "ready" | "awaiting_regions" | "folder_parent_without_regions";
+
+export interface HostAudioPayload {
+    state: HostAudioState;
+    /** 尚未被任何已分配 region 认领的片段数（"还在等音频"的片段数）。 */
+    waiting_clips: number;
+}
+
 export interface TimelineState {
     tracks: TimelineTrack[];
     clips: TimelineClip[];
@@ -174,6 +195,12 @@ export interface TimelineState {
     disabled_group_ids?: string[];
     /** Tempo Map 数据（null = 无 Tempo Map）。 */
     tempo_map?: TempoMapPayload;
+    /**
+     * 宿主音频读数（仅插件模式产生；独立 App 不带该字段）。
+     *
+     * 缺省 = 本次响应与宿主音频状态无关，消费端沿用上一次已知值。
+     */
+    host_audio?: HostAudioPayload;
     /**
      * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
      *

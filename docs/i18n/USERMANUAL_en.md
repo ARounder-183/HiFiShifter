@@ -752,6 +752,16 @@ Access steps (same for both ways):
 2. To work on several tracks, add a plugin instance on each track. Opening any one HiFiShifter window lets you edit every track already connected in the same project — these windows are different views of one workspace, not independent editing copies; edits are not shared between different projects.
 3. Before using shortcuts, click the plugin window once so keyboard focus enters the interface (the plugin forwards `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`, and the remaining shortcuts are handled by the interface itself).
 
+### Why a Track Group (Folder) Shows No Audio
+
+REAPER manages ARA plug-ins **per track**: it only hands the plug-in the audio on **the one track the plug-in sits on**. So when HiFiShifter is added to the parent track of a track group (folder), the items on the tracks inside the group are visible and can be dragged, but they get **no** audio content — no waveform, and no parameter analysis.
+
+- The correct approach is to **add one HiFiShifter instance per audio track you want to process**, not just one on the group's parent track.
+- You do not need to select the items first, and you do not need to "enable ARA" by hand: REAPER has ARA support on by default and starts analysis automatically. The only requirement is that the track actually has an audio item on it.
+- The plug-in recognizes this case: it shows a notice above the timeline, and the group's items are drawn as "waiting for REAPER to hand over audio" instead of as a blank clip that looks usable.
+
+> This follows from REAPER managing ARA plug-ins per track; it is not a defect in the plug-in.
+
 ### Model Files and Sharing
 
 The plugin needs three models — FCPE, HNSEP and HiFiGAN (about 150 MB in total). The installer puts the models into the **machine-wide shared library** (`%ProgramData%\HiFiShifter\models\<model version>`), which the standalone app reads as well — using both the plugin and the standalone app does not duplicate the 150 MB. The manual-copy version carries its own copy of the models and does not depend on the shared library.
@@ -794,6 +804,7 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 
 - The plugin cannot be found in REAPER: make sure you copied the **entire** `HiFiShifter.vst3` folder (not a single file inside it), that its parent directory is in REAPER's VST scan path, and that the WebView2 runtime and VC++ x64 runtime are installed.
 - It keeps showing `Waiting for host audio` or cannot analyse: check that the track has valid audio, that the plugin is connected through the host's ARA mode, and the automatic-apply status at the right of the status bar.
+- The plugin is on a track group (folder) parent track, items are visible but there is no waveform at all: REAPER manages ARA plug-ins per track and only hands the plug-in the audio on its own track. Add one HiFiShifter instance per audio track you want to process (see [Why a Track Group (Folder) Shows No Audio](#why-a-track-group-folder-shows-no-audio)).
 - Parameters did not take effect, or differ after reopening the project: keep a copy of the project and the error text shown in the status bar; do not overwrite the project or force a reload repeatedly.
 - An out-of-memory notice appears: it means the harmonic separation did not run this time, and the `Harmonic Separation`-related results are not silently dropped; use shorter material or turn `Harmonic Separation` off first.
 - To submit logs or troubleshoot: the plugin log is written to `%LOCALAPPDATA%\HiFiShifter\logs\plugin.log`; the menu `Help → Open Log Folder` shows that path (the plugin does not open a file manager for you). `Help → Export Diagnostics...` and `Options → Inference Device Benchmark` belong to the standalone app and are not available in the plugin.

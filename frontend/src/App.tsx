@@ -12,6 +12,7 @@ import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
+import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import {
     isPluginMode,
@@ -544,6 +545,11 @@ function AppInner() {
     const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
     const multiSelectedClipIds = useAppSelector((state) => state.session.multiSelectedClipIds);
     const sessionClips = useAppSelector((state) => state.session.clips);
+    /*
+     * 宿主音频读数（仅插件模式产生）。它只在"插件挂在 REAPER 轨道组父轨上"时
+     * 变成一条可见提示，因此这里订阅的代价只有一次浅比较。
+     */
+    const hostAudio = useAppSelector((state) => state.session.hostAudio);
     // 注意：playbackPositionSec 以 ~30Hz 持续变化，这里不能订阅（否则每次
     // 播放 tick 都重渲 AppInner）；需要它的地方（录音自动停止）在回调内经
     // store.getState() 同步读取最新值。
@@ -4322,6 +4328,14 @@ function AppInner() {
                 onLoopNewClipsChange={handleLoopNewClipsChange}
             />
             <ActionBar />
+
+            {/*
+             * 宿主音频提示条：只在"插件挂在 REAPER 轨道组（folder）父轨上、因此拿不到
+             * 组内子轨音频"时出现（见 `HostAudioNotice`）。放在工作区**之上**而不是
+             * 状态栏里：这条提示要给出原因与下一步，状态栏那个高度装不下；而它出现时
+             * 用户看到的正是一片没有内容的片段，提示必须紧挨着那片区域。
+             */}
+            {isPluginMode() ? <HostAudioNotice status={hostAudio} /> : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。

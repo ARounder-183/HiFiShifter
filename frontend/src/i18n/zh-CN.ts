@@ -2023,6 +2023,15 @@ export const zhCN = {
     ara_submit_blocked_host_fields:
         "以下由 REAPER 拥有的字段被本地修改，因此没有提交任何内容。请在 REAPER 中修改：{fields}",
     ara_submit_reconnect_required: "连接之后宿主时间线已改变。请重新连接 REAPER 后再试。",
+    /*
+     * 措辞红线：**不要**写成"ARA 规范不支持跨轨"。ARA 2.0 规范允许一个实例服务多个
+     * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
+     * `render::extension::HostAudioState` 的说明）。
+     */
+    ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
+    ara_host_audio_folder_body:
+        "REAPER 按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
+    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频（未分配 ARA 区域）",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",

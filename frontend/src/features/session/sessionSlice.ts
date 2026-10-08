@@ -1,8 +1,10 @@
 // 原编辑会话状态；独立app保留默认Main，插件首帧等待真实宿主时间线。
 import { createSlice, createAsyncThunk, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
+import { parseHostAudio } from "../ara/hostAudio";
 import type {
     HistoryRecordSummary,
+    HostAudioPayload,
     TimelineClip,
     TimelineClipTake,
     TimelineState,
@@ -858,6 +860,17 @@ export interface SessionState {
 
     /** 选区恢复请求序号（单调递增）。 */
     _paramSelectionRestoreSeq: number;
+
+    /**
+     * 宿主音频读数（插件模式；`null` = 未知或不适用）。
+     *
+     * 【为什么必须进 Redux 而不是就地轮询】它是**时间线内容**的解释：同一批片段
+     * 有没有音频，取决于宿主有没有把 region 交给插件。放在会话状态里，`HostAudioNotice`
+     * 与片段渲染都读同一份读数，不会出现"提示条说有音频、片段却没有"的错位。
+     *
+     * 独立 App 从不产生该字段，因此缺省 `null` 即"不显示任何宿主音频提示"。
+     */
+    hostAudio: HostAudioPayload | null;
 
     /**
      * 最近一次**编辑类**请求的 requestId（setClipState / bulk / move 族）。
@@ -2405,6 +2418,7 @@ const initialState: SessionState = {
     historyRecords: [],
     pendingParamSelectionRestore: null,
     _paramSelectionRestoreSeq: 0,
+    hostAudio: null,
     _latestEditRequestId: null,
     _transportEpoch: 0,
     _pluginSeekRequestId: null,
@@ -4941,10 +4955,19 @@ const sessionSlice = createSlice({
                     return;
                 const payload = action.payload as {
                     ok?: boolean;
+                    host_audio?: unknown;
                 } & TimelineState;
                 if (!payload.ok) {
                     return;
                 }
+                /*
+                 * 宿主音频读数随快照更新。只认白名单里的分类名：后端将来加了新分类时，
+                 * 旧前端若把不认识的字符串当成已知状态渲染，就会给出一条**错误的指引**
+                 * （用户照着改工程，问题更糟）。未知分类与"本次没带该字段"同义 ——
+                 * 沿用上一次已知值，而不是清空或猜测（见 `parseHostAudio`）。
+                 */
+                const nextHostAudio = parseHostAudio(payload.host_audio);
+                if (nextHostAudio) state.hostAudio = nextHostAudio;
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,

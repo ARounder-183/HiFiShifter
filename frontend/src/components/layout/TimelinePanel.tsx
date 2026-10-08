@@ -43,6 +43,7 @@ import { useMenuShortcut } from "../../ui/useMenuShortcut";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
+import { isAwaitingHostAudio } from "../../features/ara/hostAudio";
 import { DockGutter } from "../dock/DockGutter";
 import { DEFAULT_GUTTER_SIZES, GUTTER_LIMITS } from "../../features/dock/dockSchema";
 import { setGutterSize } from "../../features/dock/dockSlice";
@@ -3885,6 +3886,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         });
                     }
                     break;
+            }
+            /*
+             * 无源占位的统一提示：悬停 clip 本体时说明"为什么里面没有内容"。
+             *
+             * 只在没有更具体的控件文案时才用（`text === null` 即命中 body / 无控件
+             * 区域）—— 悬停名称、静音等控件时，那些文案更贴近用户当刻的意图。
+             */
+            if (text === null && isAwaitingHostAudio(clip)) {
+                text = t("ara_clip_waiting_for_host_audio");
             }
             publishFadeRichTooltip(anchor, text);
         },

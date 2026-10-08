@@ -45,6 +45,7 @@ import {
     viewportStartSec,
     type TimelineAxis,
 } from "../../renderKernel/timelineAxis.js";
+import { isAwaitingHostAudio } from "../../../../features/ara/hostAudio.js";
 
 type SparseRenderClip = {
     id: string;
@@ -132,6 +133,14 @@ export type TimelineCanvasClipModel = {
     playbackRate: number;
     groupId?: string;
     isMidiClip: boolean;
+    /**
+     * 该 clip 是**无源占位**：宿主尚未把音频交给插件（未分配 ARA region）。
+     *
+     * 判据沿用既有的 `sourcePath` 缺失（见 `features/ara/hostAudio.isAwaitingHostAudio`），
+     * 不新增状态字段 —— 占位识别在后端 `retain_display_waveforms` 里用的就是同一判据，
+     * 新增字段等于让同一件事有两处真相。
+     */
+    awaitingHostAudio?: boolean;
     trackColor?: string;
     isRenaming: boolean;
     /** 吸附偏移（已换算为像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
@@ -679,6 +688,7 @@ export function buildSparseClipRenderModel(args: {
             playbackRate: clip.playbackRate,
             groupId: clip.groupId,
             isMidiClip: clip.midiNoteCount != null,
+            awaitingHostAudio: isAwaitingHostAudio(clip),
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
             snapOffsetPx: secToSpanPx(args.axis, Number(clip.snapOffsetSec) || 0),
