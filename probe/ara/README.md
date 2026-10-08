@@ -165,15 +165,10 @@ Task 1 的 Step 1 / 3 / 4 / 5 需要在 REAPER 图形界面里操作，且要造
 - Step 4：造"不干净"的素材（同源多放、拉伸、倒放、淡化、非 44.1kHz 工程）重采一次。
 - Step 5：写 `captures/FINDINGS.md`，重点是**ARA 不提供但渲染需要的字段**清单。
 
-### 命令行**不能**跑探针脚本（本机实测，2026-10-09）
+### 命令行没有"运行脚本"开关，但启动钩子能（本机实测，2026-10-09）
 
-**结论：REAPER 7.82 的命令行没有"运行 ReaScript"这个开关。** 所有探针脚本只能在
-REAPER 里 `Actions → Show action list → Load… → Run`（或 `Actions → ReaScript → Load`）
-手工跑。`probe/ara/start_*.ps1` 那几个运行器把脚本当成命令行参数传进去，
-**脚本不会被执行** —— 它们实际只做到"用隔离 profile 起一个 REAPER"，剩下那一步仍然
-要人来做。
-
-证据（从 `reaper.exe` 里直接取出的用法字符串，7.82 x64）：
+**REAPER 7.82 的命令行确实没有"运行 ReaScript"这个开关。** 从 `reaper.exe` 里取出的用法串
+（7.82 x64）：
 
 ```
 -cfgfile file.ini : use full path for alternate resource directory, otherwise uses default path
@@ -190,23 +185,48 @@ REAPER 里 `Actions → Show action list → Load… → Run`（或 `Actions →
 | `reaper.exe -cfgfile X -new script.lua` | 起一个空工程，脚本不跑 |
 | `reaper.exe -cfgfile X script.lua` | 把 `script.lua` 当工程加载 → 弹 `Load Error` |
 | `reaper.exe -cfgfile X project.rpp script.lua` | 工程正常打开，脚本不跑 |
-| `Scripts\__startup.lua` 约定 | 不执行（REAPER 没有这个约定） |
+| `Scripts\__startup.lua` 约定 | 不执行 —— REAPER **没有** `.lua` 的启动约定 |
 | `-reascript script.lua` | 未知开关，被忽略 |
 
-因此各 `build_*_probe.lua` 文件头里"用法：`reaper.exe -new build_xxx.lua`"那一行是
-**错的**（写它的人没验证过）。要用这些脚本，照 `fade_axis_capture.lua` 头部的写法：
-在 REAPER 里手工 Load 再 Run。
+**但 `Scripts\__startup.eel` 是有的**（EEL，不是 Lua）。REAPER 启动时会执行资源目录下的
+`<resource>\Scripts\__startup.eel`；EEL 里能调 `AddRemoveReaScript` 把任意 `.lua` 注册成
+action，再用 `Main_OnCommand` 跑它。于是探针可以在无人值守下跑完 —— 见下一节。
+（`.lua` 名字不生效这件事曾让人得出"完全没法自动化"的结论，那个结论只对了一半。）
 
-### 隔离 profile 的正确用法（仍然有用）
+三个必须知道的细节：
 
-`-cfgfile <scratch>\REAPER.ini` 确实生效：REAPER 会把整个资源目录（`Scripts/`、
-`ColorThemes/`…）建在 `<scratch>` 下，**不碰用户自己的 `%APPDATA%\REAPER`**。两个坑：
+1. **EEL 里的 REAPER API 不带 `reaper.` 前缀**（JSFX 风格）：写 `CountTracks(0)`，不是
+   `reaper.CountTracks(0)`。写成后者会**编译失败，而且失败是静默的** —— 钩子只是不执行，
+   没有任何提示。
+2. **`GetMediaItemInfo_Value` 对不认识的键返回 `0.0`，不报错**。轴名写错一个字母，读数会是
+   一串干净的 0，看起来像"宿主不支持"。`fade_axis_capture.lua` 曾把 `C_FADEOUTSHAPE` 写成
+   `D_FADEOUTSHAPE`，fade-out 四列整列假 0。
+3. `AddRemoveReaScript(add, 0, path, 1)` 的返回值是 action id（实测从 `53000` 起），
+   返回 0 表示注册失败，此时 `Main_OnCommand(0, …)` 什么也不做。
 
-1. 隔离 profile **不带注册信息**，REAPER 会以 `EVALUATION LICENSE` 启动并弹购买提示
-   （模态）。要先把用户的 `reaper-reginfo2.ini` **复制**进 scratch（只读复制，不改用户文件）。
-2. 隔离 profile 里没有 VST 缓存，REAPER 会扫一遍默认 VST 路径；不需要插件的探针
-   （如 F-1 淡化轴）可以直接等它扫完，或在 ini 里把 `vstpath64=` 留空。
+### 无头跑探针：`run_probe_headless.ps1`
 
+```powershell
+powershell -ExecutionPolicy Bypass -File probe/ara/run_probe_headless.ps1 `
+  -Probe "D:\Projects\HiFiShifter\proberaade_axis_capture.lua" `
+  -Out   "D:\Projects\HiFiShifter\.build-tmp1ade_axis.json" `
+  -Env   "HIFISHIFTER_FADE_AXIS_OUT=D:\Projects\HiFiShifter\.build-tmp1ade_axis.json"
+```
+
+`-Env` 可重复，形如 `NAME=VALUE`（`-File` 模式传不了哈希表）。`-Project <x.rpp>` 可指定工程，
+省略则用 `-new` 起空工程。探针产出 JSON 时退出码 0；没出结果时打印钩子日志并返回 1。
+
+脚本自己会做的隔离与兜底：
+
+- 资源目录指向 `.build-tmpeaper-probe\`（`-cfgfile`），**不碰 `%APPDATA%\REAPER`**；
+- 先把用户的 ini **复制**进临时目录 —— 不复制的话 REAPER 会认为这是全新便携安装，
+  弹 "Would you like to scan system VST/CLAP/LV2 paths?" 模态框，启动钩子永远轮不到执行；
+- 输出文件所在目录若不存在会先建出来（探针用 `io.open(path,"w")`，父目录不存在时
+  会 `assert` 失败并静默中止）；
+- 跑完（或超时）无条件杀掉 reaper 进程。
+
+各 `build_*_probe.lua` 文件头里"用法：`reaper.exe -new build_xxx.lua`"那一行仍然是**错的**
+（写它的人没验证过）；但那些脚本现在可以经由 `run_probe_headless.ps1` 无头跑。
 
 ## 环境限制（记录在案）
 
