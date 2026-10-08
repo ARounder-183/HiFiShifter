@@ -834,8 +834,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 现在只做"转交"：把事件原样交给内核的滚轮入口，keybinding 判定（自由滚动 /
      * 横纵滚动 / 横纵缩放）、锚点换算、上下限全部复用画布那一套，标尺不定义第二种语义。
      */
-    const handleRulerWheel = React.useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-        kernelHostRef.current?.dispatchWheel(event as unknown as WheelEvent);
+    const handleRulerWheel = React.useCallback((event: WheelEvent) => {
+        kernelHostRef.current?.dispatchWheel(event);
     }, []);
 
     React.useLayoutEffect(() => {

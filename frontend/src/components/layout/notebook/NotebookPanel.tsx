@@ -18,7 +18,6 @@ import { EditorContent } from "@tiptap/react";
 import type { Editor } from "@tiptap/core";
 import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@radix-ui/react-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { WheelEvent as ReactWheelEvent } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import {
@@ -1085,7 +1084,7 @@ export function NotebookPanel() {
         void settingsApi.saveUiSettings({ notebook: next }).catch(() => {});
     }, 400);
 
-    const onFontZoomWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    const onFontZoomWheel = (event: WheelEvent) => {
         if (isNoneBinding(fontZoomKb) || !isModifierActive(fontZoomKb, event)) return;
         /*
          * 命中手势后每一格都要拦，包括死区里那些不产生缩放的：不拦的话 WebView

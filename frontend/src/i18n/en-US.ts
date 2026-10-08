@@ -1398,7 +1398,6 @@ export const enUS = {
     lock_param_lines: "Lock Param Lines",
     edge_smoothness: "Smoothness",
     edge_smoothness_short: "Smooth",
-    edge_smoothness_adjust_hint: "Drag or scroll to adjust",
 
     // Grid note type labels
     grid_note_normal: "Normal",

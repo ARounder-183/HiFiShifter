@@ -1278,7 +1278,6 @@ export const jaJP = {
     lock_param_lines: "パラメータ線をロック",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑",
-    edge_smoothness_adjust_hint: "ドラッグまたはスクロールで調整",
 
     // グリッド音符タイプラベル
     grid_note_normal: "通常",

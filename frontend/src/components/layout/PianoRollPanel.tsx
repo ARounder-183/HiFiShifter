@@ -1022,9 +1022,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 边缘平滑度滑块的滚轮步进：React 17+ 的根容器 wheel 监听是 passive，
     // JSX onWheel 里的 preventDefault 无效（伴随干预警告），必须走原生
     // 非 passive 监听（与主画布滚轮路径同模式）。
+    //
+    // 【修饰键必须读 `e` 本身】这里拿到的是**原生** WheelEvent（见
+    // `useNonPassiveWheel` 的说明），`ctrlKey/shiftKey/altKey` 就在它自己身上。
+    // 曾经写的是 `e.nativeEvent`（那是 React 合成事件的取法），原生事件没有这个
+    // 属性，取到 undefined 之后 `isModifierActive` 读 `ctrlKey` 直接抛异常 ——
+    // 处理器在第一行就炸，后面的 dispatch 从未执行，表现为**滚轮完全无效**。
     const attachEdgeSmoothnessWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
         e.preventDefault();
-        const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+        const fine = isModifierActive(paramFineAdjustKb, e);
         const step = fine ? 1 : 5;
         const dir = e.deltaY < 0 ? 1 : -1;
         const next = clamp(Math.round(s.edgeSmoothnessPercent) + dir * step, 0, 100);
@@ -5707,10 +5713,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 用回调 ref（而非 `useEffect(..., [])` + `ref.current`）挂监听：轨道与标尺
     // 会随停靠重排重建 DOM，回调 ref 把「元素出现」本身当作挂载时机。
     const attachVerticalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
-        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "vertical");
+        scrollerWheelHandlerRef.current(event, "vertical");
     });
     const attachHorizontalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
-        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "horizontal");
+        scrollerWheelHandlerRef.current(event, "horizontal");
     });
     const attachVerticalScrollbarTrack = useCallback(
         (element: HTMLDivElement | null) => {
@@ -5734,8 +5740,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      * 位置自行得出（标尺在容器矩形之外 ⇒ 返回 null），keybinding 判定、锚点换算、
      * 上下限全部与画布同一套，标尺不定义第二种语义。
      */
-    const handleRulerWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent);
+    const handleRulerWheel = useCallback((event: WheelEvent) => {
+        scrollerWheelHandlerRef.current(event);
     }, []);
 
     // 参数切换或参数描述符变化后，刷新竖向滚动条位置，保证滚动条与当前视口保持一致。
@@ -8468,7 +8474,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             ) : null}
                             {/* 第 7 级才隐藏滑块：它是**控件**，比只读的百分比数值（第 6 级）
                                 更该留到最后。悬停时用 ToolTip 报出当前百分比 —— 数值被隐藏
-                                （第 6 级）之后仍能读到；第二行沿用本项目的"动作"提示体裁。 */}
+                                （第 6 级）之后仍能读到。 */}
                             {toolbarTier < 7 ? (
                                 <input
                                     ref={attachEdgeSmoothnessWheel}
@@ -8480,7 +8486,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     value={Math.round(s.edgeSmoothnessPercent)}
                                     data-tooltip={`${tf("edge_smoothness")}: ${Math.round(
                                         s.edgeSmoothnessPercent,
-                                    )}%\n${tf("edge_smoothness_adjust_hint")}`}
+                                    )}%`}
                                     onChange={(e) => {
                                         const next = Number(e.currentTarget.value);
                                         dispatch(setEdgeSmoothnessPercent(next));

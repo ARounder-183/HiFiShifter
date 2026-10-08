@@ -504,8 +504,13 @@ const TimeRulerInner: React.FC<{
      *
      * 【为什么必须交给面板】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器监听；
      * 而滚动/缩放的落点换算、上下限都在各自面板里。标尺只负责"阻止默认滚动 + 转交"。
+     *
+     * 【参数是**原生** `WheelEvent`】标尺的监听经 `useNonPassiveWheel` 挂载，交出来的
+     * 就是原生事件。此前这里声明成 `React.WheelEvent`，两个消费方都只能靠
+     * `as unknown as WheelEvent` 才能用 —— 那层强转正好掩盖了"按合成事件取值"这类错误
+     * （参数编辑器的平滑度滑块就因此完全收不到滚轮）。
      */
-    onRulerWheel?: (event: React.WheelEvent<HTMLDivElement>) => void;
+    onRulerWheel?: (event: WheelEvent) => void;
     /** 见 `TimeRulerPlayhead.positionFromProps`。 */
     positionPlayheadFromProps?: boolean;
     playheadLineRef?: React.Ref<HTMLDivElement>;

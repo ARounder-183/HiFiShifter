@@ -15,10 +15,15 @@
  *
  * 回调 ref 把"元素出现"本身当作挂载时机：一出现就挂、一移除就摘，与元素何时出现
  * 无关。挂载逻辑抽成纯工厂 `createWheelAttacher`，便于直接单测（见同名测试）。
+ *
+ * 【处理器收到的是**原生** `WheelEvent`，不是 React 合成事件】这条曾经在类型上被写错
+ * （声明成 `ReactWheelEvent`），于是调用方按合成事件去取 `e.nativeEvent` —— 而原生事件
+ * 没有这个属性，取到 `undefined`，再交给读 `ctrlKey` 的函数就抛异常。参数编辑器的
+ * 平滑度滑块因此**滚轮完全无效**：处理器在第一行就炸了，后面的 dispatch 从未执行。
+ * 类型现在如实声明为原生事件，误用会直接变成编译错误。
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { WheelEvent as ReactWheelEvent } from "react";
 
 /** 回调 ref 语义的挂载器：既可作为 `ref` 直接使用，也可显式 `dispose()`。 */
 export interface WheelAttacher<E extends HTMLElement> {
@@ -30,10 +35,10 @@ export interface WheelAttacher<E extends HTMLElement> {
 /**
  * 创建挂载器（与 React 解耦的纯逻辑）。
  *
- * @param handler 事件处理器；由调用方保证它总是转发到最新的闭包。
+ * @param handler 事件处理器，收到的是原生 `WheelEvent`；由调用方保证它总是转发到最新的闭包。
  */
 export function createWheelAttacher<E extends HTMLElement>(
-    handler: (event: ReactWheelEvent<E>) => void,
+    handler: (event: WheelEvent) => void,
 ): WheelAttacher<E> {
     let cleanup: (() => void) | null = null;
     const attach = ((element: E | null) => {
@@ -42,7 +47,7 @@ export function createWheelAttacher<E extends HTMLElement>(
         cleanup = null;
         if (element === null) return;
         const listener = (event: WheelEvent) => {
-            handler(event as unknown as ReactWheelEvent<E>);
+            handler(event);
         };
         element.addEventListener("wheel", listener, { passive: false });
         cleanup = () => element.removeEventListener("wheel", listener);
@@ -66,7 +71,7 @@ export function createWheelAttacher<E extends HTMLElement>(
  * @returns 回调 ref（`setElement` 身份稳定，可直接传给 `ref=`）。
  */
 export function useNonPassiveWheel<E extends HTMLElement>(
-    handler: (event: ReactWheelEvent<E>) => void,
+    handler: (event: WheelEvent) => void,
 ): (element: E | null) => void {
     const [element, setElement] = useState<E | null>(null);
 

@@ -49,6 +49,29 @@ describe("useNonPassiveWheel（非被动滚轮监听）", () => {
         expect(handled).toEqual([event]);
     });
 
+    /*
+     * 【要钉死什么】处理器收到的是**原生** `WheelEvent`，原样透传、不做任何包装。
+     *
+     * 这条契约曾经在类型上被写错（声明成 `ReactWheelEvent`），于是参数编辑器的平滑度
+     * 滑块按合成事件去取 `e.nativeEvent` —— 原生事件没有这个属性，取到 undefined，
+     * 再交给读 `ctrlKey` 的函数就抛异常，滚轮**完全无效**。类型已如实声明，这条测试
+     * 再从行为上钉一次：若有人"顺手"包一层合成事件，`nativeEvent` 会被补上，
+     * 这里立刻变红。
+     */
+    it("★ 处理器收到的是原生事件本身（不是合成事件包装）", () => {
+        const handled: unknown[] = [];
+        const attach = createWheelAttacher<HTMLElement>((event) => handled.push(event));
+        const element = makeElement();
+        attach(element as unknown as HTMLElement);
+
+        const nativeEvent = { deltaY: -1, ctrlKey: true };
+        element.listeners[0](nativeEvent);
+
+        // 同一个对象引用：没有被包装、也没有被替换成 `{ nativeEvent }` 之类。
+        expect(handled[0]).toBe(nativeEvent);
+        expect((handled[0] as Record<string, unknown>).nativeEvent).toBeUndefined();
+    });
+
     it("元素被替换时，旧监听器被摘除、新元素挂上监听器", () => {
         const handled: unknown[] = [];
         const attach = createWheelAttacher<HTMLElement>((event) => handled.push(event));
