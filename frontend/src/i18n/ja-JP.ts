@@ -2091,6 +2091,11 @@ export const jaJP = {
     ara_error_connect: "ARA 接続に失敗しました",
     ara_error_submit: "ARA 送信に失敗しました",
     ara_error_disconnect: "ARA 切断に失敗しました",
+    ara_submit_blocked: "送信を拒否しました",
+    ara_submit_blocked_host_fields:
+        "REAPER が所有する以下のフィールドがローカルで変更されたため、何も送信していません。REAPER 側で変更してください：{fields}",
+    ara_submit_reconnect_required:
+        "接続後にホストのタイムラインが変わりました。REAPER に再接続してからやり直してください。",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",

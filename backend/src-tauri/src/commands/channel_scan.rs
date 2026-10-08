@@ -60,6 +60,29 @@ fn current_generation() -> u64 {
     CHANNEL_SCAN_GENERATION.load(Ordering::Acquire)
 }
 
+/// 当前是否有 ARA 宿主会话持有时间线。
+///
+/// # 为什么 ARA 会话期间必须抑制自动扫描
+/// ARA 会话里 clip/take 的身份、几何与声道模式都来自宿主：素材是刚从宿主下载的
+/// 授权 PCM，本地"假立体声折叠"既没有意义，又有害 —— 它会改写
+/// `take.channel_mode` / `take.channel_decision`，而这两个字段属于宿主拥有的
+/// take 状态。写入之后，App 侧提交门禁看到的"宿主几何"与连接时采集的基线不再
+/// 相等，提交就被拒，用户看到的是"本地还有未保存的编辑"，但用户什么都没做。
+///
+/// 用户显式的声道命令不经过这里（它们不走自动扫描），因此仍然可用。
+static ARA_SESSION_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 设置 ARA 会话存续标记；由 `ara_bridge` 在连接 / 断开时维护。
+pub(crate) fn set_ara_session_active(active: bool) {
+    ARA_SESSION_ACTIVE.store(active, Ordering::Release);
+}
+
+/// 见 [`ARA_SESSION_ACTIVE`]。
+pub(crate) fn ara_session_active() -> bool {
+    ARA_SESSION_ACTIVE.load(Ordering::Acquire)
+}
+
 /// 一个候选 Take 的最小快照（不克隆波形预览等大字段）。
 #[derive(Debug, Clone)]
 pub struct ScanTarget {
@@ -480,6 +503,11 @@ fn emit_progress(app: &tauri::AppHandle, done: usize, total: usize, stats: &Appl
 /// 跑完**才**请求后台预渲染：折叠会失效渲染缓存，反过来做会让先渲染出来的
 /// 结果全部白做。没有候选时直接放行渲染，不留空转。
 pub(crate) fn request_channel_scan(app: &tauri::AppHandle) {
+    // ARA 会话期间不做本地折叠：写入 take.channel_mode 会让宿主几何基线漂移，
+    // 提交随即被门禁拒绝（见 `ARA_SESSION_ACTIVE`）。
+    if ara_session_active() {
+        return;
+    }
     if CHANNEL_SCAN_ACTIVE.swap(true, Ordering::AcqRel) {
         // 已有一轮在跑：它可能已经取完快照，看不到这次的新 Take（导入 / 重链
         // 发生在它收集之后）。标记"还要再来一轮"，由本轮收尾时接手。
@@ -511,6 +539,11 @@ pub(crate) fn request_channel_scan(app: &tauri::AppHandle) {
 
 /// 单轮扫描：收集 → 判定 → 写回。世代号在写回前校验。
 fn run_scan_pass(app: &tauri::AppHandle, generation: u64) {
+    // 会话可能在本轮排队期间建立：这里与每批之前都要重检，否则 `generation`
+    // 是在 bump 之后读到的，世代校验会放行写入（见 `ARA_SESSION_ACTIVE`）。
+    if ara_session_active() {
+        return;
+    }
     let state = match app.try_state::<AppState>() {
         Some(state) => state,
         None => return,
@@ -535,6 +568,10 @@ fn run_scan_pass(app: &tauri::AppHandle, generation: u64) {
     let mut done = 0usize;
     let mut total_stats = ApplyStats::default();
     for chunk in targets.chunks(BATCH) {
+        if ara_session_active() {
+            log::info!("[channel_scan] ARA session took over; aborting pass");
+            return;
+        }
         let planned = plan(chunk.to_vec(), &policy, false);
         match apply_planned(&state, &planned, Some(generation), false) {
             Some(stats) => {

@@ -16,7 +16,7 @@ import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppButton, AppConfirmDialog, AppField, AppForm, AppSelect, AppStatusChip } from "../../ui";
-import { araApi, araError, type AraInstance, type AraResult } from "./araApi";
+import { araApi, araError, araErrorText, type AraInstance, type AraResult } from "./araApi";
 
 /** 连接成功后展示的状态词。都是词表里的既有键，不拼字符串。 */
 type AraStatusKey =
@@ -48,7 +48,8 @@ export function AraHostPanel({
         try {
             await action();
         } catch (err) {
-            setError(araError(err));
+            // 门禁拒绝在后端只带语言无关的分类与字段路径，文案在这里本地化。
+            setError(araErrorText(err, t, tVars));
         } finally {
             setBusy(false);
         }

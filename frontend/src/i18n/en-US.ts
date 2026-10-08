@@ -2077,6 +2077,11 @@ export const enUS = {
     ara_error_connect: "ARA connection failed",
     ara_error_submit: "ARA submit failed",
     ara_error_disconnect: "ARA disconnect failed",
+    ara_submit_blocked: "Submission blocked",
+    ara_submit_blocked_host_fields:
+        "These host-owned fields were changed locally, so nothing was submitted. Change them in REAPER: {fields}",
+    ara_submit_reconnect_required:
+        "The host timeline changed since you connected. Reconnect to REAPER and try again.",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",

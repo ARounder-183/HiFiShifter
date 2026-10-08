@@ -2062,6 +2062,11 @@ export const koKR = {
     ara_error_connect: "ARA 연결 실패",
     ara_error_submit: "ARA 전송 실패",
     ara_error_disconnect: "ARA 연결 해제 실패",
+    ara_submit_blocked: "전송이 거부되었습니다",
+    ara_submit_blocked_host_fields:
+        "REAPER가 소유한 다음 필드가 로컬에서 변경되어 아무것도 전송하지 않았습니다. REAPER에서 변경하세요: {fields}",
+    ara_submit_reconnect_required:
+        "연결한 뒤 호스트 타임라인이 변경되었습니다. REAPER에 다시 연결한 후 시도하세요.",
     ara_replace_dirty_message:
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",

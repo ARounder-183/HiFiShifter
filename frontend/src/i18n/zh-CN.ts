@@ -2019,6 +2019,10 @@ export const zhCN = {
     ara_error_connect: "ARA 连接失败",
     ara_error_submit: "ARA 提交失败",
     ara_error_disconnect: "ARA 断开失败",
+    ara_submit_blocked: "提交被拒绝",
+    ara_submit_blocked_host_fields:
+        "以下由 REAPER 拥有的字段被本地修改，因此没有提交任何内容。请在 REAPER 中修改：{fields}",
+    ara_submit_reconnect_required: "连接之后宿主时间线已改变。请重新连接 REAPER 后再试。",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",

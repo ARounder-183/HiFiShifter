@@ -9,6 +9,9 @@ use std::{
 };
 use tauri::Manager;
 
+/// 门禁拒绝时最多报告多少条字段差异；够用户定位即可，不刷屏。
+const HOST_GEOMETRY_DIFF_LIMIT: usize = 8;
+
 /// 仅在 Windows 默认临时目录权限拒绝时回退，不修改目录或系统完整性标签。
 fn create_ara_temp_dir_with(
     primary: &Path,
@@ -92,53 +95,157 @@ struct Session {
     model_revision: u64,
     reverse_paths: HashMap<String, String>,
     clip_ids: HashSet<String>,
-    unsupported_baseline: serde_json::Value,
+    /// 连接时采集的宿主几何投影；提交时用它判断本地是否改过宿主拥有的字段。
+    host_geometry_baseline: serde_json::Value,
     project_baseline: serde_json::Value,
 }
 
-/// 保存宿主参数投影之外的语义基线；播放位置、选择和分析缓存不代表未提交编辑。
-fn unsupported_projection(timeline: &TimelineState) -> Result<serde_json::Value, String> {
+/// 提交门禁的比较对象：**正向**列出宿主拥有、且本地不该改的字段。
+///
+/// 【为什么是正向名单，而不是"整份状态减掉几个例外"】
+/// 旧判据把整个 `TimelineState` 序列化后手工挖掉十几项，等于用"整份状态相等"
+/// 表达"这几个字段不许变"。但 `TimelineState` 是独立 App 的活状态：后台子系统
+/// （假立体声折叠扫描、波形/音高分析、渲染缓存回填）会在用户**没有做任何编辑**
+/// 时写它。只要写到的字段不在例外名单里，提交就被拒 —— 而报错文案固定指控
+/// "几何/增益/名字"，与实际原因无关，用户无法据以行动。
+///
+/// 正向名单把判据变成"我知道宿主拥有哪些字段，只比这些"。新增任何后台子系统
+/// 都不会再打穿它，而真正需要拒绝的本地几何编辑仍然会被拒绝。
+///
+/// 【为什么 `bpm` / `project_sec` 不在名单里】
+/// 二者都由宿主单方面决定：插件每次快照都从宿主时钟重读 `bpm`
+/// （`extension.rs::assigned_timeline`），并重算 `project_sec`
+/// （`editor/workspace.rs`）。本地改动既提交不上去，也不代表"未保存的宿主编辑"，
+/// 放进判据只会制造假失败。
+fn host_geometry_projection(timeline: &TimelineState) -> Result<serde_json::Value, String> {
     let mut normalized = timeline.clone();
+    // 与提交载荷走同一步：先让 Take 与扁平投影一致，再读扁平值，避免"改了 Take
+    // 没改投影"或反之造成的判据抖动。
     normalized.sync_clip_takes_from_flat();
-    for clip in &mut normalized.clips {
-        for take in &mut clip.takes {
-            take.waveform_preview = None;
-            take.pitch_range = None;
-            take.source_file_fingerprint = None;
-            take.source_sample_rate = None;
-            take.source_channels = None;
-            take.duration_frames = None;
-            take.duration_sec = None;
+    let clips: Vec<_> = normalized
+        .clips
+        .iter()
+        .map(|clip| {
+            serde_json::json!({
+                "id": clip.id,
+                "track_id": clip.track_id,
+                "name": clip.name,
+                "start_sec": clip.start_sec,
+                "length_sec": clip.length_sec,
+                "source_start_sec": clip.source_start_sec,
+                "source_end_sec": clip.source_end_sec,
+                "playback_rate": clip.playback_rate,
+                "clip_playback_rate": clip.clip_playback_rate,
+                "gain": clip.gain,
+                "muted": clip.muted,
+                "snap_offset_sec": clip.snap_offset_sec,
+                "fade_in_sec": clip.fade_in_sec,
+                "fade_out_sec": clip.fade_out_sec,
+                "fade_in_shape": clip.fade_in_shape,
+                "fade_out_shape": clip.fade_out_shape,
+                "fade_in_dir": clip.fade_in_dir,
+                "fade_out_dir": clip.fade_out_dir,
+                "auto_fade_in_sec": clip.auto_fade_in_sec,
+                "auto_fade_out_sec": clip.auto_fade_out_sec,
+            })
+        })
+        .collect();
+    let tracks: Vec<_> = normalized
+        .tracks
+        .iter()
+        .map(|track| {
+            serde_json::json!({
+                "id": track.id,
+                "name": track.name,
+                "order": track.order,
+                "parent_id": track.parent_id,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "clips": clips, "tracks": tracks }))
+}
+
+/// 把 JSON 值渲染成一行短摘要；长曲线/长字符串必须截断，否则日志自己就爆了。
+fn compact_json_value(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= 64 {
+        return text;
+    }
+    let mut truncated: String = text.chars().take(61).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+/// 逐路径收集两棵 JSON 的差异，用于把"到底哪一项漂移了"讲清楚。
+///
+/// 门禁拒绝时用户唯一能据以行动的信息就是这份路径列表：说"几何变了"没有用，
+/// 说 `clips[2].start_sec: 0.0 -> 0.25` 才有用。
+fn collect_json_differences(
+    baseline: &serde_json::Value,
+    current: &serde_json::Value,
+    path: &str,
+    limit: usize,
+    out: &mut Vec<String>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    match (baseline, current) {
+        (serde_json::Value::Object(before), serde_json::Value::Object(after)) => {
+            for (key, value) in before {
+                if out.len() >= limit {
+                    return;
+                }
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match after.get(key) {
+                    Some(other) => collect_json_differences(value, other, &child, limit, out),
+                    None => out.push(format!("{child}: removed")),
+                }
+            }
+            for key in after.keys() {
+                if out.len() >= limit {
+                    return;
+                }
+                if !before.contains_key(key) {
+                    let child = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    out.push(format!("{child}: added"));
+                }
+            }
+        }
+        (serde_json::Value::Array(before), serde_json::Value::Array(after)) => {
+            if before.len() != after.len() {
+                out.push(format!(
+                    "{path}: length {} -> {}",
+                    before.len(),
+                    after.len()
+                ));
+                return;
+            }
+            for (index, (x, y)) in before.iter().zip(after.iter()).enumerate() {
+                if out.len() >= limit {
+                    return;
+                }
+                collect_json_differences(x, y, &format!("{path}[{index}]"), limit, out);
+            }
+        }
+        _ => {
+            if baseline != current {
+                out.push(format!(
+                    "{path}: {} -> {}",
+                    compact_json_value(baseline),
+                    compact_json_value(current)
+                ));
+            }
         }
     }
-    let mut value = serde_json::to_value(normalized).map_err(|e| e.to_string())?;
-    let object = value.as_object_mut().ok_or("invalid ARA timeline")?;
-    for key in [
-        "params_by_root_track",
-        "selected_track_id",
-        "selected_clip_id",
-        "playhead_sec",
-        "next_track_order",
-    ] {
-        object.remove(key);
-    }
-    for track in object
-        .get_mut("tracks")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or("missing ARA tracks")?
-    {
-        let track = track.as_object_mut().ok_or("invalid ARA track")?;
-        for key in [
-            "compose_enabled",
-            "pitch_analysis_algo",
-            "volume",
-            "muted",
-            "solo",
-        ] {
-            track.remove(key);
-        }
-    }
-    Ok(value)
 }
 
 /// 本地工程信息没有进入插件state，备注/设置/独立保存路径仍须保护未保存提示。
@@ -177,7 +284,8 @@ fn clear_committed_parameter_dirty(
 ) {
     let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if state.timeline_version.load(Ordering::Acquire) != submitted_version
-        || unsupported_projection(&timeline).ok().as_ref() != Some(&session.unsupported_baseline)
+        || host_geometry_projection(&timeline).ok().as_ref()
+            != Some(&session.host_geometry_baseline)
     {
         return;
     }
@@ -237,13 +345,31 @@ fn apply_commit_response(session: &mut Session, response: &Response) -> Result<(
 }
 
 /// 提交时恢复宿主源身份，拒绝把独立文件工程意外提交到仍连接的插件。
+///
+/// 门禁只比较宿主拥有的几何字段（见 [`host_geometry_projection`]）；参数曲线与
+/// 轨道合成控制是本次提交的内容，不算"本地未保存的宿主编辑"。
 fn build_commit(session: &Session, mut timeline: TimelineState) -> Result<Request, String> {
-    if unsupported_projection(&timeline)? != session.unsupported_baseline {
-        return Err("ARA only submits parameter curves and track synthesis controls. Modify clip geometry, clip gain, names and other host fields in REAPER; local edits are still unsaved.".into());
+    let geometry = host_geometry_projection(&timeline)?;
+    if geometry != session.host_geometry_baseline {
+        let mut differences = Vec::new();
+        collect_json_differences(
+            &session.host_geometry_baseline,
+            &geometry,
+            "",
+            HOST_GEOMETRY_DIFF_LIMIT,
+            &mut differences,
+        );
+        log::warn!(
+            "[ara] commit refused: host-owned geometry changed locally: {}",
+            differences.join("; ")
+        );
+        // 语言无关的字段路径 + 分类；文案由前端按 catalog 本地化。
+        return Err(format!("ara_host_fields: {}", differences.join("; ")));
     }
     let ids: HashSet<_> = timeline.clips.iter().map(|clip| clip.id.clone()).collect();
     if ids != session.clip_ids {
-        return Err("ARA timeline changed; reconnect to the host".into());
+        // 语言无关的分类；文案由前端按 catalog 本地化。
+        return Err("ara_reconnect_required".into());
     }
     timeline.sync_clip_takes_from_flat();
     for clip in &mut timeline.clips {
@@ -271,7 +397,34 @@ fn build_commit(session: &Session, mut timeline: TimelineState) -> Result<Reques
 }
 
 /// 连接和刷新采用同一原子导入路径，下载期间发生本地编辑则拒绝覆盖。
+///
+/// 会话建立前后要动两处进程级状态：作废在途的声道扫描，并在会话存续期间抑制
+/// 新的扫描请求 —— 两者都是为了不让本地后台写入改到宿主拥有的字段。
 pub(crate) fn import_snapshot(
+    app: &tauri::AppHandle,
+    instance_id: Option<String>,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    // 作废在途扫描：clip/take id 在会话之间会复用，旧工程的折叠结论若落进刚
+    // 下载的 ARA 时间线，会改写 `take.channel_mode`，让宿主几何基线漂移、
+    // 提交被门禁拒绝。理由与 `open_project` 完全一致。
+    crate::commands::channel_scan::bump_generation();
+    // 下载窗口内就抑制新的扫描请求（见 `channel_scan::set_ara_session_active`）。
+    crate::commands::channel_scan::set_ara_session_active(true);
+    let result = import_snapshot_inner(app, instance_id, force);
+    // 只有真正建立了会话才保持抑制；失败或刷新失败（沿用旧会话）时如实反映。
+    let connected = app
+        .state::<AraBridge>()
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session
+        .is_some();
+    crate::commands::channel_scan::set_ara_session_active(connected);
+    result
+}
+
+fn import_snapshot_inner(
     app: &tauri::AppHandle,
     instance_id: Option<String>,
     force: bool,
@@ -313,7 +466,7 @@ pub(crate) fn import_snapshot(
     timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
     timeline.selected_clip_id = timeline.clips.first().map(|clip| clip.id.clone());
     let clip_ids = timeline.clips.iter().map(|clip| clip.id.clone()).collect();
-    let unsupported_baseline = unsupported_projection(&timeline)?;
+    let host_geometry_baseline = host_geometry_projection(&timeline)?;
     let project_baseline;
     {
         let mut current = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -344,7 +497,7 @@ pub(crate) fn import_snapshot(
         model_revision: response.model_revision,
         reverse_paths,
         clip_ids,
-        unsupported_baseline,
+        host_geometry_baseline,
         project_baseline,
     });
     let roots: Vec<_> = state
@@ -367,6 +520,30 @@ pub(crate) fn import_snapshot(
     payload.project = Some(state.project_meta_payload());
     let mut result = session_payload(inner.session.as_ref().unwrap());
     result["timeline"] = serde_json::to_value(payload).map_err(|e| e.to_string())?;
+    // 用户报障时最需要的一行事实：连接后的规模、宿主修订号，以及本地声道判定
+    // 档案的存量（后者是过去"提交莫名被拒"的头号嫌疑）。
+    if let Some(session) = inner.session.as_ref() {
+        let decided = {
+            let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            timeline
+                .clips
+                .iter()
+                .flat_map(|clip| clip.takes.iter())
+                .filter(|take| take.channel_decision.is_some())
+                .count()
+        };
+        log::info!(
+            "[ara] connected: instance={} revision={} model_revision={} clips={} tracks={} decided_takes={decided}",
+            session.instance.name,
+            session.revision,
+            session.model_revision,
+            session.clip_ids.len(),
+            session.host_geometry_baseline["tracks"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
+        );
+    }
     Ok(result)
 }
 
@@ -404,6 +581,8 @@ pub(crate) fn disconnect(app: &tauri::AppHandle) -> serde_json::Value {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .session = None;
+    // 会话结束，恢复本地后台扫描（连接期间它被抑制，见 `import_snapshot`）。
+    crate::commands::channel_scan::set_ara_session_active(false);
     serde_json::json!({"ok": true})
 }
 
@@ -566,7 +745,7 @@ mod tests {
             model_revision: 9,
             reverse_paths: HashMap::from([("owned.wav".into(), "host-id".into())]),
             clip_ids: HashSet::from(["clip".into()]),
-            unsupported_baseline: unsupported_projection(&baseline).unwrap(),
+            host_geometry_baseline: host_geometry_projection(&baseline).unwrap(),
             project_baseline: project_projection(&crate::state::ProjectState::default()),
         }
     }
@@ -598,7 +777,7 @@ mod tests {
         assert!(build_commit(&session(), timeline).is_err());
     }
 
-    /// 未提交几何/增益/名字不能被成功响应伪装为已保存。
+    /// 未提交几何/增益/名字不能被成功响应伪装为已保存；报错必须指名漂移字段。
     #[test]
     fn commit_rejects_local_move_crop_gain_and_track_name_but_accepts_parameters() {
         let mut baseline = fixture();
@@ -608,7 +787,12 @@ mod tests {
             serde_json::from_value(serde_json::json!([{"id":"track","name":"host","order":0}]))
                 .unwrap();
         let current = session();
-        for change in 0..4 {
+        for (change, expected_path) in [
+            (0usize, "clips[0].start_sec"),
+            (1, "clips[0].source_start_sec"),
+            (2, "clips[0].gain"),
+            (3, "tracks[0].name"),
+        ] {
             let mut timeline = baseline.clone();
             match change {
                 0 => timeline.clips[0].start_sec = 0.25,
@@ -617,7 +801,11 @@ mod tests {
                 _ => timeline.tracks[0].name = "local rename".into(),
             }
             let error = build_commit(&current, timeline).expect_err("未支持编辑必须拒绝");
-            assert!(error.contains("REAPER"), "{error}");
+            assert!(error.starts_with("ara_host_fields:"), "{error}");
+            assert!(
+                error.contains(expected_path),
+                "报错必须指名漂移字段 {expected_path}: {error}"
+            );
         }
         baseline.tracks[0].volume = 0.5;
         baseline.params_by_root_track.insert(
@@ -629,6 +817,109 @@ mod tests {
             },
         );
         assert!(build_commit(&current, baseline).is_ok());
+    }
+
+    /// 本次修复的核心不变量：后台子系统写入**非宿主**字段，不得阻塞提交。
+    ///
+    /// 旧门禁比较"整份状态减去例外名单"，于是声道折叠扫描写下的
+    /// `channel_mode` / `channel_decision`、分析回填的波形与音高范围、工程级的
+    /// Tempo Map / 分组禁用都会让提交被拒 —— 用户什么都没做，却被告知"本地还有
+    /// 未保存的宿主编辑"。这些字段一律不属于宿主几何，必须被忽略。
+    #[test]
+    fn background_writes_to_non_host_fields_do_not_block_commit() {
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        let current = session();
+
+        let mut timeline = baseline.clone();
+        // 假立体声折叠扫描的落点。
+        timeline.clips[0].takes[0].channel_mode = 2;
+        timeline.clips[0].takes[0].channel_decision =
+            Some(crate::channel_decision::ChannelDecisionRecord::user(2));
+        // 波形 / 音高分析的缓存回填。
+        timeline.clips[0].waveform_preview = Some(vec![0.25; 16]);
+        timeline.clips[0].pitch_range = Some(crate::models::PitchRange {
+            min: 40.0,
+            max: 80.0,
+        });
+        timeline.clips[0].takes[0].waveform_preview = Some(vec![0.25; 16]);
+        timeline.clips[0].takes[0].pitch_range = Some(crate::models::PitchRange {
+            min: 40.0,
+            max: 80.0,
+        });
+        timeline.clips[0].takes[0].source_file_fingerprint = Some(0x1122_3344_5566_7788);
+        timeline.clips[0].takes[0].source_sample_rate = Some(48_000);
+        timeline.clips[0].takes[0].source_channels = Some(2);
+        timeline.clips[0].takes[0].duration_frames = Some(96_000);
+        timeline.clips[0].takes[0].duration_sec = Some(2.0);
+        // 工程级：Tempo Map / 分组禁用 / 轨道主题色。
+        timeline.tempo_map = Some(vec![serde_json::from_value(serde_json::json!({
+            "id": "p0", "positionSec": 0.0, "bpm": 140.0
+        }))
+        .unwrap()]);
+        timeline.disabled_group_ids.insert("g1".into());
+        timeline.tracks[0].color = "#4f8ef7".into();
+        timeline.project_scale_notes = vec![0, 2, 3, 5, 7, 8, 10];
+        // 提交内容本身：参数曲线。
+        timeline.params_by_root_track.insert(
+            "track".into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![62.0],
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            build_commit(&current, timeline).is_ok(),
+            "后台写入非宿主字段不得阻塞提交"
+        );
+    }
+
+    /// 宿主单方面决定的量（`bpm` / `project_sec`）不在判据里。
+    ///
+    /// 插件每次快照都从宿主时钟重读 `bpm`、重算 `project_sec`；本地改动既提交
+    /// 不上去，也不代表"未保存的宿主编辑"，纳入判据只会制造假失败。
+    #[test]
+    fn host_derived_tempo_and_length_do_not_block_commit() {
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        let current = session();
+
+        let mut timeline = baseline.clone();
+        timeline.bpm = 143.0;
+        timeline.project_sec = 512.0;
+        assert!(build_commit(&current, timeline).is_ok());
+    }
+
+    /// ARA 会话期间必须抑制本地自动声道扫描（它会写宿主拥有的 take 状态）。
+    #[test]
+    fn ara_session_flag_round_trips() {
+        // 用例之间共享进程级标记：先归位，避免相互污染。
+        crate::commands::channel_scan::set_ara_session_active(false);
+        assert!(!crate::commands::channel_scan::ara_session_active());
+        crate::commands::channel_scan::set_ara_session_active(true);
+        assert!(crate::commands::channel_scan::ara_session_active());
+        crate::commands::channel_scan::set_ara_session_active(false);
+        assert!(!crate::commands::channel_scan::ara_session_active());
+    }
+
+    /// 差异收集器要能定位到具体路径，而不是只说"不一样"。
+    #[test]
+    fn geometry_diff_names_the_drifting_path() {
+        let baseline = serde_json::json!({"clips":[{"start_sec":0.0,"gain":1.0}]});
+        let current = serde_json::json!({"clips":[{"start_sec":0.25,"gain":1.0}]});
+        let mut out = Vec::new();
+        collect_json_differences(&baseline, &current, "", 8, &mut out);
+        assert_eq!(out, vec!["clips[0].start_sec: 0.0 -> 0.25".to_string()]);
+
+        // 长度变化直接报长度，不逐项刷屏。
+        let longer = serde_json::json!({"clips":[{},{}]});
+        let mut out = Vec::new();
+        collect_json_differences(&baseline, &longer, "", 8, &mut out);
+        assert!(out[0].starts_with("clips: length 1 -> 2"), "{out:?}");
     }
 
     #[test]

@@ -2022,6 +2022,10 @@ export const zhTW = {
     ara_error_connect: "ARA 連線失敗",
     ara_error_submit: "ARA 提交失敗",
     ara_error_disconnect: "ARA 中斷連線失敗",
+    ara_submit_blocked: "提交被拒絕",
+    ara_submit_blocked_host_fields:
+        "以下由 REAPER 擁有的欄位被本機修改，因此沒有提交任何內容。請在 REAPER 中修改：{fields}",
+    ara_submit_reconnect_required: "連線之後宿主時間軸已改變。請重新連線 REAPER 後再試。",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",
