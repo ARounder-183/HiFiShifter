@@ -257,3 +257,92 @@ fn notebook_write_clipboard_payload_rejects_foreign_bytes() {
     .is_err());
     editor.close();
 }
+
+/// 最小合法 SMF：格式 0、单轨、480 ticks/四分音符，C4 从 0 弹到半秒。
+fn minimal_midi() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"MThd");
+    bytes.extend_from_slice(&6u32.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&480u16.to_be_bytes());
+    let mut track = Vec::new();
+    track.extend_from_slice(&[0x00, 0x90, 0x3C, 0x64]);
+    track.extend_from_slice(&[0x83, 0x60, 0x80, 0x3C, 0x40]);
+    track.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+    bytes.extend_from_slice(b"MTrk");
+    bytes.extend_from_slice(&(track.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&track);
+    bytes
+}
+
+/// MIDI 导入：路径判据、共享编排真的落地到曲线，而"建成片段"仍然是明确拒绝。
+///
+/// 【为什么"建成片段"必须是拒绝而不是静默】插件的时间线是宿主清单的投影
+/// （`workspace_timeline_locked` 只保留已分配 region 的 clip）。若这里放行，命令会
+/// 成功返回、片段在下一次宿主同步时消失 —— 那是比报错更坏的结果。这条断言把
+/// 前端闸门（`canImportMidiAsClip`）背后的理由钉在后端行为上。
+#[test]
+fn midi_import_writes_the_curve_but_never_a_local_clip() {
+    let (_model, owner, _id) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    let timeline = dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+    let track = timeline["tracks"][0]["id"].as_str().unwrap().to_string();
+
+    // 相对路径：宿主进程的工作目录不可预测，不能作为基准。
+    assert!(dispatch(&editor, "get_midi_tracks", json!({"midiPath":"note.mid"})).is_err());
+    assert!(dispatch(
+        &editor,
+        "import_midi_to_pitch",
+        json!({"midiPath":"note.mid","trackIndices":[0]})
+    )
+    .is_err());
+
+    let gated = dispatch(
+        &editor,
+        "import_midi_as_clip",
+        json!({"midiPath":"note.mid","startSec":0.0}),
+    )
+    .unwrap_err();
+    assert!(gated.contains("unavailable"), "{gated}");
+
+    let dir = std::env::temp_dir().join(format!("hfs-plugin-midi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("note.mid");
+    std::fs::write(&path, minimal_midi()).unwrap();
+    let path = path.to_string_lossy().into_owned();
+
+    let tracks = dispatch(&editor, "get_midi_tracks", json!({"midiPath":path})).unwrap();
+    assert_eq!(tracks["ok"], true, "{tracks}");
+    assert_eq!(tracks["tracks"][0]["note_count"], 1);
+
+    // 夹具轨默认既没开合成、也没有音高算法，而写曲线要求目标轨真的会去读它 ——
+    // 先按 GUI 的正常路径把它打开，再导入。
+    dispatch(
+        &editor,
+        "set_track_state",
+        json!({"trackId":track,"composeEnabled":true,"pitchAnalysisAlgo":"nsf_hifigan_onnx"}),
+    )
+    .unwrap();
+    let result = dispatch(
+        &editor,
+        "import_midi_to_pitch",
+        json!({"midiPath":path,"trackIndices":[0]}),
+    )
+    .unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(result["frames_touched"].as_u64().unwrap() > 0);
+
+    let frames = dispatch(
+        &editor,
+        "get_param_frames",
+        json!({"trackId":track,"param":"pitch","startFrame":0,"frameCount":4,"binary":false}),
+    )
+    .unwrap();
+    assert_eq!(frames["ok"], true, "{frames}");
+    assert_eq!(frames["edit"][0], 60.0, "{frames}");
+    assert_eq!(frames["pitch_edit_user_modified"], true, "{frames}");
+
+    std::fs::remove_dir_all(&dir).ok();
+    editor.close();
+}

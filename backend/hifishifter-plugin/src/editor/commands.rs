@@ -17,6 +17,8 @@ pub(super) fn mutates_audio(command: &str) -> bool {
             // 拉伸映射同样改写参数曲线，必须让在途渲染作废（否则拉伸后听到的是
             // 旧曲线渲染出来的音频）。
             | "stretch_track_linked_params"
+            // MIDI 导入整段改写音高曲线，与 `set_param_frames` 同一类改动。
+            | "import_midi_to_pitch"
             | "set_track_state"
             | "move_track"
             | "undo_timeline"
@@ -36,6 +38,24 @@ fn value<T: serde::Serialize>(input: T) -> Result<Value, String> {
 }
 fn args<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid editor arguments: {e}"))
+}
+/// MIDI 输入路径判据：必须是**用户刚在原生对话框里选过**的绝对文件路径。
+///
+/// 【为什么不复用 `browser_media_path`】后者要么落在已授权目录内，要么必须是媒体
+/// 扩展名。MIDI 导入的路径来自插件自己的"打开文件"对话框（`open_midi_dialog`），
+/// 用户刚刚亲自选过 —— 与音频导入读真实磁盘路径是同一条口径，不需要目录授权；
+/// 而 `.mid` 也不在媒体扩展名表里。仍然要求绝对路径，免得相对路径被当成进程工作
+/// 目录下的文件。
+fn midi_input_path(input: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(input);
+    if !path.is_absolute() {
+        return Err("an absolute MIDI path is required".into());
+    }
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    if !path.is_file() {
+        return Err("not a file".into());
+    }
+    Ok(path)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -405,6 +425,29 @@ pub(super) fn dispatch(
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .and_then(|payload| super::host_clipboard::clipboard_kind(&payload));
             return Ok(json!({"ok":true,"kind":kind}));
+        }
+        // ── MIDI 导入的前两步 ──
+        //
+        // 解析文件与解析剪贴板都**不碰时间线**，因此放在 `ensure_loaded` 之前：宿主
+        // 尚未就绪时弹窗仍要能列出 MIDI 轨道（否则用户点了"导入 MIDI"只得到一句
+        // 与 MIDI 无关的宿主错误）。真正的写入在下面 `import_midi_to_pitch`。
+        "get_midi_tracks" => {
+            let path = input["midiPath"].as_str().unwrap_or_default().to_owned();
+            let guid = input["clipboardGuid"].as_str().map(str::to_owned);
+            if guid.as_deref().unwrap_or_default().is_empty() {
+                midi_input_path(&path)?;
+            }
+            return Ok(hifishifter_kernel::editor::midi_import::get_midi_tracks(
+                session, path, guid,
+            ));
+        }
+        "read_midi_clipboard_to_memory" => {
+            return Ok(
+                hifishifter_kernel::editor::midi_import::read_midi_clipboard_to_memory(
+                    session,
+                    hifishifter_clipboard::read_standard_midi_file(),
+                ),
+            );
         }
         "emit_ui_event" => {
             let event = input["event"].as_str().ok_or("event missing")?;
@@ -781,6 +824,38 @@ pub(super) fn dispatch(
             Ok(hifishifter_kernel::midi_export::export_pitch_to_midi(
                 &timeline, request,
             ))
+        }
+        // ── MIDI 导入 ──
+        //
+        // 【为什么插件里能做】`import_midi_to_pitch` 写的是 `params_by_root_track` 里的
+        // 音高曲线 —— 那是插件自己的权威（与参数编辑器同一份数据），不碰宿主几何，也
+        // 不要求任何宿主写接口。共享编排在内核里，与独立 App 逐字同一条路径。
+        //
+        // 【为什么只做"导入到曲线"】`import_midi_as_clip` / `replace_midi_clip_data`
+        // 建的是**本地片段**，而插件的时间线是宿主清单的投影
+        // （`workspace_timeline_locked` 只保留已分配 region 的 clip）：造出来的片段
+        // 在下一次宿主同步时就会消失。那不是"没实现"，是在这里做不到 —— 前端因此
+        // 只对"导入到音高曲线"开闸。
+        "import_midi_to_pitch" => {
+            let request: hifishifter_kernel::editor::midi_import::ImportMidiToPitchRequest =
+                args(input)?;
+            if request
+                .clipboard_guid
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            {
+                midi_input_path(&request.midi_path)?;
+            }
+            let result =
+                hifishifter_kernel::editor::midi_import::import_midi_to_pitch(session, request);
+            if result["ok"] == false {
+                // 失败原因原样交给前端：`MidiTrackSelectDialog` 按这些键给出具体文案
+                // （`pitch_requires_compose` / `no_pitch_line_selected` / …）。包成
+                // `Err` 会把它压成一句通用的"导入失败"，与独立 App 的表现分叉。
+                return Ok(result);
+            }
+            after_write(session, result)
         }
         "get_track_summary" => {
             let timeline = session.timeline.lock().unwrap();

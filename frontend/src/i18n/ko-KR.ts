@@ -1643,6 +1643,8 @@ export const koKR = {
     import_as_takes: "테이크로 추가",
     import_as_takes_plugin_unavailable:
         "ARA 플러그인 모드에서는 사용할 수 없습니다. 여러 테이크는 REAPER에서 하나의 item에 넣어 주세요.",
+    midi_import_clip_plugin_unavailable:
+        "ARA 플러그인 모드에서는 사용할 수 없습니다. 클립은 REAPER item이므로 피치 커브로 가져오기를 사용하세요.",
     folder_import_title: "폴더 가져오기",
     folder_import_import: "가져오기",
     folder_import_mode: "배치 방식",

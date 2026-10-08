@@ -119,17 +119,31 @@ export function canImportAsTakes(): boolean {
 }
 
 /**
- * 插件里能不能**导入 MIDI**（把 MIDI 的音符写进片段音高曲线）。
+ * 插件里能不能**把 MIDI 的音符导入到音高曲线**。
  *
- * 【为什么不能】MIDI 导入要写音高曲线（`import_midi_to_pitch` / `import_midi_as_clip`），
- * 而这两个命令在插件里没有实现 —— 不是宿主限制，是这条链路还没搬进内核。此前三个
- * 入口（文件菜单、拖入 MIDI、文件浏览器右键）在插件里照常打开对话框，用户走完
- * 十几项设置之后才失败。
+ * 【为什么插件里能做】`import_midi_to_pitch` 写的是插件自己的音高曲线
+ * （`params_by_root_track`，与参数编辑器同一份数据），既不碰宿主几何，也不需要任何
+ * 宿主写接口 —— 它是纯数据变换。此前整条链路被挡掉，只是因为"还没搬进内核"，
+ * 现在 App 与插件跑的是同一份实现（`kernel::editor::midi_import`）。
  *
- * 【导出方向不受影响】把编辑好的音高曲线**导出**成 MIDI 是纯变换，插件里可用
- * （见 `export_pitch_to_midi`）。
+ * 【为什么仍要这个函数】导入对话框要区分"导入到曲线"和"建成片段"两件事：插件里
+ * 只有前者成立，UI 必须把选项摆对，而不是让用户选完才失败。
  */
-export function canImportMidi(): boolean {
+export function canImportMidiToPitch(): boolean {
+    return true;
+}
+
+/**
+ * 插件里能不能**把 MIDI 建成片段**（新建 MIDI clip / 替换已有 MIDI clip 的数据）。
+ *
+ * 【为什么不能】`import_midi_as_clip` / `replace_midi_clip_data` 建的是**本地片段**，
+ * 而插件的时间线是宿主清单的投影（`workspace_timeline_locked` 只保留已分配 region
+ * 的 clip）：造出来的片段在下一次宿主同步时就会消失。那不是"没实现"，是在这里做不到。
+ *
+ * 【替代路径是完整的】"导入到音高曲线"在插件里可用 —— 用户要的"把这段 MIDI 的音符
+ * 变成我的编辑内容"由此满足；只有"在时间线上多出一个 MIDI 片段"这一步没有。
+ */
+export function canImportMidiAsClip(): boolean {
     return !isPluginMode();
 }
 
@@ -150,6 +164,10 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
     if (!isPluginMode()) return true;
     if (["playback.toggle", "playback.stop"].includes(action)) return canControlHostTransport();
     if (action === "project.importMedia") return canImportHostAudio();
+    // MIDI 导入的**快捷键**必须与菜单同一条判据：菜单项已经可用（导入到音高曲线），
+    // 而下面那条 `project.` 前缀规则会把它一并拒掉 —— 结果就是"菜单能用、快捷键
+    // 按了没反应"，正是本仓明令禁止的静默失效。
+    if (action === "project.importMidi") return canImportMidiToPitch();
     if (action === "clip.split") return canSplitHostClips();
     // 新建**宿主**轨道：与 `track.*` 的其余动作不同，它明确要写宿主工程，且已有
     // 原生实现（`create_host_track`）。用独立动作名，免得被下面那条 `track.` 规则

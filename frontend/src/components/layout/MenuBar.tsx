@@ -4,7 +4,6 @@ import {
     canImportHostAudio,
     canCreateHostTracks,
     canImportAsTakes,
-    canImportMidi,
     dawControlledReason,
 } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
@@ -697,11 +696,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </div>
                         </DropdownMenu.Item>
                         <DropdownMenu.Item
-                            // MIDI 导入要把音符写进片段音高曲线，而那条链路在插件里
-                            // 没有实现（导出方向有，导入方向没有）。禁用而不是留一个
-                            // 点了什么都不发生的入口 —— 后者会让用户以为是拖放坏了。
-                            disabled={!canImportMidi()}
-                            title={!canImportMidi() ? t("plugin_standalone_only") : undefined}
+                            // MIDI 导入在插件里**可用**：音符写进插件自己的音高曲线
+                            // （与参数编辑器同一份数据）。只有"建成片段"那一档做不到
+                            // （片段归宿主），而那是对话框内部按能力摆好的选项 ——
+                            // 见 `MidiTrackSelectDialog` 的 `canImportMidiAsClip`。
                             onSelect={() => {
                                 void handleImportMidiFromMenu();
                             }}

@@ -1084,6 +1084,25 @@ fn configure_browser(
                     }
                 })()
             },
+            // 「导入 MIDI」的打开对话框。命令名与独立 App **相同**，前端不必按模式
+            // 分支；真正的解析/写入走 actor 线程的 `get_midi_tracks` /
+            // `import_midi_to_pitch`。
+            //
+            // 【为什么对话框必须在 UI 线程】`IFileOpenDialog` 需要一个父 HWND，而
+            // HWND 只存在于 UI 线程（与文件夹选择器、另存为对话框同一条理由）。
+            Some("open_midi_dialog")=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                (||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let path=super::browser_files::pick_open_path(hwnd,"MIDI","mid")?;
+                    // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
+                    if link.authorize(&document)?!=lease {return Err("MIDI picker editor lease changed".into());}
+                    match path {
+                        Some(path)=>Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()})),
+                        None=>Ok(serde_json::json!({"ok":true,"canceled":true})),
+                    }
+                })()
+            },
             Some("export_diagnostics")=>{
                 let link=state.borrow().link.clone();
                 (||->Result<serde_json::Value,String>{

@@ -6,6 +6,7 @@ import {
     canSplitHostClips,
     canClipboardHostClips,
     canEditHostClips,
+    canImportMidiAsClip,
 } from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -794,6 +795,15 @@ export const ClipContextMenu: React.FC<{
                 {hasPitchAdjustment && onReplaceMidi && (
                     <MenuItem
                         label={isMulti ? t("ctx_replace_midi_all") : t("ctx_replace_midi")}
+                        // "替换 MIDI"要重建片段里的音符数据（`replace_midi_clip_data`），
+                        // 而片段归宿主：插件的时间线是宿主清单的投影，改写本地片段在
+                        // 下一次宿主同步时就会消失。禁用并说明，而不是留一个点了报错的入口。
+                        disabled={!canImportMidiAsClip()}
+                        title={
+                            canImportMidiAsClip()
+                                ? undefined
+                                : t("midi_import_clip_plugin_unavailable")
+                        }
                         onClick={() => {
                             onReplaceMidi(pitchOnlyIds);
                             close();

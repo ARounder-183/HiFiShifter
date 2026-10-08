@@ -1589,6 +1589,8 @@ export const jaJP = {
     import_as_takes: "テイクとして追加",
     import_as_takes_plugin_unavailable:
         "ARA プラグインモードでは使用できません。複数テイクは REAPER 側で 1 つの item にまとめてください。",
+    midi_import_clip_plugin_unavailable:
+        "ARA プラグインモードでは使用できません。クリップは REAPER の item です。ピッチカーブへのインポートをご利用ください。",
     folder_import_title: "フォルダをインポート",
     folder_import_import: "インポート",
     folder_import_mode: "配置方法",

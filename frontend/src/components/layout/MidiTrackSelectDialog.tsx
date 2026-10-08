@@ -5,6 +5,7 @@ import { paramsApi } from "../../services/api/params";
 import { AppButton, AppNumberField } from "../../ui";
 import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
+import { canImportMidiAsClip } from "../../services/hostCapabilities";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
 interface MidiTrackInfo {
@@ -159,8 +160,16 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
     // 导入目标（统一弹窗用）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数
     const isReplaceMode = mode === "replaceMidi";
+    // 插件里片段归宿主（时间线是宿主清单的投影），建不出本地 MIDI 片段；此时把目标
+    // 锁到"导入到音高曲线"—— 那是插件自己的权威，与参数编辑器同一份数据。
+    const clipTargetAvailable = canImportMidiAsClip();
+    const clipTargetReason = clipTargetAvailable
+        ? undefined
+        : tf("midi_import_clip_plugin_unavailable");
     const resolveImportTarget = () =>
-        (importTarget as "pitchRef" | "pitchParam") ?? defaultImportTarget ?? "pitchParam";
+        clipTargetAvailable
+            ? ((importTarget as "pitchRef" | "pitchParam") ?? defaultImportTarget ?? "pitchParam")
+            : "pitchParam";
     const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam">(
         resolveImportTarget(),
     );
@@ -169,7 +178,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         if (open && !isReplaceMode) {
             setCurrentTarget(resolveImportTarget());
         }
-    }, [open, defaultImportTarget, isReplaceMode, importTarget]); // eslint-disable-line react-hooks/exhaustive-deps -- resolveImportTarget 每次渲染重建的纯函数；计入依赖会让初始化 effect 每次渲染重跑（既有语义）
+    }, [open, defaultImportTarget, isReplaceMode, importTarget, clipTargetAvailable]); // eslint-disable-line react-hooks/exhaustive-deps -- resolveImportTarget 每次渲染重建的纯函数；计入依赖会让初始化 effect 每次渲染重跑（既有语义）
     // 当 currentTarget 为 paramEditor 时，行为即 pitchEdit
     const effectiveMode = isReplaceMode
         ? "replaceMidi"
@@ -699,9 +708,22 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         {tf("midi_import_target_pitch_param")}
                                     </span>
                                 </label>
-                                <label className="flex items-center gap-1 cursor-pointer">
-                                    <RadioGroup.Item value="pitchRef" />
-                                    <span className="hs-type-label">
+                                <label
+                                    className={
+                                        clipTargetAvailable
+                                            ? "flex items-center gap-1 cursor-pointer"
+                                            : "flex items-center gap-1"
+                                    }
+                                    title={clipTargetReason}
+                                >
+                                    <RadioGroup.Item
+                                        value="pitchRef"
+                                        disabled={!clipTargetAvailable}
+                                    />
+                                    <span
+                                        className="hs-type-label"
+                                        style={clipTargetAvailable ? undefined : { opacity: 0.5 }}
+                                    >
                                         {tf("midi_import_target_pitch_block")}
                                     </span>
                                 </label>

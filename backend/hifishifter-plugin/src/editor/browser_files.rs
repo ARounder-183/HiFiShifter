@@ -755,6 +755,71 @@ pub(super) fn pick_save_path(
     Err("the save dialog is not implemented on this platform".into())
 }
 
+/// 原生"打开文件"对话框，带一条扩展名筛选（MIDI 导入用）。
+///
+/// 【为什么插件要自己弹窗】独立 App 用 `rfd` 弹同一个窗，而插件不引入 Tauri/rfd；
+/// `IFileOpenDialog` 就在 [`pick_directory`] 已经在用的同一个 `Win32_UI_Shell`
+/// 特性里。命令名与独立 App 相同（`open_midi_dialog`），前端不必按模式分支。
+///
+/// 取消（`0x800704c7`）返回 `Ok(None)`，与文件夹选择器、另存为对话框同一约定。
+#[cfg(windows)]
+pub(super) fn pick_open_path(
+    hwnd: windows::Win32::Foundation::HWND,
+    filter_name: &str,
+    extension: &str,
+) -> Result<Option<PathBuf>, String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+        SIGDN_FILESYSPATH,
+    };
+    // 两个 HSTRING 必须活到 `SetFileTypes` 返回之后 —— `PCWSTR` 只是裸指针。
+    let name = HSTRING::from(filter_name);
+    let spec = HSTRING::from(format!("*.{extension}"));
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| e.to_string())?;
+        dialog
+            .SetOptions(
+                dialog.GetOptions().map_err(|e| e.to_string())?
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_PATHMUSTEXIST
+                    | FOS_FILEMUSTEXIST,
+            )
+            .map_err(|e| e.to_string())?;
+        let filters = [COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        }];
+        dialog.SetFileTypes(&filters).map_err(|e| e.to_string())?;
+        if let Err(error) = dialog.Show(Some(hwnd)) {
+            if error.code().0 as u32 == 0x800704c7 {
+                return Ok(None);
+            }
+            return Err(error.to_string());
+        }
+        let item = dialog.GetResult().map_err(|e| e.to_string())?;
+        let value = item
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .map_err(|e| e.to_string())?;
+        let text = value.to_string().map_err(|e| e.to_string());
+        CoTaskMemFree(Some(value.0.cast()));
+        Ok(Some(PathBuf::from(text?)))
+    }
+}
+
+/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为用户取消了。
+#[cfg(not(windows))]
+pub(super) fn pick_open_path(
+    _hwnd: (),
+    _filter_name: &str,
+    _extension: &str,
+) -> Result<Option<PathBuf>, String> {
+    Err("the open dialog is not implemented on this platform".into())
+}
+
 /// 在系统文件管理器中打开一个目录（Windows）。
 ///
 /// 【为什么这不是"宿主限制"】插件**已经**在 REAPER 进程里开过原生文件夹选择器

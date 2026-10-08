@@ -16,7 +16,6 @@ import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import {
     isPluginMode,
-    canImportMidi,
     pluginAllowsAction,
     pluginAllowsEditChannel,
 } from "./services/hostCapabilities";
@@ -740,13 +739,16 @@ function AppInner() {
      * MIDI 导入对话框的**唯一**开启闸门。
      *
      * 【为什么在开启处收口】MIDI 导入有三个入口（文件菜单、拖入 MIDI、文件浏览器
-     * 右键），它们各自先把路径/落点写进一组 state，再打开对话框。插件模式下这条
-     * 链路没有实现（写音高曲线的命令不存在），任何一个入口漏挡都会让用户走完十几项
-     * 设置之后才失败。闸门放在开启点，三个入口自动一起被挡住。
+     * 右键），它们各自先把路径/落点写进一组 state，再打开对话框。收口在这里，三个
+     * 入口就不会各自漂移。
+     *
+     * 【为什么现在插件里也放行】"导入到音高曲线"在插件里可用（写的是插件自己的
+     * 曲线）；只有"建成片段"不可用，而那是**对话框内部**的选项问题 —— 由
+     * `MidiTrackSelectDialog` 按 `canImportMidiAsClip()` 把目标锁到音高曲线。在开启
+     * 点整条挡掉，会让一个本来能用的功能消失。
      */
     const openMidiClipDialog = useCallback(
         (open: boolean) => {
-            if (open && !canImportMidi()) return;
             setMidiClipDialogOpen(open);
         },
         [setMidiClipDialogOpen],
@@ -2126,7 +2128,8 @@ function AppInner() {
             setMidiClipStartSec(detail?.startSec ?? 0);
             setMidiClipTrackId(detail?.trackId ?? null);
             setMidiClipClipboardGuid(null);
-            // 插件模式下闸门会吞掉这次开启（见 `openMidiClipDialog`）。
+            // 插件模式不再需要在这里拦截：对话框自己会把导入目标锁到音高曲线
+            // （见 `MidiTrackSelectDialog` 的 `canImportMidiAsClip`）。
             openMidiClipDialog(true);
         }
 

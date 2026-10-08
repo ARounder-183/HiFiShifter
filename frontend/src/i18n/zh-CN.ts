@@ -1536,6 +1536,8 @@ export const zhCN = {
     import_as_takes: "作为 Take 添加",
     import_as_takes_plugin_unavailable:
         "ARA 插件模式下不可用：请在 REAPER 中把多个 Take 放进同一个 item。",
+    midi_import_clip_plugin_unavailable:
+        "ARA 插件模式下不可用：片段归 REAPER 的 item，请改为导入到音高曲线。",
     folder_import_title: "导入文件夹",
     folder_import_import: "导入",
     folder_import_mode: "排列方式",

@@ -3,6 +3,7 @@ use crate::render::document::DocumentSession;
 use hifishifter_kernel::editor::{
     history,
     host_pcm::{materialize_with_byte_limit, PcmView},
+    midi_import::MidiImportHost,
     ParamHost,
 };
 use hifishifter_kernel::state::*;
@@ -102,6 +103,9 @@ pub(crate) struct EditorSession {
     loaded: Mutex<Loaded>,
     pub(super) namespace: String,
     pub(super) browser_roots: Mutex<Vec<PathBuf>>,
+    // 剪贴板 MIDI 载荷（"Standard MIDI File"）：前端先探测一次拿到 GUID，导入命令再
+    // 按 GUID 取字节。与 App 侧同形状、同上限，语义见内核 `editor::midi_import`。
+    pub(super) clipboard_midi: Mutex<std::collections::VecDeque<(String, Vec<u8>)>>,
     // 只保留已获ARA授权后生成的GUI媒体元信息/路径，不保留或复用实时播放PCM。
     display_waveforms: Mutex<HashMap<String, (String, hifishifter_kernel::state::Clip)>>,
     pcm_dir: PathBuf,
@@ -285,6 +289,7 @@ impl EditorSession {
             pcm_dir: hifishifter_kernel::config_location::local_data_subdir("pcm").join(&namespace),
             namespace,
             browser_roots: Mutex::new(Vec::new()),
+            clipboard_midi: Mutex::new(std::collections::VecDeque::new()),
             display_waveforms: Mutex::new(HashMap::new()),
             peaks: Mutex::new(HashMap::new()),
             queue,
@@ -1533,6 +1538,14 @@ impl ParamHost for EditorSession {
         if let Err(error) = result {
             *self.error.lock().unwrap() = Some(error);
         }
+    }
+}
+
+/// MIDI 导入在插件里与 App 共用同一份编排（`kernel::editor::midi_import`）：写的是
+/// 插件自己的音高曲线，不碰宿主几何。唯一差异是剪贴板载荷缓存归本会话持有。
+impl MidiImportHost for EditorSession {
+    fn clipboard_midi(&self) -> &Mutex<std::collections::VecDeque<(String, Vec<u8>)>> {
+        &self.clipboard_midi
     }
 }
 

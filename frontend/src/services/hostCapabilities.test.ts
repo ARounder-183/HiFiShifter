@@ -9,6 +9,8 @@ import {
     canImportHostAudio,
     canCreateHostTracks,
     canGroupPluginTracks,
+    canImportMidiToPitch,
+    canImportMidiAsClip,
     dawControlledReason,
 } from "./hostCapabilities";
 import { resolveActionByFocus, resolvePasteRoute } from "../features/keybindings/focusRouting";
@@ -115,6 +117,20 @@ test("native clipboard opens copy/cut/paste/delete only with its own host capabi
         expect(pluginAllowsEditChannel("hifi:timelineEditOp", op)).toBe(false);
     expect(pluginAllowsAction("clip.group", "timeline")).toBe(true);
     expect(pluginAllowsAction("clip.ungroup", "timeline")).toBe(true);
+});
+
+test("MIDI import reaches the pitch curve in the plugin but never builds a local clip", () => {
+    // 独立 App：两条路都在。
+    expect(canImportMidiToPitch()).toBe(true);
+    expect(canImportMidiAsClip()).toBe(true);
+    expect(pluginAllowsAction("project.importMidi", "timeline")).toBe(true);
+    // 插件：曲线是插件自己的权威（与参数编辑器同一份数据），片段归宿主 ——
+    // 本地片段会在下一次宿主同步时消失，所以那一档必须关掉。
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "midi" };
+    expect(canImportMidiToPitch()).toBe(true);
+    expect(canImportMidiAsClip()).toBe(false);
+    // 菜单项与快捷键必须走同一条判据，否则会出现"菜单能用、快捷键按了没反应"。
+    expect(pluginAllowsAction("project.importMidi", "timeline")).toBe(true);
 });
 
 test("dawControlledReason follows the current locale instead of freezing at module load", () => {

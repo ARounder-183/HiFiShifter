@@ -1710,6 +1710,8 @@ export const enUS = {
     import_as_takes: "Add as Takes",
     import_as_takes_plugin_unavailable:
         "Not available in ARA plugin mode: import takes into one REAPER item there.",
+    midi_import_clip_plugin_unavailable:
+        "Not available in ARA plugin mode: a clip there is a REAPER item. Import into the pitch curve instead.",
     folder_import_title: "Import Folder",
     folder_import_import: "Import",
     folder_import_mode: "Arrangement",

@@ -36,7 +36,6 @@ import {
     canEditHostFadeAxes,
     canImportHostAudio,
     canImportAsTakes,
-    canImportMidi,
     canCreateHostTracks,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";
@@ -6094,12 +6093,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (dropPreview !== null) setDropPreview(null);
             return;
         }
-        // 插件模式没有 MIDI 导入链路：不显示落点预览。预览是一种承诺 ——
-        // 松手什么都不会发生，比一开始就不给这个反馈更糟。
-        if (dragAction === "importMidi" && !canImportMidi()) {
-            if (dropPreview !== null) setDropPreview(null);
-            return;
-        }
+        // 插件模式也保留 MIDI 落点预览：松手会打开导入对话框，而对话框里的
+        // "导入到音高曲线"在插件里可用（见 `MidiTrackSelectDialog`）。此前这里
+        // 整条挡掉，理由是"插件没有 MIDI 导入链路" —— 那条理由已经不成立。
         // dragover 在文件悬停期间高频连发；落点各字段都没变时不 setState（新对象
         // 无法让 React 跳过重渲，逐事件重渲整个面板纯属浪费）。
         const nextDurationSec = dragAction === "importMidi" ? 2 : 0;
