@@ -33,6 +33,7 @@ import React, { useMemo, Profiler } from "react";
 import {
     isPluginMode,
     isHostGeometryReadOnly,
+    canEditHostFadeAxes,
     canImportHostAudio,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";
@@ -1223,7 +1224,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      */
     const cycleOneFade = React.useCallback(
         (clipId: string, side: "in" | "out", checkpoint = true) => {
-            if (isPluginMode()) return;
+            if (isPluginMode() && !canEditHostFadeAxes()) return;
             const targets = getBulkEditableClipIds({
                 activeClipId: clipId,
                 multiSelectedClipIds,
@@ -4052,7 +4053,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率只作用于**锚点 clip 的该侧**（旧实现明确："曲率只作用于当前 clip
             // 的该侧：指针 Y 必须映射到该 clip 自己的 gain=1 基线"——各行 body 几何
             // 不同，无法跨 clip 共用同一指针 Y）。
-            if (!isPluginMode() && isModifierActive(fadeCurvatureKb, args.modifiers)) {
+            if (
+                (!isPluginMode() || canEditHostFadeAxes()) &&
+                isModifierActive(fadeCurvatureKb, args.modifiers)
+            ) {
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
                 const clipStart = Number(clip.startSec) || 0;
@@ -5100,7 +5104,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 与旧实现 `useEditDrag` 的 `crossfade_edges` Alt 分支同一套：交叉点上的
             // 两条包络线**各自**解一条"经过指针点"的新曲率，边缘位置与长度都完全不动。
             // 求解从上一帧的解出发（`baseDir` 逐帧覆写），连续拖动才平滑。
-            if (!isPluginMode() && isModifierActive(fadeCurvatureKb, args.modifiers)) {
+            if (
+                (!isPluginMode() || canEditHostFadeAxes()) &&
+                isModifierActive(fadeCurvatureKb, args.modifiers)
+            ) {
                 const sides = origin.curveSides;
                 const ptA = resolveCurvePointer(
                     args.curveEnv,
@@ -5500,7 +5507,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelInteractions = React.useMemo(
         () => ({
             geometryReadOnly: isHostGeometryReadOnly(),
-            fadeShapeReadOnly: isPluginMode(),
+            // 【为什么不再按模式一刀切】淡变形状写的是宿主自己的轴（≤7.80 的
+            // `C_FADE*SHAPE`，≥7.81 的两个连续轴），宿主版本已知就能编辑 ——
+            // "长度能改、形状不能改"那个不一致到此为止。
+            fadeShapeReadOnly: isPluginMode() && !canEditHostFadeAxes(),
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
@@ -5535,7 +5545,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 重置曲率走既有总线（旧实现同样经它派发）：消费者在淡变相关的 hook 里，
             // 这条契约与渲染模式无关。内核只给「哪些侧」，请求包络由这里组装。
             onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) => {
-                if (!isPluginMode()) requestResetFadeCurvature({ sides });
+                if (!isPluginMode() || canEditHostFadeAxes()) requestResetFadeCurvature({ sides });
             },
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
@@ -5549,7 +5559,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
             onContextMenu: handleKernelContextMenu,
-            onFadeContextMenu: isPluginMode() ? undefined : handleKernelFadeContextMenu,
+            onFadeContextMenu:
+                isPluginMode() && !canEditHostFadeAxes() ? undefined : handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,

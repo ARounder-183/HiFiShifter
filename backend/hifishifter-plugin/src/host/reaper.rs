@@ -86,6 +86,17 @@ pub(crate) struct ReaperHost {
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
     folder: Option<folder::FolderApi>,
 }
+
+impl ReaperHost {
+    /// 宿主用哪一套淡化轴（`Some(true)` = 7.81+ 的连续 curvature/S 两轴）。
+    ///
+    /// 【为什么需要公开】"能不能编辑淡变形状"取决于它：旧轴写 `C_FADE*SHAPE`，
+    /// 新轴由两个连续参数决定形状。前端要据此决定摆预设按钮还是连续滑杆。
+    /// `None` = 版本串读不出来 → 只读。
+    pub(crate) fn fade_axes_new(&self) -> Option<bool> {
+        self.fade_axes_new
+    }
+}
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
 fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Result<T, String> {
     if !authorized() {

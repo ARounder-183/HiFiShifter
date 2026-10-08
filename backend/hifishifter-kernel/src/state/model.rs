@@ -1738,8 +1738,17 @@ pub struct ClipStatePatch {
     pub fade_out_sec: Option<f64>,
     pub fade_in_shape: Option<f64>,
     pub fade_out_shape: Option<f64>,
+    /// 淡变曲率。**落哪个宿主字段取决于宿主版本**：REAPER ≤ 7.80 写
+    /// `D_FADEINDIR`，≥ 7.81 写 `D_FADEINDIR_NEW`（区间标注见官方头文件
+    /// `sdk/reaper_plugin_functions.h`）。独立 App 用的是它自己的曲率轴。
     pub fade_in_dir: Option<f64>,
     pub fade_out_dir: Option<f64>,
+    /// 淡变 S 参数。只对 REAPER ≥ 7.81 有意义（`D_FADEINDIR2_NEW`）；
+    /// 旧宿主与独立 App 没有这个概念，写入会被**明确拒绝**而不是静默丢弃。
+    #[serde(default)]
+    pub fade_in_s: Option<f64>,
+    #[serde(default)]
+    pub fade_out_s: Option<f64>,
     pub auto_fade_in_sec: Option<f64>,
     pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
@@ -9133,6 +9142,8 @@ impl TimelineState {
                 fade_out_shape: None,
                 fade_in_dir: None,
                 fade_out_dir: None,
+                fade_in_s: None,
+                fade_out_s: None,
                 auto_fade_in_sec: None,
                 auto_fade_out_sec: None,
                 color: None,
@@ -9435,6 +9446,9 @@ impl TimelineState {
                     fade_out_shape: template.fade_out_shape,
                     fade_in_dir: template.fade_in_dir,
                     fade_out_dir: template.fade_out_dir,
+                    // S 参数是 REAPER 7.81+ 的宿主轴，独立 App 的模板不带它。
+                    fade_in_s: None,
+                    fade_out_s: None,
                     auto_fade_in_sec: template.auto_fade_in_sec,
                     auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,

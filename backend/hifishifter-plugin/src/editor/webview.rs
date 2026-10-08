@@ -799,6 +799,13 @@ struct BootstrapFlags {
     clip_clipboard: bool,
     /// 宿主允许导入音频（会建轨、建 item）。
     audio_import: bool,
+    /// 宿主用哪一套淡化轴：`Some("legacy")`（≤7.80，`C_FADE*SHAPE` 决定形状）
+    /// 或 `Some("continuous")`（≥7.81，curvature/S 两轴决定形状）。
+    ///
+    /// 【为什么是枚举而不是布尔】"能不能编辑"与"能不能选预设"是两件事：新轴宿主
+    /// 上曲率可以改，但预设到 (curvature, S) 的映射尚未校准，所以只给连续滑杆。
+    /// `None` = 版本读不出来 → 前端整块保持只读（不猜）。
+    fade_axes: Option<&'static str>,
 }
 
 impl BootstrapFlags {
@@ -811,6 +818,7 @@ impl BootstrapFlags {
             "clipSplitting": self.clip_splitting,
             "clipClipboard": self.clip_clipboard,
             "audioImport": self.audio_import,
+            "fadeAxes": self.fade_axes,
             // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
@@ -1180,12 +1188,21 @@ fn configure_browser(
             .project_history_host()
             .is_some_and(|host| host.can_clipboard_items())
     });
+    // 宿主用哪一套淡化轴。版本读不出来时是 `None`，前端据此整块保持只读。
+    let fade_axes = state
+        .borrow()
+        .link
+        .owner()
+        .ok()
+        .and_then(|owner| owner.host_fade_axes())
+        .map(|axes_new| if axes_new { "continuous" } else { "legacy" });
     let boot = BootstrapFlags {
         transport_control,
         clip_editing,
         clip_splitting,
         clip_clipboard,
         audio_import,
+        fade_axes,
     }
     .to_json(&state.borrow().view_id);
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
@@ -1289,6 +1306,7 @@ mod bootstrap_tests {
                 clip_splitting: false,
                 clip_clipboard: false,
                 audio_import,
+                fade_axes: None,
             };
             assert_eq!(
                 flags.to_json("view-7")["trackGrouping"],
@@ -1307,6 +1325,7 @@ mod bootstrap_tests {
             clip_splitting: true,
             clip_clipboard: false,
             audio_import: true,
+            fade_axes: Some("legacy"),
         };
         let json = flags.to_json("view-42");
         assert_eq!(json["version"], serde_json::json!(1));
@@ -1316,5 +1335,37 @@ mod bootstrap_tests {
         assert_eq!(json["clipSplitting"], serde_json::json!(true));
         assert_eq!(json["clipClipboard"], serde_json::json!(false));
         assert_eq!(json["audioImport"], serde_json::json!(true));
+        assert_eq!(json["fadeAxes"], serde_json::json!("legacy"));
+    }
+
+    /// 未知轴语义必须如实报 `null`，前端据此保持只读（不猜）。
+    #[test]
+    fn an_unknown_fade_axis_set_is_reported_as_null() {
+        let flags = BootstrapFlags {
+            transport_control: false,
+            clip_editing: true,
+            clip_splitting: false,
+            clip_clipboard: false,
+            audio_import: false,
+            fade_axes: None,
+        };
+        assert_eq!(flags.to_json("v")["fadeAxes"], serde_json::Value::Null);
+    }
+
+    /// 新轴宿主如实报 `continuous`：前端据此只给连续滑杆、不摆预设按钮。
+    #[test]
+    fn a_continuous_fade_axis_host_is_reported_as_such() {
+        let flags = BootstrapFlags {
+            transport_control: false,
+            clip_editing: true,
+            clip_splitting: false,
+            clip_clipboard: false,
+            audio_import: false,
+            fade_axes: Some("continuous"),
+        };
+        assert_eq!(
+            flags.to_json("v")["fadeAxes"],
+            serde_json::json!("continuous")
+        );
     }
 }

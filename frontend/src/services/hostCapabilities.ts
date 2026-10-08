@@ -35,6 +35,41 @@ export function canGroupPluginTracks(): boolean {
 export function isHostGeometryReadOnly(): boolean {
     return isPluginMode() && !canEditHostClips();
 }
+/**
+ * 宿主的淡化轴可编辑。
+ *
+ * 【为什么不能沿用 `isPluginMode()`】淡变形状**不是**宿主的独占领域：写的是宿主
+ * 自己的轴（≤7.80 的 `C_FADE*SHAPE`/`D_FADE*DIR`，≥7.81 的 `D_FADE*DIR_NEW`/
+ * `DIR2_NEW`），声音也由宿主渲染。此前用模式一刀切，于是"长度能改、形状不能改"
+ * 这个不一致一直留着 —— 而形状本来就能改。
+ *
+ * 前提是**片段几何可写**（走的是同一条 `host_edit` 路径）且宿主版本能判别轴语义；
+ * 后者读不出来时保持只读，不猜。
+ */
+export function canEditHostFadeAxes(): boolean {
+    return isPluginMode() && canEditHostClips() && hostFadeAxes() !== null;
+}
+
+/**
+ * 宿主用哪一套淡化轴；`null` = 版本读不出来。
+ *
+ * 独立 App 没有这个概念（它用自己的曲率轴），所以非插件模式返回 `null`；
+ * 调用方应先判 [`canEditHostFadeAxes`]。
+ */
+export function hostFadeAxes(): "legacy" | "continuous" | null {
+    return window.__HFS_PLUGIN_BOOTSTRAP__?.fadeAxes ?? null;
+}
+
+/**
+ * 预设形状按钮是否可用。
+ *
+ * 【为什么新轴宿主上不能用】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
+ * 而"预设 → (curvature, S)"的映射尚未校准（官方头文件没有公开 fade 求值函数）。
+ * 摆七个按钮、点了报错，比不摆更糟 —— 只给连续滑杆。
+ */
+export function canSelectHostFadeShape(): boolean {
+    return !isPluginMode() || hostFadeAxes() === "legacy";
+}
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
 export function canImportHostAudio(): boolean {
     return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.audioImport === true;

@@ -21,6 +21,7 @@ import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { canSelectHostFadeShape } from "../../../services/hostCapabilities";
 import type { MessageKey } from "../../../i18n/messages";
 import {
     formatKeybindingList,
@@ -264,17 +265,27 @@ const SideColumn: React.FC<{
     onDirChange: (clipId: string, isOut: boolean, dir: number) => void;
     t: FadeLabelLookup;
 }> = ({ side, isOut, onShapeChange, onDirChange, t }) => {
+    // 【为什么新轴宿主上不摆预设】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
+    // 而"预设 → (curvature, S)"的映射尚未校准（官方头文件没有公开 fade 求值函数）。
+    // 摆七个按钮、点了报错，比不摆更糟 —— 只给曲率滑杆。
+    const shapeSelectable = canSelectHostFadeShape();
     return (
         <div className="min-w-[210px]">
             {/* 形状选择：切换即重置该侧曲率为形状默认值。 */}
-            <ShapeRow
-                currentShape={side.shape}
-                isOut={isOut}
-                onSelectShape={(shape) => {
-                    onShapeChange(side.clipId, side.isOut, shape);
-                }}
-                t={t}
-            />
+            {shapeSelectable ? (
+                <ShapeRow
+                    currentShape={side.shape}
+                    isOut={isOut}
+                    onSelectShape={(shape) => {
+                        onShapeChange(side.clipId, side.isOut, shape);
+                    }}
+                    t={t}
+                />
+            ) : (
+                <div className="mb-1 text-qt-xs text-qt-text/70">
+                    {t("fade_shape_axes_owned_by_host")}
+                </div>
+            )}
             {/* 曲率滑块：实时提交 dir。 */}
             <CurvatureSlider
                 shape={Math.trunc(side.shape)}

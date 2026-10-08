@@ -408,8 +408,16 @@ impl DocumentSession {
                 clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
                 clip.fade_in_shape = geometry.fade_in_shape;
                 clip.fade_out_shape = geometry.fade_out_shape;
-                clip.fade_in_dir = geometry.fade_in_dir;
-                clip.fade_out_dir = geometry.fade_out_dir;
+                // 【为什么按轴分流】"曲率"落在哪个宿主字段取决于宿主版本
+                // （≤7.80 `D_FADE*DIR`，≥7.81 `D_FADE*DIR_NEW`）。取错的话滑杆
+                // 显示和编辑的都是**不是权威**的那个值 —— 在 7.81+ 上表现为
+                // "拖了滑杆但淡变没变"。
+                let (in_dir, out_dir) = match geometry.fade_axes_new {
+                    Some(true) => (geometry.fade_in_dir_new, geometry.fade_out_dir_new),
+                    _ => (geometry.fade_in_dir, geometry.fade_out_dir),
+                };
+                clip.fade_in_dir = in_dir;
+                clip.fade_out_dir = out_dir;
                 if self
                     .regions
                     .lock()

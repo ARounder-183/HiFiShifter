@@ -336,9 +336,16 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
     };
     p as *mut c_void
 }
-/// 夹具显式采用目标REAPER7.81的新轴，不用缺省字段猜宿主版本。
+// 夹具显式采用目标REAPER7.81的新轴，不用缺省字段猜宿主版本。
+//
+// 【为什么是线程局部而不是 fixture 的字段】`version()` 会在夹具装好之前被调用，
+// 而 `fixture()` 解引用的是 `ACTIVE` 里那个原始指针 —— 空指针直接段错误。
+thread_local! {
+    static APP_VERSION: Cell<&'static std::ffi::CStr> = const { Cell::new(c"7.81/x64") };
+}
+
 unsafe extern "C" fn version() -> *const c_char {
-    c"7.81/x64".as_ptr()
+    APP_VERSION.with(|value| value.get().as_ptr())
 }
 
 /// B_MUTE才是item solo覆盖后的有效静音；原始mute仍开时solo也可让该clip播放。

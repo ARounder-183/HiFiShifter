@@ -2061,6 +2061,7 @@ export const zhTW = {
     plugin_daw_controlled_reason: "由 REAPER 控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────
+    fade_shape_axes_owned_by_host: "REAPER 7.81+ 由兩個連續軸決定淡變形狀；請用下方曲率滑桿調整",
     fade_info_host_curve_note: "HiFiShifter 示意曲線；聲音由 REAPER 控制",
     fade_info_host_unknown: "REAPER 曲線未知",
     // ── 安裝程式（NSIS）──────────────────────────────────────────────────

@@ -9,6 +9,15 @@ export type PluginBootstrap = {
     clipClipboard?: boolean;
     audioImport?: boolean;
     trackGrouping?: boolean;
+    /**
+     * 宿主用哪一套淡化轴。
+     *
+     * - `"legacy"`：REAPER ≤7.80，`C_FADE*SHAPE` 决定形状 → 预设按钮可用；
+     * - `"continuous"`：REAPER ≥7.81，curvature/S 两轴决定形状 → 只给连续滑杆
+     *   （预设到 (curvature, S) 的映射尚未校准，不摆按钮假装能用）；
+     * - 缺省/`null`：版本读不出来 → 整块淡变编辑保持只读。
+     */
+    fadeAxes?: "legacy" | "continuous" | null;
 };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;

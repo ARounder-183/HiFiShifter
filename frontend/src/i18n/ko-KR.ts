@@ -2107,6 +2107,8 @@ export const koKR = {
         "REAPER가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
+    fade_shape_axes_owned_by_host:
+        "REAPER 7.81+에서는 두 개의 연속 축이 페이드 모양을 결정합니다. 아래 곡률 슬라이더를 사용하세요",
     fade_info_host_curve_note: "HiFiShifter 표시용 곡선. 오디오는 REAPER가 처리합니다",
     fade_info_host_unknown: "REAPER 곡선 알 수 없음",
     // ── 설치 프로그램(NSIS) ─────────────────────────────────────────────

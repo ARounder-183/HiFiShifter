@@ -2122,6 +2122,8 @@ export const enUS = {
         "Controlled by REAPER; manage files, clip geometry, tempo, meter and playback in the host",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
+    fade_shape_axes_owned_by_host:
+        "REAPER 7.81+ derives the fade shape from two continuous axes; use the curvature slider",
     fade_info_host_curve_note: "HiFiShifter schematic curve; REAPER renders the audio",
     fade_info_host_unknown: "REAPER curve unknown",
     // ── 安装器（NSIS）─────────────────────────────────────────────────────

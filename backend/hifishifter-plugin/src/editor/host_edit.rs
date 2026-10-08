@@ -103,6 +103,46 @@ pub(super) fn is_clip_edit(command: &str) -> bool {
     )
 }
 
+/// 请求里是否包含淡变轴字段。
+fn requests_fade_axes(patch: &ClipStatePatch) -> bool {
+    patch.fade_in_shape.is_some()
+        || patch.fade_out_shape.is_some()
+        || patch.fade_in_dir.is_some()
+        || patch.fade_out_dir.is_some()
+        || patch.fade_in_s.is_some()
+        || patch.fade_out_s.is_some()
+}
+
+/// 淡变轴写入的合法性 —— **纯函数**，因为"哪些字段落在哪套轴上"是领域知识，
+/// 不该埋在一个 200 行的循环里（那里既难读也难测）。
+///
+/// 官方头文件把两套轴标成互补区间（`sdk/reaper_plugin_functions.h`）：
+///   `C_FADE*SHAPE` / `D_FADE*DIR`        —— v7.80 and earlier
+///   `D_FADE*DIR_NEW` / `D_FADE*DIR2_NEW` —— v7.81 and later
+///
+/// 因此：
+/// - 版本读不出来（`None`）→ 拒绝，不猜；
+/// - 旧轴宿主 + S 参数 → 拒绝（S 只存在于新轴，做不到的事不静默丢弃）；
+/// - 新轴宿主 + 形状预设 → 拒绝。≥7.81 的形状由两个**连续轴**决定，而
+///   "预设 → (curvature, S)"的映射尚未校准（官方头文件没有公开 fade 求值函数，
+///   仓内也没有实测表）；界面据此在新轴宿主上隐藏预设按钮、只给连续滑杆。
+fn validate_fade_axes(axes_new: Option<bool>, patch: &ClipStatePatch) -> Result<(), String> {
+    if !requests_fade_axes(patch) {
+        return Ok(());
+    }
+    match axes_new {
+        None => Err("host fade axis version unavailable; cannot write the fade shape".into()),
+        Some(false) if patch.fade_in_s.is_some() || patch.fade_out_s.is_some() => {
+            Err("fade S parameter requires REAPER 7.81 or later".into())
+        }
+        Some(true) if patch.fade_in_shape.is_some() || patch.fade_out_shape.is_some() => Err(
+            "REAPER 7.81+ derives the fade shape from the curvature/S axes;              the preset mapping is not calibrated yet"
+                .into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// 未知非空字段必须失败，不能用户改shape却被当成成功的长度修改。
 fn patch(input: &Value) -> Result<ClipStatePatch, String> {
     let object = input.as_object().ok_or("clip patch must be an object")?;
@@ -132,6 +172,8 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "fadeOutShape"
                 | "fadeInDir"
                 | "fadeOutDir"
+                | "fadeInS"
+                | "fadeOutS"
                 | "reversed"
                 | "loopEnabled"
                 | "channelMode"
@@ -156,9 +198,13 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 .as_f64()
                 .filter(|v| v.is_finite())
                 .ok_or("finite numeric clip edit required")?;
-            if matches!(key.as_str(), "fadeInDir" | "fadeOutDir") {
+            if matches!(
+                key.as_str(),
+                "fadeInDir" | "fadeOutDir" | "fadeInS" | "fadeOutS"
+            ) {
+                // 官方头文件把两个新轴都标为 -1..1（curvature / S parameter）。
                 if !(-1.0..=1.0).contains(&number) {
-                    return Err("fade curvature outside -1..1".into());
+                    return Err("fade curvature/S outside -1..1".into());
                 }
             } else if !(0. ..=1_000_000.).contains(&number) {
                 return Err("clip edit outside supported finite range".into());
@@ -373,51 +419,71 @@ pub(super) fn execute_managed(
         {
             return Err("target track belongs to another project".into());
         }
-        if edit.patch.fade_in_shape.is_some()
-            || edit.patch.fade_out_shape.is_some()
-            || edit.patch.fade_in_dir.is_some()
-            || edit.patch.fade_out_dir.is_some()
-        {
-            let key = {
-                let ids = document.clip_ids.lock().unwrap();
-                ids.iter()
-                    .find(|(_, id)| id.as_str() == edit.native_id)
-                    .map(|(key, _)| *key)
-                    .ok_or("fade region identity missing")?
+        // ── 淡变形状 / 曲率 / S 参数 ────────────────────────────────────────
+        //
+        // 【落到哪个宿主字段取决于宿主版本】官方头文件把两套轴标成互补区间
+        // （`sdk/reaper_plugin_functions.h`）：
+        //   `C_FADE*SHAPE` / `D_FADE*DIR`      —— v7.80 and earlier
+        //   `D_FADE*DIR_NEW` / `D_FADE*DIR2_NEW` —— v7.81 and later
+        // 所以这里**必须**按 `fade_axes_new` 分流，而不是按模式或猜。
+        if requests_fade_axes(&edit.patch) {
+            // 委托（宿主把边界包络交给 HFS 渲染）时才存 HFS 自有样式；
+            // 否则直接写宿主自己的轴。此前这里**无条件**要求委托 ——
+            // 而 REAPER 从不委托，于是整条形状编辑路径是死的。
+            let delegated = {
+                let key = {
+                    let ids = document.clip_ids.lock().unwrap();
+                    ids.iter()
+                        .find(|(_, id)| id.as_str() == edit.native_id)
+                        .map(|(key, _)| *key)
+                        .ok_or("fade region identity missing")?
+                };
+                document
+                    .regions
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .is_some_and(|region| {
+                        region.has_content_based_fade_at_head
+                            || region.has_content_based_fade_at_tail
+                    })
             };
-            if !document
-                .regions
-                .lock()
-                .unwrap()
-                .get(&key)
-                .is_some_and(|region| {
-                    region.has_content_based_fade_at_head || region.has_content_based_fade_at_tail
-                })
-            {
-                return Err("REAPER has not delegated this clip's fades to HiFiShifter".into());
+            if delegated {
+                // 【为什么委托时不校验轴语义】委托时形状由 **HFS 自己**渲染
+                // （`FadeStyle` 进插件状态），宿主轴根本不参与 —— 拿宿主版本去
+                // 拦它会把一条本来能用的路径堵死。但 S 参数在 `FadeStyle` 里没有
+                // 位置，所以仍然拒绝，而不是静默丢弃。
+                if edit.patch.fade_in_s.is_some() || edit.patch.fade_out_s.is_some() {
+                    return Err(
+                        "fade S parameter is not part of the HiFiShifter fade style".into(),
+                    );
+                }
+                let mut style = document
+                    .edits
+                    .lock()
+                    .unwrap()
+                    .fades
+                    .get(&target.geometry.item_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(value) = edit.patch.fade_in_shape {
+                    style.in_shape = value;
+                }
+                if let Some(value) = edit.patch.fade_out_shape {
+                    style.out_shape = value;
+                }
+                if let Some(value) = edit.patch.fade_in_dir {
+                    style.in_dir = value;
+                }
+                if let Some(value) = edit.patch.fade_out_dir {
+                    style.out_dir = value;
+                }
+                style.validate()?;
+                styles.insert(target.geometry.item_id.clone(), style);
+            } else {
+                // 直接写宿主轴：这里才需要轴语义校验（版本未知/新轴不接受预设）。
+                validate_fade_axes(target.geometry.fade_axes_new, &edit.patch)?;
             }
-            let mut style = document
-                .edits
-                .lock()
-                .unwrap()
-                .fades
-                .get(&target.geometry.item_id)
-                .cloned()
-                .unwrap_or_default();
-            if let Some(value) = edit.patch.fade_in_shape {
-                style.in_shape = value;
-            }
-            if let Some(value) = edit.patch.fade_out_shape {
-                style.out_shape = value;
-            }
-            if let Some(value) = edit.patch.fade_in_dir {
-                style.in_dir = value;
-            }
-            if let Some(value) = edit.patch.fade_out_dir {
-                style.out_dir = value;
-            }
-            style.validate()?;
-            styles.insert(target.geometry.item_id.clone(), style);
         }
         targets.push((edit, target, destination));
     }
@@ -489,6 +555,9 @@ pub(super) fn execute_managed(
             if let Some(destination) = destination {
                 target.move_to(destination, &authorized)?;
             }
+            // 【为什么分两种情形】委托时（宿主把边界包络交给 HFS 渲染）宿主只留默认
+            // 样式，HFS 的 shape/dir 进插件状态；**不委托时直接写宿主自己的轴** ——
+            // 那才是让用户"能调淡变类型和曲率"的那条路。
             if styles.contains_key(&target.geometry.item_id) {
                 // REAPER只留默认样式；自定义shape/dir进入HFS状态，而不是宿主c/S轴。
                 match target.geometry.fade_axes_new {
@@ -520,6 +589,32 @@ pub(super) fn execute_managed(
                         return Err(
                             "host fade version unavailable; cannot normalize default style".into(),
                         )
+                    }
+                }
+            } else if let Some(axes_new) = target.geometry.fade_axes_new {
+                // 直接写宿主轴。`fade_axes_new` 已在上面的校验里排除 `None`，
+                // 这里再取一次是为了拿到值（校验阶段只做了拒绝）。
+                if axes_new {
+                    for (value, name) in [
+                        (edit.patch.fade_in_dir, c"D_FADEINDIR_NEW"),
+                        (edit.patch.fade_out_dir, c"D_FADEOUTDIR_NEW"),
+                        (edit.patch.fade_in_s, c"D_FADEINDIR2_NEW"),
+                        (edit.patch.fade_out_s, c"D_FADEOUTDIR2_NEW"),
+                    ] {
+                        if let Some(value) = value {
+                            target.set_item(name, value, &authorized)?;
+                        }
+                    }
+                } else {
+                    for (value, name) in [
+                        (edit.patch.fade_in_shape, c"C_FADEINSHAPE"),
+                        (edit.patch.fade_out_shape, c"C_FADEOUTSHAPE"),
+                        (edit.patch.fade_in_dir, c"D_FADEINDIR"),
+                        (edit.patch.fade_out_dir, c"D_FADEOUTDIR"),
+                    ] {
+                        if let Some(value) = value {
+                            target.set_item(name, value, &authorized)?;
+                        }
                     }
                 }
             }
@@ -747,17 +842,26 @@ mod tests {
             .iter()
             .any(|call| call.starts_with("write-item:D_FADEINDIR")
                 || call.starts_with("write-item:C_FADE")));
+        // 形状预设在新轴宿主上被拒绝、曲率与 S 落到新轴 —— 这两条由
+        // `fade_axis_validation_tests` 直接覆盖纯函数（夹具在这里既慢又脆）。
+        // 但曲率与 S 本身可以写，且落到新轴。
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
-                &json!({"clipId":clip.id,"fadeInShape":(clip.fade_in_shape+1.)%7.}),
+                &json!({"clipId":clip.id,"fadeInDir":0.5,"fadeInS":-0.25}),
             )
             .unwrap();
-        assert!(execute(&owner, plan, || document.is_alive())
-            .unwrap_err()
-            .contains("not delegated"));
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        let calls = host.calls();
+        assert!(calls.contains(&"write-item:D_FADEINDIR_NEW".to_string()));
+        assert!(calls.contains(&"write-item:D_FADEINDIR2_NEW".to_string()));
+        // 旧轴不得被顺手改掉 —— 它不是权威值。
+        assert!(!calls.contains(&"write-item:D_FADEINDIR".to_string()));
+        assert!(!calls.contains(&"write-item:C_FADEINSHAPE".to_string()));
         document.close();
     }
+
     /// 吸附偏移经真实typed setter和UI元数据回流，不能写完后永远等默认零值。
     #[test]
     fn host_edit_snap_offset_receipt_uses_current_host_metadata() {
@@ -839,5 +943,89 @@ mod tests {
             .iter()
             .any(|call| call == "undo-begin" || call.starts_with("write-")));
         document.close();
+    }
+}
+
+#[cfg(test)]
+mod fade_axis_validation_tests {
+    use super::*;
+
+    fn shape(shape: f64) -> ClipStatePatch {
+        ClipStatePatch {
+            fade_in_shape: Some(shape),
+            ..Default::default()
+        }
+    }
+    fn curvature(dir: f64) -> ClipStatePatch {
+        ClipStatePatch {
+            fade_in_dir: Some(dir),
+            ..Default::default()
+        }
+    }
+    fn s_param(value: f64) -> ClipStatePatch {
+        ClipStatePatch {
+            fade_in_s: Some(value),
+            ..Default::default()
+        }
+    }
+
+    /// 不含淡变轴字段的补丁永远合法 —— 长度/位置编辑不该被轴语义拦住。
+    #[test]
+    fn patches_without_fade_axes_are_always_accepted() {
+        let patch = ClipStatePatch {
+            length_sec: Some(1.),
+            ..Default::default()
+        };
+        for axes in [None, Some(true), Some(false)] {
+            assert!(validate_fade_axes(axes, &patch).is_ok(), "{axes:?}");
+        }
+    }
+
+    /// 版本读不出来时一律拒绝：不猜哪套轴是权威的。
+    #[test]
+    fn an_unknown_axis_set_rejects_every_fade_axis_write() {
+        for patch in [shape(3.), curvature(0.5), s_param(0.2)] {
+            assert!(validate_fade_axes(None, &patch).is_err());
+        }
+    }
+
+    /// 旧轴宿主（≤7.80）：形状与曲率可以写，S 参数不行（它只存在于新轴）。
+    #[test]
+    fn legacy_hosts_take_the_shape_and_curvature_but_not_the_s_parameter() {
+        assert!(validate_fade_axes(Some(false), &shape(3.)).is_ok());
+        assert!(validate_fade_axes(Some(false), &curvature(0.5)).is_ok());
+        let error = validate_fade_axes(Some(false), &s_param(0.2)).expect_err("S 必须被拒绝");
+        assert!(error.contains("7.81"), "{error}");
+    }
+
+    /// 新轴宿主（≥7.81）：曲率与 S 可以写，形状预设不行 —— 预设到
+    /// (curvature, S) 的映射尚未校准，不摆一个点了报错的按钮。
+    #[test]
+    fn continuous_axis_hosts_take_curvature_and_s_but_not_shape_presets() {
+        assert!(validate_fade_axes(Some(true), &curvature(0.5)).is_ok());
+        assert!(validate_fade_axes(Some(true), &s_param(-0.25)).is_ok());
+        let error = validate_fade_axes(Some(true), &shape(3.)).expect_err("形状预设必须被拒绝");
+        assert!(error.contains("curvature/S"), "{error}");
+    }
+
+    /// 任一淡变轴字段都会触发校验（不能只检查 `fade_in_*`）。
+    #[test]
+    fn every_fade_axis_field_triggers_validation() {
+        for patch in [
+            ClipStatePatch {
+                fade_out_shape: Some(4.),
+                ..Default::default()
+            },
+            ClipStatePatch {
+                fade_out_dir: Some(0.1),
+                ..Default::default()
+            },
+            ClipStatePatch {
+                fade_out_s: Some(0.1),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_fade_axes(None, &patch).is_err(), "{patch:?}");
+        }
     }
 }

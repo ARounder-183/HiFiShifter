@@ -2643,6 +2643,23 @@ impl ExtensionOwner {
         self.editor_document()?.editor_session()
     }
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
+    /// 宿主淡化轴的版本语义；`None` 表示版本读不出来（前端应保持只读）。
+    ///
+    /// 取**任一** owner 的读数：`fade_axes_new` 来自 `GetAppVersion`，同一进程里
+    /// 所有实例必然一致，不存在"这个 owner 是新轴、那个是旧轴"的情况。
+    pub(crate) fn host_fade_axes(&self) -> Option<bool> {
+        self.editor_document().ok().and_then(|document| {
+            document.renderer_owners().iter().find_map(|owner| {
+                owner
+                    .reaper
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|host| host.fade_axes_new())
+            })
+        })
+    }
+
     pub(crate) fn host_clip_editing_available(&self) -> bool {
         self.editor_document().is_ok_and(|document| {
             document.renderer_owners().iter().any(|owner| {
