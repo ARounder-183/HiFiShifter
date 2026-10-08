@@ -173,3 +173,29 @@ unsafe extern "C" fn destroy(context: *mut c_void) {
         unsafe { drop(Box::from_raw(context.cast::<Context>())) };
     }));
 }
+
+#[cfg(test)]
+mod role_name_tests {
+    use super::*;
+
+    /// 角色日志的**唯一职责**是让"少了哪一个角色"一眼可见 —— 用户报障时不会去换算
+    /// 位掩码，也不该让他算。因此顺序与缺失都要钉住。
+    #[test]
+    fn roles_are_named_so_the_missing_one_is_visible() {
+        assert_eq!(role_names(0), "[]");
+        assert_eq!(
+            role_names(CompanionRoles::PLAYBACK_RENDERER.bits()),
+            "[playback]"
+        );
+        // 实测里最常见的那一行：三种角色全部声明（known）。
+        assert_eq!(
+            role_names(CompanionRoles::all().bits()),
+            "[playback,editor,view]"
+        );
+        // 而宿主只分配 editor + view：playback 的缺失必须直接读出来。
+        assert_eq!(
+            role_names(CompanionRoles::EDITOR_RENDERER.bits() | CompanionRoles::EDITOR_VIEW.bits()),
+            "[editor,view]"
+        );
+    }
+}
