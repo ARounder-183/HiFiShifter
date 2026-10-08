@@ -84,6 +84,76 @@ struct PreparedVersion {
     keys: Vec<u64>,
 }
 
+/// 宿主音频是否已经到达本实例 —— **语言无关**的分类，文案由前端 catalog 本地化。
+///
+/// 【为什么不是"有没有音频"这个布尔】用户侧有两种完全不同的处境，处置方式也不同：
+/// 插件挂在了 folder 父轨上是**用法问题**，必须给出具体指引（REAPER 按轨道管理 ARA
+/// 插件）；普通等待则是宿主还没分配 region，只需说明"等待中"。把两者压成一个布尔，
+/// 前端就只能给出一句对谁都不准的泛泛提示 —— 而"轨道和 item 都看得见、能拖、但没
+/// 内容"这种症状极具误导性，泛泛提示等于没说。
+///
+/// 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务
+/// 多个 region sequence，是 **REAPER 选择按轨道管理 ARA 实例**。错的解释会把日后
+/// 真正可行的改进方向带偏。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HostAudioState {
+    /// 没有等待中的 item（含空工程）—— 无可抱怨。
+    #[default]
+    Ready,
+    /// 清单里有 item，但本实例一个 region 都没拿到：宿主尚未分配。
+    AwaitingRegions,
+    /// 同上，且本 FX 所在轨道是 folder 父轨：组内子轨的音频不会交给这个实例。
+    FolderParentWithoutRegions,
+}
+
+impl HostAudioState {
+    /// 语言无关的分类名；前端按此查 catalog（与 `ara_host_fields:` 同一原则）。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            HostAudioState::Ready => "ready",
+            HostAudioState::AwaitingRegions => "awaiting_regions",
+            HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
+        }
+    }
+}
+
+/// 最近一次清单刷新得出的宿主音频读数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HostAudioStatus {
+    pub state: HostAudioState,
+    /// 清单里**尚未被任何已分配 region 认领**的 item 数（"还在等音频"的 clip 数）。
+    pub waiting_items: usize,
+}
+
+/// 纯函数：由宿主侧事实判定状态。可独立单测，不需要 REAPER。
+///
+/// 判据只用两项可核实的事实：本 FX 轨是不是 folder 父轨、清单里有多少 item 认领
+/// 到了 region。不推断、不猜 —— 读不出 folder 结构时调用方传 `false`，此时只会
+/// 退化成"等待中"，不会给出一个可能指错方向的 folder 提示。
+pub(crate) fn classify_host_audio(
+    fx_is_folder_parent: bool,
+    item_count: usize,
+    claimed_items: usize,
+) -> HostAudioStatus {
+    let waiting_items = item_count.saturating_sub(claimed_items);
+    let state = if claimed_items > 0 || item_count == 0 {
+        // 有认领 = 正常；一个 item 都没有 = 没有"等待"可言（空工程不该报障）。
+        HostAudioState::Ready
+    } else if fx_is_folder_parent {
+        HostAudioState::FolderParentWithoutRegions
+    } else {
+        HostAudioState::AwaitingRegions
+    };
+    HostAudioStatus {
+        state,
+        waiting_items: if state == HostAudioState::Ready {
+            0
+        } else {
+            waiting_items
+        },
+    }
+}
+
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -107,6 +177,8 @@ pub(crate) struct ExtensionOwner {
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
     prepare_owner: Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
+    /// 最近一次清单刷新得出的宿主音频读数；GUI 载荷读它（见 [`HostAudioStatus`]）。
+    host_audio: Mutex<HostAudioStatus>,
 }
 
 #[cfg(test)]
@@ -2194,6 +2266,13 @@ impl ExtensionOwner {
             Err(_) => Vec::new(),
         }
     }
+    /// 最近一次清单刷新得出的宿主音频读数；GUI 载荷读它。
+    ///
+    /// 只读快照，不触发宿主调用 —— 与 `host_geometries_locked` 同一纪律：调用方已经
+    /// 在事务里，这里不得再枚举宿主。
+    pub(crate) fn host_audio_status(&self) -> HostAudioStatus {
+        *self.host_audio.lock().unwrap()
+    }
     /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
     pub(crate) fn refresh_reaper_transport(&self) {
         let Ok(stamp) = self.host_query_stamp() else {
@@ -2254,6 +2333,8 @@ impl ExtensionOwner {
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
         let mut item_count = 0usize;
         let mut claimed_items = 0usize;
+        // 本实例所在轨道的 `I_FOLDERDEPTH`；读不出来保持 `None`（见 `HostAudioState`）。
+        let mut fx_folder_depth: Option<i32> = None;
         for owner in stamp.0.renderer_owners() {
             if !allowed() {
                 return;
@@ -2271,6 +2352,11 @@ impl ExtensionOwner {
             let Ok(parent) = host.direct_track_target(&own_allowed) else {
                 continue;
             };
+            // 只读本实例那条轨道的单值，不枚举整个工程。放在 `seen` 去重之前：本实例
+            // 可能不是本轮第一个被处理的 owner，去重会让它被跳过。
+            if std::ptr::eq(self, Arc::as_ptr(&owner)) {
+                fx_folder_depth = parent.folder_depth(&own_allowed).ok();
+            }
             // 父轨已枚举过 ⇒ 它的全部后代也已经在 `tracks` 里，不必重走一遍。
             if seen.contains(parent.inventory_guid()) {
                 continue;
@@ -2327,6 +2413,13 @@ impl ExtensionOwner {
                 tracks.insert(track.guid.clone(), track);
             }
         }
+        // 分类只用两项可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
+        // `None` ⇒ 退化成"等待中"，绝不给出一个可能指错方向的 folder 提示。
+        let status = classify_host_audio(
+            fx_folder_depth.is_some_and(|depth| depth >= 1),
+            item_count,
+            claimed_items,
+        );
         if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
         }
@@ -2347,6 +2440,7 @@ impl ExtensionOwner {
         *stamp.0.ui_tracks.lock().unwrap() = tracks;
         *stamp.0.ui_inventory_stamp.lock().unwrap() = Some(token);
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        *self.host_audio.lock().unwrap() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
         if item_count > 0 {
@@ -2355,6 +2449,24 @@ impl ExtensionOwner {
                 stamp.0.ui_tracks.lock().unwrap().len(),
                 item_count,
                 claimed_items
+            );
+        }
+        if status.state != HostAudioState::Ready {
+            // 直读病灶：本实例到底拿到几条 region、FX 轨是不是 folder 父轨。下一次同样
+            // 的报障不必再从位掩码与清单反推（见方案 Task 3.3）。
+            let assigned = self
+                .host_assigned_regions(&stamp.0)
+                .map(|keys| keys.len())
+                .unwrap_or(0);
+            let depth = match fx_folder_depth {
+                Some(depth) => depth.to_string(),
+                None => "unknown".to_owned(),
+            };
+            log::info!("[ara] fx track: folderDepth={depth}; assigned regions={assigned}");
+            log::info!(
+                "[ara] {} clip(s) still waiting for host audio ({})",
+                status.waiting_items,
+                status.state.as_str()
             );
         }
     }
@@ -3665,6 +3777,110 @@ impl ExtensionOwner {
             keys.len()
         );
         Ok(())
+    }
+}
+
+/// 宿主音频分类的纯函数回归。
+///
+/// 【为什么必须钉死】这一段决定了 GUI 会给用户哪句话：说错方向（把"挂错轨道"说成
+/// "等待中"，或反过来）比不说更坏 —— 用户会按错误的提示去改工程。所以四条分支逐一
+/// 断言，并且断言"读不出 folder 结构时**不**给出 folder 结论"。
+#[cfg(test)]
+mod host_audio_state_tests {
+    use super::*;
+
+    #[test]
+    fn a_claimed_item_means_ready() {
+        let status = classify_host_audio(false, 3, 1);
+        assert_eq!(status.state, HostAudioState::Ready);
+        assert_eq!(status.waiting_items, 0);
+    }
+
+    #[test]
+    fn an_empty_project_is_not_a_fault() {
+        let status = classify_host_audio(false, 0, 0);
+        assert_eq!(status.state, HostAudioState::Ready);
+        assert_eq!(status.waiting_items, 0);
+    }
+
+    #[test]
+    fn items_without_regions_on_a_plain_track_are_awaiting() {
+        let status = classify_host_audio(false, 2, 0);
+        assert_eq!(status.state, HostAudioState::AwaitingRegions);
+        assert_eq!(status.waiting_items, 2);
+    }
+
+    #[test]
+    fn items_without_regions_on_a_folder_parent_are_named_precisely() {
+        let status = classify_host_audio(true, 2, 0);
+        assert_eq!(status.state, HostAudioState::FolderParentWithoutRegions);
+        assert_eq!(status.waiting_items, 2);
+    }
+
+    /// 认领数超过清单数（诊断计数口径不一致）时不得下溢成天文数字。
+    #[test]
+    fn an_over_counted_claim_does_not_underflow() {
+        let status = classify_host_audio(false, 1, 5);
+        assert_eq!(status.state, HostAudioState::Ready);
+        assert_eq!(status.waiting_items, 0);
+    }
+
+    /// 分类名是前端查 catalog 的键：改名即破坏文案，必须显式钉住。
+    #[test]
+    fn classification_names_are_stable_catalog_keys() {
+        assert_eq!(HostAudioState::Ready.as_str(), "ready");
+        assert_eq!(HostAudioState::AwaitingRegions.as_str(), "awaiting_regions");
+        assert_eq!(
+            HostAudioState::FolderParentWithoutRegions.as_str(),
+            "folder_parent_without_regions"
+        );
+    }
+
+    /// GUI 载荷只带**编辑器实例**的读数：playback 实例没有 GUI，它的读数不该出现在
+    /// 用户的窗口里（那会让一个正常工作的实例替另一个实例"背锅"）。
+    #[test]
+    fn the_payload_carries_the_editor_instances_reading() {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let editor = Arc::new(ExtensionOwner::default());
+        let _raw = editor
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::EDITOR_RENDERER | ExtensionRoles::EDITOR_VIEW,
+                None,
+            )
+            .unwrap();
+        assert!(
+            editor.is_editor_only(),
+            "本夹具的第二个实例必须是编辑器实例"
+        );
+        // playback 实例报"正常"、编辑器实例报 folder 判据：载荷必须取后者。
+        *owners[0].host_audio.lock().unwrap() = HostAudioStatus::default();
+        *editor.host_audio.lock().unwrap() = HostAudioStatus {
+            state: HostAudioState::FolderParentWithoutRegions,
+            waiting_items: 2,
+        };
+        let mut payload = serde_json::json!({"ok":true});
+        document.decorate_host_audio(&mut payload);
+        assert_eq!(
+            payload["host_audio"]["state"],
+            "folder_parent_without_regions"
+        );
+        assert_eq!(payload["host_audio"]["waiting_clips"], 2);
+        document.close();
+    }
+
+    /// 没有编辑器实例时**不写**该字段：前端沿用上一次已知值，而不是凭空报一个"正常"。
+    #[test]
+    fn a_document_without_an_editor_instance_writes_nothing() {
+        let (model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let mut payload = serde_json::json!({"ok":true});
+        document.decorate_host_audio(&mut payload);
+        assert!(payload.get("host_audio").is_none());
+        document.close();
     }
 }
 

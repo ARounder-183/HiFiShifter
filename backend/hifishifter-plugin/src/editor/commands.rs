@@ -124,6 +124,9 @@ pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     drop(timeline);
     let mut result = value(payload)?;
     session.decorate_host_fades(&mut result);
+    // 宿主音频读数（语言无关分类）：GUI 据此把"看起来能用、其实没内容"的空白 Clip
+    // 说明白（见 `render::extension::HostAudioState`）。
+    session.decorate_host_audio(&mut result);
     Ok(result)
 }
 fn history_state(session: &EditorSession) -> Value {

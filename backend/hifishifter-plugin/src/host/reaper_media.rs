@@ -459,6 +459,15 @@ impl ReaperHost {
     }
 }
 impl HostTrackTarget {
+    /// 本轨道的 `I_FOLDERDEPTH`（`>= 1` 即 folder 父轨）。
+    ///
+    /// 读不出来时返回 `Err`，调用方据此保持"不知道" —— **不得**把它当作 `0`：
+    /// 那会给用户一句可能是错的提示（"你没挂错轨道"），比不提示更坏。
+    pub(crate) fn folder_depth(&self, authorized: &impl Fn() -> bool) -> Result<i32, String> {
+        self.host
+            .track_folder_depth(self.track as *mut c_void, authorized)
+    }
+
     /// 从已重建身份的真实item状态创建；SOURCE/take/FX所有权由宿主state loader管理。
     pub(crate) fn create_copied_item(
         &self,

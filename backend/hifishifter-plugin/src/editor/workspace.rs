@@ -361,6 +361,28 @@ impl DocumentSession {
             self.decorate_host_fades_locked(payload, namespace, &self.edits.lock().unwrap().fades);
         }
     }
+    /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。
+    ///
+    /// 【为什么取编辑器实例的读数】GUI 就挂在这个实例上（role = 2），它才是用户看到的
+    /// 那个窗口；playback 实例没有 GUI。找不到编辑器实例时**不写**该字段 —— 前端沿用
+    /// 上一次已知值，而不是凭空报一个"正常"。
+    ///
+    /// 【为什么分类留在后端】与 `ara_host_fields:` 同一原则：后端只给语言无关的分类
+    /// （见 `render::extension::HostAudioState`），文案按 catalog 本地化。
+    pub(crate) fn decorate_host_audio(&self, payload: &mut serde_json::Value) {
+        let Some(owner) = self
+            .renderer_owners()
+            .into_iter()
+            .find(|owner| owner.is_editor_only())
+        else {
+            return;
+        };
+        let status = owner.host_audio_status();
+        payload["host_audio"] = serde_json::json!({
+            "state": status.state.as_str(),
+            "waiting_clips": status.waiting_items,
+        });
+    }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
     /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
     pub(crate) fn project_ui_fades_locked(

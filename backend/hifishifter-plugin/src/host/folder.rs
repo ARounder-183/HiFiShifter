@@ -119,6 +119,40 @@ impl HostFolderTree {
 }
 
 impl ReaperHost {
+    /// 读**一条轨道自身**的 `I_FOLDERDEPTH`：只读单值，不枚举整个工程。
+    ///
+    /// 【为什么单独开一个入口】重建 folder 树要枚举全部轨道；而"本 FX 所在轨道
+    /// 是不是 folder 父轨"只需要这一条轨道的值。为了给用户一句准确的提示去枚举整个
+    /// 工程，代价与出错面都不成比例（见 `render::extension::HostAudioState`）。
+    ///
+    /// 读不出来时返回 `Err` —— 调用方必须保持"不知道"，不得当成 `false`：那会让
+    /// 用户拿到一句可能是错的提示（"你没挂错轨道"）。
+    pub(crate) fn track_folder_depth(
+        &self,
+        track: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<i32, String> {
+        if std::thread::current().id() != self.thread {
+            return Err("REAPER track inventory queried outside host thread".into());
+        }
+        let api = self
+            .folder
+            .as_ref()
+            .ok_or("REAPER track inventory API unavailable")?;
+        let project = self.project(authorized)?;
+        if track.is_null()
+            || !checked(authorized, || unsafe {
+                (api.validate)(project, track, c"MediaTrack*".as_ptr())
+            })?
+        {
+            return Err("invalid host track object".into());
+        }
+        let depth = checked(authorized, || unsafe {
+            (api.value)(track, c"I_FOLDERDEPTH".as_ptr())
+        })?;
+        normalize_folder_depth(depth)
+    }
+
     /// 只读重建宿主轨道组。必须在宿主 UI/model 线程调用。
     pub(crate) fn folder_tree(
         &self,
@@ -187,6 +221,20 @@ struct RawTrackRow {
     track: usize,
 }
 
+/// 校验并归一化一条轨道的 `I_FOLDERDEPTH` 原值。
+///
+/// 正数大于 1 一律拒绝（见模块文档）；非整数 / 非有限 / 越界同样拒绝 —— 宿主数据
+/// 损坏时不能靠隐式转换蒙混过关。
+fn normalize_folder_depth(value: f64) -> Result<i32, String> {
+    if !value.is_finite()
+        || value.fract() != 0.
+        || !(-(MAX_FOLDER_DEPTH as f64)..=1.0).contains(&value)
+    {
+        return Err(format!("unsupported host folder depth {value}"));
+    }
+    Ok(value as i32)
+}
+
 /// 由轨道序列重建 folder 父子。**纯函数**：宿主调用与算法分离，算法可独立单测。
 ///
 /// 深度变化量作用于**本条轨道之后**的轨道，因此先定归属、再施加本条的变化。
@@ -208,17 +256,8 @@ fn build_folder_tree(rows: impl Iterator<Item = RawTrackRow>) -> Result<HostFold
         {
             return Err("invalid host track number".into());
         }
-        if !row.folder_depth.is_finite()
-            || row.folder_depth.fract() != 0.
-            || !(-(MAX_FOLDER_DEPTH as f64)..=1.0).contains(&row.folder_depth)
-        {
-            // 见模块文档：正数大于 1 的含义未经真实宿主核对，拒绝而不是猜。
-            return Err(format!(
-                "unsupported host folder depth {} on track {}",
-                row.folder_depth, row.guid
-            ));
-        }
-        let folder_depth = row.folder_depth as i32;
+        let folder_depth = normalize_folder_depth(row.folder_depth)
+            .map_err(|error| format!("{error} on track {}", row.guid))?;
         parent_of.insert(row.guid.clone(), stack.last().cloned());
         nodes.push(HostTrackNode {
             guid: row.guid.clone(),
@@ -400,5 +439,16 @@ mod tests {
         let mut broken = row(1, 1, 0.);
         broken.guid = "not-a-guid".into();
         assert!(build_folder_tree([broken].into_iter()).is_err());
+    }
+
+    /// 单轨读取与建树走**同一个**归一化：同一宿主值不允许在两条路径上得出不同结论。
+    #[test]
+    fn single_track_depth_normalization_matches_the_tree_builder() {
+        assert_eq!(normalize_folder_depth(0.).unwrap(), 0);
+        assert_eq!(normalize_folder_depth(1.).unwrap(), 1);
+        assert_eq!(normalize_folder_depth(-3.).unwrap(), -3);
+        assert!(normalize_folder_depth(2.).is_err());
+        assert!(normalize_folder_depth(1.5).is_err());
+        assert!(normalize_folder_depth(f64::NAN).is_err());
     }
 }

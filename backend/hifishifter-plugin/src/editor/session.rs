@@ -1180,6 +1180,12 @@ impl EditorSession {
             document.decorate_host_fades(payload, &self.namespace);
         }
     }
+    /// 宿主音频读数：与 `decorate_host_fades` 同一路径，只多一个语言无关的分类字段。
+    pub(super) fn decorate_host_audio(&self, payload: &mut Value) {
+        if let Some(document) = self.document.upgrade() {
+            document.decorate_host_audio(payload);
+        }
+    }
     /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
     pub(super) fn playback_state(&self) -> Value {
         let (position, playing) = self

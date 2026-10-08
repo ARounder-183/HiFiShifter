@@ -47,6 +47,12 @@ pub(crate) struct Fixture {
     bad_marker: Cell<bool>,
     bad_guid: Cell<bool>,
     change: Cell<i32>,
+    /// 轨道级 `GetMediaTrackInfo_Value` 的读数。
+    ///
+    /// 夹具不区分字段名，`IP_TRACKNUMBER` 与 `I_FOLDERDEPTH` 共用这一个值；默认 1
+    /// 与本次改动之前完全一致（原先硬编码返回 1）。需要区分"folder 父轨"与"普通轨"
+    /// 的用例必须显式设置它。
+    pub track_value: Cell<f64>,
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
 }
 impl Fixture {
@@ -118,6 +124,7 @@ impl Fixture {
             bad_marker: Cell::new(false),
             bad_guid: Cell::new(false),
             change: Cell::new(-9),
+            track_value: Cell::new(1.),
             hook: RefCell::new(None),
         });
         ACTIVE.set((&*value as *const Self) as usize);
@@ -809,8 +816,34 @@ unsafe extern "C" fn inventory_name(_take: *mut c_void) -> *const c_char {
     c"short voice".as_ptr()
 }
 unsafe extern "C" fn inventory_track_value(track: *mut c_void, _name: *const c_char) -> f64 {
-    assert_eq!(track, fixture().track());
-    1.
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.track_value.get()
+}
+
+/// folder 判据走**单值读取**：FX 轨自己的 `I_FOLDERDEPTH` 就是结论，不枚举整个工程。
+///
+/// 【为什么值得单测】"本 FX 挂在 folder 父轨上"这句提示一旦说错，用户会照着一个
+/// 错误方向去改工程。所以这里既钉住读到的值原样透传（0 / 1 / -1 都不改写），也钉住
+/// 越界值**报错而不是当成 0** —— 报错让调用方保持"不知道"，退化成"等待中"提示。
+#[test]
+fn folder_depth_is_read_from_the_fx_track_alone() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.inventory_enabled.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.direct_track_target(&|| true).unwrap();
+    for depth in [0., 1., -1.] {
+        f.track_value.set(depth);
+        assert_eq!(target.folder_depth(&|| true).unwrap(), depth as i32);
+    }
+    for broken in [2., 1.5, f64::NAN] {
+        f.track_value.set(broken);
+        assert!(
+            target.folder_depth(&|| true).is_err(),
+            "越界/非整数深度必须报错而不是当成 0：{broken}"
+        );
+    }
 }
 unsafe extern "C" fn fx_count(track: *mut c_void) -> i32 {
     i32::from(fixture().new_fx.borrow().contains(&(track as usize)))

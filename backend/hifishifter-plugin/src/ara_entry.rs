@@ -89,6 +89,25 @@ unsafe extern "C" fn get_factory(context: *mut c_void) -> *const c_void {
     }))
     .unwrap_or(std::ptr::null())
 }
+/// 把 ARA 角色位展开成名字，供绑定日志直接读数。
+///
+/// 【为什么按名字打印】`assigned=0x6` 要读者自己换算位掩码 —— 用户报障时不会算，也
+/// 不该让他算。而"少了 PLAYBACK_RENDERER"正是"拿不到音频"最直接的线索，必须一眼可见。
+/// 越界的位进不来：`CompanionRoles::from_bits` 对未知位返回 `None`，调用方已经提前返回。
+fn role_names(roles: i32) -> String {
+    let mut names = Vec::new();
+    if roles & CompanionRoles::PLAYBACK_RENDERER.bits() != 0 {
+        names.push("playback");
+    }
+    if roles & CompanionRoles::EDITOR_RENDERER.bits() != 0 {
+        names.push("editor");
+    }
+    if roles & CompanionRoles::EDITOR_VIEW.bits() != 0 {
+        names.push("view");
+    }
+    format!("[{}]", names.join(","))
+}
+
 unsafe extern "C" fn bind(
     context: *mut c_void,
     controller: *mut c_void,
@@ -122,9 +141,18 @@ unsafe extern "C" fn bind(
         }) else {
             return std::ptr::null();
         };
+        // 宿主对本实例的角色决定：`assigned` 少掉 playback 是"拿不到音频"的直接线索，
+        // 因此按名字打印，并显式标注缺失（见方案 Task 3.3）。
+        let playback = if assigned & CompanionRoles::PLAYBACK_RENDERER.bits() != 0 {
+            "assigned"
+        } else {
+            "NOT assigned"
+        };
         log::info!(
-            "[ara] bind document={} known={known:#x} assigned={assigned:#x}",
-            document.id
+            "[ara] bind document={} roles known={} assigned={} (playback {playback})",
+            document.id,
+            role_names(known),
+            role_names(assigned)
         );
         context
             .owner
