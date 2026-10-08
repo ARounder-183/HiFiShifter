@@ -717,7 +717,27 @@ impl ReaperHost {
 /// 元数据独立有界；不扩大PCM预算，也不根据item窗口删掉合法窗口外marker。
 const MAX_MARKERS: i32 = 16_384;
 
+/// 淡化轴换代的宿主版本边界。
+///
+/// 【依据】官方头文件 `sdk/reaper_plugin_functions.h`（`GetMediaItemInfo_Value` 的
+/// 值键说明区）把两套轴标成**互补区间**：
+/// ```text
+/// D_FADEINDIR      : ... (v7.80 and earlier)
+/// D_FADEINDIR_NEW  : ... (v7.81 and later)
+/// D_FADEINDIR2_NEW : ... (v7.81 and later)
+/// C_FADEINSHAPE    : ... (v7.80 and earlier, FADEINDIR_NEW/FADEINDIR2_NEW
+///                            determine shape in v7.81 and later)
+/// ```
+/// 所以 `(7, 81)` 是官方文档化的区间边界，不是"我们测过的版本"。
+/// 取头文件的方法见 `probe/ara/README.md`；pin 见 `REAPER-SDK-NOTICE.md`。
+const NEW_FADE_AXES_SINCE: (u32, u32) = (7, 81);
+
 /// 比较官方版本的整数分量（7.100不能按浮点误判为7.10）。
+///
+/// 【为什么用版本号而不是读值】`GetMediaItemInfo_Value` 对未知键返回 `0.0`，
+/// 而线性淡化（curvature=0, S=0）也合法地是 `0.0` —— 只读前提下无法区分
+/// "键不被支持"与"键被支持但值为零"。因此版本是唯一可用的判别手段；
+/// 读不出来时返回 `None`（上层据此保持只读，不猜）。
 fn new_fade_axes(version: &str) -> Option<bool> {
     let numeric = version.split('/').next()?;
     let (major, minor) = numeric.split_once('.')?;
@@ -728,7 +748,7 @@ fn new_fade_axes(version: &str) -> Option<bool> {
         .collect::<String>()
         .parse::<u32>()
         .ok()?;
-    Some((major, minor) >= (7, 81))
+    Some((major, minor) >= NEW_FADE_AXES_SINCE)
 }
 
 #[cfg(test)]
@@ -742,13 +762,25 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     /// 新旧版本边界与未知字符串明确区分，未来minor不能误按小数比较。
+    ///
+    /// 【为什么把边界单独钉住】它是官方头文件文档化的区间（`v7.80 and earlier` /
+    /// `v7.81 and later`），取错一边就会把"权威的轴"读错，而表现是"拖了滑杆但淡变
+    /// 没变"这种很难归因的现象。字符串格式取自头文件里 `GetAppVersion` 的注释。
     #[test]
     fn fade_axis_version_boundary_does_not_guess_unknown_versions() {
+        // 边界两侧：正好 7.80 是旧轴，正好 7.81 是新轴。
         assert_eq!(new_fade_axes("7.80/x64"), Some(false));
         assert_eq!(new_fade_axes("7.81/x64"), Some(true));
+        // 头文件列出的平台后缀形态。
+        assert_eq!(new_fade_axes("7.80/macOS-arm64"), Some(false));
+        assert_eq!(new_fade_axes("7.81/linux-x86_64"), Some(true));
+        assert_eq!(new_fade_axes("7.81"), Some(true));
+        // minor 必须按整数比较：7.100 不是 7.10。
         assert_eq!(new_fade_axes("7.100+dev1005/x64"), Some(true));
         assert_eq!(new_fade_axes("8.0"), Some(true));
+        // 读不出来 → None → 上层保持只读，不猜。
         assert_eq!(new_fade_axes("unknown"), None);
+        assert_eq!(new_fade_axes(""), None);
     }
     struct Project {
         position: f64,

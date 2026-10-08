@@ -33,6 +33,29 @@ cmake --build build-vs2022 --config Release --target ARATestPlugInVST3 `
   -- /m:1 /p:TrackFileAccess=false
 ```
 
+### REAPER SDK（接口签名的唯一依据）
+
+`backend/hifishifter-plugin/src/host/reaper.rs` 是**手写适配**，不是 SDK 文件。
+它的函数签名与值键语义必须对着官方头文件核对 —— 尤其是淡化轴这类"区间标注"
+（`C_FADE*SHAPE` 标注 v7.80 and earlier、`D_FADE*DIR_NEW` 标注 v7.81 and later）。
+头文件不进仓，用这条命令取（落点已在 `.gitignore` 覆盖范围内）：
+
+```powershell
+cd probe\ara\rust-path\.third-party
+git clone https://github.com/justinfrankel/reaper-sdk.git
+# 与 backend/hifishifter-plugin/src/host/REAPER-SDK-NOTICE.md 记录的 pin 对齐：
+git -C reaper-sdk checkout c0eafe87863b2bf69c5c822760f1b32a753b211b
+```
+
+核对时看 `sdk/reaper_plugin_functions.h`：
+
+| 想确认什么 | 看哪里 |
+| --- | --- |
+| 淡化轴属于哪个版本区间 | 搜 `D_FADEINDIR` / `C_FADEINSHAPE`（值键说明区，`GetMediaItemInfo_Value` 附近） |
+| `GetAppVersion` 的字符串格式 | 搜 `GetAppVersion` 上方的注释 |
+| 取 take / 枚举 take | 搜 `GetMediaItemNumTakes` / `GetMediaItemTake` |
+| 建轨与插 FX | 搜 `InsertTrackInProject` / `TrackFX_AddByName` |
+
 ### 构建这条命令为什么长这样（踩过的坑，照抄别改）
 
 在受限环境里，MSBuild 编译会以
