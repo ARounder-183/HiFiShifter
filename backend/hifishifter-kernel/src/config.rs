@@ -2693,7 +2693,7 @@ fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
         }
         // 目标不存在时 MOVEFILE_REPLACE_EXISTING 也可用，但仍回退一次 rename：
         // 某些网络/可移动卷上的 MoveFileEx 会失败，而那里的 rename 通常可行。
-        return fs::rename(tmp, target);
+        fs::rename(tmp, target)
     }
     #[cfg(not(windows))]
     {
