@@ -9,11 +9,13 @@
  *
  * 【为什么两个选项的条件显隐不同】递归是"这次没得选"（没有子目录），直接不显示；
  * 建轨道组是"这个模式下调不了"，显示但禁用 —— 让用户看得见它、也看得见为什么。
+ * ARA 插件模式下它还多一个"这个功能本身不在插件里"的原因（见 `canCreateHostTrackGroups`）。
  */
 
 import { useI18n } from "../../i18n/I18nProvider";
 import type { FolderMediaScan } from "../../services/api/fileBrowser";
 import type { FolderImportPlan } from "../../features/fileBrowser/folderImportPlan";
+import { canCreateHostTrackGroups } from "../../services/hostCapabilities";
 import {
     FOLDER_IMPORT_MODES,
     FOLDER_IMPORT_MODE_LABEL_KEY,
@@ -117,18 +119,24 @@ export function FolderImportDialog({
                 {/*
                   建轨道组只在"跨轨道添加"下有效（另外两种模式下文件根本不在各自的
                   轨道上）。这里**显示但禁用**而不是隐藏：让用户看得见它存在、也看得见
-                  为什么现在调不了。
+                  为什么现在调不了。插件模式下多一条原因（轨道组由 REAPER 管理）。
                 */}
                 <AppSwitchRow
                     control="checkbox"
                     label={t("folder_import_create_tracks")}
                     hint={
-                        options.mode === "across-tracks"
-                            ? t("folder_import_create_tracks_hint")
-                            : t("folder_import_create_tracks_unavailable")
+                        !canCreateHostTrackGroups()
+                            ? t("folder_import_create_tracks_plugin_unavailable")
+                            : options.mode === "across-tracks"
+                              ? t("folder_import_create_tracks_hint")
+                              : t("folder_import_create_tracks_unavailable")
                     }
-                    disabled={options.mode !== "across-tracks"}
-                    checked={options.createFolderTracks && options.mode === "across-tracks"}
+                    disabled={!canCreateHostTrackGroups() || options.mode !== "across-tracks"}
+                    checked={
+                        canCreateHostTrackGroups() &&
+                        options.createFolderTracks &&
+                        options.mode === "across-tracks"
+                    }
                     onCheckedChange={(checked) => onOptionsChange({ createFolderTracks: checked })}
                 />
 

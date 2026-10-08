@@ -171,3 +171,54 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
 
     document.close();
 }
+
+/// 导出 MIDI 的收口：目标路径必须绝对、以 `.mid` 结尾，且目录已存在。
+///
+/// 【为什么值得单测】这是插件里少数几条会**写用户磁盘**的命令之一，路径校验就是它
+/// 唯一的边界 —— 两个调用点（时间线菜单、钢琴卷帘）都不会再校验一次。收口漏了，
+/// 命令就会替前端决定往哪写。
+#[test]
+fn export_pitch_to_midi_validates_the_output_path() {
+    let (_model, owner, _id) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    let request = |path: &str| {
+        json!({"outputPath":path,"tracks":[],"bpm":120,"beatsPerBar":4,
+            "baseScale":"C","projectScaleNotes":[]})
+    };
+    // 相对路径：宿主进程的工作目录不可预测，不能作为基准。
+    assert!(dispatch(&editor, "export_pitch_to_midi", request("export.mid")).is_err());
+    // 扩展名不是 MIDI。
+    let wrong_ext = std::env::temp_dir().join("hfs-midi-export.wav");
+    assert!(dispatch(
+        &editor,
+        "export_pitch_to_midi",
+        request(&wrong_ext.to_string_lossy())
+    )
+    .is_err());
+    // 目录不存在：宁可不写，也不要凭空建目录树。
+    let missing = std::env::temp_dir()
+        .join("hfs-midi-export-missing")
+        .join("out.mid");
+    assert!(dispatch(
+        &editor,
+        "export_pitch_to_midi",
+        request(&missing.to_string_lossy())
+    )
+    .is_err());
+
+    // 合法路径：命令真的走到了内核（夹具时间线里没有音高数据，内核如实回报）。
+    let dir = std::env::temp_dir().join(format!("hfs-midi-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("out.mid");
+    let result = dispatch(
+        &editor,
+        "export_pitch_to_midi",
+        request(&out.to_string_lossy()),
+    )
+    .unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"], "no_pitch_data");
+
+    std::fs::remove_dir_all(&dir).ok();
+    editor.close();
+}

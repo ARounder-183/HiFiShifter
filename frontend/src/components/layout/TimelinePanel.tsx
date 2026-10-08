@@ -35,6 +35,7 @@ import {
     isHostGeometryReadOnly,
     canEditHostFadeAxes,
     canImportHostAudio,
+    canImportAsTakes,
     canCreateHostTracks,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";
@@ -6092,6 +6093,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (dropPreview !== null) setDropPreview(null);
             return;
         }
+        // 插件模式没有 MIDI 导入链路：不显示落点预览。预览是一种承诺 ——
+        // 松手什么都不会发生，比一开始就不给这个反馈更糟。
+        if (dragAction === "importMidi" && !canImportMidi()) {
+            if (dropPreview !== null) setDropPreview(null);
+            return;
+        }
         // dragover 在文件悬停期间高频连发；落点各字段都没变时不 setState（新对象
         // 无法让 React 跳过重渲，逐事件重渲整个面板纯属浪费）。
         const nextDurationSec = dragAction === "importMidi" ? 2 : 0;
@@ -6589,7 +6596,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 {
                                     key: "as-takes",
                                     label: t("import_as_takes"),
+                                    // 插件模式里多 take 的**新建**没有宿主对应（ARA 侧
+                                    // 只能读宿主已有的 take）；与 MenuBar 的模式选择
+                                    // 同一道闸，免得这里留下一个点了没反应的入口。
+                                    disabled: !canImportAsTakes(),
                                     onSelect: () => {
+                                        if (!canImportAsTakes()) return;
                                         const m = importModeMenu;
                                         void dispatch(
                                             importMultipleAudioAtPosition({

@@ -1,6 +1,7 @@
 //! 插件文件浏览器：只对用户显式选择过的真实目录生效（`browser_roots`）。
 //! 目录/元信息读取与建目录/改名/删除/显示都限制在这些根之内；音频仍由 REAPER 导入、
-//! ARA 供源，这里不读 PCM。
+//! ARA 供源。唯一的例外是三个**只读媒体探测**命令（元信息 / 解码前缀 / 容器音轨表），
+//! 它们额外接受用户显式指过的绝对媒体路径 —— 判据见 `browser_media_path`。
 use super::session::EditorSession;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,31 @@ impl EditorSession {
         }
         Ok(path)
     }
+    /// 允许**只读探测**一个媒体文件的路径判据（元信息 / 解码前缀 / 容器音轨表）。
+    ///
+    /// 【与 `browser_path` 的分工】后者是"列表与写入"的边界：路径必须落在用户在
+    /// 原生选择器里显式选过的目录内，且**会枚举目录**。本判据只服务三个只读命令：
+    /// 它们要么读文件头、要么解前几秒 PCM、要么列容器里的音轨，**从不枚举目录**，
+    /// 也从不写盘。
+    ///
+    /// 【为什么不能只认授权根】调用点来自用户**显式指过**的文件：原生"导入媒体"
+    /// 选择器返回的路径、拖入的文件、或文件浏览器里列出的条目 —— 前两者都不在任何
+    /// 授权根里。只认根会让多音轨视频的音轨选择静默退回默认音轨、拖放预览拿不到
+    /// 时长（两者都是"看起来能用、其实没生效"）。
+    fn browser_media_path(&self, input: &str) -> Result<PathBuf, String> {
+        if let Ok(path) = self.browser_path(input) {
+            return Ok(path);
+        }
+        let path = Path::new(input);
+        if !path.is_absolute() || !hifishifter_kernel::media::is_media_extension(path) {
+            return Err("an absolute media path is required outside a selected folder".into());
+        }
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        if !path.is_file() {
+            return Err("not a file".into());
+        }
+        Ok(path)
+    }
     pub(super) fn browser_command(&self, command: &str, input: &Value) -> Result<Value, String> {
         match command {
             "list_directory" | "search_files_recursive" => {
@@ -56,8 +82,18 @@ impl EditorSession {
                         }
                         let entry = entry.map_err(|e| e.to_string())?;
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        if !hidden && name.starts_with('.') {
-                            continue;
+                        // 隐藏判据与内核/独立 App **同一份**：Windows 的隐藏是一个文件
+                        // 属性，只看点开头等于对 Windows 用户完全没生效。
+                        if !hidden {
+                            let is_hidden = match entry.metadata() {
+                                Ok(meta) => {
+                                    hifishifter_kernel::folder_scan::is_hidden_entry(&meta, &name)
+                                }
+                                Err(_) => name.starts_with('.'),
+                            };
+                            if is_hidden {
+                                continue;
+                            }
                         }
                         let Ok(path) = self.browser_path(&entry.path().to_string_lossy()) else {
                             continue;
@@ -93,12 +129,81 @@ impl EditorSession {
                 Ok(json!(result))
             }
             "get_audio_file_info" => {
-                let path = self.browser_path(input["filePath"].as_str().ok_or("file missing")?)?;
+                let path =
+                    self.browser_media_path(input["filePath"].as_str().ok_or("file missing")?)?;
                 let info = hifishifter_kernel::audio_utils::try_read_wav_info(&path, 0)
                     .ok_or("unsupported audio metadata")?;
                 Ok(
                     json!({"sampleRate":info.sample_rate,"channels":info.channels,"durationSec":info.duration_sec,"totalFrames":info.total_frames}),
                 )
+            }
+            // ── 只读媒体探测 ──
+            //
+            // 这三条此前在插件里完全没有，于是：文件浏览器的试听点了没声、拖放预览
+            // 拿不到时长、多音轨视频的音轨选择框永远不出现。它们都只读，判据见
+            // `browser_media_path`。
+            "read_audio_preview" => {
+                let path =
+                    self.browser_media_path(input["filePath"].as_str().ok_or("file missing")?)?;
+                // 上限与独立 App 同量级：试听只需前几秒，一条 1 小时音轨整解会吃掉
+                // 上 GB 内存。`maxFrames` 由前端给（缺省 10 秒 @48k）。
+                let max = input["maxFrames"]
+                    .as_u64()
+                    .unwrap_or(480_000)
+                    .clamp(1, 4_800_000) as usize;
+                let (sample_rate, channels, samples) =
+                    hifishifter_kernel::media::decode_media_audio_prefix_f32(&path, None, max)?;
+                let channels = channels.max(1) as usize;
+                let frames = (samples.len() / channels).min(max);
+                let bytes = samples[..frames * channels]
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect::<Vec<u8>>();
+                use base64::Engine as _;
+                Ok(json!({
+                    "sampleRate": sample_rate,
+                    "channels": channels,
+                    "pcmBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }))
+            }
+            "get_media_audio_streams" => {
+                let path =
+                    self.browser_media_path(input["filePath"].as_str().ok_or("file missing")?)?;
+                Ok(
+                    serde_json::to_value(hifishifter_kernel::media::list_audio_streams(&path)?)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            // ── 目录导入的扫描 ──
+            //
+            // 【为什么准入必须是 `browser_path`】扫描会**递归枚举整个子树**并回报真实
+            // 文件路径 —— 这正是只读探测不能放宽的那一半。授权根来自用户在原生选择器
+            // 里显式选过的目录，与列表/写入同一条边界。
+            //
+            // 【为什么输出要过 `display_path`】`browser_path` 走 `canonicalize()`，路径
+            // 因此带扩展长度前缀（`\\?\C:\…`）；而这些路径随后会被交回 REAPER 建 item。
+            // 去掉前缀后与文件浏览器显示、与宿主选择器返回的形式一致。
+            "collect_folder_media" => {
+                let dirs = input["dirs"].as_array().ok_or("directory list missing")?;
+                if dirs.len() > 64 {
+                    return Err("directory list budget exceeded".into());
+                }
+                let mut granted = Vec::with_capacity(dirs.len());
+                for raw in dirs {
+                    let Some(text) = raw.as_str() else { continue };
+                    granted.push(display_path(&self.browser_path(text)?));
+                }
+                let options = match input.get("options") {
+                    Some(value) if !value.is_null() => Some(
+                        serde_json::from_value::<
+                            hifishifter_kernel::folder_scan::CollectFolderMediaOptions,
+                        >(value.clone())
+                        .map_err(|e| e.to_string())?,
+                    ),
+                    _ => None,
+                };
+                let scan = hifishifter_kernel::folder_scan::collect_folder_media(granted, options);
+                Ok(serde_json::to_value(scan).map_err(|e| e.to_string())?)
             }
             "stat_paths" => {
                 let paths = input["paths"].as_array().ok_or("paths missing")?;
@@ -399,6 +504,156 @@ mod tests {
                 &json!({"path":std::env::temp_dir().to_string_lossy(),"newName":"nope"})
             )
             .is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+        editor.close();
+    }
+
+    /// 最小可解码 WAV（16-bit PCM 单声道）。
+    ///
+    /// 【为什么要真造一个】媒体探测走的是真解码器：随便写几个字节只会得到"看起来
+    /// 像 WAV"的文件，解码器会如实拒绝，测试于是测不到正例。
+    fn write_minimal_wav(path: &Path, frames: usize) {
+        let sample_rate = 8000_u32;
+        let data_len = (frames * 2) as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for index in 0..frames {
+            bytes.extend_from_slice(&((index % 97) as i16 * 100 - 4800).to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// 只读媒体探测：授权根内一律可读；根外**只有媒体扩展名**可读，其余拒绝。
+    ///
+    /// 【为什么这条边界值得钉住】`browser_path`（列表/写入）与 `browser_media_path`
+    /// （只读探测）是两条不同的口子。放宽的那条必须只放宽"读用户显式指过的媒体文件"
+    /// 这一件事 —— 一旦顺手把目录枚举也放开，插件就成了任意磁盘读取的入口。
+    #[test]
+    fn browser_media_probe_widens_only_media_reads() {
+        let (_model, owner, _) = super::super::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        let dir = std::env::temp_dir().join(format!("hfs-media-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let inside = dir.join("元音.wav");
+        write_minimal_wav(&inside, 800);
+
+        // 授权根内：元信息 / 试听 / 容器音轨表都可读。
+        let root = editor.grant_browser_directory(&dir).unwrap();
+        assert_eq!(
+            editor
+                .browser_command("get_audio_file_info", &json!({"filePath":inside}))
+                .unwrap()["sampleRate"],
+            8000
+        );
+        let preview = editor
+            .browser_command(
+                "read_audio_preview",
+                &json!({"filePath":inside,"maxFrames":100}),
+            )
+            .unwrap();
+        assert_eq!(preview["channels"], 1);
+        assert!(
+            !preview["pcmBase64"].as_str().unwrap().is_empty(),
+            "试听必须真的解出 PCM"
+        );
+        assert!(
+            !editor
+                .browser_command("get_media_audio_streams", &json!({"filePath":inside}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // 授权根外：媒体文件仍可探测（导入选择器与拖入的文件不在任何授权根里）。
+        let outside_dir =
+            std::env::temp_dir().join(format!("hfs-media-out-{}", std::process::id()));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_wav = outside_dir.join("别处.wav");
+        write_minimal_wav(&outside_wav, 400);
+        assert!(editor
+            .browser_command(
+                "read_audio_preview",
+                &json!({"filePath":outside_wav,"maxFrames":50})
+            )
+            .is_ok());
+        // 非媒体扩展名在根外仍然拒绝 —— 放宽的只有媒体。
+        let outside_txt = outside_dir.join("笔记.txt");
+        std::fs::write(&outside_txt, b"secret").unwrap();
+        assert!(editor
+            .browser_command("read_audio_preview", &json!({"filePath":outside_txt}))
+            .is_err());
+        // 相对路径同样拒绝：宿主进程的工作目录不可预测，不能作为基准。
+        assert!(editor
+            .browser_command("get_audio_file_info", &json!({"filePath":"元音.wav"}))
+            .is_err());
+        // 目录不是文件。
+        assert!(editor
+            .browser_command("read_audio_preview", &json!({"filePath":root}))
+            .is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside_dir).ok();
+        editor.close();
+    }
+
+    /// 目录导入的扫描：授权根内递归分组；未授权目录整条命令拒绝。
+    ///
+    /// 【为什么未授权是整条拒绝而不是塞进 `rejected`】`rejected` 是给用户看的
+    /// "这个路径不能导入"（盘符根 / 不存在），而"这个目录你从没选过"是策略违规：
+    /// 静默跳过会让调用方以为扫完了。
+    #[test]
+    fn browser_folder_scan_stays_inside_granted_roots() {
+        let (_model, owner, _) = super::super::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        let dir = std::env::temp_dir().join(format!("hfs-folder-scan-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("Takes")).unwrap();
+        write_minimal_wav(&dir.join("主歌.wav"), 64);
+        write_minimal_wav(&dir.join("Takes").join("take2.wav"), 64);
+        std::fs::write(dir.join("说明.txt"), b"x").unwrap();
+
+        assert!(
+            editor
+                .browser_command(
+                    "collect_folder_media",
+                    &json!({"dirs":[dir],"options":{"recursive":true}})
+                )
+                .is_err(),
+            "未授权的目录不得被枚举"
+        );
+
+        let root = editor.grant_browser_directory(&dir).unwrap();
+        let flat = editor
+            .browser_command("collect_folder_media", &json!({"dirs":[root]}))
+            .unwrap();
+        assert_eq!(flat["totalFiles"], 1, "非递归只收本层媒体");
+        assert_eq!(flat["groups"][0]["hasSubdirs"], true);
+        assert!(flat["groups"][0]["paths"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("主歌.wav"));
+
+        let deep = editor
+            .browser_command(
+                "collect_folder_media",
+                &json!({"dirs":[root],"options":{"recursive":true}}),
+            )
+            .unwrap();
+        assert_eq!(deep["totalFiles"], 2);
+        assert_eq!(deep["groups"].as_array().unwrap().len(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
         editor.close();

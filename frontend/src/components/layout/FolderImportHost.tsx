@@ -42,6 +42,7 @@ import {
     type FolderImportTreeNode,
 } from "../../features/session/thunks/importThunks";
 import { persistUiSettings, setFolderImportOptions } from "../../features/session/sessionSlice";
+import { canCreateHostTrackGroups } from "../../services/hostCapabilities";
 import { FolderImportDialog } from "./FolderImportDialog";
 
 /** 计划节点 → thunk 载荷（去掉 `dir`：导入不需要它）。 */
@@ -100,7 +101,11 @@ export function FolderImportHost() {
                     looseFiles: plan.looseFiles,
                     orderedFiles: plan.orderedFiles,
                     mode: opts.mode,
-                    createFolderTracks: opts.createFolderTracks,
+                    // 插件模式下建轨道组不可用（轨道结构由 REAPER 拥有，插件只读）。
+                    // 对话框已把它显示为禁用并说明原因；这里再收一次口，免得**上次**
+                    // 记住的 `createFolderTracks: true` 把导入带进 `add_track_tree`
+                    // 这条插件里不存在的路径 —— 那条路径的失败会是一条无人处理的拒绝。
+                    createFolderTracks: opts.createFolderTracks && canCreateHostTrackGroups(),
                     trackId: detail.trackId,
                     startSec: detail.startSec,
                     insertIndex: detail.insertIndex ?? null,

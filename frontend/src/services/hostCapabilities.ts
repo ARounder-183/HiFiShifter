@@ -90,6 +90,50 @@ export function canCreateHostTracks(): boolean {
 }
 
 /**
+ * 插件里能不能由插件**建立轨道组**（REAPER 的 folder 父子）。
+ *
+ * 【为什么是"不能"而不是"尽力而为"】"为每个文件夹创建轨道组"要么建出真正的
+ * folder 层级，要么什么都不建。宿主的 folder 由每条轨道的 `I_FOLDERDEPTH` 编码，
+ * 而插件对轨道结构是**只读**的（`host/folder.rs` 的类型里根本没有写入口）；退化成
+ * 一串彼此无关的空轨道，用户看到的是"分组标题"，实际什么也没分 —— 比不做更坏。
+ *
+ * 【替代路径是完整的】不带轨道组的目录导入在插件里完全可用：文件按所选排布方式
+ * 落到宿主轨道上（`importHostBatch`），只是不建立 folder 层级。
+ */
+export function canCreateHostTrackGroups(): boolean {
+    return !isPluginMode();
+}
+
+/**
+ * 插件里能不能**一次把多个文件作为 Take 导入**。
+ *
+ * 【为什么不能】`importMultipleAudioAtPosition` 的 `as-takes` 分支在插件模式下
+ * 直接拒绝：多 take 的**创建**没有宿主对应（ARA 侧只能读宿主已有的 take，不能往
+ * 一个 item 里新建 take）。此前这个选项照常可选，点了只得到一条无人处理的拒绝。
+ *
+ * 注意与 Part 2 的多 take **枚举**是两件事：读多个 take 已经实现（每个 take 都是
+ * 一个独立片段），这里说的是往同一个 item 里**新建** take。
+ */
+export function canImportAsTakes(): boolean {
+    return !isPluginMode();
+}
+
+/**
+ * 插件里能不能**导入 MIDI**（把 MIDI 的音符写进片段音高曲线）。
+ *
+ * 【为什么不能】MIDI 导入要写音高曲线（`import_midi_to_pitch` / `import_midi_as_clip`），
+ * 而这两个命令在插件里没有实现 —— 不是宿主限制，是这条链路还没搬进内核。此前三个
+ * 入口（文件菜单、拖入 MIDI、文件浏览器右键）在插件里照常打开对话框，用户走完
+ * 十几项设置之后才失败。
+ *
+ * 【导出方向不受影响】把编辑好的音高曲线**导出**成 MIDI 是纯变换，插件里可用
+ * （见 `export_pitch_to_midi`）。
+ */
+export function canImportMidi(): boolean {
+    return !isPluginMode();
+}
+
+/**
  * 宿主接管范围的说明文案（被禁用项的 tooltip、以及"该窗口在插件里不可用"的异常）。
  *
  * 【为什么是函数而不是常量】常量在模块加载期取值，语言就冻在那一刻的

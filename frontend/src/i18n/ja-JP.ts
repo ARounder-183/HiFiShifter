@@ -1587,6 +1587,8 @@ export const jaJP = {
     import_dialog_title: "ファイルをインポート",
     import_across_tracks: "トラック間に追加",
     import_as_takes: "テイクとして追加",
+    import_as_takes_plugin_unavailable:
+        "ARA プラグインモードでは使用できません。複数テイクは REAPER 側で 1 つの item にまとめてください。",
     folder_import_title: "フォルダをインポート",
     folder_import_import: "インポート",
     folder_import_mode: "配置方法",
@@ -1595,6 +1597,8 @@ export const jaJP = {
     folder_import_create_tracks_hint:
         "各フォルダが空の親トラックになり、そのメディアファイルが子トラックになります。",
     folder_import_create_tracks_unavailable: "「トラック間に追加」でのみ使用できます。",
+    folder_import_create_tracks_plugin_unavailable:
+        "ARA プラグインモードでは使用できません。トラックのフォルダは REAPER が管理します。",
     folder_import_summary_folders: "{count} フォルダ|{count} フォルダ",
     folder_import_summary_files: "{count} 個のメディアファイル|{count} 個のメディアファイル",
     folder_import_truncated: "上限を超えています。先頭 {count} 個のみインポートします",

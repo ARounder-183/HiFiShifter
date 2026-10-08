@@ -1641,6 +1641,8 @@ export const koKR = {
     import_dialog_title: "파일 가져오기",
     import_across_tracks: "트랙 간 추가",
     import_as_takes: "테이크로 추가",
+    import_as_takes_plugin_unavailable:
+        "ARA 플러그인 모드에서는 사용할 수 없습니다. 여러 테이크는 REAPER에서 하나의 item에 넣어 주세요.",
     folder_import_title: "폴더 가져오기",
     folder_import_import: "가져오기",
     folder_import_mode: "배치 방식",
@@ -1649,6 +1651,8 @@ export const koKR = {
     folder_import_create_tracks_hint:
         "각 폴더가 빈 상위 트랙이 되고, 그 미디어 파일이 하위 트랙이 됩니다.",
     folder_import_create_tracks_unavailable: "'트랙 간 추가'에서만 사용할 수 있습니다.",
+    folder_import_create_tracks_plugin_unavailable:
+        "ARA 플러그인 모드에서는 사용할 수 없습니다. 트랙 폴더는 REAPER가 관리합니다.",
     folder_import_summary_folders: "폴더 {count}개|폴더 {count}개",
     folder_import_summary_files: "미디어 파일 {count}개|미디어 파일 {count}개",
     folder_import_truncated: "파일 수가 상한을 넘어 처음 {count}개만 가져옵니다",

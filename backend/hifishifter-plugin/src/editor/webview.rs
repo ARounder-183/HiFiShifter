@@ -1066,6 +1066,24 @@ fn configure_browser(
                         None=>Ok(serde_json::json!({"ok":false,"canceled":true}))}
                 })()
             },
+            // 「导出 MIDI」的另存为对话框。命令名与独立 App **相同**，前端不必按模式
+            // 分支；真正的导出（读曲线 → 写文件）走 actor 线程的 `export_pitch_to_midi`。
+            //
+            // 【为什么对话框必须在 UI 线程】`IFileSaveDialog` 需要一个父 HWND，而
+            // HWND 只存在于 UI 线程（与诊断导出、记事本另存为同一条理由）。
+            Some("pick_midi_output_path")=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                (||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let path=super::browser_files::pick_save_path(hwnd,"export.mid","mid")?;
+                    // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
+                    if link.authorize(&document)?!=lease {return Err("MIDI picker editor lease changed".into());}
+                    match path {
+                        Some(path)=>Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()})),
+                        None=>Ok(serde_json::json!({"ok":true,"canceled":true})),
+                    }
+                })()
+            },
             Some("export_diagnostics")=>{
                 let link=state.borrow().link.clone();
                 (||->Result<serde_json::Value,String>{

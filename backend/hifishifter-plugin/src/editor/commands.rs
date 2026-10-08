@@ -218,6 +218,9 @@ pub(super) fn dispatch(
         "list_directory"
         | "stat_paths"
         | "get_audio_file_info"
+        | "read_audio_preview"
+        | "get_media_audio_streams"
+        | "collect_folder_media"
         | "search_files_recursive"
         | "create_directory"
         | "rename_path"
@@ -632,6 +635,38 @@ pub(super) fn dispatch(
                 None => Value::Null,
             },
         ),
+        // 把编辑后的音高曲线导出成 MIDI。
+        //
+        // 【为什么插件里能做】整条链路是纯变换（读音高数据 → 写文件），不需要任何
+        // 宿主写接口 —— 与"在 REAPER 里建 MIDI item"是两件事。目标路径来自插件自己
+        // 的"另存为"对话框（见 `webview.rs` 的 `pick_midi_output_path`）。
+        //
+        // 【为什么先克隆时间线】导出可能触发 FCPE 音高分析（长素材可达数分钟）。
+        // 持有时间线锁跑完会冻结全部命令与 UI 轮询，因此快照必须在**锁外**用。
+        "export_pitch_to_midi" => {
+            let request: hifishifter_kernel::midi_export::MidiExportRequest = args(input)?;
+            if request.tracks.len() > 4096 {
+                return Err("MIDI export track budget exceeded".into());
+            }
+            let path = std::path::Path::new(&request.output_path);
+            if !path.is_absolute()
+                || !path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("mid") || ext.eq_ignore_ascii_case("midi")
+                    })
+            {
+                return Err("an absolute .mid output path is required".into());
+            }
+            if !path.parent().is_some_and(std::path::Path::is_dir) {
+                return Err("the output folder does not exist".into());
+            }
+            let timeline = session.timeline.lock().unwrap().clone();
+            Ok(hifishifter_kernel::midi_export::export_pitch_to_midi(
+                &timeline, request,
+            ))
+        }
         "get_track_summary" => {
             let timeline = session.timeline.lock().unwrap();
             Ok(

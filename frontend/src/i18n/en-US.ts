@@ -1708,6 +1708,8 @@ export const enUS = {
     import_dialog_title: "Import files",
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
+    import_as_takes_plugin_unavailable:
+        "Not available in ARA plugin mode: import takes into one REAPER item there.",
     folder_import_title: "Import Folder",
     folder_import_import: "Import",
     folder_import_mode: "Arrangement",
@@ -1716,6 +1718,8 @@ export const enUS = {
     folder_import_create_tracks_hint:
         "Each folder becomes an empty parent track; its media files become child tracks.",
     folder_import_create_tracks_unavailable: "Only available with Add Across Tracks.",
+    folder_import_create_tracks_plugin_unavailable:
+        "Not available in ARA plugin mode: REAPER owns the track folder structure.",
     folder_import_summary_folders: "{count} folder|{count} folders",
     folder_import_summary_files: "{count} media file|{count} media files",
     folder_import_truncated:

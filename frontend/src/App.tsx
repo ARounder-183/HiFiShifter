@@ -16,6 +16,7 @@ import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import {
     isPluginMode,
+    canImportMidi,
     pluginAllowsAction,
     pluginAllowsEditChannel,
 } from "./services/hostCapabilities";
@@ -735,6 +736,22 @@ function AppInner() {
         };
     }, [dispatch]);
 
+    /**
+     * MIDI 导入对话框的**唯一**开启闸门。
+     *
+     * 【为什么在开启处收口】MIDI 导入有三个入口（文件菜单、拖入 MIDI、文件浏览器
+     * 右键），它们各自先把路径/落点写进一组 state，再打开对话框。插件模式下这条
+     * 链路没有实现（写音高曲线的命令不存在），任何一个入口漏挡都会让用户走完十几项
+     * 设置之后才失败。闸门放在开启点，三个入口自动一起被挡住。
+     */
+    const openMidiClipDialog = useCallback(
+        (open: boolean) => {
+            if (open && !canImportMidi()) return;
+            setMidiClipDialogOpen(open);
+        },
+        [setMidiClipDialogOpen],
+    );
+
     const handleImportMidiFromMenu = useCallback(() => {
         const session = store.getState().session;
         setMidiDialogSource("menu");
@@ -742,8 +759,8 @@ function AppInner() {
         setMidiClipClipboardGuid(null);
         setMidiClipStartSec(session.playheadSec ?? 0);
         setMidiClipTrackId(session.selectedTrackId ?? null);
-        setMidiClipDialogOpen(true);
-    }, []);
+        openMidiClipDialog(true);
+    }, [openMidiClipDialog]);
 
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
@@ -2109,14 +2126,15 @@ function AppInner() {
             setMidiClipStartSec(detail?.startSec ?? 0);
             setMidiClipTrackId(detail?.trackId ?? null);
             setMidiClipClipboardGuid(null);
-            setMidiClipDialogOpen(true);
+            // 插件模式下闸门会吞掉这次开启（见 `openMidiClipDialog`）。
+            openMidiClipDialog(true);
         }
 
         window.addEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
         return () => {
             window.removeEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
         };
-    }, []);
+    }, [openMidiClipDialog]);
 
     useEffect(() => {
         runtimeRef.current = {
@@ -3628,7 +3646,7 @@ function AppInner() {
             specifiedBpm={specifiedBpm}
             importPosition={importPosition}
             closeLeadingGap={closeLeadingGap}
-            onMidiClipDialogOpenChange={setMidiClipDialogOpen}
+            onMidiClipDialogOpenChange={openMidiClipDialog}
             onMidiClipPathChange={setMidiClipPath}
             onMidiClipStartSecChange={setMidiClipStartSec}
             onMidiClipTrackIdChange={setMidiClipTrackId}

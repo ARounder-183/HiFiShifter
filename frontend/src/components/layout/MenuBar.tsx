@@ -3,6 +3,8 @@ import {
     isPluginMode,
     canImportHostAudio,
     canCreateHostTracks,
+    canImportAsTakes,
+    canImportMidi,
     dawControlledReason,
 } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
@@ -695,6 +697,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </div>
                         </DropdownMenu.Item>
                         <DropdownMenu.Item
+                            // MIDI 导入要把音符写进片段音高曲线，而那条链路在插件里
+                            // 没有实现（导出方向有，导入方向没有）。禁用而不是留一个
+                            // 点了什么都不发生的入口 —— 后者会让用户以为是拖放坏了。
+                            disabled={!canImportMidi()}
+                            title={!canImportMidi() ? t("plugin_standalone_only") : undefined}
                             onSelect={() => {
                                 void handleImportMidiFromMenu();
                             }}
@@ -1698,7 +1705,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     options={[
                         { id: "across-time", label: t("import_across_time") },
                         { id: "across-tracks", label: t("import_across_tracks") },
-                        { id: "as-takes", label: t("import_as_takes") },
+                        {
+                            id: "as-takes",
+                            label: t("import_as_takes"),
+                            // 插件模式里多 take 的**新建**没有宿主对应（ARA 侧只能读
+                            // 宿主已有的 take）。此前这项照常可选，点了只得到一条
+                            // 无人处理的拒绝。
+                            disabled: !canImportAsTakes(),
+                            description: canImportAsTakes()
+                                ? undefined
+                                : t("import_as_takes_plugin_unavailable"),
+                        },
                     ]}
                     onSelect={(id) => {
                         const mode = menuImportMode;
