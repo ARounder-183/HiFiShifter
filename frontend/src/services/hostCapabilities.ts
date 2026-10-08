@@ -74,6 +74,22 @@ export function hostFadeAxes(): "legacy" | "continuous" | null {
 export function canSelectHostFadeShape(): boolean {
     return !isPluginMode() || hostFadeAxes() !== null;
 }
+
+/**
+ * 速度映射（BPM / 拍号 / 音阶变化点）能否编辑。
+ *
+ * 【插件里为什么不能】两条独立的原因叠在一起，任一条都足够：
+ * 1. 写入命令 `set_timeline_tempo_map` 在插件里不被支持 —— 那里的 BPM 与拍号是
+ *    **宿主权威**（`render::transport` 从 VST3 进程上下文读，插件不写）；
+ * 2. 也没有"从宿主自动匹配一份"这条路：实测 REAPER **不向 ARA 插件提供**速度 /
+ *    拍号内容（`probe/ara/README.md` 的 F-2），所以连只读来源都没有。
+ *
+ * 于是插件里的速度映射编辑只能是一组"点了没反应"的死控件（提交被拒、快照回滚），
+ * 照 `menu_clear_waveform_cache` 的既有做法整组禁用并说明原因。
+ */
+export function canEditTempoMap(): boolean {
+    return !isPluginMode();
+}
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
 export function canImportHostAudio(): boolean {
     return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.audioImport === true;

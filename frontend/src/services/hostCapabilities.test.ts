@@ -13,6 +13,7 @@ import {
     canImportMidiAsClip,
     canEditHostFadeAxes,
     canSelectHostFadeShape,
+    canEditTempoMap,
     hostFadeAxes,
     dawControlledReason,
 } from "./hostCapabilities";
@@ -164,6 +165,23 @@ test("fade shape editing follows the host axis generation instead of one blanket
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
     expect(hostFadeAxes()).toBeNull();
     expect(canSelectHostFadeShape()).toBe(true);
+});
+
+/**
+ * 速度映射编辑在插件里整组不可用：写入命令不被支持，宿主也不提供可匹配的速度内容
+ * （`probe/ara/README.md` 的 F-2 实测 REAPER 不向 ARA 插件发速度 / 拍号内容）。
+ * 独立 App 里它自己的速度映射一直是可编辑的。
+ */
+test("tempo map editing is standalone-only, for two independent reasons", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tempo", clipEditing: true };
+    expect(canEditTempoMap()).toBe(false);
+    // 与淡化轴能力正交：宿主轴再清楚也不放行速度映射。
+    window.__HFS_PLUGIN_BOOTSTRAP__.fadeAxes = "legacy";
+    expect(canEditHostFadeAxes()).toBe(true);
+    expect(canEditTempoMap()).toBe(false);
+
+    delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    expect(canEditTempoMap()).toBe(true);
 });
 
 test("dawControlledReason follows the current locale instead of freezing at module load", () => {
