@@ -1360,7 +1360,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             )}
 
                             <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>
+                            {/* 【为什么在插件里禁用】`run_vocoder_benchmark` 在插件里明确
+                                不可用（`editor/commands.rs` 回 "the vocoder benchmark is
+                                not available in ARA plugin mode"）。它是**整块**不可用、
+                                不是部分失败，所以照 `menu_clear_waveform_cache` 的做法
+                                直接禁用并说明原因，而不是让用户点开一个只会报错的对话框。 */}
+                            <DropdownMenu.Item
+                                disabled={isPluginMode()}
+                                title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
+                                onSelect={() => setBenchmarkDialogOpen(true)}
+                            >
                                 {t("menu_run_benchmark")}
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
