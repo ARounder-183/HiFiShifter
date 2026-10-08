@@ -13,7 +13,6 @@
 
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { useEffect } from "react";
 import { Provider } from "react-redux";
 import "@radix-ui/themes/styles.css";
 import "./index.css";
@@ -22,17 +21,11 @@ import { store } from "./app/store";
 import { getDockDragState } from "./features/dock/dockDragStore";
 import { isFileBrowserDragActive } from "./features/fileBrowser/fileBrowserDragStore";
 import { AppTooltipProvider } from "./components/AppTooltip";
+import { GlobalGestureServices } from "./components/GlobalGestureServices";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
-import { initModifierWatcher } from "./components/layout/timeline/hooks/modifierWatcher";
-
-/** 进程级全局手势基建：自愈式修饰键跟踪（淡化曲率等 modifierOnly 键位）。 */
-function GlobalGestureServices() {
-    useEffect(() => initModifierWatcher() ?? undefined, []);
-    return null;
-}
 
 export function mountApp(): void {
     // dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
