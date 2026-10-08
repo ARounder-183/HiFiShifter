@@ -165,6 +165,49 @@ Task 1 的 Step 1 / 3 / 4 / 5 需要在 REAPER 图形界面里操作，且要造
 - Step 4：造"不干净"的素材（同源多放、拉伸、倒放、淡化、非 44.1kHz 工程）重采一次。
 - Step 5：写 `captures/FINDINGS.md`，重点是**ARA 不提供但渲染需要的字段**清单。
 
+### 命令行**不能**跑探针脚本（本机实测，2026-10-09）
+
+**结论：REAPER 7.82 的命令行没有"运行 ReaScript"这个开关。** 所有探针脚本只能在
+REAPER 里 `Actions → Show action list → Load… → Run`（或 `Actions → ReaScript → Load`）
+手工跑。`probe/ara/start_*.ps1` 那几个运行器把脚本当成命令行参数传进去，
+**脚本不会被执行** —— 它们实际只做到"用隔离 profile 起一个 REAPER"，剩下那一步仍然
+要人来做。
+
+证据（从 `reaper.exe` 里直接取出的用法字符串，7.82 x64）：
+
+```
+-cfgfile file.ini : use full path for alternate resource directory, otherwise uses default path
+-saveas -template -fxoffline -profile -project -batchconvert -nulltest -peaktest
+-renderproject filename.rpp : render project and exit
+-play -nonewinst -newinst -audiocfg -close -ignoreerrors -nosplash -splashlog -noactivate
+-resetconfig -new
+```
+
+逐个试过且**均不执行脚本**的形式：
+
+| 形式 | 实际行为 |
+| --- | --- |
+| `reaper.exe -cfgfile X -new script.lua` | 起一个空工程，脚本不跑 |
+| `reaper.exe -cfgfile X script.lua` | 把 `script.lua` 当工程加载 → 弹 `Load Error` |
+| `reaper.exe -cfgfile X project.rpp script.lua` | 工程正常打开，脚本不跑 |
+| `Scripts\__startup.lua` 约定 | 不执行（REAPER 没有这个约定） |
+| `-reascript script.lua` | 未知开关，被忽略 |
+
+因此各 `build_*_probe.lua` 文件头里"用法：`reaper.exe -new build_xxx.lua`"那一行是
+**错的**（写它的人没验证过）。要用这些脚本，照 `fade_axis_capture.lua` 头部的写法：
+在 REAPER 里手工 Load 再 Run。
+
+### 隔离 profile 的正确用法（仍然有用）
+
+`-cfgfile <scratch>\REAPER.ini` 确实生效：REAPER 会把整个资源目录（`Scripts/`、
+`ColorThemes/`…）建在 `<scratch>` 下，**不碰用户自己的 `%APPDATA%\REAPER`**。两个坑：
+
+1. 隔离 profile **不带注册信息**，REAPER 会以 `EVALUATION LICENSE` 启动并弹购买提示
+   （模态）。要先把用户的 `reaper-reginfo2.ini` **复制**进 scratch（只读复制，不改用户文件）。
+2. 隔离 profile 里没有 VST 缓存，REAPER 会扫一遍默认 VST 路径；不需要插件的探针
+   （如 F-1 淡化轴）可以直接等它扫完，或在 ini 里把 `vstpath64=` 留空。
+
+
 ## 环境限制（记录在案）
 
 `backend/src-tauri` 的 `cargo test` **在本会话无法取得基线**：`fdk-aac-sys` / `opusic-sys`

@@ -5,8 +5,8 @@
         替代在 REAPER 图形界面里手工点击。跑完后 ARA 插件应已激活，
         并按其插桩逻辑把模型图 dump 到 ARA_PROBE_OUT。
 
-  用法：
-    reaper.exe -new build_probe_project.lua
+  用法：**在 REAPER 里手工跑**（命令行不能跑脚本，见 ../README.md「命令行不能跑探针脚本」）：
+    Actions → Show action list → Load… 选本文件 → Run
 
   特殊说明：
     - 素材路径取自脚本同目录下的 fixtures\。路径里的反斜杠与中文无关，纯 ASCII。

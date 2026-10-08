@@ -8,8 +8,8 @@
         4) 对某个 region 设淡化
         5) 在非 44.1kHz 工程采样率下重复
 
-  用法（由采集流程调用）：
-    reaper.exe -cfgfile <隔离>\REAPER.ini -new build_awkward_fixture.lua
+  用法：**在 REAPER 里手工跑**（命令行不能跑脚本，见 ../README.md「命令行不能跑探针脚本」）：
+    Actions → Show action list → Load… 选本文件 → Run
 
   特殊说明：
     - 每一步都用 ReaScript 的 item API 完成，不依赖图形界面。

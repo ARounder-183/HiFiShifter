@@ -6,8 +6,8 @@
         判据由插件自己写：它把看到的 audioSource / playbackRegion 数量落到
         HIFISHIFTER_ARA_PROBE_LOG 指向的文件；本脚本只负责摆场景与记录 REAPER 侧结果。
 
-  用法（隔离实例，先确保没有 REAPER 在运行）：
-    reaper.exe -cfgfile <隔离目录>\REAPER.ini -new build_task2_probe.lua
+  用法：**在 REAPER 里手工跑**（命令行不能跑脚本，见 ../README.md「命令行不能跑探针脚本」）：
+    Actions → Show action list → Load… 选本文件 → Run
 
   特殊说明：本脚本是一次性探针产物，不进入产品代码。
 ]]

@@ -4,8 +4,8 @@
   作用：在**独立配置目录**的 REAPER 实例里搭建工程（挂载 ARA 插件 + 摆放素材），
         并分阶段延迟等待，让 ARA 文档真正建立后再检查 dump 是否落盘。
 
-  用法（由 probe/ara/run_capture.ps1 调用，不建议手工跑）：
-    reaper.exe -cfgfile <隔离目录>\REAPER.ini -new build_probe_project_capture.lua
+  用法：**在 REAPER 里手工跑**（命令行不能跑脚本，见 ../README.md「命令行不能跑探针脚本」）：
+    Actions → Show action list → Load… 选本文件 → Run
 
   特殊说明：
     - 采集阶段写日志到 captures\capture.log，便于事后归因（REAPER 控制台看不见）。
