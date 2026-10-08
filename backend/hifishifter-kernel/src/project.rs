@@ -180,7 +180,7 @@ impl ProjectFile {
     }
 }
 
-fn default_base_scale() -> String {
+pub fn default_base_scale() -> String {
     "C".to_string()
 }
 

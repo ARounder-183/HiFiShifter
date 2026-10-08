@@ -253,11 +253,20 @@ impl EditorSession {
         // 值，不播种的话用户在插件里设过的网格会在换工程/重启后归零 —— 而设置本该
         // 属于用户、不属于某一个工程。
         let initial_project = {
+            let settings = crate::settings_store::settings();
             let mut project = ProjectState::default();
             project.grid_size =
                 hifishifter_kernel::config::TimelineSnapSettings::normalize_grid_size(
-                    &crate::settings_store::settings().grid_size,
+                    &settings.grid_size,
                 );
+            // 音阶是 HiFiShifter 自有的设置（宿主没有对应概念），必须从用户设置里
+            // 播种 —— 否则用户在插件里选过的音阶会在换工程/重启后归零，而渲染缓存键
+            // 与级数渲染都锚定它。
+            let musical = settings.plugin_musical_context;
+            project.base_scale =
+                hifishifter_kernel::state::model::normalize_scale_key(&musical.base_scale);
+            project.use_custom_scale = musical.use_custom_scale && musical.custom_scale.is_some();
+            project.custom_scale = musical.custom_scale.map(|scale| scale.normalized());
             project
         };
         let session = Arc::new(Self {

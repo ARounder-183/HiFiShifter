@@ -900,6 +900,9 @@ pub(super) fn set_clip_state(
             fade_out_shape,
             fade_in_dir,
             fade_out_dir,
+            // S 参数是 REAPER 7.81+ 的宿主轴；独立 App 用自己的曲率轴，不涉及它。
+            fade_in_s: None,
+            fade_out_s: None,
             auto_fade_in_sec,
             auto_fade_out_sec,
             color,

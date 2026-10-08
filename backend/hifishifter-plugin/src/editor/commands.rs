@@ -444,6 +444,51 @@ pub(super) fn dispatch(
             after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
+        // 工程基准音阶。
+        //
+        // 【为什么插件必须支持它】REAPER **没有工程调号概念**（音阶只能是
+        // HiFiShifter 自有的设置），而 HiFiShifter 的音高吸附、级数渲染与渲染缓存键
+        // 全都锚定它。此前这条命令落到 `Command unavailable`，于是插件里音阶选择器
+        // 是灰的 —— 用户拿不到一整套依赖音阶的功能。
+        //
+        // 【为什么要落盘】`ProjectState` 是 per-ARA-document 且从不写的；只改它
+        // 会让用户选的音阶在换工程/重启后归零。真正的家是 `UiSettings`。
+        "set_project_base_scale" => {
+            let requested = input["baseScale"].as_str().unwrap_or_default();
+            let scale = hifishifter_kernel::state::model::normalize_scale_key(requested);
+            {
+                let mut project = session.project.lock().unwrap();
+                project.base_scale = scale.clone();
+                project.use_custom_scale = false;
+            }
+            crate::settings_store::save_settings_patch(&json!({
+                "pluginMusicalContext": {
+                    "baseScale": scale,
+                    "useCustomScale": false,
+                }
+            }))?;
+            after_write(session, json!({"ok":true}))?;
+            payload(session, true)
+        }
+        "set_project_custom_scale" => {
+            let custom: hifishifter_kernel::project::CustomScale =
+                serde_json::from_value(input["customScale"].clone())
+                    .map_err(|_| "invalid custom scale".to_string())?;
+            let normalized = custom.normalized();
+            {
+                let mut project = session.project.lock().unwrap();
+                project.custom_scale = Some(normalized.clone());
+                project.use_custom_scale = true;
+            }
+            crate::settings_store::save_settings_patch(&json!({
+                "pluginMusicalContext": {
+                    "useCustomScale": true,
+                    "customScale": normalized,
+                }
+            }))?;
+            after_write(session, json!({"ok":true}))?;
+            payload(session, true)
+        }
         "get_timeline_state_lite" => payload(session, true),
         "get_project_meta" => Ok(payload(session, true)?["project"].clone()),
         "get_runtime_info" => {

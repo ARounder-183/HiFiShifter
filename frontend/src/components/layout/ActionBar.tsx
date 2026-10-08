@@ -1055,9 +1055,13 @@ export function ActionBar() {
                     </Select.Content>
                 </Select.Root>
                 <span className="hs-type-muted">{t("base_scale")}:</span>
+                {/* 【为什么插件里也能改】音阶是 HiFiShifter 自有的设置 —— REAPER
+                    没有工程调号概念，宿主不提供它。插件把它持久化在用户设置里
+                    （`set_project_base_scale`），因此这个选择器是真的能用的。
+                    此前按模式一刀切禁用它，等于把一整套锚定音阶的功能（音高吸附、
+                    级数渲染、渲染缓存键）一起关掉了。 */}
                 <Select.Root
                     value={displayScaleSelectValue}
-                    disabled={isPluginMode()}
                     size="1"
                     onValueChange={(v) => {
                         if (v === "__custom_dialog__") {

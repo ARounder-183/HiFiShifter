@@ -473,6 +473,18 @@ pub const SCALE_KEYS: [&str; 12] = [
     "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
 ];
 
+/// 归一化音阶键名：白名单外一律回落 `C`。
+///
+/// 【为什么在这里】独立 App 的命令层与 ARA 插件此前各抄了一份 12 键清单，
+/// 改一处就会让两边接受的取值分叉。这里与 [`SCALE_KEYS`] 是同一份。
+pub fn normalize_scale_key(raw: &str) -> String {
+    if SCALE_KEYS.contains(&raw) {
+        raw.to_string()
+    } else {
+        "C".to_string()
+    }
+}
+
 /// 由音级集合反查内置音阶键名（归一化后完全一致才匹配）。
 pub fn key_for_scale_notes(notes: &[u8]) -> Option<String> {
     let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();

@@ -739,6 +739,21 @@ pub struct UiSettings {
     /// 的共享**（locale / 快捷键 / 主题 / 设备选择仍然共用）。
     #[serde(default)]
     pub dock_plugin: serde_json::Value,
+    /// ARA 插件形态的音乐上下文。
+    ///
+    /// 【为什么必须存在】REAPER **没有工程调号概念**（`src-tauri/src/import/reaper_import.rs`
+    /// 里明写"音阶全部为跟随工程音阶"），所以音阶只能是 HiFiShifter 自有的用户设置。
+    /// 而插件的 `ProjectState` 是 per-ARA-document、且**从不落盘**的 —— 不存这里，
+    /// 用户在插件里选的音阶会在换工程/重启后归零。
+    ///
+    /// 这不是一个"可有可无的偏好"：HiFiShifter 的音高吸附、级数渲染与**渲染缓存键**
+    /// （`render_key.rs` 的 `scale-signature`）全都锚定音阶。音阶丢了，渲染结果与
+    /// 缓存键一起错。
+    ///
+    /// BPM 与拍号**不在这里**：它们由宿主提供（`render::transport` 从 VST3 进程上下文
+    /// 读），是只读的宿主权威，持久化只会造出第二个写入者。
+    #[serde(default)]
+    pub plugin_musical_context: PluginMusicalContext,
     /// 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。
     ///
     /// 与 `notebook` / `dock` 同理：**后端只做透传存储**，字段语义、取值范围与
@@ -1752,6 +1767,7 @@ impl Default for UiSettings {
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
             dock_plugin: serde_json::Value::Null,
+            plugin_musical_context: PluginMusicalContext::default(),
             pen_input: serde_json::Value::Null,
         }
     }
@@ -2716,6 +2732,34 @@ impl UiSettings {
             return;
         }
         self.dock_plugin = self.dock.clone();
+    }
+}
+
+/// ARA 插件形态的音乐上下文（音阶）。
+///
+/// 与 `ProjectState` 的同名字段同形，但**持久化在用户设置里**而不是某个 ARA 文档里 ——
+/// 理由见 [`UiSettings::plugin_musical_context`]。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMusicalContext {
+    /// 基准音阶键名（`SCALE_KEYS` 之一）。
+    #[serde(default = "crate::project::default_base_scale")]
+    pub base_scale: String,
+    /// 是否使用自定义音阶（覆盖 `base_scale`）。
+    #[serde(default)]
+    pub use_custom_scale: bool,
+    /// 自定义音阶（`use_custom_scale` 为真时生效）。
+    #[serde(default)]
+    pub custom_scale: Option<crate::project::CustomScale>,
+}
+
+impl Default for PluginMusicalContext {
+    fn default() -> Self {
+        Self {
+            base_scale: "C".to_string(),
+            use_custom_scale: false,
+            custom_scale: None,
+        }
     }
 }
 

@@ -454,9 +454,7 @@ pub(super) fn execute_managed(
                 // 拦它会把一条本来能用的路径堵死。但 S 参数在 `FadeStyle` 里没有
                 // 位置，所以仍然拒绝，而不是静默丢弃。
                 if edit.patch.fade_in_s.is_some() || edit.patch.fade_out_s.is_some() {
-                    return Err(
-                        "fade S parameter is not part of the HiFiShifter fade style".into(),
-                    );
+                    return Err("fade S parameter is not part of the HiFiShifter fade style".into());
                 }
                 let mut style = document
                     .edits

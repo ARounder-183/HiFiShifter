@@ -27,6 +27,8 @@ const DEEP_MERGE_KEYS: &[&str] = &[
     // 需要子键合并 —— 漏登记这一项，用户在插件里改一个行为开关就会把整份布局抹掉。
     // 这份清单与 `hifishifter_kernel::editor::settings` 里的是**两份**，必须同时改。
     "dockPlugin",
+    // 插件形态的音乐上下文（音阶）。同样是对象，部分保存不得抹掉兄弟子键。
+    "pluginMusicalContext",
     "search",
     // 指针设备偏好：前端会把压感、捏合、读数等**逐项**部分保存
     // （如只改 `pressureMaxGain`）。漏登记这一项，用户改一个滑块就会把其余

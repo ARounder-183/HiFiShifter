@@ -14,6 +14,8 @@ pub const DEEP_MERGE_KEYS: &[&str] = &[
     // ARA 形态的布局与 App 的 `dock` 同形同语义，因此同样需要子键合并 ——
     // 漏登记这一项，用户在插件里改一个行为开关就会把整份布局抹掉。
     "dockPlugin",
+    // 插件形态的音乐上下文（音阶）。同样是对象，部分保存不得抹掉兄弟子键。
+    "pluginMusicalContext",
     "search",
     "penInput",
 ];

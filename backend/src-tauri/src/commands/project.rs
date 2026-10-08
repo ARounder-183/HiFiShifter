@@ -14,14 +14,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::{Manager, State, Window};
 
+/// 归一化音阶键名。清单只有一份，在 `hifishifter_kernel::state::model` 里 ——
+/// 此前 App 与插件各抄了一份，改一处就会让两边接受的取值分叉。
 fn normalize_scale_key(raw: &str) -> String {
-    const SCALE_KEYS: [&str; 12] = [
-        "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
-    ];
-    if SCALE_KEYS.contains(&raw) {
-        return raw.to_string();
-    }
-    "C".to_string()
+    hifishifter_kernel::state::model::normalize_scale_key(raw)
 }
 
 fn normalize_custom_scale(input: Option<CustomScale>) -> Option<CustomScale> {

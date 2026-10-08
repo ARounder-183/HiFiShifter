@@ -114,3 +114,60 @@ fn diagnostic_grouped_state_round_trip_without_host_history() {
     );
     document.close();
 }
+
+/// 音阶是 HiFiShifter 自有的设置，插件里必须能改、且必须落盘。
+///
+/// 【为什么这两件事一起测】REAPER 没有工程调号概念，所以音阶只能由 HiFiShifter
+/// 自己拥有；而插件的 `ProjectState` 是 per-ARA-document 且从不写的 —— 只改它就等于
+/// 用户选的音阶在换工程/重启后归零，而渲染缓存键与级数渲染都锚定它。
+#[test]
+fn the_project_scale_can_be_set_and_survives_a_restart() {
+    crate::settings_store::test_support::reset();
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let editor = owner.editor_session().unwrap();
+    let (reply, rx) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(32);
+    let sink = crate::editor::session::UiSink {
+        view_id: "scale-diagnostic".into(),
+        reply,
+        events,
+        closed: Arc::new(AtomicBool::new(false)),
+    };
+    let call = |id, command: &str, args| {
+        editor
+            .enqueue(crate::editor::session::UiRequest {
+                id,
+                command: command.into(),
+                args,
+                sink: sink.clone(),
+                link: None,
+            })
+            .unwrap();
+        let response: Value = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response["value"].clone()
+    };
+
+    // 白名单外的取值回落 C，而不是被静默接受。
+    let payload = call(
+        1,
+        "set_project_base_scale",
+        json!({"baseScale": "not-a-key"}),
+    );
+    assert_eq!(payload["project"]["base_scale"], "C");
+    let payload = call(2, "set_project_base_scale", json!({"baseScale": "Gb"}));
+    assert_eq!(payload["project"]["base_scale"], "Gb");
+    assert_eq!(payload["project"]["use_custom_scale"], false);
+
+    // 落盘：丢掉内存状态再读回来（等价于宿主重启）。
+    crate::settings_store::test_support::simulate_restart();
+    assert_eq!(
+        crate::settings_store::settings()
+            .plugin_musical_context
+            .base_scale,
+        "Gb"
+    );
+
+    document.close();
+}
