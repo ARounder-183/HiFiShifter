@@ -36,6 +36,7 @@ import {
     canEditHostFadeAxes,
     canImportHostAudio,
     canImportAsTakes,
+    canImportMidi,
     canCreateHostTracks,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";

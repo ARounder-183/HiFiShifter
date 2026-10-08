@@ -560,6 +560,121 @@ pub(super) fn dispatch(
             input["maxBytes"].as_u64(),
         )),
         "notebook_read_clipboard_image" => Ok(super::notebook::read_clipboard_image()),
+        // 记事本「暂存剪贴板载荷」：把插件自己写进系统剪贴板的那份 JSON 原样交出去。
+        //
+        // 【为什么不是独立 App 的 `ProjectFragment`】插件写进剪贴板的从来不是 App 的
+        // 工程片段：那是"宿主 item state + 参数种子"，粘贴时要按宿主 item 重建
+        // （见 `host_clipboard`）。把 App 的 `.hsf` 片段格式搬过来，只会产出一份谁也
+        // 粘不回去的字节。因此这里读的就是 `host_clipboard` 写出去的那一份，恢复时
+        // 原样写回，粘贴链路一行都不用改。
+        //
+        // 【为什么 `encoding` 仍是 `fragment`】记事本的围栏格式只有两个编码取值
+        // （`fragment` / `param`，见前端 `hifiClipBlock.ts` 的解析），而这里的字节
+        // 都是**自包含的片段载荷**，与"fragment"的含义一致；为插件新增第三个取值是
+        // 一次跨产品的格式变更，不值得为一句说明付出。
+        "notebook_read_clipboard_payload" => {
+            let Some(bytes) = hifishifter_clipboard::read_bytes()? else {
+                return Ok(json!({"ok":true,"available":false}));
+            };
+            if bytes.is_empty() {
+                return Ok(json!({"ok":true,"available":false}));
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                return Ok(json!({"ok":true,"available":false}));
+            };
+            let Some(kind) = super::host_clipboard::clipboard_kind(&value) else {
+                return Ok(json!({"ok":true,"available":false}));
+            };
+            let (summary, ext, encoding) = if kind == "param" {
+                // 参数线载荷：v2 是 `segments`，v1 是单段 `values`，两种都要能画。
+                let segments: Vec<&Value> = match value["segments"].as_array() {
+                    Some(list) => list.iter().collect(),
+                    None if value.get("values").is_some() => vec![&value],
+                    None => Vec::new(),
+                };
+                let mut total = 0usize;
+                let mut collected: Vec<f64> = Vec::new();
+                for segment in segments {
+                    if let Some(values) = segment["values"].as_array() {
+                        total += values.len();
+                        collected.extend(values.iter().map(|v| v.as_f64().unwrap_or(0.)));
+                    }
+                }
+                // 与 App 同口径降采样到 ≤200 点：暂存块的迷你曲线不需要原始精度，
+                // 而上万帧整条塞进 IPC 只是白搬几百 KB。
+                let step = (collected.len() / 200).max(1);
+                let sparkline: Vec<f64> = collected.iter().step_by(step).copied().collect();
+                (
+                    json!({"clipKind":"param","clipCount":0,"trackCount":0,
+                        "sourceProject":Value::Null,"durationSec":0.0,"preview":[],
+                        "param":{"param":value["param"].as_str().unwrap_or(""),
+                            "framePeriodMs":value["framePeriodMs"].as_f64().unwrap_or(0.),
+                            "frameCount":total,"sparkline":sparkline}}),
+                    "hsp",
+                    "param",
+                )
+            } else {
+                let empty = Vec::new();
+                let items = value["items"].as_array().unwrap_or(&empty);
+                let tracks = value["tracks"].as_array().unwrap_or(&empty);
+                let origin = value["origin_sec"].as_f64().unwrap_or(0.);
+                let mut end = origin;
+                let mut rows = Vec::new();
+                for item in items {
+                    let before = &item["before"];
+                    let start = before["start_sec"].as_f64().unwrap_or(origin);
+                    let length = before["length_sec"].as_f64().unwrap_or(0.);
+                    end = end.max(start + length);
+                    let slot = item["track"].as_u64().unwrap_or(0) as usize;
+                    rows.push(json!({
+                        "trackId":slot.to_string(),
+                        "trackName":tracks.get(slot).and_then(|t|t["name"].as_str()).unwrap_or(""),
+                        "name":before["name"].as_str().unwrap_or(""),
+                        "startSec":start,"lengthSec":length,
+                    }));
+                }
+                (
+                    json!({"clipKind":"clips","clipCount":items.len(),"trackCount":tracks.len(),
+                        "sourceProject":Value::Null,"durationSec":(end-origin).max(0.0),
+                        "preview":rows}),
+                    "hsf",
+                    "fragment",
+                )
+            };
+            Ok(
+                json!({"ok":true,"available":true,"kind":kind,"encoding":encoding,
+                "ext":ext,"mime":"application/json","byteLen":bytes.len(),
+                "base64":base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "summary":summary}),
+            )
+        }
+        // 把暂存的载荷原样写回系统剪贴板。
+        //
+        // 【为什么必须校验格式】写回去的字节随后会被粘贴链路解码；随便什么字节都
+        // 接受，等于让记事本把一个"看起来像暂存块"的东西变成一条必然失败的粘贴。
+        "notebook_write_clipboard_payload" => {
+            let encoded = input["payloadBase64"]
+                .as_str()
+                .ok_or("clipboard payload required")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "clipboard payload is not valid base64".to_string())?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err("clipboard payload budget exceeded".into());
+            }
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "clipboard payload is not native HiFiShifter data".to_string())?;
+            if super::host_clipboard::clipboard_kind(&value).is_none() {
+                return Err("clipboard payload is not native HiFiShifter data".into());
+            }
+            hifishifter_clipboard::write_bytes(
+                &bytes,
+                input["textSummary"]
+                    .as_str()
+                    .unwrap_or("HiFiShifter data restored."),
+            )?;
+            Ok(json!({"ok":true}))
+        }
         "get_runtime_info" => {
             let timeline = payload(session, true)?;
             let (_, playing) = session.transport();

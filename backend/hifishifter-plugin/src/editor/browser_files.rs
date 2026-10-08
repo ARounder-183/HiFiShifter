@@ -568,14 +568,12 @@ mod tests {
             !preview["pcmBase64"].as_str().unwrap().is_empty(),
             "试听必须真的解出 PCM"
         );
-        assert!(
-            !editor
-                .browser_command("get_media_audio_streams", &json!({"filePath":inside}))
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!editor
+            .browser_command("get_media_audio_streams", &json!({"filePath":inside}))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         // 授权根外：媒体文件仍可探测（导入选择器与拖入的文件不在任何授权根里）。
         let outside_dir =

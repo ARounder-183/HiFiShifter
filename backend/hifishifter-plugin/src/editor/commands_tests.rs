@@ -222,3 +222,38 @@ fn export_pitch_to_midi_validates_the_output_path() {
     std::fs::remove_dir_all(&dir).ok();
     editor.close();
 }
+
+/// 记事本「把暂存载荷写回剪贴板」：只接受插件自己的原生载荷。
+///
+/// 【为什么必须在写剪贴板**之前**拒绝】写回去的字节随后会被粘贴链路解码。放行
+/// 任意字节等于让一个"看起来像暂存块"的东西变成一次必然失败的粘贴 —— 而剪贴板
+/// 已经被覆盖，用户原来的内容也回不来了。这里只测拒绝路径：正例要真的写系统剪贴板，
+/// 那是本机环境的事，不是单元测试该碰的。
+#[test]
+fn notebook_write_clipboard_payload_rejects_foreign_bytes() {
+    let (_model, owner, _id) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    assert!(dispatch(
+        &editor,
+        "notebook_write_clipboard_payload",
+        json!({"payloadBase64":"not base64!!"})
+    )
+    .is_err());
+    // 合法 base64，但不是本插件的剪贴板格式（缺 format/version）。
+    let foreign = base64::engine::general_purpose::STANDARD.encode(br#"{"kind":"clips"}"#);
+    assert!(dispatch(
+        &editor,
+        "notebook_write_clipboard_payload",
+        json!({"payloadBase64":foreign})
+    )
+    .is_err());
+    // 完全不是 JSON。
+    let junk = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01\x02");
+    assert!(dispatch(
+        &editor,
+        "notebook_write_clipboard_payload",
+        json!({"payloadBase64":junk})
+    )
+    .is_err());
+    editor.close();
+}
