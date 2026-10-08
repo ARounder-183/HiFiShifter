@@ -3837,12 +3837,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const displayName = clipDisplayName(clip);
             let text: string | null = null;
             switch (args.headerControl) {
-                case "name":
-                    text =
+                case "name": {
+                    const base =
                         clip.midiNoteCount != null
                             ? `${t("clip_type_midi_prefix")} ${displayName}`
                             : (clip.sourcePath ?? displayName);
+                    // 倒放标记：宿主报告方向后必须让人看得见 —— 否则"这个 take 倒放了"
+                    // 只活在数据里，用户会以为它没倒放（插件里尤其如此：没有波形可看）。
+                    text = clip.reversed ? `${base} · ${t("clip_take_reverse")}` : base;
                     break;
+                }
                 case "mute":
                     text = clip.muted ? t("clip_unmute") : t("clip_mute");
                     break;

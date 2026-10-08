@@ -15,7 +15,7 @@ mod media;
 pub(crate) use media::HostTrackTarget;
 #[path = "ui_inventory.rs"]
 mod ui_inventory;
-pub(crate) use ui_inventory::UiTrack;
+pub(crate) use ui_inventory::{UiItem, UiTrack};
 #[path = "folder.rs"]
 mod folder;
 
@@ -52,6 +52,29 @@ type Guid = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) 
 type Marker = unsafe extern "C" fn(*mut c_void, i32, *mut f64, *mut f64) -> i32;
 type Slope = unsafe extern "C" fn(*mut c_void, i32) -> f64;
 type AppVersion = unsafe extern "C" fn() -> *const c_char;
+type TakeCount = unsafe extern "C" fn(*mut c_void) -> i32;
+type TakeAt = unsafe extern "C" fn(*mut c_void, i32) -> *mut c_void;
+type TakeSource = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type SectionInfo = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64, *mut bool) -> bool;
+
+/// 一个 take 的方向读取器（`GetMediaItemTake_Source` + `PCM_Source_GetSectionInfo`）。
+///
+/// 【为什么单独一束】两者是"能读出倒放位"的充分条件，缺一就整体不可用；把它们与
+/// 枚举分开，可以让"能列 take"和"能读方向"各自独立降级，而不是一起消失。
+pub(super) struct TakeDirectionApi {
+    pub source: TakeSource,
+    pub section: SectionInfo,
+}
+
+/// 多 take 枚举入口（`GetMediaItemNumTakes` / `GetMediaItemTake`）。
+///
+/// 【为什么可选】旧宿主或精简导出可能没有这两个函数。缺省时退回"只有 active
+/// take"，与本次改动之前完全一致 —— 可选增强不得让整份清单读不出来。
+pub(super) struct TakeEnumApi {
+    pub count: TakeCount,
+    pub at: TakeAt,
+    pub direction: Option<TakeDirectionApi>,
+}
 struct Transport {
     position: Position,
     cursor: Position,
@@ -83,6 +106,8 @@ pub(crate) struct ReaperHost {
     extended_media: Option<media::ExtendedMedia>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
+    /// 多 take 枚举（可选）；缺省时清单只呈现 active take。
+    take_enum: Option<TakeEnumApi>,
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
     folder: Option<folder::FolderApi>,
 }
@@ -95,6 +120,11 @@ impl ReaperHost {
     /// `None` = 版本串读不出来 → 只读。
     pub(crate) fn fade_axes_new(&self) -> Option<bool> {
         self.fade_axes_new
+    }
+
+    /// 多 take 枚举入口；`None` = 宿主没提供，调用方退回单 active take。
+    pub(super) fn take_enum(&self) -> Option<&TakeEnumApi> {
+        self.take_enum.as_ref()
     }
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
@@ -188,6 +218,19 @@ impl ReaperHost {
         let marker = lookup!(c"GetTakeStretchMarker", Marker);
         let slope = lookup!(c"GetTakeStretchMarkerSlope", Slope);
         let change = lookup!(c"GetProjectStateChangeCount", PlayState);
+        // 多 take 枚举：两个函数必须同时存在才算"能列 take"；方向读取再单独可选。
+        // 官方头文件（`reaper_plugin_functions.h`）逐条核实过签名：
+        // `int GetMediaItemNumTakes(MediaItem*)` / `MediaItem_Take* GetMediaItemTake(MediaItem*, int)`。
+        let take_direction = lookup!(c"GetMediaItemTake_Source", TakeSource)
+            .zip(lookup!(c"PCM_Source_GetSectionInfo", SectionInfo))
+            .map(|(source, section)| TakeDirectionApi { source, section });
+        let take_enum = lookup!(c"GetMediaItemNumTakes", TakeCount)
+            .zip(lookup!(c"GetMediaItemTake", TakeAt))
+            .map(|(count, at)| TakeEnumApi {
+                count,
+                at,
+                direction: take_direction,
+            });
         let tracks = match (
             lookup!(c"InsertTrackInProject", media::InsertTrack),
             lookup!(c"CountTracks", media::CountTracks),
@@ -403,6 +446,7 @@ impl ReaperHost {
             extended_media,
             validate,
             fade_axes_new,
+            take_enum,
             folder,
         })
     }
@@ -497,6 +541,44 @@ impl ReaperHost {
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         let take = checked(&authorized, || unsafe { (table.parent)(pointer, 2) })?;
         self.geometry_for_take(take, authorized)
+    }
+    /// 读取一个 take 的倒放方向；`None` = 读不出来（宿主没给读取器、或调用失败）。
+    ///
+    /// 【为什么不报错】方向只是显示用的附加信息。为一个 take 读不到方向而让整份
+    /// 清单失败，是把可选增强变成了硬依赖 —— 与 folder 展开同一条原则。
+    ///
+    /// 【为什么不反推】官方头文件给了 `PCM_Source_GetSectionInfo(..., bool* revOut)`
+    /// 这个**直接**的方向位（"If a section/reverse block, retrieves
+    /// offset/len/reverse. return true if success"）。返回 false 表示"不是
+    /// section/reverse 块"，此时**不能**断言"没倒放" —— 那会把"读不到"说成"没倒放"。
+    pub(super) fn take_reversed(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<bool> {
+        let api = self.take_enum.as_ref()?.direction.as_ref()?;
+        let geometry = self.geometry.as_ref()?;
+        let project = self.project(authorized).ok()?;
+        let source = checked(authorized, || unsafe { (api.source)(take) }).ok()?;
+        if source.is_null() {
+            return None;
+        }
+        // 与其余宿主读取同一条纪律：源指针也先经 ValidatePtr2 核对归属。
+        if !checked(authorized, || unsafe {
+            (geometry.validate)(project, source, c"PCM_source*".as_ptr())
+        })
+        .ok()?
+        {
+            return None;
+        }
+        let mut offset = 0.0_f64;
+        let mut length = 0.0_f64;
+        let mut reversed = false;
+        let ok = checked(authorized, || unsafe {
+            (api.section)(source, &mut offset, &mut length, &mut reversed)
+        })
+        .ok()?;
+        ok.then_some(reversed)
     }
     /// UI显示清单中的take必须由真实parent轨道枚举取得，不能由JS传地址。
     fn geometry_for_take(

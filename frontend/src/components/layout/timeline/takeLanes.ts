@@ -1,5 +1,5 @@
 // 原/插件共享take波形投影；宿主淡化元数据只影响UI，不能重复处理声音。
-import type { ClipInfo } from "../../../features/session/sessionTypes";
+import type { ClipInfo, ClipTakeInfo } from "../../../features/session/sessionTypes";
 import type { WaveformSceneClip } from "../../../waveform/sceneBuilder";
 
 export interface TakeLaneLayout {
@@ -14,6 +14,20 @@ export interface TakeLaneLayout {
 
 export const MIN_TAKE_LANE_HEIGHT_PX = 14;
 
+/**
+ * 音频 Take 判据：没有音符内容即为音频。
+ *
+ * 【为什么不看 `sourcePath`】插件里的 Take 由宿主枚举得到，**从不携带** `sourcePath`
+ * （PCM 只能经 ARA 授权取得，见后端 `present_host_inventory` 的安全不变式）。用
+ * `sourcePath` 当判据会让插件里的多 Take item 一条 lane 都展不开 —— 而"这个 item 有
+ * 3 个 take、哪个是 active、哪个倒放"恰恰是宿主已经告诉我们、用户最想看到的信息。
+ *
+ * 音符判据同时覆盖了原实现想表达的那条边界：MIDI Take 有 `midiNoteData`，音频 Take 没有。
+ */
+function isAudioTake(take: ClipTakeInfo): boolean {
+    return !take.midiNoteData || take.midiNoteData.length === 0;
+}
+
 /** 计算一个 Clip 的全部波形 lane；空间不足或非多 Take 时返回 null。 */
 export function resolveTakeLaneLayouts(
     clip: ClipInfo,
@@ -23,8 +37,8 @@ export function resolveTakeLaneLayouts(
     if (!showAllTakes) return null;
     // 只为音频 take 建 lane（MIDI take 无波形）。判定依据是 take 集合本身
     // 而非 flat sourcePath —— 混合 MIDI/audio take 的 Clip（active 为 MIDI）
-    // flat 投影无源路径，但其余音频 take 仍应可展开、可点击切换。
-    const takes = (clip.takes ?? []).filter((take) => Boolean(take.sourcePath));
+    // flat 投影无源路径，但其余音频 take 仍应可展开。
+    const takes = (clip.takes ?? []).filter(isAudioTake);
     if (takes.length <= 1) return null;
     if (takes.length * MIN_TAKE_LANE_HEIGHT_PX > bodyHeightPx + 1e-6) return null;
 
@@ -120,7 +134,7 @@ export function expandClipToTakeSceneClips(
     const layouts = resolveTakeLaneLayouts(clip, showAllTakes, bodyHeightPx);
     if (!layouts) return null;
 
-    const takes = (clip.takes ?? []).filter((take) => Boolean(take.sourcePath));
+    const takes = (clip.takes ?? []).filter(isAudioTake);
     const clipRate =
         Number.isFinite(clip.clipPlaybackRate) && (clip.clipPlaybackRate ?? 0) > 0
             ? Number(clip.clipPlaybackRate)

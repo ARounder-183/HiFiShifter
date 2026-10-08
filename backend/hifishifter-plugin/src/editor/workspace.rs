@@ -23,6 +23,74 @@ fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::H
     clip["host_gain"] = serde_json::json!({"item":g.item_gain,"take":g.take_gain});
 }
 
+/// 把宿主枚举到的全部 take 投影进显示用 Clip。
+///
+/// 【为什么只在集合变化时重建】take 集合稳定时不动它，才能保住 slip/trim 的乐观
+/// 预览（它们写在 active take 的扁平 `source_start_sec`/`source_end_sec` 上）。
+/// 一旦重建就 `normalize_takes()`，把 active take 重新物化 —— 所以只在该重建的时候重建。
+///
+/// 【安全底线】**任何 take 都不带 `source_path`**。这份清单是显示占位，PCM 只能经
+/// ARA 授权取得（`render/source.rs`）；非 active take 更不在本实例的 ARA 范围内。
+/// 这里从不写 `source_path`，该不变式由 `present_host_inventory` 的测试钉住。
+fn sync_host_takes(
+    clip: &mut hifishifter_kernel::state::Clip,
+    item: &crate::host::reaper::UiItem,
+    prefix: &impl Fn(&str) -> String,
+) {
+    let expected: Vec<String> = item
+        .takes
+        .iter()
+        .map(|take| prefix(&take.geometry.take_id))
+        .collect();
+    if expected.is_empty() {
+        return;
+    }
+    let unchanged = clip.takes.len() == expected.len()
+        && clip
+            .takes
+            .iter()
+            .zip(&expected)
+            .all(|(take, id)| &take.id == id);
+    if unchanged {
+        return;
+    }
+    let takes: Vec<serde_json::Value> = item
+        .takes
+        .iter()
+        .map(|take| {
+            let g = &take.geometry;
+            serde_json::json!({
+                "id": prefix(&g.take_id),
+                "name": take.name,
+                "source_start_sec": g.source_start_sec,
+                "source_end_sec": g.source_start_sec + g.duration_sec * g.playback_rate,
+                "playback_rate": g.playback_rate,
+                "channel_mode": g.channel_mode,
+                // 读不出来时留 false（不显示倒放标记），不编造"没倒放"的结论。
+                "reversed": take.reversed.unwrap_or(false),
+            })
+        })
+        .collect();
+    let active = item
+        .takes
+        .iter()
+        .find(|take| take.active)
+        .map(|take| prefix(&take.geometry.take_id));
+    let Ok(mut rebuilt) = serde_json::from_value::<Vec<hifishifter_kernel::state::ClipTake>>(
+        serde_json::Value::Array(takes),
+    ) else {
+        return;
+    };
+    // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
+    // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
+    for take in &mut rebuilt {
+        take.gain = clip.gain;
+    }
+    clip.takes = rebuilt;
+    clip.active_take_id = active;
+    clip.normalize_takes();
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
@@ -195,6 +263,7 @@ impl DocumentSession {
                     .iter_mut()
                     .find(|clip| clip.id == id)
                     .unwrap();
+                sync_host_takes(clip, item, &prefix);
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
                 clip.name = item.name.clone();

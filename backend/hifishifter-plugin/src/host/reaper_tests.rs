@@ -21,6 +21,17 @@ pub(crate) struct Fixture {
     take_volume: Cell<f64>,
     pub inventory_enabled: Cell<bool>,
     pub inventory_empty: Cell<bool>,
+    /// 多 take 枚举接口（`GetMediaItemNumTakes` / `GetMediaItemTake` 等）是否注册。
+    /// 默认关 —— 缺省下清单只呈现 active take，与本次改动之前完全一致。
+    pub takes_enabled: Cell<bool>,
+    /// 覆盖 `GetMediaItemNumTakes` 的返回值（越界/畸形预算用）。
+    pub take_count_override: Cell<Option<i32>>,
+    /// 第 2..N 个 take 的稳定地址（第 1 个复用 `take_token`）。
+    pub extra_takes: RefCell<Vec<Box<u8>>>,
+    /// `PCM_Source_GetSectionInfo` 报告的方向；配合 `section_reports` 使用。
+    pub take_reversed: Cell<bool>,
+    /// `PCM_Source_GetSectionInfo` 是否返回成功（false = 读不出方向 → `None`）。
+    pub section_reports: Cell<bool>,
     undo_records: RefCell<Vec<std::ffi::CString>>,
     undo_position: Cell<i32>,
     media_enabled: Cell<bool>,
@@ -71,6 +82,11 @@ impl Fixture {
             right_values: RefCell::new(None),
             inventory_enabled: Cell::new(false),
             inventory_empty: Cell::new(false),
+            takes_enabled: Cell::new(false),
+            take_count_override: Cell::new(None),
+            extra_takes: RefCell::new(Vec::new()),
+            take_reversed: Cell::new(false),
+            section_reports: Cell::new(false),
             undo_records: RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),
             undo_position: Cell::new(0),
             media_enabled: Cell::new(false),
@@ -167,6 +183,42 @@ impl Fixture {
     pub fn enable_media(&self) {
         self.enable_writer();
         self.media_enabled.set(true);
+    }
+    /// 注册多 take 枚举接口；`takes` 为额外 take 数（不含 active）。
+    pub fn enable_takes(&self, extra: usize) {
+        self.inventory_enabled.set(true);
+        self.takes_enabled.set(true);
+        // 方向读取需要一个非空的 PCM_source；本组用例不启用媒体导入，故直接给哨兵值。
+        self.take_source.set(0x1000);
+        self.extra_takes.borrow_mut().clear();
+        for _ in 0..extra {
+            self.extra_takes.borrow_mut().push(Box::new(11));
+        }
+    }
+    pub fn num_takes(&self) -> i32 {
+        self.take_count_override
+            .get()
+            .unwrap_or(1 + self.extra_takes.borrow().len() as i32)
+    }
+    /// 第 `index` 个 take 的地址；0 = 主 take。
+    pub fn take_at(&self, index: i32) -> *mut c_void {
+        if index == 0 {
+            return self.take();
+        }
+        let takes = self.extra_takes.borrow();
+        takes
+            .get(index as usize - 1)
+            .map_or(std::ptr::null_mut(), |take| {
+                (&**take as *const u8 as *mut u8).cast()
+            })
+    }
+    /// 额外 take 的下标（1-based）；主 take 或未知指针返回 None。
+    pub fn extra_take_index(&self, pointer: *mut c_void) -> Option<usize> {
+        self.extra_takes
+            .borrow()
+            .iter()
+            .position(|take| std::ptr::eq(&**take as *const u8, pointer as *const u8))
+            .map(|index| index + 1)
     }
     pub fn clear_markers(&self) {
         self.markers.borrow_mut().clear();
@@ -319,6 +371,10 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetTrackMediaItem" if f.inventory_enabled.get() => inventory_item as *const (),
         "GetActiveTake" if f.inventory_enabled.get() => inventory_take as *const (),
         "GetTakeName" if f.inventory_enabled.get() => inventory_name as *const (),
+        "GetMediaItemNumTakes" if f.takes_enabled.get() => num_takes as *const (),
+        "GetMediaItemTake" if f.takes_enabled.get() => take_at as *const (),
+        "GetMediaItemTake_Source" if f.takes_enabled.get() => take_source as *const (),
+        "PCM_Source_GetSectionInfo" if f.takes_enabled.get() => section_info as *const (),
         "GetMediaTrackInfo_Value" if f.inventory_enabled.get() => {
             inventory_track_value as *const ()
         }
@@ -415,11 +471,14 @@ unsafe extern "C" fn validate(
     match kind {
         "ReaProject*" => object == f.project(),
         "MediaItem_Take*" => {
-            object == f.take() || (f.right_values.borrow().is_some() && object == f.right_take())
+            object == f.take()
+                || (f.right_values.borrow().is_some() && object == f.right_take())
+                || f.extra_take_index(object).is_some()
         }
         "MediaItem*" => {
             object == f.item() || (f.right_values.borrow().is_some() && object == f.right_item())
         }
+        "PCM_source*" => object == f.take_source.get() as *mut c_void,
         "MediaTrack*" => {
             object == f.track()
                 || f.extra_tracks
@@ -435,6 +494,11 @@ unsafe extern "C" fn item(take: *mut c_void) -> *mut c_void {
     if take == f.right_take() {
         f.record("right-item");
         return f.right_item();
+    }
+    // 同一 item 的其余 take 共享同一 item 指针 —— 这正是 take 枚举的语义。
+    if f.extra_take_index(take).is_some() {
+        f.record("take-item");
+        return f.item();
     }
     assert_eq!(take, f.take());
     f.record("item");
@@ -456,6 +520,13 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
         let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
         f.record(name);
         return f.right_values.borrow().as_ref().unwrap()[name];
+    }
+    // 额外 take 与主 take 共用同一份数值表：本组用例只验证"枚举/身份/方向"，
+    // 不靠逐 take 不同的数值来伪造结论。
+    if is_take && f.extra_take_index(object).is_some() {
+        let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+        f.record(name);
+        return f.values.borrow()[name];
     }
     assert_eq!(object, if is_take { f.take() } else { f.item() });
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
@@ -827,6 +898,45 @@ unsafe extern "C" fn inventory_track_value(track: *mut c_void, _name: *const c_c
     assert_eq!(track, f.track());
     f.track_value.get()
 }
+unsafe extern "C" fn num_takes(item: *mut c_void) -> i32 {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.record("num-takes");
+    f.num_takes()
+}
+unsafe extern "C" fn take_at(item: *mut c_void, index: i32) -> *mut c_void {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.record(format!("take-at:{index}"));
+    if index < 0 || index >= f.num_takes() {
+        return std::ptr::null_mut();
+    }
+    f.take_at(index)
+}
+unsafe extern "C" fn take_source(take: *mut c_void) -> *mut c_void {
+    let f = fixture();
+    f.record("take-source");
+    assert!(
+        take == f.take() || f.extra_take_index(take).is_some(),
+        "source read must be for an enumerated take"
+    );
+    f.take_source.get() as *mut c_void
+}
+unsafe extern "C" fn section_info(
+    source: *mut c_void,
+    _offset: *mut f64,
+    _length: *mut f64,
+    reversed: *mut bool,
+) -> bool {
+    let f = fixture();
+    assert_eq!(source, f.take_source.get() as *mut c_void);
+    f.record("section-info");
+    if !f.section_reports.get() {
+        return false;
+    }
+    unsafe { *reversed = f.take_reversed.get() };
+    true
+}
 
 /// folder 判据走**单值读取**：FX 轨自己的 `I_FOLDERDEPTH` 就是结论，不枚举整个工程。
 ///
@@ -1007,12 +1117,22 @@ fn guid(
         } else {
             f.right_item()
         };
-    assert!(right || object == if is_take { f.take() } else { f.item() });
+    let extra = if is_take {
+        f.extra_take_index(object)
+    } else {
+        None
+    };
+    assert!(right || extra.is_some() || object == if is_take { f.take() } else { f.item() });
     assert!(!write, "GUID must remain read-only");
     assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"GUID");
     f.record(if is_take { "take_guid" } else { "item_guid" });
+    let owned;
     let text = if f.bad_guid.get() {
         c"bad"
+    } else if let Some(index) = extra {
+        owned =
+            std::ffi::CString::new(format!("{{55555555-5555-5555-5555-{:012}}}", index)).unwrap();
+        owned.as_c_str()
     } else if right && is_take {
         c"{44444444-4444-4444-4444-444444444444}"
     } else if right {
@@ -1039,7 +1159,10 @@ unsafe extern "C" fn count(take: *mut c_void) -> i32 {
         f.record("right-count");
         return 0;
     }
-    assert_eq!(take, f.take());
+    assert!(
+        take == f.take() || f.extra_take_index(take).is_some(),
+        "stretch markers are read for an enumerated take"
+    );
     f.record("count");
     f.count_override
         .get()
@@ -1047,7 +1170,7 @@ unsafe extern "C" fn count(take: *mut c_void) -> i32 {
 }
 unsafe extern "C" fn marker(take: *mut c_void, index: i32, pos: *mut f64, src: *mut f64) -> i32 {
     let f = fixture();
-    assert_eq!(take, f.take());
+    assert!(take == f.take() || f.extra_take_index(take).is_some());
     f.record(format!("marker:{index}"));
     if f.bad_marker.get() {
         return -1;
@@ -1061,7 +1184,7 @@ unsafe extern "C" fn marker(take: *mut c_void, index: i32, pos: *mut f64, src: *
 }
 unsafe extern "C" fn slope(take: *mut c_void, index: i32) -> f64 {
     let f = fixture();
-    assert_eq!(take, f.take());
+    assert!(take == f.take() || f.extra_take_index(take).is_some());
     f.record(format!("slope:{index}"));
     f.markers.borrow()[index as usize].2
 }

@@ -81,6 +81,7 @@ import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets"
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
 import { hitInactiveTakeLane } from "../../takeLanes";
+import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { shouldNotifySharedViewport } from "../../runtime/sharedViewportNotify";
 import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
@@ -5568,6 +5569,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         event: PointerEvent,
     ): string | null {
         if (hit.region !== "body") return null;
+        // 插件模式不提供 take 切换。
+        //
+        // 【为什么】插件里的 take 是**宿主**的所有物：切本地的 active take 不会改变
+        // 宿主播放的内容，下一次宿主清单刷新还会把 `takes` / `active_take_id` 覆盖回去
+        // —— 那是"点了没反应"的假控件，比不提供更糟。lane 本身仍作为**元数据**绘制
+        // （宿主枚举到几个 take、哪个是 active、哪个倒放），只是不可点。
+        if (isPluginMode()) return null;
         // 编辑修饰键优先于「点击切换 Take」（旧实现 `ClipItem` 同源）：物理 Alt
         // 旁路 + **解析后**的多选 / 范围选择修饰键。不能写死物理 Ctrl/Shift/Cmd——
         // 用户改绑选择修饰键后，写死的判定会把"选择 + 点击 lane"误当成切换 Take，

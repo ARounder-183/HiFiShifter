@@ -4,11 +4,29 @@ use super::*;
 use std::ffi::CStr;
 use std::sync::Arc;
 
+/// 单个 item 的 take 数量上限。REAPER 实际远低于此；设上限只为把畸形/竞态下的
+/// `GetMediaItemNumTakes` 返回值挡在枚举循环之外。
+const MAX_TAKES: i32 = 1024;
+
+#[derive(Clone)]
+pub(crate) struct UiTake {
+    pub geometry: super::super::geometry::HostClipGeometry,
+    pub name: String,
+    /// 宿主 `GetActiveTake` 指向的那一个；每个 item 恰好一个。
+    pub active: bool,
+    /// 宿主报告的方向；`None` = 读不出来（不当作"没倒放"）。
+    pub reversed: Option<bool>,
+}
+
 #[derive(Clone)]
 pub(crate) struct UiItem {
+    /// active take 的几何。既有消费者（淡化装饰、item→clip 反查）都读它，
+    /// 保持"每个 item 一份权威几何"的语义不变。
     pub geometry: super::super::geometry::HostClipGeometry,
     pub name: String,
     pub target: HostClipTarget,
+    /// 全部 take（含 active）。宿主没有枚举接口时恰好一个元素。
+    pub takes: Vec<UiTake>,
 }
 #[derive(Clone)]
 pub(crate) struct UiTrack {
@@ -174,28 +192,67 @@ impl ReaperHost {
             valid(track, c"MediaTrack*")?;
             let item = checked(authorized, || unsafe { get_item(track, index) })?;
             valid(item, c"MediaItem*")?;
-            let take = checked(authorized, || unsafe { active_take(item) })?;
-            if take.is_null() {
+            // active take 是本实例唯一可能持有 ARA PCM 的那个；其余 take 只取元数据。
+            let active = checked(authorized, || unsafe { active_take(item) })?;
+            if active.is_null() {
                 continue;
             }
-            valid(take, c"MediaItem_Take*")?;
-            let g = self.geometry_for_take(take, authorized)?;
-            let p = checked(authorized, || unsafe { take_name(take) })?;
-            let name = if p.is_null() {
-                String::new()
-            } else {
+            valid(active, c"MediaItem_Take*")?;
+            let read_name = |take: *mut c_void| -> Result<String, String> {
+                let p = checked(authorized, || unsafe { take_name(take) })?;
+                if p.is_null() {
+                    return Ok(String::new());
+                }
                 let value = unsafe { CStr::from_ptr(p) };
                 if value.to_bytes().len() > 8192 {
                     return Err("take name budget exceeded".into());
                 }
-                value.to_str().map_err(|_| "invalid take UTF-8")?.to_owned()
+                Ok(value.to_str().map_err(|_| "invalid take UTF-8")?.to_owned())
             };
+            let read_take = |take: *mut c_void, is_active: bool| -> Result<UiTake, String> {
+                let geometry = self.geometry_for_take(take, authorized)?;
+                Ok(UiTake {
+                    name: read_name(take)?,
+                    reversed: self.take_reversed(take, authorized),
+                    geometry,
+                    active: is_active,
+                })
+            };
+            // 【为什么先枚举再补 active】宿主清单与 active 指针之间没有原子性保证
+            // （用户在枚举期间切 take 会让 `GetActiveTake` 落空）。active 必须一定
+            // 在集合里，否则 clip 的 `active_take_id` 会指向一个不存在的 take。
+            let mut takes = match self.take_enum() {
+                Some(api) => {
+                    let total = checked(authorized, || unsafe { (api.count)(item) })?;
+                    if !(0..=MAX_TAKES).contains(&total) {
+                        return Err("take inventory budget exceeded".into());
+                    }
+                    let mut takes = Vec::with_capacity(total as usize);
+                    for slot in 0..total {
+                        valid(item, c"MediaItem*")?;
+                        let take = checked(authorized, || unsafe { (api.at)(item, slot) })?;
+                        if take.is_null() {
+                            continue;
+                        }
+                        valid(take, c"MediaItem_Take*")?;
+                        takes.push(read_take(take, take == active)?);
+                    }
+                    takes
+                }
+                None => Vec::new(),
+            };
+            if !takes.iter().any(|take| take.active) {
+                takes.insert(0, read_take(active, true)?);
+            }
+            let active_index = takes.iter().position(|take| take.active).unwrap_or(0);
+            let g = takes[active_index].geometry.clone();
+            let name = takes[active_index].name.clone();
             let target = super::write::inventory_target(
                 self.clone(),
                 project as usize,
                 track as usize,
                 item as usize,
-                take as usize,
+                active as usize,
                 g.clone(),
                 authorized,
             )?;
@@ -203,6 +260,7 @@ impl ReaperHost {
                 geometry: g,
                 name,
                 target,
+                takes,
             });
         }
         if change != checked(authorized, || unsafe { (geometry.change)(project) })? {
@@ -269,6 +327,133 @@ mod tests {
         document.present_host_inventory(&mut timeline, "ui-");
         assert_eq!(timeline.tracks.len(), 1);
         assert!(timeline.clips.is_empty());
+        document.close();
+    }
+
+    /// 宿主枚举到的每个 take 都要出现在清单里，且 active 恰好一个。
+    ///
+    /// 【为什么这条最要紧】清单是用户判断"插件到底看得到什么"的唯一窗口。少列一个
+    /// take 会让用户以为宿主丢了内容；把两个 take 认成同一个（身份重复）则会让
+    /// active 切换指向错误的 take。
+    #[test]
+    fn take_inventory_lists_every_take_with_distinct_identities() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        assert_eq!(track.items.len(), 1);
+        let takes = &track.items[0].takes;
+        assert_eq!(takes.len(), 3, "3 个 take 必须全部出现");
+        assert_eq!(
+            takes.iter().filter(|take| take.active).count(),
+            1,
+            "active take 恰好一个"
+        );
+        let ids: std::collections::BTreeSet<_> = takes
+            .iter()
+            .map(|take| take.geometry.take_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 3, "每个 take 的身份必须不同");
+        assert!(
+            takes
+                .iter()
+                .all(|take| take.geometry.item_id == track.items[0].geometry.item_id),
+            "同一 item 的 take 共享 item 身份"
+        );
+        // active take 的几何就是 item 的权威几何（既有消费者读它）。
+        let active = takes.iter().find(|take| take.active).unwrap();
+        assert_eq!(active.geometry.take_id, track.items[0].geometry.take_id);
+    }
+
+    /// take 集合随宿主变化时清单必须跟着变（增删 take 都算）。
+    #[test]
+    fn take_inventory_follows_the_host_when_takes_are_added() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        assert_eq!(host.ui_track(&|| true).unwrap().items[0].takes.len(), 1);
+        fixture.enable_takes(3);
+        assert_eq!(host.ui_track(&|| true).unwrap().items[0].takes.len(), 4);
+    }
+
+    /// 越界的 take 数量必须在枚举循环之外被挡下。
+    #[test]
+    fn take_inventory_rejects_an_out_of_budget_take_count() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        fixture.take_count_override.set(Some(MAX_TAKES + 1));
+        let host = Arc::new(fixture.client());
+        let error = host.ui_track(&|| true).err().expect("越界数量必须被拒绝");
+        assert!(error.contains("take inventory budget"), "{error}");
+    }
+
+    /// 宿主报告的方向要如实透传；读不出来时保持"未知"，不谎报"没倒放"。
+    #[test]
+    fn take_direction_is_reported_only_when_the_host_answers() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        fixture.section_reports.set(true);
+        fixture.take_reversed.set(true);
+        let host = Arc::new(fixture.client());
+        assert_eq!(
+            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
+            Some(true)
+        );
+
+        fixture.take_reversed.set(false);
+        assert_eq!(
+            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
+            Some(false)
+        );
+
+        // 宿主不回答（不是 section/reverse 块）→ 未知，而不是"没倒放"。
+        fixture.section_reports.set(false);
+        assert_eq!(
+            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
+            None
+        );
+    }
+
+    /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
+    #[test]
+    fn host_take_set_projects_every_take_without_any_source_path() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        fixture.section_reports.set(true);
+        fixture.take_reversed.set(true);
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let document = crate::render::document::DocumentSession::new(9876);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(timeline.clips.len(), 1);
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.takes.len(), 3);
+        assert!(
+            clip.takes.iter().all(|take| take.source_path.is_none()),
+            "任何 take 都不得未经 ARA 授权带 source_path"
+        );
+        assert!(clip.takes.iter().all(|take| take.reversed));
+        assert_eq!(clip.takes[0].playback_rate, 0.5);
+        assert_eq!(clip.takes[0].channel_mode, 2);
+        let active = clip.active_take_id.as_deref();
+        assert!(active.is_some());
+        assert!(clip
+            .takes
+            .iter()
+            .any(|take| Some(take.id.as_str()) == active));
+        assert_eq!(active, Some(clip.takes[0].id.as_str()));
         document.close();
     }
 }

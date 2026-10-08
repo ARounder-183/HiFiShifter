@@ -2,7 +2,7 @@ import { test } from "vitest";
 
 import type { ClipInfo, ClipTakeInfo } from "../../../features/session/sessionTypes";
 import type { WaveformSceneClip } from "../../../waveform/sceneBuilder";
-import { expandClipToTakeSceneClips } from "./takeLanes.ts";
+import { expandClipToTakeSceneClips, resolveTakeLaneLayouts } from "./takeLanes.ts";
 
 test("timeline/takeLanes.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -207,7 +207,14 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
         expandClipToTakeSceneClips(
             clip({
                 takes: [
-                    take({ id: "midi", name: "MIDI take" }),
+                    take({
+                        id: "midi",
+                        name: "MIDI take",
+                        // 音符内容才是"这是 MIDI take"的判据（`takeLanes.isAudioTake`）。
+                        midiNoteData: [
+                            { startSec: 0, endSec: 1, note: 60, velocity: 100, channel: 0 },
+                        ],
+                    }),
                     take({ id: "t2", sourcePath: "/b.wav" }),
                     take({ id: "t3", sourcePath: "/c.wav" }),
                 ],
@@ -242,5 +249,24 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
             [0.5, true, 5],
         ],
         "clip-level fades, mute and length carry over to every lane",
+    );
+
+    // 插件占位：宿主枚举出的 take **不带** sourcePath（PCM 只能经 ARA 授权取得），
+    // 但它们仍是音频 take —— lane 必须展开，否则用户看不到"这个 item 有几个 take"。
+    assertEqual(
+        resolveTakeLaneLayouts(
+            clip({
+                takes: [take({ id: "h1" }), take({ id: "h2" }), take({ id: "h3" })],
+                activeTakeId: "h2",
+            }),
+            true,
+            45,
+        )?.map((lane) => [lane.takeId, lane.inactive]),
+        [
+            ["h1", true],
+            ["h2", false],
+            ["h3", true],
+        ],
+        "host takes without a source path still get lanes",
     );
 });
