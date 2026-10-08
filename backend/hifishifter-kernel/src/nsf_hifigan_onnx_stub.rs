@@ -138,6 +138,10 @@ pub fn infer_pitch_edit_chunked_optimized(
 pub fn cache_identity() -> Result<String, String> {
     Err("onnx feature disabled".into())
 }
+/// 未编译 ONNX 时没有模型文件可摘要；与真实现同名以维持接口一致。
+pub fn model_digest_cached() -> Option<&'static str> {
+    None
+}
 /// 未编译模型时无神经推理。
 pub fn inference_runs() -> u64 {
     0

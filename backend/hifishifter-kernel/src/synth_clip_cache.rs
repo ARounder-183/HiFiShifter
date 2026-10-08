@@ -606,8 +606,15 @@ pub fn clear_pad_suppressed_clips() {
 /// （幅度谱余弦相似度 1.000000、逐块 RMS 比 1.002~1.008），音色与能量不变，
 /// 但 PCM 逐样本不同。若不失效，磁盘上的旧 PCM 会与新块粒度长期混用
 /// （同一工程新旧 clip 相位基准不一致）。
-// HiFiGAN批量固定上限改变随机激励分配次序，旧磁盘PCM不得伪装为本版本结果。
-pub const RENDER_PIPELINE_VERSION: u32 = 8;
+/// v8：HiFiGAN 批量固定上限改变随机激励分配次序，旧磁盘 PCM 不得伪装为本版本结果。
+/// v9：分块接缝整体治理（`docs/plans/2026-10-08-render-chunk-seam-glitch.md`）：
+/// - WORLD 去掉逐块去均值/峰值归一（改全局）、重叠区改为真正的加权叠加、
+///   干/湿混合权重改为与分块无关的居中平滑、不再使用流式合成器；
+/// - HiFiGAN 主路径的块间拼接从"直接覆盖"改为带上下文的等功率交叉淡化；
+/// - 渲染键纳入**模型文件内容摘要**。
+/// 以上每一条都改变输出 PCM（块边界位置与波形都变），必须整体失效，
+/// 否则新旧基准会长期混用 —— 表现正是"某些 clip 在接缝处仍有杂音"。
+pub const RENDER_PIPELINE_VERSION: u32 = 9;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -862,6 +869,25 @@ pub fn compute_rendered_clip_hash_excluding(
         mix_bytes!(take_id.as_bytes());
     }
     mix_bytes!(renderer_id.as_bytes());
+    // 混入**模型文件内容摘要**：磁盘上的模型被替换后，旧 PCM 不得继续命中。
+    //
+    // 【为什么在这里算而不作为入参】渲染键在两处独立构造（内核
+    // `build_rendered_hash_input` 与 app 侧 `audio_engine/snapshot.rs`），
+    // 把它做成入参就要两边都记得填 —— 那正是本项目"口径漂移"的老毛病。
+    // 放在哈希函数内部按 `renderer_id` 判定，两条路径自动一致。
+    //
+    // 【为什么不用 `cache_identity()`】那需要先建 ONNX 会话，而渲染键在
+    // 命令/快照路径上就要算出来，那里不允许同步建会话。`model_digest_cached`
+    // 只读文件、惰性缓存，见其文档。
+    //
+    // 只对**依赖外部模型文件**的渲染器生效：WORLD 静态链接进二进制，
+    // 其版本由 `RENDER_PIPELINE_VERSION` 覆盖。
+    if renderer_id == "nsf_hifigan_onnx" {
+        if let Some(digest) = crate::nsf_hifigan_onnx::model_digest_cached() {
+            mix_bytes!(b"model_digest");
+            mix_bytes!(digest.as_bytes());
+        }
+    }
     // 混入渲染管线指纹：实现变更（声码器/处理器链/后处理算法）必须整体失效。
     mix_bytes!(b"pipeline");
     mix_bytes!(&RENDER_PIPELINE_VERSION.to_le_bytes());
@@ -1278,7 +1304,15 @@ pub fn get_latest_rendered_pcm(
                 // 帧数必然一致。若帧数不同（clip 被移动/拉伸/换 Take），这条
                 // 旧渲染对应的是**另一个窗口**的内容 —— 垫上去就是把错误位置
                 // 的音频播给用户（表现为搬移后先响一下旧位置的声、再切换）。
-                && expected_frames.is_none_or(|want| v.frames == want)
+                //
+                // 【为什么比对 `pcm_stereo.len()/2` 而不是存储字段 `frames`】
+                // `frames` 是写入时记录的**声明值**，与 `pcm_stereo` 的实际长度
+                // 之间没有任何强制关系。历史上有写入点只填其一（`mixdown` 的
+                // 合成路径构造过 `vec![0.0; frames*2]` 与 `segment.len()/2`
+                // 两种来源）。一旦两者不符，按声明值放行的垫音会被后续
+                // `rendered[idx]` 越界读取或提前截断 —— 直接是不连续。
+                // **真实长度**才是唯一可信的判据；声明值不再参与判定。
+                && expected_frames.is_none_or(|want| v.pcm_stereo.len() / 2 == want as usize)
         })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
@@ -1288,7 +1322,8 @@ pub fn get_latest_rendered_pcm(
 mod tests {
     use super::{
         compute_param_hash, compute_rendered_clip_hash, compute_rendered_clip_hash_excluding,
-        HashExclusions, RenderedClipHashInput,
+        get_latest_rendered_pcm, global_rendered_clip_cache, HashExclusions,
+        RenderedClipCacheEntry, RenderedClipCacheKey, RenderedClipHashInput,
     };
 
     // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
@@ -1692,5 +1727,49 @@ mod tests {
         let _ = hash(&[]);
         let _ = hash(&[1.0]);
         assert_ne!(hash(&[]), hash(&[1.0]), "curve content must matter");
+    }
+
+    /// 垫音的长度守卫必须比对 `pcm_stereo` 的**实际**长度，而不是声明字段
+    /// `frames`。两者不符时放行，后续 `rendered[idx]` 会越界读或提前截断 ——
+    /// 直接表现为接缝处的不连续。
+    #[test]
+    fn fallback_pad_rejects_entries_whose_declared_frames_lie() {
+        use std::sync::Arc;
+
+        let clip_id = "test-fallback-length-guard";
+        let key = RenderedClipCacheKey {
+            clip_id: clip_id.to_string(),
+            param_hash: 0xDEAD_BEEF,
+        };
+        {
+            let mut cache = global_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.invalidate(clip_id);
+            // 声明 100 帧，实际只有 50 帧（100 个 f32）
+            cache.insert(
+                key,
+                RenderedClipCacheEntry {
+                    pcm_stereo: Arc::new(vec![0.1f32; 100]),
+                    breath_noise_stereo: None,
+                    frames: 100,
+                    sample_rate: 44_100,
+                    rendered_take_id: None,
+                },
+            );
+        }
+
+        // 声明值命中、但真实长度不足 → 必须拒绝
+        assert!(
+            get_latest_rendered_pcm(clip_id, None, Some(100)).is_none(),
+            "an entry whose pcm length contradicts its declared frames must not be used as a pad"
+        );
+        // 真实长度（50 帧）才是可信的判据
+        assert!(get_latest_rendered_pcm(clip_id, None, Some(50)).is_some());
+
+        let mut cache = global_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.invalidate(clip_id);
     }
 }

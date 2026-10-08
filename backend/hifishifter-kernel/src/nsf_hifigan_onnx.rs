@@ -696,6 +696,31 @@ fn digest_model_files(onnx: &Path, config: &Path) -> Result<blake3::Hash, String
 pub fn cache_identity() -> Result<String, String> {
     Ok(get_or_init_shared_session()?.identity.to_hex().to_string())
 }
+
+/// 模型文件的**内容摘要**，惰性算一次并缓存。
+///
+/// # 为什么不能直接用 [`cache_identity`]
+/// 后者取的是**已建会话**的身份，前提是先加载 ONNX 模型 —— 数百毫秒起，
+/// 还会占用推理设备。而**整 clip 渲染键**在命令/快照构建路径上就要算出来，
+/// 那里明确不允许同步建会话（见 `infer_pitch_edit_mono_mel_stretch` 的说明）。
+///
+/// 本函数只读模型文件做 blake3，**不建会话**：一次性约 54MB 的文件读取，
+/// 代价可接受，且结果严格对应文件内容 —— 换掉磁盘上的模型文件即失效。
+///
+/// 模型文件缺失/不可读时返回 `None`，此时渲染键退化为不含模型身份
+/// （与纳入该字段之前的行为一致，只会额外 miss，不会误命中）。
+pub fn model_digest_cached() -> Option<&'static str> {
+    static DIGEST: OnceLock<Option<String>> = OnceLock::new();
+    DIGEST
+        .get_or_init(|| {
+            let (onnx, cfg) = resolve_model_paths().ok()?;
+            digest_model_files(&onnx, &cfg)
+                .ok()
+                .map(|d| d.to_hex().to_string())
+        })
+        .as_deref()
+}
+
 /// 实际模型run次数（包含失败尝试，不含建会话烟测），用于非实时性能验收。
 pub fn inference_runs() -> u64 {
     NEURAL_RUNS.load(Ordering::Relaxed)
@@ -2702,6 +2727,28 @@ mod tests {
         formant_shifts_for_frames, mel_frame_count, quantize_key_shift, shift_n_fft,
         KEY_SHIFT_QUANTUM_SEMITONES,
     };
+
+    /// 模型内容摘要：必须惰性缓存，且与"现读文件"的结果一致。
+    ///
+    /// 【为什么钉住】该摘要进入整 clip 渲染键。若它不缓存，渲染键的计算就会
+    /// 在命令/快照路径上反复读 54MB；若它与文件内容脱钩，换模型后旧 PCM 会
+    /// 继续命中。
+    #[test]
+    fn model_digest_is_cached_and_matches_the_files() {
+        let first = super::model_digest_cached();
+        let second = super::model_digest_cached();
+        assert_eq!(first, second, "digest must be cached, not recomputed");
+
+        // 开发树里模型通常存在；若不存在则摘要为 None（合法降级）。
+        if let Some(cached) = first {
+            let (onnx, cfg) = super::resolve_model_paths().expect("digest implies paths resolve");
+            let expected = super::digest_model_files(&onnx, &cfg)
+                .expect("digest implies files are readable")
+                .to_hex()
+                .to_string();
+            assert_eq!(cached, expected, "cached digest must match a fresh read");
+        }
+    }
 
     /// 只读能力轮询不能隐式启动模型线程；实际合成仍由TLS加载路径负责。
     #[test]
