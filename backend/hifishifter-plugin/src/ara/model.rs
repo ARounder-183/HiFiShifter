@@ -15,9 +15,9 @@ use crate::ara::mapping::{
 use crate::render::document::DocumentSession;
 use crate::render::ownership::{region_owners, DocumentId};
 use ara2_bridge::core::{
-    ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, ContentTimeRange,
-    ContentUpdateScopes, DocumentProperties, MusicalContextProperties, PlaybackRegionProperties,
-    RegionSequenceProperties,
+    ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, BarSignatures,
+    ContentTimeRange, ContentUpdateScopes, DocumentProperties, KeySignatures,
+    MusicalContextProperties, PlaybackRegionProperties, RegionSequenceProperties, Tempo,
 };
 use ara2_bridge::plugin::{
     AudioModifications, AudioSources, CreateContext, DocumentLifecycle, HostContentScope,
@@ -372,13 +372,56 @@ impl MusicalContexts for ModelHandle {
         &mut self,
         _context: &CreateContext,
         properties: MusicalContextProperties,
-        _host: &HostContentScope<'_, '_>,
+        host: &HostContentScope<'_, '_>,
     ) -> Result<Self::MusicalContext, AraError> {
         self.document.musical_contexts.push(AraMusicalContext {
             name: properties.name().map(str::to_owned),
             region_sequences: Vec::new(),
         });
+        probe_host_musical_content(host);
         Ok(())
+    }
+}
+
+/// F-2 取证探针：宿主到底提不提供速度 / 拍号 / 调号内容？
+///
+/// 【为什么要先取证再动手】HiFiShifter 的渲染锚定在音乐上下文上，而 ARA 的
+/// `Tempo` / `BarSignatures` / `KeySignatures` 内容**不是**"规范里有就一定有"：
+/// REAPER 是否实现、实现到什么程度，只能实测。猜错的方向会一路渗进渲染缓存键。
+///
+/// 【为什么只记"有没有、几条"】`HostContentScope` 是 `!Send`，只在本次回调内有效，
+/// 而且读事件要按类型逐个解包 —— 先拿到"宿主提供 / 不提供"这一条事实就够决定
+/// 方案形状；真正消费（微分求 BPM、合并拍号）等这一条事实出来再做。
+fn probe_host_musical_content(host: &HostContentScope<'_, '_>) {
+    let Some(context) = host.current_musical_context() else {
+        log::info!("[ara][probe] musical content: no current context in this scope");
+        return;
+    };
+    for (name, grade) in [
+        ("tempo", host.musical_context_grade::<Tempo>(context)),
+        (
+            "bar_signatures",
+            host.musical_context_grade::<BarSignatures>(context),
+        ),
+        (
+            "key_signatures",
+            host.musical_context_grade::<KeySignatures>(context),
+        ),
+    ] {
+        match grade {
+            Ok(grade) => log::info!("[ara][probe] musical content {name}: grade={grade:?}"),
+            Err(error) => {
+                log::info!("[ara][probe] musical content {name}: unavailable ({error})")
+            }
+        }
+    }
+    match host.musical_context::<Tempo>(context, None) {
+        Ok(reader) => log::info!("[ara][probe] tempo entries: {}", reader.len()),
+        Err(error) => log::info!("[ara][probe] tempo entries unavailable: {error}"),
+    }
+    match host.musical_context::<BarSignatures>(context, None) {
+        Ok(reader) => log::info!("[ara][probe] bar signatures: {}", reader.len()),
+        Err(error) => log::info!("[ara][probe] bar signatures unavailable: {error}"),
     }
 }
 

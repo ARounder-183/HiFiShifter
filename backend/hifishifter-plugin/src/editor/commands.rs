@@ -215,9 +215,15 @@ pub(super) fn dispatch(
     input: Value,
 ) -> Result<Value, String> {
     match command {
-        "list_directory" | "stat_paths" | "get_audio_file_info" | "search_files_recursive" => {
-            return session.browser_command(command, &input)
-        }
+        "list_directory"
+        | "stat_paths"
+        | "get_audio_file_info"
+        | "search_files_recursive"
+        | "create_directory"
+        | "rename_path"
+        | "delete_paths"
+        | "reveal_paths_in_file_manager"
+        | "open_path_with_default_app" => return session.browser_command(command, &input),
         // 设置由进程级的 `settings_store` 持有：它属于用户，不属于某一个 ARA 文档，
         // 并且与独立 App 共用同一份配置文件。此前这里是 `session.settings`（每个
         // 文档一份、初始化为出厂默认），保存只改内存、不落盘。

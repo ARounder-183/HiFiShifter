@@ -29,6 +29,10 @@ base64 = "0.22"
 # 不值得为此多拉一个 `time` 依赖）。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+# 文件浏览器把删除做成"移入回收站"：回收站是各平台差异极大的系统集成
+# （Windows IFileOperation / macOS NSFileManager / Linux XDG trash），
+# 自己实现等于把三个平台各写一遍。与 App 侧同版本。
+trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
 # 二期仅原生WebView2，没有Tauri/wry主循环；版本复用workspace现有缓存。

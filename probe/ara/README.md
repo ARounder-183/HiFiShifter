@@ -170,3 +170,28 @@ Task 1 的 Step 1 / 3 / 4 / 5 需要在 REAPER 图形界面里操作，且要造
 `backend/src-tauri` 的 `cargo test` **在本会话无法取得基线**：`fdk-aac-sys` / `opusic-sys`
 经 `cmake` crate 调用 MSBuild，撞上同一个临时文件拒绝，而那条路径没有
 `TrackFileAccess` 之类的钩子可关。基线需在普通终端取得。这与本探针的产物无关。
+
+## F-2 探针：宿主到底提不提供速度 / 拍号 / 调号内容
+
+**代码位置**：`backend/hifishifter-plugin/src/ara/model.rs` 的
+`probe_host_musical_content`（在 `create_musical_context` 回调内调用）。
+
+**为什么在这里而不是 Lua 脚本**：要问的是 ARA 内容接口，只有插件侧的
+`HostContentScope` 拿得到 —— Lua 脚本走的是 REAPER 自己的 API，看不到这一层。
+`HostContentScope` 又是 `!Send`，只能在模型线程的回调内读，所以探针必须内联在
+`create_musical_context` 里。
+
+**怎么取证据**：正常使用插件（宿主会推送音乐上下文），然后看插件日志里的
+`[ara][probe] musical content ...` 与 `[ara][probe] tempo entries: N` 几行。
+日志路径见 Help → 打开日志文件夹（`plugin.log`）。
+
+**判决规则**：
+
+| 日志 | 结论 |
+|------|------|
+| `grade=...` 且 `tempo entries: N>0` | 宿主**提供**速度内容 → 可做速度映射（plan Part 3.6b） |
+| `unavailable (...)` | 宿主不提供该内容 → 明确定为【宿主权威·暂不呈现】，写进手册 |
+| 完全没有 `[ara][probe]` 行 | 宿主没推音乐上下文 → 同上 |
+
+**不要**在没有这几行日志的情况下设计速度映射 UI：`Tempo` / `BarSignatures` 在
+规范里存在，不等于 REAPER 实现了它。
