@@ -30,6 +30,11 @@
 //! 一棵**错误的父子树**，而错误的参数根会让用户把两条轨的参数编辑混在一起 —— 这比
 //! "这个工程暂时不映射 folder" 严重得多。调用方拿到错误后退回"只显示 FX 自己那条
 //! 轨"，行为与本次改动之前完全一致。
+//!
+//! 【未闭合项】要放宽这一条，必须先拿真实 REAPER 采一次样，确认 `I_FOLDERDEPTH > 1`
+//! 到底出现在什么结构里（见 `docs/plans/2026-10-08-folder-child-items-to-clips.md`
+//! 的 Task 5.6）。在拿到实测之前**不要**凭对称性外推：`-2` 的语义有官方文档支撑，
+//! `+2` 没有。放宽的判据是实测样本，不是推理。
 use super::{checked, ReaperHost};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr};

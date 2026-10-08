@@ -224,11 +224,19 @@ impl DocumentSession {
         timeline.clips.retain(|clip| {
             !owned.contains(&clip.track_id) || !clip.id.starts_with(&prefix("ara-clip-"))
         });
-        let known = self.ui_known_tracks.lock().unwrap();
-        timeline.tracks.retain(|track| {
-            !known.iter().any(|id| prefix(id) == track.id) || owned.contains(&track.id)
-        });
-        drop(known);
+        {
+            let known = self.ui_known_tracks.lock().unwrap();
+            timeline.tracks.retain(|track| {
+                !known.iter().any(|id| prefix(id) == track.id) || owned.contains(&track.id)
+            });
+        }
+        // 【为什么在这里把 `known` 推进到本轮清单，而不是只做并集】`known` 的语义是
+        // "宿主清单里的轨道"，用来剔除**宿主已不再报告**的轨道。只做并集的话，一条曾经
+        // 进过清单、后来离开 folder 的轨道会被永久记住，于是每一轮都被从时间线上剔掉 ——
+        // 哪怕它仍有 ARA clip、本该作为普通 ARA 轨道显示。推进到本轮之后，剔除只发生在
+        // "上次呈现有、这次没有"的那一次；此后它按普通 ARA 轨道对待。
+        *self.ui_known_tracks.lock().unwrap() =
+            tracks.values().map(|host| host.id.clone()).collect();
         // 记下"父级由宿主 folder 决定"的轨道，供私有分组呈现时让路
         // （见 `host_folder_children`）。
         *self.host_folder_children.lock().unwrap() = folder_children;
@@ -245,8 +253,8 @@ impl DocumentSession {
         let identities = self.clip_ids.lock().unwrap();
         self.renderer_owners()
             .iter()
-            .filter_map(|owner| {
-                let bound = owner.host_geometry_metadata_locked(self)?;
+            .flat_map(|owner| owner.host_geometries_locked(self))
+            .filter_map(|bound| {
                 identities
                     .get(&bound.region_key)
                     .filter(|id| clips.contains(*id))
@@ -262,11 +270,10 @@ impl DocumentSession {
         }
         let identities = self.clip_ids.lock().unwrap();
         for owner in self.renderer_owners() {
-            let Some(bound) = owner.host_geometry_metadata_locked(self) else {
-                continue;
-            };
-            if bound.geometry.item_id == item {
-                return identities.get(&bound.region_key).cloned();
+            for bound in owner.host_geometries_locked(self) {
+                if bound.geometry.item_id == item {
+                    return identities.get(&bound.region_key).cloned();
+                }
             }
         }
         None
@@ -312,39 +319,39 @@ impl DocumentSession {
             }
         }
         for owner in self.renderer_owners() {
-            let Some(bound) = owner.host_geometry_metadata_locked(self) else {
-                continue;
-            };
-            let Some(id) = identities.get(&bound.region_key) else {
-                continue;
-            };
-            let ui_id = format!("{namespace}{id}");
-            let Some(clip) = clips.iter_mut().find(|clip| clip["id"] == ui_id) else {
-                continue;
-            };
-            let g = bound.geometry;
-            decorate_item_gain(clip, &g);
-            clip["snap_offset_sec"] = serde_json::json!(g.snap_offset_sec);
-            let delegated = self
-                .regions
-                .lock()
-                .unwrap()
-                .get(&bound.region_key)
-                .is_some_and(|region| {
-                    region.has_content_based_fade_at_head || region.has_content_based_fade_at_tail
-                });
-            if delegated {
-                let style = fades.get(&g.item_id).cloned().unwrap_or_default();
-                clip["fade_in_shape"] = serde_json::json!(style.in_shape);
-                clip["fade_out_shape"] = serde_json::json!(style.out_shape);
-                clip["fade_in_dir"] = serde_json::json!(style.in_dir);
-                clip["fade_out_dir"] = serde_json::json!(style.out_dir);
-                clip["host_fades"] = serde_json::json!({"curve_mode":"hifishifter","in_curvature":style.in_dir,"out_curvature":style.out_dir,"in_s":0.,"out_s":0.});
-                continue;
+            for bound in owner.host_geometries_locked(self) {
+                let Some(id) = identities.get(&bound.region_key) else {
+                    continue;
+                };
+                let ui_id = format!("{namespace}{id}");
+                let Some(clip) = clips.iter_mut().find(|clip| clip["id"] == ui_id) else {
+                    continue;
+                };
+                let g = bound.geometry;
+                decorate_item_gain(clip, &g);
+                clip["snap_offset_sec"] = serde_json::json!(g.snap_offset_sec);
+                let delegated = self
+                    .regions
+                    .lock()
+                    .unwrap()
+                    .get(&bound.region_key)
+                    .is_some_and(|region| {
+                        region.has_content_based_fade_at_head
+                            || region.has_content_based_fade_at_tail
+                    });
+                if delegated {
+                    let style = fades.get(&g.item_id).cloned().unwrap_or_default();
+                    clip["fade_in_shape"] = serde_json::json!(style.in_shape);
+                    clip["fade_out_shape"] = serde_json::json!(style.out_shape);
+                    clip["fade_in_dir"] = serde_json::json!(style.in_dir);
+                    clip["fade_out_dir"] = serde_json::json!(style.out_dir);
+                    clip["host_fades"] = serde_json::json!({"curve_mode":"hifishifter","in_curvature":style.in_dir,"out_curvature":style.out_dir,"in_s":0.,"out_s":0.});
+                    continue;
+                }
+                clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
+                    "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
+                    "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
             }
-            clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
-                "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
-                "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
         }
     }
     /// 无宿主getter的短事务装饰；调用者不得仍持编辑timeline锁。
@@ -363,40 +370,40 @@ impl DocumentSession {
     ) {
         let identities = self.clip_ids.lock().unwrap().clone();
         for owner in self.renderer_owners() {
-            let Some(bound) = owner.host_geometry_metadata_locked(self) else {
-                continue;
-            };
-            let Some(id) = identities.get(&bound.region_key) else {
-                continue;
-            };
-            let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) else {
-                continue;
-            };
-            let geometry = bound.geometry;
-            display_item_gain(clip, geometry.item_gain);
-            clip.snap_offset_sec = geometry.snap_offset_sec;
-            clip.fade_in_sec = geometry.fade_in_sec;
-            clip.fade_out_sec = geometry.fade_out_sec;
-            clip.auto_fade_in_sec = geometry.auto_fade_in_sec;
-            clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
-            clip.fade_in_shape = geometry.fade_in_shape;
-            clip.fade_out_shape = geometry.fade_out_shape;
-            clip.fade_in_dir = geometry.fade_in_dir;
-            clip.fade_out_dir = geometry.fade_out_dir;
-            if self
-                .regions
-                .lock()
-                .unwrap()
-                .get(&bound.region_key)
-                .is_some_and(|region| {
-                    region.has_content_based_fade_at_head || region.has_content_based_fade_at_tail
-                })
-            {
-                let style = fades.get(&geometry.item_id).cloned().unwrap_or_default();
-                clip.fade_in_shape = style.in_shape;
-                clip.fade_out_shape = style.out_shape;
-                clip.fade_in_dir = style.in_dir;
-                clip.fade_out_dir = style.out_dir;
+            for bound in owner.host_geometries_locked(self) {
+                let Some(id) = identities.get(&bound.region_key) else {
+                    continue;
+                };
+                let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) else {
+                    continue;
+                };
+                let geometry = bound.geometry;
+                display_item_gain(clip, geometry.item_gain);
+                clip.snap_offset_sec = geometry.snap_offset_sec;
+                clip.fade_in_sec = geometry.fade_in_sec;
+                clip.fade_out_sec = geometry.fade_out_sec;
+                clip.auto_fade_in_sec = geometry.auto_fade_in_sec;
+                clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
+                clip.fade_in_shape = geometry.fade_in_shape;
+                clip.fade_out_shape = geometry.fade_out_shape;
+                clip.fade_in_dir = geometry.fade_in_dir;
+                clip.fade_out_dir = geometry.fade_out_dir;
+                if self
+                    .regions
+                    .lock()
+                    .unwrap()
+                    .get(&bound.region_key)
+                    .is_some_and(|region| {
+                        region.has_content_based_fade_at_head
+                            || region.has_content_based_fade_at_tail
+                    })
+                {
+                    let style = fades.get(&geometry.item_id).cloned().unwrap_or_default();
+                    clip.fade_in_shape = style.in_shape;
+                    clip.fade_out_shape = style.out_shape;
+                    clip.fade_in_dir = style.in_dir;
+                    clip.fade_out_dir = style.out_dir;
+                }
             }
         }
     }
@@ -408,6 +415,14 @@ impl DocumentSession {
     ) -> Result<(), String> {
         let identities = self.clip_ids.lock().unwrap().clone();
         let regions = self.regions.lock().unwrap().clone();
+        // 先把所有 owner 的逐 region 绑定摊平成一张表：委托 fade 的 clip 可能属于
+        // 多 region owner（folder 轨上的 FX），按 owner 逐个 find_map 会漏。
+        let geometries = self
+            .renderer_owners()
+            .iter()
+            .flat_map(|owner| owner.host_geometries_locked(self))
+            .map(|bound| (bound.region_key, bound.geometry))
+            .collect::<std::collections::HashMap<_, _>>();
         for clip in &mut timeline.clips {
             let key = identities
                 .iter()
@@ -418,16 +433,10 @@ impl DocumentSession {
             if !region.has_content_based_fade_at_head && !region.has_content_based_fade_at_tail {
                 continue;
             }
-            let geometry = self
-                .renderer_owners()
-                .iter()
-                .find_map(|owner| {
-                    owner
-                        .host_geometry_metadata_locked(self)
-                        .filter(|bound| bound.region_key == key)
-                })
-                .ok_or("delegated fade host geometry pending")?
-                .geometry;
+            let geometry = geometries
+                .get(&key)
+                .cloned()
+                .ok_or("delegated fade host geometry pending")?;
             let style = edits
                 .fades
                 .get(&geometry.item_id)
@@ -452,14 +461,13 @@ impl DocumentSession {
     pub(crate) fn project_host_mutes_locked(&self, timeline: &mut TimelineState) {
         let identities = self.clip_ids.lock().unwrap();
         for owner in self.renderer_owners() {
-            let Some(bound) = owner.host_geometry_metadata_locked(self) else {
-                continue;
-            };
-            let Some(id) = identities.get(&bound.region_key) else {
-                continue;
-            };
-            if let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) {
-                clip.muted = bound.geometry.muted;
+            for bound in owner.host_geometries_locked(self) {
+                let Some(id) = identities.get(&bound.region_key) else {
+                    continue;
+                };
+                if let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) {
+                    clip.muted = bound.geometry.muted;
+                }
             }
         }
     }
@@ -705,5 +713,83 @@ mod tests {
         assert!(empty.tracks.is_empty());
         document.close();
         assert!(document.workspace_scope().is_err());
+    }
+
+    /// 离开宿主清单的轨道只该被剔除**一次**，不能被永久记成"宿主轨道"。
+    ///
+    /// 【回归】`ui_known_tracks` 旧实现只做并集：一条曾进过清单、后来离开 folder 的
+    /// 轨道会被永久记住，于是每一轮呈现都把它从时间线上剔掉 —— 哪怕它仍有 ARA clip、
+    /// 本该作为普通 ARA 轨道显示。
+    #[test]
+    fn a_track_leaving_the_host_inventory_is_dropped_once_not_forever() {
+        let model = ModelHandle::new();
+        let document = model.session();
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let base = api.ui_track(&|| true).unwrap();
+
+        let mut staying = base.clone();
+        staying.id = "host-staying".into();
+        staying.guid = "{66666666-6666-6666-6666-666666666666}".into();
+        staying.items.clear();
+        let mut leaving = base.clone();
+        leaving.id = "host-leaving".into();
+        leaving.guid = "{77777777-7777-7777-7777-777777777777}".into();
+        leaving.items.clear();
+
+        let mut timeline = TimelineState::default();
+        timeline.tracks.clear();
+        {
+            let mut tracks = document.ui_tracks.lock().unwrap();
+            tracks.insert(staying.guid.clone(), staying.clone());
+            tracks.insert(leaving.guid.clone(), leaving.clone());
+        }
+        document.present_host_inventory(&mut timeline, "");
+        assert!(timeline
+            .tracks
+            .iter()
+            .any(|track| track.id == "host-staying"));
+        assert!(timeline
+            .tracks
+            .iter()
+            .any(|track| track.id == "host-leaving"));
+
+        // 一条轨道离开清单（例如被拖出 folder），另一条还在 —— 清单非空，本轮照常呈现。
+        document.ui_tracks.lock().unwrap().remove(&leaving.guid);
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            !timeline
+                .tracks
+                .iter()
+                .any(|track| track.id == "host-leaving"),
+            "离开清单的轨道必须被剔除一次"
+        );
+        assert!(
+            !document
+                .ui_known_tracks
+                .lock()
+                .unwrap()
+                .contains("host-leaving"),
+            "剔除之后不得永久残留，否则此后每一轮都会被误剔"
+        );
+
+        // 关键回归：此后它以普通 ARA 轨道身份出现时必须留得住。
+        let mut timeline = TimelineState::default();
+        timeline.tracks = vec![serde_json::from_value(
+            serde_json::json!({"id":"host-leaving","name":"now an ARA track","order":0}),
+        )
+        .unwrap()];
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            timeline
+                .tracks
+                .iter()
+                .any(|track| track.id == "host-leaving"),
+            "不再属于宿主清单的轨道要按普通 ARA 轨道保留"
+        );
+        document.close();
     }
 }

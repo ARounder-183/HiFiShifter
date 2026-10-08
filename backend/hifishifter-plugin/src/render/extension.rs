@@ -21,13 +21,60 @@ pub(super) fn pcm_fingerprint(pcm: &super::source::SourcePcm) -> String {
 }
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
+///
+/// `value` 是**逐 region** 的绑定列表，不是一个实例一个几何：挂在 REAPER folder
+/// 轨上的 FX 会被 ARA 分配整组 region，而 `parent(2)`（实例自己的 take）结构上只
+/// 能覆盖其中一个。见 [`ExtensionOwner::reaper_geometries`]。
 #[derive(Clone)]
 struct CachedHostGeometry {
     model: u64,
     scope: u64,
     change: Option<i32>,
-    value: Result<crate::host::geometry::BoundHostGeometry, String>,
+    value: Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
 }
+
+/// 两个宿主/ARA 浮点量是否相容；容差沿用单 region 路径的既有口径。
+fn compatible(a: f64, b: f64) -> bool {
+    a.is_finite()
+        && b.is_finite()
+        && (a - b).abs() <= 1e-7 + 8. * f64::EPSILON * a.abs().max(b.abs())
+}
+
+/// 在候选宿主 item 里为一条 ARA region 找**唯一**匹配的几何。
+///
+/// 【为什么必须"唯一才采信"】ARA 侧没有 region → item 的显式边（见
+/// `crate::ara::mapping` 的 `LOST_FIELDS`）：`parent(2)` 只覆盖 FX 自己的那一个
+/// take，源 persistentID 会被多个 item 共享，名字/轨道序号按既有纪律不得用于猜
+/// 关联。因此只能按**几何**比对；而后续所有宿主写回都沿这条边定位 item —— 猜错
+/// 就是写到别的 item 上。所以 0 个匹配或多个匹配一律返回 `None`：宁可不绑定。
+///
+/// 四项都要相容：播放位置、播放时长、源内起点、播放速率。只比时间窗会在
+/// "同一位置的两条子轨各有一个 item"这种常见布局上直接产生歧义。
+fn unique_geometry_for_region(
+    region: &crate::ara::AraPlaybackRegion,
+    candidates: &[crate::host::geometry::HostClipGeometry],
+) -> Option<crate::host::geometry::HostClipGeometry> {
+    let playback_rate = if region.duration_in_playback_time > 0.0 {
+        region.duration_in_modification_time / region.duration_in_playback_time
+    } else {
+        f64::NAN
+    };
+    let mut matched = candidates.iter().filter(|candidate| {
+        compatible(candidate.start_sec, region.start_in_playback_time)
+            && compatible(candidate.duration_sec, region.duration_in_playback_time)
+            && compatible(
+                candidate.source_start_sec,
+                region.start_in_modification_time,
+            )
+            && compatible(candidate.playback_rate, playback_rate)
+    });
+    let first = matched.next()?;
+    if matched.next().is_some() {
+        return None;
+    }
+    Some(first.clone())
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct PreparedVersion {
     model: u64,
@@ -466,8 +513,8 @@ mod bound_tests {
         let entry_metadata = editor.host_geometry_metadata();
         document.close();
         let metadata = metadata.expect("单一editor入口必须让隐藏playback的只读数据就绪");
-        assert_eq!(metadata.region_key, first);
-        assert_eq!(metadata.geometry.fade_in_sec, 0.2);
+        assert_eq!(metadata[0].region_key, first);
+        assert_eq!(metadata[0].geometry.fade_in_sec, 0.2);
         assert!(entry_metadata.is_err(), "多区域editor不能冒充唯一take绑定");
     }
 
@@ -557,7 +604,7 @@ mod bound_tests {
                 .any(|name| name == "count" || name == "D_FADEINLEN"),
             "稳定UI tick不能重读全量几何: {stable_calls:?}"
         );
-        assert_eq!(changed.geometry.fade_in_sec, 0.75);
+        assert_eq!(changed[0].geometry.fade_in_sec, 0.75);
         assert!(changed_calls.iter().any(|name| name == "D_FADEINLEN"));
         assert!(
             model_calls.iter().any(|name| name == "D_FADEINLEN"),
@@ -727,8 +774,8 @@ mod bound_tests {
         owner.refresh_reaper_transport();
         host.reset();
         let cached = owner.host_geometry_metadata().unwrap();
-        assert_eq!(cached.region_key, first);
-        assert_eq!(cached.geometry.fade_in_sec, 0.2);
+        assert_eq!(cached[0].region_key, first);
+        assert_eq!(cached[0].geometry.fade_in_sec, 0.2);
         assert!(host.calls().is_empty());
         std::thread::scope(|scope| {
             scope
@@ -745,7 +792,9 @@ mod bound_tests {
         owner.refresh_reaper_transport();
         assert_eq!(document.revision.load(Ordering::Acquire), revision);
         assert_eq!(
-            owner.host_geometry_metadata().unwrap().geometry.fade_in_sec,
+            owner.host_geometry_metadata().unwrap()[0]
+                .geometry
+                .fade_in_sec,
             0.75
         );
         document.scope_revision.fetch_add(1, Ordering::AcqRel);
@@ -1958,6 +2007,10 @@ impl ExtensionOwner {
         Ok(keys)
     }
     /// 仅UI/model线程读取；唯一assignment先成立，位置/长度仅用于绑定后相容核对。
+    ///
+    /// 这条路径的身份来自宿主直接 parent take —— 是强证据，因此**只在恰好一个
+    /// region 时**成立。多 region（folder 轨上的 FX）走
+    /// [`Self::reaper_geometries`]，那里没有直接 parent 可用，只能按几何唯一匹配。
     pub(crate) fn reaper_geometry(
         &self,
     ) -> Result<crate::host::geometry::BoundHostGeometry, String> {
@@ -1980,11 +2033,6 @@ impl ExtensionOwner {
             .clone()
             .ok_or("REAPER host extension unavailable")?;
         let geometry = host.geometry(|| self.host_query_authorized(&stamp))?;
-        let compatible = |a: f64, b: f64| {
-            a.is_finite()
-                && b.is_finite()
-                && (a - b).abs() <= 1e-7 + 8. * f64::EPSILON * a.abs().max(b.abs())
-        };
         if !compatible(geometry.start_sec, region.start_in_playback_time)
             || !compatible(geometry.duration_sec, region.duration_in_playback_time)
         {
@@ -2000,12 +2048,102 @@ impl ExtensionOwner {
             geometry,
         })
     }
+
+    /// 多 region owner（挂在 REAPER folder 轨上的 FX）逐 region 解析宿主几何。
+    ///
+    /// 【为什么不能退回"取第一个"】后续所有宿主写回都沿 region → item 这条边定位
+    /// 对象。拿一个 take 的几何去冒充整组，会把 item GUID 绑到**错误的** region 上，
+    /// 于是移动/切分/fade/音量全部可能落到别的 item。因此这里对每个 region 单独
+    /// 求唯一匹配，匹配不到就**不绑定**，并在日志里如实报出未绑定的数量。
+    ///
+    /// 候选 item 与 GUI 清单同源（FX 自己的轨道 + folder 全部后代轨道），沿既有
+    /// `ui_folder_tracks` 的线程/授权/预算纪律取得。
+    fn reaper_geometries(&self) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
+        let stamp = self.host_query_stamp()?;
+        if stamp.3.is_empty() {
+            return Err("no assigned ARA region".into());
+        }
+        let host = self
+            .reaper
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("REAPER host extension unavailable")?;
+        let authorized = || self.host_query_authorized(&stamp);
+        let candidates = host
+            .ui_folder_tracks(&authorized)?
+            .into_iter()
+            .flat_map(|track| track.items.into_iter().map(|item| item.geometry))
+            .collect::<Vec<_>>();
+        let mut bound = Vec::new();
+        let mut unmatched = Vec::new();
+        for key in &stamp.3 {
+            let region = stamp
+                .0
+                .regions
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .ok_or("assigned ARA region unavailable")?;
+            match unique_geometry_for_region(&region, &candidates) {
+                Some(geometry) => bound.push(crate::host::geometry::BoundHostGeometry {
+                    region_key: *key,
+                    geometry,
+                }),
+                None => unmatched.push(*key),
+            }
+        }
+        // 一个宿主 item 只能被**一个** region 认领。两条 region 绑到同一个 item 会让
+        // 后续所有写回指向同一对象：移动、切分、fade、音量互相覆盖，且没有任何一侧
+        // 会报错。重复认领的一律**全部**丢弃（不是留一个），并如实记账。
+        let mut claims = std::collections::HashMap::<String, usize>::new();
+        for entry in &bound {
+            *claims.entry(entry.geometry.item_id.clone()).or_default() += 1;
+        }
+        let claimed = bound.len();
+        bound.retain(|entry| claims.get(&entry.geometry.item_id) == Some(&1));
+        if bound.len() != claimed {
+            log::warn!(
+                "[ara] {} region(s) dropped: they claimed an item another region already owns",
+                claimed - bound.len()
+            );
+        }
+        if stamp.3.len() > 1 {
+            // 用户报障时最需要的一行：这个实例是不是"一个 FX 管一组 region"。
+            log::info!(
+                "[ara] multi-region owner: {} assigned region(s), {} bound to a unique host \
+                 item, {} candidate item(s)",
+                stamp.3.len(),
+                bound.len(),
+                candidates.len()
+            );
+        }
+        if !unmatched.is_empty() {
+            // 认领不到的 region 会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
+            // 这正是"子轨道 Item 没有变成真 Clip"的直接读数。
+            log::warn!(
+                "[ara] {} of {} assigned region(s) have no unique host item (candidates={}); \
+                 they stay unbound",
+                unmatched.len(),
+                stamp.3.len(),
+                candidates.len()
+            );
+        }
+        if bound.is_empty() {
+            return Err("no assigned ARA region matched a unique host item".into());
+        }
+        if !self.host_query_authorized(&stamp) {
+            return Err("host geometry authorization revoked".into());
+        }
+        Ok(bound)
+    }
     /// actor/worker只可消费UI冻结的Rust值，不沿此访问器调用host；代次变化明确不可用。
     // 只读几何元数据访问器保留，供worker消费冻结值。
     #[allow(dead_code)]
     pub(crate) fn host_geometry_metadata(
         &self,
-    ) -> Result<crate::host::geometry::BoundHostGeometry, String> {
+    ) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
         let stamp = self.host_query_stamp()?;
         let cached = self
             .host_geometry
@@ -2020,30 +2158,41 @@ impl ExtensionOwner {
         cached.value
     }
     /// 调用者已持所属doc事务，只消费已授权Rust缓存，不嵌套加锁或调用宿主。
-    pub(crate) fn host_geometry_metadata_locked(
+    ///
+    /// 返回**当前仍被分配**的 region 各自的绑定；不再要求"恰好一个" —— folder 轨上
+    /// 的 FX 会被分配整组 region，要求唯一等于让整条投影链（fade / mute / item 身份）
+    /// 全部静默失效。仍然只返回 region 与缓存都同意的那部分：缓存过期、region 已撤销、
+    /// 或该 region 没匹配到唯一 item 的，一律不出现。
+    pub(crate) fn host_geometries_locked(
         &self,
         document: &super::document::DocumentSession,
-    ) -> Option<crate::host::geometry::BoundHostGeometry> {
+    ) -> Vec<crate::host::geometry::BoundHostGeometry> {
         if self.is_closed()
             || !document.is_alive()
             || !self
                 .editor_document()
                 .is_ok_and(|current| std::ptr::eq(Arc::as_ptr(&current), document))
         {
-            return None;
+            return Vec::new();
         }
-        let cached = self.host_geometry.lock().unwrap().clone()?;
+        let Some(cached) = self.host_geometry.lock().unwrap().clone() else {
+            return Vec::new();
+        };
         if cached.model != document.revision.load(Ordering::Acquire)
             || cached.scope != document.scope_revision.load(Ordering::Acquire)
         {
-            return None;
+            return Vec::new();
         }
-        let keys = self.host_assigned_regions(document).ok()?;
-        let value = cached.value.ok()?;
-        if keys.as_slice() != [value.region_key] {
-            return None;
+        let Ok(keys) = self.host_assigned_regions(document) else {
+            return Vec::new();
+        };
+        match cached.value {
+            Ok(bound) => bound
+                .into_iter()
+                .filter(|entry| keys.contains(&entry.region_key))
+                .collect(),
+            Err(_) => Vec::new(),
         }
-        Some(value)
     }
     /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
     pub(crate) fn refresh_reaper_transport(&self) {
@@ -2102,6 +2251,9 @@ impl ExtensionOwner {
         }
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
+        // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
+        let mut item_count = 0usize;
+        let mut claimed_items = 0usize;
         for owner in stamp.0.renderer_owners() {
             if !allowed() {
                 return;
@@ -2134,21 +2286,33 @@ impl ExtensionOwner {
                 }
                 let ids = stamp.0.clip_ids.lock().unwrap();
                 let timeline = stamp.0.timeline.lock().unwrap();
+                item_count += track.items.len();
                 for candidate in stamp.0.renderer_owners() {
-                    if let Some(bound) = candidate.host_geometry_metadata_locked(&stamp.0) {
-                        if track
+                    // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
+                    // 任一 item 被它的某个 region 绑定，就把轨道身份认领到那个 clip 上。
+                    let matched =
+                        candidate
+                            .host_geometries_locked(&stamp.0)
+                            .into_iter()
+                            .find(|bound| {
+                                track
+                                    .items
+                                    .iter()
+                                    .any(|item| item.geometry.item_id == bound.geometry.item_id)
+                            });
+                    if let Some(bound) = matched {
+                        claimed_items += track
                             .items
                             .iter()
-                            .any(|item| item.geometry.item_id == bound.geometry.item_id)
-                        {
-                            if let Some(id) = ids.get(&bound.region_key) {
-                                if let Some(clip) = timeline
-                                    .as_ref()
-                                    .and_then(|t| t.clips.iter().find(|c| &c.id == id))
-                                {
-                                    track.id = clip.track_id.clone();
-                                    break;
-                                }
+                            .filter(|item| item.geometry.item_id == bound.geometry.item_id)
+                            .count();
+                        if let Some(id) = ids.get(&bound.region_key) {
+                            if let Some(clip) = timeline
+                                .as_ref()
+                                .and_then(|t| t.clips.iter().find(|c| &c.id == id))
+                            {
+                                track.id = clip.track_id.clone();
+                                break;
                             }
                         }
                     }
@@ -2183,6 +2347,16 @@ impl ExtensionOwner {
         *stamp.0.ui_tracks.lock().unwrap() = tracks;
         *stamp.0.ui_inventory_stamp.lock().unwrap() = Some(token);
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
+        // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
+        if item_count > 0 {
+            log::info!(
+                "[ara] host inventory: {} track(s), {} item(s), {} claimed by an assigned region",
+                stamp.0.ui_tracks.lock().unwrap().len(),
+                item_count,
+                claimed_items
+            );
+        }
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
     pub(crate) fn refresh_reaper_state_for_model(&self) {
@@ -2223,7 +2397,13 @@ impl ExtensionOwner {
         if !authorized() {
             return;
         }
-        let mut geometry = self.reaper_geometry();
+        // 唯一 region 时走强身份路径（宿主直接 parent take）；多 region（folder 轨上
+        // 的 FX）结构上不可能有直接 parent，只能逐 region 按几何唯一匹配。
+        let mut geometry = if stamp.3.len() == 1 {
+            self.reaper_geometry().map(|bound| vec![bound])
+        } else {
+            self.reaper_geometries()
+        };
         let after = host
             .as_ref()
             .and_then(|host| host.geometry_revision(authorized).ok());
@@ -2254,13 +2434,20 @@ impl ExtensionOwner {
                     })
             });
             if delegated && changed && geometry.is_ok() {
-                let lengths = |value: &crate::host::geometry::BoundHostGeometry| {
-                    [
-                        value.geometry.fade_in_sec,
-                        value.geometry.fade_out_sec,
-                        value.geometry.auto_fade_in_sec,
-                        value.geometry.auto_fade_out_sec,
-                    ]
+                // 比较**整组**的 fade 长度：多 region 时只看第一个会漏掉后续 region
+                // 的 fade 变化，导致委托端改动不触发重渲染。
+                let lengths = |value: &[crate::host::geometry::BoundHostGeometry]| {
+                    value
+                        .iter()
+                        .flat_map(|entry| {
+                            [
+                                entry.geometry.fade_in_sec,
+                                entry.geometry.fade_out_sec,
+                                entry.geometry.auto_fade_in_sec,
+                                entry.geometry.auto_fade_out_sec,
+                            ]
+                        })
+                        .collect::<Vec<_>>()
                 };
                 prepare_fades = cached
                     .as_ref()
@@ -2270,17 +2457,20 @@ impl ExtensionOwner {
                     stamp.0.render_epoch.fetch_add(1, Ordering::AcqRel);
                 }
             }
+            // 门控是**实例级**的：单 region 时等同于该 item 的 mute（与既有语义一致）；
+            // 多 region 时只有全部绑定 item 都静音才静音整组 —— 一个子轨静音不该让
+            // 整组哑掉。逐 item 的独立门控需要渲染路径支持，见方案 Task 5.2 的已知边界。
             self.host_item_muted.store(
-                geometry.as_ref().is_ok_and(|bound| bound.geometry.muted),
+                geometry
+                    .as_ref()
+                    .is_ok_and(|bound| !bound.is_empty() && bound.iter().all(|e| e.geometry.muted)),
                 Ordering::Release,
             );
             if let Ok(bound) = &geometry {
-                stamp
-                    .0
-                    .region_items
-                    .lock()
-                    .unwrap()
-                    .insert(bound.region_key, bound.geometry.item_id.clone());
+                let mut items = stamp.0.region_items.lock().unwrap();
+                for entry in bound {
+                    items.insert(entry.region_key, entry.geometry.item_id.clone());
+                }
             }
             *cached = Some(CachedHostGeometry {
                 model: stamp.1,
@@ -3073,10 +3263,33 @@ impl ExtensionOwner {
             timeline.bpm = tempo;
         }
         timeline.clips.retain(|clip| ids.contains(&clip.id));
-        // 零分配也只能看零轨道，不能意外把整张文档交给空renderer编辑。
-        timeline
-            .tracks
-            .retain(|track| timeline.clips.iter().any(|clip| clip.track_id == track.id));
+        // 被分配了 sequence、当前却没有 clip 的轨道仍然留下：空 folder 轨、只有静音
+        // item 或 PCM 尚未授权的子轨都属此类，而它们本该是**参数根** —— 与
+        // `add_group_view_tracks` 的既有口径一致（空父轨也能承载参数组算法）。
+        //
+        // 【为什么这不会泄漏无关轨道】这条边只来自宿主 `createRegionSequence` 的真实
+        // 键（`sequence_track_index`），且只取**本 owner 已分配**的那些 sequence。
+        // 绝不按轨名/位置/序号凭空造轨道。
+        let assigned_sequences = self
+            .sequences
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let empty_roots = document
+            .sequence_track_index
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| assigned_sequences.contains(key))
+            .filter_map(|(_, index)| timeline.tracks.get(*index).map(|track| track.id.clone()))
+            .collect::<BTreeSet<_>>();
+        timeline.tracks.retain(|track| {
+            timeline.clips.iter().any(|clip| clip.track_id == track.id)
+                || empty_roots.contains(&track.id)
+        });
         Ok(timeline)
     }
 
@@ -3452,5 +3665,293 @@ impl ExtensionOwner {
             keys.len()
         );
         Ok(())
+    }
+}
+
+/// 多 region 几何匹配的纯函数回归。
+///
+/// 【为什么单独测这一层】`reaper_geometries` 里真正有风险的不是宿主调用，而是
+/// "哪条 region 对应哪个 item"的判定：ARA 侧没有这条边，只能按几何比对，而后续
+/// 所有宿主写回都沿这条边定位对象。所以唯一性判据必须被钉死。
+#[cfg(test)]
+mod region_geometry_match_tests {
+    use super::*;
+    use crate::ara::AraPlaybackRegion;
+    use crate::host::geometry::HostClipGeometry;
+
+    fn candidate(
+        item: &str,
+        start_sec: f64,
+        duration_sec: f64,
+        source_start_sec: f64,
+        playback_rate: f64,
+    ) -> HostClipGeometry {
+        HostClipGeometry {
+            item_id: item.into(),
+            take_id: format!("{item}-take"),
+            start_sec,
+            source_start_sec,
+            duration_sec,
+            snap_offset_sec: 0.,
+            playback_rate,
+            preserve_pitch: true,
+            channel_mode: 0,
+            take_pitch: 0.,
+            item_timebase: 0,
+            auto_stretch: false,
+            muted: false,
+            item_gain: 1.,
+            group_id: 0,
+            take_gain: 1.,
+            markers: Vec::new(),
+            fade_in_sec: 0.,
+            fade_out_sec: 0.,
+            fade_in_shape: 0.,
+            fade_out_shape: 0.,
+            fade_in_dir: 0.,
+            fade_out_dir: 0.,
+            fade_in_dir_new: 0.,
+            fade_out_dir_new: 0.,
+            fade_in_dir2_new: 0.,
+            fade_out_dir2_new: 0.,
+            fade_axes_new: None,
+            auto_fade_in_sec: 0.,
+            auto_fade_out_sec: 0.,
+        }
+    }
+
+    fn region(
+        start_in_playback_time: f64,
+        duration_in_playback_time: f64,
+        start_in_modification_time: f64,
+        duration_in_modification_time: f64,
+    ) -> AraPlaybackRegion {
+        AraPlaybackRegion {
+            start_in_playback_time,
+            duration_in_playback_time,
+            start_in_modification_time,
+            duration_in_modification_time,
+            ..Default::default()
+        }
+    }
+
+    /// 四项全相容才绑定：位置、时长、源内起点、速率。
+    #[test]
+    fn a_region_binds_to_the_item_matching_all_four_quantities() {
+        let regions = [
+            candidate("item-a", 0., 2., 0., 1.),
+            candidate("item-b", 4., 2., 0., 1.),
+        ];
+        let bound = unique_geometry_for_region(&region(4., 2., 0., 2.), &regions).unwrap();
+        assert_eq!(bound.item_id, "item-b");
+    }
+
+    /// 同一位置的两条子轨各有一个 item：只比时间窗会歧义，源内起点把两者分开。
+    #[test]
+    fn the_source_window_disambiguates_items_at_the_same_playback_position() {
+        let regions = [
+            candidate("trimmed-head", 0., 2., 1., 1.),
+            candidate("full", 0., 2., 0., 1.),
+        ];
+        let bound = unique_geometry_for_region(&region(0., 2., 1., 2.), &regions).unwrap();
+        assert_eq!(bound.item_id, "trimmed-head");
+    }
+
+    /// 速率也是判据：同位置同时长的两个 item，拉伸比不同。
+    #[test]
+    fn the_playback_rate_disambiguates_stretched_items() {
+        let regions = [
+            candidate("stretched", 0., 2., 0., 2.),
+            candidate("unstretched", 0., 2., 0., 1.),
+        ];
+        let bound = unique_geometry_for_region(&region(0., 2., 0., 4.), &regions).unwrap();
+        assert_eq!(bound.item_id, "stretched");
+    }
+
+    /// 四项完全相同的两个 item ⇒ 歧义 ⇒ **不绑定**（而不是取第一个）。
+    #[test]
+    fn ambiguous_candidates_are_refused_rather_than_guessed() {
+        let regions = [
+            candidate("take-one", 0., 2., 0., 1.),
+            candidate("take-two", 0., 2., 0., 1.),
+        ];
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions).is_none());
+    }
+
+    /// 没有候选、或候选都对不上时返回 None，绝不退回"第一个 item"。
+    #[test]
+    fn a_region_without_a_matching_item_stays_unbound() {
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &[]).is_none());
+        let regions = [candidate("elsewhere", 10., 2., 0., 1.)];
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions).is_none());
+    }
+
+    /// 非有限的播放时长不产生"恰好匹配 NaN"的假绑定。
+    #[test]
+    fn a_region_with_a_degenerate_duration_never_binds() {
+        let regions = [candidate("item", 0., 2., 0., 1.)];
+        assert!(unique_geometry_for_region(&region(0., 0., 0., 2.), &regions).is_none());
+        assert!(unique_geometry_for_region(&region(0., f64::NAN, 0., 2.), &regions).is_none());
+    }
+}
+
+/// `assigned_timeline` 的保留规则回归。
+#[cfg(test)]
+mod assigned_timeline_tests {
+    use super::*;
+
+    /// 空 folder 轨 / 只有静音 item 的子轨仍须作为参数根存在。
+    ///
+    /// 【回归】旧实现先按 region 筛 clip，再丢掉**所有**没有 clip 的轨道 —— 于是一个
+    /// 被宿主分配了 sequence、当前却没有 clip 的轨道会整条消失，用户看到"轨道没了"。
+    /// 这与 `add_group_view_tracks` 的既有口径（空父轨也能承载参数组算法）直接矛盾。
+    #[test]
+    fn a_sequence_without_clips_still_yields_a_parameter_root() {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let owner = &owners[0];
+        {
+            let mut timeline = document.timeline.lock().unwrap();
+            let timeline = timeline.as_mut().unwrap();
+            timeline.tracks.push(
+                serde_json::from_value(
+                    serde_json::json!({"id":"empty","name":"empty folder","order":2}),
+                )
+                .unwrap(),
+            );
+            assert_eq!(timeline.tracks.len(), 3);
+        }
+        let sequence_key = 4242_u64;
+        document
+            .sequence_regions
+            .lock()
+            .unwrap()
+            .insert(sequence_key, std::collections::HashSet::new());
+        document
+            .sequence_track_index
+            .lock()
+            .unwrap()
+            .insert(sequence_key, 2);
+        owner
+            .sequences
+            .lock()
+            .unwrap()
+            .insert(owner.role.load(Ordering::Acquire), vec![sequence_key]);
+
+        let timeline = owner.assigned_timeline(&document).unwrap();
+        assert!(
+            timeline.tracks.iter().any(|track| track.id == "empty"),
+            "被分配 sequence 的空轨道必须留下：{:?}",
+            timeline.tracks.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+        assert_eq!(timeline.clips.len(), 1, "空轨道不带来任何 clip");
+
+        // 反向：**没有**被分配 sequence 的空轨道仍然要被剔除，否则等于把整张文档
+        // 交给了空 renderer（旧的"零分配只能看零轨道"约束不能被这次改动放宽）。
+        document
+            .sequence_track_index
+            .lock()
+            .unwrap()
+            .remove(&sequence_key);
+        let timeline = owner.assigned_timeline(&document).unwrap();
+        assert!(
+            !timeline.tracks.iter().any(|track| track.id == "empty"),
+            "未分配的空轨道不得留下"
+        );
+        document.close();
+    }
+}
+
+/// `reaper_geometries`（多 region 入口）的端到端回归。
+///
+/// 单 region 走强身份路径，所以这条入口只有在"一个 FX 管一组 region"时才被用到 ——
+/// 正是 folder 轨的场景。这里用真实宿主夹具驱动它，覆盖候选收集、逐 region 匹配、
+/// 唯一性判据与重复认领丢弃。
+#[cfg(test)]
+mod reaper_geometries_tests {
+    /// 把某条 region 调成与夹具 item 相容的窗口。
+    ///
+    /// 夹具的 item 几何是 `D_POSITION=1 / D_LENGTH=4 / D_STARTOFFS=0 / D_PLAYRATE=0.5`。
+    fn align_with_fixture_item(region: &mut crate::ara::AraPlaybackRegion) {
+        region.start_in_playback_time = 1.;
+        region.duration_in_playback_time = 4.;
+        region.start_in_modification_time = 0.;
+        region.duration_in_modification_time = 2.;
+    }
+
+    fn fixture_host() -> Box<crate::host::reaper::ReaperFixture> {
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        host
+    }
+
+    /// 一组 region 里能对上的那些被绑定，对不上的保持未绑定（不猜、不兜底）。
+    #[test]
+    fn only_the_regions_matching_a_host_item_are_bound() {
+        let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let owner = &owners[0];
+        let first = (&*ids[0] as *const u8) as u64;
+        let second = (&*ids[1] as *const u8) as u64;
+        // 夹具只有一个 item，先让它与 first 相容；second 留在原位（对不上）。
+        {
+            let mut regions = document.regions.lock().unwrap();
+            align_with_fixture_item(regions.get_mut(&first).unwrap());
+        }
+        // 把第二条 region 也分配给同一个 owner：这才是"一个实例管一组 region"。
+        let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        unsafe {
+            let ext = &*raw;
+            ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+                ext.playbackRendererRef,
+                second as *mut _,
+            );
+        }
+        let host = fixture_host();
+        unsafe {
+            owner.bind_reaper_host(host.context());
+        }
+        let bound = owner.reaper_geometries().expect("至少一条 region 必须绑定");
+        assert_eq!(bound.len(), 1, "对不上的 region 不得被绑定");
+        assert_eq!(bound[0].region_key, first);
+        assert!(bound[0].geometry.item_id.starts_with('{'));
+        document.close();
+    }
+
+    /// 两条 region 都指向同一个 item ⇒ 全部丢弃，绝不留下一个"看起来能用"的绑定。
+    ///
+    /// 这是"一个 item 只归一个 region"的判据：留下任何一个，后续写回都会指向同一
+    /// 对象，两次编辑互相覆盖且不报错。
+    #[test]
+    fn two_regions_claiming_one_item_are_both_dropped() {
+        let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let owner = &owners[0];
+        let first = (&*ids[0] as *const u8) as u64;
+        let second = (&*ids[1] as *const u8) as u64;
+        {
+            let mut regions = document.regions.lock().unwrap();
+            align_with_fixture_item(regions.get_mut(&first).unwrap());
+            align_with_fixture_item(regions.get_mut(&second).unwrap());
+        }
+        let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        unsafe {
+            let ext = &*raw;
+            ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+                ext.playbackRendererRef,
+                second as *mut _,
+            );
+        }
+        let host = fixture_host();
+        unsafe {
+            owner.bind_reaper_host(host.context());
+        }
+        let error = owner
+            .reaper_geometries()
+            .expect_err("重复认领必须整组丢弃，不能留一个绑定");
+        assert!(error.contains("no assigned ARA region matched"), "{error}");
+        document.close();
     }
 }

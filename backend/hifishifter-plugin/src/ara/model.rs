@@ -248,14 +248,27 @@ impl ModelHandle {
                 {
                     let items = self.session.region_items.lock().unwrap();
                     let mut ids = self.session.clip_ids.lock().unwrap();
+                    let mut claimed = 0usize;
                     for clip in &mut timeline.clips {
                         if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
                             if let Some(item) = items.get(key) {
                                 let key = *key;
                                 clip.id = format!("ara-item-{item}");
                                 ids.insert(key, clip.id.clone());
+                                claimed += 1;
                             }
                         }
+                    }
+                    // 用户报障时最需要的一行：多少 clip 认领到了宿主 item GUID。
+                    // 认领不到的会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
+                    // 这就是"子轨道 Item 没有变成真 Clip"的直接读数。
+                    if claimed < timeline.clips.len() {
+                        log::warn!(
+                            "[ara] {} of {} clip(s) claimed a host item GUID; the rest keep \
+                             ara-clip ids and will not survive host inventory presentation",
+                            claimed,
+                            timeline.clips.len()
+                        );
                     }
                 }
                 {
@@ -407,6 +420,12 @@ impl RegionSequences for ModelHandle {
                 .lock()
                 .unwrap()
                 .insert(key, HashSet::new());
+            // 记录 sequence → 轨道下标：空 sequence（无 region）也要能被认成参数根。
+            self.session
+                .sequence_track_index
+                .lock()
+                .unwrap()
+                .insert(key, index);
         }
         Ok(index)
     }

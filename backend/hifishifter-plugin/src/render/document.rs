@@ -31,6 +31,12 @@ pub(crate) struct DocumentSession {
     renderers: Mutex<Vec<RendererLease>>,
     pub generation: Mutex<Option<ApiGeneration>>,
     pub sequence_regions: Mutex<HashMap<u64, HashSet<u64>>>,
+    /// sequence 真实键 → 扁平 region sequence 下标（= 映射层轨道下标）。
+    ///
+    /// 只用于把"被分配了 sequence、当前却没有 clip"的轨道认出来（空 folder 轨、
+    /// 只有静音/待授权 item 的子轨）—— 它们仍应是参数根。**不是**按名字/位置猜轨道：
+    /// 这条边来自宿主 `createRegionSequence` 的真实键。
+    pub sequence_track_index: Mutex<HashMap<u64, usize>>,
     pub regions: Mutex<HashMap<u64, crate::ara::AraPlaybackRegion>>,
     pub clip_ids: Mutex<HashMap<u64, String>>,
     pub region_items: Mutex<HashMap<u64, String>>,
@@ -537,6 +543,7 @@ impl DocumentSession {
             // companion guard 随 renderer 释放，禁止继续借用即将销毁的 controller。
         }
         self.sequence_regions.lock().unwrap().clear();
+        self.sequence_track_index.lock().unwrap().clear();
         self.regions.lock().unwrap().clear();
         self.clip_ids.lock().unwrap().clear();
         self.region_items.lock().unwrap().clear();

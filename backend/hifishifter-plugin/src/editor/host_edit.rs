@@ -787,9 +787,7 @@ mod tests {
         execute(&owner, plan, || document.is_alive()).unwrap();
         owner.refresh_reaper_transport();
         assert_eq!(
-            owner
-                .host_geometry_metadata()
-                .unwrap()
+            owner.host_geometry_metadata().unwrap()[0]
                 .geometry
                 .snap_offset_sec,
             2. / 44100.
@@ -800,9 +798,7 @@ mod tests {
         host.set_value("D_SNAPOFFSET", -1. / 44100.);
         owner.refresh_reaper_transport();
         assert_eq!(
-            owner
-                .host_geometry_metadata()
-                .unwrap()
+            owner.host_geometry_metadata().unwrap()[0]
                 .geometry
                 .snap_offset_sec,
             -1. / 44100.
