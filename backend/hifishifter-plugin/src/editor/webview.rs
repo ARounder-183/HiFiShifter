@@ -1094,6 +1094,18 @@ fn configure_browser(
                     Ok(serde_json::json!({"ok":true,"path":output}))
                 })()
             },
+            // 记事本导出 / 附件另存为：需要系统保存对话框（HWND 只有 UI 线程有），
+            // 因此不走 actor dispatch。
+            Some(command @ ("notebook_export_document"|"notebook_save_asset_as"))=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                (||->Result<serde_json::Value,String>{
+                    // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let result=super::notebook::export_with_dialog(hwnd,command,&request["args"])?;
+                    if link.authorize(&document)?!=lease {return Err("notebook dialog editor lease changed".into());}
+                    Ok(result)
+                })()
+            },
             Some(command @ ("play_original"|"play_synthesized"|"stop_audio"))=>{
                 // host callback可能同步重入；调用期间不持BrowserState/会话锁。
                 let link=state.borrow().link.clone();

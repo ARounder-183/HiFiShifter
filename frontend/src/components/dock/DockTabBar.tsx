@@ -18,6 +18,7 @@ import {
 } from "@radix-ui/react-icons";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { dawControlledReason, isPluginMode } from "../../services/hostCapabilities";
 import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
 import {
     closeForm,
@@ -325,7 +326,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         // 只有**可拆**的窗体才给出这个入口 —— 否则用户会点到一个
                         // 开不出来的窗口（时间轴带着 WebGL 上下文，跨窗口必须重新
                         // 挂载，代价不可接受）。面板的可拆性是派生的（全体成员可
-                        // 拆才可拆），走同一份解析。
+                        // 拆才可拆），走同一份依赖解析。
                         synthesizePanelDefinition(layout, menu.formId)?.detachable
                             ? {
                                   labelKey: "dock_detach_to_window",
@@ -336,6 +337,11 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                           menu.formId,
                                       );
                                   },
+                                  // 插件里没有 Tauri 窗口 API：拆出去**必然**失败，
+                                  // 而失败路径只留一行日志、用户看到的是面板原地不动。
+                                  // 保留入口并写明原因，比"点了没反应"或"悄悄消失"都好。
+                                  disabled: isPluginMode(),
+                                  tooltip: isPluginMode() ? dawControlledReason() : undefined,
                               }
                             : null
                     }

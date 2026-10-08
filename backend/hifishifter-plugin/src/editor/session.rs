@@ -267,6 +267,10 @@ impl EditorSession {
                 hifishifter_kernel::state::model::normalize_scale_key(&musical.base_scale);
             project.use_custom_scale = musical.use_custom_scale && musical.custom_scale.is_some();
             project.custom_scale = musical.custom_scale.map(|scale| scale.normalized());
+            // 记事本正文同理：插件没有工程文件，正文存在插件自己的数据目录里
+            // （见 `editor/notebook.rs`）。不在这里播种的话，`get_project_meta`
+            // 会回报空正文，前端面板一片空白 —— 而磁盘上其实有内容。
+            project.notes_markdown = super::notebook::store().notes();
             project
         };
         let session = Arc::new(Self {

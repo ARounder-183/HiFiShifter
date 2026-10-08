@@ -6,6 +6,7 @@ mod events;
 mod host_clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
+mod notebook;
 pub(crate) mod parameter_atlas;
 mod plugin_diagnostics;
 pub(crate) mod private_groups;

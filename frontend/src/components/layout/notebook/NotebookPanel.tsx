@@ -20,6 +20,7 @@ import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@rad
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
+import { isPluginMode } from "../../../services/hostCapabilities";
 import {
     setNotebookAssetIndex,
     setNotebookMode,
@@ -782,14 +783,20 @@ export function NotebookPanel() {
                     }
                     if (!/^https?:/i.test(href)) return;
                     void (async () => {
-                        try {
-                            const { openUrl } = await import("@tauri-apps/plugin-opener");
-                            await openUrl(href);
-                        } catch {
-                            // 非 Tauri 环境（浏览器调试）没有 opener：退回到
-                            // 复制地址，至少让用户能自己粘进浏览器。
-                            await copyTextToClipboard(href);
+                        // 插件里没有 Tauri opener（而且原生的 `NavigationStarting`
+                        // 会拦下一切外链导航），所以直接走复制 —— 与 `AboutDialog`
+                        // 的插件分支同一条策略，不浪费一次注定失败的调用。
+                        if (!isPluginMode()) {
+                            try {
+                                const { openUrl } = await import("@tauri-apps/plugin-opener");
+                                await openUrl(href);
+                                return;
+                            } catch {
+                                // 非 Tauri 环境（浏览器调试）没有 opener：退回到
+                                // 复制地址，至少让用户能自己粘进浏览器。
+                            }
                         }
+                        await copyTextToClipboard(href);
                     })();
                 };
                 // 复制的是**归一化后**的地址：与正文里渲染出来的 href 一致。

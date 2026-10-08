@@ -22,13 +22,16 @@ function extractPluginHandlers(source: string): string[] {
         /(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g,
     ))
         result.add(match[1]);
-    // UI 线程的整字面量分支：`Some("cmd") => ...`。
+    // UI 线程的整字面量分支：`Some("cmd") => ...` 与 `Some(command @ ("a"|"b")) => ...`。
     //
-    // 【为什么要单独一条】`create_host_track` 这类命令在 UI 线程直接处理（要拿宿主
-    // 与 Undo 请求上下文），不进 actor match，因此上面两条正则都抓不到它。只认后随
-    // `=>` 的形式，避免把 `Some("continuous")` 这种**取值**当成命令名。
-    for (const match of source.matchAll(/\bSome\s*\(\s*"([a-z_0-9]+)"\s*\)\s*=>/g))
-        result.add(match[1]);
+    // 【为什么要单独一条】`create_host_track` / 记事本导出这类命令在 UI 线程直接
+    // 处理（要拿宿主、Undo 上下文或系统对话框），不进 actor match，因此上面两条
+    // 正则都抓不到它们。只认后随 `=>` 的形式，避免把 `Some("continuous")` 这种
+    // **取值**当成命令名。
+    for (const match of source.matchAll(
+        /\bSome\s*\(\s*(?:command\s*@\s*)?\(?\s*((?:"[a-z_0-9]+"\s*\|\s*)*"[a-z_0-9]+")\s*\)?\s*\)\s*=>/g,
+    ))
+        for (const literal of match[1].matchAll(/"([a-z_0-9]+)"/g)) result.add(literal[1]);
     return [...result];
 }
 

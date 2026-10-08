@@ -493,6 +493,54 @@ pub(super) fn dispatch(
         }
         "get_timeline_state_lite" => payload(session, true),
         "get_project_meta" => Ok(payload(session, true)?["project"].clone()),
+        // vslib 是闭源库，插件包**刻意不随附**（见 `hifishifter-plugin/Cargo.toml` 的
+        // 说明）。此前这条落到 `Command unavailable`，于是每次启动都有一次失败
+        // invoke，前端只能把 vslib 显示成"未知"。如实回答"没编进来 + 为什么"，
+        // 算法列表才能按能力过滤掉它。
+        "get_vslib_status" => Ok(json!({
+            "compiled": false,
+            "available": false,
+            "version": serde_json::Value::Null,
+            "error": "vslib is not bundled with the ARA plugin",
+        })),
+        // 记事本正文：独立 App 把它写进工程文件；插件没有工程文件，写进插件自己的
+        // 数据目录（见 `editor/notebook.rs`）。此前这条落到 `Command unavailable`，
+        // 而前端把失败吞掉 —— 症状是"在插件里写的笔记重载即消失"。
+        //
+        // 【为什么不登记为撤销步】插件的撤销栈只记时间轴与参数；把记事本塞进去会
+        // 让"撤销"在两套权威之间跳。用户要撤销的是编辑动作，不是打字。
+        "set_project_notes" => {
+            let markdown = input["notesMarkdown"].as_str().unwrap_or_default();
+            super::notebook::store().set_notes(markdown)?;
+            session.project.lock().unwrap().notes_markdown = markdown.to_owned();
+            payload(session, true)
+        }
+        "seal_project_notes_history" => Ok(super::notebook::seal_notes_history()),
+        "notebook_put_asset" => {
+            let result = super::notebook::store().put_asset(
+                input["assetId"].as_str().unwrap_or_default(),
+                input["kind"].as_str().unwrap_or("image"),
+                input["ext"].as_str().unwrap_or("bin"),
+                input["mime"].as_str(),
+                input["dataBase64"].as_str().unwrap_or_default(),
+                input.get("meta").cloned().filter(|v| !v.is_null()),
+            )?;
+            Ok(result)
+        }
+        "notebook_read_asset" => {
+            Ok(super::notebook::store().read_asset(input["assetId"].as_str().unwrap_or_default()))
+        }
+        "notebook_list_assets" => Ok(super::notebook::store().list_assets()),
+        "notebook_remove_asset" => Ok(
+            super::notebook::store().remove_asset(input["assetId"].as_str().unwrap_or_default())
+        ),
+        "notebook_prune_assets" => Ok(super::notebook::store().prune_assets()),
+        // 纯文件读取：不碰工程状态，也不需要宿主。
+        "notebook_read_file_base64" => Ok(super::notebook::read_file_base64(
+            input["path"].as_str().unwrap_or_default(),
+            input["maxBytes"].as_u64(),
+        )),
+        "notebook_read_clipboard_image" => Ok(super::notebook::read_clipboard_image()),
         "get_runtime_info" => {
             let timeline = payload(session, true)?;
             let (_, playing) = session.transport();
