@@ -1,6 +1,8 @@
 // 宿主淡化只读显示：用户允许HiFiShifter自己的示意曲线；普通fade声音仍由宿主负责一次。
 import type { HostFadeMetadata } from "../../../types/api";
-import { fadeGainSigned } from "./reaperFade";
+import { defaultFadeDirFor, fadeGainSigned, SHAPE_LABEL_KEYS } from "./reaperFade";
+import { hostFadePresetForAxes } from "./hostFadeAxes";
+import { formatTemplate } from "../../../i18n/format";
 
 /** 热路径复用同一函数，非法轴退零，不为每个波形采样创建闭包。 */
 function visualAxis(value: number): number {
@@ -37,7 +39,12 @@ export function visualFadeGain(
     if (metadata.curve_mode !== "reaper_new") return defaultHostFadeGain(mode, progress);
     const curvature = visualAxis(mode === "out" ? metadata.out_curvature : metadata.in_curvature);
     const s = visualAxis(mode === "out" ? metadata.out_s : metadata.in_s);
-    if (curvature === 0 && s === 0) return defaultHostFadeGain(mode, progress);
+    // 落在预设上：用该预设自己的曲线（含它在该侧的重置曲率）。
+    // 【为什么匹配用的是夹紧后的值】曲线也按夹紧后的值画，两边用同一对数字才不会
+    // 出现"画的是夹紧后的曲线、认的却是另一个预设"。
+    const preset = hostFadePresetForAxes(curvature, s);
+    if (preset !== null)
+        return fadeGainSigned(preset, defaultFadeDirFor(preset, mode === "out"), mode, progress);
     // 本应用既有幂曲率与S族做有界混合；这是HFS自身视觉定义，不是反推的REAPER公式。
     const power = fadeGainSigned(0, curvature, mode, progress);
     if (s === 0) return power;
@@ -47,6 +54,9 @@ export function visualFadeGain(
 
 /**
  * 直接报告宿主两个原始轴；问号表示版本语义不可用，不沿用过时shape名称。
+ *
+ * 落在七个预设上时额外附上预设名（`c=0.50 S=0.00 (Fast Start)`）—— 那张映射是
+ * 实测的（`hostFadeAxes.ts`），所以说得出名字；不在预设上就不猜，只报原始读数。
  *
  * `t` 只用于"轴不可用"这一种状态：`c=`/`S=` 是数值读数，语言中立，不进词表。
  * 品牌名 `HiFiShifter` 同理保持原样。
@@ -60,5 +70,9 @@ export function hostFadeLabel(
     if (metadata.curve_mode === "unknown") return t("fade_info_host_unknown");
     const curvature = isOut ? metadata.out_curvature : metadata.in_curvature;
     const s = isOut ? metadata.out_s : metadata.in_s;
-    return `REAPER c=${curvature.toFixed(2)} S=${s.toFixed(2)}`;
+    const reading = `REAPER c=${curvature.toFixed(2)} S=${s.toFixed(2)}`;
+    const preset = hostFadePresetForAxes(curvature, s);
+    if (preset === null) return reading;
+    const name = t(SHAPE_LABEL_KEYS[preset] ?? "fade_shape_linear");
+    return formatTemplate(t("common_parenthetical"), { value: reading, note: name });
 }

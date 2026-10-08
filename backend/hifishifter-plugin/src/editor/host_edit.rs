@@ -123,9 +123,11 @@ fn requests_fade_axes(patch: &ClipStatePatch) -> bool {
 /// 因此：
 /// - 版本读不出来（`None`）→ 拒绝，不猜；
 /// - 旧轴宿主 + S 参数 → 拒绝（S 只存在于新轴，做不到的事不静默丢弃）；
-/// - 新轴宿主 + 形状预设 → 拒绝。≥7.81 的形状由两个**连续轴**决定，而
-///   "预设 → (curvature, S)"的映射尚未校准（官方头文件没有公开 fade 求值函数，
-///   仓内也没有实测表）；界面据此在新轴宿主上隐藏预设按钮、只给连续滑杆。
+/// - 新轴宿主 + 形状预设 → **接受**。这里此前是拒绝的，理由是"预设 → (curvature, S)
+///   的映射尚未校准"；该映射现已实测落地（[`hifishifter_kernel::fade_axes`]，
+///   证据 `probe/ara/FADE-AXIS-FINDINGS.md`），所以预设按钮在新轴宿主上也能用。
+///   表外的形状号（越界或小数变体）仍然拒绝 —— 宿主会把它静默变成别的形状
+///   （实测写 `5.1` 读回 `SHAPE=7`）。
 fn validate_fade_axes(axes_new: Option<bool>, patch: &ClipStatePatch) -> Result<(), String> {
     if !requests_fade_axes(patch) {
         return Ok(());
@@ -135,10 +137,19 @@ fn validate_fade_axes(axes_new: Option<bool>, patch: &ClipStatePatch) -> Result<
         Some(false) if patch.fade_in_s.is_some() || patch.fade_out_s.is_some() => {
             Err("fade S parameter requires REAPER 7.81 or later".into())
         }
-        Some(true) if patch.fade_in_shape.is_some() || patch.fade_out_shape.is_some() => Err(
-            "REAPER 7.81+ derives the fade shape from the curvature/S axes;              the preset mapping is not calibrated yet"
-                .into(),
-        ),
+        Some(true) => {
+            for shape in [patch.fade_in_shape, patch.fade_out_shape]
+                .into_iter()
+                .flatten()
+            {
+                if hifishifter_kernel::fade_axes::host_fade_preset_axes(shape).is_none() {
+                    return Err(format!(
+                        "unknown fade shape {shape}: REAPER 7.81+ has no preset at that index"
+                    ));
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -593,14 +604,48 @@ pub(super) fn execute_managed(
                 // 直接写宿主轴。`fade_axes_new` 已在上面的校验里排除 `None`，
                 // 这里再取一次是为了拿到值（校验阶段只做了拒绝）。
                 if axes_new {
-                    for (value, name) in [
-                        (edit.patch.fade_in_dir, c"D_FADEINDIR_NEW"),
-                        (edit.patch.fade_out_dir, c"D_FADEOUTDIR_NEW"),
-                        (edit.patch.fade_in_s, c"D_FADEINDIR2_NEW"),
-                        (edit.patch.fade_out_s, c"D_FADEOUTDIR2_NEW"),
+                    // 【形状预设要写成**一对**分量】≥7.81 没有"形状号"这个可写状态，
+                    // 形状由 `(curvature, S)` 决定；七个预设各自对应一组确定的
+                    // 坐标（实测表见 `hifishifter_kernel::fade_axes`）。所以写形状
+                    // 就是同时写两个分量。
+                    //
+                    // 【同一次补丁里形状压过 dir】界面切换预设时会**同时**送
+                    // `fadeInShape` 与该形状的默认 `fadeInDir`（HFS 自己的曲率轴，
+                    // `DEFAULT_FADE_DIR_BY_SHAPE`）。但两套轴不是同一套参数化 ——
+                    // 实测旧 `D_FADEINDIR` 与新 `D_FADEINDIR_NEW` 互相读回都是被重
+                    // 映射过的值（`probe/ara/FADE-AXIS-FINDINGS.md`）。若让 HFS 的 dir
+                    // 覆盖预设的 curvature，用户点了"轻微凸"会得到线性
+                    // （预设 1 = `c 0.5`，而 HFS 给该形状的默认 dir 是 0）。
+                    // 曲率滑杆走的是**只带 dir、不带 shape** 的补丁，不受此规则影响。
+                    for (shape, dir, s, dir_key, s_key) in [
+                        (
+                            edit.patch.fade_in_shape,
+                            edit.patch.fade_in_dir,
+                            edit.patch.fade_in_s,
+                            c"D_FADEINDIR_NEW",
+                            c"D_FADEINDIR2_NEW",
+                        ),
+                        (
+                            edit.patch.fade_out_shape,
+                            edit.patch.fade_out_dir,
+                            edit.patch.fade_out_s,
+                            c"D_FADEOUTDIR_NEW",
+                            c"D_FADEOUTDIR2_NEW",
+                        ),
                     ] {
-                        if let Some(value) = value {
-                            target.set_item(name, value, &authorized)?;
+                        if let Some(shape) = shape {
+                            let (curvature, s_value) =
+                                hifishifter_kernel::fade_axes::host_fade_preset_axes(shape)
+                                    .ok_or_else(|| format!("unknown fade shape {shape}"))?;
+                            target.set_item(dir_key, curvature, &authorized)?;
+                            target.set_item(s_key, s_value, &authorized)?;
+                            continue;
+                        }
+                        if let Some(value) = dir {
+                            target.set_item(dir_key, value, &authorized)?;
+                        }
+                        if let Some(value) = s {
+                            target.set_item(s_key, value, &authorized)?;
                         }
                     }
                 } else {
@@ -840,9 +885,7 @@ mod tests {
             .iter()
             .any(|call| call.starts_with("write-item:D_FADEINDIR")
                 || call.starts_with("write-item:C_FADE")));
-        // 形状预设在新轴宿主上被拒绝、曲率与 S 落到新轴 —— 这两条由
-        // `fade_axis_validation_tests` 直接覆盖纯函数（夹具在这里既慢又脆）。
-        // 但曲率与 S 本身可以写，且落到新轴。
+        // 曲率与 S 落到新轴；形状预设现在也能写，落成 (curvature, S) 一对分量。
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
@@ -854,7 +897,32 @@ mod tests {
         let calls = host.calls();
         assert!(calls.contains(&"write-item:D_FADEINDIR_NEW".to_string()));
         assert!(calls.contains(&"write-item:D_FADEINDIR2_NEW".to_string()));
+        assert_eq!(host.item_value("D_FADEINDIR_NEW"), Some(0.5));
+        assert_eq!(host.item_value("D_FADEINDIR2_NEW"), Some(-0.25));
         // 旧轴不得被顺手改掉 —— 它不是权威值。
+        assert!(!calls.contains(&"write-item:D_FADEINDIR".to_string()));
+        assert!(!calls.contains(&"write-item:C_FADEINSHAPE".to_string()));
+
+        // 形状预设：写 `fadeInShape` 就是同时写两个新轴分量，值取自实测表
+        // （预设 3「陡峭凸」= `(curvature 1, S 0)`）。同一次补丁里带的 `fadeInDir`
+        // 不参与 —— 界面切预设时会顺手送 HFS 自己的默认 dir，那是**另一套参数化**，
+        // 让它覆盖 curvature 会让"陡峭凸"变成"陡峭凹"（预设 4 = `(-1, 0)`）。
+        host.set_value("D_FADEINDIR_NEW", -0.2);
+        host.set_value("D_FADEINDIR2_NEW", -0.3);
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"fadeInShape":3.,"fadeInDir":-1.}),
+            )
+            .unwrap();
+        assert_eq!(plan.edits[0].patch.fade_in_shape, Some(3.));
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        let calls = host.calls();
+        assert!(calls.contains(&"write-item:D_FADEINDIR_NEW".to_string()));
+        assert!(calls.contains(&"write-item:D_FADEINDIR2_NEW".to_string()));
+        assert_eq!(host.item_value("D_FADEINDIR_NEW"), Some(1.));
+        assert_eq!(host.item_value("D_FADEINDIR2_NEW"), Some(0.));
         assert!(!calls.contains(&"write-item:D_FADEINDIR".to_string()));
         assert!(!calls.contains(&"write-item:C_FADEINSHAPE".to_string()));
         document.close();
@@ -996,14 +1064,38 @@ mod fade_axis_validation_tests {
         assert!(error.contains("7.81"), "{error}");
     }
 
-    /// 新轴宿主（≥7.81）：曲率与 S 可以写，形状预设不行 —— 预设到
-    /// (curvature, S) 的映射尚未校准，不摆一个点了报错的按钮。
+    /// 新轴宿主（≥7.81）：曲率、S、以及**形状预设**都可以写。
+    ///
+    /// 形状此前被拒绝，理由是"预设 → (curvature, S) 的映射尚未校准"。该映射现已实测
+    /// 落地（`hifishifter_kernel::fade_axes`），所以预设按钮在新轴宿主上也能用。
     #[test]
-    fn continuous_axis_hosts_take_curvature_and_s_but_not_shape_presets() {
+    fn continuous_axis_hosts_take_curvature_s_and_shape_presets() {
         assert!(validate_fade_axes(Some(true), &curvature(0.5)).is_ok());
         assert!(validate_fade_axes(Some(true), &s_param(-0.25)).is_ok());
-        let error = validate_fade_axes(Some(true), &shape(3.)).expect_err("形状预设必须被拒绝");
-        assert!(error.contains("curvature/S"), "{error}");
+        for preset in 0..7 {
+            assert!(
+                validate_fade_axes(Some(true), &shape(preset as f64)).is_ok(),
+                "preset {preset}"
+            );
+        }
+    }
+
+    /// 表外的形状号必须拒绝。宿主对越界值不会报错，而是静默变成别的形状 ——
+    /// 实测写 `5.1` 读回 `SHAPE=7`（见 `probe/ara/FADE-AXIS-FINDINGS.md`）。
+    /// 宁可报错，也不要用户点了 A 得到 B。
+    #[test]
+    fn continuous_axis_hosts_reject_shapes_outside_the_measured_table() {
+        for value in [-1.0, 7.0, 1.1, 5.1, 6.5] {
+            let error =
+                validate_fade_axes(Some(true), &shape(value)).expect_err("表外形状必须被拒绝");
+            assert!(error.contains("unknown fade shape"), "{error}");
+        }
+    }
+
+    /// 旧轴宿主上形状仍是整数预设号，不走那张表 —— 旧轴宿主本来就有形状号。
+    #[test]
+    fn legacy_hosts_keep_accepting_plain_shape_indices() {
+        assert!(validate_fade_axes(Some(false), &shape(6.)).is_ok());
     }
 
     /// 任一淡变轴字段都会触发校验（不能只检查 `fade_in_*`）。

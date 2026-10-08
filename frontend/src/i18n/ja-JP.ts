@@ -2145,7 +2145,7 @@ export const jaJP = {
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:
-        "REAPER 7.81+ ではフェード形状を 2 つの連続軸で決めます。下のカーブ調整をお使いください",
+        "ホストのフェード軸バージョンを読み取れないため、形状プリセットは使えません。下のカーブ調整をお使いください",
     fade_info_host_curve_note: "HiFiShifter の表示用カーブ。音声は REAPER が処理します",
     fade_info_host_unknown: "REAPER カーブ不明",
     // ── インストーラー（NSIS）────────────────────────────────────────────

@@ -245,6 +245,14 @@ impl Fixture {
         self.values.borrow_mut().insert(name, value);
         self.change.set(self.change.get().wrapping_add(1));
     }
+    /// 读回夹具里某个字段的当前值（写口与 `set_value` 共用同一张表）。
+    ///
+    /// 【为什么需要】只看 `calls()` 能断言"写了哪个字段"，但断言不了"写成了什么值"。
+    /// 形状预设落成 `(curvature, S)` 这一对数值时，后者才是要钉住的东西。
+    /// 注意 `set_item` 只更新**已存在**的键，所以这里取不到的键等于"宿主写口忽略了它"。
+    pub fn item_value(&self, name: &'static str) -> Option<f64> {
+        self.values.borrow().get(name).copied()
+    }
     fn record(&self, name: impl Into<String>) {
         assert!(
             self.valid.get(),

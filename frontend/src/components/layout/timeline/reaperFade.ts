@@ -422,3 +422,21 @@ export function defaultFadeDirFor(shape: number, isOut: boolean): number {
         ? DEFAULT_FADE_DIR_BY_SHAPE[preset.id].out
         : DEFAULT_FADE_DIR_BY_SHAPE[preset.id].in_;
 }
+
+/**
+ * 形状 id → i18n 键（与 `ClipContextMenu` 的 `FADE_SHAPE_OPTIONS` 同源）。
+ *
+ * 【为什么放在本模块】它描述的是"预设叫什么"，属于预设元数据；而
+ * `fadeTooltipText.ts` 与 `hostFadeDisplay.ts` 都要用它来命名形状，其中
+ * `fadeTooltipText` 已经依赖 `hostFadeDisplay` —— 放在那边会成环。本模块是叶子，
+ * 两边都能引。
+ */
+export const SHAPE_LABEL_KEYS: Record<number, string> = {
+    0: "fade_shape_linear",
+    1: "fade_shape_fast_start",
+    2: "fade_shape_fast_end",
+    3: "fade_shape_fast_start_steep",
+    4: "fade_shape_fast_end_steep",
+    5: "fade_shape_slow_start_end",
+    6: "fade_shape_slow_start_end_steep",
+};

@@ -265,9 +265,10 @@ const SideColumn: React.FC<{
     onDirChange: (clipId: string, isOut: boolean, dir: number) => void;
     t: FadeLabelLookup;
 }> = ({ side, isOut, onShapeChange, onDirChange, t }) => {
-    // 【为什么新轴宿主上不摆预设】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
-    // 而"预设 → (curvature, S)"的映射尚未校准（官方头文件没有公开 fade 求值函数）。
-    // 摆七个按钮、点了报错，比不摆更糟 —— 只给曲率滑杆。
+    // 【新轴宿主上为什么也摆预设】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
+    // "预设 → (curvature, S)"的映射是实测出来的（`hostFadeAxes.ts`），七个预设各自
+    // 对应一组确定坐标，所以按钮照摆、点了由 Rust 侧写两个分量。
+    // 只有"宿主版本读不出来"时才退回曲率滑杆 —— 那时轴语义未知，不猜。
     const shapeSelectable = canSelectHostFadeShape();
     return (
         <div className="min-w-[210px]">

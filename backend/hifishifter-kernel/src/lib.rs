@@ -112,6 +112,7 @@ pub mod search;
 pub mod state;
 
 // ── 曲线与参数 ──────────────────────────────────────────────────────────────
+pub mod fade_axes;
 pub mod fade_curves;
 pub mod models;
 pub mod pitch_config;

@@ -32,6 +32,7 @@ import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueT
 import type { FadeLengthFormatContext } from "./timeFormat";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import { HS_TOOLTIP_CONTENT_EVENT } from "../../../components/AppTooltip";
+import { SHAPE_LABEL_KEYS } from "./reaperFade";
 
 export type { FadeLengthFormatContext };
 
@@ -53,16 +54,8 @@ export interface FadeInfoDelta {
     readonly dir?: number | null;
 }
 
-/** 形状 id → i18n 键（与 ClipContextMenu 的 FADE_SHAPE_OPTIONS 同源）。 */
-export const SHAPE_LABEL_KEYS: Record<number, string> = {
-    0: "fade_shape_linear",
-    1: "fade_shape_fast_start",
-    2: "fade_shape_fast_end",
-    3: "fade_shape_fast_start_steep",
-    4: "fade_shape_fast_end_steep",
-    5: "fade_shape_slow_start_end",
-    6: "fade_shape_slow_start_end_steep",
-};
+/** 形状 id → i18n 键（定义已移到 `reaperFade.ts`，见那里的注释；此处转出保持调用点不变）。 */
+export { SHAPE_LABEL_KEYS };
 
 function shapeName(shape: number, t: FadeLabelLookup): string {
     // 小数变体按其基础族命名（1.1 → 快起族；REAPER 内部虽有独立编号，
