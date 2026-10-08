@@ -843,10 +843,17 @@ unsafe extern "C" fn get_track(project: *mut c_void, index: i32) -> *mut c_void 
 unsafe extern "C" fn insert_track(project: *mut c_void, index: i32, flags: i32) {
     let f = fixture();
     assert_eq!(project, f.project());
-    assert_eq!(index, 1 + f.extra_tracks.borrow().len() as i32);
     assert_eq!(flags, 0);
-    f.record("insert-track");
-    f.extra_tracks.borrow_mut().push(Box::new(9));
+    // 夹具里轨道 0 恒为 FX 轨，因此合法插入点从 1 开始（"插在 FX 轨之后"）。
+    let len = f.extra_tracks.borrow().len() as i32;
+    assert!(
+        (1..=len + 1).contains(&index),
+        "insert index must land at/after the FX track: {index}"
+    );
+    f.record(format!("insert-track:{index}"));
+    f.extra_tracks
+        .borrow_mut()
+        .insert(index as usize - 1, Box::new(9));
     f.change.set(f.change.get().wrapping_add(1));
 }
 unsafe extern "C" fn add_fx(
@@ -982,16 +989,44 @@ fn host_media_new_track_uses_project_guid_difference_and_first_plugin_and_rolls_
     f.enable_media();
     let host = std::sync::Arc::new(f.client());
     {
-        let _track = host.create_audio_track("元音", &|| true).unwrap();
+        let _track = host.create_audio_track("元音", None, &|| true).unwrap();
         assert_eq!(f.extra_tracks.borrow().len(), 1);
         assert!(f.calls().contains(&"add-hfs-first-fx".into()));
     }
     assert!(f.extra_tracks.borrow().is_empty());
     assert!(f.calls().contains(&"delete-created-track".into()));
-    let mut track = host.create_audio_track("保留", &|| true).unwrap();
+    let mut track = host.create_audio_track("保留", None, &|| true).unwrap();
     track.commit();
     drop(track);
     assert_eq!(f.extra_tracks.borrow().len(), 1);
+}
+
+/// 插入锚点决定新轨道落点；锚点缺失或越界一律退回工程末尾，不报错。
+#[test]
+fn host_media_new_track_honours_the_anchor_and_falls_back_to_the_end() {
+    let f = Fixture::new();
+    f.enable_media();
+    let host = std::sync::Arc::new(f.client());
+    // 锚点 = `IP_TRACKNUMBER` 1 的唯一轨道 → 新轨道占据 0-based index 1。
+    let mut track = host
+        .create_audio_track("锚点后", Some(1), &|| true)
+        .unwrap();
+    track.commit();
+    drop(track);
+    assert!(f.calls().contains(&"insert-track:1".into()));
+    // 越界锚点（工程里只有 2 条轨道）→ 退回末尾 index 2。
+    let mut track = host.create_audio_track("末尾", Some(99), &|| true).unwrap();
+    track.commit();
+    drop(track);
+    assert!(f.calls().contains(&"insert-track:2".into()));
+    // 0 / 负值同样退回末尾（`IP_TRACKNUMBER` 是 1-based，0 不是合法锚点）。
+    for anchor in [Some(0), Some(-4), None] {
+        let mut track = host.create_audio_track("末尾", anchor, &|| true).unwrap();
+        track.commit();
+        drop(track);
+    }
+    assert_eq!(f.extra_tracks.borrow().len(), 5);
+    assert!(f.calls().contains(&"insert-track:5".into()));
 }
 #[test]
 fn host_media_multi_picker_preserves_complete_unicode_paths_and_cancel_is_empty() {

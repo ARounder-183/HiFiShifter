@@ -890,6 +890,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "clipboard_kind",
     "close_window",
     "consume_startup_project_path",
+    "create_host_track",
     "get_about_info",
     "get_project_meta",
     "get_auto_backup_settings",

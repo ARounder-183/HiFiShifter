@@ -1,6 +1,10 @@
 // 原轨道列表；插件保留选择/混音/算法控制，轨道结构与命名由宿主拥有。
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isPluginMode, canGroupPluginTracks } from "../../../services/hostCapabilities";
+import {
+    isPluginMode,
+    canGroupPluginTracks,
+    canCreateHostTracks,
+} from "../../../services/hostCapabilities";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
@@ -2233,13 +2237,19 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 </div>
 
                 {/* 整行是一条"添加轨道"按钮。它是可点区域，因此必须有键盘等价操作
-                    与按钮角色 —— 一个只响应 onClick 的 `div` 对键盘用户不存在。 */}
+                    与按钮角色 —— 一个只响应 onClick 的 `div` 对键盘用户不存在。
+                    插件里这条建的是**宿主**轨道（`create_host_track`），标签与 aria
+                    跟着换，否则读屏用户听到的是一个做不到的动作。 */}
                 <Flex
                     align="center"
                     justify="center"
                     role="button"
                     tabIndex={0}
-                    aria-label={t("track_add")}
+                    aria-label={
+                        isPluginMode() && canCreateHostTracks()
+                            ? t("track_add_host")
+                            : t("track_add")
+                    }
                     className="h-8 border-b border-qt-border border-dashed text-qt-text-muted hover:text-qt-text hover:bg-qt-button-hover cursor-pointer transition-colors"
                     style={{ height: TRACK_ADD_ROW_HEIGHT }}
                     onClick={onAddTrack}
@@ -2250,7 +2260,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     }}
                 >
                     <PlusIcon className="mr-1" />{" "}
-                    <span className="hs-type-label">{t("track_add")}</span>
+                    <span className="hs-type-label">
+                        {isPluginMode() && canCreateHostTracks()
+                            ? t("track_add_host")
+                            : t("track_add")}
+                    </span>
                 </Flex>
             </div>
 

@@ -464,6 +464,7 @@ export const zhTW = {
     common_tracks: "軌道",
 
     track_add: "新增軌道",
+    track_add_host: "新增宿主軌道（尚無音訊）",
     track_remove_selected: "刪除選取軌道",
     track_remove_confirm: "刪除此軌道？軌道及其上的所有片段都會被刪除。此操作無法復原。",
 

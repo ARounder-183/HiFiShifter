@@ -619,6 +619,7 @@ export const enUS = {
     common_tracks: "Tracks",
 
     track_add: "Add Track",
+    track_add_host: "Add Host Track (no audio yet)",
     track_remove_selected: "Remove Selected Track",
     track_remove_confirm:
         "Remove this track? The track and all of its clips are deleted. This cannot be undone.",

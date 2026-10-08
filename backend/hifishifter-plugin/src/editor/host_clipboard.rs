@@ -476,7 +476,7 @@ pub(super) fn execute_paste(
         let target = if let Some(target) = target {
             target
         } else {
-            let track = plan.host.create_audio_track(&name, allowed)?;
+            let track = plan.host.create_audio_track(&name, None, allowed)?;
             let target = track.target.clone();
             new_tracks.push(track);
             target

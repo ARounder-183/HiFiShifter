@@ -192,6 +192,16 @@ export const timelineApi = {
     // Tracks
     addTrack: (name?: string) => invoke<TimelineResult>("add_track", name),
 
+    /**
+     * 新建一条**宿主**轨道（插件专属）。
+     *
+     * 独立 App 没有这个概念（它只有 `add_track`，建的是自己的轨道），所以这条只在
+     * 插件模式下调用；调用前先判 `canCreateHostTracks()`。
+     *
+     * 新建的轨道**没有音频**：要让这个 HiFiShifter 实例有内容，需要再往它导入音频。
+     */
+    createHostTrack: () => invoke<TimelineResult>("create_host_track"),
+
     addTrackNested: (payload: { name?: string; parentTrackId?: string | null; index?: number }) =>
         invoke<TimelineResult>(
             "add_track",

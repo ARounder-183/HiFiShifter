@@ -31,6 +31,21 @@ export const removeTrackRemote = createAsyncThunk(
     },
 );
 
+/**
+ * 新建一条**宿主**轨道（插件专属）。
+ *
+ * 【为什么单独一个 thunk】`addTrackRemote` 走 `add_track` —— 建的是插件自己的
+ * 轨道，在插件模式下被 `pluginAllowsAction` 的 `track.*` 规则挡掉。这条走
+ * `create_host_track`：建 REAPER 轨道、插在**本实例能看到的最下方轨道之后**、
+ * 并挂上 HiFiShifter 作为首个 FX。两者语义不同，不能共用一个命令名。
+ *
+ * 新建的轨道**没有音频**，所以新 FX 实例暂时是空的；调用方负责把这件事告诉用户
+ * （并提供"导入音频到这条轨道"的后续动作）。
+ */
+export const createHostTrackRemote = createAsyncThunk("session/createHostTrackRemote", async () => {
+    return webApi.createHostTrack();
+});
+
 export const duplicateTrackRemote = createAsyncThunk(
     "session/duplicateTrackRemote",
     async (

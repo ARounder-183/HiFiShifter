@@ -8,6 +8,13 @@ export type PluginBootstrap = {
     clipSplitting?: boolean;
     clipClipboard?: boolean;
     audioImport?: boolean;
+    /**
+     * 宿主允许新建一条**宿主**轨道（`InsertTrackInProject` + 首 FX）。
+     *
+     * 【为什么与 `audioImport` 分开】导入音频会顺带建轨，所以后者蕴含前者；反过来
+     * 不成立 —— "先建一条空轨、之后再导入"是一条独立能力与独立入口。
+     */
+    trackCreation?: boolean;
     trackGrouping?: boolean;
     /**
      * 宿主用哪一套淡化轴。

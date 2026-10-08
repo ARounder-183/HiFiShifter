@@ -484,6 +484,7 @@ export const jaJP = {
     common_tracks: "トラック",
 
     track_add: "トラックを追加",
+    track_add_host: "ホストトラックを追加（音声なし）",
     track_remove_selected: "選択トラックを削除",
     track_remove_confirm:
         "このトラックを削除しますか？トラックとその上のすべてのクリップが削除されます。この操作は取り消せません。",

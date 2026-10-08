@@ -22,6 +22,13 @@ function extractPluginHandlers(source: string): string[] {
         /(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g,
     ))
         result.add(match[1]);
+    // UI 线程的整字面量分支：`Some("cmd") => ...`。
+    //
+    // 【为什么要单独一条】`create_host_track` 这类命令在 UI 线程直接处理（要拿宿主
+    // 与 Undo 请求上下文），不进 actor match，因此上面两条正则都抓不到它。只认后随
+    // `=>` 的形式，避免把 `Some("continuous")` 这种**取值**当成命令名。
+    for (const match of source.matchAll(/\bSome\s*\(\s*"([a-z_0-9]+)"\s*\)\s*=>/g))
+        result.add(match[1]);
     return [...result];
 }
 

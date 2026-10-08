@@ -91,6 +91,7 @@ import {
     removeClipRemote,
     removeClipsRemote,
     removeTrackRemote,
+    createHostTrackRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
     selectClipRemote,
@@ -1074,6 +1075,32 @@ function mapTimelineTracks(tracks: TimelineState["tracks"]): TrackInfo[] {
 function applyTimelineTracksOnly(state: SessionState, timeline: TimelineState) {
     state.tracks = mapTimelineTracks(timeline.tracks);
     state.selectedTrackId = timeline.selected_track_id;
+}
+
+/** 建轨回执的形状（插件自己的轨道与宿主轨道共用）。 */
+type AddedTrackPayload = {
+    ok?: boolean;
+    project?: { dirty?: boolean };
+} & TimelineState;
+
+/**
+ * 增删轨道共用：标脏 + 交互锁期间只同步轨道列表。
+ *
+ * 【为什么要标脏】增删轨道是工程结构变更：不标脏的话"加了轨道 → 新建工程"会静默
+ * 丢弃（与 Tempo Map 同款缺口）。
+ * 【为什么交互锁期间只同步轨道】拖拽中整包应用后端快照会覆盖前端的 clip 乐观位置，
+ * 产生闪烁。
+ */
+function applyAddedTrack(state: SessionState, payload: AddedTrackPayload): void {
+    if (!payload.ok) {
+        return;
+    }
+    markProjectDirty(state.project);
+    if (state._interactionLockCount > 0) {
+        applyTimelineTracksOnly(state, payload);
+        return;
+    }
+    applyTimelineState(state, payload, { force: true });
 }
 
 /**
@@ -2523,6 +2550,7 @@ export {
 
 export {
     addTrackRemote,
+    createHostTrackRemote,
     removeTrackRemote,
     moveTrackRemote,
     selectTrackRemote,
@@ -6946,23 +6974,13 @@ const sessionSlice = createSlice({
             })
 
             .addCase(addTrackRemote.fulfilled, (state, action) => {
-                const payload = action.payload as {
-                    ok?: boolean;
-                    project?: { dirty?: boolean };
-                } & TimelineState;
-                if (!payload.ok) {
-                    return;
-                }
-                // 增删轨道是工程结构变更：与 clip 级 reducer 一样必须标脏，
-                // 否则"加了轨道 → 新建工程"会静默丢弃（与 Tempo Map 同款缺口）。
-                markProjectDirty(state.project);
-                // 交互锁期间（如拖拽中）仅同步轨道列表，
-                // 避免 add_track 的后端快照覆盖前端 clip 乐观位置并产生闪烁。
-                if (state._interactionLockCount > 0) {
-                    applyTimelineTracksOnly(state, payload);
-                    return;
-                }
-                applyTimelineState(state, payload, { force: true });
+                applyAddedTrack(state, action.payload as AddedTrackPayload);
+            })
+
+            // 宿主建轨（插件专属）与插件自己建轨在 UI 上是同一件事：多了一条轨道。
+            // 复用同一个 reducer 体，免得两条路径的"标脏 / 交互锁"处理各自漂移。
+            .addCase(createHostTrackRemote.fulfilled, (state, action) => {
+                applyAddedTrack(state, action.payload as AddedTrackPayload);
             })
 
             .addCase(removeTrackRemote.fulfilled, (state, action) => {

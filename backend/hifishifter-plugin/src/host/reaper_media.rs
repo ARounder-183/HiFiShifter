@@ -290,9 +290,14 @@ impl ReaperHost {
         Ok(self.pick_audio(authorized)?.into_iter().collect())
     }
     /// 新轨身份取所属project创建前后的唯一GUID差集；重入额外增删时失败，不按位置猜新轨。
+    ///
+    /// `after_track_order` = 插入锚点的 `IP_TRACKNUMBER`（1-based）：新轨道落在它
+    /// **之后**。锚点缺失/越界一律退回工程末尾 —— 用户点"添加轨道"却失败是最差的
+    /// 体验，而"插在末尾"始终是一个合法且可理解的结果。
     pub(crate) fn create_audio_track(
         self: &Arc<Self>,
         name: &str,
+        after_track_order: Option<i32>,
         authorized: &impl Fn() -> bool,
     ) -> Result<CreatedTrack, String> {
         if !self.can_create_audio_track() {
@@ -327,8 +332,14 @@ impl ReaperHost {
             Ok(result)
         };
         let before = enumerate()?;
+        // `IP_TRACKNUMBER` 是 1-based；`InsertTrackInProject` 的 idx 是 0-based，且
+        // 插入后新轨道占据 idx。因此"插在 IP_TRACKNUMBER=N 的轨道之后" = `idx = N`。
+        let insert_at = match after_track_order {
+            Some(order) if order >= 1 && (order as usize) <= before.len() => order as usize,
+            _ => before.len(),
+        };
         checked(authorized, || unsafe {
-            (api.insert)(project, before.len() as i32, 0)
+            (api.insert)(project, insert_at as i32, 0)
         })?;
         let after = enumerate()?;
         let old = before

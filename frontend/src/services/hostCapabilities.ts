@@ -76,6 +76,20 @@ export function canImportHostAudio(): boolean {
 }
 
 /**
+ * 插件里能不能**新建一条宿主轨道**。
+ *
+ * 【为什么不复用 `canImportHostAudio`】导入音频会顺带建轨，所以导入蕴含建轨；但
+ * 反过来不成立 —— 原生侧的门槛也不同（建轨还需要 `InsertTrackInProject` 与 FX
+ * 接口齐备）。用导入能力门住"添加轨道"，会让一个不需要媒体导入的功能随它一起消失。
+ *
+ * 注意：新建的轨道**还没有音频**。要让这个 HiFiShifter 实例有内容，得再往这条轨道
+ * 导入音频（见 [`canImportHostAudio`]）—— UI 必须把这件事说清楚。
+ */
+export function canCreateHostTracks(): boolean {
+    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.trackCreation === true;
+}
+
+/**
  * 宿主接管范围的说明文案（被禁用项的 tooltip、以及"该窗口在插件里不可用"的异常）。
  *
  * 【为什么是函数而不是常量】常量在模块加载期取值，语言就冻在那一刻的
@@ -93,6 +107,10 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
     if (["playback.toggle", "playback.stop"].includes(action)) return canControlHostTransport();
     if (action === "project.importMedia") return canImportHostAudio();
     if (action === "clip.split") return canSplitHostClips();
+    // 新建**宿主**轨道：与 `track.*` 的其余动作不同，它明确要写宿主工程，且已有
+    // 原生实现（`create_host_track`）。用独立动作名，免得被下面那条 `track.` 规则
+    // 一刀切掉。
+    if (action === "track.createHost") return canCreateHostTracks();
     if (action === "clip.delete" || action === "edit.pasteTracks") return canClipboardHostClips();
     // 归一化只改HFS音频处理参数，不改REAPER item几何，可在插件中继续使用。
     if (action === "clip.normalize") return true;

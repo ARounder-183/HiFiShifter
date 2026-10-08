@@ -799,6 +799,12 @@ struct BootstrapFlags {
     clip_clipboard: bool,
     /// 宿主允许导入音频（会建轨、建 item）。
     audio_import: bool,
+    /// 宿主允许**新建一条宿主轨道**（`InsertTrackInProject` + 首 FX）。
+    ///
+    /// 【为什么与 `audio_import` 分开】导入音频会顺带建轨，所以后者蕴含前者；但
+    /// 反过来不成立 —— "只建一条空轨、先不导入"是一条独立的能力与独立的入口。
+    /// 合成一个标志会让"添加轨道"随"能不能导入"一起开关。
+    track_creation: bool,
     /// 宿主用哪一套淡化轴：`Some("legacy")`（≤7.80，`C_FADE*SHAPE` 决定形状）
     /// 或 `Some("continuous")`（≥7.81，curvature/S 两轴决定形状）。
     ///
@@ -818,6 +824,7 @@ impl BootstrapFlags {
             "clipSplitting": self.clip_splitting,
             "clipClipboard": self.clip_clipboard,
             "audioImport": self.audio_import,
+            "trackCreation": self.track_creation,
             "fadeAxes": self.fade_axes,
             // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
@@ -997,7 +1004,7 @@ fn configure_browser(
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
                     let result=(||->Result<String,String>{
-                        let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),&allowed)?)} else {None};
+                        let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
                         let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
                         let id=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)?;
                         if let Some(track)=&mut created {track.commit();}Ok(id)
@@ -1006,6 +1013,38 @@ fn configure_browser(
                     owner.refresh_reaper_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
+                })();
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+            },
+            // 独立的"添加宿主轨道"入口。
+            //
+            // 【为什么不是 `add_track`】`add_track` 建的是**插件自己的**轨道，且被
+            // `pluginAllowsAction` 的 `track.*` 规则一刀切掉；这条建的是**宿主**轨道。
+            // 两者语义不同，不能共用一个名字。
+            //
+            // 【为什么插入位置要锚定】用户说的"最下方"是**本实例能看到的最下方**，
+            // 不是整个工程的最底下 —— 后者会把新轨道丢到别的 FX 实例的轨道下面。
+            Some("create_host_track")=>{
+                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let outcome=(||->Result<HostReply,String>{
+                    if full {return Err("native track request budget exceeded".into());}
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let editor=owner.editor_session()?;
+                    let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+                    let host=owner.project_history_host().ok_or("host project history missing")?;
+                    if !host.can_create_audio_track() {return Err("host track creation is unavailable".into());}
+                    let anchor=host.folder_anchor_order(&allowed);
+                    state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
+                    document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                    let result=(||->Result<(),String>{
+                        let mut created=host.create_audio_track("HiFiShifter",anchor,&allowed)?;
+                        created.commit();
+                        Ok(())
+                    })();
+                    document.host_undo.finish_request(&view_id,id);result?;
+                    owner.refresh_reaper_transport();editor.notify_timeline();
+                    editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
@@ -1178,6 +1217,12 @@ fn configure_browser(
             .project_history_host()
             .is_some_and(|host| host.can_import_audio())
     });
+    // 建轨能力比导入窄一档：还需要 `InsertTrackInProject` / FX 接口齐备。
+    let track_creation = state.borrow().link.owner().is_ok_and(|owner| {
+        owner
+            .project_history_host()
+            .is_some_and(|host| host.can_create_audio_track())
+    });
     let clip_splitting = state.borrow().link.owner().is_ok_and(|owner| {
         owner
             .project_history_host()
@@ -1202,6 +1247,7 @@ fn configure_browser(
         clip_splitting,
         clip_clipboard,
         audio_import,
+        track_creation,
         fade_axes,
     }
     .to_json(&state.borrow().view_id);
@@ -1306,6 +1352,7 @@ mod bootstrap_tests {
                 clip_splitting: false,
                 clip_clipboard: false,
                 audio_import,
+                track_creation: false,
                 fade_axes: None,
             };
             assert_eq!(
@@ -1325,6 +1372,7 @@ mod bootstrap_tests {
             clip_splitting: true,
             clip_clipboard: false,
             audio_import: true,
+            track_creation: true,
             fade_axes: Some("legacy"),
         };
         let json = flags.to_json("view-42");
@@ -1335,7 +1383,28 @@ mod bootstrap_tests {
         assert_eq!(json["clipSplitting"], serde_json::json!(true));
         assert_eq!(json["clipClipboard"], serde_json::json!(false));
         assert_eq!(json["audioImport"], serde_json::json!(true));
+        assert_eq!(json["trackCreation"], serde_json::json!(true));
         assert_eq!(json["fadeAxes"], serde_json::json!("legacy"));
+    }
+
+    /// `trackCreation` 是独立能力：导入音频蕴含建轨，建轨不蕴含导入。
+    ///
+    /// 【为什么单独钉住】合成一个标志会让"添加轨道"随"能不能导入音频"一起开关 ——
+    /// 而这两件事的门槛不同（建轨还需要 `InsertTrackInProject` / FX 接口）。
+    #[test]
+    fn track_creation_is_independent_of_audio_import() {
+        let flags = BootstrapFlags {
+            transport_control: false,
+            clip_editing: false,
+            clip_splitting: false,
+            clip_clipboard: false,
+            audio_import: false,
+            track_creation: true,
+            fade_axes: None,
+        };
+        let json = flags.to_json("v");
+        assert_eq!(json["audioImport"], serde_json::json!(false));
+        assert_eq!(json["trackCreation"], serde_json::json!(true));
     }
 
     /// 未知轴语义必须如实报 `null`，前端据此保持只读（不猜）。
@@ -1347,6 +1416,7 @@ mod bootstrap_tests {
             clip_splitting: false,
             clip_clipboard: false,
             audio_import: false,
+            track_creation: false,
             fade_axes: None,
         };
         assert_eq!(flags.to_json("v")["fadeAxes"], serde_json::Value::Null);
@@ -1361,6 +1431,7 @@ mod bootstrap_tests {
             clip_splitting: false,
             clip_clipboard: false,
             audio_import: false,
+            track_creation: false,
             fade_axes: Some("continuous"),
         };
         assert_eq!(

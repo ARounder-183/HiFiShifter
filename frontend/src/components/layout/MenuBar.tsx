@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
     isPluginMode,
     canImportHostAudio,
+    canCreateHostTracks,
     dawControlledReason,
 } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
@@ -13,6 +14,7 @@ import {
     openReaperFromDialog,
     openVocalShifterFromDialog,
     addTrackRemote,
+    createHostTrackRemote,
     removeTrackRemote,
     duplicateTrackRemote,
     refreshRuntime,
@@ -825,60 +827,75 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             {/* Track Menu */}
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger
-                    disabled={isPluginMode()}
-                    title={isPluginMode() ? dawControlledReason() : undefined}
+                    // 插件里其余轨道操作都会写宿主工程，但"新建一条宿主轨道"是明确
+                    // 实现过的（`create_host_track`）。所以菜单不再整体禁用：能建轨
+                    // 就打开，打开后只放这一项 —— 点得到的都是真能做的。
+                    disabled={isPluginMode() && !canCreateHostTracks()}
+                    title={
+                        isPluginMode() && !canCreateHostTracks() ? dawControlledReason() : undefined
+                    }
                     className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
                 >
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            // 新建轨道继承选中轨道的层级，并紧跟在选中轨道下方插入。
-                            const placement = computeInsertBelowPlacement(
-                                s.tracks,
-                                s.selectedTrackId,
-                            );
-                            dispatch(
-                                addTrackRemote({
-                                    parentTrackId: placement.parentTrackId,
-                                    index: placement.index,
-                                }),
-                            );
-                        }}
-                    >
-                        {t("track_add")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("track.add")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        disabled={!s.selectedTrackId}
-                        onSelect={() =>
-                            s.selectedTrackId && dispatch(duplicateTrackRemote(s.selectedTrackId))
-                        }
-                    >
-                        {tf("menu_clone_selected_track")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("track.clone")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        disabled={
-                            !s.selectedTrackId ||
-                            // 只剩最后一个根轨道时，禁止删除根轨道
-                            (s.tracks.filter((t) => !t.parentId).length <= 1 &&
-                                !s.tracks.find((t) => t.id === s.selectedTrackId)?.parentId)
-                        }
-                        onSelect={() =>
-                            s.selectedTrackId && dispatch(removeTrackRemote(s.selectedTrackId))
-                        }
-                    >
-                        {t("track_remove_selected")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("track.delete")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {isPluginMode() ? (
+                        <DropdownMenu.Item onSelect={() => void dispatch(createHostTrackRemote())}>
+                            {t("track_add_host")}
+                        </DropdownMenu.Item>
+                    ) : (
+                        <>
+                            <DropdownMenu.Item
+                                onSelect={() => {
+                                    // 新建轨道继承选中轨道的层级，并紧跟在选中轨道下方插入。
+                                    const placement = computeInsertBelowPlacement(
+                                        s.tracks,
+                                        s.selectedTrackId,
+                                    );
+                                    dispatch(
+                                        addTrackRemote({
+                                            parentTrackId: placement.parentTrackId,
+                                            index: placement.index,
+                                        }),
+                                    );
+                                }}
+                            >
+                                {t("track_add")}
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                    {shortcutLabel("track.add")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                                disabled={!s.selectedTrackId}
+                                onSelect={() =>
+                                    s.selectedTrackId &&
+                                    dispatch(duplicateTrackRemote(s.selectedTrackId))
+                                }
+                            >
+                                {tf("menu_clone_selected_track")}
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                    {shortcutLabel("track.clone")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                                disabled={
+                                    !s.selectedTrackId ||
+                                    // 只剩最后一个根轨道时，禁止删除根轨道
+                                    (s.tracks.filter((t) => !t.parentId).length <= 1 &&
+                                        !s.tracks.find((t) => t.id === s.selectedTrackId)?.parentId)
+                                }
+                                onSelect={() =>
+                                    s.selectedTrackId &&
+                                    dispatch(removeTrackRemote(s.selectedTrackId))
+                                }
+                            >
+                                {t("track_remove_selected")}
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                    {shortcutLabel("track.delete")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </>
+                    )}
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 

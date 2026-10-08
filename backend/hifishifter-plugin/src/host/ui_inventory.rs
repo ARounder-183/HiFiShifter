@@ -104,6 +104,25 @@ impl ReaperHost {
         Ok(tracks)
     }
 
+    /// 本实例能看到的最下方宿主轨道的 `IP_TRACKNUMBER`；用作"新轨道插在它之后"的锚点。
+    ///
+    /// 【为什么取最大值而不是列表末元素】`ui_folder_tracks` 的顺序由 folder 树重建
+    /// 决定，与工程里的实际上下顺序不必然一致。用户说的"最下方"是**工程顺序**上的
+    /// 最下方，所以按 `IP_TRACKNUMBER` 取最大 —— 它就是这个顺序。
+    ///
+    /// 读不出来时返回 `None`，调用方退回工程末尾：锚点只是让插入位置更贴合直觉，
+    /// 读不到不该让"添加轨道"失败。
+    pub(crate) fn folder_anchor_order(
+        self: &Arc<Self>,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<i32> {
+        self.ui_folder_tracks(authorized)
+            .ok()?
+            .iter()
+            .map(|track| track.order)
+            .max()
+    }
+
     /// 枚举一条轨道及其 item；project / track 由调用方取得（本函数不做线程与归属推断）。
     pub(crate) fn ui_track_at(
         self: &Arc<Self>,

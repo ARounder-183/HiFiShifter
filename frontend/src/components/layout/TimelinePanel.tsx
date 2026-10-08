@@ -35,6 +35,7 @@ import {
     isHostGeometryReadOnly,
     canEditHostFadeAxes,
     canImportHostAudio,
+    canCreateHostTracks,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
@@ -90,6 +91,7 @@ import {
 import { createPortal } from "react-dom";
 import {
     addTrackRemote,
+    createHostTrackRemote,
     closeClipFormantToolWindow,
     openClipFormantToolWindow,
     duplicateTrackRemote,
@@ -5800,7 +5802,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, setTrackVolumeUi],
     );
     const handleAddTrack = React.useCallback(() => {
-        if (isPluginMode()) return;
+        // 插件里"添加轨道"建的是**宿主**轨道（`create_host_track`），不是插件自己的
+        // 轨道；后者的命令被 `pluginAllowsAction` 的 `track.*` 规则挡掉。新建的宿主
+        // 轨道没有音频，所以这个 FX 实例暂时还是空的 —— 菜单文案已经写明这一点。
+        if (isPluginMode()) {
+            if (!canCreateHostTracks()) return;
+            void dispatch(createHostTrackRemote());
+            return;
+        }
         dispatch(addTrackRemote({}));
     }, [dispatch]);
     const handleTrackColorChange = React.useCallback(

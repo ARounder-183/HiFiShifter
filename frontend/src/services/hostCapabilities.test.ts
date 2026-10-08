@@ -7,6 +7,7 @@ import {
     isHostGeometryReadOnly,
     canEditHostClips,
     canImportHostAudio,
+    canCreateHostTracks,
     canGroupPluginTracks,
     dawControlledReason,
 } from "./hostCapabilities";
@@ -68,6 +69,24 @@ test("native audio import opens only its media action, not project file/device c
     expect(pluginAllowsAction("project.importMedia", "timeline")).toBe(true);
     expect(pluginAllowsAction("project.open", "timeline")).toBe(false);
     expect(pluginAllowsAction("project.new", "timeline")).toBe(false);
+});
+
+/**
+ * 宿主建轨是一条**独立**能力，且只放行它自己那个动作名。
+ *
+ * 【为什么必须与导入分开】导入音频会顺带建轨，所以导入蕴含建轨；反过来不成立。
+ * 合成一个标志会让"添加轨道"随"能不能导入音频"一起开关 —— 而原生侧门槛不同。
+ */
+test("host track creation is its own capability and does not open the rest of the track menu", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tracks", audioImport: true };
+    expect(canCreateHostTracks()).toBe(false);
+    expect(pluginAllowsAction("track.createHost", "trackHeader")).toBe(false);
+    window.__HFS_PLUGIN_BOOTSTRAP__.trackCreation = true;
+    expect(canCreateHostTracks()).toBe(true);
+    expect(pluginAllowsAction("track.createHost", "trackHeader")).toBe(true);
+    // 其余 track.* 动作仍被拦下：建轨不等于能重排/删除宿主轨道。
+    for (const action of ["track.add", "track.remove", "track.duplicate", "track.move"])
+        expect(pluginAllowsAction(action, "trackHeader")).toBe(false);
 });
 
 test("native split opens only split action and its timeline channel", () => {
