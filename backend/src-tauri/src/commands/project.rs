@@ -66,15 +66,10 @@ fn normalize_beats_per_bar(raw: u32) -> u32 {
     raw.clamp(1, 32)
 }
 
+/// 归一化网格取值。清单只有一份，在 `TimelineSnapSettings` 里 ——
+/// 此前 App 与插件各抄了一份，改一处就会让两边接受的取值分叉。
 fn normalize_grid_size(raw: &str) -> String {
-    const VALID: [&str; 21] = [
-        "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/1d", "1/2d", "1/4d", "1/8d",
-        "1/16d", "1/32d", "1/64d", "1/1t", "1/2t", "1/4t", "1/8t", "1/16t", "1/32t", "1/64t",
-    ];
-    if VALID.contains(&raw) {
-        return raw.to_string();
-    }
-    "1/4".to_string()
+    hifishifter_kernel::config::TimelineSnapSettings::normalize_grid_size(raw)
 }
 
 use super::common::ok_bool;

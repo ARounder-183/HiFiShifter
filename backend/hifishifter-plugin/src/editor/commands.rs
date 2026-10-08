@@ -416,7 +416,33 @@ pub(super) fn dispatch(
                 request.parent_track_id,
             )?;
             after_write(session, json!({"ok":true}))?;
-            payload(session, false)
+            payload(session, true)
+        }
+        // 工程级拉伸覆盖（"拉伸算法 / 声码器 Mel 拉伸"子菜单）。
+        //
+        // 【为什么插件要支持它，而不是像缓存清理那样禁用】它控制的是**插件自己的**
+        // 音频处理（拉伸算法、HiFiGAN 的 mel 拉伸），不是宿主的属性 —— 在插件里
+        // 它同样有意义。此前这条命令落到 `Command unavailable`，于是整个子菜单点了
+        // 没有任何反应。
+        //
+        // 【为什么不能只写 ProjectState】真正的效果来自进程级的拉伸配置
+        // （`update_project_stretch_overrides`）；只改 `ProjectState` 会让界面上的
+        // 勾选要等下一次渲染才可能被读到。
+        "set_project_stretch_settings" => {
+            let algorithm: Option<hifishifter_kernel::time_stretch::UserStretchAlgorithm> =
+                serde_json::from_value(input["stretchAlgorithmOverride"].clone())
+                    .map_err(|_| "invalid stretch algorithm override".to_string())?;
+            let hifigan: Option<bool> =
+                serde_json::from_value(input["hifiganMelStretchOverride"].clone())
+                    .map_err(|_| "invalid hifigan mel stretch override".to_string())?;
+            {
+                let mut project = session.project.lock().unwrap();
+                project.stretch_algorithm_override = algorithm;
+                project.hifigan_mel_stretch_override = hifigan;
+            }
+            hifishifter_kernel::time_stretch::update_project_stretch_overrides(algorithm, hifigan);
+            after_write(session, json!({"ok":true}))?;
+            payload(session, true)
         }
         "get_timeline_state_lite" => payload(session, true),
         "get_project_meta" => Ok(payload(session, true)?["project"].clone()),
@@ -456,6 +482,27 @@ pub(super) fn dispatch(
                     session.timeline.lock().unwrap().playhead_sec = position.max(0.);
                 }
             }
+            payload(session, true)
+        }
+        // 【为什么必须支持它】ActionBar 的网格下拉与"吸附/网格设置"对话框都走这条
+        // 命令；插件此前对它回 `Command unavailable`，于是那些控件**看起来能用、
+        // 点了什么也不会发生**。
+        //
+        // 【为什么拍号在这里被忽略】拍号是宿主权威（`render::transport` 从 VST3
+        // 进程上下文读，见 `time_signature`），插件不写它。但前端在改网格时会把
+        // **当前**拍号一并放进同一个补丁，所以这里不能因为看到拍号就报错 ——
+        // 只接受网格那部分。真正要改拍号时 UI 是灰的（`ActionBar` 里按插件模式禁用）。
+        "set_project_timeline_settings" => {
+            let grid = input["gridSize"]
+                .as_str()
+                .map(hifishifter_kernel::config::TimelineSnapSettings::normalize_grid_size);
+            if let Some(grid) = grid {
+                session.project.lock().unwrap().grid_size = grid.clone();
+                // 网格是 HiFiShifter 自有的设置（宿主没有对应概念），因此要**落盘**：
+                // 只写进 per-document 的 `ProjectState` 会在换工程/重启后归零。
+                crate::settings_store::save_settings_patch(&json!({ "gridSize": grid }))?;
+            }
+            after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
         "get_pitch_analysis_progress" => Ok(Value::Null),

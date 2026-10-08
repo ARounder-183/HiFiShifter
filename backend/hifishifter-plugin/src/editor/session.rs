@@ -248,11 +248,23 @@ impl EditorSession {
         );
         let (queue, receiver) = mpsc::sync_channel(32);
         let (analysis_sender, analysis_updates) = mpsc::channel();
+        // 【为什么从设置里播种网格】网格是 HiFiShifter 自有的编辑设置（宿主没有对应
+        // 概念），存在进程级的 `settings_store` 里。`ProjectState::default()` 只带出厂
+        // 值，不播种的话用户在插件里设过的网格会在换工程/重启后归零 —— 而设置本该
+        // 属于用户、不属于某一个工程。
+        let initial_project = {
+            let mut project = ProjectState::default();
+            project.grid_size =
+                hifishifter_kernel::config::TimelineSnapSettings::normalize_grid_size(
+                    &crate::settings_store::settings().grid_size,
+                );
+            project
+        };
         let session = Arc::new(Self {
             document: Arc::downgrade(document),
             timeline: Mutex::new(TimelineState::default()),
             history: Mutex::new(Default::default()),
-            project: Mutex::new(ProjectState::default()),
+            project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
             // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
             // 文件会让正在进行的渲染失败。命名空间含 pid 与序号，多个宿主进程
@@ -1009,20 +1021,42 @@ impl EditorSession {
                 }
             }
         }
-        if let Some(tempo) = document.clock.tempo() {
-            let changed = {
+        // 宿主音乐上下文：BPM 与拍号都来自 VST3 进程上下文，同为**只读**的宿主权威
+        // 读数。两者各自取锁（不嵌套），最后合成一次变更通知 —— 一次回调触发两次
+        // 刷新会让 GUI 做两遍工作。
+        let tempo_changed = match document.clock.tempo() {
+            Some(tempo) => {
                 let mut timeline = self.timeline.lock().unwrap();
                 let changed = (timeline.bpm - tempo).abs() > 1e-6;
                 timeline.bpm = tempo;
                 changed
-            };
-            if changed {
-                self.host_version.fetch_add(1, Ordering::AcqRel);
-                self.emit(
-                    "plugin_host_changed",
-                    json!({"version":self.host_version.load(Ordering::Acquire)}),
-                );
             }
+            None => false,
+        };
+        // 【为什么拍号也写进来】此前只有 BPM 被下发，拍号虽然早在 `audio_abi` 的
+        // 进程上下文里解析好了，却从来没人读 —— 于是插件里的拍号永远是工程默认值，
+        // 而用户改不了它（那是宿主的东西）。读出来至少让界面说的是实话。
+        let meter_changed = match document.clock.time_signature() {
+            Some((numerator, denominator)) => {
+                let mut project = self.project.lock().unwrap();
+                // 与 `normalize_tempo_map` 同口径地夹取，不让宿主读数的越界值
+                // 进入工程状态。
+                let numerator = (numerator as u32).clamp(1, 32);
+                let denominator = (denominator as u32).clamp(1, 32);
+                let changed = project.beats_per_bar != numerator
+                    || project.time_signature_denominator != denominator;
+                project.beats_per_bar = numerator;
+                project.time_signature_denominator = denominator;
+                changed
+            }
+            None => false,
+        };
+        if tempo_changed || meter_changed {
+            self.host_version.fetch_add(1, Ordering::AcqRel);
+            self.emit(
+                "plugin_host_changed",
+                json!({"version":self.host_version.load(Ordering::Acquire)}),
+            );
         }
     }
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。

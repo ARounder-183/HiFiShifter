@@ -1,6 +1,10 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
+import {
+    isPluginMode,
+    canControlHostTransport,
+    dawControlledReason,
+} from "../../services/hostCapabilities";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
@@ -793,9 +797,11 @@ export function ActionBar() {
                     size="1"
                     value={bpmText}
                     data-tooltip={
-                        s.tempoMap && s.tempoMap.points.length > 0
-                            ? tf("tempo_map_actionbar_tip")
-                            : undefined
+                        isPluginMode()
+                            ? dawControlledReason()
+                            : s.tempoMap && s.tempoMap.points.length > 0
+                              ? tf("tempo_map_actionbar_tip")
+                              : undefined
                     }
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         setBpmDirty(true);
@@ -826,10 +832,13 @@ export function ActionBar() {
                         size="1"
                         type="number"
                         value={String(displayBeats)}
+                        disabled={isPluginMode()}
                         data-tooltip={
-                            s.tempoMap && s.tempoMap.points.length > 0
-                                ? tf("tempo_map_actionbar_tip")
-                                : undefined
+                            isPluginMode()
+                                ? dawControlledReason()
+                                : s.tempoMap && s.tempoMap.points.length > 0
+                                  ? tf("tempo_map_actionbar_tip")
+                                  : undefined
                         }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                             const raw = e.target.value.trim();
@@ -892,6 +901,7 @@ export function ActionBar() {
                     <Select.Root
                         size="1"
                         value={String(displayDenominator)}
+                        disabled={isPluginMode()}
                         onValueChange={(v) => {
                             const next = Number(v) || 4;
                             if (next === displayDenominator) return;
@@ -914,6 +924,7 @@ export function ActionBar() {
                         }}
                     >
                         <Select.Trigger
+                            data-tooltip={isPluginMode() ? dawControlledReason() : undefined}
                             style={{
                                 width: 48,
                                 backgroundColor: "var(--qt-base)",

@@ -2128,7 +2128,7 @@ export const jaJP = {
     plugin_transport_play: "REAPER の再生/一時停止",
     plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_daw_controlled_reason:
-        "REAPER が制御します。ファイル、クリップのジオメトリ、再生はホスト側で操作してください",
+        "REAPER が制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_info_host_curve_note: "HiFiShifter の表示用カーブ。音声は REAPER が処理します",

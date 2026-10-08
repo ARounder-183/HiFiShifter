@@ -1033,7 +1033,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
                         {t("action_refresh")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setWaveformCacheConfirmOpen(true)}>
+                    {/* 【为什么在插件里禁用】`clear_waveform_cache` 只存在于独立 App；
+                        插件里点它会得到一句 `Command unavailable` 的内部措辞。禁用它并
+                        说明原因才是有用的反馈 —— 与 `menu_export_diagnostics` 同一套做法。 */}
+                    <DropdownMenu.Item
+                        disabled={isPluginMode()}
+                        title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
+                        onSelect={() => setWaveformCacheConfirmOpen(true)}
+                    >
                         {t("menu_clear_waveform_cache")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
@@ -1288,7 +1295,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Sub>
 
                     {/* Background Pre-render — same level as Inference Device, no separator */}
+                    {/* 【为什么在插件里禁用】插件的渲染由宿主按需驱动
+                        （`editor/session.rs` 的 `schedule_analysis`），从不读这个开关 ——
+                        勾选它只会写下一个没人读的值，看起来像生效了。 */}
                     <DropdownMenu.Item
+                        disabled={isPluginMode()}
+                        title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
                         onSelect={async () => {
                             dispatch(toggleAutoBackgroundRender());
                             await dispatch(persistUiSettings());
@@ -1338,7 +1350,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
 
                     {/* Render cache manager — above Keyboard Shortcuts */}
-                    <DropdownMenu.Item onSelect={() => setRenderCacheDialogOpen(true)}>
+                    {/* 【为什么在插件里禁用】插件没有渲染缓存（`get_render_cache_stats` /
+                        `clear_render_cache` / `open_render_cache_dir` 都不存在），对话框里
+                        每个动作都会报错。 */}
+                    <DropdownMenu.Item
+                        disabled={isPluginMode()}
+                        title={isPluginMode() ? tf("plugin_standalone_only") : undefined}
+                        onSelect={() => setRenderCacheDialogOpen(true)}
+                    >
                         {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 

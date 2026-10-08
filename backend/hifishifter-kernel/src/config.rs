@@ -121,7 +121,12 @@ impl Default for TimelineSnapSettings {
 }
 
 impl TimelineSnapSettings {
-    fn valid_grid(value: &str) -> bool {
+    /// 网格取值的白名单（`1/1` … `1/64t`，共 21 项）。
+    ///
+    /// 【为什么公开】独立 App 的 `normalize_grid_size` 与插件侧的同名校验此前各抄了
+    /// 一份清单，改一处就会让两边接受的取值分叉 —— 用户在一个形态里设得进去的网格，
+    /// 在另一个形态里会被静默打回 `1/4`。这里是唯一一份。
+    pub fn valid_grid(value: &str) -> bool {
         matches!(
             value,
             "1/1"
@@ -146,6 +151,17 @@ impl TimelineSnapSettings {
                 | "1/32t"
                 | "1/64t"
         )
+    }
+
+    /// 归一化网格取值：白名单外一律回落 `1/4`。
+    ///
+    /// 与 [`Self::valid_grid`] 一起构成网格取值的唯一一份判据。
+    pub fn normalize_grid_size(raw: &str) -> String {
+        if Self::valid_grid(raw) {
+            raw.to_string()
+        } else {
+            "1/4".to_string()
+        }
     }
 
     pub fn normalize(&mut self) {

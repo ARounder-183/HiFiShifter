@@ -112,3 +112,30 @@ test("plugin transport hints name the host instead of leaving a hardcoded title"
     // 原生 `title` 不再参与：提示只有一个来源。
     expect(container.querySelector("[title]")).toBeNull();
 });
+
+/**
+ * 插件模式下音乐上下文控件的归属。
+ *
+ * 【要钉死什么】BPM 与拍号由宿主拥有（`render/transport.rs` 从 VST3 进程上下文读），
+ * 插件写不进去。它们此前只是**看起来能用**：输入框可编辑、改动静默失败。现在必须
+ * 禁用并说明原因，而不是留一个点了没反应的控件。
+ *
+ * 【为什么网格不在其中】网格是 HiFiShifter 自有的设置（宿主没有对应概念），插件
+ * 通过 `set_project_timeline_settings` 真正支持它，因此必须保持可用。
+ */
+test("plugin mode disables the host-owned tempo and meter with a reason", async () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "meter", transportControl: true };
+    await render();
+    expect(tooltips()).toContain(enUS.plugin_daw_controlled_reason);
+    const disabledInputs = Array.from(
+        container.querySelectorAll<HTMLInputElement>("input:disabled"),
+    ).map((input) => input.value);
+    // BPM（120）与拍号分子（4）都在其中。
+    expect(disabledInputs).toContain("120");
+    expect(disabledInputs).toContain("4");
+    // 网格下拉没有被禁用：它在插件里是真的能改的。
+    const grid = Array.from(container.querySelectorAll<HTMLElement>('[role="combobox"]')).some(
+        (element) => element.getAttribute("disabled") === null,
+    );
+    expect(grid, "网格下拉在插件里必须可用").toBe(true);
+});

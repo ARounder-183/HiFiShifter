@@ -186,11 +186,22 @@ pub(crate) mod test_support {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
     }
+
+    /// 串行化本模块的测试。
+    ///
+    /// 【为什么必须有】`STORE` 是**进程级**的单一状态，`test_dir()` 也是单一目录，
+    /// 而 `reset()` 会把两者一起清空。两个测试并行时，A 的写入会被 B 的 `reset()`
+    /// 抹掉 —— 表现为"未参与本次保存的键丢失"这种看起来像真 bug 的失败。
+    /// 这不是被测代码的问题（进程里本来就只有一个设置存储），是测试之间需要互斥。
+    pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{reset, simulate_restart};
+    use super::test_support::{exclusive, reset, simulate_restart};
     use super::*;
 
     /// 保存的设置必须在**重新加载之后**还在。
@@ -200,6 +211,7 @@ mod tests {
     /// 只有跨过一次重新加载还能读回，才叫持久化。
     #[test]
     fn saved_settings_survive_a_restart() {
+        let _serial = exclusive();
         reset();
         let mut edited = settings();
         edited.ruler_label_spacing_px = 137;
@@ -216,6 +228,7 @@ mod tests {
     /// 部分保存不得抹掉未发送的字段。
     #[test]
     fn a_partial_patch_keeps_the_other_fields() {
+        let _serial = exclusive();
         reset();
         let mut edited = settings();
         edited.ruler_label_spacing_px = 111;
@@ -237,6 +250,7 @@ mod tests {
     /// 只重载磁盘，不重建任何会话。
     #[test]
     fn settings_are_not_scoped_to_a_document() {
+        let _serial = exclusive();
         reset();
         let mut edited = settings();
         edited.ruler_label_spacing_px = 88;
@@ -249,6 +263,7 @@ mod tests {
     /// 前端偏好跨重启保留，且合并写入不丢其它键。
     #[test]
     fn frontend_prefs_survive_a_restart_and_merge() {
+        let _serial = exclusive();
         reset();
         let mut first = BTreeMap::new();
         first.insert("hifishifter.keybindings".to_string(), "{}".to_string());
@@ -276,6 +291,7 @@ mod tests {
     /// 删除偏好键只删指定的那些。
     #[test]
     fn deleting_prefs_removes_only_the_named_keys() {
+        let _serial = exclusive();
         reset();
         let mut patch = BTreeMap::new();
         patch.insert("hifishifter.appearance".to_string(), "dark".to_string());
@@ -290,6 +306,7 @@ mod tests {
     /// 界面语言写在约定好的键上并跨重启保留。
     #[test]
     fn the_locale_is_remembered() {
+        let _serial = exclusive();
         reset();
         set_locale("ja-JP");
         simulate_restart();

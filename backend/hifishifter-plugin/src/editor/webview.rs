@@ -782,6 +782,46 @@ fn begin_browser(state: &Rc<RefCell<BrowserState>>) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// WebView 启动时注入的能力标志（`window.__HFS_PLUGIN_BOOTSTRAP__`）。
+///
+/// 【为什么单独成类型】前端按这些标志决定开放哪些操作（`services/hostCapabilities.ts`）。
+/// 内联在一个 300 行的浏览器配置函数里时，**没人能对它写测试** —— 而这里恰好出过一次
+/// 错（`trackGrouping` 被写成复用 `audioImport`，见 [`BootstrapFlags::to_json`]）。
+#[derive(Clone, Copy, Debug)]
+struct BootstrapFlags {
+    /// 宿主提供 ARA 播放控制。
+    transport_control: bool,
+    /// 宿主允许写片段几何。
+    clip_editing: bool,
+    /// 宿主允许分割片段。
+    clip_splitting: bool,
+    /// 宿主提供完整 item 剪贴板。
+    clip_clipboard: bool,
+    /// 宿主允许导入音频（会建轨、建 item）。
+    audio_import: bool,
+}
+
+impl BootstrapFlags {
+    fn to_json(self, view_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "viewId": view_id,
+            "transportControl": self.transport_control,
+            "clipEditing": self.clip_editing,
+            "clipSplitting": self.clip_splitting,
+            "clipClipboard": self.clip_clipboard,
+            "audioImport": self.audio_import,
+            // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
+            // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
+            // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
+            // **不需要任何宿主写能力**。此前它写成 `"trackGrouping": audio_import`，
+            // 于是一个纯插件的参数分组功能被"能不能导入音频"门住：宿主缺少媒体 API
+            // 时，插件里的轨道拖动会无声失效，而它本来根本不需要那个 API。
+            "trackGrouping": true,
+        })
+    }
+}
+
 fn configure_browser(
     state: &Rc<RefCell<BrowserState>>,
     controller: &ICoreWebView2Controller,
@@ -1140,7 +1180,14 @@ fn configure_browser(
             .project_history_host()
             .is_some_and(|host| host.can_clipboard_items())
     });
-    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control,"clipEditing":clip_editing,"clipSplitting":clip_splitting,"clipClipboard":clip_clipboard,"audioImport":audio_import,"trackGrouping":audio_import});
+    let boot = BootstrapFlags {
+        transport_control,
+        clip_editing,
+        clip_splitting,
+        clip_clipboard,
+        audio_import,
+    }
+    .to_json(&state.borrow().view_id);
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let weak = Rc::downgrade(state);
     let navigate = browser.clone();
@@ -1222,5 +1269,52 @@ mod focus_tests {
         );
         assert_eq!(focused, child, "宿主焦点请求必须进入自有窗口");
         assert_eq!(target, Some(child), "宿主Tab顺序必须能到达真实编辑器子窗口");
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::BootstrapFlags;
+
+    /// `trackGrouping` 不随任何宿主能力变化 —— 它守卫的是纯插件的参数分组。
+    ///
+    /// 【回归】它此前被写成复用 `audioImport`，于是宿主缺少媒体 API 时，插件里
+    /// 本不需要任何宿主写能力的轨道拖动会无声失效。
+    #[test]
+    fn track_grouping_does_not_depend_on_host_media_apis() {
+        for audio_import in [true, false] {
+            let flags = BootstrapFlags {
+                transport_control: false,
+                clip_editing: false,
+                clip_splitting: false,
+                clip_clipboard: false,
+                audio_import,
+            };
+            assert_eq!(
+                flags.to_json("view-7")["trackGrouping"],
+                serde_json::json!(true),
+                "audioImport={audio_import} 时 trackGrouping 被错误地关掉了"
+            );
+        }
+    }
+
+    /// 宿主能力标志必须**原样**透传：前端按它们决定开放哪些操作。
+    #[test]
+    fn host_capabilities_pass_through_unchanged() {
+        let flags = BootstrapFlags {
+            transport_control: true,
+            clip_editing: false,
+            clip_splitting: true,
+            clip_clipboard: false,
+            audio_import: true,
+        };
+        let json = flags.to_json("view-42");
+        assert_eq!(json["version"], serde_json::json!(1));
+        assert_eq!(json["viewId"], serde_json::json!("view-42"));
+        assert_eq!(json["transportControl"], serde_json::json!(true));
+        assert_eq!(json["clipEditing"], serde_json::json!(false));
+        assert_eq!(json["clipSplitting"], serde_json::json!(true));
+        assert_eq!(json["clipClipboard"], serde_json::json!(false));
+        assert_eq!(json["audioImport"], serde_json::json!(true));
     }
 }

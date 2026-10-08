@@ -2050,7 +2050,7 @@ export const zhCN = {
     plugin_transport_stop: "控制 REAPER 停止播放",
     plugin_transport_play: "控制 REAPER 播放/暂停",
     plugin_standalone_only: "仅在独立 App 中可用",
-    plugin_daw_controlled_reason: "由 REAPER 控制；在宿主中操作文件、片段几何与播放",
+    plugin_daw_controlled_reason: "由 REAPER 控制；在宿主中操作文件、片段几何、速度、拍号与播放",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_info_host_curve_note: "HiFiShifter 示意曲线；声音由 REAPER 控制",

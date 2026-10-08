@@ -2114,7 +2114,7 @@ export const enUS = {
     plugin_transport_play: "Play or pause in REAPER",
     plugin_standalone_only: "Only available in the standalone app",
     plugin_daw_controlled_reason:
-        "Controlled by REAPER; manage files, clip geometry and playback in the host",
+        "Controlled by REAPER; manage files, clip geometry, tempo, meter and playback in the host",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_info_host_curve_note: "HiFiShifter schematic curve; REAPER renders the audio",

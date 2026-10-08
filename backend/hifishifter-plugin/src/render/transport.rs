@@ -5,6 +5,9 @@ pub(crate) struct TransportClock {
     position: AtomicU64,
     playing: AtomicBool,
     tempo: AtomicU64,
+    /// 拍号分子/分母。与 tempo 同源（VST3 进程上下文），同为**宿主权威**的只读读数。
+    time_sig_numerator: AtomicI32,
+    time_sig_denominator: AtomicI32,
     host_pose: AtomicU64,
     host_valid: AtomicBool,
     realtime: AtomicU64,
@@ -118,6 +121,7 @@ impl TransportClock {
             "last_mode":self.mode.load(Ordering::Relaxed),"last_project_samples":self.sample.load(Ordering::Relaxed),
             "last_sample_rate":f64::from_bits(self.rate.load(Ordering::Relaxed)),"last_playing":self.observed_playing.load(Ordering::Relaxed),
             "system_time":self.system_time.load(Ordering::Relaxed),"system_time_valid":self.system_valid.load(Ordering::Relaxed),
+            "time_sig_numerator":self.time_sig_numerator.load(Ordering::Relaxed),"time_sig_denominator":self.time_sig_denominator.load(Ordering::Relaxed),
             "continuous_samples":self.continuous.load(Ordering::Relaxed),"continuous_valid":self.continuous_valid.load(Ordering::Relaxed),
             "processing_stops":self.stops.load(Ordering::Relaxed),"playback_stops":self.playback_stops.load(Ordering::Relaxed),
             "editor_stops":self.editor_stops.load(Ordering::Relaxed),"last_stop_writer":self.stop_writer.load(Ordering::Relaxed),
@@ -136,6 +140,18 @@ impl TransportClock {
             if context.state & (1 << 10) != 0 && context.tempo.is_finite() && context.tempo > 0. {
                 self.tempo.store(context.tempo.to_bits(), Ordering::Release);
             }
+            // 锁定ivstprocesscontext.h的kTimeSigValid=1<<13。与 tempo 同样的规矩：
+            // 有效位不成立时**不覆盖**最后有效拍号 —— 宿主在某些块里不发它，
+            // 那不是"拍号变成 0/0"，只是这一块没说。
+            if context.state & (1 << 13) != 0
+                && context.time_sig_numerator > 0
+                && context.time_sig_denominator > 0
+            {
+                self.time_sig_numerator
+                    .store(context.time_sig_numerator, Ordering::Release);
+                self.time_sig_denominator
+                    .store(context.time_sig_denominator, Ordering::Release);
+            }
         }
     }
     pub fn stopped(&self) {
@@ -145,6 +161,15 @@ impl TransportClock {
     pub fn tempo(&self) -> Option<f64> {
         let value = f64::from_bits(self.tempo.load(Ordering::Acquire));
         (value > 0. && value.is_finite()).then_some(value)
+    }
+    /// 没有有效宿主拍号时返回None。
+    ///
+    /// 【为什么返回 Option 而不是默认 4/4】"宿主没告诉我们"与"宿主说是 4/4"是两件
+    /// 事：前者该保持上一次的读数（或落回用户设置），后者该如实显示 4/4。
+    pub fn time_signature(&self) -> Option<(i32, i32)> {
+        let numerator = self.time_sig_numerator.load(Ordering::Acquire);
+        let denominator = self.time_sig_denominator.load(Ordering::Acquire);
+        (numerator > 0 && denominator > 0).then_some((numerator, denominator))
     }
     /// 多个renderer可能并行发布同一文档块；展示容忍一块误差，不参与DSP寻址。
     pub fn read(&self) -> (f64, bool) {
@@ -228,6 +253,44 @@ mod tests {
             context.tempo = tempo;
             clock.update(&context);
             assert_eq!(clock.tempo(), Some(150.));
+        }
+    }
+
+    /// 拍号与 tempo 同一套规矩：有效位成立才写入，且不可用值不覆盖最后有效读数。
+    ///
+    /// 【为什么"不覆盖"是重点】宿主并非每个处理块都发拍号。把缺位当成"拍号 0/0"
+    /// 会让界面在播放中随机闪回默认值 —— 用户会以为工程被改了。
+    #[test]
+    fn only_valid_host_time_signature_updates_the_meter() {
+        let clock = TransportClock::default();
+        let mut context = crate::audio_abi::ProcessContext {
+            sample_rate: 44100.,
+            time_sig_numerator: 7,
+            time_sig_denominator: 8,
+            ..Default::default()
+        };
+        // 无有效位：不采纳。
+        clock.update(&context);
+        assert_eq!(clock.time_signature(), None);
+        // 有效位成立：采纳。
+        context.state = 1 << 13;
+        clock.update(&context);
+        assert_eq!(clock.time_signature(), Some((7, 8)));
+        // 后续块没有有效位：保持上一次读数，而不是退回默认。
+        context.state = 0;
+        clock.update(&context);
+        assert_eq!(clock.time_signature(), Some((7, 8)));
+        // 有效但非正：拒绝（0/0 与负数都不是合法拍号）。
+        context.state = 1 << 13;
+        for (numerator, denominator) in [(0, 8), (7, 0), (-4, 4)] {
+            context.time_sig_numerator = numerator;
+            context.time_sig_denominator = denominator;
+            clock.update(&context);
+            assert_eq!(
+                clock.time_signature(),
+                Some((7, 8)),
+                "{numerator}/{denominator}"
+            );
         }
     }
 }
