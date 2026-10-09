@@ -758,10 +758,16 @@ mod tests {
             .is_err());
         // 循环源**可以**规划：`B_LOOPSRC` 是纯 item 属性，内核语义与它一致。
         assert!(editor
-            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"loopEnabled":true}))
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"loopEnabled":true})
+            )
             .is_ok());
         assert!(editor
-            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"loopEnabled":false}))
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"loopEnabled":false})
+            )
             .is_ok());
         assert!(editor
             .plan_host_edit(

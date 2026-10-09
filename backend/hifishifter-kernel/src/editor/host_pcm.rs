@@ -33,7 +33,13 @@ pub fn materialize(
     sources: &[PcmView<'_>],
     dir: &Path,
 ) -> Result<(TimelineState, HashMap<String, String>), String> {
-    materialize_with_byte_limit(timeline, sources, dir, 64 * 1024 * 1024, ReversePolicy::Reject)
+    materialize_with_byte_limit(
+        timeline,
+        sources,
+        dir,
+        64 * 1024 * 1024,
+        ReversePolicy::Reject,
+    )
 }
 
 /// 同进程授权源已由调用者计入硬预算；文件流式写出不复制PCM，不按时长拒绝正常长源。

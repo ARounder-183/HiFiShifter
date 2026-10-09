@@ -172,7 +172,9 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
     // ★ 关键：插件的 `TimelineState` 每次 ARA 重新认领都会被整体重建
     // （`ara::mapping::ara_document_to_timeline` 只带 tracks/clips/bpm/project_sec），
     // 所以必须验"重建之后仍是 Gb" —— 只测"改完立刻变"测的是被冲掉之前的状态。
-    document.revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    document
+        .revision
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     let payload = call(3, "get_timeline_state", json!({}));
     assert_eq!(payload["project"]["base_scale"], "Gb");
     assert_eq!(

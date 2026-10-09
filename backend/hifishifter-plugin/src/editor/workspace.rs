@@ -303,7 +303,10 @@ impl DocumentSession {
         // 【为什么只借**媒体身份**】源窗口 / 倍率 / 名字都是右半段自己的宿主几何
         // （由下面的清单提供）；这里只补 `source_path` 一族的字段，与 `sync_host_takes`
         // 的嫁接同一原则：同一 `audio_source`、已在授权范围内。
-        let inherited_media: std::collections::HashMap<String, hifishifter_kernel::state::ClipTake> = {
+        let inherited_media: std::collections::HashMap<
+            String,
+            hifishifter_kernel::state::ClipTake,
+        > = {
             let lineage = self.split_media_from.lock().unwrap();
             lineage
                 .iter()
@@ -312,9 +315,7 @@ impl DocumentSession {
                     let parent = timeline.clips.iter().find(|clip| clip.id == parent_id)?;
                     // 父段自己也可能还没拿到音频（例如它也是被隔离的倒放片段）——
                     // 那就什么都不借，右半段照常显示为"在途"。
-                    if parent.source_path.is_none() {
-                        return None;
-                    }
+                    parent.source_path.as_ref()?;
                     Some((right.clone(), parent.active_take().clone()))
                 })
                 .collect()
@@ -574,8 +575,13 @@ impl DocumentSession {
         namespace: &str,
     ) {
         // 被某个 region 认领的 item；不在集合里的还没拿到 ARA 音频。
-        let claimed: std::collections::BTreeSet<String> =
-            self.region_items.lock().unwrap().values().cloned().collect();
+        let claimed: std::collections::BTreeSet<String> = self
+            .region_items
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
         let folder_parent = self.renderer_owners().into_iter().any(|owner| {
             owner.host_audio_status().state

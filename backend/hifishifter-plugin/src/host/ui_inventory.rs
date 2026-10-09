@@ -464,7 +464,10 @@ mod tests {
         timeline.tracks.clear();
         document.present_host_inventory(&mut timeline, "ui-");
         let clip = &timeline.clips[0];
-        assert!(clip.loop_enabled, "loop must reach the flat clip projection");
+        assert!(
+            clip.loop_enabled,
+            "loop must reach the flat clip projection"
+        );
         assert!(
             clip.takes.iter().all(|take| take.loop_enabled),
             "loop is item-level, so every take of the item carries it"
