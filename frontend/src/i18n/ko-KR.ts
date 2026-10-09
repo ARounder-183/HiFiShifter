@@ -2092,6 +2092,8 @@ export const koKR = {
     ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중",
     ara_clip_host_take_switched:
         "REAPER가 이 항목의 현재 테이크를 바꿨지만 플러그인이 아직 그 오디오를 받지 못했습니다. REAPER에서 실행 취소하거나 한 번 더 편집해 다시 할당되게 하세요",
+    ara_clip_direction_unknown:
+        "호스트가 이 항목의 방향을 보고하지 않아 플러그인이 역재생 여부를 판단할 수 없습니다. 역재생으로도, 정재생으로도 단정하지 않습니다",
     ara_replace_dirty_message:
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",

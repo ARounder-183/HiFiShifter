@@ -46,6 +46,8 @@ test("services/invoke.test.ts scripted checks", async () => {
         "#112233", // color
         { enabled: true, targetF1Hz: 800, targetF2Hz: 1400, strength: 0.5 }, // formantMorph
         false, // checkpoint
+        0.15, // fadeInS
+        -0.35, // fadeOutS
     ];
 
     const mapped = buildTauriArgs("set_clip_state", positional);
@@ -76,6 +78,8 @@ test("services/invoke.test.ts scripted checks", async () => {
         "color",
         "formantMorph",
         "checkpoint",
+        "fadeInS",
+        "fadeOutS",
     ];
     assertEqual(Object.keys(mapped), expectedKeys, "set_clip_state key order");
 
@@ -84,6 +88,9 @@ test("services/invoke.test.ts scripted checks", async () => {
     assertEqual(mapped.fadeInSec, 0.1, "fadeInSec value");
     assertEqual(mapped.fadeOutSec, 0.2, "fadeOutSec value");
     assertEqual(mapped.checkpoint, false, "checkpoint value");
+    // S 轴是新增的两个尾参：位置最靠后，绝不能与 checkpoint / color 串位。
+    assertEqual(mapped.fadeInS, 0.15, "fadeInS value");
+    assertEqual(mapped.fadeOutS, -0.35, "fadeOutS value");
 
     // get_param_frames 的 binary 参数曾漏映射：前端默认请求二进制，但 Tauri
     // 后端实际收到 false，返回 JSON；API 层又按二进制协议解码，破坏取数约定。

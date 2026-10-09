@@ -358,6 +358,10 @@ export const timelineApi = {
         };
         /** 是否创建 undo checkpoint，默认为 true */
         checkpoint?: boolean;
+        /** 淡入 S 轴（REAPER ≥7.81 `D_FADEINDIR2_NEW`）。旧宿主写入会被后端拒绝。 */
+        fadeInS?: number;
+        /** 淡出 S 轴（语义同 fadeInS）。 */
+        fadeOutS?: number;
     }) =>
         invoke<TimelineResult>(
             "set_clip_state",
@@ -385,6 +389,8 @@ export const timelineApi = {
             payload.color,
             payload.formantMorph,
             payload.checkpoint,
+            payload.fadeInS,
+            payload.fadeOutS,
         ),
 
     /**
@@ -411,6 +417,9 @@ export const timelineApi = {
             fadeInDir?: number;
             fadeOutShape?: number;
             fadeOutDir?: number;
+            /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
+            fadeInS?: number;
+            fadeOutS?: number;
             autoFadeInSec?: number;
             autoFadeOutSec?: number;
             /** 倒放开关（后端 ClipStatePatch 支持，必须与乐观更新字段一致）。 */

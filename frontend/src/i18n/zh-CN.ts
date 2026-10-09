@@ -2047,6 +2047,8 @@ export const zhCN = {
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频",
     ara_clip_host_take_switched:
         "REAPER 换了这一条的当前 Take，插件还没拿到它的音频；在 REAPER 里撤销，或再编辑一下让它重新分配",
+    ara_clip_direction_unknown:
+        "宿主没有报告这一条的方向，插件无法判断它是否倒放；既不标为倒放，也不假定为正放",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",

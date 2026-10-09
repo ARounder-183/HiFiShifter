@@ -1224,6 +1224,8 @@ function applyOptimisticClipState(
         fadeOutShape?: number;
         fadeInDir?: number;
         fadeOutDir?: number;
+        fadeInS?: number;
+        fadeOutS?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         formantMorph?: ClipFormantMorph;
@@ -1331,6 +1333,12 @@ function applyOptimisticClipState(
     if (payload.fadeOutDir !== undefined) {
         clip.fadeOutDir = Math.min(1, Math.max(-1, Number(payload.fadeOutDir) || 0));
     }
+    if (payload.fadeInS !== undefined) {
+        clip.fadeInS = Math.min(1, Math.max(-1, Number(payload.fadeInS) || 0));
+    }
+    if (payload.fadeOutS !== undefined) {
+        clip.fadeOutS = Math.min(1, Math.max(-1, Number(payload.fadeOutS) || 0));
+    }
     if (payload.autoFadeInSec !== undefined) {
         clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
     }
@@ -1366,6 +1374,8 @@ function applyOptimisticBulkClipState(
         fadeInDir?: number;
         fadeOutShape?: number;
         fadeOutDir?: number;
+        fadeInS?: number;
+        fadeOutS?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         reversed?: boolean;
@@ -1442,6 +1452,12 @@ function applyOptimisticBulkClipState(
         }
         if (update.fadeOutDir !== undefined) {
             clip.fadeOutDir = Math.min(1, Math.max(-1, Number(update.fadeOutDir) || 0));
+        }
+        if (update.fadeInS !== undefined) {
+            clip.fadeInS = Math.min(1, Math.max(-1, Number(update.fadeInS) || 0));
+        }
+        if (update.fadeOutS !== undefined) {
+            clip.fadeOutS = Math.min(1, Math.max(-1, Number(update.fadeOutS) || 0));
         }
         if (update.autoFadeInSec !== undefined) {
             clip.autoFadeInSec = Math.max(0, Number(update.autoFadeInSec) || 0);
@@ -1969,6 +1985,8 @@ function applyTimelineState(
             hostMedia: typeof clip.host_media === "string" ? clip.host_media : undefined,
             hostMediaReason:
                 typeof clip.host_media_reason === "string" ? clip.host_media_reason : undefined,
+            // 方向位可读性：缺省 true（独立 App / 旧后端不区分"读不到"）。
+            reversedKnown: clip.reversed_known === undefined ? true : Boolean(clip.reversed_known),
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
@@ -1983,6 +2001,16 @@ function applyTimelineState(
                 : 1,
             fadeInDir: Math.min(1, Math.max(-1, Number(clip.fade_in_dir ?? 0) || 0)),
             fadeOutDir: Math.min(1, Math.max(-1, Number(clip.fade_out_dir ?? 0) || 0)),
+            // S 轴没有 kernel 字段（REAPER ≥7.81 独有），从宿主读数装饰里取；
+            // legacy 宿主与独立 App 没有这根轴 ⇒ 0。
+            fadeInS:
+                clip.host_fades?.curve_mode === "reaper_new"
+                    ? Math.min(1, Math.max(-1, Number(clip.host_fades.in_s ?? 0) || 0))
+                    : 0,
+            fadeOutS:
+                clip.host_fades?.curve_mode === "reaper_new"
+                    ? Math.min(1, Math.max(-1, Number(clip.host_fades.out_s ?? 0) || 0))
+                    : 0,
             autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
             autoFadeOutSec: Math.max(0, Number(clip.auto_fade_out_sec ?? 0) || 0),
             formantMorph: clip.formant_morph
@@ -3504,6 +3532,8 @@ const sessionSlice = createSlice({
                 fadeOutShape?: number;
                 fadeInDir?: number;
                 fadeOutDir?: number;
+                fadeInS?: number;
+                fadeOutS?: number;
             }>,
         ) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
@@ -3526,6 +3556,13 @@ const sessionSlice = createSlice({
             }
             if (action.payload.fadeOutDir !== undefined) {
                 clip.fadeOutDir = Math.min(1, Math.max(-1, action.payload.fadeOutDir));
+            }
+            // S 轴：REAPER ≥7.81 的第二根连续轴，同样夹紧到 [-1, 1]。
+            if (action.payload.fadeInS !== undefined) {
+                clip.fadeInS = Math.min(1, Math.max(-1, Number(action.payload.fadeInS) || 0));
+            }
+            if (action.payload.fadeOutS !== undefined) {
+                clip.fadeOutS = Math.min(1, Math.max(-1, Number(action.payload.fadeOutS) || 0));
             }
         },
         /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */

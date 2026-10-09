@@ -21,7 +21,7 @@ import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
-import { canSelectHostFadeShape } from "../../../services/hostCapabilities";
+import { canEditFadeS, canSelectHostFadeShape } from "../../../services/hostCapabilities";
 import type { MessageKey } from "../../../i18n/messages";
 import {
     formatKeybindingList,
@@ -34,6 +34,7 @@ import {
     defaultFadeDirFor,
     FADE_PRESETS,
     fadeGainSigned,
+    solveNearestCurveAxes,
     solveNearestCurveDir,
 } from "./reaperFade";
 import { hostFadeGainForAxes } from "./hostFadeDisplay";
@@ -69,6 +70,8 @@ export type FadeContextSide = {
     isOut: boolean;
     shape: number;
     dir: number;
+    /** S 轴（REAPER ≥7.81 独有）；legacy 宿主与独立 App 恒为 0。 */
+    s: number;
     lengthSec: number;
     /** 宿主淡化读数（插件模式）：预览与曲率投影要按画布那套曲线算。 */
     hostFades?: HostFadeMetadata;
@@ -80,12 +83,17 @@ const CURVATURE_FINE_STEP = 0.01;
 const CurvatureSlider: React.FC<{
     shape: number;
     dir: number;
+    /** S 轴当前值（continuous 宿主）。 */
+    s: number;
+    /** 该侧是不是 continuous 宿主（决定要不要摆第二根滑杆、投影是否二维）。 */
+    continuous: boolean;
     /** 淡出列：预览按淡出取向绘制（时间镜像 + σ 符号归一），与画布一致。 */
     isOut: boolean;
     /** 宿主淡化读数（插件模式）：预览与拖拽投影必须用画布那套曲线。 */
     hostFades?: HostFadeMetadata;
     onChange: (nextDir: number) => void;
-}> = ({ shape, dir, isOut, hostFades, onChange }) => {
+    onSChange: (nextS: number) => void;
+}> = ({ shape, dir, s, continuous, isOut, hostFades, onChange, onSChange }) => {
     const fineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -109,6 +117,15 @@ const CurvatureSlider: React.FC<{
         const next = Math.max(-1, Math.min(1, dir + direction * step));
         onChange(Number(next.toFixed(2)));
     });
+    const attachSWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? CURVATURE_FINE_STEP : CURVATURE_WHEEL_STEP;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const next = Math.max(-1, Math.min(1, s + direction * step));
+        onSChange(Number(next.toFixed(2)));
+    });
     /** 失焦守卫注销函数（拖拽期间非空；blur/抬起/取消/卸载时清理）。 */
     const unregisterAbortRef = useRef<(() => void) | null>(null);
     // 卸载兜底：菜单被外部关闭时（如点击外部）不能残留失焦注册。
@@ -124,8 +141,9 @@ const CurvatureSlider: React.FC<{
     // 插件（新轴宿主）上走 `hostFadeGainForAxes`：预览必须是画布那条曲线，
     // 否则菜单里的小图与时间线上的包络不是同一条。
     const mode = isOut ? ("out" as const) : ("in" as const);
-    const hostS =
-        hostFades?.curve_mode === "reaper_new" ? (isOut ? hostFades.out_s : hostFades.in_s) : null;
+    // continuous 宿主用**本地** S（滑杆/拖拽刚改过的值）画预览，而不是宿主回读的
+    // 旧值 —— 否则刚拖动 S 滑杆时小图不动，要等一次宿主往返才跟上。
+    const hostS = continuous ? s : null;
     const preview = React.useMemo(() => {
         const size = 34;
         const pad = 2;
@@ -156,6 +174,22 @@ const CurvatureSlider: React.FC<{
         const t = Math.min(1, Math.max(0, (clientX - rect.left - pad) / inner));
         const yWithin = Math.min(inner, Math.max(0, clientY - rect.top - pad));
         const targetGain = 1 - yWithin / inner;
+        if (continuous) {
+            // continuous：曲线是 (curvature, S) 二维的，必须二维求解，否则 S 族
+            // 曲线上拖动永远只动 curvature（"拖了不跟手"）。两个分量一起提交。
+            const solved = solveNearestCurveAxes({
+                mode,
+                curvature: dir,
+                s,
+                pointerX01: t,
+                pointerY01: targetGain,
+                aspectYOverX: 1,
+                gainAt: (at, c, sv) => hostFadeGainForAxes(mode, c, sv, at),
+            });
+            onChange(Number(solved.curvature.toFixed(2)));
+            onSChange(Number(solved.s.toFixed(2)));
+            return;
+        }
         const next = solveNearestCurveDir({
             shape,
             dir,
@@ -163,85 +197,111 @@ const CurvatureSlider: React.FC<{
             pointerX01: t,
             pointerY01: targetGain,
             aspectYOverX: 1,
-            // 与预览同一条曲线：插件里曲率拖拽写的是宿主轴，投影也必须按宿主曲线算。
-            ...(hostS === null
-                ? {}
-                : {
-                      gainAt: (at: number, candidate: number) =>
-                          hostFadeGainForAxes(mode, candidate, hostS, at),
-                  }),
         }).dir;
         onChange(Number(next.toFixed(2)));
     };
 
     return (
-        <div className="hs-menu__body flex items-center gap-2">
-            <svg
-                ref={svgRef}
-                width={34}
-                height={34}
-                viewBox="0 0 34 34"
-                aria-hidden="true"
-                onPointerDown={(e) => {
-                    if (e.button !== 0) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    draggingRef.current = true;
-                    // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口
-                    //（svg 上的 pointer capture 不会在窗口外释放时派发事件），
-                    // blur 必须复位 draggingRef —— 否则切回后任意鼠标移动都会
-                    // 持续改写曲率。
-                    unregisterAbortRef.current?.();
-                    unregisterAbortRef.current = registerDragAbort(() => {
+        <div className="flex flex-col gap-1">
+            <div className="hs-menu__body flex items-center gap-2">
+                <svg
+                    ref={svgRef}
+                    width={34}
+                    height={34}
+                    viewBox="0 0 34 34"
+                    aria-hidden="true"
+                    onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        draggingRef.current = true;
+                        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口
+                        //（svg 上的 pointer capture 不会在窗口外释放时派发事件），
+                        // blur 必须复位 draggingRef —— 否则切回后任意鼠标移动都会
+                        // 持续改写曲率。
+                        unregisterAbortRef.current?.();
+                        unregisterAbortRef.current = registerDragAbort(() => {
+                            draggingRef.current = false;
+                            unregisterAbortRef.current?.();
+                            unregisterAbortRef.current = null;
+                        });
+                        try {
+                            (e.currentTarget as SVGSVGElement).setPointerCapture(e.pointerId);
+                        } catch {
+                            // 捕获失败时仍可通过 move-in-bounds 工作。
+                        }
+                        applyPointerToCurve(e.clientX, e.clientY);
+                    }}
+                    onPointerMove={(e) => {
+                        if (!draggingRef.current) return;
+                        applyPointerToCurve(e.clientX, e.clientY);
+                    }}
+                    onPointerUp={() => {
                         draggingRef.current = false;
                         unregisterAbortRef.current?.();
                         unregisterAbortRef.current = null;
-                    });
-                    try {
-                        (e.currentTarget as SVGSVGElement).setPointerCapture(e.pointerId);
-                    } catch {
-                        // 捕获失败时仍可通过 move-in-bounds 工作。
-                    }
-                    applyPointerToCurve(e.clientX, e.clientY);
-                }}
-                onPointerMove={(e) => {
-                    if (!draggingRef.current) return;
-                    applyPointerToCurve(e.clientX, e.clientY);
-                }}
-                onPointerUp={() => {
-                    draggingRef.current = false;
-                    unregisterAbortRef.current?.();
-                    unregisterAbortRef.current = null;
-                }}
-                onPointerCancel={() => {
-                    draggingRef.current = false;
-                    unregisterAbortRef.current?.();
-                    unregisterAbortRef.current = null;
-                }}
-                style={{ cursor: "crosshair", touchAction: "none", flexShrink: 0 }}
-            >
-                <polyline
-                    points={preview}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={1.5}
-                    strokeLinecap="round"
+                    }}
+                    onPointerCancel={() => {
+                        draggingRef.current = false;
+                        unregisterAbortRef.current?.();
+                        unregisterAbortRef.current = null;
+                    }}
+                    style={{ cursor: "crosshair", touchAction: "none", flexShrink: 0 }}
+                >
+                    <polyline
+                        points={preview}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.5}
+                        strokeLinecap="round"
+                    />
+                </svg>
+                <input
+                    ref={attachCurvatureWheel}
+                    type="range"
+                    className="qt-range"
+                    min={-1}
+                    max={1}
+                    step={0.01}
+                    value={dir}
+                    onChange={(e) => onChange(Number(e.currentTarget.value))}
+                    style={{ flex: 1 }}
                 />
-            </svg>
-            <input
-                ref={attachCurvatureWheel}
-                type="range"
-                className="qt-range"
-                min={-1}
-                max={1}
-                step={0.01}
-                value={dir}
-                onChange={(e) => onChange(Number(e.currentTarget.value))}
-                style={{ flex: 1 }}
-            />
-            <span className="text-qt-xs tabular-nums" style={{ minWidth: 44, textAlign: "right" }}>
-                {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
-            </span>
+                <span
+                    className="text-qt-xs tabular-nums"
+                    style={{ minWidth: 44, textAlign: "right" }}
+                >
+                    {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
+                </span>
+            </div>
+            {/* S 轴滑杆：只有 REAPER ≥7.81 有这根轴。 */}
+            {continuous ? (
+                <div className="hs-menu__body flex items-center gap-2">
+                    <span
+                        className="text-qt-xs text-qt-text/70"
+                        style={{ width: 34, textAlign: "center", flexShrink: 0 }}
+                    >
+                        S
+                    </span>
+                    <input
+                        ref={attachSWheel}
+                        type="range"
+                        className="qt-range"
+                        min={-1}
+                        max={1}
+                        step={0.01}
+                        value={s}
+                        onChange={(e) => onSChange(Number(e.currentTarget.value))}
+                        style={{ flex: 1 }}
+                    />
+                    <span
+                        className="text-qt-xs tabular-nums"
+                        style={{ minWidth: 44, textAlign: "right" }}
+                    >
+                        {(s >= 0 ? "+" : "") + s.toFixed(2)}
+                    </span>
+                </div>
+            ) : null}
         </div>
     );
 };
@@ -283,13 +343,16 @@ const SideColumn: React.FC<{
     isOut: boolean;
     onShapeChange: (clipId: string, isOut: boolean, shape: number) => void;
     onDirChange: (clipId: string, isOut: boolean, dir: number) => void;
+    onSChange: (clipId: string, isOut: boolean, s: number) => void;
     t: FadeLabelLookup;
-}> = ({ side, isOut, onShapeChange, onDirChange, t }) => {
+}> = ({ side, isOut, onShapeChange, onDirChange, onSChange, t }) => {
     // 【新轴宿主上为什么也摆预设】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
     // "预设 → (curvature, S)"的映射是实测出来的（`hostFadeAxes.ts`），七个预设各自
     // 对应一组确定坐标，所以按钮照摆、点了由 Rust 侧写两个分量。
     // 只有"宿主版本读不出来"时才退回曲率滑杆 —— 那时轴语义未知，不猜。
     const shapeSelectable = canSelectHostFadeShape();
+    // S 轴只有 REAPER ≥7.81 有；旧轴宿主与独立 App 没有这根轴，不摆第二根滑杆。
+    const continuous = side.hostFades?.curve_mode === "reaper_new" && canEditFadeS();
     return (
         <div className="min-w-[210px]">
             {/* 形状选择：切换即重置该侧曲率为形状默认值。 */}
@@ -307,13 +370,16 @@ const SideColumn: React.FC<{
                     {t("fade_shape_axes_owned_by_host")}
                 </div>
             )}
-            {/* 曲率滑块：实时提交 dir。 */}
+            {/* 曲率滑块：实时提交 dir；continuous 宿主下并列一根 S 滑杆。 */}
             <CurvatureSlider
                 shape={Math.trunc(side.shape)}
                 dir={side.dir}
+                s={side.s}
+                continuous={continuous}
                 isOut={isOut}
                 hostFades={side.hostFades}
                 onChange={(nextDir) => onDirChange(side.clipId, side.isOut, nextDir)}
+                onSChange={(nextS) => onSChange(side.clipId, side.isOut, nextS)}
             />
         </div>
     );
@@ -329,7 +395,8 @@ export const FadeContextMenu: React.FC<{
     onClose: () => void;
     onShapeChange: (clipId: string, isOut: boolean, shape: number) => void;
     onDirChange: (clipId: string, isOut: boolean, dir: number) => void;
-}> = ({ x, y, primary, secondary, onClose, onShapeChange, onDirChange }) => {
+    onSChange: (clipId: string, isOut: boolean, s: number) => void;
+}> = ({ x, y, primary, secondary, onClose, onShapeChange, onDirChange, onSChange }) => {
     const { t } = useI18n();
     const menuRef = useRef<HTMLDivElement>(null);
     useMenuKeyboard(menuRef);
@@ -398,6 +465,7 @@ export const FadeContextMenu: React.FC<{
                         isOut={primary.isOut}
                         onShapeChange={onShapeChange}
                         onDirChange={onDirChange}
+                        onSChange={onSChange}
                         t={(key) => t(key as MessageKey)}
                     />
                     <div className="hs-menu__separator" role="separator" />
@@ -407,6 +475,7 @@ export const FadeContextMenu: React.FC<{
                         isOut={secondary.isOut}
                         onShapeChange={onShapeChange}
                         onDirChange={onDirChange}
+                        onSChange={onSChange}
                         t={(key) => t(key as MessageKey)}
                     />
                 </>
@@ -418,6 +487,7 @@ export const FadeContextMenu: React.FC<{
                         isOut={primary.isOut}
                         onShapeChange={onShapeChange}
                         onDirChange={onDirChange}
+                        onSChange={onSChange}
                         t={(key) => t(key as MessageKey)}
                     />
                 </>

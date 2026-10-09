@@ -870,6 +870,10 @@ pub(super) fn set_clip_state(
     color: Option<String>,
     formant_morph: Option<crate::state::ClipFormantMorph>,
     checkpoint: Option<bool>,
+    // 淡变 S 轴：REAPER ≥7.81 的宿主专有轴。独立 App 没有这根轴（它用自己的曲率
+    // 轴），前端在独立模式下也不会发送，这里只做透传以保持两端命令签名一致。
+    fade_in_s: Option<f64>,
+    fade_out_s: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let previous_clip = tl.clips.iter().find(|clip| clip.id == clip_id).cloned();
@@ -901,8 +905,8 @@ pub(super) fn set_clip_state(
             fade_in_dir,
             fade_out_dir,
             // S 参数是 REAPER 7.81+ 的宿主轴；独立 App 用自己的曲率轴，不涉及它。
-            fade_in_s: None,
-            fade_out_s: None,
+            fade_in_s,
+            fade_out_s,
             auto_fade_in_sec,
             auto_fade_out_sec,
             color,

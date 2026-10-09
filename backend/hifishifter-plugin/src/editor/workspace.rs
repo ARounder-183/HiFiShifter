@@ -692,6 +692,16 @@ impl DocumentSession {
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
                 let reversed = clip["reversed"].as_bool() == Some(true);
+                // 方向位能否读到（三态：`Some(true)` / `Some(false)` / 读不出来）。
+                // `take_reversed` 返回 `None` 时**不能**断言"没倒放" —— 那会把"读不到"
+                // 说成"是正放"，用户据此以为插件识别错了。如实投影给前端：读不出来时
+                // 不显示方向标记，也不宣称正放。
+                let direction_known = item
+                    .takes
+                    .iter()
+                    .find(|take| take.active)
+                    .is_none_or(|take| take.reversed.is_some());
+                clip["reversed_known"] = serde_json::json!(direction_known);
                 // `waiting` 表示"这条还在等 ARA 音频"：只有它继续计时。其余状态
                 // （拿到源、倒放隔离、folder 父轨）都必须清掉起点，否则陈旧的起点会让
                 // 下一次掉回"在途"时立刻被判超期。
@@ -712,6 +722,11 @@ impl DocumentSession {
                         // 【为什么这里才给原因】未超期时原因往往是"马上就好了"
                         // （宿主正在分配 region），报原因等于制造噪声。超期后原因才
                         // 是用户真正需要的那条信息。
+                        //
+                        // 【优先级：可操作的成因优先】`take_switched`（撤销/再编辑即可）
+                        // 与 `unclaimed`（region 从未分配）都是**可操作**的，比"读不到
+                        // 方向"更该先说；`direction_unknown` 压过 `awaiting_region` ——
+                        // 方向读不出来时再等也不会变好。
                         let reason = if !claimed.contains(&item_id) {
                             "unclaimed"
                         } else if authorized_by_item.get(&item_id).is_some_and(|authorized| {
@@ -724,6 +739,9 @@ impl DocumentSession {
                             // 不符 —— 典型来源是"倒放 Item 为新 Take"（新 take 换了文件，
                             // 而 ARA 没有重新认领）。
                             "take_switched"
+                        } else if !direction_known {
+                            // 连"是不是倒放"都判不了：如实说，且再等也没用。
+                            "direction_unknown"
                         } else {
                             "awaiting_region"
                         };

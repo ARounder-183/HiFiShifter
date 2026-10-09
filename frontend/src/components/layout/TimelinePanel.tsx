@@ -67,6 +67,7 @@ import {
     FADE_PRESETS,
     resolveCurvatureEditBase,
     resolveCurvePointer,
+    solveNearestCurveAxes,
     solveNearestCurveDir,
 } from "./timeline/reaperFade";
 import { hostFadeDisplayShape, hostFadeGainForAxes } from "./timeline/hostFadeDisplay";
@@ -3931,17 +3932,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 【为什么按原因分开】"等待 REAPER 提供音频"回答不了用户最需要
                         // 的问题：该等、该改用法、还是该撤销。`take_switched`（宿主换了
                         // 当前 Take 而 ARA 未重认领，典型来源"倒放 Item 为新 Take"）是
-                        // **可操作**的，必须给出下一步；其余退回通用文案。
+                        // **可操作**的，必须给出下一步；`direction_unknown`（方向位读不
+                        // 出来）则要说清"等也没用"；其余退回通用文案。
                         text =
                             hostMediaReason(clip) === "take_switched"
                                 ? t("ara_clip_host_take_switched")
-                                : t("ara_clip_waiting_for_host_audio");
+                                : hostMediaReason(clip) === "direction_unknown"
+                                  ? t("ara_clip_direction_unknown")
+                                  : t("ara_clip_waiting_for_host_audio");
                         break;
                     case "reversed":
                         text = t("ara_clip_reversed_host_handled");
                         break;
                     default:
                         break;
+                }
+                // 方向位读不出来（即便拿到了音频）：不宣称"是正放"。
+                if (text === null && clip.reversedKnown === false) {
+                    text = t("ara_clip_direction_unknown");
                 }
             }
             publishFadeRichTooltip(anchor, text);
@@ -4129,31 +4137,60 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 的混合曲线，不是 `fadeGainSigned`。求解器若还按后者算，指针与画出来的
                 // 包络就是两条不同的曲线 —— 表现为"拖了不跟手"。
                 const curveMode = args.side === "in" ? "in" : "out";
-                const hostS =
-                    clip.hostFades?.curve_mode === "reaper_new"
-                        ? curveMode === "out"
-                            ? clip.hostFades.out_s
-                            : clip.hostFades.in_s
-                        : null;
-                const nextDir = solveNearestCurveDir({
-                    shape,
-                    dir: baseDir,
-                    mode: args.side,
-                    pointerX01: pt.t,
-                    pointerY01: pt.gain,
-                    aspectYOverX:
-                        args.curveEnv.bodyHeightPx / Math.max(1, widthSec * pxPerSecRef.current),
-                    ...(hostS === null
-                        ? {}
-                        : {
-                              gainAt: (t: number, dir: number) =>
-                                  hostFadeGainForAxes(curveMode, dir, hostS, t),
-                          }),
-                }).dir;
+                const continuous = clip.hostFades?.curve_mode === "reaper_new";
+                const hostS = continuous
+                    ? curveMode === "out"
+                        ? clip.hostFades!.out_s
+                        : clip.hostFades!.in_s
+                    : null;
+                const aspectYOverX =
+                    args.curveEnv.bodyHeightPx / Math.max(1, widthSec * pxPerSecRef.current);
+                // 【continuous 宿主为什么必须二维求解】它的曲线由 `(curvature, S)` 两轴
+                // 共同决定，而 `solveNearestCurveDir` 的签名只能解一维 —— 在 S 族曲线上
+                // 拖动时它会把 S 钉死成常数、只动 curvature，解出的点不在曲线族上（"拖了
+                // 不跟手 / 跳变"）。二维版解出的两个分量**都写**，连续拖动才跟手。
+                const baseS = continuous
+                    ? Number((curveMode === "out" ? clip.fadeOutS : clip.fadeInS) ?? hostS) || 0
+                    : 0;
+                const solved = continuous
+                    ? solveNearestCurveAxes({
+                          mode: curveMode,
+                          curvature: Number(baseDir) || 0,
+                          s: baseS,
+                          pointerX01: pt.t,
+                          pointerY01: pt.gain,
+                          aspectYOverX,
+                          gainAt: (t, c, s) => hostFadeGainForAxes(curveMode, c, s, t),
+                      })
+                    : null;
+                const nextDir = solved
+                    ? solved.curvature
+                    : solveNearestCurveDir({
+                          shape,
+                          dir: baseDir,
+                          mode: args.side,
+                          pointerX01: pt.t,
+                          pointerY01: pt.gain,
+                          aspectYOverX,
+                          ...(hostS === null
+                              ? {}
+                              : {
+                                    gainAt: (t: number, dir: number) =>
+                                        hostFadeGainForAxes(curveMode, dir, hostS, t),
+                                }),
+                      }).dir;
                 dispatch(
                     args.side === "in"
-                        ? setClipFades({ clipId: args.clipId, fadeInDir: nextDir })
-                        : setClipFades({ clipId: args.clipId, fadeOutDir: nextDir }),
+                        ? setClipFades({
+                              clipId: args.clipId,
+                              fadeInDir: nextDir,
+                              ...(solved ? { fadeInS: solved.s } : {}),
+                          })
+                        : setClipFades({
+                              clipId: args.clipId,
+                              fadeOutDir: nextDir,
+                              ...(solved ? { fadeOutS: solved.s } : {}),
+                          }),
                 );
                 // 曲率拖拽的实时浮标：曲率行带 `[±增量]`，长度行只给当前值。
                 // 增量基准必须取**按下时**的 dir（`origin.baseById`）—— `baseDir`
@@ -4298,11 +4335,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 autoFadeOutSec?: number;
                 fadeInDir?: number;
                 fadeOutDir?: number;
+                fadeInS?: number;
+                fadeOutS?: number;
             }> = [];
             for (const participant of origin.participants) {
                 const clip = session.clips.find((item) => item.id === participant.clipId);
                 if (clip === undefined) continue;
                 const base = origin.baseById.get(participant.clipId);
+                // S 只对 continuous 宿主可写（`validate_fade_axes` 会在旧轴宿主上拒绝
+                // 任何 S 字段）——所以只在 continuous 时把它随曲率一起送出。
+                const continuous = clip.hostFades?.curve_mode === "reaper_new";
                 if (args.side === "in") {
                     const manual = Number(clip.fadeInSec) || 0;
                     const lengthEdited = Math.abs(manual - (base?.fadeInSec ?? 0)) > 1e-9;
@@ -4317,6 +4359,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 曲率/形状的落盘：缺了它们，bulk 回灌会把拖拽期的修改丢掉
                         //（旧实现同一处理——它总是带上 dir / shape）。
                         fadeInDir: nextDir,
+                        // continuous 宿主：曲线是二维的，S 必须随曲率一起写回，
+                        // 否则拖拽期解出的 S 会在下一次回灌时被宿主的旧值冲掉。
+                        ...(continuous ? { fadeInS: Number(clip.fadeInS) || 0 } : {}),
                     });
                 } else {
                     const manual = Number(clip.fadeOutSec) || 0;
@@ -4328,6 +4373,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         clipId: participant.clipId,
                         ...(lengthEdited ? { fadeOutSec: manual, autoFadeOutSec: 0 } : {}),
                         fadeOutDir: nextDir,
+                        ...(continuous ? { fadeOutS: Number(clip.fadeOutS) || 0 } : {}),
                     });
                 }
             }
@@ -4962,6 +5008,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 baseDir: number;
                 /** 新轴宿主的 S 分量（`null` = 不是新轴宿主）：曲率投影要按同一条曲线算。 */
                 hostS: number | null;
+                /** 二维求解的 S 起点（continuous 宿主才用）。 */
+                baseS: number;
             };
             b: {
                 clipId: string;
@@ -4970,6 +5018,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 shape: number;
                 baseDir: number;
                 hostS: number | null;
+                baseS: number;
             };
         };
         /**
@@ -5146,6 +5195,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     earlier.hostFades?.curve_mode === "reaper_new"
                                         ? earlier.hostFades.out_s
                                         : null,
+                                // 二维求解的 S 起点（continuous 宿主才用）。
+                                baseS:
+                                    earlier.hostFades?.curve_mode === "reaper_new"
+                                        ? Number(earlier.fadeOutS ?? earlier.hostFades.out_s) || 0
+                                        : 0,
                             },
                             b: {
                                 clipId: later.id,
@@ -5158,6 +5212,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     later.hostFades?.curve_mode === "reaper_new"
                                         ? later.hostFades.in_s
                                         : null,
+                                baseS:
+                                    later.hostFades?.curve_mode === "reaper_new"
+                                        ? Number(later.fadeInS ?? later.hostFades.in_s) || 0
+                                        : 0,
                             },
                         };
                     })(),
@@ -5204,44 +5262,90 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 取成本地常量：闭包里读 `sides.a.hostS` 会丢掉 `!== null` 的收窄。
                 const hostSA = sides.a.hostS;
                 const hostSB = sides.b.hostS;
-                const dirA = solveNearestCurveDir({
-                    shape: sides.a.shape,
-                    dir: sides.a.baseDir,
-                    mode: "out",
-                    pointerX01: ptA.t,
-                    pointerY01: ptA.gain,
-                    aspectYOverX:
-                        args.curveEnv.bodyHeightPx /
-                        Math.max(1, sides.a.widthSec * pxPerSecRef.current),
-                    // 与画布同一条曲线（见单侧拖拽处的说明）。
-                    ...(hostSA === null
-                        ? {}
-                        : {
-                              gainAt: (t: number, dir: number) =>
-                                  hostFadeGainForAxes("out", dir, hostSA, t),
-                          }),
-                }).dir;
-                const dirB = solveNearestCurveDir({
-                    shape: sides.b.shape,
-                    dir: sides.b.baseDir,
-                    mode: "in",
-                    pointerX01: ptB.t,
-                    pointerY01: ptB.gain,
-                    aspectYOverX:
-                        args.curveEnv.bodyHeightPx /
-                        Math.max(1, sides.b.widthSec * pxPerSecRef.current),
-                    ...(hostSB === null
-                        ? {}
-                        : {
-                              gainAt: (t: number, dir: number) =>
-                                  hostFadeGainForAxes("in", dir, hostSB, t),
-                          }),
-                }).dir;
+                const aspectA =
+                    args.curveEnv.bodyHeightPx /
+                    Math.max(1, sides.a.widthSec * pxPerSecRef.current);
+                const aspectB =
+                    args.curveEnv.bodyHeightPx /
+                    Math.max(1, sides.b.widthSec * pxPerSecRef.current);
+                // continuous 宿主：两轴二维求解（见单侧拖拽处的说明）。
+                const solvedA =
+                    hostSA === null
+                        ? null
+                        : solveNearestCurveAxes({
+                              mode: "out",
+                              curvature: sides.a.baseDir,
+                              s: sides.a.baseS,
+                              pointerX01: ptA.t,
+                              pointerY01: ptA.gain,
+                              aspectYOverX: aspectA,
+                              gainAt: (t, c, s) => hostFadeGainForAxes("out", c, s, t),
+                          });
+                const solvedB =
+                    hostSB === null
+                        ? null
+                        : solveNearestCurveAxes({
+                              mode: "in",
+                              curvature: sides.b.baseDir,
+                              s: sides.b.baseS,
+                              pointerX01: ptB.t,
+                              pointerY01: ptB.gain,
+                              aspectYOverX: aspectB,
+                              gainAt: (t, c, s) => hostFadeGainForAxes("in", c, s, t),
+                          });
+                const dirA = solvedA
+                    ? solvedA.curvature
+                    : solveNearestCurveDir({
+                          shape: sides.a.shape,
+                          dir: sides.a.baseDir,
+                          mode: "out",
+                          pointerX01: ptA.t,
+                          pointerY01: ptA.gain,
+                          aspectYOverX: aspectA,
+                          // 与画布同一条曲线（见单侧拖拽处的说明）。
+                          ...(hostSA === null
+                              ? {}
+                              : {
+                                    gainAt: (t: number, dir: number) =>
+                                        hostFadeGainForAxes("out", dir, hostSA, t),
+                                }),
+                      }).dir;
+                const dirB = solvedB
+                    ? solvedB.curvature
+                    : solveNearestCurveDir({
+                          shape: sides.b.shape,
+                          dir: sides.b.baseDir,
+                          mode: "in",
+                          pointerX01: ptB.t,
+                          pointerY01: ptB.gain,
+                          aspectYOverX: aspectB,
+                          ...(hostSB === null
+                              ? {}
+                              : {
+                                    gainAt: (t: number, dir: number) =>
+                                        hostFadeGainForAxes("in", dir, hostSB, t),
+                                }),
+                      }).dir;
                 sides.a.baseDir = dirA;
                 sides.b.baseDir = dirB;
+                // 逐帧覆写 S 起点：二维求解从上一帧的解出发，连续拖动才平滑。
+                if (solvedA) sides.a.baseS = solvedA.s;
+                if (solvedB) sides.b.baseS = solvedB.s;
                 batch(() => {
-                    dispatch(setClipFades({ clipId: sides.a.clipId, fadeOutDir: dirA }));
-                    dispatch(setClipFades({ clipId: sides.b.clipId, fadeInDir: dirB }));
+                    dispatch(
+                        setClipFades({
+                            clipId: sides.a.clipId,
+                            fadeOutDir: dirA,
+                            ...(solvedA ? { fadeOutS: solvedA.s } : {}),
+                        }),
+                    );
+                    dispatch(
+                        setClipFades({
+                            clipId: sides.b.clipId,
+                            fadeInDir: dirB,
+                            ...(solvedB ? { fadeInS: solvedB.s } : {}),
+                        }),
+                    );
                 });
                 // 曲率拖拽的实时浮标（双列）：曲率行各带 `[±增量]`，长度行只给当前值。
                 // 增量基准取按下时的 dir（`origin.baseById`）—— `sides.*.baseDir` 被
@@ -5552,6 +5656,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             autoFadeOutSec: Number(earlier.autoFadeOutSec) || 0,
                             fadeInDir: Number(earlier.fadeInDir) || 0,
                             fadeOutDir: Number(earlier.fadeOutDir) || 0,
+                            // continuous 宿主：S 是曲线的一部分，随曲率一起提交（旧轴宿主
+                            // 不写 —— `validate_fade_axes` 会拒绝任何 S 字段）。
+                            ...(earlier.hostFades?.curve_mode === "reaper_new"
+                                ? {
+                                      fadeInS: Number(earlier.fadeInS) || 0,
+                                      fadeOutS: Number(earlier.fadeOutS) || 0,
+                                  }
+                                : {}),
                         },
                         {
                             clipId: later.id,
@@ -5565,6 +5677,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             autoFadeOutSec: Number(later.autoFadeOutSec) || 0,
                             fadeInDir: Number(later.fadeInDir) || 0,
                             fadeOutDir: Number(later.fadeOutDir) || 0,
+                            ...(later.hostFades?.curve_mode === "reaper_new"
+                                ? {
+                                      fadeInS: Number(later.fadeInS) || 0,
+                                      fadeOutS: Number(later.fadeOutS) || 0,
+                                  }
+                                : {}),
                         },
                     ],
                 }),

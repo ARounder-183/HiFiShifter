@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// `reclaim` 等待在途读者退出的自旋上限（见 [`SnapshotStore::reclaim`]）。
+/// 仅在非实时线程使用；亚毫秒量级，不阻塞音频线程。
+const RECLAIM_SPIN_LIMIT: u32 = 4096;
+
 #[derive(Debug)]
 pub(crate) struct PlaybackSnapshot {
     pub sample_rate: u32,
@@ -326,10 +330,27 @@ impl SnapshotPublisher {
     }
     /// 必须持发布锁且仅在非实时线程调用。SeqCst保证旧指针读者先登记；新的读者只能
     /// 取得当前指针，故readers=0时可释放所有非current对象，不在音频线程析构大缓冲。
+    ///
+    /// 【为什么要有界自旋】连续播放时音频线程**几乎总**持有 reader（每个 block 进/出
+    /// 一次，而 block 只有几十毫秒量级、进/出间隔更短），一次不中就放弃会让退役快照
+    /// **永不回收** —— 预算被撑满后新的 `publish` 直接 `BudgetExceeded`，表现为"播放
+    /// 中改不动任何东西"。读取区极短（拷一个 block），通常几微秒就归零，所以这里做
+    /// **有界**自旋：自旋上限对应亚毫秒量级，远小于一次 publish 的可接受延迟；超限仍
+    /// 归零失败就照旧放弃（不阻塞、不分配），下一次 publish/collect 再试。
     fn reclaim(&self, retained: &mut (Vec<Box<PlaybackSnapshot>>, usize)) {
         let current = self.current.load(Ordering::SeqCst);
-        if self.readers.load(Ordering::SeqCst) != 0 {
-            return;
+        let mut spins = 0u32;
+        while self.readers.load(Ordering::SeqCst) != 0 {
+            if spins >= RECLAIM_SPIN_LIMIT {
+                return;
+            }
+            spins += 1;
+            std::hint::spin_loop();
+            // 每自旋一段让出一次时间片：其它线程（含音频线程）才能推进并把 readers
+            // 归零。仅非实时线程会走到这里（publish / collect_retired / has_capacity）。
+            if spins.is_multiple_of(128) {
+                std::thread::yield_now();
+            }
         }
         retained
             .0

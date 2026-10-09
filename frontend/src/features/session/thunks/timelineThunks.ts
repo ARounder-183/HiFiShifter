@@ -352,6 +352,9 @@ export const setClipStateRemote = createAsyncThunk(
             strength: number;
         };
         checkpoint?: boolean;
+        /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
+        fadeInS?: number;
+        fadeOutS?: number;
     }) => {
         return webApi.setClipState(payload);
     },
@@ -499,6 +502,9 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             fadeInDir?: number;
             fadeOutShape?: number;
             fadeOutDir?: number;
+            /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
+            fadeInS?: number;
+            fadeOutS?: number;
             autoFadeInSec?: number;
             autoFadeOutSec?: number;
             reversed?: boolean;

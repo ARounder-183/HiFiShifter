@@ -608,6 +608,55 @@ mod tests {
         assert!(document.pending_since.lock().unwrap().is_empty());
     }
 
+    /// 方向位读不出来（`PCM_Source_GetSectionInfo` 不可用）时，插件**既不能**标为倒放，
+    /// **也不能**假定为正放。必须如实投影 `reversed_known=false`，并在超期后给出
+    /// `direction_unknown` 原因码 —— 再等也不会变好，用户需要知道这一点。
+    #[test]
+    fn an_unreadable_direction_is_reported_instead_of_assumed_forward() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        // `section_reports` 默认 false ⇒ `take_reversed` 返回 `None`（读不到方向）。
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9880);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+
+        let mut payload = serde_json::json!({"clips": [
+            {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
+        ]});
+        // 已被认领（⇒ 不是 `unclaimed`）、也没有"授权指向另一个 take"（⇒ 不是
+        // `take_switched`）—— 于是唯一剩下的成因就是"方向读不出来"。
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, item_id.clone());
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        // 读不到方向 ⇒ `reversed_known=false`；未超期时仍是"在途"。
+        assert_eq!(payload["clips"][0]["reversed_known"], false);
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
+
+        {
+            let mut since = document.pending_since.lock().unwrap();
+            since.insert(
+                item_id.clone(),
+                std::time::Instant::now() - std::time::Duration::from_secs(10),
+            );
+        }
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "unavailable");
+        assert_eq!(
+            payload["clips"][0]["host_media_reason"],
+            "direction_unknown"
+        );
+    }
+
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
     #[test]
     fn host_take_set_projects_every_take_without_any_source_path() {

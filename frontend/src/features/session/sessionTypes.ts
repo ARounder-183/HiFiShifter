@@ -290,6 +290,13 @@ export interface ClipInfo {
      */
     hostMediaReason?: string;
     /**
+     * 这一条的**方向位**是否读得到（插件模式；缺省 true）。
+     *
+     * `false` = 宿主没给出方向（`PCM_Source_GetSectionInfo` 不可用）。此时既不能画倒放
+     * 标记，也**不能**宣称"是正放" —— 如实显示"方向未知"，见 `hostAudio`。
+     */
+    reversedKnown?: boolean;
+    /**
      * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
      * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
      * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；
@@ -308,6 +315,16 @@ export interface ClipInfo {
     fadeInDir: number;
     /** 淡出曲率（REAPER D_FADEOUTDIR），范围 [-1, 1]。 */
     fadeOutDir: number;
+    /**
+     * 淡入 S 轴（REAPER ≥7.81 `D_FADEINDIR2_NEW`），范围 [-1, 1]；缺省 = 0。
+     *
+     * 只对 continuous 宿主有意义：它的曲线由 `(curvature, S)` 两轴共同决定，
+     * 一维投影解不出正确的点（见 `solveNearestCurveAxes`）。legacy 宿主与独立 App
+     * 恒为 0（没有这根轴）。与 `autoFadeInSec` 同属"可选、缺省即中性值"。
+     */
+    fadeInS?: number;
+    /** 淡出 S 轴（语义同 fadeInS）。 */
+    fadeOutS?: number;
     /** 自动交叉淡化长度（秒），与手动 fade（fadeInSec/fadeOutSec）分离存储。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;

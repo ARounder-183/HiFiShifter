@@ -48,7 +48,7 @@ type MenuState = {
 type PendingEntry = {
     clipId: string;
     isOut: boolean;
-    patch: { shape?: number; dir?: number };
+    patch: { shape?: number; dir?: number; s?: number };
 };
 
 function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide | null {
@@ -59,6 +59,9 @@ function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide 
             : clip.fadeInShape
         : 0;
     const dir = (ref.isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0;
+    // S 轴只对 continuous 宿主存在；legacy/独立 App 恒 0。
+    const continuous = clip.hostFades?.curve_mode === "reaper_new";
+    const s = continuous ? Number((ref.isOut ? clip.fadeOutS : clip.fadeInS) ?? 0) || 0 : 0;
     const autoSec = ref.isOut ? (clip.autoFadeOutSec ?? 0) : (clip.autoFadeInSec ?? 0);
     const manualSec = Math.max(0, ref.isOut ? (clip.fadeOutSec ?? 0) : (clip.fadeInSec ?? 0));
     const lengthSec = autoSec > 0 ? autoSec : manualSec;
@@ -67,6 +70,7 @@ function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide 
         isOut: ref.isOut,
         shape,
         dir,
+        s,
         lengthSec,
         // 宿主读数从 Redux 实时解析（不是打开时的快照）——与 shape/dir 同一条纪律。
         hostFades: clip.hostFades,
@@ -122,6 +126,14 @@ export const FadeContextMenuHost: React.FC = () => {
         const entry = pendingPatchesRef.current.get(key);
         if (!entry) return;
         lastRemoteRef.current[key] = Date.now();
+        // S 只在 continuous 宿主上出现（`handleSChange` 才会填它）。legacy 宿主上
+        // 传 S 会被后端 `validate_fade_axes` 拒绝，所以这里按"有没有值"条件展开。
+        const sPatch =
+            entry.patch.s === undefined
+                ? {}
+                : entry.isOut
+                  ? { fadeOutS: entry.patch.s }
+                  : { fadeInS: entry.patch.s };
         remoteChainRef.current = remoteChainRef.current
             .then(() =>
                 webApi.setClipState({
@@ -129,6 +141,7 @@ export const FadeContextMenuHost: React.FC = () => {
                     ...(entry.isOut
                         ? { fadeOutShape: entry.patch.shape, fadeOutDir: entry.patch.dir }
                         : { fadeInShape: entry.patch.shape, fadeInDir: entry.patch.dir }),
+                    ...sPatch,
                     checkpoint: false,
                 }),
             )
@@ -271,17 +284,24 @@ export const FadeContextMenuHost: React.FC = () => {
      * - 全部写入 checkpoint:false，并入会话 undo group（首次提交时惰性开启）。
      */
     const commit = React.useCallback(
-        (clipId: string, isOut: boolean, patch: { shape?: number; dir?: number }) => {
+        (clipId: string, isOut: boolean, patch: { shape?: number; dir?: number; s?: number }) => {
             void ensureSessionGroup();
             const targets = expandTargets(clipId);
             batch(() => {
                 for (const targetId of targets) {
+                    const sPatch =
+                        patch.s === undefined
+                            ? {}
+                            : isOut
+                              ? { fadeOutS: patch.s }
+                              : { fadeInS: patch.s };
                     dispatch(
                         setClipFades({
                             clipId: targetId,
                             ...(isOut
                                 ? { fadeOutShape: patch.shape, fadeOutDir: patch.dir }
                                 : { fadeInShape: patch.shape, fadeInDir: patch.dir }),
+                            ...sPatch,
                         }),
                     );
                 }
@@ -316,6 +336,15 @@ export const FadeContextMenuHost: React.FC = () => {
         [commit],
     );
 
+    // S 轴滑杆（只有 REAPER ≥7.81 有）。曲率与 S 是同一族曲线的两个分量，
+    // 单独动 S 时不带 shape —— 后端只写 `D_FADE*DIR2_NEW`，曲率保持不变。
+    const handleSChange = React.useCallback(
+        (clipId: string, isOut: boolean, s: number) => {
+            commit(clipId, isOut, { s });
+        },
+        [commit],
+    );
+
     if (!menu || !primary) return null; // 目标 clip 已被删除等情形：直接关闭。
     return (
         <FadeContextMenu
@@ -326,6 +355,7 @@ export const FadeContextMenuHost: React.FC = () => {
             onClose={closeMenu}
             onShapeChange={handleShapeChange}
             onDirChange={handleDirChange}
+            onSChange={handleSChange}
         />
     );
 };

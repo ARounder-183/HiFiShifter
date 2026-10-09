@@ -269,6 +269,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 color: args[21],
                 formantMorph: args[22],
                 checkpoint: args[23],
+                fadeInS: args[24],
+                fadeOutS: args[25],
             };
 
         case "set_clips_state_bulk":

@@ -2050,6 +2050,8 @@ export const zhTW = {
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
     ara_clip_host_take_switched:
         "REAPER 換了這一條的目前 Take，外掛還沒拿到它的音訊；在 REAPER 裡復原，或再編輯一下讓它重新分配",
+    ara_clip_direction_unknown:
+        "宿主沒有回報這一條的方向，外掛無法判斷它是否倒放；既不標為倒放，也不假定為正放",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",

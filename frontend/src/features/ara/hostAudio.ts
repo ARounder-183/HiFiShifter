@@ -113,15 +113,23 @@ export function hostMediaState(clip: {
  * - `unclaimed` —— 这个 item 从未被本实例的 ARA region 认领。
  * - `folder_parent` —— FX 挂在 folder 父轨，本实例永远拿不到组内音频。**用法问题**。
  * - `awaiting_region` —— 等超时了仍没有 region；多半是宿主侧出了别的岔子。
+ * - `direction_unknown` —— 连这一条**是不是倒放**都读不出来（`PCM_Source_GetSectionInfo`
+ *   不可用）。再等也不会变好；如实说明，不宣称"是正放"。
  */
 export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
     "take_switched",
     "unclaimed",
     "folder_parent",
     "awaiting_region",
+    "direction_unknown",
 ]);
 
-export type HostMediaReason = "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region";
+export type HostMediaReason =
+    | "take_switched"
+    | "unclaimed"
+    | "folder_parent"
+    | "awaiting_region"
+    | "direction_unknown";
 
 /**
  * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。

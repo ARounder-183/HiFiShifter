@@ -5637,10 +5637,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             isOut,
             shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
             dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
+            // S 轴只对 continuous 宿主存在；legacy/独立 App 恒 0。
+            s: Number((isOut ? clip.fadeOutS : clip.fadeInS) ?? 0) || 0,
             lengthSec: effectiveFadeSec(
                 isOut ? clip.fadeOutSec : clip.fadeInSec,
                 isOut ? clip.autoFadeOutSec : clip.autoFadeInSec,
             ),
+            hostFades: clip.hostFades,
         };
     }
 

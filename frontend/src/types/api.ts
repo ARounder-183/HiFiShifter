@@ -118,6 +118,11 @@ export interface TimelineClip {
      * 缺省 = 未给或未知，消费端退回通用文案。
      */
     host_media_reason?: string;
+    /**
+     * 这一条的**方向位**是否读得到（仅插件模式产生；缺省 true）。
+     * `false` = 宿主没给出方向，既不能画倒放标记，也不能宣称"是正放"。
+     */
+    reversed_known?: boolean;
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
     snap_offset_sec?: number;
     fade_in_sec?: number;

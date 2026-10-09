@@ -366,6 +366,121 @@ export function solveNearestCurveDir(args: {
 }
 
 /**
+ * 二维最近点求解器：把指针投影到 `(curvature, S)` 曲线族上。
+ *
+ * 【为什么需要二维】REAPER ≥7.81 的淡变曲线由 `D_FADE*DIR_NEW` 与
+ * `D_FADE*DIR2_NEW` **两个**连续轴共同决定，不是一维。{@link solveNearestCurveDir}
+ * 的签名是 `(t, dir) => gain`，结构上只能解一维 —— 在 S 族曲线上拖动时它永远把 S
+ * 固定成常数、只动 curvature，解出的点根本不在曲线族上，表现为"拖了不跟手 / 跳变"。
+ *
+ * 本函数沿用一维版**完全相同的两段式**（粗扫 + 局部精化），只是网格从
+ * `(dir × t)` 升成 `(curvature × S × t)`。粗扫刻意取偶数格宽，使七个实测预设
+ * （`HOST_FADE_PRESET_AXES`：curvature/S 只取 0/±0.5/±1）都精确落在网格点上，
+ * 不会被邻格"吸走"而画出混合曲线。
+ *
+ * 旧轴宿主与独立 App 仍走一维版（那里的"形状号"本身是离散的）——本函数是
+ * **并列**入口，不替换它。
+ */
+export function solveNearestCurveAxes(args: {
+    mode: "in" | "out";
+    curvature: number;
+    s: number;
+    pointerX01: number;
+    pointerY01: number;
+    aspectYOverX?: number;
+    /** 曲线求值器 `(t, curvature, s) => gain`；必须与画布画的是同一条曲线。 */
+    gainAt: (t: number, curvature: number, s: number) => number;
+}): { t: number; curvature: number; s: number; gain: number } {
+    const rawAspect = args.aspectYOverX;
+    const aspect =
+        typeof rawAspect === "number" && Number.isFinite(rawAspect) && rawAspect > 0
+            ? rawAspect
+            : 1;
+    const px = Math.min(1, Math.max(0, args.pointerX01));
+    const py = Math.min(1, Math.max(0, args.pointerY01));
+    const axisClamp = (v: number) => Math.min(1, Math.max(-1, v));
+    const gainAt = args.gainAt;
+    const startC = axisClamp(args.curvature);
+    const startS = axisClamp(args.s);
+
+    /**
+     * 屏幕距离 + **起始轴偏离**惩罚。
+     *
+     * 【为什么必须带这一项】`(curvature, S)` → 曲线是**多对一**的：表外的坐标是
+     * "线性形状 + 曲率"与 S 族的有界混合，很多组 `(c, S)` 会描出经过同一指针点的
+     * 曲线。若只比屏幕距离，求解器会在这些等价解里随便挑一个 —— 于是用户在一根
+     * **纯曲率**曲线上拖动时，S 会被无端拽到 0.4 之类的值，曲线族整个换掉（正是
+     * "跳变"）。惩罚项极小（`REG` 远小于有意义的屏幕距离），只在**屏幕距离等价**
+     * 的候选之间做取舍：优先保持用户原有的两根轴。
+     */
+    const REG = 0.005;
+    const scoreOf = (t: number, c: number, s: number): number => {
+        const g = gainAt(t, c, s);
+        const screen = Math.hypot(t - px, (g - py) * aspect);
+        return screen + REG * (Math.abs(c - startC) + Math.abs(s - startS));
+    };
+
+    // 粗扫描：(curvature × S × t) 网格取最优。偶数格宽 ⇒ 预设坐标落在网格点上。
+    const C_STEPS = 16;
+    const S_STEPS = 16;
+    const T_STEPS = 32;
+    // 起点先入场：保证结果**永不比"什么都不改"更差**（网格可能恰好错过最优点）。
+    let bestT = px;
+    let bestC = startC;
+    let bestS = startS;
+    let bestScore = scoreOf(px, startC, startS);
+    for (let ci = 0; ci <= C_STEPS; ci += 1) {
+        const c = -1 + (2 * ci) / C_STEPS;
+        for (let si = 0; si <= S_STEPS; si += 1) {
+            const s = -1 + (2 * si) / S_STEPS;
+            for (let ti = 0; ti <= T_STEPS; ti += 1) {
+                const t = ti / T_STEPS;
+                const score = scoreOf(t, c, s);
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestT = t;
+                    bestC = c;
+                    bestS = s;
+                }
+            }
+        }
+    }
+
+    // 局部精化：三轴逐步缩小步长的网格下降（含对角方向，避免轴向锯齿）。
+    let stepT = 1 / T_STEPS;
+    let stepC = 2 / C_STEPS;
+    let stepS = 2 / S_STEPS;
+    for (let iter = 0; iter < 12; iter += 1) {
+        for (const [dt, dc, ds] of [
+            [stepT, 0, 0],
+            [-stepT, 0, 0],
+            [0, stepC, 0],
+            [0, -stepC, 0],
+            [0, 0, stepS],
+            [0, 0, -stepS],
+            [0, stepC, stepS],
+            [0, -stepC, -stepS],
+        ]) {
+            const nt = Math.min(1, Math.max(0, bestT + dt));
+            const nc = axisClamp(bestC + dc);
+            const ns = axisClamp(bestS + ds);
+            const score = scoreOf(nt, nc, ns);
+            if (score < bestScore) {
+                bestScore = score;
+                bestT = nt;
+                bestC = nc;
+                bestS = ns;
+            }
+        }
+        stepT /= 2;
+        stepC /= 2;
+        stepS /= 2;
+    }
+
+    return { t: bestT, curvature: bestC, s: bestS, gain: gainAt(bestT, bestC, bestS) };
+}
+
+/**
  * 曲率编辑的基础形状解析。
  *
  * 模型修正后**任何预设都直接可弯**（线性是真实可弯的轴端视图，
