@@ -2104,6 +2104,8 @@ export const enUS = {
     ara_clip_syncing_host_audio: "Waiting for REAPER to finish assigning audio",
     ara_clip_reversed_host_handled: "Reversed by REAPER; HiFiShifter does not process it",
     ara_clip_waiting_for_host_audio: "Waiting for REAPER to hand over audio",
+    ara_clip_host_take_switched:
+        "REAPER switched this item's active take and the plugin has not received its audio yet; undo in REAPER, or edit once more to make it reassign",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",

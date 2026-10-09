@@ -2048,6 +2048,8 @@ export const zhTW = {
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音訊分配",
     ara_clip_reversed_host_handled: "由 REAPER 倒放；HiFiShifter 不處理這一條",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
+    ara_clip_host_take_switched:
+        "REAPER 換了這一條的目前 Take，外掛還沒拿到它的音訊；在 REAPER 裡復原，或再編輯一下讓它重新分配",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",

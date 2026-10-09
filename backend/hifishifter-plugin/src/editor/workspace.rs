@@ -5,6 +5,13 @@ use hifishifter_kernel::state::TimelineState;
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
+/// 一个 item 没有 ARA 音频多久之后，就从"在途"改判为"等不到了"。
+///
+/// 【为什么是 2 秒】一次正常的 ARA 重认领（`begin_editing` … `end_editing`）在数百
+/// 毫秒内完成；2 秒足够覆盖一次分割/粘贴/切换 active take 后的回流。超过它仍无源，
+/// 再显示"正在等待"就是在骗用户 —— 转成带原因的 `unavailable`，让用户知道该做什么。
+const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// gain在原GUI是active-take扁平投影；插件显示item音量，两份显示字段必须一致且不送DSP。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
     clip.gain = gain as f32;
@@ -650,39 +657,95 @@ impl DocumentSession {
             .values()
             .cloned()
             .collect();
+        // item GUID → ARA 授权那一刻的 active take GUID。用来把"换了 active take 而
+        // ARA 尚未重新认领"（`take_switched`）与"从未被认领"分开 —— 两者的处理方式
+        // 完全不同，不能都压成一句"正在等待"。
+        let authorized_by_item: std::collections::HashMap<String, String> = {
+            let items = self.region_items.lock().unwrap();
+            let takes = self.authorized_takes.lock().unwrap();
+            items
+                .iter()
+                .filter_map(|(key, item)| {
+                    takes
+                        .get(key)
+                        .map(|take| (item.clone(), take.clone()))
+                })
+                .collect()
+        };
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
         let folder_parent = self.renderer_owners().into_iter().any(|owner| {
             owner.host_audio_status().state
                 == crate::render::extension::HostAudioState::FolderParentWithoutRegions
         });
+        let now = std::time::Instant::now();
+        let mut pending_since = self.pending_since.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
         for track in self.ui_tracks.lock().unwrap().values() {
             for item in &track.items {
+                let item_id = item.geometry.item_id.clone();
                 let Some(clip) = clips.iter_mut().find(|clip| {
-                    clip["id"] == format!("{namespace}ara-item-{}", item.geometry.item_id)
+                    clip["id"] == format!("{namespace}ara-item-{}", item_id)
                 }) else {
                     continue;
                 };
                 let has_source = clip["source_path"]
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
-                let state = if has_source {
-                    "ready"
-                } else if clip["reversed"].as_bool() == Some(true) {
+                let reversed = clip["reversed"].as_bool() == Some(true);
+                let (state, reason) = if has_source {
+                    // 有源 ⇒ 不管之前等过多久都从"在途"里出来。
+                    ("ready", None)
+                } else if reversed {
                     // 倒放被隔离：插件渲染不出反向内容，这一条由 REAPER 处理。
                     // 与"还没拿到音频"不是一回事，文案必须分开。
-                    "reversed"
-                } else if folder_parent && !claimed.contains(&item.geometry.item_id) {
-                    "unavailable"
+                    ("reversed", None)
+                } else if folder_parent && !claimed.contains(&item_id) {
+                    ("unavailable", Some("folder_parent"))
                 } else {
-                    // 其余都是**在途**：宿主可能还在分配，不是故障。
-                    "pending"
+                    // 还没拿到音频：先按"在途"记时，超期再判原因。
+                    let since = *pending_since.entry(item_id.clone()).or_insert(now);
+                    if now.duration_since(since) < PENDING_MEDIA_TIMEOUT {
+                        ("pending", None)
+                    } else {
+                        // 【为什么这里才给原因】未超期时原因往往是"马上就好了"
+                        // （宿主正在分配 region），报原因等于制造噪声。超期后原因才
+                        // 是用户真正需要的那条信息。
+                        let reason = if !claimed.contains(&item_id) {
+                            "unclaimed"
+                        } else if authorized_by_item
+                            .get(&item_id)
+                            .is_some_and(|authorized| {
+                                item.takes
+                                    .iter()
+                                    .find(|take| take.active)
+                                    .is_none_or(|take| &take.geometry.take_id != authorized)
+                            })
+                        {
+                            // ARA 授权的是**另一个** take 的 PCM，当前 active take 与它
+                            // 不符 —— 典型来源是"倒放 Item 为新 Take"（新 take 换了文件，
+                            // 而 ARA 没有重新认领）。
+                            "take_switched"
+                        } else {
+                            "awaiting_region"
+                        };
+                        ("unavailable", Some(reason))
+                    }
                 };
                 clip["host_media"] = serde_json::json!(state);
+                if let Some(reason) = reason {
+                    clip["host_media_reason"] = serde_json::json!(reason);
+                }
+                if state == "ready" {
+                    seen.insert(item_id);
+                }
             }
         }
+        // 回收：已经拿到音频（或已不在清单里）的 item 不再计时，否则它下次掉回
+        // "在途"时会立刻被判成超期。
+        pending_since.retain(|id, _| !seen.contains(id));
     }
     /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。
     ///

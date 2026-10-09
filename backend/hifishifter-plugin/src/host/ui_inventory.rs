@@ -543,6 +543,65 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "reversed");
     }
 
+    /// "等待 REAPER 完成音频分配"不能是吸收态：等超期后必须转成带**原因码**的
+    /// `unavailable`，否则用户对着一个永远转不完的占位，无从判断该做什么。
+    ///
+    /// 典型触发是 REAPER 的"倒放 Item 为新 Take"：宿主换了 active take，而 ARA 不再
+    /// 重发模型 ⇒ `authorized_takes` 永久陈旧 ⇒ 没有 take 拿到 `source_path`。
+    #[test]
+    fn a_stale_pending_item_becomes_an_actionable_unavailable() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9879);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+
+        // 该 item 已被 ARA 认领，授权记录指向**另一个** take GUID（= 用户切了 active take）。
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, item_id.clone());
+        document
+            .authorized_takes
+            .lock()
+            .unwrap()
+            .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
+
+        let mut payload = serde_json::json!({"clips": [
+            {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
+        ]});
+        // 第一轮：刚进入"在途"，不报原因（宿主可能马上就好）。
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
+        assert!(payload["clips"][0].get("host_media_reason").is_none());
+
+        // 把"开始等待的时刻"倒推到阈值之前，模拟"等了很久仍无源"。
+        {
+            let mut since = document.pending_since.lock().unwrap();
+            since.insert(
+                item_id.clone(),
+                std::time::Instant::now() - std::time::Duration::from_secs(10),
+            );
+        }
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "unavailable");
+        assert_eq!(payload["clips"][0]["host_media_reason"], "take_switched");
+
+        // 拿到音频后必须回到 ready，并**清掉计时** —— 否则下次掉回"在途"会立刻超期。
+        payload["clips"][0]["source_path"] = serde_json::json!("C:/pcm/source.wav");
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "ready");
+        assert!(document.pending_since.lock().unwrap().is_empty());
+    }
+
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
     #[test]
     fn host_take_set_projects_every_take_without_any_source_path() {

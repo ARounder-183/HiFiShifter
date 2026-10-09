@@ -285,6 +285,11 @@ export interface ClipInfo {
      */
     hostMedia?: string;
     /**
+     * `hostMedia === "unavailable"` 时的原因码（见 `hostAudio.hostMediaReason`）。
+     * 缺省 = 后端未给或原因未知，调用方退回通用文案。
+     */
+    hostMediaReason?: string;
+    /**
      * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
      * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
      * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；

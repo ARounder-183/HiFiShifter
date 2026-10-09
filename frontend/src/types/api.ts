@@ -112,6 +112,12 @@ export interface TimelineClip {
      * 缺省 = 本次响应没带该字段，消费端沿用上次已知值或按 `source_path` 推断。
      */
     host_media?: string;
+    /**
+     * `host_media === "unavailable"` 时的原因码（仅插件模式产生）：
+     * `take_switched` / `unclaimed` / `folder_parent` / `awaiting_region`。
+     * 缺省 = 未给或未知，消费端退回通用文案。
+     */
+    host_media_reason?: string;
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
     snap_offset_sec?: number;
     fade_in_sec?: number;

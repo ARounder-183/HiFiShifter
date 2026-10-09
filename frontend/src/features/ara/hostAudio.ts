@@ -102,3 +102,34 @@ export function hostMediaState(clip: {
     }
     return isAwaitingHostAudio(clip) ? "unavailable" : "ready";
 }
+
+/**
+ * `unavailable` 的**原因码**；与后端 `decorate_host_media_locked` 一一对应。
+ *
+ * 【为什么要有原因码】`unavailable` 单独一句"等待 REAPER 提供音频"回答不了用户最需要
+ * 的那个问题：该等、该改用法、还是该撤销。原因码把三种完全不同的处置分开：
+ * - `take_switched` —— 宿主换了这一条的当前 Take，而 ARA 尚未重新认领
+ *   （典型来源：REAPER 的"倒放 Item 为新 Take"）。**可操作**：撤销或再编辑一次。
+ * - `unclaimed` —— 这个 item 从未被本实例的 ARA region 认领。
+ * - `folder_parent` —— FX 挂在 folder 父轨，本实例永远拿不到组内音频。**用法问题**。
+ * - `awaiting_region` —— 等超时了仍没有 region；多半是宿主侧出了别的岔子。
+ */
+export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
+    "take_switched",
+    "unclaimed",
+    "folder_parent",
+    "awaiting_region",
+]);
+
+export type HostMediaReason = "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region";
+
+/**
+ * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。
+ */
+export function hostMediaReason(clip: { hostMediaReason?: string | null }): HostMediaReason | null {
+    const raw = clip.hostMediaReason;
+    if (typeof raw === "string" && HOST_MEDIA_REASONS.has(raw)) {
+        return raw as HostMediaReason;
+    }
+    return null;
+}

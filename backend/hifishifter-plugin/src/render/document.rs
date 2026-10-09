@@ -73,6 +73,16 @@ pub(crate) struct DocumentSession {
     /// 继承，键与生命周期都挂在参数权威上；媒体派生是显示层的事，两件事不该共用一个
     /// 记录 —— 否则一方的清理会静默影响另一方。
     pub split_media_from: Mutex<HashMap<String, String>>,
+    /// 每个尚未拿到音频的 item 是**从什么时候**开始等的（item GUID → 首次进入
+    /// "在途"的时刻）。
+    ///
+    /// 【为什么必须记时刻】"等待 REAPER 完成音频分配"此前是**吸收态**：只要一个 item
+    /// 没有 `source_path`、又不是 folder 父轨、方向位也读不出来，它就永远显示"正在
+    /// 等待"，无论等多久、用户做什么都出不来（典型触发：REAPER 的"倒放 Item 为新
+    /// Take"换了 active take，而 ARA 不再重发模型 ⇒ `authorized_takes` 永久陈旧）。
+    /// 记下时刻就能把"在途"与"等不到了"分开：超过阈值仍无源 ⇒ 转 `unavailable` 并给出
+    /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
+    pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
     pub ui_inventory_stamp: Mutex<Option<(i32, u64, u64)>>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,

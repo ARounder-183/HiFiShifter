@@ -2045,6 +2045,8 @@ export const zhCN = {
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音频分配",
     ara_clip_reversed_host_handled: "由 REAPER 倒放；HiFiShifter 不处理这一条",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频",
+    ara_clip_host_take_switched:
+        "REAPER 换了这一条的当前 Take，插件还没拿到它的音频；在 REAPER 里撤销，或再编辑一下让它重新分配",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",

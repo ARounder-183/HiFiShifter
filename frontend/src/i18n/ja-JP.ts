@@ -2119,6 +2119,8 @@ export const jaJP = {
     ara_clip_syncing_host_audio: "REAPER の音声割り当て完了を待っています",
     ara_clip_reversed_host_handled: "REAPER による逆再生です。HiFiShifter は処理しません",
     ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中",
+    ara_clip_host_take_switched:
+        "REAPER がこのアイテムの現在のテイクを切り替えましたが、プラグインはまだその音声を受け取っていません。REAPER で元に戻すか、もう一度編集して再割り当てさせてください",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",
