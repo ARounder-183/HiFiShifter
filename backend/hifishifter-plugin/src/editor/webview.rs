@@ -41,6 +41,24 @@ const PENDING_BUDGET: usize = 32;
 /// 请求已被丢弃。超时后剔除该条目，避免永久占用预算。
 const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 一组 clip id → 宿主 `I_GROUPID`（`1..=host_edit::HOST_GROUP_ID_MAX`）。
+///
+/// 【为什么是哈希而不是"显式序号"】序号要从当前编组集合取 `max+1`，而本处理器在
+/// UI 线程读到的 `editor.timeline` 未必已含刚提交的上一次编组 ⇒ 两次快速编组会取到
+/// 同一个序号，反而把两组并成一组。哈希只依赖**本次选择**：同一选择恒等（幂等），
+/// 不受提交时序影响。
+///
+/// 【为什么必须折进区间】旧实现 `raw & 0x7fff_ffff` 会给出到 `2^31-1` 的值，而宿主
+/// 只收 `0..=HOST_GROUP_ID_MAX`：约 7% 的编组会撞上 "invalid host item group id"，
+/// 整条 `set_clips_state_bulk` 被拒。取模后用到全部 32 位熵，同时保证落在区间内。
+fn host_group_id_for(clip_ids: &[String]) -> i32 {
+    let joined = clip_ids.join("\n");
+    let digest = blake3::hash(joined.as_bytes());
+    let mut bytes = [0_u8; 4];
+    bytes.copy_from_slice(&digest.as_bytes()[..4]);
+    (u32::from_le_bytes(bytes) % super::host_edit::HOST_GROUP_ID_MAX as u32 + 1) as i32
+}
+
 struct BrowserState {
     hwnd: HWND,
     closed: bool,
@@ -1003,8 +1021,8 @@ fn configure_browser(
             let ids=request["args"]["clipIds"].as_array().cloned().unwrap_or_default();
             if ids.is_empty()||ids.len()>512||ids.iter().any(|id|id.as_str().is_none()) {return Ok(());}
             let group=if request["command"]=="ungroup_clips" {0_i32} else {
-                let mut bytes=[0_u8;4];bytes.copy_from_slice(&blake3::hash(ids.iter().filter_map(|id|id.as_str()).collect::<Vec<_>>().join("\n").as_bytes()).as_bytes()[..4]);
-                (u32::from_le_bytes(bytes)&0x7fff_ffff).max(1) as i32
+                let names=ids.iter().filter_map(|id|id.as_str()).map(str::to_owned).collect::<Vec<_>>();
+                host_group_id_for(&names)
             };
             request["command"]=serde_json::json!("set_clips_state_bulk");request["args"]=serde_json::json!({"updates":ids.into_iter().map(|id|serde_json::json!({"clipId":id,"hostGroupId":group})).collect::<Vec<_>>(),"checkpoint":true});
         }
@@ -1629,5 +1647,59 @@ mod bootstrap_tests {
             flags.to_json("v")["fadeAxes"],
             serde_json::json!("continuous")
         );
+    }
+}
+
+#[cfg(test)]
+mod group_id_tests {
+    use super::host_group_id_for;
+    use crate::editor::host_edit::HOST_GROUP_ID_MAX;
+
+    fn raw_first_four(key: &str) -> u32 {
+        let digest = blake3::hash(key.as_bytes());
+        u32::from_le_bytes(digest.as_bytes()[..4].try_into().unwrap())
+    }
+
+    /// 编组 id 必须落在宿主接受区间内 —— 旧实现 `& 0x7fff_ffff` 会给出到 `2^31-1`
+    /// 的值，约 7% 的编组被 `host_edit` 的 "invalid host item group id" 整条拒绝。
+    #[test]
+    fn host_group_ids_stay_inside_the_host_accepted_range() {
+        let mut highest = 0_i32;
+        for i in 0..20_000 {
+            let id = host_group_id_for(&[format!("clip-{i}")]);
+            assert!((1..=HOST_GROUP_ID_MAX).contains(&id), "越界 id: {id}");
+            highest = highest.max(id);
+        }
+        // 分布应覆盖到区间上半，否则本测试没证明折进区间后仍用满了熵。
+        assert!(
+            highest > HOST_GROUP_ID_MAX / 2,
+            "取值上界偏低，折进区间可能压掉了熵：{highest}"
+        );
+    }
+
+    /// 直接钉住回归：样本里存在旧实现会拒绝的取值，新实现必须把它们收进区间。
+    #[test]
+    fn values_the_old_mask_would_have_rejected_are_now_in_range() {
+        let mut rejected_by_old = 0;
+        for i in 0..20_000 {
+            let key = format!("clip-{i}");
+            if raw_first_four(&key) & 0x7fff_ffff > HOST_GROUP_ID_MAX as u32 {
+                rejected_by_old += 1;
+                let id = host_group_id_for(&[key]);
+                assert!((1..=HOST_GROUP_ID_MAX).contains(&id), "仍越界: {id}");
+            }
+        }
+        assert!(
+            rejected_by_old > 0,
+            "样本里应存在旧实现会拒绝的取值，否则本测试没覆盖到回归"
+        );
+    }
+
+    /// 同一选择必须恒等映射：重复编组不得不断改号。
+    #[test]
+    fn the_same_selection_always_maps_to_the_same_group() {
+        let first = host_group_id_for(&["b".into(), "a".into()]);
+        let second = host_group_id_for(&["b".into(), "a".into()]);
+        assert_eq!(first, second);
     }
 }

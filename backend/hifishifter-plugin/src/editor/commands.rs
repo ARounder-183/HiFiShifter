@@ -671,6 +671,26 @@ pub(super) fn dispatch(
             "version": serde_json::Value::Null,
             "error": "vslib is not bundled with the ARA plugin",
         })),
+        // 推理设备（ORT Execution Provider）只读状态。插件与独立 App **共用同一份设置、
+        // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_id` 下发给
+        // 会话，所以这几条读数在插件里同样成立。
+        //
+        // 【为什么必须补】此前它们落到 `Command unavailable`，于是 `MenuBar` 把整个
+        // 推理设备子菜单禁用（`disabled={isPluginMode()}`）—— 用户能在独立 App 里选
+        // GPU，在插件里却只能看着 CPU。三个读数都**不初始化 ORT**（`is_available` 是
+        // 只读快照，GPU/DXGI 枚举是纯查询），不会像 `run_vocoder_benchmark` 那样在
+        // DAW 进程里触发重量级会话重建。
+        "get_onnx_status" => {
+            let compiled = hifishifter_kernel::nsf_hifigan_onnx::compiled();
+            Ok(json!({
+                "compiled": compiled,
+                "available": compiled && hifishifter_kernel::nsf_hifigan_onnx::is_available(),
+                "error": hifishifter_kernel::nsf_hifigan_onnx::model_load_error(),
+                "epChoice": hifishifter_kernel::nsf_hifigan_onnx::ep_choice(),
+            }))
+        }
+        "get_gpu_devices" => value(hifishifter_kernel::gpu_info::enumerate_gpus()),
+        "get_dml_adapters" => value(hifishifter_kernel::dml_adapters::enumerate_dml_adapters()),
         // 记事本正文：独立 App 把它写进工程文件；插件没有工程文件，写进插件自己的
         // 数据目录（见 `editor/notebook.rs`）。此前这条落到 `Command unavailable`，
         // 而前端把失败吞掉 —— 症状是"在插件里写的笔记重载即消失"。

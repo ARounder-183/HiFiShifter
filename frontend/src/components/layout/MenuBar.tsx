@@ -234,9 +234,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
 
-    // Fetch DML adapters on mount for GPU device selector
+    // Fetch DML adapters on mount for GPU device selector.
+    //
+    // 【为什么插件里也要取】插件的推理设备子菜单现在可用（插件与独立 App 共用同一份
+    // 设置与同一个内核，见 `editor/commands.rs` 的 `get_dml_adapters`）。此前这里
+    // 直接早退，插件里 GPU 设备清单恒空 —— 子菜单即使打开也选不到具体显卡。
     useEffect(() => {
-        if (isPluginMode()) return;
         import("../../services/api/core")
             .then(({ coreApi }) => coreApi.getDmlAdapters())
             .then((result) => {
@@ -1293,9 +1296,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Separator />
 
-                    {/* Inference Device */}
+                    {/* Inference Device。
+                        【为什么插件里可用】插件与独立 App 共用同一份设置与同一个内核：
+                        `ui_settings_apply::apply` 会把 `ort_ep` / `ort_device_id` 下发给
+                        会话，渲染管线按它选 EP。此前子菜单在插件里被整体禁用，用户能在
+                        独立 App 选 GPU、在插件里却只能看着 CPU。设备清单由内核的 DXGI
+                        枚举提供（`get_dml_adapters`），不初始化 ORT。 */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger disabled={isPluginMode()}>
+                        <DropdownMenu.SubTrigger>
                             {`${t("menu_inference_device")}: ${
                                 s.ortEp === "auto"
                                     ? `${t("menu_inference_auto")}${gpuBackend ? ` (${gpuBackend})` : ""}`

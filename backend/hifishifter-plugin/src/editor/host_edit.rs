@@ -7,6 +7,13 @@ use hifishifter_kernel::state::{Clip, ClipStatePatch, TimelineState};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// 宿主 `I_GROUPID` 的上界（0 保留给"未编组"）。
+///
+/// 【为什么是一份共享常量】写入侧（本文件）与生成侧（`editor/webview.rs` 的
+/// `host_group_id_for`）必须落在同一区间；两处各写一个字面量时，只改一处就会让
+/// 编组在生成侧合法、在写入侧被整条拒绝。
+pub(crate) const HOST_GROUP_ID_MAX: i32 = 2_000_000_000;
+
 pub(crate) struct ClipEdit {
     pub native_id: String,
     pub source_track: String,
@@ -289,7 +296,7 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 return Err("clip volume outside original GUI range 0..4".into());
             }
             if key == "hostGroupId"
-                && (!(0.0..=2_000_000_000.0).contains(&number) || number.fract() != 0.)
+                && (!(0.0..=HOST_GROUP_ID_MAX as f64).contains(&number) || number.fract() != 0.)
             {
                 return Err("invalid host item group id".into());
             }
@@ -600,7 +607,7 @@ pub(super) fn execute_managed(
                 target.set_take(c"I_CHANMODE", value as f64, &authorized)?;
             }
             if let Some(value) = edit.patch.host_group_id {
-                if !(0..=2_000_000_000).contains(&value) {
+                if !(0..=HOST_GROUP_ID_MAX).contains(&value) {
                     return Err("invalid host item group id".into());
                 }
                 target.set_item(c"I_GROUPID", value as f64, &authorized)?;
