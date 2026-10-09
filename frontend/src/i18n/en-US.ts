@@ -2101,8 +2101,9 @@ export const enUS = {
     ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
     ara_host_audio_folder_body:
         "REAPER manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
-    ara_clip_waiting_for_host_audio:
-        "Waiting for REAPER to hand over audio (no ARA region assigned)",
+    ara_clip_syncing_host_audio: "Waiting for REAPER to finish assigning audio",
+    ara_clip_reversed_host_handled: "Reversed by REAPER; HiFiShifter does not process it",
+    ara_clip_waiting_for_host_audio: "Waiting for REAPER to hand over audio",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",

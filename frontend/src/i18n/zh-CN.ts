@@ -2042,7 +2042,9 @@ export const zhCN = {
     ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
     ara_host_audio_folder_body:
         "REAPER 按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
-    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频（未分配 ARA 区域）",
+    ara_clip_syncing_host_audio: "正在等待 REAPER 完成音频分配",
+    ara_clip_reversed_host_handled: "由 REAPER 倒放；HiFiShifter 不处理这一条",
+    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",

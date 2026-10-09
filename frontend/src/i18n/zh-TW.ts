@@ -2045,7 +2045,9 @@ export const zhTW = {
     ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
     ara_host_audio_folder_body:
         "REAPER 按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
-    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊（未分配 ARA 區域）",
+    ara_clip_syncing_host_audio: "正在等待 REAPER 完成音訊分配",
+    ara_clip_reversed_host_handled: "由 REAPER 倒放；HiFiShifter 不處理這一條",
+    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",

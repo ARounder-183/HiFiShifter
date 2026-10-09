@@ -7,7 +7,12 @@
  */
 import { describe, expect, test } from "vitest";
 
-import { isAwaitingHostAudio, needsFolderTrackNotice, parseHostAudio } from "./hostAudio";
+import {
+    hostMediaState,
+    isAwaitingHostAudio,
+    needsFolderTrackNotice,
+    parseHostAudio,
+} from "./hostAudio";
 
 describe("parseHostAudio", () => {
     test("接受已知分类并归一化计数", () => {
@@ -90,5 +95,38 @@ describe("isAwaitingHostAudio", () => {
     test("MIDI 片段不是占位", () => {
         expect(isAwaitingHostAudio({ sourcePath: undefined, midiNoteCount: 4 })).toBe(false);
         expect(isAwaitingHostAudio({ sourcePath: undefined, midiNoteCount: 0 })).toBe(false);
+    });
+});
+
+/*
+ * 逐 clip 的成因：一个布尔承载不了四种互不相容的情形。
+ *
+ * 【为什么值得单测】四种情形此前共用一句"等待 REAPER 提供音频（未分配 ARA 区域）"，
+ * 于是"我刚分割了一下"（在途）看起来像"插件坏了"。分类名由后端给，前端只做映射 ——
+ * 未知分类名必须沿用旧行为，不能凭空造一个新状态。
+ */
+describe("hostMediaState", () => {
+    test("后端分类优先，且原样透传", () => {
+        expect(hostMediaState({ sourcePath: undefined, hostMedia: "pending" })).toBe("pending");
+        expect(hostMediaState({ sourcePath: "x", hostMedia: "ready" })).toBe("ready");
+        expect(hostMediaState({ sourcePath: undefined, hostMedia: "reversed" })).toBe("reversed");
+        expect(hostMediaState({ sourcePath: undefined, hostMedia: "unavailable" })).toBe(
+            "unavailable",
+        );
+    });
+
+    test("未知分类名不被当成已知状态", () => {
+        // 旧前端遇到新后端的新分类时，按"没带该字段"处理（这里回落到 source_path 推断）。
+        expect(hostMediaState({ sourcePath: "x", hostMedia: "something-new" })).toBe("ready");
+        expect(hostMediaState({ sourcePath: undefined, hostMedia: "something-new" })).toBe(
+            "unavailable",
+        );
+    });
+
+    test("独立 App（无该字段）沿用旧行为", () => {
+        expect(hostMediaState({ sourcePath: "C:/a.wav" })).toBe("ready");
+        expect(hostMediaState({ sourcePath: undefined })).toBe("unavailable");
+        // MIDI 片段有内容可画，不是占位。
+        expect(hostMediaState({ sourcePath: undefined, midiNoteCount: 3 })).toBe("ready");
     });
 });

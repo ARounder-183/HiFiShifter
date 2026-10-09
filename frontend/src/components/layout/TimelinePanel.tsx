@@ -46,7 +46,7 @@ import { useMenuShortcut } from "../../ui/useMenuShortcut";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
-import { isAwaitingHostAudio } from "../../features/ara/hostAudio";
+import { hostMediaState } from "../../features/ara/hostAudio";
 import { DockGutter } from "../dock/DockGutter";
 import { DEFAULT_GUTTER_SIZES, GUTTER_LIMITS } from "../../features/dock/dockSchema";
 import { setGutterSize } from "../../features/dock/dockSlice";
@@ -3905,9 +3905,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
              *
              * 只在没有更具体的控件文案时才用（`text === null` 即命中 body / 无控件
              * 区域）—— 悬停名称、静音等控件时，那些文案更贴近用户当刻的意图。
+             *
+             * 【为什么按状态分文案】一个布尔承载不了四种成因：刚分割后的**在途**、
+             * folder 父轨的**永远拿不到**、倒放的**宿主在处理**、以及真的在等。
+             * 此前它们共用一句"等待 REAPER 提供音频（未分配 ARA 区域）"，
+             * 于是"我刚分割了一下"看起来像"插件坏了"。
              */
-            if (text === null && isAwaitingHostAudio(clip)) {
-                text = t("ara_clip_waiting_for_host_audio");
+            if (text === null) {
+                switch (hostMediaState(clip)) {
+                    case "pending":
+                        text = t("ara_clip_syncing_host_audio");
+                        break;
+                    case "unavailable":
+                        text = t("ara_clip_waiting_for_host_audio");
+                        break;
+                    case "reversed":
+                        text = t("ara_clip_reversed_host_handled");
+                        break;
+                    default:
+                        break;
+                }
             }
             publishFadeRichTooltip(anchor, text);
         },

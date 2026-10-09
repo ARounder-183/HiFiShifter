@@ -1966,6 +1966,7 @@ function applyTimelineState(
                     ? Number(clip.source_channels)
                     : undefined,
             loopEnabled: Boolean(clip.loop_enabled),
+            hostMedia: typeof clip.host_media === "string" ? clip.host_media : undefined,
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),

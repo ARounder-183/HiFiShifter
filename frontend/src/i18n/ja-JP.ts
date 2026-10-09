@@ -2116,7 +2116,9 @@ export const jaJP = {
     ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
     ara_host_audio_folder_body:
         "REAPER は ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
-    ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中（ARA リージョンが未割り当て）",
+    ara_clip_syncing_host_audio: "REAPER の音声割り当て完了を待っています",
+    ara_clip_reversed_host_handled: "REAPER による逆再生です。HiFiShifter は処理しません",
+    ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",

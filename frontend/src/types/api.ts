@@ -106,6 +106,12 @@ export interface TimelineClip {
     source_channels?: number;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;
+    /**
+     * 宿主媒体状态（仅插件模式产生）：`ready` / `pending` / `unavailable` / `reversed`。
+     *
+     * 缺省 = 本次响应没带该字段，消费端沿用上次已知值或按 `source_path` 推断。
+     */
+    host_media?: string;
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
     snap_offset_sec?: number;
     fade_in_sec?: number;

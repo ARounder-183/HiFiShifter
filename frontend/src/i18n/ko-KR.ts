@@ -2087,7 +2087,9 @@ export const koKR = {
     ara_host_audio_folder_title: "이 플러그인은 트랙 그룹(폴더)에 있습니다",
     ara_host_audio_folder_body:
         "REAPER는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",
-    ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중(ARA 리전 미할당)",
+    ara_clip_syncing_host_audio: "REAPER의 오디오 할당 완료를 기다리는 중",
+    ara_clip_reversed_host_handled: "REAPER가 역재생합니다. HiFiShifter는 처리하지 않습니다",
+    ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중",
     ara_replace_dirty_message:
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",

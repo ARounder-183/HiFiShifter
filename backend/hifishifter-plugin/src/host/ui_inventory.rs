@@ -471,6 +471,42 @@ mod tests {
         );
     }
 
+    /// 逐 clip 的宿主媒体状态必须把**四种成因分开** —— 它们此前共用一句
+    /// "等待 REAPER 提供音频（未分配 ARA 区域）"，于是"刚分割了一下"看起来像故障。
+    #[test]
+    fn host_media_state_separates_the_causes() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9878);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+
+        let mut payload = serde_json::json!({"clips": [
+            {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
+        ]});
+        // 未认领、也不是 folder 父轨 → **在途**（宿主可能还在分配，不是故障）。
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
+
+        // 有源 → ready。
+        payload["clips"][0]["source_path"] = serde_json::json!("C:/pcm/source.wav");
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "ready");
+
+        // 倒放被隔离 → reversed（**不是** pending）：ARA 不给反向 PCM，这一条由宿主处理。
+        payload["clips"][0]["source_path"] = serde_json::json!(null);
+        payload["clips"][0]["reversed"] = serde_json::json!(true);
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "reversed");
+    }
+
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
     #[test]
     fn host_take_set_projects_every_take_without_any_source_path() {

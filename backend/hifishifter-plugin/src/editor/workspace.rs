@@ -501,6 +501,59 @@ impl DocumentSession {
         let _transaction = self.transaction.lock().unwrap();
         if self.is_alive() {
             self.decorate_host_fades_locked(payload, namespace, &self.edits.lock().unwrap().fades);
+            self.decorate_host_media_locked(payload, namespace);
+        }
+    }
+    /// 逐 clip 的宿主媒体状态（语言无关分类，文案由前端 catalog 本地化）。
+    ///
+    /// 【为什么需要它】前端此前用一个"没有 `source_path`"的布尔同时表示四种互不相容的
+    /// 情形：刚分割/裁切后的**在途**、非 active take 的**正常**、folder 父轨的**永远
+    /// 拿不到**、宿主换 take 后的**授权失效**。四者给出同一句"等待 REAPER 提供音频"，
+    /// 于是"我刚分割了一下"看起来像"插件坏了"。
+    ///
+    /// 【为什么分类留在后端】与 `host_audio` 同一纪律：后端只给语言无关的分类名
+    /// （`HostAudioState` 的先例），文案按 catalog 本地化。前端对不认识的分类名
+    /// 沿用上一次已知值，不猜。
+    pub(crate) fn decorate_host_media_locked(
+        &self,
+        payload: &mut serde_json::Value,
+        namespace: &str,
+    ) {
+        // 被某个 region 认领的 item；不在集合里的还没拿到 ARA 音频。
+        let claimed: std::collections::BTreeSet<String> =
+            self.region_items.lock().unwrap().values().cloned().collect();
+        // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
+        let folder_parent = self.renderer_owners().into_iter().any(|owner| {
+            owner.host_audio_status().state
+                == crate::render::extension::HostAudioState::FolderParentWithoutRegions
+        });
+        let Some(clips) = payload["clips"].as_array_mut() else {
+            return;
+        };
+        for track in self.ui_tracks.lock().unwrap().values() {
+            for item in &track.items {
+                let Some(clip) = clips.iter_mut().find(|clip| {
+                    clip["id"] == format!("{namespace}ara-item-{}", item.geometry.item_id)
+                }) else {
+                    continue;
+                };
+                let has_source = clip["source_path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty());
+                let state = if has_source {
+                    "ready"
+                } else if clip["reversed"].as_bool() == Some(true) {
+                    // 倒放被隔离：插件渲染不出反向内容，这一条由 REAPER 处理。
+                    // 与"还没拿到音频"不是一回事，文案必须分开。
+                    "reversed"
+                } else if folder_parent && !claimed.contains(&item.geometry.item_id) {
+                    "unavailable"
+                } else {
+                    // 其余都是**在途**：宿主可能还在分配，不是故障。
+                    "pending"
+                };
+                clip["host_media"] = serde_json::json!(state);
+            }
         }
     }
     /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。

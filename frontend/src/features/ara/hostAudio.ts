@@ -53,13 +53,52 @@ export function needsFolderTrackNotice(status: HostAudioPayload | null): boolean
  *
  * 【判据沿用既有的 `source_path` 缺失】占位片段没有 `source_path`（见后端
  * `present_host_inventory` 与 `retain_display_waveforms`：未经 ARA 授权不得读 PCM）。
- * 不新增状态字段，避免同一件事维护两处真相。
  *
  * MIDI / 音高参考片段同样没有 `source_path`，但它有音符内容可画，不该被标成"等待音频"。
+ *
+ * 【与 `hostMediaState` 的关系】本函数只回答"要不要画占位"，不回答"为什么"。
+ * 悬停文案必须用 [`hostMediaState`] —— 一个布尔承载不了四种成因。
  */
 export function isAwaitingHostAudio(clip: {
     sourcePath?: string | null;
     midiNoteCount?: number | null;
 }): boolean {
     return !clip.sourcePath && clip.midiNoteCount == null;
+}
+
+/** 后端给出的逐 clip 宿主媒体分类；与 `render::editor::workspace` 一一对应。 */
+export const HOST_MEDIA_STATES: ReadonlySet<string> = new Set([
+    "ready",
+    "pending",
+    "unavailable",
+    "reversed",
+]);
+
+export type HostMediaState = "ready" | "pending" | "unavailable" | "reversed";
+
+/**
+ * 该片段为什么没有（或已有）音频。
+ *
+ * 【为什么不能只用一个布尔】"没有 `source_path`"同时命中的情形里，只有一种是故障：
+ * - `pending` —— 刚分割/裁切/粘贴，宿主还在分配 region。**在途**，会自己好。
+ * - `unavailable` —— FX 挂在 folder 父轨上，本实例**永远**拿不到组内音频。**用法问题**。
+ * - `reversed` —— 倒放片段被隔离：ARA 不给反向 PCM。**宿主在处理**。
+ * - `ready` —— 正常。
+ *
+ * 四者此前共用一句"等待 REAPER 提供音频（未分配 ARA 区域）"，于是"我刚分割了一下"
+ * 看起来像"插件坏了"。分类名由后端给（语言无关），文案在这里查 catalog。
+ *
+ * 缺省（独立 App、或旧后端不带该字段）时按 `source_path` 推断 —— 沿用旧行为，
+ * 不猜一个新状态。
+ */
+export function hostMediaState(clip: {
+    sourcePath?: string | null;
+    midiNoteCount?: number | null;
+    hostMedia?: string | null;
+}): HostMediaState {
+    const raw = clip.hostMedia;
+    if (typeof raw === "string" && HOST_MEDIA_STATES.has(raw)) {
+        return raw as HostMediaState;
+    }
+    return isAwaitingHostAudio(clip) ? "unavailable" : "ready";
 }

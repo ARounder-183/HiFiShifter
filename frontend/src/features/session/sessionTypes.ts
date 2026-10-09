@@ -280,6 +280,11 @@ export interface ClipInfo {
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
     /**
+     * 宿主媒体状态（仅插件模式；见 `features/ara/hostAudio.hostMediaState`）。
+     * 缺省 = 独立 App 或旧后端，按 `sourcePath` 推断。
+     */
+    hostMedia?: string;
+    /**
      * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
      * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
      * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；
