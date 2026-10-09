@@ -244,8 +244,11 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
         }
     }
     let patch: ClipStatePatch = serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
-    if patch.reversed == Some(true) || patch.loop_enabled == Some(true) {
-        return Err("reverse/loop source editing is not supported".into());
+    // 倒放仍然拒绝：ARA 不给反向 PCM，插件渲染不出正确的反向内容（见 `probe/ara/` 的
+    // 倒放取证）。循环源**可以写** —— REAPER 的 `B_LOOPSRC` 是纯 item 属性，内核的
+    // `loop_enabled` 语义（对整份媒体回绕）与它一致，写回不会让两边不一致。
+    if patch.reversed == Some(true) {
+        return Err("reverse source editing is not supported".into());
     }
     Ok(patch)
 }
@@ -525,8 +528,9 @@ pub(super) fn execute_managed(
             if let Some(value) = edit.patch.gain {
                 target.set_item(c"D_VOL", value as f64, &authorized)?;
             }
-            if edit.patch.loop_enabled == Some(false) {
-                target.set_item(c"B_LOOPSRC", 0., &authorized)?;
+            if let Some(enabled) = edit.patch.loop_enabled {
+                // 双向：`B_LOOPSRC` 是 item 属性，读回来的就是它（见 `HostClipGeometry`）。
+                target.set_item(c"B_LOOPSRC", if enabled { 1. } else { 0. }, &authorized)?;
             }
             if let Some(value) = edit.patch.channel_mode {
                 if !(0..=4).contains(&value) {
@@ -752,6 +756,13 @@ mod tests {
         assert!(editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
             .is_err());
+        // 循环源**可以**规划：`B_LOOPSRC` 是纯 item 属性，内核语义与它一致。
+        assert!(editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"loopEnabled":true}))
+            .is_ok());
+        assert!(editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"loopEnabled":false}))
+            .is_ok());
         assert!(editor
             .plan_host_edit(
                 "set_clip_state",

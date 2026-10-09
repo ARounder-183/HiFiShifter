@@ -53,13 +53,21 @@ fn sync_host_takes(
         .iter()
         .find(|take| take.active)
         .map(|take| prefix(&take.geometry.take_id));
+    // 循环源是 item 级属性，同一个 item 的所有 take 读到同一个值。
+    let item_loop = item
+        .takes
+        .first()
+        .is_some_and(|take| take.geometry.loop_source);
     let unchanged = clip.active_take_id == active
         && clip.takes.len() == expected.len()
         && clip
             .takes
             .iter()
             .zip(&expected)
-            .all(|(take, id)| &take.id == id);
+            .all(|(take, id)| &take.id == id)
+        // 【为什么循环也进这条判据】它影响渲染（内核按整份媒体回绕）与渲染缓存键。
+        // 漏掉它时，用户在 REAPER 里开关"循环源"后这里会早退，界面停在旧状态。
+        && clip.loop_enabled == item_loop;
     if unchanged {
         return;
     }
@@ -91,6 +99,9 @@ fn sync_host_takes(
                 "channel_mode": g.channel_mode,
                 // 读不出来时留 false（不显示倒放标记），不编造"没倒放"的结论。
                 "reversed": take.reversed.unwrap_or(false),
+                // 循环源（item 级）。内核的 `loop_enabled` 语义与 REAPER 的循环源一致：
+                // 对**整份媒体**取模回绕，而插件物化的 PCM 就是完整源。
+                "loop_enabled": g.loop_source,
             })
         })
         .collect();

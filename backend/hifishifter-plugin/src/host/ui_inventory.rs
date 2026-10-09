@@ -437,6 +437,40 @@ mod tests {
         );
     }
 
+    /// 循环源（`B_LOOPSRC`）是 **item** 属性，必须读进几何并投影到 clip 与每个 take。
+    ///
+    /// 【为什么要读】内核的 `loop_enabled` 决定源窗口是否对**整份媒体**回绕，并且进渲染
+    /// 缓存键。不读就等于"REAPER 里循环了、插件按不循环渲染"—— 又一条静默分叉。
+    #[test]
+    fn loop_source_is_read_from_the_item_and_projected() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        fixture.set_value("B_LOOPSRC", 1.);
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        assert!(
+            track.items[0].geometry.loop_source,
+            "B_LOOPSRC is an item attribute and must be read from the item"
+        );
+
+        let document = crate::render::document::DocumentSession::new(9877);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        document.present_host_inventory(&mut timeline, "ui-");
+        let clip = &timeline.clips[0];
+        assert!(clip.loop_enabled, "loop must reach the flat clip projection");
+        assert!(
+            clip.takes.iter().all(|take| take.loop_enabled),
+            "loop is item-level, so every take of the item carries it"
+        );
+    }
+
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
     #[test]
     fn host_take_set_projects_every_take_without_any_source_path() {

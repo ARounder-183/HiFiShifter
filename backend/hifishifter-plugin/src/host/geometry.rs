@@ -46,6 +46,17 @@ pub(crate) struct HostClipGeometry {
     pub fade_axes_new: Option<bool>,
     pub auto_fade_in_sec: f64,
     pub auto_fade_out_sec: f64,
+    /// 宿主 item 的 `B_LOOPSRC`（"循环源"）。
+    ///
+    /// 【为什么是 item 级】REAPER 的循环源是 **item** 属性（官方头文件里
+    /// `B_LOOPSRC` 列在 `GetMediaItemInfo_Value` 的属性表中），与 RPP 的 `LOOP` 行同源 ——
+    /// 不是 take 属性。内核的 `Clip.loop_enabled` 语义（对**整份媒体**取模回绕）与它一致，
+    /// 而插件物化的 PCM 是完整源，所以这条读出来可以直接交给内核，无需改渲染路径。
+    ///
+    /// 【为什么读不出来时给 false 而不是 Option】与 `reversed` 不同：方向读不出来时
+    /// 说"没倒放"是**错的结论**（会漏掉一个真实状态），而循环源读不出来时说"不循环"
+    /// 是安全默认 —— 回绕是加法性的，关掉它只是少绕一圈，不会把内容指向别处。
+    pub loop_source: bool,
 }
 
 /// 此key来自唯一真实assignment；GUID不是用来搜索/猜测ARA对应关系的。

@@ -268,6 +268,14 @@ impl ParameterAtlas {
             record.live = false;
         }
         for clip in &timeline.clips {
+            // 【为什么跳过倒放而不是报错】本函数在**整份**接受路径上跑
+            // （`capture_render_input`、工作区接受都经过它）。一个倒放片段若在这里
+            // `Err`，整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句
+            // `any(reversed)` 是同一个"把局部状态升级成全局故障"的错。
+            // 倒放 clip 本来也渲染不出反向内容，跳过它就是如实处理。
+            if clip.reversed {
+                continue;
+            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
@@ -382,6 +390,11 @@ impl ParameterAtlas {
             let Some(params) = clips.get(&clip.id) else {
                 continue;
             };
+            // 与 `capture_changes` 同一条理由：倒放 clip 不参与参数投影，
+            // 但绝不能因为它让整份投影失败（本函数在渲染输入路径上）。
+            if clip.reversed {
+                continue;
+            }
             let root = timeline
                 .resolve_root_track_id(&clip.track_id)
                 .ok_or("unknown parameter root")?;

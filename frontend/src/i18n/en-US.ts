@@ -2124,6 +2124,8 @@ export const enUS = {
     plugin_transport_stop: "Stop playback in REAPER",
     plugin_transport_play: "Play or pause in REAPER",
     plugin_standalone_only: "Only available in the standalone app",
+    plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
+    plugin_reverse_unavailable: "ARA delivers no reversed audio; use REAPER to reverse",
     plugin_daw_controlled_reason:
         "Controlled by REAPER; manage files, clip geometry, tempo, meter and playback in the host",
 

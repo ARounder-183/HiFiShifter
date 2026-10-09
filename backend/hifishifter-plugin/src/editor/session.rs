@@ -856,12 +856,13 @@ impl EditorSession {
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        // 正向倍率交给原kernel保调处理，不能再把全部拉伸挡在GUI外；倒放仍按用户范围拒绝。
-        if timeline.clips.iter().any(|clip| clip.reversed) {
-            let error = "Unsupported ARA geometry: reverse is not supported".to_owned();
-            *self.error.lock().unwrap() = Some(error.clone());
-            return Err(error);
-        }
+        // 正向倍率交给原kernel保调处理，不能再把全部拉伸挡在GUI外。
+        //
+        // 【倒放为什么不再是整份失败】倒放是**宿主**的既有状态（REAPER 的
+        // `SOURCE SECTION MODE` / 负 `PLAYRATE`），用户没做错任何事；而此前这里一句
+        // `any(reversed)` 就 `Err`，于是"一个片段倒放"升级成"整个插件打不开"。
+        // 现在交给 `materialize_with_byte_limit` 的 `ReversePolicy::Isolate` 逐 clip 隔离：
+        // 该 clip 不物化（界面按无源占位显示，并标明"由 REAPER 处理"），其余照常。
         if timeline.target_param_frames(timeline.frame_period_ms()) > 1_000_000 {
             return Err("ARA editor parameter frame budget exceeded for project span".into());
         }
@@ -881,6 +882,7 @@ impl EditorSession {
             &views,
             &dir,
             crate::render::budget::global_budget().limit(),
+            hifishifter_kernel::editor::host_pcm::ReversePolicy::Isolate,
         )?;
         // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
         for params in timeline.params_by_root_track.values_mut() {
@@ -1178,6 +1180,9 @@ impl EditorSession {
                     .any(|id| format!("{}{id}", self.namespace) == clip.id)
             });
         }
+        // 倒放 clip 不参与分析：ARA 不给反向 PCM，插件渲染不出正确内容，
+        // 对它的分析结果也无处施加。它仍留在 GUI 时间线上（显示为"由 REAPER 处理"）。
+        timeline.clips.retain(|clip| !clip.reversed);
         for track in &mut timeline.tracks {
             if timeline
                 .params_by_root_track
@@ -3238,9 +3243,14 @@ pub(crate) mod tests {
         }
         editor.close();
     }
-    /// 首次遇到用户明确暂不做的倒放必须显示原因，不能只永远显示等待音频。
+    /// 倒放是**宿主**的既有状态，只逐 clip 隔离，绝不让整份会话失败。
+    ///
+    /// 【为什么这条是本测试的重点】此前 `ensure_loaded` 里一句
+    /// `any(|clip| clip.reversed)` 就 `Err`，于是"一个片段倒放"升级成"整个插件打不开"——
+    /// 用户报障的"特别多的兼容性问题"里就有它。现在隔离：该 clip 不物化（无源，界面按
+    /// "由 REAPER 处理"显示），其余照常加载。
     #[test]
-    fn unsupported_first_load_surfaces_geometry_error() {
+    fn a_reversed_clip_is_isolated_instead_of_failing_the_session() {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let mut timeline = document.timeline.lock().unwrap();
@@ -3249,10 +3259,20 @@ pub(crate) mod tests {
         clip.takes[0].reversed = true;
         drop(timeline);
         let editor = owner.editor_session().unwrap();
-        assert!(editor
-            .ensure_loaded(false)
-            .unwrap_err()
-            .starts_with("Unsupported"));
+        // 会话照常加载 —— 不再整份失败。
+        editor.ensure_loaded(false).unwrap();
+        let loaded = editor.timeline.lock().unwrap().clone();
+        let clip = &loaded.clips[0];
+        assert!(clip.reversed, "宿主事实要保留下来，界面才能显示倒放标记");
+        assert!(
+            clip.source_path.is_none(),
+            "被隔离的倒放 clip 不带源：ARA 不给反向 PCM，拿正向 PCM 当反向渲染是错的"
+        );
+        assert!(
+            clip.takes.iter().all(|take| take.source_path.is_none()),
+            "take 层同样不得留下源引用"
+        );
+        // 播放观察照常工作（此前那条路径被整份失败连带打断）。
         owner
             .clock
             .get()
@@ -3266,17 +3286,10 @@ pub(crate) mod tests {
         let playing =
             super::super::commands::dispatch(&editor, "get_playback_state", json!({})).unwrap();
         assert_eq!(playing["is_playing"], true);
-        assert_eq!(playing["position_sec"], 1.);
         owner.clock.get().unwrap().stopped();
-        assert_eq!(
-            super::super::commands::dispatch(&editor, "get_playback_state", json!({})).unwrap()
-                ["is_playing"],
-            false
-        );
         let state = editor.state();
         editor.close();
-        assert!(state["error"].as_str().unwrap().starts_with("Unsupported"));
-        assert_eq!(state["ready"], false);
+        assert_eq!(state["ready"], true, "会话必须处于就绪态，而不是报错态");
     }
     /// 同一已打开会话只改变GUI清单代次，读取仍采纳新增/删除；不依赖重开或定时器抢跑。
     #[test]

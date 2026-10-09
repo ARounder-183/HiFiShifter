@@ -2109,6 +2109,9 @@ export const koKR = {
     plugin_transport_stop: "REAPER에서 재생 정지",
     plugin_transport_play: "REAPER에서 재생/일시 정지",
     plugin_standalone_only: "독립 실행형 앱에서만 사용할 수 있습니다",
+    plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
+    plugin_reverse_unavailable:
+        "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 REAPER에서 하세요",
     plugin_daw_controlled_reason:
         "REAPER가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
 

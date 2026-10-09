@@ -122,6 +122,8 @@ impl Fixture {
                 ("C_AUTOSTRETCH", 1.),
                 ("B_MUTE", 0.),
                 ("B_MUTE_ACTUAL", 0.),
+                // 循环源是 item 属性（与 RPP 的 LOOP 行同源）。
+                ("B_LOOPSRC", 0.),
                 ("D_FADEINLEN", 0.2),
                 ("D_FADEOUTLEN", 0.3),
                 ("D_FADEINLEN_AUTO", 0.4),

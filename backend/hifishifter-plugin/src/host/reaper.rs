@@ -716,6 +716,9 @@ impl ReaperHost {
         let item_timebase = integer(iv(c"C_BEATATTACHMODE")?)?;
         let auto_stretch = boolean(iv(c"C_AUTOSTRETCH")?)?;
         let muted = boolean(iv(c"B_MUTE")?)?;
+        // 循环源是 **item** 属性（与 RPP 的 `LOOP` 行同源），不是 take 属性。
+        // 用 `iv`（item 值）而不是 `tv`（take 值）读，读的就是同一个对象上正确的那一项。
+        let loop_source = boolean(iv(c"B_LOOPSRC")?)?;
         let length = |name| -> Result<f64, String> {
             let v = iv(name)?;
             if v < 0. {
@@ -789,6 +792,7 @@ impl ReaperHost {
             item_timebase,
             auto_stretch,
             muted,
+            loop_source,
             item_gain,
             take_gain,
             markers,

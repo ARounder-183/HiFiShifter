@@ -1,12 +1,29 @@
 //! 宿主PCM的私有分析副本：只写调用方提供的私有目录，绝不把宿主ID当文件读取。
 use crate::state::TimelineState;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 pub struct PcmView<'a> {
     pub persistent_id: &'a str,
     pub sample_rate: u32,
     pub planes: &'a [Vec<f32>],
+}
+
+/// 遇到倒放 clip 时怎么办。
+///
+/// 【为什么需要两种】两条调用路径对"倒放"的含义完全不同：
+/// - **独立 App** 的工程文件里倒放是合法内容（导入/导出都支持），遇到它说明数据或调用方
+///   有问题 —— 硬失败是对的，能立刻暴露。
+/// - **ARA 插件**里的倒放是**宿主**的既有状态（REAPER 的 `SOURCE SECTION MODE` /
+///   负 `PLAYRATE`），用户没做错任何事。ARA 又不提供反向 PCM，插件渲染不出正确的反向
+///   内容 —— 但"一个片段倒放"不该升级成"整个插件打不开"。所以插件要**隔离**：
+///   该 clip 不物化（无源、界面显示为宿主处理），其余照常。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReversePolicy {
+    /// 遇到倒放即整份失败（独立 App 的既有行为）。
+    Reject,
+    /// 跳过倒放 clip：不物化、不报错，其余照常。
+    Isolate,
 }
 
 /// 在所有源/几何校验成功后生成只用于波形与分析的WAV，返回路径→宿主ID反向表。
@@ -16,7 +33,7 @@ pub fn materialize(
     sources: &[PcmView<'_>],
     dir: &Path,
 ) -> Result<(TimelineState, HashMap<String, String>), String> {
-    materialize_with_byte_limit(timeline, sources, dir, 64 * 1024 * 1024)
+    materialize_with_byte_limit(timeline, sources, dir, 64 * 1024 * 1024, ReversePolicy::Reject)
 }
 
 /// 同进程授权源已由调用者计入硬预算；文件流式写出不复制PCM，不按时长拒绝正常长源。
@@ -26,6 +43,7 @@ pub fn materialize_with_byte_limit(
     sources: &[PcmView<'_>],
     dir: &Path,
     byte_limit: usize,
+    reverse_policy: ReversePolicy,
 ) -> Result<(TimelineState, HashMap<String, String>), String> {
     if byte_limit == 0 || byte_limit > 512 * 1024 * 1024 {
         return Err("invalid host PCM byte limit".into());
@@ -63,18 +81,36 @@ pub fn materialize_with_byte_limit(
             return Err("invalid or oversized host PCM".into());
         }
     }
+    // 被隔离（跳过物化）的倒放 clip。第二趟改写路径时也要跳过它们 ——
+    // 它们已经没有源引用，`known[...]` 会失败。
+    let mut isolated: BTreeSet<String> = BTreeSet::new();
     for clip in &mut timeline.clips {
         clip.normalize_takes();
         if clip.reversed || clip.takes.iter().any(|t| t.reversed) {
-            return Err("ARA reverse playback is unsupported".into());
+            match reverse_policy {
+                ReversePolicy::Reject => {
+                    return Err("ARA reverse playback is unsupported".into());
+                }
+                ReversePolicy::Isolate => {
+                    // 隔离：**不物化**。清掉源引用而不是留着它 —— 留着会让下游把它当成
+                    // "有源"，于是拿正向 PCM 当反向内容渲染（那是错的，且不可见）。
+                    // 清掉之后界面按"无源占位"渲染，与"宿主在处理这一条"是同一个事实。
+                    clip.source_path = None;
+                    clip.source_path_relative = None;
+                    for take in &mut clip.takes {
+                        take.source_path = None;
+                        take.source_path_relative = None;
+                    }
+                    isolated.insert(clip.id.clone());
+                    continue;
+                }
+            }
         }
         if !clip.start_sec.is_finite()
             || !clip.length_sec.is_finite()
             || clip.length_sec <= 0.
-            || clip.reversed
             || clip.takes.iter().any(|t| {
-                t.reversed
-                    || !t.source_start_sec.is_finite()
+                !t.source_start_sec.is_finite()
                     || !t.source_end_sec.is_finite()
                     || !t.playback_rate.is_finite()
                     || t.playback_rate <= 0.
@@ -140,6 +176,10 @@ pub fn materialize_with_byte_limit(
         reverse.insert(path, pcm.persistent_id.to_owned());
     }
     for clip in &mut timeline.clips {
+        // 被隔离的倒放 clip 没有源引用，跳过 —— 它们保持无源（界面按占位渲染）。
+        if isolated.contains(&clip.id) {
+            continue;
+        }
         clip.source_path = clip
             .source_path
             .as_deref()
@@ -278,5 +318,86 @@ mod tests {
         )
         .unwrap();
         assert_ne!(next.clips[0].source_path.as_deref(), Some(path.as_str()));
+    }
+
+    /// 倒放的两种策略：独立 App 保持"整份拒绝"，插件"逐 clip 隔离"。
+    ///
+    /// 【为什么这条必须存在】`Isolate` 是插件能"一个片段倒放不再打死整个插件"的唯一
+    /// 依据；而 `Reject` 是独立 App 的既有行为，不能被这次改动削弱。两条一起钉住，
+    /// 才不会出现"为了修插件把独立 App 的校验也放开了"。
+    #[test]
+    fn reverse_policy_rejects_for_the_app_and_isolates_for_the_plugin() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-host-pcm-reverse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"T","order":0}],"bpm":120,"project_sec":1,
+            "clips":[
+                {"id":"reversed","name":"R","track_id":"track","start_sec":0,"length_sec":4.0/44100.,
+                 "takes":[{"id":"rt","source_path":"same-host-id","source_end_sec":4.0/44100.,
+                           "reversed":true}]},
+                {"id":"plain","name":"P","track_id":"track","start_sec":4.0/44100.,"length_sec":4.0/44100.,
+                 "takes":[{"id":"pt","source_path":"same-host-id","source_end_sec":4.0/44100.}]}
+            ]
+        }))
+        .unwrap();
+        let planes = vec![vec![0.1, 0.2, 0.3, 0.4]];
+        let view = PcmView {
+            persistent_id: "same-host-id",
+            sample_rate: 44100,
+            planes: &planes,
+        };
+
+        // 独立 App：整份拒绝（既有行为不变）。
+        assert!(
+            materialize_with_byte_limit(
+                timeline.clone(),
+                &[PcmView {
+                    persistent_id: view.persistent_id,
+                    sample_rate: view.sample_rate,
+                    planes: view.planes,
+                }],
+                &dir,
+                64 * 1024 * 1024,
+                ReversePolicy::Reject,
+            )
+            .is_err(),
+            "独立 App 的倒放校验不能被削弱"
+        );
+
+        // 插件：隔离倒放 clip，其余照常物化。
+        let (isolated, _) = materialize_with_byte_limit(
+            timeline,
+            &[view],
+            &dir,
+            64 * 1024 * 1024,
+            ReversePolicy::Isolate,
+        )
+        .unwrap();
+        let reversed = isolated
+            .clips
+            .iter()
+            .find(|clip| clip.id == "reversed")
+            .unwrap();
+        assert!(reversed.reversed, "宿主事实保留，界面才能显示倒放标记");
+        assert!(
+            reversed.source_path.is_none(),
+            "隔离 = 不物化：拿正向 PCM 当反向渲染是错的，而且不可见"
+        );
+        assert!(reversed.takes.iter().all(|take| take.source_path.is_none()));
+        let plain = isolated
+            .clips
+            .iter()
+            .find(|clip| clip.id == "plain")
+            .unwrap();
+        assert!(
+            plain.source_path.is_some(),
+            "其余 clip 必须照常物化 —— 隔离不是整份放弃"
+        );
     }
 }

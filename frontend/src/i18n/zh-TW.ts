@@ -2064,6 +2064,8 @@ export const zhTW = {
     plugin_transport_stop: "控制 REAPER 停止播放",
     plugin_transport_play: "控制 REAPER 播放/暫停",
     plugin_standalone_only: "僅在獨立 App 中可用",
+    plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
+    plugin_reverse_unavailable: "ARA 不提供反向音訊；倒放請在 REAPER 裡操作",
     plugin_daw_controlled_reason: "由 REAPER 控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

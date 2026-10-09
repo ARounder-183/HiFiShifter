@@ -2138,6 +2138,8 @@ export const jaJP = {
     plugin_transport_stop: "REAPER の再生を停止",
     plugin_transport_play: "REAPER の再生/一時停止",
     plugin_standalone_only: "スタンドアロン版でのみ利用できます",
+    plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
+    plugin_reverse_unavailable: "ARA は逆再生音声を提供しません。逆再生は REAPER で行ってください",
     plugin_daw_controlled_reason:
         "REAPER が制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 

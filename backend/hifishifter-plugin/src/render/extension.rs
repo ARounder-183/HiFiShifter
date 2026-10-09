@@ -3971,6 +3971,7 @@ mod region_geometry_match_tests {
             fade_axes_new: None,
             auto_fade_in_sec: 0.,
             auto_fade_out_sec: 0.,
+            loop_source: false,
         }
     }
 

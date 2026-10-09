@@ -1,4 +1,4 @@
-// 片段菜单共用原GUI；插件只显示已接通的宿主操作，不能暴露独立App私有几何命令。
+// 片段菜单共用原GUI；插件里做不到的项**显示并禁用 + 说明原因**，不换一棵手抄的子树。
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -6,7 +6,9 @@ import {
     canSplitHostClips,
     canClipboardHostClips,
     canEditHostClips,
+    canEditHostFadeAxes,
     canImportMidiAsClip,
+    dawControlledReason,
 } from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -82,6 +84,14 @@ const TakeMenuItem: React.FC<{
     disabled?: boolean;
     reversed: boolean;
     reverseLabel: string;
+    /**
+     * 倒放按钮是否不可用。
+     *
+     * 【为什么与 `disabled` 分开】行点击（切换 active take）与行尾倒放按钮是两件
+     * 独立的事：插件里 take 切换尚未接通，但"倒放"更是**永远**做不到 —— ARA 不给反向
+     * PCM，插件渲染不出正确的反向内容。两者禁用理由不同，不能共用一个开关。
+     */
+    reverseDisabled?: boolean;
     /** 声道模式（0..=4，对齐 REAPER CHANMODE）；MIDI take 等无声道语义时省略按钮。 */
     channelMode?: number;
     modeLabel?: string;
@@ -94,6 +104,7 @@ const TakeMenuItem: React.FC<{
     disabled = false,
     reversed,
     reverseLabel,
+    reverseDisabled = false,
     channelMode,
     modeLabel,
     modeTitle,
@@ -143,15 +154,17 @@ const TakeMenuItem: React.FC<{
             role="menuitem"
             aria-label={`${reverseLabel}: ${label}`}
             data-tooltip={reverseLabel}
+            disabled={reverseDisabled}
             className={`shrink-0 px-1.5 py-0.5 text-qt-micro leading-none rounded border transition-colors
                 ${
                     reversed
                         ? "border-qt-highlight text-qt-highlight"
                         : "border-qt-border text-qt-text-muted opacity-70"
-                } hover:bg-qt-menu-item-hover`}
+                } hover:bg-qt-menu-item-hover disabled:opacity-40`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
                 e.stopPropagation();
+                if (reverseDisabled) return;
                 onToggleReverse();
             }}
         >
@@ -389,124 +402,48 @@ export const ClipContextMenu: React.FC<{
         return () => window.removeEventListener("keydown", onKey);
     }, [onClose]);
 
-    if (isPluginMode())
-        return createPortal(
-            <div
-                ref={menuRef}
-                role="menu"
-                data-hs-context-menu="1"
-                data-hs-floating-menu="1"
-                className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                style={{ left: x, top: y }}
-                onPointerDown={(e) => e.stopPropagation()}
-            >
-                <MenuItem
-                    label={isMulti ? t("ctx_delete_all") : t("ctx_delete")}
-                    shortcut={deleteShortcut}
-                    danger
-                    disabled={!canClipboardHostClips()}
-                    onClick={() => {
-                        if (canClipboardHostClips()) onDelete(ids);
-                        close();
-                    }}
-                />
-                <MenuItem
-                    label={
-                        allMuted
-                            ? isMulti
-                                ? t("ctx_unmute_all")
-                                : t("clip_unmute")
-                            : isMulti
-                              ? t("ctx_mute_all")
-                              : t("clip_mute")
-                    }
-                    disabled={!canEditHostClips()}
-                    onClick={() => {
-                        if (canEditHostClips()) onMute(ids, !allMuted);
-                        close();
-                    }}
-                />
-                <Divider />
-                <MenuItem
-                    label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
-                    shortcut={copyShortcut}
-                    disabled={!canClipboardHostClips()}
-                    onClick={() => {
-                        if (canClipboardHostClips()) onCopy(ids);
-                        close();
-                    }}
-                />
-                <MenuItem
-                    label={isMulti ? t("ctx_cut_all") : t("ctx_cut")}
-                    shortcut={cutShortcut}
-                    disabled={!canClipboardHostClips()}
-                    onClick={() => {
-                        if (canClipboardHostClips()) onCut(ids);
-                        close();
-                    }}
-                />
-                <MenuItem
-                    label={t("ctx_split_at_playhead")}
-                    shortcut={splitShortcut}
-                    disabled={
-                        !canSplitHostClips() || (isMulti ? !canSplitSelected : !playheadInClip)
-                    }
-                    onClick={() => {
-                        onSplit(ids);
-                        close();
-                    }}
-                />
-                <MenuItem
-                    label={isMulti ? t("ctx_normalize_all") : t("ctx_normalize")}
-                    shortcut={normalizeShortcut}
-                    onClick={() => {
-                        onNormalize(ids);
-                        close();
-                    }}
-                />
-                {onEditRate && (
-                    <MenuItem
-                        label={t("ctx_edit_rate")}
-                        disabled={!canEditHostClips()}
-                        onClick={() => {
-                            if (canEditHostClips()) onEditRate(clip.id, x, y);
-                            close();
-                        }}
-                    />
-                )}
-                {onAddToParamSelection && (
-                    <MenuItem
-                        label={t("ctx_add_to_param_selection")}
-                        shortcut={addToParamSelectionShortcut}
-                        onClick={() => {
-                            onAddToParamSelection(ids);
-                            close();
-                        }}
-                    />
-                )}
-                {onGroup && (
-                    <MenuItem
-                        label={t("common_group")}
-                        disabled={!canEditHostClips() || isMulti === false}
-                        onClick={() => {
-                            if (canEditHostClips()) onGroup(ids);
-                            close();
-                        }}
-                    />
-                )}
-                {onUngroup && hasGroup && (
-                    <MenuItem
-                        label={t("common_ungroup")}
-                        disabled={!canEditHostClips()}
-                        onClick={() => {
-                            if (canEditHostClips()) onUngroup(ids);
-                            close();
-                        }}
-                    />
-                )}
-            </div>,
-            document.body,
-        );
+    /**
+     * 逐项能力门：**一棵菜单树**，插件里做不到的项禁用并说明原因。
+     *
+     * 【为什么是"禁用"而不是"不渲染"】此前插件走的是另一棵手抄的 10 项子树，于是
+     * "Take 子菜单 / 声道模式 / 循环 / 淡变形状行"这些入口在插件里**根本不存在** ——
+     * 用户看到的不是"这里不能做"，而是"这里没有"，于是报告"右键菜单缺很多入口"。
+     * 菜单项不占布局空间（与 Part 4 那条"隐藏内联控件"是两条不同的规则），
+     * 所以正确做法是显示 + 禁用 + 原因。
+     *
+     * 【每一项的判据来自哪里】都来自宿主写接口是否真的接通，不来自猜测。
+     */
+    const pluginMode = isPluginMode();
+    /** 宿主 item 几何可写：静音 / 编组 / 速率 / 循环 / 声道模式 / 淡变形状。 */
+    const hostGeometry = !pluginMode || canEditHostClips();
+    /** 宿主 item 剪贴板：复制 / 剪切 / 删除。 */
+    const hostClipboard = !pluginMode || canClipboardHostClips();
+    /** 宿主分割。 */
+    const hostSplit = !pluginMode || canSplitHostClips();
+    /**
+     * 宿主 **take 结构**（切换 active take、增删 take、逐 take 写）。
+     * 插件尚未绑定 `SetActiveTake` / `GetMediaItemTakeByGUID`，因此整族仍不可用。
+     */
+    const hostTakes = !pluginMode;
+    /** 需要**新建宿主 item** 的动作（胶合）。 */
+    const hostItemCreate = !pluginMode;
+    /** 倒放写回：ARA 不给反向 PCM，插件渲染不出正确的反向内容。 */
+    const hostReverse = !pluginMode;
+    /** 尚未搬进插件的插件自有工具（静音检测 / 音高参考 / 快速导出 / 假立体声扫描）。 */
+    const pluginLocalTools = !pluginMode;
+    /** 宿主权威原因文案（与 `canEditHostClips` 等同一份措辞）。 */
+    const hostReason = pluginMode ? dawControlledReason() : undefined;
+    /**
+     * "插件里暂时没有"与"由宿主控制"是两件事，文案必须分开 ——
+     * 把"静音检测还没搬进插件"说成"由 REAPER 控制"会把人引向错误的下一步。
+     */
+    const unavailableReason = pluginMode ? t("plugin_feature_unavailable") : undefined;
+    /** 倒放有**专有**原因：不是"没做"，而是 ARA 不提供反向 PCM。 */
+    const reverseReason = pluginMode ? t("plugin_reverse_unavailable") : undefined;
+    const gate = (allowed: boolean, reason?: string) => ({
+        disabled: !allowed,
+        ...(allowed ? {} : { title: reason ?? hostReason }),
+    });
 
     // 菜单挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
     // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
@@ -535,6 +472,7 @@ export const ClipContextMenu: React.FC<{
                 label={isMulti ? t("ctx_delete_all") : t("ctx_delete")}
                 shortcut={deleteShortcut}
                 danger
+                {...gate(hostClipboard)}
                 onClick={() => {
                     onDelete(ids);
                     close();
@@ -550,6 +488,7 @@ export const ClipContextMenu: React.FC<{
                           ? t("ctx_mute_all")
                           : t("clip_mute")
                 }
+                {...gate(hostGeometry)}
                 onClick={() => {
                     onMute(ids, !allMuted);
                     close();
@@ -563,6 +502,7 @@ export const ClipContextMenu: React.FC<{
                 {isMulti && (
                     <MenuItem
                         label={t("clip_pack_into_takes")}
+                        {...gate(hostTakes, unavailableReason)}
                         onClick={() => {
                             void dispatch(packClipsIntoTakesRemote({ clipIds: ids }));
                             close();
@@ -581,10 +521,11 @@ export const ClipContextMenu: React.FC<{
                                         ? t("clip_take_active_mark")
                                         : "\u2003"
                                 } ${take.name || take.id}`}
-                                disabled={takes.length <= 1}
+                                disabled={takes.length <= 1 || !hostTakes}
                                 reversed={Boolean(take.reversed)}
                                 reverseLabel={t("clip_take_reverse")}
-                                {...(take.sourcePath
+                                reverseDisabled={!hostReverse}
+                                {...(take.sourcePath && hostTakes
                                     ? {
                                           channelMode: take.channelMode,
                                           modeLabel: channelModeShortLabel(take.channelMode),
@@ -639,6 +580,7 @@ export const ClipContextMenu: React.FC<{
                                 <MenuItem
                                     label={t("clip_take_cycle_prev")}
                                     shortcut={cycleTakePrevShortcut}
+                                    {...gate(hostTakes, unavailableReason)}
                                     onClick={() => {
                                         void dispatch(
                                             cycleClipTakesRemote({
@@ -652,6 +594,7 @@ export const ClipContextMenu: React.FC<{
                                 <MenuItem
                                     label={t("clip_take_cycle_next")}
                                     shortcut={cycleTakeNextShortcut}
+                                    {...gate(hostTakes, unavailableReason)}
                                     onClick={() => {
                                         void dispatch(
                                             cycleClipTakesRemote({
@@ -667,6 +610,7 @@ export const ClipContextMenu: React.FC<{
                         <Divider />
                         <MenuItem
                             label={t("clip_take_add")}
+                            {...gate(hostTakes, unavailableReason)}
                             onClick={() => {
                                 void (async () => {
                                     const picked = await webApi.openAudioDialog();
@@ -688,7 +632,7 @@ export const ClipContextMenu: React.FC<{
                         />
                         <MenuItem
                             label={t("clip_take_duplicate")}
-                            disabled={!activeTake}
+                            disabled={!activeTake || !hostTakes}
                             onClick={() => {
                                 if (!activeTake) return;
                                 void dispatch(
@@ -757,7 +701,7 @@ export const ClipContextMenu: React.FC<{
                         <MenuItem
                             label={t("clip_take_remove")}
                             danger
-                            disabled={takes.length <= 1 || !activeTake}
+                            disabled={takes.length <= 1 || !activeTake || !hostTakes}
                             onClick={() => {
                                 if (!activeTake) return;
                                 void dispatch(
@@ -772,6 +716,7 @@ export const ClipContextMenu: React.FC<{
                         {takes.length > 1 && (
                             <MenuItem
                                 label={t("clip_take_explode")}
+                                {...gate(hostTakes, unavailableReason)}
                                 onClick={() => {
                                     void dispatch(explodeClipTakesRemote({ clipId: clip.id }));
                                     close();
@@ -786,6 +731,7 @@ export const ClipContextMenu: React.FC<{
                 {!allPitchAdjustment && (
                     <MenuItem
                         label={isMulti ? t("ctx_replace_all") : t("ctx_replace")}
+                        {...gate(hostTakes, unavailableReason)}
                         onClick={() => {
                             onReplace(hasPitchAdjustment ? audioOnlyIds : ids);
                             close();
@@ -823,6 +769,7 @@ export const ClipContextMenu: React.FC<{
                                 option.i18nKey,
                             )}`}
                             shortcut={option.shortLabel}
+                            {...gate(hostGeometry)}
                             onClick={() => {
                                 onSetChannelMode?.(ids, option.value);
                                 close();
@@ -835,6 +782,7 @@ export const ClipContextMenu: React.FC<{
                             <MenuItem
                                 label={t("ctx_scan_fake_stereo")}
                                 title={t("ctx_scan_fake_stereo_hint")}
+                                {...gate(pluginLocalTools, unavailableReason)}
                                 onClick={() => {
                                     onScanFakeStereo(ids);
                                     close();
@@ -854,6 +802,7 @@ export const ClipContextMenu: React.FC<{
                           ? t("ctx_reverse_selected")
                           : t("ctx_reverse")
                 }
+                {...gate(hostReverse, reverseReason)}
                 onClick={() => {
                     onToggleReverse(ids, !allReversed);
                     close();
@@ -870,6 +819,7 @@ export const ClipContextMenu: React.FC<{
                               ? t("ctx_loop_selected")
                               : t("ctx_loop")
                     }
+                    {...gate(hostGeometry)}
                     onClick={() => {
                         onToggleLoop(ids, !allLooped);
                         close();
@@ -880,6 +830,7 @@ export const ClipContextMenu: React.FC<{
             <MenuItem
                 label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
                 shortcut={copyShortcut}
+                {...gate(hostClipboard)}
                 onClick={() => {
                     onCopy(ids);
                     close();
@@ -888,6 +839,7 @@ export const ClipContextMenu: React.FC<{
             <MenuItem
                 label={isMulti ? t("ctx_cut_all") : t("ctx_cut")}
                 shortcut={cutShortcut}
+                {...gate(hostClipboard)}
                 onClick={() => {
                     onCut(ids);
                     close();
@@ -896,7 +848,7 @@ export const ClipContextMenu: React.FC<{
             <MenuItem
                 label={t("ctx_split_at_playhead")}
                 shortcut={splitShortcut}
-                disabled={isMulti ? !canSplitSelected : !playheadInClip}
+                disabled={!hostSplit || (isMulti ? !canSplitSelected : !playheadInClip)}
                 onClick={() => {
                     onSplit(ids);
                     close();
@@ -930,6 +882,7 @@ export const ClipContextMenu: React.FC<{
                     {onEditRate && (
                         <MenuItem
                             label={t("ctx_edit_rate")}
+                            {...gate(hostGeometry)}
                             onClick={() => {
                                 // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
                                 // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
@@ -941,9 +894,13 @@ export const ClipContextMenu: React.FC<{
                     {onSilenceDetection && (
                         <MenuItem
                             label={t("ctx_silence_detection")}
-                            disabled={!silenceEligible}
-                            data-tooltip={
-                                silenceEligible ? undefined : t("silence_no_audio_source")
+                            disabled={!silenceEligible || !pluginLocalTools}
+                            title={
+                                silenceEligible && pluginLocalTools
+                                    ? undefined
+                                    : pluginLocalTools
+                                      ? t("silence_no_audio_source")
+                                      : unavailableReason
                             }
                             onClick={() => {
                                 onSilenceDetection(ids);
@@ -960,6 +917,7 @@ export const ClipContextMenu: React.FC<{
                     {!allPitchAdjustment && onConvertToPitchRef && (
                         <MenuItem
                             label={t("ctx_convert_to_pitch_ref")}
+                            {...gate(pluginLocalTools, unavailableReason)}
                             onClick={() => {
                                 const audioIds = selectedClips
                                     .filter((c) => !isPitch(c))
@@ -974,6 +932,7 @@ export const ClipContextMenu: React.FC<{
                     {allPitchAdjustment && onUpdatePitchRef && (
                         <MenuItem
                             label={t("ctx_update_pitch_ref")}
+                            {...gate(pluginLocalTools, unavailableReason)}
                             onClick={() => {
                                 if (pitchOnlyIds.length > 0) {
                                     onUpdatePitchRef(pitchOnlyIds);
@@ -990,6 +949,7 @@ export const ClipContextMenu: React.FC<{
                     {!allPitchAdjustment && (
                         <MenuItem
                             label={t("ctx_quick_export")}
+                            {...gate(pluginLocalTools, unavailableReason)}
                             onClick={() => {
                                 onQuickExport(hasPitchAdjustment ? audioOnlyIds : ids);
                                 close();
@@ -1015,6 +975,7 @@ export const ClipContextMenu: React.FC<{
                             <MenuItem
                                 label={t("common_group")}
                                 shortcut={groupShortcut}
+                                {...gate(hostGeometry)}
                                 onClick={() => {
                                     onGroup?.(ids);
                                     close();
@@ -1025,6 +986,7 @@ export const ClipContextMenu: React.FC<{
                             <MenuItem
                                 label={t("common_ungroup")}
                                 shortcut={ungroupShortcut}
+                                {...gate(hostGeometry)}
                                 onClick={() => {
                                     onUngroup?.(ids);
                                     close();
@@ -1034,7 +996,8 @@ export const ClipContextMenu: React.FC<{
                         {isMulti && (
                             <MenuItem
                                 label={t("common_glue")}
-                                disabled={glueDisabled}
+                                disabled={glueDisabled || !hostItemCreate}
+                                title={hostItemCreate ? undefined : hostReason}
                                 onClick={() => {
                                     onGlue(ids);
                                     close();
@@ -1046,6 +1009,7 @@ export const ClipContextMenu: React.FC<{
             )}
 
             {onFadeShapeChange &&
+                canEditHostFadeAxes() &&
                 (() => {
                     // 多选：**每个方向只给一行**，选择即批量应用到全部所选 Clip。
                     // 旧实现逐个 Clip 列举（还带名字表头），选项行数随选择数线性
