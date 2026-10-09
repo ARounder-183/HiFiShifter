@@ -113,7 +113,7 @@ fn sync_host_takes(
                 "loop_enabled": g.loop_source,
                 // 宿主不报告、必须从旧 take 继承的插件自有内容。
                 "source_channels": old.and_then(|take| take.source_channels),
-                "channel_decision": old.and_then(|take| take.channel_decision.clone()),
+                "channel_decision": old.and_then(|take| take.channel_decision),
                 "midi_note_data": old.and_then(|take| take.midi_note_data.clone()),
                 "midi_fill_gaps": old.is_some_and(|take| take.midi_fill_gaps),
                 "stretch_markers": old.map(|take| take.stretch_markers.clone()).unwrap_or_default(),
