@@ -1,6 +1,11 @@
 // 宿主淡化示意显示：本应用包络有界/端点正确，保留原App路径，不伪称REAPER公式。
 import { expect, test } from "vitest";
-import { hostFadeDisplay, hostFadeLabel, visualFadeGain } from "./hostFadeDisplay";
+import {
+    hostFadeDisplay,
+    hostFadeDisplayShape,
+    hostFadeGainForAxes,
+    visualFadeGain,
+} from "./hostFadeDisplay";
 import { defaultFadeDirFor, fadeGainSigned } from "./reaperFade";
 import { HOST_FADE_PRESET_AXES } from "./hostFadeAxes";
 import type { HostFadeMetadata } from "../../../types/api";
@@ -12,8 +17,6 @@ const metadata: HostFadeMetadata = {
     in_s: 0.65,
     out_s: 0,
 };
-/** 只查得到 unknown 标记的极简词表；其余键原样返回，便于断言"没走硬编码"。 */
-const label = (key: string) => (key === "fade_info_host_unknown" ? "REAPER curve unknown" : key);
 test("HFS-owned envelope displays the same shape/curvature family used by audio, not host c/S", () => {
     const owned = { ...metadata, curve_mode: "hifishifter" as const };
     for (const mode of ["in", "out"] as const)
@@ -24,15 +27,40 @@ test("HFS-owned envelope displays the same shape/curvature family used by audio,
 });
 test("new axes preserve both values and use an explicit HFS visual style", () => {
     expect(hostFadeDisplay(metadata, false)).toBe("hifishifter");
-    expect(hostFadeLabel(metadata, false, label)).toBe("REAPER c=-0.20 S=0.65");
     expect(hostFadeDisplay(metadata, true)).toBe("hifishifter");
     expect(hostFadeDisplay({ ...metadata, curve_mode: "unknown" }, true)).toBe("hifishifter");
 });
 
-test("the unknown-axes marker comes from the catalog instead of a literal", () => {
-    const unknown = { ...metadata, curve_mode: "unknown" as const };
-    expect(hostFadeLabel(unknown, false, label)).toBe("REAPER curve unknown");
-    expect(hostFadeLabel(unknown, false, label)).not.toContain("fade_info_host_unknown");
+/**
+ * 显示形状必须**跟着画布画的那一族曲线**走：落在实测表上就是那个预设，表外按渲染器
+ * 实际用的权重报占优的一族（`hostFadeGainForAxes` 的 |S| 混合），绝不假称某个具体预设。
+ */
+test("the displayed shape follows the family the canvas actually draws", () => {
+    // 落在实测表上：逐行验证七个预设都能被认出来。
+    for (let shape = 0; shape < HOST_FADE_PRESET_AXES.length; shape += 1) {
+        const [curvature, s] = HOST_FADE_PRESET_AXES[shape];
+        const axes = { ...metadata, in_curvature: curvature, in_s: s };
+        expect(hostFadeDisplayShape(axes, false, -1)).toBe(shape);
+    }
+    // 表外：|S| 过半 → S 族（渲染器的 sigmoid 分量用的就是 5 号）；否则线性。
+    expect(hostFadeDisplayShape({ ...metadata, in_curvature: 0.25, in_s: 0.6 }, false, -1)).toBe(5);
+    expect(hostFadeDisplayShape({ ...metadata, in_curvature: 0.25, in_s: 0.1 }, false, -1)).toBe(0);
+    // 独立 App / 旧轴宿主：原样用它自己的形状（越界才归零）。
+    expect(hostFadeDisplayShape(undefined, false, 3)).toBe(3);
+    expect(hostFadeDisplayShape({ ...metadata, curve_mode: "legacy" }, false, 6)).toBe(6);
+    expect(hostFadeDisplayShape({ ...metadata, curve_mode: "unknown" }, false, -1)).toBe(0);
+});
+
+/** 拖拽投影与画布必须共用同一个求值器 —— 曲率由调用方给出，其余轴照旧。 */
+test("the shared evaluator agrees with the canvas at the current axes", () => {
+    for (const mode of ["in", "out"] as const)
+        for (const t of [0, 0.2, 0.5, 0.9, 1]) {
+            const curvature = mode === "out" ? metadata.out_curvature : metadata.in_curvature;
+            const s = mode === "out" ? metadata.out_s : metadata.in_s;
+            expect(hostFadeGainForAxes(mode, curvature, s, t)).toBe(
+                visualFadeGain(metadata, 0, 0, mode, t),
+            );
+        }
 });
 
 test("HFS visuals are bounded monotone with exact in/out endpoints for both axes", () => {
@@ -136,27 +164,6 @@ test("axes landing exactly on a measured preset draw that preset's own curve", (
     }
 });
 
-test("a preset reading is named in the label; an off-table reading only reports the axes", () => {
-    const lookup = (key: string) =>
-        ({
-            common_parenthetical: "{value} ({note})",
-            fade_shape_fast_start: "Fast Start",
-        })[key] ?? key;
-    // 预设 1「快起」= `(c 0.5, S 0)`，实测表里的第二行。
-    const preset: HostFadeMetadata = {
-        curve_mode: "reaper_new",
-        in_curvature: 0.5,
-        out_curvature: 0.5,
-        in_s: 0,
-        out_s: 0,
-    };
-    expect(hostFadeLabel(preset, false, lookup)).toBe("REAPER c=0.50 S=0.00 (Fast Start)");
-    // 差一点点就不是预设：只报原始读数，不替用户认领一个形状。
-    expect(hostFadeLabel({ ...preset, in_curvature: 0.25 }, false, lookup)).toBe(
-        "REAPER c=0.25 S=0.00",
-    );
-    expect(hostFadeLabel({ ...preset, in_s: 0.0001 }, false, lookup)).toBe("REAPER c=0.50 S=0.00");
-});
 test("standalone and known legacy hosts retain the existing fade renderer", () => {
     expect(hostFadeDisplay(undefined, false)).toBe("legacy");
     expect(hostFadeDisplay({ ...metadata, curve_mode: "legacy" }, false)).toBe("legacy");

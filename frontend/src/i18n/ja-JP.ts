@@ -1587,8 +1587,6 @@ export const jaJP = {
     import_dialog_title: "ファイルをインポート",
     import_across_tracks: "トラック間に追加",
     import_as_takes: "テイクとして追加",
-    import_as_takes_plugin_unavailable:
-        "ARA プラグインモードでは使用できません。複数テイクは REAPER 側で 1 つの item にまとめてください。",
     midi_import_clip_plugin_unavailable:
         "ARA プラグインモードでは使用できません。クリップは REAPER の item です。ピッチカーブへのインポートをご利用ください。",
     folder_import_title: "フォルダをインポート",
@@ -1599,8 +1597,6 @@ export const jaJP = {
     folder_import_create_tracks_hint:
         "各フォルダが空の親トラックになり、そのメディアファイルが子トラックになります。",
     folder_import_create_tracks_unavailable: "「トラック間に追加」でのみ使用できます。",
-    folder_import_create_tracks_plugin_unavailable:
-        "ARA プラグインモードでは使用できません。トラックのフォルダは REAPER が管理します。",
     folder_import_summary_folders: "{count} フォルダ|{count} フォルダ",
     folder_import_summary_files: "{count} 個のメディアファイル|{count} 個のメディアファイル",
     folder_import_truncated: "上限を超えています。先頭 {count} 個のみインポートします",
@@ -2146,8 +2142,6 @@ export const jaJP = {
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:
         "ホストのフェード軸バージョンを読み取れないため、形状プリセットは使えません。下のカーブ調整をお使いください",
-    fade_info_host_curve_note: "HiFiShifter の表示用カーブ。音声は REAPER が処理します",
-    fade_info_host_unknown: "REAPER カーブ不明",
     // ── インストーラー（NSIS）────────────────────────────────────────────
     installer_name: "HiFiShifter VST3",
     installer_publisher: "ARounder",

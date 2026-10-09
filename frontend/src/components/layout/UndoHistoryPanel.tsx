@@ -6,7 +6,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
-import { isPluginMode, dawControlledReason } from "../../services/hostCapabilities";
+import { isPluginMode } from "../../services/hostCapabilities";
 import {
     persistUiSettings,
     setHistoryPositionRemote,
@@ -142,21 +142,22 @@ export const UndoHistoryPanel: React.FC = () => {
 
             <div className="shrink-0 space-y-1 border-t border-qt-border px-3 py-1.5">
                 {/* 工程级：保存本工程时是否写出 UNDO 数据（随工程文件持久化）。
-                    无论勾选与否，打开工程时都会尝试读取伴生文件。 */}
-                {/* 【为什么在插件里禁用】`set_project_save_undo_history` 只存在于独立
-                    App，而插件里根本没有"工程文件"可写 —— 勾选它只会静默失败。 */}
-                <AppForm booleanRow="leading">
-                    <AppSwitchRow
-                        control="checkbox"
-                        label={tf("undo_history_save_with_project")}
-                        checked={s.saveUndoHistory}
-                        disabled={isPluginMode()}
-                        hint={isPluginMode() ? dawControlledReason() : undefined}
-                        onCheckedChange={(checked) => {
-                            void dispatch(setProjectSaveUndoHistoryRemote(checked));
-                        }}
-                    />
-                </AppForm>
+                    无论勾选与否，打开工程时都会尝试读取伴生文件。
+                    【插件里为什么不渲染】`set_project_save_undo_history` 只存在于独立
+                    App，插件里根本没有"工程文件"可写 —— 一个勾了也不生效的开关只会
+                    占掉宿主那点面板高度。 */}
+                {!isPluginMode() && (
+                    <AppForm booleanRow="leading">
+                        <AppSwitchRow
+                            control="checkbox"
+                            label={tf("undo_history_save_with_project")}
+                            checked={s.saveUndoHistory}
+                            onCheckedChange={(checked) => {
+                                void dispatch(setProjectSaveUndoHistoryRemote(checked));
+                            }}
+                        />
+                    </AppForm>
+                )}
                 {/* 全局：新工程的默认值（默认开启）。 */}
                 <AppForm booleanRow="leading">
                     <AppSwitchRow

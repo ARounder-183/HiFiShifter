@@ -19,6 +19,7 @@ import {
     setTempoMapVisible,
 } from "../../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../../features/session/thunks/tempoMapThunks";
+import { isPluginMode } from "../../../services/hostCapabilities";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     clampBpm,
@@ -150,6 +151,15 @@ export const TempoMapCornerButton: React.FC = () => {
         void dispatch(persistUiSettings());
         setDialogOpen(false);
     }, [dispatch]);
+
+    /*
+     * 【插件里为什么整块不渲染】这个按钮做两件事：显示速度映射、并在没有 Tempo Map 时
+     * 给工程建一个。插件里两件都不成立 —— BPM / 拍号是**宿主权威**（`canEditTempoMap`），
+     * 写入命令 `set_timeline_tempo_map` 不被支持：点下去只会得到一条被拒绝的错误
+     * （`错误：Rejected`，用户反馈过）。宿主窗口本来就窄，所以整块不渲染，而不是留一个
+     * 按不动的按钮占位。
+     */
+    if (isPluginMode()) return null;
 
     return (
         <>

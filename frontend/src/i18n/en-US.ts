@@ -1708,8 +1708,6 @@ export const enUS = {
     import_dialog_title: "Import files",
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
-    import_as_takes_plugin_unavailable:
-        "Not available in ARA plugin mode: import takes into one REAPER item there.",
     midi_import_clip_plugin_unavailable:
         "Not available in ARA plugin mode: a clip there is a REAPER item. Import into the pitch curve instead.",
     folder_import_title: "Import Folder",
@@ -1720,8 +1718,6 @@ export const enUS = {
     folder_import_create_tracks_hint:
         "Each folder becomes an empty parent track; its media files become child tracks.",
     folder_import_create_tracks_unavailable: "Only available with Add Across Tracks.",
-    folder_import_create_tracks_plugin_unavailable:
-        "Not available in ARA plugin mode: REAPER owns the track folder structure.",
     folder_import_summary_folders: "{count} folder|{count} folders",
     folder_import_summary_files: "{count} media file|{count} media files",
     folder_import_truncated:
@@ -2132,8 +2128,6 @@ export const enUS = {
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:
         "The host's fade axis version could not be read, so shape presets are unavailable; use the curvature slider",
-    fade_info_host_curve_note: "HiFiShifter schematic curve; REAPER renders the audio",
-    fade_info_host_unknown: "REAPER curve unknown",
     // ── 安装器（NSIS）─────────────────────────────────────────────────────
     //
     // 【为什么安装器文案在这里】安装器原先硬编码简体中文，五语用户看到的是中文向导。

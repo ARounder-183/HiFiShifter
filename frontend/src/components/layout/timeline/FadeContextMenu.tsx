@@ -36,6 +36,8 @@ import {
     fadeGainSigned,
     solveNearestCurveDir,
 } from "./reaperFade";
+import { hostFadeGainForAxes } from "./hostFadeDisplay";
+import type { HostFadeMetadata } from "../../../types/api";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { FadeLabelLookup } from "./fadeTooltipText";
 
@@ -68,6 +70,8 @@ export type FadeContextSide = {
     shape: number;
     dir: number;
     lengthSec: number;
+    /** 宿主淡化读数（插件模式）：预览与曲率投影要按画布那套曲线算。 */
+    hostFades?: HostFadeMetadata;
 };
 
 /** 曲率滑块微调步长（dir 单位）。 */
@@ -78,8 +82,10 @@ const CurvatureSlider: React.FC<{
     dir: number;
     /** 淡出列：预览按淡出取向绘制（时间镜像 + σ 符号归一），与画布一致。 */
     isOut: boolean;
+    /** 宿主淡化读数（插件模式）：预览与拖拽投影必须用画布那套曲线。 */
+    hostFades?: HostFadeMetadata;
     onChange: (nextDir: number) => void;
-}> = ({ shape, dir, isOut, onChange }) => {
+}> = ({ shape, dir, isOut, hostFades, onChange }) => {
     const fineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -115,6 +121,11 @@ const CurvatureSlider: React.FC<{
     // 展示用的预览采样点（迷你曲线），随形状与曲率实时重绘。
     // mode='out' 时 fadeGainSigned 内部完成 σ 符号归一与时间镜像，
     // 画出的曲线方向与该侧在 Clip 上看到的完全一致（淡出=左上→右下）。
+    // 插件（新轴宿主）上走 `hostFadeGainForAxes`：预览必须是画布那条曲线，
+    // 否则菜单里的小图与时间线上的包络不是同一条。
+    const mode = isOut ? ("out" as const) : ("in" as const);
+    const hostS =
+        hostFades?.curve_mode === "reaper_new" ? (isOut ? hostFades.out_s : hostFades.in_s) : null;
     const preview = React.useMemo(() => {
         const size = 34;
         const pad = 2;
@@ -123,16 +134,18 @@ const CurvatureSlider: React.FC<{
         const pts: string[] = [];
         for (let i = 0; i < steps; i += 1) {
             const p = i / (steps - 1);
-            const gain = fadeGainSigned(shape, dir, isOut ? "out" : "in", p);
+            const gain =
+                hostS === null
+                    ? fadeGainSigned(shape, dir, mode, p)
+                    : hostFadeGainForAxes(mode, dir, hostS, p);
             pts.push(`${(pad + p * inner).toFixed(2)},${(pad + (1 - gain) * inner).toFixed(2)}`);
         }
         return pts.join(" ");
-    }, [shape, dir, isOut]);
+    }, [shape, dir, mode, hostS]);
 
     // ── 预览图直接拖拽调曲率（无需修饰键）──────────────────────────
-    // 把指针位置投影回曲线空间：x → 进度 t，y → 目标增益，再用
-    // solveDirAt 反解 dir。pointer capture 挂在 svg 自身，
-    // React 重渲染不会丢失捕获。
+    // 把指针位置投影回曲线空间：x → 进度 t，y → 目标增益，再取曲率族上的最近点。
+    // pointer capture 挂在 svg 自身，React 重渲染不会丢失捕获。
     const applyPointerToCurve = (clientX: number, clientY: number): void => {
         const el = svgRef.current;
         if (!el) return;
@@ -146,10 +159,17 @@ const CurvatureSlider: React.FC<{
         const next = solveNearestCurveDir({
             shape,
             dir,
-            mode: isOut ? "out" : "in",
+            mode,
             pointerX01: t,
             pointerY01: targetGain,
             aspectYOverX: 1,
+            // 与预览同一条曲线：插件里曲率拖拽写的是宿主轴，投影也必须按宿主曲线算。
+            ...(hostS === null
+                ? {}
+                : {
+                      gainAt: (at: number, candidate: number) =>
+                          hostFadeGainForAxes(mode, candidate, hostS, at),
+                  }),
         }).dir;
         onChange(Number(next.toFixed(2)));
     };
@@ -292,6 +312,7 @@ const SideColumn: React.FC<{
                 shape={Math.trunc(side.shape)}
                 dir={side.dir}
                 isOut={isOut}
+                hostFades={side.hostFades}
                 onChange={(nextDir) => onDirChange(side.clipId, side.isOut, nextDir)}
             />
         </div>

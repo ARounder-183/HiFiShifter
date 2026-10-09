@@ -1537,8 +1537,6 @@ export const zhTW = {
     import_dialog_title: "匯入檔案",
     import_across_tracks: "跨軌道新增",
     import_as_takes: "作為 Take 新增",
-    import_as_takes_plugin_unavailable:
-        "ARA 外掛模式下無法使用：請在 REAPER 中把多個 Take 放進同一個 item。",
     midi_import_clip_plugin_unavailable:
         "ARA 外掛模式下無法使用：片段屬於 REAPER 的 item，請改為匯入到音高曲線。",
     folder_import_title: "匯入資料夾",
@@ -1548,8 +1546,6 @@ export const zhTW = {
     folder_import_create_tracks: "為每個資料夾建立軌道群組",
     folder_import_create_tracks_hint: "每個資料夾成為一條空白父軌道，其媒體檔案成為子軌道。",
     folder_import_create_tracks_unavailable: "僅在「跨軌道新增」時可用。",
-    folder_import_create_tracks_plugin_unavailable:
-        "ARA 外掛模式下無法使用：軌道群組由 REAPER 管理。",
     folder_import_summary_folders: "{count} 個資料夾|{count} 個資料夾",
     folder_import_summary_files: "{count} 個媒體檔案|{count} 個媒體檔案",
     folder_import_truncated: "檔案數超過上限，僅匯入前 {count} 個",
@@ -2070,8 +2066,6 @@ export const zhTW = {
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "讀不出宿主的淡化軸版本，無法確定用哪套軸；請用下方曲率滑桿調整",
-    fade_info_host_curve_note: "HiFiShifter 示意曲線；聲音由 REAPER 控制",
-    fade_info_host_unknown: "REAPER 曲線未知",
     // ── 安裝程式（NSIS）──────────────────────────────────────────────────
     installer_name: "HiFiShifter VST3",
     installer_publisher: "ARounder",

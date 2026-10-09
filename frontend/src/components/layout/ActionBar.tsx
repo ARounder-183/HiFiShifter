@@ -1,10 +1,6 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-    isPluginMode,
-    canControlHostTransport,
-    dawControlledReason,
-} from "../../services/hostCapabilities";
+import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
@@ -646,337 +642,344 @@ export function ActionBar() {
             {/* BPM & Time */}
             <Flex align="center" gap="2" className="shrink-0">
                 {/* Metronome */}
-                <Box style={{ position: "relative" }} data-hs-context-menu>
-                    <AppIconButton
-                        active={s.metronomeEnabled}
-                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                        emphasis="accent"
-                        // 【为什么在插件里禁用】节拍器由宿主播放（REAPER 自己的
-                        // metronome 在主输出上），插件里没有 `set_metronome` 这条命令 ——
-                        // 此前点它只会写下一个没人读的值，并在控制台留一条错误。
-                        // 与菜单里其它插件禁用项同一套做法：禁用 + 说明原因。
-                        disabled={isPluginMode()}
-                        tooltip={
-                            isPluginMode() ? t("plugin_standalone_only") : t("action_metronome")
-                        }
-                        icon={<MetronomeIcon />}
-                        onClick={() => {
-                            void dispatch(
-                                updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
-                            );
-                        }}
-                        onContextMenu={(event) => {
-                            event.preventDefault();
-                            // 禁用态不再弹右键菜单：一个能改音量、改音色却什么都
-                            // 不会发生的浮层，比一个禁用按钮更难理解。
-                            if (isPluginMode()) return;
-                            setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
-                        }}
-                    />
-                    {metronomeMenuPos &&
-                        createPortal(
-                            <div
-                                ref={metronomeMenuRef}
-                                data-hs-context-menu="1"
-                                className="hs-menu hs-menu--no-scroll"
-                                style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
-                            >
-                                <div className="hs-menu__label">{t("metronome_volume")}</div>
-                                <div className="hs-menu__body flex items-center gap-2">
-                                    {/*
-                                     * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
-                                     * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
-                                     * 内建，`percent` 单位语义给出的正是这两个步长。
-                                     *
-                                     * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
-                                     * 关闭"监听在 window 捕获阶段，且已经先判 `contains(target)`
-                                     * 直接放行菜单内部的指针事件（见上方 effect）。
-                                     *
-                                     * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
-                                     * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
-                                     * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
-                                     */}
-                                    <AppSlider
-                                        value={Math.round(s.metronomeGain * 100)}
-                                        unit="percent"
-                                        min={0}
-                                        max={100}
-                                        ariaLabel={t("metronome_volume")}
-                                        onChange={(next) => {
-                                            void dispatch(
-                                                updateMetronome({ metronomeGain: next / 100 }),
-                                            );
-                                        }}
-                                    />
-                                    <AppSliderReadout>
-                                        {Math.round(s.metronomeGain * 100)}%
-                                    </AppSliderReadout>
-                                </div>
-                                <div className="hs-menu__separator" role="separator" />
-                                <div className="hs-menu__label">{t("metronome_mode")}</div>
-                                {(
-                                    [
-                                        ["grid", "metronome_mode_grid"],
-                                        ["beat", "metronome_mode_beat"],
-                                        ["bar", "metronome_mode_bar"],
-                                    ] as const
-                                ).map(([mode, key]) => (
-                                    <button
-                                        key={mode}
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            void dispatch(updateMetronome({ metronomeMode: mode }));
-                                            setMetronomeMenuPos(null);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span className="hs-menu__label-text">{t(key)}</span>
-                                        <span className="hs-menu__trail">
-                                            {s.metronomeMode === mode ? (
-                                                <span className="hs-menu__check">
-                                                    <CheckIcon />
-                                                </span>
-                                            ) : null}
-                                        </span>
-                                    </button>
-                                ))}
-                                <div className="hs-menu__separator" role="separator" />
-                                <div className="hs-menu__label">{t("metronome_sound")}</div>
-                                {(
-                                    [
-                                        ["click", "metronome_sound_click"],
-                                        ["woodblock", "metronome_sound_woodblock"],
-                                        ["beep", "metronome_sound_beep"],
-                                    ] as const
-                                ).map(([sound, key]) => (
-                                    <button
-                                        key={sound}
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            void dispatch(
-                                                updateMetronome({ metronomeSound: sound }),
-                                            );
-                                            setMetronomeMenuPos(null);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span className="hs-menu__label-text">{t(key)}</span>
-                                        <span className="hs-menu__trail">
-                                            {s.metronomeSound === sound ? (
-                                                <span className="hs-menu__check">
-                                                    <CheckIcon />
-                                                </span>
-                                            ) : null}
-                                        </span>
-                                    </button>
-                                ))}
-                                <div className="hs-menu__separator" role="separator" />
-                                <button
-                                    type="button"
-                                    className="hs-menu__item"
-                                    onClick={() => {
-                                        void dispatch(
-                                            updateMetronome({
-                                                metronomeAccent: !s.metronomeAccent,
-                                            }),
-                                        );
-                                    }}
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                >
-                                    <span className="hs-menu__label-text">
-                                        {t("metronome_accent")}
-                                    </span>
-                                    <span className="hs-menu__trail">
-                                        {s.metronomeAccent ? (
-                                            <span className="hs-menu__check">
-                                                <CheckIcon />
-                                            </span>
-                                        ) : null}
-                                    </span>
-                                </button>
-                            </div>,
-                            document.body,
-                        )}
-                </Box>
-                <span className="hs-type-muted">{t("common_bpm")}:</span>
-                <TextField.Root
-                    ref={attachBpmWheel}
-                    disabled={isPluginMode()}
-                    size="1"
-                    value={bpmText}
-                    data-tooltip={
-                        isPluginMode()
-                            ? dawControlledReason()
-                            : s.tempoMap && s.tempoMap.points.length > 0
-                              ? tf("tempo_map_actionbar_tip")
-                              : undefined
-                    }
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                        setBpmDirty(true);
-                        setBpmText(e.target.value);
-                    }}
-                    onBlur={() => commitBpm()}
-                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-                        if (e.key === "Enter") {
-                            e.preventDefault();
-                            commitBpm();
-                            (e.currentTarget as HTMLInputElement).blur();
-                        } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            setBpmDirty(false);
-                            setBpmText(formatBpmValue(displayBpm));
-                            (e.currentTarget as HTMLInputElement).blur();
-                        }
-                    }}
-                    style={{
-                        width: 60,
-                        textAlign: "center",
-                        backgroundColor: "var(--qt-base)",
-                    }}
-                />
-                <span className="hs-type-muted">{t("time_signature")}:</span>
-                <Flex align="center" gap="1">
-                    <TextField.Root
-                        size="1"
-                        type="number"
-                        value={String(displayBeats)}
-                        disabled={isPluginMode()}
-                        data-tooltip={
-                            isPluginMode()
-                                ? dawControlledReason()
-                                : s.tempoMap && s.tempoMap.points.length > 0
-                                  ? tf("tempo_map_actionbar_tip")
-                                  : undefined
-                        }
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                            const raw = e.target.value.trim();
-                            const parsed = Number(raw);
-                            if (!Number.isFinite(parsed)) return;
-                            // Clamp locally to avoid sending huge values to backend
-                            const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
-                            // 与显示值比较（Tempo Map 下为播放头位置生效值）。
-                            if (clamped === Math.round(displayBeats)) return;
-                            if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                updateTempoPointAtPlayhead({
-                                    timeSignature: {
-                                        numerator: clamped,
-                                        denominator: displayDenominator,
-                                    },
-                                });
-                                return;
-                            }
-                            void dispatch(
-                                setProjectTimelineSettingsRemote({
-                                    beatsPerBar: clamped,
-                                    timeSignatureDenominator: displayDenominator,
-                                    gridSize: s.grid,
-                                }),
-                            );
-                        }}
-                        onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const direction = e.deltaY < 0 ? 1 : -1;
-                            // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
-                            // 与 BPM / 基准音阶一致。
-                            const current = Math.max(1, Math.min(32, Math.round(displayBeats)));
-                            const next = Math.max(1, Math.min(32, current + direction));
-                            if (next === current) return;
-                            if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                updateTempoPointAtPlayhead({
-                                    timeSignature: {
-                                        numerator: next,
-                                        denominator: displayDenominator,
-                                    },
-                                });
-                                return;
-                            }
-                            void dispatch(
-                                setProjectTimelineSettingsRemote({
-                                    beatsPerBar: next,
-                                    timeSignatureDenominator: displayDenominator,
-                                    gridSize: s.grid,
-                                }),
-                            );
-                        }}
-                        style={{
-                            width: 42,
-                            textAlign: "center",
-                            backgroundColor: "var(--qt-base)",
-                        }}
-                    />
-                    <span className="hs-type-muted">/</span>
-                    <Select.Root
-                        size="1"
-                        value={String(displayDenominator)}
-                        disabled={isPluginMode()}
-                        onValueChange={(v) => {
-                            const next = Number(v) || 4;
-                            if (next === displayDenominator) return;
-                            if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                updateTempoPointAtPlayhead({
-                                    timeSignature: {
-                                        numerator: displayBeats,
-                                        denominator: next,
-                                    },
-                                });
-                                return;
-                            }
-                            void dispatch(
-                                setProjectTimelineSettingsRemote({
-                                    beatsPerBar: s.beats,
-                                    timeSignatureDenominator: next,
-                                    gridSize: s.grid,
-                                }),
-                            );
-                        }}
-                    >
-                        <Select.Trigger
-                            data-tooltip={isPluginMode() ? dawControlledReason() : undefined}
-                            style={{
-                                width: 48,
-                                backgroundColor: "var(--qt-base)",
-                                justifyContent: "center",
+                {/*
+                 * 【为什么插件里整块不渲染】节拍器由宿主播放（REAPER 自己的 metronome
+                 * 在主输出上），插件里没有 `set_metronome` 这条命令 —— 点了只会写下一个
+                 * 没人读的值。此前是"禁用 + 说明原因"，但宿主给的 VST 窗口往往很窄，
+                 * 一个永远按不动的按钮只会把界面挤满（用户反馈）。
+                 */}
+                {!isPluginMode() && (
+                    <Box style={{ position: "relative" }} data-hs-context-menu>
+                        <AppIconButton
+                            active={s.metronomeEnabled}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
+                            tooltip={t("action_metronome")}
+                            icon={<MetronomeIcon />}
+                            onClick={() => {
+                                void dispatch(
+                                    updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
+                                );
                             }}
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: String(displayDenominator),
-                                    options: TEMPO_DENOMINATORS.map((d) => String(d)),
-                                    onChange: (v) => {
-                                        const next = Number(v) || 4;
-                                        if (next === displayDenominator) return;
-                                        if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                            updateTempoPointAtPlayhead({
-                                                timeSignature: {
-                                                    numerator: displayBeats,
-                                                    denominator: next,
-                                                },
-                                            });
-                                            return;
-                                        }
-                                        void dispatch(
-                                            setProjectTimelineSettingsRemote({
-                                                beatsPerBar: s.beats,
-                                                timeSignatureDenominator: next,
-                                                gridSize: s.grid,
-                                            }),
-                                        );
-                                    },
-                                });
+                            onContextMenu={(event) => {
+                                event.preventDefault();
+                                setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
                             }}
                         />
-                        <Select.Content>
-                            {TEMPO_DENOMINATORS.map((d) => (
-                                <Select.Item key={d} value={String(d)}>
-                                    {d}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
-                </Flex>
+                        {metronomeMenuPos &&
+                            createPortal(
+                                <div
+                                    ref={metronomeMenuRef}
+                                    data-hs-context-menu="1"
+                                    className="hs-menu hs-menu--no-scroll"
+                                    style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
+                                >
+                                    <div className="hs-menu__label">{t("metronome_volume")}</div>
+                                    <div className="hs-menu__body flex items-center gap-2">
+                                        {/*
+                                         * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
+                                         * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
+                                         * 内建，`percent` 单位语义给出的正是这两个步长。
+                                         *
+                                         * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
+                                         * 关闭"监听在 window 捕获阶段，且已经先判 `contains(target)`
+                                         * 直接放行菜单内部的指针事件（见上方 effect）。
+                                         *
+                                         * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
+                                         * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
+                                         * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
+                                         */}
+                                        <AppSlider
+                                            value={Math.round(s.metronomeGain * 100)}
+                                            unit="percent"
+                                            min={0}
+                                            max={100}
+                                            ariaLabel={t("metronome_volume")}
+                                            onChange={(next) => {
+                                                void dispatch(
+                                                    updateMetronome({ metronomeGain: next / 100 }),
+                                                );
+                                            }}
+                                        />
+                                        <AppSliderReadout>
+                                            {Math.round(s.metronomeGain * 100)}%
+                                        </AppSliderReadout>
+                                    </div>
+                                    <div className="hs-menu__separator" role="separator" />
+                                    <div className="hs-menu__label">{t("metronome_mode")}</div>
+                                    {(
+                                        [
+                                            ["grid", "metronome_mode_grid"],
+                                            ["beat", "metronome_mode_beat"],
+                                            ["bar", "metronome_mode_bar"],
+                                        ] as const
+                                    ).map(([mode, key]) => (
+                                        <button
+                                            key={mode}
+                                            type="button"
+                                            className="hs-menu__item"
+                                            onClick={() => {
+                                                void dispatch(
+                                                    updateMetronome({ metronomeMode: mode }),
+                                                );
+                                                setMetronomeMenuPos(null);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="hs-menu__label-text">{t(key)}</span>
+                                            <span className="hs-menu__trail">
+                                                {s.metronomeMode === mode ? (
+                                                    <span className="hs-menu__check">
+                                                        <CheckIcon />
+                                                    </span>
+                                                ) : null}
+                                            </span>
+                                        </button>
+                                    ))}
+                                    <div className="hs-menu__separator" role="separator" />
+                                    <div className="hs-menu__label">{t("metronome_sound")}</div>
+                                    {(
+                                        [
+                                            ["click", "metronome_sound_click"],
+                                            ["woodblock", "metronome_sound_woodblock"],
+                                            ["beep", "metronome_sound_beep"],
+                                        ] as const
+                                    ).map(([sound, key]) => (
+                                        <button
+                                            key={sound}
+                                            type="button"
+                                            className="hs-menu__item"
+                                            onClick={() => {
+                                                void dispatch(
+                                                    updateMetronome({ metronomeSound: sound }),
+                                                );
+                                                setMetronomeMenuPos(null);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="hs-menu__label-text">{t(key)}</span>
+                                            <span className="hs-menu__trail">
+                                                {s.metronomeSound === sound ? (
+                                                    <span className="hs-menu__check">
+                                                        <CheckIcon />
+                                                    </span>
+                                                ) : null}
+                                            </span>
+                                        </button>
+                                    ))}
+                                    <div className="hs-menu__separator" role="separator" />
+                                    <button
+                                        type="button"
+                                        className="hs-menu__item"
+                                        onClick={() => {
+                                            void dispatch(
+                                                updateMetronome({
+                                                    metronomeAccent: !s.metronomeAccent,
+                                                }),
+                                            );
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span className="hs-menu__label-text">
+                                            {t("metronome_accent")}
+                                        </span>
+                                        <span className="hs-menu__trail">
+                                            {s.metronomeAccent ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
+                                    </button>
+                                </div>,
+                                document.body,
+                            )}
+                    </Box>
+                )}
+                {/* BPM 与拍号是**宿主权威读数**，插件里改不了。
+                    此前是两个禁用输入框 —— 宿主窗口本来就窄，一个按不动的输入框
+                    既占位又暗示"本来能改"；REAPER 自己的工具栏上就显示着这两个值。 */}
+                {!isPluginMode() && (
+                    <>
+                        <span className="hs-type-muted">{t("common_bpm")}:</span>
+                        <TextField.Root
+                            ref={attachBpmWheel}
+                            size="1"
+                            value={bpmText}
+                            data-tooltip={
+                                s.tempoMap && s.tempoMap.points.length > 0
+                                    ? tf("tempo_map_actionbar_tip")
+                                    : undefined
+                            }
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                setBpmDirty(true);
+                                setBpmText(e.target.value);
+                            }}
+                            onBlur={() => commitBpm()}
+                            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    commitBpm();
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    setBpmDirty(false);
+                                    setBpmText(formatBpmValue(displayBpm));
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                }
+                            }}
+                            style={{
+                                width: 60,
+                                textAlign: "center",
+                                backgroundColor: "var(--qt-base)",
+                            }}
+                        />
+                    </>
+                )}
+                {/* 拍号同上：宿主权威读数，插件里改不了，REAPER 自己会显示。 */}
+                {!isPluginMode() && (
+                    <>
+                        <span className="hs-type-muted">{t("time_signature")}:</span>
+                        <Flex align="center" gap="1">
+                            <TextField.Root
+                                size="1"
+                                type="number"
+                                value={String(displayBeats)}
+                                data-tooltip={
+                                    s.tempoMap && s.tempoMap.points.length > 0
+                                        ? tf("tempo_map_actionbar_tip")
+                                        : undefined
+                                }
+                                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                    const raw = e.target.value.trim();
+                                    const parsed = Number(raw);
+                                    if (!Number.isFinite(parsed)) return;
+                                    // Clamp locally to avoid sending huge values to backend
+                                    const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
+                                    // 与显示值比较（Tempo Map 下为播放头位置生效值）。
+                                    if (clamped === Math.round(displayBeats)) return;
+                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                        updateTempoPointAtPlayhead({
+                                            timeSignature: {
+                                                numerator: clamped,
+                                                denominator: displayDenominator,
+                                            },
+                                        });
+                                        return;
+                                    }
+                                    void dispatch(
+                                        setProjectTimelineSettingsRemote({
+                                            beatsPerBar: clamped,
+                                            timeSignatureDenominator: displayDenominator,
+                                            gridSize: s.grid,
+                                        }),
+                                    );
+                                }}
+                                onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    const direction = e.deltaY < 0 ? 1 : -1;
+                                    // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
+                                    // 与 BPM / 基准音阶一致。
+                                    const current = Math.max(
+                                        1,
+                                        Math.min(32, Math.round(displayBeats)),
+                                    );
+                                    const next = Math.max(1, Math.min(32, current + direction));
+                                    if (next === current) return;
+                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                        updateTempoPointAtPlayhead({
+                                            timeSignature: {
+                                                numerator: next,
+                                                denominator: displayDenominator,
+                                            },
+                                        });
+                                        return;
+                                    }
+                                    void dispatch(
+                                        setProjectTimelineSettingsRemote({
+                                            beatsPerBar: next,
+                                            timeSignatureDenominator: displayDenominator,
+                                            gridSize: s.grid,
+                                        }),
+                                    );
+                                }}
+                                style={{
+                                    width: 42,
+                                    textAlign: "center",
+                                    backgroundColor: "var(--qt-base)",
+                                }}
+                            />
+                            <span className="hs-type-muted">/</span>
+                            <Select.Root
+                                size="1"
+                                value={String(displayDenominator)}
+                                onValueChange={(v) => {
+                                    const next = Number(v) || 4;
+                                    if (next === displayDenominator) return;
+                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                        updateTempoPointAtPlayhead({
+                                            timeSignature: {
+                                                numerator: displayBeats,
+                                                denominator: next,
+                                            },
+                                        });
+                                        return;
+                                    }
+                                    void dispatch(
+                                        setProjectTimelineSettingsRemote({
+                                            beatsPerBar: s.beats,
+                                            timeSignatureDenominator: next,
+                                            gridSize: s.grid,
+                                        }),
+                                    );
+                                }}
+                            >
+                                <Select.Trigger
+                                    style={{
+                                        width: 48,
+                                        backgroundColor: "var(--qt-base)",
+                                        justifyContent: "center",
+                                    }}
+                                    onWheel={(event) => {
+                                        applySelectWheelChange({
+                                            event,
+                                            currentValue: String(displayDenominator),
+                                            options: TEMPO_DENOMINATORS.map((d) => String(d)),
+                                            onChange: (v) => {
+                                                const next = Number(v) || 4;
+                                                if (next === displayDenominator) return;
+                                                if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                                    updateTempoPointAtPlayhead({
+                                                        timeSignature: {
+                                                            numerator: displayBeats,
+                                                            denominator: next,
+                                                        },
+                                                    });
+                                                    return;
+                                                }
+                                                void dispatch(
+                                                    setProjectTimelineSettingsRemote({
+                                                        beatsPerBar: s.beats,
+                                                        timeSignatureDenominator: next,
+                                                        gridSize: s.grid,
+                                                    }),
+                                                );
+                                            },
+                                        });
+                                    }}
+                                />
+                                <Select.Content>
+                                    {TEMPO_DENOMINATORS.map((d) => (
+                                        <Select.Item key={d} value={String(d)}>
+                                            {d}
+                                        </Select.Item>
+                                    ))}
+                                </Select.Content>
+                            </Select.Root>
+                        </Flex>
+                    </>
+                )}
 
                 <span className="hs-type-muted">{t("common_grid")}:</span>
                 <Select.Root
@@ -1176,280 +1179,319 @@ export function ActionBar() {
             <AppToolbarSeparator />
 
             {/* Transport */}
-            <Flex gap="1" className="shrink-0">
-                <Button
-                    variant="soft"
-                    color="gray"
-                    size="1"
-                    onClick={() => {
-                        dispatch(stopAudioPlayback({ restoreAnchor: true }));
-                    }}
-                    data-tooltip={isPluginMode() ? t("plugin_transport_stop") : t("action_stop")}
-                    disabled={isPluginMode() && !canControlHostTransport()}
-                >
-                    <StopIcon />
-                </Button>
-                <IconButton
-                    variant="solid"
-                    size="1"
-                    onClick={() => {
-                        if (isPlaying) {
-                            dispatch(stopAudioPlayback());
-                            return;
-                        }
-                        dispatch(playOriginal());
-                    }}
-                    data-tooltip={
-                        isPluginMode()
-                            ? t("plugin_transport_play")
-                            : isPlaying
-                              ? tf("action_pause")
-                              : t("action_play_out")
-                    }
-                    disabled={isPluginMode() && !canControlHostTransport()}
-                >
-                    {isPlaying ? <PauseIcon /> : <PlayIcon />}
-                </IconButton>
-                <Box style={{ position: "relative" }} data-hs-context-menu>
-                    <IconButton
+            {/*
+             * 【插件里为什么整组条件渲染】播放由宿主控制；`transportControl` 为假时
+             * 这两个按钮此前是"永久禁用"，只是占位。宿主能控时照常显示（走
+             * `playback.toggle` / `playback.stop` 的宿主通道）。
+             * 录音键在插件里没有对应命令（`recording.*` 全被 `pluginAllowsAction`
+             * 拒掉），一并去掉。
+             */}
+            {(!isPluginMode() || canControlHostTransport()) && (
+                <Flex gap="1" className="shrink-0">
+                    <Button
+                        variant="soft"
+                        color="gray"
                         size="1"
-                        /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
-                           录音键的"红"只在录制中才出现，语义色缺失） */
-                        variant={recording.active ? "solid" : "soft"}
-                        color="red"
-                        data-tooltip={recordingTooltip}
-                        disabled={
-                            isPluginMode() || (recording.busy && recording.countdownRemaining === 0)
-                        }
                         onClick={() => {
-                            if (recording.active) {
-                                void dispatch(stopRecordingFlow());
-                            } else if (recording.countdownRemaining > 0) {
-                                void dispatch(cancelRecordingCountdown());
-                            } else {
-                                void dispatch(startRecordingFlow());
-                            }
+                            dispatch(stopAudioPlayback({ restoreAnchor: true }));
                         }}
-                        onContextMenu={(event) => {
-                            event.preventDefault();
-                            if (isPluginMode()) return;
-                            setRecordingMenuPos({ x: event.clientX, y: event.clientY });
-                            void dispatch(loadRecordingSettings());
-                            // 每次打开菜单都强制重新枚举设备/应用，
-                            // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
-                            void dispatch(loadRecordingDevices({ force: true }));
-                            void dispatch(loadRecordingApps({ force: true }));
-                        }}
+                        data-tooltip={
+                            isPluginMode() ? t("plugin_transport_stop") : t("action_stop")
+                        }
                     >
-                        {recording.active ? (
-                            <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
-                                <rect x="4" y="4" width="7" height="7" rx="1.2" />
-                            </svg>
-                        ) : (
-                            <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
-                                <circle cx="7.5" cy="7.5" r="4.2" />
-                            </svg>
-                        )}
+                        <StopIcon />
+                    </Button>
+                    <IconButton
+                        variant="solid"
+                        size="1"
+                        onClick={() => {
+                            if (isPlaying) {
+                                dispatch(stopAudioPlayback());
+                                return;
+                            }
+                            dispatch(playOriginal());
+                        }}
+                        data-tooltip={
+                            isPluginMode()
+                                ? t("plugin_transport_play")
+                                : isPlaying
+                                  ? tf("action_pause")
+                                  : t("action_play_out")
+                        }
+                    >
+                        {isPlaying ? <PauseIcon /> : <PlayIcon />}
                     </IconButton>
-                    {recordingMenuPos && (
-                        <AppContextMenu
-                            x={recordingMenuPos.x}
-                            y={recordingMenuPos.y}
-                            ariaLabel={tf("recording_source_mode")}
-                            onClose={() => setRecordingMenuPos(null)}
-                            items={[
-                                {
-                                    key: "mode-heading",
-                                    heading: true,
-                                    label: tf("recording_source_mode"),
-                                },
-                                {
-                                    key: "mode-device",
-                                    label: tf("recording_mode_device"),
-                                    checked: recording.settings.captureMode === "device",
-                                    onSelect: () =>
-                                        void applyRecordingSettings({ captureMode: "device" }),
-                                },
-                                {
-                                    key: "mode-loopback",
-                                    label: tf("recording_mode_loopback"),
-                                    checked: recording.settings.captureMode === "loopback",
-                                    onSelect: () =>
-                                        void applyRecordingSettings({ captureMode: "loopback" }),
-                                },
-                                {
-                                    key: "mode-application",
-                                    label: tf("recording_mode_application"),
-                                    checked: recording.settings.captureMode === "application",
-                                    onSelect: () =>
-                                        void applyRecordingSettings({ captureMode: "application" }),
-                                },
-                                {
-                                    key: "source-heading",
-                                    heading: true,
-                                    separatorBefore: true,
-                                    label: tf(
-                                        recording.settings.captureMode === "application"
-                                            ? "recording_application"
-                                            : "recording_device",
-                                    ),
-                                },
-                                ...(recording.settings.captureMode === "device"
-                                    ? [
-                                          {
-                                              key: "device-default",
-                                              label: tf("recording_device_default"),
-                                              checked:
-                                                  recording.settings.sourceDevice === "default",
-                                              onSelect: () =>
-                                                  void applyRecordingSettings({
-                                                      sourceDevice: "default",
-                                                  }),
-                                          },
-                                          ...recording.devices
-                                              .filter(
-                                                  (device) =>
-                                                      !device.isLoopback && device.id !== "default",
-                                              )
-                                              .map((device) => ({
-                                                  key: device.id,
-                                                  label: device.name,
-                                                  checked:
-                                                      recording.settings.sourceDevice === device.id,
-                                                  onSelect: () =>
-                                                      void applyRecordingSettings({
-                                                          sourceDevice: device.id,
-                                                      }),
-                                              })),
-                                      ]
-                                    : recording.settings.captureMode === "loopback"
-                                      ? [
-                                            {
-                                                key: "loopback-default",
-                                                label: tf("recording_loopback_default"),
-                                                checked:
-                                                    recording.settings.loopbackDevice === "default",
-                                                onSelect: () =>
-                                                    void applyRecordingSettings({
-                                                        loopbackDevice: "default",
-                                                    }),
-                                            },
-                                            ...recording.devices
-                                                .filter(
-                                                    (device) =>
-                                                        device.isLoopback &&
-                                                        device.id !== "loopback:default",
-                                                )
-                                                .map((device) => ({
-                                                    key: device.id,
-                                                    label: device.name,
-                                                    checked:
-                                                        recording.settings.loopbackDevice ===
-                                                        device.id,
-                                                    onSelect: () =>
-                                                        void applyRecordingSettings({
-                                                            loopbackDevice: device.id,
-                                                        }),
-                                                })),
-                                        ]
-                                      : [
-                                            ...(recording.settings.captureAppId &&
-                                            !recording.apps.some(
-                                                (app) => app.id === recording.settings.captureAppId,
-                                            )
-                                                ? [
-                                                      {
-                                                          key: recording.settings.captureAppId,
-                                                          label:
-                                                              recording.settings.captureAppName ||
-                                                              recording.settings.captureAppId,
-                                                          checked: true,
+                    {!isPluginMode() && (
+                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                            <IconButton
+                                size="1"
+                                /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
+                                   录音键的"红"只在录制中才出现，语义色缺失） */
+                                variant={recording.active ? "solid" : "soft"}
+                                color="red"
+                                data-tooltip={recordingTooltip}
+                                disabled={recording.busy && recording.countdownRemaining === 0}
+                                onClick={() => {
+                                    if (recording.active) {
+                                        void dispatch(stopRecordingFlow());
+                                    } else if (recording.countdownRemaining > 0) {
+                                        void dispatch(cancelRecordingCountdown());
+                                    } else {
+                                        void dispatch(startRecordingFlow());
+                                    }
+                                }}
+                                onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    if (isPluginMode()) return;
+                                    setRecordingMenuPos({ x: event.clientX, y: event.clientY });
+                                    void dispatch(loadRecordingSettings());
+                                    // 每次打开菜单都强制重新枚举设备/应用，
+                                    // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
+                                    void dispatch(loadRecordingDevices({ force: true }));
+                                    void dispatch(loadRecordingApps({ force: true }));
+                                }}
+                            >
+                                {recording.active ? (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="currentColor"
+                                    >
+                                        <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                                    </svg>
+                                ) : (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="currentColor"
+                                    >
+                                        <circle cx="7.5" cy="7.5" r="4.2" />
+                                    </svg>
+                                )}
+                            </IconButton>
+                            {recordingMenuPos && (
+                                <AppContextMenu
+                                    x={recordingMenuPos.x}
+                                    y={recordingMenuPos.y}
+                                    ariaLabel={tf("recording_source_mode")}
+                                    onClose={() => setRecordingMenuPos(null)}
+                                    items={[
+                                        {
+                                            key: "mode-heading",
+                                            heading: true,
+                                            label: tf("recording_source_mode"),
+                                        },
+                                        {
+                                            key: "mode-device",
+                                            label: tf("recording_mode_device"),
+                                            checked: recording.settings.captureMode === "device",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "device",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-loopback",
+                                            label: tf("recording_mode_loopback"),
+                                            checked: recording.settings.captureMode === "loopback",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "loopback",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-application",
+                                            label: tf("recording_mode_application"),
+                                            checked:
+                                                recording.settings.captureMode === "application",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "application",
+                                                }),
+                                        },
+                                        {
+                                            key: "source-heading",
+                                            heading: true,
+                                            separatorBefore: true,
+                                            label: tf(
+                                                recording.settings.captureMode === "application"
+                                                    ? "recording_application"
+                                                    : "recording_device",
+                                            ),
+                                        },
+                                        ...(recording.settings.captureMode === "device"
+                                            ? [
+                                                  {
+                                                      key: "device-default",
+                                                      label: tf("recording_device_default"),
+                                                      checked:
+                                                          recording.settings.sourceDevice ===
+                                                          "default",
+                                                      onSelect: () =>
+                                                          void applyRecordingSettings({
+                                                              sourceDevice: "default",
+                                                          }),
+                                                  },
+                                                  ...recording.devices
+                                                      .filter(
+                                                          (device) =>
+                                                              !device.isLoopback &&
+                                                              device.id !== "default",
+                                                      )
+                                                      .map((device) => ({
+                                                          key: device.id,
+                                                          label: device.name,
+                                                          checked:
+                                                              recording.settings.sourceDevice ===
+                                                              device.id,
                                                           onSelect: () =>
                                                               void applyRecordingSettings({
-                                                                  captureAppId:
+                                                                  sourceDevice: device.id,
+                                                              }),
+                                                      })),
+                                              ]
+                                            : recording.settings.captureMode === "loopback"
+                                              ? [
+                                                    {
+                                                        key: "loopback-default",
+                                                        label: tf("recording_loopback_default"),
+                                                        checked:
+                                                            recording.settings.loopbackDevice ===
+                                                            "default",
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                loopbackDevice: "default",
+                                                            }),
+                                                    },
+                                                    ...recording.devices
+                                                        .filter(
+                                                            (device) =>
+                                                                device.isLoopback &&
+                                                                device.id !== "loopback:default",
+                                                        )
+                                                        .map((device) => ({
+                                                            key: device.id,
+                                                            label: device.name,
+                                                            checked:
+                                                                recording.settings
+                                                                    .loopbackDevice === device.id,
+                                                            onSelect: () =>
+                                                                void applyRecordingSettings({
+                                                                    loopbackDevice: device.id,
+                                                                }),
+                                                        })),
+                                                ]
+                                              : [
+                                                    ...(recording.settings.captureAppId &&
+                                                    !recording.apps.some(
+                                                        (app) =>
+                                                            app.id ===
+                                                            recording.settings.captureAppId,
+                                                    )
+                                                        ? [
+                                                              {
+                                                                  key: recording.settings
+                                                                      .captureAppId,
+                                                                  label:
+                                                                      recording.settings
+                                                                          .captureAppName ||
                                                                       recording.settings
                                                                           .captureAppId,
-                                                                  captureAppName:
-                                                                      recording.settings
-                                                                          .captureAppName,
-                                                                  captureAppProcess:
-                                                                      recording.settings
-                                                                          .captureAppProcess,
-                                                              }),
-                                                      },
-                                                  ]
-                                                : []),
-                                            ...recording.apps.map((app) => ({
-                                                key: app.id,
-                                                label: app.name,
-                                                checked: recording.settings.captureAppId === app.id,
-                                                onSelect: () =>
-                                                    void applyRecordingSettings({
-                                                        captureAppId: app.id,
-                                                        captureAppName: app.name,
-                                                        captureAppProcess: app.processName,
-                                                    }),
-                                            })),
-                                        ]),
-                                {
-                                    key: "settings",
-                                    label: tf("recording_context_settings"),
-                                    separatorBefore: true,
-                                    onSelect: () => {
-                                        setRecordingMenuPos(null);
-                                        setRecordingSettingsOpen(true);
-                                    },
-                                },
-                            ]}
-                        />
+                                                                  checked: true,
+                                                                  onSelect: () =>
+                                                                      void applyRecordingSettings({
+                                                                          captureAppId:
+                                                                              recording.settings
+                                                                                  .captureAppId,
+                                                                          captureAppName:
+                                                                              recording.settings
+                                                                                  .captureAppName,
+                                                                          captureAppProcess:
+                                                                              recording.settings
+                                                                                  .captureAppProcess,
+                                                                      }),
+                                                              },
+                                                          ]
+                                                        : []),
+                                                    ...recording.apps.map((app) => ({
+                                                        key: app.id,
+                                                        label: app.name,
+                                                        checked:
+                                                            recording.settings.captureAppId ===
+                                                            app.id,
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                captureAppId: app.id,
+                                                                captureAppName: app.name,
+                                                                captureAppProcess: app.processName,
+                                                            }),
+                                                    })),
+                                                ]),
+                                        {
+                                            key: "settings",
+                                            label: tf("recording_context_settings"),
+                                            separatorBefore: true,
+                                            onSelect: () => {
+                                                setRecordingMenuPos(null);
+                                                setRecordingSettingsOpen(true);
+                                            },
+                                        },
+                                    ]}
+                                />
+                            )}
+                        </Box>
                     )}
-                </Box>
-                {recording.active || recording.countdownRemaining > 0 ? (
-                    <Flex align="center" gap="1" className="shrink-0">
-                        <span
-                            className="hs-type-label tabular-nums"
-                            style={
-                                recording.active ? { color: "var(--qt-danger-text)" } : undefined
-                            }
-                        >
-                            {recording.countdownRemaining > 0
-                                ? `-${recording.countdownRemaining}`
-                                : formatRecordingTime(recording.elapsedSec)}
-                        </span>
-                        <div
-                            style={{
-                                width: 48,
-                                height: 6,
-                                borderRadius: "var(--qt-radius-pill)",
-                                background: "var(--qt-border)",
-                                overflow: "hidden",
-                                flexShrink: 0,
-                            }}
-                        >
+                    {recording.active || recording.countdownRemaining > 0 ? (
+                        <Flex align="center" gap="1" className="shrink-0">
+                            <span
+                                className="hs-type-label tabular-nums"
+                                style={
+                                    recording.active
+                                        ? { color: "var(--qt-danger-text)" }
+                                        : undefined
+                                }
+                            >
+                                {recording.countdownRemaining > 0
+                                    ? `-${recording.countdownRemaining}`
+                                    : formatRecordingTime(recording.elapsedSec)}
+                            </span>
                             <div
                                 style={{
-                                    width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
-                                    height: "100%",
-                                    background:
-                                        recording.level > 0.98
-                                            ? "var(--qt-danger-text)"
-                                            : "var(--qt-danger-border)",
-                                    transition: "width 80ms linear",
+                                    width: 48,
+                                    height: 6,
+                                    borderRadius: "var(--qt-radius-pill)",
+                                    background: "var(--qt-border)",
+                                    overflow: "hidden",
+                                    flexShrink: 0,
                                 }}
-                            />
-                        </div>
-                    </Flex>
-                ) : null}
-                {recording.error ? (
-                    <span
-                        className="hs-type-label truncate"
-                        data-tooltip={recording.error}
-                        style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
-                    >
-                        {recordingErrorMessage(recording.error)}
-                    </span>
-                ) : null}
-            </Flex>
+                            >
+                                <div
+                                    style={{
+                                        width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                        height: "100%",
+                                        background:
+                                            recording.level > 0.98
+                                                ? "var(--qt-danger-text)"
+                                                : "var(--qt-danger-border)",
+                                        transition: "width 80ms linear",
+                                    }}
+                                />
+                            </div>
+                        </Flex>
+                    ) : null}
+                    {recording.error ? (
+                        <span
+                            className="hs-type-label truncate"
+                            data-tooltip={recording.error}
+                            style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
+                        >
+                            {recordingErrorMessage(recording.error)}
+                        </span>
+                    ) : null}
+                </Flex>
+            )}
 
             <AppToolbarSeparator />
 

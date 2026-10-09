@@ -68,6 +68,8 @@ import {
     resolveCurvePointer,
     solveNearestCurveDir,
 } from "./timeline/reaperFade";
+import { hostFadeGainForAxes } from "./timeline/hostFadeDisplay";
+import type { HostFadeMetadata } from "../../types/api";
 import {
     buildCrossfadeGripInfoContent,
     buildSingleFadeInfoContent,
@@ -441,6 +443,8 @@ type FadeSideInfo = {
     dir: number;
     lengthSec: number;
     delta?: FadeInfoDelta;
+    /** 宿主淡化读数（插件模式）：形状名要按画布真正画的那族曲线取（见 `hostFadeDisplayShape`）。 */
+    hostFades?: HostFadeMetadata;
 };
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
@@ -4084,6 +4088,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     (args.side === "in" ? clip.fadeInShape : clip.fadeOutShape) ?? 0,
                 ).shape;
                 const baseDir = (args.side === "in" ? clip.fadeInDir : clip.fadeOutDir) ?? 0;
+                // 【为什么投影要用宿主那套曲线】画布在新轴宿主上画的是 `hostFadeGainForAxes`
+                // 的混合曲线，不是 `fadeGainSigned`。求解器若还按后者算，指针与画出来的
+                // 包络就是两条不同的曲线 —— 表现为"拖了不跟手"。
+                const curveMode = args.side === "in" ? "in" : "out";
+                const hostS =
+                    clip.hostFades?.curve_mode === "reaper_new"
+                        ? curveMode === "out"
+                            ? clip.hostFades.out_s
+                            : clip.hostFades.in_s
+                        : null;
                 const nextDir = solveNearestCurveDir({
                     shape,
                     dir: baseDir,
@@ -4092,6 +4106,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     pointerY01: pt.gain,
                     aspectYOverX:
                         args.curveEnv.bodyHeightPx / Math.max(1, widthSec * pxPerSecRef.current),
+                    ...(hostS === null
+                        ? {}
+                        : {
+                              gainAt: (t: number, dir: number) =>
+                                  hostFadeGainForAxes(curveMode, dir, hostS, t),
+                          }),
                 }).dir;
                 dispatch(
                     args.side === "in"
@@ -4108,6 +4128,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     shape,
                     dir: nextDir,
                     lengthSec: widthSec,
+                    hostFades: clip.hostFades,
                     delta: {
                         dir:
                             nextDir -
@@ -4168,6 +4189,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 shape: (lenIsOut ? lenBase?.fadeOutShape : lenBase?.fadeInShape) ?? 0,
                 dir: (lenIsOut ? lenBase?.fadeOutDir : lenBase?.fadeInDir) ?? 0,
                 lengthSec: nextLength,
+                // 宿主读数按 clip id 现取：长度拖拽期间它不变，不必进手势快照。
+                hostFades: sessionRef.current.clips.find((item) => item.id === args.clipId)
+                    ?.hostFades,
                 delta: { lengthSec: nextLength - baseLength },
             });
         },
@@ -4899,6 +4923,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 widthSec: number;
                 shape: number;
                 baseDir: number;
+                /** 新轴宿主的 S 分量（`null` = 不是新轴宿主）：曲率投影要按同一条曲线算。 */
+                hostS: number | null;
             };
             b: {
                 clipId: string;
@@ -4906,6 +4932,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 widthSec: number;
                 shape: number;
                 baseDir: number;
+                hostS: number | null;
             };
         };
         /**
@@ -5077,6 +5104,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 shape: resolveCurvatureEditBase(Number(earlier.fadeOutShape) || 0)
                                     .shape,
                                 baseDir: Number(earlier.fadeOutDir) || 0,
+                                // 新轴宿主的 S 分量：曲率拖拽的投影必须与画布同一条曲线。
+                                hostS:
+                                    earlier.hostFades?.curve_mode === "reaper_new"
+                                        ? earlier.hostFades.out_s
+                                        : null,
                             },
                             b: {
                                 clipId: later.id,
@@ -5085,6 +5117,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 shape: resolveCurvatureEditBase(Number(later.fadeInShape) || 0)
                                     .shape,
                                 baseDir: Number(later.fadeInDir) || 0,
+                                hostS:
+                                    later.hostFades?.curve_mode === "reaper_new"
+                                        ? later.hostFades.in_s
+                                        : null,
                             },
                         };
                     })(),
@@ -5129,6 +5165,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     args.curveEnv.clientY,
                 );
                 if (ptA === null || ptB === null) return;
+                // 取成本地常量：闭包里读 `sides.a.hostS` 会丢掉 `!== null` 的收窄。
+                const hostSA = sides.a.hostS;
+                const hostSB = sides.b.hostS;
                 const dirA = solveNearestCurveDir({
                     shape: sides.a.shape,
                     dir: sides.a.baseDir,
@@ -5138,6 +5177,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     aspectYOverX:
                         args.curveEnv.bodyHeightPx /
                         Math.max(1, sides.a.widthSec * pxPerSecRef.current),
+                    // 与画布同一条曲线（见单侧拖拽处的说明）。
+                    ...(hostSA === null
+                        ? {}
+                        : {
+                              gainAt: (t: number, dir: number) =>
+                                  hostFadeGainForAxes("out", dir, hostSA, t),
+                          }),
                 }).dir;
                 const dirB = solveNearestCurveDir({
                     shape: sides.b.shape,
@@ -5148,6 +5194,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     aspectYOverX:
                         args.curveEnv.bodyHeightPx /
                         Math.max(1, sides.b.widthSec * pxPerSecRef.current),
+                    ...(hostSB === null
+                        ? {}
+                        : {
+                              gainAt: (t: number, dir: number) =>
+                                  hostFadeGainForAxes("in", dir, hostSB, t),
+                          }),
                 }).dir;
                 sides.a.baseDir = dirA;
                 sides.b.baseDir = dirB;
@@ -5166,12 +5218,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         shape: curveBaseA?.fadeOutShape ?? 0,
                         dir: dirA,
                         lengthSec: origin.earlierFadeOutSec,
+                        hostFades: earlier.hostFades,
                         delta: { dir: dirA - (curveBaseA?.fadeOutDir ?? 0) },
                     },
                     {
                         shape: curveBaseB?.fadeInShape ?? 0,
                         dir: dirB,
                         lengthSec: origin.laterFadeInSec,
+                        hostFades: later.hostFades,
                         delta: { dir: dirB - (curveBaseB?.fadeInDir ?? 0) },
                     },
                 );
@@ -5332,12 +5386,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     shape: gripBaseA?.fadeOutShape ?? 0,
                     dir: gripBaseA?.fadeOutDir ?? 0,
                     lengthSec: lengthA,
+                    hostFades: earlier.hostFades,
                     delta: { lengthSec: lengthA - origin.earlierFadeOutSec },
                 },
                 {
                     shape: gripBaseB?.fadeInShape ?? 0,
                     dir: gripBaseB?.fadeInDir ?? 0,
                     lengthSec: lengthB,
+                    hostFades: later.hostFades,
                     delta: { lengthSec: lengthB - origin.laterFadeInSec },
                 },
             );
@@ -6590,26 +6646,28 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         }
                                     },
                                 },
-                                {
-                                    key: "as-takes",
-                                    label: t("import_as_takes"),
-                                    // 插件模式里多 take 的**新建**没有宿主对应（ARA 侧
-                                    // 只能读宿主已有的 take）；与 MenuBar 的模式选择
-                                    // 同一道闸，免得这里留下一个点了没反应的入口。
-                                    disabled: !canImportAsTakes(),
-                                    onSelect: () => {
-                                        if (!canImportAsTakes()) return;
-                                        const m = importModeMenu;
-                                        void dispatch(
-                                            importMultipleAudioAtPosition({
-                                                audioPaths: m.audioPaths,
-                                                mode: "as-takes",
-                                                trackId: m.trackId,
-                                                startSec: m.startSec,
-                                            }),
-                                        );
-                                    },
-                                },
+                                // 【插件里为什么整项不出现】多 take 的**新建**没有宿主
+                                // 对应（ARA 侧只能读宿主已有的 take）；与 MenuBar 的
+                                // 模式选择同一道闸，免得这里留下一个点了没反应的入口。
+                                ...(canImportAsTakes()
+                                    ? [
+                                          {
+                                              key: "as-takes",
+                                              label: t("import_as_takes"),
+                                              onSelect: () => {
+                                                  const m = importModeMenu;
+                                                  void dispatch(
+                                                      importMultipleAudioAtPosition({
+                                                          audioPaths: m.audioPaths,
+                                                          mode: "as-takes",
+                                                          trackId: m.trackId,
+                                                          startSec: m.startSec,
+                                                      }),
+                                                  );
+                                              },
+                                          },
+                                      ]
+                                    : []),
                             ]}
                         />
                     ) : null}

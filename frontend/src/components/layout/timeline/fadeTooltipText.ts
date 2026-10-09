@@ -21,11 +21,17 @@
  *
  * 长度格式化走 `timeValueText.formatDurationText`（相对时长，无工程原点
  * 偏移；主副单位来自时间轴显示设置）。
+ *
+ * 【为什么插件里也是这三行】曾经在插件（新轴宿主）里换成"REAPER c=… S=…"加一句
+ * "HiFiShifter 示意曲线；声音由 REAPER 控制"。那是**给实现者看的**读数，对用户没有
+ * 任何用：他既不知道 `c`/`S` 是什么，也不知道该拿它们怎么办。淡变在插件里同样是
+ * "形状 + 长度 + 曲率"三个量，与独立 App 同一套说法（`hostFadeDisplayShape` 负责把
+ * 宿主两轴翻译成画布上那一族曲线的名字）。
  */
 import type { ReactNode } from "react";
 import { createElement } from "react";
 import type { HostFadeMetadata } from "../../../types/api";
-import { hostFadeLabel } from "./hostFadeDisplay";
+import { hostFadeDisplayShape } from "./hostFadeDisplay";
 
 import { formatTemplate } from "../../../i18n/format";
 import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueText";
@@ -128,26 +134,11 @@ export function buildSingleFadeInfoText(args: {
     delta?: FadeInfoDelta;
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
-    const name = shapeName(args.shape, args.t);
+    const name = shapeName(displayShape(args), args.t);
     const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
         side: sideLabel,
         type: args.t("fade_type_label"),
     });
-    if (
-        args.hostFades &&
-        args.hostFades.curve_mode !== "legacy" &&
-        args.hostFades.curve_mode !== "hifishifter"
-    ) {
-        return [
-            labelValue(args.t, typeLabel, hostFadeLabel(args.hostFades, args.isOut, args.t)),
-            labelValue(
-                args.t,
-                args.t("common_length"),
-                lengthLine(args.lengthSec, args.formatCtx, args.delta),
-            ),
-            args.t("fade_info_host_curve_note"),
-        ].join("\n");
-    }
     return [
         labelValue(args.t, typeLabel, name),
         labelValue(
@@ -157,6 +148,25 @@ export function buildSingleFadeInfoText(args: {
         ),
         labelValue(args.t, args.t("common_curvature"), dirLine(args.dir, args.delta)),
     ].join("\n");
+}
+
+/**
+ * 界面要显示的形状号。
+ *
+ * 【为什么不能直接用 `args.shape`】插件（新轴宿主）的 `fadeInShape` 读自
+ * `C_FADE*SHAPE`，实测在坐标不落在七个预设上时是 `-1`（见
+ * `probe/ara/FADE-AXIS-FINDINGS.md`）—— 直接命名会把它显示成"线性"。
+ * `hostFadeDisplayShape` 按**画布真正画的那一族曲线**给出形状，所以图标/名称与
+ * 用户看到的包络一致；独立 App 与旧轴宿主原样返回。
+ *
+ * 曲率行不动：`args.dir` 就是曲率滑杆持有的、拖拽写回宿主轴的同一个数。
+ */
+function displayShape(args: {
+    shape: number;
+    isOut: boolean;
+    hostFades?: HostFadeMetadata;
+}): number {
+    return hostFadeDisplayShape(args.hostFades, args.isOut, args.shape);
 }
 
 /** 富内容版单侧块：首行为"侧别+图标"，其余两行为纯文本。 */
@@ -170,22 +180,13 @@ export function buildSingleFadeInfoContent(args: {
     delta?: FadeInfoDelta;
     hostFades?: HostFadeMetadata;
 }): ReactNode {
-    if (
-        args.hostFades &&
-        args.hostFades.curve_mode !== "legacy" &&
-        args.hostFades.curve_mode !== "hifishifter"
-    ) {
-        return buildSingleFadeInfoText(args)
-            .split("\n")
-            .map((row, key) => createElement("div", { key }, row));
-    }
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const typeLabel = formatTemplate(args.t("fade_info_side_type_label"), {
         side: sideLabel,
         type: args.t("fade_type_label"),
     });
     return [
-        [typeLabel, args.t("common_value_sep"), fadeIconNode(args.shape, args.isOut)],
+        [typeLabel, args.t("common_value_sep"), fadeIconNode(displayShape(args), args.isOut)],
         [
             labelValue(
                 args.t,

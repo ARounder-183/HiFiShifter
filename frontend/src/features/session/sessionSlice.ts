@@ -911,6 +911,30 @@ function clamp(value: number, minValue: number, maxValue: number): number {
     return Math.min(maxValue, Math.max(minValue, value));
 }
 
+/**
+ * 从被拒绝的 thunk 里取出**对用户有意义**的原因。
+ *
+ * 【为什么不能直接用 `action.error.message`】`createAsyncThunk` 配
+ * `rejectWithValue` 时，真正的原因在 `action.payload`，而 `action.error.message`
+ * 恒为字面量 `"Rejected"`。于是状态栏显示"错误：Rejected" —— 用户拿不到任何可
+ * 行动的信息（这正是"点`显示速度映射`得到 错误：Rejected"的来源）。
+ */
+export function rejectedMessage(action: {
+    payload?: unknown;
+    error?: { message?: string };
+}): string {
+    const payload = action.payload;
+    if (typeof payload === "string" && payload.trim() !== "") return payload;
+    if (payload !== null && typeof payload === "object" && "message" in payload) {
+        const message = (payload as { message?: unknown }).message;
+        if (typeof message === "string" && message.trim() !== "") return message;
+    }
+    const message = action.error?.message;
+    // `"Rejected"` 不是原因，只是 RTK 的占位符 —— 拿它当消息等于什么都没说。
+    if (typeof message === "string" && message !== "" && message !== "Rejected") return message;
+    return "Request failed";
+}
+
 function createId(prefix: string): string {
     return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -3708,9 +3732,12 @@ const sessionSlice = createSlice({
             state.status = label;
             state.error = undefined;
         };
-        const setRejected = (state: SessionState, action: { error?: { message?: string } }) => {
+        const setRejected = (
+            state: SessionState,
+            action: { payload?: unknown; error?: { message?: string } },
+        ) => {
             state.busy = false;
-            state.error = action.error?.message ?? "Request failed";
+            state.error = rejectedMessage(action);
             state.status = "Failed";
         };
 

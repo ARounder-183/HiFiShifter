@@ -118,27 +118,29 @@ export function FolderImportDialog({
 
                 {/*
                   建轨道组只在"跨轨道添加"下有效（另外两种模式下文件根本不在各自的
-                  轨道上）。这里**显示但禁用**而不是隐藏：让用户看得见它存在、也看得见
-                  为什么现在调不了。插件模式下多一条原因（轨道组由 REAPER 管理）。
+                  轨道上）。独立 App 里**显示但禁用**：让用户看得见它存在、也看得见
+                  为什么现在调不了。
+
+                  插件模式下**整项不出现** —— 轨道组由 REAPER 管理，插件对轨道结构
+                  是只读的（`host/folder.rs` 根本没有写入口），这个开关在那里永远
+                  不可能生效；宿主窗口本来就窄，不该再摆一个死选项。
                 */}
-                <AppSwitchRow
-                    control="checkbox"
-                    label={t("folder_import_create_tracks")}
-                    hint={
-                        !canCreateHostTrackGroups()
-                            ? t("folder_import_create_tracks_plugin_unavailable")
-                            : options.mode === "across-tracks"
-                              ? t("folder_import_create_tracks_hint")
-                              : t("folder_import_create_tracks_unavailable")
-                    }
-                    disabled={!canCreateHostTrackGroups() || options.mode !== "across-tracks"}
-                    checked={
-                        canCreateHostTrackGroups() &&
-                        options.createFolderTracks &&
-                        options.mode === "across-tracks"
-                    }
-                    onCheckedChange={(checked) => onOptionsChange({ createFolderTracks: checked })}
-                />
+                {canCreateHostTrackGroups() && (
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("folder_import_create_tracks")}
+                        hint={
+                            options.mode === "across-tracks"
+                                ? t("folder_import_create_tracks_hint")
+                                : t("folder_import_create_tracks_unavailable")
+                        }
+                        disabled={options.mode !== "across-tracks"}
+                        checked={options.createFolderTracks && options.mode === "across-tracks"}
+                        onCheckedChange={(checked) =>
+                            onOptionsChange({ createFolderTracks: checked })
+                        }
+                    />
+                )}
 
                 {/* 截断与跳过都必须说出来：不说就等于静默少导入。 */}
                 {truncated && (

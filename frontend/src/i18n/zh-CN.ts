@@ -1534,8 +1534,6 @@ export const zhCN = {
     import_dialog_title: "导入文件",
     import_across_tracks: "跨轨道添加",
     import_as_takes: "作为 Take 添加",
-    import_as_takes_plugin_unavailable:
-        "ARA 插件模式下不可用：请在 REAPER 中把多个 Take 放进同一个 item。",
     midi_import_clip_plugin_unavailable:
         "ARA 插件模式下不可用：片段归 REAPER 的 item，请改为导入到音高曲线。",
     folder_import_title: "导入文件夹",
@@ -1545,7 +1543,6 @@ export const zhCN = {
     folder_import_create_tracks: "为每个文件夹创建轨道组",
     folder_import_create_tracks_hint: "每个文件夹成为一条空白父轨道，其媒体文件成为子轨道。",
     folder_import_create_tracks_unavailable: "仅在「跨轨道添加」时可用。",
-    folder_import_create_tracks_plugin_unavailable: "ARA 插件模式下不可用：轨道组由 REAPER 管理。",
     folder_import_summary_folders: "{count} 个文件夹|{count} 个文件夹",
     folder_import_summary_files: "{count} 个媒体文件|{count} 个媒体文件",
     folder_import_truncated: "文件数超过上限，仅导入前 {count} 个",
@@ -2066,8 +2063,6 @@ export const zhCN = {
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "读不出宿主的淡化轴版本，无法确定用哪套轴；请用下方曲率滑杆调整",
-    fade_info_host_curve_note: "HiFiShifter 示意曲线；声音由 REAPER 控制",
-    fade_info_host_unknown: "REAPER 曲线未知",
     // ── 安装器（NSIS）─────────────────────────────────────────────────────
     installer_name: "HiFiShifter VST3",
     installer_publisher: "ARounder",

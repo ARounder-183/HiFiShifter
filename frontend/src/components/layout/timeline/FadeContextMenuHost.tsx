@@ -61,7 +61,15 @@ function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide 
     const autoSec = ref.isOut ? (clip.autoFadeOutSec ?? 0) : (clip.autoFadeInSec ?? 0);
     const manualSec = Math.max(0, ref.isOut ? (clip.fadeOutSec ?? 0) : (clip.fadeInSec ?? 0));
     const lengthSec = autoSec > 0 ? autoSec : manualSec;
-    return { clipId: ref.clipId, isOut: ref.isOut, shape, dir, lengthSec };
+    return {
+        clipId: ref.clipId,
+        isOut: ref.isOut,
+        shape,
+        dir,
+        lengthSec,
+        // 宿主读数从 Redux 实时解析（不是打开时的快照）——与 shape/dir 同一条纪律。
+        hostFades: clip.hostFades,
+    };
 }
 
 export const FadeContextMenuHost: React.FC = () => {

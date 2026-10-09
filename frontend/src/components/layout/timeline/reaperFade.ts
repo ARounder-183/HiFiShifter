@@ -288,6 +288,10 @@ export function resolveCurvePointer(
  * @param pointerY01 指针的归一化目标增益 [0,1]（1 = 响）
  * @param aspectYOverX y 距离的屏幕权重（= 绘制高度 / 宽度），使距离
  *        度量在非正方形淡化区里依然符合视觉直觉
+ * @param gainAt 曲线求值器 `(t, dir) => gain`；缺省用本应用的曲线族
+ *        （`fadeGainSigned`）。**画布画哪条曲线，这里就必须用哪条** ——
+ *        插件的新轴宿主画的是宿主两轴的混合（`hostFadeGainForAxes`），
+ *        用 `fadeGainSigned` 投影会让指针和包络对不上（"拖了不跟手"）。
  */
 export function solveNearestCurveDir(args: {
     shape: number;
@@ -296,6 +300,7 @@ export function solveNearestCurveDir(args: {
     pointerX01: number;
     pointerY01: number;
     aspectYOverX?: number;
+    gainAt?: (t: number, dir: number) => number;
 }): { t: number; dir: number; gain: number } {
     const rawAspect = args.aspectYOverX;
     const aspect =
@@ -305,9 +310,11 @@ export function solveNearestCurveDir(args: {
     const px = Math.min(1, Math.max(0, args.pointerX01));
     const py = Math.min(1, Math.max(0, args.pointerY01));
     const dirClamp = (d: number) => Math.min(1, Math.max(-1, d));
+    const gainAt =
+        args.gainAt ?? ((t: number, d: number) => fadeGainSigned(args.shape, d, args.mode, t));
 
     const distanceOf = (t: number, d: number): number => {
-        const g = fadeGainSigned(args.shape, d, args.mode, t);
+        const g = gainAt(t, d);
         const dx = t - px;
         const dy = (g - py) * aspect;
         return Math.hypot(dx, dy);

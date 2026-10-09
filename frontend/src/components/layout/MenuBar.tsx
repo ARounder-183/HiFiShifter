@@ -621,11 +621,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 </DropdownMenu.Root>
             ) : (
                 <DropdownMenu.Root>
-                    <DropdownMenu.Trigger
-                        disabled={isPluginMode()}
-                        title={isPluginMode() ? dawControlledReason() : undefined}
-                        className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
-                    >
+                    {/* 这个分支只在独立 App 走：插件有上面那个只留"导入媒体"的菜单。
+                        此前这里还写着 `disabled={isPluginMode()}` —— 恒为假的死条件。 */}
+                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                         <span>{t("menu_file")}</span>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content variant="soft" color="gray">
@@ -1712,17 +1710,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     options={[
                         { id: "across-time", label: t("import_across_time") },
                         { id: "across-tracks", label: t("import_across_tracks") },
-                        {
-                            id: "as-takes",
-                            label: t("import_as_takes"),
-                            // 插件模式里多 take 的**新建**没有宿主对应（ARA 侧只能读
-                            // 宿主已有的 take）。此前这项照常可选，点了只得到一条
-                            // 无人处理的拒绝。
-                            disabled: !canImportAsTakes(),
-                            description: canImportAsTakes()
-                                ? undefined
-                                : t("import_as_takes_plugin_unavailable"),
-                        },
+                        // 【插件里为什么整项不出现】多 take 的**新建**没有宿主对应
+                        // （ARA 侧只能读宿主已有的 take）。一项永远选不动的选项只会
+                        // 让用户先选错再被打回，所以整项隐藏。
+                        ...(canImportAsTakes()
+                            ? [{ id: "as-takes", label: t("import_as_takes") }]
+                            : []),
                     ]}
                     onSelect={(id) => {
                         const mode = menuImportMode;
