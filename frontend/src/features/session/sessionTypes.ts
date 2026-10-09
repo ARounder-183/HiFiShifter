@@ -372,6 +372,33 @@ export function activeClipTakeName(clip: {
     return activeTake?.name || clip.name;
 }
 
+/**
+ * Clip 浮标的**名称行**：只给名字，**永不**给路径。
+ *
+ * 【为什么不能用 `clip.sourcePath` 当名称】ARA 插件里它是物化后的私有 PCM 绝对路径
+ * （`…\pcm\<namespace>\sources\source-<hash>.wav`），独立 App 里是完整源路径 ——
+ * 两者都是实现细节。此前浮标写的是 `clip.sourcePath ?? displayName`，于是悬停一个
+ * 片段看到的是一长串路径，用户报障"名称太过冗长"。
+ *
+ * 【是取法错了，不是数据错了】`clip.name` 本来就是短的：插件里是宿主 take 名，
+ * 独立 App 里是导入时从文件名取的主名。
+ *
+ * 【兜底也绝不回落到完整路径】名字为空时用源文件的 basename（仍是一个短标识）；
+ * 再没有就返回空串 —— 浮标因此不显示，而不是显示一串噪声。
+ */
+export function clipTooltipTitle(clip: {
+    name: string;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
+    sourcePath?: string | null;
+}): string {
+    const display = clipDisplayName(clip).trim();
+    if (display !== "") return display;
+    const path = typeof clip.sourcePath === "string" ? clip.sourcePath.trim() : "";
+    if (path === "") return "";
+    return path.split(/[\\/]/).pop() ?? "";
+}
+
 export interface MidiNoteEvent {
     startSec: number;
     endSec: number;

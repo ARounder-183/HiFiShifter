@@ -276,7 +276,7 @@ import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isMirrorEcho } from "./timeline/scrollEcho";
 import {
     activeClipTakeName,
-    clipDisplayName,
+    clipTooltipTitle,
     type ClipFormantMorph,
 } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
@@ -3841,14 +3841,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 publishFadeRichTooltip(anchor, null);
                 return;
             }
-            const displayName = clipDisplayName(clip);
             let text: string | null = null;
             switch (args.headerControl) {
                 case "name": {
+                    // 名称行只给名字，不给路径（见 `clipTooltipTitle`）。
+                    const label = clipTooltipTitle(clip);
                     const base =
                         clip.midiNoteCount != null
-                            ? `${t("clip_type_midi_prefix")} ${displayName}`
-                            : (clip.sourcePath ?? displayName);
+                            ? `${t("clip_type_midi_prefix")} ${label}`.trim()
+                            : label;
                     // 倒放标记：宿主报告方向后必须让人看得见 —— 否则"这个 take 倒放了"
                     // 只活在数据里，用户会以为它没倒放（插件里尤其如此：没有波形可看）。
                     text = clip.reversed ? `${base} · ${t("clip_take_reverse")}` : base;

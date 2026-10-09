@@ -323,7 +323,12 @@ impl DocumentSession {
                 );
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
-                clip.name = item.name.clone();
+                // 【为什么空名不覆盖】宿主 take 名可能为空（`GetTakeName` 返回空串）。
+                // 用空串盖掉 ARA 映射带来的名字（region / source 名）会让片段在画布与
+                // 浮标上都无字可显示 —— 名字是用户识别片段的主要线索。
+                if !item.name.trim().is_empty() {
+                    clip.name = item.name.clone();
+                }
                 clip.muted = g.muted;
                 clip.start_sec = g.start_sec;
                 clip.length_sec = g.duration_sec;

@@ -153,6 +153,7 @@ import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/sess
 import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep";
 import { resolveParamShiftIntent } from "./features/keybindings/paramShiftActions";
 import { isSelectionParamEditInFlight } from "./features/session/selectionEditInFlight";
+import { trackNameForMedia } from "./features/session/mediaTrackName";
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
@@ -1327,14 +1328,10 @@ function AppInner() {
                             }
                             currentProgress = p ?? 0;
                             currentComputingPath = sourcePath;
-                            // 提取文件名（不含路径和扩展名）
-                            const fileName = sourcePath
-                                ? (sourcePath
-                                      .replace(/\\/g, "/")
-                                      .split("/")
-                                      .pop()
-                                      ?.replace(/\.[^.]+$/, "") ?? sourcePath)
-                                : null;
+                            // 与导入建轨共用同一条"取文件名主名"规则
+                            // （`trackNameForMedia`）—— 此前这里内联重写了一遍，
+                            // 改一处就会让两处显示分叉。
+                            const fileName = sourcePath ? trackNameForMedia(sourcePath) : null;
                             appStatusProgressBus.setWaveformAnalysis({
                                 active: true,
                                 sourcePath: fileName,
