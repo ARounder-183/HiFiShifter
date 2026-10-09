@@ -48,8 +48,22 @@ function clipWithTakes(): ClipInfo {
         lengthSec: 4,
         color: "blue",
         takes: [
-            { id: "t1", name: "Take A", gain: 1, reversed: false, channelMode: 0, loopEnabled: false },
-            { id: "t2", name: "Take B", gain: 1, reversed: false, channelMode: 0, loopEnabled: false },
+            {
+                id: "t1",
+                name: "Take A",
+                gain: 1,
+                reversed: false,
+                channelMode: 0,
+                loopEnabled: false,
+            },
+            {
+                id: "t2",
+                name: "Take B",
+                gain: 1,
+                reversed: false,
+                channelMode: 0,
+                loopEnabled: false,
+            },
         ],
         activeTakeId: "t1",
         sourcePath: "C:\\audio\\vocal.wav",
@@ -111,9 +125,9 @@ function menuLabels(): string[] {
 }
 
 function entryByLabel(label: string): HTMLButtonElement {
-    const found = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button.hs-menu__item")).find(
-        (el) => (el.textContent ?? "").includes(label),
-    );
+    const found = Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>("button.hs-menu__item"),
+    ).find((el) => (el.textContent ?? "").includes(label));
     if (!found) throw new Error(`menu entry not found: ${label}`);
     return found;
 }

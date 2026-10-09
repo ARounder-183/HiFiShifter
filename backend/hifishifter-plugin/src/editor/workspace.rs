@@ -39,6 +39,10 @@ fn sync_host_takes(
     item: &crate::host::reaper::UiItem,
     prefix: &impl Fn(&str) -> String,
     authorized_take: Option<&str>,
+    // 分割出来的右半段：父段已被授权的媒体身份（见 `present_host_inventory`）。
+    // 右半段没有自己的 region，所以 `authorized_take` 是 `None`；但它的源与父段是
+    // 同一个文件、父段已授权 ⇒ 可以借用。这是**显示**的补位，不是新的授权。
+    inherited_media: Option<&hifishifter_kernel::state::ClipTake>,
 ) {
     let expected: Vec<String> = item
         .takes
@@ -110,27 +114,44 @@ fn sync_host_takes(
     ) else {
         return;
     };
-    // 把 clip 的扁平投影（= ARA 授权媒体）搬到指名的那一个 take 上。只搬**媒体身份**
-    // 字段：源窗口 / 倍率 / 名字 / 声道模式都是宿主几何，由上面的清单提供。
-    if let Some(index) = granted {
-        // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
-        // 无 take 的扁平 clip 退回投影本身。
-        let granted_media = if clip.takes.is_empty() {
-            hifishifter_kernel::state::ClipTake::from_clip(clip)
-        } else {
-            clip.active_take().clone()
-        };
+    // 把媒体身份搬到该搬的那个 take 上。只搬**媒体身份**字段：源窗口 / 倍率 / 名字 /
+    // 声道模式都是宿主几何，由上面的清单提供。
+    //
+    // 【搬到哪一个】
+    // - 自己的 region 已认领（`granted`）→ 挂到 GUID 与授权记录相等的那一个 take；
+    // - 分割出来的右半段（`inherited_media`）→ 挂到自己的 active take —— 它的源与父段
+    //   是同一个文件，所以父段的媒体身份对它是成立的；
+    // - 都不是 → 一个都不挂（宁可显示占位，也不把别的 take 的采样挂上来）。
+    let media: Option<(usize, hifishifter_kernel::state::ClipTake)> = match granted {
+        Some(index) => {
+            // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
+            // 无 take 的扁平 clip 退回投影本身。
+            let owned = if clip.takes.is_empty() {
+                hifishifter_kernel::state::ClipTake::from_clip(clip)
+            } else {
+                clip.active_take().clone()
+            };
+            Some((index, owned))
+        }
+        None => inherited_media.and_then(|media| {
+            item.takes
+                .iter()
+                .position(|take| take.active)
+                .map(|index| (index, media.clone()))
+        }),
+    };
+    if let Some((index, media)) = media {
         let target = &mut rebuilt[index];
-        target.source_path = granted_media.source_path;
-        target.source_path_relative = granted_media.source_path_relative;
-        target.duration_sec = granted_media.duration_sec;
-        target.duration_frames = granted_media.duration_frames;
-        target.source_sample_rate = granted_media.source_sample_rate;
-        target.source_file_fingerprint = granted_media.source_file_fingerprint;
-        target.source_file_mtime = granted_media.source_file_mtime;
-        target.source_file_size = granted_media.source_file_size;
-        target.waveform_preview = granted_media.waveform_preview;
-        target.pitch_range = granted_media.pitch_range;
+        target.source_path = media.source_path;
+        target.source_path_relative = media.source_path_relative;
+        target.duration_sec = media.duration_sec;
+        target.duration_frames = media.duration_frames;
+        target.source_sample_rate = media.source_sample_rate;
+        target.source_file_fingerprint = media.source_file_fingerprint;
+        target.source_file_mtime = media.source_file_mtime;
+        target.source_file_size = media.source_file_size;
+        target.waveform_preview = media.waveform_preview;
+        target.pitch_range = media.pitch_range;
     }
     // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
     // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
@@ -275,6 +296,29 @@ impl DocumentSession {
         if tracks.is_empty() {
             return;
         }
+        // 分割出来的右半段：宿主还没为它分配 region，所以 `authorized_takes` 里没有它。
+        // 但分割**不改变音频源**，父段已被授权 —— 于是把父段的授权媒体身份借给右半段，
+        // 让它立刻有波形，而不是停在"等待 REAPER 提供音频"的占位里。
+        //
+        // 【为什么只借**媒体身份**】源窗口 / 倍率 / 名字都是右半段自己的宿主几何
+        // （由下面的清单提供）；这里只补 `source_path` 一族的字段，与 `sync_host_takes`
+        // 的嫁接同一原则：同一 `audio_source`、已在授权范围内。
+        let inherited_media: std::collections::HashMap<String, hifishifter_kernel::state::ClipTake> = {
+            let lineage = self.split_media_from.lock().unwrap();
+            lineage
+                .iter()
+                .filter_map(|(right, left)| {
+                    let parent_id = prefix(&format!("ara-item-{left}"));
+                    let parent = timeline.clips.iter().find(|clip| clip.id == parent_id)?;
+                    // 父段自己也可能还没拿到音频（例如它也是被隔离的倒放片段）——
+                    // 那就什么都不借，右半段照常显示为"在途"。
+                    if parent.source_path.is_none() {
+                        return None;
+                    }
+                    Some((right.clone(), parent.active_take().clone()))
+                })
+                .collect()
+        };
         timeline.tracks.retain(|track| track.id != "track_main");
         let mut present = std::collections::BTreeSet::new();
         let mut owned = std::collections::BTreeSet::new();
@@ -331,6 +375,7 @@ impl DocumentSession {
                     item,
                     &prefix,
                     authorized_takes.get(&g.item_id).map(String::as_str),
+                    inherited_media.get(&g.item_id),
                 );
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
@@ -366,6 +411,15 @@ impl DocumentSession {
         timeline.clips.retain(|clip| {
             !owned.contains(&clip.track_id) || !clip.id.starts_with(&prefix("ara-clip-"))
         });
+        // 分割谱系回收：两段都不在宿主清单里时删掉这条边，免得它随分割次数无限增长
+        // （与 `ParameterAtlas::split_parents` 的 retain 同一手法）。
+        {
+            let mut lineage = self.split_media_from.lock().unwrap();
+            lineage.retain(|right, left| {
+                present.contains(&prefix(&format!("ara-item-{right}")))
+                    && present.contains(&prefix(&format!("ara-item-{left}")))
+            });
+        }
         {
             let known = self.ui_known_tracks.lock().unwrap();
             timeline.tracks.retain(|track| {

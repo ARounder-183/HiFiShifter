@@ -139,6 +139,14 @@ pub(crate) fn execute(
                 .checked_add(1)
                 .ok_or("edit revision exhausted")?;
         }
+        // 媒体派生谱系：右半段没有自己的 region，但它的源与父段**同一个文件**，
+        // 而父段已被 ARA 授权。记下这条边，右半段就能立刻显示波形，而不是停在
+        // "等待 REAPER 提供音频"的占位里（见 `DocumentSession::split_media_from`）。
+        document
+            .split_media_from
+            .lock()
+            .unwrap()
+            .insert(pair.1.item_id.clone(), pair.0.item_id.clone());
         pairs.push(pair);
     }
     owner.refresh_reaper_transport();
