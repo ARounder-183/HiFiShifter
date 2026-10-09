@@ -51,6 +51,17 @@ pub(crate) struct DocumentSession {
     /// take 的采样挂到新 take 上，那是听不见的错（渲染读的是同一条 `source_path`）。
     /// 记不下来时宁可不挂：无源占位是看得见的。
     pub authorized_takes: Mutex<HashMap<u64, String>>,
+    /// ARA 授权那一刻，每个 region 对应 item 的 active take 的**源文件路径**
+    /// （region_key → 文件路径）。与 [`Self::authorized_takes`] 同处写入。
+    ///
+    /// 【为什么需要】GUID 相等是**最强**的身份判据，但用户在 REAPER 里把 active take
+    /// 换成**同一个文件**的另一个 take（复制 take、切换 take）时 GUID 就变了，而内容
+    /// 并未改变。此时文件路径相同即可证明"同一份已授权 PCM"，`sync_host_takes` 可以
+    /// 安全地把它挂上去，而不是让明明有音频的片段显示占位。
+    ///
+    /// 【边界不可松动】这只回退到**已被 ARA 授权的那份 PCM**；路径为空或读不到时
+    /// 仍然"宁可不挂"（无源占位是看得见的，挂错采样是听不见的错）。
+    pub authorized_sources: Mutex<HashMap<u64, String>>,
     pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::reaper::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
     /// 由 REAPER folder 结构**得到父级**的轨道 id（见 `host::folder`）。

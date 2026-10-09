@@ -4039,6 +4039,7 @@ mod region_geometry_match_tests {
             auto_fade_in_sec: 0.,
             auto_fade_out_sec: 0.,
             loop_source: false,
+            source_file_name: None,
         }
     }
 

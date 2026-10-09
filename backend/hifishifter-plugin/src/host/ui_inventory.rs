@@ -792,6 +792,81 @@ mod tests {
         document.close();
     }
 
+    /// 用户把 active take 换成**同一个文件**的另一个 take 时，授权媒体仍要挂得上。
+    ///
+    /// 【为什么这条测试存在】媒体嫁接此前只认 take GUID 相等。复制 take / 切换 active
+    /// take 会让 GUID 变、内容不变 —— 于是明明有音频的片段显示占位。文件路径相同即证明
+    /// "同一份已授权 PCM"，可以安全回退；路径不同（或无路径）时仍然"宁可不挂"。
+    #[test]
+    fn a_take_switch_to_the_same_file_keeps_the_authorized_media() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        *fixture.source_file_name.borrow_mut() = Some("C:/media/same.wav".into());
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9881);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, item_id.clone());
+        // GUID 对不上任何一个 take（模拟"切到了别的 take"），但文件路径对得上。
+        document
+            .authorized_takes
+            .lock()
+            .unwrap()
+            .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
+        document
+            .authorized_sources
+            .lock()
+            .unwrap()
+            .insert(7, "C:/media/same.wav".into());
+
+        let mut timeline: hifishifter_kernel::state::TimelineState =
+            serde_json::from_value(serde_json::json!({
+                "tracks":[{"id":"ui-host-track","name":"T","order":0}],
+                "bpm":120.,"project_sec":1.,
+                "clips":[{"id":format!("ui-ara-item-{item_id}"),"track_id":"ui-host-track",
+                    "name":"C","start_sec":0.,"length_sec":4.0/44100.,
+                    "takes":[{"id":"ara-clip-1-take-1","source_path":"authorized-source",
+                        "source_start_sec":0.,"source_end_sec":4.0/44100.}]}],
+            }))
+            .unwrap();
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(
+            timeline.clips[0].source_path.as_deref(),
+            Some("authorized-source"),
+            "同文件的 take 切换必须保住授权媒体（文件路径回退）"
+        );
+
+        // 路径对不上（宿主换成了另一个文件）→ 不许挂旧采样。
+        document
+            .authorized_sources
+            .lock()
+            .unwrap()
+            .insert(7, "C:/media/other.wav".into());
+        let mut again = hifishifter_kernel::state::TimelineState {
+            clips: vec![timeline.clips[0].clone()],
+            ..Default::default()
+        };
+        document.present_host_inventory(&mut again, "ui-");
+        assert!(
+            again.clips[0]
+                .takes
+                .iter()
+                .all(|take| take.source_path.is_none()),
+            "文件不同时不得沿用旧授权媒体"
+        );
+        document.close();
+    }
+
     /// 宿主改了 take 的声道模式后，**清单重建**必须把新值带到 clip 与 active take 上。
     ///
     /// 【为什么这条测试存在】用户报障："改了声道模式，插件里闪一下又变回旧值"。

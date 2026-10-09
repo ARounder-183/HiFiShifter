@@ -53,6 +53,9 @@ fn sync_host_takes(
     item: &crate::host::reaper::UiItem,
     prefix: &impl Fn(&str) -> String,
     authorized_take: Option<&str>,
+    // ARA 授权那一刻 active take 的**源文件路径**（`authorized_sources`）。
+    // 只在 GUID 对不上时作为回退身份（见下面的 `granted`）。
+    authorized_source: Option<&str>,
     // 分割出来的右半段：父段已被授权的媒体身份（见 `present_host_inventory`）。
     // 右半段没有自己的 region，所以 `authorized_take` 是 `None`；但它的源与父段是
     // 同一个文件、父段已授权 ⇒ 可以借用。这是**显示**的补位，不是新的授权。
@@ -79,11 +82,22 @@ fn sync_host_takes(
     // 授权媒体只挂到 GUID 与记录相等的那一个 take 上：用户在 REAPER 里换了 active take
     // 而 ARA 尚未重新认领时，GUID 对不上 ⇒ 一个都不挂（宁可显示占位，也不把上一个 take
     // 的采样挂到新 take 上）。
-    let granted = authorized_take.and_then(|guid| {
-        item.takes
-            .iter()
-            .position(|take| take.geometry.take_id == guid)
-    });
+    let granted = authorized_take
+        .and_then(|guid| {
+            item.takes
+                .iter()
+                .position(|take| take.geometry.take_id == guid)
+        })
+        // 【回退：同一 item 内、源文件与授权那一刻相同的 take】用户把 active take 换成
+        // **同一个文件**的另一个 take（复制 take、切换 take）时 GUID 变了，内容却没变。
+        // 文件名相同即证明"同一份已授权 PCM"，可以安全地把授权媒体挂上去 —— 否则明明
+        // 有音频的片段会显示占位。路径为空（读不到）时不回退，保持"宁可不挂"。
+        .or_else(|| {
+            let wanted = authorized_source.filter(|name| !name.is_empty())?;
+            item.takes
+                .iter()
+                .position(|take| take.geometry.source_file_name.as_deref() == Some(wanted))
+        });
     // 【为什么按 id 合并而不是整体替换】宿主元数据只描述**几何与媒体**；take 上的
     // 插件自有内容（MIDI 音符、声道判定档案、包络、拉伸标记、源声道数）宿主根本不报告。
     // 整体替换会在每次清单刷新时把它们抹掉。先按 id 建一份旧值索引，逐字段合并。
@@ -323,6 +337,20 @@ impl DocumentSession {
                 .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
                 .collect()
         };
+        // item GUID → 授权那一刻 active take 的源文件路径（回退身份，见
+        // `DocumentSession::authorized_sources`）。只在 take GUID 对不上时使用。
+        let authorized_sources: std::collections::HashMap<String, String> = {
+            let items = self.region_items.lock().unwrap();
+            let sources = self.authorized_sources.lock().unwrap();
+            items
+                .iter()
+                .filter_map(|(key, item)| {
+                    sources
+                        .get(key)
+                        .map(|source| (item.clone(), source.clone()))
+                })
+                .collect()
+        };
         let tracks = self.ui_tracks.lock().unwrap();
         if tracks.is_empty() {
             return;
@@ -432,6 +460,7 @@ impl DocumentSession {
                     item,
                     &prefix,
                     authorized_takes.get(&g.item_id).map(String::as_str),
+                    authorized_sources.get(&g.item_id).map(String::as_str),
                     inherited_media.get(&g.item_id),
                 );
                 display_item_gain(clip, g.item_gain);

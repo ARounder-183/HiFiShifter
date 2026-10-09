@@ -320,11 +320,32 @@ impl ModelHandle {
                             })
                             .collect::<std::collections::HashMap<_, _>>()
                     };
+                    // 同一时刻记下 active take 的**源文件路径**（可读时）：GUID 是主判据，
+                    // 文件路径是"换成同一文件的另一个 take"时的回退身份（见
+                    // `DocumentSession::authorized_sources`）。
+                    let source_by_item = {
+                        let tracks = self.session.ui_tracks.lock().unwrap();
+                        tracks
+                            .values()
+                            .flat_map(|track| &track.items)
+                            .filter_map(|item| {
+                                item.geometry
+                                    .source_file_name
+                                    .clone()
+                                    .map(|name| (item.geometry.item_id.clone(), name))
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    };
                     let mut takes = self.session.authorized_takes.lock().unwrap();
+                    let mut sources = self.session.authorized_sources.lock().unwrap();
                     takes.clear();
+                    sources.clear();
                     for (key, item) in items.iter() {
                         if let Some(take) = take_by_item.get(item) {
                             takes.insert(*key, take.clone());
+                        }
+                        if let Some(source) = source_by_item.get(item) {
+                            sources.insert(*key, source.clone());
                         }
                     }
                 }

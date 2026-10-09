@@ -56,6 +56,8 @@ type TakeCount = unsafe extern "C" fn(*mut c_void) -> i32;
 type TakeAt = unsafe extern "C" fn(*mut c_void, i32) -> *mut c_void;
 type TakeSource = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 type SectionInfo = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64, *mut bool) -> bool;
+/// `void GetMediaSourceFileName(PCM_source*, char* bufOut, int sz)`：take 源文件的路径。
+type SourceFileName = unsafe extern "C" fn(*mut c_void, *mut std::ffi::c_char, i32);
 
 /// 一个 take 的方向读取器（`GetMediaItemTake_Source` + `PCM_Source_GetSectionInfo`）。
 ///
@@ -64,6 +66,15 @@ type SectionInfo = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64, *mut bo
 pub(super) struct TakeDirectionApi {
     pub source: TakeSource,
     pub section: SectionInfo,
+    /// `GetMediaSourceFileName`：读 take 源文件的路径。
+    ///
+    /// 【为什么需要它】`sync_host_takes` 的媒体嫁接此前只认 take GUID 相等。用户在
+    /// REAPER 里把 active take 换成**同一个文件**的另一个 take（复制 take、切换 take）
+    /// 时，新 take 的 GUID 与授权记录不符 ⇒ 拿不到媒体 ⇒ 明明有音频却显示占位。
+    /// 文件名相同即可证明"同一份已授权 PCM"，可以安全地把它挂上去。
+    ///
+    /// 缺省时该回退不可用（与方向读取独立降级）：读不到文件名就退回"宁可不挂"。
+    pub filename: Option<SourceFileName>,
 }
 
 /// 多 take 枚举入口（`GetMediaItemNumTakes` / `GetMediaItemTake`）。
@@ -232,9 +243,15 @@ impl ReaperHost {
         // 多 take 枚举：两个函数必须同时存在才算"能列 take"；方向读取再单独可选。
         // 官方头文件（`reaper_plugin_functions.h`）逐条核实过签名：
         // `int GetMediaItemNumTakes(MediaItem*)` / `MediaItem_Take* GetMediaItemTake(MediaItem*, int)`。
+        // 文件名读取器与方向读取器独立可选（各自降级），但都在函数体的 `Option` 上下文里查。
+        let source_file_name = lookup!(c"GetMediaSourceFileName", SourceFileName);
         let take_direction = lookup!(c"GetMediaItemTake_Source", TakeSource)
             .zip(lookup!(c"PCM_Source_GetSectionInfo", SectionInfo))
-            .map(|(source, section)| TakeDirectionApi { source, section });
+            .map(|(source, section)| TakeDirectionApi {
+                source,
+                section,
+                filename: source_file_name,
+            });
         let take_enum = lookup!(c"GetMediaItemNumTakes", TakeCount)
             .zip(lookup!(c"GetMediaItemTake", TakeAt))
             .map(|(count, at)| TakeEnumApi {
@@ -592,6 +609,48 @@ impl ReaperHost {
         .ok()?;
         ok.then_some(reversed)
     }
+    /// take 源文件的路径（`GetMediaSourceFileName`）。
+    ///
+    /// 【为什么需要它】`sync_host_takes` 的媒体嫁接此前只认 take GUID 相等；用户换成
+    /// **同一个文件**的另一个 take（复制 take、切换 active take）时，新 GUID 与授权记录
+    /// 不符 ⇒ 明明有音频却显示占位。文件名相同即可证明"同一份已授权 PCM"，可安全回退。
+    ///
+    /// 读不出来（API 缺失、源为空、路径为空）返回 `None` —— 调用方退回"宁可不挂"。
+    pub(super) fn take_source_file_name(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<String> {
+        let api = self.take_enum.as_ref()?.direction.as_ref()?;
+        let filename = api.filename?;
+        let geometry = self.geometry.as_ref()?;
+        let project = self.project(authorized).ok()?;
+        let source = checked(authorized, || unsafe { (api.source)(take) }).ok()?;
+        if source.is_null() {
+            return None;
+        }
+        if !checked(authorized, || unsafe {
+            (geometry.validate)(project, source, c"PCM_source*".as_ptr())
+        })
+        .ok()?
+        {
+            return None;
+        }
+        // 路径有界（与 GUID 读取同一条纪律：不开放任意长字符串）。
+        let mut buffer = [0u8; 4096];
+        checked(authorized, || unsafe {
+            filename(source, buffer.as_mut_ptr().cast(), buffer.len() as i32)
+        })
+        .ok()?;
+        let end = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        if end == 0 {
+            return None;
+        }
+        std::str::from_utf8(&buffer[..end]).ok().map(str::to_owned)
+    }
     /// UI显示清单中的take必须由真实parent轨道枚举取得，不能由JS传地址。
     fn geometry_for_take(
         &self,
@@ -719,6 +778,8 @@ impl ReaperHost {
         // 循环源是 **item** 属性（与 RPP 的 `LOOP` 行同源），不是 take 属性。
         // 用 `iv`（item 值）而不是 `tv`（take 值）读，读的就是同一个对象上正确的那一项。
         let loop_source = boolean(iv(c"B_LOOPSRC")?)?;
+        // 源文件路径：读不出来就是 `None`（回退身份不可用），不猜。
+        let source_file_name = self.take_source_file_name(take, &authorized);
         let length = |name| -> Result<f64, String> {
             let v = iv(name)?;
             if v < 0. {
@@ -809,6 +870,7 @@ impl ReaperHost {
             fade_axes_new: self.fade_axes_new,
             auto_fade_in_sec,
             auto_fade_out_sec,
+            source_file_name,
         })
     }
 }

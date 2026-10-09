@@ -611,7 +611,10 @@ mod tests {
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
         let error = input.render(Arc::new(AtomicBool::new(false))).unwrap_err();
-        assert!(error.contains("BudgetExceeded"));
+        assert!(
+            error.contains("BudgetExceeded"),
+            "unexpected error: {error}"
+        );
         assert_eq!(budget.used(), baseline);
     }
     /// 双输出率从同一HiFiGAN原生结果派生，整段HNSEP也只运行一次，不以WORLD外推。

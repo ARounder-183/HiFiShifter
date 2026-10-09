@@ -32,6 +32,8 @@ pub(crate) struct Fixture {
     pub take_reversed: Cell<bool>,
     /// `PCM_Source_GetSectionInfo` 是否返回成功（false = 读不出方向 → `None`）。
     pub section_reports: Cell<bool>,
+    /// `GetMediaSourceFileName` 报告的路径；`None` = 读不出文件名（回退身份不可用）。
+    pub source_file_name: RefCell<Option<String>>,
     undo_records: RefCell<Vec<std::ffi::CString>>,
     undo_position: Cell<i32>,
     media_enabled: Cell<bool>,
@@ -87,6 +89,7 @@ impl Fixture {
             extra_takes: RefCell::new(Vec::new()),
             take_reversed: Cell::new(false),
             section_reports: Cell::new(false),
+            source_file_name: RefCell::new(None),
             undo_records: RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),
             undo_position: Cell::new(0),
             media_enabled: Cell::new(false),
@@ -385,6 +388,7 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetMediaItemTake" if f.takes_enabled.get() => take_at as *const (),
         "GetMediaItemTake_Source" if f.takes_enabled.get() => take_source as *const (),
         "PCM_Source_GetSectionInfo" if f.takes_enabled.get() => section_info as *const (),
+        "GetMediaSourceFileName" if f.takes_enabled.get() => source_file_name as *const (),
         "GetMediaTrackInfo_Value" if f.inventory_enabled.get() => {
             inventory_track_value as *const ()
         }
@@ -953,6 +957,33 @@ unsafe extern "C" fn section_info(
     }
     unsafe { *reversed = f.take_reversed.get() };
     true
+}
+
+/// `GetMediaSourceFileName(PCM_source*, char* buf, int sz)`：把夹具里记的路径写进缓冲。
+unsafe extern "C" fn source_file_name(
+    source: *mut c_void,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+) {
+    let f = fixture();
+    assert_eq!(source, f.take_source.get() as *mut c_void);
+    f.record("source-file-name");
+    if buffer.is_null() || size <= 0 {
+        return;
+    }
+    let path = f.source_file_name.borrow();
+    let Some(path) = path.as_deref() else {
+        // 读不到：写一个空串（调用方按"空 = 不可用"处理）。
+        unsafe { *buffer = 0 };
+        return;
+    };
+    let bytes = path.as_bytes();
+    let count = bytes.len().min(size as usize - 1);
+    // SAFETY: 调用方给出 size 字节的可写缓冲；只写 count+1 字节（含 NUL）。
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), count);
+        *buffer.add(count) = 0;
+    }
 }
 
 /// folder 判据走**单值读取**：FX 轨自己的 `I_FOLDERDEPTH` 就是结论，不枚举整个工程。

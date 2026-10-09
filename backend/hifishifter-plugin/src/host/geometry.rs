@@ -71,6 +71,12 @@ pub(crate) struct HostClipGeometry {
     /// 说"没倒放"是**错的结论**（会漏掉一个真实状态），而循环源读不出来时说"不循环"
     /// 是安全默认 —— 回绕是加法性的，关掉它只是少绕一圈，不会把内容指向别处。
     pub loop_source: bool,
+    /// take 源文件路径（`GetMediaSourceFileName`）；读不出来为 `None`。
+    ///
+    /// 【用途】媒体嫁接的回退身份：用户把 active take 换成**同一个文件**的另一个 take
+    /// （复制 take、切换 active take）时，GUID 对不上但文件相同 —— 同一份已授权 PCM，
+    /// 可以安全地把授权媒体挂上去，而不是让明明有音频的片段显示占位。
+    pub source_file_name: Option<String>,
 }
 
 /// 此key来自唯一真实assignment；GUID不是用来搜索/猜测ARA对应关系的。
