@@ -692,20 +692,22 @@ impl DocumentSession {
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
                 let reversed = clip["reversed"].as_bool() == Some(true);
-                let (state, reason) = if has_source {
-                    // 有源 ⇒ 不管之前等过多久都从"在途"里出来。
-                    ("ready", None)
+                // `waiting` 表示"这条还在等 ARA 音频"：只有它继续计时。其余状态
+                // （拿到源、倒放隔离、folder 父轨）都必须清掉起点，否则陈旧的起点会让
+                // 下一次掉回"在途"时立刻被判超期。
+                let (state, reason, waiting) = if has_source {
+                    ("ready", None, false)
                 } else if reversed {
                     // 倒放被隔离：插件渲染不出反向内容，这一条由 REAPER 处理。
                     // 与"还没拿到音频"不是一回事，文案必须分开。
-                    ("reversed", None)
+                    ("reversed", None, false)
                 } else if folder_parent && !claimed.contains(&item_id) {
-                    ("unavailable", Some("folder_parent"))
+                    ("unavailable", Some("folder_parent"), false)
                 } else {
                     // 还没拿到音频：先按"在途"记时，超期再判原因。
                     let since = *pending_since.entry(item_id.clone()).or_insert(now);
                     if now.duration_since(since) < PENDING_MEDIA_TIMEOUT {
-                        ("pending", None)
+                        ("pending", None, true)
                     } else {
                         // 【为什么这里才给原因】未超期时原因往往是"马上就好了"
                         // （宿主正在分配 region），报原因等于制造噪声。超期后原因才
@@ -725,20 +727,20 @@ impl DocumentSession {
                         } else {
                             "awaiting_region"
                         };
-                        ("unavailable", Some(reason))
+                        // 超期后**继续**保留起点：否则下一次进来会重新 `or_insert(now)`，
+                        // 状态在 `pending` / `unavailable` 之间来回跳。
+                        ("unavailable", Some(reason), true)
                     }
                 };
                 clip["host_media"] = serde_json::json!(state);
                 if let Some(reason) = reason {
                     clip["host_media_reason"] = serde_json::json!(reason);
                 }
-                if state == "ready" {
+                if !waiting {
                     seen.insert(item_id);
                 }
             }
         }
-        // 回收：已经拿到音频（或已不在清单里）的 item 不再计时，否则它下次掉回
-        // "在途"时会立刻被判成超期。
         pending_since.retain(|id, _| !seen.contains(id));
     }
     /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。

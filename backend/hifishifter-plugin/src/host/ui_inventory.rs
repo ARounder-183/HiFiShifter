@@ -595,6 +595,12 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "unavailable");
         assert_eq!(payload["clips"][0]["host_media_reason"], "take_switched");
 
+        // 幂等：再次呈现仍是 `unavailable` + 同一原因，不能在 pending/unavailable
+        // 之间来回跳（起点被保留，不会重新 `or_insert(now)`）。
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "unavailable");
+        assert_eq!(payload["clips"][0]["host_media_reason"], "take_switched");
+
         // 拿到音频后必须回到 ready，并**清掉计时** —— 否则下次掉回"在途"会立刻超期。
         payload["clips"][0]["source_path"] = serde_json::json!("C:/pcm/source.wav");
         document.decorate_host_media_locked(&mut payload, "ui-");
