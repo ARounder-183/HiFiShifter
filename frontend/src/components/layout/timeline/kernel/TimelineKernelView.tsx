@@ -447,12 +447,16 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             scrollHorizontal: scrollHorizontalKb,
             scrollVertical: scrollVerticalKb,
             scrollbarZoom: scrollbarZoomKb,
-            fadeShapeCycle: interactions?.fadeShapeReadOnly ? null : fadeShapeCycleKb,
+            // 【为什么不再把键位设成 null】此前"形状/曲率不可写"时把这两个键位置空，
+            // 于是 Alt 悬停的 `move` 光标形态也一起消失、Ctrl+点击的循环也静默失效 ——
+            // 用户看到的是"控件没了"。现在键位**保留**，由语义层按能力决定做什么
+            // （能做就做，不能做就明确不做并说明原因）。见 `interactions` 的两个只读标志。
+            fadeShapeCycle: fadeShapeCycleKb,
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
             clipRangeToParamSelection: clipRangeToParamKb,
             clipStretch: clipStretchKb,
-            fadeCurvatureDrag: interactions?.fadeShapeReadOnly ? null : fadeCurvatureKb,
+            fadeCurvatureDrag: fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -556,6 +560,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             },
             get fadeShapeReadOnly() {
                 return interactionsRef.current?.fadeShapeReadOnly;
+            },
+            get fadeCurvatureReadOnly() {
+                return interactionsRef.current?.fadeCurvatureReadOnly;
             },
             onSeek: (sec, phase, trackId) => interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),

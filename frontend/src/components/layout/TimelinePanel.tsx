@@ -33,7 +33,8 @@ import React, { useMemo, Profiler } from "react";
 import {
     isPluginMode,
     isHostGeometryReadOnly,
-    canEditHostFadeAxes,
+    canEditFadeShape,
+    canEditFadeCurvature,
     canImportHostAudio,
     canImportAsTakes,
     canCreateHostTracks,
@@ -1231,7 +1232,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      */
     const cycleOneFade = React.useCallback(
         (clipId: string, side: "in" | "out", checkpoint = true) => {
-            if (isPluginMode() && !canEditHostFadeAxes()) return;
+            // 形状循环写的是宿主形状轴：legacy 写 `C_FADE*SHAPE`，continuous 写
+            // `(curvature, S)` 预设对。轴版本读不出来时不做（也不静默退化成别的编辑）。
+            if (!canEditFadeShape()) return;
             const targets = getBulkEditableClipIds({
                 activeClipId: clipId,
                 multiSelectedClipIds,
@@ -4094,7 +4097,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 修饰键按下了 = 用户要的是**曲率**。宿主轴版本读不出来时做不了曲率，
                 // 此时**不能**退化成改长度 —— 那是另一个编辑，用户会以为自己在调曲率
                 // 却把淡变长度改掉了（静默改错数据比什么都不做更坏）。
-                if (isPluginMode() && !canEditHostFadeAxes()) return;
+                if (!canEditFadeCurvature()) return;
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
                 const clipStart = Number(clip.startSec) || 0;
@@ -5176,7 +5179,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 求解从上一帧的解出发（`baseDir` 逐帧覆写），连续拖动才平滑。
             if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
                 // 同单侧分支：修饰键要的是曲率，做不了就不做，不退化成移动几何。
-                if (isPluginMode() && !canEditHostFadeAxes()) return;
+                if (!canEditFadeCurvature()) return;
                 const sides = origin.curveSides;
                 const ptA = resolveCurvePointer(
                     args.curveEnv,
@@ -5515,14 +5518,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 源窗口必须一起提交：只写长度会让后端按旧源区间重新解释内容
             // （波形与音频都对不上）——与裁切提交同一约束。
             //
-            // 【淡变 / 曲率 / 自动交叉淡化也必须一起提交】两处由来：
+            // 【淡变长度 / 曲率 / 自动交叉淡化也必须一起提交】两处由来：
             // - 曲率拖拽（`modifier.fadeCurvatureDrag`）在拖拽期只改 Redux 的
             //   `fadeInDir / fadeOutDir`；只提交几何会让批量 fulfilled 的整份时间线
             //   回灌把拖拽期的曲率**丢弃**（表现为"松开鼠标后曲率没改对"）。
             // - 反向模式按比例缩放两侧淡变（写 auto 或手动字段），同样只在 Redux 里。
-            // 旧实现 `useEditDrag` 的 `crossfade_edges` 分支正是把
-            // `fadeInSec/fadeOutSec/autoFade*/fadeInShape/fadeInDir/fadeOutShape/fadeOutDir`
-            // 随整份 patch 一并落盘（见该分支的注释），此处对齐。
+            //
+            // 【为什么**不**提交 `fadeInShape`/`fadeOutShape`】交叉点拖拽改的是**几何**
+            // （重叠与两侧长度），不是形状。而 ≥7.81 的宿主上"补丁里带 shape"会让后端
+            // 走"写 `(curvature, S)` 预设对并丢弃补丁里的 dir"那条分支
+            // （`host_edit.rs` 的 `continue`）—— 于是**纯几何的握把拖拽会把两端曲率
+            // 重置成预设默认值**（用户看到的"拖了一下交叉点，曲线形状自己变了"）。
+            // 形状的修改只走显式路径（形状行 / Ctrl+点击循环），不搭几何提交的车。
             const persist = dispatch(
                 setClipsStateBulkRemote({
                     updates: [
@@ -5536,9 +5543,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             fadeOutSec: Number(earlier.fadeOutSec) || 0,
                             autoFadeInSec: Number(earlier.autoFadeInSec) || 0,
                             autoFadeOutSec: Number(earlier.autoFadeOutSec) || 0,
-                            fadeInShape: Number(earlier.fadeInShape) || 0,
                             fadeInDir: Number(earlier.fadeInDir) || 0,
-                            fadeOutShape: Number(earlier.fadeOutShape) || 0,
                             fadeOutDir: Number(earlier.fadeOutDir) || 0,
                         },
                         {
@@ -5551,9 +5556,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             fadeOutSec: Number(later.fadeOutSec) || 0,
                             autoFadeInSec: Number(later.autoFadeInSec) || 0,
                             autoFadeOutSec: Number(later.autoFadeOutSec) || 0,
-                            fadeInShape: Number(later.fadeInShape) || 0,
                             fadeInDir: Number(later.fadeInDir) || 0,
-                            fadeOutShape: Number(later.fadeOutShape) || 0,
                             fadeOutDir: Number(later.fadeOutDir) || 0,
                         },
                     ],
@@ -5596,10 +5599,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelInteractions = React.useMemo(
         () => ({
             geometryReadOnly: isHostGeometryReadOnly(),
-            // 【为什么不再按模式一刀切】淡变形状写的是宿主自己的轴（≤7.80 的
-            // `C_FADE*SHAPE`，≥7.81 的两个连续轴），宿主版本已知就能编辑 ——
-            // "长度能改、形状不能改"那个不一致到此为止。
-            fadeShapeReadOnly: isPluginMode() && !canEditHostFadeAxes(),
+            // 【为什么拆成两个标志】形状与曲率同门槛（都要宿主版本分得清轴语义），
+            // 但分开表达让"哪件事被关掉"一目了然；长度永远可写，不受这两个影响。
+            fadeShapeReadOnly: !canEditFadeShape(),
+            fadeCurvatureReadOnly: !canEditFadeCurvature(),
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
@@ -5634,7 +5637,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 重置曲率走既有总线（旧实现同样经它派发）：消费者在淡变相关的 hook 里，
             // 这条契约与渲染模式无关。内核只给「哪些侧」，请求包络由这里组装。
             onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) => {
-                if (!isPluginMode() || canEditHostFadeAxes()) requestResetFadeCurvature({ sides });
+                if (canEditFadeCurvature()) requestResetFadeCurvature({ sides });
             },
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
@@ -5648,8 +5651,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
             onContextMenu: handleKernelContextMenu,
-            onFadeContextMenu:
-                isPluginMode() && !canEditHostFadeAxes() ? undefined : handleKernelFadeContextMenu,
+            // 【为什么永远提供】此前轴版本读不出来时这里给 `undefined`，于是淡变右键
+            // 菜单**整个消失**、降级到通用 clip 菜单 —— 用户连"重置曲率/看形状"的入口
+            // 都找不到。菜单内部已经按能力降级（形状行不可选时给说明文字，曲率滑杆
+            // 照常），所以"给菜单"和"能不能写"是两件事，不该混成一个闸门。
+            onFadeContextMenu: handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,

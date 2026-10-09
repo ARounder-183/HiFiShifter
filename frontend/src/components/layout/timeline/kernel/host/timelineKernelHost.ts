@@ -567,8 +567,21 @@ export interface KernelDragModifiers {
 export interface TimelineKernelInteractions {
     /** 插件由宿主拥有几何，内核仍显示原clip并允许选择和参数手势。 */
     readonly geometryReadOnly?: boolean;
-    /** 宿主未委托渐变时只写宽度，不开放无法兑现的HFS形状/曲率编辑。 */
+    /**
+     * 形状/曲率不可写（宿主轴版本读不出来，或片段几何只读）。
+     *
+     * 【为什么与曲率分成两个】形状与曲率同门槛（都要宿主版本分得清轴语义），
+     * 但语义上仍分开表达：长度永远可写（`D_FADE*LEN` 与轴版本无关），形状/曲率
+     * 不可写时长度拖拽照常。
+     */
     readonly fadeShapeReadOnly?: boolean;
+    /**
+     * 曲率不可写。双击重置曲率、Alt 拖拽曲率都以它为准。
+     *
+     * 【为什么不复用 `fadeShapeReadOnly`】两者当前同门槛，但分开命名让"哪件事被关掉"
+     * 在调用点一目了然，也避免将来放开其中一个时漏改。
+     */
+    readonly fadeCurvatureReadOnly?: boolean;
     /**
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
      *
@@ -4148,7 +4161,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         : hit.fadeIsLine === true
                           ? [{ clipId: hit.clip.id, isOut: hit.region === "fade-out-corner" }]
                           : null;
-                    if (sides !== null && !interactions?.fadeShapeReadOnly) {
+                    if (sides !== null && !interactions?.fadeCurvatureReadOnly) {
                         event.preventDefault();
                         interactions?.onResetFadeCurvature?.(sides);
                         return;

@@ -6,7 +6,7 @@ import {
     canSplitHostClips,
     canClipboardHostClips,
     canEditHostClips,
-    canEditHostFadeAxes,
+    canEditFadeShape,
     canImportMidiAsClip,
     dawControlledReason,
 } from "../../../services/hostCapabilities";
@@ -1009,7 +1009,11 @@ export const ClipContextMenu: React.FC<{
             )}
 
             {onFadeShapeChange &&
-                canEditHostFadeAxes() &&
+                // 【为什么不是 `canEditHostFadeAxes`】那个函数在**独立 App** 里恒为 false
+                // （它要求 `isPluginMode()`），于是这行形状选择在独立 App 里也一起消失 ——
+                // 而独立 App 用的是自己的形状轴，永远可写。`canEditFadeShape` 才是
+                // "形状轴能不能写"的正确判据（独立 App 恒真）。
+                canEditFadeShape() &&
                 (() => {
                     // 多选：**每个方向只给一行**，选择即批量应用到全部所选 Clip。
                     // 旧实现逐个 Clip 列举（还带名字表头），选项行数随选择数线性

@@ -51,6 +51,50 @@ export function canEditHostFadeAxes(): boolean {
 }
 
 /**
+ * 淡变**长度**能否编辑。
+ *
+ * 【为什么与形状分开】长度落在 `D_FADE*LEN` / `D_FADE*LEN_AUTO` 四个键上，与宿主的
+ * 轴版本**无关**（`editor/host_edit.rs` 的写口把它们和轴写入分开）。所以即使轴版本
+ * 读不出来（`fadeAxes === null`，形状/曲率不可写），长度拖拽照常可用 —— 此前用一个
+ * `fadeShapeReadOnly` 布尔把两者一起关掉，用户连长度都调不了。
+ */
+export function canEditFadeLength(): boolean {
+    return !isPluginMode() || canEditHostClips();
+}
+
+/**
+ * 淡变**形状**能否编辑。
+ *
+ * - 独立 App：用 HiFiShifter 自己的形状轴，永远可写；
+ * - legacy 宿主（≤7.80）：写 `C_FADE*SHAPE`；
+ * - continuous 宿主（≥7.81）：写 `(curvature, S)` 预设对；
+ * - 版本读不出来：不可写，也不猜。
+ */
+export function canEditFadeShape(): boolean {
+    return !isPluginMode() || (canEditHostClips() && hostFadeAxes() !== null);
+}
+
+/**
+ * 淡变**曲率**能否编辑。
+ *
+ * 与形状同门槛：两者都要宿主版本分得清轴语义（`fade_axes_new`），否则不知道曲率该写
+ * 哪个键（legacy `D_FADE*DIR` / continuous `D_FADE*DIR_NEW`）。
+ */
+export function canEditFadeCurvature(): boolean {
+    return canEditFadeShape();
+}
+
+/**
+ * 淡变的 **S 参数轴**能否编辑。
+ *
+ * 只有 REAPER ≥7.81 有这根轴（`D_FADE*DIR2_NEW`）。legacy 宿主写它会被后端拒绝
+ * （`validate_fade_axes`："fade S parameter requires REAPER 7.81 or later"）。
+ */
+export function canEditFadeS(): boolean {
+    return !isPluginMode() || (canEditHostClips() && hostFadeAxes() === "continuous");
+}
+
+/**
  * 宿主用哪一套淡化轴；`null` = 版本读不出来。
  *
  * 独立 App 没有这个概念（它用自己的曲率轴），所以非插件模式返回 `null`；

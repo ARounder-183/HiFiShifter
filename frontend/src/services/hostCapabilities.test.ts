@@ -12,6 +12,10 @@ import {
     canImportMidiToPitch,
     canImportMidiAsClip,
     canEditHostFadeAxes,
+    canEditFadeLength,
+    canEditFadeShape,
+    canEditFadeCurvature,
+    canEditFadeS,
     canSelectHostFadeShape,
     canEditTempoMapTempo,
     hostFadeAxes,
@@ -165,6 +169,51 @@ test("fade shape editing follows the host axis generation instead of one blanket
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
     expect(hostFadeAxes()).toBeNull();
     expect(canSelectHostFadeShape()).toBe(true);
+});
+
+/**
+ * 淡变能力**按轴**拆开，而不是一个 `fadeShapeReadOnly` 布尔把四件事一起关掉。
+ *
+ * 【为什么长度必须与形状分开】长度落在 `D_FADE*LEN` / `*_AUTO`，与宿主轴版本无关。
+ * 此前用一个布尔门住全部淡变编辑，于是宿主版本读不出来时用户**连长度都调不了** ——
+ * 而那本来是能做的。
+ *
+ * 【为什么 S 轴只有新轴有】`D_FADE*DIR2_NEW` 是 REAPER ≥7.81 才有的键；legacy 宿主
+ * 写它会被后端 `validate_fade_axes` 拒绝。
+ */
+test("fade capabilities split by axis: length always writable, S only on 7.81+", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "fade-split", clipEditing: true };
+    // 轴版本读不出来：长度仍可写，形状/曲率/S 不可写。
+    expect(hostFadeAxes()).toBeNull();
+    expect(canEditFadeLength()).toBe(true);
+    expect(canEditFadeShape()).toBe(false);
+    expect(canEditFadeCurvature()).toBe(false);
+    expect(canEditFadeS()).toBe(false);
+
+    // legacy：形状与曲率可写，S 不可写。
+    window.__HFS_PLUGIN_BOOTSTRAP__.fadeAxes = "legacy";
+    expect(canEditFadeLength()).toBe(true);
+    expect(canEditFadeShape()).toBe(true);
+    expect(canEditFadeCurvature()).toBe(true);
+    expect(canEditFadeS()).toBe(false);
+
+    // continuous：三样都可写。
+    window.__HFS_PLUGIN_BOOTSTRAP__.fadeAxes = "continuous";
+    expect(canEditFadeShape()).toBe(true);
+    expect(canEditFadeCurvature()).toBe(true);
+    expect(canEditFadeS()).toBe(true);
+
+    // 几何不可写时，长度也一起关掉（同一条 host_edit 路径）。
+    window.__HFS_PLUGIN_BOOTSTRAP__.clipEditing = false;
+    expect(canEditFadeLength()).toBe(false);
+    expect(canEditFadeShape()).toBe(false);
+
+    // 独立 App：自己的形状轴，全部可写。
+    delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    expect(canEditFadeLength()).toBe(true);
+    expect(canEditFadeShape()).toBe(true);
+    expect(canEditFadeCurvature()).toBe(true);
+    expect(canEditFadeS()).toBe(true);
 });
 
 /**

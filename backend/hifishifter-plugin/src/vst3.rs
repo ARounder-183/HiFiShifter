@@ -1073,7 +1073,25 @@ unsafe extern "system" fn audio_setup_processing(
     {
         return K_INVALID_ARGUMENT;
     }
-    if setup.symbolic_sample_size != 0 || ![44100.0, 48000.0].contains(&setup.sample_rate) {
+    // 【为什么用容差而不是字面量相等】宿主报的是 `f64`，`44100.0` 与
+    // `44100.0000001` 在这里没有语义差别；用 `contains(&setup.sample_rate)` 做
+    // **精确浮点相等**会把后者判成不支持。
+    //
+    // 【为什么只认 44.1/48k】渲染管线当前为这两个采样率各持一份快照
+    // （`ExtensionOwner::snapshots[0..2]`、`render/input.rs`）。其它采样率下
+    // **显式拒绝并记一条可诊断的日志**，而不是静默返回 FALSE 让宿主把插件踢出链路
+    // 却什么都不说。支持任意采样率（88.2/96/176.4/192k）是独立的一期工作。
+    const SUPPORTED_RATES: [f64; 2] = [44100.0, 48000.0];
+    let rate_supported = SUPPORTED_RATES
+        .iter()
+        .any(|rate| (setup.sample_rate - rate).abs() <= 1e-6);
+    if setup.symbolic_sample_size != 0 || !rate_supported {
+        crate::log_line(&format!(
+            "[vst3] setupProcessing refused: sampleRate={} (supported: {SUPPORTED_RATES:?}), \
+             sampleSize={}. The plugin cannot run at this rate yet; the host will keep it out of \
+             the chain.",
+            setup.sample_rate, setup.symbolic_sample_size
+        ));
         return K_RESULT_FALSE;
     }
     crate::log_line(&format!(
@@ -1154,10 +1172,15 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
             if data.process_mode != 2 && context.state & (1 << 1) == 0 {
                 return K_RESULT_OK;
             }
-            let publisher = match context.sample_rate {
-                44100.0 => &owner.snapshots[0],
-                48000.0 => &owner.snapshots[1],
-                _ => return K_RESULT_FALSE,
+            // 与 `audio_setup_processing` 同一判据（容差、只认两个已支持采样率）。
+            // 走到这里说明 setup 已经接受过这个采样率；用容差避免浮点噪声把它挡在
+            // 音频线程外（那会让整条链路静音且没有日志）。
+            let publisher = if (context.sample_rate - 44100.0).abs() <= 1e-6 {
+                &owner.snapshots[0]
+            } else if (context.sample_rate - 48000.0).abs() <= 1e-6 {
+                &owner.snapshots[1]
+            } else {
+                return K_RESULT_FALSE;
             };
             // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
             let ready = unsafe {
