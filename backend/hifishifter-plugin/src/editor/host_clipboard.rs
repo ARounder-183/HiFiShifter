@@ -1,7 +1,7 @@
 //! 原GUI媒体剪贴板的宿主执行层：保存真实item状态和源域曲线，不保存宿主指针。
 use super::parameter_atlas::{ParameterAtlas, RegionGeometry, RegionParameters};
 use super::session::EditorSession;
-use crate::host::geometry::HostClipGeometry;
+use crate::host::geometry::{host_value_compatible, HostClipGeometry};
 use crate::host::reaper::{HostClipTarget, HostTrackTarget, ReaperHost, RewrittenItem};
 use crate::render::document::DocumentSession;
 use crate::render::extension::ExtensionOwner;
@@ -117,7 +117,7 @@ fn target_for(
         (g.source_start_sec, clip.source_start_sec),
         (g.playback_rate, clip.playback_rate as f64),
     ] {
-        if !actual.is_finite() || !expected.is_finite() || (actual - expected).abs() > 1e-6 {
+        if !host_value_compatible(actual, expected) {
             return Err("host clip changed before media operation; refresh required".into());
         }
     }
@@ -535,7 +535,7 @@ pub(super) fn execute_paste(
             (actual.playback_rate, item.before.playback_rate as f64),
         ]
         .iter()
-        .any(|(actual, expected)| (actual - expected).abs() > 1e-6)
+        .any(|(actual, expected)| !host_value_compatible(*actual, *expected))
         {
             return Err(
                 "pasted item geometry differs from copied data; host Undo remains available".into(),
@@ -653,7 +653,7 @@ impl MediaReceipt {
             .any(|(key, expected)| {
                 clip[*key]
                     .as_f64()
-                    .is_none_or(|actual| (actual - expected).abs() > 1e-6)
+                    .is_none_or(|actual| !host_value_compatible(actual, *expected))
             }) {
                 return false;
             }

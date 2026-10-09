@@ -1,7 +1,10 @@
 //! 原GUI分割命令只写所属REAPER item；整批预检、宿主Undo、真实两段回流共同决定成功。
 use super::session::EditorSession;
 use crate::{
-    host::{geometry::HostClipGeometry, reaper::HostClipTarget},
+    host::{
+        geometry::{host_value_compatible, HostClipGeometry},
+        reaper::HostClipTarget,
+    },
     render::{document::DocumentSession, extension::ExtensionOwner},
 };
 use hifishifter_kernel::state::Clip;
@@ -97,7 +100,7 @@ pub(crate) fn execute(
             (g.playback_rate, before.playback_rate as f64),
         ]
         .iter()
-        .any(|(a, b)| (a - b).abs() > 1e-6)
+        .any(|(a, b)| !host_value_compatible(*a, *b))
         {
             return Err("host clip changed before split; refresh required".into());
         }
@@ -187,7 +190,7 @@ impl SplitReceipt {
                 .any(|(key, expected)| {
                     clip[*key]
                         .as_f64()
-                        .is_none_or(|actual| (actual - expected).abs() > 1e-6)
+                        .is_none_or(|actual| !host_value_compatible(actual, *expected))
                 }) {
                     return false;
                 }

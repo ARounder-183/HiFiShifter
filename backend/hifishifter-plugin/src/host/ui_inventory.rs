@@ -677,4 +677,54 @@ mod tests {
             .all(|take| take.source_path.is_none()));
         document.close();
     }
+
+    /// 宿主改了 take 的声道模式后，**清单重建**必须把新值带到 clip 与 active take 上。
+    ///
+    /// 【为什么这条测试存在】用户报障："改了声道模式，插件里闪一下又变回旧值"。
+    /// 根因是旧的"未变则早退"判据只比 active take id / take id 列表 / `loop_enabled`，
+    /// **不含 `channel_mode`** —— 于是重建不发生，界面停在乐观更新的旧值上。现在
+    /// `sync_host_takes` 无条件重建，这条测试钉住它不再回退。
+    ///
+    /// 关键：只测"改完立刻变"不算通过（那是乐观更新）；必须**再跑一次清单呈现**。
+    #[test]
+    fn a_channel_mode_change_survives_the_inventory_rebuild() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(1);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let document = crate::render::document::DocumentSession::new(9876);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        document.present_host_inventory(&mut timeline, "ui-");
+        // fixture 的 take 声道模式是 2（见 `host_take_set_projects_every_take...`）。
+        assert_eq!(timeline.clips[0].channel_mode, 2);
+
+        // 宿主把声道模式改成 3，清单刷新（同一 item、同一 take、同一循环源）。
+        fixture.set_value("I_CHANMODE", 3.);
+        let refreshed = host.ui_track(&|| true).unwrap();
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(refreshed.guid.clone(), refreshed);
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(
+            timeline.clips[0].channel_mode, 3,
+            "声道模式必须跟着宿主走，不能停在旧值"
+        );
+        assert!(
+            timeline.clips[0]
+                .takes
+                .iter()
+                .all(|take| take.channel_mode == 3),
+            "每个 take 都要拿到新的声道模式"
+        );
+        document.close();
+    }
 }

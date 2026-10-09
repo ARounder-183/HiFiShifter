@@ -33,11 +33,10 @@ struct CachedHostGeometry {
     value: Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
 }
 
-/// 两个宿主/ARA 浮点量是否相容；容差沿用单 region 路径的既有口径。
+/// 两个宿主/ARA 浮点量是否相容；判据全局唯一，见 `host::geometry::host_value_compatible`
+/// （绑定 / 分割规划 / 写回前置检查 / 剪贴板共用，避免"规划接受、绑定拒绝"的不对称）。
 fn compatible(a: f64, b: f64) -> bool {
-    a.is_finite()
-        && b.is_finite()
-        && (a - b).abs() <= 1e-7 + 8. * f64::EPSILON * a.abs().max(b.abs())
+    crate::host::geometry::host_value_compatible(a, b)
 }
 
 /// 在候选宿主 item 里为一条 ARA region 找**唯一**匹配的几何。
@@ -50,29 +49,48 @@ fn compatible(a: f64, b: f64) -> bool {
 ///
 /// 四项都要相容：播放位置、播放时长、源内起点、播放速率。只比时间窗会在
 /// "同一位置的两条子轨各有一个 item"这种常见布局上直接产生歧义。
+///
+/// 【`preferred` 是消歧而不是放宽】`preferred` 是这条 region **上一次**绑定的 item GUID。
+/// 复制粘贴的安全副本、同一素材的多个 item 会给出多个几何全等的候选；纯"唯一才采信"
+/// 会把它们**全部**判为歧义、两个都丢（用户看到片段凭空消失）。当且仅当候选里恰好有
+/// 一个 GUID 等于上次绑定时采信它 —— 这是**稳定性**，不是猜测：上一次的绑定本身就来自
+/// 一次唯一匹配，保持它不会把写回引到新的对象上。
 fn unique_geometry_for_region(
     region: &crate::ara::AraPlaybackRegion,
     candidates: &[crate::host::geometry::HostClipGeometry],
+    preferred: Option<&str>,
 ) -> Option<crate::host::geometry::HostClipGeometry> {
     let playback_rate = if region.duration_in_playback_time > 0.0 {
         region.duration_in_modification_time / region.duration_in_playback_time
     } else {
         f64::NAN
     };
-    let mut matched = candidates.iter().filter(|candidate| {
-        compatible(candidate.start_sec, region.start_in_playback_time)
-            && compatible(candidate.duration_sec, region.duration_in_playback_time)
-            && compatible(
-                candidate.source_start_sec,
-                region.start_in_modification_time,
-            )
-            && compatible(candidate.playback_rate, playback_rate)
-    });
-    let first = matched.next()?;
-    if matched.next().is_some() {
-        return None;
+    let matched: Vec<&crate::host::geometry::HostClipGeometry> = candidates
+        .iter()
+        .filter(|candidate| {
+            compatible(candidate.start_sec, region.start_in_playback_time)
+                && compatible(candidate.duration_sec, region.duration_in_playback_time)
+                && compatible(
+                    candidate.source_start_sec,
+                    region.start_in_modification_time,
+                )
+                && compatible(candidate.playback_rate, playback_rate)
+        })
+        .collect();
+    let first = *matched.first()?;
+    if matched.len() == 1 {
+        return Some(first.clone());
     }
-    Some(first.clone())
+    // 有歧义：只有"上次绑定的那个"能打破它 —— 且它必须在候选里。
+    if let Some(preferred) = preferred {
+        if let Some(found) = matched
+            .iter()
+            .find(|candidate| candidate.item_id == preferred)
+        {
+            return Some((*found).clone());
+        }
+    }
+    None
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -179,7 +197,19 @@ pub(crate) struct ExtensionOwner {
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
     /// 最近一次清单刷新得出的宿主音频读数；GUI 载荷读它（见 [`HostAudioStatus`]）。
     host_audio: Mutex<HostAudioStatus>,
+    /// 上一次"重"宿主枚举（几何 + 清单）的时刻。
+    ///
+    /// 【为什么把时钟与枚举分开节流】UI 定时器是 20ms（50Hz）。播放光标必须跟得上
+    /// （`host.sample` 很便宜），但几何/清单枚举即使有代次缓存，每 tick 仍要付
+    /// `GetProjectStateChangeCount` 等若干宿主调用。50Hz 下这些调用在真实工程里会累积
+    /// 成可观的 UI 线程占用（且与 actor/渲染线程争同一把 document 事务）。所以时钟保持
+    /// 20ms，枚举降到 [`HOST_ENUMERATION_INTERVAL`]。宿主真的变了时，下一次节流点就会
+    /// 捕捉到（≤100ms 延迟），用户不可感。
+    last_enumeration: Mutex<Option<std::time::Instant>>,
 }
+
+/// 宿主几何/清单枚举的节流间隔（见 `ExtensionOwner::last_enumeration`）。
+const HOST_ENUMERATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[cfg(test)]
 mod bound_tests {
@@ -2158,7 +2188,9 @@ impl ExtensionOwner {
                 .get(key)
                 .cloned()
                 .ok_or("assigned ARA region unavailable")?;
-            match unique_geometry_for_region(&region, &candidates) {
+            // 上一次绑定：给几何全等的候选（复制出来的安全副本等）一个稳定性偏好。
+            let preferred = stamp.0.region_items.lock().unwrap().get(key).cloned();
+            match unique_geometry_for_region(&region, &candidates, preferred.as_deref()) {
                 Some(geometry) => bound.push(crate::host::geometry::BoundHostGeometry {
                     region_key: *key,
                     geometry,
@@ -2168,13 +2200,15 @@ impl ExtensionOwner {
         }
         // 一个宿主 item 只能被**一个** region 认领。两条 region 绑到同一个 item 会让
         // 后续所有写回指向同一对象：移动、切分、fade、音量互相覆盖，且没有任何一侧
-        // 会报错。重复认领的一律**全部**丢弃（不是留一个），并如实记账。
-        let mut claims = std::collections::HashMap::<String, usize>::new();
-        for entry in &bound {
-            *claims.entry(entry.geometry.item_id.clone()).or_default() += 1;
-        }
+        // 会报错。
+        //
+        // 【为什么不再"全部丢弃"】旧实现把重复认领的候选**全丢**，于是"同一位置两个
+        // 几何全等的 item"会两个都不绑定、两个 clip 一起消失（用户报障："片段凭空
+        // 没了"）。现在按 region key 的**稳定顺序**保留第一个认领者，其余照常记账 ——
+        // 至少不会一次丢掉全部；剩下的那个 region 仍走 unmatched，如实报出。
+        let mut seen = std::collections::HashSet::<String>::new();
         let claimed = bound.len();
-        bound.retain(|entry| claims.get(&entry.geometry.item_id) == Some(&1));
+        bound.retain(|entry| seen.insert(entry.geometry.item_id.clone()));
         if bound.len() != claimed {
             log::warn!(
                 "[ara] {} region(s) dropped: they claimed an item another region already owns",
@@ -2273,8 +2307,26 @@ impl ExtensionOwner {
     pub(crate) fn host_audio_status(&self) -> HostAudioStatus {
         *self.host_audio.lock().unwrap()
     }
-    /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
+    /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
     pub(crate) fn refresh_reaper_transport(&self) {
+        self.refresh_reaper_transport_inner(false);
+    }
+
+    /// UI 定时器路径：时钟每次跟，几何/清单按 [`HOST_ENUMERATION_INTERVAL`] 节流。
+    ///
+    /// 【为什么时钟与枚举分开节流】定时器是 20ms（50Hz）。播放光标必须跟得上
+    /// （`host.sample` 很便宜），但几何/清单枚举即使有代次缓存，每 tick 仍要付
+    /// `GetProjectStateChangeCount` 等若干宿主调用，还会与 actor/渲染线程争同一把
+    /// document 事务。宿主真变了时下一次节流点会捕捉到（≤100ms），用户不可感。
+    ///
+    /// 【为什么不把节流放进 `refresh_reaper_transport` 本身】写回路径（导入/分割/
+    /// 剪贴板）与测试依赖它**同步**把新几何取回来；节流在那里会把"刚写完就读到新值"
+    /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
+    pub(crate) fn refresh_reaper_transport_tick(&self) {
+        self.refresh_reaper_transport_inner(true);
+    }
+
+    fn refresh_reaper_transport_inner(&self, throttled: bool) {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
@@ -2296,6 +2348,14 @@ impl ExtensionOwner {
         }
         if !self.host_query_authorized(&stamp) {
             return;
+        }
+        if throttled {
+            let mut last = self.last_enumeration.lock().unwrap();
+            let now = std::time::Instant::now();
+            if last.is_some_and(|last| now.duration_since(last) < HOST_ENUMERATION_INTERVAL) {
+                return;
+            }
+            *last = Some(now);
         }
         self.refresh_reaper_geometry();
         // editor-only通常没有所属take；一个工程GUI必须驱动真正隐藏playback实例的只读采集。
@@ -3314,6 +3374,13 @@ impl ExtensionOwner {
         let mut timeline = self.assigned_timeline(document)?;
         // 所有授权轨道保留原kernel的全局solo/父链判定，clip仍只有本renderer分配区域。
         timeline.tracks = document.workspace_timeline_locked()?.tracks;
+        // 【为什么这里也要播种宿主 take 事实】渲染路径**不经过** `workspace_timeline_locked`
+        // 的 clip 过滤（见上一行的注释：只借了 tracks）。而 `assigned_timeline` 读的是
+        // `document.timeline`（ARA 映射产物），ARA **没有**方向位/循环源/声道模式
+        // （`ara::mapping::LOST_FIELDS`）—— 不播种，倒放片段会被按正放合成（用户报障：
+        // "在 HiFiShifter 中，倒放被识别为正放"）。与音阶播种（`document.timeline` 的
+        // `project_scale_notes`）是同一条纪律、同一个理由。
+        document.project_host_take_facts_locked(&mut timeline);
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock().unwrap())?;
         resolved.apply(&mut timeline);
@@ -3997,7 +4064,7 @@ mod region_geometry_match_tests {
             candidate("item-a", 0., 2., 0., 1.),
             candidate("item-b", 4., 2., 0., 1.),
         ];
-        let bound = unique_geometry_for_region(&region(4., 2., 0., 2.), &regions).unwrap();
+        let bound = unique_geometry_for_region(&region(4., 2., 0., 2.), &regions, None).unwrap();
         assert_eq!(bound.item_id, "item-b");
     }
 
@@ -4008,7 +4075,7 @@ mod region_geometry_match_tests {
             candidate("trimmed-head", 0., 2., 1., 1.),
             candidate("full", 0., 2., 0., 1.),
         ];
-        let bound = unique_geometry_for_region(&region(0., 2., 1., 2.), &regions).unwrap();
+        let bound = unique_geometry_for_region(&region(0., 2., 1., 2.), &regions, None).unwrap();
         assert_eq!(bound.item_id, "trimmed-head");
     }
 
@@ -4019,7 +4086,7 @@ mod region_geometry_match_tests {
             candidate("stretched", 0., 2., 0., 2.),
             candidate("unstretched", 0., 2., 0., 1.),
         ];
-        let bound = unique_geometry_for_region(&region(0., 2., 0., 4.), &regions).unwrap();
+        let bound = unique_geometry_for_region(&region(0., 2., 0., 4.), &regions, None).unwrap();
         assert_eq!(bound.item_id, "stretched");
     }
 
@@ -4030,23 +4097,45 @@ mod region_geometry_match_tests {
             candidate("take-one", 0., 2., 0., 1.),
             candidate("take-two", 0., 2., 0., 1.),
         ];
-        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions).is_none());
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions, None).is_none());
+    }
+
+    /// 歧义时，**上一次绑定的那个**候选可以打破它（稳定性，不是猜测）。
+    ///
+    /// 【为什么这条必须有】复制粘贴出来的安全副本、同一素材的多个 item 会给出几何
+    /// 全等的候选。旧实现把它们**全部**判为歧义、两个都丢 —— 用户看到片段凭空消失。
+    /// 保持上次的绑定不会把写回引到新对象上：那次绑定本身就来自一次唯一匹配。
+    #[test]
+    fn a_previous_binding_disambiguates_otherwise_identical_candidates() {
+        let regions = [
+            candidate("take-one", 0., 2., 0., 1.),
+            candidate("take-two", 0., 2., 0., 1.),
+        ];
+        let bound = unique_geometry_for_region(&region(0., 2., 0., 2.), &regions, Some("take-two"))
+            .expect("the previously bound item must win");
+        assert_eq!(bound.item_id, "take-two");
+        // 上次绑定的那个已经不在候选里时，仍然不猜。
+        assert!(
+            unique_geometry_for_region(&region(0., 2., 0., 2.), &regions, Some("gone")).is_none()
+        );
     }
 
     /// 没有候选、或候选都对不上时返回 None，绝不退回"第一个 item"。
     #[test]
     fn a_region_without_a_matching_item_stays_unbound() {
-        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &[]).is_none());
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &[], None).is_none());
         let regions = [candidate("elsewhere", 10., 2., 0., 1.)];
-        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions).is_none());
+        assert!(unique_geometry_for_region(&region(0., 2., 0., 2.), &regions, None).is_none());
     }
 
     /// 非有限的播放时长不产生"恰好匹配 NaN"的假绑定。
     #[test]
     fn a_region_with_a_degenerate_duration_never_binds() {
         let regions = [candidate("item", 0., 2., 0., 1.)];
-        assert!(unique_geometry_for_region(&region(0., 0., 0., 2.), &regions).is_none());
-        assert!(unique_geometry_for_region(&region(0., f64::NAN, 0., 2.), &regions).is_none());
+        assert!(unique_geometry_for_region(&region(0., 0., 0., 2.), &regions, None).is_none());
+        assert!(
+            unique_geometry_for_region(&region(0., f64::NAN, 0., 2.), &regions, None).is_none()
+        );
     }
 }
 
@@ -4175,12 +4264,15 @@ mod reaper_geometries_tests {
         document.close();
     }
 
-    /// 两条 region 都指向同一个 item ⇒ 全部丢弃，绝不留下一个"看起来能用"的绑定。
+    /// 两条 region 都指向同一个 item ⇒ 只保留**一个**认领者，绝不留下两个指向同一
+    /// 对象的绑定。
     ///
-    /// 这是"一个 item 只归一个 region"的判据：留下任何一个，后续写回都会指向同一
-    /// 对象，两次编辑互相覆盖且不报错。
+    /// 【为什么不"两个都丢"】旧实现把重复认领的候选**全部**丢弃，于是"同一位置两个
+    /// 几何全等的 item"会让两个 clip 一起消失（用户报障："片段凭空没了"）。现在按
+    /// region key 的稳定顺序保留第一个认领者：仍然满足"一个 item 只归一个 region"
+    /// （后续写回不会互相覆盖），但不会一次丢掉全部。
     #[test]
-    fn two_regions_claiming_one_item_are_both_dropped() {
+    fn two_regions_claiming_one_item_keep_exactly_one_owner() {
         let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
         let document = model.session();
         let owner = &owners[0];
@@ -4203,10 +4295,14 @@ mod reaper_geometries_tests {
         unsafe {
             owner.bind_reaper_host(host.context());
         }
-        let error = owner
+        let bound = owner
             .reaper_geometries()
-            .expect_err("重复认领必须整组丢弃，不能留一个绑定");
-        assert!(error.contains("no assigned ARA region matched"), "{error}");
+            .expect("重复认领必须留下恰好一个绑定，不能整组丢弃");
+        assert_eq!(bound.len(), 1, "一个 item 只能归一个 region");
+        assert!(
+            bound[0].region_key == first || bound[0].region_key == second,
+            "保留的必须是其中一个真实认领者"
+        );
         document.close();
     }
 }

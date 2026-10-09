@@ -1,5 +1,19 @@
 //! 真实take的只读宿主元数据；原生marker单位/坡度未验收，不作为kernel渲染坐标。
 
+/// 两个宿主/ARA 浮点量是否相容。
+///
+/// 【为什么全局只有这一份】此前绑定用 `1e-7 + 8ε·max`（`render/extension.rs`），
+/// 而分割规划、写回前置检查、剪贴板各写各的 `1e-6`。两者不对称会造出"规划接受、
+/// 绑定拒绝"（或反过来）的窗口 —— 用户表现为"分割/拖动偶尔报 host clip changed"。
+/// 现在绑定、规划、写回、剪贴板共用这一个判据。
+///
+/// 【为什么是相对容差而不是纯绝对】`Clip::playback_rate` 在 kernel 里是 f32，写回
+/// 前置检查拿它与 REAPER 的 f64 `D_PLAYRATE` 比 —— f32 往返本身就有 ~1e-7 相对误差。
+/// 纯绝对阈值会把这种正常舍入判成"宿主变了"。相对项吸收它，绝对项兜住接近 0 的量。
+pub(crate) fn host_value_compatible(a: f64, b: f64) -> bool {
+    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-6 + 1e-9 * a.abs().max(b.abs())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostStretchMarker {
     pub item_position_raw: f64,

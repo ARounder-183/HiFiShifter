@@ -166,7 +166,11 @@ fn zero_length_region_is_skipped_not_fatal() {
     let outcome =
         ara_document_to_timeline_reporting(&doc).expect("a bad region must not fail the mapping");
     assert_eq!(outcome.timeline.clips.len(), 1, "only the good region maps");
-    assert_eq!(outcome.clip_regions, vec![1], "the good region keeps its index");
+    assert_eq!(
+        outcome.clip_regions,
+        vec![1],
+        "the good region keeps its index"
+    );
     assert_eq!(outcome.skipped.len(), 1);
     assert_eq!(outcome.skipped[0].index, 0);
     assert_eq!(

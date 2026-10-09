@@ -109,7 +109,10 @@ impl BrowserState {
                 .as_ref()
                 .and_then(|reply| reply.document.upgrade())
                 .or_else(|| self.undo_document.as_ref().and_then(|weak| weak.upgrade()));
-            let undo = self.undo_requests.remove(id).and_then(|weak| weak.upgrade());
+            let undo = self
+                .undo_requests
+                .remove(id)
+                .and_then(|weak| weak.upgrade());
             let history = self.history_requests.remove(id);
             if let Some(document) = undo {
                 document.host_undo.finish_request(&view_id, *id);
@@ -542,7 +545,7 @@ unsafe extern "system" fn window_proc(
                 let state = (*pointer).state.clone();
                 let link = state.borrow().link.clone();
                 if let Ok(owner) = link.owner() {
-                    owner.refresh_reaper_transport();
+                    owner.refresh_reaper_transport_tick();
                 }
                 if !state.borrow().closed {
                     deliver(&state);

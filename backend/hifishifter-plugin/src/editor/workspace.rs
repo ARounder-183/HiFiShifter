@@ -34,6 +34,13 @@ fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::H
 /// 这份清单是显示占位，PCM 只能经 ARA 授权取得（`render/source.rs`）；非 active take
 /// 更不在本实例的 ARA 范围内。授权 take 由 `authorized_take` 指名（见
 /// `DocumentSession::authorized_takes`），本函数只为它保留已有的授权媒体投影。
+///
+/// 【为什么无条件重建，而不是"未变则早退"】此前的早退判据是"active take id / take id
+/// 列表 / `loop_enabled` 都没变就跳过"。那是一个**枚举型**判据：宿主能改、而判据没
+/// 覆盖的属性（`channel_mode`、`reversed`、take 名、源窗口、倍率）改了之后这里会早退，
+/// 界面停在旧值 —— 用户报的"改了声道模式，闪一下又变回去"就是它（乐观更新先亮，下一份
+/// 权威 payload 又发旧值）。枚举永远补不完，所以现在**每次都重建**，并把宿主不报告的
+/// 插件自有字段（MIDI 音符、声道判定档案、包络、拉伸标记）从旧 take **合并**过来。
 fn sync_host_takes(
     clip: &mut hifishifter_kernel::state::Clip,
     item: &crate::host::reaper::UiItem,
@@ -57,29 +64,10 @@ fn sync_host_takes(
         .iter()
         .find(|take| take.active)
         .map(|take| prefix(&take.geometry.take_id));
-    // 循环源是 item 级属性，同一个 item 的所有 take 读到同一个值。
-    let item_loop = item
-        .takes
-        .first()
-        .is_some_and(|take| take.geometry.loop_source);
-    let unchanged = clip.active_take_id == active
-        && clip.takes.len() == expected.len()
-        && clip
-            .takes
-            .iter()
-            .zip(&expected)
-            .all(|(take, id)| &take.id == id)
-        // 【为什么循环也进这条判据】它影响渲染（内核按整份媒体回绕）与渲染缓存键。
-        // 漏掉它时，用户在 REAPER 里开关"循环源"后这里会早退，界面停在旧状态。
-        && clip.loop_enabled == item_loop;
-    if unchanged {
-        return;
-    }
     // 【为什么必须把授权媒体搬到新 take 上】这份重建从宿主元数据造 take，而宿主元数据
     // **按设计**不带 `source_path`；随后 `normalize_takes()` 会把 active take 物化到扁平
     // 投影上，于是 `clip.source_path` 被清空 —— 每个 ARA 已授权片段都会变成"等待宿主
-    // 音频"的斜纹占位（连波形一起消失）。此前 ARA 片段的 take id 是 `ara-clip-N-take-1`，
-    // 与宿主 GUID 永不相等，所以这条重建**每次清单呈现都会发生**。
+    // 音频"的斜纹占位（连波形一起消失）。
     //
     // 授权媒体只挂到 GUID 与记录相等的那一个 take 上：用户在 REAPER 里换了 active take
     // 而 ARA 尚未重新认领时，GUID 对不上 ⇒ 一个都不挂（宁可显示占位，也不把上一个 take
@@ -89,13 +77,23 @@ fn sync_host_takes(
             .iter()
             .position(|take| take.geometry.take_id == guid)
     });
+    // 【为什么按 id 合并而不是整体替换】宿主元数据只描述**几何与媒体**；take 上的
+    // 插件自有内容（MIDI 音符、声道判定档案、包络、拉伸标记、源声道数）宿主根本不报告。
+    // 整体替换会在每次清单刷新时把它们抹掉。先按 id 建一份旧值索引，逐字段合并。
+    let existing: std::collections::HashMap<String, &hifishifter_kernel::state::ClipTake> = clip
+        .takes
+        .iter()
+        .map(|take| (take.id.clone(), take))
+        .collect();
     let takes: Vec<serde_json::Value> = item
         .takes
         .iter()
         .map(|take| {
             let g = &take.geometry;
+            let id = prefix(&g.take_id);
+            let old = existing.get(&id);
             serde_json::json!({
-                "id": prefix(&g.take_id),
+                "id": id,
                 "name": take.name,
                 "source_start_sec": g.source_start_sec,
                 "source_end_sec": g.source_start_sec + g.duration_sec * g.playback_rate,
@@ -106,6 +104,13 @@ fn sync_host_takes(
                 // 循环源（item 级）。内核的 `loop_enabled` 语义与 REAPER 的循环源一致：
                 // 对**整份媒体**取模回绕，而插件物化的 PCM 就是完整源。
                 "loop_enabled": g.loop_source,
+                // 宿主不报告、必须从旧 take 继承的插件自有内容。
+                "source_channels": old.and_then(|take| take.source_channels),
+                "channel_decision": old.and_then(|take| take.channel_decision.clone()),
+                "midi_note_data": old.and_then(|take| take.midi_note_data.clone()),
+                "midi_fill_gaps": old.is_some_and(|take| take.midi_fill_gaps),
+                "stretch_markers": old.map(|take| take.stretch_markers.clone()).unwrap_or_default(),
+                "envelopes": old.and_then(|take| take.envelopes.clone()),
             })
         })
         .collect();
@@ -805,6 +810,69 @@ impl DocumentSession {
         }
         Ok(())
     }
+    /// 宿主 take 事实投影：把 ARA 表达不到、但宿主能读到的渲染输入播种到时间线上。
+    ///
+    /// 【为什么必须每次重建后做】`ara::mapping::ara_document_to_timeline` 只能从 ARA
+    /// 图重建 clip，而 ARA **没有**方向位、没有循环源、没有声道模式
+    /// （见 `ara::mapping::LOST_FIELDS`）。不播种就等于：界面显示"倒放 · 由 REAPER
+    /// 处理"，**渲染却在按正放合成**（`capture_render_input` 读的正是这条时间线）。
+    /// 这与 [`Self::project_host_mutes_locked`] / [`Self::project_plugin_musical_context_locked`]
+    /// 是同一条纪律：宿主权威的、影响渲染的状态，每次重建后重新投影。
+    ///
+    /// 【为什么按 item GUID 查而不是按 region】clip id 形如 `ara-item-{guid}`
+    /// （`present_host_inventory` 建立的身份），与 `ui_tracks` 的 item 一一对应；
+    /// region→item 的边只服务 ARA 授权，这里要的是"这个 item 现在的 active take 是什么
+    /// 状态"，按 GUID 查最直接，且对没有 region 的 item（尚未授权）也成立。
+    pub(crate) fn project_host_take_facts_locked(&self, timeline: &mut TimelineState) {
+        // item GUID → (方向, 循环源, 声道模式)。取 **active take** 的几何：扁平投影
+        // 描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
+        let facts: std::collections::HashMap<String, (Option<bool>, bool, i32)> = self
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .values()
+            .flat_map(|track| &track.items)
+            .map(|item| {
+                let active = item.takes.iter().find(|take| take.active);
+                let reversed = active.and_then(|take| take.reversed);
+                // 循环源与声道模式是 item 级 / active take 级；缺 active take 时退回
+                // item 的权威几何。
+                let loop_source = active
+                    .map(|take| take.geometry.loop_source)
+                    .unwrap_or(item.geometry.loop_source);
+                let channel_mode = active
+                    .map(|take| take.geometry.channel_mode)
+                    .unwrap_or(item.geometry.channel_mode);
+                (
+                    item.geometry.item_id.clone(),
+                    (reversed, loop_source, channel_mode),
+                )
+            })
+            .collect();
+        for clip in &mut timeline.clips {
+            let Some(guid) = clip.id.strip_prefix("ara-item-") else {
+                continue;
+            };
+            let Some((reversed, loop_source, channel_mode)) = facts.get(guid) else {
+                continue;
+            };
+            // 方向：读不出来时**不改**（`None` 不当作"没倒放"）。
+            if let Some(reversed) = reversed {
+                clip.reversed = *reversed;
+            }
+            clip.loop_enabled = *loop_source;
+            clip.channel_mode = *channel_mode;
+            // 让 active take 也带上同一份事实：`normalize_takes()` 之后 clip 的扁平字段
+            // 来自 active take，只在 clip 上写会被下一次物化覆盖。
+            for take in &mut clip.takes {
+                if let Some(reversed) = reversed {
+                    take.reversed = *reversed;
+                }
+                take.loop_enabled = *loop_source;
+                take.channel_mode = *channel_mode;
+            }
+        }
+    }
     /// 有效item静音按同文档唯一region身份投影；不把它存成HFS自己的可写轨道状态。
     pub(crate) fn project_host_mutes_locked(&self, timeline: &mut TimelineState) {
         let identities = self.clip_ids.lock().unwrap();
@@ -923,6 +991,7 @@ impl DocumentSession {
             .ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| clips.contains(&clip.id));
         self.project_host_mutes_locked(&mut timeline);
+        self.project_host_take_facts_locked(&mut timeline);
         self.project_plugin_musical_context_locked(&mut timeline);
         let mut tracks = timeline
             .clips

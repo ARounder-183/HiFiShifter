@@ -1,5 +1,6 @@
 //! 原GUI几何命令的纯规划与真实宿主写入；不修改actor私有timeline冒充REAPER成功。
 use super::session::EditorSession;
+use crate::host::geometry::host_value_compatible;
 use crate::host::reaper::HostClipTarget;
 use crate::render::extension::ExtensionOwner;
 use hifishifter_kernel::state::{Clip, ClipStatePatch, TimelineState};
@@ -439,8 +440,12 @@ pub(super) fn execute_managed(
         {
             return Err("nonlinear host stretch-marker editing is not supported".into());
         }
-        if (target.geometry.start_sec - edit.before.start_sec).abs() > 1e-6
-            || (target.geometry.duration_sec - edit.before.length_sec).abs() > 1e-6
+        // 与绑定同一判据（`host::geometry::host_value_compatible`）。此前这里用 1e-6
+        // 绝对阈值，而绑定用 1e-7 —— `before` 是**派生物**（经 `normalize_takes` 的 f32
+        // 往返），与宿主原值在两者之间的正常舍入会被判成"宿主变了"，用户看到
+        // "host clip changed before GUI commit"，一次编辑被拒。
+        if !host_value_compatible(target.geometry.start_sec, edit.before.start_sec)
+            || !host_value_compatible(target.geometry.duration_sec, edit.before.length_sec)
         {
             return Err("host clip changed before GUI commit; refresh required".into());
         }
@@ -449,8 +454,13 @@ pub(super) fn execute_managed(
             || edit.patch.length_sec.is_some()
             || edit.patch.playback_rate.is_some()
             || edit.patch.clip_playback_rate.is_some())
-            && ((target.geometry.source_start_sec - edit.before.source_start_sec).abs() > 1e-6
-                || (target.geometry.playback_rate - edit.before.playback_rate as f64).abs() > 1e-6)
+            && (!host_value_compatible(
+                target.geometry.source_start_sec,
+                edit.before.source_start_sec,
+            ) || !host_value_compatible(
+                target.geometry.playback_rate,
+                edit.before.playback_rate as f64,
+            ))
         {
             return Err(
                 "host source window/rate changed before GUI commit; refresh required".into(),
