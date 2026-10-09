@@ -1023,7 +1023,22 @@ fn configure_browser(
             let name=request["args"]["name"].as_str().unwrap_or("").to_owned();let link=state.borrow().link.clone();
             if let Ok(owner)=link.owner() {if let Ok(editor)=owner.editor_session() {
                 let active=editor.timeline.lock().unwrap().clips.iter().find(|clip|clip.id==clip_id).and_then(|clip|clip.active_take_id.clone());
-                if active.as_deref()==Some(take_id.as_str()) {request["command"]=serde_json::json!("set_clip_state");request["args"]=serde_json::json!({"clipId":clip_id,"name":name,"checkpoint":request["args"]["checkpoint"]});}
+                if active.as_deref()==Some(take_id.as_str()) {
+                    // 只有 active take 的名字能落到宿主：`set_clip_state{name}` 写的是
+                    // 宿主 item 的当前 take 名。非 active take 的重命名没有宿主对应
+                    // （`SetTakeName` 只作用于 take 指针，而 ARA 侧只认 active take）。
+                    request["command"]=serde_json::json!("set_clip_state");
+                    request["args"]=serde_json::json!({"clipId":clip_id,"name":name,"checkpoint":request["args"]["checkpoint"]});
+                } else {
+                    // 【为什么给明确错误而不是让它掉进 catch-all】此前这条命令原样落到
+                    // `Command unavailable in ARA plugin mode: rename_clip_take` ——
+                    // 用户看到的是"命令不可用"，而不是"只有当前 Take 能改名"。后者才是
+                    // 可操作的。
+                    let reply=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
+                        "error":"only the active take can be renamed in the ARA plugin; switch to it in REAPER first"}).to_string());
+                    browser.PostWebMessageAsJson(PCWSTR(reply.as_ptr()))?;
+                    return Ok(());
+                }
             }}
         }
         // DOM File不经base64复制音频；路径仅从WebView2提供的真实File对象读取。
