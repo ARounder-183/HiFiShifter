@@ -89,11 +89,9 @@ const CurvatureSlider: React.FC<{
     continuous: boolean;
     /** 淡出列：预览按淡出取向绘制（时间镜像 + σ 符号归一），与画布一致。 */
     isOut: boolean;
-    /** 宿主淡化读数（插件模式）：预览与拖拽投影必须用画布那套曲线。 */
-    hostFades?: HostFadeMetadata;
     onChange: (nextDir: number) => void;
     onSChange: (nextS: number) => void;
-}> = ({ shape, dir, s, continuous, isOut, hostFades, onChange, onSChange }) => {
+}> = ({ shape, dir, s, continuous, isOut, onChange, onSChange }) => {
     const fineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -377,7 +375,6 @@ const SideColumn: React.FC<{
                 s={side.s}
                 continuous={continuous}
                 isOut={isOut}
-                hostFades={side.hostFades}
                 onChange={(nextDir) => onDirChange(side.clipId, side.isOut, nextDir)}
                 onSChange={(nextS) => onSChange(side.clipId, side.isOut, nextS)}
             />
