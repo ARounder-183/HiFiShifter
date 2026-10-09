@@ -75,6 +75,11 @@ export interface HitTestClip {
     readonly fadeOutShape?: number;
     readonly fadeOutDir?: number;
     /**
+     * 宿主淡化轴（插件模式）。命中块与画布必须用**同一个**求值器，否则用户得离开
+     * 看得见的曲线去抓（见 `fadeHitTargets` 的文件头）。
+     */
+    readonly hostFades?: import("../../../../../types/api").HostFadeMetadata;
+    /**
      * 吸附偏移（秒，相对 clip 起点）。
      *
      * `hitTest` **会**消费它——snap offset 三角手柄的命中区左缘跟随该值

@@ -15,11 +15,12 @@
  * - 消费方：旧实现的 `OverlapEditLayer`（DOM 命中层）与内核的重叠区解析
  *   （`kernel/interaction/overlapControls`）。抽成共享模块是为了让两者用**同一份
  *   几何**——两份实现迟早漂移，而漂移的表现是「抓手画在这里、却在那里才抓得住」。
- * - 依赖：`reaperFade.fadeGainSigned`（与绘制端同一套曲线函数）。
+ * - 依赖：`hostFadeDisplay.visualFadeGain`（与绘制端**同一个**求值器）。
  * - 独立性：纯函数，无 DOM / React 依赖。
  */
 
-import { fadeGainSigned } from "./reaperFade";
+import { visualFadeGain } from "./hostFadeDisplay";
+import type { HostFadeMetadata } from "../../../types/api";
 
 /** 交点计算参数（坐标均为时间轴内容坐标，px）。 */
 export interface CrossfadeGripArgs {
@@ -29,12 +30,16 @@ export interface CrossfadeGripArgs {
     readonly earlierFadePx: number;
     readonly earlierShape: number;
     readonly earlierDir: number;
+    /** 前一个 clip 的宿主淡化轴（插件模式）；缺省时按 HFS 自己的曲线求交。 */
+    readonly earlierHostFades?: HostFadeMetadata;
     /** 后一个 clip 的左边缘 X。 */
     readonly laterStartPx: number;
     /** 后一个 clip 淡入包络的像素宽度。 */
     readonly laterFadePx: number;
     readonly laterShape: number;
     readonly laterDir: number;
+    /** 后一个 clip 的宿主淡化轴（插件模式）。 */
+    readonly laterHostFades?: HostFadeMetadata;
     readonly bodyTop: number;
     readonly bodyHeight: number;
 }
@@ -72,12 +77,13 @@ export function computeCrossfadeGripPoint(
 
     // 两条曲线在重叠淡化区的 X 区间单调：A 淡出 y 随 x 增大而增大，
     // B 淡入 y 随 x 增大而减小，因此 yA-yB 严格单调 → 二分求零点。
+    // 与画布同一个求值器：画的是宿主两轴曲线时，抓手也必须落在**那条**曲线的交点上。
     const yDiff = (x: number): number => {
         const tA = (x - earlierLeftPx) / earlierFadePx;
-        const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
+        const gainA = visualFadeGain(args.earlierHostFades, earlierShape, earlierDir, "out", tA);
         const yA = bodyTop + bodyHeight * (1 - gainA);
         const tB = (x - laterStartPx) / laterFadePx;
-        const gainB = fadeGainSigned(laterShape, laterDir, "in", tB);
+        const gainB = visualFadeGain(args.laterHostFades, laterShape, laterDir, "in", tB);
         const yB = bodyTop + bodyHeight * (1 - gainB);
         return yA - yB;
     };
@@ -108,7 +114,7 @@ export function computeCrossfadeGripPoint(
 
     const x = (low + high) / 2;
     const tA = (x - earlierLeftPx) / earlierFadePx;
-    const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
+    const gainA = visualFadeGain(args.earlierHostFades, earlierShape, earlierDir, "out", tA);
     return {
         x,
         y: bodyTop + bodyHeight * (1 - gainA),

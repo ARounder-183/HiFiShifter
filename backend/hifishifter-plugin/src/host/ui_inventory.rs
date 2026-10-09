@@ -474,6 +474,39 @@ mod tests {
         );
     }
 
+    /// 清单投影必须按**宿主实际在用的那套轴**取曲率。
+    ///
+    /// 【为什么值得一条测试】本函数在 `project_ui_fades_locked` **之后**跑
+    /// （`ensure_loaded`：先 snapshot 再 inventory）。无条件取旧轴 `D_FADEINDIR` 会把刚
+    /// 投影好的新轴曲率覆盖成一个被重映射过的旧值（实测 7.81 上新轴 0.5 读回旧轴是 0），
+    /// 表现就是"拖了曲率，滑杆与曲线又跳回另一个值"。
+    #[test]
+    fn inventory_projects_the_curvature_of_the_host_axis_in_use() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let geometry = track.items[0].geometry.clone();
+        assert_ne!(
+            geometry.fade_in_dir, geometry.fade_in_dir_new,
+            "夹具必须让两套轴取值不同，否则这条测试对缺陷不敏感"
+        );
+        let document = crate::render::document::DocumentSession::new(9879);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        document.present_host_inventory(&mut timeline, "ui-");
+        let clip = &timeline.clips[0];
+        // 夹具自报 REAPER 7.81 → 新轴才是权威值。
+        assert_eq!(clip.fade_in_dir, geometry.fade_in_dir_new);
+        assert_eq!(clip.fade_out_dir, geometry.fade_out_dir_new);
+    }
+
     /// 逐 clip 的宿主媒体状态必须把**四种成因分开** —— 它们此前共用一句
     /// "等待 REAPER 提供音频（未分配 ARA 区域）"，于是"刚分割了一下"看起来像故障。
     #[test]

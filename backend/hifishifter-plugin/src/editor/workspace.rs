@@ -280,6 +280,25 @@ impl DocumentSession {
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
+        // 委托 fade 的样式（宿主把边界包络交给 HFS 渲染时，shape/dir 由插件状态决定）。
+        // 一次取出，避免在 track/item 双层循环里反复取锁。
+        let delegated_fades = self.edits.lock().unwrap().fades.clone();
+        // 哪些 item 的边界包络被委托给 HFS（按 item GUID 收集，判据与
+        // `project_ui_fades_locked` 相同）。
+        let delegated_items: std::collections::BTreeSet<String> = {
+            let regions = self.regions.lock().unwrap();
+            let items = self.region_items.lock().unwrap();
+            items
+                .iter()
+                .filter(|(key, _)| {
+                    regions.get(key).is_some_and(|region| {
+                        region.has_content_based_fade_at_head
+                            || region.has_content_based_fade_at_tail
+                    })
+                })
+                .map(|(_, item)| item.clone())
+                .collect()
+        };
         // item GUID → 该 item 在 ARA 授权那一刻的 active take GUID。
         //
         // 一个 item 只有一个 active take，多个 region 认领同一 item 时记录的都是同一个
@@ -401,8 +420,27 @@ impl DocumentSession {
                 clip.auto_fade_out_sec = g.auto_fade_out_sec;
                 clip.fade_in_shape = g.fade_in_shape;
                 clip.fade_out_shape = g.fade_out_shape;
-                clip.fade_in_dir = g.fade_in_dir;
-                clip.fade_out_dir = g.fade_out_dir;
+                // 【为什么按轴分流】"曲率"落在哪个宿主字段取决于宿主版本（≤7.80
+                // `D_FADE*DIR`，≥7.81 `D_FADE*DIR_NEW`）。这里**必须**与
+                // `project_ui_fades_locked` 同口径 —— 本函数在它**之后**跑（见
+                // `ensure_loaded`：先 snapshot 再 inventory），无条件取旧轴会把刚投影好
+                // 的新轴曲率覆盖成一个被重映射过的旧值（实测 7.81 上新轴 0.5 读回旧轴
+                // 是 0）。表现就是"拖了曲率，滑杆/曲线又跳回另一个值"。
+                let (in_dir, out_dir) = match g.fade_axes_new {
+                    Some(true) => (g.fade_in_dir_new, g.fade_out_dir_new),
+                    _ => (g.fade_in_dir, g.fade_out_dir),
+                };
+                clip.fade_in_dir = in_dir;
+                clip.fade_out_dir = out_dir;
+                // 委托 fade 的 item：宿主把边界包络交给 HFS 渲染，shape/dir 由插件状态
+                // 决定 —— 与 `project_ui_fades_locked` 的同一分支、同一判据。
+                if delegated_items.contains(&g.item_id) {
+                    let style = delegated_fades.get(&g.item_id).cloned().unwrap_or_default();
+                    clip.fade_in_shape = style.in_shape;
+                    clip.fade_out_shape = style.out_shape;
+                    clip.fade_in_dir = style.in_dir;
+                    clip.fade_out_dir = style.out_dir;
+                }
                 timeline.project_sec = timeline.project_sec.max(g.start_sec + g.duration_sec);
             }
         }

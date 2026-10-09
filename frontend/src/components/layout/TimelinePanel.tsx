@@ -68,7 +68,7 @@ import {
     resolveCurvePointer,
     solveNearestCurveDir,
 } from "./timeline/reaperFade";
-import { hostFadeGainForAxes } from "./timeline/hostFadeDisplay";
+import { hostFadeDisplayShape, hostFadeGainForAxes } from "./timeline/hostFadeDisplay";
 import type { HostFadeMetadata } from "../../types/api";
 import {
     buildCrossfadeGripInfoContent,
@@ -1247,8 +1247,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             for (const targetId of targets) {
                 const clip = sessionRef.current.clips.find((entry) => entry.id === targetId);
                 if (!clip) continue;
-                const rawShape = side === "in" ? clip.fadeInShape : clip.fadeOutShape;
-                const currentShape = Number.isFinite(rawShape) ? Math.trunc(rawShape) : 0;
+                // 【为什么不能直接用 `clip.fadeInShape`】宿主是 7.81+ 时那个字段是
+                // `C_FADE*SHAPE` 的**派生**读数：非预设曲线上它可能是 -1（多对一，
+                // 见 `fade_axes.rs`），照着循环会从"线性"重新开始而不是从相邻预设。
+                // `hostFadeDisplayShape` 是"画布实际画的那一族"的唯一判定，
+                // 与浮标、右键菜单用的是同一个。
+                const currentShape = hostFadeDisplayShape(
+                    clip.hostFades,
+                    side === "out",
+                    Number(side === "in" ? clip.fadeInShape : clip.fadeOutShape) || 0,
+                );
                 const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
                 const nextPreset =
                     FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
@@ -4082,10 +4090,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率只作用于**锚点 clip 的该侧**（旧实现明确："曲率只作用于当前 clip
             // 的该侧：指针 Y 必须映射到该 clip 自己的 gain=1 基线"——各行 body 几何
             // 不同，无法跨 clip 共用同一指针 Y）。
-            if (
-                (!isPluginMode() || canEditHostFadeAxes()) &&
-                isModifierActive(fadeCurvatureKb, args.modifiers)
-            ) {
+            if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
+                // 修饰键按下了 = 用户要的是**曲率**。宿主轴版本读不出来时做不了曲率，
+                // 此时**不能**退化成改长度 —— 那是另一个编辑，用户会以为自己在调曲率
+                // 却把淡变长度改掉了（静默改错数据比什么都不做更坏）。
+                if (isPluginMode() && !canEditHostFadeAxes()) return;
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
                 const clipStart = Number(clip.startSec) || 0;
@@ -5165,10 +5174,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 与旧实现 `useEditDrag` 的 `crossfade_edges` Alt 分支同一套：交叉点上的
             // 两条包络线**各自**解一条"经过指针点"的新曲率，边缘位置与长度都完全不动。
             // 求解从上一帧的解出发（`baseDir` 逐帧覆写），连续拖动才平滑。
-            if (
-                (!isPluginMode() || canEditHostFadeAxes()) &&
-                isModifierActive(fadeCurvatureKb, args.modifiers)
-            ) {
+            if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
+                // 同单侧分支：修饰键要的是曲率，做不了就不做，不退化成移动几何。
+                if (isPluginMode() && !canEditHostFadeAxes()) return;
                 const sides = origin.curveSides;
                 const ptA = resolveCurvePointer(
                     args.curveEnv,

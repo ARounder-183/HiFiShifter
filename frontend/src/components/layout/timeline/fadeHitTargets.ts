@@ -9,10 +9,17 @@
  * 本模块把这两条线离散化为小块 axis-aligned Hit 矩形，交给 DOM 层直接渲染为
  * 可按下/拖拽的透明手柄；未命中区域的事件可自然穿透到 clip body（拖拽移动 clip）。
  *
- * 几何与 timelineCanvasRenderer.drawFadeCurveStroke 完全一致（同一套
- * fadeCurveGain + bodyTop/bodyHeight 约定），保证"视觉画在哪、就能在哪抓住"。
+ * 几何与 timelineCanvasRenderer.drawFadeCurveStroke 完全一致（**同一个**
+ * `visualFadeGain` + bodyTop/bodyHeight 约定），保证"视觉画在哪、就能在哪抓住"。
+ *
+ * 【为什么必须走 `visualFadeGain` 而不是 `fadeGainSigned`】宿主是 7.81+ 时画布画的
+ * 是宿主的 `(curvature, S)` 两轴曲线，而 `fadeGainSigned` 算的是 HiFiShifter 自己的
+ * `(shape, dir)` 曲线 —— 两者不是同一套参数化（实测见
+ * `probe/ara/FADE-AXIS-FINDINGS.md`）。用后者铺命中块，用户就得**离开看得见的曲线**
+ * 去抓，且抓取点会随曲率变化漂移。这正是"看到的 = 可点的"这条不变量被破坏的形态。
  */
-import { fadeGainSigned } from "./reaperFade";
+import { visualFadeGain } from "./hostFadeDisplay";
+import type { HostFadeMetadata } from "../../../types/api";
 
 /**
  * 包络线命中块：边长（px）。
@@ -83,6 +90,8 @@ function sampleFadeLine(args: {
     mode: "in" | "out";
     clipXFrom: number;
     clipXTo: number;
+    /** 宿主淡化轴；`undefined`（独立 App）时 `visualFadeGain` 走 HFS 自己的曲线。 */
+    hostFades?: HostFadeMetadata;
 }): Array<{ x: number; y: number }> {
     const { left, right, bodyTop, bodyHeight, shape, dir, mode, clipXFrom, clipXTo } = args;
     const width = right - left;
@@ -102,10 +111,8 @@ function sampleFadeLine(args: {
         const t = index / Math.max(1, count - 1);
         const x = left + t * width;
         if (x < clipXFrom || x > clipXTo) continue;
-        const gain =
-            mode === "in"
-                ? fadeGainSigned(shape, dir, "in", t)
-                : fadeGainSigned(shape, dir, "out", t);
+        // 与画布同一个求值器：画的是宿主两轴曲线时，命中块也铺在宿主曲线上。
+        const gain = visualFadeGain(args.hostFades, shape, dir, mode, t);
         const y = bodyTop + bodyHeight * (1 - gain);
         points.push({ x, y });
     }
@@ -129,6 +136,8 @@ export function buildFadeHitTargets(args: {
     fadeInDir: number;
     fadeOutShape: number;
     fadeOutDir: number;
+    /** 宿主淡化轴（插件模式）；缺省时按 HFS 自己的曲线铺命中块。 */
+    hostFades?: HostFadeMetadata;
     clipXFrom?: number;
     clipXTo?: number;
 }): FadeHitTarget[] {
@@ -164,6 +173,7 @@ export function buildFadeHitTargets(args: {
             mode: "in",
             clipXFrom,
             clipXTo,
+            hostFades: args.hostFades,
         })) {
             targets.push({
                 kind: "line",
@@ -198,6 +208,7 @@ export function buildFadeHitTargets(args: {
             mode: "out",
             clipXFrom,
             clipXTo,
+            hostFades: args.hostFades,
         })) {
             targets.push({
                 kind: "line",

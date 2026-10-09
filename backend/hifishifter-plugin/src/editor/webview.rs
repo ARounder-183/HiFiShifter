@@ -1188,7 +1188,10 @@ fn configure_browser(
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
                     let editor=owner.editor_session()?;let input=request.get("args").cloned().unwrap_or_else(||serde_json::json!({}));
                     let plan=editor.plan_host_edit(command,&input)?;
-                    let geometry=Some(plan.receipt(&editor.namespace));
+                    // 完成门需要知道宿主的淡化轴版本：形状预设在新轴/旧轴上落盘的字段不同，
+                    // 期望值也就不同（见 `HostEditPlan::receipt`）。
+                    let fade_axes_new=owner.host_fade_axes();
+                    let geometry=Some(plan.receipt(&editor.namespace,fade_axes_new));
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);

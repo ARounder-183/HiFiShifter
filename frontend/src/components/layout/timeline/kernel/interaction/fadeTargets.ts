@@ -25,6 +25,7 @@
 
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../../constants";
 import { buildFadeHitTargets } from "../../fadeHitTargets";
+import type { HostFadeMetadata } from "../../../../../types/api";
 
 /** 淡变命中所需的 clip 字段（全部可选：未设过淡变的 clip 缺省即为 0）。 */
 export interface FadeTargetClip {
@@ -37,6 +38,14 @@ export interface FadeTargetClip {
     readonly autoFadeOutSec?: number;
     readonly fadeOutShape?: number;
     readonly fadeOutDir?: number;
+    /**
+     * 宿主淡化轴（插件模式）。
+     *
+     * 【为什么命中判定必须拿到它】画布用 `visualFadeGain` 画宿主的两轴曲线；命中块
+     * 若仍按 HFS 的 `(shape, dir)` 铺，用户就得离开看得见的曲线去抓 —— 违反本模块
+     * 文件头那条"看到的 = 可点的"。缺省（独立 App）时两者是同一套曲线。
+     */
+    readonly hostFades?: HostFadeMetadata;
 }
 
 /**
@@ -115,6 +124,7 @@ export function hitClipFadeTarget(args: ClipFadeTargetArgs): ClipFadeTargetHit |
         fadeInDir: args.clip.fadeInDir ?? 0,
         fadeOutShape: args.clip.fadeOutShape ?? 0,
         fadeOutDir: args.clip.fadeOutDir ?? 0,
+        hostFades: args.clip.hostFades,
         clipXFrom: args.clipXFrom,
         clipXTo: args.clipXTo,
     });

@@ -2431,6 +2431,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 autoFadeOutSec: clip.autoFadeOutSec,
                 fadeOutShape: clip.fadeOutShape,
                 fadeOutDir: clip.fadeOutDir,
+                // 宿主淡化轴随几何一起透传：命中块与画布必须用同一个求值器
+                // （见 `fadeHitTargets` 的文件头）。
+                hostFades: clip.hostFades,
             });
         }
         for (const list of map.values()) list.sort((a, b) => a.startSec - b.startSec);

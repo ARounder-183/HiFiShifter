@@ -25,7 +25,19 @@ pub(crate) struct HostEditReceipt {
 }
 impl HostEditPlan {
     /// 冻结本次确切clip及预期宿主几何，单独的fade宽度也必须进入完成门。
-    pub(crate) fn receipt(&self, namespace: &str) -> HostEditReceipt {
+    ///
+    /// 【为什么形状 / 曲率也必须进门】它们此前不在门里，于是"只改曲率"的补丁
+    /// `matches()` 恒真：响应立刻带着**改动前**的 dir/shape 回来，前端按权威回声整份
+    /// 应用，用户看到的曲线会**弹回**，直到 UI 定时器刷新几何才纠正 —— 一次可见的抖动。
+    /// 长度一直在门里，所以只有形状 / 曲率拖拽会抖。
+    ///
+    /// 【为什么期望值随轴版本而变】连续轴（≥7.81）上形状预设写的是预设自己的
+    /// `(curvature, S)`，补丁里同带的 HFS `dir` 会被忽略（见写回块）；旧轴上写的才是
+    /// `C_FADE*SHAPE` 与 `D_FADE*DIR` 本身。
+    ///
+    /// 【为什么不比 `fade_*_s`】GUI 载荷没有这个字段（S 只在 `host_fades` 读数里），
+    /// 拿它当判据会让门永远不成立。连续轴上比 curvature 就足以确认宿主已跟上。
+    pub(crate) fn receipt(&self, namespace: &str, fade_axes_new: Option<bool>) -> HostEditReceipt {
         HostEditReceipt {
             clips: self
                 .edits
@@ -55,6 +67,45 @@ impl HostEditPlan {
                     ] {
                         if let Some(value) = value {
                             fields.push((key, serde_json::json!(value)));
+                        }
+                    }
+                    for (shape, dir, shape_key, dir_key) in [
+                        (
+                            edit.patch.fade_in_shape,
+                            edit.patch.fade_in_dir,
+                            "fade_in_shape",
+                            "fade_in_dir",
+                        ),
+                        (
+                            edit.patch.fade_out_shape,
+                            edit.patch.fade_out_dir,
+                            "fade_out_shape",
+                            "fade_out_dir",
+                        ),
+                    ] {
+                        if let Some(shape) = shape {
+                            match fade_axes_new {
+                                // 连续轴：形状没有可写号，写的是预设的 curvature；
+                                // 载荷的 `fade_*_dir` 正是宿主回读的 curvature。
+                                Some(true) => {
+                                    if let Some((curvature, _)) =
+                                        hifishifter_kernel::fade_axes::host_fade_preset_axes(shape)
+                                    {
+                                        fields.push((dir_key, serde_json::json!(curvature)));
+                                    }
+                                }
+                                // 旧轴（或版本读不出来）：形状号本身可写，且 dir 原样写回。
+                                _ => {
+                                    fields.push((shape_key, serde_json::json!(shape)));
+                                    if let Some(dir) = dir {
+                                        fields.push((dir_key, serde_json::json!(dir)));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(dir) = dir {
+                            fields.push((dir_key, serde_json::json!(dir)));
                         }
                     }
                     if let Some(group) = edit.patch.host_group_id {
@@ -714,7 +765,7 @@ mod tests {
             let plan = editor
                 .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":gain}))
                 .unwrap();
-            let receipt = plan.receipt(&editor.namespace);
+            let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
             host.reset();
             execute(&owner, plan, || document.is_alive()).unwrap();
             let native = clip.id.strip_prefix(&editor.namespace).unwrap();
@@ -854,7 +905,7 @@ mod tests {
                 &json!({"clipId":clip.id,"startSec":3.,"fadeInSec":0.2}),
             )
             .unwrap();
-        let receipt = plan.receipt(&editor.namespace);
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
         let mut payload = super::super::commands::payload(&editor, false).unwrap();
         assert!(!receipt.matches(&payload));
         payload["clips"][0]["start_sec"] = json!(3.);
@@ -945,6 +996,84 @@ mod tests {
         document.close();
     }
 
+    /// 形状 / 曲率必须进完成门：否则"只改曲率"的补丁 `matches()` 恒真，响应会带着
+    /// **改动前**的 dir 回来，前端按权威回声整份应用 → 用户拖完曲率看到曲线弹回。
+    ///
+    /// 【为什么这条只在插件里有意义】独立 App 直接改自己的模型，没有"宿主回流"这一步。
+    #[test]
+    fn fade_axis_edits_are_part_of_the_completion_receipt() {
+        let (model, owner, _id) = super::super::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_reaper_host(host.context());
+        }
+        owner.refresh_reaper_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+
+        let fields_of = |receipt: &super::HostEditReceipt| -> Vec<(&'static str, Value)> {
+            receipt.clips[0].1.clone()
+        };
+        let key_value = |fields: &[(&'static str, Value)], key: &str| -> Option<Value> {
+            fields
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        };
+
+        // ① 纯曲率拖拽：补丁里**没有**任何长度字段。
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"fadeInDir":0.5}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let fields = fields_of(&receipt);
+        assert_eq!(
+            key_value(&fields, "fade_in_dir").and_then(|value| value.as_f64()),
+            Some(0.5),
+            "曲率必须在完成门里，否则响应会带着改动前的值回来、曲线弹回"
+        );
+        assert!(
+            key_value(&fields, "fade_in_sec").is_none(),
+            "长度没改就不该等长度：门只等本次真正请求的字段"
+        );
+
+        // ② 形状预设（连续轴）：落盘的是预设自己的 curvature，不是同补丁带的 dir。
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"fadeInShape":3.,"fadeInDir":-1.}),
+            )
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, Some(true));
+        let fields = fields_of(&receipt);
+        // 预设 3「陡峭凸」= (curvature 1, S 0)；若照抄 dir(-1) 会变成预设 4。
+        assert_eq!(
+            key_value(&fields, "fade_in_dir").and_then(|value| value.as_f64()),
+            Some(1.),
+            "连续轴上形状的期望值取自实测表，不是补丁里同带的 HFS dir"
+        );
+        assert!(
+            key_value(&fields, "fade_in_shape").is_none(),
+            "连续轴上形状号是派生读数（可能是 -1），不能当判据"
+        );
+
+        // ③ 旧轴：形状号本身可写，照常进门。
+        let receipt = plan.receipt(&editor.namespace, Some(false));
+        let fields = fields_of(&receipt);
+        assert_eq!(
+            key_value(&fields, "fade_in_shape").and_then(|value| value.as_f64()),
+            Some(3.)
+        );
+        document.close();
+    }
+
     /// 吸附偏移经真实typed setter和UI元数据回流，不能写完后永远等默认零值。
     #[test]
     fn host_edit_snap_offset_receipt_uses_current_host_metadata() {
@@ -969,7 +1098,7 @@ mod tests {
                 &json!({"clipId":clip.id,"snapOffsetSec":2./44100.}),
             )
             .unwrap();
-        let receipt = plan.receipt(&editor.namespace);
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
         assert!(!receipt.matches(&super::super::commands::payload(&editor, false).unwrap()));
         execute(&owner, plan, || document.is_alive()).unwrap();
         owner.refresh_reaper_transport();

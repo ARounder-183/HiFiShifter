@@ -209,10 +209,12 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 earlierFadePx,
                 earlierShape: earlier.fadeOutShape ?? 0,
                 earlierDir: earlier.fadeOutDir ?? 0,
+                earlierHostFades: earlier.hostFades,
                 laterStartPx,
                 laterFadePx,
                 laterShape: later.fadeInShape ?? 0,
                 laterDir: later.fadeInDir ?? 0,
+                laterHostFades: later.hostFades,
                 bodyTop: CLIP_HEADER_HEIGHT,
                 bodyHeight: Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
             });
