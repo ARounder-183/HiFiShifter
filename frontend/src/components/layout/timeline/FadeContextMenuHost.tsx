@@ -29,6 +29,7 @@ import { setClipFades } from "../../../features/session/sessionSlice";
 import { webApi } from "../../../services/webviewApi";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { defaultFadeDirFor } from "./reaperFade";
+import { hostFadeDisplayShape } from "./hostFadeDisplay";
 import { FadeContextMenu, type FadeContextSide } from "./FadeContextMenu";
 import { onFadeContextMenuRequest, onFadeCurvatureReset } from "./fadeContextMenuBus";
 import { getBulkEditableClipIds } from "./hooks/bulkClipEdit";
@@ -195,20 +196,29 @@ export const FadeContextMenuHost: React.FC = () => {
                         for (const targetId of targets) {
                             const clip = clipsRef.current.find((c) => c.id === targetId);
                             if (!clip) continue;
+                            // 【为什么形状也要一起送】"曲率"落在哪个宿主字段取决于版本，
+                            // 而两套轴**不是同一套参数化**（实测 HFS dir 0.75 ↔ 宿主
+                            // curvature 0.6878）。只送 HFS 的 dir，连续轴宿主会把它当
+                            // curvature 直接写进 `D_FADEINDIR_NEW` —— 那是个别族的数值。
+                            // 连形状一起送，后端就会按实测表写预设自己的
+                            // `(curvature, S)`；旧轴宿主则照旧写 `C_FADE*SHAPE` + dir。
+                            // 这与形状循环走的是同一条规则。
                             const shapeRaw = side.isOut ? clip.fadeOutShape : clip.fadeInShape;
-                            const shape = Number.isFinite(shapeRaw) ? shapeRaw : 0;
-                            const dir = defaultFadeDirFor(shape, side.isOut);
-                            dispatch(
-                                setClipFades({
-                                    clipId: targetId,
-                                    ...(side.isOut ? { fadeOutDir: dir } : { fadeInDir: dir }),
-                                }),
+                            const shape = hostFadeDisplayShape(
+                                clip.hostFades,
+                                side.isOut,
+                                Number.isFinite(shapeRaw) ? shapeRaw : 0,
                             );
+                            const dir = defaultFadeDirFor(shape, side.isOut);
+                            const patch = side.isOut
+                                ? { fadeOutShape: shape, fadeOutDir: dir }
+                                : { fadeInShape: shape, fadeInDir: dir };
+                            dispatch(setClipFades({ clipId: targetId, ...patch }));
                             remoteChainRef.current = remoteChainRef.current
                                 .then(() =>
                                     webApi.setClipState({
                                         clipId: targetId,
-                                        ...(side.isOut ? { fadeOutDir: dir } : { fadeInDir: dir }),
+                                        ...patch,
                                         checkpoint: false,
                                     }),
                                 )
