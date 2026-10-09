@@ -665,11 +665,7 @@ impl DocumentSession {
             let takes = self.authorized_takes.lock().unwrap();
             items
                 .iter()
-                .filter_map(|(key, item)| {
-                    takes
-                        .get(key)
-                        .map(|take| (item.clone(), take.clone()))
-                })
+                .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
                 .collect()
         };
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
@@ -686,9 +682,10 @@ impl DocumentSession {
         for track in self.ui_tracks.lock().unwrap().values() {
             for item in &track.items {
                 let item_id = item.geometry.item_id.clone();
-                let Some(clip) = clips.iter_mut().find(|clip| {
-                    clip["id"] == format!("{namespace}ara-item-{}", item_id)
-                }) else {
+                let Some(clip) = clips
+                    .iter_mut()
+                    .find(|clip| clip["id"] == format!("{namespace}ara-item-{}", item_id))
+                else {
                     continue;
                 };
                 let has_source = clip["source_path"]
@@ -715,15 +712,12 @@ impl DocumentSession {
                         // 是用户真正需要的那条信息。
                         let reason = if !claimed.contains(&item_id) {
                             "unclaimed"
-                        } else if authorized_by_item
-                            .get(&item_id)
-                            .is_some_and(|authorized| {
-                                item.takes
-                                    .iter()
-                                    .find(|take| take.active)
-                                    .is_none_or(|take| &take.geometry.take_id != authorized)
-                            })
-                        {
+                        } else if authorized_by_item.get(&item_id).is_some_and(|authorized| {
+                            item.takes
+                                .iter()
+                                .find(|take| take.active)
+                                .is_none_or(|take| &take.geometry.take_id != authorized)
+                        }) {
                             // ARA 授权的是**另一个** take 的 PCM，当前 active take 与它
                             // 不符 —— 典型来源是"倒放 Item 为新 Take"（新 take 换了文件，
                             // 而 ARA 没有重新认领）。
