@@ -160,6 +160,27 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
     assert_eq!(payload["project"]["base_scale"], "Gb");
     assert_eq!(payload["project"]["use_custom_scale"], false);
 
+    // 【为什么这两条是本测试的重点】`project.base_scale` 只是 GUI 显示值；内核的
+    // 渲染锚点是 `timeline.project_scale_notes`（`scale_segments()` →
+    // `render_scale_signature()` → 渲染缓存键）。只改前者等于"显示成 Gb、内核按 C 渲染"。
+    let expected = hifishifter_kernel::state::scale_notes_for_key("Gb").unwrap();
+    assert_eq!(
+        editor.timeline.lock().unwrap().project_scale_notes,
+        expected,
+        "音阶必须真的进内核，而不是只改了 GUI 显示值"
+    );
+    // ★ 关键：插件的 `TimelineState` 每次 ARA 重新认领都会被整体重建
+    // （`ara::mapping::ara_document_to_timeline` 只带 tracks/clips/bpm/project_sec），
+    // 所以必须验"重建之后仍是 Gb" —— 只测"改完立刻变"测的是被冲掉之前的状态。
+    document.revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let payload = call(3, "get_timeline_state", json!({}));
+    assert_eq!(payload["project"]["base_scale"], "Gb");
+    assert_eq!(
+        editor.timeline.lock().unwrap().project_scale_notes,
+        expected,
+        "音阶必须在每次 ARA 重建后重新播种，否则会被冲回 C 大调"
+    );
+
     // 落盘：丢掉内存状态再读回来（等价于宿主重启）。
     crate::settings_store::test_support::simulate_restart();
     assert_eq!(
@@ -172,7 +193,94 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
     document.close();
 }
 
-/// 导出 MIDI 的收口：目标路径必须绝对、以 `.mid` 结尾，且目录已存在。
+/// 插件里的 Tempo Map **只保存音阶轴**：BPM / 拍号是宿主权威，不落盘。
+///
+/// 【为什么这条值得单测】Tempo Map 就是"随时间变化的音阶"的存储，而插件此前对它整组
+/// 回 `Command unavailable` —— 于是"音阶功能完整保留"这句话有一半是假的。反过来，
+/// 若连 BPM 一起收下，又会造出第二个 BPM 真相（宿主才是那个真相）。
+#[test]
+fn the_tempo_map_keeps_only_the_scale_axis() {
+    crate::settings_store::test_support::reset();
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let editor = owner.editor_session().unwrap();
+    let (reply, rx) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(32);
+    let sink = crate::editor::session::UiSink {
+        view_id: "tempo-map-diagnostic".into(),
+        reply,
+        events,
+        closed: Arc::new(AtomicBool::new(false)),
+    };
+    let call = |id, command: &str, args| {
+        editor
+            .enqueue(crate::editor::session::UiRequest {
+                id,
+                command: command.into(),
+                args,
+                sink: sink.clone(),
+                link: None,
+            })
+            .unwrap();
+        let response: Value = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response["value"].clone()
+    };
+    let point = |position: f64, key: &str| {
+        json!({
+            "id": format!("p{position}"),
+            "positionSec": position,
+            "bpm": 120.0,
+            "numerator": 4,
+            "denominator": 4,
+            "scale": {"key": key, "name": null, "notes": null},
+        })
+    };
+
+    // 前端形态：`{ tempoMap: [...] }`。
+    let payload = call(
+        1,
+        "set_timeline_tempo_map",
+        json!({"tempoMap": [point(0.0, "C"), point(4.0, "Gb")]}),
+    );
+    // 落盘的是**音阶轴**（两条），且没有 BPM 字段。
+    let stored = crate::settings_store::settings()
+        .plugin_musical_context
+        .scale_points;
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].key.as_deref(), Some("Gb"));
+    assert_eq!(stored[1].position_sec, 4.0);
+    // 响应本身就要反映新值：前端把响应当权威回声照单应用，陈旧回声会抹掉用户的编辑。
+    assert_eq!(payload["tempo_map"].as_array().map(Vec::len), Some(2));
+    // 生效：内核的时间线真的有两段音阶（而不只是设置里存了两条）。
+    assert_eq!(editor.timeline.lock().unwrap().scale_segments().len(), 2);
+
+    // 宿主权威字段以宿主为准：载荷带一个不同的 BPM/拍号时，音阶仍然保存、BPM 不保存。
+    let _ = call(
+        2,
+        "set_timeline_tempo_map",
+        json!({"tempoMap": [{
+            "id": "p0", "positionSec": 0.0,
+            "bpm": 999.0, "numerator": 7, "denominator": 8,
+            "scale": {"key": "D", "name": null, "notes": null},
+        }]}),
+    );
+    let stored = crate::settings_store::settings()
+        .plugin_musical_context
+        .scale_points;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].key.as_deref(), Some("D"));
+
+    // 清空 = 取消 Tempo Map，回到"无时变音阶"。
+    let payload = call(3, "set_timeline_tempo_map", json!({"tempoMap": null}));
+    assert!(crate::settings_store::settings()
+        .plugin_musical_context
+        .scale_points
+        .is_empty());
+    assert!(payload["tempo_map"].is_null());
+
+    document.close();
+}
 ///
 /// 【为什么值得单测】这是插件里少数几条会**写用户磁盘**的命令之一，路径校验就是它
 /// 唯一的边界 —— 两个调用点（时间线菜单、钢琴卷帘）都不会再校验一次。收口漏了，

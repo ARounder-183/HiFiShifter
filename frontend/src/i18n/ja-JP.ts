@@ -1347,7 +1347,9 @@ export const jaJP = {
     tempo_map: "テンポマップ",
     menu_view_tempo_map: "テンポマップ",
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
+    tempo_map_add_scale_point: "ここにスケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",
+    tempo_map_edit_scale_point: "このスケール変更点を編集...",
     tempo_map_delete_point: "この変更点を削除",
     tempo_map_delete_point_confirm:
         "この変更点を削除しますか？この位置のテンポ・拍子・スケールの変化がすべて削除されます。この操作は取り消せません。",

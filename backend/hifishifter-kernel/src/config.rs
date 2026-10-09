@@ -2751,6 +2751,70 @@ pub struct PluginMusicalContext {
     /// 自定义音阶（`use_custom_scale` 为真时生效）。
     #[serde(default)]
     pub custom_scale: Option<crate::project::CustomScale>,
+    /// 音阶变化点（Tempo Map 的**音阶轴**），按 `position_sec` 升序。
+    ///
+    /// 【为什么只存音阶轴】Tempo Map 的三个轴里，BPM 与拍号是**宿主权威**
+    /// （`render::transport` 从 VST3 进程上下文读，插件不写）；只有音阶是
+    /// HiFiShifter 自有的。把整份 Tempo Map 存进来会造出第二个 BPM 写入者。
+    ///
+    /// 【为什么不复用 `TempoPointData`】后者带 `bpm` / `numerator` / `denominator`
+    /// 三个宿主权威字段，复用等于承认"插件存了一份宿主真相"。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scale_points: Vec<PluginScalePoint>,
+}
+
+/// 一个音阶变化点：位置（秒）+ 该位置起的生效音阶。
+///
+/// 与 `TempoScaleData` 同形，但**不带**任何宿主权威字段（见
+/// [`PluginMusicalContext::scale_points`]）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginScalePoint {
+    /// 变化点位置（秒）；负值在规范化时钳到 0。
+    #[serde(default)]
+    pub position_sec: f64,
+    /// 内置音阶键（`SCALE_KEYS` 之一）。
+    #[serde(default)]
+    pub key: Option<String>,
+    /// 自定义音阶名（仅用于显示）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 自定义音阶音级集合（0..12）。
+    #[serde(default)]
+    pub notes: Option<Vec<u8>>,
+}
+
+impl PluginScalePoint {
+    /// 规范化为内核可消费的形式；无有效音阶内容时返回 `None`（该点被丢弃）。
+    ///
+    /// 钳制口径与 `TimelineState::normalize_tempo_map` 一致：位置不为负、
+    /// 音级取模 12 后排序去重。
+    pub fn normalized(&self) -> Option<Self> {
+        if !self.position_sec.is_finite() {
+            return None;
+        }
+        let key = self
+            .key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| crate::state::scale_notes_for_key(key).is_some())
+            .map(str::to_owned);
+        let notes = self.notes.as_ref().map(|notes| {
+            let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+            normalized.sort_unstable();
+            normalized.dedup();
+            normalized
+        });
+        if key.is_none() && notes.as_ref().is_none_or(Vec::is_empty) {
+            return None;
+        }
+        Some(Self {
+            position_sec: self.position_sec.max(0.0),
+            key,
+            name: self.name.clone().filter(|name| !name.trim().is_empty()),
+            notes,
+        })
+    }
 }
 
 impl Default for PluginMusicalContext {
@@ -2759,6 +2823,7 @@ impl Default for PluginMusicalContext {
             base_scale: "C".to_string(),
             use_custom_scale: false,
             custom_scale: None,
+            scale_points: Vec::new(),
         }
     }
 }

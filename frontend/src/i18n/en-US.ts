@@ -1467,7 +1467,9 @@ export const enUS = {
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
+    tempo_map_add_scale_point: "Add Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",
+    tempo_map_edit_scale_point: "Edit This Scale Change...",
     tempo_map_delete_point: "Delete This Point",
     tempo_map_delete_point_confirm:
         "Delete this Tempo Map point? The tempo, time-signature and scale changes at this position are removed. This cannot be undone.",

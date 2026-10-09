@@ -521,6 +521,256 @@ pub fn tempo_scale_data_from_project(p: &ProjectState) -> TempoScaleData {
     }
 }
 
+/// 插件自有的音乐上下文 + 宿主读数 → 时间线的音阶投影。
+///
+/// 【为什么需要这个纯函数】插件的 `TimelineState` 每次 ARA 重新认领都会被整体重建
+/// （`ara::mapping::ara_document_to_timeline` 只带 tracks/clips/bpm/project_sec），
+/// 于是 `project_scale_notes` 与 `tempo_map` 都退回默认值。插件自有的音阶必须在
+/// 每次重建后**重新播种**，本函数就是那份播种的纯函数形式 —— 放在内核里是为了
+/// 可独立单测，不必起一个 ARA 文档。
+///
+/// 返回 `(project_scale_notes, tempo_map)`：
+/// - `project_scale_notes` 总是有效（工程基准音阶，含自定义音阶）；
+/// - `tempo_map` 只在存在音阶变化点时给出。没有变化点就没有"随时间变化的音阶"，
+///   返回 `None` 让时间线保持无 Tempo Map 的原状（与插件此前行为一致）。
+///
+/// 点的 `bpm` / 拍号取**宿主读数**（插件只有一个标量，如实填同一组值）；
+/// 音阶取插件自有的变化点。宿主权威字段不来自调用方之外的任何地方。
+pub fn plugin_musical_projection(
+    musical: &crate::config::PluginMusicalContext,
+    host_bpm: f64,
+    host_numerator: u32,
+    host_denominator: u32,
+) -> (Vec<u8>, Option<Vec<TempoPointData>>) {
+    let base_notes = if musical.use_custom_scale {
+        musical
+            .custom_scale
+            .as_ref()
+            .map(|custom| custom.normalized().notes)
+            .filter(|notes| !notes.is_empty())
+            .unwrap_or_else(|| {
+                scale_notes_for_key(&musical.base_scale).unwrap_or_else(default_project_scale_notes)
+            })
+    } else {
+        scale_notes_for_key(&musical.base_scale).unwrap_or_else(default_project_scale_notes)
+    };
+
+    let mut points: Vec<(f64, TempoScaleData)> = musical
+        .scale_points
+        .iter()
+        .filter_map(|point| {
+            let point = point.normalized()?;
+            Some((
+                point.position_sec,
+                TempoScaleData {
+                    key: point.key,
+                    name: point.name,
+                    notes: point.notes,
+                },
+            ))
+        })
+        .collect();
+    if points.is_empty() {
+        return (base_notes, None);
+    }
+    // 先排序再去重：与 `normalize_tempo_map` 同一条理由 —— 乱序输入下相邻重复点
+    // 会破坏"位置严格递增"这条下游二分查找依赖的不变量。
+    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+
+    let bpm = if host_bpm.is_finite() && host_bpm > 0.0 {
+        host_bpm
+    } else {
+        120.0
+    };
+    let numerator = host_numerator.clamp(1, 32);
+    let denominator = if matches!(host_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+        host_denominator
+    } else {
+        4
+    };
+    let mut map: Vec<TempoPointData> = Vec::with_capacity(points.len() + 1);
+    // 【为什么 id 是确定性的】这份投影会被逐次重算并参与 `workspace_projection`
+    // 的哈希；用 `new_id`（随机 UUID）会让"内容没变"的两次投影哈希不同，于是
+    // `ensure_loaded` 的早退永远不成立 —— 每轮都整体重载并重渲染。
+    // 确定性 id 让"内容相同 ⇒ 哈希相同"成立，且对前端仍是唯一、稳定的键。
+    let point_id = |index: usize| format!("plugin-scale-{index}");
+    // 0 位置初始点即工程基准记录：**必须显式带拍号**（前端
+    // `effectiveTimeSignatures` 依赖它），并携带工程基准音阶。
+    if points[0].0 > 1e-9 {
+        map.push(TempoPointData {
+            id: point_id(0),
+            position_sec: 0.0,
+            bpm,
+            numerator: Some(numerator),
+            denominator: Some(denominator),
+            scale: Some(TempoScaleData {
+                key: key_for_scale_notes(&base_notes),
+                name: None,
+                notes: Some(base_notes.clone()),
+            }),
+        });
+    }
+    for (position_sec, scale) in points {
+        let id = point_id(map.len());
+        map.push(TempoPointData {
+            id,
+            position_sec,
+            bpm,
+            numerator: Some(numerator),
+            denominator: Some(denominator),
+            scale: Some(scale),
+        });
+    }
+    (base_notes, Some(map))
+}
+
+#[cfg(test)]
+mod plugin_musical_projection_tests {
+    use super::*;
+    use crate::config::{PluginMusicalContext, PluginScalePoint};
+
+    fn point(position_sec: f64, key: &str) -> PluginScalePoint {
+        PluginScalePoint {
+            position_sec,
+            key: Some(key.to_string()),
+            name: None,
+            notes: None,
+        }
+    }
+
+    /// 基准音阶必须真的落到渲染锚点上 —— 这正是"插件里音阶没生效"那条缺陷的判据。
+    #[test]
+    fn base_scale_reaches_project_scale_notes() {
+        let mut musical = PluginMusicalContext::default();
+        musical.base_scale = "Gb".to_string();
+        let (notes, map) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        assert_eq!(notes, scale_notes_for_key("Gb").unwrap());
+        assert!(
+            map.is_none(),
+            "no scale points means no tempo map (keep the plugin's default state)"
+        );
+    }
+
+    /// 自定义音阶开启时压过基准键名；这是插件里唯一能让"自定义音阶"生效的路径。
+    #[test]
+    fn custom_scale_wins_when_enabled() {
+        let mut musical = PluginMusicalContext::default();
+        musical.base_scale = "C".to_string();
+        musical.use_custom_scale = true;
+        musical.custom_scale = Some(crate::project::CustomScale {
+            id: "cs".to_string(),
+            name: "Whole tone".to_string(),
+            notes: vec![0, 2, 4, 6, 8, 10],
+        });
+        let (notes, _) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        assert_eq!(notes, vec![0, 2, 4, 6, 8, 10]);
+    }
+
+    /// 变化点必须产出一条以 0 位置初始点开头的 Tempo Map，宿主 BPM/拍号如实填在每个点上。
+    #[test]
+    fn scale_points_build_a_tempo_map_with_an_explicit_initial_point() {
+        let mut musical = PluginMusicalContext::default();
+        musical.scale_points = vec![point(4.0, "Gb")];
+        let (notes, map) = plugin_musical_projection(&musical, 96.0, 3, 4);
+        assert_eq!(notes, scale_notes_for_key("C").unwrap());
+        let map = map.expect("scale points must produce a tempo map");
+        assert_eq!(map.len(), 2);
+        // 0 位置初始点必须显式带拍号（前端 effectiveTimeSignatures 依赖它）。
+        assert_eq!(map[0].position_sec, 0.0);
+        assert_eq!(map[0].numerator, Some(3));
+        assert_eq!(map[0].denominator, Some(4));
+        assert_eq!(map[0].bpm, 96.0);
+        assert_eq!(
+            map[0].scale.as_ref().and_then(|scale| scale.key.as_deref()),
+            Some("C"),
+            "the initial point carries the project base scale"
+        );
+        assert_eq!(map[1].position_sec, 4.0);
+        assert_eq!(
+            map[1].scale.as_ref().and_then(|scale| scale.key.as_deref()),
+            Some("Gb")
+        );
+    }
+
+    /// 已经带 0 位置变化点时不再补初始点（否则同一位置两个点，破坏严格递增）。
+    #[test]
+    fn a_point_at_zero_is_not_duplicated() {
+        let mut musical = PluginMusicalContext::default();
+        musical.scale_points = vec![point(0.0, "D"), point(8.0, "A")];
+        let (_, map) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        let map = map.unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[0].position_sec, 0.0);
+        assert_eq!(map[1].position_sec, 8.0);
+    }
+
+    /// 无效点被丢弃、未知键名被拒；全部无效时退回"无 Tempo Map"。
+    #[test]
+    fn invalid_points_are_dropped() {
+        let mut musical = PluginMusicalContext::default();
+        musical.scale_points = vec![
+            PluginScalePoint {
+                position_sec: f64::NAN,
+                key: Some("C".to_string()),
+                name: None,
+                notes: None,
+            },
+            PluginScalePoint {
+                position_sec: 2.0,
+                key: Some("H".to_string()),
+                name: None,
+                notes: None,
+            },
+            PluginScalePoint {
+                position_sec: 3.0,
+                key: None,
+                name: None,
+                notes: Some(vec![]),
+            },
+        ];
+        let (_, map) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        assert!(map.is_none(), "no usable point means no tempo map");
+    }
+
+    /// **端到端**：投影出来的 Tempo Map 必须真的让 `scale_segments()` 产生两段 ——
+    /// 也就是"随时间变化的音阶"确实生效，而不只是数据摆在那里。
+    #[test]
+    fn the_projection_actually_drives_scale_segments() {
+        let mut musical = PluginMusicalContext::default();
+        musical.base_scale = "C".to_string();
+        musical.scale_points = vec![point(4.0, "Gb")];
+        let (notes, map) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        let mut timeline = TimelineState::default();
+        timeline.project_scale_notes = notes;
+        timeline.tempo_map = map;
+        let segments = timeline.scale_segments();
+        assert_eq!(segments.len(), 2, "one segment per effective scale");
+        assert_eq!(segments[0].0, 0.0);
+        assert_eq!(segments[0].1, scale_notes_for_key("C").unwrap());
+        assert_eq!(segments[1].0, 4.0);
+        assert_eq!(segments[1].1, scale_notes_for_key("Gb").unwrap());
+        // 音阶变了，渲染缓存键也必须跟着变（否则改音阶会命中旧缓存）。
+        let mut other = timeline.clone();
+        other.tempo_map = None;
+        assert_ne!(
+            timeline.render_scale_signature(),
+            other.render_scale_signature()
+        );
+    }
+
+    /// id 必须是确定性的：随机 id 会让 `workspace_projection` 每轮都变，
+    /// `ensure_loaded` 的早退永远不成立（每次回调都整体重载）。
+    #[test]
+    fn ids_are_deterministic() {
+        let mut musical = PluginMusicalContext::default();
+        musical.scale_points = vec![point(4.0, "Gb"), point(9.0, "A")];
+        let (_, first) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        let (_, second) = plugin_musical_projection(&musical, 120.0, 4, 4);
+        assert_eq!(first, second);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {

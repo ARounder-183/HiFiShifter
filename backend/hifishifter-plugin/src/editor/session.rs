@@ -1076,6 +1076,37 @@ impl EditorSession {
                 json!({"version":self.host_version.load(Ordering::Acquire)}),
             );
         }
+        // 文档级宿主音乐读数：Tempo Map 的音阶点需要它当**宿主轴**
+        // （0 位置点必须显式带拍号，每个点都要 BPM；见 `DocumentSession::host_meter`）。
+        // per-view 的 `timeline.bpm` / `project.beats_per_bar` 只服务 GUI 显示，
+        // 投影读的是这一份。
+        //
+        // 【为什么带阈值】读数每次回调都会来；不加阈值时浮点噪声会让投影缓存的键
+        // 每轮都变，进而让 `workspace_projection` 变化、`ensure_loaded` 早退失效 ——
+        // 变成"每次回调都整体重载"。
+        {
+            let mut meter = document.host_meter.lock().unwrap();
+            if let Some(tempo) = document.clock.tempo() {
+                if tempo.is_finite() && tempo > 0. && (meter.bpm - tempo).abs() > 1e-6 {
+                    meter.bpm = tempo;
+                }
+            }
+            if let Some((numerator, denominator)) = document.clock.time_signature() {
+                let numerator = (numerator as u32).clamp(1, 32);
+                let denominator = (denominator as u32).clamp(1, 32);
+                // 与 `normalize_tempo_map` 同口径地夹取分母，不让宿主读数的越界值
+                // 进入 Tempo Map。
+                let denominator = if matches!(denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                    denominator
+                } else {
+                    4
+                };
+                if meter.numerator != numerator || meter.denominator != denominator {
+                    meter.numerator = numerator;
+                    meter.denominator = denominator;
+                }
+            }
+        }
     }
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
     pub(super) fn check_source(&self, path: &str) -> Result<(), String> {

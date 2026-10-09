@@ -76,18 +76,20 @@ export function canSelectHostFadeShape(): boolean {
 }
 
 /**
- * 速度映射（BPM / 拍号 / 音阶变化点）能否编辑。
+ * 速度映射的 **BPM / 拍号轴**能否编辑。
  *
- * 【插件里为什么不能】两条独立的原因叠在一起，任一条都足够：
- * 1. 写入命令 `set_timeline_tempo_map` 在插件里不被支持 —— 那里的 BPM 与拍号是
- *    **宿主权威**（`render::transport` 从 VST3 进程上下文读，插件不写）；
- * 2. 也没有"从宿主自动匹配一份"这条路：实测 REAPER **不向 ARA 插件提供**速度 /
- *    拍号内容（`probe/ara/README.md` 的 F-2），所以连只读来源都没有。
+ * 【为什么插件里不成立】两者都是**宿主权威**：BPM 与拍号经 VST3 进程上下文读入
+ * （`render::transport` 的 `tempo()` / `time_signature()`），插件只读不写。
+ * 界面必须把这两个字段显示成只读并说明原因，而不是让用户改完才发现被覆盖。
  *
- * 于是插件里的速度映射编辑只能是一组"点了没反应"的死控件（提交被拒、快照回滚），
- * 照 `menu_clear_waveform_cache` 的既有做法整组禁用并说明原因。
+ * 【为什么音阶轴不需要对应的函数】Tempo Map 不是"一组宿主参数的编辑器"，它是
+ * **随时间变化的音阶**的存储：`TempoPointData.scale` 就是音阶覆盖，
+ * `TimelineState::scale_segments()` 由它产出逐段的生效音阶，渲染缓存键
+ * （`scale-signature`）与子轨级数渲染都锚定它。音阶是 HiFiShifter 自有的
+ * （REAPER 没有工程调号概念），因此在插件里**永远**可编辑 —— 一个恒真的闸门只是噪声，
+ * 所以速度映射的菜单组与按钮在插件里照常渲染，只有 BPM/拍号字段是只读的。
  */
-export function canEditTempoMap(): boolean {
+export function canEditTempoMapTempo(): boolean {
     return !isPluginMode();
 }
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */

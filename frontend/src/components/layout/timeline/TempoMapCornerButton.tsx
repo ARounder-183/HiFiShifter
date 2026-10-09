@@ -19,7 +19,6 @@ import {
     setTempoMapVisible,
 } from "../../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../../features/session/thunks/tempoMapThunks";
-import { isPluginMode } from "../../../services/hostCapabilities";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     clampBpm,
@@ -153,14 +152,15 @@ export const TempoMapCornerButton: React.FC = () => {
     }, [dispatch]);
 
     /*
-     * 【插件里为什么整块不渲染】这个按钮做两件事：显示速度映射、并在没有 Tempo Map 时
-     * 给工程建一个。插件里两件都不成立 —— BPM / 拍号是**宿主权威**（`canEditTempoMap`），
-     * 写入命令 `set_timeline_tempo_map` 不被支持：点下去只会得到一条被拒绝的错误
-     * （`错误：Rejected`，用户反馈过）。宿主窗口本来就窄，所以整块不渲染，而不是留一个
-     * 按不动的按钮占位。
+     * 插件里照常渲染。
+     *
+     * 【为什么撤销"整块不渲染"】这个按钮做两件事：显示速度映射、并在没有 Tempo Map 时
+     * 建一个（只含 0 位置初始点 = 工程基准记录）。上一轮按模式整块隐藏，理由是"BPM /
+     * 拍号是宿主权威 + 写入命令不被支持"。现在插件实现了 `set_timeline_tempo_map`
+     * 且**只接受音阶轴**，于是两件事都成立：建出来的初始点携带的是**插件自有的音阶**，
+     * 而 BPM/拍号在对话框里只读（`canEditTempoMapTempo`）。Tempo Map 本就是"随时间变化的
+     * 音阶"的存储，把它藏起来等于砍掉音阶功能的一半。
      */
-    if (isPluginMode()) return null;
-
     return (
         <>
             <button

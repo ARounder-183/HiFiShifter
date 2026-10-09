@@ -3407,6 +3407,11 @@ impl ExtensionOwner {
         if let Some(tempo) = document.clock.tempo() {
             timeline.bpm = tempo;
         }
+        // 【为什么这里也要播种音阶】渲染路径**不经过** `workspace_timeline_locked`
+        // 的 clip 分支：它克隆原始 ARA 时间线后只借用后者的 `tracks`。所以只在
+        // `workspace_timeline_locked` 里播种，渲染拿到的仍是默认 C 大调 ——
+        // 正是"界面显示 Gb、内核按 C 渲染"那条缺陷。
+        document.project_plugin_musical_context_locked(&mut timeline);
         timeline.clips.retain(|clip| ids.contains(&clip.id));
         // 被分配了 sequence、当前却没有 clip 的轨道仍然留下：空 folder 轨、只有静音
         // item 或 PCM 尚未授权的子轨都属此类，而它们本该是**参数根** —— 与

@@ -1296,7 +1296,9 @@ export const zhCN = {
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
     tempo_map_add_point: "在此添加速度/拍号/音阶变化...",
+    tempo_map_add_scale_point: "在此添加音阶变化点...",
     tempo_map_edit_point: "编辑此变化点...",
+    tempo_map_edit_scale_point: "编辑此音阶变化点...",
     tempo_map_delete_point: "删除此变化点",
     tempo_map_delete_point_confirm:
         "删除此变化点？该位置的速度、拍号与音阶变化都会被移除。此操作无法撤销。",

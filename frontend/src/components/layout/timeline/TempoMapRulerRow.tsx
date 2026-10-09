@@ -10,6 +10,7 @@ import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
 import { anchoredDeltaSec } from "./runtime/dragAnchor";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
+import { canEditTempoMapTempo, dawControlledReason } from "../../../services/hostCapabilities";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
     clampBpm,
@@ -192,6 +193,12 @@ function TempoPointDialog({
 }: TempoPointDialogProps) {
     // 对话框通过 key 重挂载来复位表单状态（打开新点时由父组件更换 key）。
     const [bpmText, setBpmText] = useState(() => (point ? formatTempoBpm(point.bpm) : "120"));
+    /**
+     * BPM / 拍号是**宿主权威**（插件里只读）：两者经 VST3 进程上下文读入，
+     * 插件不写。音阶字段不受影响 —— 那一轴是 HiFiShifter 自有的。
+     */
+    const tempoEditable = canEditTempoMapTempo();
+    const tempoReadOnlyReason = tempoEditable ? undefined : dawControlledReason();
     // 拍号：跟随之前的拍号时，输入框展示“上一变化点实际生效”的拍号（禁用态）。
     // 初始点即工程基准记录，必须显式携带拍号，不能跟随。
     const [sigFollow, setSigFollow] = useState(() =>
@@ -386,6 +393,8 @@ function TempoPointDialog({
                             size="1"
                             ref={bpmRef}
                             value={bpmText}
+                            disabled={!tempoEditable}
+                            data-tooltip={tempoReadOnlyReason}
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                 setBpmText(e.target.value)
                             }
@@ -403,9 +412,10 @@ function TempoPointDialog({
                             size="1"
                             ref={numRef}
                             value={numText}
-                            disabled={sigFollow}
+                            disabled={sigFollow || !tempoEditable}
+                            data-tooltip={tempoReadOnlyReason}
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                                if (sigFollow) return;
+                                if (sigFollow || !tempoEditable) return;
                                 setNumText(e.target.value);
                             }}
                             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -417,9 +427,9 @@ function TempoPointDialog({
                         <Select.Root
                             size="1"
                             value={String(denominator)}
-                            disabled={sigFollow}
+                            disabled={sigFollow || !tempoEditable}
                             onValueChange={(v) => {
-                                if (sigFollow) return;
+                                if (sigFollow || !tempoEditable) return;
                                 setDenominator(Number(v) || 4);
                             }}
                         >
@@ -434,13 +444,22 @@ function TempoPointDialog({
                         </Select.Root>
                     </Flex>
                 </AppField>
+                {/* 只读原因必须写出来：否则"改不动"看起来像 bug，而不是宿主权威。 */}
+                {!tempoEditable && (
+                    <span className="hs-type-caption" style={{ marginTop: -8 }}>
+                        {tempoReadOnlyReason}
+                    </span>
+                )}
                 {!isFirst ? (
                     <Flex gap="2" align="center" style={{ marginTop: -8 }}>
                         <Checkbox
                             size="1"
                             checked={sigFollow}
-                            disabled={isFirst}
-                            onCheckedChange={(checked) => setSigFollow(checked === true)}
+                            disabled={isFirst || !tempoEditable}
+                            onCheckedChange={(checked) => {
+                                if (!tempoEditable) return;
+                                setSigFollow(checked === true);
+                            }}
                         />
                         <span className="hs-type-caption">
                             {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})

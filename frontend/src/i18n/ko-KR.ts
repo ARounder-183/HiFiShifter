@@ -1400,7 +1400,9 @@ export const koKR = {
     tempo_map: "템포 맵",
     menu_view_tempo_map: "템포 맵",
     tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가...",
+    tempo_map_add_scale_point: "여기에 스케일 변경 추가...",
     tempo_map_edit_point: "이 변경점 편집...",
+    tempo_map_edit_scale_point: "이 스케일 변경점 편집...",
     tempo_map_delete_point: "이 변경점 삭제",
     tempo_map_delete_point_confirm:
         "이 변경점을 삭제할까요? 이 위치의 템포, 박자표, 스케일 변경이 모두 제거됩니다. 이 작업은 되돌릴 수 없습니다.",

@@ -14,7 +14,7 @@ import type { ScaleLike } from "../../../utils/musicalScales.ts";
 import { SCALE_LABELS } from "../../../utils/musicalScales.ts";
 import type { CustomScalePreset } from "../../../utils/customScales.ts";
 import type { TempoMap } from "../../../utils/tempoMap.ts";
-import { canEditTempoMap } from "../../../services/hostCapabilities";
+import { isPluginMode } from "../../../services/hostCapabilities";
 import {
     computeTempoFloatingLabelState,
     effectiveScaleAtSec,
@@ -385,49 +385,48 @@ function TimeRulerContextMenu({
     // 悬停无反应）。此前用 `disabled: true` 冒充 —— 那对屏幕阅读器是"一个禁用的
     // 菜单项"、对键盘是不可达项，语义是错的，也和文件浏览器菜单的同类标题
     // 长得不一样。
-    // 【插件里为什么整组不渲染】理由集中在
-    // [`canEditTempoMap`](../../../../services/hostCapabilities.ts)：写入口不被支持，
-    // 宿主又不提供可匹配的速度内容。所以整组（含分区标题）都不出现 —— 宿主窗口本来就
-    // 窄，一串永远点不动的菜单项只是噪声。菜单其余部分（时间单位、复制播放头时间、
-    // 显示设置）与速度映射无关，照常保留。
-    const tempoEditable = canEditTempoMap();
+    //
+    // 【插件里为什么照常渲染】Tempo Map 是**随时间变化的音阶**的存储，而音阶是
+    // HiFiShifter 自有的（REAPER 没有工程调号概念）。这一组（加/编辑/删除/清除变化点）
+    // 在插件里全部成立 —— 只有 BPM/拍号字段是宿主权威、在对话框里只读
+    // （见 `canEditTempoMapTempo`）。此前整组隐藏的理由（"写入命令不被支持 + 宿主不提供
+    // 速度内容"）已经随插件实现 `set_timeline_tempo_map` 而消失。
+    const scaleOnly = isPluginMode();
     const items: AppMenuItemSpec[] = [
-        ...(tempoEditable
-            ? ([
-                  { key: "tempoMapHeader", label: t("tempo_map"), heading: true },
+        { key: "tempoMapHeader", label: t("tempo_map"), heading: true },
+        {
+            key: "addTempoPoint",
+            label: scaleOnly ? t("tempo_map_add_scale_point") : t("tempo_map_add_point"),
+            onSelect: () => onAddTempoPointAt(clickedSec, null),
+        },
+        ...(nearPoint
+            ? [
                   {
-                      key: "addTempoPoint",
-                      label: t("tempo_map_add_point"),
-                      onSelect: () => onAddTempoPointAt(clickedSec, null),
-                  },
-                  ...(nearPoint
-                      ? [
-                            {
-                                key: "editTempoPoint",
-                                label: t("tempo_map_edit_point"),
-                                onSelect: () => onEditTempoPoint(nearPoint.point.id),
-                            } satisfies AppMenuItemSpec,
-                        ]
-                      : []),
-                  ...(nearPoint && !nearPoint.isFirst
-                      ? [
-                            {
-                                key: "deleteTempoPoint",
-                                label: t("tempo_map_delete_point"),
-                                onSelect: () => onDeleteTempoPoint(nearPoint.point.id),
-                            } satisfies AppMenuItemSpec,
-                        ]
-                      : []),
-                  ...(hasMap
-                      ? [
-                            {
-                                key: "clearTempoMap",
-                                label: t("tempo_map_clear_all"),
-                                onSelect: () => onClearTempoMap(),
-                            } satisfies AppMenuItemSpec,
-                        ]
-                      : []),
-              ] satisfies AppMenuItemSpec[])
+                      key: "editTempoPoint",
+                      label: scaleOnly
+                          ? t("tempo_map_edit_scale_point")
+                          : t("tempo_map_edit_point"),
+                      onSelect: () => onEditTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(nearPoint && !nearPoint.isFirst
+            ? [
+                  {
+                      key: "deleteTempoPoint",
+                      label: t("tempo_map_delete_point"),
+                      onSelect: () => onDeleteTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(hasMap
+            ? [
+                  {
+                      key: "clearTempoMap",
+                      label: t("tempo_map_clear_all"),
+                      onSelect: () => onClearTempoMap(),
+                  } satisfies AppMenuItemSpec,
+              ]
             : []),
         {
             key: "primaryHeader",

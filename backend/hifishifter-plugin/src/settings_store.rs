@@ -102,13 +102,25 @@ pub fn settings() -> UiSettings {
     with_state(|state| state.settings.clone())
 }
 
+/// 设置代次：每次写入自增。
+///
+/// 【为什么需要】热路径（每次 `workspace_timeline_locked`）都要读"插件自有的音乐
+/// 上下文"，而 `settings()` 会克隆整份 `UiSettings`（字段很多）。用一个原子代次
+/// 做缓存戳，命中时只付一次原子读的代价。
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 当前设置代次；与 [`save_settings_patch`] 的写入一一对应。
+pub fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// 应用一份**部分**设置补丁并落盘。
 ///
 /// 合并语义沿用独立 App 的一层深合并（`hifishifter_kernel::editor::settings::merge`）：
 /// 前端一次只发变更字段，按顶层键整体替换会让未发送的兄弟字段回落到默认值 ——
 /// 用户改一个开关就会丢掉一批设置。
 pub fn save_settings_patch(patch: &serde_json::Value) -> Result<UiSettings, String> {
-    with_state(|state| {
+    let result = with_state(|state| {
         let base = serde_json::to_value(&state.settings).map_err(|e| e.to_string())?;
         let merged = hifishifter_kernel::editor::settings::merge(base, patch);
         let next: UiSettings =
@@ -118,7 +130,11 @@ pub fn save_settings_patch(patch: &serde_json::Value) -> Result<UiSettings, Stri
         // 下发到进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略）。
         hifishifter_kernel::ui_settings_apply::apply(&state.settings);
         Ok(state.settings.clone())
-    })
+    });
+    if result.is_ok() {
+        REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    result
 }
 
 /// 全部前端偏好（前端启动时一次性取走，用于灌进内存缓存）。

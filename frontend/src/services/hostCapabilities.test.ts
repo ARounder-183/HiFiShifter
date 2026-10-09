@@ -13,7 +13,7 @@ import {
     canImportMidiAsClip,
     canEditHostFadeAxes,
     canSelectHostFadeShape,
-    canEditTempoMap,
+    canEditTempoMapTempo,
     hostFadeAxes,
     dawControlledReason,
 } from "./hostCapabilities";
@@ -168,20 +168,24 @@ test("fade shape editing follows the host axis generation instead of one blanket
 });
 
 /**
- * 速度映射编辑在插件里整组不可用：写入命令不被支持，宿主也不提供可匹配的速度内容
- * （`probe/ara/README.md` 的 F-2 实测 REAPER 不向 ARA 插件发速度 / 拍号内容）。
- * 独立 App 里它自己的速度映射一直是可编辑的。
+ * 速度映射**按轴**切分，不按功能整组切。
+ *
+ * 【为什么音阶轴在插件里必须可用】Tempo Map 是"随时间变化的音阶"的存储
+ * （`TempoPointData.scale`），音阶又是 HiFiShifter 自有的（REAPER 没有工程调号概念）。
+ * 整组按模式隐藏 = 砍掉音阶功能的一半。
+ *
+ * 【为什么 BPM/拍号轴仍不可编辑】两者是宿主权威（VST3 进程上下文只读）。
  */
-test("tempo map editing is standalone-only, for two independent reasons", () => {
+test("tempo map splits by axis: BPM/time signature stay host-owned in the plugin", () => {
     window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tempo", clipEditing: true };
-    expect(canEditTempoMap()).toBe(false);
-    // 与淡化轴能力正交：宿主轴再清楚也不放行速度映射。
+    expect(canEditTempoMapTempo()).toBe(false);
+    // 与淡化轴能力正交：宿主轴再清楚也不放行 BPM/拍号。
     window.__HFS_PLUGIN_BOOTSTRAP__.fadeAxes = "legacy";
     expect(canEditHostFadeAxes()).toBe(true);
-    expect(canEditTempoMap()).toBe(false);
+    expect(canEditTempoMapTempo()).toBe(false);
 
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
-    expect(canEditTempoMap()).toBe(true);
+    expect(canEditTempoMapTempo()).toBe(true);
 });
 
 test("dawControlledReason follows the current locale instead of freezing at module load", () => {

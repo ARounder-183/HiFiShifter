@@ -208,6 +208,27 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
     session.notify_timeline();
     Ok(result)
 }
+
+/// 插件自有音乐上下文（基准音阶 / 自定义音阶 / 音阶变化点）变化后的统一收尾。
+///
+/// 【为什么两件事必须一起做】
+/// 1. **立刻投影到 GUI 时间线**：`payload()` 读的是 `session.timeline`，而它要到下一次
+///    `ensure_loaded` 才重建。不投影的话，本命令的**响应**会带着旧的 `project_scale_notes`
+///    / `tempo_map`，而前端把响应当权威回声照单应用（`applyTimelineState` 在
+///    `tempo_map !== undefined` 时无条件覆盖），用户刚提交的改动会被自己的回声抹掉。
+/// 2. **让在途渲染作废**：音阶进渲染缓存键（`scale-signature`），与
+///    `refresh_reaper_geometry` 处理 fade 变化是同一条理由。
+///
+/// 投影本身是**派生**的（真相在 `settings_store`），所以这里写 `session.timeline`
+/// 不违反"派生物会被重建"那条纪律 —— 它会在每次重建后由
+/// `project_plugin_musical_context_locked` 重新算出来。
+fn after_musical_context_write(session: &EditorSession) {
+    let Some(document) = session.document.upgrade() else {
+        return;
+    };
+    document.project_plugin_musical_context_locked(&mut session.timeline.lock().unwrap());
+    document.render_epoch.fetch_add(1, Ordering::AcqRel);
+}
 fn peaks(
     session: &EditorSession,
     path: &str,
@@ -531,6 +552,7 @@ pub(super) fn dispatch(
                     "useCustomScale": false,
                 }
             }))?;
+            after_musical_context_write(session);
             after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
@@ -550,7 +572,91 @@ pub(super) fn dispatch(
                     "customScale": normalized,
                 }
             }))?;
+            after_musical_context_write(session);
             after_write(session, json!({"ok":true}))?;
+            payload(session, true)
+        }
+        // Tempo Map：插件里**只接受音阶轴**。
+        //
+        // 【为什么不能整组拒绝】Tempo Map 就是"随时间变化的音阶"的存储
+        // （`TempoPointData.scale`），而 ActionBar 的基准音阶选择器在有 Tempo Map 时
+        // 写的就是变化点。整组拒绝 = 插件里没有时变音阶 —— 音阶功能被砍掉一半。
+        //
+        // 【为什么 BPM/拍号要拒】它们是**宿主权威**（`render::transport` 从 VST3
+        // 进程上下文读，插件不写）。接受写入就会造出第二个 BPM 真相。
+        // 拒绝时给**明确原因**，不是 `Rejected` / `Command unavailable`。
+        //
+        // 【为什么只落盘、不写 session.timeline】`session.timeline` 是派生物，会被
+        // `ensure_loaded` 与 ARA 重新认领整体替换。音阶的真相在设置里，由
+        // `workspace_timeline_locked` 每轮重新播种（见
+        // `DocumentSession::project_plugin_musical_context_locked`）。
+        "set_timeline_tempo_map" => {
+            // 前端形态是 `{ tempoMap: [...] | null }`；也接受裸数组/null，
+            // 免得换一种调用形态就变成"命令不可用"。
+            let raw = match input {
+                Value::Object(_) => input.get("tempoMap").cloned().unwrap_or(Value::Null),
+                other => other,
+            };
+            let points: Vec<hifishifter_kernel::models::TempoPointPayload> = match raw {
+                Value::Null => Vec::new(),
+                value => serde_json::from_value(value)
+                    .map_err(|_| "invalid tempo map payload".to_string())?,
+            };
+            let (host_bpm, host_numerator, host_denominator) = {
+                let timeline = session.timeline.lock().unwrap();
+                let project = session.project.lock().unwrap();
+                (
+                    timeline.bpm,
+                    project.beats_per_bar,
+                    project.time_signature_denominator,
+                )
+            };
+            // 宿主权威字段**以宿主为准**（载荷里带的 BPM/拍号一律不采信）。
+            //
+            // 【为什么是"覆盖"而不是"拒绝"】界面在插件里把 BPM/拍号显示成只读，
+            // 所以载荷里这两个值本来就只是"上一次后端发的读数"。宿主在用户编辑期间
+            // 改了速度时，两者会短暂不等 —— 此时拒绝会让**用户真正想改的音阶**一起
+            // 丢失（前端会回滚整份 Tempo Map）。覆盖则只丢一个本就不该由插件持有的值。
+            // 差异如实记一行日志，不做静默吞掉。
+            let coerced = points.iter().any(|point| {
+                (point.bpm - host_bpm).abs() > 1e-6
+                    || point
+                        .numerator
+                        .is_some_and(|numerator| numerator != host_numerator)
+                    || point
+                        .denominator
+                        .is_some_and(|denominator| denominator != host_denominator)
+            });
+            if coerced {
+                crate::log_line(&format!(
+                    "[ara] tempo map: host-authoritative BPM/time signature override \
+                     (payload carried a value differing from host {host_bpm}/{host_numerator}\
+                     /{host_denominator}); the plugin stores the scale axis only"
+                ));
+            }
+            let scale_points: Vec<hifishifter_kernel::config::PluginScalePoint> = points
+                .iter()
+                .filter_map(|point| {
+                    let scale = point.scale.as_ref()?;
+                    Some(hifishifter_kernel::config::PluginScalePoint {
+                        position_sec: point.position_sec,
+                        key: scale.key.clone(),
+                        name: scale.name.clone(),
+                        notes: scale.notes.clone(),
+                    })
+                })
+                .collect();
+            // 幂等：内容没变就不写、不触发重载（一次编辑不该产生两次撤销步/两次重渲染）。
+            let current = crate::settings_store::settings()
+                .plugin_musical_context
+                .scale_points;
+            if current != scale_points {
+                crate::settings_store::save_settings_patch(&json!({
+                    "pluginMusicalContext": { "scalePoints": scale_points }
+                }))?;
+                after_musical_context_write(session);
+                after_write(session, json!({"ok":true}))?;
+            }
             payload(session, true)
         }
         "get_timeline_state_lite" => payload(session, true),

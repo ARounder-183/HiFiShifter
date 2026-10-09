@@ -1,10 +1,11 @@
 /*
- * 插件模式下的"速度映射"小按钮。
+ * "速度映射"小按钮在两种模式下都渲染。
  *
- * 【要钉死什么】这个按钮做两件事：显示速度映射、并在没有 Tempo Map 时给工程建一个。
- * 插件里两件都不成立 —— BPM / 拍号是宿主权威，写入命令 `set_timeline_tempo_map` 不被
- * 支持，点下去只会得到一条被拒绝的错误（用户报障：`错误：Rejected`）。宿主窗口窄，
- * 所以整块**不渲染**，而不是留一个按不动的按钮占位。
+ * 【要钉死什么】这个按钮做两件事：显示速度映射、并在没有 Tempo Map 时建一个
+ * （只含 0 位置初始点 = 工程基准记录）。两件事在插件里都成立 —— Tempo Map 是
+ * "随时间变化的音阶"的存储，音阶是 HiFiShifter 自有的；插件实现了
+ * `set_timeline_tempo_map` 且只接受音阶轴，BPM/拍号在对话框里只读。
+ * 上一轮"插件里整块不渲染"的决定已随写入命令落地而撤销。
  */
 // @vitest-environment jsdom
 import { act } from "react";
@@ -83,8 +84,11 @@ test("standalone keeps the tempo-map corner button", async () => {
     expect(container.querySelector("button")?.dataset.tooltip).toBe(enUS.tempo_map_show_tooltip);
 });
 
-test("plugin mode renders nothing: the write command is not supported there", async () => {
+test("plugin mode also keeps the corner button", async () => {
     window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tempo-corner" };
     await render();
-    expect(container.querySelector("button")).toBeNull();
+    // Tempo Map 是"随时间变化的音阶"的存储，而音阶是 HiFiShifter 自有的 ——
+    // 插件里这个按钮照常可用（BPM/拍号在对话框里只读，见 canEditTempoMapTempo）。
+    expect(container.querySelector("button")).not.toBeNull();
+    expect(container.querySelector("button")?.dataset.tooltip).toBe(enUS.tempo_map_show_tooltip);
 });

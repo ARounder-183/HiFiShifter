@@ -627,6 +627,47 @@ impl DocumentSession {
             }
         }
     }
+    /// 插件自有的音阶投影：把 `PluginMusicalContext` 播种到时间线上。
+    ///
+    /// 【为什么必须每次重建后做】`ara::mapping::ara_document_to_timeline` 只从
+    /// tracks/clips/bpm/project_sec 重建 `TimelineState`，`project_scale_notes` 与
+    /// `tempo_map` 都不在其中 —— 不播种就等于"用户选了 Gb、内核按 C 渲染"，
+    /// 且渲染缓存键（`scale-signature`）也一起错。这与
+    /// [`Self::project_host_mutes_locked`] 是同一条纪律：**插件自有的、会影响渲染的
+    /// 状态，每次重建后重新投影，而不是指望它留在时间线上**。
+    ///
+    /// 【为什么用缓存】本函数在每次 `workspace_timeline_locked` 里跑（渲染与 GUI
+    /// 两条路径都经过它），而 `settings()` 会克隆整份 `UiSettings`。命中缓存时
+    /// 只付一次原子读 + 一次互斥。
+    pub(crate) fn project_plugin_musical_context_locked(&self, timeline: &mut TimelineState) {
+        let key = crate::render::document::MusicalProjectionKey::new(
+            crate::settings_store::revision(),
+            *self.host_meter.lock().unwrap(),
+        );
+        let mut cache = self.musical_projection.lock().unwrap();
+        if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
+            let musical = crate::settings_store::settings().plugin_musical_context;
+            let meter = *self.host_meter.lock().unwrap();
+            let (project_scale_notes, tempo_map) =
+                hifishifter_kernel::state::plugin_musical_projection(
+                    &musical,
+                    meter.bpm,
+                    meter.numerator,
+                    meter.denominator,
+                );
+            *cache = Some((
+                key,
+                crate::render::document::PluginMusicalProjection {
+                    project_scale_notes,
+                    tempo_map,
+                },
+            ));
+        }
+        if let Some((_, projection)) = cache.as_ref() {
+            timeline.project_scale_notes = projection.project_scale_notes.clone();
+            timeline.tempo_map = projection.tempo_map.clone();
+        }
+    }
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
     pub(crate) fn ui_fade_projection(&self) -> Result<(u64, TimelineState), String> {
         let _transaction = self.transaction.lock().unwrap();
@@ -690,6 +731,7 @@ impl DocumentSession {
             .ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| clips.contains(&clip.id));
         self.project_host_mutes_locked(&mut timeline);
+        self.project_plugin_musical_context_locked(&mut timeline);
         let mut tracks = timeline
             .clips
             .iter()

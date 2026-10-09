@@ -1298,7 +1298,9 @@ export const zhTW = {
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
     tempo_map_add_point: "在此新增速度/拍號/音階變化...",
+    tempo_map_add_scale_point: "在此新增音階變化點...",
     tempo_map_edit_point: "編輯此變化點...",
+    tempo_map_edit_scale_point: "編輯此音階變化點...",
     tempo_map_delete_point: "刪除此變化點",
     tempo_map_delete_point_confirm:
         "刪除此變化點？該位置的速度、拍號與音階變化都會被移除。此操作無法復原。",

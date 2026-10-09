@@ -82,7 +82,65 @@ pub(crate) struct DocumentSession {
     pub clock: Arc<super::transport::TransportClock>,
     pub playback: Mutex<Option<ara2_bridge::plugin::PlaybackRequestHandle>>,
     pub host_undo: crate::host::undo::HostUndo,
+    /// 宿主 BPM / 拍号读数（VST3 进程上下文）。
+    ///
+    /// 【为什么记在文档上】Tempo Map 的音阶点需要宿主轴：0 位置点**必须**显式带拍号
+    /// （前端 `effectiveTimeSignatures` 依赖它），每个点都要 BPM。而音阶投影在
+    /// `workspace_timeline_locked` 里跑（`DocumentSession` 上），那里读不到
+    /// per-view 的 `ProjectState`。
+    pub host_meter: Mutex<HostMeter>,
+    /// 插件自有音乐上下文的投影缓存，键是"输入代次"（见
+    /// [`DocumentSession::project_plugin_musical_context_locked`]）。
+    pub musical_projection: Mutex<Option<(MusicalProjectionKey, PluginMusicalProjection)>>,
     editor: OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
+}
+
+/// 宿主音乐读数的快照；默认 120 BPM 4/4（与 `TimelineState::default` 同口径）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HostMeter {
+    pub bpm: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl Default for HostMeter {
+    fn default() -> Self {
+        Self {
+            bpm: 120.0,
+            numerator: 4,
+            denominator: 4,
+        }
+    }
+}
+
+/// 音阶投影缓存的键：设置代次 + 宿主音乐读数。
+///
+/// 【为什么宿主读数也在键里】BPM/拍号变化不经过设置写入，只看设置代次会让
+/// Tempo Map 的宿主轴停在旧读数上。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MusicalProjectionKey {
+    settings: u64,
+    bpm_bits: u64,
+    numerator: u32,
+    denominator: u32,
+}
+
+impl MusicalProjectionKey {
+    pub(crate) fn new(settings: u64, meter: HostMeter) -> Self {
+        Self {
+            settings,
+            bpm_bits: meter.bpm.to_bits(),
+            numerator: meter.numerator,
+            denominator: meter.denominator,
+        }
+    }
+}
+
+/// 插件自有音阶在时间线上的投影结果。
+#[derive(Clone, Debug)]
+pub(crate) struct PluginMusicalProjection {
+    pub project_scale_notes: Vec<u8>,
+    pub tempo_map: Option<Vec<hifishifter_kernel::state::TempoPointData>>,
 }
 
 #[cfg(test)]
@@ -228,11 +286,22 @@ impl DocumentSession {
     ) -> Result<String, String> {
         let mut timeline = self.workspace_timeline_locked()?;
         edits.apply(&mut timeline);
+        // 【为什么音阶也在指纹里】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退
+        // （`editor/session.rs:819-843`）。音阶与音阶变化点都是**会影响渲染结果**的
+        // 插件自有状态（`scale-signature` 进渲染缓存键），却不在版本号里 —— 不进指纹
+        // 就会出现"改了音阶，早退成立，于是既不重载也不重渲染"。与 `fades` 同列，
+        // 理由相同。
+        //
+        // 【为什么可以整体哈希】音阶点的 id 是确定性的（见
+        // `plugin_musical_projection`），宿主读数带 1e-6 阈值，所以"内容没变 ⇒
+        // 指纹相同"成立，不会造成每轮重载。
         let bytes = serde_json::to_vec(&(
             timeline.params_by_root_track,
             timeline.tracks,
             &edits.fades,
             &edits.groups,
+            &timeline.project_scale_notes,
+            &timeline.tempo_map,
         ))
         .map_err(|e| e.to_string())?;
         Ok(format!(
