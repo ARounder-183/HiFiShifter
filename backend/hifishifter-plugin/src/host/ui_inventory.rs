@@ -475,4 +475,100 @@ mod tests {
         assert_eq!(active, Some(clip.takes[0].id.as_str()));
         document.close();
     }
+
+    /// ARA 已授权的那个 take 在清单重建后必须保住授权媒体。
+    ///
+    /// 【为什么这条测试存在】清单重建从宿主元数据造 take，而宿主元数据按设计不带
+    /// `source_path`；重建后 `normalize_takes()` 会把 active take 物化到扁平投影上。
+    /// 若不把授权媒体搬过去，每个 ARA 片段都会掉进"等待宿主音频"的斜纹占位。
+    #[test]
+    fn an_authorized_take_keeps_its_media_through_inventory_rebuild() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let active_take = track.items[0].geometry.take_id.clone();
+        let document = crate::render::document::DocumentSession::new(9876);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        // ARA 侧认领了该 item，并记下了授权那一刻的 active take GUID。
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, item_id.clone());
+        document
+            .authorized_takes
+            .lock()
+            .unwrap()
+            .insert(7, active_take.clone());
+        // 时间线上已有该 clip（ARA 身份 + 授权媒体），但 take 身份还是 ARA 自己的命名。
+        let mut timeline: hifishifter_kernel::state::TimelineState =
+            serde_json::from_value(serde_json::json!({
+                "tracks":[{"id":"ui-host-track","name":"T","order":0}],
+                "bpm":120.,"project_sec":1.,
+                "clips":[{"id":format!("ui-ara-item-{item_id}"),"track_id":"ui-host-track",
+                    "name":"C","start_sec":0.,"length_sec":4.0/44100.,
+                    "takes":[{"id":"ara-clip-1-take-1","source_path":"authorized-source",
+                        "source_start_sec":0.,"source_end_sec":4.0/44100.}]}],
+            }))
+            .unwrap();
+        document.present_host_inventory(&mut timeline, "ui-");
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.takes.len(), 3, "宿主清单的三个 take 都要出现");
+        assert_eq!(
+            clip.source_path.as_deref(),
+            Some("authorized-source"),
+            "授权媒体必须活过清单重建"
+        );
+        let granted = clip
+            .takes
+            .iter()
+            .find(|take| take.id.ends_with(&active_take))
+            .expect("授权 take 必须在清单里");
+        assert_eq!(granted.source_path.as_deref(), Some("authorized-source"));
+        assert!(
+            clip.takes
+                .iter()
+                .filter(|take| take.id != granted.id)
+                .all(|take| take.source_path.is_none()),
+            "非授权 take 必须保持无源"
+        );
+
+        // 用户切了 active take（记录还指向一个已经不存在的 take）→ 一个 take 都不许带上
+        // 旧采样。宿主清单同时多出一个 take，确保走的是"重建"这条路径。
+        let stale = timeline.clips[0].clone();
+        fixture.enable_takes(3);
+        let grown = host.ui_track(&|| true).unwrap();
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(grown.guid.clone(), grown);
+        document
+            .authorized_takes
+            .lock()
+            .unwrap()
+            .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
+        let mut again = hifishifter_kernel::state::TimelineState {
+            clips: vec![stale],
+            ..Default::default()
+        };
+        document.present_host_inventory(&mut again, "ui-");
+        assert_eq!(again.clips[0].takes.len(), 4, "重建必须跟上宿主");
+        assert!(
+            again.clips[0].source_path.is_none(),
+            "active take 换过之后不得沿用旧授权媒体"
+        );
+        assert!(again.clips[0]
+            .takes
+            .iter()
+            .all(|take| take.source_path.is_none()));
+        document.close();
+    }
 }

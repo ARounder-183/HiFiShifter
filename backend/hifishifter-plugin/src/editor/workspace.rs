@@ -25,17 +25,20 @@ fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::H
 
 /// 把宿主枚举到的全部 take 投影进显示用 Clip。
 ///
-/// 【为什么只在集合变化时重建】take 集合稳定时不动它，才能保住 slip/trim 的乐观
-/// 预览（它们写在 active take 的扁平 `source_start_sec`/`source_end_sec` 上）。
+/// 【为什么只在集合或 active 变化时重建】take 集合稳定时不动它，才能保住 slip/trim 的
+/// 乐观预览（它们写在 active take 的扁平 `source_start_sec`/`source_end_sec` 上）。
 /// 一旦重建就 `normalize_takes()`，把 active take 重新物化 —— 所以只在该重建的时候重建。
+/// active 变化必须算作"该重建"：宿主换了当前 take，界面却还指着旧的那条 lane，是错的。
 ///
-/// 【安全底线】**任何 take 都不带 `source_path`**。这份清单是显示占位，PCM 只能经
-/// ARA 授权取得（`render/source.rs`）；非 active take 更不在本实例的 ARA 范围内。
-/// 这里从不写 `source_path`，该不变式由 `present_host_inventory` 的测试钉住。
+/// 【安全底线】**除被 ARA 授权的那一个 take 外，任何 take 都不带 `source_path`**。
+/// 这份清单是显示占位，PCM 只能经 ARA 授权取得（`render/source.rs`）；非 active take
+/// 更不在本实例的 ARA 范围内。授权 take 由 `authorized_take` 指名（见
+/// `DocumentSession::authorized_takes`），本函数只为它保留已有的授权媒体投影。
 fn sync_host_takes(
     clip: &mut hifishifter_kernel::state::Clip,
     item: &crate::host::reaper::UiItem,
     prefix: &impl Fn(&str) -> String,
+    authorized_take: Option<&str>,
 ) {
     let expected: Vec<String> = item
         .takes
@@ -45,7 +48,13 @@ fn sync_host_takes(
     if expected.is_empty() {
         return;
     }
-    let unchanged = clip.takes.len() == expected.len()
+    let active = item
+        .takes
+        .iter()
+        .find(|take| take.active)
+        .map(|take| prefix(&take.geometry.take_id));
+    let unchanged = clip.active_take_id == active
+        && clip.takes.len() == expected.len()
         && clip
             .takes
             .iter()
@@ -54,6 +63,20 @@ fn sync_host_takes(
     if unchanged {
         return;
     }
+    // 【为什么必须把授权媒体搬到新 take 上】这份重建从宿主元数据造 take，而宿主元数据
+    // **按设计**不带 `source_path`；随后 `normalize_takes()` 会把 active take 物化到扁平
+    // 投影上，于是 `clip.source_path` 被清空 —— 每个 ARA 已授权片段都会变成"等待宿主
+    // 音频"的斜纹占位（连波形一起消失）。此前 ARA 片段的 take id 是 `ara-clip-N-take-1`，
+    // 与宿主 GUID 永不相等，所以这条重建**每次清单呈现都会发生**。
+    //
+    // 授权媒体只挂到 GUID 与记录相等的那一个 take 上：用户在 REAPER 里换了 active take
+    // 而 ARA 尚未重新认领时，GUID 对不上 ⇒ 一个都不挂（宁可显示占位，也不把上一个 take
+    // 的采样挂到新 take 上）。
+    let granted = authorized_take.and_then(|guid| {
+        item.takes
+            .iter()
+            .position(|take| take.geometry.take_id == guid)
+    });
     let takes: Vec<serde_json::Value> = item
         .takes
         .iter()
@@ -71,16 +94,33 @@ fn sync_host_takes(
             })
         })
         .collect();
-    let active = item
-        .takes
-        .iter()
-        .find(|take| take.active)
-        .map(|take| prefix(&take.geometry.take_id));
     let Ok(mut rebuilt) = serde_json::from_value::<Vec<hifishifter_kernel::state::ClipTake>>(
         serde_json::Value::Array(takes),
     ) else {
         return;
     };
+    // 把 clip 的扁平投影（= ARA 授权媒体）搬到指名的那一个 take 上。只搬**媒体身份**
+    // 字段：源窗口 / 倍率 / 名字 / 声道模式都是宿主几何，由上面的清单提供。
+    if let Some(index) = granted {
+        // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
+        // 无 take 的扁平 clip 退回投影本身。
+        let granted_media = if clip.takes.is_empty() {
+            hifishifter_kernel::state::ClipTake::from_clip(clip)
+        } else {
+            clip.active_take().clone()
+        };
+        let target = &mut rebuilt[index];
+        target.source_path = granted_media.source_path;
+        target.source_path_relative = granted_media.source_path_relative;
+        target.duration_sec = granted_media.duration_sec;
+        target.duration_frames = granted_media.duration_frames;
+        target.source_sample_rate = granted_media.source_sample_rate;
+        target.source_file_fingerprint = granted_media.source_file_fingerprint;
+        target.source_file_mtime = granted_media.source_file_mtime;
+        target.source_file_size = granted_media.source_file_size;
+        target.waveform_preview = granted_media.waveform_preview;
+        target.pitch_range = granted_media.pitch_range;
+    }
     // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
     // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
     for take in &mut rebuilt {
@@ -208,6 +248,18 @@ impl DocumentSession {
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
+        // item GUID → 该 item 在 ARA 授权那一刻的 active take GUID。
+        //
+        // 一个 item 只有一个 active take，多个 region 认领同一 item 时记录的都是同一个
+        // GUID，所以这里按 item 取一个即可（见 `DocumentSession::authorized_takes`）。
+        let authorized_takes: std::collections::HashMap<String, String> = {
+            let items = self.region_items.lock().unwrap();
+            let takes = self.authorized_takes.lock().unwrap();
+            items
+                .iter()
+                .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
+                .collect()
+        };
         let tracks = self.ui_tracks.lock().unwrap();
         if tracks.is_empty() {
             return;
@@ -263,7 +315,12 @@ impl DocumentSession {
                     .iter_mut()
                     .find(|clip| clip.id == id)
                     .unwrap();
-                sync_host_takes(clip, item, &prefix);
+                sync_host_takes(
+                    clip,
+                    item,
+                    &prefix,
+                    authorized_takes.get(&g.item_id).map(String::as_str),
+                );
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
                 clip.name = item.name.clone();

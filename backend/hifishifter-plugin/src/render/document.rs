@@ -40,6 +40,17 @@ pub(crate) struct DocumentSession {
     pub regions: Mutex<HashMap<u64, crate::ara::AraPlaybackRegion>>,
     pub clip_ids: Mutex<HashMap<u64, String>>,
     pub region_items: Mutex<HashMap<u64, String>>,
+    /// ARA 授权那一刻，每个 region 对应 item 的 **active take GUID**（region_key → take GUID）。
+    ///
+    /// 【为什么需要】ARA 只授权 active take 的 PCM（见 `probe/ara/MULTI-TAKE-FINDINGS.md`
+    /// 与 plan Part 2 的授权边界）。宿主清单重建 take 列表时（`sync_host_takes`），
+    /// 只有 GUID 与这里相等的那一个 take 可以带上授权媒体；其余 take 必须保持无源。
+    ///
+    /// 【为什么记 GUID 而不是"就是 active 那个"】用户在 REAPER 里切换 active take 后，
+    /// 这条记录直到 ARA 模型重新认领才更新。这期间**不沿用**旧 PCM —— 否则会把上一个
+    /// take 的采样挂到新 take 上，那是听不见的错（渲染读的是同一条 `source_path`）。
+    /// 记不下来时宁可不挂：无源占位是看得见的。
+    pub authorized_takes: Mutex<HashMap<u64, String>>,
     pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::reaper::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
     /// 由 REAPER folder 结构**得到父级**的轨道 id（见 `host::folder`）。

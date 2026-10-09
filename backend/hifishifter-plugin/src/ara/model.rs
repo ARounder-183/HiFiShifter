@@ -271,6 +271,34 @@ impl ModelHandle {
                         );
                     }
                 }
+                // 记下"授权这一刻"的 active take GUID。
+                //
+                // 【为什么在这里、而不是每次清单刷新都重记】ARA 的 playback region 指向
+                // item 的 active take（`probe/ara/MULTI-TAKE-FINDINGS.md` 的 F-3），所以
+                // 授权 PCM 属于**那一刻**的 active take。`sync_host_takes` 重建 take 列表
+                // 时只有 GUID 相等的那一个能带上授权媒体；用户随后在 REAPER 里切换 active
+                // take 时这条记录保持旧值，于是新 take 不会被挂上旧采样 —— 直到 ARA 模型
+                // 重新认领（那时 region 的 source 也换了，这里跟着更新）。
+                {
+                    let items = self.session.region_items.lock().unwrap().clone();
+                    let take_by_item = {
+                        let tracks = self.session.ui_tracks.lock().unwrap();
+                        tracks
+                            .values()
+                            .flat_map(|track| &track.items)
+                            .map(|item| {
+                                (item.geometry.item_id.clone(), item.geometry.take_id.clone())
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    };
+                    let mut takes = self.session.authorized_takes.lock().unwrap();
+                    takes.clear();
+                    for (key, item) in items.iter() {
+                        if let Some(take) = take_by_item.get(item) {
+                            takes.insert(*key, take.clone());
+                        }
+                    }
+                }
                 {
                     let mut edits = self.session.edits.lock().unwrap();
                     if !edits.atlas.is_empty() && !edits.needs_rebind {
