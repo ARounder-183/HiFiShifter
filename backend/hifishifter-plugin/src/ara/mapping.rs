@@ -281,11 +281,78 @@ fn region_sequence_of(doc: &AraDocument) -> Result<Vec<usize>, MappingError> {
     Ok(owned)
 }
 
-/// ARA 文档 → `TimelineState`。
+/// 一条被跳过的 region 及其原因。
+///
+/// 【为什么跳过而不是失败】一个零长度 item、一个 MIDI item（ARA 不给音频源）、
+/// 一条引用了已删除源的 region —— 都是**局部**问题。此前任何一条都会让整份映射
+/// `Err`，进而把 `DocumentSession::ready` 打成 `false`、整个实例永久砖化。
+/// 现在逐 region 隔离：坏的那条不产生 clip，其余照常。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedRegion {
+    /// 在 `doc.playback_regions` 里的下标。
+    pub index: usize,
+    /// 跳过原因（语言无关的分类名，文案由上层本地化）。
+    pub reason: SkipReason,
+}
+
+/// 跳过原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// region 指向了不存在的 region sequence。
+    UnknownRegionSequence,
+    /// region 引用了不存在的音频源。
+    UnknownSource,
+    /// region 引用了不存在的修改。
+    UnknownModification,
+    /// 播放时长为 0 或非有限值（零长度 item）。
+    NonPositivePlaybackDuration,
+}
+
+impl SkipReason {
+    /// 语言无关的分类名，供日志与逐 clip 状态复用。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownRegionSequence => "unknown_region_sequence",
+            Self::UnknownSource => "unknown_source",
+            Self::UnknownModification => "unknown_modification",
+            Self::NonPositivePlaybackDuration => "non_positive_duration",
+        }
+    }
+}
+
+/// 逐 region 映射的结果。
+pub struct MappingOutcome {
+    /// 映射出的时间线（只含成功映射的 region）。
+    pub timeline: TimelineState,
+    /// 与 `timeline.clips` **一一对应**：该 clip 来自 `doc.playback_regions` 的哪个下标。
+    ///
+    /// 【为什么必须带回这份对齐】调用方（`ModelHandle::remap_and_log`）要把 clip 身份
+    /// 挂回 region key。此前它靠"文档顺序 zip 存活 region"来对齐 —— 一旦有 region
+    /// 被跳过，这个 zip 就整体错位，把身份挂到错误的 clip 上。带回来就不会错。
+    pub clip_regions: Vec<usize>,
+    /// 被跳过的 region。
+    pub skipped: Vec<SkippedRegion>,
+}
+
+/// ARA 文档 → `TimelineState`（整份成功或整份失败）。
+///
+/// 供只需要时间线、不关心跳过明细的调用方使用；坏 region 会被静默丢弃。
+/// 需要逐 region 明细时用 [`ara_document_to_timeline_reporting`]。
+pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, MappingError> {
+    Ok(ara_document_to_timeline_reporting(doc)?.timeline)
+}
+
+/// ARA 文档 → `TimelineState`，并回报逐 region 的跳过明细。
 ///
 /// 映射口径见模块文档；拉伸按 `durationInModificationTime / durationInPlaybackTime`
 /// 落到 take 的 `playback_rate`，而不是读 `isTimestretchEnabled` 标志位。
-pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, MappingError> {
+///
+/// 【只有文档级结构不一致才整份失败】`Json`（无法解析）与 `SequenceCountMismatch`
+/// （声明数量与扁平列表对不上，无法判断任何一条 region 的归属）保留为致命错误；
+/// 单条 region 的问题一律降级为跳过。
+pub fn ara_document_to_timeline_reporting(
+    doc: &AraDocument,
+) -> Result<MappingOutcome, MappingError> {
     let sources: HashMap<&str, &AraAudioSource> = doc
         .audio_sources
         .iter()
@@ -320,26 +387,42 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
 
     let ownership = region_sequence_of(doc)?;
     let mut clips: Vec<Value> = Vec::new();
+    let mut clip_regions: Vec<usize> = Vec::new();
+    let mut skipped: Vec<SkippedRegion> = Vec::new();
     for (index, region) in doc.playback_regions.iter().enumerate() {
         let sequence_index = ownership.get(index).copied().unwrap_or(0);
-        let track_id = track_ids
-            .get(sequence_index)
-            .ok_or(MappingError::UnknownRegionSequence(sequence_index))?;
+        let Some(track_id) = track_ids.get(sequence_index) else {
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::UnknownRegionSequence,
+            });
+            continue;
+        };
 
-        let source = sources
+        let Some(source) = sources
             .get(region.audio_source_persistent_id.as_str())
             .copied()
-            .ok_or_else(|| {
-                MappingError::UnknownSource(region.audio_source_persistent_id.clone())
-            })?;
+        else {
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::UnknownSource,
+            });
+            continue;
+        };
         if !modifications.contains_key(region.audio_modification_persistent_id.as_str()) {
-            return Err(MappingError::UnknownModification(
-                region.audio_modification_persistent_id.clone(),
-            ));
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::UnknownModification,
+            });
+            continue;
         }
         if !(region.duration_in_playback_time.is_finite() && region.duration_in_playback_time > 0.0)
         {
-            return Err(MappingError::NonPositivePlaybackDuration);
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::NonPositivePlaybackDuration,
+            });
+            continue;
         }
 
         let playback_rate = region.duration_in_modification_time / region.duration_in_playback_time;
@@ -372,6 +455,9 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
                 "source_channels": source.channel_count.max(0) as u16,
             }],
         }));
+        // 下标是**原文档下标**（`ara-clip-{index+1}` 与它一致），所以身份在
+        // "中间有 region 被跳过"时也保持稳定 —— 不会因为跳过而整体前移。
+        clip_regions.push(index);
     }
 
     let project_sec = clips
@@ -397,7 +483,11 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
     for clip in &mut timeline.clips {
         clip.normalize_takes();
     }
-    Ok(timeline)
+    Ok(MappingOutcome {
+        timeline,
+        clip_regions,
+        skipped,
+    })
 }
 
 /// 一行可核对的摘要。

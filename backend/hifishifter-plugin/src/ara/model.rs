@@ -194,23 +194,52 @@ impl ModelHandle {
             .filter(|(index, _)| !self.destroyed_regions.contains(index))
             .map(|(_, region)| region)
             .collect();
-        match crate::ara::mapping::ara_document_to_timeline(&document) {
-            Ok(mut timeline) => {
+        match crate::ara::mapping::ara_document_to_timeline_reporting(&document) {
+            Ok(outcome) => {
+                let crate::ara::mapping::MappingOutcome {
+                    mut timeline,
+                    clip_regions,
+                    skipped,
+                } = outcome;
+                if !skipped.is_empty() {
+                    // 逐 region 跳过是**局部**问题：记一行明细，但会话继续可用。
+                    // 这正是"一个零长度/MIDI item 打死整个插件"的修复点。
+                    log::warn!(
+                        "[ara] skipped {} of {} playback region(s): {}",
+                        skipped.len(),
+                        document.playback_regions.len(),
+                        skipped
+                            .iter()
+                            .map(|s| format!("{}:{}", s.index, s.reason.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                }
                 for track in &mut timeline.tracks {
                     track.compose_enabled = true;
                     track.pitch_analysis_algo =
                         hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
                 }
                 // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
-                let keys = self
+                //
+                // 【为什么按 `clip_regions` 对齐而不是顺序 zip】`ara_document_to_timeline`
+                // 现在会逐 region 跳过坏条目；顺序 zip 会在有跳过时整体错位，把身份挂到
+                // 错误的 clip 上。`clip_regions[i]` 是该 clip 在**过滤后**文档里的下标，
+                // 与 `live_keys` 同序。
+                let live_keys: Vec<u64> = self
                     .region_keys
                     .iter()
                     .enumerate()
-                    .filter(|(slot, _)| !self.destroyed_regions.contains(slot));
+                    .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+                    .map(|(_, key)| *key)
+                    .collect();
                 let mut identities = self.session.clip_ids.lock().unwrap();
                 identities.clear();
-                for (clip, (slot, key)) in timeline.clips.iter_mut().zip(keys) {
-                    clip.id = format!("ara-clip-{}", slot + 1);
+                for (clip, region_index) in timeline.clips.iter_mut().zip(&clip_regions) {
+                    let Some(key) = live_keys.get(*region_index) else {
+                        continue;
+                    };
+                    clip.id = format!("ara-clip-{}", region_index + 1);
                     identities.insert(*key, clip.id.clone());
                 }
                 drop(identities);
@@ -318,11 +347,13 @@ impl ModelHandle {
                                     .retain(|track| bindings.contains_key(&track.id));
                             }
                             Err(error) => {
+                                // 【为什么不整份中止】参数投影失败只说明"曲线身份这次没能
+                                // 对齐"，几何与 PCM 都是好的。此前这里 `return`，于是
+                                // 连 `prepare_renderers()` 都不跑 —— `ready` 停在 `false`，
+                                // 而它只能由 `prepare_renderers` 置真，宿主若不重发
+                                // `end_editing` 就再也回不来（实例永久砖化）。
+                                // 现在只记一行、保留旧图集，继续把这份时间线发布出去。
                                 log::error!("[ara] source parameter projection conflict: {error}");
-                                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
-                                self.timeline = Some(timeline);
-                                self.session.ready.store(false, Ordering::Release);
-                                return;
                             }
                         }
                     }
@@ -338,9 +369,24 @@ impl ModelHandle {
             }
             Err(err) => {
                 // 映射失败必须显式记录：它是"DAW 里看到的时间线不对"这类问题的唯一线索。
+                //
+                // 【为什么不再无条件把实例打成"未就绪"】能走到这里只剩文档级结构错误
+                // （JSON 无法解析 / region 数量与声明对不上）。此前这里直接 `return`，
+                // 跳过了 `prepare_renderers()` —— 而 `ready` 只能由它置真，宿主若不重发
+                // `end_editing` 就永远回不来。现在：
+                //   * 已经发布过一份可用时间线时，**保留它**并继续服务（渲染用上一版
+                //     几何，比整个实例变砖强得多）；
+                //   * 从未成功映射过（首次就失败）才置 `ready=false`。
+                // 下一次 `end_editing` 会自然重试；`refresh_host` 的版本比较也会再触发。
                 log::error!("[ara] mapping failed: {err:?}");
-                self.session.ready.store(false, Ordering::Release);
-                return;
+                if self.timeline.is_none() {
+                    self.session.ready.store(false, Ordering::Release);
+                    return;
+                }
+                log::warn!(
+                    "[ara] keeping the previously published timeline; the host model will be \
+                     re-mapped on the next edit"
+                );
             }
         }
         self.session.prepare_renderers();

@@ -1130,8 +1130,12 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
                     Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
                 };
             }
-            unsafe {
-                crate::audio_abi::clear_outputs(data).expect("validated audio buffers");
+            // 【为什么不用 expect】这里在**音频线程**上，panic 会跨越 VST3 的 FFI 边界
+            // 展开进 REAPER 的音频回调。`validate` 已经查过布局，但校验与使用之间若出现
+            // 任何不一致（例如宿主给了我们没预料到的总线形状），宁可返回错误码让宿主把
+            // 这一帧当静音，也不能让整个 DAW 崩掉。
+            if unsafe { crate::audio_abi::clear_outputs(data) }.is_err() {
+                return K_RESULT_FALSE;
             }
             if owner.host_item_muted() {
                 return K_RESULT_OK;

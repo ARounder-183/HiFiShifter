@@ -369,27 +369,52 @@ impl DocumentSession {
                 track.order = host.order;
                 track.parent_id = parent_id;
             } else {
-                let mut track: hifishifter_kernel::state::Track =
-                    serde_json::from_value(serde_json::json!({"id":track_id,"name":host.name,"order":host.order,"compose_enabled":true})).unwrap();
-                track.parent_id = parent_id;
-                timeline.tracks.push(track);
+                // 【为什么不用 unwrap】`host.name` 是宿主给的字符串，理论上总能量进
+                // 一个字符串字段；但这里跑在**宿主 UI 线程**的清单刷新路径上，一次
+                // panic 会带走整个 DAW 会话。JSON 反序列化失败时降级为"跳过这条轨道"，
+                // 其余轨道照常呈现。
+                match serde_json::from_value::<hifishifter_kernel::state::Track>(
+                    serde_json::json!({"id":track_id,"name":host.name,"order":host.order,"compose_enabled":true}),
+                ) {
+                    Ok(mut track) => {
+                        track.parent_id = parent_id;
+                        timeline.tracks.push(track);
+                    }
+                    Err(error) => {
+                        log::warn!("[ara] skipping host track {track_id}: {error}");
+                        continue;
+                    }
+                }
             }
             for item in &host.items {
                 let g = &item.geometry;
                 let id = prefix(&format!("ara-item-{}", g.item_id));
                 present.insert(id.clone());
                 if !timeline.clips.iter().any(|clip| clip.id == id) {
-                    let mut clip:hifishifter_kernel::state::Clip=serde_json::from_value(serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
+                    // 同上的 panic 纪律：宿主给一个非有限 `playback_rate`（离线/损坏素材）
+                    // 时不能让整个清单刷新 panic。反序列化失败就跳过这个 item。
+                    let built = serde_json::from_value::<hifishifter_kernel::state::Clip>(
+                        serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
                         "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":g.source_start_sec,
-                        "source_end_sec":g.source_start_sec+g.duration_sec*g.playback_rate,"playback_rate":g.playback_rate}]})).unwrap();
-                    clip.normalize_takes();
-                    timeline.clips.push(clip);
+                        "source_end_sec":g.source_start_sec+g.duration_sec*g.playback_rate,"playback_rate":g.playback_rate}]}),
+                    );
+                    match built {
+                        Ok(mut clip) => {
+                            clip.normalize_takes();
+                            timeline.clips.push(clip);
+                        }
+                        Err(error) => {
+                            log::warn!("[ara] skipping host item {id}: {error}");
+                            present.remove(&id);
+                            continue;
+                        }
+                    }
                 }
-                let clip = timeline
-                    .clips
-                    .iter_mut()
-                    .find(|clip| clip.id == id)
-                    .unwrap();
+                let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == id) else {
+                    // 上面的 `continue` 已经移除了 `present`；这里只是防御性兜底。
+                    present.remove(&id);
+                    continue;
+                };
                 sync_host_takes(
                     clip,
                     item,

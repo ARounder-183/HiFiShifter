@@ -6,8 +6,9 @@
 //! `render_mixdown_interleaved` 暴露出来了。
 
 use hifishifter_plugin::ara::{
-    ara_document_from_json, ara_document_to_timeline, clip_starts_line, has_observed_time_stretch,
-    source_sample_rates, summary_line, AraDocument, LostField, LOST_FIELDS,
+    ara_document_from_json, ara_document_to_timeline, ara_document_to_timeline_reporting,
+    clip_starts_line, has_observed_time_stretch, source_sample_rates, summary_line, AraDocument,
+    LostField, SkipReason, LOST_FIELDS,
 };
 use hifishifter_plugin::render::render_timeline;
 use serde_json::json;
@@ -142,21 +143,87 @@ fn empty_document_maps_to_an_empty_timeline() {
 }
 
 #[test]
-fn zero_length_region_is_rejected() {
+fn zero_length_region_is_skipped_not_fatal() {
+    // 【为什么改判据】零长度 region 是**局部**问题（在边界处分割的产物）。此前它让整份
+    // 映射 `Err`，进而把 `DocumentSession::ready` 打成 `false`、整个实例永久砖化。
+    // 现在逐 region 跳过：坏的那条不产生 clip，其余照常。
     let doc = ara_document_from_json(
         r#"{
-          "musicalContexts": [{"regionSequences": [{"name": "s", "playbackRegionCount": 1}]}],
+          "musicalContexts": [{"regionSequences": [{"name": "s", "playbackRegionCount": 2}]}],
           "audioSources": [{"persistentID": "p", "sampleRate": 44100, "sampleCount": 0}],
           "audioModifications": [{"persistentID": "p", "audioSourcePersistentID": "p"}],
           "playbackRegions": [
             {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
              "startInModificationTime": 0, "durationInModificationTime": 0,
-             "startInPlaybackTime": 0, "durationInPlaybackTime": 0}
+             "startInPlaybackTime": 0, "durationInPlaybackTime": 0},
+            {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
+             "startInModificationTime": 0, "durationInModificationTime": 1,
+             "startInPlaybackTime": 1, "durationInPlaybackTime": 1}
           ]
         }"#,
     )
     .expect("document parses");
-    assert!(ara_document_to_timeline(&doc).is_err());
+    let outcome =
+        ara_document_to_timeline_reporting(&doc).expect("a bad region must not fail the mapping");
+    assert_eq!(outcome.timeline.clips.len(), 1, "only the good region maps");
+    assert_eq!(outcome.clip_regions, vec![1], "the good region keeps its index");
+    assert_eq!(outcome.skipped.len(), 1);
+    assert_eq!(outcome.skipped[0].index, 0);
+    assert_eq!(
+        outcome.skipped[0].reason,
+        SkipReason::NonPositivePlaybackDuration
+    );
+    assert_eq!(outcome.skipped[0].reason.as_str(), "non_positive_duration");
+}
+
+#[test]
+fn unknown_source_region_is_skipped_and_keeps_the_rest() {
+    let doc = ara_document_from_json(
+        r#"{
+          "musicalContexts": [{"regionSequences": [{"name": "s", "playbackRegionCount": 2}]}],
+          "audioSources": [{"persistentID": "p", "sampleRate": 44100, "sampleCount": 44100}],
+          "audioModifications": [{"persistentID": "p", "audioSourcePersistentID": "p"}],
+          "playbackRegions": [
+            {"audioSourcePersistentID": "ghost", "audioModificationPersistentID": "p",
+             "durationInModificationTime": 1, "durationInPlaybackTime": 1},
+            {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
+             "startInPlaybackTime": 1, "durationInModificationTime": 1, "durationInPlaybackTime": 1}
+          ]
+        }"#,
+    )
+    .expect("document parses");
+    let outcome = ara_document_to_timeline_reporting(&doc).expect("mapping survives");
+    assert_eq!(outcome.timeline.clips.len(), 1);
+    assert_eq!(outcome.clip_regions, vec![1]);
+    assert_eq!(outcome.skipped[0].reason, SkipReason::UnknownSource);
+}
+
+#[test]
+fn clip_identity_stays_aligned_when_an_earlier_region_is_skipped() {
+    // 【为什么这条必须有】`remap_and_log` 要把 clip 身份挂回 region key。若调用方按
+    // "文档顺序 zip 存活 region"对齐，一旦前面有 region 被跳过就会整体错位 —— 把身份
+    // 挂到错误的 clip 上。`clip_regions` 就是为此带回的对齐信息。
+    let doc = ara_document_from_json(
+        r#"{
+          "musicalContexts": [{"regionSequences": [{"name": "s", "playbackRegionCount": 3}]}],
+          "audioSources": [{"persistentID": "p", "sampleRate": 44100, "sampleCount": 44100}],
+          "audioModifications": [{"persistentID": "p", "audioSourcePersistentID": "p"}],
+          "playbackRegions": [
+            {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
+             "durationInModificationTime": 0, "durationInPlaybackTime": 0},
+            {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
+             "startInPlaybackTime": 1, "durationInModificationTime": 1, "durationInPlaybackTime": 1},
+            {"audioSourcePersistentID": "p", "audioModificationPersistentID": "p",
+             "startInPlaybackTime": 2, "durationInModificationTime": 1, "durationInPlaybackTime": 1}
+          ]
+        }"#,
+    )
+    .expect("document parses");
+    let outcome = ara_document_to_timeline_reporting(&doc).expect("mapping survives");
+    assert_eq!(outcome.clip_regions, vec![1, 2]);
+    // 第 2、3 条 region 的 clip id 用的是**原文档下标**（2、3），不因跳过而前移。
+    assert_eq!(outcome.timeline.clips[0].id, "ara-clip-2");
+    assert_eq!(outcome.timeline.clips[1].id, "ara-clip-3");
 }
 
 #[test]

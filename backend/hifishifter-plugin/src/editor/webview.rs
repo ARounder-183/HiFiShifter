@@ -32,6 +32,15 @@ static WINDOWS: AtomicUsize = AtomicUsize::new(0);
 static CLASS_LOCK: Mutex<bool> = Mutex::new(false);
 static WEBVIEW_MODULE_PIN: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// 在途请求上限。
+const PENDING_BUDGET: usize = 32;
+/// 在途请求的存活时间。超过它仍未收到回复的请求视为"永远不会回"。
+///
+/// 【为什么是 30 秒】与各处 `HostReply::until` 的等待窗口一致：正常的宿主回流
+/// （一次 `get_timeline_state` + ARA 重认领）在数百毫秒内完成；30 秒仍无回复只可能是
+/// 请求已被丢弃。超时后剔除该条目，避免永久占用预算。
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct BrowserState {
     hwnd: HWND,
     closed: bool,
@@ -42,7 +51,13 @@ struct BrowserState {
     sink: super::session::UiSink,
     replies: mpsc::Receiver<serde_json::Value>,
     events: mpsc::Receiver<serde_json::Value>,
-    pending: HashSet<u64>,
+    /// 在途请求 id → 插入时刻。
+    ///
+    /// 【为什么带时刻】`pending` 只在**收到回复**时移除（`deliver` 的 `retain_mut`）。
+    /// 若某个请求永远不回（文档关闭、`PostWebMessageAsJson` 失败、actor 丢弃），条目会
+    /// 永久残留；累积到 32（各处的预算上限）后，本视图会**拒绝一切后续命令**。
+    /// 带时刻就能在定时器里超时剔除，把"永久失效"降级成"这一次超时"。
+    pending: std::collections::HashMap<u64, std::time::Instant>,
     forwarded_keys: HashSet<char>,
     host_replies: std::collections::HashMap<u64, HostReply>,
     undo_requests:
@@ -51,6 +66,62 @@ struct BrowserState {
     history_requests: HashSet<u64>,
     history_cache: Option<((usize, i32, i32), serde_json::Value)>,
     last_history: Option<serde_json::Value>,
+}
+
+impl BrowserState {
+    /// 记录一个在途请求。
+    fn mark_pending(&mut self, id: u64) {
+        self.pending.insert(id, std::time::Instant::now());
+    }
+
+    /// 在途请求是否已满（或该 id 已在途）。
+    ///
+    /// 先剔除超时条目，再判预算 —— 否则一个永不回复的请求会永久占用一个名额。
+    fn pending_full(&mut self, id: u64) -> bool {
+        self.expire_pending();
+        self.pending.len() >= PENDING_BUDGET || self.pending.contains_key(&id)
+    }
+
+    /// 剔除超过 [`PENDING_TTL`] 仍无回复的请求，并同步释放它占用的关联状态。
+    ///
+    /// 只删 `pending` 条目还不够：`host_replies` / `undo_requests` / `history_requests`
+    /// 都以同一 id 为键，留着会泄漏内存，也会让宿主 Undo 块一直开着（`finish_request`
+    /// 收不到）。所以这里把它们一并清掉。
+    fn expire_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let expired: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) >= PENDING_TTL)
+            .map(|(id, _)| *id)
+            .collect();
+        if expired.is_empty() {
+            return;
+        }
+        let view_id = self.view_id.clone();
+        for id in &expired {
+            self.pending.remove(id);
+            let reply = self.host_replies.remove(id);
+            let document = reply
+                .as_ref()
+                .and_then(|reply| reply.document.upgrade())
+                .or_else(|| self.undo_document.as_ref().and_then(|weak| weak.upgrade()));
+            let undo = self.undo_requests.remove(id).and_then(|weak| weak.upgrade());
+            let history = self.history_requests.remove(id);
+            if let Some(document) = undo {
+                document.host_undo.finish_request(&view_id, *id);
+            }
+            if history {
+                if let Some(document) = &document {
+                    document.host_undo.finish_history(&view_id, *id);
+                }
+            }
+            log::warn!("[ara] editor request {id} expired without a reply");
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum HistoryJump {
@@ -256,7 +327,7 @@ impl NativeEditor {
             sink,
             replies,
             events,
-            pending: HashSet::new(),
+            pending: std::collections::HashMap::new(),
             forwarded_keys: HashSet::new(),
             host_replies: std::collections::HashMap::new(),
             undo_requests: std::collections::HashMap::new(),
@@ -994,7 +1065,7 @@ fn configure_browser(
                 })()
             },
             Some("import_audio_item")=>{
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native import request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
@@ -1018,7 +1089,7 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             // 独立的"添加宿主轨道"入口。
             //
@@ -1029,7 +1100,7 @@ fn configure_browser(
             // 【为什么插入位置要锚定】用户说的"最下方"是**本实例能看到的最下方**，
             // 不是整个工程的最底下 —— 后者会把新轨道丢到别的 FX 实例的轨道下面。
             Some("create_host_track")=>{
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native track request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1050,7 +1121,7 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             // 精简诊断导出（Help 菜单）。命令名与独立 App **相同** —— 前端不需要按
             // 模式分支，也不需要一个"插件能不能导出"的能力标志。
@@ -1163,7 +1234,7 @@ fn configure_browser(
                 })()
             },
             Some(command @ ("split_clip"|"split_clips_at"))=>{
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String> {
                     if full {return Err("native split request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1179,10 +1250,10 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry:None,split,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             Some(command) if super::host_edit::is_clip_edit(command)=>{
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String> {
                     if full {return Err("native host edit request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1202,13 +1273,13 @@ fn configure_browser(
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry,split:None,media:None,action:None})
                 })();
                 match outcome {
-                    Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},
+                    Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},
                     Err(error)=>Err(error),
                 }
             },
             Some("has_timeline_clipboard")=>super::host_clipboard::available(),
             Some(command @ ("copy_timeline_clips"|"paste_timeline_clipboard"|"duplicate_clips_bulk"|"remove_clip"|"remove_clips"))=>{
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native media request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1221,7 +1292,7 @@ fn configure_browser(
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,
                         imported:None,geometry:None,split:None,media:None,action:Some(MediaAction {command:command.into(),input:request.get("args").cloned().unwrap_or_else(||serde_json::json!({}))})})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.pending.insert(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             Some("get_history_state") if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
@@ -1232,7 +1303,7 @@ fn configure_browser(
             Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position")) if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
                 let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
                 let outcome=(||->Result<HostReply,String>{
-                    if state.borrow().pending.len()>=32||state.borrow().pending.contains(&id) {return Err("native history request budget exceeded".into());}
+                    if state.borrow_mut().pending_full(id) {return Err("native history request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
                     let jump=match command {"undo_timeline"=>HistoryJump::Undo,"redo_timeline"=>HistoryJump::Redo,_=>HistoryJump::Position(request["args"]["position"].as_i64().filter(|v|(0..10000).contains(v)).ok_or("invalid host history position")? as i32)};
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
@@ -1242,7 +1313,7 @@ fn configure_browser(
                     }
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None,geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             Some(command)=>{
                 if command=="set_transport" && request["args"]["playheadSec"].is_number() {
@@ -1260,7 +1331,7 @@ fn configure_browser(
                         browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))?;return Ok(());
                     }
                 }
-                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32 || state.pending.contains(&id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let history_context=link.owner().ok().and_then(|owner|{
                     let document=owner.editor_document().ok()?;let host=owner.project_history_host()?;
                     let lease=link.authorize(&document).ok()?;Some((document,host,lease))
@@ -1284,7 +1355,7 @@ fn configure_browser(
                     }))
                 };
                 match outcome {
-                    Ok(())=>{let mut state=state.borrow_mut();state.pending.insert(id);if undo_started {if let Some((document,_,_))=&history_context {state.undo_requests.insert(id,Arc::downgrade(document));}}return Ok(());},
+                    Ok(())=>{let mut state=state.borrow_mut();state.mark_pending(id);if undo_started {if let Some((document,_,_))=&history_context {state.undo_requests.insert(id,Arc::downgrade(document));}}return Ok(());},
                     Err(error)=>{
                         if let Some((document,_,_))=&history_context {
                             if undo_started {document.host_undo.finish_request(&view_id,id);}

@@ -522,7 +522,12 @@ impl EditorSession {
                             .is_some_and(|doc| doc.host_undo.pending.load(Ordering::Acquire))
                     {
                         deadline = Some(Instant::now() + Duration::from_millis(50));
-                    } else if session.processed.load(Ordering::Acquire) != ticket {
+                    } else if session.processed.load(Ordering::Acquire) < ticket {
+                        // 【为什么是 `<` 而不是 `!=`】`submitted` 在 `try_send` **之后**自增，
+                        // 而 worker 可能在自增前就取走并处理了该请求（`processed` 先涨）。
+                        // 用 `!=` 时这个瞬时反超会被读成"还有待处理"，于是每 1ms 重试一次；
+                        // 稳态下就是渲染请求风暴（或反之饿死）。语义只有"队列里还有未处理的
+                        // 变更"—— 那就是 `processed < submitted`。
                         deadline = Some(Instant::now() + Duration::from_millis(1));
                     } else {
                         deadline = None;
