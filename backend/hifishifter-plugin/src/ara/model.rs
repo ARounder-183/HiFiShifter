@@ -101,6 +101,41 @@ pub struct ModelHandle {
     /// `create_playback_region` 的说明），只能靠"ARA 在同一文档内给同一对象稳定指针"
     /// 这一事实来推。顺序按首次出现，与宿主创建顺序一致。
     sequence_index_by_model_ref: HashMap<usize, usize>,
+    /// 上一帧映射时的 region 集合快照，供宿主分割的**结构 diff** 使用。
+    ///
+    /// 【为什么需要它】GUI 分割会显式 `register_split`，而宿主分割（REAPER 里按 S）
+    /// 只表现为"一个 region 消失 + 两个 region 出现"，没有任何显式谱系 ⇒ 参数曲线
+    /// 只能靠几何兜底猜祖先，兄弟半段会互相污染（用户报障：分割后 Clip 内产生偏移）。
+    /// 记下上一帧就能按**只用 ARA 自己给的量**识别分割（见 `register_host_split_lineage`）。
+    lineage_frame: Vec<RegionFrame>,
+}
+
+/// 一帧里一个活 region 的 ARA 几何（宿主分割结构 diff 的输入）。
+#[derive(Clone, PartialEq)]
+struct RegionFrame {
+    key: u64,
+    item: Option<String>,
+    audio_source: String,
+    mod_start: f64,
+    mod_dur: f64,
+    play_start: f64,
+    play_dur: f64,
+}
+
+impl RegionFrame {
+    /// 身份判据：同一个 region 在两次映射之间几何不变时视为"同一帧的同一个对象"。
+    ///
+    /// 【为什么不用 region key】`allocate_region` 复用已销毁的最小槽位，分割后的左半段
+    /// 常常拿到父段的 key ⇒ key 不是稳定身份。几何四元组才是。
+    fn geometry(&self) -> (String, u64, u64, u64, u64) {
+        (
+            self.audio_source.clone(),
+            self.mod_start.to_bits(),
+            self.mod_dur.to_bits(),
+            self.play_start.to_bits(),
+            self.play_dur.to_bits(),
+        )
+    }
 }
 
 impl Default for ModelHandle {
@@ -132,6 +167,7 @@ impl Default for ModelHandle {
             content_versions: Vec::new(),
             destroyed_regions: HashSet::new(),
             sequence_index_by_model_ref: HashMap::new(),
+            lineage_frame: Vec::new(),
         }
     }
 }
@@ -194,6 +230,123 @@ impl ModelHandle {
             }
         }
         Ok(index)
+    }
+
+    /// 当前帧的活 region 几何快照（宿主分割结构 diff 的输入）。
+    fn region_frames(&self) -> Vec<RegionFrame> {
+        let items = self.session.region_items.lock().unwrap();
+        self.document
+            .playback_regions
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+            .filter_map(|(slot, region)| {
+                let key = *self.region_keys.get(slot)?;
+                Some(RegionFrame {
+                    key,
+                    item: items.get(&key).cloned(),
+                    audio_source: region.audio_source_persistent_id.clone(),
+                    mod_start: region.start_in_modification_time,
+                    mod_dur: region.duration_in_modification_time,
+                    play_start: region.start_in_playback_time,
+                    play_dur: region.duration_in_playback_time,
+                })
+            })
+            .collect()
+    }
+
+    /// 判定 `left` / `right` 是否由 `parent` 一次分割而来（只用 ARA 自己给的量）。
+    ///
+    /// 【为什么不用宿主 GUID / 专有字段】判据必须对**任何** ARA 宿主成立：同
+    /// `audio_source`、左半段源窗紧接右半段（`left.mod_end == right.mod_start`）、播放窗
+    /// 相邻、父窗口 == 左 ∪ 右。
+    fn is_host_split(parent: &RegionFrame, left: &RegionFrame, right: &RegionFrame) -> bool {
+        let close = crate::host::geometry::host_value_compatible;
+        parent.audio_source == left.audio_source
+            && parent.audio_source == right.audio_source
+            && close(left.mod_start, parent.mod_start)
+            && close(right.mod_start, parent.mod_start + left.mod_dur)
+            && close(left.play_start, parent.play_start)
+            && close(right.play_start, parent.play_start + left.play_dur)
+            && close(left.mod_dur + right.mod_dur, parent.mod_dur)
+            && close(left.play_dur + right.play_dur, parent.play_dur)
+    }
+
+    /// 宿主分割的**结构 diff**：比较上一帧与当前帧的 region 集合，识别"1 个 region
+    /// 消失 + 2 个 region 出现"，并把谱系登记成与 GUI 分割相同的形状
+    /// （`split_parents` + `split_seed` + `split_media_from`）。
+    ///
+    /// 【为什么必须有它】GUI 分割走 `host_split::execute`，显式 `register_split`；而宿主
+    /// 分割（REAPER 里按 S）只表现为 region 的销毁与创建，**一个谱系都不写** ⇒ 右半段
+    /// 落到几何兜底层，兄弟半段被当成合法祖先，曲线整体平移一个分割长度（用户报障：
+    /// 宿主分割后 Clip 内产生偏移）。
+    ///
+    /// 【为什么没有 seed 就不登记】`register_split` 的 seed 是父段（分割前）的**完整**
+    /// 窗口，右半段靠它做包含判定。父段没有曲线记录时（用户从没编辑过它）没有谱系可
+    /// 继承，此时退回几何兜底，与本次改动之前完全一致 —— 宁可不登记，也不要造一条
+    /// 解析不出祖先的假谱系。
+    fn register_host_split_lineage(&mut self) {
+        let current = self.region_frames();
+        let previous = std::mem::take(&mut self.lineage_frame);
+        if !previous.is_empty() {
+            let current_geometry: HashSet<_> =
+                current.iter().map(RegionFrame::geometry).collect();
+            let previous_geometry: HashSet<_> =
+                previous.iter().map(RegionFrame::geometry).collect();
+            let disappeared = previous
+                .iter()
+                .filter(|frame| !current_geometry.contains(&frame.geometry()))
+                .collect::<Vec<_>>();
+            let appeared = current
+                .iter()
+                .filter(|frame| !previous_geometry.contains(&frame.geometry()))
+                .collect::<Vec<_>>();
+            for parent in disappeared {
+                for (left_index, left) in appeared.iter().enumerate() {
+                    for (right_index, right) in appeared.iter().enumerate() {
+                        if left_index == right_index || !Self::is_host_split(parent, left, right) {
+                            continue;
+                        }
+                        self.register_host_split(parent, left, right);
+                    }
+                }
+            }
+        }
+        self.lineage_frame = current;
+    }
+
+    /// 登记一对宿主分割半段；父段没有可继承曲线时什么都不做。
+    fn register_host_split(
+        &mut self,
+        parent: &RegionFrame,
+        left: &RegionFrame,
+        right: &RegionFrame,
+    ) {
+        let (Some(parent_item), Some(left_item), Some(right_item)) =
+            (parent.item.as_deref(), left.item.as_deref(), right.item.as_deref())
+        else {
+            // 认不出宿主 item 的 region（还在等清单认领）不能登记：谱系按 item GUID 索引。
+            return;
+        };
+        let mut edits = self.session.edits.lock().unwrap();
+        let Some(seed) = edits.atlas.split_seed(parent_item) else {
+            return;
+        };
+        if let Err(error) = edits.atlas.register_split(left_item, right_item, Some(seed)) {
+            log::warn!("[ara] host split lineage not registered: {error}");
+            return;
+        }
+        edits.revision = edits.revision.saturating_add(1);
+        drop(edits);
+        // 媒体派生谱系：右半段的源与父段是同一个文件（父段已授权 ⇒ 右半段立刻有波形）。
+        self.session
+            .split_media_from
+            .lock()
+            .unwrap()
+            .insert(right_item.to_owned(), left_item.to_owned());
+        log::info!(
+            "[ara] host split detected: parent={parent_item} left={left_item} right={right_item}"
+        );
     }
 
     /// 当前累积到的 ARA 文档（供映射与测试）。
@@ -403,6 +556,10 @@ impl ModelHandle {
                         }
                     }
                 }
+                // 宿主分割的结构 diff 必须在**参数投影之前**跑：投影会 `follow_geometry`
+                // 并把父段记录置为非活，届时 `split_seed` 就取不到父段窗口了（见
+                // `register_host_split_lineage`）。
+                self.register_host_split_lineage();
                 {
                     let mut edits = self.session.edits.lock().unwrap();
                     if !edits.atlas.is_empty() && !edits.needs_rebind {
@@ -1245,6 +1402,157 @@ mod tests {
             });
         }
         doc
+    }
+
+    fn frame(
+        item: &str,
+        audio_source: &str,
+        mod_start: f64,
+        mod_dur: f64,
+        play_start: f64,
+        play_dur: f64,
+    ) -> RegionFrame {
+        RegionFrame {
+            key: 0,
+            item: Some(item.to_string()),
+            audio_source: audio_source.to_string(),
+            mod_start,
+            mod_dur,
+            play_start,
+            play_dur,
+        }
+    }
+
+    /// 分割判据只认"源窗连续 + 播放窗相邻 + 父窗口 = 左 ∪ 右"，且必须同 `audio_source`。
+    #[test]
+    fn host_split_detection_requires_contiguous_windows_on_one_source() {
+        let parent = frame("{P}", "src", 0., 1., 0., 1.);
+        let left = frame("{P}", "src", 0., 0.5, 0., 0.5);
+        let right = frame("{R}", "src", 0.5, 0.5, 0.5, 0.5);
+        assert!(ModelHandle::is_host_split(&parent, &left, &right));
+
+        // 源窗不连续（中间缺一段）⇒ 不是一次分割。
+        let gapped = frame("{R}", "src", 0.6, 0.4, 0.5, 0.5);
+        assert!(!ModelHandle::is_host_split(&parent, &left, &gapped));
+        // 播放窗不相邻 ⇒ 不是分割。
+        let moved = frame("{R}", "src", 0.5, 0.5, 0.7, 0.5);
+        assert!(!ModelHandle::is_host_split(&parent, &left, &moved));
+        // 不同源 ⇒ 不是同一次分割。
+        let other_source = frame("{R}", "other", 0.5, 0.5, 0.5, 0.5);
+        assert!(!ModelHandle::is_host_split(&parent, &left, &other_source));
+        // 半段之和与父窗口不符 ⇒ 不是分割（例如只是一次裁切）。
+        let wrong_total = frame("{R}", "src", 0.5, 0.2, 0.5, 0.5);
+        assert!(!ModelHandle::is_host_split(&parent, &left, &wrong_total));
+    }
+
+    /// 结构 diff 必须把宿主分割登记成与 GUI 分割相同的形状。
+    ///
+    /// 【为什么这条最要紧】宿主分割只表现为"1 个 region 消失 + 2 个出现"，没有任何显式
+    /// 谱系。不登记的话右半段落到几何兜底层，兄弟半段被当成合法祖先，曲线整体平移一个
+    /// 分割长度 —— 正是用户报障的"宿主分割后 Clip 内产生偏移"。
+    #[test]
+    fn a_host_split_registers_the_same_lineage_shape_as_a_gui_split() {
+        use crate::editor::parameter_atlas::{ParameterAtlas, RegionIdentity};
+        const PARENT: &str = "{11111111-1111-1111-1111-111111111111}";
+        const RIGHT: &str = "{22222222-2222-2222-2222-222222222222}";
+
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        // 父段有一条 live 的曲线记录（`split_seed` 只认 live 记录）。
+        let mut timeline = TimelineState::default();
+        timeline.tracks.push(
+            serde_json::from_value(serde_json::json!({"id":"ara-track-0","name":"A","order":0}))
+                .unwrap(),
+        );
+        timeline.clips.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"ara-clip-1","track_id":"ara-track-0","name":"C","start_sec":0.,"length_sec":1.,
+                "takes":[{"id":"t","source_path":"src","source_end_sec":1.}]
+            }))
+            .unwrap(),
+        );
+        timeline.bpm = 120.;
+        timeline.project_sec = 1.;
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        timeline.params_by_root_track.insert(
+            "ara-track-0".into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 100.,
+                pitch_orig: vec![57.; 6],
+                pitch_edit: vec![60., 61., 62., 63., 64., 65.],
+                ..Default::default()
+            },
+        );
+        let identities = std::collections::BTreeMap::from([(
+            "ara-clip-1".to_string(),
+            RegionIdentity {
+                key: 1,
+                item: Some(PARENT.to_string()),
+                source: "src".into(),
+                modification: "mod".into(),
+            },
+        )]);
+        model.session.edits.lock().unwrap().atlas =
+            ParameterAtlas::default().capture(&timeline, &identities).unwrap();
+
+        // 上一帧：一个父 region。
+        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
+        // 当前帧：父 region 消失，左半段（沿用父段 item GUID）+ 右半段（新 GUID）出现。
+        model.document.playback_regions = vec![
+            AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                audio_modification_persistent_id: "mod-left".into(),
+                start_in_modification_time: 0.,
+                duration_in_modification_time: 0.5,
+                start_in_playback_time: 0.,
+                duration_in_playback_time: 0.5,
+                ..Default::default()
+            },
+            AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                audio_modification_persistent_id: "mod-right".into(),
+                start_in_modification_time: 0.5,
+                duration_in_modification_time: 0.5,
+                start_in_playback_time: 0.5,
+                duration_in_playback_time: 0.5,
+                ..Default::default()
+            },
+        ];
+        model.region_keys = vec![7, 8];
+        {
+            let mut items = model.session.region_items.lock().unwrap();
+            items.insert(7, PARENT.to_string());
+            items.insert(8, RIGHT.to_string());
+        }
+
+        model.register_host_split_lineage();
+
+        let edits = model.session.edits.lock().unwrap();
+        assert_eq!(
+            edits.atlas.split_parent_of(RIGHT),
+            Some(PARENT),
+            "右半段必须显式继承左半段（= 父段）"
+        );
+        assert!(
+            edits.atlas.has_split_basis(RIGHT),
+            "父段的完整窗口必须以 seed 形式保留，右半段靠它做包含判定"
+        );
+        drop(edits);
+        assert_eq!(
+            model
+                .session
+                .split_media_from
+                .lock()
+                .unwrap()
+                .get(RIGHT)
+                .map(String::as_str),
+            Some(PARENT),
+            "媒体派生谱系也要登记（右半段借父段媒体）"
+        );
+        // 本帧成为下一帧的基线。
+        assert_eq!(model.lineage_frame.len(), 2);
     }
 
     /// 保存后新建图的序号不可决定旧编辑归属；共同source由真正modification身份区分。

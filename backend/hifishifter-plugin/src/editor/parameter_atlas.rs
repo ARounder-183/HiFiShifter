@@ -188,6 +188,16 @@ impl ParameterAtlas {
     pub fn is_empty(&self) -> bool {
         self.regions.is_empty() && self.copy_seeds.is_empty() && self.gaps.is_empty()
     }
+    /// 测试用：右半段登记的父 item（宿主分割谱系）。
+    #[cfg(test)]
+    pub(crate) fn split_parent_of(&self, right: &str) -> Option<&str> {
+        self.split_parents.get(right).map(String::as_str)
+    }
+    /// 测试用：右半段是否保留了父段的完整窗口 seed（`find` 的包含判定靠它）。
+    #[cfg(test)]
+    pub(crate) fn has_split_basis(&self, right: &str) -> bool {
+        self.regions.contains_key(&format!("split-basis:{right}"))
+    }
     /// 同一源曲线可由历史/区域共享，额度按reservation身份去重，而不是按序列化值重复计数。
     // 额度统计诊断入口，保留供预算核对。
     #[allow(dead_code)]
