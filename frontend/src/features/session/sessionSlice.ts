@@ -1985,8 +1985,6 @@ function applyTimelineState(
             hostMedia: typeof clip.host_media === "string" ? clip.host_media : undefined,
             hostMediaReason:
                 typeof clip.host_media_reason === "string" ? clip.host_media_reason : undefined,
-            // 方向位可读性：缺省 true（独立 App / 旧后端不区分"读不到"）。
-            reversedKnown: clip.reversed_known === undefined ? true : Boolean(clip.reversed_known),
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),

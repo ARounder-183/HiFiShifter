@@ -14,8 +14,12 @@ pub(crate) struct UiTake {
     pub name: String,
     /// 宿主 `GetActiveTake` 指向的那一个；每个 item 恰好一个。
     pub active: bool,
-    /// 宿主报告的方向；`None` = 读不出来（不当作"没倒放"）。
-    pub reversed: Option<bool>,
+    /// 宿主报告的方向。读不出来时为 `false`（**按正放**）。
+    ///
+    /// 【为什么不再分三态】方向是纯渲染输入，不是需要用户决策的状态：读不到时按正放
+    /// 渲染，与 `loop_enabled`（`geometry.rs` 的同名注释）是同一条纪律。此前把"读不到"
+    /// 投影成一个面向用户的提示，等于让用户为一个**不可操作**的内部读数负责。
+    pub reversed: bool,
 }
 
 #[derive(Clone)]
@@ -409,7 +413,7 @@ mod tests {
         assert!(error.contains("take inventory budget"), "{error}");
     }
 
-    /// 宿主报告的方向要如实透传；读不出来时保持"未知"，不谎报"没倒放"。
+    /// 宿主报告的方向要如实透传；读不出来时**按正放**（不是一种需要用户处置的状态）。
     #[test]
     fn take_direction_is_reported_only_when_the_host_answers() {
         let fixture = super::super::ReaperFixture::new();
@@ -418,23 +422,14 @@ mod tests {
         fixture.section_reports.set(true);
         fixture.take_reversed.set(true);
         let host = Arc::new(fixture.client());
-        assert_eq!(
-            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
-            Some(true)
-        );
+        assert!(host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
 
         fixture.take_reversed.set(false);
-        assert_eq!(
-            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
-            Some(false)
-        );
+        assert!(!host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
 
-        // 宿主不回答（不是 section/reverse 块）→ 未知，而不是"没倒放"。
+        // 宿主不回答（不是 section/reverse 块）→ 按正放，而不是制造一个"未知"态。
         fixture.section_reports.set(false);
-        assert_eq!(
-            host.ui_track(&|| true).unwrap().items[0].takes[0].reversed,
-            None
-        );
+        assert!(!host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
     }
 
     /// 循环源（`B_LOOPSRC`）是 **item** 属性，必须读进几何并投影到 clip 与每个 take。
@@ -507,7 +502,7 @@ mod tests {
         assert_eq!(clip.fade_out_dir, geometry.fade_out_dir_new);
     }
 
-    /// 逐 clip 的宿主媒体状态必须把**四种成因分开** —— 它们此前共用一句
+    /// 逐 clip 的宿主媒体状态必须把**成因分开** —— 它们此前共用一句
     /// "等待 REAPER 提供音频（未分配 ARA 区域）"，于是"刚分割了一下"看起来像故障。
     #[test]
     fn host_media_state_separates_the_causes() {
@@ -536,11 +531,12 @@ mod tests {
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "ready");
 
-        // 倒放被隔离 → reversed（**不是** pending）：ARA 不给反向 PCM，这一条由宿主处理。
+        // 倒放**不再是一种宿主媒体状态**：倒放由本插件渲染（内核装配期翻转），与正放
+        // 一样等 ARA 音频 —— 没有源时同样是"在途"，不是一个需要用户处置的状态。
         payload["clips"][0]["source_path"] = serde_json::json!(null);
         payload["clips"][0]["reversed"] = serde_json::json!(true);
         document.decorate_host_media_locked(&mut payload, "ui-");
-        assert_eq!(payload["clips"][0]["host_media"], "reversed");
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
     }
 
     /// "等待 REAPER 完成音频分配"不能是吸收态：等超期后必须转成带**原因码**的
@@ -608,18 +604,18 @@ mod tests {
         assert!(document.pending_since.lock().unwrap().is_empty());
     }
 
-    /// 方向位读不出来（`PCM_Source_GetSectionInfo` 不可用）时，插件**既不能**标为倒放，
-    /// **也不能**假定为正放。必须如实投影 `reversed_known=false`，并在超期后给出
-    /// `direction_unknown` 原因码 —— 再等也不会变好，用户需要知道这一点。
+    /// 方向位读不出来（`PCM_Source_GetSectionInfo` 不可用）时，插件**按正放**处理，
+    /// 不再制造一个"方向未知"的用户提示 —— 方向是纯渲染输入，读不到不影响可用性。
     #[test]
-    fn an_unreadable_direction_is_reported_instead_of_assumed_forward() {
+    fn an_unreadable_direction_is_assumed_forward() {
         let fixture = super::super::ReaperFixture::new();
         fixture.enable_takes(0);
         fixture.enable_media();
-        // `section_reports` 默认 false ⇒ `take_reversed` 返回 `None`（读不到方向）。
+        // `section_reports` 默认 false ⇒ `take_reversed` 落成 false（按正放）。
         let host = Arc::new(fixture.client());
         let track = host.ui_track(&|| true).unwrap();
         let item_id = track.items[0].geometry.item_id.clone();
+        assert!(!track.items[0].takes[0].reversed);
         let document = crate::render::document::DocumentSession::new(9880);
         document
             .ui_tracks
@@ -630,16 +626,14 @@ mod tests {
         let mut payload = serde_json::json!({"clips": [
             {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
         ]});
-        // 已被认领（⇒ 不是 `unclaimed`）、也没有"授权指向另一个 take"（⇒ 不是
-        // `take_switched`）—— 于是唯一剩下的成因就是"方向读不出来"。
+        // 已被认领、也没有"授权指向另一个 take" ⇒ 超期后剩下的成因只有"等 ARA 分配"。
         document
             .region_items
             .lock()
             .unwrap()
             .insert(7, item_id.clone());
         document.decorate_host_media_locked(&mut payload, "ui-");
-        // 读不到方向 ⇒ `reversed_known=false`；未超期时仍是"在途"。
-        assert_eq!(payload["clips"][0]["reversed_known"], false);
+        assert!(payload["clips"][0]["reversed_known"].is_null());
         assert_eq!(payload["clips"][0]["host_media"], "pending");
 
         {
@@ -651,10 +645,7 @@ mod tests {
         }
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "unavailable");
-        assert_eq!(
-            payload["clips"][0]["host_media_reason"],
-            "direction_unknown"
-        );
+        assert_eq!(payload["clips"][0]["host_media_reason"], "awaiting_region");
     }
 
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。

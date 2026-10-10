@@ -2117,12 +2117,9 @@ export const jaJP = {
     ara_host_audio_folder_body:
         "REAPER は ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
     ara_clip_syncing_host_audio: "REAPER の音声割り当て完了を待っています",
-    ara_clip_reversed_host_handled: "REAPER による逆再生です。HiFiShifter は処理しません",
     ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中",
     ara_clip_host_take_switched:
         "REAPER がこのアイテムの現在のテイクを切り替えましたが、プラグインはまだその音声を受け取っていません。REAPER で元に戻すか、もう一度編集して再割り当てさせてください",
-    ara_clip_direction_unknown:
-        "ホストがこのアイテムの方向を報告していないため、プラグインは逆再生かどうかを判別できません。逆再生とも正再生とも見なしません",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",
@@ -2140,12 +2137,13 @@ export const jaJP = {
         "未適用の編集が残っています。再読み込みするとローカルのカーブが置き換わります。続行しますか？",
     plugin_apply_reload_confirm: "再読み込みを実行",
     plugin_apply_hint:
-        "クリップ編集とフェード幅は REAPER に同期 · フェード音声は REAPER が処理 · 逆再生は未対応",
+        "クリップ編集とフェード幅は REAPER に同期 · フェード音声は REAPER が処理 · 逆再生は HiFiShifter が描画",
     plugin_transport_stop: "REAPER の再生を停止",
     plugin_transport_play: "REAPER の再生/一時停止",
     plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
-    plugin_reverse_unavailable: "ARA は逆再生音声を提供しません。逆再生は REAPER で行ってください",
+    plugin_reverse_unavailable:
+        "逆再生はホストのアイテム操作です。REAPER でこのクリップを逆再生してください",
     plugin_daw_controlled_reason:
         "REAPER が制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 

@@ -571,20 +571,23 @@ impl ReaperHost {
         let take = checked(&authorized, || unsafe { (table.parent)(pointer, 2) })?;
         self.geometry_for_take(take, authorized)
     }
-    /// 读取一个 take 的倒放方向；`None` = 读不出来（宿主没给读取器、或调用失败）。
+    /// 读取一个 take 的倒放方向；读不出来时返回 `false`（**按正放**）。
     ///
-    /// 【为什么不报错】方向只是显示用的附加信息。为一个 take 读不到方向而让整份
+    /// 【为什么不报错】方向只是渲染输入的附加信息。为一个 take 读不到方向而让整份
     /// 清单失败，是把可选增强变成了硬依赖 —— 与 folder 展开同一条原则。
     ///
-    /// 【为什么不反推】官方头文件给了 `PCM_Source_GetSectionInfo(..., bool* revOut)`
+    /// 【读不到时按正放】官方头文件给了 `PCM_Source_GetSectionInfo(..., bool* revOut)`
     /// 这个**直接**的方向位（"If a section/reverse block, retrieves
     /// offset/len/reverse. return true if success"）。返回 false 表示"不是
-    /// section/reverse 块"，此时**不能**断言"没倒放" —— 那会把"读不到"说成"没倒放"。
-    pub(super) fn take_reversed(
-        &self,
-        take: *mut c_void,
-        authorized: &impl Fn() -> bool,
-    ) -> Option<bool> {
+    /// section/reverse 块"，此时按正放处理 —— 与 `loop_enabled` 同一纪律：读不到不
+    /// 阻断渲染，也不制造一个用户无法处置的提示。
+    pub(super) fn take_reversed(&self, take: *mut c_void, authorized: &impl Fn() -> bool) -> bool {
+        self.take_reversed_raw(take, authorized).unwrap_or(false)
+    }
+
+    /// 方向位的原始读数；`None` = 读不出来。对外一律经 [`Self::take_reversed`] 落成
+    /// `bool`，本函数只用来把"读不到"这一路径集中在一处。
+    fn take_reversed_raw(&self, take: *mut c_void, authorized: &impl Fn() -> bool) -> Option<bool> {
         let api = self.take_enum.as_ref()?.direction.as_ref()?;
         let geometry = self.geometry.as_ref()?;
         let project = self.project(authorized).ok()?;

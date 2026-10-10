@@ -2088,12 +2088,9 @@ export const koKR = {
     ara_host_audio_folder_body:
         "REAPER는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",
     ara_clip_syncing_host_audio: "REAPER의 오디오 할당 완료를 기다리는 중",
-    ara_clip_reversed_host_handled: "REAPER가 역재생합니다. HiFiShifter는 처리하지 않습니다",
     ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중",
     ara_clip_host_take_switched:
         "REAPER가 이 항목의 현재 테이크를 바꿨지만 플러그인이 아직 그 오디오를 받지 못했습니다. REAPER에서 실행 취소하거나 한 번 더 편집해 다시 할당되게 하세요",
-    ara_clip_direction_unknown:
-        "호스트가 이 항목의 방향을 보고하지 않아 플러그인이 역재생 여부를 판단할 수 없습니다. 역재생으로도, 정재생으로도 단정하지 않습니다",
     ara_replace_dirty_message:
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",
@@ -2111,7 +2108,7 @@ export const koKR = {
         "적용되지 않은 편집이 남아 있습니다. 다시 로드하면 로컬 곡선이 교체됩니다. 계속할까요?",
     plugin_apply_reload_confirm: "다시 로드 확인",
     plugin_apply_hint:
-        "클립 편집과 페이드 너비는 REAPER에 동기화 · 페이드 오디오는 REAPER가 처리 · 역재생은 미지원",
+        "클립 편집과 페이드 너비는 REAPER에 동기화 · 페이드 오디오는 REAPER가 처리 · 역재생은 HiFiShifter가 렌더링",
     plugin_transport_stop: "REAPER에서 재생 정지",
     plugin_transport_play: "REAPER에서 재생/일시 정지",
     plugin_standalone_only: "독립 실행형 앱에서만 사용할 수 있습니다",

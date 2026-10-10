@@ -2046,12 +2046,9 @@ export const zhTW = {
     ara_host_audio_folder_body:
         "REAPER 按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音訊分配",
-    ara_clip_reversed_host_handled: "由 REAPER 倒放；HiFiShifter 不處理這一條",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
     ara_clip_host_take_switched:
         "REAPER 換了這一條的目前 Take，外掛還沒拿到它的音訊；在 REAPER 裡復原，或再編輯一下讓它重新分配",
-    ara_clip_direction_unknown:
-        "宿主沒有回報這一條的方向，外掛無法判斷它是否倒放；既不標為倒放，也不假定為正放",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",
     ara_replace_dirty_confirm: "取代未儲存的工程",
     ara_revisions: "修訂 {revision} · 模型 {model}",
@@ -2066,12 +2063,13 @@ export const zhTW = {
     plugin_apply_reload_host: "重新載入宿主",
     plugin_apply_reload_message: "目前仍有未套用的編輯。重新載入會取代本機曲線，要繼續嗎？",
     plugin_apply_reload_confirm: "確認重新載入",
-    plugin_apply_hint: "片段編輯與漸變寬度同步 REAPER · 漸變聲音由 REAPER 處理 · 倒放暫不支援",
+    plugin_apply_hint:
+        "片段編輯與漸變寬度同步 REAPER · 漸變聲音由 REAPER 處理 · 倒放由 HiFiShifter 渲染",
     plugin_transport_stop: "控制 REAPER 停止播放",
     plugin_transport_play: "控制 REAPER 播放/暫停",
     plugin_standalone_only: "僅在獨立 App 中可用",
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
-    plugin_reverse_unavailable: "ARA 不提供反向音訊；倒放請在 REAPER 裡操作",
+    plugin_reverse_unavailable: "倒放是宿主 item 操作；請在 REAPER 裡倒放這一條",
     plugin_daw_controlled_reason: "由 REAPER 控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

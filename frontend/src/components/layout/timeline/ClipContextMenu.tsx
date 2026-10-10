@@ -427,7 +427,11 @@ export const ClipContextMenu: React.FC<{
     const hostTakes = !pluginMode;
     /** 需要**新建宿主 item** 的动作（胶合）。 */
     const hostItemCreate = !pluginMode;
-    /** 倒放写回：ARA 不给反向 PCM，插件渲染不出正确的反向内容。 */
+    /**
+     * 倒放写回：倒放是**宿主 item 操作**（REAPER 换新 take / 改 section），插件只负责把
+     * 结果渲染成反向音频，不自己翻转宿主 item。所以这里仍不可用 —— 但原因不再是
+     * "渲染不出反向内容"，那已由内核装配期翻转解决。
+     */
     const hostReverse = !pluginMode;
     /** 尚未搬进插件的插件自有工具（静音检测 / 音高参考 / 快速导出 / 假立体声扫描）。 */
     const pluginLocalTools = !pluginMode;

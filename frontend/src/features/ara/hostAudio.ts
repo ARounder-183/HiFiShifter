@@ -67,14 +67,9 @@ export function isAwaitingHostAudio(clip: {
 }
 
 /** 后端给出的逐 clip 宿主媒体分类；与 `render::editor::workspace` 一一对应。 */
-export const HOST_MEDIA_STATES: ReadonlySet<string> = new Set([
-    "ready",
-    "pending",
-    "unavailable",
-    "reversed",
-]);
+export const HOST_MEDIA_STATES: ReadonlySet<string> = new Set(["ready", "pending", "unavailable"]);
 
-export type HostMediaState = "ready" | "pending" | "unavailable" | "reversed";
+export type HostMediaState = "ready" | "pending" | "unavailable";
 
 /**
  * 该片段为什么没有（或已有）音频。
@@ -82,11 +77,13 @@ export type HostMediaState = "ready" | "pending" | "unavailable" | "reversed";
  * 【为什么不能只用一个布尔】"没有 `source_path`"同时命中的情形里，只有一种是故障：
  * - `pending` —— 刚分割/裁切/粘贴，宿主还在分配 region。**在途**，会自己好。
  * - `unavailable` —— FX 挂在 folder 父轨上，本实例**永远**拿不到组内音频。**用法问题**。
- * - `reversed` —— 倒放片段被隔离：ARA 不给反向 PCM。**宿主在处理**。
  * - `ready` —— 正常。
  *
- * 四者此前共用一句"等待 REAPER 提供音频（未分配 ARA 区域）"，于是"我刚分割了一下"
+ * 三者此前共用一句"等待 REAPER 提供音频（未分配 ARA 区域）"，于是"我刚分割了一下"
  * 看起来像"插件坏了"。分类名由后端给（语言无关），文案在这里查 catalog。
+ *
+ * 【为什么没有"倒放"这一态】倒放现在由本插件渲染（内核装配期翻转），与正放同为
+ * `ready`。方向是纯渲染输入，不是用户需要处置的状态。
  *
  * 缺省（独立 App、或旧后端不带该字段）时按 `source_path` 推断 —— 沿用旧行为，
  * 不猜一个新状态。
@@ -113,23 +110,15 @@ export function hostMediaState(clip: {
  * - `unclaimed` —— 这个 item 从未被本实例的 ARA region 认领。
  * - `folder_parent` —— FX 挂在 folder 父轨，本实例永远拿不到组内音频。**用法问题**。
  * - `awaiting_region` —— 等超时了仍没有 region；多半是宿主侧出了别的岔子。
- * - `direction_unknown` —— 连这一条**是不是倒放**都读不出来（`PCM_Source_GetSectionInfo`
- *   不可用）。再等也不会变好；如实说明，不宣称"是正放"。
  */
 export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
     "take_switched",
     "unclaimed",
     "folder_parent",
     "awaiting_region",
-    "direction_unknown",
 ]);
 
-export type HostMediaReason =
-    | "take_switched"
-    | "unclaimed"
-    | "folder_parent"
-    | "awaiting_region"
-    | "direction_unknown";
+export type HostMediaReason = "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region";
 
 /**
  * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。

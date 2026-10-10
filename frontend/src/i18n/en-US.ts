@@ -2102,12 +2102,9 @@ export const enUS = {
     ara_host_audio_folder_body:
         "REAPER manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
     ara_clip_syncing_host_audio: "Waiting for REAPER to finish assigning audio",
-    ara_clip_reversed_host_handled: "Reversed by REAPER; HiFiShifter does not process it",
     ara_clip_waiting_for_host_audio: "Waiting for REAPER to hand over audio",
     ara_clip_host_take_switched:
         "REAPER switched this item's active take and the plugin has not received its audio yet; undo in REAPER, or edit once more to make it reassign",
-    ara_clip_direction_unknown:
-        "The host did not report this item's direction, so the plugin cannot tell whether it is reversed; it neither marks it reversed nor assumes forward",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",
@@ -2125,12 +2122,13 @@ export const enUS = {
         "There are still unapplied edits. Reloading will replace the local curves. Continue?",
     plugin_apply_reload_confirm: "Reload Anyway",
     plugin_apply_hint:
-        "Clip edits and fade widths sync to REAPER · REAPER renders fade audio · Reverse playback unsupported",
+        "Clip edits and fade widths sync to REAPER · REAPER renders fade audio · Reverse is rendered by HiFiShifter",
     plugin_transport_stop: "Stop playback in REAPER",
     plugin_transport_play: "Play or pause in REAPER",
     plugin_standalone_only: "Only available in the standalone app",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
-    plugin_reverse_unavailable: "ARA delivers no reversed audio; use REAPER to reverse",
+    plugin_reverse_unavailable:
+        "Reversing is a host item operation; use REAPER to reverse this clip",
     plugin_daw_controlled_reason:
         "Controlled by REAPER; manage files, clip geometry, tempo, meter and playback in the host",
 

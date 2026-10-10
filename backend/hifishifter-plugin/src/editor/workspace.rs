@@ -120,8 +120,8 @@ fn sync_host_takes(
                 "source_end_sec": g.source_start_sec + g.duration_sec * g.playback_rate,
                 "playback_rate": g.playback_rate,
                 "channel_mode": g.channel_mode,
-                // 读不出来时留 false（不显示倒放标记），不编造"没倒放"的结论。
-                "reversed": take.reversed.unwrap_or(false),
+                // 宿主报告的方向；读不到时 `take_reversed` 已落成 false（按正放）。
+                "reversed": take.reversed,
                 // 循环源（item 级）。内核的 `loop_enabled` 语义与 REAPER 的循环源一致：
                 // 对**整份媒体**取模回绕，而插件物化的 PCM 就是完整源。
                 "loop_enabled": g.loop_source,
@@ -720,26 +720,15 @@ impl DocumentSession {
                 let has_source = clip["source_path"]
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
-                let reversed = clip["reversed"].as_bool() == Some(true);
-                // 方向位能否读到（三态：`Some(true)` / `Some(false)` / 读不出来）。
-                // `take_reversed` 返回 `None` 时**不能**断言"没倒放" —— 那会把"读不到"
-                // 说成"是正放"，用户据此以为插件识别错了。如实投影给前端：读不出来时
-                // 不显示方向标记，也不宣称正放。
-                let direction_known = item
-                    .takes
-                    .iter()
-                    .find(|take| take.active)
-                    .is_none_or(|take| take.reversed.is_some());
-                clip["reversed_known"] = serde_json::json!(direction_known);
                 // `waiting` 表示"这条还在等 ARA 音频"：只有它继续计时。其余状态
-                // （拿到源、倒放隔离、folder 父轨）都必须清掉起点，否则陈旧的起点会让
-                // 下一次掉回"在途"时立刻被判超期。
+                // （拿到源、folder 父轨）都必须清掉起点，否则陈旧的起点会让下一次
+                // 掉回"在途"时立刻被判超期。
+                //
+                // 【为什么没有"倒放"这一态】倒放现在由本插件渲染
+                // （`ReversePolicy::Materialize` + 内核装配期翻转），不再是"交给宿主
+                // 处理"。它和正放一样走 `ready` —— 方向不再是用户需要处置的状态。
                 let (state, reason, waiting) = if has_source {
                     ("ready", None, false)
-                } else if reversed {
-                    // 倒放被隔离：插件渲染不出反向内容，这一条由 REAPER 处理。
-                    // 与"还没拿到音频"不是一回事，文案必须分开。
-                    ("reversed", None, false)
                 } else if folder_parent && !claimed.contains(&item_id) {
                     ("unavailable", Some("folder_parent"), false)
                 } else {
@@ -751,11 +740,6 @@ impl DocumentSession {
                         // 【为什么这里才给原因】未超期时原因往往是"马上就好了"
                         // （宿主正在分配 region），报原因等于制造噪声。超期后原因才
                         // 是用户真正需要的那条信息。
-                        //
-                        // 【优先级：可操作的成因优先】`take_switched`（撤销/再编辑即可）
-                        // 与 `unclaimed`（region 从未分配）都是**可操作**的，比"读不到
-                        // 方向"更该先说；`direction_unknown` 压过 `awaiting_region` ——
-                        // 方向读不出来时再等也不会变好。
                         let reason = if !claimed.contains(&item_id) {
                             "unclaimed"
                         } else if authorized_by_item.get(&item_id).is_some_and(|authorized| {
@@ -768,9 +752,6 @@ impl DocumentSession {
                             // 不符 —— 典型来源是"倒放 Item 为新 Take"（新 take 换了文件，
                             // 而 ARA 没有重新认领）。
                             "take_switched"
-                        } else if !direction_known {
-                            // 连"是不是倒放"都判不了：如实说，且再等也没用。
-                            "direction_unknown"
                         } else {
                             "awaiting_region"
                         };
@@ -933,10 +914,7 @@ impl DocumentSession {
         // item GUID → (方向, 循环源, 声道模式, 宿主源窗口)。取 **active take** 的几何：
         // 扁平投影描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
         // 源窗口 `(start, span)` 只服务倒放的**镜像坐标复原**（见下）。
-        let facts: std::collections::HashMap<
-            String,
-            (Option<bool>, bool, i32, Option<(f64, f64)>),
-        > = self
+        let facts: std::collections::HashMap<String, (bool, bool, i32, Option<(f64, f64)>)> = self
             .ui_tracks
             .lock()
             .unwrap()
@@ -944,7 +922,8 @@ impl DocumentSession {
             .flat_map(|track| &track.items)
             .map(|item| {
                 let active = item.takes.iter().find(|take| take.active);
-                let reversed = active.and_then(|take| take.reversed);
+                // 读不到方向 ⇒ 正放（`take_reversed` 已落成 `bool`）。
+                let reversed = active.is_some_and(|take| take.reversed);
                 // 循环源与声道模式是 item 级 / active take 级；缺 active take 时退回
                 // item 的权威几何。
                 let geometry = active.map(|take| &take.geometry).unwrap_or(&item.geometry);
@@ -970,10 +949,7 @@ impl DocumentSession {
             let Some((reversed, loop_source, channel_mode, host_window)) = facts.get(guid) else {
                 continue;
             };
-            // 方向：读不出来时**不改**（`None` 不当作"没倒放"）。
-            if let Some(reversed) = reversed {
-                clip.reversed = *reversed;
-            }
+            clip.reversed = *reversed;
             clip.loop_enabled = *loop_source;
             clip.channel_mode = *channel_mode;
             // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
@@ -1001,9 +977,7 @@ impl DocumentSession {
             // 让 active take 也带上同一份事实：`normalize_takes()` 之后 clip 的扁平字段
             // 来自 active take，只在 clip 上写会被下一次物化覆盖。
             for take in &mut clip.takes {
-                if let Some(reversed) = reversed {
-                    take.reversed = *reversed;
-                }
+                take.reversed = *reversed;
                 take.loop_enabled = *loop_source;
                 take.channel_mode = *channel_mode;
             }

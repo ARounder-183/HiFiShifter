@@ -109,7 +109,6 @@ describe("hostMediaState", () => {
     test("后端分类优先，且原样透传", () => {
         expect(hostMediaState({ sourcePath: undefined, hostMedia: "pending" })).toBe("pending");
         expect(hostMediaState({ sourcePath: "x", hostMedia: "ready" })).toBe("ready");
-        expect(hostMediaState({ sourcePath: undefined, hostMedia: "reversed" })).toBe("reversed");
         expect(hostMediaState({ sourcePath: undefined, hostMedia: "unavailable" })).toBe(
             "unavailable",
         );

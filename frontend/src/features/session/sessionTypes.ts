@@ -290,13 +290,6 @@ export interface ClipInfo {
      */
     hostMediaReason?: string;
     /**
-     * 这一条的**方向位**是否读得到（插件模式；缺省 true）。
-     *
-     * `false` = 宿主没给出方向（`PCM_Source_GetSectionInfo` 不可用）。此时既不能画倒放
-     * 标记，也**不能**宣称"是正放" —— 如实显示"方向未知"，见 `hostAudio`。
-     */
-    reversedKnown?: boolean;
-    /**
      * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
      * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
      * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；

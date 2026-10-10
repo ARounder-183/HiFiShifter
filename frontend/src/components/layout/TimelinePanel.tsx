@@ -3932,24 +3932,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 【为什么按原因分开】"等待 REAPER 提供音频"回答不了用户最需要
                         // 的问题：该等、该改用法、还是该撤销。`take_switched`（宿主换了
                         // 当前 Take 而 ARA 未重认领，典型来源"倒放 Item 为新 Take"）是
-                        // **可操作**的，必须给出下一步；`direction_unknown`（方向位读不
-                        // 出来）则要说清"等也没用"；其余退回通用文案。
+                        // **可操作**的，必须给出下一步；其余退回通用文案。
                         text =
                             hostMediaReason(clip) === "take_switched"
                                 ? t("ara_clip_host_take_switched")
-                                : hostMediaReason(clip) === "direction_unknown"
-                                  ? t("ara_clip_direction_unknown")
-                                  : t("ara_clip_waiting_for_host_audio");
-                        break;
-                    case "reversed":
-                        text = t("ara_clip_reversed_host_handled");
+                                : t("ara_clip_waiting_for_host_audio");
                         break;
                     default:
                         break;
-                }
-                // 方向位读不出来（即便拿到了音频）：不宣称"是正放"。
-                if (text === null && clip.reversedKnown === false) {
-                    text = t("ara_clip_direction_unknown");
                 }
             }
             publishFadeRichTooltip(anchor, text);
