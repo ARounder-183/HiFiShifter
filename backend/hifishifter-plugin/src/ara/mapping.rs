@@ -519,3 +519,422 @@ pub fn clip_starts_line(timeline: &TimelineState) -> String {
         .collect::<Vec<_>>();
     format!("ara: clipStartsSec=[{}]", starts.join(","))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一份与探针 Task 1 采集形状一致的文档：一条源、一条修改、一条序列、两条 region。
+    ///
+    /// region 0 表达拉伸（`durationMod=1.0` / `durationPlay=2.0` ⇒ rate 0.5），
+    /// region 1 不拉伸（rate 1.0）。
+    fn probe_shaped_document() -> AraDocument {
+        ara_document_from_json(
+            r#"{
+                "documentName": "session",
+                "audioSources": [
+                    { "persistentID": "C:/audio/one.wav", "name": "one", "sampleRate": 48000.0,
+                      "sampleCount": 144000, "durationSeconds": 3.0, "channelCount": 2,
+                      "sampleAccessEnabled": true }
+                ],
+                "musicalContexts": [
+                    { "name": "ctx", "regionSequences": [
+                        { "name": "Track A", "orderIndex": 0, "playbackRegionCount": 2 }
+                    ] }
+                ],
+                "audioModifications": [
+                    { "persistentID": "mod-1", "audioSourcePersistentID": "C:/audio/one.wav" }
+                ],
+                "playbackRegions": [
+                    { "name": "clip a", "audioSourcePersistentID": "C:/audio/one.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 0.5, "durationInModificationTime": 1.0,
+                      "startInPlaybackTime": 4.0, "durationInPlaybackTime": 2.0,
+                      "isTimestretchEnabled": false },
+                    { "audioSourcePersistentID": "C:/audio/one.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 1.5, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 6.0, "durationInPlaybackTime": 0.5 }
+                ]
+            }"#,
+        )
+        .expect("probe-shaped document parses")
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn json_round_trip_reads_the_probe_shape() {
+        let doc = probe_shaped_document();
+        assert_eq!(doc.document_name, "session");
+        assert_eq!(doc.audio_sources.len(), 1);
+        assert_eq!(doc.audio_sources[0].persistent_id, "C:/audio/one.wav");
+        assert_eq!(doc.audio_sources[0].name.as_deref(), Some("one"));
+        assert!(doc.audio_sources[0].sample_access_enabled);
+        assert_eq!(doc.audio_modifications[0].persistent_id, "mod-1");
+        assert_eq!(doc.playback_regions[0].region_sequence_index, Some(0));
+        assert_eq!(doc.playback_regions[1].name, None);
+    }
+
+    #[test]
+    fn source_rates_and_stretch_are_read_from_the_document() {
+        let doc = probe_shaped_document();
+        assert_eq!(source_sample_rates(&doc), vec![48000]);
+        // region 0 的 mod/play 时长不等 ⇒ 观察到拉伸。
+        assert!(has_observed_time_stretch(&doc));
+
+        let untimed = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 1 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInModificationTime": 1.0, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("untimed document parses");
+        assert_eq!(source_sample_rates(&untimed), vec![44100]);
+        assert!(!has_observed_time_stretch(&untimed));
+    }
+
+    #[test]
+    fn mapping_projects_track_and_clip_geometry_and_take_media() {
+        let doc = probe_shaped_document();
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(outcome.clip_regions, vec![0, 1]);
+
+        assert_eq!(outcome.timeline.tracks.len(), 1);
+        let track = &outcome.timeline.tracks[0];
+        assert_eq!(track.id, "ara-track-0");
+        assert_eq!(track.name, "Track A");
+        assert_eq!(track.order, 0);
+
+        assert_eq!(outcome.timeline.clips.len(), 2);
+        let clip = &outcome.timeline.clips[0];
+        assert_eq!(clip.id, "ara-clip-1");
+        assert_eq!(clip.track_id, "ara-track-0");
+        assert_eq!(clip.name, "clip a");
+        assert_close(clip.start_sec, 4.0);
+        assert_close(clip.length_sec, 2.0);
+
+        // take 物化到扁平投影：源窗口是**正放口径**（startMod .. startMod+durMod）。
+        assert_eq!(clip.source_path.as_deref(), Some("C:/audio/one.wav"));
+        assert_close(clip.source_start_sec, 0.5);
+        assert_close(clip.source_end_sec, 1.5);
+        assert_eq!(clip.source_sample_rate, Some(48000));
+        assert_eq!(clip.source_channels, Some(2));
+        assert_eq!(clip.duration_sec, Some(3.0));
+        // 拉伸由时长比值表达，而不是 isTimestretchEnabled 旗标。
+        assert!((clip.playback_rate - 0.5).abs() < 1e-6);
+
+        // 第二条 region 名字缺席时回退到源名，且不拉伸。
+        let second = &outcome.timeline.clips[1];
+        assert_eq!(second.id, "ara-clip-2");
+        assert_eq!(second.name, "one");
+        assert_close(second.start_sec, 6.0);
+        assert!((second.playback_rate - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn playback_rate_comes_from_the_duration_ratio_not_the_stretch_flag() {
+        // 旗标为 false，但时长确实不等：映射仍必须按比值给出速率。
+        let doc = probe_shaped_document();
+        assert!(!doc.playback_regions[0].is_timestretch_enabled);
+        let clip = &ara_document_to_timeline(&doc).unwrap().clips[0];
+        assert!((clip.playback_rate - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zero_length_region_is_skipped_without_failing_the_document() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 1 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 0.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        // 整份映射**不**失败（这正是"一个零长度 item 打死整个插件"的修复点）。
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.timeline.clips.is_empty());
+        assert_eq!(
+            outcome.skipped,
+            vec![SkippedRegion {
+                index: 0,
+                reason: SkipReason::NonPositivePlaybackDuration,
+            }]
+        );
+        assert_eq!(
+            SkipReason::NonPositivePlaybackDuration.as_str(),
+            "non_positive_duration"
+        );
+    }
+
+    #[test]
+    fn unknown_source_and_modification_are_skipped_locally_with_reasons() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 2 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "missing", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "missing",
+                      "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.timeline.clips.is_empty());
+        assert_eq!(
+            outcome.skipped,
+            vec![
+                SkippedRegion {
+                    index: 0,
+                    reason: SkipReason::UnknownSource,
+                },
+                SkippedRegion {
+                    index: 1,
+                    reason: SkipReason::UnknownModification,
+                },
+            ]
+        );
+        assert_eq!(SkipReason::UnknownSource.as_str(), "unknown_source");
+        assert_eq!(
+            SkipReason::UnknownModification.as_str(),
+            "unknown_modification"
+        );
+    }
+
+    #[test]
+    fn clip_regions_keeps_original_indices_when_a_middle_region_is_skipped() {
+        // 【为什么钉这条】调用方靠 `clip_regions` 把身份挂回 region key；一旦有 region
+        // 被跳过，按顺序 zip 就会整体错位，把身份挂到错误的 clip 上。
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 3 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 1.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInPlaybackTime": 1.0, "durationInPlaybackTime": 0.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInPlaybackTime": 2.0, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert_eq!(outcome.clip_regions, vec![0, 2]);
+        assert_eq!(
+            outcome.skipped,
+            vec![SkippedRegion {
+                index: 1,
+                reason: SkipReason::NonPositivePlaybackDuration,
+            }]
+        );
+        // clip id 也按**原文档下标**生成，跳过后不前移。
+        let ids = outcome
+            .timeline
+            .clips
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["ara-clip-1", "ara-clip-3"]);
+    }
+
+    #[test]
+    fn fallback_ownership_splits_by_declared_region_counts() {
+        // 没有 regionSequenceIndex 的探针 dump：按各序列声明的数量顺序切分。
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [
+                        { "name": "A", "playbackRegionCount": 1 },
+                        { "name": "B", "playbackRegionCount": 1 }
+                    ] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 1.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInPlaybackTime": 1.0, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        let timeline = ara_document_to_timeline(&doc).expect("document maps");
+        assert_eq!(timeline.tracks.len(), 2);
+        assert_eq!(timeline.tracks[0].id, "ara-track-0");
+        assert_eq!(timeline.tracks[1].id, "ara-track-1");
+        assert_eq!(timeline.clips[0].track_id, "ara-track-0");
+        assert_eq!(timeline.clips[1].track_id, "ara-track-1");
+    }
+
+    #[test]
+    fn declared_count_mismatch_is_fatal() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 1 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        // 声明数量与扁平列表对不上 ⇒ 无法判断任何一条 region 的归属 ⇒ 整份失败。
+        let error = ara_document_to_timeline(&doc).expect_err("mismatch is fatal");
+        assert!(matches!(
+            error,
+            MappingError::SequenceCountMismatch {
+                declared: 1,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_region_sequence_index_wins_and_out_of_range_is_skipped() {
+        // 显式边存在时**不**做声明数量一致性检查。
+        let explicit = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [
+                        { "playbackRegionCount": 0 },
+                        { "playbackRegionCount": 0 }
+                    ] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "regionSequenceIndex": 1, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+        let outcome =
+            ara_document_to_timeline_reporting(&explicit).expect("explicit ownership maps");
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(outcome.timeline.clips[0].track_id, "ara-track-1");
+
+        // 越界的显式下标 ⇒ 该 region 被跳过，其余照常。
+        let out_of_range = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 0 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "regionSequenceIndex": 5, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+        let outcome = ara_document_to_timeline_reporting(&out_of_range).expect("document maps");
+        assert!(outcome.timeline.clips.is_empty());
+        assert_eq!(
+            outcome.skipped,
+            vec![SkippedRegion {
+                index: 0,
+                reason: SkipReason::UnknownRegionSequence,
+            }]
+        );
+        assert_eq!(
+            SkipReason::UnknownRegionSequence.as_str(),
+            "unknown_region_sequence"
+        );
+    }
+
+    #[test]
+    fn summary_and_clip_start_lines_are_stable() {
+        let doc = probe_shaped_document();
+        let timeline = ara_document_to_timeline(&doc).expect("document maps");
+        assert_eq!(
+            summary_line(&doc, &timeline),
+            "ara: sources=1 modifications=1 regionSequences=1 playbackRegions=2 clips=2"
+        );
+        assert_eq!(
+            clip_starts_line(&timeline),
+            "ara: clipStartsSec=[4.000000,6.000000]"
+        );
+    }
+
+    #[test]
+    fn default_bpm_is_pinned() {
+        assert_eq!(default_bpm(), 120.0);
+    }
+}

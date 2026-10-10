@@ -85,3 +85,53 @@ pub(crate) struct BoundHostGeometry {
     pub region_key: u64,
     pub geometry: HostClipGeometry,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::host_value_compatible;
+
+    #[test]
+    fn identical_values_are_compatible() {
+        assert!(host_value_compatible(0.0, 0.0));
+        assert!(host_value_compatible(4.0, 4.0));
+        assert!(host_value_compatible(-1.25, -1.25));
+    }
+
+    #[test]
+    fn f32_round_trip_of_playback_rate_stays_compatible() {
+        // `Clip::playback_rate` 是 f32，写回前置检查拿它与 REAPER 的 f64 `D_PLAYRATE`
+        // 比 —— f32 往返本身就有 ~1e-7 相对误差。这一档**必须**判为相容，否则用户
+        // 每改一次速率都会撞 "host clip changed before GUI commit"。
+        for rate in [0.25_f32, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            let projected = rate as f64;
+            let host = (rate as f64) * (1.0 + 1e-7);
+            assert!(
+                host_value_compatible(projected, host),
+                "f32 round-trip of {rate} must stay compatible"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_geometry_change_is_rejected() {
+        // 1e-4 秒在 44.1k 上约 4 个采样点，是真实的移动，不是舍入。
+        assert!(!host_value_compatible(0.0, 1e-4));
+        assert!(!host_value_compatible(1.0, 1.001));
+        assert!(!host_value_compatible(48000.0, 48000.5));
+    }
+
+    #[test]
+    fn absolute_floor_covers_values_near_zero() {
+        // 接近 0 的量没有相对项可用，由 1e-6 的绝对项兜底。
+        assert!(host_value_compatible(0.0, 5e-7));
+        assert!(!host_value_compatible(0.0, 2e-6));
+    }
+
+    #[test]
+    fn non_finite_values_are_never_compatible() {
+        assert!(!host_value_compatible(f64::NAN, f64::NAN));
+        assert!(!host_value_compatible(f64::INFINITY, f64::INFINITY));
+        assert!(!host_value_compatible(0.0, f64::NAN));
+        assert!(!host_value_compatible(f64::INFINITY, 1.0));
+    }
+}

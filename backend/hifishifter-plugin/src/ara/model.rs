@@ -153,6 +153,42 @@ impl ModelHandle {
         Self::default()
     }
 
+    /// 分配一个 region 槽位、登记身份并落盘这份 region 数据。
+    ///
+    /// 【为什么复用已销毁的槽位，而不是永远 `push`】`region_keys` /
+    /// `destroyed_regions` / `document.playback_regions` 此前只增不减，长会话里随
+    /// **编辑次数**无界增长（每次分割/移动都会 destroy + create）。取已销毁槽位中
+    /// 最小的一个复用，就把三者都钉在"同时存活的 region 数"这个上界内。
+    ///
+    /// 【为什么复用是安全的】宿主把我们的 `usize` 状态当**不透明令牌**用；region
+    /// 销毁后按 ARA 契约宿主不再引用它，所以把该槽位交给新 region 不会让任何存活对象
+    /// 串号。存活 region 的槽位（进而 `ara-clip-N` 身份与 `renderer` 分配）一个都不动 ——
+    /// 这正是"删除不压缩下标"这条既有不变式仍然成立的原因。
+    fn allocate_region(&mut self, key: u64, region: AraPlaybackRegion) -> Result<usize, AraError> {
+        let reused = self.destroyed_regions.iter().copied().min();
+        let index = match reused {
+            Some(slot) => slot,
+            None => self.document.playback_regions.len(),
+        };
+        region_owners()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .register(key, self.document_id, index)
+            .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
+        match reused {
+            Some(slot) => {
+                self.region_keys[slot] = key;
+                self.destroyed_regions.remove(&slot);
+                self.document.playback_regions[slot] = region;
+            }
+            None => {
+                self.region_keys.push(key);
+                self.document.playback_regions.push(region);
+            }
+        }
+        Ok(index)
+    }
+
     /// 当前累积到的 ARA 文档（供映射与测试）。
     pub fn document(&self) -> &AraDocument {
         &self.document
@@ -906,16 +942,26 @@ impl PlaybackRegions for ModelHandle {
         // 用数值是为了不依赖 sys 包的常量导出路径 —— 那两个值来自 ARAInterface.h，稳定。
         let has_content_based_fade_at_head = (flags & 8) != 0;
         let has_content_based_fade_at_tail = (flags & 4) != 0;
-        let index = self.document.playback_regions.len();
         let key = context
             .realtime_key()
             .ok_or(AraError::InvalidState("missing region key"))?;
-        region_owners()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .register(key, self.document_id, index)
-            .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
-        self.region_keys.push(key);
+        let index = self.allocate_region(
+            key,
+            AraPlaybackRegion {
+                name: properties.name().map(str::to_owned),
+                audio_source_persistent_id: source_persistent_id.clone(),
+                audio_modification_persistent_id: modification_persistent_id,
+                region_sequence_index: sequence_index,
+                start_in_modification_time: properties.start_in_modification_time(),
+                duration_in_modification_time: properties.duration_in_modification_time(),
+                start_in_playback_time: properties.start_in_playback_time(),
+                duration_in_playback_time: properties.duration_in_playback_time(),
+                // ARA 的拉伸由"时长差"表达，这个旗标只是声明；映射层用的是时长比值。
+                is_timestretch_enabled: (flags & 1) != 0,
+                has_content_based_fade_at_head,
+                has_content_based_fade_at_tail,
+            },
+        )?;
         self.publish_head_tail()?;
         if let Some(sequence) = properties.region_sequence() {
             self.session
@@ -926,20 +972,6 @@ impl PlaybackRegions for ModelHandle {
                 .or_default()
                 .insert(key);
         }
-        self.document.playback_regions.push(AraPlaybackRegion {
-            name: properties.name().map(str::to_owned),
-            audio_source_persistent_id: source_persistent_id.clone(),
-            audio_modification_persistent_id: modification_persistent_id,
-            region_sequence_index: sequence_index,
-            start_in_modification_time: properties.start_in_modification_time(),
-            duration_in_modification_time: properties.duration_in_modification_time(),
-            start_in_playback_time: properties.start_in_playback_time(),
-            duration_in_playback_time: properties.duration_in_playback_time(),
-            // ARA 的拉伸由"时长差"表达，这个旗标只是声明；映射层用的是时长比值。
-            is_timestretch_enabled: (flags & 1) != 0,
-            has_content_based_fade_at_head,
-            has_content_based_fade_at_tail,
-        });
         log::info!(
             "[ara] playback_region #{}: source={} startMod={:.6} durationMod={:.6} startPlay={:.6} durationPlay={:.6} flags=0x{:X}",
             index,
@@ -1627,5 +1659,95 @@ mod tests {
         PlaybackRegions::destroy_playback_region(&mut model, 0);
         model.remap_and_log();
         assert!(model.timeline().unwrap().clips.is_empty());
+    }
+
+    /// 首次映射就失败后，`ready` 必须能在**下一次**成功编辑上自愈，而不是砖化。
+    ///
+    /// 【为什么必须走生产路径】此前已有的用例手动 `ready.store(true)` 绕过
+    /// `prepare_renderers` —— 那只证明"标志能被置真"，没证明"失败之后还能自己回来"。
+    /// 这里让第一次映射真的以**文档级致命错误**失败（region 数量与序列声明对不上），
+    /// 从未发布过时间线 ⇒ `ready=false`；随后喂一份可映射的文档，`ready` 必须由
+    /// `prepare_renderers` 自己从 `false` 回到 `true`，否则宿主不重发 `end_editing`
+    /// 时实例会永久失效。
+    #[test]
+    fn a_failed_first_mapping_recovers_on_the_next_successful_edit() {
+        use std::sync::atomic::Ordering;
+
+        let mut model = ModelHandle::new();
+        // 声明 1 条 region，扁平列表却有 2 条，且都缺 `regionSequenceIndex` ⇒
+        // `SequenceCountMismatch`（文档级致命错误，逐 region 跳过救不了）。
+        model.document = crate::ara::ara_document_from_json(
+            r#"{
+                "audioSources": [ { "persistentID": "s", "sampleRate": 44100.0 } ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [ { "regionSequences": [ { "playbackRegionCount": 1 } ] } ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        model.remap_and_log();
+        assert!(model.timeline().is_none(), "致命错误不得发布半份时间线");
+        assert!(
+            !model.session.ready.load(Ordering::Acquire),
+            "从未成功映射过 ⇒ 未就绪"
+        );
+
+        // 宿主随后给出可映射的文档：下一次收口必须把实例自己拉回可用状态。
+        model.document = identity_document(&["A"]);
+        model.remap_and_log();
+        assert_eq!(model.timeline().unwrap().clips.len(), 1);
+        assert!(
+            model.session.ready.load(Ordering::Acquire),
+            "成功映射必须经 `prepare_renderers` 把 `ready` 置真"
+        );
+    }
+
+    /// 已销毁的槽位必须被**复用**：长会话里三份结构不得随"编辑次数"无界增长。
+    #[test]
+    fn destroyed_region_slots_are_reused_instead_of_growing_the_vectors() {
+        // 用**存活**的堆地址作键，避免与并行运行的其他用例在进程级 `region_owners`
+        // 上撞车（那里按 key 唯一登记）。
+        let owners = [
+            Box::new(0_u8),
+            Box::new(0_u8),
+            Box::new(0_u8),
+            Box::new(0_u8),
+        ];
+        let key = |index: usize| (&*owners[index] as *const u8) as u64;
+
+        let mut model = ModelHandle::new();
+        for slot in 0..3 {
+            model
+                .allocate_region(key(slot), AraPlaybackRegion::default())
+                .unwrap();
+        }
+        assert_eq!(model.region_keys.len(), 3);
+        assert_eq!(model.document.playback_regions.len(), 3);
+
+        // 销毁中间一个：下标不压缩（存活 region 的身份不变），槽位 1 进入待复用集合。
+        PlaybackRegions::destroy_playback_region(&mut model, 1);
+        assert_eq!(model.destroyed_regions, HashSet::from([1_usize]));
+        assert_eq!(model.region_keys.len(), 3, "销毁不得压缩下标");
+
+        // 再建一个：必须复用槽位 1，而不是把向量撑到 4。
+        let index = model
+            .allocate_region(key(3), AraPlaybackRegion::default())
+            .unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(model.region_keys.len(), 3, "槽位复用不得增长向量");
+        assert_eq!(model.document.playback_regions.len(), 3);
+        assert!(model.destroyed_regions.is_empty());
+        // 复用的是**销毁过的**槽位；存活 region 的键一个都没动。
+        assert_eq!(model.region_keys[0], key(0));
+        assert_eq!(model.region_keys[1], key(3));
+        assert_eq!(model.region_keys[2], key(2));
     }
 }
