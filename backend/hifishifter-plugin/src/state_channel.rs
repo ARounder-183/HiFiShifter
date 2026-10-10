@@ -6,6 +6,25 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 会话轨道键只用于live关联；值完全来自宿主的modification/source persistentID。
 pub(crate) type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
 
+/// 插件自有、宿主表达不到的**逐片段**属性。
+///
+/// 【为什么需要独立存储】clip 颜色与共振峰变形在宿主里没有对应概念（宿主只报告几何与
+/// 媒体），而 `session.timeline` 每次 `ensure_loaded` 都会被整体替换。不落在"有权威来源
+/// + 在共同投影入口重新播种"的地方，就会被下一次重建冲掉 —— 这正是 `fades` 用同一手法
+/// 解决的同一个问题（见 [`EditState::fades`] 与 [`EditState::apply`]）。
+///
+/// 【键为什么是 clip id】`apply` 收到的时间线里 clip id 形如 `ara-item-{item GUID}`，
+/// 即宿主的稳定 item 身份；与 `fades` 的键口径一致，冷重建后仍能对上。
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ClipLocalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// 共振峰变形是**渲染输入**（内核 DSP 读它），所以必须随片段一起播种，
+    /// 否则重新加载后声音会退回未变形的版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formant_morph: Option<hifishifter_kernel::state::ClipFormantMorph>,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct EditState {
     pub revision: u64,
@@ -21,6 +40,9 @@ pub(crate) struct EditState {
     /// REAPER稳定item GUID对应的HFS自有形状；不写回宿主shape/c/S字段。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fades: BTreeMap<String, crate::fade::FadeStyle>,
+    /// 插件自有、宿主表达不到的逐片段属性（颜色 / 共振峰变形）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub clip_local: BTreeMap<String, ClipLocalState>,
     /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
     #[serde(
         default,
@@ -43,6 +65,22 @@ impl EditState {
                 return Err("invalid fade item identity".into());
             }
             style.validate()?;
+        }
+        Ok(())
+    }
+    /// 逐片段自有属性同样有界：数量与颜色长度都设上限，避免不可信 state 撑爆内存。
+    fn validate_clip_local(&self) -> Result<(), String> {
+        if self.clip_local.len() > 10000 {
+            return Err("clip local state budget exceeded".into());
+        }
+        for local in self.clip_local.values() {
+            if local
+                .color
+                .as_deref()
+                .is_some_and(|color| color.len() > 64 || color.contains('\0'))
+            {
+                return Err("invalid clip color".into());
+            }
         }
         Ok(())
     }
@@ -235,6 +273,19 @@ impl EditState {
                 track.solo = edited.solo;
             }
         }
+        // 插件自有、宿主表达不到的逐片段属性：必须在**共同的投影入口**重新播种，
+        // 否则会被下一次 `ensure_loaded` 的整份重建冲掉（颜色消失、共振峰变形失效）。
+        for clip in &mut timeline.clips {
+            let Some(local) = self.clip_local.get(&clip.id) else {
+                continue;
+            };
+            if let Some(color) = &local.color {
+                clip.color = color.clone();
+            }
+            if local.formant_morph.is_some() {
+                clip.formant_morph = local.formant_morph.clone();
+            }
+        }
     }
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
@@ -242,12 +293,25 @@ impl EditState {
         self.groups.validate()?;
         self.atlas.validate()?;
         self.validate_fades()?;
+        self.validate_clip_local()?;
         for id in self.tracks.iter().map(|t| &t.id).chain(self.params.keys()) {
             if self.bindings.get(id).is_none_or(Vec::is_empty) {
                 return Err("ARA edit identity missing; cannot save edits".into());
             }
         }
-        let bytes=serde_json::to_vec(&serde_json::json!({"version":if !self.groups.is_empty() {5} else if !self.fades.is_empty() {4} else if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())?;
+        let version = if !self.clip_local.is_empty() {
+            6
+        } else if !self.groups.is_empty() {
+            5
+        } else if !self.fades.is_empty() {
+            4
+        } else if self.atlas.is_empty() {
+            2
+        } else {
+            3
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":self}))
+            .map_err(|e| e.to_string())?;
         if bytes.len() > hifishifter_ara_ipc::MAX_FRAME {
             return Err("state exceeds transport budget".into());
         }
@@ -262,12 +326,7 @@ impl EditState {
             return Err("state too large".into());
         }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if value["version"] != 1
-            && value["version"] != 2
-            && value["version"] != 3
-            && value["version"] != 4
-            && value["version"] != 5
-        {
+        if !(1..=6).contains(&value["version"].as_u64().unwrap_or(0)) {
             return Err("unsupported state version".into());
         }
         let mut restored: Self =
@@ -288,6 +347,7 @@ impl EditState {
             return Err("ARA edit identity missing in saved state".into());
         }
         restored.needs_rebind = !restored.tracks.is_empty() || !restored.params.is_empty();
+        restored.validate_clip_local()?;
         restored.revision = self
             .revision
             .max(restored.revision)
@@ -315,6 +375,42 @@ mod tests {
         assert_eq!(rendered.tracks[0].volume, 0.5);
         assert_eq!(rendered.project_sec, 1.);
         assert!(state.merge(&host(), &client, 0).is_err());
+    }
+    /// **不变量：插件自有逐片段属性必须在共同投影入口重新播种。**
+    ///
+    /// 【为什么这是回归测试】`session.timeline` 每次 `ensure_loaded` 都被整体替换；
+    /// 不落在"有权威来源 + 在共同投影入口重新播种"的地方，颜色会在下一次重建后消失、
+    /// 共振峰变形会失效（它还是渲染输入）。键是 `ara-item-{guid}`，与投影里的 clip id
+    /// 同口径，冷重建后仍能对上。
+    #[test]
+    fn clip_local_properties_are_reseeded_by_apply() {
+        let mut edits = EditState::default();
+        edits.clip_local.insert(
+            "ara-item-{11111111-1111-1111-1111-111111111111}".into(),
+            ClipLocalState {
+                color: Some("#abcdef".into()),
+                formant_morph: Some(hifishifter_kernel::state::ClipFormantMorph {
+                    enabled: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"host","order":0}],
+            "clips":[{"id":"ara-item-{11111111-1111-1111-1111-111111111111}",
+                      "track_id":"track","name":"c","start_sec":0,"length_sec":1,
+                      "takes":[{"id":"t","source_start_sec":0,"source_end_sec":1}]}],
+            "bpm":120,"project_sec":1
+        }))
+        .unwrap();
+        let before = timeline.clips[0].color.clone();
+        assert_ne!(before, "#abcdef", "前提：宿主时间线没有这条颜色");
+        edits.apply(&mut timeline);
+        assert_eq!(timeline.clips[0].color, "#abcdef");
+        assert!(
+            timeline.clips[0].formant_morph.is_some(),
+            "共振峰变形是渲染输入，必须随投影播种"
+        );
     }
     #[test]
     fn invalid_curve_and_unknown_track_are_rejected() {

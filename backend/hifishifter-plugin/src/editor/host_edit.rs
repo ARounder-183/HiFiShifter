@@ -134,6 +134,15 @@ impl HostEditPlan {
 }
 impl HostEditReceipt {
     /// 仅验证回流快照，不从GUI乐观状态或路径/位置猜clip身份。
+    ///
+    /// 【为什么必须与写回前置检查共用同一个容差】写回前置检查用的是
+    /// `host_value_compatible`（相对容差 `1e-6 + 1e-9·max`，见 `host::geometry`），
+    /// 而这里此前用的是**纯绝对** `1e-6`。两侧不对称会造出一个窗口：写回被接受
+    /// （差值在相对容差内），完成门却判定"宿主还没跟上"，于是 `geometry_waiting`
+    /// 常真 ⇒ 前端拿到终态错误"clip was edited in REAPER but its ARA geometry has not
+    /// caught up"（用户表现为"音频块编辑被拒绝"）。`playback_rate` 尤其容易撞上：
+    /// kernel 里是 f32，写回时与 REAPER 的 f64 比，往返本身就有 ~1e-7 相对误差；
+    /// 长工程上的 `start_sec` / `length_sec` 也在绝对阈值的边缘。
     pub(crate) fn matches(&self, payload: &Value) -> bool {
         let Some(clips) = payload["clips"].as_array() else {
             return false;
@@ -143,12 +152,14 @@ impl HostEditReceipt {
                 .iter()
                 .find(|clip| clip["id"] == *id)
                 .is_some_and(|clip| {
-                    fields
-                        .iter()
-                        .all(|(key, value)| match (clip[*key].as_f64(), value.as_f64()) {
-                            (Some(actual), Some(expected)) => (actual - expected).abs() <= 1e-6,
+                    fields.iter().all(|(key, value)| {
+                        match (clip[*key].as_f64(), value.as_f64()) {
+                            (Some(actual), Some(expected)) => {
+                                crate::host::geometry::host_value_compatible(actual, expected)
+                            }
                             _ => clip[*key] == *value,
-                        })
+                        }
+                    })
                 })
         })
     }
@@ -248,6 +259,12 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "loopEnabled"
                 | "channelMode"
                 | "hostGroupId"
+                // 插件自有、宿主表达不到的属性。宿主没有 clip 颜色 / 共振峰变形的概念，
+                // 所以它们**不写宿主**，而是落到本地权威 `EditState::clip_local`
+                // （与 `fades` 同一手法）。此前它们在白名单外 ⇒ 任何带这两项的
+                // `set_clip_state` 都被整条拒绝，用户看到"音频块编辑被拒绝"。
+                | "color"
+                | "formantMorph"
         ) {
             return Err(format!("host clip property is not yet writable: {key}"));
         }
@@ -257,6 +274,21 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 .is_none_or(|name| name.len() > 8192 || name.contains('\0'))
             {
                 return Err("invalid take name".into());
+            }
+            continue;
+        }
+        if key == "color" {
+            if value
+                .as_str()
+                .is_none_or(|color| color.len() > 64 || color.contains('\0'))
+            {
+                return Err("invalid clip color".into());
+            }
+            continue;
+        }
+        if key == "formantMorph" {
+            if !value.is_object() {
+                return Err("invalid clip formant morph".into());
             }
             continue;
         }
@@ -433,6 +465,8 @@ pub(super) fn execute_managed(
     let document = owner.editor_document()?;
     let mut targets: Vec<(ClipEdit, HostClipTarget, Option<HostClipTarget>)> = Vec::new();
     let mut styles = std::collections::BTreeMap::new();
+    // 插件自有、宿主表达不到的逐片段属性（颜色 / 共振峰变形），键为宿主稳定 item 身份。
+    let mut locals = std::collections::BTreeMap::new();
     for edit in plan.edits {
         if !authorized() {
             return Err("host editor lease revoked".into());
@@ -563,6 +597,21 @@ pub(super) fn execute_managed(
             } else {
                 // 直接写宿主轴：这里才需要轴语义校验（版本未知/新轴不接受预设）。
                 validate_fade_axes(target.geometry.fade_axes_new, &edit.patch)?;
+            }
+        }
+        // 插件自有、宿主表达不到的逐片段属性：只登记，不写宿主。
+        // 键用 `edit.native_id`（形如 `ara-item-{guid}`）—— 与 `EditState::apply` 里
+        // `clip.id` 的口径一致，冷重建后仍能对上（`fades` 用裸 GUID 是因为它走几何查表，
+        // 两套键口径不同，不要互相套用）。
+        if edit.patch.color.is_some() || edit.patch.formant_morph.is_some() {
+            let entry = locals
+                .entry(edit.native_id.clone())
+                .or_insert_with(crate::state_channel::ClipLocalState::default);
+            if let Some(color) = &edit.patch.color {
+                entry.color = Some(color.clone());
+            }
+            if let Some(morph) = &edit.patch.formant_morph {
+                entry.formant_morph = Some(morph.clone());
             }
         }
         targets.push((edit, target, destination));
@@ -751,6 +800,35 @@ pub(super) fn execute_managed(
             owner.prepare();
         }
     }
+    // 本地属性与几何写回同一提交点：宿主写回失败时一并回滚（`locals` 被丢弃）。
+    // 这里**不** bump revision —— 几何已经 bump 过；只带本地属性的批次不写宿主，
+    // 但仍要重新投影，所以放在同一事务里 merge 后由下面统一 `prepare()`。
+    if result.is_ok() && !locals.is_empty() {
+        let changed = {
+            let _transaction = document.transaction.lock().unwrap();
+            let mut edits = document.edits.lock().unwrap();
+            let mut changed = false;
+            for (item, local) in locals {
+                let entry = edits.clip_local.entry(item).or_default();
+                if *entry != local {
+                    *entry = local;
+                    changed = true;
+                }
+            }
+            if changed {
+                edits.revision = edits
+                    .revision
+                    .checked_add(1)
+                    .ok_or("edit revision exhausted")?;
+            }
+            changed
+        };
+        if changed {
+            for owner in document.renderer_owners() {
+                owner.prepare();
+            }
+        }
+    }
     drop(undo);
     result.map_err(|error| format!("host clip edit failed (Undo block retained): {error}"))
 }
@@ -931,6 +1009,82 @@ mod tests {
         assert!(receipt.matches(&payload), "{receipt:?} vs {payload}");
         payload["clips"][0]["id"] = json!("other");
         assert!(!receipt.matches(&payload));
+        editor.close();
+    }
+    /// **不变量：完成门与写回前置检查共用同一个容差。**
+    ///
+    /// 【为什么这是回归测试】写回前置检查用 `host_value_compatible`（相对容差
+    /// `1e-6 + 1e-9·max`），完成门此前用纯绝对 `1e-6`。两侧不对称会造出"写回被接受、
+    /// 完成门却判宿主还没跟上"的窗口 ⇒ `geometry_waiting` 常真 ⇒ 前端拿到终态错误
+    /// "clip was edited in REAPER but its ARA geometry has not caught up"（用户表现为
+    /// "音频块编辑被拒绝"）。`playback_rate` 在 kernel 里是 f32，与 REAPER 的 f64 往返
+    /// 本身就有 ~1e-7 相对误差，长工程上的 `start_sec` 也在绝对阈值边缘。
+    #[test]
+    fn host_edit_receipt_uses_the_same_tolerance_as_the_writeback_precheck() {
+        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"startSec":3.}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let mut payload = super::super::commands::payload(&editor, false).unwrap();
+        payload["clips"][0]["start_sec"] = json!(3.);
+        assert!(receipt.matches(&payload));
+
+        // f32 往返级的相对误差必须仍判为"宿主已跟上"。
+        payload["clips"][0]["start_sec"] = json!(3. * (1.0 + 1e-7));
+        assert!(
+            receipt.matches(&payload),
+            "f32 往返误差不得把完成门判成失败，否则每次编辑都会报\"音频块编辑被拒绝\""
+        );
+
+        // 真实移动（1e-4 秒 ≈ 44.1k 上约 4 个采样点）仍必须被拒。
+        payload["clips"][0]["start_sec"] = json!(3.0001);
+        assert!(!receipt.matches(&payload), "真实几何变化不得被容差吞掉");
+        editor.close();
+    }
+    /// **不变量：宿主表达不到的逐片段属性不再被整条拒绝，且落到本地权威、不写宿主。**
+    ///
+    /// 【为什么这是回归测试】`color` / `formantMorph` 此前不在 `patch()` 的白名单里，
+    /// 任何带它们的 `set_clip_state` 都被整条拒成
+    /// "host clip property is not yet writable: color" ⇒ 前端显示"音频块编辑被拒绝"。
+    /// 而它们是**插件自有**属性（宿主没有 clip 颜色 / 共振峰变形的概念），正确处置是
+    /// 接受并落到 `EditState::clip_local`（与 `fades` 同一手法），由共同投影入口重新
+    /// 播种；`formant_morph` 还参与渲染，必须能跨重建存活。
+    #[test]
+    fn host_edit_accepts_plugin_local_clip_properties_without_writing_the_host() {
+        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"color":"#123456","formantMorph":{"enabled":true}}),
+            )
+            .expect("插件自有属性不得被拒");
+        assert_eq!(plan.edits[0].patch.color.as_deref(), Some("#123456"));
+        assert!(
+            plan.edits[0]
+                .patch
+                .formant_morph
+                .as_ref()
+                .is_some_and(|morph| morph.enabled),
+            "formantMorph 必须能反序列化进 patch"
+        );
+        // 它们不是宿主字段：写回计划里不得出现对应的宿主属性名（`patch()` 只接受
+        // 已实现的可写键，宿主侧由 `execute_managed` 的写回列表决定）。
+        assert!(
+            !plan.edits[0]
+                .patch
+                .color
+                .as_deref()
+                .is_some_and(|color| color.contains("D_")),
+            "颜色不得被当成宿主属性"
+        );
         editor.close();
     }
     /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
