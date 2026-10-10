@@ -37,6 +37,11 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 - HiFiGAN分块，HNSEP整段处理。三分钟HNSEP曾实测瞬时峰值约13.3GB，已有资源预检；
   不能保证普通16GB机器无条件运行长素材，也不能把PCM额度当模型总内存。
 - GPU VRAM、任意自定义模型的资源严格上界及其它宿主矩阵没有完整测量证据。
+- **DLL 一旦打开过编辑器就无法卸载（硬约束）**：WebView2 的环境创建没有取消 API，
+  迟到的 COM 回调仍会进入本 DLL，因此 `pin_callback_code`（`editor/webview.rs`）用
+  `GET_MODULE_HANDLE_EX_FLAG_PIN` 把本模块钉到宿主退出。`ExitDll` 在有活窗口时返回
+  `false`（关窗后可卸载，但模块仍被 PIN 住）。**开发升级必须完整退出宿主**，不能靠
+  "卸载插件再重载"热替换；这不是可以绕过的缺陷，是 WebView2 生命周期的直接后果。
 - Linux/macOS插件本次不要求实现；独立App原跨平台路径保留。
 
 ## 后续使用与开发
