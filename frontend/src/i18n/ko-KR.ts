@@ -2092,6 +2092,8 @@ export const koKR = {
         "HiFiShifter는 트랙과 아이템을 열거하는 데 사용하는 확장 API를 제공하는 호스트(현재 REAPER)가 필요합니다. 다른 호스트에서는 타임라인이 비어 있습니다.",
     ara_clip_syncing_host_audio: "REAPER의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중",
+    ara_clip_host_source_read_failed:
+        "호스트가 이 항목의 샘플 접근을 허용했지만 읽기에 실패했습니다. 호스트가 오디오를 제공할 때까지 이 클립은 렌더링할 수 없습니다",
     ara_clip_host_take_switched:
         "REAPER가 이 항목의 현재 테이크를 바꿨지만 플러그인이 아직 그 오디오를 받지 못했습니다. REAPER에서 실행 취소하거나 한 번 더 편집해 다시 할당되게 하세요",
     ara_replace_dirty_message:

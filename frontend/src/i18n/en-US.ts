@@ -2106,6 +2106,8 @@ export const enUS = {
         "HiFiShifter needs a host that exposes the extension API it uses to enumerate tracks and items (REAPER today). On other hosts the timeline stays empty because the plug-in cannot see any tracks.",
     ara_clip_syncing_host_audio: "Waiting for REAPER to finish assigning audio",
     ara_clip_waiting_for_host_audio: "Waiting for REAPER to hand over audio",
+    ara_clip_host_source_read_failed:
+        "The host granted sample access for this item but reading it failed; the clip cannot be rendered until the host supplies its audio",
     ara_clip_host_take_switched:
         "REAPER switched this item's active take and the plugin has not received its audio yet; undo in REAPER, or edit once more to make it reassign",
     ara_replace_dirty_message:

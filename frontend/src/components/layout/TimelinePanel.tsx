@@ -3932,11 +3932,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 【为什么按原因分开】"等待 REAPER 提供音频"回答不了用户最需要
                         // 的问题：该等、该改用法、还是该撤销。`take_switched`（宿主换了
                         // 当前 Take 而 ARA 未重认领，典型来源"倒放 Item 为新 Take"）是
-                        // **可操作**的，必须给出下一步；其余退回通用文案。
-                        text =
-                            hostMediaReason(clip) === "take_switched"
-                                ? t("ara_clip_host_take_switched")
-                                : t("ara_clip_waiting_for_host_audio");
+                        // **可操作**的，必须给出下一步；`source_read_failed`（已授权却读不出
+                        // 样本）同样需要明确告知，不能与"还在等分配 region"混为一谈；其余退回
+                        // 通用文案。
+                        text = (() => {
+                            const reason = hostMediaReason(clip);
+                            if (reason === "take_switched") {
+                                return t("ara_clip_host_take_switched");
+                            }
+                            if (reason === "source_read_failed") {
+                                return t("ara_clip_host_source_read_failed");
+                            }
+                            return t("ara_clip_waiting_for_host_audio");
+                        })();
                         break;
                     default:
                         break;

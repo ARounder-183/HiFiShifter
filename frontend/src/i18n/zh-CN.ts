@@ -2047,6 +2047,8 @@ export const zhCN = {
         "HiFiShifter 需要宿主提供它用来枚举轨道与 item 的扩展接口（目前是 REAPER）。在其它宿主上时间线会是空的 —— 插件看不到任何轨道。",
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音频分配",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频",
+    ara_clip_host_source_read_failed:
+        "宿主已为这一条授予样本访问权，但读取失败；在宿主补上音频之前，这个片段无法渲染",
     ara_clip_host_take_switched:
         "REAPER 换了这一条的当前 Take，插件还没拿到它的音频；在 REAPER 里撤销，或再编辑一下让它重新分配",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",

@@ -2050,6 +2050,8 @@ export const zhTW = {
         "HiFiShifter 需要宿主提供它用來列舉軌道與 item 的擴充介面（目前是 REAPER）。在其它宿主上時間軸會是空的 —— 外掛看不到任何軌道。",
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音訊分配",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
+    ara_clip_host_source_read_failed:
+        "宿主已為這一條授予樣本存取權，但讀取失敗；在宿主補上音訊之前，這個片段無法算繪",
     ara_clip_host_take_switched:
         "REAPER 換了這一條的目前 Take，外掛還沒拿到它的音訊；在 REAPER 裡復原，或再編輯一下讓它重新分配",
     ara_replace_dirty_message: "目前工程有未儲存的修改，要取代為宿主快照嗎？",

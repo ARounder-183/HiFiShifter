@@ -2121,6 +2121,8 @@ export const jaJP = {
         "HiFiShifter は、トラックとアイテムを列挙するために使用する拡張 API を提供するホスト（現在は REAPER）が必要です。他のホストではタイムラインは空のままです。",
     ara_clip_syncing_host_audio: "REAPER の音声割り当て完了を待っています",
     ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中",
+    ara_clip_host_source_read_failed:
+        "ホストはこのアイテムのサンプルアクセスを許可しましたが、読み取りに失敗しました。ホストが音声を提供するまでこのクリップはレンダリングできません",
     ara_clip_host_take_switched:
         "REAPER がこのアイテムの現在のテイクを切り替えましたが、プラグインはまだその音声を受け取っていません。REAPER で元に戻すか、もう一度編集して再割り当てさせてください",
     ara_replace_dirty_message:

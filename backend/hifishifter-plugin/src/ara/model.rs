@@ -837,9 +837,25 @@ impl ModelHandle {
                     );
                     let pcm = Arc::new(pcm);
                     self.session
+                        .source_failures
+                        .lock()
+                        .unwrap()
+                        .remove(&source.persistent_id);
+                    self.session
                         .publish_source_pcm(source.persistent_id.clone(), pcm);
                 }
-                Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
+                Err(error) => {
+                    // 【为什么单记一份真因】此前只 `log::warn`，于是"授权了却读不出来"
+                    // 在界面上与"还没认领"长得一模一样（都报 `awaiting_region`）——
+                    // 用户对着一个永远转不完的占位，无从判断该做什么。记下真因后
+                    // `decorate_host_media_locked` 把它报成 `source_read_failed`。
+                    log::warn!("[ara] host PCM unavailable: {error:?}");
+                    self.session
+                        .source_failures
+                        .lock()
+                        .unwrap()
+                        .insert(source.persistent_id.clone(), format!("{error:?}"));
+                }
             }
         }
         if !self.editing {

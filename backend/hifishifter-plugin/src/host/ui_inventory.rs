@@ -604,6 +604,62 @@ mod tests {
         assert!(document.pending_since.lock().unwrap().is_empty());
     }
 
+    /// ARA 已授权样本访问、但**读取失败**时，原因必须是真因 `source_read_failed`，
+    /// 而不是含混的 `awaiting_region`（那会让用户以为"再等等就好"）。
+    ///
+    /// 【为什么与 `ready` 分开】`ready` 还参与 `ensure_loaded` 的宿主冲突判据，把样本
+    /// 读取失败折进 `ready=false` 会被报成"尚未应用：Conflict: host changed"。真因单记
+    /// 一份（`DocumentSession::source_failures`），只影响这一条 clip 的原因码。
+    #[test]
+    fn an_authorized_but_unreadable_source_reports_its_real_reason() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9882);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, item_id.clone());
+        document.regions.lock().unwrap().insert(
+            7,
+            crate::ara::AraPlaybackRegion {
+                audio_source_persistent_id: "ara://source".into(),
+                audio_modification_persistent_id: "mod".into(),
+                ..Default::default()
+            },
+        );
+        // 源被授权、读取失败 ⇒ 立刻报真因，不启动"在途"计时。
+        document
+            .source_failures
+            .lock()
+            .unwrap()
+            .insert("ara://source".into(), "host read failed".into());
+
+        let mut payload = serde_json::json!({"clips": [
+            {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
+        ]});
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "unavailable");
+        assert_eq!(
+            payload["clips"][0]["host_media_reason"],
+            "source_read_failed"
+        );
+
+        // 读取成功后条目消失 ⇒ 回到"在途/未认领"的常规判定，不再报读取失败。
+        document.source_failures.lock().unwrap().clear();
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
+    }
+
     /// 方向位读不出来（`PCM_Source_GetSectionInfo` 不可用）时，插件**按正放**处理，
     /// 不再制造一个"方向未知"的用户提示 —— 方向是纯渲染输入，读不到不影响可用性。
     #[test]

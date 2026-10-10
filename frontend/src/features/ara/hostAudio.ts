@@ -122,15 +122,23 @@ export function hostMediaState(clip: {
  * - `unclaimed` —— 这个 item 从未被本实例的 ARA region 认领。
  * - `folder_parent` —— FX 挂在 folder 父轨，本实例永远拿不到组内音频。**用法问题**。
  * - `awaiting_region` —— 等超时了仍没有 region；多半是宿主侧出了别的岔子。
+ * - `source_read_failed` —— ARA 已授权样本访问，但读取失败（宿主样本侧故障）。
+ *   与 `awaiting_region` 分开：这里不是"还没轮到它"，而是"拿不到就是拿不到"。
  */
 export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
     "take_switched",
     "unclaimed",
     "folder_parent",
     "awaiting_region",
+    "source_read_failed",
 ]);
 
-export type HostMediaReason = "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region";
+export type HostMediaReason =
+    | "take_switched"
+    | "unclaimed"
+    | "folder_parent"
+    | "awaiting_region"
+    | "source_read_failed";
 
 /**
  * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。

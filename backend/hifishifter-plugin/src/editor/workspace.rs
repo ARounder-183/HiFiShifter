@@ -10,7 +10,11 @@ use std::sync::atomic::Ordering;
 /// 【为什么是 2 秒】一次正常的 ARA 重认领（`begin_editing` … `end_editing`）在数百
 /// 毫秒内完成；2 秒足够覆盖一次分割/粘贴/切换 active take 后的回流。超过它仍无源，
 /// 再显示"正在等待"就是在骗用户 —— 转成带原因的 `unavailable`，让用户知道该做什么。
-const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+///
+/// 【为什么 `pub(crate)`】应用状态（`EditorSession::state` 的 `pending`）也必须按同一
+/// 口径判断"是否仍在争取"：只数"缺 `source_path` 的片段"会让终态（folder 父轨 /
+/// 读取失败 / 超期）把状态永久钉在"进行中"。
+pub(crate) const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// gain在原GUI是active-take扁平投影；插件显示item音量，两份显示字段必须一致且不送DSP。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
@@ -703,6 +707,23 @@ impl DocumentSession {
                 .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
                 .collect()
         };
+        // item GUID → 该 item 所属 region 的 ARA 源身份。用来把"这条的源**已被授权却读
+        // 不出来**"（`source_read_failed`）与"还没轮到它"分开：前者是宿主/样本侧的真故障，
+        // 用户需要立刻知道，不该和"正在分配 region"共用同一句"等待中"。
+        let source_by_item: std::collections::HashMap<String, String> = {
+            let items = self.region_items.lock().unwrap();
+            let regions = self.regions.lock().unwrap();
+            items
+                .iter()
+                .filter_map(|(key, item)| {
+                    regions
+                        .get(key)
+                        .map(|region| (item.clone(), region.audio_source_persistent_id.clone()))
+                })
+                .collect()
+        };
+        let failed_sources: std::collections::HashSet<String> =
+            self.source_failures.lock().unwrap().keys().cloned().collect();
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
         let folder_parent = self.renderer_owners().into_iter().any(|owner| {
             owner.host_audio_status().state
@@ -735,6 +756,12 @@ impl DocumentSession {
                 // 处理"。它和正放一样走 `ready` —— 方向不再是用户需要处置的状态。
                 let (state, reason, waiting) = if has_source {
                     ("ready", None, false)
+                } else if source_by_item
+                    .get(&item_id)
+                    .is_some_and(|source| failed_sources.contains(source))
+                {
+                    // 源已授权、读取却失败：这不是"在途"，立刻报真因，不启动计时。
+                    ("unavailable", Some("source_read_failed"), false)
                 } else if folder_parent && !claimed.contains(&item_id) {
                     ("unavailable", Some("folder_parent"), false)
                 } else {
@@ -776,6 +803,63 @@ impl DocumentSession {
             }
         }
         pending_since.retain(|id, _| !seen.contains(id));
+    }
+    /// 仍在"争取宿主音频"的片段数（`0` = 没有在途项，应用状态不应停在"进行中"）。
+    ///
+    /// 【为什么不能只数"缺 `source_path` 的片段"】`unavailable` 的三类成因都是**终态**：
+    /// folder 父轨（本实例永远拿不到组内音频）、样本读取失败、超期未认领。把它们也算作
+    /// "进行中"会让应用状态永久停在 pending —— 用户对着一个永远转不完的转圈，却不知道
+    /// 什么都不会再发生（这正是 `EditorSession::state` 的 `inventory_pending` 的缺陷）。
+    ///
+    /// 口径与 [`Self::decorate_host_media_locked`] 一致：只有"已开始等待且未超期"的
+    /// item 才计入；没有宿主身份的 ARA 片段（还在等认领）同样计入。
+    pub(crate) fn media_in_flight_items(&self, timeline: &TimelineState) -> usize {
+        let missing: Vec<&str> = timeline
+            .clips
+            .iter()
+            .filter(|clip| !clip.muted && clip.source_path.is_none())
+            .map(|clip| clip.id.as_str())
+            .collect();
+        if missing.is_empty() {
+            return 0;
+        }
+        // folder 父轨：整组永远拿不到音频 ⇒ 不是"进行中"。
+        if self.renderer_owners().into_iter().any(|owner| {
+            owner.host_audio_status().state
+                == crate::render::extension::HostAudioState::FolderParentWithoutRegions
+        }) {
+            return 0;
+        }
+        // 已授权却读取失败的 item：终态，不计入。
+        let failed_items: std::collections::HashSet<String> = {
+            let items = self.region_items.lock().unwrap();
+            let regions = self.regions.lock().unwrap();
+            let failures = self.source_failures.lock().unwrap();
+            items
+                .iter()
+                .filter_map(|(key, item)| {
+                    let source = regions.get(key)?.audio_source_persistent_id.clone();
+                    failures.contains_key(&source).then(|| item.clone())
+                })
+                .collect()
+        };
+        let since = self.pending_since.lock().unwrap();
+        let now = std::time::Instant::now();
+        missing
+            .iter()
+            .filter(|id| {
+                let Some(guid) = id.strip_prefix("ara-item-") else {
+                    // 还没有宿主身份的 ARA 片段：仍在等认领。
+                    return true;
+                };
+                if failed_items.contains(guid) {
+                    return false;
+                }
+                since
+                    .get(guid)
+                    .is_none_or(|at| now.duration_since(*at) < PENDING_MEDIA_TIMEOUT)
+            })
+            .count()
     }
     /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。
     ///
@@ -1522,5 +1606,80 @@ mod tests {
         // 连 ARA 源时长也没有时，只能返回 None（由调用方记 warn，不静默按镜像渲染）。
         assert_eq!(reversed_media_duration(None, &unclaimed), None);
         assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
+    }
+
+    /// "在途"必须排除**终态**，否则应用状态会永久停在"进行中"。
+    ///
+    /// 【为什么这条是回归测试】此前 `EditorSession::state` 的 `inventory_pending` 直接数
+    /// "缺 `source_path` 的片段"。folder 父轨 / 样本读取失败 / 超期未认领都是终态，永远
+    /// 不会再变成 ready ⇒ 状态片永远转圈。现在只有"已开始等待且未超期"的才计入。
+    #[test]
+    fn media_in_flight_items_excludes_terminal_states() {
+        use std::time::{Duration, Instant};
+        let model = ModelHandle::new();
+        let document = model.session();
+        let clip = |id: &str, source: Option<&str>| {
+            let mut clip =
+                serde_json::from_value::<hifishifter_kernel::state::Clip>(serde_json::json!({
+                    "id": id, "track_id":"t", "name":"c", "start_sec":0., "length_sec":0.5,
+                    "takes":[{"id":"tk","source_path":source,"source_start_sec":0.,"source_end_sec":0.5}]
+                }))
+                .unwrap();
+            // 扁平字段来自 active take；不物化就测不到"有源"这一档。
+            clip.normalize_takes();
+            clip
+        };
+        let timeline = TimelineState {
+            clips: vec![clip("ara-item-{G}", None)],
+            ..Default::default()
+        };
+        // 无 `pending_since` 记录 ⇒ 视为刚进入在途。
+        assert_eq!(document.media_in_flight_items(&timeline), 1);
+
+        // 超期 ⇒ 终态（`unavailable`），不再计入。
+        document.pending_since.lock().unwrap().insert(
+            "{G}".into(),
+            Instant::now() - PENDING_MEDIA_TIMEOUT - Duration::from_secs(1),
+        );
+        assert_eq!(document.media_in_flight_items(&timeline), 0);
+
+        // 源读取失败 ⇒ 终态，即便还没超期也不计入。
+        document.pending_since.lock().unwrap().clear();
+        document
+            .region_items
+            .lock()
+            .unwrap()
+            .insert(7, "{G}".into());
+        document.regions.lock().unwrap().insert(
+            7,
+            crate::ara::AraPlaybackRegion {
+                audio_source_persistent_id: "ara://source".into(),
+                ..Default::default()
+            },
+        );
+        document
+            .source_failures
+            .lock()
+            .unwrap()
+            .insert("ara://source".into(), "boom".into());
+        assert_eq!(document.media_in_flight_items(&timeline), 0);
+
+        // 有源 ⇒ 不计入；静音片段也不计入。
+        document.source_failures.lock().unwrap().clear();
+        let ready = TimelineState {
+            clips: vec![clip("ara-item-{G}", Some("ara://source"))],
+            ..Default::default()
+        };
+        assert_eq!(document.media_in_flight_items(&ready), 0);
+        let mut muted = clip("ara-item-{G}", None);
+        muted.muted = true;
+        assert_eq!(
+            document.media_in_flight_items(&TimelineState {
+                clips: vec![muted],
+                ..Default::default()
+            }),
+            0
+        );
+        document.close();
     }
 }

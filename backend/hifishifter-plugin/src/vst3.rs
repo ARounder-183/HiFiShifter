@@ -1104,6 +1104,10 @@ unsafe extern "system" fn audio_setup_processing(
             setup.sample_rate
         ));
     }
+    // 记下权威采样率：`process` 用它（而非 `ProcessContext::sample_rate`）选快照，
+    // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
+    // SAFETY: this 为存活音频接口。
+    unsafe { &(*base_from_audio(this)).extension_owner }.set_setup_sample_rate(setup.sample_rate);
     crate::log_line(&format!(
         "IAudioProcessor::setupProcessing mode={} rate={}",
         setup.process_mode, setup.sample_rate
@@ -1225,21 +1229,23 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             if data.process_mode != 2 && context.state & (1 << 1) == 0 {
                 return K_RESULT_OK;
             }
-            // 与 `audio_setup_processing` 同一判据（容差、只认两个已支持采样率）。
-            // 走到这里说明 setup 已经接受过这个采样率；用容差避免浮点噪声把它挡在
-            // 音频线程外（那会让整条链路静音且没有日志）。
-            let publisher = if (context.sample_rate - 44100.0).abs() <= 1e-6 {
-                &owner.snapshots[0]
-            } else if (context.sample_rate - 48000.0).abs() <= 1e-6 {
-                &owner.snapshots[1]
+            // 按 `setupProcessing` 的**权威率**选快照：非原生率（96k/192k…）取最近的已声明
+            // 原生快照，`copy_block` 会把它线性重采样到宿主输出率。此前这里用
+            // `context.sample_rate` 且只认 44.1/48k，其余 `kResultFalse` —— 与 setup 的接受域
+            // 不一致，96k 工程里会持续静音甚至被踢出链路（见 `setup_sample_rate`）。
+            let publisher = &owner.snapshots[owner.snapshot_index_for_rate(context.sample_rate)];
+            // 输出率取宿主在 processContext 里报的率（那才是宿主缓冲的真实率）；它缺失/
+            // 非法时退回 `setupProcessing` 的声明，避免 0 触发无意义的巨量重采样。
+            let output_rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
+                context.sample_rate
             } else {
-                return K_RESULT_FALSE;
+                owner.setup_sample_rate()
             };
             // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
             let ready = unsafe {
                 publisher.copy_block(
                     context.project_time_samples,
-                    context.sample_rate as u32,
+                    output_rate.max(1.0) as u32,
                     &mut *data.outputs,
                     data.num_samples as usize,
                 )

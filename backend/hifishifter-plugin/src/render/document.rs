@@ -141,6 +141,16 @@ pub(crate) struct DocumentSession {
     pub render_facts: Mutex<crate::host::geometry::RenderFacts>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
+    /// 已授权但**读取失败**的 ARA 音频源（`audioSource.persistentID` → 原因）。
+    ///
+    /// 【为什么必须与 `ready` 分开】`ready` 的语义是"ARA 是否已重新交付输入"，它还
+    /// 参与 `ensure_loaded` 的宿主冲突判据（见 `editing_session`）。把"某个源读不出来"
+    /// 折进 `ready=false` 会让一次样本读取失败被报成"宿主冲突"，正是用户报障的
+    /// "尚未应用：Conflict: host changed" 的来源。所以这里单记一份：读取失败时条目
+    /// 出现、成功时消失，`decorate_host_media_locked` 据此把 clip 的
+    /// `host_media_reason` 报成真因（`source_read_failed`），而不是含混的
+    /// `awaiting_region`。
+    pub source_failures: Mutex<HashMap<String, String>>,
     /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
     pub editor_audio_revision: AtomicU64,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
@@ -724,6 +734,7 @@ impl DocumentSession {
         self.authorized_takes.lock().unwrap().clear();
         self.authorized_sources.lock().unwrap().clear();
         self.split_media_from.lock().unwrap().clear();
+        self.source_failures.lock().unwrap().clear();
         self.pending_since.lock().unwrap().clear();
         self.ui_tracks.lock().unwrap().clear();
         self.ui_known_tracks.lock().unwrap().clear();

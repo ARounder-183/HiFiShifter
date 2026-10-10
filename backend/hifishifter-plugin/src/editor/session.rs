@@ -1679,13 +1679,16 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = Self::requires_analysis(&self.timeline.lock().unwrap());
         let rendering = self.render_task.lock().unwrap().is_some();
-        let inventory_pending = self
-            .timeline
-            .lock()
-            .unwrap()
-            .clips
-            .iter()
-            .any(|clip| !clip.muted && clip.source_path.is_none());
+        // 【为什么不是"有片段缺 source_path 就算在途"】`unavailable` 的三类成因都是终态
+        // （folder 父轨 / 样本读取失败 / 超期未认领）。把它们也算作"进行中"会让应用状态
+        // 永久停在 pending —— 用户对着一个永远转不完的转圈。口径交给文档侧的唯一判据
+        // （`media_in_flight_items`，与 `decorate_host_media_locked` 同一套分类）。
+        let inventory_pending = {
+            let timeline = self.timeline.lock().unwrap();
+            self.document
+                .upgrade()
+                .is_some_and(|document| document.media_in_flight_items(&timeline) > 0)
+        };
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
             // `rendering_active` 是**派生状态**，前端据此点亮/熄灭"渲染中"片，而不是
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），

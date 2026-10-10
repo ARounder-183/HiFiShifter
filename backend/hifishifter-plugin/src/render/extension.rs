@@ -195,6 +195,14 @@ pub(crate) struct ExtensionOwner {
     host_geometry: Mutex<Option<CachedHostGeometry>>,
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
+    /// 宿主在 `setupProcessing` 声明的采样率（Hz；`0` = 尚未声明）。
+    ///
+    /// 【为什么必须记下来】`process` 此前用 `ProcessContext::sample_rate` 选快照，且只认
+    /// 44.1/48k，其余一律 `kResultFalse` —— 而 `setupProcessing` 已接受 44.1..192k。两者
+    /// 不一致时（96k 宿主、或宿主在两处报出不同率）音频线程会持续返回错误码，用户听到
+    /// 静音甚至被踢出链路。改按 `setupProcessing` 的权威率选快照，非原生率交给
+    /// `PlaybackSnapshot::copy_block` 线性重采样（与 `setupProcessing` 的声明一致）。
+    setup_sample_rate: AtomicI32,
     prepared: Mutex<Option<PreparedVersion>>,
     /// 测试专用：`prepare()` 真正进入重排的次数。
     ///
@@ -2762,6 +2770,45 @@ impl ExtensionOwner {
     pub(crate) fn renders_playback(&self) -> bool {
         self.role.load(Ordering::Acquire) == 1
     }
+    /// 记录 `setupProcessing` 声明的采样率（Hz）。非有限/非正数忽略（保持未声明）。
+    pub(crate) fn set_setup_sample_rate(&self, rate: f64) {
+        let hz = rate.round();
+        if hz.is_finite() && hz > 0.0 && hz <= f64::from(i32::MAX) {
+            self.setup_sample_rate.store(hz as i32, Ordering::Release);
+        }
+    }
+    /// `setupProcessing` 声明的采样率（Hz；未声明为 `0`）。
+    pub(crate) fn setup_sample_rate(&self) -> f64 {
+        f64::from(self.setup_sample_rate.load(Ordering::Acquire))
+    }
+    /// 快照发布者下标：原生 44.1/48k 各一个，其余率取**最合适的已声明原生率**。
+    ///
+    /// 优先用 `setupProcessing` 的率（权威），未声明时退回 `context_rate`。这里**不**按
+    /// 宿主率拒绝：`copy_block` 会把宿主帧线性重采样到该快照的原生率，与
+    /// `setupProcessing` 里对非原生率的声明一致。
+    ///
+    /// 选择次序：先看输出率是不是某个原生率的**整数倍**（整数倍重采样无插值误差，
+    /// 如 88.2k→44.1k、96k→48k），再退到最近的原生率。
+    pub(crate) fn snapshot_index_for_rate(&self, context_rate: f64) -> usize {
+        let declared = self.setup_sample_rate();
+        let rate = if declared > 0.0 { declared } else { context_rate };
+        if !rate.is_finite() || rate <= 0.0 {
+            return 0;
+        }
+        let integral_multiple = |base: f64| {
+            let ratio = rate / base;
+            ratio >= 1.0 && (ratio - ratio.round()).abs() <= 1e-6
+        };
+        if integral_multiple(44100.0) {
+            0
+        } else if integral_multiple(48000.0) {
+            1
+        } else if (rate - 44100.0).abs() <= (rate - 48000.0).abs() {
+            0
+        } else {
+            1
+        }
+    }
     /// 最终输出前的有效item静音门；与编辑器内轨道mute不同，不从输入是否全零猜静音。
     pub(crate) fn host_item_muted(&self) -> bool {
         self.host_item_muted.load(Ordering::Acquire)
@@ -4054,6 +4101,36 @@ mod host_audio_state_tests {
         let status = classify_host_audio(false, 1, 5);
         assert_eq!(status.state, HostAudioState::Ready);
         assert_eq!(status.waiting_items, 0);
+    }
+
+    /// `process` 选快照必须按 `setupProcessing` 的**权威率**，不能按宿主上下文率拒绝。
+    ///
+    /// 【为什么这是回归测试】此前 `process` 用 `ProcessContext::sample_rate` 且只认
+    /// 44.1/48k，其余 `kResultFalse` —— 而 `setupProcessing` 已接受 44.1..192k。两者
+    /// 不一致时（96k 宿主）音频线程持续返回错误码：静音、甚至被踢出链路。
+    #[test]
+    fn the_snapshot_index_follows_the_declared_setup_rate() {
+        let owner = ExtensionOwner::default();
+        // 未声明 ⇒ 按传入率就近。
+        assert_eq!(owner.snapshot_index_for_rate(44100.0), 0);
+        assert_eq!(owner.snapshot_index_for_rate(48000.0), 1);
+        // 非原生率：整数倍优先（88.2k→44.1k，176.4k→44.1k），96k/192k→48k。
+        assert_eq!(owner.snapshot_index_for_rate(88200.0), 0);
+        assert_eq!(owner.snapshot_index_for_rate(176400.0), 0);
+        assert_eq!(owner.snapshot_index_for_rate(96000.0), 1);
+        assert_eq!(owner.snapshot_index_for_rate(192000.0), 1);
+        // 非整数倍（44.1k 的奇数倍之外）退到最近的原生率。
+        assert_eq!(owner.snapshot_index_for_rate(50000.0), 1);
+        assert_eq!(owner.snapshot_index_for_rate(44101.0), 0);
+        // `setupProcessing` 的声明优先：96k 工程里即便 context 报 44.1 也按 96k 选。
+        owner.set_setup_sample_rate(96000.0);
+        assert_eq!(owner.setup_sample_rate(), 96000.0);
+        assert_eq!(owner.snapshot_index_for_rate(44100.0), 1);
+        // 非法声明被忽略（保持上一次的有效值）。
+        owner.set_setup_sample_rate(f64::NAN);
+        assert_eq!(owner.setup_sample_rate(), 96000.0);
+        owner.set_setup_sample_rate(0.0);
+        assert_eq!(owner.setup_sample_rate(), 96000.0);
     }
 
     /// 分类名是前端查 catalog 的键：改名即破坏文案，必须显式钉住。
