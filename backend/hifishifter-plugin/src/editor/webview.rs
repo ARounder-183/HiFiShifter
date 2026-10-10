@@ -41,6 +41,24 @@ const PENDING_BUDGET: usize = 32;
 /// 请求已被丢弃。超时后剔除该条目，避免永久占用预算。
 const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 单个编辑请求最多重投多少次（等待宿主几何/媒体追上）。
+///
+/// 【为什么必须有上限】回复泵由 20 ms 定时器驱动。没有上限时，一个**永不收敛**的
+/// 等待会以 50 Hz 空转到 `until`（30 s ≈ 1500 次 `get_timeline_state`），每次都争
+/// 同一把文档事务。有了预算，失败在几秒内转成明确的终态错误，用户可以据此处置。
+const HOST_REPLY_RETRY_BUDGET: u32 = 24;
+
+/// 第 `attempt` 次重投前的等待：20 ms 起指数退避，上限 500 ms。
+///
+/// 【为什么起点仍是 20 ms】宿主追上几何通常只要一两帧；第一档保持与定时器同频，
+/// 不牺牲正常情况的响应速度，只把"长期不收敛"从 50 Hz 压到 2 Hz。
+fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
+    // attempt 从 1 起算（第一次重投前），所以第 1 档就是 20 ms。
+    let shift = attempt.saturating_sub(1).min(5);
+    let millis = 20_u64.saturating_mul(1_u64 << shift).min(500);
+    std::time::Duration::from_millis(millis)
+}
+
 /// 一组 clip id → 宿主 `I_GROUPID`（`1..=host_edit::HOST_GROUP_ID_MAX`）。
 ///
 /// 【为什么是哈希而不是"显式序号"】序号要从当前编组集合取 `max+1`，而本处理器在
@@ -161,6 +179,15 @@ struct HostReply {
     document: std::sync::Weak<crate::render::document::DocumentSession>,
     lease: u64,
     until: std::time::Instant,
+    /// 已重投次数与下一次允许重投的时刻。
+    ///
+    /// 【为什么需要退避】回复泵由 20 ms `WM_TIMER` 驱动，此前只要判据仍成立就**每一 tick
+    /// 重投一次**（50 Hz，直到 30 s 的 `until`）。宿主追上几何通常只需一两帧，这种
+    /// 线性热重投让"等待收敛"变成 1500 次无意义的 `get_timeline_state`，与渲染线程争
+    /// 同一把文档事务。改为指数退避（20→40→80…≤500 ms）并设总次数上限，超限即走明确的
+    /// 终态错误，而不是继续空转。
+    attempts: u32,
+    next_attempt: std::time::Instant,
     jump: Option<HistoryJump>,
     imported: Option<String>,
     geometry: Option<super::host_edit::HostEditReceipt>,
@@ -692,10 +719,51 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
             let geometry_waiting=reply["ok"]==true&&host.geometry.as_ref().is_some_and(|geometry|!geometry.matches(&reply["value"]));
             let split_waiting=reply["ok"]==true&&host.split.as_ref().is_some_and(|split|!host.document.upgrade().is_some_and(|doc|split.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let media_waiting=reply["ok"]==true&&host.media.as_ref().is_some_and(|media|!host.document.upgrade().is_some_and(|doc|media.matches(&doc,&host.editor.namespace,&mut reply["value"])));
-            if (waiting||geometry_waiting||split_waiting||media_waiting||reply["ok"]==false&&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")))&&std::time::Instant::now()<host.until {
-                let allowed=host.document.upgrade().is_some_and(|doc|state.link.authorize(&doc).is_ok_and(|lease|lease==host.lease));
-                let command=if host.media.is_some() {"get_timeline_inventory"} else {"get_timeline_state"};
-                if allowed&&host.editor.enqueue(super::session::UiRequest {id,command:command.into(),args:serde_json::json!({}),sink:state.sink.clone(),link:Some(state.link.clone())}).is_ok() {return false;}
+            let now = std::time::Instant::now();
+            let retryable = waiting
+                || geometry_waiting
+                || split_waiting
+                || media_waiting
+                || reply["ok"] == false
+                    && (error.starts_with("Conflict: host")
+                        || error.contains("host PCM unavailable")
+                        || error.contains("host model not ready"));
+            // 退避：只在到点且未超预算时重投。预算与 `until` 双保险 —— 前者挡住
+            // "永不收敛的失败"（否则 50 Hz 空转到 30 s），后者挡住"慢宿主"。
+            let can_retry = host.attempts < HOST_REPLY_RETRY_BUDGET && now >= host.next_attempt;
+            if retryable && now < host.until && can_retry {
+                let allowed = host.document.upgrade().is_some_and(|doc| {
+                    state
+                        .link
+                        .authorize(&doc)
+                        .is_ok_and(|lease| lease == host.lease)
+                });
+                let command = if host.media.is_some() {
+                    "get_timeline_inventory"
+                } else {
+                    "get_timeline_state"
+                };
+                let editor = host.editor.clone();
+                let sink = state.sink.clone();
+                let link = state.link.clone();
+                let enqueued = allowed
+                    && editor
+                        .enqueue(super::session::UiRequest {
+                            id,
+                            command: command.into(),
+                            args: serde_json::json!({}),
+                            sink,
+                            link: Some(link),
+                        })
+                        .is_ok();
+                if enqueued {
+                    // 单独取可变借用推进退避状态（上面的只读借用到此结束）。
+                    if let Some(host) = state.host_replies.get_mut(&id) {
+                        host.attempts = host.attempts.saturating_add(1);
+                        host.next_attempt = now + host_reply_retry_backoff(host.attempts);
+                    }
+                    return false;
+                }
             }
             if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in REAPER but its ARA audio is not ready; use host Undo if canceling");}
             if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in REAPER but its ARA geometry has not caught up; host Undo remains available");}
@@ -1134,7 +1202,7 @@ fn configure_browser(
                     document.host_undo.finish_request(&view_id,id);let imported=result?;
                     owner.refresh_reaper_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
@@ -1166,7 +1234,7 @@ fn configure_browser(
                     document.host_undo.finish_request(&view_id,id);result?;
                     owner.refresh_reaper_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
@@ -1298,7 +1366,7 @@ fn configure_browser(
                     let outcome=super::host_split::execute(&owner,plan,&allowed);
                     document.host_undo.finish_request(&view_id,id);let split=Some(outcome?);
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry:None,split,media:None,action:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
@@ -1320,7 +1388,7 @@ fn configure_browser(
                     let outcome=super::host_edit::execute_managed(&owner,plan,allowed,true);
                     document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry,split:None,media:None,action:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry,split:None,media:None,action:None})
                 })();
                 match outcome {
                     Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},
@@ -1339,7 +1407,7 @@ fn configure_browser(
                     if let Err(error)=editor.enqueue(super::session::UiRequest {id,command:"plugin_editor_barrier".into(),args:serde_json::json!({}),sink,link:Some(link.clone())}) {
                         document.host_undo.finish_history(&view_id,id);return Err(error);
                     }
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,
                         imported:None,geometry:None,split:None,media:None,action:Some(MediaAction {command:command.into(),input:request.get("args").cloned().unwrap_or_else(||serde_json::json!({}))})})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
@@ -1380,7 +1448,7 @@ fn configure_browser(
                     if let Err(error)=editor.enqueue(super::session::UiRequest {id,command:"plugin_history_barrier".into(),args:serde_json::json!({}),sink,link:Some(link.clone())}) {
                         document.host_undo.finish_history(&view_id,id);return Err(error);
                     }
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None,geometry:None,split:None,media:None,action:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:Some(jump),imported:None,geometry:None,split:None,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
                 }
@@ -1529,6 +1597,32 @@ fn configure_browser(
 #[cfg(test)]
 mod focus_tests {
     use super::*;
+
+    /// **不变量：重投必须退避且封顶。**
+    ///
+    /// 【为什么这是回归测试】回复泵由 20 ms 定时器驱动，此前只要等待判据仍成立就
+    /// **每一 tick 重投一次**（50 Hz，直到 30 s 的 `until`）。一个永不收敛的等待会变成
+    /// ~1500 次 `get_timeline_state`，每次都与渲染线程争同一把文档事务。退避必须
+    /// 单调不减、首档与定时器同频（不牺牲正常情况的响应），并封顶。
+    #[test]
+    fn host_reply_retry_backoff_grows_and_is_capped() {
+        let first = host_reply_retry_backoff(1);
+        assert_eq!(
+            first,
+            std::time::Duration::from_millis(20),
+            "第一档保持与 20 ms 定时器同频，正常情况不受影响"
+        );
+        let mut previous = std::time::Duration::ZERO;
+        for attempt in 1..=HOST_REPLY_RETRY_BUDGET {
+            let delay = host_reply_retry_backoff(attempt);
+            assert!(delay >= previous, "退避不得回退（attempt={attempt}）");
+            assert!(
+                delay <= std::time::Duration::from_millis(500),
+                "退避必须封顶，否则收敛会慢到不可接受（attempt={attempt}）"
+            );
+            previous = delay;
+        }
+    }
 
     /// 用真实自有HWND验证Tab边界，不凭源码是否包含某个style判断可达性。
     #[test]
