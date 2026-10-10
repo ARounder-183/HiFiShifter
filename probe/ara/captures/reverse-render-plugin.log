@@ -1,0 +1,163 @@
+==== HiFiShifter ARA plugin v0.1.0-beta.15 (windows x86_64) log started at 2026-10-10 10:09:06.229 ====
+[2026-10-10 10:09:06.230] [INFO ] hifishifter_plugin: [vst3] models: C:\ProgramData\HiFiShifter\models\cf0df3fff419 (Shared)
+[2026-10-10 10:09:06.231] [INFO ] hifishifter_plugin: [vst3] ARA factory built; companion association ready
+[2026-10-10 10:09:06.231] [INFO ] hifishifter_plugin: [vst3] models: C:\ProgramData\HiFiShifter\models\cf0df3fff419 (Shared)
+[2026-10-10 10:09:06.231] [INFO ] hifishifter_plugin: [vst3] GetPluginFactory called
+[2026-10-10 10:09:06.231] [INFO ] hifishifter_plugin: [vst3] factory countClasses -> 3
+[2026-10-10 10:09:06.231] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] [reaper-host] QI succeeded
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] [reaper-host] initialization parent(project) pending; retaining host interface
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] REAPER host extension available=true
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] IComponent::initialize
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[2026-10-10 10:09:06.233] [INFO ] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin: [vst3] ARA host playback control available=true
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara] document controller created: apiGeneration=V2Final
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara] begin_editing
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara][probe] musical content tempo: grade=ContentGrade(2)
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara][probe] musical content bar_signatures: grade=ContentGrade(2)
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara][probe] musical content key_signatures: grade=ContentGrade(2)
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara][probe] tempo entries: 2
+[2026-10-10 10:09:06.234] [INFO ] hifishifter_plugin::ara::model: [ara][probe] bar signatures: 1
+[2026-10-10 10:09:06.235] [INFO ] hifishifter_plugin::ara::model: ara: sources=0 modifications=0 regionSequences=0 playbackRegions=0 clips=0
+[2026-10-10 10:09:06.235] [INFO ] hifishifter_plugin::ara::model: ara: clipStartsSec=[]
+[2026-10-10 10:09:06.235] [INFO ] hifishifter_plugin::ara_entry: [ara] bind document=1 roles known=[playback,editor,view] assigned=[editor,view] (playback NOT assigned)
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin::render::extension: [ara] GUI channel ready instance=a26fd3fc-ef61-4096-a026-428a0e653a0e
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] IEditController::initialize
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] [undo] IComponentHandler2 available=true
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] IEditController::setComponentHandler(connected)
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller editor route bound to actual processor
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] processor connection route sent result=0
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller editor route bound to actual processor
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller connection route requested result=0
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[2026-10-10 10:09:06.236] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[2026-10-10 10:09:06.238] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[2026-10-10 10:09:06.238] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[2026-10-10 10:09:06.238] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=0 rate=48000
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:06.239] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:06.244] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.307] [WARN ] hifishifter_kernel::nsf_hifigan_onnx: [ort] initialized: ORT Build Info: git-branch=rel-1.28.0, git-commit-id=da9b5e3, fp8-kv-cache=1, build type=Release
+[2026-10-10 10:09:06.443] [INFO ] hifishifter_plugin::ara::model: [ara] begin_editing
+[2026-10-10 10:09:06.444] [INFO ] hifishifter_plugin::render::extension: [ara] renderer assignment role=2 regions=0
+[2026-10-10 10:09:06.444] [INFO ] hifishifter_plugin: [vst3] [reaper-host] direct project attached on model/UI thread
+[2026-10-10 10:09:06.444] [INFO ] hifishifter_plugin::ara::model: [ara] audio_source #0: persistentID=D:\Projects\HiFiShifter\probe\ara\fixtures\phase3a-asymmetric.wav sampleRate=44100 sampleCount=88200
+[2026-10-10 10:09:06.444] [INFO ] hifishifter_plugin::ara::model: [ara] audio_source samples_access enable=true
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin::ara::model: [ara] host PCM ready source=0 frames=88200 version=0
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin: [vst3] factory countClasses -> 3
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E50726331 iid=31FF31E8D5F20143928EBBEE25697802
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin: [vst3] component queryInterface hit IComponent
+[2026-10-10 10:09:06.446] [INFO ] hifishifter_plugin: [vst3] [reaper-host] QI succeeded
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] [reaper-host] initialization parent(project) pending; retaining host interface
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] REAPER host extension available=true
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::initialize
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=544E8112CEA1764082B9681316950BD6
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] component queryInterface ARA hit iid=13599ACDEBC9D74696CA53ADD1DB89F5
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin::ara_entry: [ara] bind document=1 roles known=[playback,editor,view] assigned=[playback] (playback assigned)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] component queryInterface hit IAudioProcessor
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] component queryInterface miss iid=E3BBD7DC42778D44A874AACC979C759E
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::getControllerClassId -> HFSARAProbe.Ctl1
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] factory createInstance cid=48465341524150726F62652E43746C31 iid=E3BBD7DC42778D44A874AACC979C759E
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IEditController::initialize
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] [undo] IComponentHandler2 available=true
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IEditController::setComponentHandler(connected)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller editor route bound to actual processor
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] processor connection route sent result=0
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller editor route bound to actual processor
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller connection route requested result=0
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=F7F90FDFB7496946B63AB7327ADBF5E5
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=CC49246B9741B540AB3C79DAC5FE5C86
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=59F8F8B723417248911695814F3721A3
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=D3762F1FFBBF964BB99527A55EBCCEF4
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=B5D64B3D3A91D24FA886E768A5EB92C1
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=7A9AE23150E5AD438B95B9B8DA1FBE1E
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=C07BB1C3172C944480293402FBC4BBF8
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=8147190F988DDA4ABBA0C1EFC011D8D0
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=E7F99B0474BCD0EAC4101E867F725981
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] controller queryInterface miss iid=2C293C8E92959D4FB2590B1E100E4198
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=0 rate=48000
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] factory getClassInfo(0) ok
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin::ara::model: [ara] playback_region #0: source=D:\Projects\HiFiShifter\probe\ara\fixtures\phase3a-asymmetric.wav startMod=0.750000 durationMod=1.000000 startPlay=0.000000 durationPlay=1.000000 flags=0x1
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin::render::extension: [ara] renderer assignment role=1 regions=1
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] [reaper-host] direct project attached on model/UI thread
+[2026-10-10 10:09:06.447] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:06.449] [INFO ] hifishifter_plugin::render::extension: [ara] host inventory: 1 track(s), 1 item(s), 1 claimed by an assigned region
+[2026-10-10 10:09:06.450] [INFO ] hifishifter_plugin::ara::model: ara: sources=1 modifications=1 regionSequences=1 playbackRegions=1 clips=1
+[2026-10-10 10:09:06.450] [INFO ] hifishifter_plugin::ara::model: ara: clipStartsSec=[0.000000]
+[2026-10-10 10:09:06.450] [INFO ] hifishifter_plugin::editor::workspace: [takefacts] guid={A38BB8B1-86D3-44BD-BF97-5DECB6904738} reversed=Some(true) host_window=Some((0.75, 1.0)) clip_win=(0.75,1.75) media=Some(2.0)
+[2026-10-10 10:09:06.450] [INFO ] hifishifter_plugin::editor::workspace: [takefacts] guid={A38BB8B1-86D3-44BD-BF97-5DECB6904738} reversed=Some(true) host_window=Some((0.75, 1.0)) clip_win=(0.75,1.75) media=Some(2.0)
+[2026-10-10 10:09:06.469] [INFO ] hifishifter_plugin::render::extension: [ara] background snapshot ready role=1 revision=0 model=2 regions=1
+[2026-10-10 10:09:07.704] [WARN ] hifishifter_kernel::nsf_hifigan_onnx: [ort] available providers: ["CPUExecutionProvider", "DmlExecutionProvider"]
+[2026-10-10 10:09:07.741] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: try_register_directml_ep
+[2026-10-10 10:09:07.742] [WARN ] hifishifter_kernel::dml_adapters: dml_adapters: enumerated 2 unique DXGI GPU adapters (4 total indices scanned)
+[2026-10-10 10:09:07.742] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: auto-detected DML device_id=1 name='NVIDIA GeForce RTX 3050 Laptop GPU' vram=3962MB
+[2026-10-10 10:09:07.742] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: DirectML device_id=1 (old API)
+[2026-10-10 10:09:07.964] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: model=pc_nsf_hifigan.onnx ep=directml strict=true (choice=auto, global_env=auto)
+[2026-10-10 10:09:08.054] [ERROR] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: strict DirectML failed (will retry with CPU fallback): load onnx into ort session failed: This session contains graph nodes that are assigned to the default CPU EP, but fallback to CPU EP has been explicitly disabled by the user.
+[2026-10-10 10:09:08.055] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: try_register_directml_ep
+[2026-10-10 10:09:08.056] [WARN ] hifishifter_kernel::dml_adapters: dml_adapters: enumerated 2 unique DXGI GPU adapters (4 total indices scanned)
+[2026-10-10 10:09:08.056] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: auto-detected DML device_id=1 name='NVIDIA GeForce RTX 3050 Laptop GPU' vram=3962MB
+[2026-10-10 10:09:08.056] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: DirectML device_id=1 (old API)
+[2026-10-10 10:09:08.204] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: model=pc_nsf_hifigan.onnx ep=directml strict=false (choice=auto, global_env=auto)
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: created session ep=directml strict=false intra_threads=20 commit_ms=143
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]:   input name='mel' dtype=Tensor { ty: Float32, shape: [1, 128, -1], dimension_symbols: SymbolicDimensions(["", "", "time"]) }
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]:   input name='f0' dtype=Tensor { ty: Float32, shape: [1, -1], dimension_symbols: SymbolicDimensions(["", "time"]) }
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]:   output name='audio' dtype=Tensor { ty: Float32, shape: [-1, 1, -1], dimension_symbols: SymbolicDimensions(["batch", "", "time"]) }
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: smoke stage=begin ep=DirectML
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: smoke stage=inputs_planned count=2 elapsed_ms=0
+[2026-10-10 10:09:08.347] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: smoke stage=tensors_ready elapsed_ms=0 — spawning inference thread
+[2026-10-10 10:09:09.991] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: smoke stage=inference_returned elapsed_ms=1644
+[2026-10-10 10:09:09.991] [INFO ] hifishifter_kernel::vocoder_ort_session: ort_session[Vocoder]: DirectML smoke test passed - EP is functional
+[2026-10-10 10:09:10.063] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: acquired the global session build lock after 3.8245479s (a build was in progress)
+[2026-10-10 10:09:10.096] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Separator]: model=hnsep.onnx ep=cpu (choice=cpu, global_env=auto)
+[2026-10-10 10:09:10.251] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[Separator]: created session ep=cpu intra_threads=20 commit_ms=155
+[2026-10-10 10:09:10.315] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: acquired the global session build lock after 4.0763874s (a build was in progress)
+[2026-10-10 10:09:10.316] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: try_register_directml_ep
+[2026-10-10 10:09:10.317] [WARN ] hifishifter_kernel::dml_adapters: dml_adapters: enumerated 2 unique DXGI GPU adapters (4 total indices scanned)
+[2026-10-10 10:09:10.317] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session: auto-detected DML device_id=1 name='NVIDIA GeForce RTX 3050 Laptop GPU' vram=3962MB
+[2026-10-10 10:09:10.317] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: DirectML device_id=1 (old API)
+[2026-10-10 10:09:10.333] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: model=fcpe.onnx ep=directml strict=true (choice=auto, global_env=auto)
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: created session ep=directml strict=true intra_threads=2 commit_ms=86
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]:   input name='mel' dtype=Tensor { ty: Float32, shape: [1, -1, 128], dimension_symbols: SymbolicDimensions(["", "time", ""]) }
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]:   output name='latent' dtype=Tensor { ty: Float32, shape: [-1, -1, 360], dimension_symbols: SymbolicDimensions(["batch", "time", ""]) }
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: smoke stage=begin ep=DirectML
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: smoke stage=inputs_planned count=1 elapsed_ms=0
+[2026-10-10 10:09:10.420] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: smoke stage=tensors_ready elapsed_ms=0 — spawning inference thread
+[2026-10-10 10:09:10.574] [WARN ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: smoke stage=inference_returned elapsed_ms=153
+[2026-10-10 10:09:10.574] [INFO ] hifishifter_kernel::vocoder_ort_session: ort_session[PitchDetector]: DirectML smoke test passed - EP is functional
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=2 rate=48000
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=2 rate=48000
+[2026-10-10 10:09:19.098] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=0 rate=48000
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(0)
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IAudioProcessor::setupProcessing mode=0 rate=48000
+[2026-10-10 10:09:20.002] [INFO ] hifishifter_plugin: [vst3] IComponent::setActive(1)

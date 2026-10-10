@@ -930,9 +930,13 @@ impl DocumentSession {
     /// region→item 的边只服务 ARA 授权，这里要的是"这个 item 现在的 active take 是什么
     /// 状态"，按 GUID 查最直接，且对没有 region 的 item（尚未授权）也成立。
     pub(crate) fn project_host_take_facts_locked(&self, timeline: &mut TimelineState) {
-        // item GUID → (方向, 循环源, 声道模式)。取 **active take** 的几何：扁平投影
-        // 描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
-        let facts: std::collections::HashMap<String, (Option<bool>, bool, i32)> = self
+        // item GUID → (方向, 循环源, 声道模式, 宿主源窗口)。取 **active take** 的几何：
+        // 扁平投影描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
+        // 源窗口 `(start, span)` 只服务倒放的**镜像坐标复原**（见下）。
+        let facts: std::collections::HashMap<
+            String,
+            (Option<bool>, bool, i32, Option<(f64, f64)>),
+        > = self
             .ui_tracks
             .lock()
             .unwrap()
@@ -943,15 +947,19 @@ impl DocumentSession {
                 let reversed = active.and_then(|take| take.reversed);
                 // 循环源与声道模式是 item 级 / active take 级；缺 active take 时退回
                 // item 的权威几何。
-                let loop_source = active
-                    .map(|take| take.geometry.loop_source)
-                    .unwrap_or(item.geometry.loop_source);
-                let channel_mode = active
-                    .map(|take| take.geometry.channel_mode)
-                    .unwrap_or(item.geometry.channel_mode);
+                let geometry = active.map(|take| &take.geometry).unwrap_or(&item.geometry);
+                let loop_source = geometry.loop_source;
+                let channel_mode = geometry.channel_mode;
+                // 宿主源窗口 = `[D_STARTOFFS, D_STARTOFFS + D_LENGTH×D_PLAYRATE]`。
+                let host_window = active.map(|take| {
+                    (
+                        take.geometry.source_start_sec,
+                        take.geometry.duration_sec * take.geometry.playback_rate,
+                    )
+                });
                 (
                     item.geometry.item_id.clone(),
-                    (reversed, loop_source, channel_mode),
+                    (reversed, loop_source, channel_mode, host_window),
                 )
             })
             .collect();
@@ -959,7 +967,7 @@ impl DocumentSession {
             let Some(guid) = clip.id.strip_prefix("ara-item-") else {
                 continue;
             };
-            let Some((reversed, loop_source, channel_mode)) = facts.get(guid) else {
+            let Some((reversed, loop_source, channel_mode, host_window)) = facts.get(guid) else {
                 continue;
             };
             // 方向：读不出来时**不改**（`None` 不当作"没倒放"）。
@@ -968,6 +976,28 @@ impl DocumentSession {
             }
             clip.loop_enabled = *loop_source;
             clip.channel_mode = *channel_mode;
+            // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
+            // 见 `probe/ara/REVERSE-FINDINGS.md`）：倒放 take 的 `D_STARTOFFS` 是
+            // `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
+            // （`clip_playback_window_sec`）要的是**正向**窗口的终点 —— 直接用 ARA
+            // 的区间会让内核二次镜像 = 又变正放。所以按**宿主几何**把窗口翻回正向：
+            //   forward = [D − host_start − host_span, D − host_start]
+            // 由宿主事实直接推导，**幂等**（重复调用结果相同），不依赖入参 clip 的当前
+            // 窗口 —— 因此重认领/重建不会累积镜像。Loop 倒放走内核的回绕分支，不适用
+            // 本模型，保持原样。
+            if clip.reversed && !clip.loop_enabled {
+                if let Some((forward_start, forward_end)) = reversed_forward_window(
+                    hifishifter_kernel::state::clip_source_media_duration_sec(clip),
+                    *host_window,
+                ) {
+                    clip.source_start_sec = forward_start;
+                    clip.source_end_sec = forward_end;
+                    for take in &mut clip.takes {
+                        take.source_start_sec = forward_start;
+                        take.source_end_sec = forward_end;
+                    }
+                }
+            }
             // 让 active take 也带上同一份事实：`normalize_takes()` 之后 clip 的扁平字段
             // 来自 active take，只在 clip 上写会被下一次物化覆盖。
             for take in &mut clip.takes {
@@ -1157,6 +1187,29 @@ impl DocumentSession {
         }
         Ok(timeline)
     }
+}
+
+/// 倒放 clip 的**镜像坐标复原**：宿主报的源窗口 `[host_start, host_start + host_span]`
+/// 是**已镜像坐标**（F-4 实测，见 `probe/ara/REVERSE-FINDINGS.md`）—— 倒放 take 的
+/// `D_STARTOFFS` 是 `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
+/// （`clip_playback_window_sec`）要的是**正向**窗口的终点。返回正向 `(start, end)`：
+///
+///   forward = [D − host_start − host_span, D − host_start]
+///
+/// 【为什么是幂等的】只读**宿主事实**与媒体时长，不读入参 clip 的当前窗口 —— 所以对
+/// 同一份宿主事实重复调用结果相同，重建/重认领不会累积镜像（累积镜像 = 又变正放）。
+/// 媒体时长未知（`None`）或输入非有限时返回 `None`：保持宿主窗口，宁可显示不精确，
+/// 也不编造一个可能错的正向窗口。
+fn reversed_forward_window(
+    media_sec: Option<f64>,
+    host_window: Option<(f64, f64)>,
+) -> Option<(f64, f64)> {
+    let media_sec = media_sec.filter(|d| d.is_finite() && *d > 0.0)?;
+    let (host_start, host_span) = host_window?;
+    if !host_start.is_finite() || !host_span.is_finite() {
+        return None;
+    }
+    Some((media_sec - host_start - host_span, media_sec - host_start))
 }
 
 #[cfg(test)]
@@ -1356,5 +1409,39 @@ mod tests {
             "不再属于宿主清单的轨道要按普通 ARA 轨道保留"
         );
         document.close();
+    }
+
+    /// F-4 实测：源长 2.0、非对称裁切 `[0.25, 1.25]`、倒放后宿主报 `D_STARTOFFS=0.75`
+    /// （镜像坐标）。复原必须得到正向窗口 `[0.25, 1.25]`，且**幂等**（同输入同输出），
+    /// 否则重建会累积镜像 = 又变正放。
+    #[test]
+    fn a_reversed_host_window_is_mirrored_back_to_the_forward_window() {
+        // 宿主 [0.75, 0.75+1.0]，源长 2.0 ⇒ 正向 [2.0−1.75, 2.0−0.75] = [0.25, 1.25]。
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((0.75, 1.0))),
+            Some((0.25, 1.25))
+        );
+        // 幂等：只读宿主事实，不读 clip 当前窗口，重复调用结果相同。
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((0.75, 1.0))),
+            Some((0.25, 1.25))
+        );
+        // 源长未知 ⇒ 不复原（保持宿主窗口，不编造一个可能错的正向窗口）。
+        assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
+        assert_eq!(reversed_forward_window(Some(0.0), Some((0.75, 1.0))), None);
+        // 缺宿主窗口 / 非有限输入一律不复原。
+        assert_eq!(reversed_forward_window(Some(2.0), None), None);
+        assert_eq!(
+            reversed_forward_window(Some(f64::NAN), Some((0.75, 1.0))),
+            None
+        );
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((f64::NAN, 1.0))),
+            None
+        );
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((0.75, f64::INFINITY))),
+            None
+        );
     }
 }

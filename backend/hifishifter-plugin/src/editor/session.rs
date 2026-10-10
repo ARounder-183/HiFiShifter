@@ -863,11 +863,13 @@ impl EditorSession {
         }
         // 正向倍率交给原kernel保调处理，不能再把全部拉伸挡在GUI外。
         //
-        // 【倒放为什么不再是整份失败】倒放是**宿主**的既有状态（REAPER 的
+        // 【倒放为什么不再是整份失败，也不再隔离】倒放是**宿主**的既有状态（REAPER 的
         // `SOURCE SECTION MODE` / 负 `PLAYRATE`），用户没做错任何事；而此前这里一句
         // `any(reversed)` 就 `Err`，于是"一个片段倒放"升级成"整个插件打不开"。
-        // 现在交给 `materialize_with_byte_limit` 的 `ReversePolicy::Isolate` 逐 clip 隔离：
-        // 该 clip 不物化（界面按无源占位显示，并标明"由 REAPER 处理"），其余照常。
+        // 隔离（`ReversePolicy::Isolate`）只解决了"不打死会话"，代价是倒放片段永远
+        // 渲染不出来。F-4 已判明 ARA 报的是**镜像坐标**，播种层
+        // （`project_host_take_facts_locked`）据此把窗口翻回正向，内核的倒放数学
+        // 自会反向取窗 —— 所以现在**照常物化**（`Materialize`），倒放片段真的会渲染。
         if timeline.target_param_frames(timeline.frame_period_ms()) > 1_000_000 {
             return Err("ARA editor parameter frame budget exceeded for project span".into());
         }
@@ -887,7 +889,7 @@ impl EditorSession {
             &views,
             &dir,
             crate::render::budget::global_budget().limit(),
-            hifishifter_kernel::editor::host_pcm::ReversePolicy::Isolate,
+            hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
         )?;
         // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
         for params in timeline.params_by_root_track.values_mut() {
@@ -1185,9 +1187,12 @@ impl EditorSession {
                     .any(|id| format!("{}{id}", self.namespace) == clip.id)
             });
         }
-        // 倒放 clip 不参与分析：ARA 不给反向 PCM，插件渲染不出正确内容，
-        // 对它的分析结果也无处施加。它仍留在 GUI 时间线上（显示为"由 REAPER 处理"）。
-        timeline.clips.retain(|clip| !clip.reversed);
+        // 倒放 clip **重新纳入分析**：分析读的是**正向完整源**（缓存键含源路径 + 文件
+        // 签名 + 帧周期，不含消费窗口），倒放只发生在**装配期** ——
+        // `pitch_analysis/schedule.rs` 与 `pitch_editing.rs` 在把曲线写入时间线帧时
+        // 整体翻转。所以让倒放进分析是安全的：它读的还是同一份正向缓存，只是取窗口时
+        // 镜像。此前把它排除是因为倒放被隔离（没有源可分析）；现在照常物化
+        // （`ReversePolicy::Materialize`），排除反而会让它的 f0 全零 ⇒ 只剩气声。
         for track in &mut timeline.tracks {
             if timeline
                 .params_by_root_track
@@ -3248,14 +3253,16 @@ pub(crate) mod tests {
         }
         editor.close();
     }
-    /// 倒放是**宿主**的既有状态，只逐 clip 隔离，绝不让整份会话失败。
+    /// 倒放是**宿主**的既有状态，现在**照常物化**（不再隔离），且绝不让整份会话失败。
     ///
     /// 【为什么这条是本测试的重点】此前 `ensure_loaded` 里一句
-    /// `any(|clip| clip.reversed)` 就 `Err`，于是"一个片段倒放"升级成"整个插件打不开"——
-    /// 用户报障的"特别多的兼容性问题"里就有它。现在隔离：该 clip 不物化（无源，界面按
-    /// "由 REAPER 处理"显示），其余照常加载。
+    /// `any(|clip| clip.reversed)` 就 `Err`，于是"一个片段倒放"升级成"整个插件打不开"。
+    /// 中间态是 `ReversePolicy::Isolate`：不物化、界面按"由 REAPER 处理"显示 —— 它只
+    /// 解决"不打死会话"，代价是倒放片段**永远渲染不出来**。F-4 判明 ARA 报镜像坐标后，
+    /// 播种层（`project_host_take_facts_locked`）把窗口翻回正向，内核的倒放数学自会反向
+    /// 取窗，所以现在 `Materialize`：倒放 clip 照常带源。
     #[test]
-    fn a_reversed_clip_is_isolated_instead_of_failing_the_session() {
+    fn a_reversed_clip_is_materialized_instead_of_failing_the_session() {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let mut timeline = document.timeline.lock().unwrap();
@@ -3264,18 +3271,24 @@ pub(crate) mod tests {
         clip.takes[0].reversed = true;
         drop(timeline);
         let editor = owner.editor_session().unwrap();
-        // 会话照常加载 —— 不再整份失败。
+        // 会话照常加载 —— 既不整份失败，也不再隔离。
         editor.ensure_loaded(false).unwrap();
         let loaded = editor.timeline.lock().unwrap().clone();
         let clip = &loaded.clips[0];
         assert!(clip.reversed, "宿主事实要保留下来，界面才能显示倒放标记");
         assert!(
-            clip.source_path.is_none(),
-            "被隔离的倒放 clip 不带源：ARA 不给反向 PCM，拿正向 PCM 当反向渲染是错的"
+            clip.source_path.is_some(),
+            "倒放 clip 现在照常物化：内核按反向窗口消费这份正向 PCM"
         );
         assert!(
-            clip.takes.iter().all(|take| take.source_path.is_none()),
-            "take 层同样不得留下源引用"
+            clip.takes.iter().all(|take| take.source_path.is_some()),
+            "take 层同样带源引用（否则 normalize_takes 会把扁平投影清空）"
+        );
+        // 倒放 clip 也必须纳入分析：分析读正向完整源，装配期再整体翻转。
+        // 排除它会让 f0 全零 ⇒ 只剩气声（用户报障的另一半）。
+        assert!(
+            editor.analysis_timeline().clips.iter().any(|c| c.reversed),
+            "倒放 clip 必须出现在分析时间线上"
         );
         // 播放观察照常工作（此前那条路径被整份失败连带打断）。
         owner

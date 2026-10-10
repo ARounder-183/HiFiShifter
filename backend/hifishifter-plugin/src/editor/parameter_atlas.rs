@@ -323,6 +323,10 @@ impl ParameterAtlas {
             let candidates = timeline
                 .clips
                 .iter()
+                // 倒放 clip 不参与参数绑定：它的播放顺序与源窗口反向，需要镜像的帧
+                // 映射（单列一期）。把它排除在候选之外，而不是让 `geometry(clip)`
+                // 报错 —— 后者会让整份重绑定失败。
+                .filter(|clip| !clip.reversed)
                 .filter(|clip| {
                     identities.get(&clip.id).is_some_and(|id| {
                         id.source == record.identity.source
@@ -452,6 +456,11 @@ impl ParameterAtlas {
         let mut candidate = self.clone();
         candidate.capture_gaps(timeline, previous_view)?;
         for clip in &timeline.clips {
+            // 倒放 clip 不参与参数捕获：帧映射需要镜像，单列一期。跳过而不是让
+            // `geometry(clip)` 报错，否则一条倒放片段会让整份捕获失败。
+            if clip.reversed {
+                continue;
+            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
@@ -606,6 +615,12 @@ impl ParameterAtlas {
         self.validate()?;
         let mut projected = BTreeMap::new();
         for clip in &timeline.clips {
+            // 倒放 clip 不参与参数投影：它的播放顺序与源窗口反向，需要镜像的帧映射
+            // （单列一期）。跳过而不是让 `geometry(clip)` 报错 —— 后者会让整个渲染
+            // 输入准备失败（本函数在 `capture_render_input` 上）。
+            if clip.reversed {
+                continue;
+            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
@@ -833,7 +848,15 @@ impl ParameterAtlas {
             let root = timeline
                 .resolve_root_track_id(&clip.track_id)
                 .ok_or("unknown gap parameter root")?;
-            coverage.entry(root).or_default().push(geometry(clip)?);
+            // 覆盖只用到**时间线跨度**（`covered_frame_range` 只看 project_start/duration），
+            // 与方向无关 —— 倒放 clip 也必须计入覆盖，否则它的跨度会被当成空白层，
+            // 用户在其上的编辑被误捕获进 gap 层。所以这里不走 `geometry()` 的倒放拒绝。
+            coverage.entry(root).or_default().push(RegionGeometry {
+                project_start: clip.start_sec,
+                project_duration: clip.length_sec,
+                source_start: clip.source_start_sec,
+                source_duration: clip.length_sec * clip.playback_rate as f64,
+            });
         }
         self.capture_gap_roots(&timeline.params_by_root_track, &coverage, previous)
     }

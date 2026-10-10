@@ -3418,7 +3418,14 @@ impl ExtensionOwner {
         if owned_fade {
             document.project_audio_fades_locked(&mut timeline, &resolved)?;
         }
-        let kernel_render = edited || stretch || owned_fade || !resolved.groups.is_empty();
+        // 【倒放也必须走内核】未编辑、无拉伸、无淡化委托的片段本来走
+        // `mix_plain_regions` 直通（`RenderInput.timeline = None`）—— 那是"原样放 ARA
+        // 授权 PCM"。但倒放片段**不能**直通：ARA 给的是正向 PCM，方向翻转只发生在内核
+        // 的 `render_mixdown_internal`（`reverse_interleaved_frames`）。不把倒放片段推进
+        // 内核，它就会被原样按正向放出来（实测：输出 = 源窗口正放）。
+        let reversed_clip = timeline.clips.iter().any(|clip| clip.reversed);
+        let kernel_render =
+            edited || stretch || owned_fade || reversed_clip || !resolved.groups.is_empty();
         let clip_parameters = if resolved.atlas.is_empty() {
             Default::default()
         } else {

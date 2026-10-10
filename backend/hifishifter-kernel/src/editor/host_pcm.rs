@@ -24,6 +24,15 @@ pub enum ReversePolicy {
     Reject,
     /// 跳过倒放 clip：不物化、不报错，其余照常。
     Isolate,
+    /// 照常物化倒放 clip —— 方向交给下游消费方。
+    ///
+    /// 【为什么插件用这一支而不是 `Isolate`】隔离是"宁可显示占位，也不拿正向 PCM
+    /// 当反向内容"的安全选择，代价是倒放片段**永远渲染不出来**。当播种层已按宿主
+    /// 事实把 ARA 的**镜像窗口翻回正向**（`project_host_take_facts_locked`）后，
+    /// 内核的倒放消费数学（`clip_playback_window_sec` 反向取窗 + `reverse_*`）
+    /// 自会产出正确的反向内容 —— 此时物化的**正向** WAV 是正确输入，隔离反而
+    /// 会让它缺失。分析也依赖它（分析读正向完整源，装配期再镜像）。
+    Materialize,
 }
 
 /// 在所有源/几何校验成功后生成只用于波形与分析的WAV，返回路径→宿主ID反向表。
@@ -110,6 +119,8 @@ pub fn materialize_with_byte_limit(
                     isolated.insert(clip.id.clone());
                     continue;
                 }
+                // 照常物化：走下面的常规几何校验与路径改写。
+                ReversePolicy::Materialize => {}
             }
         }
         if !clip.start_sec.is_finite()
@@ -326,11 +337,12 @@ mod tests {
         assert_ne!(next.clips[0].source_path.as_deref(), Some(path.as_str()));
     }
 
-    /// 倒放的两种策略：独立 App 保持"整份拒绝"，插件"逐 clip 隔离"。
+    /// 倒放的三种策略：独立 App 保持"整份拒绝"；插件在 F-4 之前"逐 clip 隔离"、
+    /// F-4 之后"照常物化"（镜像窗口已在播种层翻回正向）。
     ///
-    /// 【为什么这条必须存在】`Isolate` 是插件能"一个片段倒放不再打死整个插件"的唯一
-    /// 依据；而 `Reject` 是独立 App 的既有行为，不能被这次改动削弱。两条一起钉住，
-    /// 才不会出现"为了修插件把独立 App 的校验也放开了"。
+    /// 【为什么这条必须存在】`Isolate` 曾让"一个片段倒放不再打死整个插件"；而 `Reject`
+    /// 是独立 App 的既有行为，不能被削弱。`Materialize` 是"倒放真的能渲染"的依据。
+    /// 三条一起钉住，才不会出现"为了修插件把独立 App 的校验也放开了"。
     #[test]
     fn reverse_policy_rejects_for_the_app_and_isolates_for_the_plugin() {
         let dir = std::env::temp_dir().join(format!(
@@ -376,10 +388,14 @@ mod tests {
             "独立 App 的倒放校验不能被削弱"
         );
 
-        // 插件：隔离倒放 clip，其余照常物化。
+        // 插件（隔离策略，保留给其它调用方）：不物化倒放 clip，其余照常。
         let (isolated, _) = materialize_with_byte_limit(
-            timeline,
-            &[view],
+            timeline.clone(),
+            &[PcmView {
+                persistent_id: view.persistent_id,
+                sample_rate: view.sample_rate,
+                planes: view.planes,
+            }],
             &dir,
             64 * 1024 * 1024,
             ReversePolicy::Isolate,
@@ -405,5 +421,33 @@ mod tests {
             plain.source_path.is_some(),
             "其余 clip 必须照常物化 —— 隔离不是整份放弃"
         );
+
+        // 插件（F-4 之后）：**照常物化**倒放 clip —— 方向由下游消费（镜像窗口已在播种层
+        // 翻回正向，内核按反向窗口消费这份正向 PCM）。这是"倒放真的能渲染"的唯一依据。
+        let (materialized, _) = materialize_with_byte_limit(
+            timeline,
+            &[view],
+            &dir,
+            64 * 1024 * 1024,
+            ReversePolicy::Materialize,
+        )
+        .unwrap();
+        let reversed = materialized
+            .clips
+            .iter()
+            .find(|clip| clip.id == "reversed")
+            .unwrap();
+        assert!(reversed.reversed, "宿主事实保留");
+        assert!(
+            reversed.source_path.is_some(),
+            "照常物化：内核按反向窗口消费这份正向 PCM"
+        );
+        assert!(reversed.takes.iter().all(|take| take.source_path.is_some()));
+        let plain = materialized
+            .clips
+            .iter()
+            .find(|clip| clip.id == "plain")
+            .unwrap();
+        assert!(plain.source_path.is_some(), "其余 clip 照常物化");
     }
 }
