@@ -2,6 +2,7 @@
 import { createSlice, createAsyncThunk, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
 import { parseHostAudio } from "../ara/hostAudio";
+import { classifyClipEditFailure } from "./clipEditFailure";
 import type {
     HistoryRecordSummary,
     HostAudioPayload,
@@ -6231,6 +6232,15 @@ const sessionSlice = createSlice({
                 // 交互锁期间若不强制应用，后端返回的波纹位移会被丢弃，导致波纹“无效”。
                 applyTimelineState(state, payload, { force: true });
             })
+            .addCase(moveClipRemote.rejected, (state, action) => {
+                // 【为什么移动此前完全没有 rejected 分支】失败是**静默**的：同一类宿主
+                // 冲突在 set_clip_state 上会报"音频块编辑被拒绝"，在移动上却什么都不说，
+                // 用户只看到片段弹回原位。现在与状态编辑用同一套分类：瞬时失败仍静默
+                // （后端自行收敛），只有需要用户处置的才提示。
+                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                    state.status = "Clip edit rejected";
+                }
+            })
             .addCase(moveClipsRemote.pending, (state, action) => {
                 state._latestEditRequestId = action.meta.requestId;
             })
@@ -6247,6 +6257,12 @@ const sessionSlice = createSlice({
                 }
                 // force：见 moveClipRemote.fulfilled 注释（交互锁期间也必须应用波纹结果）。
                 applyTimelineState(state, payload, { force: true });
+            })
+            .addCase(moveClipsRemote.rejected, (state, action) => {
+                // 与 moveClipRemote.rejected 同一分类口径（此前完全静默）。
+                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                    state.status = "Clip edit rejected";
+                }
             })
 
             .addCase(closeTrackGapsRemote.pending, (state, action) => {
@@ -6502,10 +6518,15 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(setClipStateRemote.rejected, (state, action) => {
-                // 后端拒绝：保留乐观值（用户意图可见），给出非致命反馈。
+                // 后端拒绝：保留乐观值（用户意图可见）。
                 // 此后任何权威快照会以真实状态纠正；不静默回滚。
                 applyOptimisticClipState(state, action.meta.arg);
-                state.status = "Clip edit rejected";
+                // 【为什么不一律报错】"宿主还在追上几何/媒体"是**瞬时**失败，后端会自己
+                // 重试并收敛，用户不需要做任何事。此前它和"真正被拒绝"共用一句
+                // "音频块编辑被拒绝"，于是每次编辑都闪一次错 —— 即使编辑其实生效了。
+                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                    state.status = "Clip edit rejected";
+                }
             })
 
             .addCase(setClipsStateBulkRemote.fulfilled, (state, action) => {
@@ -6528,9 +6549,12 @@ const sessionSlice = createSlice({
                 applyOptimisticBulkClipState(state, action.meta.arg.updates);
             })
             .addCase(setClipsStateBulkRemote.rejected, (state, action) => {
-                // 后端拒绝：保留乐观值（用户意图可见），给出非致命反馈。
+                // 后端拒绝：保留乐观值（用户意图可见）；分类理由见
+                // `setClipStateRemote.rejected`。
                 applyOptimisticBulkClipState(state, action.meta.arg.updates);
-                state.status = "Clip edit rejected";
+                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                    state.status = "Clip edit rejected";
+                }
             })
 
             .addCase(scanAndConvertFakeStereoRemote.fulfilled, (state, action) => {
