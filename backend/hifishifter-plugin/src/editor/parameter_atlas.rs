@@ -711,14 +711,26 @@ impl ParameterAtlas {
                 return Ok(Some(record));
             }
         }
+        // 【兜底层：没有谱系时按源窗猜祖先 —— 判据必须是**包含**而不是**重叠**】
+        //
+        // 这一层只在没有显式谱系（`split_parents`）可用时才跑，因此必须保守：
+        //   * **重叠**会把**兄弟半段**判成合法祖先。分割后两半的源窗恰好相邻/相接，
+        //     重叠判据让右半段继承左半段的 `SourceCurve.basis`，曲线被整体平移一个
+        //     分割长度（用户报障：分割含倒放 Take 的 Item 后偏移；几何正确、曲线错位）。
+        //     改成包含后，只有真正**包住**本片段窗口的祖先才合格，兄弟半段被排除。
+        //   * 多候选说明"猜不出"。返回 `None`（不画曲线）远好于返回**错**曲线；
+        //     也远好于把"猜不出"当 `Err` 抛给用户 —— 那会变成一次
+        //     "音频块编辑被拒绝"，让用户为一个内部推断失败负责。
+        //
+        // 这里保留"优先活记录、必要时退回非活记录"的口径：非活记录正是**分割前**的
+        // 父段，用它才能让两半继承到正确祖先。只有显式谱系（F1.2）铺开后才应进一步收紧。
         let candidates = related
             .filter(|record| {
                 record.identity.key != 0
                     && record.root == root
-                    && geometry.source_start
-                        < record.current.source_start + record.current.source_duration
+                    && geometry.source_start >= record.current.source_start - 1e-6
                     && geometry.source_start + geometry.source_duration
-                        > record.current.source_start
+                        <= record.current.source_start + record.current.source_duration + 1e-6
             })
             .collect::<Vec<_>>();
         let live = candidates
@@ -730,6 +742,8 @@ impl ParameterAtlas {
         match candidates.as_slice() {
             [] => Ok(None),
             [record] => Ok(Some(*record)),
+            // 两条**真正活且重叠**的不同编辑仍是真歧义，不能靠"取最小范围/最后写入"
+            // 掩盖（既有契约，见 `nested_splits_follow_live_ancestry_…`）。
             _ => Err("Conflict: ambiguous source parameter ancestry".into()),
         }
     }
