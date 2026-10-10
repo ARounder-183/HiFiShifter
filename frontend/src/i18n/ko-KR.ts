@@ -2084,6 +2084,9 @@ export const koKR = {
      * 이유는 REAPER가 ARA 플러그인을 트랙 단위로 관리하기 때문입니다(백엔드
      * `render::extension::HostAudioState` 참조).
      */
+    ara_host_audio_skipped_title: "표시되지 않는 클립이 있습니다",
+    ara_host_audio_skipped_body:
+        "호스트가 제공한 {count}개의 클립을 매핑할 수 없어 여기에 표시되지 않습니다(MIDI 또는 길이가 0인 아이템 등)",
     ara_host_audio_folder_title: "이 플러그인은 트랙 그룹(폴더)에 있습니다",
     ara_host_audio_folder_body:
         "REAPER는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",

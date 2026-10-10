@@ -2042,6 +2042,9 @@ export const zhTW = {
      * region sequence；真正的原因是 REAPER 按軌道管理 ARA 外掛（見後端
      * `render::extension::HostAudioState` 的說明）。
      */
+    ara_host_audio_skipped_title: "有片段未顯示",
+    ara_host_audio_skipped_body:
+        "宿主提供了 {count} 個此外掛無法對應的片段（例如 MIDI 或零長度 Item），它們不會出現在這裡",
     ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
     ara_host_audio_folder_body:
         "REAPER 按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",

@@ -660,6 +660,36 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "pending");
     }
 
+    /// 被跳过的 playback region 必须进载荷：只 log 会让 MIDI / 零长度 item 静默消失。
+    #[test]
+    fn skipped_regions_are_reported_in_the_payload() {
+        let fixture = super::super::ReaperFixture::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let document = crate::render::document::DocumentSession::new(9883);
+        document
+            .ui_tracks
+            .lock()
+            .unwrap()
+            .insert(track.guid.clone(), track);
+        document.skipped_regions.lock().unwrap().push((2, "midi".into()));
+        document.skipped_regions.lock().unwrap().push((5, "zero_length".into()));
+
+        let mut payload = serde_json::json!({"clips": []});
+        document.decorate_host_media_locked(&mut payload, "ui-");
+        assert_eq!(payload["skipped_regions"]["count"], 2);
+        assert_eq!(payload["skipped_regions"]["items"][0]["reason"], "midi");
+        assert_eq!(payload["skipped_regions"]["items"][1]["index"], 5);
+
+        // 没有跳过项时**不写**该字段：前端沿用"没有跳过"，而不是被一个空数组扰动。
+        document.skipped_regions.lock().unwrap().clear();
+        let mut clean = serde_json::json!({"clips": []});
+        document.decorate_host_media_locked(&mut clean, "ui-");
+        assert!(clean.get("skipped_regions").is_none());
+    }
+
     /// 方向位读不出来（`PCM_Source_GetSectionInfo` 不可用）时，插件**按正放**处理，
     /// 不再制造一个"方向未知"的用户提示 —— 方向是纯渲染输入，读不到不影响可用性。
     #[test]

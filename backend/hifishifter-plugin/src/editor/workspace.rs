@@ -803,6 +803,18 @@ impl DocumentSession {
             }
         }
         pending_since.retain(|id, _| !seen.contains(id));
+        // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
+        // 语言无关地报出数量与原因码，文案由前端 catalog 本地化。
+        let skipped = self.skipped_regions.lock().unwrap();
+        if !skipped.is_empty() {
+            payload["skipped_regions"] = serde_json::json!({
+                "count": skipped.len(),
+                "items": skipped
+                    .iter()
+                    .map(|(index, reason)| serde_json::json!({"index": index, "reason": reason}))
+                    .collect::<Vec<_>>(),
+            });
+        }
     }
     /// 仍在"争取宿主音频"的片段数（`0` = 没有在途项，应用状态不应停在"进行中"）。
     ///
@@ -878,9 +890,14 @@ impl DocumentSession {
             return;
         };
         let status = owner.host_audio_status();
+        // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
+        // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
+        // 里是为了复用前端已有的读数通道，不必新增一条状态链。
+        let skipped = self.skipped_regions.lock().unwrap().len();
         payload["host_audio"] = serde_json::json!({
             "state": status.state.as_str(),
             "waiting_clips": status.waiting_items,
+            "skipped_clips": skipped,
         });
     }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。

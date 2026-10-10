@@ -137,7 +137,23 @@ pub struct AraPlaybackRegion {
     pub has_content_based_fade_at_tail: bool,
 }
 
-/// ARA 不提供、但渲染需要的输入。
+/// ARA 的 playback transformation / region 结构**表达不到**、但渲染需要的输入。
+///
+/// 【这一层现在是什么】清单里的每一项都**已经**由宿主只读查询补回来，不再是"丢失"：
+///
+/// | 字段 | 补回它的地方 |
+/// |---|---|
+/// | [`LostField::Reversed`] | `project_host_take_facts_locked`（`PCM_Source_GetSectionInfo` 的方向位） |
+/// | [`LostField::FadeShapeAndCurvature`] | `project_ui_fades_locked`（`D_FADE*DIR` / `_NEW`） |
+/// | [`LostField::FadeLength`] | `project_ui_fades_locked`（`D_FADE*LEN`） |
+/// | [`LostField::LoopSource`] | `project_host_take_facts_locked`（item 级 `B_LOOPSRC`） |
+/// | [`LostField::ItemGain`] | `display_item_gain`（`D_VOL`） |
+/// | [`LostField::TempoMap`] | `project_plugin_musical_context_locked` + VST3 `ProcessContext` |
+/// | [`LostField::SourceFileFingerprint`] | `Clip::source_file_fingerprint`（宿主文件名 + 内容版本） |
+///
+/// 【为什么保留这份清单】它是**可审计的边界声明**：任何"ARA 给不了、只能问宿主"的输入
+/// 都应先在这里登记，再决定它是否要进渲染缓存键（`PreparedVersion`）。早前它被误读成
+/// "这些字段用不了"，于是有人据此以为倒放/循环源没有支持 —— 上表的补回点就是纠正。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LostField {
     /// 倒放：ARA 的 playback transformation 里**没有**反向位。
@@ -156,7 +172,7 @@ pub enum LostField {
     SourceFileFingerprint,
 }
 
-/// 无法从 ARA 取得的渲染输入清单。
+/// 无法从 ARA 本体取得的渲染输入清单；每项的宿主补回点见 [`LostField`]。
 pub const LOST_FIELDS: &[LostField] = &[
     LostField::Reversed,
     LostField::FadeShapeAndCurvature,

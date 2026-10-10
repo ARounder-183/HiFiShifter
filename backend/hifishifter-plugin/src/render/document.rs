@@ -116,6 +116,12 @@ pub(crate) struct DocumentSession {
     /// 记下时刻就能把"在途"与"等不到了"分开：超过阈值仍无源 ⇒ 转 `unavailable` 并给出
     /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
     pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
+    /// 最近一次映射里被**跳过**的 playback region（下标 + 语言无关原因码）。
+    ///
+    /// 【为什么要进 GUI 载荷】此前只 `log::warn`，于是 MIDI / 零长度 item 在插件里
+    /// **静默消失**：用户看到"我明明有这一段"，界面却什么都没有，也没有任何提示。
+    /// 记在这里，载荷给一句"N 个片段未显示（宿主数据无法映射）"，用户至少知道该查什么。
+    pub skipped_regions: Mutex<Vec<(usize, String)>>,
     /// 最近一次**完整**宿主清单采集的代次令牌 `(change_count, model, scope)`。
     ///
     /// 【为什么是文档级、不是实例级】`ui_tracks` / `render_facts` 都是文档级共享状态，
@@ -248,7 +254,7 @@ mod tests {
     #[test]
     fn native_factory_registers_the_actual_controller_identity() {
         let factory = FactoryBuilder::new("org.hfs.identity", "org.hfs.identity.archive")
-            .display("identity", "HiFiShifter", "https://example.invalid", "1")
+            .display("identity", "HiFiShifter", "https://github.com/ARounder-183/HiFiShifter", "1")
             .document_controller(|| {
                 let model = crate::ara::model::ModelHandle::new();
                 let session = model.session();
@@ -736,6 +742,7 @@ impl DocumentSession {
         self.split_media_from.lock().unwrap().clear();
         self.source_failures.lock().unwrap().clear();
         self.pending_since.lock().unwrap().clear();
+        self.skipped_regions.lock().unwrap().clear();
         self.ui_tracks.lock().unwrap().clear();
         self.ui_known_tracks.lock().unwrap().clear();
         *self.ui_inventory_stamp.lock().unwrap() = None;

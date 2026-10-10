@@ -2113,6 +2113,9 @@ export const jaJP = {
      * REAPER が ARA プラグインをトラック単位で管理していることです（バックエンドの
      * `render::extension::HostAudioState` を参照）。
      */
+    ara_host_audio_skipped_title: "表示されないクリップがあります",
+    ara_host_audio_skipped_body:
+        "ホストが提供した {count} 個のクリップをマッピングできず、ここには表示されません（MIDI や長さ 0 のアイテムなど）",
     ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
     ara_host_audio_folder_body:
         "REAPER は ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",

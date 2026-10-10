@@ -196,6 +196,13 @@ export interface HostAudioPayload {
     state: HostAudioState;
     /** 尚未被任何已分配 region 认领的片段数（"还在等音频"的片段数）。 */
     waiting_clips: number;
+    /**
+     * 宿主给了、但插件**无法映射**而被跳过的 playback region 数（MIDI / 零长度 item…）。
+     *
+     * 缺省 = 旧后端不带该字段（视为 0）。>0 时 `HostAudioNotice` 给一条提示，
+     * 否则这些片段在插件里**静默消失**，用户以为内容丢了。
+     */
+    skipped_clips?: number;
 }
 
 export interface TimelineState {

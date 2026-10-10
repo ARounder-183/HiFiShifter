@@ -1817,7 +1817,7 @@ mod bound_tests {
     fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
         let factory = Box::leak(Box::new(
             FactoryBuilder::new("org.hfs.bound", "org.hfs.bound.archive")
-                .display("bound", "HiFiShifter", "https://example.invalid", "1")
+                .display("bound", "HiFiShifter", "https://github.com/ARounder-183/HiFiShifter", "1")
                 .document_controller(|| {
                     let model = crate::ara::model::ModelHandle::new();
                     let session = model.session();

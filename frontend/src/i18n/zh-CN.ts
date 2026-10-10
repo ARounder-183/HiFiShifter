@@ -2039,6 +2039,9 @@ export const zhCN = {
      * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
      * `render::extension::HostAudioState` 的说明）。
      */
+    ara_host_audio_skipped_title: "有片段未显示",
+    ara_host_audio_skipped_body:
+        "宿主提供了 {count} 个本插件无法映射的片段（例如 MIDI 或零长度 Item），它们不会出现在这里",
     ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
     ara_host_audio_folder_body:
         "REAPER 按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",

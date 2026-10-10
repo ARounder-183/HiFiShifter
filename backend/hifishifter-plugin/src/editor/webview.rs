@@ -26,6 +26,11 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+/// 内嵌 WebView 的虚拟 origin。
+///
+/// 【为什么用 `.invalid`】RFC 2606 把 `.invalid` 保留为**永不解析**的 TLD，所以即使宿主
+/// 机器上有恶意 DNS/代理，这个 origin 也不可能指向真实站点 —— 它只是本进程内
+/// `WebResourceRequested` 拦截器（见下面的路由表）用的命名空间。不要改成任何可注册域名。
 const ORIGIN: &str = "https://hifishifter.invalid/";
 static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 static WINDOWS: AtomicUsize = AtomicUsize::new(0);

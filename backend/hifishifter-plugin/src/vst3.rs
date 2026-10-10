@@ -378,7 +378,7 @@ unsafe extern "system" fn factory_get_factory_info(
     // SAFETY: info 是宿主提供的可写 PFactoryInfo。
     let info = unsafe { &mut *info };
     copy_str(&mut info.vendor, "HiFiShifter");
-    copy_str(&mut info.url, "https://example.invalid");
+    copy_str(&mut info.url, "https://github.com/ARounder-183/HiFiShifter");
     copy_str(&mut info.email, "");
     // kUnicode = 1 << 4
     info.flags = 1 << 4;

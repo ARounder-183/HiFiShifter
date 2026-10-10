@@ -258,6 +258,12 @@ impl ModelHandle {
                             .join(",")
                     );
                 }
+                // 让界面也知道"有 N 段没显示"：只 log 会让 MIDI / 零长度 item 在插件里
+                // 静默消失，用户以为自己的内容丢了（见 `DocumentSession::skipped_regions`）。
+                *self.session.skipped_regions.lock().unwrap() = skipped
+                    .iter()
+                    .map(|s| (s.index, s.reason.as_str().to_owned()))
+                    .collect();
                 for track in &mut timeline.tracks {
                     track.compose_enabled = true;
                     track.pitch_analysis_algo =

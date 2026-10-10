@@ -54,7 +54,7 @@ impl Runtime {
             .display(
                 crate::CLASS_NAME,
                 "HiFiShifter",
-                "https://example.invalid",
+                "https://github.com/ARounder-183/HiFiShifter",
                 crate::VERSION,
             )
             // 原kernel处理委托的边界包络，head/tail无额外延伸；tempo-reflecting仍不广告。

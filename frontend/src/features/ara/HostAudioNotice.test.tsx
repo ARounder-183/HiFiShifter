@@ -81,3 +81,22 @@ test("an unknown reading stays quiet", async () => {
     await render(null);
     expect(container.querySelector('[role="status"]')).toBeNull();
 });
+
+/*
+ * 被跳过的片段在插件里**根本不存在**：不提示的话用户只看到"内容不见了"，唯一的线索是
+ * 一行日志。数量进读数通道（`host_audio.skipped_clips`），提示条据此给出可执行的下一步。
+ */
+test("skipped clips surface a notice with the count", async () => {
+    await render({ state: "ready", waiting_clips: 0, skipped_clips: 2 });
+    const notice = container.querySelector('[role="status"]');
+    expect(notice).toBeTruthy();
+    expect(notice?.textContent).toContain(enUS.ara_host_audio_skipped_title);
+    // 复数形态按计数回填 `{count}`。
+    expect(notice?.textContent).toContain("2");
+    expect(notice?.textContent).toContain("MIDI");
+});
+
+test("a zero skipped count stays quiet", async () => {
+    await render({ state: "ready", waiting_clips: 0, skipped_clips: 0 });
+    expect(container.querySelector('[role="status"]')).toBeNull();
+});

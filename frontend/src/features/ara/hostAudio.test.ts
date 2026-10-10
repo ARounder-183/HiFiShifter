@@ -11,6 +11,7 @@ import {
     hostMediaState,
     isAwaitingHostAudio,
     needsFolderTrackNotice,
+    needsSkippedClipsNotice,
     needsUnidentifiedHostNotice,
     parseHostAudio,
 } from "./hostAudio";
@@ -55,6 +56,38 @@ describe("parseHostAudio", () => {
         expect(parseHostAudio({ state: "awaiting_regions", waiting_clips: 1.7 })).toEqual({
             state: "awaiting_regions",
             waiting_clips: 1,
+        });
+    });
+});
+
+/*
+ * 被跳过的片段（MIDI / 零长度 item…）在插件里**根本不存在**：只 log 会让用户看到
+ * "我明明有这一段，界面却什么都没有"。数量必须能从读数里取出来，且 0 / 缺省同义。
+ */
+describe("needsSkippedClipsNotice", () => {
+    test("有跳过片段时返回数量", () => {
+        expect(
+            needsSkippedClipsNotice({
+                state: "ready",
+                waiting_clips: 0,
+                skipped_clips: 3,
+            }),
+        ).toBe(3);
+        expect(
+            parseHostAudio({ state: "ready", waiting_clips: 0, skipped_clips: 3 })?.skipped_clips,
+        ).toBe(3);
+    });
+
+    test("0 或缺省不算需要提示", () => {
+        expect(needsSkippedClipsNotice({ state: "ready", waiting_clips: 0 })).toBe(0);
+        expect(
+            needsSkippedClipsNotice({ state: "ready", waiting_clips: 0, skipped_clips: 0 }),
+        ).toBe(0);
+        expect(needsSkippedClipsNotice(null)).toBe(0);
+        // 0 与"旧后端不带该字段"同义：不把 `skipped_clips: 0` 带进解析结果。
+        expect(parseHostAudio({ state: "ready", waiting_clips: 0, skipped_clips: 0 })).toEqual({
+            state: "ready",
+            waiting_clips: 0,
         });
     });
 });

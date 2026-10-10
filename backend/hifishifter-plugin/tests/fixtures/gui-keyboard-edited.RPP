@@ -33,7 +33,7 @@
   >
   <APPLYFX_CFG
   >
-  RENDER_FILE "E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\captures\embedded-editor-source-changed.wav"
+  RENDER_FILE "probe\ara\captures\embedded-editor-source-changed.wav"
   RENDER_FMT 0 2 44100
   RENDER_1X 0
   RENDER_RANGE 0 0 5 0 1000
@@ -170,7 +170,7 @@
       GUID {EA522763-8A72-4231-B207-D170212A134D}
       ARAMOD {00000000-0000-0000-0000-000000000001}
       <SOURCE WAVE
-        FILE "E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\embedded-editor-voice.wav"
+        FILE "probe\ara\fixtures\embedded-editor-voice.wav"
       >
       <TAKEFX
         SHOW 0
@@ -198,7 +198,7 @@
       GUID {3AEE822E-D215-47F8-B2E5-E845F57E02F0}
       ARAMOD {00000000-0000-0000-0000-000000000001}
       <SOURCE WAVE
-        FILE "E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\embedded-editor-voice.wav"
+        FILE "probe\ara\fixtures\embedded-editor-voice.wav"
       >
       <TAKEFX
         SHOW 0
@@ -503,7 +503,7 @@
       GUID {680346A6-54F7-4C45-B393-9417E2D5422B}
       ARAMOD {00000000-0000-0000-0000-000000000001}
       <SOURCE WAVE
-        FILE "E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\embedded-editor-voice.wav"
+        FILE "probe\ara\fixtures\embedded-editor-voice.wav"
       >
       <TAKEFX
         SHOW 0
@@ -531,7 +531,7 @@
       GUID {001DDFF6-97E5-4384-ADFC-275A61F8E09E}
       ARAMOD {00000000-0000-0000-0000-000000000001}
       <SOURCE WAVE
-        FILE "E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\embedded-editor-voice.wav"
+        FILE "probe\ara\fixtures\embedded-editor-voice.wav"
       >
       <TAKEFX
         SHOW 0
@@ -545,7 +545,7 @@
     >
   >
   <ARASRC com.hifishifter.ara.archive 4
-    {EA522763-8A72-4231-B207-D170212A134D} E:\code\HiFiShifter\.worktrees\ara-plugin\probe\ara\fixtures\embedded-editor-voice.wav
+    {EA522763-8A72-4231-B207-D170212A134D} probe\ara\fixtures\embedded-editor-voice.wav
   >
   ARA_POOLED_EDITS
 >

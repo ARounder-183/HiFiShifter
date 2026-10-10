@@ -2098,6 +2098,9 @@ export const enUS = {
      * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
      * `render::extension::HostAudioState` 的说明）。
      */
+    ara_host_audio_skipped_title: "Some clips are not shown",
+    ara_host_audio_skipped_body:
+        "{count} clip could not be mapped and is not shown here (for example a MIDI or zero-length item)|{count} clips could not be mapped and are not shown here (for example MIDI or zero-length items)",
     ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
     ara_host_audio_folder_body:
         "REAPER manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",

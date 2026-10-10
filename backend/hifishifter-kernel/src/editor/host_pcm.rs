@@ -226,31 +226,35 @@ pub fn materialize_with_byte_limit(
     Ok((timeline, reverse))
 }
 
-/// 完整逐样本核对授权PCM后才复用私有分析文件；位置/名称变化保持mtime与原线cache。
-/// 文件损坏重建采用临时文件原子替换，不允许分析worker读到半个WAV。
+/// 授权 PCM 的私有分析文件是否可复用。
+///
+/// 【为什么不再逐样本回读比对】缓存文件名 `source-{blake3}.wav` 已经把**整份授权内容**
+/// （persistent_id + 采样率 + 声道数 + 每个样本的 bit 模式）编进名字：内容一变文件名就变，
+/// 旧文件根本不会被选中。于是再逐样本回读整份 WAV 只是在重复推导同一个事实，代价却是
+/// 一次全量 I/O + 解码 —— 长工程上每次导入都要把整首歌再读一遍。
+///
+/// 【现在查什么】头（率/声道/位深/浮点格式）+ 帧数 + **末尾样本可读**：截断与格式损坏
+/// 仍然会被发现并触发原子重建（`materialize` 的 tmp+rename），而载荷内部的随机位翻转
+/// 不再被发现 —— 文件名即内容令牌，这条取舍是有意的。
 fn matches_authorized_pcm(path: &Path, pcm: &PcmView<'_>) -> bool {
     let Ok(mut wav) = hound::WavReader::open(path) else {
         return false;
     };
     let spec = wav.spec();
+    let frames = pcm.planes[0].len();
     if spec.sample_rate != pcm.sample_rate
         || spec.channels as usize != pcm.planes.len()
         || spec.bits_per_sample != 32
         || spec.sample_format != hound::SampleFormat::Float
-        || wav.duration() as usize != pcm.planes[0].len()
+        || wav.duration() as usize != frames
     {
         return false;
     }
-    let mut samples = wav.samples::<f32>();
-    for frame in 0..pcm.planes[0].len() {
-        for plane in pcm.planes {
-            if !matches!(samples.next(),Some(Ok(sample)) if sample.to_bits()==plane[frame].to_bits())
-            {
-                return false;
-            }
-        }
-    }
-    samples.next().is_none()
+    // 廉价完整性：能读到**最后一个**样本才算数据区没被截断（O(1)，不逐样本比对）。
+    let last = (frames * pcm.planes.len()).saturating_sub(1);
+    let last = u32::try_from(last).unwrap_or(u32::MAX);
+    matches!(wav.seek(last), Ok(()))
+        && matches!(wav.samples::<f32>().next(), Some(Ok(_)))
 }
 
 #[cfg(test)]

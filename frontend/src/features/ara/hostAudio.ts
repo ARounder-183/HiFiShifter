@@ -26,15 +26,32 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
  */
 export function parseHostAudio(raw: unknown): HostAudioPayload | null {
     if (typeof raw !== "object" || raw === null) return null;
-    const candidate = raw as { state?: unknown; waiting_clips?: unknown };
+    const candidate = raw as { state?: unknown; waiting_clips?: unknown; skipped_clips?: unknown };
     if (typeof candidate.state !== "string" || !HOST_AUDIO_STATES.has(candidate.state)) {
         return null;
     }
     const count = Number(candidate.waiting_clips);
-    return {
+    const skipped = Number(candidate.skipped_clips);
+    const payload: HostAudioPayload = {
         state: candidate.state as HostAudioState,
         waiting_clips: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
     };
+    // 仅在 >0 时带上：0 与"旧后端不带该字段"同义，避免给所有消费端多一个无意义的字段。
+    if (Number.isFinite(skipped) && skipped > 0) {
+        payload.skipped_clips = Math.floor(skipped);
+    }
+    return payload;
+}
+
+/**
+ * 是否有片段被宿主提供了、但插件**无法映射**而跳过（MIDI / 零长度 item…）。
+ *
+ * 【为什么必须提示】这些片段在插件里根本不存在 —— 用户看到"我明明有这一段"，
+ * 界面却什么都没有。不给提示的话，唯一的线索是一行日志。
+ */
+export function needsSkippedClipsNotice(status: HostAudioPayload | null): number {
+    const skipped = status?.skipped_clips ?? 0;
+    return Number.isFinite(skipped) && skipped > 0 ? Math.floor(skipped) : 0;
 }
 
 /**
