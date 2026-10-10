@@ -917,6 +917,34 @@ impl DocumentSession {
     /// region→item 的边只服务 ARA 授权，这里要的是"这个 item 现在的 active take 是什么
     /// 状态"，按 GUID 查最直接，且对没有 region 的 item（尚未授权）也成立。
     pub(crate) fn project_host_take_facts_locked(&self, timeline: &mut TimelineState) {
+        // 媒体总时长：来自 ARA 的 `AudioSource.durationSeconds`（映射层已写进
+        // `take.duration_sec`，见 `ara::mapping`），**与"是否已授权 PCM"无关**。
+        //
+        // 【为什么必须单独取一份，而不是读入参 clip 的字段】倒放的镜像坐标复原需要
+        // 媒体总时长 D（`forward = [D − host_start − host_span, D − host_start]`），
+        // 而 `clip.duration_sec` / `duration_frames` / `source_sample_rate` 只在
+        // `sync_host_takes` 搬媒体身份时才写入 —— 分割瞬间两半都没有自己的 region，
+        // 拿不到授权 ⇒ 三个字段全空 ⇒ 复原返回 `None` ⇒ 保留宿主**镜像**坐标，
+        // 内核再取一次镜像 = 又变正放/偏移（用户报障：分割含倒放 Take 的 Item 后偏移）。
+        // ARA 的源时长在映射阶段就存在，用它就能在认领前正确复原。
+        let media_by_item: std::collections::HashMap<String, f64> = {
+            let mapped = self.timeline.lock().unwrap();
+            mapped
+                .as_ref()
+                .map(|mapped| {
+                    mapped
+                        .clips
+                        .iter()
+                        .filter_map(|clip| {
+                            let guid = clip.id.strip_prefix("ara-item-")?;
+                            let duration = clip.active_take().duration_sec?;
+                            (duration.is_finite() && duration > 0.0)
+                                .then(|| (guid.to_owned(), duration))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         // item GUID → (方向, 循环源, 声道模式, 宿主源窗口)。取 **active take** 的几何：
         // 扁平投影描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
         // 源窗口 `(start, span)` 只服务倒放的**镜像坐标复原**（见下）。
@@ -968,16 +996,25 @@ impl DocumentSession {
             // 窗口 —— 因此重认领/重建不会累积镜像。Loop 倒放走内核的回绕分支，不适用
             // 本模型，保持原样。
             if clip.reversed && !clip.loop_enabled {
-                if let Some((forward_start, forward_end)) = reversed_forward_window(
-                    hifishifter_kernel::state::clip_source_media_duration_sec(clip),
-                    *host_window,
-                ) {
-                    clip.source_start_sec = forward_start;
-                    clip.source_end_sec = forward_end;
-                    for take in &mut clip.takes {
-                        take.source_start_sec = forward_start;
-                        take.source_end_sec = forward_end;
+                // 媒体总时长优先取 **ARA 源时长**（`media_by_item`）：它在映射阶段就存在，
+                // 与"这一条是否已被 ARA 授权 PCM"无关。回退到 clip 自带字段只服务
+                // 旧路径；两者都拿不到时**不能**静默按镜像坐标渲染 —— 那会让内容整体
+                // 偏移/变正放，且没有任何线索（见 F7.2）。
+                let media = reversed_media_duration(media_by_item.get(guid).copied(), clip);
+                match reversed_forward_window(media, *host_window) {
+                    Some((forward_start, forward_end)) => {
+                        clip.source_start_sec = forward_start;
+                        clip.source_end_sec = forward_end;
+                        for take in &mut clip.takes {
+                            take.source_start_sec = forward_start;
+                            take.source_end_sec = forward_end;
+                        }
                     }
+                    None => log::warn!(
+                        "[ara] reversed item {guid} could not resolve its forward window \
+                         (media_duration={media:?}, host_window={host_window:?}); the clip keeps \
+                         the host's mirrored coordinates and will render shifted"
+                    ),
                 }
             }
             // 让 active take 也带上同一份事实：`normalize_takes()` 之后 clip 的扁平字段
@@ -1180,6 +1217,23 @@ impl DocumentSession {
 /// 同一份宿主事实重复调用结果相同，重建/重认领不会累积镜像（累积镜像 = 又变正放）。
 /// 媒体时长未知（`None`）或输入非有限时返回 `None`：保持宿主窗口，宁可显示不精确，
 /// 也不编造一个可能错的正向窗口。
+/// 倒放镜像复原要用的**媒体总时长**（秒）。
+///
+/// 【为什么优先 ARA 源时长而不是 clip 自带字段】`clip.duration_sec` /
+/// `duration_frames` / `source_sample_rate` 只在 `sync_host_takes` 搬媒体身份时才写入，
+/// 也就是**要求该片段已被 ARA 授权 PCM**。而分割瞬间两半都没有自己的 region ——
+/// 于是三个字段全空 ⇒ 复原返回 `None` ⇒ 保留宿主镜像坐标 ⇒ 内核再取一次镜像 =
+/// 内容偏移/变正放（用户报障：分割含倒放 Take 的 Item 后偏移）。
+/// ARA 的 `AudioSource.durationSeconds` 在映射阶段就存在，与授权无关，因此优先用它。
+fn reversed_media_duration(
+    ara_source_duration: Option<f64>,
+    clip: &hifishifter_kernel::state::Clip,
+) -> Option<f64> {
+    ara_source_duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .or_else(|| hifishifter_kernel::state::clip_source_media_duration_sec(clip))
+}
+
 fn reversed_forward_window(
     media_sec: Option<f64>,
     host_window: Option<(f64, f64)>,
@@ -1423,5 +1477,50 @@ mod tests {
             reversed_forward_window(Some(2.0), Some((0.75, f64::INFINITY))),
             None
         );
+    }
+
+    /// **不变量：倒放镜像复原所需的媒体时长来自 ARA 源时长，不依赖"是否已授权 PCM"。**
+    ///
+    /// 【为什么这是回归测试】`clip.duration_sec` / `duration_frames` /
+    /// `source_sample_rate` 只在 `sync_host_takes` 搬媒体身份时才写入 —— 也就是要求该
+    /// 片段已被 ARA 授权。分割含倒放 Take 的 Item 时，两半都还没有自己的 region，
+    /// 三个字段全空 ⇒ 复原拿不到 D ⇒ 保留宿主**镜像**坐标 ⇒ 内核再取一次镜像 =
+    /// 内容偏移/变正放（用户报障："分割含倒放 Take 的 Item 时 Take 的偏移计算有误"，
+    /// 独立 App 正常）。ARA 的源时长在映射阶段就存在，与授权无关。
+    #[test]
+    fn a_reversed_clip_without_authorized_media_still_restores_its_forward_window() {
+        use hifishifter_kernel::state::Clip;
+        // 未授权的倒放片段：没有任何"媒体身份"字段。
+        let mut unclaimed: Clip = serde_json::from_value(serde_json::json!({
+            "id":"ara-item-{11111111-1111-1111-1111-111111111111}","track_id":"track",
+            "name":"half","start_sec":0,"length_sec":1,
+            "takes":[{"id":"take","source_start_sec":0.75,"source_end_sec":1.75}]
+        }))
+        .unwrap();
+        unclaimed.duration_sec = None;
+        unclaimed.duration_frames = None;
+        unclaimed.source_sample_rate = None;
+        for take in &mut unclaimed.takes {
+            take.duration_sec = None;
+            take.duration_frames = None;
+            take.source_sample_rate = None;
+        }
+        assert!(
+            hifishifter_kernel::state::clip_source_media_duration_sec(&unclaimed).is_none(),
+            "前提：未授权片段自身拿不到媒体时长（这正是缺陷的起点）"
+        );
+
+        // ARA 源时长 2.0 可用 ⇒ 复原照常成立。
+        let media = reversed_media_duration(Some(2.0), &unclaimed);
+        assert_eq!(media, Some(2.0));
+        assert_eq!(
+            reversed_forward_window(media, Some((0.75, 1.0))),
+            Some((0.25, 1.25)),
+            "宿主镜像窗口 [0.75, 1.75] + 源长 2.0 ⇒ 正向 [0.25, 1.25]"
+        );
+
+        // 连 ARA 源时长也没有时，只能返回 None（由调用方记 warn，不静默按镜像渲染）。
+        assert_eq!(reversed_media_duration(None, &unclaimed), None);
+        assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
     }
 }
