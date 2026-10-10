@@ -116,7 +116,21 @@ pub(crate) struct DocumentSession {
     /// 记下时刻就能把"在途"与"等不到了"分开：超过阈值仍无源 ⇒ 转 `unavailable` 并给出
     /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
     pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
+    /// 最近一次**完整**宿主清单采集的代次令牌 `(change_count, model, scope)`。
+    ///
+    /// 【为什么是文档级、不是实例级】`ui_tracks` / `render_facts` 都是文档级共享状态，
+    /// 采集结果写进 `document`，任何实例调用 [`crate::render::extension::ExtensionOwner::refresh_ui_inventory`]
+    /// 都命中同一份缓存 —— 于是"谁采的"与"谁要用的"不再分离（多实例下只有第一个带
+    /// 新令牌的实例真正枚举，其余早退）。
     pub ui_inventory_stamp: Mutex<Option<(i32, u64, u64)>>,
+    /// 最近一次**完整**采集的时刻。
+    ///
+    /// 【为什么必须与令牌并存】令牌以 `GetProjectStateChangeCount` 为主。方向（倒放）是
+    /// **take 级**属性，宿主未必为它推进项目 change count；只靠令牌早退会让"倒放 Take"
+    /// 连采样这一步都被跳过（`render_facts` 不更新 ⇒ 渲染输入不失效 ⇒ 波形变了声音没变）。
+    /// 超过 [`crate::render::extension::FACTS_REFRESH_INTERVAL`] 就**强制**重采一轮，
+    /// 让任何 take 级事实变化都必然穿透这道早退 —— 代价被钉在低频（见该常量）。
+    pub ui_inventory_sampled_at: Mutex<Option<std::time::Instant>>,
     /// 上一轮宿主清单里"ARA 表达不到、但会改变渲染结果"的事实快照。
     ///
     /// 【为什么必须有它】`render_epoch` 此前只有**淡变长度**一个写者，于是宿主把一条
@@ -714,6 +728,7 @@ impl DocumentSession {
         self.ui_tracks.lock().unwrap().clear();
         self.ui_known_tracks.lock().unwrap().clear();
         *self.ui_inventory_stamp.lock().unwrap() = None;
+        *self.ui_inventory_sampled_at.lock().unwrap() = None;
         *self.render_facts.lock().unwrap() = Default::default();
         self.timeline.lock().unwrap().take();
         self.track_bindings.lock().unwrap().clear();

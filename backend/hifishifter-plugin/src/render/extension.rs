@@ -227,6 +227,19 @@ pub(crate) struct ExtensionOwner {
 /// 宿主几何/清单枚举的节流间隔（见 `ExtensionOwner::last_enumeration`）。
 const HOST_ENUMERATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// 强制重采宿主清单的最长间隔（见 `DocumentSession::ui_inventory_sampled_at`）。
+///
+/// 【为什么需要一条与 change count 无关的下限】`ui_inventory_stamp` 早退以
+/// `GetProjectStateChangeCount` 为主。方向（倒放）/ 声道模式是 **take / item 级**属性，
+/// 宿主未必为它们推进项目 change count；只靠令牌早退会让"倒放 Take"连采样这一步都被
+/// 跳过（`render_facts` 不更新 ⇒ 渲染输入不失效 ⇒ 波形变了、声音没变）。超过这个间隔
+/// 就强制重采一轮，保证任何 take 级事实变化都必然穿透早退。
+///
+/// 【为什么是 1s】宿主真变了时令牌仍走原路（≤100ms 捕捉）；这条只兜住"令牌不动"的
+/// 情况，把最坏延迟钉在 1s，同时把空闲时的完整枚举压到 1Hz —— 相比 50Hz 定时器可以
+/// 忽略，又足以让用户在放手后立刻看到倒放生效。
+pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[cfg(test)]
 mod bound_tests {
     use super::*;
@@ -2405,11 +2418,25 @@ impl ExtensionOwner {
             return;
         };
         let token = (change, stamp.1, stamp.2);
-        if self.host_query_authorized(&stamp)
-            && *stamp.0.ui_inventory_stamp.lock().unwrap() == Some(token)
-        {
+        // 令牌相同 **且** 距上次完整采集还没超过 `FACTS_REFRESH_INTERVAL` 才早退。
+        // 光看令牌会漏掉 take/item 级事实变化（倒放 / 声道模式），因为宿主未必为它们
+        // 推进 `GetProjectStateChangeCount` —— 那会让 `render_facts` 永不更新，正是
+        // "倒放后波形变了、声音没变"的第二层缺口（见 `ui_inventory_sampled_at` 与
+        // `FACTS_REFRESH_INTERVAL`）。
+        let fresh = stamp
+            .0
+            .ui_inventory_sampled_at
+            .lock()
+            .unwrap()
+            .is_some_and(|at| at.elapsed() < FACTS_REFRESH_INTERVAL);
+        let stored = *stamp.0.ui_inventory_stamp.lock().unwrap();
+        if self.host_query_authorized(&stamp) && fresh && stored == Some(token) {
             return;
         }
+        // 令牌本身是否变了。强制重采（令牌没变、只是采样过期）时若事实也没变，
+        // 就不发布、不 bump `ui_geometry_revision`、不失效渲染 —— 兜底采样必须**无副作用**，
+        // 否则空闲工程会被 1Hz 的假变更搅得前端反复重绘。
+        let token_changed = stored != Some(token);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
@@ -2548,6 +2575,12 @@ impl ExtensionOwner {
                 facts_changed = true;
             }
         }
+        // 强制重采但令牌与事实都没变 ⇒ 这一轮什么也没发生：只刷新采样时刻并返回，
+        // 不发布清单、不 bump `ui_geometry_revision`、不失效渲染（见上面的 `token_changed`）。
+        if !token_changed && !facts_changed {
+            *stamp.0.ui_inventory_sampled_at.lock().unwrap() = Some(std::time::Instant::now());
+            return;
+        }
         stamp
             .0
             .ui_known_tracks
@@ -2556,6 +2589,9 @@ impl ExtensionOwner {
             .extend(tracks.values().map(|track| track.id.clone()));
         *stamp.0.ui_tracks.lock().unwrap() = tracks;
         *stamp.0.ui_inventory_stamp.lock().unwrap() = Some(token);
+        // 完整采集已完成：记下时刻，让"令牌不动但 take 级事实变了"这条兜底路径
+        // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
+        *stamp.0.ui_inventory_sampled_at.lock().unwrap() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
         *self.host_audio.lock().unwrap() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
@@ -4081,6 +4117,72 @@ mod host_audio_state_tests {
                 let _ = worker.wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
             }
         }
+    }
+
+    /// **不变量：take 级事实变化（倒放 / 声道模式）不能被 `change count` 早退挡住。**
+    ///
+    /// 【为什么这是回归测试】`ui_inventory_stamp` 早退以 `GetProjectStateChangeCount`
+    /// 为主，而方向是 **take 级**属性 —— 宿主未必为它推进项目 change count。只靠令牌
+    /// 早退会让"倒放 Take"连采样这一步都被跳过：`render_facts` 不更新 ⇒ 渲染输入不失效
+    /// ⇒ 波形变了、声音没变。夹具把 change count 钉住不动，只翻 `take_reversed`，断言
+    /// 事实仍被采到、渲染仍被失效（`FACTS_REFRESH_INTERVAL` 到期即强制重采）。
+    #[test]
+    fn a_take_level_fact_change_survives_the_change_count_early_return() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::ReaperFixture::new();
+        host.enable_takes(0);
+        host.enable_media();
+        host.clear_markers();
+        // SAFETY: 夹具与 owner 在整个用例期间存活。
+        unsafe {
+            owner.bind_reaper_host(host.context());
+        }
+        // 第一轮完整采集：方向按正放。
+        owner.refresh_reaper_transport();
+        assert!(
+            document
+                .render_facts
+                .lock()
+                .unwrap()
+                .items
+                .values()
+                .all(|item| !item.reversed),
+            "首轮必须采到正放，否则这条测试对缺陷不敏感"
+        );
+        let epoch_before = document.render_epoch.load(Ordering::Acquire);
+        let change = host.change_count();
+
+        // 宿主倒放该 take，但 **不** 推进 change count（这正是要兜住的情况）。
+        host.section_reports.set(true);
+        host.take_reversed.set(true);
+        assert_eq!(
+            host.change_count(),
+            change,
+            "夹具必须把 change count 钉住不动，否则测不到兜底路径"
+        );
+        // 让强制重采兜底路径生效：把上次采集时刻倒推到间隔之前。
+        *document.ui_inventory_sampled_at.lock().unwrap() = Some(
+            std::time::Instant::now() - FACTS_REFRESH_INTERVAL - std::time::Duration::from_secs(1),
+        );
+
+        owner.refresh_ui_inventory();
+
+        assert!(
+            document
+                .render_facts
+                .lock()
+                .unwrap()
+                .items
+                .values()
+                .all(|item| item.reversed),
+            "take 级方向变化必须穿透 change-count 早退被采到"
+        );
+        assert!(
+            document.render_epoch.load(Ordering::Acquire) > epoch_before,
+            "方向变化必须失效渲染输入，否则波形变了、声音不变"
+        );
+        document.close();
     }
 
     /// GUI 载荷只带**编辑器实例**的读数：playback 实例没有 GUI，它的读数不该出现在

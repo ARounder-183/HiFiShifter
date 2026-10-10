@@ -240,6 +240,11 @@ impl Fixture {
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+    /// `GetProjectStateChangeCount` 当前读数。用例用它把"宿主 change count 不动"
+    /// 这一前提钉住（take 级事实变化必须另有兜底路径穿透，见 `FACTS_REFRESH_INTERVAL`）。
+    pub fn change_count(&self) -> i32 {
+        self.change.get()
+    }
     pub fn references(&self) -> u32 {
         self.refs.load(Ordering::Acquire)
     }
