@@ -109,7 +109,9 @@ try {
         [IO.File]::WriteAllText($buildTaskAppConfig,'{"build":{"beforeBuildCommand":""}}',[Text.UTF8Encoding]::new($false))
         Push-Location backend
         try {
-            $buildTaskAppArgs=@('tauri','build','--ci','--no-bundle','--config',$buildTaskAppConfig)
+            # --bundles nsis：让 Tauri 产出 App 的 NSIS 安装器（tauri.conf.json 声明的
+            # Windows 目标）。安装器是产品产物，随交付带走；--config 仍把前端构建置空。
+            $buildTaskAppArgs=@('tauri','build','--ci','--bundles','nsis','--config',$buildTaskAppConfig)
             if ($Configuration -eq 'Debug') {$buildTaskAppArgs+='--debug'}
             $buildTaskAppArgs+=@('--','--offline','--jobs','1')
             & cargo @buildTaskAppArgs
@@ -124,6 +126,13 @@ try {
             if (Test-Path -LiteralPath $buildTaskDllSource) {Copy-Item -LiteralPath $buildTaskDllSource -Destination $buildTaskApp}
         }
         Copy-Item -LiteralPath backend\src-tauri\resources\models -Destination (Join-Path $buildTaskApp 'models') -Recurse
+        # App 的 NSIS 安装器随交付一起带走（pack-portable 再从交付拷进 dist）。安装器是
+        # 产品产物，缺失即视为构建失败 —— 与插件安装器同一条逻辑，而不是"恰好存在就拷"。
+        $buildTaskAppInstaller = Get-ChildItem -LiteralPath (Join-Path $buildTaskRoot "backend\target\$buildTaskProfile\bundle\nsis") -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (!$buildTaskAppInstaller) { throw 'Standalone App NSIS installer was not produced; install NSIS (scripts/install_deps_windows.ps1) and retry.' }
+        $buildTaskAppNsis = Join-Path $buildTaskApp 'bundle\nsis'
+        New-Item -ItemType Directory -Path $buildTaskAppNsis -Force | Out-Null
+        Copy-Item -LiteralPath $buildTaskAppInstaller.FullName -Destination $buildTaskAppNsis
     }
     if ($buildTaskIncludesPlugin) {
         $buildTaskPluginArgs=@{SkipFrontend=$true;BundleDirectory=$buildTaskBundleName}

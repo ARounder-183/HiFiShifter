@@ -497,6 +497,12 @@ if (-not $NoZip) {
         $NsisSizeMB = [math]::Round($NsisSize / 1MB, 2)
         Write-Host "[5/5] NSIS installer copied [OK] ($($NsisSizeMB) MB)" -ForegroundColor Green
     }
+    elseif ($UnifiedAppDirectory) {
+        # 统一构建（-PackageTarget All）的 App 由 tools/build-hifishifter.ps1 产出，
+        # 它保证交付里带着 App 安装器；缺失即交付不完整，不能悄悄跳过 —— 那正是
+        # "安装器看起来应该存在却找不到"的来源。
+        throw "Unified App delivery is missing the NSIS installer: $NsisExePath"
+    }
     else {
         Write-Host "[5/5] NSIS installer not found, skipping (path: $NsisExePath)" -ForegroundColor DarkGray
     }
