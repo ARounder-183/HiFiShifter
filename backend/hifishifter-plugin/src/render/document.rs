@@ -95,6 +95,14 @@ pub(crate) struct DocumentSession {
     /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
     pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
     pub ui_inventory_stamp: Mutex<Option<(i32, u64, u64)>>,
+    /// 上一轮宿主清单里"ARA 表达不到、但会改变渲染结果"的事实快照。
+    ///
+    /// 【为什么必须有它】`render_epoch` 此前只有**淡变长度**一个写者，于是宿主把一条
+    /// take 倒放（或改声道模式、开循环源）之后，`PreparedVersion` 五分量全不变 ⇒
+    /// `prepare_job` / `prepare_offline_until` 判定"已是最新"直接早退，继续播旧的正向
+    /// 音频。用户表现为"波形更新了、声音没变，编辑一下才对"（编辑是唯一能推动
+    /// `PreparedVersion.edit` 的手动途径）。见 `host::geometry::RenderFacts`。
+    pub render_facts: Mutex<crate::host::geometry::RenderFacts>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
@@ -333,6 +341,11 @@ impl DocumentSession {
             &edits.groups,
             &timeline.project_scale_notes,
             &timeline.tempo_map,
+            // 【为什么渲染事实也进指纹】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退。
+            // 方向 / 循环源 / 声道模式由 `project_host_take_facts_locked` 播种进**clips**
+            // —— 而 clips 不在上面的哈希里。不进指纹就会出现"宿主倒放了，早退成立，
+            // 于是既不重载也不重渲染"，与音阶进指纹是同一条理由。
+            &*self.render_facts.lock().unwrap(),
         ))
         .map_err(|e| e.to_string())?;
         Ok(format!(
@@ -658,9 +671,17 @@ impl DocumentSession {
         self.regions.lock().unwrap().clear();
         self.clip_ids.lock().unwrap().clear();
         self.region_items.lock().unwrap().clear();
+        // 授权/事实映射随文档一起释放：此前 `region_items` / `authorized_takes` /
+        // `authorized_sources` / `split_media_from` 只在文档销毁时清，而 region 销毁
+        // 回调并不回收它们 —— 长会话里每次分割/移动/粘贴都会留下永不释放的条目。
+        self.authorized_takes.lock().unwrap().clear();
+        self.authorized_sources.lock().unwrap().clear();
+        self.split_media_from.lock().unwrap().clear();
+        self.pending_since.lock().unwrap().clear();
         self.ui_tracks.lock().unwrap().clear();
         self.ui_known_tracks.lock().unwrap().clear();
         *self.ui_inventory_stamp.lock().unwrap() = None;
+        *self.render_facts.lock().unwrap() = Default::default();
         self.timeline.lock().unwrap().take();
         self.track_bindings.lock().unwrap().clear();
         *self.edits.lock().unwrap() = Default::default();

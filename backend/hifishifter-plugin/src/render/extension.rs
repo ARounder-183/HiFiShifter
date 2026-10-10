@@ -2483,6 +2483,24 @@ impl ExtensionOwner {
         if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
         }
+        // 采样"ARA 表达不到、但会改变渲染结果"的宿主事实（方向 / 循环源 / 声道模式）。
+        // 与 `project_host_take_facts_locked` 用**同一个** active-take 口径，否则"清单
+        // 说倒放、渲染播种说正放"会再次分叉。
+        let facts =
+            crate::host::geometry::RenderFacts::from_items(tracks.values().flat_map(|track| {
+                track.items.iter().map(|item| {
+                    let active = item.takes.iter().find(|take| take.active);
+                    let geometry = active.map(|take| &take.geometry).unwrap_or(&item.geometry);
+                    (
+                        item.geometry.item_id.clone(),
+                        crate::host::geometry::RenderItemFacts {
+                            reversed: active.is_some_and(|take| take.reversed),
+                            loop_enabled: geometry.loop_source,
+                            channel_mode: geometry.channel_mode,
+                        },
+                    )
+                })
+            }));
         let _transaction = stamp.0.transaction.lock().unwrap();
         if self.is_closed()
             || !stamp.0.is_alive()
@@ -2490,6 +2508,19 @@ impl ExtensionOwner {
             || stamp.0.scope_revision.load(Ordering::Acquire) != stamp.2
         {
             return;
+        }
+        // 【这是"宿主改了、插件立刻重渲染"的唯一通路】任何一项渲染事实变化都推进
+        // `render_epoch`，于是 `PreparedVersion`（渲染缓存键）失效、`prepare_job` 不再
+        // 早退。此前只有**淡变长度**有这条通路，倒放/声道/循环源都没有 —— 用户报障
+        // "倒放后波形更新了、声音没变，编辑一下才对"正是这个缺口。
+        let mut facts_changed = false;
+        {
+            let mut previous = stamp.0.render_facts.lock().unwrap();
+            if *previous != facts {
+                *previous = facts;
+                stamp.0.render_epoch.fetch_add(1, Ordering::AcqRel);
+                facts_changed = true;
+            }
         }
         stamp
             .0
@@ -2528,6 +2559,12 @@ impl ExtensionOwner {
                 status.waiting_items,
                 status.state.as_str()
             );
+        }
+        drop(_transaction);
+        if facts_changed {
+            // 与 `refresh_reaper_geometry` 的淡变分支同一理由：渲染输入变了就重排准备。
+            // 不持 `transaction` 调用，避免与 `prepare_job` 的事务重入。
+            self.prepare();
         }
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。

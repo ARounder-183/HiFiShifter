@@ -14,6 +14,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+/// 自动渲染连续失败多少次后**停止重试**，把错误稳定地交给状态栏。
+///
+/// 【为什么必须有上限】此前失败路径只设一个 150 ms / 1 s 的 `deadline`，下一轮又
+/// `start_render` —— 而 `start_render` 会先发 `active:true`。于是一个**永不收敛**的
+/// 失败（典型：关掉根轨 `合成` 后 `pitch analysis pending`）会以约 1 Hz 无限回潮，
+/// 用户看到左下角永远在"渲染中"。有上限后，连续失败到预算就转成稳定的错误读数
+/// （前端 `PluginApplyStatus` 的"尚未应用：{error}"），不再重排、不再发 `active:true`。
+///
+/// 用户的**新**操作会推进 `generation`，计数随之清零并重新武装 —— 上限只挡住
+/// "没人操作时的空转"，不挡住正常重试。
+const RENDER_RETRY_BUDGET: u32 = 8;
+
 #[derive(Clone)]
 pub(crate) struct UiSink {
     pub view_id: String,
@@ -457,10 +469,25 @@ impl EditorSession {
     }
     fn run(weak: Weak<Self>, receiver: mpsc::Receiver<Job>) {
         let mut deadline: Option<Instant> = None;
+        // 自动渲染的**重试预算**状态（见 `RENDER_RETRY_BUDGET`）。`submitted` 是"用户
+        // 做了新操作"的权威信号（`enqueue` 对 `mutates_audio` 命令自增它），因此用它
+        // 做清零键：上限只挡住"没人操作时的空转"，不挡住正常重试。
+        let mut retry_submitted = weak
+            .upgrade()
+            .map(|session| session.submitted.load(Ordering::Acquire))
+            .unwrap_or(0);
+        let mut retry_streak: u32 = 0;
+        let mut render_settled = false;
         loop {
             if let Some(session) = weak.upgrade() {
                 if session.closed.load(Ordering::Acquire) {
                     break;
+                }
+                let submitted_now = session.submitted.load(Ordering::Acquire);
+                if submitted_now != retry_submitted {
+                    retry_submitted = submitted_now;
+                    retry_streak = 0;
+                    render_settled = false;
                 }
                 session.refresh_host();
                 if let Some(render) = session.render_task.lock().unwrap().as_ref() {
@@ -485,16 +512,28 @@ impl EditorSession {
                                 session.applied.store(generation, Ordering::Release);
                                 session.render_requested.store(false, Ordering::Release);
                                 *session.render_error.lock().unwrap() = None;
-                            }
-                            Err(error)
-                                if error == "pitch analysis pending"
-                                    || error == "automatic apply superseded" =>
-                            {
-                                deadline = Some(Instant::now() + Duration::from_millis(150));
+                                retry_streak = 0;
+                                render_settled = false;
                             }
                             Err(error) => {
-                                *session.render_error.lock().unwrap() = Some(error);
-                                deadline = Some(Instant::now() + Duration::from_secs(1));
+                                retry_streak = retry_streak.saturating_add(1);
+                                if retry_streak >= RENDER_RETRY_BUDGET {
+                                    // 稳定失败：固定错误、清掉重试意图，不再重排。
+                                    *session.render_error.lock().unwrap() = Some(error.clone());
+                                    session.render_requested.store(false, Ordering::Release);
+                                    render_settled = true;
+                                    deadline = None;
+                                    log::warn!(
+                                        "[ara] automatic render gave up after {retry_streak} attempts: {error}"
+                                    );
+                                } else {
+                                    if error != "pitch analysis pending"
+                                        && error != "automatic apply superseded"
+                                    {
+                                        *session.render_error.lock().unwrap() = Some(error);
+                                    }
+                                    deadline = Some(Instant::now() + Duration::from_millis(150));
+                                }
                             }
                         }
                     } else {
@@ -504,16 +543,20 @@ impl EditorSession {
                 }
                 session.report_transport_probe();
                 if session.refresh_analysis() {
+                    // 分析有新进展 ⇒ 之前失败的前提可能已消失，重新武装重试。
+                    retry_streak = 0;
+                    render_settled = false;
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 if deadline.is_none()
+                    && !render_settled
                     && session.render_requested.load(Ordering::Acquire)
                     && session.error.lock().unwrap().is_none()
                 {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
-                if deadline.is_some_and(|d| d <= Instant::now()) {
+                if !render_settled && deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
                     if session.render_task.lock().unwrap().is_some()
                         || session
@@ -533,11 +576,20 @@ impl EditorSession {
                         deadline = None;
                         if let Err(error) = session.start_render(ticket) {
                             session.emit("playback_rendering_state",json!({"active":false,"progress":None::<f64>,"target":"background"}));
-                            if error == "pitch analysis pending" {
-                                deadline = Some(Instant::now() + Duration::from_millis(150));
+                            retry_streak = retry_streak.saturating_add(1);
+                            if retry_streak >= RENDER_RETRY_BUDGET {
+                                *session.render_error.lock().unwrap() = Some(error.clone());
+                                session.render_requested.store(false, Ordering::Release);
+                                render_settled = true;
+                                deadline = None;
+                                log::warn!(
+                                    "[ara] automatic render gave up after {retry_streak} attempts: {error}"
+                                );
                             } else {
-                                *session.render_error.lock().unwrap() = Some(error);
-                                deadline = Some(Instant::now() + Duration::from_secs(1));
+                                if error != "pitch analysis pending" {
+                                    *session.render_error.lock().unwrap() = Some(error);
+                                }
+                                deadline = Some(Instant::now() + Duration::from_millis(150));
                             }
                             session.emit_state();
                         }
@@ -723,20 +775,26 @@ impl EditorSession {
         )
     }
     /// 音高和气声等处理器效果都依赖完成的原线；纯混音/禁用算法不受此门禁阻塞。
+    ///
+    /// 【两个条件都必须来自内核】"这一根还没收敛"用
+    /// `root_pitch_assembly_pending`，"有 clip 真的需要处理器"用
+    /// `does_clip_need_processor_render`。两者此前各写各的：内核的分析门禁不看手绘
+    /// 曲线，而这里看 —— 关掉 `合成` 但留着手绘曲线时，门禁在等一个永远不会被调度的
+    /// 分析任务，`prepare_apply` 因此永远返回 `"pitch analysis pending"`（用户报障：
+    /// 关掉合成后左下角一直"渲染中"）。现在分析门禁**覆盖**渲染门禁（见
+    /// `assembly_gate_open` 的不变量注释），所以"pending"一定意味着"真的有人会产出它"。
     fn requires_analysis(timeline: &TimelineState) -> bool {
-        timeline.params_by_root_track.iter().any(|(root, params)| {
-            params.pitch_orig_key.is_none()
-                && timeline.clips.iter().any(|clip| {
-                    timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root.as_str())
-                        && hifishifter_kernel::pitch_editing::does_clip_need_processor_render(
-                            timeline,
-                            clip,
-                            clip.start_sec,
-                        )
-                })
-                && timeline.tracks.iter().any(|t| {
-                    t.id == *root && !matches!(t.pitch_analysis_algo, PitchAnalysisAlgo::None)
-                })
+        timeline.params_by_root_track.keys().any(|root| {
+            hifishifter_kernel::pitch_analysis::analysis::root_pitch_assembly_pending(
+                timeline, root,
+            ) && timeline.clips.iter().any(|clip| {
+                timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root.as_str())
+                    && hifishifter_kernel::pitch_editing::does_clip_need_processor_render(
+                        timeline,
+                        clip,
+                        clip.start_sec,
+                    )
+            })
         })
     }
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
@@ -1177,7 +1235,16 @@ impl EditorSession {
             }
         }
     }
-    /// 手绘pitch在compose关闭时仍需原线；只在分析快照中打开门禁，不改宿主轨道。
+    /// 分析快照：与 `session.timeline` 的**唯一**差别是只保留本实例认领的 clip。
+    ///
+    /// 【为什么不再强制打开 `compose_enabled`】此前这里对手绘曲线所在的根轨强制
+    /// `compose_enabled = true`，以便"关掉 Compose 也产出原线"。但
+    /// `build_root_pitch_key` 把 `compose_enabled` 计入缓存键 ⇒ 分析产出的是
+    /// compose=true 的键，而会话时间线算出的是 compose=false 的键，两者不符 ⇒
+    /// `pitch_orig_key` 被反复清空 ⇒ 渲染门禁永远 `pending`（用户报障：关掉合成后
+    /// 左下角一直"渲染中"）。现在"手绘曲线也算需要原线"这条规则落在**内核门禁**
+    /// （`pitch_analysis::analysis::assembly_gate_open`）里，两个视图用同一份事实、
+    /// 算出同一个键，因此不再需要这个会造成键漂移的绕过。
     fn analysis_timeline(&self) -> TimelineState {
         let mut timeline = self.timeline.lock().unwrap().clone();
         if let Some(document) = self.document.upgrade() {
@@ -1193,15 +1260,6 @@ impl EditorSession {
         // 整体翻转。所以让倒放进分析是安全的：它读的还是同一份正向缓存，只是取窗口时
         // 镜像。此前把它排除是因为倒放被隔离（没有源可分析）；现在照常物化
         // （`ReversePolicy::Materialize`），排除反而会让它的 f0 全零 ⇒ 只剩气声。
-        for track in &mut timeline.tracks {
-            if timeline
-                .params_by_root_track
-                .get(&track.id)
-                .is_some_and(|p| p.pitch_edit_user_modified)
-            {
-                track.compose_enabled = true;
-            }
-        }
         timeline
     }
     /// 原分析实现可取消/join；每会话持有自己的worker，不推进全局generation。
@@ -1517,6 +1575,10 @@ impl EditorSession {
             .iter()
             .any(|clip| !clip.muted && clip.source_path.is_none());
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
+            // `rendering_active` 是**派生状态**，前端据此点亮/熄灭"渲染中"片，而不是
+            // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
+            // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
+            "rendering_active":rendering,
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock().unwrap().clone().or_else(||self.render_error.lock().unwrap().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock().unwrap().initialized})
@@ -3308,6 +3370,38 @@ pub(crate) mod tests {
         let state = editor.state();
         editor.close();
         assert_eq!(state["ready"], true, "会话必须处于就绪态，而不是报错态");
+    }
+    /// 方向 / 循环源 / 声道模式是 ARA 表达不到的渲染输入，**必须**参与工作区指纹。
+    ///
+    /// 【为什么这是回归测试】宿主倒放一条 take 后，`prepare_job` 只看 `PreparedVersion`
+    /// （model/edit/epoch/scope/keys），而 `ensure_loaded` 早退只看工作区投影。此前
+    /// 方向既不进 `render_epoch`（只有淡变长度有写者）也不进投影指纹（只哈希
+    /// `params_by_root_track` / `tracks`，不含 `clips`）—— 于是倒放后既不重载也不重渲染，
+    /// 用户听到的还是旧的正向音频，直到手动编辑一次才被 `edit` 分量带出来。
+    #[test]
+    fn render_facts_participate_in_the_workspace_projection() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let before = document.workspace_projection().unwrap();
+
+        document.render_facts.lock().unwrap().items.insert(
+            "item-1".into(),
+            crate::host::geometry::RenderItemFacts {
+                reversed: true,
+                loop_enabled: false,
+                channel_mode: 0,
+            },
+        );
+        let after = document.workspace_projection().unwrap();
+        assert_ne!(
+            before, after,
+            "宿主把一条 take 倒放必须改变工作区指纹，否则 ensure_loaded 会带着旧方向早退"
+        );
+
+        // 幂等：同样的方向再投影一次不得继续变化（否则每轮清单刷新都会重载）。
+        let again = document.workspace_projection().unwrap();
+        assert_eq!(after, again, "同一份渲染事实必须产生同一个指纹");
+        owner.editor_session().unwrap().close();
     }
     /// 同一已打开会话只改变GUI清单代次，读取仍采纳新增/删除；不依赖重开或定时器抢跑。
     #[test]

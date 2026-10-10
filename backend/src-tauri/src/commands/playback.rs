@@ -246,37 +246,18 @@ fn is_clip_pitch_analysis_ready(
 /// 前置条件与 `build_pitch_job` 的"是否需要组装"判定保持一致（不含其昂贵的
 /// mix timeline 构建）——该根根本没有组装任务时不视为 pending，否则会永久
 /// 卡住渲染。
+///
+/// 【为什么改为直接调内核】此前这里手抄了一份门禁（compose / MIDI / adjustment /
+/// algo），内核版本与插件侧又各有一份：三份判据对同一个根可能给出相反结论，表现为
+/// 渲染永久 pending 或提前渲染。统一走 `root_pitch_assembly_pending` 后分叉消失。
 fn root_pitch_assembly_pending(
     timeline: &crate::state::TimelineState,
     root_track_id: &str,
 ) -> bool {
-    let Some(track) = timeline.tracks.iter().find(|t| t.id == root_track_id) else {
-        return false;
-    };
-    let has_active_midi_clip = timeline.clips.iter().any(|c| {
-        timeline.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id)
-            && !c.muted
-            && c.midi_note_data.is_some()
-    });
-    let currently_has_adjustment = timeline
-        .params_by_root_track
-        .get(root_track_id)
-        .map(|e| e.has_pitch_adjustment_active)
-        .unwrap_or(false);
-    if !track.compose_enabled && !has_active_midi_clip && !currently_has_adjustment {
-        return false;
-    }
-    if matches!(
-        track.pitch_analysis_algo,
-        crate::state::PitchAnalysisAlgo::None
-    ) {
-        return false;
-    }
-    timeline
-        .params_by_root_track
-        .get(root_track_id)
-        .map(|e| e.pitch_orig_key.is_none())
-        .unwrap_or(false)
+    hifishifter_kernel::pitch_analysis::analysis::root_pitch_assembly_pending(
+        timeline,
+        root_track_id,
+    )
 }
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {

@@ -14,6 +14,7 @@ import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
+import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import {
     isPluginMode,
     pluginAllowsAction,
@@ -1534,9 +1535,34 @@ function AppInner() {
         }
 
         void setup();
+
+        // 【插件模式的自愈】"渲染中"由**轮询快照**兜底：`playback_rendering_state`
+        // 事件用 `try_send`（队列满即丢），丢一个 `active:false` 就会让状态栏片
+        // **永久亮着**。快照说"不在渲染"时强制熄灭；事件只负责进度与快速点亮。
+        // 独立 App 不订阅：那边没有插件 actor，也没有这条丢包路径。
+        const unsubscribeApply = isPluginMode()
+            ? subscribePluginApply(() => {
+                  const state = getPluginApplySnapshot().state;
+                  if (!state || state.rendering_active !== false) return;
+                  if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
+                      return;
+                  }
+                  originalRenderActiveRef.current = false;
+                  backgroundRenderActiveRef.current = false;
+                  dispatch(
+                      setPlaybackRenderingState({
+                          active: false,
+                          target: "background",
+                          blocking: false,
+                      }),
+                  );
+              })
+            : null;
+
         return () => {
             disposed = true;
             if (unlisten) unlisten();
+            if (unsubscribeApply) unsubscribeApply();
         };
     }, [dispatch]);
 

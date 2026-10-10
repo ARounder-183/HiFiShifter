@@ -23,6 +23,14 @@ export interface PluginApplyState {
     connected: boolean;
     ready?: boolean;
     error: string | null;
+    /**
+     * 后端是否真的在跑一次渲染（派生状态，不是事件）。
+     *
+     * 【为什么需要它】"渲染中"此前完全由 `playback_rendering_state` 事件流驱动，
+     * 而该事件用 `try_send`（队列满即丢）—— 丢一个 `active:false` 就会让状态栏片
+     * **永久亮着**。轮询快照每 250 ms 重读一次，是这条 UI 状态的自愈来源。
+     */
+    rendering_active?: boolean;
 }
 
 export interface PluginApplySnapshot {
@@ -49,6 +57,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.host_version === b.host_version &&
         a.connected === b.connected &&
         a.ready === b.ready &&
+        a.rendering_active === b.rendering_active &&
         a.error === b.error
     );
 }

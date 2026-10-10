@@ -67,9 +67,9 @@ pub(crate) struct HostClipGeometry {
     /// 不是 take 属性。内核的 `Clip.loop_enabled` 语义（对**整份媒体**取模回绕）与它一致，
     /// 而插件物化的 PCM 是完整源，所以这条读出来可以直接交给内核，无需改渲染路径。
     ///
-    /// 【为什么读不出来时给 false 而不是 Option】与 `reversed` 不同：方向读不出来时
-    /// 说"没倒放"是**错的结论**（会漏掉一个真实状态），而循环源读不出来时说"不循环"
-    /// 是安全默认 —— 回绕是加法性的，关掉它只是少绕一圈，不会把内容指向别处。
+    /// 【为什么读不出来时给 false 而不是 Option】与 `reversed` 同一纪律：读不到就是
+    /// 安全默认（不循环 / 正放）。回绕是加法性的，关掉它只是少绕一圈，不会把内容指向
+    /// 别处；方向读不到时按正放渲染，与 `loop_enabled` 一样是"不阻断渲染"的降级。
     pub loop_source: bool,
     /// take 源文件路径（`GetMediaSourceFileName`）；读不出来为 `None`。
     ///
@@ -84,6 +84,53 @@ pub(crate) struct HostClipGeometry {
 pub(crate) struct BoundHostGeometry {
     pub region_key: u64,
     pub geometry: HostClipGeometry,
+}
+
+/// ARA **不提供**、但会改变渲染结果的宿主事实快照（`ara::mapping::LOST_FIELDS`
+/// 的渲染相关子集）。
+///
+/// 【为什么单独一层，而不是塞进 `HostClipGeometry`】几何是**逐 region 绑定**的、
+/// 偏 UI 的；这一组是**逐 item** 的、纯渲染输入。混在一起会让"UI 几何变了"与
+/// "渲染输入变了"两个语义互相污染 —— 而"宿主改了方向，插件不重渲染"这个报障，
+/// 根因正是 `render_epoch` 只跟着**淡变长度**走，方向/循环源/声道模式没有写者。
+///
+/// 【为什么按 item GUID】与 `project_host_take_facts_locked` 同一身份口径：clip id
+/// 形如 `ara-item-{guid}`，item 是宿主清单里的最小单位，且对尚未被 ARA 认领的 item
+/// 也成立。
+///
+/// 【用途】任何一项变化都推进 `DocumentSession::render_epoch`，于是
+/// `PreparedVersion`（渲染缓存键）与工作区投影指纹同时失效 —— 这是"宿主改了、
+/// 插件立刻重渲染"的**唯一**通路，不再依赖某一处记得手动 bump。
+#[derive(Clone, Default, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RenderFacts {
+    pub items: std::collections::BTreeMap<String, RenderItemFacts>,
+}
+
+/// 单个 item 的渲染相关宿主事实。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RenderItemFacts {
+    /// 方向（`PCM_Source_GetSectionInfo` 的 revOut）；读不到即正放。
+    pub reversed: bool,
+    /// 循环源（`B_LOOPSRC`，item 级）。
+    pub loop_enabled: bool,
+    /// 声道模式（`I_CHANMODE`）。
+    pub channel_mode: i32,
+}
+
+impl RenderFacts {
+    /// 从宿主清单（`UiTrack` 集）采样。取 **active take** 的事实：扁平投影描述的就是
+    /// active take，`normalize_takes()` 之后 clip 的字段来自它。
+    ///
+    /// 【为什么不用 `impl Iterator<Item = &UiTrack>`】`UiTrack` 是 `host::reaper` 的
+    /// 私有子模块类型，这里不引入它 —— 调用点就地展开成 `(item_id, facts)` 迭代即可。
+    pub(crate) fn from_items<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = (String, RenderItemFacts)>,
+    {
+        Self {
+            items: items.into_iter().collect(),
+        }
+    }
 }
 
 #[cfg(test)]
