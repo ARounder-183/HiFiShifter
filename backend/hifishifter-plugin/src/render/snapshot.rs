@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// `reclaim` 等待在途读者退出的自旋上限（见 [`SnapshotStore::reclaim`]）。
-/// 仅在非实时线程使用；亚毫秒量级，不阻塞音频线程。
+/// `reclaim` 等待 `registering` 归零的自旋上限（见 [`SnapshotPublisher::reclaim`]）。
+/// 该窗口只有几条指令；仅在非实时线程使用，不阻塞音频线程。
 const RECLAIM_SPIN_LIMIT: u32 = 4096;
 
 #[derive(Debug)]
@@ -228,10 +228,28 @@ pub(crate) fn mix_plain_regions(
     Ok(snapshot)
 }
 
-pub(crate) struct SnapshotPublisher {
-    retained: Mutex<(Vec<Box<PlaybackSnapshot>>, usize)>,
-    current: AtomicPtr<PlaybackSnapshot>,
+/// 已发布快照 + **它自己的**读者计数。
+///
+/// 【为什么读者计数必须逐快照，而不是一个全局计数】退役快照只有在"读过**它**的读者"
+/// 全部退出后才能释放。全局计数做不到这一点：播放时音频线程几乎总在读**当前**快照，
+/// 全局计数因此恒非零，退役快照永远收不回来 ⇒ 预算被撑满 ⇒ 后续 `publish` 直接
+/// `BudgetExceeded`，表现为"播放中改不动任何东西"。逐快照计数把"读当前"与"读退役"
+/// 分开：退役快照的计数一归零就能回收，不必等整个音频线程静默。
+struct RetainedSnapshot {
     readers: AtomicUsize,
+    snapshot: PlaybackSnapshot,
+}
+
+pub(crate) struct SnapshotPublisher {
+    retained: Mutex<(Vec<Box<RetainedSnapshot>>, usize)>,
+    current: AtomicPtr<RetainedSnapshot>,
+    /// 正在"载入当前指针并登记到该快照"的读者数。
+    ///
+    /// 【为什么需要它】`enter` 是"载入指针 → 递增该快照的读者数"两步，中间有一个极短
+    /// 窗口。回收若只看逐快照计数，就可能在这个窗口里判定"无人读"而释放一个刚被载入
+    /// 指针的快照。`registering` 把窗口封住：`reclaim` 只在它为 0 时才判定可释放。
+    /// 它只覆盖**几条指令**（不是整个读取区），所以等待它归零是真正短暂的。
+    registering: AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
 }
@@ -244,13 +262,11 @@ impl Default for SnapshotPublisher {
 impl SnapshotPublisher {
     /// IPC/诊断线程有界读当前实际发布的PCM；不复制音频、不调用宿主、不在实时回调执行。
     pub(crate) fn diagnose(&self, ranges: &[(String, f64, f64)]) -> serde_json::Value {
-        let _read = self.enter();
-        let pointer = self.current.load(Ordering::SeqCst);
-        if pointer.is_null() {
+        let read = self.enter();
+        // SAFETY: 与 copy_block 相同读区契约；本读区登记的快照在返回前不会被释放。
+        let Some(snapshot) = read.snapshot() else {
             return serde_json::json!({"ready":false,"misses":self.misses.load(Ordering::Relaxed)});
-        }
-        // SAFETY: 与copy_block相同读区契约，退休缓冲在本方法返回前不会释放。
-        let snapshot = unsafe { &*pointer };
+        };
         let clips=ranges.iter().take(8).map(|(id,start,duration)| {
             let lo=((*start*snapshot.sample_rate as f64).round() as i64).checked_sub(snapshot.origin_sample);
             let frames=(*duration*snapshot.sample_rate as f64).round().max(0.).min(snapshot.sample_rate as f64*2.) as usize;
@@ -286,7 +302,7 @@ impl SnapshotPublisher {
         Self {
             retained: Mutex::new((Vec::new(), 0)),
             current: AtomicPtr::new(std::ptr::null_mut()),
-            readers: AtomicUsize::new(0),
+            registering: AtomicUsize::new(0),
             limit,
             misses: AtomicU64::new(0),
         }
@@ -316,9 +332,12 @@ impl SnapshotPublisher {
                     .ok_or(SnapshotError::BudgetExceeded)?,
             );
         }
-        let mut snapshot = Box::new(snapshot);
-        let pointer = &mut *snapshot as *mut PlaybackSnapshot;
-        retained.0.push(snapshot);
+        let mut entry = Box::new(RetainedSnapshot {
+            readers: AtomicUsize::new(0),
+            snapshot,
+        });
+        let pointer = &mut *entry as *mut RetainedSnapshot;
+        retained.0.push(entry);
         retained.1 = total;
         self.current.store(pointer, Ordering::SeqCst);
         self.reclaim(&mut retained);
@@ -328,37 +347,36 @@ impl SnapshotPublisher {
     pub fn clear(&self) {
         self.current.store(std::ptr::null_mut(), Ordering::SeqCst);
     }
-    /// 必须持发布锁且仅在非实时线程调用。SeqCst保证旧指针读者先登记；新的读者只能
-    /// 取得当前指针，故readers=0时可释放所有非current对象，不在音频线程析构大缓冲。
+    /// 必须持发布锁且仅在非实时线程调用。
     ///
-    /// 【为什么要有界自旋】连续播放时音频线程**几乎总**持有 reader（每个 block 进/出
-    /// 一次，而 block 只有几十毫秒量级、进/出间隔更短），一次不中就放弃会让退役快照
-    /// **永不回收** —— 预算被撑满后新的 `publish` 直接 `BudgetExceeded`，表现为"播放
-    /// 中改不动任何东西"。读取区极短（拷一个 block），通常几微秒就归零，所以这里做
-    /// **有界**自旋：自旋上限对应亚毫秒量级，远小于一次 publish 的可接受延迟；超限仍
-    /// 归零失败就照旧放弃（不阻塞、不分配），下一次 publish/collect 再试。
-    fn reclaim(&self, retained: &mut (Vec<Box<PlaybackSnapshot>>, usize)) {
+    /// 【回收判据】退役快照只在**读过它的**读者全部退出（逐快照计数归零）后释放，
+    /// 而不再等整个音频线程静默 —— 播放时音频线程几乎总在读**当前**快照，用全局计数
+    /// 会让退役缓冲永不回收、预算被撑满，表现为"播放中改不动任何东西"。等 `registering`
+    /// 归零只是封住 `enter` 的极短窗口（几条指令），不是等一整个读取区。
+    ///
+    /// 【为什么仍是有界等待】`registering` 只在 `enter` 的两条指令之间非零，正常情况
+    /// 一两次自旋即可；万一读者被抢占在窗口内，超限就直接返回、把回收留给下一次调用
+    /// （不阻塞、不分配，也不释放任何仍有读者的快照）。
+    fn reclaim(&self, retained: &mut (Vec<Box<RetainedSnapshot>>, usize)) {
         let current = self.current.load(Ordering::SeqCst);
         let mut spins = 0u32;
-        while self.readers.load(Ordering::SeqCst) != 0 {
+        while self.registering.load(Ordering::SeqCst) != 0 {
             if spins >= RECLAIM_SPIN_LIMIT {
                 return;
             }
             spins += 1;
             std::hint::spin_loop();
-            // 每自旋一段让出一次时间片：其它线程（含音频线程）才能推进并把 readers
-            // 归零。仅非实时线程会走到这里（publish / collect_retired / has_capacity）。
-            if spins.is_multiple_of(128) {
+            if spins.is_multiple_of(64) {
                 std::thread::yield_now();
             }
         }
-        retained
-            .0
-            .retain(|snapshot| std::ptr::eq(&**snapshot, current));
+        retained.0.retain(|entry| {
+            std::ptr::eq(&**entry, current) || entry.readers.load(Ordering::SeqCst) != 0
+        });
         retained.1 = retained
             .0
             .iter()
-            .map(|snapshot| snapshot.storage_bytes().unwrap())
+            .map(|entry| entry.snapshot.storage_bytes().unwrap())
             .sum();
     }
     /// 分配下一批音频前回收已退役缓冲，避免全局预算已满时无法进入publish回收。
@@ -367,9 +385,18 @@ impl SnapshotPublisher {
         self.reclaim(&mut retained);
     }
     /// 实时guard只增减计数，不分配、不释放、不等待mutex。
-    fn enter(&self) -> ReadSection<'_> {
-        self.readers.fetch_add(1, Ordering::SeqCst);
-        ReadSection(&self.readers)
+    ///
+    /// 【顺序】先取当前指针、再递增该快照的读者数，两步之间用 `registering` 标记；
+    /// `reclaim` 只在这个标记为 0 时才判定可释放，因此不存在"载入指针后、登记前被回收"。
+    fn enter(&self) -> ReadSection {
+        self.registering.fetch_add(1, Ordering::SeqCst);
+        let pointer = self.current.load(Ordering::SeqCst);
+        if !pointer.is_null() {
+            // SAFETY: 指针来自 `retained` 中存活的 Box；`registering` 非零期间不会被回收。
+            unsafe { (*pointer).readers.fetch_add(1, Ordering::SeqCst) };
+        }
+        self.registering.fetch_sub(1, Ordering::SeqCst);
+        ReadSection { snapshot: pointer }
     }
     /// 按项目绝对 sample 时间读取，seek/loop 不使用累计 playhead。
     ///
@@ -395,14 +422,9 @@ impl SnapshotPublisher {
         if output.num_channels == 0 || output.num_channels > 2 || output.channel_buffers.is_null() {
             return false;
         }
-        let _read = self.enter();
-        let pointer = self.current.load(Ordering::SeqCst);
-        // SAFETY: 进入SeqCst读区先于加载指针；非实时回收只有readers=0才释放退役Box。
-        let snapshot = if pointer.is_null() {
-            None
-        } else {
-            Some(unsafe { &*pointer })
-        };
+        let read_guard = self.enter();
+        // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
+        let snapshot = read_guard.snapshot();
         if snapshot.is_none() {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
@@ -468,10 +490,26 @@ impl SnapshotPublisher {
         snapshot.is_some()
     }
 }
-struct ReadSection<'a>(&'a AtomicUsize);
-impl Drop for ReadSection<'_> {
+/// 一个实时读区的 guard：持有它期间，它登记的那份快照不会因回收而释放。
+struct ReadSection {
+    snapshot: *const RetainedSnapshot,
+}
+impl ReadSection {
+    /// 本读区登记的不可变快照；`None` = 进入读区时没有已发布快照。
+    fn snapshot(&self) -> Option<&PlaybackSnapshot> {
+        if self.snapshot.is_null() {
+            return None;
+        }
+        // SAFETY: 本 guard 存活期间 `snapshot` 指向的 Box 因读者计数非零不会被回收。
+        Some(unsafe { &(*self.snapshot).snapshot })
+    }
+}
+impl Drop for ReadSection {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        if !self.snapshot.is_null() {
+            // SAFETY: `enter` 登记过该快照；guard 只析构一次。
+            unsafe { (*self.snapshot).readers.fetch_sub(1, Ordering::SeqCst) };
+        }
     }
 }
 
@@ -782,6 +820,43 @@ mod tests {
             assert_eq!(publisher.retained.lock().unwrap().1, 8);
         }
     }
+    /// **读"当前"快照不能阻止回收已退役的那一份。**
+    ///
+    /// 【为什么这是回归测试】此前用**全局**读者计数：播放时音频线程几乎总在读当前快照，
+    /// 计数恒非零 ⇒ 退役缓冲永不回收 ⇒ 预算撑满后 `publish` 直接 `BudgetExceeded`，
+    /// 用户表现为"播放中改不动任何东西"。逐快照计数把"读当前"与"读退役"分开，退役的那
+    /// 一份只要没人读就能立刻回收。这里把预算压到两份，读者横跨两次发布：旧实现第二次
+    /// 发布就必然预算耗尽。
+    #[test]
+    fn a_reader_of_the_current_snapshot_does_not_block_reclaiming_the_retired_one() {
+        let publisher = SnapshotPublisher::new(32);
+        let snapshot = || PlaybackSnapshot {
+            sample_rate: 4,
+            origin_sample: 0,
+            // 左右不同 ⇒ 不触发 compact_mono，每份占 16 字节，预算 32 = 两份。
+            left: vec![1.; 2],
+            right: vec![2.; 2],
+            _reservation: None,
+        };
+        publisher.publish(snapshot()).unwrap();
+        // r1 只读 A；A 退役后因它而被保留。
+        let r1 = publisher.enter();
+        publisher.publish(snapshot()).unwrap();
+        drop(r1);
+        // r2 读**当前**的 B。它不该阻止"已无人读的 A"被回收 —— 旧实现用全局计数，
+        // 这里会因 r2 而放弃回收，预算（=两份）随即被撑满。
+        let r2 = publisher.enter();
+        publisher.publish(snapshot()).unwrap();
+        assert_eq!(
+            publisher.retained.lock().unwrap().0.len(),
+            2,
+            "只应留下正被读的 B 与当前 C"
+        );
+        drop(r2);
+        publisher.collect_retired();
+        assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+    }
+
     /// 一个读者横跨发布时旧快照保持，退出后下一次非实时预检安全回收。
     #[test]
     fn active_reader_delays_reclamation_until_next_non_realtime_boundary() {
