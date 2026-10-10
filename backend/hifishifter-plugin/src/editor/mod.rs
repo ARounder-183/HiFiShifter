@@ -13,6 +13,7 @@ pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;
 pub(crate) mod session;
+mod temp_sweep;
 mod view;
 #[cfg(windows)]
 mod webview;

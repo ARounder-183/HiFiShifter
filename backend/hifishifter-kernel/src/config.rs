@@ -3,6 +3,7 @@ use crate::time_stretch::UserStretchAlgorithm;
 use crate::vibrato::VibratoPreset;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// 时间轴吸附/网格设置（对标 REAPER Snap/Grid Settings）。
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -2542,6 +2543,38 @@ mod tests {
         dir
     }
 
+    /// 并发的读-改-写不得互相丢更新。
+    ///
+    /// 【为什么这是回归测试】每个 `save_*` 都是"读整份 → 改一个字段 → 整体写回"。没有
+    /// 串行化时，两个调用者交错会让后写的那份覆盖先写的改动（Tauri 命令跑在线程池上，
+    /// 同进程内就能并发）。这里两个线程各写**不同**的键：锁失效时几乎必然丢掉一边。
+    #[test]
+    fn concurrent_preference_writes_do_not_lose_updates() {
+        let dir = prefs_scratch("concurrent");
+        std::thread::scope(|scope| {
+            let a = dir.clone();
+            scope.spawn(move || {
+                for _ in 0..200 {
+                    let mut patch = std::collections::BTreeMap::new();
+                    patch.insert("hifishifter.a".to_string(), "1".to_string());
+                    super::save_frontend_prefs(&a, &patch);
+                }
+            });
+            let b = dir.clone();
+            scope.spawn(move || {
+                for _ in 0..200 {
+                    let mut patch = std::collections::BTreeMap::new();
+                    patch.insert("hifishifter.b".to_string(), "2".to_string());
+                    super::save_frontend_prefs(&b, &patch);
+                }
+            });
+        });
+        let prefs = super::load_frontend_prefs(&dir);
+        assert_eq!(prefs.get("hifishifter.a").map(String::as_str), Some("1"));
+        assert_eq!(prefs.get("hifishifter.b").map(String::as_str), Some("2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 写入的前端偏好必须能原样读回（这就是"设置持久化"的最小契约）。
     #[test]
     fn frontend_prefs_round_trip() {
@@ -2909,6 +2942,25 @@ fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
+/// 配置文件的读-改-写串行化锁。
+///
+/// 【为什么必须有】每个 `save_*` 都是 `load_config` → 改**一个**字段 → 整体写回。两个
+/// 调用者交错时（Tauri 命令跑在线程池上，同一进程内就能并发），后写的那份会把先写的
+/// 那次改动丢掉 —— 用户表现为"刚调好的设置自己变回去了"。
+///
+/// 【边界：只覆盖同进程】独立 App 与宿主里的插件是两个进程，同时写仍可能丢一边。真正的
+/// 跨进程锁需要文件锁 API（`LockFileEx`/`flock`），本 crate 不引入额外依赖；这里先把
+/// 最常见的那条路径修好，并把边界写清楚而不是假装已经跨进程安全。
+static CONFIG_WRITE: Mutex<()> = Mutex::new(());
+
+/// 在串行化锁内做一次读-改-写；所有 `save_*` 都经它，不各自 `load_config`。
+fn update_config(config_dir: &Path, update: impl FnOnce(&mut AppConfig)) {
+    let _guard = CONFIG_WRITE.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut cfg = load_config(config_dir);
+    update(&mut cfg);
+    save_config(config_dir, &cfg);
+}
+
 fn save_config(config_dir: &Path, cfg: &AppConfig) {
     let path = config_dir.join("app_config.json");
     if let Ok(data) = serde_json::to_string_pretty(cfg) {
@@ -2993,9 +3045,9 @@ pub fn load_window_state(config_dir: &Path) -> WindowState {
 
 /// 将窗口状态写回配置文件（保留其他字段）。
 pub fn save_window_state(config_dir: &Path, ws: &WindowState) {
-    let mut cfg = load_config(config_dir);
-    cfg.window = merge_window_state(cfg.window.clone(), ws.clone());
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| {
+        cfg.window = merge_window_state(cfg.window.clone(), ws.clone());
+    });
 }
 
 // ── 窗口恢复的显示器交集校验（纯函数，lib.rs 在启动时调用） ────────────────
@@ -3046,9 +3098,7 @@ pub fn load_recent(config_dir: &Path) -> Vec<String> {
 /// 将最近工程列表写入 config dir；写入失败时静默忽略。
 /// 保留现有配置中的其他字段（如 UI 设置）。
 pub fn save_recent(config_dir: &Path, recent: &[String]) {
-    let mut cfg = load_config(config_dir);
-    cfg.recent = recent.to_vec();
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| cfg.recent = recent.to_vec());
 }
 
 /// 从 config dir 读取 UI 设置。
@@ -3058,9 +3108,7 @@ pub fn load_ui_settings(config_dir: &Path) -> UiSettings {
 
 /// 将 UI 设置写入 config dir；保留现有配置中的其他字段。
 pub fn save_ui_settings(config_dir: &Path, ui: &UiSettings) {
-    let mut cfg = load_config(config_dir);
-    cfg.ui = ui.clone();
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| cfg.ui = ui.clone());
 }
 
 /// 从 config dir 读取导出设置。
@@ -3070,9 +3118,7 @@ pub fn load_export_settings(config_dir: &Path) -> ExportSettings {
 
 /// 将导出设置写入 config dir；保留现有配置中的其他字段。
 pub fn save_export_settings(config_dir: &Path, export: &ExportSettings) {
-    let mut cfg = load_config(config_dir);
-    cfg.export = export.clone();
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| cfg.export = export.clone());
 }
 
 /// 从 config dir 读取自动备份设置。
@@ -3082,9 +3128,7 @@ pub fn load_auto_backup_settings(config_dir: &Path) -> AutoBackupSettings {
 
 /// 将自动备份设置写入 config dir；保留现有配置中的其他字段。
 pub fn save_auto_backup_settings(config_dir: &Path, settings: &AutoBackupSettings) {
-    let mut cfg = load_config(config_dir);
-    cfg.auto_backup = settings.normalized();
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| cfg.auto_backup = settings.normalized());
 }
 
 // ── 前端偏好（原 localStorage 的 `hifishifter.*` 键）───────────────────────
@@ -3109,12 +3153,13 @@ pub fn save_frontend_prefs(
     config_dir: &Path,
     patch: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut cfg = load_config(config_dir);
-    for (key, value) in patch {
-        cfg.frontend_prefs.insert(key.clone(), value.clone());
-    }
-    let snapshot = cfg.frontend_prefs.clone();
-    save_config(config_dir, &cfg);
+    let mut snapshot = std::collections::BTreeMap::new();
+    update_config(config_dir, |cfg| {
+        for (key, value) in patch {
+            cfg.frontend_prefs.insert(key.clone(), value.clone());
+        }
+        snapshot = cfg.frontend_prefs.clone();
+    });
     snapshot
 }
 
@@ -3123,12 +3168,13 @@ pub fn delete_frontend_prefs(
     config_dir: &Path,
     keys: &[String],
 ) -> std::collections::BTreeMap<String, String> {
-    let mut cfg = load_config(config_dir);
-    for key in keys {
-        cfg.frontend_prefs.remove(key);
-    }
-    let snapshot = cfg.frontend_prefs.clone();
-    save_config(config_dir, &cfg);
+    let mut snapshot = std::collections::BTreeMap::new();
+    update_config(config_dir, |cfg| {
+        for key in keys {
+            cfg.frontend_prefs.remove(key);
+        }
+        snapshot = cfg.frontend_prefs.clone();
+    });
     snapshot
 }
 
@@ -3139,7 +3185,5 @@ pub fn load_recording_settings(config_dir: &Path) -> RecordingSettings {
 
 /// 将录音设置写入 config dir；保留现有配置中的其他字段。
 pub fn save_recording_settings(config_dir: &Path, settings: &RecordingSettings) {
-    let mut cfg = load_config(config_dir);
-    cfg.recording = settings.normalized();
-    save_config(config_dir, &cfg);
+    update_config(config_dir, |cfg| cfg.recording = settings.normalized());
 }

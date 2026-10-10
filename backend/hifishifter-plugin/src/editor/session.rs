@@ -353,6 +353,9 @@ impl EditorSession {
     /// 每个真实文档唯一actor；worker与会话均用weak，不形成document→actor→document循环。
     pub(crate) fn new(document: &Arc<DocumentSession>) -> Result<Arc<Self>, String> {
         super::resources::initialize_models();
+        // 本机数据目录里的 `pcm` / `webview` 子目录按会话/进程新建，只在 Drop 时清理；
+        // 宿主被强杀时它们会永久留下（实测攒到 838 MB）。启动时扫一次已退出进程的目录。
+        super::temp_sweep::sweep_stale_temp_dirs();
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let namespace = format!(
             "hfs-ui-{}-{}-",
