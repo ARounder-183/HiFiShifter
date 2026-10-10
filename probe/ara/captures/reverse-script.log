@@ -1,7 +1,0 @@
-=== reverse probe run 2026-10-10 08:51:15 ===
-take facts: forward startoffs=0.250000 playrate=1.000000 length=1.000000
-reverse verified: forward section=false reversed=false offset=0.000000 length=2.000000
-take facts: reversed startoffs=0.750000 playrate=1.000000 length=1.000000
-reverse verified: reversed section=true reversed=true offset=0.000000 length=2.000000
-TrackFX_AddByName -> 0
-probe status=ok detail=both regions observed at check 1

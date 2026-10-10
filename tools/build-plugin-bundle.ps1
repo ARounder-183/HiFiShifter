@@ -20,6 +20,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $pluginBundleRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+# SDK 缓存位置由 tools/sdk-env.ps1 统一定义。
+. (Join-Path $PSScriptRoot 'sdk-env.ps1')
 $pluginBundleOutput = Join-Path $pluginBundleRoot ".build-tmp\$BundleDirectory"
 # REAPER 会锁住已加载的 DLL：只允许构建一个全新的目录，绝不覆盖正在使用的 bundle。
 if ((Get-Process reaper -ErrorAction SilentlyContinue) -and
@@ -38,12 +40,17 @@ try {
     New-Item -ItemType Directory -Path $pluginBundleTemp -Force | Out-Null
     $env:TEMP = $pluginBundleTemp
     $env:TMP = $pluginBundleTemp
-    # SDK 默认位置仍在 probe/ara 下（那是 `tools/prepare-plugin-sdks.ps1` 的落地目录，
-    # 由 `tools/plugin-sdks.json` 钉死 commit 与 tree）；CI 通过环境变量覆盖。
-    if (!$env:ARA_VST3_SDK_DIR) { $env:ARA_VST3_SDK_DIR = Join-Path $pluginBundleRoot 'probe\ara\rust-path\.third-party\vst3sdk' }
-    if (!$env:ARA_SDK_DIR) { $env:ARA_SDK_DIR = Join-Path $pluginBundleRoot 'probe\ara\rust-path\.third-party\ARA_SDK' }
+    # SDK 位置由 `tools/sdk-env.ps1` 统一定义（缓存根 third_party/sdk，由
+    # `tools/plugin-sdks.json` 钉死 commit 与 tree）。已存在的环境变量优先，
+    # 便于 CI 与开发者覆盖。
+    Set-SdkEnvironment
 
     if (!$SkipFrontend) {
+        # 全新 checkout 没有 node_modules；先补齐，避免前端构建报出难以定位的失败。
+        if (!(Test-Path -LiteralPath 'frontend\node_modules')) {
+            & npm --prefix frontend ci
+            if ($LASTEXITCODE -ne 0) { throw 'frontend dependency installation failed' }
+        }
         Push-Location frontend
         try { & npm run build; if ($LASTEXITCODE -ne 0) { throw 'frontend build failed' } }
         finally { Pop-Location }

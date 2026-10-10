@@ -18,7 +18,8 @@ blake3 = "1"
 #
 # 【build.rs 依赖】它要求环境变量 `ARA_VST3_SDK_DIR` 与 `ARA_SDK_DIR` 指向按
 # 它自己校验过的两个 SDK 检出（仓库 + commit + tree hash 三项匹配，tree 一脏即拒绝）。
-# 本仓库里它们在 `probe/ara/rust-path/.third-party/`，见 probe/ara/README.md。
+# 本仓库里它们在 `third_party/sdk/`（路径见 `tools/sdk-env.ps1`，revision 见
+# `tools/plugin-sdks.json`）；先跑 `tools/prepare-plugin-sdks.ps1` 下载并校验。
 ara2-bridge = { version = "0.3.0", features = ["vst3"] }
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }

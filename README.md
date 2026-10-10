@@ -179,6 +179,18 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
+构建 VST3 插件还需要 ARA 与 VST3 两份 SDK。它们的源码**不随仓库分发**（许可与本仓库的
+MIT 不同），而是由 `tools/plugin-sdks.json` 钉死 revision、构建时下载到 `third_party/sdk/`
+（该目录被 gitignore）。首次构建 VST3 插件前先执行一次：
+
+```powershell
+.\tools\prepare-plugin-sdks.ps1
+```
+
+脚本按 revision 浅克隆并做仓库 + commit + tree 三重校验，重复执行是幂等的。缓存路径的
+唯一事实来源是 `tools/sdk-env.ps1`（它同时定义构建需要的 `ARA_SDK_DIR` /
+`ARA_VST3_SDK_DIR` 两个环境变量），构建脚本与 CI 都从它取，不再各自硬编码。
+
 ### 4. 开发与构建
 
 ```bash

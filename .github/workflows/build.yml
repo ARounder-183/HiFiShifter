@@ -125,11 +125,15 @@ jobs:
     defaults:
       run:
         shell: pwsh
-    env:
-      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
-      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
     steps:
       - uses: actions/checkout@v6
+
+      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
+      - name: Configure pinned SDK paths
+        run: |
+          . ./tools/sdk-env.ps1
+          Export-SdkEnvironment
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -164,7 +168,7 @@ jobs:
       - name: Cache pinned plugin SDKs
         uses: actions/cache@v5
         with:
-          path: probe/ara/rust-path/.third-party
+          path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
 
       - name: Install pinned ARA and VST3 SDKs
@@ -189,11 +193,15 @@ jobs:
     defaults:
       run:
         shell: pwsh
-    env:
-      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
-      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
     steps:
       - uses: actions/checkout@v6
+
+      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
+      - name: Configure pinned SDK paths
+        run: |
+          . ./tools/sdk-env.ps1
+          Export-SdkEnvironment
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -226,7 +234,7 @@ jobs:
       - name: Cache pinned plugin SDKs
         uses: actions/cache@v5
         with:
-          path: probe/ara/rust-path/.third-party
+          path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
 
       - name: Install pinned ARA and VST3 SDKs

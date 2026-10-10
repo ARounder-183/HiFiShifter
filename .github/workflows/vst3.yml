@@ -17,14 +17,18 @@ jobs:
     name: Build and package VST3 (Windows x64)
     runs-on: windows-latest
     timeout-minutes: 90
-    env:
-      ARA_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/ARA_SDK
-      ARA_VST3_SDK_DIR: ${{ github.workspace }}/probe/ara/rust-path/.third-party/vst3sdk
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
+
+      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
+      - name: Configure pinned SDK paths
+        run: |
+          . ./tools/sdk-env.ps1
+          Export-SdkEnvironment
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

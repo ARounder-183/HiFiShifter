@@ -36,10 +36,10 @@ Write-Host "Product consistency checks" -ForegroundColor Cyan
 
 # ── 1. 交付链路不依赖一次性探针目录 ────────────────────────────────────
 #
-# `probe/ara/README.md` 明写该目录可以整体删除。只有 SDK 检出目录
-# （`probe/ara/rust-path/.third-party`）是例外：它是被 `tools/plugin-sdks.json`
-# 钉死 commit 的依赖缓存，删了要重新下载，但**不属于探针产物**。
-Test-Consistency '交付链路不引用一次性探针产物（probe/ara/rust-path 除外）' {
+# `probe/` 是一次性验证工程，可以整体删除。产品交付链（脚本 / CI / 前端）不得引用
+# 它。插件 SDK 缓存也已移出 probe/，改由 `tools/sdk-env.ps1` 统一定义（third_party/sdk），
+# 因此这里不再需要任何例外。
+Test-Consistency '交付链路不引用一次性探针产物' {
     $scanRoots = @('tools', 'frontend/src', 'backend/build-support', '.github/workflows')
     $offenders = @()
     foreach ($scanRoot in $scanRoots) {
@@ -51,13 +51,7 @@ Test-Consistency '交付链路不引用一次性探针产物（probe/ara/rust-pa
             foreach ($match in $matches) {
                 # 注释里解释"这段代码原先借用过探针脚本"是正当的，不是依赖。
                 if ($match.Line.Trim() -match '^(#|//|;|\*|--)') { continue }
-                foreach ($hit in $match.Matches) {
-                    # 允许 probe/ara/rust-path（SDK 缓存），禁止其余（脚本 / 采集物）。
-                    $tail = $match.Line.Substring($hit.Index + $hit.Length)
-                    if ($tail -notmatch '^[/\\]rust-path') {
-                        $offenders += "$($file.FullName.Substring($checkRoot.Length + 1)): $($match.Line.Trim())"
-                    }
-                }
+                $offenders += "$($file.FullName.Substring($checkRoot.Length + 1)): $($match.Line.Trim())"
             }
         }
     }
@@ -67,12 +61,7 @@ Test-Consistency '交付链路不引用一次性探针产物（probe/ara/rust-pa
         $matches = Select-String -LiteralPath $file.FullName -Pattern 'probe[/\\]ara' -AllMatches -ErrorAction SilentlyContinue
         foreach ($match in $matches) {
             if ($match.Line.Trim() -match '^(//|\*|/\*)') { continue }
-            foreach ($hit in $match.Matches) {
-                $tail = $match.Line.Substring($hit.Index + $hit.Length)
-                if ($tail -notmatch '^[/\\]rust-path') {
-                    $offenders += "$($file.FullName.Substring($checkRoot.Length + 1)): $($match.Line.Trim())"
-                }
-            }
+            $offenders += "$($file.FullName.Substring($checkRoot.Length + 1)): $($match.Line.Trim())"
         }
     }
     if ($offenders.Count) { throw ("以下位置仍引用 probe/ara 的探针产物：`n         " + ($offenders -join "`n         ")) }
@@ -121,7 +110,7 @@ Test-Consistency '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
         $full = Join-Path $checkRoot $scanRoot
         if (!(Test-Path -LiteralPath $full)) { continue }
         foreach ($file in Get-ChildItem -LiteralPath $full -Recurse -File |
-            Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1') -and $_.FullName -notlike '*\.third-party\*' }) {
+            Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1') }) {
             $bytes = [IO.File]::ReadAllBytes($file.FullName)
             if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { continue }
             # 无 BOM：只要有一个字节 > 0x7F 就会被 PowerShell 5.1 误读。

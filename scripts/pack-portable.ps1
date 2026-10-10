@@ -213,18 +213,33 @@ $TauriConf = Get-Content (Join-Path $TauriDir "tauri.conf.json") -Raw | ConvertF
 $ProductName = $TauriConf.productName
 $Version = $TauriConf.version
 
-# 双击快速入口可选择 App、插件或两者；CI 与 -SkipBuild 调用保持非交互默认 App。
+# 双击快速入口：先选打包目标，再选构建方式（只问一次）。CI 与脚本调用走非交互路径 ——
+# 给了 -PackageTarget 就不再询问目标，给了 -SkipBuild 就直接打包已有产物。
 if (!$PSBoundParameters.ContainsKey('PackageTarget') -and !$SkipBuild) {
     do { $packageChoice = Read-Host '打包目标：1 App，2 VST3 插件，3 两者' } while ($packageChoice -notin @('1','2','3'))
     $PackageTarget = @{'1'='App';'2'='Plugin';'3'='All'}[$packageChoice]
+    do { $buildChoice = Read-Host '构建方式：1 构建并打包，2 仅打包已有交付' } while ($buildChoice -notin @('1','2'))
+    if ($buildChoice -eq '2') { $SkipBuild = $true }
+}
+if (!$SkipBuild) {
+    # 构建会经 cc/cmake 调 cl.exe 编译内核的 C 依赖（soundtouch/world/opus 等）；双击启动
+    # 的 shell 里没有 MSVC 环境，必须先导入，否则报 D8050（"cl.exe 存在但编译全部失败"）。
+    # -SkipBuild 只打包已有产物，不需要工具链，因此这些前置检查都放在构建路径里。
+    foreach ($buildTool in @('cargo', 'npm')) {
+        if (!(Get-Command $buildTool -ErrorAction SilentlyContinue)) { throw "$buildTool 未安装或不在 PATH 上，无法构建。" }
+    }
+    # App 与插件的前端产物都来自 frontend/dist（由 npm 构建）。全新 checkout 没有
+    # node_modules，先补齐，避免构建在 beforeBuildCommand 处报出难以定位的失败。
+    if (!(Test-Path -LiteralPath (Join-Path $ProjectRoot 'frontend\node_modules'))) {
+        Write-Host '[Preprocessing] Installing frontend dependencies (npm ci)...' -ForegroundColor Yellow
+        & npm --prefix (Join-Path $ProjectRoot 'frontend') ci
+        if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+    }
+    . (Join-Path $ProjectRoot 'tools\msvc-env.ps1')
 }
 if ($PackageTarget -ne 'App') {
     if ($TargetTriple -and $TargetTriple -ne 'x86_64-pc-windows-msvc') { throw 'VST3 packaging currently supports Windows x64 only.' }
     if (!$OutputDir) { $OutputDir = Join-Path $ProjectRoot 'dist' }
-    if (!$SkipBuild) {
-        do { $pluginBuildChoice = Read-Host '构建方式：1 构建并打包，2 仅打包已有交付' } while ($pluginBuildChoice -notin @('1','2'))
-        if ($pluginBuildChoice -eq '2') { $SkipBuild = $true }
-    }
     if (!$SkipBuild) {
         & (Join-Path $ProjectRoot 'tools\prepare-plugin-sdks.ps1')
         & cargo fetch --manifest-path (Join-Path $ProjectRoot 'backend\Cargo.toml') --locked
@@ -302,29 +317,6 @@ Write-Host "  Version:      $Version"
 Write-Host "  Output Path:  $ZipPath"
 Write-Host "  Release Dir:  $TargetRelease"
 Write-Host ""
-
-# ===== Interactive choice (when -SkipBuild is not specified) =====
-if (-not $SkipBuild) {
-    Write-Host "Please select an action:" -ForegroundColor White
-    Write-Host "  [1] Full build + packaging" -ForegroundColor Yellow
-    Write-Host "  [2] Skip build, package directly (use existing artifacts)" -ForegroundColor Yellow
-    Write-Host ""
-    do {
-        $choice = Read-Host "Enter option (1/2)"
-        if ($choice -eq "2") {
-            $SkipBuild = $true
-            Write-Host ""
-            break
-        }
-        elseif ($choice -eq "1") {
-            Write-Host ""
-            break
-        }
-        else {
-            Write-Host "Invalid input, please enter 1 or 2" -ForegroundColor Red
-        }
-    } while ($true)
-}
 
 # ===== Step 1: Build (optional) =====
 if (-not $SkipBuild) {

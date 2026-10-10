@@ -9,6 +9,8 @@ param(
 )
 $ErrorActionPreference='Stop'
 $buildTaskRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+# SDK 缓存位置由 tools/sdk-env.ps1 统一定义。
+. (Join-Path $PSScriptRoot 'sdk-env.ps1')
 if (!$BuildName) {$BuildName='hfs-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)}
 $buildTaskDelivery=Join-Path $buildTaskRoot ".build-tmp\deliveries\$BuildName"
 $buildTaskBundleName="$BuildName-vst3"
@@ -19,15 +21,16 @@ $buildTaskIncludesPlugin=$Target -in @('All','Plugin')
 if ($buildTaskIncludesPlugin -and (Test-Path -LiteralPath (Join-Path $buildTaskRoot ".build-tmp\$buildTaskBundleName"))) {
     throw 'Plugin bundle already exists; immutable build requires a fresh Name.'
 }
-foreach ($buildTaskRequired in @('frontend\package-lock.json','backend\Cargo.lock','tools\msvc-env.ps1',
+foreach ($buildTaskRequired in @('frontend\package-lock.json','backend\Cargo.lock','tools\msvc-env.ps1','tools\sdk-env.ps1',
     'backend\src-tauri\resources\models\fcpe\fcpe.onnx','backend\src-tauri\resources\models\hnsep\hnsep.onnx',
     'backend\src-tauri\resources\models\nsf_hifigan\pc_nsf_hifigan.onnx')) {
     if (!(Test-Path -LiteralPath (Join-Path $buildTaskRoot $buildTaskRequired))) {throw "Missing input: $buildTaskRequired"}
 }
 if ($buildTaskIncludesPlugin) {
+    $buildTaskSdkRoot=Get-SdkCacheRoot
     foreach ($buildTaskSdk in @('ARA_SDK','vst3sdk')) {
-        if (!(Test-Path -LiteralPath (Join-Path $buildTaskRoot "probe\ara\rust-path\.third-party\$buildTaskSdk\.git"))) {
-            throw "Missing locked SDK checkout: $buildTaskSdk; this flow never clones or edits SDKs."
+        if (!(Test-Path -LiteralPath (Join-Path $buildTaskSdkRoot "$buildTaskSdk\.git"))) {
+            throw "Missing locked SDK checkout: $buildTaskSdk; run tools/prepare-plugin-sdks.ps1 (this flow never clones or edits SDKs)."
         }
     }
 }
@@ -63,8 +66,8 @@ try {
     $buildTaskTemp=Join-Path $buildTaskRoot ('.build-tmp\product-build-'+[Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $buildTaskTemp | Out-Null
     $env:TEMP=$buildTaskTemp;$env:TMP=$buildTaskTemp
-    $env:ARA_SDK_DIR=Join-Path $buildTaskRoot 'probe\ara\rust-path\.third-party\ARA_SDK'
-    $env:ARA_VST3_SDK_DIR=Join-Path $buildTaskRoot 'probe\ara\rust-path\.third-party\vst3sdk'
+    # 本流程是封闭构建：强制指向仓库内的 SDK 缓存，不接受外部残留的同名变量。
+    Set-SdkEnvironment -Force
     if ($Verify) {
         & npm --prefix frontend test
         if ($LASTEXITCODE -ne 0) {throw 'Frontend regression failed.'}
@@ -81,6 +84,12 @@ try {
             & cargo test --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin --lib -- --test-threads=1
             if ($LASTEXITCODE -ne 0) {throw 'Plugin/ABI regression failed.'}
         }
+    }
+    # 前端产物由 npm 构建；全新 checkout 没有 node_modules，先补齐，避免构建在
+    # npm run build 处报出难以定位的失败（CI 已先 npm ci，这里不会触发）。
+    if (!(Test-Path -LiteralPath (Join-Path $buildTaskRoot 'frontend\node_modules'))) {
+        & npm --prefix frontend ci
+        if ($LASTEXITCODE -ne 0) {throw 'Frontend dependency installation failed.'}
     }
     & npm --prefix frontend run build
     if ($LASTEXITCODE -ne 0) {throw 'Shared frontend build failed.'}
