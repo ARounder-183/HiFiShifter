@@ -101,13 +101,18 @@ jobs:
 
       - name: Run plugin integration contracts
         run: |
-          # 四个契约测试（ARA 映射 / renderer 分配 / VST3 导出 / 依赖树无 Tauri）此前只在
-          # 本地 `-Verify` 里跑，CI 从不执行 —— 也就是说插件最容易出问题的 ABI 与依赖
-          # 边界在流水线上是无人值守的。这里显式跑一遍。
+          # 契约测试（ARA 映射 / renderer 分配 / VST3 导出 / 依赖树无 Tauri / 版本一致性 /
+          # 宿主持久 ID）此前只在本地 `-Verify` 里跑，CI 从不执行 —— 也就是说插件最容易出
+          # 问题的 ABI 与依赖边界在流水线上是无人值守的。这里显式跑一遍。
+          #
+          # 【为什么 `version_parity` 与 `host_persistent_ids` 必须在这里】前者守卫插件
+          # 版本与 `tauri.conf.json` / `Cargo.toml` / `package.json` 一致（文件头自己写着
+          # 它已经漂移过一次），后者守卫宿主持久 ID 的解析；两者此前都不在清单里，
+          # 等于没有守卫。
           . ./tools/msvc-env.ps1
           cargo build --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin
           if ($LASTEXITCODE -ne 0) { throw 'Plugin ABI regression prerequisite build failed.' }
-          foreach ($contract in @('ara_mapping', 'renderer_assignments', 'vst3_exports', 'no_tauri_in_dependency_tree')) {
+          foreach ($contract in @('ara_mapping', 'renderer_assignments', 'vst3_exports', 'no_tauri_in_dependency_tree', 'version_parity', 'host_persistent_ids')) {
             cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --test $contract -- --test-threads=1
             if ($LASTEXITCODE -ne 0) { throw "Plugin integration contract failed: $contract" }
           }

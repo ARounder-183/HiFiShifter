@@ -17,26 +17,20 @@ use std::path::{Path, PathBuf};
 const CLEAN_FIXTURE: &str = "ara-model.reaper.json";
 const AWKWARD_FIXTURE: &str = "ara-model.awkward.json";
 
-/// 仓库根（`backend/hifishifter-plugin` 往上两级）。
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
-
-/// 探针 Task 1 采集的 ARA 样本与音频素材（本分支上随探针一起带过来）。
-fn captures_dir() -> PathBuf {
-    repo_root().join("probe").join("ara").join("captures")
-}
-
+/// 测试夹具目录（随 crate 一起提交）。
+///
+/// 【为什么不放在 `probe/` 下】这些夹具原在 `probe/ara/{captures,fixtures}`，而
+/// `probe/` 被当作可丢弃的开发树整体删掉了（连同 SDK 缓存）—— 于是本测试在 CI 上
+/// **静默全红**：它读的是已经不存在的路径。夹具现在住在 crate 自己的 `tests/fixtures`
+/// 里，测试不再依赖任何仓库外的目录。
 fn fixtures_dir() -> PathBuf {
-    repo_root().join("probe").join("ara").join("fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
 }
 
 fn fixture_json(name: &str) -> String {
-    let path = captures_dir().join(name);
+    let path = fixtures_dir().join(name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }

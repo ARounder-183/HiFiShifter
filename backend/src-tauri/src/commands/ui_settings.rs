@@ -10,62 +10,17 @@ use crate::config::UiSettings;
 use crate::state::AppState;
 use tauri::State;
 
-/// 需要做**深度合并**（逐个嵌套子键覆盖）的顶层键。
-///
-/// 这些键的值是对象，而前端可能只发送其中一个子字段（如只改声道导入策略的
-/// 容差）。若按顶层键做浅替换，未发送的兄弟子键会整块丢失。
-///
-/// `dock` 尤其关键：行为选项与整份布局同处一个对象，只写选项的部分保存若走
-/// 浅替换，会把 `layout` 整个抹掉 —— 用户排了十分钟的界面会在改一个开关后归零。
-const DEEP_MERGE_KEYS: &[&str] = &[
-    "timelineSnap",
-    "renderCache",
-    "channelImportPolicy",
-    "notebook",
-    "dock",
-    // ARA 形态的布局与 `dock` 同形同语义（见 `UiSettings::dock_plugin`），因此同样
-    // 需要子键合并 —— 漏登记这一项，用户在插件里改一个行为开关就会把整份布局抹掉。
-    // 这份清单与 `hifishifter_kernel::editor::settings` 里的是**两份**，必须同时改。
-    "dockPlugin",
-    // 插件形态的音乐上下文（音阶）。同样是对象，部分保存不得抹掉兄弟子键。
-    "pluginMusicalContext",
-    "search",
-    // 指针设备偏好：前端会把压感、捏合、读数等**逐项**部分保存
-    // （如只改 `pressureMaxGain`）。漏登记这一项，用户改一个滑块就会把其余
-    // 指针偏好整个抹掉 —— 而这一处没有编译保护，只能靠这条注释与下面的测试。
-    "penInput",
-];
-
 /// 以现有设置为基底合并前端发来的部分补丁（纯函数，便于测试）。
 ///
-/// 顶层做逐键覆盖；[`DEEP_MERGE_KEYS`] 中的键再做一层子键合并。
+/// 【为什么只有这一份清单】深度合并的白名单与实现都在内核
+/// （`hifishifter_kernel::editor::settings`），App 与插件共用同一份。此前 App 里抄了
+/// **第二份**同内容的清单 + 一份同样的合并逻辑，两者没有编译保护，只能靠一条"两份清单
+/// 相等"的测试兜着 —— 而那条测试本身也是重复。现在这里只是转发。
 pub(crate) fn merge_ui_settings_patch(
-    mut base: serde_json::Value,
+    base: serde_json::Value,
     patch: &serde_json::Value,
 ) -> serde_json::Value {
-    if let (serde_json::Value::Object(base_obj), serde_json::Value::Object(patch_obj)) =
-        (&mut base, patch)
-    {
-        for (key, value) in patch_obj {
-            if DEEP_MERGE_KEYS.contains(&key.as_str()) {
-                match base_obj.get_mut(key.as_str()) {
-                    Some(serde_json::Value::Object(base_nested)) => {
-                        if let serde_json::Value::Object(patch_nested) = value {
-                            for (nested_key, nested_value) in patch_nested {
-                                base_nested.insert(nested_key.clone(), nested_value.clone());
-                            }
-                        }
-                    }
-                    _ => {
-                        base_obj.insert(key.clone(), value.clone());
-                    }
-                }
-            } else {
-                base_obj.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    base
+    hifishifter_kernel::editor::settings::merge(base, patch)
 }
 
 pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
@@ -247,7 +202,7 @@ mod tests {
     #[test]
     fn deep_merge_covers_every_nested_settings_object() {
         // 逐个白名单键验证：只发一个子字段时，另一个子字段必须留存。
-        for key in DEEP_MERGE_KEYS {
+        for key in hifishifter_kernel::editor::settings::DEEP_MERGE_KEYS {
             let key: &str = key;
             let base = json!({ key: { "kept": 1, "changed": 1 } });
             let patch = json!({ key: { "changed": 2 } });
@@ -257,25 +212,10 @@ mod tests {
         }
     }
 
-    /// 两份深度合并清单必须**逐字相同**。
-    ///
-    /// 【为什么需要这条】插件走 `hifishifter_kernel::editor::settings::merge`（用内核
-    /// 那份），独立 App 走本文件的 `DEEP_MERGE_KEYS`。两份清单是重复的、没有编译保护，
-    /// 漏改一处只会表现为"某个设置改一次就把兄弟字段全丢了" —— 很难被注意到。
-    /// 新增嵌套设置对象时，这条测试会立刻指出漏改的那一份。
-    #[test]
-    fn the_two_deep_merge_lists_stay_identical() {
-        assert_eq!(
-            DEEP_MERGE_KEYS,
-            hifishifter_kernel::editor::settings::DEEP_MERGE_KEYS,
-            "App 与内核的深度合并清单已经分叉：改一处必须同时改另一处"
-        );
-    }
-
     #[test]
     fn deep_merge_keeps_sibling_pen_input_keys() {
         // 具体场景：用户只改压感上界，其余指针偏好（捏合、读数、设备声明）必须留存。
-        // 这一处没有编译保护 —— `DEEP_MERGE_KEYS` 漏登记时本测试会失败，
+        // 这一处没有编译保护 —— 内核白名单漏登记时本测试会失败，
         // 而线上表现只是"改一个滑块，别的偏好全丢"，很难被注意到。
         let base = json!({
             "penInput": {
