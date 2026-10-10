@@ -126,6 +126,17 @@ pub(crate) struct ReaperHost {
     take_enum: Option<TakeEnumApi>,
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
     folder: Option<folder::FolderApi>,
+    /// 本实例创建的 Undo 条目的**时间戳缓存**（条目索引 → Unix 毫秒）。
+    ///
+    /// 【为什么需要】REAPER 的 `Undo_GetEntryDesc` 只给标签，**没有时间**。此前
+    /// `project_history` 把 `atMs` 硬编码成 0，前端 `new Date(0)` 于是显示 1970。
+    /// 这里在 `Undo_EndBlock2` 之后记下当时的 `Undo_GetCurEntry` 索引与墙钟时间，
+    /// 供历史面板读出真实时间。
+    ///
+    /// 【为什么按索引是安全的】REAPER 的撤销栈只在**尾部**追加、在回退点**截断**。
+    /// 记录新条目时先丢掉所有索引大于它的旧记录，于是"用户回退后再编辑"造成的重编号
+    /// 不会留下错位的时间。宿主的自有条目（不是本插件创建的）没有时间，读作 `null`。
+    undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
 }
 
 impl ReaperHost {
@@ -477,6 +488,7 @@ impl ReaperHost {
             app_version,
             take_enum,
             folder,
+            undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
     /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。

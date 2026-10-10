@@ -29,6 +29,7 @@ export function useHistoryStateListener(): void {
                 setHistoryState({
                     undoDepth: Number(payload.undoDepth) || 0,
                     redoDepth: Number(payload.redoDepth) || 0,
+                    backend: payload.backend,
                     records: Array.isArray(payload.records) ? payload.records : undefined,
                 }),
             );

@@ -251,6 +251,34 @@ mod tests {
         host.history_jump_to(1, &|| true).unwrap();
         assert_eq!(host.project_history(&|| true).unwrap()["position"], 1);
     }
+    /// 插件创建的撤销条目要有真实时间；宿主自己的条目没有时间，读作 `null`（**不是 0**，
+    /// 否则前端 `new Date(0)` 会显示 1970 —— 这正是此前的报障）。
+    #[test]
+    fn plugin_created_entries_get_a_timestamp_and_host_entries_stay_null() {
+        let fixture = crate::host::reaper::ReaperFixture::new();
+        fixture.enable_writer();
+        let host = Arc::new(fixture.client());
+        let undo = Arc::new(HostUndo::default());
+
+        // 宿主自带的第 0 条（"Initial state"）没有时间。
+        let before = host.project_history(&|| true).unwrap();
+        assert!(before["records"][0]["atMs"].is_null(), "{before}");
+        assert_eq!(before["backend"], "reaper");
+
+        undo.begin_request("view", 1, true, false, &host, &|| true)
+            .unwrap();
+        undo.finish_request("view", 1);
+        undo.finish_if_idle(false);
+
+        let after = host.project_history(&|| true).unwrap();
+        // 新条目（索引 1）由本插件创建 ⇒ 有真实时间；索引 0 仍是 null。
+        let created = after["records"][1]["atMs"]
+            .as_u64()
+            .expect("plugin entry has a time");
+        assert!(created > 0, "{after}");
+        assert!(after["records"][0]["atMs"].is_null(), "{after}");
+    }
+
     /// 关闭UI发生在原生setter内部时，不能提前结束Undo让余下setter落到历史之外。
     #[test]
     fn host_history_view_close_waits_for_native_writer_but_releases_queued_actor_tail() {

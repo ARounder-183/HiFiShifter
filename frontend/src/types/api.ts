@@ -339,12 +339,24 @@ export interface TimelineResult {
 /** 「操作记录」中的一条状态（`history_state` 事件 / `get_history_state`）。 */
 export interface HistoryRecordSummary {
     /**
-     * 产生该状态的操作 key（前端按 `history_op_<label>` 本地化）；
+     * 产生该状态的操作标识。含义**取决于 `backend`**：
+     * - `local`：op key（前端按 `history_op_<label>` 本地化）；
+     * - `reaper`：宿主自己的可读字符串（前端原样显示，不再加前缀）。
      * `null` = 初始状态（「初始化状态」行）。
      */
     label: string | null;
-    /** 该状态形成时刻（Unix 毫秒）。 */
-    atMs: number;
+    /**
+     * 该状态形成时刻（Unix 毫秒）；`null` = 未知。
+     *
+     * 宿主（REAPER）的撤销栈不提供时间戳，只有本插件创建的条目才有记录 ——
+     * 未知时前端**隐藏**时间列，而不是渲染 `new Date(0)`（1970）。
+     */
+    atMs: number | null;
+    /**
+     * 记录来自哪一个撤销栈：`"local"`（插件自管）或 `"reaper"`（宿主权威）。
+     * 缺省按 `"local"` 处理（独立 App / 旧后端）。
+     */
+    backend?: "local" | "reaper";
 }
 
 /**
@@ -355,6 +367,8 @@ export interface HistoryRecordSummary {
  */
 export interface HistoryStateResult {
     ok: boolean;
+    /** 记录来源；缺省 `"local"`。见 [`HistoryRecordSummary.backend`]。 */
+    backend?: "local" | "reaper";
     position: number;
     undoDepth: number;
     redoDepth: number;

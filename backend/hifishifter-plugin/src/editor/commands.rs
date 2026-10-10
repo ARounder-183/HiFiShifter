@@ -167,7 +167,10 @@ fn history_state(session: &EditorSession) -> Value {
         .iter()
         .map(|r| json!({"label":r.label,"atMs":r.at_ms}))
         .collect();
-    json!({"ok":true,"position":history.position,"undoDepth":undo,"redoDepth":redo,
+    // `backend` 是**判别式**：本地栈的 `label` 是 op key（前端按 `history_op_<key>` 本地化），
+    // 宿主栈的 `label` 是宿主自己的可读字符串（前端原样显示）。没有它，前端只能无差别加
+    // 前缀，于是宿主字符串被渲染成 `history_op_Move items`（见 `UndoHistoryPanel::labelOf`）。
+    json!({"ok":true,"backend":"local","position":history.position,"undoDepth":undo,"redoDepth":redo,
         "records":if records.is_empty() {vec![json!({"label":null,"atMs":history.started_at_ms})]} else {records}})
 }
 fn track_exists(session: &EditorSession, track: &str) -> Result<(), String> {

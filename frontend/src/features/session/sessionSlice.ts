@@ -2744,13 +2744,20 @@ const sessionSlice = createSlice({
             action: PayloadAction<{
                 undoDepth: number;
                 redoDepth: number;
+                backend?: "local" | "reaper";
                 records?: HistoryRecordSummary[];
             }>,
         ) {
             applyHistoryDepths(state, action.payload.undoDepth, action.payload.redoDepth);
             const records = action.payload.records;
             if (Array.isArray(records)) {
-                state.historyRecords = records;
+                // 把顶层 `backend` 盖到每条记录上：`labelOf` 要按**记录来源**决定是否
+                // 加 `history_op_` 前缀（宿主字符串原样显示，本地 op key 才查表）。
+                const backend = action.payload.backend ?? "local";
+                state.historyRecords = records.map((record) => ({
+                    ...record,
+                    backend: record.backend ?? backend,
+                }));
             }
         },
         checkpointHistory(state) {

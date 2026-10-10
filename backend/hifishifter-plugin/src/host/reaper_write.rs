@@ -164,7 +164,19 @@ impl Drop for HostUndoBlock {
         let project = self.project as *mut c_void;
         if unsafe { (api.validate)(project, project, c"ReaProject*".as_ptr()) } {
             unsafe {
-                (write.end)(project, c"HiFiShifter edit".as_ptr(), -1);
+                // 【为什么是品牌名而不是文案】后端不持有 UI 文案（见 `model.rs` 的同名
+                // 约定）。这里写进的是**宿主自己的**撤销栈，宿主会把它显示在它自己的
+                // 界面里；一个稳定的产品名比一句可能过期的英文描述更合适。前端只对
+                // `backend === "local"` 的记录做 `history_op_` 本地化，宿主记录原样显示。
+                (write.end)(project, c"HiFiShifter".as_ptr(), -1);
+            }
+            // `Undo_EndBlock2` 之后，刚创建的条目就是当前条目 —— 在这里记下它的墙钟时间。
+            // 时间戳只是显示用的缓存，读不到就算了（不阻断任何写路径）。
+            if let Some(history) = &self.host.history {
+                let index = unsafe { (history.current)(project) };
+                if index >= 0 {
+                    self.host.note_undo_entry_time(index);
+                }
             }
         }
     }
@@ -205,6 +217,19 @@ impl ReaperHost {
         })?;
         Ok(block)
     }
+    /// 记下一个由本插件创建的 Undo 条目的墙钟时间（Unix 毫秒）。
+    ///
+    /// 【为什么先丢弃更大的索引】REAPER 的撤销栈在回退点截断：用户回退到索引 `i` 之后
+    /// 再编辑，`i+1` 起的新条目会顶掉旧条目。丢掉所有大于 `index` 的记录，就不会让
+    /// 旧时间错配到新条目上。
+    ///
+    /// 【容量】宿主条目数已有 10000 上限（见 [`Self::project_history`]）；本表只记本插件
+    /// 自己创建的条目，规模受同样约束，并在 `close` 时随文档一起丢弃。
+    pub(crate) fn note_undo_entry_time(&self, index: i32) {
+        let mut times = self.undo_entry_times.lock().unwrap();
+        times.retain(|known, _| *known < index);
+        times.insert(index, hifishifter_kernel::state::now_unix_ms());
+    }
     /// 官方Undo枚举提供真实深度和行，而不是用本地参数history冒充宿主历史。
     pub(crate) fn project_history(
         &self,
@@ -235,7 +260,17 @@ impl ReaperHost {
         for index in 0..count {
             let pointer = checked(authorized, || unsafe { (history.entry)(project, index) })?;
             let label = read(pointer)?.ok_or("host undo changed while reading")?;
-            records.push(serde_json::json!({"label":label,"atMs":0}));
+            // REAPER 不提供时间；只有**本插件创建**的条目有记录（见 `HostUndoBlock::drop`）。
+            // 未知一律 `null`（前端隐藏时间列），绝不回落到 0 —— 那会显示 1970。
+            let at = self
+                .undo_entry_times
+                .lock()
+                .unwrap()
+                .get(&index)
+                .copied()
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null);
+            records.push(serde_json::json!({"label":label,"atMs":at}));
         }
         let position = if position < 0 && records.is_empty() {
             0

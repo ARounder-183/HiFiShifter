@@ -285,4 +285,43 @@ test("features/session/sessionSlice.history.test.ts scripted checks", async () =
         assertEqual(cleared.historyUndoDepth, 0, "history reset clears undo depth");
         assertEqual(cleared.historyRedoDepth, 0, "history reset clears redo depth");
     }
+
+    // ── `backend` 判别式：记录要带上来源，前端据此决定是否本地化 label ──
+    {
+        // 宿主（REAPER）栈：label 是宿主自己的可读字符串，原样显示。
+        const host = reducer(
+            createState(),
+            setHistoryState({
+                undoDepth: 1,
+                redoDepth: 0,
+                backend: "reaper",
+                records: [{ label: "Move items", atMs: null }],
+            }),
+        );
+        assertEqual(host.historyRecords[0].backend, "reaper", "host records keep their backend");
+        assertEqual(host.historyRecords[0].atMs, null, "host records may have no timestamp");
+
+        // 本地栈：label 是 op key，前端按 `history_op_<key>` 本地化。
+        const local = reducer(
+            createState(),
+            setHistoryState({
+                undoDepth: 1,
+                redoDepth: 0,
+                backend: "local",
+                records: [{ label: "edit_clip", atMs: 1_700_000_000_000 }],
+            }),
+        );
+        assertEqual(local.historyRecords[0].backend, "local", "local records are tagged local");
+
+        // 缺省（独立 App / 旧后端不带该字段）按 local 处理。
+        const legacy = reducer(
+            createState(),
+            setHistoryState({
+                undoDepth: 1,
+                redoDepth: 0,
+                records: [{ label: "edit_clip", atMs: 1 }],
+            }),
+        );
+        assertEqual(legacy.historyRecords[0].backend, "local", "missing backend defaults to local");
+    }
 });

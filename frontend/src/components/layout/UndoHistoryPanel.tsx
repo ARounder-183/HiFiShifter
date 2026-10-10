@@ -56,8 +56,19 @@ export const UndoHistoryPanel: React.FC = () => {
         [locale],
     );
 
+    /**
+     * 一条记录显示什么文字。
+     *
+     * 【为什么要看 `backend`】两条撤销栈共用这一个面板，但 `label` 的含义不同：
+     * - `local`（插件自管）：`label` 是 op key，按 `history_op_<key>` 查 catalog；
+     * - `reaper`（宿主权威）：`label` 是**宿主自己**的可读字符串（`Undo_GetEntryDesc`），
+     *   原样显示 —— 加前缀查表必然失败，会把 `history_op_Move items` 这种原始键名
+     *   直接摊给用户（这正是此前的报障）。
+     */
     const labelOf = useCallback(
-        (label: string | null): string => {
+        (record: { label: string | null; backend?: "local" | "reaper" }): string => {
+            const { label } = record;
+            if (record.backend === "reaper") return label ?? "—";
             const key = label ? `history_op_${label}` : "history_op_initial";
             const text = tf(key);
             return typeof text === "string" && text.length > 0 ? text : (label ?? "—");
@@ -113,11 +124,18 @@ export const UndoHistoryPanel: React.FC = () => {
                                 className="min-w-0 flex-1 truncate"
                                 aria-current={isCurrent ? "true" : undefined}
                             >
-                                {labelOf(row.label)}
+                                {labelOf(row)}
                             </span>
-                            <span className="shrink-0 text-qt-xs tabular-nums text-qt-text-muted">
-                                {timeFormatter.format(new Date(row.atMs))}
-                            </span>
+                            {/*
+                              时间是**可选**的：宿主（REAPER）的撤销栈不提供时间戳，
+                              只有本插件创建的条目有记录。未知时**不渲染**时间列 ——
+                              渲染 `new Date(null/0)` 会显示 1970（此前的报障）。
+                            */}
+                            {row.atMs != null ? (
+                                <span className="shrink-0 text-qt-xs tabular-nums text-qt-text-muted">
+                                    {timeFormatter.format(new Date(row.atMs))}
+                                </span>
+                            ) : null}
                             <button
                                 type="button"
                                 data-tooltip={tf("undo_history_jump")}
