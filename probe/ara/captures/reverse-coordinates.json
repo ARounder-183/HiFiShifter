@@ -1,0 +1,56 @@
+﻿{
+    "provenance":  "Classified from captures/reverse-script.log and captures/reverse-plugin.log against fixtures/phase3a-asymmetric.wav",
+    "host":  "REAPER (record the version on the run that produced the capture)",
+    "reverseAction":  41051,
+    "reverseVerifiedByHost":  true,
+    "fixture":  {
+                    "path":  "D:\\Projects\\HiFiShifter\\probe\\ara\\fixtures\\phase3a-asymmetric.wav",
+                    "sampleRate":  44100,
+                    "frames":  88200,
+                    "durationSeconds":  2
+                },
+    "probeGeometry":  {
+                          "sourceOffset":  0.25,
+                          "itemLength":  1,
+                          "forwardPosition":  0,
+                          "reversePosition":  3
+                      },
+    "takeFacts":  {
+                      "reversed":  {
+                                       "startoffs":  0.75,
+                                       "playrate":  1,
+                                       "length":  1
+                                   },
+                      "forward":  {
+                                      "startoffs":  0.25,
+                                      "playrate":  1,
+                                      "length":  1
+                                  }
+                  },
+    "forwardRegion":  {
+                          "index":  0,
+                          "audioSourcePersistentID":  "D:\\Projects\\HiFiShifter\\probe\\ara\\fixtures\\phase3a-asymmetric.wav",
+                          "startInModificationTime":  0.25,
+                          "durationInModificationTime":  1,
+                          "startInPlaybackTime":  0,
+                          "durationInPlaybackTime":  1,
+                          "transformationFlags":  1
+                      },
+    "reverseRegion":  {
+                          "index":  1,
+                          "audioSourcePersistentID":  "D:\\Projects\\HiFiShifter\\probe\\ara\\fixtures\\phase3a-asymmetric.wav",
+                          "startInModificationTime":  0.75,
+                          "durationInModificationTime":  1,
+                          "startInPlaybackTime":  3,
+                          "durationInPlaybackTime":  1,
+                          "transformationFlags":  1
+                      },
+    "expected":  {
+                     "forwardStartInModificationTime":  0.25,
+                     "mirroredStartInModificationTime":  0.75
+                 },
+    "conclusion":  {
+                       "coordinateSystem":  "mirrored",
+                       "note":  "Region coordinates only; pair with verify_reverse_window.py for the covered source window."
+                   }
+}
