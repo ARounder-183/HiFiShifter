@@ -992,11 +992,25 @@ impl EditorSession {
         }
         // generation 未应用不等于宿主冲突：workspace_snapshot 会把本地曲线
         // 叠加到最新宿主几何上。只有 ARA 还没有重新交付输入时才暂缓重载。
-        if !force
-            && !document.ready.load(Ordering::Acquire)
-            && !document.workspace_timeline()?.clips.is_empty()
-        {
-            return Err("Conflict: host changed; local curves preserved, host is not ready".into());
+        //
+        // 【为什么"会话中未就绪"不是冲突】`ready` 的语义是"ARA 是否已重新交付可用输入"，
+        // 会被会话内的**真实内容变化**（几何、增删 region、源内容）按回 `false`。
+        // 但那时宿主只是还没发 `endEditing` —— 这是必然收敛的**暂缓**，不是需要用户
+        // 处置的冲突。此前二者共用一个 `ready`，于是用户每做一次编辑都撞一串
+        // "尚未应用：Conflict: host changed"（自伤：插件自己的写回触发了它）。
+        // 现在：会话中保留已有时间线，等 `endEditing` 自己收敛；只有**不在会话中**
+        // 却拿不到输入，才是真正的宿主冲突。从未加载过时仍必须继续往下走，
+        // 否则界面永远空白。
+        if !force && !document.ready.load(Ordering::Acquire) {
+            if document.editing_session.load(Ordering::Acquire) {
+                if self.loaded.lock().unwrap().initialized {
+                    return Ok(());
+                }
+            } else if !document.workspace_timeline()?.clips.is_empty() {
+                return Err(
+                    "Conflict: host changed; local curves preserved, host is not ready".into(),
+                );
+            }
         }
         let (snapshot, scope, projection) = document.workspace_snapshot()?;
         let mut timeline = snapshot.timeline;
@@ -3500,6 +3514,40 @@ pub(crate) mod tests {
         let again = document.workspace_projection().unwrap();
         assert_eq!(after, again, "同一份渲染事实必须产生同一个指纹");
         owner.editor_session().unwrap().close();
+    }
+
+    /// **不变量：编辑会话中的"未就绪"是暂缓，不是宿主冲突。**
+    ///
+    /// 【为什么这是回归测试】`ready` 的语义是"ARA 是否已重新交付可用输入"，会被会话内
+    /// 的**真实内容变化**（几何、增删 region、源内容）按回 `false`。但 `ensure_loaded`
+    /// 此前把"未就绪"一律判成宿主冲突，而插件自己的写回同样会触发这条通路 —— 于是用户
+    /// 每做一次编辑都撞一串"尚未应用：Conflict: host changed"（自伤正反馈，与宿主是否
+    /// 真的变了无关）。会话状态必须被单独识别：会话中 → 暂缓；非会话中 → 才是真冲突。
+    #[test]
+    fn a_mid_session_not_ready_window_is_deferred_instead_of_reported_as_a_conflict() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+
+        // 会话内的一次真实内容变化：`ready` 被按回 false，而宿主尚未发 `endEditing`。
+        document.ready.store(false, Ordering::Release);
+        document.editing_session.store(true, Ordering::Release);
+        document.revision.fetch_add(1, Ordering::AcqRel);
+        let deferred = editor.ensure_loaded(false);
+        assert!(
+            deferred.is_ok(),
+            "会话中的未就绪必须暂缓（等 endEditing 收敛），不得报成宿主冲突：{deferred:?}"
+        );
+
+        // 同一状态、但**不在**会话中 ⇒ 宿主真的没交付输入，仍是冲突，不能被暂缓语义吞掉。
+        document.editing_session.store(false, Ordering::Release);
+        let conflict = editor.ensure_loaded(false);
+        assert!(
+            conflict.is_err(),
+            "非会话状态下的未就绪仍是真冲突，否则真正的宿主故障会被静默"
+        );
+        editor.close();
     }
     /// 同一已打开会话只改变GUI清单代次，读取仍采纳新增/删除；不依赖重开或定时器抢跑。
     #[test]

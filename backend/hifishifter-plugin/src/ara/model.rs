@@ -481,9 +481,19 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     /// 记录宿主编辑会话，区分宿主未通知与委托回调未处理。
+    ///
+    /// 【为什么这里**不再** `clear_renderers()`】`clear_renderers()` 会把 `ready` 按回
+    /// `false`，而 `ready` 参与 `ensure_loaded` 的"宿主是否冲突"判据。一次编辑会话里
+    /// 宿主会连续回调，会话**一开始**就无条件失效意味着整段会话都处在"冲突"读数里
+    /// （用户报障：每次编辑都闪"尚未应用：Conflict: host changed"）。
+    /// 真正需要失效的是**内容变化**：`update_playback_region`（几何真变时）、
+    /// `destroy/create_playback_region`、`update_audio_source_content` 各自负责。
+    /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
         self.editing = true;
-        self.session.clear_renderers();
+        self.session
+            .editing_session
+            .store(true, std::sync::atomic::Ordering::Release);
         log::info!("[ara] begin_editing");
         Ok(())
     }
@@ -494,6 +504,9 @@ impl DocumentLifecycle for ModelHandle {
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         self.editing = false;
+        self.session
+            .editing_session
+            .store(false, std::sync::atomic::Ordering::Release);
         self.remap_and_log();
         Ok(())
     }
@@ -1003,7 +1016,29 @@ impl PlaybackRegions for ModelHandle {
         state: &mut Self::PlaybackRegion,
         properties: PlaybackRegionProperties,
     ) -> Result<(), AraError> {
-        self.session.clear_renderers();
+        // 【为什么只在几何真变时才失效】宿主在一次编辑会话里会对同一条 region 反复回调
+        // （拖动、吸附、逐帧对齐），其中大量回调的几何与上一次完全相同。无条件
+        // `clear_renderers()` 会把 `ready` 反复按回 `false`，而 `ready` 又参与
+        // `ensure_loaded` 的"宿主是否冲突"判据 ⇒ 用户每做一次编辑都撞一串
+        // "Conflict: host changed"（见会话侧同一处注释）。这里逐项比较，值没动就不失效。
+        let flags = properties.transformation_flags();
+        let changed = self
+            .document
+            .playback_regions
+            .get(*state)
+            .is_some_and(|region| {
+                region.start_in_modification_time != properties.start_in_modification_time()
+                    || region.duration_in_modification_time
+                        != properties.duration_in_modification_time()
+                    || region.start_in_playback_time != properties.start_in_playback_time()
+                    || region.duration_in_playback_time != properties.duration_in_playback_time()
+                    || region.is_timestretch_enabled != ((flags & 1) != 0)
+                    || region.has_content_based_fade_at_head != ((flags & 8) != 0)
+                    || region.has_content_based_fade_at_tail != ((flags & 4) != 0)
+            });
+        if changed {
+            self.session.clear_renderers();
+        }
         if let Some(sequence) = properties.region_sequence() {
             let sequence_key = sequence.as_raw() as usize;
             if let Some(index) = self.sequence_index_by_model_ref.get(&sequence_key).copied() {
@@ -1024,7 +1059,6 @@ impl PlaybackRegions for ModelHandle {
             .playback_regions
             .get_mut(*state)
             .ok_or(AraError::InvalidArgument("unknown playback region"))?;
-        let flags = properties.transformation_flags();
         region.name = properties.name().map(str::to_owned);
         region.start_in_modification_time = properties.start_in_modification_time();
         region.duration_in_modification_time = properties.duration_in_modification_time();

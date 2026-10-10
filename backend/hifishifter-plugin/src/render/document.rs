@@ -137,6 +137,15 @@ pub(crate) struct DocumentSession {
     /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
     pub ui_geometry_revision: AtomicU64,
     pub ready: AtomicBool,
+    /// 宿主是否处在一次 `beginEditing` / `endEditing` 会话中。
+    ///
+    /// 【为什么与 `ready` 分开】`ready` 的语义是"ARA 是否已重新交付可用输入"，
+    /// 会被**任何**内容变化按回 `false`；而"宿主正在编辑"是另一件事。此前二者共用
+    /// `ready`，于是会话内每一次真实变化都被 `ensure_loaded` 判成"宿主冲突"
+    /// （用户报障：每次编辑都闪"尚未应用：Conflict: host changed"）。
+    /// 有了这个标志，会话中的未就绪窗口被识别为**暂缓**而不是冲突 —— 它会随
+    /// `endEditing` 自然收敛，不需要用户干预，也不该报错。
+    pub editing_session: AtomicBool,
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
@@ -666,6 +675,8 @@ impl DocumentSession {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         self.playback.lock().unwrap().take();
         self.ready.store(false, Ordering::Release);
+        // 文档关闭时不存在"进行中的宿主会话"；留着会让下一次 ensure_loaded 误判为暂缓。
+        self.editing_session.store(false, Ordering::Release);
         let leases = {
             let mut renderers = self.renderers.lock().unwrap();
             self.alive.store(false, Ordering::Release);
