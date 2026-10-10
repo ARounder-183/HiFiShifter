@@ -908,6 +908,13 @@ struct BootstrapFlags {
     /// `probe/ara/FADE-AXIS-FINDINGS.md`），所以新轴宿主上**也**摆七个预设按钮；
     /// 此前这里的注释写着"预设映射尚未校准，所以只给连续滑杆"，那条限制已随实测消失。
     fade_axes: Option<&'static str>,
+    /// 撤销历史由谁承载：`"reaper"`（宿主权威栈）或 `"local"`（插件自管栈）。
+    ///
+    /// 【为什么前端需要它】两条栈共用同一个「操作记录」面板，但 `label` 的含义不同：
+    /// 本地栈是 op key（按 `history_op_*` 本地化），宿主栈是宿主自己的可读字符串
+    /// （原样显示）。缺了这个判别式，前端只能无差别加前缀 —— 那正是
+    /// `history_op_Move items` 这类原始键名被摊给用户的原因。
+    history_backend: &'static str,
 }
 
 impl BootstrapFlags {
@@ -922,6 +929,7 @@ impl BootstrapFlags {
             "audioImport": self.audio_import,
             "trackCreation": self.track_creation,
             "fadeAxes": self.fade_axes,
+            "historyBackend": self.history_backend,
             // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
@@ -1330,14 +1338,33 @@ fn configure_browser(
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
-            Some("get_history_state") if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
+            // 【无条件处理，不再用 `is_some()` 做 guard】此前这两条 arm 只在宿主提供撤销栈
+            // 时才匹配，非 REAPER 宿主会落到下面的 `Some(command)` 分支并被静默丢弃 ——
+            // 用户按 Ctrl+Z 什么都不发生。现在"没有宿主撤销栈"是 `LocalHistory` 这个
+            // **实现**，`history_authority()` 永远返回一个权威（见 `host::history`）。
+            Some("get_history_state")=>{
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
-                    owner.project_history_host().ok_or("host history missing")?.project_history(&||link.authorize(&document).is_ok_and(|current|current==lease))
+                    owner.history_authority().snapshot(&||link.authorize(&document).is_ok_and(|current|current==lease))
                 })()
             },
-            Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position")) if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
+            Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position"))=>{
                 let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
+                // 宿主权威栈 ⇒ 走异步路径（必须等在途写入落定再跳，否则会跳到一半的状态）。
+                let uses_host = link
+                    .owner()
+                    .is_ok_and(|owner| owner.history_authority().backend() == "reaper");
+                if !uses_host {
+                    // 本地权威栈 ⇒ 与普通命令同一条队列：本地命令天然排在已入队写入之后，
+                    // 不需要额外的 barrier，也不会被 `host_undo.pending` 的门控挡住。
+                    let full=state.borrow_mut().pending_full(id);
+                    let outcome=if full {Err("pending request budget exceeded".into())} else {
+                        link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
+                            id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,link:Some(link.clone()),
+                        }))
+                    };
+                    match outcome {Ok(())=>{state.borrow_mut().mark_pending(id);Ok(serde_json::Value::Null)},Err(error)=>Err(error)}
+                } else {
                 let outcome=(||->Result<HostReply,String>{
                     if state.borrow_mut().pending_full(id) {return Err("native history request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
@@ -1350,6 +1377,7 @@ fn configure_browser(
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None,geometry:None,split:None,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                }
             },
             Some(command)=>{
                 if command=="set_transport" && request["args"]["playheadSec"].is_number() {
@@ -1458,6 +1486,12 @@ fn configure_browser(
         audio_import,
         track_creation,
         fade_axes,
+        history_backend: state
+            .borrow()
+            .link
+            .owner()
+            .map(|owner| owner.history_authority().backend())
+            .unwrap_or("local"),
     }
     .to_json(&state.borrow().view_id);
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
@@ -1563,6 +1597,7 @@ mod bootstrap_tests {
                 audio_import,
                 track_creation: false,
                 fade_axes: None,
+                history_backend: "local",
             };
             assert_eq!(
                 flags.to_json("view-7")["trackGrouping"],
@@ -1583,6 +1618,7 @@ mod bootstrap_tests {
             audio_import: true,
             track_creation: true,
             fade_axes: Some("legacy"),
+            history_backend: "local",
         };
         let json = flags.to_json("view-42");
         assert_eq!(json["version"], serde_json::json!(1));
@@ -1610,6 +1646,7 @@ mod bootstrap_tests {
             audio_import: false,
             track_creation: true,
             fade_axes: None,
+            history_backend: "local",
         };
         let json = flags.to_json("v");
         assert_eq!(json["audioImport"], serde_json::json!(false));
@@ -1627,6 +1664,7 @@ mod bootstrap_tests {
             audio_import: false,
             track_creation: false,
             fade_axes: None,
+            history_backend: "local",
         };
         assert_eq!(flags.to_json("v")["fadeAxes"], serde_json::Value::Null);
     }
@@ -1642,6 +1680,7 @@ mod bootstrap_tests {
             audio_import: false,
             track_creation: false,
             fade_axes: Some("continuous"),
+            history_backend: "local",
         };
         assert_eq!(
             flags.to_json("v")["fadeAxes"],

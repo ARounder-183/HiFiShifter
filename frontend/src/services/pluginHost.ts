@@ -25,6 +25,17 @@ export type PluginBootstrap = {
      * - 缺省/`null`：版本读不出来 → 整块淡变编辑保持只读。
      */
     fadeAxes?: "legacy" | "continuous" | null;
+    /**
+     * 撤销历史由谁承载：`"reaper"`（宿主权威栈）或 `"local"`（插件自管栈）。
+     *
+     * 【为什么需要它】两条栈共用同一个「操作记录」面板，但记录里 `label` 的含义不同：
+     * 本地栈是 op key（按 `history_op_<key>` 查 catalog），宿主栈是宿主自己的可读字符串
+     * （原样显示）。缺了这个判别式，前端只能无差别加前缀 —— 那正是
+     * `history_op_Move items` 这类原始键名被摊给用户的原因。
+     *
+     * 缺省按 `"local"`（独立 App / 旧后端）。
+     */
+    historyBackend?: "reaper" | "local";
 };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;

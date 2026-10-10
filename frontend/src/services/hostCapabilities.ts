@@ -105,6 +105,17 @@ export function hostFadeAxes(): "legacy" | "continuous" | null {
 }
 
 /**
+ * 撤销历史由谁承载：`"reaper"` = 宿主权威栈，`"local"` = 插件自管栈。
+ *
+ * 【为什么需要】「操作记录」面板里 `label` 的含义取决于它：本地栈是 op key（要按
+ * `history_op_<key>` 本地化），宿主栈是宿主自己的可读字符串（原样显示）。缺省
+ * `"local"`，与后端 `BootstrapFlags.history_backend` 的缺省一致。
+ */
+export function historyBackend(): "reaper" | "local" {
+    return window.__HFS_PLUGIN_BOOTSTRAP__?.historyBackend === "reaper" ? "reaper" : "local";
+}
+
+/**
  * 预设形状按钮是否可用。
  *
  * 【为什么新轴宿主上也能用】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，

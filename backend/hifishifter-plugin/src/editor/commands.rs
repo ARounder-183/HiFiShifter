@@ -159,7 +159,7 @@ pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     session.decorate_host_audio(&mut result);
     Ok(result)
 }
-fn history_state(session: &EditorSession) -> Value {
+pub(crate) fn history_state(session: &EditorSession) -> Value {
     let history = session.history.lock().unwrap();
     let (undo, redo) = history_depths_of(&history);
     let records: Vec<_> = history

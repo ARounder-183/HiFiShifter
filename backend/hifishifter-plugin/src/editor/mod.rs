@@ -1,6 +1,6 @@
 //! 插件内原GUI宿主；原生视图不启动独立app，也不接管宿主消息循环。
 mod browser_files;
-mod commands;
+pub(crate) mod commands;
 pub(crate) mod connection;
 mod events;
 mod host_clipboard;

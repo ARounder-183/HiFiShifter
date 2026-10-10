@@ -2,6 +2,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test } from "vitest";
 import {
+    historyBackend,
     pluginAllowsAction,
     pluginAllowsEditChannel,
     isHostGeometryReadOnly,
@@ -169,6 +170,23 @@ test("fade shape editing follows the host axis generation instead of one blanket
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
     expect(hostFadeAxes()).toBeNull();
     expect(canSelectHostFadeShape()).toBe(true);
+});
+
+/**
+ * 撤销历史的**判别式**：宿主栈（`reaper`）的记录里 `label` 是宿主自己的可读字符串，
+ * 本地栈（`local`）的 `label` 是 op key。缺了它，「操作记录」只能无差别加
+ * `history_op_` 前缀，于是 `Move items` 被渲染成 `history_op_Move items`。
+ */
+test("history backend discriminates host labels from local op keys", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "history", historyBackend: "reaper" };
+    expect(historyBackend()).toBe("reaper");
+
+    window.__HFS_PLUGIN_BOOTSTRAP__.historyBackend = "local";
+    expect(historyBackend()).toBe("local");
+
+    // 缺省（独立 App / 旧后端）按 local：旧后端发的是 op key。
+    delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    expect(historyBackend()).toBe("local");
 });
 
 /**

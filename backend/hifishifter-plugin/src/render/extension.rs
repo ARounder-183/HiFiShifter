@@ -2792,6 +2792,25 @@ impl ExtensionOwner {
                 .cloned()
         })
     }
+    /// 撤销历史的**权威**：宿主提供撤销栈时用宿主的，否则用插件自管的那份。
+    ///
+    /// 【为什么永远返回 `Some`】把"没有宿主历史"变成一个实现（`LocalHistory`）而不是
+    /// 一条被跳过的分支，是 `undo_timeline` / `redo_timeline` / `set_history_position`
+    /// 在非 REAPER 宿主上不再静默失效的关键。只有在文档/会话都还没建起来时才退到
+    /// `NullHistory`（诚实的空栈），仍然不是 `None`。
+    pub(crate) fn history_authority(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::host::history::HostHistory> {
+        if let Some(host) = self.project_history_host() {
+            return Arc::new(crate::host::history::ReaperHistory { host });
+        }
+        match self.editor_session() {
+            Ok(editor) => Arc::new(crate::host::history::LocalHistory {
+                editor: Arc::downgrade(&editor),
+            }),
+            Err(_) => Arc::new(crate::host::history::NullHistory),
+        }
+    }
     /// 明确指定轨道须已有真实assigned item；空轨未指定时仅允许本FX的直接parent轨道。
     pub(crate) fn audio_import_target(
         &self,

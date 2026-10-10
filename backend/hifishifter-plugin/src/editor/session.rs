@@ -18,13 +18,110 @@ use std::time::{Duration, Instant};
 ///
 /// 【为什么必须有上限】此前失败路径只设一个 150 ms / 1 s 的 `deadline`，下一轮又
 /// `start_render` —— 而 `start_render` 会先发 `active:true`。于是一个**永不收敛**的
-/// 失败（典型：关掉根轨 `合成` 后 `pitch analysis pending`）会以约 1 Hz 无限回潮，
-/// 用户看到左下角永远在"渲染中"。有上限后，连续失败到预算就转成稳定的错误读数
-/// （前端 `PluginApplyStatus` 的"尚未应用：{error}"），不再重排、不再发 `active:true`。
+/// 失败会以约 1 Hz 无限回潮，用户看到左下角永远在"渲染中"。有上限后，连续失败到预算
+/// 就转成稳定的错误读数（前端 `PluginApplyStatus` 的"尚未应用：{error}"）。
 ///
-/// 用户的**新**操作会推进 `generation`，计数随之清零并重新武装 —— 上限只挡住
-/// "没人操作时的空转"，不挡住正常重试。
+/// 【为什么只统计**真错误**】`"pitch analysis pending"` 是正常在途状态，不是失败：
+/// 一段几分钟素材的分析本来就可能跑很久，按次数计数会把"慢"误判成"不收敛"而提前
+/// 放弃渲染。它由 [`RetryState`] 的 `analysis_pending_since` 单独按**时间**约束。
 const RENDER_RETRY_BUDGET: u32 = 8;
+
+/// 分析一直 pending 多久后判定"这条原线不会被产出了"。
+///
+/// 触发条件是两个**可核实的**事实同时成立：没有任何分析 worker 在跑，且已经等了
+/// 这么久。仅凭时间不足以判定（慢分析合法），仅凭"没有 worker"也不足以（worker 刚
+/// 结束、结果还在通道里）。两者都成立 ⇒ 再等也不会变好，如实报错并停止空转。
+const ANALYSIS_STALL_GRACE: Duration = Duration::from_secs(2);
+
+/// 分析 pending 的**绝对**上限：即使 worker 还在跑，超过它就放弃（防"活锁"——
+/// worker 反复重排却永远不置位 `pitch_orig_key`）。
+const ANALYSIS_PENDING_CEILING: Duration = Duration::from_secs(60);
+
+/// "pitch analysis pending" 的重试间隔。
+///
+/// 【为什么不是 150 ms】`start_render` 会先跑 `prepare_apply`，而它内部要
+/// `complete_cached_analysis`（按根重组装原线，不便宜）。150 ms 的热重试在慢分析期间
+/// 会以每秒 6–7 次的速度反复做这件事，把单线程 actor 饿死 —— 表现是**无关的 UI 命令
+/// 5 秒超时**。分析本来就慢，用 1 s 轮询足够；而分析一有进展，
+/// `refresh_analysis()` 会立刻重新武装成 150 ms，不会拖慢正常收敛。
+const ANALYSIS_PENDING_RETRY: Duration = Duration::from_secs(1);
+
+/// 自动渲染重试的本地状态（只属于 actor 循环，不跨线程）。
+struct RetryState {
+    /// 上一轮见过的 `submitted`：用户的新操作会推进它，据此清零预算、重新武装。
+    submitted: u64,
+    /// 连续**真错误**的次数。
+    streak: u32,
+    /// 已判定"不收敛"：不再重排、不再发 `active:true`。
+    settled: bool,
+    /// "pitch analysis pending" 从什么时候开始（有进展即清零）。
+    analysis_pending_since: Option<Instant>,
+}
+
+/// 一次渲染尝试失败后的处置。
+enum RenderAction {
+    /// 稍后重试。
+    Retry(Duration),
+    /// 停止重试；错误已写进 `render_error`。
+    Settled,
+}
+
+impl RetryState {
+    fn new(submitted: u64) -> Self {
+        Self {
+            submitted,
+            streak: 0,
+            settled: false,
+            analysis_pending_since: None,
+        }
+    }
+
+    /// 用户做了新操作 / 分析有新进展 ⇒ 清零预算并重新武装。
+    fn rearm(&mut self) {
+        self.streak = 0;
+        self.settled = false;
+        self.analysis_pending_since = None;
+    }
+
+    /// 分类一次失败。
+    fn classify(&mut self, session: &EditorSession, error: String) -> RenderAction {
+        if error == "pitch analysis pending" {
+            // 正常在途：不计入次数预算，只按时间约束。
+            let since = *self.analysis_pending_since.get_or_insert_with(Instant::now);
+            let stalled = !session.analysis_in_flight() && since.elapsed() > ANALYSIS_STALL_GRACE;
+            let abandoned = since.elapsed() > ANALYSIS_PENDING_CEILING;
+            if stalled || abandoned {
+                *session.render_error.lock().unwrap() = Some(
+                    "pitch analysis did not converge; the original pitch line for this track was never produced"
+                        .into(),
+                );
+                self.settled = true;
+                log::warn!(
+                    "[ara] giving up on pitch analysis after {:?} (workers in flight: {})",
+                    since.elapsed(),
+                    session.analysis_in_flight()
+                );
+                return RenderAction::Settled;
+            }
+            return RenderAction::Retry(ANALYSIS_PENDING_RETRY);
+        }
+        self.analysis_pending_since = None;
+        self.streak = self.streak.saturating_add(1);
+        if self.streak >= RENDER_RETRY_BUDGET {
+            *session.render_error.lock().unwrap() = Some(error.clone());
+            self.settled = true;
+            log::warn!(
+                "[ara] automatic render gave up after {} attempts: {error}",
+                self.streak
+            );
+            return RenderAction::Settled;
+        }
+        if error != "automatic apply superseded" {
+            *session.render_error.lock().unwrap() = Some(error);
+        }
+        RenderAction::Retry(Duration::from_millis(150))
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct UiSink {
@@ -472,22 +569,20 @@ impl EditorSession {
         // 自动渲染的**重试预算**状态（见 `RENDER_RETRY_BUDGET`）。`submitted` 是"用户
         // 做了新操作"的权威信号（`enqueue` 对 `mutates_audio` 命令自增它），因此用它
         // 做清零键：上限只挡住"没人操作时的空转"，不挡住正常重试。
-        let mut retry_submitted = weak
+        let retry_submitted = weak
             .upgrade()
             .map(|session| session.submitted.load(Ordering::Acquire))
             .unwrap_or(0);
-        let mut retry_streak: u32 = 0;
-        let mut render_settled = false;
+        let mut retry = RetryState::new(retry_submitted);
         loop {
             if let Some(session) = weak.upgrade() {
                 if session.closed.load(Ordering::Acquire) {
                     break;
                 }
                 let submitted_now = session.submitted.load(Ordering::Acquire);
-                if submitted_now != retry_submitted {
-                    retry_submitted = submitted_now;
-                    retry_streak = 0;
-                    render_settled = false;
+                if submitted_now != retry.submitted {
+                    retry.submitted = submitted_now;
+                    retry.rearm();
                 }
                 session.refresh_host();
                 if let Some(render) = session.render_task.lock().unwrap().as_ref() {
@@ -512,29 +607,17 @@ impl EditorSession {
                                 session.applied.store(generation, Ordering::Release);
                                 session.render_requested.store(false, Ordering::Release);
                                 *session.render_error.lock().unwrap() = None;
-                                retry_streak = 0;
-                                render_settled = false;
+                                retry.rearm();
                             }
-                            Err(error) => {
-                                retry_streak = retry_streak.saturating_add(1);
-                                if retry_streak >= RENDER_RETRY_BUDGET {
-                                    // 稳定失败：固定错误、清掉重试意图，不再重排。
-                                    *session.render_error.lock().unwrap() = Some(error.clone());
-                                    session.render_requested.store(false, Ordering::Release);
-                                    render_settled = true;
-                                    deadline = None;
-                                    log::warn!(
-                                        "[ara] automatic render gave up after {retry_streak} attempts: {error}"
-                                    );
-                                } else {
-                                    if error != "pitch analysis pending"
-                                        && error != "automatic apply superseded"
-                                    {
-                                        *session.render_error.lock().unwrap() = Some(error);
-                                    }
-                                    deadline = Some(Instant::now() + Duration::from_millis(150));
+                            Err(error) => match retry.classify(&session, error) {
+                                RenderAction::Retry(delay) => {
+                                    deadline = Some(Instant::now() + delay);
                                 }
-                            }
+                                RenderAction::Settled => {
+                                    session.render_requested.store(false, Ordering::Release);
+                                    deadline = None;
+                                }
+                            },
                         }
                     } else {
                         deadline = Some(Instant::now() + Duration::from_millis(150));
@@ -544,19 +627,18 @@ impl EditorSession {
                 session.report_transport_probe();
                 if session.refresh_analysis() {
                     // 分析有新进展 ⇒ 之前失败的前提可能已消失，重新武装重试。
-                    retry_streak = 0;
-                    render_settled = false;
+                    retry.rearm();
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 if deadline.is_none()
-                    && !render_settled
+                    && !retry.settled
                     && session.render_requested.load(Ordering::Acquire)
                     && session.error.lock().unwrap().is_none()
                 {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
-                if !render_settled && deadline.is_some_and(|d| d <= Instant::now()) {
+                if !retry.settled && deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
                     if session.render_task.lock().unwrap().is_some()
                         || session
@@ -576,20 +658,14 @@ impl EditorSession {
                         deadline = None;
                         if let Err(error) = session.start_render(ticket) {
                             session.emit("playback_rendering_state",json!({"active":false,"progress":None::<f64>,"target":"background"}));
-                            retry_streak = retry_streak.saturating_add(1);
-                            if retry_streak >= RENDER_RETRY_BUDGET {
-                                *session.render_error.lock().unwrap() = Some(error.clone());
-                                session.render_requested.store(false, Ordering::Release);
-                                render_settled = true;
-                                deadline = None;
-                                log::warn!(
-                                    "[ara] automatic render gave up after {retry_streak} attempts: {error}"
-                                );
-                            } else {
-                                if error != "pitch analysis pending" {
-                                    *session.render_error.lock().unwrap() = Some(error);
+                            match retry.classify(&session, error) {
+                                RenderAction::Retry(delay) => {
+                                    deadline = Some(Instant::now() + delay);
                                 }
-                                deadline = Some(Instant::now() + Duration::from_millis(150));
+                                RenderAction::Settled => {
+                                    session.render_requested.store(false, Ordering::Release);
+                                    deadline = None;
+                                }
                             }
                             session.emit_state();
                         }
@@ -1284,6 +1360,19 @@ impl EditorSession {
             ),
         );
         *workers = pending;
+    }
+    /// 是否有分析 worker 仍在跑。
+    ///
+    /// 【用途】把"分析在途（等就是了）"与"原线永远不会产出（再等也没用）"分开。
+    /// 只看时间会把几分钟素材的**正常**慢分析误判成不收敛；只看这个布尔又会把
+    /// "worker 刚结束、结果还在通道里"的瞬间误判成死局。两者结合才既不过早放弃、
+    /// 也不无限空转。
+    fn analysis_in_flight(&self) -> bool {
+        self.analysis_workers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|worker| !worker.is_finished())
     }
     /// 原设备worker负责的ClipPitchReady现在由本实例actor接收，不创建cpal设备。
     fn refresh_analysis(&self) -> bool {
