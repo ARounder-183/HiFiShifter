@@ -1021,8 +1021,11 @@ unsafe extern "system" fn audio_set_bus_arrangements(
     if inputs.is_null() || outputs.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    // SAFETY: 宿主按数量提供合法布局数组；本批只声明一进一出 stereo。
-    if unsafe { *inputs != 3 || *outputs != 3 } {
+    // SAFETY: 宿主按数量提供合法布局数组；本批声明一进一出。
+    // 【为什么同时接受单声道】`kMono`(1) 与 `kStereo`(3) 都接受。此前只认 stereo ⇒
+    // 单声道轨道上 `setBusArrangements` 返回失败 ⇒ 宿主把插件踢出链路，而人声轨
+    // 单声道极常见。渲染面见 `PlaybackSnapshot::copy_block`。
+    if !matches!(unsafe { *inputs }, 1 | 3) || !matches!(unsafe { *outputs }, 1 | 3) {
         return K_RESULT_FALSE;
     }
     K_RESULT_OK
@@ -1073,26 +1076,33 @@ unsafe extern "system" fn audio_setup_processing(
     {
         return K_INVALID_ARGUMENT;
     }
-    // 【为什么用容差而不是字面量相等】宿主报的是 `f64`，`44100.0` 与
-    // `44100.0000001` 在这里没有语义差别；用 `contains(&setup.sample_rate)` 做
-    // **精确浮点相等**会把后者判成不支持。
-    //
-    // 【为什么只认 44.1/48k】渲染管线当前为这两个采样率各持一份快照
-    // （`ExtensionOwner::snapshots[0..2]`、`render/input.rs`）。其它采样率下
-    // **显式拒绝并记一条可诊断的日志**，而不是静默返回 FALSE 让宿主把插件踢出链路
-    // 却什么都不说。支持任意采样率（88.2/96/176.4/192k）是独立的一期工作。
-    const SUPPORTED_RATES: [f64; 2] = [44100.0, 48000.0];
-    let rate_supported = SUPPORTED_RATES
-        .iter()
-        .any(|rate| (setup.sample_rate - rate).abs() <= 1e-6);
-    if setup.symbolic_sample_size != 0 || !rate_supported {
+    // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
+    // 收到 `kResultFalse` 会把插件**整条踢出链路**：96k/192k 工程里用户看到"插件不见了"，
+    // 没有任何提示。内部渲染仍按 44.1/48k 出快照，其余率由
+    // `PlaybackSnapshot::copy_block` 做线性重采样（降级、可听、有日志）。真正的多率
+    // 渲染管线是独立一期工作；**先保证插件在场**。
+    if setup.symbolic_sample_size != 0 {
         crate::log_line(&format!(
-            "[vst3] setupProcessing refused: sampleRate={} (supported: {SUPPORTED_RATES:?}), \
-             sampleSize={}. The plugin cannot run at this rate yet; the host will keep it out of \
-             the chain.",
-            setup.sample_rate, setup.symbolic_sample_size
+            "[vst3] setupProcessing refused: sampleSize={} (only 32-bit float is supported). \
+             The host will keep the plugin out of the chain.",
+            setup.symbolic_sample_size
         ));
         return K_RESULT_FALSE;
+    }
+    if !(44100.0..=192000.0).contains(&setup.sample_rate) {
+        // 离谱的率（0.5x 慢放、损坏的工程设置）仍然拒绝：重采样的比例会大到没有意义。
+        crate::log_line(&format!(
+            "[vst3] setupProcessing refused: sampleRate={} is outside 44100..=192000",
+            setup.sample_rate
+        ));
+        return K_RESULT_FALSE;
+    }
+    if (setup.sample_rate - 44100.0).abs() > 1e-6 && (setup.sample_rate - 48000.0).abs() > 1e-6 {
+        crate::log_line(&format!(
+            "[vst3] sampleRate={} is not natively rendered; output will be linearly resampled \
+             from the internal 44.1/48k snapshots.",
+            setup.sample_rate
+        ));
     }
     crate::log_line(&format!(
         "IAudioProcessor::setupProcessing mode={} rate={}",
@@ -2778,10 +2788,13 @@ mod audio_boundary_tests {
         let mut input_planes = [std::ptr::null_mut(), std::ptr::null_mut()];
         for (channels, missing_array, expected) in [
             (-1, false, K_INVALID_ARGUMENT),
-            (1, false, K_RESULT_FALSE),
+            // 单声道是**合法**总线形状（人声轨常见）；此前被拒 ⇒ 宿主静默旁路插件。
+            (1, false, K_RESULT_OK),
             (2, true, K_INVALID_ARGUMENT),
             (2, false, K_RESULT_OK),
             (0, true, K_RESULT_OK),
+            // 超过 2 声道仍然拒绝（我们没有环绕声通路）。
+            (3, false, K_RESULT_FALSE),
         ] {
             let mut left = [0.25_f32, 0.5];
             let mut right = [0.75_f32, 1.0];
@@ -2826,6 +2839,7 @@ mod audio_boundary_tests {
         let mut processor = Processor::create().unwrap();
         let mut stereo = 3_u64;
         let mut mono = 1_u64;
+        let mut surround = 0x3F_u64;
         // SAFETY: 真实处理器和布局数组在协商期间存活。
         unsafe {
             let this = audio_ptr(&mut *processor);
@@ -2833,8 +2847,19 @@ mod audio_boundary_tests {
                 audio_set_bus_arrangements(this, &raw mut stereo, 1, &raw mut stereo, 1),
                 K_RESULT_OK
             );
+            // 单声道入/出、以及单声道入 + 立体声出都接受：人声轨单声道极常见，此前
+            // 一律拒绝会让宿主把插件踢出链路。
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut mono, 1),
+                K_RESULT_OK
+            );
             assert_eq!(
                 audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1),
+                K_RESULT_OK
+            );
+            // 环绕声没有通路，仍然拒绝。
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut surround, 1, &raw mut surround, 1),
                 K_RESULT_FALSE
             );
             assert_eq!(
@@ -2865,7 +2890,12 @@ mod audio_boundary_tests {
                 (0.0, 512, 0, K_INVALID_ARGUMENT),
                 (44100.0, -1, 0, K_INVALID_ARGUMENT),
                 (44100.0, 512, 1, K_RESULT_FALSE),
-                (96000.0, 512, 0, K_RESULT_FALSE),
+                // 96k 现在**接受**（内部按 44.1/48k 出快照，输出线性重采样）—— 此前
+                // 返回 `kResultFalse` 会让宿主把插件整条踢出链路。
+                (96000.0, 512, 0, K_RESULT_OK),
+                (192000.0, 512, 0, K_RESULT_OK),
+                // 离谱的率仍然拒绝：重采样比例会大到没有意义。
+                (8000.0, 512, 0, K_RESULT_FALSE),
             ] {
                 let mut setup = ProcessSetup {
                     process_mode: 0,

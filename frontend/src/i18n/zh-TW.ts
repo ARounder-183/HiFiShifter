@@ -2045,6 +2045,9 @@ export const zhTW = {
     ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
     ara_host_audio_folder_body:
         "REAPER 按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
+    ara_host_audio_unidentified_title: "此宿主暫不受支援",
+    ara_host_audio_unidentified_body:
+        "HiFiShifter 需要宿主提供它用來列舉軌道與 item 的擴充介面（目前是 REAPER）。在其它宿主上時間軸會是空的 —— 外掛看不到任何軌道。",
     ara_clip_syncing_host_audio: "正在等待 REAPER 完成音訊分配",
     ara_clip_waiting_for_host_audio: "等待 REAPER 提供音訊",
     ara_clip_host_take_switched:

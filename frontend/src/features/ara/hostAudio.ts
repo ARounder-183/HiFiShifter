@@ -17,6 +17,7 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "ready",
     "awaiting_regions",
     "folder_parent_without_regions",
+    "host_unidentified",
 ]);
 
 /**
@@ -46,6 +47,17 @@ export function parseHostAudio(raw: unknown): HostAudioPayload | null {
  */
 export function needsFolderTrackNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "folder_parent_without_regions";
+}
+
+/**
+ * 是否需要"这个宿主不受支持"这条提示。
+ *
+ * 【为什么必须提示】没有宿主扩展接口时插件**看不到任何轨道**。不提示的话用户看到的
+ * 是一个空时间线 —— 与"工程里本来就没东西"完全无法区分。这条提示把"插件坏了"
+ * 与"这个宿主还没适配"分开。
+ */
+export function needsUnidentifiedHostNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "host_unidentified";
 }
 
 /**

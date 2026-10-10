@@ -11,6 +11,7 @@ import {
     hostMediaState,
     isAwaitingHostAudio,
     needsFolderTrackNotice,
+    needsUnidentifiedHostNotice,
     parseHostAudio,
 } from "./hostAudio";
 
@@ -72,7 +73,31 @@ describe("needsFolderTrackNotice", () => {
         ).toBe(true);
         expect(needsFolderTrackNotice({ state: "awaiting_regions", waiting_clips: 2 })).toBe(false);
         expect(needsFolderTrackNotice({ state: "ready", waiting_clips: 0 })).toBe(false);
+        // 宿主未识别是**另一种成因**：提示归 `needsUnidentifiedHostNotice`，不能混用。
+        expect(needsFolderTrackNotice({ state: "host_unidentified", waiting_clips: 0 })).toBe(
+            false,
+        );
         expect(needsFolderTrackNotice(null)).toBe(false);
+    });
+});
+
+describe("needsUnidentifiedHostNotice", () => {
+    /*
+     * 没有宿主扩展接口时插件看不到任何轨道；不提示的话用户看到的是一个空时间线，
+     * 与"工程里本来就没东西"无法区分。
+     */
+    test("只有宿主未识别时才提示", () => {
+        expect(needsUnidentifiedHostNotice({ state: "host_unidentified", waiting_clips: 0 })).toBe(
+            true,
+        );
+        expect(needsUnidentifiedHostNotice({ state: "ready", waiting_clips: 0 })).toBe(false);
+        expect(
+            needsUnidentifiedHostNotice({
+                state: "folder_parent_without_regions",
+                waiting_clips: 1,
+            }),
+        ).toBe(false);
+        expect(needsUnidentifiedHostNotice(null)).toBe(false);
     });
 });
 

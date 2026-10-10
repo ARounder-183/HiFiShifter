@@ -2087,6 +2087,9 @@ export const koKR = {
     ara_host_audio_folder_title: "이 플러그인은 트랙 그룹(폴더)에 있습니다",
     ara_host_audio_folder_body:
         "REAPER는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",
+    ara_host_audio_unidentified_title: "이 호스트는 아직 지원되지 않습니다",
+    ara_host_audio_unidentified_body:
+        "HiFiShifter는 트랙과 아이템을 열거하는 데 사용하는 확장 API를 제공하는 호스트(현재 REAPER)가 필요합니다. 다른 호스트에서는 타임라인이 비어 있습니다.",
     ara_clip_syncing_host_audio: "REAPER의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "REAPER의 오디오를 기다리는 중",
     ara_clip_host_take_switched:

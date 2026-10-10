@@ -122,6 +122,13 @@ pub(crate) enum HostAudioState {
     AwaitingRegions,
     /// 同上，且本 FX 所在轨道是 folder 父轨：组内子轨的音频不会交给这个实例。
     FolderParentWithoutRegions,
+    /// 宿主**不是**本插件当前适配的那一个（没有可用的扩展接口）。
+    ///
+    /// 【为什么必须有这一态】此前没有扩展接口时 `refresh_ui_inventory` 直接 `return`，
+    /// 什么都不写：界面停在初始值上，表现为**时间线全空且没有任何提示** —— 用户以为
+    /// 插件坏了，而不是"这个宿主不受支持"。空白 + 沉默是最糟的组合：无从诊断，
+    /// 也不会去查文档。
+    HostUnidentified,
 }
 
 impl HostAudioState {
@@ -131,6 +138,7 @@ impl HostAudioState {
             HostAudioState::Ready => "ready",
             HostAudioState::AwaitingRegions => "awaiting_regions",
             HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
+            HostAudioState::HostUnidentified => "host_unidentified",
         }
     }
 }
@@ -2376,6 +2384,12 @@ impl ExtensionOwner {
             return;
         };
         let Some(host) = self.reaper.lock().unwrap().clone() else {
+            // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
+            // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
+            *self.host_audio.lock().unwrap() = HostAudioStatus {
+                state: HostAudioState::HostUnidentified,
+                waiting_items: 0,
+            };
             return;
         };
         let allowed = || self.host_query_authorized(&stamp);

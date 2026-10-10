@@ -185,7 +185,12 @@ export interface ProjectMeta {
  * 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务多个
  * region sequence，是 **REAPER 选择按轨道管理 ARA 实例**。
  */
-export type HostAudioState = "ready" | "awaiting_regions" | "folder_parent_without_regions";
+export type HostAudioState =
+    | "ready"
+    | "awaiting_regions"
+    | "folder_parent_without_regions"
+    /** 没有可用的宿主扩展接口：插件看不到任何轨道（见 `HostAudioNotice`）。 */
+    | "host_unidentified";
 
 export interface HostAudioPayload {
     state: HostAudioState;

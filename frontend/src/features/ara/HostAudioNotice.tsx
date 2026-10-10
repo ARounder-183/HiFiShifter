@@ -17,10 +17,30 @@ import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
 import type { HostAudioPayload } from "../../types/api";
-import { needsFolderTrackNotice } from "./hostAudio";
+import { needsFolderTrackNotice, needsUnidentifiedHostNotice } from "./hostAudio";
 
 export function HostAudioNotice({ status }: { status: HostAudioPayload | null }) {
     const { t } = useI18n();
+    // 宿主不受支持与 folder 父轨是**两种不同的成因**，文案必须分开：前者是"这个宿主
+    // 还没适配"，后者是"插件挂错了轨道"。共用一句话会把用户引向错误的下一步
+    //（改轨道布局 vs 换宿主）。
+    if (needsUnidentifiedHostNotice(status)) {
+        return (
+            <Flex
+                role="status"
+                direction="column"
+                gap="1"
+                className="bg-qt-window border-b border-qt-border px-qt-4 py-qt-2 select-none"
+            >
+                <span className="hs-type-label font-bold">
+                    {t("ara_host_audio_unidentified_title")}
+                </span>
+                <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
+                    {t("ara_host_audio_unidentified_body")}
+                </span>
+            </Flex>
+        );
+    }
     if (!needsFolderTrackNotice(status)) return null;
     return (
         <Flex

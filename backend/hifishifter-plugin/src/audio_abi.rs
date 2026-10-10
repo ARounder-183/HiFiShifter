@@ -72,11 +72,16 @@ pub(crate) enum BufferError {
 }
 
 /// 校验当前支持的总线形状，不读取或写入 plane；inactive plane 的空指针合法。
+///
+/// 【为什么允许单声道】人声轨单声道极其常见，而此前 1 声道直接被判
+/// `UnsupportedFormat` ⇒ `process` 返回失败 ⇒ 宿主**静默旁路**插件。内部渲染仍是
+/// 立体声（`PlaybackSnapshot` 始终持左右两轨），单声道只是**输出面**的降级，见
+/// `render::snapshot` 的 `copy_block`。
 fn validate_bus(bus: &AudioBusBuffers) -> Result<(), BufferError> {
     if bus.num_channels < 0 {
         return Err(BufferError::InvalidArgument);
     }
-    if bus.num_channels != 0 && bus.num_channels != 2 {
+    if bus.num_channels > 2 {
         return Err(BufferError::UnsupportedFormat);
     }
     if bus.num_channels > 0 && bus.channel_buffers.is_null() {
@@ -144,14 +149,17 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
         output.silence_flags = 0;
         return Ok(());
     }
-    for channel in 0..2 {
-        // SAFETY: 宿主提供两个 plane 指针，非空 plane 至少含指定帧数。
+    // 【为什么按 `num_channels` 而不是写死 2】总线现在允许单声道（见 `validate_bus`），
+    // 写死 2 会读越界的 `channel_buffers[1]`。
+    let channels = output.num_channels.clamp(0, 2) as usize;
+    for channel in 0..channels {
+        // SAFETY: 宿主提供 `num_channels` 个 plane 指针，非空 plane 至少含指定帧数。
         let plane = unsafe { *output.channel_buffers.add(channel) };
         if !plane.is_null() {
             unsafe { std::ptr::write_bytes(plane, 0, data.num_samples as usize) };
         }
     }
-    output.silence_flags = 3;
+    output.silence_flags = (1_u64 << channels) - 1;
     Ok(())
 }
 
@@ -177,15 +185,34 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
         output.silence_flags = 0;
         return Ok(());
     }
+    // 【为什么按实际声道数展开】总线允许单声道（见 `validate_bus`）。单声道输入喂给
+    // 立体声输出时两个输出通道复用同一个源 plane（下面的"每帧先读后写"已经处理别名）；
+    // 立体声输入给单声道输出时取平均，而不是丢掉右声道。
+    let channels = output.num_channels.clamp(0, 2) as usize;
+    let input_channels = input
+        .as_ref()
+        .map(|bus| bus.num_channels.clamp(0, 2) as usize)
+        .unwrap_or(0);
     let sources: [*mut f32; 2] = std::array::from_fn(|channel| match &input {
-        Some(bus) if bus.num_channels == 2 && bus.silence_flags & (1 << channel) == 0 => unsafe {
-            *bus.channel_buffers.add(channel)
-        },
+        Some(bus) if input_channels > 0 => {
+            let index = if input_channels == 1 { 0 } else { channel };
+            if index >= input_channels || bus.silence_flags & (1 << index) != 0 {
+                std::ptr::null_mut()
+            } else {
+                // SAFETY: `index < input_channels <= 2`，宿主提供对应数量的 plane 指针。
+                unsafe { *bus.channel_buffers.add(index) }
+            }
+        }
         _ => std::ptr::null_mut(),
     });
-    let targets = [unsafe { *output.channel_buffers }, unsafe {
-        *output.channel_buffers.add(1)
-    }];
+    let targets: [*mut f32; 2] = std::array::from_fn(|channel| {
+        if channel < channels {
+            // SAFETY: `channel < channels = output.num_channels`，宿主提供对应数量的指针。
+            unsafe { *output.channel_buffers.add(channel) }
+        } else {
+            std::ptr::null_mut()
+        }
+    });
     let bytes = data.num_samples as usize * std::mem::size_of::<f32>();
     for source in sources {
         for target in targets {
@@ -200,7 +227,7 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
         }
     }
     // 支持独立plane或整个plane的in-place/交换；部分偏移重叠明确拒绝且不写数据。
-    // 每帧先读两个源再写两个输出，兼容对应in-place与两个完整plane的交换别名。
+    // 每帧先读两个源再写输出，兼容对应in-place与两个完整plane的交换别名。
     for frame in 0..data.num_samples as usize {
         let values = sources.map(|source| {
             if source.is_null() {
@@ -209,15 +236,26 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
                 unsafe { *source.add(frame) }
             }
         });
-        for channel in 0..2 {
-            if !targets[channel].is_null() {
-                unsafe {
-                    targets[channel].add(frame).write(values[channel]);
+        if channels == 1 {
+            let mono = if input_channels >= 2 {
+                (values[0] + values[1]) * 0.5
+            } else {
+                values[0]
+            };
+            if !targets[0].is_null() {
+                unsafe { targets[0].add(frame).write(mono) };
+            }
+        } else {
+            for channel in 0..channels {
+                if !targets[channel].is_null() {
+                    unsafe {
+                        targets[channel].add(frame).write(values[channel]);
+                    }
                 }
             }
         }
     }
-    output.silence_flags = (0..2).fold(0, |flags, channel| {
+    output.silence_flags = (0..channels).fold(0, |flags, channel| {
         if sources[channel].is_null() || targets[channel].is_null() {
             flags | (1 << channel)
         } else {

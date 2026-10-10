@@ -19,13 +19,18 @@ pub(crate) fn read_source_pcm(
     sample_rate: u32,
     version: u64,
 ) -> Result<SourcePcm, AraError> {
-    if ![44100, 48000].contains(&sample_rate)
+    // 【为什么不再限定 44.1/48k】宿主工程与素材都可能是 88.2/96/176.4/192k（母带、后期
+    // 很常见）。此前直接 `Unsupported` ⇒ 插件**一条 region 都拿不到** ⇒ 整个插件静默
+    // 不可用。读取路径是**离线**的（不在音频回调里），而下游两处都已经会重采样：
+    // `mix_plain_regions` 按 `source.sample_rate` 线性取点，内核路径走
+    // `linear_resample_interleaved`。所以这里只需要挡明显不合理的值。
+    if !(8000..=384_000).contains(&sample_rate)
         || !(1..=2).contains(&channels)
         || frames == 0
         || frames > i64::MAX as usize
     {
         return Err(AraError::Unsupported(
-            "ARA requires nonempty 44100/48000Hz mono/stereo sources",
+            "ARA requires nonempty mono/stereo sources within 8k..=384kHz",
         ));
     }
     let source = host

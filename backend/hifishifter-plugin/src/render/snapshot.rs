@@ -372,8 +372,19 @@ impl SnapshotPublisher {
         ReadSection(&self.readers)
     }
     /// 按项目绝对 sample 时间读取，seek/loop 不使用累计 playhead。
+    ///
+    /// 【支持的输出形状】1 或 2 声道。内部快照恒为立体声：立体声输出逐轨取，单声道
+    /// 输出取左右**平均**（丢掉右声道是有损的，平均才是正确的下混）。此前只认 2 声道
+    /// ⇒ 单声道轨道上 `process` 失败 ⇒ 宿主**静默旁路**插件 —— 而人声轨单声道极常见。
+    ///
+    /// 【为什么按比例重采样】内部快照只有 44.1/48k 两种率。宿主用别的率（96k/192k
+    /// 工程）时，此前 `sample_rate` 不等即判"没有快照"⇒ 整条插件**静默输出静音**。
+    /// 这里用线性插值把快照重采样到宿主率：这是**降级路径**（线性插值在高采样率下
+    /// 有可闻的高频镜像），但"能听见、略有染色"远好于"什么都听不见"。真正的多率
+    /// 渲染管线是独立一期工作（见 `vst3.rs` 的 `setupProcessing` 注释）。
+    ///
     /// # Safety
-    /// output 为已校验 stereo f32 SDK 缓冲，非空 plane 至少含 frames 个样本。
+    /// output 为已校验 f32 SDK 缓冲（1 或 2 声道），非空 plane 至少含 frames 个样本。
     pub unsafe fn copy_block(
         &self,
         sample: i64,
@@ -381,7 +392,7 @@ impl SnapshotPublisher {
         output: &mut AudioBusBuffers,
         frames: usize,
     ) -> bool {
-        if output.num_channels != 2 || output.channel_buffers.is_null() {
+        if output.num_channels == 0 || output.num_channels > 2 || output.channel_buffers.is_null() {
             return false;
         }
         let _read = self.enter();
@@ -390,33 +401,62 @@ impl SnapshotPublisher {
         let snapshot = if pointer.is_null() {
             None
         } else {
-            Some(unsafe { &*pointer }).filter(|snapshot| snapshot.sample_rate == rate)
+            Some(unsafe { &*pointer })
         };
         if snapshot.is_none() {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let mut silence = 3_u64;
-        for channel in 0..2 {
-            // SAFETY: 调用方已验证 SDK stereo 数组，允许 inactive null plane。
+        let channels = output.num_channels.clamp(0, 2) as usize;
+        // 源率/目标率之比：把宿主帧号换算成快照帧号。
+        let ratio = snapshot
+            .map(|snapshot| snapshot.sample_rate as f64 / rate.max(1) as f64)
+            .unwrap_or(1.0);
+        let resampling = (ratio - 1.0).abs() > 1e-9;
+        // 一个输出声道在给定宿主帧上应取的采样值（含可选线性插值）。
+        let read = |channel: usize, offset: usize| -> f32 {
+            snapshot
+                .and_then(|snapshot| {
+                    let local = sample
+                        .checked_add(offset as i64)?
+                        .checked_sub(snapshot.origin_sample)?;
+                    let at = |position: f64| -> Option<f32> {
+                        if position < 0.0 {
+                            return None;
+                        }
+                        let index = usize::try_from(position as u64).ok()?;
+                        if channel == 0 || snapshot.right.is_empty() {
+                            snapshot.left.get(index).copied()
+                        } else {
+                            snapshot.right.get(index).copied()
+                        }
+                    };
+                    if !resampling {
+                        return at(local as f64);
+                    }
+                    let position = local as f64 * ratio;
+                    let base = position.floor();
+                    let frac = (position - base) as f32;
+                    let a = at(base)?;
+                    // 末尾一帧没有后继：保持最后一个采样（不外推、不补零）。
+                    let b = at(base + 1.0).unwrap_or(a);
+                    Some(a + (b - a) * frac)
+                })
+                .unwrap_or(0.0)
+        };
+        let mut silence = (1_u64 << channels) - 1;
+        for channel in 0..channels {
+            // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。
             let plane = unsafe { *output.channel_buffers.add(channel) };
             if plane.is_null() {
                 continue;
             }
             for offset in 0..frames {
-                let value = snapshot
-                    .and_then(|snapshot| {
-                        let local = sample
-                            .checked_add(offset as i64)?
-                            .checked_sub(snapshot.origin_sample)?;
-                        let index = usize::try_from(local).ok()?;
-                        if channel == 0 || snapshot.right.is_empty() {
-                            snapshot.left.get(index)
-                        } else {
-                            snapshot.right.get(index)
-                        }
-                        .copied()
-                    })
-                    .unwrap_or(0.0);
+                let value = if channels == 1 {
+                    // 立体声快照 → 单声道总线：平均，而不是丢掉右声道。
+                    (read(0, offset) + read(1, offset)) * 0.5
+                } else {
+                    read(channel, offset)
+                };
                 // SAFETY: 宿主提供至少 frames 样本的可写平面。
                 unsafe { plane.add(offset).write(value) };
                 if value != 0.0 {
@@ -650,6 +690,58 @@ mod tests {
         assert!(!unsafe { publisher.copy_block(2, 4, &mut bus, 3) });
         assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
         assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+    }
+
+    /// 单声道总线与"宿主率 ≠ 内部率"都必须能出声。
+    ///
+    /// 【为什么这是回归测试】此前 `copy_block` 要求 `output.num_channels == 2` **且**
+    /// `snapshot.sample_rate == rate`，两条不满足就返回 false ⇒ 输出全零。宿主于是看到
+    /// 一个"成功加载、但永远静音"的插件：单声道人声轨与 96k 工程都命中这条。
+    #[test]
+    fn mono_outputs_and_foreign_rates_still_produce_audio() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 0,
+                left: vec![0.2, 0.4, 0.6, 0.8],
+                right: vec![0.4, 0.8, 1.2, 1.6],
+                _reservation: None,
+            })
+            .unwrap();
+
+        // 单声道输出：左右**平均**（而不是丢掉右声道）。
+        let mut mono = [9.0_f32; 3];
+        let mut mono_planes = [mono.as_mut_ptr()];
+        let mut mono_bus = AudioBusBuffers {
+            num_channels: 1,
+            silence_flags: 0,
+            channel_buffers: mono_planes.as_mut_ptr(),
+        };
+        // SAFETY: 单个 plane 至少 3 帧。
+        assert!(unsafe { publisher.copy_block(0, 4, &mut mono_bus, 3) });
+        let close = |actual: [f32; 3], expected: [f32; 3]| {
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-6)
+        };
+        assert!(close(mono, [0.3, 0.6, 0.9]), "{mono:?}");
+
+        // 宿主 8 帧/秒、快照 4 帧/秒 ⇒ 比例 0.5，线性插值取中间值。
+        let mut left = [9.0_f32; 3];
+        let mut right = [9.0_f32; 3];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        // SAFETY: 两个 plane 各至少 3 帧。
+        assert!(unsafe { publisher.copy_block(0, 8, &mut bus, 3) });
+        // 位置 0.0 / 0.5 / 1.0 → 0.2 / 0.3 / 0.4。
+        assert!(close(left, [0.2, 0.3, 0.4]), "{left:?}");
+        assert!(close(right, [0.4, 0.6, 0.8]), "{right:?}");
     }
 
     /// 活跃读者期间退役快照必须保留；失败保留旧音频，不能将失败伪报成已应用。
