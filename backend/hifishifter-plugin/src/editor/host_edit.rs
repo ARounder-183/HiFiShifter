@@ -45,7 +45,7 @@ impl HostEditPlan {
     ///
     /// 【为什么不比 `fade_*_s`】GUI 载荷没有这个字段（S 只在 `host_fades` 读数里），
     /// 拿它当判据会让门永远不成立。连续轴上比 curvature 就足以确认宿主已跟上。
-    pub(crate) fn receipt(&self, namespace: &str, fade_axes_new: Option<bool>) -> HostEditReceipt {
+    pub(crate) fn receipt(&self, namespace: &str, fade_axes_v2: Option<bool>) -> HostEditReceipt {
         HostEditReceipt {
             clips: self
                 .edits
@@ -92,7 +92,7 @@ impl HostEditPlan {
                         ),
                     ] {
                         if let Some(shape) = shape {
-                            match fade_axes_new {
+                            match fade_axes_v2 {
                                 // 连续轴：形状没有可写号，写的是预设的 curvature；
                                 // 载荷的 `fade_*_dir` 正是宿主回读的 curvature。
                                 Some(true) => {
@@ -122,7 +122,7 @@ impl HostEditPlan {
                             if group == 0 {
                                 serde_json::Value::Null
                             } else {
-                                serde_json::json!(format!("reaper-group-{group}"))
+                                serde_json::json!(format!("host-group-{group}"))
                             },
                         ));
                     }
@@ -541,7 +541,7 @@ pub(super) fn execute_managed(
         // （`sdk/reaper_plugin_functions.h`）：
         //   `C_FADE*SHAPE` / `D_FADE*DIR`      —— v7.80 and earlier
         //   `D_FADE*DIR_NEW` / `D_FADE*DIR2_NEW` —— v7.81 and later
-        // 所以这里**必须**按 `fade_axes_new` 分流，而不是按模式或猜。
+        // 所以这里**必须**按 `fade_axes_v2` 分流，而不是按模式或猜。
         if requests_fade_axes(&edit.patch) {
             // 委托（宿主把边界包络交给 HFS 渲染）时才存 HFS 自有样式；
             // 否则直接写宿主自己的轴。此前这里**无条件**要求委托 ——
@@ -596,7 +596,7 @@ pub(super) fn execute_managed(
                 styles.insert(target.geometry.item_id.clone(), style);
             } else {
                 // 直接写宿主轴：这里才需要轴语义校验（版本未知/新轴不接受预设）。
-                validate_fade_axes(target.geometry.fade_axes_new, &edit.patch)?;
+                validate_fade_axes(target.geometry.fade_axes_v2, &edit.patch)?;
             }
         }
         // 插件自有、宿主表达不到的逐片段属性：只登记，不写宿主。
@@ -690,7 +690,7 @@ pub(super) fn execute_managed(
             // 那才是让用户"能调淡变类型和曲率"的那条路。
             if styles.contains_key(&target.geometry.item_id) {
                 // REAPER只留默认样式；自定义shape/dir进入HFS状态，而不是宿主c/S轴。
-                match target.geometry.fade_axes_new {
+                match target.geometry.fade_axes_v2 {
                     Some(true) => {
                         for (name, value) in [
                             (c"D_FADEINDIR_NEW", target.geometry.fade_in_dir_new),
@@ -721,8 +721,8 @@ pub(super) fn execute_managed(
                         )
                     }
                 }
-            } else if let Some(axes_new) = target.geometry.fade_axes_new {
-                // 直接写宿主轴。`fade_axes_new` 已在上面的校验里排除 `None`，
+            } else if let Some(axes_new) = target.geometry.fade_axes_v2 {
+                // 直接写宿主轴。`fade_axes_v2` 已在上面的校验里排除 `None`，
                 // 这里再取一次是为了拿到值（校验阶段只做了拒绝）。
                 if axes_new {
                     // 【形状预设要写成**一对**分量】≥7.81 没有"形状号"这个可写状态，
@@ -842,7 +842,7 @@ mod tests {
     fn host_clip_gain_writes_item_volume_and_preserves_take_polarity() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_take_volume(-0.25);
@@ -850,9 +850,9 @@ mod tests {
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();
@@ -946,16 +946,16 @@ mod tests {
     fn host_edit_writes_directly_bound_item_under_one_project_undo_block() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();
@@ -979,7 +979,7 @@ mod tests {
         );
         assert!(calls.contains(&"write-item:D_POSITION".into()));
         assert!(calls.contains(&"write-take:D_PLAYRATE".into()));
-        let geometry = owner.reaper_geometry().unwrap_err();
+        let geometry = owner.host_geometry().unwrap_err();
         assert!(
             geometry.contains("incompatible"),
             "未模拟ARA回流，不能伪造已同步模型"
@@ -1092,16 +1092,16 @@ mod tests {
     fn host_edit_fade_width_writes_reaper_without_delegation_or_redundant_shape() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();
@@ -1175,16 +1175,16 @@ mod tests {
     fn fade_axis_edits_are_part_of_the_completion_receipt() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();
@@ -1250,16 +1250,16 @@ mod tests {
     fn host_edit_snap_offset_receipt_uses_current_host_metadata() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();
@@ -1272,7 +1272,7 @@ mod tests {
         let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
         assert!(!receipt.matches(&super::super::commands::payload(&editor, false).unwrap()));
         execute(&owner, plan, || document.is_alive()).unwrap();
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         assert_eq!(
             owner.host_geometry_metadata().unwrap()[0]
                 .geometry
@@ -1283,7 +1283,7 @@ mod tests {
         assert!(receipt.matches(&payload));
         // 官方只说明秒域，不因用户已有负偏移使整个host几何失效；GUI自行按原约定绘制。
         host.set_value("D_SNAPOFFSET", -1. / 44100.);
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         assert_eq!(
             owner.host_geometry_metadata().unwrap()[0]
                 .geometry
@@ -1297,16 +1297,16 @@ mod tests {
     fn host_edit_source_trim_rejects_stale_source_offset_before_any_write() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("D_PLAYRATE", 1.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();

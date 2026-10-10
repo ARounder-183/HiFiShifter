@@ -215,7 +215,7 @@ describe("drawTimelineCanvas 合批", () => {
                     clip({
                         fadeInPx: 100,
                         hostFades: {
-                            curve_mode: "reaper_new",
+                            curve_mode: "continuous",
                             in_curvature: curvature,
                             in_s: s,
                             out_curvature: 0,

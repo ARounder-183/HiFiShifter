@@ -32,7 +32,7 @@ const formatCtx = {
 };
 
 const hostFades = (over: Partial<Record<string, unknown>> = {}) => ({
-    curve_mode: "reaper_new" as const,
+    curve_mode: "continuous" as const,
     in_curvature: -0.2,
     out_curvature: 0,
     in_s: 0.65,

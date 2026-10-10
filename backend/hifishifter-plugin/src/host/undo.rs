@@ -214,7 +214,7 @@ mod tests {
     /// 一次多块参数提交/显式几何组只有一个原生Undo块，收尾回调期间pending仍有效。
     #[test]
     fn host_history_groups_chunks_and_closes_outside_mutex() {
-        let fixture = crate::host::reaper::ReaperFixture::new();
+        let fixture = crate::host::reaper::MockHost::new();
         fixture.enable_writer();
         let host = Arc::new(fixture.client());
         let undo = Arc::new(HostUndo::default());
@@ -255,7 +255,7 @@ mod tests {
     /// 否则前端 `new Date(0)` 会显示 1970 —— 这正是此前的报障）。
     #[test]
     fn plugin_created_entries_get_a_timestamp_and_host_entries_stay_null() {
-        let fixture = crate::host::reaper::ReaperFixture::new();
+        let fixture = crate::host::reaper::MockHost::new();
         fixture.enable_writer();
         let host = Arc::new(fixture.client());
         let undo = Arc::new(HostUndo::default());
@@ -263,7 +263,7 @@ mod tests {
         // 宿主自带的第 0 条（"Initial state"）没有时间。
         let before = host.project_history(&|| true).unwrap();
         assert!(before["records"][0]["atMs"].is_null(), "{before}");
-        assert_eq!(before["backend"], "reaper");
+        assert_eq!(before["backend"], "host");
 
         undo.begin_request("view", 1, true, false, &host, &|| true)
             .unwrap();
@@ -282,7 +282,7 @@ mod tests {
     /// 关闭UI发生在原生setter内部时，不能提前结束Undo让余下setter落到历史之外。
     #[test]
     fn host_history_view_close_waits_for_native_writer_but_releases_queued_actor_tail() {
-        let fixture = crate::host::reaper::ReaperFixture::new();
+        let fixture = crate::host::reaper::MockHost::new();
         fixture.enable_writer();
         let host = Arc::new(fixture.client());
         let undo = HostUndo::default();
@@ -305,7 +305,7 @@ mod tests {
         let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        let fixture = crate::host::reaper::ReaperFixture::new();
+        let fixture = crate::host::reaper::MockHost::new();
         fixture.enable_writer();
         let host = Arc::new(fixture.client());
         let (reply, rx) = std::sync::mpsc::channel();

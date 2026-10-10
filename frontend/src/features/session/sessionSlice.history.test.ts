@@ -294,11 +294,11 @@ test("features/session/sessionSlice.history.test.ts scripted checks", async () =
             setHistoryState({
                 undoDepth: 1,
                 redoDepth: 0,
-                backend: "reaper",
+                backend: "host",
                 records: [{ label: "Move items", atMs: null }],
             }),
         );
-        assertEqual(host.historyRecords[0].backend, "reaper", "host records keep their backend");
+        assertEqual(host.historyRecords[0].backend, "host", "host records keep their backend");
         assertEqual(host.historyRecords[0].atMs, null, "host records may have no timestamp");
 
         // 本地栈：label 是 op key，前端按 `history_op_<key>` 本地化。

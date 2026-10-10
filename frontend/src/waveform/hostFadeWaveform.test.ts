@@ -11,7 +11,7 @@ import { buildWaveformScene, type WaveformSceneClip } from "./sceneBuilder";
 import { buildWaveformGeometry } from "./geometry";
 
 const metadata: HostFadeMetadata = {
-    curve_mode: "reaper_new",
+    curve_mode: "continuous",
     in_curvature: -0.6,
     in_s: 0.65,
     out_curvature: 0.4,

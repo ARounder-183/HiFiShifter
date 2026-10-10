@@ -350,7 +350,7 @@ const SideColumn: React.FC<{
     // 只有"宿主版本读不出来"时才退回曲率滑杆 —— 那时轴语义未知，不猜。
     const shapeSelectable = canSelectHostFadeShape();
     // S 轴只有 REAPER ≥7.81 有；旧轴宿主与独立 App 没有这根轴，不摆第二根滑杆。
-    const continuous = side.hostFades?.curve_mode === "reaper_new" && canEditFadeS();
+    const continuous = side.hostFades?.curve_mode === "continuous" && canEditFadeS();
     return (
         <div className="min-w-[210px]">
             {/* 形状选择：切换即重置该侧曲率为形状默认值。 */}

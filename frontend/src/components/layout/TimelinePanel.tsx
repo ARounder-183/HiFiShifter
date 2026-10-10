@@ -4135,7 +4135,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 的混合曲线，不是 `fadeGainSigned`。求解器若还按后者算，指针与画出来的
                 // 包络就是两条不同的曲线 —— 表现为"拖了不跟手"。
                 const curveMode = args.side === "in" ? "in" : "out";
-                const continuous = clip.hostFades?.curve_mode === "reaper_new";
+                const continuous = clip.hostFades?.curve_mode === "continuous";
                 const hostS = continuous
                     ? curveMode === "out"
                         ? clip.hostFades!.out_s
@@ -4342,7 +4342,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 const base = origin.baseById.get(participant.clipId);
                 // S 只对 continuous 宿主可写（`validate_fade_axes` 会在旧轴宿主上拒绝
                 // 任何 S 字段）——所以只在 continuous 时把它随曲率一起送出。
-                const continuous = clip.hostFades?.curve_mode === "reaper_new";
+                const continuous = clip.hostFades?.curve_mode === "continuous";
                 if (args.side === "in") {
                     const manual = Number(clip.fadeInSec) || 0;
                     const lengthEdited = Math.abs(manual - (base?.fadeInSec ?? 0)) > 1e-9;
@@ -5190,12 +5190,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 baseDir: Number(earlier.fadeOutDir) || 0,
                                 // 新轴宿主的 S 分量：曲率拖拽的投影必须与画布同一条曲线。
                                 hostS:
-                                    earlier.hostFades?.curve_mode === "reaper_new"
+                                    earlier.hostFades?.curve_mode === "continuous"
                                         ? earlier.hostFades.out_s
                                         : null,
                                 // 二维求解的 S 起点（continuous 宿主才用）。
                                 baseS:
-                                    earlier.hostFades?.curve_mode === "reaper_new"
+                                    earlier.hostFades?.curve_mode === "continuous"
                                         ? Number(earlier.fadeOutS ?? earlier.hostFades.out_s) || 0
                                         : 0,
                             },
@@ -5207,11 +5207,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     .shape,
                                 baseDir: Number(later.fadeInDir) || 0,
                                 hostS:
-                                    later.hostFades?.curve_mode === "reaper_new"
+                                    later.hostFades?.curve_mode === "continuous"
                                         ? later.hostFades.in_s
                                         : null,
                                 baseS:
-                                    later.hostFades?.curve_mode === "reaper_new"
+                                    later.hostFades?.curve_mode === "continuous"
                                         ? Number(later.fadeInS ?? later.hostFades.in_s) || 0
                                         : 0,
                             },
@@ -5656,7 +5656,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             fadeOutDir: Number(earlier.fadeOutDir) || 0,
                             // continuous 宿主：S 是曲线的一部分，随曲率一起提交（旧轴宿主
                             // 不写 —— `validate_fade_axes` 会拒绝任何 S 字段）。
-                            ...(earlier.hostFades?.curve_mode === "reaper_new"
+                            ...(earlier.hostFades?.curve_mode === "continuous"
                                 ? {
                                       fadeInS: Number(earlier.fadeInS) || 0,
                                       fadeOutS: Number(earlier.fadeOutS) || 0,
@@ -5675,7 +5675,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             autoFadeOutSec: Number(later.autoFadeOutSec) || 0,
                             fadeInDir: Number(later.fadeInDir) || 0,
                             fadeOutDir: Number(later.fadeOutDir) || 0,
-                            ...(later.hostFades?.curve_mode === "reaper_new"
+                            ...(later.hostFades?.curve_mode === "continuous"
                                 ? {
                                       fadeInS: Number(later.fadeInS) || 0,
                                       fadeOutS: Number(later.fadeOutS) || 0,

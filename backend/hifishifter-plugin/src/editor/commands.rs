@@ -135,7 +135,7 @@ pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     payload.redo_depth = Some(redo);
     let project = session.project.lock().unwrap().clone();
     payload.project = Some(hifishifter_kernel::models::ProjectMetaPayload {
-        name: "REAPER / HiFiShifter".into(),
+        name: "HiFiShifter ARA".into(),
         path: None,
         dirty: session.generation.load(Ordering::Acquire)
             != session.applied.load(Ordering::Acquire),
@@ -220,7 +220,7 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
 ///    / `tempo_map`，而前端把响应当权威回声照单应用（`applyTimelineState` 在
 ///    `tempo_map !== undefined` 时无条件覆盖），用户刚提交的改动会被自己的回声抹掉。
 /// 2. **让在途渲染作废**：音阶进渲染缓存键（`scale-signature`），与
-///    `refresh_reaper_geometry` 处理 fade 变化是同一条理由。
+///    `refresh_host_geometry` 处理 fade 变化是同一条理由。
 ///
 /// 投影本身是**派生**的（真相在 `settings_store`），所以这里写 `session.timeline`
 /// 不违反"派生物会被重建"那条纪律 —— 它会在每次重建后由
@@ -851,7 +851,7 @@ pub(super) fn dispatch(
             let timeline = payload(session, true)?;
             let (_, playing) = session.transport();
             Ok(
-                json!({"ok":true,"device":"REAPER / ARA","model_loaded":hifishifter_kernel::world_vocoder::is_available(),
+                json!({"ok":true,"device":"Host / ARA","model_loaded":hifishifter_kernel::world_vocoder::is_available(),
                 "audio_loaded":!session.timeline.lock().unwrap().clips.is_empty(),"has_synthesized":session.applied.load(Ordering::Acquire)>0,
                 "is_playing":playing,"playback_target":if playing {Some("synthesized")} else {None},"gpu_backend":"","timeline":timeline}),
             )
@@ -876,7 +876,7 @@ pub(super) fn dispatch(
         }
         "set_transport" => {
             if input["bpm"].is_number() {
-                return Err("tempo is controlled by REAPER".into());
+                return Err("tempo is controlled by the host".into());
             }
             if let Some(position) = input["playheadSec"].as_f64() {
                 if position.is_finite() {

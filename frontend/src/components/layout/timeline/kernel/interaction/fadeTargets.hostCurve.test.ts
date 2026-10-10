@@ -24,7 +24,7 @@ const CLIP_PX = 400;
 
 /** 宿主"轻微凸"（预设 1 = curvature 0.5）；clip 自身仍是线性（shape 0 / dir 0）。 */
 const HOST_CONVEX: HostFadeMetadata = {
-    curve_mode: "reaper_new",
+    curve_mode: "continuous",
     in_curvature: 0.5,
     out_curvature: 0.5,
     in_s: 0,

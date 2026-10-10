@@ -116,10 +116,10 @@ pub(crate) struct ReaperHost {
     media: Option<media::MediaApi>,
     extended_media: Option<media::ExtendedMedia>,
     validate: Option<Validate>,
-    fade_axes_new: Option<bool>,
+    fade_axes_v2: Option<bool>,
     /// 宿主原始版本串（`GetAppVersion`，如 `"7.81/x64"`）；读不出来时为 `None`。
     ///
-    /// 【为什么保留原文】淡变轴只需要 `fade_axes_new` 那个布尔，但诊断包需要
+    /// 【为什么保留原文】淡变轴只需要 `fade_axes_v2` 那个布尔，但诊断包需要
     /// **原始字符串** —— 用户报障时"你到底是哪个版本"是第一个要问的问题。
     app_version: Option<String>,
     /// 多 take 枚举（可选）；缺省时清单只呈现 active take。
@@ -145,8 +145,8 @@ impl ReaperHost {
     /// 【为什么需要公开】"能不能编辑淡变形状"取决于它：旧轴写 `C_FADE*SHAPE`，
     /// 新轴由两个连续参数决定形状。前端要据此决定摆预设按钮还是连续滑杆。
     /// `None` = 版本串读不出来 → 只读。
-    pub(crate) fn fade_axes_new(&self) -> Option<bool> {
-        self.fade_axes_new
+    pub(crate) fn fade_axes_v2(&self) -> Option<bool> {
+        self.fade_axes_v2
     }
 
     /// 多 take 枚举入口；`None` = 宿主没提供，调用方退回单 active take。
@@ -156,6 +156,35 @@ impl ReaperHost {
 
     /// 宿主原始版本串（诊断包用）；读不出来时为 `None`。
     pub(crate) fn app_version(&self) -> Option<&str> {
+        self.app_version.as_deref()
+    }
+}
+
+/// REAPER 适配器的后端身份与能力。
+///
+/// 【为什么能力位从既有谓词派生，而不是再列一遍 `Option`】这些谓词（`can_edit_clips` /
+/// `can_split_clips` / …）已经是"能不能用"的唯一出处，前端与命令分派都读它们。这里
+/// 只是把同一批判据翻译成宿主无关的 [`HostCapabilities`]，避免出现第二份会漂移的副本。
+impl hifishifter_kernel::editor::host::EditorHost for ReaperHost {
+    fn kind(&self) -> hifishifter_kernel::editor::host::HostKind {
+        hifishifter_kernel::editor::host::HostKind::Reaper
+    }
+
+    fn capabilities(&self) -> hifishifter_kernel::editor::host::HostCapabilities {
+        hifishifter_kernel::editor::host::HostCapabilities {
+            transport: self.transport.is_some(),
+            clip_geometry: self.geometry.is_some(),
+            clip_write: self.can_edit_clips(),
+            split: self.can_split_clips(),
+            undo_stack: self.has_project_history(),
+            media_import: self.can_import_audio(),
+            track_create: self.can_create_audio_track(),
+            item_clipboard: self.can_clipboard_items(),
+            fade_axes: self.fade_axes_v2.is_some(),
+        }
+    }
+
+    fn app_version(&self) -> Option<&str> {
         self.app_version.as_deref()
     }
 }
@@ -241,7 +270,7 @@ impl ReaperHost {
             .filter(|value| !value.is_null())
             .and_then(|value| unsafe { std::ffi::CStr::from_ptr(value) }.to_str().ok())
             .map(str::to_owned);
-        let fade_axes_new = app_version.as_deref().and_then(new_fade_axes);
+        let fade_axes_v2 = app_version.as_deref().and_then(new_fade_axes);
         let item = lookup!(c"GetMediaItemTake_Item", TakeItem);
         let item_value = lookup!(c"GetMediaItemInfo_Value", Value);
         let take_value = lookup!(c"GetMediaItemTakeInfo_Value", Value);
@@ -484,7 +513,7 @@ impl ReaperHost {
             media,
             extended_media,
             validate,
-            fade_axes_new,
+            fade_axes_v2,
             app_version,
             take_enum,
             folder,
@@ -882,7 +911,7 @@ impl ReaperHost {
             fade_out_dir_new,
             fade_in_dir2_new,
             fade_out_dir2_new,
-            fade_axes_new: self.fade_axes_new,
+            fade_axes_v2: self.fade_axes_v2,
             auto_fade_in_sec,
             auto_fade_out_sec,
             source_file_name,
@@ -930,7 +959,7 @@ fn new_fade_axes(version: &str) -> Option<bool> {
 #[path = "reaper_tests.rs"]
 mod geometry_tests;
 #[cfg(test)]
-pub(crate) use geometry_tests::Fixture as ReaperFixture;
+pub(crate) use geometry_tests::Fixture as MockHost;
 
 #[cfg(test)]
 mod tests {

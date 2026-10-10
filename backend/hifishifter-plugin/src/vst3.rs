@@ -853,7 +853,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
         return K_RESULT_FALSE;
     }
     unsafe {
-        owner.bind_reaper_host(context);
+        owner.bind_host_adapter(context);
     }
     if owner.is_closed() {
         unsafe {
@@ -1738,7 +1738,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
         let component = create_component();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         let observed = Arc::new(AtomicI32::new(0));
         let count = observed.clone();
         let raw = component as usize;
@@ -1767,7 +1767,7 @@ mod lifetime_tests {
     fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
         for terminate in [true, false] {
             let component = create_component();
-            let host = crate::host::reaper::ReaperFixture::new();
+            let host = crate::host::reaper::MockHost::new();
             let raw = component as usize;
             let owner =
                 unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
@@ -1799,7 +1799,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
         let component = create_component();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         let raw = component as usize;
         let weak = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
         let during = weak.clone();
@@ -1828,7 +1828,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_of_a_closed_component_does_not_call_host() {
         let component = create_component();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
             component_terminate(component);
         }
@@ -1846,7 +1846,7 @@ mod lifetime_tests {
     fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference()
     {
         let component = create_component();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_connection_host();
         let raw = component as usize;
         *host.hook.borrow_mut() = Some((
@@ -2605,14 +2605,14 @@ mod audio_boundary_tests {
     fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
         let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("B_MUTE", 1.);
         unsafe {
-            owners[0].bind_reaper_host(host.context());
+            owners[0].bind_host_adapter(host.context());
         }
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         let workspace = document.workspace_timeline().unwrap();
         assert!(workspace.clips[0].muted);
         assert!(!workspace.clips[1].muted);
@@ -2663,7 +2663,7 @@ mod audio_boundary_tests {
         }
         host.set_value("B_MUTE", 0.);
         host.set_value("B_MUTE_ACTUAL", 1.);
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         assert!(
             !document.workspace_timeline().unwrap().clips[0].muted,
             "solo覆盖后的解除不丢原始mute"

@@ -475,7 +475,7 @@ impl ModelHandle {
                 *self.session.timeline.lock().unwrap() = Some(timeline.clone());
                 drop(transaction);
                 for owner in self.session.renderer_owners() {
-                    owner.refresh_reaper_state_for_model();
+                    owner.refresh_host_state_for_model();
                 }
                 for owner in self.session.renderer_owners() {
                     owner.refresh_ui_inventory();

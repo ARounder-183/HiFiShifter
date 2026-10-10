@@ -26,7 +26,7 @@ export type PluginBootstrap = {
      */
     fadeAxes?: "legacy" | "continuous" | null;
     /**
-     * 撤销历史由谁承载：`"reaper"`（宿主权威栈）或 `"local"`（插件自管栈）。
+     * 撤销历史由谁承载：`"host"`（宿主权威栈）或 `"local"`（插件自管栈）。
      *
      * 【为什么需要它】两条栈共用同一个「操作记录」面板，但记录里 `label` 的含义不同：
      * 本地栈是 op key（按 `history_op_<key>` 查 catalog），宿主栈是宿主自己的可读字符串
@@ -35,7 +35,26 @@ export type PluginBootstrap = {
      *
      * 缺省按 `"local"`（独立 App / 旧后端）。
      */
-    historyBackend?: "reaper" | "local";
+    historyBackend?: "host" | "local";
+    /**
+     * 当前编辑后端身份：`"reaper"`（宿主给了原生扩展）或 `"ara_only"`（只有 ARA 2.0）。
+     *
+     * 【为什么前端需要它】ARA-only 后端上片段几何**只读**（ARA 2.0 不允许插件改 region
+     * 几何），前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
+     */
+    hostKind?: "reaper" | "ara_only";
+    /** 后端能力位快照（与上面的布尔同源，但更细）。 */
+    hostCapabilities?: {
+        transport: boolean;
+        clipGeometry: boolean;
+        clipWrite: boolean;
+        split: boolean;
+        undoStack: boolean;
+        mediaImport: boolean;
+        trackCreate: boolean;
+        itemClipboard: boolean;
+        fadeAxes: boolean;
+    };
 };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;

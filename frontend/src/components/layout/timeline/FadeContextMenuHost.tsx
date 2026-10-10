@@ -60,7 +60,7 @@ function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide 
         : 0;
     const dir = (ref.isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0;
     // S 轴只对 continuous 宿主存在；legacy/独立 App 恒 0。
-    const continuous = clip.hostFades?.curve_mode === "reaper_new";
+    const continuous = clip.hostFades?.curve_mode === "continuous";
     const s = continuous ? Number((ref.isOut ? clip.fadeOutS : clip.fadeInS) ?? 0) || 0 : 0;
     const autoSec = ref.isOut ? (clip.autoFadeOutSec ?? 0) : (clip.autoFadeInSec ?? 0);
     const manualSec = Math.max(0, ref.isOut ? (clip.fadeOutSec ?? 0) : (clip.fadeInSec ?? 0));

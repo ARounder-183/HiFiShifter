@@ -314,7 +314,7 @@ mod tests {
     /// 不依赖ARA assignment的显示清单必须保留mute item及空轨，不产生音频source读取。
     #[test]
     fn ui_inventory_keeps_muted_item_and_empty_track_without_audio_assignments() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_writer();
         fixture.enable_media();
         fixture.clear_markers();
@@ -360,7 +360,7 @@ mod tests {
     /// active 切换指向错误的 take。
     #[test]
     fn take_inventory_lists_every_take_with_distinct_identities() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(2);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -392,7 +392,7 @@ mod tests {
     /// take 集合随宿主变化时清单必须跟着变（增删 take 都算）。
     #[test]
     fn take_inventory_follows_the_host_when_takes_are_added() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -404,7 +404,7 @@ mod tests {
     /// 越界的 take 数量必须在枚举循环之外被挡下。
     #[test]
     fn take_inventory_rejects_an_out_of_budget_take_count() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         fixture.take_count_override.set(Some(MAX_TAKES + 1));
@@ -416,7 +416,7 @@ mod tests {
     /// 宿主报告的方向要如实透传；读不出来时**按正放**（不是一种需要用户处置的状态）。
     #[test]
     fn take_direction_is_reported_only_when_the_host_answers() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         fixture.section_reports.set(true);
@@ -438,7 +438,7 @@ mod tests {
     /// 缓存键。不读就等于"REAPER 里循环了、插件按不循环渲染"—— 又一条静默分叉。
     #[test]
     fn loop_source_is_read_from_the_item_and_projected() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(2);
         fixture.enable_media();
         fixture.set_value("B_LOOPSRC", 1.);
@@ -477,7 +477,7 @@ mod tests {
     /// 表现就是"拖了曲率，滑杆与曲线又跳回另一个值"。
     #[test]
     fn inventory_projects_the_curvature_of_the_host_axis_in_use() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -506,7 +506,7 @@ mod tests {
     /// "等待 REAPER 提供音频（未分配 ARA 区域）"，于是"刚分割了一下"看起来像故障。
     #[test]
     fn host_media_state_separates_the_causes() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -546,7 +546,7 @@ mod tests {
     /// 重发模型 ⇒ `authorized_takes` 永久陈旧 ⇒ 没有 take 拿到 `source_path`。
     #[test]
     fn a_stale_pending_item_becomes_an_actionable_unavailable() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -612,7 +612,7 @@ mod tests {
     /// 一份（`DocumentSession::source_failures`），只影响这一条 clip 的原因码。
     #[test]
     fn an_authorized_but_unreadable_source_reports_its_real_reason() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -663,7 +663,7 @@ mod tests {
     /// 被跳过的 playback region 必须进载荷：只 log 会让 MIDI / 零长度 item 静默消失。
     #[test]
     fn skipped_regions_are_reported_in_the_payload() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -694,7 +694,7 @@ mod tests {
     /// 不再制造一个"方向未知"的用户提示 —— 方向是纯渲染输入，读不到不影响可用性。
     #[test]
     fn an_unreadable_direction_is_assumed_forward() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
         // `section_reports` 默认 false ⇒ `take_reversed` 落成 false（按正放）。
@@ -737,7 +737,7 @@ mod tests {
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。
     #[test]
     fn host_take_set_projects_every_take_without_any_source_path() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(2);
         fixture.enable_media();
         fixture.section_reports.set(true);
@@ -780,7 +780,7 @@ mod tests {
     /// 若不把授权媒体搬过去，每个 ARA 片段都会掉进"等待宿主音频"的斜纹占位。
     #[test]
     fn an_authorized_take_keeps_its_media_through_inventory_rebuild() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(2);
         fixture.enable_media();
         let host = Arc::new(fixture.client());
@@ -876,7 +876,7 @@ mod tests {
     /// "同一份已授权 PCM"，可以安全回退；路径不同（或无路径）时仍然"宁可不挂"。
     #[test]
     fn a_take_switch_to_the_same_file_keeps_the_authorized_media() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(2);
         fixture.enable_media();
         *fixture.source_file_name.borrow_mut() = Some("C:/media/same.wav".into());
@@ -954,7 +954,7 @@ mod tests {
     /// 关键：只测"改完立刻变"不算通过（那是乐观更新）；必须**再跑一次清单呈现**。
     #[test]
     fn a_channel_mode_change_survives_the_inventory_rebuild() {
-        let fixture = super::super::ReaperFixture::new();
+        let fixture = super::super::MockHost::new();
         fixture.enable_takes(1);
         fixture.enable_media();
         let host = Arc::new(fixture.client());

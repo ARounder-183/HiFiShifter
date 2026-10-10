@@ -11,7 +11,7 @@ import { HOST_FADE_PRESET_AXES } from "./hostFadeAxes";
 import type { HostFadeMetadata } from "../../../types/api";
 
 const metadata: HostFadeMetadata = {
-    curve_mode: "reaper_new",
+    curve_mode: "continuous",
     in_curvature: -0.2,
     out_curvature: 0,
     in_s: 0.65,
@@ -111,7 +111,7 @@ test("changing either axis changes visual curves and App/legacy remain exactly u
 test("off-table host axes stay bounded curved visuals, and unknown hosts keep the schematic", () => {
     // 表外的坐标（用户拖过曲率滑杆）没有可命名的形状，沿用原来的有界混合示意。
     const offTable: HostFadeMetadata = {
-        curve_mode: "reaper_new",
+        curve_mode: "continuous",
         in_curvature: 0.25,
         out_curvature: 0.25,
         in_s: 0.25,
@@ -150,7 +150,7 @@ test("axes landing exactly on a measured preset draw that preset's own curve", (
     for (let shape = 0; shape < HOST_FADE_PRESET_AXES.length; shape += 1) {
         const [curvature, s] = HOST_FADE_PRESET_AXES[shape];
         const axes: HostFadeMetadata = {
-            curve_mode: "reaper_new",
+            curve_mode: "continuous",
             in_curvature: curvature,
             out_curvature: curvature,
             in_s: s,

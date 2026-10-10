@@ -2003,11 +2003,11 @@ function applyTimelineState(
             // S 轴没有 kernel 字段（REAPER ≥7.81 独有），从宿主读数装饰里取；
             // legacy 宿主与独立 App 没有这根轴 ⇒ 0。
             fadeInS:
-                clip.host_fades?.curve_mode === "reaper_new"
+                clip.host_fades?.curve_mode === "continuous"
                     ? Math.min(1, Math.max(-1, Number(clip.host_fades.in_s ?? 0) || 0))
                     : 0,
             fadeOutS:
-                clip.host_fades?.curve_mode === "reaper_new"
+                clip.host_fades?.curve_mode === "continuous"
                     ? Math.min(1, Math.max(-1, Number(clip.host_fades.out_s ?? 0) || 0))
                     : 0,
             autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
@@ -2745,7 +2745,7 @@ const sessionSlice = createSlice({
             action: PayloadAction<{
                 undoDepth: number;
                 redoDepth: number;
-                backend?: "local" | "reaper";
+                backend?: "local" | "host";
                 records?: HistoryRecordSummary[];
             }>,
         ) {

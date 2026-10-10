@@ -794,7 +794,7 @@ impl DocumentSession {
         }
         drop(_transaction);
         for owner in owners {
-            owner.refresh_reaper_state_for_model();
+            owner.refresh_host_state_for_model();
             owner.prepare();
         }
     }

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-const FORMAT: &str = "hifishifter-reaper-items-1";
+const FORMAT: &str = "hifishifter-host-items-2";
 const MAX_CLIPS: usize = 512;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 
@@ -212,7 +212,7 @@ pub(super) fn copy(
     }
     hifishifter_clipboard::write_bytes(
         &bytes,
-        &format!("HiFiShifter: {} REAPER clips copied.", object.items.len()),
+        &format!("HiFiShifter: {} clips copied.", object.items.len()),
     )?;
     Ok(json!({"ok":true,"kind":"clips"}))
 }
@@ -430,7 +430,7 @@ pub(super) fn plan_paste(
         };
         tracks.push((source.name, target));
     }
-    owner.refresh_reaper_transport();
+    owner.refresh_host_transport();
     let anchor = owner
         .clock
         .get()
@@ -486,7 +486,7 @@ pub(super) fn execute_paste(
     let mut created = Vec::new();
     for item in plan.items {
         let target = &tracks[item.slot];
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let root = {
             let tracks = document.ui_tracks.lock().unwrap();
             tracks
@@ -545,7 +545,7 @@ pub(super) fn execute_paste(
     }
     // 原生setter在Undo块内不保证立即推进项目change计数；本批写完必须重新采集清单。
     *document.ui_inventory_stamp.lock().unwrap() = None;
-    owner.refresh_reaper_transport();
+    owner.refresh_host_transport();
     for track in &mut new_tracks {
         track.commit();
     }
@@ -601,7 +601,7 @@ pub(super) fn execute_delete(
     }
     let document = owner.editor_document()?;
     *document.ui_inventory_stamp.lock().unwrap() = None;
-    owner.refresh_reaper_transport();
+    owner.refresh_host_transport();
     Ok(MediaReceipt {
         created: Vec::new(),
         deleted,
@@ -681,7 +681,7 @@ mod tests {
     /// 确切宿主创建已回流时不等神经PCM；来源未授权仍显式pending且没有路径可读。
     #[test]
     fn goal_feedback_media_receipt_returns_before_audio_is_ready() {
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);

@@ -2143,7 +2143,7 @@ pub(crate) mod tests {
         let (model, owners, _ids) = workspace_fixture();
         let document = model.session();
         document.host_undo.pending.store(true, Ordering::Release);
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);
@@ -3586,7 +3586,7 @@ pub(crate) mod tests {
         let history =
             super::super::commands::dispatch(&editor, "get_history_state", json!({})).unwrap();
         let selected = editor.timeline.lock().unwrap().selected_clip_id.clone();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.enable_media();
         host.clear_markers();
@@ -3662,7 +3662,7 @@ pub(crate) mod tests {
         let document = model.session();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.enable_media();
         host.clear_markers();
@@ -3707,6 +3707,49 @@ pub(crate) mod tests {
         document.present_host_inventory(&mut visible, &editor.namespace);
         editor.retain_display_waveforms(&mut visible, true);
         assert!(visible.clips[0].source_path.is_none());
+        document.close();
+    }
+    /// **ARA-only 全链路**：宿主只提供 ARA、没有原生扩展时，加载仍必须给出带媒体的时间线，
+    /// 后端如实报告为只读的 `AraOnly`。
+    ///
+    /// 【为什么这是解耦的核心验收】此前"没有 REAPER"与"有 REAPER 但缺 API"无法区分，
+    /// 退化形态一律是空时间线。这条测试用一个**没有 `ui_tracks`** 的文档（即 ARA-only
+    /// 宿主的形状）驱动真实会话：加载 → 出时间线 → 片段带媒体身份（不是占位）→ 授权
+    /// PCM 已物化（波形与渲染输入可用）。后端身份与能力位也必须如实反映"片段几何只读"。
+    #[test]
+    fn an_ara_only_host_loads_a_timeline_with_media_and_reports_read_only() {
+        use hifishifter_kernel::editor::host::HostKind;
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        // 前提：ARA-only 宿主的形状就是"没有任何宿主清单"。
+        assert!(document.ui_tracks.lock().unwrap().is_empty());
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+
+        // 后端身份：没有原生适配器 ⇒ ARA-only，且片段几何只读。
+        let backend = owner.host_backend();
+        assert_eq!(backend.kind(), HostKind::AraOnly);
+        assert!(backend.reaper().is_none());
+        let caps = backend.capabilities();
+        assert!(caps.clip_geometry, "ARA 直接给出 region 几何");
+        assert!(!caps.clip_write, "ARA-only 后端不得宣称可写片段几何");
+
+        // 时间线：clip 带媒体身份，不是"等待宿主提供音频"的占位。
+        let timeline = editor.timeline.lock().unwrap().clone();
+        assert_eq!(timeline.clips.len(), 1, "ARA-only 也必须出时间线");
+        let source = timeline.clips[0]
+            .source_path
+            .clone()
+            .expect("ARA 授权 PCM 必须给出媒体路径，而不是占位");
+        // 插件把 ARA 授权 PCM 物化成会话本地的 wav，`source_path` 指向它。
+        assert!(
+            source.ends_with(".wav"),
+            "媒体路径应指向物化后的本地 PCM：{source}"
+        );
+        // 波形与渲染输入共用同一份授权 PCM：能取到源即证明两者都可用。
+        editor
+            .check_source(&source)
+            .expect("授权 PCM 必须已物化，波形/渲染输入才可用");
         document.close();
     }
     /// 真实宿主正向倍率不再被GUI挡住；take的源窗口和项目时长保留各自坐标。

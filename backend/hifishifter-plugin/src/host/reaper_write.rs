@@ -285,7 +285,7 @@ impl ReaperHost {
             return Err("host undo changed while reading".into());
         }
         Ok(
-            serde_json::json!({"ok":true,"backend":"reaper","position":position,"undoDepth":position,
+            serde_json::json!({"ok":true,"backend":"host","position":position,"undoDepth":position,
             "redoDepth":records.len().saturating_sub(position+1),"records":records}),
         )
     }

@@ -152,7 +152,7 @@ pub(crate) fn execute(
             .insert(pair.1.item_id.clone(), pair.0.item_id.clone());
         pairs.push(pair);
     }
-    owner.refresh_reaper_transport();
+    owner.refresh_host_transport();
     for owner in document.renderer_owners() {
         owner.prepare();
     }
@@ -237,7 +237,7 @@ mod tests {
     fn host_split_native_returns_distinct_item_guids_and_keeps_source_window() {
         let (model, owner, _id) = super::super::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_split();
         host.clear_markers();
         host.set_value("D_POSITION", 0.);
@@ -245,9 +245,9 @@ mod tests {
         host.set_value("D_PLAYRATE", 1.);
         host.set_value("D_STARTOFFS", 0.);
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock().unwrap().clips[0].clone();

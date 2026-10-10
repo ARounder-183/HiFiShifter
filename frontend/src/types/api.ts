@@ -1,6 +1,6 @@
 // ARA宿主UI载荷可附只读淡化轴；独立App不生成这些字段，音频仍由宿主淡化。
 export interface HostFadeMetadata {
-    curve_mode: "reaper_new" | "legacy" | "unknown" | "hifishifter";
+    curve_mode: "continuous" | "legacy" | "unknown" | "hifishifter";
     in_curvature: number;
     out_curvature: number;
     in_s: number;
@@ -365,10 +365,10 @@ export interface HistoryRecordSummary {
      */
     atMs: number | null;
     /**
-     * 记录来自哪一个撤销栈：`"local"`（插件自管）或 `"reaper"`（宿主权威）。
+     * 记录来自哪一个撤销栈：`"local"`（插件自管）或 `"host"`（宿主权威）。
      * 缺省按 `"local"` 处理（独立 App / 旧后端）。
      */
-    backend?: "local" | "reaper";
+    backend?: "local" | "host";
 }
 
 /**
@@ -380,7 +380,7 @@ export interface HistoryRecordSummary {
 export interface HistoryStateResult {
     ok: boolean;
     /** 记录来源；缺省 `"local"`。见 [`HistoryRecordSummary.backend`]。 */
-    backend?: "local" | "reaper";
+    backend?: "local" | "host";
     position: number;
     undoDepth: number;
     redoDepth: number;

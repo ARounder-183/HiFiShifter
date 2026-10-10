@@ -22,7 +22,7 @@ const EARLIER_FADE_LEFT_PX = EARLIER_END_PX - FADE_PX;
 
 /** 两侧都是"轻微凸"（预设 1 = curvature 0.5）；clip 自身是线性（shape 0 / dir 0）。 */
 const HOST: HostFadeMetadata = {
-    curve_mode: "reaper_new",
+    curve_mode: "continuous",
     in_curvature: 0.5,
     out_curvature: 0.5,
     in_s: 0,

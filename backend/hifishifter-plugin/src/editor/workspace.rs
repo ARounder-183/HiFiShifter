@@ -554,7 +554,7 @@ impl DocumentSession {
                 clip.group_id = if g.group_id == 0 {
                     None
                 } else {
-                    Some(format!("reaper-group-{}", g.group_id))
+                    Some(format!("host-group-{}", g.group_id))
                 };
                 clip.snap_offset_sec = g.snap_offset_sec;
                 clip.fade_in_sec = g.fade_in_sec;
@@ -569,7 +569,7 @@ impl DocumentSession {
                 // `ensure_loaded`：先 snapshot 再 inventory），无条件取旧轴会把刚投影好
                 // 的新轴曲率覆盖成一个被重映射过的旧值（实测 7.81 上新轴 0.5 读回旧轴
                 // 是 0）。表现就是"拖了曲率，滑杆/曲线又跳回另一个值"。
-                let (in_dir, out_dir) = match g.fade_axes_new {
+                let (in_dir, out_dir) = match g.fade_axes_v2 {
                     Some(true) => (g.fade_in_dir_new, g.fade_out_dir_new),
                     _ => (g.fade_in_dir, g.fade_out_dir),
                 };
@@ -698,7 +698,7 @@ impl DocumentSession {
                 }) {
                     decorate_item_gain(clip, &item.geometry);
                     let g = &item.geometry;
-                    clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
+                    clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_v2 {Some(true)=>"continuous",Some(false)=>"legacy",None=>"unknown"},
                     "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,"in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
                 }
             }
@@ -733,7 +733,7 @@ impl DocumentSession {
                     clip["host_fades"] = serde_json::json!({"curve_mode":"hifishifter","in_curvature":style.in_dir,"out_curvature":style.out_dir,"in_s":0.,"out_s":0.});
                     continue;
                 }
-                clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
+                clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_v2 {Some(true)=>"continuous",Some(false)=>"legacy",None=>"unknown"},
                     "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
                     "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
             }
@@ -1003,7 +1003,7 @@ impl DocumentSession {
                 // （≤7.80 `D_FADE*DIR`，≥7.81 `D_FADE*DIR_NEW`）。取错的话滑杆
                 // 显示和编辑的都是**不是权威**的那个值 —— 在 7.81+ 上表现为
                 // "拖了滑杆但淡变没变"。
-                let (in_dir, out_dir) = match geometry.fade_axes_new {
+                let (in_dir, out_dir) = match geometry.fade_axes_v2 {
                     Some(true) => (geometry.fade_in_dir_new, geometry.fade_out_dir_new),
                     _ => (geometry.fade_in_dir, geometry.fade_out_dir),
                 };
@@ -1557,7 +1557,7 @@ mod tests {
     fn a_track_leaving_the_host_inventory_is_dropped_once_not_forever() {
         let model = ModelHandle::new();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);

@@ -77,7 +77,7 @@ export function canEditFadeShape(): boolean {
 /**
  * 淡变**曲率**能否编辑。
  *
- * 与形状同门槛：两者都要宿主版本分得清轴语义（`fade_axes_new`），否则不知道曲率该写
+ * 与形状同门槛：两者都要宿主版本分得清轴语义（`fade_axes_v2`），否则不知道曲率该写
  * 哪个键（legacy `D_FADE*DIR` / continuous `D_FADE*DIR_NEW`）。
  */
 export function canEditFadeCurvature(): boolean {
@@ -105,14 +105,24 @@ export function hostFadeAxes(): "legacy" | "continuous" | null {
 }
 
 /**
- * 撤销历史由谁承载：`"reaper"` = 宿主权威栈，`"local"` = 插件自管栈。
+ * 撤销历史由谁承载：`"host"` = 宿主权威栈，`"local"` = 插件自管栈。
  *
  * 【为什么需要】「操作记录」面板里 `label` 的含义取决于它：本地栈是 op key（要按
  * `history_op_<key>` 本地化），宿主栈是宿主自己的可读字符串（原样显示）。缺省
  * `"local"`，与后端 `BootstrapFlags.history_backend` 的缺省一致。
  */
-export function historyBackend(): "reaper" | "local" {
-    return window.__HFS_PLUGIN_BOOTSTRAP__?.historyBackend === "reaper" ? "reaper" : "local";
+export function historyBackend(): "host" | "local" {
+    return window.__HFS_PLUGIN_BOOTSTRAP__?.historyBackend === "host" ? "host" : "local";
+}
+
+/**
+ * 当前编辑后端身份：`"reaper"`（宿主给了原生扩展）或 `"ara_only"`（只有 ARA 2.0）。
+ *
+ * 【为什么需要】ARA-only 后端上片段几何只读。缺省按 `"ara_only"`（非插件模式 / 旧后端
+ * 没有这个字段时），与后端 [`HostCapabilities::ara_only`] 的保守缺省一致。
+ */
+export function hostKind(): "reaper" | "ara_only" {
+    return window.__HFS_PLUGIN_BOOTSTRAP__?.hostKind === "reaper" ? "reaper" : "ara_only";
 }
 
 /**

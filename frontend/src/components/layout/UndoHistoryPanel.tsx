@@ -66,9 +66,9 @@ export const UndoHistoryPanel: React.FC = () => {
      *   直接摊给用户（这正是此前的报障）。
      */
     const labelOf = useCallback(
-        (record: { label: string | null; backend?: "local" | "reaper" }): string => {
+        (record: { label: string | null; backend?: "local" | "host" }): string => {
             const { label } = record;
-            if (record.backend === "reaper") return label ?? "—";
+            if (record.backend === "host") return label ?? "—";
             const key = label ? `history_op_${label}` : "history_op_initial";
             const text = tf(key);
             return typeof text === "string" && text.length > 0 ? text : (label ?? "—");

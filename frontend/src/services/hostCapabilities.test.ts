@@ -3,6 +3,7 @@
 import { afterEach, expect, test } from "vitest";
 import {
     historyBackend,
+    hostKind,
     pluginAllowsAction,
     pluginAllowsEditChannel,
     isHostGeometryReadOnly,
@@ -173,13 +174,13 @@ test("fade shape editing follows the host axis generation instead of one blanket
 });
 
 /**
- * 撤销历史的**判别式**：宿主栈（`reaper`）的记录里 `label` 是宿主自己的可读字符串，
+ * 撤销历史的**判别式**：宿主栈（`host`）的记录里 `label` 是宿主自己的可读字符串，
  * 本地栈（`local`）的 `label` 是 op key。缺了它，「操作记录」只能无差别加
  * `history_op_` 前缀，于是 `Move items` 被渲染成 `history_op_Move items`。
  */
 test("history backend discriminates host labels from local op keys", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "history", historyBackend: "reaper" };
-    expect(historyBackend()).toBe("reaper");
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "history", historyBackend: "host" };
+    expect(historyBackend()).toBe("host");
 
     window.__HFS_PLUGIN_BOOTSTRAP__.historyBackend = "local";
     expect(historyBackend()).toBe("local");
@@ -187,6 +188,23 @@ test("history backend discriminates host labels from local op keys", () => {
     // 缺省（独立 App / 旧后端）按 local：旧后端发的是 op key。
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
     expect(historyBackend()).toBe("local");
+});
+
+/**
+ * 后端身份判别式：只有宿主给出原生扩展时才报 `"reaper"`，其余一律 `"ara_only"`。
+ *
+ * 【为什么缺省是 `ara_only`】ARA-only 后端上片段几何只读；把缺省值取成"可写"会让
+ * 前端在旧后端上给出必然失败的写入口。保守缺省与后端 `HostCapabilities::ara_only` 一致。
+ */
+test("host kind defaults to ara_only and only reports reaper for a native adapter", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "kind", hostKind: "reaper" };
+    expect(hostKind()).toBe("reaper");
+
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostKind = "ara_only";
+    expect(hostKind()).toBe("ara_only");
+
+    delete window.__HFS_PLUGIN_BOOTSTRAP__;
+    expect(hostKind()).toBe("ara_only");
 });
 
 /**

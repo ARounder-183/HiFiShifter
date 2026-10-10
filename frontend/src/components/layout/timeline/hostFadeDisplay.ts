@@ -66,7 +66,7 @@ export function visualFadeGain(
     if (!metadata || metadata.curve_mode === "legacy" || metadata.curve_mode === "hifishifter")
         return fadeGainSigned(shape, dir, mode, t);
     const progress = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
-    if (metadata.curve_mode !== "reaper_new") return defaultHostFadeGain(mode, progress);
+    if (metadata.curve_mode !== "continuous") return defaultHostFadeGain(mode, progress);
     const isOut = mode === "out";
     // 曲线也按夹紧后的值画，与"认预设"用的是同一对数字，才不会出现"画的是夹紧后的
     // 曲线、认的却是另一个预设"。
@@ -97,7 +97,7 @@ export function hostFadeDisplayShape(
     const normalized = Math.trunc(Number.isFinite(fallbackShape) ? fallbackShape : 0);
     const known =
         normalized >= FADE_LINEAR && normalized <= FADE_S_SHARP ? normalized : FADE_LINEAR;
-    if (!metadata || metadata.curve_mode !== "reaper_new") return known;
+    if (!metadata || metadata.curve_mode !== "continuous") return known;
     const preset = hostFadePresetForAxes(
         visualAxis(isOut ? metadata.out_curvature : metadata.in_curvature),
         visualAxis(isOut ? metadata.out_s : metadata.in_s),

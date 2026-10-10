@@ -14,7 +14,7 @@
 //! 【为什么不把 jump 也做成纯同步 trait 方法】REAPER 的撤销必须**等在途写入落定**
 //! 才能跳（否则跳到一半的编辑状态）。那条路径要持有 document / view / 异步 barrier，
 //! 不是一次函数调用能表达的。所以 trait 负责**判别式与快照**，跳转按 `backend()`
-//! 分流：`"reaper"` 走既有的异步路径，其余走本地队列（本地命令天然排在已入队写入
+//! 分流：`"host"` 走既有的异步路径，其余走本地队列（本地命令天然排在已入队写入
 //! 之后，不需要额外的 barrier）。
 
 use super::reaper::ReaperHost;
@@ -22,7 +22,7 @@ use std::sync::{Arc, Weak};
 
 /// 宿主项目历史的只读快照 + 判别式。
 pub(crate) trait HostHistory: Send + Sync {
-    /// 判别式：`"reaper"` = 宿主权威栈；`"local"` = 插件自管栈。
+    /// 判别式：`"host"` = 宿主权威栈；`"local"` = 插件自管栈。
     ///
     /// 【为什么要这个字符串而不是 bool】它是**跨进程契约**的一部分：前端按它决定
     /// `label` 是 op key（要查 `history_op_*`）还是宿主自己的可读字符串（原样显示）。
@@ -40,7 +40,7 @@ pub(crate) struct ReaperHistory {
 
 impl HostHistory for ReaperHistory {
     fn backend(&self) -> &'static str {
-        "reaper"
+        "host"
     }
 
     fn snapshot(&self, authorized: &dyn Fn() -> bool) -> Result<serde_json::Value, String> {

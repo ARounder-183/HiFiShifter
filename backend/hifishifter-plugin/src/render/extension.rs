@@ -24,7 +24,7 @@ pub(super) fn pcm_fingerprint(pcm: &super::source::SourcePcm) -> String {
 ///
 /// `value` 是**逐 region** 的绑定列表，不是一个实例一个几何：挂在 REAPER folder
 /// 轨上的 FX 会被 ARA 分配整组 region，而 `parent(2)`（实例自己的 take）结构上只
-/// 能覆盖其中一个。见 [`ExtensionOwner::reaper_geometries`]。
+/// 能覆盖其中一个。见 [`ExtensionOwner::host_geometries`]。
 #[derive(Clone)]
 struct CachedHostGeometry {
     model: u64,
@@ -191,7 +191,8 @@ pub(crate) struct ExtensionOwner {
     roles: AtomicI32,
     closed: std::sync::atomic::AtomicBool,
     writer_id: AtomicU64,
-    reaper: Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
+    /// 原生宿主适配器（REAPER）；`None` ⇒ 退回 ARA-only 后端（见 [`Self::host_backend`]）。
+    host: Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
     host_geometry: Mutex<Option<CachedHostGeometry>>,
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
@@ -290,7 +291,7 @@ mod bound_tests {
             .lock()
             .unwrap()
             .insert("ara://source".into(), pcm);
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         for (name, value) in [
@@ -304,9 +305,9 @@ mod bound_tests {
             host.set_value(name, value);
         }
         unsafe {
-            owners[0].bind_reaper_host(host.context());
+            owners[0].bind_host_adapter(host.context());
         }
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         let editor = owners[0].editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let before = owners[0].encode_state().unwrap();
@@ -542,11 +543,11 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owners[0].bind_reaper_host(host.context());
+            owners[0].bind_host_adapter(host.context());
         }
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         let (response, _, _) = document.workspace_snapshot().unwrap();
         assert_eq!(response.timeline.clips[0].fade_in_sec, 0.2);
         let actor = owners[0].editor_session().unwrap();
@@ -576,15 +577,15 @@ mod bound_tests {
         let initial = call("get_timeline_state");
         assert_eq!(
             initial["clips"][0]["host_fades"]["curve_mode"],
-            "reaper_new"
+            "continuous"
         );
         assert_eq!(initial["clips"][0]["host_fades"]["in_curvature"], -0.2);
         assert_eq!(initial["clips"][0]["host_fades"]["in_s"], -0.3);
         let generation = call("plugin_get_apply_state")["generation"].clone();
         host.set_value("D_FADEINLEN", 0.75);
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         host.set_value("D_FADEINDIR2_NEW", 0.65);
-        owners[0].refresh_reaper_transport();
+        owners[0].refresh_host_transport();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             let timeline = call("get_timeline_state");
@@ -642,12 +643,12 @@ mod bound_tests {
                 );
             }
         }
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owners[0].bind_reaper_host(host.context());
+            owners[0].bind_host_adapter(host.context());
         }
         host.reset();
-        editor.refresh_reaper_transport();
+        editor.refresh_host_transport();
         let metadata = owners[0].host_geometry_metadata();
         let entry_metadata = editor.host_geometry_metadata();
         document.close();
@@ -679,9 +680,9 @@ mod bound_tests {
                 (&*ids[0] as *const u8).cast_mut().cast(),
             );
         }
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owners[0].bind_reaper_host(host.context());
+            owners[0].bind_host_adapter(host.context());
         }
         // assignment 回调会提前缓存“无宿主接口”的 Err；只观测这次被撤销的读取批次。
         for owner in &owners {
@@ -693,7 +694,7 @@ mod bound_tests {
             "D_LENGTH".into(),
             Box::new(move || weak.upgrade().unwrap().stop_editor()),
         ));
-        editor.refresh_reaper_transport();
+        editor.refresh_host_transport();
         let calls = host.calls();
         let sampled_next = owners[1].host_geometry.lock().unwrap().is_some();
         let sampled_first = owners[0].host_geometry.lock().unwrap().is_some();
@@ -716,24 +717,24 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let first_metadata = owner.host_geometry_metadata().unwrap();
         host.reset();
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let same = owner.host_geometry_metadata().unwrap();
         let stable_calls = host.calls();
         host.set_value("D_FADEINLEN", 0.75);
         host.reset();
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let changed = owner.host_geometry_metadata().unwrap();
         let changed_calls = host.calls();
         host.reset();
         document.revision.fetch_add(1, Ordering::AcqRel);
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         let model_calls = host.calls();
         document.close();
         assert_eq!(same, first_metadata);
@@ -758,9 +759,9 @@ mod bound_tests {
             let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
             let document = model.session();
             let owner = owners[0].clone();
-            let host = crate::host::reaper::ReaperFixture::new();
+            let host = crate::host::reaper::MockHost::new();
             unsafe {
-                owner.bind_reaper_host(host.context());
+                owner.bind_host_adapter(host.context());
             }
             host.reset();
             let weak = Arc::downgrade(&owner);
@@ -778,9 +779,9 @@ mod bound_tests {
                     }
                 }),
             ));
-            owner.refresh_reaper_transport();
+            owner.refresh_host_transport();
             let calls = host.calls();
-            let pose = document.clock.diagnostics()["reaper_position_authority"].clone();
+            let pose = document.clock.diagnostics()["host_position_authority"].clone();
             document.close();
             assert_eq!(
                 calls,
@@ -799,13 +800,13 @@ mod bound_tests {
         let owner = &owners[0];
         let first = (&*ids[0] as *const u8) as u64;
         let second = (&*ids[1] as *const u8) as u64;
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
         host.reset();
         assert!(owner
-            .reaper_geometry()
+            .host_geometry()
             .unwrap_err()
             .contains("incompatible"));
         {
@@ -814,7 +815,7 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        assert_eq!(owner.reaper_geometry().unwrap().region_key, first);
+        assert_eq!(owner.host_geometry().unwrap().region_key, first);
         let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
         // playback仍只有first，但editor另一region也属于此owner，不能忽略它伪造唯一性。
         unsafe {
@@ -825,7 +826,7 @@ mod bound_tests {
             );
         }
         host.reset();
-        assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));
+        assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
         assert!(host.calls().is_empty());
         unsafe {
             let ext = &*raw;
@@ -842,7 +843,7 @@ mod bound_tests {
             );
         }
         host.reset();
-        assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));
+        assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
         assert!(host.calls().is_empty());
         unsafe {
             let ext = &*raw;
@@ -853,7 +854,7 @@ mod bound_tests {
             }
         }
         host.reset();
-        assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));
+        assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
         assert!(host.calls().is_empty());
         document.close();
     }
@@ -864,9 +865,9 @@ mod bound_tests {
             let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
             let document = model.session();
             let owner = owners[0].clone();
-            let host = crate::host::reaper::ReaperFixture::new();
+            let host = crate::host::reaper::MockHost::new();
             unsafe {
-                owner.bind_reaper_host(host.context());
+                owner.bind_host_adapter(host.context());
             }
             host.reset();
             let weak = Arc::downgrade(&owner);
@@ -884,7 +885,7 @@ mod bound_tests {
                     }
                 }),
             ));
-            let result = owner.reaper_geometry();
+            let result = owner.host_geometry();
             let calls = host.calls();
             document.close();
             assert!(result.unwrap_err().contains("authorization revoked"));
@@ -905,12 +906,12 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
         assert!(owner.host_geometry_metadata().is_err());
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         host.reset();
         let cached = owner.host_geometry_metadata().unwrap();
         assert_eq!(cached[0].region_key, first);
@@ -920,7 +921,7 @@ mod bound_tests {
             scope
                 .spawn(|| {
                     assert_eq!(owner.host_geometry_metadata().unwrap(), cached);
-                    assert!(owner.reaper_geometry().is_err());
+                    assert!(owner.host_geometry().is_err());
                 })
                 .join()
                 .unwrap();
@@ -928,7 +929,7 @@ mod bound_tests {
         assert!(host.calls().is_empty());
         let revision = document.revision.load(Ordering::Acquire);
         host.set_value("D_FADEINLEN", 0.75);
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         assert_eq!(document.revision.load(Ordering::Acquire), revision);
         assert_eq!(
             owner.host_geometry_metadata().unwrap()[0]
@@ -2037,7 +2038,7 @@ impl ExtensionOwner {
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
-    pub(crate) unsafe fn bind_reaper_host(&self, context: *mut std::ffi::c_void) {
+    pub(crate) unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
         let bound = self.document.lock().unwrap().is_some();
         let stamp = if bound {
             match self.host_query_stamp() {
@@ -2063,7 +2064,7 @@ impl ExtensionOwner {
             "REAPER host extension available={}",
             host.is_some()
         ));
-        let old = std::mem::replace(&mut *self.reaper.lock().unwrap(), host);
+        let old = std::mem::replace(&mut *self.host.lock().unwrap(), host);
         drop(old);
         self.host_geometry.lock().unwrap().take();
     }
@@ -2149,8 +2150,8 @@ impl ExtensionOwner {
     ///
     /// 这条路径的身份来自宿主直接 parent take —— 是强证据，因此**只在恰好一个
     /// region 时**成立。多 region（folder 轨上的 FX）走
-    /// [`Self::reaper_geometries`]，那里没有直接 parent 可用，只能按几何唯一匹配。
-    pub(crate) fn reaper_geometry(
+    /// [`Self::host_geometries`]，那里没有直接 parent 可用，只能按几何唯一匹配。
+    pub(crate) fn host_geometry(
         &self,
     ) -> Result<crate::host::geometry::BoundHostGeometry, String> {
         let stamp = self.host_query_stamp()?;
@@ -2166,7 +2167,7 @@ impl ExtensionOwner {
             .cloned()
             .ok_or("assigned ARA region unavailable")?;
         let host = self
-            .reaper
+            .host
             .lock()
             .unwrap()
             .clone()
@@ -2197,13 +2198,13 @@ impl ExtensionOwner {
     ///
     /// 候选 item 与 GUI 清单同源（FX 自己的轨道 + folder 全部后代轨道），沿既有
     /// `ui_folder_tracks` 的线程/授权/预算纪律取得。
-    fn reaper_geometries(&self) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
+    fn host_geometries(&self) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
         let stamp = self.host_query_stamp()?;
         if stamp.3.is_empty() {
             return Err("no assigned ARA region".into());
         }
         let host = self
-            .reaper
+            .host
             .lock()
             .unwrap()
             .clone()
@@ -2345,8 +2346,8 @@ impl ExtensionOwner {
         *self.host_audio.lock().unwrap()
     }
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
-    pub(crate) fn refresh_reaper_transport(&self) {
-        self.refresh_reaper_transport_inner(false);
+    pub(crate) fn refresh_host_transport(&self) {
+        self.refresh_host_transport_inner(false);
     }
 
     /// UI 定时器路径：时钟每次跟，几何/清单按 [`HOST_ENUMERATION_INTERVAL`] 节流。
@@ -2356,18 +2357,18 @@ impl ExtensionOwner {
     /// `GetProjectStateChangeCount` 等若干宿主调用，还会与 actor/渲染线程争同一把
     /// document 事务。宿主真变了时下一次节流点会捕捉到（≤100ms），用户不可感。
     ///
-    /// 【为什么不把节流放进 `refresh_reaper_transport` 本身】写回路径（导入/分割/
+    /// 【为什么不把节流放进 `refresh_host_transport` 本身】写回路径（导入/分割/
     /// 剪贴板）与测试依赖它**同步**把新几何取回来；节流在那里会把"刚写完就读到新值"
     /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
-    pub(crate) fn refresh_reaper_transport_tick(&self) {
-        self.refresh_reaper_transport_inner(true);
+    pub(crate) fn refresh_host_transport_tick(&self) {
+        self.refresh_host_transport_inner(true);
     }
 
-    fn refresh_reaper_transport_inner(&self, throttled: bool) {
+    fn refresh_host_transport_inner(&self, throttled: bool) {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.reaper.lock().unwrap().clone() };
+        let host = { self.host.lock().unwrap().clone() };
         if let Some(host) = host {
             if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
                 // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
@@ -2394,7 +2395,7 @@ impl ExtensionOwner {
             }
             *last = Some(now);
         }
-        self.refresh_reaper_geometry();
+        self.refresh_host_geometry();
         // editor-only通常没有所属take；一个工程GUI必须驱动真正隐藏playback实例的只读采集。
         // renderer_owners仅返回本真实文档的活租约，不扫描全局实例，也不借名称/位置找take。
         for owner in stamp.0.renderer_owners() {
@@ -2402,7 +2403,7 @@ impl ExtensionOwner {
                 break;
             }
             if owner.renders_playback() && !std::ptr::eq(self, Arc::as_ptr(&owner)) {
-                owner.refresh_reaper_geometry();
+                owner.refresh_host_geometry();
             }
         }
         self.refresh_ui_inventory();
@@ -2412,7 +2413,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let Some(host) = self.reaper.lock().unwrap().clone() else {
+        let Some(host) = self.host.lock().unwrap().clone() else {
             // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
             // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
             *self.host_audio.lock().unwrap() = HostAudioStatus {
@@ -2456,7 +2457,7 @@ impl ExtensionOwner {
             if !allowed() {
                 return;
             }
-            let Some(host) = owner.reaper.lock().unwrap().clone() else {
+            let Some(host) = owner.host.lock().unwrap().clone() else {
                 continue;
             };
             let own_allowed = || {
@@ -2638,14 +2639,14 @@ impl ExtensionOwner {
         }
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
-    pub(crate) fn refresh_reaper_state_for_model(&self) {
-        self.refresh_reaper_geometry();
+    pub(crate) fn refresh_host_state_for_model(&self) {
+        self.refresh_host_geometry();
     }
-    fn refresh_reaper_geometry(&self) {
+    fn refresh_host_geometry(&self) {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.reaper.lock().unwrap().clone() };
+        let host = { self.host.lock().unwrap().clone() };
         let authorized = || self.host_query_authorized(&stamp);
         let before = host
             .as_ref()
@@ -2679,9 +2680,9 @@ impl ExtensionOwner {
         // 唯一 region 时走强身份路径（宿主直接 parent take）；多 region（folder 轨上
         // 的 FX）结构上不可能有直接 parent，只能逐 region 按几何唯一匹配。
         let mut geometry = if stamp.3.len() == 1 {
-            self.reaper_geometry().map(|bound| vec![bound])
+            self.host_geometry().map(|bound| vec![bound])
         } else {
-            self.reaper_geometries()
+            self.host_geometries()
         };
         let after = host
             .as_ref()
@@ -2850,17 +2851,17 @@ impl ExtensionOwner {
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
     /// 宿主淡化轴的版本语义；`None` 表示版本读不出来（前端应保持只读）。
     ///
-    /// 取**任一** owner 的读数：`fade_axes_new` 来自 `GetAppVersion`，同一进程里
+    /// 取**任一** owner 的读数：`fade_axes_v2` 来自 `GetAppVersion`，同一进程里
     /// 所有实例必然一致，不存在"这个 owner 是新轴、那个是旧轴"的情况。
     pub(crate) fn host_fade_axes(&self) -> Option<bool> {
         self.editor_document().ok().and_then(|document| {
             document.renderer_owners().iter().find_map(|owner| {
                 owner
-                    .reaper
+                    .host
                     .lock()
                     .unwrap()
                     .as_ref()
-                    .and_then(|host| host.fade_axes_new())
+                    .and_then(|host| host.fade_axes_v2())
             })
         })
     }
@@ -2869,7 +2870,7 @@ impl ExtensionOwner {
         self.editor_document().is_ok_and(|document| {
             document.renderer_owners().iter().any(|owner| {
                 owner
-                    .reaper
+                    .host
                     .lock()
                     .unwrap()
                     .as_ref()
@@ -2881,7 +2882,7 @@ impl ExtensionOwner {
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
         let document = self.editor_document().ok()?;
         if let Some(host) = self
-            .reaper
+            .host
             .lock()
             .unwrap()
             .as_ref()
@@ -2892,13 +2893,21 @@ impl ExtensionOwner {
         }
         document.renderer_owners().iter().find_map(|owner| {
             owner
-                .reaper
+                .host
                 .lock()
                 .unwrap()
                 .as_ref()
                 .filter(|host| host.has_project_history())
                 .cloned()
         })
+    }
+    /// 当前编辑后端：宿主给了原生扩展就用它，否则退回 ARA-only。
+    ///
+    /// 【为什么是"一等后端"而不是 `None`】ARA-only 后端照样能看 / 能听 / 能渲染 /
+    /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
+    /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
+    pub(crate) fn host_backend(&self) -> crate::host::adapter::HostBackend {
+        crate::host::adapter::HostBackend::from_native(self.host.lock().unwrap().clone())
     }
     /// 撤销历史的**权威**：宿主提供撤销栈时用宿主的，否则用插件自管的那份。
     ///
@@ -2961,7 +2970,7 @@ impl ExtensionOwner {
             return Err("import track has no directly bound host region".into());
         }
         let host = self
-            .reaper
+            .host
             .lock()
             .unwrap()
             .clone()
@@ -3011,12 +3020,12 @@ impl ExtensionOwner {
                 continue;
             }
             let stamp = owner.host_query_stamp()?;
-            let bound = owner.reaper_geometry()?;
+            let bound = owner.host_geometry()?;
             if bound.region_key != key {
                 return Err("host region binding changed".into());
             }
             let host = owner
-                .reaper
+                .host
                 .lock()
                 .unwrap()
                 .clone()
@@ -3052,7 +3061,7 @@ impl ExtensionOwner {
             self.closed.store(true, Ordering::Release);
             self.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
-        let host = self.reaper.lock().unwrap().take();
+        let host = self.host.lock().unwrap().take();
         drop(host);
         self.host_geometry.lock().unwrap().take();
         self.cancel_preparation();
@@ -3756,7 +3765,7 @@ impl ExtensionOwner {
                     // 某轨首次获得分配可能恢复其state并推进共享revision；其它轨也需要最新任务。
                     drop(_transaction);
                     for renderer in owners {
-                        renderer.refresh_reaper_geometry();
+                        renderer.refresh_host_geometry();
                         renderer.prepare();
                     }
                 }
@@ -3936,7 +3945,7 @@ impl ExtensionOwner {
             return Ok(());
         }
         // SDK离线setup在UI线程；无GUI时也刷新真实item状态，不能依赖WebView timer。
-        self.refresh_reaper_geometry();
+        self.refresh_host_geometry();
         let document = self.editor_document()?;
         loop {
             {
@@ -4207,16 +4216,16 @@ mod host_audio_state_tests {
     fn a_take_level_fact_change_survives_the_change_count_early_return() {
         let (model, owner, _identity) = crate::editor::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::ReaperFixture::new();
+        let host = crate::host::reaper::MockHost::new();
         host.enable_takes(0);
         host.enable_media();
         host.clear_markers();
         // SAFETY: 夹具与 owner 在整个用例期间存活。
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
         // 第一轮完整采集：方向按正放。
-        owner.refresh_reaper_transport();
+        owner.refresh_host_transport();
         assert!(
             document
                 .render_facts
@@ -4312,7 +4321,7 @@ mod host_audio_state_tests {
 
 /// 多 region 几何匹配的纯函数回归。
 ///
-/// 【为什么单独测这一层】`reaper_geometries` 里真正有风险的不是宿主调用，而是
+/// 【为什么单独测这一层】`host_geometries` 里真正有风险的不是宿主调用，而是
 /// "哪条 region 对应哪个 item"的判定：ARA 侧没有这条边，只能按几何比对，而后续
 /// 所有宿主写回都沿这条边定位对象。所以唯一性判据必须被钉死。
 #[cfg(test)]
@@ -4356,7 +4365,7 @@ mod region_geometry_match_tests {
             fade_out_dir_new: 0.,
             fade_in_dir2_new: 0.,
             fade_out_dir2_new: 0.,
-            fade_axes_new: None,
+            fade_axes_v2: None,
             auto_fade_in_sec: 0.,
             auto_fade_out_sec: 0.,
             loop_source: false,
@@ -4528,13 +4537,13 @@ mod assigned_timeline_tests {
     }
 }
 
-/// `reaper_geometries`（多 region 入口）的端到端回归。
+/// `host_geometries`（多 region 入口）的端到端回归。
 ///
 /// 单 region 走强身份路径，所以这条入口只有在"一个 FX 管一组 region"时才被用到 ——
 /// 正是 folder 轨的场景。这里用真实宿主夹具驱动它，覆盖候选收集、逐 region 匹配、
 /// 唯一性判据与重复认领丢弃。
 #[cfg(test)]
-mod reaper_geometries_tests {
+mod host_geometries_tests {
     /// 把某条 region 调成与夹具 item 相容的窗口。
     ///
     /// 夹具的 item 几何是 `D_POSITION=1 / D_LENGTH=4 / D_STARTOFFS=0 / D_PLAYRATE=0.5`。
@@ -4545,8 +4554,8 @@ mod reaper_geometries_tests {
         region.duration_in_modification_time = 2.;
     }
 
-    fn fixture_host() -> Box<crate::host::reaper::ReaperFixture> {
-        let host = crate::host::reaper::ReaperFixture::new();
+    fn fixture_host() -> Box<crate::host::reaper::MockHost> {
+        let host = crate::host::reaper::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);
@@ -4577,9 +4586,9 @@ mod reaper_geometries_tests {
         }
         let host = fixture_host();
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
-        let bound = owner.reaper_geometries().expect("至少一条 region 必须绑定");
+        let bound = owner.host_geometries().expect("至少一条 region 必须绑定");
         assert_eq!(bound.len(), 1, "对不上的 region 不得被绑定");
         assert_eq!(bound[0].region_key, first);
         assert!(bound[0].geometry.item_id.starts_with('{'));
@@ -4615,10 +4624,10 @@ mod reaper_geometries_tests {
         }
         let host = fixture_host();
         unsafe {
-            owner.bind_reaper_host(host.context());
+            owner.bind_host_adapter(host.context());
         }
         let bound = owner
-            .reaper_geometries()
+            .host_geometries()
             .expect("重复认领必须留下恰好一个绑定，不能整组丢弃");
         assert_eq!(bound.len(), 1, "一个 item 只能归一个 region");
         assert!(

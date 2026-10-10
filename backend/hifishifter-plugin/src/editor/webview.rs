@@ -591,7 +591,7 @@ unsafe extern "system" fn window_proc(
                 let state = (*pointer).state.clone();
                 let link = state.borrow().link.clone();
                 if let Ok(owner) = link.owner() {
-                    owner.refresh_reaper_transport_tick();
+                    owner.refresh_host_transport_tick();
                 }
                 if !state.borrow().closed {
                     deliver(&state);
@@ -989,6 +989,13 @@ struct BootstrapFlags {
     /// （原样显示）。缺了这个判别式，前端只能无差别加前缀 —— 那正是
     /// `history_op_Move items` 这类原始键名被摊给用户的原因。
     history_backend: &'static str,
+    /// 当前后端身份：`"reaper"` 或 `"ara_only"`。
+    ///
+    /// 【为什么前端需要它】非 REAPER 宿主上片段几何**只读**（ARA 2.0 不允许插件改
+    /// region 几何）。前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
+    host_kind: &'static str,
+    /// 后端能力位的完整快照（与 [`BootstrapFlags`] 的布尔同源，但更细）。
+    host_capabilities: hifishifter_kernel::editor::host::HostCapabilities,
 }
 
 impl BootstrapFlags {
@@ -1004,6 +1011,9 @@ impl BootstrapFlags {
             "trackCreation": self.track_creation,
             "fadeAxes": self.fade_axes,
             "historyBackend": self.history_backend,
+            // 后端身份与能力：前端据此显示只读横幅、禁用不可用的入口。
+            "hostKind": self.host_kind,
+            "hostCapabilities": self.host_capabilities,
             // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
@@ -1203,7 +1213,7 @@ fn configure_browser(
                         if let Some(track)=&mut created {track.commit();}Ok(id)
                     })();
                     document.host_undo.finish_request(&view_id,id);let imported=result?;
-                    owner.refresh_reaper_transport();editor.notify_timeline();
+                    owner.refresh_host_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
                 })();
@@ -1235,7 +1245,7 @@ fn configure_browser(
                         Ok(())
                     })();
                     document.host_undo.finish_request(&view_id,id);result?;
-                    owner.refresh_reaper_transport();editor.notify_timeline();
+                    owner.refresh_host_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
                 })();
@@ -1303,16 +1313,21 @@ fn configure_browser(
                     let out=std::path::PathBuf::from(output);
                     if !out.is_absolute() {return Err("diagnostics output path must be absolute".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;
-                    let host=owner.project_history_host();
+                    let backend=owner.host_backend();
                     let system=serde_json::json!({
                         "product":"HiFiShifter ARA plugin",
                         "about":hifishifter_kernel::build_info::about_payload("ARA plugin",crate::VERSION),
                         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,
                         "generatedAt":chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                        // 用户报障时"你是哪个 REAPER"是第一个要问的问题。宿主名来自
+                        // 用户报障时"你是哪个宿主"是第一个要问的问题。宿主名来自
                         // `IHostApplication::getName`（只诊断用，绝不参与分支）。
-                        "host":{"appName":super::connection::host_application_name(),
-                            "appVersion":host.as_ref().and_then(|host|host.app_version())},
+                        "host":{"appName":backend.app_name().map(str::to_owned)
+                                .or_else(super::connection::host_application_name),
+                            "appVersion":backend.app_version()},
+                        // 当前编辑后端与能力位：报障时能直接读出"是不是 ARA-only 只读后端"。
+                        "backend":{"kind":backend.kind().as_str(),
+                            "nativeAdapter":backend.reaper().is_some(),
+                            "capabilities":backend.capabilities()},
                         "transport":document.clock.diagnostics(),
                         // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
                         // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。
@@ -1384,8 +1399,8 @@ fn configure_browser(
                     let plan=editor.plan_host_edit(command,&input)?;
                     // 完成门需要知道宿主的淡化轴版本：形状预设在新轴/旧轴上落盘的字段不同，
                     // 期望值也就不同（见 `HostEditPlan::receipt`）。
-                    let fade_axes_new=owner.host_fade_axes();
-                    let geometry=Some(plan.receipt(&editor.namespace,fade_axes_new));
+                    let fade_axes_v2=owner.host_fade_axes();
+                    let geometry=Some(plan.receipt(&editor.namespace,fade_axes_v2));
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
@@ -1467,7 +1482,7 @@ fn configure_browser(
                         owner.host_playback().ok_or("host does not provide ARA playback control")?
                             .set_position(position).map_err(|e|e.to_string())?;
                         // seek回执前同步真实宿主光标，避免继续发布上次UI tick的旧位置。
-                        owner.refresh_reaper_transport();Ok(())
+                        owner.refresh_host_transport();Ok(())
                     })();
                     if let Err(error)=result {
                         let text=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}).to_string());
@@ -1571,6 +1586,18 @@ fn configure_browser(
             .owner()
             .map(|owner| owner.history_authority().backend())
             .unwrap_or("local"),
+        host_kind: state
+            .borrow()
+            .link
+            .owner()
+            .map(|owner| owner.host_backend().kind().as_str())
+            .unwrap_or("ara_only"),
+        host_capabilities: state
+            .borrow()
+            .link
+            .owner()
+            .map(|owner| owner.host_backend().capabilities())
+            .unwrap_or_else(|_| hifishifter_kernel::editor::host::HostCapabilities::none()),
     }
     .to_json(&state.borrow().view_id);
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
@@ -1703,6 +1730,9 @@ mod bootstrap_tests {
                 track_creation: false,
                 fade_axes: None,
                 history_backend: "local",
+                host_kind: "ara_only",
+                host_capabilities:
+                    hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
             };
             assert_eq!(
                 flags.to_json("view-7")["trackGrouping"],
@@ -1724,6 +1754,8 @@ mod bootstrap_tests {
             track_creation: true,
             fade_axes: Some("legacy"),
             history_backend: "local",
+            host_kind: "ara_only",
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
         };
         let json = flags.to_json("view-42");
         assert_eq!(json["version"], serde_json::json!(1));
@@ -1735,6 +1767,10 @@ mod bootstrap_tests {
         assert_eq!(json["audioImport"], serde_json::json!(true));
         assert_eq!(json["trackCreation"], serde_json::json!(true));
         assert_eq!(json["fadeAxes"], serde_json::json!("legacy"));
+        // 后端身份与能力位必须与布尔同源透传：前端据此显示只读横幅。
+        assert_eq!(json["hostKind"], serde_json::json!("ara_only"));
+        assert_eq!(json["hostCapabilities"]["clipWrite"], serde_json::json!(false));
+        assert_eq!(json["hostCapabilities"]["clipGeometry"], serde_json::json!(true));
     }
 
     /// `trackCreation` 是独立能力：导入音频蕴含建轨，建轨不蕴含导入。
@@ -1752,6 +1788,8 @@ mod bootstrap_tests {
             track_creation: true,
             fade_axes: None,
             history_backend: "local",
+            host_kind: "ara_only",
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
         };
         let json = flags.to_json("v");
         assert_eq!(json["audioImport"], serde_json::json!(false));
@@ -1770,6 +1808,8 @@ mod bootstrap_tests {
             track_creation: false,
             fade_axes: None,
             history_backend: "local",
+            host_kind: "ara_only",
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
         };
         assert_eq!(flags.to_json("v")["fadeAxes"], serde_json::Value::Null);
     }
@@ -1786,6 +1826,8 @@ mod bootstrap_tests {
             track_creation: false,
             fade_axes: Some("continuous"),
             history_backend: "local",
+            host_kind: "ara_only",
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
         };
         assert_eq!(
             flags.to_json("v")["fadeAxes"],

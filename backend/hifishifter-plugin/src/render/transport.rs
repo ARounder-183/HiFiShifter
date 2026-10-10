@@ -114,7 +114,7 @@ impl TransportClock {
     /// 仅非实时actor查询，JSON分配绝不进入process/setProcessing。
     pub fn diagnostics(&self) -> serde_json::Value {
         serde_json::json!({"realtime_callbacks":self.realtime.load(Ordering::Relaxed),
-            "reaper_position_authority":self.host_valid.load(Ordering::Acquire),
+            "host_position_authority":self.host_valid.load(Ordering::Acquire),
             "prefetch_callbacks":self.prefetch.load(Ordering::Relaxed),"offline_callbacks":self.offline.load(Ordering::Relaxed),
             "writer_switches":self.switches.load(Ordering::Relaxed),"backwards_while_playing":self.backwards.load(Ordering::Relaxed),
             "last_writer":self.writer.load(Ordering::Relaxed),"last_role":self.role.load(Ordering::Relaxed),
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(clock.read(), (0.5, true));
         clock.publish_host(0.25, false);
         assert_eq!(clock.read(), (0.25, false));
-        assert_eq!(clock.diagnostics()["reaper_position_authority"], true);
+        assert_eq!(clock.diagnostics()["host_position_authority"], true);
     }
     /// 诊断真实区分三模式/多writer/回跳/瞬时停止，但本身不能改变GUI播放时间。
     #[test]
