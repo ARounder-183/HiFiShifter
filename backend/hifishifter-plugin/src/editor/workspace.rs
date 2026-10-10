@@ -48,6 +48,83 @@ fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::H
 ///
 /// 【为什么无条件重建，而不是"未变则早退"】此前的早退判据是"active take id / take id
 /// 列表 / `loop_enabled` 都没变就跳过"。那是一个**枚举型**判据：宿主能改、而判据没
+/// 把一份**已授权媒体身份**搬到 `take` 上。
+///
+/// 【为什么只搬这些字段】源窗口 / 倍率 / 名字 / 声道模式都是宿主几何，由清单或 ARA
+/// 映射提供；这里只补"这份采样是哪一个文件"这一族身份字段（与 `sync_host_takes` 的
+/// 嫁接同一原则）。两条路径（清单重建、渲染派生）共用它，避免字段集再次分叉。
+fn apply_take_media(
+    take: &mut hifishifter_kernel::state::ClipTake,
+    media: &hifishifter_kernel::state::ClipTake,
+) {
+    take.source_path = media.source_path.clone();
+    take.source_path_relative = media.source_path_relative.clone();
+    take.duration_sec = media.duration_sec;
+    take.duration_frames = media.duration_frames;
+    take.source_sample_rate = media.source_sample_rate;
+    take.source_file_fingerprint = media.source_file_fingerprint;
+    take.source_file_mtime = media.source_file_mtime;
+    take.source_file_size = media.source_file_size;
+    take.waveform_preview = media.waveform_preview.clone();
+    take.pitch_range = media.pitch_range.clone();
+}
+
+/// 分割派生：把父段的授权媒体身份借给右半段。
+///
+/// 【为什么需要】宿主分割**不改变音频源** —— 两半指向同一个文件。父段已被 ARA 授权，
+/// 所以右半段可以立刻显示波形，不必等宿主为它重新分配 region。缺了这条，分割后右半段
+/// 会停在一段"等待 REAPER 提供音频"的占位里（用户报障过）。
+///
+/// 【为什么两条路径都要调】清单路径（`present_host_inventory`，经 `sync_host_takes`
+/// 的 `inherited_media`）与渲染路径（`workspace_timeline_locked`）各建一份时间线。
+/// 只给清单补，界面显示正常，但**渲染出来的右半段仍是无源静音**（上一篇 Plan 明写
+/// "两处都要"，只做了一半）。
+///
+/// 【为什么只借媒体身份】源窗口 / 倍率 / 名字都是右半段自己的宿主几何；这里只补
+/// `source_path` 一族字段，与 `sync_host_takes` 的嫁接同一原则：同一 `audio_source`、
+/// 已在授权范围内。父段自己也可能还没拿到音频（例如它也是被隔离的倒放片段）—— 那就
+/// 什么都不借，右半段照常显示为"在途"。
+pub(crate) fn derive_split_media(
+    timeline: &mut TimelineState,
+    lineage: &std::collections::HashMap<String, String>,
+    prefix: &impl Fn(&str) -> String,
+) {
+    for (right, left) in lineage {
+        let right_id = prefix(&format!("ara-item-{right}"));
+        let left_id = prefix(&format!("ara-item-{left}"));
+        let Some(media) = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == left_id)
+            .filter(|parent| parent.source_path.is_some())
+            .map(|parent| parent.active_take().clone())
+        else {
+            continue;
+        };
+        let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == right_id) else {
+            continue;
+        };
+        // ARA 已经认领过这一条 ⇒ 它有自己的授权媒体，不覆盖。
+        if clip.source_path.is_some() {
+            continue;
+        }
+        if clip.takes.is_empty() {
+            let mut take = hifishifter_kernel::state::ClipTake::from_clip(clip);
+            apply_take_media(&mut take, &media);
+            clip.takes.push(take);
+            clip.active_take_id = clip.takes.first().map(|take| take.id.clone());
+        } else {
+            let index = clip
+                .takes
+                .iter()
+                .position(|take| Some(take.id.as_str()) == clip.active_take_id.as_deref())
+                .unwrap_or(0);
+            apply_take_media(&mut clip.takes[index], &media);
+        }
+        clip.normalize_takes();
+    }
+}
+
 /// 覆盖的属性（`channel_mode`、`reversed`、take 名、源窗口、倍率）改了之后这里会早退，
 /// 界面停在旧值 —— 用户报的"改了声道模式，闪一下又变回去"就是它（乐观更新先亮，下一份
 /// 权威 payload 又发旧值）。枚举永远补不完，所以现在**每次都重建**，并把宿主不报告的
@@ -171,17 +248,7 @@ fn sync_host_takes(
         }),
     };
     if let Some((index, media)) = media {
-        let target = &mut rebuilt[index];
-        target.source_path = media.source_path;
-        target.source_path_relative = media.source_path_relative;
-        target.duration_sec = media.duration_sec;
-        target.duration_frames = media.duration_frames;
-        target.source_sample_rate = media.source_sample_rate;
-        target.source_file_fingerprint = media.source_file_fingerprint;
-        target.source_file_mtime = media.source_file_mtime;
-        target.source_file_size = media.source_file_size;
-        target.waveform_preview = media.waveform_preview;
-        target.pitch_range = media.pitch_range;
+        apply_take_media(&mut rebuilt[index], &media);
     }
     // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
     // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
@@ -534,6 +601,13 @@ impl DocumentSession {
                 present.contains(&prefix(&format!("ara-item-{right}")))
                     && present.contains(&prefix(&format!("ara-item-{left}")))
             });
+        }
+        // 与渲染路径共用同一份派生（`derive_split_media`）：宿主清单里没有、但作为 ARA
+        // clip 存在的右半段也能借到父段媒体。已有源的片段会被跳过，所以与上面
+        // `sync_host_takes` 的 `inherited_media` 嫁接不冲突（同值，幂等）。
+        {
+            let lineage = self.split_media_from.lock().unwrap().clone();
+            derive_split_media(&mut *timeline, &lineage, &prefix);
         }
         {
             let known = self.ui_known_tracks.lock().unwrap();
@@ -1244,6 +1318,12 @@ impl DocumentSession {
             .clone()
             .ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| clips.contains(&clip.id));
+        // 分割派生：右半段的授权媒体借自父段。**渲染路径**过去没有这一步，于是界面显示
+        // 正常、渲染出来的右半段却是无源静音（见 `derive_split_media`）。
+        {
+            let lineage = self.split_media_from.lock().unwrap().clone();
+            derive_split_media(&mut timeline, &lineage, &|id: &str| id.to_owned());
+        }
         self.project_host_mutes_locked(&mut timeline);
         self.project_host_take_facts_locked(&mut timeline);
         self.project_plugin_musical_context_locked(&mut timeline);
@@ -1623,6 +1703,63 @@ mod tests {
         // 连 ARA 源时长也没有时，只能返回 None（由调用方记 warn，不静默按镜像渲染）。
         assert_eq!(reversed_media_duration(None, &unclaimed), None);
         assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
+    }
+
+    /// 分割派生：只有**自己没源**的右半段才借父段媒体；已有源的片段不被覆盖。
+    ///
+    /// 【为什么这是回归测试】此前只有清单路径做了这件事（`sync_host_takes` 的
+    /// `inherited_media`），渲染路径没有 ⇒ 界面显示正常、渲染出来的右半段却是无源静音。
+    #[test]
+    fn derive_split_media_lends_the_parent_media_only_to_a_sourceless_right_half() {
+        let model = ModelHandle::new();
+        let document = model.session();
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],
+            "clips":[
+                {"id":"ara-item-{P}","track_id":"a","name":"L","start_sec":0,"length_sec":0.25,
+                 "takes":[{"id":"tl","source_path":"shared-source","source_end_sec":0.25}]},
+                {"id":"ara-item-{R}","track_id":"a","name":"R","start_sec":0.25,"length_sec":0.25,
+                 "takes":[{"id":"tr","source_end_sec":0.25}]},
+                {"id":"ara-item-{O}","track_id":"a","name":"O","start_sec":0.5,"length_sec":0.25,
+                 "takes":[{"id":"to","source_path":"own-source","source_end_sec":0.25}]}
+            ],
+            "bpm":120,"project_sec":1
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        let lineage = std::collections::HashMap::from([
+            ("{R}".to_string(), "{P}".to_string()),
+            ("{O}".to_string(), "{P}".to_string()),
+        ]);
+        derive_split_media(&mut timeline, &lineage, &|id: &str| id.to_owned());
+
+        let right = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == "ara-item-{R}")
+            .unwrap();
+        assert_eq!(
+            right.source_path.as_deref(),
+            Some("shared-source"),
+            "无源右半段必须借到父段媒体（渲染路径过去没有这一步）"
+        );
+        assert!(
+            right
+                .takes
+                .iter()
+                .all(|take| take.source_path.as_deref() == Some("shared-source")),
+            "active take 也要带上，否则下一次 normalize_takes 会把扁平字段清空"
+        );
+        // 自己已经有源的片段不被覆盖。
+        let own = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == "ara-item-{O}")
+            .unwrap();
+        assert_eq!(own.source_path.as_deref(), Some("own-source"));
+        document.close();
     }
 
     /// "在途"必须排除**终态**，否则应用状态会永久停在"进行中"。
