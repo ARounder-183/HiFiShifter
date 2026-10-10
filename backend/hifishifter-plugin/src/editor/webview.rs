@@ -1309,8 +1309,10 @@ fn configure_browser(
                         "about":hifishifter_kernel::build_info::about_payload("ARA plugin",crate::VERSION),
                         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,
                         "generatedAt":chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                        // 用户报障时"你是哪个 REAPER"是第一个要问的问题。
-                        "host":{"appVersion":host.as_ref().and_then(|host|host.app_version())},
+                        // 用户报障时"你是哪个 REAPER"是第一个要问的问题。宿主名来自
+                        // `IHostApplication::getName`（只诊断用，绝不参与分支）。
+                        "host":{"appName":super::connection::host_application_name(),
+                            "appVersion":host.as_ref().and_then(|host|host.app_version())},
                         "transport":document.clock.diagnostics(),
                         // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
                         // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。

@@ -861,6 +861,11 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
         }
         return K_RESULT_FALSE;
     }
+    // 走到这里说明组件没有在 QI/bind 期间被重入关闭；此时才读一次宿主应用名
+    // （只用于诊断，见 `connection::host_application_name`）。
+    unsafe {
+        (*this.cast::<Processor>()).connection.record_host_name();
+    }
     crate::log_line("IComponent::initialize");
     K_RESULT_OK
 }

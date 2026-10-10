@@ -78,6 +78,80 @@ impl Drop for Owned {
         }
     }
 }
+
+/// 宿主应用名（`IHostApplication::getName`）。
+///
+/// 【为什么单独存一份】报障时最需要的一条信息是"你在哪个宿主里"——而这份信息此前只有
+/// 一个**声明过却从未调用**的 vtable 槽位（`HostVtbl::name`）。存下来供诊断包读取。
+///
+/// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
+/// 能力探测（`BootstrapFlags` / `ReaperHost::from_context` 的 Option bundle）决定。
+static HOST_NAME: Mutex<Option<String>> = Mutex::new(None);
+
+/// 读回宿主应用名（未识别为 `None`）。只读，供诊断输出。
+pub(crate) fn host_application_name() -> Option<String> {
+    HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 调用 `IHostApplication::getName` 并记录；失败/空名一律静默（诊断信息不是硬依赖）。
+///
+/// # Safety
+/// `host` 必须是 `IID_HOST` 查询成功返回的、仍持有引用的宿主接口指针。
+unsafe fn record_host_name(host: *mut c_void) {
+    if host.is_null() {
+        return;
+    }
+    // SAFETY: host 指向 IHostApplication vtable；name 的签名为 `TResult(String128)`，
+    // 即写入一个 128 个 UTF-16 单元的调用方缓冲（VST3 SDK 的 String128）。
+    let table = unsafe { &**host.cast::<*const HostVtbl>() };
+    let mut buffer = [0u16; 128];
+    if unsafe { (table.name)(host, buffer.as_mut_ptr()) } != K_RESULT_OK {
+        return;
+    }
+    let Some(name) = decode_string128(&buffer) else {
+        return;
+    };
+    *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
+    crate::log_line(&format!("host application: {name}"));
+}
+
+/// `String128`（NUL 结尾的 UTF-16）→ `String`；空串/非法 UTF-16 返回 `None`。
+///
+/// 【为什么单独抽出来】宿主名是纯诊断信息，绝不能因为一次读名失败影响加载；把"怎么
+/// 解释这段缓冲"独立出来，边界就能单测，不必造一个真实宿主接口。
+fn decode_string128(buffer: &[u16]) -> Option<String> {
+    let end = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
+    let name = String::from_utf16(&buffer[..end]).ok()?;
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(test)]
+mod host_name_tests {
+    use super::*;
+
+    /// 未连接宿主时读不到名字 —— 诊断包据此报 `null`，而不是一个编出来的占位名。
+    #[test]
+    fn the_host_name_is_absent_before_any_host_is_recorded() {
+        // 注意：本用例不写 `HOST_NAME`（进程级静态），只读。
+        let name = host_application_name();
+        assert!(name.is_none() || !name.unwrap().is_empty());
+    }
+
+    #[test]
+    fn string128_decoding_stops_at_the_terminator() {
+        let mut buffer = [0u16; 128];
+        for (slot, unit) in "REAPER".encode_utf16().enumerate() {
+            buffer[slot] = unit;
+        }
+        assert_eq!(decode_string128(&buffer).as_deref(), Some("REAPER"));
+        // 全是 NUL ⇒ 空名 ⇒ None（不是 `Some("")`）。
+        assert_eq!(decode_string128(&[0u16; 128]), None);
+        // 没有终结符时取整段。
+        assert_eq!(decode_string128(&[b'A' as u16, b'B' as u16]).as_deref(), Some("AB"));
+        // 非法 UTF-16（孤立高位代理）⇒ None，不 panic。
+        assert_eq!(decode_string128(&[0xD800, 0]), None);
+    }
+}
 #[derive(Default)]
 pub(crate) struct ConnectionState {
     host: Mutex<usize>,
@@ -101,6 +175,17 @@ impl ConnectionState {
             );
             drop(Owned(old));
         }
+    }
+    /// 读一次宿主应用名（`IHostApplication::getName`）。
+    ///
+    /// 【为什么由调用方在**健康路径**上触发】`initialize` 里的 QI 可能先重入关闭组件
+    /// （见 `component_initialize` 的重入测试）。读名是一次额外的宿主调用，不该发生在
+    /// "已经被重入关闭"的那条路径上 —— 那时组件正在拒绝初始化，任何多余的宿主交互都
+    /// 没有意义。
+    pub fn record_host_name(&self) {
+        let host = *self.host.lock().unwrap_or_else(|e| e.into_inner()) as *mut c_void;
+        // SAFETY: host 是本状态持有的 IHostApplication 引用（QI 成功后登记）。
+        unsafe { record_host_name(host) };
     }
     pub unsafe fn connect(&self, peer: *mut c_void) -> TResult {
         if peer.is_null() {
