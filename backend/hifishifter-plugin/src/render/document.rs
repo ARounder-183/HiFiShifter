@@ -801,6 +801,39 @@ impl DocumentSession {
         self.revoke_snapshots();
     }
 
+    /// 渲染输入失效：推进 `render_epoch` 并**通知本文档全部 owner** 重排。
+    ///
+    /// 【为什么必须是文档级、必须遍历全部 owner】`render_epoch` 是本文档的共享计数器，
+    /// 但"谁发现了变化"与"谁持有快照"在多实例下**不是同一个实例**。REAPER 按轨道管理
+    /// ARA 实例：持有 webview 与 20 ms 定时器的是编辑/视图实例（`role == 2`），真正被
+    /// 音频回调读取快照的是播放渲染实例（`role == 1`）。若发现变化的一侧只
+    /// `self.prepare()`，编辑实例会因 `prepare()` 首行的 `!renders_playback()` 直接返回
+    /// （`extension.rs`），播放实例则**从未被通知** —— 于是波形更新、声音不变，直到
+    /// 用户做一次编辑（编辑路径恰好遍历了全部 owner）才"碰巧"恢复。
+    ///
+    /// 【为什么不在这里清快照】失效只需要让 `PreparedVersion` 不再匹配（它含 `epoch`），
+    /// `prepare_job` 便不会早退；清快照会制造一段静音空窗，而重排是异步的。
+    ///
+    /// 【为什么**不**取 `transaction`】这是一次通知，不是与文档状态必须原子提交的变更：
+    /// 只推进一个原子计数并枚举 owner。`prepare_job` 会在自己的事务里重新校验全部版本，
+    /// 因此这里取事务没有正确性收益，却会在这个 20 ms 定时器路径上多抢一次文档锁，
+    /// 并让调用方无法"持事务阻止后台渲染"（测试与离线 setup 都依赖这个手法）。
+    /// 锁序也因此更简单：本函数只取 `renderers`，不参与"事务 → renderers"的嵌套。
+    pub fn invalidate_render_input(&self) {
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        let owners = self
+            .renderers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|lease| lease.owner.upgrade())
+            .filter(|owner| !owner.is_closed())
+            .collect::<Vec<_>>();
+        for owner in owners {
+            owner.prepare();
+        }
+    }
+
     fn revoke_snapshots(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         self.ready.store(false, Ordering::Release);

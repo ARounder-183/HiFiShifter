@@ -196,6 +196,14 @@ pub(crate) struct ExtensionOwner {
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
     prepared: Mutex<Option<PreparedVersion>>,
+    /// 测试专用：`prepare()` 真正进入重排的次数。
+    ///
+    /// 【为什么需要它】"渲染输入失效必须通知**全部** owner"这条不变量，在单实例下
+    /// 无法与"只通知自己"区分（`self` 恰好就是播放实例）。只有让编辑实例触发、断言
+    /// 播放实例被通知，才能锁住回归。计数在 `prepare()` 的 `renders_playback()` 之后
+    /// 自增 —— 那正是此前漏掉播放实例的位置。
+    #[cfg(test)]
+    prepare_requests: AtomicU64,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
@@ -2527,12 +2535,16 @@ impl ExtensionOwner {
         // `render_epoch`，于是 `PreparedVersion`（渲染缓存键）失效、`prepare_job` 不再
         // 早退。此前只有**淡变长度**有这条通路，倒放/声道/循环源都没有 —— 用户报障
         // "倒放后波形更新了、声音没变，编辑一下才对"正是这个缺口。
+        //
+        // 【为什么只置标志、通知留给文档级入口】发现变化的实例不一定是持有快照的实例
+        // （REAPER 按轨道管理 ARA 实例：定时器在编辑实例上，快照在播放实例上）。
+        // `invalidate_render_input()` 会推进 epoch 并通知**全部 owner**；此处只在本
+        // 事务内记下"变了"，出事务后再调用它。
         let mut facts_changed = false;
         {
             let mut previous = stamp.0.render_facts.lock().unwrap();
             if *previous != facts {
                 *previous = facts;
-                stamp.0.render_epoch.fetch_add(1, Ordering::AcqRel);
                 facts_changed = true;
             }
         }
@@ -2576,9 +2588,9 @@ impl ExtensionOwner {
         }
         drop(_transaction);
         if facts_changed {
-            // 与 `refresh_reaper_geometry` 的淡变分支同一理由：渲染输入变了就重排准备。
+            // 渲染输入变了 ⇒ 文档级失效：推进 epoch 并通知**全部 owner**。
             // 不持 `transaction` 调用，避免与 `prepare_job` 的事务重入。
-            self.prepare();
+            stamp.0.invalidate_render_input();
         }
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
@@ -2676,9 +2688,8 @@ impl ExtensionOwner {
                     .as_ref()
                     .and_then(|old| old.value.as_ref().ok())
                     .is_none_or(|old| lengths(old) != lengths(geometry.as_ref().unwrap()));
-                if prepare_fades {
-                    stamp.0.render_epoch.fetch_add(1, Ordering::AcqRel);
-                }
+                // `prepare_fades` 只记"渲染输入变了"；`render_epoch` 的推进与对全部
+                // owner 的通知统一由下面的 `invalidate_render_input()` 完成。
             }
             // 门控是**实例级**的：单 region 时等同于该 item 的 mute（与既有语义一致）；
             // 多 region 时只有全部绑定 item 都静音才静音整组 —— 一个子轨静音不该让
@@ -2708,7 +2719,7 @@ impl ExtensionOwner {
         }
         drop(_transaction);
         if prepare_fades {
-            self.prepare();
+            stamp.0.invalidate_render_input();
         }
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
@@ -3795,6 +3806,8 @@ impl ExtensionOwner {
         if !self.renders_playback() {
             return;
         }
+        #[cfg(test)]
+        self.prepare_requests.fetch_add(1, Ordering::AcqRel);
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
         let weak = self.prepare_owner.lock().unwrap().clone();
         let Some(weak) = weak else {
@@ -4016,6 +4029,58 @@ mod host_audio_state_tests {
             HostAudioState::FolderParentWithoutRegions.as_str(),
             "folder_parent_without_regions"
         );
+    }
+
+    /// **不变量：渲染输入失效必须通知本文档的**全部** owner，而不只是发现变化的那个实例。**
+    ///
+    /// 【为什么这是回归测试】REAPER 按轨道管理 ARA 实例：20 ms 定时器与清单采样跑在
+    /// 编辑/视图实例上（`role == 2`），而快照被播放渲染实例持有（`role == 1`）。
+    /// 此前 `RenderFacts` 变化时调用的是 `self.prepare()` —— 编辑实例的 `prepare()`
+    /// 首行就因 `!renders_playback()` 直接返回，播放实例**从未被通知**。用户报障：
+    /// "在宿主里倒放 Take，波形更新了、声音没变，编辑一下才对"（编辑路径恰好遍历了
+    /// 全部 owner，所以"碰巧"恢复）。单实例夹具无法区分"通知全部"与"只通知自己"，
+    /// 因此必须让编辑实例触发、断言播放实例被通知。
+    #[test]
+    fn render_input_invalidation_reaches_the_playback_instance() {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let playback = owners[0].clone();
+        assert!(playback.renders_playback(), "夹具第一个实例必须是播放渲染器");
+        let editor = Arc::new(ExtensionOwner::default());
+        let _raw = editor
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .unwrap();
+        assert!(editor.is_editor_only(), "本夹具的第二个实例必须是编辑器实例");
+        // 编辑实例自己的 prepare() 是合法 no-op（它不持有快照）；关键是播放实例必须被通知。
+        let before = playback.prepare_requests.load(Ordering::Acquire);
+        let epoch_before = document.render_epoch.load(Ordering::Acquire);
+        // 持事务调用：`prepare_job` 会在事务处阻塞，后台不会真的去渲染合成夹具文档
+        // （与 `vst3.rs` 的离线 setup 用例同一手法）。`invalidate_render_input` 刻意
+        // **不**取事务，所以这里不会自锁。
+        let held = document.transaction.lock().unwrap();
+        document.invalidate_render_input();
+        assert!(
+            document.render_epoch.load(Ordering::Acquire) > epoch_before,
+            "渲染输入失效必须推进 render_epoch（PreparedVersion 才会失配）"
+        );
+        assert_eq!(
+            playback.prepare_requests.load(Ordering::Acquire),
+            before + 1,
+            "播放实例必须被通知重排，而不是只通知发现变化的实例"
+        );
+        drop(held);
+        // 放行后等后台排空，避免用例结束时与仍在运行的任务抢生命周期。
+        for owner in [&playback, &owners[1]] {
+            if let Some(Ok(worker)) = owner.preparation.get() {
+                let _ = worker.wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+        }
     }
 
     /// GUI 载荷只带**编辑器实例**的读数：playback 实例没有 GUI，它的读数不该出现在
