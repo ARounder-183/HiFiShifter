@@ -499,6 +499,12 @@ impl EditorSession {
         Ok(())
     }
     /// getState的非实时屏障：先排完已收到的尾块，不需要等音频快照才持久化曲线。
+    ///
+    /// 【为什么超时返回 `Err` 而不是静默 `Ok`】"flush 成功"是调用方的**前置条件**：
+    /// `encode_state` 依赖已排队的编辑都已落进 timeline，撤销/恢复的测试也依赖这一点。
+    /// 把超时吞掉会让调用方在**未排空**的状态上继续工作 —— 那比一次可诊断的失败糟得多。
+    /// 上限从 30 s 收到 10 s：仍足以排空正常积压，又不会在异常情况下把宿主 UI 线程
+    /// 卡到用户以为程序死了。
     pub fn flush(&self) -> Result<(), String> {
         if self.closed.load(Ordering::Acquire) {
             return Ok(());
@@ -508,7 +514,7 @@ impl EditorSession {
             .send(Job::Barrier(sender))
             .map_err(|e| e.to_string())?;
         receiver
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(10))
             .map_err(|e| format!("editor flush: {e}"))
     }
     /// 在组件stop返回前撤销其回信/订阅；排队任务仍会独立核对原始route代次。
@@ -563,6 +569,9 @@ impl EditorSession {
         *self.history.lock().unwrap() = Default::default();
         *self.loaded.lock().unwrap() = Default::default();
         self.peaks.lock().unwrap().clear();
+        // MIDI 剪贴板此前只增不减、连 close 都不清 —— 每次"读 MIDI 剪贴板"都往
+        // 队列尾部追加一份字节，长会话里就是一条无界增长。
+        self.clipboard_midi.lock().unwrap().clear();
     }
     fn run(weak: Weak<Self>, receiver: mpsc::Receiver<Job>) {
         let mut deadline: Option<Instant> = None;

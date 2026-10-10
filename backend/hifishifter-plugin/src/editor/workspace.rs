@@ -220,13 +220,19 @@ impl DocumentSession {
     fn add_group_view_tracks(&self, timeline: &mut TimelineState) {
         for host in self.ui_tracks.lock().unwrap().values() {
             if !timeline.tracks.iter().any(|track| track.id == host.id) {
-                timeline.tracks.push(
-                    serde_json::from_value(
-                        serde_json::json!({"id":host.id,"name":host.name,"order":host.order,
+                // 【为什么不用 unwrap】这条路径跑在**宿主 UI 线程**的清单刷新里，一次
+                // panic 会带走整个 DAW 会话（与同文件 `present_host_inventory` 的注释
+                // 同一条纪律）。`host.name` 是宿主给的字符串，反序列化失败时降级为
+                // "跳过这条轨道"，其余轨道照常呈现。
+                match serde_json::from_value::<hifishifter_kernel::state::Track>(
+                    serde_json::json!({"id":host.id,"name":host.name,"order":host.order,
                     "compose_enabled":true,"pitch_analysis_algo":"nsf_hifigan_onnx"}),
-                    )
-                    .unwrap(),
-                );
+                ) {
+                    Ok(track) => timeline.tracks.push(track),
+                    Err(error) => {
+                        log::warn!("[ara] skipping empty host track {}: {error}", host.id);
+                    }
+                }
             }
         }
     }

@@ -1101,11 +1101,21 @@ unsafe extern "system" fn audio_setup_processing(
     if setup.process_mode == 2 {
         // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+        // 【为什么是 15 s 而不是 180 s】本调用在 `setupProcessing` 里，而那是**宿主 UI
+        // 线程**；180 s 会把宿主界面卡死三分钟。15 s 足够覆盖一次正常的离线准备。
+        //
+        // 【为什么失败返回 `kResultOk` 而不是 `kResultFalse`】`kResultFalse` 会让多数
+        // 宿主把插件**整个踢出链路**（用户看到"插件不见了"，没有任何提示）。返回 OK 则
+        // 保留插件：离线渲染输出静音，且日志里有一条明确的原因 —— 可诊断的降级优于
+        // 静默的消失。
         if let Err(error) = owner
-            .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(180))
+            .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(15))
         {
-            crate::log_line(&format!("Offline preparation failed: {error}"));
-            return K_RESULT_FALSE;
+            crate::log_line(&format!(
+                "Offline preparation failed after 15s: {error}. Keeping the plugin in the chain; \
+                 offline output will be silent until preparation succeeds."
+            ));
+            return K_RESULT_OK;
         }
     }
     K_RESULT_OK
@@ -1122,8 +1132,41 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
     K_RESULT_OK
 }
 
+/// 音频回调里被 `catch_unwind` 拦下的 panic 次数。
+///
+/// 【为什么是原子计数而不是日志】音频线程不能做文件 IO（见
+/// `realtime_callbacks_do_not_enter_the_file_logger`），而 panic 现场又必须留下痕迹。
+/// 计一次数，由下一次 UI 轮询/诊断包落盘。
+static AUDIO_PANIC_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 音频回调被拦下的 panic 次数（诊断用）。
+pub(crate) fn audio_panic_count() -> u64 {
+    AUDIO_PANIC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
+    // 【为什么必须 catch_unwind】本回调由**宿主音频线程**调用，panic 越过
+    // `extern "system"` 边界是 UB，而且会带走整个 DAW 会话。`component_set_state` /
+    // `component_get_state` 早就包了这一层，音频路径此前没有 —— 一条最不该崩的路径
+    // 反而最没有保护。捕获后输出静音（不留上一次的残留），并只做一次原子计数：
+    // 音频线程不得写文件、不得加锁等待。
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        audio_process_inner(this, data)
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(_) => {
+            AUDIO_PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // SAFETY: 与 audio_process_inner 同一份宿主提供的 ProcessData；清空输出
+            // 失败（形状非法）也只能返回 OK —— 此时输出交给宿主处置，不能二次 panic。
+            let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
+            K_RESULT_OK
+        }
+    }
+}
+
+unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     // SAFETY: VST3 宿主按 SDK 布局提供回调数据，函数内部处理空指针与非法字段。
     if this.is_null() {
         return K_INVALID_ARGUMENT;

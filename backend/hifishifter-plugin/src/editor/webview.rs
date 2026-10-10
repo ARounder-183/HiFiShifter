@@ -675,7 +675,10 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                 }
                 let host=link.owner()?.project_history_host().ok_or("host history unavailable")?;
                 match jump {HistoryJump::Undo=>{host.history_jump(false,&allowed)?;},HistoryJump::Redo=>{host.history_jump(true,&allowed)?;},HistoryJump::Position(index)=>{host.history_jump_to(index,&allowed)?;}}
-                state.borrow_mut().host_replies.get_mut(&id).unwrap().jump=None;
+                // 【为什么用 `get_mut` 而不是 `[&id]`/`unwrap`】上面的 `history_jump` 是
+                // **宿主回调**，其间不持 BrowserState 借用（见本段的注释），因此它可能
+                // 重入并改动 `host_replies`。用索引会 panic，而这里跑在宿主进程里。
+                if let Some(entry)=state.borrow_mut().host_replies.get_mut(&id) {entry.jump=None;}
                 editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                 Ok(false)
             })();
@@ -1238,6 +1241,9 @@ fn configure_browser(
                         // 用户报障时"你是哪个 REAPER"是第一个要问的问题。
                         "host":{"appVersion":host.as_ref().and_then(|host|host.app_version())},
                         "transport":document.clock.diagnostics(),
+                        // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
+                        // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。
+                        "audioPanicCount":crate::vst3::audio_panic_count(),
                         "renderers":document.renderer_diagnostics(),
                     });
                     let settings=serde_json::json!({

@@ -88,7 +88,8 @@ impl HostClipTarget {
         })? {
             return Err("REAPER rejected item deletion".into());
         }
-        checked(authorized, || unsafe { (self.api().1.arrange)() })
+        let write = self.api()?.1;
+        checked(authorized, || unsafe { (write.arrange)() })
     }
     /// 复制捕获真实item状态；宿主变化/对象租约失效即拒绝，不保存指针充当剪贴板。
     pub(crate) fn capture_item_state(
@@ -448,11 +449,22 @@ impl HostClipTarget {
         self.verify(authorized)?;
         self.host.track_target(self.project, self.track, authorized)
     }
-    fn api(&self) -> (&super::GeometryApi, &WriteApi) {
-        (
-            self.host.geometry.as_ref().unwrap(),
-            self.host.write.as_ref().unwrap(),
-        )
+    /// 写能力束。
+    ///
+    /// 【为什么返回 `Result` 而不是 `unwrap`】`geometry` 与 `write` 是**两个独立的
+    /// `Option`**（`can_edit_clips` 要求两者同时存在，但构造/校验路径不止一条）。
+    /// 这里跑在宿主进程里，一次 panic 会带走整个 DAW 会话 —— 缺能力时如实报错。
+    fn api(&self) -> Result<(&super::GeometryApi, &WriteApi), String> {
+        Ok((
+            self.host
+                .geometry
+                .as_ref()
+                .ok_or("REAPER geometry API unavailable")?,
+            self.host
+                .write
+                .as_ref()
+                .ok_or("REAPER write API unavailable")?,
+        ))
     }
     fn valid(
         &self,
@@ -463,8 +475,9 @@ impl HostClipTarget {
         if pointer == 0 {
             return Err("missing host edit object".into());
         }
+        let api = self.api()?;
         if !checked(authorized, || unsafe {
-            (self.api().0.validate)(
+            (api.0.validate)(
                 self.project as *mut c_void,
                 pointer as *mut c_void,
                 kind.as_ptr(),
@@ -507,7 +520,7 @@ impl HostClipTarget {
         self.valid(self.project, c"ReaProject*", authorized)?;
         self.valid(self.item, c"MediaItem*", authorized)?;
         self.valid(self.take, c"MediaItem_Take*", authorized)?;
-        let api = self.api().0;
+        let api = self.api()?.0;
         if checked(authorized, || unsafe {
             (api.item)(self.take as *mut c_void)
         })? as usize
@@ -528,8 +541,9 @@ impl HostClipTarget {
             host: self.host.clone(),
             project: self.project,
         };
+        let api = self.api()?;
         checked(authorized, || unsafe {
-            (self.api().1.begin)(self.project as *mut c_void)
+            (api.1.begin)(self.project as *mut c_void)
         })?;
         Ok(block)
     }
@@ -571,8 +585,9 @@ impl HostClipTarget {
         if name == c"D_VOL" && value < 0. {
             return Err("negative item volume is not supported".into());
         }
+        let api = self.api()?;
         if !checked(authorized, || unsafe {
-            (self.api().1.set_item)(self.item as *mut c_void, name.as_ptr(), value)
+            (api.1.set_item)(self.item as *mut c_void, name.as_ptr(), value)
         })? {
             return Err(format!(
                 "REAPER rejected item field {}",
@@ -597,8 +612,9 @@ impl HostClipTarget {
         if !value.is_finite() {
             return Err("nonfinite host take edit".into());
         }
+        let api = self.api()?;
         if !checked(authorized, || unsafe {
-            (self.api().1.set_take)(self.take as *mut c_void, name.as_ptr(), value)
+            (api.1.set_take)(self.take as *mut c_void, name.as_ptr(), value)
         })? {
             return Err(format!(
                 "REAPER rejected take field {}",
@@ -620,8 +636,9 @@ impl HostClipTarget {
         let mut bytes = std::ffi::CString::new(name)
             .map_err(|_| "take name contains NUL")?
             .into_bytes_with_nul();
+        let api = self.api()?;
         if !checked(authorized, || unsafe {
-            (self.api().1.set_take_string)(
+            (api.1.set_take_string)(
                 self.take as *mut c_void,
                 c"P_NAME".as_ptr(),
                 bytes.as_mut_ptr().cast(),
@@ -644,8 +661,9 @@ impl HostClipTarget {
             return Err("cannot move item across host projects".into());
         }
         self.valid(destination.track, c"MediaTrack*", authorized)?;
+        let api = self.api()?;
         if !checked(authorized, || unsafe {
-            (self.api().1.move_item)(self.item as *mut c_void, destination.track as *mut c_void)
+            (api.1.move_item)(self.item as *mut c_void, destination.track as *mut c_void)
         })? {
             return Err("REAPER rejected item track move".into());
         }
@@ -654,9 +672,10 @@ impl HostClipTarget {
     /// 触发宿主刷新和真实ARA回流，不直接篡改插件timeline几何。
     pub(crate) fn update(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
         self.verify(authorized)?;
+        let api = self.api()?;
         checked(authorized, || unsafe {
-            (self.api().1.update)(self.item as *mut c_void)
+            (api.1.update)(self.item as *mut c_void)
         })?;
-        checked(authorized, || unsafe { (self.api().1.arrange)() })
+        checked(authorized, || unsafe { (api.1.arrange)() })
     }
 }

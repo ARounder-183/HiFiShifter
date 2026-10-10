@@ -112,8 +112,15 @@ impl Default for ModelHandle {
             session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
             head_tail: Arc::new(
-                ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192)
-                    .expect("constant head/tail capacity"),
+                // 【为什么不用 expect】`Default for ModelHandle` 在**每次文档创建**时
+                // 都会跑，而它在宿主进程里 —— 一次 panic 会带走整个 DAW 会话。容量常量
+                // 8192 本身只可能因资源耗尽被拒，退到最小合法容量让"快照装不下"变成一次
+                // 可诊断的 `install` 失败，而不是崩溃。
+                ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192).unwrap_or_else(|_| {
+                    log::warn!("[ara] head/tail snapshot capacity 8192 refused; falling back to 1");
+                    ara2_bridge::plugin::RealtimeHeadTailAdapter::new(1)
+                        .expect("capacity 1 is the minimal legal head/tail snapshot")
+                }),
             ),
             document: AraDocument::default(),
             timeline: None,
@@ -288,10 +295,15 @@ impl ModelHandle {
                 for region in &document.playback_regions {
                     if let Some(index) = region.region_sequence_index {
                         if let Some(track) = timeline.tracks.get(index) {
-                            bindings.get_mut(&track.id).unwrap().push((
-                                region.audio_modification_persistent_id.clone(),
-                                region.audio_source_persistent_id.clone(),
-                            ));
+                            // 【为什么不用 unwrap】`bindings` 由上面的 `timeline.tracks`
+                            // 直接构建，当前必然命中；但这条路径跑在 **ARA 模型线程**，
+                            // 未来任何一处 divergence 都会变成宿主进程里的硬 panic。
+                            if let Some(members) = bindings.get_mut(&track.id) {
+                                members.push((
+                                    region.audio_modification_persistent_id.clone(),
+                                    region.audio_source_persistent_id.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1033,13 +1045,22 @@ impl PlaybackRegions for ModelHandle {
     fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
         self.session.clear_renderers();
         if let Some(key) = self.region_keys.get(state) {
+            let key = *key;
             region_owners()
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remove(*key);
+                .remove(key);
             for regions in self.session.sequence_regions.lock().unwrap().values_mut() {
-                regions.remove(key);
+                regions.remove(&key);
             }
+            // 【为什么在这里清文档侧映射】下面这些表都按 `region_key` 索引，而 region
+            // 销毁是"这个 key 再也不会被用到"的唯一时刻（槽位还会被 `destroyed_regions`
+            // 复用，见 `allocate_region_slot`）。此前它们只在**文档销毁**时清 —— 长会话里
+            // 每次分割/移动/粘贴都会留下永不释放的条目，是真正的无界增长。
+            self.session.region_items.lock().unwrap().remove(&key);
+            self.session.authorized_takes.lock().unwrap().remove(&key);
+            self.session.authorized_sources.lock().unwrap().remove(&key);
+            self.session.clip_ids.lock().unwrap().remove(&key);
         }
         self.destroyed_regions.insert(state);
         if let Err(error) = self.publish_head_tail() {

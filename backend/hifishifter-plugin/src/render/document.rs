@@ -24,6 +24,28 @@ pub(crate) struct WorkspaceSnapshot {
     pub audio_revision: u64,
 }
 
+/// 一个 ARA 文档的共享状态。
+///
+/// # 锁序（必须遵守）
+///
+/// 多把锁同时持有时，一律按下面的顺序获取；**反向获取会死锁**：
+///
+/// 1. `transaction` —— 最外层：几何/编辑的短事务
+/// 2. `timeline`
+/// 3. `edits`
+/// 4. 宿主事实：`ui_tracks` → `host_folder_children` / `clip_ids` / `regions` /
+///    `region_items` / `authorized_takes` / `authorized_sources` / `render_facts`
+/// 5. `region_owners()`（进程级全局表）—— 最内层叶子锁
+///
+/// 例外与约束：
+/// - `region_owners()` 是**叶子**：持有它时不得再取上面任何一把锁。它出现在
+///   `ara/model.rs` 的回调里（不持文档锁）与 `render/extension.rs` 的查询里
+///   （在 `transaction` 之内）—— 两者都满足"最后获取"。
+/// - `RenderFacts` 采样（`refresh_ui_inventory`）在 `transaction` 之内、且在其它
+///   文档锁之外，因此它与 `workspace_projection_locked` 里对 `render_facts` 的读取
+///   不会互相阻塞到死锁。
+/// - 单把锁内的长操作（宿主 API 调用、神经推理）必须先把数据 `clone` 出来再解锁 ——
+///   见 `render/extension.rs` 的"宿主调用始终不持内部锁"。
 #[derive(Default)]
 pub(crate) struct DocumentSession {
     controller: AtomicUsize,

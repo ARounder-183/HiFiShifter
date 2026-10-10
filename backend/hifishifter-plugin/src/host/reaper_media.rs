@@ -134,7 +134,12 @@ fn fx_guid(api: &NewTrackApi, track: *mut c_void, index: i32) -> Option<[u8; 16]
 impl CreatedItem {
     fn verify(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
         self.target.verify(authorized)?;
-        let api = self.target.host.geometry.as_ref().unwrap();
+        let api = self
+            .target
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
         if !checked(authorized, || unsafe {
             (api.validate)(
                 self.target.project as *mut c_void,
@@ -145,9 +150,15 @@ impl CreatedItem {
             return Err("created item no longer valid".into());
         }
         let guid = read_guid(api.item_guid, self.item as *mut c_void, authorized)?;
+        let write = self
+            .target
+            .host
+            .write
+            .as_ref()
+            .ok_or("REAPER write API unavailable")?;
         if (guid != self.guid && self.state_guid.as_ref() != Some(&guid))
             || checked(authorized, || unsafe {
-                (self.target.host.write.as_ref().unwrap().item_track)(self.item as *mut c_void)
+                (write.item_track)(self.item as *mut c_void)
             })? as usize
                 != self.target.track
         {
@@ -306,10 +317,8 @@ impl ReaperHost {
         let api = self
             .extended_media
             .as_ref()
-            .unwrap()
-            .tracks
-            .as_ref()
-            .unwrap();
+            .and_then(|media| media.tracks.as_ref())
+            .ok_or("REAPER new-track API unavailable")?;
         let project = self.project(authorized)?;
         let enumerate = || -> Result<Vec<(String, usize)>, String> {
             let token = self.geometry_revision(authorized)?;
@@ -368,8 +377,9 @@ impl ReaperHost {
             .map_err(|_| "track name contains NUL")?
             .into_bytes_with_nul();
         created.target.verify(authorized)?;
+        let media = self.media.as_ref().ok_or("REAPER media API unavailable")?;
         if !checked(authorized, || unsafe {
-            (self.media.as_ref().unwrap().track_guid)(
+            (media.track_guid)(
                 created.target.track as *mut c_void,
                 c"P_NAME".as_ptr(),
                 name.as_mut_ptr().cast(),
@@ -441,7 +451,10 @@ impl ReaperHost {
         if !self.can_import_audio() {
             return Err("REAPER audio import API unavailable".into());
         }
-        let api = self.geometry.as_ref().unwrap();
+        let api = self
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
         if project == 0
             || track == 0
             || !checked(authorized, || unsafe {
@@ -454,11 +467,8 @@ impl ReaperHost {
         {
             return Err("invalid import target track".into());
         }
-        let guid = read_guid(
-            self.media.as_ref().unwrap().track_guid,
-            track as *mut c_void,
-            authorized,
-        )?;
+        let media = self.media.as_ref().ok_or("REAPER media API unavailable")?;
+        let guid = read_guid(media.track_guid, track as *mut c_void, authorized)?;
         let target = HostTrackTarget {
             host: self.clone(),
             project,
@@ -490,10 +500,26 @@ impl HostTrackTarget {
             return Err("host clip clipboard capability unavailable".into());
         }
         let bytes = CString::new(state.text.as_str()).map_err(|_| "item state contains NUL")?;
-        let media = self.host.media.as_ref().unwrap();
-        let api = self.host.geometry.as_ref().unwrap();
-        let state_api = self.host.item_state.as_ref().unwrap();
-        let write = self.host.write.as_ref().unwrap();
+        let media = self
+            .host
+            .media
+            .as_ref()
+            .ok_or("REAPER media API unavailable")?;
+        let api = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let state_api = self
+            .host
+            .item_state
+            .as_ref()
+            .ok_or("REAPER item state API unavailable")?;
+        let write = self
+            .host
+            .write
+            .as_ref()
+            .ok_or("REAPER write API unavailable")?;
         let item = checked(authorized, || unsafe {
             (media.create_item)(self.track as *mut c_void)
         })?;
@@ -518,9 +544,12 @@ impl HostTrackTarget {
         if read_guid(api.item_guid, item, authorized)? != state.item_guid {
             return Err("copied item identity differs from prepared GUID".into());
         }
-        let take = checked(authorized, || unsafe {
-            (self.host.split.as_ref().unwrap().active_take)(item)
-        })?;
+        let split = self
+            .host
+            .split
+            .as_ref()
+            .ok_or("REAPER split API unavailable")?;
+        let take = checked(authorized, || unsafe { (split.active_take)(item) })?;
         if take.is_null() {
             return Err("copied item has no active take".into());
         }
@@ -558,12 +587,12 @@ impl HostTrackTarget {
                 return Err("import project/track no longer valid".into());
             }
         }
-        if read_guid(
-            self.host.media.as_ref().unwrap().track_guid,
-            self.track as *mut c_void,
-            authorized,
-        )? != self.guid
-        {
+        let media = self
+            .host
+            .media
+            .as_ref()
+            .ok_or("REAPER media API unavailable")?;
+        if read_guid(media.track_guid, self.track as *mut c_void, authorized)? != self.guid {
             return Err("import track identity changed".into());
         }
         Ok(())
@@ -584,9 +613,21 @@ impl HostTrackTarget {
             return Err("absolute audio path and nonnegative finite start required".into());
         }
         let path = CString::new(path).map_err(|_| "audio path contains NUL")?;
-        let media = self.host.media.as_ref().unwrap();
-        let api = self.host.geometry.as_ref().unwrap();
-        let write = self.host.write.as_ref().unwrap();
+        let media = self
+            .host
+            .media
+            .as_ref()
+            .ok_or("REAPER media API unavailable")?;
+        let api = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let write = self
+            .host
+            .write
+            .as_ref()
+            .ok_or("REAPER write API unavailable")?;
         if !authorized() {
             return Err("import authorization revoked".into());
         }

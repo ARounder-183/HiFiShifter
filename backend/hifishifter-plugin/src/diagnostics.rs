@@ -160,9 +160,14 @@ fn install_panic_hook() {
             &format!("PANIC: thread '{name}' panicked at {location}: {payload}"),
         );
         {
-            let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(writer) = guard.as_mut() {
-                let _ = writer.write_line(&line);
+            // 【为什么用 `try_lock` 而不是 `lock`】本 hook 会在**任意线程**的 panic 上跑，
+            // 包括"panic 正发生在 `FileLogger::log` 里、`WRITER` 已被持有"这种情况 ——
+            // 那时 `lock` 会自锁死。拿不到就放弃写这一行（`previous(info)` 仍会执行，
+            // 宿主/标准错误仍能看到 panic），绝不让日志把 panic 变成死锁。
+            if let Ok(mut guard) = WRITER.try_lock() {
+                if let Some(writer) = guard.as_mut() {
+                    let _ = writer.write_line(&line);
+                }
             }
         }
         previous(info);
