@@ -84,7 +84,12 @@ pub fn materialize_with_byte_limit(
             .ok_or("host PCM size overflow")?;
         if bytes > byte_limit
             || pcm.persistent_id.is_empty()
-            || !matches!(pcm.sample_rate, 44100 | 48000)
+            // 【为什么不再限定 44.1/48k】与 `render/source.rs` 的读取门保持**同一条判据**。
+            // 那一侧已经放开到 8k..=384k（宿主工程与素材可能是 88.2/96/176.4/192k），
+            // 理由写在它的注释里：读取是离线的，下游两处都会重采样。这里若仍只认
+            // 44.1/48k，就会出现"读进来了、`publish` 了，然后 `materialize` 整会话失败"
+            // —— 一个 96 kHz 素材就能让插件打不开。两处判据分叉是这次的真实缺陷。
+            || !(8000..=384_000).contains(&pcm.sample_rate)
             || !(1..=2).contains(&pcm.planes.len())
             || frames == 0
             || pcm
@@ -449,5 +454,47 @@ mod tests {
             .find(|clip| clip.id == "plain")
             .unwrap();
         assert!(plain.source_path.is_some(), "其余 clip 照常物化");
+    }
+
+    /// **不变量：`materialize` 与 `render/source.rs` 的读取门接受同一个采样率区间。**
+    ///
+    /// 【为什么这是回归测试】`render/source.rs` 已放开到 8k..=384k（宿主工程与素材可能是
+    /// 88.2/96/176.4/192k，读取是离线的、下游会重采样），而这里此前只认 44.1/48k。
+    /// 两处判据分叉的后果不是"某个片段降级"，而是"读进来 → `publish` → `materialize`
+    /// 整会话失败"：**一个 96 kHz 素材就能让插件打不开**。
+    #[test]
+    fn materialize_accepts_the_same_sample_rates_as_the_ara_reader() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-host-pcm-rate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"T","order":0}],"bpm":120,"project_sec":1,
+            "clips":[{"id":"clip","name":"C","track_id":"track","start_sec":0,"length_sec":4.0/96000.,
+                "takes":[{"id":"take","source_path":"host-id","source_end_sec":4.0/96000.}]}]
+        }))
+        .unwrap();
+        let planes = vec![vec![0.1, 0.2, 0.3, 0.4]];
+        for sample_rate in [44_100_u32, 48_000, 88_200, 96_000, 192_000] {
+            let (materialized, _) = materialize(
+                timeline.clone(),
+                &[PcmView {
+                    persistent_id: "host-id",
+                    sample_rate,
+                    planes: &planes,
+                }],
+                &dir,
+            )
+            .unwrap_or_else(|error| panic!("{sample_rate} Hz 必须能物化：{error}"));
+            assert!(
+                materialized.clips[0].source_path.is_some(),
+                "{sample_rate} Hz 的源必须拿到物化路径，否则会话整体加载失败"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
