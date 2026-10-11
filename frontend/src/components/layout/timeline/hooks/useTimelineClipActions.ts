@@ -38,6 +38,7 @@ import {
     toggleGroupDisabledRemote,
 } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
+import { canClipboardHostClips } from "../../../../services/hostCapabilities";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
@@ -347,8 +348,8 @@ export function useTimelineClipActions(
 
     useEffect(() => {
         // 新插件查询原生宿主剪贴板，旧插件仍不发未实现的App媒体命令。
-        if (window.__HFS_PLUGIN_BOOTSTRAP__ && !window.__HFS_PLUGIN_BOOTSTRAP__.clipClipboard)
-            return;
+        // 【为什么读能力位而不是旧顶层布尔】写能力只有 `hostCapabilities` 一个来源。
+        if (window.__HFS_PLUGIN_BOOTSTRAP__ && !canClipboardHostClips()) return;
         let cancelled = false;
         const refresh = () => {
             void webApi

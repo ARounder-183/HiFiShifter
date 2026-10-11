@@ -11,6 +11,7 @@ import {
     splitClipsAtRemote,
 } from "./thunks/timelineThunks";
 import { webApi } from "../../services/webviewApi";
+import { writableHostCaps } from "../../services/pluginBootstrapFixtures";
 import { seekPlayhead, syncPlaybackState } from "./thunks/transportThunks";
 import { importAudioFileAtPosition } from "./thunks/importThunks";
 import type { TimelineResult } from "../../types/api";
@@ -56,7 +57,11 @@ function timeline(start: number): TimelineResult {
     } as TimelineResult;
 }
 function initial() {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "race", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "race",
+        hostCapabilities: writableHostCaps(),
+    };
     return reducer(undefined, fetchTimeline.fulfilled(timeline(0), "initial", undefined));
 }
 afterEach(() => {

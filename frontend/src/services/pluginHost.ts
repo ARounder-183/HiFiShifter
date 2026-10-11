@@ -3,18 +3,17 @@ export type HostEvent<T> = { event: string; id: number; payload: T };
 export type PluginBootstrap = {
     version: 1;
     viewId: string;
-    transportControl?: boolean;
-    clipEditing?: boolean;
-    clipSplitting?: boolean;
-    clipClipboard?: boolean;
-    audioImport?: boolean;
     /**
-     * 宿主允许新建一条**宿主**轨道（`InsertTrackInProject` + 首 FX）。
+     * 宿主提供 ARA 播放请求（`ARAPlaybackControllerInterface`）。
      *
-     * 【为什么与 `audioImport` 分开】导入音频会顺带建轨，所以后者蕴含前者；反过来
-     * 不成立 —— "先建一条空轨、之后再导入"是一条独立能力与独立入口。
+     * 【为什么**不**放进 `hostCapabilities`】它描述的是**插件**能否向宿主发播放请求，
+     * 不是宿主能否提供 transport 读数（后者是 `hostCapabilities.transport`）。
      */
-    trackCreation?: boolean;
+    transportControl?: boolean;
+    /**
+     * 插件私有的参数分组是否可用。守卫的是纯插件的 `move_private_track`，**不需要任何
+     * 宿主写能力**，因此恒为 `true`（见后端 `BootstrapFlags::to_json`）。
+     */
     trackGrouping?: boolean;
     /**
      * 宿主用哪一套淡化轴。
@@ -43,7 +42,13 @@ export type PluginBootstrap = {
      * 几何），前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
      */
     hostKind?: "reaper" | "ara_only";
-    /** 后端能力位快照（与上面的布尔同源，但更细）。 */
+    /**
+     * 生效的宿主能力位快照：**写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源**。
+     *
+     * 【为什么不再有并存的顶层布尔】此前 `clipEditing` / `audioImport` 等与这里并存，
+     * 由后端两处各自计算 —— 必然漂移。现在只读这一份（后端
+     * `ExtensionOwner::effective_host_capabilities` 统一算出）。
+     */
     hostCapabilities?: {
         transport: boolean;
         clipGeometry: boolean;

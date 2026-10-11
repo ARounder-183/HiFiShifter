@@ -18,6 +18,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { Provider } from "react-redux";
 import { afterEach, beforeEach, expect, test } from "vitest";
 
+import { writableHostCaps } from "../../../services/pluginBootstrapFixtures";
+
 import keybindingsReducer, {
     formatKeybinding,
     setKeybindings,
@@ -123,7 +125,11 @@ test("禁用项仍然显示快捷键（用户靠它知道这个操作本来有�
 });
 
 test("插件保留空白菜单，按真实能力开放分割，不误放开App粘贴或关闭间隙", async () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "blank-menu", clipSplitting: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "blank-menu",
+        hostCapabilities: writableHostCaps({ split: true }),
+    };
     const { items, disabled } = await mountMenu();
     expect(items).toHaveLength(3);
     expect(disabled).toEqual([true, false, true]);
@@ -140,8 +146,7 @@ test("原生剪贴板接通后空白区粘贴启用，不误开放关闭间隙",
     window.__HFS_PLUGIN_BOOTSTRAP__ = {
         version: 1,
         viewId: "blank-menu",
-        clipSplitting: true,
-        clipClipboard: true,
+        hostCapabilities: writableHostCaps({ split: true, itemClipboard: true }),
     };
     const { disabled } = await mountMenu();
     expect(disabled).toEqual([false, false, true]);

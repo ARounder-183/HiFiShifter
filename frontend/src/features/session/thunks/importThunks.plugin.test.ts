@@ -11,11 +11,16 @@ vi.mock("../../../services/webviewApi", () => ({
     },
 }));
 import { webApi } from "../../../services/webviewApi";
+import { araOnlyCaps } from "../../../services/pluginBootstrapFixtures";
 import reducer from "../sessionSlice";
 import { importMultipleAudioAtPosition } from "./importThunks";
 beforeEach(() => {
     vi.clearAllMocks();
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "imports", audioImport: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "imports",
+        hostCapabilities: araOnlyCaps({ mediaImport: true }),
+    };
 });
 afterEach(() => {
     delete window.__HFS_PLUGIN_BOOTSTRAP__;

@@ -957,24 +957,21 @@ fn begin_browser(state: &Rc<RefCell<BrowserState>>) -> Result<(), String> {
 /// 【为什么单独成类型】前端按这些标志决定开放哪些操作（`services/hostCapabilities.ts`）。
 /// 内联在一个 300 行的浏览器配置函数里时，**没人能对它写测试** —— 而这里恰好出过一次
 /// 错（`trackGrouping` 被写成复用 `audioImport`，见 [`BootstrapFlags::to_json`]）。
+///
+/// 【为什么宿主写能力不再各占一个布尔】`clip_editing` / `clip_splitting` /
+/// `clip_clipboard` / `audio_import` / `track_creation` 曾经与 `hostCapabilities` 并存，
+/// 由**两处**各自计算（一处按本实例的原生扩展、一处按 `project_history_host()`）——
+/// 两份判据必然漂移。现在它们只存在于 `host_capabilities`（由
+/// [`crate::render::extension::ExtensionOwner::effective_host_capabilities`] 统一算出），
+/// 前端只读一处。
 #[derive(Clone, Copy, Debug)]
 struct BootstrapFlags {
-    /// 宿主提供 ARA 播放控制。
-    transport_control: bool,
-    /// 宿主允许写片段几何。
-    clip_editing: bool,
-    /// 宿主允许分割片段。
-    clip_splitting: bool,
-    /// 宿主提供完整 item 剪贴板。
-    clip_clipboard: bool,
-    /// 宿主允许导入音频（会建轨、建 item）。
-    audio_import: bool,
-    /// 宿主允许**新建一条宿主轨道**（`InsertTrackInProject` + 首 FX）。
+    /// 宿主提供 ARA 播放请求（`ARAPlaybackControllerInterface`）。
     ///
-    /// 【为什么与 `audio_import` 分开】导入音频会顺带建轨，所以后者蕴含前者；但
-    /// 反过来不成立 —— "只建一条空轨、先不导入"是一条独立的能力与独立的入口。
-    /// 合成一个标志会让"添加轨道"随"能不能导入"一起开关。
-    track_creation: bool,
+    /// 【为什么**不**放进 `hostCapabilities`】它描述的是**插件**能否向宿主发播放请求，
+    /// 不是宿主能否提供 transport 读数（后者是 `HostCapabilities::transport`）。两者是
+    /// 不同的东西：ARA 播放控制器可用不代表宿主把播放位置喂给了插件，反之亦然。
+    transport_control: bool,
     /// 宿主用哪一套淡化轴：`Some("legacy")`（≤7.80，`C_FADE*SHAPE` 决定形状）
     /// 或 `Some("continuous")`（≥7.81，curvature/S 两轴决定形状）。
     ///
@@ -986,7 +983,7 @@ struct BootstrapFlags {
     /// `probe/ara/FADE-AXIS-FINDINGS.md`），所以新轴宿主上**也**摆七个预设按钮；
     /// 此前这里的注释写着"预设映射尚未校准，所以只给连续滑杆"，那条限制已随实测消失。
     fade_axes: Option<&'static str>,
-    /// 撤销历史由谁承载：`"reaper"`（宿主权威栈）或 `"local"`（插件自管栈）。
+    /// 撤销历史由谁承载：`"host"`（宿主权威栈）或 `"local"`（插件自管栈）。
     ///
     /// 【为什么前端需要它】两条栈共用同一个「操作记录」面板，但 `label` 的含义不同：
     /// 本地栈是 op key（按 `history_op_*` 本地化），宿主栈是宿主自己的可读字符串
@@ -998,7 +995,7 @@ struct BootstrapFlags {
     /// 【为什么前端需要它】非 REAPER 宿主上片段几何**只读**（ARA 2.0 不允许插件改
     /// region 几何）。前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
     host_kind: &'static str,
-    /// 后端能力位的完整快照（与 [`BootstrapFlags`] 的布尔同源，但更细）。
+    /// **生效的**能力位快照：写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源。
     host_capabilities: hifishifter_kernel::editor::host::HostCapabilities,
 }
 
@@ -1008,17 +1005,14 @@ impl BootstrapFlags {
             "version": 1,
             "viewId": view_id,
             "transportControl": self.transport_control,
-            "clipEditing": self.clip_editing,
-            "clipSplitting": self.clip_splitting,
-            "clipClipboard": self.clip_clipboard,
-            "audioImport": self.audio_import,
-            "trackCreation": self.track_creation,
             "fadeAxes": self.fade_axes,
             "historyBackend": self.history_backend,
             // 后端身份与能力：前端据此显示只读横幅、禁用不可用的入口。
+            // 【这是写能力的唯一来源】clipWrite / split / itemClipboard / mediaImport /
+            // trackCreate / undoStack 都从这里读，不再有并存的顶层布尔。
             "hostKind": self.host_kind,
             "hostCapabilities": self.host_capabilities,
-            // 【为什么是常量 true，而不是复用 audioImport】它守卫的是
+            // 【为什么是常量 true，而不是复用 mediaImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
             // **不需要任何宿主写能力**。此前它写成 `"trackGrouping": audio_import`，
@@ -1547,32 +1541,6 @@ fn configure_browser(
         .link
         .owner()
         .is_ok_and(|owner| owner.host_playback().is_some());
-    let clip_editing = state
-        .borrow()
-        .link
-        .owner()
-        .is_ok_and(|owner| owner.host_clip_editing_available());
-    let audio_import = state.borrow().link.owner().is_ok_and(|owner| {
-        owner
-            .project_history_host()
-            .is_some_and(|host| host.can_import_audio())
-    });
-    // 建轨能力比导入窄一档：还需要 `InsertTrackInProject` / FX 接口齐备。
-    let track_creation = state.borrow().link.owner().is_ok_and(|owner| {
-        owner
-            .project_history_host()
-            .is_some_and(|host| host.can_create_audio_track())
-    });
-    let clip_splitting = state.borrow().link.owner().is_ok_and(|owner| {
-        owner
-            .project_history_host()
-            .is_some_and(|host| host.can_split_clips())
-    });
-    let clip_clipboard = state.borrow().link.owner().is_ok_and(|owner| {
-        owner
-            .project_history_host()
-            .is_some_and(|host| host.can_clipboard_items())
-    });
     // 宿主用哪一套淡化轴。版本读不出来时是 `None`，前端据此整块保持只读。
     let fade_axes = state
         .borrow()
@@ -1583,11 +1551,6 @@ fn configure_browser(
         .map(|axes_new| if axes_new { "continuous" } else { "legacy" });
     let boot = BootstrapFlags {
         transport_control,
-        clip_editing,
-        clip_splitting,
-        clip_clipboard,
-        audio_import,
-        track_creation,
         fade_axes,
         history_backend: state
             .borrow()
@@ -1601,11 +1564,12 @@ fn configure_browser(
             .owner()
             .map(|owner| owner.host_backend().kind().as_str())
             .unwrap_or("ara_only"),
+        // 写能力/分割/剪贴板/导入/建轨/撤销栈的唯一来源（见 `effective_host_capabilities`）。
         host_capabilities: state
             .borrow()
             .link
             .owner()
-            .map(|owner| owner.host_backend().capabilities())
+            .map(|owner| owner.effective_host_capabilities())
             .unwrap_or_else(|_| hifishifter_kernel::editor::host::HostCapabilities::none()),
     }
     .to_json(&state.borrow().view_id);
@@ -1729,23 +1693,21 @@ mod bootstrap_tests {
     /// 本不需要任何宿主写能力的轨道拖动会无声失效。
     #[test]
     fn track_grouping_does_not_depend_on_host_media_apis() {
-        for audio_import in [true, false] {
+        for media_import in [true, false] {
             let flags = BootstrapFlags {
                 transport_control: false,
-                clip_editing: false,
-                clip_splitting: false,
-                clip_clipboard: false,
-                audio_import,
-                track_creation: false,
                 fade_axes: None,
                 history_backend: "local",
                 host_kind: "ara_only",
-                host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
+                host_capabilities: hifishifter_kernel::editor::host::HostCapabilities {
+                    media_import,
+                    ..hifishifter_kernel::editor::host::HostCapabilities::ara_only()
+                },
             };
             assert_eq!(
                 flags.to_json("view-7")["trackGrouping"],
                 serde_json::json!(true),
-                "audioImport={audio_import} 时 trackGrouping 被错误地关掉了"
+                "mediaImport={media_import} 时 trackGrouping 被错误地关掉了"
             );
         }
     }
@@ -1755,27 +1717,22 @@ mod bootstrap_tests {
     fn host_capabilities_pass_through_unchanged() {
         let flags = BootstrapFlags {
             transport_control: true,
-            clip_editing: false,
-            clip_splitting: true,
-            clip_clipboard: false,
-            audio_import: true,
-            track_creation: true,
             fade_axes: Some("legacy"),
             history_backend: "local",
             host_kind: "ara_only",
-            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities {
+                split: true,
+                media_import: true,
+                track_create: true,
+                ..hifishifter_kernel::editor::host::HostCapabilities::ara_only()
+            },
         };
         let json = flags.to_json("view-42");
         assert_eq!(json["version"], serde_json::json!(1));
         assert_eq!(json["viewId"], serde_json::json!("view-42"));
         assert_eq!(json["transportControl"], serde_json::json!(true));
-        assert_eq!(json["clipEditing"], serde_json::json!(false));
-        assert_eq!(json["clipSplitting"], serde_json::json!(true));
-        assert_eq!(json["clipClipboard"], serde_json::json!(false));
-        assert_eq!(json["audioImport"], serde_json::json!(true));
-        assert_eq!(json["trackCreation"], serde_json::json!(true));
         assert_eq!(json["fadeAxes"], serde_json::json!("legacy"));
-        // 后端身份与能力位必须与布尔同源透传：前端据此显示只读横幅。
+        // 后端身份与能力位必须原样透传：前端据此显示只读横幅。
         assert_eq!(json["hostKind"], serde_json::json!("ara_only"));
         assert_eq!(
             json["hostCapabilities"]["clipWrite"],
@@ -1785,9 +1742,46 @@ mod bootstrap_tests {
             json["hostCapabilities"]["clipGeometry"],
             serde_json::json!(true)
         );
+        assert_eq!(json["hostCapabilities"]["split"], serde_json::json!(true));
+        assert_eq!(
+            json["hostCapabilities"]["mediaImport"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            json["hostCapabilities"]["trackCreate"],
+            serde_json::json!(true)
+        );
     }
 
-    /// `trackCreation` 是独立能力：导入音频蕴含建轨，建轨不蕴含导入。
+    /// 写能力只有**一个**来源：顶层不得再出现 `clipEditing` / `audioImport` 这类副本。
+    ///
+    /// 【回归】两处并存时（一处按本实例原生扩展、一处按 `project_history_host()`）
+    /// 必然漂移，而"哪一份算数"没人说得清。
+    #[test]
+    fn host_write_capabilities_have_a_single_source() {
+        let flags = BootstrapFlags {
+            transport_control: false,
+            fade_axes: None,
+            history_backend: "local",
+            host_kind: "ara_only",
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
+        };
+        let json = flags.to_json("v");
+        for stale in [
+            "clipEditing",
+            "clipSplitting",
+            "clipClipboard",
+            "audioImport",
+            "trackCreation",
+        ] {
+            assert!(
+                json.get(stale).is_none(),
+                "顶层不应再出现 `{stale}`：写能力只由 `hostCapabilities` 提供"
+            );
+        }
+    }
+
+    /// `trackCreate` 与 `mediaImport` 是独立能力：导入音频蕴含建轨，建轨不蕴含导入。
     ///
     /// 【为什么单独钉住】合成一个标志会让"添加轨道"随"能不能导入音频"一起开关 ——
     /// 而这两件事的门槛不同（建轨还需要 `InsertTrackInProject` / FX 接口）。
@@ -1795,19 +1789,24 @@ mod bootstrap_tests {
     fn track_creation_is_independent_of_audio_import() {
         let flags = BootstrapFlags {
             transport_control: false,
-            clip_editing: false,
-            clip_splitting: false,
-            clip_clipboard: false,
-            audio_import: false,
-            track_creation: true,
             fade_axes: None,
             history_backend: "local",
             host_kind: "ara_only",
-            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
+            host_capabilities: hifishifter_kernel::editor::host::HostCapabilities {
+                media_import: false,
+                track_create: true,
+                ..hifishifter_kernel::editor::host::HostCapabilities::ara_only()
+            },
         };
         let json = flags.to_json("v");
-        assert_eq!(json["audioImport"], serde_json::json!(false));
-        assert_eq!(json["trackCreation"], serde_json::json!(true));
+        assert_eq!(
+            json["hostCapabilities"]["mediaImport"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            json["hostCapabilities"]["trackCreate"],
+            serde_json::json!(true)
+        );
     }
 
     /// 未知轴语义必须如实报 `null`，前端据此保持只读（不猜）。
@@ -1815,11 +1814,6 @@ mod bootstrap_tests {
     fn an_unknown_fade_axis_set_is_reported_as_null() {
         let flags = BootstrapFlags {
             transport_control: false,
-            clip_editing: true,
-            clip_splitting: false,
-            clip_clipboard: false,
-            audio_import: false,
-            track_creation: false,
             fade_axes: None,
             history_backend: "local",
             host_kind: "ara_only",
@@ -1833,11 +1827,6 @@ mod bootstrap_tests {
     fn a_continuous_fade_axis_host_is_reported_as_such() {
         let flags = BootstrapFlags {
             transport_control: false,
-            clip_editing: true,
-            clip_splitting: false,
-            clip_clipboard: false,
-            audio_import: false,
-            track_creation: false,
             fade_axes: Some("continuous"),
             history_backend: "local",
             host_kind: "ara_only",

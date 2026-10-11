@@ -23,6 +23,7 @@ import {
     hostFadeAxes,
     dawControlledReason,
 } from "./hostCapabilities";
+import { araOnlyCaps, writableHostCaps } from "./pluginBootstrapFixtures";
 import { resolveActionByFocus, resolvePasteRoute } from "../features/keybindings/focusRouting";
 import { DEFAULT_KEYBINDINGS } from "../features/keybindings/defaultKeybindings";
 
@@ -31,7 +32,11 @@ afterEach(() => {
 });
 
 test("private track grouping needs its own capability and never opens host track creation", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "groups", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "groups",
+        hostCapabilities: araOnlyCaps(),
+    };
     expect(canGroupPluginTracks()).toBe(false);
     window.__HFS_PLUGIN_BOOTSTRAP__.trackGrouping = true;
     expect(canGroupPluginTracks()).toBe(true);
@@ -65,18 +70,29 @@ test("standalone clipboard routes stay allowed; unrelated plugin geometry shortc
 
 test("geometry editing requires explicit native write capability and standalone stays editable", () => {
     expect(isHostGeometryReadOnly()).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "host-geometry" };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "host-geometry",
+        hostCapabilities: araOnlyCaps(),
+    };
     expect(isHostGeometryReadOnly()).toBe(true);
     expect(canEditHostClips()).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__.clipEditing = true;
+    // 拖拽要求"可写片段 **且** 有宿主撤销栈"两项同时成立。
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.clipWrite = true;
+    expect(canEditHostClips()).toBe(false);
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.undoStack = true;
     expect(isHostGeometryReadOnly()).toBe(false);
     expect(canEditHostClips()).toBe(true);
 });
 test("native audio import opens only its media action, not project file/device commands", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "media" };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "media",
+        hostCapabilities: araOnlyCaps(),
+    };
     expect(canImportHostAudio()).toBe(false);
     expect(pluginAllowsAction("project.importMedia", "timeline")).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__.audioImport = true;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.mediaImport = true;
     expect(canImportHostAudio()).toBe(true);
     expect(pluginAllowsAction("project.importMedia", "timeline")).toBe(true);
     expect(pluginAllowsAction("project.open", "timeline")).toBe(false);
@@ -90,10 +106,14 @@ test("native audio import opens only its media action, not project file/device c
  * 合成一个标志会让"添加轨道"随"能不能导入音频"一起开关 —— 而原生侧门槛不同。
  */
 test("host track creation is its own capability and does not open the rest of the track menu", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tracks", audioImport: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "tracks",
+        hostCapabilities: araOnlyCaps({ mediaImport: true }),
+    };
     expect(canCreateHostTracks()).toBe(false);
     expect(pluginAllowsAction("track.createHost", "trackHeader")).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__.trackCreation = true;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.trackCreate = true;
     expect(canCreateHostTracks()).toBe(true);
     expect(pluginAllowsAction("track.createHost", "trackHeader")).toBe(true);
     // 其余 track.* 动作仍被拦下：建轨不等于能重排/删除宿主轨道。
@@ -102,9 +122,13 @@ test("host track creation is its own capability and does not open the rest of th
 });
 
 test("native split opens only split action and its timeline channel", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "split", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "split",
+        hostCapabilities: writableHostCaps(),
+    };
     expect(pluginAllowsAction("clip.split", "timeline")).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__.clipSplitting = true;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.split = true;
     expect(pluginAllowsAction("clip.split", "timeline")).toBe(true);
     expect(pluginAllowsEditChannel("hifi:timelineEditOp", "split")).toBe(true);
     for (const op of ["delete", "cut", "paste", "glue", undefined])
@@ -113,10 +137,14 @@ test("native split opens only split action and its timeline channel", () => {
 });
 
 test("native clipboard opens copy/cut/paste/delete only with its own host capability", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "clipboard", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "clipboard",
+        hostCapabilities: writableHostCaps(),
+    };
     for (const op of ["copy", "cut", "paste", "pasteTracks", "delete"])
         expect(pluginAllowsEditChannel("hifi:timelineEditOp", op)).toBe(false);
-    window.__HFS_PLUGIN_BOOTSTRAP__.clipClipboard = true;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.itemClipboard = true;
     for (const op of ["copy", "cut", "paste", "pasteTracks", "delete"])
         expect(pluginAllowsEditChannel("hifi:timelineEditOp", op)).toBe(true);
     expect(pluginAllowsAction("clip.delete", "timeline")).toBe(true);
@@ -152,7 +180,11 @@ test("MIDI import reaches the pitch curve in the plugin but never builds a local
  * `legacy`，那条"映射尚未校准"的理由已经随实测消失。
  */
 test("fade shape editing follows the host axis generation instead of one blanket mode", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "fade", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "fade",
+        hostCapabilities: writableHostCaps(),
+    };
     expect(hostFadeAxes()).toBeNull();
     expect(canEditHostFadeAxes()).toBe(false);
     expect(canSelectHostFadeShape()).toBe(false);
@@ -164,7 +196,7 @@ test("fade shape editing follows the host axis generation instead of one blanket
     }
 
     // 几何不可写时，轴语义再清楚也不能开闸 —— 走的是同一条 host_edit 路径。
-    window.__HFS_PLUGIN_BOOTSTRAP__.clipEditing = false;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.clipWrite = false;
     expect(canEditHostFadeAxes()).toBe(false);
 
     // 独立 App 用自己的曲率轴，没有宿主版本这个概念。
@@ -218,7 +250,11 @@ test("host kind defaults to ara_only and only reports reaper for a native adapte
  * 写它会被后端 `validate_fade_axes` 拒绝。
  */
 test("fade capabilities split by axis: length always writable, S only on 7.81+", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "fade-split", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "fade-split",
+        hostCapabilities: writableHostCaps(),
+    };
     // 轴版本读不出来：长度仍可写，形状/曲率/S 不可写。
     expect(hostFadeAxes()).toBeNull();
     expect(canEditFadeLength()).toBe(true);
@@ -240,7 +276,7 @@ test("fade capabilities split by axis: length always writable, S only on 7.81+",
     expect(canEditFadeS()).toBe(true);
 
     // 几何不可写时，长度也一起关掉（同一条 host_edit 路径）。
-    window.__HFS_PLUGIN_BOOTSTRAP__.clipEditing = false;
+    window.__HFS_PLUGIN_BOOTSTRAP__.hostCapabilities!.clipWrite = false;
     expect(canEditFadeLength()).toBe(false);
     expect(canEditFadeShape()).toBe(false);
 
@@ -262,7 +298,11 @@ test("fade capabilities split by axis: length always writable, S only on 7.81+",
  * 【为什么 BPM/拍号轴仍不可编辑】两者是宿主权威（VST3 进程上下文只读）。
  */
 test("tempo map splits by axis: BPM/time signature stay host-owned in the plugin", () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "tempo", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "tempo",
+        hostCapabilities: writableHostCaps(),
+    };
     expect(canEditTempoMapTempo()).toBe(false);
     // 与淡化轴能力正交：宿主轴再清楚也不放行 BPM/拍号。
     window.__HFS_PLUGIN_BOOTSTRAP__.fadeAxes = "legacy";

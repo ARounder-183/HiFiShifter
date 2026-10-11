@@ -1,5 +1,6 @@
 // 原GUI的运行模式与能力边界；独立app保持原窗口/文件/设备行为，插件由DAW供源。
 import { translateOutsideReact } from "../i18n/I18nProvider";
+import type { PluginBootstrap } from "./pluginHost";
 
 export type HostMode = "standalone" | "plugin";
 /** 必须使用显式bootstrap，而不是把所有WebView2都误认为插件。 */
@@ -11,21 +12,37 @@ export function hostMode(): HostMode {
 export function isPluginMode(): boolean {
     return hostMode() === "plugin";
 }
+/**
+ * 宿主写能力的**唯一**读取入口：后端 `hostCapabilities` 快照。
+ *
+ * 【为什么只有一个来源】此前 `clipEditing` / `audioImport` 等顶层布尔与
+ * `hostCapabilities` 并存，后端两处各自计算 —— 必然漂移。现在统一从这里读。
+ */
+function caps(): PluginBootstrap["hostCapabilities"] {
+    return window.__HFS_PLUGIN_BOOTSTRAP__?.hostCapabilities;
+}
 /** 仅宿主原生明确提供ARA播放请求能力时开放，不把插件模式等同支持播放控制。 */
 export function canControlHostTransport(): boolean {
     return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.transportControl === true;
 }
-/** 只有本次原生入口明确具备REAPER写API，才打开片段拖拽/裁切/线性拉伸。 */
+/**
+ * 只有本次原生入口明确具备写 API **且**有宿主撤销栈，才打开片段拖拽/裁切/线性拉伸。
+ *
+ * 【为什么还要 `undoStack`】后端 `effective_host_capabilities` 把 `clipWrite`
+ * （`can_edit_clips`）与 `undo_stack`（`has_project_history`）分开报；两者同时成立
+ * 才等于"有 project history 的宿主"，也就是此前的 `clipEditing` 语义。
+ */
 export function canEditHostClips(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipEditing === true;
+    const c = caps();
+    return isPluginMode() && c?.clipWrite === true && c.undoStack === true;
 }
 /** 分割有独立原生能力门，不因允许拖拽就放开未实现的片段命令。 */
 export function canSplitHostClips(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipSplitting === true;
+    return isPluginMode() && caps()?.split === true;
 }
 /** 原生完整item剪贴板及创建/删除接口已接通时开放，旧插件不会误发App私有媒体命令。 */
 export function canClipboardHostClips(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipClipboard === true;
+    return isPluginMode() && caps()?.itemClipboard === true;
 }
 /** 只允许插件私有参数分组，不代表能重排或创建REAPER的轨道/folder。 */
 export function canGroupPluginTracks(): boolean {
@@ -159,7 +176,7 @@ export function canEditTempoMapTempo(): boolean {
 }
 /** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
 export function canImportHostAudio(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.audioImport === true;
+    return isPluginMode() && caps()?.mediaImport === true;
 }
 
 /**
@@ -173,7 +190,7 @@ export function canImportHostAudio(): boolean {
  * 导入音频（见 [`canImportHostAudio`]）—— UI 必须把这件事说清楚。
  */
 export function canCreateHostTracks(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.trackCreation === true;
+    return isPluginMode() && caps()?.trackCreate === true;
 }
 
 /**

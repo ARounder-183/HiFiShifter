@@ -18,6 +18,7 @@ import dockReducer from "../../../features/dock/dockSlice";
 import keybindingsReducer from "../../../features/keybindings/keybindingsSlice";
 import { enUS } from "../../../i18n/en-US";
 import { I18nProvider } from "../../../i18n/I18nProvider";
+import { writableHostCaps } from "../../../services/pluginBootstrapFixtures";
 import { AppThemeProvider } from "../../../theme/AppThemeProvider";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { ClipContextMenu } from "./ClipContextMenu";
@@ -148,7 +149,11 @@ afterEach(() => {
 });
 
 test("plugin mode still shows the take, channel-mode and loop entries", async () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "menu", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "menu",
+        hostCapabilities: writableHostCaps(),
+    };
     await renderMenu(clipWithTakes());
 
     const labels = menuLabels().join("\n");
@@ -159,7 +164,11 @@ test("plugin mode still shows the take, channel-mode and loop entries", async ()
 });
 
 test("entries the plugin cannot do are disabled with a reason, not hidden", async () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "menu", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "menu",
+        hostCapabilities: writableHostCaps(),
+    };
     await renderMenu(clipWithTakes());
 
     // 倒放：ARA 不给反向 PCM —— 有专有原因，不是"由 REAPER 控制"。
@@ -173,7 +182,11 @@ test("entries the plugin cannot do are disabled with a reason, not hidden", asyn
 });
 
 test("loop stays usable in the plugin: it is a plain host item attribute", async () => {
-    window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "menu", clipEditing: true };
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "menu",
+        hostCapabilities: writableHostCaps(),
+    };
     await renderMenu(clipWithTakes());
     expect(entryByLabel(enUS.ctx_loop).disabled).toBe(false);
 });

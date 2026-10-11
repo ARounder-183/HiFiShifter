@@ -2956,18 +2956,6 @@ impl ExtensionOwner {
         })
     }
 
-    pub(crate) fn host_clip_editing_available(&self) -> bool {
-        self.editor_document().is_ok_and(|document| {
-            document.renderer_owners().iter().any(|owner| {
-                owner
-                    .host
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|host| host.has_project_history())
-            })
-        })
-    }
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
         let document = self.editor_document().ok()?;
@@ -2998,6 +2986,31 @@ impl ExtensionOwner {
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
     pub(crate) fn host_backend(&self) -> crate::host::adapter::HostBackend {
         crate::host::adapter::HostBackend::from_native(self.host.lock_or_recover().clone())
+    }
+    /// **生效的**宿主能力位：唯一来源，前端只读这一份。
+    ///
+    /// 【为什么不能直接用 `host_backend().capabilities()`】后者按 `self.host`（本实例自己
+    /// 的原生扩展）计算，而写能力实际由**本文档里任何**一个持有 project history 的实例
+    /// 提供（`project_history_host` 的解析口径）。此前前端另有一组 `BootstrapFlags` 布尔，
+    /// 用 `project_history_host().can_*()` 各算一遍 —— 两份判据必然漂移，而且"到底哪一份
+    /// 算数"没人说得清。这里把同一口径收敛成一个值，布尔与能力位不再各说各话。
+    ///
+    /// 【为什么 `clip_write` 与 `undo_stack` 分开报】`has_project_history()` 等于
+    /// "有撤销栈 **且** 可写片段"，前端 `canEditHostClips()` 用 `clipWrite && undoStack`
+    /// 即可精确复现"没有历史 API 就不给拖拽"这条既有语义，而不是把它折进 `clip_write`。
+    pub(crate) fn effective_host_capabilities(
+        &self,
+    ) -> hifishifter_kernel::editor::host::HostCapabilities {
+        let mut caps = self.host_backend().capabilities();
+        if let Some(host) = self.project_history_host() {
+            caps.clip_write = host.can_edit_clips();
+            caps.split = host.can_split_clips();
+            caps.item_clipboard = host.can_clipboard_items();
+            caps.media_import = host.can_import_audio();
+            caps.track_create = host.can_create_audio_track();
+            caps.undo_stack = host.has_project_history();
+        }
+        caps
     }
     /// 撤销历史的**权威**：宿主提供撤销栈时用宿主的，否则用插件自管的那份。
     ///
