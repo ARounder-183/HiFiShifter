@@ -421,13 +421,16 @@ pub(super) fn dispatch(
             ));
         }
         "read_system_clipboard_object" => {
-            return match hifishifter_clipboard::read_bytes()? {
+            // 【为什么读不到不是错误】这是"看看剪贴板里有没有我们的对象"的探测。
+            // 剪贴板被别的进程短暂占用是常态，把它报成 invoke 失败只会让前端把
+            // "暂时读不到"显示成故障。读不到就是"没有"。
+            return Ok(match hifishifter_clipboard::peek_bytes() {
                 Some(bytes) => match String::from_utf8(bytes) {
-                    Ok(payload) => Ok(json!({"ok":true,"available":true,"payload":payload})),
-                    Err(_) => Ok(json!({"ok":true,"available":false})),
+                    Ok(payload) => json!({"ok":true,"available":true,"payload":payload}),
+                    Err(_) => json!({"ok":true,"available":false}),
                 },
-                None => Ok(json!({"ok":true,"available":false})),
-            };
+                None => json!({"ok":true,"available":false}),
+            });
         }
         "write_system_clipboard_object" => {
             let payload = input["payload"]
@@ -449,7 +452,8 @@ pub(super) fn dispatch(
             return Ok(json!({"ok":true}));
         }
         "clipboard_kind" => {
-            let kind = hifishifter_clipboard::read_bytes()?
+            // 同 `read_system_clipboard_object`：探测读不到即"没有"，不是失败。
+            let kind = hifishifter_clipboard::peek_bytes()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .and_then(|payload| crate::host::clipboard::clipboard_kind(&payload));
             return Ok(json!({"ok":true,"kind":kind}));

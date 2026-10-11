@@ -308,6 +308,70 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 只读、**无重试、不持进程锁**的剪贴板探测：现在有没有 HiFiShifter 数据。
+///
+/// 【为什么必须是独立路径，而不是复用 `read_bytes`】`read_bytes` 是为"用户真的要
+/// 粘贴"设计的：独占打开 + 12 次退避重试（最坏约 800 ms）+ 全程持 `CLIPBOARD_LOCK`。
+/// 而可用性探测（前端定时询问"粘贴按钮要不要亮"）只需要一个是/否。用 `read_bytes`
+/// 做探测会让**探测本身变成争用源**：它与 WebView2、与宿主反复抢独占剪贴板，
+/// 每次抢不到还要等满 800 ms —— 实测这在一个工程里制造了 16,738 条
+/// `clipboard_open_failed` 日志，并把剪贴板让给了对手方。
+///
+/// 本函数只做一次 `open()`（无 owner，不接管剪贴板），失败立即放弃；不重试、
+/// 不持锁。**任何失败都返回 `None`** —— 对"有没有数据"这个问题，读不到就是没有，
+/// 不是错误。
+#[cfg(target_os = "windows")]
+pub fn peek_bytes() -> Option<Vec<u8>> {
+    use clipboard_win::raw;
+    if raw::open().is_err() {
+        return None;
+    }
+    let found = (|| {
+        if let Some(format) = clipboard_win::register_format(OBJECT_FORMAT) {
+            if raw::is_format_avail(format.get()) {
+                if let Some(size) = raw::size(format.get()) {
+                    let mut buf = vec![0u8; size.get()];
+                    if let Ok(read) = raw::get(format.get(), &mut buf) {
+                        buf.truncate(read);
+                        if !buf.is_empty() {
+                            return Some(buf);
+                        }
+                    }
+                }
+            }
+        }
+        // 旧版写入器只用文本信封（`HIFISHIFTER_CLIPBOARD_V1:`）。CF_UNICODETEXT
+        // 是预定义格式（id 13），按 id 直读即可，不必注册。
+        const CF_UNICODETEXT: u32 = 13;
+        if raw::is_format_avail(CF_UNICODETEXT) {
+            if let Some(size) = raw::size(CF_UNICODETEXT) {
+                let mut buf = vec![0u8; size.get()];
+                if let Ok(read) = raw::get(CF_UNICODETEXT, &mut buf) {
+                    buf.truncate(read);
+                    // UTF-16LE，去掉 NUL 终止符。
+                    let units: Vec<u16> = buf
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .take_while(|unit| *unit != 0)
+                        .collect();
+                    let text = String::from_utf16_lossy(&units);
+                    return decode_text_envelope(text.trim());
+                }
+            }
+        }
+        None
+    })();
+    let _ = raw::close();
+    found
+}
+
+/// 非 Windows 平台没有"独占打开"这一争用模型，退回普通读取即可。
+#[cfg(not(target_os = "windows"))]
+pub fn peek_bytes() -> Option<Vec<u8>> {
+    read_bytes().ok().flatten()
+}
+
+
 #[cfg(target_os = "windows")]
 pub fn write_bytes_with_reaper(
     bytes: &[u8],

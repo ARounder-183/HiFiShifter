@@ -378,8 +378,16 @@ pub(crate) fn plan_duplicate(
 }
 
 /// 可用性查询不创建/删除任何item，失败明确为空，不把参数剪贴板当片段剪贴板。
+///
+/// 【为什么"读不到"不是错误】本函数回答的是"粘贴按钮要不要亮"，不是"报告宿主故障"。
+/// 此前它用 `read_bytes()?` —— 独占打开剪贴板 + 12 次退避重试（最坏约 800 ms）+
+/// 进程级锁，并把失败当错误上抛。于是前端的可用性轮询本身成了争用源：实测一个工程
+/// 里制造了 16,738 条 `clipboard_open_failed`，且每次失败都要等满重试预算。
+///
+/// 现在走 [`hifishifter_clipboard::peek_bytes`]（只读、无重试、不持锁），
+/// 且**任何**读取失败都回落成 `available:false` —— 读不到就是没有数据。
 pub(crate) fn available() -> Result<Value, String> {
-    let data = hifishifter_clipboard::read_bytes()?.and_then(|bytes| decode(&bytes).ok());
+    let data = hifishifter_clipboard::peek_bytes().and_then(|bytes| decode(&bytes).ok());
     Ok(
         json!({"ok":true,"available":data.is_some(),"kind":data.as_ref().map(|_|"clips"),
         "clipCount":data.as_ref().map(|data|data.items.len()).unwrap_or(0)}),

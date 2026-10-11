@@ -362,10 +362,18 @@ export function useTimelineClipActions(
                 });
         };
         refresh();
-        const timer = window.setInterval(refresh, 2000);
+        // 【为什么从 2 s 放宽到 10 s，并加焦点/粘贴刷新】这个轮询读的是**宿主原生
+        // 剪贴板**，而用户可能连续几小时不碰它。2 s 的频率本身就是一个争用源：
+        // 它与 WebView2、与宿主反复抢独占剪贴板（实测一个工程里制造了 16,738 条
+        // `clipboard_open_failed`）。用户真正需要"立刻反映"的时刻只有两个 ——
+        // 窗口重新获得焦点、以及他自己按下粘贴 —— 那两处已各自刷新。
+        const timer = window.setInterval(refresh, 10000);
+        const onFocus = () => refresh();
+        window.addEventListener("focus", onFocus);
         return () => {
             cancelled = true;
             window.clearInterval(timer);
+            window.removeEventListener("focus", onFocus);
         };
     }, []);
 

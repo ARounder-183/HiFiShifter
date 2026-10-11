@@ -105,6 +105,22 @@ macro_rules! log_warn_limited {
     };
 }
 
+/// 按**动态键**限流的警告：每类键每 10 秒最多一条。
+///
+/// 【与 `log_warn_limited!` 的分工】后者按编译期调用点分桶，适合"同一行被循环反复
+/// 触发"；本宏按运行期键分桶，适合"同一个调用点承载多种错误"（如前端上报的 invoke
+/// 失败，每个方法名是一类）。两者共用同一个 10 秒窗口语义。
+#[allow(unused_macros)]
+macro_rules! log_warn_limited_key {
+    ($key:expr, $($arg:tt)*) => {
+        $crate::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            $key,
+            format_args!($($arg)*),
+        )
+    };
+}
+
 // ── 时间线模型 ──────────────────────────────────────────────────────────────
 pub mod editor;
 pub mod hfspeaks_v2;

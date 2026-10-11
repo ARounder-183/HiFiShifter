@@ -65,6 +65,25 @@ fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
+/// 把前端上报的错误文本折成一个**稳定、有界**的限流键片段。
+///
+/// 【为什么截断】键里带的是运行期数据（方法名、错误摘要、栈）。不截断就等于把
+/// 整条栈当成键 —— 而栈里往往含地址/行号这类每次都变的内容，会让"同一类错误"
+/// 每次都落进新桶，限流器形同虚设。64 字符足以区分 invoke 方法名与错误分类，
+/// 又不会让键本身变成新的日志体量。
+fn truncate_key(text: &str) -> String {
+    const MAX: usize = 64;
+    if text.len() <= MAX {
+        return text.to_owned();
+    }
+    // 按字符边界截断，避免在多字节 UTF-8 中间切开造成 panic。
+    let mut end = MAX;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 /// 一组 clip id → 宿主 `I_GROUPID`（`1..=host_edit::HOST_GROUP_ID_MAX`）。
 ///
 /// 【为什么是哈希而不是"显式序号"】序号要从当前编组集合取 `max+1`，而本处理器在
@@ -1168,7 +1187,27 @@ fn configure_browser(
             Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
                 "connected":state.borrow().link.owner().is_ok()})),
             Some("log_frontend_error") => {
-                crate::log_line(&format!("Embedded frontend: {}",request["args"])); Ok(serde_json::Value::Null)
+                // 【为什么按 (message, detail) 分桶限流，而不是原样落盘】
+                // 这个入口是**运行期数据驱动**的：每个失败的方法名是一类新错误。
+                // 此前每条都原样写进日志，实测把一个终态错误（组件已关闭而页面仍在
+                // 轮询）放大成 50 分钟 19,056 行、轮转文件合计约 32 MB 纯噪声 ——
+                // 用户报障时真正有用的线索全被冲掉。
+                // 现在每类错误各自 10 秒最多一条，且窗口内被抑制的条数会在下一条
+                // 输出前以 `[throttled]` 汇总行补记（不丢信息，只丢重复）。
+                let args = &request["args"];
+                let message = args["message"].as_str().unwrap_or("");
+                let detail = args["detail"].as_str().unwrap_or("");
+                let key = format!(
+                    "frontend:{}:{}",
+                    truncate_key(message),
+                    truncate_key(detail)
+                );
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Info,
+                    &key,
+                    format_args!("Embedded frontend: {}", args),
+                );
+                Ok(serde_json::Value::Null)
             }
             Some(command @ ("open_audio_dialog"|"open_audio_dialog_multi"))=>{
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
