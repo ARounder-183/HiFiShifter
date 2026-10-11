@@ -501,12 +501,9 @@ pub fn frame_fade_gain(
             None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
         };
     }
-    if fade_out_frames > 0
-        && local_in_clip >= fade_zone_start
-        && local_in_clip < clip_total_frames
+    if fade_out_frames > 0 && local_in_clip >= fade_zone_start && local_in_clip < clip_total_frames
     {
-        let progress =
-            (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
+        let progress = (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
         if progress <= 1.0 {
             g *= match fade_out_lut {
                 Some(lut) => sample_fade_lut(lut, progress * FADE_LUT_SIZE as f64),
@@ -858,22 +855,24 @@ mod tests {
         // 4 帧淡入 + 4 帧淡出（区间起点 6），clip 总长 10 帧，真实 LUT（线性形状）。
         let fade_in = build_fade_lut(0.0, 0.0, false);
         let fade_out = build_fade_lut(0.0, 0.0, true);
-        let g = |local: u64| {
-            frame_fade_gain(
-                local,
-                4,
-                Some(&fade_in),
-                6,
-                4,
-                Some(&fade_out),
-                10,
-            )
-        };
-        assert!(g(0) < 1.0 && g(0) > 0.0, "first frame is frame-centered, not hard-zeroed");
-        assert!((g(3) - 1.0).abs() < 1e-6, "last fade-in frame reaches full gain");
+        let g = |local: u64| frame_fade_gain(local, 4, Some(&fade_in), 6, 4, Some(&fade_out), 10);
+        assert!(
+            g(0) < 1.0 && g(0) > 0.0,
+            "first frame is frame-centered, not hard-zeroed"
+        );
+        assert!(
+            (g(3) - 1.0).abs() < 1e-6,
+            "last fade-in frame reaches full gain"
+        );
         assert!((g(5) - 1.0).abs() < 1e-6, "between the two zones");
-        assert!(g(6) < 1.0 && g(6) > 0.0, "fade-out starts just below full gain");
-        assert!(g(9).abs() < 1e-6, "last frame is endpoint-locked to exactly 0");
+        assert!(
+            g(6) < 1.0 && g(6) > 0.0,
+            "fade-out starts just below full gain"
+        );
+        assert!(
+            g(9).abs() < 1e-6,
+            "last frame is endpoint-locked to exactly 0"
+        );
     }
 
     /// 生成跨语言黄金向量：`tests/fixtures/fade-gain-golden.json` 由本函数写出，

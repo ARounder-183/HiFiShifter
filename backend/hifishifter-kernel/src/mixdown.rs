@@ -3560,8 +3560,8 @@ mod tests {
         /// 逐帧对拍必红。
         #[test]
         fn a_reversed_clip_renders_as_the_time_reversed_forward_render() {
-            let dir = std::env::temp_dir()
-                .join(format!("hfs_reversed_render_{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("hfs_reversed_render_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("asym.wav");
             let spec = hound::WavSpec {
@@ -3619,8 +3619,7 @@ mod tests {
             };
             let (_, _, _, forward) =
                 render_mixdown_interleaved(&build(false), options.clone()).unwrap();
-            let (_, _, _, reversed) =
-                render_mixdown_interleaved(&build(true), options).unwrap();
+            let (_, _, _, reversed) = render_mixdown_interleaved(&build(true), options).unwrap();
             assert_eq!(forward.len(), reversed.len());
             assert_eq!(forward.len(), frames * 2, "0.5s 双声道交织");
 
