@@ -152,3 +152,102 @@ fn cleanup_dir_by_prefix_older_than(dir: &Path, prefixes: &[&str], max_age_sec: 
 fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
     cleanup_dir_by_prefix_older_than(dir, prefixes, 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{cleanup_dir_by_prefix, cleanup_dir_by_prefix_older_than};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    /// 每个测试一个独立目录，用进程 id + 计数器避免并行测试互相踩踏；析构时清理。
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "hifishifter-temp-manager-test-{}-{}-{label}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: usize) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, vec![0u8; bytes]).unwrap();
+        path
+    }
+
+    /// 把文件的修改时间往回拨，模拟"陈旧残留"。
+    fn age_file(path: &Path, age: Duration) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn prefix_cleanup_removes_only_matching_files_and_reports_bytes() {
+        let scratch = Scratch::new("prefix");
+        let synth = write_file(scratch.path(), "synth_a.wav", 100);
+        let other = write_file(scratch.path(), "other.wav", 7);
+        fs::create_dir_all(scratch.path().join("synth_dir")).unwrap();
+
+        let (removed, bytes) = cleanup_dir_by_prefix(scratch.path(), &["synth_"]);
+        assert_eq!((removed, bytes), (1, 100));
+        assert!(!synth.exists(), "匹配前缀的文件应被删除");
+        assert!(other.exists(), "不匹配的文件必须保留");
+        assert!(
+            scratch.path().join("synth_dir").is_dir(),
+            "目录即使名字匹配也不能被当作文件删除"
+        );
+    }
+
+    #[test]
+    fn the_age_filter_keeps_recent_files_and_removes_old_ones() {
+        let scratch = Scratch::new("age");
+        let old = write_file(scratch.path(), "glue_old.wav", 40);
+        let recent = write_file(scratch.path(), "glue_recent.wav", 40);
+        age_file(&old, Duration::from_secs(8 * 24 * 3600));
+
+        let (removed, bytes) =
+            cleanup_dir_by_prefix_older_than(scratch.path(), &["glue_"], 7 * 24 * 3600);
+        assert_eq!((removed, bytes), (1, 40));
+        assert!(!old.exists(), "超过 7 天的 glue_ 残留应被删除");
+        assert!(recent.exists(), "新文件必须保留（可能仍被已保存工程引用）");
+    }
+
+    #[test]
+    fn a_zero_max_age_disables_the_age_filter() {
+        let scratch = Scratch::new("zero-age");
+        let fresh = write_file(scratch.path(), "import_fresh.wav", 12);
+
+        let (removed, _) = cleanup_dir_by_prefix_older_than(scratch.path(), &["import_"], 0);
+        assert_eq!(removed, 1, "max_age_sec = 0 表示不限龄");
+        assert!(!fresh.exists());
+    }
+
+    #[test]
+    fn a_missing_directory_is_not_an_error() {
+        let scratch = Scratch::new("missing");
+        let absent = scratch.path().join("does-not-exist");
+        assert_eq!(cleanup_dir_by_prefix(&absent, &["synth_"]), (0, 0));
+    }
+}
