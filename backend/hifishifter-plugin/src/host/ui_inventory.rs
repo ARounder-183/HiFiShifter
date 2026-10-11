@@ -328,8 +328,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9876);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
@@ -345,8 +344,7 @@ mod tests {
         let empty = host.ui_track(&|| true).unwrap();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(empty.guid.clone(), empty);
         document.present_host_inventory(&mut timeline, "ui-");
         assert_eq!(timeline.tracks.len(), 1);
@@ -453,8 +451,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9877);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
@@ -491,8 +488,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9879);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
@@ -516,8 +512,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9878);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
 
         let mut payload = serde_json::json!({"clips": [
@@ -556,20 +551,17 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9879);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
 
         // 该 item 已被 ARA 认领，授权记录指向**另一个** take GUID（= 用户切了 active take）。
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, item_id.clone());
         document
             .authorized_takes
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
 
         let mut payload = serde_json::json!({"clips": [
@@ -622,13 +614,11 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9882);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, item_id.clone());
         document.regions.lock_or_recover().insert(
             7,
@@ -641,8 +631,7 @@ mod tests {
         // 源被授权、读取失败 ⇒ 立刻报真因，不启动"在途"计时。
         document
             .source_failures
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), "host read failed".into());
 
         let mut payload = serde_json::json!({"clips": [
@@ -672,18 +661,15 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9883);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         document
             .skipped_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .push((2, "midi".into()));
         document
             .skipped_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .push((5, "zero_length".into()));
 
         let mut payload = serde_json::json!({"clips": []});
@@ -714,8 +700,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9880);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
 
         let mut payload = serde_json::json!({"clips": [
@@ -724,8 +709,7 @@ mod tests {
         // 已被认领、也没有"授权指向另一个 take" ⇒ 超期后剩下的成因只有"等 ARA 分配"。
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, item_id.clone());
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert!(payload["clips"][0]["reversed_known"].is_null());
@@ -756,8 +740,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9876);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
@@ -799,19 +782,16 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9876);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         // ARA 侧认领了该 item，并记下了授权那一刻的 active take GUID。
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, item_id.clone());
         document
             .authorized_takes
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, active_take.clone());
         // 时间线上已有该 clip（ARA 身份 + 授权媒体），但 take 身份还是 ARA 自己的命名。
         let mut timeline: hifishifter_kernel::state::TimelineState =
@@ -853,13 +833,11 @@ mod tests {
         let grown = host.ui_track(&|| true).unwrap();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(grown.guid.clone(), grown);
         document
             .authorized_takes
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
         let mut again = hifishifter_kernel::state::TimelineState {
             clips: vec![stale],
@@ -895,24 +873,20 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9881);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, item_id.clone());
         // GUID 对不上任何一个 take（模拟"切到了别的 take"），但文件路径对得上。
         document
             .authorized_takes
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "{99999999-9999-9999-9999-999999999999}".into());
         document
             .authorized_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "C:/media/same.wav".into());
 
         let mut timeline: hifishifter_kernel::state::TimelineState =
@@ -935,8 +909,7 @@ mod tests {
         // 路径对不上（宿主换成了另一个文件）→ 不许挂旧采样。
         document
             .authorized_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "C:/media/other.wav".into());
         let mut again = hifishifter_kernel::state::TimelineState {
             clips: vec![timeline.clips[0].clone()],
@@ -971,8 +944,7 @@ mod tests {
         let document = crate::render::document::DocumentSession::new(9876);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
@@ -985,8 +957,7 @@ mod tests {
         let refreshed = host.ui_track(&|| true).unwrap();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(refreshed.guid.clone(), refreshed);
         document.present_host_inventory(&mut timeline, "ui-");
         assert_eq!(

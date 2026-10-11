@@ -26,8 +26,7 @@ impl EditorSession {
         let path = Path::new(input).canonicalize().map_err(|e| e.to_string())?;
         if !self
             .browser_roots
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .any(|root| path.starts_with(root))
         {

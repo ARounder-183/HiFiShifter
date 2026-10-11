@@ -272,8 +272,7 @@ impl DocumentSession {
         namespace: &str,
     ) -> std::collections::BTreeMap<String, String> {
         self.ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .map(|track| (track.guid.clone(), format!("{namespace}{}", track.id)))
             .collect()
@@ -670,8 +669,7 @@ impl DocumentSession {
             return Some(id);
         }
         self.ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .any(|track| {
                 track
@@ -718,8 +716,7 @@ impl DocumentSession {
                 clip["snap_offset_sec"] = serde_json::json!(g.snap_offset_sec);
                 let delegated = self
                     .regions
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .get(&bound.region_key)
                     .is_some_and(|region| {
                         region.has_content_based_fade_at_head
@@ -778,8 +775,7 @@ impl DocumentSession {
         // 被某个 region 认领的 item；不在集合里的还没拿到 ARA 音频。
         let claimed: std::collections::BTreeSet<String> = self
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .cloned()
             .collect();
@@ -814,8 +810,7 @@ impl DocumentSession {
         };
         let failed_sources: std::collections::HashSet<String> = self
             .source_failures
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .keys()
             .cloned()
             .collect();
@@ -1042,8 +1037,7 @@ impl DocumentSession {
                 clip.fade_out_s = out_s;
                 if self
                     .regions
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .get(&bound.region_key)
                     .is_some_and(|region| {
                         region.has_content_based_fade_at_head
@@ -1152,8 +1146,7 @@ impl DocumentSession {
         // 源窗口 `(start, span)` 只服务倒放的**镜像坐标复原**（见下）。
         let facts: std::collections::HashMap<String, (bool, bool, i32, Option<(f64, f64)>)> = self
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .flat_map(|track| &track.items)
             .map(|item| {
@@ -1318,8 +1311,7 @@ impl DocumentSession {
         if !regions.is_empty() {
             let keys = regions.iter().copied().collect::<Vec<_>>();
             let (document, _) = region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .resolve(&keys)
                 .map_err(|e| format!("workspace region ownership: {e:?}"))?;
             if document != self.id {
@@ -1349,8 +1341,7 @@ impl DocumentSession {
         drop(identities);
         let mut timeline = self
             .timeline
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .clone()
             .ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| clips.contains(&clip.id));
@@ -1532,8 +1523,7 @@ mod tests {
         for (index, id) in ["ca", "cb"].into_iter().enumerate() {
             let key = (&*identities[index] as *const u8) as u64;
             region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .register(key, document.id, index)
                 .unwrap();
             document.clip_ids.lock_or_recover().insert(key, id.into());
@@ -1680,8 +1670,7 @@ mod tests {
         assert!(
             !document
                 .ui_known_tracks
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .contains("host-leaving"),
             "剔除之后不得永久残留，否则此后每一轮都会被误剔"
         );
@@ -1914,8 +1903,7 @@ mod tests {
         document.pending_since.lock_or_recover().clear();
         document
             .region_items
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(7, "{G}".into());
         document.regions.lock_or_recover().insert(
             7,
@@ -1926,8 +1914,7 @@ mod tests {
         );
         document
             .source_failures
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), "boom".into());
         assert_eq!(document.media_in_flight_items(&timeline), 0);
 

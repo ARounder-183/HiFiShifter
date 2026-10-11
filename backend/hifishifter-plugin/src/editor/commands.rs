@@ -177,8 +177,7 @@ pub(crate) fn history_state(session: &EditorSession) -> Value {
 fn track_exists(session: &EditorSession, track: &str) -> Result<(), String> {
     if session
         .timeline
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .tracks
         .iter()
         .any(|t| t.id == track)

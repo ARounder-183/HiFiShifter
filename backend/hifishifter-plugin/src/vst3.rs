@@ -2440,8 +2440,7 @@ mod audio_boundary_tests {
         let pcm = document.edit_sources.lock_or_recover()["ara://source"].clone();
         document
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm);
         let mut processor = Processor::create().unwrap();
         processor.extension_owner = owners[0].clone();

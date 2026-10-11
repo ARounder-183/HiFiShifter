@@ -315,6 +315,7 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::MutexExt;
     /// 用已核对的windows crate typed API读取真实进程高水位，不用PCM额度冒充RSS。
     #[cfg(windows)]
     fn process_memory_profile() -> (usize, usize, usize) {
@@ -346,8 +347,7 @@ mod tests {
         hifishifter_kernel::hnsep_onnx::clear_separation_cache();
         hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
         hifishifter_kernel::synth_clip_cache::global_synth_clip_cache()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .clear();
         let seconds = 180.;
         let frames = 44100 * 180;
@@ -658,8 +658,7 @@ mod tests {
         let parameters = timeline.params_by_root_track["track"].clone();
         hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
         hifishifter_kernel::synth_clip_cache::global_synth_clip_cache()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .clear();
         let mut input = RenderInput {
             timeline: Some(timeline),

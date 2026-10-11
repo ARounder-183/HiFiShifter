@@ -125,8 +125,7 @@ pub(crate) fn execute(
             let _transaction = document.transaction.lock_or_recover();
             document
                 .edits
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .atlas
                 .split_seed(&target.geometry.item_id)
         };
@@ -148,8 +147,7 @@ pub(crate) fn execute(
         // "等待 REAPER 提供音频"的占位里（见 `DocumentSession::split_media_from`）。
         document
             .split_media_from
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(pair.1.item_id.clone(), pair.0.item_id.clone());
         pairs.push(pair);
     }

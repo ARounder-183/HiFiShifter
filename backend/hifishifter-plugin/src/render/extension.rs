@@ -192,8 +192,14 @@ pub(crate) struct ExtensionOwner {
     roles: AtomicI32,
     closed: std::sync::atomic::AtomicBool,
     writer_id: AtomicU64,
-    /// 原生宿主适配器（REAPER）；`None` ⇒ 退回 ARA-only 后端（见 [`Self::host_backend`]）。
-    host: Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
+    /// 当前编辑后端；`None` ⇒ 尚未绑定任何原生扩展（与 `HostBackend::AraOnly` 不同：
+    /// 后者是"宿主明确只给 ARA"，前者是"还没接上"）。
+    ///
+    /// 【为什么字段不是具体类型 `Arc<ReaperHost>`】通用层（本文件）不该按 REAPER 类型
+    /// 书写。存 [`crate::host::adapter::HostBackend`] 之后，任何需要原生扩展的调用点都
+    /// 必须显式 `reaper()` 并处理 `None` —— REAPER 依赖变成**可见且可能力门控**的一步，
+    /// 而不是一个默认就在的具体类型。
+    host: Mutex<Option<crate::host::adapter::HostBackend>>,
     host_geometry: Mutex<Option<CachedHostGeometry>>,
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
@@ -302,13 +308,11 @@ mod bound_tests {
         });
         document
             .edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm.clone());
         document
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm);
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -374,8 +378,7 @@ mod bound_tests {
         assert_eq!(
             document
                 .edits
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .fades
                 .values()
                 .next()
@@ -1257,13 +1260,11 @@ mod bound_tests {
         });
         document
             .edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("source".into(), pcm.clone());
         document
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("source".into(), pcm);
         *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
             ("a".into(), vec![("ma".into(), "source".into())]),
@@ -1275,8 +1276,7 @@ mod bound_tests {
         for (index, clip) in ["ca", "cb"].into_iter().enumerate() {
             let key = (&*identities[index] as *const u8) as u64;
             region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .register(key, document.id, index)
                 .unwrap();
             document.clip_ids.lock_or_recover().insert(key, clip.into());
@@ -1410,8 +1410,7 @@ mod bound_tests {
         let identity = Box::new(0_u8);
         let key = (&*identity as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, document.id, 0)
             .unwrap();
         let (ready, entered) = std::sync::mpsc::channel();
@@ -1478,8 +1477,7 @@ mod bound_tests {
         let identity = Box::new(0_u8);
         let key = (&*identity as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, document.id, 0)
             .unwrap();
         document
@@ -1650,8 +1648,7 @@ mod bound_tests {
         for (index, id) in ["clip-a", "clip-b"].into_iter().enumerate() {
             let key = (&*identities[index] as *const u8) as u64;
             region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .register(key, document.id, index)
                 .unwrap();
             document.clip_ids.lock_or_recover().insert(key, id.into());
@@ -1816,8 +1813,7 @@ mod bound_tests {
             assert_eq!(
                 document
                     .edits
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .tracks
                     .iter()
                     .find(|t| t.id == "a")
@@ -1828,8 +1824,7 @@ mod bound_tests {
             assert_eq!(
                 document
                     .edits
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .tracks
                     .iter()
                     .find(|t| t.id == "b")
@@ -1913,8 +1908,7 @@ mod bound_tests {
         let identity = Box::new(0_u8);
         let key = (&*identity as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, document.id, 0)
             .unwrap();
         // SAFETY: extension 与 controller 保留；region 仅作为不透明身份。
@@ -1973,19 +1967,16 @@ mod bound_tests {
         let b = (&*region_b as *const u8) as u64;
         let seq = (&*sequence as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(a, document.id, 0)
             .unwrap();
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(b, document.id, 1)
             .unwrap();
         document
             .sequence_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(seq, [a, b].into_iter().collect());
         // SAFETY: binding、session 和不透明身份在调用期间均存活。
         unsafe {
@@ -1999,8 +1990,7 @@ mod bound_tests {
         assert_eq!(owner.assigned_regions().unwrap(), expected);
         document
             .sequence_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get_mut(&seq)
             .unwrap()
             .remove(&b);
@@ -2060,8 +2050,7 @@ impl ExtensionOwner {
             return Err("FX processor closed".into());
         }
         self.document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .filter(|document| document.is_alive())
@@ -2088,12 +2077,12 @@ impl ExtensionOwner {
                 }
         };
         let host = unsafe { crate::host::reaper::ReaperHost::from_context(context, authorized) }
-            .map(Arc::new);
+            .map(|host| crate::host::adapter::HostBackend::Reaper(Arc::new(host)));
         if !authorized() {
             return;
         }
         crate::log_line(&format!(
-            "REAPER host extension available={}",
+            "native host extension available={}",
             host.is_some()
         ));
         let old = std::mem::replace(&mut *self.host.lock_or_recover(), host);
@@ -2139,16 +2128,14 @@ impl ExtensionOwner {
     ) -> Result<Vec<u64>, String> {
         let mut keys = self
             .assignments
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
         let sequences = self
             .sequences
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .flatten()
             .copied()
@@ -2167,8 +2154,7 @@ impl ExtensionOwner {
         let keys = keys.into_iter().collect::<Vec<_>>();
         if !keys.is_empty()
             && region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .resolve(&keys)
                 .map_err(|_| "invalid host assigned region")?
                 .0
@@ -2191,16 +2177,12 @@ impl ExtensionOwner {
         let region = stamp
             .0
             .regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(region_key)
             .cloned()
             .ok_or("assigned ARA region unavailable")?;
         let host = self
-            .host
-            .lock()
-            .unwrap()
-            .clone()
+            .reaper_host()
             .ok_or("REAPER host extension unavailable")?;
         let geometry = host.geometry(|| self.host_query_authorized(&stamp))?;
         if !compatible(geometry.start_sec, region.start_in_playback_time)
@@ -2234,10 +2216,7 @@ impl ExtensionOwner {
             return Err("no assigned ARA region".into());
         }
         let host = self
-            .host
-            .lock()
-            .unwrap()
-            .clone()
+            .reaper_host()
             .ok_or("REAPER host extension unavailable")?;
         let authorized = || self.host_query_authorized(&stamp);
         let candidates = host
@@ -2251,8 +2230,7 @@ impl ExtensionOwner {
             let region = stamp
                 .0
                 .regions
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .get(key)
                 .cloned()
                 .ok_or("assigned ARA region unavailable")?;
@@ -2321,8 +2299,7 @@ impl ExtensionOwner {
         let stamp = self.host_query_stamp()?;
         let cached = self
             .host_geometry
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .clone()
             .ok_or("REAPER geometry has not been sampled on model/UI thread")?;
         if cached.model != stamp.1 || cached.scope != stamp.2 || !self.host_query_authorized(&stamp)
@@ -2398,7 +2375,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.host.lock_or_recover().clone() };
+        let host = self.reaper_host();
         if let Some(host) = host {
             if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
                 // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
@@ -2443,7 +2420,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let Some(host) = self.host.lock_or_recover().clone() else {
+        let Some(host) = self.reaper_host() else {
             // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
             // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
             *self.host_audio.lock_or_recover() = HostAudioStatus {
@@ -2465,8 +2442,7 @@ impl ExtensionOwner {
         let fresh = stamp
             .0
             .ui_inventory_sampled_at
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .is_some_and(|at| at.elapsed() < FACTS_REFRESH_INTERVAL);
         let stored = *stamp.0.ui_inventory_stamp.lock_or_recover();
         if self.host_query_authorized(&stamp) && fresh && stored == Some(token) {
@@ -2487,7 +2463,7 @@ impl ExtensionOwner {
             if !allowed() {
                 return;
             }
-            let Some(host) = owner.host.lock_or_recover().clone() else {
+            let Some(host) = owner.reaper_host() else {
                 continue;
             };
             let own_allowed = || {
@@ -2648,8 +2624,7 @@ impl ExtensionOwner {
         stamp
             .0
             .ui_known_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .extend(tracks.values().map(|track| track.id.clone()));
         *stamp.0.ui_tracks.lock_or_recover() = tracks;
         *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
@@ -2701,7 +2676,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.host.lock_or_recover().clone() };
+        let host = self.reaper_host();
         let authorized = || self.host_query_authorized(&stamp);
         let before = host
             .as_ref()
@@ -2712,8 +2687,7 @@ impl ExtensionOwner {
         let unchanged = before.is_some()
             && self
                 .host_geometry
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .as_ref()
                 .is_some_and(|cached| {
                     cached.model == stamp.1
@@ -2760,8 +2734,7 @@ impl ExtensionOwner {
                 stamp
                     .0
                     .regions
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .get(key)
                     .is_some_and(|region| {
                         region.has_content_based_fade_at_head
@@ -2945,38 +2918,23 @@ impl ExtensionOwner {
     /// 所有实例必然一致，不存在"这个 owner 是新轴、那个是旧轴"的情况。
     pub(crate) fn host_fade_axes(&self) -> Option<bool> {
         self.editor_document().ok().and_then(|document| {
-            document.renderer_owners().iter().find_map(|owner| {
-                owner
-                    .host
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|host| host.fade_axes_v2())
-            })
+            document
+                .renderer_owners()
+                .iter()
+                .find_map(|owner| owner.reaper_host().and_then(|host| host.fade_axes_v2()))
         })
     }
 
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
         let document = self.editor_document().ok()?;
-        if let Some(host) = self
-            .host
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|host| host.has_project_history())
-            .cloned()
-        {
+        if let Some(host) = self.reaper_host().filter(|host| host.has_project_history()) {
             return Some(host);
         }
         document.renderer_owners().iter().find_map(|owner| {
             owner
-                .host
-                .lock()
-                .unwrap()
-                .as_ref()
+                .reaper_host()
                 .filter(|host| host.has_project_history())
-                .cloned()
         })
     }
     /// 当前编辑后端：宿主给了原生扩展就用它，否则退回 ARA-only。
@@ -2985,7 +2943,21 @@ impl ExtensionOwner {
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
     pub(crate) fn host_backend(&self) -> crate::host::adapter::HostBackend {
-        crate::host::adapter::HostBackend::from_native(self.host.lock_or_recover().clone())
+        self.host
+            .lock_or_recover()
+            .clone()
+            .unwrap_or_else(|| crate::host::adapter::HostBackend::from_native(None))
+    }
+    /// 原生 REAPER 适配器（未绑定时 `None`）。
+    ///
+    /// 【为什么单独一个访问器】它是通用层唯一允许取具体 `ReaperHost` 的地方 —— 所有
+    /// 需要宿主扩展的操作都从这里取、并显式处理 `None`，让"这一步依赖原生扩展"写在
+    /// 调用点上，而不是藏在字段类型里。
+    pub(crate) fn reaper_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
+        self.host
+            .lock_or_recover()
+            .clone()
+            .and_then(|backend| backend.reaper().cloned())
     }
     /// **生效的**宿主能力位：唯一来源，前端只读这一份。
     ///
@@ -3042,8 +3014,7 @@ impl ExtensionOwner {
             let target = {
                 document
                     .ui_tracks
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .values()
                     .find(|t| t.id == id)
                     .map(|t| t.target.clone())
@@ -3073,10 +3044,7 @@ impl ExtensionOwner {
             return Err("import track has no directly bound host region".into());
         }
         let host = self
-            .host
-            .lock()
-            .unwrap()
-            .clone()
+            .reaper_host()
             .ok_or("primary REAPER host interface missing")?;
         host.direct_track_target(authorized)
     }
@@ -3090,8 +3058,7 @@ impl ExtensionOwner {
         if let Some(item) = clip_id.strip_prefix("ara-item-") {
             let target = document
                 .ui_tracks
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .values()
                 .flat_map(|track| &track.items)
                 .find(|entry| entry.geometry.item_id == item)
@@ -3127,12 +3094,7 @@ impl ExtensionOwner {
             if bound.region_key != key {
                 return Err("host region binding changed".into());
             }
-            let host = owner
-                .host
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or("REAPER host interface missing")?;
+            let host = owner.reaper_host().ok_or("REAPER host interface missing")?;
             let next = host.clip_target(|| owner.host_query_authorized(&stamp))?;
             if target.is_some() {
                 return Err("multiple host writers for one ARA clip".into());
@@ -3145,8 +3107,7 @@ impl ExtensionOwner {
     pub(crate) fn stop_editor(&self) {
         let document = {
             self.document
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade)
         };
@@ -3183,8 +3144,7 @@ impl ExtensionOwner {
         if self.is_editor_only() {
             if let Some(document) = self
                 .document
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade)
             {
@@ -3228,8 +3188,7 @@ impl ExtensionOwner {
     /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
     pub(crate) fn host_playback(&self) -> Option<ara2_bridge::plugin::PlaybackRequestHandle> {
         self.document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .and_then(|document| document.playback.lock_or_recover().clone())
@@ -3245,8 +3204,7 @@ impl ExtensionOwner {
     #[allow(dead_code)]
     pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
         self.document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .map(|document| document.edits.clone())
@@ -3257,8 +3215,7 @@ impl ExtensionOwner {
     pub fn refresh_document(&self) {
         let document = self
             .document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
@@ -3317,8 +3274,7 @@ impl ExtensionOwner {
         let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
         let bindings = document
             .track_bindings
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter(|(id, _)| allowed.contains(*id))
             .map(|(id, identity)| (id.clone(), identity.clone()))
@@ -3381,8 +3337,7 @@ impl ExtensionOwner {
     pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
         let document = self
             .document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
@@ -3421,8 +3376,7 @@ impl ExtensionOwner {
             local.encode()
         } else {
             self.pending_restore
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .as_ref()
                 .unwrap_or(&self.edits.lock_or_recover())
                 .encode()
@@ -3437,8 +3391,7 @@ impl ExtensionOwner {
         use hifishifter_ara_ipc::{HostPcm, Request, Response};
         let document = self
             .document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         let Some(document) = document else {
@@ -3754,8 +3707,7 @@ impl ExtensionOwner {
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut timeline = document
             .timeline
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .clone()
             .ok_or("host timeline unavailable")?;
         if let Some(tempo) = document.clock.tempo() {
@@ -3776,16 +3728,14 @@ impl ExtensionOwner {
         // 绝不按轨名/位置/序号凭空造轨道。
         let assigned_sequences = self
             .sequences
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
         let empty_roots = document
             .sequence_track_index
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter(|(key, _)| assigned_sequences.contains(key))
             .filter_map(|(_, index)| timeline.tracks.get(*index).map(|track| track.id.clone()))
@@ -3817,8 +3767,7 @@ impl ExtensionOwner {
                 if let Some(owner) = owner.upgrade() {
                     let document = owner
                         .document
-                        .lock()
-                        .unwrap()
+                        .lock_or_recover()
                         .as_ref()
                         .and_then(std::sync::Weak::upgrade);
                     let Some(document) = document else {
@@ -3955,16 +3904,14 @@ impl ExtensionOwner {
     pub fn assigned_regions(&self) -> Result<Vec<u64>, AraError> {
         let document = self
             .document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .ok_or(AraError::InvalidState("document no longer available"))?;
         let role = self.role.load(Ordering::Acquire);
         let mut keys = self
             .assignments
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(&role)
             .cloned()
             .unwrap_or_default()
@@ -3972,8 +3919,7 @@ impl ExtensionOwner {
             .collect::<BTreeSet<_>>();
         let sequences = self
             .sequences
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(&role)
             .cloned()
             .unwrap_or_default();
@@ -3991,8 +3937,7 @@ impl ExtensionOwner {
         let keys = keys.into_iter().collect::<Vec<_>>();
         if !keys.is_empty() {
             let (owner, _) = region_owners()
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .resolve(&keys)
                 .map_err(|_| AraError::InvalidState("invalid assigned region"))?;
             if owner != document.id {
@@ -4113,8 +4058,7 @@ impl ExtensionOwner {
     fn prepare_job(&self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Result<(), String> {
         let Some(document) = self
             .document
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -4360,8 +4304,7 @@ mod host_audio_state_tests {
         assert!(
             document
                 .render_facts
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .items
                 .values()
                 .all(|item| !item.reversed),
@@ -4388,8 +4331,7 @@ mod host_audio_state_tests {
         assert!(
             document
                 .render_facts
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .items
                 .values()
                 .all(|item| item.reversed),
@@ -4630,18 +4572,15 @@ mod assigned_timeline_tests {
         let sequence_key = 4242_u64;
         document
             .sequence_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(sequence_key, std::collections::HashSet::new());
         document
             .sequence_track_index
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(sequence_key, 2);
         owner
             .sequences
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(owner.role.load(Ordering::Acquire), vec![sequence_key]);
 
         let timeline = owner.assigned_timeline(&document).unwrap();
@@ -4656,8 +4595,7 @@ mod assigned_timeline_tests {
         // 交给了空 renderer（旧的"零分配只能看零轨道"约束不能被这次改动放宽）。
         document
             .sequence_track_index
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .remove(&sequence_key);
         let timeline = owner.assigned_timeline(&document).unwrap();
         assert!(

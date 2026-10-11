@@ -266,8 +266,7 @@ impl ReaperHost {
             // 未知一律 `null`（前端隐藏时间列），绝不回落到 0 —— 那会显示 1970。
             let at = self
                 .undo_entry_times
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .get(&index)
                 .copied()
                 .map(serde_json::Value::from)

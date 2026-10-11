@@ -600,8 +600,7 @@ pub(super) fn execute_managed(
                 };
                 document
                     .regions
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .get(&key)
                     .is_some_and(|region| {
                         region.has_content_based_fade_at_head
@@ -618,8 +617,7 @@ pub(super) fn execute_managed(
                 }
                 let mut style = document
                     .edits
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .fades
                     .get(&target.geometry.item_id)
                     .cloned()

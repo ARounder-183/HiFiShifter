@@ -362,8 +362,7 @@ impl ModelHandle {
         // 媒体派生谱系：右半段的源与父段是同一个文件（父段已授权 ⇒ 右半段立刻有波形）。
         self.session
             .split_media_from
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(right_item.to_owned(), left_item.to_owned());
         log::info!(
             "[ara] host split detected: parent={parent_item} left={left_item} right={right_item}"
@@ -800,14 +799,12 @@ impl RegionSequences for ModelHandle {
             self.sequence_index_by_model_ref.insert(key as usize, index);
             self.session
                 .sequence_regions
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .insert(key, HashSet::new());
             // 记录 sequence → 轨道下标：空 sequence（无 region）也要能被认成参数根。
             self.session
                 .sequence_track_index
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .insert(key, index);
         }
         Ok(index)
@@ -832,13 +829,11 @@ impl AudioSources for ModelHandle {
         self.session.clear_renderers();
         self.session
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .remove(&source.persistent_id);
         self.session
             .edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .remove(&source.persistent_id);
         source.persistent_id = properties.persistent_id().to_string();
         source.name = properties.name().map(str::to_owned);
@@ -863,8 +858,7 @@ impl AudioSources for ModelHandle {
             if let Some(source) = self.document.audio_sources.get(*state) {
                 self.session
                     .edit_sources
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .remove(&source.persistent_id);
             }
             if let Some(source) = self.document.audio_sources.get_mut(*state) {
@@ -881,8 +875,7 @@ impl AudioSources for ModelHandle {
         if let Some(source) = self.document.audio_sources.get(state) {
             self.session
                 .edit_sources
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .remove(&source.persistent_id);
         }
         if let Some(source) = self.document.audio_sources.get_mut(state) {
@@ -936,8 +929,7 @@ impl AudioSources for ModelHandle {
         if let Some(source) = self.document.audio_sources.get(*state) {
             self.session
                 .edit_sources
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .remove(&source.persistent_id);
         }
         self.source_content_version_bump(*state);
@@ -995,8 +987,7 @@ impl ModelHandle {
         };
         self.session
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .remove(&source.persistent_id);
         if source.sample_access_enabled {
             let result = usize::try_from(source.sample_count)
@@ -1022,8 +1013,7 @@ impl ModelHandle {
                     let pcm = Arc::new(pcm);
                     self.session
                         .source_failures
-                        .lock()
-                        .unwrap()
+                        .lock_or_recover()
                         .remove(&source.persistent_id);
                     self.session
                         .publish_source_pcm(source.persistent_id.clone(), pcm);
@@ -1036,8 +1026,7 @@ impl ModelHandle {
                     log::warn!("[ara] host PCM unavailable: {error:?}");
                     self.session
                         .source_failures
-                        .lock()
-                        .unwrap()
+                        .lock_or_recover()
                         .insert(source.persistent_id.clone(), format!("{error:?}"));
                 }
             }
@@ -1191,8 +1180,7 @@ impl PlaybackRegions for ModelHandle {
         if let Some(sequence) = properties.region_sequence() {
             self.session
                 .sequence_regions
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .entry(sequence.as_raw() as usize as u64)
                 .or_default()
                 .insert(key);
@@ -1330,8 +1318,7 @@ mod tests {
         let key = (&*identity as *const u8) as u64;
         model.region_keys.push(key);
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, model.document_id, 0)
             .unwrap();
         model.remap_and_log();
@@ -1569,8 +1556,7 @@ mod tests {
             model
                 .session
                 .split_media_from
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .get(RIGHT)
                 .map(String::as_str),
             Some(PARENT),
@@ -1614,8 +1600,7 @@ mod tests {
             reopened
                 .session
                 .edits
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .restore(&bytes)
                 .unwrap();
             reopened.remap_and_log();
@@ -1695,14 +1680,12 @@ mod tests {
         model
             .session
             .sequence_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(old_key, [region_key].into_iter().collect());
         model
             .session
             .sequence_regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(new_key, HashSet::new());
         let properties =
             PlaybackRegionProperties::for_ara2(1, 0.0, 1.0, 2.0, 1.0, new, None, None).unwrap();
@@ -1825,8 +1808,7 @@ mod tests {
         let key = (&*region as *const u8) as u64;
         model.region_keys.push(key);
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, model.document_id, 0)
             .unwrap();
         model.remap_and_log();
@@ -1986,8 +1968,7 @@ mod tests {
         let mut model = ModelHandle::new();
         model.region_keys.push(key);
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, model.document_id, 0)
             .unwrap();
         PlaybackRegions::destroy_playback_region(&mut model, 0);
@@ -2001,16 +1982,14 @@ mod tests {
         let key = (&*identity as *const u8) as u64;
         let mut old = ModelHandle::new();
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, old.document_id, 0)
             .unwrap();
         DocumentLifecycle::destroy_document(&mut old, ());
         assert!(region_owners().lock_or_recover().resolve(&[key]).is_err());
         let replacement = ModelHandle::new();
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, replacement.document_id, 0)
             .unwrap();
         drop(old);

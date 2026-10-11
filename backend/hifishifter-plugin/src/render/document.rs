@@ -311,8 +311,7 @@ impl DocumentSession {
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
         self.edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(id.clone(), pcm.clone());
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
@@ -689,8 +688,7 @@ impl DocumentSession {
     pub fn register(self: &Arc<Self>, key: usize) {
         self.controller.store(key, Ordering::Release);
         controllers()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(key, Arc::downgrade(self));
     }
 
@@ -786,8 +784,7 @@ impl DocumentSession {
         self.ready.store(true, Ordering::Release);
         let owners = self
             .renderers
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
@@ -808,8 +805,7 @@ impl DocumentSession {
     /// 同一ARA文档的编辑权威共享，输出仍按各renderer分配隔离。
     pub fn renderer_owners(&self) -> Vec<Arc<ExtensionOwner>> {
         self.renderers
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
@@ -873,8 +869,7 @@ impl DocumentSession {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         let owners = self
             .renderers
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
@@ -889,8 +884,7 @@ impl DocumentSession {
         self.ready.store(false, Ordering::Release);
         let owners = self
             .renderers
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .filter_map(|lease| lease.owner.upgrade())
             .collect::<Vec<_>>();
@@ -903,8 +897,7 @@ impl DocumentSession {
     /// 只借出仍存活的文档，拒绝已销毁或非本插件的控制器。
     pub fn lookup(key: usize) -> Option<Arc<Self>> {
         controllers()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(&key)
             .and_then(Weak::upgrade)
             .filter(|session| session.alive.load(Ordering::Acquire))

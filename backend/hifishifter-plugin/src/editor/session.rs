@@ -265,8 +265,7 @@ impl EditorSession {
     pub(super) fn host_track_id(&self, id: &str) -> Result<String, String> {
         if !self
             .timeline
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .tracks
             .iter()
             .any(|track| track.id == id)
@@ -1287,8 +1286,7 @@ impl EditorSession {
             .contains_key(path)
             || self
                 .display_waveforms
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .values()
                 .any(|(_, clip)| clip.source_path.as_deref() == Some(path))
         {
@@ -1400,8 +1398,7 @@ impl EditorSession {
     /// 也不无限空转。
     fn analysis_in_flight(&self) -> bool {
         self.analysis_workers
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .iter()
             .any(|worker| !worker.is_finished())
     }
@@ -1409,8 +1406,7 @@ impl EditorSession {
     fn refresh_analysis(&self) -> bool {
         let updates = self
             .analysis_updates
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .try_iter()
             .collect::<Vec<_>>();
         let mut roots = std::collections::BTreeSet::new();
@@ -1621,8 +1617,7 @@ impl EditorSession {
     pub(super) fn select_source_projection(&self) -> Result<(), String> {
         if self
             .error
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .is_some_and(|error| error.starts_with("Conflict"))
         {
@@ -2026,8 +2021,7 @@ pub(crate) mod tests {
         let identity = Box::new(0_u8);
         let key = (&*identity as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, document.id, 0)
             .unwrap();
         document
@@ -2110,15 +2104,13 @@ pub(crate) mod tests {
         let second = Box::new(0_u8);
         let key = (&*second as *const u8) as u64;
         region_owners()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .register(key, document.id, 1)
             .unwrap();
         document.clip_ids.lock_or_recover().insert(key, "cb".into());
         let mut region = document
             .regions
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .values()
             .next()
             .unwrap()
@@ -2168,8 +2160,7 @@ pub(crate) mod tests {
             track.items.clear();
             document
                 .ui_tracks
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .insert(guid.into(), track);
         }
         document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
@@ -2207,8 +2198,7 @@ pub(crate) mod tests {
         assert!(
             document
                 .timeline
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .as_ref()
                 .unwrap()
                 .tracks
@@ -2337,13 +2327,11 @@ pub(crate) mod tests {
         });
         document
             .edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm.clone());
         document
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm);
         (model, owners, ids)
     }
@@ -2626,8 +2614,7 @@ pub(crate) mod tests {
         }
         assert!(editor
             .error
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .as_ref()
             .unwrap()
             .contains("local curves preserved"));
@@ -3582,8 +3569,7 @@ pub(crate) mod tests {
         editor.queue.send(Job::Close).unwrap();
         editor
             .worker
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .take()
             .unwrap()
             .join()
@@ -3614,16 +3600,14 @@ pub(crate) mod tests {
         track.items.clear();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
         super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
         track.items.push(item.clone());
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
         let added =
@@ -3646,8 +3630,7 @@ pub(crate) mod tests {
         track.items.clear();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
         let removed =
@@ -3694,8 +3677,7 @@ pub(crate) mod tests {
         audio.track_id = format!("{}{}", editor.namespace, track.id);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         let mut visible = TimelineState::default();
         visible.tracks.clear();
@@ -3704,8 +3686,7 @@ pub(crate) mod tests {
         track.items[0].geometry.muted = true;
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         visible.clips.clear();
         document.present_host_inventory(&mut visible, &editor.namespace);
@@ -3716,8 +3697,7 @@ pub(crate) mod tests {
         track.items[0].geometry.take_id = "different-take".into();
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track);
         visible.clips.clear();
         document.present_host_inventory(&mut visible, &editor.namespace);
@@ -4071,13 +4051,11 @@ pub(crate) mod tests {
         });
         document
             .sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm.clone());
         document
             .edit_sources
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert("ara://source".into(), pcm.clone());
         {
             let mut timeline = document.timeline.lock_or_recover();
@@ -4412,8 +4390,7 @@ pub(crate) mod tests {
         wait(&|| {
             editor
                 .timeline
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .params_by_root_track
                 .get(root)
                 .is_some_and(|params| params.pitch_orig_key.is_some())
@@ -4454,13 +4431,11 @@ pub(crate) mod tests {
             });
             document
                 .edit_sources
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .insert("ara://source".into(), pcm.clone());
             document
                 .sources
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .insert("ara://source".into(), pcm);
             document.revision.fetch_add(1, Ordering::AcqRel);
             document.render_epoch.fetch_add(1, Ordering::AcqRel);
@@ -4481,8 +4456,7 @@ pub(crate) mod tests {
         wait(&|| {
             document
                 .edits
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .params
                 .get("track")
                 .is_some_and(|params| {

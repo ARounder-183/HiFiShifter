@@ -214,8 +214,7 @@ unsafe extern "C" fn archive_size(
     // SAFETY: 由调用方保证的稳定 fixture 指针。
     unsafe { fixture(context.cast()) }
         .archive_bytes
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .len()
 }
 unsafe extern "C" fn archive_read(

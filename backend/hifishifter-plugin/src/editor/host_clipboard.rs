@@ -171,8 +171,7 @@ fn capture(
             let _transaction = document.transaction.lock_or_recover();
             document
                 .edits
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .atlas
                 .split_seed(&target.geometry.item_id)
         };
@@ -660,8 +659,7 @@ impl MediaReceipt {
             }
             let track = document
                 .ui_tracks
-                .lock()
-                .unwrap()
+                .lock_or_recover()
                 .get(track_guid)
                 .map(|track| track.id.clone());
             if track.is_none_or(|track| clip["track_id"] != format!("{namespace}{track}")) {
@@ -692,8 +690,7 @@ mod tests {
         let document = DocumentSession::new(987654);
         document
             .ui_tracks
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(track.guid.clone(), track.clone());
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         document.present_host_inventory(&mut timeline, "fast-");
