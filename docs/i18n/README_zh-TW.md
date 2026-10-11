@@ -177,6 +177,8 @@ SoundTouch、WORLD、Signalsmith Stretch 均在編譯時從原始碼構建，首
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
+# Verify against the pin (tools/plugin-sdks.json, soundtouch section; the build does this automatically):
+git -C soundtouch rev-parse HEAD
 ```
 
 ### 4. 開發與構建

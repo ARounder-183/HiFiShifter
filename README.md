@@ -177,6 +177,8 @@ SoundTouch、WORLD、Signalsmith Stretch 均在编译时从源码构建，首次
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
+# 校验与 pin 一致（tools/plugin-sdks.json 的 soundtouch 段；构建脚本会自动校验）：
+git -C soundtouch rev-parse HEAD
 ```
 
 构建 VST3 插件还需要 ARA 与 VST3 两份 SDK。它们的源码**不随仓库分发**（许可与本仓库的

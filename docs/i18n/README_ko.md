@@ -177,6 +177,8 @@ SoundTouch, WORLD, Signalsmith Stretch는 모두 컴파일 시점에 소스에�
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
+# Verify against the pin (tools/plugin-sdks.json, soundtouch section; the build does this automatically):
+git -C soundtouch rev-parse HEAD
 ```
 
 ### 4. 개발 및 빌드
