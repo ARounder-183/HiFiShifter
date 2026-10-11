@@ -1576,6 +1576,8 @@ fn process_item(
                 fade_out_shape: 0.0,
                 fade_in_dir: 0.0,
                 fade_out_dir: 0.0,
+                fade_in_s: 0.0,
+                fade_out_s: 0.0,
                 fade_in_curve: String::new(),
                 fade_out_curve: String::new(),
                 auto_fade_in_sec: 0.0,
@@ -1783,6 +1785,10 @@ fn process_item(
             fade_out_shape,
             fade_in_dir,
             fade_out_dir,
+            // RPP 只携带旧轴（`D_FADE*DIR`）；新轴的 S 参数不在 `.rpp` 里，
+            // 按 0 补齐（与独立 App 的"无此轴"语义一致）。
+            fade_in_s: 0.0,
+            fade_out_s: 0.0,
             fade_in_curve: String::new(),
             fade_out_curve: String::new(),
             auto_fade_in_sec,
@@ -2422,6 +2428,8 @@ fn process_midi_item(
         fade_out_shape: 0.0,
         fade_in_dir: 0.0,
         fade_out_dir: 0.0,
+        fade_in_s: 0.0,
+        fade_out_s: 0.0,
         fade_in_curve: String::new(),
         fade_out_curve: String::new(),
         auto_fade_in_sec: 0.0,

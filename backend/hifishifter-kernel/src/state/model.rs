@@ -1647,6 +1647,17 @@ pub struct Clip {
     /// 淡出曲率，对标 REAPER `D_FADEOUTDIR`，范围 [-1, 1]；默认 0。
     #[serde(default)]
     pub fade_out_dir: f64,
+    /// 淡入 S 参数（REAPER ≥7.81 的 `D_FADEINDIR2_NEW`），范围 [-1, 1]；默认 0。
+    ///
+    /// 与 [`Clip::fade_in_dir`] 一起构成宿主**连续两轴**的权威状态，由
+    /// [`crate::fade_curves::fade_gain_axes`] 求值。独立 App 与旧轴宿主恒为 0
+    /// （没有这根轴）。此前它只存在于 [`ClipStatePatch`]，于是独立 App 的 S 写入被
+    /// 静默丢弃、插件也无法把"未变的 S"与"改了的 S"区分开。
+    #[serde(default)]
+    pub fade_in_s: f64,
+    /// 淡出 S 参数（语义同 [`Clip::fade_in_s`]）。
+    #[serde(default)]
+    pub fade_out_s: f64,
 
     /// 自动交叉淡化长度（秒，由剪辑重叠派生；**不覆盖手动 fade**）。
     ///
@@ -8827,6 +8838,8 @@ impl TimelineState {
             fade_out_shape: 1.0,
             fade_in_dir: 0.0,
             fade_out_dir: 0.0,
+            fade_in_s: 0.0,
+            fade_out_s: 0.0,
             fade_in_curve: String::new(),
             fade_out_curve: String::new(),
             auto_fade_in_sec: 0.0,
@@ -9546,6 +9559,12 @@ impl TimelineState {
             if let Some(v) = patch.fade_out_dir {
                 c.fade_out_dir = clamp_fade_dir(v);
             }
+            if let Some(v) = patch.fade_in_s {
+                c.fade_in_s = clamp_fade_dir(v);
+            }
+            if let Some(v) = patch.fade_out_s {
+                c.fade_out_s = clamp_fade_dir(v);
+            }
             if let Some(v) = patch.auto_fade_in_sec {
                 c.auto_fade_in_sec = v.max(0.0);
             }
@@ -10010,6 +10029,8 @@ impl TimelineState {
             fade_out_shape: 1.0,
             fade_in_dir: 0.0,
             fade_out_dir: 0.0,
+            fade_in_s: 0.0,
+            fade_out_s: 0.0,
             fade_in_curve: String::new(),
             fade_out_curve: String::new(),
             auto_fade_in_sec: 0.0,

@@ -805,10 +805,7 @@ mod bound_tests {
             owner.bind_host_adapter(host.context());
         }
         host.reset();
-        assert!(owner
-            .host_geometry()
-            .unwrap_err()
-            .contains("incompatible"));
+        assert!(owner.host_geometry().unwrap_err().contains("incompatible"));
         {
             let mut regions = document.regions.lock().unwrap();
             let region = regions.get_mut(&first).unwrap();
@@ -1818,7 +1815,12 @@ mod bound_tests {
     fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
         let factory = Box::leak(Box::new(
             FactoryBuilder::new("org.hfs.bound", "org.hfs.bound.archive")
-                .display("bound", "HiFiShifter", "https://github.com/ARounder-183/HiFiShifter", "1")
+                .display(
+                    "bound",
+                    "HiFiShifter",
+                    "https://github.com/ARounder-183/HiFiShifter",
+                    "1",
+                )
                 .document_controller(|| {
                     let model = crate::ara::model::ModelHandle::new();
                     let session = model.session();
@@ -2151,9 +2153,7 @@ impl ExtensionOwner {
     /// 这条路径的身份来自宿主直接 parent take —— 是强证据，因此**只在恰好一个
     /// region 时**成立。多 region（folder 轨上的 FX）走
     /// [`Self::host_geometries`]，那里没有直接 parent 可用，只能按几何唯一匹配。
-    pub(crate) fn host_geometry(
-        &self,
-    ) -> Result<crate::host::geometry::BoundHostGeometry, String> {
+    pub(crate) fn host_geometry(&self) -> Result<crate::host::geometry::BoundHostGeometry, String> {
         let stamp = self.host_query_stamp()?;
         let [region_key] = stamp.3.as_slice() else {
             return Err("REAPER geometry requires exactly one assigned ARA region".into());
@@ -2714,17 +2714,27 @@ impl ExtensionOwner {
                     })
             });
             if delegated && changed && geometry.is_ok() {
-                // 比较**整组**的 fade 长度：多 region 时只看第一个会漏掉后续 region
-                // 的 fade 变化，导致委托端改动不触发重渲染。
-                let lengths = |value: &[crate::host::geometry::BoundHostGeometry]| {
+                // 比较**整组**的淡变输入：此前只比四个 fade **长度**，于是改形状 /
+                // 曲率 / S 都不推进 `render_epoch` —— 委托端（插件自己渲这条淡变）
+                // 改了曲线而声音不变。形状与两根轴同样进指纹。
+                let fade_inputs = |value: &[crate::host::geometry::BoundHostGeometry]| {
                     value
                         .iter()
                         .flat_map(|entry| {
+                            let g = &entry.geometry;
                             [
-                                entry.geometry.fade_in_sec,
-                                entry.geometry.fade_out_sec,
-                                entry.geometry.auto_fade_in_sec,
-                                entry.geometry.auto_fade_out_sec,
+                                g.fade_in_sec,
+                                g.fade_out_sec,
+                                g.auto_fade_in_sec,
+                                g.auto_fade_out_sec,
+                                g.fade_in_shape,
+                                g.fade_out_shape,
+                                g.fade_in_dir,
+                                g.fade_out_dir,
+                                g.fade_in_dir_new,
+                                g.fade_out_dir_new,
+                                g.fade_in_dir2_new,
+                                g.fade_out_dir2_new,
                             ]
                         })
                         .collect::<Vec<_>>()
@@ -2732,7 +2742,7 @@ impl ExtensionOwner {
                 prepare_fades = cached
                     .as_ref()
                     .and_then(|old| old.value.as_ref().ok())
-                    .is_none_or(|old| lengths(old) != lengths(geometry.as_ref().unwrap()));
+                    .is_none_or(|old| fade_inputs(old) != fade_inputs(geometry.as_ref().unwrap()));
                 // `prepare_fades` 只记"渲染输入变了"；`render_epoch` 的推进与对全部
                 // owner 的通知统一由下面的 `invalidate_render_input()` 完成。
             }
@@ -2792,7 +2802,11 @@ impl ExtensionOwner {
     /// 如 88.2k→44.1k、96k→48k），再退到最近的原生率。
     pub(crate) fn snapshot_index_for_rate(&self, context_rate: f64) -> usize {
         let declared = self.setup_sample_rate();
-        let rate = if declared > 0.0 { declared } else { context_rate };
+        let rate = if declared > 0.0 {
+            declared
+        } else {
+            context_rate
+        };
         if !rate.is_finite() || rate <= 0.0 {
             return 0;
         }
@@ -4167,7 +4181,10 @@ mod host_audio_state_tests {
         let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
         let document = model.session();
         let playback = owners[0].clone();
-        assert!(playback.renders_playback(), "夹具第一个实例必须是播放渲染器");
+        assert!(
+            playback.renders_playback(),
+            "夹具第一个实例必须是播放渲染器"
+        );
         let editor = Arc::new(ExtensionOwner::default());
         let _raw = editor
             .bind_to_document(
@@ -4178,7 +4195,10 @@ mod host_audio_state_tests {
                 None,
             )
             .unwrap();
-        assert!(editor.is_editor_only(), "本夹具的第二个实例必须是编辑器实例");
+        assert!(
+            editor.is_editor_only(),
+            "本夹具的第二个实例必须是编辑器实例"
+        );
         // 编辑实例自己的 prepare() 是合法 no-op（它不持有快照）；关键是播放实例必须被通知。
         let before = playback.prepare_requests.load(Ordering::Acquire);
         let epoch_before = document.render_epoch.load(Ordering::Acquire);
@@ -4200,7 +4220,8 @@ mod host_audio_state_tests {
         // 放行后等后台排空，避免用例结束时与仍在运行的任务抢生命周期。
         for owner in [&playback, &owners[1]] {
             if let Some(Ok(worker)) = owner.preparation.get() {
-                let _ = worker.wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                let _ = worker
+                    .wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
             }
         }
     }

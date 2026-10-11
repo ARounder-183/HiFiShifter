@@ -730,9 +730,17 @@ impl DocumentSession {
                     clip["fade_out_shape"] = serde_json::json!(style.out_shape);
                     clip["fade_in_dir"] = serde_json::json!(style.in_dir);
                     clip["fade_out_dir"] = serde_json::json!(style.out_dir);
+                    // 委托端由 HFS 自己的曲线渲染，宿主 S 轴不参与 —— 显式归 0，
+                    // 让"未变的 S"在写回去重里是一个稳定值而不是缺失字段。
+                    clip["fade_in_s"] = serde_json::json!(0.0);
+                    clip["fade_out_s"] = serde_json::json!(0.0);
                     clip["host_fades"] = serde_json::json!({"curve_mode":"hifishifter","in_curvature":style.in_dir,"out_curvature":style.out_dir,"in_s":0.,"out_s":0.});
                     continue;
                 }
+                // S 也作为**顶层字段**回流：完成门的收据按顶层字段比对，只有
+                // `host_fades` 里的嵌套 S 是不够的（那会让门永远判"宿主没跟上"）。
+                clip["fade_in_s"] = serde_json::json!(g.fade_in_dir2_new);
+                clip["fade_out_s"] = serde_json::json!(g.fade_out_dir2_new);
                 clip["host_fades"] = serde_json::json!({"curve_mode":match g.fade_axes_v2 {Some(true)=>"continuous",Some(false)=>"legacy",None=>"unknown"},
                     "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
                     "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
@@ -1014,6 +1022,15 @@ impl DocumentSession {
                 };
                 clip.fade_in_dir = in_dir;
                 clip.fade_out_dir = out_dir;
+                // S 是**新轴才有的第二根轴**（`D_FADE*DIR2_NEW`）。写进 clip 才能让
+                // 载荷、写回去重、以及"未变的 S 不该触发写回"共用同一个权威值；
+                // 旧轴宿主没有这根轴，恒为 0。
+                let (in_s, out_s) = match geometry.fade_axes_v2 {
+                    Some(true) => (geometry.fade_in_dir2_new, geometry.fade_out_dir2_new),
+                    _ => (0.0, 0.0),
+                };
+                clip.fade_in_s = in_s;
+                clip.fade_out_s = out_s;
                 if self
                     .regions
                     .lock()
@@ -1024,11 +1041,15 @@ impl DocumentSession {
                             || region.has_content_based_fade_at_tail
                     })
                 {
+                    // 委托：曲线由 HFS 自己的 `FadeStyle` 渲染，宿主两轴不参与 ——
+                    // S 在 `FadeStyle` 里没有位置，显式归 0（不是"漏了"）。
                     let style = fades.get(&geometry.item_id).cloned().unwrap_or_default();
                     clip.fade_in_shape = style.in_shape;
                     clip.fade_out_shape = style.out_shape;
                     clip.fade_in_dir = style.in_dir;
                     clip.fade_out_dir = style.out_dir;
+                    clip.fade_in_s = 0.0;
+                    clip.fade_out_s = 0.0;
                 }
             }
         }
@@ -1073,12 +1094,15 @@ impl DocumentSession {
                 clip.auto_fade_in_sec = geometry.auto_fade_in_sec;
                 clip.fade_in_shape = style.in_shape;
                 clip.fade_in_dir = style.in_dir;
+                // 委托端由 HFS 自己的 `FadeStyle` 渲染，宿主两轴不参与 ⇒ S 归 0。
+                clip.fade_in_s = 0.0;
             }
             if region.has_content_based_fade_at_tail {
                 clip.fade_out_sec = geometry.fade_out_sec;
                 clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
                 clip.fade_out_shape = style.out_shape;
                 clip.fade_out_dir = style.out_dir;
+                clip.fade_out_s = 0.0;
             }
         }
         Ok(())

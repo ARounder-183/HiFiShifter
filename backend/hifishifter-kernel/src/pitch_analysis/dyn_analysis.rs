@@ -509,6 +509,8 @@ mod tests {
             fade_out_shape: 0.0,
             fade_in_dir: 0.0,
             fade_out_dir: 0.0,
+            fade_in_s: 0.0,
+            fade_out_s: 0.0,
             auto_fade_in_sec: 0.0,
             auto_fade_out_sec: 0.0,
             extra_curves: None,

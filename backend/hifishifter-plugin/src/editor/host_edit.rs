@@ -43,8 +43,11 @@ impl HostEditPlan {
     /// `(curvature, S)`，补丁里同带的 HFS `dir` 会被忽略（见写回块）；旧轴上写的才是
     /// `C_FADE*SHAPE` 与 `D_FADE*DIR` 本身。
     ///
-    /// 【为什么不比 `fade_*_s`】GUI 载荷没有这个字段（S 只在 `host_fades` 读数里），
-    /// 拿它当判据会让门永远不成立。连续轴上比 curvature 就足以确认宿主已跟上。
+    /// 【为什么 `fade_*_s` 现在也进门】此前不进门的理由是"GUI 载荷没有这个字段
+    /// （S 只在 `host_fades` 读数里）"，拿它当判据会让门永远不成立 —— 那个理由在
+    /// 载荷补上**顶层** `fade_*_s`（`decorate_host_fades_locked`）之后已经失效。
+    /// 不进门的后果与当年 dir/shape 的抖动同源：只改 S 的补丁 `matches()` 恒真，
+    /// 回显带着改动前的 S 回来，曲线弹回。
     pub(crate) fn receipt(&self, namespace: &str, fade_axes_v2: Option<bool>) -> HostEditReceipt {
         HostEditReceipt {
             clips: self
@@ -77,18 +80,22 @@ impl HostEditPlan {
                             fields.push((key, serde_json::json!(value)));
                         }
                     }
-                    for (shape, dir, shape_key, dir_key) in [
+                    for (shape, dir, s, shape_key, dir_key, s_key) in [
                         (
                             edit.patch.fade_in_shape,
                             edit.patch.fade_in_dir,
+                            edit.patch.fade_in_s,
                             "fade_in_shape",
                             "fade_in_dir",
+                            "fade_in_s",
                         ),
                         (
                             edit.patch.fade_out_shape,
                             edit.patch.fade_out_dir,
+                            edit.patch.fade_out_s,
                             "fade_out_shape",
                             "fade_out_dir",
+                            "fade_out_s",
                         ),
                     ] {
                         if let Some(shape) = shape {
@@ -96,10 +103,16 @@ impl HostEditPlan {
                                 // 连续轴：形状没有可写号，写的是预设的 curvature；
                                 // 载荷的 `fade_*_dir` 正是宿主回读的 curvature。
                                 Some(true) => {
-                                    if let Some((curvature, _)) =
+                                    if let Some((curvature, preset_s)) =
                                         hifishifter_kernel::fade_axes::host_fade_preset_axes(shape)
                                     {
                                         fields.push((dir_key, serde_json::json!(curvature)));
+                                        // 形状预设自带 S；补丁同带 S 时以补丁为准
+                                        // （与写回块同一口径）。
+                                        fields.push((
+                                            s_key,
+                                            serde_json::json!(s.unwrap_or(preset_s)),
+                                        ));
                                     }
                                 }
                                 // 旧轴（或版本读不出来）：形状号本身可写，且 dir 原样写回。
@@ -114,6 +127,13 @@ impl HostEditPlan {
                         }
                         if let Some(dir) = dir {
                             fields.push((dir_key, serde_json::json!(dir)));
+                        }
+                        // 【为什么 S 也要进门】此前只比 curvature，理由是"GUI 载荷没有
+                        // 这个字段"。现在载荷已带**顶层** `fade_*_s`
+                        // （`decorate_host_fades_locked`），不比它会让"只改 S"的补丁
+                        // `matches()` 恒真、回显带着改动前的 S 回来 ⇒ 曲线弹回。
+                        if let Some(s) = s {
+                            fields.push((s_key, serde_json::json!(s)));
                         }
                     }
                     if let Some(group) = edit.patch.host_group_id {
@@ -152,14 +172,14 @@ impl HostEditReceipt {
                 .iter()
                 .find(|clip| clip["id"] == *id)
                 .is_some_and(|clip| {
-                    fields.iter().all(|(key, value)| {
-                        match (clip[*key].as_f64(), value.as_f64()) {
+                    fields
+                        .iter()
+                        .all(|(key, value)| match (clip[*key].as_f64(), value.as_f64()) {
                             (Some(actual), Some(expected)) => {
                                 crate::host::geometry::host_value_compatible(actual, expected)
                             }
                             _ => clip[*key] == *value,
-                        }
-                    })
+                        })
                 })
         })
     }
@@ -403,6 +423,14 @@ impl EditorSession {
             }
             if patch.fade_out_dir == Some(before.fade_out_dir) {
                 patch.fade_out_dir = None;
+            }
+            // S 同理：连续轴宿主上每次提交都会带上当前 S（前端发整份 clip 状态），
+            // 不在这里去重就会让**每一次**几何编辑都触发一次淡变轴写回。
+            if patch.fade_in_s == Some(before.fade_in_s) {
+                patch.fade_in_s = None;
+            }
+            if patch.fade_out_s == Some(before.fade_out_s) {
+                patch.fade_out_s = None;
             }
             // 复用原Clip级乘数/Take有效倍率和裁切语义，而不是把clipPlaybackRate当take速率。
             let mut view = TimelineState {
@@ -755,11 +783,15 @@ pub(super) fn execute_managed(
                         ),
                     ] {
                         if let Some(shape) = shape {
-                            let (curvature, s_value) =
+                            let (curvature, preset_s) =
                                 hifishifter_kernel::fade_axes::host_fade_preset_axes(shape)
                                     .ok_or_else(|| format!("unknown fade shape {shape}"))?;
                             target.set_item(dir_key, curvature, &authorized)?;
-                            target.set_item(s_key, s_value, &authorized)?;
+                            // 【为什么补丁自带的 S 优先】此前这里直接写预设的 S 并
+                            // `continue`，把同一补丁里的 `fade_*_s` **静默丢掉**。补丁
+                            // 显式给了 S 就是用户/调用方更具体的要求，按它写；没给才用
+                            // 预设自带的 S。收据（`receipt`）按同一口径比对。
+                            target.set_item(s_key, s.unwrap_or(preset_s), &authorized)?;
                             continue;
                         }
                         if let Some(value) = dir {
@@ -1164,6 +1196,25 @@ mod tests {
         assert_eq!(host.item_value("D_FADEINDIR2_NEW"), Some(0.));
         assert!(!calls.contains(&"write-item:D_FADEINDIR".to_string()));
         assert!(!calls.contains(&"write-item:C_FADEINSHAPE".to_string()));
+
+        // 形状 + S 同发：S 不能被形状分支**静默吞掉**（此前那里 `continue` 掉了
+        // 同补丁的 `fadeInS`）。预设 5「轻微 S」自带 S=0.5；补丁显式给 0.9 时按 0.9 写。
+        host.set_value("D_FADEINDIR_NEW", -0.2);
+        host.set_value("D_FADEINDIR2_NEW", -0.3);
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"fadeInShape":5.,"fadeInS":0.9}),
+            )
+            .unwrap();
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        assert_eq!(
+            host.item_value("D_FADEINDIR2_NEW"),
+            Some(0.9),
+            "补丁显式给的 S 优先于形状预设自带的 S，不能被吞掉"
+        );
+        assert_eq!(host.item_value("D_FADEINDIR_NEW"), Some(0.));
         document.close();
     }
 
@@ -1241,6 +1292,31 @@ mod tests {
         assert_eq!(
             key_value(&fields, "fade_in_shape").and_then(|value| value.as_f64()),
             Some(3.)
+        );
+
+        // ④ 只改 S：S 必须进完成门，且门**能真正闭合**（载荷带顶层 `fade_in_s`）。
+        //    此前不比 S 的后果与当年 dir 的抖动同源：只改 S 的补丁 `matches()` 恒真，
+        //    回显带着改动前的 S 回来，曲线弹回。
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"fadeInS":0.5}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, Some(true));
+        let fields = fields_of(&receipt);
+        assert_eq!(
+            key_value(&fields, "fade_in_s").and_then(|value| value.as_f64()),
+            Some(0.5),
+            "S 必须进完成门"
+        );
+        assert!(
+            !receipt.matches(&super::super::commands::payload(&editor, false).unwrap()),
+            "写回前宿主读数还是旧 S ⇒ 门不成立"
+        );
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        owner.refresh_host_transport();
+        let payload = super::super::commands::payload(&editor, false).unwrap();
+        assert!(
+            receipt.matches(&payload),
+            "写回后宿主读数必须让 S 的门闭合（载荷顶层带 `fade_in_s`）"
         );
         document.close();
     }

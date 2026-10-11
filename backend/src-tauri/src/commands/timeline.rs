@@ -1977,6 +1977,8 @@ pub(super) fn import_media_files_as_takes(
         fade_out_shape: 1.0,
         fade_in_dir: 0.0,
         fade_out_dir: 0.0,
+        fade_in_s: 0.0,
+        fade_out_s: 0.0,
         fade_in_curve: String::new(),
         fade_out_curve: String::new(),
         auto_fade_in_sec: 0.0,

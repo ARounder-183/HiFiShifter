@@ -79,6 +79,22 @@ fn resolve_shape(shape: f64) -> ShapeSpec {
     ShapeSpec::LinearPower
 }
 
+/// 形状号是否被曲线族**真正**支持（整数 `0..=6`，或官方小数变体 `1.x` / `5.x` / `6.x`）。
+///
+/// `resolve_shape` 对**其它**输入静默退化为 `LinearPower` —— 那是"看起来能存、读回来
+/// 却变样"的陷阱（例如 `0.5` 会渲染成线性）。持久化形状前用它拦一道，与
+/// `resolve_shape` 的接受域逐字对齐。
+pub fn is_supported_fade_shape(shape: f64) -> bool {
+    if !shape.is_finite() {
+        return false;
+    }
+    let base = shape.trunc();
+    if (shape - base).abs() <= f64::EPSILON {
+        return (0.0..=6.0).contains(&base);
+    }
+    matches!(base as i64, 1 | 5 | 6)
+}
+
 /// 上升视角核心：x ∈ (0,1)、世界轴坐标 u → 增益。
 fn core_ascending(spec: &ShapeSpec, u: f64, x: f64) -> f64 {
     match spec {
@@ -757,6 +773,30 @@ mod tests {
                     assert!((0.0..=1.0).contains(&g), "c={c} s={s} g={g}");
                 }
             }
+        }
+    }
+
+    /// 形状支持域必须与 `resolve_shape` 的接受域逐字对齐：凡它接受的就该被判为支持，
+    /// 凡它**静默退化为线性**的就该被拒（否则"存得进去、读回来变样"）。
+    #[test]
+    fn supported_shapes_match_the_curve_families() {
+        let supported = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.1, 1.9, 5.1, 6.5, 6.999];
+        for shape in supported {
+            assert!(
+                is_supported_fade_shape(shape),
+                "shape {shape} should be supported"
+            );
+            assert!(
+                !matches!(resolve_shape(shape), ShapeSpec::LinearPower),
+                "shape {shape} silently degrades to linear"
+            );
+        }
+        let rejected = [-0.1, 0.5, 2.5, 3.7, 4.2, 7.0, 8.0, f64::NAN, f64::INFINITY];
+        for shape in rejected {
+            assert!(
+                !is_supported_fade_shape(shape),
+                "shape {shape} must be rejected (it degrades to linear)"
+            );
         }
     }
 }
