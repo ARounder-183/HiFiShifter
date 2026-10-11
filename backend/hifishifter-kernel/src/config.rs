@@ -1838,7 +1838,7 @@ impl UiSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::UiSettings;
+    use super::{acquire_config_file_lock, UiSettings};
     use crate::time_stretch::UserStretchAlgorithm;
 
     /// 共享布局在插件形态缺失时被**复制**一份过去，且原值留给独立 App。
@@ -2465,6 +2465,37 @@ mod tests {
         assert_eq!(centered_position((3840.0, 2160.0), &monitor), (0, 0));
     }
 
+    /// 文件锁必须真正互斥：持有者未释放前，另一把句柄（同进程内开的第二个
+    /// fd 也一样 —— flock/LockFileEx 都按打开描述计锁）拿不到锁。这是"两个
+    /// 进程不会插进彼此的读-改-写"的可测替身。
+    #[test]
+    fn config_file_lock_is_actually_exclusive() {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_cfg_lock_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp config dir");
+
+        let held = acquire_config_file_lock(&dir).expect("first acquire");
+        let second = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(dir.join("app_config.json.lock"))
+            .expect("second open");
+        assert!(
+            second.try_lock().is_err(),
+            "second handle must not acquire while the first is held"
+        );
+        drop(held);
+        let reacquired = acquire_config_file_lock(&dir).expect("re-acquire after release");
+        drop(reacquired);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn save_window_state_round_trip_merges_and_self_heals() {
         let dir = std::env::temp_dir().join(format!(
@@ -2942,22 +2973,52 @@ fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
-/// 配置文件的读-改-写串行化锁。
+/// 配置文件的读-改-写串行化锁（进程内）。
 ///
 /// 【为什么必须有】每个 `save_*` 都是 `load_config` → 改**一个**字段 → 整体写回。两个
 /// 调用者交错时（Tauri 命令跑在线程池上，同一进程内就能并发），后写的那份会把先写的
 /// 那次改动丢掉 —— 用户表现为"刚调好的设置自己变回去了"。
 ///
-/// 【边界：只覆盖同进程】独立 App 与宿主里的插件是两个进程，同时写仍可能丢一边。真正的
-/// 跨进程锁需要文件锁 API（`LockFileEx`/`flock`），本 crate 不引入额外依赖；这里先把
-/// 最常见的那条路径修好，并把边界写清楚而不是假装已经跨进程安全。
+/// 进程间的串行化由 [`acquire_config_file_lock`] 补上，两层锁缺一不可。
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
-/// 在串行化锁内做一次读-改-写；所有 `save_*` 都经它，不各自 `load_config`。
+/// 跨进程配置写锁：配置同目录下 `app_config.json.lock` 上的**排他文件锁**。
+///
+/// 【为什么进程内 Mutex 不够】独立 App 与 DAW 里的插件是两个进程（这正是产品的
+/// 正常形态），两边同时读-改-写时，后写者会用自己 load 时的快照把对方刚写的字段
+/// 盖掉 —— "偶发、无法复现"的设置丢失报障。文件锁把两个进程的读-改-写串行化；
+/// 锁文件与配置同目录，跟着同一份用户配置走。锁经 `File::lock`（Windows 上
+/// `LockFileEx`、unix 上 `flock`），不引入新依赖；锁文件本身永不被读写，只是
+/// 锁的挂靠对象，随配置目录存在，无需清理。
+///
+/// 【失败语义】个别文件系统不支持锁（某些网络卷）：记日志后放行 —— 退化为
+/// 没有跨进程锁的行为，而不是让设置保存直接失败。
+fn acquire_config_file_lock(config_dir: &Path) -> Option<std::fs::File> {
+    let path = config_dir.join("app_config.json.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    match file.lock() {
+        Ok(()) => Some(file),
+        Err(error) => {
+            log::warn!("app_config cross-process lock unavailable ({error}); continuing without it");
+            None
+        }
+    }
+}
+
+/// 在两层串行化锁内做一次读-改-写；所有 `save_*` 都经它，不各自 `load_config`。
+///
+/// 文件锁在 `load` **之前**拿到、函数返回才释放：另一个进程的写入不会插进
+/// load 与 save 之间。进程内 Mutex 仍在外层 —— 同进程的并发写不必每个都开
+/// 一个文件句柄。
 fn update_config(config_dir: &Path, update: impl FnOnce(&mut AppConfig)) {
     let _guard = CONFIG_WRITE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    let _cross_process = acquire_config_file_lock(config_dir);
     let mut cfg = load_config(config_dir);
     update(&mut cfg);
     save_config(config_dir, &cfg);
