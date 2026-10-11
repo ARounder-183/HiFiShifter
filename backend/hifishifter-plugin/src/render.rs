@@ -10,7 +10,6 @@
 use hifishifter_kernel::encode::OutputSpec;
 use hifishifter_kernel::mixdown::{render_mixdown_interleaved, MixdownOptions, QualityPreset};
 use hifishifter_kernel::state::TimelineState;
-use hifishifter_kernel::time_stretch::StretchAlgorithm;
 
 pub(crate) mod budget;
 pub(crate) mod document;
@@ -49,8 +48,11 @@ impl RenderedAudio {
 
 /// 用本体内核把 `[start_sec, end_sec)` 渲染成交织 f32。
 ///
-/// 约定：不做音高编辑（`apply_pitch_edit = false`），拉伸算法用 Windows 上本体的
-/// 默认实现。插件侧的 ARA renderer 后续会复用同一入口。
+/// 约定：不做音高编辑（`apply_pitch_edit = false`）。拉伸算法读内核的
+/// `resolved_external_stretch_algorithm()`，与生产路径（`render/input.rs`）及
+/// 独立 App 完全同源 —— 拉伸算法是用户设置，此前这里写死 `SoundTouchDll`，
+/// 导致本入口（含 `tests/ara_mapping.rs` 的逐样本比对）跑在与生产不同的算法上，
+/// "唯一入口"名不副实。
 pub fn render_timeline(
     timeline: &TimelineState,
     sample_rate: u32,
@@ -61,7 +63,7 @@ pub fn render_timeline(
         sample_rate,
         start_sec,
         end_sec: Some(end_sec),
-        stretch: StretchAlgorithm::SoundTouchDll,
+        stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(),
         apply_pitch_edit: false,
         output: OutputSpec::wav_32f(),
         quality_preset: QualityPreset::Realtime,

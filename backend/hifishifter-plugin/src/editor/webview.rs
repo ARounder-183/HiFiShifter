@@ -125,7 +125,10 @@ struct BrowserState {
         std::collections::HashMap<u64, std::sync::Weak<crate::render::document::DocumentSession>>,
     undo_document: Option<std::sync::Weak<crate::render::document::DocumentSession>>,
     history_requests: HashSet<u64>,
-    history_cache: Option<((usize, i32, i32), serde_json::Value)>,
+    // 首位是连接绑定标识（route token + 重绑代数，见 `EditorLink::route_identity`），
+    // 不是 `Arc::as_ptr`：地址回收复用后旧指针可能命中陈旧缓存（撤销历史来自
+    // 上一份文档）。
+    history_cache: Option<((String, u64, i32, i32), serde_json::Value)>,
     last_history: Option<serde_json::Value>,
 }
 
@@ -451,6 +454,11 @@ impl NativeEditor {
         }
         if let Err(error) = begin_browser(&state) {
             show_error(&state, &error);
+            // attach 半失败：没有可投递的 browser，`deliver` 无事可做、视图已死，
+            // 20ms 定时器只会空转（50Hz 全速泵一块错误 STATIC）。停掉它。
+            unsafe {
+                let _ = KillTimer(Some(hwnd), 0x4853);
+            }
         }
         Ok(native)
     }
@@ -812,7 +820,8 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                 .is_ok_and(|current| current == lease)
         };
         let token = host.history_token(&allowed).ok()?;
-        let key = (Arc::as_ptr(&host) as usize, token.0, token.1);
+        let identity = link.route_identity()?;
+        let key = (identity.0, identity.1, token.0, token.1);
         if let Some((_, cached)) = state
             .borrow()
             .history_cache
@@ -1441,7 +1450,11 @@ fn configure_browser(
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
-                    document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                    // checkpoint 由调用方声明（流式提交的末笔才收尾批次），此前这里写死
+                    // `true`，任何按帧分块提交的调用方会把宿主撤销栈打爆（对照通用命令
+                    // 分支对 `args.checkpoint` 的读法）。缺省仍是 true：整笔提交是常态。
+                    let checkpoint=input["checkpoint"].as_bool().unwrap_or(true);
+                    document.host_undo.begin_request(&view_id,id,checkpoint,true,&host,&allowed)?;
                     let outcome=crate::host::host_edit::execute_managed(&owner,plan,allowed,true);
                     document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;

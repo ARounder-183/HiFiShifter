@@ -183,6 +183,14 @@ impl EditorLink {
         }
         Ok(binding.generation)
     }
+    /// 本绑定的稳定标识（路由 token + 重绑代数）。
+    ///
+    /// 用于把缓存键绑到"这份文档的这条连接"上 —— 而不是某个会被回收复用的
+    /// 指针地址（`Arc::as_ptr` 在文档重开后可能命中陈旧缓存）。
+    pub(super) fn route_identity(&self) -> Option<(String, u64)> {
+        let binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+        Some((binding.token.as_ref()?.clone(), binding.generation))
+    }
 }
 #[cfg(test)]
 mod tests {

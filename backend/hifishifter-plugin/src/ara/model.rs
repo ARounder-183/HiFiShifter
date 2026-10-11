@@ -1125,6 +1125,26 @@ impl AudioModifications for ModelHandle {
     }
 }
 
+/// 宿主带来本插件不认识的 `transformationFlags` 位时限流记录一条。
+///
+/// 【为什么必须留痕】decode 只认 1/4/8 —— bit 2（TimestretchReflectingTempo）
+/// 是刻意不解：拉伸由"时长差"表达，映射层用的就是时长比值。但其余位（含
+/// 未来 SDK 新增位）此前被静默丢弃，违背本插件"逐 region 显式降级"的纪律：
+/// 能力协商没谈下来的东西，宿主却可能照给。窗口内每类未知位组合最多一条。
+fn log_unknown_transformation_flags(flags: i32) {
+    const DECODED_TRANSFORMATION_FLAGS: i32 = 0b1111;
+    let unknown = flags & !DECODED_TRANSFORMATION_FLAGS;
+    if unknown != 0 {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            &format!("ara:unknown-transformation-flags:{unknown:#x}"),
+            format_args!(
+                "[ara] playback region carries transformationFlags 0x{flags:X}; unknown bits {unknown:#x} ignored"
+            ),
+        );
+    }
+}
+
 impl PlaybackRegions for ModelHandle {
     type PlaybackRegion = usize;
     /// 与 `AudioModifications::AudioModification` 同一个类型（本地补丁）。
@@ -1156,6 +1176,7 @@ impl PlaybackRegions for ModelHandle {
             .unwrap_or_default();
 
         let flags = properties.transformation_flags();
+        log_unknown_transformation_flags(flags);
         // ARA 的内容淡化旗标（kARAPlaybackTransformationContentBasedFadeAtHead = 8，Tail = 4）。
         // 用数值是为了不依赖 sys 包的常量导出路径 —— 那两个值来自 ARAInterface.h，稳定。
         let has_content_based_fade_at_head = (flags & 8) != 0;
@@ -1214,6 +1235,7 @@ impl PlaybackRegions for ModelHandle {
         // `ensure_loaded` 的"宿主是否冲突"判据 ⇒ 用户每做一次编辑都撞一串
         // "Conflict: host changed"（见会话侧同一处注释）。这里逐项比较，值没动就不失效。
         let flags = properties.transformation_flags();
+        log_unknown_transformation_flags(flags);
         let changed = self
             .document
             .playback_regions

@@ -2943,10 +2943,11 @@ impl ExtensionOwner {
         self.bus_arrangement
             .store((inputs << 32) | (outputs & 0xffff_ffff), Ordering::Release);
     }
-    /// 协商出的扬声器编排（`direction`：`kInput` = 0 / `kOutput` = 1）。
+    /// 协商出的扬声器编排位掩码（`direction`：`kInput` = 0 / `kOutput` = 1）。
     ///
-    /// 尚未协商（`0`）时按默认 `kStereo`(3) 报告 —— 与 `component_get_bus_info`
-    /// 声明的 2 声道一致，不与宿主协商结果矛盾。
+    /// 声道数 = 掩码置位数（`count_ones`）：kMono=1 ⇒ 1，kStereo=3 ⇒ 2，
+    /// 5.1=63 ⇒ 6。尚未协商（`0`）时按默认 `kStereo`(3) 报告 —— 与
+    /// `component_get_bus_info` 声明的 2 声道一致，不与宿主协商结果矛盾。
     pub(crate) fn bus_arrangement(&self, direction: i32) -> u64 {
         let packed = self.bus_arrangement.load(Ordering::Acquire);
         if packed == 0 {

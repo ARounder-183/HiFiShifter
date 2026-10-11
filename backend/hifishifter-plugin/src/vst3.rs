@@ -1,16 +1,16 @@
-//! HiFiShifter ARA 探针 / Task 2 Step 3 —— 手写的最小 VST3 模块 ABI。
+//! HiFiShifter 的手写 VST3 模块 ABI：产品级插件外壳（工厂 + 组件/音频处理器 +
+//! 编辑控制器 + 连接点）。
 //!
-//! 目标只有一个：让 REAPER 能加载这个 cdylib、把它识别为 ARA 插件，并把 ARA 对象
-//! 推给 `ara2-bridge` 的文档控制器（见 `model.rs` 的计数）。
+//! REAPER 等宿主加载本 cdylib、把它识别为 ARA 插件，并把 ARA 对象推给
+//! `ara2-bridge` 的文档控制器（见 `model.rs` 的计数）。渲染调度、快照输出与
+//! 编辑器生命周期都在本文件与 `render/`、`editor/` 模块里落地。
 //!
 //! 这里为什么手写 vtbl 而不引入 `vst3-sys`：本机 cargo 缓存里没有 VST3 绑定，
-//! 且探针只用到极少接口。vtbl 的槽位顺序、结构体布局与调用约定都按锁定的
+//! 且只用得到少量接口。vtbl 的槽位顺序、结构体布局与调用约定都按锁定的
 //! VST3 SDK `v3.8.0_build_66` 头文件逐条对齐（`ipluginbase.h` / `ivstcomponent.h` /
 //! `ivstaudioprocessor.h` / `funknown.h`）。ARA 侧的接口（`IMainFactory`、
 //! `IPlugInEntryPoint`、`IPlugInEntryPoint2`）不在这里实现，而是转发给
 //! `ara2-bridge-companion` 的 C++ 适配器，避免重复实现引用计数语义。
-//!
-//! 产品外壳从一次性探针迁入；尚未完成的渲染/生命周期事项见 Phase 3a 计划。
 
 use crate::ara_entry::HostEntry;
 use crate::render::extension::ExtensionOwner;
@@ -560,8 +560,15 @@ unsafe extern "system" fn factory_create_instance(
         // SAFETY: controller 是新分配的控制器对象。
         let result = unsafe { edit_controller_query_interface(controller, iid as *const u8, obj) };
         if result != K_RESULT_OK {
+            // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
             // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
             unsafe { drop(Box::from_raw(controller as *mut EditController)) };
+        } else {
+            // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
+            // 此前漏掉这一步：每交付一个控制器实例就永久泄漏一份
+            // ConnectionState（含 Arc 与两个 Mutex），宿主反复插拔 FX 时慢性增长。
+            // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
+            unsafe { edit_controller_release(controller) };
         }
         return result;
     }
@@ -926,21 +933,23 @@ unsafe extern "system" fn component_get_bus_info(
     unsafe { std::ptr::write_bytes(bus as *mut BusInfo, 0, 1) };
     bus.media_type = 0;
     bus.direction = direction;
-    // 如实报告**协商结果**：`setBusArrangements` 接受 mono(1) 与 stereo(3) 两种，这里
-    // 必须回吐对应的声道数。此前无条件写死 2 ⇒ 单声道轨道上宿主按 2 声道组织缓冲，而
-    // 插件只填/读 1 声道（对宿主撒谎）。未协商时 `bus_arrangement` 默认 kStereo。
+    // 如实报告**协商结果**：`setBusArrangements` 接受宿主给出的任意扬声器布局
+    // （值是位掩码：kMono=1、kStereo=3、5.1=63…），声道数即置位数。此前
+    // `1 => 1, _ => 2` 的映射只认 mono/stereo —— 宿主协商 5.1 时
+    // `getBusArrangement` 回 6、这里却报 2，注释与两处实现互相矛盾。渲染面已
+    // 泛化到任意声道数（`copy_block` 只处理前两个声道，`audio_abi::clear_outputs`
+    // 按 `num_channels` 清零其余），所以这里照实报即可。未协商时
+    // `bus_arrangement` 默认 kStereo(3) ⇒ 2。
     bus.channel_count = if _this.is_null() {
         2
     } else {
         // SAFETY: `_this` 是存活 component（即 `Processor`）。
-        match unsafe {
+        unsafe {
             (*_this.cast::<Processor>())
                 .extension_owner
                 .bus_arrangement(direction)
-        } {
-            1 => 1,
-            _ => 2,
         }
+        .count_ones() as i32
     };
     bus.bus_type = 0;
     bus.flags = 1; // kDefaultActive
@@ -1206,7 +1215,8 @@ pub(crate) fn audio_panic_count() -> u64 {
     AUDIO_PANIC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
+/// 宿主音频回调：完整渲染调度 + PCM 快照输出都在 `audio_process_inner` 里完成；
+/// 本层只负责 panic 遏制。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
     // 【为什么必须 catch_unwind】本回调由**宿主音频线程**调用，panic 越过
     // `extern "system"` 边界是 UB，而且会带走整个 DAW 会话。`component_set_state` /
@@ -1793,6 +1803,31 @@ mod lifetime_tests {
         };
         assert_eq!(result, K_RESULT_OK);
         component
+    }
+
+    /// 工厂交付控制器时必须消耗自己的初始引用：create + QI 之后，宿主引用应是
+    /// 唯一引用，宿主一次 release 就归零并销毁。此前成功分支漏掉工厂侧 release，
+    /// 每个控制器实例都确定性泄漏一份 ConnectionState（含 Arc 与两个 Mutex）。
+    #[test]
+    fn controller_instance_arrives_with_exactly_one_host_reference() {
+        let iid = uid_guid(IID_IEDIT_CONTROLLER);
+        let mut controller = std::ptr::null_mut();
+        // SAFETY: CID/IID 和输出槽均在同步工厂调用期间存活。
+        let result = unsafe {
+            factory_create_instance(
+                std::ptr::null_mut(),
+                CONTROLLER_CID.as_ptr().cast(),
+                iid.as_ptr().cast(),
+                &raw mut controller,
+            )
+        };
+        assert_eq!(result, K_RESULT_OK);
+        assert!(!controller.is_null());
+        let refcount =
+            unsafe { (*controller.cast::<EditController>()).refcount.load(Ordering::Acquire) };
+        assert_eq!(refcount, 1, "工厂交付后应只剩宿主那一份引用");
+        // 宿主放手后对象必须真正销毁（release 返回 0 = 计数归零并 drop）。
+        assert_eq!(unsafe { edit_controller_release(controller) }, 0);
     }
 
     /// 安全RED：只观察原生refcount，不在尚未保活的实现中重入最终release触发悬空。

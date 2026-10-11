@@ -148,8 +148,17 @@ pub struct AraPlaybackRegion {
 /// | [`LostField::FadeLength`] | `project_ui_fades_locked`（`D_FADE*LEN`） |
 /// | [`LostField::LoopSource`] | `project_host_take_facts_locked`（item 级 `B_LOOPSRC`） |
 /// | [`LostField::ItemGain`] | `display_item_gain`（`D_VOL`） |
-/// | [`LostField::TempoMap`] | `project_plugin_musical_context_locked` + VST3 `ProcessContext` |
+/// | [`LostField::TempoMap`] | 仅**单点**：VST3 `ProcessContext` 播放位置处的 tempo（见下） |
 /// | [`LostField::SourceFileFingerprint`] | `Clip::source_file_fingerprint`（宿主文件名 + 内容版本） |
+///
+/// 【TempoMap 的现状与上表不符的历史】`editor/session.rs` 的补回链只取
+/// `ProcessContext` 里**播放位置处的单点 tempo** 写进 `timeline.bpm`；宿主经 ARA
+/// musical context 给出的多点 Tempo/BarSignature 内容目前零消费
+/// （`model.rs::probe_host_musical_content` 只记条数日志），多点 tempo map 由插件
+/// 设置 + 单点 bpm 合成。含 tempo map 的工程里，小节/拍网格与 musical-time 投影
+/// 因此是近似的（只有 playhead 处是对的）；秒域换算不受影响 —— 曲线 basis 存源
+/// 坐标，与 tempo 无关。真消费多点 tempo map 时应把它折进渲染缓存键
+/// （`PreparedVersion`）。
 ///
 /// 【关键限定：这张表的补回点全是**原生扩展**】ARA 2.x 本身**没有**方向位、循环源、
 /// 声道模式、item 增益这些概念（`ARAPlaybackRegion` 只给四段几何、`isTimestretchEnabled`
