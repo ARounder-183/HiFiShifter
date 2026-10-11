@@ -139,7 +139,7 @@ pub struct AraPlaybackRegion {
 
 /// ARA 的 playback transformation / region 结构**表达不到**、但渲染需要的输入。
 ///
-/// 【这一层现在是什么】清单里的每一项都**已经**由宿主只读查询补回来，不再是"丢失"：
+/// 【这一层现在是什么】每一项都在**存在原生宿主扩展时**由宿主只读查询补回来：
 ///
 /// | 字段 | 补回它的地方 |
 /// |---|---|
@@ -151,9 +151,17 @@ pub struct AraPlaybackRegion {
 /// | [`LostField::TempoMap`] | `project_plugin_musical_context_locked` + VST3 `ProcessContext` |
 /// | [`LostField::SourceFileFingerprint`] | `Clip::source_file_fingerprint`（宿主文件名 + 内容版本） |
 ///
+/// 【关键限定：这张表的补回点全是**原生扩展**】ARA 2.x 本身**没有**方向位、循环源、
+/// 声道模式、item 增益这些概念（`ARAPlaybackRegion` 只给四段几何、`isTimestretchEnabled`
+/// 与两个 content-based fade 布尔）。因此在**只提供 ARA 的宿主**（Studio One / Cubase /
+/// Nuendo / Logic …）上，上表每一行都**补不回来** —— 插件会以安全默认渲染（正放 /
+/// 不循环 / 声道模式 0 / 无 item 增益），而不是拿到错误的值。这不是"还没实现"，是
+/// 这些概念在该宿主里**根本不存在**。此前这里的注释写成"都已经补回来、不再是丢失"，
+/// 对 ARA-only 后端是**不准确的**。
+///
 /// 【为什么保留这份清单】它是**可审计的边界声明**：任何"ARA 给不了、只能问宿主"的输入
-/// 都应先在这里登记，再决定它是否要进渲染缓存键（`PreparedVersion`）。早前它被误读成
-/// "这些字段用不了"，于是有人据此以为倒放/循环源没有支持 —— 上表的补回点就是纠正。
+/// 都应先在这里登记，再决定它是否要进渲染缓存键（`PreparedVersion`）。同时它也是
+/// "哪些功能天生依赖原生扩展"的唯一出处 —— 前端据此把对应控件在 ARA-only 上标成只读。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LostField {
     /// 倒放：ARA 的 playback transformation 里**没有**反向位。

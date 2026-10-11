@@ -107,22 +107,36 @@ pub(crate) struct RenderFacts {
 }
 
 /// 单个 item 的渲染相关宿主事实。
+///
+/// 【为什么分成两来源】前三个字段（`reversed` / `loop_enabled` / `channel_mode`）是
+/// **ARA 表达不到、只有原生扩展能给出**的宿主事实；后三个（`timestretch` /
+/// `content_fade_head` / `content_fade_tail`）恰好相反 —— **ARA region 自己就有**。
+/// 把两者放进同一个结构，是因为它们的作用相同（都会改变渲染结果、都必须推进
+/// `render_epoch`），而不是因为它们来自同一个 API。任何"ARA 能给出"的渲染输入都应在
+/// 这里登记，避免又出现"某一处忘了手动 bump"的缺口。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct RenderItemFacts {
-    /// 方向（`PCM_Source_GetSectionInfo` 的 revOut）；读不到即正放。
+    /// 方向（`PCM_Source_GetSectionInfo` 的 revOut）；读不到即正放。**仅原生扩展**。
     pub reversed: bool,
-    /// 循环源（`B_LOOPSRC`，item 级）。
+    /// 循环源（`B_LOOPSRC`，item 级）。**仅原生扩展**。
     pub loop_enabled: bool,
-    /// 声道模式（`I_CHANMODE`）。
+    /// 声道模式（`I_CHANMODE`）。**仅原生扩展**。
     pub channel_mode: i32,
+    /// 宿主是否真的启用了时间拉伸（`ARAPlaybackRegion::isTimestretchEnabled`）。**ARA**。
+    pub timestretch: bool,
+    /// 区间头部是否有基于内容的淡化。**ARA**。
+    pub content_fade_head: bool,
+    /// 区间尾部是否有基于内容的淡化。**ARA**。
+    pub content_fade_tail: bool,
 }
 
 impl RenderFacts {
-    /// 从宿主清单（`UiTrack` 集）采样。取 **active take** 的事实：扁平投影描述的就是
+    /// 从 (item id, facts) 对采样。取 **active take** 的事实：扁平投影描述的就是
     /// active take，`normalize_takes()` 之后 clip 的字段来自它。
     ///
     /// 【为什么不用 `impl Iterator<Item = &UiTrack>`】`UiTrack` 是 `host::reaper` 的
     /// 私有子模块类型，这里不引入它 —— 调用点就地展开成 `(item_id, facts)` 迭代即可。
+    /// 调用点可以先填原生字段、再按 region 叠加 ARA 字段（见 `RenderItemFacts` 的两来源）。
     pub(crate) fn from_items<I>(items: I) -> Self
     where
         I: IntoIterator<Item = (String, RenderItemFacts)>,
@@ -136,6 +150,41 @@ impl RenderFacts {
 #[cfg(test)]
 mod tests {
     use super::host_value_compatible;
+    use super::{RenderFacts, RenderItemFacts};
+
+    /// 两个来源的字段都必须参与相等判定 —— 否则"宿主改了内容淡化/时间拉伸"不会推进
+    /// `render_epoch`，波形更新而声音不变（`RenderFacts` 存在的唯一理由）。
+    #[test]
+    fn both_native_and_ara_facts_participate_in_the_equality() {
+        let base = RenderItemFacts {
+            reversed: false,
+            loop_enabled: false,
+            channel_mode: 0,
+            timestretch: false,
+            content_fade_head: false,
+            content_fade_tail: false,
+        };
+        let with = |f: fn(&mut RenderItemFacts)| {
+            let mut v = base;
+            f(&mut v);
+            RenderFacts::from_items([("item-1".to_string(), v)])
+        };
+        let reference = RenderFacts::from_items([("item-1".to_string(), base)]);
+        for mutate in [
+            (|f: &mut RenderItemFacts| f.reversed = true) as fn(&mut RenderItemFacts),
+            |f: &mut RenderItemFacts| f.loop_enabled = true,
+            |f: &mut RenderItemFacts| f.channel_mode = 4,
+            |f: &mut RenderItemFacts| f.timestretch = true,
+            |f: &mut RenderItemFacts| f.content_fade_head = true,
+            |f: &mut RenderItemFacts| f.content_fade_tail = true,
+        ] {
+            assert_ne!(
+                with(mutate),
+                reference,
+                "每一项渲染事实变化都必须改变指纹，否则不会触发重渲染"
+            );
+        }
+    }
 
     #[test]
     fn identical_values_are_compatible() {

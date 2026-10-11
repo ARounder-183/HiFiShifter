@@ -3508,6 +3508,9 @@ pub(crate) mod tests {
                 reversed: true,
                 loop_enabled: false,
                 channel_mode: 0,
+                timestretch: false,
+                content_fade_head: false,
+                content_fade_tail: false,
             },
         );
         let after = document.workspace_projection().unwrap();

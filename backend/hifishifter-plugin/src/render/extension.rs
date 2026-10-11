@@ -2562,10 +2562,12 @@ impl ExtensionOwner {
         if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
         }
-        // 采样"ARA 表达不到、但会改变渲染结果"的宿主事实（方向 / 循环源 / 声道模式）。
+        // 采样会改变渲染结果的宿主事实。**两个来源**：
+        //  - 原生扩展：方向 / 循环源 / 声道模式（ARA 表达不到，见 `ara::mapping::LOST_FIELDS`）；
+        //  - ARA 模型：时间拉伸 / 基于内容的淡化（ARA region 自己就给出）。
         // 与 `project_host_take_facts_locked` 用**同一个** active-take 口径，否则"清单
         // 说倒放、渲染播种说正放"会再次分叉。
-        let facts =
+        let mut facts =
             crate::host::geometry::RenderFacts::from_items(tracks.values().flat_map(|track| {
                 track.items.iter().map(|item| {
                     let active = item.takes.iter().find(|take| take.active);
@@ -2576,10 +2578,30 @@ impl ExtensionOwner {
                             reversed: active.is_some_and(|take| take.reversed),
                             loop_enabled: geometry.loop_source,
                             channel_mode: geometry.channel_mode,
+                            // ARA 侧字段在下面按 region 叠加；这里先给安全默认。
+                            timestretch: false,
+                            content_fade_head: false,
+                            content_fade_tail: false,
                         },
                     )
                 })
             }));
+        // ARA 侧的细化：把 `region_items` 里已认领的 region 事实叠加到对应 item 上。
+        // 这份叠加让"宿主在 ARA 侧改了时间拉伸 / 内容淡化"也进 `RenderFacts` —— 与原生
+        // 字段走同一条失效通路，不必再依赖某一处记得手动 bump。
+        {
+            let regions = stamp.0.regions.lock().unwrap();
+            let items = stamp.0.region_items.lock().unwrap();
+            for (key, item_id) in items.iter() {
+                let (Some(entry), Some(region)) = (facts.items.get_mut(item_id), regions.get(key))
+                else {
+                    continue;
+                };
+                entry.timestretch = region.is_timestretch_enabled;
+                entry.content_fade_head = region.has_content_based_fade_at_head;
+                entry.content_fade_tail = region.has_content_based_fade_at_tail;
+            }
+        }
         let _transaction = stamp.0.transaction.lock().unwrap();
         if self.is_closed()
             || !stamp.0.is_alive()

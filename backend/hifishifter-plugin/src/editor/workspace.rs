@@ -793,8 +793,11 @@ impl DocumentSession {
         // 不出来**"（`source_read_failed`）与"还没轮到它"分开：前者是宿主/样本侧的真故障，
         // 用户需要立刻知道，不该和"正在分配 region"共用同一句"等待中"。
         let source_by_item: std::collections::HashMap<String, String> = {
-            let items = self.region_items.lock().unwrap();
+            // 【锁序】按 `document.rs` 声明的层级取锁：`regions` 先于 `region_items`。
+            // 此前这里是反的，与 `document.rs::clip_for_host_item` 的正序共存，构成真实的
+            // 死锁窗口（两把锁同时在手时方向相反）。
             let regions = self.regions.lock().unwrap();
+            let items = self.region_items.lock().unwrap();
             items
                 .iter()
                 .filter_map(|(key, item)| {
@@ -931,8 +934,9 @@ impl DocumentSession {
         }
         // 已授权却读取失败的 item：终态，不计入。
         let failed_items: std::collections::HashSet<String> = {
-            let items = self.region_items.lock().unwrap();
+            // 【锁序】`regions` 先于 `region_items`（见 `document.rs` 的声明）。
             let regions = self.regions.lock().unwrap();
+            let items = self.region_items.lock().unwrap();
             let failures = self.source_failures.lock().unwrap();
             items
                 .iter()
