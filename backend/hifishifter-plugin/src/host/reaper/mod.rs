@@ -4,19 +4,14 @@
 use crate::editor::connection::UnknownVtbl;
 use crate::vst3::{uid_guid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
-#[path = "item_chunk.rs"]
 pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
-#[path = "reaper_write.rs"]
 mod write;
 pub(crate) use write::{HostClipTarget, HostUndoBlock};
-#[path = "reaper_media.rs"]
 mod media;
 pub(crate) use media::HostTrackTarget;
-#[path = "ui_inventory.rs"]
 mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
-#[path = "folder.rs"]
 mod folder;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
@@ -958,7 +953,7 @@ fn new_fade_axes(version: &str) -> Option<bool> {
 }
 
 #[cfg(test)]
-#[path = "reaper_tests.rs"]
+#[path = "tests.rs"]
 mod geometry_tests;
 #[cfg(test)]
 pub(crate) use geometry_tests::Fixture as MockHost;
