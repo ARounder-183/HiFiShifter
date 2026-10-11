@@ -254,8 +254,13 @@ pub(crate) struct SnapshotPublisher {
     pub misses: AtomicU64,
 }
 impl Default for SnapshotPublisher {
+    /// 【为什么从全局预算派生而不是写死 512 MiB】每个 owner 有 **2 个** publisher（两个
+    /// 输出率），folder 轨多实例下"每个 512 MiB"会让人误以为天花板是 N × 1 GiB。事实上
+    /// 唯一权威是 [`super::budget::global_budget`]：`publish` 每次都要向它 `reserve`，
+    /// 进程级总和恒被它夹住。这里的 per-publisher 限额只是本地理智上限，取全局上限即
+    /// "一个 publisher 不可能比全局预算还大"，不再制造第二套可叠加的额度。
     fn default() -> Self {
-        Self::new(512 * 1024 * 1024)
+        Self::new(super::budget::global_budget().limit())
     }
 }
 

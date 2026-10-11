@@ -255,6 +255,18 @@ const HOST_ENUMERATION_INTERVAL: std::time::Duration = std::time::Duration::from
 /// 忽略，又足以让用户在放手后立刻看到倒放生效。
 pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// VST3 离线 `setupProcessing` 里等待后台准备的最长时间。
+///
+/// 【为什么是 15 s 而不是更短】这个调用在宿主的 prepare 线程/UI 线程上同步等待，而
+/// 离线渲染（冻结 / 胶合 / 导出）会**把当时听不到的声音烘焙进产物**：等得不够久 ⇒
+/// 产物里是静音，这是数据正确性失败，比 UI 卡一下严重得多。因此宁可等。15 s 只是
+/// **上限**：正常路径上编辑已经触发过后台准备，这里通常只等剩余的推理时间。
+///
+/// 【为什么不更长】180 s 会把宿主界面卡死三分钟。真正消除这次同步等待需要异步完成 +
+/// 进度回报（独立一期）；在那之前，收敛失败由 [`ExtensionOwner::prepare_offline_until`]
+/// 的尝试次数上限提前退出，不必空等到这个上限。
+pub(crate) const OFFLINE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[cfg(test)]
 mod bound_tests {
     use super::*;
@@ -3999,6 +4011,11 @@ impl ExtensionOwner {
         // SDK离线setup在UI线程；无GUI时也刷新真实item状态，不能依赖WebView timer。
         self.refresh_host_geometry();
         let document = self.editor_document()?;
+        // 【为什么需要尝试次数上限】若后台准备**成功返回**却仍不能收敛到当前版本
+        // （例如 ready 永远不置位），此前会一路空转到 deadline，把宿主线程白等满
+        // `OFFLINE_PREPARE_TIMEOUT`。同一个版本连续排队两次仍不匹配就是不可能收敛，
+        // 提前返回明确错误，让上层如实记录，而不是静默冻结 15 s。
+        let mut attempts = 0usize;
         loop {
             {
                 let _transaction = document.transaction.lock().unwrap();
@@ -4032,6 +4049,14 @@ impl ExtensionOwner {
                 .as_ref()
                 .map_err(Clone::clone)?;
             if !worker.state().0 {
+                attempts += 1;
+                if attempts > 2 {
+                    return Err(
+                        "offline preparation did not converge; the current edit cannot be \
+                         rendered (host model/PCM or region assignment keeps changing)"
+                            .into(),
+                    );
+                }
                 self.prepare();
             }
             worker.wait_idle_until(deadline)?;

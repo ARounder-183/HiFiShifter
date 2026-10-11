@@ -163,6 +163,58 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
     Ok(())
 }
 
+/// 非 32-bit 浮点（`kSample64`）时的**降级静音**：按宿主声明的样本宽度清零输出。
+///
+/// 【为什么是静音 + OK，而不是返回失败】`validate` 对非 32-bit 浮点判
+/// `UnsupportedFormat` ⇒ `process` 返回非 OK ⇒ 多数宿主把插件**整条踢出链路**（用户
+/// 看到"插件不见了"，且日志无从查看）。我们确实读不了 f64 平面（`copy_block` 只按
+/// `f32` 解引用），所以正确的降级是：不读、按实际宽度写零、返回 OK —— 宿主得到静音
+/// 但插件在场，可诊断、可恢复。真正的 64-bit 处理是独立一期。
+///
+/// 【返回 false 的情形】不是"样本宽度"问题（`symbolic_sample_size == 0`）时返回
+/// false，让调用方沿用原有的失败上报 —— 多总线等形状问题不在本降级覆盖范围内。
+///
+/// # Safety
+/// 调用方保证 `data` 指向当前回调独占的 SDK 结构；非空 plane 至少含 `num_samples` 个
+/// 宿主声明宽度的样本。
+pub(crate) unsafe fn silence_unsupported_sample_size(data: *mut ProcessData) -> bool {
+    if data.is_null() {
+        return false;
+    }
+    // SAFETY: 调用者提供当前回调独占的 SDK 结构。
+    let data = unsafe { &*data };
+    if data.symbolic_sample_size == 0 || data.num_samples < 0 || data.num_outputs < 0 {
+        return false;
+    }
+    if data.num_samples == 0 || data.num_outputs == 0 {
+        return true;
+    }
+    // 只认 kSample64（1）；其它未知宽度交给调用方按失败处理。
+    if data.symbolic_sample_size != 1 || data.outputs.is_null() {
+        return false;
+    }
+    for bus in 0..data.num_outputs as usize {
+        // SAFETY: 宿主声明 num_outputs 个总线结构；指针数组可索引。
+        let output = unsafe { &mut *data.outputs.add(bus) };
+        if output.num_channels < 0 || (output.num_channels > 0 && output.channel_buffers.is_null())
+        {
+            return false;
+        }
+        for channel in 0..output.num_channels as usize {
+            // SAFETY: 宿主声明 num_channels 个 plane 指针。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if !plane.is_null() {
+                // SAFETY: 非空 plane 至少含 num_samples 个 f64 样本（8 字节/样本）。
+                unsafe {
+                    std::ptr::write_bytes(plane as *mut u8, 0, data.num_samples as usize * 8)
+                };
+            }
+        }
+        output.silence_flags = (1_u64 << output.num_channels.min(64)) - 1;
+    }
+    true
+}
+
 /// 纯editor renderer按SDK透传宿主信号；输入/输出bus或对应plane相同也不能先清零。
 /// # Safety
 /// 与validate相同，输入非空plane可读、输出可写num_samples帧；不保留任何宿主指针。

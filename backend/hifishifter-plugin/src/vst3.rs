@@ -1094,12 +1094,16 @@ unsafe extern "system" fn audio_setup_processing(
     // `PlaybackSnapshot::copy_block` 做线性重采样（降级、可听、有日志）。真正的多率
     // 渲染管线是独立一期工作；**先保证插件在场**。
     if setup.symbolic_sample_size != 0 {
+        // 【为什么返回 OK 而不是 `kResultFalse`】`kResultFalse` 会让多数宿主把插件
+        // **整条踢出链路**（用户看到"插件不见了"）。我们读不了 f64 平面，但可以在
+        // `process` 里按实际宽度静音（`silence_unsupported_sample_size`）—— 静音但在场
+        // 是可诊断的降级，优于静默消失。
         crate::log_line(&format!(
-            "[vst3] setupProcessing refused: sampleSize={} (only 32-bit float is supported). \
-             The host will keep the plugin out of the chain.",
+            "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in the \
+             chain and outputs silence (see silence_unsupported_sample_size).",
             setup.symbolic_sample_size
         ));
-        return K_RESULT_FALSE;
+        return K_RESULT_OK;
     }
     if !(44100.0..=192000.0).contains(&setup.sample_rate) {
         // 【为什么下限是 44.1k 而不是源读取域的 8k】内部快照固定为 44.1/48k：
@@ -1131,19 +1135,21 @@ unsafe extern "system" fn audio_setup_processing(
     if setup.process_mode == 2 {
         // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-        // 【为什么是 15 s 而不是 180 s】本调用在 `setupProcessing` 里，而那是**宿主 UI
-        // 线程**；180 s 会把宿主界面卡死三分钟。15 s 足够覆盖一次正常的离线准备。
+        // 【为什么在这里同步等待】离线渲染会把当时听不到的声音烘焙进产物：等得不够久
+        // ⇒ 产物里是静音，这是数据正确性失败。等待时长与理由见 `OFFLINE_PREPARE_TIMEOUT`。
         //
         // 【为什么失败返回 `kResultOk` 而不是 `kResultFalse`】`kResultFalse` 会让多数
         // 宿主把插件**整个踢出链路**（用户看到"插件不见了"，没有任何提示）。返回 OK 则
         // 保留插件：离线渲染输出静音，且日志里有一条明确的原因 —— 可诊断的降级优于
         // 静默的消失。
-        if let Err(error) = owner
-            .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(15))
+        let started = std::time::Instant::now();
+        if let Err(error) =
+            owner.prepare_offline_until(started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT)
         {
             crate::log_line(&format!(
-                "Offline preparation failed after 15s: {error}. Keeping the plugin in the chain; \
-                 offline output will be silent until preparation succeeds."
+                "Offline preparation failed after {:?}: {error}. Keeping the plugin in the chain; \
+                 offline output will be silent until preparation succeeds.",
+                started.elapsed()
             ));
             return K_RESULT_OK;
         }
@@ -1218,7 +1224,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 return match unsafe { crate::audio_abi::pass_through(data) } {
                     Ok(()) => K_RESULT_OK,
                     Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
-                    Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
+                    Err(crate::audio_abi::BufferError::UnsupportedFormat) => {
+                        if unsafe { crate::audio_abi::silence_unsupported_sample_size(data) } {
+                            K_RESULT_OK
+                        } else {
+                            K_RESULT_FALSE
+                        }
+                    }
                 };
             }
             // 【为什么不用 expect】这里在**音频线程**上，panic 会跨越 VST3 的 FFI 边界
@@ -1272,7 +1284,19 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             K_RESULT_OK
         }
         Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
-        Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
+        Err(crate::audio_abi::BufferError::UnsupportedFormat) => {
+            // 样本宽度不支持（kSample64）时按实际宽度静音并留在链路里；其余形状问题
+            // （多总线等）仍按失败上报 —— 见 `silence_unsupported_sample_size`。
+            if unsafe {
+                crate::audio_abi::silence_unsupported_sample_size(
+                    data.cast::<crate::audio_abi::ProcessData>(),
+                )
+            } {
+                K_RESULT_OK
+            } else {
+                K_RESULT_FALSE
+            }
+        }
     }
 }
 
@@ -2759,9 +2783,10 @@ mod audio_boundary_tests {
         assert_eq!(run(&raw mut empty), K_RESULT_OK);
     }
 
-    /// 64 位样本不支持时必须拒绝，不能按 f32 写出破坏的样本。
+    /// 64 位样本不支持处理，但**不能**让宿主把插件踢出链路：按实际宽度静音、返回 OK，
+    /// 且绝不按 f32 解引用 f64 平面（那会写出破坏的样本）。
     #[test]
-    fn process_rejects_sample64_without_writing() {
+    fn process_silences_sample64_instead_of_leaving_the_chain() {
         let mut samples = [0.25_f64, 0.5];
         let mut planes = [samples.as_mut_ptr(), samples.as_mut_ptr()];
         let mut output = AudioBusBuffers {
@@ -2776,8 +2801,9 @@ mod audio_boundary_tests {
             outputs: &raw mut output,
             ..Default::default()
         };
-        assert_eq!(run(&raw mut data), K_RESULT_FALSE);
-        assert_eq!(samples, [0.25, 0.5]);
+        assert_eq!(run(&raw mut data), K_RESULT_OK);
+        assert_eq!(samples, [0.0, 0.0]);
+        assert_eq!(output.silence_flags, 3);
     }
 
     /// SDK 允许 inactive plane 为 null，但有通道时 plane 数组不能缺失。
@@ -2911,7 +2937,10 @@ mod audio_boundary_tests {
                 (f64::NAN, 512, 0, K_INVALID_ARGUMENT),
                 (0.0, 512, 0, K_INVALID_ARGUMENT),
                 (44100.0, -1, 0, K_INVALID_ARGUMENT),
-                (44100.0, 512, 1, K_RESULT_FALSE),
+                // 非 32-bit 浮点现在**接受**：process 侧按实际宽度静音并留在链路里
+                // （见 `silence_unsupported_sample_size`）。此前 `kResultFalse` 会让宿主
+                // 把插件整条踢出链路。
+                (44100.0, 512, 1, K_RESULT_OK),
                 // 96k 现在**接受**（内部按 44.1/48k 出快照，输出线性重采样）—— 此前
                 // 返回 `kResultFalse` 会让宿主把插件整条踢出链路。
                 (96000.0, 512, 0, K_RESULT_OK),

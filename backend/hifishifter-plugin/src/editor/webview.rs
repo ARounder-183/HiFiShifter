@@ -657,8 +657,11 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
     replies.retain_mut(|reply| {
         let Some(id)=reply["id"].as_u64() else {return true;};
         // 媒体复制需要先越过actor写入屏障；API仍在本UI线程，调用期间不借用BrowserState。
-        let action={let state=state.borrow();state.host_replies.get(&id).and_then(|host|host.action.clone())
-            .map(|action|(action,state.host_replies[&id].document.clone(),state.host_replies[&id].lease,state.host_replies[&id].editor.clone(),state.sink.clone(),state.view_id.clone()))};
+        // 【为什么用单次 `get` 而不是 `get` 之后再 `[&id]`】后者是 `Index` panic 形状：一旦
+        // 将来这段改成跨借用边界，缺失的条目会直接 panic 在宿主进程里。这里一次取到
+        // 需要的字段再克隆出来。
+        let action={let state=state.borrow();state.host_replies.get(&id).and_then(|host|{
+            host.action.clone().map(|action|(action,host.document.clone(),host.lease,host.editor.clone(),state.sink.clone(),state.view_id.clone()))})};
         if let Some((action,weak,lease,editor,sink,view_id))=action.filter(|_|reply["ok"]==true) {
             let outcome=(||->Result<bool,String>{
                 let document=weak.upgrade().ok_or("media document closed")?;
@@ -689,8 +692,8 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
             match outcome {Ok(false)=>return false,Ok(true)=>{},Err(error)=>{reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!(error);}}
         }
         // Undo/Redo的actor屏障到达后才调用宿主；该外部调用期间不持BrowserState借用。
-        let jump={let state=state.borrow();state.host_replies.get(&id).and_then(|host|host.jump)
-            .map(|redo|(redo,state.host_replies[&id].document.clone(),state.host_replies[&id].lease,state.host_replies[&id].editor.clone(),state.sink.clone()))};
+        let jump={let state=state.borrow();state.host_replies.get(&id).and_then(|host|{
+            host.jump.map(|redo|(redo,host.document.clone(),host.lease,host.editor.clone(),state.sink.clone()))})};
         if let Some((jump,weak,lease,editor,sink))=jump {
             let result=(||->Result<bool,String>{
                 let document=weak.upgrade().ok_or("undo document closed")?;
