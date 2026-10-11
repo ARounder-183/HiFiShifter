@@ -266,21 +266,59 @@ pub fn get_or_compute_formant_analysis(
     let (in_rate, in_channels, pcm) =
         crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
     let ch = (in_channels as usize).max(1);
+    let summary = analyze_clip_formants_from_interleaved(
+        &pcm,
+        ch,
+        in_rate,
+        win_start,
+        win_end,
+        clip.reversed,
+    )?;
+
+    let mut cache = global_formant_analysis_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if cache.len() >= FORMANT_ANALYSIS_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, summary.clone());
+    Ok(summary)
+}
+
+/// 从**已解码**的交错 PCM 计算 clip 播放窗口的源共振峰分析。
+///
+/// 【为什么抽出来】这是 [`get_or_compute_formant_analysis`] 的**切片 / 倒放预反转 /
+/// 通道平均**三步的独立实现，与解码来源无关：独立 App 解的是用户媒体文件，ARA 插件
+/// 解的是它自己物化出来的分析副本（见 `kernel::editor::host_pcm::materialize`）。三者
+/// 必须逐字一致，否则同一个 clip 在 App 与插件里会显示不同的共振峰位置。
+///
+/// `pcm` 为交错样本（`channels` 个声道），`window_start`/`window_end` 是
+/// `clip_playback_window_sec` 给出的**正向**消费窗口（秒）；`reversed` 时把切片整体
+/// 反转，与实时域的方向一致。
+pub fn analyze_clip_formants_from_interleaved(
+    pcm: &[f32],
+    channels: usize,
+    sample_rate: u32,
+    window_start: f64,
+    window_end: f64,
+    reversed: bool,
+) -> Result<crate::formant_morph::analysis::FormantAnalysisSummary, String> {
+    let ch = channels.max(1);
     let frames = pcm.len() / ch;
-    if frames < 2 {
+    if sample_rate == 0 || frames < 2 {
         return Err("source_audio_too_short".to_string());
     }
-    let total_sec = frames as f64 / in_rate as f64;
-    let s0 = win_start.max(0.0).min(total_sec);
-    let s1 = win_end.min(total_sec).max(s0);
-    let i0 = (s0 * in_rate as f64).floor() as usize;
-    let i1 = ((s1 * in_rate as f64).ceil() as usize).min(frames);
+    let total_sec = frames as f64 / sample_rate as f64;
+    let s0 = window_start.max(0.0).min(total_sec);
+    let s1 = window_end.min(total_sec).max(s0);
+    let i0 = (s0 * sample_rate as f64).floor() as usize;
+    let i1 = ((s1 * sample_rate as f64).ceil() as usize).min(frames);
     if i1 <= i0 + 1 {
         return Err("source_slice_too_short".to_string());
     }
 
     let mut slice = pcm[i0 * ch..i1 * ch].to_vec();
-    if clip.reversed {
+    if reversed {
         crate::mixdown::reverse_interleaved_frames(&mut slice, ch);
     }
     // 通道平均 → mono
@@ -295,16 +333,10 @@ pub fn get_or_compute_formant_analysis(
         *slot = sum * inv_ch;
     }
 
-    let summary = crate::formant_morph::analysis::analyze_clip_formants(&mono, in_rate);
-
-    let mut cache = global_formant_analysis_cache()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if cache.len() >= FORMANT_ANALYSIS_CACHE_CAP {
-        cache.clear();
-    }
-    cache.insert(key, summary.clone());
-    Ok(summary)
+    Ok(crate::formant_morph::analysis::analyze_clip_formants(
+        &mono,
+        sample_rate,
+    ))
 }
 
 pub fn cancel_formant_rebuild_generation(clip_id: &str) {
@@ -538,9 +570,79 @@ pub fn get_or_compute_formant_audio(
 
 #[cfg(test)]
 mod tests {
-    use super::make_formant_cache_key;
+    use super::{analyze_clip_formants_from_interleaved, make_formant_cache_key};
     use crate::state::ClipFormantMorph;
     use std::path::Path;
+
+    /// 交错入口就是"手工切片 + 通道平均 + analyze"；App 与 ARA 插件因此逐字一致。
+    #[test]
+    fn interleaved_window_equals_a_hand_built_downmix() {
+        // 非对称信号：左声道是斜坡、右声道是反向斜坡，下混后仍非对称。
+        let frames = 8_000usize;
+        let mut interleaved = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            interleaved.push(i as f32 / frames as f32);
+            interleaved.push(1.0 - i as f32 / frames as f32);
+        }
+        let window_start = 0.05;
+        let window_end = 0.5;
+        let got = analyze_clip_formants_from_interleaved(
+            &interleaved,
+            2,
+            8_000,
+            window_start,
+            window_end,
+            false,
+        )
+        .unwrap();
+
+        let i0 = (window_start * 8_000.0).floor() as usize;
+        let i1 = ((window_end * 8_000.0).ceil() as usize).min(frames);
+        let mono = (i0..i1)
+            .map(|frame| (interleaved[frame * 2] + interleaved[frame * 2 + 1]) * 0.5)
+            .collect::<Vec<f32>>();
+        let expected = crate::formant_morph::analysis::analyze_clip_formants(&mono, 8_000);
+        assert_eq!(got.message, expected.message);
+        assert_eq!(got.track, expected.track);
+        assert_eq!(got.voiced_ratio, expected.voiced_ratio);
+    }
+
+    /// 倒放与实时域一致：切片先整体反转，再下混分析。
+    #[test]
+    fn reversed_window_matches_the_time_reversed_slice() {
+        let frames = 8_000usize;
+        let mut interleaved = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let value = (i as f32 * 0.017).sin();
+            interleaved.push(value);
+            interleaved.push(value);
+        }
+        let got =
+            analyze_clip_formants_from_interleaved(&interleaved, 2, 8_000, 0.0, 1.0, true).unwrap();
+        let mut slice = interleaved.clone();
+        crate::mixdown::reverse_interleaved_frames(&mut slice, 2);
+        let mono = slice
+            .chunks(2)
+            .map(|pair| (pair[0] + pair[1]) * 0.5)
+            .collect::<Vec<f32>>();
+        let expected = crate::formant_morph::analysis::analyze_clip_formants(&mono, 8_000);
+        assert_eq!(got.track, expected.track);
+    }
+
+    /// 窗口过短 / 音频过短必须报错，不能返回"零共振峰"的假成功。
+    #[test]
+    fn short_windows_and_empty_audio_are_rejected() {
+        let interleaved = vec![0.0_f32; 8];
+        assert_eq!(
+            analyze_clip_formants_from_interleaved(&interleaved, 2, 8_000, 0.0, 0.0, false)
+                .unwrap_err(),
+            "source_slice_too_short"
+        );
+        assert_eq!(
+            analyze_clip_formants_from_interleaved(&[], 2, 8_000, 0.0, 1.0, false).unwrap_err(),
+            "source_audio_too_short"
+        );
+    }
 
     #[test]
     fn formant_cache_key_changes_when_parameters_change() {

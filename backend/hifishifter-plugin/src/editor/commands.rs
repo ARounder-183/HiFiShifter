@@ -381,6 +381,10 @@ pub(super) fn dispatch(
             // 宿主播放态不依赖曲线载入；Unsupported/Conflict也必须还能观察播放并暂停。
             return Ok(session.playback_state());
         }
+        // 共振峰工具窗口：命令名与载荷和独立 App **逐字段同形**，前端不必按模式分支。
+        // 音频来自宿主授权的 PCM（插件禁止读本机文件），切片/倒放/下混与 App 共用
+        // kernel 的 `formant_cache::analyze_clip_formants_from_interleaved`。
+        "analyze_clip_formants" => return value(session.analyze_clip_formants(&input)?),
         "plugin_refresh" => {
             session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;
             return payload(session, false);

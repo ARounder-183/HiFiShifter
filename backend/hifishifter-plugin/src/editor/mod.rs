@@ -3,6 +3,7 @@ mod browser_files;
 pub(crate) mod commands;
 pub(crate) mod connection;
 mod events;
+mod formant;
 mod host_clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
