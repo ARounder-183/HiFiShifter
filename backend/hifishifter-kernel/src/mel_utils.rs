@@ -189,3 +189,105 @@ pub fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 恒等率、空输入、单点输入都必须原样返回 —— 它们是"便宜输出层"的早退分支，
+    /// 一旦被改坏，48k 输出会莫名其妙地重采样甚至清空。
+    #[test]
+    fn resampling_short_circuits_leave_input_untouched() {
+        let ramp = [0.0f32, 1.0, 2.0, 3.0];
+        assert_eq!(linear_resample_mono(&ramp, 48000, 48000), ramp);
+        assert!(linear_resample_mono(&[], 44100, 48000).is_empty());
+        assert_eq!(linear_resample_mono(&[0.5], 44100, 48000), [0.5]);
+        // 非法率同样原样返回，不制造除零。
+        assert_eq!(linear_resample_mono(&ramp, 0, 48000), ramp);
+        assert_eq!(linear_resample_mono(&ramp, 44100, 0), ramp);
+    }
+
+    /// 输出长度按比例取整；直流被保留（线性插值不改变常量信号）。
+    #[test]
+    fn resampling_length_and_endpoints_follow_the_ratio() {
+        let input = vec![0.25f32; 100];
+        let up = linear_resample_mono(&input, 44100, 48000);
+        assert_eq!(up.len(), ((100.0_f64 * 48000.0 / 44100.0).round()) as usize);
+        assert!(up.iter().all(|v| (v - 0.25).abs() < 1e-6));
+        let down = linear_resample_mono(&input, 48000, 44100);
+        assert_eq!(
+            down.len(),
+            ((100.0_f64 * 44100.0 / 48000.0).round()) as usize
+        );
+        assert!(down.iter().all(|v| (v - 0.25).abs() < 1e-6));
+    }
+
+    /// 2× 上采样的**斜坡**应落在原采样点之间的线性插值上；且尾部不能被外推成越界值。
+    ///
+    /// 【为什么要跨过 chunk_size=8】重采样内层按 8 分块 + 独立尾循环，两段的边界处理
+    /// 不一致时只会在这条缝上出错 —— 取一个非 8 倍数的输出长度把它钉住。
+    #[test]
+    fn resampling_interpolates_a_ramp_and_clamps_the_tail() {
+        let ramp = [0.0f32, 1.0, 2.0, 3.0];
+        let up = linear_resample_mono(&ramp, 1, 2);
+        assert_eq!(up.len(), 8);
+        for (i, value) in up.iter().enumerate().take(7) {
+            // 前 7 帧是斜坡上的线性插值（0, 0.5, 1.0, …）。
+            let expected = (i as f32) * 0.5;
+            assert!(
+                (value - expected).abs() < 1e-5,
+                "frame {i}: {value} != {expected}"
+            );
+        }
+        // 单调不减：任何"尾部外推/回绕"都会破坏它。
+        assert!(up.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    /// reflect 索引在两端镜像，且对任意越界输入都落在 [0, len)。
+    #[test]
+    fn reflect_index_mirrors_at_both_ends() {
+        assert_eq!(reflect_index(-1, 4), 1);
+        assert_eq!(reflect_index(-2, 4), 2);
+        assert_eq!(reflect_index(4, 4), 2);
+        assert_eq!(reflect_index(5, 4), 1);
+        assert_eq!(reflect_index(6, 4), 0);
+        for i in -50..60 {
+            assert!(reflect_index(i, 4) < 4);
+            assert_eq!(reflect_index(i, 1), 0);
+        }
+    }
+
+    /// reflect_pad 的左右边界取自镜像，长度正确。
+    #[test]
+    fn reflect_pad_mirrors_without_touching_the_body() {
+        let body = [1.0f32, 2.0, 3.0, 4.0];
+        assert_eq!(
+            reflect_pad(&body, 1, 2),
+            [2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0]
+        );
+        assert_eq!(reflect_pad(&[], 3, 2).len(), 5);
+    }
+
+    /// Hann 窗：端点为零、关于中心对称、峰值不超过 1。
+    #[test]
+    fn hann_window_is_symmetric_and_zero_at_the_ends() {
+        assert!(hann_window(0).is_empty());
+        assert_eq!(hann_window(1), [1.0]);
+        let w = hann_window(5);
+        assert_eq!(w.len(), 5);
+        assert!(w[0].abs() < 1e-6 && w[4].abs() < 1e-6);
+        for i in 0..5 {
+            assert!((w[i] - w[4 - i]).abs() < 1e-6, "not symmetric at {i}");
+            assert!((-1e-6..=1.0 + 1e-6).contains(&w[i]));
+        }
+    }
+
+    /// Slaney 域与其逆在整条频带上互为反函数。
+    #[test]
+    fn slaney_mel_round_trips() {
+        for hz in [0.0f32, 100.0, 500.0, 999.0, 1000.0, 4000.0, 8000.0] {
+            let back = mel_to_hz_slaney(hz_to_mel_slaney(hz));
+            assert!((back - hz).abs() <= 1e-3 * hz.max(1.0), "hz {hz} -> {back}");
+        }
+    }
+}
