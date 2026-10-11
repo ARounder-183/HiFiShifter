@@ -3,7 +3,7 @@
 //! 与 `onnx_status` 同构：把「这个后端在当前构建里到底能不能用」回答给前端，
 //! 供算法列表按能力过滤 —— 而不是让前端拿着一份硬编码列表去赌。
 //!
-//! vslib 是**加载期**链接（导入库，见 `vocoder/vslib.rs` 的 `#[link]`），
+//! vslib 是**加载期**链接（导入库，见 `hifishifter-kernel/src/vslib.rs` 的 `#[link]`），
 //! 所以「不可用」只有两种来源：
 //! 1. 编译期没满足条件（未开启 `vslib` feature，或不是 Windows x86_64）；
 //! 2. 符号探测失败（`VslibGetVersion` 未返回有效版本号）。
