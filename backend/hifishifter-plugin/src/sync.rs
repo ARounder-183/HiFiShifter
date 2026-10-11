@@ -21,12 +21,27 @@ use std::sync::{Mutex, MutexGuard};
 pub(crate) trait MutexExt<T> {
     /// 取锁；锁已被毒化时**恢复**内部数据而不是 panic。
     fn lock_or_recover(&self) -> MutexGuard<'_, T>;
+
+    /// 取锁并**报告**是否从毒化中恢复（`true` = 数据可能半写）。
+    ///
+    /// 【为什么需要"报告"这一版】`lock_or_recover` 恢复的是"锁的可用性"，不是"数据一定
+    /// 正确"（见模块文档）。纯读路径可以照常跑；但**读改写并影响宿主**的路径（把编辑器
+    /// 时间线写回 DAW）不能拿一份半写状态去改宿主 —— 那会把一次局部 panic 升级成工程级
+    /// 损坏。这类调用点在返回 `true` 时必须**放弃本次操作**并留痕，而不是继续。
+    fn lock_or_recover_checked(&self) -> (MutexGuard<'_, T>, bool);
 }
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_recover(&self) -> MutexGuard<'_, T> {
         self.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_or_recover_checked(&self) -> (MutexGuard<'_, T>, bool) {
+        match self.lock() {
+            Ok(guard) => (guard, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        }
     }
 }
 
@@ -47,5 +62,24 @@ mod tests {
         .join();
         assert!(mutex.is_poisoned(), "前提：锁确实被毒化了");
         assert_eq!(*mutex.lock_or_recover(), 7, "恢复后仍能读到内部数据");
+    }
+
+    /// 影响宿主的读改写路径必须能**知道**这次取锁是从毒化恢复来的 —— 否则它会把
+    /// 一份可能半写的状态写回 DAW。
+    #[test]
+    fn checked_recovery_reports_poison_to_host_facing_callers() {
+        let mutex = Arc::new(Mutex::new(7_u32));
+        let (_guard, poisoned) = mutex.lock_or_recover_checked();
+        assert!(!poisoned, "未毒化时必须是 false（正常路径不受影响）");
+        drop(_guard);
+        let clone = Arc::clone(&mutex);
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.lock_or_recover();
+            panic!("poison the mutex");
+        })
+        .join();
+        let (guard, poisoned) = mutex.lock_or_recover_checked();
+        assert!(poisoned, "毒化恢复必须报告 true");
+        assert_eq!(*guard, 7);
     }
 }

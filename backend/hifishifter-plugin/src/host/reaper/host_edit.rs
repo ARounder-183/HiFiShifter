@@ -393,7 +393,21 @@ impl EditorSession {
         if requests.is_empty() || requests.len() > 512 {
             return Err("host edit batch must contain 1..512 clips".into());
         }
-        let timeline = self.timeline.lock_or_recover();
+        // 【为什么用 checked 取锁】本函数把编辑器时间线**写回宿主**。若这把锁此前被
+        // 某线程的 panic 毒化过，`lock_or_recover` 会交回一份**可能半写**的 clip 状态；
+        // 拿它去改 DAW 会把一次局部 panic 升级成工程级损坏（S1）。因此这里在恢复即
+        // 拒绝本次写回，让用户走"刷新/重开"这条明确的恢复路径，而不是默默写坏。
+        let (timeline, recovered) = self.timeline.lock_or_recover_checked();
+        if recovered {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Error,
+                "editor.timeline-poisoned",
+                format_args!(
+                    "[ara] editor timeline was poisoned by a panic; refusing to write host edits"
+                ),
+            );
+            return Err("editor state was reset after an internal error; refresh required".into());
+        }
         let mut seen = std::collections::HashSet::new();
         let mut edits = Vec::new();
         for request in requests {
@@ -982,6 +996,29 @@ mod tests {
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":5.}))
             .is_err());
         document.close();
+    }
+    /// S1：编辑器时间线被 panic 毒化后，**不得**拿半写状态去改宿主 —— 规划必须拒绝。
+    #[test]
+    fn a_poisoned_editor_timeline_refuses_host_edits() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = editor.timeline.lock_or_recover().clips[0].id.clone();
+        // 在另一线程持锁 panic ⇒ 毒化时间线锁（模拟"某线程在写时间线时崩了"）。
+        let poisoned = Arc::clone(&editor);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.timeline.lock_or_recover();
+            panic!("poison the editor timeline");
+        })
+        .join();
+        assert!(editor.timeline.is_poisoned(), "前提：时间线锁被毒化");
+        let error = match editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip_id,"gain":0.5}))
+        {
+            Ok(_) => panic!("毒化后必须拒绝写回宿主"),
+            Err(error) => error,
+        };
+        assert!(error.contains("refresh required"), "{error}");
     }
     /// 规划复用原Clip×Take倍率，且未开始宿主写之前整批拒绝非法/未知字段。
     #[test]
