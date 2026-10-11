@@ -249,16 +249,16 @@ test("a transient failure backs off instead of retrying every 250ms", async () =
 
 /** 成功一次之后退避必须复位，否则状态栏会永久停在慢节奏上。 */
 test("a success after a transient failure resets the poll cadence", async () => {
-    invokeMock.mockRejectedValueOnce(
-        Object.assign(new Error("host busy"), { kind: "transient" }),
-    );
+    invokeMock.mockRejectedValueOnce(Object.assign(new Error("host busy"), { kind: "transient" }));
     stop = startPluginApplyPolling(async () => undefined);
     await flush();
+    // 失败一次后停在退避窗口里（下面用"再等 250 ms 没有新请求"验证）。
     const afterFailure = invokeMock.mock.calls.length;
 
     invokeMock.mockResolvedValue(readyState());
     await vi.advanceTimersByTimeAsync(1000);
     await flush();
+    expect(invokeMock.mock.calls.length).toBeGreaterThan(afterFailure);
     expect(getPluginApplySnapshot().failure).toBe("");
 
     // 复位后回到 250 ms 节奏：再等一个基础间隔就应有新请求。

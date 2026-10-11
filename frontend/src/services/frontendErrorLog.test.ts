@@ -9,7 +9,9 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from "vitest";
 
-const invokeMock = vi.fn(() => Promise.resolve(null));
+// 【为什么参数是 `unknown[]` 而不是空】`reportFrontendError` 会以
+// `(command, { message, detail })` 调用宿主 invoke；测试要能读到那份载荷。
+const invokeMock = vi.fn((..._args: unknown[]) => Promise.resolve(null));
 
 vi.mock("./pluginHost", () => ({
     getPluginHost: () => ({
@@ -50,7 +52,7 @@ test("after the window elapses the error is reported again with a repeat count",
         expect(invokeMock).toHaveBeenCalledTimes(2);
         // 4 次调用里首次已上报，其余 3 次被抑制 —— 汇总必须如实说出这个数字，
         // 否则用户会以为"只重复了一次"。
-        const [, args] = invokeMock.mock.calls[1] as [string, { message: string }];
+        const args = invokeMock.mock.calls[1]?.[1] as { message: string };
         expect(args.message).toContain("repeated 3 time(s)");
     } finally {
         vi.useRealTimers();

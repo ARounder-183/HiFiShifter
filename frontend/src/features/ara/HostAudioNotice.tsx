@@ -57,7 +57,9 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
                 gap="1"
                 className="bg-qt-window border-b border-qt-border px-qt-4 py-qt-2 select-none"
             >
-                <span className="hs-type-label font-bold">{t("ara_host_audio_ara_only_title")}</span>
+                <span className="hs-type-label font-bold">
+                    {t("ara_host_audio_ara_only_title")}
+                </span>
                 <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
                     {t("ara_host_audio_ara_only_body")}
                 </span>
