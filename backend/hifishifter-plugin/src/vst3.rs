@@ -1014,7 +1014,7 @@ unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn audio_set_bus_arrangements(
-    _this: *mut c_void,
+    this: *mut c_void,
     inputs: *mut u64,
     num_inputs: i32,
     outputs: *mut u64,
@@ -1023,30 +1023,37 @@ unsafe extern "system" fn audio_set_bus_arrangements(
     if num_inputs != 1 || num_outputs != 1 {
         return K_RESULT_FALSE;
     }
-    if inputs.is_null() || outputs.is_null() {
+    if this.is_null() || inputs.is_null() || outputs.is_null() {
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: 宿主按数量提供合法布局数组；本批声明一进一出。
     // 【为什么同时接受单声道】`kMono`(1) 与 `kStereo`(3) 都接受。此前只认 stereo ⇒
     // 单声道轨道上 `setBusArrangements` 返回失败 ⇒ 宿主把插件踢出链路，而人声轨
     // 单声道极常见。渲染面见 `PlaybackSnapshot::copy_block`。
-    if !matches!(unsafe { *inputs }, 1 | 3) || !matches!(unsafe { *outputs }, 1 | 3) {
+    let (input, output) = unsafe { (*inputs, *outputs) };
+    if !matches!(input, 1 | 3) || !matches!(output, 1 | 3) {
         return K_RESULT_FALSE;
     }
+    // 记下协商结果：`getBusArrangement` 必须如实回吐，否则宿主按错误声道数组织缓冲。
+    // SAFETY: this 为存活音频接口。
+    unsafe { &(*base_from_audio(this)).extension_owner }.set_bus_arrangements(input, output);
     K_RESULT_OK
 }
 
 unsafe extern "system" fn audio_get_bus_arrangement(
-    _this: *mut c_void,
-    _direction: i32,
+    this: *mut c_void,
+    direction: i32,
     _index: i32,
     arrangement: *mut u64,
 ) -> TResult {
-    if arrangement.is_null() {
+    if this.is_null() || arrangement.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    // SAFETY: arrangement 是宿主提供的可写 SpeakerArrangement。
-    unsafe { *arrangement = 3 }; // kStereo
+    // SAFETY: this 为存活音频接口；arrangement 是宿主提供的可写 SpeakerArrangement。
+    // 回吐**协商结果**（未协商时默认 kStereo），不再无条件写死 kStereo。
+    let negotiated =
+        unsafe { &(*base_from_audio(this)).extension_owner }.bus_arrangement(direction);
+    unsafe { *arrangement = negotiated };
     K_RESULT_OK
 }
 
@@ -1095,7 +1102,11 @@ unsafe extern "system" fn audio_setup_processing(
         return K_RESULT_FALSE;
     }
     if !(44100.0..=192000.0).contains(&setup.sample_rate) {
-        // 离谱的率（0.5x 慢放、损坏的工程设置）仍然拒绝：重采样的比例会大到没有意义。
+        // 【为什么下限是 44.1k 而不是源读取域的 8k】内部快照固定为 44.1/48k：
+        // 宿主率**高于**它只是上采样（无混叠，最多缺高频），宿主率**低于**它则要把快照
+        // 降采样 —— 线性重采样没有抗混叠滤波，8k 宿主上会听到明显的镜像。所以下限就是
+        // "永不降采样内部快照"，这是刻意的；要真正支持 22.05k/32k 工程需要按宿主率
+        // 渲染内部快照（独立一期）。
         crate::log_line(&format!(
             "[vst3] setupProcessing refused: sampleRate={} is outside 44100..=192000",
             setup.sample_rate

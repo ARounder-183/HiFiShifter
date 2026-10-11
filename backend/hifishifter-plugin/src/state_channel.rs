@@ -288,6 +288,14 @@ impl EditState {
         }
     }
 
+    /// 本构建支持的**最高**状态 schema 代际。
+    ///
+    /// 【为什么 `encode` 不写这个常量】版本号在这里是**向后兼容**手段：只带 atlas 的
+    /// 载荷写 2、带 groups 写 5……旧构建（它只认自己那一代及更低）因此仍能读。写死最高
+    /// 代际会让所有旧构建一律拒绝，把"能读"变成"全丢"。这个常量只用于 `restore` 判断
+    /// "由更新的插件保存"。
+    const CURRENT_STATE_VERSION: u64 = 6;
+
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.groups.validate()?;
@@ -326,15 +334,25 @@ impl EditState {
             return Err("state too large".into());
         }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if !(1..=6).contains(&value["version"].as_u64().unwrap_or(0)) {
+        // 【为什么区分"更新版保存"与"损坏"】两者此前都报同一句
+        // `unsupported state version`，用户看到"编辑全没了"却不知道原因。版本高于本
+        // 构建时明确说明"由更新的插件保存"，让人知道该升级而不是以为档坏了。
+        let version = value["version"].as_u64().unwrap_or(0);
+        if version == 0 {
             return Err("unsupported state version".into());
+        }
+        if version > Self::CURRENT_STATE_VERSION {
+            return Err(format!(
+                "state was saved by a newer plugin version (state {version} > supported {})",
+                Self::CURRENT_STATE_VERSION
+            ));
         }
         let mut restored: Self =
             serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
         restored.groups.validate()?;
         restored.validate_fades()?;
         restored.atlas = restored.atlas.reserve_restored()?;
-        if value["version"] == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
+        if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
         }
         if restored
@@ -579,6 +597,33 @@ mod tests {
             .unwrap_err()
             .contains("legacy"));
         assert_eq!(state.revision, 1, "拒绝旧state保留现有编辑");
+    }
+
+    /// 版本号是"最低够用的代际"（**向后兼容**手段），且"更新版保存的"与"损坏的"
+    /// 给出可区分的报错。
+    #[test]
+    fn a_newer_state_version_is_reported_distinctly_from_corruption() {
+        let mut state = EditState::default();
+        let value: serde_json::Value = serde_json::from_slice(&state.encode().unwrap()).unwrap();
+        assert_eq!(
+            value["version"].as_u64(),
+            Some(2),
+            "空编辑只带 atlas 段 ⇒ 写最低代际 2，旧构建也能读"
+        );
+        // 更高版本：明确说"由更新的插件保存"，而不是含混的 unsupported。
+        let mut newer = value.clone();
+        newer["version"] = serde_json::json!(7);
+        let error = state
+            .restore(&serde_json::to_vec(&newer).unwrap())
+            .unwrap_err();
+        assert!(error.contains("newer plugin version"), "{error}");
+        // 缺版本：仍是"不支持"。
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("version");
+        assert!(state
+            .restore(&serde_json::to_vec(&missing).unwrap())
+            .unwrap_err()
+            .contains("unsupported"));
     }
 
     #[test]

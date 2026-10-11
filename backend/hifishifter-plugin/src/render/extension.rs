@@ -204,6 +204,12 @@ pub(crate) struct ExtensionOwner {
     /// 静音甚至被踢出链路。改按 `setupProcessing` 的权威率选快照，非原生率交给
     /// `PlaybackSnapshot::copy_block` 线性重采样（与 `setupProcessing` 的声明一致）。
     setup_sample_rate: AtomicI32,
+    /// 宿主在 `setBusArrangements` 协商出的扬声器编排（`kMono` = 1 / `kStereo` = 3）。
+    ///
+    /// 【为什么必须记下来】`setBusArrangements` 接受 mono，但 `getBusArrangement` 此前
+    /// **无条件**回 `kStereo` —— 对宿主撒谎。宿主据此重新协商或按错误声道数组织缓冲，
+    /// 单声道轨（人声轨极常见）上表现为编排反复或静音。默认 `kStereo`。
+    bus_arrangement: AtomicU64,
     prepared: Mutex<Option<PreparedVersion>>,
     /// 测试专用：`prepare()` 真正进入重排的次数。
     ///
@@ -2794,6 +2800,27 @@ impl ExtensionOwner {
     /// `setupProcessing` 声明的采样率（Hz；未声明为 `0`）。
     pub(crate) fn setup_sample_rate(&self) -> f64 {
         f64::from(self.setup_sample_rate.load(Ordering::Acquire))
+    }
+    /// 记录 `setBusArrangements` 协商出的扬声器编排（`kMono` = 1 / `kStereo` = 3），
+    /// 打包为 `(输入 << 32) | 输出`。
+    pub(crate) fn set_bus_arrangements(&self, inputs: u64, outputs: u64) {
+        self.bus_arrangement
+            .store((inputs << 32) | (outputs & 0xffff_ffff), Ordering::Release);
+    }
+    /// 协商出的扬声器编排（`direction`：`kInput` = 0 / `kOutput` = 1）。
+    ///
+    /// 尚未协商（`0`）时按默认 `kStereo`(3) 报告 —— 与 `component_get_bus_info`
+    /// 声明的 2 声道一致，不与宿主协商结果矛盾。
+    pub(crate) fn bus_arrangement(&self, direction: i32) -> u64 {
+        let packed = self.bus_arrangement.load(Ordering::Acquire);
+        if packed == 0 {
+            return 3;
+        }
+        if direction == 0 {
+            packed >> 32
+        } else {
+            packed & 0xffff_ffff
+        }
     }
     /// 快照发布者下标：原生 44.1/48k 各一个，其余率取**最合适的已声明原生率**。
     ///
