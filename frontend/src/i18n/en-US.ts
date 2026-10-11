@@ -2104,6 +2104,9 @@ export const enUS = {
     ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
     ara_host_audio_folder_body:
         "the host manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
+    ara_host_audio_ara_only_title: "This host provides ARA only",
+    ara_host_audio_ara_only_body:
+        "Everything works here except editing clip geometry: viewing, playback, parameter edits and rendering all use ARA. Moving, trimming, splitting and item clipboard need a native host extension, so those stay read-only.",
     ara_host_audio_unidentified_title: "This host is not supported yet",
     ara_host_audio_unidentified_body:
         "HiFiShifter needs a host that exposes the extension API it uses to enumerate tracks and items (the host today). On other hosts the timeline stays empty because the plug-in cannot see any tracks.",

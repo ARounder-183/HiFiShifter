@@ -78,6 +78,19 @@ pub(super) struct TakeDirectionApi {
     pub filename: Option<SourceFileName>,
 }
 
+/// 一个 take 的**方向与段边界**读数（`PCM_Source_GetSectionInfo` 的三个出参）。
+///
+/// 【为什么合成一条】三个出参来自同一次调用，且都描述"这个 take 消费源的哪一段、
+/// 朝哪个方向"。分开读会重复调用宿主；分开丢弃（此前只取 `reversed`）则让
+/// `offset`/`length` 白白浪费 —— 而它们正是共享解算
+/// （`hifishifter_kernel::take_geometry`）判定镜像轴所需的输入。
+pub(super) struct TakeDirectionFacts {
+    /// 宿主报告的方向位。
+    pub reversed: bool,
+    /// 可寻址的 SECTION 边界；读不出或长度非法时为 `None`（按"无段"处理）。
+    pub section: Option<hifishifter_kernel::take_geometry::SourceSection>,
+}
+
 /// 多 take 枚举入口（`GetMediaItemNumTakes` / `GetMediaItemTake`）。
 ///
 /// 【为什么可选】旧宿主或精简导出可能没有这两个函数。缺省时退回"只有 active
@@ -613,7 +626,7 @@ impl NativeHost {
         let take = checked(&authorized, || unsafe { (table.parent)(pointer, 2) })?;
         self.geometry_for_take(take, authorized)
     }
-    /// 读取一个 take 的倒放方向；读不出来时返回 `false`（**按正放**）。
+    /// 读取一个 take 的方向与 SECTION 边界；读不出来时返回 `None`（**按正放、无段**）。
     ///
     /// 【为什么不报错】方向只是渲染输入的附加信息。为一个 take 读不到方向而让整份
     /// 清单失败，是把可选增强变成了硬依赖 —— 与 folder 展开同一条原则。
@@ -623,13 +636,11 @@ impl NativeHost {
     /// offset/len/reverse. return true if success"）。返回 false 表示"不是
     /// section/reverse 块"，此时按正放处理 —— 与 `loop_enabled` 同一纪律：读不到不
     /// 阻断渲染，也不制造一个用户无法处置的提示。
-    pub(super) fn take_reversed(&self, take: *mut c_void, authorized: &impl Fn() -> bool) -> bool {
-        self.take_reversed_raw(take, authorized).unwrap_or(false)
-    }
-
-    /// 方向位的原始读数；`None` = 读不出来。对外一律经 [`Self::take_reversed`] 落成
-    /// `bool`，本函数只用来把"读不到"这一路径集中在一处。
-    fn take_reversed_raw(&self, take: *mut c_void, authorized: &impl Fn() -> bool) -> Option<bool> {
+    pub(super) fn take_direction_facts(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<TakeDirectionFacts> {
         let api = self.take_enum.as_ref()?.direction.as_ref()?;
         let geometry = self.geometry.as_ref()?;
         let project = self.project(authorized).ok()?;
@@ -652,7 +663,19 @@ impl NativeHost {
             (api.section)(source, &mut offset, &mut length, &mut reversed)
         })
         .ok()?;
-        ok.then_some(reversed)
+        if !ok {
+            return None;
+        }
+        // 【为什么把 offset/length 一起收回】它们此前被声明、传给宿主、然后丢弃 ——
+        // 而它们是"这个 take 的可寻址源区间"，正是共享解算判定镜像轴所需的输入。
+        // 长度非法（非有限 / ≤0）时按"无段"处理，不猜、不补默认值。
+        let section = (offset.is_finite() && length.is_finite() && length > 0.0).then_some(
+            hifishifter_kernel::take_geometry::SourceSection {
+                start_sec: offset,
+                length_sec: Some(length),
+            },
+        );
+        Some(TakeDirectionFacts { reversed, section })
     }
     /// take 源文件的路径（`GetMediaSourceFileName`）。
     ///
@@ -797,18 +820,21 @@ impl NativeHost {
         if item_gain < 0. {
             return Err("invalid REAPER item volume".into());
         }
-        let playback_rate = tv(c"D_PLAYRATE")?;
+        let play_rate_signed = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. {
             return Err("invalid REAPER length".into());
         }
-        // 速率只保留**幅值**：负速率是宿主的倒放信号之一（与独立 App 的
-        // `reaper_import.rs` 同口径：`raw_play_rate.abs().max(0.01)`），方向由
-        // `PCM_Source_GetSectionInfo` 的方向位单独表达（见 `LostField::Reversed`）。
-        // 此前直接拒绝 `<= 0` ⇒ **整个 item 从清单里消失**，比"识别成倒放"更糟。
-        if playback_rate == 0. {
+        // 【为什么保留符号】负速率是宿主表达倒放的**两个来源之一**（另一个是
+        // `SECTION MODE 1` / `PCM_Source_GetSectionInfo` 的方向位）。独立 App 的判据
+        // 是 `play_rate < 0 || section_mode > 0`；插件此前把符号 `.abs()` 掉、只认方向位，
+        // 于是"只用负速率表达倒放"的 take 被**静默按正放渲染** —— 输出错的音频。
+        // 幅值仍单独保留（`playback_rate`）：窗口宽度、缓存键这些与方向无关的消费者用它。
+        // 拒绝 0 与非有限值：此前直接拒绝 `<= 0` 会让**整个 item 从清单里消失**，
+        // 比"识别成倒放"更糟。
+        if play_rate_signed == 0. || !play_rate_signed.is_finite() {
             return Err("invalid REAPER playback rate".into());
         }
-        let playback_rate = playback_rate.abs();
+        let playback_rate = play_rate_signed.abs();
         let integer = |v: f64| -> Result<i32, String> {
             if v.fract() == 0. && v >= i32::MIN as f64 && v <= i32::MAX as f64 {
                 Ok(v as i32)
@@ -835,6 +861,12 @@ impl NativeHost {
         let loop_source = boolean(iv(c"B_LOOPSRC")?)?;
         // 源文件路径：读不出来就是 `None`（回退身份不可用），不猜。
         let source_file_name = self.take_source_file_name(take, &authorized);
+        // 方向与段边界来自**同一次** `PCM_Source_GetSectionInfo`。
+        // 方向取两个来源的并集：宿主方向位 **或** 负速率 —— 与独立 App 的
+        // `play_rate < 0 || section_mode > 0` 逐条对齐（见 `HostClipGeometry::play_rate_signed`）。
+        let direction = self.take_direction_facts(take, &authorized);
+        let reversed = play_rate_signed < 0.0 || direction.as_ref().is_some_and(|f| f.reversed);
+        let section = direction.and_then(|facts| facts.section);
         let length = |name| -> Result<f64, String> {
             let v = iv(name)?;
             if v < 0. {
@@ -901,6 +933,9 @@ impl NativeHost {
             duration_sec,
             snap_offset_sec,
             playback_rate,
+            play_rate_signed,
+            reversed,
+            section,
             preserve_pitch,
             channel_mode,
             group_id,

@@ -18,6 +18,7 @@ import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { HostAudioPayload } from "../../types/api";
 import {
+    needsAraOnlyNotice,
     needsFolderTrackNotice,
     needsSkippedClipsNotice,
     needsUnidentifiedHostNotice,
@@ -41,6 +42,24 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
                 </span>
                 <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
                     {t("ara_host_audio_unidentified_body")}
+                </span>
+            </Flex>
+        );
+    }
+    // 【为什么这条与上一条分开，且措辞必须"是事实"】ARA-only 宿主上插件**是能用的**
+    // （能看 / 能听 / 能调参），只读的只有片段几何写回。此前它与"宿主不受支持"
+    // 共用一句话，等于对一个正常工作的宿主宣称它不受支持 —— 用户会去查一个不存在的问题。
+    if (needsAraOnlyNotice(status)) {
+        return (
+            <Flex
+                role="status"
+                direction="column"
+                gap="1"
+                className="bg-qt-window border-b border-qt-border px-qt-4 py-qt-2 select-none"
+            >
+                <span className="hs-type-label font-bold">{t("ara_host_audio_ara_only_title")}</span>
+                <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
+                    {t("ara_host_audio_ara_only_body")}
                 </span>
             </Flex>
         );

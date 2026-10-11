@@ -190,7 +190,9 @@ export type HostAudioState =
     | "awaiting_regions"
     | "folder_parent_without_regions"
     /** 没有可用的宿主扩展接口：插件看不到任何轨道（见 `HostAudioNotice`）。 */
-    | "host_unidentified";
+    | "host_unidentified"
+    /** 宿主只提供 ARA 2.0：能看 / 能听 / 能调参，但片段几何**只读**。 */
+    | "ara_only_read_only";
 
 export interface HostAudioPayload {
     state: HostAudioState;

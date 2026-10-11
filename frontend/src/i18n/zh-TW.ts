@@ -2048,6 +2048,9 @@ export const zhTW = {
     ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
     ara_host_audio_folder_body:
         "宿主按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
+    ara_host_audio_ara_only_title: "此宿主只提供 ARA",
+    ara_host_audio_ara_only_body:
+        "這裡除了片段幾何編輯外一切可用：檢視、播放、調參與算繪都走 ARA。移動、裁切、分割與 item 剪貼簿需要宿主原生擴充，因此維持唯讀。",
     ara_host_audio_unidentified_title: "此宿主暫不受支援",
     ara_host_audio_unidentified_body:
         "HiFiShifter 需要宿主提供它用來列舉軌道與 item 的擴充介面（目前是宿主）。在其它宿主上時間軸會是空的 —— 外掛看不到任何軌道。",

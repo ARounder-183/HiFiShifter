@@ -2448,10 +2448,6 @@ pub(crate) mod tests {
             "set_param_frames",
             json!({"trackId":tb,"param":"pitch","startFrame":0,"values":vec![67.;400],"checkpoint":true}),
         );
-        // 真实不支持的宿主fade使合成失败；权威的尾笔不能依赖快照发布成功。
-        for region in document.regions.lock_or_recover().values_mut() {
-            region.has_content_based_fade_at_head = true;
-        }
         let held = editor.timeline.lock_or_recover();
         editor
             .enqueue(UiRequest {
@@ -2469,12 +2465,16 @@ pub(crate) mod tests {
             owners[0].encode_state().unwrap(),
             owners[1].encode_state().unwrap(),
         ];
-        assert!(
-            editor
-                .apply(editor.submitted.load(Ordering::Acquire), None)
-                .is_err(),
-            "真实不支持fade必须拒绝合成"
-        );
+        // 【为什么用"宿主未就绪"当失败触发】本用例要验的是"合成失败也不能丢权威尾笔"。
+        // 此前用"委托淡化缺宿主几何"，但那条路径已经改成**降级**（保留 ARA 自己声明的
+        // 淡化，不整份失败）—— 它在 ARA-only 宿主上曾让整轨静音，见
+        // `project_audio_fades_locked`。`ready=false` 会让 `apply_workspace_edits` 以
+        // "host model changed during automatic apply" 拒绝，触发条件等价而不再依赖
+        // 那个已被改掉的行为。恢复 `ready` 以免影响后续的撤销/恢复断言。
+        document.ready.store(false, Ordering::Release);
+        let applied = editor.apply(editor.submitted.load(Ordering::Acquire), None);
+        document.ready.store(true, Ordering::Release);
+        assert!(applied.is_err(), "合成必须失败，才能验证尾笔不依赖它");
         let b: Value = serde_json::from_slice(&saved[1]).unwrap();
         assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399], 69.);
         assert_eq!(

@@ -236,7 +236,9 @@ impl NativeHost {
                 let geometry = self.geometry_for_take(take, authorized)?;
                 Ok(UiTake {
                     name: read_name(take)?,
-                    reversed: self.take_reversed(take, authorized),
+                    // 方向已经在 `geometry_for_take` 里连同 SECTION 边界一起读过一次；
+                    // 这里复用，避免对同一个 take 重复调用宿主。
+                    reversed: geometry.reversed,
                     geometry,
                     active: is_active,
                 })
@@ -429,6 +431,45 @@ mod tests {
         // 宿主不回答（不是 section/reverse 块）→ 按正放，而不是制造一个"未知"态。
         fixture.section_reports.set(false);
         assert!(!host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
+    }
+
+    /// **回归：负 `D_PLAYRATE` 也是倒放的一种表达，必须与方向位等价。**
+    ///
+    /// 【为什么这是回归测试】REAPER 用**两种**方式表达倒放：负速率、或
+    /// `SECTION MODE 1`。独立 App 的判据是 `play_rate < 0 || section_mode > 0`；
+    /// 插件此前把速率符号 `.abs()` 掉、只认方向位 —— 于是"只用负速率表达倒放"的
+    /// take 被**静默按正放渲染**：输出错的音频，而不是报错。
+    #[test]
+    fn a_negative_play_rate_marks_the_take_as_reversed() {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        // 宿主**不**回答方向位 —— 倒放只由速率符号表达。
+        fixture.section_reports.set(false);
+        fixture.set_value("D_PLAYRATE", -1.0);
+        let host = Arc::new(fixture.client());
+        let take = &host.ui_track(&|| true).unwrap().items[0].takes[0];
+        assert!(take.reversed, "负速率必须判为倒放");
+        assert!(
+            take.geometry.play_rate_signed < 0.0,
+            "符号必须原样保留，写回时才能不被抹掉"
+        );
+        // 幅值仍按正数给出：窗口宽度、缓存键这些与方向无关的消费者用它。
+        assert!((take.geometry.playback_rate - 1.0).abs() < 1e-9);
+    }
+
+    /// 正速率 + 无方向位 ⇒ 正放（默认路径不被上面那条误伤）。
+    #[test]
+    fn a_positive_play_rate_without_a_section_stays_forward() {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_takes(0);
+        fixture.enable_media();
+        fixture.section_reports.set(false);
+        fixture.set_value("D_PLAYRATE", 2.0);
+        let host = Arc::new(fixture.client());
+        let take = &host.ui_track(&|| true).unwrap().items[0].takes[0];
+        assert!(!take.reversed);
+        assert!(take.geometry.play_rate_signed > 0.0);
     }
 
     /// 循环源（`B_LOOPSRC`）是 **item** 属性，必须读进几何并投影到 clip 与每个 take。

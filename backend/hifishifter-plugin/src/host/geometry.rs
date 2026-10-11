@@ -32,6 +32,26 @@ pub(crate) struct HostClipGeometry {
     /// item秒域吸附偏移，仅用于原GUI几何回流，不参与源PCM和音频渲染。
     pub snap_offset_sec: f64,
     pub playback_rate: f64,
+    /// 宿主 `D_PLAYRATE` 的**原始带符号**读数。
+    ///
+    /// 【为什么保留符号，而不是像 `playback_rate` 那样取幅值】REAPER 用**两种**
+    /// 方式表达倒放：负速率、或 `SECTION MODE 1`。独立 App 的方向判据是
+    /// `play_rate < 0 || section_mode > 0`（两个来源都要）；插件此前把符号
+    /// `.abs()` 掉、只认方向位，于是"只用负速率表达倒放"的 take 被**静默按正放
+    /// 渲染** —— 输出错的音频，而不是报错。
+    ///
+    /// `playback_rate` 仍是幅值：窗口宽度、缓存键这些"与方向无关"的消费者继续用它。
+    pub play_rate_signed: f64,
+    /// 宿主报告的**方向**（`PCM_Source_GetSectionInfo` 的 revOut **或** 负速率）。
+    pub reversed: bool,
+    /// `PCM_Source_GetSectionInfo` 给出的 SECTION 边界（`offset` / `length`）。
+    ///
+    /// 【为什么必须收回它】此前这两个出参被声明、被传给宿主、然后**被丢弃**。
+    /// 它们是"这个 take 的可寻址源区间"，正是共享解算
+    /// （`hifishifter_kernel::take_geometry`）判定镜像轴所需的输入。丢弃之后插件
+    /// 只能按媒体全长猜轴，遇到显式建过 SECTION 边界的工程就会算错。
+    /// 读不出来（API 缺失 / 非 section 块 / 长度非法）时为 `None`。
+    pub section: Option<hifishifter_kernel::take_geometry::SourceSection>,
     pub preserve_pitch: bool,
     pub channel_mode: i32,
     pub take_pitch: f64,

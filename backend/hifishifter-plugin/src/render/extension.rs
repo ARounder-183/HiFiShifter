@@ -130,6 +130,13 @@ pub(crate) enum HostAudioState {
     /// 插件坏了，而不是"这个宿主不受支持"。空白 + 沉默是最糟的组合：无从诊断，
     /// 也不会去查文档。
     HostUnidentified,
+    /// 宿主**只**提供 ARA 2.0（Studio One / Cubase / Nuendo / Logic …）。
+    ///
+    /// 【为什么与 `HostUnidentified` 分开】两者此前共用一个状态，而那个状态的文案是
+    /// 「本宿主尚不支持 / 时间线会是空的」—— 对 ARA-only 宿主**是假的**：时间线有内容、
+    /// 音频能出、参数能调，只读的只是**片段几何写回**。给一个正常工作的宿主挂一条
+    /// "不受支持"的横幅，用户会去查一个不存在的问题。
+    AraOnlyReadOnly,
 }
 
 impl HostAudioState {
@@ -140,6 +147,7 @@ impl HostAudioState {
             HostAudioState::AwaitingRegions => "awaiting_regions",
             HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
             HostAudioState::HostUnidentified => "host_unidentified",
+            HostAudioState::AraOnlyReadOnly => "ara_only_read_only",
         }
     }
 }
@@ -2417,10 +2425,20 @@ impl ExtensionOwner {
             return;
         };
         let Some(host) = self.native_host() else {
-            // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
-            // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
+            // 没有原生扩展接口 ⇒ 说清楚是哪一种"没有"。
+            //
+            // 【为什么不是一律 HostUnidentified】那个状态的文案是「本宿主尚不支持 /
+            // 时间线会是空的」。ARA-only 宿主（Studio One / Cubase / Nuendo / Logic）
+            // 上时间线**有内容、音频能出、参数能调** —— 只是片段几何写回不可用。
+            // 给一个正常工作的宿主挂"不受支持"的横幅，是把用户引向一个不存在的问题。
+            let ara_only = self.host_backend().kind()
+                == hifishifter_kernel::editor::host::HostKind::AraOnly;
             *self.host_audio.lock_or_recover() = HostAudioStatus {
-                state: HostAudioState::HostUnidentified,
+                state: if ara_only {
+                    HostAudioState::AraOnlyReadOnly
+                } else {
+                    HostAudioState::HostUnidentified
+                },
                 waiting_items: 0,
             };
             // 【ARA-only 也必须推进 render_epoch】原生扩展缺席不代表"没有渲染输入"：
@@ -3707,8 +3725,23 @@ impl ExtensionOwner {
         // 的 `render_mixdown_internal`（`reverse_interleaved_frames`）。不把倒放片段推进
         // 内核，它就会被原样按正向放出来（实测：输出 = 源窗口正放）。
         let reversed_clip = timeline.clips.iter().any(|clip| clip.reversed);
-        let kernel_render =
-            edited || stretch || owned_fade || reversed_clip || !resolved.groups.is_empty();
+        // 【为什么"事实还没到"也必须走内核】方向 / 循环源 / 声道模式是 ARA **表达不到**
+        // 的输入（`ara::mapping::LOST_FIELDS`），只有宿主清单能给。直通路径
+        // （`mix_plain_regions`）不做这些处理 —— 于是在"宿主有原生扩展、清单却还没刷新"
+        // 这个窗口里，clip 的 `reversed` 还是默认 false，一个倒放片段会被原样按正放放出来：
+        // 波形、按钮都正常，声音是错的，且没有任何线索。
+        //
+        // 【为什么条件不是"清单为空"】宿主**根本不给**这些概念时（ARA-only），强制走内核
+        // 换不来任何信息，只会白白多算一遍、多占一份工作缓冲。真正会出错的是上面那个
+        // 中间窗口，所以判据是"有原生扩展 且 清单还没到"。
+        let facts_pending = self.native_host().is_some()
+            && document.ui_tracks.lock_or_recover().is_empty();
+        let kernel_render = edited
+            || stretch
+            || owned_fade
+            || reversed_clip
+            || !resolved.groups.is_empty()
+            || facts_pending;
         let clip_parameters = if resolved.atlas.is_empty() {
             Default::default()
         } else {
@@ -4269,6 +4302,19 @@ mod host_audio_state_tests {
             HostAudioState::FolderParentWithoutRegions.as_str(),
             "folder_parent_without_regions"
         );
+        assert_eq!(HostAudioState::HostUnidentified.as_str(), "host_unidentified");
+        // 【为什么单独钉住这一条】它与 `host_unidentified` 共用过一句话，而那句
+        // 「本宿主尚不支持」对 ARA-only 宿主是假的。分类名一旦被合回去，前端就会
+        // 重新对一个能正常工作的宿主宣称"不受支持"。
+        assert_eq!(
+            HostAudioState::AraOnlyReadOnly.as_str(),
+            "ara_only_read_only"
+        );
+        assert_ne!(
+            HostAudioState::AraOnlyReadOnly.as_str(),
+            HostAudioState::HostUnidentified.as_str(),
+            "ARA-only 是「只读」，不是「不受支持」"
+        );
     }
 
     /// **不变量：渲染输入失效必须通知本文档的**全部** owner，而不只是发现变化的那个实例。**
@@ -4543,6 +4589,10 @@ mod region_geometry_match_tests {
             duration_sec,
             snap_offset_sec: 0.,
             playback_rate,
+            // 测试夹具按正放、无 SECTION 构造；符号与幅值一致。
+            play_rate_signed: playback_rate,
+            reversed: false,
+            section: None,
             preserve_pitch: true,
             channel_mode: 0,
             take_pitch: 0.,

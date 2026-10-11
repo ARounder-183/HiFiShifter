@@ -2119,6 +2119,9 @@ export const jaJP = {
     ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
     ara_host_audio_folder_body:
         "ホストは ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
+    ara_host_audio_ara_only_title: "このホストは ARA のみを提供します",
+    ara_host_audio_ara_only_body:
+        "クリップのジオメトリ編集以外はすべて利用できます。表示・再生・パラメータ編集・レンダリングは ARA で動作します。移動・トリム・分割・アイテムクリップボードにはホストのネイティブ拡張が必要なため、読み取り専用のままです。",
     ara_host_audio_unidentified_title: "このホストは未対応です",
     ara_host_audio_unidentified_body:
         "HiFiShifter は、トラックとアイテムを列挙するために使用する拡張 API を提供するホスト（現在はホスト）が必要です。他のホストではタイムラインは空のままです。",

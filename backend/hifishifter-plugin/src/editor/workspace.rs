@@ -1083,10 +1083,25 @@ impl DocumentSession {
             if !region.has_content_based_fade_at_head && !region.has_content_based_fade_at_tail {
                 continue;
             }
-            let geometry = geometries
-                .get(&key)
-                .cloned()
-                .ok_or("delegated fade host geometry pending")?;
+            let Some(geometry) = geometries.get(&key).cloned() else {
+                // 【为什么降级而不是整份失败】宿主几何在 ARA-only 宿主上**恒缺**
+                // （没有原生扩展就没有 `D_FADE*LEN`）。此前这里 `?` 上抛，经
+                // `capture_render_input` 让整条 renderer 永远不发布快照 ——
+                // Studio One / Cubase / Nuendo / Logic 上只要有一个内容淡化，
+                // **整轨彻底静音**。而"某一段的淡化长度取不到"只是局部信息缺失：
+                // 保留 ARA 自己给的淡化信息，其余照常渲染。
+                // 与 `ara::mapping` 对坏 region"跳过而不是整份失败"是同一条纪律。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.delegated-fade-geometry",
+                    format_args!(
+                        "[ara] delegated content fade for clip {} has no host geometry; \
+                         keeping the ARA-declared fades",
+                        clip.id
+                    ),
+                );
+                continue;
+            };
             let style = edits
                 .fades
                 .get(&geometry.item_id)
@@ -1144,7 +1159,7 @@ impl DocumentSession {
         // item GUID → (方向, 循环源, 声道模式, 宿主源窗口)。取 **active take** 的几何：
         // 扁平投影描述的就是 active take，`normalize_takes` 之后 clip 的字段来自它。
         // 源窗口 `(start, span)` 只服务倒放的**镜像坐标复原**（见下）。
-        let facts: std::collections::HashMap<String, (bool, bool, i32, Option<(f64, f64)>)> = self
+        let facts: std::collections::HashMap<String, HostItemFacts> = self
             .ui_tracks
             .lock_or_recover()
             .values()
@@ -1156,20 +1171,22 @@ impl DocumentSession {
                 // 循环源与声道模式是 item 级 / active take 级；缺 active take 时退回
                 // item 的权威几何。
                 let geometry = active.map(|take| &take.geometry).unwrap_or(&item.geometry);
-                let loop_source = geometry.loop_source;
-                let channel_mode = geometry.channel_mode;
-                // 宿主源窗口 = `[D_STARTOFFS, D_STARTOFFS + D_LENGTH×|D_PLAYRATE|]`。
-                // 速率取绝对值：符号只表示方向，不该把跨度翻成负数（独立 App 同样先
-                // `.abs()`）。
-                let host_window = active.map(|take| {
-                    (
-                        take.geometry.source_start_sec,
-                        take.geometry.duration_sec * take.geometry.playback_rate.abs(),
-                    )
+                // 源窗口解算所需的全部宿主读数，逐 item 冻结一份。媒体总长不在其中：
+                // 它按 clip 查（见下面的 `media_by_item` / `media_by_source`）。
+                let host = active.map(|take| HostTakeFacts {
+                    start_offset_sec: take.geometry.source_start_sec,
+                    item_length_sec: take.geometry.duration_sec,
+                    play_rate_signed: take.geometry.play_rate_signed,
+                    section: take.geometry.section,
                 });
                 (
                     item.geometry.item_id.clone(),
-                    (reversed, loop_source, channel_mode, host_window),
+                    HostItemFacts {
+                        reversed,
+                        loop_source: geometry.loop_source,
+                        channel_mode: geometry.channel_mode,
+                        host,
+                    },
                 )
             })
             .collect();
@@ -1180,56 +1197,65 @@ impl DocumentSession {
             let Some(guid) = host_item_guid(&clip.id) else {
                 continue;
             };
-            let Some((reversed, loop_source, channel_mode, host_window)) = facts.get(guid) else {
+            let Some(facts) = facts.get(guid) else {
                 continue;
             };
-            clip.reversed = *reversed;
-            clip.loop_enabled = *loop_source;
-            clip.channel_mode = *channel_mode;
+            clip.reversed = facts.reversed;
+            clip.loop_enabled = facts.loop_source;
+            clip.channel_mode = facts.channel_mode;
             // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
             // 见 `probe/ara/REVERSE-FINDINGS.md`）：倒放 take 的 `D_STARTOFFS` 是
             // `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
             // （`clip_playback_window_sec`）要的是**正向**窗口的终点 —— 直接用 ARA
-            // 的区间会让内核二次镜像 = 又变正放。所以按**宿主几何**把窗口翻回正向：
-            //   forward = [D − host_start − host_span, D − host_start]
-            // 由宿主事实直接推导，**幂等**（重复调用结果相同），不依赖入参 clip 的当前
-            // 窗口 —— 因此重认领/重建不会累积镜像。Loop 倒放走内核的回绕分支，不适用
-            // 本模型，保持原样。
-            if clip.reversed && !clip.loop_enabled {
-                // 媒体总时长：先按 **item GUID**（认领后可用），再按 **音频源 id**
-                // （映射阶段就有，与认领/授权无关）。分割瞬间两半都还没有自己的
-                // region→item 边，只有后者能命中 —— 这是"分割含倒放 Take 的 Item 后
-                // 偏移"的根因。两者都拿不到时**不能**静默按镜像坐标渲染（那会让内容
-                // 整体偏移/变正放且没有线索），而是保留坐标并告警。
-                let by_source = clip
-                    .active_take()
-                    .source_path
-                    .as_deref()
-                    .and_then(|source| media_by_source.get(source).copied());
-                let media =
-                    reversed_media_duration(media_by_item.get(guid).copied().or(by_source), clip);
-                match reversed_forward_window(media, *host_window) {
-                    Some((forward_start, forward_end)) => {
-                        clip.source_start_sec = forward_start;
-                        clip.source_end_sec = forward_end;
-                        for take in &mut clip.takes {
-                            take.source_start_sec = forward_start;
-                            take.source_end_sec = forward_end;
-                        }
+            // 的区间会让内核二次镜像 = 又变正放。
+            //
+            // 【为什么调共享解算而不是就地再写一遍】这段数学必须与独立 App 的
+            // `.rpp` 导入**逐位一致**（否则同一个工程两个前端听感不同）。解算收口在
+            // `hifishifter_kernel::take_geometry`，本处只负责喂宿主读数。
+            // 它由宿主事实直接推导，**幂等**（不读入参 clip 的当前窗口），因此重认领/
+            // 重建不会累积镜像。
+            if clip.reversed {
+                if let Some(host) = &facts.host {
+                    // 媒体总时长：先按 **item GUID**（认领后可用），再按 **音频源 id**
+                    // （映射阶段就有，与认领/授权无关）。分割瞬间两半都还没有自己的
+                    // region→item 边，只有后者能命中 —— 这是"分割含倒放 Take 的 Item 后
+                    // 偏移"的根因。
+                    let by_source = clip
+                        .active_take()
+                        .source_path
+                        .as_deref()
+                        .and_then(|source| media_by_source.get(source).copied());
+                    let media =
+                        reversed_media_duration(media_by_item.get(guid).copied().or(by_source), clip);
+                    let geometry = host.to_geometry(media, facts.reversed, facts.loop_source);
+                    let (forward_start, forward_end) = geometry.forward_source_window();
+                    clip.source_start_sec = forward_start;
+                    clip.source_end_sec = forward_end;
+                    // 窗口只写 **active take**（或全部，当 active 身份不可解析时）：
+                    // 多 take item 里各 take 的源窗口本可不同，把 active 的窗口盖到
+                    // 全部 take 上会污染 inactive take 的几何 —— 用户切过去时看到的是
+                    // 上一个 take 的窗口。
+                    for take in active_takes_of(clip) {
+                        take.source_start_sec = forward_start;
+                        take.source_end_sec = forward_end;
                     }
-                    None => log::warn!(
-                        "[ara] reversed item {guid} could not resolve its forward window \
-                         (media_duration={media:?}, host_window={host_window:?}); the clip keeps \
-                         the host's mirrored coordinates and will render shifted"
-                    ),
+                } else {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.reversed-window",
+                        format_args!(
+                            "[ara] reversed item {guid} has no active take geometry; the clip \
+                             keeps the host's mirrored coordinates and will render shifted"
+                        ),
+                    );
                 }
             }
-            // 让 active take 也带上同一份事实：`normalize_takes()` 之后 clip 的扁平字段
-            // 来自 active take，只在 clip 上写会被下一次物化覆盖。
-            for take in &mut clip.takes {
-                take.reversed = *reversed;
-                take.loop_enabled = *loop_source;
-                take.channel_mode = *channel_mode;
+            // 同上：让 **active take** 也带上同一份事实。`normalize_takes()` 之后 clip 的
+            // 扁平字段来自 active take，只在 clip 上写会被下一次物化覆盖。
+            for take in active_takes_of(clip) {
+                take.reversed = facts.reversed;
+                take.loop_enabled = facts.loop_source;
+                take.channel_mode = facts.channel_mode;
             }
         }
     }
@@ -1417,17 +1443,6 @@ impl DocumentSession {
     }
 }
 
-/// 倒放 clip 的**镜像坐标复原**：宿主报的源窗口 `[host_start, host_start + host_span]`
-/// 是**已镜像坐标**（F-4 实测，见 `probe/ara/REVERSE-FINDINGS.md`）—— 倒放 take 的
-/// `D_STARTOFFS` 是 `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
-/// （`clip_playback_window_sec`）要的是**正向**窗口的终点。返回正向 `(start, end)`：
-///
-///   forward = [D − host_start − host_span, D − host_start]
-///
-/// 【为什么是幂等的】只读**宿主事实**与媒体时长，不读入参 clip 的当前窗口 —— 所以对
-/// 同一份宿主事实重复调用结果相同，重建/重认领不会累积镜像（累积镜像 = 又变正放）。
-/// 媒体时长未知（`None`）或输入非有限时返回 `None`：保持宿主窗口，宁可显示不精确，
-/// 也不编造一个可能错的正向窗口。
 /// 从 clip id 取回宿主 item GUID（`ara-item-{guid}` 的 `{guid}` 部分）。
 ///
 /// 【为什么不能用 `strip_prefix("ara-item-")`】同一个插件里有**两种** clip id：
@@ -1445,6 +1460,25 @@ fn host_item_guid(clip_id: &str) -> Option<&str> {
     clip_id
         .rfind(ITEM_TAG)
         .map(|index| &clip_id[index + ITEM_TAG.len()..])
+}
+
+/// clip 的 **active take**；active 身份解析不出来时退回**全部** take。
+///
+/// 【为什么需要它】多 take item 里各 take 的源窗口/方向本可不同，把 active take 的
+/// 事实盖到其它 take 上会污染它们的几何。但 `normalize_takes()` 只从 active take
+/// 物化扁平字段 —— 所以**必须**保证 active take 拿到事实；身份不可解析时宁可写全部，
+/// 也不能漏掉它。
+fn active_takes_of(
+    clip: &mut hifishifter_kernel::state::Clip,
+) -> impl Iterator<Item = &mut hifishifter_kernel::state::ClipTake> {
+    let wanted = clip
+        .active_take_id
+        .clone()
+        .filter(|id| clip.takes.iter().any(|take| &take.id == id));
+    let all = wanted.is_none();
+    clip.takes
+        .iter_mut()
+        .filter(move |take| all || wanted.as_ref().is_some_and(|id| &take.id == id))
 }
 
 /// 倒放镜像复原要用的**媒体总时长**（秒）。
@@ -1501,30 +1535,49 @@ fn media_duration_indexes(
     (by_item, by_source)
 }
 
-fn reversed_forward_window(
-    media_sec: Option<f64>,
-    host_window: Option<(f64, f64)>,
-) -> Option<(f64, f64)> {
-    let media_sec = media_sec.filter(|d| d.is_finite() && *d > 0.0)?;
-    let (host_start, host_span) = host_window?;
-    if !host_start.is_finite() || !host_span.is_finite() {
-        return None;
+/// 一个 item 的宿主事实快照（源窗口解算与方向投影的输入）。
+///
+/// 【为什么逐 item 冻结而不是每次现读宿主】`project_host_take_facts_locked` 在
+/// 渲染与 GUI 两条路径上都跑，逐 clip 再调宿主 API 会把一次投影变成 N 次跨 FFI
+/// 查询。清单快照本来就是"一次枚举、多处消费"。
+struct HostItemFacts {
+    reversed: bool,
+    loop_source: bool,
+    channel_mode: i32,
+    /// active take 的读数；缺 active take 时为 `None`（此时无法解算窗口）。
+    host: Option<HostTakeFacts>,
+}
+
+/// active take 上"解算源窗口"所需的宿主读数。
+#[derive(Clone, Copy)]
+struct HostTakeFacts {
+    /// `D_STARTOFFS`（倒放时是**镜像**量，见 `take_geometry` 模块文档）。
+    start_offset_sec: f64,
+    /// `D_LENGTH`（item 长度，秒）。
+    item_length_sec: f64,
+    /// `D_PLAYRATE`，**保留符号**（负号是倒放的来源之一）。
+    play_rate_signed: f64,
+    /// `PCM_Source_GetSectionInfo` 给出的 SECTION 边界。
+    section: Option<hifishifter_kernel::take_geometry::SourceSection>,
+}
+
+impl HostTakeFacts {
+    fn to_geometry(
+        &self,
+        media_duration_sec: Option<f64>,
+        reversed: bool,
+        loop_enabled: bool,
+    ) -> hifishifter_kernel::take_geometry::TakeGeometry {
+        hifishifter_kernel::take_geometry::TakeGeometry {
+            start_offset_sec: self.start_offset_sec,
+            item_length_sec: self.item_length_sec,
+            play_rate_signed: self.play_rate_signed,
+            media_duration_sec,
+            section: self.section,
+            reversed,
+            loop_enabled,
+        }
     }
-    // 夹紧到 `[0, D]`：长 item / 短媒体时 `D − start − span` 会落到负半轴，不夹紧
-    // 会写出一个**负的源起点**（独立 App 同样有 `.max(min_bound)` 的钳制）。
-    let raw_end = media_sec - host_start;
-    let raw_start = raw_end - host_span;
-    let end = raw_end.clamp(0.0, media_sec);
-    let start = raw_start.clamp(0.0, media_sec);
-    // 越界不是常态，是"宿主报的窗口与媒体总长对不上"的信号（长 item 覆盖短媒体、
-    // 或媒体身份还没认领）。夹紧保证不写出负起点，但必须**留痕** —— 静默夹紧会让
-    // "偏移不对"变成"没有线索"。独立 App 的同类钳制同样不静默。
-    if raw_start != start || raw_end != end {
-        log::warn!(
-            "reversed host window [{host_start}, {host_start}+{host_span}] exceeds media length {media_sec}; clamped to [{start}, {end}]"
-        );
-    }
-    Some((start.min(end), end))
 }
 
 #[cfg(test)]
@@ -1724,59 +1777,50 @@ mod tests {
         document.close();
     }
 
+    /// 构造"宿主报镜像窗口 `[host_start, +host_span]`、速率 1.0"的**共享几何输入**。
+    ///
+    /// 【为什么在插件侧只造输入】插件不再有自带的镜像公式 —— 它已收口到
+    /// `hifishifter_kernel::take_geometry`（公式本身由内核的用例覆盖）。这里测的是
+    /// "喂进去的宿主读数对不对"，也就是投影层唯一的职责。
+    fn mirrored_geometry(media: Option<f64>, host_start: f64, host_span: f64) -> (f64, f64) {
+        hifishifter_kernel::take_geometry::TakeGeometry {
+            start_offset_sec: host_start,
+            item_length_sec: host_span,
+            play_rate_signed: 1.0,
+            media_duration_sec: media,
+            section: None,
+            reversed: true,
+            loop_enabled: false,
+        }
+        .forward_source_window()
+    }
+
     /// F-4 实测：源长 2.0、非对称裁切 `[0.25, 1.25]`、倒放后宿主报 `D_STARTOFFS=0.75`
     /// （镜像坐标）。复原必须得到正向窗口 `[0.25, 1.25]`，且**幂等**（同输入同输出），
     /// 否则重建会累积镜像 = 又变正放。
     #[test]
     fn a_reversed_host_window_is_mirrored_back_to_the_forward_window() {
         // 宿主 [0.75, 0.75+1.0]，源长 2.0 ⇒ 正向 [2.0−1.75, 2.0−0.75] = [0.25, 1.25]。
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((0.75, 1.0))),
-            Some((0.25, 1.25))
-        );
+        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), (0.25, 1.25));
         // 幂等：只读宿主事实，不读 clip 当前窗口，重复调用结果相同。
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((0.75, 1.0))),
-            Some((0.25, 1.25))
-        );
-        // 源长未知 ⇒ 不复原（保持宿主窗口，不编造一个可能错的正向窗口）。
-        assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
-        assert_eq!(reversed_forward_window(Some(0.0), Some((0.75, 1.0))), None);
-        // 缺宿主窗口 / 非有限输入一律不复原。
-        assert_eq!(reversed_forward_window(Some(2.0), None), None);
-        assert_eq!(
-            reversed_forward_window(Some(f64::NAN), Some((0.75, 1.0))),
-            None
-        );
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((f64::NAN, 1.0))),
-            None
-        );
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((0.75, f64::INFINITY))),
-            None
-        );
+        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), (0.25, 1.25));
     }
 
-    /// **越界必须夹紧且留痕**：长 item / 短媒体时 `D − start − span` 会落到负半轴，
-    /// 不夹紧就写出一个**负的源起点**。独立 App 的同类钳制同样不是静默的。
+    /// **越界必须夹紧**：长 item / 短媒体时镜像端点会落到媒体之外，不夹紧就写出一个
+    /// 越界窗口（负起点 / 超出媒体末端）。独立 App 的同类钳制同样不是静默的。
     #[test]
     fn an_out_of_range_reversed_host_window_is_clamped_into_the_media() {
         // 宿主窗口整体越过媒体末端：正向 [2.0−2.5, 2.0−1.5] = [−0.5, 0.5] ⇒ 夹到 [0, 0.5]。
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((1.5, 1.0))),
-            Some((0.0, 0.5))
-        );
-        // 宿主起点为负（窗口前伸）：正向 [2.0−(−0.5+1.0), 2.0−(−0.5)] = [1.5, 2.5] ⇒ 夹到 [1.5, 2.0]。
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((-0.5, 1.0))),
-            Some((1.5, 2.0))
-        );
-        // 窗口完全在媒体之外 ⇒ 两端都夹到同一端点，退化为零长度而不是负长度。
-        assert_eq!(
-            reversed_forward_window(Some(2.0), Some((5.0, 1.0))),
-            Some((0.0, 0.0))
-        );
+        assert_eq!(mirrored_geometry(Some(2.0), 1.5, 1.0), (0.0, 0.5));
+        // 窗口完全在媒体之外 ⇒ 两端夹到同一端点，退化为零长度而不是负长度。
+        assert_eq!(mirrored_geometry(Some(2.0), 5.0, 1.0), (0.0, 0.0));
+    }
+
+    /// 媒体总长未知时退回**原始读数**作锚点（与独立 App 的 `else { take.s_offs }` 同口径），
+    /// 而不是保留镜像坐标。两侧必须给同一个答案 —— 这正是本次收口的目的。
+    #[test]
+    fn an_unknown_media_duration_falls_back_to_the_raw_offset() {
+        assert_eq!(mirrored_geometry(None, 0.75, 1.0), (0.0, 0.75));
     }
 
     /// **不变量：倒放镜像复原所需的媒体时长来自 ARA 源时长，不依赖"是否已授权 PCM"。**
@@ -1814,14 +1858,14 @@ mod tests {
         let media = reversed_media_duration(Some(2.0), &unclaimed);
         assert_eq!(media, Some(2.0));
         assert_eq!(
-            reversed_forward_window(media, Some((0.75, 1.0))),
-            Some((0.25, 1.25)),
+            mirrored_geometry(media, 0.75, 1.0),
+            (0.25, 1.25),
             "宿主镜像窗口 [0.75, 1.75] + 源长 2.0 ⇒ 正向 [0.25, 1.25]"
         );
 
-        // 连 ARA 源时长也没有时，只能返回 None（由调用方记 warn，不静默按镜像渲染）。
+        // 连 ARA 源时长也没有时，`reversed_media_duration` 明确返回 None
+        // （调用方据此留痕；共享解算会退回原始读数作锚点，而不是编造一个媒体长）。
         assert_eq!(reversed_media_duration(None, &unclaimed), None);
-        assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
     }
 
     /// **回归：未认领的分割半段也要能拿到媒体总长。**
@@ -2084,5 +2128,47 @@ mod tests {
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
+    }
+    /// **回归：缺宿主几何的委托淡化必须降级，而不是让整份合成失败。**
+    ///
+    /// 【为什么这是回归测试】宿主几何在 ARA-only 宿主上**恒缺**（没有原生扩展就没有
+    /// `D_FADE*LEN`）。此前 `project_audio_fades_locked` 直接 `?` 上抛，经
+    /// `capture_render_input` 让整条 renderer 永远不发布快照 —— Studio One / Cubase /
+    /// Nuendo / Logic 上只要有一个内容淡化，**整轨彻底静音**。而"某一段的淡化长度取不到"
+    /// 只是局部信息缺失：保留 ARA 自己声明的淡化，其余照常渲染。
+    #[test]
+    fn a_delegated_fade_without_host_geometry_degrades_instead_of_failing() {
+        use crate::ara::AraPlaybackRegion;
+        let model = ModelHandle::new();
+        let document = model.session();
+        // 一个已认领的 clip：`clip_ids` 把 region key 映射到它的 id。
+        let key = 0x5150_u64;
+        document.clip_ids.lock_or_recover().insert(key, "clip-a".into());
+        let mut region = AraPlaybackRegion::default();
+        region.audio_source_persistent_id = "ara://source".into();
+        region.has_content_based_fade_at_head = true;
+        region.has_content_based_fade_at_tail = true;
+        document.regions.lock_or_recover().insert(key, region);
+
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"t","name":"T","order":0}],
+            "clips":[{"id":"clip-a","track_id":"t","name":"c","start_sec":0,"length_sec":1,
+                      "takes":[{"id":"take","source_path":"ara://source"}]}],
+            "bpm":120,"project_sec":1
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+
+        // 没有任何 renderer owner ⇒ 宿主几何表为空，正是 ARA-only 的形状。
+        let edits = crate::state_channel::EditState::default();
+        let outcome = document.project_audio_fades_locked(&mut timeline, &edits);
+        assert!(
+            outcome.is_ok(),
+            "缺宿主几何只能是局部降级，不能让整份合成失败：{outcome:?}"
+        );
+        document.close();
+        drop(model);
     }
 }

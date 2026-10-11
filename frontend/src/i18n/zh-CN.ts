@@ -2045,6 +2045,9 @@ export const zhCN = {
     ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
     ara_host_audio_folder_body:
         "宿主按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
+    ara_host_audio_ara_only_title: "此宿主只提供 ARA",
+    ara_host_audio_ara_only_body:
+        "这里除片段几何编辑外一切可用：查看、播放、调参与渲染都走 ARA。移动、裁切、分割与 item 剪贴板需要宿主原生扩展，因此保持只读。",
     ara_host_audio_unidentified_title: "此宿主暂不受支持",
     ara_host_audio_unidentified_body:
         "HiFiShifter 需要宿主提供它用来枚举轨道与 item 的扩展接口（目前是宿主）。在其它宿主上时间线会是空的 —— 插件看不到任何轨道。",

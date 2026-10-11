@@ -356,11 +356,17 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
         }
     }
     let patch: ClipStatePatch = serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
-    // 倒放仍然拒绝：ARA 不给反向 PCM，插件渲染不出正确的反向内容（见 `probe/ara/` 的
-    // 倒放取证）。循环源**可以写** —— REAPER 的 `B_LOOPSRC` 是纯 item 属性，内核的
-    // `loop_enabled` 语义（对整份媒体回绕）与它一致，写回不会让两边不一致。
+    // 倒放**编辑**仍然拒绝，但理由与旧注释不同（旧注释说"插件渲染不出反向内容"，
+    // 那句已经过期 —— 插件现在会物化并反向渲染，见 `ReversePolicy::Materialize`）。
+    //
+    // 真正缺的是**写回**：把方向交给宿主需要在 take 上建 `SOURCE SECTION MODE 1`，
+    // 而本模块只写数值/字符串字段，建不了结构。放行的话，GUI 的"倒放"开关会
+    // 静默什么都不做 —— 那比明确拒绝更糟。
     if patch.reversed == Some(true) {
-        return Err("reverse source editing is not supported".into());
+        return Err(
+            "toggling reverse in the host is not supported yet; reverse it in the host itself"
+                .into(),
+        );
     }
     Ok(patch)
 }
@@ -478,16 +484,43 @@ impl EditorSession {
 /// 宿主 `D_STARTOFFS` 的值：倒放 take 存的是**镜像**起点（`D − 正向终点`），
 /// 正放（以及倒放 + 循环源，走内核回绕分支）就是正向起点本身。
 ///
-/// 【为什么需要它】`workspace::reversed_forward_window` 把宿主镜像坐标复原成正向窗口
-/// 交给内核，这里是它的**逆运算** —— 写回时必须再翻回镜像域，否则倒放 take 会被整体
-/// 平移 `D − start − span`。媒体总长取不到时返回 `None`：宁可不写，也不写一个错的起点。
+/// 【为什么需要它】`project_host_take_facts_locked` 把宿主镜像坐标复原成正向窗口
+/// 交给内核（见 `hifishifter_kernel::take_geometry`），这里是它的**逆运算** ——
+/// 写回时必须再翻回镜像域，否则倒放 take 会被整体平移 `媒体长 − 正向终点`。
+/// 媒体总长取不到时返回 `None`：宁可不写，也不写一个错的起点。
 fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
     if clip.reversed && !clip.loop_enabled {
-        hifishifter_kernel::state::clip_source_media_duration_sec(clip)
-            .map(|media| media - clip.source_end_sec)
+        let media = hifishifter_kernel::state::clip_source_media_duration_sec(clip);
+        // 与读取侧同一个逆运算（`forward_source_window` 的逆），避免两侧各写一份。
+        hifishifter_kernel::take_geometry::host_start_offset(clip.source_end_sec, media)
     } else {
         Some(clip.source_start_sec)
     }
+}
+
+/// 宿主几何换算出的**正向**窗口起点 —— 与 `project_host_take_facts_locked` 走同一份
+/// 解算（`hifishifter_kernel::take_geometry`）。
+///
+/// 【为什么需要它】写回前置检查此前直接拿 `target.geometry.source_start_sec`
+/// （宿主**镜像**域）与 `edit.before.source_start_sec`（编辑器时间线，倒放时是**正向**
+/// 域）比较。倒放 clip 上这是两个不同坐标系的值：检查要么恒失败（用户看到
+/// "host source window changed before GUI commit"，一次编辑被拒），要么碰巧通过。
+/// 统一换算到正向域之后，判据对两个方向都成立。
+fn host_forward_window_start(
+    geometry: &crate::host::geometry::HostClipGeometry,
+    media_duration_sec: Option<f64>,
+) -> f64 {
+    hifishifter_kernel::take_geometry::TakeGeometry {
+        start_offset_sec: geometry.source_start_sec,
+        item_length_sec: geometry.duration_sec,
+        play_rate_signed: geometry.play_rate_signed,
+        media_duration_sec,
+        section: geometry.section,
+        reversed: geometry.reversed,
+        loop_enabled: geometry.loop_source,
+    }
+    .forward_source_window()
+    .0
 }
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
@@ -540,7 +573,13 @@ pub(crate) fn execute_managed(
             || edit.patch.playback_rate.is_some()
             || edit.patch.clip_playback_rate.is_some())
             && (!host_value_compatible(
-                target.geometry.source_start_sec,
+                // 两侧统一到**正向**域再比：宿主几何是镜像/段相对域，而 `before` 来自
+                // 编辑器时间线（倒放时已被复原成正向）。媒体总长取 `before` 自带的
+                // ARA 源时长 —— 它是"编辑前"的权威读数，且与 clip 一起冻结。
+                host_forward_window_start(
+                    &target.geometry,
+                    hifishifter_kernel::state::clip_source_media_duration_sec(&edit.before),
+                ),
                 edit.before.source_start_sec,
             ) || !host_value_compatible(
                 target.geometry.playback_rate,
@@ -670,7 +709,15 @@ pub(crate) fn execute_managed(
             // 写速率时明确保调；普通移动/裁切不擅自改变用户B_PPITCH。
             if (before.playback_rate - after.playback_rate).abs() > 1e-6 {
                 target.set_take(c"B_PPITCH", 1., &authorized)?;
-                target.set_take(c"D_PLAYRATE", after.playback_rate as f64, &authorized)?;
+                // 【为什么保留符号】负速率是 REAPER 表达倒放的**方式之一**（另一个是
+                // `SECTION MODE 1`）。此前这里恒写正值 —— 用户只要改一次速率，倒放就被
+                // 静默改成正放。符号取自宿主的原始读数，不由 clip 推断。
+                let sign = if target.geometry.play_rate_signed < 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                target.set_take(c"D_PLAYRATE", sign * after.playback_rate as f64, &authorized)?;
             }
             // 【倒放必须写**镜像**起点】宿主 `D_STARTOFFS` 在倒放 take 上是
             // `D − 正向终点`（F-4 实测），而 clip 持有的是镜像复原之后的**正向**窗口。
