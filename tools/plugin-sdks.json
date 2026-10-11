@@ -42,5 +42,11 @@
     "submodule": "pluginterfaces",
     "submoduleCommit": "31d6eeba6daaa3e2a8bfbe3e7a90ca0b7fbfbc1c",
     "submoduleTree": "ebffbe4eb40bbf1f6fec030feeed30da47e6c719"
+  },
+  "soundtouch": {
+    "repository": "https://codeberg.org/soundtouch/soundtouch.git",
+    "tag": "2.3.3",
+    "commit": "e83424d5928ab8513d2d082779c275765dee31b9",
+    "_comment": "Pin for the LGPL-2.1 time-stretch library cloned by hifishifter-kernel/build.rs (tag 2.3.3 is a mutable reference; the build verifies HEAD against this commit after cloning). commit = refs/tags/2.3.3 peeled. Keep ASCII only: PowerShell 5.1 reads this file as ANSI when it has no BOM."
   }
 }

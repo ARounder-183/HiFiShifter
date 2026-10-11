@@ -273,6 +273,64 @@ fn build_signalsmith_stretch() {
 /// `third_party/soundtouch-static/soundtouch/` —— 那是**给 Tauri 的资源打包用的**
 /// （`tauri.conf.json` 以该相对路径把它打进去），不是给内核用的。
 /// 搬过来之后由本脚本继续写，行为与搬家前一致。
+/// SoundTouch 供给链钉子：`tools/plugin-sdks.json` 的 `soundtouch` 段是唯一事实
+/// 来源（与 ARA/VST3 SDK 的 pin 同一份清单）。
+///
+/// 【为什么必须校验】clone 按 `--branch 2.3.3` 拉，而 tag 是**可变引用** —— 上游
+/// 重打 tag 或 codeberg 供给链事故会直接进入音频时基代码，且两次构建产物可能不同。
+/// clone（或复用已有检出）后对 pin 校验 HEAD，不一致即失败。pin 升级走
+/// plugin-sdks.json 的评审 diff。
+const SOUNDTOUCH_PIN_JSON: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/plugin-sdks.json"));
+
+fn soundtouch_pinned_commit() -> String {
+    // 不为 build.rs 引入 serde_json（build-dependencies 只有 cc）：清单是受控文件，
+    // soundtouch 段放在最后，取该标记之后第一个 "commit" 值即可。
+    let section = SOUNDTOUCH_PIN_JSON
+        .split("\"soundtouch\"")
+        .nth(1)
+        .expect("tools/plugin-sdks.json must contain a soundtouch section");
+    let rest = section
+        .split("\"commit\": \"")
+        .nth(1)
+        .expect("soundtouch section must pin a commit");
+    rest.split('"')
+        .next()
+        .expect("soundtouch commit value")
+        .to_string()
+}
+
+/// 校验 SoundTouch 检出的 HEAD 与 pin 一致；无 `.git` 的检出版本无法核对，跳过。
+fn verify_soundtouch_pin(st_src_path: &Path) {
+    let pinned = soundtouch_pinned_commit();
+    if !st_src_path.join(".git").exists() {
+        println!("cargo:warning=[soundtouch] source has no .git; skipping pin verification");
+        return;
+    }
+    // safe.directory=*：检出可能由不同用户/WSL 创建（Windows 的 dubious ownership）。
+    // 这是一次只读的 HEAD 元数据查询，放开该限制不引入执行面。
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "safe.directory=*",
+            "-C",
+            st_src_path.to_str().expect("[soundtouch] src path"),
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .expect("[soundtouch] failed to run git rev-parse");
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || head != pinned {
+        panic!(
+            "[soundtouch] checkout HEAD {head} does not match the pinned commit {pinned} \
+             (tools/plugin-sdks.json). Delete the checkout and rebuild to re-clone the \
+             pinned revision - a retagged upstream must never reach audio code silently."
+        );
+    }
+    println!("cargo:warning=[soundtouch] pin verified: {head}");
+}
+
 fn build_soundtouch() {
     println!("cargo:warning=[kernel-native] starting build_soundtouch...");
 
@@ -318,6 +376,10 @@ fn build_soundtouch() {
             panic!("SoundTouch source clone failed. See error message above for instructions.");
         }
         println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
+        verify_soundtouch_pin(st_src_path);
+    } else {
+        // 已有检出同样校验：本地残留的旧 clone 不该静默参与构建。
+        verify_soundtouch_pin(st_src_path);
     }
 
     // Only re-run if build.rs itself changes - the SoundTouch source tree is modified

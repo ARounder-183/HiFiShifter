@@ -19,10 +19,12 @@ $manifestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $manifestModels = Join-Path $manifestRoot 'backend\src-tauri\resources\models'
 $manifestPath = Join-Path $manifestModels 'models.json'
 
-# 只登记真正参与推理的文件。`coreml_pads_patch.txt` 是 macOS 构建期的补丁输入、
-# `config.json` / `config.yaml` 是模型自带的配置 —— 它们一起改才叫"换模型"，
-# 因此一并纳入版本计算，但目录里的临时产物不纳入。
-$manifestExcluded = @('models.json', 'coreml_pads_patch.txt')
+# 只登记真正参与推理的文件。`coreml_pads_patch.txt` 是 macOS CoreML 构建期的
+# 补丁输入（由 scripts/generate-coreml-pads-patch.py 生成、产物入库）——它改变
+# 推理输入的构造方式，必须参与版本计算：换模型忘了重新生成清单时，这里是唯一
+# 会红的地方。`config.json` / `config.yaml` 是模型自带的配置 —— 它们一起改才叫
+# "换模型"，因此一并纳入。目录里的临时产物（models.json 自身）不纳入。
+$manifestExcluded = @('models.json')
 
 $manifestFiles = @()
 foreach ($manifestFile in Get-ChildItem -LiteralPath $manifestModels -Recurse -File |

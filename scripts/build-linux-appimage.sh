@@ -39,15 +39,17 @@ cd "$BACKEND_DIR"
 set +e  # bundling may fail; AppDir is already created
 HIFISHIFTER_SKIP_FRONTEND_BUILD=1 cargo tauri build \
     --bundles appimage \
-    -- --no-default-features --features onnx \
-    ${CARGO_PROFILE:+-- --profile "$CARGO_PROFILE"} 2>&1 | tail -5
+    -- --locked --no-default-features --features onnx \
+    ${CARGO_PROFILE:+--profile "$CARGO_PROFILE"} 2>&1 | tail -5
 set -e
 echo "(Tauri bundling step may have failed — this is OK, AppDir should be ready)"
 
-# Step 2: Determine AppDir and output paths
-TARGET_DIR="$BACKEND_DIR/src-tauri/target/release"
+# Step 2: Determine AppDir and output paths.
+# cargo workspace 合并后产物统一落在 workspace 根的 target/（backend/target/），
+# 不再是 src-tauri 自己的 target/。
+TARGET_DIR="$BACKEND_DIR/target/release"
 if [ "$TARGET_PROFILE" != "release" ] && [ -n "$TARGET_PROFILE" ]; then
-    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$TARGET_PROFILE"
+    TARGET_DIR="$BACKEND_DIR/target/$TARGET_PROFILE"
 fi
 APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
 OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
@@ -55,7 +57,7 @@ OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
 if [ ! -d "$APPDIR" ]; then
     # Try x86_64 target-specific path
     TARGET_TRIPLE="x86_64-unknown-linux-gnu"
-    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$TARGET_TRIPLE/$TARGET_PROFILE"
+    TARGET_DIR="$BACKEND_DIR/target/$TARGET_TRIPLE/$TARGET_PROFILE"
     APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
     OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
 fi

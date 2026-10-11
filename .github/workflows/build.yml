@@ -162,7 +162,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
-          shared-key: rust-checks-windows-x64
+          shared-key: rust-clippy-windows-x64
           cache-on-failure: true
 
       - name: Cache pinned plugin SDKs
@@ -183,8 +183,14 @@ jobs:
       - name: Run clippy
         run: |
           . ./tools/msvc-env.ps1
-          cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
+          # --locked：build.yml 必须证明"提交的锁"能编译，而不是 CI 临时解析出的依赖树
+          # （vst3.yml 一直如此，两边门禁因此等价）。
+          cargo clippy --locked --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy reported warnings or errors.' }
+          # 纯 Rust 形态（无 onnx / vslib）此前从未被 CI 编译过 —— 未来做轻量形态或
+          # 重排 cfg 门控时，破坏只会先在用户处爆发。分钟级成本，单独钉住。
+          cargo clippy --locked --manifest-path backend/Cargo.toml -p hifishifter-kernel --no-default-features --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Kernel no-default-features clippy failed.' }
 
   rust-test:
     name: Rust tests (workspace)
@@ -228,7 +234,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
-          shared-key: rust-checks-windows-x64
+          # 与 rust-clippy 分开：两个 job 同 key 互写缓存条目，先完成者独占，
+          # 后者常态吃不到自己形状的缓存（全量编译 15-25 分钟）。
+          shared-key: rust-test-windows-x64
           cache-on-failure: true
 
       - name: Cache pinned plugin SDKs
@@ -245,7 +253,7 @@ jobs:
       - name: Run workspace tests
         run: |
           . ./tools/msvc-env.ps1
-          cargo test --manifest-path backend/Cargo.toml --workspace -- --test-threads=1
+          cargo test --locked --manifest-path backend/Cargo.toml --workspace -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
 
   # vendored 的 ara2-bridge-testkit（见 backend/third-party/ara2-bridge-testkit/PATCHED.md）。
@@ -291,11 +299,11 @@ jobs:
           . ./tools/sdk-env.ps1
           Set-SdkEnvironment
           Push-Location backend/third-party/ara2-bridge-testkit
-          cargo test --features cpp-interop --test cpp_interop
+          cargo test --locked --features cpp-interop --test cpp_interop
           if ($LASTEXITCODE -ne 0) { throw 'cpp_interop failed.' }
-          cargo test --test plugin_contract
+          cargo test --locked --test plugin_contract
           if ($LASTEXITCODE -ne 0) { throw 'plugin_contract failed.' }
-          cargo test --test coverage_join
+          cargo test --locked --test coverage_join
           if ($LASTEXITCODE -ne 0) { throw 'coverage_join failed.' }
           Pop-Location
 
@@ -321,31 +329,31 @@ jobs:
           - name: windows-x86_64
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
-            cargo_extra: "-- --profile dist"                      # default features: onnx + vslib
+            cargo_extra: "-- --locked --profile dist"                      # default features: onnx + vslib
           - name: windows-arm64
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
-            cargo_extra: "-- --profile dist --no-default-features --features onnx"   # vslib is x86_64-only
+            cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"   # vslib is x86_64-only
 
           # macOS — CoreML + WebGPU on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
             os: macos-latest
             cargo_target: aarch64-apple-darwin
-            cargo_extra: "-- --profile dist --no-default-features --features onnx"
+            cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: macos-x86_64
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
-            cargo_extra: "-- --profile dist --no-default-features --features onnx"
+            cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
 
           # Linux — WebGPU (Dawn/Vulkan backend); vslib excluded
           - name: linux-x86_64
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
-            cargo_extra: "-- --profile dist --no-default-features --features onnx"
+            cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: linux-arm64
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
-            cargo_extra: "-- --profile dist --no-default-features --features onnx"
+            cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
 
     steps:
       - uses: actions/checkout@v6
@@ -380,6 +388,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-
 
       - name: Cache cargo registry (Windows)
         if: runner.os == 'Windows'
@@ -389,6 +398,7 @@ jobs:
             %USERPROFILE%\.cargo\registry
             %USERPROFILE%\.cargo\git
           key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1

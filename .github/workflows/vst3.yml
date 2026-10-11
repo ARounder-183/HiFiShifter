@@ -136,6 +136,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Plugin integration contract failed: $contract" }
           }
 
+      # 手动 dispatch 本流水线可以单独触发，此前门禁是 build.yml 的真子集 ——
+      # 绿灯产物可绕过跨文件一致性守卫。检查不依赖编译，几十秒。
+      - name: Product consistency gate
+        run: ./scripts/check-product-consistency.ps1
+
       - name: Build complete VST3 Release delivery
         run: ./tools/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
 

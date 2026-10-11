@@ -1,5 +1,5 @@
 {
-    "version":  "cf0df3fff419",
+    "version":  "d342aa989cee",
     "files":  [
                   {
                       "path":  "fcpe/fcpe.onnx",
@@ -20,6 +20,11 @@
                       "path":  "nsf_hifigan/config.json",
                       "bytes":  550,
                       "sha256":  "C3C56EFAA5ABDF1862224AE8396B17680C78D0B95AB009A31EF5D2F873CF07C2"
+                  },
+                  {
+                      "path":  "nsf_hifigan/coreml_pads_patch.txt",
+                      "bytes":  109,
+                      "sha256":  "211FB034EE2962D5D407AFF73F9D549669E2FB20D326AFD2AE48A35735B0973E"
                   },
                   {
                       "path":  "nsf_hifigan/pc_nsf_hifigan.onnx",

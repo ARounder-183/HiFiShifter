@@ -87,7 +87,8 @@ else
   ARCH_SUFFIX_ALT="x64"
 fi
 
-RELEASE_DIR="$TAURI_DIR/target/release"
+# cargo workspace 合并后产物统一落在 workspace 根的 target/（backend/target/）。
+RELEASE_DIR="$ROOT/backend/target/release"
 DMG_PATH="$RELEASE_DIR/bundle/dmg/${PRODUCT_NAME}_${VERSION}_${ARCH_SUFFIX}.dmg"
 # 兼容旧命名，找不到主路径时回退探测。
 if [[ ! -f "$DMG_PATH" ]]; then
@@ -101,7 +102,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "[mac-dmg] Building $PRODUCT_NAME $VERSION ($ARCH_SUFFIX) DMG"
   (
     cd "$TAURI_DIR"
-    cargo tauri build --bundles app,dmg
+    cargo tauri build --bundles app,dmg -- --locked
   )
 fi
 
