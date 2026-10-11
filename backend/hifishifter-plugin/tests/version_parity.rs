@@ -13,6 +13,7 @@
 //!    必须等于**单一来源** `src-tauri/tauri.conf.json`；
 //! 2. 其余副本（`tauri.conf.dist-dev.json` / 两个 `Cargo.toml` / `package.json` /
 //!    `package-lock.json`）必须都等于插件的 `CARGO_PKG_VERSION`。
+//!
 //! 任何一处不一致都说明 `scripts/set-version.ps1` 漏了一个文件。
 
 use std::path::{Path, PathBuf};
