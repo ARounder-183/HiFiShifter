@@ -1063,6 +1063,9 @@ impl EditorSession {
         self.retain_display_waveforms(&mut timeline, false);
         document.present_host_inventory(&mut timeline, &self.namespace);
         document.present_private_groups(&mut timeline, &self.namespace);
+        // 【必须成对】清单写的是宿主**镜像**坐标，这一步把倒放窗口翻回正向 ——
+        // 少了它，界面上的倒放窗口就与真实声音不一致（见 `project_host_facts`）。
+        self.project_host_facts(&mut timeline);
         self.retain_display_waveforms(&mut timeline, true);
         // 音频迟到只能补齐资源，不能把用户已选中的新粘贴片段跳回首个clip。
         {
@@ -1140,6 +1143,9 @@ impl EditorSession {
             self.retain_display_waveforms(&mut timeline, false);
             document.present_host_inventory(&mut timeline, &self.namespace);
             document.present_private_groups(&mut timeline, &self.namespace);
+            // 与 `ensure_loaded` 同一条不变量：清单之后必须补一次事实投影，
+            // 否则增量刷新会把已经复原的正向窗口重新打回镜像。
+            document.project_host_take_facts_locked(&mut timeline);
             self.retain_display_waveforms(&mut timeline, true);
             if let Some((_, host)) = fades {
                 for clip in &mut timeline.clips {
@@ -1519,6 +1525,23 @@ impl EditorSession {
             .into_iter()
             .map(|(key, value)| (id(&key), value))
             .collect();
+    }
+
+    /// 把**宿主事实**（方向 / 循环源 / 声道模式 / 正向源窗口）投影到编辑器时间线。
+    ///
+    /// 【为什么必须单独一步，且必须在 `present_host_inventory` 之后】
+    /// `present_host_inventory` 写的是宿主 `D_STARTOFFS` 的**原值**（倒放时是镜像
+    /// 坐标），而 `project_host_take_facts_locked` 是全仓**唯一**的镜像复原点。
+    /// 此前编辑器路径只做了前者、漏了后者 —— 于是界面里的倒放窗口是镜像的、声音
+    /// 却是对的（渲染路径做了复原）。用户看到的正是"倒放 Offset 逻辑不对"。
+    ///
+    /// 【为什么不做成"顺手在 present_host_inventory 里加一句"】那条函数还会被
+    /// 别的调用点使用（增量刷新等），把两条职责焊死会让"只想刷清单"的调用方
+    /// 意外触发一次事实投影。分开命名、由调用方显式成对调用，边界才清楚。
+    fn project_host_facts(&self, timeline: &mut TimelineState) {
+        if let Some(document) = self.document.upgrade() {
+            document.project_host_take_facts_locked(timeline);
+        }
     }
     /// 只将已授权私有分析路径还原到ARA身份，未知路径明确失败。
     fn native_timeline(&self, mut timeline: TimelineState) -> Result<TimelineState, String> {

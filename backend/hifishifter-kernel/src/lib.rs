@@ -218,6 +218,9 @@ pub mod channel_mode;
 pub mod channel_policy;
 pub mod stereo_detect;
 
+// ── 宿主 take 几何（App 的 .rpp 导入与插件的实时读数共用同一份解算）────────
+pub mod take_geometry;
+
 // ── 工程与杂项 ──────────────────────────────────────────────────────────────
 pub mod clip_rendering_state;
 pub mod config;

@@ -1174,7 +1174,10 @@ impl DocumentSession {
             })
             .collect();
         for clip in &mut timeline.clips {
-            let Some(guid) = clip.id.strip_prefix("ara-item-") else {
+            // 【为什么按后缀取 GUID】编辑器时间线的 id 带 GUI namespace 前缀，
+            // `strip_prefix("ara-item-")` 在它上面恒为 `None` ⇒ 整条投影静默空转
+            // （见 `host_item_guid` 的说明）。
+            let Some(guid) = host_item_guid(&clip.id) else {
                 continue;
             };
             let Some((reversed, loop_source, channel_mode, host_window)) = facts.get(guid) else {
@@ -1425,6 +1428,25 @@ impl DocumentSession {
 /// 同一份宿主事实重复调用结果相同，重建/重认领不会累积镜像（累积镜像 = 又变正放）。
 /// 媒体时长未知（`None`）或输入非有限时返回 `None`：保持宿主窗口，宁可显示不精确，
 /// 也不编造一个可能错的正向窗口。
+/// 从 clip id 取回宿主 item GUID（`ara-item-{guid}` 的 `{guid}` 部分）。
+///
+/// 【为什么不能用 `strip_prefix("ara-item-")`】同一个插件里有**两种** clip id：
+///
+/// - **渲染时间线**（`document.timeline`）上是原生 `ara-item-{guid}`；
+/// - **编辑器时间线**（`EditorSession::timeline`）上带 GUI namespace 前缀
+///   `hfs-ui-{pid}-{n}-ara-item-{guid}`（见 `EditorSession::rewrite_ids`）。
+///
+/// 事实投影、媒体时长索引都按这个后缀取宿主身份。只认前缀的写法在编辑器路径上
+/// **静默空转**（返回 `None` ⇒ 整条 clip 被跳过），于是"界面上倒放窗口是镜像、
+/// 声音却是对的"—— 这正是用户报障的"倒放 Offset 逻辑不对"的根因之一。
+/// 按**后缀**取键，两种 id 都能命中。
+fn host_item_guid(clip_id: &str) -> Option<&str> {
+    const ITEM_TAG: &str = "ara-item-";
+    clip_id
+        .rfind(ITEM_TAG)
+        .map(|index| &clip_id[index + ITEM_TAG.len()..])
+}
+
 /// 倒放镜像复原要用的**媒体总时长**（秒）。
 ///
 /// 【为什么优先 ARA 源时长而不是 clip 自带字段】`clip.duration_sec` /
@@ -1467,7 +1489,7 @@ fn media_duration_indexes(
         if !(duration.is_finite() && duration > 0.0) {
             continue;
         }
-        if let Some(guid) = clip.id.strip_prefix("ara-item-") {
+        if let Some(guid) = host_item_guid(&clip.id) {
             by_item.insert(guid.to_owned(), duration);
         }
         if let Some(source) = clip.active_take().source_path.as_deref() {
@@ -1966,5 +1988,101 @@ mod tests {
             0
         );
         document.close();
+    }
+    /// **回归（本次事故的根因）：倒放的镜像复原必须在编辑器（带 GUI namespace
+    /// 前缀）时间线上也生效。**
+    ///
+    /// 【为什么这是根因】全仓只有 `project_host_take_facts_locked` 会做镜像复原，
+    /// 而它按 `strip_prefix("ara-item-")` 取宿主身份 —— 编辑器时间线的 id 带
+    /// `hfs-ui-{pid}-{n}-` 前缀（见 `EditorSession::rewrite_ids`），`strip_prefix`
+    /// 恒为 `None` ⇒ **整条投影静默空转**。于是界面上的倒放窗口停留在宿主镜像坐标
+    /// （0.75），而渲染路径（无前缀）复原成 0.25 —— 用户看到"倒放 Offset 逻辑不对、
+    /// 方向与 REAPER 相反"。
+    #[test]
+    fn reversed_facts_project_onto_a_namespaced_editor_timeline() {
+        let model = ModelHandle::new();
+        let document = model.session();
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        // `enable_takes` 同时给出方向读取所需的非空 `PCM_source` 哨兵。
+        host.enable_takes(0);
+        host.take_reversed.set(true);
+        host.section_reports.set(true);
+        // 宿主读数：item 长 1.0、速率 1.0、倒放镜像起点 0.75（媒体总长 2.0）。
+        host.set_value("D_POSITION", 0.0);
+        host.set_value("D_LENGTH", 1.0);
+        host.set_value("D_STARTOFFS", 0.75);
+        host.set_value("D_PLAYRATE", 1.0);
+
+        let api = Arc::new(host.client());
+        let track = api.ui_track(&|| true).expect("host inventory");
+        let guid = track.items[0].geometry.item_id.clone();
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+
+        // 文档时间线：一条 ARA clip。媒体总长来自 ARA 源（映射阶段就有，与授权无关）。
+        let mut mapped: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"t","name":"T","order":0}],
+            "clips":[{"id":format!("ara-item-{guid}"),"track_id":"t","name":"c","start_sec":0,
+                      "length_sec":1.0,"takes":[{"id":"take","source_path":"src",
+                      "source_start_sec":0.75,"source_end_sec":1.75,"duration_sec":2.0}]}],
+            "bpm":120,"project_sec":1
+        }))
+        .unwrap();
+        for clip in &mut mapped.clips {
+            clip.normalize_takes();
+        }
+        *document.timeline.lock_or_recover() = Some(mapped);
+
+        // 编辑器时间线：id 带 GUI namespace 前缀 —— 与 `rewrite_ids(to_ui=true)` 同形。
+        let namespace = "hfs-ui-1-1-";
+        let mut editor: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":format!("{namespace}t"),"name":"T","order":0}],
+            "clips":[{"id":format!("{namespace}ara-item-{guid}"),
+                      "track_id":format!("{namespace}t"),"name":"c","start_sec":0,
+                      "length_sec":1.0,"takes":[{"id":format!("{namespace}take"),
+                      "source_path":"src","source_start_sec":0.75,"source_end_sec":1.75,
+                      "duration_sec":2.0}]}],
+            "bpm":120,"project_sec":1
+        }))
+        .unwrap();
+        for clip in &mut editor.clips {
+            clip.normalize_takes();
+        }
+
+        // 【为什么把断言包进 `catch_unwind`】`UiItem` 里的 `HostClipTarget` 持有
+        // `Arc<NativeHost>`；若它比夹具活得久，析构会经 vtable 回访**已释放**的夹具
+        // （测试进程 STATUS_ACCESS_VIOLATION，断言失败被 AV 盖掉，看不出真实原因）。
+        // 本文件其它用例插入的轨道 `items.clear()`，恰好绕开了这一点。这里先收尾、
+        // 再让断言失败照常冒泡 —— 于是失败时看到的是断言消息，不是访问违例。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            document.project_host_take_facts_locked(&mut editor);
+            let clip = &editor.clips[0];
+            assert!(clip.reversed, "方向必须投影到带前缀的时间线上");
+            assert!(
+                (clip.source_start_sec - 0.25).abs() < 1e-9,
+                "镜像必须复原成正向起点，got {}",
+                clip.source_start_sec
+            );
+            assert!(
+                (clip.source_end_sec - 1.25).abs() < 1e-9,
+                "镜像必须复原成正向终点，got {}",
+                clip.source_end_sec
+            );
+
+            // 幂等：重复投影不得累积镜像（累积 = 又变正放）。
+            document.project_host_take_facts_locked(&mut editor);
+            let clip = &editor.clips[0];
+            assert!((clip.source_start_sec - 0.25).abs() < 1e-9);
+            assert!((clip.source_end_sec - 1.25).abs() < 1e-9);
+        }));
+        document.close();
+        drop(model);
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 }

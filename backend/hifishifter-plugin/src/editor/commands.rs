@@ -495,6 +495,9 @@ pub(super) fn dispatch(
                     {
                         let mut timeline = session.timeline.lock_or_recover();
                         document.present_host_inventory(&mut timeline, &session.namespace);
+                        // 与 `ensure_loaded` 同一条不变量：清单之后补一次事实投影，
+                        // 否则倒放窗口在这里会被重新打回镜像。
+                        document.project_host_take_facts_locked(&mut timeline);
                     }
                     return payload(session, command == "get_timeline_state_lite");
                 }

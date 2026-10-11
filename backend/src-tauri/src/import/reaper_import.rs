@@ -148,106 +148,37 @@ fn effective_item_fades(
     )
 }
 
-fn compute_take_source_bounds_sec(
+/// 从解析出的 RPP take 构造**共享**的 take 几何输入。
+///
+/// 【为什么只做适配、不在这里算窗口】窗口解算（含倒放的镜像复原）是 App 与 ARA
+/// 插件**必须逐位一致**的一段数学，已收口到
+/// [`hifishifter_kernel::take_geometry`]。此前两侧各写一份，插件的近似实现让同一个
+/// 工程在两个前端听感不同（用户报障："倒放的 Take，其 Offset 逻辑不对，方向与
+/// REAPER 完全相反"）。这里只负责把宿主类型拆成纯数据，内核侧保持零宿主依赖。
+fn take_geometry(
     take: &ReaperTake,
-    source_duration_sec: Option<f64>,
-) -> (f64, f64, bool) {
-    let section_start = take
-        .source
-        .as_ref()
-        .and_then(|src| src.section_start_sec)
-        .unwrap_or(0.0);
-    let section_length = take
-        .source
-        .as_ref()
-        .and_then(|src| src.section_length_sec)
-        .filter(|len| len.is_finite() && *len > 0.0);
-
-    let mut min_bound = 0.0;
-    let mut max_bound = f64::INFINITY;
-    let has_section = take
-        .source
-        .as_ref()
-        .and_then(|src| src.section_start_sec)
-        .is_some();
-
-    if has_section {
-        min_bound = section_start.max(0.0);
-        if let Some(section_len) = section_length {
-            max_bound = (section_start + section_len).max(min_bound);
-        }
-    }
-
-    if let Some(total_sec) = source_duration_sec.filter(|v| v.is_finite() && *v > 0.0) {
-        max_bound = max_bound.min(total_sec);
-    }
-
-    (min_bound, max_bound, has_section)
-}
-
-fn compute_take_source_anchor_sec(
-    take: &ReaperTake,
-    min_bound: f64,
-    max_bound: f64,
-    has_section: bool,
+    item_length_sec: f64,
+    media_duration_sec: Option<f64>,
     is_reversed: bool,
-) -> f64 {
-    let section_start = take
-        .source
-        .as_ref()
-        .and_then(|src| src.section_start_sec)
-        .unwrap_or(0.0);
-    let soffs_nonneg = take.s_offs.max(0.0);
-
-    let primary_anchor = if has_section {
-        if is_reversed {
-            max_bound - soffs_nonneg
-        } else {
-            section_start + soffs_nonneg
-        }
-    } else if is_reversed {
-        if max_bound.is_finite() {
-            max_bound - soffs_nonneg
-        } else {
-            take.s_offs
-        }
-    } else {
-        // 兼容 REAPER 左延伸 item（负 SOFFS = 前导静音）：正放无 SECTION 时
-        // 保留原始符号，仅在媒体时长已知时对上界钳制。引擎侧以
-        // pre-silence / Loop 回绕锚点两种方式都原生支持负 source_start。
-        take.s_offs.clamp(-1_000_000.0, max_bound)
-    };
-
-    let mut anchor = if has_section || is_reversed {
-        primary_anchor.clamp(min_bound, max_bound)
-    } else {
-        // 正放无 SECTION：下界允许为负（前导静音），只做有限性兜底。
-        if primary_anchor.is_finite() {
-            primary_anchor
-        } else {
-            0.0
-        }
-    };
-
-    if has_section {
-        // 兼容部分工程里 SOFFS 已经是绝对源坐标的写法。
-        let alt_anchor = soffs_nonneg.clamp(min_bound, max_bound);
-        let primary_span = if is_reversed {
-            anchor - min_bound
-        } else {
-            max_bound - anchor
-        };
-        let alt_span = if is_reversed {
-            alt_anchor - min_bound
-        } else {
-            max_bound - alt_anchor
-        };
-        if alt_span > primary_span {
-            anchor = alt_anchor;
-        }
+    is_loop: bool,
+) -> hifishifter_kernel::take_geometry::TakeGeometry {
+    use hifishifter_kernel::take_geometry::{SourceSection, TakeGeometry};
+    let section = take.source.as_ref().and_then(|source| {
+        source.section_start_sec.map(|start_sec| SourceSection {
+            start_sec,
+            length_sec: source.section_length_sec,
+        })
+    });
+    TakeGeometry {
+        start_offset_sec: take.s_offs,
+        item_length_sec,
+        // 保留符号：App 用 `play_rate < 0` 作为倒放的来源之一。
+        play_rate_signed: take.play_rate.first().copied().unwrap_or(1.0),
+        media_duration_sec,
+        section,
+        reversed: is_reversed,
+        loop_enabled: is_loop,
     }
-
-    anchor
 }
 
 fn reaper_take_volume(values: &[f64], explicit_take: bool) -> f64 {
@@ -392,35 +323,14 @@ fn build_audio_clip_take(
         skipped_files.push(raw_path.clone());
     }
 
-    let (mut source_start, mut source_end) = compute_item_source_window_sec(
-        take,
-        item.length.max(0.0) * play_rate,
-        duration_sec,
-        item_reversed,
-        item_loop,
-    );
-    // 兜底：与 flat/active 导入路径一致 —— 窗口被 SECTION/SOFFS 组合裁成
-    // 零长度时回退到基于锚点的正向区间，避免 inactive take 切过去即静音。
-    if source_end - source_start <= 1e-9 {
-        let consumed = item.length.max(0.0) * play_rate;
-        let (min_bound, max_bound, has_section) =
-            compute_take_source_bounds_sec(take, duration_sec);
-        let anchor =
-            compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, item_reversed);
-        let (fallback_start, fallback_end) = if item_reversed {
-            let end = anchor;
-            let start = (end - consumed).max(min_bound).min(end);
-            (start, end)
-        } else {
-            let start = anchor;
-            let end = (start + consumed).min(max_bound).max(start);
-            (start, end)
-        };
-        if fallback_end - fallback_start > source_end - source_start {
-            source_start = fallback_start;
-            source_end = fallback_end;
-        }
-    }
+    // 源窗口由共享解算给出（含倒放的镜像复原）。**不再有"零长度兜底"**：
+    // 那个兜底算出的区间与主路径逐位相同（倒放分支公式一模一样；正放分支只多钳
+    // 一次上界，而退化时本来就没超上界），因此是死代码。退化只在"宿主报了越界
+    // 镜像读数"或"正放 Loop 锚点被钳到段末端"时出现，见
+    // `hifishifter_kernel::take_geometry` 的边界测试。
+    let (source_start, source_end) =
+        take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
+            .forward_source_window();
 
     let name = if take.name.trim().is_empty() {
         clip_name_from_path(&audio_path)
@@ -464,53 +374,6 @@ fn build_audio_clip_take(
         midi_fill_gaps: false,
         stretch_markers: Vec::new(),
         envelopes: None,
-    }
-}
-
-fn compute_item_source_window_sec(
-    take: &ReaperTake,
-    consumed_sec: f64,
-    source_duration_sec: Option<f64>,
-    is_reversed: bool,
-    is_loop: bool,
-) -> (f64, f64) {
-    let (min_bound, max_bound, has_section) =
-        compute_take_source_bounds_sec(take, source_duration_sec);
-
-    let consumed = consumed_sec.max(0.0);
-    let anchor =
-        compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, is_reversed);
-
-    if is_loop {
-        // LOOP=1（循环源，REAPER "Loop source" 语义）：
-        // 源窗口取"锚点 → 可用边界"的完整区间（正向到媒体/SECTION 末尾，
-        // 反向回退到区间起点），不被 ITEM LENGTH 钳制 —— 超出窗口的播放
-        // 时间由引擎/渲染按该窗口周期回绕产生循环内容。
-        if is_reversed {
-            let start = min_bound.min(anchor);
-            return (start, anchor);
-        }
-        let end = if max_bound.is_finite() {
-            max_bound.max(anchor)
-        } else {
-            // 媒体时长未知时退化为按消耗量截取（无回绕素材可用）。
-            anchor + consumed
-        };
-        return (anchor, end);
-    }
-
-    if is_reversed {
-        let end = anchor;
-        let start = (end - consumed).max(min_bound).min(end);
-        (start, end)
-    } else {
-        // 非 Loop 正放：派生窗口 —— 终点 = 起点 + 消耗量，**不**按媒体时长
-        // 钳制。REAPER 中 LENGTH 大于可用源的 item 其超出部分为静音尾巴，
-        // 导入必须保真（渲染管线自行把越界区间处理为静音；派生模型下
-        // source_end 与 length 保持一致，Slip/拖边的语义才成立）。
-        let start = anchor;
-        let end = start + consumed;
-        (start, end)
     }
 }
 
@@ -1657,42 +1520,12 @@ fn process_item(
             }
         }
     } else {
-        // 无 stretch markers：使用 take 的 play_rate
+        // 无 stretch markers：使用 take 的 play_rate。窗口同样由共享解算给出
+        // （见 `take_geometry`），两条导入路径不可能再分叉。
         let effective_rate = play_rate;
-        let (mut source_start, mut source_end) = compute_item_source_window_sec(
-            take,
-            item_length * effective_rate,
-            duration_sec,
-            item_reversed,
-            item_loop,
-        );
-
-        // 兜底：若窗口被裁成零长度，回退到基于 SOFFS 的正向区间，避免导入后静音。
-        if source_end - source_start <= 1e-9 {
-            let consumed = item_length * effective_rate;
-            let (min_bound, max_bound, has_section) =
-                compute_take_source_bounds_sec(take, duration_sec);
-            let anchor = compute_take_source_anchor_sec(
-                take,
-                min_bound,
-                max_bound,
-                has_section,
-                item_reversed,
-            );
-            let (fallback_start, fallback_end) = if item_reversed {
-                let end = anchor;
-                let start = (end - consumed).max(min_bound).min(end);
-                (start, end)
-            } else {
-                let start = anchor;
-                let end = (start + consumed).min(max_bound).max(start);
-                (start, end)
-            };
-            if fallback_end - fallback_start > source_end - source_start {
-                source_start = fallback_start;
-                source_end = fallback_end;
-            }
-        }
+        let (source_start, source_end) =
+            take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
+                .forward_source_window();
         // 构造全部 take（default + 显式 TAKE 块），active take 由选择规则决定。
         let mut hs_takes: Vec<crate::state::ClipTake> = Vec::new();
         for reaper_take in std::iter::once(&item.default_take).chain(item.takes.iter()) {
@@ -2521,21 +2354,27 @@ mod tests {
 
     #[test]
     fn loop_source_window_extends_to_media_end() {
+        // 这些用例的 take 速率是 1.0（`ReaperTake::default()`），所以"消耗量"
+        // 直接由 item 长度表达 —— 与旧 API 的 `consumed_sec` 参数一一对应。
         // 正向 LOOP：窗口 = [SOFFS, 媒体末尾]，不被 LENGTH 钳制。
         let take = ReaperTake {
             s_offs: 1.0,
             ..ReaperTake::default()
         };
-        let (start, end) = compute_item_source_window_sec(&take, 10.0, Some(4.0), false, true);
+        let window = |item_length: f64, media: Option<f64>, reversed: bool, is_loop: bool| {
+            take_geometry(&take, item_length, media, reversed, is_loop).forward_source_window()
+        };
+
+        let (start, end) = window(10.0, Some(4.0), false, true);
         assert!((start - 1.0).abs() < 1e-9);
         assert!((end - 4.0).abs() < 1e-9);
 
         // 非 LOOP：窗口被消耗量钳制。
-        let (start2, end2) = compute_item_source_window_sec(&take, 1.5, Some(4.0), false, false);
+        let (start2, end2) = window(1.5, Some(4.0), false, false);
         assert!((end2 - start2 - 1.5).abs() < 1e-9);
 
         // 反向 LOOP：窗口 = [区间起点, 锚点]，锚点 = max_bound − SOFFS。
-        let (start3, end3) = compute_item_source_window_sec(&take, 10.0, Some(4.0), true, true);
+        let (start3, end3) = window(10.0, Some(4.0), true, true);
         assert!(start3.abs() < 1e-9);
         assert!((end3 - 3.0).abs() < 1e-9);
     }
@@ -2662,7 +2501,8 @@ mod tests {
             s_offs: 2.0,
             ..ReaperTake::default()
         };
-        let (start, end) = compute_item_source_window_sec(&take, 3.0, None, false, true);
+        let (start, end) =
+            take_geometry(&take, 3.0, None, false, true).forward_source_window();
         assert!((start - 2.0).abs() < 1e-9);
         assert!((end - 5.0).abs() < 1e-9);
     }
