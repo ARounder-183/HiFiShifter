@@ -247,11 +247,6 @@ pub(crate) fn build_snapshot(
 ) -> EngineSnapshot {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let stretch_algorithm = crate::time_stretch::resolved_user_external_stretch_algorithm();
-    let bpm = if timeline.bpm.is_finite() && timeline.bpm > 0.0 {
-        timeline.bpm
-    } else {
-        120.0
-    };
 
     let duration_frames = (timeline.project_sec.max(0.0) * out_rate as f64)
         .round()
@@ -1073,7 +1068,6 @@ pub(crate) fn build_snapshot(
     }
 
     EngineSnapshot {
-        bpm,
         sample_rate: out_rate,
         duration_frames,
         track_ids: Arc::new(track_ids),
@@ -1101,7 +1095,6 @@ pub(crate) fn build_snapshot_for_file(
         .min(src.frames as u64);
 
     EngineSnapshot {
-        bpm: 120.0,
         sample_rate: out_rate,
         duration_frames: length_frames,
         track_ids: Arc::new(vec!["__file_preview__".to_string()]),

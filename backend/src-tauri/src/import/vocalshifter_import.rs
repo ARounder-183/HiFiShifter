@@ -56,8 +56,6 @@ const MAGIC: [u8; 4] = [0x56, 0x53, 0x50, 0x44]; // "VSPD"
 struct VspProject {
     sample_rate: u32,
     time_sig_num: i32,
-    #[allow(dead_code)]
-    time_sig_den: i32,
     bpm: f64,
 }
 
@@ -65,8 +63,6 @@ struct VspProject {
 struct VspTrack {
     name: String,
     volume: f64,
-    #[allow(dead_code)]
-    pan: f64,
     muted: bool,
     solo: bool,
     selected: bool,
@@ -91,21 +87,13 @@ struct VspItemExt {
 #[derive(Debug, Clone, Copy)]
 struct VspPitchPoint {
     disabled: bool,
-    #[allow(dead_code)]
-    original_pitch: i16, // *PIT (offset 20)
-    pitch: i16,   // PIT (offset 22)
-    formant: i16, // FRM (offset 24)
-    bre: i16,     // BRE (offset 26)
-    #[allow(dead_code)]
-    eq1: i16, // EQ1 (offset 28)
-    #[allow(dead_code)]
-    eq2: i16, // EQ2 (offset 30)
+    pitch: i16,    // PIT (offset 22)
+    formant: i16,  // FRM (offset 24)
+    bre: i16,      // BRE (offset 26)
     dyn_orig: f64, // *DYN (offset 32)
     dyn_edit: f64, // DYN (offset 40)
-    vol: f64,     // VOL (offset 48)
-    pan: f64,     // PAN (offset 56)
-    #[allow(dead_code)]
-    heq_or_mrp: i16, // HEQ/MRP (offset 82)
+    vol: f64,      // VOL (offset 48)
+    pan: f64,      // PAN (offset 56)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -215,26 +203,6 @@ impl<'a> BinReader<'a> {
         } else {
             None
         }
-    }
-
-    #[allow(dead_code)]
-    fn read_i16_le(&mut self) -> Option<i16> {
-        let b = self.read_bytes(2)?;
-        Some(i16::from_le_bytes([b[0], b[1]]))
-    }
-
-    #[allow(dead_code)]
-    fn read_i32_le(&mut self) -> Option<i32> {
-        let b = self.read_bytes(4)?;
-        Some(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    #[allow(dead_code)]
-    fn read_f64_le(&mut self) -> Option<f64> {
-        let b = self.read_bytes(8)?;
-        Some(f64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
     }
 }
 
@@ -375,7 +343,6 @@ fn parse_prjp(data: &[u8]) -> VspProject {
     VspProject {
         sample_rate: read_i32_at(data, 16).unwrap_or(44100) as u32,
         time_sig_num: read_i32_at(data, 20).unwrap_or(4),
-        time_sig_den: read_i32_at(data, 24).unwrap_or(4),
         bpm: read_f64_at(data, 32).unwrap_or(120.0),
     }
 }
@@ -385,7 +352,6 @@ fn parse_trkp(data: &[u8]) -> VspTrack {
     VspTrack {
         name,
         volume: read_f64_at(data, 64).unwrap_or(1.0),
-        pan: read_f64_at(data, 72).unwrap_or(0.0),
         muted: read_i32_at(data, 80).unwrap_or(0) != 0,
         solo: read_i32_at(data, 84).unwrap_or(0) != 0,
         selected: read_i32_at(data, 0x58).unwrap_or(0) == 1,
@@ -420,17 +386,13 @@ fn parse_itmp_ext(data: &[u8]) -> VspItemExt {
 fn parse_ctrp(data: &[u8]) -> VspPitchPoint {
     VspPitchPoint {
         disabled: read_i16_at(data, 18).unwrap_or(0) != 0,
-        original_pitch: read_i16_at(data, 20).unwrap_or(0),
         pitch: read_i16_at(data, 22).unwrap_or(0),
         formant: read_i16_at(data, 24).unwrap_or(0),
         bre: read_i16_at(data, 26).unwrap_or(0),
-        eq1: read_i16_at(data, 28).unwrap_or(0),
-        eq2: read_i16_at(data, 30).unwrap_or(0),
         dyn_orig: read_f64_at(data, 32).unwrap_or(1.0),
         dyn_edit: read_f64_at(data, 40).unwrap_or(1.0),
         vol: read_f64_at(data, 48).unwrap_or(1.0),
         pan: read_f64_at(data, 56).unwrap_or(0.0),
-        heq_or_mrp: read_i16_at(data, 82).unwrap_or(0),
     }
 }
 
@@ -470,20 +432,6 @@ fn is_world_algo(algo_type: i16) -> bool {
 /// 获取 algo_type 对应的 vslib synth_mode。
 fn algo_synth_mode(algo_type: i16) -> i32 {
     algo_type_to_hs(algo_type).1
-}
-
-/// 根据 (is_world, synth_mode) 对返回轨道名称后缀。
-#[allow(dead_code)]
-fn algo_pair_suffix(is_world: bool, synth_mode: i32) -> &'static str {
-    if is_world {
-        " (World)"
-    } else {
-        match synth_mode {
-            0 => " (VsLib-M)",
-            2 => " (VsLib-P)",
-            _ => " (VsLib-V)",
-        }
-    }
 }
 
 // ─── 转换为 HiFiShifter 工程 ───

@@ -190,30 +190,3 @@ pub(crate) fn get_resampled_stereo_cached(
     }
     None
 }
-
-#[allow(dead_code)]
-pub(crate) fn get_resampled_stereo(
-    path: &Path,
-    out_rate: u32,
-    cache: &Arc<Mutex<DecodeCache>>,
-) -> Option<ResampledStereo> {
-    if !path.exists() {
-        return None;
-    }
-
-    let key = (path.to_path_buf(), out_rate);
-    if let Ok(mut map) = cache.lock() {
-        if let Some(v) = map.get(&key) {
-            return Some(v.clone());
-        }
-    }
-
-    let v = decode_resampled_stereo(path, out_rate)?;
-
-    if let Ok(mut map) = cache.lock() {
-        let pcm_bytes = v.pcm_bytes();
-        map.insert(key, v.clone(), pcm_bytes);
-    }
-
-    Some(v)
-}

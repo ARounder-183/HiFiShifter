@@ -37,8 +37,6 @@ pub struct AudioEngineStateSnapshot {
     pub base_sec: f64,
     pub position_sec: f64,
     pub duration_sec: f64,
-    #[allow(dead_code)]
-    pub sample_rate: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,7 +46,6 @@ pub(crate) struct TrackMeterValue {
     pub(crate) clipped: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ResampledStereo {
     pub(crate) sample_rate: u32,
@@ -67,7 +64,6 @@ impl ResampledStereo {
 #[derive(Debug, Clone)]
 pub(crate) struct EngineClip {
     pub(crate) clip_id: String,
-    #[allow(dead_code)]
     pub(crate) track_id: String,
 
     pub(crate) start_frame: u64,
@@ -151,10 +147,8 @@ pub(crate) struct EngineClip {
     pub(crate) needs_synthesis: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct EngineSnapshot {
-    pub(crate) bpm: f64,
     pub(crate) sample_rate: u32,
     pub(crate) duration_frames: u64,
     pub(crate) track_ids: Arc<Vec<String>>,
@@ -164,7 +158,6 @@ pub(crate) struct EngineSnapshot {
 impl EngineSnapshot {
     pub(crate) fn empty(sample_rate: u32) -> Self {
         Self {
-            bpm: 120.0,
             sample_rate,
             duration_frames: 0,
             track_ids: Arc::new(vec![]),

@@ -883,12 +883,6 @@ impl AudioEngine {
         let _ = self.tx.send(EngineCommand::SetMetronomeSchedule { clicks });
     }
 
-    #[allow(dead_code)]
-    pub fn position_frames(&self) -> u64 {
-        self.position_frames.load(Ordering::Relaxed)
-    }
-
-    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.meter_shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(EngineCommand::Shutdown);
@@ -919,6 +913,13 @@ impl AudioEngine {
         });
     }
 
+    /// 引擎侧"单文件预览播放"入口。
+    ///
+    /// 【为什么保留 allow(dead_code)】整条 `PlayFile` 命令通路仍完整保留 —— 变体
+    /// `EngineCommand::PlayFile` 定义在**内核的命令词汇表**里、`handle_play_file` 与
+    /// 分派臂都在位，只差这一个 UI 调用方。删掉入口而不动词汇表会让分派 `match` 变成
+    /// 非穷尽；而删词汇表是内核 API 变更，超出"清理死代码"的范围。等预览功能重新接上
+    /// 时无需重建这条通路。
     #[allow(dead_code)]
     pub fn play_file(&self, path: &Path, offset_sec: f64, target: &str) {
         let _ = self.tx.send(EngineCommand::PlayFile {
@@ -963,7 +964,6 @@ impl AudioEngine {
             base_sec: base as f64 / sr as f64,
             position_sec: pos as f64 / sr as f64,
             duration_sec: dur as f64 / sr as f64,
-            sample_rate: sr,
         }
     }
 
@@ -2373,7 +2373,6 @@ mod tests {
         let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
         let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
         let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot {
-            bpm: 120.0,
             sample_rate: 44_100,
             duration_frames: 0,
             track_ids: Arc::new(vec![]),

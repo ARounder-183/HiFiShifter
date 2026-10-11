@@ -42,20 +42,8 @@ pub struct ClipboardPitchPoint {
     pub pan: f64,
     /// DYN (dynamics edit, multiplier)
     pub dyn_edit: f64,
-    /// *PIT (original pitch cents before edit)
-    #[allow(dead_code)]
-    pub original_pitch_cents: f64,
     /// BRE (breathiness, raw value -10000..10000)
     pub breathiness: f64,
-    /// EQ1 (raw value)
-    #[allow(dead_code)]
-    pub eq1: f64,
-    /// EQ2 (raw value)
-    #[allow(dead_code)]
-    pub eq2: f64,
-    /// HEQ/MRP (raw value)
-    #[allow(dead_code)]
-    pub heq_mrp: f64,
 }
 
 /// 剪贴板文件类型。
@@ -122,11 +110,7 @@ pub fn parse_clipboard_file(path: &Path) -> Result<Vec<ClipboardPitchPoint>, Str
         let volume = read_f64(rec, 32);
         let pan = read_f64(rec, 40);
         let dyn_edit = read_f64(rec, 48);
-        let original_pitch_cents = read_f64(rec, 56);
         let breathiness = read_f64(rec, 64);
-        let eq1 = read_f64(rec, 72);
-        let eq2 = read_f64(rec, 80);
-        let heq_mrp = read_f64(rec, 88);
 
         out.push(ClipboardPitchPoint {
             time_sec,
@@ -136,11 +120,7 @@ pub fn parse_clipboard_file(path: &Path) -> Result<Vec<ClipboardPitchPoint>, Str
             volume,
             pan,
             dyn_edit,
-            original_pitch_cents,
             breathiness,
-            eq1,
-            eq2,
-            heq_mrp,
         });
     }
 

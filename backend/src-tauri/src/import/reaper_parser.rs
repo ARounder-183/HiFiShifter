@@ -25,7 +25,6 @@ pub struct ReaperTempo {
     /// 每小节拍数（拍号分子）
     pub beats_per_bar: u32,
     /// 基准音符（4 = 四分音符，8 = 八分音符等）
-    #[allow(dead_code)]
     pub beat_note: u32,
 }
 
@@ -244,9 +243,7 @@ pub struct ReaperIgnTempo {
     /// true = 使用自身 BPM 而非工程 BPM
     pub ignore_project: bool,
     pub tempo: f64,
-    #[allow(dead_code)]
     pub beats: u32,
-    #[allow(dead_code)]
     pub beat_note: u32,
 }
 
@@ -548,7 +545,7 @@ fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
 ///
 /// 保留为设计文档指定的"唯一转换点"反向函数（导入端按帧 t→u 采样，故当前
 /// 无直接调用者；u 域结论被 REAPER 实测推翻时，u↔t 的整体翻转只改这里）。
-#[allow(dead_code)]
+#[allow(dead_code)] // 有意保留：与 `item_time_to_take_env_u` 配对，翻转 u↔t 时只改这一处。
 #[inline]
 pub fn take_env_u_to_item_time(u: f64, take_rate: f64) -> f64 {
     u / take_rate.max(1e-6)
