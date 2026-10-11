@@ -102,9 +102,14 @@ describe("solveNearestCurveAxes（两轴宿主）", () => {
         expect(Math.abs(solved.s)).toBeLessThan(0.05);
     });
 
-    it("reaches a curvature-family target that the S-fixed 1-D solver cannot", () => {
-        // 目标点落在**纯曲率族**上，而一维求解器把 S 钉死在 1（S 族）——
-        // 它只能沿 S 族滑动，够不到目标；二维解则能同时调整两个分量。
+    it("reaches a pointer that sits off the S-pinned slice, staying on the family", () => {
+        // 指针落在**纯曲率族**上的点，而起始轴把 S 钉在 1（S 族）。
+        //
+        // 【为什么不能拿"屏幕距离比一维解更小"当判据】复合族在固定 `t` 上对 `(c, s)`
+        // 是**多对一**的：`S = 1` 这条切片本身也会穿过这个目标点（实测在
+        // `c ≈ 0.367` 处增益与目标相同）。旧实现里 S 族的陡度被 `curvature + S`
+        // 钳成一个常数，切片够不到目标，判据才成立；修正后的连续族不再如此。
+        // 真正要钉的是：解落在指针上、且仍在族内。
         const t0 = 0.3;
         const g0 = hostFadeGainForAxes("in", 0.5, 0, t0);
         const two = solveNearestCurveAxes({
@@ -116,18 +121,14 @@ describe("solveNearestCurveAxes（两轴宿主）", () => {
             aspectYOverX: ASPECT,
             gainAt: (t, c, s) => hostFadeGainForAxes("in", c, s, t),
         });
-        const one = solveNearestCurveDir({
-            shape: 0,
-            dir: 0,
-            mode: "in",
-            pointerX01: t0,
-            pointerY01: g0,
-            aspectYOverX: ASPECT,
-            gainAt: (t, c) => hostFadeGainForAxes("in", c, 1, t),
-        });
-        const d2 = distance("in", two.curvature, two.s, two.t, t0, g0);
-        const d1 = distance("in", one.dir, 1, one.t, t0, g0);
-        expect(d2).toBeLessThan(0.03);
-        expect(d2).toBeLessThan(d1);
+        expect(distance("in", two.curvature, two.s, two.t, t0, g0)).toBeLessThan(0.03);
+        // 解出的曲线复现目标增益（"画的 = 解的"）。
+        expect(Math.abs(hostFadeGainForAxes("in", two.curvature, two.s, t0) - g0)).toBeLessThan(
+            0.05,
+        );
+        expect(two.curvature).toBeGreaterThanOrEqual(-1);
+        expect(two.curvature).toBeLessThanOrEqual(1);
+        expect(two.s).toBeGreaterThanOrEqual(-1);
+        expect(two.s).toBeLessThanOrEqual(1);
     });
 });

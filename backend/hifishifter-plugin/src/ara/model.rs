@@ -76,7 +76,7 @@ pub struct ModelHandle {
     document_id: DocumentId,
     session: Arc<DocumentSession>,
     region_keys: Vec<u64>,
-    head_tail: Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>,
+    head_tail: Option<Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
     /// 映射好的时间线（`end_editing` 之后可用）。
@@ -146,17 +146,25 @@ impl Default for ModelHandle {
             document_id,
             session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
-            head_tail: Arc::new(
+            head_tail: {
                 // 【为什么不用 expect】`Default for ModelHandle` 在**每次文档创建**时
                 // 都会跑，而它在宿主进程里 —— 一次 panic 会带走整个 DAW 会话。容量常量
-                // 8192 本身只可能因资源耗尽被拒，退到最小合法容量让"快照装不下"变成一次
-                // 可诊断的 `install` 失败，而不是崩溃。
-                ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192).unwrap_or_else(|_| {
+                // 8192 本身只可能因资源耗尽被拒，退到最小合法容量；连最小容量也建不出来
+                // 时**降级为 None**（head/tail 快照只是实时优化，不是正确性依赖），
+                // 而不是用 `expect` 在这里崩掉整个宿主。
+                let make = |capacity| {
+                    ara2_bridge::plugin::RealtimeHeadTailAdapter::new(capacity)
+                        .map(Arc::new)
+                        .ok()
+                };
+                make(8192).or_else(|| {
                     log::warn!("[ara] head/tail snapshot capacity 8192 refused; falling back to 1");
-                    ara2_bridge::plugin::RealtimeHeadTailAdapter::new(1)
-                        .expect("capacity 1 is the minimal legal head/tail snapshot")
-                }),
-            ),
+                    make(1).or_else(|| {
+                        log::warn!("[ara] head/tail adapter unavailable at any capacity");
+                        None
+                    })
+                })
+            },
             document: AraDocument::default(),
             timeline: None,
             generation: None,
@@ -173,11 +181,19 @@ impl Default for ModelHandle {
 }
 
 impl ModelHandle {
-    pub(crate) fn head_tail(&self) -> Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter> {
+    /// head/tail 快照适配器；资源耗尽导致创建失败时为 `None`（降级，不影响正确性）。
+    pub(crate) fn head_tail(&self) -> Option<Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>> {
         self.head_tail.clone()
     }
     /// 本应用渐变位于clip边界内，没有额外head/tail；查询使用SDK的零分配快照接口。
     fn publish_head_tail(&self) -> Result<(), AraError> {
+        let Some(head_tail) = self.head_tail.as_ref() else {
+            // 适配器创建失败（内存耗尽）时降级：head/tail 快照是实时读取的**优化**，
+            // 缺席只让宿主读边界包络时走非快照路径，不影响正确性。这里**不能**报错 ——
+            // 调用方在 remap 主路径上，报错会把一次成功的重建整体判失败。
+            log::warn!("[ara] head/tail adapter unavailable; skipping snapshot publish");
+            return Ok(());
+        };
         let entries = self
             .region_keys
             .iter()
@@ -185,7 +201,7 @@ impl ModelHandle {
             .filter(|(index, _)| !self.destroyed_regions.contains(index))
             .map(|(_, key)| ara2_bridge::core::HeadTailEntry::new(*key, 0., 0.))
             .collect::<Result<Vec<_>, _>>()?;
-        self.head_tail.install(entries)
+        head_tail.install(entries)
     }
     /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
     pub(crate) fn session(&self) -> Arc<DocumentSession> {
@@ -289,8 +305,7 @@ impl ModelHandle {
         let current = self.region_frames();
         let previous = std::mem::take(&mut self.lineage_frame);
         if !previous.is_empty() {
-            let current_geometry: HashSet<_> =
-                current.iter().map(RegionFrame::geometry).collect();
+            let current_geometry: HashSet<_> = current.iter().map(RegionFrame::geometry).collect();
             let previous_geometry: HashSet<_> =
                 previous.iter().map(RegionFrame::geometry).collect();
             let disappeared = previous
@@ -322,9 +337,11 @@ impl ModelHandle {
         left: &RegionFrame,
         right: &RegionFrame,
     ) {
-        let (Some(parent_item), Some(left_item), Some(right_item)) =
-            (parent.item.as_deref(), left.item.as_deref(), right.item.as_deref())
-        else {
+        let (Some(parent_item), Some(left_item), Some(right_item)) = (
+            parent.item.as_deref(),
+            left.item.as_deref(),
+            right.item.as_deref(),
+        ) else {
             // 认不出宿主 item 的 region（还在等清单认领）不能登记：谱系按 item GUID 索引。
             return;
         };
@@ -332,7 +349,10 @@ impl ModelHandle {
         let Some(seed) = edits.atlas.split_seed(parent_item) else {
             return;
         };
-        if let Err(error) = edits.atlas.register_split(left_item, right_item, Some(seed)) {
+        if let Err(error) = edits
+            .atlas
+            .register_split(left_item, right_item, Some(seed))
+        {
             log::warn!("[ara] host split lineage not registered: {error}");
             return;
         }
@@ -1494,8 +1514,9 @@ mod tests {
                 modification: "mod".into(),
             },
         )]);
-        model.session.edits.lock().unwrap().atlas =
-            ParameterAtlas::default().capture(&timeline, &identities).unwrap();
+        model.session.edits.lock().unwrap().atlas = ParameterAtlas::default()
+            .capture(&timeline, &identities)
+            .unwrap();
 
         // 上一帧：一个父 region。
         model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];

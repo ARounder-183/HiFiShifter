@@ -150,6 +150,214 @@ pub fn fade_gain(shape: f64, dir: f64, t: f64) -> f64 {
     fade_gain_signed(shape, dir, false, t)
 }
 
+// ── 宿主连续两轴（curvature, S）→ 曲线 ────────────────────────────────────────
+//
+// 与前端 `reaperFade.fadeGainAxes` **公式级一致**（两侧各有一组黄金值测试钉住同一
+// 组采样点）。改任一侧必须同步另一侧。
+//
+// 【为什么单独一套】REAPER ≥7.81 的淡变由 `D_FADE*DIR_NEW`（curvature）与
+// `D_FADE*DIR2_NEW`（S）**两个正交轴**共同决定（见 `fade_axes`）。宿主轴上没有形状号
+// 可用，必须直接从两根轴求值。
+//
+// 【模型】两轴各自驱动一个变换并**复合**：`g(x) = S_a(x^e)`，其中
+// `e = E(curvature)`（幂族指数）、`a = A(S)`（S 族陡度）。
+// `S_a(y) = y^a / (y^a + (1-y)^a)` 在 `a = 1` 时恰为恒等 —— 两族在 `(0, 0)` 处自然
+// 相接。复合保持单调、端点精确，且两轴**正交**（`curvature` 只进 `e`、`S` 只进 `a`）。
+//
+// 【锚点来源】五个曲率锚点就是各幂族预设的 `p0`，两个 S 锚点就是 `S_ANCHORS` 的
+// `a0` —— 不是新造的数，因此表与曲线不会分家。
+
+/// 单调三次插值的一段（Hermite 系数已预乘步长）。
+#[derive(Clone, Copy)]
+struct HermiteSegment {
+    x0: f64,
+    h: f64,
+    y0: f64,
+    y1: f64,
+    m0h: f64,
+    m1h: f64,
+}
+
+/// 把 `(坐标, 值)` 结点表编译成**保单调**的 C¹ 分段三次（Fritsch–Carlson）。
+fn compile_monotone_cubic(knots: &[(f64, f64)]) -> Vec<HermiteSegment> {
+    let n = knots.len();
+    let mut h = Vec::with_capacity(n - 1);
+    let mut delta = Vec::with_capacity(n - 1);
+    for i in 0..n - 1 {
+        let dx = knots[i + 1].0 - knots[i].0;
+        h.push(dx);
+        delta.push((knots[i + 1].1 - knots[i].1) / dx);
+    }
+    let mut m = vec![0.0_f64; n];
+    for i in 1..n - 1 {
+        if delta[i - 1] * delta[i] <= 0.0 {
+            continue;
+        }
+        let w1 = 2.0 * h[i] + h[i - 1];
+        let w2 = h[i] + 2.0 * h[i - 1];
+        m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
+    }
+    for (i, d) in [(0usize, delta[0]), (n - 1, delta[n - 2])] {
+        if d == 0.0 || m[i] * d < 0.0 {
+            m[i] = 0.0;
+        } else if m[i].abs() > (3.0 * d).abs() {
+            m[i] = 3.0 * d;
+        }
+    }
+    (0..n - 1)
+        .map(|i| HermiteSegment {
+            x0: knots[i].0,
+            h: h[i],
+            y0: knots[i].1,
+            y1: knots[i + 1].1,
+            m0h: h[i] * m[i],
+            m1h: h[i] * m[i + 1],
+        })
+        .collect()
+}
+
+/// 在编译好的分段上求值；结点处返回**结点原值**（保证预设逐点精确）。
+fn sample_monotone_cubic(segments: &[HermiteSegment], x: f64) -> f64 {
+    let first = segments[0];
+    if x <= first.x0 {
+        return first.y0;
+    }
+    let last = segments[segments.len() - 1];
+    if x >= last.x0 + last.h {
+        return last.y1;
+    }
+    let (mut lo, mut hi) = (0usize, segments.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if x < segments[mid].x0 + segments[mid].h {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let s = segments[lo];
+    let u = (x - s.x0) / s.h;
+    let u2 = u * u;
+    let u3 = u2 * u;
+    (2.0 * u3 - 3.0 * u2 + 1.0) * s.y0
+        + (u3 - 2.0 * u2 + u) * s.m0h
+        + (-2.0 * u3 + 3.0 * u2) * s.y1
+        + (u3 - u2) * s.m1h
+}
+
+/// 曲率 → 幂族指数锚点：就是各幂族预设的 `p0`（该预设默认方向上的指数）。
+fn curvature_exponent_knots() -> Vec<(f64, f64)> {
+    let p = |base: i64| power_anchor(base).map(|a| a.0).unwrap_or(1.0);
+    vec![
+        (-1.0, p(4)),
+        (-0.5, p(2)),
+        (0.0, p(0)),
+        (0.5, p(1)),
+        (1.0, p(3)),
+    ]
+}
+
+/// S → S 族陡度锚点：两个 S 预设的 `a0`，负半轴按 `a(-S) = 1/a(S)` 取镜像。
+///
+/// `S_{1/a}` 恰是 `S_a` 的函数反演，所以负 S 是正 S 的"反向 S"。**负半轴没有实测
+/// 数据**（实测表只有 `S ∈ {0, 0.5, 1}`），此镜像是一个待取证的有界外推。
+fn s_steepness_knots() -> Vec<(f64, f64)> {
+    let a = |base: i64| s_anchor(base).map(|a| a.0).unwrap_or(1.0);
+    vec![
+        (-1.0, 1.0 / a(6)),
+        (-0.5, 1.0 / a(5)),
+        (0.0, 1.0),
+        (0.5, a(5)),
+        (1.0, a(6)),
+    ]
+}
+
+fn curvature_log2_segments() -> &'static [HermiteSegment] {
+    static CELL: std::sync::OnceLock<Vec<HermiteSegment>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        let knots = curvature_exponent_knots()
+            .into_iter()
+            .map(|(c, e)| (c, e.log2()))
+            .collect::<Vec<_>>();
+        compile_monotone_cubic(&knots)
+    })
+}
+
+fn s_log2_segments() -> &'static [HermiteSegment] {
+    static CELL: std::sync::OnceLock<Vec<HermiteSegment>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        let knots = s_steepness_knots()
+            .into_iter()
+            .map(|(s, a)| (s, a.log2()))
+            .collect::<Vec<_>>();
+        compile_monotone_cubic(&knots)
+    })
+}
+
+/// S 族对称比值曲线：`a = 1` 为恒等，`a > 1` 慢起慢收，`a < 1` 为其反向。
+fn s_warp(y: f64, a: f64) -> f64 {
+    if y <= 0.0 {
+        return 0.0;
+    }
+    if y >= 1.0 {
+        return 1.0;
+    }
+    let ya = y.powf(a);
+    ya / (ya + (1.0 - y).powf(a))
+}
+
+/// 宿主连续两轴求值（与前端 `reaperFade.fadeGainAxes` 公式级一致）。
+///
+/// 单一连续函数：无分支跳变，两轴正交，七个实测预设坐标上逐点等于各自的预设曲线。
+pub fn fade_gain_axes(curvature: f64, s: f64, mode_out: bool, t: f64) -> f64 {
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if mode_out {
+        if t <= 0.0 {
+            return 1.0;
+        }
+        if t >= 1.0 {
+            return 0.0;
+        }
+    } else if t <= 0.0 {
+        return 0.0;
+    } else if t >= 1.0 {
+        return 1.0;
+    }
+    let c = if curvature.is_finite() {
+        curvature.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let sv = if s.is_finite() {
+        s.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let x = if mode_out { 1.0 - t } else { t };
+    let e = (2.0_f64)
+        .powf(sample_monotone_cubic(curvature_log2_segments(), c))
+        .clamp(E_MIN, E_MAX);
+    let inner = if e == 1.0 { x } else { x.powf(e) };
+    let a = (2.0_f64).powf(sample_monotone_cubic(s_log2_segments(), sv));
+    let gain = (if a == 1.0 { inner } else { s_warp(inner, a) }) * landing_window(t, mode_out);
+    if gain.is_finite() {
+        gain
+    } else {
+        x
+    }
+}
+
+/// 构建一条宿主两轴的完整淡化查表（含两端点，共 N+1 项）。
+pub fn build_fade_lut_axes(curvature: f64, s: f64, mode_out: bool) -> Vec<f32> {
+    (0..=FADE_LUT_SIZE)
+        .map(|i| fade_gain_axes(curvature, s, mode_out, i as f64 / FADE_LUT_SIZE as f64) as f32)
+        .collect()
+}
+
 /// LUT 尺寸：音频混音用。
 pub const FADE_LUT_SIZE: usize = 1024;
 
@@ -434,6 +642,120 @@ mod tests {
                     max_step < 0.025,
                     "per-frame gain step too large (click risk) s={shape} d={dir} N={frames}: {max_step}"
                 );
+            }
+        }
+    }
+
+    /// 宿主两轴求值器必须**连续**：旧实现（前端）在实测表坐标处换曲线、差一个 ulp
+    /// 就走混合分支，曲率动 0.05 增益跳半个满量程。这条按细网格扫两根轴，
+    /// 断言相邻采样的增益差有界。
+    #[test]
+    fn axes_gain_is_continuous_in_both_axes() {
+        const STEPS: usize = 400;
+        const LIMIT: f64 = 0.05;
+        for out in [false, true] {
+            for s in [-1.0, -0.5, 0.0, 0.25, 0.5, 1.0] {
+                let mut prev = fade_gain_axes(-1.0, s, out, 0.5);
+                for i in 1..=STEPS {
+                    let c = -1.0 + (2.0 * i as f64) / STEPS as f64;
+                    let g = fade_gain_axes(c, s, out, 0.5);
+                    assert!(
+                        (g - prev).abs() < LIMIT,
+                        "curvature jump out={out} s={s} c={c}: {} -> {}",
+                        prev,
+                        g
+                    );
+                    prev = g;
+                }
+            }
+            for c in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                let mut prev = fade_gain_axes(c, -1.0, out, 0.5);
+                for i in 1..=STEPS {
+                    let sv = -1.0 + (2.0 * i as f64) / STEPS as f64;
+                    let g = fade_gain_axes(c, sv, out, 0.5);
+                    assert!(
+                        (g - prev).abs() < LIMIT,
+                        "S jump out={out} c={c} s={sv}: {} -> {}",
+                        prev,
+                        g
+                    );
+                    prev = g;
+                }
+            }
+        }
+    }
+
+    /// 七个实测预设坐标上，两轴求值器必须**逐点等于**各自的预设曲线
+    /// （前端 `hostFadeDisplay.test.ts` 钉同一组等式）。
+    #[test]
+    fn axes_reproduce_every_measured_preset_exactly() {
+        for (index, (curvature, s)) in crate::fade_axes::HOST_FADE_PRESET_AXES.iter().enumerate() {
+            let (curvature, s) = (*curvature, *s);
+            for out in [false, true] {
+                let dir = if out {
+                    crate::fade_axes::host_fade_default_dir(index as f64, true)
+                } else {
+                    crate::fade_axes::host_fade_default_dir(index as f64, false)
+                };
+                for i in 0..=20 {
+                    let t = i as f64 / 20.0;
+                    assert_eq!(
+                        fade_gain_axes(curvature, s, out, t),
+                        fade_gain_signed(index as f64, dir, out, t),
+                        "preset {index} out={out} t={t}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 两轴**正交**：S 只进 S 族、curvature 只进幂族；`(c, S)` 不等价于 `(c + S, 0)`。
+    #[test]
+    fn axes_stay_orthogonal_instead_of_being_summed() {
+        for (c, s) in [(0.0, 0.5), (0.5, 0.5), (-0.5, 0.5)] {
+            let both = fade_gain_axes(c, s, false, 0.5);
+            let summed = fade_gain_axes(c + s, 0.0, false, 0.5);
+            assert!(
+                (both - summed).abs() > 1e-3,
+                "(c={c}, S={s}) must not equal (c+S, 0): both={both} summed={summed}"
+            );
+        }
+        // S = 0 时是纯幂族：结果与 S 的符号无关（不掺 S）。
+        for c in [-1.0, -0.5, 0.25, 1.0] {
+            assert_eq!(
+                fade_gain_axes(c, 0.0, false, 0.4),
+                fade_gain_axes(c, -0.0, false, 0.4)
+            );
+        }
+    }
+
+    /// 黄金值：与前端 `hostFadeDisplay.test.ts` 同一组采样点。改这里必须同步前端。
+    #[test]
+    fn axes_golden_values_match_the_frontend() {
+        // 线性预设（(0, 0)）就是恒等。
+        assert_eq!(fade_gain_axes(0.0, 0.0, false, 0.5), 0.5);
+        // 轻微凸（c = 0.5, S = 0）指数为 0.45。
+        assert!((fade_gain_axes(0.5, 0.0, false, 0.5) - 0.5_f64.powf(0.45)).abs() < 1e-12);
+        // 锐利 S（c = 0, S = 1）在中点仍为 0.5（S 族对称）。
+        assert!((fade_gain_axes(0.0, 1.0, false, 0.5) - 0.5).abs() < 1e-12);
+        // 端点精确。
+        for out in [false, true] {
+            assert_eq!(
+                fade_gain_axes(0.3, 0.7, out, 0.0),
+                if out { 1.0 } else { 0.0 }
+            );
+            assert_eq!(
+                fade_gain_axes(0.3, 0.7, out, 1.0),
+                if out { 0.0 } else { 1.0 }
+            );
+        }
+        // 全域有界。
+        for c in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            for s in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                for i in 0..=20 {
+                    let g = fade_gain_axes(c, s, false, i as f64 / 20.0);
+                    assert!((0.0..=1.0).contains(&g), "c={c} s={s} g={g}");
+                }
             }
         }
     }

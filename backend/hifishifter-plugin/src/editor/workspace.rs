@@ -796,8 +796,13 @@ impl DocumentSession {
                 })
                 .collect()
         };
-        let failed_sources: std::collections::HashSet<String> =
-            self.source_failures.lock().unwrap().keys().cloned().collect();
+        let failed_sources: std::collections::HashSet<String> = self
+            .source_failures
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
         let folder_parent = self.renderer_owners().into_iter().any(|owner| {
             owner.host_audio_status().state
@@ -1102,22 +1107,11 @@ impl DocumentSession {
         // 拿不到授权 ⇒ 三个字段全空 ⇒ 复原返回 `None` ⇒ 保留宿主**镜像**坐标，
         // 内核再取一次镜像 = 又变正放/偏移（用户报障：分割含倒放 Take 的 Item 后偏移）。
         // ARA 的源时长在映射阶段就存在，用它就能在认领前正确复原。
-        let media_by_item: std::collections::HashMap<String, f64> = {
+        let (media_by_item, media_by_source) = {
             let mapped = self.timeline.lock().unwrap();
             mapped
                 .as_ref()
-                .map(|mapped| {
-                    mapped
-                        .clips
-                        .iter()
-                        .filter_map(|clip| {
-                            let guid = clip.id.strip_prefix("ara-item-")?;
-                            let duration = clip.active_take().duration_sec?;
-                            (duration.is_finite() && duration > 0.0)
-                                .then(|| (guid.to_owned(), duration))
-                        })
-                        .collect()
-                })
+                .map(media_duration_indexes)
                 .unwrap_or_default()
         };
         // item GUID → (方向, 循环源, 声道模式, 宿主源窗口)。取 **active take** 的几何：
@@ -1138,11 +1132,13 @@ impl DocumentSession {
                 let geometry = active.map(|take| &take.geometry).unwrap_or(&item.geometry);
                 let loop_source = geometry.loop_source;
                 let channel_mode = geometry.channel_mode;
-                // 宿主源窗口 = `[D_STARTOFFS, D_STARTOFFS + D_LENGTH×D_PLAYRATE]`。
+                // 宿主源窗口 = `[D_STARTOFFS, D_STARTOFFS + D_LENGTH×|D_PLAYRATE|]`。
+                // 速率取绝对值：符号只表示方向，不该把跨度翻成负数（独立 App 同样先
+                // `.abs()`）。
                 let host_window = active.map(|take| {
                     (
                         take.geometry.source_start_sec,
-                        take.geometry.duration_sec * take.geometry.playback_rate,
+                        take.geometry.duration_sec * take.geometry.playback_rate.abs(),
                     )
                 });
                 (
@@ -1171,11 +1167,18 @@ impl DocumentSession {
             // 窗口 —— 因此重认领/重建不会累积镜像。Loop 倒放走内核的回绕分支，不适用
             // 本模型，保持原样。
             if clip.reversed && !clip.loop_enabled {
-                // 媒体总时长优先取 **ARA 源时长**（`media_by_item`）：它在映射阶段就存在，
-                // 与"这一条是否已被 ARA 授权 PCM"无关。回退到 clip 自带字段只服务
-                // 旧路径；两者都拿不到时**不能**静默按镜像坐标渲染 —— 那会让内容整体
-                // 偏移/变正放，且没有任何线索（见 F7.2）。
-                let media = reversed_media_duration(media_by_item.get(guid).copied(), clip);
+                // 媒体总时长：先按 **item GUID**（认领后可用），再按 **音频源 id**
+                // （映射阶段就有，与认领/授权无关）。分割瞬间两半都还没有自己的
+                // region→item 边，只有后者能命中 —— 这是"分割含倒放 Take 的 Item 后
+                // 偏移"的根因。两者都拿不到时**不能**静默按镜像坐标渲染（那会让内容
+                // 整体偏移/变正放且没有线索），而是保留坐标并告警。
+                let by_source = clip
+                    .active_take()
+                    .source_path
+                    .as_deref()
+                    .and_then(|source| media_by_source.get(source).copied());
+                let media =
+                    reversed_media_duration(media_by_item.get(guid).copied().or(by_source), clip);
                 match reversed_forward_window(media, *host_window) {
                     Some((forward_start, forward_end)) => {
                         clip.source_start_sec = forward_start;
@@ -1415,6 +1418,43 @@ fn reversed_media_duration(
         .or_else(|| hifishifter_kernel::state::clip_source_media_duration_sec(clip))
 }
 
+/// 从 ARA 映射产物里取"媒体总时长"的两份索引。
+///
+/// 返回 `(按 item GUID, 按音频源 persistent id)`。
+///
+/// 【为什么两份都要】item GUID 是 `present_host_inventory` 建立的身份，**只在 region
+/// 被认领进 `region_items` 之后**才出现在 clip id 上；而音频源 id（`take.source_path`，
+/// 即 ARA 的 `AudioSource.persistentID`）在映射阶段就写好了，与认领、授权都无关。
+/// 宿主分割的瞬间两个新 region 都还没有 item GUID —— 只按 GUID 索引会让倒放的镜像
+/// 复原取不到媒体总长，clip 保留宿主镜像坐标、内核再镜像一次，内容整体偏移
+/// （用户报障："分割含倒放 Take 的 Item 时 Take 的偏移计算有误"）。
+fn media_duration_indexes(
+    mapped: &TimelineState,
+) -> (
+    std::collections::HashMap<String, f64>,
+    std::collections::HashMap<String, f64>,
+) {
+    let mut by_item = std::collections::HashMap::new();
+    let mut by_source = std::collections::HashMap::new();
+    for clip in &mapped.clips {
+        let Some(duration) = clip.active_take().duration_sec else {
+            continue;
+        };
+        if !(duration.is_finite() && duration > 0.0) {
+            continue;
+        }
+        if let Some(guid) = clip.id.strip_prefix("ara-item-") {
+            by_item.insert(guid.to_owned(), duration);
+        }
+        if let Some(source) = clip.active_take().source_path.as_deref() {
+            if !source.is_empty() {
+                by_source.entry(source.to_owned()).or_insert(duration);
+            }
+        }
+    }
+    (by_item, by_source)
+}
+
 fn reversed_forward_window(
     media_sec: Option<f64>,
     host_window: Option<(f64, f64)>,
@@ -1424,7 +1464,11 @@ fn reversed_forward_window(
     if !host_start.is_finite() || !host_span.is_finite() {
         return None;
     }
-    Some((media_sec - host_start - host_span, media_sec - host_start))
+    // 夹紧到 `[0, D]`：长 item / 短媒体时 `D − start − span` 会落到负半轴，不夹紧
+    // 会写出一个**负的源起点**（独立 App 同样有 `.max(min_bound)` 的钳制）。
+    let end = (media_sec - host_start).clamp(0.0, media_sec);
+    let start = (media_sec - host_start - host_span).clamp(0.0, media_sec);
+    Some((start.min(end), end))
 }
 
 #[cfg(test)]
@@ -1703,6 +1747,42 @@ mod tests {
         // 连 ARA 源时长也没有时，只能返回 None（由调用方记 warn，不静默按镜像渲染）。
         assert_eq!(reversed_media_duration(None, &unclaimed), None);
         assert_eq!(reversed_forward_window(None, Some((0.75, 1.0))), None);
+    }
+
+    /// **回归：未认领的分割半段也要能拿到媒体总长。**
+    ///
+    /// 【为什么这条必须单独存在】上一条测试把时长**直接传进** `reversed_forward_window`，
+    /// 绕过了索引 —— 于是"用 ARA 源时长"这个修复看似成立，实际在分割瞬间仍然落空：
+    /// 两个新 region 还没有 item GUID，`media_by_item` 里根本没有它们（`a252a119` 的
+    /// 缺陷）。这条钉住 `media_duration_indexes` 的**音频源 id 通路**：clip 仍是
+    /// `ara-clip-N`（未认领，无 GUID 键），只有 `source_path` 可用。
+    #[test]
+    fn unclaimed_split_halves_resolve_media_duration_by_audio_source_id() {
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],
+            "clips":[
+                // 未认领：id 仍是 `ara-clip-N`，没有 item GUID 键。
+                {"id":"ara-clip-7","track_id":"a","name":"half","start_sec":0,"length_sec":1,
+                 "takes":[{"id":"take","source_path":"src-A","source_start_sec":0.75,
+                           "source_end_sec":1.75,"duration_sec":2.0}]},
+                // 已认领的对照项：GUID 键与源键都该有。
+                {"id":"ara-item-{G}","track_id":"a","name":"claimed","start_sec":1,"length_sec":1,
+                 "takes":[{"id":"take","source_path":"src-B","source_start_sec":0,
+                           "source_end_sec":1,"duration_sec":3.0}]}
+            ],
+            "bpm":120,"project_sec":2
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        let (by_item, by_source) = media_duration_indexes(&timeline);
+        assert!(
+            by_source.get("src-A").copied() == Some(2.0),
+            "未认领的半段必须能按音频源 id 取到媒体总长（这是分割偏移的根因）"
+        );
+        assert_eq!(by_item.get("{G}").copied(), Some(3.0));
+        assert_eq!(by_source.get("src-B").copied(), Some(3.0));
     }
 
     /// 分割派生：只有**自己没源**的右半段才借父段媒体；已有源的片段不被覆盖。

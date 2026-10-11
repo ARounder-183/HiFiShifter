@@ -1,10 +1,10 @@
 // 宿主淡化只读显示：用户允许HiFiShifter自己的示意曲线；普通fade声音仍由宿主负责一次。
 import type { HostFadeMetadata } from "../../../types/api";
 import {
-    defaultFadeDirFor,
     FADE_LINEAR,
     FADE_S_SHARP,
     FADE_S_SLIGHT,
+    fadeGainAxes,
     fadeGainSigned,
 } from "./reaperFade";
 import { hostFadePresetForAxes } from "./hostFadeAxes";
@@ -33,12 +33,14 @@ function defaultHostFadeGain(mode: "in" | "out", progress: number): number {
 /**
  * 新轴宿主的曲线求值，**曲率与 S 由调用方给出**。
  *
- * 【为什么把它单独开出来】画布要按"当前轴值"画，而曲率拖拽要把指针投影到**候选**曲率
- * 上（`solveNearestCurveDir` 的 `gainAt`）。两者必须是同一条曲线，否则指针和画出来的
- * 包络对不上（"拖了不跟手"）。所以只有这一个求值入口，两处都走它。
+ * 【为什么把它单独开出来】画布要按"当前轴值"画，而曲率拖拽要把指针投影到**候选**
+ * 轴值上（`solveNearestCurveAxes` 的 `gainAt`）。两者必须是同一条曲线，否则指针和
+ * 画出来的包络对不上（"拖了不跟手"）。所以只有这一个求值入口，两处都走它。
  *
- * 落在实测表上的坐标画该预设自己的曲线；表外的坐标是"线性形状 + 曲率"与 S 族的**有界
- * 混合**（权重 |S|）—— 这是 HFS 自身的视觉定义，不是反推的 REAPER 公式。
+ * 求值本身在 `reaperFade.fadeGainAxes`：**单一连续函数**，两轴正交，且在七个实测
+ * 预设坐标上逐点等于各自的预设曲线。此前这里按"命中实测表就走预设、否则走
+ * `curvature + S` 的混合"分支 —— 两支在同一坐标上相差半个满量程，且把正交的两轴
+ * 相加。这里只保留一个转发，判定形状名仍由 `hostFadeDisplayShape` 负责。
  */
 export function hostFadeGainForAxes(
     mode: "in" | "out",
@@ -46,13 +48,7 @@ export function hostFadeGainForAxes(
     s: number,
     progress: number,
 ): number {
-    const preset = hostFadePresetForAxes(curvature, s);
-    if (preset !== null)
-        return fadeGainSigned(preset, defaultFadeDirFor(preset, mode === "out"), mode, progress);
-    const power = fadeGainSigned(0, curvature, mode, progress);
-    if (s === 0) return power;
-    const sigmoid = fadeGainSigned(5, visualAxis(curvature + s), mode, progress);
-    return power + (sigmoid - power) * Math.abs(s);
+    return fadeGainAxes(curvature, s, mode, progress);
 }
 
 /** UI求值器供曲线描边与波形共用；只画图，不把宿主fade烘焙到插件PCM。 */

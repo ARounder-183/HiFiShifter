@@ -1445,9 +1445,14 @@ fn configure_browser(
             Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position"))=>{
                 let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
                 // 宿主权威栈 ⇒ 走异步路径（必须等在途写入落定再跳，否则会跳到一半的状态）。
+                //
+                // 【为什么比 `"host"` 而不是 `"reaper"`】`ReaperHistory::backend()` 返回
+                // `"host"`（`host::history`，随后端去品牌化改名）。此前这里比的是旧值
+                // `"reaper"`，于是 `uses_host` 恒为 `false` —— REAPER 里宿主撤销/重做
+                // 实际走了本地栈，`history_jump*` 整条路径不可达。
                 let uses_host = link
                     .owner()
-                    .is_ok_and(|owner| owner.history_authority().backend() == "reaper");
+                    .is_ok_and(|owner| owner.history_authority().backend() == "host");
                 if !uses_host {
                     // 本地权威栈 ⇒ 与普通命令同一条队列：本地命令天然排在已入队写入之后，
                     // 不需要额外的 barrier，也不会被 `host_undo.pending` 的门控挡住。
@@ -1731,8 +1736,7 @@ mod bootstrap_tests {
                 fade_axes: None,
                 history_backend: "local",
                 host_kind: "ara_only",
-                host_capabilities:
-                    hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
+                host_capabilities: hifishifter_kernel::editor::host::HostCapabilities::ara_only(),
             };
             assert_eq!(
                 flags.to_json("view-7")["trackGrouping"],
@@ -1769,8 +1773,14 @@ mod bootstrap_tests {
         assert_eq!(json["fadeAxes"], serde_json::json!("legacy"));
         // 后端身份与能力位必须与布尔同源透传：前端据此显示只读横幅。
         assert_eq!(json["hostKind"], serde_json::json!("ara_only"));
-        assert_eq!(json["hostCapabilities"]["clipWrite"], serde_json::json!(false));
-        assert_eq!(json["hostCapabilities"]["clipGeometry"], serde_json::json!(true));
+        assert_eq!(
+            json["hostCapabilities"]["clipWrite"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            json["hostCapabilities"]["clipGeometry"],
+            serde_json::json!(true)
+        );
     }
 
     /// `trackCreation` 是独立能力：导入音频蕴含建轨，建轨不蕴含导入。

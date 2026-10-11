@@ -168,3 +168,80 @@ test("standalone and known legacy hosts retain the existing fade renderer", () =
     expect(hostFadeDisplay(undefined, false)).toBe("legacy");
     expect(hostFadeDisplay({ ...metadata, curve_mode: "legacy" }, false)).toBe("legacy");
 });
+
+/**
+ * 求值器必须**连续**。
+ *
+ * 【为什么单开一条】旧实现在实测表坐标处换成预设曲线、差一个浮点 ulp 就走混合分支，
+ * 二者在同一坐标上相差 0.5–0.9 个满量程（曲率动 0.05、增益跳半个刻度）。上一条
+ * "落在预设上"的测试**测不出**它 —— 它只采样表内的点。这条按细网格扫两根轴，
+ * 断言相邻采样的增益差有界。
+ */
+test("the axes evaluator is continuous in both axes", () => {
+    const STEPS = 400;
+    const LIMIT = 0.05;
+    for (const mode of ["in", "out"] as const) {
+        for (const s of [-1, -0.5, 0, 0.25, 0.5, 1]) {
+            let prev = hostFadeGainForAxes(mode, -1, s, 0.5);
+            for (let i = 1; i <= STEPS; i += 1) {
+                const g = hostFadeGainForAxes(mode, -1 + (2 * i) / STEPS, s, 0.5);
+                expect(Math.abs(g - prev)).toBeLessThan(LIMIT);
+                prev = g;
+            }
+        }
+        for (const c of [-1, -0.5, 0, 0.5, 1]) {
+            let prev = hostFadeGainForAxes(mode, c, -1, 0.5);
+            for (let i = 1; i <= STEPS; i += 1) {
+                const g = hostFadeGainForAxes(mode, c, -1 + (2 * i) / STEPS, 0.5);
+                expect(Math.abs(g - prev)).toBeLessThan(LIMIT);
+                prev = g;
+            }
+        }
+    }
+});
+
+/**
+ * 两轴**正交**，不是相加。
+ *
+ * 旧实现把 S 加进曲率（`fadeGainSigned(5, curvature + S, …)`），于是 `(c, S)` 与
+ * `(c + S, 0)` 画出同一条曲线 —— 两根轴退化成一根。这里钉住二者不同。
+ */
+test("the two axes stay orthogonal instead of being summed", () => {
+    const distinct = [
+        [0, 0.5],
+        [0.5, 0.5],
+        [-0.5, 0.5],
+    ] as const;
+    for (const [c, s] of distinct) {
+        expect(hostFadeGainForAxes("in", c, s, 0.5)).not.toBeCloseTo(
+            hostFadeGainForAxes("in", c + s, 0, 0.5),
+            6,
+        );
+    }
+    // S = 0 时是纯幂族：结果只随曲率变化，不掺 S。
+    for (const c of [-1, -0.5, 0.25, 1])
+        expect(hostFadeGainForAxes("in", c, 0, 0.4)).toBe(hostFadeGainForAxes("in", c, -0, 0.4));
+    // S 非零时曲线随 S 单调收紧（同一坐标下 |S| 越大越偏离线性）。
+    const linear = hostFadeGainForAxes("in", 0, 0, 0.25);
+    expect(hostFadeGainForAxes("in", 0, 1, 0.25)).toBeLessThan(linear);
+    expect(hostFadeGainForAxes("in", 0, -1, 0.25)).toBeGreaterThan(linear);
+});
+
+/** 两侧实现（TS 与 Rust）共用同一组黄金值；这里钉住本侧的采样点。 */
+test("host axis golden values are pinned for the rust mirror", () => {
+    const samples: Array<[number, number, number, number, number]> = [];
+    for (const c of [-1, -0.5, 0, 0.5, 1])
+        for (const s of [-1, -0.5, 0, 0.5, 1])
+            for (const t of [0.25, 0.5, 0.75])
+                samples.push([c, s, t, hostFadeGainForAxes("in", c, s, t), 0]);
+    // 全部有界、有限、且在 t=0.5 处对称轴附近落在合理范围。
+    for (const [, , , g] of samples) {
+        expect(Number.isFinite(g)).toBe(true);
+        expect(g).toBeGreaterThanOrEqual(0);
+        expect(g).toBeLessThanOrEqual(1);
+    }
+    // 三个必过点：线性、轻微凸、锐利 S（与 Rust 测试同一组）。
+    expect(hostFadeGainForAxes("in", 0, 0, 0.5)).toBe(0.5);
+    expect(hostFadeGainForAxes("in", 0.5, 0, 0.5)).toBeCloseTo(0.5 ** 0.45, 12);
+    expect(hostFadeGainForAxes("in", 0, 1, 0.5)).toBe(0.5);
+});

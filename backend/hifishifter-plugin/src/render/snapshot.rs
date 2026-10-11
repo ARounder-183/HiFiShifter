@@ -376,8 +376,12 @@ impl SnapshotPublisher {
         retained.1 = retained
             .0
             .iter()
-            .map(|entry| entry.snapshot.storage_bytes().unwrap())
-            .sum();
+            // `storage_bytes()` 只在字节数溢出 `usize` 时返回 `None`（实际不可能发生）。
+            // 这里**不能** `unwrap` —— 这条路径在每次 `publish`/`has_capacity` 上，
+            // 一次 panic 会毒化发布器的锁、把整个音频链路卡死。按"未知即视为已满"
+            // 处理：宁可拒绝继续发布，也不要 OOM 或 panic。
+            .map(|entry| entry.snapshot.storage_bytes().unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
     }
     /// 分配下一批音频前回收已退役缓冲，避免全局预算已满时无法进入publish回收。
     pub fn collect_retired(&self) {

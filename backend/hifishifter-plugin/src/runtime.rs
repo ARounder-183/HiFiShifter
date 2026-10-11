@@ -71,8 +71,13 @@ impl Runtime {
                 let head_tail = model.head_tail();
                 let session = model.session();
                 let playback = session.clone();
-                PluginBuilder::new(model)
-                    .realtime_head_tail(head_tail)
+                let builder = PluginBuilder::new(model);
+                // 适配器创建失败时降级：不注册快照能力，其余照常（见 `publish_head_tail`）。
+                let builder = match head_tail {
+                    Some(adapter) => builder.realtime_head_tail(adapter),
+                    None => builder,
+                };
+                builder
                     .controller_identity(move |key| session.register(key))
                     .host_playback(move |handle| {
                         crate::log_line(&format!(

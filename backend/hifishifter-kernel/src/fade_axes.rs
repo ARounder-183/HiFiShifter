@@ -84,6 +84,33 @@ pub fn host_fade_preset_for_axes(curvature: f64, s: f64) -> Option<f64> {
         .map(|index| index as f64)
 }
 
+/// 各形状预设的默认曲率 `(淡入, 淡出)`，下标即预设号。
+///
+/// 与前端 `DEFAULT_FADE_DIR_BY_SHAPE`（`reaperFade.ts`）同步。语义是 HFS 自己的
+/// `dir` 轴：预设曲线要落在它上面才等于该预设本身。切换形状时必须重置为这个值。
+pub const HOST_FADE_DEFAULT_DIR: [(f64, f64); 7] = [
+    (0.0, 0.0),  // 0 线性
+    (0.0, 0.0),  // 1 轻微凸（快起）
+    (1.0, -1.0), // 2 轻微凹（快收）
+    (-1.0, 1.0), // 3 陡峭凸（快起陡）
+    (1.0, -1.0), // 4 陡峭凹（快收陡）
+    (0.0, 0.0),  // 5 轻微 S（慢起慢收）
+    (0.0, 0.0),  // 6 锐利 S
+];
+
+/// 形状预设 → 该侧的默认曲率；非整数或越界返回 `0`（线性）。
+pub fn host_fade_default_dir(shape: f64, is_out: bool) -> f64 {
+    if !is_host_fade_preset(shape) {
+        return 0.0;
+    }
+    let (in_, out) = HOST_FADE_DEFAULT_DIR[shape as usize];
+    if is_out {
+        out
+    } else {
+        in_
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -187,6 +187,171 @@ export function fadeGain(shape: number, dir: number, t: number): number {
     return fadeGainSigned(shape, dir, "in", t);
 }
 
+// ── 宿主连续两轴（curvature, S）→ 曲线 ────────────────────────────────────────
+//
+// 【为什么单独一套】REAPER ≥7.81 的淡变由 `D_FADE*DIR_NEW`（curvature）与
+// `D_FADE*DIR2_NEW`（S）**两个正交轴**共同决定；`C_FADE*SHAPE` 只是由它们派生出的
+// 粗分类读数（见 `hostFadeAxes.ts` 与 Rust `fade_axes.rs` 的实测说明）。宿主轴上
+// **没有**形状号可用，必须直接从两根轴求值。
+//
+// 【模型】两根轴各自驱动一个变换，**复合**而不是相加：
+//     g(x) = S_a( x^e )
+//   · `e = E(curvature)`：幂族指数，只由 curvature 驱动；
+//   · `a = A(S)`：S 族陡度，只由 S 驱动。
+// `S_a(y) = y^a / (y^a + (1-y)^a)` 在 `a = 1` 时恰为恒等 —— 两族于是在 `(0, 0)`
+// 处自然相接（都退化为线性），复合整体保持单调、端点精确。
+//
+// 【为什么是复合而不是按 |S| 混合】混合在预设 5 的坐标 `(0, 0.5)` 上会得到
+// `0.5·线性 + 0.5·S(2.2)`，**不等于**预设 5 自己的曲线；复合则在七个实测坐标上
+// **逐点精确**复现各自的预设曲线（两侧各有黄金值测试钉住）。旧实现既按
+// `curvature + S` 求值（把两根**正交**轴相加），又"命中实测表就换预设曲线、差一个
+// ulp 就走混合"——同一坐标上相差半个满量程，是用户报障的直接原因。
+//
+// 【锚点来源】五个曲率锚点就是 `POWER_ANCHORS` 各预设的 `p0`（该预设在自己的默认
+// 方向上的指数）；两个 S 锚点就是 `S_ANCHORS` 的 `a0`。锚点不是新造的数，而是既有
+// 预设参数 —— 表与曲线永远不会分家。
+
+/** 一根轴上的锚点 `(坐标, 值)`，按坐标升序。 */
+type AxisKnots = ReadonlyArray<readonly [number, number]>;
+
+/** 单调三次插值的一段（Hermite 系数已预乘步长）。 */
+interface HermiteSegment {
+    readonly x0: number;
+    readonly h: number;
+    readonly y0: number;
+    readonly y1: number;
+    readonly m0h: number;
+    readonly m1h: number;
+}
+
+/**
+ * 把 `(坐标, 值)` 结点表编译成**保单调**的 C¹ 分段三次（Fritsch–Carlson）。
+ *
+ * 只编译一次（结点是常量），求值只剩三次多项式 —— 这个函数在波形重建的热路径上
+ * 按"像素列 × 列内切片"被调用，不能每次重算切线。
+ */
+function compileMonotoneCubic(knots: AxisKnots): HermiteSegment[] {
+    const n = knots.length;
+    const h: number[] = [];
+    const delta: number[] = [];
+    for (let i = 0; i < n - 1; i += 1) {
+        const dx = knots[i + 1][0] - knots[i][0];
+        h.push(dx);
+        delta.push((knots[i + 1][1] - knots[i][1]) / dx);
+    }
+    const m: number[] = new Array<number>(n).fill(0);
+    for (let i = 1; i < n - 1; i += 1) {
+        if (delta[i - 1] * delta[i] <= 0) continue;
+        const w1 = 2 * h[i] + h[i - 1];
+        const w2 = h[i] + 2 * h[i - 1];
+        m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
+    }
+    // 端点切线取单侧斜率，并按保单调条件夹紧。
+    const ends: ReadonlyArray<readonly [number, number]> = [
+        [0, delta[0]],
+        [n - 1, delta[n - 2]],
+    ];
+    for (const [i, d] of ends) {
+        if (d === 0 || m[i] * d < 0) m[i] = 0;
+        else if (Math.abs(m[i]) > Math.abs(3 * d)) m[i] = 3 * d;
+    }
+    return h.map((hi, i) => ({
+        x0: knots[i][0],
+        h: hi,
+        y0: knots[i][1],
+        y1: knots[i + 1][1],
+        m0h: hi * m[i],
+        m1h: hi * m[i + 1],
+    }));
+}
+
+/** 在编译好的分段上求值；结点处返回**结点原值**（保证预设逐点精确）。 */
+function sampleMonotoneCubic(segments: HermiteSegment[], x: number): number {
+    const first = segments[0];
+    if (x <= first.x0) return first.y0;
+    const last = segments[segments.length - 1];
+    if (x >= last.x0 + last.h) return last.y1;
+    let lo = 0;
+    let hi = segments.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (x < segments[mid].x0 + segments[mid].h) hi = mid;
+        else lo = mid + 1;
+    }
+    const s = segments[lo];
+    const u = (x - s.x0) / s.h;
+    const u2 = u * u;
+    const u3 = u2 * u;
+    return (
+        (2 * u3 - 3 * u2 + 1) * s.y0 +
+        (u3 - 2 * u2 + u) * s.m0h +
+        (-2 * u3 + 3 * u2) * s.y1 +
+        (u3 - u2) * s.m1h
+    );
+}
+
+/** curvature → 幂族指数 e 的锚点：就是各幂族预设的 `p0`。 */
+const CURVATURE_EXPONENT_KNOTS: AxisKnots = [
+    [-1, POWER_ANCHORS[FADE_LATE_SHARP].p0],
+    [-0.5, POWER_ANCHORS[FADE_LATE_SLIGHT].p0],
+    [0, POWER_ANCHORS[FADE_LINEAR].p0],
+    [0.5, POWER_ANCHORS[FADE_CONVEX_SLIGHT].p0],
+    [1, POWER_ANCHORS[FADE_CONVEX_SHARP].p0],
+];
+
+/**
+ * S → S 族陡度 a 的锚点：两个 S 预设的 `a0`，负半轴按 `a(-S) = 1/a(S)` 取镜像。
+ *
+ * `S_{1/a}` 恰是 `S_a` 的函数反演（`odds(y) = odds(x)^a`），所以负 S 是正 S 的
+ * "反向 S"——单调、连续、在 `S = 0` 处与恒等相接。**负半轴没有实测数据**
+ * （实测表只有 `S ∈ {0, 0.5, 1}`），此镜像是一个待取证的有界外推。
+ */
+const S_STEEPNESS_KNOTS: AxisKnots = [
+    [-1, 1 / S_ANCHORS[FADE_S_SHARP].a0],
+    [-0.5, 1 / S_ANCHORS[FADE_S_SLIGHT].a0],
+    [0, 1],
+    [0.5, S_ANCHORS[FADE_S_SLIGHT].a0],
+    [1, S_ANCHORS[FADE_S_SHARP].a0],
+];
+
+const CURVATURE_LOG2_SEGMENTS = compileMonotoneCubic(
+    CURVATURE_EXPONENT_KNOTS.map(([c, e]) => [c, Math.log2(e)] as const),
+);
+const S_LOG2_SEGMENTS = compileMonotoneCubic(
+    S_STEEPNESS_KNOTS.map(([s, a]) => [s, Math.log2(a)] as const),
+);
+
+/** S 族对称比值曲线：`a = 1` 为恒等，`a > 1` 慢起慢收，`a < 1` 为其反向。 */
+function sWarp(y: number, a: number): number {
+    if (y <= 0) return 0;
+    if (y >= 1) return 1;
+    const ya = Math.pow(y, a);
+    return ya / (ya + Math.pow(1 - y, a));
+}
+
+/**
+ * 宿主连续两轴求值（与 Rust `fade_curves::fade_gain_axes` 公式级一致）。
+ *
+ * 单一连续函数：无分支跳变，两轴正交（`curvature` 只进指数、`S` 只进 S 族），
+ * 七个实测预设坐标上逐点等于各自的预设曲线。
+ */
+export function fadeGainAxes(curvature: number, s: number, mode: "in" | "out", t: number): number {
+    const clampedT = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
+    if (clampedT <= 0) return mode === "out" ? 1 : 0;
+    if (clampedT >= 1) return mode === "out" ? 0 : 1;
+    const c = Number.isFinite(curvature) ? Math.min(1, Math.max(-1, curvature)) : 0;
+    const sv = Number.isFinite(s) ? Math.min(1, Math.max(-1, s)) : 0;
+    const x = mode === "out" ? 1 - clampedT : clampedT;
+    const e = Math.min(
+        E_MAX,
+        Math.max(E_MIN, Math.pow(2, sampleMonotoneCubic(CURVATURE_LOG2_SEGMENTS, c))),
+    );
+    const inner = e === 1 ? x : Math.pow(x, e);
+    const a = Math.pow(2, sampleMonotoneCubic(S_LOG2_SEGMENTS, sv));
+    const gain = (a === 1 ? inner : sWarp(inner, a)) * landingWindow(clampedT, mode);
+    return Number.isFinite(gain) ? gain : x;
+}
+
 /**
  * 交互求解器：给定进度 t 与目标增益，反解该侧曲率 dir。
  * 幂族/S 族在固定 t 对 u 单调（含钳制平顶），扫描 + 二分总能给出确定解；
