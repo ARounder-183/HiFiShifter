@@ -29,8 +29,7 @@
         "targets": ["nsis", "dmg", "appimage"],
         "windows": {
             "nsis": {
-                "installMode": "both",
-                "license": "../../LICENSE"
+                "installMode": "both"
             }
         },
         "resources": {

@@ -280,8 +280,10 @@ fn build_signalsmith_stretch() {
 /// 重打 tag 或 codeberg 供给链事故会直接进入音频时基代码，且两次构建产物可能不同。
 /// clone（或复用已有检出）后对 pin 校验 HEAD，不一致即失败。pin 升级走
 /// plugin-sdks.json 的评审 diff。
-const SOUNDTOUCH_PIN_JSON: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/plugin-sdks.json"));
+const SOUNDTOUCH_PIN_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/plugin-sdks.json"
+));
 
 fn soundtouch_pinned_commit() -> String {
     // 不为 build.rs 引入 serde_json（build-dependencies 只有 cc）：清单是受控文件，

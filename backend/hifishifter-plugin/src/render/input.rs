@@ -93,10 +93,9 @@ impl RenderInput {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .try_fold(0_usize, |total, id| {
-                let pcm = self
-                    .sources
-                    .get(id)
-                    .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
+                let pcm = self.sources.get(id).ok_or_else(|| {
+                    format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE)
+                })?;
                 total
                     .checked_add(
                         pcm.planes

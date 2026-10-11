@@ -332,89 +332,94 @@ unsafe extern "system" fn factory_query_interface(
     this: *mut c_void,
     iid: *const u8,
     obj: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || {
-        if obj.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: obj 是宿主提供的输出槽。
-        unsafe { *obj = std::ptr::null_mut() };
-        if unsafe { iid_matches(iid, IID_FUNKNOWN) }
-            || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY) }
-            || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY2) }
-        {
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_NO_INTERFACE, || {
+            if obj.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: obj 是宿主提供的输出槽。
+            unsafe { *obj = std::ptr::null_mut() };
+            if unsafe { iid_matches(iid, IID_FUNKNOWN) }
+                || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY) }
+                || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY2) }
+            {
+                let factory = this as *const PluginFactoryObj;
+                // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
+                unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) };
+                // SAFETY: 输出槽非空。
+                unsafe { *obj = this };
+                return K_RESULT_OK;
+            }
+            crate::log_line(&format!("factory queryInterface miss iid={}", unsafe {
+                hex_iid(iid)
+            }));
+            K_NO_INTERFACE
+        })
+    }
+}
+
+unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
             let factory = this as *const PluginFactoryObj;
             // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
-            unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) };
-            // SAFETY: 输出槽非空。
-            unsafe { *obj = this };
-            return K_RESULT_OK;
-        }
-        crate::log_line(&format!("factory queryInterface miss iid={}", unsafe {
-            hex_iid(iid)
-        }));
-        K_NO_INTERFACE
+            unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        let factory = this as *const PluginFactoryObj;
-        // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
-        unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
-
-    })
-  }}
-
-unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        let factory = this as *const PluginFactoryObj;
-        // SAFETY: this 是形如 PluginFactoryObj 的常驻单例；探针不销毁它。
-        let previous = unsafe { (*factory).refcount.fetch_sub(1, Ordering::AcqRel) };
-        (previous - 1) as u32
-
-    })
-  }}
+unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            let factory = this as *const PluginFactoryObj;
+            // SAFETY: this 是形如 PluginFactoryObj 的常驻单例；探针不销毁它。
+            let previous = unsafe { (*factory).refcount.fetch_sub(1, Ordering::AcqRel) };
+            (previous - 1) as u32
+        })
+    }
+}
 
 unsafe extern "system" fn factory_get_factory_info(
     _this: *mut c_void,
     info: *mut PFactoryInfo,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if info.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: info 是宿主提供的可写 PFactoryInfo。
-        let info = unsafe { &mut *info };
-        copy_str(&mut info.vendor, "HiFiShifter");
-        copy_str(&mut info.url, "https://github.com/ARounder-183/HiFiShifter");
-        copy_str(&mut info.email, "");
-        // kUnicode = 1 << 4
-        info.flags = 1 << 4;
-        K_RESULT_OK
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if info.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: info 是宿主提供的可写 PFactoryInfo。
+            let info = unsafe { &mut *info };
+            copy_str(&mut info.vendor, "HiFiShifter");
+            copy_str(&mut info.url, "https://github.com/ARounder-183/HiFiShifter");
+            copy_str(&mut info.email, "");
+            // kUnicode = 1 << 4
+            info.flags = 1 << 4;
+            K_RESULT_OK
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn factory_count_classes(_this: *mut c_void) -> i32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        // 0: 音频处理器组件，1: ARA 主工厂类，2: 编辑器控制器。
-        crate::log_line("factory countClasses -> 3");
-        3
-
-    })
-  }}
+unsafe extern "system" fn factory_count_classes(_this: *mut c_void) -> i32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            // 0: 音频处理器组件，1: ARA 主工厂类，2: 编辑器控制器。
+            crate::log_line("factory countClasses -> 3");
+            3
+        })
+    }
+}
 
 /// 以下两个类共用的静态元数据。
 const AUDIO_MODULE_CLASS: &str = "Audio Module Class";
@@ -453,177 +458,179 @@ unsafe extern "system" fn factory_get_class_info(
     _this: *mut c_void,
     index: i32,
     info: *mut PClassInfo,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if info.is_null() || !(0..=2).contains(&index) {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: info 是宿主提供的可写 PClassInfo。
-        unsafe { fill_class_info(info, index) };
-        crate::log_line(&format!("factory getClassInfo({index}) ok"));
-        K_RESULT_OK
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if info.is_null() || !(0..=2).contains(&index) {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: info 是宿主提供的可写 PClassInfo。
+            unsafe { fill_class_info(info, index) };
+            crate::log_line(&format!("factory getClassInfo({index}) ok"));
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn factory_get_class_info2(
     _this: *mut c_void,
     index: i32,
     info: *mut PClassInfo2,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if info.is_null() || !(0..=2).contains(&index) {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: info 是宿主提供的可写 PClassInfo2。
-        let info = unsafe { &mut *info };
-        // SAFETY: POD 清零。
-        unsafe { std::ptr::write_bytes(info as *mut PClassInfo2, 0, 1) };
-        info.cardinality = K_MANY_INSTANCES;
-        match index {
-            0 => {
-                info.cid = PROCESSOR_CID;
-                copy_str(&mut info.category, AUDIO_MODULE_CLASS);
-                copy_str(&mut info.name, crate::CLASS_NAME);
-                // 二期编辑会话在宿主本进程，不宣称跨进程processor/controller分布。
-                info.class_flags = 0;
-                copy_str(&mut info.sub_categories, "Fx|OnlyARA");
-                copy_str(&mut info.vendor, "HiFiShifter");
-                copy_str(&mut info.version, crate::VERSION);
-                copy_str(&mut info.sdk_version, "VST 3.8.0");
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if info.is_null() || !(0..=2).contains(&index) {
+                return K_INVALID_ARGUMENT;
             }
-            2 => {
-                info.cid = CONTROLLER_CID;
-                copy_str(&mut info.category, COMPONENT_CONTROLLER_CLASS);
-                copy_str(&mut info.name, crate::CLASS_NAME);
-                copy_str(&mut info.vendor, "HiFiShifter");
-                copy_str(&mut info.version, crate::VERSION);
-                copy_str(&mut info.sdk_version, "VST 3.8.0");
-            }
-            1 => {
-                info.cid = FACTORY_CID;
-                // SAFETY: 适配器返回常驻 C 字符串（或 null）。
-                unsafe { copy_str_ptr(&mut info.category, ara2_vst3_main_factory_category()) };
-                if info.category[0] == 0 {
-                    copy_str(&mut info.category, "ARA Main Factory Class");
+            // SAFETY: info 是宿主提供的可写 PClassInfo2。
+            let info = unsafe { &mut *info };
+            // SAFETY: POD 清零。
+            unsafe { std::ptr::write_bytes(info as *mut PClassInfo2, 0, 1) };
+            info.cardinality = K_MANY_INSTANCES;
+            match index {
+                0 => {
+                    info.cid = PROCESSOR_CID;
+                    copy_str(&mut info.category, AUDIO_MODULE_CLASS);
+                    copy_str(&mut info.name, crate::CLASS_NAME);
+                    // 二期编辑会话在宿主本进程，不宣称跨进程processor/controller分布。
+                    info.class_flags = 0;
+                    copy_str(&mut info.sub_categories, "Fx|OnlyARA");
+                    copy_str(&mut info.vendor, "HiFiShifter");
+                    copy_str(&mut info.version, crate::VERSION);
+                    copy_str(&mut info.sdk_version, "VST 3.8.0");
                 }
-                copy_str(&mut info.name, crate::CLASS_NAME);
-                copy_str(&mut info.vendor, "HiFiShifter");
-                copy_str(&mut info.version, crate::VERSION);
-                copy_str(&mut info.sdk_version, "VST 3.8.0");
+                2 => {
+                    info.cid = CONTROLLER_CID;
+                    copy_str(&mut info.category, COMPONENT_CONTROLLER_CLASS);
+                    copy_str(&mut info.name, crate::CLASS_NAME);
+                    copy_str(&mut info.vendor, "HiFiShifter");
+                    copy_str(&mut info.version, crate::VERSION);
+                    copy_str(&mut info.sdk_version, "VST 3.8.0");
+                }
+                1 => {
+                    info.cid = FACTORY_CID;
+                    // SAFETY: 适配器返回常驻 C 字符串（或 null）。
+                    unsafe { copy_str_ptr(&mut info.category, ara2_vst3_main_factory_category()) };
+                    if info.category[0] == 0 {
+                        copy_str(&mut info.category, "ARA Main Factory Class");
+                    }
+                    copy_str(&mut info.name, crate::CLASS_NAME);
+                    copy_str(&mut info.vendor, "HiFiShifter");
+                    copy_str(&mut info.version, crate::VERSION);
+                    copy_str(&mut info.sdk_version, "VST 3.8.0");
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        K_RESULT_OK
-
-    })
-  }}
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn factory_get_class_info_unicode(
     _this: *mut c_void,
     _index: i32,
     _info: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn factory_set_host_context(
     _this: *mut c_void,
     _context: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_RESULT_OK
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+    }
+}
 
 unsafe extern "system" fn factory_create_instance(
     _this: *mut c_void,
     cid: *const c_char,
     iid: *const c_char,
     obj: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if obj.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: obj 是宿主提供的输出槽。
-        unsafe { *obj = std::ptr::null_mut() };
-        if cid.is_null() || iid.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: cid 指向宿主从 getClassInfo 拿到的 16 字节 TUID。
-        let cid = unsafe { std::slice::from_raw_parts(cid as *const u8, 16) };
-        crate::log_line(&format!(
-            "factory createInstance cid={} iid={}",
-            hex16(cid),
-            unsafe { hex_iid(iid as *const u8) }
-        ));
-        if cid == PROCESSOR_CID {
-            let Some(processor) = Processor::create() else {
-                return K_NO_INTERFACE;
-            };
-            let base = Box::into_raw(processor) as *mut c_void;
-            // SAFETY: base 是新分配的 Processor，iid/obj 来自宿主。
-            let result = unsafe { component_query_interface(base, iid as *const u8, obj) };
-            if result != K_RESULT_OK {
-                // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
-                // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
-                unsafe { drop(Box::from_raw(base as *mut Processor)) };
-            } else {
-                // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
-                // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
-                unsafe { processor_release(base as *mut Processor) };
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if obj.is_null() {
+                return K_INVALID_ARGUMENT;
             }
-            return result;
-        }
-        if cid == FACTORY_CID {
-            let Some(adapter) = new_main_factory_adapter() else {
-                return K_NO_INTERFACE;
-            };
-            // 宿主会按它请求的 IID（ARA::IMainFactory 或 FUnknown）使用该对象，
-            // 适配器自身的 queryInterface 已支持两者，因此直接把主接口交出去。
-            let raw = adapter.as_raw();
-            // 探针把适配器泄漏给宿主管理引用计数，直到进程结束。
-            std::mem::forget(adapter);
             // SAFETY: obj 是宿主提供的输出槽。
-            unsafe { *obj = raw };
-            return K_RESULT_OK;
-        }
-        if cid == CONTROLLER_CID {
-            let controller = Box::into_raw(Box::new(EditController::new())) as *mut c_void;
-            // SAFETY: controller 是新分配的控制器对象。
-            let result = unsafe { edit_controller_query_interface(controller, iid as *const u8, obj) };
-            if result != K_RESULT_OK {
-                // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
-                // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
-                unsafe { drop(Box::from_raw(controller as *mut EditController)) };
-            } else {
-                // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
-                // 此前漏掉这一步：每交付一个控制器实例就永久泄漏一份
-                // ConnectionState（含 Arc 与两个 Mutex），宿主反复插拔 FX 时慢性增长。
-                // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
-                unsafe { edit_controller_release(controller) };
+            unsafe { *obj = std::ptr::null_mut() };
+            if cid.is_null() || iid.is_null() {
+                return K_INVALID_ARGUMENT;
             }
-            return result;
-        }
-        K_INVALID_ARGUMENT
-
-    })
-  }}
+            // SAFETY: cid 指向宿主从 getClassInfo 拿到的 16 字节 TUID。
+            let cid = unsafe { std::slice::from_raw_parts(cid as *const u8, 16) };
+            crate::log_line(&format!(
+                "factory createInstance cid={} iid={}",
+                hex16(cid),
+                unsafe { hex_iid(iid as *const u8) }
+            ));
+            if cid == PROCESSOR_CID {
+                let Some(processor) = Processor::create() else {
+                    return K_NO_INTERFACE;
+                };
+                let base = Box::into_raw(processor) as *mut c_void;
+                // SAFETY: base 是新分配的 Processor，iid/obj 来自宿主。
+                let result = unsafe { component_query_interface(base, iid as *const u8, obj) };
+                if result != K_RESULT_OK {
+                    // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
+                    // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
+                    unsafe { drop(Box::from_raw(base as *mut Processor)) };
+                } else {
+                    // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
+                    // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
+                    unsafe { processor_release(base as *mut Processor) };
+                }
+                return result;
+            }
+            if cid == FACTORY_CID {
+                let Some(adapter) = new_main_factory_adapter() else {
+                    return K_NO_INTERFACE;
+                };
+                // 宿主会按它请求的 IID（ARA::IMainFactory 或 FUnknown）使用该对象，
+                // 适配器自身的 queryInterface 已支持两者，因此直接把主接口交出去。
+                let raw = adapter.as_raw();
+                // 探针把适配器泄漏给宿主管理引用计数，直到进程结束。
+                std::mem::forget(adapter);
+                // SAFETY: obj 是宿主提供的输出槽。
+                unsafe { *obj = raw };
+                return K_RESULT_OK;
+            }
+            if cid == CONTROLLER_CID {
+                let controller = Box::into_raw(Box::new(EditController::new())) as *mut c_void;
+                // SAFETY: controller 是新分配的控制器对象。
+                let result =
+                    unsafe { edit_controller_query_interface(controller, iid as *const u8, obj) };
+                if result != K_RESULT_OK {
+                    // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
+                    // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
+                    unsafe { drop(Box::from_raw(controller as *mut EditController)) };
+                } else {
+                    // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
+                    // 此前漏掉这一步：每交付一个控制器实例就永久泄漏一份
+                    // ConnectionState（含 Arc 与两个 Mutex），宿主反复插拔 FX 时慢性增长。
+                    // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
+                    unsafe { edit_controller_release(controller) };
+                }
+                return result;
+            }
+            K_INVALID_ARGUMENT
+        })
+    }
+}
 
 static FACTORY_VTBL: PluginFactoryVtbl = PluginFactoryVtbl {
     query_interface: factory_query_interface,
@@ -802,210 +809,210 @@ unsafe extern "system" fn component_query_interface(
     this: *mut c_void,
     iid: *const u8,
     obj: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || {
-        if obj.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: obj 是宿主提供的输出槽。
-        unsafe { *obj = std::ptr::null_mut() };
-        let processor = this as *mut Processor;
-        if unsafe { crate::editor::connection::is_connection(iid) } {
-            unsafe {
-                processor_add_ref(processor);
-                *obj = std::ptr::addr_of_mut!((*processor).connection_vtbl).cast();
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_NO_INTERFACE, || {
+            if obj.is_null() {
+                return K_INVALID_ARGUMENT;
             }
-            return K_RESULT_OK;
-        }
-        // FUnknown / IPluginBase / IComponent 共用对象基址。
-        if unsafe { iid_matches(iid, IID_FUNKNOWN) }
-            || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
-            || unsafe { iid_matches(iid, IID_ICOMPONENT) }
-        {
-            if unsafe { iid_matches(iid, IID_ICOMPONENT) } {
-                crate::log_line("component queryInterface hit IComponent");
+            // SAFETY: obj 是宿主提供的输出槽。
+            unsafe { *obj = std::ptr::null_mut() };
+            let processor = this as *mut Processor;
+            if unsafe { crate::editor::connection::is_connection(iid) } {
+                unsafe {
+                    processor_add_ref(processor);
+                    *obj = std::ptr::addr_of_mut!((*processor).connection_vtbl).cast();
+                }
+                return K_RESULT_OK;
             }
-            // SAFETY: processor 是活动对象。
-            unsafe { processor_add_ref(processor) };
-            // SAFETY: 输出槽非空。
-            unsafe { *obj = this };
-            return K_RESULT_OK;
-        }
-        if unsafe { iid_matches(iid, IID_IAUDIO_PROCESSOR) } {
-            crate::log_line("component queryInterface hit IAudioProcessor");
-            // SAFETY: processor 是活动对象。
-            unsafe { processor_add_ref(processor) };
-            // SAFETY: 输出槽非空。
-            unsafe { *obj = audio_ptr(processor) };
-            return K_RESULT_OK;
-        }
-        // ARA 入口点：转发给 companion 适配器，由它做 IID 匹配与引用计数。
-        // 关键：必须先按宿主**实际请求的 IID** 判断，不能无条件转发 ——
-        // companion 的 query_interface(kind) 是按给定 kind 去问"你支持这个 ARA 接口吗"，
-        // 它永远会成功。若宿主问的是别的接口（实测会问 IEditController），
-        // 无条件返回 ARA 指针会让宿主用错误的 vtable 调用方法而崩溃。
-        // SAFETY: processor 是活动对象；entry 在对象生命周期内有效。
-        if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
-            for kind in [
-                Ara2Vst3InterfaceKind::PluginEntry,
-                Ara2Vst3InterfaceKind::PluginEntry2,
-            ] {
-                let Some(words) = ara_iid_words(kind) else {
-                    continue;
-                };
-                if unsafe { iid_matches(iid, words) } {
-                    if let Ok(interface) = entry.query_interface(kind) {
-                        crate::log_line(&format!(
-                            "component queryInterface ARA hit iid={}",
-                            unsafe { hex_iid(iid) }
-                        ));
-                        // SAFETY: 输出槽非空。
-                        unsafe { *obj = interface };
-                        return K_RESULT_OK;
+            // FUnknown / IPluginBase / IComponent 共用对象基址。
+            if unsafe { iid_matches(iid, IID_FUNKNOWN) }
+                || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
+                || unsafe { iid_matches(iid, IID_ICOMPONENT) }
+            {
+                if unsafe { iid_matches(iid, IID_ICOMPONENT) } {
+                    crate::log_line("component queryInterface hit IComponent");
+                }
+                // SAFETY: processor 是活动对象。
+                unsafe { processor_add_ref(processor) };
+                // SAFETY: 输出槽非空。
+                unsafe { *obj = this };
+                return K_RESULT_OK;
+            }
+            if unsafe { iid_matches(iid, IID_IAUDIO_PROCESSOR) } {
+                crate::log_line("component queryInterface hit IAudioProcessor");
+                // SAFETY: processor 是活动对象。
+                unsafe { processor_add_ref(processor) };
+                // SAFETY: 输出槽非空。
+                unsafe { *obj = audio_ptr(processor) };
+                return K_RESULT_OK;
+            }
+            // ARA 入口点：转发给 companion 适配器，由它做 IID 匹配与引用计数。
+            // 关键：必须先按宿主**实际请求的 IID** 判断，不能无条件转发 ——
+            // companion 的 query_interface(kind) 是按给定 kind 去问"你支持这个 ARA 接口吗"，
+            // 它永远会成功。若宿主问的是别的接口（实测会问 IEditController），
+            // 无条件返回 ARA 指针会让宿主用错误的 vtable 调用方法而崩溃。
+            // SAFETY: processor 是活动对象；entry 在对象生命周期内有效。
+            if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
+                for kind in [
+                    Ara2Vst3InterfaceKind::PluginEntry,
+                    Ara2Vst3InterfaceKind::PluginEntry2,
+                ] {
+                    let Some(words) = ara_iid_words(kind) else {
+                        continue;
+                    };
+                    if unsafe { iid_matches(iid, words) } {
+                        if let Ok(interface) = entry.query_interface(kind) {
+                            crate::log_line(&format!(
+                                "component queryInterface ARA hit iid={}",
+                                unsafe { hex_iid(iid) }
+                            ));
+                            // SAFETY: 输出槽非空。
+                            unsafe { *obj = interface };
+                            return K_RESULT_OK;
+                        }
                     }
                 }
             }
-        }
-        crate::log_line(&format!("component queryInterface miss iid={}", unsafe {
-            hex_iid(iid)
-        }));
-        K_NO_INTERFACE
+            crate::log_line(&format!("component queryInterface miss iid={}", unsafe {
+                hex_iid(iid)
+            }));
+            K_NO_INTERFACE
+        })
+    }
+}
 
-    })
-  }}
+unsafe extern "system" fn component_add_ref(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            // SAFETY: this 是组件接口指针（对象基址）。
+            unsafe { processor_add_ref(this as *mut Processor) }
+        })
+    }
+}
 
-unsafe extern "system" fn component_add_ref(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        // SAFETY: this 是组件接口指针（对象基址）。
-        unsafe { processor_add_ref(this as *mut Processor) }
+unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            // SAFETY: this 是组件接口指针（对象基址）。
+            unsafe { processor_release(this as *mut Processor) }
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        // SAFETY: this 是组件接口指针（对象基址）。
-        unsafe { processor_release(this as *mut Processor) }
-
-    })
-  }}
-
-unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
-        struct CallReference(*mut c_void);
-        impl Drop for CallReference {
-            fn drop(&mut self) {
-                unsafe {
-                    component_release(self.0);
+unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
+            struct CallReference(*mut c_void);
+            impl Drop for CallReference {
+                fn drop(&mut self) {
+                    unsafe {
+                        component_release(self.0);
+                    }
                 }
             }
-        }
-        unsafe {
-            component_add_ref(this);
-        }
-        let _call_reference = CallReference(this);
-        let owner = unsafe { (*this.cast::<Processor>()).extension_owner.clone() };
-        if owner.is_closed() {
-            return K_RESULT_FALSE;
-        }
-        unsafe {
-            (*(this as *mut Processor)).connection.initialize(context);
-        }
-        if owner.is_closed() {
-            // QI可能先重入close再返回新引用；拒绝初始化时不能把该引用留在closed connection。
             unsafe {
-                (*this.cast::<Processor>()).connection.close();
+                component_add_ref(this);
             }
-            return K_RESULT_FALSE;
-        }
-        unsafe {
-            owner.bind_host_adapter(context);
-        }
-        if owner.is_closed() {
+            let _call_reference = CallReference(this);
+            let owner = unsafe { (*this.cast::<Processor>()).extension_owner.clone() };
+            if owner.is_closed() {
+                return K_RESULT_FALSE;
+            }
             unsafe {
-                (*this.cast::<Processor>()).connection.close();
+                (*(this as *mut Processor)).connection.initialize(context);
             }
-            return K_RESULT_FALSE;
-        }
-        // 走到这里说明组件没有在 QI/bind 期间被重入关闭；此时才读一次宿主应用名
-        // （只用于诊断，见 `connection::host_application_name`）。
-        unsafe {
-            (*this.cast::<Processor>()).connection.record_host_name();
-        }
-        crate::log_line("IComponent::initialize");
-        K_RESULT_OK
+            if owner.is_closed() {
+                // QI可能先重入close再返回新引用；拒绝初始化时不能把该引用留在closed connection。
+                unsafe {
+                    (*this.cast::<Processor>()).connection.close();
+                }
+                return K_RESULT_FALSE;
+            }
+            unsafe {
+                owner.bind_host_adapter(context);
+            }
+            if owner.is_closed() {
+                unsafe {
+                    (*this.cast::<Processor>()).connection.close();
+                }
+                return K_RESULT_FALSE;
+            }
+            // 走到这里说明组件没有在 QI/bind 期间被重入关闭；此时才读一次宿主应用名
+            // （只用于诊断，见 `connection::host_application_name`）。
+            unsafe {
+                (*this.cast::<Processor>()).connection.record_host_name();
+            }
+            crate::log_line("IComponent::initialize");
+            K_RESULT_OK
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe {
-            let processor = &*(this as *mut Processor);
-            processor.connection.close();
-            processor.extension_owner.stop_editor();
-        }
-        crate::log_line("IComponent::terminate");
-        K_RESULT_OK
-
-    })
-  }}
+unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            unsafe {
+                let processor = &*(this as *mut Processor);
+                processor.connection.close();
+                processor.extension_owner.stop_editor();
+            }
+            crate::log_line("IComponent::terminate");
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn component_get_controller_class_id(
     _this: *mut c_void,
     class_id: *mut u8,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if class_id.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // 探针提供一个最小编辑器控制器：REAPER 需要它才能完成 ARA 插入。
-        // SAFETY: class_id 是宿主提供的可写 TUID。
-        unsafe { std::ptr::copy_nonoverlapping(CONTROLLER_CID.as_ptr(), class_id, 16) };
-        crate::log_line("IComponent::getControllerClassId -> HFSARAProbe.Ctl1");
-        K_RESULT_OK
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if class_id.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // 探针提供一个最小编辑器控制器：REAPER 需要它才能完成 ARA 插入。
+            // SAFETY: class_id 是宿主提供的可写 TUID。
+            unsafe { std::ptr::copy_nonoverlapping(CONTROLLER_CID.as_ptr(), class_id, 16) };
+            crate::log_line("IComponent::getControllerClassId -> HFSARAProbe.Ctl1");
+            K_RESULT_OK
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn component_set_io_mode(_this: *mut c_void, _mode: i32) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_RESULT_OK
-
-    })
-  }}
+unsafe extern "system" fn component_set_io_mode(_this: *mut c_void, _mode: i32) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+    }
+}
 
 unsafe extern "system" fn component_get_bus_count(
     _this: *mut c_void,
     media_type: i32,
     _direction: i32,
-) -> i32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        if media_type == 0 {
-            1
-        } else {
-            0
-        }
-
-    })
-  }}
+) -> i32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || if media_type == 0 { 1 } else { 0 })
+    }
+}
 
 unsafe extern "system" fn component_get_bus_info(
     _this: *mut c_void,
@@ -1013,57 +1020,57 @@ unsafe extern "system" fn component_get_bus_info(
     direction: i32,
     index: i32,
     bus: *mut BusInfo,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if bus.is_null() || media_type != 0 || index != 0 {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: bus 是宿主提供的可写 BusInfo。
-        let bus = unsafe { &mut *bus };
-        // SAFETY: POD 清零。
-        unsafe { std::ptr::write_bytes(bus as *mut BusInfo, 0, 1) };
-        bus.media_type = 0;
-        bus.direction = direction;
-        // 如实报告**协商结果**：`setBusArrangements` 接受宿主给出的任意扬声器布局
-        // （值是位掩码：kMono=1、kStereo=3、5.1=63…），声道数即置位数。此前
-        // `1 => 1, _ => 2` 的映射只认 mono/stereo —— 宿主协商 5.1 时
-        // `getBusArrangement` 回 6、这里却报 2，注释与两处实现互相矛盾。渲染面已
-        // 泛化到任意声道数（`copy_block` 只处理前两个声道，`audio_abi::clear_outputs`
-        // 按 `num_channels` 清零其余），所以这里照实报即可。未协商时
-        // `bus_arrangement` 默认 kStereo(3) ⇒ 2。
-        bus.channel_count = if _this.is_null() {
-            2
-        } else {
-            // SAFETY: `_this` 是存活 component（即 `Processor`）。
-            unsafe {
-                (*_this.cast::<Processor>())
-                    .extension_owner
-                    .bus_arrangement(direction)
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if bus.is_null() || media_type != 0 || index != 0 {
+                return K_INVALID_ARGUMENT;
             }
-            .count_ones() as i32
-        };
-        bus.bus_type = 0;
-        bus.flags = 1; // kDefaultActive
-        bus.name[0] = b'M' as u16;
-        K_RESULT_OK
-
-    })
-  }}
+            // SAFETY: bus 是宿主提供的可写 BusInfo。
+            let bus = unsafe { &mut *bus };
+            // SAFETY: POD 清零。
+            unsafe { std::ptr::write_bytes(bus as *mut BusInfo, 0, 1) };
+            bus.media_type = 0;
+            bus.direction = direction;
+            // 如实报告**协商结果**：`setBusArrangements` 接受宿主给出的任意扬声器布局
+            // （值是位掩码：kMono=1、kStereo=3、5.1=63…），声道数即置位数。此前
+            // `1 => 1, _ => 2` 的映射只认 mono/stereo —— 宿主协商 5.1 时
+            // `getBusArrangement` 回 6、这里却报 2，注释与两处实现互相矛盾。渲染面已
+            // 泛化到任意声道数（`copy_block` 只处理前两个声道，`audio_abi::clear_outputs`
+            // 按 `num_channels` 清零其余），所以这里照实报即可。未协商时
+            // `bus_arrangement` 默认 kStereo(3) ⇒ 2。
+            bus.channel_count = if _this.is_null() {
+                2
+            } else {
+                // SAFETY: `_this` 是存活 component（即 `Processor`）。
+                unsafe {
+                    (*_this.cast::<Processor>())
+                        .extension_owner
+                        .bus_arrangement(direction)
+                }
+                .count_ones() as i32
+            };
+            bus.bus_type = 0;
+            bus.flags = 1; // kDefaultActive
+            bus.name[0] = b'M' as u16;
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn component_get_routing_info(
     _this: *mut c_void,
     _in_info: *mut RoutingInfo,
     _out_info: *mut RoutingInfo,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn component_activate_bus(
     _this: *mut c_void,
@@ -1071,27 +1078,27 @@ unsafe extern "system" fn component_activate_bus(
     _direction: i32,
     _index: i32,
     _state: i8,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_RESULT_OK
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let processor = this as *mut Processor;
-        // SAFETY: processor 是活动对象。
-        unsafe { (*processor).active.store(state as i32, Ordering::SeqCst) };
-        crate::log_line(&format!("IComponent::setActive({state})"));
-        K_RESULT_OK
-
-    })
-  }}
+unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let processor = this as *mut Processor;
+            // SAFETY: processor 是活动对象。
+            unsafe { (*processor).active.store(state as i32, Ordering::SeqCst) };
+            crate::log_line(&format!("IComponent::setActive({state})"));
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_void) -> TResult {
     if this.is_null() {
@@ -1130,37 +1137,40 @@ unsafe extern "system" fn audio_query_interface(
     this: *mut c_void,
     iid: *const u8,
     obj: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || {
-        // SAFETY: this 是 IAudioProcessor 子对象指针。
-        let base = unsafe { base_from_audio(this) } as *mut c_void;
-        // SAFETY: 转发到基址查询。
-        unsafe { component_query_interface(base, iid, obj) }
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_NO_INTERFACE, || {
+            // SAFETY: this 是 IAudioProcessor 子对象指针。
+            let base = unsafe { base_from_audio(this) } as *mut c_void;
+            // SAFETY: 转发到基址查询。
+            unsafe { component_query_interface(base, iid, obj) }
+        })
+    }
+}
 
-    })
-  }}
+unsafe extern "system" fn audio_add_ref(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            // SAFETY: this 是 IAudioProcessor 子对象指针。
+            unsafe { processor_add_ref(base_from_audio(this)) }
+        })
+    }
+}
 
-unsafe extern "system" fn audio_add_ref(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        // SAFETY: this 是 IAudioProcessor 子对象指针。
-        unsafe { processor_add_ref(base_from_audio(this)) }
-
-    })
-  }}
-
-unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        // SAFETY: this 是 IAudioProcessor 子对象指针。
-        unsafe { processor_release(base_from_audio(this)) }
-
-    })
-  }}
+unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            // SAFETY: this 是 IAudioProcessor 子对象指针。
+            unsafe { processor_release(base_from_audio(this)) }
+        })
+    }
+}
 
 unsafe extern "system" fn audio_set_bus_arrangements(
     this: *mut c_void,
@@ -1168,195 +1178,203 @@ unsafe extern "system" fn audio_set_bus_arrangements(
     num_inputs: i32,
     outputs: *mut u64,
     num_outputs: i32,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if num_inputs != 1 || num_outputs != 1 {
-            return K_RESULT_FALSE;
-        }
-        if this.is_null() || inputs.is_null() || outputs.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: 宿主按数量提供合法布局数组；本批声明一进一出。
-        // 【为什么接受任意布局】此前只认 `kMono`(1) 与 `kStereo`(3)，而多数宿主在
-        // `setBusArrangements` 返回 `kResultFalse` 时会把插件**踢出插槽**（用户看到
-        // "插件不见了"，且没有提示）。5.1 / 7.1 / 任意环绕轨道因此完全不可用。
-        // 现在的取舍：接受宿主给的布局、内部只处理前两个声道、其余保持静音 ——
-        // 宁可部分工作，也不要从插槽里消失（渲染面见 `PlaybackSnapshot::copy_block`，
-        // 清零点见 `audio_abi::clear_outputs`）。
-        let (input, output) = unsafe { (*inputs, *outputs) };
-        if input == 0 || output == 0 {
-            return K_RESULT_FALSE;
-        }
-        // 记下协商结果：`getBusArrangement` 必须如实回吐，否则宿主按错误声道数组织缓冲。
-        // SAFETY: this 为存活音频接口。
-        unsafe { &(*base_from_audio(this)).extension_owner }.set_bus_arrangements(input, output);
-        K_RESULT_OK
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if num_inputs != 1 || num_outputs != 1 {
+                return K_RESULT_FALSE;
+            }
+            if this.is_null() || inputs.is_null() || outputs.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: 宿主按数量提供合法布局数组；本批声明一进一出。
+            // 【为什么接受任意布局】此前只认 `kMono`(1) 与 `kStereo`(3)，而多数宿主在
+            // `setBusArrangements` 返回 `kResultFalse` 时会把插件**踢出插槽**（用户看到
+            // "插件不见了"，且没有提示）。5.1 / 7.1 / 任意环绕轨道因此完全不可用。
+            // 现在的取舍：接受宿主给的布局、内部只处理前两个声道、其余保持静音 ——
+            // 宁可部分工作，也不要从插槽里消失（渲染面见 `PlaybackSnapshot::copy_block`，
+            // 清零点见 `audio_abi::clear_outputs`）。
+            let (input, output) = unsafe { (*inputs, *outputs) };
+            if input == 0 || output == 0 {
+                return K_RESULT_FALSE;
+            }
+            // 记下协商结果：`getBusArrangement` 必须如实回吐，否则宿主按错误声道数组织缓冲。
+            // SAFETY: this 为存活音频接口。
+            unsafe { &(*base_from_audio(this)).extension_owner }
+                .set_bus_arrangements(input, output);
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn audio_get_bus_arrangement(
     this: *mut c_void,
     direction: i32,
     _index: i32,
     arrangement: *mut u64,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if this.is_null() || arrangement.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: this 为存活音频接口；arrangement 是宿主提供的可写 SpeakerArrangement。
-        // 回吐**协商结果**（未协商时默认 kStereo），不再无条件写死 kStereo。
-        let negotiated =
-            unsafe { &(*base_from_audio(this)).extension_owner }.bus_arrangement(direction);
-        unsafe { *arrangement = negotiated };
-        K_RESULT_OK
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if this.is_null() || arrangement.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: this 为存活音频接口；arrangement 是宿主提供的可写 SpeakerArrangement。
+            // 回吐**协商结果**（未协商时默认 kStereo），不再无条件写死 kStereo。
+            let negotiated =
+                unsafe { &(*base_from_audio(this)).extension_owner }.bus_arrangement(direction);
+            unsafe { *arrangement = negotiated };
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn audio_can_process_sample_size(
     _this: *mut c_void,
     symbolic_sample_size: i32,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if symbolic_sample_size == 0 {
-            K_RESULT_OK
-        } else {
-            K_RESULT_FALSE
-        }
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if symbolic_sample_size == 0 {
+                K_RESULT_OK
+            } else {
+                K_RESULT_FALSE
+            }
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        0
-
-    })
-  }}
+unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || 0)
+    }
+}
 
 unsafe extern "system" fn audio_setup_processing(
     this: *mut c_void,
     setup: *mut ProcessSetup,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if this.is_null() || setup.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: 宿主提供调用期间可读的 SDK setup 结构。
-        let setup = unsafe { &*setup };
-        if !setup.sample_rate.is_finite()
-            || setup.sample_rate <= 0.0
-            || setup.max_samples_per_block <= 0
-            || !(0..=2).contains(&setup.process_mode)
-        {
-            return K_INVALID_ARGUMENT;
-        }
-        // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
-        // 收到 `kResultFalse` 会把插件**整条踢出链路**：96k/192k 工程里用户看到"插件不见了"，
-        // 没有任何提示。内部渲染仍按 44.1/48k 出快照，其余率由
-        // `PlaybackSnapshot::copy_block` 做线性重采样（降级、可听、有日志）。真正的多率
-        // 渲染管线是独立一期工作；**先保证插件在场**。
-        if setup.symbolic_sample_size != 0 {
-            // 【为什么返回 OK 而不是 `kResultFalse`】`kResultFalse` 会让多数宿主把插件
-            // **整条踢出链路**（用户看到"插件不见了"）。我们读不了 f64 平面，但可以在
-            // `process` 里按实际宽度静音（`silence_unsupported_sample_size`）—— 静音但在场
-            // 是可诊断的降级，优于静默消失。
-            crate::log_line(&format!(
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if this.is_null() || setup.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: 宿主提供调用期间可读的 SDK setup 结构。
+            let setup = unsafe { &*setup };
+            if !setup.sample_rate.is_finite()
+                || setup.sample_rate <= 0.0
+                || setup.max_samples_per_block <= 0
+                || !(0..=2).contains(&setup.process_mode)
+            {
+                return K_INVALID_ARGUMENT;
+            }
+            // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
+            // 收到 `kResultFalse` 会把插件**整条踢出链路**：96k/192k 工程里用户看到"插件不见了"，
+            // 没有任何提示。内部渲染仍按 44.1/48k 出快照，其余率由
+            // `PlaybackSnapshot::copy_block` 做线性重采样（降级、可听、有日志）。真正的多率
+            // 渲染管线是独立一期工作；**先保证插件在场**。
+            if setup.symbolic_sample_size != 0 {
+                // 【为什么返回 OK 而不是 `kResultFalse`】`kResultFalse` 会让多数宿主把插件
+                // **整条踢出链路**（用户看到"插件不见了"）。我们读不了 f64 平面，但可以在
+                // `process` 里按实际宽度静音（`silence_unsupported_sample_size`）—— 静音但在场
+                // 是可诊断的降级，优于静默消失。
+                crate::log_line(&format!(
                 "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in the \
                  chain and outputs silence (see silence_unsupported_sample_size).",
                 setup.symbolic_sample_size
             ));
-            return K_RESULT_OK;
-        }
-        // 【接受域与 `render::source` 对齐（8k..=384k）】此前下限是 44.1k，理由是"内部快照
-        // 永不降采样"。但宿主率低于 44.1k 时返回 `kResultFalse` 会让多数宿主把插件**整条
-        // 踢出链路**（用户看到"插件不见了"，与 `symbolic_sample_size` 同一类失败）。源读取域
-        // 本就接受 8k（`render/source.rs`），这里与它对齐：接受后用
-        // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
-        // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
-        // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
-        if !(8000.0..=384000.0).contains(&setup.sample_rate) {
-            crate::log_line(&format!(
-                "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
-                setup.sample_rate
-            ));
-            return K_RESULT_FALSE;
-        }
-        if (setup.sample_rate - 44100.0).abs() > 1e-6 && (setup.sample_rate - 48000.0).abs() > 1e-6 {
-            let aliasing = if setup.sample_rate < 44100.0 {
-                " The host rate is below the internal snapshot rate, so this is a downsample with \
+                return K_RESULT_OK;
+            }
+            // 【接受域与 `render::source` 对齐（8k..=384k）】此前下限是 44.1k，理由是"内部快照
+            // 永不降采样"。但宿主率低于 44.1k 时返回 `kResultFalse` 会让多数宿主把插件**整条
+            // 踢出链路**（用户看到"插件不见了"，与 `symbolic_sample_size` 同一类失败）。源读取域
+            // 本就接受 8k（`render/source.rs`），这里与它对齐：接受后用
+            // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
+            // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
+            // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
+            if !(8000.0..=384000.0).contains(&setup.sample_rate) {
+                crate::log_line(&format!(
+                    "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
+                    setup.sample_rate
+                ));
+                return K_RESULT_FALSE;
+            }
+            if (setup.sample_rate - 44100.0).abs() > 1e-6
+                && (setup.sample_rate - 48000.0).abs() > 1e-6
+            {
+                let aliasing = if setup.sample_rate < 44100.0 {
+                    " The host rate is below the internal snapshot rate, so this is a downsample with \
                  no anti-aliasing filter; expect audible imaging."
-            } else {
-                ""
-            };
-            crate::log_line(&format!(
+                } else {
+                    ""
+                };
+                crate::log_line(&format!(
                 "[vst3] sampleRate={} is not natively rendered; output will be linearly resampled \
                  from the internal 44.1/48k snapshots.{aliasing}",
                 setup.sample_rate
             ));
-        }
-        // 记下权威采样率：`process` 用它（而非 `ProcessContext::sample_rate`）选快照，
-        // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
-        // SAFETY: this 为存活音频接口。
-        unsafe { &(*base_from_audio(this)).extension_owner }.set_setup_sample_rate(setup.sample_rate);
-        crate::log_line(&format!(
-            "IAudioProcessor::setupProcessing mode={} rate={}",
-            setup.process_mode, setup.sample_rate
-        ));
-        if setup.process_mode == 2 {
-            // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
-            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-            // 【为什么在这里同步等待】离线渲染会把当时听不到的声音烘焙进产物：等得不够久
-            // ⇒ 产物里是静音，这是数据正确性失败。等待时长与理由见 `OFFLINE_PREPARE_TIMEOUT`。
-            //
-            // 【为什么失败返回 `kResultOk` 而不是 `kResultFalse`】`kResultFalse` 会让多数
-            // 宿主把插件**整个踢出链路**（用户看到"插件不见了"，没有任何提示）。返回 OK 则
-            // 保留插件：离线渲染输出静音，且日志里有一条明确的原因 —— 可诊断的降级优于
-            // 静默的消失。
-            let started = std::time::Instant::now();
-            if let Err(error) =
-                owner.prepare_offline_until(started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT)
-            {
-                crate::log_line(&format!(
+            }
+            // 记下权威采样率：`process` 用它（而非 `ProcessContext::sample_rate`）选快照，
+            // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
+            // SAFETY: this 为存活音频接口。
+            unsafe { &(*base_from_audio(this)).extension_owner }
+                .set_setup_sample_rate(setup.sample_rate);
+            crate::log_line(&format!(
+                "IAudioProcessor::setupProcessing mode={} rate={}",
+                setup.process_mode, setup.sample_rate
+            ));
+            if setup.process_mode == 2 {
+                // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
+                let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+                // 【为什么在这里同步等待】离线渲染会把当时听不到的声音烘焙进产物：等得不够久
+                // ⇒ 产物里是静音，这是数据正确性失败。等待时长与理由见 `OFFLINE_PREPARE_TIMEOUT`。
+                //
+                // 【为什么失败返回 `kResultOk` 而不是 `kResultFalse`】`kResultFalse` 会让多数
+                // 宿主把插件**整个踢出链路**（用户看到"插件不见了"，没有任何提示）。返回 OK 则
+                // 保留插件：离线渲染输出静音，且日志里有一条明确的原因 —— 可诊断的降级优于
+                // 静默的消失。
+                let started = std::time::Instant::now();
+                if let Err(error) = owner.prepare_offline_until(
+                    started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT,
+                ) {
+                    crate::log_line(&format!(
                     "Offline preparation failed after {:?}: {error}. Keeping the plugin in the chain; \
                      offline output will be silent until preparation succeeds.",
                     started.elapsed()
                 ));
-                return K_RESULT_OK;
+                    return K_RESULT_OK;
+                }
             }
-        }
-        K_RESULT_OK
+            K_RESULT_OK
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
-        if this.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        if state == 0 {
-            unsafe { &(*base_from_audio(this)).extension_owner }.record_processing_stop();
-        }
-        K_RESULT_OK
-
-    })
-  }}
+unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
+            if this.is_null() {
+                return K_INVALID_ARGUMENT;
+            }
+            if state == 0 {
+                unsafe { &(*base_from_audio(this)).extension_owner }.record_processing_stop();
+            }
+            K_RESULT_OK
+        })
+    }
+}
 
 /// 音频回调里被 `catch_unwind` 拦下的 panic 次数。
 ///
@@ -1491,14 +1509,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     }
 }
 
-unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        0
-
-    })
-  }}
+unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || 0)
+    }
+}
 
 static COMPONENT_VTBL: ComponentVtbl = ComponentVtbl {
     query_interface: component_query_interface,
@@ -1590,296 +1607,292 @@ unsafe extern "system" fn edit_controller_query_interface(
     this: *mut c_void,
     iid: *const u8,
     obj: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || {
-        if obj.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        // SAFETY: obj 是宿主提供的输出槽。
-        unsafe { *obj = std::ptr::null_mut() };
-        if unsafe { crate::editor::connection::is_connection(iid) } {
-            let controller = this as *mut EditController;
-            unsafe {
-                edit_controller_add_ref(this);
-                *obj = std::ptr::addr_of_mut!((*controller).connection_vtbl).cast();
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_NO_INTERFACE, || {
+            if obj.is_null() {
+                return K_INVALID_ARGUMENT;
             }
-            return K_RESULT_OK;
-        }
-        if unsafe { iid_matches(iid, IID_FUNKNOWN) }
-            || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
-            || unsafe { iid_matches(iid, IID_IEDIT_CONTROLLER) }
-        {
+            // SAFETY: obj 是宿主提供的输出槽。
+            unsafe { *obj = std::ptr::null_mut() };
+            if unsafe { crate::editor::connection::is_connection(iid) } {
+                let controller = this as *mut EditController;
+                unsafe {
+                    edit_controller_add_ref(this);
+                    *obj = std::ptr::addr_of_mut!((*controller).connection_vtbl).cast();
+                }
+                return K_RESULT_OK;
+            }
+            if unsafe { iid_matches(iid, IID_FUNKNOWN) }
+                || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
+                || unsafe { iid_matches(iid, IID_IEDIT_CONTROLLER) }
+            {
+                let controller = this as *const EditController;
+                // SAFETY: this 是活动控制器对象。
+                unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) };
+                // SAFETY: 输出槽非空。
+                unsafe { *obj = this };
+                return K_RESULT_OK;
+            }
+            crate::log_line(&format!("controller queryInterface miss iid={}", unsafe {
+                hex_iid(iid)
+            }));
+            K_NO_INTERFACE
+        })
+    }
+}
+
+unsafe extern "system" fn edit_controller_add_ref(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
             let controller = this as *const EditController;
             // SAFETY: this 是活动控制器对象。
-            unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) };
-            // SAFETY: 输出槽非空。
-            unsafe { *obj = this };
-            return K_RESULT_OK;
-        }
-        crate::log_line(&format!("controller queryInterface miss iid={}", unsafe {
-            hex_iid(iid)
-        }));
-        K_NO_INTERFACE
+            unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn edit_controller_add_ref(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        let controller = this as *const EditController;
-        // SAFETY: this 是活动控制器对象。
-        unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
-
-    })
-  }}
-
-unsafe extern "system" fn edit_controller_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        let controller = this as *mut EditController;
-        // SAFETY: this 是活动控制器对象。
-        let previous = unsafe { (*controller).refcount.fetch_sub(1, Ordering::AcqRel) };
-        let remaining = previous - 1;
-        if remaining == 0 {
-            // SAFETY: 引用计数归零，且没有其它持有者。
-            unsafe { drop(Box::from_raw(controller)) };
-        }
-        remaining as u32
-
-    })
-  }}
+unsafe extern "system" fn edit_controller_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || {
+            let controller = this as *mut EditController;
+            // SAFETY: this 是活动控制器对象。
+            let previous = unsafe { (*controller).refcount.fetch_sub(1, Ordering::AcqRel) };
+            let remaining = previous - 1;
+            if remaining == 0 {
+                // SAFETY: 引用计数归零，且没有其它持有者。
+                unsafe { drop(Box::from_raw(controller)) };
+            }
+            remaining as u32
+        })
+    }
+}
 
 unsafe extern "system" fn edit_controller_initialize(
     this: *mut c_void,
     context: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe {
-            (*(this as *mut EditController))
-                .connection
-                .initialize(context);
-        }
-        crate::log_line("IEditController::initialize");
-        K_RESULT_OK
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            unsafe {
+                (*(this as *mut EditController))
+                    .connection
+                    .initialize(context);
+            }
+            crate::log_line("IEditController::initialize");
+            K_RESULT_OK
+        })
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe {
-            let controller = &*(this as *mut EditController);
-            controller.editor_link.clear();
-            let _ = controller
-                .editor_link
-                .set_component_handler(std::ptr::null_mut());
-            controller.connection.close();
-        }
-        crate::log_line("IEditController::terminate");
-        K_RESULT_OK
-
-    })
-  }}
+unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            unsafe {
+                let controller = &*(this as *mut EditController);
+                controller.editor_link.clear();
+                let _ = controller
+                    .editor_link
+                    .set_component_handler(std::ptr::null_mut());
+                controller.connection.close();
+            }
+            crate::log_line("IEditController::terminate");
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn edit_controller_set_component_state(
     _this: *mut c_void,
     _state: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_set_state(
     _this: *mut c_void,
     _state: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_get_state(
     _this: *mut c_void,
     _state: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
-    })
-  }}
-
-unsafe extern "system" fn edit_controller_get_parameter_count(_this: *mut c_void) -> i32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        0
-
-    })
-  }}
+unsafe extern "system" fn edit_controller_get_parameter_count(_this: *mut c_void) -> i32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || 0)
+    }
+}
 
 unsafe extern "system" fn edit_controller_get_parameter_info(
     _this: *mut c_void,
     _index: i32,
     _info: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_get_param_string_by_value(
     _this: *mut c_void,
     _id: u32,
     _value: f64,
     _string: *mut u16,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_get_param_value_by_string(
     _this: *mut c_void,
     _id: u32,
     _string: *mut u16,
     _value: *mut f64,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_normalized_param_to_plain(
     _this: *mut c_void,
     _id: u32,
     value: f64,
-) -> f64 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || {
-        value
-
-    })
-  }}
+) -> f64 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0.0, || value)
+    }
+}
 
 unsafe extern "system" fn edit_controller_plain_param_to_normalized(
     _this: *mut c_void,
     _id: u32,
     value: f64,
-) -> f64 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || {
-        value
-
-    })
-  }}
+) -> f64 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0.0, || value)
+    }
+}
 
 unsafe extern "system" fn edit_controller_get_param_normalized(
     _this: *mut c_void,
     _id: u32,
-) -> f64 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || {
-        0.0
-
-    })
-  }}
+) -> f64 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0.0, || 0.0)
+    }
+}
 
 unsafe extern "system" fn edit_controller_set_param_normalized(
     _this: *mut c_void,
     _id: u32,
     _value: f64,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        K_NOT_IMPLEMENTED
-
-    })
-  }}
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    }
+}
 
 unsafe extern "system" fn edit_controller_set_component_handler(
     this: *mut c_void,
     handler: *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        if this.is_null() {
-            return K_INVALID_ARGUMENT;
-        }
-        let controller = unsafe { &*(this as *const EditController) };
-        if controller
-            .editor_link
-            .set_component_handler(handler)
-            .is_err()
-        {
-            return K_RESULT_FALSE;
-        }
-        crate::log_line(&format!(
-            "IEditController::setComponentHandler({})",
-            if handler.is_null() {
-                "null"
-            } else {
-                "connected"
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if this.is_null() {
+                return K_INVALID_ARGUMENT;
             }
-        ));
-        K_RESULT_OK
-
-    })
-  }}
+            let controller = unsafe { &*(this as *const EditController) };
+            if controller
+                .editor_link
+                .set_component_handler(handler)
+                .is_err()
+            {
+                return K_RESULT_FALSE;
+            }
+            crate::log_line(&format!(
+                "IEditController::setComponentHandler({})",
+                if handler.is_null() {
+                    "null"
+                } else {
+                    "connected"
+                }
+            ));
+            K_RESULT_OK
+        })
+    }
+}
 
 unsafe extern "system" fn edit_controller_create_view(
     this: *mut c_void,
     name: *const c_char,
-) -> *mut c_void {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(std::ptr::null_mut(), || {
-        if this.is_null()
-            || name.is_null()
-            || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor"
-        {
-            return std::ptr::null_mut();
-        }
-        crate::log_line("IEditController::createView -> native editor");
-        crate::editor::create_view_with_link(
-            unsafe { &*(this as *const EditController) }
-                .editor_link
-                .clone(),
-        )
-
-    })
-  }}
+) -> *mut c_void {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(std::ptr::null_mut(), || {
+            if this.is_null()
+                || name.is_null()
+                || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor"
+            {
+                return std::ptr::null_mut();
+            }
+            crate::log_line("IEditController::createView -> native editor");
+            crate::editor::create_view_with_link(
+                unsafe { &*(this as *const EditController) }
+                    .editor_link
+                    .clone(),
+            )
+        })
+    }
+}
 
 static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
     query_interface: edit_controller_query_interface,
@@ -1921,148 +1934,160 @@ unsafe extern "system" fn pc_query(
     this: *mut c_void,
     iid: *const u8,
     out: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe { component_query_interface(processor_from_connection(this).cast(), iid, out) }
-
-    })
-  }}
-unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        unsafe { processor_add_ref(processor_from_connection(this)) }
-
-    })
-  }}
-unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        unsafe { processor_release(processor_from_connection(this)) }
-
-    })
-  }}
-unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let processor = unsafe { &*processor_from_connection(this) };
-        let result = unsafe { processor.connection.connect(other) };
-        if result == K_RESULT_OK {
-            let sent = processor.connection.send(Some(processor.route.token()));
-            crate::log_line(&format!("processor connection route sent result={sent}"));
-        }
-        result
-
-    })
-  }}
-unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe { &*processor_from_connection(this) }
-            .connection
-            .disconnect(other)
-
-    })
-  }}
-unsafe extern "system" fn pc_notify(this: *mut c_void, message: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let processor = unsafe { &*processor_from_connection(this) };
-        match unsafe { crate::editor::connection::read(message) } {
-            Ok(crate::editor::connection::Message::RequestRoute) => {
-                processor.connection.send(Some(processor.route.token()))
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+            component_query_interface(processor_from_connection(this).cast(), iid, out)
+        })
+    }
+}
+unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || unsafe {
+            processor_add_ref(processor_from_connection(this))
+        })
+    }
+}
+unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || unsafe {
+            processor_release(processor_from_connection(this))
+        })
+    }
+}
+unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let processor = unsafe { &*processor_from_connection(this) };
+            let result = unsafe { processor.connection.connect(other) };
+            if result == K_RESULT_OK {
+                let sent = processor.connection.send(Some(processor.route.token()));
+                crate::log_line(&format!("processor connection route sent result={sent}"));
             }
-            _ => K_RESULT_FALSE,
-        }
-
-    })
-  }}
+            result
+        })
+    }
+}
+unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            unsafe { &*processor_from_connection(this) }
+                .connection
+                .disconnect(other)
+        })
+    }
+}
+unsafe extern "system" fn pc_notify(this: *mut c_void, message: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let processor = unsafe { &*processor_from_connection(this) };
+            match unsafe { crate::editor::connection::read(message) } {
+                Ok(crate::editor::connection::Message::RequestRoute) => {
+                    processor.connection.send(Some(processor.route.token()))
+                }
+                _ => K_RESULT_FALSE,
+            }
+        })
+    }
+}
 unsafe extern "system" fn cc_query(
     this: *mut c_void,
     iid: *const u8,
     out: *mut *mut c_void,
-) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        unsafe { edit_controller_query_interface(controller_from_connection(this).cast(), iid, out) }
-
-    })
-  }}
-unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        unsafe { edit_controller_add_ref(controller_from_connection(this).cast()) }
-
-    })
-  }}
-unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || {
-        unsafe { edit_controller_release(controller_from_connection(this).cast()) }
-
-    })
-  }}
-unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let controller = unsafe { &*controller_from_connection(this) };
-        let result = unsafe { controller.connection.connect(other) };
-        if result == K_RESULT_OK {
-            let sent = controller.connection.send(None);
-            crate::log_line(&format!(
-                "controller connection route requested result={sent}"
-            ));
-        }
-        result
-
-    })
-  }}
-unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let controller = unsafe { &*controller_from_connection(this) };
-        let result = controller.connection.disconnect(other);
-        if result == K_RESULT_OK {
-            controller.editor_link.clear();
-        }
-        result
-
-    })
-  }}
-unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> TResult {{
-    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || {
-        let controller = unsafe { &*controller_from_connection(this) };
-        match unsafe { crate::editor::connection::read(message) } {
-            Ok(crate::editor::connection::Message::Route { pid, token }) => {
-                match controller.editor_link.bind(pid, &token) {
-                    Ok(()) => {
-                        crate::log_line("controller editor route bound to actual processor");
-                        K_RESULT_OK
-                    }
-                    Err(error) => {
-                        crate::log_line(&format!("controller editor route rejected: {error}"));
-                        K_RESULT_FALSE
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+            edit_controller_query_interface(controller_from_connection(this).cast(), iid, out)
+        })
+    }
+}
+unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || unsafe {
+            edit_controller_add_ref(controller_from_connection(this).cast())
+        })
+    }
+}
+unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(0, || unsafe {
+            edit_controller_release(controller_from_connection(this).cast())
+        })
+    }
+}
+unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let controller = unsafe { &*controller_from_connection(this) };
+            let result = unsafe { controller.connection.connect(other) };
+            if result == K_RESULT_OK {
+                let sent = controller.connection.send(None);
+                crate::log_line(&format!(
+                    "controller connection route requested result={sent}"
+                ));
+            }
+            result
+        })
+    }
+}
+unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let controller = unsafe { &*controller_from_connection(this) };
+            let result = controller.connection.disconnect(other);
+            if result == K_RESULT_OK {
+                controller.editor_link.clear();
+            }
+            result
+        })
+    }
+}
+unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            let controller = unsafe { &*controller_from_connection(this) };
+            match unsafe { crate::editor::connection::read(message) } {
+                Ok(crate::editor::connection::Message::Route { pid, token }) => {
+                    match controller.editor_link.bind(pid, &token) {
+                        Ok(()) => {
+                            crate::log_line("controller editor route bound to actual processor");
+                            K_RESULT_OK
+                        }
+                        Err(error) => {
+                            crate::log_line(&format!("controller editor route rejected: {error}"));
+                            K_RESULT_FALSE
+                        }
                     }
                 }
+                _ => K_RESULT_FALSE,
             }
-            _ => K_RESULT_FALSE,
-        }
-
-    })
-  }}
+        })
+    }
+}
 static PROCESSOR_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
     crate::editor::connection::ConnectionVtbl {
         base: crate::editor::connection::UnknownVtbl {
@@ -2093,8 +2118,8 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 }
 
 #[cfg(test)]
-mod lifetime_tests;
-#[cfg(test)]
 mod audio_boundary_tests;
+#[cfg(test)]
+mod lifetime_tests;
 #[cfg(test)]
 mod realtime_tests;

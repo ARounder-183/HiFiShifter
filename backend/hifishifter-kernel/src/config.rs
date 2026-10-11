@@ -3005,7 +3005,9 @@ fn acquire_config_file_lock(config_dir: &Path) -> Option<std::fs::File> {
     match file.lock() {
         Ok(()) => Some(file),
         Err(error) => {
-            log::warn!("app_config cross-process lock unavailable ({error}); continuing without it");
+            log::warn!(
+                "app_config cross-process lock unavailable ({error}); continuing without it"
+            );
             None
         }
     }

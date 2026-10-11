@@ -187,7 +187,9 @@ mod tests {
     #[test]
     fn the_captured_baseline_is_preset_one() {
         let baseline = &fade_axis_capture()["baseline"];
-        let curvature = baseline["D_FADEINDIR_NEW"].as_f64().expect("curvature reading");
+        let curvature = baseline["D_FADEINDIR_NEW"]
+            .as_f64()
+            .expect("curvature reading");
         let s = baseline["D_FADEINDIR2_NEW"].as_f64().expect("S reading");
         assert_eq!(host_fade_preset_for_axes(curvature, s), Some(1.0));
     }

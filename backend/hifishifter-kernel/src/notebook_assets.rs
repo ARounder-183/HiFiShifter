@@ -522,7 +522,13 @@ mod tests {
         assert_eq!(sanitize_export_file_name("../evil", "untitled"), "..evil");
         assert_eq!(sanitize_export_file_name("a:b*c?", "untitled"), "abc");
         assert_eq!(sanitize_export_file_name("   ", "untitled"), "untitled");
-        assert_eq!(sanitize_export_file_name("line
-break", "untitled"), "linebreak");
+        assert_eq!(
+            sanitize_export_file_name(
+                "line
+break",
+                "untitled"
+            ),
+            "linebreak"
+        );
     }
 }

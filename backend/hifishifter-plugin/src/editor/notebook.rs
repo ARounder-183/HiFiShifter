@@ -364,13 +364,13 @@ pub(super) fn read_file_base64(path: &str, max_bytes: Option<u64>) -> serde_json
             "byteLen": read.bytes.len(),
             "base64": B64.encode(&read.bytes),
         }),
-        Err(hifishifter_kernel::notebook_assets::ReadImageFileError::TooLarge {
-            byte_len,
-        }) => serde_json::json!({
-            "ok": false,
-            "error": "notebook_file_too_large",
-            "byteLen": byte_len
-        }),
+        Err(hifishifter_kernel::notebook_assets::ReadImageFileError::TooLarge { byte_len }) => {
+            serde_json::json!({
+                "ok": false,
+                "error": "notebook_file_too_large",
+                "byteLen": byte_len
+            })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
     }
 }
@@ -500,8 +500,7 @@ mod tests {
     /// `notebook_file_too_large` 码必须原样透传给前端。
     #[test]
     fn read_file_base64_wraps_the_kernel_guard_with_stable_codes() {
-        let dir =
-            std::env::temp_dir().join(format!("hfs-plugin-readimage-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hfs-plugin-readimage-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("x.png");

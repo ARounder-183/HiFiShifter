@@ -286,7 +286,10 @@ impl EditorSession {
         index: usize,
         parent: Option<String>,
     ) -> Result<(), String> {
-        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self
+            .document
+            .upgrade()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let before = self.timeline.lock_or_recover().clone();
         if !before.tracks.iter().any(|track| track.id == id) || index > 10000 {
             return Err("unknown private track or invalid index".into());
@@ -441,7 +444,10 @@ impl EditorSession {
         if self.closed.load(Ordering::Acquire) {
             return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
         }
-        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self
+            .document
+            .upgrade()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let lease = request
             .link
             .as_ref()
@@ -705,9 +711,14 @@ impl EditorSession {
                     let mutates = super::commands::mutates_audio(&request.command);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Some(link) = &request.link {
-                            let document = session.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+                            let document = session
+                                .document
+                                .upgrade()
+                                .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
                             if Some(link.authorize(&document)?) != lease {
-                                return Err(crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error());
+                                return Err(
+                                    crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error()
+                                );
                             }
                             let views = session.views.lock_or_recover();
                             // view关闭仅取消回信；已入队尾笔仍持enqueue验证的身份与route代次。
@@ -793,7 +804,10 @@ impl EditorSession {
             let loaded = self.loaded.lock_or_recover();
             (loaded.edit, loaded.model, loaded.projection.clone())
         };
-        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self
+            .document
+            .upgrade()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         Ok((document, edit, model, projection))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
@@ -963,7 +977,10 @@ impl EditorSession {
         }
     }
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
-        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self
+            .document
+            .upgrade()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         // GUI清单有独立代次：粘贴/删除可以先于ARA模型回调，不能被模型缓存早退吞掉。
         if self.loaded.lock_or_recover().initialized
             && document.renderer_owners().is_empty()
@@ -1650,7 +1667,10 @@ impl EditorSession {
         {
             return Ok(());
         }
-        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self
+            .document
+            .upgrade()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let current = self.native_timeline(self.timeline.lock_or_recover().clone())?;
         let roots = document.selected_source_parameters(&current)?;
         let mut timeline = self.timeline.lock_or_recover();
@@ -1758,7 +1778,10 @@ impl ParamHost for EditorSession {
     }
     fn publish_timeline(&self, timeline: TimelineState) {
         let result = (|| {
-            let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+            let document = self
+                .document
+                .upgrade()
+                .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
             let groups = document.edits.lock_or_recover().groups.clone();
             let groups =
                 if groups.is_empty() {

@@ -472,9 +472,9 @@ impl DocumentSession {
         let sources = ids
             .into_iter()
             .map(|id| {
-                let pcm = available
-                    .get(id)
-                    .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
+                let pcm = available.get(id).ok_or_else(|| {
+                    format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE)
+                })?;
                 Ok((id.clone(), pcm.clone()))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -540,9 +540,9 @@ impl DocumentSession {
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
             return Err(format!(
-            "{} model changed; local curves preserved",
-            crate::editor::errors::CONFLICT_PREFIX
-        ));
+                "{} model changed; local curves preserved",
+                crate::editor::errors::CONFLICT_PREFIX
+            ));
         }
         let host = self.workspace_timeline_locked()?;
         let mut edits = self.edits.lock_or_recover();
@@ -603,9 +603,9 @@ impl DocumentSession {
                 || self.revision.load(Ordering::Acquire) != base_model
             {
                 return Err(format!(
-            "{} model changed during automatic apply",
-            crate::editor::errors::CONFLICT_PREFIX
-        ));
+                    "{} model changed during automatic apply",
+                    crate::editor::errors::CONFLICT_PREFIX
+                ));
             }
             let edits = self.edits.lock_or_recover().clone();
             if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
@@ -646,9 +646,9 @@ impl DocumentSession {
             || self.revision.load(Ordering::Acquire) != base_model
         {
             return Err(format!(
-            "{} model changed during automatic apply",
-            crate::editor::errors::CONFLICT_PREFIX
-        ));
+                "{} model changed during automatic apply",
+                crate::editor::errors::CONFLICT_PREFIX
+            ));
         }
         if !current()
             || self.edits.lock_or_recover().revision != edit

@@ -282,8 +282,6 @@ pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Durati
 /// 的尝试次数上限提前退出，不必空等到这个上限。
 pub(crate) const OFFLINE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-
-
 impl ExtensionOwner {
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
     pub(crate) fn is_closed(&self) -> bool {
@@ -1733,7 +1731,8 @@ impl ExtensionOwner {
             // timeline 载荷的结构版本守卫：未知的新版本拒收（旧客户端的 0 = 版本化
             // 之前，按 pre-versioning 接受）。否则一次不认识的 JSON 会被静默合并进
             // 编辑会话。
-            if schema_version != 0 && schema_version != hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION {
+            if schema_version != 0 && schema_version != hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION
+            {
                 return Response {
                     ok: false,
                     error: Some(format!(
@@ -1775,9 +1774,9 @@ impl ExtensionOwner {
                         .filter_map(|clip| clip.source_path.as_ref())
                         .collect::<BTreeSet<_>>()
                     {
-                        let pcm = available
-                            .get(id)
-                            .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
+                        let pcm = available.get(id).ok_or_else(|| {
+                            format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE)
+                        })?;
                         sources.push(HostPcm {
                             persistent_id: id.clone(),
                             sample_rate: pcm.sample_rate,
@@ -1839,15 +1838,15 @@ impl ExtensionOwner {
                 self.merge_pending_restore(document)?;
                 if !document.ready.load(Ordering::Acquire) {
                     return Err(format!(
-                    "{}; refresh after editing",
-                    crate::editor::errors::HOST_MODEL_NOT_READY
-                ));
+                        "{}; refresh after editing",
+                        crate::editor::errors::HOST_MODEL_NOT_READY
+                    ));
                 }
                 if document.revision.load(Ordering::Acquire) != base_model {
                     return Err(format!(
-                    "{} model changed; refresh",
-                    crate::editor::errors::CONFLICT_PREFIX
-                ));
+                        "{} model changed; refresh",
+                        crate::editor::errors::CONFLICT_PREFIX
+                    ));
                 }
                 let mut edits = document.edits.lock_or_recover();
                 edits.reconcile(&document.track_bindings.lock_or_recover())?;
@@ -2511,12 +2510,12 @@ impl ExtensionOwner {
 }
 
 #[cfg(test)]
+mod assigned_timeline_tests;
+#[cfg(test)]
 mod bound_tests;
 #[cfg(test)]
 mod host_audio_state_tests;
 #[cfg(test)]
-mod region_geometry_match_tests;
-#[cfg(test)]
-mod assigned_timeline_tests;
-#[cfg(test)]
 mod host_geometries_tests;
+#[cfg(test)]
+mod region_geometry_match_tests;

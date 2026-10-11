@@ -28,29 +28,45 @@ impl TerminalError {
 }
 
 /// 编辑文档已关闭（`alive` 原子量一旦 false 永不再活）。
-pub(crate) const DOCUMENT_CLOSED: TerminalError =
-    TerminalError { code: error_code::DOCUMENT_CLOSED, message: "document closed" };
+pub(crate) const DOCUMENT_CLOSED: TerminalError = TerminalError {
+    code: error_code::DOCUMENT_CLOSED,
+    message: "document closed",
+};
 /// FX 处理器（组件）已销毁。
-pub(crate) const FX_PROCESSOR_CLOSED: TerminalError =
-    TerminalError { code: error_code::FX_PROCESSOR_CLOSED, message: "FX processor closed" };
+pub(crate) const FX_PROCESSOR_CLOSED: TerminalError = TerminalError {
+    code: error_code::FX_PROCESSOR_CLOSED,
+    message: "FX processor closed",
+};
 /// 编辑器视图不存在或身份未知。
-pub(crate) const VIEW_CLOSED_OR_UNKNOWN: TerminalError =
-    TerminalError { code: error_code::VIEW_CLOSED_OR_UNKNOWN, message: "editor view closed or unknown" };
+pub(crate) const VIEW_CLOSED_OR_UNKNOWN: TerminalError = TerminalError {
+    code: error_code::VIEW_CLOSED_OR_UNKNOWN,
+    message: "editor view closed or unknown",
+};
 /// 视图身份与会话不匹配。
-pub(crate) const VIEW_IDENTITY_MISMATCH: TerminalError =
-    TerminalError { code: error_code::VIEW_IDENTITY_MISMATCH, message: "editor view identity mismatch" };
+pub(crate) const VIEW_IDENTITY_MISMATCH: TerminalError = TerminalError {
+    code: error_code::VIEW_IDENTITY_MISMATCH,
+    message: "editor view identity mismatch",
+};
 /// 请求排队期间编辑路由已改变。
-pub(crate) const ROUTE_CHANGED_WHILE_QUEUED: TerminalError =
-    TerminalError { code: error_code::ROUTE_CHANGED_WHILE_QUEUED, message: "editor route changed while request queued" };
+pub(crate) const ROUTE_CHANGED_WHILE_QUEUED: TerminalError = TerminalError {
+    code: error_code::ROUTE_CHANGED_WHILE_QUEUED,
+    message: "editor route changed while request queued",
+};
 /// 编辑路由属于另一份文档。
-pub(crate) const ROUTE_OTHER_DOCUMENT: TerminalError =
-    TerminalError { code: error_code::ROUTE_OTHER_DOCUMENT, message: "editor route belongs to another document" };
+pub(crate) const ROUTE_OTHER_DOCUMENT: TerminalError = TerminalError {
+    code: error_code::ROUTE_OTHER_DOCUMENT,
+    message: "editor route belongs to another document",
+};
 /// 编辑租约已被撤销。
-pub(crate) const LEASE_REVOKED: TerminalError =
-    TerminalError { code: error_code::LEASE_REVOKED, message: "editor lease revoked" };
+pub(crate) const LEASE_REVOKED: TerminalError = TerminalError {
+    code: error_code::LEASE_REVOKED,
+    message: "editor lease revoked",
+};
 /// 插件实例已关闭。
-pub(crate) const INSTANCE_CLOSED: TerminalError =
-    TerminalError { code: error_code::INSTANCE_CLOSED, message: "plugin instance closed" };
+pub(crate) const INSTANCE_CLOSED: TerminalError = TerminalError {
+    code: error_code::INSTANCE_CLOSED,
+    message: "plugin instance closed",
+};
 
 /// 终态表：分类点遍历它做子串匹配（措辞本身来自上面这些常量）。
 const TERMINAL: &[&str] = &[
@@ -91,7 +107,10 @@ pub(crate) fn terminal_error_code(error: &str) -> Option<u32> {
         (FX_PROCESSOR_CLOSED.message, FX_PROCESSOR_CLOSED.code),
         (VIEW_CLOSED_OR_UNKNOWN.message, VIEW_CLOSED_OR_UNKNOWN.code),
         (VIEW_IDENTITY_MISMATCH.message, VIEW_IDENTITY_MISMATCH.code),
-        (ROUTE_CHANGED_WHILE_QUEUED.message, ROUTE_CHANGED_WHILE_QUEUED.code),
+        (
+            ROUTE_CHANGED_WHILE_QUEUED.message,
+            ROUTE_CHANGED_WHILE_QUEUED.code,
+        ),
         (ROUTE_OTHER_DOCUMENT.message, ROUTE_OTHER_DOCUMENT.code),
         (LEASE_REVOKED.message, LEASE_REVOKED.code),
         (INSTANCE_CLOSED.message, INSTANCE_CLOSED.code),
@@ -120,7 +139,11 @@ mod tests {
             (INSTANCE_CLOSED, 8),
         ];
         for (entry, code) in table {
-            assert_eq!(entry.code, code, "{} must keep its protocol code", entry.message);
+            assert_eq!(
+                entry.code, code,
+                "{} must keep its protocol code",
+                entry.message
+            );
         }
     }
 
