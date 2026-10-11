@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # 每个被宿主调用的 extern "system" 入口都必须自带 panic 守卫
+      # （panic 越过 FFI 边界 = abort = DAW 崩溃）。纪律见 docs/thread-model.md。
+      - name: FFI panic-guard gate
+        run: python tools/check-ffi-guards.py
+
       # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
       # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
       - name: Configure pinned SDK paths

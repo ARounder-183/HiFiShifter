@@ -94,32 +94,60 @@ pub(crate) fn log_line(message: &str) {
     log::info!("[vst3] {message}");
 }
 
+/// FFI 入口的 panic 遏制原语：Rust 1.71+ 起 panic 越过 `extern "system"` 边界 =
+/// abort，宿主（DAW）进程随之崩溃。**每一个被宿主调用的入口**都必须把自己的
+/// panic 拦成明确的失败值 —— 这不是音频回调的特例，而是全部 ABI 面的规则。
+///
+/// 【为什么 fallback 由调用方给】不同入口的"诚实失败值"不同（QI 该回
+/// `K_NO_INTERFACE`、refcount 该回计数、视图创建该回 null），原语不该替调用方猜。
+/// 拦下的 panic 统一记入日志（带 payload 文本），诊断有据可查。
+pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic payload".to_string());
+            log::error!("[ffi-guard] panic contained at FFI boundary: {message}");
+            fallback
+        }
+    }
+}
+
 /// VST3 模块入口：返回 `IPluginFactory*`。
 ///
 /// 【为什么先 `runtime()`】工厂查询可能早于任何组件创建；先把 ARA 工厂建好，
 /// 后面 VST3 侧查 `IPlugInEntryPoint` 时才有东西可给。
 #[no_mangle]
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
-    diagnostics::init();
-    editor::resources::initialize_models();
-    let _ = runtime::runtime();
-    vst3::get_plugin_factory()
+    crate::guard_ffi(std::ptr::null_mut(), || {
+        diagnostics::init();
+        editor::resources::initialize_models();
+        let _ = runtime::runtime();
+        vst3::get_plugin_factory()
+    })
 }
 
 /// VST3 模块初始化入口（REAPER 在 `LoadLibrary` 之后显式调用）。
 ///
 /// 【为什么初始化失败也返回 `true`】让宿主把类列出来，失败原因记在日志里。返回
 /// `false` 会让 REAPER 直接跳过插件 —— 那就什么信息都拿不到了。探针期实测过这个取舍。
+/// panic 除外：`guard_ffi` 已把 panic 原文记进日志，此时模块状态未知，宁可让宿主
+/// 跳过也不要带着坏 runtime 插进 N 个轨道。
 #[no_mangle]
 pub extern "system" fn InitDll() -> bool {
-    diagnostics::init();
-    editor::resources::initialize_models();
-    let _ = runtime::runtime();
-    true
+    crate::guard_ffi(false, || {
+        diagnostics::init();
+        editor::resources::initialize_models();
+        let _ = runtime::runtime();
+        true
+    })
 }
 
 /// VST3 模块卸载入口。
 #[no_mangle]
 pub extern "system" fn ExitDll() -> bool {
-    editor::shutdown()
+    crate::guard_ffi(false, || editor::shutdown())
 }

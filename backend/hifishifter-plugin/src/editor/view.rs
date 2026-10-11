@@ -102,45 +102,65 @@ unsafe extern "system" fn query(
     this: *mut c_void,
     iid: *const u8,
     out: *mut *mut c_void,
-) -> TResult {
-    if out.is_null() || this.is_null() {
-        return K_INVALID_ARGUMENT;
-    }
-    unsafe {
-        *out = std::ptr::null_mut();
-    }
-    if unsafe { iid_matches(iid, IID_VIEW) || iid_matches(iid, IID_UNKNOWN) } {
-        unsafe {
-            add_ref(this);
-            *out = this;
+) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        if out.is_null() || this.is_null() {
+            return K_INVALID_ARGUMENT;
         }
-        K_RESULT_OK
-    } else {
-        K_NO_INTERFACE
-    }
-}
-unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
-    unsafe { view(this) }.refs.fetch_add(1, Ordering::Relaxed) + 1
-}
-unsafe extern "system" fn release(this: *mut c_void) -> u32 {
-    let previous = unsafe { view(this) }.refs.fetch_sub(1, Ordering::AcqRel);
-    if previous == 1 {
         unsafe {
-            drop(Box::from_raw(this.cast::<View>()));
+            *out = std::ptr::null_mut();
         }
-    }
-    previous - 1
-}
-unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> TResult {
-    if kind.is_null() {
-        return K_INVALID_ARGUMENT;
-    }
-    #[cfg(windows)]
-    if unsafe { CStr::from_ptr(kind) }.to_bytes() == b"HWND" {
-        return K_RESULT_OK;
-    }
-    K_RESULT_FALSE
-}
+        if unsafe { iid_matches(iid, IID_VIEW) || iid_matches(iid, IID_UNKNOWN) } {
+            unsafe {
+                add_ref(this);
+                *out = this;
+            }
+            K_RESULT_OK
+        } else {
+            K_NO_INTERFACE
+        }
+
+    })
+  }}
+unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(0, || unsafe {
+        unsafe { view(this) }.refs.fetch_add(1, Ordering::Relaxed) + 1
+
+    })
+  }}
+unsafe extern "system" fn release(this: *mut c_void) -> u32 {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(0, || unsafe {
+        let previous = unsafe { view(this) }.refs.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            unsafe {
+                drop(Box::from_raw(this.cast::<View>()));
+            }
+        }
+        previous - 1
+
+    })
+  }}
+unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        if kind.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        #[cfg(windows)]
+        if unsafe { CStr::from_ptr(kind) }.to_bytes() == b"HWND" {
+            return K_RESULT_OK;
+        }
+        K_RESULT_FALSE
+
+    })
+  }}
 unsafe extern "system" fn attached(
     this: *mut c_void,
     parent: *mut c_void,
@@ -220,9 +240,14 @@ unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
         K_RESULT_OK
     })
 }
-unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult {
-    K_RESULT_FALSE
-}
+unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        K_RESULT_FALSE
+
+    })
+  }}
 /// 按锁定SDK的kCommandKey/ASCII虚拟键约定识别共享编辑键，不消费宿主其它快捷键。
 fn edit_key(key: u16, code: i16, mods: i16) -> Option<char> {
     if mods & 4 == 0 || mods & 2 != 0 {
@@ -268,12 +293,22 @@ unsafe fn forward_edit_key(
         K_RESULT_FALSE
     })
 }
-unsafe extern "system" fn key_down(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {
-    unsafe { forward_edit_key(this, key, code, mods, true) }
-}
-unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {
-    unsafe { forward_edit_key(this, key, code, mods, false) }
-}
+unsafe extern "system" fn key_down(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        unsafe { forward_edit_key(this, key, code, mods, true) }
+
+    })
+  }}
+unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        unsafe { forward_edit_key(this, key, code, mods, false) }
+
+    })
+  }}
 unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
@@ -392,33 +427,43 @@ unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TR
         K_RESULT_OK
     })
 }
-unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
-    K_RESULT_OK
-}
-unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> TResult {
-    if rect.is_null() {
-        return K_INVALID_ARGUMENT;
-    }
-    let rect = unsafe { &mut *rect };
-    let (Some(width), Some(height)) = (
-        rect.right.checked_sub(rect.left),
-        rect.bottom.checked_sub(rect.top),
-    ) else {
-        return K_INVALID_ARGUMENT;
-    };
-    if width <= 0 || height <= 0 {
-        return K_INVALID_ARGUMENT;
-    }
-    let (Some(right), Some(bottom)) = (
-        rect.left.checked_add(width.clamp(640, 16384)),
-        rect.top.checked_add(height.clamp(400, 16384)),
-    ) else {
-        return K_INVALID_ARGUMENT;
-    };
-    rect.right = right;
-    rect.bottom = bottom;
-    K_RESULT_OK
-}
+unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        K_RESULT_OK
+
+    })
+  }}
+unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> TResult {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        if rect.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        let rect = unsafe { &mut *rect };
+        let (Some(width), Some(height)) = (
+            rect.right.checked_sub(rect.left),
+            rect.bottom.checked_sub(rect.top),
+        ) else {
+            return K_INVALID_ARGUMENT;
+        };
+        if width <= 0 || height <= 0 {
+            return K_INVALID_ARGUMENT;
+        }
+        let (Some(right), Some(bottom)) = (
+            rect.left.checked_add(width.clamp(640, 16384)),
+            rect.top.checked_add(height.clamp(400, 16384)),
+        ) else {
+            return K_INVALID_ARGUMENT;
+        };
+        rect.right = right;
+        rect.bottom = bottom;
+        K_RESULT_OK
+
+    })
+  }}
 impl Drop for View {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());

@@ -23,16 +23,58 @@ pub(crate) struct PlaybackRenderingStateEvent {
     pub(crate) pass: Option<u64>,
 }
 
-pub(crate) fn guard_json_command(
-    name: &str,
-    f: impl FnOnce() -> serde_json::Value,
-) -> serde_json::Value {
+pub(crate) fn guard_command<T>(name: &str, fallback: T, f: impl FnOnce() -> T) -> T {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
             log::error!("command panicked: {name}");
-            serde_json::json!({"ok": false, "error": format!("panic in command: {name}")})
+            fallback
         }
+    }
+}
+
+/// 同步 Tauri 命令的 panic 守卫（`serde_json::Value` 版）。
+///
+/// 【为什么必须接在每条同步命令上】Tauri 的同步命令在 WebView 的 IPC 线程上
+/// **内联**执行 —— panic 会一路 unwind 穿过 Win32 消息循环的 `extern "system"`
+/// 边界，Rust 1.71+ 语义下等于 abort 整个 App。async 命令已被 tokio 的
+/// 任务边界结构性遏制，同步命令只能靠这层显式守卫。
+pub(crate) fn guard_json_command(
+    name: &str,
+    f: impl FnOnce() -> serde_json::Value,
+) -> serde_json::Value {
+    guard_command(
+        name,
+        serde_json::json!({"ok": false, "error": format!("panic in command: {name}")}),
+        f,
+    )
+}
+
+/// `TimelineStatePayload` 的"命令失败"形态（panic 守卫与各处错误路径共用）。
+///
+/// 【为什么错误挂在 `missing_files`】本 payload 没有独立 error 字段，前端既有
+/// 惯例是把失败信息放进 `missing_files`（见 midi 导入的 error_payload）——
+/// panic 守卫沿用同一惯例，前端不需要新增分支。
+pub(crate) fn timeline_error_payload(error: &str) -> crate::models::TimelineStatePayload {
+    crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: vec![],
+        clips: vec![],
+        created_clip_ids: None,
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![error.to_string()]),
+        disabled_group_ids: vec![],
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
     }
 }
 

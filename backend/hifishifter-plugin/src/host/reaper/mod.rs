@@ -1047,26 +1047,41 @@ mod tests {
         this: *mut c_void,
         iid: *const u8,
         out: *mut *mut c_void,
-    ) -> i32 {
-        let expected = [
-            0x36, 0x5e, 0x65, 0x79, 0xee, 0x77, 0x67, 0x42, 0xa5, 0x73, 0xfe, 0xf7, 0x49, 0x12,
-            0xc2, 0x7c,
-        ];
-        if unsafe { std::slice::from_raw_parts(iid, 16) } != expected {
-            return crate::vst3::K_NO_INTERFACE;
-        }
-        unsafe {
-            add(this);
-            *out = this;
-        }
-        K_RESULT_OK
-    }
-    unsafe extern "system" fn add(this: *mut c_void) -> u32 {
-        unsafe { (&*this.cast::<Host>()).refs.fetch_add(1, Ordering::AcqRel) + 1 }
-    }
-    unsafe extern "system" fn release(this: *mut c_void) -> u32 {
-        unsafe { (&*this.cast::<Host>()).refs.fetch_sub(1, Ordering::AcqRel) - 1 }
-    }
+    ) -> i32 {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(0, || unsafe {
+            let expected = [
+                0x36, 0x5e, 0x65, 0x79, 0xee, 0x77, 0x67, 0x42, 0xa5, 0x73, 0xfe, 0xf7, 0x49, 0x12,
+                0xc2, 0x7c,
+            ];
+            if unsafe { std::slice::from_raw_parts(iid, 16) } != expected {
+                return crate::vst3::K_NO_INTERFACE;
+            }
+            unsafe {
+                add(this);
+                *out = this;
+            }
+            K_RESULT_OK
+    
+    })
+  }}
+    unsafe extern "system" fn add(this: *mut c_void) -> u32 {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(0, || unsafe {
+            unsafe { (&*this.cast::<Host>()).refs.fetch_add(1, Ordering::AcqRel) + 1 }
+    
+    })
+  }}
+    unsafe extern "system" fn release(this: *mut c_void) -> u32 {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(0, || unsafe {
+            unsafe { (&*this.cast::<Host>()).refs.fetch_sub(1, Ordering::AcqRel) - 1 }
+    
+    })
+  }}
     unsafe extern "C" fn position(project: *mut c_void) -> f64 {
         unsafe { (&*project.cast::<Project>()).position }
     }
@@ -1076,30 +1091,45 @@ mod tests {
     unsafe extern "C" fn state(project: *mut c_void) -> i32 {
         unsafe { (&*project.cast::<Project>()).state }
     }
-    unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_void {
-        match unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() {
-            b"GetPlayPositionEx" => position as *const () as *mut c_void,
-            b"GetCursorPositionEx" => cursor as *const () as *mut c_void,
-            b"GetPlayStateEx" => state as *const () as *mut c_void,
-            _ => std::ptr::null_mut(),
-        }
-    }
-    unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_void {
-        if selector == 3 {
-            unsafe { (&*this.cast::<Host>()).project.cast() }
-        } else {
-            std::ptr::null_mut()
-        }
-    }
+    unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_void {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(std::ptr::null_mut(), || unsafe {
+            match unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() {
+                b"GetPlayPositionEx" => position as *const () as *mut c_void,
+                b"GetCursorPositionEx" => cursor as *const () as *mut c_void,
+                b"GetPlayStateEx" => state as *const () as *mut c_void,
+                _ => std::ptr::null_mut(),
+            }
+    
+    })
+  }}
+    unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_void {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(std::ptr::null_mut(), || unsafe {
+            if selector == 3 {
+                unsafe { (&*this.cast::<Host>()).project.cast() }
+            } else {
+                std::ptr::null_mut()
+            }
+    
+    })
+  }}
     unsafe extern "system" fn extended(
         _: *mut c_void,
         _: u32,
         _: *mut c_void,
         _: *mut c_void,
         _: *mut c_void,
-    ) -> *mut c_void {
-        std::ptr::null_mut()
-    }
+    ) -> *mut c_void {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(std::ptr::null_mut(), || unsafe {
+            std::ptr::null_mut()
+    
+    })
+  }}
     static TABLE: HostVtbl = HostVtbl {
         base: UnknownVtbl {
             query,
@@ -1115,13 +1145,18 @@ mod tests {
         REVOKED.set(true);
         1
     }
-    unsafe extern "system" fn reentrant_api(this: *mut c_void, name: *const c_char) -> *mut c_void {
-        if unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() == b"GetPlayStateEx" {
-            reentrant_state as *const () as *mut c_void
-        } else {
-            unsafe { api(this, name) }
-        }
-    }
+    unsafe extern "system" fn reentrant_api(this: *mut c_void, name: *const c_char) -> *mut c_void {{
+    // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+    // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+    crate::guard_ffi(std::ptr::null_mut(), || unsafe {
+            if unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() == b"GetPlayStateEx" {
+                reentrant_state as *const () as *mut c_void
+            } else {
+                unsafe { api(this, name) }
+            }
+    
+    })
+  }}
     /// state读取关闭文档后必须停止，strong host引用不能保活project。
     #[test]
     fn task38a_transport_reentry_revokes_the_next_project_getter() {

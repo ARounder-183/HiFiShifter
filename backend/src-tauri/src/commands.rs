@@ -148,9 +148,18 @@ use tauri::{Manager, State, Window};
 // ===================== core =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn ping() -> serde_json::Value {
-    core::ping()
-}
+pub fn ping() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "ping",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: ping") }),
+        || {
+        core::ping()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInfoPayload {
@@ -159,24 +168,60 @@ pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInf
 
 /// 关于对话框数据（版本 / commit / 仓库链接）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_about_info() -> serde_json::Value {
-    core::get_about_info()
-}
+pub fn get_about_info() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_about_info",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_about_info") }),
+        || {
+        core::get_about_info()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {
-    core::consume_startup_project_path(state)
-}
+pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "consume_startup_project_path",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: consume_startup_project_path") }),
+        || {
+        core::consume_startup_project_path(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::Value {
-    core::set_ui_locale(state, locale)
-}
+pub fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_ui_locale",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_ui_locale") }),
+        || {
+        core::set_ui_locale(state, locale)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    core::get_timeline_state(state)
-}
+pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_timeline_state",
+        common::timeline_error_payload(&format!("panic in command: get_timeline_state")),
+        || {
+        core::get_timeline_state(state)
+
+        },
+    )
+  }}
 
 /// Lightweight timeline state — skips waveform_preview, pitch_range, and
 /// midi_note_data to reduce clone+serialize overhead.
@@ -185,45 +230,90 @@ pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::Timeline
 /// 轮询瘦身的现成入口（直接套用 lite payload 会清掉上述字段，需前端按字段
 /// 合并后才能启用）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_timeline_state_lite(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    core::get_timeline_state_lite(state)
-}
+pub fn get_timeline_state_lite(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_timeline_state_lite",
+        common::timeline_error_payload(&format!("panic in command: get_timeline_state_lite")),
+        || {
+        core::get_timeline_state_lite(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_transport(
     state: State<'_, AppState>,
     playhead_sec: Option<f64>,
     bpm: Option<f64>,
-) -> serde_json::Value {
-    // 传输命令全序化（见 AppState::transport_lock 注释）：seek（含播放/停止
-    // 流程内的锚点恢复）必须与 play/stop 全序执行，否则与它们交错的 seek
-    // 会把 timeline.playhead_sec 写到中间态上。
-    // 经 state.inner() 取锁：guard 借用原始 'r 生命周期而非局部 State 包装，
-    // 否则随后按值传入内部函数会触发 E0505。
-    let _transport_order = state
-        .inner()
-        .transport_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    core::set_transport(state, playhead_sec, bpm)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_transport",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_transport") }),
+        || {
+        // 传输命令全序化（见 AppState::transport_lock 注释）：seek（含播放/停止
+        // 流程内的锚点恢复）必须与 play/stop 全序执行，否则与它们交错的 seek
+        // 会把 timeline.playhead_sec 写到中间态上。
+        // 经 state.inner() 取锁：guard 借用原始 'r 生命周期而非局部 State 包装，
+        // 否则随后按值传入内部函数会触发 E0505。
+        let _transport_order = state
+            .inner()
+            .transport_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        core::set_transport(state, playhead_sec, bpm)
+
+        },
+    )
+  }}
 #[tauri::command(rename_all = "camelCase")]
-pub fn undo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    core::undo_timeline(state)
-}
+pub fn undo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "undo_timeline",
+        common::timeline_error_payload(&format!("panic in command: undo_timeline")),
+        || {
+        core::undo_timeline(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    core::redo_timeline(state)
-}
+pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "redo_timeline",
+        common::timeline_error_payload(&format!("panic in command: redo_timeline")),
+        || {
+        core::redo_timeline(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn begin_undo_group(
     state: State<'_, AppState>,
     label: Option<String>,
-) -> crate::models::TimelineStatePayload {
-    state.begin_undo_group(label)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "begin_undo_group",
+        common::timeline_error_payload(&format!("panic in command: begin_undo_group")),
+        || {
+        state.begin_undo_group(label)
+
+        },
+    )
+  }}
 
 /// 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
 ///
@@ -233,12 +323,21 @@ pub fn begin_undo_group(
 pub fn set_project_save_undo_history(
     state: State<'_, AppState>,
     enabled: bool,
-) -> serde_json::Value {
-    serde_json::json!({
-        "ok": true,
-        "project": state.set_project_save_undo_history(enabled),
-    })
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_save_undo_history",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_save_undo_history") }),
+        || {
+        serde_json::json!({
+            "ok": true,
+            "project": state.set_project_save_undo_history(enabled),
+        })
+
+        },
+    )
+  }}
 
 /// 跳到「操作记录」中的第 `position` 个状态（双击条目）。
 ///
@@ -248,9 +347,18 @@ pub fn set_project_save_undo_history(
 pub fn set_history_position(
     state: State<'_, AppState>,
     position: usize,
-) -> crate::models::TimelineStatePayload {
-    state.set_history_position(position, crate::state::HistoryJumpIntent::Jump)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_history_position",
+        common::timeline_error_payload(&format!("panic in command: set_history_position")),
+        || {
+        state.set_history_position(position, crate::state::HistoryJumpIntent::Jump)
+
+        },
+    )
+  }}
 
 /// 登记「参数编辑器边缘拉伸」这一步带来的选区变化。
 ///
@@ -263,30 +371,66 @@ pub fn record_param_selection_step(
     state: State<'_, AppState>,
     before: Vec<[f32; 2]>,
     after: Vec<[f32; 2]>,
-) -> serde_json::Value {
-    state.record_param_selection_step(before, after)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "record_param_selection_step",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: record_param_selection_step") }),
+        || {
+        state.record_param_selection_step(before, after)
+
+        },
+    )
+  }}
 
 /// 「操作记录」+ 撤销/重做可用性。
 ///
 /// 前端挂载时同步一次；此后由 `history_state` 事件（打点 / 清空历史 /
 /// 撤销 / 重做 / 跳转都会广播）保持实时，无需轮询。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {
-    state.history_state_json()
-}
+pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_history_state",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_history_state") }),
+        || {
+        state.history_state_json()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn end_undo_group(state: State<'_, AppState>) -> serde_json::Value {
-    state.end_undo_group()
-}
+pub fn end_undo_group(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "end_undo_group",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: end_undo_group") }),
+        || {
+        state.end_undo_group()
+
+        },
+    )
+  }}
 
 // ===================== project =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn close_window(window: Window) -> serde_json::Value {
-    project::close_window(window)
-}
+pub fn close_window(window: Window) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "close_window",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: close_window") }),
+        || {
+        project::close_window(window)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMetaPayload {
@@ -297,14 +441,32 @@ pub fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMet
 pub fn new_project(
     state: State<'_, AppState>,
     window: Window,
-) -> crate::models::TimelineStatePayload {
-    project::new_project(state, window)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "new_project",
+        common::timeline_error_payload(&format!("panic in command: new_project")),
+        || {
+        project::new_project(state, window)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_project_dialog() -> serde_json::Value {
-    project::open_project_dialog()
-}
+pub fn open_project_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_project_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_project_dialog") }),
+        || {
+        project::open_project_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn open_project(
@@ -343,18 +505,36 @@ pub async fn open_project(
 
 /// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
-    project::set_project_notes(state, notes_markdown)
-}
+pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_notes",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_notes") }),
+        || {
+        project::set_project_notes(state, notes_markdown)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project(
     state: State<'_, AppState>,
     window: Window,
     notes_markdown: Option<String>,
-) -> serde_json::Value {
-    project::save_project(state, window, notes_markdown)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "save_project",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: save_project") }),
+        || {
+        project::save_project(state, window, notes_markdown)
+
+        },
+    )
+  }}
 
 // ===================== 记事本（附件 / 剪贴板暂存 / 导出） =====================
 
@@ -368,32 +548,77 @@ pub fn notebook_put_asset(
     mime: Option<String>,
     data_base64: String,
     meta: Option<serde_json::Value>,
-) -> serde_json::Value {
-    notebook::put_asset(state, asset_id, kind, ext, mime, data_base64, meta)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_put_asset",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_put_asset") }),
+        || {
+        notebook::put_asset(state, asset_id, kind, ext, mime, data_base64, meta)
+
+        },
+    )
+  }}
 
 /// 读回一条附件的字节（图片渲染走这条）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_read_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
-    notebook::read_asset(state, asset_id)
-}
+pub fn notebook_read_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_read_asset",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_asset") }),
+        || {
+        notebook::read_asset(state, asset_id)
+
+        },
+    )
+  }}
 
 /// 列出全部附件（附件管理器用）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_list_assets(state: State<'_, AppState>) -> serde_json::Value {
-    notebook::list_assets(state)
-}
+pub fn notebook_list_assets(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_list_assets",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_list_assets") }),
+        || {
+        notebook::list_assets(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_remove_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
-    notebook::remove_asset(state, asset_id)
-}
+pub fn notebook_remove_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_remove_asset",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_remove_asset") }),
+        || {
+        notebook::remove_asset(state, asset_id)
+
+        },
+    )
+  }}
 
 /// 按正文引用清理孤儿附件（保存前调用）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {
-    notebook::prune_assets(state)
-}
+pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_prune_assets",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_prune_assets") }),
+        || {
+        notebook::prune_assets(state)
+
+        },
+    )
+  }}
 
 /// 把图片文件读成 base64（拖入的图片走这条）。
 #[tauri::command(rename_all = "camelCase")]
@@ -412,30 +637,66 @@ pub async fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> 
 
 /// 读出系统剪贴板里的 HiFiShifter 载荷（时间轴片段 / 参数线），供暂存。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_read_clipboard_payload() -> serde_json::Value {
-    notebook::read_clipboard_payload()
-}
+pub fn notebook_read_clipboard_payload() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_read_clipboard_payload",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_clipboard_payload") }),
+        || {
+        notebook::read_clipboard_payload()
+
+        },
+    )
+  }}
 
 /// 把暂存的载荷字节原样写回系统剪贴板。
 #[tauri::command(rename_all = "camelCase")]
 pub fn notebook_write_clipboard_payload(
     payload_base64: String,
     text_summary: Option<String>,
-) -> serde_json::Value {
-    notebook::write_clipboard_payload(payload_base64, text_summary)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_write_clipboard_payload",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_write_clipboard_payload") }),
+        || {
+        notebook::write_clipboard_payload(payload_base64, text_summary)
+
+        },
+    )
+  }}
 
 /// 读系统剪贴板里的位图（截图粘贴的兜底路径）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_read_clipboard_image() -> serde_json::Value {
-    notebook::read_clipboard_image()
-}
+pub fn notebook_read_clipboard_image() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_read_clipboard_image",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_clipboard_image") }),
+        || {
+        notebook::read_clipboard_image()
+
+        },
+    )
+  }}
 
 /// 关闭记事本编辑的撤销合并窗口（切模式 / 失焦 / 关面板 / 保存前调用）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Value {
-    notebook::seal_notes_history(state)
-}
+pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "seal_project_notes_history",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: seal_project_notes_history") }),
+        || {
+        notebook::seal_notes_history(state)
+
+        },
+    )
+  }}
 
 /// 导出记事本正文（.md / .html）：图片以 data URI 内嵌，产物自包含。
 #[tauri::command(rename_all = "camelCase")]
@@ -444,9 +705,18 @@ pub fn notebook_export_document(
     suggested_name: String,
     extension: String,
     content: String,
-) -> serde_json::Value {
-    notebook::export_document(state, suggested_name, extension, content)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_export_document",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_export_document") }),
+        || {
+        notebook::export_document(state, suggested_name, extension, content)
+
+        },
+    )
+  }}
 
 /// 把一条附件另存为独立文件。
 #[tauri::command(rename_all = "camelCase")]
@@ -454,18 +724,36 @@ pub fn notebook_save_asset_as(
     state: State<'_, AppState>,
     asset_id: String,
     suggested_name: Option<String>,
-) -> serde_json::Value {
-    notebook::save_asset_as(state, asset_id, suggested_name)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "notebook_save_asset_as",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_save_asset_as") }),
+        || {
+        notebook::save_asset_as(state, asset_id, suggested_name)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project_as(
     state: State<'_, AppState>,
     window: Window,
     notes_markdown: Option<String>,
-) -> serde_json::Value {
-    project::save_project_as(state, window, notes_markdown)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "save_project_as",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: save_project_as") }),
+        || {
+        project::save_project_as(state, window, notes_markdown)
+
+        },
+    )
+  }}
 
 /// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
 /// 确认"继续保存"。
@@ -503,17 +791,35 @@ pub fn get_auto_backup_settings(state: State<'_, AppState>) -> crate::config::Au
 pub fn save_auto_backup_settings(
     state: State<'_, AppState>,
     settings: crate::config::AutoBackupSettings,
-) -> serde_json::Value {
-    project::save_auto_backup_settings(state, settings)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "save_auto_backup_settings",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: save_auto_backup_settings") }),
+        || {
+        project::save_auto_backup_settings(state, settings)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn run_timed_auto_backup(
     state: State<'_, AppState>,
     path_template: String,
-) -> serde_json::Value {
-    project::run_timed_auto_backup(state, path_template)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "run_timed_auto_backup",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: run_timed_auto_backup") }),
+        || {
+        project::run_timed_auto_backup(state, path_template)
+
+        },
+    )
+  }}
 
 // ===================== recording =====================
 
@@ -526,29 +832,74 @@ pub fn get_recording_settings(state: State<'_, AppState>) -> crate::config::Reco
 pub fn save_recording_settings(
     state: State<'_, AppState>,
     settings: crate::config::RecordingSettings,
-) -> serde_json::Value {
-    recording::save_recording_settings(state, settings)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "save_recording_settings",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: save_recording_settings") }),
+        || {
+        recording::save_recording_settings(state, settings)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_recording_devices() -> serde_json::Value {
-    recording::get_recording_devices()
-}
+pub fn get_recording_devices() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_recording_devices",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_recording_devices") }),
+        || {
+        recording::get_recording_devices()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_recording_apps() -> serde_json::Value {
-    recording::get_recording_apps()
-}
+pub fn get_recording_apps() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_recording_apps",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_recording_apps") }),
+        || {
+        recording::get_recording_apps()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
-    recording::start_recording(state, start_sec)
-}
+pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "start_recording",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: start_recording") }),
+        || {
+        recording::start_recording(state, start_sec)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {
-    recording::stop_recording(state)
-}
+pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "stop_recording",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: stop_recording") }),
+        || {
+        recording::stop_recording(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::RecordingStatePayload {
@@ -556,17 +907,35 @@ pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::Reco
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_project_base_scale(state: State<'_, AppState>, base_scale: String) -> serde_json::Value {
-    project::set_project_base_scale(state, base_scale)
-}
+pub fn set_project_base_scale(state: State<'_, AppState>, base_scale: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_base_scale",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_base_scale") }),
+        || {
+        project::set_project_base_scale(state, base_scale)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_project_custom_scale(
     state: State<'_, AppState>,
     custom_scale: crate::project::CustomScale,
-) -> serde_json::Value {
-    project::set_project_custom_scale(state, custom_scale)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_custom_scale",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_custom_scale") }),
+        || {
+        project::set_project_custom_scale(state, custom_scale)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_project_timeline_settings(
@@ -574,19 +943,37 @@ pub fn set_project_timeline_settings(
     beats_per_bar: u32,
     time_signature_denominator: u32,
     grid_size: String,
-) -> serde_json::Value {
-    project::set_project_timeline_settings(
-        state,
-        beats_per_bar,
-        time_signature_denominator,
-        grid_size,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_timeline_settings",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_timeline_settings") }),
+        || {
+        project::set_project_timeline_settings(
+            state,
+            beats_per_bar,
+            time_signature_denominator,
+            grid_size,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_project_dialog() -> serde_json::Value {
-    project_import::import_project_dialog()
-}
+pub fn import_project_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_project_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: import_project_dialog") }),
+        || {
+        project_import::import_project_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_project(
@@ -595,68 +982,149 @@ pub fn import_project(
     project_path: String,
     place_at_playhead: Option<bool>,
     import_tempo_map: Option<bool>,
-) -> serde_json::Value {
-    project_import::import_project(
-        state,
-        window,
-        project_path,
-        place_at_playhead,
-        import_tempo_map,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_project",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: import_project") }),
+        || {
+        project_import::import_project(
+            state,
+            window,
+            project_path,
+            place_at_playhead,
+            import_tempo_map,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_project_stretch_settings(
     state: State<'_, AppState>,
     stretch_algorithm_override: Option<crate::time_stretch::UserStretchAlgorithm>,
     hifigan_mel_stretch_override: Option<bool>,
-) -> serde_json::Value {
-    project::set_project_stretch_settings(
-        state,
-        stretch_algorithm_override,
-        hifigan_mel_stretch_override,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_stretch_settings",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_stretch_settings") }),
+        || {
+        project::set_project_stretch_settings(
+            state,
+            stretch_algorithm_override,
+            hifigan_mel_stretch_override,
+        )
+
+        },
     )
-}
+  }}
 
 // ===================== dialogs =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_audio_dialog() -> serde_json::Value {
-    dialogs::open_audio_dialog()
-}
+pub fn open_audio_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_audio_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog") }),
+        || {
+        dialogs::open_audio_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_audio_dialog_multi() -> serde_json::Value {
-    dialogs::open_audio_dialog_multi()
-}
+pub fn open_audio_dialog_multi() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_audio_dialog_multi",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog_multi") }),
+        || {
+        dialogs::open_audio_dialog_multi()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_audio_dialog_for_source(
     source_path: String,
     dialog_title: String,
-) -> serde_json::Value {
-    dialogs::open_audio_dialog_for_source(source_path, dialog_title)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_audio_dialog_for_source",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog_for_source") }),
+        || {
+        dialogs::open_audio_dialog_for_source(source_path, dialog_title)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_output_path() -> serde_json::Value {
-    dialogs::pick_output_path()
-}
+pub fn pick_output_path() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "pick_output_path",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_output_path") }),
+        || {
+        dialogs::pick_output_path()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_directory() -> serde_json::Value {
-    dialogs::pick_directory()
-}
+pub fn pick_directory() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "pick_directory",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_directory") }),
+        || {
+        dialogs::pick_directory()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_midi_dialog() -> serde_json::Value {
-    dialogs::open_midi_dialog()
-}
+pub fn open_midi_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_midi_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_midi_dialog") }),
+        || {
+        dialogs::open_midi_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_midi_output_path() -> serde_json::Value {
-    dialogs::pick_midi_output_path()
-}
+pub fn pick_midi_output_path() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "pick_midi_output_path",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_midi_output_path") }),
+        || {
+        dialogs::pick_midi_output_path()
+
+        },
+    )
+  }}
 
 // ===================== waveform =====================
 //
@@ -724,9 +1192,18 @@ pub async fn get_track_mix_waveform_peaks_segment(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
-    waveform::clear_waveform_cache(state)
-}
+pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "clear_waveform_cache",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: clear_waveform_cache") }),
+        || {
+        waveform::clear_waveform_cache(state)
+
+        },
+    )
+  }}
 
 // ===================== clip formant analysis =====================
 //
@@ -886,9 +1363,18 @@ pub fn add_track(
     name: Option<String>,
     parent_track_id: Option<String>,
     index: Option<usize>,
-) -> crate::models::TimelineStatePayload {
-    timeline::add_track(state, name, parent_track_id, index)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "add_track",
+        common::timeline_error_payload(&format!("panic in command: add_track")),
+        || {
+        timeline::add_track(state, name, parent_track_id, index)
+
+        },
+    )
+  }}
 
 /// 批量建出一整棵轨道子树（目录导入的"为每个文件夹创建轨道组"）。
 ///
@@ -900,26 +1386,44 @@ pub fn add_track_tree(
     state: State<'_, AppState>,
     nodes: Vec<crate::state::TrackTreeNode>,
     insert_index: Option<usize>,
-) -> serde_json::Value {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
-    let created_track_ids = tl.add_track_tree(&nodes, insert_index);
-    state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
-    serde_json::json!({
-        "timeline": payload,
-        "createdTrackIds": created_track_ids,
-    })
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "add_track_tree",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: add_track_tree") }),
+        || {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
+        let created_track_ids = tl.add_track_tree(&nodes, insert_index);
+        state.audio_engine.update_timeline(tl.clone());
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        serde_json::json!({
+            "timeline": payload,
+            "createdTrackIds": created_track_ids,
+        })
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn remove_track(
     state: State<'_, AppState>,
     track_id: String,
-) -> crate::models::TimelineStatePayload {
-    timeline::remove_track(state, track_id)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "remove_track",
+        common::timeline_error_payload(&format!("panic in command: remove_track")),
+        || {
+        timeline::remove_track(state, track_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn duplicate_track(
@@ -927,9 +1431,18 @@ pub fn duplicate_track(
     track_id: String,
     parent_track_id: Option<String>,
     target_index: Option<usize>,
-) -> crate::models::TimelineStatePayload {
-    timeline::duplicate_track(state, track_id, parent_track_id, target_index)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "duplicate_track",
+        common::timeline_error_payload(&format!("panic in command: duplicate_track")),
+        || {
+        timeline::duplicate_track(state, track_id, parent_track_id, target_index)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn move_track(
@@ -937,9 +1450,18 @@ pub fn move_track(
     track_id: String,
     target_index: usize,
     parent_track_id: Option<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::move_track(state, track_id, target_index, parent_track_id)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "move_track",
+        common::timeline_error_payload(&format!("panic in command: move_track")),
+        || {
+        timeline::move_track(state, track_id, target_index, parent_track_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_track_state(
@@ -952,42 +1474,78 @@ pub fn set_track_state(
     pitch_analysis_algo: Option<String>,
     color: Option<String>,
     name: Option<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_track_state(
-        state,
-        track_id,
-        muted,
-        solo,
-        volume,
-        compose_enabled,
-        pitch_analysis_algo,
-        color,
-        name,
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_track_state",
+        common::timeline_error_payload(&format!("panic in command: set_track_state")),
+        || {
+        timeline::set_track_state(
+            state,
+            track_id,
+            muted,
+            solo,
+            volume,
+            compose_enabled,
+            pitch_analysis_algo,
+            color,
+            name,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn select_track(
     state: State<'_, AppState>,
     track_id: String,
-) -> crate::models::TimelineStatePayload {
-    timeline::select_track(state, track_id)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "select_track",
+        common::timeline_error_payload(&format!("panic in command: select_track")),
+        || {
+        timeline::select_track(state, track_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_project_length(
     state: State<'_, AppState>,
     project_sec: f64,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_project_length(state, project_sec)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_project_length",
+        common::timeline_error_payload(&format!("panic in command: set_project_length")),
+        || {
+        timeline::set_project_length(state, project_sec)
+
+        },
+    )
+  }}
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_track_summary(
     state: State<'_, AppState>,
     track_id: Option<String>,
-) -> serde_json::Value {
-    timeline::get_track_summary(state, track_id)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_track_summary",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_track_summary") }),
+        || {
+        timeline::get_track_summary(state, track_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn add_clip(
@@ -1074,17 +1632,35 @@ pub async fn create_clips_bulk(
 pub fn remove_clip(
     state: State<'_, AppState>,
     clip_id: String,
-) -> crate::models::TimelineStatePayload {
-    timeline::remove_clip(state, clip_id)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "remove_clip",
+        common::timeline_error_payload(&format!("panic in command: remove_clip")),
+        || {
+        timeline::remove_clip(state, clip_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn remove_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::remove_clips(state, clip_ids)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "remove_clips",
+        common::timeline_error_payload(&format!("panic in command: remove_clips")),
+        || {
+        timeline::remove_clips(state, clip_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn move_clip(
@@ -1093,32 +1669,68 @@ pub fn move_clip(
     start_sec: f64,
     track_id: Option<String>,
     move_linked_params: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::move_clip(state, clip_id, start_sec, track_id, move_linked_params)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "move_clip",
+        common::timeline_error_payload(&format!("panic in command: move_clip")),
+        || {
+        timeline::move_clip(state, clip_id, start_sec, track_id, move_linked_params)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn move_clips(
     state: State<'_, AppState>,
     moves: Vec<crate::state::MoveClipPayload>,
     move_linked_params: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::move_clips(state, moves, move_linked_params)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "move_clips",
+        common::timeline_error_payload(&format!("panic in command: move_clips")),
+        || {
+        timeline::move_clips(state, moves, move_linked_params)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_clip_linked_params(state: State<'_, AppState>, clip_id: String) -> serde_json::Value {
-    timeline::get_clip_linked_params(state, clip_id)
-}
+pub fn get_clip_linked_params(state: State<'_, AppState>, clip_id: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_clip_linked_params",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_clip_linked_params") }),
+        || {
+        timeline::get_clip_linked_params(state, clip_id)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn apply_clip_linked_params(
     state: State<'_, AppState>,
     clip_id: String,
     linked_params: crate::state::LinkedParamCurvesPayload,
-) -> crate::models::TimelineStatePayload {
-    timeline::apply_clip_linked_params(state, clip_id, linked_params)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "apply_clip_linked_params",
+        common::timeline_error_payload(&format!("panic in command: apply_clip_linked_params")),
+        || {
+        timeline::apply_clip_linked_params(state, clip_id, linked_params)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
@@ -1187,9 +1799,18 @@ pub fn set_clips_state_bulk(
     state: State<'_, AppState>,
     updates: Vec<crate::state::BulkClipStatePatch>,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_clips_state_bulk(state, updates, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_clips_state_bulk",
+        common::timeline_error_payload(&format!("panic in command: set_clips_state_bulk")),
+        || {
+        timeline::set_clips_state_bulk(state, updates, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_clip_active_take(
@@ -1197,9 +1818,18 @@ pub fn set_clip_active_take(
     clip_id: String,
     take_id: String,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_clip_active_take(state, clip_id, take_id, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_clip_active_take",
+        common::timeline_error_payload(&format!("panic in command: set_clip_active_take")),
+        || {
+        timeline::set_clip_active_take(state, clip_id, take_id, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn cycle_clip_takes(
@@ -1207,27 +1837,54 @@ pub fn cycle_clip_takes(
     clip_ids: Vec<String>,
     direction: Option<i32>,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::cycle_clip_takes(state, clip_ids, direction.unwrap_or(1), checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "cycle_clip_takes",
+        common::timeline_error_payload(&format!("panic in command: cycle_clip_takes")),
+        || {
+        timeline::cycle_clip_takes(state, clip_ids, direction.unwrap_or(1), checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn pack_clips_into_takes(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::pack_clips_into_takes(state, clip_ids, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "pack_clips_into_takes",
+        common::timeline_error_payload(&format!("panic in command: pack_clips_into_takes")),
+        || {
+        timeline::pack_clips_into_takes(state, clip_ids, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn explode_clip_takes(
     state: State<'_, AppState>,
     clip_id: String,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::explode_clip_takes(state, clip_id, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "explode_clip_takes",
+        common::timeline_error_payload(&format!("panic in command: explode_clip_takes")),
+        || {
+        timeline::explode_clip_takes(state, clip_id, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn duplicate_clip_take(
@@ -1235,9 +1892,18 @@ pub fn duplicate_clip_take(
     clip_id: String,
     take_id: String,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::duplicate_clip_take(state, clip_id, take_id, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "duplicate_clip_take",
+        common::timeline_error_payload(&format!("panic in command: duplicate_clip_take")),
+        || {
+        timeline::duplicate_clip_take(state, clip_id, take_id, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn remove_clip_take(
@@ -1245,9 +1911,18 @@ pub fn remove_clip_take(
     clip_id: String,
     take_id: String,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::remove_clip_take(state, clip_id, take_id, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "remove_clip_take",
+        common::timeline_error_payload(&format!("panic in command: remove_clip_take")),
+        || {
+        timeline::remove_clip_take(state, clip_id, take_id, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn rename_clip_take(
@@ -1256,9 +1931,18 @@ pub fn rename_clip_take(
     take_id: String,
     name: String,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::rename_clip_take(state, clip_id, take_id, name, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "rename_clip_take",
+        common::timeline_error_payload(&format!("panic in command: rename_clip_take")),
+        || {
+        timeline::rename_clip_take(state, clip_id, take_id, name, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_clip_take_reversed(
@@ -1267,9 +1951,18 @@ pub fn set_clip_take_reversed(
     take_id: String,
     reversed: bool,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_clip_take_reversed",
+        common::timeline_error_payload(&format!("panic in command: set_clip_take_reversed")),
+        || {
+        timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_clip_take_channel_mode(
@@ -1278,9 +1971,18 @@ pub fn set_clip_take_channel_mode(
     take_id: String,
     channel_mode: i32,
     checkpoint: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_clip_take_channel_mode(state, clip_id, take_id, channel_mode, checkpoint)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_clip_take_channel_mode",
+        common::timeline_error_payload(&format!("panic in command: set_clip_take_channel_mode")),
+        || {
+        timeline::set_clip_take_channel_mode(state, clip_id, take_id, channel_mode, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn scan_and_convert_fake_stereo(
@@ -1391,9 +2093,18 @@ pub async fn import_media_files_as_takes(
 pub fn duplicate_clips_bulk(
     state: State<'_, AppState>,
     payload: crate::state::DuplicateClipsBulkPayload,
-) -> crate::models::TimelineStatePayload {
-    timeline::duplicate_clips_bulk(state, payload)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "duplicate_clips_bulk",
+        common::timeline_error_payload(&format!("panic in command: duplicate_clips_bulk")),
+        || {
+        timeline::duplicate_clips_bulk(state, payload)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn replace_clip_source(
@@ -1401,9 +2112,18 @@ pub fn replace_clip_source(
     clip_ids: Vec<String>,
     new_source_path: String,
     replace_same_source: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    timeline::replace_clip_source(state, clip_ids, new_source_path, replace_same_source)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "replace_clip_source",
+        common::timeline_error_payload(&format!("panic in command: replace_clip_source")),
+        || {
+        timeline::replace_clip_source(state, clip_ids, new_source_path, replace_same_source)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn check_source_files_changed(
@@ -1427,17 +2147,35 @@ pub fn split_clip(
     state: State<'_, AppState>,
     clip_id: String,
     split_sec: f64,
-) -> crate::models::TimelineStatePayload {
-    timeline::split_clip(state, clip_id, split_sec)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "split_clip",
+        common::timeline_error_payload(&format!("panic in command: split_clip")),
+        || {
+        timeline::split_clip(state, clip_id, split_sec)
+
+        },
+    )
+  }}
 #[tauri::command(rename_all = "camelCase")]
 pub fn split_clips_at(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
     split_sec: f64,
-) -> crate::models::TimelineStatePayload {
-    timeline::split_clips_at(state, clip_ids, split_sec)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "split_clips_at",
+        common::timeline_error_payload(&format!("panic in command: split_clips_at")),
+        || {
+        timeline::split_clips_at(state, clip_ids, split_sec)
+
+        },
+    )
+  }}
 #[tauri::command(rename_all = "camelCase")]
 pub async fn analyze_clip_silence(
     app: tauri::AppHandle,
@@ -1478,112 +2216,229 @@ pub fn close_track_gaps(
     state: State<'_, AppState>,
     track_id: String,
     from_sec: f64,
-) -> crate::models::TimelineStatePayload {
-    timeline::close_track_gaps(state, track_id, from_sec)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "close_track_gaps",
+        common::timeline_error_payload(&format!("panic in command: close_track_gaps")),
+        || {
+        timeline::close_track_gaps(state, track_id, from_sec)
+
+        },
+    )
+  }}
 #[tauri::command(rename_all = "camelCase")]
 pub fn glue_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::glue_clips(state, clip_ids)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "glue_clips",
+        common::timeline_error_payload(&format!("panic in command: glue_clips")),
+        || {
+        timeline::glue_clips(state, clip_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn group_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
-    tl.group_clips(&clip_ids);
-    let payload = tl.to_payload();
-    drop(tl);
-    payload
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "group_clips",
+        common::timeline_error_payload(&format!("panic in command: group_clips")),
+        || {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
+        tl.group_clips(&clip_ids);
+        let payload = tl.to_payload();
+        drop(tl);
+        payload
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn ungroup_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
-    tl.ungroup_clips(&clip_ids);
-    let payload = tl.to_payload();
-    drop(tl);
-    payload
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "ungroup_clips",
+        common::timeline_error_payload(&format!("panic in command: ungroup_clips")),
+        || {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
+        tl.ungroup_clips(&clip_ids);
+        let payload = tl.to_payload();
+        drop(tl);
+        payload
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn toggle_group_disabled(
     state: State<'_, AppState>,
     group_id: String,
-) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
-    tl.toggle_group_disabled(&group_id);
-    let payload = tl.to_payload();
-    drop(tl);
-    payload
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "toggle_group_disabled",
+        common::timeline_error_payload(&format!("panic in command: toggle_group_disabled")),
+        || {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
+        tl.toggle_group_disabled(&group_id);
+        let payload = tl.to_payload();
+        drop(tl);
+        payload
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn convert_clips_to_pitch_reference(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::convert_clips_to_pitch_reference(state, clip_ids)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "convert_clips_to_pitch_reference",
+        common::timeline_error_payload(&format!("panic in command: convert_clips_to_pitch_reference")),
+        || {
+        timeline::convert_clips_to_pitch_reference(state, clip_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn update_pitch_reference(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::update_pitch_reference(state, clip_ids)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "update_pitch_reference",
+        common::timeline_error_payload(&format!("panic in command: update_pitch_reference")),
+        || {
+        timeline::update_pitch_reference(state, clip_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn select_clip(
     state: State<'_, AppState>,
     clip_id: Option<String>,
-) -> crate::models::TimelineStatePayload {
-    timeline::select_clip(state, clip_id)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "select_clip",
+        common::timeline_error_payload(&format!("panic in command: select_clip")),
+        || {
+        timeline::select_clip(state, clip_id)
+
+        },
+    )
+  }}
 
 // ===================== native timeline clipboard =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn copy_timeline_clips(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {
-    timeline_clipboard::copy_timeline_clips(&state, clip_ids)
-}
+pub fn copy_timeline_clips(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "copy_timeline_clips",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: copy_timeline_clips") }),
+        || {
+        timeline_clipboard::copy_timeline_clips(&state, clip_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn copy_timeline_tracks(
     state: State<'_, AppState>,
     track_ids: Vec<String>,
-) -> serde_json::Value {
-    timeline_clipboard::copy_timeline_tracks(&state, track_ids)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "copy_timeline_tracks",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: copy_timeline_tracks") }),
+        || {
+        timeline_clipboard::copy_timeline_tracks(&state, track_ids)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn paste_timeline_clipboard(
     state: State<'_, AppState>,
     mode: Option<String>,
-) -> serde_json::Value {
-    timeline_clipboard::paste_timeline_clipboard(&state, mode)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "paste_timeline_clipboard",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_timeline_clipboard") }),
+        || {
+        timeline_clipboard::paste_timeline_clipboard(&state, mode)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn has_timeline_clipboard() -> serde_json::Value {
-    timeline_clipboard::has_timeline_clipboard()
-}
+pub fn has_timeline_clipboard() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "has_timeline_clipboard",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: has_timeline_clipboard") }),
+        || {
+        timeline_clipboard::has_timeline_clipboard()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn clipboard_kind() -> serde_json::Value {
-    timeline_clipboard::clipboard_kind()
-}
+pub fn clipboard_kind() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "clipboard_kind",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: clipboard_kind") }),
+        || {
+        timeline_clipboard::clipboard_kind()
+
+        },
+    )
+  }}
 
 // ===================== generic system object clipboard =====================
 
@@ -1591,56 +2446,83 @@ pub fn clipboard_kind() -> serde_json::Value {
 pub fn write_system_clipboard_object(
     payload: String,
     text_summary: Option<String>,
-) -> serde_json::Value {
-    let summary = text_summary
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
-    // 单剪贴板纪律：本次写入替换整个逻辑剪贴板（时间轴 Clip 载荷随
-    // empty() 一并清除），最后复制的获胜。
-    match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
-        Ok(()) => {
-            // 记录缓存（clipboard_kind 探测与可用性轮询的快速路径）：
-            // 参数线载荷占据槽位，时间轴可用性判定为不可用（counts 0）。
-            if let Some(seq) = crate::system_clipboard::clipboard_seq_num() {
-                crate::system_clipboard::write_clipboard_cache(
-                    crate::system_clipboard::ClipboardCacheEntry {
-                        seq,
-                        hifi_kind: Some("param".to_string()),
-                        hifi_clip_count: 0,
-                        hifi_track_count: 0,
-                        hifi_source_project: None,
-                        // write_contents 的 empty() 清除了 REAPERMedia。
-                        reaper_available: false,
-                    },
-                );
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "write_system_clipboard_object",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: write_system_clipboard_object") }),
+        || {
+        let summary = text_summary
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
+        // 单剪贴板纪律：本次写入替换整个逻辑剪贴板（时间轴 Clip 载荷随
+        // empty() 一并清除），最后复制的获胜。
+        match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
+            Ok(()) => {
+                // 记录缓存（clipboard_kind 探测与可用性轮询的快速路径）：
+                // 参数线载荷占据槽位，时间轴可用性判定为不可用（counts 0）。
+                if let Some(seq) = crate::system_clipboard::clipboard_seq_num() {
+                    crate::system_clipboard::write_clipboard_cache(
+                        crate::system_clipboard::ClipboardCacheEntry {
+                            seq,
+                            hifi_kind: Some("param".to_string()),
+                            hifi_clip_count: 0,
+                            hifi_track_count: 0,
+                            hifi_source_project: None,
+                            // write_contents 的 empty() 清除了 REAPERMedia。
+                            reaper_available: false,
+                        },
+                    );
+                }
+                serde_json::json!({ "ok": true })
             }
-            serde_json::json!({ "ok": true })
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
         }
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    }
-}
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_system_clipboard_object() -> serde_json::Value {
-    match crate::system_clipboard::read_bytes() {
-        Ok(Some(bytes)) => match String::from_utf8(bytes) {
-            Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
-            // 二进制载荷（如时间轴 MessagePack）对本读取方等价于
-            // "没有可用的参数线数据"，由前端回退内部剪贴板。
-            Err(_) => serde_json::json!({ "ok": true, "available": false }),
+pub fn read_system_clipboard_object() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "read_system_clipboard_object",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: read_system_clipboard_object") }),
+        || {
+        match crate::system_clipboard::read_bytes() {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
+                // 二进制载荷（如时间轴 MessagePack）对本读取方等价于
+                // "没有可用的参数线数据"，由前端回退内部剪贴板。
+                Err(_) => serde_json::json!({ "ok": true, "available": false }),
+            },
+            Ok(None) => serde_json::json!({ "ok": true, "available": false }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        }
+
         },
-        Ok(None) => serde_json::json!({ "ok": true, "available": false }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    }
-}
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_timeline_tempo_map(
     state: State<'_, AppState>,
     tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
-) -> crate::models::TimelineStatePayload {
-    timeline::set_timeline_tempo_map(state, tempo_map)
-}
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_timeline_tempo_map",
+        common::timeline_error_payload(&format!("panic in command: set_timeline_tempo_map")),
+        || {
+        timeline::set_timeline_tempo_map(state, tempo_map)
+
+        },
+    )
+  }}
 
 // ===================== params =====================
 
@@ -1675,9 +2557,18 @@ pub fn set_param_frames(
     start_frame: u32,
     values: Vec<f32>,
     checkpoint: Option<bool>,
-) -> serde_json::Value {
-    params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_param_frames",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_param_frames") }),
+        || {
+        params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn restore_param_frames(
@@ -1687,16 +2578,25 @@ pub fn restore_param_frames(
     start_frame: u32,
     frame_count: u32,
     checkpoint: Option<bool>,
-) -> serde_json::Value {
-    params::restore_param_frames(
-        &state,
-        track_id,
-        param,
-        start_frame,
-        frame_count,
-        checkpoint,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "restore_param_frames",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: restore_param_frames") }),
+        || {
+        params::restore_param_frames(
+            &state,
+            track_id,
+            param,
+            start_frame,
+            frame_count,
+            checkpoint,
+        )
+
+        },
     )
-}
+  }}
 
 /// 互转选区段由共享编辑内核定义，独立app命令形状保持不变。
 pub use hifishifter_kernel::editor::ConvertRange;
@@ -1711,9 +2611,18 @@ pub fn convert_mix_param(
     track_id: String,
     from: String,
     ranges: Vec<ConvertRange>,
-) -> serde_json::Value {
-    params::convert_mix_param(state, track_id, from, ranges)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "convert_mix_param",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: convert_mix_param") }),
+        || {
+        params::convert_mix_param(state, track_id, from, ranges)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_static_param(
@@ -1731,9 +2640,18 @@ pub fn set_static_param(
     param: String,
     value: f64,
     checkpoint: Option<bool>,
-) -> serde_json::Value {
-    params::set_static_param(&state, track_id, param, value, checkpoint)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_static_param",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_static_param") }),
+        || {
+        params::set_static_param(&state, track_id, param, value, checkpoint)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn stretch_track_linked_params(
@@ -1741,9 +2659,18 @@ pub fn stretch_track_linked_params(
     track_id: String,
     mappings: Vec<crate::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
-) -> serde_json::Value {
-    params::stretch_track_linked_params(&state, track_id, mappings, checkpoint)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "stretch_track_linked_params",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: stretch_track_linked_params") }),
+        || {
+        params::stretch_track_linked_params(&state, track_id, mappings, checkpoint)
+
+        },
+    )
+  }}
 
 // ===================== synth =====================
 
@@ -1761,9 +2688,18 @@ pub fn load_model(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {
-    synth::set_pitch_shift(semitones)
-}
+pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_pitch_shift",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_pitch_shift") }),
+        || {
+        synth::set_pitch_shift(semitones)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn process_audio(
@@ -1849,9 +2785,18 @@ pub async fn export_audio_advanced(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn cancel_export_audio() -> serde_json::Value {
-    synth::cancel_export_audio()
-}
+pub fn cancel_export_audio() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "cancel_export_audio",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: cancel_export_audio") }),
+        || {
+        synth::cancel_export_audio()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_export_audio_defaults(state: State<'_, AppState>) -> synth::ExportAudioDefaultsPayload {
@@ -1895,33 +2840,60 @@ pub fn set_metronome(
     mode: String,
     accent: bool,
     sound: String,
-) -> serde_json::Value {
-    playback::set_metronome(state, enabled, gain, mode, accent, sound)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "set_metronome",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: set_metronome") }),
+        || {
+        playback::set_metronome(state, enabled, gain, mode, accent, sound)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
-    // 传输命令全序化（见 AppState::transport_lock 注释）：快速连续
-    // 播放/暂停/停止时，Tauri 线程池的并发执行会让 stop 与 play 交错
-    // （stop 杀掉刚起的播放 / play 读到写了一半的 playhead），前端状态机
-    // 与引擎分裂后光标跳变。锁内工作最重的是节拍器响点表重建（毫秒级）。
-    let _transport_order = state
-        .inner()
-        .transport_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    playback::play_original(state, start_sec)
-}
+pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "play_original",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: play_original") }),
+        || {
+        // 传输命令全序化（见 AppState::transport_lock 注释）：快速连续
+        // 播放/暂停/停止时，Tauri 线程池的并发执行会让 stop 与 play 交错
+        // （stop 杀掉刚起的播放 / play 读到写了一半的 playhead），前端状态机
+        // 与引擎分裂后光标跳变。锁内工作最重的是节拍器响点表重建（毫秒级）。
+        let _transport_order = state
+            .inner()
+            .transport_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        playback::play_original(state, start_sec)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
-    let _transport_order = state
-        .inner()
-        .transport_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    playback::stop_audio(state)
-}
+pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "stop_audio",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: stop_audio") }),
+        || {
+        let _transport_order = state
+            .inner()
+            .transport_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        playback::stop_audio(state)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::PlaybackStatePayload {
@@ -1938,15 +2910,33 @@ pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::Playback
 /// 后台预渲染：编辑操作后立即在后台开始渲染，无需等待播放。
 /// 启用后，用户可在渲染进行中随时播放已渲染完成的内容。
 #[tauri::command(rename_all = "camelCase")]
-pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
-    playback::start_background_render(app)
-}
+pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "start_background_render",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: start_background_render") }),
+        || {
+        playback::start_background_render(app)
+
+        },
+    )
+  }}
 
 /// 取消正在进行的后台预渲染。
 #[tauri::command(rename_all = "camelCase")]
-pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
-    playback::cancel_background_render(Some(&app))
-}
+pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "cancel_background_render",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: cancel_background_render") }),
+        || {
+        playback::cancel_background_render(Some(&app))
+
+        },
+    )
+  }}
 
 // ===================== diagnostics =====================
 //
@@ -1954,14 +2944,32 @@ pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
 // 放到阻塞线程池执行；输出路径选择对话框单独走同步命令（主线程）。
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
-    diagnostics::open_log_folder(app)
-}
+pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_log_folder",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_log_folder") }),
+        || {
+        diagnostics::open_log_folder(app)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_diagnostics_output_path() -> serde_json::Value {
-    diagnostics::pick_diagnostics_output_path()
-}
+pub fn pick_diagnostics_output_path() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "pick_diagnostics_output_path",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_diagnostics_output_path") }),
+        || {
+        diagnostics::pick_diagnostics_output_path()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn export_diagnostics(
@@ -1986,23 +2994,41 @@ pub async fn export_diagnostics(
 /// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
 /// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_layout_json(json: String) -> serde_json::Value {
-    json_export::export_json_file(json, "hifishifter-layout.json", "Export layout", "layout")
-}
+pub fn export_layout_json(json: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "export_layout_json",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: export_layout_json") }),
+        || {
+        json_export::export_json_file(json, "hifishifter-layout.json", "Export layout", "layout")
+
+        },
+    )
+  }}
 
 /// 视图 → 外观设置 → 「导出」：把当前外观主题存成 JSON。
 ///
 /// 与布局导出共用一个实现 —— 外观这条路径此前用的是浏览器下载，因此**完全不起作用**
 /// （wry 拦截 `<a download>`）。默认文件名由前端给（主题名是用户起的，含非 ASCII）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {
-    let file_name = if default_file_name.trim().is_empty() {
-        "hifishifter-theme.json".to_string()
-    } else {
-        default_file_name
-    };
-    json_export::export_json_file(json, &file_name, "Export theme", "theme")
-}
+pub fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "export_theme_json",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: export_theme_json") }),
+        || {
+        let file_name = if default_file_name.trim().is_empty() {
+            "hifishifter-theme.json".to_string()
+        } else {
+            default_file_name
+        };
+        json_export::export_json_file(json, &file_name, "Export theme", "theme")
+
+        },
+    )
+  }}
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
 /// 颤音预设管理器 → 「导出...」：把当前预设存成 JSON。
@@ -2010,28 +3036,55 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
 /// 与布局 / 主题导出共用 `json_export::export_json_file` —— 命令名是 invoke 的
 /// 稳定契约，因此**每处一个命令**（标题与日志前缀随业务变化），实现只有一份。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> serde_json::Value {
-    let file_name = if default_file_name.trim().is_empty() {
-        "hifishifter-vibrato-preset.json".to_string()
-    } else {
-        default_file_name
-    };
-    json_export::export_json_file(json, &file_name, "Export vibrato preset", "vibrato_presets")
-}
+pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "export_vibrato_presets_json",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: export_vibrato_presets_json") }),
+        || {
+        let file_name = if default_file_name.trim().is_empty() {
+            "hifishifter-vibrato-preset.json".to_string()
+        } else {
+            default_file_name
+        };
+        json_export::export_json_file(json, &file_name, "Export vibrato preset", "vibrato_presets")
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
-    diagnostics::log_frontend_error(message, detail)
-}
+pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "log_frontend_error",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: log_frontend_error") }),
+        || {
+        diagnostics::log_frontend_error(message, detail)
+
+        },
+    )
+  }}
 
 // ===================== pitch_progress =====================
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_pitch_analysis_progress(
     state: State<'_, AppState>,
-) -> Result<Option<crate::pitch_analysis::PitchProgressPayload>, String> {
-    pitch_progress::get_pitch_analysis_progress(state)
-}
+) -> Result<Option<crate::pitch_analysis::PitchProgressPayload>, String> {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_pitch_analysis_progress",
+        Err(format!("panic in command: get_pitch_analysis_progress")),
+        || {
+        pitch_progress::get_pitch_analysis_progress(state)
+
+        },
+    )
+  }}
 
 // ===================== onnx_status =====================
 
@@ -2126,13 +3179,22 @@ pub fn create_directory(
     state: State<'_, AppState>,
     parent_dir: String,
     name: String,
-) -> Result<String, String> {
-    file_browser::create_directory(
-        parent_dir,
-        name,
-        state.config_dir.get().map(|p| p.as_path()),
+) -> Result<String, String> {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "create_directory",
+        Err(format!("panic in command: create_directory")),
+        || {
+        file_browser::create_directory(
+            parent_dir,
+            name,
+            state.config_dir.get().map(|p| p.as_path()),
+        )
+
+        },
     )
-}
+  }}
 
 /// 把 `path` 重命名为同目录下的 `newName`，返回新路径。
 #[tauri::command(rename_all = "camelCase")]
@@ -2140,9 +3202,18 @@ pub fn rename_path(
     state: State<'_, AppState>,
     path: String,
     new_name: String,
-) -> Result<String, String> {
-    file_browser::rename_path(path, new_name, state.config_dir.get().map(|p| p.as_path()))
-}
+) -> Result<String, String> {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "rename_path",
+        Err(format!("panic in command: rename_path")),
+        || {
+        file_browser::rename_path(path, new_name, state.config_dir.get().map(|p| p.as_path()))
+
+        },
+    )
+  }}
 
 /// 把一批路径移入回收站（`permanent` 为真时永久删除）。
 ///
@@ -2168,9 +3239,18 @@ pub async fn delete_paths(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileInfo, String> {
-    file_browser::get_audio_file_info(file_path)
-}
+pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileInfo, String> {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_audio_file_info",
+        Err(format!("panic in command: get_audio_file_info")),
+        || {
+        file_browser::get_audio_file_info(file_path)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_media_audio_streams(
@@ -2219,15 +3299,33 @@ pub async fn search_files_recursive(
 pub fn reveal_paths_in_file_manager(
     app: tauri::AppHandle,
     paths: Vec<String>,
-) -> serde_json::Value {
-    common::reveal_paths_in_file_manager(&app, paths, "no paths given")
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "reveal_paths_in_file_manager",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: reveal_paths_in_file_manager") }),
+        || {
+        common::reveal_paths_in_file_manager(&app, paths, "no paths given")
+
+        },
+    )
+  }}
 
 /// 用系统默认程序打开一个路径。
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_json::Value {
-    common::open_path_with_default_app(&app, &path)
-}
+pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_path_with_default_app",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_path_with_default_app") }),
+        || {
+        common::open_path_with_default_app(&app, &path)
+
+        },
+    )
+  }}
 
 /// 批量把文本转写成可检索的拉丁形态（拼音 / 罗马字 / 谚文分解）。
 ///
@@ -2244,18 +3342,36 @@ pub fn transliterate(
 // ===================== vocalshifter =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_vocalshifter_dialog() -> serde_json::Value {
-    vocalshifter::open_vocalshifter_dialog()
-}
+pub fn open_vocalshifter_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_vocalshifter_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_vocalshifter_dialog") }),
+        || {
+        vocalshifter::open_vocalshifter_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_vocalshifter_project(
     state: State<'_, AppState>,
     window: Window,
     vsp_path: String,
-) -> serde_json::Value {
-    vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_vocalshifter_project",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: import_vocalshifter_project") }),
+        || {
+        vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
+
+        },
+    )
+  }}
 
 /// 粘贴 VocalShifter 剪贴板。
 ///
@@ -2269,52 +3385,97 @@ pub fn paste_vocalshifter_clipboard(
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
     active_param: Option<String>,
-) -> serde_json::Value {
-    vocalshifter_clipboard::paste_vocalshifter_clipboard(
-        state.inner(),
-        selection_ranges,
-        selection_start_frame,
-        selection_max_frames,
-        active_param,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "paste_vocalshifter_clipboard",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_vocalshifter_clipboard") }),
+        || {
+        vocalshifter_clipboard::paste_vocalshifter_clipboard(
+            state.inner(),
+            selection_ranges,
+            selection_start_frame,
+            selection_max_frames,
+            active_param,
+        )
+
+        },
     )
-}
+  }}
 
 // ===================== reaper =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_reaper_dialog() -> serde_json::Value {
-    reaper::open_reaper_dialog()
-}
+pub fn open_reaper_dialog() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_reaper_dialog",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_reaper_dialog") }),
+        || {
+        reaper::open_reaper_dialog()
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_reaper_project(
     state: State<'_, AppState>,
     window: Window,
     rpp_path: String,
-) -> serde_json::Value {
-    reaper::import_reaper_project(state.inner(), &window, rpp_path)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_reaper_project",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: import_reaper_project") }),
+        || {
+        reaper::import_reaper_project(state.inner(), &window, rpp_path)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn paste_reaper_clipboard(
     state: State<'_, AppState>,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
-) -> serde_json::Value {
-    reaper_clipboard::paste_reaper_clipboard(
-        state.inner(),
-        selection_start_frame,
-        selection_max_frames,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "paste_reaper_clipboard",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_reaper_clipboard") }),
+        || {
+        reaper_clipboard::paste_reaper_clipboard(
+            state.inner(),
+            selection_start_frame,
+            selection_max_frames,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn has_reaper_clipboard() -> serde_json::Value {
-    serde_json::json!({
-        "ok": true,
-        "available": reaper_clipboard::has_reaper_clipboard(),
-    })
-}
+pub fn has_reaper_clipboard() -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "has_reaper_clipboard",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: has_reaper_clipboard") }),
+        || {
+        serde_json::json!({
+            "ok": true,
+            "available": reaper_clipboard::has_reaper_clipboard(),
+        })
+
+        },
+    )
+  }}
 
 // ===================== cache =====================
 
@@ -2350,15 +3511,33 @@ pub async fn clear_render_cache(
 
 /// 在系统文件管理器中打开渲染缓存目录。
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {
-    cache::open_render_cache_dir(app)
-}
+pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "open_render_cache_dir",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: open_render_cache_dir") }),
+        || {
+        cache::open_render_cache_dir(app)
+
+        },
+    )
+  }}
 
 /// 在系统文件管理器中定位导出音频的产物（选中所有已渲染文件；无文件时打开目标文件夹）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_json::Value {
-    cache::reveal_export_paths(app, paths)
-}
+pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "reveal_export_paths",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: reveal_export_paths") }),
+        || {
+        cache::reveal_export_paths(app, paths)
+
+        },
+    )
+  }}
 
 // ===================== processor_caps =====================
 
@@ -2374,14 +3553,32 @@ pub fn get_midi_tracks(
     state: State<'_, AppState>,
     midi_path: String,
     clipboard_guid: Option<String>,
-) -> serde_json::Value {
-    midi::get_midi_tracks(state.inner(), midi_path, clipboard_guid)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "get_midi_tracks",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: get_midi_tracks") }),
+        || {
+        midi::get_midi_tracks(state.inner(), midi_path, clipboard_guid)
+
+        },
+    )
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::Value {
-    midi::read_midi_clipboard_to_memory(state.inner())
-}
+pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "read_midi_clipboard_to_memory",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: read_midi_clipboard_to_memory") }),
+        || {
+        midi::read_midi_clipboard_to_memory(state.inner())
+
+        },
+    )
+  }}
 
 /// 导入 MIDI 到参数线（pitch）。`selectionRanges` 为参数编辑器多选区：
 /// 音符对齐首段起点，且只写入落在任一段内的帧（断层保持原值）。
@@ -2397,20 +3594,29 @@ pub fn import_midi_to_pitch(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
-) -> serde_json::Value {
-    midi::import_midi_to_pitch(
-        state.inner(),
-        midi_path,
-        track_indices,
-        selection_ranges,
-        fill_gaps,
-        note_bpm_mode,
-        specified_bpm,
-        import_midi_bpm_as_project,
-        clipboard_guid,
-        close_leading_gap,
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_midi_to_pitch",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: import_midi_to_pitch") }),
+        || {
+        midi::import_midi_to_pitch(
+            state.inner(),
+            midi_path,
+            track_indices,
+            selection_ranges,
+            fill_gaps,
+            note_bpm_mode,
+            specified_bpm,
+            import_midi_bpm_as_project,
+            clipboard_guid,
+            close_leading_gap,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_midi_as_clip(
@@ -2430,26 +3636,35 @@ pub fn import_midi_as_clip(
     import_midi_tempo: Option<bool>,
     import_midi_time_signature: Option<bool>,
     import_midi_key_signature: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    midi::import_midi_as_clip(
-        state.inner(),
-        midi_path,
-        track_indices,
-        track_id,
-        start_sec,
-        fill_gaps,
-        multi_track_merge,
-        note_bpm_mode,
-        specified_bpm,
-        import_midi_bpm_as_project,
-        clipboard_guid,
-        close_leading_gap,
-        import_midi_as_tempo_map,
-        import_midi_tempo,
-        import_midi_time_signature,
-        import_midi_key_signature,
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "import_midi_as_clip",
+        common::timeline_error_payload(&format!("panic in command: import_midi_as_clip")),
+        || {
+        midi::import_midi_as_clip(
+            state.inner(),
+            midi_path,
+            track_indices,
+            track_id,
+            start_sec,
+            fill_gaps,
+            multi_track_merge,
+            note_bpm_mode,
+            specified_bpm,
+            import_midi_bpm_as_project,
+            clipboard_guid,
+            close_leading_gap,
+            import_midi_as_tempo_map,
+            import_midi_tempo,
+            import_midi_time_signature,
+            import_midi_key_signature,
+        )
+
+        },
     )
-}
+  }}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn replace_midi_clip_data(
@@ -2463,20 +3678,29 @@ pub fn replace_midi_clip_data(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
-) -> crate::models::TimelineStatePayload {
-    midi::replace_midi_clip_data(
-        state.inner(),
-        clip_id,
-        midi_path,
-        track_indices,
-        fill_gaps,
-        note_bpm_mode,
-        specified_bpm,
-        import_midi_bpm_as_project,
-        clipboard_guid,
-        close_leading_gap,
+) -> crate::models::TimelineStatePayload {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "replace_midi_clip_data",
+        common::timeline_error_payload(&format!("panic in command: replace_midi_clip_data")),
+        || {
+        midi::replace_midi_clip_data(
+            state.inner(),
+            clip_id,
+            midi_path,
+            track_indices,
+            fill_gaps,
+            note_bpm_mode,
+            specified_bpm,
+            import_midi_bpm_as_project,
+            clipboard_guid,
+            close_leading_gap,
+        )
+
+        },
     )
-}
+  }}
 
 // ===================== midi_export =====================
 
@@ -2523,9 +3747,18 @@ pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings 
 pub fn save_ui_settings(
     state: State<'_, AppState>,
     settings: serde_json::Value,
-) -> serde_json::Value {
-    ui_settings::save_ui_settings(state, settings)
-}
+) -> serde_json::Value {{
+    // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
+    // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    common::guard_command(
+        "save_ui_settings",
+        serde_json::json!({ "ok": false, "error": format!("panic in command: save_ui_settings") }),
+        || {
+        ui_settings::save_ui_settings(state, settings)
+
+        },
+    )
+  }}
 
 // ── 前端偏好（原 localStorage 的 `hifishifter.*` 键）──────────────────────
 //
