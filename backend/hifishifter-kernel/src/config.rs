@@ -2483,6 +2483,7 @@ mod tests {
         let held = acquire_config_file_lock(&dir).expect("first acquire");
         let second = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(dir.join("app_config.json.lock"))
             .expect("second open");
@@ -2997,6 +2998,7 @@ fn acquire_config_file_lock(config_dir: &Path) -> Option<std::fs::File> {
     let path = config_dir.join("app_config.json.lock");
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&path)
         .ok()?;

@@ -105,7 +105,7 @@ unsafe extern "system" fn query(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if out.is_null() || this.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -127,7 +127,7 @@ unsafe extern "system" fn query(
 unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         unsafe { view(this) }.refs.fetch_add(1, Ordering::Relaxed) + 1
 
     })
@@ -135,7 +135,7 @@ unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         let previous = unsafe { view(this) }.refs.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
             unsafe {
@@ -149,7 +149,7 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if kind.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -243,7 +243,7 @@ unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
 unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_RESULT_FALSE
 
     })
@@ -296,7 +296,7 @@ unsafe fn forward_edit_key(
 unsafe extern "system" fn key_down(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe { forward_edit_key(this, key, code, mods, true) }
 
     })
@@ -304,7 +304,7 @@ unsafe extern "system" fn key_down(this: *mut c_void, key: u16, code: i16, mods:
 unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i16) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe { forward_edit_key(this, key, code, mods, false) }
 
     })
@@ -430,7 +430,7 @@ unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TR
 unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_RESULT_OK
 
     })
@@ -438,7 +438,7 @@ unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {{
 unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if rect.is_null() {
             return K_INVALID_ARGUMENT;
         }

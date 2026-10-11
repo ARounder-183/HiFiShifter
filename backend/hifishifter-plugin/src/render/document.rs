@@ -539,7 +539,10 @@ impl DocumentSession {
         let _transaction = self.transaction.lock_or_recover();
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
-            return Err(format!("{} model changed; local curves preserved", crate::editor::errors::CONFLICT_PREFIX).into());
+            return Err(format!(
+            "{} model changed; local curves preserved",
+            crate::editor::errors::CONFLICT_PREFIX
+        ));
         }
         let host = self.workspace_timeline_locked()?;
         let mut edits = self.edits.lock_or_recover();
@@ -599,7 +602,10 @@ impl DocumentSession {
                 || !self.ready.load(Ordering::Acquire)
                 || self.revision.load(Ordering::Acquire) != base_model
             {
-                return Err(format!("{} model changed during automatic apply", crate::editor::errors::CONFLICT_PREFIX).into());
+                return Err(format!(
+            "{} model changed during automatic apply",
+            crate::editor::errors::CONFLICT_PREFIX
+        ));
             }
             let edits = self.edits.lock_or_recover().clone();
             if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
@@ -639,7 +645,10 @@ impl DocumentSession {
             || !self.ready.load(Ordering::Acquire)
             || self.revision.load(Ordering::Acquire) != base_model
         {
-            return Err(format!("{} model changed during automatic apply", crate::editor::errors::CONFLICT_PREFIX).into());
+            return Err(format!(
+            "{} model changed during automatic apply",
+            crate::editor::errors::CONFLICT_PREFIX
+        ));
         }
         if !current()
             || self.edits.lock_or_recover().revision != edit

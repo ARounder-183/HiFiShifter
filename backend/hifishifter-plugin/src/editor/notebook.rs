@@ -439,12 +439,9 @@ pub(super) fn mime_for_ext(ext: &str) -> String {
     .to_string()
 }
 
-/// 清洗导出/另存为对话框的默认文件名。
-///
-/// 名字来自前端或正文引用，最终交给系统保存对话框：路径分隔符能让对话框预导航
-/// 到任意目录，Windows 保留字符在多数文件系统上非法。实现在内核
-/// `notebook_assets::sanitize_export_file_name`（App 与插件共用，此前两侧逐字
-/// 各存一份），`use` 已接回本模块名字空间。
+// 导出/另存为对话框的默认文件名清洗已收口到内核
+// `notebook_assets::sanitize_export_file_name`（App 与插件共用，此前两侧逐字
+// 各存一份），`use` 已接回本模块名字空间。
 
 #[cfg(test)]
 mod tests {

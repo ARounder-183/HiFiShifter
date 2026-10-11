@@ -32,6 +32,15 @@ pub struct HostPcm {
     pub fingerprint: String,
 }
 
+/// `Commit.timeline` 载荷的结构版本。
+///
+/// 【为什么在载荷里而不是信封】`PROTOCOL` 守卫的是帧格式；`Commit` 里的
+/// `timeline` 是一个**自由 JSON**，它自己的字段结构变更（新增/改义）不会动到
+/// 信封。接收端按它拒绝"结构对不上"的提交，而不是静默把看不懂的 JSON 合并进
+/// 编辑会话。历史客户端不带该字段 → 反序列化为 0 → 接收端按 pre-versioning
+/// 接受；从本版起，timeline 语义变更必须递增本值。
+pub const TIMELINE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -39,6 +48,9 @@ pub enum Request {
     Commit {
         base_revision: u64,
         model_revision: u64,
+        /// timeline JSON 的结构版本；0 = 版本化之前的历史客户端。
+        #[serde(default)]
+        schema_version: u32,
         timeline: Value,
     },
 }
@@ -206,6 +218,7 @@ mod tests {
         let request = Request::Commit {
             base_revision: 7,
             model_revision: 9,
+            schema_version: TIMELINE_SCHEMA_VERSION,
             timeline: serde_json::json!({"pitch": [60, 62]}),
         };
         let mut bytes = Vec::new();
@@ -215,8 +228,10 @@ mod tests {
             Request::Commit {
                 base_revision,
                 model_revision,
+                schema_version,
                 timeline,
             } => {
+                assert_eq!(schema_version, TIMELINE_SCHEMA_VERSION);
                 assert_eq!((base_revision, model_revision), (7, 9));
                 assert_eq!(timeline["pitch"], serde_json::json!([60, 62]));
             }

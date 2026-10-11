@@ -101,7 +101,7 @@ mod tests {
     unsafe extern "system" fn query(_: *mut c_void, _: *const u8, _: *mut *mut c_void) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             1
     
     })
@@ -109,7 +109,7 @@ mod tests {
     unsafe extern "system" fn refs(_: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             1
     
     })
@@ -122,7 +122,7 @@ mod tests {
     ) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             let stream = unsafe { &mut *ptr.cast::<Stream>() };
             let size = (count as usize)
                 .min(3)
@@ -152,7 +152,7 @@ mod tests {
     ) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             let stream = unsafe { &mut *ptr.cast::<Stream>() };
             let size = (count as usize).min(2);
             stream
@@ -168,7 +168,7 @@ mod tests {
     unsafe extern "system" fn seek(_: *mut c_void, _: i64, _: i32, _: *mut i64) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             1
     
     })
@@ -176,7 +176,7 @@ mod tests {
     unsafe extern "system" fn tell(_: *mut c_void, _: *mut i64) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
             1
     
     })

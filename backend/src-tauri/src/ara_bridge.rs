@@ -392,6 +392,7 @@ fn build_commit(session: &Session, mut timeline: TimelineState) -> Result<Reques
     Ok(Request::Commit {
         base_revision: session.revision,
         model_revision: session.model_revision,
+        schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
         timeline: serde_json::to_value(timeline).map_err(|e| e.to_string())?,
     })
 }
@@ -759,6 +760,7 @@ mod tests {
             Request::Commit {
                 base_revision,
                 model_revision,
+                schema_version: _,
                 timeline,
             } => {
                 assert_eq!((base_revision, model_revision), (7, 9));

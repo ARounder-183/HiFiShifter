@@ -560,7 +560,7 @@ pub(crate) fn execute_managed(
     let mut locals = std::collections::BTreeMap::new();
     for edit in plan.edits {
         if !authorized() {
-            return Err(format!("host {}", crate::editor::errors::LEASE_REVOKED.message).into());
+            return Err(format!("host {}", crate::editor::errors::LEASE_REVOKED.message));
         }
         let target = owner.host_edit_target(&edit.native_id)?;
         if !target.geometry.markers.is_empty()

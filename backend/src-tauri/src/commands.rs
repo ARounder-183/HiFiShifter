@@ -153,7 +153,7 @@ pub fn ping() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "ping",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: ping") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: ping" }),
         || {
         core::ping()
 
@@ -173,7 +173,7 @@ pub fn get_about_info() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_about_info",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_about_info") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_about_info" }),
         || {
         core::get_about_info()
 
@@ -187,7 +187,7 @@ pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::V
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "consume_startup_project_path",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: consume_startup_project_path") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: consume_startup_project_path" }),
         || {
         core::consume_startup_project_path(state)
 
@@ -201,7 +201,7 @@ pub fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_ui_locale",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_ui_locale") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_ui_locale" }),
         || {
         core::set_ui_locale(state, locale)
 
@@ -215,7 +215,7 @@ pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::Timeline
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_timeline_state",
-        common::timeline_error_payload(&format!("panic in command: get_timeline_state")),
+        common::timeline_error_payload("panic in command: get_timeline_state"),
         || {
         core::get_timeline_state(state)
 
@@ -235,7 +235,7 @@ pub fn get_timeline_state_lite(state: State<'_, AppState>) -> crate::models::Tim
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_timeline_state_lite",
-        common::timeline_error_payload(&format!("panic in command: get_timeline_state_lite")),
+        common::timeline_error_payload("panic in command: get_timeline_state_lite"),
         || {
         core::get_timeline_state_lite(state)
 
@@ -253,7 +253,7 @@ pub fn set_transport(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_transport",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_transport") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_transport" }),
         || {
         // 传输命令全序化（见 AppState::transport_lock 注释）：seek（含播放/停止
         // 流程内的锚点恢复）必须与 play/stop 全序执行，否则与它们交错的 seek
@@ -276,7 +276,7 @@ pub fn undo_timeline(state: State<'_, AppState>) -> crate::models::TimelineState
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "undo_timeline",
-        common::timeline_error_payload(&format!("panic in command: undo_timeline")),
+        common::timeline_error_payload("panic in command: undo_timeline"),
         || {
         core::undo_timeline(state)
 
@@ -290,7 +290,7 @@ pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineState
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "redo_timeline",
-        common::timeline_error_payload(&format!("panic in command: redo_timeline")),
+        common::timeline_error_payload("panic in command: redo_timeline"),
         || {
         core::redo_timeline(state)
 
@@ -307,7 +307,7 @@ pub fn begin_undo_group(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "begin_undo_group",
-        common::timeline_error_payload(&format!("panic in command: begin_undo_group")),
+        common::timeline_error_payload("panic in command: begin_undo_group"),
         || {
         state.begin_undo_group(label)
 
@@ -328,7 +328,7 @@ pub fn set_project_save_undo_history(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_save_undo_history",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_save_undo_history") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_save_undo_history" }),
         || {
         serde_json::json!({
             "ok": true,
@@ -352,7 +352,7 @@ pub fn set_history_position(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_history_position",
-        common::timeline_error_payload(&format!("panic in command: set_history_position")),
+        common::timeline_error_payload("panic in command: set_history_position"),
         || {
         state.set_history_position(position, crate::state::HistoryJumpIntent::Jump)
 
@@ -376,7 +376,7 @@ pub fn record_param_selection_step(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "record_param_selection_step",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: record_param_selection_step") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: record_param_selection_step" }),
         || {
         state.record_param_selection_step(before, after)
 
@@ -394,7 +394,7 @@ pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_history_state",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_history_state") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_history_state" }),
         || {
         state.history_state_json()
 
@@ -408,7 +408,7 @@ pub fn end_undo_group(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "end_undo_group",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: end_undo_group") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: end_undo_group" }),
         || {
         state.end_undo_group()
 
@@ -424,7 +424,7 @@ pub fn close_window(window: Window) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "close_window",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: close_window") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: close_window" }),
         || {
         project::close_window(window)
 
@@ -446,7 +446,7 @@ pub fn new_project(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "new_project",
-        common::timeline_error_payload(&format!("panic in command: new_project")),
+        common::timeline_error_payload("panic in command: new_project"),
         || {
         project::new_project(state, window)
 
@@ -460,7 +460,7 @@ pub fn open_project_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_project_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_project_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_project_dialog" }),
         || {
         project::open_project_dialog()
 
@@ -510,7 +510,7 @@ pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> 
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_notes",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_notes") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_notes" }),
         || {
         project::set_project_notes(state, notes_markdown)
 
@@ -528,7 +528,7 @@ pub fn save_project(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "save_project",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: save_project") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: save_project" }),
         || {
         project::save_project(state, window, notes_markdown)
 
@@ -553,7 +553,7 @@ pub fn notebook_put_asset(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_put_asset",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_put_asset") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_put_asset" }),
         || {
         notebook::put_asset(state, asset_id, kind, ext, mime, data_base64, meta)
 
@@ -568,7 +568,7 @@ pub fn notebook_read_asset(state: State<'_, AppState>, asset_id: String) -> serd
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_read_asset",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_asset") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_read_asset" }),
         || {
         notebook::read_asset(state, asset_id)
 
@@ -583,7 +583,7 @@ pub fn notebook_list_assets(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_list_assets",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_list_assets") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_list_assets" }),
         || {
         notebook::list_assets(state)
 
@@ -597,7 +597,7 @@ pub fn notebook_remove_asset(state: State<'_, AppState>, asset_id: String) -> se
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_remove_asset",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_remove_asset") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_remove_asset" }),
         || {
         notebook::remove_asset(state, asset_id)
 
@@ -612,7 +612,7 @@ pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_prune_assets",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_prune_assets") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_prune_assets" }),
         || {
         notebook::prune_assets(state)
 
@@ -642,7 +642,7 @@ pub fn notebook_read_clipboard_payload() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_read_clipboard_payload",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_clipboard_payload") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_read_clipboard_payload" }),
         || {
         notebook::read_clipboard_payload()
 
@@ -660,7 +660,7 @@ pub fn notebook_write_clipboard_payload(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_write_clipboard_payload",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_write_clipboard_payload") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_write_clipboard_payload" }),
         || {
         notebook::write_clipboard_payload(payload_base64, text_summary)
 
@@ -675,7 +675,7 @@ pub fn notebook_read_clipboard_image() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_read_clipboard_image",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_read_clipboard_image") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_read_clipboard_image" }),
         || {
         notebook::read_clipboard_image()
 
@@ -690,7 +690,7 @@ pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Val
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "seal_project_notes_history",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: seal_project_notes_history") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: seal_project_notes_history" }),
         || {
         notebook::seal_notes_history(state)
 
@@ -710,7 +710,7 @@ pub fn notebook_export_document(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_export_document",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_export_document") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_export_document" }),
         || {
         notebook::export_document(state, suggested_name, extension, content)
 
@@ -729,7 +729,7 @@ pub fn notebook_save_asset_as(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "notebook_save_asset_as",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: notebook_save_asset_as") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: notebook_save_asset_as" }),
         || {
         notebook::save_asset_as(state, asset_id, suggested_name)
 
@@ -747,7 +747,7 @@ pub fn save_project_as(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "save_project_as",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: save_project_as") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: save_project_as" }),
         || {
         project::save_project_as(state, window, notes_markdown)
 
@@ -796,7 +796,7 @@ pub fn save_auto_backup_settings(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "save_auto_backup_settings",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: save_auto_backup_settings") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: save_auto_backup_settings" }),
         || {
         project::save_auto_backup_settings(state, settings)
 
@@ -813,7 +813,7 @@ pub fn run_timed_auto_backup(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "run_timed_auto_backup",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: run_timed_auto_backup") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: run_timed_auto_backup" }),
         || {
         project::run_timed_auto_backup(state, path_template)
 
@@ -837,7 +837,7 @@ pub fn save_recording_settings(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "save_recording_settings",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: save_recording_settings") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: save_recording_settings" }),
         || {
         recording::save_recording_settings(state, settings)
 
@@ -851,7 +851,7 @@ pub fn get_recording_devices() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_recording_devices",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_recording_devices") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_recording_devices" }),
         || {
         recording::get_recording_devices()
 
@@ -865,7 +865,7 @@ pub fn get_recording_apps() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_recording_apps",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_recording_apps") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_recording_apps" }),
         || {
         recording::get_recording_apps()
 
@@ -879,7 +879,7 @@ pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "start_recording",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: start_recording") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: start_recording" }),
         || {
         recording::start_recording(state, start_sec)
 
@@ -893,7 +893,7 @@ pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "stop_recording",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: stop_recording") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: stop_recording" }),
         || {
         recording::stop_recording(state)
 
@@ -912,7 +912,7 @@ pub fn set_project_base_scale(state: State<'_, AppState>, base_scale: String) ->
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_base_scale",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_base_scale") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_base_scale" }),
         || {
         project::set_project_base_scale(state, base_scale)
 
@@ -929,7 +929,7 @@ pub fn set_project_custom_scale(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_custom_scale",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_custom_scale") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_custom_scale" }),
         || {
         project::set_project_custom_scale(state, custom_scale)
 
@@ -948,7 +948,7 @@ pub fn set_project_timeline_settings(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_timeline_settings",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_timeline_settings") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_timeline_settings" }),
         || {
         project::set_project_timeline_settings(
             state,
@@ -967,7 +967,7 @@ pub fn import_project_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_project_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: import_project_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: import_project_dialog" }),
         || {
         project_import::import_project_dialog()
 
@@ -987,7 +987,7 @@ pub fn import_project(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_project",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: import_project") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: import_project" }),
         || {
         project_import::import_project(
             state,
@@ -1011,7 +1011,7 @@ pub fn set_project_stretch_settings(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_stretch_settings",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_project_stretch_settings") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_project_stretch_settings" }),
         || {
         project::set_project_stretch_settings(
             state,
@@ -1031,7 +1031,7 @@ pub fn open_audio_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_audio_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog" }),
         || {
         dialogs::open_audio_dialog()
 
@@ -1045,7 +1045,7 @@ pub fn open_audio_dialog_multi() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_audio_dialog_multi",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog_multi") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog_multi" }),
         || {
         dialogs::open_audio_dialog_multi()
 
@@ -1062,7 +1062,7 @@ pub fn open_audio_dialog_for_source(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_audio_dialog_for_source",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_audio_dialog_for_source") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog_for_source" }),
         || {
         dialogs::open_audio_dialog_for_source(source_path, dialog_title)
 
@@ -1076,7 +1076,7 @@ pub fn pick_output_path() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "pick_output_path",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_output_path") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: pick_output_path" }),
         || {
         dialogs::pick_output_path()
 
@@ -1090,7 +1090,7 @@ pub fn pick_directory() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "pick_directory",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_directory") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: pick_directory" }),
         || {
         dialogs::pick_directory()
 
@@ -1104,7 +1104,7 @@ pub fn open_midi_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_midi_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_midi_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_midi_dialog" }),
         || {
         dialogs::open_midi_dialog()
 
@@ -1118,7 +1118,7 @@ pub fn pick_midi_output_path() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "pick_midi_output_path",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_midi_output_path") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: pick_midi_output_path" }),
         || {
         dialogs::pick_midi_output_path()
 
@@ -1197,7 +1197,7 @@ pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "clear_waveform_cache",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: clear_waveform_cache") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: clear_waveform_cache" }),
         || {
         waveform::clear_waveform_cache(state)
 
@@ -1368,7 +1368,7 @@ pub fn add_track(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "add_track",
-        common::timeline_error_payload(&format!("panic in command: add_track")),
+        common::timeline_error_payload("panic in command: add_track"),
         || {
         timeline::add_track(state, name, parent_track_id, index)
 
@@ -1391,7 +1391,7 @@ pub fn add_track_tree(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "add_track_tree",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: add_track_tree") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: add_track_tree" }),
         || {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
@@ -1417,7 +1417,7 @@ pub fn remove_track(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "remove_track",
-        common::timeline_error_payload(&format!("panic in command: remove_track")),
+        common::timeline_error_payload("panic in command: remove_track"),
         || {
         timeline::remove_track(state, track_id)
 
@@ -1436,7 +1436,7 @@ pub fn duplicate_track(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "duplicate_track",
-        common::timeline_error_payload(&format!("panic in command: duplicate_track")),
+        common::timeline_error_payload("panic in command: duplicate_track"),
         || {
         timeline::duplicate_track(state, track_id, parent_track_id, target_index)
 
@@ -1455,7 +1455,7 @@ pub fn move_track(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "move_track",
-        common::timeline_error_payload(&format!("panic in command: move_track")),
+        common::timeline_error_payload("panic in command: move_track"),
         || {
         timeline::move_track(state, track_id, target_index, parent_track_id)
 
@@ -1479,7 +1479,7 @@ pub fn set_track_state(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_track_state",
-        common::timeline_error_payload(&format!("panic in command: set_track_state")),
+        common::timeline_error_payload("panic in command: set_track_state"),
         || {
         timeline::set_track_state(
             state,
@@ -1506,7 +1506,7 @@ pub fn select_track(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "select_track",
-        common::timeline_error_payload(&format!("panic in command: select_track")),
+        common::timeline_error_payload("panic in command: select_track"),
         || {
         timeline::select_track(state, track_id)
 
@@ -1523,7 +1523,7 @@ pub fn set_project_length(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_project_length",
-        common::timeline_error_payload(&format!("panic in command: set_project_length")),
+        common::timeline_error_payload("panic in command: set_project_length"),
         || {
         timeline::set_project_length(state, project_sec)
 
@@ -1539,7 +1539,7 @@ pub fn get_track_summary(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_track_summary",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_track_summary") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_track_summary" }),
         || {
         timeline::get_track_summary(state, track_id)
 
@@ -1637,7 +1637,7 @@ pub fn remove_clip(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "remove_clip",
-        common::timeline_error_payload(&format!("panic in command: remove_clip")),
+        common::timeline_error_payload("panic in command: remove_clip"),
         || {
         timeline::remove_clip(state, clip_id)
 
@@ -1654,7 +1654,7 @@ pub fn remove_clips(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "remove_clips",
-        common::timeline_error_payload(&format!("panic in command: remove_clips")),
+        common::timeline_error_payload("panic in command: remove_clips"),
         || {
         timeline::remove_clips(state, clip_ids)
 
@@ -1674,7 +1674,7 @@ pub fn move_clip(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "move_clip",
-        common::timeline_error_payload(&format!("panic in command: move_clip")),
+        common::timeline_error_payload("panic in command: move_clip"),
         || {
         timeline::move_clip(state, clip_id, start_sec, track_id, move_linked_params)
 
@@ -1692,7 +1692,7 @@ pub fn move_clips(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "move_clips",
-        common::timeline_error_payload(&format!("panic in command: move_clips")),
+        common::timeline_error_payload("panic in command: move_clips"),
         || {
         timeline::move_clips(state, moves, move_linked_params)
 
@@ -1706,7 +1706,7 @@ pub fn get_clip_linked_params(state: State<'_, AppState>, clip_id: String) -> se
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_clip_linked_params",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_clip_linked_params") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_clip_linked_params" }),
         || {
         timeline::get_clip_linked_params(state, clip_id)
 
@@ -1724,7 +1724,7 @@ pub fn apply_clip_linked_params(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "apply_clip_linked_params",
-        common::timeline_error_payload(&format!("panic in command: apply_clip_linked_params")),
+        common::timeline_error_payload("panic in command: apply_clip_linked_params"),
         || {
         timeline::apply_clip_linked_params(state, clip_id, linked_params)
 
@@ -1804,7 +1804,7 @@ pub fn set_clips_state_bulk(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_clips_state_bulk",
-        common::timeline_error_payload(&format!("panic in command: set_clips_state_bulk")),
+        common::timeline_error_payload("panic in command: set_clips_state_bulk"),
         || {
         timeline::set_clips_state_bulk(state, updates, checkpoint)
 
@@ -1823,7 +1823,7 @@ pub fn set_clip_active_take(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_clip_active_take",
-        common::timeline_error_payload(&format!("panic in command: set_clip_active_take")),
+        common::timeline_error_payload("panic in command: set_clip_active_take"),
         || {
         timeline::set_clip_active_take(state, clip_id, take_id, checkpoint)
 
@@ -1842,7 +1842,7 @@ pub fn cycle_clip_takes(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "cycle_clip_takes",
-        common::timeline_error_payload(&format!("panic in command: cycle_clip_takes")),
+        common::timeline_error_payload("panic in command: cycle_clip_takes"),
         || {
         timeline::cycle_clip_takes(state, clip_ids, direction.unwrap_or(1), checkpoint)
 
@@ -1860,7 +1860,7 @@ pub fn pack_clips_into_takes(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "pack_clips_into_takes",
-        common::timeline_error_payload(&format!("panic in command: pack_clips_into_takes")),
+        common::timeline_error_payload("panic in command: pack_clips_into_takes"),
         || {
         timeline::pack_clips_into_takes(state, clip_ids, checkpoint)
 
@@ -1878,7 +1878,7 @@ pub fn explode_clip_takes(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "explode_clip_takes",
-        common::timeline_error_payload(&format!("panic in command: explode_clip_takes")),
+        common::timeline_error_payload("panic in command: explode_clip_takes"),
         || {
         timeline::explode_clip_takes(state, clip_id, checkpoint)
 
@@ -1897,7 +1897,7 @@ pub fn duplicate_clip_take(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "duplicate_clip_take",
-        common::timeline_error_payload(&format!("panic in command: duplicate_clip_take")),
+        common::timeline_error_payload("panic in command: duplicate_clip_take"),
         || {
         timeline::duplicate_clip_take(state, clip_id, take_id, checkpoint)
 
@@ -1916,7 +1916,7 @@ pub fn remove_clip_take(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "remove_clip_take",
-        common::timeline_error_payload(&format!("panic in command: remove_clip_take")),
+        common::timeline_error_payload("panic in command: remove_clip_take"),
         || {
         timeline::remove_clip_take(state, clip_id, take_id, checkpoint)
 
@@ -1936,7 +1936,7 @@ pub fn rename_clip_take(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "rename_clip_take",
-        common::timeline_error_payload(&format!("panic in command: rename_clip_take")),
+        common::timeline_error_payload("panic in command: rename_clip_take"),
         || {
         timeline::rename_clip_take(state, clip_id, take_id, name, checkpoint)
 
@@ -1956,7 +1956,7 @@ pub fn set_clip_take_reversed(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_clip_take_reversed",
-        common::timeline_error_payload(&format!("panic in command: set_clip_take_reversed")),
+        common::timeline_error_payload("panic in command: set_clip_take_reversed"),
         || {
         timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
 
@@ -1976,7 +1976,7 @@ pub fn set_clip_take_channel_mode(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_clip_take_channel_mode",
-        common::timeline_error_payload(&format!("panic in command: set_clip_take_channel_mode")),
+        common::timeline_error_payload("panic in command: set_clip_take_channel_mode"),
         || {
         timeline::set_clip_take_channel_mode(state, clip_id, take_id, channel_mode, checkpoint)
 
@@ -2098,7 +2098,7 @@ pub fn duplicate_clips_bulk(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "duplicate_clips_bulk",
-        common::timeline_error_payload(&format!("panic in command: duplicate_clips_bulk")),
+        common::timeline_error_payload("panic in command: duplicate_clips_bulk"),
         || {
         timeline::duplicate_clips_bulk(state, payload)
 
@@ -2117,7 +2117,7 @@ pub fn replace_clip_source(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "replace_clip_source",
-        common::timeline_error_payload(&format!("panic in command: replace_clip_source")),
+        common::timeline_error_payload("panic in command: replace_clip_source"),
         || {
         timeline::replace_clip_source(state, clip_ids, new_source_path, replace_same_source)
 
@@ -2152,7 +2152,7 @@ pub fn split_clip(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "split_clip",
-        common::timeline_error_payload(&format!("panic in command: split_clip")),
+        common::timeline_error_payload("panic in command: split_clip"),
         || {
         timeline::split_clip(state, clip_id, split_sec)
 
@@ -2169,7 +2169,7 @@ pub fn split_clips_at(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "split_clips_at",
-        common::timeline_error_payload(&format!("panic in command: split_clips_at")),
+        common::timeline_error_payload("panic in command: split_clips_at"),
         || {
         timeline::split_clips_at(state, clip_ids, split_sec)
 
@@ -2221,7 +2221,7 @@ pub fn close_track_gaps(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "close_track_gaps",
-        common::timeline_error_payload(&format!("panic in command: close_track_gaps")),
+        common::timeline_error_payload("panic in command: close_track_gaps"),
         || {
         timeline::close_track_gaps(state, track_id, from_sec)
 
@@ -2237,7 +2237,7 @@ pub fn glue_clips(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "glue_clips",
-        common::timeline_error_payload(&format!("panic in command: glue_clips")),
+        common::timeline_error_payload("panic in command: glue_clips"),
         || {
         timeline::glue_clips(state, clip_ids)
 
@@ -2254,7 +2254,7 @@ pub fn group_clips(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "group_clips",
-        common::timeline_error_payload(&format!("panic in command: group_clips")),
+        common::timeline_error_payload("panic in command: group_clips"),
         || {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
@@ -2276,7 +2276,7 @@ pub fn ungroup_clips(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "ungroup_clips",
-        common::timeline_error_payload(&format!("panic in command: ungroup_clips")),
+        common::timeline_error_payload("panic in command: ungroup_clips"),
         || {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
@@ -2298,7 +2298,7 @@ pub fn toggle_group_disabled(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "toggle_group_disabled",
-        common::timeline_error_payload(&format!("panic in command: toggle_group_disabled")),
+        common::timeline_error_payload("panic in command: toggle_group_disabled"),
         || {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
@@ -2320,7 +2320,7 @@ pub fn convert_clips_to_pitch_reference(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "convert_clips_to_pitch_reference",
-        common::timeline_error_payload(&format!("panic in command: convert_clips_to_pitch_reference")),
+        common::timeline_error_payload("panic in command: convert_clips_to_pitch_reference"),
         || {
         timeline::convert_clips_to_pitch_reference(state, clip_ids)
 
@@ -2337,7 +2337,7 @@ pub fn update_pitch_reference(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "update_pitch_reference",
-        common::timeline_error_payload(&format!("panic in command: update_pitch_reference")),
+        common::timeline_error_payload("panic in command: update_pitch_reference"),
         || {
         timeline::update_pitch_reference(state, clip_ids)
 
@@ -2354,7 +2354,7 @@ pub fn select_clip(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "select_clip",
-        common::timeline_error_payload(&format!("panic in command: select_clip")),
+        common::timeline_error_payload("panic in command: select_clip"),
         || {
         timeline::select_clip(state, clip_id)
 
@@ -2370,7 +2370,7 @@ pub fn copy_timeline_clips(state: State<'_, AppState>, clip_ids: Vec<String>) ->
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "copy_timeline_clips",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: copy_timeline_clips") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: copy_timeline_clips" }),
         || {
         timeline_clipboard::copy_timeline_clips(&state, clip_ids)
 
@@ -2387,7 +2387,7 @@ pub fn copy_timeline_tracks(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "copy_timeline_tracks",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: copy_timeline_tracks") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: copy_timeline_tracks" }),
         || {
         timeline_clipboard::copy_timeline_tracks(&state, track_ids)
 
@@ -2404,7 +2404,7 @@ pub fn paste_timeline_clipboard(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "paste_timeline_clipboard",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_timeline_clipboard") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: paste_timeline_clipboard" }),
         || {
         timeline_clipboard::paste_timeline_clipboard(&state, mode)
 
@@ -2418,7 +2418,7 @@ pub fn has_timeline_clipboard() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "has_timeline_clipboard",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: has_timeline_clipboard") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: has_timeline_clipboard" }),
         || {
         timeline_clipboard::has_timeline_clipboard()
 
@@ -2432,7 +2432,7 @@ pub fn clipboard_kind() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "clipboard_kind",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: clipboard_kind") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: clipboard_kind" }),
         || {
         timeline_clipboard::clipboard_kind()
 
@@ -2451,7 +2451,7 @@ pub fn write_system_clipboard_object(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "write_system_clipboard_object",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: write_system_clipboard_object") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: write_system_clipboard_object" }),
         || {
         let summary = text_summary
             .filter(|value| !value.trim().is_empty())
@@ -2490,7 +2490,7 @@ pub fn read_system_clipboard_object() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "read_system_clipboard_object",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: read_system_clipboard_object") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: read_system_clipboard_object" }),
         || {
         match crate::system_clipboard::read_bytes() {
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
@@ -2516,7 +2516,7 @@ pub fn set_timeline_tempo_map(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_timeline_tempo_map",
-        common::timeline_error_payload(&format!("panic in command: set_timeline_tempo_map")),
+        common::timeline_error_payload("panic in command: set_timeline_tempo_map"),
         || {
         timeline::set_timeline_tempo_map(state, tempo_map)
 
@@ -2562,7 +2562,7 @@ pub fn set_param_frames(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_param_frames",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_param_frames") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_param_frames" }),
         || {
         params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint)
 
@@ -2583,7 +2583,7 @@ pub fn restore_param_frames(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "restore_param_frames",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: restore_param_frames") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: restore_param_frames" }),
         || {
         params::restore_param_frames(
             &state,
@@ -2616,7 +2616,7 @@ pub fn convert_mix_param(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "convert_mix_param",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: convert_mix_param") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: convert_mix_param" }),
         || {
         params::convert_mix_param(state, track_id, from, ranges)
 
@@ -2645,7 +2645,7 @@ pub fn set_static_param(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_static_param",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_static_param") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_static_param" }),
         || {
         params::set_static_param(&state, track_id, param, value, checkpoint)
 
@@ -2664,7 +2664,7 @@ pub fn stretch_track_linked_params(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "stretch_track_linked_params",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: stretch_track_linked_params") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: stretch_track_linked_params" }),
         || {
         params::stretch_track_linked_params(&state, track_id, mappings, checkpoint)
 
@@ -2693,7 +2693,7 @@ pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_pitch_shift",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_pitch_shift") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_pitch_shift" }),
         || {
         synth::set_pitch_shift(semitones)
 
@@ -2790,7 +2790,7 @@ pub fn cancel_export_audio() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "cancel_export_audio",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: cancel_export_audio") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: cancel_export_audio" }),
         || {
         synth::cancel_export_audio()
 
@@ -2845,7 +2845,7 @@ pub fn set_metronome(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "set_metronome",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: set_metronome") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: set_metronome" }),
         || {
         playback::set_metronome(state, enabled, gain, mode, accent, sound)
 
@@ -2859,7 +2859,7 @@ pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "play_original",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: play_original") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: play_original" }),
         || {
         // 传输命令全序化（见 AppState::transport_lock 注释）：快速连续
         // 播放/暂停/停止时，Tauri 线程池的并发执行会让 stop 与 play 交错
@@ -2882,7 +2882,7 @@ pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "stop_audio",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: stop_audio") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: stop_audio" }),
         || {
         let _transport_order = state
             .inner()
@@ -2915,7 +2915,7 @@ pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "start_background_render",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: start_background_render") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: start_background_render" }),
         || {
         playback::start_background_render(app)
 
@@ -2930,7 +2930,7 @@ pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "cancel_background_render",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: cancel_background_render") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: cancel_background_render" }),
         || {
         playback::cancel_background_render(Some(&app))
 
@@ -2949,7 +2949,7 @@ pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_log_folder",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_log_folder") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_log_folder" }),
         || {
         diagnostics::open_log_folder(app)
 
@@ -2963,7 +2963,7 @@ pub fn pick_diagnostics_output_path() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "pick_diagnostics_output_path",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: pick_diagnostics_output_path") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
         || {
         diagnostics::pick_diagnostics_output_path()
 
@@ -2999,7 +2999,7 @@ pub fn export_layout_json(json: String) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "export_layout_json",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: export_layout_json") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: export_layout_json" }),
         || {
         json_export::export_json_file(json, "hifishifter-layout.json", "Export layout", "layout")
 
@@ -3017,7 +3017,7 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "export_theme_json",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: export_theme_json") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: export_theme_json" }),
         || {
         let file_name = if default_file_name.trim().is_empty() {
             "hifishifter-theme.json".to_string()
@@ -3041,7 +3041,7 @@ pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> s
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "export_vibrato_presets_json",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: export_vibrato_presets_json") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: export_vibrato_presets_json" }),
         || {
         let file_name = if default_file_name.trim().is_empty() {
             "hifishifter-vibrato-preset.json".to_string()
@@ -3060,7 +3060,7 @@ pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "log_frontend_error",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: log_frontend_error") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: log_frontend_error" }),
         || {
         diagnostics::log_frontend_error(message, detail)
 
@@ -3078,7 +3078,7 @@ pub fn get_pitch_analysis_progress(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_pitch_analysis_progress",
-        Err(format!("panic in command: get_pitch_analysis_progress")),
+        Err("panic in command: get_pitch_analysis_progress".to_string()),
         || {
         pitch_progress::get_pitch_analysis_progress(state)
 
@@ -3184,7 +3184,7 @@ pub fn create_directory(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "create_directory",
-        Err(format!("panic in command: create_directory")),
+        Err("panic in command: create_directory".to_string()),
         || {
         file_browser::create_directory(
             parent_dir,
@@ -3207,7 +3207,7 @@ pub fn rename_path(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "rename_path",
-        Err(format!("panic in command: rename_path")),
+        Err("panic in command: rename_path".to_string()),
         || {
         file_browser::rename_path(path, new_name, state.config_dir.get().map(|p| p.as_path()))
 
@@ -3244,7 +3244,7 @@ pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileI
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_audio_file_info",
-        Err(format!("panic in command: get_audio_file_info")),
+        Err("panic in command: get_audio_file_info".to_string()),
         || {
         file_browser::get_audio_file_info(file_path)
 
@@ -3304,7 +3304,7 @@ pub fn reveal_paths_in_file_manager(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "reveal_paths_in_file_manager",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: reveal_paths_in_file_manager") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: reveal_paths_in_file_manager" }),
         || {
         common::reveal_paths_in_file_manager(&app, paths, "no paths given")
 
@@ -3319,7 +3319,7 @@ pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_path_with_default_app",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_path_with_default_app") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_path_with_default_app" }),
         || {
         common::open_path_with_default_app(&app, &path)
 
@@ -3347,7 +3347,7 @@ pub fn open_vocalshifter_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_vocalshifter_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_vocalshifter_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_vocalshifter_dialog" }),
         || {
         vocalshifter::open_vocalshifter_dialog()
 
@@ -3365,7 +3365,7 @@ pub fn import_vocalshifter_project(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_vocalshifter_project",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: import_vocalshifter_project") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: import_vocalshifter_project" }),
         || {
         vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
 
@@ -3390,7 +3390,7 @@ pub fn paste_vocalshifter_clipboard(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "paste_vocalshifter_clipboard",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_vocalshifter_clipboard") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: paste_vocalshifter_clipboard" }),
         || {
         vocalshifter_clipboard::paste_vocalshifter_clipboard(
             state.inner(),
@@ -3412,7 +3412,7 @@ pub fn open_reaper_dialog() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_reaper_dialog",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_reaper_dialog") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_reaper_dialog" }),
         || {
         reaper::open_reaper_dialog()
 
@@ -3430,7 +3430,7 @@ pub fn import_reaper_project(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_reaper_project",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: import_reaper_project") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: import_reaper_project" }),
         || {
         reaper::import_reaper_project(state.inner(), &window, rpp_path)
 
@@ -3448,7 +3448,7 @@ pub fn paste_reaper_clipboard(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "paste_reaper_clipboard",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: paste_reaper_clipboard") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: paste_reaper_clipboard" }),
         || {
         reaper_clipboard::paste_reaper_clipboard(
             state.inner(),
@@ -3466,7 +3466,7 @@ pub fn has_reaper_clipboard() -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "has_reaper_clipboard",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: has_reaper_clipboard") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: has_reaper_clipboard" }),
         || {
         serde_json::json!({
             "ok": true,
@@ -3516,7 +3516,7 @@ pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {{
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "open_render_cache_dir",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: open_render_cache_dir") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: open_render_cache_dir" }),
         || {
         cache::open_render_cache_dir(app)
 
@@ -3531,7 +3531,7 @@ pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_j
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "reveal_export_paths",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: reveal_export_paths") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: reveal_export_paths" }),
         || {
         cache::reveal_export_paths(app, paths)
 
@@ -3558,7 +3558,7 @@ pub fn get_midi_tracks(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "get_midi_tracks",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: get_midi_tracks") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: get_midi_tracks" }),
         || {
         midi::get_midi_tracks(state.inner(), midi_path, clipboard_guid)
 
@@ -3572,7 +3572,7 @@ pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "read_midi_clipboard_to_memory",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: read_midi_clipboard_to_memory") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: read_midi_clipboard_to_memory" }),
         || {
         midi::read_midi_clipboard_to_memory(state.inner())
 
@@ -3599,7 +3599,7 @@ pub fn import_midi_to_pitch(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_midi_to_pitch",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: import_midi_to_pitch") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: import_midi_to_pitch" }),
         || {
         midi::import_midi_to_pitch(
             state.inner(),
@@ -3641,7 +3641,7 @@ pub fn import_midi_as_clip(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "import_midi_as_clip",
-        common::timeline_error_payload(&format!("panic in command: import_midi_as_clip")),
+        common::timeline_error_payload("panic in command: import_midi_as_clip"),
         || {
         midi::import_midi_as_clip(
             state.inner(),
@@ -3683,7 +3683,7 @@ pub fn replace_midi_clip_data(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "replace_midi_clip_data",
-        common::timeline_error_payload(&format!("panic in command: replace_midi_clip_data")),
+        common::timeline_error_payload("panic in command: replace_midi_clip_data"),
         || {
         midi::replace_midi_clip_data(
             state.inner(),
@@ -3752,7 +3752,7 @@ pub fn save_ui_settings(
     // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
     common::guard_command(
         "save_ui_settings",
-        serde_json::json!({ "ok": false, "error": format!("panic in command: save_ui_settings") }),
+        serde_json::json!({ "ok": false, "error": "panic in command: save_ui_settings" }),
         || {
         ui_settings::save_ui_settings(state, settings)
 

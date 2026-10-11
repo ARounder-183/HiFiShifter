@@ -149,5 +149,5 @@ pub extern "system" fn InitDll() -> bool {
 /// VST3 模块卸载入口。
 #[no_mangle]
 pub extern "system" fn ExitDll() -> bool {
-    crate::guard_ffi(false, || editor::shutdown())
+    crate::guard_ffi(false, editor::shutdown)
 }

@@ -17,7 +17,7 @@ mod view;
 #[cfg(windows)]
 mod webview;
 pub(crate) mod workspace;
-pub(crate) use errors::{classify_error, terminal_error_code};
+pub(crate) use errors::classify_error;
 pub(crate) use view::create_view_with_link;
 
 #[cfg(test)]

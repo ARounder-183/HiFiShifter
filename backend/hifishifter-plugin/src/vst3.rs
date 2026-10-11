@@ -335,7 +335,7 @@ unsafe extern "system" fn factory_query_interface(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+    crate::guard_ffi(K_NO_INTERFACE, || {
         if obj.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -363,7 +363,7 @@ unsafe extern "system" fn factory_query_interface(
 unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         let factory = this as *const PluginFactoryObj;
         // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
         unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
@@ -374,7 +374,7 @@ unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         let factory = this as *const PluginFactoryObj;
         // SAFETY: this 是形如 PluginFactoryObj 的常驻单例；探针不销毁它。
         let previous = unsafe { (*factory).refcount.fetch_sub(1, Ordering::AcqRel) };
@@ -389,7 +389,7 @@ unsafe extern "system" fn factory_get_factory_info(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if info.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -408,7 +408,7 @@ unsafe extern "system" fn factory_get_factory_info(
 unsafe extern "system" fn factory_count_classes(_this: *mut c_void) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         // 0: 音频处理器组件，1: ARA 主工厂类，2: 编辑器控制器。
         crate::log_line("factory countClasses -> 3");
         3
@@ -456,7 +456,7 @@ unsafe extern "system" fn factory_get_class_info(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if info.is_null() || !(0..=2).contains(&index) {
             return K_INVALID_ARGUMENT;
         }
@@ -475,7 +475,7 @@ unsafe extern "system" fn factory_get_class_info2(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if info.is_null() || !(0..=2).contains(&index) {
             return K_INVALID_ARGUMENT;
         }
@@ -530,7 +530,7 @@ unsafe extern "system" fn factory_get_class_info_unicode(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -542,7 +542,7 @@ unsafe extern "system" fn factory_set_host_context(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_RESULT_OK
 
     })
@@ -556,7 +556,7 @@ unsafe extern "system" fn factory_create_instance(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if obj.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -805,7 +805,7 @@ unsafe extern "system" fn component_query_interface(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+    crate::guard_ffi(K_NO_INTERFACE, || {
         if obj.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -879,7 +879,7 @@ unsafe extern "system" fn component_query_interface(
 unsafe extern "system" fn component_add_ref(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         // SAFETY: this 是组件接口指针（对象基址）。
         unsafe { processor_add_ref(this as *mut Processor) }
 
@@ -889,7 +889,7 @@ unsafe extern "system" fn component_add_ref(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         // SAFETY: this 是组件接口指针（对象基址）。
         unsafe { processor_release(this as *mut Processor) }
 
@@ -899,7 +899,7 @@ unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
         struct CallReference(*mut c_void);
         impl Drop for CallReference {
@@ -950,7 +950,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
 unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe {
             let processor = &*(this as *mut Processor);
             processor.connection.close();
@@ -968,7 +968,7 @@ unsafe extern "system" fn component_get_controller_class_id(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if class_id.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -984,7 +984,7 @@ unsafe extern "system" fn component_get_controller_class_id(
 unsafe extern "system" fn component_set_io_mode(_this: *mut c_void, _mode: i32) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_RESULT_OK
 
     })
@@ -997,7 +997,7 @@ unsafe extern "system" fn component_get_bus_count(
 ) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         if media_type == 0 {
             1
         } else {
@@ -1016,7 +1016,7 @@ unsafe extern "system" fn component_get_bus_info(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if bus.is_null() || media_type != 0 || index != 0 {
             return K_INVALID_ARGUMENT;
         }
@@ -1059,7 +1059,7 @@ unsafe extern "system" fn component_get_routing_info(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1074,7 +1074,7 @@ unsafe extern "system" fn component_activate_bus(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_RESULT_OK
 
     })
@@ -1083,7 +1083,7 @@ unsafe extern "system" fn component_activate_bus(
 unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let processor = this as *mut Processor;
         // SAFETY: processor 是活动对象。
         unsafe { (*processor).active.store(state as i32, Ordering::SeqCst) };
@@ -1133,7 +1133,7 @@ unsafe extern "system" fn audio_query_interface(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+    crate::guard_ffi(K_NO_INTERFACE, || {
         // SAFETY: this 是 IAudioProcessor 子对象指针。
         let base = unsafe { base_from_audio(this) } as *mut c_void;
         // SAFETY: 转发到基址查询。
@@ -1145,7 +1145,7 @@ unsafe extern "system" fn audio_query_interface(
 unsafe extern "system" fn audio_add_ref(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         // SAFETY: this 是 IAudioProcessor 子对象指针。
         unsafe { processor_add_ref(base_from_audio(this)) }
 
@@ -1155,7 +1155,7 @@ unsafe extern "system" fn audio_add_ref(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         // SAFETY: this 是 IAudioProcessor 子对象指针。
         unsafe { processor_release(base_from_audio(this)) }
 
@@ -1171,7 +1171,7 @@ unsafe extern "system" fn audio_set_bus_arrangements(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if num_inputs != 1 || num_outputs != 1 {
             return K_RESULT_FALSE;
         }
@@ -1205,7 +1205,7 @@ unsafe extern "system" fn audio_get_bus_arrangement(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || arrangement.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -1225,7 +1225,7 @@ unsafe extern "system" fn audio_can_process_sample_size(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if symbolic_sample_size == 0 {
             K_RESULT_OK
         } else {
@@ -1238,7 +1238,7 @@ unsafe extern "system" fn audio_can_process_sample_size(
 unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         0
 
     })
@@ -1250,7 +1250,7 @@ unsafe extern "system" fn audio_setup_processing(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || setup.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -1345,7 +1345,7 @@ unsafe extern "system" fn audio_setup_processing(
 unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
         if this.is_null() {
             return K_INVALID_ARGUMENT;
@@ -1494,7 +1494,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
 unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         0
 
     })
@@ -1593,7 +1593,7 @@ unsafe extern "system" fn edit_controller_query_interface(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+    crate::guard_ffi(K_NO_INTERFACE, || {
         if obj.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -1629,7 +1629,7 @@ unsafe extern "system" fn edit_controller_query_interface(
 unsafe extern "system" fn edit_controller_add_ref(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         let controller = this as *const EditController;
         // SAFETY: this 是活动控制器对象。
         unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
@@ -1640,7 +1640,7 @@ unsafe extern "system" fn edit_controller_add_ref(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn edit_controller_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         let controller = this as *mut EditController;
         // SAFETY: this 是活动控制器对象。
         let previous = unsafe { (*controller).refcount.fetch_sub(1, Ordering::AcqRel) };
@@ -1660,7 +1660,7 @@ unsafe extern "system" fn edit_controller_initialize(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe {
             (*(this as *mut EditController))
                 .connection
@@ -1675,7 +1675,7 @@ unsafe extern "system" fn edit_controller_initialize(
 unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe {
             let controller = &*(this as *mut EditController);
             controller.editor_link.clear();
@@ -1696,7 +1696,7 @@ unsafe extern "system" fn edit_controller_set_component_state(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1708,7 +1708,7 @@ unsafe extern "system" fn edit_controller_set_state(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1720,7 +1720,7 @@ unsafe extern "system" fn edit_controller_get_state(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1729,7 +1729,7 @@ unsafe extern "system" fn edit_controller_get_state(
 unsafe extern "system" fn edit_controller_get_parameter_count(_this: *mut c_void) -> i32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         0
 
     })
@@ -1742,7 +1742,7 @@ unsafe extern "system" fn edit_controller_get_parameter_info(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1756,7 +1756,7 @@ unsafe extern "system" fn edit_controller_get_param_string_by_value(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1770,7 +1770,7 @@ unsafe extern "system" fn edit_controller_get_param_value_by_string(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1783,7 +1783,7 @@ unsafe extern "system" fn edit_controller_normalized_param_to_plain(
 ) -> f64 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || unsafe {
+    crate::guard_ffi(0.0, || {
         value
 
     })
@@ -1796,7 +1796,7 @@ unsafe extern "system" fn edit_controller_plain_param_to_normalized(
 ) -> f64 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || unsafe {
+    crate::guard_ffi(0.0, || {
         value
 
     })
@@ -1808,7 +1808,7 @@ unsafe extern "system" fn edit_controller_get_param_normalized(
 ) -> f64 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0.0, || unsafe {
+    crate::guard_ffi(0.0, || {
         0.0
 
     })
@@ -1821,7 +1821,7 @@ unsafe extern "system" fn edit_controller_set_param_normalized(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         K_NOT_IMPLEMENTED
 
     })
@@ -1833,7 +1833,7 @@ unsafe extern "system" fn edit_controller_set_component_handler(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -1864,7 +1864,7 @@ unsafe extern "system" fn edit_controller_create_view(
 ) -> *mut c_void {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(std::ptr::null_mut(), || unsafe {
+    crate::guard_ffi(std::ptr::null_mut(), || {
         if this.is_null()
             || name.is_null()
             || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor"
@@ -1924,7 +1924,7 @@ unsafe extern "system" fn pc_query(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe { component_query_interface(processor_from_connection(this).cast(), iid, out) }
 
     })
@@ -1932,7 +1932,7 @@ unsafe extern "system" fn pc_query(
 unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         unsafe { processor_add_ref(processor_from_connection(this)) }
 
     })
@@ -1940,7 +1940,7 @@ unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         unsafe { processor_release(processor_from_connection(this)) }
 
     })
@@ -1948,7 +1948,7 @@ unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let processor = unsafe { &*processor_from_connection(this) };
         let result = unsafe { processor.connection.connect(other) };
         if result == K_RESULT_OK {
@@ -1962,7 +1962,7 @@ unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> T
 unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe { &*processor_from_connection(this) }
             .connection
             .disconnect(other)
@@ -1972,7 +1972,7 @@ unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -
 unsafe extern "system" fn pc_notify(this: *mut c_void, message: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let processor = unsafe { &*processor_from_connection(this) };
         match unsafe { crate::editor::connection::read(message) } {
             Ok(crate::editor::connection::Message::RequestRoute) => {
@@ -1990,7 +1990,7 @@ unsafe extern "system" fn cc_query(
 ) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         unsafe { edit_controller_query_interface(controller_from_connection(this).cast(), iid, out) }
 
     })
@@ -1998,7 +1998,7 @@ unsafe extern "system" fn cc_query(
 unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         unsafe { edit_controller_add_ref(controller_from_connection(this).cast()) }
 
     })
@@ -2006,7 +2006,7 @@ unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(0, || unsafe {
+    crate::guard_ffi(0, || {
         unsafe { edit_controller_release(controller_from_connection(this).cast()) }
 
     })
@@ -2014,7 +2014,7 @@ unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {{
 unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*controller_from_connection(this) };
         let result = unsafe { controller.connection.connect(other) };
         if result == K_RESULT_OK {
@@ -2030,7 +2030,7 @@ unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> T
 unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*controller_from_connection(this) };
         let result = controller.connection.disconnect(other);
         if result == K_RESULT_OK {
@@ -2043,7 +2043,7 @@ unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -
 unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> TResult {{
     // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
     // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-    crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+    crate::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*controller_from_connection(this) };
         match unsafe { crate::editor::connection::read(message) } {
             Ok(crate::editor::connection::Message::Route { pid, token }) => {
@@ -2093,1343 +2093,8 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 }
 
 #[cfg(test)]
-mod lifetime_tests {
-    use super::*;
-    use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
-    use std::sync::atomic::AtomicU32;
-
-    /// 从真实工厂创建组件，返回其宿主 owning COM 引用。
-    fn create_component() -> *mut c_void {
-        let iid = uid_guid(IID_ICOMPONENT);
-        let mut component = std::ptr::null_mut();
-        // SAFETY: CID/IID 和输出槽均在同步工厂调用期间存活。
-        let result = unsafe {
-            factory_create_instance(
-                std::ptr::null_mut(),
-                PROCESSOR_CID.as_ptr().cast(),
-                iid.as_ptr().cast(),
-                &raw mut component,
-            )
-        };
-        assert_eq!(result, K_RESULT_OK);
-        component
-    }
-
-    /// 工厂交付控制器时必须消耗自己的初始引用：create + QI 之后，宿主引用应是
-    /// 唯一引用，宿主一次 release 就归零并销毁。此前成功分支漏掉工厂侧 release，
-    /// 每个控制器实例都确定性泄漏一份 ConnectionState（含 Arc 与两个 Mutex）。
-    #[test]
-    fn controller_instance_arrives_with_exactly_one_host_reference() {
-        let iid = uid_guid(IID_IEDIT_CONTROLLER);
-        let mut controller = std::ptr::null_mut();
-        // SAFETY: CID/IID 和输出槽均在同步工厂调用期间存活。
-        let result = unsafe {
-            factory_create_instance(
-                std::ptr::null_mut(),
-                CONTROLLER_CID.as_ptr().cast(),
-                iid.as_ptr().cast(),
-                &raw mut controller,
-            )
-        };
-        assert_eq!(result, K_RESULT_OK);
-        assert!(!controller.is_null());
-        let refcount =
-            unsafe { (*controller.cast::<EditController>()).refcount.load(Ordering::Acquire) };
-        assert_eq!(refcount, 1, "工厂交付后应只剩宿主那一份引用");
-        // 宿主放手后对象必须真正销毁（release 返回 0 = 计数归零并 drop）。
-        assert_eq!(unsafe { edit_controller_release(controller) }, 0);
-    }
-
-    /// 安全RED：只观察原生refcount，不在尚未保活的实现中重入最终release触发悬空。
-    #[test]
-    fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
-        let component = create_component();
-        let host = crate::host::MockHost::new();
-        let observed = Arc::new(AtomicI32::new(0));
-        let count = observed.clone();
-        let raw = component as usize;
-        *host.hook.borrow_mut() = Some((
-            "api:GetPlayPositionEx".into(),
-            Box::new(move || {
-                count.store(
-                    unsafe {
-                        (*((raw as *mut c_void).cast::<Processor>()))
-                            .refcount
-                            .load(Ordering::Acquire)
-                    },
-                    Ordering::Release,
-                );
-            }),
-        ));
-        let result = unsafe { component_initialize(component, host.context()) };
-        let count = observed.load(Ordering::Acquire);
-        assert_eq!(unsafe { component_release(component) }, 0);
-        assert_eq!(result, K_RESULT_OK);
-        assert_eq!(count, 2, "宿主owning引用之外，本次初始化应独立保活插件存储");
-    }
-
-    /// terminate撤销授权与最终release不同；初始化不得把closed组件伪报成成功或重装host引用。
-    #[test]
-    fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
-        for terminate in [true, false] {
-            let component = create_component();
-            let host = crate::host::MockHost::new();
-            let raw = component as usize;
-            let owner =
-                unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
-            *host.hook.borrow_mut() = Some((
-                "api:GetPlayPositionEx".into(),
-                Box::new(move || {
-                    if terminate {
-                        unsafe {
-                            component_terminate(raw as *mut c_void);
-                        }
-                    } else {
-                        owner.upgrade().unwrap().stop_editor();
-                    }
-                }),
-            ));
-            let result = unsafe { component_initialize(component, host.context()) };
-            let closed = unsafe { (*component.cast::<Processor>()).extension_owner.is_closed() };
-            let references = host.references();
-            let calls = host.calls();
-            assert_eq!(unsafe { component_release(component) }, 0);
-            assert_eq!(result, K_RESULT_FALSE);
-            assert!(closed);
-            assert_eq!(references, 1);
-            assert_eq!(calls.last().unwrap(), "api:GetPlayPositionEx");
-        }
-    }
-
-    /// 完成保活后才执行真正的重入最终release；调用结束不能泄漏该短引用。
-    #[test]
-    fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
-        let component = create_component();
-        let host = crate::host::MockHost::new();
-        let raw = component as usize;
-        let weak = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
-        let during = weak.clone();
-        let remaining = Arc::new(AtomicU32::new(99));
-        let observed = remaining.clone();
-        let alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed_alive = alive.clone();
-        *host.hook.borrow_mut() = Some((
-            "api:GetPlayPositionEx".into(),
-            Box::new(move || {
-                let count = unsafe { component_release(raw as *mut c_void) };
-                observed.store(count, Ordering::Release);
-                observed_alive.store(during.upgrade().is_some(), Ordering::Release);
-            }),
-        ));
-        assert_eq!(
-            unsafe { component_initialize(component, host.context()) },
-            K_RESULT_OK
-        );
-        assert_eq!(remaining.load(Ordering::Acquire), 1);
-        assert!(alive.load(Ordering::Acquire));
-        assert!(weak.upgrade().is_none());
-        assert_eq!(host.references(), 1);
-    }
-
-    #[test]
-    fn task38a_initialize_of_a_closed_component_does_not_call_host() {
-        let component = create_component();
-        let host = crate::host::MockHost::new();
-        unsafe {
-            component_terminate(component);
-        }
-        host.reset();
-        let result = unsafe { component_initialize(component, host.context()) };
-        let calls = host.calls();
-        assert_eq!(unsafe { component_release(component) }, 0);
-        assert_eq!(result, K_RESULT_FALSE);
-        assert!(calls.is_empty());
-        assert_eq!(host.references(), 1);
-    }
-
-    /// IHostApplication QI itself可重入terminate；失败初始化不能留下后来才存入的host owning引用。
-    #[test]
-    fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference()
-    {
-        let component = create_component();
-        let host = crate::host::MockHost::new();
-        host.enable_connection_host();
-        let raw = component as usize;
-        *host.hook.borrow_mut() = Some((
-            "QI".into(),
-            Box::new(move || unsafe {
-                component_terminate(raw as *mut c_void);
-            }),
-        ));
-        let result = unsafe { component_initialize(component, host.context()) };
-        let refs = host.references();
-        let calls = host.calls();
-        assert_eq!(unsafe { component_release(component) }, 0);
-        assert_eq!(result, K_RESULT_FALSE);
-        assert_eq!(refs, 1, "关闭回调之后QI成功返回的引用也必须立即回收");
-        assert_eq!(calls, ["QI"]);
-    }
-
-    /// 工厂不能遗留自己的初始引用，否则组件和扩展永远不会释放。
-    #[test]
-    fn host_component_release_drops_the_extension_owner() {
-        let component = create_component();
-        // SAFETY: component 是工厂返回的有效 Processor 基址。
-        let owner = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
-        // SAFETY: 消耗唯一宿主组件引用，此后不再使用 component。
-        assert_eq!(unsafe { component_release(component) }, 0);
-        assert!(owner.upgrade().is_none());
-    }
-
-    /// native ARA entry 被宿主持有时，组件先释放也不能让 extension storage 悬空。
-    #[test]
-    fn host_entry_reference_keeps_the_extension_owner_alive() {
-        let component = create_component();
-        // SAFETY: 组件仍存活，query_interface 返回新 owning COM 引用。
-        let (owner, entry) = unsafe {
-            let processor = &*component.cast::<Processor>();
-            (
-                Arc::downgrade(&processor.extension_owner),
-                processor
-                    .entry
-                    .as_ref()
-                    .unwrap()
-                    .query_interface(Ara2Vst3InterfaceKind::PluginEntry2)
-                    .unwrap(),
-            )
-        };
-        // SAFETY: 消耗宿主组件引用，entry 仍被单独持有。
-        assert_eq!(unsafe { component_release(component) }, 0);
-        assert!(owner.upgrade().is_some());
-        let mut remaining = 0;
-        // SAFETY: 最后消耗 entry owning COM 引用，不再访问其指针。
-        assert_eq!(
-            unsafe { ara2_vst3_release(entry, &raw mut remaining) },
-            ARA2_VST3_OK
-        );
-        assert_eq!(remaining, 0);
-        assert!(owner.upgrade().is_none());
-    }
-
-    /// 真COM组件、真实route租约与native entry同时持有；释放入口不能牵连同文档/另一文档actor。
-    #[test]
-    fn task34_real_processor_release_revokes_routes_without_retaining_document() {
-        use crate::editor::{
-            routing::EditorLink,
-            session::{UiRequest, UiSink},
-        };
-        use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
-        use std::sync::{atomic::AtomicBool, mpsc};
-        let model = crate::ara::model::ModelHandle::new();
-        let document = model.session();
-        let weak_document = Arc::downgrade(&document);
-        let other_model = crate::ara::model::ModelHandle::new();
-        let other_document = other_model.session();
-        let components = [create_component(), create_component(), create_component()];
-        let mut links = Vec::new();
-        let mut editors = Vec::new();
-        let mut sinks = Vec::new();
-        let mut receivers = Vec::new();
-        for (index, component) in components.iter().enumerate() {
-            // SAFETY: 三个工厂返回的COM owning引用在循环期间均存活。
-            let processor = unsafe { &*component.cast::<Processor>() };
-            processor
-                .extension_owner
-                .bind_to_document(
-                    if index == 2 {
-                        other_document.clone()
-                    } else {
-                        document.clone()
-                    },
-                    ApiGeneration::V2Final,
-                    ExtensionRoles::all(),
-                    ExtensionRoles::EDITOR_RENDERER,
-                    None,
-                )
-                .unwrap();
-            let link = Arc::new(EditorLink::default());
-            link.bind(std::process::id() as i64, processor.route.token())
-                .unwrap();
-            let editor = processor.extension_owner.editor_session().unwrap();
-            let (reply, rx) = mpsc::channel();
-            let (events, _) = mpsc::sync_channel(8);
-            let sink = UiSink {
-                view_id: format!("task34-com-{index}"),
-                reply,
-                events,
-                closed: Arc::new(AtomicBool::new(false)),
-            };
-            editor
-                .enqueue(UiRequest {
-                    id: 1,
-                    command: "get_ui_settings".into(),
-                    args: serde_json::json!({}),
-                    sink: sink.clone(),
-                    link: Some(link.clone()),
-                })
-                .unwrap();
-            assert_eq!(
-                rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap()["ok"],
-                true
-            );
-            links.push(link);
-            editors.push(editor);
-            sinks.push(sink);
-            receivers.push(rx);
-        }
-        assert!(Arc::ptr_eq(&editors[0], &editors[1]));
-        assert!(!Arc::ptr_eq(&editors[0], &editors[2]));
-        // ARA native entry保留owner，弱引用仍能升级也必须撤销processor入口。
-        let (weak_owner, entry) = unsafe {
-            let processor = &*components[0].cast::<Processor>();
-            (
-                Arc::downgrade(&processor.extension_owner),
-                processor
-                    .entry
-                    .as_ref()
-                    .unwrap()
-                    .query_interface(Ara2Vst3InterfaceKind::PluginEntry2)
-                    .unwrap(),
-            )
-        };
-        assert_eq!(unsafe { component_release(components[0]) }, 0);
-        assert!(weak_owner.upgrade().is_some());
-        assert!(links[0].owner().is_err());
-        assert!(sinks[0].closed.load(Ordering::Acquire));
-        assert!(!sinks[1].closed.load(Ordering::Acquire));
-        assert!(editors[0]
-            .enqueue(UiRequest {
-                id: 2,
-                command: "get_ui_settings".into(),
-                args: serde_json::json!({}),
-                sink: sinks[0].clone(),
-                link: Some(links[0].clone())
-            })
-            .is_err());
-        document.close();
-        assert!(sinks[1].closed.load(Ordering::Acquire));
-        assert!(links[1].owner().is_err());
-        assert!(links[2].owner().is_ok());
-        editors[2]
-            .enqueue(UiRequest {
-                id: 3,
-                command: "get_ui_settings".into(),
-                args: serde_json::json!({}),
-                sink: sinks[2].clone(),
-                link: Some(links[2].clone()),
-            })
-            .unwrap();
-        assert_eq!(
-            receivers[2]
-                .recv_timeout(std::time::Duration::from_secs(3))
-                .unwrap()["ok"],
-            true
-        );
-        drop(document);
-        drop(model);
-        assert!(
-            weak_document.upgrade().is_none(),
-            "native entry/actor/route不能强持document"
-        );
-        let mut remaining = 0;
-        assert_eq!(
-            unsafe { ara2_vst3_release(entry, &raw mut remaining) },
-            ARA2_VST3_OK
-        );
-        assert_eq!(remaining, 0);
-        assert!(weak_owner.upgrade().is_none());
-        assert_eq!(unsafe { component_release(components[1]) }, 0);
-        assert_eq!(unsafe { component_release(components[2]) }, 0);
-        other_document.close();
-        drop(other_document);
-        drop(other_model);
-    }
-
-    /// 实际IComponent getState/setState经过IBStream ABI；短读写也必须保存共享actor最新值的组件范围。
-    #[test]
-    fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
-        use crate::editor::{
-            routing::EditorLink,
-            session::{UiRequest, UiSink},
-        };
-        use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
-        use std::sync::{atomic::AtomicBool, mpsc};
-        #[repr(C)]
-        struct Stream {
-            vtable: *const Vtable,
-            bytes: Vec<u8>,
-            position: usize,
-        }
-        #[repr(C)]
-        struct Vtable {
-            query: usize,
-            add_ref: usize,
-            release: usize,
-            read: unsafe extern "system" fn(*mut c_void, *mut c_void, i32, *mut i32) -> i32,
-            write: unsafe extern "system" fn(*mut c_void, *mut c_void, i32, *mut i32) -> i32,
-            seek: usize,
-            tell: usize,
-        }
-        unsafe extern "system" fn read(
-            this: *mut c_void,
-            buffer: *mut c_void,
-            count: i32,
-            actual: *mut i32,
-        ) -> i32 {
-            let stream = unsafe { &mut *this.cast::<Stream>() };
-            let size = (count as usize)
-                .min(13)
-                .min(stream.bytes.len() - stream.position);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    stream.bytes.as_ptr().add(stream.position),
-                    buffer.cast(),
-                    size,
-                );
-                *actual = size as i32;
-            }
-            stream.position += size;
-            K_RESULT_OK
-        }
-        unsafe extern "system" fn write(
-            this: *mut c_void,
-            buffer: *mut c_void,
-            count: i32,
-            actual: *mut i32,
-        ) -> i32 {
-            let stream = unsafe { &mut *this.cast::<Stream>() };
-            let size = (count as usize).min(11);
-            stream.bytes.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(buffer.cast::<u8>(), size)
-            });
-            unsafe {
-                *actual = size as i32;
-            }
-            K_RESULT_OK
-        }
-        let vtable = Vtable {
-            query: 0,
-            add_ref: 0,
-            release: 0,
-            read,
-            write,
-            seek: 0,
-            tell: 0,
-        };
-        let (model, old_owners, ids) = crate::editor::session::tests::workspace_fixture();
-        let document = model.session();
-        for owner in old_owners {
-            owner.stop_editor();
-        }
-        let components = [create_component(), create_component()];
-        let mut links = Vec::new();
-        for (index, component) in components.iter().enumerate() {
-            // SAFETY: 工厂返回的processor COM owning引用仍由本测试持有。
-            let processor = unsafe { &*component.cast::<Processor>() };
-            let raw = processor
-                .extension_owner
-                .bind_to_document(
-                    document.clone(),
-                    ApiGeneration::V2Final,
-                    ExtensionRoles::all(),
-                    ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
-                    None,
-                )
-                .unwrap();
-            let key = (&*ids[index] as *const u8) as u64;
-            unsafe {
-                let ext = &*raw;
-                ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
-                    ext.playbackRendererRef,
-                    key as *mut _,
-                );
-            }
-            let link = Arc::new(EditorLink::default());
-            link.bind(std::process::id() as i64, processor.route.token())
-                .unwrap();
-            links.push(link);
-        }
-        let editor = document.editor_session().unwrap();
-        let (reply, rx) = mpsc::channel();
-        let (events, _) = mpsc::sync_channel(128);
-        let sink = UiSink {
-            view_id: "task34-state-stream".into(),
-            reply,
-            events,
-            closed: Arc::new(AtomicBool::new(false)),
-        };
-        let request = |id, command: &str, args| {
-            editor
-                .enqueue(UiRequest {
-                    id,
-                    command: command.into(),
-                    args,
-                    sink: sink.clone(),
-                    link: Some(links[0].clone()),
-                })
-                .unwrap();
-            let response = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-            assert_eq!(response["ok"], true, "{response}");
-            response["value"].clone()
-        };
-        let timeline = request(1, "get_timeline_state", serde_json::json!({}));
-        for (index, volume) in [0.5, 0.25].into_iter().enumerate() {
-            request(
-                2,
-                "set_track_state",
-                serde_json::json!({"trackId":timeline["tracks"][index]["id"],"volume":volume}),
-            );
-        }
-        for (index, id) in ["track", "b"].into_iter().enumerate() {
-            let mut stream = Stream {
-                vtable: &vtable,
-                bytes: Vec::new(),
-                position: 0,
-            };
-            assert_eq!(
-                unsafe { (COMPONENT_VTBL.get_state)(components[index], (&raw mut stream).cast()) },
-                K_RESULT_OK
-            );
-            let length = u32::from_le_bytes(stream.bytes[..4].try_into().unwrap()) as usize;
-            assert_eq!(stream.bytes.len(), length + 4);
-            let saved: serde_json::Value = serde_json::from_slice(&stream.bytes[4..]).unwrap();
-            // source basis已随自动初始化进入v3；仍须证明IBStream仅保存当前组件范围。
-            assert_eq!(saved["version"], 3);
-            assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
-            assert_eq!(saved["edits"]["tracks"][0]["id"], id);
-            assert_eq!(
-                saved["edits"]["tracks"][0]["volume"],
-                if index == 0 { 0.5 } else { 0.25 }
-            );
-            assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
-            let regions = saved["edits"]["atlas"]["regions"]
-                .as_object()
-                .expect("v3 source basis");
-            assert_eq!(regions.len(), 1);
-            assert!(regions.values().all(|region| region["root"] == id));
-            assert_eq!(
-                unsafe { (COMPONENT_VTBL.set_state)(components[index], (&raw mut stream).cast()) },
-                K_RESULT_OK
-            );
-        }
-        document.close();
-        for component in components {
-            assert_eq!(unsafe { component_release(component) }, 0);
-        }
-    }
-}
-
+mod lifetime_tests;
 #[cfg(test)]
-mod audio_boundary_tests {
-    use super::*;
-    use crate::audio_abi::{AudioBusBuffers, ProcessData};
-    use crate::sync::MutexExt;
-
-    /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
-    #[test]
-    fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_allocations() {
-        let model = crate::ara::model::ModelHandle::new();
-        let mut processor = Processor::create().unwrap();
-        processor
-            .extension_owner
-            .bind_to_document(
-                model.session(),
-                ara2_bridge::core::ApiGeneration::V2Final,
-                ara2_bridge::plugin::ExtensionRoles::all(),
-                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
-                None,
-            )
-            .unwrap();
-        processor.extension_owner.snapshots[0]
-            .publish(crate::render::snapshot::PlaybackSnapshot {
-                sample_rate: 44100,
-                origin_sample: 0,
-                left: vec![0.9; 4],
-                right: vec![0.9; 4],
-                _reservation: None,
-            })
-            .unwrap();
-        for mode in [0, 1, 2] {
-            let mut source_left = [0.0, 0.1, 0.2, 0.3];
-            let mut source_right = [0.3, 0.2, 0.1, 0.0];
-            let mut input_planes = [source_left.as_mut_ptr(), source_right.as_mut_ptr()];
-            let mut input = AudioBusBuffers {
-                num_channels: 2,
-                silence_flags: 0,
-                channel_buffers: input_planes.as_mut_ptr(),
-            };
-            let mut left = [9.0; 5];
-            let mut right = [9.0; 5];
-            let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-            let mut output = AudioBusBuffers {
-                num_channels: 2,
-                silence_flags: 3,
-                channel_buffers: output_planes.as_mut_ptr(),
-            };
-            // context可选/停播也必须透传；preview为空时不能凭播放门禁覆盖宿主输入。
-            let mut data = ProcessData {
-                process_mode: mode,
-                num_samples: 4,
-                num_inputs: 1,
-                num_outputs: 1,
-                inputs: &raw mut input,
-                outputs: &raw mut output,
-                ..Default::default()
-            };
-            crate::test_allocator::begin();
-            let result =
-                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-            let allocations = crate::test_allocator::end();
-            assert_eq!(result, K_RESULT_OK);
-            assert_eq!(allocations, 0);
-            assert_eq!(left, [0.0, 0.1, 0.2, 0.3, 9.0]);
-            assert_eq!(right, [0.3, 0.2, 0.1, 0.0, 9.0]);
-            assert_eq!(output.silence_flags, 0);
-        }
-    }
-
-    /// 相同bus/相同plane的in-place不能先清零；silent或inactive输入则明确补零。
-    // 测试故意把plane置空来模拟inactive输入，赋值本身不被读取。
-    #[allow(unused_assignments)]
-    #[test]
-    fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
-        let model = crate::ara::model::ModelHandle::new();
-        let mut processor = Processor::create().unwrap();
-        processor
-            .extension_owner
-            .bind_to_document(
-                model.session(),
-                ara2_bridge::core::ApiGeneration::V2Final,
-                ara2_bridge::plugin::ExtensionRoles::all(),
-                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
-                None,
-            )
-            .unwrap();
-        let mut left = [0.05, 0.1, 123.0];
-        let mut right = [0.2, 0.3, 456.0];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut data = ProcessData {
-            num_samples: 2,
-            num_inputs: 1,
-            num_outputs: 1,
-            inputs: &raw mut bus,
-            outputs: &raw mut bus,
-            ..Default::default()
-        };
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-            K_RESULT_OK
-        );
-        assert_eq!(left, [0.05, 0.1, 123.0]);
-        assert_eq!(right, [0.2, 0.3, 456.0]);
-        bus.silence_flags = 1;
-        planes[1] = std::ptr::null_mut();
-        let mut out_left = [9.0; 3];
-        let mut out_right = [9.0; 3];
-        let mut out_planes = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
-        let mut output = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: out_planes.as_mut_ptr(),
-        };
-        data.inputs = &raw mut bus;
-        data.outputs = &raw mut output;
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-            K_RESULT_OK
-        );
-        assert_eq!(out_left, [0.0, 0.0, 9.0]);
-        assert_eq!(out_right, [0.0, 0.0, 9.0]);
-        assert_eq!(output.silence_flags, 3);
-        bus.channel_buffers = std::ptr::null_mut();
-        out_left = [7.0; 3];
-        data.inputs = &raw mut bus;
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-            K_INVALID_ARGUMENT
-        );
-        assert_eq!(out_left, [7.0; 3]);
-    }
-
-    /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
-    #[test]
-    fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
-        let mut processor = Processor::create().unwrap();
-        processor.extension_owner.snapshots[0]
-            .publish(crate::render::snapshot::PlaybackSnapshot {
-                sample_rate: 44100,
-                origin_sample: 10,
-                left: vec![0.1, 0.2],
-                right: vec![0.3, 0.4],
-                _reservation: None,
-            })
-            .unwrap();
-        let mut left = [8.0_f32; 3];
-        let mut right = [8.0_f32; 3];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut context = crate::audio_abi::ProcessContext {
-            state: 1 << 1,
-            sample_rate: 44100.0,
-            project_time_samples: 11,
-            ..Default::default()
-        };
-        let mut data = ProcessData {
-            num_samples: 2,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            process_context: &raw mut context,
-            ..Default::default()
-        };
-        crate::test_allocator::begin();
-        // SAFETY: 实际 processor 音频子对象和完整 SDK 缓冲都在回调期间存活。
-        let result =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        let allocations = crate::test_allocator::end();
-        assert_eq!(result, K_RESULT_OK);
-        assert_eq!(left, [0.2, 0.0, 8.0]);
-        assert_eq!(right, [0.4, 0.0, 8.0]);
-        assert_eq!(bus.silence_flags, 0);
-        assert_eq!(allocations, 0);
-    }
-
-    /// 真实SDK入口验证离线setup等完整后台发布；普通setup不受doc事务/worker阻塞。
-    #[test]
-    fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_changes() {
-        use std::sync::mpsc;
-        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
-        let document = model.session();
-        let pcm = document.edit_sources.lock_or_recover()["ara://source"].clone();
-        document
-            .sources
-            .lock_or_recover()
-            .insert("ara://source".into(), pcm);
-        let mut processor = Processor::create().unwrap();
-        processor.extension_owner = owners[0].clone();
-        // SAFETY: Box保留稳定处理器地址到离线setup测试线程join。
-        let audio = unsafe { audio_ptr(&mut *processor) };
-        let held = document.transaction.lock_or_recover();
-        owners[0].prepare();
-        let mut normal = ProcessSetup {
-            process_mode: 0,
-            symbolic_sample_size: 0,
-            max_samples_per_block: 1024,
-            sample_rate: 44100.,
-        };
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.setup_processing)(audio, &raw mut normal) },
-            K_RESULT_OK,
-            "普通setup不能等待doc/推理"
-        );
-        let pointer = audio as usize;
-        let (done, rx) = mpsc::channel();
-        let job = std::thread::spawn(move || {
-            let mut setup = ProcessSetup {
-                process_mode: 2,
-                symbolic_sample_size: 0,
-                max_samples_per_block: 1024,
-                sample_rate: 44100.,
-            };
-            // SAFETY: 主测试保留稳定Box/接口/owner到join；此线程模拟SDK的非实时setup调用。
-            let result =
-                unsafe { (AUDIO_VTBL.setup_processing)(pointer as *mut c_void, &raw mut setup) };
-            done.send(result).unwrap();
-        });
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(20))
-                .is_err(),
-            "不能在后台未完成时成功返回"
-        );
-        drop(held);
-        assert_eq!(
-            rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),
-            K_RESULT_OK
-        );
-        job.join().unwrap();
-        assert!(owners[0]
-            .snapshots
-            .iter()
-            .all(|snapshot| snapshot.is_ready()));
-        {
-            let _transaction = document.transaction.lock_or_recover();
-            let mut edits = document.edits.lock_or_recover();
-            edits.revision += 1;
-            let mut track = document.timeline.lock_or_recover().as_ref().unwrap().tracks[0].clone();
-            track.volume = 0.5;
-            edits.tracks = vec![track];
-        }
-        let mut setup = ProcessSetup {
-            process_mode: 2,
-            symbolic_sample_size: 0,
-            max_samples_per_block: 1024,
-            sample_rate: 44100.,
-        };
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.setup_processing)(audio, &raw mut setup) },
-            K_RESULT_OK
-        );
-        let mut left = [9_f32; 5];
-        let mut right = [9_f32; 5];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut context = crate::audio_abi::ProcessContext {
-            sample_rate: 44100.,
-            ..Default::default()
-        };
-        let mut data = ProcessData {
-            process_mode: 2,
-            num_samples: 4,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            process_context: &raw mut context,
-            ..Default::default()
-        };
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio, (&raw mut data).cast()) },
-            K_RESULT_OK
-        );
-        document.close();
-        for (actual, want) in left[..4].iter().zip([0.05, 0.1, 0.15, 0.2]) {
-            assert!((*actual - want).abs() < 1e-6);
-        }
-        assert_eq!(left, right);
-        assert_eq!(left[4], 9.);
-    }
-    /// 离线缺快照/上下文必须显式失败；实时仍安全静音，全部回调保持零分配。
-    #[test]
-    fn offline_missing_snapshot_is_failure_not_successful_silence() {
-        let mut processor = Processor::create().unwrap();
-        let mut left = [9_f32; 4];
-        let mut right = [9_f32; 4];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut context = crate::audio_abi::ProcessContext {
-            sample_rate: 44100.,
-            ..Default::default()
-        };
-        let mut data = ProcessData {
-            process_mode: 2,
-            num_samples: 4,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            process_context: &raw mut context,
-            ..Default::default()
-        };
-        crate::test_allocator::begin();
-        let missing =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        data.process_context = std::ptr::null_mut();
-        let no_context =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        data.process_mode = 0;
-        let realtime =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        let allocations = crate::test_allocator::end();
-        assert_eq!(
-            (missing, no_context, realtime),
-            (K_RESULT_FALSE, K_RESULT_FALSE, K_RESULT_OK)
-        );
-        assert_eq!(allocations, 0);
-        assert_eq!(left, [0.; 4]);
-        assert_eq!(right, [0.; 4]);
-    }
-    /// 用真实接口子对象调用 process，避免测试绕过产品 vtable。
-    fn run(data: *mut ProcessData) -> TResult {
-        let mut processor = Processor::create().unwrap();
-        // SAFETY: 本测试持有处理器与 SDK 同布局数据，调用期间缓冲存活。
-        unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), data.cast()) }
-    }
-
-    /// 停播重复process同一帧必须静音；离线导出没有kPlaying也必须保留音频。
-    #[test]
-    fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
-        let mut processor = Processor::create().unwrap();
-        processor.extension_owner.snapshots[0]
-            .publish(crate::render::snapshot::PlaybackSnapshot {
-                sample_rate: 44100,
-                origin_sample: 0,
-                left: vec![0.25; 4],
-                right: vec![0.5; 4],
-                _reservation: None,
-            })
-            .unwrap();
-        let mut left = [9_f32; 4];
-        let mut right = [9_f32; 4];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut context = crate::audio_abi::ProcessContext {
-            sample_rate: 44100.,
-            ..Default::default()
-        };
-        let mut data = ProcessData {
-            num_samples: 4,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            process_context: &raw mut context,
-            ..Default::default()
-        };
-        for _ in 0..3 {
-            assert_eq!(
-                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-                K_RESULT_OK
-            );
-            assert_eq!(left, [0.; 4], "停播不能循环输出光标位置的快照块");
-            assert_eq!(right, [0.; 4]);
-        }
-        data.process_mode = 2;
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-            K_RESULT_OK
-        );
-        assert_eq!(left, [0.25; 4]);
-        assert_eq!(right, [0.5; 4]);
-    }
-
-    /// 宿主有效item mute即时门控真正VST3输出；同文档另一region不被静音，解除后复用原快照。
-    #[test]
-    fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
-        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
-        let document = model.session();
-        let host = crate::host::MockHost::new();
-        host.set_value("D_POSITION", 0.);
-        host.set_value("D_LENGTH", 4. / 44100.);
-        host.set_value("B_MUTE", 1.);
-        unsafe {
-            owners[0].bind_host_adapter(host.context());
-        }
-        owners[0].refresh_host_transport();
-        let workspace = document.workspace_timeline().unwrap();
-        assert!(workspace.clips[0].muted);
-        assert!(!workspace.clips[1].muted);
-        assert!(!owners[1].host_item_muted(), "静音只能影响直接绑定region");
-        let mut processor = Processor::create().unwrap();
-        processor.extension_owner = owners[0].clone();
-        owners[0].snapshots[0]
-            .publish(crate::render::snapshot::PlaybackSnapshot {
-                sample_rate: 44100,
-                origin_sample: 0,
-                left: vec![0.25; 4],
-                right: vec![0.5; 4],
-                _reservation: None,
-            })
-            .unwrap();
-        let mut left = [9_f32; 5];
-        let mut right = [9_f32; 5];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut context = crate::audio_abi::ProcessContext {
-            state: 1 << 1,
-            sample_rate: 44100.,
-            ..Default::default()
-        };
-        let mut data = ProcessData {
-            num_samples: 4,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            process_context: &raw mut context,
-            ..Default::default()
-        };
-        for mode in [0, 2] {
-            data.process_mode = mode;
-            crate::test_allocator::begin();
-            let result =
-                unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-            let allocations = crate::test_allocator::end();
-            assert_eq!(result, K_RESULT_OK);
-            assert_eq!(allocations, 0);
-            assert_eq!(&left[..4], &[0.; 4]);
-            assert_eq!(&right[..4], &[0.; 4]);
-            assert_eq!((left[4], right[4]), (9., 9.));
-            assert_eq!(bus.silence_flags, 3);
-        }
-        host.set_value("B_MUTE", 0.);
-        host.set_value("B_MUTE_ACTUAL", 1.);
-        owners[0].refresh_host_transport();
-        assert!(
-            !document.workspace_timeline().unwrap().clips[0].muted,
-            "solo覆盖后的解除不丢原始mute"
-        );
-        assert_eq!(
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
-            K_RESULT_OK
-        );
-        assert_eq!(&left[..4], &[0.25; 4]);
-        assert_eq!(&right[..4], &[0.5; 4]);
-        document.close();
-    }
-
-    /// 空实现留下旧音频；写错块长则越界覆盖尾哨兵。
-    #[test]
-    fn process_clears_exactly_the_requested_frames() {
-        let mut left = [0.75_f32, 0.75, 123.0];
-        let mut right = [-0.5_f32, -0.5, 456.0];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut output = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut data = ProcessData {
-            num_samples: 2,
-            num_outputs: 1,
-            outputs: &raw mut output,
-            ..Default::default()
-        };
-        assert_eq!(run(&raw mut data), K_RESULT_OK);
-        assert_eq!(left, [0.0, 0.0, 123.0]);
-        assert_eq!(right, [0.0, 0.0, 456.0]);
-        assert_eq!(output.silence_flags, 3);
-    }
-
-    /// 非法宿主数据不能被空实现伪报成功。
-    #[test]
-    fn process_rejects_invalid_counts_and_missing_bus_storage() {
-        assert_eq!(run(std::ptr::null_mut()), K_INVALID_ARGUMENT);
-        for data in [
-            ProcessData {
-                num_samples: -1,
-                ..Default::default()
-            },
-            ProcessData {
-                num_outputs: -1,
-                ..Default::default()
-            },
-            ProcessData {
-                num_inputs: -1,
-                ..Default::default()
-            },
-            ProcessData {
-                num_samples: 1,
-                num_outputs: 1,
-                ..Default::default()
-            },
-            ProcessData {
-                num_samples: 1,
-                num_inputs: 1,
-                ..Default::default()
-            },
-        ] {
-            let mut data = data;
-            assert_eq!(run(&raw mut data), K_INVALID_ARGUMENT);
-        }
-    }
-
-    /// 零帧参数 flush 与无总线合法，不应解引用空地址。
-    #[test]
-    fn process_accepts_zero_frame_flush_and_no_output() {
-        let mut flush = ProcessData {
-            num_outputs: 1,
-            ..Default::default()
-        };
-        assert_eq!(run(&raw mut flush), K_RESULT_OK);
-        let mut empty = ProcessData {
-            num_samples: 32,
-            ..Default::default()
-        };
-        assert_eq!(run(&raw mut empty), K_RESULT_OK);
-    }
-
-    /// 64 位样本不支持处理，但**不能**让宿主把插件踢出链路：按实际宽度静音、返回 OK，
-    /// 且绝不按 f32 解引用 f64 平面（那会写出破坏的样本）。
-    #[test]
-    fn process_silences_sample64_instead_of_leaving_the_chain() {
-        let mut samples = [0.25_f64, 0.5];
-        let mut planes = [samples.as_mut_ptr(), samples.as_mut_ptr()];
-        let mut output = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr().cast(),
-        };
-        let mut data = ProcessData {
-            symbolic_sample_size: 1,
-            num_samples: 2,
-            num_outputs: 1,
-            outputs: &raw mut output,
-            ..Default::default()
-        };
-        assert_eq!(run(&raw mut data), K_RESULT_OK);
-        assert_eq!(samples, [0.0, 0.0]);
-        assert_eq!(output.silence_flags, 3);
-    }
-
-    /// SDK 允许 inactive plane 为 null，但有通道时 plane 数组不能缺失。
-    #[test]
-    fn process_skips_inactive_planes_but_rejects_missing_arrays() {
-        let mut samples = [1.0_f32, 2.0];
-        let mut planes = [samples.as_mut_ptr(), std::ptr::null_mut()];
-        let mut output = AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut data = ProcessData {
-            num_samples: 2,
-            num_outputs: 1,
-            outputs: &raw mut output,
-            ..Default::default()
-        };
-        assert_eq!(run(&raw mut data), K_RESULT_OK);
-        assert_eq!(samples, [0.0, 0.0]);
-        assert_eq!(output.silence_flags, 3);
-        output.channel_buffers = std::ptr::null_mut();
-        data.outputs = &raw mut output;
-        assert_eq!(run(&raw mut data), K_INVALID_ARGUMENT);
-    }
-
-    /// 所有输入形状先校验，非法输入不能导致输出缓冲被部分写入。
-    #[test]
-    fn process_rejects_invalid_input_before_touching_output() {
-        // 三个 plane：下面的用例会声明 3 声道输入（宽总线现在被接受）。
-        let mut input_planes = [
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ];
-        for (channels, missing_array, expected) in [
-            (-1, false, K_INVALID_ARGUMENT),
-            // 单声道是**合法**总线形状（人声轨常见）；此前被拒 ⇒ 宿主静默旁路插件。
-            (1, false, K_RESULT_OK),
-            (2, true, K_INVALID_ARGUMENT),
-            (2, false, K_RESULT_OK),
-            (0, true, K_RESULT_OK),
-            // 宽于立体声的输入**接受**：拒绝会让宿主把插件踢出插槽（5.1 / 7.1 轨道）。
-            // 我们只读前两个声道，其余不参与处理。
-            (3, false, K_RESULT_OK),
-        ] {
-            let mut left = [0.25_f32, 0.5];
-            let mut right = [0.75_f32, 1.0];
-            let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-            let mut input = AudioBusBuffers {
-                num_channels: channels,
-                silence_flags: 0,
-                channel_buffers: if missing_array {
-                    std::ptr::null_mut()
-                } else {
-                    input_planes.as_mut_ptr()
-                },
-            };
-            let mut output = AudioBusBuffers {
-                num_channels: 2,
-                silence_flags: 0,
-                channel_buffers: output_planes.as_mut_ptr(),
-            };
-            let mut data = ProcessData {
-                num_samples: 2,
-                num_inputs: 1,
-                num_outputs: 1,
-                inputs: &raw mut input,
-                outputs: &raw mut output,
-                ..Default::default()
-            };
-            assert_eq!(run(&raw mut data), expected);
-            if expected != K_RESULT_OK {
-                assert_eq!(left, [0.25, 0.5]);
-                assert_eq!(right, [0.75, 1.0]);
-                assert_eq!(output.silence_flags, 0);
-            } else {
-                assert_eq!(left, [0.0, 0.0]);
-                assert_eq!(right, [0.0, 0.0]);
-            }
-        }
-    }
-
-    /// 未实现多总线或非 stereo 时不能假装完成协商。
-    #[test]
-    fn bus_negotiation_rejects_unsupported_arrangements() {
-        let mut processor = Processor::create().unwrap();
-        let mut stereo = 3_u64;
-        let mut mono = 1_u64;
-        let mut surround = 0x3F_u64;
-        // SAFETY: 真实处理器和布局数组在协商期间存活。
-        unsafe {
-            let this = audio_ptr(&mut *processor);
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut stereo, 1, &raw mut stereo, 1),
-                K_RESULT_OK
-            );
-            // 单声道入/出、以及单声道入 + 立体声出都接受：人声轨单声道极常见，此前
-            // 一律拒绝会让宿主把插件踢出链路。
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut mono, 1),
-                K_RESULT_OK
-            );
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1),
-                K_RESULT_OK
-            );
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut stereo, 0, &raw mut stereo, 1),
-                K_RESULT_FALSE
-            );
-            assert_eq!(
-                audio_set_bus_arrangements(this, std::ptr::null_mut(), 1, &raw mut stereo, 1),
-                K_INVALID_ARGUMENT
-            );
-            // `getBusInfo` 必须如实回吐协商后的声道数。此前无条件写死 2 ⇒ 单声道轨道上
-            // 宿主按 2 声道组织缓冲，而插件只填/读 1 声道（对宿主撒谎）。最后一次成功
-            // 协商是 mono 入 + stereo 出，故输入 1、输出 2。
-            let component = (&mut *processor) as *mut Processor as *mut c_void;
-            let mut input_info = std::mem::zeroed::<BusInfo>();
-            assert_eq!(
-                component_get_bus_info(component, 0, 0, 0, &raw mut input_info),
-                K_RESULT_OK
-            );
-            assert_eq!(
-                input_info.channel_count, 1,
-                "协商为单声道输入 ⇒ 报告 1 声道"
-            );
-            let mut output_info = std::mem::zeroed::<BusInfo>();
-            assert_eq!(
-                component_get_bus_info(component, 0, 1, 0, &raw mut output_info),
-                K_RESULT_OK
-            );
-            assert_eq!(
-                output_info.channel_count, 2,
-                "协商为立体声输出 ⇒ 报告 2 声道"
-            );
-
-            // 环绕声**接受**（放在最后，避免影响上面的"最后一次成功协商"断言）：
-            // 此前拒绝，而多数宿主在 `kResultFalse` 时把插件**踢出插槽** ——
-            // 5.1 / 7.1 轨道上用户看到的是"插件不见了"，没有任何提示。
-            // 现在的取舍是"部分工作、留在插槽里"：内部只处理前两个声道
-            // （见 `PlaybackSnapshot::copy_block` / `audio_abi::clear_outputs`）。
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut surround, 1, &raw mut surround, 1),
-                K_RESULT_OK
-            );
-        }
-    }
-
-    /// 非法 setup 不能让后续回调使用无效采样率或块尺寸。
-    #[test]
-    fn setup_rejects_invalid_rate_block_and_format() {
-        let mut processor = Processor::create().unwrap();
-        // SAFETY: 真实处理器和 setup POD 在调用期间存活。
-        unsafe {
-            let this = audio_ptr(&mut *processor);
-            assert_eq!(
-                audio_setup_processing(this, std::ptr::null_mut()),
-                K_INVALID_ARGUMENT
-            );
-            for (rate, block, format, expected) in [
-                (44100.0, 512, 0, K_RESULT_OK),
-                (f64::NAN, 512, 0, K_INVALID_ARGUMENT),
-                (0.0, 512, 0, K_INVALID_ARGUMENT),
-                (44100.0, -1, 0, K_INVALID_ARGUMENT),
-                // 非 32-bit 浮点现在**接受**：process 侧按实际宽度静音并留在链路里
-                // （见 `silence_unsupported_sample_size`）。此前 `kResultFalse` 会让宿主
-                // 把插件整条踢出链路。
-                (44100.0, 512, 1, K_RESULT_OK),
-                // 96k 现在**接受**（内部按 44.1/48k 出快照，输出线性重采样）—— 此前
-                // 返回 `kResultFalse` 会让宿主把插件整条踢出链路。
-                (96000.0, 512, 0, K_RESULT_OK),
-                (192000.0, 512, 0, K_RESULT_OK),
-                // 低于 44.1k 现在也**接受**（接受域与 `render::source` 的 8k 下限对齐）：
-                // 内部快照仍按 44.1/48k 出，输出走线性重采样（降采样、有镜像，记警告）。
-                // 此前返回 `kResultFalse` 会让宿主把插件整条踢出链路。
-                (8000.0, 512, 0, K_RESULT_OK),
-                (22050.0, 512, 0, K_RESULT_OK),
-                // 超出源读取域的率仍然拒绝：重采样比例会大到没有意义。
-                (4000.0, 512, 0, K_RESULT_FALSE),
-                (768000.0, 512, 0, K_RESULT_FALSE),
-            ] {
-                let mut setup = ProcessSetup {
-                    process_mode: 0,
-                    symbolic_sample_size: format,
-                    max_samples_per_block: block,
-                    sample_rate: rate,
-                };
-                assert_eq!(audio_setup_processing(this, &raw mut setup), expected);
-            }
-        }
-    }
-}
-
+mod audio_boundary_tests;
 #[cfg(test)]
-mod realtime_tests {
-    use super::*;
-    use std::cell::Cell;
-
-    std::thread_local! {
-        static IN_REALTIME_CALLBACK: Cell<bool> = const { Cell::new(false) };
-        static REALTIME_LOGS: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct ObservingLogger;
-
-    impl log::Log for ObservingLogger {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-        fn log(&self, _: &log::Record<'_>) {
-            if IN_REALTIME_CALLBACK.with(Cell::get) {
-                REALTIME_LOGS.with(|count| count.set(count.get() + 1));
-            }
-        }
-        fn flush(&self) {}
-    }
-
-    /// setProcessing 和 process 都可在音频线程运行，不能触发同步文件日志。
-    #[test]
-    fn realtime_callbacks_do_not_enter_the_file_logger() {
-        static LOGGER: ObservingLogger = ObservingLogger;
-        log::set_logger(&LOGGER).unwrap();
-        log::set_max_level(log::LevelFilter::Info);
-        let mut processor = Processor::create().expect("processor creation");
-        // SAFETY: 取真实音频处理器子对象地址，而非组件基址。
-        let this = unsafe { audio_ptr(&mut *processor) };
-        let mut left = [1.0_f32; 2];
-        let mut right = [1.0_f32; 2];
-        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-        let mut bus = crate::audio_abi::AudioBusBuffers {
-            num_channels: 2,
-            silence_flags: 0,
-            channel_buffers: planes.as_mut_ptr(),
-        };
-        let mut data = crate::audio_abi::ProcessData {
-            num_samples: 2,
-            num_outputs: 1,
-            outputs: &raw mut bus,
-            ..Default::default()
-        };
-        IN_REALTIME_CALLBACK.with(|flag| flag.set(true));
-        // SAFETY: 处理器在两次状态回调期间存活。
-        unsafe {
-            assert_eq!(audio_set_processing(this, 1), K_RESULT_OK);
-            assert_eq!(
-                (AUDIO_VTBL.process)(this, (&raw mut data).cast()),
-                K_RESULT_OK
-            );
-            assert_eq!(audio_set_processing(this, 0), K_RESULT_OK);
-        }
-        IN_REALTIME_CALLBACK.with(|flag| flag.set(false));
-        assert_eq!(REALTIME_LOGS.with(Cell::get), 0);
-        assert_eq!(left, [0.0; 2]);
-        assert_eq!(right, [0.0; 2]);
-    }
-}
+mod realtime_tests;

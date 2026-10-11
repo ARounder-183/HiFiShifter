@@ -1945,6 +1945,7 @@ mod tests {
             Request::Commit {
                 base_revision: snapshot.revision,
                 model_revision: snapshot.model_revision,
+                schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
                 timeline: client,
             }
         };
