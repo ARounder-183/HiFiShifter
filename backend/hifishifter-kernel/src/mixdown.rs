@@ -252,11 +252,6 @@ impl<'a> MixdownProgress<'a> {
     }
 }
 
-#[allow(dead_code)]
-fn beat_sec(bpm: f64) -> f64 {
-    60.0 / bpm.max(1e-6)
-}
-
 fn clamp_track_volume(x: f32) -> f32 {
     x.clamp(0.0, 4.0)
 }

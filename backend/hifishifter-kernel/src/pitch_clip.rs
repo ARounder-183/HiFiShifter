@@ -402,14 +402,6 @@ pub fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_ms: f64
     out
 }
 
-#[allow(dead_code)]
-fn quantize_i64(x: f64, scale: f64) -> i64 {
-    if !x.is_finite() {
-        return 0;
-    }
-    (x * scale).round() as i64
-}
-
 fn quantize_u32(x: f64, scale: f64) -> u32 {
     if !x.is_finite() {
         return 0;
@@ -530,11 +522,6 @@ fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
         *out_v = a + (b - a) * frac;
     }
     out
-}
-
-#[allow(dead_code)]
-fn beat_sec(bpm: f64) -> f64 {
-    60.0 / bpm.max(1e-6)
 }
 
 fn build_clip_pitch_key(

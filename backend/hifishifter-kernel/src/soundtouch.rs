@@ -23,11 +23,8 @@ extern "C" {
     fn soundtouch_setSampleRate(handle: Handle, sample_rate: c_uint) -> c_int;
     fn soundtouch_flush(handle: Handle) -> c_int;
     fn soundtouch_putSamples(handle: Handle, samples: *const f32, num_samples: c_uint) -> c_int;
-    #[allow(dead_code)]
     fn soundtouch_clear(handle: Handle);
     fn soundtouch_numSamples(handle: Handle) -> c_uint;
-    #[allow(dead_code)]
-    fn soundtouch_isEmpty(handle: Handle) -> c_int;
     fn soundtouch_receiveSamples(
         handle: Handle,
         out_buffer: *mut f32,
