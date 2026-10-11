@@ -13,8 +13,8 @@
 //!
 //! 并注明 7.81+ 由 `DIR_NEW`/`DIR2_NEW` 决定形状 —— 但**没有**公开 fade 求值函数，
 //! 也没有说明七个预设各自对应哪一组 `(curvature, S)`。所以这张表是量出来的，不是
-//! 从文档抄的：`probe/ara/FADE-AXIS-FINDINGS.md`，原始数据
-//! `probe/ara/captures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样）。
+//! 从文档抄的：`docs/2026-10-09-fade-axis-findings.md`，原始数据
+//! `tests/fixtures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样）。
 //!
 //! ## 表的形状
 //!
@@ -38,7 +38,7 @@
 
 /// 七个形状预设在新轴上的坐标 `(curvature, S)`，下标即 `C_FADE*SHAPE` 的预设号。
 ///
-/// 数值来自 `probe/ara/captures/fade-axis-7.82.json` 的 `legacy_shape_only` 用例：
+/// 数值来自 `tests/fixtures/fade-axis-7.82.json` 的 `legacy_shape_only` 用例：
 /// 只写 `C_FADEINSHAPE = k`，读回 `D_FADEINDIR_NEW` / `D_FADEINDIR2_NEW`。
 /// 表里的 `0.5` 不是"精确的一半"而是宿主原样吐回的读数，故按原值保留。
 pub const HOST_FADE_PRESET_AXES: [(f64, f64); 7] = [
@@ -115,22 +115,81 @@ pub fn host_fade_default_dir(shape: f64, is_out: bool) -> f64 {
 mod tests {
     use super::*;
 
-    /// 钉住实测值。改这里必须同时改 `probe/ara/captures/fade-axis-7.82.json`
-    /// 与 `probe/ara/FADE-AXIS-FINDINGS.md` 的表。
+    /// 读入**提交进仓**的实测原始数据：`tests/fixtures/fade-axis-7.82.json`
+    /// （REAPER 7.82/x64）。
+    ///
+    /// 【为什么不内联一份拷贝】内联字面量的话，绑定测试又退化成"常数等于自己"：
+    /// 改表时顺手改字面量就能变绿，证据与实现各走各的。读原始数据才把表**绑在证据上**
+    /// —— 证据缺失、或被改动到与表不符，都会失败，而不是静默通过。
+    fn fade_axis_capture() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fade-axis-7.82.json");
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        serde_json::from_slice(&bytes).expect("parse fade-axis capture")
+    }
+
+    /// 表必须与实测数据逐行一致：`legacy_shape_only` 用例里写 `C_FADEINSHAPE = k`
+    /// 后读回的 `(D_FADEINDIR_NEW, D_FADEINDIR2_NEW)`。
+    ///
+    /// 改 `HOST_FADE_PRESET_AXES` 必须同时改 `tests/fixtures/fade-axis-7.82.json`、
+    /// `docs/2026-10-09-fade-axis-findings.md` 的表，以及前端同源的
+    /// `hostFadeAxes.test.ts` 绑定 —— 否则这条测试红。
     #[test]
-    fn preset_table_matches_the_capture() {
+    fn preset_table_matches_the_committed_capture() {
+        let capture = fade_axis_capture();
+        let case = capture["cases"]
+            .as_array()
+            .expect("cases array")
+            .iter()
+            .find(|case| case["case"] == "legacy_shape_only")
+            .expect("legacy_shape_only case");
+        let mut measured: Vec<(usize, (f64, f64))> = Vec::new();
+        for sample in case["samples"].as_array().expect("samples array") {
+            let written: f64 = sample["written"]
+                .as_str()
+                .expect("written is a string")
+                .parse()
+                .expect("written parses as f64");
+            // 小数变体（1.1 / 5.1）不是预设，不参与本表。
+            if written.fract() != 0.0
+                || !(0.0..HOST_FADE_PRESET_AXES.len() as f64).contains(&written)
+            {
+                continue;
+            }
+            let after = &sample["after"];
+            measured.push((
+                written as usize,
+                (
+                    after["D_FADEINDIR_NEW"]
+                        .as_f64()
+                        .expect("curvature reading"),
+                    after["D_FADEINDIR2_NEW"].as_f64().expect("S reading"),
+                ),
+            ));
+        }
+        measured.sort_by_key(|(index, _)| *index);
         assert_eq!(
-            HOST_FADE_PRESET_AXES,
-            [
-                (0.0, 0.0),
-                (0.5, 0.0),
-                (-0.5, 0.0),
-                (1.0, 0.0),
-                (-1.0, 0.0),
-                (0.0, 0.5),
-                (0.0, 1.0),
-            ]
+            measured.len(),
+            HOST_FADE_PRESET_AXES.len(),
+            "capture must cover every preset 0..=6"
         );
+        for (index, (curvature, s)) in measured {
+            let (expected_c, expected_s) = HOST_FADE_PRESET_AXES[index];
+            assert!(
+                (curvature - expected_c).abs() < 1e-9 && (s - expected_s).abs() < 1e-9,
+                "preset {index}: capture ({curvature}, {s}) vs table ({expected_c}, {expected_s})"
+            );
+        }
+    }
+
+    /// 交叉验证：实测 baseline（全新 item）的读数就是预设 1（`c=0.5`、`S=0`）。
+    /// 与上一条同源 —— 都读同一份证据，而不是各自内联。
+    #[test]
+    fn the_captured_baseline_is_preset_one() {
+        let baseline = &fade_axis_capture()["baseline"];
+        let curvature = baseline["D_FADEINDIR_NEW"].as_f64().expect("curvature reading");
+        let s = baseline["D_FADEINDIR2_NEW"].as_f64().expect("S reading");
+        assert_eq!(host_fade_preset_for_axes(curvature, s), Some(1.0));
     }
 
     /// 预设 0/1/2/3/4 只在 curvature 轴上，5/6 只在 S 轴上 —— 两轴正交，

@@ -999,7 +999,7 @@ struct BootstrapFlags {
     /// 版本读不出来 → 前端整块保持只读（不猜）。
     ///
     /// 这套翻译的映射是实测的（`hifishifter_kernel::fade_axes`，证据
-    /// `probe/ara/FADE-AXIS-FINDINGS.md`），所以新轴宿主上**也**摆七个预设按钮；
+    /// `docs/2026-10-09-fade-axis-findings.md`），所以新轴宿主上**也**摆七个预设按钮；
     /// 此前这里的注释写着"预设映射尚未校准，所以只给连续滑杆"，那条限制已随实测消失。
     fade_axes: Option<&'static str>,
     /// 撤销历史由谁承载：`"host"`（宿主权威栈）或 `"local"`（插件自管栈）。

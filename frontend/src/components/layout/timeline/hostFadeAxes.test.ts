@@ -1,24 +1,52 @@
 // 宿主淡化轴的预设映射：与 Rust 侧 `fade_axes.rs` 钉住同一组实测值。
+import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import { HOST_FADE_PRESET_AXES, hostFadePresetAxes, hostFadePresetForAxes } from "./hostFadeAxes";
 
 /**
- * 黄金值来自 `probe/ara/captures/fade-axis-7.82.json` 的 `legacy_shape_only` 用例
- * （REAPER 7.82/x64：只写 `C_FADEINSHAPE = k`，读回两个新轴）。
+ * 实测证据（提交进仓）：`backend/hifishifter-kernel/tests/fixtures/fade-axis-7.82.json`
+ * 的 `legacy_shape_only` 用例（REAPER 7.82/x64：只写 `C_FADEINSHAPE = k`，读回两个新轴）。
  *
- * Rust 侧 `fade_axes.rs::preset_table_matches_the_capture` 断言同一张表。两处一起改，
- * 或一起不改 —— 单改一处会让插件写出的形状与界面认出的形状分家。
+ * 【为什么不内联字面量】内联的话这条测试就退化成"常数等于自己"：改表时顺手改字面量
+ * 就能变绿，证据与实现各走各的。这里读**原始数据**，让 TS 表、Rust 表
+ * （`fade_axes.rs::preset_table_matches_the_committed_capture`）与同一份证据绑在一起 ——
+ * 任一侧与证据不符都会红。两处一起改，或一起不改。
  */
-test("golden values match the rust fade-axis table", () => {
-    expect(HOST_FADE_PRESET_AXES).toEqual([
-        [0, 0],
-        [0.5, 0],
-        [-0.5, 0],
-        [1, 0],
-        [-1, 0],
-        [0, 0.5],
-        [0, 1],
-    ]);
+const CAPTURE_URL = new URL(
+    "../../../../../backend/hifishifter-kernel/tests/fixtures/fade-axis-7.82.json",
+    import.meta.url,
+);
+
+interface FadeAxisCapture {
+    baseline: Record<string, number>;
+    cases: { case: string; samples: { written: string; after: Record<string, number> }[] }[];
+}
+
+function readCapture(): FadeAxisCapture {
+    return JSON.parse(readFileSync(CAPTURE_URL, "utf8")) as FadeAxisCapture;
+}
+
+/** 从实测数据还原 `[curvature, S]` 表（只取整数预设 0..=6，跳过 1.1 / 5.1 小数变体）。 */
+function measuredPresetAxes(): [number, number][] {
+    const legacy = readCapture().cases.find((entry) => entry.case === "legacy_shape_only");
+    if (!legacy) throw new Error("fade-axis capture is missing the legacy_shape_only case");
+    return legacy.samples
+        .map((sample) => ({ k: Number(sample.written), after: sample.after }))
+        .filter(({ k }) => Number.isInteger(k) && k >= 0 && k <= 6)
+        .sort((a, b) => a.k - b.k)
+        .map(({ after }) => [after.D_FADEINDIR_NEW, after.D_FADEINDIR2_NEW] as [number, number]);
+}
+
+test("golden values match the committed fade-axis capture", () => {
+    const measured = measuredPresetAxes();
+    expect(measured).toHaveLength(HOST_FADE_PRESET_AXES.length);
+    expect(HOST_FADE_PRESET_AXES.map(([curvature, s]) => [curvature, s])).toEqual(measured);
+});
+
+/** 交叉验证：实测 baseline（全新 item）的读数就是预设 1（`SHAPE=1` / `c=0.5` / `S=0`）。 */
+test("the captured baseline is preset one", () => {
+    const baseline = readCapture().baseline;
+    expect(hostFadePresetForAxes(baseline.D_FADEINDIR_NEW, baseline.D_FADEINDIR2_NEW)).toBe(1);
 });
 
 /** 两轴正交是"新轴能完整表达七个预设"的全部理由，单独钉一条。 */

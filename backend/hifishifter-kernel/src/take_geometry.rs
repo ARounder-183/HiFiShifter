@@ -31,7 +31,7 @@
 //!
 //! ## 镜像轴
 //!
-//! 实测（`probe/ara/captures/reverse-script.log`）：REAPER 为倒放 take 建的 SECTION
+//! 实测（REAPER 7.82/x64 探针取证）：REAPER 为倒放 take 建的 SECTION
 //! 覆盖**整个媒体**（`PCM_Source_GetSectionInfo` 返回 `offset=0, length=媒体长`），
 //! 所以"段末端"与"媒体末端"在该情形下重合。本模块按 App 的既有口径取
 //! `min(段末端, 媒体长)` 为轴 —— 对 REAPER 生成的倒放段二者相等；对用户显式建过
