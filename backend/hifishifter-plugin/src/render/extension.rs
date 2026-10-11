@@ -2172,7 +2172,7 @@ impl ExtensionOwner {
     pub(crate) fn host_geometry(&self) -> Result<crate::host::geometry::BoundHostGeometry, String> {
         let stamp = self.host_query_stamp()?;
         let [region_key] = stamp.3.as_slice() else {
-            return Err("REAPER geometry requires exactly one assigned ARA region".into());
+            return Err("host geometry requires exactly one assigned ARA region".into());
         };
         let region = stamp
             .0
@@ -2181,9 +2181,7 @@ impl ExtensionOwner {
             .get(region_key)
             .cloned()
             .ok_or("assigned ARA region unavailable")?;
-        let host = self
-            .reaper_host()
-            .ok_or("REAPER host extension unavailable")?;
+        let host = self.native_host().ok_or("host extension unavailable")?;
         let geometry = host.geometry(|| self.host_query_authorized(&stamp))?;
         if !compatible(geometry.start_sec, region.start_in_playback_time)
             || !compatible(geometry.duration_sec, region.duration_in_playback_time)
@@ -2215,9 +2213,7 @@ impl ExtensionOwner {
         if stamp.3.is_empty() {
             return Err("no assigned ARA region".into());
         }
-        let host = self
-            .reaper_host()
-            .ok_or("REAPER host extension unavailable")?;
+        let host = self.native_host().ok_or("host extension unavailable")?;
         let authorized = || self.host_query_authorized(&stamp);
         let candidates = host
             .ui_folder_tracks(&authorized)?
@@ -2301,10 +2297,10 @@ impl ExtensionOwner {
             .host_geometry
             .lock_or_recover()
             .clone()
-            .ok_or("REAPER geometry has not been sampled on model/UI thread")?;
+            .ok_or("host geometry has not been sampled on model/UI thread")?;
         if cached.model != stamp.1 || cached.scope != stamp.2 || !self.host_query_authorized(&stamp)
         {
-            return Err("REAPER geometry metadata superseded".into());
+            return Err("host geometry metadata superseded".into());
         }
         cached.value
     }
@@ -2375,7 +2371,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = self.reaper_host();
+        let host = self.native_host();
         if let Some(host) = host {
             if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
                 // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
@@ -2420,13 +2416,20 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let Some(host) = self.reaper_host() else {
+        let Some(host) = self.native_host() else {
             // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
             // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
             *self.host_audio.lock_or_recover() = HostAudioStatus {
                 state: HostAudioState::HostUnidentified,
                 waiting_items: 0,
             };
+            // 【ARA-only 也必须推进 render_epoch】原生扩展缺席不代表"没有渲染输入"：
+            // ARA 模型自己就能给出时间拉伸与内容淡化（`RenderItemFacts` 的 ARA 三字段）。
+            // 此前这里直接 return ⇒ `render_facts` 永不更新、`render_epoch` 永不推进 ⇒
+            // 宿主在 ARA 侧改了这两项，插件继续用旧配置渲染（静默的正确性 bug）。
+            // ARA 拿不到方向/循环/声道（ARA 表达不到，见 `ara::mapping::LOST_FIELDS`），
+            // 所以这里只登记 ARA 能给出的字段，不假装有原生事实。
+            self.refresh_ara_render_facts(&stamp);
             return;
         };
         let allowed = || self.host_query_authorized(&stamp);
@@ -2463,7 +2466,7 @@ impl ExtensionOwner {
             if !allowed() {
                 return;
             }
-            let Some(host) = owner.reaper_host() else {
+            let Some(host) = owner.native_host() else {
                 continue;
             };
             let own_allowed = || {
@@ -2668,6 +2671,54 @@ impl ExtensionOwner {
             stamp.0.invalidate_render_input();
         }
     }
+    /// ARA-only 后端的渲染事实来源：只登记 ARA region 自己能给出的字段。
+    ///
+    /// 键用 region key 而非 item GUID —— ARA-only 下没有宿主 item 清单，item GUID 不
+    /// 存在；region key 是这一后端里唯一稳定的 region 身份。原生后端另有一套按 item
+    /// GUID 的键空间，两者不会同时出现（一个实例的后端在生命周期内固定）。
+    fn refresh_ara_render_facts(
+        &self,
+        stamp: &(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>),
+    ) {
+        let facts = {
+            let regions = stamp.0.regions.lock_or_recover();
+            crate::host::geometry::RenderFacts::from_items(regions.iter().map(|(key, region)| {
+                (
+                    format!("ara-region-{key}"),
+                    crate::host::geometry::RenderItemFacts {
+                        // 方向 / 循环 / 声道是**原生扩展专属**事实，ARA 表达不到 ⇒ 恒为安全默认。
+                        reversed: false,
+                        loop_enabled: false,
+                        channel_mode: 0,
+                        timestretch: region.is_timestretch_enabled,
+                        content_fade_head: region.has_content_based_fade_at_head,
+                        content_fade_tail: region.has_content_based_fade_at_tail,
+                    },
+                )
+            }))
+        };
+        let _transaction = stamp.0.transaction.lock_or_recover();
+        if self.is_closed()
+            || !stamp.0.is_alive()
+            || stamp.0.revision.load(Ordering::Acquire) != stamp.1
+            || stamp.0.scope_revision.load(Ordering::Acquire) != stamp.2
+        {
+            return;
+        }
+        let changed = {
+            let mut previous = stamp.0.render_facts.lock_or_recover();
+            if *previous != facts {
+                *previous = facts;
+                true
+            } else {
+                false
+            }
+        };
+        drop(_transaction);
+        if changed {
+            stamp.0.invalidate_render_input();
+        }
+    }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
     pub(crate) fn refresh_host_state_for_model(&self) {
         self.refresh_host_geometry();
@@ -2676,7 +2727,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = self.reaper_host();
+        let host = self.native_host();
         let authorized = || self.host_query_authorized(&stamp);
         let before = host
             .as_ref()
@@ -2717,7 +2768,7 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(|host| host.geometry_revision(authorized).ok());
         if geometry.is_ok() && (before.is_none() || before != after) {
-            geometry = Err("REAPER project changed during cached geometry refresh".into());
+            geometry = Err("host project changed during cached geometry refresh".into());
         }
         let _transaction = stamp.0.transaction.lock_or_recover();
         let mut prepare_fades = false;
@@ -2921,19 +2972,19 @@ impl ExtensionOwner {
             document
                 .renderer_owners()
                 .iter()
-                .find_map(|owner| owner.reaper_host().and_then(|host| host.fade_axes_v2()))
+                .find_map(|owner| owner.native_host().and_then(|host| host.fade_axes_v2()))
         })
     }
 
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         let document = self.editor_document().ok()?;
-        if let Some(host) = self.reaper_host().filter(|host| host.has_project_history()) {
+        if let Some(host) = self.native_host().filter(|host| host.has_project_history()) {
             return Some(host);
         }
         document.renderer_owners().iter().find_map(|owner| {
             owner
-                .reaper_host()
+                .native_host()
                 .filter(|host| host.has_project_history())
         })
     }
@@ -2948,12 +2999,13 @@ impl ExtensionOwner {
             .clone()
             .unwrap_or_else(|| crate::host::adapter::HostBackend::from_native(None))
     }
-    /// 原生 REAPER 适配器（未绑定时 `None`）。
+    /// 原生宿主适配器（未绑定时 `None`）。
     ///
     /// 【为什么单独一个访问器】它是通用层唯一允许取具体 `NativeHost` 的地方 —— 所有
     /// 需要宿主扩展的操作都从这里取、并显式处理 `None`，让"这一步依赖原生扩展"写在
-    /// 调用点上，而不是藏在字段类型里。
-    pub(crate) fn reaper_host(&self) -> Option<Arc<crate::host::NativeHost>> {
+    /// 调用点上，而不是藏在字段类型里。`NativeHost` 自身不带品牌：它只是一组宿主扩展
+    /// API 的适配器，当前实现是 REAPER，但通用层从不命名具体宿主。
+    pub(crate) fn native_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         self.host
             .lock_or_recover()
             .clone()
@@ -3043,9 +3095,7 @@ impl ExtensionOwner {
             }
             return Err("import track has no directly bound host region".into());
         }
-        let host = self
-            .reaper_host()
-            .ok_or("primary REAPER host interface missing")?;
+        let host = self.native_host().ok_or("primary host interface missing")?;
         host.direct_track_target(authorized)
     }
     /// 同文档实际renderer唯一region边解析写对象，不能按名字/位置/源路径查item。
@@ -3094,14 +3144,14 @@ impl ExtensionOwner {
             if bound.region_key != key {
                 return Err("host region binding changed".into());
             }
-            let host = owner.reaper_host().ok_or("REAPER host interface missing")?;
+            let host = owner.native_host().ok_or("host interface missing")?;
             let next = host.clip_target(|| owner.host_query_authorized(&stamp))?;
             if target.is_some() {
                 return Err("multiple host writers for one ARA clip".into());
             }
             target = Some(next);
         }
-        target.ok_or_else(|| "clip has no unique directly bound REAPER take".into())
+        target.ok_or_else(|| "clip has no unique directly bound host take".into())
     }
     /// 组件/文档终止时停止实例worker；不要在音频process调用。
     pub(crate) fn stop_editor(&self) {
@@ -4278,6 +4328,81 @@ mod host_audio_state_tests {
                     .wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
             }
         }
+    }
+
+    /// **ARA-only 后端的渲染事实必须推进 `render_epoch`。**
+    ///
+    /// 【为什么这是回归测试】原生扩展缺席时 `refresh_ui_inventory` 此前直接 `return`，
+    /// `render_facts` 永不更新、`render_epoch` 永不推进 ⇒ 宿主在 ARA 侧改了时间拉伸 /
+    /// 内容淡化，插件继续用旧配置渲染（静默的正确性 bug）。本用例不绑任何原生宿主，
+    /// 只翻 ARA region 的 `is_timestretch_enabled`，断言事实被采到且渲染被失效。
+    #[test]
+    fn ara_only_backend_still_advances_the_render_epoch() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        assert!(
+            owner.native_host().is_none(),
+            "夹具必须是没有原生扩展的 ARA-only 后端"
+        );
+        // 第一轮：时间拉伸关 ⇒ 事实从"空"变为"一个 region" ⇒ epoch 前进。
+        owner.refresh_ui_inventory();
+        let epoch = document.render_epoch.load(Ordering::Acquire);
+        let facts = document.render_facts.lock_or_recover().clone();
+        assert_eq!(facts.items.len(), 1, "ARA region 必须进渲染事实");
+        assert!(
+            facts.items.values().all(|f| !f.timestretch),
+            "时间拉伸关时事实为假"
+        );
+        // 事实未变 ⇒ 幂等，不推进 epoch（否则空闲工程会被搅得反复重绘）。
+        owner.refresh_ui_inventory();
+        assert_eq!(
+            document.render_epoch.load(Ordering::Acquire),
+            epoch,
+            "事实未变不得推进 render_epoch"
+        );
+        // 宿主在 ARA 侧开启时间拉伸 ⇒ 必须重新失效渲染。
+        for region in document.regions.lock_or_recover().values_mut() {
+            region.is_timestretch_enabled = true;
+        }
+        owner.refresh_ui_inventory();
+        assert!(
+            document.render_epoch.load(Ordering::Acquire) > epoch,
+            "ARA 侧时间拉伸变化必须推进 render_epoch"
+        );
+    }
+
+    /// **路由选择：有宿主撤销栈走宿主、没有走本地。**
+    ///
+    /// 【为什么这是回归测试】`webview.rs` 用 `history_authority().backend() == "host"` 决定
+    /// `undo_timeline` / `redo_timeline` / `set_history_position` 走宿主异步路径还是本地队列。
+    /// 判别式一旦漂移（曾把 `"host"` 写成 `"reaper"`），REAPER 里宿主撤销实际会走本地栈，
+    /// `history_jump*` 整条路径不可达。这里把两条栈的路由都钉死。
+    #[test]
+    fn history_routing_follows_the_authority_backend() {
+        // 无原生扩展 ⇒ 本地权威栈。
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        assert_eq!(
+            owner.history_authority().backend(),
+            "local",
+            "没有宿主撤销栈时必须走本地队列"
+        );
+        model.session().close();
+
+        // 绑定原生宿主（含 Undo_* 与写接口）⇒ 宿主权威栈。
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = crate::host::MockHost::new();
+        host.enable_writer();
+        // SAFETY: 夹具与 owner 在整个用例期间存活。
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        assert!(owner.native_host().is_some(), "绑定后必须拿到原生适配器");
+        assert_eq!(
+            owner.history_authority().backend(),
+            "host",
+            "有宿主撤销栈时必须走宿主异步路径"
+        );
+        model.session().close();
     }
 
     /// **不变量：take 级事实变化（倒放 / 声道模式）不能被 `change count` 早退挡住。**

@@ -1490,8 +1490,18 @@ fn reversed_forward_window(
     }
     // 夹紧到 `[0, D]`：长 item / 短媒体时 `D − start − span` 会落到负半轴，不夹紧
     // 会写出一个**负的源起点**（独立 App 同样有 `.max(min_bound)` 的钳制）。
-    let end = (media_sec - host_start).clamp(0.0, media_sec);
-    let start = (media_sec - host_start - host_span).clamp(0.0, media_sec);
+    let raw_end = media_sec - host_start;
+    let raw_start = raw_end - host_span;
+    let end = raw_end.clamp(0.0, media_sec);
+    let start = raw_start.clamp(0.0, media_sec);
+    // 越界不是常态，是"宿主报的窗口与媒体总长对不上"的信号（长 item 覆盖短媒体、
+    // 或媒体身份还没认领）。夹紧保证不写出负起点，但必须**留痕** —— 静默夹紧会让
+    // "偏移不对"变成"没有线索"。独立 App 的同类钳制同样不静默。
+    if raw_start != start || raw_end != end {
+        log::warn!(
+            "reversed host window [{host_start}, {host_start}+{host_span}] exceeds media length {media_sec}; clamped to [{start}, {end}]"
+        );
+    }
     Some((start.min(end), end))
 }
 
@@ -1723,6 +1733,27 @@ mod tests {
         assert_eq!(
             reversed_forward_window(Some(2.0), Some((0.75, f64::INFINITY))),
             None
+        );
+    }
+
+    /// **越界必须夹紧且留痕**：长 item / 短媒体时 `D − start − span` 会落到负半轴，
+    /// 不夹紧就写出一个**负的源起点**。独立 App 的同类钳制同样不是静默的。
+    #[test]
+    fn an_out_of_range_reversed_host_window_is_clamped_into_the_media() {
+        // 宿主窗口整体越过媒体末端：正向 [2.0−2.5, 2.0−1.5] = [−0.5, 0.5] ⇒ 夹到 [0, 0.5]。
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((1.5, 1.0))),
+            Some((0.0, 0.5))
+        );
+        // 宿主起点为负（窗口前伸）：正向 [2.0−(−0.5+1.0), 2.0−(−0.5)] = [1.5, 2.5] ⇒ 夹到 [1.5, 2.0]。
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((-0.5, 1.0))),
+            Some((1.5, 2.0))
+        );
+        // 窗口完全在媒体之外 ⇒ 两端都夹到同一端点，退化为零长度而不是负长度。
+        assert_eq!(
+            reversed_forward_window(Some(2.0), Some((5.0, 1.0))),
+            Some((0.0, 0.0))
         );
     }
 

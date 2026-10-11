@@ -926,7 +926,22 @@ unsafe extern "system" fn component_get_bus_info(
     unsafe { std::ptr::write_bytes(bus as *mut BusInfo, 0, 1) };
     bus.media_type = 0;
     bus.direction = direction;
-    bus.channel_count = 2;
+    // 如实报告**协商结果**：`setBusArrangements` 接受 mono(1) 与 stereo(3) 两种，这里
+    // 必须回吐对应的声道数。此前无条件写死 2 ⇒ 单声道轨道上宿主按 2 声道组织缓冲，而
+    // 插件只填/读 1 声道（对宿主撒谎）。未协商时 `bus_arrangement` 默认 kStereo。
+    bus.channel_count = if _this.is_null() {
+        2
+    } else {
+        // SAFETY: `_this` 是存活 component（即 `Processor`）。
+        match unsafe {
+            (*_this.cast::<Processor>())
+                .extension_owner
+                .bus_arrangement(direction)
+        } {
+            1 => 1,
+            _ => 2,
+        }
+    };
     bus.bus_type = 0;
     bus.flags = 1; // kDefaultActive
     bus.name[0] = b'M' as u16;
@@ -2925,6 +2940,25 @@ mod audio_boundary_tests {
             assert_eq!(
                 audio_set_bus_arrangements(this, std::ptr::null_mut(), 1, &raw mut stereo, 1),
                 K_INVALID_ARGUMENT
+            );
+            // `getBusInfo` 必须如实回吐协商后的声道数。此前无条件写死 2 ⇒ 单声道轨道上
+            // 宿主按 2 声道组织缓冲，而插件只填/读 1 声道（对宿主撒谎）。最后一次成功
+            // 协商是 mono 入 + stereo 出，故输入 1、输出 2。
+            let component = (&mut *processor) as *mut Processor as *mut c_void;
+            let mut input_info = std::mem::zeroed::<BusInfo>();
+            assert_eq!(
+                component_get_bus_info(component, 0, 0, 0, &raw mut input_info),
+                K_RESULT_OK
+            );
+            assert_eq!(input_info.channel_count, 1, "协商为单声道输入 ⇒ 报告 1 声道");
+            let mut output_info = std::mem::zeroed::<BusInfo>();
+            assert_eq!(
+                component_get_bus_info(component, 0, 1, 0, &raw mut output_info),
+                K_RESULT_OK
+            );
+            assert_eq!(
+                output_info.channel_count, 2,
+                "协商为立体声输出 ⇒ 报告 2 声道"
             );
         }
     }
