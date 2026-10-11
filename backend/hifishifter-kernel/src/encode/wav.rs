@@ -110,3 +110,79 @@ impl FileAudioEncoder for WavFileEncoder {
         Ok(EncodeSummary { bytes_written })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::{DitherMode, WavBitDepth, WavEncodeOptions};
+
+    /// 编码一组样本到临时文件再读回；调用后临时文件已删除。
+    fn encode(
+        name: &str,
+        bit_depth: WavBitDepth,
+        samples: &[f32],
+    ) -> hound::WavReader<std::io::BufReader<std::fs::File>> {
+        let path =
+            std::env::temp_dir().join(format!("hifishifter-wav-{name}-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let options = WavEncodeOptions { bit_depth };
+        let mut encoder =
+            WavFileEncoder::new(&path, &options, DitherMode::None, 1, 48_000, None).unwrap();
+        encoder.push(samples).unwrap();
+        // `finish` 的接收者是 `Box<Self>`（trait 契约），不是 `&mut self`。
+        Box::new(encoder).finish().unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        reader
+    }
+
+    /// 浮点位深逐样本原样写出，不做量化。
+    #[test]
+    fn float_output_round_trips_samples_verbatim() {
+        let samples = [0.0_f32, 0.25, -0.5, 1.0];
+        let reader = encode("f32", WavBitDepth::F32, &samples);
+        assert_eq!(reader.spec().bits_per_sample, 32);
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+        let read = reader
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(read, samples);
+    }
+
+    /// 整型位深经量化：满量程映射到接近 i16 上限，零映射到零。
+    #[test]
+    fn integer_output_quantizes_to_the_bit_depth() {
+        let reader = encode("i16", WavBitDepth::I16, &[0.0, 1.0, -1.0]);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        let read = reader
+            .into_samples::<i32>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(read[0], 0);
+        assert!(read[1] > 32_000, "{read:?}");
+        assert!(read[2] < -32_000, "{read:?}");
+    }
+
+    /// 取消标志在 push 前生效时立即返回 `Cancelled`，不写出数据。
+    #[test]
+    fn a_cancelled_encoder_refuses_to_push() {
+        let path =
+            std::env::temp_dir().join(format!("hifishifter-wav-cancel-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut encoder = WavFileEncoder::new(
+            &path,
+            &WavEncodeOptions {
+                bit_depth: WavBitDepth::F32,
+            },
+            DitherMode::None,
+            1,
+            48_000,
+            Some(cancel),
+        )
+        .unwrap();
+        assert!(matches!(encoder.push(&[0.5]), Err(EncodeError::Cancelled)));
+        let _ = std::fs::remove_file(&path);
+    }
+}

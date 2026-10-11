@@ -624,3 +624,106 @@ pub fn finalize_timeline_for_session(
 
     (tl, missing_files)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline() -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks": [], "clips": [], "bpm": 120.0, "project_sec": 1.0
+        }))
+        .unwrap()
+    }
+
+    fn project(name: &str) -> ProjectFile {
+        ProjectFile::new(
+            name.to_string(),
+            timeline(),
+            default_base_scale(),
+            4,
+            4,
+            "1/4".to_string(),
+        )
+    }
+
+    /// 版本探针两种线格式都要能读；坏字节必须报 `None` 而不是猜一个版本。
+    #[test]
+    fn the_version_probe_reads_both_wire_formats() {
+        let pf = project("song");
+        let msgpack = rmp_serde::to_vec_named(&pf).unwrap();
+        let json = serde_json::to_vec(&pf).unwrap();
+        assert_eq!(
+            read_project_file_version(&msgpack),
+            Some(CURRENT_PROJECT_FILE_VERSION)
+        );
+        assert_eq!(
+            read_project_file_version(&json),
+            Some(CURRENT_PROJECT_FILE_VERSION)
+        );
+        assert_eq!(read_project_file_version(b"not a project"), None);
+    }
+
+    /// 未来版本的工程体即使无法完整反序列化，也必须能先读到版本号发出警告。
+    #[test]
+    fn a_newer_version_is_reported_even_when_the_body_does_not_parse() {
+        let json = br#"{"version":99,"unknown_future_field":{"x":1}}"#;
+        assert_eq!(read_project_file_version(json), Some(99));
+    }
+
+    /// 两种线格式都要能"存了再读"回来，且语义字段不变。
+    #[test]
+    fn project_files_round_trip_in_both_wire_formats() {
+        let mut pf = project("roundtrip");
+        pf.timeline.bpm = 143.5;
+        let dir = std::env::temp_dir();
+        for name in ["hifishifter-roundtrip.hfs", "hifishifter-roundtrip.json"] {
+            let path = dir.join(name);
+            let bytes = serialize_project_file_for_path(&pf, &path).unwrap();
+            let loaded = load_project_file(&bytes).unwrap();
+            assert_eq!(loaded.version, CURRENT_PROJECT_FILE_VERSION);
+            assert_eq!(loaded.name, "roundtrip");
+            assert!((loaded.timeline.bpm - 143.5).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn json_paths_are_recognized_case_insensitively() {
+        assert!(is_json_project_path(Path::new("a.json")));
+        assert!(is_json_project_path(Path::new("a.JSON")));
+        assert!(!is_json_project_path(Path::new("a.hfs")));
+        assert!(!is_json_project_path(Path::new("noext")));
+    }
+
+    #[test]
+    fn the_project_name_is_the_file_stem() {
+        assert_eq!(project_name_from_path(Path::new("/tmp/song.hfs")), "song");
+        assert_eq!(
+            project_name_from_path(Path::new("C:/x/y/demo.json")),
+            "demo"
+        );
+        assert_eq!(project_name_from_path(Path::new("noext")), "noext");
+    }
+
+    /// 自定义音阶：音符取模 12 去重排序；空值回落默认大调与占位名。
+    #[test]
+    fn a_custom_scale_normalizes_notes_and_defaults() {
+        let scale = CustomScale {
+            id: "  ".into(),
+            name: "".into(),
+            notes: vec![14, 2, 14, 0, 26],
+        }
+        .normalized();
+        assert_eq!(scale.id, "custom");
+        assert_eq!(scale.name, "Custom Scale");
+        // 14%12=2、26%12=2 去重；排序后 [0, 2]。
+        assert_eq!(scale.notes, vec![0, 2]);
+        let empty = CustomScale {
+            id: "id".into(),
+            name: "n".into(),
+            notes: vec![],
+        }
+        .normalized();
+        assert_eq!(empty.notes, vec![0, 2, 4, 5, 7, 9, 11]);
+    }
+}
