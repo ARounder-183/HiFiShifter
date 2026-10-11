@@ -69,7 +69,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
     const pluginMode = isPluginMode();
 
     async function openExternal(url: string) {
-        if (window.__HFS_PLUGIN_BOOTSTRAP__) return;
+        if (isPluginMode()) return;
         try {
             const { openUrl } = await import("@tauri-apps/plugin-opener");
             await openUrl(url);

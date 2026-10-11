@@ -38,5 +38,30 @@ export default defineConfig([
             "react-hooks/immutability": "warn",
         },
     },
+    {
+        // 宿主形态与事件路由的唯一出口在 services 层（见 services/hostDetect.ts
+        // 与 services/hostEvents.ts 的注释）。此前 14 处监听器各自复制
+        // `window.__HFS_PLUGIN_BOOTSTRAP__ ? hostEvents : tauri` 三元式 —— 第 15 个
+        // 照抄漏掉守卫就会让插件形态静默收不到事件。这里禁掉 services 之外（与
+        // 单测之外）对全局的直接访问，新监听器必须走 hostEvents，形态判定走 hostDetect。
+        files: ["**/*.{ts,tsx}"],
+        ignores: ["src/services/**", "**/*.test.*", "src/dev/**"],
+        rules: {
+            "no-restricted-syntax": [
+                "error",
+                {
+                    selector:
+                        "MemberExpression[object.name='window'][property.name='__HFS_PLUGIN_BOOTSTRAP__']",
+                    message:
+                        "宿主形态判定走 services/hostDetect，事件走 services/hostEvents；services 内部除外",
+                },
+                {
+                    selector: "MemberExpression[object.name='window'][property.name='__TAURI__']",
+                    message:
+                        "独立 App 判定走 services/hostDetect 的 isTauriRuntime()，invoke 走 services/invoke；services 内部除外",
+                },
+            ],
+        },
+    },
     eslintConfigPrettier,
 ]);

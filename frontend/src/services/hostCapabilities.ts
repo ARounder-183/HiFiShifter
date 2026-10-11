@@ -1,13 +1,12 @@
 // 原GUI的运行模式与能力边界；独立app保持原窗口/文件/设备行为，插件由DAW供源。
 import { translateOutsideReact } from "../i18n/I18nProvider";
+import { hostMode as detectHostMode, pluginBootstrap } from "./hostDetect";
 import type { PluginBootstrap } from "./pluginHost";
 
 export type HostMode = "standalone" | "plugin";
-/** 必须使用显式bootstrap，而不是把所有WebView2都误认为插件。 */
+/** 必须使用显式bootstrap，而不是把所有WebView2都误认为插件。判据底层在 hostDetect。 */
 export function hostMode(): HostMode {
-    return typeof window !== "undefined" && window.__HFS_PLUGIN_BOOTSTRAP__?.version === 1
-        ? "plugin"
-        : "standalone";
+    return detectHostMode();
 }
 export function isPluginMode(): boolean {
     return hostMode() === "plugin";
@@ -19,11 +18,11 @@ export function isPluginMode(): boolean {
  * `hostCapabilities` 并存，后端两处各自计算 —— 必然漂移。现在统一从这里读。
  */
 function caps(): PluginBootstrap["hostCapabilities"] {
-    return window.__HFS_PLUGIN_BOOTSTRAP__?.hostCapabilities;
+    return pluginBootstrap()?.hostCapabilities;
 }
 /** 仅宿主原生明确提供ARA播放请求能力时开放，不把插件模式等同支持播放控制。 */
 export function canControlHostTransport(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.transportControl === true;
+    return isPluginMode() && pluginBootstrap()?.transportControl === true;
 }
 /**
  * 只有本次原生入口明确具备写 API **且**有宿主撤销栈，才打开片段拖拽/裁切/线性拉伸。
@@ -46,7 +45,7 @@ export function canClipboardHostClips(): boolean {
 }
 /** 只允许插件私有参数分组，不代表能重排或创建REAPER的轨道/folder。 */
 export function canGroupPluginTracks(): boolean {
-    return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.trackGrouping === true;
+    return isPluginMode() && pluginBootstrap()?.trackGrouping === true;
 }
 /** 独立App保留原几何编辑；旧插件或其它宿主缺写接口时保持只读。 */
 export function isHostGeometryReadOnly(): boolean {
@@ -118,7 +117,7 @@ export function canEditFadeS(): boolean {
  * 调用方应先判 [`canEditHostFadeAxes`]。
  */
 export function hostFadeAxes(): "legacy" | "continuous" | null {
-    return window.__HFS_PLUGIN_BOOTSTRAP__?.fadeAxes ?? null;
+    return pluginBootstrap()?.fadeAxes ?? null;
 }
 
 /**
@@ -129,7 +128,7 @@ export function hostFadeAxes(): "legacy" | "continuous" | null {
  * `"local"`，与后端 `BootstrapFlags.history_backend` 的缺省一致。
  */
 export function historyBackend(): "host" | "local" {
-    return window.__HFS_PLUGIN_BOOTSTRAP__?.historyBackend === "host" ? "host" : "local";
+    return pluginBootstrap()?.historyBackend === "host" ? "host" : "local";
 }
 
 /**
@@ -139,7 +138,7 @@ export function historyBackend(): "host" | "local" {
  * 没有这个字段时），与后端 [`HostCapabilities::ara_only`] 的保守缺省一致。
  */
 export function hostKind(): "reaper" | "ara_only" {
-    return window.__HFS_PLUGIN_BOOTSTRAP__?.hostKind === "reaper" ? "reaper" : "ara_only";
+    return pluginBootstrap()?.hostKind === "reaper" ? "reaper" : "ara_only";
 }
 
 /**

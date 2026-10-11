@@ -22,6 +22,7 @@ import {
     subscribeExtensionMessages,
 } from "./extensionMessages";
 import { coreApi } from "../services/api/core";
+import { isTauriRuntime } from "../services/hostDetect";
 import { readUiValue, writeUiValue } from "../services/uiStorage";
 
 interface I18nContextValue {
@@ -93,8 +94,7 @@ export function I18nProvider({ children }: PropsWithChildren) {
     useEffect(() => {
         // Native close-confirmation dialog lives in Rust (Tauri). Keep backend locale in sync
         // so the dialog follows the user's in-app language.
-        const tauriInvoke = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke;
-        if (typeof tauriInvoke !== "function") return;
+        if (!isTauriRuntime()) return;
 
         void coreApi.setUiLocale(localeState).catch(() => {
             // Best-effort: ignore failures (e.g. during early boot).

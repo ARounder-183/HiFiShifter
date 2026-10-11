@@ -27,6 +27,7 @@
 import type { Middleware, UnknownAction } from "@reduxjs/toolkit";
 
 import { reportFrontendError } from "../../services/frontendErrorLog";
+import { isPluginMode } from "../../services/hostDetect";
 import { loadAppearance } from "../../theme/themeStorage";
 
 /** 窗口角色。 */
@@ -246,7 +247,7 @@ async function loadEventApi(): Promise<{
     listen: (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>;
 } | null> {
     // 插件没有Tauri卫星窗口，不广播Redux动作到独立app事件总线。
-    if (typeof window !== "undefined" && window.__HFS_PLUGIN_BOOTSTRAP__) return null;
+    if (isPluginMode()) return null;
     try {
         const mod = await import("@tauri-apps/api/event");
         return { emit: mod.emit, listen: mod.listen };

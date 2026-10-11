@@ -66,9 +66,14 @@ beforeEach(async () => {
             </PitchAnalysisProvider>,
         );
     });
-    // 让 `setup()` 里的动态 import + listen 注册完成。
+    // 让 `setup()` 里的动态 import + listen 注册完成。hostEvents 路由多解析一层
+    // 模块，固定次数的 flush 在首评（vite 转换）时不够 —— 轮询到监听器真的
+    // 进了桩的 handler 表为止。
     await act(async () => {
-        await Promise.resolve();
+        for (let i = 0; i < 100; i++) {
+            if ((handlers.get("pitch_orig_analysis_started")?.size ?? 0) > 0) break;
+            await new Promise((resolve) => setTimeout(resolve, 2));
+        }
     });
 });
 

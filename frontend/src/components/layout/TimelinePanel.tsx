@@ -40,6 +40,7 @@ import {
     canCreateHostTracks,
     canGroupPluginTracks,
 } from "../../services/hostCapabilities";
+import { isTauriRuntime } from "../../services/hostDetect";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -6289,7 +6290,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-        const isTauri = Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__);
+        const isTauri = isTauriRuntime();
         if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
         e.preventDefault();
         const info = extractLocalFilePath(dt);
@@ -6364,7 +6365,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;
         const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-        const isTauri = Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__);
+        const isTauri = isTauriRuntime();
         if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
         e.preventDefault();
 

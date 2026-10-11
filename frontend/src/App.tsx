@@ -1143,9 +1143,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "stretch_progress",
                     (event: { payload?: { active?: boolean; clipName?: string | null } }) => {
@@ -1184,9 +1182,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "track_meter",
                     (event: {
@@ -1267,9 +1263,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "waveform_analysis_progress",
                     (event: {
@@ -1422,9 +1416,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "playback_rendering_state",
                     (event: {
@@ -1588,9 +1580,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "render_cache_summary",
                     (event: {
@@ -1685,9 +1675,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = window.__HFS_PLUGIN_BOOTSTRAP__
-                    ? await import("./services/hostEvents")
-                    : await import("@tauri-apps/api/event");
+                const mod = await import("./services/hostEvents");
                 unlisten = await mod.listen(
                     "channel_scan_progress",
                     (event: {

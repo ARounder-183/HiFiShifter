@@ -19,9 +19,11 @@
  *
  * 【为什么本模块不 import `hostCapabilities`】它间接依赖 i18n 提供者（React 组件
  * 链），而本模块会被 `keybindingStorage` 这类**叶子模块**引用 —— 那些模块的 node
- * 单测不装 jsdom，多引一层就会在 `import` 那一刻炸掉。插件模式直接看
- * `window.__HFS_PLUGIN_BOOTSTRAP__` 即可，判据与 `isPluginMode()` 完全相同。
+ * 单测不装 jsdom，多引一层就会在 `import` 那一刻炸掉。判据走**零依赖**的
+ * `hostDetect`（与 `isPluginMode()` 同一来源），不再本地复制判据。
  */
+
+import { isPluginMode } from "./hostDetect";
 
 /** 前端偏好的键前缀；与后端 `frontendPrefs` 的键名约定一致。 */
 const PREFIX = "hifishifter.";
@@ -65,9 +67,9 @@ const PLUGIN_SCOPED_KEYS: ReadonlySet<string> = new Set([
 /** 插件形态的后缀。用一个**不在** `PREFIX` 之外的普通字符，键名仍以 `hifishifter.` 开头。 */
 const PLUGIN_SUFFIX = ".plugin";
 
-/** 当前是否跑在 ARA 插件里（判据与 `hostCapabilities.isPluginMode()` 一致）。 */
+/** 当前是否跑在 ARA 插件里（与 `hostCapabilities.isPluginMode()` 同一判据来源）。 */
 function isPluginHost(): boolean {
-    return typeof window !== "undefined" && window.__HFS_PLUGIN_BOOTSTRAP__?.version === 1;
+    return isPluginMode();
 }
 
 /**

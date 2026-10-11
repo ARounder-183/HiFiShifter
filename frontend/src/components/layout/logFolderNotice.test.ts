@@ -9,7 +9,7 @@ import { expect, test } from "vitest";
 import { logFolderNotice } from "./logFolderNotice";
 
 const PATH = String.raw`C:\Users\me\AppData\Local\com.arounder.hifishitter\logs`;
-const FILE = `${PATH}\plugin.log`;
+const FILE = `${PATH}\\plugin.log`;
 
 test("a failure reports the backend detail", () => {
     expect(logFolderNotice({ ok: false, error: "boom" }, true)).toEqual({
