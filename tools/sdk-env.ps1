@@ -16,9 +16,10 @@
 
 # 缓存根：仓库根下的 third_party/sdk。
 #
-# 为什么整目录 gitignore、构建期才拉取：ARA SDK 与 VST3 SDK 的许可都不允许把
-# 它们的源码随本仓库（MIT）一起分发，因此只提交「钉死 revision 的清单」，检出
-# 放在这里、按需下载。
+# 为什么整目录 gitignore、构建期才拉取：按 tools/plugin-sdks.json 钉死的 revision
+# 下载以控仓库体积，并履行许可声明义务（见根 LICENSE 的 Third-Party Notices：
+# ARA SDK 为 Apache-2.0；VST3 SDK 自 3.8.0 起为 MIT，本仓 pin 的正是 3.8.0）。
+# 检出放在这里、按需下载。
 function Get-SdkCacheRoot {
     # SDK 缓存根目录（绝对路径）。
     [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\third_party\sdk'))

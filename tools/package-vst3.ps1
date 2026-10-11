@@ -46,12 +46,17 @@ $packageTaskStage = Join-Path $packageTaskOutput ($packageTaskName + '-' + [Guid
 New-Item -ItemType Directory -Path $packageTaskStage -Force | Out-Null
 Copy-Item -LiteralPath $packageTaskBundle -Destination $packageTaskStage -Recurse
 Copy-Item -LiteralPath (Join-Path $packageTaskRoot 'LICENSE') -Destination $packageTaskStage
+# LGPL-2.1 全文与构建期补丁披露随包分发（SoundTouch 以动态库分发，许可义务见
+# licenses/SOUNDTOUCH-CHANGES.md）。
+Copy-Item -LiteralPath (Join-Path $packageTaskRoot 'licenses\COPYING.LGPL-2.1') -Destination $packageTaskStage
+Copy-Item -LiteralPath (Join-Path $packageTaskRoot 'licenses\SOUNDTOUCH-CHANGES.md') -Destination $packageTaskStage
 $packageTaskManifest.target = 'Plugin'
 $packageTaskManifest.files = $packageTaskFiles
 $packageTaskManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $packageTaskStage 'build-manifest.json') -Encoding utf8
 $packageTaskArchive = Join-Path $packageTaskOutput ($packageTaskName + '.zip')
 if (!$NoZip) {
 Compress-Archive -LiteralPath (Join-Path $packageTaskStage 'HiFiShifter.vst3'), (Join-Path $packageTaskStage 'LICENSE'),
+    (Join-Path $packageTaskStage 'COPYING.LGPL-2.1'), (Join-Path $packageTaskStage 'SOUNDTOUCH-CHANGES.md'),
     (Join-Path $packageTaskStage 'build-manifest.json') -DestinationPath $packageTaskArchive -Force
 Write-Output "Packaged: $packageTaskArchive"
 }
@@ -81,7 +86,7 @@ if ($Installer) {
     $packageTaskSetup = Join-Path $packageTaskOutput ($packageTaskName + '-setup.exe')
     # LICENSE 用绝对路径传入：`vst3-installer.nsi` 里的默认值 `..\LICENSE` 只在从
     # 仓库的 tools\ 目录编译时成立。
-    & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskInstallerBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" "/DHFS_LICENSE=$(Join-Path $packageTaskRoot 'LICENSE')" "/DHFS_MODELS=$(Join-Path $packageTaskInstallerRoot 'models')" "/DHFS_MODELS_VERSION=$packageTaskModelsVersion" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
+    & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskInstallerBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" "/DHFS_LICENSE=$(Join-Path $packageTaskRoot 'LICENSE')" "/DHFS_LGPL=$(Join-Path $packageTaskRoot 'licenses\COPYING.LGPL-2.1')" "/DHFS_ST_CHANGES=$(Join-Path $packageTaskRoot 'licenses\SOUNDTOUCH-CHANGES.md')" "/DHFS_MODELS=$(Join-Path $packageTaskInstallerRoot 'models')" "/DHFS_MODELS_VERSION=$packageTaskModelsVersion" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $packageTaskSetup)) { throw 'VST3 installer compilation failed.' }
     Write-Output "Installer: $packageTaskSetup"
 }

@@ -629,6 +629,9 @@ export const zhCN = {
     about_copy_repo_link: "复制仓库链接",
     about_copy_commit_link: "复制 Commit 链接",
     about_copied: "已复制到剪贴板",
+    about_third_party_title: "第三方许可",
+    about_third_party_note:
+        "随附的库与模型权重各自保留其原有许可（完整清单见 LICENSE 文件）。NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0，仅限非商业使用。",
     clip_badge_rate_tip: "速率",
     clip_badge_gain_tip: "增益",
     clip_rate_editor_title: "编辑播放速率",
@@ -2089,7 +2092,7 @@ export const zhCN = {
     installer_publisher: "ARounder",
     installer_welcome_title: "欢迎安装 HiFiShifter VST3",
     installer_welcome_text:
-        "安装程序会把 HiFiShifter VST3/ARA 插件放进你选择的 VST3 文件夹。\n请先关闭 REAPER：安装程序不会覆盖正在被加载的插件。\n设置与独立 App 共用。",
+        "安装程序会把 HiFiShifter VST3/ARA 插件放进你选择的 VST3 文件夹。\n请先关闭 REAPER：安装程序不会覆盖正在被加载的插件。\n设置与独立 App 共用。\n随包分发的 NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0 授权，仅限非商业使用。",
     installer_dir_text:
         "请选择 REAPER 会扫描的 VST3 文件夹。插件会以 HiFiShifter.vst3 文件夹的形式装在其中。",
     installer_installing: "正在安装 HiFiShifter VST3...",

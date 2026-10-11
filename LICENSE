@@ -89,3 +89,32 @@ their own licenses as listed below.
    Copyright (c) 2016 James Hurst
    License: MIT
    https://github.com/piedoom/rust-id3
+
+12. ARA SDK (ARA_API headers)
+   Copyright (c) Celemony Software & Melodyne development team
+   License: Apache License 2.0. Built from the revision pinned in
+   tools/plugin-sdks.json; source at https://github.com/Celemony/ARA_SDK
+
+13. VST3 SDK (pluginterfaces headers)
+   Copyright (c) Steinberg Media Technologies GmbH
+   License: MIT (VST SDK 3.8.0 and later are licensed MIT; the pinned
+   revision in tools/plugin-sdks.json is 3.8.0). The VST3 SDK is used in
+   source form to define the plugin ABI; no Steinberg proprietary license
+   applies to these headers.
+   https://github.com/steinbergmedia/vst3sdk
+
+14. ONNX Runtime (onnxruntime / ort bindings)
+   Copyright (c) Microsoft Corporation
+   License: MIT
+   https://github.com/microsoft/onnxruntime
+
+15. Microsoft DirectML (Windows GPU execution provider for ONNX Runtime)
+   Copyright (c) Microsoft Corporation
+   License: MIT
+   https://github.com/microsoft/DirectML
+
+NON-COMMERCIAL WEIGHTS NOTE: item 8 (pc_nsf_hifigan) is CC BY-NC-SA 4.0 and
+therefore ships under a non-commercial license. Redistribution of this
+application (including the VST3 installer) is for non-commercial use with
+respect to that model; commercial redistribution requires a separate license
+from the OpenVPI Team.

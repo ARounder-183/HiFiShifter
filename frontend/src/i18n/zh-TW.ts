@@ -630,6 +630,9 @@ export const zhTW = {
     about_copy_repo_link: "複製儲存庫連結",
     about_copy_commit_link: "複製 Commit 連結",
     about_copied: "已複製到剪貼簿",
+    about_third_party_title: "第三方授權",
+    about_third_party_note:
+        "隨附的程式庫與模型權重各自保留其原有授權（完整清單見 LICENSE 檔案）。NSF-HiFiGAN 聲碼器權重為 CC BY-NC-SA 4.0，僅限非商業使用。",
     clip_badge_rate_tip: "速率",
     clip_badge_gain_tip: "增益",
     clip_rate_editor_title: "編輯播放速率",
@@ -2092,7 +2095,7 @@ export const zhTW = {
     installer_publisher: "ARounder",
     installer_welcome_title: "歡迎安裝 HiFiShifter VST3",
     installer_welcome_text:
-        "安裝程式會把 HiFiShifter VST3/ARA 外掛放進你選擇的 VST3 資料夾。\n請先關閉 REAPER：安裝程式不會覆寫正在被載入的外掛。\n設定與獨立 App 共用。",
+        "安裝程式會把 HiFiShifter VST3/ARA 外掛放進你選擇的 VST3 資料夾。\n請先關閉 REAPER：安裝程式不會覆寫正在被載入的外掛。\n設定與獨立 App 共用。\n隨套件分發的 NSF-HiFiGAN 聲碼器權重為 CC BY-NC-SA 4.0 授權，僅限非商業使用。",
     installer_dir_text:
         "請選擇 REAPER 會掃描的 VST3 資料夾。外掛會以 HiFiShifter.vst3 資料夾的形式安裝在其中。",
     installer_installing: "正在安裝 HiFiShifter VST3...",

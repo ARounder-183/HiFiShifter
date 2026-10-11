@@ -27,6 +27,26 @@ import { AppForm } from "../../ui/Field";
 /** 上游不是 GitHub 或读取失败时的回退仓库链接。 */
 const FALLBACK_REPO_URL = "https://github.com/ARounder-183/HiFiShifter";
 
+/**
+ * 随发行物分发的第三方组件与其许可（专名与许可证号，不翻译）。
+ *
+ * 与根 `LICENSE` 的 Third-Party Notices 同源 —— 那里是**权威**完整清单（含 URL
+ * 与 NC 权重的详细条款）；这里只做「关于」里的速览。
+ */
+const THIRD_PARTY_COMPONENTS: [string, string][] = [
+    ["Signalsmith Stretch", "MIT"],
+    ["vslib (VocalShifter)", "Freeware (individual-developed freeware)"],
+    ["WORLD", "Modified BSD (3-clause)"],
+    ["SoundTouch", "LGPL-2.1 (dynamic link)"],
+    ["OpenVPI derived code", "MIT"],
+    ["vocal-remover / HNSEP", "MIT"],
+    ["FCPE", "MIT"],
+    ["NSF-HiGAN vocoder weights", "CC BY-NC-SA 4.0 (non-commercial)"],
+    ["ARA SDK", "Apache-2.0"],
+    ["VST3 SDK (3.8.0)", "MIT"],
+    ["ONNX Runtime / DirectML", "MIT"],
+];
+
 interface AboutDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
@@ -172,6 +192,20 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                             )}
                         </Flex>
                     ) : null}
+                    {/*
+                     * 第三方许可：组件名与许可证号是专名/编号，不进 i18n；标题与
+                     * 说明走词典（五语目录）。完整清单与文本见发行物内的 LICENSE
+                     * （含 SOUNDTOUCH-CHANGES.md / COPYING.LGPL-2.1）。
+                     */}
+                    <Flex direction="column" gap="1">
+                        <span className="hs-type-muted">{tf("about_third_party_title")}</span>
+                        <span className="hs-type-caption" data-hs-selectable="true">
+                            {THIRD_PARTY_COMPONENTS.map(
+                                ([name, license]) => `${name} — ${license}`,
+                            ).join(" · ")}
+                        </span>
+                        <span className="hs-type-caption">{tf("about_third_party_note")}</span>
+                    </Flex>
                 </Flex>
             </AppForm>
         </AppDialog>

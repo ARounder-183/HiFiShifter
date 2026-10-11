@@ -430,11 +430,22 @@ foreach ($res in $Resources) {
     Write-Host "  [OK] $($res.Dst)" -ForegroundColor DarkGreen
 }
 
-# Copy LICENSE
+# Copy LICENSE + LGPL-2.1 full text + SoundTouch build-patch disclosure
+# (SoundTouch is distributed as a DLL; LGPL obligations travel with the package).
 $LicensePath = Join-Path $ProjectRoot "LICENSE"
 if (Test-Path $LicensePath) {
     Copy-Item $LicensePath -Destination $TempDir
     Write-Host "  [OK] LICENSE" -ForegroundColor DarkGreen
+}
+$LgplPath = Join-Path $ProjectRoot "licenses\COPYING.LGPL-2.1"
+if (Test-Path $LgplPath) {
+    Copy-Item $LgplPath -Destination $TempDir
+    Write-Host "  [OK] COPYING.LGPL-2.1" -ForegroundColor DarkGreen
+}
+$StChangesPath = Join-Path $ProjectRoot "licenses\SOUNDTOUCH-CHANGES.md"
+if (Test-Path $StChangesPath) {
+    Copy-Item $StChangesPath -Destination $TempDir
+    Write-Host "  [OK] SOUNDTOUCH-CHANGES.md" -ForegroundColor DarkGreen
 }
 
 # Copy any DLLs from the release directory (SoundTouchDLL, ORT, etc.).

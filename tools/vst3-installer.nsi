@@ -57,6 +57,13 @@ ${UnStrStr}
 !ifndef HFS_LICENSE
   !define HFS_LICENSE "..\LICENSE"
 !endif
+; LGPL-2.1 全文与 SoundTouch 构建期补丁披露（路径由打包脚本传入，默认值同上口径）。
+!ifndef HFS_LGPL
+  !define HFS_LGPL "..\licenses\COPYING.LGPL-2.1"
+!endif
+!ifndef HFS_ST_CHANGES
+  !define HFS_ST_CHANGES "..\licenses\SOUNDTOUCH-CHANGES.md"
+!endif
 
 ; 共享模型库的两个参数由打包脚本传入（`/DHFS_MODELS=…` `/DHFS_MODELS_VERSION=…`）。
 ; 空版本号表示"这个安装包不含模型"（例如从旧流程打出来的包），此时跳过模型安装。
@@ -261,6 +268,8 @@ Section "$(HFS_NAME)" SEC_PLUGIN
   File /r "${PLUGIN_BUNDLE}\*"
   SetOutPath "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources"
   File "${HFS_LICENSE}"
+  File "${HFS_LGPL}"
+  File "${HFS_ST_CHANGES}"
 
   ; ── 卸载信息 ────────────────────────────────────────────────────────
   ;

@@ -719,6 +719,9 @@ export const koKR = {
     about_copy_repo_link: "저장소 링크 복사",
     about_copy_commit_link: "Commit 링크 복사",
     about_copied: "클립보드에 복사됨",
+    about_third_party_title: "서드파티 라이선스",
+    about_third_party_note:
+        "번들된 라이브러리와 모델 가중치는 각자의 원래 라이선스를 따릅니다 (전체 목록은 LICENSE 파일 참조). NSF-HiFiGAN 보코더 가중치는 CC BY-NC-SA 4.0 라이선스로 비상업적 용도로만 사용할 수 있습니다.",
     clip_badge_rate_tip: "속도",
     clip_badge_gain_tip: "게인",
     clip_rate_editor_title: "재생 속도 편집",
@@ -2141,7 +2144,7 @@ export const koKR = {
     installer_publisher: "ARounder",
     installer_welcome_title: "HiFiShifter VST3 설치를 시작합니다",
     installer_welcome_text:
-        "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.\n설정은 독립 실행형 앱과 공유됩니다.",
+        "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.\n설정은 독립 실행형 앱과 공유됩니다.\n번들된 NSF-HiFiGAN 보코더 가중치는 CC BY-NC-SA 4.0 라이선스로 비상업적 용도로만 사용할 수 있습니다.",
     installer_dir_text:
         "REAPER가 검사하는 VST3 폴더를 선택하세요. 플러그인은 HiFiShifter.vst3 폴더로 설치됩니다.",
     installer_installing: "HiFiShifter VST3 설치 중...",

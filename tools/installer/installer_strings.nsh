@@ -64,11 +64,11 @@ LangString HFS_UNINSTALL_REAPER_OPEN ${LANG_JAPANESE} "HiFiShifter VST3 をア�
 LangString HFS_UNINSTALL_REAPER_OPEN ${LANG_KOREAN} "HiFiShifter VST3를 제거하기 전에 REAPER를 종료하세요."
 
 ; installer_welcome_text
-LangString HFS_WELCOME_TEXT ${LANG_ENGLISH} "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.$\r$\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.$\r$\nSettings are shared with the standalone app."
-LangString HFS_WELCOME_TEXT ${LANG_SIMPCHINESE} "安装程序会把 HiFiShifter VST3/ARA 插件放进你选择的 VST3 文件夹。$\r$\n请先关闭 REAPER：安装程序不会覆盖正在被加载的插件。$\r$\n设置与独立 App 共用。"
-LangString HFS_WELCOME_TEXT ${LANG_TRADCHINESE} "安裝程式會把 HiFiShifter VST3/ARA 外掛放進你選擇的 VST3 資料夾。$\r$\n請先關閉 REAPER：安裝程式不會覆寫正在被載入的外掛。$\r$\n設定與獨立 App 共用。"
-LangString HFS_WELCOME_TEXT ${LANG_JAPANESE} "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。$\r$\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。$\r$\n設定は単体アプリと共有されます。"
-LangString HFS_WELCOME_TEXT ${LANG_KOREAN} "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.$\r$\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.$\r$\n설정은 독립 실행형 앱과 공유됩니다."
+LangString HFS_WELCOME_TEXT ${LANG_ENGLISH} "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.$\r$\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.$\r$\nSettings are shared with the standalone app.$\r$\nThe bundled NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only."
+LangString HFS_WELCOME_TEXT ${LANG_SIMPCHINESE} "安装程序会把 HiFiShifter VST3/ARA 插件放进你选择的 VST3 文件夹。$\r$\n请先关闭 REAPER：安装程序不会覆盖正在被加载的插件。$\r$\n设置与独立 App 共用。$\r$\n随包分发的 NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0 授权，仅限非商业使用。"
+LangString HFS_WELCOME_TEXT ${LANG_TRADCHINESE} "安裝程式會把 HiFiShifter VST3/ARA 外掛放進你選擇的 VST3 資料夾。$\r$\n請先關閉 REAPER：安裝程式不會覆寫正在被載入的外掛。$\r$\n設定與獨立 App 共用。$\r$\n隨套件分發的 NSF-HiFiGAN 聲碼器權重為 CC BY-NC-SA 4.0 授權，僅限非商業使用。"
+LangString HFS_WELCOME_TEXT ${LANG_JAPANESE} "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。$\r$\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。$\r$\n設定は単体アプリと共有されます。$\r$\n同梱の NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。"
+LangString HFS_WELCOME_TEXT ${LANG_KOREAN} "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.$\r$\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.$\r$\n설정은 독립 실행형 앱과 공유됩니다.$\r$\n번들된 NSF-HiFiGAN 보코더 가중치는 CC BY-NC-SA 4.0 라이선스로 비상업적 용도로만 사용할 수 있습니다."
 
 ; installer_welcome_title
 LangString HFS_WELCOME_TITLE ${LANG_ENGLISH} "Welcome to the HiFiShifter VST3 Setup"
