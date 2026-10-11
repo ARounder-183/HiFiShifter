@@ -1,7 +1,7 @@
 //! 区域参数的源坐标权威；原GUI项目帧只是投影，宿主移动/拉伸不重新采样写坏原始曲线。
 //! 身份来自真实ARA region→modification/source边；不从名字/文件路径/会话序号猜冷恢复归属。
 
-use crate::ara::time_map::SourceTimeMap;
+use crate::ara::time_map::{SourceTimeMap, TimeAnchor};
 use hifishifter_kernel::state::{TimelineState, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,29 +21,51 @@ pub(crate) struct RegionIdentity {
 pub(crate) struct RegionGeometry {
     pub project_start: f64,
     pub project_duration: f64,
+    /// **消费窗口起点**（源域升序下界）；倒放时是 `source_end − span`，不是存储的
+    /// `clip.source_start_sec`（后者在倒放里只是编辑痕迹，不参与消费数学）。
     pub source_start: f64,
     pub source_duration: f64,
+    /// 倒放：项目时间增、源位置减。缺省 false 让旧归档按正放读，语义不变。
+    #[serde(default)]
+    pub reversed: bool,
 }
 impl RegionGeometry {
     /// JSON f64往返可能偏一ULP；只忽略数值舍入，不把真实移动/倍率变化当相同布局。
     fn equivalent(&self, other: &Self) -> bool {
-        [
-            (self.project_start, other.project_start),
-            (self.project_duration, other.project_duration),
-            (self.source_start, other.source_start),
-            (self.source_duration, other.source_duration),
-        ]
-        .into_iter()
-        .all(|(a, b)| near(a, b))
+        self.reversed == other.reversed
+            && [
+                (self.project_start, other.project_start),
+                (self.project_duration, other.project_duration),
+                (self.source_start, other.source_start),
+                (self.source_duration, other.source_duration),
+            ]
+            .into_iter()
+            .all(|(a, b)| near(a, b))
     }
     /// 几何只接受已经确认的ARA秒域；未确认raw marker不得在此成为渲染权威。
+    ///
+    /// 倒放建**降序源轴**（项目起点 ⇒ 消费窗口终点），正放建升序源轴。两者共用
+    /// `SourceTimeMap` 的同一份区间插值，只是锚点方向相反。
     pub fn map(&self) -> Result<SourceTimeMap, String> {
-        SourceTimeMap::linear(
-            self.project_start,
-            self.project_duration,
-            self.source_start,
-            self.source_duration,
-        )
+        if self.reversed {
+            SourceTimeMap::piecewise(vec![
+                TimeAnchor {
+                    project_sec: self.project_start,
+                    source_sec: self.source_start + self.source_duration,
+                },
+                TimeAnchor {
+                    project_sec: self.project_start + self.project_duration,
+                    source_sec: self.source_start,
+                },
+            ])
+        } else {
+            SourceTimeMap::linear(
+                self.project_start,
+                self.project_duration,
+                self.source_start,
+                self.source_duration,
+            )
+        }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -278,21 +300,19 @@ impl ParameterAtlas {
             record.live = false;
         }
         for clip in &timeline.clips {
-            // 【为什么跳过倒放而不是报错】本函数在**整份**接受路径上跑
-            // （`capture_render_input`、工作区接受都经过它）。一个倒放片段若在这里
-            // `Err`，整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句
-            // `any(reversed)` 是同一个"把局部状态升级成全局故障"的错。
-            // 倒放 clip 本来也渲染不出反向内容，跳过它就是如实处理。
-            if !parameters_supported(clip) {
-                continue;
-            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
             let root = timeline
                 .resolve_root_track_id(&clip.track_id)
                 .ok_or("unknown parameter root")?;
-            let geometry = geometry(clip)?;
+            // 【为什么几何失败只跳过而不是报错】本函数在**整份**接受路径上跑
+            // （`capture_render_input`、工作区接受都经过它）。一个片段若在这里 `Err`，
+            // 整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句 `any(reversed)` 是同一个
+            // "把局部状态升级成全局故障"的错。几何不可解（退化窗口等）时如实跳过它。
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
             if let Some(previous) = self.find(identity, &root, &geometry)? {
                 let mut record = previous.clone();
                 record.identity = identity.clone();
@@ -333,10 +353,8 @@ impl ParameterAtlas {
             let candidates = timeline
                 .clips
                 .iter()
-                // 倒放 clip 不参与参数绑定：它的播放顺序与源窗口反向，需要镜像的帧
-                // 映射（单列一期）。把它排除在候选之外，而不是让 `geometry(clip)`
-                // 报错 —— 后者会让整份重绑定失败。
-                .filter(|clip| parameters_supported(clip))
+                // 倒放与正放都参与绑定：几何的 `reversed` 让候选按真实消费窗口比较，
+                // 方向不同即窗口不同，自然区分。
                 .filter(|clip| {
                     identities.get(&clip.id).is_some_and(|id| {
                         id.source == record.identity.source
@@ -353,7 +371,8 @@ impl ParameterAtlas {
                     .into_iter()
                     .filter(|clip| {
                         geometry(clip).is_ok_and(|geometry| {
-                            near(geometry.source_start, record.current.source_start)
+                            geometry.reversed == record.current.reversed
+                                && near(geometry.source_start, record.current.source_start)
                                 && near(geometry.source_duration, record.current.source_duration)
                         })
                     })
@@ -404,15 +423,14 @@ impl ParameterAtlas {
             let Some(params) = clips.get(&clip.id) else {
                 continue;
             };
-            // 与 `capture_changes` 同一条理由：倒放 clip 不参与参数投影，
-            // 但绝不能因为它让整份投影失败（本函数在渲染输入路径上）。
-            if !parameters_supported(clip) {
-                continue;
-            }
+            // 与 `capture_changes` 同一条理由：几何不可解的片段只跳过它自己，
+            // 绝不能让一条片段使整份投影失败（本函数在渲染输入路径上）。
             let root = timeline
                 .resolve_root_track_id(&clip.track_id)
                 .ok_or("unknown parameter root")?;
-            let geometry = geometry(clip)?;
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
             let Some((begin, end)) = covered_frame_range(&geometry, params.frame_period_ms)? else {
                 continue;
             };
@@ -466,11 +484,6 @@ impl ParameterAtlas {
         let mut candidate = self.clone();
         candidate.capture_gaps(timeline, previous_view)?;
         for clip in &timeline.clips {
-            // 倒放 clip 不参与参数捕获：帧映射需要镜像，单列一期。跳过而不是让
-            // `geometry(clip)` 报错，否则一条倒放片段会让整份捕获失败。
-            if !parameters_supported(clip) {
-                continue;
-            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
@@ -488,7 +501,10 @@ impl ParameterAtlas {
                 candidate.regions.remove(&clip.id);
                 continue;
             };
-            let geometry = geometry(clip)?;
+            // 几何不可解只跳过该片段：否则一条退化片段会让整份捕获失败。
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
             let (begin, end) = frame_range(&geometry, params.frame_period_ms)?;
             let previous = self.find(identity, &root, &geometry)?;
             let mut curves = BTreeMap::new();
@@ -625,19 +641,17 @@ impl ParameterAtlas {
         self.validate()?;
         let mut projected = BTreeMap::new();
         for clip in &timeline.clips {
-            // 倒放 clip 不参与参数投影：它的播放顺序与源窗口反向，需要镜像的帧映射
-            // （单列一期）。跳过而不是让 `geometry(clip)` 报错 —— 后者会让整个渲染
-            // 输入准备失败（本函数在 `capture_render_input` 上）。
-            if !parameters_supported(clip) {
-                continue;
-            }
             let identity = identities
                 .get(&clip.id)
                 .ok_or("missing actual ARA parameter identity")?;
             let root = timeline
                 .resolve_root_track_id(&clip.track_id)
                 .ok_or("unknown parameter root")?;
-            let mut geometry = geometry(clip)?;
+            // 几何不可解只跳过该片段：否则整个渲染输入准备都会失败
+            // （本函数在 `capture_render_input` 上）。
+            let Ok(mut geometry) = geometry(clip) else {
+                continue;
+            };
             let Some(record) = self.find(identity, &root, &geometry)? else {
                 continue;
             };
@@ -874,12 +888,13 @@ impl ParameterAtlas {
                 .ok_or("unknown gap parameter root")?;
             // 覆盖只用到**时间线跨度**（`covered_frame_range` 只看 project_start/duration），
             // 与方向无关 —— 倒放 clip 也必须计入覆盖，否则它的跨度会被当成空白层，
-            // 用户在其上的编辑被误捕获进 gap 层。所以这里不走 `geometry()` 的倒放拒绝。
+            // 用户在其上的编辑被误捕获进 gap 层。
             coverage.entry(root).or_default().push(RegionGeometry {
                 project_start: clip.start_sec,
                 project_duration: clip.length_sec,
                 source_start: clip.source_start_sec,
                 source_duration: clip.length_sec * clip.playback_rate as f64,
+                reversed: clip.reversed && !clip.loop_enabled,
             });
         }
         self.capture_gap_roots(&timeline.params_by_root_track, &coverage, previous)
@@ -1002,33 +1017,32 @@ impl ParameterAtlas {
     }
 }
 
-/// 倒放 clip 是否可参与**参数曲线**投影/捕获。
+/// 用**真实消费窗口**而不是 take 媒体全长；宿主 ARA 已经把总倍率投影到 active take。
 ///
-/// 【为什么现在是否】参数曲线的帧映射要把宿主的**镜像**坐标翻回正向再逐帧反向索引
-/// （见 `probe/ara/REVERSE-FINDINGS.md` 的 F-4），这是一期独立工作。当前如实返回
-/// `false`：倒放 clip **没有**曲线，而不是画一条错的 —— 后者会把"局部状态"变成
-/// "整份投影/捕获失败"或"曲线整体平移一个分割长度"。
+/// 【倒放为什么要重算窗口】倒放的消费窗口是 `[se−len·r, se)`（`clip_playback_window_sec`），
+/// 而 `clip.source_start_sec` 在倒放里只是编辑痕迹、**不参与消费数学**。若照搬
+/// `source_start_sec` 建升序映射，曲线会被整体镜像 —— 与波形/音频对不上。
+/// 这里取真实窗口并把 `reversed` 交给 [`RegionGeometry::map`] 建降序源轴。
 ///
-/// 【为什么与 `capture_gaps` 不同】空白层的覆盖只用到**时间线跨度**，与方向无关 ——
-/// 倒放 clip 必须计入覆盖，否则它的跨度会被当成空白层、用户在其上的编辑被误捕获。
-/// 所以"投影/捕获曲线时排除"与"统计覆盖时包含"是**两个不同的口径**，不是不自洽。
-/// 本函数是前者的唯一判据，所有投影/捕获/绑定路径都必须走它。
-fn parameters_supported(clip: &hifishifter_kernel::state::Clip) -> bool {
-    !clip.reversed
-}
-
-/// 用本体真实消费窗口而不是take媒体全长；宿主ARA已经把总倍率投影到active take。
-fn geometry(clip: &hifishifter_kernel::state::Clip) -> Result<RegionGeometry, String> {
-    // 安全网：调用方已用 `parameters_supported` 排除倒放；这里再挡一次，避免将来新增
-    // 调用点绕过判据时把镜像帧映射的缺口悄悄变成一条错曲线。
-    if !parameters_supported(clip) {
-        return Err("reverse parameter map unsupported".into());
-    }
+/// 公开给同 crate 的剪贴板粘贴路径，避免"窗口/方向"这套规则被抄成两份。
+pub(crate) fn geometry(clip: &hifishifter_kernel::state::Clip) -> Result<RegionGeometry, String> {
+    // Loop 有自己的回绕锚点语义，不适用"窗口终点递减"模型；沿用既有的正放近似。
+    let reversed = clip.reversed && !clip.loop_enabled;
+    let (source_start, source_duration) = if reversed {
+        let (window_start, window_end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+        (window_start, window_end - window_start)
+    } else {
+        (
+            clip.source_start_sec,
+            clip.length_sec * clip.playback_rate as f64,
+        )
+    };
     let value = RegionGeometry {
         project_start: clip.start_sec,
         project_duration: clip.length_sec,
-        source_start: clip.source_start_sec,
-        source_duration: clip.length_sec * clip.playback_rate as f64,
+        source_start,
+        source_duration,
+        reversed,
     };
     value.map()?;
     Ok(value)
@@ -1500,22 +1514,70 @@ mod tests {
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64.]
         );
     }
-    /// 倒放 clip 不参与参数投影/捕获（镜像帧映射是独立一期），但**绝不能**因为它让整份
-    /// 投影/捕获/绑定失败 —— 局部状态不能升级成全局故障。正放 clip 照常。
+    /// 倒放 clip **参与**参数投影：同一源曲线经降序窗口投影后，项目时间上的取值相对正放
+    /// **镜像**（源位置随时间递减）。这条把"倒放无曲线"的老口径钉死为历史。
     #[test]
-    fn a_reversed_clip_is_skipped_without_failing_the_whole_projection() {
+    fn a_reversed_clip_projects_the_source_curve_mirrored() {
+        let ids = identities();
+        let forward = edited();
+        let atlas = ParameterAtlas::default().capture(&forward, &ids).unwrap();
+        let forward_view = atlas.project_local(&forward, &ids).unwrap()["clip"]
+            .pitch_edit
+            .clone();
+        assert!(!forward_view.is_empty());
+
+        // 同一源窗口 [0,1)、同一项目 [1,2)，只是消费方向相反。
+        let mut reversed = forward.clone();
+        reversed.clips[0].reversed = true;
+        let reversed_view = atlas.project_local(&reversed, &ids).unwrap()["clip"]
+            .pitch_edit
+            .clone();
+
+        let expected = forward_view.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(
+            reversed_view, expected,
+            "倒放投影必须是正放投影的时间镜像"
+        );
+    }
+
+    /// 倒放几何的源窗口取自真实消费窗口（`[se−len·r, se)`），而不是存储的
+    /// `source_start_sec`，并且方向位被记进 `RegionGeometry`。
+    #[test]
+    fn reversed_geometry_uses_the_consumption_window_and_marks_direction() {
+        let mut clip = edited().clips[0].clone();
+        clip.reversed = true;
+        clip.source_start_sec = 7.; // 陈旧/编辑痕迹，不参与倒放消费数学
+        clip.source_end_sec = 1.;
+        clip.length_sec = 1.;
+        clip.playback_rate = 1.;
+        let geometry = geometry(&clip).unwrap();
+        assert!(geometry.reversed);
+        assert!((geometry.source_start - 0.).abs() < 1e-12);
+        assert!((geometry.source_duration - 1.).abs() < 1e-12);
+        // 降序映射：项目起点 ⇒ 源窗口终点。
+        let map = geometry.map().unwrap();
+        assert!((map.project_to_source(clip.start_sec).unwrap() - 1.).abs() < 1e-12);
+        assert!(
+            (map.project_to_source(clip.start_sec + clip.length_sec).unwrap() - 0.).abs() < 1e-12
+        );
+    }
+
+    /// 一条几何不可解的片段只跳过它自己，绝不把局部状态升级成整份投影/捕获失败。
+    #[test]
+    fn a_degenerate_clip_is_skipped_without_failing_the_whole_projection() {
         let mut ids = identities();
         let mut timeline = edited();
-        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
-        // 追加一个倒放 clip（同源同窗，方向相反）。
-        let mut reversed = timeline.clips[0].clone();
-        reversed.id = "rev".into();
-        reversed.reversed = true;
-        reversed.start_sec = 3.;
-        timeline.clips.push(reversed);
+        // 退化窗口：跨度为零 ⇒ 无法建映射。此前靠"倒放即跳过"回避，现在靠几何失败兜底。
+        let mut degenerate = timeline.clips[0].clone();
+        degenerate.id = "degenerate".into();
+        degenerate.start_sec = 3.;
+        degenerate.length_sec = 0.;
+        degenerate.source_start_sec = 0.;
+        degenerate.source_end_sec = 0.;
+        timeline.clips.push(degenerate);
         timeline.project_sec = 4.;
         ids.insert(
-            "rev".into(),
+            "degenerate".into(),
             RegionIdentity {
                 key: 99,
                 item: None,
@@ -1523,16 +1585,15 @@ mod tests {
                 modification: "mod".into(),
             },
         );
-        // 投影：倒放缺席、正放仍在，整体不报错。
+        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
         let projected = atlas.project_local(&timeline, &ids).unwrap();
         assert!(projected.contains_key("clip"), "正放 clip 必须照常投影");
-        assert!(!projected.contains_key("rev"), "倒放 clip 不应有曲线");
-        // 捕获 / 跟随几何 / 重绑定都跳过倒放，不升级成错误。
+        assert!(!projected.contains_key("degenerate"), "退化 clip 无曲线");
         assert!(!atlas
             .capture(&timeline, &ids)
             .unwrap()
             .regions
-            .contains_key("rev"));
+            .contains_key("degenerate"));
         assert!(atlas.follow_geometry(&timeline, &ids).is_ok());
         assert!(atlas.rebind(&timeline, &ids).is_ok());
     }

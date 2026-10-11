@@ -1,5 +1,9 @@
 //! 已确认秒域的项目↔源时间映射；原生REAPER raw marker必须先验证单位后才能进入这里。
 //! 本模块为曲线源坐标迁移提供同一映射，不对PCM做普通重采样，也不假称完整marker渲染。
+//!
+//! 【倒放契约】倒放片段的源轴是**严格降序**（项目时间增 ⇒ 源位置减）。`piecewise`
+//! 接受升序或降序源轴，但要求全程同向；`interpolate` 对两种方向都做区间线性插值。
+//! 正放/倒放因此共用同一份锚点与查询代码，不存在"两套倍率公式"。
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TimeAnchor {
@@ -32,7 +36,11 @@ impl SourceTimeMap {
         ])
     }
 
-    /// 接收经过单位确认的严格递增锚点；不排序/钳制损坏数据来伪造有效映射。
+    /// 接收经过单位确认的严格单调锚点。
+    ///
+    /// **项目轴**必须严格向前（时间只能往前）；**源轴**必须严格单调，且**全程同向**：
+    /// 严格升序 = 正放，严格降序 = 倒放。倒放片段的项目时间增、源位置减，正是降序源轴
+    /// 的直接表达 —— 用升序轴表示它会把曲线整体镜像。不排序/钳制损坏数据来伪造有效映射。
     pub fn piecewise(points: Vec<TimeAnchor>) -> Result<Self, String> {
         if !(2..=65_536).contains(&points.len()) {
             return Err("source time map requires 2..65536 anchors".into());
@@ -43,15 +51,18 @@ impl SourceTimeMap {
         {
             return Err("non-finite source time anchor".into());
         }
+        let descending = points[1].source_sec < points[0].source_sec;
         for pair in points.windows(2) {
             let project_span = pair[1].project_sec - pair[0].project_sec;
             let source_span = pair[1].source_sec - pair[0].source_sec;
-            if !project_span.is_finite()
-                || !source_span.is_finite()
-                || project_span <= 0.0
-                || source_span <= 0.0
-            {
-                return Err("source time map must be strictly forward and finite".into());
+            if !project_span.is_finite() || project_span <= 0.0 {
+                return Err("source time map project axis must be strictly forward".into());
+            }
+            if !source_span.is_finite() || source_span == 0.0 {
+                return Err("source time map source axis must be strictly monotonic".into());
+            }
+            if (source_span < 0.0) != descending {
+                return Err("source time map source axis must not change direction".into());
             }
         }
         Ok(Self { points })
@@ -79,22 +90,33 @@ impl SourceTimeMap {
     }
 
     /// 两方向共享严格单调的区间查询，保证正反映射使用相同锚点而不是两套倍率公式。
+    ///
+    /// 查询轴（`input`）在正放时升序、倒放时降序；两种方向都按"落在哪一段"做线性
+    /// 插值，**不**依赖固定的升序假设 —— 否则倒放的 `source_to_project` 会静默取错段。
     fn interpolate(
         &self,
         value: f64,
         input: impl Fn(&TimeAnchor) -> f64,
         output: impl Fn(&TimeAnchor) -> f64,
     ) -> Option<f64> {
-        if !value.is_finite()
-            || value < input(&self.points[0])
-            || value > input(self.points.last()?)
-        {
+        if !value.is_finite() {
             return None;
         }
-        let next = self
-            .points
-            .partition_point(|point| input(point) <= value)
-            .clamp(1, self.points.len() - 1);
+        let first = input(&self.points[0]);
+        let last = input(self.points.last()?);
+        let ascending = last >= first;
+        let (low, high) = if ascending { (first, last) } else { (last, first) };
+        if value < low || value > high {
+            return None;
+        }
+        // `partition_point` 要求谓词"前真后假"：升序轴数"<= value"的个数，
+        // 降序轴数">= value"的个数 —— 两者都给出"值之前"的锚点数。
+        let next = if ascending {
+            self.points.partition_point(|point| input(point) <= value)
+        } else {
+            self.points.partition_point(|point| input(point) >= value)
+        }
+        .clamp(1, self.points.len() - 1);
         let lo = &self.points[next - 1];
         let hi = &self.points[next];
         let fraction = (value - input(lo)) / (input(hi) - input(lo));
@@ -170,9 +192,9 @@ mod tests {
         close(map.project_to_source(3.0), 0.5);
     }
 
-    /// 正向域必须严格单调；非法/重复锚点不能被悄悄排序或当反向播放。
+    /// 正向域必须严格单调；非法/重复/换向锚点不能被悄悄排序或当反向播放。
     #[test]
-    fn malformed_and_reverse_maps_fail_without_clamping_or_sorting() {
+    fn malformed_maps_fail_without_clamping_or_sorting() {
         for points in [
             vec![],
             vec![TimeAnchor {
@@ -189,24 +211,30 @@ mod tests {
                     source_sec: 1.0,
                 },
             ],
+            // 项目轴倒走：时间不能倒退。
             vec![
-                TimeAnchor {
-                    project_sec: 0.0,
-                    source_sec: 1.0,
-                },
                 TimeAnchor {
                     project_sec: 1.0,
                     source_sec: 0.0,
+                },
+                TimeAnchor {
+                    project_sec: 0.0,
+                    source_sec: 1.0,
                 },
             ],
+            // 源轴先降后升：换向不是合法倒放，必须拒绝而不是猜一个方向。
             vec![
                 TimeAnchor {
-                    project_sec: 1.0,
-                    source_sec: 0.0,
+                    project_sec: 0.0,
+                    source_sec: 2.0,
                 },
                 TimeAnchor {
-                    project_sec: 0.0,
+                    project_sec: 1.0,
                     source_sec: 1.0,
+                },
+                TimeAnchor {
+                    project_sec: 2.0,
+                    source_sec: 1.5,
                 },
             ],
             vec![
@@ -238,5 +266,60 @@ mod tests {
         let map = SourceTimeMap::linear(0.0, 1.0, 0.0, 1.0).unwrap();
         assert_eq!(map.project_to_source(f64::NAN), None);
         assert_eq!(map.source_to_project(f64::INFINITY), None);
+    }
+
+    /// 倒放：源轴严格降序，项目时间增 ⇒ 源位置减；正反映射仍互为逆运算。
+    #[test]
+    fn descending_source_axis_models_reversed_playback() {
+        // 源 [0, 2) 倒放铺到项目 [1, 5)：项目 1 ⇒ 源 2，项目 5 ⇒ 源 0。
+        let map = SourceTimeMap::piecewise(vec![
+            TimeAnchor {
+                project_sec: 1.0,
+                source_sec: 2.0,
+            },
+            TimeAnchor {
+                project_sec: 5.0,
+                source_sec: 0.0,
+            },
+        ])
+        .unwrap();
+        for (project, source) in [(1.0, 2.0), (2.0, 1.5), (3.0, 1.0), (4.0, 0.5), (5.0, 0.0)] {
+            close(map.project_to_source(project), source);
+            close(map.source_to_project(source), project);
+        }
+        assert_eq!(map.project_to_source(0.99), None);
+        assert_eq!(map.project_to_source(5.01), None);
+        assert_eq!(map.source_to_project(-0.01), None);
+        assert_eq!(map.source_to_project(2.01), None);
+    }
+
+    /// 倒放曲线迁移：同一源位置在新旧倒放布局间继承，不按项目位置猜。
+    #[test]
+    fn reversed_maps_transfer_curves_by_source_position() {
+        let old = SourceTimeMap::piecewise(vec![
+            TimeAnchor {
+                project_sec: 0.0,
+                source_sec: 2.0,
+            },
+            TimeAnchor {
+                project_sec: 2.0,
+                source_sec: 0.0,
+            },
+        ])
+        .unwrap();
+        // 同一源窗口移到项目 4..6：项目 4.5 应对应源 1.5，即旧项目的 0.5。
+        let moved = SourceTimeMap::piecewise(vec![
+            TimeAnchor {
+                project_sec: 4.0,
+                source_sec: 2.0,
+            },
+            TimeAnchor {
+                project_sec: 6.0,
+                source_sec: 0.0,
+            },
+        ])
+        .unwrap();
+        close(moved.previous_project_time(&old, 4.5), 0.5);
+        close(moved.previous_project_time(&old, 5.0), 1.0);
     }
 }

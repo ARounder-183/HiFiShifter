@@ -1,6 +1,6 @@
 //! 原GUI媒体剪贴板的宿主执行层：保存真实item状态和源域曲线，不保存宿主指针。
 use super::{HostClipTarget, HostTrackTarget, NativeHost, RewrittenItem};
-use crate::editor::parameter_atlas::{ParameterAtlas, RegionGeometry, RegionParameters};
+use crate::editor::parameter_atlas::{ParameterAtlas, RegionParameters};
 use crate::editor::session::EditorSession;
 use crate::host::geometry::{host_value_compatible, HostClipGeometry};
 use crate::render::document::DocumentSession;
@@ -502,12 +502,10 @@ pub(crate) fn execute_paste(
                 .map(|track| track.id.clone())
         }
         .ok_or("new paste track has not entered host inventory")?;
-        let geometry = RegionGeometry {
-            project_start: item.start_sec,
-            project_duration: item.before.length_sec,
-            source_start: item.before.source_start_sec,
-            source_duration: item.before.length_sec * item.before.playback_rate as f64,
-        };
+        // 粘贴的源几何复用参数图集的唯一窗口/方向解算（倒放窗口、方向都由它定），
+        // 只把项目起点换成粘贴落点 —— 不让这套规则在这里被抄成第二份。
+        let mut geometry = crate::editor::parameter_atlas::geometry(&item.before)?;
+        geometry.project_start = item.start_sec;
         {
             let _transaction = document.transaction.lock_or_recover();
             let mut edits = document.edits.lock_or_recover();
