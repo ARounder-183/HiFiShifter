@@ -1105,22 +1105,30 @@ unsafe extern "system" fn audio_setup_processing(
         ));
         return K_RESULT_OK;
     }
-    if !(44100.0..=192000.0).contains(&setup.sample_rate) {
-        // 【为什么下限是 44.1k 而不是源读取域的 8k】内部快照固定为 44.1/48k：
-        // 宿主率**高于**它只是上采样（无混叠，最多缺高频），宿主率**低于**它则要把快照
-        // 降采样 —— 线性重采样没有抗混叠滤波，8k 宿主上会听到明显的镜像。所以下限就是
-        // "永不降采样内部快照"，这是刻意的；要真正支持 22.05k/32k 工程需要按宿主率
-        // 渲染内部快照（独立一期）。
+    // 【接受域与 `render::source` 对齐（8k..=384k）】此前下限是 44.1k，理由是"内部快照
+    // 永不降采样"。但宿主率低于 44.1k 时返回 `kResultFalse` 会让多数宿主把插件**整条
+    // 踢出链路**（用户看到"插件不见了"，与 `symbolic_sample_size` 同一类失败）。源读取域
+    // 本就接受 8k（`render/source.rs`），这里与它对齐：接受后用
+    // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
+    // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
+    // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
+    if !(8000.0..=384000.0).contains(&setup.sample_rate) {
         crate::log_line(&format!(
-            "[vst3] setupProcessing refused: sampleRate={} is outside 44100..=192000",
+            "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
             setup.sample_rate
         ));
         return K_RESULT_FALSE;
     }
     if (setup.sample_rate - 44100.0).abs() > 1e-6 && (setup.sample_rate - 48000.0).abs() > 1e-6 {
+        let aliasing = if setup.sample_rate < 44100.0 {
+            " The host rate is below the internal snapshot rate, so this is a downsample with \
+             no anti-aliasing filter; expect audible imaging."
+        } else {
+            ""
+        };
         crate::log_line(&format!(
             "[vst3] sampleRate={} is not natively rendered; output will be linearly resampled \
-             from the internal 44.1/48k snapshots.",
+             from the internal 44.1/48k snapshots.{aliasing}",
             setup.sample_rate
         ));
     }
@@ -2945,8 +2953,14 @@ mod audio_boundary_tests {
                 // 返回 `kResultFalse` 会让宿主把插件整条踢出链路。
                 (96000.0, 512, 0, K_RESULT_OK),
                 (192000.0, 512, 0, K_RESULT_OK),
-                // 离谱的率仍然拒绝：重采样比例会大到没有意义。
-                (8000.0, 512, 0, K_RESULT_FALSE),
+                // 低于 44.1k 现在也**接受**（接受域与 `render::source` 的 8k 下限对齐）：
+                // 内部快照仍按 44.1/48k 出，输出走线性重采样（降采样、有镜像，记警告）。
+                // 此前返回 `kResultFalse` 会让宿主把插件整条踢出链路。
+                (8000.0, 512, 0, K_RESULT_OK),
+                (22050.0, 512, 0, K_RESULT_OK),
+                // 超出源读取域的率仍然拒绝：重采样比例会大到没有意义。
+                (4000.0, 512, 0, K_RESULT_FALSE),
+                (768000.0, 512, 0, K_RESULT_FALSE),
             ] {
                 let mut setup = ProcessSetup {
                     process_mode: 0,
