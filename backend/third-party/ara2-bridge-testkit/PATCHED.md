@@ -41,6 +41,18 @@ crates.io 上发布的 testkit 是按**上游签名**写的，直接引用会编
 `ara2-bridge-host` 的编辑会话 API（`edit.create_audio_modification(source, ..)`），
 那是宿主侧接口，本就带 source 参数，不受 plugin 补丁影响。
 
+## 接口覆盖报告（vendoring 补件）
+
+`tests/coverage_join.rs` 的 `every_public_slot_is_delegated_classified_and_reported`
+会读 `CARGO_MANIFEST_DIR/../docs/conformance/interface-coverage.md` 并断言它等于
+当前 delegates / contract-tests 渲染出的报告。发布的 `.crate` **不含**该文件
+（它是上游工作区的产物），所以 vendor 后此测试必然找不到路径。
+
+因此本仓补了 `backend/third-party/docs/conformance/interface-coverage.md`，内容由
+`CoverageReport::render_markdown()` 对**打过补丁的**桥渲染而来（95 个已发布回调槽，
+`semantic_gaps` 为空）。改动补丁里的 delegate/contract 面时需重新生成，否则该测试会
+报"报告过期"——这正是它存在的意义。
+
 ## 与本仓工作区的关系
 
 - `backend/Cargo.toml` 的 `exclude` 列入了本目录，`cargo test --workspace`
