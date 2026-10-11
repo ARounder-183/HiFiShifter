@@ -61,6 +61,7 @@ mod runtime;
 mod settings_store;
 mod state_channel;
 mod state_stream;
+mod sync;
 #[cfg(test)]
 mod test_allocator;
 #[cfg(test)]

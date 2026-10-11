@@ -3,6 +3,7 @@ use super::session::EditorSession;
 use crate::host::geometry::host_value_compatible;
 use crate::host::reaper::HostClipTarget;
 use crate::render::extension::ExtensionOwner;
+use crate::sync::MutexExt;
 use hifishifter_kernel::state::{Clip, ClipStatePatch, TimelineState};
 use serde_json::Value;
 use std::sync::Arc;
@@ -386,7 +387,7 @@ impl EditorSession {
         if requests.is_empty() || requests.len() > 512 {
             return Err("host edit batch must contain 1..512 clips".into());
         }
-        let timeline = self.timeline.lock().unwrap();
+        let timeline = self.timeline.lock_or_recover();
         let mut seen = std::collections::HashSet::new();
         let mut edits = Vec::new();
         for request in requests {
@@ -554,7 +555,7 @@ pub(super) fn execute_managed(
             None
         } else {
             let clip = {
-                let timeline = document.timeline.lock().unwrap();
+                let timeline = document.timeline.lock_or_recover();
                 timeline
                     .as_ref()
                     .ok_or("host timeline unavailable")?
@@ -591,7 +592,7 @@ pub(super) fn execute_managed(
             // 而 REAPER 从不委托，于是整条形状编辑路径是死的。
             let delegated = {
                 let key = {
-                    let ids = document.clip_ids.lock().unwrap();
+                    let ids = document.clip_ids.lock_or_recover();
                     ids.iter()
                         .find(|(_, id)| id.as_str() == edit.native_id)
                         .map(|(key, _)| *key)
@@ -841,8 +842,8 @@ pub(super) fn execute_managed(
     })();
     if result.is_ok() && !styles.is_empty() {
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             edits.fades.extend(styles);
             edits.revision = edits
                 .revision
@@ -858,8 +859,8 @@ pub(super) fn execute_managed(
     // 但仍要重新投影，所以放在同一事务里 merge 后由下面统一 `prepare()`。
     if result.is_ok() && !locals.is_empty() {
         let changed = {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             let mut changed = false;
             for (item, local) in locals {
                 let entry = edits.clip_local.entry(item).or_default();
@@ -908,7 +909,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         for gain in [0.5, 0.] {
             let plan = editor
                 .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":gain}))
@@ -943,7 +944,7 @@ mod tests {
         let (_model, owner, _id) = super::super::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
@@ -988,7 +989,7 @@ mod tests {
             )
             .is_err());
         assert_eq!(
-            editor.timeline.lock().unwrap().clips[0].start_sec,
+            editor.timeline.lock_or_recover().clips[0].start_sec,
             clip.start_sec,
             "纯规划不得修改actor私有几何"
         );
@@ -1011,7 +1012,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"startSec":3.,"lengthSec":8./44100.,"clipPlaybackRate":0.5})).unwrap();
         host.reset();
         execute(&owner, plan, || document.is_alive()).unwrap();
@@ -1037,7 +1038,7 @@ mod tests {
             geometry.contains("incompatible"),
             "未模拟ARA回流，不能伪造已同步模型"
         );
-        assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec, 0.);
+        assert_eq!(editor.timeline.lock_or_recover().clips[0].start_sec, 0.);
         document.close();
     }
     /// 旧快照仍ok也不能结束移动；长度/倍率/淡变宽度均须准确回流，且缺失clip不可成功。
@@ -1046,7 +1047,7 @@ mod tests {
         let (_model, owner, _id) = super::super::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
@@ -1077,7 +1078,7 @@ mod tests {
         let (_model, owner, _id) = super::super::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"startSec":3.}))
             .unwrap();
@@ -1111,7 +1112,7 @@ mod tests {
         let (_model, owner, _id) = super::super::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
 
         let plan = editor
             .plan_host_edit(
@@ -1157,7 +1158,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInSec":0.00002,"fadeOutSec":0.00003,
             "autoFadeInSec":0.,"autoFadeOutSec":0.,"fadeInShape":clip.fade_in_shape,"fadeOutShape":clip.fade_out_shape,
             "fadeInDir":clip.fade_in_dir,"fadeOutDir":clip.fade_out_dir})).unwrap();
@@ -1290,7 +1291,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
 
         let fields_of = |receipt: &super::HostEditReceipt| -> Vec<(&'static str, Value)> {
             receipt.clips[0].1.clone()
@@ -1390,7 +1391,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
@@ -1437,7 +1438,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",

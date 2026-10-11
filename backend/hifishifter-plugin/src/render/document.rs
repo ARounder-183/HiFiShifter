@@ -2,6 +2,7 @@
 
 use super::extension::ExtensionOwner;
 use super::ownership::DocumentId;
+use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
@@ -308,12 +309,12 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
 
 impl DocumentSession {
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.edit_sources
             .lock()
             .unwrap()
             .insert(id.clone(), pcm.clone());
-        self.sources.lock().unwrap().insert(id, pcm);
+        self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
     }
     /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
@@ -324,8 +325,8 @@ impl DocumentSession {
         std::collections::BTreeMap<String, crate::editor::parameter_atlas::RegionIdentity>,
         String,
     > {
-        let ids = self.clip_ids.lock().unwrap();
-        let regions = self.regions.lock().unwrap();
+        let ids = self.clip_ids.lock_or_recover();
+        let regions = self.regions.lock_or_recover();
         timeline
             .clips
             .iter()
@@ -341,7 +342,7 @@ impl DocumentSession {
                     clip.id.clone(),
                     crate::editor::parameter_atlas::RegionIdentity {
                         key: *key,
-                        item: self.region_items.lock().unwrap().get(key).cloned(),
+                        item: self.region_items.lock_or_recover().get(key).cloned(),
                         source: region.audio_source_persistent_id.clone(),
                         modification: region.audio_modification_persistent_id.clone(),
                     },
@@ -353,7 +354,7 @@ impl DocumentSession {
     pub(crate) fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
             return Err("document closed".into());
         }
@@ -375,12 +376,12 @@ impl DocumentSession {
     }
     /// edit/model/scope分开计数；assignment变更不能由相同model误判成未变。
     pub(crate) fn editor_versions(&self) -> Result<(u64, u64, u64), String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
             return Err("document closed".into());
         }
         Ok((
-            self.edits.lock().unwrap().revision,
+            self.edits.lock_or_recover().revision,
             self.revision.load(Ordering::Acquire),
             self.scope_revision.load(Ordering::Acquire),
         ))
@@ -411,7 +412,7 @@ impl DocumentSession {
             // 方向 / 循环源 / 声道模式由 `project_host_take_facts_locked` 播种进**clips**
             // —— 而 clips 不在上面的哈希里。不进指纹就会出现"宿主倒放了，早退成立，
             // 于是既不重载也不重渲染"，与音阶进指纹是同一条理由。
-            &*self.render_facts.lock().unwrap(),
+            &*self.render_facts.lock_or_recover(),
         ))
         .map_err(|e| e.to_string())?;
         Ok(format!(
@@ -422,8 +423,8 @@ impl DocumentSession {
     }
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
     pub(crate) fn workspace_projection(&self) -> Result<String, String> {
-        let _transaction = self.transaction.lock().unwrap();
-        self.workspace_projection_locked(&self.edits.lock().unwrap())
+        let _transaction = self.transaction.lock_or_recover();
+        self.workspace_projection_locked(&self.edits.lock_or_recover())
     }
     /// 原GUI改变素材选择只换可见source投影；不修改参数authority、history或渲染generation。
     pub(crate) fn selected_source_parameters(
@@ -433,13 +434,13 @@ impl DocumentSession {
         std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
         String,
     > {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
             return Err("document closed".into());
         }
         let host = self.workspace_timeline_locked()?;
         Self::validate_workspace_geometry(&host, selection)?;
-        let edits = self.edits.lock().unwrap();
+        let edits = self.edits.lock_or_recover();
         let mut grouped = host;
         edits.apply(&mut grouped);
         grouped.selected_clip_id = selection.selected_clip_id.clone();
@@ -448,18 +449,18 @@ impl DocumentSession {
     }
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
     pub(crate) fn workspace_snapshot(&self) -> Result<(WorkspaceSnapshot, u64, String), String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         for owner in self.renderer_owners() {
             owner.merge_pending_restore(self)?;
         }
         let mut timeline = self.workspace_timeline_locked()?;
-        let mut edits = self.edits.lock().unwrap();
-        edits.reconcile(&self.track_bindings.lock().unwrap())?;
+        let mut edits = self.edits.lock_or_recover();
+        edits.reconcile(&self.track_bindings.lock_or_recover())?;
         edits.apply(&mut timeline);
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        let available = self.edit_sources.lock().unwrap();
+        let available = self.edit_sources.lock_or_recover();
         let ids = timeline
             .clips
             .iter()
@@ -536,13 +537,13 @@ impl DocumentSession {
         previous: &str,
         groups: Option<crate::editor::private_groups::TrackGroups>,
     ) -> Result<(u64, u64, String), String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
             return Err("Conflict: host model changed; local curves preserved".into());
         }
         let host = self.workspace_timeline_locked()?;
-        let mut edits = self.edits.lock().unwrap();
+        let mut edits = self.edits.lock_or_recover();
         if self.workspace_projection_locked(&edits)? != previous || base_edit > edits.revision {
             return Err(
                 "Conflict: workspace scope or curves changed; local curves preserved".into(),
@@ -550,7 +551,7 @@ impl DocumentSession {
         }
         Self::validate_workspace_geometry(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
-        candidate.reconcile(&self.track_bindings.lock().unwrap())?;
+        candidate.reconcile(&self.track_bindings.lock_or_recover())?;
         let identities = self.parameter_identities_locked(&host)?;
         let mut previous_view = edits.params.clone();
         if !edits.atlas.is_empty() {
@@ -594,14 +595,14 @@ impl DocumentSession {
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
         let (edit, epoch, scope, inputs) = {
-            let _transaction = self.transaction.lock().unwrap();
+            let _transaction = self.transaction.lock_or_recover();
             if !self.is_alive()
                 || !self.ready.load(Ordering::Acquire)
                 || self.revision.load(Ordering::Acquire) != base_model
             {
                 return Err("Conflict: host model changed during automatic apply".into());
             }
-            let edits = self.edits.lock().unwrap().clone();
+            let edits = self.edits.lock_or_recover().clone();
             if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
             {
                 return Err("Conflict: workspace changed during automatic apply".into());
@@ -634,7 +635,7 @@ impl DocumentSession {
             super::snapshot::compact_prepared(&mut snapshots)?;
             prepared.push((owner, keys, snapshots));
         }
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive()
             || !self.ready.load(Ordering::Acquire)
             || self.revision.load(Ordering::Acquire) != base_model
@@ -642,7 +643,7 @@ impl DocumentSession {
             return Err("Conflict: host model changed during automatic apply".into());
         }
         if !current()
-            || self.edits.lock().unwrap().revision != edit
+            || self.edits.lock_or_recover().revision != edit
             || self.render_epoch.load(Ordering::Acquire) != epoch
             || self.scope_revision.load(Ordering::Acquire) != scope
         {
@@ -696,7 +697,7 @@ impl DocumentSession {
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
     pub fn close(&self) {
         {
-            let _transaction = self.transaction.lock().unwrap();
+            let _transaction = self.transaction.lock_or_recover();
             if !self.alive.swap(false, Ordering::AcqRel) {
                 return;
             }
@@ -708,16 +709,16 @@ impl DocumentSession {
             editor.close();
         }
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
-        self.playback.lock().unwrap().take();
+        self.playback.lock_or_recover().take();
         self.ready.store(false, Ordering::Release);
         // 文档关闭时不存在"进行中的宿主会话"；留着会让下一次 ensure_loaded 误判为暂缓。
         self.editing_session.store(false, Ordering::Release);
         let leases = {
-            let mut renderers = self.renderers.lock().unwrap();
+            let mut renderers = self.renderers.lock_or_recover();
             self.alive.store(false, Ordering::Release);
             std::mem::take(&mut *renderers)
         };
-        let mut controllers = controllers().lock().unwrap();
+        let mut controllers = controllers().lock_or_recover();
         let key = self.controller.load(Ordering::Acquire);
         if controllers
             .get(&key)
@@ -734,30 +735,30 @@ impl DocumentSession {
             }
             // companion guard 随 renderer 释放，禁止继续借用即将销毁的 controller。
         }
-        self.sequence_regions.lock().unwrap().clear();
-        self.sequence_track_index.lock().unwrap().clear();
-        self.regions.lock().unwrap().clear();
-        self.clip_ids.lock().unwrap().clear();
-        self.region_items.lock().unwrap().clear();
+        self.sequence_regions.lock_or_recover().clear();
+        self.sequence_track_index.lock_or_recover().clear();
+        self.regions.lock_or_recover().clear();
+        self.clip_ids.lock_or_recover().clear();
+        self.region_items.lock_or_recover().clear();
         // 授权/事实映射随文档一起释放：此前 `region_items` / `authorized_takes` /
         // `authorized_sources` / `split_media_from` 只在文档销毁时清，而 region 销毁
         // 回调并不回收它们 —— 长会话里每次分割/移动/粘贴都会留下永不释放的条目。
-        self.authorized_takes.lock().unwrap().clear();
-        self.authorized_sources.lock().unwrap().clear();
-        self.split_media_from.lock().unwrap().clear();
-        self.source_failures.lock().unwrap().clear();
-        self.pending_since.lock().unwrap().clear();
-        self.skipped_regions.lock().unwrap().clear();
-        self.ui_tracks.lock().unwrap().clear();
-        self.ui_known_tracks.lock().unwrap().clear();
-        *self.ui_inventory_stamp.lock().unwrap() = None;
-        *self.ui_inventory_sampled_at.lock().unwrap() = None;
-        *self.render_facts.lock().unwrap() = Default::default();
-        self.timeline.lock().unwrap().take();
-        self.track_bindings.lock().unwrap().clear();
-        *self.edits.lock().unwrap() = Default::default();
-        self.sources.lock().unwrap().clear();
-        self.edit_sources.lock().unwrap().clear();
+        self.authorized_takes.lock_or_recover().clear();
+        self.authorized_sources.lock_or_recover().clear();
+        self.split_media_from.lock_or_recover().clear();
+        self.source_failures.lock_or_recover().clear();
+        self.pending_since.lock_or_recover().clear();
+        self.skipped_regions.lock_or_recover().clear();
+        self.ui_tracks.lock_or_recover().clear();
+        self.ui_known_tracks.lock_or_recover().clear();
+        *self.ui_inventory_stamp.lock_or_recover() = None;
+        *self.ui_inventory_sampled_at.lock_or_recover() = None;
+        *self.render_facts.lock_or_recover() = Default::default();
+        self.timeline.lock_or_recover().take();
+        self.track_bindings.lock_or_recover().clear();
+        *self.edits.lock_or_recover() = Default::default();
+        self.sources.lock_or_recover().clear();
+        self.edit_sources.lock_or_recover().clear();
     }
 
     /// 控制器侧独立保留 lease，companion 先释放时 raw extension 存储仍须存活。
@@ -767,7 +768,7 @@ impl DocumentSession {
         lease: ExtensionControllerLease,
         companion: Option<CompanionControllerBinding<'static>>,
     ) -> Result<(), AraError> {
-        let mut renderers = self.renderers.lock().unwrap();
+        let mut renderers = self.renderers.lock_or_recover();
         if !self.alive.load(Ordering::Acquire) {
             return Err(AraError::InvalidState("document is destroyed"));
         }
@@ -781,7 +782,7 @@ impl DocumentSession {
 
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
     pub fn prepare_renderers(&self) {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.ready.store(true, Ordering::Release);
         let owners = self
             .renderers
@@ -839,14 +840,14 @@ impl DocumentSession {
 
     /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。
     pub fn clear_renderers(&self) {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.revoke_snapshots();
     }
 
     /// 授权开关只撤销播放许可，不改变宿主内容/布局的乐观并发版本。
     pub fn revoke_renderers(&self) {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.revoke_snapshots();
     }
 

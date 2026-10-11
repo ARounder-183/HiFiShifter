@@ -1,4 +1,5 @@
 //! 原生WebView2子窗口：借用REAPER消息循环，取消异步创建，不启动Tauri/app。
+use crate::sync::MutexExt;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::c_void;
@@ -1125,7 +1126,7 @@ fn configure_browser(
             let track=request["args"]["trackId"].as_str().unwrap_or("").to_owned();let from=request["args"]["fromSec"].as_f64().unwrap_or(f64::NAN);
             let link=state.borrow().link.clone();
             if let Ok(owner)=link.owner() {if let Ok(editor)=owner.editor_session() {
-                let moves=editor.timeline.lock().unwrap().close_track_gaps_moves(&track,from);
+                let moves=editor.timeline.lock_or_recover().close_track_gaps_moves(&track,from);
                 request["command"]=if moves.is_empty(){serde_json::json!("get_timeline_state")}else{serde_json::json!("move_clips")};
                 request["args"]=if moves.is_empty(){serde_json::json!({})}else{serde_json::json!({"moves":moves,"moveLinkedParams":true})};
             }}
@@ -1135,7 +1136,7 @@ fn configure_browser(
             let take_id=request["args"]["takeId"].as_str().unwrap_or("").to_owned();
             let name=request["args"]["name"].as_str().unwrap_or("").to_owned();let link=state.borrow().link.clone();
             if let Ok(owner)=link.owner() {if let Ok(editor)=owner.editor_session() {
-                let active=editor.timeline.lock().unwrap().clips.iter().find(|clip|clip.id==clip_id).and_then(|clip|clip.active_take_id.clone());
+                let active=editor.timeline.lock_or_recover().clips.iter().find(|clip|clip.id==clip_id).and_then(|clip|clip.active_take_id.clone());
                 if active.as_deref()==Some(take_id.as_str()) {
                     // 只有 active take 的名字能落到宿主：`set_clip_state{name}` 写的是
                     // 宿主 item 的当前 take 名。非 active take 的重命名没有宿主对应

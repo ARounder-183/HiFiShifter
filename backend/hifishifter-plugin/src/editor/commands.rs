@@ -1,5 +1,6 @@
 //! 原GUI命令的插件准入与类型适配；使用共享原参数/历史/波形实现，不接收宿主几何变更。
 use super::session::EditorSession;
+use crate::sync::MutexExt;
 use base64::Engine as _;
 use hifishifter_kernel::editor::{history, params, waveform, ParamHost};
 use hifishifter_kernel::state::*;
@@ -123,17 +124,17 @@ struct PrivateTrackMove {
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
 pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, String> {
     let (position, _) = session.transport();
-    let timeline = session.timeline.lock().unwrap();
+    let timeline = session.timeline.lock_or_recover();
     let mut payload = if lite {
         timeline.to_payload_lite()
     } else {
         timeline.to_payload()
     };
     payload.playhead_sec = position.max(0.);
-    let (undo, redo) = history_depths_of(&session.history.lock().unwrap());
+    let (undo, redo) = history_depths_of(&session.history.lock_or_recover());
     payload.undo_depth = Some(undo);
     payload.redo_depth = Some(redo);
-    let project = session.project.lock().unwrap().clone();
+    let project = session.project.lock_or_recover().clone();
     payload.project = Some(hifishifter_kernel::models::ProjectMetaPayload {
         name: "HiFiShifter ARA".into(),
         path: None,
@@ -160,7 +161,7 @@ pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     Ok(result)
 }
 pub(crate) fn history_state(session: &EditorSession) -> Value {
-    let history = session.history.lock().unwrap();
+    let history = session.history.lock_or_recover();
     let (undo, redo) = history_depths_of(&history);
     let records: Vec<_> = history
         .records
@@ -204,7 +205,7 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
             .unwrap_or("parameter operation rejected")
             .into());
     }
-    if let Some(error) = session.error.lock().unwrap().clone() {
+    if let Some(error) = session.error.lock_or_recover().clone() {
         return Err(error);
     }
     session.emit("history_state", history_state(session));
@@ -229,7 +230,7 @@ fn after_musical_context_write(session: &EditorSession) {
     let Some(document) = session.document.upgrade() else {
         return;
     };
-    document.project_plugin_musical_context_locked(&mut session.timeline.lock().unwrap());
+    document.project_plugin_musical_context_locked(&mut session.timeline.lock_or_recover());
     document.render_epoch.fetch_add(1, Ordering::AcqRel);
 }
 fn peaks(
@@ -237,13 +238,13 @@ fn peaks(
     path: &str,
 ) -> Result<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>, String> {
     session.check_source(path)?;
-    if let Some(found) = session.peaks.lock().unwrap().get(path).cloned() {
+    if let Some(found) = session.peaks.lock_or_recover().get(path).cloned() {
         return Ok(found);
     }
     let result = std::sync::Arc::new(hifishifter_kernel::hfspeaks_v2::compute_mipmap_peaks(
         std::path::Path::new(path),
     )?);
-    let mut cache = session.peaks.lock().unwrap();
+    let mut cache = session.peaks.lock_or_recover();
     let total: u64 = cache.values().map(|p| p.estimated_byte_size()).sum();
     if total.saturating_add(result.estimated_byte_size()) > 64 * 1024 * 1024 {
         cache.clear();
@@ -350,10 +351,10 @@ pub(super) fn dispatch(
             if command == "select_track" {
                 let id = input["trackId"].as_str().ok_or("trackId missing")?;
                 track_exists(session, id)?;
-                session.timeline.lock().unwrap().select_track(id);
+                session.timeline.lock_or_recover().select_track(id);
             } else {
                 let id = input["clipId"].as_str().map(str::to_owned);
-                let mut timeline = session.timeline.lock().unwrap();
+                let mut timeline = session.timeline.lock_or_recover();
                 if let Some(id) = &id {
                     if !timeline.clips.iter().any(|clip| &clip.id == id) {
                         return Err("unknown host clip".into());
@@ -363,7 +364,7 @@ pub(super) fn dispatch(
             }
             // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本机原文件。
             let authorized = {
-                let timeline = session.timeline.lock().unwrap();
+                let timeline = session.timeline.lock_or_recover();
                 timeline.selected_clip_id.as_ref().is_none_or(|id| {
                     timeline
                         .clips
@@ -483,9 +484,9 @@ pub(super) fn dispatch(
     if let Err(error) = session.ensure_loaded(false) {
         if matches!(command, "get_timeline_state" | "get_timeline_state_lite") {
             if let Some(document) = session.document.upgrade() {
-                if !document.ui_tracks.lock().unwrap().is_empty() {
+                if !document.ui_tracks.lock_or_recover().is_empty() {
                     {
-                        let mut timeline = session.timeline.lock().unwrap();
+                        let mut timeline = session.timeline.lock_or_recover();
                         document.present_host_inventory(&mut timeline, &session.namespace);
                     }
                     return payload(session, command == "get_timeline_state_lite");
@@ -524,7 +525,7 @@ pub(super) fn dispatch(
                 serde_json::from_value(input["hifiganMelStretchOverride"].clone())
                     .map_err(|_| "invalid hifigan mel stretch override".to_string())?;
             {
-                let mut project = session.project.lock().unwrap();
+                let mut project = session.project.lock_or_recover();
                 project.stretch_algorithm_override = algorithm;
                 project.hifigan_mel_stretch_override = hifigan;
             }
@@ -545,7 +546,7 @@ pub(super) fn dispatch(
             let requested = input["baseScale"].as_str().unwrap_or_default();
             let scale = hifishifter_kernel::state::model::normalize_scale_key(requested);
             {
-                let mut project = session.project.lock().unwrap();
+                let mut project = session.project.lock_or_recover();
                 project.base_scale = scale.clone();
                 project.use_custom_scale = false;
             }
@@ -565,7 +566,7 @@ pub(super) fn dispatch(
                     .map_err(|_| "invalid custom scale".to_string())?;
             let normalized = custom.normalized();
             {
-                let mut project = session.project.lock().unwrap();
+                let mut project = session.project.lock_or_recover();
                 project.custom_scale = Some(normalized.clone());
                 project.use_custom_scale = true;
             }
@@ -606,8 +607,8 @@ pub(super) fn dispatch(
                     .map_err(|_| "invalid tempo map payload".to_string())?,
             };
             let (host_bpm, host_numerator, host_denominator) = {
-                let timeline = session.timeline.lock().unwrap();
-                let project = session.project.lock().unwrap();
+                let timeline = session.timeline.lock_or_recover();
+                let project = session.project.lock_or_recover();
                 (
                     timeline.bpm,
                     project.beats_per_bar,
@@ -703,7 +704,7 @@ pub(super) fn dispatch(
         "set_project_notes" => {
             let markdown = input["notesMarkdown"].as_str().unwrap_or_default();
             super::notebook::store().set_notes(markdown)?;
-            session.project.lock().unwrap().notes_markdown = markdown.to_owned();
+            session.project.lock_or_recover().notes_markdown = markdown.to_owned();
             payload(session, true)
         }
         "seal_project_notes_history" => Ok(super::notebook::seal_notes_history()),
@@ -852,15 +853,15 @@ pub(super) fn dispatch(
             let (_, playing) = session.transport();
             Ok(
                 json!({"ok":true,"device":"Host / ARA","model_loaded":hifishifter_kernel::world_vocoder::is_available(),
-                "audio_loaded":!session.timeline.lock().unwrap().clips.is_empty(),"has_synthesized":session.applied.load(Ordering::Acquire)>0,
+                "audio_loaded":!session.timeline.lock_or_recover().clips.is_empty(),"has_synthesized":session.applied.load(Ordering::Acquire)>0,
                 "is_playing":playing,"playback_target":if playing {Some("synthesized")} else {None},"gpu_backend":"","timeline":timeline}),
             )
         }
         "get_history_state" => Ok(history_state(session)),
         "begin_undo_group" => {
-            let timeline = session.timeline.lock().unwrap();
+            let timeline = session.timeline.lock_or_recover();
             history::checkpoint(
-                &mut session.history.lock().unwrap(),
+                &mut session.history.lock_or_recover(),
                 &timeline,
                 input["label"].as_str().unwrap_or("batch").into(),
                 || None,
@@ -880,7 +881,7 @@ pub(super) fn dispatch(
             }
             if let Some(position) = input["playheadSec"].as_f64() {
                 if position.is_finite() {
-                    session.timeline.lock().unwrap().playhead_sec = position.max(0.);
+                    session.timeline.lock_or_recover().playhead_sec = position.max(0.);
                 }
             }
             payload(session, true)
@@ -898,7 +899,7 @@ pub(super) fn dispatch(
                 .as_str()
                 .map(hifishifter_kernel::config::TimelineSnapSettings::normalize_grid_size);
             if let Some(grid) = grid {
-                session.project.lock().unwrap().grid_size = grid.clone();
+                session.project.lock_or_recover().grid_size = grid.clone();
                 // 网格是 HiFiShifter 自有的设置（宿主没有对应概念），因此要**落盘**：
                 // 只写进 per-document 的 `ProjectState` 会在换工程/重启后归零。
                 crate::settings_store::save_settings_patch(&json!({ "gridSize": grid }))?;
@@ -949,7 +950,7 @@ pub(super) fn dispatch(
             if !path.parent().is_some_and(std::path::Path::is_dir) {
                 return Err("the output folder does not exist".into());
             }
-            let timeline = session.timeline.lock().unwrap().clone();
+            let timeline = session.timeline.lock_or_recover().clone();
             Ok(hifishifter_kernel::midi_export::export_pitch_to_midi(
                 &timeline, request,
             ))
@@ -987,7 +988,7 @@ pub(super) fn dispatch(
             after_write(session, result)
         }
         "get_track_summary" => {
-            let timeline = session.timeline.lock().unwrap();
+            let timeline = session.timeline.lock_or_recover();
             Ok(
                 json!({"ok":true,"track_id":input["trackId"].as_str().map(str::to_owned).or_else(||timeline.selected_track_id.clone()),
                 "waveform_preview":[],"pitch_range":{"min":-24,"max":24}}),
@@ -1119,7 +1120,7 @@ pub(super) fn dispatch(
             {
                 return Err("track volume out of range".into());
             }
-            let mut timeline = session.timeline.lock().unwrap();
+            let mut timeline = session.timeline.lock_or_recover();
             let mut candidate = timeline.clone();
             let track = candidate.tracks.iter_mut().find(|t| t.id == id).unwrap();
             if let Some(volume) = patch.volume {
@@ -1150,8 +1151,8 @@ pub(super) fn dispatch(
         | "undo_parameter_edit"
         | "redo_parameter_edit"
         | "set_history_position" => {
-            let mut timeline = session.timeline.lock().unwrap();
-            let mut recorded = session.history.lock().unwrap();
+            let mut timeline = session.timeline.lock_or_recover();
+            let mut recorded = session.history.lock_or_recover();
             let (target, intent) = match command {
                 "undo_timeline" | "undo_parameter_edit" => {
                     (recorded.position.saturating_sub(1), HistoryJumpIntent::Undo)
@@ -1194,7 +1195,7 @@ pub(super) fn dispatch(
                 if let Some(selection) = selection {
                     payload["param_selection_restore"] = json!(selection);
                 }
-                if let Some(error) = session.error.lock().unwrap().clone() {
+                if let Some(error) = session.error.lock_or_recover().clone() {
                     return Err(error);
                 }
                 Ok(payload)

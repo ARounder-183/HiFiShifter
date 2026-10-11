@@ -10,6 +10,7 @@
 //! 计数真实、归档往返真实；内容访问（音符/和声/速度注解）故意回"不可用" —— 那不是
 //! 简化，是本仓插件不消费这些注解的诚实表态（真消费时再补）。
 
+use crate::sync::MutexExt;
 use ara2_bridge::sys::*;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -132,7 +133,7 @@ impl HostFixture {
 
     /// 归档缓冲的当前内容（round-trip 断言用）。
     pub fn archived(&self) -> Vec<u8> {
-        self.archive_bytes.lock().unwrap().clone()
+        self.archive_bytes.lock_or_recover().clone()
     }
 
     /// 上下文指针，供测试直接调用回调。
@@ -229,7 +230,7 @@ unsafe extern "C" fn archive_read(
     }
     // SAFETY: 由调用方保证的稳定 fixture 指针。
     let fixture = unsafe { fixture(context.cast()) };
-    let archive = fixture.archive_bytes.lock().unwrap();
+    let archive = fixture.archive_bytes.lock_or_recover();
     let Some(end) = offset.checked_add(size) else {
         return 0;
     };
@@ -255,7 +256,7 @@ unsafe extern "C" fn archive_write(
     }
     // SAFETY: 由调用方保证的稳定 fixture 指针。
     let fixture = unsafe { fixture(context.cast()) };
-    let mut archive = fixture.archive_bytes.lock().unwrap();
+    let mut archive = fixture.archive_bytes.lock_or_recover();
     let Some(end) = offset.checked_add(size) else {
         return 0;
     };

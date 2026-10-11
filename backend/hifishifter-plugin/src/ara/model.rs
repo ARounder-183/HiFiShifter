@@ -14,6 +14,7 @@ use crate::ara::mapping::{
 };
 use crate::render::document::DocumentSession;
 use crate::render::ownership::{region_owners, DocumentId};
+use crate::sync::MutexExt;
 use ara2_bridge::core::{
     ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, BarSignatures,
     ContentTimeRange, ContentUpdateScopes, DocumentProperties, KeySignatures,
@@ -250,7 +251,7 @@ impl ModelHandle {
 
     /// 当前帧的活 region 几何快照（宿主分割结构 diff 的输入）。
     fn region_frames(&self) -> Vec<RegionFrame> {
-        let items = self.session.region_items.lock().unwrap();
+        let items = self.session.region_items.lock_or_recover();
         self.document
             .playback_regions
             .iter()
@@ -345,7 +346,7 @@ impl ModelHandle {
             // 认不出宿主 item 的 region（还在等清单认领）不能登记：谱系按 item GUID 索引。
             return;
         };
-        let mut edits = self.session.edits.lock().unwrap();
+        let mut edits = self.session.edits.lock_or_recover();
         let Some(seed) = edits.atlas.split_seed(parent_item) else {
             return;
         };
@@ -390,9 +391,9 @@ impl ModelHandle {
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
     fn remap_and_log(&mut self) {
         let session = self.session.clone();
-        let transaction = session.transaction.lock().unwrap();
+        let transaction = session.transaction.lock_or_recover();
         {
-            let mut regions = self.session.regions.lock().unwrap();
+            let mut regions = self.session.regions.lock_or_recover();
             regions.clear();
             for (slot, region) in self.document.playback_regions.iter().enumerate() {
                 if !self.destroyed_regions.contains(&slot) {
@@ -433,7 +434,7 @@ impl ModelHandle {
                 }
                 // 让界面也知道"有 N 段没显示"：只 log 会让 MIDI / 零长度 item 在插件里
                 // 静默消失，用户以为自己的内容丢了（见 `DocumentSession::skipped_regions`）。
-                *self.session.skipped_regions.lock().unwrap() = skipped
+                *self.session.skipped_regions.lock_or_recover() = skipped
                     .iter()
                     .map(|s| (s.index, s.reason.as_str().to_owned()))
                     .collect();
@@ -455,7 +456,7 @@ impl ModelHandle {
                     .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
                     .map(|(_, key)| *key)
                     .collect();
-                let mut identities = self.session.clip_ids.lock().unwrap();
+                let mut identities = self.session.clip_ids.lock_or_recover();
                 identities.clear();
                 for (clip, region_index) in timeline.clips.iter_mut().zip(&clip_regions) {
                     let Some(key) = live_keys.get(*region_index) else {
@@ -490,9 +491,9 @@ impl ModelHandle {
                     members.sort();
                     members.dedup();
                 }
-                *self.session.track_bindings.lock().unwrap() = bindings.clone();
+                *self.session.track_bindings.lock_or_recover() = bindings.clone();
                 // getter可能重入ARA：先发布真实基础图、释放事务，再采集稳定item GUID。
-                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
+                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 drop(transaction);
                 for owner in self.session.renderer_owners() {
                     owner.refresh_host_state_for_model();
@@ -500,10 +501,10 @@ impl ModelHandle {
                 for owner in self.session.renderer_owners() {
                     owner.refresh_ui_inventory();
                 }
-                let transaction = session.transaction.lock().unwrap();
+                let transaction = session.transaction.lock_or_recover();
                 {
-                    let items = self.session.region_items.lock().unwrap();
-                    let mut ids = self.session.clip_ids.lock().unwrap();
+                    let items = self.session.region_items.lock_or_recover();
+                    let mut ids = self.session.clip_ids.lock_or_recover();
                     let mut claimed = 0usize;
                     for clip in &mut timeline.clips {
                         if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
@@ -536,9 +537,9 @@ impl ModelHandle {
                 // take 时这条记录保持旧值，于是新 take 不会被挂上旧采样 —— 直到 ARA 模型
                 // 重新认领（那时 region 的 source 也换了，这里跟着更新）。
                 {
-                    let items = self.session.region_items.lock().unwrap().clone();
+                    let items = self.session.region_items.lock_or_recover().clone();
                     let take_by_item = {
-                        let tracks = self.session.ui_tracks.lock().unwrap();
+                        let tracks = self.session.ui_tracks.lock_or_recover();
                         tracks
                             .values()
                             .flat_map(|track| &track.items)
@@ -551,7 +552,7 @@ impl ModelHandle {
                     // 文件路径是"换成同一文件的另一个 take"时的回退身份（见
                     // `DocumentSession::authorized_sources`）。
                     let source_by_item = {
-                        let tracks = self.session.ui_tracks.lock().unwrap();
+                        let tracks = self.session.ui_tracks.lock_or_recover();
                         tracks
                             .values()
                             .flat_map(|track| &track.items)
@@ -563,8 +564,8 @@ impl ModelHandle {
                             })
                             .collect::<std::collections::HashMap<_, _>>()
                     };
-                    let mut takes = self.session.authorized_takes.lock().unwrap();
-                    let mut sources = self.session.authorized_sources.lock().unwrap();
+                    let mut takes = self.session.authorized_takes.lock_or_recover();
+                    let mut sources = self.session.authorized_sources.lock_or_recover();
                     takes.clear();
                     sources.clear();
                     for (key, item) in items.iter() {
@@ -581,7 +582,7 @@ impl ModelHandle {
                 // `register_host_split_lineage`）。
                 self.register_host_split_lineage();
                 {
-                    let mut edits = self.session.edits.lock().unwrap();
+                    let mut edits = self.session.edits.lock_or_recover();
                     if !edits.atlas.is_empty() && !edits.needs_rebind {
                         let projection = (|| {
                             let identities = self.session.parameter_identities_locked(&timeline)?;
@@ -610,12 +611,12 @@ impl ModelHandle {
                         }
                     }
                 }
-                if let Err(error) = self.session.edits.lock().unwrap().reconcile(&bindings) {
+                if let Err(error) = self.session.edits.lock_or_recover().reconcile(&bindings) {
                     log::error!("[ara] edit identity unresolved: {error}");
                 }
                 log::info!("{}", crate::ara::summary_line(&document, &timeline));
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
-                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
+                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);
                 drop(transaction);
             }
@@ -654,7 +655,7 @@ impl DocumentLifecycle for ModelHandle {
         properties: DocumentProperties,
     ) -> Result<Self::Document, AraError> {
         self.generation = Some(context.generation());
-        *self.session.generation.lock().unwrap() = self.generation;
+        *self.session.generation.lock_or_recover() = self.generation;
         self.document.document_name = properties.name().unwrap_or("").to_string();
         log::info!(
             "[ara] document controller created: apiGeneration={:?}",
@@ -1242,7 +1243,7 @@ impl PlaybackRegions for ModelHandle {
             let sequence_key = sequence.as_raw() as usize;
             if let Some(index) = self.sequence_index_by_model_ref.get(&sequence_key).copied() {
                 if let Some(key) = self.region_keys.get(*state) {
-                    let mut members = self.session.sequence_regions.lock().unwrap();
+                    let mut members = self.session.sequence_regions.lock_or_recover();
                     for regions in members.values_mut() {
                         regions.remove(key);
                     }
@@ -1283,17 +1284,20 @@ impl PlaybackRegions for ModelHandle {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(key);
-            for regions in self.session.sequence_regions.lock().unwrap().values_mut() {
+            for regions in self.session.sequence_regions.lock_or_recover().values_mut() {
                 regions.remove(&key);
             }
             // 【为什么在这里清文档侧映射】下面这些表都按 `region_key` 索引，而 region
             // 销毁是"这个 key 再也不会被用到"的唯一时刻（槽位还会被 `destroyed_regions`
             // 复用，见 `allocate_region_slot`）。此前它们只在**文档销毁**时清 —— 长会话里
             // 每次分割/移动/粘贴都会留下永不释放的条目，是真正的无界增长。
-            self.session.region_items.lock().unwrap().remove(&key);
-            self.session.authorized_takes.lock().unwrap().remove(&key);
-            self.session.authorized_sources.lock().unwrap().remove(&key);
-            self.session.clip_ids.lock().unwrap().remove(&key);
+            self.session.region_items.lock_or_recover().remove(&key);
+            self.session.authorized_takes.lock_or_recover().remove(&key);
+            self.session
+                .authorized_sources
+                .lock_or_recover()
+                .remove(&key);
+            self.session.clip_ids.lock_or_recover().remove(&key);
         }
         self.destroyed_regions.insert(state);
         if let Err(error) = self.publish_head_tail() {
@@ -1371,12 +1375,12 @@ mod tests {
                 &projection,
             )
             .unwrap();
-        assert!(!document.edits.lock().unwrap().atlas.is_empty());
+        assert!(!document.edits.lock_or_recover().atlas.is_empty());
         model.document.playback_regions[0].start_in_playback_time = 1.;
         model.document.playback_regions[0].duration_in_playback_time = 1.;
         model.document.playback_regions[0].is_timestretch_enabled = true;
         model.remap_and_log();
-        let pitch = document.edits.lock().unwrap().params[&root]
+        let pitch = document.edits.lock_or_recover().params[&root]
             .pitch_edit
             .clone();
         document.close();
@@ -1514,7 +1518,7 @@ mod tests {
                 modification: "mod".into(),
             },
         )]);
-        model.session.edits.lock().unwrap().atlas = ParameterAtlas::default()
+        model.session.edits.lock_or_recover().atlas = ParameterAtlas::default()
             .capture(&timeline, &identities)
             .unwrap();
 
@@ -1543,14 +1547,14 @@ mod tests {
         ];
         model.region_keys = vec![7, 8];
         {
-            let mut items = model.session.region_items.lock().unwrap();
+            let mut items = model.session.region_items.lock_or_recover();
             items.insert(7, PARENT.to_string());
             items.insert(8, RIGHT.to_string());
         }
 
         model.register_host_split_lineage();
 
-        let edits = model.session.edits.lock().unwrap();
+        let edits = model.session.edits.lock_or_recover();
         assert_eq!(
             edits.atlas.split_parent_of(RIGHT),
             Some(PARENT),
@@ -1597,13 +1601,13 @@ mod tests {
         client.tracks.remove(0);
         let mut view = host.clone();
         view.tracks.remove(0);
-        *model.session.edits.lock().unwrap() = crate::state_channel::EditState::default()
+        *model.session.edits.lock_or_recover() = crate::state_channel::EditState::default()
             .merge(&view, &client, 0)
             .unwrap();
         // 同live图中删A区间，但B的会话slot不压缩。
         model.destroyed_regions.insert(0);
         model.remap_and_log();
-        let bytes = model.session.edits.lock().unwrap().encode().unwrap();
+        let bytes = model.session.edits.lock_or_recover().encode().unwrap();
         for order in [vec!["B"], vec!["B", "A"]] {
             let mut reopened = ModelHandle::new();
             reopened.document = identity_document(&order);
@@ -1616,7 +1620,11 @@ mod tests {
                 .unwrap();
             reopened.remap_and_log();
             let mut timeline = reopened.timeline().unwrap().clone();
-            reopened.session.edits.lock().unwrap().apply(&mut timeline);
+            reopened
+                .session
+                .edits
+                .lock_or_recover()
+                .apply(&mut timeline);
             assert_eq!(timeline.tracks[0].name, "B");
             assert_eq!(
                 timeline.tracks[0].volume, 0.25,
@@ -1703,9 +1711,9 @@ mod tests {
             model.document.playback_regions[0].region_sequence_index,
             Some(1)
         );
-        assert!(model.session.sequence_regions.lock().unwrap()[&old_key].is_empty());
+        assert!(model.session.sequence_regions.lock_or_recover()[&old_key].is_empty());
         assert_eq!(
-            model.session.sequence_regions.lock().unwrap()[&new_key],
+            model.session.sequence_regions.lock_or_recover()[&new_key],
             [region_key].into_iter().collect()
         );
     }
@@ -1743,7 +1751,7 @@ mod tests {
         );
         let id = model.document.audio_sources[0].persistent_id.clone();
         assert_eq!(
-            model.session.sources.lock().unwrap()[&id].planes[0],
+            model.session.sources.lock_or_recover()[&id].planes[0],
             [0.1, 0.2, 0.3, 0.4]
         );
         fixture.planes[0] = vec![0.5, 0.6, 0.7, 0.8];
@@ -1764,10 +1772,10 @@ mod tests {
             "真实内容通知推进模型版本"
         );
         assert_eq!(
-            model.session.sources.lock().unwrap()[&id].planes[0],
+            model.session.sources.lock_or_recover()[&id].planes[0],
             [0.5, 0.6, 0.7, 0.8]
         );
-        assert_eq!(model.session.sources.lock().unwrap()[&id].version, 1);
+        assert_eq!(model.session.sources.lock_or_recover()[&id].version, 1);
         let before_revoke = model.session.revision.load(Ordering::Acquire);
         clients
             .with_audio_source_management(source, |scope| {
@@ -1786,9 +1794,9 @@ mod tests {
             fixture.destroyed.load(Ordering::Acquire),
             "reader同步释放"
         );
-        assert!(model.session.sources.lock().unwrap().is_empty());
+        assert!(model.session.sources.lock_or_recover().is_empty());
         assert_eq!(
-            model.session.edit_sources.lock().unwrap()[&id].planes[0],
+            model.session.edit_sources.lock_or_recover()[&id].planes[0],
             [0.5, 0.6, 0.7, 0.8]
         );
         clients
@@ -1796,7 +1804,7 @@ mod tests {
                 AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)
             })
             .unwrap();
-        assert!(model.session.edit_sources.lock().unwrap().is_empty());
+        assert!(model.session.edit_sources.lock_or_recover().is_empty());
         assert!(
             model.session.revision.load(Ordering::Acquire) > before_revoke,
             "停用确实改变模型"
@@ -1983,7 +1991,7 @@ mod tests {
             .register(key, model.document_id, 0)
             .unwrap();
         PlaybackRegions::destroy_playback_region(&mut model, 0);
-        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+        assert!(region_owners().lock_or_recover().resolve(&[key]).is_err());
     }
 
     /// 旧文档 Drop 的兜底不能撤销已被新文档复用地址的身份。
@@ -1998,7 +2006,7 @@ mod tests {
             .register(key, old.document_id, 0)
             .unwrap();
         DocumentLifecycle::destroy_document(&mut old, ());
-        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+        assert!(region_owners().lock_or_recover().resolve(&[key]).is_err());
         let replacement = ModelHandle::new();
         region_owners()
             .lock()
@@ -2007,11 +2015,11 @@ mod tests {
             .unwrap();
         drop(old);
         assert_eq!(
-            region_owners().lock().unwrap().resolve(&[key]).unwrap(),
+            region_owners().lock_or_recover().resolve(&[key]).unwrap(),
             (replacement.document_id, vec![0])
         );
         drop(replacement);
-        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+        assert!(region_owners().lock_or_recover().resolve(&[key]).is_err());
     }
 
     /// 宿主移动与拉伸更新必须替换现存区间，不能新增重复 clip 或忽略更新。

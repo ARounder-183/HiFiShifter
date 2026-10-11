@@ -1,5 +1,6 @@
 //! 参数分组编辑与组件状态回归；验证 actor/state，不代替真实宿主 GUI 验收。
 use super::*;
+use crate::sync::MutexExt;
 use std::sync::{atomic::AtomicBool, mpsc, Arc};
 
 /// 同一真实actor分派中，分组编辑与非分组编辑的本地历史深度对比。
@@ -165,7 +166,7 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
     // `render_scale_signature()` → 渲染缓存键）。只改前者等于"显示成 Gb、内核按 C 渲染"。
     let expected = hifishifter_kernel::state::scale_notes_for_key("Gb").unwrap();
     assert_eq!(
-        editor.timeline.lock().unwrap().project_scale_notes,
+        editor.timeline.lock_or_recover().project_scale_notes,
         expected,
         "音阶必须真的进内核，而不是只改了 GUI 显示值"
     );
@@ -178,7 +179,7 @@ fn the_project_scale_can_be_set_and_survives_a_restart() {
     let payload = call(3, "get_timeline_state", json!({}));
     assert_eq!(payload["project"]["base_scale"], "Gb");
     assert_eq!(
-        editor.timeline.lock().unwrap().project_scale_notes,
+        editor.timeline.lock_or_recover().project_scale_notes,
         expected,
         "音阶必须在每次 ARA 重建后重新播种，否则会被冲回 C 大调"
     );
@@ -255,7 +256,7 @@ fn the_tempo_map_keeps_only_the_scale_axis() {
     // 响应本身就要反映新值：前端把响应当权威回声照单应用，陈旧回声会抹掉用户的编辑。
     assert_eq!(payload["tempo_map"].as_array().map(Vec::len), Some(2));
     // 生效：内核的时间线真的有两段音阶（而不只是设置里存了两条）。
-    assert_eq!(editor.timeline.lock().unwrap().scale_segments().len(), 2);
+    assert_eq!(editor.timeline.lock_or_recover().scale_segments().len(), 2);
 
     // 宿主权威字段以宿主为准：载荷带一个不同的 BPM/拍号时，音阶仍然保存、BPM 不保存。
     let _ = call(

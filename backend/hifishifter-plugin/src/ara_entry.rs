@@ -1,6 +1,7 @@
 //! 控制器身份感知的 ARA entry；复用 audited C++ shim 和 companion 绑定，不手写 ARA COM vtable。
 
 use crate::render::{document::DocumentSession, extension::ExtensionOwner};
+use crate::sync::MutexExt;
 use ara2_bridge::companion::vst3::ffi::*;
 use ara2_bridge::companion::{CompanionProcessorBinding, CompanionRoles};
 use ara2_bridge::core::AraError;
@@ -130,7 +131,7 @@ unsafe extern "C" fn bind(
         let Some(document) = DocumentSession::lookup(controller as usize) else {
             return std::ptr::null();
         };
-        let Some(generation) = *document.generation.lock().unwrap() else {
+        let Some(generation) = *document.generation.lock_or_recover() else {
             return std::ptr::null();
         };
         // SAFETY: lookup 已确认来自本产品的仍存活文档，guard 将在实际 document close 撤销。

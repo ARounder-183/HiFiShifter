@@ -1,5 +1,6 @@
 //! 每个renderer的有界后台准备邮箱：最多一个运行和一个最新任务，宿主回调只排队。
 
+use crate::sync::MutexExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 type Job = Box<dyn FnOnce(Arc<AtomicBool>) -> Result<(), String> + Send>;
@@ -30,7 +31,7 @@ impl PreparationQueue {
             .name("hfs-host-prepare".into())
             .spawn(move || loop {
                 let (job, cancel) = {
-                    let mut mailbox = run.mailbox.lock().unwrap();
+                    let mut mailbox = run.mailbox.lock_or_recover();
                     while !mailbox.closed && mailbox.pending.is_none() {
                         mailbox = run.wake.wait(mailbox).unwrap();
                     }
@@ -44,7 +45,7 @@ impl PreparationQueue {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(cancel.clone())))
                         .unwrap_or_else(|_| Err("host preparation panicked".into()));
-                let mut mailbox = run.mailbox.lock().unwrap();
+                let mut mailbox = run.mailbox.lock_or_recover();
                 mailbox.active = None;
                 if !cancel.load(Ordering::Acquire) {
                     mailbox.error = result.err();
@@ -59,7 +60,7 @@ impl PreparationQueue {
     }
     /// 只保存最新待办，旧任务的取消标记立即置位；不在宿主线程执行任务或等待计算。
     pub fn request(&self, job: Job) -> Result<(), String> {
-        let mut mailbox = self.state.mailbox.lock().unwrap();
+        let mut mailbox = self.state.mailbox.lock_or_recover();
         if mailbox.closed {
             return Err("host preparation closed".into());
         }
@@ -73,7 +74,7 @@ impl PreparationQueue {
     }
     /// 状态查询只读小邮箱，不能把失败当作已经准备成功。
     pub fn state(&self) -> (bool, Option<String>) {
-        let mailbox = self.state.mailbox.lock().unwrap();
+        let mailbox = self.state.mailbox.lock_or_recover();
         (
             mailbox.pending.is_some() || mailbox.active.is_some(),
             mailbox.error.clone(),
@@ -82,14 +83,14 @@ impl PreparationQueue {
     /// actor已核对代次并成功发布全部PCM时，空闲邮箱不能继续报告之前失败的错误。
     /// 运行/待办中的任务仍保留自己的结果权威，不抢先清掉尚未完成的失败信息。
     pub fn acknowledge_idle_success(&self) {
-        let mut mailbox = self.state.mailbox.lock().unwrap();
+        let mut mailbox = self.state.mailbox.lock_or_recover();
         if mailbox.pending.is_none() && mailbox.active.is_none() {
             mailbox.error = None;
         }
     }
     /// 仅VST3离线setup的UI线程使用；Condvar等待后台工作，process/setProcessing不得调用。
     pub fn wait_idle_until(&self, deadline: std::time::Instant) -> Result<(), String> {
-        let mut mailbox = self.state.mailbox.lock().unwrap();
+        let mut mailbox = self.state.mailbox.lock_or_recover();
         loop {
             if mailbox.closed {
                 return Err("host preparation closed".into());
@@ -106,7 +107,7 @@ impl PreparationQueue {
     }
     /// 源/模型撤销取消当前与待办，但不终止worker，下一次授权可再次排队。
     pub fn cancel(&self) {
-        let mut mailbox = self.state.mailbox.lock().unwrap();
+        let mut mailbox = self.state.mailbox.lock_or_recover();
         mailbox.pending = None;
         if let Some(cancel) = &mailbox.active {
             cancel.store(true, Ordering::Release);
@@ -115,7 +116,7 @@ impl PreparationQueue {
     /// 关闭取消/join；不持邮箱锁join，也不能在worker自身join自身。
     pub fn close(&self) {
         {
-            let mut mailbox = self.state.mailbox.lock().unwrap();
+            let mut mailbox = self.state.mailbox.lock_or_recover();
             mailbox.closed = true;
             mailbox.pending = None;
             if let Some(cancel) = &mailbox.active {
@@ -123,7 +124,7 @@ impl PreparationQueue {
             }
             self.state.wake.notify_all();
         }
-        if let Some(worker) = self.worker.lock().unwrap().take() {
+        if let Some(worker) = self.worker.lock_or_recover().take() {
             if worker.thread().id() != std::thread::current().id() {
                 let _ = worker.join();
             }

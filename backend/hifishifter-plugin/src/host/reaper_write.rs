@@ -1,6 +1,7 @@
 //! 核对锁定官方REAPER API的主线程片段写入口；GUID来自真实直接take绑定，不猜活动工程。
 use super::{checked, Guid, HostVtbl, ReaperHost};
 use crate::host::geometry::HostClipGeometry;
+use crate::sync::MutexExt;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
 
@@ -227,7 +228,7 @@ impl ReaperHost {
     /// 【容量】宿主条目数已有 10000 上限（见 [`Self::project_history`]）；本表只记本插件
     /// 自己创建的条目，规模受同样约束，并在 `close` 时随文档一起丢弃。
     pub(crate) fn note_undo_entry_time(&self, index: i32) {
-        let mut times = self.undo_entry_times.lock().unwrap();
+        let mut times = self.undo_entry_times.lock_or_recover();
         times.retain(|known, _| *known < index);
         times.insert(index, hifishifter_kernel::state::now_unix_ms());
     }

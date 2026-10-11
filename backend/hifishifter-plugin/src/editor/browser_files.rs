@@ -3,6 +3,7 @@
 //! ARA 供源。唯一的例外是三个**只读媒体探测**命令（元信息 / 解码前缀 / 容器音轨表），
 //! 它们额外接受用户显式指过的绝对媒体路径 —— 判据见 `browser_media_path`。
 use super::session::EditorSession;
+use crate::sync::MutexExt;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +18,7 @@ impl EditorSession {
             .to_string_lossy()
             .trim_start_matches(r"\\?\")
             .to_owned();
-        self.browser_roots.lock().unwrap().push(path);
+        self.browser_roots.lock_or_recover().push(path);
         Ok(text)
     }
     /// 浏览授权只用于目录/元信息；音频仍由REAPER导入和ARA供源。

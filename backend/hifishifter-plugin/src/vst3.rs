@@ -2252,6 +2252,7 @@ mod lifetime_tests {
 mod audio_boundary_tests {
     use super::*;
     use crate::audio_abi::{AudioBusBuffers, ProcessData};
+    use crate::sync::MutexExt;
 
     /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
     #[test]
@@ -2436,7 +2437,7 @@ mod audio_boundary_tests {
         use std::sync::mpsc;
         let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
         let document = model.session();
-        let pcm = document.edit_sources.lock().unwrap()["ara://source"].clone();
+        let pcm = document.edit_sources.lock_or_recover()["ara://source"].clone();
         document
             .sources
             .lock()
@@ -2446,7 +2447,7 @@ mod audio_boundary_tests {
         processor.extension_owner = owners[0].clone();
         // SAFETY: Box保留稳定处理器地址到离线setup测试线程join。
         let audio = unsafe { audio_ptr(&mut *processor) };
-        let held = document.transaction.lock().unwrap();
+        let held = document.transaction.lock_or_recover();
         owners[0].prepare();
         let mut normal = ProcessSetup {
             process_mode: 0,
@@ -2489,10 +2490,10 @@ mod audio_boundary_tests {
             .iter()
             .all(|snapshot| snapshot.is_ready()));
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             edits.revision += 1;
-            let mut track = document.timeline.lock().unwrap().as_ref().unwrap().tracks[0].clone();
+            let mut track = document.timeline.lock_or_recover().as_ref().unwrap().tracks[0].clone();
             track.volume = 0.5;
             edits.tracks = vec![track];
         }

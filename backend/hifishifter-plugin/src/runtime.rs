@@ -6,6 +6,7 @@
 //!
 //! 与探针版的差别：模型换成产品模型（累积 `AraDocument` 而不是计数），日志走 `log`。
 
+use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionFactory;
 use ara2_bridge::core::AraError;
 use ara2_bridge::core::PlaybackTransformationFlags;
@@ -84,7 +85,7 @@ impl Runtime {
                             "ARA host playback control available={}",
                             handle.is_some()
                         ));
-                        *playback.playback.lock().unwrap() = handle;
+                        *playback.playback.lock_or_recover() = handle;
                     })
                     .build()
             })

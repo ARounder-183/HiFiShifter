@@ -311,6 +311,7 @@ impl ReaperHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::MutexExt;
     /// 不依赖ARA assignment的显示清单必须保留mute item及空轨，不产生音频source读取。
     #[test]
     fn ui_inventory_keeps_muted_item_and_empty_track_without_audio_assignments() {
@@ -581,7 +582,7 @@ mod tests {
 
         // 把"开始等待的时刻"倒推到阈值之前，模拟"等了很久仍无源"。
         {
-            let mut since = document.pending_since.lock().unwrap();
+            let mut since = document.pending_since.lock_or_recover();
             since.insert(
                 item_id.clone(),
                 std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -601,7 +602,7 @@ mod tests {
         payload["clips"][0]["source_path"] = serde_json::json!("C:/pcm/source.wav");
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "ready");
-        assert!(document.pending_since.lock().unwrap().is_empty());
+        assert!(document.pending_since.lock_or_recover().is_empty());
     }
 
     /// ARA 已授权样本访问、但**读取失败**时，原因必须是真因 `source_read_failed`，
@@ -629,7 +630,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(7, item_id.clone());
-        document.regions.lock().unwrap().insert(
+        document.regions.lock_or_recover().insert(
             7,
             crate::ara::AraPlaybackRegion {
                 audio_source_persistent_id: "ara://source".into(),
@@ -655,7 +656,7 @@ mod tests {
         );
 
         // 读取成功后条目消失 ⇒ 回到"在途/未认领"的常规判定，不再报读取失败。
-        document.source_failures.lock().unwrap().clear();
+        document.source_failures.lock_or_recover().clear();
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "pending");
     }
@@ -692,7 +693,7 @@ mod tests {
         assert_eq!(payload["skipped_regions"]["items"][1]["index"], 5);
 
         // 没有跳过项时**不写**该字段：前端沿用"没有跳过"，而不是被一个空数组扰动。
-        document.skipped_regions.lock().unwrap().clear();
+        document.skipped_regions.lock_or_recover().clear();
         let mut clean = serde_json::json!({"clips": []});
         document.decorate_host_media_locked(&mut clean, "ui-");
         assert!(clean.get("skipped_regions").is_none());
@@ -731,7 +732,7 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "pending");
 
         {
-            let mut since = document.pending_since.lock().unwrap();
+            let mut since = document.pending_since.lock_or_recover();
             since.insert(
                 item_id.clone(),
                 std::time::Instant::now() - std::time::Duration::from_secs(10),

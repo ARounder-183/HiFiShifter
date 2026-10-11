@@ -5,6 +5,7 @@ use crate::host::geometry::{host_value_compatible, HostClipGeometry};
 use crate::host::reaper::{HostClipTarget, HostTrackTarget, ReaperHost, RewrittenItem};
 use crate::render::document::DocumentSession;
 use crate::render::extension::ExtensionOwner;
+use crate::sync::MutexExt;
 use hifishifter_kernel::state::Clip;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -75,7 +76,7 @@ fn selected_clips(
     if ids.is_empty() || ids.len() > MAX_CLIPS {
         return Err("clip operation batch must contain 1..512 items".into());
     }
-    let timeline = editor.timeline.lock().unwrap();
+    let timeline = editor.timeline.lock_or_recover();
     let mut seen = BTreeSet::new();
     ids.into_iter()
         .map(|id| {
@@ -133,7 +134,7 @@ fn capture(
 ) -> Result<ClipboardItems, String> {
     let document = owner.editor_document()?;
     let mut clips = selected_clips(editor, input, false)?;
-    let mut tracks = editor.timeline.lock().unwrap().tracks.clone();
+    let mut tracks = editor.timeline.lock_or_recover().tracks.clone();
     tracks.sort_by_key(|track| track.order);
     tracks.retain(|track| clips.iter().any(|clip| clip.track_id == track.id));
     let origin_sec = clips
@@ -167,7 +168,7 @@ fn capture(
             .position(|track| track.id == clip.track_id)
             .ok_or("clipboard source track missing")?;
         let seed = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             document
                 .edits
                 .lock()
@@ -404,7 +405,7 @@ pub(super) fn plan_paste(
         .filter(|host| host.can_clipboard_items())
         .ok_or("host clipboard capability unavailable")?;
     let (mut current, selected) = {
-        let timeline = editor.timeline.lock().unwrap();
+        let timeline = editor.timeline.lock_or_recover();
         (timeline.tracks.clone(), timeline.selected_track_id.clone())
     };
     current.sort_by_key(|track| track.order);
@@ -488,7 +489,7 @@ pub(super) fn execute_paste(
         let target = &tracks[item.slot];
         owner.refresh_host_transport();
         let root = {
-            let tracks = document.ui_tracks.lock().unwrap();
+            let tracks = document.ui_tracks.lock_or_recover();
             tracks
                 .get(target.inventory_guid())
                 .map(|track| track.id.clone())
@@ -501,8 +502,8 @@ pub(super) fn execute_paste(
             source_duration: item.before.length_sec * item.before.playback_rate as f64,
         };
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             edits
                 .atlas
                 .register_copy(&item.state.item_guid, &root, geometry, item.seed)?;
@@ -515,8 +516,8 @@ pub(super) fn execute_paste(
         let actual = match outcome {
             Ok(actual) => actual,
             Err(error) => {
-                let _transaction = document.transaction.lock().unwrap();
-                let mut edits = document.edits.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
+                let mut edits = document.edits.lock_or_recover();
                 edits.atlas.copy_seeds.remove(&item.state.item_guid);
                 edits.revision = edits
                     .revision
@@ -544,7 +545,7 @@ pub(super) fn execute_paste(
         created.push((target.inventory_guid().to_owned(), actual));
     }
     // 原生setter在Undo块内不保证立即推进项目change计数；本批写完必须重新采集清单。
-    *document.ui_inventory_stamp.lock().unwrap() = None;
+    *document.ui_inventory_stamp.lock_or_recover() = None;
     owner.refresh_host_transport();
     for track in &mut new_tracks {
         track.commit();
@@ -600,7 +601,7 @@ pub(super) fn execute_delete(
         deleted.push((target.geometry.item_id.clone(), id));
     }
     let document = owner.editor_document()?;
-    *document.ui_inventory_stamp.lock().unwrap() = None;
+    *document.ui_inventory_stamp.lock_or_recover() = None;
     owner.refresh_host_transport();
     Ok(MediaReceipt {
         created: Vec::new(),

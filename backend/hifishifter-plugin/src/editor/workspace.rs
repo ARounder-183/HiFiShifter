@@ -1,6 +1,7 @@
 //! 工程编辑权限是同一活ARA文档renderer区域并集，音频输出仍按各renderer原分配隔离。
 use crate::render::document::DocumentSession;
 use crate::render::ownership::region_owners;
+use crate::sync::MutexExt;
 use hifishifter_kernel::state::TimelineState;
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
@@ -281,15 +282,15 @@ impl DocumentSession {
     pub(crate) fn present_private_groups(&self, timeline: &mut TimelineState, namespace: &str) {
         // 锁序固定为 edits → host_owned（见 `host_folder_children` 的说明）：
         // `project_private_group_view` 等路径在持 edits 时读 host_owned，反向获取会死锁。
-        let edits = self.edits.lock().unwrap();
-        let host_owned = self.host_folder_children.lock().unwrap().clone();
+        let edits = self.edits.lock_or_recover();
+        let host_owned = self.host_folder_children.lock_or_recover().clone();
         edits
             .groups
             .apply(timeline, &self.group_aliases(namespace), &host_owned);
     }
     /// 显示参数根可包含无播放区域的空父轨；不创建任何clip或未经授权的源。
     fn add_group_view_tracks(&self, timeline: &mut TimelineState) {
-        for host in self.ui_tracks.lock().unwrap().values() {
+        for host in self.ui_tracks.lock_or_recover().values() {
             if !timeline.tracks.iter().any(|track| track.id == host.id) {
                 // 【为什么不用 unwrap】这条路径跑在**宿主 UI 线程**的清单刷新里，一次
                 // panic 会带走整个 DAW 会话（与同文件 `present_host_inventory` 的注释
@@ -315,7 +316,7 @@ impl DocumentSession {
     ) -> Result<(), String> {
         self.add_group_view_tracks(timeline);
         // 锁序 edits（调用方已持）→ host_owned，与 `present_private_groups` 一致。
-        let host_owned = self.host_folder_children.lock().unwrap().clone();
+        let host_owned = self.host_folder_children.lock_or_recover().clone();
         edits
             .groups
             .apply(timeline, &self.group_aliases(""), &host_owned);
@@ -343,12 +344,12 @@ impl DocumentSession {
         selected: Option<String>,
         groups: Option<&super::private_groups::TrackGroups>,
     ) -> Result<(TimelineState, TimelineState), String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         let mut flat = self.workspace_timeline_locked()?;
         flat.selected_clip_id = selected;
-        let edits = self.edits.lock().unwrap();
+        let edits = self.edits.lock_or_recover();
         // 锁序 edits → host_owned（见 `present_private_groups` 的说明）。
-        let host_owned = self.host_folder_children.lock().unwrap().clone();
+        let host_owned = self.host_folder_children.lock_or_recover().clone();
         edits.apply(&mut flat);
         self.add_group_view_tracks(&mut flat);
         if !edits.atlas.is_empty() {
@@ -385,12 +386,12 @@ impl DocumentSession {
         let prefix = |id: &str| format!("{namespace}{id}");
         // 委托 fade 的样式（宿主把边界包络交给 HFS 渲染时，shape/dir 由插件状态决定）。
         // 一次取出，避免在 track/item 双层循环里反复取锁。
-        let delegated_fades = self.edits.lock().unwrap().fades.clone();
+        let delegated_fades = self.edits.lock_or_recover().fades.clone();
         // 哪些 item 的边界包络被委托给 HFS（按 item GUID 收集，判据与
         // `project_ui_fades_locked` 相同）。
         let delegated_items: std::collections::BTreeSet<String> = {
-            let regions = self.regions.lock().unwrap();
-            let items = self.region_items.lock().unwrap();
+            let regions = self.regions.lock_or_recover();
+            let items = self.region_items.lock_or_recover();
             items
                 .iter()
                 .filter(|(key, _)| {
@@ -407,8 +408,8 @@ impl DocumentSession {
         // 一个 item 只有一个 active take，多个 region 认领同一 item 时记录的都是同一个
         // GUID，所以这里按 item 取一个即可（见 `DocumentSession::authorized_takes`）。
         let authorized_takes: std::collections::HashMap<String, String> = {
-            let items = self.region_items.lock().unwrap();
-            let takes = self.authorized_takes.lock().unwrap();
+            let items = self.region_items.lock_or_recover();
+            let takes = self.authorized_takes.lock_or_recover();
             items
                 .iter()
                 .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
@@ -417,8 +418,8 @@ impl DocumentSession {
         // item GUID → 授权那一刻 active take 的源文件路径（回退身份，见
         // `DocumentSession::authorized_sources`）。只在 take GUID 对不上时使用。
         let authorized_sources: std::collections::HashMap<String, String> = {
-            let items = self.region_items.lock().unwrap();
-            let sources = self.authorized_sources.lock().unwrap();
+            let items = self.region_items.lock_or_recover();
+            let sources = self.authorized_sources.lock_or_recover();
             items
                 .iter()
                 .filter_map(|(key, item)| {
@@ -428,7 +429,7 @@ impl DocumentSession {
                 })
                 .collect()
         };
-        let tracks = self.ui_tracks.lock().unwrap();
+        let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
             return;
         }
@@ -443,7 +444,7 @@ impl DocumentSession {
             String,
             hifishifter_kernel::state::ClipTake,
         > = {
-            let lineage = self.split_media_from.lock().unwrap();
+            let lineage = self.split_media_from.lock_or_recover();
             lineage
                 .iter()
                 .filter_map(|(right, left)| {
@@ -596,7 +597,7 @@ impl DocumentSession {
         // 分割谱系回收：两段都不在宿主清单里时删掉这条边，免得它随分割次数无限增长
         // （与 `ParameterAtlas::split_parents` 的 retain 同一手法）。
         {
-            let mut lineage = self.split_media_from.lock().unwrap();
+            let mut lineage = self.split_media_from.lock_or_recover();
             lineage.retain(|right, left| {
                 present.contains(&prefix(&format!("ara-item-{right}")))
                     && present.contains(&prefix(&format!("ara-item-{left}")))
@@ -606,11 +607,11 @@ impl DocumentSession {
         // clip 存在的右半段也能借到父段媒体。已有源的片段会被跳过，所以与上面
         // `sync_host_takes` 的 `inherited_media` 嫁接不冲突（同值，幂等）。
         {
-            let lineage = self.split_media_from.lock().unwrap().clone();
+            let lineage = self.split_media_from.lock_or_recover().clone();
             derive_split_media(&mut *timeline, &lineage, &prefix);
         }
         {
-            let known = self.ui_known_tracks.lock().unwrap();
+            let known = self.ui_known_tracks.lock_or_recover();
             timeline.tracks.retain(|track| {
                 !known.iter().any(|id| prefix(id) == track.id) || owned.contains(&track.id)
             });
@@ -620,11 +621,11 @@ impl DocumentSession {
         // 进过清单、后来离开 folder 的轨道会被永久记住，于是每一轮都被从时间线上剔掉 ——
         // 哪怕它仍有 ARA clip、本该作为普通 ARA 轨道显示。推进到本轮之后，剔除只发生在
         // "上次呈现有、这次没有"的那一次；此后它按普通 ARA 轨道对待。
-        *self.ui_known_tracks.lock().unwrap() =
+        *self.ui_known_tracks.lock_or_recover() =
             tracks.values().map(|host| host.id.clone()).collect();
         // 记下"父级由宿主 folder 决定"的轨道，供私有分组呈现时让路
         // （见 `host_folder_children`）。
-        *self.host_folder_children.lock().unwrap() = folder_children;
+        *self.host_folder_children.lock_or_recover() = folder_children;
         timeline.tracks.sort_by_key(|track| track.order);
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
@@ -635,7 +636,7 @@ impl DocumentSession {
         &self,
         clips: &std::collections::BTreeSet<String>,
     ) -> std::collections::BTreeSet<String> {
-        let identities = self.clip_ids.lock().unwrap();
+        let identities = self.clip_ids.lock_or_recover();
         self.renderer_owners()
             .iter()
             .flat_map(|owner| owner.host_geometries_locked(self))
@@ -649,11 +650,11 @@ impl DocumentSession {
     }
     /// 创建item返回的GUID只用于等待它自己的真实ARA区域，不用文件名/位置匹配新clip。
     pub(crate) fn clip_for_host_item(&self, item: &str) -> Option<String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
             return None;
         }
-        let identities = self.clip_ids.lock().unwrap();
+        let identities = self.clip_ids.lock_or_recover();
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 if bound.geometry.item_id == item {
@@ -687,11 +688,11 @@ impl DocumentSession {
         namespace: &str,
         fades: &std::collections::BTreeMap<String, crate::fade::FadeStyle>,
     ) {
-        let identities = self.clip_ids.lock().unwrap().clone();
+        let identities = self.clip_ids.lock_or_recover().clone();
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock().unwrap().values() {
+        for track in self.ui_tracks.lock_or_recover().values() {
             for item in &track.items {
                 if let Some(clip) = clips.iter_mut().find(|clip| {
                     clip["id"] == format!("{namespace}ara-item-{}", item.geometry.item_id)
@@ -749,9 +750,13 @@ impl DocumentSession {
     }
     /// 无宿主getter的短事务装饰；调用者不得仍持编辑timeline锁。
     pub(crate) fn decorate_host_fades(&self, payload: &mut serde_json::Value, namespace: &str) {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         if self.is_alive() {
-            self.decorate_host_fades_locked(payload, namespace, &self.edits.lock().unwrap().fades);
+            self.decorate_host_fades_locked(
+                payload,
+                namespace,
+                &self.edits.lock_or_recover().fades,
+            );
             self.decorate_host_media_locked(payload, namespace);
         }
     }
@@ -782,8 +787,8 @@ impl DocumentSession {
         // ARA 尚未重新认领"（`take_switched`）与"从未被认领"分开 —— 两者的处理方式
         // 完全不同，不能都压成一句"正在等待"。
         let authorized_by_item: std::collections::HashMap<String, String> = {
-            let items = self.region_items.lock().unwrap();
-            let takes = self.authorized_takes.lock().unwrap();
+            let items = self.region_items.lock_or_recover();
+            let takes = self.authorized_takes.lock_or_recover();
             items
                 .iter()
                 .filter_map(|(key, item)| takes.get(key).map(|take| (item.clone(), take.clone())))
@@ -796,8 +801,8 @@ impl DocumentSession {
             // 【锁序】按 `document.rs` 声明的层级取锁：`regions` 先于 `region_items`。
             // 此前这里是反的，与 `document.rs::clip_for_host_item` 的正序共存，构成真实的
             // 死锁窗口（两把锁同时在手时方向相反）。
-            let regions = self.regions.lock().unwrap();
-            let items = self.region_items.lock().unwrap();
+            let regions = self.regions.lock_or_recover();
+            let items = self.region_items.lock_or_recover();
             items
                 .iter()
                 .filter_map(|(key, item)| {
@@ -820,12 +825,12 @@ impl DocumentSession {
                 == crate::render::extension::HostAudioState::FolderParentWithoutRegions
         });
         let now = std::time::Instant::now();
-        let mut pending_since = self.pending_since.lock().unwrap();
+        let mut pending_since = self.pending_since.lock_or_recover();
         let mut seen = std::collections::HashSet::new();
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock().unwrap().values() {
+        for track in self.ui_tracks.lock_or_recover().values() {
             for item in &track.items {
                 let item_id = item.geometry.item_id.clone();
                 let Some(clip) = clips
@@ -895,7 +900,7 @@ impl DocumentSession {
         pending_since.retain(|id, _| !seen.contains(id));
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
         // 语言无关地报出数量与原因码，文案由前端 catalog 本地化。
-        let skipped = self.skipped_regions.lock().unwrap();
+        let skipped = self.skipped_regions.lock_or_recover();
         if !skipped.is_empty() {
             payload["skipped_regions"] = serde_json::json!({
                 "count": skipped.len(),
@@ -935,9 +940,9 @@ impl DocumentSession {
         // 已授权却读取失败的 item：终态，不计入。
         let failed_items: std::collections::HashSet<String> = {
             // 【锁序】`regions` 先于 `region_items`（见 `document.rs` 的声明）。
-            let regions = self.regions.lock().unwrap();
-            let items = self.region_items.lock().unwrap();
-            let failures = self.source_failures.lock().unwrap();
+            let regions = self.regions.lock_or_recover();
+            let items = self.region_items.lock_or_recover();
+            let failures = self.source_failures.lock_or_recover();
             items
                 .iter()
                 .filter_map(|(key, item)| {
@@ -946,7 +951,7 @@ impl DocumentSession {
                 })
                 .collect()
         };
-        let since = self.pending_since.lock().unwrap();
+        let since = self.pending_since.lock_or_recover();
         let now = std::time::Instant::now();
         missing
             .iter()
@@ -984,7 +989,7 @@ impl DocumentSession {
         // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
         // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
         // 里是为了复用前端已有的读数通道，不必新增一条状态链。
-        let skipped = self.skipped_regions.lock().unwrap().len();
+        let skipped = self.skipped_regions.lock_or_recover().len();
         payload["host_audio"] = serde_json::json!({
             "state": status.state.as_str(),
             "waiting_clips": status.waiting_items,
@@ -998,7 +1003,7 @@ impl DocumentSession {
         timeline: &mut TimelineState,
         fades: &std::collections::BTreeMap<String, crate::fade::FadeStyle>,
     ) {
-        let identities = self.clip_ids.lock().unwrap().clone();
+        let identities = self.clip_ids.lock_or_recover().clone();
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 let Some(id) = identities.get(&bound.region_key) else {
@@ -1064,8 +1069,8 @@ impl DocumentSession {
         timeline: &mut TimelineState,
         edits: &crate::state_channel::EditState,
     ) -> Result<(), String> {
-        let identities = self.clip_ids.lock().unwrap().clone();
-        let regions = self.regions.lock().unwrap().clone();
+        let identities = self.clip_ids.lock_or_recover().clone();
+        let regions = self.regions.lock_or_recover().clone();
         // 先把所有 owner 的逐 region 绑定摊平成一张表：委托 fade 的 clip 可能属于
         // 多 region owner（folder 轨上的 FX），按 owner 逐个 find_map 会漏。
         let geometries = self
@@ -1136,7 +1141,7 @@ impl DocumentSession {
         // 内核再取一次镜像 = 又变正放/偏移（用户报障：分割含倒放 Take 的 Item 后偏移）。
         // ARA 的源时长在映射阶段就存在，用它就能在认领前正确复原。
         let (media_by_item, media_by_source) = {
-            let mapped = self.timeline.lock().unwrap();
+            let mapped = self.timeline.lock_or_recover();
             mapped
                 .as_ref()
                 .map(media_duration_indexes)
@@ -1234,7 +1239,7 @@ impl DocumentSession {
     }
     /// 有效item静音按同文档唯一region身份投影；不把它存成HFS自己的可写轨道状态。
     pub(crate) fn project_host_mutes_locked(&self, timeline: &mut TimelineState) {
-        let identities = self.clip_ids.lock().unwrap();
+        let identities = self.clip_ids.lock_or_recover();
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 let Some(id) = identities.get(&bound.region_key) else {
@@ -1261,12 +1266,12 @@ impl DocumentSession {
     pub(crate) fn project_plugin_musical_context_locked(&self, timeline: &mut TimelineState) {
         let key = crate::render::document::MusicalProjectionKey::new(
             crate::settings_store::revision(),
-            *self.host_meter.lock().unwrap(),
+            *self.host_meter.lock_or_recover(),
         );
-        let mut cache = self.musical_projection.lock().unwrap();
+        let mut cache = self.musical_projection.lock_or_recover();
         if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
             let musical = crate::settings_store::settings().plugin_musical_context;
-            let meter = *self.host_meter.lock().unwrap();
+            let meter = *self.host_meter.lock_or_recover();
             let (project_scale_notes, tempo_map) =
                 hifishifter_kernel::state::plugin_musical_projection(
                     &musical,
@@ -1289,16 +1294,16 @@ impl DocumentSession {
     }
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
     pub(crate) fn ui_fade_projection(&self) -> Result<(u64, TimelineState), String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
-        self.project_ui_fades_locked(&mut timeline, &self.edits.lock().unwrap().fades);
+        self.project_ui_fades_locked(&mut timeline, &self.edits.lock_or_recover().fades);
         Ok((self.ui_geometry_revision.load(Ordering::Acquire), timeline))
     }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
     // 非实时诊断入口，保留供授权范围核对。
     #[allow(dead_code)]
     pub(crate) fn workspace_scope(&self) -> Result<WorkspaceScope, String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.workspace_scope_locked()
     }
     /// 调用方已持transaction；真实model-ref所有权再次校验，拒绝跨文档或已销毁区域。
@@ -1325,12 +1330,12 @@ impl DocumentSession {
     }
     /// 原GUI的多轨快照只扩展查看/编辑范围，不更改任何播放renderer的混音归属。
     pub(crate) fn workspace_timeline(&self) -> Result<TimelineState, String> {
-        let _transaction = self.transaction.lock().unwrap();
+        let _transaction = self.transaction.lock_or_recover();
         self.workspace_timeline_locked()
     }
     pub(crate) fn workspace_timeline_locked(&self) -> Result<TimelineState, String> {
         let scope = self.workspace_scope_locked()?;
-        let identities = self.clip_ids.lock().unwrap();
+        let identities = self.clip_ids.lock_or_recover();
         let clips = scope
             .regions
             .iter()
@@ -1352,7 +1357,7 @@ impl DocumentSession {
         // 分割派生：右半段的授权媒体借自父段。**渲染路径**过去没有这一步，于是界面显示
         // 正常、渲染出来的右半段却是无源静音（见 `derive_split_media`）。
         {
-            let lineage = self.split_media_from.lock().unwrap().clone();
+            let lineage = self.split_media_from.lock_or_recover().clone();
             derive_split_media(&mut timeline, &lineage, &|id: &str| id.to_owned());
         }
         self.project_host_mutes_locked(&mut timeline);
@@ -1363,7 +1368,7 @@ impl DocumentSession {
             .iter()
             .map(|clip| clip.track_id.clone())
             .collect::<BTreeSet<_>>();
-        for track in self.ui_tracks.lock().unwrap().values() {
+        for track in self.ui_tracks.lock_or_recover().values() {
             if timeline.tracks.iter().any(|t| t.id == track.id) {
                 tracks.insert(track.id.clone());
             }
@@ -1516,7 +1521,7 @@ mod tests {
     ) {
         let model = ModelHandle::new();
         let document = model.session();
-        *document.timeline.lock().unwrap()=Some(serde_json::from_value(serde_json::json!({
+        *document.timeline.lock_or_recover()=Some(serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"a","name":"same-name","order":0},{"id":"b","name":"same-name","order":1}],"bpm":120,"project_sec":1,
             "clips":[{"id":"ca","name":"A","track_id":"a","start_sec":0,"length_sec":0.5,"takes":[{"id":"ta","source_path":"shared-source"}]},
                 {"id":"cb","name":"B","track_id":"b","start_sec":0,"length_sec":0.5,"takes":[{"id":"tb","source_path":"shared-source"}]}]
@@ -1531,7 +1536,7 @@ mod tests {
                 .unwrap()
                 .register(key, document.id, index)
                 .unwrap();
-            document.clip_ids.lock().unwrap().insert(key, id.into());
+            document.clip_ids.lock_or_recover().insert(key, id.into());
             let owner = Arc::new(ExtensionOwner::default());
             let raw = owner
                 .bind_to_document(
@@ -1648,7 +1653,7 @@ mod tests {
         let mut timeline = TimelineState::default();
         timeline.tracks.clear();
         {
-            let mut tracks = document.ui_tracks.lock().unwrap();
+            let mut tracks = document.ui_tracks.lock_or_recover();
             tracks.insert(staying.guid.clone(), staying.clone());
             tracks.insert(leaving.guid.clone(), leaving.clone());
         }
@@ -1663,7 +1668,7 @@ mod tests {
             .any(|track| track.id == "host-leaving"));
 
         // 一条轨道离开清单（例如被拖出 folder），另一条还在 —— 清单非空，本轮照常呈现。
-        document.ui_tracks.lock().unwrap().remove(&leaving.guid);
+        document.ui_tracks.lock_or_recover().remove(&leaving.guid);
         document.present_host_inventory(&mut timeline, "");
         assert!(
             !timeline
@@ -1899,20 +1904,20 @@ mod tests {
         assert_eq!(document.media_in_flight_items(&timeline), 1);
 
         // 超期 ⇒ 终态（`unavailable`），不再计入。
-        document.pending_since.lock().unwrap().insert(
+        document.pending_since.lock_or_recover().insert(
             "{G}".into(),
             Instant::now() - PENDING_MEDIA_TIMEOUT - Duration::from_secs(1),
         );
         assert_eq!(document.media_in_flight_items(&timeline), 0);
 
         // 源读取失败 ⇒ 终态，即便还没超期也不计入。
-        document.pending_since.lock().unwrap().clear();
+        document.pending_since.lock_or_recover().clear();
         document
             .region_items
             .lock()
             .unwrap()
             .insert(7, "{G}".into());
-        document.regions.lock().unwrap().insert(
+        document.regions.lock_or_recover().insert(
             7,
             crate::ara::AraPlaybackRegion {
                 audio_source_persistent_id: "ara://source".into(),
@@ -1927,7 +1932,7 @@ mod tests {
         assert_eq!(document.media_in_flight_items(&timeline), 0);
 
         // 有源 ⇒ 不计入；静音片段也不计入。
-        document.source_failures.lock().unwrap().clear();
+        document.source_failures.lock_or_recover().clear();
         let ready = TimelineState {
             clips: vec![clip("ara-item-{G}", Some("ara://source"))],
             ..Default::default()

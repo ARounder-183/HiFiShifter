@@ -3,6 +3,7 @@
 use super::source::SourcePcm;
 use crate::ara::AraPlaybackRegion;
 use crate::audio_abi::AudioBusBuffers;
+use crate::sync::MutexExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -295,7 +296,7 @@ impl SnapshotPublisher {
     }
     /// 发布前在非实时线程预检，两个采样率必须都可容纳才替换编辑状态。
     pub fn has_capacity(&self, snapshot: &PlaybackSnapshot) -> bool {
-        let mut retained = self.retained.lock().unwrap();
+        let mut retained = self.retained.lock_or_recover();
         self.reclaim(&mut retained);
         snapshot
             .storage_bytes()
@@ -323,7 +324,7 @@ impl SnapshotPublisher {
         let bytes = snapshot
             .storage_bytes()
             .ok_or(SnapshotError::BudgetExceeded)?;
-        let mut retained = self.retained.lock().unwrap();
+        let mut retained = self.retained.lock_or_recover();
         self.reclaim(&mut retained);
         let total = retained
             .1
@@ -390,7 +391,7 @@ impl SnapshotPublisher {
     }
     /// 分配下一批音频前回收已退役缓冲，避免全局预算已满时无法进入publish回收。
     pub fn collect_retired(&self) {
-        let mut retained = self.retained.lock().unwrap();
+        let mut retained = self.retained.lock_or_recover();
         self.reclaim(&mut retained);
     }
     /// 实时guard只增减计数，不分配、不释放、不等待mutex。
@@ -736,7 +737,7 @@ mod tests {
         // SAFETY: 读取空快照应当零输出，不能继续消费旧音频。
         assert!(!unsafe { publisher.copy_block(2, 4, &mut bus, 3) });
         assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
-        assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+        assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
     }
 
     /// 单声道总线与"宿主率 ≠ 内部率"都必须能出声。
@@ -825,8 +826,8 @@ mod tests {
                     _reservation: None,
                 })
                 .unwrap();
-            assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
-            assert_eq!(publisher.retained.lock().unwrap().1, 8);
+            assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
+            assert_eq!(publisher.retained.lock_or_recover().1, 8);
         }
     }
     /// **读"当前"快照不能阻止回收已退役的那一份。**
@@ -857,13 +858,13 @@ mod tests {
         let r2 = publisher.enter();
         publisher.publish(snapshot()).unwrap();
         assert_eq!(
-            publisher.retained.lock().unwrap().0.len(),
+            publisher.retained.lock_or_recover().0.len(),
             2,
             "只应留下正被读的 B 与当前 C"
         );
         drop(r2);
         publisher.collect_retired();
-        assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+        assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
     }
 
     /// 一个读者横跨发布时旧快照保持，退出后下一次非实时预检安全回收。
@@ -880,9 +881,9 @@ mod tests {
         publisher.publish(snapshot()).unwrap();
         let read = publisher.enter();
         publisher.publish(snapshot()).unwrap();
-        assert_eq!(publisher.retained.lock().unwrap().0.len(), 2);
+        assert_eq!(publisher.retained.lock_or_recover().0.len(), 2);
         drop(read);
         assert!(publisher.has_capacity(&snapshot()));
-        assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+        assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
     }
 }

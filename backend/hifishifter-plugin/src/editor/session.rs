@@ -1,5 +1,6 @@
 //! 真实ARA文档共享原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
 use crate::render::document::DocumentSession;
+use crate::sync::MutexExt;
 use hifishifter_kernel::editor::{
     history,
     host_pcm::{materialize_with_byte_limit, PcmView},
@@ -91,7 +92,7 @@ impl RetryState {
             let stalled = !session.analysis_in_flight() && since.elapsed() > ANALYSIS_STALL_GRACE;
             let abandoned = since.elapsed() > ANALYSIS_PENDING_CEILING;
             if stalled || abandoned {
-                *session.render_error.lock().unwrap() = Some(
+                *session.render_error.lock_or_recover() = Some(
                     "pitch analysis did not converge; the original pitch line for this track was never produced"
                         .into(),
                 );
@@ -108,7 +109,7 @@ impl RetryState {
         self.analysis_pending_since = None;
         self.streak = self.streak.saturating_add(1);
         if self.streak >= RENDER_RETRY_BUDGET {
-            *session.render_error.lock().unwrap() = Some(error.clone());
+            *session.render_error.lock_or_recover() = Some(error.clone());
             self.settled = true;
             log::warn!(
                 "[ara] automatic render gave up after {} attempts: {error}",
@@ -117,7 +118,7 @@ impl RetryState {
             return RenderAction::Settled;
         }
         if error != "automatic apply superseded" {
-            *session.render_error.lock().unwrap() = Some(error);
+            *session.render_error.lock_or_recover() = Some(error);
         }
         RenderAction::Retry(Duration::from_millis(150))
     }
@@ -287,7 +288,7 @@ impl EditorSession {
         parent: Option<String>,
     ) -> Result<(), String> {
         let document = self.document.upgrade().ok_or("document closed")?;
-        let before = self.timeline.lock().unwrap().clone();
+        let before = self.timeline.lock_or_recover().clone();
         if !before.tracks.iter().any(|track| track.id == id) || index > 10000 {
             return Err("unknown private track or invalid index".into());
         }
@@ -314,8 +315,8 @@ impl EditorSession {
             .map(|id| id.strip_prefix(&self.namespace).unwrap_or(id).to_owned());
         let (_, grouped) = document.private_parameter_views(selected, Some(&groups))?;
         let revision = {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             if (
                 edits.revision,
                 document.revision.load(Ordering::Acquire),
@@ -338,9 +339,9 @@ impl EditorSession {
             .map(|(root, params)| (format!("{}{root}", self.namespace), params))
             .collect();
         self.checkpoint_timeline(&before, HistoryOp::MoveTrack);
-        *self.timeline.lock().unwrap() = candidate;
+        *self.timeline.lock_or_recover() = candidate;
         {
-            let mut loaded = self.loaded.lock().unwrap();
+            let mut loaded = self.loaded.lock_or_recover();
             loaded.edit = revision;
             loaded.projection = document.workspace_projection()?;
         }
@@ -432,7 +433,7 @@ impl EditorSession {
             .name("hfs-embedded-editor".into())
             .spawn(move || Self::run(weak, receiver))
             .map_err(|e| format!("create editor command worker: {e}"))?;
-        *session.worker.lock().unwrap() = Some(worker);
+        *session.worker.lock_or_recover() = Some(worker);
         super::events::register(&session);
         Ok(session)
     }
@@ -452,7 +453,7 @@ impl EditorSession {
         {
             return Err("editor view closed or unknown".into());
         }
-        let mut views = self.views.lock().unwrap();
+        let mut views = self.views.lock_or_recover();
         if self.closed.load(Ordering::Acquire) {
             return Err("editor session closed".into());
         }
@@ -523,7 +524,7 @@ impl EditorSession {
     /// 在组件stop返回前撤销其回信/订阅；排队任务仍会独立核对原始route代次。
     pub(crate) fn revoke_closed_views(&self) {
         let document = self.document.upgrade();
-        self.views.lock().unwrap().retain(|_, view| {
+        self.views.lock_or_recover().retain(|_, view| {
             let valid = view.route.as_ref().is_none_or(|(link, lease)| {
                 document.as_ref().is_some_and(|document| {
                     link.authorize(document)
@@ -541,7 +542,7 @@ impl EditorSession {
             return;
         }
         {
-            let mut views = self.views.lock().unwrap();
+            let mut views = self.views.lock_or_recover();
             for view in views.values() {
                 view.sink.closed.store(true, Ordering::Release);
             }
@@ -551,30 +552,30 @@ impl EditorSession {
         self.cancel_render();
         self.submitted.fetch_add(1, Ordering::AcqRel);
         let _ = self.queue.send(Job::Close);
-        let worker = self.worker.lock().unwrap().take();
+        let worker = self.worker.lock_or_recover().take();
         if let Some(worker) = worker {
             if worker.thread().id() != std::thread::current().id() {
                 let _ = worker.join();
             }
         }
-        let render = self.render_task.lock().unwrap().take();
+        let render = self.render_task.lock_or_recover().take();
         if let Some(render) = render {
             render.cancel.store(true, Ordering::Release);
             if render.worker.thread().id() != std::thread::current().id() {
                 let _ = render.worker.join();
             }
         }
-        for worker in self.analysis_workers.lock().unwrap().drain(..) {
+        for worker in self.analysis_workers.lock_or_recover().drain(..) {
             let _ = worker.join();
         }
         // 旧view可继续持有已关闭actor的Arc；join之后释放分析投影/历史/波形缓存。
-        *self.timeline.lock().unwrap() = Default::default();
-        *self.history.lock().unwrap() = Default::default();
-        *self.loaded.lock().unwrap() = Default::default();
-        self.peaks.lock().unwrap().clear();
+        *self.timeline.lock_or_recover() = Default::default();
+        *self.history.lock_or_recover() = Default::default();
+        *self.loaded.lock_or_recover() = Default::default();
+        self.peaks.lock_or_recover().clear();
         // MIDI 剪贴板此前只增不减、连 close 都不清 —— 每次"读 MIDI 剪贴板"都往
         // 队列尾部追加一份字节，长会话里就是一条无界增长。
-        self.clipboard_midi.lock().unwrap().clear();
+        self.clipboard_midi.lock_or_recover().clear();
     }
     fn run(weak: Weak<Self>, receiver: mpsc::Receiver<Job>) {
         let mut deadline: Option<Instant> = None;
@@ -597,7 +598,7 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
-                if let Some(render) = session.render_task.lock().unwrap().as_ref() {
+                if let Some(render) = session.render_task.lock_or_recover().as_ref() {
                     if render.ticket != session.submitted.load(Ordering::Acquire)
                         || render.generation != session.generation.load(Ordering::Acquire)
                         || session
@@ -618,7 +619,7 @@ impl EditorSession {
                             Ok(()) => {
                                 session.applied.store(generation, Ordering::Release);
                                 session.render_requested.store(false, Ordering::Release);
-                                *session.render_error.lock().unwrap() = None;
+                                *session.render_error.lock_or_recover() = None;
                                 retry.rearm();
                             }
                             Err(error) => match retry.classify(&session, error) {
@@ -645,14 +646,14 @@ impl EditorSession {
                 if deadline.is_none()
                     && !retry.settled
                     && session.render_requested.load(Ordering::Acquire)
-                    && session.error.lock().unwrap().is_none()
+                    && session.error.lock_or_recover().is_none()
                 {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
                 if !retry.settled && deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
-                    if session.render_task.lock().unwrap().is_some()
+                    if session.render_task.lock_or_recover().is_some()
                         || session
                             .document
                             .upgrade()
@@ -709,7 +710,7 @@ impl EditorSession {
                             if Some(link.authorize(&document)?) != lease {
                                 return Err("editor route changed while request queued".into());
                             }
-                            let views = session.views.lock().unwrap();
+                            let views = session.views.lock_or_recover();
                             // view关闭仅取消回信；已入队尾笔仍持enqueue验证的身份与route代次。
                             // emit可能已移除closed view，但同名新view不能替代这次原始请求。
                             match views.get(&request.sink.view_id) {
@@ -754,12 +755,12 @@ impl EditorSession {
     }
     /// 新写入只设取消标记，不join或等待DSP，保证FIFO参数读写/flush始终可运行。
     fn cancel_render(&self) {
-        if let Some(render) = self.render_task.lock().unwrap().as_ref() {
+        if let Some(render) = self.render_task.lock_or_recover().as_ref() {
             render.cancel.store(true, Ordering::Release);
         }
     }
     fn complete_render(&self) -> Option<(u64, u64, bool, Result<(), String>)> {
-        let mut task = self.render_task.lock().unwrap();
+        let mut task = self.render_task.lock_or_recover();
         let current = task.as_ref()?;
         let result = match current.reply.try_recv() {
             Ok(result) => result,
@@ -774,19 +775,19 @@ impl EditorSession {
     }
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
     fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64, u64, String), String> {
-        if let Some(error) = self.error.lock().unwrap().clone() {
+        if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
         self.complete_cached_analysis();
-        if let Some(error) = self.error.lock().unwrap().clone() {
+        if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
         // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
-        if Self::requires_analysis(&self.timeline.lock().unwrap()) {
+        if Self::requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
         let (edit, model, projection) = {
-            let loaded = self.loaded.lock().unwrap();
+            let loaded = self.loaded.lock_or_recover();
             (loaded.edit, loaded.model, loaded.projection.clone())
         };
         let document = self.document.upgrade().ok_or("document closed")?;
@@ -840,7 +841,7 @@ impl EditorSession {
                 Some(progress),
             )
         })?;
-        *self.render_task.lock().unwrap() = Some(worker);
+        *self.render_task.lock_or_recover() = Some(worker);
         Ok(())
     }
     #[cfg(test)]
@@ -889,7 +890,7 @@ impl EditorSession {
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
     fn complete_cached_analysis(&self) {
         let roots = {
-            let mut timeline = self.timeline.lock().unwrap();
+            let mut timeline = self.timeline.lock_or_recover();
             // 首次载入尚未get_param_frames时也必须有根状态，否则完成通知找不到接收原线的条目。
             let active_roots = timeline
                 .clips
@@ -913,7 +914,7 @@ impl EditorSession {
         }
         let analysis = Mutex::new(self.analysis_timeline());
         {
-            let mut timeline = analysis.lock().unwrap();
+            let mut timeline = analysis.lock_or_recover();
             if let Some(selected) = timeline.selected_clip_id.clone() {
                 if let Some(index) = timeline.clips.iter().position(|clip| clip.id == selected) {
                     let clip = timeline.clips.remove(index);
@@ -928,7 +929,7 @@ impl EditorSession {
         let params = analysis.into_inner().unwrap().params_by_root_track;
         let mut changed = false;
         {
-            let mut timeline = self.timeline.lock().unwrap();
+            let mut timeline = self.timeline.lock_or_recover();
             for root in roots {
                 let Some(next) = params.get(&root) else {
                     continue;
@@ -953,7 +954,7 @@ impl EditorSession {
             }
         }
         if changed {
-            let updated = self.timeline.lock().unwrap().clone();
+            let updated = self.timeline.lock_or_recover().clone();
             self.publish_timeline(updated);
             self.render_requested.store(true, Ordering::Release);
         }
@@ -961,18 +962,18 @@ impl EditorSession {
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
         let document = self.document.upgrade().ok_or("document closed")?;
         // GUI清单有独立代次：粘贴/删除可以先于ARA模型回调，不能被模型缓存早退吞掉。
-        if self.loaded.lock().unwrap().initialized
+        if self.loaded.lock_or_recover().initialized
             && document.renderer_owners().is_empty()
-            && !self.timeline.lock().unwrap().clips.is_empty()
+            && !self.timeline.lock_or_recover().clips.is_empty()
         {
             return Err("Conflict: no active renderer; local curves preserved".into());
         }
-        if self.loaded.lock().unwrap().initialized {
+        if self.loaded.lock_or_recover().initialized {
             self.refresh_ui_geometry(&document);
         }
         let versions = document.editor_versions()?;
         {
-            let mut loaded = self.loaded.lock().unwrap();
+            let mut loaded = self.loaded.lock_or_recover();
             let audio_current =
                 loaded.audio == document.editor_audio_revision.load(Ordering::Acquire);
             if loaded.initialized
@@ -1006,7 +1007,7 @@ impl EditorSession {
         // 否则界面永远空白。
         if !force && !document.ready.load(Ordering::Acquire) {
             if document.editing_session.load(Ordering::Acquire) {
-                if self.loaded.lock().unwrap().initialized {
+                if self.loaded.lock_or_recover().initialized {
                     return Ok(());
                 }
             } else if !document.workspace_timeline()?.clips.is_empty() {
@@ -1063,7 +1064,7 @@ impl EditorSession {
         self.retain_display_waveforms(&mut timeline, true);
         // 音频迟到只能补齐资源，不能把用户已选中的新粘贴片段跳回首个clip。
         {
-            let previous = self.timeline.lock().unwrap();
+            let previous = self.timeline.lock_or_recover();
             if previous
                 .selected_track_id
                 .as_ref()
@@ -1087,18 +1088,18 @@ impl EditorSession {
         }
         self.project_duration
             .store(timeline.project_sec.to_bits(), Ordering::Release);
-        *self.timeline.lock().unwrap() = timeline;
+        *self.timeline.lock_or_recover() = timeline;
         {
-            let loaded = self.loaded.lock().unwrap();
+            let loaded = self.loaded.lock_or_recover();
             if force
                 || !loaded.initialized
                 || loaded.model != snapshot.model_revision
                 || loaded.scope != scope
             {
-                *self.history.lock().unwrap() = Default::default();
+                *self.history.lock_or_recover() = Default::default();
             }
         }
-        *self.loaded.lock().unwrap() = Loaded {
+        *self.loaded.lock_or_recover() = Loaded {
             initialized: true,
             edit: snapshot.revision,
             model: snapshot.model_revision,
@@ -1107,11 +1108,11 @@ impl EditorSession {
             reverse_paths,
             projection,
         };
-        *self.error.lock().unwrap() = None;
-        *self.render_error.lock().unwrap() = None;
+        *self.error.lock_or_recover() = None;
+        *self.render_error.lock_or_recover() = None;
         self.applied
             .store(self.generation.load(Ordering::Acquire), Ordering::Release);
-        self.peaks.lock().unwrap().clear();
+        self.peaks.lock_or_recover().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0, Ordering::Release);
         self.complete_cached_analysis();
@@ -1133,7 +1134,7 @@ impl EditorSession {
         // 先冻结可用fade，再合并清单；只确认开始时的代次，期间的新变化留到下一轮。
         let fades = document.ui_fade_projection().ok();
         {
-            let mut timeline = self.timeline.lock().unwrap();
+            let mut timeline = self.timeline.lock_or_recover();
             self.retain_display_waveforms(&mut timeline, false);
             document.present_host_inventory(&mut timeline, &self.namespace);
             document.present_private_groups(&mut timeline, &self.namespace);
@@ -1174,7 +1175,7 @@ impl EditorSession {
             return;
         };
         let (initialized, edit, model, scope, audio) = {
-            let loaded = self.loaded.lock().unwrap();
+            let loaded = self.loaded.lock_or_recover();
             (
                 loaded.initialized,
                 loaded.edit,
@@ -1197,7 +1198,7 @@ impl EditorSession {
             if let Err(error) = self.ensure_loaded(false) {
                 if error.starts_with("Conflict") || error.starts_with("Unsupported") {
                     let changed = {
-                        let mut current = self.error.lock().unwrap();
+                        let mut current = self.error.lock_or_recover();
                         let changed = current.as_deref() != Some(error.as_str());
                         *current = Some(error);
                         changed
@@ -1213,7 +1214,7 @@ impl EditorSession {
         // 刷新会让 GUI 做两遍工作。
         let tempo_changed = match document.clock.tempo() {
             Some(tempo) => {
-                let mut timeline = self.timeline.lock().unwrap();
+                let mut timeline = self.timeline.lock_or_recover();
                 let changed = (timeline.bpm - tempo).abs() > 1e-6;
                 timeline.bpm = tempo;
                 changed
@@ -1225,7 +1226,7 @@ impl EditorSession {
         // 而用户改不了它（那是宿主的东西）。读出来至少让界面说的是实话。
         let meter_changed = match document.clock.time_signature() {
             Some((numerator, denominator)) => {
-                let mut project = self.project.lock().unwrap();
+                let mut project = self.project.lock_or_recover();
                 // 与 `normalize_tempo_map` 同口径地夹取，不让宿主读数的越界值
                 // 进入工程状态。
                 let numerator = (numerator as u32).clamp(1, 32);
@@ -1254,7 +1255,7 @@ impl EditorSession {
         // 每轮都变，进而让 `workspace_projection` 变化、`ensure_loaded` 早退失效 ——
         // 变成"每次回调都整体重载"。
         {
-            let mut meter = document.host_meter.lock().unwrap();
+            let mut meter = document.host_meter.lock_or_recover();
             if let Some(tempo) = document.clock.tempo() {
                 if tempo.is_finite() && tempo > 0. && (meter.bpm - tempo).abs() > 1e-6 {
                     meter.bpm = tempo;
@@ -1279,7 +1280,11 @@ impl EditorSession {
     }
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
     pub(super) fn check_source(&self, path: &str) -> Result<(), String> {
-        if self.loaded.lock().unwrap().reverse_paths.contains_key(path)
+        if self
+            .loaded
+            .lock_or_recover()
+            .reverse_paths
+            .contains_key(path)
             || self
                 .display_waveforms
                 .lock()
@@ -1297,8 +1302,8 @@ impl EditorSession {
         let Some(document) = self.document.upgrade() else {
             return;
         };
-        let tracks = document.ui_tracks.lock().unwrap();
-        let mut cache = self.display_waveforms.lock().unwrap();
+        let tracks = document.ui_tracks.lock_or_recover();
+        let mut cache = self.display_waveforms.lock_or_recover();
         let actual = tracks
             .values()
             .flat_map(|track| &track.items)
@@ -1348,9 +1353,9 @@ impl EditorSession {
     /// （`pitch_analysis::analysis::assembly_gate_open`）里，两个视图用同一份事实、
     /// 算出同一个键，因此不再需要这个会造成键漂移的绕过。
     fn analysis_timeline(&self) -> TimelineState {
-        let mut timeline = self.timeline.lock().unwrap().clone();
+        let mut timeline = self.timeline.lock_or_recover().clone();
         if let Some(document) = self.document.upgrade() {
-            let ids = document.clip_ids.lock().unwrap();
+            let ids = document.clip_ids.lock_or_recover();
             timeline.clips.retain(|clip| {
                 ids.values()
                     .any(|id| format!("{}{id}", self.namespace) == clip.id)
@@ -1366,10 +1371,10 @@ impl EditorSession {
     }
     /// 原分析实现可取消/join；每会话持有自己的worker，不推进全局generation。
     fn schedule_analysis(&self) {
-        if self.closed.load(Ordering::Acquire) || !self.loaded.lock().unwrap().initialized {
+        if self.closed.load(Ordering::Acquire) || !self.loaded.lock_or_recover().initialized {
             return;
         }
-        let mut workers = self.analysis_workers.lock().unwrap();
+        let mut workers = self.analysis_workers.lock_or_recover();
         let mut pending = Vec::new();
         for worker in workers.drain(..) {
             if worker.is_finished() {
@@ -1410,7 +1415,7 @@ impl EditorSession {
             .collect::<Vec<_>>();
         let mut roots = std::collections::BTreeSet::new();
         {
-            let mut timeline = self.timeline.lock().unwrap();
+            let mut timeline = self.timeline.lock_or_recover();
             for update in updates {
                 if let hifishifter_kernel::engine_command::EngineCommand::ClipPitchReady {
                     clip_id,
@@ -1443,7 +1448,7 @@ impl EditorSession {
             .upgrade()
             .filter(|document| document.is_alive())
             .map(|document| document.clock.read())
-            .unwrap_or_else(|| (self.timeline.lock().unwrap().playhead_sec, false))
+            .unwrap_or_else(|| (self.timeline.lock_or_recover().playhead_sec, false))
     }
     /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
     pub(super) fn decorate_host_fades(&self, payload: &mut Value) {
@@ -1476,7 +1481,7 @@ impl EditorSession {
             return;
         }
         let now = Instant::now();
-        let mut next = self.transport_probe_next.lock().unwrap();
+        let mut next = self.transport_probe_next.lock_or_recover();
         if now < *next {
             return;
         }
@@ -1520,10 +1525,10 @@ impl EditorSession {
     fn native_timeline(&self, mut timeline: TimelineState) -> Result<TimelineState, String> {
         self.rewrite_ids(&mut timeline, false);
         if let Some(document) = self.document.upgrade() {
-            if !document.ui_tracks.lock().unwrap().is_empty() {
+            if !document.ui_tracks.lock_or_recover().is_empty() {
                 // GUI占位、名字/排序及可见总时长不进入音频权威；只取参数/轨道可编辑值。
                 let mut host = document.workspace_timeline()?;
-                if !document.edits.lock().unwrap().groups.is_empty() {
+                if !document.edits.lock_or_recover().groups.is_empty() {
                     let ids = host
                         .tracks
                         .iter()
@@ -1565,12 +1570,12 @@ impl EditorSession {
         }
         // 宿主显示占位没有ARA音频授权，只提交真实活动图，不能把占位送入分析/合成。
         if let Some(document) = self.document.upgrade() {
-            let ids = document.clip_ids.lock().unwrap();
+            let ids = document.clip_ids.lock_or_recover();
             timeline
                 .clips
                 .retain(|clip| ids.values().any(|id| id == &clip.id));
             drop(ids);
-            let host = document.timeline.lock().unwrap();
+            let host = document.timeline.lock_or_recover();
             if let Some(host) = host.as_ref() {
                 timeline
                     .tracks
@@ -1580,7 +1585,7 @@ impl EditorSession {
                     .retain(|id, _| host.tracks.iter().any(|t| &t.id == id));
             }
         }
-        let loaded = self.loaded.lock().unwrap();
+        let loaded = self.loaded.lock_or_recover();
         for clip in &mut timeline.clips {
             // 原GUI普通宿主fade仅装饰，参数提交还原到ARA内核域，避免二次淡化。
             clip.fade_in_sec = 0.;
@@ -1624,9 +1629,9 @@ impl EditorSession {
             return Ok(());
         }
         let document = self.document.upgrade().ok_or("document closed")?;
-        let current = self.native_timeline(self.timeline.lock().unwrap().clone())?;
+        let current = self.native_timeline(self.timeline.lock_or_recover().clone())?;
         let roots = document.selected_source_parameters(&current)?;
-        let mut timeline = self.timeline.lock().unwrap();
+        let mut timeline = self.timeline.lock_or_recover();
         timeline.params_by_root_track.extend(
             roots
                 .into_iter()
@@ -1637,7 +1642,7 @@ impl EditorSession {
     pub(super) fn emit(&self, event: &str, payload: Value) {
         let document = self.document.upgrade();
         let views = {
-            let mut views = self.views.lock().unwrap();
+            let mut views = self.views.lock_or_recover();
             views.retain(|_, view| {
                 !view.sink.closed.load(Ordering::Acquire)
                     && view.route.as_ref().is_none_or(|(link, lease)| {
@@ -1680,14 +1685,14 @@ impl EditorSession {
             .unwrap_or_default();
         let host_pending = states.iter().any(|state| state.0);
         let host_error = states.into_iter().find_map(|state| state.1);
-        let analysis_pending = Self::requires_analysis(&self.timeline.lock().unwrap());
-        let rendering = self.render_task.lock().unwrap().is_some();
+        let analysis_pending = Self::requires_analysis(&self.timeline.lock_or_recover());
+        let rendering = self.render_task.lock_or_recover().is_some();
         // 【为什么不是"有片段缺 source_path 就算在途"】`unavailable` 的三类成因都是终态
         // （folder 父轨 / 样本读取失败 / 超期未认领）。把它们也算作"进行中"会让应用状态
         // 永久停在 pending —— 用户对着一个永远转不完的转圈。口径交给文档侧的唯一判据
         // （`media_in_flight_items`，与 `decorate_host_media_locked` 同一套分类）。
         let inventory_pending = {
-            let timeline = self.timeline.lock().unwrap();
+            let timeline = self.timeline.lock_or_recover();
             self.document
                 .upgrade()
                 .is_some_and(|document| document.media_in_flight_items(&timeline) > 0)
@@ -1698,8 +1703,8 @@ impl EditorSession {
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
             "host_version":self.host_version.load(Ordering::Acquire),
-            "error":self.error.lock().unwrap().clone().or_else(||self.render_error.lock().unwrap().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
-            "ready":self.loaded.lock().unwrap().initialized})
+            "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
+            "ready":self.loaded.lock_or_recover().initialized})
     }
     fn emit_state(&self) {
         self.emit("plugin_apply_state", self.state());
@@ -1714,7 +1719,7 @@ impl ParamHost for EditorSession {
             return;
         }
         history::checkpoint(
-            &mut self.history.lock().unwrap(),
+            &mut self.history.lock_or_recover(),
             timeline,
             operation.key().into(),
             || None,
@@ -1722,7 +1727,7 @@ impl ParamHost for EditorSession {
     }
     fn mark_dirty(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
-        let views = self.views.lock().unwrap();
+        let views = self.views.lock_or_recover();
         for view in views.values() {
             if let Some((link, _)) = &view.route {
                 link.mark_dirty();
@@ -1732,7 +1737,7 @@ impl ParamHost for EditorSession {
     fn publish_timeline(&self, timeline: TimelineState) {
         let result = (|| {
             let document = self.document.upgrade().ok_or("document closed")?;
-            let groups = document.edits.lock().unwrap().groups.clone();
+            let groups = document.edits.lock_or_recover().groups.clone();
             let groups =
                 if groups.is_empty() {
                     None
@@ -1744,7 +1749,7 @@ impl ParamHost for EditorSession {
                 };
             let timeline = self.native_timeline(timeline)?;
             let (edit, model, projection) = {
-                let loaded = self.loaded.lock().unwrap();
+                let loaded = self.loaded.lock_or_recover();
                 (loaded.edit, loaded.model, loaded.projection.clone())
             };
             let versions = document.accept_workspace_edits_with_groups(
@@ -1754,15 +1759,15 @@ impl ParamHost for EditorSession {
                 &projection,
                 groups,
             )?;
-            let mut loaded = self.loaded.lock().unwrap();
+            let mut loaded = self.loaded.lock_or_recover();
             loaded.edit = versions.0;
             loaded.model = versions.1;
             loaded.projection = versions.2;
-            *self.error.lock().unwrap() = None;
+            *self.error.lock_or_recover() = None;
             Ok::<_, String>(())
         })();
         if let Err(error) = result {
-            *self.error.lock().unwrap() = Some(error);
+            *self.error.lock_or_recover() = Some(error);
         }
     }
 }
@@ -1881,7 +1886,7 @@ pub(crate) mod tests {
         document.host_undo.pending.store(true, Ordering::Release);
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let track = editor.timeline.lock().unwrap().tracks[0].id.clone();
+        let track = editor.timeline.lock_or_recover().tracks[0].id.clone();
         let (release, wait) = mpsc::channel();
         let mut release = ReleaseDsp(Some(release));
         let (started, ready) = mpsc::channel();
@@ -1900,7 +1905,7 @@ pub(crate) mod tests {
         .unwrap();
         ready.recv_timeout(Duration::from_secs(1)).unwrap();
         {
-            let mut active = editor.render_task.lock().unwrap();
+            let mut active = editor.render_task.lock_or_recover();
             *active = Some(job);
             document.host_undo.pending.store(false, Ordering::Release);
         }
@@ -1943,7 +1948,7 @@ pub(crate) mod tests {
         release.0.take().unwrap().send(()).unwrap();
         document.close();
         assert!(
-            editor.render_task.lock().unwrap().is_none(),
+            editor.render_task.lock_or_recover().is_none(),
             "关闭完成前必须回收DSP任务"
         );
     }
@@ -1958,7 +1963,7 @@ pub(crate) mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         let job = RenderTask::spawn(41, 17, cancel, || Ok(())).unwrap();
         {
-            let mut active = editor.render_task.lock().unwrap();
+            let mut active = editor.render_task.lock_or_recover();
             assert!(active.is_none());
             *active = Some(job);
         }
@@ -1982,7 +1987,7 @@ pub(crate) mod tests {
         let (_model, owner, _id) = fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let mut display = editor.timeline.lock().unwrap().clone();
+        let mut display = editor.timeline.lock_or_recover().clone();
         display.clips[0].gain = 0.5;
         display.clips[0].takes[0].gain = 0.5;
         let native = editor.native_timeline(display).unwrap();
@@ -2004,12 +2009,12 @@ pub(crate) mod tests {
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        *document.timeline.lock().unwrap() = Some(timeline);
-        document.track_bindings.lock().unwrap().insert(
+        *document.timeline.lock_or_recover() = Some(timeline);
+        document.track_bindings.lock_or_recover().insert(
             "track".into(),
             vec![("modification".into(), "ara://source".into())],
         );
-        document.edit_sources.lock().unwrap().insert(
+        document.edit_sources.lock_or_recover().insert(
             "ara://source".into(),
             Arc::new(SourcePcm {
                 sample_rate: 44100,
@@ -2025,8 +2030,11 @@ pub(crate) mod tests {
             .unwrap()
             .register(key, document.id, 0)
             .unwrap();
-        document.clip_ids.lock().unwrap().insert(key, "clip".into());
-        document.regions.lock().unwrap().insert(
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(key, "clip".into());
+        document.regions.lock_or_recover().insert(
             key,
             crate::ara::AraPlaybackRegion {
                 audio_source_persistent_id: "ara://source".into(),
@@ -2084,7 +2092,7 @@ pub(crate) mod tests {
         let (model, a, first) = fixture();
         let document = model.session();
         {
-            let mut host = document.timeline.lock().unwrap();
+            let mut host = document.timeline.lock_or_recover();
             let host = host.as_mut().unwrap();
             let mut track = host.tracks[0].clone();
             track.id = "b".into();
@@ -2095,7 +2103,7 @@ pub(crate) mod tests {
             clip.track_id = "b".into();
             host.clips.push(clip);
         }
-        document.track_bindings.lock().unwrap().insert(
+        document.track_bindings.lock_or_recover().insert(
             "b".into(),
             vec![("modification-b".into(), "ara://source".into())],
         );
@@ -2106,7 +2114,7 @@ pub(crate) mod tests {
             .unwrap()
             .register(key, document.id, 1)
             .unwrap();
-        document.clip_ids.lock().unwrap().insert(key, "cb".into());
+        document.clip_ids.lock_or_recover().insert(key, "cb".into());
         let mut region = document
             .regions
             .lock()
@@ -2116,7 +2124,7 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         region.audio_modification_persistent_id = "modification-b".into();
-        document.regions.lock().unwrap().insert(key, region);
+        document.regions.lock_or_recover().insert(key, region);
         let b = Arc::new(ExtensionOwner::default());
         let raw = b
             .bind_to_document(
@@ -2209,7 +2217,7 @@ pub(crate) mod tests {
             "REAPER图必须保持原样"
         );
         assert_eq!(
-            document.edits.lock().unwrap().params["b"].extra_curves["hifigan_tension"][0],
+            document.edits.lock_or_recover().params["b"].extra_curves["hifigan_tension"][0],
             20.,
             "仅分组不覆盖子轨曲线"
         );
@@ -2223,7 +2231,7 @@ pub(crate) mod tests {
         );
         for id in ["track", "b"] {
             assert_eq!(
-                document.edits.lock().unwrap().params[id].extra_curves["hifigan_tension"][0],
+                document.edits.lock_or_recover().params[id].extra_curves["hifigan_tension"][0],
                 65.
             );
         }
@@ -2236,7 +2244,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             restored.groups,
-            document.edits.lock().unwrap().groups,
+            document.edits.lock_or_recover().groups,
             "组件保存必须保留共享GUID分组"
         );
         let parent_state = owners[0].encode_state().unwrap();
@@ -2246,12 +2254,12 @@ pub(crate) mod tests {
             .host_undo
             .pending
             .store(true, Ordering::Release);
-        *cold_document.ui_tracks.lock().unwrap() = document.ui_tracks.lock().unwrap().clone();
+        *cold_document.ui_tracks.lock_or_recover() = document.ui_tracks.lock_or_recover().clone();
         cold_owners[0].restore_state(&parent_state).unwrap();
         cold_owners[1].restore_state(&encoded).unwrap();
         let cold_editor = cold_owners[0].editor_session().unwrap();
         cold_editor.ensure_loaded(false).unwrap();
-        let cold = cold_editor.timeline.lock().unwrap().clone();
+        let cold = cold_editor.timeline.lock_or_recover().clone();
         let cold_b = cold
             .tracks
             .iter()
@@ -2265,7 +2273,7 @@ pub(crate) mod tests {
             "冷恢复后GUID分组必须重投影到新GUI namespace"
         );
         assert_eq!(
-            cold_document.edits.lock().unwrap().params["b"].extra_curves["hifigan_tension"][0],
+            cold_document.edits.lock_or_recover().params["b"].extra_curves["hifigan_tension"][0],
             65.
         );
         cold_document.close();
@@ -2296,7 +2304,7 @@ pub(crate) mod tests {
         let (model, owners, ids) = workspace_fixture();
         let document = model.session();
         {
-            let mut known = document.timeline.lock().unwrap();
+            let mut known = document.timeline.lock_or_recover();
             let timeline = known.as_mut().unwrap();
             timeline.project_sec = 2.;
             for track in &mut timeline.tracks {
@@ -2309,7 +2317,7 @@ pub(crate) mod tests {
                 clip.normalize_takes();
             }
         }
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.duration_in_modification_time = 2.;
             region.duration_in_playback_time = 2.;
         }
@@ -2427,10 +2435,10 @@ pub(crate) mod tests {
             json!({"trackId":tb,"param":"pitch","startFrame":0,"values":vec![67.;400],"checkpoint":true}),
         );
         // 真实不支持的宿主fade使合成失败；权威的尾笔不能依赖快照发布成功。
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.has_content_based_fade_at_head = true;
         }
-        let held = editor.timeline.lock().unwrap();
+        let held = editor.timeline.lock_or_recover();
         editor
             .enqueue(UiRequest {
                 id: 6,
@@ -2456,7 +2464,7 @@ pub(crate) mod tests {
         let b: Value = serde_json::from_slice(&saved[1]).unwrap();
         assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399], 69.);
         assert_eq!(
-            editor.history.lock().unwrap().position,
+            editor.history.lock_or_recover().position,
             2,
             "尾笔不新增undo步"
         );
@@ -2561,7 +2569,7 @@ pub(crate) mod tests {
             .as_str()
             .unwrap()
             .contains("local curves preserved"));
-        let local = editor.timeline.lock().unwrap();
+        let local = editor.timeline.lock_or_recover();
         assert_eq!(local.params_by_root_track[ta].pitch_edit[100], 60.);
         assert_eq!(local.params_by_root_track[tb].pitch_edit[100], 64.);
         drop(local);
@@ -2601,7 +2609,7 @@ pub(crate) mod tests {
         assert!(workspace.clips.is_empty());
         let began = Instant::now();
         editor.flush().unwrap();
-        let edit = document.edits.lock().unwrap().revision;
+        let edit = document.edits.lock_or_recover().revision;
         document
             .apply_workspace_edits(
                 edit,
@@ -2612,7 +2620,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while editor.error.lock().unwrap().is_none() {
+        while editor.error.lock_or_recover().is_none() {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -2634,7 +2642,7 @@ pub(crate) mod tests {
         );
         document.close();
         assert!(began.elapsed() < Duration::from_secs(3));
-        assert!(editor.worker.lock().unwrap().is_none());
+        assert!(editor.worker.lock_or_recover().is_none());
     }
     /// 旧view仍持actor Arc时，文档close也必须在join之后释放分析投影/历史和持久权威缓存。
     #[test]
@@ -2661,18 +2669,18 @@ pub(crate) mod tests {
         );
         let authority = document.edits.clone();
         document.close();
-        assert!(editor.worker.lock().unwrap().is_none());
-        assert!(editor.analysis_workers.lock().unwrap().is_empty());
+        assert!(editor.worker.lock_or_recover().is_none());
+        assert!(editor.analysis_workers.lock_or_recover().is_empty());
         assert!(
-            editor.timeline.lock().unwrap().clips.is_empty(),
+            editor.timeline.lock_or_recover().clips.is_empty(),
             "join后旧actor不得继续持有分析投影"
         );
-        assert!(editor.history.lock().unwrap().records.is_empty());
-        assert!(editor.peaks.lock().unwrap().is_empty());
-        assert!(!editor.loaded.lock().unwrap().initialized);
-        assert!(document.track_bindings.lock().unwrap().is_empty());
-        assert!(authority.lock().unwrap().params.is_empty());
-        assert!(authority.lock().unwrap().tracks.is_empty());
+        assert!(editor.history.lock_or_recover().records.is_empty());
+        assert!(editor.peaks.lock_or_recover().is_empty());
+        assert!(!editor.loaded.lock_or_recover().initialized);
+        assert!(document.track_bindings.lock_or_recover().is_empty());
+        assert!(authority.lock_or_recover().params.is_empty());
+        assert!(authority.lock_or_recover().tracks.is_empty());
     }
     #[test]
     fn task34_component_stop_revokes_its_views_and_output_before_returning() {
@@ -2775,7 +2783,12 @@ pub(crate) mod tests {
     fn atlas_selection_commands_project_overlaps_without_audio_or_history_changes() {
         let (model, owners, _ids) = workspace_fixture();
         let document = model.session();
-        let mut original = document.timeline.lock().unwrap().as_ref().unwrap().clone();
+        let mut original = document
+            .timeline
+            .lock_or_recover()
+            .as_ref()
+            .unwrap()
+            .clone();
         for (index, track) in original.tracks.iter().enumerate() {
             original.params_by_root_track.insert(
                 track.id.clone(),
@@ -2798,8 +2811,8 @@ pub(crate) mod tests {
         original.selected_clip_id = Some(ca.clone());
         let atlas = atlas.follow_geometry(&original, &identities).unwrap();
         original.params_by_root_track = atlas.project_roots(&original, &identities).unwrap();
-        *document.timeline.lock().unwrap() = Some(original.clone());
-        document.track_bindings.lock().unwrap().insert(
+        *document.timeline.lock_or_recover() = Some(original.clone());
+        document.track_bindings.lock_or_recover().insert(
             root.clone(),
             vec![
                 ("modification".into(), "ara://source".into()),
@@ -2807,7 +2820,7 @@ pub(crate) mod tests {
             ],
         );
         {
-            let mut edits = document.edits.lock().unwrap();
+            let mut edits = document.edits.lock_or_recover();
             edits.params = original.params_by_root_track;
             edits.atlas = atlas;
         }
@@ -2825,18 +2838,18 @@ pub(crate) mod tests {
         let ca = format!("{}{ca}", editor.namespace);
         let cb = format!("{}{cb}", editor.namespace);
         let before = (
-            document.edits.lock().unwrap().revision,
+            document.edits.lock_or_recover().revision,
             editor.generation.load(Ordering::Acquire),
         );
         call(&editor, &sink, &rx, 2, "select_clip", json!({"clipId":cb}));
-        let b = editor.timeline.lock().unwrap().params_by_root_track[root].pitch_edit[0];
+        let b = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
         call(&editor, &sink, &rx, 3, "select_clip", json!({"clipId":ca}));
-        let a = editor.timeline.lock().unwrap().params_by_root_track[root].pitch_edit[0];
+        let a = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
         let after = (
-            document.edits.lock().unwrap().revision,
+            document.edits.lock_or_recover().revision,
             editor.generation.load(Ordering::Acquire),
         );
-        let history = editor.history.lock().unwrap().records.len();
+        let history = editor.history.lock_or_recover().records.len();
         document.close();
         assert_eq!((a, b), (60., 67.));
         assert_eq!(before, after);
@@ -2942,16 +2955,16 @@ pub(crate) mod tests {
         assert!(eb.try_iter().any(|e| e["event"] == "plugin_host_changed"));
         call(&a, &sa, &rx, 7, "undo_timeline", json!({}));
         assert_eq!(
-            a.timeline.lock().unwrap().params_by_root_track[ta].pitch_edit[0],
+            a.timeline.lock_or_recover().params_by_root_track[ta].pitch_edit[0],
             60.
         );
         assert_eq!(
-            a.timeline.lock().unwrap().params_by_root_track[tb].pitch_edit[0],
+            a.timeline.lock_or_recover().params_by_root_track[tb].pitch_edit[0],
             64.
         );
         call(&b, &sb, &rb, 8, "redo_timeline", json!({}));
         assert_eq!(
-            a.timeline.lock().unwrap().params_by_root_track[tb].pitch_edit[0],
+            a.timeline.lock_or_recover().params_by_root_track[tb].pitch_edit[0],
             67.
         );
         assert!(event_rx.try_iter().any(|e| e["event"] == "history_state"));
@@ -2983,7 +2996,7 @@ pub(crate) mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         // 真实命令在timeline锁上停住，随后命令一定排队；clear/bind不需持document事务。
-        let held = editor.timeline.lock().unwrap();
+        let held = editor.timeline.lock_or_recover();
         editor
             .enqueue(UiRequest {
                 id: 1,
@@ -3007,7 +3020,7 @@ pub(crate) mod tests {
             results[1]["ok"], false,
             "排队入口不能重新绑定别的组件继续写入"
         );
-        assert_eq!(model.session().edits.lock().unwrap().revision, 0);
+        assert_eq!(model.session().edits.lock_or_recover().revision, 0);
         drop(rb);
         assert!(
             editor
@@ -3090,7 +3103,7 @@ pub(crate) mod tests {
             events,
             closed: Arc::new(AtomicBool::new(false)),
         };
-        let held = editor.timeline.lock().unwrap();
+        let held = editor.timeline.lock_or_recover();
         editor
             .enqueue(UiRequest {
                 id: 1,
@@ -3153,10 +3166,10 @@ pub(crate) mod tests {
             started.elapsed() < Duration::from_secs(3),
             "document close应join而不持事务等待actor"
         );
-        assert!(editor.worker.lock().unwrap().is_none());
-        assert!(editor.analysis_workers.lock().unwrap().is_empty());
-        assert!(document.timeline.lock().unwrap().is_none());
-        assert!(document.edit_sources.lock().unwrap().is_empty());
+        assert!(editor.worker.lock_or_recover().is_none());
+        assert!(editor.analysis_workers.lock_or_recover().is_empty());
+        assert!(document.timeline.lock_or_recover().is_none());
+        assert!(document.edit_sources.lock_or_recover().is_empty());
         assert!(
             sink.closed.load(Ordering::Acquire),
             "文档关闭撤销全部view回信/事件"
@@ -3191,7 +3204,7 @@ pub(crate) mod tests {
                 .accept_workspace_edits(0, version, &client, &previous)
                 .is_err());
             assert_eq!(
-                document.edits.lock().unwrap().revision,
+                document.edits.lock_or_recover().revision,
                 0,
                 "拒绝前不能部分提交"
             );
@@ -3205,7 +3218,7 @@ pub(crate) mod tests {
                 .starts_with("Conflict"),
             "scope必须独立于model校验"
         );
-        assert_eq!(document.edits.lock().unwrap().revision, 0);
+        assert_eq!(document.edits.lock_or_recover().revision, 0);
     }
     #[test]
     fn workspace_accept_rejects_forged_geometry_before_changing_document_edits() {
@@ -3225,7 +3238,7 @@ pub(crate) mod tests {
                 .is_err(),
             "宿主几何必须拒绝而不是忽略"
         );
-        assert_eq!(document.edits.lock().unwrap().revision, 0);
+        assert_eq!(document.edits.lock_or_recover().revision, 0);
     }
     #[test]
     fn workspace_global_solo_keeps_each_renderer_output_independent() {
@@ -3261,7 +3274,7 @@ pub(crate) mod tests {
             assert!(
                 Instant::now() < deadline,
                 "{:?}",
-                editor.error.lock().unwrap()
+                editor.error.lock_or_recover()
             );
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -3331,7 +3344,7 @@ pub(crate) mod tests {
             &[json!(60.), json!(64.)]
         );
         assert_eq!(
-            editor.history.lock().unwrap().position,
+            editor.history.lock_or_recover().position,
             1,
             "尾块不得增加undo步"
         );
@@ -3342,15 +3355,15 @@ pub(crate) mod tests {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let track = editor.timeline.lock().unwrap().tracks[0].id.clone();
+        let track = editor.timeline.lock_or_recover().tracks[0].id.clone();
         let result = super::super::commands::dispatch(
             &editor,
             "set_track_state",
             json!({"trackId":track,"volume":0.5,"pitchAnalysisAlgo":"not-an-algorithm"}),
         );
         assert!(result.is_err());
-        assert_eq!(editor.timeline.lock().unwrap().tracks[0].volume, 1.);
-        assert!(editor.history.lock().unwrap().records.is_empty());
+        assert_eq!(editor.timeline.lock_or_recover().tracks[0].volume, 1.);
+        assert!(editor.history.lock_or_recover().records.is_empty());
         assert_eq!(editor.generation.load(Ordering::Acquire), 0);
         assert!(editor.check_source("C:/Users/user/private.wav").is_err());
         editor.close();
@@ -3361,7 +3374,7 @@ pub(crate) mod tests {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
         // 时钟投影与分析无关；标记夹具已加载，避免为四帧源启动异步ONNX预热。
-        editor.loaded.lock().unwrap().initialized = true;
+        editor.loaded.lock_or_recover().initialized = true;
         owner
             .clock
             .get()
@@ -3415,11 +3428,11 @@ pub(crate) mod tests {
                 ..Default::default()
             });
         let document = model.session();
-        document.timeline.lock().unwrap().as_mut().unwrap().clips[0].start_sec = 2.;
+        document.timeline.lock_or_recover().as_mut().unwrap().clips[0].start_sec = 2.;
         document.revision.fetch_add(1, Ordering::AcqRel);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let synced = editor.timeline.lock().unwrap().clone();
+            let synced = editor.timeline.lock_or_recover().clone();
             if synced.clips[0].start_sec == 2. && synced.bpm == 150. {
                 break;
             }
@@ -3445,7 +3458,7 @@ pub(crate) mod tests {
     fn a_reversed_clip_is_materialized_instead_of_failing_the_session() {
         let (model, owner, _identity) = fixture();
         let document = model.session();
-        let mut timeline = document.timeline.lock().unwrap();
+        let mut timeline = document.timeline.lock_or_recover();
         let clip = &mut timeline.as_mut().unwrap().clips[0];
         clip.reversed = true;
         clip.takes[0].reversed = true;
@@ -3453,7 +3466,7 @@ pub(crate) mod tests {
         let editor = owner.editor_session().unwrap();
         // 会话照常加载 —— 既不整份失败，也不再隔离。
         editor.ensure_loaded(false).unwrap();
-        let loaded = editor.timeline.lock().unwrap().clone();
+        let loaded = editor.timeline.lock_or_recover().clone();
         let clip = &loaded.clips[0];
         assert!(clip.reversed, "宿主事实要保留下来，界面才能显示倒放标记");
         assert!(
@@ -3502,7 +3515,7 @@ pub(crate) mod tests {
         let document = model.session();
         let before = document.workspace_projection().unwrap();
 
-        document.render_facts.lock().unwrap().items.insert(
+        document.render_facts.lock_or_recover().items.insert(
             "item-1".into(),
             crate::host::geometry::RenderItemFacts {
                 reversed: true,
@@ -3588,7 +3601,7 @@ pub(crate) mod tests {
         let versions = document.editor_versions().unwrap();
         let history =
             super::super::commands::dispatch(&editor, "get_history_state", json!({})).unwrap();
-        let selected = editor.timeline.lock().unwrap().selected_clip_id.clone();
+        let selected = editor.timeline.lock_or_recover().selected_clip_id.clone();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
         host.enable_media();
@@ -3629,7 +3642,7 @@ pub(crate) mod tests {
             versions,
             "清单不伪造ARA/edit/scope代次"
         );
-        assert_eq!(editor.timeline.lock().unwrap().selected_clip_id, selected);
+        assert_eq!(editor.timeline.lock_or_recover().selected_clip_id, selected);
         track.items.clear();
         document
             .ui_tracks
@@ -3672,7 +3685,7 @@ pub(crate) mod tests {
         host.inventory_enabled.set(true);
         let host_api = Arc::new(host.client());
         let mut track = host_api.ui_track(&|| true).unwrap();
-        let mut audio = editor.timeline.lock().unwrap().clips[0].clone();
+        let mut audio = editor.timeline.lock_or_recover().clips[0].clone();
         let path = audio.source_path.clone().unwrap();
         audio.id = format!(
             "{}ara-item-{}",
@@ -3725,7 +3738,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         // 前提：ARA-only 宿主的形状就是"没有任何宿主清单"。
-        assert!(document.ui_tracks.lock().unwrap().is_empty());
+        assert!(document.ui_tracks.lock_or_recover().is_empty());
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
 
@@ -3738,7 +3751,7 @@ pub(crate) mod tests {
         assert!(!caps.clip_write, "ARA-only 后端不得宣称可写片段几何");
 
         // 时间线：clip 带媒体身份，不是"等待宿主提供音频"的占位。
-        let timeline = editor.timeline.lock().unwrap().clone();
+        let timeline = editor.timeline.lock_or_recover().clone();
         assert_eq!(timeline.clips.len(), 1, "ARA-only 也必须出时间线");
         let source = timeline.clips[0]
             .source_path
@@ -3761,14 +3774,14 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         {
-            let mut timeline = document.timeline.lock().unwrap();
+            let mut timeline = document.timeline.lock_or_recover();
             let clip = &mut timeline.as_mut().unwrap().clips[0];
             clip.length_sec = 8.0 / 44100.0;
             clip.takes[0].playback_rate = 0.5;
             clip.normalize_takes();
         }
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             for region in regions.values_mut() {
                 region.duration_in_playback_time = 8.0 / 44100.0;
                 region.is_timestretch_enabled = true;
@@ -3776,7 +3789,7 @@ pub(crate) mod tests {
         }
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let timeline = editor.timeline.lock().unwrap();
+        let timeline = editor.timeline.lock_or_recover();
         assert_eq!(timeline.clips[0].playback_rate, 0.5);
         assert_eq!(timeline.clips[0].length_sec, 8.0 / 44100.0);
         drop(timeline);
@@ -3817,7 +3830,7 @@ pub(crate) mod tests {
                 );
             }
             if roots.iter().all(|root| {
-                editor.timeline.lock().unwrap().params_by_root_track[root]
+                editor.timeline.lock_or_recover().params_by_root_track[root]
                     .pitch_orig_key
                     .is_some()
             }) {
@@ -3832,7 +3845,7 @@ pub(crate) mod tests {
                 assert!(
                     began.elapsed() < Duration::from_secs(10),
                     "{:?}",
-                    editor.error.lock().unwrap()
+                    editor.error.lock_or_recover()
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -3857,7 +3870,7 @@ pub(crate) mod tests {
         );
         wait(2);
         let restored = owners[1].encode_state().unwrap();
-        let accepted = document.edits.lock().unwrap().params["b"].pitch_edit[100];
+        let accepted = document.edits.lock_or_recover().params["b"].pitch_edit[100];
         document.close();
         assert_eq!(accepted, 67.);
         assert!(!restored.is_empty());
@@ -3929,7 +3942,7 @@ pub(crate) mod tests {
             events,
             closed: Arc::new(AtomicBool::new(false)),
         };
-        let held = editor.timeline.lock().unwrap();
+        let held = editor.timeline.lock_or_recover();
         editor
             .enqueue(UiRequest {
                 id: 1,
@@ -3969,7 +3982,7 @@ pub(crate) mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         let loaded = call(&editor, &sink, &rx, 1, "get_timeline_state", json!({}));
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.has_content_based_fade_at_head = true;
         }
         call(
@@ -3981,13 +3994,13 @@ pub(crate) mod tests {
             json!({"trackId":loaded["tracks"][0]["id"],"volume":0.5}),
         );
         let began = Instant::now();
-        while editor.render_error.lock().unwrap().is_none() {
+        while editor.render_error.lock_or_recover().is_none() {
             assert!(began.elapsed() < Duration::from_secs(5));
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(editor.error.lock().unwrap().is_none());
+        assert!(editor.error.lock_or_recover().is_none());
         assert_eq!(editor.applied.load(Ordering::Acquire), 0);
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.has_content_based_fade_at_head = false;
         }
         let began = Instant::now();
@@ -3999,7 +4012,7 @@ pub(crate) mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(editor.render_error.lock().unwrap().is_none());
+        assert!(editor.render_error.lock_or_recover().is_none());
         document.close();
     }
     /// 没有手绘pitch的HiFiGAN气声/张力/共振峰也要等原线；None与纯混音仍能立即应用。
@@ -4008,7 +4021,7 @@ pub(crate) mod tests {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let mut timeline = editor.timeline.lock().unwrap().clone();
+        let mut timeline = editor.timeline.lock_or_recover().clone();
         let root = timeline.tracks[0].id.clone();
         timeline.ensure_params_for_root(&root);
         timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::NsfHifiganOnnx;
@@ -4067,7 +4080,7 @@ pub(crate) mod tests {
             .unwrap()
             .insert("ara://source".into(), pcm.clone());
         {
-            let mut timeline = document.timeline.lock().unwrap();
+            let mut timeline = document.timeline.lock_or_recover();
             let timeline = timeline.as_mut().unwrap();
             timeline.project_sec = seconds;
             for clip in &mut timeline.clips {
@@ -4076,7 +4089,7 @@ pub(crate) mod tests {
                 clip.normalize_takes();
             }
         }
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.duration_in_modification_time = seconds;
             region.duration_in_playback_time = seconds;
         }
@@ -4090,7 +4103,7 @@ pub(crate) mod tests {
         drop(snapshot);
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let timeline = editor.timeline.lock().unwrap();
+        let timeline = editor.timeline.lock_or_recover();
         assert_eq!(timeline.clips[0].length_sec, seconds);
         assert_eq!(timeline.clips[0].duration_frames, Some(frames as u64));
         let path = timeline.clips[0].source_path.clone().unwrap();
@@ -4127,8 +4140,8 @@ pub(crate) mod tests {
         let a = source(0.25);
         let b = source(0.5);
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut timeline = document.timeline.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut timeline = document.timeline.lock_or_recover();
             let timeline = timeline.as_mut().unwrap();
             timeline.project_sec = seconds;
             for (index, clip) in timeline.clips.iter_mut().enumerate() {
@@ -4146,7 +4159,7 @@ pub(crate) mod tests {
             }
             for (index, id) in ids.iter().enumerate() {
                 let key = (&**id as *const u8) as u64;
-                let mut regions = document.regions.lock().unwrap();
+                let mut regions = document.regions.lock_or_recover();
                 let region = regions.get_mut(&key).unwrap();
                 region.duration_in_modification_time = seconds;
                 region.duration_in_playback_time = seconds;
@@ -4154,12 +4167,12 @@ pub(crate) mod tests {
                     region.audio_source_persistent_id = "ara://source-b".into();
                 }
             }
-            document.track_bindings.lock().unwrap().insert(
+            document.track_bindings.lock_or_recover().insert(
                 "b".into(),
                 vec![("modification-b".into(), "ara://source-b".into())],
             );
             for sources in [&document.sources, &document.edit_sources] {
-                let mut sources = sources.lock().unwrap();
+                let mut sources = sources.lock_or_recover();
                 sources.insert("ara://source".into(), a.clone());
                 sources.insert("ara://source-b".into(), b.clone());
             }
@@ -4238,7 +4251,11 @@ pub(crate) mod tests {
             }
         }
         let ready_bytes = (44100 + 48000) * 180 * 4 * 2;
-        let curve_bytes = document.edits.lock().unwrap().atlas.accounted_curve_bytes();
+        let curve_bytes = document
+            .edits
+            .lock_or_recover()
+            .atlas
+            .accounted_curve_bytes();
         assert_eq!(
             budget.used() - baseline,
             frames * 4 * 2 + ready_bytes + curve_bytes
@@ -4262,18 +4279,18 @@ pub(crate) mod tests {
         let document = model.session();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let before_path = editor.timeline.lock().unwrap().clips[0]
+        let before_path = editor.timeline.lock_or_recover().clips[0]
             .source_path
             .clone()
             .unwrap();
         let modified = std::fs::metadata(&before_path).unwrap().modified().unwrap();
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut timeline = document.timeline.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut timeline = document.timeline.lock_or_recover();
             let timeline = timeline.as_mut().unwrap();
             timeline.clips[0].start_sec = 1.;
             timeline.project_sec = 2.;
-            for region in document.regions.lock().unwrap().values_mut() {
+            for region in document.regions.lock_or_recover().values_mut() {
                 region.start_in_playback_time = 1.;
             }
             document.revision.fetch_add(1, Ordering::AcqRel);
@@ -4302,7 +4319,7 @@ pub(crate) mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let after_path = editor.timeline.lock().unwrap().clips[0]
+        let after_path = editor.timeline.lock_or_recover().clips[0]
             .source_path
             .clone()
             .unwrap();
@@ -4321,7 +4338,7 @@ pub(crate) mod tests {
         let document = model.session();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let root = editor.timeline.lock().unwrap().tracks[0].id.clone();
+        let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
         super::super::commands::dispatch(
             &editor,
             "set_track_state",
@@ -4329,11 +4346,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         let versions = document.editor_versions().unwrap();
-        let selected = editor.timeline.lock().unwrap().selected_clip_id.clone();
-        let history = editor.history.lock().unwrap().position;
+        let selected = editor.timeline.lock_or_recover().selected_clip_id.clone();
+        let history = editor.history.lock_or_recover().position;
         assert!(history > 0);
         {
-            let mut timeline = editor.timeline.lock().unwrap();
+            let mut timeline = editor.timeline.lock_or_recover();
             timeline.clips[0].source_path = None;
             for take in &mut timeline.clips[0].takes {
                 take.source_path = None;
@@ -4350,7 +4367,7 @@ pub(crate) mod tests {
         );
         assert_eq!(document.editor_versions().unwrap(), versions);
         editor.refresh_host();
-        let timeline = editor.timeline.lock().unwrap();
+        let timeline = editor.timeline.lock_or_recover();
         let clip = &timeline.clips[0];
         let path = clip
             .source_path
@@ -4361,7 +4378,7 @@ pub(crate) mod tests {
         assert_eq!(timeline.selected_clip_id, selected);
         assert_eq!(timeline.tracks[0].volume, 0.5);
         drop(timeline);
-        assert_eq!(editor.history.lock().unwrap().position, history);
+        assert_eq!(editor.history.lock_or_recover().position, history);
         document.close();
     }
 
@@ -4401,12 +4418,12 @@ pub(crate) mod tests {
                 .get(root)
                 .is_some_and(|params| params.pitch_orig_key.is_some())
         });
-        let old_path = editor.timeline.lock().unwrap().clips[0]
+        let old_path = editor.timeline.lock_or_recover().clips[0]
             .source_path
             .clone()
             .unwrap();
         assert!(
-            (editor.timeline.lock().unwrap().params_by_root_track[root].pitch_orig[100] - 57.)
+            (editor.timeline.lock_or_recover().params_by_root_track[root].pitch_orig[100] - 57.)
                 .abs()
                 < 1.
         );
@@ -4428,7 +4445,7 @@ pub(crate) mod tests {
             })
             .collect();
         {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             let pcm = Arc::new(SourcePcm {
                 sample_rate: 44100,
                 planes: vec![samples],
@@ -4449,7 +4466,7 @@ pub(crate) mod tests {
             document.render_epoch.fetch_add(1, Ordering::AcqRel);
         }
         wait(&|| {
-            let timeline = editor.timeline.lock().unwrap();
+            let timeline = editor.timeline.lock_or_recover();
             timeline
                 .params_by_root_track
                 .get(root)
@@ -4475,7 +4492,7 @@ pub(crate) mod tests {
                         .is_some_and(|note| (*note - 69.).abs() < 1.)
                 })
         });
-        let timeline = editor.timeline.lock().unwrap();
+        let timeline = editor.timeline.lock_or_recover();
         assert_ne!(
             timeline.clips[0].source_path.as_deref(),
             Some(old_path.as_str())
@@ -4528,7 +4545,7 @@ pub(crate) mod tests {
                 assert!(
                     Instant::now() < deadline,
                     "automatic apply failed: {:?}",
-                    editor.error.lock().unwrap()
+                    editor.error.lock_or_recover()
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -4594,7 +4611,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         {
-            let mut known = document.timeline.lock().unwrap();
+            let mut known = document.timeline.lock_or_recover();
             let timeline = known.as_mut().unwrap();
             timeline.project_sec = 2.;
             timeline.tracks[0].compose_enabled = true;
@@ -4603,7 +4620,7 @@ pub(crate) mod tests {
             timeline.clips[0].takes[0].source_end_sec = 2.;
             timeline.clips[0].normalize_takes();
         }
-        for region in document.regions.lock().unwrap().values_mut() {
+        for region in document.regions.lock_or_recover().values_mut() {
             region.duration_in_modification_time = 2.;
             region.duration_in_playback_time = 2.;
         }
@@ -4616,7 +4633,7 @@ pub(crate) mod tests {
                     .sum::<f64>() as f32
             })
             .collect();
-        document.edit_sources.lock().unwrap().insert(
+        document.edit_sources.lock_or_recover().insert(
             "ara://source".into(),
             Arc::new(SourcePcm {
                 sample_rate: 44100,
@@ -4644,7 +4661,7 @@ pub(crate) mod tests {
         );
         assert_eq!(timeline["clips"].as_array().unwrap().len(), 1);
         {
-            let live = editor.timeline.lock().unwrap();
+            let live = editor.timeline.lock_or_recover();
             assert!(live.tracks[0].compose_enabled);
             assert!(!live.clips[0].muted);
             assert_eq!(live.clips[0].track_id, live.tracks[0].id);
@@ -4683,7 +4700,7 @@ pub(crate) mod tests {
         );
         {
             let accepted = owner.edit_state();
-            let accepted = accepted.lock().unwrap();
+            let accepted = accepted.lock_or_recover();
             assert!(
                 accepted.params["track"].pitch_edit_user_modified,
                 "参数写入必须保留用户修改标记"
@@ -4708,7 +4725,7 @@ pub(crate) mod tests {
             assert!(
                 Instant::now() < deadline,
                 "WORLD automatic apply failed: {:?}",
-                editor.error.lock().unwrap()
+                editor.error.lock_or_recover()
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -4753,7 +4770,7 @@ pub(crate) mod tests {
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         {
-            let mut timeline = editor.timeline.lock().unwrap();
+            let mut timeline = editor.timeline.lock_or_recover();
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::WorldDll;
             timeline.tracks[0].compose_enabled = true;
             let root = timeline.tracks[0].id.clone();

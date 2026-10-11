@@ -1,5 +1,6 @@
 //! 文档共享宿主Undo调度：GUI只负责主线程API，actor在原生历史收尾前暂缓神经合成。
 use super::reaper::{HostUndoBlock, ReaperHost};
+use crate::sync::MutexExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,13 +28,13 @@ pub(crate) struct HostUndo {
 }
 impl HostUndo {
     pub(crate) fn begin_group(&self, view: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
         *state.groups.entry(view.into()).or_default() += 1;
         state.idle = None;
     }
     pub(crate) fn end_group(&self, view: &str) {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             if let Some(depth) = state.groups.get_mut(view) {
                 *depth = depth.saturating_sub(1);
                 if *depth == 0 {
@@ -57,7 +58,7 @@ impl HostUndo {
             self.finish_if_idle(false);
         }
         let start = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             if state.starting || state.closing {
                 return Err("host undo reentry while starting/closing block".into());
             }
@@ -77,7 +78,7 @@ impl HostUndo {
         if start {
             self.pending.store(true, Ordering::Release);
             let block = host.begin_project_undo(authorized);
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             state.starting = false;
             match block {
                 Ok(block) => state.block = Some(block),
@@ -93,7 +94,7 @@ impl HostUndo {
         Ok(())
     }
     pub(crate) fn finish_request(&self, view: &str, id: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
         state.requests.remove(&(view.into(), id));
         state.native_requests.remove(&(view.into(), id));
         if state.requests.is_empty() {
@@ -115,7 +116,7 @@ impl HostUndo {
     /// Ctrl+Z先等已入队写入的响应，再结束活动手势组；返回false表示尚有在途请求。
     pub(crate) fn finish_for_history(&self) -> bool {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             if state.starting || state.closing || !state.requests.is_empty() {
                 return false;
             }
@@ -126,7 +127,7 @@ impl HostUndo {
     }
     pub(crate) fn finish_if_idle(&self, wait_deadline: bool) {
         let block = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             if state.starting
                 || state.closing
                 || !state.requests.is_empty()
@@ -142,14 +143,14 @@ impl HostUndo {
         };
         if block.is_some() {
             drop(block);
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             state.closing = false;
             self.pending
                 .store(!state.histories.is_empty(), Ordering::Release);
         }
     }
     pub(crate) fn begin_history(&self, view: &str, id: u64) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
         if state.histories.len() >= 32 || !state.histories.insert((view.into(), id)) {
             return Err("host history request budget/identity rejected".into());
         }
@@ -157,7 +158,7 @@ impl HostUndo {
         Ok(())
     }
     pub(crate) fn finish_history(&self, view: &str, id: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
         state.histories.remove(&(view.into(), id));
         self.pending.store(
             state.block.is_some() || state.starting || state.closing || !state.histories.is_empty(),
@@ -167,7 +168,7 @@ impl HostUndo {
     /// 窗口关闭不能遗留整个工程的Undo组；已排队参数尾笔由getState的actor屏障保存。
     pub(crate) fn release_view(&self, view: &str) {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             state.groups.remove(view);
             let native = state
                 .native_requests
@@ -184,7 +185,7 @@ impl HostUndo {
             state.histories.retain(|(owner, _)| owner != view);
         }
         self.finish_if_idle(false);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock_or_recover();
         self.pending.store(
             state.block.is_some() || state.starting || state.closing || !state.histories.is_empty(),
             Ordering::Release,
@@ -192,7 +193,7 @@ impl HostUndo {
     }
     pub(crate) fn close(&self) {
         let block = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
             state.groups.clear();
             state.requests.clear();
             state.native_requests.clear();
@@ -204,7 +205,7 @@ impl HostUndo {
         };
         drop(block);
         self.pending.store(false, Ordering::Release);
-        self.state.lock().unwrap().closing = false;
+        self.state.lock_or_recover().closing = false;
     }
 }
 

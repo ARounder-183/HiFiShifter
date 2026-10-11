@@ -1,6 +1,7 @@
 //! 每个 VST3 entry 的扩展所有权。强引用由 entry builder 保留，不在组件销毁时悬空。
 
 use super::ownership::{region_owners, RegionKey};
+use crate::sync::MutexExt;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
@@ -278,7 +279,7 @@ mod bound_tests {
         let document = model.session();
         let key = (&*ids[0] as *const u8) as u64;
         {
-            let mut timeline = document.timeline.lock().unwrap();
+            let mut timeline = document.timeline.lock_or_recover();
             let clip = &mut timeline.as_mut().unwrap().clips[0];
             clip.start_sec = 1.;
             clip.length_sec = 1.;
@@ -286,7 +287,7 @@ mod bound_tests {
             clip.normalize_takes();
         }
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&key).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 1.;
@@ -331,9 +332,9 @@ mod bound_tests {
         let before = owners[0].encode_state().unwrap();
         let render = || {
             let input = {
-                let _transaction = document.transaction.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
                 owners[0]
-                    .capture_render_input(&document, &document.edits.lock().unwrap(), true)
+                    .capture_render_input(&document, &document.edits.lock_or_recover(), true)
                     .unwrap()
                     .1
             };
@@ -349,7 +350,7 @@ mod bound_tests {
         let original = render();
         let index = 5512;
         assert!((original[0].left[index] as f64 - 0.5 * 0.5_f64.powf(0.45)).abs() < 0.001);
-        let clip = editor.timeline().lock().unwrap().clips[0].id.clone();
+        let clip = editor.timeline().lock_or_recover().clips[0].id.clone();
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",
@@ -366,7 +367,7 @@ mod bound_tests {
         assert_eq!(value["edits"]["fades"].as_object().unwrap().len(), 1);
         owners[0].restore_state(&before).unwrap();
         assert!(
-            document.edits.lock().unwrap().fades.is_empty(),
+            document.edits.lock_or_recover().fades.is_empty(),
             "恢复旧无形状状态必须撤销HFS形状，不保留未来编辑"
         );
         owners[0].restore_state(&saved).unwrap();
@@ -396,8 +397,8 @@ mod bound_tests {
         let document = model.session();
         let key = (&*ids[0] as *const u8) as u64;
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut timeline = document.timeline.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut timeline = document.timeline.lock_or_recover();
             let timeline = timeline.as_mut().unwrap();
             timeline.project_sec = 2.;
             let clip = &mut timeline.clips[0];
@@ -405,7 +406,7 @@ mod bound_tests {
             clip.length_sec = 1.;
             clip.takes[0].source_end_sec = 1.;
             clip.normalize_takes();
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&key).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_modification_time = 1.;
@@ -447,10 +448,10 @@ mod bound_tests {
             serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["version"],
             3
         );
-        let atlas = document.edits.lock().unwrap().atlas.clone();
+        let atlas = document.edits.lock_or_recover().atlas.clone();
         assert_eq!(atlas.regions.len(), 1);
         let identities = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             document.parameter_identities_locked(&host).unwrap()
         };
         let unchanged = atlas.project_roots(&host, &identities).unwrap();
@@ -537,7 +538,7 @@ mod bound_tests {
             restored[index].restore_state(&saved[index]).unwrap();
         }
         cold_doc.prepare_renderers();
-        let atlas = cold_doc.edits.lock().unwrap().atlas.clone();
+        let atlas = cold_doc.edits.lock_or_recover().atlas.clone();
         cold_doc.close();
         assert_eq!(atlas.regions.len(), 2);
         assert!(
@@ -556,7 +557,7 @@ mod bound_tests {
         let document = model.session();
         let first = (&*ids[0] as *const u8) as u64;
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&first).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
@@ -617,9 +618,9 @@ mod bound_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let (keys, input) = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             owners[0]
-                .capture_render_input(&document, &document.edits.lock().unwrap(), true)
+                .capture_render_input(&document, &document.edits.lock_or_recover(), true)
                 .unwrap()
         };
         let canonical = input.timeline.unwrap().clips[0].fade_in_sec;
@@ -636,7 +637,7 @@ mod bound_tests {
         let document = model.session();
         let first = (&*ids[0] as *const u8) as u64;
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&first).unwrap();
             region.start_in_playback_time = 1.0;
             region.duration_in_playback_time = 4.0;
@@ -704,7 +705,7 @@ mod bound_tests {
         }
         // assignment 回调会提前缓存“无宿主接口”的 Err；只观测这次被撤销的读取批次。
         for owner in &owners {
-            owner.host_geometry.lock().unwrap().take();
+            owner.host_geometry.lock_or_recover().take();
         }
         host.reset();
         let weak = Arc::downgrade(&editor);
@@ -714,8 +715,8 @@ mod bound_tests {
         ));
         editor.refresh_host_transport();
         let calls = host.calls();
-        let sampled_next = owners[1].host_geometry.lock().unwrap().is_some();
-        let sampled_first = owners[0].host_geometry.lock().unwrap().is_some();
+        let sampled_next = owners[1].host_geometry.lock_or_recover().is_some();
+        let sampled_first = owners[0].host_geometry.lock_or_recover().is_some();
         document.close();
         assert_eq!(calls.last().map(String::as_str), Some("D_LENGTH"));
         assert!(!sampled_first, "撤销后的第一份数据不能发布");
@@ -730,7 +731,7 @@ mod bound_tests {
         let owner = &owners[0];
         let first = (&*ids[0] as *const u8) as u64;
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&first).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
@@ -825,13 +826,13 @@ mod bound_tests {
         host.reset();
         assert!(owner.host_geometry().unwrap_err().contains("incompatible"));
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&first).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
         assert_eq!(owner.host_geometry().unwrap().region_key, first);
-        let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        let raw = owner.binding.lock_or_recover().as_ref().unwrap().as_raw();
         // playback仍只有first，但editor另一region也属于此owner，不能忽略它伪造唯一性。
         unsafe {
             let ext = &*raw;
@@ -916,7 +917,7 @@ mod bound_tests {
         let owner = &owners[0];
         let first = (&*ids[0] as *const u8) as u64;
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             let region = regions.get_mut(&first).unwrap();
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
@@ -956,7 +957,7 @@ mod bound_tests {
         assert!(owner.host_geometry_metadata().is_err());
         document.close();
         assert!(owner.host_geometry_metadata().is_err());
-        assert!(owner.host_geometry.lock().unwrap().is_none());
+        assert!(owner.host_geometry.lock_or_recover().is_none());
     }
 
     /// 测试专用同步驱动：冻结阶段持锁，真正内核计算阶段不借文档事务。
@@ -966,7 +967,7 @@ mod bound_tests {
         edits: &crate::state_channel::EditState,
     ) -> Result<Vec<super::super::snapshot::PlaybackSnapshot>, String> {
         let input = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             owner.capture_render_input(document, edits, true)?.1
         };
         input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
@@ -1023,7 +1024,7 @@ mod bound_tests {
         let archived: serde_json::Value = serde_json::from_slice(&states[0]).unwrap();
         let identity: Vec<(String, String)> =
             serde_json::from_value(archived["edits"]["bindings"]["ara-track-0"].clone()).unwrap();
-        *document.track_bindings.lock().unwrap() = std::collections::BTreeMap::from([
+        *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
             ("track".into(), identity.clone()),
             ("b".into(), identity.clone()),
         ]);
@@ -1033,7 +1034,7 @@ mod bound_tests {
             owner.restore_state(bytes).unwrap();
         }
         document.prepare_renderers();
-        let accepted = document.edits.lock().unwrap().clone();
+        let accepted = document.edits.lock_or_recover().clone();
         assert!(
             !accepted.params.contains_key("track"),
             "旧A无曲线，不能借旧轨序号取到B曲线"
@@ -1055,7 +1056,12 @@ mod bound_tests {
         }
         // 真正扩大同一组件assignment，使两个完全相同身份同时进入候选集，必须拒绝合入。
         let key = (&*_ids[1] as *const u8) as u64;
-        let raw = owners[0].binding.lock().unwrap().as_ref().unwrap().as_raw();
+        let raw = owners[0]
+            .binding
+            .lock_or_recover()
+            .as_ref()
+            .unwrap()
+            .as_raw();
         unsafe {
             let ext = &*raw;
             ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
@@ -1063,26 +1069,26 @@ mod bound_tests {
                 key as *mut _,
             );
         }
-        let before = document.edits.lock().unwrap().revision;
+        let before = document.edits.lock_or_recover().revision;
         owners[0].restore_state(&states[1]).unwrap();
         assert!(owners[0].encode_state().unwrap_err().contains("ambiguous"));
-        assert_eq!(document.edits.lock().unwrap().revision, before);
+        assert_eq!(document.edits.lock_or_recover().revision, before);
         assert_eq!(
-            document.edits.lock().unwrap().params["b"].pitch_edit[200],
+            document.edits.lock_or_recover().params["b"].pitch_edit[200],
             64.
         );
         // 缺少真实身份也不能按归档旧序号恢复；既有曲线留在权威中。
-        document.track_bindings.lock().unwrap().insert(
+        document.track_bindings.lock_or_recover().insert(
             "track".into(),
             vec![("unknown-mod".into(), "ara://source".into())],
         );
-        document.track_bindings.lock().unwrap().insert(
+        document.track_bindings.lock_or_recover().insert(
             "b".into(),
             vec![("unknown-b".into(), "ara://source".into())],
         );
         assert!(owners[0].encode_state().unwrap_err().contains("identity"));
         assert_eq!(
-            document.edits.lock().unwrap().params["b"].pitch_edit[200],
+            document.edits.lock_or_recover().params["b"].pitch_edit[200],
             64.
         );
         document.close();
@@ -1094,7 +1100,7 @@ mod bound_tests {
         for model_changed in [true, false] {
             let model = crate::ara::model::ModelHandle::new();
             let document = model.session();
-            *document.timeline.lock().unwrap() = Some(
+            *document.timeline.lock_or_recover() = Some(
                 serde_json::from_value(serde_json::json!({
                 "tracks":[],"clips":[],"bpm":120,"project_sec":0}))
                 .unwrap(),
@@ -1135,7 +1141,7 @@ mod bound_tests {
                         if model_changed {
                             document.clear_renderers();
                         } else {
-                            let timeline = document.timeline.lock().unwrap().clone().unwrap();
+                            let timeline = document.timeline.lock_or_recover().clone().unwrap();
                             document
                                 .accept_workspace_edits(
                                     0,
@@ -1156,7 +1162,7 @@ mod bound_tests {
                 "superseded"
             }));
             assert_eq!(
-                document.edits.lock().unwrap().revision,
+                document.edits.lock_or_recover().revision,
                 if model_changed { 0 } else { 1 }
             );
             let mut left = [9.0; 4];
@@ -1180,7 +1186,7 @@ mod bound_tests {
     fn prepare_callback_does_not_wait_for_a_model_transaction() {
         let model = crate::ara::model::ModelHandle::new();
         let document = model.session();
-        *document.timeline.lock().unwrap() = Some(
+        *document.timeline.lock_or_recover() = Some(
             serde_json::from_value(serde_json::json!({
             "tracks":[],"clips":[],"bpm":120,"project_sec":0}))
             .unwrap(),
@@ -1196,7 +1202,7 @@ mod bound_tests {
                 None,
             )
             .unwrap();
-        let held = document.transaction.lock().unwrap();
+        let held = document.transaction.lock_or_recover();
         let (sent, received) = std::sync::mpsc::channel();
         let requesting = owner.clone();
         let caller = std::thread::spawn(move || {
@@ -1242,7 +1248,7 @@ mod bound_tests {
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        *document.timeline.lock().unwrap() = Some(timeline);
+        *document.timeline.lock_or_recover() = Some(timeline);
         let pcm = Arc::new(super::super::source::SourcePcm {
             sample_rate: 44100,
             planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
@@ -1259,7 +1265,7 @@ mod bound_tests {
             .lock()
             .unwrap()
             .insert("source".into(), pcm);
-        *document.track_bindings.lock().unwrap() = std::collections::BTreeMap::from([
+        *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
             ("a".into(), vec![("ma".into(), "source".into())]),
             ("b".into(), vec![("mb".into(), "source".into())]),
         ]);
@@ -1273,8 +1279,8 @@ mod bound_tests {
                 .unwrap()
                 .register(key, document.id, index)
                 .unwrap();
-            document.clip_ids.lock().unwrap().insert(key, clip.into());
-            document.regions.lock().unwrap().insert(
+            document.clip_ids.lock_or_recover().insert(key, clip.into());
+            document.regions.lock_or_recover().insert(
                 key,
                 crate::ara::AraPlaybackRegion {
                     audio_source_persistent_id: "source".into(),
@@ -1330,14 +1336,14 @@ mod bound_tests {
             saved
                 .reconcile(&std::collections::BTreeMap::from([(
                     id.into(),
-                    document.track_bindings.lock().unwrap()[id].clone(),
+                    document.track_bindings.lock_or_recover()[id].clone(),
                 )]))
                 .unwrap();
             owner.restore_state(&saved.encode().unwrap()).unwrap();
             owners.push(owner);
         }
         document.prepare_renderers();
-        let accepted = document.edits.lock().unwrap().clone();
+        let accepted = document.edits.lock_or_recover().clone();
         // 先释放测试屏障再断言，旧实现失败也不能把真实worker留在无限等待里。
         for gate in gates {
             gate.send(()).unwrap();
@@ -1412,7 +1418,7 @@ mod bound_tests {
         let (release, released) = std::sync::mpsc::channel();
         let blocking = document.clone();
         let holder = std::thread::spawn(move || {
-            let _held = blocking.transaction.lock().unwrap();
+            let _held = blocking.transaction.lock_or_recover();
             ready.send(()).unwrap();
             let _ = released.recv_timeout(std::time::Duration::from_millis(300));
         });
@@ -1435,7 +1441,7 @@ mod bound_tests {
             elapsed >= std::time::Duration::from_millis(150),
             "assignment不得绕开发布的文档事务"
         );
-        assert_eq!(owner.assignments.lock().unwrap()[&2], [key]);
+        assert_eq!(owner.assignments.lock_or_recover()[&2], [key]);
         drop(model);
     }
 
@@ -1455,12 +1461,12 @@ mod bound_tests {
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        *document.timeline.lock().unwrap() = Some(timeline);
-        document.track_bindings.lock().unwrap().insert(
+        *document.timeline.lock_or_recover() = Some(timeline);
+        document.track_bindings.lock_or_recover().insert(
             "track".into(),
             vec![("host-mod".into(), "ara://pcm".into())],
         );
-        document.edit_sources.lock().unwrap().insert(
+        document.edit_sources.lock_or_recover().insert(
             "ara://pcm".into(),
             Arc::new(SourcePcm {
                 sample_rate: 44100,
@@ -1476,8 +1482,11 @@ mod bound_tests {
             .unwrap()
             .register(key, document.id, 0)
             .unwrap();
-        document.clip_ids.lock().unwrap().insert(key, "one".into());
-        document.regions.lock().unwrap().insert(
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(key, "one".into());
+        document.regions.lock_or_recover().insert(
             key,
             crate::ara::AraPlaybackRegion {
                 audio_source_persistent_id: "ara://pcm".into(),
@@ -1527,11 +1536,14 @@ mod bound_tests {
             )
             .unwrap();
         assert_eq!(
-            companion.edit_state().lock().unwrap().revision,
+            companion.edit_state().lock_or_recover().revision,
             response.revision
         );
-        assert_eq!(companion.edit_state().lock().unwrap().tracks[0].volume, 0.5);
-        let state = owner.edit_state().lock().unwrap().encode().unwrap();
+        assert_eq!(
+            companion.edit_state().lock_or_recover().tracks[0].volume,
+            0.5
+        );
+        let state = owner.edit_state().lock_or_recover().encode().unwrap();
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state).unwrap();
         let output = render_test_edits(&owner, &document, &restored).unwrap();
@@ -1552,7 +1564,7 @@ mod bound_tests {
                 "tracks":[],"clips":[],"bpm":120,"project_sec":0
             }))
             .unwrap();
-        *document.timeline.lock().unwrap() = Some(timeline);
+        *document.timeline.lock_or_recover() = Some(timeline);
         document.ready.store(true, Ordering::Release);
         let owner = Arc::new(ExtensionOwner::default());
         owner
@@ -1611,8 +1623,8 @@ mod bound_tests {
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }
-        *document.timeline.lock().unwrap() = Some(timeline);
-        document.edit_sources.lock().unwrap().insert(
+        *document.timeline.lock_or_recover() = Some(timeline);
+        document.edit_sources.lock_or_recover().insert(
             "ara://pcm".into(),
             Arc::new(SourcePcm {
                 sample_rate: 44100,
@@ -1631,7 +1643,7 @@ mod bound_tests {
                 )],
             ),
         ]);
-        *document.track_bindings.lock().unwrap() = bindings.clone();
+        *document.track_bindings.lock_or_recover() = bindings.clone();
         document.ready.store(true, Ordering::Release);
         let identities = [Box::new(0_u8), Box::new(0_u8)];
         let mut owners = Vec::new();
@@ -1642,8 +1654,8 @@ mod bound_tests {
                 .unwrap()
                 .register(key, document.id, index)
                 .unwrap();
-            document.clip_ids.lock().unwrap().insert(key, id.into());
-            document.regions.lock().unwrap().insert(
+            document.clip_ids.lock_or_recover().insert(key, id.into());
+            document.regions.lock_or_recover().insert(
                 key,
                 crate::ara::AraPlaybackRegion {
                     audio_source_persistent_id: "ara://pcm".into(),
@@ -1702,7 +1714,7 @@ mod bound_tests {
             );
             assert!(saved["edits"]["params"].get(id).is_some());
         }
-        let mut restored = document.edits.lock().unwrap().clone();
+        let mut restored = document.edits.lock_or_recover().clone();
         restored.reconcile(&bindings).unwrap();
         for (index, id) in ["a", "b"].into_iter().enumerate() {
             assert_eq!(
@@ -1732,16 +1744,16 @@ mod bound_tests {
             assert_eq!(a.timeline.unwrap()["tracks"][0]["volume"], 0.5);
             assert_eq!(b.timeline.unwrap()["tracks"][0]["volume"], 0.5);
             assert_eq!(
-                document.edits.lock().unwrap().params["b"].pitch_edit,
+                document.edits.lock_or_recover().params["b"].pitch_edit,
                 [61., 63.]
             );
             owners[1].restore_state(&second).unwrap();
             assert_eq!(
-                document.edits.lock().unwrap().params["a"].pitch_edit,
+                document.edits.lock_or_recover().params["a"].pitch_edit,
                 [61., 63.]
             );
             assert_eq!(
-                document.edits.lock().unwrap().params["b"].pitch_edit,
+                document.edits.lock_or_recover().params["b"].pitch_edit,
                 [62., 64.]
             );
             let editors: Vec<_> = owners
@@ -1914,14 +1926,14 @@ mod bound_tests {
                 .addPlaybackRegion
                 .unwrap())(extension.playbackRendererRef, key as *mut _);
         }
-        assert_eq!(owner.assignments.lock().unwrap().get(&1).unwrap(), &[key]);
+        assert_eq!(owner.assignments.lock_or_recover().get(&1).unwrap(), &[key]);
         // SAFETY: actual controller destructor invokes ModelHandle::destroy_document。
         unsafe {
             ((*controller.documentControllerInterface)
                 .destroyDocumentController
                 .unwrap())(controller.documentControllerRef)
         };
-        assert!(owner.assignments.lock().unwrap().is_empty());
+        assert!(owner.assignments.lock_or_recover().is_empty());
         assert!(owner.assigned_regions().is_err());
         assert!(!probe.controller_alive());
         // SAFETY: native entry 仍保留 companion storage；销毁文档后回调必须被 tombstone 拒绝。
@@ -1933,7 +1945,7 @@ mod bound_tests {
                 .addPlaybackRegion
                 .unwrap())(extension.playbackRendererRef, key as *mut _);
         }
-        assert!(owner.assignments.lock().unwrap().is_empty());
+        assert!(owner.assignments.lock_or_recover().is_empty());
         drop(entry);
         drop(owner);
         factory.entry().uninitialize().unwrap();
@@ -1992,7 +2004,7 @@ mod bound_tests {
             .get_mut(&seq)
             .unwrap()
             .remove(&b);
-        region_owners().lock().unwrap().remove(b);
+        region_owners().lock_or_recover().remove(b);
         assert_eq!(owner.assigned_regions().unwrap(), [a]);
         // SAFETY: lease 保留接口，remove sequence 不会移除显式 region。
         unsafe {
@@ -2059,7 +2071,7 @@ impl ExtensionOwner {
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
     pub(crate) unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
-        let bound = self.document.lock().unwrap().is_some();
+        let bound = self.document.lock_or_recover().is_some();
         let stamp = if bound {
             match self.host_query_stamp() {
                 Ok(stamp) => Some(stamp),
@@ -2072,7 +2084,7 @@ impl ExtensionOwner {
             !self.is_closed()
                 && match &stamp {
                     Some(stamp) => self.host_query_authorized(stamp),
-                    None => self.document.lock().unwrap().is_none(),
+                    None => self.document.lock_or_recover().is_none(),
                 }
         };
         let host = unsafe { crate::host::reaper::ReaperHost::from_context(context, authorized) }
@@ -2084,16 +2096,16 @@ impl ExtensionOwner {
             "REAPER host extension available={}",
             host.is_some()
         ));
-        let old = std::mem::replace(&mut *self.host.lock().unwrap(), host);
+        let old = std::mem::replace(&mut *self.host.lock_or_recover(), host);
         drop(old);
-        self.host_geometry.lock().unwrap().take();
+        self.host_geometry.lock_or_recover().take();
     }
     /// 短事务冻结真实owner/document/model/scope；整个host调用链都不持内部锁。
     fn host_query_stamp(
         &self,
     ) -> Result<(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>), String> {
         let document = self.editor_document()?;
-        let _transaction = document.transaction.lock().unwrap();
+        let _transaction = document.transaction.lock_or_recover();
         if self.is_closed() || !document.is_alive() {
             return Err("host query document/owner closed".into());
         }
@@ -2108,7 +2120,7 @@ impl ExtensionOwner {
         stamp: &(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>),
     ) -> bool {
         let (document, model, scope, keys) = stamp;
-        let _transaction = document.transaction.lock().unwrap();
+        let _transaction = document.transaction.lock_or_recover();
         !self.is_closed()
             && document.is_alive()
             && self
@@ -2141,7 +2153,7 @@ impl ExtensionOwner {
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
-        let members = document.sequence_regions.lock().unwrap();
+        let members = document.sequence_regions.lock_or_recover();
         for sequence in sequences {
             keys.extend(
                 members
@@ -2245,7 +2257,7 @@ impl ExtensionOwner {
                 .cloned()
                 .ok_or("assigned ARA region unavailable")?;
             // 上一次绑定：给几何全等的候选（复制出来的安全副本等）一个稳定性偏好。
-            let preferred = stamp.0.region_items.lock().unwrap().get(key).cloned();
+            let preferred = stamp.0.region_items.lock_or_recover().get(key).cloned();
             match unique_geometry_for_region(&region, &candidates, preferred.as_deref()) {
                 Some(geometry) => bound.push(crate::host::geometry::BoundHostGeometry {
                     region_key: *key,
@@ -2337,7 +2349,7 @@ impl ExtensionOwner {
         {
             return Vec::new();
         }
-        let Some(cached) = self.host_geometry.lock().unwrap().clone() else {
+        let Some(cached) = self.host_geometry.lock_or_recover().clone() else {
             return Vec::new();
         };
         if cached.model != document.revision.load(Ordering::Acquire)
@@ -2361,7 +2373,7 @@ impl ExtensionOwner {
     /// 只读快照，不触发宿主调用 —— 与 `host_geometries_locked` 同一纪律：调用方已经
     /// 在事务里，这里不得再枚举宿主。
     pub(crate) fn host_audio_status(&self) -> HostAudioStatus {
-        *self.host_audio.lock().unwrap()
+        *self.host_audio.lock_or_recover()
     }
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
     pub(crate) fn refresh_host_transport(&self) {
@@ -2386,11 +2398,11 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.host.lock().unwrap().clone() };
+        let host = { self.host.lock_or_recover().clone() };
         if let Some(host) = host {
             if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
                 // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
-                let _transaction = stamp.0.transaction.lock().unwrap();
+                let _transaction = stamp.0.transaction.lock_or_recover();
                 if !self.is_closed()
                     && stamp.0.is_alive()
                     && stamp.0.revision.load(Ordering::Acquire) == stamp.1
@@ -2406,7 +2418,7 @@ impl ExtensionOwner {
             return;
         }
         if throttled {
-            let mut last = self.last_enumeration.lock().unwrap();
+            let mut last = self.last_enumeration.lock_or_recover();
             let now = std::time::Instant::now();
             if last.is_some_and(|last| now.duration_since(last) < HOST_ENUMERATION_INTERVAL) {
                 return;
@@ -2431,10 +2443,10 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let Some(host) = self.host.lock().unwrap().clone() else {
+        let Some(host) = self.host.lock_or_recover().clone() else {
             // 没有可用的宿主扩展接口 ⇒ 明确报"宿主未识别"，而不是静默 `return`。
             // 静默返回会让界面停在初始值上（时间线全空、无提示），用户以为插件坏了。
-            *self.host_audio.lock().unwrap() = HostAudioStatus {
+            *self.host_audio.lock_or_recover() = HostAudioStatus {
                 state: HostAudioState::HostUnidentified,
                 waiting_items: 0,
             };
@@ -2456,7 +2468,7 @@ impl ExtensionOwner {
             .lock()
             .unwrap()
             .is_some_and(|at| at.elapsed() < FACTS_REFRESH_INTERVAL);
-        let stored = *stamp.0.ui_inventory_stamp.lock().unwrap();
+        let stored = *stamp.0.ui_inventory_stamp.lock_or_recover();
         if self.host_query_authorized(&stamp) && fresh && stored == Some(token) {
             return;
         }
@@ -2475,7 +2487,7 @@ impl ExtensionOwner {
             if !allowed() {
                 return;
             }
-            let Some(host) = owner.host.lock().unwrap().clone() else {
+            let Some(host) = owner.host.lock_or_recover().clone() else {
                 continue;
             };
             let own_allowed = || {
@@ -2509,8 +2521,8 @@ impl ExtensionOwner {
                 // 【锁序】按 `document.rs` 声明的层级取锁：`timeline`(2) 先于
                 // `clip_ids`(4)。此前这里是反的 —— 与 `session.rs::analysis_timeline`
                 // 的正序共存，构成真实的死锁窗口。
-                let timeline = stamp.0.timeline.lock().unwrap();
-                let ids = stamp.0.clip_ids.lock().unwrap();
+                let timeline = stamp.0.timeline.lock_or_recover();
+                let ids = stamp.0.clip_ids.lock_or_recover();
                 item_count += track.items.len();
                 for candidate in stamp.0.renderer_owners() {
                     // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
@@ -2545,7 +2557,7 @@ impl ExtensionOwner {
                 drop(timeline);
                 drop(ids);
                 if track.id.starts_with("host-track-") {
-                    if let Some(old) = stamp.0.ui_tracks.lock().unwrap().get(&track.guid) {
+                    if let Some(old) = stamp.0.ui_tracks.lock_or_recover().get(&track.guid) {
                         track.id = old.id.clone();
                     }
                 }
@@ -2590,8 +2602,8 @@ impl ExtensionOwner {
         // 这份叠加让"宿主在 ARA 侧改了时间拉伸 / 内容淡化"也进 `RenderFacts` —— 与原生
         // 字段走同一条失效通路，不必再依赖某一处记得手动 bump。
         {
-            let regions = stamp.0.regions.lock().unwrap();
-            let items = stamp.0.region_items.lock().unwrap();
+            let regions = stamp.0.regions.lock_or_recover();
+            let items = stamp.0.region_items.lock_or_recover();
             for (key, item_id) in items.iter() {
                 let (Some(entry), Some(region)) = (facts.items.get_mut(item_id), regions.get(key))
                 else {
@@ -2602,7 +2614,7 @@ impl ExtensionOwner {
                 entry.content_fade_tail = region.has_content_based_fade_at_tail;
             }
         }
-        let _transaction = stamp.0.transaction.lock().unwrap();
+        let _transaction = stamp.0.transaction.lock_or_recover();
         if self.is_closed()
             || !stamp.0.is_alive()
             || stamp.0.revision.load(Ordering::Acquire) != stamp.1
@@ -2621,7 +2633,7 @@ impl ExtensionOwner {
         // 事务内记下"变了"，出事务后再调用它。
         let mut facts_changed = false;
         {
-            let mut previous = stamp.0.render_facts.lock().unwrap();
+            let mut previous = stamp.0.render_facts.lock_or_recover();
             if *previous != facts {
                 *previous = facts;
                 facts_changed = true;
@@ -2630,7 +2642,7 @@ impl ExtensionOwner {
         // 强制重采但令牌与事实都没变 ⇒ 这一轮什么也没发生：只刷新采样时刻并返回，
         // 不发布清单、不 bump `ui_geometry_revision`、不失效渲染（见上面的 `token_changed`）。
         if !token_changed && !facts_changed {
-            *stamp.0.ui_inventory_sampled_at.lock().unwrap() = Some(std::time::Instant::now());
+            *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
             return;
         }
         stamp
@@ -2639,19 +2651,19 @@ impl ExtensionOwner {
             .lock()
             .unwrap()
             .extend(tracks.values().map(|track| track.id.clone()));
-        *stamp.0.ui_tracks.lock().unwrap() = tracks;
-        *stamp.0.ui_inventory_stamp.lock().unwrap() = Some(token);
+        *stamp.0.ui_tracks.lock_or_recover() = tracks;
+        *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
         // 完整采集已完成：记下时刻，让"令牌不动但 take 级事实变了"这条兜底路径
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
-        *stamp.0.ui_inventory_sampled_at.lock().unwrap() = Some(std::time::Instant::now());
+        *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
-        *self.host_audio.lock().unwrap() = status;
+        *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
         if item_count > 0 {
             log::info!(
                 "[ara] host inventory: {} track(s), {} item(s), {} claimed by an assigned region",
-                stamp.0.ui_tracks.lock().unwrap().len(),
+                stamp.0.ui_tracks.lock_or_recover().len(),
                 item_count,
                 claimed_items
             );
@@ -2689,7 +2701,7 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        let host = { self.host.lock().unwrap().clone() };
+        let host = { self.host.lock_or_recover().clone() };
         let authorized = || self.host_query_authorized(&stamp);
         let before = host
             .as_ref()
@@ -2733,14 +2745,14 @@ impl ExtensionOwner {
         if geometry.is_ok() && (before.is_none() || before != after) {
             geometry = Err("REAPER project changed during cached geometry refresh".into());
         }
-        let _transaction = stamp.0.transaction.lock().unwrap();
+        let _transaction = stamp.0.transaction.lock_or_recover();
         let mut prepare_fades = false;
         if !self.is_closed()
             && stamp.0.is_alive()
             && stamp.0.revision.load(Ordering::Acquire) == stamp.1
             && stamp.0.scope_revision.load(Ordering::Acquire) == stamp.2
         {
-            let mut cached = self.host_geometry.lock().unwrap();
+            let mut cached = self.host_geometry.lock_or_recover();
             let changed = cached.as_ref().is_none_or(|old| {
                 old.model != stamp.1 || old.scope != stamp.2 || old.value != geometry
             });
@@ -2799,7 +2811,7 @@ impl ExtensionOwner {
                 Ordering::Release,
             );
             if let Ok(bound) = &geometry {
-                let mut items = stamp.0.region_items.lock().unwrap();
+                let mut items = stamp.0.region_items.lock_or_recover();
                 for entry in bound {
                     items.insert(entry.region_key, entry.geometry.item_id.clone());
                 }
@@ -2985,7 +2997,7 @@ impl ExtensionOwner {
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
     pub(crate) fn host_backend(&self) -> crate::host::adapter::HostBackend {
-        crate::host::adapter::HostBackend::from_native(self.host.lock().unwrap().clone())
+        crate::host::adapter::HostBackend::from_native(self.host.lock_or_recover().clone())
     }
     /// 撤销历史的**权威**：宿主提供撤销栈时用宿主的，否则用插件自管的那份。
     ///
@@ -3030,7 +3042,7 @@ impl ExtensionOwner {
         if let Some(track) = track {
             let document = self.editor_document()?;
             let clips = {
-                let timeline = document.timeline.lock().unwrap();
+                let timeline = document.timeline.lock_or_recover();
                 timeline
                     .as_ref()
                     .ok_or("host timeline unavailable")?
@@ -3082,7 +3094,7 @@ impl ExtensionOwner {
             }
         }
         let key = {
-            let ids = document.clip_ids.lock().unwrap();
+            let ids = document.clip_ids.lock_or_recover();
             ids.iter()
                 .find(|(_, id)| id.as_str() == clip_id)
                 .map(|(key, _)| *key)
@@ -3127,7 +3139,7 @@ impl ExtensionOwner {
         };
         if let Some(document) = document {
             {
-                let _transaction = document.transaction.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
                 if !self.closed.swap(true, Ordering::AcqRel) {
                     document.scope_revision.fetch_add(1, Ordering::AcqRel);
                 }
@@ -3139,9 +3151,9 @@ impl ExtensionOwner {
             self.closed.store(true, Ordering::Release);
             self.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
-        let host = self.host.lock().unwrap().take();
+        let host = self.host.lock_or_recover().take();
         drop(host);
-        self.host_geometry.lock().unwrap().take();
+        self.host_geometry.lock_or_recover().take();
         self.cancel_preparation();
         if let Some(Ok(worker)) = self.preparation.get() {
             worker.close();
@@ -3190,7 +3202,7 @@ impl ExtensionOwner {
     /// 诊断包在任意时刻被导出，不值得为它触发一次完整快照。这里只给"准备好了没有、
     /// 准备的是哪一版"，那正是排查"渲染结果陈旧"时要看的东西。
     pub(crate) fn prepared_snapshot(&self) -> Option<serde_json::Value> {
-        self.prepared.lock().unwrap().as_ref().map(|version| {
+        self.prepared.lock_or_recover().as_ref().map(|version| {
             serde_json::json!({
                 "model": version.model,
                 "edit": version.edit,
@@ -3207,11 +3219,11 @@ impl ExtensionOwner {
             .unwrap()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
-            .and_then(|document| document.playback.lock().unwrap().clone())
+            .and_then(|document| document.playback.lock_or_recover().clone())
     }
     /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
     pub fn stop_channel(&self) {
-        let channel = self.channel.lock().unwrap().take();
+        let channel = self.channel.lock_or_recover().take();
         drop(channel);
     }
 
@@ -3238,7 +3250,7 @@ impl ExtensionOwner {
             .and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
             {
-                let _transaction = document.transaction.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
                 let owners = document.renderer_owners();
                 for owner in &owners {
                     if let Err(error) = owner.merge_pending_restore(&document) {
@@ -3259,7 +3271,7 @@ impl ExtensionOwner {
         }
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(bytes)?;
-        *self.pending_restore.lock().unwrap() = Some(restored);
+        *self.pending_restore.lock_or_recover() = Some(restored);
         self.refresh_document();
         Ok(())
     }
@@ -3268,7 +3280,7 @@ impl ExtensionOwner {
         &self,
         document: &super::document::DocumentSession,
     ) -> Result<(), String> {
-        let mut pending = self.pending_restore.lock().unwrap();
+        let mut pending = self.pending_restore.lock_or_recover();
         let Some(saved) = pending.as_ref() else {
             return Ok(());
         };
@@ -3279,7 +3291,7 @@ impl ExtensionOwner {
         if host.tracks.is_empty() {
             // 空轨组件仍能恢复私有参数分组；不借零音频scope恢复其它轨的源曲线。
             if saved.params.is_empty() && saved.tracks.is_empty() && saved.atlas.is_empty() {
-                let mut edits = document.edits.lock().unwrap();
+                let mut edits = document.edits.lock_or_recover();
                 edits.groups = saved.groups.clone();
                 edits.revision = edits
                     .revision
@@ -3323,7 +3335,7 @@ impl ExtensionOwner {
             restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
                 .capture(&client, &document.parameter_identities_locked(&host)?)?;
         }
-        let mut edits = document.edits.lock().unwrap();
+        let mut edits = document.edits.lock_or_recover();
         let mut merged = edits.merge(&host, &client, edits.revision)?;
         merged.groups = restored.groups.clone();
         let clip_ids = host
@@ -3346,7 +3358,7 @@ impl ExtensionOwner {
         }
         merged.fades.retain(|item, _| !items.contains(item));
         merged.fades.extend(restored.fades);
-        merged.reconcile(&document.track_bindings.lock().unwrap())?;
+        merged.reconcile(&document.track_bindings.lock_or_recover())?;
         *edits = merged;
         *pending = None;
         Ok(())
@@ -3362,13 +3374,13 @@ impl ExtensionOwner {
             .and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
             document.flush_editor()?;
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire) {
                 return Err("host graph not ready; cannot save ARA edits".into());
             }
             self.merge_pending_restore(&document)?;
-            let mut edits = document.edits.lock().unwrap();
-            edits.reconcile(&document.track_bindings.lock().unwrap())?;
+            let mut edits = document.edits.lock_or_recover();
+            edits.reconcile(&document.track_bindings.lock_or_recover())?;
             let host = self.assigned_timeline(&document)?;
             let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
             let mut local = edits.clone();
@@ -3399,7 +3411,7 @@ impl ExtensionOwner {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .unwrap_or(&self.edits.lock().unwrap())
+                .unwrap_or(&self.edits.lock_or_recover())
                 .encode()
         }
     }
@@ -3430,7 +3442,7 @@ impl ExtensionOwner {
         {
             return self.commit_request(&document, base_revision, model_revision, timeline);
         }
-        let _transaction = document.transaction.lock().unwrap();
+        let _transaction = document.transaction.lock_or_recover();
         if let Err(error) = self.merge_pending_restore(&document) {
             return Response {
                 error: Some(error),
@@ -3438,17 +3450,17 @@ impl ExtensionOwner {
             };
         }
         let model_revision = document.revision.load(Ordering::Acquire);
-        let mut edits = document.edits.lock().unwrap();
+        let mut edits = document.edits.lock_or_recover();
         let outcome = (|| {
             if !document.ready.load(Ordering::Acquire) {
                 return Err("host model not ready; refresh after editing".into());
             }
-            edits.reconcile(&document.track_bindings.lock().unwrap())?;
+            edits.reconcile(&document.track_bindings.lock_or_recover())?;
             let mut timeline = self.assigned_timeline(&document)?;
             match request {
                 Request::Snapshot => {
                     edits.apply(&mut timeline);
-                    let available = document.edit_sources.lock().unwrap();
+                    let available = document.edit_sources.lock_or_recover();
                     let mut sources = Vec::new();
                     for id in timeline
                         .clips
@@ -3515,7 +3527,7 @@ impl ExtensionOwner {
     ) -> hifishifter_ara_ipc::Response {
         let outcome = (|| {
             let (candidate, epoch, scope, inputs) = {
-                let _transaction = document.transaction.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
                 self.merge_pending_restore(document)?;
                 if !document.ready.load(Ordering::Acquire) {
                     return Err("host model not ready; refresh after editing".into());
@@ -3523,8 +3535,8 @@ impl ExtensionOwner {
                 if document.revision.load(Ordering::Acquire) != base_model {
                     return Err("Conflict: host model changed; refresh".into());
                 }
-                let mut edits = document.edits.lock().unwrap();
-                edits.reconcile(&document.track_bindings.lock().unwrap())?;
+                let mut edits = document.edits.lock_or_recover();
+                edits.reconcile(&document.track_bindings.lock_or_recover())?;
                 let client = serde_json::from_value(client).map_err(|e| e.to_string())?;
                 let mut candidate =
                     edits.merge(&self.assigned_timeline(document)?, &client, base_edit)?;
@@ -3534,7 +3546,7 @@ impl ExtensionOwner {
                     &curve_timeline,
                     &document.parameter_identities_locked(&curve_timeline)?,
                 )?;
-                candidate.reconcile(&document.track_bindings.lock().unwrap())?;
+                candidate.reconcile(&document.track_bindings.lock_or_recover())?;
                 drop(edits);
                 let inputs = document
                     .renderer_owners()
@@ -3563,13 +3575,13 @@ impl ExtensionOwner {
                 super::snapshot::compact_prepared(&mut snapshots)?;
                 prepared.push((owner, keys, snapshots));
             }
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire)
                 || document.revision.load(Ordering::Acquire) != base_model
             {
                 return Err("Conflict: host model changed during commit".into());
             }
-            let mut edits = document.edits.lock().unwrap();
+            let mut edits = document.edits.lock_or_recover();
             if edits.revision != base_edit {
                 return Err("Conflict: edit revision changed during commit".into());
             }
@@ -3609,7 +3621,7 @@ impl ExtensionOwner {
         hifishifter_ara_ipc::Response {
             ok: outcome.is_ok(),
             error: outcome.err(),
-            revision: document.edits.lock().unwrap().revision,
+            revision: document.edits.lock_or_recover().revision,
             model_revision: document.revision.load(Ordering::Acquire),
             ..Default::default()
         }
@@ -3637,7 +3649,7 @@ impl ExtensionOwner {
         // `project_scale_notes`）是同一条纪律、同一个理由。
         document.project_host_take_facts_locked(&mut timeline);
         let mut resolved = edits.clone();
-        resolved.reconcile(&document.track_bindings.lock().unwrap())?;
+        resolved.reconcile(&document.track_bindings.lock_or_recover())?;
         resolved.apply(&mut timeline);
         if !resolved.groups.is_empty() {
             // 空父轨也能承载参数组算法；不加入其音频clip，更不混入其它renderer的区域。
@@ -3653,7 +3665,7 @@ impl ExtensionOwner {
                 &std::collections::BTreeSet::new(),
             );
         }
-        let geometry = document.regions.lock().unwrap();
+        let geometry = document.regions.lock_or_recover();
         let regions = keys
             .iter()
             .map(|key| {
@@ -3689,9 +3701,9 @@ impl ExtensionOwner {
                 .project_local(&timeline, &document.parameter_identities_locked(&timeline)?)?
         };
         let available = if kernel_render {
-            document.edit_sources.lock().unwrap()
+            document.edit_sources.lock_or_recover()
         } else {
-            document.sources.lock().unwrap()
+            document.sources.lock_or_recover()
         };
         let sources = regions
             .iter()
@@ -3717,7 +3729,7 @@ impl ExtensionOwner {
         document: &super::document::DocumentSession,
     ) -> Result<hifishifter_kernel::state::TimelineState, String> {
         let keys = self.assigned_regions().map_err(|e| e.to_string())?;
-        let identities = document.clip_ids.lock().unwrap();
+        let identities = document.clip_ids.lock_or_recover();
         let ids = keys
             .iter()
             .map(|key| {
@@ -3800,7 +3812,7 @@ impl ExtensionOwner {
                         return;
                     };
                     // assignment写入、撤销和最终发布必须共用此短事务，消除check→publish竞态。
-                    let _transaction = document.transaction.lock().unwrap();
+                    let _transaction = document.transaction.lock_or_recover();
                     let keys = keys.iter().map(|key| *key as RegionKey).collect::<Vec<_>>();
                     let valid = keys.is_empty()
                         || region_owners()
@@ -3812,9 +3824,9 @@ impl ExtensionOwner {
                     let next_keys = if valid { keys.clone() } else { Vec::new() };
                     let next_sequences =
                         sequences.iter().map(|key| *key as u64).collect::<Vec<_>>();
-                    let changed = owner.assignments.lock().unwrap().get(&role.bits())
+                    let changed = owner.assignments.lock_or_recover().get(&role.bits())
                         != Some(&next_keys)
-                        || owner.sequences.lock().unwrap().get(&role.bits())
+                        || owner.sequences.lock_or_recover().get(&role.bits())
                             != Some(&next_sequences);
                     if changed {
                         document.scope_revision.fetch_add(1, Ordering::AcqRel);
@@ -3824,7 +3836,7 @@ impl ExtensionOwner {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .insert(role.bits(), if valid { keys } else { Vec::new() });
-                    owner.sequences.lock().unwrap().insert(
+                    owner.sequences.lock_or_recover().insert(
                         role.bits(),
                         sequences.iter().map(|key| *key as u64).collect(),
                     );
@@ -3860,7 +3872,7 @@ impl ExtensionOwner {
         )?;
         let raw = owned.0.as_raw();
         document.attach(self, owned.1, companion)?;
-        *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
+        *self.document.lock_or_recover() = Some(Arc::downgrade(&document));
         let weak = Arc::downgrade(self);
         if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
             let _ = self
@@ -3868,7 +3880,7 @@ impl ExtensionOwner {
                 .get_or_init(super::preparation::PreparationQueue::new);
         }
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
-        *self.prepare_owner.lock().unwrap() = Some(weak);
+        *self.prepare_owner.lock_or_recover() = Some(weak);
         let _ = self.clock.set(document.clock.clone());
         static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
         self.writer_id.store(
@@ -3908,7 +3920,7 @@ impl ExtensionOwner {
                         "[ara] GUI channel ready instance={}",
                         server.record().instance_id
                     );
-                    *self.channel.lock().unwrap() = Some(server);
+                    *self.channel.lock_or_recover() = Some(server);
                 }
                 Err(error) => log::warn!("[ara] GUI channel unavailable: {error}"),
             }
@@ -3920,9 +3932,9 @@ impl ExtensionOwner {
     pub fn document_closed(&self) {
         self.stop_editor();
         self.stop_channel();
-        self.assignments.lock().unwrap().clear();
-        self.sequences.lock().unwrap().clear();
-        self.document.lock().unwrap().take();
+        self.assignments.lock_or_recover().clear();
+        self.sequences.lock_or_recover().clear();
+        self.document.lock_or_recover().take();
         self.snapshots.iter().for_each(|snapshot| snapshot.clear());
     }
 
@@ -3952,7 +3964,7 @@ impl ExtensionOwner {
             .get(&role)
             .cloned()
             .unwrap_or_default();
-        let members = document.sequence_regions.lock().unwrap();
+        let members = document.sequence_regions.lock_or_recover();
         for sequence in sequences {
             keys.extend(
                 members
@@ -3987,7 +3999,7 @@ impl ExtensionOwner {
         #[cfg(test)]
         self.prepare_requests.fetch_add(1, Ordering::AcqRel);
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
-        let weak = self.prepare_owner.lock().unwrap().clone();
+        let weak = self.prepare_owner.lock_or_recover().clone();
         let Some(weak) = weak else {
             return;
         };
@@ -4014,7 +4026,7 @@ impl ExtensionOwner {
         scope: u64,
         keys: Vec<u64>,
     ) {
-        *self.prepared.lock().unwrap() = Some(PreparedVersion {
+        *self.prepared.lock_or_recover() = Some(PreparedVersion {
             model,
             edit,
             epoch,
@@ -4040,7 +4052,7 @@ impl ExtensionOwner {
         let mut attempts = 0usize;
         loop {
             {
-                let _transaction = document.transaction.lock().unwrap();
+                let _transaction = document.transaction.lock_or_recover();
                 if self.is_closed() || !document.is_alive() {
                     return Err("offline renderer closed".into());
                 }
@@ -4050,12 +4062,12 @@ impl ExtensionOwner {
                 let keys = self.assigned_regions().map_err(|e| e.to_string())?;
                 let version = PreparedVersion {
                     model: document.revision.load(Ordering::Acquire),
-                    edit: document.edits.lock().unwrap().revision,
+                    edit: document.edits.lock_or_recover().revision,
                     epoch: document.render_epoch.load(Ordering::Acquire),
                     scope: document.scope_revision.load(Ordering::Acquire),
                     keys,
                 };
-                if self.prepared.lock().unwrap().as_ref() == Some(&version)
+                if self.prepared.lock_or_recover().as_ref() == Some(&version)
                     && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
                 {
                     return Ok(());
@@ -4096,11 +4108,11 @@ impl ExtensionOwner {
             return Err("document closed".into());
         };
         let (model, edit, epoch, scope, keys, input) = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire) {
                 return Ok(());
             }
-            let edits = document.edits.lock().unwrap().clone();
+            let edits = document.edits.lock_or_recover().clone();
             let (keys, input) = self.capture_render_input(&document, &edits, edits.revision > 0)?;
             // actor可能已发布本代两率结果；同版本重排队不应再争预算或留下伪失败状态。
             let version = PreparedVersion {
@@ -4110,7 +4122,7 @@ impl ExtensionOwner {
                 scope: document.scope_revision.load(Ordering::Acquire),
                 keys: keys.clone(),
             };
-            if self.prepared.lock().unwrap().as_ref() == Some(&version)
+            if self.prepared.lock_or_recover().as_ref() == Some(&version)
                 && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
             {
                 return Ok(());
@@ -4129,12 +4141,12 @@ impl ExtensionOwner {
         }
         let mut snapshots = input.render(cancel.clone())?;
         super::snapshot::compact_prepared(&mut snapshots)?;
-        let _transaction = document.transaction.lock().unwrap();
+        let _transaction = document.transaction.lock_or_recover();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
             return Ok(());
         }
         if document.revision.load(Ordering::Acquire) != model
-            || document.edits.lock().unwrap().revision != edit
+            || document.edits.lock_or_recover().revision != edit
             || document.render_epoch.load(Ordering::Acquire) != epoch
             || document.scope_revision.load(Ordering::Acquire) != scope
             || self.assigned_regions().map_err(|e| e.to_string())? != keys
@@ -4290,7 +4302,7 @@ mod host_audio_state_tests {
         // 持事务调用：`prepare_job` 会在事务处阻塞，后台不会真的去渲染合成夹具文档
         // （与 `vst3.rs` 的离线 setup 用例同一手法）。`invalidate_render_input` 刻意
         // **不**取事务，所以这里不会自锁。
-        let held = document.transaction.lock().unwrap();
+        let held = document.transaction.lock_or_recover();
         document.invalidate_render_input();
         assert!(
             document.render_epoch.load(Ordering::Acquire) > epoch_before,
@@ -4354,7 +4366,7 @@ mod host_audio_state_tests {
             "夹具必须把 change count 钉住不动，否则测不到兜底路径"
         );
         // 让强制重采兜底路径生效：把上次采集时刻倒推到间隔之前。
-        *document.ui_inventory_sampled_at.lock().unwrap() = Some(
+        *document.ui_inventory_sampled_at.lock_or_recover() = Some(
             std::time::Instant::now() - FACTS_REFRESH_INTERVAL - std::time::Duration::from_secs(1),
         );
 
@@ -4398,8 +4410,8 @@ mod host_audio_state_tests {
             "本夹具的第二个实例必须是编辑器实例"
         );
         // playback 实例报"正常"、编辑器实例报 folder 判据：载荷必须取后者。
-        *owners[0].host_audio.lock().unwrap() = HostAudioStatus::default();
-        *editor.host_audio.lock().unwrap() = HostAudioStatus {
+        *owners[0].host_audio.lock_or_recover() = HostAudioStatus::default();
+        *editor.host_audio.lock_or_recover() = HostAudioStatus {
             state: HostAudioState::FolderParentWithoutRegions,
             waiting_items: 2,
         };
@@ -4592,7 +4604,7 @@ mod assigned_timeline_tests {
         let document = model.session();
         let owner = &owners[0];
         {
-            let mut timeline = document.timeline.lock().unwrap();
+            let mut timeline = document.timeline.lock_or_recover();
             let timeline = timeline.as_mut().unwrap();
             timeline.tracks.push(
                 serde_json::from_value(
@@ -4650,6 +4662,8 @@ mod assigned_timeline_tests {
 /// 唯一性判据与重复认领丢弃。
 #[cfg(test)]
 mod host_geometries_tests {
+    use crate::sync::MutexExt;
+
     /// 把某条 region 调成与夹具 item 相容的窗口。
     ///
     /// 夹具的 item 几何是 `D_POSITION=1 / D_LENGTH=4 / D_STARTOFFS=0 / D_PLAYRATE=0.5`。
@@ -4678,11 +4692,11 @@ mod host_geometries_tests {
         let second = (&*ids[1] as *const u8) as u64;
         // 夹具只有一个 item，先让它与 first 相容；second 留在原位（对不上）。
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             align_with_fixture_item(regions.get_mut(&first).unwrap());
         }
         // 把第二条 region 也分配给同一个 owner：这才是"一个实例管一组 region"。
-        let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        let raw = owner.binding.lock_or_recover().as_ref().unwrap().as_raw();
         unsafe {
             let ext = &*raw;
             ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
@@ -4716,11 +4730,11 @@ mod host_geometries_tests {
         let first = (&*ids[0] as *const u8) as u64;
         let second = (&*ids[1] as *const u8) as u64;
         {
-            let mut regions = document.regions.lock().unwrap();
+            let mut regions = document.regions.lock_or_recover();
             align_with_fixture_item(regions.get_mut(&first).unwrap());
             align_with_fixture_item(regions.get_mut(&second).unwrap());
         }
-        let raw = owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        let raw = owner.binding.lock_or_recover().as_ref().unwrap().as_raw();
         unsafe {
             let ext = &*raw;
             ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(

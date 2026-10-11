@@ -1,5 +1,6 @@
 //! 原GUI分割命令只写所属REAPER item；整批预检、宿主Undo、真实两段回流共同决定成功。
 use super::session::EditorSession;
+use crate::sync::MutexExt;
 use crate::{
     host::{
         geometry::{host_value_compatible, HostClipGeometry},
@@ -43,7 +44,7 @@ impl EditorSession {
         if ids.is_empty() || ids.len() > 512 {
             return Err("split batch must contain 1..512 clips".into());
         }
-        let timeline = self.timeline.lock().unwrap();
+        let timeline = self.timeline.lock_or_recover();
         let mut seen = std::collections::HashSet::new();
         let mut clips = Vec::new();
         for id in ids {
@@ -121,7 +122,7 @@ pub(crate) fn execute(
     let mut pairs = Vec::new();
     for target in targets {
         let seed = {
-            let _transaction = document.transaction.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
             document
                 .edits
                 .lock()
@@ -132,8 +133,8 @@ pub(crate) fn execute(
         let pair = target.split_at(plan.position, authorized)?;
         // 确切API回执建立右段→父item关系，重叠同源片段不走模糊祖先匹配。
         {
-            let _transaction = document.transaction.lock().unwrap();
-            let mut edits = document.edits.lock().unwrap();
+            let _transaction = document.transaction.lock_or_recover();
+            let mut edits = document.edits.lock_or_recover();
             edits
                 .atlas
                 .register_split(&pair.0.item_id, &pair.1.item_id, seed)?;
@@ -213,7 +214,7 @@ mod tests {
         let (_model, owner, _id) = super::super::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let mid = clip.start_sec + clip.length_sec / 2.;
         assert!(editor
             .plan_host_split("split_clip", &json!({"clipId":clip.id,"splitSec":mid}))
@@ -229,7 +230,7 @@ mod tests {
                 &json!({"clipIds":[clip.id,clip.id],"splitSec":mid})
             )
             .is_err());
-        assert_eq!(editor.timeline.lock().unwrap().clips.len(), 1);
+        assert_eq!(editor.timeline.lock_or_recover().clips.len(), 1);
         editor.close();
     }
     /// 真正经过raw SplitMediaItem绑定取得新GUID；源起点按倍率推进，不改私有timeline冒充回流。
@@ -250,7 +251,7 @@ mod tests {
         owner.refresh_host_transport();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let clip = editor.timeline.lock().unwrap().clips[0].clone();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
         let plan = editor
             .plan_host_split(
                 "split_clip",
@@ -271,7 +272,7 @@ mod tests {
             1
         );
         assert_eq!(
-            editor.timeline.lock().unwrap().clips.len(),
+            editor.timeline.lock_or_recover().clips.len(),
             1,
             "fixture未模拟ARA创建，不能假装已看见两段"
         );
