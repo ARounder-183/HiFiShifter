@@ -206,6 +206,12 @@ frontend/.esbuild-tmp/
 # Committed here rather than on develop so the main working tree stays clean.
 .superpowers/
 
+# AI-assistant tool artifacts and stale generated analysis: kept locally,
+# never source (the authoritative architecture doc is docs/extension-api.md).
+.sisyphus/
+PROJECT_ANALYSIS.md
+vowel_synth.py
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
@@ -215,6 +221,14 @@ squashfs-root/
 
 
 # 插件 SDK 检出（ARA_SDK / vst3sdk）：构建期按 tools/plugin-sdks.json 钉死的
-# revision 拉取，不提交（SDK 许可不允许随本仓库分发）。位置见 tools/sdk-env.ps1。
+# revision 拉取，不提交（按 pin 下载以控体积并履行许可声明义务）。位置见 tools/sdk-env.ps1。
 third_party/sdk/
+
+# 运行时模型只认 backend/src-tauri/resources/models/（解析路径从不查 third_party/，
+# 见 vocoder/hnsep_onnx.rs::resolve_model_path）。下面是曾经误入库的死重副本：
+# 本地留存、不再跟踪。来源与校验信息见各目录的 NOTICE / README。
+third_party/vocal-remover/model/hnsep_240512_vr/hnsep.onnx
+third_party/vocal-remover/model/hnsep_240512_vr/model.pt
+third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/model.ckpt
+third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/pc_nsf_hifigan.onnx
 
