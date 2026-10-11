@@ -692,6 +692,8 @@ export const jaJP = {
     clip_take_cycle_prev: "前のテイクへ切替",
     clip_take_duplicate: "現在のテイクを複製",
     clip_take_reverse: "逆再生",
+    clip_nonlinear_stretch_unsupported: "非線形ストレッチは非対応",
+    clip_take_envelope_unsupported: "テイクエンベロープは未対応",
     clip_take_channel_mode: "チャンネルモード",
     clip_take_channel_mode_cycle: "クリックで切り替え",
     clip_channel_mode_normal: "ステレオ（ソース準拠）",

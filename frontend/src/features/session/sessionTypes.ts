@@ -246,6 +246,13 @@ export interface ClipTakeInfo {
     sourceChannels?: number;
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
+    /**
+     * 宿主的非线性拉伸标记（REAPER stretch markers）。非空 ⇒ 该 take 的源时间映射
+     * 不是直线，插件不渲染它（见 `clipHasNonlinearStretch`）。
+     */
+    stretchMarkers?: unknown[];
+    /** Take 级包络（VOLENV/PANENV/MUTEENV）。插件不渲染 take 包络。 */
+    envelopes?: unknown;
 }
 
 export interface ClipInfo {
@@ -417,6 +424,39 @@ export function clipTooltipTitle(clip: {
     const path = typeof clip.sourcePath === "string" ? clip.sourcePath.trim() : "";
     if (path === "") return "";
     return path.split(/[\\/]/).pop() ?? "";
+}
+
+/** active take（缺 `activeTakeId` 时退回第一个；无 take 时 `undefined`）。 */
+function activeTake<T extends { id: string }>(clip: {
+    takes?: T[];
+    activeTakeId?: string;
+}): T | undefined {
+    const takes = clip.takes ?? [];
+    return takes.find((take) => take.id === clip.activeTakeId) ?? takes[0];
+}
+
+/**
+ * 该 clip 的 active take 是否带**非线性拉伸标记**（REAPER stretch markers）。
+ *
+ * 【为什么前端要判它】插件读到 marker 却从不物化（`SourceTimeMap::piecewise` 已就绪，
+ * 但只有 `linear` 被构造过），因此源时间映射不是直线时插件**渲染不出正确内容**，
+ * 分割/拖边也一律被后端拒绝。后端会给一条明确错误，但"点了才报错"不如"事先说清楚"。
+ * 这里只做**只读展示**判据：UI 据此提示"非线性拉伸暂不支持"。
+ */
+export function clipHasNonlinearStretch(clip: {
+    takes?: Array<{ id: string; stretchMarkers?: unknown[] }>;
+    activeTakeId?: string;
+}): boolean {
+    const take = activeTake(clip);
+    return Array.isArray(take?.stretchMarkers) && take.stretchMarkers.length > 0;
+}
+
+/** 该 clip 的 active take 是否带 take 级包络（VOLENV/PANENV/MUTEENV）。 */
+export function clipHasTakeEnvelope(clip: {
+    takes?: Array<{ id: string; envelopes?: unknown }>;
+    activeTakeId?: string;
+}): boolean {
+    return activeTake(clip)?.envelopes != null;
 }
 
 export interface MidiNoteEvent {

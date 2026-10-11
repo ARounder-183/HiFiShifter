@@ -278,6 +278,8 @@ import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isMirrorEcho } from "./timeline/scrollEcho";
 import {
     activeClipTakeName,
+    clipHasNonlinearStretch,
+    clipHasTakeEnvelope,
     clipTooltipTitle,
     type ClipFormantMorph,
 } from "../../features/session/sessionTypes";
@@ -3862,9 +3864,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         clip.midiNoteCount != null
                             ? `${t("clip_type_midi_prefix")} ${label}`.trim()
                             : label;
+                    // 插件不渲染非线性拉伸 / take 包络。事先在浮标里说清楚，而不是让用户
+                    // 点了分割/拖边再撞一个"operation refused"（独立 App 会物化它们，
+                    // 因此只在插件模式下提示）。
+                    let described = base;
+                    if (isPluginMode() && clipHasNonlinearStretch(clip)) {
+                        described = `${described} · ${t("clip_nonlinear_stretch_unsupported")}`;
+                    }
+                    if (isPluginMode() && clipHasTakeEnvelope(clip)) {
+                        described = `${described} · ${t("clip_take_envelope_unsupported")}`;
+                    }
                     // 倒放标记：宿主报告方向后必须让人看得见 —— 否则"这个 take 倒放了"
                     // 只活在数据里，用户会以为它没倒放（插件里尤其如此：没有波形可看）。
-                    text = clip.reversed ? `${base} · ${t("clip_take_reverse")}` : base;
+                    text = clip.reversed ? `${described} · ${t("clip_take_reverse")}` : described;
                     break;
                 }
                 case "mute":

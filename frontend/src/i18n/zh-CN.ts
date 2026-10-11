@@ -662,6 +662,8 @@ export const zhCN = {
     clip_take_cycle_prev: "切换到上一个 Take",
     clip_take_duplicate: "复制当前 Take",
     clip_take_reverse: "倒放",
+    clip_nonlinear_stretch_unsupported: "不支持非线性拉伸",
+    clip_take_envelope_unsupported: "不渲染 Take 包络",
     clip_take_channel_mode: "声道模式",
     clip_take_channel_mode_cycle: "点击循环切换",
     clip_channel_mode_normal: "双声道（按源）",

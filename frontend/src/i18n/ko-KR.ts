@@ -752,6 +752,8 @@ export const koKR = {
     clip_take_cycle_prev: "이전 테이크로 전환",
     clip_take_duplicate: "현재 테이크 복제",
     clip_take_reverse: "역재생",
+    clip_nonlinear_stretch_unsupported: "비선형 스트레치는 지원되지 않음",
+    clip_take_envelope_unsupported: "테이크 엔벨로프는 렌더링되지 않음",
     clip_take_channel_mode: "채널 모드",
     clip_take_channel_mode_cycle: "클릭하여 전환",
     clip_channel_mode_normal: "스테레오(소스 따름)",

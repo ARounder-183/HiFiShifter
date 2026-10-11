@@ -1552,6 +1552,10 @@ function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             channel: n.channel ?? 0,
         })),
         midiFillGaps: take.midi_fill_gaps ?? false,
+        // 宿主的非线性拉伸标记 / take 包络：插件不渲染，但前端要据此把分割/拖边显式
+        // 置为只读（见 `clipHasNonlinearStretch` / `clipHasTakeEnvelope`）。
+        stretchMarkers: Array.isArray(take.stretch_markers) ? take.stretch_markers : undefined,
+        envelopes: take.envelopes ?? undefined,
     };
 }
 

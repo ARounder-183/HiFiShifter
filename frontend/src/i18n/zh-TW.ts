@@ -663,6 +663,8 @@ export const zhTW = {
     clip_take_cycle_prev: "切換到上一個 Take",
     clip_take_duplicate: "複製目前 Take",
     clip_take_reverse: "倒放",
+    clip_nonlinear_stretch_unsupported: "不支援非線性伸縮",
+    clip_take_envelope_unsupported: "不轉譯 Take 封套",
     clip_take_channel_mode: "聲道模式",
     clip_take_channel_mode_cycle: "點擊循環切換",
     clip_channel_mode_normal: "雙聲道（按源）",

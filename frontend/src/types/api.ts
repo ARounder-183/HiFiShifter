@@ -71,6 +71,13 @@ export interface TimelineClipTake {
         channel?: number;
     }>;
     midi_fill_gaps?: boolean;
+    /**
+     * 宿主的非线性拉伸标记（REAPER stretch markers）。非空表示该 take 的源时间
+     * 映射不是一条直线 —— 插件**不**渲染它，只用于把分割/拖边显式置为只读。
+     */
+    stretch_markers?: unknown[];
+    /** Take 级包络（VOLENV/PANENV/MUTEENV）。插件不渲染 take 包络。 */
+    envelopes?: unknown;
 }
 
 export interface TimelineClip {

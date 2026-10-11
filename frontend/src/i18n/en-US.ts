@@ -821,6 +821,8 @@ export const enUS = {
     clip_take_cycle_prev: "Switch to Previous Take",
     clip_take_duplicate: "Duplicate Current Take",
     clip_take_reverse: "Reverse",
+    clip_nonlinear_stretch_unsupported: "Non-linear stretch is not supported",
+    clip_take_envelope_unsupported: "Take envelopes are not rendered",
     clip_take_channel_mode: "Channel mode",
     clip_take_channel_mode_cycle: "Click to cycle",
     clip_channel_mode_normal: "Stereo (per source)",
