@@ -229,7 +229,13 @@ impl RenderInput {
                     sample_rate,
                     start_sec: lo,
                     end_sec: Some(hi),
-                    stretch: hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,
+                    // 【为什么读内核的解析器而不是写死 SoundTouch】拉伸算法是**用户设置**
+                    // （插件通过 `update_project_stretch_overrides` 收下它，与独立 App
+                    // 共用同一份运行时设置）。此前这里硬编码 `SoundTouchDll`，于是用户在
+                    // 插件里改拉伸算法菜单**毫无效果** —— 一个看起来生效、实际被忽略的
+                    // 设置，比一个明确禁用掉的菜单更糟。解析口径与 App 完全一致：同一个
+                    // `resolved_external_stretch_algorithm()`。
+                    stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(),
                     apply_pitch_edit: true,
                     output: hifishifter_kernel::encode::OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Export,

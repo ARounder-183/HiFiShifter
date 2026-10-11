@@ -1042,11 +1042,14 @@ unsafe extern "system" fn audio_set_bus_arrangements(
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: 宿主按数量提供合法布局数组；本批声明一进一出。
-    // 【为什么同时接受单声道】`kMono`(1) 与 `kStereo`(3) 都接受。此前只认 stereo ⇒
-    // 单声道轨道上 `setBusArrangements` 返回失败 ⇒ 宿主把插件踢出链路，而人声轨
-    // 单声道极常见。渲染面见 `PlaybackSnapshot::copy_block`。
+    // 【为什么接受任意布局】此前只认 `kMono`(1) 与 `kStereo`(3)，而多数宿主在
+    // `setBusArrangements` 返回 `kResultFalse` 时会把插件**踢出插槽**（用户看到
+    // "插件不见了"，且没有提示）。5.1 / 7.1 / 任意环绕轨道因此完全不可用。
+    // 现在的取舍：接受宿主给的布局、内部只处理前两个声道、其余保持静音 ——
+    // 宁可部分工作，也不要从插槽里消失（渲染面见 `PlaybackSnapshot::copy_block`，
+    // 清零点见 `audio_abi::clear_outputs`）。
     let (input, output) = unsafe { (*inputs, *outputs) };
-    if !matches!(input, 1 | 3) || !matches!(output, 1 | 3) {
+    if input == 0 || output == 0 {
         return K_RESULT_FALSE;
     }
     // 记下协商结果：`getBusArrangement` 必须如实回吐，否则宿主按错误声道数组织缓冲。
@@ -2856,7 +2859,12 @@ mod audio_boundary_tests {
     /// 所有输入形状先校验，非法输入不能导致输出缓冲被部分写入。
     #[test]
     fn process_rejects_invalid_input_before_touching_output() {
-        let mut input_planes = [std::ptr::null_mut(), std::ptr::null_mut()];
+        // 三个 plane：下面的用例会声明 3 声道输入（宽总线现在被接受）。
+        let mut input_planes = [
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ];
         for (channels, missing_array, expected) in [
             (-1, false, K_INVALID_ARGUMENT),
             // 单声道是**合法**总线形状（人声轨常见）；此前被拒 ⇒ 宿主静默旁路插件。
@@ -2864,8 +2872,9 @@ mod audio_boundary_tests {
             (2, true, K_INVALID_ARGUMENT),
             (2, false, K_RESULT_OK),
             (0, true, K_RESULT_OK),
-            // 超过 2 声道仍然拒绝（我们没有环绕声通路）。
-            (3, false, K_RESULT_FALSE),
+            // 宽于立体声的输入**接受**：拒绝会让宿主把插件踢出插槽（5.1 / 7.1 轨道）。
+            // 我们只读前两个声道，其余不参与处理。
+            (3, false, K_RESULT_OK),
         ] {
             let mut left = [0.25_f32, 0.5];
             let mut right = [0.75_f32, 1.0];
@@ -2928,11 +2937,6 @@ mod audio_boundary_tests {
                 audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1),
                 K_RESULT_OK
             );
-            // 环绕声没有通路，仍然拒绝。
-            assert_eq!(
-                audio_set_bus_arrangements(this, &raw mut surround, 1, &raw mut surround, 1),
-                K_RESULT_FALSE
-            );
             assert_eq!(
                 audio_set_bus_arrangements(this, &raw mut stereo, 0, &raw mut stereo, 1),
                 K_RESULT_FALSE
@@ -2959,6 +2963,16 @@ mod audio_boundary_tests {
             assert_eq!(
                 output_info.channel_count, 2,
                 "协商为立体声输出 ⇒ 报告 2 声道"
+            );
+
+            // 环绕声**接受**（放在最后，避免影响上面的"最后一次成功协商"断言）：
+            // 此前拒绝，而多数宿主在 `kResultFalse` 时把插件**踢出插槽** ——
+            // 5.1 / 7.1 轨道上用户看到的是"插件不见了"，没有任何提示。
+            // 现在的取舍是"部分工作、留在插槽里"：内部只处理前两个声道
+            // （见 `PlaybackSnapshot::copy_block` / `audio_abi::clear_outputs`）。
+            assert_eq!(
+                audio_set_bus_arrangements(this, &raw mut surround, 1, &raw mut surround, 1),
+                K_RESULT_OK
             );
         }
     }

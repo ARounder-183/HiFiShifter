@@ -81,7 +81,12 @@ fn validate_bus(bus: &AudioBusBuffers) -> Result<(), BufferError> {
     if bus.num_channels < 0 {
         return Err(BufferError::InvalidArgument);
     }
-    if bus.num_channels > 2 {
+    // 【为什么不再拒绝 > 2 声道】此前 5.1 / 7.1 / 任意环绕总线一律
+    // `UnsupportedFormat`，而 `setBusArrangements` 也跟着返回 `kResultFalse` ——
+    // 多数宿主据此**把插件从插槽里弹出**（用户看到"插件不见了"，且没有提示）。
+    // 正确的降级是：接受布局、只处理前两个声道、其余保持静音并在场。
+    // 上限 64 只为把静音掩码的移位限定在合法范围（`1u64 << 64` 是 UB）。
+    if bus.num_channels > 64 {
         return Err(BufferError::UnsupportedFormat);
     }
     if bus.num_channels > 0 && bus.channel_buffers.is_null() {
@@ -149,9 +154,11 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
         output.silence_flags = 0;
         return Ok(());
     }
-    // 【为什么按 `num_channels` 而不是写死 2】总线现在允许单声道（见 `validate_bus`），
-    // 写死 2 会读越界的 `channel_buffers[1]`。
-    let channels = output.num_channels.clamp(0, 2) as usize;
+    // 【为什么按 `num_channels` 而不是写死 2，也不再钳到 2】总线现在接受任意声道数
+    // （见 `validate_bus`）：钳到 2 会让第 3..N 个声道**留着上一次回调的残留**——
+    // 而 `copy_block` 只写前两个，于是环绕声道输出垃圾。这里必须把所有声明的声道都
+    // 清零，后两个之后的部分才真正静音。
+    let channels = output.num_channels as usize;
     for channel in 0..channels {
         // SAFETY: 宿主提供 `num_channels` 个 plane 指针，非空 plane 至少含指定帧数。
         let plane = unsafe { *output.channel_buffers.add(channel) };
@@ -159,7 +166,7 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
             unsafe { std::ptr::write_bytes(plane, 0, data.num_samples as usize) };
         }
     }
-    output.silence_flags = (1_u64 << channels) - 1;
+    output.silence_flags = (1_u64 << channels.min(64)) - 1;
     Ok(())
 }
 

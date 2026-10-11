@@ -429,7 +429,10 @@ impl SnapshotPublisher {
         output: &mut AudioBusBuffers,
         frames: usize,
     ) -> bool {
-        if output.num_channels == 0 || output.num_channels > 2 || output.channel_buffers.is_null() {
+        // 【为什么接受任意声道数】宿主可能给 5.1 / 7.1 总线（见 `audio_abi::validate_bus`）。
+        // 我们只处理**前两个**声道，其余保持调用方（`clear_outputs`）已经写好的静音，
+        // 并把它们记进静音掩码 —— 拒绝整条总线会让宿主把插件踢出插槽。
+        if output.num_channels == 0 || output.channel_buffers.is_null() {
             return false;
         }
         let read_guard = self.enter();
@@ -438,7 +441,12 @@ impl SnapshotPublisher {
         if snapshot.is_none() {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let channels = output.num_channels.clamp(0, 2) as usize;
+        // 实际写入的声道数：单声道（平均 L/R）或立体声；更宽的总线只写前两个。
+        let declared = output.num_channels as usize;
+        let channels = declared.min(2);
+        // 静音掩码：先假定**所有**声明声道都静音（未写入的第 3..N 个由 `clear_outputs`
+        // 清零，确实静音），再按实际写入的非零值逐位清除。
+        let mut silence: u64 = (1_u64 << declared.min(64)) - 1;
         // 源率/目标率之比：把宿主帧号换算成快照帧号。
         let ratio = snapshot
             .map(|snapshot| snapshot.sample_rate as f64 / rate.max(1) as f64)
@@ -475,7 +483,6 @@ impl SnapshotPublisher {
                 })
                 .unwrap_or(0.0)
         };
-        let mut silence = (1_u64 << channels) - 1;
         for channel in 0..channels {
             // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。
             let plane = unsafe { *output.channel_buffers.add(channel) };
@@ -790,6 +797,55 @@ mod tests {
         // 位置 0.0 / 0.5 / 1.0 → 0.2 / 0.3 / 0.4。
         assert!(close(left, [0.2, 0.3, 0.4]), "{left:?}");
         assert!(close(right, [0.4, 0.6, 0.8]), "{right:?}");
+    }
+
+    /// **回归：比立体声更宽的总线必须被接受，且只写前两个声道。**
+    ///
+    /// 【为什么这是回归测试】此前 `copy_block` 对 `num_channels > 2` 直接返回 `false`，
+    /// 而 `setBusArrangements` 也拒绝非 mono/stereo 布局 —— 多数宿主据此**把插件踢出
+    /// 插槽**：5.1 / 7.1 轨道上用户看到的是"插件不见了"，没有任何提示。
+    /// 现在的取舍是"部分工作、留在插槽里"：处理前两个声道，其余保持静音并如实回报。
+    #[test]
+    fn a_wider_than_stereo_bus_is_accepted_and_the_extra_channels_stay_silent() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 0,
+                left: vec![0.2, 0.4, 0.6],
+                right: vec![0.4, 0.8, 1.2],
+                _reservation: None,
+            })
+            .unwrap();
+
+        // 6 声道（5.1）：调用方已按 `clear_outputs` 语义清零，这里只验证写前两个。
+        let mut planes: Vec<[f32; 3]> = vec![[0.0; 3]; 6];
+        let mut pointers: Vec<*mut f32> = planes.iter_mut().map(|p| p.as_mut_ptr()).collect();
+        let mut bus = AudioBusBuffers {
+            num_channels: 6,
+            silence_flags: 0,
+            channel_buffers: pointers.as_mut_ptr(),
+        };
+        // SAFETY: 6 个 plane 各至少 3 帧。
+        assert!(
+            unsafe { publisher.copy_block(0, 4, &mut bus, 3) },
+            "宽总线不能被拒绝（拒绝即被宿主踢出插槽）"
+        );
+        assert!((planes[0][0] - 0.2).abs() < 1e-6, "{:?}", planes[0]);
+        assert!((planes[1][0] - 0.4).abs() < 1e-6, "{:?}", planes[1]);
+        // 第 3..6 个声道未被写入，且必须被标成静音（宿主据此跳过它们）。
+        for plane in &planes[2..] {
+            assert!(plane.iter().all(|sample| *sample == 0.0), "{plane:?}");
+        }
+        for channel in 2..6 {
+            assert!(
+                bus.silence_flags & (1 << channel) != 0,
+                "未处理的声道必须标静音，flags={:#b}",
+                bus.silence_flags
+            );
+        }
+        // 前两个声道有内容 ⇒ 不能标静音。
+        assert_eq!(bus.silence_flags & 0b11, 0, "{:#b}", bus.silence_flags);
     }
 
     /// 活跃读者期间退役快照必须保留；失败保留旧音频，不能将失败伪报成已应用。
