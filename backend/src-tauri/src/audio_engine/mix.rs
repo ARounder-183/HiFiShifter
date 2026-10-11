@@ -543,38 +543,19 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             }
             let local_adj = local_adj_i64 as f64;
 
-            let mut g = clip.gain;
-            if clip.fade_in_frames > 0 && local < clip.fade_in_frames {
-                // Use frame-centered fade-in so the first frame is not hard-zeroed.
-                g *= match &clip.fade_in_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        ((local + 1) as f64 / clip.fade_in_frames as f64)
-                            * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
-                };
-            }
-            if clip.fade_out_frames > 0 && local >= fade_zone_start && local < clip.length_frames {
-                // 淡出表按【区间内时间进度】下降采样（t=0 处 1 → t=1 处 0），
-                // 因此必须用"已消耗进度"索引。剩余比例的走向恰好相反，
-                // 用它做索引会把淡出整体反成淡入（历史 bug）。进度起点
-                // 1/N、终点 1（端点锁定），区间由 content_end 决定。
-                let progress =
-                    (local - fade_zone_start + 1) as f64 / clip.fade_out_frames.max(1) as f64;
-                if progress <= 1.0 {
-                    g *= match &clip.fade_out_lut {
-                        Some(lut) => crate::fade_curves::sample_fade_lut(
-                            lut,
-                            progress * crate::fade_curves::FADE_LUT_SIZE as f64,
-                        ),
-                        None => (progress as f32).clamp(0.0, 1.0),
-                    };
-                } else {
-                    // 收缩后的淡出在这帧之前已走完 → 静音。
-                    g = 0.0;
-                }
-            }
+            // 淡化应用收口在内核 `fade_curves::frame_fade_gain`（帧中心淡入、
+            // 端点锁定淡出、内容耗尽收缩），与导出（mixdown.rs）逐位同源 ——
+            // "预览 ≠ 导出"那类漂移在这里结构上不可能再发生。
+            let g = clip.gain
+                * crate::fade_curves::frame_fade_gain(
+                    local,
+                    clip.fade_in_frames,
+                    clip.fade_in_lut.as_deref().map(Vec::as_slice),
+                    fade_zone_start,
+                    clip.fade_out_frames,
+                    clip.fade_out_lut.as_deref().map(Vec::as_slice),
+                    clip.length_frames,
+                );
             if g <= 0.0 {
                 continue;
             }

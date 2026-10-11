@@ -1,11 +1,15 @@
 # 本地补丁说明（HiFiShifter）
 
-这份源码是 `ara2-bridge-core` 0.3.0 的**逐字拷贝**，外加 `src/properties/model.rs` 里
-一处**纯增量**的补丁。
+这份源码是 `ara2-bridge-core` 0.3.0 的拷贝 + 下表所列补丁。
 
-## 补了什么
+## 补丁清单（升级 0.4 时逐项核对；"行为"= 不只是新增代码）
 
-`PlaybackRegionProperties` 的四个读访问器 + `name()`：
+| # | 位置 | 增量/行为 | 内容 | 上游 0.4 状态 |
+|---|---|---|---|---|
+| 1 | `src/properties/model.rs` | 增量 | `PlaybackRegionProperties` 补 `start/duration_in_{modification,playback}_time()` 与 `name()` 读访问器（上游 0.3.0 只有 `transformation_flags()`） | 待查 |
+| 2 | FFI ASCII 校验（`src/properties/model.rs` 的 persistent-ID 输入路径） | **行为** | 有界非空有效 UTF-8 直通（REAPER 对中文素材路径传 UTF-8 对象 ID，严格 ASCII 拒绝会让 REAPER 空指针崩溃）——见下方「REAPER中文宿主对象ID兼容」 | 待查 |
+
+## 1 的细节：`PlaybackRegionProperties` 的四个读访问器 + `name()`
 
 - `start_in_modification_time()`
 - `duration_in_modification_time()`

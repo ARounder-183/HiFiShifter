@@ -1,7 +1,16 @@
 # 本地补丁说明（HiFiShifter）
 
-这份源码是 `ara2-bridge-plugin` 0.3.0 的**逐字拷贝**，外加一处**把模型图的边找回
-委托层**的补丁，以及 renderer 分配/控制器身份通知补丁。
+这份源码是 `ara2-bridge-plugin` 0.3.0 的拷贝 + 下表所列补丁。
+
+## 补丁清单（升级 0.4 时逐项核对；"行为"= 不只是新增代码）
+
+| # | 位置 | 增量/行为 | 内容 | 上游 0.4 状态 |
+|---|---|---|---|---|
+| 1 | trait 签名（`AudioModifications` / `PlaybackRegions`）+ `runtime.rs` 派发 | **行为**（3 个 trait 方法加参） | 把模型图的三条父子边传回委托层（见下方「补了什么」） | 待查 |
+| 2 | `ExtensionBinding` | 增量 | `new_with_assignment_observer` / `new_with_renderer_observer`：add/remove playback region 后的通知（原构造器行为不变） | 待查 |
+| 3 | `PluginBuilder` | 增量 | `controller_identity(Fn(usize))`：controller 分配后通知真实 ref | 待查 |
+| 4 | persistent-ID FFI 校验 | **行为** | 有界非空有效 UTF-8 直通（同 core 侧补丁 2；REAPER 中文路径对象 ID） | 待查 |
+| 5 | `Cargo.toml` | 增量 | 新增 `log` 依赖（通知路径诊断） | 待查 |
 
 ## 补了什么
 

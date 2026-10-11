@@ -470,6 +470,55 @@ pub fn global_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Arc<Vec<f32>> {
         .lut(shape, dir, mode_out)
 }
 
+/// 单帧的淡化增益（淡入 × 淡出），乘在基础增益上；返回 `0.0` = 该帧静音
+/// （淡出已走完）。App 的预览路径（`audio_engine/mix.rs`）与导出路径
+/// （`mixdown.rs`）**共用**这一份 —— 此前是两份逐行复制的应用循环，改一处漏
+/// 一处的症状正是"预览 ≠ 导出"，而且只能靠人耳发现。
+///
+/// 语义要点（两侧注释原本各自抄了一遍，现收口在这里）：
+/// - 淡入按**帧中心**采样（首帧用 `1/N` 而不是 0），第一帧不被硬归零；
+/// - 淡出表按【区间内已消耗进度】下降采样（t=0 处 1 → t=1 处 0），必须用
+///   进度而非剩余比例做索引 —— 用反会把淡出整体变成淡入（历史 bug）；
+/// - 进度起点 `1/N`、终点 1（端点锁定：N 帧区间的最后一帧增益精确为 0，
+///   避免曲线尾部的增益阶跃 Click）；区间起点由调用方给（内容耗尽时收缩）；
+/// - 进度 > 1（收缩后的淡出在这帧之前已走完）→ 该帧静音。
+pub fn frame_fade_gain(
+    local_in_clip: u64,
+    fade_in_frames: u64,
+    fade_in_lut: Option<&[f32]>,
+    fade_zone_start: u64,
+    fade_out_frames: u64,
+    fade_out_lut: Option<&[f32]>,
+    clip_total_frames: u64,
+) -> f32 {
+    let mut g = 1.0_f32;
+    if fade_in_frames > 0 && local_in_clip < fade_in_frames {
+        g *= match fade_in_lut {
+            Some(lut) => sample_fade_lut(
+                lut,
+                ((local_in_clip + 1) as f64 / fade_in_frames as f64) * FADE_LUT_SIZE as f64,
+            ),
+            None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
+        };
+    }
+    if fade_out_frames > 0
+        && local_in_clip >= fade_zone_start
+        && local_in_clip < clip_total_frames
+    {
+        let progress =
+            (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
+        if progress <= 1.0 {
+            g *= match fade_out_lut {
+                Some(lut) => sample_fade_lut(lut, progress * FADE_LUT_SIZE as f64),
+                None => (progress as f32).clamp(0.0, 1.0),
+            };
+        } else {
+            g = 0.0;
+        }
+    }
+    g
+}
+
 /// 从 LUT 取增益（index 为浮点帧位置，线性插值；越界返回边界值）。
 pub fn sample_fade_lut(table: &[f32], index: f64) -> f32 {
     if table.is_empty() {
@@ -795,6 +844,139 @@ mod tests {
             assert!(
                 !is_supported_fade_shape(shape),
                 "shape {shape} must be rejected (it degrades to linear)"
+            );
+        }
+    }
+
+    /// `frame_fade_gain` 的端点契约（收口前这是两份复制的应用循环各自的口头约定，
+    /// 现在钉在唯一实现上）：首帧按 1/N 帧中心取值（不硬归零）、区间之间增益为 1、
+    /// 末帧端点锁定精确为 0（该性质来自淡出 LUT 的末位值为 0 —— 生产路径
+    /// `frames > 0` 时必建 LUT，`None` 只是退化兜底）、调用方保证
+    /// `local < clip_total_frames`。
+    #[test]
+    fn frame_fade_gain_endpoints_match_the_documented_contract() {
+        // 4 帧淡入 + 4 帧淡出（区间起点 6），clip 总长 10 帧，真实 LUT（线性形状）。
+        let fade_in = build_fade_lut(0.0, 0.0, false);
+        let fade_out = build_fade_lut(0.0, 0.0, true);
+        let g = |local: u64| {
+            frame_fade_gain(
+                local,
+                4,
+                Some(&fade_in),
+                6,
+                4,
+                Some(&fade_out),
+                10,
+            )
+        };
+        assert!(g(0) < 1.0 && g(0) > 0.0, "first frame is frame-centered, not hard-zeroed");
+        assert!((g(3) - 1.0).abs() < 1e-6, "last fade-in frame reaches full gain");
+        assert!((g(5) - 1.0).abs() < 1e-6, "between the two zones");
+        assert!(g(6) < 1.0 && g(6) > 0.0, "fade-out starts just below full gain");
+        assert!(g(9).abs() < 1e-6, "last frame is endpoint-locked to exactly 0");
+    }
+
+    /// 生成跨语言黄金向量：`tests/fixtures/fade-gain-golden.json` 由本函数写出，
+    /// 前端 `reaperFade.golden.test.ts` 读同一份文件比对 TS 镜像公式 —— 曲线数学
+    /// 的 Rust/TS 两份实现从此绑在同一份机械证据上。手动跑：
+    /// `cargo test -p hifishifter-kernel --lib regenerate_fade_gain_golden -- --ignored --nocapture`
+    #[test]
+    #[ignore = "generator: writes the committed fixture"]
+    fn regenerate_fade_gain_golden() {
+        let mut entries_signed = Vec::new();
+        for shape_int in 0..=6i64 {
+            let shape = shape_int as f64;
+            for dir in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                for mode_out in [false, true] {
+                    for step in 0..=10u32 {
+                        let t = f64::from(step) / 10.0;
+                        entries_signed.push(serde_json::json!({
+                            "shape": shape, "dir": dir,
+                            "modeOut": mode_out, "t": t,
+                            "gain": fade_gain_signed(shape, dir, mode_out, t),
+                            "shapeInt": shape_int,
+                        }));
+                    }
+                }
+            }
+        }
+        let mut entries_axes = Vec::new();
+        for curvature in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            for s in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                for mode_out in [false, true] {
+                    for step in 0..=10u32 {
+                        let t = f64::from(step) / 10.0;
+                        entries_axes.push(serde_json::json!({
+                            "curvature": curvature, "s": s,
+                            "modeOut": mode_out, "t": t,
+                            "gain": fade_gain_axes(curvature, s, mode_out, t),
+                        }));
+                    }
+                }
+            }
+        }
+        // 12 位小数足够钉住 f64 比较（1e-12 容差），文件体积减半。
+        let round = |v: serde_json::Value| -> serde_json::Value {
+            match v {
+                serde_json::Value::Object(map) => {
+                    let mut out = serde_json::Map::new();
+                    for (key, value) in map {
+                        if key == "gain" {
+                            let g = value.as_f64().unwrap();
+                            out.insert(key, serde_json::json!((g * 1e12).round() / 1e12));
+                        } else {
+                            out.insert(key, value);
+                        }
+                    }
+                    serde_json::Value::Object(out)
+                }
+                other => other,
+            }
+        };
+        let entries_signed = entries_signed.into_iter().map(&round).collect::<Vec<_>>();
+        let entries_axes = entries_axes.into_iter().map(round).collect::<Vec<_>>();
+        let doc = serde_json::json!({
+            "comment": "Golden vectors from hifishifter-kernel fade_curves (fade_gain_signed / fade_gain_axes). Regenerate with: cargo test -p hifishifter-kernel --lib regenerate_fade_gain_golden -- --ignored --nocapture. The frontend reaperFade.golden.test.ts asserts its TS mirror against this file.",
+            "signed": entries_signed,
+            "axes": entries_axes,
+        });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fade-gain-golden.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        println!("wrote {}", path.display());
+    }
+
+    /// 常规门：黄金向量必须与当前实现一致（向量过期 = 实现变了，需有意识地
+    /// 重生成并同步前端测试）。
+    #[test]
+    fn fade_gain_matches_the_committed_golden_vectors() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fade-gain-golden.json");
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for entry in doc["signed"].as_array().unwrap() {
+            let gain = fade_gain_signed(
+                entry["shape"].as_f64().unwrap(),
+                entry["dir"].as_f64().unwrap(),
+                entry["modeOut"].as_bool().unwrap(),
+                entry["t"].as_f64().unwrap(),
+            );
+            assert!(
+                (gain - entry["gain"].as_f64().unwrap()).abs() < 1e-12,
+                "signed vector drifted: {entry}"
+            );
+        }
+        for entry in doc["axes"].as_array().unwrap() {
+            let gain = fade_gain_axes(
+                entry["curvature"].as_f64().unwrap(),
+                entry["s"].as_f64().unwrap(),
+                entry["modeOut"].as_bool().unwrap(),
+                entry["t"].as_f64().unwrap(),
+            );
+            assert!(
+                (gain - entry["gain"].as_f64().unwrap()).abs() < 1e-12,
+                "axes vector drifted: {entry}"
             );
         }
     }

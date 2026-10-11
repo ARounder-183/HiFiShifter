@@ -99,6 +99,12 @@ async function mountDialog() {
             </Provider>,
         );
     });
+    // 进度监听经 services/hostEvents 路由：轮询到注册完成（首评时固定 flush 不够）。
+    await act(async () => {
+        for (let i = 0; i < 100 && mocks.progressListener === null; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 2));
+        }
+    });
 
     /** 推进到"正在导出"：进度区出现，进度条自带取消按钮随之出现。 */
     const enterExportingState = async () => {

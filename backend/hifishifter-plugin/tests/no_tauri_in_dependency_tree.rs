@@ -32,14 +32,55 @@ fn the_plugin_dependency_tree_contains_no_tauri_stack() {
     assert!(output.status.success(), "cargo tree failed: {output:?}");
 
     let text = String::from_utf8_lossy(&output.stdout);
-    // 每行形如 `name v1.2.3`，所以按「行首的包名」匹配，避免误伤子串。
+    // 每行形如 `name v1.2.3`，所以按「行首包名前缀」匹配。此前是行首**全等**，
+    // 漏掉 `tauri-utils` / `tauri-runtime` 这类 tauri 家族的传递依赖 —— 禁表的本意
+    // 是"整个 tauri 栈"，不是恰好叫 tauri 的那一个 crate。
     for banned in ["tauri", "wry", "HiFiShifter", "cpal"] {
-        let hit = text
-            .lines()
-            .any(|line| line.split_whitespace().next() == Some(banned));
+        let hit = text.lines().any(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|name| name.starts_with(banned))
+        });
         assert!(
             !hit,
-            "插件依赖树里出现了 `{banned}` —— 二期只能引入原生WebView2，不可引入app事件循环/设备（判据 A5-v2）"
+            "插件依赖树里出现了 `{banned}` 家族 —— 二期只能引入原生WebView2，不可引入app事件循环/设备（判据 A5-v2）"
+        );
+    }
+}
+
+/// `--edges normal` 只覆盖默认 feature 的依赖边：可选依赖在非默认 feature 下被
+/// 引入时这条测试看不见。加一条 --all-features 变体把那扇门也钉住。
+#[test]
+fn the_plugin_dependency_tree_contains_no_tauri_stack_with_all_features() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "tree",
+            "-p",
+            "hifishifter-plugin",
+            "--edges",
+            "normal",
+            "--all-features",
+            "--prefix",
+            "none",
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(format!("{manifest}/Cargo.toml"))
+        .output()
+        .expect("cargo tree must run");
+    assert!(output.status.success(), "cargo tree failed: {output:?}");
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for banned in ["tauri", "wry", "HiFiShifter", "cpal"] {
+        let hit = text.lines().any(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|name| name.starts_with(banned))
+        });
+        assert!(
+            !hit,
+            "插件依赖树（--all-features）里出现了 `{banned}` 家族 —— 可选 feature 也不得引入app事件循环/设备"
         );
     }
 }

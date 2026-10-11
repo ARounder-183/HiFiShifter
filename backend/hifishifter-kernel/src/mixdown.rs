@@ -1676,38 +1676,18 @@ fn render_mixdown_internal(
                 break;
             }
 
-            let mut g = gain;
-            if fade_in_frames > 0 && local_in_clip < fade_in_frames {
-                // Frame-centered fade-in (same as audio_engine/mix.rs) so the
-                // first frame is not hard-zeroed and export matches preview.
-                g *= match &fade_in_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        ((local_in_clip + 1) as f64 / fade_in_frames as f64)
-                            * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
-                };
-            }
-            if fade_out_frames > 0
-                && local_in_clip >= fade_zone_start
-                && local_in_clip < clip_total_frames
-            {
-                let progress =
-                    (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
-                if progress <= 1.0 {
-                    g *= match &fade_out_lut {
-                        Some(lut) => crate::fade_curves::sample_fade_lut(
-                            lut,
-                            progress * crate::fade_curves::FADE_LUT_SIZE as f64,
-                        ),
-                        None => (progress as f32).clamp(0.0, 1.0),
-                    };
-                } else {
-                    // 收缩后的淡出在这帧之前已走完 → 静音。
-                    g = 0.0;
-                }
-            }
+            // 淡化应用收口在 `fade_curves::frame_fade_gain`，与 App 预览
+            // （audio_engine/mix.rs）逐位同源。
+            let g = gain
+                * crate::fade_curves::frame_fade_gain(
+                    local_in_clip as u64,
+                    fade_in_frames as u64,
+                    fade_in_lut.as_deref().map(Vec::as_slice),
+                    fade_zone_start as u64,
+                    fade_out_frames as u64,
+                    fade_out_lut.as_deref().map(Vec::as_slice),
+                    clip_total_frames as u64,
+                );
             if g <= 0.0 {
                 continue;
             }
@@ -3569,6 +3549,103 @@ mod tests {
             let err = render_mixdown_to_file(&tl, &out, o).expect_err("96k must be rejected");
             assert_eq!(err, "mp3_unsupported_sample_rate");
             assert!(!out.exists());
+        }
+
+        /// "倒放已支持"的声学级回归：`reversed` clip 的渲染必须等于同一 clip
+        /// 正放渲染的**时间反转**。此前全部渲染比对夹具都是正放 —— 倒放路径
+        /// （`take_geometry` 镜像 → 渲染窗口）一旦回归，症状只是"声音错了"，
+        /// 没有任何测试会红。
+        ///
+        /// 用非对称信号（0→1 斜坡 + 正弦）：倒放方向错了的话，斜坡方向立刻反掉，
+        /// 逐帧对拍必红。
+        #[test]
+        fn a_reversed_clip_renders_as_the_time_reversed_forward_render() {
+            let dir = std::env::temp_dir()
+                .join(format!("hfs_reversed_render_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("asym.wav");
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44_100,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            let frames = 22_050usize; // 0.5s @ 44.1k
+            for i in 0..frames {
+                let t = i as f64 / 44_100.0;
+                let ramp = i as f32 / frames as f32;
+                let sine = (2.0 * std::f64::consts::PI * 220.0 * t).sin() as f32 * 0.3;
+                let v = (ramp * 0.7 + sine).clamp(-1.0, 1.0);
+                writer.write_sample(v).unwrap();
+                writer.write_sample(v).unwrap();
+            }
+            writer.finalize().unwrap();
+            let identity = path.to_string_lossy().to_string();
+
+            let build = |reversed: bool| -> TimelineState {
+                let mut tl: TimelineState = serde_json::from_value(serde_json::json!({
+                    "tracks": [{ "id": "t0", "name": "T", "order": 0 }],
+                    "clips": [{
+                        "id": "c0", "track_id": "t0", "name": "V",
+                        "start_sec": 0.0, "length_sec": 0.5,
+                        "source_path": identity,
+                        "source_start_sec": 0.0, "source_end_sec": 0.5,
+                        "playback_rate": 1.0,
+                        "source_sample_rate": 44_100, "source_channels": 2,
+                        "duration_sec": 0.5,
+                        "reversed": reversed,
+                    }],
+                    "bpm": 120.0, "project_sec": 0.5,
+                }))
+                .expect("timeline deserializes");
+                for clip in &mut tl.clips {
+                    clip.normalize_takes();
+                }
+                tl
+            };
+
+            let options = MixdownOptions {
+                sample_rate: 44_100,
+                start_sec: 0.0,
+                end_sec: None,
+                stretch: StretchAlgorithm::LinearResample,
+                apply_pitch_edit: false,
+                output: OutputSpec::default(),
+                quality_preset: QualityPreset::Export,
+                cancel_flag: None,
+                progress: None,
+                cache_stats: None,
+            };
+            let (_, _, _, forward) =
+                render_mixdown_interleaved(&build(false), options.clone()).unwrap();
+            let (_, _, _, reversed) =
+                render_mixdown_interleaved(&build(true), options).unwrap();
+            assert_eq!(forward.len(), reversed.len());
+            assert_eq!(forward.len(), frames * 2, "0.5s 双声道交织");
+
+            // 全局必须**不是**同一个渲染（夹具对倒放敏感：斜坡方向反了）。
+            let identical = forward
+                .iter()
+                .zip(&reversed)
+                .all(|(a, b)| (*a - *b).abs() < 1e-6);
+            assert!(!identical, "倒放渲染与正放完全一致 = 倒放被静默降级");
+
+            // 逐帧对拍：reversed[frame t] == forward[frame T-1-t]（整数倍率 1.0
+            // 下是纯索引重排；边界容差吸收插值窗口的半帧差异）。
+            let channels = 2;
+            for f in 0..frames {
+                let mirror = frames - 1 - f;
+                for ch in 0..channels {
+                    let a = reversed[f * channels + ch] as f64;
+                    let b = forward[mirror * channels + ch] as f64;
+                    assert!(
+                        (a - b).abs() < 1e-3,
+                        "frame {f} ch {ch}: reversed {a} vs mirrored forward {b}"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(&dir).ok();
         }
     }
 }

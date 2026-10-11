@@ -65,8 +65,10 @@ vslib = []
 # Windows — DirectML (DX12, stable)
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
-# DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
-windows = { version = "0.58", features = [
+# DXGI adapter enumeration for DirectML device discovery (all GPU vendors).
+# 0.61 与 src-tauri 同版：消除 windows-core 0.58/0.61 双版本（类型互不兼容曾迫使
+# webview2_accelerators.rs 这类转换层存在）。
+windows = { version = "0.61", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Foundation",
     "Win32_Devices_Properties",
@@ -82,7 +84,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Security",
-    "implement",
 ] }
 
 # Linux x86_64 — WebGPU (Dawn/Vulkan backend, prebuilt binaries available)
