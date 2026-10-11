@@ -331,7 +331,7 @@ impl ModelHandle {
         self.lineage_frame = current;
     }
 
-    /// 登记一对宿主分割半段；父段没有可继承曲线时什么都不做。
+    /// 登记一对宿主分割半段：曲线谱系尽力而为，媒体身份无条件登记。
     fn register_host_split(
         &mut self,
         parent: &RegionFrame,
@@ -347,17 +347,21 @@ impl ModelHandle {
             return;
         };
         let mut edits = self.session.edits.lock_or_recover();
-        let Some(seed) = edits.atlas.split_seed(parent_item) else {
-            return;
-        };
-        if let Err(error) = edits
-            .atlas
-            .register_split(left_item, right_item, Some(seed))
-        {
-            log::warn!("[ara] host split lineage not registered: {error}");
-            return;
+        // 曲线谱系：只有父段有 live 曲线可继承时才登记（`register_split` 的 seed 是
+        // 父段完整窗口，右半段靠它做包含判定）。
+        //
+        // 【为什么不再 `return`】此前 seed 缺失会连**媒体派生谱系**一起跳过，右半段
+        // 因此既无曲线祖先也无媒体身份 —— 波形要等下一次授权才出现。媒体身份只依赖
+        // "父段与右半段同源"，与父段有没有曲线无关，两者必须解耦。
+        if let Some(seed) = edits.atlas.split_seed(parent_item) {
+            match edits
+                .atlas
+                .register_split(left_item, right_item, Some(seed))
+            {
+                Ok(()) => edits.revision = edits.revision.saturating_add(1),
+                Err(error) => log::warn!("[ara] host split lineage not registered: {error}"),
+            }
         }
-        edits.revision = edits.revision.saturating_add(1);
         drop(edits);
         // 媒体派生谱系：右半段的源与父段是同一个文件（父段已授权 ⇒ 右半段立刻有波形）。
         self.session
@@ -1564,6 +1568,73 @@ mod tests {
         );
         // 本帧成为下一帧的基线。
         assert_eq!(model.lineage_frame.len(), 2);
+    }
+
+    /// 父段**没有** live 曲线时：曲线谱系不登记（没有可继承的 seed），但**媒体身份必须
+    /// 照常登记**。
+    ///
+    /// 【为什么单独钉住】此前 `split_seed` 取不到就 `return`，连 `split_media_from` 一起
+    /// 跳过 ⇒ 右半段既无曲线祖先也无媒体身份，波形要等下一次授权才出现。媒体身份只依赖
+    /// "父段与右半段同源"，与父段有没有曲线无关。
+    #[test]
+    fn a_host_split_without_a_curve_still_registers_media_identity() {
+        const PARENT: &str = "{33333333-3333-3333-3333-333333333333}";
+        const RIGHT: &str = "{44444444-4444-4444-4444-444444444444}";
+
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        // 刻意不 `capture` 任何曲线：父段没有 live 记录 ⇒ `split_seed` 返回 None。
+
+        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
+        model.document.playback_regions = vec![
+            AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                audio_modification_persistent_id: "mod-left".into(),
+                start_in_modification_time: 0.,
+                duration_in_modification_time: 0.5,
+                start_in_playback_time: 0.,
+                duration_in_playback_time: 0.5,
+                ..Default::default()
+            },
+            AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                audio_modification_persistent_id: "mod-right".into(),
+                start_in_modification_time: 0.5,
+                duration_in_modification_time: 0.5,
+                start_in_playback_time: 0.5,
+                duration_in_playback_time: 0.5,
+                ..Default::default()
+            },
+        ];
+        model.region_keys = vec![7, 8];
+        {
+            let mut items = model.session.region_items.lock_or_recover();
+            items.insert(7, PARENT.to_string());
+            items.insert(8, RIGHT.to_string());
+        }
+
+        model.register_host_split_lineage();
+
+        assert_eq!(
+            model
+                .session
+                .edits
+                .lock_or_recover()
+                .atlas
+                .split_parent_of(RIGHT),
+            None,
+            "没有可继承的曲线时不登记曲线谱系"
+        );
+        assert_eq!(
+            model
+                .session
+                .split_media_from
+                .lock_or_recover()
+                .get(RIGHT)
+                .map(String::as_str),
+            Some(PARENT),
+            "媒体身份与曲线 seed 解耦，必须照常登记"
+        );
     }
 
     /// 保存后新建图的序号不可决定旧编辑归属；共同source由真正modification身份区分。
