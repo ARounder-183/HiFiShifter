@@ -474,6 +474,21 @@ impl EditorSession {
     }
 }
 
+/// 宿主 `D_STARTOFFS` 的值：倒放 take 存的是**镜像**起点（`D − 正向终点`），
+/// 正放（以及倒放 + 循环源，走内核回绕分支）就是正向起点本身。
+///
+/// 【为什么需要它】`workspace::reversed_forward_window` 把宿主镜像坐标复原成正向窗口
+/// 交给内核，这里是它的**逆运算** —— 写回时必须再翻回镜像域，否则倒放 take 会被整体
+/// 平移 `D − start − span`。媒体总长取不到时返回 `None`：宁可不写，也不写一个错的起点。
+fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
+    if clip.reversed && !clip.loop_enabled {
+        hifishifter_kernel::state::clip_source_media_duration_sec(clip)
+            .map(|media| media - clip.source_end_sec)
+    } else {
+        Some(clip.source_start_sec)
+    }
+}
+
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
 // 保留无undo上下文的一次性执行入口，当前调用方统一走execute_managed。
 #[allow(dead_code)]
@@ -658,8 +673,14 @@ pub(super) fn execute_managed(
                 target.set_take(c"B_PPITCH", 1., &authorized)?;
                 target.set_take(c"D_PLAYRATE", after.playback_rate as f64, &authorized)?;
             }
-            if (before.source_start_sec - after.source_start_sec).abs() > 1e-9 {
-                target.set_take(c"D_STARTOFFS", after.source_start_sec, &authorized)?;
+            // 【倒放必须写**镜像**起点】宿主 `D_STARTOFFS` 在倒放 take 上是
+            // `D − 正向终点`（F-4 实测），而 clip 持有的是镜像复原之后的**正向**窗口。
+            // 直接写正向起点会让宿主把内容整体平移。镜像复原（`reversed_forward_window`）
+            // 的逆运算就在这里。
+            let after_offs = host_start_offset(after)
+                .ok_or("cannot write a reversed take without its media duration")?;
+            if host_start_offset(before).is_none_or(|b| (b - after_offs).abs() > 1e-9) {
+                target.set_take(c"D_STARTOFFS", after_offs, &authorized)?;
             }
             if (before.start_sec - after.start_sec).abs() > 1e-9 {
                 target.set_item(c"D_POSITION", after.start_sec, &authorized)?;
@@ -1216,6 +1237,37 @@ mod tests {
         );
         assert_eq!(host.item_value("D_FADEINDIR_NEW"), Some(0.));
         document.close();
+    }
+
+    /// 倒放写回必须翻回宿主**镜像**域：`D_STARTOFFS = D − 正向终点`。
+    ///
+    /// 【为什么这是回归测试】`workspace::reversed_forward_window` 把宿主镜像坐标复原成
+    /// 正向窗口交给内核；写回时若不翻回去，宿主会按"起点"重新解释那个正向值 —— 倒放
+    /// take 被整体平移 `D − start − span`。
+    #[test]
+    fn reversed_write_back_uses_the_mirrored_host_offset() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+            "id":"c","track_id":"t","name":"n","start_sec":0,"length_sec":1,
+            "duration_sec":2.0,
+            "reversed":true,
+            "takes":[{"id":"k","source_start_sec":0.25,"source_end_sec":1.25,"reversed":true,
+                      "duration_sec":2.0}]
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        // 正向窗 [0.25, 1.25]、媒体总长 2.0 ⇒ 宿主镜像起点 2.0 − 1.25 = 0.75。
+        assert_eq!(host_start_offset(&clip), Some(0.75));
+        // 正放：就是正向起点本身。
+        clip.reversed = false;
+        assert_eq!(host_start_offset(&clip), Some(0.25));
+        // 倒放 + 循环源：走内核回绕分支，不适用镜像模型。
+        clip.reversed = true;
+        clip.loop_enabled = true;
+        assert_eq!(host_start_offset(&clip), Some(0.25));
+        // 媒体总长取不到 ⇒ 返回 None（宁可不写，也不写一个错的起点）。
+        clip.loop_enabled = false;
+        clip.duration_sec = None;
+        assert_eq!(host_start_offset(&clip), None);
     }
 
     /// 形状 / 曲率必须进完成门：否则"只改曲率"的补丁 `matches()` 恒真，响应会带着
