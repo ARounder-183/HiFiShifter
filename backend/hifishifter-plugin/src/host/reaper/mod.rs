@@ -792,9 +792,17 @@ impl ReaperHost {
             return Err("invalid REAPER item volume".into());
         }
         let playback_rate = tv(c"D_PLAYRATE")?;
-        if duration_sec <= 0. || playback_rate <= 0. {
-            return Err("invalid REAPER length/playback rate".into());
+        if duration_sec <= 0. {
+            return Err("invalid REAPER length".into());
         }
+        // 速率只保留**幅值**：负速率是宿主的倒放信号之一（与独立 App 的
+        // `reaper_import.rs` 同口径：`raw_play_rate.abs().max(0.01)`），方向由
+        // `PCM_Source_GetSectionInfo` 的方向位单独表达（见 `LostField::Reversed`）。
+        // 此前直接拒绝 `<= 0` ⇒ **整个 item 从清单里消失**，比"识别成倒放"更糟。
+        if playback_rate == 0. {
+            return Err("invalid REAPER playback rate".into());
+        }
+        let playback_rate = playback_rate.abs();
         let integer = |v: f64| -> Result<i32, String> {
             if v.fract() == 0. && v >= i32::MIN as f64 && v <= i32::MAX as f64 {
                 Ok(v as i32)

@@ -1468,6 +1468,23 @@ fn task38a_bad_fields_guid_and_marker_count_are_bounded_and_explicit() {
     );
 }
 
+/// 负速率是宿主的倒放信号，不是非法值：几何保留**幅值**而不是丢掉整个 item。
+///
+/// 【为什么单独钉住】此前 `playback_rate <= 0.` 直接报错 ⇒ 该 item 从宿主清单里
+/// 消失，比"识别成倒放"更糟（前端看不到它，也无法在它上面编辑）。方向由
+/// `PCM_Source_GetSectionInfo` 的方向位单独表达，与这里的速率符号无关；与独立 App
+/// 的 `reaper_import.rs`（`raw_play_rate.abs().max(0.01)`）同口径。
+#[test]
+fn a_negative_play_rate_is_normalized_instead_of_dropping_the_item() {
+    let f = Fixture::new();
+    f.values.borrow_mut().insert("D_PLAYRATE", -2.);
+    let client = f.client();
+    let geometry = f
+        .geometry(&client)
+        .expect("a negative rate must not drop the item");
+    assert_eq!(geometry.playback_rate, 2.);
+}
+
 #[test]
 fn task38a_each_raw_geometry_getter_reentry_stops_before_the_next_getter() {
     let f = Fixture::new();
