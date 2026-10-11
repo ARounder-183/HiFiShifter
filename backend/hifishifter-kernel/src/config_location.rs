@@ -180,10 +180,24 @@ pub fn shared_data_subdir(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `HIFISHIFTER_CONFIG_DIR` 是**进程级**全局量，而 cargo 默认并行跑用例：一个用例
+    /// `set_var`、另一个同时把它设成空值、第一个再去读，就会落到平台默认 —— 表现为
+    /// 随机失败的"环境变量没生效"。改动它的用例都先取这把锁，让"写入-读取-清除"成为
+    /// 临界区。（锁中毒按既有 `lock_or_recover` 纪律恢复，不 panic。）
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// 显式参数优先于环境变量：App 传自己的路径时必须用它。
     #[test]
     fn explicit_path_wins_over_the_environment() {
+        let _guard = env_guard();
         let explicit = PathBuf::from("C:/explicit/config");
         std::env::set_var(CONFIG_DIR_ENV, "C:/from-env/config");
         let resolved = resolve(Some(&explicit));
@@ -194,6 +208,7 @@ mod tests {
     /// 环境变量优先于平台默认：测试与排障依赖这一点。
     #[test]
     fn environment_overrides_the_platform_default() {
+        let _guard = env_guard();
         let override_dir = std::env::temp_dir().join("hfs-config-location-test");
         std::env::set_var(CONFIG_DIR_ENV, &override_dir);
         let resolved = resolve(None);
@@ -204,6 +219,7 @@ mod tests {
     /// 空的环境变量视为未设置，不能解析成一个空路径。
     #[test]
     fn a_blank_environment_value_falls_through() {
+        let _guard = env_guard();
         std::env::set_var(CONFIG_DIR_ENV, "   ");
         let resolved = resolve(None);
         std::env::remove_var(CONFIG_DIR_ENV);
