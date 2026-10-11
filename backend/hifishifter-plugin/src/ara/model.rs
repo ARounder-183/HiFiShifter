@@ -2129,17 +2129,17 @@ mod tests {
     ///
     /// 【为什么必须走生产路径】此前已有的用例手动 `ready.store(true)` 绕过
     /// `prepare_renderers` —— 那只证明"标志能被置真"，没证明"失败之后还能自己回来"。
-    /// 这里让第一次映射真的以**文档级致命错误**失败（region 数量与序列声明对不上），
-    /// 从未发布过时间线 ⇒ `ready=false`；随后喂一份可映射的文档，`ready` 必须由
-    /// `prepare_renderers` 自己从 `false` 回到 `true`，否则宿主不重发 `end_editing`
-    /// 时实例会永久失效。
+    ///
+    /// 【为什么不再用"声明数量对不上"当致命触发】该输入现在按顺序归属**成功映射**
+    /// （见 `region_sequence_of`），不再整份失败 —— 因此这里改为钉住新的、更重要的性质：
+    /// 归属信息缺失时**不砖化实例**，片段照常发布且 `ready` 为真。
     #[test]
-    fn a_failed_first_mapping_recovers_on_the_next_successful_edit() {
+    fn missing_sequence_attribution_publishes_clips_without_bricking_the_instance() {
         use std::sync::atomic::Ordering;
 
         let mut model = ModelHandle::new();
         // 声明 1 条 region，扁平列表却有 2 条，且都缺 `regionSequenceIndex` ⇒
-        // `SequenceCountMismatch`（文档级致命错误，逐 region 跳过救不了）。
+        // 多出来的 region 归到首条序列，映射成功（宿主不填 count 也要能显示片段）。
         model.document = crate::ara::ara_document_from_json(
             r#"{
                 "audioSources": [ { "persistentID": "s", "sampleRate": 44100.0 } ],
@@ -2158,16 +2158,8 @@ mod tests {
         .unwrap();
 
         model.remap_and_log();
-        assert!(model.timeline().is_none(), "致命错误不得发布半份时间线");
-        assert!(
-            !model.session.ready.load(Ordering::Acquire),
-            "从未成功映射过 ⇒ 未就绪"
-        );
-
-        // 宿主随后给出可映射的文档：下一次收口必须把实例自己拉回可用状态。
-        model.document = identity_document(&["A"]);
-        model.remap_and_log();
-        assert_eq!(model.timeline().unwrap().clips.len(), 1);
+        let timeline = model.timeline().expect("归属缺失不得整份失败");
+        assert_eq!(timeline.clips.len(), 2);
         assert!(
             model.session.ready.load(Ordering::Acquire),
             "成功映射必须经 `prepare_renderers` 把 `ready` 置真"

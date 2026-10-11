@@ -3974,6 +3974,11 @@ pub(crate) mod tests {
             .is_err());
     }
     /// 暂时渲染失败只影响就绪状态；宿主恢复后自动重试，不能要求用户手工reload。
+    ///
+    /// 【为什么不再用"内容淡化缺宿主几何"当失败源】那条路径已按 Task 4.1 改为**逐 clip
+    /// 降级**（ARA-only 宿主上淡化不再让整条 renderer 失败）—— 它不再产生渲染错误，
+    /// 因此这里改用真正**暂时**的失败源：宿主尚未就绪（`host PCM/model not ready`）。
+    /// 这与本用例要钉的性质完全一致：失败只影响就绪读数，恢复后自动重试即可。
     #[test]
     fn automatic_apply_recovers_from_render_failure_without_reload() {
         let (model, owner, _identity) = fixture();
@@ -3988,9 +3993,8 @@ pub(crate) mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         let loaded = call(&editor, &sink, &rx, 1, "get_timeline_state", json!({}));
-        for region in document.regions.lock_or_recover().values_mut() {
-            region.has_content_based_fade_at_head = true;
-        }
+        // 宿主暂时未就绪 ⇒ 渲染暂时失败（局部/暂时，不是文档级故障）。
+        document.ready.store(false, Ordering::Release);
         call(
             &editor,
             &sink,
@@ -4006,9 +4010,8 @@ pub(crate) mod tests {
         }
         assert!(editor.error.lock_or_recover().is_none());
         assert_eq!(editor.applied.load(Ordering::Acquire), 0);
-        for region in document.regions.lock_or_recover().values_mut() {
-            region.has_content_based_fade_at_head = false;
-        }
+        // 宿主恢复就绪 ⇒ 自动重试必须自己回到可用状态，不需要 reload。
+        document.ready.store(true, Ordering::Release);
         let began = Instant::now();
         while editor.applied.load(Ordering::Acquire) < 1 {
             assert!(

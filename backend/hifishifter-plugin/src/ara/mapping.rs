@@ -202,13 +202,6 @@ pub enum MappingError {
     UnknownModification(String),
     /// region 归属越界。
     UnknownRegionSequence(usize),
-    /// 序列声明数量与扁平列表对不上。
-    SequenceCountMismatch {
-        /// 声明之和。
-        declared: i64,
-        /// 实际数量。
-        actual: usize,
-    },
     /// 播放时长为 0 或非有限值。
     NonPositivePlaybackDuration,
 }
@@ -224,10 +217,6 @@ impl std::fmt::Display for MappingError {
             Self::UnknownRegionSequence(index) => {
                 write!(f, "playback region references region sequence {index}")
             }
-            Self::SequenceCountMismatch { declared, actual } => write!(
-                f,
-                "region sequences declare {declared} regions but the flat list has {actual}"
-            ),
             Self::NonPositivePlaybackDuration => {
                 write!(f, "playback region has a non-positive playback duration")
             }
@@ -289,11 +278,22 @@ fn region_sequence_of(doc: &AraDocument) -> Result<Vec<usize>, MappingError> {
         }
     }
     let declared_total: i64 = declared_counts.iter().map(|count| *count as i64).sum();
+    // 【为什么不再整份失败】声明数量与扁平列表对不上时，此前直接返回
+    // `SequenceCountMismatch` ⇒ **整份文档**映射失败 ⇒ 插件里一片空白。宿主（尤其
+    // 非 REAPER）可能既不填 `playbackRegionCount`（恒 0）也不给 region→sequence 边 ——
+    // 那不是"文档损坏"，而是"归属信息缺失"。此时退回**顺序归属**：按声明数量切分，
+    // 多出来的 region 归到第一条序列（下标 0，调用点的 `unwrap_or(0)` 已实现）。
+    // 宁可把片段放在首轨，也不要什么都不显示；真实布局缺失只记一行限流告警。
     if !doc.playback_regions.is_empty() && declared_total != doc.playback_regions.len() as i64 {
-        return Err(MappingError::SequenceCountMismatch {
-            declared: declared_total,
-            actual: doc.playback_regions.len(),
-        });
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.region-sequence-count",
+            format_args!(
+                "[ara] region sequences declare {declared_total} region(s) but the flat list has {}; \
+                 attributing the surplus to the first sequence",
+                doc.playback_regions.len()
+            ),
+        );
     }
 
     let mut owned = Vec::with_capacity(doc.playback_regions.len());
@@ -371,9 +371,9 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
 /// 映射口径见模块文档；拉伸按 `durationInModificationTime / durationInPlaybackTime`
 /// 落到 take 的 `playback_rate`，而不是读 `isTimestretchEnabled` 标志位。
 ///
-/// 【只有文档级结构不一致才整份失败】`Json`（无法解析）与 `SequenceCountMismatch`
-/// （声明数量与扁平列表对不上，无法判断任何一条 region 的归属）保留为致命错误；
-/// 单条 region 的问题一律降级为跳过。
+/// 【只有文档级结构不一致才整份失败】`Json`（无法解析）保留为致命错误 —— 连形状都
+/// 读不出来时没有可映射的东西；单条 region 的问题一律降级为跳过，region→sequence
+/// 归属缺失则退回顺序归属（见 [`region_sequence_of`]），不再整份失败。
 pub fn ara_document_to_timeline_reporting(
     doc: &AraDocument,
 ) -> Result<MappingOutcome, MappingError> {
@@ -846,8 +846,10 @@ mod tests {
         assert_eq!(timeline.clips[1].track_id, "ara-track-1");
     }
 
+    /// 声明数量与扁平列表对不上**不再整份失败**：按声明数量切分，多出来的 region 归到
+    /// 第一条序列。宿主不填 `playbackRegionCount` 时插件仍要能显示片段，而不是一片空白。
     #[test]
-    fn declared_count_mismatch_is_fatal() {
+    fn declared_count_mismatch_falls_back_to_the_first_sequence() {
         let doc = ara_document_from_json(
             r#"{
                 "audioSources": [
@@ -869,15 +871,35 @@ mod tests {
         )
         .expect("document parses");
 
-        // 声明数量与扁平列表对不上 ⇒ 无法判断任何一条 region 的归属 ⇒ 整份失败。
-        let error = ara_document_to_timeline(&doc).expect_err("mismatch is fatal");
-        assert!(matches!(
-            error,
-            MappingError::SequenceCountMismatch {
-                declared: 1,
-                actual: 2
-            }
-        ));
+        // 声明 1 条、实际 2 条 ⇒ 两条都落在首条序列上，映射成功而不是整份失败。
+        let timeline = ara_document_to_timeline(&doc).expect("mismatch must not be fatal");
+        assert_eq!(timeline.clips.len(), 2);
+        assert!(timeline.clips.iter().all(|clip| clip.track_id == "ara-track-0"));
+    }
+
+    /// 完全没有 region sequence 时，region 无轨可归 —— 如实逐条跳过，而不是整份失败。
+    #[test]
+    fn regions_without_any_sequence_are_skipped_individually() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0 }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("must not be fatal");
+        assert!(outcome.timeline.clips.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].reason, SkipReason::UnknownRegionSequence);
     }
 
     #[test]
