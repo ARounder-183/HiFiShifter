@@ -1,6 +1,7 @@
 //! 插件引擎的构建脚本。
 //!
-//! 只有一件事：把构建身份（commit / 脏标志 / GitHub 仓库链接）烘进 DLL。
+//! 两件事：把构建身份（commit / 脏标志 / GitHub 仓库链接）烘进 DLL；把产品版本的
+//! **单一来源**（`src-tauri/tauri.conf.json`）注入为 `HFS_PRODUCT_VERSION`。
 //!
 //! 【为什么现在才有】在此之前插件完全没有 build script，于是它的「关于」对话框
 //! 只能报一个 crate 版本号 —— 没有 commit、没有仓库链接，用户报 bug 时无法定位到
@@ -11,7 +12,13 @@
 
 #[path = "../build-support/git_info.rs"]
 mod git_info;
+#[path = "../build-support/product_version.rs"]
+mod product_version;
 
 fn main() {
     git_info::emit(&["src", "native"]);
+    product_version::emit(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_VERSION"),
+    );
 }

@@ -73,7 +73,13 @@ use std::ffi::c_void;
 pub(crate) const CLASS_NAME: &str = "HiFiShifter";
 pub(crate) mod host;
 /// 版本号（展示用）。
-pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+///
+/// 【为什么不是 `CARGO_PKG_VERSION`】产品版本的**单一来源**是
+/// `src-tauri/tauri.conf.json`，由 `build.rs` 注入为 `HFS_PRODUCT_VERSION`。读本 crate
+/// 的 `CARGO_PKG_VERSION` 会引入**第二份副本**：只改一处就会让插件与独立 App 的
+/// 「关于」对话框报出不同版本（已经真实发生过一次）。`tests/version_parity.rs`
+/// 再把 Cargo.toml / package.json 等其余副本钉在这一个值上。
+pub(crate) const VERSION: &str = env!("HFS_PRODUCT_VERSION");
 /// ARA 工厂的持久 ID。
 pub(crate) const FACTORY_ID: &str = "com.hifishifter.ara";
 /// ARA 文档归档 ID。

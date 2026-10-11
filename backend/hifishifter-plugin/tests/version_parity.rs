@@ -8,7 +8,11 @@
 //! 【为什么用测试而不是只改脚本】改脚本只解决"这次改对了"；漏改一次不会有任何
 //! 症状，直到用户在关于对话框里看到错误的版本。这条测试让漏改立刻变红。
 //!
-//! 判据：插件的 `CARGO_PKG_VERSION` 必须同时等于 App 的三个版本来源。
+//! 判据（两层）：
+//! 1. `build.rs` 注入的 `HFS_PRODUCT_VERSION`（两个形态「关于」对话框的实际取值）
+//!    必须等于**单一来源** `src-tauri/tauri.conf.json`；
+//! 2. 其余副本（`tauri.conf.dist-dev.json` / 两个 `Cargo.toml` / `package.json` /
+//!    `package-lock.json`）必须都等于插件的 `CARGO_PKG_VERSION`。
 //! 任何一处不一致都说明 `scripts/set-version.ps1` 漏了一个文件。
 
 use std::path::{Path, PathBuf};
@@ -55,10 +59,25 @@ fn every_version_source_agrees_with_the_plugin_crate() {
     let root = repo_root();
     let plugin_version = env!("CARGO_PKG_VERSION");
 
+    // 产品版本的**单一来源**是 `src-tauri/tauri.conf.json`；`build.rs` 把它注入为
+    // `HFS_PRODUCT_VERSION`，两个形态的「关于」对话框都读这一个值。这里先钉住注入值
+    // 与权威文件一致，再钉住其余副本 —— 任何一处漏改都会立刻变红。
+    let authority = {
+        let text = read(&root.join("backend/src-tauri/tauri.conf.json"));
+        first_version_assignment(&text).expect("tauri.conf.json must declare a version")
+    };
+    assert_eq!(
+        env!("HFS_PRODUCT_VERSION"),
+        authority,
+        "build.rs 注入的 HFS_PRODUCT_VERSION 必须来自 tauri.conf.json（产品版本的单一来源）"
+    );
+
     let sources = [
         "backend/src-tauri/tauri.conf.json",
+        "backend/src-tauri/tauri.conf.dist-dev.json",
         "backend/src-tauri/Cargo.toml",
         "frontend/package.json",
+        "frontend/package-lock.json",
     ];
 
     let mut mismatches = Vec::new();

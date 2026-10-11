@@ -1,4 +1,13 @@
+#[path = "../build-support/product_version.rs"]
+mod product_version;
+
 fn main() {
+    // 产品版本的单一来源（`src-tauri/tauri.conf.json`）注入为 `HFS_PRODUCT_VERSION`，
+    // 供 `build_info::version()` 与插件的「关于」对话框共用同一个值。
+    product_version::emit(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_VERSION"),
+    );
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
