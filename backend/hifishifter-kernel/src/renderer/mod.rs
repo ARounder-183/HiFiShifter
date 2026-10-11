@@ -66,7 +66,6 @@ pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
 }
 
 /// 列出所有已注册的渲染器（供前端 UI 展示或调试）。
-#[allow(dead_code)]
 pub fn all_renderers() -> Vec<&'static dyn Renderer> {
     vec![&WORLD_RENDERER, &HIFIGAN_RENDERER]
 }

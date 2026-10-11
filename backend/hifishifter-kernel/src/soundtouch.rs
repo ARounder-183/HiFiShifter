@@ -63,7 +63,6 @@ pub fn runtime_library_name() -> &'static str {
     }
 }
 
-#[allow(dead_code)]
 pub fn import_library_name() -> &'static str {
     "SoundTouchDLL.lib"
 }
@@ -144,7 +143,6 @@ impl SoundTouchState {
         Ok(Self { handle, channels })
     }
 
-    #[allow(dead_code)]
     fn reset(&mut self, time_ratio: f64) -> Result<(), SoundTouchError> {
         unsafe {
             soundtouch_clear(self.handle);
@@ -249,7 +247,6 @@ impl RealtimeStretcher {
         })
     }
 
-    #[allow(dead_code)]
     pub fn reset(&mut self, time_ratio: f64) -> Result<(), String> {
         self.out_buffer.clear();
         self.out_read_pos = 0;

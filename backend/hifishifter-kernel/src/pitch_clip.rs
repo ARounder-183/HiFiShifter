@@ -97,16 +97,9 @@ pub fn get_clip_pitch_batch_progress() -> Option<ClipPitchBatchProgress> {
 
 #[derive(Debug, Clone)]
 struct ClipPitchKey {
-    #[allow(dead_code)]
-    clip_id: String,
     key: String,
     frame_period_ms: f64,
     sample_rate: u32,
-    #[allow(dead_code)]
-    pre_silence_sec: f64,
-    /// true = playback_rate==1，分析源音频全量，cache key 不含 trim
-    #[allow(dead_code)]
-    is_full_source: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -537,15 +530,6 @@ fn build_clip_pitch_key(
         return None;
     }
 
-    let playback_rate = clip.playback_rate as f64;
-    let playback_rate = if playback_rate.is_finite() && playback_rate > 0.0 {
-        playback_rate
-    } else {
-        1.0
-    };
-
-    let pre_silence_sec = (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6);
-
     let fp = frame_period_ms.max(0.1);
 
     // 缓存 key 只包含影响原始音频分析结果的字段：source_path（文件内容签名）+ frame_period。
@@ -559,17 +543,12 @@ fn build_clip_pitch_key(
     hasher.update(&mtime.to_le_bytes());
     hasher.update(&quantize_u32(fp, 1000.0).to_le_bytes());
 
-    let is_full_source = (playback_rate - 1.0).abs() <= 1e-6;
-
     let key = hasher.finalize().to_hex().to_string();
 
     Some(ClipPitchKey {
-        clip_id: clip.id.clone(),
         key,
         frame_period_ms: fp,
         sample_rate: 44100,
-        pre_silence_sec,
-        is_full_source,
     })
 }
 
@@ -1610,7 +1589,6 @@ pub fn assemble_nonloop_pitch_from_window(
 /// 使指定 clip 的 pitch MIDI 缓存失效（例如源文件变化后调用）。
 /// 以 clip 所对应的 content_hash 为 key 删除缓存，影响所有共享该源文件的 clip。
 /// 下次 `schedule_clip_pitch_jobs` 时会重新提交检测任务。
-#[allow(dead_code)]
 pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
     let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else {
@@ -1623,7 +1601,6 @@ pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
 /// 清除指定 clip 对应源文件的 inflight 标记。
 /// 当拉伸完成（handle_stretch_ready）后调用，确保后续的
 /// schedule_clip_pitch_jobs 不会因为残留的 inflight 标记而跳过该 clip。
-#[allow(dead_code)]
 pub fn clear_clip_inflight(tl: &TimelineState, clip: &Clip) {
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
     let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else {
@@ -1633,7 +1610,6 @@ pub fn clear_clip_inflight(tl: &TimelineState, clip: &Clip) {
     set.remove(&ck.key);
 }
 
-#[allow(dead_code)]
 pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec<&'a Clip> {
     let mut out: Vec<&'a Clip> = tl
         .clips

@@ -400,7 +400,6 @@ pub fn apply_formant_morph_interleaved(
 ///
 /// 当前**无任何调用方**（前端经 IPC 用的是显式 `target_f1_hz / target_f2_hz`）。
 /// 保留为纯查表工具，供将来接线；本模块算法不依赖它。
-#[allow(dead_code)]
 pub fn vowel_formant_preset(vowel: &str) -> Option<(f64, f64)> {
     match vowel.trim().to_ascii_lowercase().as_str() {
         "a" | "aa" | "ah" | "啊" | "あ" | "ア" => Some((800.0, 1_200.0)),

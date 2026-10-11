@@ -829,7 +829,6 @@ impl ClipProcessor for VslibProcessor {
 // ─── 静态描述符暴露（即使不启用 vslib feature 也可查询）──────────────────────
 
 /// 返回 vslib 声码器参数描述符静态切片（供前端 UI 查询，不依赖 DLL）。
-#[allow(dead_code)]
 pub fn vslib_param_descriptors() -> &'static [ParamDescriptor] {
     VSLIB_PARAMS
 }

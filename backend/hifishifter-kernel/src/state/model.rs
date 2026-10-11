@@ -2407,7 +2407,6 @@ pub struct ProjectState {
     /// 新建工程时取全局默认（`UiSettings::save_undo_history_by_default`），
     /// 之后由工程文件持久化；打开工程时总是尝试读取 UNDO 数据，与本开关无关。
     pub save_undo_history: bool,
-    #[allow(dead_code)]
     pub allow_close: bool,
 }
 
@@ -9382,7 +9381,6 @@ impl TimelineState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
     pub fn set_clip_state(
         &mut self,
         clip_id: &str,
@@ -10796,7 +10794,6 @@ impl TimelineState {
     /// - Right halves get a new group_id (per original group).
     /// - Unsplit clips in affected groups are assigned to left or right side by position.
     /// - Groups with fewer than 2 members after reassignment are dissolved.
-    #[allow(dead_code)]
     pub fn split_clips_at(&mut self, clip_ids: &[String], split_sec: f64) {
         self.split_clips_at_with_options(clip_ids, split_sec, None);
     }

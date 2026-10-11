@@ -46,7 +46,6 @@ pub struct MixdownOptions {
     ///
     /// **尚未被消费** —— 见 [`QualityPreset`] 的说明。调用点应继续正确传入，
     /// 以便补齐语义时无需再改一遍所有调用点；但不要据此推断行为差异。
-    #[allow(dead_code)]
     pub quality_preset: QualityPreset,
     /// 可选取消标记：为 true 时中断渲染并返回 `export_cancelled`。
     pub cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -93,7 +92,6 @@ pub struct MixdownResult {
     pub sample_rate: u32,
     pub duration_sec: f64,
     /// 实际导出声道数（应用 Mono 下混后；诊断/元数据保留字段）。
-    #[allow(dead_code)]
     pub channels: u16,
     /// 写盘字节数。
     pub bytes_written: u64,

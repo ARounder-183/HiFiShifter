@@ -50,7 +50,7 @@ pub struct FormantCandidate {
     pub f2: Pole,
     /// 该帧 LPC 残差能量比（透传给浊音 gate；当前 gate 直接读分析结果，
     /// 此字段保留供候选级门控使用）。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 候选级门控尚未接入：字段已随候选一路透传，接入后即成为读取方。
     pub residual_ratio: f32,
 }
 

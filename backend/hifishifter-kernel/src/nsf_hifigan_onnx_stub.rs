@@ -1,6 +1,5 @@
 //! 未编译ONNX时保持HiFiGAN接口，不伪造可用模型、推理或缓存身份。
 
-#[allow(dead_code)]
 pub fn probe_load() {
     // ONNX feature disabled.
 }
@@ -50,13 +49,11 @@ pub fn ep_choice() -> String {
 }
 
 /// 与 onnx 变体同名；无 onnx 构建下无调用方，保留以维持接口一致。
-#[allow(dead_code)]
 pub fn active_ep() -> String {
     "none".to_string()
 }
 
 /// 与 onnx 变体同名；无 onnx 构建下没有会话，因此返回空串（UI 不显示设备）。
-#[allow(dead_code)]
 pub fn active_backend_name() -> &'static str {
     ""
 }

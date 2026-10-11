@@ -117,7 +117,6 @@ extern "C" {
         aperiodicity: *mut *mut f64,
         synth: *mut WorldSynthesizerRaw,
     ) -> i32;
-    #[allow(dead_code)]
     pub fn RefreshSynthesizer(synth: *mut WorldSynthesizerRaw);
     pub fn DestroySynthesizer(synth: *mut WorldSynthesizerRaw);
     pub fn IsLocked(synth: *mut WorldSynthesizerRaw) -> i32;

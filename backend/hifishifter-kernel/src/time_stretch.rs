@@ -38,7 +38,6 @@ pub enum StretchAlgorithm {
     /// Desired: zplane Elastique (Soloist) time-stretch preserving pitch + formants.
     /// This requires integrating the Elastique SDK (commercial) — deliberately
     /// kept as a roadmap placeholder until that integration happens.
-    #[allow(dead_code)]
     ElastiqueSoloist,
 }
 

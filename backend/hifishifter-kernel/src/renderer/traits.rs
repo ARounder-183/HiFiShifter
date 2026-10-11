@@ -47,7 +47,6 @@ pub struct RenderContext<'a> {
 
 /// 渲染器能力描述。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RendererCapabilities {
     /// 是否支持实时渲染（audio callback 级低延迟）。
     pub supports_realtime: bool,
@@ -77,22 +76,18 @@ pub trait Renderer: Send + Sync {
     fn id(&self) -> &str;
 
     /// 人类可读的显示名称。
-    #[allow(dead_code)]
     fn display_name(&self) -> &str;
 
     /// 返回该渲染器对应的 [`SynthPipelineKind`]。
-    #[allow(dead_code)]
     fn kind(&self) -> SynthPipelineKind;
 
     /// 检查渲染器是否可用（动态库已加载 / ONNX 模型已就绪等）。
-    #[allow(dead_code)]
     fn is_available(&self) -> bool;
 
     /// 对输入 PCM 执行音高编辑，返回处理后的单声道 PCM。
     fn render(&self, ctx: &RenderContext<'_>) -> Result<Vec<f32>, String>;
 
     /// 声明该渲染器支持的能力。
-    #[allow(dead_code)]
     fn capabilities(&self) -> RendererCapabilities {
         RendererCapabilities::default()
     }
@@ -133,7 +128,6 @@ pub struct ClipProcessContext<'a> {
     pub playback_rate: f64,
     /// 输出帧数（应用 playback_rate 后）。
     /// 仅 vslib 处理器消费；无 vslib 构建下保留以维持上下文契约完整。
-    #[allow(dead_code)]
     pub out_frames: usize,
     /// 用于缓存 key 的 Clip 唯一 ID。
     pub clip_id: &'a str,
@@ -153,10 +147,8 @@ pub struct ProcessorCapabilities {
     /// 是否原生处理 `playback_rate`（= true 时 compat 层不再调 Signalsmith Stretch）。
     pub handles_time_stretch: bool,
     /// 是否支持逐帧共振峰偏移曲线（"formant_shift_cents"）。
-    #[allow(dead_code)]
     pub supports_formant: bool,
     /// 是否支持逐帧气声强度曲线（"breathiness"）。
-    #[allow(dead_code)]
     pub supports_breathiness: bool,
 }
 
@@ -208,10 +200,8 @@ pub trait ClipProcessor: Send + Sync {
     /// 处理器唯一标识符（与 `SynthPipelineKind` 对应）。
     fn id(&self) -> &str;
     /// 人类可读显示名称。
-    #[allow(dead_code)]
     fn display_name(&self) -> &str;
     /// 运行时可用性检查（例：vslib 仅在 DLL 已加载时为 true）。
-    #[allow(dead_code)]
     fn is_available(&self) -> bool;
     /// 声明处理器支持的能力。
     fn capabilities(&self) -> ProcessorCapabilities {

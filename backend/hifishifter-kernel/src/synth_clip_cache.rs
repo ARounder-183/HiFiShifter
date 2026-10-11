@@ -20,8 +20,6 @@
 //! 共振峰参数"的情况下 RenderedClipCache 反复 miss, 表现为"共振峰参数
 //! 频繁出现异常的缓存失效"。
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
@@ -88,7 +86,6 @@ impl SynthClipCache {
     }
 
     /// 清空所有缓存。
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
     }
@@ -101,7 +98,6 @@ impl SynthClipCache {
     }
 
     /// 当前缓存条目数。
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -423,13 +419,11 @@ impl RenderedClipCache {
     }
 
     /// 清空所有缓存。
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
     }
 
     /// 当前缓存条目数。
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -1056,21 +1050,6 @@ pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
         formant_morph: None,
         ..*input
     })
-}
-
-fn curve_slice_bounds(
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    frame_period_ms: f64,
-    len: usize,
-) -> (usize, usize) {
-    let fp = frame_period_ms.max(0.1);
-    let start_sec = start_frame as f64 / sr.max(1) as f64;
-    let end_sec = end_frame as f64 / sr.max(1) as f64;
-    let start_idx = ((start_sec * 1000.0) / fp).floor().max(0.0) as usize;
-    let end_idx = ((end_sec * 1000.0) / fp).ceil().max(0.0) as usize;
-    (start_idx.min(len), end_idx.min(len))
 }
 
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────

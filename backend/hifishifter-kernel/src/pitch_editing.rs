@@ -30,7 +30,6 @@ pub struct PitchCurvesSnapshot<'a> {
 }
 
 impl<'a> PitchCurvesSnapshot<'a> {
-    #[allow(dead_code)]
     pub fn midi_at_time(&self, abs_time_sec: f64) -> f64 {
         if !(abs_time_sec.is_finite() && abs_time_sec >= 0.0) {
             return 0.0;
@@ -89,7 +88,6 @@ impl<'a> PitchCurvesSnapshot<'a> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_voiced_at_time(&self, abs_time_sec: f64) -> bool {
         let fp = self.frame_period_ms.max(0.1);
         let idx = ((abs_time_sec.max(0.0) * 1000.0) / fp).round().max(0.0) as usize;
@@ -99,7 +97,6 @@ impl<'a> PitchCurvesSnapshot<'a> {
     }
 }
 
-#[allow(dead_code)]
 pub fn selected_pitch_curves_snapshot<'a>(
     timeline: &'a TimelineState,
 ) -> Option<PitchCurvesSnapshot<'a>> {
@@ -429,7 +426,6 @@ pub fn dyn_orig_curve_for_clip<'a>(
 ///
 /// 保留该函数（而非各处内联 `false`）是为了让「不存在 processor 烘焙」这一事实
 /// 有唯一的、可被搜索与断言的落点。
-#[allow(dead_code)]
 #[inline]
 pub fn processor_bakes_common_mix_curves(_kind: SynthPipelineKind) -> bool {
     false
@@ -626,7 +622,6 @@ impl PitchEditAlgorithm {
     }
 }
 
-#[allow(dead_code)]
 pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgorithm {
     let selected = timeline
         .selected_track_id
@@ -2555,7 +2550,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     Ok(true)
 }
 
-#[allow(dead_code)]
 pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     let selected = timeline
         .selected_track_id
@@ -2588,7 +2582,6 @@ pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     entry.pitch_edit_user_modified
 }
 
-#[allow(dead_code)]
 pub fn is_pitch_edit_backend_available(timeline: &TimelineState) -> bool {
     let selected = timeline
         .selected_track_id
@@ -2613,7 +2606,6 @@ pub fn semitone_to_ratio(semitones: f64) -> f64 {
 
 /// 检测指定clip是否需要pitch edit
 /// 返回true表示该clip需要pitch edit处理
-#[allow(dead_code)]
 pub fn does_clip_need_pitch_edit(
     timeline: &TimelineState,
     clip: &crate::state::Clip,

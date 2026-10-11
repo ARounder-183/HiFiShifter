@@ -31,7 +31,6 @@ pub struct StretchKey {
 }
 
 /// 内核与设备层之间的命令。**纯数据**，不含任何宿主句柄。
-#[allow(dead_code)]
 pub enum EngineCommand {
     UpdateTimeline(TimelineState),
     SeekSec {
@@ -50,7 +49,6 @@ pub enum EngineCommand {
         key: StretchKey,
     },
     AudioReady {
-        #[allow(dead_code)]
         key: AudioKey,
     },
     /// clip pitch MIDI 异步预计算完成，触发 snapshot rebuild。

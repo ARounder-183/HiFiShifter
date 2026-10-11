@@ -200,7 +200,6 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<SeparatorSession, String> {
 }
 
 /// Returns the EP that was actually selected for the HNSEP session (for diagnostics).
-#[allow(dead_code)]
 pub fn selected_ep_name() -> Option<&'static str> {
     SELECTED_EP.get().map(|s| s.as_str())
 }
@@ -367,7 +366,6 @@ pub fn is_available() -> bool {
 /// （输入名/形状不符、输出只有 1 个），表现为"模型坏了"的错误结论。
 /// 自检必须走与生产一致的路径（`hnsep_dsp` 的 STFT + mask 网络），否则它证明不了
 /// 任何事。这里刻意只跑一个最小 segment（32 帧）以保持自检轻量。
-#[allow(dead_code)]
 pub fn probe_load() -> Result<String, String> {
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;

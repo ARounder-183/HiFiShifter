@@ -45,7 +45,6 @@ pub struct MidiExportRequest {
     #[serde(alias = "baseScale")]
     pub base_scale: String,
     #[serde(alias = "projectScaleNotes")]
-    #[allow(dead_code)]
     pub project_scale_notes: Vec<u8>,
 }
 

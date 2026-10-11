@@ -1077,7 +1077,6 @@ impl NsfHifiganOnnx {
         )
     }
 
-    #[allow(dead_code)]
     fn env_usize(name: &str) -> Option<usize> {
         std::env::var(name)
             .ok()
@@ -1958,7 +1957,6 @@ pub fn extract_mel_with_shifts(
 /// 输出: `[n_mels * t_out]`，同样行优先。
 ///
 /// 当 `t_in == t_out` 时直接返回输入的拷贝。
-#[allow(dead_code)]
 fn interpolate_mel_time(mel: &[f32], n_mels: usize, t_in: usize, t_out: usize) -> Vec<f32> {
     if t_in == t_out {
         return mel.to_vec();
@@ -2002,7 +2000,6 @@ impl NsfHifiganOnnx {
     /// - `playback_rate`：播放速率（> 1.0 快放/缩短，< 1.0 慢放/拉长）
     /// - `start_sec`：该段在**时间轴**上的起始秒（已考虑拉伸后坐标）
     /// - `midi_at_time`：回调，参数为时间轴绝对时间（秒），返回目标 MIDI 值
-    #[allow(dead_code)]
     pub fn infer_from_audio_and_midi_mel_stretch(
         &mut self,
         audio_mono: &[f32],
@@ -2192,7 +2189,6 @@ fn smooth_tail_then_align(out: &mut Vec<f32>, target_len: usize, ramp: usize) {
 ///
 /// 参数语义与已移除的 `infer_pitch_edit_mono`（df4e17b4 删除）相似，但额外
 /// 接收 `playback_rate` 并在 mel 域完成时间拉伸，省去外部预处理。
-#[allow(dead_code)]
 pub fn infer_pitch_edit_mono_mel_stretch(
     audio_mono: &[f32],
     sample_rate: u32,
@@ -2231,7 +2227,6 @@ pub fn infer_pitch_edit_mono_mel_stretch(
 
 /// 分块 mel stretch 推理：对长 clip 分块调用 [`infer_pitch_edit_mono_mel_stretch`]，
 /// 相邻块之间使用等功率 crossfade 拼接。
-#[allow(dead_code)]
 pub fn infer_pitch_edit_chunked_mel_stretch(
     mono_pcm: &[f32],
     sample_rate: u32,

@@ -161,7 +161,6 @@ pub fn fade_gain_signed(shape: f64, dir: f64, mode_out: bool, t: f64) -> f64 {
 }
 
 /// 兼容旧调用形态的淡入求值（当前消费端均走 signed/LUT 路径，保留 API）。
-#[allow(dead_code)]
 pub fn fade_gain(shape: f64, dir: f64, t: f64) -> f64 {
     fade_gain_signed(shape, dir, false, t)
 }

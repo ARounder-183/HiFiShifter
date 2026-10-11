@@ -42,7 +42,6 @@ pub struct MidiNoteEvent {
     /// MIDI note number (0.0-127.0)，已包含弯音轮偏移
     pub note: f32,
     /// 力度 (0-127)
-    #[allow(dead_code)]
     #[serde(alias = "velocity")]
     pub velocity: u8,
     /// MIDI 通道 (0-15)

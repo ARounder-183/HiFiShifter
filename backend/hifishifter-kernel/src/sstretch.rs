@@ -48,10 +48,8 @@ pub fn is_available() -> bool {
 /// exposes it through `retrieve_interleaved_into()`.
 pub struct SignalsmithRealtimeStretcher {
     state: SStretchState,
-    #[allow(dead_code)]
     channels: usize,
     sample_rate: u32,
-    #[allow(dead_code)]
     time_ratio: f64,
 
     out_buffer: Vec<f32>,
@@ -63,7 +61,6 @@ pub struct SignalsmithRealtimeStretcher {
 
 unsafe impl Send for SignalsmithRealtimeStretcher {}
 
-#[allow(dead_code)]
 impl SignalsmithRealtimeStretcher {
     pub fn new(sample_rate: u32, channels: usize, time_ratio: f64) -> Result<Self, String> {
         if channels == 0 {
@@ -182,7 +179,6 @@ impl SignalsmithRealtimeStretcher {
         Ok(take_frames)
     }
 
-    #[allow(dead_code)]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }

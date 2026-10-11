@@ -63,7 +63,6 @@ pub const DEFAULT_DIVISION_FACTORS: [u32; MAX_MIPMAP_LEVELS] = [
 /// spp ≤ SPP_THRESHOLDS[0] → L0
 /// SPP_THRESHOLDS[0] < spp ≤ SPP_THRESHOLDS[1] → L1
 /// spp > SPP_THRESHOLDS[1] → L2
-#[allow(dead_code)]
 pub const SPP_THRESHOLDS: [f64; 2] = [512.0, 1024.0];
 
 // ============== 文件头结构 ==============
@@ -247,7 +246,6 @@ impl MipmapData {
     }
 
     /// 是否为空
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -269,7 +267,6 @@ impl MipmapData {
     }
 
     /// 计算数据大小 (bytes)
-    #[allow(dead_code)]
     pub fn data_size(&self) -> usize {
         (self.min.len() + self.max.len()) * 4
     }
@@ -396,7 +393,6 @@ impl HfsPeakFile {
     ///
     /// # 返回
     /// 最佳 mipmap 级别索引
-    #[allow(dead_code)]
     pub fn select_mipmap_level(&self, samples_per_pixel: f64) -> usize {
         // 根据 spp 阈值选择最佳 mipmap 级别
         // spp ≤ 512 → L0 (div=16, 精细级)
@@ -547,22 +543,18 @@ impl WaveformPeakCache {
 
     // Cache introspection accessors: used by unit tests and diagnostics;
     // no callers in non-test builds.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    #[allow(dead_code)]
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
-    #[allow(dead_code)]
     pub fn budget_bytes(&self) -> u64 {
         self.budget_bytes
     }
@@ -611,14 +603,11 @@ struct LevelAccumulator {
 }
 
 /// 多级 Mipmap 峰值计算器（v3：逐声道）
-#[allow(dead_code)]
+///
+/// 只保留驱动计算所需的派生状态（除数因子 + 逐级累积器）：除数因子由采样率算出、
+/// 累积器按声道数分配。采样率 / 声道数 / 总帧数都是"构造时用完即弃"的输入，不作为
+/// 字段留存 —— 存下来没有任何读取方，只会让输入伪装成状态。
 pub struct MipmapPeakCalculator {
-    /// 采样率
-    sample_rate: u32,
-    /// 声道数
-    channels: u16,
-    /// 总帧数
-    total_frames: u64,
     /// 各级别的除数因子
     division_factors: Vec<u32>,
     /// 各级别的累积器
@@ -627,7 +616,7 @@ pub struct MipmapPeakCalculator {
 
 impl MipmapPeakCalculator {
     /// 创建新的计算器
-    pub fn new(sample_rate: u32, channels: u16, total_frames: u64) -> Self {
+    pub fn new(sample_rate: u32, channels: u16) -> Self {
         let division_factors = calculate_division_factors(sample_rate);
         let ch = channels.max(1) as usize;
         let accumulators = division_factors
@@ -640,9 +629,6 @@ impl MipmapPeakCalculator {
             .collect();
 
         Self {
-            sample_rate,
-            channels,
-            total_frames,
             division_factors,
             accumulators,
         }
@@ -773,7 +759,6 @@ impl PerChannelPeakBuffer {
 ///
 /// # 参数
 /// - `progress_cb`: 可选的进度回调，参数为 0.0~1.0 的进度值
-#[allow(dead_code)]
 pub fn compute_mipmap_peaks(path: &Path) -> Result<HfsPeakFile, String> {
     compute_mipmap_peaks_with_progress(path, None::<fn(f32)>)
 }
@@ -840,7 +825,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
         .collect();
 
     // 创建计算器
-    let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
+    let mut calculator = MipmapPeakCalculator::new(sample_rate, channels);
 
     // 重新打开文件读取采样数据
     let mut reader = WavReader::open(path).map_err(|e| e.to_string())?;
@@ -985,7 +970,7 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
         .iter()
         .map(|_| PerChannelPeakBuffer::new(channels))
         .collect();
-    let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
+    let mut calculator = MipmapPeakCalculator::new(sample_rate, channels);
 
     let mut output_callback = |level: usize, min: &[f32], max: &[f32]| {
         if level < output_buffers.len() {
@@ -1180,7 +1165,6 @@ impl HfsPeakFile {
 
     /// 从文件加载，仅读取指定级别的 mipmap 数据
     /// 用于按需加载，减少内存占用
-    #[allow(dead_code)]
     pub fn load_mipmap_level(
         path: &Path,
         level: usize,
@@ -1375,7 +1359,6 @@ impl HfsPeaksCache {
     /// 获取或计算峰值数据
     ///
     /// 优先从缓存加载，缓存不存在时计算并保存
-    #[allow(dead_code)]
     pub fn get_or_compute(&self, source_path: &Path) -> Result<HfsPeakFile, String> {
         // 尝试从缓存加载
         if let Some(cached) = self.try_load(source_path) {
@@ -1394,7 +1377,6 @@ impl HfsPeaksCache {
     }
 
     /// 清理缓存目录
-    #[allow(dead_code)]
     pub fn clear(&self) -> std::io::Result<(u64, u64)> {
         let mut removed_files = 0u64;
         let mut removed_bytes = 0u64;
@@ -1513,7 +1495,7 @@ mod waveform_tile_tests {
 
     #[test]
     fn calculator_accumulates_per_channel() {
-        let mut calc = MipmapPeakCalculator::new(44100, 2, 16);
+        let mut calc = MipmapPeakCalculator::new(44100, 2);
         let mut buffers: Vec<PerChannelPeakBuffer> = vec![PerChannelPeakBuffer::new(2)];
         let mut cb = |level: usize, min: &[f32], max: &[f32]| {
             if level == 0 {

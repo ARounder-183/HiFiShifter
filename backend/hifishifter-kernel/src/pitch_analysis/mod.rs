@@ -16,7 +16,6 @@ pub use schedule::maybe_schedule_pitch_orig;
 // DYN（动态）原声电平基线的组装入口。
 pub use dyn_analysis::{assemble_dyn_orig_for_engine, maybe_schedule_dyn_orig};
 
-#[allow(dead_code)]
 pub fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
         return 0.0;
@@ -197,7 +196,6 @@ pub struct PitchOrigAnalysisProgressEvent {
     pub total_clips: u32,
 }
 
-#[allow(dead_code)]
 pub fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
     if out_len == 0 {
         return vec![];

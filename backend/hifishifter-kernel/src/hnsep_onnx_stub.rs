@@ -5,7 +5,6 @@ pub fn is_available() -> bool {
 }
 
 /// 与 onnx 变体同名；无 onnx 构建下无调用方，保留以维持接口一致。
-#[allow(dead_code)]
 pub fn probe_load() -> Result<String, String> {
     Err("onnx feature disabled".to_string())
 }

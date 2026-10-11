@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 pub fn beat_to_sec(beat: f64, bpm: f64) -> f64 {
     let bpm = if bpm.is_finite() && bpm > 0.0 {
         bpm
