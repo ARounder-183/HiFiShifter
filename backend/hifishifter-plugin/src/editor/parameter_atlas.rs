@@ -200,7 +200,7 @@ impl ParameterAtlas {
     }
     /// 同一源曲线可由历史/区域共享，额度按reservation身份去重，而不是按序列化值重复计数。
     // 额度统计诊断入口，保留供预算核对。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn accounted_curve_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let source = self
@@ -283,7 +283,7 @@ impl ParameterAtlas {
             // `Err`，整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句
             // `any(reversed)` 是同一个"把局部状态升级成全局故障"的错。
             // 倒放 clip 本来也渲染不出反向内容，跳过它就是如实处理。
-            if clip.reversed {
+            if !parameters_supported(clip) {
                 continue;
             }
             let identity = identities
@@ -336,7 +336,7 @@ impl ParameterAtlas {
                 // 倒放 clip 不参与参数绑定：它的播放顺序与源窗口反向，需要镜像的帧
                 // 映射（单列一期）。把它排除在候选之外，而不是让 `geometry(clip)`
                 // 报错 —— 后者会让整份重绑定失败。
-                .filter(|clip| !clip.reversed)
+                .filter(|clip| parameters_supported(clip))
                 .filter(|clip| {
                     identities.get(&clip.id).is_some_and(|id| {
                         id.source == record.identity.source
@@ -406,7 +406,7 @@ impl ParameterAtlas {
             };
             // 与 `capture_changes` 同一条理由：倒放 clip 不参与参数投影，
             // 但绝不能因为它让整份投影失败（本函数在渲染输入路径上）。
-            if clip.reversed {
+            if !parameters_supported(clip) {
                 continue;
             }
             let root = timeline
@@ -468,7 +468,7 @@ impl ParameterAtlas {
         for clip in &timeline.clips {
             // 倒放 clip 不参与参数捕获：帧映射需要镜像，单列一期。跳过而不是让
             // `geometry(clip)` 报错，否则一条倒放片段会让整份捕获失败。
-            if clip.reversed {
+            if !parameters_supported(clip) {
                 continue;
             }
             let identity = identities
@@ -628,7 +628,7 @@ impl ParameterAtlas {
             // 倒放 clip 不参与参数投影：它的播放顺序与源窗口反向，需要镜像的帧映射
             // （单列一期）。跳过而不是让 `geometry(clip)` 报错 —— 后者会让整个渲染
             // 输入准备失败（本函数在 `capture_render_input` 上）。
-            if clip.reversed {
+            if !parameters_supported(clip) {
                 continue;
             }
             let identity = identities
@@ -1002,9 +1002,26 @@ impl ParameterAtlas {
     }
 }
 
+/// 倒放 clip 是否可参与**参数曲线**投影/捕获。
+///
+/// 【为什么现在是否】参数曲线的帧映射要把宿主的**镜像**坐标翻回正向再逐帧反向索引
+/// （见 `probe/ara/REVERSE-FINDINGS.md` 的 F-4），这是一期独立工作。当前如实返回
+/// `false`：倒放 clip **没有**曲线，而不是画一条错的 —— 后者会把"局部状态"变成
+/// "整份投影/捕获失败"或"曲线整体平移一个分割长度"。
+///
+/// 【为什么与 `capture_gaps` 不同】空白层的覆盖只用到**时间线跨度**，与方向无关 ——
+/// 倒放 clip 必须计入覆盖，否则它的跨度会被当成空白层、用户在其上的编辑被误捕获。
+/// 所以"投影/捕获曲线时排除"与"统计覆盖时包含"是**两个不同的口径**，不是不自洽。
+/// 本函数是前者的唯一判据，所有投影/捕获/绑定路径都必须走它。
+fn parameters_supported(clip: &hifishifter_kernel::state::Clip) -> bool {
+    !clip.reversed
+}
+
 /// 用本体真实消费窗口而不是take媒体全长；宿主ARA已经把总倍率投影到active take。
 fn geometry(clip: &hifishifter_kernel::state::Clip) -> Result<RegionGeometry, String> {
-    if clip.reversed {
+    // 安全网：调用方已用 `parameters_supported` 排除倒放；这里再挡一次，避免将来新增
+    // 调用点绕过判据时把镜像帧映射的缺口悄悄变成一条错曲线。
+    if !parameters_supported(clip) {
         return Err("reverse parameter map unsupported".into());
     }
     let value = RegionGeometry {
@@ -1482,6 +1499,42 @@ mod tests {
             &stretched["clip"].pitch_edit,
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64.]
         );
+    }
+    /// 倒放 clip 不参与参数投影/捕获（镜像帧映射是独立一期），但**绝不能**因为它让整份
+    /// 投影/捕获/绑定失败 —— 局部状态不能升级成全局故障。正放 clip 照常。
+    #[test]
+    fn a_reversed_clip_is_skipped_without_failing_the_whole_projection() {
+        let mut ids = identities();
+        let mut timeline = edited();
+        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
+        // 追加一个倒放 clip（同源同窗，方向相反）。
+        let mut reversed = timeline.clips[0].clone();
+        reversed.id = "rev".into();
+        reversed.reversed = true;
+        reversed.start_sec = 3.;
+        timeline.clips.push(reversed);
+        timeline.project_sec = 4.;
+        ids.insert(
+            "rev".into(),
+            RegionIdentity {
+                key: 99,
+                item: None,
+                source: "source".into(),
+                modification: "mod".into(),
+            },
+        );
+        // 投影：倒放缺席、正放仍在，整体不报错。
+        let projected = atlas.project_local(&timeline, &ids).unwrap();
+        assert!(projected.contains_key("clip"), "正放 clip 必须照常投影");
+        assert!(!projected.contains_key("rev"), "倒放 clip 不应有曲线");
+        // 捕获 / 跟随几何 / 重绑定都跳过倒放，不升级成错误。
+        assert!(!atlas
+            .capture(&timeline, &ids)
+            .unwrap()
+            .regions
+            .contains_key("rev"));
+        assert!(atlas.follow_geometry(&timeline, &ids).is_ok());
+        assert!(atlas.rebind(&timeline, &ids).is_ok());
     }
     /// 一个可见root数组不能把重叠的另一region当同一编辑；只修改可见delta对应的选区。
     #[test]
