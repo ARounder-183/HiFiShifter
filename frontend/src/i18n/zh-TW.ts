@@ -2071,8 +2071,7 @@ export const zhTW = {
     plugin_apply_reload_host: "重新載入宿主",
     plugin_apply_reload_message: "目前仍有未套用的編輯。重新載入會取代本機曲線，要繼續嗎？",
     plugin_apply_reload_confirm: "確認重新載入",
-    plugin_apply_hint:
-        "片段編輯與漸變寬度同步宿主 · 漸變聲音由宿主處理 · 倒放由 HiFiShifter 渲染",
+    plugin_apply_hint: "片段編輯與漸變寬度同步宿主 · 漸變聲音由宿主處理 · 倒放由 HiFiShifter 渲染",
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暫停",
     plugin_standalone_only: "僅在獨立 App 中可用",

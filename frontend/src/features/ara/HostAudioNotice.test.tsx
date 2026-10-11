@@ -60,8 +60,8 @@ test("folder parent track shows the reason and the next step", async () => {
     expect(notice).toBeTruthy();
     expect(notice?.textContent).toContain(enUS.ara_host_audio_folder_title);
     expect(notice?.textContent).toContain(enUS.ara_host_audio_folder_body);
-    // 正确的因果表述：REAPER 按轨道管理 ARA 插件。
-    expect(enUS.ara_host_audio_folder_body).toContain("REAPER manages ARA plug-ins per track");
+    // 正确的因果表述：宿主按轨道管理 ARA 插件（不再写死 REAPER）。
+    expect(enUS.ara_host_audio_folder_body).toContain("the host manages ARA plug-ins per track");
     // 措辞红线：不得出现"ARA 规范不支持跨轨"这类错误解释。
     expect(enUS.ara_host_audio_folder_body).not.toMatch(/spec|specification/i);
 });

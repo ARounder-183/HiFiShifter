@@ -2068,8 +2068,7 @@ export const zhCN = {
     plugin_apply_reload_host: "重新载入宿主",
     plugin_apply_reload_message: "当前仍有未应用编辑。重新载入会替换本地曲线，继续？",
     plugin_apply_reload_confirm: "确认重新载入",
-    plugin_apply_hint:
-        "片段编辑与渐变宽度同步宿主 · 渐变声音由宿主处理 · 倒放由 HiFiShifter 渲染",
+    plugin_apply_hint: "片段编辑与渐变宽度同步宿主 · 渐变声音由宿主处理 · 倒放由 HiFiShifter 渲染",
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暂停",
     plugin_standalone_only: "仅在独立 App 中可用",
