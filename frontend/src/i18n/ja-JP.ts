@@ -1590,7 +1590,7 @@ export const jaJP = {
     import_across_tracks: "トラック間に追加",
     import_as_takes: "テイクとして追加",
     midi_import_clip_plugin_unavailable:
-        "ARA プラグインモードでは使用できません。クリップは REAPER の item です。ピッチカーブへのインポートをご利用ください。",
+        "ARA プラグインモードでは使用できません。クリップはホストの item です。ピッチカーブへのインポートをご利用ください。",
     folder_import_title: "フォルダをインポート",
     folder_import_import: "インポート",
     folder_import_mode: "配置方法",
@@ -2084,12 +2084,12 @@ export const jaJP = {
     vibrato_unit_cycles: "周期",
 
     // ── ARA host session（スタンドアロン版のホスト接続セッション）──────
-    ara_panel_title: "ARA / REAPER",
+    ara_panel_title: "ARA ホスト",
     ara_instance_label: "ARA インスタンス",
     ara_no_instances: "インスタンスが見つかりません",
     ara_refresh_instances: "インスタンスを更新",
     ara_connect: "接続",
-    ara_submit: "REAPER に送信",
+    ara_submit: "ホストに送信",
     ara_refresh_host: "ホストを更新",
     ara_disconnect: "切断",
     ara_reverse_unsupported: "逆再生は未対応",
@@ -2104,9 +2104,9 @@ export const jaJP = {
     ara_error_disconnect: "ARA 切断に失敗しました",
     ara_submit_blocked: "送信を拒否しました",
     ara_submit_blocked_host_fields:
-        "REAPER が所有する以下のフィールドがローカルで変更されたため、何も送信していません。REAPER 側で変更してください：{fields}",
+        "ホストが所有する以下のフィールドがローカルで変更されたため、何も送信していません。ホスト側で変更してください：{fields}",
     ara_submit_reconnect_required:
-        "接続後にホストのタイムラインが変わりました。REAPER に再接続してからやり直してください。",
+        "接続後にホストのタイムラインが変わりました。ホストに再接続してからやり直してください。",
     /*
      * 措辞の注意：**「ARA 仕様はクロストラック非対応」と書かないこと**。ARA 2.0 の仕様は
      * 1 つのインスタンスが複数の region sequence を扱うことを許しています。実際の理由は
@@ -2118,16 +2118,16 @@ export const jaJP = {
         "ホストが提供した {count} 個のクリップをマッピングできず、ここには表示されません（MIDI や長さ 0 のアイテムなど）",
     ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
     ara_host_audio_folder_body:
-        "REAPER は ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
+        "ホストは ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
     ara_host_audio_unidentified_title: "このホストは未対応です",
     ara_host_audio_unidentified_body:
-        "HiFiShifter は、トラックとアイテムを列挙するために使用する拡張 API を提供するホスト（現在は REAPER）が必要です。他のホストではタイムラインは空のままです。",
-    ara_clip_syncing_host_audio: "REAPER の音声割り当て完了を待っています",
-    ara_clip_waiting_for_host_audio: "REAPER からの音声を待機中",
+        "HiFiShifter は、トラックとアイテムを列挙するために使用する拡張 API を提供するホスト（現在はホスト）が必要です。他のホストではタイムラインは空のままです。",
+    ara_clip_syncing_host_audio: "ホストの音声割り当て完了を待っています",
+    ara_clip_waiting_for_host_audio: "ホストからの音声を待機中",
     ara_clip_host_source_read_failed:
         "ホストはこのアイテムのサンプルアクセスを許可しましたが、読み取りに失敗しました。ホストが音声を提供するまでこのクリップはレンダリングできません",
     ara_clip_host_take_switched:
-        "REAPER がこのアイテムの現在のテイクを切り替えましたが、プラグインはまだその音声を受け取っていません。REAPER で元に戻すか、もう一度編集して再割り当てさせてください",
+        "ホストがこのアイテムの現在のテイクを切り替えましたが、プラグインはまだその音声を受け取っていません。ホストで元に戻すか、もう一度編集して再割り当てさせてください",
     ara_replace_dirty_message:
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",
@@ -2145,15 +2145,15 @@ export const jaJP = {
         "未適用の編集が残っています。再読み込みするとローカルのカーブが置き換わります。続行しますか？",
     plugin_apply_reload_confirm: "再読み込みを実行",
     plugin_apply_hint:
-        "クリップ編集とフェード幅は REAPER に同期 · フェード音声は REAPER が処理 · 逆再生は HiFiShifter が描画",
-    plugin_transport_stop: "REAPER の再生を停止",
-    plugin_transport_play: "REAPER の再生/一時停止",
+        "クリップ編集とフェード幅はホストに同期 · フェード音声はホストが処理 · 逆再生は HiFiShifter が描画",
+    plugin_transport_stop: "ホストの再生を停止",
+    plugin_transport_play: "ホストの再生/一時停止",
     plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
-        "逆再生はホストのアイテム操作です。REAPER でこのクリップを逆再生してください",
+        "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
     plugin_daw_controlled_reason:
-        "REAPER が制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
+        "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:

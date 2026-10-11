@@ -1711,7 +1711,7 @@ export const enUS = {
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
     midi_import_clip_plugin_unavailable:
-        "Not available in ARA plugin mode: a clip there is a REAPER item. Import into the pitch curve instead.",
+        "Not available in ARA plugin mode: a clip there is a host item. Import into the pitch curve instead.",
     folder_import_title: "Import Folder",
     folder_import_import: "Import",
     folder_import_mode: "Arrangement",
@@ -2070,12 +2070,12 @@ export const enUS = {
     vibrato_unit_cycles: "cycles",
 
     // ── ARA host session（独立 App 的宿主连接会话）─────────────────────
-    ara_panel_title: "ARA / REAPER",
+    ara_panel_title: "ARA Host",
     ara_instance_label: "ARA instance",
     ara_no_instances: "No instances found",
     ara_refresh_instances: "Refresh Instances",
     ara_connect: "Connect",
-    ara_submit: "Submit to REAPER",
+    ara_submit: "Submit to the host",
     ara_refresh_host: "Refresh Host",
     ara_disconnect: "Disconnect",
     ara_reverse_unsupported: "Reverse playback unsupported",
@@ -2090,9 +2090,9 @@ export const enUS = {
     ara_error_disconnect: "ARA disconnect failed",
     ara_submit_blocked: "Submission blocked",
     ara_submit_blocked_host_fields:
-        "These host-owned fields were changed locally, so nothing was submitted. Change them in REAPER: {fields}",
+        "These host-owned fields were changed locally, so nothing was submitted. Change them in the host: {fields}",
     ara_submit_reconnect_required:
-        "The host timeline changed since you connected. Reconnect to REAPER and try again.",
+        "The host timeline changed since you connected. Reconnect to the host and try again.",
     /*
      * 措辞红线：**不要**写成"ARA 规范不支持跨轨"。ARA 2.0 规范允许一个实例服务多个
      * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
@@ -2103,16 +2103,16 @@ export const enUS = {
         "{count} clip could not be mapped and is not shown here (for example a MIDI or zero-length item)|{count} clips could not be mapped and are not shown here (for example MIDI or zero-length items)",
     ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
     ara_host_audio_folder_body:
-        "REAPER manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
+        "the host manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
     ara_host_audio_unidentified_title: "This host is not supported yet",
     ara_host_audio_unidentified_body:
-        "HiFiShifter needs a host that exposes the extension API it uses to enumerate tracks and items (REAPER today). On other hosts the timeline stays empty because the plug-in cannot see any tracks.",
-    ara_clip_syncing_host_audio: "Waiting for REAPER to finish assigning audio",
-    ara_clip_waiting_for_host_audio: "Waiting for REAPER to hand over audio",
+        "HiFiShifter needs a host that exposes the extension API it uses to enumerate tracks and items (the host today). On other hosts the timeline stays empty because the plug-in cannot see any tracks.",
+    ara_clip_syncing_host_audio: "Waiting for the host to finish assigning audio",
+    ara_clip_waiting_for_host_audio: "Waiting for the host to hand over audio",
     ara_clip_host_source_read_failed:
         "The host granted sample access for this item but reading it failed; the clip cannot be rendered until the host supplies its audio",
     ara_clip_host_take_switched:
-        "REAPER switched this item's active take and the plugin has not received its audio yet; undo in REAPER, or edit once more to make it reassign",
+        "the host switched this item's active take and the plugin has not received its audio yet; undo in the host, or edit once more to make it reassign",
     ara_replace_dirty_message:
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",
@@ -2130,15 +2130,15 @@ export const enUS = {
         "There are still unapplied edits. Reloading will replace the local curves. Continue?",
     plugin_apply_reload_confirm: "Reload Anyway",
     plugin_apply_hint:
-        "Clip edits and fade widths sync to REAPER · REAPER renders fade audio · Reverse is rendered by HiFiShifter",
-    plugin_transport_stop: "Stop playback in REAPER",
-    plugin_transport_play: "Play or pause in REAPER",
+        "Clip edits and fade widths sync to the host · the host renders fade audio · Reverse is rendered by HiFiShifter",
+    plugin_transport_stop: "Stop playback in the host",
+    plugin_transport_play: "Play or pause in the host",
     plugin_standalone_only: "Only available in the standalone app",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
-        "Reversing is a host item operation; use REAPER to reverse this clip",
+        "Reversing is a host item operation; use the host to reverse this clip",
     plugin_daw_controlled_reason:
-        "Controlled by REAPER; manage files, clip geometry, tempo, meter and playback in the host",
+        "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:

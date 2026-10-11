@@ -1537,7 +1537,7 @@ export const zhCN = {
     import_across_tracks: "跨轨道添加",
     import_as_takes: "作为 Take 添加",
     midi_import_clip_plugin_unavailable:
-        "ARA 插件模式下不可用：片段归 REAPER 的 item，请改为导入到音高曲线。",
+        "ARA 插件模式下不可用：片段归宿主的 item，请改为导入到音高曲线。",
     folder_import_title: "导入文件夹",
     folder_import_import: "导入",
     folder_import_mode: "排列方式",
@@ -2012,12 +2012,12 @@ export const zhCN = {
     vibrato_unit_cycles: "周期",
 
     // ── ARA host session（独立 App 的宿主连接会话）─────────────────────
-    ara_panel_title: "ARA / REAPER",
+    ara_panel_title: "ARA 宿主",
     ara_instance_label: "ARA 实例",
     ara_no_instances: "未发现实例",
     ara_refresh_instances: "刷新实例",
     ara_connect: "连接",
-    ara_submit: "提交到 REAPER",
+    ara_submit: "提交到宿主",
     ara_refresh_host: "刷新宿主",
     ara_disconnect: "断开",
     ara_reverse_unsupported: "不支持倒放",
@@ -2032,8 +2032,8 @@ export const zhCN = {
     ara_error_disconnect: "ARA 断开失败",
     ara_submit_blocked: "提交被拒绝",
     ara_submit_blocked_host_fields:
-        "以下由 REAPER 拥有的字段被本地修改，因此没有提交任何内容。请在 REAPER 中修改：{fields}",
-    ara_submit_reconnect_required: "连接之后宿主时间线已改变。请重新连接 REAPER 后再试。",
+        "以下由宿主拥有的字段被本地修改，因此没有提交任何内容。请在宿主中修改：{fields}",
+    ara_submit_reconnect_required: "连接之后宿主时间线已改变。请重新连接宿主后再试。",
     /*
      * 措辞红线：**不要**写成"ARA 规范不支持跨轨"。ARA 2.0 规范允许一个实例服务多个
      * region sequence；真正的原因是 REAPER 按轨道管理 ARA 插件（见后端
@@ -2044,16 +2044,16 @@ export const zhCN = {
         "宿主提供了 {count} 个本插件无法映射的片段（例如 MIDI 或零长度 Item），它们不会出现在这里",
     ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
     ara_host_audio_folder_body:
-        "REAPER 按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
+        "宿主按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
     ara_host_audio_unidentified_title: "此宿主暂不受支持",
     ara_host_audio_unidentified_body:
-        "HiFiShifter 需要宿主提供它用来枚举轨道与 item 的扩展接口（目前是 REAPER）。在其它宿主上时间线会是空的 —— 插件看不到任何轨道。",
-    ara_clip_syncing_host_audio: "正在等待 REAPER 完成音频分配",
-    ara_clip_waiting_for_host_audio: "等待 REAPER 提供音频",
+        "HiFiShifter 需要宿主提供它用来枚举轨道与 item 的扩展接口（目前是宿主）。在其它宿主上时间线会是空的 —— 插件看不到任何轨道。",
+    ara_clip_syncing_host_audio: "正在等待宿主完成音频分配",
+    ara_clip_waiting_for_host_audio: "等待宿主提供音频",
     ara_clip_host_source_read_failed:
         "宿主已为这一条授予样本访问权，但读取失败；在宿主补上音频之前，这个片段无法渲染",
     ara_clip_host_take_switched:
-        "REAPER 换了这一条的当前 Take，插件还没拿到它的音频；在 REAPER 里撤销，或再编辑一下让它重新分配",
+        "宿主换了这一条的当前 Take，插件还没拿到它的音频；在宿主里撤销，或再编辑一下让它重新分配",
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",
@@ -2069,13 +2069,13 @@ export const zhCN = {
     plugin_apply_reload_message: "当前仍有未应用编辑。重新载入会替换本地曲线，继续？",
     plugin_apply_reload_confirm: "确认重新载入",
     plugin_apply_hint:
-        "片段编辑与渐变宽度同步 REAPER · 渐变声音由 REAPER 处理 · 倒放由 HiFiShifter 渲染",
-    plugin_transport_stop: "控制 REAPER 停止播放",
-    plugin_transport_play: "控制 REAPER 播放/暂停",
+        "片段编辑与渐变宽度同步宿主 · 渐变声音由宿主处理 · 倒放由 HiFiShifter 渲染",
+    plugin_transport_stop: "控制宿主停止播放",
+    plugin_transport_play: "控制宿主播放/暂停",
     plugin_standalone_only: "仅在独立 App 中可用",
     plugin_feature_unavailable: "该功能尚未在 VST/ARA 插件里提供",
-    plugin_reverse_unavailable: "倒放是宿主 item 操作；请在 REAPER 里倒放这一条",
-    plugin_daw_controlled_reason: "由 REAPER 控制；在宿主中操作文件、片段几何、速度、拍号与播放",
+    plugin_reverse_unavailable: "倒放是宿主 item 操作；请在宿主里倒放这一条",
+    plugin_daw_controlled_reason: "由宿主控制；在宿主中操作文件、片段几何、速度、拍号与播放",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "读不出宿主的淡化轴版本，无法确定用哪套轴；请用下方曲率滑杆调整",
