@@ -169,3 +169,23 @@ fn writer_loop(rx: std::sync::mpsc::Receiver<Job>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 写盘线程必须存在并响应排空确认。
+    ///
+    /// 【为什么只测这一条】本模块的其余行为都依赖真实磁盘与全局运行时配置；但
+    /// `flush_blocking` 是**退出路径的同步点**：线程没起来（或已死）时它会超时返回
+    /// `false`，未落盘的条目就此丢失。这条契约不碰磁盘、不依赖配置，是模块的最小
+    /// 可测面。它此前零覆盖。
+    #[test]
+    fn the_writer_thread_starts_and_acknowledges_a_flush() {
+        assert!(
+            flush_blocking(Duration::from_secs(5)),
+            "render-cache writer thread did not acknowledge flush"
+        );
+    }
+}

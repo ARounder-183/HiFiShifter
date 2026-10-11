@@ -137,3 +137,81 @@ impl FileAudioEncoder for Mp3FileEncoder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::{Mp3BitrateMode, Mp3Tags};
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("hifishifter-mp3-{name}-{}.mp3", std::process::id()))
+    }
+
+    /// 立体声交错正弦（左右同相）；长度足够让 CBR 编码器产出多帧。
+    fn tone(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let value = (i as f32 * 0.05).sin() * 0.5;
+                [value, value]
+            })
+            .collect()
+    }
+
+    /// 落盘后摘要与文件长度一致，且文件以 MP3 帧同步字开头（无标签时无 ID3 前置）。
+    #[test]
+    fn encodes_pcm_to_a_playable_mp3() {
+        let path = temp_path("basic");
+        let _ = std::fs::remove_file(&path);
+        let options = Mp3EncodeOptions {
+            mode: Mp3BitrateMode::Cbr { bitrate_kbps: 128 },
+            tags: Mp3Tags::default(),
+        };
+        let mut encoder = Mp3FileEncoder::new(&path, &options, 2, 48_000, None).unwrap();
+        encoder.push(&tone(48_000)).unwrap();
+        let summary = Box::new(encoder).finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(summary.bytes_written, bytes.len() as u64);
+        // 11 位全 1 的帧同步：0xFF 后高 3 位为 111。
+        assert!(bytes.len() > 2, "output too short: {} bytes", bytes.len());
+        assert_eq!(bytes[0], 0xFF, "no frame sync: {:02X?}", &bytes[..4]);
+        assert_eq!(bytes[1] & 0xE0, 0xE0, "no frame sync: {:02X?}", &bytes[..4]);
+    }
+
+    /// 非空标签写成 ID3v2 头，前置到文件开头。
+    #[test]
+    fn a_non_empty_tag_is_written_as_an_id3v2_header() {
+        let path = temp_path("tagged");
+        let _ = std::fs::remove_file(&path);
+        let options = Mp3EncodeOptions {
+            mode: Mp3BitrateMode::Vbr { quality_index: 2 },
+            tags: Mp3Tags {
+                title: Some("HiFi".to_string()),
+                artist: Some("Shifter".to_string()),
+                ..Default::default()
+            },
+        };
+        let mut encoder = Mp3FileEncoder::new(&path, &options, 2, 44_100, None).unwrap();
+        encoder.push(&tone(44_100)).unwrap();
+        Box::new(encoder).finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&bytes[..3], b"ID3");
+    }
+
+    /// 取消标志在 push 前生效时立即返回 `Cancelled`，不写出数据。
+    #[test]
+    fn a_cancelled_encoder_refuses_to_push() {
+        let path = temp_path("cancel");
+        let _ = std::fs::remove_file(&path);
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut encoder =
+            Mp3FileEncoder::new(&path, &Mp3EncodeOptions::default(), 2, 44_100, Some(cancel))
+                .unwrap();
+        assert!(matches!(
+            encoder.push(&[0.5, 0.5]),
+            Err(EncodeError::Cancelled)
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+}

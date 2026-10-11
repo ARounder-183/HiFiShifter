@@ -96,3 +96,67 @@ impl FileAudioEncoder for FlacFileEncoder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::FlacBitDepth;
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hifishifter-flac-{name}-{}.flac",
+            std::process::id()
+        ))
+    }
+
+    /// 立体声交错正弦（左右同相）。
+    fn tone(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let value = (i as f32 * 0.05).sin() * 0.5;
+                [value, value]
+            })
+            .collect()
+    }
+
+    /// 落盘后摘要与文件长度一致，且以 FLAC 魔数 `fLaC` 开头。
+    #[test]
+    fn encodes_pcm_to_a_flac_stream() {
+        let path = temp_path("basic");
+        let _ = std::fs::remove_file(&path);
+        let options = FlacEncodeOptions {
+            bit_depth: FlacBitDepth::I16,
+            compression_level: 5,
+        };
+        let mut encoder =
+            FlacFileEncoder::new(&path, &options, DitherMode::None, 2, 48_000, None).unwrap();
+        encoder.push(&tone(48_000)).unwrap();
+        let summary = Box::new(encoder).finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(summary.bytes_written, bytes.len() as u64);
+        assert_eq!(&bytes[..4], b"fLaC");
+    }
+
+    /// 取消标志在 push 前生效时立即返回 `Cancelled`，不写出数据。
+    #[test]
+    fn a_cancelled_encoder_refuses_to_push() {
+        let path = temp_path("cancel");
+        let _ = std::fs::remove_file(&path);
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut encoder = FlacFileEncoder::new(
+            &path,
+            &FlacEncodeOptions::default(),
+            DitherMode::None,
+            2,
+            48_000,
+            Some(cancel),
+        )
+        .unwrap();
+        assert!(matches!(
+            encoder.push(&[0.5, 0.5]),
+            Err(EncodeError::Cancelled)
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+}
