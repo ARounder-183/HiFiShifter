@@ -1,4 +1,12 @@
 //! 冻结的合成输入只包含Rust值和授权PCM的Arc，不借文档锁或调用宿主ARA接口。
+//!
+//! 【快照率为什么固定 44.1/48k】内部合成在两档各出一份快照；宿主用别的率时由
+//! `PlaybackSnapshot::copy_block` 线性重采样到宿主率（`vst3.rs::setupProcessing`
+//! 记录权威率，`ExtensionOwner::snapshot_index_for_rate` 选最合适的原生档：整数倍
+//! 优先，否则取最近）。这是**有意的降级**：能听见、略有染色，远好于"没有快照 ⇒
+//! 整条插件静默"。真正的"按宿主率渲染内部快照"（消除这次重采样）要把合成/缓存/预算
+//! 全部按宿主率参数化，是独立一期工作 —— 在那之前，本文件的两档固定率就是权威设计，
+//! 不随 `setupProcessing` 变化。
 
 use super::snapshot::{mix_plain_regions, PlaybackSnapshot};
 use super::source::SourcePcm;
