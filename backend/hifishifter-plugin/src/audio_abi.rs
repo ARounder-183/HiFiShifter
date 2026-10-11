@@ -317,6 +317,180 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
     Ok(())
 }
 
+/// 手写 ABI 结构体的**完整布局清单**（`类型.字段` / `类型.size` / `类型.align` → 字节）。
+///
+/// 【为什么抽成函数】它是跨平台布局基准的唯一来源：
+/// - Windows x86_64 上由 MSVC oracle（`layout_tests`）拿**真 SDK 结构**交叉验证；
+/// - 其它平台（Linux / macOS / aarch64）与提交的 JSON 基准逐项比对。
+///
+/// 此前布局断言被 `cfg(target_os = "windows", target_arch = "x86_64")` 整块挡住 ——
+/// 手写 `#[repr(C)]` 结构在 Linux/macOS 上的字段漂移**完全没守**。这些结构只含
+/// i32/i64/u32/u64/f64/指针，没有 C `long`，因此 64 位 LP64/LLP64 平台布局一致，
+/// 可以共用一份基准。
+#[cfg(test)]
+fn abi_layout_entries() -> Vec<(&'static str, usize)> {
+    use crate::vst3::ProcessSetup;
+    use std::mem::{align_of, offset_of, size_of};
+
+    macro_rules! kind {
+        ($ty:ty) => {{
+            vec![
+                (concat!(stringify!($ty), ".size"), size_of::<$ty>()),
+                (concat!(stringify!($ty), ".align"), align_of::<$ty>()),
+            ]
+        }};
+    }
+    macro_rules! field {
+        ($ty:ty, $rust:ident, $native:ident) => {
+            (
+                concat!(stringify!($ty), ".", stringify!($native)),
+                offset_of!($ty, $rust),
+            )
+        };
+    }
+    let mut entries: Vec<(&'static str, usize)> = Vec::new();
+    entries.extend(kind!(ProcessSetup));
+    entries.push(field!(ProcessSetup, process_mode, processMode));
+    entries.push(field!(
+        ProcessSetup,
+        symbolic_sample_size,
+        symbolicSampleSize
+    ));
+    entries.push(field!(
+        ProcessSetup,
+        max_samples_per_block,
+        maxSamplesPerBlock
+    ));
+    entries.push(field!(ProcessSetup, sample_rate, sampleRate));
+    entries.extend(kind!(AudioBusBuffers));
+    entries.push(field!(AudioBusBuffers, num_channels, numChannels));
+    entries.push(field!(AudioBusBuffers, silence_flags, silenceFlags));
+    entries.push(field!(AudioBusBuffers, channel_buffers, channelBuffers32));
+    entries.push(field!(AudioBusBuffers, channel_buffers, channelBuffers64));
+    entries.extend(kind!(ProcessData));
+    entries.push(field!(ProcessData, process_mode, processMode));
+    entries.push(field!(
+        ProcessData,
+        symbolic_sample_size,
+        symbolicSampleSize
+    ));
+    entries.push(field!(ProcessData, num_samples, numSamples));
+    entries.push(field!(ProcessData, num_inputs, numInputs));
+    entries.push(field!(ProcessData, num_outputs, numOutputs));
+    entries.push(field!(ProcessData, inputs, inputs));
+    entries.push(field!(ProcessData, outputs, outputs));
+    entries.push(field!(
+        ProcessData,
+        input_parameter_changes,
+        inputParameterChanges
+    ));
+    entries.push(field!(
+        ProcessData,
+        output_parameter_changes,
+        outputParameterChanges
+    ));
+    entries.push(field!(ProcessData, input_events, inputEvents));
+    entries.push(field!(ProcessData, output_events, outputEvents));
+    entries.push(field!(ProcessData, process_context, processContext));
+    entries.extend(kind!(ProcessContext));
+    entries.push(field!(ProcessContext, state, state));
+    entries.push(field!(ProcessContext, sample_rate, sampleRate));
+    entries.push(field!(
+        ProcessContext,
+        project_time_samples,
+        projectTimeSamples
+    ));
+    entries.push(field!(ProcessContext, system_time, systemTime));
+    entries.push(field!(
+        ProcessContext,
+        continuous_time_samples,
+        continousTimeSamples
+    ));
+    entries.push(field!(ProcessContext, project_time_music, projectTimeMusic));
+    entries.push(field!(ProcessContext, bar_position_music, barPositionMusic));
+    entries.push(field!(ProcessContext, cycle_start_music, cycleStartMusic));
+    entries.push(field!(ProcessContext, cycle_end_music, cycleEndMusic));
+    entries.push(field!(ProcessContext, tempo, tempo));
+    entries.push(field!(ProcessContext, time_sig_numerator, timeSigNumerator));
+    entries.push(field!(
+        ProcessContext,
+        time_sig_denominator,
+        timeSigDenominator
+    ));
+    entries.push(field!(ProcessContext, chord, chord));
+    entries.push(field!(
+        ProcessContext,
+        smpte_offset_subframes,
+        smpteOffsetSubframes
+    ));
+    entries.push(field!(ProcessContext, frame_rate, frameRate));
+    entries.push(field!(
+        ProcessContext,
+        samples_to_next_clock,
+        samplesToNextClock
+    ));
+    entries.extend(kind!(Chord));
+    entries.push(field!(Chord, key_note, keyNote));
+    entries.push(field!(Chord, root_note, rootNote));
+    entries.push(field!(Chord, chord_mask, chordMask));
+    entries.extend(kind!(FrameRate));
+    entries.push(field!(FrameRate, frames_per_second, framesPerSecond));
+    entries.push(field!(FrameRate, flags, flags));
+    entries
+}
+
+/// 跨平台布局门禁：任何 64 位目标上，手写结构的每个字段偏移都必须与提交的基准一致。
+///
+/// 【为什么要有它，而不是只留 MSVC oracle】oracle 只在 Windows x86_64 跑；Linux/macOS
+/// 的手写 ABI 一旦漂移，CI 上没有任何一条断言会失败 —— 直到用户在这些平台上撞到
+/// 内存错乱。这份 JSON 基准把"已经验过的布局"固化下来，全平台都能守。
+#[cfg(test)]
+mod abi_baseline {
+    use super::abi_layout_entries;
+
+    fn baseline() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/abi-layout.json"))
+            .expect("committed ABI layout baseline must be valid JSON")
+    }
+
+    #[test]
+    fn the_hand_written_abi_layout_matches_the_committed_baseline() {
+        // 32 位目标的指针宽度不同，布局另有一套；这里只守 64 位（CI 的目标平台）。
+        if std::mem::size_of::<usize>() != 8 {
+            return;
+        }
+        let baseline = baseline();
+        for (name, value) in abi_layout_entries() {
+            let expected = baseline[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("baseline is missing ABI entry {name}"));
+            assert_eq!(
+                expected as usize, value,
+                "ABI {name} drifted from the committed baseline; if the change is \
+                 intentional, re-verify against the MSVC oracle and update \
+                 tests/fixtures/abi-layout.json"
+            );
+        }
+    }
+
+    /// 生成基准文件的一次性助手（`HFS_WRITE_ABI_BASELINE=1 cargo test ...`）。
+    #[test]
+    fn write_abi_baseline_when_requested() {
+        if std::env::var_os("HFS_WRITE_ABI_BASELINE").is_none() {
+            return;
+        }
+        let mut map = serde_json::Map::new();
+        for (name, value) in abi_layout_entries() {
+            map.insert(name.to_string(), serde_json::json!(value));
+        }
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/abi-layout.json"
+        );
+        std::fs::write(path, serde_json::to_string_pretty(&map).unwrap() + "\n").unwrap();
+    }
+}
+
 #[cfg(all(test, target_os = "windows", target_arch = "x86_64"))]
 mod layout_tests {
     use super::*;
