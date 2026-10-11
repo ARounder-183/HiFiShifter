@@ -85,7 +85,7 @@ impl Drop for Owned {
 /// 一个**声明过却从未调用**的 vtable 槽位（`HostVtbl::name`）。存下来供诊断包读取。
 ///
 /// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
-/// 能力探测（`BootstrapFlags` / `ReaperHost::from_context` 的 Option bundle）决定。
+/// 能力探测（`BootstrapFlags` / `NativeHost::from_context` 的 Option bundle）决定。
 static HOST_NAME: Mutex<Option<String>> = Mutex::new(None);
 
 /// 读回宿主应用名（未识别为 `None`）。只读，供诊断输出。
@@ -143,10 +143,10 @@ mod host_name_tests {
     #[test]
     fn string128_decoding_stops_at_the_terminator() {
         let mut buffer = [0u16; 128];
-        for (slot, unit) in "REAPER".encode_utf16().enumerate() {
+        for (slot, unit) in "TestHost".encode_utf16().enumerate() {
             buffer[slot] = unit;
         }
-        assert_eq!(decode_string128(&buffer).as_deref(), Some("REAPER"));
+        assert_eq!(decode_string128(&buffer).as_deref(), Some("TestHost"));
         // 全是 NUL ⇒ 空名 ⇒ None（不是 `Some("")`）。
         assert_eq!(decode_string128(&[0u16; 128]), None);
         // 没有终结符时取整段。

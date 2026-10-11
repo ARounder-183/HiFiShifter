@@ -1,5 +1,5 @@
 //! 核对锁定官方REAPER API的主线程片段写入口；GUID来自真实直接take绑定，不猜活动工程。
-use super::{checked, Guid, HostVtbl, ReaperHost};
+use super::{checked, Guid, HostVtbl, NativeHost};
 use crate::host::geometry::HostClipGeometry;
 use crate::sync::MutexExt;
 use std::ffi::{c_char, c_void, CStr};
@@ -47,7 +47,7 @@ pub(super) struct WriteApi {
 /// 地址只在所属UI线程使用；拥有host接口引用不等同item/take生命周期，每次写前都验证。
 #[derive(Clone)]
 pub(crate) struct HostClipTarget {
-    host: Arc<ReaperHost>,
+    host: Arc<NativeHost>,
     project: usize,
     item: usize,
     take: usize,
@@ -56,7 +56,7 @@ pub(crate) struct HostClipTarget {
 }
 /// 只由已验证parent轨道枚举器构建；当前take/item GUID与项目归属再次核对。
 pub(super) fn inventory_target(
-    host: Arc<ReaperHost>,
+    host: Arc<NativeHost>,
     project: usize,
     track: usize,
     item: usize,
@@ -149,7 +149,7 @@ impl HostClipTarget {
 
 /// 一个真实宿主Undo块；关闭视图/错误也收尾。析构不在错误线程调用宿主API。
 pub(crate) struct HostUndoBlock {
-    host: Arc<ReaperHost>,
+    host: Arc<NativeHost>,
     project: usize,
 }
 impl Drop for HostUndoBlock {
@@ -184,7 +184,7 @@ impl Drop for HostUndoBlock {
     }
 }
 
-impl ReaperHost {
+impl NativeHost {
     /// 可选写能力与只读几何独立；缺setter时GUI保持只读，不调用未查到的函数。
     pub(crate) fn can_edit_clips(&self) -> bool {
         self.write.is_some() && self.geometry.is_some()

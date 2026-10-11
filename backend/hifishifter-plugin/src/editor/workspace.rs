@@ -132,7 +132,7 @@ pub(crate) fn derive_split_media(
 /// 插件自有字段（MIDI 音符、声道判定档案、包络、拉伸标记）从旧 take **合并**过来。
 fn sync_host_takes(
     clip: &mut hifishifter_kernel::state::Clip,
-    item: &crate::host::reaper::UiItem,
+    item: &crate::host::UiItem,
     prefix: &impl Fn(&str) -> String,
     authorized_take: Option<&str>,
     // ARA 授权那一刻 active take 的**源文件路径**（`authorized_sources`）。
@@ -1624,7 +1624,7 @@ mod tests {
     fn a_track_leaving_the_host_inventory_is_dropped_once_not_forever() {
         let model = ModelHandle::new();
         let document = model.session();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);

@@ -228,8 +228,8 @@ impl Fixture {
     pub fn clear_markers(&self) {
         self.markers.borrow_mut().clear();
     }
-    pub fn client(&self) -> ReaperHost {
-        unsafe { ReaperHost::from_context(self.context(), || self.valid.get()) }.unwrap()
+    pub fn client(&self) -> NativeHost {
+        unsafe { NativeHost::from_context(self.context(), || self.valid.get()) }.unwrap()
     }
     pub fn reset(&self) {
         self.calls.borrow_mut().clear();
@@ -289,7 +289,7 @@ impl Fixture {
     }
     fn geometry(
         &self,
-        client: &ReaperHost,
+        client: &NativeHost,
     ) -> Result<crate::host::geometry::HostClipGeometry, String> {
         client.geometry(|| self.valid.get())
     }
@@ -1551,7 +1551,7 @@ fn task38a_query_initialization_reentry_balances_qi_and_stops_lookup() {
     for index in 1..=count {
         f.reset();
         f.revoke_at.set(index);
-        assert!(unsafe { ReaperHost::from_context(f.context(), || f.valid.get()) }.is_none());
+        assert!(unsafe { NativeHost::from_context(f.context(), || f.valid.get()) }.is_none());
         assert_eq!(f.calls.borrow().len(), index);
         assert_eq!(f.refs.load(Ordering::Acquire), 1);
     }

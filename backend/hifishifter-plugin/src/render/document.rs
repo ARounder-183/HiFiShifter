@@ -85,7 +85,7 @@ pub(crate) struct DocumentSession {
     /// 【边界不可松动】这只回退到**已被 ARA 授权的那份 PCM**；路径为空或读不到时
     /// 仍然"宁可不挂"（无源占位是看得见的，挂错采样是听不见的错）。
     pub authorized_sources: Mutex<HashMap<u64, String>>,
-    pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::reaper::UiTrack>>,
+    pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
     /// 由 REAPER folder 结构**得到父级**的轨道 id（见 `host::folder`）。
     ///

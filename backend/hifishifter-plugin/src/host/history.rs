@@ -1,6 +1,6 @@
 //! 撤销历史的**能力**抽象。
 //!
-//! 【为什么需要 trait】此前"宿主历史"在类型上就是 `Arc<ReaperHost>`（具体类型），
+//! 【为什么需要 trait】此前"宿主历史"在类型上就是 `Arc<NativeHost>`（具体类型），
 //! 于是"宿主不提供撤销栈"只能表达为 `None`，调用点用 `is_some()` 做 match guard 跳过
 //! —— 跳过意味着 `undo_timeline` / `redo_timeline` / `set_history_position` 在
 //! Cubase / Logic / Studio One 这类不暴露撤销栈的宿主上**静默 no-op**，用户按 Ctrl+Z
@@ -17,7 +17,7 @@
 //! 分流：`"host"` 走既有的异步路径，其余走本地队列（本地命令天然排在已入队写入
 //! 之后，不需要额外的 barrier）。
 
-use super::reaper::ReaperHost;
+use super::NativeHost;
 use std::sync::{Arc, Weak};
 
 /// 宿主项目历史的只读快照 + 判别式。
@@ -34,11 +34,11 @@ pub(crate) trait HostHistory: Send + Sync {
 }
 
 /// REAPER 原生撤销栈。
-pub(crate) struct ReaperHistory {
-    pub host: Arc<ReaperHost>,
+pub(crate) struct ProjectHistory {
+    pub host: Arc<NativeHost>,
 }
 
-impl HostHistory for ReaperHistory {
+impl HostHistory for ProjectHistory {
     fn backend(&self) -> &'static str {
         "host"
     }

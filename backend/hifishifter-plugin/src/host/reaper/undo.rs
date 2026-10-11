@@ -1,5 +1,5 @@
 //! 文档共享宿主Undo调度：GUI只负责主线程API，actor在原生历史收尾前暂缓神经合成。
-use super::reaper::{HostUndoBlock, ReaperHost};
+use super::{HostUndoBlock, NativeHost};
 use crate::sync::MutexExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
@@ -51,7 +51,7 @@ impl HostUndo {
         id: u64,
         checkpoint: bool,
         native: bool,
-        host: &Arc<ReaperHost>,
+        host: &Arc<NativeHost>,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
         if checkpoint {

@@ -1,5 +1,5 @@
 //! 官方REAPER媒体创建接口：宿主创建item/take/source，PCM与region仍等真实ARA回流授权。
-use super::{checked, Guid, HostVtbl, ReaperHost};
+use super::{checked, Guid, HostVtbl, NativeHost};
 use std::ffi::{c_char, c_void, CString};
 use std::sync::Arc;
 
@@ -57,7 +57,7 @@ pub(super) struct ExtendedMedia {
 /// 目标轨道由直接parent或已绑定item的真实parent证明，不接受JS地址或活动工程编号。
 #[derive(Clone)]
 pub(crate) struct HostTrackTarget {
-    host: Arc<ReaperHost>,
+    host: Arc<NativeHost>,
     project: usize,
     track: usize,
     guid: String,
@@ -214,7 +214,7 @@ fn read_guid(
     String::from_utf8(bytes[..38].to_vec()).map_err(|_| "invalid GUID encoding".into())
 }
 
-impl ReaperHost {
+impl NativeHost {
     /// 媒体剪贴板要求完整创建/删除/历史和状态API；不借clipEditing宣称全部命令可用。
     pub(crate) fn can_clipboard_items(&self) -> bool {
         self.can_import_audio() && self.item_state.is_some() && self.split.is_some()

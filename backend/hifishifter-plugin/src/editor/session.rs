@@ -204,14 +204,14 @@ struct Loaded {
 }
 pub(crate) struct EditorSession {
     pub(super) document: Weak<DocumentSession>,
-    pub(super) timeline: Mutex<TimelineState>,
+    pub(crate) timeline: Mutex<TimelineState>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
     // 于是每个工程一份、初始化为出厂默认，换工程即丢。现在由进程级的
     // `crate::settings_store` 持有（与独立 App 共用同一份配置文件）。
     loaded: Mutex<Loaded>,
-    pub(super) namespace: String,
+    pub(crate) namespace: String,
     pub(super) browser_roots: Mutex<Vec<PathBuf>>,
     // 剪贴板 MIDI 载荷（"Standard MIDI File"）：前端先探测一次拿到 GUID，导入命令再
     // 按 GUID 取字节。与 App 侧同形状、同上限，语义见内核 `editor::midi_import`。
@@ -262,7 +262,7 @@ impl Drop for EditorSession {
 
 impl EditorSession {
     /// 导入目标只接受当前原GUI已授权轨道；未指定时由native直接parent决定空轨首次导入。
-    pub(super) fn host_track_id(&self, id: &str) -> Result<String, String> {
+    pub(crate) fn host_track_id(&self, id: &str) -> Result<String, String> {
         if !self
             .timeline
             .lock_or_recover()
@@ -2143,7 +2143,7 @@ pub(crate) mod tests {
         let (model, owners, _ids) = workspace_fixture();
         let document = model.session();
         document.host_undo.pending.store(true, Ordering::Release);
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);
@@ -3588,7 +3588,7 @@ pub(crate) mod tests {
         let history =
             super::super::commands::dispatch(&editor, "get_history_state", json!({})).unwrap();
         let selected = editor.timeline.lock_or_recover().selected_clip_id.clone();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_writer();
         host.enable_media();
         host.clear_markers();
@@ -3661,7 +3661,7 @@ pub(crate) mod tests {
         let document = model.session();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_writer();
         host.enable_media();
         host.clear_markers();
@@ -3725,7 +3725,7 @@ pub(crate) mod tests {
         // 后端身份：没有原生适配器 ⇒ ARA-only，且片段几何只读。
         let backend = owner.host_backend();
         assert_eq!(backend.kind(), HostKind::AraOnly);
-        assert!(backend.reaper().is_none());
+        assert!(backend.native().is_none());
         let caps = backend.capabilities();
         assert!(caps.clip_geometry, "ARA 直接给出 region 几何");
         assert!(!caps.clip_write, "ARA-only 后端不得宣称可写片段几何");

@@ -1,8 +1,8 @@
 //! 原GUI媒体剪贴板的宿主执行层：保存真实item状态和源域曲线，不保存宿主指针。
-use super::parameter_atlas::{ParameterAtlas, RegionGeometry, RegionParameters};
-use super::session::EditorSession;
+use super::{HostClipTarget, HostTrackTarget, NativeHost, RewrittenItem};
+use crate::editor::parameter_atlas::{ParameterAtlas, RegionGeometry, RegionParameters};
+use crate::editor::session::EditorSession;
 use crate::host::geometry::{host_value_compatible, HostClipGeometry};
-use crate::host::reaper::{HostClipTarget, HostTrackTarget, ReaperHost, RewrittenItem};
 use crate::render::document::DocumentSession;
 use crate::render::extension::ExtensionOwner;
 use crate::sync::MutexExt;
@@ -44,15 +44,15 @@ struct PasteItem {
     start_sec: f64,
     seed: Option<RegionParameters>,
 }
-pub(super) struct PastePlan {
-    host: Arc<ReaperHost>,
+pub(crate) struct PastePlan {
+    host: Arc<NativeHost>,
     tracks: Vec<(String, Option<HostTrackTarget>)>,
     items: Vec<PasteItem>,
 }
-pub(super) struct DeletePlan {
+pub(crate) struct DeletePlan {
     targets: Vec<(HostClipTarget, String)>,
 }
-pub(super) struct MediaReceipt {
+pub(crate) struct MediaReceipt {
     created: Vec<(String, HostClipGeometry)>,
     deleted: Vec<(String, String)>,
 }
@@ -199,7 +199,7 @@ fn capture(
     Ok(object)
 }
 /// 系统复制和Ctrl拖动共享宿主捕获，但Ctrl拖动不能覆盖用户已有参数/片段剪贴板。
-pub(super) fn copy(
+pub(crate) fn copy(
     owner: &Arc<ExtensionOwner>,
     editor: &EditorSession,
     input: &Value,
@@ -275,7 +275,7 @@ fn decode(bytes: &[u8]) -> Result<ClipboardItems, String> {
 }
 
 /// 同一个结构化剪贴板协议同时服务参数与clip路由，不能将clip类型过滤成null。
-pub(super) fn clipboard_kind(payload: &Value) -> Option<&'static str> {
+pub(crate) fn clipboard_kind(payload: &Value) -> Option<&'static str> {
     match payload["kind"].as_str() {
         Some("param") => Some("param"),
         Some("clips") if payload["format"] == FORMAT && payload["version"] == 1 => Some("clips"),
@@ -284,7 +284,7 @@ pub(super) fn clipboard_kind(payload: &Value) -> Option<&'static str> {
 }
 
 /// Ctrl拖动复制直接捕获当前宿主item，目标来自明确GUI映射，不经系统剪贴板或全局粘贴action。
-pub(super) fn plan_duplicate(
+pub(crate) fn plan_duplicate(
     owner: &Arc<ExtensionOwner>,
     editor: &EditorSession,
     input: &Value,
@@ -378,7 +378,7 @@ pub(super) fn plan_duplicate(
 }
 
 /// 可用性查询不创建/删除任何item，失败明确为空，不把参数剪贴板当片段剪贴板。
-pub(super) fn available() -> Result<Value, String> {
+pub(crate) fn available() -> Result<Value, String> {
     let data = hifishifter_clipboard::read_bytes()?.and_then(|bytes| decode(&bytes).ok());
     Ok(
         json!({"ok":true,"available":data.is_some(),"kind":data.as_ref().map(|_|"clips"),
@@ -387,7 +387,7 @@ pub(super) fn available() -> Result<Value, String> {
 }
 
 /// 所有数据、目标与GUID先预检，再开始原生Undo块；默认粘贴保留轨道相对关系。
-pub(super) fn plan_paste(
+pub(crate) fn plan_paste(
     owner: &Arc<ExtensionOwner>,
     editor: &EditorSession,
     input: &Value,
@@ -464,7 +464,7 @@ pub(super) fn plan_paste(
 }
 
 /// 真实新GUID在state loader重入前登记seed；回流不重发创建，部分失败保留宿主Undo。
-pub(super) fn execute_paste(
+pub(crate) fn execute_paste(
     owner: &Arc<ExtensionOwner>,
     plan: PastePlan,
     allowed: &impl Fn() -> bool,
@@ -559,7 +559,7 @@ pub(super) fn execute_paste(
 }
 
 /// 整批对象预检后删除；不存在的GUI残留、重复item或跨工程选择均不开始写入。
-pub(super) fn plan_delete(
+pub(crate) fn plan_delete(
     owner: &Arc<ExtensionOwner>,
     editor: &EditorSession,
     input: &Value,
@@ -584,7 +584,7 @@ pub(super) fn plan_delete(
 }
 
 /// 返回真实已删除GUID集合，后续等模型与GUI均不存在这些对象再回执。
-pub(super) fn execute_delete(
+pub(crate) fn execute_delete(
     owner: &Arc<ExtensionOwner>,
     plan: DeletePlan,
     allowed: &impl Fn() -> bool,
@@ -610,7 +610,7 @@ pub(super) fn execute_delete(
 
 impl MediaReceipt {
     /// 媒体创建/删除按真实清单GUID、几何和目标轨道回执；音频就绪另行标记，不阻塞显示。
-    pub(super) fn matches(
+    pub(crate) fn matches(
         &self,
         document: &DocumentSession,
         namespace: &str,

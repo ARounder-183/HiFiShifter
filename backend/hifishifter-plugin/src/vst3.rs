@@ -1781,7 +1781,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
         let component = create_component();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         let observed = Arc::new(AtomicI32::new(0));
         let count = observed.clone();
         let raw = component as usize;
@@ -1810,7 +1810,7 @@ mod lifetime_tests {
     fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
         for terminate in [true, false] {
             let component = create_component();
-            let host = crate::host::reaper::MockHost::new();
+            let host = crate::host::MockHost::new();
             let raw = component as usize;
             let owner =
                 unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
@@ -1842,7 +1842,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
         let component = create_component();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         let raw = component as usize;
         let weak = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
         let during = weak.clone();
@@ -1871,7 +1871,7 @@ mod lifetime_tests {
     #[test]
     fn task38a_initialize_of_a_closed_component_does_not_call_host() {
         let component = create_component();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             component_terminate(component);
         }
@@ -1889,7 +1889,7 @@ mod lifetime_tests {
     fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference()
     {
         let component = create_component();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_connection_host();
         let raw = component as usize;
         *host.hook.borrow_mut() = Some((
@@ -2648,7 +2648,7 @@ mod audio_boundary_tests {
     fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
         let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
         let document = model.session();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.set_value("D_POSITION", 0.);
         host.set_value("D_LENGTH", 4. / 44100.);
         host.set_value("B_MUTE", 1.);

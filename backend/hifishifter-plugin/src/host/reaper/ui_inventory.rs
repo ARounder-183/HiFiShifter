@@ -51,7 +51,7 @@ pub(crate) struct UiTrack {
     pub target: HostTrackTarget,
 }
 
-impl ReaperHost {
+impl NativeHost {
     /// 所有查询都在所属UI线程并逐调用授权；没有region也不代表轨道或item已被删除。
     pub(crate) fn ui_track(
         self: &Arc<Self>,

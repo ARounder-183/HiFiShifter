@@ -195,7 +195,7 @@ pub(crate) struct ExtensionOwner {
     /// 当前编辑后端；`None` ⇒ 尚未绑定任何原生扩展（与 `HostBackend::AraOnly` 不同：
     /// 后者是"宿主明确只给 ARA"，前者是"还没接上"）。
     ///
-    /// 【为什么字段不是具体类型 `Arc<ReaperHost>`】通用层（本文件）不该按 REAPER 类型
+    /// 【为什么字段不是具体类型 `Arc<NativeHost>`】通用层（本文件）不该按 REAPER 类型
     /// 书写。存 [`crate::host::adapter::HostBackend`] 之后，任何需要原生扩展的调用点都
     /// 必须显式 `reaper()` 并处理 `None` —— REAPER 依赖变成**可见且可能力门控**的一步，
     /// 而不是一个默认就在的具体类型。
@@ -314,7 +314,7 @@ mod bound_tests {
             .sources
             .lock_or_recover()
             .insert("ara://source".into(), pcm);
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_writer();
         host.clear_markers();
         for (name, value) in [
@@ -361,7 +361,7 @@ mod bound_tests {
                 &serde_json::json!({"clipId":clip,"fadeInShape":5.,"fadeInDir":0.}),
             )
             .unwrap();
-        crate::editor::host_edit::execute(&owners[0], plan, || document.is_alive()).unwrap();
+        crate::host::host_edit::execute(&owners[0], plan, || document.is_alive()).unwrap();
         let updated = render();
         assert!((updated[0].left[index] as f64 - 0.25).abs() < 0.001);
         assert!((updated[0].left[index] - original[0].left[index]).abs() > 0.1);
@@ -565,7 +565,7 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owners[0].bind_host_adapter(host.context());
         }
@@ -665,7 +665,7 @@ mod bound_tests {
                 );
             }
         }
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owners[0].bind_host_adapter(host.context());
         }
@@ -702,7 +702,7 @@ mod bound_tests {
                 (&*ids[0] as *const u8).cast_mut().cast(),
             );
         }
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owners[0].bind_host_adapter(host.context());
         }
@@ -739,7 +739,7 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owner.bind_host_adapter(host.context());
         }
@@ -781,7 +781,7 @@ mod bound_tests {
             let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
             let document = model.session();
             let owner = owners[0].clone();
-            let host = crate::host::reaper::MockHost::new();
+            let host = crate::host::MockHost::new();
             unsafe {
                 owner.bind_host_adapter(host.context());
             }
@@ -822,7 +822,7 @@ mod bound_tests {
         let owner = &owners[0];
         let first = (&*ids[0] as *const u8) as u64;
         let second = (&*ids[1] as *const u8) as u64;
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owner.bind_host_adapter(host.context());
         }
@@ -884,7 +884,7 @@ mod bound_tests {
             let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
             let document = model.session();
             let owner = owners[0].clone();
-            let host = crate::host::reaper::MockHost::new();
+            let host = crate::host::MockHost::new();
             unsafe {
                 owner.bind_host_adapter(host.context());
             }
@@ -925,7 +925,7 @@ mod bound_tests {
             region.start_in_playback_time = 1.;
             region.duration_in_playback_time = 4.;
         }
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         unsafe {
             owner.bind_host_adapter(host.context());
         }
@@ -2076,8 +2076,8 @@ impl ExtensionOwner {
                     None => self.document.lock_or_recover().is_none(),
                 }
         };
-        let host = unsafe { crate::host::reaper::ReaperHost::from_context(context, authorized) }
-            .map(|host| crate::host::adapter::HostBackend::Reaper(Arc::new(host)));
+        let host = unsafe { crate::host::NativeHost::from_context(context, authorized) }
+            .map(|host| crate::host::adapter::HostBackend::Native(Arc::new(host)));
         if !authorized() {
             return;
         }
@@ -2926,7 +2926,7 @@ impl ExtensionOwner {
     }
 
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
-    pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
+    pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         let document = self.editor_document().ok()?;
         if let Some(host) = self.reaper_host().filter(|host| host.has_project_history()) {
             return Some(host);
@@ -2950,14 +2950,14 @@ impl ExtensionOwner {
     }
     /// 原生 REAPER 适配器（未绑定时 `None`）。
     ///
-    /// 【为什么单独一个访问器】它是通用层唯一允许取具体 `ReaperHost` 的地方 —— 所有
+    /// 【为什么单独一个访问器】它是通用层唯一允许取具体 `NativeHost` 的地方 —— 所有
     /// 需要宿主扩展的操作都从这里取、并显式处理 `None`，让"这一步依赖原生扩展"写在
     /// 调用点上，而不是藏在字段类型里。
-    pub(crate) fn reaper_host(&self) -> Option<Arc<crate::host::reaper::ReaperHost>> {
+    pub(crate) fn reaper_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         self.host
             .lock_or_recover()
             .clone()
-            .and_then(|backend| backend.reaper().cloned())
+            .and_then(|backend| backend.native().cloned())
     }
     /// **生效的**宿主能力位：唯一来源，前端只读这一份。
     ///
@@ -2994,7 +2994,7 @@ impl ExtensionOwner {
         self: &Arc<Self>,
     ) -> Arc<dyn crate::host::history::HostHistory> {
         if let Some(host) = self.project_history_host() {
-            return Arc::new(crate::host::history::ReaperHistory { host });
+            return Arc::new(crate::host::history::ProjectHistory { host });
         }
         match self.editor_session() {
             Ok(editor) => Arc::new(crate::host::history::LocalHistory {
@@ -3008,7 +3008,7 @@ impl ExtensionOwner {
         &self,
         track: Option<&str>,
         authorized: &impl Fn() -> bool,
-    ) -> Result<crate::host::reaper::HostTrackTarget, String> {
+    ) -> Result<crate::host::HostTrackTarget, String> {
         if let Some(id) = track {
             let document = self.editor_document()?;
             let target = {
@@ -3052,7 +3052,7 @@ impl ExtensionOwner {
     pub(crate) fn host_edit_target(
         &self,
         clip_id: &str,
-    ) -> Result<crate::host::reaper::HostClipTarget, String> {
+    ) -> Result<crate::host::HostClipTarget, String> {
         self.refresh_ui_inventory();
         let document = self.editor_document()?;
         if let Some(item) = clip_id.strip_prefix("ara-item-") {
@@ -4291,7 +4291,7 @@ mod host_audio_state_tests {
     fn a_take_level_fact_change_survives_the_change_count_early_return() {
         let (model, owner, _identity) = crate::editor::session::tests::fixture();
         let document = model.session();
-        let host = crate::host::reaper::MockHost::new();
+        let host = crate::host::MockHost::new();
         host.enable_takes(0);
         host.enable_media();
         host.clear_markers();
@@ -4625,8 +4625,8 @@ mod host_geometries_tests {
         region.duration_in_modification_time = 2.;
     }
 
-    fn fixture_host() -> Box<crate::host::reaper::MockHost> {
-        let host = crate::host::reaper::MockHost::new();
+    fn fixture_host() -> Box<crate::host::MockHost> {
+        let host = crate::host::MockHost::new();
         host.enable_media();
         host.clear_markers();
         host.inventory_enabled.set(true);

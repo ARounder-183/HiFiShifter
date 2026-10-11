@@ -1,13 +1,9 @@
 //! 原GUI分割命令只写所属REAPER item；整批预检、宿主Undo、真实两段回流共同决定成功。
-use super::session::EditorSession;
+use super::HostClipTarget;
+use crate::editor::session::EditorSession;
+use crate::host::geometry::{host_value_compatible, HostClipGeometry};
+use crate::render::{document::DocumentSession, extension::ExtensionOwner};
 use crate::sync::MutexExt;
-use crate::{
-    host::{
-        geometry::{host_value_compatible, HostClipGeometry},
-        reaper::HostClipTarget,
-    },
-    render::{document::DocumentSession, extension::ExtensionOwner},
-};
 use hifishifter_kernel::state::Clip;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -209,7 +205,7 @@ mod tests {
     /// 边界、重复、外会话与旧源窗口均在写入前失败，规划不能修改私有模型。
     #[test]
     fn host_split_planning_rejects_invalid_batches_without_mutation() {
-        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
@@ -234,7 +230,7 @@ mod tests {
     /// 真正经过raw SplitMediaItem绑定取得新GUID；源起点按倍率推进，不改私有timeline冒充回流。
     #[test]
     fn host_split_native_returns_distinct_item_guids_and_keeps_source_window() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_split();

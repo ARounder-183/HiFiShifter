@@ -1,7 +1,7 @@
 //! 原GUI几何命令的纯规划与真实宿主写入；不修改actor私有timeline冒充REAPER成功。
-use super::session::EditorSession;
+use super::HostClipTarget;
+use crate::editor::session::EditorSession;
 use crate::host::geometry::host_value_compatible;
-use crate::host::reaper::HostClipTarget;
 use crate::render::extension::ExtensionOwner;
 use crate::sync::MutexExt;
 use hifishifter_kernel::state::{Clip, ClipStatePatch, TimelineState};
@@ -187,7 +187,7 @@ impl HostEditReceipt {
 }
 
 /// 只拦截已实现的宿主命令；未知命令仍走原actor的明确错误路径。
-pub(super) fn is_clip_edit(command: &str) -> bool {
+pub(crate) fn is_clip_edit(command: &str) -> bool {
     matches!(
         command,
         "move_clip" | "move_clips" | "set_clip_state" | "set_clips_state_bulk"
@@ -500,7 +500,7 @@ pub(crate) fn execute(
 ) -> Result<(), String> {
     execute_managed(owner, plan, authorized, false)
 }
-pub(super) fn execute_managed(
+pub(crate) fn execute_managed(
     owner: &Arc<ExtensionOwner>,
     plan: HostEditPlan,
     authorized: impl Fn() -> bool,
@@ -892,7 +892,7 @@ mod tests {
     /// clip音量写真实item D_VOL，支持零；不能写take音量/极性或靠本地gain冒充成功。
     #[test]
     fn host_clip_gain_writes_item_volume_and_preserves_take_polarity() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -939,7 +939,7 @@ mod tests {
     /// 规划复用原Clip×Take倍率，且未开始宿主写之前整批拒绝非法/未知字段。
     #[test]
     fn host_edit_planning_preserves_effective_rate_and_rejects_unknown_batch_fields() {
-        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
@@ -996,7 +996,7 @@ mod tests {
     /// 使用生产clip路由、官方typed getter/setter与Undo块；没有把私有timeline赋值当同步。
     #[test]
     fn host_edit_writes_directly_bound_item_under_one_project_undo_block() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -1042,7 +1042,7 @@ mod tests {
     /// 旧快照仍ok也不能结束移动；长度/倍率/淡变宽度均须准确回流，且缺失clip不可成功。
     #[test]
     fn host_edit_receipt_rejects_readable_old_geometry_and_waits_for_widths() {
-        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
@@ -1053,7 +1053,7 @@ mod tests {
             )
             .unwrap();
         let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
-        let mut payload = super::super::commands::payload(&editor, false).unwrap();
+        let mut payload = crate::editor::commands::payload(&editor, false).unwrap();
         assert!(!receipt.matches(&payload));
         payload["clips"][0]["start_sec"] = json!(3.);
         assert!(!receipt.matches(&payload));
@@ -1073,7 +1073,7 @@ mod tests {
     /// 本身就有 ~1e-7 相对误差，长工程上的 `start_sec` 也在绝对阈值边缘。
     #[test]
     fn host_edit_receipt_uses_the_same_tolerance_as_the_writeback_precheck() {
-        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
@@ -1081,7 +1081,7 @@ mod tests {
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"startSec":3.}))
             .unwrap();
         let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
-        let mut payload = super::super::commands::payload(&editor, false).unwrap();
+        let mut payload = crate::editor::commands::payload(&editor, false).unwrap();
         payload["clips"][0]["start_sec"] = json!(3.);
         assert!(receipt.matches(&payload));
 
@@ -1107,7 +1107,7 @@ mod tests {
     /// 播种；`formant_morph` 还参与渲染，必须能跨重建存活。
     #[test]
     fn host_edit_accepts_plugin_local_clip_properties_without_writing_the_host() {
-        let (_model, owner, _id) = super::super::session::tests::fixture();
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
@@ -1142,7 +1142,7 @@ mod tests {
     /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
     #[test]
     fn host_edit_fade_width_writes_reaper_without_delegation_or_redundant_shape() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -1275,7 +1275,7 @@ mod tests {
     /// 【为什么这条只在插件里有意义】独立 App 直接改自己的模型，没有"宿主回流"这一步。
     #[test]
     fn fade_axis_edits_are_part_of_the_completion_receipt() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -1359,12 +1359,12 @@ mod tests {
             "S 必须进完成门"
         );
         assert!(
-            !receipt.matches(&super::super::commands::payload(&editor, false).unwrap()),
+            !receipt.matches(&crate::editor::commands::payload(&editor, false).unwrap()),
             "写回前宿主读数还是旧 S ⇒ 门不成立"
         );
         execute(&owner, plan, || document.is_alive()).unwrap();
         owner.refresh_host_transport();
-        let payload = super::super::commands::payload(&editor, false).unwrap();
+        let payload = crate::editor::commands::payload(&editor, false).unwrap();
         assert!(
             receipt.matches(&payload),
             "写回后宿主读数必须让 S 的门闭合（载荷顶层带 `fade_in_s`）"
@@ -1375,7 +1375,7 @@ mod tests {
     /// 吸附偏移经真实typed setter和UI元数据回流，不能写完后永远等默认零值。
     #[test]
     fn host_edit_snap_offset_receipt_uses_current_host_metadata() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();
@@ -1397,7 +1397,7 @@ mod tests {
             )
             .unwrap();
         let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
-        assert!(!receipt.matches(&super::super::commands::payload(&editor, false).unwrap()));
+        assert!(!receipt.matches(&crate::editor::commands::payload(&editor, false).unwrap()));
         execute(&owner, plan, || document.is_alive()).unwrap();
         owner.refresh_host_transport();
         assert_eq!(
@@ -1406,7 +1406,7 @@ mod tests {
                 .snap_offset_sec,
             2. / 44100.
         );
-        let payload = super::super::commands::payload(&editor, false).unwrap();
+        let payload = crate::editor::commands::payload(&editor, false).unwrap();
         assert!(receipt.matches(&payload));
         // 官方只说明秒域，不因用户已有负偏移使整个host几何失效；GUI自行按原约定绘制。
         host.set_value("D_SNAPOFFSET", -1. / 44100.);
@@ -1422,7 +1422,7 @@ mod tests {
     /// 起点/时长未变但宿主已经改源窗口时，裁切预检必须在Undo/写API之前拒绝。
     #[test]
     fn host_edit_source_trim_rejects_stale_source_offset_before_any_write() {
-        let (model, owner, _id) = super::super::session::tests::fixture();
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
         let document = model.session();
         let host = crate::host::reaper::MockHost::new();
         host.enable_writer();

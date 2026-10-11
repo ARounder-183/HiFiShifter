@@ -35,7 +35,7 @@
 //! 到底出现在什么结构里（见 `docs/plans/2026-10-08-folder-child-items-to-clips.md`
 //! 的 Task 5.6）。在拿到实测之前**不要**凭对称性外推：`-2` 的语义有官方文档支撑，
 //! `+2` 没有。放宽的判据是实测样本，不是推理。
-use super::{checked, ReaperHost};
+use super::{checked, NativeHost};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr};
 
@@ -118,7 +118,7 @@ impl HostFolderTree {
     }
 }
 
-impl ReaperHost {
+impl NativeHost {
     /// 读**一条轨道自身**的 `I_FOLDERDEPTH`：只读单值，不枚举整个工程。
     ///
     /// 【为什么单独开一个入口】重建 folder 树要枚举全部轨道；而"本 FX 所在轨道

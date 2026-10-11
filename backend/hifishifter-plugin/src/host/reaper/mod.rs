@@ -13,6 +13,12 @@ pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
+// 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
+// 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
+pub(crate) mod clipboard;
+pub(crate) mod host_edit;
+pub(crate) mod host_split;
+pub(crate) mod undo;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -98,7 +104,7 @@ struct GeometryApi {
     slope: Slope,
     change: PlayState,
 }
-pub(crate) struct ReaperHost {
+pub(crate) struct NativeHost {
     _interface: Interface,
     thread: std::thread::ThreadId,
     project: std::sync::atomic::AtomicUsize,
@@ -134,7 +140,7 @@ pub(crate) struct ReaperHost {
     undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
 }
 
-impl ReaperHost {
+impl NativeHost {
     /// 宿主用哪一套淡化轴（`Some(true)` = 7.81+ 的连续 curvature/S 两轴）。
     ///
     /// 【为什么需要公开】"能不能编辑淡变形状"取决于它：旧轴写 `C_FADE*SHAPE`，
@@ -160,7 +166,7 @@ impl ReaperHost {
 /// 【为什么能力位从既有谓词派生，而不是再列一遍 `Option`】这些谓词（`can_edit_clips` /
 /// `can_split_clips` / …）已经是"能不能用"的唯一出处，前端与命令分派都读它们。这里
 /// 只是把同一批判据翻译成宿主无关的 [`HostCapabilities`]，避免出现第二份会漂移的副本。
-impl hifishifter_kernel::editor::host::EditorHost for ReaperHost {
+impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
     fn kind(&self) -> hifishifter_kernel::editor::host::HostKind {
         hifishifter_kernel::editor::host::HostKind::Reaper
     }
@@ -194,7 +200,7 @@ fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Resul
     }
     Ok(value)
 }
-impl ReaperHost {
+impl NativeHost {
     /// 从真实host context QI；parent(3)是所属project，不使用当前活动project或按轨名猜归属。
     /// # Safety
     /// context是初始化期间可读的活FUnknown；host在该 owning reference期间保持接口/API有效。
@@ -1106,7 +1112,7 @@ mod tests {
             project: &raw mut project,
         };
         let client =
-            unsafe { ReaperHost::from_context((&raw mut host).cast(), || !REVOKED.get()) }.unwrap();
+            unsafe { NativeHost::from_context((&raw mut host).cast(), || !REVOKED.get()) }.unwrap();
         assert!(
             client.sample(|| !REVOKED.get()).is_err(),
             "重入关闭必须丢弃本次transport结果"
@@ -1127,7 +1133,7 @@ mod tests {
             refs: AtomicU32::new(1),
             project: &raw mut project,
         };
-        let client = unsafe { ReaperHost::from_context((&raw mut host).cast(), || true) }.unwrap();
+        let client = unsafe { NativeHost::from_context((&raw mut host).cast(), || true) }.unwrap();
         assert_eq!(client.sample(|| true).unwrap(), (4.5, true));
         assert_eq!(host.refs.load(Ordering::Acquire), 2);
         project.state = 2;

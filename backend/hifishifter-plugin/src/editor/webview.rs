@@ -80,7 +80,7 @@ fn host_group_id_for(clip_ids: &[String]) -> i32 {
     let digest = blake3::hash(joined.as_bytes());
     let mut bytes = [0_u8; 4];
     bytes.copy_from_slice(&digest.as_bytes()[..4]);
-    (u32::from_le_bytes(bytes) % super::host_edit::HOST_GROUP_ID_MAX as u32 + 1) as i32
+    (u32::from_le_bytes(bytes) % crate::host::host_edit::HOST_GROUP_ID_MAX as u32 + 1) as i32
 }
 
 struct BrowserState {
@@ -196,9 +196,9 @@ struct HostReply {
     next_attempt: std::time::Instant,
     jump: Option<HistoryJump>,
     imported: Option<String>,
-    geometry: Option<super::host_edit::HostEditReceipt>,
-    split: Option<super::host_split::SplitReceipt>,
-    media: Option<super::host_clipboard::MediaReceipt>,
+    geometry: Option<crate::host::host_edit::HostEditReceipt>,
+    split: Option<crate::host::host_split::SplitReceipt>,
+    media: Option<crate::host::clipboard::MediaReceipt>,
     action: Option<MediaAction>,
 }
 struct WindowData {
@@ -671,17 +671,17 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                 if !allowed() {return Err("media editor lease changed".into());}
                 state.borrow_mut().host_replies.get_mut(&id).ok_or("media request closed")?.action=None;
                 let owner=link.owner()?;
-                if action.command=="copy_timeline_clips" {reply["value"]=super::host_clipboard::copy(&owner,&editor,&action.input,&allowed)?;return Ok(true);}
+                if action.command=="copy_timeline_clips" {reply["value"]=crate::host::clipboard::copy(&owner,&editor,&action.input,&allowed)?;return Ok(true);}
                 let host=owner.project_history_host().filter(|host|host.can_clipboard_items()).ok_or("host media clipboard API unavailable")?;
                 let duplicated=action.command=="duplicate_clips_bulk";
                 let pasted=action.command=="paste_timeline_clipboard"||duplicated;
                 // 计划只读预检；native Undo开始后才创建/删除，失败也必须结束请求。
-                let paste=if duplicated {Some(super::host_clipboard::plan_duplicate(&owner,&editor,&action.input,&allowed)?)} else if pasted {Some(super::host_clipboard::plan_paste(&owner,&editor,&action.input,&allowed)?)} else {None};
-                let delete=if pasted {None} else {Some(super::host_clipboard::plan_delete(&owner,&editor,&action.input,action.command=="remove_clip",&allowed)?)};
+                let paste=if duplicated {Some(crate::host::clipboard::plan_duplicate(&owner,&editor,&action.input,&allowed)?)} else if pasted {Some(crate::host::clipboard::plan_paste(&owner,&editor,&action.input,&allowed)?)} else {None};
+                let delete=if pasted {None} else {Some(crate::host::clipboard::plan_delete(&owner,&editor,&action.input,action.command=="remove_clip",&allowed)?)};
                 document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
                 state.borrow_mut().undo_requests.insert(id,Arc::downgrade(&document));
-                let receipt=if let Some(plan)=paste {super::host_clipboard::execute_paste(&owner,plan,&allowed)?}
-                    else {super::host_clipboard::execute_delete(&owner,delete.unwrap(),&allowed)?};
+                let receipt=if let Some(plan)=paste {crate::host::clipboard::execute_paste(&owner,plan,&allowed)?}
+                    else {crate::host::clipboard::execute_delete(&owner,delete.unwrap(),&allowed)?};
                 // 所有native写入已结束；回执只读等待不能撑住宿主Undo块/自动准备，形成相互等待。
                 // 失败仍由下方统一收尾；成功回执继续核对真实GUID，不重复创建item。
                 state.borrow_mut().undo_requests.remove(&id);
@@ -1324,7 +1324,7 @@ fn configure_browser(
                             "appVersion":backend.app_version()},
                         // 当前编辑后端与能力位：报障时能直接读出"是不是 ARA-only 只读后端"。
                         "backend":{"kind":backend.kind().as_str(),
-                            "nativeAdapter":backend.reaper().is_some(),
+                            "nativeAdapter":backend.native().is_some(),
                             "capabilities":backend.capabilities()},
                         "transport":document.clock.diagnostics(),
                         // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
@@ -1381,14 +1381,14 @@ fn configure_browser(
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                    let outcome=super::host_split::execute(&owner,plan,&allowed);
+                    let outcome=crate::host::host_split::execute(&owner,plan,&allowed);
                     document.host_undo.finish_request(&view_id,id);let split=Some(outcome?);
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split,media:None,action:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
-            Some(command) if super::host_edit::is_clip_edit(command)=>{
+            Some(command) if crate::host::host_edit::is_clip_edit(command)=>{
                 let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String> {
                     if full {return Err("native host edit request budget exceeded".into());}
@@ -1403,7 +1403,7 @@ fn configure_browser(
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                     document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                    let outcome=super::host_edit::execute_managed(&owner,plan,allowed,true);
+                    let outcome=crate::host::host_edit::execute_managed(&owner,plan,allowed,true);
                     document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry,split:None,media:None,action:None})
@@ -1413,7 +1413,7 @@ fn configure_browser(
                     Err(error)=>Err(error),
                 }
             },
-            Some("has_timeline_clipboard")=>super::host_clipboard::available(),
+            Some("has_timeline_clipboard")=>crate::host::clipboard::available(),
             Some(command @ ("copy_timeline_clips"|"paste_timeline_clipboard"|"duplicate_clips_bulk"|"remove_clip"|"remove_clips"))=>{
                 let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
                 let outcome=(||->Result<HostReply,String>{
@@ -1444,7 +1444,7 @@ fn configure_browser(
                 let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
                 // 宿主权威栈 ⇒ 走异步路径（必须等在途写入落定再跳，否则会跳到一半的状态）。
                 //
-                // 【为什么比 `"host"` 而不是 `"reaper"`】`ReaperHistory::backend()` 返回
+                // 【为什么比 `"host"` 而不是 `"reaper"`】`ProjectHistory::backend()` 返回
                 // `"host"`（`host::history`，随后端去品牌化改名）。此前这里比的是旧值
                 // `"reaper"`，于是 `uses_host` 恒为 `false` —— REAPER 里宿主撤销/重做
                 // 实际走了本地栈，`history_jump*` 整条路径不可达。
@@ -1842,7 +1842,7 @@ mod bootstrap_tests {
 #[cfg(test)]
 mod group_id_tests {
     use super::host_group_id_for;
-    use crate::editor::host_edit::HOST_GROUP_ID_MAX;
+    use crate::host::host_edit::HOST_GROUP_ID_MAX;
 
     fn raw_first_four(key: &str) -> u32 {
         let digest = blake3::hash(key.as_bytes());

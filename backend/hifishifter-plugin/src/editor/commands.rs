@@ -122,7 +122,7 @@ struct PrivateTrackMove {
 }
 
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
-pub(super) fn payload(session: &EditorSession, lite: bool) -> Result<Value, String> {
+pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, String> {
     let (position, _) = session.transport();
     let timeline = session.timeline.lock_or_recover();
     let mut payload = if lite {
@@ -451,7 +451,7 @@ pub(super) fn dispatch(
         "clipboard_kind" => {
             let kind = hifishifter_clipboard::read_bytes()?
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .and_then(|payload| super::host_clipboard::clipboard_kind(&payload));
+                .and_then(|payload| crate::host::clipboard::clipboard_kind(&payload));
             return Ok(json!({"ok":true,"kind":kind}));
         }
         // ── MIDI 导入的前两步 ──
@@ -758,7 +758,7 @@ pub(super) fn dispatch(
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
                 return Ok(json!({"ok":true,"available":false}));
             };
-            let Some(kind) = super::host_clipboard::clipboard_kind(&value) else {
+            let Some(kind) = crate::host::clipboard::clipboard_kind(&value) else {
                 return Ok(json!({"ok":true,"available":false}));
             };
             let (summary, ext, encoding) = if kind == "param" {
@@ -840,7 +840,7 @@ pub(super) fn dispatch(
             }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| "clipboard payload is not native HiFiShifter data".to_string())?;
-            if super::host_clipboard::clipboard_kind(&value).is_none() {
+            if crate::host::clipboard::clipboard_kind(&value).is_none() {
                 return Err("clipboard payload is not native HiFiShifter data".into());
             }
             hifishifter_clipboard::write_bytes(
