@@ -2139,6 +2139,8 @@ export const jaJP = {
     plugin_apply_pending: "自動適用中...",
     plugin_apply_applied: "適用済み",
     plugin_apply_error: "未適用：{error}",
+    plugin_apply_session_ended:
+        "この編集セッションは終了しました。プラグインウィンドウを閉じて開き直してください。",
     plugin_apply_generations: "編集 {edits} / オーディオ {audio}",
     plugin_apply_reload_host: "ホストから再読み込み",
     plugin_apply_reload_message:

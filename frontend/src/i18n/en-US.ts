@@ -2124,6 +2124,8 @@ export const enUS = {
     plugin_apply_pending: "Applying automatically...",
     plugin_apply_applied: "Applied",
     plugin_apply_error: "Not applied: {error}",
+    plugin_apply_session_ended:
+        "This editor session has ended. Close and reopen the plug-in window to continue.",
     plugin_apply_generations: "Edits {edits} / Audio {audio}",
     plugin_apply_reload_host: "Reload from Host",
     plugin_apply_reload_message:

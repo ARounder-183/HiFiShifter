@@ -28,7 +28,7 @@ export function PluginApplyStatus({
     onTimelineChanged: () => Promise<unknown>;
 }) {
     const { t, tVars } = useI18n();
-    const { state, failure, reloading } = useSyncExternalStore(
+    const { state, failure, reloading, sessionEnded } = useSyncExternalStore(
         subscribePluginApply,
         getPluginApplySnapshot,
         getPluginApplySnapshot,
@@ -48,18 +48,26 @@ export function PluginApplyStatus({
 
     const refreshTimeline = () => refreshRef.current();
     const error = failure || state?.error || "";
-    const tone = error
+    // 【为什么终态要单独一条】会话结束不是"尚未应用"的一种：重试、点"重新载入"
+    // 都不会成功。把后端原始串直接摊给用户（`plugin_apply_error`）会让人以为
+    // 再等等就好。这里给出**可操作的**说明（关窗重开），并且不再显示重载按钮。
+    const terminal = sessionEnded;
+    const tone = terminal
         ? "danger"
-        : reloading || state?.pending
-          ? "accent"
-          : state?.ready
-            ? "success"
-            : "neutral";
-    const label = !state?.ready
-        ? t("plugin_apply_waiting_host")
-        : state.pending
-          ? t("plugin_apply_pending")
-          : t("plugin_apply_applied");
+        : error
+          ? "danger"
+          : reloading || state?.pending
+            ? "accent"
+            : state?.ready
+              ? "success"
+              : "neutral";
+    const label = terminal
+        ? t("plugin_apply_session_ended")
+        : !state?.ready
+          ? t("plugin_apply_waiting_host")
+          : state.pending
+            ? t("plugin_apply_pending")
+            : t("plugin_apply_applied");
     /*
      * 修订数与长说明都进 `title`：它们在状态栏里没有位置，但"为什么还没应用"
      * 恰恰要靠它们判断 —— 塞进片里会把状态栏撑成一条跑道。
@@ -87,7 +95,7 @@ export function PluginApplyStatus({
             <AppStatusChip tone={tone} title={title}>
                 {label}
             </AppStatusChip>
-            {error ? (
+            {error && !terminal ? (
                 <span
                     role="alert"
                     className="hs-type-label min-w-0 truncate"
@@ -102,7 +110,7 @@ export function PluginApplyStatus({
                     {tVars("plugin_apply_error", { error })}
                 </span>
             ) : null}
-            {state?.ready ? (
+            {state?.ready && !terminal ? (
                 <AppButton size="sm" disabled={reloading} onClick={requestReload}>
                     {t("plugin_apply_reload_host")}
                 </AppButton>

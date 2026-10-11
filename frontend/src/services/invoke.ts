@@ -5,7 +5,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { reportFrontendError } from "./frontendErrorLog";
-import { getPluginHost } from "./pluginHost";
+import { getPluginHost, PluginInvokeError } from "./pluginHost";
 
 declare global {
     interface Window {
@@ -29,8 +29,23 @@ export class BackendInvokeError extends Error {
     public readonly mode: InvokeMode;
     public readonly method: string;
     public readonly args?: unknown;
+    /**
+     * 失败是否**可恢复**。
+     *
+     * 【为什么需要它】此前调用方只能拿到一个错误对象，无法区分"稍后重试会好"与
+     * "这个会话已经永久结束"。用户报障的 Cubase 场景是后者：后端把同一个终态错误
+     * 答了 19,056 次。轮询方据 `terminal` **停止**重试，是这条信息的唯一用途。
+     * 分类由插件后端随回执给出（`errorKind`），前端**不解析错误文本**。
+     */
+    public readonly kind: "terminal" | "transient";
 
-    constructor(params: { mode: InvokeMode; method: string; args?: unknown; cause?: unknown }) {
+    constructor(params: {
+        mode: InvokeMode;
+        method: string;
+        args?: unknown;
+        cause?: unknown;
+        kind?: "terminal" | "transient";
+    }) {
         super(`Backend invoke failed: ${params.mode}:${params.method}`, {
             cause: params.cause,
         });
@@ -38,7 +53,22 @@ export class BackendInvokeError extends Error {
         this.mode = params.mode;
         this.method = params.method;
         this.args = params.args;
+        this.kind = params.kind ?? "transient";
     }
+}
+
+/** 从任意错误对象里取出后端给出的分类；非插件错误一律视为 `transient`。 */
+export function invokeErrorKind(error: unknown): "terminal" | "transient" {
+    if (error instanceof BackendInvokeError) return error.kind;
+    if (
+        error &&
+        typeof error === "object" &&
+        "kind" in error &&
+        (error as { kind?: unknown }).kind === "terminal"
+    ) {
+        return "terminal";
+    }
+    return "transient";
 }
 
 let pywebviewAvailability: "unknown" | "available" | "unavailable" = "unknown";
@@ -959,7 +989,14 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             return await plugin.invoke<T>(method, named);
         } catch (cause) {
             reportFrontendError(`Invoke failed: ${method}`, cause);
-            throw new BackendInvokeError({ mode: "plugin", method, args: named, cause });
+            throw new BackendInvokeError({
+                mode: "plugin",
+                method,
+                args: named,
+                cause,
+                // 后端的分类随回执传来；轮询方据此决定"停止重试"还是"稍后再来"。
+                kind: cause instanceof PluginInvokeError ? cause.kind : "transient",
+            });
         }
     }
     const tauriInvoke = getTauriInvoke();

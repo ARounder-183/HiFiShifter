@@ -2064,6 +2064,7 @@ export const zhCN = {
     plugin_apply_pending: "正在自动应用...",
     plugin_apply_applied: "已应用",
     plugin_apply_error: "尚未应用：{error}",
+    plugin_apply_session_ended: "本次编辑会话已结束。请关闭并重新打开插件窗口后继续。",
     plugin_apply_generations: "编辑 {edits} / 音频 {audio}",
     plugin_apply_reload_host: "重新载入宿主",
     plugin_apply_reload_message: "当前仍有未应用编辑。重新载入会替换本地曲线，继续？",

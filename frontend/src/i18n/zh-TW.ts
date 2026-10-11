@@ -2067,6 +2067,7 @@ export const zhTW = {
     plugin_apply_pending: "正在自動套用...",
     plugin_apply_applied: "已套用",
     plugin_apply_error: "尚未套用：{error}",
+    plugin_apply_session_ended: "本次編輯工作階段已結束。請關閉並重新開啟外掛視窗後繼續。",
     plugin_apply_generations: "編輯 {edits} / 音訊 {audio}",
     plugin_apply_reload_host: "重新載入宿主",
     plugin_apply_reload_message: "目前仍有未套用的編輯。重新載入會取代本機曲線，要繼續嗎？",

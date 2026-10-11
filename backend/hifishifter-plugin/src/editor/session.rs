@@ -739,7 +739,10 @@ impl EditorSession {
                             json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":true,"value":value})
                         }
                         Err(error) => {
-                            json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":false,"error":error})
+                            // 与 `webview.rs` 的同一条协议：终态错误必须带 `errorKind`，
+                            // 否则前端无法区分"稍后重试"与"会话已结束"。
+                            json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":false,
+                                "errorKind":super::classify_error(&error),"error":error})
                         }
                     };
                     request.sink.response(response);

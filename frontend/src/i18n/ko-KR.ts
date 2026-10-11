@@ -2110,6 +2110,8 @@ export const koKR = {
     plugin_apply_pending: "자동 적용 중...",
     plugin_apply_applied: "적용됨",
     plugin_apply_error: "적용되지 않음: {error}",
+    plugin_apply_session_ended:
+        "이 편집 세션이 종료되었습니다. 플러그인 창을 닫았다가 다시 열어 계속하세요.",
     plugin_apply_generations: "편집 {edits} / 오디오 {audio}",
     plugin_apply_reload_host: "호스트에서 다시 로드",
     plugin_apply_reload_message:

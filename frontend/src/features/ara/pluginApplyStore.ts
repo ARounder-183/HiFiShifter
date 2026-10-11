@@ -12,7 +12,7 @@
  * 轮询里绝大多数回调其实什么都没变，不比较就等于每 250 ms 白重渲染一次。
  */
 import { listen } from "../../services/hostEvents";
-import { invoke } from "../../services/invoke";
+import { invoke, invokeErrorKind } from "../../services/invoke";
 
 /** 后端 `plugin_get_apply_state` / `plugin_apply_state` 事件的负载。 */
 export interface PluginApplyState {
@@ -40,9 +40,27 @@ export interface PluginApplySnapshot {
     failure: string;
     /** `plugin_refresh` 正在进行。 */
     reloading: boolean;
+    /**
+     * 编辑会话已**永久**结束（后端回执分类为 `terminal`）。
+     *
+     * 【为什么需要它】后端在文档/组件关闭后会把同一个终态错误答给每一次轮询 ——
+     * 实测在 Cubase 上一个终态错误被答了 19,056 次、日志轮转文件合计约 32 MB。
+     * 轮询必须据此**停止**，而不是无限重试。
+     */
+    sessionEnded: boolean;
 }
 
-const EMPTY: PluginApplySnapshot = { state: null, failure: "", reloading: false };
+const EMPTY: PluginApplySnapshot = {
+    state: null,
+    failure: "",
+    reloading: false,
+    sessionEnded: false,
+};
+
+/** 正常轮询间隔（与旧实现的 250 ms 一致：状态栏要跟得上宿主的应用进度）。 */
+const BASE_POLL_MS = 250;
+/** 暂时性失败后的退避上限。 */
+const MAX_POLL_MS = 30_000;
 
 let snapshot: PluginApplySnapshot = EMPTY;
 const listeners = new Set<() => void>();
@@ -66,7 +84,8 @@ function publish(next: PluginApplySnapshot): void {
     if (
         sameState(snapshot.state, next.state) &&
         snapshot.failure === next.failure &&
-        snapshot.reloading === next.reloading
+        snapshot.reloading === next.reloading &&
+        snapshot.sessionEnded === next.sessionEnded
     ) {
         // 内容没变就保留旧引用：订阅者不该因为"又轮询了一次"而重渲染。
         return;
@@ -99,12 +118,19 @@ export function resetPluginApplyStoreForTests(): void {
  * 【保留的两处既有语义，别顺手简化】
  * - `timelineInFlight` 重入保护：宿主版本连续前进时不能并发重取时间轴；
  * - 重取失败**不推进** `lastHostVersion`，于是下一次轮询会重试。
+ *
+ * 【为什么失败要退避、终态要停止】原实现每 250 ms 无条件重试，且不区分失败种类。
+ * 当后端已把会话终结（文档/组件关闭）时，这就是**永远**失败的 4 次/秒 —— 实测把
+ * 一个终态错误放大成 19,056 条日志。现在：终态**停止轮询**，暂时性失败指数退避
+ * （250ms → 2s → 8s，上限 30s），成功一次即复位。
  */
 export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>): () => void {
     let disposed = false;
     let inFlight = false;
     let lastHostVersion: number | undefined;
     let timelineInFlight = false;
+    let timer: number | undefined;
+    let backoffMs = BASE_POLL_MS;
 
     async function updateTimeline(): Promise<boolean> {
         if (disposed || timelineInFlight) return false;
@@ -126,27 +152,49 @@ export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>)
         if (!disposed) publish({ ...snapshot, state: event.payload });
     });
 
+    /** 安排下一次轮询。`delayMs` 为 undefined 表示"停止"（终态或已 dispose）。 */
+    function schedule(delayMs: number | undefined): void {
+        if (disposed || delayMs === undefined) return;
+        timer = window.setTimeout(() => void poll(), delayMs);
+    }
+
     async function poll(): Promise<void> {
         if (inFlight || disposed) return;
         inFlight = true;
         try {
             const current = await invoke<PluginApplyState>("plugin_get_apply_state");
-            if (!disposed) publish({ ...snapshot, state: current, failure: "" });
+            if (disposed) return;
+            backoffMs = BASE_POLL_MS;
+            publish({ ...snapshot, state: current, failure: "", sessionEnded: false });
             if (!current.ready || current.host_version !== lastHostVersion) {
                 if (await updateTimeline()) lastHostVersion = current.host_version;
             }
+            schedule(BASE_POLL_MS);
         } catch (error) {
-            if (!disposed) publish({ ...snapshot, failure: String(error) });
+            if (disposed) return;
+            const kind = invokeErrorKind(error);
+            if (kind === "terminal") {
+                // 会话已永久结束：停止轮询，如实显示，不再制造 IPC 与日志。
+                publish({
+                    ...snapshot,
+                    failure: String(error),
+                    sessionEnded: true,
+                });
+                schedule(undefined);
+                return;
+            }
+            publish({ ...snapshot, failure: String(error) });
+            schedule(backoffMs);
+            backoffMs = Math.min(backoffMs * 4, MAX_POLL_MS);
         } finally {
             inFlight = false;
         }
     }
 
     void poll();
-    const timer = window.setInterval(() => void poll(), 250);
     return () => {
         disposed = true;
-        window.clearInterval(timer);
+        if (timer !== undefined) window.clearTimeout(timer);
         void stateSubscription.then((off) => off()).catch(() => undefined);
         void hostSubscription.then((off) => off()).catch(() => undefined);
     };
@@ -167,8 +215,15 @@ export async function reloadPluginHost(
         await invoke("plugin_refresh", force);
         await refreshTimeline();
         const state = await invoke<PluginApplyState>("plugin_get_apply_state");
-        publish({ ...snapshot, state, failure: "", reloading: false });
+        publish({ ...snapshot, state, failure: "", reloading: false, sessionEnded: false });
     } catch (error) {
-        publish({ ...snapshot, failure: String(error), reloading: false });
+        // 终态失败同样要如实记下：用户主动点"重新载入"却撞上会话已结束，
+        // 界面必须说明原因，而不是只把按钮转一圈又回到原样。
+        publish({
+            ...snapshot,
+            failure: String(error),
+            reloading: false,
+            sessionEnded: invokeErrorKind(error) === "terminal",
+        });
     }
 }

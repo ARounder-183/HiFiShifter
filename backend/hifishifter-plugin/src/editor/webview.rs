@@ -1568,7 +1568,11 @@ fn configure_browser(
         };
         let response = match result {
             Ok(value) => serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,"value":value}),
-            Err(error) => serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}),
+            // `errorKind` 让前端能区分"暂时失败"与"会话已终结"。后者必须让前端
+            // **停止轮询**并如实显示，而不是每 250 ms 重问一个永远不会好的问题
+            // （见 `editor::classify_error` 的说明）。
+            Err(error) => serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
+                "errorKind":super::classify_error(&error),"error":error}),
         };
         let response = wide(&response.to_string());
         browser.PostWebMessageAsJson(PCWSTR(response.as_ptr()))?;

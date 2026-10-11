@@ -21,6 +21,12 @@ const handlers = new Map<string, (event: { payload: unknown }) => void>();
 
 vi.mock("../../services/invoke", () => ({
     invoke: (...args: unknown[]) => invokeMock(...args),
+    // 生产实现读 `BackendInvokeError.kind`；这里按同样的语义从错误对象上取，
+    // 让测试能构造"终态失败"（见下面的 terminal tests）。
+    invokeErrorKind: (error: unknown) =>
+        error && typeof error === "object" && (error as { kind?: unknown }).kind === "terminal"
+            ? "terminal"
+            : "transient",
 }));
 
 vi.mock("../../services/hostEvents", () => ({
@@ -187,4 +193,77 @@ test("a failed reload surfaces as a communication failure and clears the busy fl
 
     expect(getPluginApplySnapshot().failure).toContain("host refused");
     expect(getPluginApplySnapshot().reloading).toBe(false);
+});
+
+/**
+ * 【为什么必须钉死终态停止】后端在文档/组件关闭后会把同一个终态错误答给每一次
+ * 轮询。实测在 Cubase 上这一个缺陷把一个终态错误放大成 19,056 条日志、轮转文件
+ * 合计约 32 MB。轮询必须据此**永久停止**，而不是无限重试。
+ */
+test("a terminal failure stops polling for good and marks the session ended", async () => {
+    const terminal = Object.assign(new Error("document closed"), { kind: "terminal" });
+    invokeMock.mockRejectedValue(terminal);
+    stop = startPluginApplyPolling(async () => undefined);
+
+    await flush();
+    expect(getPluginApplySnapshot().sessionEnded).toBe(true);
+    expect(getPluginApplySnapshot().failure).toContain("document closed");
+    const afterFailure = invokeMock.mock.calls.length;
+
+    // 再推很久也不该有任何新请求：会话已结束，重试没有意义。
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBe(afterFailure);
+});
+
+/**
+ * 【为什么要退避】暂时性失败（宿主正在重载、PCM 尚未就绪）确实值得重试，但按
+ * 250 ms 的节奏重试 4 次/秒同样是白费 IPC。策略是"起步仍然快、随后成倍拉长"：
+ * 第一次重试仍等基础间隔（保持状态栏响应），之后每失败一次 ×4，上限 30s。
+ */
+test("a transient failure backs off instead of retrying every 250ms", async () => {
+    const transient = Object.assign(new Error("host busy"), { kind: "transient" });
+    invokeMock.mockRejectedValue(transient);
+    stop = startPluginApplyPolling(async () => undefined);
+
+    await flush();
+    expect(getPluginApplySnapshot().sessionEnded).toBe(false);
+    const afterFirst = invokeMock.mock.calls.length;
+
+    // 第一次重试仍等基础间隔（250 ms）：起步不牺牲响应。
+    await vi.advanceTimersByTimeAsync(250);
+    await flush();
+    const afterSecond = invokeMock.mock.calls.length;
+    expect(afterSecond).toBeGreaterThan(afterFirst);
+
+    // 第二次失败后间隔翻到 1s（250×4）：再等 250 ms 不该有新请求。
+    await vi.advanceTimersByTimeAsync(250);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBe(afterSecond);
+
+    // 满 1s 之后才重试。
+    await vi.advanceTimersByTimeAsync(750);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBeGreaterThan(afterSecond);
+});
+
+/** 成功一次之后退避必须复位，否则状态栏会永久停在慢节奏上。 */
+test("a success after a transient failure resets the poll cadence", async () => {
+    invokeMock.mockRejectedValueOnce(
+        Object.assign(new Error("host busy"), { kind: "transient" }),
+    );
+    stop = startPluginApplyPolling(async () => undefined);
+    await flush();
+    const afterFailure = invokeMock.mock.calls.length;
+
+    invokeMock.mockResolvedValue(readyState());
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    expect(getPluginApplySnapshot().failure).toBe("");
+
+    // 复位后回到 250 ms 节奏：再等一个基础间隔就应有新请求。
+    const afterSuccess = invokeMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(250);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBeGreaterThan(afterSuccess);
 });

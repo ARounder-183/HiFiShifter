@@ -85,6 +85,26 @@ type Pending = {
     timer: ReturnType<typeof setTimeout>;
 };
 
+/**
+ * 命令失败的**机器可读分类**，由后端随 IPC 回执一起给出。
+ *
+ * - `terminal`：这个编辑会话已经**永久**结束（文档/组件已关闭），再问一万次也一样。
+ *   调用方应当**停止轮询**并如实显示，而不是无限重试 —— 用户报障的 Cubase 场景
+ *   正是后端把同一个终态错误答了 19,056 次、把日志刷满。
+ * - `transient`：暂时失败，值得稍后重试。
+ */
+export type PluginErrorKind = "terminal" | "transient";
+
+/** 带分类的插件命令错误。调用方按 `kind` 决策，**不解析错误文本**。 */
+export class PluginInvokeError extends Error {
+    readonly kind: PluginErrorKind;
+    constructor(message: string, kind: PluginErrorKind) {
+        super(message);
+        this.name = "PluginInvokeError";
+        this.kind = kind;
+    }
+}
+
 /** 宿主IPlugView兜底按键继续经过原GUI监听器，保留输入框、模态及自定义键位的规则。 */
 function forwardPluginKeyboard(payload: unknown): void {
     if (!payload || typeof payload !== "object" || typeof document === "undefined") return;
@@ -152,7 +172,10 @@ export function createPluginHost(
         if (data.ok === true) slot.resolve(data.value);
         else
             slot.reject(
-                new Error(typeof data.error === "string" ? data.error : "Invalid plugin response"),
+                new PluginInvokeError(
+                    typeof data.error === "string" ? data.error : "Invalid plugin response",
+                    data.errorKind === "terminal" ? "terminal" : "transient",
+                ),
             );
     }
     port.addEventListener("message", receive);

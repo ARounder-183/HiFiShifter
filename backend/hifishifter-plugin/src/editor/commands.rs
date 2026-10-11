@@ -856,13 +856,25 @@ pub(super) fn dispatch(
             Ok(json!({"ok":true}))
         }
         "get_runtime_info" => {
-            let timeline = payload(session, true)?;
+            // 【为什么不再序列化整条时间线】此前这里调 `payload(session, true)` ——
+            // 一次"运行时状态"查询要锁住 timeline/history/project 并序列化全部片段，
+            // 于是状态栏的一次失败与内容加载强耦合（大工程上这个查询还会明显卡顿）。
+            // 时间线本来就有自己的通路（前端启动时的 `fetch_timeline` 与
+            // `plugin_refresh`），独立 App 的同一命令也**从不**带 timeline
+            // （`RuntimeInfoPayload.timeline = None`）。这里与 App 对齐，只回报摘要。
             let (_, playing) = session.transport();
-            Ok(
-                json!({"ok":true,"device":"Host / ARA","model_loaded":hifishifter_kernel::world_vocoder::is_available(),
-                "audio_loaded":!session.timeline.lock_or_recover().clips.is_empty(),"has_synthesized":session.applied.load(Ordering::Acquire)>0,
-                "is_playing":playing,"playback_target":if playing {Some("synthesized")} else {None},"gpu_backend":"","timeline":timeline}),
-            )
+            let clip_count = session.timeline.lock_or_recover().clips.len();
+            Ok(json!({
+                "ok": true,
+                "device": "Host / ARA",
+                "model_loaded": hifishifter_kernel::world_vocoder::is_available(),
+                "audio_loaded": clip_count > 0,
+                "has_synthesized": session.applied.load(Ordering::Acquire) > 0,
+                "is_playing": playing,
+                "playback_target": if playing { Some("synthesized") } else { None },
+                "gpu_backend": "",
+                "clip_count": clip_count,
+            }))
         }
         "get_history_state" => Ok(history_state(session)),
         "begin_undo_group" => {

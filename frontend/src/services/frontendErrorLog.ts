@@ -50,12 +50,73 @@ function toDetailText(detail: unknown): string {
     return text;
 }
 
+/**
+ * 同一错误的抑制窗口：窗口内只上报一次，窗口过后再报一次并附上重复次数。
+ *
+ * 【为什么前端也要去重，而不是只靠后端限流】后端限流能保住日志文件，但挡不住
+ * **每次失败都要跨一次 IPC**：一个每秒重试 4 次的终态错误，即使后端只写一行，
+ * 前端仍会把整条错误对象序列化 4 次/秒（含最长 4000 字符的栈）并投递过去。
+ * 两侧都做，才是"既不刷屏、也不白费 IPC"。
+ */
+const DEDUP_WINDOW_MS = 60_000;
+/** 同时跟踪的键上限：超限时按最久未见淘汰，避免自身变成内存增长点。 */
+const DEDUP_MAX_KEYS = 64;
+
+type DedupState = { firstSeen: number; lastReported: number; count: number };
+const dedupKeys = new Map<string, DedupState>();
+
+/**
+ * 判定这条错误是否应当**现在**上报；返回 null 表示抑制。
+ *
+ * 返回值为附加在消息末尾的重复说明（首次上报为空串）。
+ */
+function dedupDecision(key: string, now: number): string | null {
+    const existing = dedupKeys.get(key);
+    if (!existing) {
+        if (dedupKeys.size >= DEDUP_MAX_KEYS) {
+            // 淘汰最久未上报的键。Map 迭代顺序即插入顺序，但 lastReported 才是
+            // 真正的"新近度"，所以按它找最小值。
+            let stalestKey: string | null = null;
+            let stalestAt = Number.POSITIVE_INFINITY;
+            for (const [candidate, state] of dedupKeys) {
+                if (state.lastReported < stalestAt) {
+                    stalestAt = state.lastReported;
+                    stalestKey = candidate;
+                }
+            }
+            if (stalestKey !== null) dedupKeys.delete(stalestKey);
+        }
+        dedupKeys.set(key, { firstSeen: now, lastReported: now, count: 1 });
+        return "";
+    }
+    existing.count += 1;
+    if (now - existing.lastReported < DEDUP_WINDOW_MS) {
+        return null;
+    }
+    const seconds = Math.max(1, Math.round((now - existing.firstSeen) / 1000));
+    const repeats = existing.count - 1;
+    existing.lastReported = now;
+    existing.count = 1;
+    existing.firstSeen = now;
+    return ` (repeated ${repeats} time(s) over the last ${seconds}s)`;
+}
+
+/** 仅供测试重置模块级去重状态。 */
+export function resetFrontendErrorDedupForTests(): void {
+    dedupKeys.clear();
+}
+
 /** 把一条前端错误写入后端日志（fire-and-forget，永不抛出）。 */
 export function reportFrontendError(message: string, detail?: unknown): void {
     try {
         const detailText = toDetailText(detail);
+        // 键取"消息 + 详情前 200 字符"：足够区分不同错误，又不会被栈里的地址/行号
+        // 打散成每次都不同的键（那会让去重完全失效）。
+        const key = `${message}\u0000${detailText.slice(0, 200)}`;
+        const suffix = dedupDecision(key, Date.now());
+        if (suffix === null) return;
         const result = tauriInvokeRaw("log_frontend_error", {
-            message,
+            message: `${message}${suffix}`,
             detail: detailText || null,
         });
         if (result && typeof (result as Promise<unknown>).catch === "function") {
