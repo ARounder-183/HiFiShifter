@@ -82,6 +82,16 @@ impl EditorSession {
                         }
                         let entry = entry.map_err(|e| e.to_string())?;
                         let name = entry.file_name().to_string_lossy().into_owned();
+                        // 【为什么非 UTF-8 路径直接跳过，而不是 `to_string_lossy` 后继续】
+                        // 浏览协议走 JSON 字符串，非 UTF-8 的路径**无法无损往返**：`lossy`
+                        // 会把不可解码的字节换成 U+FFFD，之后 `canonicalize` 得到的要么是
+                        // 另一个路径、要么直接失败 —— 而下面的 `?` 会让**整份目录列表**
+                        // 报错。与其列出一个点了就错（或让整页打不开）的条目，不如不列它。
+                        // 这只影响无法用 UTF-8 表达的文件名，其余路径不受影响。
+                        let entry_path = entry.path();
+                        let Some(raw_path) = entry_path.to_str() else {
+                            continue;
+                        };
                         // 隐藏判据与内核/独立 App **同一份**：Windows 的隐藏是一个文件
                         // 属性，只看点开头等于对 Windows 用户完全没生效。
                         if !hidden {
@@ -95,7 +105,7 @@ impl EditorSession {
                                 continue;
                             }
                         }
-                        let Ok(path) = self.browser_path(&entry.path().to_string_lossy()) else {
+                        let Ok(path) = self.browser_path(raw_path) else {
                             continue;
                         };
                         let meta = path.metadata().map_err(|e| e.to_string())?;

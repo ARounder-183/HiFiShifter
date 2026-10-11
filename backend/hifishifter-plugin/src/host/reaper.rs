@@ -680,16 +680,18 @@ impl ReaperHost {
         {
             return None;
         }
-        // 路径有界（与 GUID 读取同一条纪律：不开放任意长字符串）。
-        let mut buffer = [0u8; 4096];
+        // 【为什么缓冲是 32 KiB 且截断即视为失败】`GetMediaSourceFileName` 不报告所需
+        // 长度，只在缓冲不足时**静默截断**。截断出来的路径会成为一个"看起来合法、其实
+        // 指向别处"的回退身份，比没有更坏 —— 它可能把另一份媒体嫁接上来。因此：
+        // 缓冲按 Windows 扩展路径上限（32767 个宽字符，UTF-8 下最多约 128 KiB）留足；
+        // 仍然找不到 NUL 终止符时**返回 None**，让调用方退回 GUID 身份，而不是用一个
+        // 被截断的路径。
+        let mut buffer = [0u8; 32768];
         checked(authorized, || unsafe {
             filename(source, buffer.as_mut_ptr().cast(), buffer.len() as i32)
         })
         .ok()?;
-        let end = buffer
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(buffer.len());
+        let end = buffer.iter().position(|byte| *byte == 0)?;
         if end == 0 {
             return None;
         }
