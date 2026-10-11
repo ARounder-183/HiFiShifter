@@ -135,12 +135,36 @@ unsafe extern "C" fn bind(
             return std::ptr::null();
         };
         // SAFETY: lookup 已确认来自本产品的仍存活文档，guard 将在实际 document close 撤销。
-        let Ok(companion) = (unsafe {
+        let companion = match unsafe {
             context
                 .processor
                 .bind(controller.cast(), known_roles, assigned_roles)
-        }) else {
-            return std::ptr::null();
+        } {
+            Ok(companion) => companion,
+            // 宿主在同一实例上重复 `bindDocumentToExtension` 时，companion 层**先**拒绝
+            // 第二次绑定（`already bound`），此前这里直接返回 null ⇒ 宿主认为插件未绑定、
+            // 插件完全无法加载（Cubase 报障）。幂等复用既有扩展实例并留痕：不新建
+            // companion（也就没有需要释放的旧 companion），不改绑定语义。
+            // 【为什么不在 owner 侧"拆除后重建"】`document_closed()` 会经 `stop_editor()`
+            // 把 `closed` 单向锁死，盲目重建会把编辑器永久关闭 —— 比宿主重绑本身更糟。
+            // 【取证依赖】宿主是否真的重绑、以及是否换了文档，仍待实机确认。
+            Err(AraError::InvalidState("companion processor is already bound")) => {
+                return match context.owner.existing_binding_raw() {
+                    Some(raw) => {
+                        log::warn!(
+                            "[ara] duplicate bindDocumentToExtension; reusing the existing \
+                             extension instance (document={})",
+                            document.id
+                        );
+                        raw.cast()
+                    }
+                    None => std::ptr::null(),
+                };
+            }
+            Err(error) => {
+                log::warn!("[ara] companion bind failed: {error}");
+                return std::ptr::null();
+            }
         };
         // 宿主对本实例的角色决定：`assigned` 少掉 playback 是"拿不到音频"的直接线索，
         // 因此按名字打印，并显式标注缺失（见方案 Task 3.3）。

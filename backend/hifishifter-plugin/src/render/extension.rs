@@ -688,6 +688,37 @@ mod bound_tests {
         assert!(entry_metadata.is_err(), "多区域editor不能冒充唯一take绑定");
     }
 
+    /// 重复 `bindDocumentToExtension` 的幂等复用需要"已绑定且未关闭"的只读实例指针；
+    /// 关闭后必须为 `None` —— 绝不能把一个已终止的实例交回宿主。
+    #[test]
+    fn existing_binding_raw_disappears_once_the_owner_is_closed() {
+        let (model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let editor = Arc::new(ExtensionOwner::default());
+        assert!(
+            editor.existing_binding_raw().is_none(),
+            "未绑定时不得有实例指针"
+        );
+        editor
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .unwrap();
+        assert!(
+            editor.existing_binding_raw().is_some(),
+            "绑定后应可复用实例指针"
+        );
+        document.close();
+        assert!(
+            editor.existing_binding_raw().is_none(),
+            "关闭后不得把死实例交回宿主"
+        );
+    }
+
     /// 隐藏getter重入关闭唯一GUI入口后，不能借另一活owner继续该入口的采集批次。
     #[test]
     fn task38b_hidden_getter_revokes_closed_editor_batch_before_next_renderer() {
@@ -2052,6 +2083,23 @@ impl ExtensionOwner {
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+    /// 已绑定且实例仍存活时的扩展实例指针。
+    ///
+    /// 【用途】宿主重复 `bindDocumentToExtension` 时，companion 层会先拒绝第二次绑定
+    /// （`companion processor is already bound`），`ara_entry::bind` 据此**幂等复用**
+    /// 既有实例而不是返回 null —— 否则宿主认为插件未绑定、插件完全无法加载。这里只
+    /// 暴露"复用"所需的只读指针，**不改绑定语义**。
+    pub(crate) fn existing_binding_raw(
+        &self,
+    ) -> Option<*const ara2_bridge::sys::ARAPlugInExtensionInstance> {
+        if self.is_closed() {
+            return None;
+        }
+        self.binding
+            .lock_or_recover()
+            .as_ref()
+            .map(ara2_bridge::plugin::ExtensionBinding::as_raw)
     }
     pub(crate) fn editor_document(&self) -> Result<Arc<super::document::DocumentSession>, String> {
         if self.is_closed() {
@@ -3841,6 +3889,10 @@ impl ExtensionOwner {
     ) -> Result<*const ara2_bridge::sys::ARAPlugInExtensionInstance, AraError> {
         let mut current = self.binding.lock().unwrap_or_else(|p| p.into_inner());
         if current.is_some() {
+            // 已绑定再绑定是**不变量违反**（一个实例只绑一个文档）。真实宿主的重复
+            // `bindDocumentToExtension` 会在更早的 companion 层被拒（"already bound"），
+            // 由 `ara_entry::bind` 幂等复用既有实例处理（见那里的说明）—— 所以这里保持
+            // 防御性错误，不在此做语义变更。
             return Err(AraError::InvalidState("extension already bound"));
         }
         let owner = Arc::downgrade(self);
