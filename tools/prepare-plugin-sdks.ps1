@@ -1,7 +1,11 @@
 ﻿# 下载并校验 ARA / VST3 SDK 检出，落地到 tools/sdk-env.ps1 定义的缓存根（third_party/sdk）。
 # 身份校验与 ara2-bridge-companion 0.3.0 保持一致；只下载构建所需子模块。
+#
+# 默认只拉产品构建必需的子模块（ARA_API / pluginterfaces）。`-WithTestkit` 额外拉
+# ARA_Library / ARA_Examples（及其嵌套 3rdParty）—— 只有 ara2-bridge-testkit 的
+# cpp-interop 需要它们；产品构建不需要，故保持默认最小化。
 [CmdletBinding()]
-param([string]$SdkDirectory)
+param([string]$SdkDirectory, [switch]$WithTestkit)
 $ErrorActionPreference = 'Stop'
 $sdkTaskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 # 缓存根由 tools/sdk-env.ps1 统一定义，避免路径散落在多个脚本与 CI workflow 里。
@@ -54,6 +58,22 @@ function New-SdkCheckout($Path, $Pin) {
     & git -C $Path -c core.autocrlf=false submodule update --init --depth 1 -- $Pin.submodule
     if ($LASTEXITCODE -ne 0) { throw 'SDK submodule download failed.' }
 }
+function Ensure-TestkitSubmodules($Path, $Pin) {
+    # 只有 ara2-bridge-testkit 的 cpp-interop 需要 ARA_Library / ARA_Examples。
+    # 拉取是幂等的：已初始化且提交正确时是 no-op；缺失（含 ARA_Examples 嵌套的
+    # 3rdParty）时补齐。`--recursive` 覆盖嵌套子模块；随后逐个校验 commit/tree，
+    # 与产品 SDK 用同一套身份判据。
+    if (!$Pin.testkitSubmodules) { return }
+    # `git submodule update` 只认超项目（ARA_SDK）直接登记的子模块路径；嵌套的
+    # 3rdParty 归 ARA_Examples 管，传进来会报 "pathspec did not match"。因此只把
+    # 顶层路径交给 update，靠 `--recursive` 连带拉取嵌套子模块，随后逐个校验身份。
+    $sdkTestkitRoots = @($Pin.testkitSubmodules | Where-Object { $_.path -notmatch '/' } | ForEach-Object { $_.path })
+    & git -C $Path -c core.autocrlf=false submodule update --init --depth 1 --recursive -- $sdkTestkitRoots
+    if ($LASTEXITCODE -ne 0) { throw 'Testkit submodule download failed.' }
+    foreach ($sdkTestkitSubmodule in $Pin.testkitSubmodules) {
+        Assert-SdkIdentity (Join-Path $Path $sdkTestkitSubmodule.path) $sdkTestkitSubmodule.commit $sdkTestkitSubmodule.tree
+    }
+}
 foreach ($sdkTaskEntry in @(@('ARA_SDK', $sdkTaskLock.ara), @('vst3sdk', $sdkTaskLock.vst3))) {
     $sdkTaskPath = Join-Path $sdkTaskDirectory $sdkTaskEntry[0]
     $sdkTaskPin = $sdkTaskEntry[1]
@@ -76,4 +96,7 @@ foreach ($sdkTaskEntry in @(@('ARA_SDK', $sdkTaskLock.ara), @('vst3sdk', $sdkTas
         Assert-SdkIdentity (Join-Path $sdkTaskPath $sdkTaskPin.submodule) $sdkTaskPin.submoduleCommit $sdkTaskPin.submoduleTree
     }
     Write-Output "Verified SDK: $($sdkTaskEntry[0]) at $($sdkTaskPin.commit)"
+    if ($WithTestkit) {
+        Ensure-TestkitSubmodules $sdkTaskPath $sdkTaskPin
+    }
 }

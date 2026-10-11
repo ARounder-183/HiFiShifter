@@ -1,0 +1,3 @@
+# 构建产物（与 backend/third-party/ 下其它 vendored crate 一致：只提交源码与夹具）。
+Cargo.lock
+target/

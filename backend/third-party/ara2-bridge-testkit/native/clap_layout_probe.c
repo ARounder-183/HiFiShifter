@@ -1,0 +1,7 @@
+#include "ARACLAP.h"
+
+clap_ara_factory_t ara2_probe_ara_factory;
+clap_ara_plugin_extension_t ara2_probe_ara_plugin_extension;
+clap_plugin_entry_t ara2_probe_plugin_entry;
+clap_plugin_t ara2_probe_plugin;
+clap_plugin_factory_t ara2_probe_plugin_factory;

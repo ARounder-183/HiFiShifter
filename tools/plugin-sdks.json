@@ -5,7 +5,35 @@
     "tree": "305a0dc9ba4759963c1e974353a999c3810b2319",
     "submodule": "ARA_API",
     "submoduleCommit": "65ec5c43b943a48cb5446f448a0492db6af8534b",
-    "submoduleTree": "2e3b0455f61314068d34501c5f71407d6ed0051b"
+    "submoduleTree": "2e3b0455f61314068d34501c5f71407d6ed0051b",
+    "_comment_testkitSubmodules": "Needed only by ara2-bridge-testkit cpp-interop; the product build does not need them, so prepare-plugin-sdks.ps1 fetches them on demand via -WithTestkit. Includes ARA_Examples nested 3rdParty (cpp-base64=zlib / pugixml=MIT / ICST_AudioFile=2-clause BSD). ASCII only: PowerShell 5.1 reads this file as ANSI when it has no BOM.",
+    "testkitSubmodules": [
+      {
+        "path": "ARA_Library",
+        "commit": "d18a6a5e489816316be84a9de0eaf7307bc1abe4",
+        "tree": "a53995463c520ba7aa1015a5cf8d7ae448007800"
+      },
+      {
+        "path": "ARA_Examples",
+        "commit": "abd7c8aa5854591995e1fbf16f854c65b0998e8d",
+        "tree": "34919bd48ed748fc0889f1a0a8e532e37c8d4500"
+      },
+      {
+        "path": "ARA_Examples/3rdParty/cpp-base64",
+        "commit": "07ae5045d67b5bf6ffb46646b8ac2370eff1ae3e",
+        "tree": "708d22699d429aa02b8c65e0de8407c83d5462de"
+      },
+      {
+        "path": "ARA_Examples/3rdParty/pugixml",
+        "commit": "08b3433180727ea2f78fe02e860a08471db1e03c",
+        "tree": "e55b03e893c5204712655b5abe5b0525a3df415b"
+      },
+      {
+        "path": "ARA_Examples/3rdParty/ICST_AudioFile",
+        "commit": "148e3c7828ebbe0ddafd29d83e67f91b9458b1bd",
+        "tree": "a4e9010e03f09cd9ee40b791ba3f3c5aac4222d7"
+      }
+    ]
   },
   "vst3": {
     "repository": "https://github.com/steinbergmedia/vst3sdk.git",

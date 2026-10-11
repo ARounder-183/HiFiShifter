@@ -248,6 +248,51 @@ jobs:
           cargo test --manifest-path backend/Cargo.toml --workspace -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
 
+  # vendored 的 ara2-bridge-testkit（见 backend/third-party/ara2-bridge-testkit/PATCHED.md）。
+  #
+  # 【为什么单开一个 job】cpp-interop 会把 Celemony 的 ARA_Library / ARA_Examples 编成
+  # C++（约 24 个源文件），既慢又需要额外的 SDK 子模块。产品 workspace 的测试不该被它
+  # 拖慢，也不该因它而红。它测的是本仓**打过补丁**的 core/plugin 与 C++ 参考实现的双向
+  # 互操作，因此必须用 `-WithTestkit` 把 ARA_Library / ARA_Examples（含嵌套 3rdParty）拉齐。
+  ara2-bridge-testkit:
+    name: ARA bridge testkit (cpp-interop)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ''
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+
+      - name: Install pinned SDKs with testkit submodules
+        run: ./tools/prepare-plugin-sdks.ps1 -WithTestkit
+
+      # 直接 cargo 调用需要这里导出的 ARA_SDK_DIR（build.rs 读它定位 ARA_API）。
+      - name: Run testkit contract and C++ interop tests
+        run: |
+          . ./tools/msvc-env.ps1
+          . ./tools/sdk-env.ps1
+          Set-SdkEnvironment
+          Push-Location backend/third-party/ara2-bridge-testkit
+          cargo test --features cpp-interop --test cpp_interop
+          if ($LASTEXITCODE -ne 0) { throw 'cpp_interop failed.' }
+          cargo test --test plugin_contract
+          if ($LASTEXITCODE -ne 0) { throw 'plugin_contract failed.' }
+          Pop-Location
+
   backend:
     name: Build Backend (${{ matrix.name }})
     needs: frontend-build

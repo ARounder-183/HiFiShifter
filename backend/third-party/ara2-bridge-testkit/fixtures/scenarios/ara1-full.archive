@@ -1,0 +1,6 @@
+ARA2-BRIDGE-ARCHIVE
+recipe-version=1
+generation=1-final
+scope=full-document
+document-archive-id=org.ara2-bridge.test.archive
+content=capability-rich-fixture

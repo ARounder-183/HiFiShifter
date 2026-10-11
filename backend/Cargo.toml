@@ -10,8 +10,13 @@
 resolver = "2"
 members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin", "hifishifter-ara-ipc", "hifishifter-clipboard"]
 # 打补丁的第三方 crate 不进 workspace（它有自己的构建语义，也不该被
-# `cargo test --workspace` 拉进来）。
-exclude = ["third-party/ara2-bridge-core", "third-party/ara2-bridge-plugin"]
+# `cargo test --workspace` 拉进来）。testkit 同理：它是独立工作区根，
+# 且 cpp-interop 会拉 C++ SDK 构建，绝不能被常规 `--workspace` 连带编译。
+exclude = [
+    "third-party/ara2-bridge-core",
+    "third-party/ara2-bridge-plugin",
+    "third-party/ara2-bridge-testkit",
+]
 
 # ── 第三方补丁 ──────────────────────────────────────────────────────────────
 #

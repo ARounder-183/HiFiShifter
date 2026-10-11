@@ -1,0 +1,121 @@
+# HiFiShifter 本地检出的 ara2-bridge-testkit（见同目录 PATCHED.md）。
+#
+# 与 backend/third-party/ara2-bridge-core、-plugin 同构：空 `[workspace]` 让它成为
+# 独立工作区根，因而：
+#   1. 不会被 backend 工作区吸收（`cargo test --workspace` 不会连带编译它，
+#      cpp-interop 的 C++ 构建因此不会污染常规测试）；
+#   2. 可以在自己的 manifest 里声明 `[patch.crates-io]`（`[patch]` 只对工作区根生效）。
+#
+# 【为什么要在这里再 patch 一次】本目录依赖 core/plugin 的 `=0.3.0`。若不 patch，
+# 会拉到 crates.io 的**上游**版本，测的就是上游而不是本仓发货的桥。把 core/plugin
+# 指回 `../ara2-bridge-core`、`../ara2-bridge-plugin`（即本仓打过补丁的版本），
+# cpp-interop 才能真正覆盖本仓插件。
+[workspace]
+
+[package]
+name = "ara2-bridge-testkit"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Mock peers and conformance scenarios for ara2-bridge"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/entrepeneur4lyf/ara2-bridge"
+publish = false
+
+[features]
+default = []
+clap = ["ara2-bridge-companion/clap"]
+vst3 = ["ara2-bridge-companion/vst3"]
+audio-unit-v2 = ["ara2-bridge-companion/audio-unit-v2"]
+cpp-interop = []
+
+[lib]
+name = "ara2_bridge_testkit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "invalid_pointer_case"
+path = "src/bin/invalid_pointer_case.rs"
+
+[[test]]
+name = "analysis_concurrency"
+path = "tests/analysis_concurrency.rs"
+
+[[test]]
+name = "audio_unit_interop"
+path = "tests/audio_unit_interop.rs"
+
+[[test]]
+name = "clap_abi"
+path = "tests/clap_abi.rs"
+
+[[test]]
+name = "clap_interop"
+path = "tests/clap_interop.rs"
+
+[[test]]
+name = "companion_features"
+path = "tests/companion_features.rs"
+
+[[test]]
+name = "coverage_join"
+path = "tests/coverage_join.rs"
+
+[[test]]
+name = "cpp_interop"
+path = "tests/cpp_interop.rs"
+required-features = ["cpp-interop"]
+
+[[test]]
+name = "editor_renderer_concurrency"
+path = "tests/editor_renderer_concurrency.rs"
+
+[[test]]
+name = "invalid_pointer_subprocess"
+path = "tests/invalid_pointer_subprocess.rs"
+
+[[test]]
+name = "plugin_contract"
+path = "tests/plugin_contract.rs"
+
+[[test]]
+name = "realtime"
+path = "tests/realtime.rs"
+
+[[test]]
+name = "rust_interop"
+path = "tests/rust_interop.rs"
+
+[[test]]
+name = "sample_access_concurrency"
+path = "tests/sample_access_concurrency.rs"
+
+[[test]]
+name = "upstream_scenarios"
+path = "tests/upstream_scenarios.rs"
+
+[[test]]
+name = "vst3_abi"
+path = "tests/vst3_abi.rs"
+
+[[test]]
+name = "vst3_interop"
+path = "tests/vst3_interop.rs"
+
+[dependencies]
+ara2-bridge-sys = "=0.3.0"
+ara2-bridge-core = "=0.3.0"
+ara2-bridge-plugin = "=0.3.0"
+ara2-bridge-host = "=0.3.0"
+ara2-bridge-companion = "=0.3.0"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"
+
+# 本仓补丁：core/plugin 指向 vendored 的已改签名版本（见文件头说明）。
+[patch.crates-io]
+ara2-bridge-core = { path = "../ara2-bridge-core" }
+ara2-bridge-plugin = { path = "../ara2-bridge-plugin" }
