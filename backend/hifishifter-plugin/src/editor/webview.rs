@@ -766,10 +766,10 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                     return false;
                 }
             }
-            if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in REAPER but its ARA audio is not ready; use host Undo if canceling");}
-            if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in REAPER but its ARA geometry has not caught up; host Undo remains available");}
-            if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in REAPER but both clips have not caught up; host Undo remains available");}
-            if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in REAPER but its GUI/ARA identities have not caught up; host Undo remains available");}
+            if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in the host but its ARA audio is not ready; use host Undo if canceling");}
+            if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in the host but its ARA geometry has not caught up; host Undo remains available");}
+            if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in the host but both clips have not caught up; host Undo remains available");}
+            if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in the host but its GUI/ARA identities have not caught up; host Undo remains available");}
             if !waiting&&host.imported.is_some() {reply["value"]["imported_clip_id"]=serde_json::json!(imported);}
         }
         let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
@@ -1145,7 +1145,7 @@ fn configure_browser(
                     // 用户看到的是"命令不可用"，而不是"只有当前 Take 能改名"。后者才是
                     // 可操作的。
                     let reply=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
-                        "error":"only the active take can be renamed in the ARA plugin; switch to it in REAPER first"}).to_string());
+                        "error":"only the active take can be renamed in the ARA plugin; switch to it in the host first"}).to_string());
                     browser.PostWebMessageAsJson(PCWSTR(reply.as_ptr()))?;
                     return Ok(());
                 }

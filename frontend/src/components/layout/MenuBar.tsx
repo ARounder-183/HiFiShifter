@@ -617,8 +617,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </div>
                         </DropdownMenu.Item>
                         <DropdownMenu.Separator />
-                        <DropdownMenu.Item disabled>
-                            {t("menu_save_project")} · REAPER
+                        {/* 【为什么不再写死 `· REAPER`】菜单标签对所有宿主可见；宿主
+                            身份由 `hostKind()` 决定，说明"由宿主管理"用既有的本地化
+                            文案，而不是把 REAPER 当成唯一宿主。 */}
+                        <DropdownMenu.Item disabled title={dawControlledReason()}>
+                            {t("menu_save_project")}
                         </DropdownMenu.Item>
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
@@ -1087,8 +1090,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_appearance_settings")}
                     </DropdownMenu.Item>
                     {/*
-                      ARA 宿主会话**只在独立 App**里出现：插件模式下宿主就是 REAPER
-                      自己，前端由原生 bootstrap 直接驱动，没有"连接哪个实例"这一步。
+                      ARA 宿主会话**只在独立 App**里出现：插件模式下前端由原生
+                      bootstrap 直接驱动，没有"连接哪个实例"这一步（宿主是谁与这里无关）。
                       它同样是浮出面板 + `togglePanelVisible`（见注册表声明）。
                     */}
                     {!isPluginMode() && (

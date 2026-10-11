@@ -2488,8 +2488,11 @@ impl ExtensionOwner {
                 if !seen.insert(track.guid.clone()) {
                     continue;
                 }
-                let ids = stamp.0.clip_ids.lock().unwrap();
+                // 【锁序】按 `document.rs` 声明的层级取锁：`timeline`(2) 先于
+                // `clip_ids`(4)。此前这里是反的 —— 与 `session.rs::analysis_timeline`
+                // 的正序共存，构成真实的死锁窗口。
                 let timeline = stamp.0.timeline.lock().unwrap();
+                let ids = stamp.0.clip_ids.lock().unwrap();
                 item_count += track.items.len();
                 for candidate in stamp.0.renderer_owners() {
                     // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
@@ -3424,7 +3427,11 @@ impl ExtensionOwner {
                     })
                 }
                 Request::Commit { .. } => {
-                    unreachable!("commit dispatched before snapshot transaction")
+                    // 结构性守卫：`Commit` 在进入本分发前就被拦下（见上方早分发）。
+                    // 用 `unreachable!` 的话，一旦以后新增请求变体或早分发条件变动，
+                    // 这里会在 IPC 工作线程上 panic（`catch_unwind` 会把它降级成
+                    // "plugin request panicked"，提交被静默丢掉）。返回错误更诚实。
+                    Err("commit request reached the non-commit dispatcher".to_string())
                 }
             }
         })();
@@ -3820,17 +3827,21 @@ impl ExtensionOwner {
         drop(current);
         if enabled.contains(ExtensionRoles::EDITOR_RENDERER) {
             let weak = Arc::downgrade(self);
-            match hifishifter_ara_ipc::Server::start(
-                "HiFiShifter / REAPER".into(),
-                move |request| {
-                    weak.upgrade()
-                        .map(|owner| owner.handle_request(request))
-                        .unwrap_or_else(|| hifishifter_ara_ipc::Response {
-                            error: Some("plugin instance closed".into()),
-                            ..Default::default()
-                        })
-                },
-            ) {
+            // 【为什么不写死宿主名】IPC 服务器名对所有连接的客户端可见；此前硬编码
+            // `"HiFiShifter / REAPER"`，在 Studio One / Cubase 等宿主上会报出错误的
+            // 宿主身份。从当前后端派生（`app_name` 只用于诊断，不参与分支）。
+            let server_name = match self.host_backend().app_name() {
+                Some(app) => format!("HiFiShifter / {app}"),
+                None => "HiFiShifter".to_string(),
+            };
+            match hifishifter_ara_ipc::Server::start(server_name, move |request| {
+                weak.upgrade()
+                    .map(|owner| owner.handle_request(request))
+                    .unwrap_or_else(|| hifishifter_ara_ipc::Response {
+                        error: Some("plugin instance closed".into()),
+                        ..Default::default()
+                    })
+            }) {
                 Ok(server) => {
                     log::info!(
                         "[ara] GUI channel ready instance={}",
