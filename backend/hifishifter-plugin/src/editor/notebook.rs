@@ -31,14 +31,12 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use hifishifter_kernel::notebook_assets::{
-    prune_unreferenced, referenced_asset_ids, sanitize_asset_id, sanitize_ext, NotebookAsset,
-    NotebookAssetKind, NotebookAssetMap,
+    prune_unreferenced, read_image_file, referenced_asset_ids, sanitize_asset_id,
+    sanitize_export_file_name, sanitize_ext, NotebookAsset, NotebookAssetKind, NotebookAssetMap,
 };
 
 /// 单条附件的解码后字节上限（与 App 侧同值）。
 const MAX_ASSET_BYTES: usize = 32 * 1024 * 1024;
-/// `notebook_read_file_base64` 的单文件读取上限（与 App 侧同值）。
-const READ_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
@@ -351,30 +349,29 @@ fn write_atomically(temp: &Path, path: &Path, bytes: &[u8], tag: &str) -> Result
 // ─────────────────────────── 其它（无状态） ───────────────────────────
 
 /// 读一个磁盘文件为 base64（拖入图片走这条）。
+///
+/// 安全收口（扩展名白名单、不可抬高的上限、is_file）在内核
+/// `notebook_assets::read_image_file` —— App 与插件共用的唯一实现。此前本侧
+/// 直读 `std::fs::read`、没有白名单：前端一旦被注入，就能在 DAW 进程内读
+/// 任意文件（App 侧修过、插件侧没跟上，正是"两侧各一份安全校验"的漂移）。
+/// 本包装只做错误码 → 响应 JSON 的映射。
 pub(super) fn read_file_base64(path: &str, max_bytes: Option<u64>) -> serde_json::Value {
-    let limit = max_bytes
-        .unwrap_or(READ_FILE_MAX_BYTES)
-        .min(READ_FILE_MAX_BYTES);
-    let source = Path::new(path);
-    let size = match std::fs::metadata(source) {
-        Ok(meta) => meta.len(),
-        Err(error) => return serde_json::json!({"ok": false, "error": error.to_string()}),
-    };
-    if size > limit {
-        return serde_json::json!({"ok": false, "error": "notebook_read_file_too_large"});
-    }
-    match std::fs::read(source) {
-        Ok(bytes) => {
-            let ext = extension_of(source);
-            serde_json::json!({
-                "ok": true,
-                "mime": mime_for_ext(&ext),
-                "ext": ext,
-                "byteLen": bytes.len(),
-                "base64": B64.encode(&bytes),
-            })
-        }
-        Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}),
+    match read_image_file(path, max_bytes) {
+        Ok(read) => serde_json::json!({
+            "ok": true,
+            "mime": read.mime,
+            "ext": read.ext,
+            "byteLen": read.bytes.len(),
+            "base64": B64.encode(&read.bytes),
+        }),
+        Err(hifishifter_kernel::notebook_assets::ReadImageFileError::TooLarge {
+            byte_len,
+        }) => serde_json::json!({
+            "ok": false,
+            "error": "notebook_file_too_large",
+            "byteLen": byte_len
+        }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
     }
 }
 
@@ -445,22 +442,9 @@ pub(super) fn mime_for_ext(ext: &str) -> String {
 /// 清洗导出/另存为对话框的默认文件名。
 ///
 /// 名字来自前端或正文引用，最终交给系统保存对话框：路径分隔符能让对话框预导航
-/// 到任意目录，Windows 保留字符在多数文件系统上非法。与 `sanitize_asset_id`
-/// 同风格 —— 删非法字符、去首尾空白；清完为空时回落到调用方给的通用名。
-pub(super) fn sanitize_export_file_name(raw: &str, fallback: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| {
-            !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()
-        })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
+/// 到任意目录，Windows 保留字符在多数文件系统上非法。实现在内核
+/// `notebook_assets::sanitize_export_file_name`（App 与插件共用，此前两侧逐字
+/// 各存一份），`use` 已接回本模块名字空间。
 
 #[cfg(test)]
 mod tests {
@@ -512,6 +496,41 @@ mod tests {
             .is_err());
         assert_eq!(store.read_asset("../escape")["ok"], false);
         assert_eq!(store.remove_asset("../escape")["removed"], false);
+    }
+
+    /// 读盘通道的收口在内核（`notebook_assets::read_image_file`），本包装只做
+    /// 错误码 → 响应 JSON 的映射。这条测试钉住映射本身：白名单拒绝与
+    /// `notebook_file_too_large` 码必须原样透传给前端。
+    #[test]
+    fn read_file_base64_wraps_the_kernel_guard_with_stable_codes() {
+        let dir =
+            std::env::temp_dir().join(format!("hfs-plugin-readimage-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("x.png");
+        std::fs::write(&png, b"png-bytes").unwrap();
+        let png = png.to_str().unwrap();
+        let txt = dir.join("x.txt");
+        std::fs::write(&txt, b"secret").unwrap();
+
+        let ok = read_file_base64(png, None);
+        assert_eq!(ok["ok"], true);
+        assert_eq!(ok["mime"], "image/png");
+        assert_eq!(ok["byteLen"], 9);
+
+        let rejected = read_file_base64(dir.join("x.txt").to_str().unwrap(), None);
+        assert_eq!(rejected["ok"], false);
+        assert!(rejected["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("notebook_unsupported_image_ext"));
+
+        let large = read_file_base64(png, Some(2));
+        assert_eq!(large["ok"], false);
+        assert_eq!(large["error"], "notebook_file_too_large");
+        assert_eq!(large["byteLen"], 9);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 正文里不再引用的附件在 prune 时被清掉，仍被引用的保留。

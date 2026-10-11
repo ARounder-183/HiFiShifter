@@ -36,21 +36,15 @@ use crate::project_fragment::{ProjectFragment, ProjectFragmentKind};
 use crate::state::AppState;
 use base64::Engine as _;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tauri::State;
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
-/// `read_file_base64` 允许读取的扩展名白名单。
-///
-/// 该命令按任意路径读盘并回传 base64，不加收口就是一条任意文件读通道：
-/// 收到 IPC 后只放行图片格式（音频导入有专用命令，`hsf` 载荷只来自
-/// 剪贴板而非磁盘），即使前端被攻破也读不出工程外的任意文件。
-const READABLE_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"];
-
-/// `read_file_base64` 的服务端硬上限（字节）。
-const READ_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+// `read_file_base64` 的扩展名白名单与服务端硬上限在内核
+// `notebook_assets::READABLE_IMAGE_EXTS` / `READ_FILE_MAX_BYTES`
+// （App 与插件共用的唯一实现，注释与测试都在那里）。
 
 /// 单条附件解码后的字节上限。
 ///
@@ -213,41 +207,24 @@ pub(super) fn prune_assets(state: State<'_, AppState>) -> serde_json::Value {
 ///    [`READ_FILE_MAX_BYTES`])，调用方传更大的值抬不高上限；
 /// 3. **阻塞线程池**：文件读取 + base64 编码可能达数十 MB，包装命令把它放进
 ///    `spawn_blocking`（见 commands.rs 的 `notebook_read_file_base64`）。
+/// `read_file_base64` 允许读取的扩展名白名单与服务端硬上限在内核
+/// `notebook_assets::read_image_file`（App 与插件共用的唯一实现）；
+/// 本包装只负责把错误码映射成响应 JSON，并把重活放进 `spawn_blocking`。
+///
+/// 这是 IPC 可达的读盘通道，三条服务端收口（扩展名白名单、不可协商的大小
+/// 上限、is_file）都在共享实现里逐条收紧 —— 缺任何一条就是任意文件读。
 pub(super) fn read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
-    let path = PathBuf::from(&path);
-    if !path.is_file() {
-        return json!({ "ok": false, "error": format!("notebook_not_a_file: {}", path.display()) });
-    }
-    let limit = max_bytes
-        .unwrap_or(READ_FILE_MAX_BYTES)
-        .min(READ_FILE_MAX_BYTES);
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    if !READABLE_IMAGE_EXTS.contains(&ext.as_str()) {
-        return json!({
-            "ok": false,
-            "error": format!("notebook_unsupported_image_ext: {ext}"),
-            "ext": ext,
-        });
-    }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.len() > limit => {
-            return json!({ "ok": false, "error": "notebook_file_too_large", "byteLen": meta.len() })
-        }
-        Ok(_) => {}
-        Err(error) => return json!({ "ok": false, "error": error.to_string() }),
-    }
-    match std::fs::read(&path) {
-        Ok(bytes) => json!({
+    match notebook_assets::read_image_file(&path, max_bytes) {
+        Ok(read) => json!({
             "ok": true,
-            "mime": mime_for_ext(&ext),
-            "ext": ext,
-            "byteLen": bytes.len(),
-            "base64": b64_encode(&bytes),
+            "mime": read.mime,
+            "ext": read.ext,
+            "byteLen": read.bytes.len(),
+            "base64": b64_encode(&read.bytes),
         }),
+        Err(notebook_assets::ReadImageFileError::TooLarge { byte_len }) => {
+            json!({ "ok": false, "error": "notebook_file_too_large", "byteLen": byte_len })
+        }
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
     }
 }
@@ -470,27 +447,6 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 清洗导出 / 另存为对话框的默认文件名。
-///
-/// 名字来自前端或正文引用，最终交给 `rfd::FileDialog::set_file_name`：路径
-/// 分隔符（`/`、`\`）能让对话框预导航到任意目录，Windows 保留字符与控制
-/// 字符在多数文件系统上非法。与 `sanitize_asset_id` 同风格 —— 删非法字符、
-/// 去首尾空白；清完为空时回落到调用方给定的通用名。
-fn sanitize_export_file_name(raw: &str, fallback: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| {
-            !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()
-        })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 /// 导出正文：把 `hifi-asset://` 引用改写成内嵌 data URI。
 ///
 /// 导出物是**单个自包含文件**（图片以 data URI 内嵌），不生成任何旁挂目录 ——
@@ -508,7 +464,7 @@ pub(super) fn export_document(
     };
     // suggested_name 由前端传入，先清洗再拼扩展名：路径分隔符可以让对话框
     // 预导航到任意目录。
-    let base_name = sanitize_export_file_name(&suggested_name, "untitled");
+    let base_name = notebook_assets::sanitize_export_file_name(&suggested_name, "untitled");
 
     let picked = rfd::FileDialog::new()
         .add_filter(filter_label, &[ext.as_str()])
@@ -587,7 +543,7 @@ pub(super) fn save_asset_as(
     let fallback = format!("{asset_id}.{}", notebook_assets::sanitize_ext(&asset.ext));
     // suggested_name 来自前端；asset_id 来自工程文件（可能被手工编辑过）。
     // 两者都不可信，最终统一过一遍清洗器。
-    let name = sanitize_export_file_name(
+    let name = notebook_assets::sanitize_export_file_name(
         suggested_name
             .as_deref()
             .filter(|s| !s.trim().is_empty())

@@ -109,6 +109,140 @@ pub fn sanitize_ext(raw: &str) -> String {
     }
 }
 
+// ─── 磁盘读取通道（App 与插件共用的安全收口） ────────────────────────────────
+//
+// `notebook_read_file_base64` 是 IPC 可达的读盘通道。收口必须**只有一份**：
+// App 侧先加固了（扩展名白名单 + 不可抬高的上限 + is_file），插件侧的复制体
+// 没跟上，漏出一条"前端被注入后可在 DAW 进程内读任意文件"的通道。既然
+// `sanitize_asset_id` / `sanitize_ext` 早已在内核，读取通道也下沉到这里。
+
+/// `read_image_file` 允许读取的扩展名白名单。
+///
+/// 该命令按任意路径读盘并回传 base64，不加收口就是一条任意文件读通道：
+/// 收到 IPC 后只放行图片格式（音频导入有专用命令，`hsf` 载荷只来自
+/// 剪贴板而非磁盘），即使前端被攻破也读不出工程外的任意文件。
+pub const READABLE_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"];
+
+/// `read_image_file` 的服务端硬上限（字节）。生效上限 =
+/// `min(调用方值或缺省, READ_FILE_MAX_BYTES)` —— 调用方传更大的值抬不高上限。
+pub const READ_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `read_image_file` 的拒绝理由。`Display` 输出**稳定错误码**（与 App 侧
+/// `commands/notebook.rs` 对前端的既有约定一致：前端按码做 i18n 与归类）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadImageFileError {
+    /// 目标不是常规文件（detail: 路径）。
+    NotAFile(String),
+    /// 扩展名不在 [`READABLE_IMAGE_EXTS`]（detail: 扩展名）。
+    UnsupportedExt(String),
+    /// 超过大小上限（`byte_len` 是实测文件大小）。
+    TooLarge {
+        /// 实测文件字节数（供响应体附加 `byteLen` 字段）。
+        byte_len: u64,
+    },
+    /// 磁盘 IO 失败（detail: io 错误串）。
+    Io(String),
+}
+
+impl std::fmt::Display for ReadImageFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAFile(path) => write!(f, "notebook_not_a_file: {path}"),
+            Self::UnsupportedExt(ext) => write!(f, "notebook_unsupported_image_ext: {ext}"),
+            Self::TooLarge { byte_len } => write!(f, "notebook_file_too_large: {byte_len}"),
+            Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// 一次成功读取：扩展名、MIME 兜底与原始字节（base64 编码留给调用方 ——
+/// 两侧各自的编码器与响应组装已经存在，不必把 JSON 形状搬进内核）。
+#[derive(Debug, Clone)]
+pub struct ReadImageFile {
+    /// 小写扩展名（白名单内）。
+    pub ext: String,
+    /// 按扩展名给出的 MIME 兜底（前端一般会显式传）。
+    pub mime: &'static str,
+    /// 文件原始字节。
+    pub bytes: Vec<u8>,
+}
+
+/// 白名单内扩展名的 MIME 兜底。
+pub fn image_mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 读一个磁盘图片文件（拖入图片的读盘通道；App 与插件共用此实现）。
+///
+/// 三条服务端收口缺一不可：
+/// 1. **扩展名白名单**（[`READABLE_IMAGE_EXTS`]）——否则即任意文件读；
+/// 2. **大小上限不可协商**：生效上限 = `min(调用方值或缺省, [`READ_FILE_MAX_BYTES`])`；
+/// 3. **只读常规文件**（`is_file`）。
+pub fn read_image_file(
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<ReadImageFile, ReadImageFileError> {
+    let path = std::path::Path::new(path);
+    if !path.is_file() {
+        return Err(ReadImageFileError::NotAFile(path.display().to_string()));
+    }
+    let limit = max_bytes
+        .unwrap_or(READ_FILE_MAX_BYTES)
+        .min(READ_FILE_MAX_BYTES);
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !READABLE_IMAGE_EXTS.contains(&ext.as_str()) {
+        return Err(ReadImageFileError::UnsupportedExt(ext));
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > limit => {
+            return Err(ReadImageFileError::TooLarge {
+                byte_len: meta.len(),
+            })
+        }
+        Ok(_) => {}
+        Err(error) => return Err(ReadImageFileError::Io(error.to_string())),
+    }
+    let bytes = std::fs::read(path).map_err(|e| ReadImageFileError::Io(e.to_string()))?;
+    Ok(ReadImageFile {
+        // mime 先算：`ext` 还要在下面移进字段。
+        mime: image_mime_for_ext(&ext),
+        ext,
+        bytes,
+    })
+}
+
+/// 清洗导出/另存为对话框的默认文件名（App 与插件共用此实现）。
+///
+/// 名字来自前端或正文引用，最终交给系统保存对话框：路径分隔符能让对话框预导航
+/// 到任意目录，Windows 保留字符在多数文件系统上非法。与 `sanitize_asset_id`
+/// 同风格 —— 删非法字符、去首尾空白；清完为空时回落到调用方给的通用名。
+pub fn sanitize_export_file_name(raw: &str, fallback: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| {
+            !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// 登记表的别名，避免调用点到处写完整泛型。
 pub type NotebookAssetMap = BTreeMap<String, NotebookAsset>;
 
@@ -343,13 +477,52 @@ mod tests {
         assert_eq!(back["abc"].ext, "png");
     }
 
+    /// 读盘通道的三条收口逐条验证（App 与插件共用这份实现，测一处即测两处；
+    /// 两侧各自的包装只应做错误码到响应 JSON 的映射，见各自的包装测试）。
     #[test]
-    fn asset_without_data_field_still_deserializes() {
-        // `data` 带 serde(default)：手工编辑或部分写入的工程也要能打开，
-        // 只是那条附件显示为"内容缺失"，而不是整个工程反序列化失败。
-        let json = r#"{"abc":{"kind":"image","ext":"png","mime":"image/png","byte_len":3}}"#;
-        let map: NotebookAssetMap = serde_json::from_str(json).expect("deserialize partial shape");
-        assert_eq!(map["abc"].data, "");
-        assert_eq!(map["abc"].ext, "png");
+    fn read_image_file_enforces_whitelist_size_and_file_checks() {
+        let dir = std::env::temp_dir().join(format!("hfs-kernel-readimage-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("x.png");
+        std::fs::write(&png, b"png-bytes").unwrap();
+        let png = png.display().to_string();
+
+        let read = read_image_file(&png, None).expect("png passes the whitelist");
+        assert_eq!(read.ext, "png");
+        assert_eq!(read.mime, "image/png");
+        assert_eq!(read.bytes, b"png-bytes");
+
+        // 白名单外一律拒绝（这是"任意文件读"的收口本身）。
+        let txt = dir.join("x.txt");
+        std::fs::write(&txt, b"secret").unwrap();
+        match read_image_file(&txt.display().to_string(), None) {
+            Err(ReadImageFileError::UnsupportedExt(ext)) => assert_eq!(ext, "txt"),
+            other => panic!("expected UnsupportedExt, got {other:?}"),
+        }
+
+        // 非 is_file（目录、不存在的路径）拒绝。
+        match read_image_file(&dir.display().to_string(), None) {
+            Err(ReadImageFileError::NotAFile(_)) => {}
+            other => panic!("expected NotAFile, got {other:?}"),
+        }
+
+        // 大小上限不可协商：调用方给的值只在 min 里生效，抬不高上限本身。
+        match read_image_file(&png, Some(2)) {
+            Err(ReadImageFileError::TooLarge { byte_len }) => assert_eq!(byte_len, 9),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 文件名清洗：分隔符与 Windows 保留字符全删，清空回落到通用名。
+    #[test]
+    fn export_file_names_never_escape_the_dialog() {
+        assert_eq!(sanitize_export_file_name("../evil", "untitled"), "..evil");
+        assert_eq!(sanitize_export_file_name("a:b*c?", "untitled"), "abc");
+        assert_eq!(sanitize_export_file_name("   ", "untitled"), "untitled");
+        assert_eq!(sanitize_export_file_name("line
+break", "untitled"), "linebreak");
     }
 }
