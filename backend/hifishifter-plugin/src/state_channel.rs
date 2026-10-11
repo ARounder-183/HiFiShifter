@@ -9,9 +9,9 @@ pub(crate) type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
 /// 插件自有、宿主表达不到的**逐片段**属性。
 ///
 /// 【为什么需要独立存储】clip 颜色与共振峰变形在宿主里没有对应概念（宿主只报告几何与
-/// 媒体），而 `session.timeline` 每次 `ensure_loaded` 都会被整体替换。不落在"有权威来源
-/// + 在共同投影入口重新播种"的地方，就会被下一次重建冲掉 —— 这正是 `fades` 用同一手法
-/// 解决的同一个问题（见 [`EditState::fades`] 与 [`EditState::apply`]）。
+/// 媒体），而 `session.timeline` 每次 `ensure_loaded` 都会被整体替换。只有落在"有权威
+/// 来源、且在共同投影入口重新播种"的地方，才不会被下一次重建冲掉 —— 这正是 `fades`
+/// 用同一手法解决的同一个问题（见 [`EditState::fades`] 与 [`EditState::apply`]）。
 ///
 /// 【键为什么是 clip id】`apply` 收到的时间线里 clip id 形如 `ara-item-{item GUID}`，
 /// 即宿主的稳定 item 身份；与 `fades` 的键口径一致，冷重建后仍能对上。

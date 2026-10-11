@@ -674,8 +674,16 @@ mod tests {
             .lock()
             .unwrap()
             .insert(track.guid.clone(), track);
-        document.skipped_regions.lock().unwrap().push((2, "midi".into()));
-        document.skipped_regions.lock().unwrap().push((5, "zero_length".into()));
+        document
+            .skipped_regions
+            .lock()
+            .unwrap()
+            .push((2, "midi".into()));
+        document
+            .skipped_regions
+            .lock()
+            .unwrap()
+            .push((5, "zero_length".into()));
 
         let mut payload = serde_json::json!({"clips": []});
         document.decorate_host_media_locked(&mut payload, "ui-");

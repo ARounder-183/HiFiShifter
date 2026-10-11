@@ -2955,7 +2955,9 @@ static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
 /// 在串行化锁内做一次读-改-写；所有 `save_*` 都经它，不各自 `load_config`。
 fn update_config(config_dir: &Path, update: impl FnOnce(&mut AppConfig)) {
-    let _guard = CONFIG_WRITE.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = CONFIG_WRITE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mut cfg = load_config(config_dir);
     update(&mut cfg);
     save_config(config_dir, &cfg);

@@ -79,6 +79,20 @@ jobs:
           choco install nsis -y --no-progress
           if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed.' }
 
+      # 【为什么 lint 必须在这里】`build.yml` 有 fmt/clippy 两道门禁，`vst3.yml` 没有 ——
+      # 两条流水线可以给出相反结论：本流水线会在 `build.yml` 会拒绝的树上产出并上传
+      # 绿灯产物。这里补上同一组门禁。
+      #
+      # 【为什么 clippy 只覆盖插件与 kernel】`--workspace` 还包含 `src-tauri`，而它需要
+      # 前端产物；本流水线到这一步还没有前端 dist（`build-hifishifter.ps1` 之后才建）。
+      - name: Run rustfmt and clippy
+        run: |
+          . ./tools/msvc-env.ps1
+          cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'rustfmt check failed.' }
+          cargo clippy --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin -p hifishifter-kernel --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'clippy failed.' }
+
       - name: Run plugin unit tests
         run: |
           New-Item -ItemType Directory -Path .build-tmp -Force | Out-Null

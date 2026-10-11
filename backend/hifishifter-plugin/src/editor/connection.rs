@@ -120,7 +120,10 @@ unsafe fn record_host_name(host: *mut c_void) {
 /// 【为什么单独抽出来】宿主名是纯诊断信息，绝不能因为一次读名失败影响加载；把"怎么
 /// 解释这段缓冲"独立出来，边界就能单测，不必造一个真实宿主接口。
 fn decode_string128(buffer: &[u16]) -> Option<String> {
-    let end = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
+    let end = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
     let name = String::from_utf16(&buffer[..end]).ok()?;
     (!name.is_empty()).then_some(name)
 }
@@ -147,7 +150,10 @@ mod host_name_tests {
         // 全是 NUL ⇒ 空名 ⇒ None（不是 `Some("")`）。
         assert_eq!(decode_string128(&[0u16; 128]), None);
         // 没有终结符时取整段。
-        assert_eq!(decode_string128(&[b'A' as u16, b'B' as u16]).as_deref(), Some("AB"));
+        assert_eq!(
+            decode_string128(&[b'A' as u16, b'B' as u16]).as_deref(),
+            Some("AB")
+        );
         // 非法 UTF-16（孤立高位代理）⇒ None，不 panic。
         assert_eq!(decode_string128(&[0xD800, 0]), None);
     }

@@ -253,8 +253,7 @@ fn matches_authorized_pcm(path: &Path, pcm: &PcmView<'_>) -> bool {
     // 廉价完整性：能读到**最后一个**样本才算数据区没被截断（O(1)，不逐样本比对）。
     let last = (frames * pcm.planes.len()).saturating_sub(1);
     let last = u32::try_from(last).unwrap_or(u32::MAX);
-    matches!(wav.seek(last), Ok(()))
-        && matches!(wav.samples::<f32>().next(), Some(Ok(_)))
+    matches!(wav.seek(last), Ok(())) && matches!(wav.samples::<f32>().next(), Some(Ok(_)))
 }
 
 #[cfg(test)]
