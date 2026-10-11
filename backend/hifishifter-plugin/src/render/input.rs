@@ -235,7 +235,8 @@ impl RenderInput {
                     // 插件里改拉伸算法菜单**毫无效果** —— 一个看起来生效、实际被忽略的
                     // 设置，比一个明确禁用掉的菜单更糟。解析口径与 App 完全一致：同一个
                     // `resolved_external_stretch_algorithm()`。
-                    stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(),
+                    stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(
+                    ),
                     apply_pitch_edit: true,
                     output: hifishifter_kernel::encode::OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Export,

@@ -103,7 +103,10 @@ impl TakeGeometry {
         let has_section = self.section.is_some();
         if let Some(section) = self.section {
             min_bound = section.start_sec.max(0.0);
-            if let Some(length) = section.length_sec.filter(|len| len.is_finite() && *len > 0.0) {
+            if let Some(length) = section
+                .length_sec
+                .filter(|len| len.is_finite() && *len > 0.0)
+            {
                 max_bound = (section.start_sec + length).max(min_bound);
             }
         }
@@ -290,7 +293,10 @@ mod tests {
         };
         let (start, end) = geometry.forward_source_window();
         assert!(close(start, 0.25));
-        assert!(close(end, 3.25), "must extend past the media as a silence tail");
+        assert!(
+            close(end, 3.25),
+            "must extend past the media as a silence tail"
+        );
     }
 
     /// 负 SOFFS（REAPER 左延伸 item 的前导静音）只在"正放 + 无 SECTION"时保留符号。

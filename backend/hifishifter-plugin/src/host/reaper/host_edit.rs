@@ -731,7 +731,11 @@ pub(crate) fn execute_managed(
                 } else {
                     1.0
                 };
-                target.set_take(c"D_PLAYRATE", sign * after.playback_rate as f64, &authorized)?;
+                target.set_take(
+                    c"D_PLAYRATE",
+                    sign * after.playback_rate as f64,
+                    &authorized,
+                )?;
             }
             // 【倒放必须写**镜像**起点】宿主 `D_STARTOFFS` 在倒放 take 上是
             // `D − 正向终点`（F-4 实测），而 clip 持有的是镜像复原之后的**正向**窗口。
@@ -1012,12 +1016,11 @@ mod tests {
         })
         .join();
         assert!(editor.timeline.is_poisoned(), "前提：时间线锁被毒化");
-        let error = match editor
-            .plan_host_edit("set_clip_state", &json!({"clipId":clip_id,"gain":0.5}))
-        {
-            Ok(_) => panic!("毒化后必须拒绝写回宿主"),
-            Err(error) => error,
-        };
+        let error =
+            match editor.plan_host_edit("set_clip_state", &json!({"clipId":clip_id,"gain":0.5})) {
+                Ok(_) => panic!("毒化后必须拒绝写回宿主"),
+                Err(error) => error,
+            };
         assert!(error.contains("refresh required"), "{error}");
     }
     /// 规划复用原Clip×Take倍率，且未开始宿主写之前整批拒绝非法/未知字段。

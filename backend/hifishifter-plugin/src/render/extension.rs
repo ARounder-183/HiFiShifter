@@ -2479,8 +2479,8 @@ impl ExtensionOwner {
             // 时间线会是空的」。ARA-only 宿主（Studio One / Cubase / Nuendo / Logic）
             // 上时间线**有内容、音频能出、参数能调** —— 只是片段几何写回不可用。
             // 给一个正常工作的宿主挂"不受支持"的横幅，是把用户引向一个不存在的问题。
-            let ara_only = self.host_backend().kind()
-                == hifishifter_kernel::editor::host::HostKind::AraOnly;
+            let ara_only =
+                self.host_backend().kind() == hifishifter_kernel::editor::host::HostKind::AraOnly;
             *self.host_audio.lock_or_recover() = HostAudioStatus {
                 state: if ara_only {
                     HostAudioState::AraOnlyReadOnly
@@ -3782,8 +3782,8 @@ impl ExtensionOwner {
         // 【为什么条件不是"清单为空"】宿主**根本不给**这些概念时（ARA-only），强制走内核
         // 换不来任何信息，只会白白多算一遍、多占一份工作缓冲。真正会出错的是上面那个
         // 中间窗口，所以判据是"有原生扩展 且 清单还没到"。
-        let facts_pending = self.native_host().is_some()
-            && document.ui_tracks.lock_or_recover().is_empty();
+        let facts_pending =
+            self.native_host().is_some() && document.ui_tracks.lock_or_recover().is_empty();
         let kernel_render = edited
             || stretch
             || owned_fade
@@ -4354,7 +4354,10 @@ mod host_audio_state_tests {
             HostAudioState::FolderParentWithoutRegions.as_str(),
             "folder_parent_without_regions"
         );
-        assert_eq!(HostAudioState::HostUnidentified.as_str(), "host_unidentified");
+        assert_eq!(
+            HostAudioState::HostUnidentified.as_str(),
+            "host_unidentified"
+        );
         // 【为什么单独钉住这一条】它与 `host_unidentified` 共用过一句话，而那句
         // 「本宿主尚不支持」对 ARA-only 宿主是假的。分类名一旦被合回去，前端就会
         // 重新对一个能正常工作的宿主宣称"不受支持"。

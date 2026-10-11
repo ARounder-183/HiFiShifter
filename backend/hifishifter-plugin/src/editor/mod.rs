@@ -67,7 +67,11 @@ mod tests {
             "editor lease revoked",
             "plugin instance closed",
         ] {
-            assert_eq!(classify_error(error), "terminal", "{error} must be terminal");
+            assert_eq!(
+                classify_error(error),
+                "terminal",
+                "{error} must be terminal"
+            );
         }
     }
 
@@ -81,11 +85,14 @@ mod tests {
             "host does not provide ARA playback control",
             "invalid editor arguments",
         ] {
-            assert_eq!(classify_error(error), "transient", "{error} must be transient");
+            assert_eq!(
+                classify_error(error),
+                "transient",
+                "{error} must be transient"
+            );
         }
     }
 }
-
 
 /// 卸载前撤销本模块注册的窗口类；尚有窗口时明确拒绝正常卸载。
 pub(crate) fn shutdown() -> bool {

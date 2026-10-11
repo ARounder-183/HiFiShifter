@@ -1225,8 +1225,10 @@ impl DocumentSession {
                         .source_path
                         .as_deref()
                         .and_then(|source| media_by_source.get(source).copied());
-                    let media =
-                        reversed_media_duration(media_by_item.get(guid).copied().or(by_source), clip);
+                    let media = reversed_media_duration(
+                        media_by_item.get(guid).copied().or(by_source),
+                        clip,
+                    );
                     let geometry = host.to_geometry(media, facts.reversed, facts.loop_source);
                     let (forward_start, forward_end) = geometry.forward_source_window();
                     clip.source_start_sec = forward_start;
@@ -1563,7 +1565,7 @@ struct HostTakeFacts {
 
 impl HostTakeFacts {
     fn to_geometry(
-        &self,
+        self,
         media_duration_sec: Option<f64>,
         reversed: bool,
         loop_enabled: bool,
@@ -2143,7 +2145,10 @@ mod tests {
         let document = model.session();
         // 一个已认领的 clip：`clip_ids` 把 region key 映射到它的 id。
         let key = 0x5150_u64;
-        document.clip_ids.lock_or_recover().insert(key, "clip-a".into());
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(key, "clip-a".into());
         let mut region = AraPlaybackRegion::default();
         region.audio_source_persistent_id = "ara://source".into();
         region.has_content_based_fade_at_head = true;

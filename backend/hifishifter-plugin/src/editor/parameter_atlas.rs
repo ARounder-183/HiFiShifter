@@ -1534,10 +1534,7 @@ mod tests {
             .clone();
 
         let expected = forward_view.iter().rev().copied().collect::<Vec<_>>();
-        assert_eq!(
-            reversed_view, expected,
-            "倒放投影必须是正放投影的时间镜像"
-        );
+        assert_eq!(reversed_view, expected, "倒放投影必须是正放投影的时间镜像");
     }
 
     /// 倒放几何的源窗口取自真实消费窗口（`[se−len·r, se)`），而不是存储的
@@ -1558,7 +1555,11 @@ mod tests {
         let map = geometry.map().unwrap();
         assert!((map.project_to_source(clip.start_sec).unwrap() - 1.).abs() < 1e-12);
         assert!(
-            (map.project_to_source(clip.start_sec + clip.length_sec).unwrap() - 0.).abs() < 1e-12
+            (map.project_to_source(clip.start_sec + clip.length_sec)
+                .unwrap()
+                - 0.)
+                .abs()
+                < 1e-12
         );
     }
 

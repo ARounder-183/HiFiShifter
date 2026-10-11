@@ -2954,7 +2954,10 @@ mod audio_boundary_tests {
                 component_get_bus_info(component, 0, 0, 0, &raw mut input_info),
                 K_RESULT_OK
             );
-            assert_eq!(input_info.channel_count, 1, "协商为单声道输入 ⇒ 报告 1 声道");
+            assert_eq!(
+                input_info.channel_count, 1,
+                "协商为单声道输入 ⇒ 报告 1 声道"
+            );
             let mut output_info = std::mem::zeroed::<BusInfo>();
             assert_eq!(
                 component_get_bus_info(component, 0, 1, 0, &raw mut output_info),

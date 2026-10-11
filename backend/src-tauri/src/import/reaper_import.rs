@@ -2501,8 +2501,7 @@ mod tests {
             s_offs: 2.0,
             ..ReaperTake::default()
         };
-        let (start, end) =
-            take_geometry(&take, 3.0, None, false, true).forward_source_window();
+        let (start, end) = take_geometry(&take, 3.0, None, false, true).forward_source_window();
         assert!((start - 2.0).abs() < 1e-9);
         assert!((end - 5.0).abs() < 1e-9);
     }

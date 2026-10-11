@@ -371,7 +371,6 @@ pub fn peek_bytes() -> Option<Vec<u8>> {
     read_bytes().ok().flatten()
 }
 
-
 #[cfg(target_os = "windows")]
 pub fn write_bytes_with_reaper(
     bytes: &[u8],

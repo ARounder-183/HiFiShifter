@@ -105,7 +105,11 @@ impl SourceTimeMap {
         let first = input(&self.points[0]);
         let last = input(self.points.last()?);
         let ascending = last >= first;
-        let (low, high) = if ascending { (first, last) } else { (last, first) };
+        let (low, high) = if ascending {
+            (first, last)
+        } else {
+            (last, first)
+        };
         if value < low || value > high {
             return None;
         }

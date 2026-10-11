@@ -874,7 +874,10 @@ mod tests {
         // 声明 1 条、实际 2 条 ⇒ 两条都落在首条序列上，映射成功而不是整份失败。
         let timeline = ara_document_to_timeline(&doc).expect("mismatch must not be fatal");
         assert_eq!(timeline.clips.len(), 2);
-        assert!(timeline.clips.iter().all(|clip| clip.track_id == "ara-track-0"));
+        assert!(timeline
+            .clips
+            .iter()
+            .all(|clip| clip.track_id == "ara-track-0"));
     }
 
     /// 完全没有 region sequence 时，region 无轨可归 —— 如实逐条跳过，而不是整份失败。
