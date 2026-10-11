@@ -160,7 +160,7 @@ impl EditorLink {
             .get(&token)
             .and_then(Weak::upgrade)
             .filter(|owner| !owner.is_closed())
-            .ok_or_else(|| "FX processor closed".into())
+            .ok_or_else(|| crate::editor::errors::FX_PROCESSOR_CLOSED.error())
     }
     /// 排队和执行各核对一次真实文档与绑定代次；clear/rebind不能为旧请求借新的组件入口。
     pub(super) fn authorize(
@@ -177,9 +177,9 @@ impl EditorLink {
             .unwrap_or_else(|e| e.into_inner())
             .get(token)
             .and_then(Weak::upgrade)
-            .ok_or("FX processor closed")?;
+            .ok_or(crate::editor::errors::FX_PROCESSOR_CLOSED.error())?;
         if !Arc::ptr_eq(&owner.editor_document()?, document) {
-            return Err("editor route belongs to another document".into());
+            return Err(crate::editor::errors::ROUTE_OTHER_DOCUMENT.error());
         }
         Ok(binding.generation)
     }

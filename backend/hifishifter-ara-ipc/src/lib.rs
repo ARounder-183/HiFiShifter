@@ -43,10 +43,39 @@ pub enum Request {
     },
 }
 
+/// `Response.code` 的稳定取值。
+///
+/// 【为什么在协议 crate 里】码是**协议承诺**（只增不改）：插件侧的产生点与
+/// GUI 侧的消费点都从这里取，任何一侧改措辞都不会漂移。客户端分类
+/// （如"终态 => 永久停止轮询"）先看 `code`；`code` 缺失（旧服务端）才退回
+/// 对 `error` 文本的子串匹配 —— 文本只做展示。
+pub mod error_code {
+    /// 编辑文档已关闭（终态：再重试也不会成功）。
+    pub const DOCUMENT_CLOSED: u32 = 1;
+    /// FX 处理器（组件）已销毁。
+    pub const FX_PROCESSOR_CLOSED: u32 = 2;
+    /// 编辑器视图不存在或身份未知。
+    pub const VIEW_CLOSED_OR_UNKNOWN: u32 = 3;
+    /// 视图身份与会话不匹配。
+    pub const VIEW_IDENTITY_MISMATCH: u32 = 4;
+    /// 请求排队期间编辑路由已改变。
+    pub const ROUTE_CHANGED_WHILE_QUEUED: u32 = 5;
+    /// 编辑路由属于另一份文档。
+    pub const ROUTE_OTHER_DOCUMENT: u32 = 6;
+    /// 编辑租约已被撤销。
+    pub const LEASE_REVOKED: u32 = 7;
+    /// 插件实例已关闭。
+    pub const INSTANCE_CLOSED: u32 = 8;
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Response {
     pub ok: bool,
     pub error: Option<String>,
+    /// 协议级错误码（[`error_code`]）。可选字段 —— 旧客户端忽略，
+    /// 不改变 Snapshot/Commit 协议语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<u32>,
     pub revision: u64,
     pub model_revision: u64,
     pub timeline: Option<Value>,

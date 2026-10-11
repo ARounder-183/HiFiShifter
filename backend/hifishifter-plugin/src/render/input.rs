@@ -96,7 +96,7 @@ impl RenderInput {
                 let pcm = self
                     .sources
                     .get(id)
-                    .ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+                    .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
                 total
                     .checked_add(
                         pcm.planes
@@ -166,7 +166,7 @@ impl RenderInput {
             let pcm = self
                 .sources
                 .get(id)
-                .ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+                .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
             let channels = pcm.planes.len();
             let mut samples = Vec::with_capacity(pcm.planes[0].len() * channels);
             for frame in 0..pcm.planes[0].len() {

@@ -2103,14 +2103,14 @@ impl ExtensionOwner {
     }
     pub(crate) fn editor_document(&self) -> Result<Arc<super::document::DocumentSession>, String> {
         if self.is_closed() {
-            return Err("FX processor closed".into());
+            return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
         }
         self.document
             .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .filter(|document| document.is_alive())
-            .ok_or_else(|| "document closed".into())
+            .ok_or_else(|| crate::editor::errors::DOCUMENT_CLOSED.error())
     }
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
@@ -3513,7 +3513,8 @@ impl ExtensionOwner {
             .and_then(std::sync::Weak::upgrade);
         let Some(document) = document else {
             return Response {
-                error: Some("document closed".into()),
+                error: Some(crate::editor::errors::DOCUMENT_CLOSED.error()),
+                code: Some(hifishifter_ara_ipc::error_code::DOCUMENT_CLOSED),
                 ..Default::default()
             };
         };
@@ -3528,6 +3529,7 @@ impl ExtensionOwner {
         let _transaction = document.transaction.lock_or_recover();
         if let Err(error) = self.merge_pending_restore(&document) {
             return Response {
+                code: crate::editor::errors::terminal_error_code(&error),
                 error: Some(error),
                 ..Default::default()
             };
@@ -3536,7 +3538,7 @@ impl ExtensionOwner {
         let mut edits = document.edits.lock_or_recover();
         let outcome = (|| {
             if !document.ready.load(Ordering::Acquire) {
-                return Err("host model not ready; refresh after editing".into());
+                return Err(format!("{}; refresh after editing", crate::editor::errors::HOST_MODEL_NOT_READY).into());
             }
             edits.reconcile(&document.track_bindings.lock_or_recover())?;
             let mut timeline = self.assigned_timeline(&document)?;
@@ -3553,7 +3555,7 @@ impl ExtensionOwner {
                     {
                         let pcm = available
                             .get(id)
-                            .ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+                            .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
                         sources.push(HostPcm {
                             persistent_id: id.clone(),
                             sample_rate: pcm.sample_rate,
@@ -3592,6 +3594,7 @@ impl ExtensionOwner {
             }
         })();
         let mut response = outcome.unwrap_or_else(|error| Response {
+            code: crate::editor::errors::terminal_error_code(&error),
             error: Some(error),
             ..Default::default()
         });
@@ -3613,10 +3616,10 @@ impl ExtensionOwner {
                 let _transaction = document.transaction.lock_or_recover();
                 self.merge_pending_restore(document)?;
                 if !document.ready.load(Ordering::Acquire) {
-                    return Err("host model not ready; refresh after editing".into());
+                    return Err(format!("{}; refresh after editing", crate::editor::errors::HOST_MODEL_NOT_READY).into());
                 }
                 if document.revision.load(Ordering::Acquire) != base_model {
-                    return Err("Conflict: host model changed; refresh".into());
+                    return Err(format!("{} model changed; refresh", crate::editor::errors::CONFLICT_PREFIX).into());
                 }
                 let mut edits = document.edits.lock_or_recover();
                 edits.reconcile(&document.track_bindings.lock_or_recover())?;
@@ -3701,9 +3704,13 @@ impl ExtensionOwner {
             );
             Ok::<(), String>(())
         })();
+        let error = outcome.err();
         hifishifter_ara_ipc::Response {
-            ok: outcome.is_ok(),
-            error: outcome.err(),
+            ok: error.is_none(),
+            code: error
+                .as_deref()
+                .and_then(crate::editor::errors::terminal_error_code),
+            error,
             revision: document.edits.lock_or_recover().revision,
             model_revision: document.revision.load(Ordering::Acquire),
             ..Default::default()
@@ -3718,7 +3725,7 @@ impl ExtensionOwner {
         edited: bool,
     ) -> Result<(Vec<u64>, super::input::RenderInput), String> {
         if !document.ready.load(Ordering::Acquire) {
-            return Err("host PCM/model not ready".into());
+            return Err(format!("{}; {}", crate::editor::errors::HOST_PCM_UNAVAILABLE, crate::editor::errors::HOST_MODEL_NOT_READY).into());
         }
         let keys = self.assigned_regions().map_err(|e| e.to_string())?;
         let mut timeline = self.assigned_timeline(document)?;
@@ -4009,7 +4016,7 @@ impl ExtensionOwner {
                 weak.upgrade()
                     .map(|owner| owner.handle_request(request))
                     .unwrap_or_else(|| hifishifter_ara_ipc::Response {
-                        error: Some("plugin instance closed".into()),
+                        error: Some(crate::editor::errors::INSTANCE_CLOSED.error()),
                         ..Default::default()
                     })
             }) {

@@ -286,7 +286,7 @@ impl EditorSession {
         index: usize,
         parent: Option<String>,
     ) -> Result<(), String> {
-        let document = self.document.upgrade().ok_or("document closed")?;
+        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let before = self.timeline.lock_or_recover().clone();
         if !before.tracks.iter().any(|track| track.id == id) || index > 10000 {
             return Err("unknown private track or invalid index".into());
@@ -439,9 +439,9 @@ impl EditorSession {
     /// 有界32任务FIFO；关view取消回信，真实组件入口撤销则拒绝排队请求执行。
     pub fn enqueue(&self, request: UiRequest) -> Result<(), String> {
         if self.closed.load(Ordering::Acquire) {
-            return Err("FX processor closed".into());
+            return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
         }
-        let document = self.document.upgrade().ok_or("document closed")?;
+        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let lease = request
             .link
             .as_ref()
@@ -450,7 +450,7 @@ impl EditorSession {
         if request.sink.view_id.is_empty()
             || (request.link.is_some() && request.sink.closed.load(Ordering::Acquire))
         {
-            return Err("editor view closed or unknown".into());
+            return Err(crate::editor::errors::VIEW_CLOSED_OR_UNKNOWN.error());
         }
         let mut views = self.views.lock_or_recover();
         if self.closed.load(Ordering::Acquire) {
@@ -461,7 +461,7 @@ impl EditorSession {
                 .get(&request.sink.view_id)
                 .is_some_and(|view| !Arc::ptr_eq(&view.sink.closed, &request.sink.closed))
         {
-            return Err("editor view identity mismatch".into());
+            return Err(crate::editor::errors::VIEW_IDENTITY_MISMATCH.error());
         }
         let sink = request.sink.clone();
         let route = request.link.clone().zip(lease);
@@ -469,7 +469,7 @@ impl EditorSession {
         // 原始view身份及同文档route授权仍与普通队列入口一致。
         if request.command == "get_playback_state" {
             if !document.is_alive() {
-                return Err("document closed".into());
+                return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
             }
             let value = self.playback_state();
             if let Some(link) = &request.link {
@@ -705,9 +705,9 @@ impl EditorSession {
                     let mutates = super::commands::mutates_audio(&request.command);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Some(link) = &request.link {
-                            let document = session.document.upgrade().ok_or("document closed")?;
+                            let document = session.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
                             if Some(link.authorize(&document)?) != lease {
-                                return Err("editor route changed while request queued".into());
+                                return Err(crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error());
                             }
                             let views = session.views.lock_or_recover();
                             // view关闭仅取消回信；已入队尾笔仍持enqueue验证的身份与route代次。
@@ -742,7 +742,8 @@ impl EditorSession {
                             // 与 `webview.rs` 的同一条协议：终态错误必须带 `errorKind`，
                             // 否则前端无法区分"稍后重试"与"会话已结束"。
                             json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":false,
-                                "errorKind":super::classify_error(&error),"error":error})
+                                "errorKind":super::classify_error(&error),
+                                "errorCode":super::errors::terminal_error_code(&error),"error":error})
                         }
                     };
                     request.sink.response(response);
@@ -792,7 +793,7 @@ impl EditorSession {
             let loaded = self.loaded.lock_or_recover();
             (loaded.edit, loaded.model, loaded.projection.clone())
         };
-        let document = self.document.upgrade().ok_or("document closed")?;
+        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         Ok((document, edit, model, projection))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
@@ -962,7 +963,7 @@ impl EditorSession {
         }
     }
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
-        let document = self.document.upgrade().ok_or("document closed")?;
+        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         // GUI清单有独立代次：粘贴/删除可以先于ARA模型回调，不能被模型缓存早退吞掉。
         if self.loaded.lock_or_recover().initialized
             && document.renderer_owners().is_empty()
@@ -1649,7 +1650,7 @@ impl EditorSession {
         {
             return Ok(());
         }
-        let document = self.document.upgrade().ok_or("document closed")?;
+        let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let current = self.native_timeline(self.timeline.lock_or_recover().clone())?;
         let roots = document.selected_source_parameters(&current)?;
         let mut timeline = self.timeline.lock_or_recover();
@@ -1757,7 +1758,7 @@ impl ParamHost for EditorSession {
     }
     fn publish_timeline(&self, timeline: TimelineState) {
         let result = (|| {
-            let document = self.document.upgrade().ok_or("document closed")?;
+            let document = self.document.upgrade().ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
             let groups = document.edits.lock_or_recover().groups.clone();
             let groups =
                 if groups.is_empty() {

@@ -1,0 +1,139 @@
+//! 编辑会话错误的**单一事实来源**：措辞常量 + 协议码。
+//!
+//! 【为什么常量要共享】终态错误的**产生点**（`session` / `routing` /
+//! `render::extension` / `render::document`）与**分类点**（[`classify_error`]）
+//! 分处不同模块。此前两边各写字面量、靠子串匹配对齐 —— 任何一处改措辞都会把
+//! 终态判成 transient（或反之），且无编译期信号（"19,056 次轮询"那类缺陷的
+//! 温床）。现在产生点引用这里的常量，分类点匹配同一常量：改措辞只改一处。
+//!
+//! 协议码随回执下发（回执 JSON 的 `errorCode` / `hifishifter-ara-ipc`
+//! `Response.code`），客户端按码分类；字符串只做展示。**码的取值是协议承诺：
+//! 只增不改**。分类判定看码，码不存在（旧产生点/旧服务端）才退回字符串匹配。
+
+use hifishifter_ara_ipc::error_code;
+
+/// 一条错误的稳定措辞与协议码。
+pub(crate) struct TerminalError {
+    /// 协议码（只增不改）。
+    pub code: u32,
+    /// 稳定措辞；产生点经 [`TerminalError::error`] 引用，分类点按它匹配。
+    pub message: &'static str,
+}
+
+impl TerminalError {
+    /// 产生点用它构造 `Err(String)` —— 与既有 `Result<_, String>` 链兼容。
+    pub fn error(&self) -> String {
+        self.message.to_string()
+    }
+}
+
+/// 编辑文档已关闭（`alive` 原子量一旦 false 永不再活）。
+pub(crate) const DOCUMENT_CLOSED: TerminalError =
+    TerminalError { code: error_code::DOCUMENT_CLOSED, message: "document closed" };
+/// FX 处理器（组件）已销毁。
+pub(crate) const FX_PROCESSOR_CLOSED: TerminalError =
+    TerminalError { code: error_code::FX_PROCESSOR_CLOSED, message: "FX processor closed" };
+/// 编辑器视图不存在或身份未知。
+pub(crate) const VIEW_CLOSED_OR_UNKNOWN: TerminalError =
+    TerminalError { code: error_code::VIEW_CLOSED_OR_UNKNOWN, message: "editor view closed or unknown" };
+/// 视图身份与会话不匹配。
+pub(crate) const VIEW_IDENTITY_MISMATCH: TerminalError =
+    TerminalError { code: error_code::VIEW_IDENTITY_MISMATCH, message: "editor view identity mismatch" };
+/// 请求排队期间编辑路由已改变。
+pub(crate) const ROUTE_CHANGED_WHILE_QUEUED: TerminalError =
+    TerminalError { code: error_code::ROUTE_CHANGED_WHILE_QUEUED, message: "editor route changed while request queued" };
+/// 编辑路由属于另一份文档。
+pub(crate) const ROUTE_OTHER_DOCUMENT: TerminalError =
+    TerminalError { code: error_code::ROUTE_OTHER_DOCUMENT, message: "editor route belongs to another document" };
+/// 编辑租约已被撤销。
+pub(crate) const LEASE_REVOKED: TerminalError =
+    TerminalError { code: error_code::LEASE_REVOKED, message: "editor lease revoked" };
+/// 插件实例已关闭。
+pub(crate) const INSTANCE_CLOSED: TerminalError =
+    TerminalError { code: error_code::INSTANCE_CLOSED, message: "plugin instance closed" };
+
+/// 终态表：分类点遍历它做子串匹配（措辞本身来自上面这些常量）。
+const TERMINAL: &[&str] = &[
+    DOCUMENT_CLOSED.message,
+    FX_PROCESSOR_CLOSED.message,
+    VIEW_CLOSED_OR_UNKNOWN.message,
+    VIEW_IDENTITY_MISMATCH.message,
+    ROUTE_CHANGED_WHILE_QUEUED.message,
+    ROUTE_OTHER_DOCUMENT.message,
+    LEASE_REVOKED.message,
+    INSTANCE_CLOSED.message,
+];
+
+/// "宿主模型冲突"前缀：可重试（宿主把模型带到了真实状态后会收敛）。
+pub(crate) const CONFLICT_PREFIX: &str = "Conflict: host";
+
+/// 宿主 PCM 尚未就绪（可重试的暂时失败源）。
+pub(crate) const HOST_PCM_UNAVAILABLE: &str = "host PCM unavailable";
+/// 宿主模型尚未就绪（可重试的暂时失败源）。
+pub(crate) const HOST_MODEL_NOT_READY: &str = "host model not ready";
+
+/// 会话错误的**机器可读分类**：`terminal`（永久停止轮询）/ `transient`（可重试）。
+///
+/// 【为什么用"包含"而不是全等】措辞可能带上下文前缀（如 `host {LEASE_REVOKED}`
+/// 变成 "host editor lease revoked"），常量保证的是**子串出现**而非整串相等。
+pub(crate) fn classify_error(error: &str) -> &'static str {
+    if TERMINAL.iter().any(|needle| error.contains(needle)) {
+        "terminal"
+    } else {
+        "transient"
+    }
+}
+
+/// 错误的协议码；非终态或未知措辞返回 `None`（客户端退回字符串分类）。
+pub(crate) fn terminal_error_code(error: &str) -> Option<u32> {
+    const TABLE: &[(&str, u32)] = &[
+        (DOCUMENT_CLOSED.message, DOCUMENT_CLOSED.code),
+        (FX_PROCESSOR_CLOSED.message, FX_PROCESSOR_CLOSED.code),
+        (VIEW_CLOSED_OR_UNKNOWN.message, VIEW_CLOSED_OR_UNKNOWN.code),
+        (VIEW_IDENTITY_MISMATCH.message, VIEW_IDENTITY_MISMATCH.code),
+        (ROUTE_CHANGED_WHILE_QUEUED.message, ROUTE_CHANGED_WHILE_QUEUED.code),
+        (ROUTE_OTHER_DOCUMENT.message, ROUTE_OTHER_DOCUMENT.code),
+        (LEASE_REVOKED.message, LEASE_REVOKED.code),
+        (INSTANCE_CLOSED.message, INSTANCE_CLOSED.code),
+    ];
+    TABLE
+        .iter()
+        .find(|(needle, _)| error.contains(needle))
+        .map(|(_, code)| *code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 措辞与码一一对应，且码只增不改 —— 协议承诺。
+    #[test]
+    fn terminal_codes_are_stable_and_unique() {
+        let table = [
+            (DOCUMENT_CLOSED, 1),
+            (FX_PROCESSOR_CLOSED, 2),
+            (VIEW_CLOSED_OR_UNKNOWN, 3),
+            (VIEW_IDENTITY_MISMATCH, 4),
+            (ROUTE_CHANGED_WHILE_QUEUED, 5),
+            (ROUTE_OTHER_DOCUMENT, 6),
+            (LEASE_REVOKED, 7),
+            (INSTANCE_CLOSED, 8),
+        ];
+        for (entry, code) in table {
+            assert_eq!(entry.code, code, "{} must keep its protocol code", entry.message);
+        }
+    }
+
+    /// 带上下文前缀的产生点措辞仍能按常量命中（"包含"而非全等）。
+    #[test]
+    fn prefixed_producers_still_classify_terminal() {
+        assert_eq!(
+            classify_error(&format!("host split: {}", LEASE_REVOKED.message)),
+            "terminal"
+        );
+        assert_eq!(
+            terminal_error_code(&format!("host split: {}", LEASE_REVOKED.message)),
+            Some(LEASE_REVOKED.code)
+        );
+    }
+}

@@ -757,9 +757,9 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                 || split_waiting
                 || media_waiting
                 || reply["ok"] == false
-                    && (error.starts_with("Conflict: host")
-                        || error.contains("host PCM unavailable")
-                        || error.contains("host model not ready"));
+                    && (error.starts_with(crate::editor::errors::CONFLICT_PREFIX)
+                        || error.contains(crate::editor::errors::HOST_PCM_UNAVAILABLE)
+                        || error.contains(crate::editor::errors::HOST_MODEL_NOT_READY));
             // 退避：只在到点且未超预算时重投。预算与 `until` 双保险 —— 前者挡住
             // "永不收敛的失败"（否则 50 Hz 空转到 30 s），后者挡住"慢宿主"。
             let can_retry = host.attempts < HOST_REPLY_RETRY_BUDGET && now >= host.next_attempt;
@@ -1585,7 +1585,8 @@ fn configure_browser(
             // **停止轮询**并如实显示，而不是每 250 ms 重问一个永远不会好的问题
             // （见 `editor::classify_error` 的说明）。
             Err(error) => serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
-                "errorKind":super::classify_error(&error),"error":error}),
+                "errorKind":super::classify_error(&error),
+                "errorCode":super::errors::terminal_error_code(&error),"error":error}),
         };
         let response = wide(&response.to_string());
         browser.PostWebMessageAsJson(PCWSTR(response.as_ptr()))?;

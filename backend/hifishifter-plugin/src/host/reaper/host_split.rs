@@ -83,7 +83,7 @@ pub(crate) fn execute(
     let mut targets: Vec<HostClipTarget> = Vec::new();
     for (native, before) in &plan.clips {
         if !authorized() {
-            return Err("host split lease revoked".into());
+            return Err(format!("host split: {}", crate::editor::errors::LEASE_REVOKED.message).into());
         }
         let target = owner.host_edit_target(native)?.current(authorized)?;
         let g = &target.geometry;

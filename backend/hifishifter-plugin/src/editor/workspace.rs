@@ -1333,7 +1333,7 @@ impl DocumentSession {
     /// 调用方已持transaction；真实model-ref所有权再次校验，拒绝跨文档或已销毁区域。
     pub(crate) fn workspace_scope_locked(&self) -> Result<WorkspaceScope, String> {
         if !self.is_alive() {
-            return Err("document closed".into());
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         let mut regions = BTreeSet::new();
         for owner in self.renderer_owners() {

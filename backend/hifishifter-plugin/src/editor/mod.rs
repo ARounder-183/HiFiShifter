@@ -2,6 +2,7 @@
 mod browser_files;
 pub(crate) mod commands;
 pub(crate) mod connection;
+pub(crate) mod errors;
 mod events;
 mod formant;
 mod notebook;
@@ -16,38 +17,8 @@ mod view;
 #[cfg(windows)]
 mod webview;
 pub(crate) mod workspace;
+pub(crate) use errors::{classify_error, terminal_error_code};
 pub(crate) use view::create_view_with_link;
-
-/// 命令失败的**机器可读分类**，随 IPC 回执一起发给前端。
-///
-/// 【为什么需要它】此前前端只能拿到一个裸字符串。于是它无法区分"这次失败是暂时的、
-/// 稍后会好"与"这个编辑会话已经**永久**结束、再问一万次也一样" —— 用户报障的
-/// Cubase 场景正是后者：文档 `close()` 是终态（`alive` 原子量一旦 false 永不再活），
-/// 而页面仍在每 250 ms 轮询，把一个终态错误放大成 19,056 条日志。
-/// 有了分类，前端可以**停止**轮询并如实显示"会话已结束"，而不是无限重试。
-///
-/// 【为什么用"包含"而不是全等】这些串来自多个模块（`render::extension` 的
-/// `editor_document`、`editor::routing` 的 `EditorLink`、`editor::session` 的
-/// worker），措辞略有差异但语义同类。用子串匹配能覆盖它们而不必让每个产生点都改。
-/// 这是**协议级**的固定映射，不是"随手解析错误文本"。
-pub(crate) fn classify_error(error: &str) -> &'static str {
-    /// 会话已终结：再重试也不会成功，前端应当停止轮询。
-    const TERMINAL: &[&str] = &[
-        "document closed",
-        "FX processor closed",
-        "editor view closed or unknown",
-        "editor view identity mismatch",
-        "editor route changed while request queued",
-        "editor route belongs to another document",
-        "editor lease revoked",
-        "plugin instance closed",
-    ];
-    if TERMINAL.iter().any(|needle| error.contains(needle)) {
-        "terminal"
-    } else {
-        "transient"
-    }
-}
 
 #[cfg(test)]
 mod tests {

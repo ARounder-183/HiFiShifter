@@ -355,7 +355,7 @@ impl DocumentSession {
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
-            return Err("document closed".into());
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         self.editor
             .get_or_init(|| crate::editor::session::EditorSession::new(self))
@@ -377,7 +377,7 @@ impl DocumentSession {
     pub(crate) fn editor_versions(&self) -> Result<(u64, u64, u64), String> {
         let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
-            return Err("document closed".into());
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         Ok((
             self.edits.lock_or_recover().revision,
@@ -435,7 +435,7 @@ impl DocumentSession {
     > {
         let _transaction = self.transaction.lock_or_recover();
         if !self.is_alive() {
-            return Err("document closed".into());
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         let host = self.workspace_timeline_locked()?;
         Self::validate_workspace_geometry(&host, selection)?;
@@ -474,7 +474,7 @@ impl DocumentSession {
             .map(|id| {
                 let pcm = available
                     .get(id)
-                    .ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+                    .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
                 Ok((id.clone(), pcm.clone()))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -539,7 +539,7 @@ impl DocumentSession {
         let _transaction = self.transaction.lock_or_recover();
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
-            return Err("Conflict: host model changed; local curves preserved".into());
+            return Err(format!("{} model changed; local curves preserved", crate::editor::errors::CONFLICT_PREFIX).into());
         }
         let host = self.workspace_timeline_locked()?;
         let mut edits = self.edits.lock_or_recover();
@@ -599,7 +599,7 @@ impl DocumentSession {
                 || !self.ready.load(Ordering::Acquire)
                 || self.revision.load(Ordering::Acquire) != base_model
             {
-                return Err("Conflict: host model changed during automatic apply".into());
+                return Err(format!("{} model changed during automatic apply", crate::editor::errors::CONFLICT_PREFIX).into());
             }
             let edits = self.edits.lock_or_recover().clone();
             if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
@@ -639,7 +639,7 @@ impl DocumentSession {
             || !self.ready.load(Ordering::Acquire)
             || self.revision.load(Ordering::Acquire) != base_model
         {
-            return Err("Conflict: host model changed during automatic apply".into());
+            return Err(format!("{} model changed during automatic apply", crate::editor::errors::CONFLICT_PREFIX).into());
         }
         if !current()
             || self.edits.lock_or_recover().revision != edit
