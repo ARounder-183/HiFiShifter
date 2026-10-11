@@ -45,7 +45,7 @@ pub(crate) struct UiTrack {
     /// 时间线据此设置 `Track.parent_id`，于是参数根、合成开关与分析算法的既有继承
     /// 逻辑零改动即可工作 —— 注意它只决定**参数根**，与 REAPER 的音频路由无关。
     pub parent_guid: Option<String>,
-    // 宿主 change 代次字段保留，随 UiTrack 一起快照。
+    // 宿主 change 代次字段保留，随 UiTrack 一起快照（当前无读取方）。
     #[allow(dead_code)]
     pub change: i32,
     pub target: HostTrackTarget,

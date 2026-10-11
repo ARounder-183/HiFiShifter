@@ -2292,7 +2292,7 @@ impl ExtensionOwner {
     }
     /// actor/worker只可消费UI冻结的Rust值，不沿此访问器调用host；代次变化明确不可用。
     // 只读几何元数据访问器保留，供worker消费冻结值。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn host_geometry_metadata(
         &self,
     ) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
@@ -3201,7 +3201,7 @@ impl ExtensionOwner {
 
     /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
     // 组件state访问器保留，供未绑定路径读取。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
         self.document
             .lock_or_recover()

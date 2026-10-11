@@ -492,7 +492,7 @@ fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
 // 保留无undo上下文的一次性执行入口，当前调用方统一走execute_managed。
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn execute(
     owner: &Arc<ExtensionOwner>,
     plan: HostEditPlan,

@@ -10,9 +10,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionFactory;
 use ara2_bridge::core::AraError;
 use ara2_bridge::core::PlaybackTransformationFlags;
-use ara2_bridge::plugin::{
-    Factory, FactoryBuilder, FactoryCapabilities, PluginBuilder, PluginEntry,
-};
+use ara2_bridge::plugin::{Factory, FactoryBuilder, FactoryCapabilities, PluginBuilder};
 use std::sync::OnceLock;
 
 /// 把 `Factory` 以只读方式跨线程共享的包装。
@@ -20,7 +18,8 @@ use std::sync::OnceLock;
 /// `Factory` 内部是 ARA 回调的常驻 backing，ARA 工厂契约本身就要求它在进程内稳定可读；
 /// 这里只读取它（取 generation / 包 companion 关联），不修改，因此这条 `Sync` 是安全的。
 pub struct StaticFactory(
-    // ARA 工厂句柄；entry() 等访问器通过它读取，字段本身不直接引用。
+    // ARA 工厂句柄；只被 cfg(test) 的 ABI 断言读取（`factory_raw`），产品构建里
+    // 字段本身不直接引用。此前还有一个 `entry()` 访问器，无任何调用方，已删除。
     #[allow(dead_code)] &'static Factory,
 );
 
@@ -29,19 +28,10 @@ unsafe impl Send for StaticFactory {}
 // SAFETY: 见 StaticFactory 文档注释。
 unsafe impl Sync for StaticFactory {}
 
-impl StaticFactory {
-    /// 借出该工厂的初始化入口（用于读取协商到的 ARA 版本）。
-    // 协商版本读取入口保留，当前无调用方。
-    #[allow(dead_code)]
-    pub fn entry(&self) -> &PluginEntry {
-        self.0.entry()
-    }
-}
-
 /// 进程级运行时：泄漏到进程结束的 ARA 工厂 + companion 关联。
 pub struct Runtime {
     /// ARA 工厂。
-    // 工厂字段保留，供 companion 关联与调试读取。
+    // 只被 cfg(test) 的 ABI 断言读取；产品构建里由 `OnceLock` 持有并泄漏到进程结束。
     #[allow(dead_code)]
     pub factory: StaticFactory,
     /// companion 层看到的关联（VST3 主工厂与处理器都用它）。
