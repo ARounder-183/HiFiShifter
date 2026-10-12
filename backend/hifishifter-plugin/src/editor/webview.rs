@@ -561,7 +561,9 @@ fn register_class() -> Result<(), String> {
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err(windows::core::Error::from_win32().to_string());
+        // windows 0.62 把 `Error::from_win32` 改名为 `from_thread`（语义不变：
+        // 取本线程的 GetLastError）。
+        return Err(windows::core::Error::from_thread().to_string());
     }
     *registered = true;
     Ok(())

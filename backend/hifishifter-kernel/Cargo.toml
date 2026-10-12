@@ -66,10 +66,10 @@ vslib = []
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
 # DXGI adapter enumeration for DirectML device discovery (all GPU vendors).
-# 0.61 与 src-tauri / hifishifter-plugin 同版：三者 windows-core 归一，App 构建
-# 里不再有第二份 `windows`。此前 0.58/0.61 并存、类型互不兼容，曾迫使
-# webview2_accelerators.rs 用 `windows-core-webview2` 别名做转换层。
-windows = { version = "0.61", features = [
+# 0.62 与 src-tauri / hifishifter-plugin / tauri 链同版：App 构建里的 `windows`
+# 只有这一份。历史上 0.58/0.61 并存、类型互不兼容，曾迫使
+# webview2_accelerators.rs 用别名做转换层。
+windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Foundation",
     "Win32_Devices_Properties",
