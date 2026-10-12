@@ -15,6 +15,7 @@
 | 7 | `factory.rs` 的 `create_document_controller` ABI 入口 | 增量 | 记录"把 null 控制器交给宿主"的**原因**（原先 `.ok()` 把错误整条丢掉） | 待查 |
 | 8 | `entry.rs` 的 `initialize` | **行为** | 宿主没给 assert 指针时记警告后**继续**（原先硬拒绝 ⇒ 静默 ⇒ null 控制器交给宿主）；该地址在本库只被记录与比较、从不被调用，取 0 是安全的 | 待查 |
 | 9 | `controller.rs` 的 `create_playback_region` | 增量 | 记录两种"整条 playback region 变成 null 交给宿主"的原因：宿主旗标不是工厂广告集合的子集、模型侧创建失败（原先都是裸 `return null_mut()`） | 待查 |
+| 10 | `controller.rs` 的 `create_audio_modification` / `create_region_sequence` / `create_playback_region` 入口，以及分析状态查询 | 增量 | 入口留痕 + 每条静默拒绝的原因；`isAudioSourceContentAnalysisIncomplete` 答"未完成"时、宿主请求未广告的内容类型时各记一条警告（见下方「宿主没有交出事件内容」） | 待查 |
 
 ## 代数协商的静默失败（补丁 6/7）
 
@@ -29,6 +30,22 @@
 （异常 `0xc0000005`，参数 `[1, 0xb0]`，两次 dump 同一偏移 `+0x512af`），调用栈上没有任何
 HiFiShifter 模块，崩溃进程的模块表里也没有。补丁 6/7 把这三步都变成日志：
 **请求了哪一代、我们接受还是拒绝、拒绝后交给宿主的是 null 及其原因。**
+
+## 宿主没有交出事件内容（补丁 10）
+
+Cubase 15 实测：文档控制器建起来了、音频源与轨道序列都到了，但
+`modifications=0 playbackRegions=0` —— 一条片段都没有，编辑器里连轨道都是空的
+（前端时间线由渲染快照物化，0 个 region 就没有轨道）。而这些失败点在库里原先
+**全是裸 `return null_mut()`**：既看不出宿主有没有调用，也看不出为什么被拒。
+
+补丁 10 给三个创建入口（source / modification / region）都加了入口留痕，并给
+modification 的每条静默拒绝补上原因。有了它，下一次运行可以直接判定：
+入口日志不出现 ⇒ 宿主根本没走到那一步（问题在宿主侧的事件分配）；
+入口出现而后面没有 ⇒ 原因就在紧随其后的那行警告里。
+
+另外两处与分析相关：`isAudioSourceContentAnalysisIncomplete` 只有真答"未完成"时
+才记一行（宿主会轮询它并据此**推迟**后续动作），宿主请求我们未广告的内容类型时
+也记一行（那个请求永远不会完成）。
 
 ## 补了什么
 

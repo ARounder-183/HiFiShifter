@@ -774,29 +774,47 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAAudioModificationHostRef,
         properties: *const ARAAudioModificationProperties,
     ) -> ARAAudioModificationRef {
+        // 【本地补丁 10】入口留痕 + 每条静默拒绝的原因。
+        //
+        // 宿主拿不到 modification 就不会建 playback region，于是**一条片段都没有**，
+        // 而这里的每个失败分支原先都只是裸 `return null_mut()`：现场只有"时间线是空的"，
+        // 既看不出宿主有没有调用，也看不出为什么被拒。实测 Cubase 15 的读数恒为
+        // `sources=2 modifications=0 regionSequences=1 playbackRegions=0`。
+        log::info!("[ara] host createAudioModification");
         if host_ref.is_null() {
+            log::warn!("[ara] createAudioModification rejected: null host reference");
             return null_mut();
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties.
         let Ok(properties) =
             (unsafe { ara2_bridge_core::AudioModificationProperties::copy_from_ffi(properties) })
         else {
+            log::warn!(
+                "[ara] createAudioModification rejected: properties refused (see the core's                  persistent-ID / display-string validation)"
+            );
             return null_mut();
         };
         let (handle, reference) = {
             let Ok(runtime) = self.runtime_mut() else {
+                log::warn!("[ara] createAudioModification rejected: document runtime busy or closed");
                 return null_mut();
             };
             let Ok(source) = runtime.resolve_audio_source(source_reference) else {
+                log::warn!(
+                    "[ara] createAudioModification rejected: the host's audio-source reference                      does not resolve in this document"
+                );
                 return null_mut();
             };
             let Ok(mut edit) = runtime.callback_edit() else {
+                log::warn!("[ara] createAudioModification rejected: callback edit already active");
                 return null_mut();
             };
             let Ok(handle) = edit.create_audio_modification(source, properties) else {
+                log::error!("[ara] createAudioModification rejected: the model refused it");
                 return null_mut();
             };
             let Ok(reference) = edit.audio_modification_ref(handle) else {
+                log::error!("[ara] createAudioModification rejected: no ARA reference for the new modification");
                 return null_mut();
             };
             (handle.into_raw(), reference.as_raw().cast())
@@ -920,12 +938,18 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         let Some(ContentObject::AudioSource(source)) = self.audio_source_object(reference) else {
             return kARAFalse;
         };
-        ffi_bool(
-            self.analysis.contains(source, content_type)
-                || self
-                    .capabilities
-                    .is_analysis_incomplete(source, content_type),
-        )
+        let incomplete = self.analysis.contains(source, content_type)
+            || self
+                .capabilities
+                .is_analysis_incomplete(source, content_type);
+        if incomplete {
+            // 【本地补丁 10】宿主会轮询这一项，并在"未完成"时**推迟**后续动作。
+            // 只有真的答"未完成"时才记一行 —— 否则会把日志刷满。
+            log::warn!(
+                "[ara] reporting content analysis INCOMPLETE for type {content_type}; a host that                  waits for analysis will not proceed past this point"
+            );
+        }
+        ffi_bool(incomplete)
     }
 
     fn request_audio_source_content_analysis(
@@ -947,6 +971,11 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             .iter()
             .any(|content_type| !self.factory_analyzable_content.contains(content_type))
         {
+            // 【本地补丁 10】宿主请求分析我们**没有广告**的内容类型。忽略是对的（我们不会
+            // 做这个分析），但必须留痕：宿主可能正等着它完成才继续。
+            log::warn!(
+                "[ara] the host requested analysis of {content_types:?}, which this factory does                  not advertise; the request is ignored and will never complete"
+            );
             return;
         }
         if self
@@ -1102,7 +1131,11 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         _host_ref: ARARegionSequenceHostRef,
         properties: *const ARARegionSequenceProperties,
     ) -> ARARegionSequenceRef {
+        // 【本地补丁 10】与 createAudioModification 同一理由：入口留痕，便于对照宿主
+        // 究竟走到哪一步。
+        log::info!("[ara] host createRegionSequence");
         let Ok(runtime) = self.runtime_mut() else {
+            log::warn!("[ara] createRegionSequence rejected: document runtime busy or closed");
             return null_mut();
         };
         // SAFETY: properties are ephemeral and the resolver accepts only this runtime's live refs.
@@ -1208,7 +1241,11 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAPlaybackRegionHostRef,
         properties: *const ARAPlaybackRegionProperties,
     ) -> ARAPlaybackRegionRef {
+        // 【本地补丁 10】入口留痕：这一行出现而后面没有 region，才说明问题在创建逻辑里；
+        // 它根本不出现，就说明宿主没走到这一步（modification 那步已经断了）。
+        log::info!("[ara] host createPlaybackRegion");
         if host_ref.is_null() {
+            log::warn!("[ara] createPlaybackRegion rejected: null host reference");
             return null_mut();
         }
         let (modification, sequence, properties) = {
