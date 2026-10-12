@@ -1659,6 +1659,7 @@ fn configure_browser(
 #[cfg(test)]
 mod focus_tests {
     use super::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, SetActiveWindow};
 
     /// **不变量：重投必须退避且封顶。**
     ///
@@ -1710,6 +1711,17 @@ mod focus_tests {
         let native =
             NativeEditor::attach(parent.0, 1100, 720, Arc::new(Default::default())).unwrap();
         let child = HWND(native.key.hwnd as *mut c_void);
+        // `SetFocus` 的前置条件是目标窗口所属线程有一个**活动窗口**：刚创建的
+        // 夹具窗口尚未激活，此时 `SetFocus` 返回 `ERROR_INVALID_PARAMETER`
+        // (0x80070057) —— 于是本用例在"进程没有前台窗口"的会话里（无头/服务/
+        // 沙箱）会假失败，而真实宿主里插件窗口始终位于活动窗口内。这里显式补上
+        // 同一前置条件，让用例自足、与运行会话无关。
+        // `SetActiveWindow` 返回先前的活动窗口（没有则为 null → Err），仅用于还原。
+        let previous_active = unsafe { SetActiveWindow(parent) }.ok();
+        assert!(
+            unsafe { GetActiveWindow() } == parent,
+            "夹具父窗口必须能成为活动窗口；不能则说明本会话没有可交互的窗口站"
+        );
         // GetNextDlgTabItem在没有任何Tab stop时会回退到第一个child，单看句柄会假通过。
         let tab_stop = unsafe { GetWindowLongPtrW(child, GWL_STYLE) } as u32 & WS_TABSTOP.0 != 0;
         let key = native.key;
@@ -1725,6 +1737,11 @@ mod focus_tests {
         let target = unsafe { GetNextDlgTabItem(parent, None, false) }.ok();
         drop(native);
         assert!(key.focus().is_err(), "关闭后的窗口租约不能再夺取焦点");
+        // 把线程的活动窗口还回去，免得把即将销毁的夹具窗口留给后续用例。
+        if let Some(previous) = previous_active {
+            // SAFETY: 还原本线程先前的活动窗口。
+            let _ = unsafe { SetActiveWindow(previous) };
+        }
         // SAFETY: 清理测试创建的唯一父窗口，子窗口已由NativeEditor析构。
         unsafe { DestroyWindow(parent) }.unwrap();
         assert!(
