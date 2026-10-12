@@ -506,13 +506,26 @@ mod layout_tests {
     use std::path::PathBuf;
     use std::process::Command;
 
+    /// oracle 需要"普通 `cargo test` shell 里没有"的两样东西，以及怎么拿到它们。
+    ///
+    /// 【为什么是硬失败而不是跳过】oracle 是手写 ABI 的唯一真值来源；环境不齐时
+    /// 静默跳过 = "绿在没跑"，与 `check-ffi-guards.py` 曾经"门禁恒过"是同一类错误。
+    const ORACLE_ENV_HELP: &str = "\
+the native ABI oracle needs the MSVC toolchain and the pinned VST3 SDK:
+  cl.exe on PATH    <-  . ./scripts/env/msvc-env.ps1
+  ARA_VST3_SDK_DIR  <-  . ./scripts/env/sdk-env.ps1; Set-SdkEnvironment
+then, from the repo root in PowerShell:
+  cargo test --manifest-path backend/Cargo.toml -p hifishifter-plugin --lib
+CI sets both before running the tests.";
+
     /// 原生 SDK 编译器为布局 oracle；任何字段偏移/对齐漂移都必须阻断测试。
     #[test]
     fn rust_audio_layout_matches_the_locked_native_sdk() {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let scratch = manifest.join("../../.build-tmp/vst3-layout");
         std::fs::create_dir_all(&scratch).unwrap();
-        let sdk = std::env::var_os("ARA_VST3_SDK_DIR").expect("ARA_VST3_SDK_DIR required");
+        let sdk =
+            std::env::var_os("ARA_VST3_SDK_DIR").unwrap_or_else(|| panic!("{}", ORACLE_ENV_HELP));
         let exe = scratch.join("vst3-layout.exe");
         let compile = Command::new("cl.exe")
             .current_dir(&scratch)
@@ -522,10 +535,12 @@ mod layout_tests {
             .arg(format!("/Fe{}", exe.display()))
             .arg(manifest.join("tests/vst3_layout.cpp"))
             .output()
-            .expect("MSVC cl.exe required, load scripts/env/msvc-env.ps1");
+            .unwrap_or_else(|e| panic!("{}\n\nspawning cl.exe failed: {}", ORACLE_ENV_HELP, e));
         assert!(
             compile.status.success(),
-            "native ABI oracle compile failed: {compile:?}"
+            "native ABI oracle compile failed: {:?}\n\n{}",
+            compile,
+            ORACLE_ENV_HELP
         );
         let native = Command::new(exe).output().unwrap();
         assert!(

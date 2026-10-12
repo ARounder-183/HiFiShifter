@@ -13,6 +13,12 @@
 #       . .\scripts\env\msvc-env.ps1
 #       cd backend\src-tauri; cargo test
 #
+# 插件 / 内核的测试还要再点源一次 SDK 环境（`ara2-bridge` 的 build.rs 与
+# `audio_abi::layout_tests` 的 ABI oracle 都要求 `ARA_SDK_DIR` / `ARA_VST3_SDK_DIR`）：
+#       . .\scripts\env\sdk-env.ps1; Set-SdkEnvironment
+#       cargo test --manifest-path backend\Cargo.toml -p hifishifter-plugin --lib
+# 少点这一句时，oracle 会以 `ORACLE_ENV_HELP` 的文案失败并直接列出上面两条命令。
+#
 # 特殊说明：
 #   - 必须用点源（`. .\scripts\env\msvc-env.ps1`）而不是 `.\scripts\env\msvc-env.ps1`，
 #     否则环境变量只存在于子进程里，对后续 cargo 无效。
