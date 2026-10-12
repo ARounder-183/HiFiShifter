@@ -158,8 +158,13 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                             </div>
                             {tick.secondaryLabel != null ? (
                                 <>
-                                    <div className="w-5 border-t border-qt-border/20 my-[3px]" />
-                                    <div className="text-qt-micro leading-tight text-qt-text-muted/45 tabular-nums whitespace-nowrap">
+                                    {/* 主/副两行的分隔线：用实色 --qt-border，
+                                        不再压到 20% 透明 —— 那样在深色标尺上
+                                        几乎看不见。 */}
+                                    <div className="w-5 border-t border-qt-border my-[3px]" />
+                                    {/* 副时间文本用正文色：主副靠字号与上下顺序
+                                        已经能分辨，再压低对比度只会让用户看不清。 */}
+                                    <div className="text-qt-micro leading-tight text-qt-text tabular-nums whitespace-nowrap">
                                         {tick.secondaryLabel}
                                     </div>
                                 </>
@@ -969,7 +974,7 @@ const TimeRulerInner: React.FC<{
                         {hoverTime.primaryLabel}
                     </div>
                     {hoverTime.secondaryLabel ? (
-                        <div className="text-qt-micro leading-tight text-qt-text-muted/60 tabular-nums whitespace-nowrap">
+                        <div className="text-qt-micro leading-tight text-qt-text tabular-nums whitespace-nowrap">
                             {hoverTime.secondaryLabel}
                         </div>
                     ) : null}

@@ -282,7 +282,12 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
 
     if (!selector.show) return null;
     return (
-        <div className="min-w-0 flex-1 flex justify-end" data-playhead-sec={visualSec.toFixed(6)}>
+        // `pr-5` 为右下角的速度映射按钮让位：该按钮绝对定位在右 3px、宽 16px，
+        // 时间读数右对齐后若不内缩，末位数字会与按钮图标叠在一起。
+        <div
+            className="min-w-0 flex-1 flex justify-end pr-5"
+            data-playhead-sec={visualSec.toFixed(6)}
+        >
             <span
                 ref={maxLabelSpanRef}
                 aria-hidden
@@ -1354,15 +1359,23 @@ const TrackListInner: React.FC<TrackListProps> = ({
             className="h-full w-full border-r border-qt-border bg-qt-window"
             data-hs-surface="trackHeader"
         >
-            <Box
-                className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-xs z-10 relative"
+            {/* 【为什么用 `Flex` 而不是 `Box className="flex …"`】Radix 的 `.rt-Box`
+                把 `display: block` 写在自己未分层的样式表里，会盖掉 Tailwind 4
+                分层后的 `.flex` 工具类 —— 于是这一行退化成块级布局，"轨道"标签与
+                右侧时间读数被拆到上下两行，时间读数又正好压到右下角的速度映射
+                按钮上。`Flex` 由 Radix 自己给 `display: flex`，不依赖工具类。 */}
+            <Flex
+                align="center"
+                justify="between"
+                gap="2"
+                className="border-b border-qt-border px-2 bg-qt-window shadow-xs z-10 relative"
                 style={{ height: headerHeight }}
             >
                 <span className="hs-type-label font-semibold shrink-0">{t("common_tracks")}</span>
                 <TrackHeaderPlayheadTime />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
-            </Box>
+            </Flex>
             <div
                 ref={(el) => {
                     (listRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
@@ -2039,8 +2052,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 )
                                                             }
                                                         >
+                                                            {/* 指针的平移由内联 `transform` 承担（它必须与
+                                                                `rotate` 同处一条 transform 列表，才能让
+                                                                `transformOrigin` 的"底边中点"正好落在旋钮
+                                                                圆心）。Tailwind 4 把 `-translate-*` 编译成独立的
+                                                                `translate` 属性 —— 它作用在 `transform` 之前，
+                                                                会把旋转中心再上移 12px，指针因此绕着圆心之外的
+                                                                一点转。这里不能再挂那两个类。 */}
                                                             <span
-                                                                className="absolute left-1/2 top-1/2 w-[2px] h-3 -translate-x-1/2 -translate-y-full rounded-full bg-qt-highlight"
+                                                                className="absolute left-1/2 top-1/2 w-[2px] h-3 rounded-full bg-qt-highlight"
                                                                 style={{
                                                                     transform: `translate(-50%, -100%) rotate(${knobDeg}deg)`,
                                                                     transformOrigin: "50% 100%",

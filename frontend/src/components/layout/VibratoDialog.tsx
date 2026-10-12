@@ -1917,7 +1917,14 @@ export function VibratoDialog({
                         </Flex>
 
                         {/* ---- 编辑器 ---- */}
-                        <Box className="min-h-0 flex flex-col" style={{ minWidth: 0, flex: 1 }}>
+                        {/* `Flex`（而非 `Box className="flex …"`）：Radix 的 `.rt-Box`
+                            以未分层的 `display: block` 压过 Tailwind 4 分层后的
+                            `.flex`/`.flex-col`，会把这里退化成块级布局。 */}
+                        <Flex
+                            direction="column"
+                            className="min-h-0"
+                            style={{ minWidth: 0, flex: 1 }}
+                        >
                             {draft && previewSamples ? (
                                 <Flex direction="column" gap="3" className="min-h-0 flex-1">
                                     {/*
@@ -2411,7 +2418,7 @@ export function VibratoDialog({
                                     {t("vibrato_manager_empty")}
                                 </span>
                             )}
-                        </Box>
+                        </Flex>
                     </Flex>
 
                     {/* 预设行右键菜单：把"针对这一条预设"的动作收拢到指针处。

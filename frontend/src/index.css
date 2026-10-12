@@ -67,7 +67,17 @@
     --radius-xl: var(--qt-radius-lg);
     --radius-2xl: var(--qt-radius-lg);
     --radius-3xl: var(--qt-radius-lg);
-    --radius-full: 9999px;
+    /*
+     * 【为什么这里**不能**定义 `--radius-full`】
+     * 一旦定义，Tailwind 4 会把 `.rounded-full` 编译成
+     * `border-radius: var(--radius-full)`（而不是内联的 `calc(infinity * 1px)`）。
+     * 而 Radix Themes 在 `[data-radius='none'|'small'|'medium'|'large']` 上把
+     * `--radius-full` 定为 `0px`（只有 `full` 档是 9999px）—— 于是所有
+     * "全圆"元素（增益旋钮、轨道色圆点、加载转圈…）会**跟着外观设置的圆角
+     * 风格变成方角**。Radix 的样式表未分层，永远压过 Tailwind 的分层工具类，
+     * 靠提高优先级无解。不定义它，`.rounded-full` 就退回 Tailwind 的静态值，
+     * 与圆角设置彻底解耦。
+     * `--qt-radius-pill` 仍按原意读 Radix 的 `--radius-full`（见其 fallback）。 */
     --radius-qt-sm: var(--qt-radius-sm);
     --radius-qt-md: var(--qt-radius-md);
     --radius-qt-lg: var(--qt-radius-lg);
