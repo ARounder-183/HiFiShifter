@@ -15,12 +15,12 @@
 
 use tauri::WebviewWindow;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
-use windows_core_webview2::Interface;
+use windows_core::Interface;
 
 /// 禁用主窗口 WebView2 的浏览器级快捷键。失败仅记录警告，不影响启动。
 pub fn disable_browser_accelerator_keys(win: &WebviewWindow) {
     let dispatched = win.with_webview(|webview| {
-        let outcome = (|| -> windows_core_webview2::Result<()> {
+        let outcome = (|| -> windows_core::Result<()> {
             let controller = webview.controller();
             // SAFETY: COM 调用均在 WebView2 控制器存活期内执行；
             // with_webview 的闭包在 UI 线程上运行，满足 WebView2 线程模型。

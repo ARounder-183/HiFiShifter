@@ -50,15 +50,18 @@ use windows::Win32::Media::KernelStreaming::{
     WAVE_FORMAT_EXTENSIBLE,
 };
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
+use windows::Win32::System::Com::StructuredStorage::{
+    PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, StructuredStorage, CLSCTX_ALL,
-    COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, StructuredStorage, BLOB,
+    CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::{
     CreateEventA, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::System::Variant::VT_LPWSTR;
+use windows::Win32::System::Variant::{VT_BLOB, VT_LPWSTR};
 
 /// Runs system-sound (loopback) capture until the stop signal is set.
 pub fn run_loopback_capture(
@@ -148,10 +151,10 @@ struct ActivationHandler {
 impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
     fn ActivateCompleted(
         &self,
-        operation: Option<&IActivateAudioInterfaceAsyncOperation>,
+        operation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
     ) -> windows::core::Result<()> {
         let this = &self.this;
-        let Some(operation) = operation else {
+        let Some(operation) = operation.as_ref() else {
             let _ = this
                 .tx
                 .send(Err(windows::core::Error::from_hresult(E_POINTER)));
@@ -194,31 +197,38 @@ unsafe fn activate_process_loopback(pid: u32) -> Result<IAudioClient, String> {
     };
     // The activation parameters are passed as a VT_BLOB PROPVARIANT. The
     // pointer must stay valid until the async activation completes, so both
-    // values live in this frame until `recv_timeout` returns. We build the
-    // raw layout directly (instead of `PROPVARIANT::from_raw`) because the
-    // wrapper's `Drop` would call PropVariantClear on our stack blob.
-    let raw_prop = windows::core::imp::PROPVARIANT {
-        Anonymous: windows::core::imp::PROPVARIANT_0 {
-            Anonymous: windows::core::imp::PROPVARIANT_0_0 {
-                vt: 65u16, // VT_BLOB
+    // values live in this frame until `recv_timeout` returns.
+    //
+    // windows 0.61 dropped the raw `windows::core::imp::PROPVARIANT` type and
+    // made `PROPVARIANT` itself carry a `Drop` that calls `PropVariantClear`.
+    // For a `VT_BLOB` whose `pBlobData` points at *stack* memory that Drop
+    // would `CoTaskMemFree` a stack address — so the whole value is wrapped in
+    // `ManuallyDrop` to suppress it. (`PROPVARIANT_0.Anonymous` is already
+    // `ManuallyDrop<PROPVARIANT_0_0>` in 0.61; `vt` is the
+    // `#[repr(transparent)] VARENUM` newtype over `u16`. Both are
+    // layout-identical to the C struct — `layout_tests` pins that.)
+    let raw_prop = std::mem::ManuallyDrop::new(PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
                 wReserved1: 0,
                 wReserved2: 0,
                 wReserved3: 0,
-                Anonymous: windows::core::imp::PROPVARIANT_0_0_0 {
-                    blob: windows::core::imp::BLOB {
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
                         cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
                         pBlobData: &params as *const _ as *mut _,
                     },
                 },
-            },
+            }),
         },
-    };
+    });
     let (tx, rx) = mpsc::channel::<windows::core::Result<IUnknown>>();
     let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler { tx }.into();
     let operation = ActivateAudioInterfaceAsync(
         VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
         &IAudioClient::IID,
-        Some(&raw_prop as *const _ as *const windows::core::PROPVARIANT),
+        Some(&*raw_prop as *const _),
         &handler,
     )
     .map_err(|e| format!("recording_error_app_activation:{e}"))?;
@@ -634,8 +644,9 @@ unsafe fn device_friendly_name(device: &IMMDevice) -> Option<String> {
     let mut property_value = property_store
         .GetValue(&Properties::DEVPKEY_Device_FriendlyName as *const _ as *const _)
         .ok()?;
-    let prop_variant = &property_value.as_raw().Anonymous.Anonymous;
-    if prop_variant.vt != VT_LPWSTR.0 {
+    // 0.61 removed `PROPVARIANT::as_raw()`; the value itself is the raw struct.
+    let prop_variant: &PROPVARIANT_0_0 = &property_value.Anonymous.Anonymous;
+    if prop_variant.vt != VT_LPWSTR {
         return None;
     }
     let ptr_utf16 = *(&prop_variant.Anonymous as *const _ as *const *const u16);
@@ -848,5 +859,66 @@ impl Drop for ComGuard {
                 CoUninitialize();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use std::mem::{offset_of, size_of};
+    use windows::Win32::System::Variant::VARENUM;
+
+    /// The process-loopback activation path hand-builds a `VT_BLOB`
+    /// `PROPVARIANT` over a *stack* pointer and suppresses its `Drop`. Both the
+    /// hand-built layout and the `ManuallyDrop` suppression depend on the exact
+    /// windows-rs representation, so pin them here: a dependency bump that
+    /// changes the layout must fail this test rather than `CoTaskMemFree` a
+    /// stack address while recording inside a DAW.
+    #[test]
+    fn the_hand_built_propvariant_layout_is_pinned() {
+        assert_eq!(size_of::<VARENUM>(), 2, "VARENUM must stay a u16 newtype");
+        assert_eq!(offset_of!(PROPVARIANT_0_0, vt), 0, "vt leads the struct");
+        assert_eq!(
+            offset_of!(PROPVARIANT_0_0, Anonymous),
+            8,
+            "the value union follows the 8-byte header"
+        );
+        assert_eq!(size_of::<BLOB>(), 16);
+        assert_eq!(offset_of!(BLOB, pBlobData), 8);
+        assert_eq!(size_of::<PROPVARIANT>(), 24, "x64 PROPVARIANT is 24 bytes");
+    }
+
+    /// Round-trips the exact construction `activate_process_loopback` uses: the
+    /// tag must read back as `VT_BLOB` and the blob pointer must survive
+    /// unmangled.
+    #[test]
+    fn the_hand_built_blob_propvariant_reads_back_as_a_blob() {
+        let payload = AUDIOCLIENT_ACTIVATION_PARAMS::default();
+        let raw = std::mem::ManuallyDrop::new(PROPVARIANT {
+            Anonymous: PROPVARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                    vt: VT_BLOB,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: PROPVARIANT_0_0_0 {
+                        blob: BLOB {
+                            cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                            pBlobData: &payload as *const _ as *mut _,
+                        },
+                    },
+                }),
+            },
+        });
+        // SAFETY: `raw` was just built with the `VT_BLOB` arm active, so the
+        // union may be read through `Anonymous`.
+        let value = unsafe { &raw.Anonymous.Anonymous };
+        assert_eq!(value.vt, VT_BLOB);
+        let blob = unsafe { value.Anonymous.blob };
+        assert_eq!(blob.pBlobData as usize, &payload as *const _ as usize);
+        assert_eq!(
+            blob.cbSize as usize,
+            size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>()
+        );
     }
 }

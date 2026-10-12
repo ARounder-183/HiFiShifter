@@ -71,8 +71,10 @@ trash = "5.2.9"
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
 libc = "0.2"
-windows-core = "0.58"
-windows-core-webview2 = { package = "windows-core", version = "0.61" }
+# 0.61 与 `windows` / `webview2-com` 同版：三者的 windows-core 归一，此前
+# 0.58/0.61 并存迫使 `webview2_accelerators.rs` 用 `windows-core-webview2`
+# 别名做类型转换层，现在直接 `use windows_core::…` 即可。
+windows-core = "0.61"
 webview2-com = "0.38"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -118,8 +120,10 @@ vslib = []
 # Windows — DirectML (DX12, stable)
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
-# DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
-windows = { version = "0.58", features = [
+# DXGI adapter enumeration for DirectML device discovery (all GPU vendors).
+# 0.61 与 hifishifter-kernel / hifishifter-plugin 同版：App 构建里不再有第二份
+# `windows`。（`implement` 不是 0.61 的 feature —— 该宏已无条件可用。）
+windows = { version = "0.61", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Foundation",
     "Win32_Devices_Properties",
@@ -134,7 +138,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Security",
-    "implement",
 ] }
 
 # Linux x86_64 — WebGPU (Dawn/Vulkan backend, prebuilt binaries available)
