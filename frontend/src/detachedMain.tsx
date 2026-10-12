@@ -10,7 +10,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
-import "@radix-ui/themes/styles.css";
+/* Radix 的样式表由 `index.css` 以 `layer(radix)` 引入，不在这里 import（见其顶部说明）。 */
 import "./index.css";
 
 import { store } from "./app/store";

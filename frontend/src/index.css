@@ -1,4 +1,24 @@
+/*
+ * 级联层顺序。
+ *
+ * 【为什么 Radix 必须有自己的层】Radix Themes 的样式表里有
+ * `.rt-reset:where(button, select, input, …) { all: unset }` —— 一条未分层的
+ * `all: unset` 会**重置该元素上的每一个属性**。Tailwind 4 的工具类在
+ * `@layer utilities` 里，而未分层的声明在层叠中永远压过分层声明（层叠层先于
+ * 优先级比较），于是 `all: unset` 把工具类连同 `.rt-Box{display:block}`、
+ * `.rt-SelectTrigger` 等一起抹平：下拉框的 `min-w-[140px]`、`w-full`、
+ * 图标按钮的 `opacity-0 group-hover:opacity-100` 全部失效。v3 时代两者都未分层，
+ * 靠优先级（工具类 `.foo` 0,1,0 > `.rt-reset:where(...)` 0,0,0）工具类胜出 ——
+ * 迁移到 v4 后这条隐性约定被层叠层反转，这才是"界面变得奇怪"的根因。
+ *
+ * 把 Radix 放进 `radix` 层即可复原 v3 的语义：它**高于** `base`（preflight 不会
+ * 抹掉 Radix 的组件样式），**低于** `utilities`（工具类仍能覆盖 Radix），而应用
+ * 自己的未分层样式（本文件后半、dock.css、notebook.css）依旧压过两者。
+ * 层顺序由首次声明决定，所以这行必须写在 `@import` 之前。
+ */
+@layer theme, base, radix, components, utilities;
 @import "tailwindcss";
+@import "@radix-ui/themes/styles.css" layer(radix);
 
 @theme {
     --color-qt-window: var(--qt-window);

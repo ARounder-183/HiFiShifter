@@ -14,7 +14,12 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
-import "@radix-ui/themes/styles.css";
+/*
+ * Radix 的样式表**不在这里** import：它必须落在 `@layer radix` 里才能被 Tailwind
+ * 工具类覆盖，而 CSS 的 `@import ... layer()` 只能写在 CSS 内（见 `index.css`
+ * 顶部的层顺序说明）。在这里再 import 一次会得到一份**未分层**的副本，
+ * `.rt-reset { all: unset }` 会重新压过所有工具类。
+ */
 import "./index.css";
 import App from "./App.tsx";
 import { store } from "./app/store";
