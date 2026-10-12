@@ -322,9 +322,10 @@ fn run_cpal_input(
     let (config, sample_format) = pick_input_config(&device, sample_rate, channels, is_loopback)?;
     let channels_in = config.channels as usize;
     let channels_out = channels as usize;
-    let resampler = if config.sample_rate.0 != sample_rate {
+    // cpal 0.18：`SampleRate` 是 `u32` 的类型别名，字段访问 `.0` 不再存在。
+    let resampler = if config.sample_rate != sample_rate {
         Some(RateConverter::new(
-            config.sample_rate.0,
+            config.sample_rate,
             sample_rate,
             channels_out,
             channels_out,
@@ -333,14 +334,14 @@ fn run_cpal_input(
         None
     };
     let resampler = Arc::new(Mutex::new(resampler));
-    let err_callback = |err: cpal::StreamError| {
+    let err_callback = |err: cpal::Error| {
         log_error_limited!("[recording] input stream error: {err}");
     };
     let capture_ctx = ctx.clone();
     let capture_resampler = resampler.clone();
     let stream = device
         .build_input_stream_raw(
-            &config,
+            config,
             sample_format,
             move |data: &cpal::Data, _: &cpal::InputCallbackInfo| {
                 let samples = decode_input_data(data, channels_in, channels_out);
@@ -398,8 +399,10 @@ fn resolve_input_device(source: &str) -> Result<cpal::Device, String> {
         .input_devices()
         .map_err(|_| "recording_error_enumeration".to_string())?;
     for device in devices {
-        if let Ok(device_name) = device.name() {
-            if device_name == name {
+        // cpal 0.18：`Device::name()` 换成 `description()`，名称经
+        // `DeviceDescription::name()` 取（同样是人类可读名）。
+        if let Ok(description) = device.description() {
+            if description.name() == name {
                 return Ok(device);
             }
         }
@@ -420,8 +423,10 @@ fn resolve_loopback_device(device_id: &str) -> Result<cpal::Device, String> {
         .output_devices()
         .map_err(|_| "recording_error_enumeration".to_string())?;
     for device in devices {
-        if let Ok(device_name) = device.name() {
-            if device_name == name {
+        // cpal 0.18：`Device::name()` 换成 `description()`，名称经
+        // `DeviceDescription::name()` 取（同样是人类可读名）。
+        if let Ok(description) = device.description() {
+            if description.name() == name {
                 return Ok(device);
             }
         }
@@ -435,7 +440,8 @@ fn pick_input_config(
     channels: u16,
     is_loopback: bool,
 ) -> Result<(cpal::StreamConfig, SampleFormat), String> {
-    let want_rate = cpal::SampleRate(sample_rate);
+    // cpal 0.18：`SampleRate` 是 `u32` 别名，不再是 newtype。
+    let want_rate = sample_rate;
     let mut fallback: Option<(cpal::StreamConfig, SampleFormat)> = None;
 
     if is_loopback {
@@ -695,12 +701,12 @@ fn build_monitor_stream(
     queue: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream, String> {
     let (config, sample_format) = pick_monitor_config(device)?;
-    let err_callback = |err: cpal::StreamError| {
+    let err_callback = |err: cpal::Error| {
         log_error_limited!("[recording] monitor stream error: {err}");
     };
     let stream = device
         .build_output_stream_raw(
-            &config,
+            config,
             sample_format,
             move |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {
                 if let Some(samples) = data.as_slice_mut::<f32>() {
@@ -744,7 +750,7 @@ fn pick_monitor_config(
                 continue;
             }
             let config = range
-                .try_with_sample_rate(cpal::SampleRate(48_000))
+                .try_with_sample_rate(48_000)
                 .or_else(|| Some(range.with_max_sample_rate()));
             if let Some(config) = config {
                 return Ok((config.into(), SampleFormat::F32));
@@ -772,7 +778,10 @@ pub fn enumerate_devices() -> Vec<AudioDeviceInfo> {
 
     if let Ok(host_inputs) = cpal::default_host().input_devices() {
         for device in host_inputs {
-            let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+            let name = device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "Unknown".to_string());
             devices.push(AudioDeviceInfo {
                 id: format!("input:{name}"),
                 name,
@@ -806,7 +815,10 @@ fn enumerate_cpal_loopback_devices() -> Vec<AudioDeviceInfo> {
     });
     if let Ok(host_outputs) = cpal::default_host().output_devices() {
         for device in host_outputs {
-            let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+            let name = device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "Unknown".to_string());
             devices.push(AudioDeviceInfo {
                 id: format!("loopback:{name}"),
                 name,

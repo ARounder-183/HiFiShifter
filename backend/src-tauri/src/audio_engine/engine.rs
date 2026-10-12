@@ -411,7 +411,8 @@ impl AudioEngine {
                 }
             };
 
-            let sr = default_config.sample_rate().0;
+            // cpal 0.18 起 `SampleRate` 是 `u32` 的类型别名，不再是 newtype。
+            let sr = default_config.sample_rate();
             sample_rate_thread.store(sr, Ordering::Relaxed);
             worker_ready_thread.store(true, Ordering::Release);
 
@@ -598,7 +599,8 @@ impl AudioEngine {
             // 是 `Copy`，可以同时交给三个 `build_output_stream` 分支。一旦它捕获
             // 了 `meter_bus` 就不再是 `Copy`，必须逐分支构造。
             let err_fn = |bus: Arc<TrackMeterBus>| {
-                move |_err: cpal::StreamError| bus.record_rt_fault(RtFault::StreamError)
+                // cpal 0.18 移除了 `StreamError`，错误回调统一收 `cpal::Error`。
+                move |_err: cpal::Error| bus.record_rt_fault(RtFault::StreamError)
             };
 
             let stream = match sample_format {
@@ -609,7 +611,7 @@ impl AudioEngine {
                     let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
-                            &config,
+                            config,
                             move |data: &mut [f32], _| {
                                 let r =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -648,7 +650,7 @@ impl AudioEngine {
                     let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
-                            &config,
+                            config,
                             move |data: &mut [i16], _| {
                                 let r =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -687,7 +689,7 @@ impl AudioEngine {
                     let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
-                            &config,
+                            config,
                             move |data: &mut [u16], _| {
                                 let r =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

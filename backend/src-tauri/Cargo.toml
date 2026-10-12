@@ -40,7 +40,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.15"
 hound = "3"
-cpal = "0.15"
+cpal = "0.18"
 rubato = "0.15"
 arc-swap = "1.7"
 symphonia = { version = "0.6.1", features = ["all"] }
