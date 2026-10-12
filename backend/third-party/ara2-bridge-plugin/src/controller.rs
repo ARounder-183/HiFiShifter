@@ -198,12 +198,20 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn notify_model_updates(&mut self) {
-        if !self.content_readers.is_empty()
-            || self.runtime().map_or(true, PluginRuntime::is_editing)
-        {
+        // 【本地补丁 11】宿主用它让插件把待发的更新推回去（ARA 2.0 起替代旧的归档路径），
+        // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
+        // 因此把三条早退原因都记下来。
+        log::info!("[ara] host notifyModelUpdates");
+        if !self.content_readers.is_empty() {
+            log::warn!("[ara] notifyModelUpdates skipped: {} content reader(s) still live", self.content_readers.len());
+            return;
+        }
+        if self.runtime().map_or(true, PluginRuntime::is_editing) {
+            log::warn!("[ara] notifyModelUpdates skipped: the document is in an editing session");
             return;
         }
         let Some(host) = self.host.model_updates() else {
+            log::warn!("[ara] notifyModelUpdates skipped: the host provided no model-update interface");
             return;
         };
         for source in std::mem::take(&mut self.pending_analysis_starts) {
@@ -924,10 +932,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         reference: ARAAudioSourceRef,
         content_type: ARAContentType,
     ) -> ARABool {
-        ffi_bool(
-            self.audio_source_object(reference)
-                .is_some_and(|object| self.capabilities.is_content_available(object, content_type)),
-        )
+        // 【本地补丁 11】宿主据此判断"这个插件能读这条源的哪类内容"。我们不做分析，
+        // 因此一律答 false —— 但必须留痕：如果宿主正是靠它决定要不要把事件交给我们，
+        // 那么"一律 false"就是片段消失的原因。
+        let available = self
+            .audio_source_object(reference)
+            .is_some_and(|object| self.capabilities.is_content_available(object, content_type));
+        log::info!("[ara] host isAudioSourceContentAvailable(type={content_type}) -> {available}");
+        ffi_bool(available)
     }
 
     fn is_audio_source_content_analysis_incomplete(
@@ -1001,11 +1013,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         reference: ARAAudioSourceRef,
         content_type: ARAContentType,
     ) -> ARAContentGrade {
-        self.audio_source_object(reference).map_or(0, |object| {
+        // 【本地补丁 11】0 = 最低等级（未分析）。宿主可能等它升到"最终"才继续。
+        let grade = self.audio_source_object(reference).map_or(0, |object| {
             self.capabilities
                 .content_grade(object, content_type)
                 .as_raw()
-        })
+        });
+        log::info!("[ara] host getAudioSourceContentGrade(type={content_type}) -> {grade}");
+        grade
     }
 
     fn create_audio_source_content_reader(
@@ -1014,14 +1029,23 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         content_type: ARAContentType,
         range: *const ARAContentTimeRange,
     ) -> ARAContentReaderRef {
+        // 【本地补丁 11】宿主向我们索取某类内容的读取器。我们不做分析 ⇒ 交 null，
+        // 而宿主可能把它当成"这个插件对这条源没有可读内容"。
         let Some(object) = self.audio_source_object(reference) else {
+            log::warn!("[ara] createAudioSourceContentReader rejected: unknown audio source reference");
             return null_mut();
         };
         // SAFETY: the callback supplies null or one complete aligned ephemeral range.
         let Ok(range) = (unsafe { ContentTimeRange::copy_optional_from_ffi(range) }) else {
+            log::warn!("[ara] createAudioSourceContentReader rejected: malformed range");
             return null_mut();
         };
-        self.create_reader_for(object, content_type, range)
+        let reader = self.create_reader_for(object, content_type, range);
+        log::info!(
+            "[ara] host createAudioSourceContentReader(type={content_type}) -> {}",
+            if reader.is_null() { "null (no such content)" } else { "reader" }
+        );
+        reader
     }
 
     fn is_audio_modification_content_available(
