@@ -1139,7 +1139,7 @@ pub(crate) fn render_callback_u16(
 #[cfg(test)]
 mod tests {
     use super::{apply_mix_automation, sample_automation_curve};
-    use crate::audio_engine::types::{EngineClip, ResampledStereo};
+    use crate::audio_engine::types::{EngineClip, EngineSnapshot, ResampledStereo};
     use std::sync::Arc;
 
     #[test]
@@ -1659,5 +1659,49 @@ mod tests {
             (cur[(total + 1) * 2] - 1.0).abs() < 1e-6,
             "淡化区之后保持新值"
         );
+    }
+
+    /// App 实时路径的分配门禁。
+    ///
+    /// `render_callback_f32`（实时音频回调）每帧走到
+    /// `mix_snapshot_clips_into_scratch`，而淡化收口后这里多了一次跨 crate 的
+    /// `frame_fade_gain` 调用。插件侧的 RT 路径有 `test_allocator` 兜底，App 侧
+    /// 此前一条断言都没有（`measure_peak_alloc` 长期是死代码）。这里用真实的
+    /// 淡入/淡出 LUT 走一遍，把"实时混音零分配"钉住。
+    ///
+    /// 【必须串行】`measure_peak_alloc` 的计数器是进程级的；CI 与本地的工作区
+    /// 测试都以 `--test-threads=1` 运行（见 `.github/workflows/build.yml`）。
+    #[test]
+    fn mixing_a_faded_clip_on_the_audio_thread_does_not_allocate() {
+        let mut clip = clip_with_dyn(None, None);
+        clip.length_frames = 64;
+        clip.src = ResampledStereo {
+            sample_rate: 44_100,
+            frames: 64,
+            pcm: Arc::new(vec![0.5f32; 64 * 2]),
+        };
+        clip.src_end_frame = 64;
+        clip.fade_in_frames = 16;
+        clip.fade_out_frames = 16;
+        clip.fade_in_lut = Some(crate::fade_curves::global_fade_lut(0.0, 0.0, false));
+        clip.fade_out_lut = Some(crate::fade_curves::global_fade_lut(0.0, 0.0, true));
+        let snap = EngineSnapshot {
+            sample_rate: 44_100,
+            duration_frames: 64,
+            track_ids: Arc::new(vec!["track-a".to_string()]),
+            clips: Arc::new(vec![clip]),
+        };
+
+        let mut scratch = vec![0.0f32; 64 * 2];
+        // 预热一次：排除首次触碰（惰性初始化等）的一次性分配。
+        super::mix_snapshot_clips_into_scratch(64, &snap, 0, 64, &mut scratch, None);
+
+        let (_, peak) = crate::alloc_probe::measure_peak_alloc(|| {
+            super::mix_snapshot_clips_into_scratch(64, &snap, 0, 64, &mut scratch, None);
+        });
+        assert_eq!(peak, 0, "App 实时混音路径分配了 {peak} 字节");
+
+        // 顺带确认这条路径真的产出了非静音（否则"零分配"可能只是空跑）。
+        assert!(scratch.iter().any(|v| v.abs() > 1e-6), "混音结果不应全静音");
     }
 }

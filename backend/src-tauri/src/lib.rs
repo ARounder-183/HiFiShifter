@@ -163,15 +163,12 @@ pub(crate) mod alloc_probe {
     ///
     /// 基线取进入 `f` 时刻的存活字节数，因此结果只反映 `f` 自身的开销。
     /// 【前置条件】计数器是进程级的，调用期间不能有别的线程在分配 —— 使用者必须
-    /// 串行运行（见调用处的 `#[ignore]` 说明与 `--test-threads=1`）。
+    /// 串行运行。CI 与本地都以 `--test-threads=1` 跑工作区测试
+    /// （见 `.github/workflows/build.yml`），正是为了这个前置条件。
     ///
-    /// 【为什么保留而未删除】它是内存验收的计量设施（见上方 `alloc_probe` 的说明
-    /// 与 `docs/` 里的峰值内存验收标准），当前没有调用点是因为依赖它的 `#[ignore]`
-    /// 用例尚未回填。删掉它会把这条验收路径一并删掉。
-    #[allow(
-        dead_code,
-        reason = "内存峰值验收的计量设施；调用方（#[ignore] 用例）尚未回填"
-    )]
+    /// 调用点：`audio_engine::mix::tests` 的实时混音分配门禁 —— 音频回调
+    /// （`render_callback_f32`）逐帧走到 `mix_snapshot_clips_into_scratch`，
+    /// 该路径必须零分配。
     pub fn measure_peak_alloc<T>(f: impl FnOnce() -> T) -> (T, usize) {
         let base = LIVE.load(Ordering::Relaxed);
         PEAK.store(base, Ordering::Relaxed);
