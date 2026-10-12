@@ -4,28 +4,28 @@ use super::*;
 
 #[test]
 fn a_claimed_item_means_ready() {
-    let status = classify_host_audio(false, 3, 1);
+    let status = classify_host_audio(false, 3, 1, 0, 0);
     assert_eq!(status.state, HostAudioState::Ready);
     assert_eq!(status.waiting_items, 0);
 }
 
 #[test]
 fn an_empty_project_is_not_a_fault() {
-    let status = classify_host_audio(false, 0, 0);
+    let status = classify_host_audio(false, 0, 0, 0, 0);
     assert_eq!(status.state, HostAudioState::Ready);
     assert_eq!(status.waiting_items, 0);
 }
 
 #[test]
 fn items_without_regions_on_a_plain_track_are_awaiting() {
-    let status = classify_host_audio(false, 2, 0);
+    let status = classify_host_audio(false, 2, 0, 0, 0);
     assert_eq!(status.state, HostAudioState::AwaitingRegions);
     assert_eq!(status.waiting_items, 2);
 }
 
 #[test]
 fn items_without_regions_on_a_folder_parent_are_named_precisely() {
-    let status = classify_host_audio(true, 2, 0);
+    let status = classify_host_audio(true, 2, 0, 0, 0);
     assert_eq!(status.state, HostAudioState::FolderParentWithoutRegions);
     assert_eq!(status.waiting_items, 2);
 }
@@ -33,9 +33,48 @@ fn items_without_regions_on_a_folder_parent_are_named_precisely() {
 /// 认领数超过清单数（诊断计数口径不一致）时不得下溢成天文数字。
 #[test]
 fn an_over_counted_claim_does_not_underflow() {
-    let status = classify_host_audio(false, 1, 5);
+    let status = classify_host_audio(false, 1, 5, 0, 0);
     assert_eq!(status.state, HostAudioState::Ready);
     assert_eq!(status.waiting_items, 0);
+}
+
+/// **"拿到了 region 但一条都绑不上"必须与"还没拿到"分开报。**
+///
+/// 【为什么这是回归测试】这正是用户报障的场景：FX 挂在 folder 父轨上，宿主分配了
+/// 整组 region（实测 2 条），而候选 item 只有 1 个 ⇒ 按几何唯一匹配一条都对不上。
+/// 此前这个读数**只存在于刷屏日志里**（见 `BindingReport`），界面上没有任何对应物。
+/// 判据一旦退化成"等待中"，用户就又回到"时间线是空的、没有任何说明"。
+#[test]
+fn assigned_but_unbound_regions_are_reported_as_such() {
+    let status = classify_host_audio(false, 1, 0, 2, 2);
+    assert_eq!(status.state, HostAudioState::UnmatchedRegions);
+    assert_eq!(status.waiting_items, 1);
+    // 优先于 folder 判定：它更具体（folder 判定说的是"一个都没拿到"）。
+    let status = classify_host_audio(true, 1, 0, 2, 2);
+    assert_eq!(
+        status.state,
+        HostAudioState::UnmatchedRegions,
+        "已分配但未绑定比 folder 父轨更具体，必须优先报出"
+    );
+}
+
+/// 部分绑定（1/2）不算本态：有片段能显示，就不是"片段凭空消失"那种症状。
+///
+/// 【为什么钉住】把部分绑定也报成"未绑定"会让一个**大部分正常**的工程挂上一条
+/// 误导性的警告。本态专指"一条都没绑上"。
+#[test]
+fn partial_binding_is_not_reported_as_unmatched() {
+    let status = classify_host_audio(false, 2, 1, 2, 1);
+    assert_eq!(status.state, HostAudioState::Ready);
+}
+
+/// 读不出绑定读数（还没求解过）时传 0 ⇒ 退回既有判定，不得凭空报"未绑定"。
+#[test]
+fn an_unknown_binding_reading_falls_back_to_the_previous_classification() {
+    let status = classify_host_audio(false, 2, 0, 0, 0);
+    assert_eq!(status.state, HostAudioState::AwaitingRegions);
+    let status = classify_host_audio(true, 2, 0, 0, 0);
+    assert_eq!(status.state, HostAudioState::FolderParentWithoutRegions);
 }
 
 /// `process` 选快照必须按 `setupProcessing` 的**权威率**，不能按宿主上下文率拒绝。
@@ -92,6 +131,18 @@ fn classification_names_are_stable_catalog_keys() {
         HostAudioState::AraOnlyReadOnly.as_str(),
         HostAudioState::HostUnidentified.as_str(),
         "ARA-only 是「只读」，不是「不受支持」"
+    );
+    // 【为什么单独钉住这一条】它是"拿到了 region 但绑不上"的唯一分类名。与
+    // `folder_parent_without_regions` 合并会让"宿主分配了但匹配不上"被说成
+    // "宿主没分配"，而两者的成因与处置不同。
+    assert_eq!(
+        HostAudioState::UnmatchedRegions.as_str(),
+        "unmatched_regions"
+    );
+    assert_ne!(
+        HostAudioState::UnmatchedRegions.as_str(),
+        HostAudioState::FolderParentWithoutRegions.as_str(),
+        "「分配了但绑不上」不是「没拿到 region」"
     );
 }
 

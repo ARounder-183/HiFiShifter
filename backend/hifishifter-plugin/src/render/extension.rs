@@ -34,6 +34,34 @@ struct CachedHostGeometry {
     value: Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
 }
 
+/// 一次 region → 宿主 item 绑定求解的**可判等读数**。
+///
+/// 【为什么需要指纹】"2 个 region 对 1 个候选 item"是 **folder 父轨上的结构性不匹配**：
+/// 宿主工程不变，它就永远匹配不上。而无条件日志会跟着 UI 定时器以 10Hz 无限重放 ——
+/// 实测 2026-10-12 那一次 35 分钟输出了 16,769 条，把三个 8MB 轮转件全部写满。
+/// 指纹相同即"没有任何新信息"，不输出。
+///
+/// 【为什么不放几何本身】几何每次刷新都可能有微小差异（宿主浮点读数），放进去会让
+/// 指纹永远不同、去重彻底失效。这里只放**身份与数量**：哪些 region 被分配、哪些绑上了、
+/// 哪些没绑上、候选有多少个。
+#[derive(Clone, PartialEq, Eq)]
+struct BindingReport {
+    assigned: Vec<u64>,
+    bound: Vec<u64>,
+    unmatched: Vec<u64>,
+    dropped: usize,
+    candidates: usize,
+}
+
+/// 绑定失败是否属于"由宿主工程结构决定、不会自行变化"的一类。
+///
+/// 【为什么必须区分】只有这一类才值得退避：它是"重试一万次也一样"的读数。授权撤销、
+/// 文档关闭、扩展接口消失都是**状态变化**，它们要么很快自愈、要么已经是终态 ——
+/// 对它们退避只会拖慢恢复。
+fn is_structural_binding_failure(error: &str) -> bool {
+    error.contains("matched a unique host item") || error.contains("geometry incompatible")
+}
+
 /// 两个宿主/ARA 浮点量是否相容；判据全局唯一，见 `host::geometry::host_value_compatible`
 /// （绑定 / 分割规划 / 写回前置检查 / 剪贴板共用，避免"规划接受、绑定拒绝"的不对称）。
 fn compatible(a: f64, b: f64) -> bool {
@@ -137,6 +165,18 @@ pub(crate) enum HostAudioState {
     /// 音频能出、参数能调，只读的只是**片段几何写回**。给一个正常工作的宿主挂一条
     /// "不受支持"的横幅，用户会去查一个不存在的问题。
     AraOnlyReadOnly,
+    /// 宿主**分配了** region，但没有一条能绑到唯一宿主 item。
+    ///
+    /// 【为什么必须与 `FolderParentWithoutRegions` 分开】两者的用户可见症状相同（片段
+    /// 是空的、能拖、没内容），但事实不同：那一态是"一个 region 都没拿到"（宿主尚未
+    /// 分配，或 FX 挂在 folder 父轨上）；这一态是"拿到了，但按几何唯一匹配对不上"
+    /// （folder 父轨的 FX 会拿到整组 region，而候选 item 数少于 region 数，或几何不
+    /// 相等）。混为一谈会让提示说不准。
+    ///
+    /// 【为什么必须让用户看见】这个读数此前**只存在于日志里** —— 而且是刷屏的那两条
+    /// （见 [`BindingReport`]）。用户界面上没有任何对应物：时间线是空的，没有任何说明。
+    /// 把它接进状态链之后，日志可以安静，用户拿到的是**一句可读的说明**。
+    UnmatchedRegions,
 }
 
 impl HostAudioState {
@@ -148,6 +188,7 @@ impl HostAudioState {
             HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
             HostAudioState::HostUnidentified => "host_unidentified",
             HostAudioState::AraOnlyReadOnly => "ara_only_read_only",
+            HostAudioState::UnmatchedRegions => "unmatched_regions",
         }
     }
 }
@@ -162,16 +203,26 @@ pub(crate) struct HostAudioStatus {
 
 /// 纯函数：由宿主侧事实判定状态。可独立单测，不需要 REAPER。
 ///
-/// 判据只用两项可核实的事实：本 FX 轨是不是 folder 父轨、清单里有多少 item 认领
-/// 到了 region。不推断、不猜 —— 读不出 folder 结构时调用方传 `false`，此时只会
-/// 退化成"等待中"，不会给出一个可能指错方向的 folder 提示。
+/// 判据只用可核实的事实：本 FX 轨是不是 folder 父轨、清单里有多少 item 认领到了
+/// region、以及宿主**分配**了多少 region、其中多少条没绑上。不推断、不猜 ——
+/// 读不出 folder 结构时调用方传 `false`，读不出绑定读数时两个 region 计数传 `0`，
+/// 此时只会退化成"等待中"，不会给出一个可能指错方向的提示。
+///
+/// 【为什么 region 计数与 `claimed_items` 都要】`claimed_items` 来自**清单侧**（item
+/// 被谁认领），region 计数来自**绑定侧**（求解结果）。"分配了但一条都没绑上"这个事实
+/// 只有绑定侧有，而它正是 folder 父轨上片段凭空消失的成因。
 pub(crate) fn classify_host_audio(
     fx_is_folder_parent: bool,
     item_count: usize,
     claimed_items: usize,
+    regions_assigned: usize,
+    regions_unmatched: usize,
 ) -> HostAudioStatus {
     let waiting_items = item_count.saturating_sub(claimed_items);
-    let state = if claimed_items > 0 || item_count == 0 {
+    let state = if regions_assigned > 0 && regions_unmatched > 0 && claimed_items == 0 {
+        // 拿到了 region，但一条都没绑上 —— 比"还没拿到"更具体，优先报它。
+        HostAudioState::UnmatchedRegions
+    } else if claimed_items > 0 || item_count == 0 {
         // 有认领 = 正常；一个 item 都没有 = 没有"等待"可言（空工程不该报障）。
         HostAudioState::Ready
     } else if fx_is_folder_parent {
@@ -252,6 +303,20 @@ pub(crate) struct ExtensionOwner {
     /// 20ms，枚举降到 [`HOST_ENUMERATION_INTERVAL`]。宿主真的变了时，下一次节流点就会
     /// 捕捉到（≤100ms 延迟），用户不可感。
     last_enumeration: Mutex<Option<std::time::Instant>>,
+    /// 上一次对外报告过的绑定读数（见 [`BindingReport`]）。
+    binding_report: Mutex<Option<BindingReport>>,
+    /// 连续"结构性绑定失败"的次数（见 [`ExtensionOwner::enumeration_interval`]）。
+    ///
+    /// 【为什么必须退避】`HOST_ENUMERATION_INTERVAL`（100ms）是研究"宿主刚改了几何"
+    /// 定出来的节奏，把它用在**永不成功**的重试上，等于每 110ms 完整枚举一遍宿主工程
+    /// （folder 树 + 每条后代轨道的 item × take）。实测 35 分钟 ≈ 22,000 次 ——
+    /// 日志刷屏只是这件事可见的那一部分。
+    enumeration_backoff: std::sync::atomic::AtomicU32,
+    /// 上一次结构性失败时看到的宿主几何代次；用于"工程真变了就立刻回到全速"。
+    ///
+    /// 【为什么不能省】退避不能牺牲响应速度：用户拖完 item 必须立刻看到新几何，
+    /// 而不是等 4 秒。代次一变就清零档位，这条是唯一的保证。
+    last_failed_revision: Mutex<Option<Option<i32>>>,
 }
 
 /// 宿主几何/清单枚举的节流间隔（见 `ExtensionOwner::last_enumeration`）。
@@ -510,33 +575,15 @@ impl ExtensionOwner {
         let mut seen = std::collections::HashSet::<String>::new();
         let claimed = bound.len();
         bound.retain(|entry| seen.insert(entry.geometry.item_id.clone()));
-        if bound.len() != claimed {
-            log::warn!(
-                "[ara] {} region(s) dropped: they claimed an item another region already owns",
-                claimed - bound.len()
-            );
-        }
-        if stamp.3.len() > 1 {
-            // 用户报障时最需要的一行：这个实例是不是"一个 FX 管一组 region"。
-            log::info!(
-                "[ara] multi-region owner: {} assigned region(s), {} bound to a unique host \
-                 item, {} candidate item(s)",
-                stamp.3.len(),
-                bound.len(),
-                candidates.len()
-            );
-        }
-        if !unmatched.is_empty() {
-            // 认领不到的 region 会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
-            // 这正是"子轨道 Item 没有变成真 Clip"的直接读数。
-            log::warn!(
-                "[ara] {} of {} assigned region(s) have no unique host item (candidates={}); \
-                 they stay unbound",
-                unmatched.len(),
-                stamp.3.len(),
-                candidates.len()
-            );
-        }
+        // 一次说清、且只在读数变化时输出（见 `report_binding`）。此前这里是两条无条件
+        // 日志（INFO + WARN），在 folder 父轨场景下以 10Hz 重放 35 分钟共 16,769 条。
+        self.report_binding(&BindingReport {
+            assigned: stamp.3.clone(),
+            bound: bound.iter().map(|entry| entry.region_key).collect(),
+            unmatched: unmatched.clone(),
+            dropped: claimed.saturating_sub(bound.len()),
+            candidates: candidates.len(),
+        });
         if bound.is_empty() {
             return Err("no assigned ARA region matched a unique host item".into());
         }
@@ -545,6 +592,105 @@ impl ExtensionOwner {
         }
         Ok(bound)
     }
+
+    /// 报告一次 region → 宿主 item 的绑定读数；**只在读数变化时**输出。
+    ///
+    /// 【为什么必须去重】见 [`BindingReport`]：folder 父轨上的"2 个 region 对 1 个候选"
+    /// 是结构性不匹配，100ms 内不会自愈。无条件日志会跟着 UI 定时器无限重放。
+    ///
+    /// 【为什么还要限流兜底】指纹是"变化检测"，限流是"变化速率上限"。两者叠加覆盖两种
+    /// 失败模式：指纹包含会漂移的字段 ⇒ 变化检测失效，由限流兜住；读数在两个值之间
+    /// 高频抖动 ⇒ 变化检测每次都为真，同样由限流兜住（键含指纹，两个值各自计数）。
+    /// 最坏情况是 10 秒一条，与"刷屏"已经不沾边。
+    fn report_binding(&self, report: &BindingReport) {
+        if !self.binding_report_is_new(report) {
+            return;
+        }
+        let detail = format!(
+            "{} assigned, {} bound, {} unmatched, {} dropped (candidates={})",
+            report.assigned.len(),
+            report.bound.len(),
+            report.unmatched.len(),
+            report.dropped,
+            report.candidates
+        );
+        // 键取**读数本身**：不同读数各自限流，因此真实变化不会被别的读数挤掉。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            &format!("ara:binding-report:{detail}"),
+            format_args!("[ara] region→item binding: {detail}"),
+        );
+    }
+
+    /// 这份读数是否**尚未报告过**；是则记下它。纯状态判定，可独立单测。
+    ///
+    /// 【为什么与输出分开】去重逻辑是这条修复的核心（它决定"刷屏"会不会回来），
+    /// 必须能脱离日志后端被断言 —— 与 `log_limiter::limited_decision` 同一手法。
+    fn binding_report_is_new(&self, report: &BindingReport) -> bool {
+        // 全部绑上 = 没有可抱怨的读数。顺手清掉指纹，让下一次真实失败**必然**输出
+        // （否则"失败 → 成功 → 同样的失败"会被去重吞掉第二条）。
+        if report.unmatched.is_empty() && report.dropped == 0 {
+            self.binding_report.lock_or_recover().take();
+            return false;
+        }
+        let mut last = self.binding_report.lock_or_recover();
+        if last.as_ref() == Some(report) {
+            return false;
+        }
+        *last = Some(report.clone());
+        true
+    }
+
+    /// 当前的重枚举间隔：无失败时是 [`HOST_ENUMERATION_INTERVAL`]，连续结构性失败时退避。
+    ///
+    /// 【为什么用绝对档位而不是乘法】档位表要能一眼看出"最坏情况多久枚举一次"。乘法
+    /// 形式（100ms × 2^n）在 n 大时会越过 4 秒上限，得再补一次钳制 —— 不如直接查表。
+    fn enumeration_interval(&self) -> std::time::Duration {
+        match self
+            .enumeration_backoff
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            0 => HOST_ENUMERATION_INTERVAL,
+            1..=2 => std::time::Duration::from_millis(250),
+            3..=5 => std::time::Duration::from_secs(1),
+            _ => std::time::Duration::from_secs(4),
+        }
+    }
+
+    /// 按一次几何求解的结果更新退避档位（见 [`ExtensionOwner::enumeration_interval`]）。
+    fn note_geometry_outcome(
+        &self,
+        geometry: &Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
+        revision: Option<i32>,
+    ) {
+        let Err(error) = geometry else {
+            self.enumeration_backoff
+                .store(0, std::sync::atomic::Ordering::Release);
+            *self.last_failed_revision.lock_or_recover() = None;
+            return;
+        };
+        if !is_structural_binding_failure(error) {
+            // 授权撤销 / 文档关闭 / 扩展接口消失：状态变化，不是结构性问题。
+            // 退避它们只会拖慢恢复，且它们本来就不会以 10Hz 重放。
+            return;
+        }
+        let mut last = self.last_failed_revision.lock_or_recover();
+        if *last != Some(revision) {
+            // 宿主几何代次变了（用户真的动了工程）⇒ 回到全速，本次不计档。
+            // 【为什么不在这里也 +1】那会让"改完工程"的第一次重试落在 250ms 档，
+            // 而不是 100ms —— 退避不得牺牲响应速度。
+            *last = Some(revision);
+            self.enumeration_backoff
+                .store(0, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        let _ = self.enumeration_backoff.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |level| Some(level.saturating_add(1)),
+        );
+    }
+
     /// actor/worker只可消费UI冻结的Rust值，不沿此访问器调用host；代次变化明确不可用。
     // 只读几何元数据访问器保留，供worker消费冻结值。
     #[cfg(test)]
@@ -612,12 +758,16 @@ impl ExtensionOwner {
         self.refresh_host_transport_inner(false);
     }
 
-    /// UI 定时器路径：时钟每次跟，几何/清单按 [`HOST_ENUMERATION_INTERVAL`] 节流。
+    /// UI 定时器路径：时钟每次跟，几何/清单按 [`ExtensionOwner::enumeration_interval`] 节流。
     ///
     /// 【为什么时钟与枚举分开节流】定时器是 20ms（50Hz）。播放光标必须跟得上
     /// （`host.sample` 很便宜），但几何/清单枚举即使有代次缓存，每 tick 仍要付
     /// `GetProjectStateChangeCount` 等若干宿主调用，还会与 actor/渲染线程争同一把
     /// document 事务。宿主真变了时下一次节流点会捕捉到（≤100ms），用户不可感。
+    ///
+    /// 【为什么节流间隔是动态的】连续的结构性绑定失败（folder 父轨上"2 个 region 对
+    /// 1 个候选"）不会在 100ms 内自愈，却会以这个节奏完整枚举宿主工程。退避把这种
+    /// "永不成功"的重试降到 4 秒一次，而宿主几何代次一变就立刻回到 100ms。
     ///
     /// 【为什么不把节流放进 `refresh_host_transport` 本身】写回路径（导入/分割/
     /// 剪贴板）与测试依赖它**同步**把新几何取回来；节流在那里会把"刚写完就读到新值"
@@ -652,7 +802,7 @@ impl ExtensionOwner {
         if throttled {
             let mut last = self.last_enumeration.lock_or_recover();
             let now = std::time::Instant::now();
-            if last.is_some_and(|last| now.duration_since(last) < HOST_ENUMERATION_INTERVAL) {
+            if last.is_some_and(|last| now.duration_since(last) < self.enumeration_interval()) {
                 return;
             }
             *last = Some(now);
@@ -812,12 +962,24 @@ impl ExtensionOwner {
                 tracks.insert(track.guid.clone(), track);
             }
         }
-        // 分类只用两项可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
+        // 分类只用可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
         // `None` ⇒ 退化成"等待中"，绝不给出一个可能指错方向的 folder 提示。
+        //
+        // 绑定侧读数取自 `binding_report`：它与刷屏日志**同源** —— 同一份事实既决定
+        // 日志输出，也决定用户看到的提示。`None` 表示"全部绑上了"（或还没求解过），
+        // 此时两个 region 计数传 0，分类退回既有的 folder / awaiting 判定。
+        let (regions_assigned, regions_unmatched) = self
+            .binding_report
+            .lock_or_recover()
+            .as_ref()
+            .map(|report| (report.assigned.len(), report.unmatched.len()))
+            .unwrap_or((0, 0));
         let status = classify_host_audio(
             fx_folder_depth.is_some_and(|depth| depth >= 1),
             item_count,
             claimed_items,
+            regions_assigned,
+            regions_unmatched,
         );
         if !allowed() || host.geometry_revision(allowed).ok() != Some(change) {
             return;
@@ -1039,6 +1201,10 @@ impl ExtensionOwner {
         if geometry.is_ok() && (before.is_none() || before != after) {
             geometry = Err("host project changed during cached geometry refresh".into());
         }
+        // 退避档位按**求解结果**更新（见 `enumeration_interval`）。放在缓存事务之前：
+        // 它只读结果与代次，不碰文档锁。`after` 是本次尝试结束时的宿主几何代次，
+        // 用它判断"宿主工程真的变了"。
+        self.note_geometry_outcome(&geometry, after);
         let _transaction = stamp.0.transaction.lock_or_recover();
         let mut prepare_fades = false;
         if !self.is_closed()
