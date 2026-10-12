@@ -4907,8 +4907,7 @@ const sessionSlice = createSlice({
                 // 播放光标跳变的主要根源）。直接丢弃，等下一次轮询读取新态。
                 // arg 缺省（如测试夹具）时保持旧行为不拦截。
                 const arg = action.meta.arg as
-                    | { epoch?: number; dispatchedAtMs?: number }
-                    | undefined;
+                    { epoch?: number; dispatchedAtMs?: number } | undefined;
                 if (arg && typeof arg.epoch === "number" && arg.epoch !== state._transportEpoch) {
                     return;
                 }
@@ -5403,8 +5402,7 @@ const sessionSlice = createSlice({
             .addCase(pickProjectToImport.fulfilled, (state, action) => {
                 state.busy = false;
                 const payload = action.payload as
-                    | { ok: true; canceled: true }
-                    | { ok: true; canceled: false; path: string };
+                    { ok: true; canceled: true } | { ok: true; canceled: false; path: string };
                 if (!payload || (payload as { canceled?: boolean }).canceled) {
                     state.status = "Import canceled";
                 }

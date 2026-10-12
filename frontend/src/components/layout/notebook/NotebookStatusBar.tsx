@@ -38,8 +38,7 @@ export function NotebookStatusBar({
             if (editor.isDestroyed) return;
             try {
                 const storage = editor.storage.characterCount as
-                    | { characters?: () => number }
-                    | undefined;
+                    { characters?: () => number } | undefined;
                 setCharacters(storage?.characters?.() ?? editor.state.doc.textContent.length);
             } catch {
                 // 统计只是状态栏数字：拿不到就保持上一次的值。

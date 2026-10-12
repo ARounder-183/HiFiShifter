@@ -164,11 +164,7 @@ export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 export type HostMediaReason =
-    | "take_switched"
-    | "unclaimed"
-    | "folder_parent"
-    | "awaiting_region"
-    | "source_read_failed";
+    "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region" | "source_read_failed";
 
 /**
  * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。

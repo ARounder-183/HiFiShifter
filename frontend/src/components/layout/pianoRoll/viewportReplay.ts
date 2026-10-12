@@ -77,10 +77,7 @@ export interface ViewportReplayInput {
 
 /** 不重放的原因（调用方据此决定要不要打开发告警）。 */
 export type ViewportReplaySkipReason =
-    | "projection-unchanged"
-    | "not-dragging"
-    | "pressed-buttons-lost"
-    | "no-last-move";
+    "projection-unchanged" | "not-dragging" | "pressed-buttons-lost" | "no-last-move";
 
 /** 合成事件载荷（直接交给 `new PointerEvent("pointermove", payload)`）。 */
 export interface ViewportReplayPayload {

@@ -55,10 +55,7 @@ export interface FolderMediaGroup {
 
 /** 顶层路径为什么没被扫描。 */
 export type FolderScanRejectReason =
-    | "drive_root"
-    | "not_found"
-    | "not_a_directory"
-    | "virtual_path";
+    "drive_root" | "not_found" | "not_a_directory" | "virtual_path";
 
 export interface FolderMediaScan {
     groups: FolderMediaGroup[];

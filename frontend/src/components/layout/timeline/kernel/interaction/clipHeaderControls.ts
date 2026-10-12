@@ -33,14 +33,7 @@
 
 /** header 内的可交互控件；`null` = 未命中任何控件。 */
 export type ClipHeaderControl =
-    | "mute"
-    | "formant"
-    | "chain"
-    | "gain-knob"
-    | "gain-label"
-    | "rate-label"
-    | "name"
-    | null;
+    "mute" | "formant" | "chain" | "gain-knob" | "gain-label" | "rate-label" | "name" | null;
 
 /**
  * 控件命中所需的样式字段。

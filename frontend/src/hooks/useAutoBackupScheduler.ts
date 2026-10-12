@@ -28,10 +28,15 @@ export function useAutoBackupScheduler({
     const settingsRef = useRef(settings);
     const paramsEpochRef = useRef(paramsEpoch);
     const projectDirtyRef = useRef(projectDirty);
-    const baselineRef = useRef<{ timestampMs: number; paramsEpoch: number }>({
-        timestampMs: Date.now(),
-        paramsEpoch,
-    });
+    // `Date.now()` 不能在渲染期求值：渲染必须幂等，React Compiler 的 purity 规则
+    // 会拦下（而且每次渲染都会白算一次）。基线只在 effect/回调里读，因此在挂载
+    // effect 里写一次即可 —— 首个读取方是 1 秒后的定时器。
+    const baselineRef = useRef<{ timestampMs: number; paramsEpoch: number } | null>(null);
+    useEffect(() => {
+        baselineRef.current ??= { timestampMs: Date.now(), paramsEpoch };
+        // 只取挂载时的基线；后续由 runTimedBackupNow 覆写。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     const waitingForEditRef = useRef(false);
     const inFlightRef = useRef(false);
     const lastStatusRef = useRef(status);
@@ -106,11 +111,12 @@ export function useAutoBackupScheduler({
                 1000,
                 Math.floor(settingsRef.current.timedBackupIntervalSec * 1000),
             );
-            const elapsedMs = Date.now() - baselineRef.current.timestampMs;
+            const elapsedMs = Date.now() - baselineRef.current!.timestampMs;
             if (elapsedMs < intervalMs) return;
 
             const hasEditSinceBaseline =
-                projectDirtyRef.current && paramsEpochRef.current > baselineRef.current.paramsEpoch;
+                projectDirtyRef.current &&
+                paramsEpochRef.current > baselineRef.current!.paramsEpoch;
             if (!hasEditSinceBaseline) {
                 waitingForEditRef.current = true;
                 return;
@@ -127,7 +133,7 @@ export function useAutoBackupScheduler({
         if (!settings.timedBackupEnabled) return;
         if (!waitingForEditRef.current) return;
 
-        const hasEditSinceBaseline = projectDirty && paramsEpoch > baselineRef.current.paramsEpoch;
+        const hasEditSinceBaseline = projectDirty && paramsEpoch > baselineRef.current!.paramsEpoch;
         if (!hasEditSinceBaseline) return;
 
         void runTimedBackupNow();

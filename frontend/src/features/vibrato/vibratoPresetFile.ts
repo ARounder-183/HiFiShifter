@@ -40,8 +40,7 @@ export type VibratoPresetFileError =
     | "noPresets";
 
 export type VibratoPresetFileResult =
-    | { ok: true; presets: VibratoPreset[] }
-    | { ok: false; error: VibratoPresetFileError };
+    { ok: true; presets: VibratoPreset[] } | { ok: false; error: VibratoPresetFileError };
 
 /**
  * 序列化预设为文件文本（2 空格缩进，便于手工查看与 diff）。

@@ -118,9 +118,7 @@ const PREVIEW_NAV_DEBOUNCE_MS = 160;
 
 /** 面板内的行内编辑状态。 */
 type EditingState =
-    | { kind: "rename"; path: string; initial: string }
-    | { kind: "newFolder" }
-    | null;
+    { kind: "rename"; path: string; initial: string } | { kind: "newFolder" } | null;
 
 /** 一次进行中的文件拖拽（自定义 pointer 事件，替代 HTML5 drag API）。 */
 interface FileDragState extends FileDragSource {

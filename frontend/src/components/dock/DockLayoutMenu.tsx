@@ -55,12 +55,7 @@ import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
  * `MenuBar` 又会让停靠 UI 的细节漏进菜单栏。这里用模块级单值桥接：菜单项
  * 置位、常驻宿主订阅。快照是原始值，`useSyncExternalStore` 不会抖。 */
 type DockDialogKind =
-    | "settings"
-    | "namePrompt"
-    | "resetConfirm"
-    | "deletePresetConfirm"
-    | "notice"
-    | null;
+    "settings" | "namePrompt" | "resetConfirm" | "deletePresetConfirm" | "notice" | null;
 
 let dockDialogKind: DockDialogKind = null;
 const dockDialogListeners = new Set<() => void>();

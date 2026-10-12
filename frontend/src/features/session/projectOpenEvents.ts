@@ -18,10 +18,7 @@ export const IMPORT_PROJECT_PICK_EVENT = "hifi:importProjectPick";
 export const IMPORT_MIDI_PATH_EVENT = "hifi:import-midi-path";
 
 export type ExternalFileActionKind =
-    | "openProject"
-    | "importVocalShifter"
-    | "importReaper"
-    | "importAudio";
+    "openProject" | "importVocalShifter" | "importReaper" | "importAudio";
 
 export type ExternalFileActionDetail = {
     kind: ExternalFileActionKind;

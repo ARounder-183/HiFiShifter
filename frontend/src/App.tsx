@@ -324,12 +324,7 @@ const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
 };
 
 type SourceFileChangeAction =
-    | "pending"
-    | "processing"
-    | "ignored"
-    | "reloaded"
-    | "replaced"
-    | "failed";
+    "pending" | "processing" | "ignored" | "reloaded" | "replaced" | "failed";
 
 type SourceFileChangedItem = SourceFileChange & {
     action: SourceFileChangeAction;
@@ -2207,8 +2202,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const ignored = ignoredSourcePathsRef.current;
             const changes = normalizeSourceFileChanges(result?.changed ?? []).filter(
                 (change) => !ignored.has(change.source_path),
@@ -2244,8 +2238,7 @@ function AppInner() {
                 }
 
                 const refreshed = (await webApi.checkSourceFilesChanged()) as
-                    | { changed?: SourceFileChange[] }
-                    | undefined;
+                    { changed?: SourceFileChange[] } | undefined;
                 const remaining = normalizeSourceFileChanges(refreshed?.changed ?? []).filter(
                     (change) => !ignored.has(change.source_path),
                 );
@@ -2289,8 +2282,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
 
             setSourceFileChangedDialog((prev) => {
@@ -2350,8 +2342,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const changes = normalizeSourceFileChanges(result?.changed ?? []);
             markMissingSourceFilesUnavailable(changes);
             const items = changes.map((change) => ({ ...change, action: "pending" as const }));
@@ -2511,8 +2502,7 @@ function AppInner() {
             let becameMissing = false;
             try {
                 const result = (await webApi.checkSourceFilesChanged()) as
-                    | { changed?: SourceFileChange[] }
-                    | undefined;
+                    { changed?: SourceFileChange[] } | undefined;
                 const latest = normalizeSourceFileChanges(result?.changed ?? []).find(
                     (change) =>
                         change.clip_id === item.clip_id ||
@@ -2689,8 +2679,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
             const baseItems = sourceFileInitialChangesRef.current.map((item) => ({ ...item }));
             const changes = mergeLatestSourceFileChanges(baseItems, rawChanges)

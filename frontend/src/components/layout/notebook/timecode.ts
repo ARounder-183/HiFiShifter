@@ -15,8 +15,7 @@ export const SEEK_SCHEME = "hifi://seek/";
 export const CLIP_SCHEME = "hifi://clip/";
 
 export type NotebookInternalLink =
-    | { type: "seek"; seconds: number }
-    | { type: "clip"; clipId: string };
+    { type: "seek"; seconds: number } | { type: "clip"; clipId: string };
 
 /** 解析内部链接；不是内部链接返回 null。 */
 export function parseInternalLink(href: string): NotebookInternalLink | null {

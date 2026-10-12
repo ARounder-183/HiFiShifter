@@ -2072,8 +2072,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             disabledGroupIds: [...d.disabledGroupIds],
             // 静音检测预览：由细节层画半透明红色（旧实现是 ClipItem 内的 DOM 层）。
             silenceSegmentsByClipId: d.silenceSegmentsByClipId as
-                | Record<string, ReadonlyArray<readonly [number, number]>>
-                | undefined,
+                Record<string, ReadonlyArray<readonly [number, number]>> | undefined,
             // 多 Take lane 分界线：与波形面 / 点击命中同一套 takeLanes 数学。
             showAllTakes: d.showAllTakes,
         });

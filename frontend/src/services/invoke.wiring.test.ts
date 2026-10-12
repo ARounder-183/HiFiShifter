@@ -114,9 +114,7 @@ describe("invoke wiring", () => {
         //（"可选单参"命令在无参调用时返回 undefined；无参命令返回 {}）。
         const unwired = [...invoked].filter((cmd) => {
             const mapped = buildTauriArgs(cmd, []) as
-                | Record<string, unknown>
-                | undefined
-                | { __unwired: true };
+                Record<string, unknown> | undefined | { __unwired: true };
             return mapped != null && "__unwired" in mapped;
         });
         expect(unwired).toEqual([]);

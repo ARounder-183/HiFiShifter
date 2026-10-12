@@ -15,13 +15,7 @@
 
 /** 参数式波形的形状。`skew` 的含义随形状变化，见 `vibratoCycle.ts`。 */
 export type WaveShape =
-    | "sine"
-    | "triangle"
-    | "sawUp"
-    | "sawDown"
-    | "square"
-    | "trapezoid"
-    | "trill";
+    "sine" | "triangle" | "sawUp" | "sawDown" | "square" | "trapezoid" | "trill";
 
 /**
  * 归一化周期波形：相位 `u ∈ [0,1)` → 波形值 `∈ [-1,1]`。
@@ -30,8 +24,7 @@ export type WaveShape =
  * - `table`：一个周期的采样表（手绘提取 / 用户捏出来的），首尾相接
  */
 export type CycleSource =
-    | { kind: "shape"; shape: WaveShape; skew: number }
-    | { kind: "table"; table: number[] };
+    { kind: "shape"; shape: WaveShape; skew: number } | { kind: "table"; table: number[] };
 
 /** 深度换算的族别。决定「同一个 cents 值」在参数上是什么量。 */
 export type DepthFamily = "cents" | "ratio" | "raw";

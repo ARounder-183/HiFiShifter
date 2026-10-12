@@ -363,8 +363,7 @@ export function computeRegionRightEdgeDelta(args: {
     readonly clipIds: readonly string[];
     readonly baseById: Readonly<Record<string, { startSec: number; lengthSec: number }>>;
     readonly clips:
-        | readonly ClipInfo[]
-        | readonly { id: string; startSec: number; lengthSec: number }[];
+        readonly ClipInfo[] | readonly { id: string; startSec: number; lengthSec: number }[];
 }): number {
     let maxOldRight = Number.NEGATIVE_INFINITY;
     let maxNewRight = Number.NEGATIVE_INFINITY;

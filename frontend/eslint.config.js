@@ -36,6 +36,18 @@ export default defineConfig([
             // 提交。降为 warn 保留可见性，不作为 CI 阻塞。
             "react-hooks/refs": "warn",
             "react-hooks/immutability": "warn",
+            // react-hooks 7.1 把下面两条提升为 recommended 里的 error：
+            //   set-state-in-effect          命中"对话框打开时从 props/ref 初始化
+            //                                本地状态"这一惯例（35 处，如
+            //                                ExportAudioDialog 的 customEndSec、
+            //                                AutoBackupDialog 的 notice 复位）。
+            //                                这是常见且非错误的写法，改成 key /
+            //                                派生状态是一次独立的 UI 重构。
+            //   preserve-manual-memoization  React Compiler 无法保留既有手动 memo
+            //                                的诊断（13 处），同样需要专门的清理轮次。
+            // 两者降为 warn：信号留在 lint 输出里可见，但不阻塞 CI。
+            "react-hooks/set-state-in-effect": "warn",
+            "react-hooks/preserve-manual-memoization": "warn",
         },
     },
     {
