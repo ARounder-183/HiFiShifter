@@ -128,6 +128,10 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+# 上面这几条来自 Python 模板，`env/` 与 `ENV/` 会连本仓自己的 `scripts/env/`
+# 一起忽略（该目录下的 SDK 路径 / MSVC 环境脚本是构建的必需件）。已跟踪的文件
+# 不受影响，但**新增**文件会被 `git add` 静默跳过 —— 这里把它重新纳入。
+!scripts/env/
 
 # Spyder project settings
 .spyderproject
