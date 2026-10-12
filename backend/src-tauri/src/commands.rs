@@ -155,7 +155,7 @@ pub fn ping() -> serde_json::Value {
         common::guard_command(
             "ping",
             serde_json::json!({ "ok": false, "error": "panic in command: ping" }),
-            || core::ping(),
+            core::ping,
         )
     }
 }
@@ -174,7 +174,7 @@ pub fn get_about_info() -> serde_json::Value {
         common::guard_command(
             "get_about_info",
             serde_json::json!({ "ok": false, "error": "panic in command: get_about_info" }),
-            || core::get_about_info(),
+            core::get_about_info,
         )
     }
 }
@@ -449,7 +449,7 @@ pub fn open_project_dialog() -> serde_json::Value {
         common::guard_command(
             "open_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_project_dialog" }),
-            || project::open_project_dialog(),
+            project::open_project_dialog,
         )
     }
 }
@@ -623,7 +623,7 @@ pub fn notebook_read_clipboard_payload() -> serde_json::Value {
         common::guard_command(
             "notebook_read_clipboard_payload",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_read_clipboard_payload" }),
-            || notebook::read_clipboard_payload(),
+            notebook::read_clipboard_payload,
         )
     }
 }
@@ -654,7 +654,7 @@ pub fn notebook_read_clipboard_image() -> serde_json::Value {
         common::guard_command(
             "notebook_read_clipboard_image",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_read_clipboard_image" }),
-            || notebook::read_clipboard_image(),
+            notebook::read_clipboard_image,
         )
     }
 }
@@ -822,7 +822,7 @@ pub fn get_recording_devices() -> serde_json::Value {
         common::guard_command(
             "get_recording_devices",
             serde_json::json!({ "ok": false, "error": "panic in command: get_recording_devices" }),
-            || recording::get_recording_devices(),
+            recording::get_recording_devices,
         )
     }
 }
@@ -835,7 +835,7 @@ pub fn get_recording_apps() -> serde_json::Value {
         common::guard_command(
             "get_recording_apps",
             serde_json::json!({ "ok": false, "error": "panic in command: get_recording_apps" }),
-            || recording::get_recording_apps(),
+            recording::get_recording_apps,
         )
     }
 }
@@ -933,7 +933,7 @@ pub fn import_project_dialog() -> serde_json::Value {
         common::guard_command(
             "import_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: import_project_dialog" }),
-            || project_import::import_project_dialog(),
+            project_import::import_project_dialog,
         )
     }
 }
@@ -998,7 +998,7 @@ pub fn open_audio_dialog() -> serde_json::Value {
         common::guard_command(
             "open_audio_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog" }),
-            || dialogs::open_audio_dialog(),
+            dialogs::open_audio_dialog,
         )
     }
 }
@@ -1011,7 +1011,7 @@ pub fn open_audio_dialog_multi() -> serde_json::Value {
         common::guard_command(
             "open_audio_dialog_multi",
             serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog_multi" }),
-            || dialogs::open_audio_dialog_multi(),
+            dialogs::open_audio_dialog_multi,
         )
     }
 }
@@ -1040,7 +1040,7 @@ pub fn pick_output_path() -> serde_json::Value {
         common::guard_command(
             "pick_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_output_path" }),
-            || dialogs::pick_output_path(),
+            dialogs::pick_output_path,
         )
     }
 }
@@ -1053,7 +1053,7 @@ pub fn pick_directory() -> serde_json::Value {
         common::guard_command(
             "pick_directory",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_directory" }),
-            || dialogs::pick_directory(),
+            dialogs::pick_directory,
         )
     }
 }
@@ -1066,7 +1066,7 @@ pub fn open_midi_dialog() -> serde_json::Value {
         common::guard_command(
             "open_midi_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_midi_dialog" }),
-            || dialogs::open_midi_dialog(),
+            dialogs::open_midi_dialog,
         )
     }
 }
@@ -1079,7 +1079,7 @@ pub fn pick_midi_output_path() -> serde_json::Value {
         common::guard_command(
             "pick_midi_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_midi_output_path" }),
-            || dialogs::pick_midi_output_path(),
+            dialogs::pick_midi_output_path,
         )
     }
 }
@@ -2355,7 +2355,7 @@ pub fn has_timeline_clipboard() -> serde_json::Value {
         common::guard_command(
             "has_timeline_clipboard",
             serde_json::json!({ "ok": false, "error": "panic in command: has_timeline_clipboard" }),
-            || timeline_clipboard::has_timeline_clipboard(),
+            timeline_clipboard::has_timeline_clipboard,
         )
     }
 }
@@ -2368,7 +2368,7 @@ pub fn clipboard_kind() -> serde_json::Value {
         common::guard_command(
             "clipboard_kind",
             serde_json::json!({ "ok": false, "error": "panic in command: clipboard_kind" }),
-            || timeline_clipboard::clipboard_kind(),
+            timeline_clipboard::clipboard_kind,
         )
     }
 }
@@ -2726,7 +2726,7 @@ pub fn cancel_export_audio() -> serde_json::Value {
         common::guard_command(
             "cancel_export_audio",
             serde_json::json!({ "ok": false, "error": "panic in command: cancel_export_audio" }),
-            || synth::cancel_export_audio(),
+            synth::cancel_export_audio,
         )
     }
 }
@@ -2896,7 +2896,7 @@ pub fn pick_diagnostics_output_path() -> serde_json::Value {
         common::guard_command(
             "pick_diagnostics_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
-            || diagnostics::pick_diagnostics_output_path(),
+            diagnostics::pick_diagnostics_output_path,
         )
     }
 }
@@ -3293,7 +3293,7 @@ pub fn open_vocalshifter_dialog() -> serde_json::Value {
         common::guard_command(
             "open_vocalshifter_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_vocalshifter_dialog" }),
-            || vocalshifter::open_vocalshifter_dialog(),
+            vocalshifter::open_vocalshifter_dialog,
         )
     }
 }
@@ -3357,7 +3357,7 @@ pub fn open_reaper_dialog() -> serde_json::Value {
         common::guard_command(
             "open_reaper_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_reaper_dialog" }),
-            || reaper::open_reaper_dialog(),
+            reaper::open_reaper_dialog,
         )
     }
 }

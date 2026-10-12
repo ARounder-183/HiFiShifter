@@ -1131,7 +1131,7 @@ mod tests {
         {
             // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
             // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-            crate::guard_ffi(std::ptr::null_mut(), || std::ptr::null_mut())
+            crate::guard_ffi(std::ptr::null_mut(), std::ptr::null_mut)
         }
     }
     static TABLE: HostVtbl = HostVtbl {

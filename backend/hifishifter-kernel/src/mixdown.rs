@@ -1850,6 +1850,9 @@ mod tests {
         }
 
         /// 真正子进程没有RAM缓存；只读持久结果应零重推理，损坏后在worker重建正确PCM。
+        // 依赖 onnx 门控的 `vocoder_ort_session`：纯 Rust 形态
+        // （`--no-default-features --all-targets`）下必须整体消失，否则编译失败。
+        #[cfg(feature = "onnx")]
         #[test]
         #[ignore = "真实CPU磁盘冷恢复诊断：显式运行，父子进程均无UI"]
         fn real_model_host_cache_cold_process_and_corruption() {
@@ -2000,6 +2003,9 @@ mod tests {
         }
 
         /// 宿主PCM走真正HiFiGAN/HNSEP与原参数门禁；气声增益只混噪声，不重复分离。
+        // 依赖 onnx 门控的 `vocoder_ort_session` / `hnsep_onnx`：纯 Rust 形态
+        // （`--no-default-features --all-targets`）下必须整体消失。
+        #[cfg(feature = "onnx")]
         #[test]
         #[ignore = "真实CPU模型参数矩阵：显式运行，避免普通回归反复重推理"]
         fn real_model_host_hifigan_parameters_preserve_hnsep_and_breath_gain_contracts() {
