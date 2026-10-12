@@ -1653,6 +1653,16 @@ fn render_mixdown_internal(
         } else {
             default_zone_start
         };
+        // 淡化应用收口在 `fade_curves::ClipFade`，与 App 预览
+        // （audio_engine/mix.rs）逐位同源。逐帧不变的参数在循环外构造一次。
+        let fade = crate::fade_curves::ClipFade {
+            fade_in_frames: fade_in_frames as u64,
+            fade_in_lut: fade_in_lut.as_deref().map(Vec::as_slice),
+            fade_zone_start: fade_zone_start as u64,
+            fade_out_frames: fade_out_frames as u64,
+            fade_out_lut: fade_out_lut.as_deref().map(Vec::as_slice),
+            clip_total_frames: clip_total_frames as u64,
+        };
         let mut last_l: f32 = 0.0;
         let mut last_r: f32 = 0.0;
         let mut has_last: bool = false;
@@ -1676,18 +1686,7 @@ fn render_mixdown_internal(
                 break;
             }
 
-            // 淡化应用收口在 `fade_curves::frame_fade_gain`，与 App 预览
-            // （audio_engine/mix.rs）逐位同源。
-            let g = gain
-                * crate::fade_curves::frame_fade_gain(
-                    local_in_clip as u64,
-                    fade_in_frames as u64,
-                    fade_in_lut.as_deref().map(Vec::as_slice),
-                    fade_zone_start as u64,
-                    fade_out_frames as u64,
-                    fade_out_lut.as_deref().map(Vec::as_slice),
-                    clip_total_frames as u64,
-                );
+            let g = gain * fade.gain_at(local_in_clip as u64);
             if g <= 0.0 {
                 continue;
             }

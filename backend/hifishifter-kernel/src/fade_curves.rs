@@ -470,50 +470,66 @@ pub fn global_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Arc<Vec<f32>> {
         .lut(shape, dir, mode_out)
 }
 
-/// 单帧的淡化增益（淡入 × 淡出），乘在基础增益上；返回 `0.0` = 该帧静音
-/// （淡出已走完）。App 的预览路径（`audio_engine/mix.rs`）与导出路径
-/// （`mixdown.rs`）**共用**这一份 —— 此前是两份逐行复制的应用循环，改一处漏
-/// 一处的症状正是"预览 ≠ 导出"，而且只能靠人耳发现。
+/// 一个 clip 的淡化参数（逐帧不变）：淡入/淡出帧数与形状 LUT、淡出区间起点、
+/// clip 总长。App 的预览路径（`audio_engine/mix.rs`）与导出路径（`mixdown.rs`）
+/// **共用**这一份 —— 此前是两份逐行复制的应用循环，改一处漏一处的症状正是
+/// "预览 ≠ 导出"，而且只能靠人耳发现。
 ///
-/// 语义要点（两侧注释原本各自抄了一遍，现收口在这里）：
-/// - 淡入按**帧中心**采样（首帧用 `1/N` 而不是 0），第一帧不被硬归零；
-/// - 淡出表按【区间内已消耗进度】下降采样（t=0 处 1 → t=1 处 0），必须用
-///   进度而非剩余比例做索引 —— 用反会把淡出整体变成淡入（历史 bug）；
-/// - 进度起点 `1/N`、终点 1（端点锁定：N 帧区间的最后一帧增益精确为 0，
-///   避免曲线尾部的增益阶跃 Click）；区间起点由调用方给（内容耗尽时收缩）；
-/// - 进度 > 1（收缩后的淡出在这帧之前已走完）→ 该帧静音。
-pub fn frame_fade_gain(
-    local_in_clip: u64,
-    fade_in_frames: u64,
-    fade_in_lut: Option<&[f32]>,
-    fade_zone_start: u64,
-    fade_out_frames: u64,
-    fade_out_lut: Option<&[f32]>,
-    clip_total_frames: u64,
-) -> f32 {
-    let mut g = 1.0_f32;
-    if fade_in_frames > 0 && local_in_clip < fade_in_frames {
-        g *= match fade_in_lut {
-            Some(lut) => sample_fade_lut(
-                lut,
-                ((local_in_clip + 1) as f64 / fade_in_frames as f64) * FADE_LUT_SIZE as f64,
-            ),
-            None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
-        };
-    }
-    if fade_out_frames > 0 && local_in_clip >= fade_zone_start && local_in_clip < clip_total_frames
-    {
-        let progress = (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
-        if progress <= 1.0 {
-            g *= match fade_out_lut {
-                Some(lut) => sample_fade_lut(lut, progress * FADE_LUT_SIZE as f64),
-                None => (progress as f32).clamp(0.0, 1.0),
+/// 【为什么是结构体而不是 7 个位置参数】这些参数的类型几乎全同（`u64` /
+/// `Option<&[f32]>`），传反了照样编译，只在听感上暴露 —— 正是本类型要消灭的
+/// 那一类 bug。收进具名字段后调用点自解释，也便于在循环外构造一次。
+#[derive(Clone, Copy)]
+pub struct ClipFade<'a> {
+    pub fade_in_frames: u64,
+    pub fade_in_lut: Option<&'a [f32]>,
+    /// 淡出区间起点（局部帧）。内容耗尽收缩后由调用方给出。
+    pub fade_zone_start: u64,
+    pub fade_out_frames: u64,
+    pub fade_out_lut: Option<&'a [f32]>,
+    pub clip_total_frames: u64,
+}
+
+impl ClipFade<'_> {
+    /// 局部帧 `local_in_clip` 处的淡化增益（淡入 × 淡出），乘在基础增益上；
+    /// 返回 `0.0` = 该帧静音（淡出已走完）。
+    ///
+    /// 语义要点（两侧注释原本各自抄了一遍，现收口在这里）：
+    /// - 淡入按**帧中心**采样（首帧用 `1/N` 而不是 0），第一帧不被硬归零；
+    /// - 淡出表按【区间内已消耗进度】下降采样（t=0 处 1 → t=1 处 0），必须用
+    ///   进度而非剩余比例做索引 —— 用反会把淡出整体变成淡入（历史 bug）；
+    /// - 进度起点 `1/N`、终点 1（端点锁定：N 帧区间的最后一帧增益精确为 0，
+    ///   避免曲线尾部的增益阶跃 Click）；区间起点由调用方给（内容耗尽时收缩）；
+    /// - 进度 > 1（收缩后的淡出在这帧之前已走完）→ 该帧静音。
+    #[inline]
+    pub fn gain_at(&self, local_in_clip: u64) -> f32 {
+        let mut g = 1.0_f32;
+        if self.fade_in_frames > 0 && local_in_clip < self.fade_in_frames {
+            g *= match self.fade_in_lut {
+                Some(lut) => sample_fade_lut(
+                    lut,
+                    ((local_in_clip + 1) as f64 / self.fade_in_frames as f64)
+                        * FADE_LUT_SIZE as f64,
+                ),
+                None => ((local_in_clip + 1) as f32 / self.fade_in_frames as f32).clamp(0.0, 1.0),
             };
-        } else {
-            g = 0.0;
         }
+        if self.fade_out_frames > 0
+            && local_in_clip >= self.fade_zone_start
+            && local_in_clip < self.clip_total_frames
+        {
+            let progress = (local_in_clip - self.fade_zone_start + 1) as f64
+                / self.fade_out_frames.max(1) as f64;
+            if progress <= 1.0 {
+                g *= match self.fade_out_lut {
+                    Some(lut) => sample_fade_lut(lut, progress * FADE_LUT_SIZE as f64),
+                    None => (progress as f32).clamp(0.0, 1.0),
+                };
+            } else {
+                g = 0.0;
+            }
+        }
+        g
     }
-    g
 }
 
 /// 从 LUT 取增益（index 为浮点帧位置，线性插值；越界返回边界值）。
@@ -845,17 +861,25 @@ mod tests {
         }
     }
 
-    /// `frame_fade_gain` 的端点契约（收口前这是两份复制的应用循环各自的口头约定，
+    /// `ClipFade::gain_at` 的端点契约（收口前这是两份复制的应用循环各自的口头约定，
     /// 现在钉在唯一实现上）：首帧按 1/N 帧中心取值（不硬归零）、区间之间增益为 1、
     /// 末帧端点锁定精确为 0（该性质来自淡出 LUT 的末位值为 0 —— 生产路径
     /// `frames > 0` 时必建 LUT，`None` 只是退化兜底）、调用方保证
     /// `local < clip_total_frames`。
     #[test]
-    fn frame_fade_gain_endpoints_match_the_documented_contract() {
+    fn clip_fade_gain_endpoints_match_the_documented_contract() {
         // 4 帧淡入 + 4 帧淡出（区间起点 6），clip 总长 10 帧，真实 LUT（线性形状）。
         let fade_in = build_fade_lut(0.0, 0.0, false);
         let fade_out = build_fade_lut(0.0, 0.0, true);
-        let g = |local: u64| frame_fade_gain(local, 4, Some(&fade_in), 6, 4, Some(&fade_out), 10);
+        let fade = ClipFade {
+            fade_in_frames: 4,
+            fade_in_lut: Some(&fade_in),
+            fade_zone_start: 6,
+            fade_out_frames: 4,
+            fade_out_lut: Some(&fade_out),
+            clip_total_frames: 10,
+        };
+        let g = |local: u64| fade.gain_at(local);
         assert!(
             g(0) < 1.0 && g(0) > 0.0,
             "first frame is frame-centered, not hard-zeroed"

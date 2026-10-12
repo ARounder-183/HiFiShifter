@@ -525,6 +525,17 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             Some(end) if end < default_zone_start => end.saturating_sub(clip.fade_out_frames),
             _ => default_zone_start,
         };
+        // 淡化应用收口在内核 `fade_curves::ClipFade`（帧中心淡入、端点锁定淡出、
+        // 内容耗尽收缩），与导出（mixdown.rs）逐位同源 —— "预览 ≠ 导出"那类漂移
+        // 在这里结构上不可能再发生。逐帧不变的参数在循环外构造一次。
+        let fade = crate::fade_curves::ClipFade {
+            fade_in_frames: clip.fade_in_frames,
+            fade_in_lut: clip.fade_in_lut.as_deref().map(Vec::as_slice),
+            fade_zone_start,
+            fade_out_frames: clip.fade_out_frames,
+            fade_out_lut: clip.fade_out_lut.as_deref().map(Vec::as_slice),
+            clip_total_frames: clip.length_frames,
+        };
         let mut last_l: f32 = 0.0;
         let mut last_r: f32 = 0.0;
         let mut has_last: bool = false;
@@ -543,19 +554,7 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             }
             let local_adj = local_adj_i64 as f64;
 
-            // 淡化应用收口在内核 `fade_curves::frame_fade_gain`（帧中心淡入、
-            // 端点锁定淡出、内容耗尽收缩），与导出（mixdown.rs）逐位同源 ——
-            // "预览 ≠ 导出"那类漂移在这里结构上不可能再发生。
-            let g = clip.gain
-                * crate::fade_curves::frame_fade_gain(
-                    local,
-                    clip.fade_in_frames,
-                    clip.fade_in_lut.as_deref().map(Vec::as_slice),
-                    fade_zone_start,
-                    clip.fade_out_frames,
-                    clip.fade_out_lut.as_deref().map(Vec::as_slice),
-                    clip.length_frames,
-                );
+            let g = clip.gain * fade.gain_at(local);
             if g <= 0.0 {
                 continue;
             }
@@ -1665,7 +1664,7 @@ mod tests {
     ///
     /// `render_callback_f32`（实时音频回调）每帧走到
     /// `mix_snapshot_clips_into_scratch`，而淡化收口后这里多了一次跨 crate 的
-    /// `frame_fade_gain` 调用。插件侧的 RT 路径有 `test_allocator` 兜底，App 侧
+    /// `ClipFade::gain_at` 调用。插件侧的 RT 路径有 `test_allocator` 兜底，App 侧
     /// 此前一条断言都没有（`measure_peak_alloc` 长期是死代码）。这里用真实的
     /// 淡入/淡出 LUT 走一遍，把"实时混音零分配"钉住。
     ///
