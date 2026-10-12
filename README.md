@@ -177,7 +177,8 @@ SoundTouch、WORLD、Signalsmith Stretch 均在编译时从源码构建，首次
 ```bash
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
-# 校验与 pin 一致（tools/plugin-sdks.json 的 soundtouch 段；构建脚本会自动校验）：
+# 校验与 pin 一致：应输出 e83424d5928ab8513d2d082779c275765dee31b9
+# （tools/plugin-sdks.json 的 soundtouch 段；不一致就删掉 soundtouch/ 重新克隆）：
 git -C soundtouch rev-parse HEAD
 ```
 
