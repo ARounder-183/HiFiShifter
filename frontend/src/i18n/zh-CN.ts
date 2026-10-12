@@ -2053,12 +2053,6 @@ export const zhCN = {
     ara_host_audio_unmatched_title: "宿主分配的区域对不上片段",
     ara_host_audio_unmatched_body:
         "宿主已把这个插件挂到一组音频区域上，但其中没有一条能对上本轨的片段（候选片段数与区域数不一致，或位置/长度不相等），因此这些片段没有内容。请确认本插件所在轨道的片段与它被分配的区域一一对应；folder 父轨上的插件请改挂到具体的音频子轨。",
-    ara_host_audio_ara_only_title: "此宿主只提供 ARA",
-    ara_host_audio_ara_only_body:
-        "这里除片段几何编辑外一切可用：查看、播放、调参与渲染都走 ARA。移动、裁切、分割与 item 剪贴板需要宿主原生扩展，因此保持只读。",
-    ara_host_audio_unidentified_title: "此宿主暂不受支持",
-    ara_host_audio_unidentified_body:
-        "HiFiShifter 需要宿主提供它用来枚举轨道与 item 的扩展接口（目前是宿主）。在其它宿主上时间线会是空的 —— 插件看不到任何轨道。",
     ara_clip_syncing_host_audio: "正在等待宿主完成音频分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音频",
     ara_clip_host_source_read_failed:

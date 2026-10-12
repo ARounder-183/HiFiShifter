@@ -163,20 +163,6 @@ pub(crate) enum HostAudioState {
     AwaitingRegions,
     /// 同上，且本 FX 所在轨道是 folder 父轨：组内子轨的音频不会交给这个实例。
     FolderParentWithoutRegions,
-    /// 宿主**不是**本插件当前适配的那一个（没有可用的扩展接口）。
-    ///
-    /// 【为什么必须有这一态】此前没有扩展接口时 `refresh_ui_inventory` 直接 `return`，
-    /// 什么都不写：界面停在初始值上，表现为**时间线全空且没有任何提示** —— 用户以为
-    /// 插件坏了，而不是"这个宿主不受支持"。空白 + 沉默是最糟的组合：无从诊断，
-    /// 也不会去查文档。
-    HostUnidentified,
-    /// 宿主**只**提供 ARA 2.0（Studio One / Cubase / Nuendo / Logic …）。
-    ///
-    /// 【为什么与 `HostUnidentified` 分开】两者此前共用一个状态，而那个状态的文案是
-    /// 「本宿主尚不支持 / 时间线会是空的」—— 对 ARA-only 宿主**是假的**：时间线有内容、
-    /// 音频能出、参数能调，只读的只是**片段几何写回**。给一个正常工作的宿主挂一条
-    /// "不受支持"的横幅，用户会去查一个不存在的问题。
-    AraOnlyReadOnly,
     /// 宿主**分配了** region，但没有一条能绑到唯一宿主 item。
     ///
     /// 【为什么必须与 `FolderParentWithoutRegions` 分开】两者的用户可见症状相同（片段
@@ -198,8 +184,6 @@ impl HostAudioState {
             HostAudioState::Ready => "ready",
             HostAudioState::AwaitingRegions => "awaiting_regions",
             HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
-            HostAudioState::HostUnidentified => "host_unidentified",
-            HostAudioState::AraOnlyReadOnly => "ara_only_read_only",
             HostAudioState::UnmatchedRegions => "unmatched_regions",
         }
     }
@@ -932,22 +916,21 @@ impl ExtensionOwner {
             return;
         };
         let Some(host) = self.native_host() else {
-            // 没有原生扩展接口 ⇒ 说清楚是哪一种"没有"。
+            // 没有原生扩展接口 —— 这是 **ARA-only 宿主**（Studio One / Cubase / Nuendo /
+            // Logic …）的正常形态，不是"不受支持"：时间线有内容、音频能出、参数能调，
+            // 只读的只有**片段几何写回**，而那由能力位门控（`HostCapabilities`），
+            // 不需要任何横幅。
             //
-            // 【为什么不是一律 HostUnidentified】那个状态的文案是「本宿主尚不支持 /
-            // 时间线会是空的」。ARA-only 宿主（Studio One / Cubase / Nuendo / Logic）
-            // 上时间线**有内容、音频能出、参数能调** —— 只是片段几何写回不可用。
-            // 给一个正常工作的宿主挂"不受支持"的横幅，是把用户引向一个不存在的问题。
-            let ara_only =
-                self.host_backend().kind() == hifishifter_kernel::editor::host::HostKind::AraOnly;
-            *self.host_audio.lock_or_recover() = HostAudioStatus {
-                state: if ara_only {
-                    HostAudioState::AraOnlyReadOnly
-                } else {
-                    HostAudioState::HostUnidentified
-                },
-                waiting_items: 0,
-            };
+            // 【为什么这里不再区分"未识别的宿主"】两者此前共用一个三元表达式，而
+            // `ara_only` 那一支**恒为真**：`bind_host_adapter` 只会存 `Some(Native)` 或
+            // `None`，而 `host_backend()` 把 `None` 映射成 `AraOnly`。所以"未识别"那一态
+            // 从来没有产出者，而它的文案（「本宿主尚不支持 / 时间线会是空的」）对每一个
+            // 真能走到编辑器里的宿主都是**假的**。真正"既不提供原生扩展、也不提供 ARA"
+            // 的宿主根本不会有文档，插件报的是 `ARA_NOT_BOUND` 那条终态错误，
+            // 不会表现为"空白时间线 + 一条猜错方向的横幅"。
+            //
+            // 因此这里只把读数复位为"无可抱怨"，不再产生任何宿主支持类提示。
+            *self.host_audio.lock_or_recover() = HostAudioStatus::default();
             // 【ARA-only 也必须推进 render_epoch】原生扩展缺席不代表"没有渲染输入"：
             // ARA 模型自己就能给出时间拉伸与内容淡化（`RenderItemFacts` 的 ARA 三字段）。
             // 此前这里直接 return ⇒ `render_facts` 永不更新、`render_epoch` 永不推进 ⇒

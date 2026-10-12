@@ -2127,12 +2127,6 @@ export const jaJP = {
     ara_host_audio_unmatched_title: "割り当てられたリージョンがクリップと一致しません",
     ara_host_audio_unmatched_body:
         "ホストはこのプラグインに複数のオーディオリージョンを割り当てましたが、このトラックのクリップと一致するものがありません（候補数とリージョン数が異なるか、位置・長さが一致しません）。そのためこれらのクリップには内容がありません。プラグインのトラックのクリップと割り当てられたリージョンが一対一で対応しているか確認してください。folder 親トラックにある場合は、実際のオーディオ子トラックへ移動してください。",
-    ara_host_audio_ara_only_title: "このホストは ARA のみを提供します",
-    ara_host_audio_ara_only_body:
-        "クリップのジオメトリ編集以外はすべて利用できます。表示・再生・パラメータ編集・レンダリングは ARA で動作します。移動・トリム・分割・アイテムクリップボードにはホストのネイティブ拡張が必要なため、読み取り専用のままです。",
-    ara_host_audio_unidentified_title: "このホストは未対応です",
-    ara_host_audio_unidentified_body:
-        "HiFiShifter は、トラックとアイテムを列挙するために使用する拡張 API を提供するホスト（現在はホスト）が必要です。他のホストではタイムラインは空のままです。",
     ara_clip_syncing_host_audio: "ホストの音声割り当て完了を待っています",
     ara_clip_waiting_for_host_audio: "ホストからの音声を待機中",
     ara_clip_host_source_read_failed:

@@ -191,15 +191,17 @@ export interface ProjectMeta {
  *
  * 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务多个
  * region sequence，是 **REAPER 选择按轨道管理 ARA 实例**。
+ *
+ * 【为什么没有"宿主不受支持"这一类】那类提示整体删除了。ARA-only 宿主
+ *（Studio One / Cubase / Nuendo / Logic …）本来就正常工作：时间线有内容、音频能出、
+ * 参数能调，只读的只有片段几何写回，而那由能力位门控（`hostCapabilities`），不需要
+ * 横幅。而"既不提供原生扩展、也不提供 ARA"的宿主根本拿不到文档，插件报的是
+ * `ARA_NOT_BOUND` 那条终态错误，不会表现为"空白时间线 + 一条猜错方向的横幅"。
  */
 export type HostAudioState =
     | "ready"
     | "awaiting_regions"
     | "folder_parent_without_regions"
-    /** 没有可用的宿主扩展接口：插件看不到任何轨道（见 `HostAudioNotice`）。 */
-    | "host_unidentified"
-    /** 宿主只提供 ARA 2.0：能看 / 能听 / 能调参，但片段几何**只读**。 */
-    | "ara_only_read_only"
     /**
      * 宿主**分配了** region，但没有一条能绑到唯一宿主 item。
      *

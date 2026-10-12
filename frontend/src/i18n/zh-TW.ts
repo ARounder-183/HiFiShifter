@@ -2056,12 +2056,6 @@ export const zhTW = {
     ara_host_audio_unmatched_title: "宿主分配的區域對不上片段",
     ara_host_audio_unmatched_body:
         "宿主已將此外掛掛到一組音訊區域上，但其中沒有一條能對上本軌的片段（候選片段數與區域數不一致，或位置／長度不相等），因此這些片段沒有內容。請確認此外掛所在軌道的片段與它被分配的區域一一對應；folder 父軌上的外掛請改掛到具體的音訊子軌。",
-    ara_host_audio_ara_only_title: "此宿主只提供 ARA",
-    ara_host_audio_ara_only_body:
-        "這裡除了片段幾何編輯外一切可用：檢視、播放、調參與算繪都走 ARA。移動、裁切、分割與 item 剪貼簿需要宿主原生擴充，因此維持唯讀。",
-    ara_host_audio_unidentified_title: "此宿主暫不受支援",
-    ara_host_audio_unidentified_body:
-        "HiFiShifter 需要宿主提供它用來列舉軌道與 item 的擴充介面（目前是宿主）。在其它宿主上時間軸會是空的 —— 外掛看不到任何軌道。",
     ara_clip_syncing_host_audio: "正在等待宿主完成音訊分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音訊",
     ara_clip_host_source_read_failed:

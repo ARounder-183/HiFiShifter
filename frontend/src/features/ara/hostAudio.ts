@@ -17,8 +17,6 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "ready",
     "awaiting_regions",
     "folder_parent_without_regions",
-    "host_unidentified",
-    "ara_only_read_only",
     "unmatched_regions",
 ]);
 
@@ -81,29 +79,6 @@ export function needsFolderTrackNotice(status: HostAudioPayload | null): boolean
  */
 export function needsUnmatchedRegionsNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "unmatched_regions";
-}
-
-/**
- * 是否需要"这个宿主不受支持"这条提示。
- *
- * 【为什么必须提示】没有宿主扩展接口时插件**看不到任何轨道**。不提示的话用户看到的
- * 是一个空时间线 —— 与"工程里本来就没东西"完全无法区分。这条提示把"插件坏了"
- * 与"这个宿主还没适配"分开。
- */
-export function needsUnidentifiedHostNotice(status: HostAudioPayload | null): boolean {
-    return status?.state === "host_unidentified";
-}
-
-/**
- * 是否需要"本宿主只提供 ARA，片段几何只读"这条说明。
- *
- * 【为什么必须有它，且必须与上一条分开】此前这两种情形共用一个状态，文案是
- * 「本宿主尚不支持 / 时间线会是空的」。对 ARA-only 宿主（Studio One / Cubase /
- * Nuendo / Logic）**那句话是假的**：时间线有内容、音频能出、参数能调，只读的只有
- * **片段几何写回**。给一个正常工作的宿主挂"不受支持"，用户会去查一个不存在的问题。
- */
-export function needsAraOnlyNotice(status: HostAudioPayload | null): boolean {
-    return status?.state === "ara_only_read_only";
 }
 
 /**

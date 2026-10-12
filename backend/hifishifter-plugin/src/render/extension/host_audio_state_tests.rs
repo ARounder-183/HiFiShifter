@@ -108,6 +108,11 @@ fn the_snapshot_index_follows_the_declared_setup_rate() {
 }
 
 /// 分类名是前端查 catalog 的键：改名即破坏文案，必须显式钉住。
+///
+/// 【为什么只剩这几态】宿主支持类提示（"本宿主尚不支持" / "此宿主只提供 ARA"）已整体
+/// 删除：前者从来没有产出者（`bind_host_adapter` 只存 `Some(Native)` 或 `None`，而
+/// `host_backend()` 把 `None` 映射成 `AraOnly`），后者对每一个能打开编辑器的宿主都是
+/// 假的 —— ARA-only 宿主本来就正常工作，只读的只有片段几何写回，而那由能力位门控。
 #[test]
 fn classification_names_are_stable_catalog_keys() {
     assert_eq!(HostAudioState::Ready.as_str(), "ready");
@@ -115,22 +120,6 @@ fn classification_names_are_stable_catalog_keys() {
     assert_eq!(
         HostAudioState::FolderParentWithoutRegions.as_str(),
         "folder_parent_without_regions"
-    );
-    assert_eq!(
-        HostAudioState::HostUnidentified.as_str(),
-        "host_unidentified"
-    );
-    // 【为什么单独钉住这一条】它与 `host_unidentified` 共用过一句话，而那句
-    // 「本宿主尚不支持」对 ARA-only 宿主是假的。分类名一旦被合回去，前端就会
-    // 重新对一个能正常工作的宿主宣称"不受支持"。
-    assert_eq!(
-        HostAudioState::AraOnlyReadOnly.as_str(),
-        "ara_only_read_only"
-    );
-    assert_ne!(
-        HostAudioState::AraOnlyReadOnly.as_str(),
-        HostAudioState::HostUnidentified.as_str(),
-        "ARA-only 是「只读」，不是「不受支持」"
     );
     // 【为什么单独钉住这一条】它是"拿到了 region 但绑不上"的唯一分类名。与
     // `folder_parent_without_regions` 合并会让"宿主分配了但匹配不上"被说成

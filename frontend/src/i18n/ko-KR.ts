@@ -2098,12 +2098,6 @@ export const koKR = {
     ara_host_audio_unmatched_title: "할당된 리전이 클립과 일치하지 않습니다",
     ara_host_audio_unmatched_body:
         "호스트가 이 플러그인에 여러 오디오 리전을 할당했지만, 이 트랙의 클립과 일치하는 리전이 없습니다(후보 수와 리전 수가 다르거나 위치·길이가 일치하지 않음). 따라서 이 클립에는 내용이 없습니다. 플러그인이 있는 트랙의 클립과 할당된 리전이 일대일로 대응하는지 확인하고, folder 상위 트랙에 있다면 실제 오디오 하위 트랙으로 옮기세요.",
-    ara_host_audio_ara_only_title: "이 호스트는 ARA만 제공합니다",
-    ara_host_audio_ara_only_body:
-        "클립 지오메트리 편집을 제외한 모든 기능을 사용할 수 있습니다. 보기, 재생, 파라미터 편집, 렌더링은 ARA로 동작합니다. 이동, 트림, 분할, 아이템 클립보드는 호스트 네이티브 확장이 필요하므로 읽기 전용입니다.",
-    ara_host_audio_unidentified_title: "이 호스트는 아직 지원되지 않습니다",
-    ara_host_audio_unidentified_body:
-        "HiFiShifter는 트랙과 아이템을 열거하는 데 사용하는 확장 API를 제공하는 호스트(현재 호스트)가 필요합니다. 다른 호스트에서는 타임라인이 비어 있습니다.",
     ara_clip_syncing_host_audio: "호스트의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:
