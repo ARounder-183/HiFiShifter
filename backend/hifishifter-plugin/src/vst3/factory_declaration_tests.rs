@@ -198,17 +198,12 @@ fn the_main_factory_instance_honours_the_requested_iid() {
 
     // 不受支持的 IID ⇒ 明确拒绝，且不交出任何指针。
     let unknown = [
-        0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
-        0xFF, 0x00,
+        0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00,
     ];
     let mut rejected = std::ptr::null_mut();
     let result = unsafe {
-        factory_create_instance(
-            factory,
-            cid.cast(),
-            unknown.as_ptr().cast(),
-            &mut rejected,
-        )
+        factory_create_instance(factory, cid.cast(), unknown.as_ptr().cast(), &mut rejected)
     };
     assert_eq!(result, K_NO_INTERFACE, "不受支持的 IID 必须回 kNoInterface");
     assert!(rejected.is_null(), "拒绝时不得交出对象");
@@ -219,9 +214,8 @@ fn the_main_factory_instance_honours_the_requested_iid() {
     for words in [IID_FUNKNOWN, main_factory] {
         let iid = uid_guid(words);
         let mut out = std::ptr::null_mut();
-        let result = unsafe {
-            factory_create_instance(factory, cid.cast(), iid.as_ptr().cast(), &mut out)
-        };
+        let result =
+            unsafe { factory_create_instance(factory, cid.cast(), iid.as_ptr().cast(), &mut out) };
         assert_eq!(result, K_RESULT_OK, "受支持的 IID 必须交付");
         assert!(!out.is_null());
         // 交付出去的那一份引用由宿主（这里就是本测试）负责释放。
