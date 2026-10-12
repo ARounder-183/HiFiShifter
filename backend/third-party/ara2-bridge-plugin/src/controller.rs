@@ -1239,6 +1239,19 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 properties.transformation_flags() as u32,
             );
             if !self.factory_playback_transformations.contains(requested) {
+                // 【本地补丁 9】这里回 null 就是"整条 playback region 消失"：宿主拿不到
+                // region，于是既没有 clip、也不会调用任何 renderer 的 addPlaybackRegion，
+                // 而**没有任何日志**。实测 Cubase 15 的 ARA region 带
+                // `TimestretchReflectingTempo`（1<<1），插件只广告 TIMESTRETCH 时整批被丢掉
+                // （`sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有）。
+                // 把两边的位都打出来，下一次一眼能看出差在哪一位。
+                log::warn!(
+                    "[ara] playback region rejected: host flags {:#x} are not a subset of the \
+                     factory's advertised {:#x}; the host receives a null region and no clip is \
+                     created for it",
+                    requested.bits(),
+                    self.factory_playback_transformations.bits()
+                );
                 return null_mut();
             }
             let Ok(modification) = runtime.resolve_audio_modification(modification_reference)
@@ -1277,8 +1290,16 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             let Ok(mut edit) = runtime.callback_edit() else {
                 return null_mut();
             };
-            let Ok(handle) = edit.create_playback_region(modification, sequence, properties) else {
-                return null_mut();
+            // 【本地补丁 9】同样静默：模型侧拒绝一条 region 时，宿主只看到 null。
+            let handle = match edit.create_playback_region(modification, sequence, properties) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    log::error!(
+                        "[ara] playback region rejected: create_playback_region failed: {error}; \
+                         the host receives a null region and no clip is created for it"
+                    );
+                    return null_mut();
+                }
             };
             let Ok(reference) = edit.playback_region_ref(handle) else {
                 return null_mut();

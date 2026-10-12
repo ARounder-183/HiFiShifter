@@ -100,10 +100,37 @@ impl Runtime {
             // `audio_file_chunks` / `signal_preservation` 一个都没用），因此不会撞上
             // 库的"能力需要 2.0 Final"拒绝。
             .generations(ApiGeneration::V2Draft, ApiGeneration::V2Final)
-            // 原kernel处理委托的边界包络，head/tail无额外延伸；tempo-reflecting仍不广告。
+            // 【为什么必须广告 `REFLECT_TEMPO`】宿主在**创建每条 playback region** 时给出
+            // transformation flags，而库会拿它跟这里声明的集合做子集校验：
+            //
+            //   if !self.factory_playback_transformations.contains(requested) { return null_mut(); }
+            //
+            // 校验不过就**静默**回 null —— 宿主拿不到 region，于是既没有 clip、也不会
+            // 调用任何 renderer 的 addPlaybackRegion。实测 Cubase 15 正是如此：
+            // `sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有，
+            // 而 source / region sequence 的创建路径**没有**这个旗标闸门，所以它们照常到达。
+            //
+            // Cubase 的 ARA region 是跟随工程速度拉伸的，于是带上
+            // `kARAPlaybackTransformationTimestretchReflectingTempo`（1<<1）。我们此前只
+            // 广告 `TIMESTRETCH | CONTENT_FADES`，于是**每一条** region 都被丢掉。
+            //
+            // 【为什么广告它是诚实的】SDK 对这个旗标的定义是"区分拉伸是严格线性、还是反映
+            // 音乐上下文与素材内容之间的速度关系"。本插件的拉伸比例正是取自 region 声明的
+            // `durationInModificationTime / durationInPlaybackTime` —— 对 tempo-reflecting
+            // region 而言，那个比值**就是**宿主算出的速度关系，所以按它渲染正是这一位所要求
+            // 的结果。我们**不**支持的是非线性 stretch markers，那在 ARA 里由别处表达，且
+            // 本插件会显式报出"不支持非线性拉伸"。
+            //
+            // 【为什么不能继续拒绝】拒绝的代价不是"退回线性"，而是**整条片段消失**（宿主
+            // 拿到 null region）。这与本插件"逐 region 显式降级、不静默丢弃"的纪律相悖 ——
+            // 模型侧早已按这个纪律写好（`log_unknown_transformation_flags` 会留痕、映射层
+            // 用时长比值），只有工厂这一句声明在反着来。
+            //
+            // 原kernel处理委托的边界包络，head/tail无额外延伸。
             .capabilities(
                 FactoryCapabilities::default().with_playback_transformations(
                     PlaybackTransformationFlags::TIMESTRETCH
+                        | PlaybackTransformationFlags::REFLECT_TEMPO
                         | PlaybackTransformationFlags::CONTENT_FADES,
                 ),
             )
@@ -171,15 +198,42 @@ pub fn runtime() -> Option<&'static Runtime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// 原生工厂仅广告线性拉伸与本应用的委托渐变，不广告未实现的tempo-reflecting。
+
+    /// **不变量：工厂广告的 transformation 集合必须覆盖宿主会给出的每一种。**
+    ///
+    /// 【为什么这是"片段凭空消失"级回归】库在 `create_playback_region` 里用
+    /// `factory_playback_transformations.contains(host_flags)` 校验，不通过就**静默**回
+    /// null region —— 宿主拿不到 region，于是既没有 clip、也不会调用任何 renderer 的
+    /// addPlaybackRegion，而日志里没有任何错误。实测 Cubase 15：
+    /// `sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有。
+    ///
+    /// `REFLECT_TEMPO`（1<<1）是 Cubase 的 ARA region 必带的一位（它的拉伸跟随工程速度）。
+    /// 本插件的拉伸比例取自 region 声明的时长比值，对 tempo-reflecting region 而言那正是
+    /// 宿主算出的速度关系，因此广告它是诚实的；不广告则整条片段消失。
     #[test]
-    fn native_factory_advertises_linear_stretch_and_owned_fades_without_tempo_reflection() {
+    fn native_factory_advertises_every_transformation_the_host_may_set() {
         let runtime = Runtime::init().unwrap();
         let raw = unsafe { &*runtime.factory.0.as_raw() };
-        assert_eq!(
+        let advertised = PlaybackTransformationFlags::from_bits_retain(
             raw.supportedPlaybackTransformationFlags as u32,
-            (PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::CONTENT_FADES)
-                .bits()
+        );
+        // 宿主实际会给出的组合：Cubase 的 ARA region 跟随工程速度拉伸，因此带 REFLECT_TEMPO。
+        let host_flags = PlaybackTransformationFlags::TIMESTRETCH
+            | PlaybackTransformationFlags::REFLECT_TEMPO
+            | PlaybackTransformationFlags::CONTENT_FADES;
+        // 直接照搬库的判据：这一步就是"宿主能不能拿到 region"的开关。
+        assert!(
+            advertised.contains(host_flags),
+            "库用 contains 校验宿主旗标，不通过就静默回 null region：广告 {:#x} 不含宿主给出的 {:#x}",
+            advertised.bits(),
+            host_flags.bits()
+        );
+        // 反向：也不得多广告我们从未声明要处理的位 —— 那会变成"宣称了不履行的能力"
+        //（与 2.3 变更通知那次同类）。广告集合必须恰好是这三位。
+        assert_eq!(
+            advertised.bits(),
+            host_flags.bits(),
+            "广告集合必须恰好覆盖 TIMESTRETCH / REFLECT_TEMPO / CONTENT_FADES"
         );
     }
 }

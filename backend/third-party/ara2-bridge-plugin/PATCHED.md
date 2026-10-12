@@ -14,6 +14,7 @@
 | 6 | `factory.rs` 的 `initialize` ABI 入口 | 增量 | 记录宿主请求的 ARA 代数与接受/拒绝结果（见下方「代数协商的静默失败」） | 待查 |
 | 7 | `factory.rs` 的 `create_document_controller` ABI 入口 | 增量 | 记录"把 null 控制器交给宿主"的**原因**（原先 `.ok()` 把错误整条丢掉） | 待查 |
 | 8 | `entry.rs` 的 `initialize` | **行为** | 宿主没给 assert 指针时记警告后**继续**（原先硬拒绝 ⇒ 静默 ⇒ null 控制器交给宿主）；该地址在本库只被记录与比较、从不被调用，取 0 是安全的 | 待查 |
+| 9 | `controller.rs` 的 `create_playback_region` | 增量 | 记录两种"整条 playback region 变成 null 交给宿主"的原因：宿主旗标不是工厂广告集合的子集、模型侧创建失败（原先都是裸 `return null_mut()`） | 待查 |
 
 ## 代数协商的静默失败（补丁 6/7）
 

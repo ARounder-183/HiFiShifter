@@ -1127,10 +1127,17 @@ impl AudioModifications for ModelHandle {
 
 /// 宿主带来本插件不认识的 `transformationFlags` 位时限流记录一条。
 ///
-/// 【为什么必须留痕】decode 只认 1/4/8 —— bit 2（TimestretchReflectingTempo）
-/// 是刻意不解：拉伸由"时长差"表达，映射层用的就是时长比值。但其余位（含
-/// 未来 SDK 新增位）此前被静默丢弃，违背本插件"逐 region 显式降级"的纪律：
+/// 【为什么必须留痕】解码只认低四位（1 = Timestretch、2 = TimestretchReflectingTempo、
+/// 4 = 内容淡出尾、8 = 内容淡出头）—— 其中 **2 只作留痕、不作语义**：拉伸由"时长差"
+/// 表达，映射层用的就是 `durationInModificationTime / durationInPlaybackTime` 这个比值，
+/// 而 tempo-reflecting region 的这个比值**正是**宿主算出的速度关系，所以按它渲染就是
+/// 这一位所要求的结果（见 `runtime.rs` 的能力声明）。
+///
+/// 其余位（含未来 SDK 新增位）此前被静默丢弃，违背本插件"逐 region 显式降级"的纪律：
 /// 能力协商没谈下来的东西，宿主却可能照给。窗口内每类未知位组合最多一条。
+///
+/// 【注意】工厂**不广告**的位不会走到这里 —— 库在 `create_playback_region` 里就按
+/// `contains` 把整条 region 静默丢成 null 了。这里只处理"已广告、但语义上不参与渲染"的位。
 fn log_unknown_transformation_flags(flags: i32) {
     const DECODED_TRANSFORMATION_FLAGS: i32 = 0b1111;
     let unknown = flags & !DECODED_TRANSFORMATION_FLAGS;
