@@ -13,6 +13,7 @@
     --color-qt-button-hover: var(--qt-button-hover);
     --color-qt-border: var(--qt-border);
     --color-qt-hover: var(--qt-hover);
+    --color-qt-menu-item-hover: var(--qt-menu-item-hover);
     --color-qt-accent: var(--qt-accent);
     --color-qt-danger-bg: var(--qt-danger-bg);
     --color-qt-danger-text: var(--qt-danger-text);
@@ -39,6 +40,9 @@
     --color-qt-subtle-3: var(--qt-subtle-3);
     --color-qt-subtle-hover: var(--qt-subtle-hover);
     --color-qt-divider: var(--qt-divider);
+    /* 吸附高亮的语义色（`--qt-snap-*` 是一整组）目前只有"来源"这一档
+       有工具类调用点（参数编辑器的拖入 MIDI 提示框描边）。 */
+    --color-qt-snap-source: var(--qt-snap-source);
 
     --font-sans: var(--qt-font-family);
 

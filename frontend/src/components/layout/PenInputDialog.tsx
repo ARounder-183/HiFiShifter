@@ -249,7 +249,7 @@ export function PenInputDialog({ open, onOpenChange }: PenInputDialogProps) {
                 </AppField>
 
                 {errorText ? (
-                    <span className="text-qt-sm text-qt-danger">{errorText}</span>
+                    <span className="text-qt-sm text-qt-danger-text">{errorText}</span>
                 ) : notice ? (
                     <span className="text-qt-sm text-qt-text-muted">{notice}</span>
                 ) : null}
