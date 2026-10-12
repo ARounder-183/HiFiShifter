@@ -898,7 +898,7 @@ describe("禁止浏览器原生 affordance", () => {
 describe("列表行键盘光标环", () => {
     /*
      * 【要钉死什么】上一版把光标环写成行原语上的一组 Tailwind 工具类，同时用
-     * `focus:outline-none` 关掉浏览器默认描边。后者编译成
+     * `focus:outline-hidden` 关掉浏览器默认描边。后者编译成
      * `outline: 2px solid transparent` 这个**简写**，而它带 `:focus`、优先级高于
      * 那四个单类 —— 光标行的环被整体改写成透明，键盘移动**完全看不到高亮**。
      *
@@ -907,7 +907,7 @@ describe("列表行键盘光标环", () => {
      *
      * 【为什么不用本文件的 `stripCommentsAndStrings`】它会把字符串内容一并剥掉，
      * 而这里要找的类名就写在字符串里 —— 用它做检查会得到一条**永远通过**的断言
-     * （实测：把 `focus:outline-none` 加回去，断言仍然是绿的）。这里只去注释。
+     * （实测：把 `focus:outline-hidden` 加回去，断言仍然是绿的）。这里只去注释。
      */
     function stripCommentsOnly(source: string): string {
         return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
@@ -921,11 +921,11 @@ describe("列表行键盘光标环", () => {
         expect(ring, "光标环必须取语义令牌，不能写死颜色").toContain("--qt-focus-ring");
     });
 
-    test("行原语不得用 outline-none 抹掉自己画的环", () => {
+    test("行原语不得用 outline-hidden 抹掉自己画的环", () => {
         const listRow = stripCommentsOnly(readFileSync(join(UI_DIR, "ListRow.tsx"), "utf8"));
         expect(
-            listRow.includes("outline-none"),
-            "outline-none 会以更高优先级把 [data-active] 的环改成透明（本回归的成因）",
+            listRow.includes("outline-hidden"),
+            "outline-hidden 会以更高优先级把 [data-active] 的环改成透明（本回归的成因）",
         ).toBe(false);
         // 环挂在 data-active 上；行必须继续暴露这个状态，否则规则无从命中。
         expect(listRow).toContain("data-active");

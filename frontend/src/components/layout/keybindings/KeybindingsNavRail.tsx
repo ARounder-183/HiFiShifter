@@ -64,7 +64,7 @@ export function KeybindingsNavRail({
              * 的前提下自己滚。这也是不用 `max-h-[Npx]` 的原因 ——
              * 那会在 `designSystemGates.test.ts` 的"有界滚动盒"门禁上报错。
              */
-            className="hide-v-scrollbar w-max max-w-[15rem] shrink-0 overflow-y-auto border-r border-qt-border pr-1"
+            className="hide-v-scrollbar w-max max-w-60 shrink-0 overflow-y-auto border-r border-qt-border pr-1"
         >
             {items.map((item) => {
                 const dimmed = item.matchCount === 0;

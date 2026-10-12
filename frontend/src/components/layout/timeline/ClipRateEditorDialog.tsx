@@ -281,7 +281,7 @@ function ClipRateEditorFields({
             <label className="flex flex-col gap-1">
                 <span className="text-qt-micro text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
                 <input
-                    className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                    className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
                     value={rateText}
                     onChange={(e) => {
                         setRateEdited(true);
@@ -314,7 +314,7 @@ function ClipRateEditorFields({
                         {tf("clip_rate_editor_old_bpm")}
                     </span>
                     <input
-                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
                         value={oldBpmText}
                         onChange={(e) => {
                             setOldBpmText(e.target.value);
@@ -333,7 +333,7 @@ function ClipRateEditorFields({
                         {tf("clip_rate_editor_new_bpm")}
                     </span>
                     <input
-                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
                         value={newBpmText}
                         onChange={(e) => {
                             setNewBpmText(e.target.value);
@@ -357,7 +357,7 @@ function ClipRateEditorFields({
                     })}
                 </span>
                 <input
-                    className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
+                    className={`w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border ${
                         durationEdited && parsedDuration == null
                             ? "border-qt-danger-border"
                             : "border-qt-border"

@@ -2587,7 +2587,7 @@ function PresetRow({
                                  * 固有宽度，只按 `flex-1` 填满行内剩余空间。
                                  */
                                 size={1}
-                                className="hs-type-label min-w-0 flex-1 rounded border border-qt-border bg-qt-window px-1 py-0 text-qt-text outline-none focus:border-qt-highlight"
+                                className="hs-type-label min-w-0 flex-1 rounded border border-qt-border bg-qt-window px-1 py-0 text-qt-text outline-hidden focus:border-qt-highlight"
                                 value={renameValue ?? ""}
                                 aria-label={t("vibrato_manager_rename")}
                                 // 行本身带点击 / 双击 / 拖拽：输入框内的事件一律不外泄，

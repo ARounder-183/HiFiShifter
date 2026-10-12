@@ -340,7 +340,7 @@ export function AppFormSection({
             className={cx(
                 // 分区之间要明显比行距松：分组靠留白承担（本组件取代了 Radix
                 // Separator），若节间距与行距相同，分组就看不出来。
-                "flex flex-col gap-3 [&:not(:first-child)]:mt-3",
+                "flex flex-col gap-3 not-first:mt-3",
                 className,
             )}
         >

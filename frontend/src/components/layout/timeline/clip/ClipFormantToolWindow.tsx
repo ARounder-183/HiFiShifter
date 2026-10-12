@@ -239,7 +239,7 @@ export const ClipFormantToolWindow: React.FC<{
 
     return (
         <div
-            className="fixed z-[260] rounded-xl border border-qt-border bg-qt-window text-qt-text shadow-2xl"
+            className="fixed z-260 rounded-xl border border-qt-border bg-qt-window text-qt-text shadow-2xl"
             style={{
                 left: position.x,
                 top: position.y,

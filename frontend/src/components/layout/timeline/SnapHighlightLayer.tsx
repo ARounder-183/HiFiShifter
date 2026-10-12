@@ -71,7 +71,7 @@ export const SnapHighlightLayer: React.FC<{
 
     return (
         <div
-            className="absolute top-0 left-0 pointer-events-none z-[13] overflow-hidden"
+            className="absolute top-0 left-0 pointer-events-none z-13 overflow-hidden"
             style={{ width: "100%", height: layerHeightPx }}
         >
             {snapshot.entries.map((entry) => (

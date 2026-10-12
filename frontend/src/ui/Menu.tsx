@@ -16,7 +16,7 @@
  *    键盘用户打开右键菜单后只能再按 Esc 关掉，无法选择任何一项。
  *
  * 3. **各不相同的定位与层级**。有的按估算尺寸夹紧、有的不夹紧，
- *    z-index 从 `z-50` 到 `z-[9999]` 有 4 档（其中两处反而高过对话框）。
+ *    z-index 从 `z-50` 到 `z-9999` 有 4 档（其中两处反而高过对话框）。
  *
  * 本组件把这三件事各做一次：单一 class 来源、完整键盘模型、按实测尺寸夹紧 +
  * `--qt-z-menu` 层级。
@@ -732,7 +732,7 @@ export function AppSubMenu({
                     ) : null}
                     <span className="hs-menu__label-text">{label}</span>
                     {badge ? (
-                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70 max-w-[9rem] truncate">
+                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70 max-w-36 truncate">
                             {badge}
                         </span>
                     ) : null}

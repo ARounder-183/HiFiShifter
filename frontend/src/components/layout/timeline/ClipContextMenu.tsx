@@ -671,7 +671,7 @@ export const ClipContextMenu: React.FC<{
                                     autoFocus
                                     role="menuitem"
                                     aria-label={t("clip_take_rename")}
-                                    className="w-full bg-qt-window text-qt-sm border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
+                                    className="w-full bg-qt-window text-qt-sm border border-qt-border rounded px-2 py-1 outline-hidden focus:border-qt-highlight text-qt-text"
                                     value={takeRenameDraft.value}
                                     onChange={(e) =>
                                         setTakeRenameDraft({

@@ -2009,7 +2009,7 @@ export const FileBrowserPanel: React.FC = () => {
                         ) : (
                             <input
                                 autoFocus
-                                className="hs-type-label flex-1 min-w-0 bg-qt-base rounded px-1 outline-none"
+                                className="hs-type-label flex-1 min-w-0 bg-qt-base rounded px-1 outline-hidden"
                                 style={{ border: "1px solid var(--qt-border)" }}
                                 value={pathDraft}
                                 aria-label={t("fb_path_edit_tooltip")}
@@ -2048,10 +2048,10 @@ export const FileBrowserPanel: React.FC = () => {
                 全仓统一的主题滚动条（见 index.css 的滚动条说明）。 */}
             <div
                 ref={listScrollRef}
-                // `focus:outline-none`：容器只是"焦点落点"，视觉指示由**活动行**的
+                // `focus:outline-hidden`：容器只是"焦点落点"，视觉指示由**活动行**的
                 // 描边负责（`index.css` 的 `[data-active]:focus`）。不关掉的话，浏览器
                 // 会给这个可聚焦的 div 画一圈默认的黑色描边 —— 那不是本应用的焦点样式。
-                className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto focus:outline-none"
+                className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto focus:outline-hidden"
                 onScroll={handleListScroll}
                 /*
                  * listbox 角色挂在**滚动容器**上（内层只是 `role="presentation"` 的

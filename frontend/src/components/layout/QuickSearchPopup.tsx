@@ -410,7 +410,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         <>
             {/* 全屏透明遮罩层 —— 点击即关闭弹窗 */}
             <div
-                className="fixed inset-0 z-[99998]"
+                className="fixed inset-0 z-99998"
                 style={{ background: "transparent" }}
                 onMouseDown={(e) => {
                     e.stopPropagation();
@@ -420,7 +420,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             />
             <div
                 ref={popupRef}
-                className="fixed z-[99999] flex flex-col"
+                className="fixed z-99999 flex flex-col"
                 style={{
                     left: position.x,
                     top: position.y,
@@ -448,7 +448,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         onKeyDown={handleKeyDown}
                         placeholder={noFolder ? t("qs_no_folder") : t("qs_placeholder")}
                         disabled={noFolder}
-                        className="flex-1 bg-transparent border-none outline-none text-qt-text text-qt-xs placeholder:text-qt-text-muted"
+                        className="flex-1 bg-transparent border-none outline-hidden text-qt-text text-qt-xs placeholder:text-qt-text-muted"
                         autoComplete="off"
                         spellCheck={false}
                     />

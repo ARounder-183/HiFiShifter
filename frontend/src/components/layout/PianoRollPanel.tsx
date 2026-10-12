@@ -9206,7 +9206,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             // 底部预留 8px（bottom-2）：给自绘水平滚动条独占一行。滚动
                             // 条若叠加在内容上，会挡住贴底的参数线；让 scroller 在水平
                             // 条上方收边，二者互不重叠（竖直条同步缩短，见下方轨道）。
-                            className="absolute left-0 right-0 top-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            className="absolute left-0 right-0 top-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-hidden focus:outline-hidden focus-visible:outline-hidden"
                             // 底部预留一行给自绘水平滚动条（见 PARAM_EDITOR_BOTTOM_BAR_PX）
                             style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                             data-piano-roll-scroller
@@ -9433,7 +9433,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             <div
                                 ref={vScrollbarThumbRef}
                                 data-hs-scrollbar="1"
-                                className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                className="absolute left-0 w-full cursor-grab rounded-full bg-(--qt-scrollbar-thumb)"
                             />
                         </div>
                         <div
@@ -9445,7 +9445,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             <div
                                 ref={hScrollbarThumbRef}
                                 data-hs-scrollbar="1"
-                                className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                className="absolute top-0 h-full cursor-grab rounded-full bg-(--qt-scrollbar-thumb)"
                             />
                         </div>
                     </div>

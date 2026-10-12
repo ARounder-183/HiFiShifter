@@ -233,7 +233,7 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
                     transform: "translateX(-6px)",
                 }}
             >
-                <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[8px] border-t-qt-playhead" />
+                <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-8 border-t-qt-playhead" />
             </div>
         </>
     );

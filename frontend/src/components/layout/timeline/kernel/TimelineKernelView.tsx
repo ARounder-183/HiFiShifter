@@ -857,7 +857,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                （两个面板的网格线无法按同一屏幕位置对齐）。此处语义相同：
                它是轨道区的视口元素（只是滚动由内核自绘而非浏览器维护）。 */
             data-timeline-scroller
-            className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
+            className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-hidden"
             style={{ touchAction: "none" }}
             onDragOver={onDragOver}
             onDrop={onDrop}
@@ -872,7 +872,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 两遍（合并 feature/tools 时其独立 sticky 音高线层即因此移除，
                 数学统一在 `runtime/midiPitchCurve.ts`）。 */}
             {hostReady && waveformAxis !== null && visibleRows.rowCount > 0 ? (
-                <div className="pointer-events-none absolute inset-0 z-[1]">
+                <div className="pointer-events-none absolute inset-0 z-1">
                     <TimelineWaveformSurface
                         tracks={waveformTracks}
                         startTrackIndex={visibleRows.firstRow}
@@ -896,12 +896,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 由宿主整层 translate 跟随视口。旧实现靠原生滚动平移它，内核自绘
                 滚动后必须显式补上，否则该层要么不挂载、要么位置不随滚动。
                 注意：transform 会创建 stacking context，因此容器需显式 z-index
-                （层内部的 z-[13] 只在容器内生效）。 */}
+                （层内部的 z-13 只在容器内生效）。 */}
             {snapHighlight !== undefined ? (
                 <div
                     ref={snapContentRef}
                     data-hs-snap-content="1"
-                    className="pointer-events-none absolute left-0 top-0 z-[3] overflow-hidden"
+                    className="pointer-events-none absolute left-0 top-0 z-3 overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,
                         // 层高取「内容 ∪ 可视区」的并集：通栏吸附竖线（网格线 / 播放
@@ -928,7 +928,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             <div
                 ref={ghostContentRef}
                 data-hs-ghost-content="1"
-                className="pointer-events-none absolute left-0 top-0 z-[4] overflow-hidden"
+                className="pointer-events-none absolute left-0 top-0 z-4 overflow-hidden"
                 style={{
                     width: ghost?.contentWidth ?? 0,
                     height: ghost?.contentHeight ?? 0,
@@ -971,7 +971,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             <div
                 ref={dropPreviewContentRef}
                 data-hs-drop-preview="1"
-                className="pointer-events-none absolute left-0 top-0 z-[5] overflow-hidden"
+                className="pointer-events-none absolute left-0 top-0 z-5 overflow-hidden"
                 style={{
                     width: dropPreview?.contentWidth ?? 0,
                     height: dropPreview?.contentHeight ?? 0,
@@ -1024,7 +1024,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             <div
                 ref={newTrackDropContentRef}
                 data-hs-new-track-content="1"
-                className="pointer-events-none absolute left-0 top-0 z-[6] overflow-hidden"
+                className="pointer-events-none absolute left-0 top-0 z-6 overflow-hidden"
                 style={{
                     width: newTrackDrop?.contentWidth ?? 0,
                     // 高度按"全部轨道 + 幽灵行"算：幽灵行在最后一行之下。
@@ -1137,7 +1137,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 <div
                     ref={vThumbRef}
                     data-hs-scrollbar="1"
-                    className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    className="absolute left-0 w-full cursor-grab rounded-full bg-(--qt-scrollbar-thumb)"
                 />
             </div>
             <div
@@ -1148,7 +1148,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 <div
                     ref={hThumbRef}
                     data-hs-scrollbar="1"
-                    className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    className="absolute top-0 h-full cursor-grab rounded-full bg-(--qt-scrollbar-thumb)"
                 />
             </div>
         </div>

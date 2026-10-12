@@ -446,7 +446,7 @@ const ColorTokenRow: React.FC<{
                     type="text"
                     value={color}
                     onChange={(e) => onChange(e.target.value)}
-                    className="w-[92px] px-2 py-1 text-qt-micro bg-qt-base text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                    className="w-[92px] px-2 py-1 text-qt-micro bg-qt-base text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                     spellCheck={false}
                 />
             </div>
@@ -1136,7 +1136,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                 markDraftDirty();
                                                 setEditThemeName(e.target.value);
                                             }}
-                                            className="w-full rounded border border-qt-border bg-qt-base px-2 py-1.5 text-qt-xs text-qt-text transition-colors focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                            className="w-full rounded border border-qt-border bg-qt-base px-2 py-1.5 text-qt-xs text-qt-text transition-colors focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30"
                                             placeholder={tf("appearance_custom_theme")}
                                         />
                                     </AppField>
@@ -1237,7 +1237,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                 }}
                                             >
                                                 {isSelected && (
-                                                    <span className="absolute inset-0 flex items-center justify-center text-white text-qt-micro font-bold drop-shadow-sm">
+                                                    <span className="absolute inset-0 flex items-center justify-center text-white text-qt-micro font-bold drop-shadow-xs">
                                                         ✓
                                                     </span>
                                                 )}
@@ -1388,7 +1388,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         markDraftDirty();
                                         setFontFamily(e.target.value);
                                     }}
-                                    className="w-full rounded-md border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-qt-xs text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                    className="w-full rounded-md border border-(--qt-divider) bg-qt-surface/40 px-3 py-2 text-qt-xs text-qt-text font-mono focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                     placeholder={DEFAULT_FONT_FAMILY}
                                     spellCheck={false}
                                 />
@@ -1434,7 +1434,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                             >
                                 {/* 加载中 */}
                                 {availableFonts.length === 0 && (
-                                    <div className="flex items-center gap-2 rounded-md border border-dashed border-[color:var(--qt-divider)] bg-qt-base/35 px-3 py-3 text-qt-xs text-qt-text-muted">
+                                    <div className="flex items-center gap-2 rounded-md border border-dashed border-(--qt-divider) bg-qt-base/35 px-3 py-3 text-qt-xs text-qt-text-muted">
                                         {systemFonts.loading ? (
                                             <>
                                                 <span className="animate-spin inline-block w-3 h-3 border-2 border-qt-text-muted/20 border-t-qt-highlight rounded-full" />
@@ -1459,7 +1459,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                 onChange={(e: ChangeEvent<HTMLInputElement>) =>
                                                     setFontSearch(e.target.value)
                                                 }
-                                                className="w-full rounded-md border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                                className="w-full rounded-md border border-(--qt-divider) bg-qt-surface/40 py-2 pl-8 pr-8 text-qt-xs text-qt-text focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                                 placeholder={tf(
                                                     "appearance_font_search_placeholder",
                                                 )}
@@ -1501,7 +1501,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                                 "cursor-pointer select-none text-qt-xs flex items-center gap-3 " +
                                                                 (isActive
                                                                     ? "border-qt-highlight/25 bg-qt-highlight/12 text-qt-highlight"
-                                                                    : "border-transparent text-qt-text hover:border-[color:var(--qt-divider)] hover:bg-qt-surface/40")
+                                                                    : "border-transparent text-qt-text hover:border-(--qt-divider) hover:bg-qt-surface/40")
                                                             }
                                                             onClick={() => {
                                                                 markDraftDirty();

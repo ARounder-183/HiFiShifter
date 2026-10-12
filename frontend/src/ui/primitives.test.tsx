@@ -252,8 +252,8 @@ test("AppFormSection 渲染 section + section 角色标题，并靠留白而非�
     // 若节间距与行距相同就分不出组。两个分区带**同一个类**，`:not(:first-child)`
     // 由 CSS 在运行期挑出后面的分区 —— 因此这里断言"机制存在"，
     // 而不是断言某个分区没有这个类（那是把选择器文本当成结果读）。
-    expect(sections[0].className).toContain("[&:not(:first-child)]:mt-3");
-    expect(sections[1].className).toContain("[&:not(:first-child)]:mt-3");
+    expect(sections[0].className).toContain("not-first:mt-3");
+    expect(sections[1].className).toContain("not-first:mt-3");
 });
 
 test("AppSwitchRow 的 control 决定控件类型，两种共用同一排版", async () => {

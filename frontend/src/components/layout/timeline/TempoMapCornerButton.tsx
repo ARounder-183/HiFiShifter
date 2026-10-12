@@ -165,7 +165,7 @@ export const TempoMapCornerButton: React.FC = () => {
         <>
             <button
                 type="button"
-                className="absolute rounded-[3px] flex items-center justify-center outline-none focus-visible:outline-none transition-colors"
+                className="absolute rounded-[3px] flex items-center justify-center outline-hidden focus-visible:outline-hidden transition-colors"
                 style={{
                     right: 3,
                     bottom: 3,

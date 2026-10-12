@@ -187,7 +187,7 @@ function RenameInput({
                     onCancel();
                 }
             }}
-            className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-xs text-qt-text outline-none"
+            className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-xs text-qt-text outline-hidden"
         />
     );
 }

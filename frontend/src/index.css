@@ -1,6 +1,112 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+    --color-qt-window: var(--qt-window);
+    --color-qt-base: var(--qt-base);
+    --color-qt-panel: var(--qt-panel);
+    --color-qt-surface: var(--qt-surface);
+    --color-qt-text: var(--qt-text);
+    --color-qt-text-muted: var(--qt-text-muted);
+    --color-qt-highlight: var(--qt-highlight);
+    --color-qt-playhead: var(--qt-playhead);
+    --color-qt-button: var(--qt-button);
+    --color-qt-button-hover: var(--qt-button-hover);
+    --color-qt-border: var(--qt-border);
+    --color-qt-hover: var(--qt-hover);
+    --color-qt-accent: var(--qt-accent);
+    --color-qt-danger-bg: var(--qt-danger-bg);
+    --color-qt-danger-text: var(--qt-danger-text);
+    --color-qt-danger-border: var(--qt-danger-border);
+    --color-qt-warning-bg: var(--qt-warning-bg);
+    --color-qt-warning-text: var(--qt-warning-text);
+    --color-qt-warning-border: var(--qt-warning-border);
+    --color-qt-success-bg: var(--qt-success-bg);
+    --color-qt-success-text: var(--qt-success-text);
+    --color-qt-success-border: var(--qt-success-border);
+    --color-qt-info-bg: var(--qt-info-bg);
+    --color-qt-info-text: var(--qt-info-text);
+    --color-qt-info-border: var(--qt-info-border);
+    --color-qt-graph-bg: var(--qt-graph-bg);
+    --color-qt-graph-grid-strong: var(--qt-graph-grid-strong);
+    --color-qt-graph-grid-weak: var(--qt-graph-grid-weak);
+    --color-qt-scrollbar-thumb: var(--qt-scrollbar-thumb);
+    --color-qt-scrollbar-thumb-hover: var(--qt-scrollbar-thumb-hover);
+    --color-qt-overlay: var(--qt-overlay);
+    --color-qt-meter-rail: var(--qt-meter-rail);
+    --color-qt-meter-well: var(--qt-meter-well);
+    --color-qt-subtle-1: var(--qt-subtle-1);
+    --color-qt-subtle-2: var(--qt-subtle-2);
+    --color-qt-subtle-3: var(--qt-subtle-3);
+    --color-qt-subtle-hover: var(--qt-subtle-hover);
+    --color-qt-divider: var(--qt-divider);
+
+    --font-sans: var(--qt-font-family);
+
+    --spacing-qt-0: var(--qt-space-0);
+    --spacing-qt-1: var(--qt-space-1);
+    --spacing-qt-2: var(--qt-space-2);
+    --spacing-qt-3: var(--qt-space-3);
+    --spacing-qt-4: var(--qt-space-4);
+    --spacing-qt-5: var(--qt-space-5);
+    --spacing-qt-6: var(--qt-space-6);
+    --spacing-qt-7: var(--qt-space-7);
+
+    --height-qt-ctl-sm: var(--qt-ctl-sm);
+    --height-qt-ctl-md: var(--qt-ctl-md);
+    --height-qt-ctl-lg: var(--qt-ctl-lg);
+    --height-qt-bar-title: var(--qt-bar-title);
+    --height-qt-bar-compact: var(--qt-bar-compact);
+    --height-qt-bar-main: var(--qt-bar-main);
+    --height-qt-bar-status: var(--qt-bar-status);
+
+    --radius-none: 0px;
+    --radius-sm: var(--qt-radius-sm);
+    --radius: var(--qt-radius-sm);
+    --radius-md: var(--qt-radius-md);
+    --radius-lg: var(--qt-radius-lg);
+    --radius-xl: var(--qt-radius-lg);
+    --radius-2xl: var(--qt-radius-lg);
+    --radius-3xl: var(--qt-radius-lg);
+    --radius-full: 9999px;
+    --radius-qt-sm: var(--qt-radius-sm);
+    --radius-qt-md: var(--qt-radius-md);
+    --radius-qt-lg: var(--qt-radius-lg);
+    --radius-qt-pill: var(--qt-radius-pill);
+
+    --text-qt-3xs: var(--qt-fs-3xs);
+    --text-qt-micro: var(--qt-fs-micro);
+    --text-qt-xs: var(--qt-fs-xs);
+    --text-qt-sm: var(--qt-fs-sm);
+    --text-qt-md: var(--qt-fs-md);
+    --text-qt-lg: var(--qt-fs-lg);
+    --text-qt-xl: var(--qt-fs-xl);
+    --text-qt-2xl: var(--qt-fs-2xl);
+
+    --z-index-qt-transient: var(--qt-z-transient);
+    --z-index-qt-panel: var(--qt-z-panel);
+    --z-index-qt-popover: var(--qt-z-popover);
+    --z-index-qt-menu: var(--qt-z-menu);
+    --z-index-qt-dialog: var(--qt-z-dialog);
+    --z-index-qt-fullscreen: var(--qt-z-fullscreen);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+    *,
+    ::after,
+    ::before,
+    ::backdrop,
+    ::file-selector-button {
+        border-color: var(--color-gray-200, currentcolor);
+    }
+}
 
 /*
   Qt-like design tokens as CSS variables.

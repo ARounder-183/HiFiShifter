@@ -3966,7 +3966,7 @@ function AppInner() {
                                 {t("recapture_missing_media_search_mode_label")}
                             </span>
                             <WheelSelect
-                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30"
                                 value={sourceFileSearchMode}
                                 disabled={
                                     sourceFileSearchBusy ||
@@ -4199,7 +4199,7 @@ function AppInner() {
                                             item.candidates.length > 0 && (
                                                 <div className="mt-1 flex items-center gap-1">
                                                     <WheelSelect
-                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-hidden focus:ring-1 focus:ring-qt-highlight/30"
                                                         value={item.selectedCandidatePath ?? ""}
                                                         disabled={isBusy}
                                                         onValueChange={(value) =>

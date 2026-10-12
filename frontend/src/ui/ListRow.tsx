@@ -49,7 +49,7 @@ export interface AppListRowProps {
      * 与背景正交，可以叠加且各自可辨。
      *
      * 【描边的实际规则在 `index.css`】见那里的 `[data-active]:focus`。放在 CSS
-     * 而不是这里，是因为 Tailwind 的 `focus:outline-none`（用于关掉浏览器默认
+     * 而不是这里，是因为 Tailwind 的 `focus:outline-hidden`（用于关掉浏览器默认
      * 描边）编译成 `outline: 2px solid transparent` 的**简写**，带 `:focus` 的
      * 选择器优先级又高于本组类 —— 两者叠在一起时，我们画的环会被整体改写成透明，
      * 表现就是"键盘移动完全不显示高亮"。这类"工具类互相覆盖"的坑，只有在
