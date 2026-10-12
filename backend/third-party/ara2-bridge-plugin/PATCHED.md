@@ -11,6 +11,23 @@
 | 3 | `PluginBuilder` | 增量 | `controller_identity(Fn(usize))`：controller 分配后通知真实 ref | 待查 |
 | 4 | persistent-ID FFI 校验 | **行为** | 有界非空有效 UTF-8 直通（同 core 侧补丁 2；REAPER 中文路径对象 ID） | 待查 |
 | 5 | `Cargo.toml` | 增量 | 新增 `log` 依赖（通知路径诊断） | 待查 |
+| 6 | `factory.rs` 的 `initialize` ABI 入口 | 增量 | 记录宿主请求的 ARA 代数与接受/拒绝结果（见下方「代数协商的静默失败」） | 待查 |
+| 7 | `factory.rs` 的 `create_document_controller` ABI 入口 | 增量 | 记录"把 null 控制器交给宿主"的**原因**（原先 `.ok()` 把错误整条丢掉） | 待查 |
+| 8 | `entry.rs` 的 `initialize` | **行为** | 宿主没给 assert 指针时记警告后**继续**（原先硬拒绝 ⇒ 静默 ⇒ null 控制器交给宿主）；该地址在本库只被记录与比较、从不被调用，取 0 是安全的 | 待查 |
+
+## 代数协商的静默失败（补丁 6/7）
+
+这条链上有三个静默点叠在一起，任一处出问题都表现为**宿主崩在自己的代码里**，
+从崩溃现场完全看不出与插件有关：
+
+1. `initializeARAWithConfiguration` 的 C ABI 返回 **void** —— 我们拒了宿主，宿主无从得知；
+2. 拒绝的结果被折叠成 `createDocumentControllerWithDocument` 返回 **null**；
+3. 宿主**不检查**这个 null —— 它会拿着它写字段。
+
+实测：Cubase 15 插入为 ARA 插件后，在 `araservice.dll` 内以空指针 + 0xB0 写入崩溃
+（异常 `0xc0000005`，参数 `[1, 0xb0]`，两次 dump 同一偏移 `+0x512af`），调用栈上没有任何
+HiFiShifter 模块，崩溃进程的模块表里也没有。补丁 6/7 把这三步都变成日志：
+**请求了哪一代、我们接受还是拒绝、拒绝后交给宿主的是 null 及其原因。**
 
 ## 补了什么
 

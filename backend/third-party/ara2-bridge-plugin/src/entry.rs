@@ -123,10 +123,22 @@ impl CallbackState {
         generation: ApiGeneration,
         assert_address: *mut ARAAssertFunction,
     ) -> Result<(), AraError> {
+        // 【本地补丁 8】宿主没提供 assert 指针时**容忍**，而不是拒绝。
+        //
+        // 规范要求宿主总是提供这个指针（"It must be always provided by the host, but can
+        // point to NULL to suppress debugging in release versions"），但拒绝的代价极不对称：
+        // 拒绝是静默的（C ABI 返回 void），随后 `createDocumentControllerWithDocument` 会
+        // 把 **null** 交给宿主，而宿主不检查它 —— 它拿着 null 写字段就崩在自己的代码里
+        // （Cubase 15 实测：`araservice.dll` 空指针 + 0xB0 写入，0xc0000005/[1, 0xb0]）。
+        //
+        // 而这个地址在本库里**只被记录与比较，从不被调用**（见 `acquire_assertion` /
+        // `release_assertion`），所以取 0 的唯一后果是"没有装调试断言钩子"。
+        // 把宿主的轻微不规范变成崩溃是不可接受的，所以这里记一条警告后继续。
         if assert_address.is_null() {
-            return Err(AraError::InvalidArgument(
-                "assert-function address must not be null",
-            ));
+            log::warn!(
+                "[ara] the host provided no assert-function address; continuing without the \
+                 debug assertion hook instead of rejecting the configuration"
+            );
         }
         if generation < self.lowest || generation > self.highest {
             return Err(AraError::InvalidArgument(

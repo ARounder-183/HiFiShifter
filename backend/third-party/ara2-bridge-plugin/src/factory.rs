@@ -91,11 +91,27 @@ unsafe extern "C" fn initialize<const SLOT: usize>(config: *const ARAInterfaceCo
             return;
         }
         // SAFETY: the checked byte extent covers both fields and both are copied unaligned.
-        let generation = unsafe { addr_of!((*config).desiredApiGeneration).read_unaligned() };
+        let requested = unsafe { addr_of!((*config).desiredApiGeneration).read_unaligned() };
         // SAFETY: same checked extent as above.
         let assert_address = unsafe { addr_of!((*config).assertFunctionAddress).read_unaligned() };
-        if let Ok(generation) = ApiGeneration::try_from_raw(generation) {
-            let _ = state.initialize(generation, assert_address);
+        // 【本地补丁 6】代数协商失败是**静默**的：本入口的 C ABI 返回 void，宿主无从得知
+        // 我们拒了它，而后果是 `createDocumentControllerWithDocument` 把 null 交给宿主
+        // （宿主不检查，会拿着它写字段）。把请求值与结果记下来，否则现场只剩"宿主崩在
+        // 自己的代码里"，完全看不出与插件有关。
+        match ApiGeneration::try_from_raw(requested) {
+            Ok(generation) => match state.initialize(generation, assert_address) {
+                Ok(()) => log::info!("[ara] host selected API generation {generation:?}"),
+                // 措辞不写"代数被拒"：拒绝的原因不止代数一种（也可能是重复初始化）。
+                // `error` 本身带着真正的原因，照原样输出。
+                Err(error) => log::warn!(
+                    "[ara] rejected the host's ARA configuration (requested generation \
+                     raw={requested}): {error}; the host is not told, so its \
+                     document-controller request will receive null"
+                ),
+            },
+            Err(error) => log::warn!(
+                "[ara] host requested an unknown API generation (raw={requested}): {error}"
+            ),
         }
     }));
 }
@@ -113,13 +129,27 @@ unsafe extern "C" fn create_document_controller<const SLOT: usize>(
     properties: *const ARADocumentProperties,
 ) -> *const ARADocumentControllerInstance {
     catch_unwind(AssertUnwindSafe(|| {
-        callback_state(SLOT)
-            .and_then(|state| {
-                state
-                    .create_document_controller(host_instance, properties)
-                    .ok()
-            })
-            .unwrap_or_else(null)
+        // 【本地补丁 7】这里返回的 null 会被**直接交给宿主**，而宿主通常不检查它 ——
+        // Cubase 15 实测就是拿着这个 null 在 `araservice.dll` 内写字段，以空指针 + 0xB0
+        // 崩溃（0xc0000005，参数 [1, 0xb0]）。原先的 `.ok()` 把失败原因整条丢掉，现场
+        // 只剩宿主自己的崩溃。把原因记下来。
+        let Some(state) = callback_state(SLOT) else {
+            log::error!(
+                "[ara] document controller request dropped: this factory's ABI slot is gone; \
+                 handing the host a null controller"
+            );
+            return null();
+        };
+        match state.create_document_controller(host_instance, properties) {
+            Ok(controller) => controller,
+            Err(error) => {
+                log::error!(
+                    "[ara] document controller request failed: {error}; handing the host a null \
+                     controller, which a host that does not check it will write through"
+                );
+                null()
+            }
+        }
     }))
     .unwrap_or(null())
 }

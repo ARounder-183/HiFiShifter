@@ -2278,6 +2278,8 @@ mod audio_boundary_tests;
 #[cfg(test)]
 mod factory_declaration_tests;
 #[cfg(test)]
+mod host_handshake_tests;
+#[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]
 mod realtime_tests;

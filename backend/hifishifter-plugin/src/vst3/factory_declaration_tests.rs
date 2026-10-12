@@ -151,19 +151,26 @@ fn plugin_factory3_is_queryable() {
     assert!(miss.is_null());
 }
 
-/// **不变量：对外宣称的 ARA 代数必须是我们真正履行的契约。**
+/// **不变量：对外宣称的 ARA 代数区间必须既覆盖真实宿主、又不超过我们履行的契约。**
 ///
-/// 【为什么这是崩溃级回归】库的默认最高代数是 **2.3 Final**，而 2.3 的全部含义是一句
-/// 能力承诺（ARA SDK 的 `ARAAPIGeneration` 注释）：插件会通过
+/// 【上界为什么是 2.0 Final，不是库默认的 2.3 Final】2.3 的全部含义是一句能力承诺
+/// （ARA SDK 的 `ARAAPIGeneration` 注释）：插件会通过
 /// `ARAModelUpdateControllerInterface` 发送持久状态变更通知，宿主因此可以**只保存变化
 /// 的部分**。本插件从不调用那套接口 —— 照默认值宣称 2.3，等于让宿主改用自己的增量保存
 /// 与状态记账路径，而通知永远不来。
 ///
-/// 实测：Cubase 15 在读完 `ARAFactory`（即选定代数）之后、创建文档控制器之前，于
-/// `araservice.dll` 内以空指针 + 0xB0 写入崩溃（`0xc0000005`，参数 `[1, 0xb0]`）；
-/// 而唯一验收过的宿主 REAPER 协商的是 2.0 Final（`apiGeneration=V2Final`）。
+/// 【下界为什么必须低到 2.0 Draft】SDK 把每一代的使用者写明了：2.0 **Draft** 列出
+/// Studio One / Logic Pro / **Cubase·Nuendo** / Cakewalk / REAPER / Melodyne。
+/// 代数协商失败是**静默**的（`initializeARAWithConfiguration` 返回 void），后果是
+/// `createDocumentControllerWithDocument` 回 **null** 交给宿主 —— 而宿主不检查它。
+/// Cubase 15 实测就是这样在 `araservice.dll` 内以空指针 + 0xB0 写入崩溃
+/// （`0xc0000005`，参数 `[1, 0xb0]`，两次 dump 同一偏移）。
+///
+/// 两端的断言各自钉住一个方向：上界收窄会让我们谎称支持 2.3 之后又反悔，
+/// 下界收窄会把 Cubase/Nuendo 挡在门外。`host_handshake_tests` 从**宿主视角**
+/// 把同一件事再钉一遍（请求每一代都必须拿到真实控制器）。
 #[test]
-fn the_advertised_ara_generation_is_the_one_we_actually_honour() {
+fn the_advertised_ara_generation_range_covers_hosts_and_stays_honest() {
     let runtime = crate::runtime::runtime().expect("进程级 ARA 运行时必须可建");
     // `ARAFactory` 是**紧凑（packed）**结构（ARA SDK 在 Windows 上按 1 字节对齐生成），
     // 因此不能直接对字段取引用（E0793）。整份拷出来再读，与库的 `raw_copy` 同一手法。
@@ -175,8 +182,8 @@ fn the_advertised_ara_generation_is_the_one_we_actually_honour() {
     let highest = factory.highestSupportedApiGeneration;
     assert_eq!(
         lowest,
-        ApiGeneration::V2Final.as_raw(),
-        "最低代数必须是实测验收过的那一代"
+        ApiGeneration::V2Draft.as_raw(),
+        "最低代数必须覆盖 2.0 Draft —— SDK 明确列出 Cubase/Nuendo 使用这一代"
     );
     assert_eq!(
         highest,
