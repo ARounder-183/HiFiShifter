@@ -997,11 +997,16 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         {
             return;
         }
-        if self
-            .capabilities
-            .request_analysis(source, &content_types)
-            .is_err()
-        {
+        if let Err(error) = self.capabilities.request_analysis(source, &content_types) {
+            // 【本地补丁 10】宿主请求了分析、而本插件做不了：库会取消这次分析，宿主随后
+            // 得到"没有待办分析"。必须留痕 —— 这条日志出现就说明宿主**确实**想要分析，
+            // 而那正是"广告了可分析内容"探针要找的答案（探针开着时请求会走到这里，
+            // 而不是走上面那条"未广告"的分支）。
+            log::warn!(
+                "[ara] the host requested analysis of {content_types:?}, which this build \
+                 advertises but does not implement ({error}); the request is cancelled and the \
+                 host is told there is nothing pending"
+            );
             let _ = self.analysis.cancel(source);
             return;
         }

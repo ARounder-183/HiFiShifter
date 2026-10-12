@@ -61,6 +61,52 @@ pub struct Runtime {
     pub companion: CompanionFactory<'static>,
 }
 
+/// 环境变量名：把"可分析内容类型"广告出去（**诊断探针**，默认关闭）。
+const PROBE_ANALYSIS_ENV: &str = "HIFISHIFTER_ARA_PROBE_ANALYSIS";
+
+/// 本进程是否启用了"广告可分析内容"探针。
+///
+/// 【为什么需要这个探针】Cubase 15 实测：文档控制器、轨道序列、音频源都建好了，
+/// 却**从不**创建 audio modification / playback region —— 编辑器里一条片段都没有
+///（前端时间线由渲染快照物化，0 个 region 连轨道都不显示）。而同一台机器上
+/// Melodyne 完全正常，所以差异在我们这一侧。
+///
+/// 我们与 Melodyne 唯一同类的差别是 `ARAFactory::analyzeableContentTypes` 为空。ARA
+/// 规范里宿主正是靠这个字段判断"这个插件能否给出**导入素材**的音乐时值"，而实测素材
+/// 正是导入的 `Vocal-1-1.wav`（宿主不掌握它的速度）。若 Cubase 据此决定要不要把事件
+/// 交给插件，那么"广告出去、它就会问"就能把这条因果坐实。
+///
+/// 【为什么默认关闭】广告一个我们不实现的能力是**假声明** —— 与早先"宣称 ARA 2.3"
+/// 同类。探针只在诊断时开。
+///
+/// 【为什么开了也不会让宿主空等】库对"没注册分析能力"的回答是安全的：
+/// `is_analysis_incomplete` / `is_content_available` 用 `is_some_and` 一律回 false，
+/// `request_analysis` 返回 Err 之后库会**取消**该次分析 —— 宿主问得到"没有待办分析"，
+/// 不会挂起。
+fn probe_analysis_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some()
+}
+
+/// 工厂能力集合：默认只广告我们**真正履行**的东西。
+fn factory_capabilities() -> FactoryCapabilities {
+    let capabilities = FactoryCapabilities::default().with_playback_transformations(
+        PlaybackTransformationFlags::TIMESTRETCH
+            | PlaybackTransformationFlags::REFLECT_TEMPO
+            | PlaybackTransformationFlags::CONTENT_FADES,
+    );
+    if probe_analysis_requested(std::env::var_os(PROBE_ANALYSIS_ENV).as_deref()) {
+        log::warn!(
+            "[ara] PROBE ({PROBE_ANALYSIS_ENV}): advertising tempo/bar-signature analysis even \
+             though this build does not implement it; the host may now request it"
+        );
+        return capabilities.with_analyzable_content_types([
+            ara2_bridge::sys::kARAContentTypeTempoEntries as i32,
+            ara2_bridge::sys::kARAContentTypeBarSignatures as i32,
+        ]);
+    }
+    capabilities
+}
+
 impl Runtime {
     /// 建立工厂与 companion 关联。
     fn init() -> Result<Runtime, AraError> {
@@ -127,13 +173,7 @@ impl Runtime {
             // 用时长比值），只有工厂这一句声明在反着来。
             //
             // 原kernel处理委托的边界包络，head/tail无额外延伸。
-            .capabilities(
-                FactoryCapabilities::default().with_playback_transformations(
-                    PlaybackTransformationFlags::TIMESTRETCH
-                        | PlaybackTransformationFlags::REFLECT_TEMPO
-                        | PlaybackTransformationFlags::CONTENT_FADES,
-                ),
-            )
+            .capabilities(factory_capabilities())
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
             // 共享一份会让两份文档的累积互相污染（设计 §4.1：v1 是"一实例一编辑轨"）。
             .document_controller(|| {
@@ -165,6 +205,21 @@ impl Runtime {
             })
             .build()?;
         let factory: &'static Factory = Box::leak(Box::new(factory));
+        // 【为什么把对外声明留痕】宿主是否愿意把事件内容交给本插件，读的正是这几个字段。
+        // 实测 Cubase 15 建了源与轨道序列却不建任何 region，而日志里看不出我们声明了什么，
+        // 于是每次都只能靠推测。`ARAFactory` 是紧凑结构，按值读出字段再打印。
+        {
+            // SAFETY: 工厂泄漏到进程结束，指针在整个进程期内有效；read_unaligned 接受任意对齐。
+            let raw = unsafe { std::ptr::read_unaligned(factory.as_raw()) };
+            let lowest = raw.lowestSupportedApiGeneration;
+            let highest = raw.highestSupportedApiGeneration;
+            let transformations = raw.supportedPlaybackTransformationFlags;
+            let analyzeable = raw.analyzeableContentTypesCount;
+            log::info!(
+                "[ara] factory advertised: generations={lowest}..={highest} \
+                 transformations={transformations:#x} analyzeableContentTypes={analyzeable}"
+            );
+        }
         // SAFETY: 工厂被泄漏到进程结束，`as_raw` 指向的 ARAFactory 与工厂同寿。
         let companion =
             unsafe { CompanionFactory::from_raw(crate::CLASS_NAME, &*factory.as_raw())? };
@@ -198,6 +253,36 @@ pub fn runtime() -> Option<&'static Runtime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **不变量：默认不广告任何"可分析内容类型"。**
+    ///
+    /// 【为什么钉住】广告一个我们不实现的能力是**假声明**（与早先"宣称 ARA 2.3 变更
+    /// 通知"同类）。探针只在显式设置 `HIFISHIFTER_ARA_PROBE_ANALYSIS` 时打开，且开关本身
+    /// 由 `the_analysis_probe_follows_the_environment_variable` 单独钉住。
+    #[test]
+    fn the_default_capabilities_advertise_no_analysis() {
+        let runtime = Runtime::init().unwrap();
+        // SAFETY: 工厂泄漏到进程结束；紧凑结构整份拷出来再读字段。
+        let raw = unsafe { std::ptr::read_unaligned(runtime.factory.0.as_raw()) };
+        let analyzeable = raw.analyzeableContentTypesCount;
+        let transformations = raw.supportedPlaybackTransformationFlags;
+        assert_eq!(analyzeable, 0, "默认不得广告任何可分析内容类型");
+        assert_eq!(
+            transformations as u32,
+            (PlaybackTransformationFlags::TIMESTRETCH
+                | PlaybackTransformationFlags::REFLECT_TEMPO
+                | PlaybackTransformationFlags::CONTENT_FADES)
+                .bits()
+        );
+    }
+
+    /// 探针只认"环境变量是否存在"，不解析取值 —— 诊断时设成什么都该生效。
+    #[test]
+    fn the_analysis_probe_follows_the_environment_variable() {
+        assert!(!probe_analysis_requested(None));
+        assert!(probe_analysis_requested(Some(std::ffi::OsStr::new("1"))));
+        assert!(probe_analysis_requested(Some(std::ffi::OsStr::new("0"))));
+    }
 
     /// **不变量：工厂广告的 transformation 集合必须覆盖宿主会给出的每一种。**
     ///
