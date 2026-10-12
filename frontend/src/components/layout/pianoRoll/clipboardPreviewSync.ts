@@ -42,7 +42,8 @@ export function createClipboardPreviewSync(read: ParamClipboardReader): Clipboar
     return {
         async sync(apply) {
             const mine = (token += 1);
-            let data: ParamClipboardData | null = null;
+            // 两条分支（try 成功 / catch 置空）都会赋值，初始值用不到。
+            let data: ParamClipboardData | null;
             try {
                 data = await read();
             } catch {

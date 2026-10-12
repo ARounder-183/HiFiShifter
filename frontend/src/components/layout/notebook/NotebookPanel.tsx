@@ -650,7 +650,8 @@ export function NotebookPanel() {
     const pasteFromClipboard = useCallback(
         async (overrides?: NotebookPasteOverrides) => {
             if (!insertContext) return;
-            let text = "";
+            // try 与 catch 都会赋值，初始值用不到。
+            let text: string;
             try {
                 text = await navigator.clipboard.readText();
             } catch {

@@ -1455,7 +1455,8 @@ function AppInner() {
                         // ref 会分叉 —— 后台完成事件来时 wasActiveForTarget 仍
                         // 判定 false，徽标会卡在与 ref 不一致的状态上。
                         const targetKey = target ?? "background";
-                        let wasActiveForTarget = false;
+                        // if / else 两条分支都会赋值，初始值用不到。
+                        let wasActiveForTarget: boolean;
                         if (targetKey === "original") {
                             wasActiveForTarget = originalRenderActiveRef.current;
                             originalRenderActiveRef.current = active;

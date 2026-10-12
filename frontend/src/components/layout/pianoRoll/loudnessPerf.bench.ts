@@ -24,7 +24,9 @@
  * 【运行】`npx vitest bench src/components/layout/pianoRoll/loudnessPerf.bench.ts`
  */
 
-import { bench, describe } from "vitest";
+// vitest 5 起基准不再是顶层 `bench()`，而是 `test` 回调上的 `bench` fixture：
+// 先 `bench(name, fn)` 登记，再用 `bench.compare(...)` 跑这一组。
+import { describe, test } from "vitest";
 
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
@@ -189,29 +191,33 @@ console.log(
 );
 
 describe("参数编辑器波形重建（1 行 / 2624px 窗口 / L0 / 150 px/s）", () => {
-    bench("线性映射（无响度自动化）", () => {
-        build(fine, linear);
-    });
-
-    bench("响度映射 · 无 live 覆盖", () => {
-        build(fine, loudnessSnapshot);
-    });
-
-    bench("响度映射 · 拖动音量（live 覆盖）", () => {
-        build(fine, loudnessLive);
+    test("基准", async ({ bench }) => {
+        await bench.compare(
+            bench("线性映射（无响度自动化）", () => {
+                build(fine, linear);
+            }),
+            bench("响度映射 · 无 live 覆盖", () => {
+                build(fine, loudnessSnapshot);
+            }),
+            bench("响度映射 · 拖动音量（live 覆盖）", () => {
+                build(fine, loudnessLive);
+            }),
+        );
     });
 });
 
 describe("参数编辑器波形重建（粗缩放 6 px/s：列少、列内窗口宽）", () => {
-    bench("线性映射（无响度自动化）", () => {
-        build(coarse, linear);
-    });
-
-    bench("响度映射 · 无 live 覆盖", () => {
-        build(coarse, loudnessSnapshot);
-    });
-
-    bench("响度映射 · 拖动音量（live 覆盖）", () => {
-        build(coarse, loudnessLive);
+    test("基准", async ({ bench }) => {
+        await bench.compare(
+            bench("线性映射（无响度自动化）", () => {
+                build(coarse, linear);
+            }),
+            bench("响度映射 · 无 live 覆盖", () => {
+                build(coarse, loudnessSnapshot);
+            }),
+            bench("响度映射 · 拖动音量（live 覆盖）", () => {
+                build(coarse, loudnessLive);
+            }),
+        );
     });
 });

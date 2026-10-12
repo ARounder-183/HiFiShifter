@@ -17,7 +17,6 @@ import reducer, {
     createEmptyPanel,
     dockFormTo,
     floatForm,
-    setDockLayout,
     syncRegisteredPanels,
 } from "./dockSlice.ts";
 import { normalizeDockLayout } from "./dockSchema.ts";
@@ -492,10 +491,9 @@ test("dock panel behaviors", () => {
 
     // ── 子树根集合：独立窗口挂载排除与自引用防护共用同一份计算 ──
     {
-        let state = reducer(undefined, { type: "@@INIT" });
-        state = reducer(state, setDockLayout(normalizeDockLayout(state.layout)));
-        const { state: withPanel, panelFormId } = seedPanel();
-        state = withPanel;
+        // 直接取种子工程：此前先本地跑两次 reducer，紧接着又整个换成
+        // `seedPanel()` 的 state —— 那两步的结果从未被读取。
+        const { state, panelFormId } = seedPanel();
         const rootId = state.layout.forms[panelFormId].childRootId as string;
         assertEqual(
             [...collectSubtreeRootIds(state.layout, rootId)].sort(),

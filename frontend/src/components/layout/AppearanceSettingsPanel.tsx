@@ -758,7 +758,8 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
     /* ── 应用 & 关闭 ── */
     const handleApply = useCallback(() => {
         const hasCustom = Object.keys(editColors).length > 0 || editWaveform;
-        let themeId: string | null = null;
+        // if / else 两条分支都会赋值，初始值用不到。
+        let themeId: string | null;
 
         if (hasCustom) {
             const existing = customThemes.find((ct) => ct.id === activeThemeId);

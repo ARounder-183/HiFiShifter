@@ -317,23 +317,19 @@ describe("与 drawCurveTimed 循环逐点等价", () => {
         const visibleStartSec = viewportStartSec(axis);
         const visibleEndSec = viewportEndSec(axis);
         const out: { x: number; y: number }[] = [];
-        let started = false;
         for (let i = 0; i < values.length; i += 1) {
             const frame = startFrame + i * step;
             const tSec = framesToTime(frame, fp);
             if (tSec > visibleEndSec) break;
             if (tSec < visibleStartSec) {
-                started = false;
                 continue;
             }
             const x = secToViewportPx(axis, tSec);
             const rawValue = values[i] ?? 0;
             const mappedValue = param === "pitch" ? rawValue + 0.5 : rawValue;
             const y = project(mappedValue);
-            // 原实现只区分 moveTo / lineTo，两者都产出顶点；
-            // 这里用 started 记录"是否为子路径首点"，等价于我们的索引 0。
-            started = true;
-            void started;
+            // 原实现只区分 moveTo / lineTo，两者都产出顶点；可见区之前的点被跳过，
+            // 等价于每条子路径都从索引 0 起算。
             out.push({ x, y });
         }
         return out;

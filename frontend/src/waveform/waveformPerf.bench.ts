@@ -29,7 +29,7 @@
  * 最坏），避免基于错误前提做优化决策。
  */
 
-import { bench, describe } from "vitest";
+import { describe, test } from "vitest";
 
 import {
     viewportEndSec,
@@ -138,35 +138,37 @@ function registerScenario(spec: ScenarioSpec): void {
          * 协调（reconciliation）、TimelinePanel 其余 hook 与浏览器
          * layout/paint。真实成本只会更高。
          */
-        bench("0. renderModel (React 侧)", () => {
-            buildTimelineRenderModel({
-                tracks: scenario.tracks,
-                clips: scenario.clips,
-                viewportStartSec: viewportStartSec(axis),
-                pxPerSec: axis.pxPerSec,
-                viewportEndSec: viewportEndSec(axis),
-                rowHeight: ROW_HEIGHT,
-                scrollTopPx: 0,
-                viewportHeightPx: 960,
-            });
-        });
-
-        bench("1. scene", () => {
-            buildScene();
-        });
-
-        bench("2. geometry", () => {
-            buildGeometry(warmScene);
-        });
-
-        bench("3. quads", () => {
-            expandLineSegmentsToQuads(warmGeometry.vertices);
-        });
-
-        bench("4. full frame", () => {
-            const scene = buildScene();
-            const geometry = buildGeometry(scene);
-            expandLineSegmentsToQuads(geometry.vertices);
+        // vitest 5 起基准不再是顶层 `bench()`，而是 `test` 回调上的 `bench`
+        // fixture：先登记，再用 `bench.compare(...)` 跑这一组。
+        test("基准", async ({ bench }) => {
+            await bench.compare(
+                bench("0. renderModel (React 侧)", () => {
+                    buildTimelineRenderModel({
+                        tracks: scenario.tracks,
+                        clips: scenario.clips,
+                        viewportStartSec: viewportStartSec(axis),
+                        pxPerSec: axis.pxPerSec,
+                        viewportEndSec: viewportEndSec(axis),
+                        rowHeight: ROW_HEIGHT,
+                        scrollTopPx: 0,
+                        viewportHeightPx: 960,
+                    });
+                }),
+                bench("1. scene", () => {
+                    buildScene();
+                }),
+                bench("2. geometry", () => {
+                    buildGeometry(warmScene);
+                }),
+                bench("3. quads", () => {
+                    expandLineSegmentsToQuads(warmGeometry.vertices);
+                }),
+                bench("4. full frame", () => {
+                    const scene = buildScene();
+                    const geometry = buildGeometry(scene);
+                    expandLineSegmentsToQuads(geometry.vertices);
+                }),
+            );
         });
     });
 }

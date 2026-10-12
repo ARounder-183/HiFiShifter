@@ -26,7 +26,7 @@
  * 【运行】`npm run bench`，或 `npx vitest bench timelineClipPerf`。
  */
 
-import { bench, describe } from "vitest";
+import { describe, test } from "vitest";
 
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
@@ -182,58 +182,61 @@ function registerScenario(spec: {
     );
 
     describe(`clip body · ${spec.label}`, () => {
-        bench("0. renderModel (全 clip 分组 + 窗口裁剪)", () => {
-            buildTimelineRenderModel({
-                tracks,
-                clips,
-                viewportStartSec: 0,
-                viewportEndSec: contentEndSec,
-                pxPerSec: axis.pxPerSec,
-                rowHeight: ROW_HEIGHT,
-                scrollTopPx: 0,
-                viewportHeightPx: 960,
-            });
-        });
-
-        bench("1. sparseClipRenderModel (几何投影 + 重叠检测)", () => {
-            buildModel();
-        });
-
-        bench("2. clipVisualStyle ×3 宽度档 (全部 clip)", () => {
-            buildStyles();
-        });
-
-        bench("3. full frame (纯计算部分)", () => {
-            buildTimelineRenderModel({
-                tracks,
-                clips,
-                viewportStartSec: 0,
-                viewportEndSec: contentEndSec,
-                pxPerSec: axis.pxPerSec,
-                rowHeight: ROW_HEIGHT,
-                scrollTopPx: 0,
-                viewportHeightPx: 960,
-            });
-            const model = buildModel();
-            for (const widthPx of styleWidths) {
-                for (const clip of model.drawClips) {
-                    buildTimelineClipVisualStyle({
-                        widthPx,
-                        trackColor: clip.trackColor,
-                        selected: clip.selected,
-                        muted: clip.muted,
-                        gain: clip.gain,
-                        playbackRate: clip.playbackRate,
-                        name: clip.name,
-                        fontFamily: FONT_FAMILY,
-                        isPitchAdjustment: clip.isMidiClip,
-                        groupId: clip.groupId,
-                        isGroupActive: false,
-                        isGroupDisabled: false,
-                        darkMode: true,
+        // vitest 5 起基准不再是顶层 `bench()`，而是 `test` 回调上的 `bench`
+        // fixture：先登记，再用 `bench.compare(...)` 跑这一组。
+        test("基准", async ({ bench }) => {
+            await bench.compare(
+                bench("0. renderModel (全 clip 分组 + 窗口裁剪)", () => {
+                    buildTimelineRenderModel({
+                        tracks,
+                        clips,
+                        viewportStartSec: 0,
+                        viewportEndSec: contentEndSec,
+                        pxPerSec: axis.pxPerSec,
+                        rowHeight: ROW_HEIGHT,
+                        scrollTopPx: 0,
+                        viewportHeightPx: 960,
                     });
-                }
-            }
+                }),
+                bench("1. sparseClipRenderModel (几何投影 + 重叠检测)", () => {
+                    buildModel();
+                }),
+                bench("2. clipVisualStyle ×3 宽度档 (全部 clip)", () => {
+                    buildStyles();
+                }),
+                bench("3. full frame (纯计算部分)", () => {
+                    buildTimelineRenderModel({
+                        tracks,
+                        clips,
+                        viewportStartSec: 0,
+                        viewportEndSec: contentEndSec,
+                        pxPerSec: axis.pxPerSec,
+                        rowHeight: ROW_HEIGHT,
+                        scrollTopPx: 0,
+                        viewportHeightPx: 960,
+                    });
+                    const model = buildModel();
+                    for (const widthPx of styleWidths) {
+                        for (const clip of model.drawClips) {
+                            buildTimelineClipVisualStyle({
+                                widthPx,
+                                trackColor: clip.trackColor,
+                                selected: clip.selected,
+                                muted: clip.muted,
+                                gain: clip.gain,
+                                playbackRate: clip.playbackRate,
+                                name: clip.name,
+                                fontFamily: FONT_FAMILY,
+                                isPitchAdjustment: clip.isMidiClip,
+                                groupId: clip.groupId,
+                                isGroupActive: false,
+                                isGroupDisabled: false,
+                                darkMode: true,
+                            });
+                        }
+                    }
+                }),
+            );
         });
     });
 }

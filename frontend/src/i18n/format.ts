@@ -74,7 +74,8 @@ export function selectPluralForm(locale: string, count: number, raw: string): st
 
     const singular = raw.slice(0, separatorAt);
     const plural = raw.slice(separatorAt + 1);
-    let category: Intl.LDMLPluralRule = "other";
+    // try 与 catch 都会赋值，初始值用不到。
+    let category: Intl.LDMLPluralRule;
     try {
         category = new Intl.PluralRules(locale).select(count);
     } catch {
