@@ -355,7 +355,9 @@ enum CaptureOutput {
         decoder: NativeDecoder,
         channels_in: u16,
         channels_out: u16,
-        resampler: Option<RateConverter>,
+        // Boxed：`RateConverter` 内嵌 rubato 5 的 `Async`（约 200 B），直接内联会
+        // 让两个变体尺寸悬殊（clippy::large_enum_variant）。每包解一次引用，代价可忽略。
+        resampler: Option<Box<RateConverter>>,
     },
 }
 
@@ -455,12 +457,12 @@ unsafe fn init_capture_client(
             )
             .map_err(|e| format!("recording_error_wasapi_init:{e}"))?;
         let resampler = if mix_rate != sample_rate {
-            Some(RateConverter::new(
+            Some(Box::new(RateConverter::new(
                 mix_rate,
                 sample_rate,
                 channels as usize,
                 channels as usize,
-            )?)
+            )?))
         } else {
             None
         };

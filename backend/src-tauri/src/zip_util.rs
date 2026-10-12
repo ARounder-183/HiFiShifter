@@ -1,6 +1,7 @@
 //! zip 归档写入的共享辅助：保留源文件元数据。
 //!
-//! 项目的 zip 依赖关闭了 default features；`time` feature 已显式启用，
+//! 项目的 zip 依赖关闭了 default features；`chrono` feature 已显式启用
+//! （zip 9 起 `DateTime` 的转换由 chrono 提供，早先是 `time`），
 //! `FileOptions::default()` 的修改时间默认为当前 UTC 时间，但仍不会保留
 //! 源文件的时间。本模块按源文件元数据构造条目选项：
 //! - 修改时间（zip 使用 DOS 本地时间，精度 2 秒；超出 DOS 表示范围
@@ -14,7 +15,7 @@ use chrono::{DateTime as ChronoDateTime, Local};
 
 /// 为磁盘上的源文件构造条目选项（保留修改时间与 unix 权限位）。
 /// 元数据读取失败时回退为当前时间。
-pub(crate) fn options_for_source(source: &Path) -> zip::write::FileOptions {
+pub(crate) fn options_for_source(source: &Path) -> zip::write::SimpleFileOptions {
     let options = base_options().last_modified_time(
         std::fs::metadata(source)
             .and_then(|meta| meta.modified())
@@ -32,18 +33,18 @@ pub(crate) fn options_for_source(source: &Path) -> zip::write::FileOptions {
 }
 
 /// 为内存内容（如序列化出的 json）构造条目选项，修改时间取当前本地时间。
-pub(crate) fn options_now() -> zip::write::FileOptions {
+pub(crate) fn options_now() -> zip::write::SimpleFileOptions {
     base_options().last_modified_time(datetime_now())
 }
 
 /// 可能为超大文件的条目（如音频媒体）：同 [`options_for_source`]，
 /// 并允许 ZIP64（>4GiB 的录音文件不开启此标志会在写入时报错）。
-pub(crate) fn options_for_large_source(source: &Path) -> zip::write::FileOptions {
+pub(crate) fn options_for_large_source(source: &Path) -> zip::write::SimpleFileOptions {
     options_for_source(source).large_file(true)
 }
 
-fn base_options() -> zip::write::FileOptions {
-    zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+fn base_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
 }
 
 fn datetime_now() -> zip::DateTime {
@@ -54,15 +55,11 @@ fn datetime_from_system_time(t: std::time::SystemTime) -> zip::DateTime {
     datetime_from_chrono(t.into())
 }
 
-/// chrono 本地时间 → zip DOS 时间（经 `time::OffsetDateTime` 转换）。
+/// chrono 本地时间 → zip DOS 时间（zip 9 起经 `TryFrom<NaiveDateTime>`；
+/// 早先经 `time::OffsetDateTime`，那条路径在 zip 9 已被移除）。
 /// 超出 DOS 表示范围（1980-2107）时回退为 `DateTime::default()`（1980-01-01）。
 fn datetime_from_chrono(dt: ChronoDateTime<Local>) -> zip::DateTime {
-    let offset = time::UtcOffset::from_whole_seconds(dt.offset().local_minus_utc())
-        .unwrap_or(time::UtcOffset::UTC);
-    let local = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
-        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-        .to_offset(offset);
-    zip::DateTime::try_from(local).unwrap_or_default()
+    zip::DateTime::try_from(dt.naive_local()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -161,14 +158,15 @@ mod tests {
         let mut archive = zip::ZipArchive::new(f).expect("archive");
         let entry = archive.by_index(0).expect("entry");
         let expected = datetime_from_system_time(mtime);
-        assert_eq!(entry.last_modified().datepart(), expected.datepart());
-        assert_eq!(entry.last_modified().timepart(), expected.timepart());
+        // zip 9 起 `last_modified()` 返回 `Option<DateTime>`。
+        let actual = entry
+            .last_modified()
+            .expect("entry has a modification time");
+        assert_eq!(actual.datepart(), expected.datepart());
+        assert_eq!(actual.timepart(), expected.timepart());
         // 修复前的默认值是 1980-01-01（33, 0），不允许再出现。
         assert_ne!(
-            (
-                entry.last_modified().datepart(),
-                entry.last_modified().timepart()
-            ),
+            (actual.datepart(), actual.timepart()),
             (DOS_EPOCH_DATEPART, DOS_EPOCH_TIMEPART)
         );
 

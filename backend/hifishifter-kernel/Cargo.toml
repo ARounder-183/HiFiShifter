@@ -6,16 +6,15 @@ publish = false
 description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依赖音频设备"
 
 [dependencies]
-lru = "0.12"
+lru = "0.18"
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rmp-serde = "1"
 uuid = { version = "1", features = ["v4"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hound = "3"
-rubato = "0.15"
 arc-swap = "1.7"
 symphonia = { version = "0.6.1", features = ["all"] }
 symphonia-adapter-fdk-aac = "0.2.0"
@@ -24,17 +23,15 @@ blake3 = "1"
 rayon = "1.7"
 encoding_rs = "0.8"
 midly = "0.5"
-zip = { version = "0.6", default-features = false, features = ["deflate", "time"] }
-# zip 的 time feature 使其依赖 time；此处直接引用以完成 SystemTime → zip::DateTime 转换
-time = { version = "0.3", default-features = false, features = ["std"] }
-libloading = "0.8"
-rusty_mp3 = "=0.7.0"
-rusty_flac = "=0.1.2"
+zip = { version = "9", default-features = false, features = ["deflate", "chrono"] }
+libloading = "0.9"
+rusty_mp3 = "=1.0.0"
+rusty_flac = "=0.1.3"
 id3 = "1"
 rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"
-ndarray = { version = "0.16", optional = true }
+ndarray = { version = "0.17", optional = true }
 # 原GUI文字索引的纯转写/匹配，共享命令不引入Tauri或文件浏览器。
 pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
 wana_kana = { version = "5.0", default-features = false }

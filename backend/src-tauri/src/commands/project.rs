@@ -1558,7 +1558,14 @@ mod tests {
         let file = std::fs::File::open(&zip_path).expect("open zip");
         let mut archive = zip::ZipArchive::new(file).expect("zip archive");
         let names: Vec<String> = (0..archive.len())
-            .filter_map(|index| archive.by_index(index).ok().map(|e| e.name().to_string()))
+            // zip 9 起 `ZipFile::name()` 返回 `Result<Cow<str>, ZipError>`
+            // （文件名解码可能失败），不再是无条件 `&str`。
+            .filter_map(|index| {
+                archive
+                    .by_index(index)
+                    .ok()
+                    .and_then(|e| e.name().ok().map(|name| name.to_string()))
+            })
             .collect();
         assert!(
             names.iter().any(|name| name == "My Song.hshp"),

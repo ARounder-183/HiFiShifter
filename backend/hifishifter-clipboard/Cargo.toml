@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 log = "0.4"
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"

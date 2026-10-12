@@ -34,8 +34,8 @@ pub(super) fn write_package(
 ) -> Result<(), String> {
     let file = std::fs::File::create(out).map_err(|e| format!("create zip failed: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
     zip.start_file("system_info.json", options)
         .map_err(|e| format!("zip add system_info failed: {e}"))?;
@@ -122,7 +122,15 @@ mod tests {
         let file = std::fs::File::open(&out).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut names = (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            // zip 9 起 `name()` 返回 `Result<Cow<str>, ZipError>`。
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .expect("entry name decodes")
+                    .into_owned()
+            })
             .collect::<Vec<_>>();
         names.sort();
         assert!(names.contains(&"system_info.json".to_owned()), "{names:?}");

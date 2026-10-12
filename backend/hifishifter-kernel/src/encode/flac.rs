@@ -1,4 +1,4 @@
-//! FLAC 编码器（rusty_flac 0.1.2，纯 Rust，Apache-2.0）。
+//! FLAC 编码器（rusty_flac 0.1.3，纯 Rust，Apache-2.0）。
 //!
 //! rusty_flac 的 `Encoder::finish(self)` 一次性返回完整 FLAC 流（暂无流式
 //! 写盘 API），因此与 MP3 相同采用"内存缓冲、finish 后落盘"策略；内存峰值

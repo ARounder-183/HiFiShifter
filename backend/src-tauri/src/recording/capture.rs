@@ -582,7 +582,7 @@ pub(super) fn convert_channels(
 /// High-quality rate conversion used when the capture device cannot deliver
 /// the requested sample rate (cpal paths and the WASAPI fallback).
 pub(super) struct RateConverter {
-    resampler: rubato::SincFixedIn<f32>,
+    resampler: rubato::Async<f32>,
     buffers: Vec<VecDeque<f32>>,
     channels_out: usize,
 }
@@ -596,14 +596,25 @@ impl RateConverter {
     ) -> Result<Self, String> {
         let params = rubato::SincInterpolationParameters {
             sinc_len: 128,
-            f_cutoff: 0.95,
+            // rubato 5 起 `f_cutoff` 是 `Option`：`None` 让重采样器按滤波器长度
+            // 自动选截止频率（官方推荐）。这里保留 0.15 时代显式写下的 0.95，
+            // 以免悄悄改变既有音色。
+            f_cutoff: Some(0.95),
             oversampling_factor: 256,
             interpolation: rubato::SincInterpolationType::Nearest,
             window: rubato::WindowFunction::BlackmanHarris2,
         };
         let ratio = rate_out as f64 / rate_in as f64;
-        let resampler = rubato::SincFixedIn::<f32>::new(ratio, 2.0, params, 1024, channels_in)
-            .map_err(|e| format!("recording_error_resampler:{e}"))?;
+        // rubato 5 把 `SincFixedIn` 并入 `Async`：输入帧数固定 = `FixedAsync::Input`。
+        let resampler = rubato::Async::<f32>::new_sinc(
+            ratio,
+            2.0,
+            &params,
+            1024,
+            channels_in,
+            rubato::FixedAsync::Input,
+        )
+        .map_err(|e| format!("recording_error_resampler:{e}"))?;
         Ok(Self {
             resampler,
             buffers: vec![VecDeque::new(); channels_in],
@@ -619,24 +630,15 @@ impl RateConverter {
         for (index, sample) in samples.iter().enumerate() {
             self.buffers[index % channels_in].push_back(*sample);
         }
+        let channels_out = self.channels_out;
         let mut out = Vec::new();
         loop {
             let needed = rubato::Resampler::input_frames_next(&self.resampler);
             if needed == 0 || self.buffers.iter().any(|buffer| buffer.len() < needed) {
                 break;
             }
-            let mut input = Vec::with_capacity(channels_in);
-            for buffer in self.buffers.iter_mut() {
-                input.push(buffer.drain(..needed).collect::<Vec<f32>>());
-            }
-            let wave = rubato::Resampler::process(&mut self.resampler, &input, None)
-                .map_err(|e| format!("recording_error_resampler:{e}"))?;
-            let out_frames = wave[0].len();
-            for frame in 0..out_frames {
-                for channel in 0..self.channels_out {
-                    out.push(wave[channel][frame]);
-                }
-            }
+            let input = self.drain_chunk(needed);
+            self.resample_into(&input, channels_in, channels_out, &mut out)?;
         }
         Ok(out)
     }
@@ -657,20 +659,50 @@ impl RateConverter {
                 buffer.push_back(0.0);
             }
         }
-        let mut input = Vec::with_capacity(channels_in);
-        for buffer in self.buffers.iter_mut() {
-            input.push(buffer.drain(..needed).collect::<Vec<f32>>());
-        }
+        let input = self.drain_chunk(needed);
         let mut out = Vec::new();
-        if let Ok(wave) = rubato::Resampler::process(&mut self.resampler, &input, None) {
-            let out_frames = wave[0].len();
-            for frame in 0..out_frames {
-                for channel in 0..channels_out {
-                    out.push(wave[channel][frame]);
-                }
+        let _ = self.resample_into(&input, channels_in, channels_out, &mut out);
+        out
+    }
+
+    /// 取走每个声道各 `needed` 帧（planar）。
+    fn drain_chunk(&mut self, needed: usize) -> Vec<Vec<f32>> {
+        self.buffers
+            .iter_mut()
+            .map(|buffer| buffer.drain(..needed).collect::<Vec<f32>>())
+            .collect()
+    }
+
+    /// 喂一批 planar 输入，按 `channels_out` 交织追加到 `out`。
+    ///
+    /// rubato 5 起 `process` 收 `Adapter`（`Vec<Vec<f32>>` 不再直接可用），返回
+    /// 交织的 `InterleavedOwned`；这里显式取前 `channels_out` 个声道，与 0.15
+    /// 时代逐声道取样的语义一致。
+    fn resample_into(
+        &mut self,
+        input: &[Vec<f32>],
+        channels_in: usize,
+        channels_out: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        let frames = input.first().map_or(0, Vec::len);
+        let adapter = rubato::audioadapter_buffers::direct::SequentialSliceOfVecs::new(
+            input,
+            channels_in,
+            frames,
+        )
+        .map_err(|e| format!("recording_error_resampler:{e}"))?;
+        let wave = rubato::Resampler::process(&mut self.resampler, &adapter, None)
+            .map_err(|e| format!("recording_error_resampler:{e}"))?;
+        let interleaved = wave.take_data();
+        let channels_in = channels_in.max(1);
+        let out_frames = interleaved.len() / channels_in;
+        for frame in 0..out_frames {
+            for channel in 0..channels_out {
+                out.push(interleaved[frame * channels_in + channel]);
             }
         }
-        out
+        Ok(())
     }
 }
 
@@ -844,5 +876,58 @@ pub fn enumerate_applications() -> Vec<AppAudioInfo> {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod rate_converter_tests {
+    use super::RateConverter;
+
+    /// 喂一整秒的恒定输入并冲干净，返回交织输出。
+    fn resample_constant(constant: f32, rate_in: u32, rate_out: u32, channels: usize) -> Vec<f32> {
+        let mut conv =
+            RateConverter::new(rate_in, rate_out, channels, channels).expect("rate converter");
+        let frames_in = rate_in as usize;
+        let interleaved = vec![constant; frames_in * channels];
+        let mut out = conv.push_interleaved(&interleaved, channels).expect("push");
+        out.extend(conv.flush_interleaved(channels, channels));
+        out
+    }
+
+    /// rubato 0.15 → 5.0 是一次 API 重写（`SincFixedIn` → `Async::new_sinc`，
+    /// `process` 改收 `Adapter` 且返回交织缓冲）。这条测试把重采样行为钉住：
+    /// 恒定输入必须还原成同一常量（sinc 滤波器直流增益为 1）。若声道交织或适配器
+    /// 接线错了，中段会出现错位/串声 —— 而录制回退路径没有别的自动化覆盖。
+    #[test]
+    fn rate_converter_preserves_a_constant_signal() {
+        let channels = 2usize;
+        let out = resample_constant(0.25, 48_000, 44_100, channels);
+        assert!(!out.is_empty(), "重采样不得为空");
+        let frames_out = out.len() / channels;
+        // 跳过滤波器延迟影响的头尾，中段应还原为同一常量。
+        for frame in (frames_out / 4)..(frames_out * 3 / 4) {
+            for ch in 0..channels {
+                let v = out[frame * channels + ch];
+                assert!(
+                    (v - 0.25).abs() < 1e-3,
+                    "frame {frame} ch {ch}: {v}（期望 0.25）"
+                );
+            }
+        }
+    }
+
+    /// 输出帧数应约等于输入帧数 × 比率（滤波延迟造成少量偏差）。
+    #[test]
+    fn rate_converter_resamples_at_the_requested_ratio() {
+        let channels = 2usize;
+        let frames_in = 48_000usize;
+        let out = resample_constant(0.0, 48_000, 44_100, channels);
+        let frames_out = out.len() / channels;
+        let expected = (frames_in as f64 * 44_100.0 / 48_000.0).round() as usize;
+        let tolerance = expected / 50 + 512;
+        assert!(
+            frames_out.abs_diff(expected) <= tolerance,
+            "输出 {frames_out} 帧应接近 {expected} 帧（±{tolerance}）"
+        );
     }
 }

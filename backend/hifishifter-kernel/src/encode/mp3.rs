@@ -1,4 +1,4 @@
-//! MP3 编码器（rusty_mp3 0.7.0，纯 Rust，Apache-2.0）。
+//! MP3 编码器（rusty_mp3 1.0.0，纯 Rust，Apache-2.0）。
 //!
 //! ⚠ 关键约束：rusty_mp3 的 Xing/Info 头在 `finish()` 时才以 `push_front`
 //! 方式进入输出队列 —— 若在 push 阶段就把帧落盘，Xing 头将无法位于文件头
