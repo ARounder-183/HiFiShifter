@@ -1,0 +1,18 @@
+# Baseline for the `error.contains(` gate in check-ffi-guards.py.
+#
+# Format: <path relative to backend/>:<allowed count>, one per line. A count
+# above the baseline fails CI; the count may only go down (delete the line
+# once it reaches 0).
+#
+# Protocol semantics must travel as structured codes (the hifishifter-ara-ipc
+# `Response.code`, the notebook `notebook_*` codes); strings are for display
+# only. See docs/thread-model.md §1.3.
+#
+# The entries below are the remaining legacy sites that classify a host
+# message by substring. They are substring matches on purpose: the wording can
+# carry a context prefix (`host split: …`), so an exact match would miss it.
+# The wordings they match against are named constants that live next to the
+# messages they describe (editor::errors, render::extension).
+hifishifter-plugin/src/editor/errors.rs:2
+hifishifter-plugin/src/editor/webview.rs:2
+hifishifter-plugin/src/render/extension.rs:2

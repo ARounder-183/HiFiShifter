@@ -20,7 +20,16 @@ import sys
 
 GUARD_MARKERS = ('guard_ffi(', 'catch_unwind', 'boundary(')
 sig_re = re.compile(r'^[ ]*(?:pub )?unsafe extern "system" fn (\w+)\(', re.M)
-BASELINE_DIR = os.path.join(os.path.dirname(__file__))
+# All paths come from this file's own location. `SCAN_ROOTS` are relative to
+# `backend/`, so the backend root must never be derived from a caller-supplied
+# plugin `src/` path: that produced
+# `backend/hifishifter-plugin/hifishifter-plugin/src`, `os.walk` found nothing
+# and both baseline gates passed vacuously.
+CHECKS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(CHECKS_DIR, '..', '..'))
+BACKEND_ROOT = os.path.join(REPO_ROOT, 'backend')
+PLUGIN_SRC = os.path.join(BACKEND_ROOT, 'hifishifter-plugin', 'src')
+BASELINE_DIR = CHECKS_DIR
 SCAN_ROOTS = ['hifishifter-plugin/src', 'hifishifter-kernel/src', 'src-tauri/src']
 
 
@@ -92,15 +101,19 @@ def is_test_path(rel_path):
     return base == 'tests.rs' or base.endswith('_tests.rs')
 
 
-def is_production_src(rel_path):
-    """True when the file is production source (not a cfg(test)-gated module)."""
+def production_src(rel_path):
+    """The file's source with every `#[cfg(test)] mod …` body removed.
+
+    Returns None for test-only files (`tests.rs` / `*_tests.rs`). The caller
+    must scan the returned text: re-reading the file would put the cfg(test)
+    bodies back and count test-only fakes as production violations.
+    """
     if is_test_path(rel_path):
-        return False
+        return None
     with open(rel_path, encoding='utf-8') as f:
         src = f.read()
-    ranges = cfg_test_module_ranges(src)
     # Strip cfg(test) module bodies before scanning for the patterns.
-    for a, b in sorted(ranges, reverse=True):
+    for a, b in sorted(cfg_test_module_ranges(src), reverse=True):
         src = src[:a] + src[b:]
     return src
 
@@ -119,16 +132,21 @@ def baseline_gate(backend_root, pattern, baseline_file, label):
     current = {}
     for scan_root in SCAN_ROOTS:
         root = os.path.join(backend_root, scan_root)
+        if not os.path.isdir(root):
+            # A missing scan root must be a hard failure, never a silent pass:
+            # an empty walk means "no violations" and the gate would go green
+            # while checking nothing (exactly the bug this guard used to have).
+            print(f'{label} gate FAILED - scan root does not exist: {root}')
+            return 1
         for dirpath, _dirs, files in os.walk(root):
             for fn in sorted(files):
                 if not fn.endswith('.rs'):
                     continue
                 path = os.path.join(dirpath, fn)
                 rel = os.path.relpath(path, backend_root).replace('\\', '/')
-                if not is_production_src(path):
+                src = production_src(path)
+                if src is None:
                     continue
-                with open(path, encoding='utf-8') as f:
-                    src = f.read()
                 count = len(re.findall(pattern, src))
                 if count:
                     current[rel] = count
@@ -150,12 +168,11 @@ def baseline_gate(backend_root, pattern, baseline_file, label):
     return 0
 
 
-def main(root):
-    rc = ffi_guard_gate(root)
-    backend_root = os.path.dirname(root.rstrip('/\\'))
-    rc |= baseline_gate(backend_root, r'\.lock\(\)\.unwrap\(\)',
+def main():
+    rc = ffi_guard_gate(PLUGIN_SRC)
+    rc |= baseline_gate(BACKEND_ROOT, r'\.lock\(\)\.unwrap\(\)',
                         'baseline-lock-unwrap.txt', 'lock().unwrap()')
-    rc |= baseline_gate(backend_root, r'error\.contains\(',
+    rc |= baseline_gate(BACKEND_ROOT, r'error\.contains\(',
                         'baseline-error-contains.txt', 'error.contains()')
     return rc
 
@@ -210,5 +227,4 @@ def ffi_guard_gate(root):
     return 0
 
 if __name__ == '__main__':
-    plugin_src = os.path.join(os.path.dirname(__file__), '..', '..', 'backend', 'hifishifter-plugin', 'src')
-    sys.exit(main(plugin_src))
+    sys.exit(main())

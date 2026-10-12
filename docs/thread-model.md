@@ -20,9 +20,12 @@
 2. **锁毒化必须恢复而不是 panic。** 生产代码禁止 `.lock().unwrap()` —— 用
    `MutexExt::lock_or_recover()`（毒化后取回内部数据继续）或
    `unwrap_or_else(|e| e.into_inner())`。`scripts/checks/check-ffi-guards.py` 的基线门禁
-   禁止新增（`scripts/checks/baseline-lock-unwrap.txt`，现存 0 处）。
+   禁止新增（`scripts/checks/baseline-lock-unwrap.txt`，现存 0 处）。门禁会剥掉
+   `#[cfg(test)] mod` 的函数体，测试里的 `.lock().unwrap()` 不计入。
 3. **错误语义不靠子串匹配传播。** 禁止新增 `error.contains("...")` 式的分类
-   （基线 `scripts/checks/baseline-error-contains.txt`）。协议语义用结构化错误码
+   （基线 `scripts/checks/baseline-error-contains.txt`，现存 6 处：`editor::errors`
+   的 `classify_error` / `error_code_for`、`editor::webview` 的重试判定、
+   `render::extension` 的绑定失败判定，各 2 处）。协议语义用结构化错误码
    （`hifishifter-ara-ipc` 的 `Response.code`；notebook 家族的
    `notebook_*` 稳定码），字符串只做展示。
 

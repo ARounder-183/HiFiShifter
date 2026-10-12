@@ -1,0 +1,13 @@
+# Baseline for the `.lock().unwrap()` gate in check-ffi-guards.py.
+#
+# Format: <path relative to backend/>:<allowed count>, one per line. A count
+# above the baseline fails CI; the count may only go down (delete the line
+# once it reaches 0).
+#
+# Production code must recover from lock poisoning instead of panicking:
+# `MutexExt::lock_or_recover()` or `unwrap_or_else(|e| e.into_inner())`.
+# See docs/thread-model.md §1.2.
+#
+# Deliberately empty: production source currently has none. Test-only fakes
+# live in `#[cfg(test)] mod` bodies (or in `tests.rs` / `*_tests.rs`) and the
+# guard strips them, so they must not be listed here.
