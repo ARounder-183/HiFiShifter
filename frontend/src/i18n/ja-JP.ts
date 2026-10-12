@@ -2124,6 +2124,9 @@ export const jaJP = {
     ara_host_audio_folder_title: "このプラグインはトラックグループ（フォルダ）上にあります",
     ara_host_audio_folder_body:
         "ホストは ARA プラグインをトラック単位で管理し、プラグインが載っているトラックの音声しか渡しません。そのためグループ内の子トラックの音声はここでは処理できません。処理したいオーディオトラックごとに HiFiShifter を追加してください。",
+    ara_host_audio_unmatched_title: "割り当てられたリージョンがクリップと一致しません",
+    ara_host_audio_unmatched_body:
+        "ホストはこのプラグインに複数のオーディオリージョンを割り当てましたが、このトラックのクリップと一致するものがありません（候補数とリージョン数が異なるか、位置・長さが一致しません）。そのためこれらのクリップには内容がありません。プラグインのトラックのクリップと割り当てられたリージョンが一対一で対応しているか確認してください。folder 親トラックにある場合は、実際のオーディオ子トラックへ移動してください。",
     ara_host_audio_ara_only_title: "このホストは ARA のみを提供します",
     ara_host_audio_ara_only_body:
         "クリップのジオメトリ編集以外はすべて利用できます。表示・再生・パラメータ編集・レンダリングは ARA で動作します。移動・トリム・分割・アイテムクリップボードにはホストのネイティブ拡張が必要なため、読み取り専用のままです。",
@@ -2149,6 +2152,10 @@ export const jaJP = {
     plugin_apply_error: "未適用：{error}",
     plugin_apply_session_ended:
         "この編集セッションは終了しました。プラグインウィンドウを閉じて開き直してください。",
+    plugin_ara_not_bound:
+        "ホストがこのプラグインを ARA に接続していないため、編集できるクリップがありません。通常のエフェクトスロットではなく、ホストの ARA 入口から挿入されているか確認してください。",
+    session_unavailable_title: "プラグインセッションを利用できません",
+    session_unavailable_open_log: "ログフォルダーを開く",
     plugin_apply_generations: "編集 {edits} / オーディオ {audio}",
     plugin_apply_reload_host: "ホストから再読み込み",
     plugin_apply_reload_message:

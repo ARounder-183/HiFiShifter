@@ -2109,6 +2109,9 @@ export const enUS = {
     ara_host_audio_folder_title: "This plug-in is on a track group (folder)",
     ara_host_audio_folder_body:
         "the host manages ARA plug-ins per track and only hands this plug-in the audio on its own track, so audio on the tracks inside the group cannot be processed here. Add a HiFiShifter instance to each audio track you want to process.",
+    ara_host_audio_unmatched_title: "Assigned regions do not match any clip",
+    ara_host_audio_unmatched_body:
+        "the host assigned this plug-in a group of audio regions, but none of them matches a clip on this track (the candidate count differs from the region count, or position and length differ), so those clips have no content. Make sure the clips on this plug-in's track correspond one-to-one with the regions it was assigned; if the plug-in sits on a folder parent track, move it to the actual audio child track.",
     ara_host_audio_ara_only_title: "This host provides ARA only",
     ara_host_audio_ara_only_body:
         "Everything works here except editing clip geometry: viewing, playback, parameter edits and rendering all use ARA. Moving, trimming, splitting and item clipboard need a native host extension, so those stay read-only.",
@@ -2134,6 +2137,10 @@ export const enUS = {
     plugin_apply_error: "Not applied: {error}",
     plugin_apply_session_ended:
         "This editor session has ended. Close and reopen the plug-in window to continue.",
+    plugin_ara_not_bound:
+        "The host has not bound this plug-in to ARA, so there are no clips to edit. Make sure the plug-in was inserted from the host's ARA entry rather than a regular effect slot.",
+    session_unavailable_title: "Plug-in session unavailable",
+    session_unavailable_open_log: "Open log folder",
     plugin_apply_generations: "Edits {edits} / Audio {audio}",
     plugin_apply_reload_host: "Reload from Host",
     plugin_apply_reload_message:

@@ -32,4 +32,4 @@ installUiStorageFlushHooks();
 await hydrateUiStorage();
 
 const { mountApp } = await import("./mount");
-mountApp();
+await mountApp();

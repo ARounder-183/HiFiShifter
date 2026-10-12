@@ -12,7 +12,7 @@
  * 轮询里绝大多数回调其实什么都没变，不比较就等于每 250 ms 白重渲染一次。
  */
 import { listen } from "../../services/hostEvents";
-import { invoke, invokeErrorKind } from "../../services/invoke";
+import { invoke, invokeErrorCode, invokeErrorKind } from "../../services/invoke";
 
 /** 后端 `plugin_get_apply_state` / `plugin_apply_state` 事件的负载。 */
 export interface PluginApplyState {
@@ -48,6 +48,14 @@ export interface PluginApplySnapshot {
      * 轮询必须据此**停止**，而不是无限重试。
      */
     sessionEnded: boolean;
+    /**
+     * 终态的**协议码**（`services/sessionGate.ts` 的 `ERROR_CODE`）；未终结时为 `null`。
+     *
+     * 【为什么需要它】`sessionEnded` 只说"永久结束了"，说不出是**哪一种**结束：
+     * "编辑文档已关闭"关窗重开有用，"宿主从未把本插件接入 ARA"关窗重开无用。状态栏
+     * 要按码给不同的指引，而按错误文本分支是被明令禁止的（见 `pluginHost.ts`）。
+     */
+    sessionCode: number | null;
 }
 
 const EMPTY: PluginApplySnapshot = {
@@ -55,6 +63,7 @@ const EMPTY: PluginApplySnapshot = {
     failure: "",
     reloading: false,
     sessionEnded: false,
+    sessionCode: null,
 };
 
 /** 正常轮询间隔（与旧实现的 250 ms 一致：状态栏要跟得上宿主的应用进度）。 */
@@ -85,7 +94,8 @@ function publish(next: PluginApplySnapshot): void {
         sameState(snapshot.state, next.state) &&
         snapshot.failure === next.failure &&
         snapshot.reloading === next.reloading &&
-        snapshot.sessionEnded === next.sessionEnded
+        snapshot.sessionEnded === next.sessionEnded &&
+        snapshot.sessionCode === next.sessionCode
     ) {
         // 内容没变就保留旧引用：订阅者不该因为"又轮询了一次"而重渲染。
         return;
@@ -165,7 +175,13 @@ export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>)
             const current = await invoke<PluginApplyState>("plugin_get_apply_state");
             if (disposed) return;
             backoffMs = BASE_POLL_MS;
-            publish({ ...snapshot, state: current, failure: "", sessionEnded: false });
+            publish({
+                ...snapshot,
+                state: current,
+                failure: "",
+                sessionEnded: false,
+                sessionCode: null,
+            });
             if (!current.ready || current.host_version !== lastHostVersion) {
                 if (await updateTimeline()) lastHostVersion = current.host_version;
             }
@@ -179,6 +195,7 @@ export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>)
                     ...snapshot,
                     failure: String(error),
                     sessionEnded: true,
+                    sessionCode: invokeErrorCode(error),
                 });
                 schedule(undefined);
                 return;
@@ -215,7 +232,14 @@ export async function reloadPluginHost(
         await invoke("plugin_refresh", force);
         await refreshTimeline();
         const state = await invoke<PluginApplyState>("plugin_get_apply_state");
-        publish({ ...snapshot, state, failure: "", reloading: false, sessionEnded: false });
+        publish({
+            ...snapshot,
+            state,
+            failure: "",
+            reloading: false,
+            sessionEnded: false,
+            sessionCode: null,
+        });
     } catch (error) {
         // 终态失败同样要如实记下：用户主动点"重新载入"却撞上会话已结束，
         // 界面必须说明原因，而不是只把按钮转一圈又回到原样。
@@ -224,6 +248,7 @@ export async function reloadPluginHost(
             failure: String(error),
             reloading: false,
             sessionEnded: invokeErrorKind(error) === "terminal",
+            sessionCode: invokeErrorCode(error),
         });
     }
 }

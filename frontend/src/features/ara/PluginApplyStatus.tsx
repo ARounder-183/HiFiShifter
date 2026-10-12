@@ -14,6 +14,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
+import { ERROR_CODE } from "../../services/sessionGate";
 import { AppButton, AppConfirmDialog, AppStatusChip } from "../../ui";
 import {
     getPluginApplySnapshot,
@@ -28,7 +29,7 @@ export function PluginApplyStatus({
     onTimelineChanged: () => Promise<unknown>;
 }) {
     const { t, tVars } = useI18n();
-    const { state, failure, reloading, sessionEnded } = useSyncExternalStore(
+    const { state, failure, reloading, sessionEnded, sessionCode } = useSyncExternalStore(
         subscribePluginApply,
         getPluginApplySnapshot,
         getPluginApplySnapshot,
@@ -50,8 +51,17 @@ export function PluginApplyStatus({
     const error = failure || state?.error || "";
     // 【为什么终态要单独一条】会话结束不是"尚未应用"的一种：重试、点"重新载入"
     // 都不会成功。把后端原始串直接摊给用户（`plugin_apply_error`）会让人以为
-    // 再等等就好。这里给出**可操作的**说明（关窗重开），并且不再显示重载按钮。
+    // 再等等就好。这里给出**可操作的**说明，并且不再显示重载按钮。
+    //
+    // 【为什么还要按码再分一层】"编辑文档已关闭"与"宿主从未把本插件接入 ARA"是两种
+    // 终态，**下一步完全不同**：前者关窗重开有用，后者关窗重开无用（宿主根本不走 ARA
+    // 路径，重开会走完全相同的流程）。共用一句会把用户引向一个必然失败的补救动作 ——
+    // 这正是 Cubase 报障里那条提示的问题。按协议码分支，不解析错误文本。
     const terminal = sessionEnded;
+    const terminalLabel =
+        sessionCode === ERROR_CODE.ARA_NOT_BOUND
+            ? t("plugin_ara_not_bound")
+            : t("plugin_apply_session_ended");
     const tone = terminal
         ? "danger"
         : error
@@ -62,7 +72,7 @@ export function PluginApplyStatus({
               ? "success"
               : "neutral";
     const label = terminal
-        ? t("plugin_apply_session_ended")
+        ? terminalLabel
         : !state?.ready
           ? t("plugin_apply_waiting_host")
           : state.pending

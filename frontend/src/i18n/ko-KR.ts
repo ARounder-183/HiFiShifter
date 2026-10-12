@@ -2095,6 +2095,9 @@ export const koKR = {
     ara_host_audio_folder_title: "이 플러그인은 트랙 그룹(폴더)에 있습니다",
     ara_host_audio_folder_body:
         "호스트는 ARA 플러그인을 트랙 단위로 관리하며 플러그인이 올라간 트랙의 오디오만 전달합니다. 따라서 그룹 안 하위 트랙의 오디오는 여기서 처리할 수 없습니다. 처리하려는 오디오 트랙마다 HiFiShifter를 추가하세요.",
+    ara_host_audio_unmatched_title: "할당된 리전이 클립과 일치하지 않습니다",
+    ara_host_audio_unmatched_body:
+        "호스트가 이 플러그인에 여러 오디오 리전을 할당했지만, 이 트랙의 클립과 일치하는 리전이 없습니다(후보 수와 리전 수가 다르거나 위치·길이가 일치하지 않음). 따라서 이 클립에는 내용이 없습니다. 플러그인이 있는 트랙의 클립과 할당된 리전이 일대일로 대응하는지 확인하고, folder 상위 트랙에 있다면 실제 오디오 하위 트랙으로 옮기세요.",
     ara_host_audio_ara_only_title: "이 호스트는 ARA만 제공합니다",
     ara_host_audio_ara_only_body:
         "클립 지오메트리 편집을 제외한 모든 기능을 사용할 수 있습니다. 보기, 재생, 파라미터 편집, 렌더링은 ARA로 동작합니다. 이동, 트림, 분할, 아이템 클립보드는 호스트 네이티브 확장이 필요하므로 읽기 전용입니다.",
@@ -2120,6 +2123,10 @@ export const koKR = {
     plugin_apply_error: "적용되지 않음: {error}",
     plugin_apply_session_ended:
         "이 편집 세션이 종료되었습니다. 플러그인 창을 닫았다가 다시 열어 계속하세요.",
+    plugin_ara_not_bound:
+        "호스트가 이 플러그인을 ARA에 연결하지 않아 편집할 클립이 없습니다. 일반 이펙트 슬롯이 아니라 호스트의 ARA 진입점에서 삽입했는지 확인하세요.",
+    session_unavailable_title: "플러그인 세션을 사용할 수 없습니다",
+    session_unavailable_open_log: "로그 폴더 열기",
     plugin_apply_generations: "편집 {edits} / 오디오 {audio}",
     plugin_apply_reload_host: "호스트에서 다시 로드",
     plugin_apply_reload_message:

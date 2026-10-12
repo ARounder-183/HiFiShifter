@@ -6,6 +6,7 @@ import {
     useMemo,
     useRef,
     useState,
+    useSyncExternalStore,
     type ReactNode,
 } from "react";
 import { Flex, Button } from "@radix-ui/themes";
@@ -15,6 +16,7 @@ import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
+import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
     isPluginMode,
     pluginAllowsAction,
@@ -3484,6 +3486,23 @@ function AppInner() {
     // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
     useEffect(() => installFocusSurfaceTracking(), []);
 
+    /*
+     * 会话闸门快照：后端编辑会话是否已进入**终态**（文档已关闭 / 宿主从未绑定 ARA）。
+     *
+     * 【为什么放在这里而不是让每个轮询点各自判断】终态是会话级事实。此前只有
+     * `pluginApplyStore` 一个轮询点采纳了后端的 `terminal` 分类，本组件的常驻播放
+     * 轮询完全不看 —— 实测在 Cubase 上同一个终态错误被问了 750 次（每 400ms 一次，
+     * 持续 5 分钟以上）。订阅闸门之后，终态一落所有轮询**同时**停止，不依赖谁记得
+     * 检查。`invoke()` 也会在闸门置位后本地失败，因此即便某个 interval 漏网也不会
+     * 产生 IPC（见 `services/invoke.ts`）。
+     */
+    const sessionEnded =
+        useSyncExternalStore(
+            subscribeSessionGate,
+            getSessionGateSnapshot,
+            getSessionGateSnapshot,
+        ) !== null;
+
     useEffect(() => {
         // ★ 常驻轮询（自愈）：播放中 ~30Hz；未播放时低频（400ms）作看门狗。
         //
@@ -3494,6 +3513,11 @@ function AppInner() {
         // 而重新播放（把传输层 seek 回播放头，音频从头开始）。低频看门狗使镜像
         // 在 ≤~400ms 内自我纠正：首个纠正采样即翻转 isPlaying、恢复 30Hz 与
         // 光标推进。
+        //
+        // 【为什么终态时直接不建 interval】会话已结束 ⇒ 这个采样永远失败。留着它只会
+        // 每 400ms 造一次本地失败（闸门挡掉了 IPC，但定时器本身仍在空转），并让状态栏
+        // 持续闪一条没有意义的错误。
+        if (sessionEnded) return;
         const intervalMs = runtimeIsPlaying ? 33 : 400;
         const id = window.setInterval(() => {
             // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
@@ -3521,18 +3545,22 @@ function AppInner() {
             // 标志，与其它在途守卫的语义一致（见 `hooks/*Listener` 的 inFlightRef）。
             void p
                 .catch(() => {
-                    // 失败由 syncPlaybackState 自身记录；这里只负责让下一次轮询
-                    // 能重新发起，不重复上报。
+                    // 失败由 syncPlaybackState 自身记录；这里只负责复位在途标志。
+                    // 【为什么不再写"让下一次轮询能重新发起"】终态由会话闸门统一停止
+                    // （见上方 `sessionEnded` 与 `services/sessionGate.ts`）；这里只处理
+                    // 正常运行时的临时失败。
                 })
                 .finally(() => {
                     playbackSyncInFlightRef.current = false;
                 });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying, rendering.blocking]);
+    }, [dispatch, runtimeIsPlaying, rendering.blocking, sessionEnded]);
 
     useEffect(() => {
         if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;
+        // 会话终态：录音流本身已经不可用，这个自动停止看门狗只会空转。
+        if (sessionEnded) return;
         const selectedIds = new Set<string>();
         if (selectedClipId) selectedIds.add(selectedClipId);
         for (const id of multiSelectedClipIds) selectedIds.add(id);
@@ -3562,6 +3590,7 @@ function AppInner() {
         recordingStartSec,
         selectedClipId,
         sessionClips,
+        sessionEnded,
     ]);
 
     const sourceFileSearchMatchTotal = sourceFileChangedDialog.changes.reduce(

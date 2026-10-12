@@ -2053,6 +2053,9 @@ export const zhTW = {
     ara_host_audio_folder_title: "此外掛掛在軌道組（folder）上",
     ara_host_audio_folder_body:
         "宿主按軌道管理 ARA 外掛，只會把外掛所在那條軌道上的音訊交給它，因此組內子軌的音訊無法在這裡處理。請為每條需要處理的音訊軌道各新增一個 HiFiShifter。",
+    ara_host_audio_unmatched_title: "宿主分配的區域對不上片段",
+    ara_host_audio_unmatched_body:
+        "宿主已將此外掛掛到一組音訊區域上，但其中沒有一條能對上本軌的片段（候選片段數與區域數不一致，或位置／長度不相等），因此這些片段沒有內容。請確認此外掛所在軌道的片段與它被分配的區域一一對應；folder 父軌上的外掛請改掛到具體的音訊子軌。",
     ara_host_audio_ara_only_title: "此宿主只提供 ARA",
     ara_host_audio_ara_only_body:
         "這裡除了片段幾何編輯外一切可用：檢視、播放、調參與算繪都走 ARA。移動、裁切、分割與 item 剪貼簿需要宿主原生擴充，因此維持唯讀。",
@@ -2076,6 +2079,10 @@ export const zhTW = {
     plugin_apply_applied: "已套用",
     plugin_apply_error: "尚未套用：{error}",
     plugin_apply_session_ended: "本次編輯工作階段已結束。請關閉並重新開啟外掛視窗後繼續。",
+    plugin_ara_not_bound:
+        "宿主尚未將此外掛接入 ARA，因此沒有可編輯的片段。請確認此外掛是從宿主的 ARA 入口插入，而不是一般效果器插槽。",
+    session_unavailable_title: "外掛工作階段無法使用",
+    session_unavailable_open_log: "開啟日誌目錄",
     plugin_apply_generations: "編輯 {edits} / 音訊 {audio}",
     plugin_apply_reload_host: "重新載入宿主",
     plugin_apply_reload_message: "目前仍有未套用的編輯。重新載入會取代本機曲線，要繼續嗎？",

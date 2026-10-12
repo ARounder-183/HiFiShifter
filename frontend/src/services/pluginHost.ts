@@ -98,10 +98,20 @@ export type PluginErrorKind = "terminal" | "transient";
 /** 带分类的插件命令错误。调用方按 `kind` 决策，**不解析错误文本**。 */
 export class PluginInvokeError extends Error {
     readonly kind: PluginErrorKind;
-    constructor(message: string, kind: PluginErrorKind) {
+    /**
+     * 后端协议码（回执的 `errorCode`，见 `services/sessionGate.ts` 的 `ERROR_CODE`）。
+     *
+     * 【为什么需要它】`kind` 只说"是不是终态"，说不出是**哪一种**终态。而
+     * "编辑文档已关闭"（关窗重开有用）与"宿主从未绑定 ARA"（关窗重开无用）需要给
+     * 用户完全不同的指引。码是协议承诺（只增不改），文本只做展示 —— 与 `kind`
+     * 同一纪律：**按码分支，不解析文本**。旧后端不带该字段时为 `null`。
+     */
+    readonly code: number | null;
+    constructor(message: string, kind: PluginErrorKind, code: number | null = null) {
         super(message);
         this.name = "PluginInvokeError";
         this.kind = kind;
+        this.code = code;
     }
 }
 
@@ -175,6 +185,7 @@ export function createPluginHost(
                 new PluginInvokeError(
                     typeof data.error === "string" ? data.error : "Invalid plugin response",
                     data.errorKind === "terminal" ? "terminal" : "transient",
+                    typeof data.errorCode === "number" ? data.errorCode : null,
                 ),
             );
     }

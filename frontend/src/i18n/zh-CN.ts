@@ -2050,6 +2050,9 @@ export const zhCN = {
     ara_host_audio_folder_title: "本插件挂在轨道组（folder）上",
     ara_host_audio_folder_body:
         "宿主按轨道管理 ARA 插件，只会把插件所在那条轨道上的音频交给它，因此组内子轨的音频无法在这里处理。请为每条需要处理的音频轨道各添加一个 HiFiShifter。",
+    ara_host_audio_unmatched_title: "宿主分配的区域对不上片段",
+    ara_host_audio_unmatched_body:
+        "宿主已把这个插件挂到一组音频区域上，但其中没有一条能对上本轨的片段（候选片段数与区域数不一致，或位置/长度不相等），因此这些片段没有内容。请确认本插件所在轨道的片段与它被分配的区域一一对应；folder 父轨上的插件请改挂到具体的音频子轨。",
     ara_host_audio_ara_only_title: "此宿主只提供 ARA",
     ara_host_audio_ara_only_body:
         "这里除片段几何编辑外一切可用：查看、播放、调参与渲染都走 ARA。移动、裁切、分割与 item 剪贴板需要宿主原生扩展，因此保持只读。",
@@ -2073,6 +2076,10 @@ export const zhCN = {
     plugin_apply_applied: "已应用",
     plugin_apply_error: "尚未应用：{error}",
     plugin_apply_session_ended: "本次编辑会话已结束。请关闭并重新打开插件窗口后继续。",
+    plugin_ara_not_bound:
+        "宿主尚未把本插件接入 ARA，因此没有可编辑的片段。请确认本插件是从宿主的 ARA 入口插入的，而不是普通效果器槽位。",
+    session_unavailable_title: "插件会话不可用",
+    session_unavailable_open_log: "打开日志目录",
     plugin_apply_generations: "编辑 {edits} / 音频 {audio}",
     plugin_apply_reload_host: "重新载入宿主",
     plugin_apply_reload_message: "当前仍有未应用编辑。重新载入会替换本地曲线，继续？",

@@ -19,6 +19,7 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "folder_parent_without_regions",
     "host_unidentified",
     "ara_only_read_only",
+    "unmatched_regions",
 ]);
 
 /**
@@ -65,6 +66,21 @@ export function needsSkippedClipsNotice(status: HostAudioPayload | null): number
  */
 export function needsFolderTrackNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "folder_parent_without_regions";
+}
+
+/**
+ * 是否需要"宿主分配了区域，但没有一条能对上宿主片段"这条提示。
+ *
+ * 【为什么必须与 folder 父轨那条分开】两者的用户可见症状相同（片段是空的、能拖、
+ * 没内容），但事实不同：folder 那条是"一个区域都没拿到"，这条是"拿到了但对不上"
+ * （folder 父轨的 FX 会拿到整组区域，而候选片段数少于区域数，或几何不相等）。
+ * 提示要给出**正确的原因**，否则用户会去改一件无关的事。
+ *
+ * 【为什么必须有它】这个读数此前**只存在于日志里** —— 而且是刷屏的那两条
+ * （后端 `BindingReport`）。界面上没有任何对应物：时间线是空的，没有任何说明。
+ */
+export function needsUnmatchedRegionsNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "unmatched_regions";
 }
 
 /**

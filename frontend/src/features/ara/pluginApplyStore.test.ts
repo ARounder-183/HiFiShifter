@@ -27,6 +27,12 @@ vi.mock("../../services/invoke", () => ({
         error && typeof error === "object" && (error as { kind?: unknown }).kind === "terminal"
             ? "terminal"
             : "transient",
+    // 生产实现读 `BackendInvokeError.code`（协议码）。store 用它区分"编辑文档已关闭"
+    // 与"宿主从未绑定 ARA"—— 两者需要给用户完全不同的下一步。
+    invokeErrorCode: (error: unknown) =>
+        error && typeof error === "object" && typeof (error as { code?: unknown }).code === "number"
+            ? (error as { code: number }).code
+            : null,
 }));
 
 vi.mock("../../services/hostEvents", () => ({
@@ -201,12 +207,18 @@ test("a failed reload surfaces as a communication failure and clears the busy fl
  * 合计约 32 MB。轮询必须据此**永久停止**，而不是无限重试。
  */
 test("a terminal failure stops polling for good and marks the session ended", async () => {
-    const terminal = Object.assign(new Error("document closed"), { kind: "terminal" });
+    const terminal = Object.assign(new Error("document closed"), {
+        kind: "terminal",
+        code: 1,
+    });
     invokeMock.mockRejectedValue(terminal);
     stop = startPluginApplyPolling(async () => undefined);
 
     await flush();
     expect(getPluginApplySnapshot().sessionEnded).toBe(true);
+    // 协议码必须一并带出：状态栏据它决定说"关窗重开"还是"宿主尚未接入 ARA"。
+    // 丢掉码会让两种终态重新共用一句（正是 Cubase 报障里那条误导性提示的成因）。
+    expect(getPluginApplySnapshot().sessionCode).toBe(1);
     expect(getPluginApplySnapshot().failure).toContain("document closed");
     const afterFailure = invokeMock.mock.calls.length;
 
@@ -266,4 +278,26 @@ test("a success after a transient failure resets the poll cadence", async () => 
     await vi.advanceTimersByTimeAsync(250);
     await flush();
     expect(invokeMock.mock.calls.length).toBeGreaterThan(afterSuccess);
+});
+
+/**
+ * 终态的**协议码**必须原样透传。
+ *
+ * 【为什么单独钉这一条】`sessionEnded` 只说"永久结束了"，说不出是**哪一种**结束：
+ * "编辑文档已关闭"（关窗重开有用）与"宿主从未把本插件接入 ARA"（关窗重开无用，
+ * 宿主根本不走 ARA 路径）需要给用户完全不同的下一步。状态栏按码分支
+ * （见 `PluginApplyStatus`），因此码必须一路带到这里。丢掉它，两种终态就重新
+ * 共用一句 —— 正是 Cubase 报障里那条把用户引向必然失败动作的提示。
+ */
+test("the terminal protocol code is carried through to the snapshot", async () => {
+    const terminal = Object.assign(new Error("plug-in instance is not bound to an ARA document"), {
+        kind: "terminal",
+        code: 9,
+    });
+    invokeMock.mockRejectedValue(terminal);
+    stop = startPluginApplyPolling(async () => undefined);
+
+    await flush();
+    expect(getPluginApplySnapshot().sessionEnded).toBe(true);
+    expect(getPluginApplySnapshot().sessionCode).toBe(9);
 });

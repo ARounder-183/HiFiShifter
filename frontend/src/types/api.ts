@@ -199,7 +199,15 @@ export type HostAudioState =
     /** 没有可用的宿主扩展接口：插件看不到任何轨道（见 `HostAudioNotice`）。 */
     | "host_unidentified"
     /** 宿主只提供 ARA 2.0：能看 / 能听 / 能调参，但片段几何**只读**。 */
-    | "ara_only_read_only";
+    | "ara_only_read_only"
+    /**
+     * 宿主**分配了** region，但没有一条能绑到唯一宿主 item。
+     *
+     * 【为什么与 `folder_parent_without_regions` 分开】症状相同（片段是空的），事实不同：
+     * 那一态是"一个 region 都没拿到"，这一态是"拿到了，但按几何唯一匹配对不上"
+     * （folder 父轨的 FX 会拿到整组 region，而候选 item 数少于 region 数）。
+     */
+    | "unmatched_regions";
 
 export interface HostAudioPayload {
     state: HostAudioState;

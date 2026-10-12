@@ -6,6 +6,7 @@
 
 import { reportFrontendError } from "./frontendErrorLog";
 import { getPluginHost, PluginInvokeError } from "./pluginHost";
+import { markBackendTerminal, sessionTerminal } from "./sessionGate";
 
 declare global {
     interface Window {
@@ -38,6 +39,14 @@ export class BackendInvokeError extends Error {
      * 分类由插件后端随回执给出（`errorKind`），前端**不解析错误文本**。
      */
     public readonly kind: "terminal" | "transient";
+    /**
+     * 后端协议码（仅插件模式有值）。
+     *
+     * 【为什么需要它】`kind` 区分"可重试 / 永久结束"，但说不出是**哪一种**结束。
+     * 界面要按码给出不同指引（"关窗重开" vs "宿主尚未接入 ARA"），而按错误文本分支
+     * 是被明令禁止的（见 `pluginHost.ts` 的说明）。旧后端不带该字段时为 `null`。
+     */
+    public readonly code: number | null;
 
     constructor(params: {
         mode: InvokeMode;
@@ -45,6 +54,7 @@ export class BackendInvokeError extends Error {
         args?: unknown;
         cause?: unknown;
         kind?: "terminal" | "transient";
+        code?: number | null;
     }) {
         super(`Backend invoke failed: ${params.mode}:${params.method}`, {
             cause: params.cause,
@@ -54,6 +64,7 @@ export class BackendInvokeError extends Error {
         this.method = params.method;
         this.args = params.args;
         this.kind = params.kind ?? "transient";
+        this.code = params.code ?? null;
     }
 }
 
@@ -69,6 +80,13 @@ export function invokeErrorKind(error: unknown): "terminal" | "transient" {
         return "terminal";
     }
     return "transient";
+}
+
+/** 从任意错误对象里取出后端协议码；取不到时为 `null`（旧后端 / 非插件错误）。 */
+export function invokeErrorCode(error: unknown): number | null {
+    if (error instanceof BackendInvokeError) return error.code;
+    if (error instanceof PluginInvokeError) return error.code;
+    return null;
 }
 
 let pywebviewAvailability: "unknown" | "available" | "unavailable" = "unknown";
@@ -978,6 +996,22 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
     const plugin = getPluginHost();
     if (plugin) {
+        // 会话终态 ⇒ **本地失败**，不跨 IPC。
+        //
+        // 【为什么必须在最前面】终态是会话级事实：再问一万次也一样。此前每个调用点
+        // 各自重试，实测在 Cubase 上把同一个终态错误问了 750 次，每次都跨一次 IPC 并
+        // 序列化整条错误对象（含最长 4000 字符的栈）。闸门把这条通路整条关掉。
+        const ended = sessionTerminal();
+        if (ended) {
+            throw new BackendInvokeError({
+                mode: "plugin",
+                method,
+                args,
+                cause: new Error(ended.message),
+                kind: "terminal",
+                code: ended.code,
+            });
+        }
         const mapped = buildTauriArgs(method, args);
         if (mapped && "__unwired" in mapped && args.length > 0) {
             throw new Error(
@@ -989,13 +1023,20 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             return await plugin.invoke<T>(method, named);
         } catch (cause) {
             reportFrontendError(`Invoke failed: ${method}`, cause);
+            // 后端的分类随回执传来；轮询方据此决定"停止重试"还是"稍后再来"。
+            const kind = cause instanceof PluginInvokeError ? cause.kind : "transient";
+            const code = cause instanceof PluginInvokeError ? cause.code : null;
+            // 终态一次判定、全局生效：置位后所有后续插件调用本地失败，所有轮询停止。
+            if (kind === "terminal") {
+                markBackendTerminal(cause instanceof Error ? cause.message : String(cause), code);
+            }
             throw new BackendInvokeError({
                 mode: "plugin",
                 method,
                 args: named,
                 cause,
-                // 后端的分类随回执传来；轮询方据此决定"停止重试"还是"稍后再来"。
-                kind: cause instanceof PluginInvokeError ? cause.kind : "transient",
+                kind,
+                code,
             });
         }
     }

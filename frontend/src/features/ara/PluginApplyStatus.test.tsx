@@ -15,6 +15,17 @@ const invokeMock = vi.fn();
 
 vi.mock("../../services/invoke", () => ({
     invoke: (...args: unknown[]) => invokeMock(...args),
+    // `pluginApplyStore` 在失败路径上会调用这两个分类辅助函数。不提供它们的话，
+    // 任何一次"失败路径"用例都会撞上 `undefined is not a function` —— 而不是
+    // 被测的真实行为。
+    invokeErrorKind: (error: unknown) =>
+        error && typeof error === "object" && (error as { kind?: unknown }).kind === "terminal"
+            ? "terminal"
+            : "transient",
+    invokeErrorCode: (error: unknown) =>
+        error && typeof error === "object" && typeof (error as { code?: unknown }).code === "number"
+            ? (error as { code: number }).code
+            : null,
 }));
 
 vi.mock("../../services/hostEvents", () => ({

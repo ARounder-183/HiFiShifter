@@ -13,6 +13,7 @@ import {
     needsFolderTrackNotice,
     needsSkippedClipsNotice,
     needsUnidentifiedHostNotice,
+    needsUnmatchedRegionsNotice,
     parseHostAudio,
 } from "./hostAudio";
 
@@ -185,5 +186,31 @@ describe("hostMediaState", () => {
         expect(hostMediaState({ sourcePath: undefined })).toBe("unavailable");
         // MIDI 片段有内容可画，不是占位。
         expect(hostMediaState({ sourcePath: undefined, midiNoteCount: 3 })).toBe("ready");
+    });
+});
+
+/**
+ * "宿主分配了区域但没有一条能绑上"必须有自己的分类名与提示。
+ *
+ * 【为什么不能与 folder 父轨合并】两者的用户可见症状相同（片段是空的、能拖、没内容），
+ * 但事实不同：folder 那条是"一个区域都没拿到"，这条是"拿到了但对不上"。提示要说对
+ * 原因，否则用户会去改一件无关的事。这个读数此前**只存在于刷屏日志里**，界面上没有
+ * 任何对应物。
+ */
+describe("unmatched_regions", () => {
+    test("分类名被接受，且只有它触发该提示", () => {
+        const status = parseHostAudio({ state: "unmatched_regions", waiting_clips: 2 });
+        expect(status).toEqual({ state: "unmatched_regions", waiting_clips: 2 });
+        expect(needsUnmatchedRegionsNotice(status)).toBe(true);
+        // 与相邻的两态互不误触发。
+        expect(
+            needsUnmatchedRegionsNotice(parseHostAudio({ state: "ready", waiting_clips: 0 })),
+        ).toBe(false);
+        expect(
+            needsUnmatchedRegionsNotice(
+                parseHostAudio({ state: "folder_parent_without_regions", waiting_clips: 2 }),
+            ),
+        ).toBe(false);
+        expect(needsFolderTrackNotice(status)).toBe(false);
     });
 });

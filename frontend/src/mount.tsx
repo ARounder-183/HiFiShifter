@@ -31,8 +31,38 @@ import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
+import { SessionUnavailable } from "./features/ara/SessionUnavailable";
+import { isPluginMode } from "./services/hostCapabilities";
+import { invoke, invokeErrorKind } from "./services/invoke";
 
-export function mountApp(): void {
+/**
+ * 挂载前的会话探活：后端编辑会话是否**已经**处于终态。
+ *
+ * 【为什么必须在挂载 App 之前问一次】会话在启动前就已经终结时（宿主从未把本插件接入
+ * ARA），App 的初始化扇出会**并发**发出十几条命令，每条都失败、每条都进日志 —— 实测
+ * Cubase 上那一秒有 15 条 `Invoke failed`。闸门拦不住它们（IPC 往返约 200ms，大部分
+ * 命令在第一个响应回来前就发出去了），只有在扇出**之前**问一次才拦得住。
+ *
+ * 【为什么不能用 `ping`】`ping` 在 `editor/webview.rs` 里是**内联**处理的：它只回
+ * `{"ok":true,"connected":link.owner().is_ok()}`，**不经过 `editor_session()`** ——
+ * 也就是说"宿主从未绑定 ARA"时它照样回 `ok`。用它探活会得到一个假的健康信号，整条
+ * 保护静默失效。必须用一个真正走命令队列的命令；`get_runtime_info` 正好合适（它本就
+ * 在启动扇出里，返回值有用，这次往返不浪费）。
+ *
+ * 【为什么瞬时失败不算不可用】"编辑器尚未连上处理器"这类是**暂时**的：组件创建与绑定
+ * 之间必然经历它，正常挂载后 App 自己会重试（见 `editor/mod.rs` 的分类测试）。
+ */
+async function probeSession(): Promise<"ready" | "unavailable"> {
+    if (!isPluginMode()) return "ready";
+    try {
+        await invoke("get_runtime_info");
+        return "ready";
+    } catch (error) {
+        return invokeErrorKind(error) === "terminal" ? "unavailable" : "ready";
+    }
+}
+
+export async function mountApp(): Promise<void> {
     // dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
     // 用法：`?perf=400`（clip 总数，按 10 轨均分）或 `?perf=10x40`（轨数 × 每轨
     // clip 数）冷启动即全览；运行时也可用控制台 `window.__hsPerf({...})` 重生成。
@@ -43,6 +73,9 @@ export function mountApp(): void {
         // 才能验证"的事实，从内核句柄读不到）。生产构建不挂载。
         (window as unknown as { __hfsStore?: typeof store }).__hfsStore = store;
     }
+
+    // 探活必须在扇出之前完成（见 `probeSession` 的说明）。
+    const session = await probeSession();
 
     createRoot(document.getElementById("root")!).render(
         <StrictMode>
@@ -68,7 +101,7 @@ export function mountApp(): void {
                               放在 Provider 内侧以便用上主题与语言，包住 App 整体。
                             */}
                             <AppRootErrorBoundary>
-                                <App />
+                                {session === "unavailable" ? <SessionUnavailable /> : <App />}
                             </AppRootErrorBoundary>
                         </AppTooltipProvider>
                     </AppThemeProvider>
