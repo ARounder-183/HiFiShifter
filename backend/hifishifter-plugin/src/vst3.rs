@@ -285,7 +285,12 @@ fn class_declaration(index: i32) -> Option<ClassDeclaration> {
     const VENDOR: &str = "HiFiShifter";
 
     let (cid, category, sub_categories, class_flags) = match index {
-        0 => (PROCESSOR_CID, AUDIO_MODULE_CLASS.to_owned(), "Fx|OnlyARA", 0),
+        0 => (
+            PROCESSOR_CID,
+            AUDIO_MODULE_CLASS.to_owned(),
+            "Fx|OnlyARA",
+            0,
+        ),
         1 => {
             // 主工厂的类别串由适配器给出（与 shim 的常量同源）；取不到时退回规范字面量。
             let mut buffer = [0 as c_char; 32];

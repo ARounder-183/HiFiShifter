@@ -193,7 +193,10 @@ fn structural_binding_failures_back_off_and_cap() {
         Err("no assigned ARA region matched a unique host item".into());
     // 第一次失败：记录代次，档位保持 0 ⇒ 下一次重试仍是 100ms（不牺牲首次重试速度）。
     owner.note_geometry_outcome(&failure, Some(7));
-    assert_eq!(owner.enumeration_interval(), super::HOST_ENUMERATION_INTERVAL);
+    assert_eq!(
+        owner.enumeration_interval(),
+        super::HOST_ENUMERATION_INTERVAL
+    );
     let mut previous = std::time::Duration::ZERO;
     for _ in 0..20 {
         owner.note_geometry_outcome(&failure, Some(7));
@@ -224,7 +227,10 @@ fn a_host_change_resets_the_backoff_immediately() {
     for _ in 0..20 {
         owner.note_geometry_outcome(&failure, Some(7));
     }
-    assert_eq!(owner.enumeration_interval(), std::time::Duration::from_secs(4));
+    assert_eq!(
+        owner.enumeration_interval(),
+        std::time::Duration::from_secs(4)
+    );
     owner.note_geometry_outcome(&failure, Some(8));
     assert_eq!(
         owner.enumeration_interval(),

@@ -77,10 +77,7 @@ fn document_closed_keeps_the_never_bound_flag_monotonic() {
         crate::editor::errors::ARA_NOT_BOUND.error(),
         "`document_closed()` 之后仍是「已关闭」，不能变成「从未绑定」"
     );
-    assert_eq!(
-        crate::editor::errors::classify_error(&error),
-        "terminal"
-    );
+    assert_eq!(crate::editor::errors::classify_error(&error), "terminal");
     document.close();
 }
 
@@ -134,10 +131,7 @@ fn a_terminal_session_never_reaches_the_queue() {
         crate::editor::errors::ARA_NOT_BOUND.error(),
         "绑定过又关闭的实例必须报「会话已结束」，而不是「从未绑定」"
     );
-    assert_eq!(
-        crate::editor::errors::classify_error(&error),
-        "terminal"
-    );
+    assert_eq!(crate::editor::errors::classify_error(&error), "terminal");
 
     // 即便有人绕过上一步直接入队，也必须被拒（`closed` / 文档存活双重守卫）。
     let direct = editor.enqueue(request(2));

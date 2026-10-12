@@ -72,7 +72,10 @@ fn every_class_info_entry_agrees_on_the_same_declaration() {
         assert_eq!(ascii2.cardinality, K_MANY_INSTANCES);
         assert_eq!(wide.cardinality, K_MANY_INSTANCES);
         // 扩展字段在两个"富"入口里也必须一致。
-        assert_eq!(cstr_field(&ascii2.sub_categories), declaration.sub_categories);
+        assert_eq!(
+            cstr_field(&ascii2.sub_categories),
+            declaration.sub_categories
+        );
         assert_eq!(cstr_field(&wide.sub_categories), declaration.sub_categories);
         assert_eq!(ascii2.class_flags, declaration.class_flags);
         assert_eq!(wide.class_flags, declaration.class_flags);
@@ -138,8 +141,8 @@ fn plugin_factory3_is_queryable() {
     // 未实现的接口仍必须明确回 `K_NO_INTERFACE`（放宽不得变成"什么都接受"）。
     let mut miss = std::ptr::null_mut();
     let unknown = [
-        0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
-        0xFF, 0x00,
+        0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00,
     ];
     let result = unsafe { factory_query_interface(factory, unknown.as_ptr(), &mut miss) };
     assert_eq!(result, K_NO_INTERFACE);
