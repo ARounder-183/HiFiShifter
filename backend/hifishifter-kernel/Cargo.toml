@@ -59,6 +59,13 @@ vslib = []
 # 与 app 的 Cargo.toml 逐字一致：两边各自声明同一份 spec，cargo 会做特性统一，
 # 结果与搬迁前相同。注释见 app 的 Cargo.toml（GPU 策略：Windows→DirectML 等）。
 
+# `render_cache::available_disk_bytes` 在 `#[cfg(unix)]` 下用 `libc::statvfs`
+# 取可用磁盘空间。此前 kernel 从未声明 libc —— 内核搬进本 crate（88dfa760）
+# 之后，**Linux/macOS 构建一直是编译不过的**（Windows 走另一分支，所以只在
+# 非 Windows 上暴露）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows — DirectML (DX12, stable)
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }

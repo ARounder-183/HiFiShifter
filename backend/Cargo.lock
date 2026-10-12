@@ -2040,6 +2040,7 @@ dependencies = [
  "encoding_rs",
  "hound",
  "id3",
+ "libc",
  "libloading 0.9.0",
  "log",
  "lru",
