@@ -353,13 +353,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 盘符根与不存在的路径被拒绝，且**不**产生空组。
+    /// 文件系统根与不存在的路径被拒绝，且**不**产生空组。
     #[test]
     fn scan_rejects_drive_roots_and_missing_paths() {
+        // 判据是"没有 parent"，因此 Windows 是盘符根、Unix 是 `/`。此前这里硬编码
+        // `C:\`，在 Unix 上它只是个不存在的相对路径（理由变成 `not_found`），
+        // 断言 `drive_root` 必然失败 —— 该用例只在 Windows 上跑得通。
+        let root_path = if cfg!(windows) { r"C:\" } else { "/" };
         let missing = temp_dir("reject").join("gone");
         let result = collect_folder_media(
             vec![
-                r"C:\".to_string(),
+                root_path.to_string(),
                 missing.to_string_lossy().into_owned(),
                 VIRTUAL_COMPUTER_PATH.to_string(),
                 "   ".to_string(),
