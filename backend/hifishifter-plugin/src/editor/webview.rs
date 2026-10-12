@@ -622,6 +622,12 @@ unsafe extern "system" fn window_proc(
                 let link = state.borrow().link.clone();
                 if let Ok(owner) = link.owner() {
                     owner.refresh_host_transport_tick();
+                    // 【为什么在视图定时器上做这件事】宿主激活后仍无 ARA 绑定时要给出
+                    // 一次性诊断，而它必须走一条"未绑定也照跑"的路径：
+                    // `refresh_host_transport_tick` 在未绑定时会因 `host_query_stamp`
+                    // 失败而立即返回，诊断挂在它内部永远不会执行。视图定时器与视图
+                    // 同寿，且已经在每 20ms 跑一次。
+                    owner.note_editor_tick();
                 }
                 if !state.borrow().closed {
                     deliver(&state);

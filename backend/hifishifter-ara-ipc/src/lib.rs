@@ -78,6 +78,14 @@ pub mod error_code {
     pub const LEASE_REVOKED: u32 = 7;
     /// 插件实例已关闭。
     pub const INSTANCE_CLOSED: u32 = 8;
+    /// 宿主从未把本实例绑定到 ARA 文档（终态）。
+    ///
+    /// 【为什么必须与 `DOCUMENT_CLOSED` 分开】两者此前共用一句 "document closed"，
+    /// 于是"宿主根本没走 ARA 路径"（Cubase 实测：从不查询 `IPlugInEntryPoint`、
+    /// 从不创建文档控制器）被表述成"会话已结束"。前端据此提示"关闭并重新打开插件
+    /// 窗口"—— 而重开会走完全相同的路径、得到完全相同的错误。那条提示把用户引向
+    /// 一个**必然失败**的补救动作。
+    pub const ARA_NOT_BOUND: u32 = 9;
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

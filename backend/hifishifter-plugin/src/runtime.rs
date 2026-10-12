@@ -23,6 +23,22 @@ pub struct StaticFactory(
     #[allow(dead_code)] &'static Factory,
 );
 
+impl StaticFactory {
+    /// 只读的 ARA 工厂记录指针。
+    ///
+    /// 【为什么需要它】ARA 契约要求处理器类的 `PClassInfo.name` 与
+    /// `ARAFactory.plugInName` 一致，宿主据此把 ARA 主工厂与音频处理器配成一对
+    /// （`ARAVST3.h` 的 `IMainFactory` 说明）。`vst3::factory_declaration_tests`
+    /// 要读回 `plugInName` 才能把这条不变量钉住 —— 漂移的症状是"插件能加载但从不
+    /// 进入 ARA"，没有断言就无从发现。
+    ///
+    /// 【为什么只读】工厂由 `OnceLock` 持有并泄漏到进程结束，这里只暴露核对元数据
+    /// 所需的只读指针；能改状态的访问器不该存在。
+    pub(crate) fn factory_raw(&self) -> *const ara2_bridge::sys::ARAFactory {
+        self.0.as_raw()
+    }
+}
+
 // SAFETY: 见 StaticFactory 文档注释。
 unsafe impl Send for StaticFactory {}
 // SAFETY: 见 StaticFactory 文档注释。

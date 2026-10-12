@@ -110,6 +110,11 @@ const IID_FUNKNOWN: [u32; 4] = [0x0000_0000, 0x0000_0000, 0xC000_0000, 0x0000_00
 const IID_IPLUGIN_BASE: [u32; 4] = [0x2288_8DDB, 0x156E_45AE, 0x8358_B348, 0x0819_0625];
 const IID_IPLUGIN_FACTORY: [u32; 4] = [0x7A4D_811C, 0x5211_4A1F, 0xAED9_D2EE, 0x0B43_BF9F];
 const IID_IPLUGIN_FACTORY2: [u32; 4] = [0x0007_B650, 0xF24B_4C0B, 0xA464_EDB9, 0xF00B_2ABB];
+/// `IPluginFactory3`（`ipluginbase.h`）。它只比 `IPluginFactory2` 多一个
+/// `getClassInfoUnicode`，但 Steinberg 自家宿主（Cubase / Nuendo）会**主动查询**它：
+/// 实测日志里 `factory queryInterface miss iid=ABA2554523C1574E9B12291036878931` 就是
+/// 它。此前我们回 `K_NO_INTERFACE`，等于对宿主说"这个工厂没有你认识的那版接口"。
+const IID_IPLUGIN_FACTORY3: [u32; 4] = [0x4555_A2AB, 0xC123_4E57, 0x9B12_2910, 0x3687_8931];
 const IID_ICOMPONENT: [u32; 4] = [0xE831_FF31, 0xF2D5_4301, 0x928E_BBEE, 0x2569_7802];
 const IID_IAUDIO_PROCESSOR: [u32; 4] = [0x4204_3F99, 0xB7DA_453C, 0xA569_E79D, 0x9AAE_C33D];
 const IID_IEDIT_CONTROLLER: [u32; 4] = [0xDCD7_BBE3, 0x7742_448D, 0xA874_AACC, 0x979C_759E];
@@ -144,6 +149,25 @@ unsafe fn hex_iid(iid: *const u8) -> String {
     }
     // SAFETY: 调用方保证 iid 指向可读的 16 字节 TUID。
     hex16(unsafe { std::slice::from_raw_parts(iid, 16) })
+}
+
+/// 记录一次"查询未命中"，同一接口每 10 秒最多一条。
+///
+/// 【为什么要限流】宿主会成批查询它认识的每一个接口（Cubase 一次会话里就有几十条），
+/// 全部记 INFO 会把真正有用的行冲掉。**首次仍然记** —— 未命中的接口清单是判断"宿主
+/// 想用什么"的第一手证据（例如 Cubase 查询 `IPluginFactory3` 而未命中）；重复项交给
+/// 内核限流器汇总成 `[throttled] N message(s) suppressed`，信息不丢，只是不重复。
+///
+/// 【为什么按接口分桶】不同接口的未命中是不同的事实。用一个粗桶会让"新出现的未命中"
+/// 被已有噪音吞掉 —— 那正是需要看见的时刻。
+fn log_query_interface_miss(owner: &str, iid: *const u8) {
+    // SAFETY: 调用方保证 iid 指向可读的 16 字节 TUID（或为空）。
+    let iid = unsafe { hex_iid(iid) };
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Info,
+        &format!("vst3-qi-miss:{owner}:{iid}"),
+        format_args!("[vst3] {owner} queryInterface miss iid={iid}"),
+    );
 }
 
 /// 读取 companion 侧声明的 ARA 接口 IID（四个 32 位字）。
@@ -207,6 +231,93 @@ pub struct PClassInfo2 {
     pub sdk_version: [c_char; 64],
 }
 
+/// `PClassInfoW`（`IPluginFactory3::getClassInfoUnicode`）。
+///
+/// 与 [`PClassInfo2`] 同形，差别只在 `name` / `vendor` / `version` / `sdk_version`
+/// 是 UTF-16（`char16`）。
+#[repr(C)]
+pub struct PClassInfoW {
+    /// 类 ID。
+    pub cid: Tuid,
+    /// 基数。
+    pub cardinality: i32,
+    /// 类类别。
+    pub category: [c_char; 32],
+    /// 类名（UTF-16，64 个 char16）。
+    pub name: [u16; 64],
+    /// 类别标志。
+    pub class_flags: u32,
+    /// 子类别（128 字节，ARA 约定 `Fx|OnlyARA`）。
+    pub sub_categories: [c_char; 128],
+    /// 厂商覆盖（UTF-16）。
+    pub vendor: [u16; 64],
+    /// 版本（UTF-16）。
+    pub version: [u16; 64],
+    /// SDK 版本（UTF-16）。
+    pub sdk_version: [u16; 64],
+}
+
+/// 一个 VST3 类的声明内容 —— `getClassInfo` / `getClassInfo2` /
+/// `getClassInfoUnicode` 三个入口共用**同一份事实**。
+///
+/// 【为什么必须共用】ARA 契约要求处理器类的 `PClassInfo.name` 与
+/// `ARAFactory.plugInName` 一致，宿主据此把 ARA 主工厂与音频处理器配成一对
+/// （见 `ARAVST3.h` 的 `IMainFactory` 说明）。三个入口各写一份字面量时，任何一处
+/// 漂移都会让宿主配不上对 —— 而症状是"插件能加载但从不进入 ARA"，极难定位。
+struct ClassDeclaration {
+    cid: Tuid,
+    category: String,
+    name: &'static str,
+    class_flags: u32,
+    sub_categories: &'static str,
+    vendor: &'static str,
+    version: &'static str,
+    sdk_version: &'static str,
+}
+
+/// 类别索引 → 声明内容；越界返回 `None`（宿主只该问 0..=2）。
+///
+/// 索引与 `factory_count_classes` 的注释一致：0 = 音频处理器组件，1 = ARA 主工厂，
+/// 2 = 编辑器控制器。
+fn class_declaration(index: i32) -> Option<ClassDeclaration> {
+    /// 所有类共用的 SDK 版本串。
+    const SDK_VERSION: &str = "VST 3.8.0";
+    const VENDOR: &str = "HiFiShifter";
+
+    let (cid, category, sub_categories, class_flags) = match index {
+        0 => (PROCESSOR_CID, AUDIO_MODULE_CLASS.to_owned(), "Fx|OnlyARA", 0),
+        1 => {
+            // 主工厂的类别串由适配器给出（与 shim 的常量同源）；取不到时退回规范字面量。
+            let mut buffer = [0 as c_char; 32];
+            // SAFETY: 适配器返回常驻 NUL 结尾 C 字符串（或 null），缓冲足够。
+            unsafe { copy_str_ptr(&mut buffer, ara2_vst3_main_factory_category()) };
+            let category = if buffer[0] == 0 {
+                "ARA Main Factory Class".to_owned()
+            } else {
+                let bytes = buffer
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .map(|byte| *byte as u8)
+                    .collect::<Vec<u8>>();
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            (FACTORY_CID, category, "", 0)
+        }
+        2 => (CONTROLLER_CID, COMPONENT_CONTROLLER_CLASS.to_owned(), "", 0),
+        _ => return None,
+    };
+    Some(ClassDeclaration {
+        cid,
+        category,
+        name: crate::CLASS_NAME,
+        class_flags,
+        sub_categories,
+        vendor: VENDOR,
+        version: crate::VERSION,
+        sdk_version: SDK_VERSION,
+    })
+}
+
 /// `Vst::BusInfo`。
 #[repr(C)]
 pub struct BusInfo {
@@ -252,6 +363,15 @@ pub struct ProcessSetup {
 fn copy_str<const N: usize>(dst: &mut [c_char; N], src: &str) {
     for (slot, byte) in dst.iter_mut().zip(src.bytes()) {
         *slot = byte as c_char;
+    }
+}
+
+/// 把 `&str` 按 UTF-16 写入定长 `char16` 缓冲（`PClassInfoW` 的字段用）。
+///
+/// 与 [`copy_str`] 同一纪律：只填前 N 个码元，剩余留给调用方清零的尾部。
+fn copy_wide_str<const N: usize>(dst: &mut [u16; N], src: &str) {
+    for (slot, unit) in dst.iter_mut().zip(src.encode_utf16()) {
+        *slot = unit;
     }
 }
 
@@ -305,7 +425,7 @@ pub struct PluginFactoryVtbl {
     ) -> TResult,
     /// `IPluginFactory2::getClassInfo2`。
     pub get_class_info2: unsafe extern "system" fn(*mut c_void, i32, *mut PClassInfo2) -> TResult,
-    /// `IPluginFactory3::getClassInfoUnicode`（探针不 adverise 该接口）。
+    /// `IPluginFactory3::getClassInfoUnicode`。
     pub get_class_info_unicode: unsafe extern "system" fn(*mut c_void, i32, *mut c_void) -> TResult,
     /// `IPluginFactory3::setHostContext`（探针不 advertise 该接口）。
     pub set_host_context: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
@@ -342,21 +462,29 @@ unsafe extern "system" fn factory_query_interface(
             }
             // SAFETY: obj 是宿主提供的输出槽。
             unsafe { *obj = std::ptr::null_mut() };
-            if unsafe { iid_matches(iid, IID_FUNKNOWN) }
-                || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY) }
-                || unsafe { iid_matches(iid, IID_IPLUGIN_FACTORY2) }
-            {
-                let factory = this as *const PluginFactoryObj;
-                // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
-                unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) };
-                // SAFETY: 输出槽非空。
-                unsafe { *obj = this };
-                return K_RESULT_OK;
-            }
-            crate::log_line(&format!("factory queryInterface miss iid={}", unsafe {
-                hex_iid(iid)
-            }));
-            K_NO_INTERFACE
+            // 接受的接口 → 名字。**命中与未命中都记**：未命中的清单是判断"宿主想用
+            // 什么"的第一手证据，命中的则回答"宿主拿走了哪一版工厂接口"。
+            let accepted = [
+                (IID_FUNKNOWN, "FUnknown"),
+                (IID_IPLUGIN_FACTORY, "IPluginFactory"),
+                (IID_IPLUGIN_FACTORY2, "IPluginFactory2"),
+                (IID_IPLUGIN_FACTORY3, "IPluginFactory3"),
+            ];
+            let Some(name) = accepted
+                .iter()
+                .find(|(words, _)| unsafe { iid_matches(iid, *words) })
+                .map(|(_, name)| *name)
+            else {
+                log_query_interface_miss("factory", iid);
+                return K_NO_INTERFACE;
+            };
+            let factory = this as *const PluginFactoryObj;
+            // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
+            unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) };
+            // SAFETY: 输出槽非空。
+            unsafe { *obj = this };
+            crate::log_line(&format!("factory queryInterface hit {name}"));
+            K_RESULT_OK
         })
     }
 }
@@ -430,28 +558,13 @@ unsafe fn fill_class_info(info: *mut PClassInfo, index: i32) {
     // SAFETY: 整个结构体是 POD，可直接清零。
     unsafe { std::ptr::write_bytes(info as *mut PClassInfo, 0, 1) };
     info.cardinality = K_MANY_INSTANCES;
-    match index {
-        0 => {
-            info.cid = PROCESSOR_CID;
-            copy_str(&mut info.category, AUDIO_MODULE_CLASS);
-            copy_str(&mut info.name, crate::CLASS_NAME);
-        }
-        2 => {
-            info.cid = CONTROLLER_CID;
-            copy_str(&mut info.category, COMPONENT_CONTROLLER_CLASS);
-            copy_str(&mut info.name, crate::CLASS_NAME);
-        }
-        1 => {
-            info.cid = FACTORY_CID;
-            // SAFETY: 适配器返回常驻 C 字符串（或 null）。
-            unsafe { copy_str_ptr(&mut info.category, ara2_vst3_main_factory_category()) };
-            if info.category[0] == 0 {
-                copy_str(&mut info.category, "ARA Main Factory Class");
-            }
-            copy_str(&mut info.name, crate::CLASS_NAME);
-        }
-        _ => {}
-    }
+    // `PClassInfo` 是精简版：只有 cid / cardinality / category / name。
+    let Some(declaration) = class_declaration(index) else {
+        return;
+    };
+    info.cid = declaration.cid;
+    copy_str(&mut info.category, &declaration.category);
+    copy_str(&mut info.name, declaration.name);
 }
 
 unsafe extern "system" fn factory_get_class_info(
@@ -491,54 +604,62 @@ unsafe extern "system" fn factory_get_class_info2(
             // SAFETY: POD 清零。
             unsafe { std::ptr::write_bytes(info as *mut PClassInfo2, 0, 1) };
             info.cardinality = K_MANY_INSTANCES;
-            match index {
-                0 => {
-                    info.cid = PROCESSOR_CID;
-                    copy_str(&mut info.category, AUDIO_MODULE_CLASS);
-                    copy_str(&mut info.name, crate::CLASS_NAME);
-                    // 二期编辑会话在宿主本进程，不宣称跨进程processor/controller分布。
-                    info.class_flags = 0;
-                    copy_str(&mut info.sub_categories, "Fx|OnlyARA");
-                    copy_str(&mut info.vendor, "HiFiShifter");
-                    copy_str(&mut info.version, crate::VERSION);
-                    copy_str(&mut info.sdk_version, "VST 3.8.0");
-                }
-                2 => {
-                    info.cid = CONTROLLER_CID;
-                    copy_str(&mut info.category, COMPONENT_CONTROLLER_CLASS);
-                    copy_str(&mut info.name, crate::CLASS_NAME);
-                    copy_str(&mut info.vendor, "HiFiShifter");
-                    copy_str(&mut info.version, crate::VERSION);
-                    copy_str(&mut info.sdk_version, "VST 3.8.0");
-                }
-                1 => {
-                    info.cid = FACTORY_CID;
-                    // SAFETY: 适配器返回常驻 C 字符串（或 null）。
-                    unsafe { copy_str_ptr(&mut info.category, ara2_vst3_main_factory_category()) };
-                    if info.category[0] == 0 {
-                        copy_str(&mut info.category, "ARA Main Factory Class");
-                    }
-                    copy_str(&mut info.name, crate::CLASS_NAME);
-                    copy_str(&mut info.vendor, "HiFiShifter");
-                    copy_str(&mut info.version, crate::VERSION);
-                    copy_str(&mut info.sdk_version, "VST 3.8.0");
-                }
-                _ => {}
-            }
+            let Some(declaration) = class_declaration(index) else {
+                return K_INVALID_ARGUMENT;
+            };
+            info.cid = declaration.cid;
+            copy_str(&mut info.category, &declaration.category);
+            copy_str(&mut info.name, declaration.name);
+            // 二期编辑会话在宿主本进程，不宣称跨进程 processor/controller 分布。
+            info.class_flags = declaration.class_flags;
+            copy_str(&mut info.sub_categories, declaration.sub_categories);
+            copy_str(&mut info.vendor, declaration.vendor);
+            copy_str(&mut info.version, declaration.version);
+            copy_str(&mut info.sdk_version, declaration.sdk_version);
             K_RESULT_OK
         })
     }
 }
 
+/// `IPluginFactory3::getClassInfoUnicode`。
+///
+/// 【为什么必须真的实现】Steinberg 自家宿主会**主动查询** `IPluginFactory3`（实测
+/// Cubase 日志里 `factory queryInterface miss iid=ABA25545…`）。此前这个入口回
+/// `K_NOT_IMPLEMENTED`，且 `factory_query_interface` 也不接受该接口 —— 对宿主而言
+/// 就是"这个工厂没有你认识的那版接口"。名字走 UTF-16 是这套接口存在的唯一理由，
+/// 因此内容与 [`factory_get_class_info2`] **同源**（见 [`class_declaration`]），
+/// 不另写一份字面量。
 unsafe extern "system" fn factory_get_class_info_unicode(
     _this: *mut c_void,
-    _index: i32,
-    _info: *mut c_void,
+    index: i32,
+    info: *mut c_void,
 ) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        crate::guard_ffi(K_RESULT_FALSE, || {
+            if info.is_null() || !(0..=2).contains(&index) {
+                return K_INVALID_ARGUMENT;
+            }
+            // SAFETY: info 是宿主提供的可写 PClassInfoW。
+            let info = unsafe { &mut *info.cast::<PClassInfoW>() };
+            // SAFETY: POD 清零。
+            unsafe { std::ptr::write_bytes(info as *mut PClassInfoW, 0, 1) };
+            info.cardinality = K_MANY_INSTANCES;
+            let Some(declaration) = class_declaration(index) else {
+                return K_INVALID_ARGUMENT;
+            };
+            info.cid = declaration.cid;
+            copy_str(&mut info.category, &declaration.category);
+            copy_wide_str(&mut info.name, declaration.name);
+            info.class_flags = declaration.class_flags;
+            copy_str(&mut info.sub_categories, declaration.sub_categories);
+            copy_wide_str(&mut info.vendor, declaration.vendor);
+            copy_wide_str(&mut info.version, declaration.version);
+            copy_wide_str(&mut info.sdk_version, declaration.sdk_version);
+            crate::log_line(&format!("factory getClassInfoUnicode({index}) ok"));
+            K_RESULT_OK
+        })
     }
 }
 
@@ -600,6 +721,10 @@ unsafe extern "system" fn factory_create_instance(
                 let Some(adapter) = new_main_factory_adapter() else {
                     return K_NO_INTERFACE;
                 };
+                // 【为什么记这一行】创建 ARA 主工厂是宿主**明确要走 ARA 路径**的第一个
+                // 信号（Cubase 实测：加载前创建了它两次）。把它与"之后是否真的绑定了
+                // 文档控制器"放在同一条时间线上，一眼就能看出宿主走到哪一步停住。
+                crate::log_line("factory createInstance ARA main factory");
                 // 宿主会按它请求的 IID（ARA::IMainFactory 或 FUnknown）使用该对象，
                 // 适配器自身的 queryInterface 已支持两者，因此直接把主接口交出去。
                 let raw = adapter.as_raw();
@@ -876,9 +1001,7 @@ unsafe extern "system" fn component_query_interface(
                     }
                 }
             }
-            crate::log_line(&format!("component queryInterface miss iid={}", unsafe {
-                hex_iid(iid)
-            }));
+            log_query_interface_miss("component", iid);
             K_NO_INTERFACE
         })
     }
@@ -1094,7 +1217,22 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
             let processor = this as *mut Processor;
             // SAFETY: processor 是活动对象。
             unsafe { (*processor).active.store(state as i32, Ordering::SeqCst) };
-            crate::log_line(&format!("IComponent::setActive({state})"));
+            // SAFETY: processor 是活动对象。
+            let owner = unsafe { (*processor).extension_owner.clone() };
+            if state != 0 {
+                // 【为什么记这一行】`setActive` 是 ARA 绑定窗口的关闭点：契约规定
+                // `bindToDocumentControllerWithRoles` 只能在它之前调用（ARAVST3.h 的
+                // `IPlugInEntryPoint2`）。`ara_bound` 为假就是"宿主把本插件当普通插入
+                // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
+                // 直接说出这件事，得靠对比两个会话才能推断。
+                owner.note_component_activated();
+                crate::log_line(&format!(
+                    "IComponent::setActive({state}): ara_bound={}",
+                    owner.is_ara_bound()
+                ));
+            } else {
+                crate::log_line(&format!("IComponent::setActive({state})"));
+            }
             K_RESULT_OK
         })
     }
@@ -1636,9 +1774,7 @@ unsafe extern "system" fn edit_controller_query_interface(
                 unsafe { *obj = this };
                 return K_RESULT_OK;
             }
-            crate::log_line(&format!("controller queryInterface miss iid={}", unsafe {
-                hex_iid(iid)
-            }));
+            log_query_interface_miss("controller", iid);
             K_NO_INTERFACE
         })
     }
@@ -2119,6 +2255,8 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 
 #[cfg(test)]
 mod audio_boundary_tests;
+#[cfg(test)]
+mod factory_declaration_tests;
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]

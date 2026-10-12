@@ -245,6 +245,16 @@ pub(crate) fn classify_host_audio(
 pub(crate) struct ExtensionOwner {
     binding: Mutex<Option<ExtensionBinding>>,
     document: Mutex<Option<std::sync::Weak<super::document::DocumentSession>>>,
+    /// 本实例**曾经**成功绑定过 ARA 文档（一旦置真永不回落）。
+    ///
+    /// 【为什么需要它】`document` 字段同时表达两种完全不同的处境：`None` 既可能是
+    /// "宿主从未绑定"（Cubase 实测：从不查询 ARA 入口点），也可能是"绑定过、文档已
+    /// 销毁"。两者此前共用一句 "document closed"，前端据此提示"关闭并重新打开插件
+    /// 窗口"—— 而前者重开一万次也一样。用一个单调标志把两者分开，让错误措辞说实话。
+    ///
+    /// 【为什么单调不回落】绑定过又关闭就是**真的**关闭了；重置它会让措辞静默退化回
+    /// 那句误导性的提示。`document_closed()` 因此刻意不清它。
+    bound_once: std::sync::atomic::AtomicBool,
     assignments: Mutex<HashMap<i32, Vec<RegionKey>>>,
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
@@ -317,7 +327,22 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么不能省】退避不能牺牲响应速度：用户拖完 item 必须立刻看到新几何，
     /// 而不是等 4 秒。代次一变就清零档位，这条是唯一的保证。
     last_failed_revision: Mutex<Option<Option<i32>>>,
+    /// 宿主调用 `setActive(true)` 的时刻；`None` = 还没激活。
+    ///
+    /// 【为什么必须记下来】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
+    /// `setActive` **之前**调用。宿主一旦激活组件就再也不会给这个实例绑定机会 ——
+    /// 那一刻之后仍无绑定，就是"宿主把本插件当普通插入效果器"的确证。此前这件事
+    /// 只能靠读者对比两个会话的日志才能推断出来（见 `note_editor_tick`）。
+    set_active_at: Mutex<Option<std::time::Instant>>,
+    /// "激活后仍无 ARA 绑定"这条诊断是否已经报过（一次性）。
+    ara_binding_absent_reported: std::sync::atomic::AtomicBool,
 }
+
+/// `setActive(true)` 之后允许 ARA 绑定出现的宽限时间（见 [`ExtensionOwner::note_editor_tick`]）。
+///
+/// 【为什么不是 0】有些宿主在 `setActive` 前后几毫秒内完成绑定；立刻报"没有绑定"会
+/// 产生假警报。5 秒足以覆盖实测过的全部宿主，而真出问题时用户也不会等得不耐烦。
+const ARA_BINDING_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 宿主几何/清单枚举的节流间隔（见 `ExtensionOwner::last_enumeration`）。
 const HOST_ENUMERATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -378,8 +403,79 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .filter(|document| document.is_alive())
-            .ok_or_else(|| crate::editor::errors::DOCUMENT_CLOSED.error())
+            .ok_or_else(|| {
+                // "从未绑定"与"绑定过又关闭"是两件不同的事，措辞必须分开：
+                // 前者在 Cubase 上重开一万次窗口也一样（宿主根本不走 ARA 路径），
+                // 后者才是"会话已结束"。共用一句会把用户引向必然失败的补救动作。
+                if self.bound_once.load(Ordering::Acquire) {
+                    crate::editor::errors::DOCUMENT_CLOSED.error()
+                } else {
+                    crate::editor::errors::ARA_NOT_BOUND.error()
+                }
+            })
     }
+    /// 本实例当前是否**真的**挂在一份活的 ARA 文档上。
+    ///
+    /// 与 `bound_once` 的区别：那个是"曾经绑定过"的单调历史，这个是"此刻有效"。
+    /// 诊断（"宿主是否走了 ARA 路径"）要的是后者。
+    pub(crate) fn is_ara_bound(&self) -> bool {
+        self.document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|document| document.is_alive())
+    }
+
+    /// 记录宿主调用 `setActive(true)` 的时刻。
+    ///
+    /// 【为什么在这里记而不是轮询宿主】`setActive` 是 ARA 绑定窗口的**关闭点**：
+    /// 契约规定绑定只能发生在它之前。把时刻记下来，UI 定时器就能在宽限期后给出
+    /// 一条确定性的诊断，而不是让读者去对比两个会话的日志。
+    pub(crate) fn note_component_activated(&self) {
+        let mut at = self.set_active_at.lock_or_recover();
+        if at.is_none() {
+            *at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// UI 定时器每 tick 调用：宿主激活后仍无 ARA 绑定时，**一次性**给出诊断。
+    ///
+    /// 【为什么必须有这一条】用户报障：Cubase 里窗口能开、每个命令都失败，但日志里
+    /// 没有任何一行说明"宿主根本没走 ARA"。要得出这个结论，得把 Cubase 会话与 REAPER
+    /// 会话逐行对比（前者零次 `queryInterface ARA hit`、零次 `document controller
+    /// created`）。一条确定性的警告把这件事变成一眼可见。
+    ///
+    /// 【为什么在 UI 定时器上做而不是开线程】插件 DLL 可能被宿主卸载；一个 sleep 5 秒
+    /// 的分离线程会在模块卸载后回到已消失的代码。UI 定时器天然与视图同寿，且已经在
+    /// 每 20ms 跑一次。
+    pub(crate) fn note_editor_tick(&self) {
+        if self.is_ara_bound() {
+            return;
+        }
+        let Some(at) = *self.set_active_at.lock_or_recover() else {
+            // 宿主还没激活：绑定窗口仍然开着，任何结论都是早的。
+            return;
+        };
+        let elapsed = at.elapsed();
+        if elapsed < ARA_BINDING_GRACE {
+            return;
+        }
+        if self
+            .ara_binding_absent_reported
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let backend = self.host_backend();
+        let host = backend.app_name().unwrap_or("this host");
+        log::warn!(
+            "[ara] no ARA binding {:.0}s after setActive: {host} is running this instance as a \
+             plain insert effect (no document controller was created, so no clip can be edited). \
+             Insert the plug-in from the host's ARA entry rather than a regular effect slot.",
+            elapsed.as_secs_f32()
+        );
+    }
+
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
@@ -2390,6 +2486,9 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         *current = Some(owned.0);
+        // 绑定成功即置"曾经绑定过"。此后 `editor_document()` 的措辞走 DOCUMENT_CLOSED
+        // 而不是 ARA_NOT_BOUND —— 两者对用户的含义完全不同（见该访问器的说明）。
+        self.bound_once.store(true, Ordering::Release);
         self.roles.store(enabled.bits(), Ordering::Release);
         self.role.store(
             if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
@@ -2438,6 +2537,9 @@ impl ExtensionOwner {
         self.sequences.lock_or_recover().clear();
         self.document.lock_or_recover().take();
         self.snapshots.iter().for_each(|snapshot| snapshot.clear());
+        // 【刻意不清 `bound_once`】绑定过又关闭就是真的关闭了，措辞必须保持
+        // DOCUMENT_CLOSED。清掉它会让 "document closed" 静默退化成
+        // ARA_NOT_BOUND（"宿主从未绑定"）—— 那是在陈述一件没发生过的事。
     }
 
     /// 模型线程展开当前 renderer 的显式区域与 editor sequence，并去重，拒绝跨文档身份。
@@ -2679,6 +2781,8 @@ impl ExtensionOwner {
 mod assigned_timeline_tests;
 #[cfg(test)]
 mod bound_tests;
+#[cfg(test)]
+mod editor_document_tests;
 #[cfg(test)]
 mod host_audio_state_tests;
 #[cfg(test)]

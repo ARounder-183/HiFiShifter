@@ -67,6 +67,25 @@ pub(crate) const INSTANCE_CLOSED: TerminalError = TerminalError {
     code: error_code::INSTANCE_CLOSED,
     message: "plugin instance closed",
 };
+/// 宿主从未把本实例绑定到 ARA 文档。
+///
+/// 【为什么必须与 `DOCUMENT_CLOSED` 分开】两者此前共用一句 "document closed"，
+/// 于是"宿主根本没走 ARA 路径"（Cubase 实测：从不查询 `IPlugInEntryPoint`、从不
+/// 创建文档控制器、`setActive` 时仍未绑定）被表述成"会话已结束"。前端据此提示
+/// "关闭并重新打开插件窗口"—— 而重开会走完全相同的路径、得到完全相同的错误。
+/// 那条提示把用户引向一个**必然失败**的补救动作。
+///
+/// 【为什么它是终态】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
+/// `setActive` / `setState` / GUI 创建之前调用一次（`ARAVST3.h` 的
+/// `IPlugInEntryPoint2` 契约）；宿主既然已经 `setActive`，就不会再给这个组件机会。
+/// 对这个编辑器窗口而言，确实永久。
+///
+/// 【措辞红线】不得包含 "closed" —— [`classify_error`] 用**子串**匹配（见其文档），
+/// 一旦新措辞里出现该词，它会被 `DOCUMENT_CLOSED` 抢先命中，两种终态重新混为一谈。
+pub(crate) const ARA_NOT_BOUND: TerminalError = TerminalError {
+    code: error_code::ARA_NOT_BOUND,
+    message: "plug-in instance is not bound to an ARA document",
+};
 
 /// 终态表：分类点遍历它做子串匹配（措辞本身来自上面这些常量）。
 const TERMINAL: &[&str] = &[
@@ -78,6 +97,7 @@ const TERMINAL: &[&str] = &[
     ROUTE_OTHER_DOCUMENT.message,
     LEASE_REVOKED.message,
     INSTANCE_CLOSED.message,
+    ARA_NOT_BOUND.message,
 ];
 
 /// "宿主模型冲突"前缀：可重试（宿主把模型带到了真实状态后会收敛）。
@@ -114,6 +134,7 @@ pub(crate) fn terminal_error_code(error: &str) -> Option<u32> {
         (ROUTE_OTHER_DOCUMENT.message, ROUTE_OTHER_DOCUMENT.code),
         (LEASE_REVOKED.message, LEASE_REVOKED.code),
         (INSTANCE_CLOSED.message, INSTANCE_CLOSED.code),
+        (ARA_NOT_BOUND.message, ARA_NOT_BOUND.code),
     ];
     TABLE
         .iter()
@@ -137,6 +158,7 @@ mod tests {
             (ROUTE_OTHER_DOCUMENT, 6),
             (LEASE_REVOKED, 7),
             (INSTANCE_CLOSED, 8),
+            (ARA_NOT_BOUND, 9),
         ];
         for (entry, code) in table {
             assert_eq!(
@@ -157,6 +179,31 @@ mod tests {
         assert_eq!(
             terminal_error_code(&format!("host split: {}", LEASE_REVOKED.message)),
             Some(LEASE_REVOKED.code)
+        );
+    }
+
+    /// **"从未绑定"必须与"已关闭"分得开。**
+    ///
+    /// 【为什么这是回归测试】`classify_error` 与 `terminal_error_code` 都用**子串**
+    /// 匹配，且 `DOCUMENT_CLOSED` 在表里排在前面。新措辞一旦包含 "closed"，它会被
+    /// `DOCUMENT_CLOSED` 抢先命中 —— 两种终态重新合并，前端又会对"宿主从未绑定 ARA"
+    /// 给出"请关闭并重新打开插件窗口"这条**必然失败**的指引。
+    #[test]
+    fn a_never_bound_instance_is_not_reported_as_closed() {
+        assert!(
+            !ARA_NOT_BOUND.message.contains("closed"),
+            "措辞含 'closed' 会被 DOCUMENT_CLOSED 抢先命中：{}",
+            ARA_NOT_BOUND.message
+        );
+        assert_eq!(classify_error(ARA_NOT_BOUND.message), "terminal");
+        assert_eq!(
+            terminal_error_code(ARA_NOT_BOUND.message),
+            Some(ARA_NOT_BOUND.code)
+        );
+        // 反向：真正的关闭仍归 DOCUMENT_CLOSED，不能被新常量抢走。
+        assert_eq!(
+            terminal_error_code(DOCUMENT_CLOSED.message),
+            Some(DOCUMENT_CLOSED.code)
         );
     }
 }

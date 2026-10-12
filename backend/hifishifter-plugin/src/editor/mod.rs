@@ -37,6 +37,7 @@ mod tests {
             "editor route belongs to another document",
             "editor lease revoked",
             "plugin instance closed",
+            "plug-in instance is not bound to an ARA document",
         ] {
             assert_eq!(
                 classify_error(error),
