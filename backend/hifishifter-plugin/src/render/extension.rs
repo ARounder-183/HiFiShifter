@@ -53,13 +53,25 @@ struct BindingReport {
     candidates: usize,
 }
 
+/// 绑定求解失败的两条**结构性**措辞（产生点与分类点共用同一常量）。
+///
+/// 【为什么不用字面量】与 `editor::errors` 的终态常量同一条纪律：产生点与分类点
+/// 分处不同函数，两边各写字面量时任何一处改措辞都会让分类**静默失效**（退避停摆，
+/// 或对状态变化误退避），且没有编译期信号。
+const BINDING_NO_UNIQUE_ITEM: &str = "no assigned ARA region matched a unique host item";
+const BINDING_GEOMETRY_INCOMPATIBLE: &str =
+    "direct take geometry incompatible with assigned ARA playback window";
+
 /// 绑定失败是否属于"由宿主工程结构决定、不会自行变化"的一类。
 ///
 /// 【为什么必须区分】只有这一类才值得退避：它是"重试一万次也一样"的读数。授权撤销、
 /// 文档关闭、扩展接口消失都是**状态变化**，它们要么很快自愈、要么已经是终态 ——
 /// 对它们退避只会拖慢恢复。
+///
+/// 【为什么用"包含"而不是全等】与 `editor::errors::classify_error` 同一理由：措辞
+/// 可能带上下文前缀（`host split: …`），常量保证的是**子串出现**。
 fn is_structural_binding_failure(error: &str) -> bool {
-    error.contains("matched a unique host item") || error.contains("geometry incompatible")
+    error.contains(BINDING_NO_UNIQUE_ITEM) || error.contains(BINDING_GEOMETRY_INCOMPATIBLE)
 }
 
 /// 两个宿主/ARA 浮点量是否相容；判据全局唯一，见 `host::geometry::host_value_compatible`
@@ -606,9 +618,7 @@ impl ExtensionOwner {
         if !compatible(geometry.start_sec, region.start_in_playback_time)
             || !compatible(geometry.duration_sec, region.duration_in_playback_time)
         {
-            return Err(
-                "direct take geometry incompatible with assigned ARA playback window".into(),
-            );
+            return Err(BINDING_GEOMETRY_INCOMPATIBLE.into());
         }
         if !self.host_query_authorized(&stamp) {
             return Err("host geometry authorization revoked".into());
@@ -681,7 +691,7 @@ impl ExtensionOwner {
             candidates: candidates.len(),
         });
         if bound.is_empty() {
-            return Err("no assigned ARA region matched a unique host item".into());
+            return Err(BINDING_NO_UNIQUE_ITEM.into());
         }
         if !self.host_query_authorized(&stamp) {
             return Err("host geometry authorization revoked".into());
