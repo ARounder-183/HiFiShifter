@@ -61,50 +61,21 @@ pub struct Runtime {
     pub companion: CompanionFactory<'static>,
 }
 
-/// 环境变量名：把"可分析内容类型"广告出去（**诊断探针**，默认关闭）。
-const PROBE_ANALYSIS_ENV: &str = "HIFISHIFTER_ARA_PROBE_ANALYSIS";
-
-/// 本进程是否启用了"广告可分析内容"探针。
+/// 工厂能力集合：只广告我们**真正履行**的东西。
 ///
-/// 【为什么需要这个探针】Cubase 15 实测：文档控制器、轨道序列、音频源都建好了，
-/// 却**从不**创建 audio modification / playback region —— 编辑器里一条片段都没有
-///（前端时间线由渲染快照物化，0 个 region 连轨道都不显示）。而同一台机器上
-/// Melodyne 完全正常，所以差异在我们这一侧。
-///
-/// 我们与 Melodyne 唯一同类的差别是 `ARAFactory::analyzeableContentTypes` 为空。ARA
-/// 规范里宿主正是靠这个字段判断"这个插件能否给出**导入素材**的音乐时值"，而实测素材
-/// 正是导入的 `Vocal-1-1.wav`（宿主不掌握它的速度）。若 Cubase 据此决定要不要把事件
-/// 交给插件，那么"广告出去、它就会问"就能把这条因果坐实。
-///
-/// 【为什么默认关闭】广告一个我们不实现的能力是**假声明** —— 与早先"宣称 ARA 2.3"
-/// 同类。探针只在诊断时开。
-///
-/// 【为什么开了也不会让宿主空等】库对"没注册分析能力"的回答是安全的：
-/// `is_analysis_incomplete` / `is_content_available` 用 `is_some_and` 一律回 false，
-/// `request_analysis` 返回 Err 之后库会**取消**该次分析 —— 宿主问得到"没有待办分析"，
-/// 不会挂起。
-fn probe_analysis_requested(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some()
-}
-
-/// 工厂能力集合：默认只广告我们**真正履行**的东西。
+/// 【为什么这里没有可分析内容类型】`analyzeableContentTypes` 保持为空。曾有一个
+/// `HIFISHIFTER_ARA_PROBE_ANALYSIS` 探针用来验证"Cubase 是否因为插件广告不出素材的
+/// 音乐时值而不交事件"，该假设已被日志否证：整个会话里宿主**一次都没有**调用
+/// `getAudioSourceContentGrade` / `isAudioSourceContentAvailable` /
+/// `createAudioSourceContentReader`，也没有发起任何分析请求 —— 它压根没问过内容。
+/// 真正的成因是 `createAudioModification` 把宿主传来的 null hostRef 当成了硬错误。
+/// 探针因此删除，不留一个已经答完的问题的答案。
 fn factory_capabilities() -> FactoryCapabilities {
-    let capabilities = FactoryCapabilities::default().with_playback_transformations(
+    FactoryCapabilities::default().with_playback_transformations(
         PlaybackTransformationFlags::TIMESTRETCH
             | PlaybackTransformationFlags::REFLECT_TEMPO
             | PlaybackTransformationFlags::CONTENT_FADES,
-    );
-    if probe_analysis_requested(std::env::var_os(PROBE_ANALYSIS_ENV).as_deref()) {
-        log::warn!(
-            "[ara] PROBE ({PROBE_ANALYSIS_ENV}): advertising tempo/bar-signature analysis even \
-             though this build does not implement it; the host may now request it"
-        );
-        return capabilities.with_analyzable_content_types([
-            ara2_bridge::sys::kARAContentTypeTempoEntries as i32,
-            ara2_bridge::sys::kARAContentTypeBarSignatures as i32,
-        ]);
-    }
-    capabilities
+    )
 }
 
 impl Runtime {
@@ -257,8 +228,7 @@ mod tests {
     /// **不变量：默认不广告任何"可分析内容类型"。**
     ///
     /// 【为什么钉住】广告一个我们不实现的能力是**假声明**（与早先"宣称 ARA 2.3 变更
-    /// 通知"同类）。探针只在显式设置 `HIFISHIFTER_ARA_PROBE_ANALYSIS` 时打开，且开关本身
-    /// 由 `the_analysis_probe_follows_the_environment_variable` 单独钉住。
+    /// 通知"同类）。
     #[test]
     fn the_default_capabilities_advertise_no_analysis() {
         let runtime = Runtime::init().unwrap();
@@ -266,7 +236,7 @@ mod tests {
         let raw = unsafe { std::ptr::read_unaligned(runtime.factory.0.as_raw()) };
         let analyzeable = raw.analyzeableContentTypesCount;
         let transformations = raw.supportedPlaybackTransformationFlags;
-        assert_eq!(analyzeable, 0, "默认不得广告任何可分析内容类型");
+        assert_eq!(analyzeable, 0, "不得广告任何可分析内容类型");
         assert_eq!(
             transformations as u32,
             (PlaybackTransformationFlags::TIMESTRETCH
@@ -274,14 +244,6 @@ mod tests {
                 | PlaybackTransformationFlags::CONTENT_FADES)
                 .bits()
         );
-    }
-
-    /// 探针只认"环境变量是否存在"，不解析取值 —— 诊断时设成什么都该生效。
-    #[test]
-    fn the_analysis_probe_follows_the_environment_variable() {
-        assert!(!probe_analysis_requested(None));
-        assert!(probe_analysis_requested(Some(std::ffi::OsStr::new("1"))));
-        assert!(probe_analysis_requested(Some(std::ffi::OsStr::new("0"))));
     }
 
     /// **不变量：工厂广告的 transformation 集合必须覆盖宿主会给出的每一种。**
