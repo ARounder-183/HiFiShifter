@@ -61,10 +61,13 @@ fn fixture_factory_and_extension_surface_advertise_every_supported_capability() 
 fn raw_fixture_drives_all_54_document_controller_callbacks() {
     let trace = TestPluginTrace::new();
     let factory = build_test_factory(trace).unwrap();
-    let mut assertion: ARAAssertFunction = None;
+    // The assert-function address must be shared process-wide per API generation; see
+    // `SHARED_ASSERTION`. This test previously used a fresh local, which collides with any
+    // other test in this binary that boots a controller for the same generation.
+    let mut assertion = SHARED_ASSERTION.lock().unwrap();
     factory
         .entry()
-        .initialize(ApiGeneration::V23Final, &raw mut assertion)
+        .initialize(ApiGeneration::V23Final, &raw mut *assertion)
         .unwrap();
     let host = RawHost::new();
     let host_instance = host.instance();
@@ -1391,6 +1394,237 @@ fn fixture_handle() -> RawHandle {
     enum Kind {}
     let mut registry = Registry::<Kind, ()>::new(1);
     registry.insert(()).unwrap().into_raw()
+}
+
+/// Boots a live document controller over the raw C ABI, exactly as a host would.
+///
+/// Returns the controller reference, the interface pointer, and the raw factory.
+struct RawController {
+    controller: ARADocumentControllerRef,
+    interface: *const ARADocumentControllerInterface,
+}
+
+/// The ARA entry point requires every factory using one API generation to share the same
+/// assert-function address, and it is process-global — so the helper cannot use a fresh local.
+static SHARED_ASSERTION: std::sync::Mutex<ARAAssertFunction> = std::sync::Mutex::new(None);
+
+fn boot_raw_controller(trace: TestPluginTrace) -> RawController {
+    let factory = build_test_factory(trace).unwrap();
+    let mut assertion = SHARED_ASSERTION.lock().unwrap();
+    factory
+        .entry()
+        .initialize(ApiGeneration::V23Final, &raw mut *assertion)
+        .unwrap();
+    let host = RawHost::new();
+    let host_instance = host.instance();
+    let document = DocumentProperties::new(Some("Null Host Ref")).unwrap();
+    let raw_document = document.as_ffi();
+    let raw_factory = factory.raw_copy();
+    // SAFETY: copied from the complete live packed factory record.
+    let create_controller = unsafe {
+        std::ptr::addr_of!(raw_factory.createDocumentControllerWithDocument).read_unaligned()
+    }
+    .unwrap();
+    // SAFETY: `host` and `raw_document` outlive the created controller for this scope, and the
+    // returned instance keeps the host instance pointer only for the document's lifetime.
+    let (instance, controller, interface) = unsafe {
+        let instance = create_controller(&raw const host_instance, raw_document.as_ref().as_ptr());
+        assert!(!instance.is_null());
+        let controller = ara2_bridge_sys::access::read_field::<ARADocumentControllerRef>(
+            instance.cast(),
+            offset_of!(ARADocumentControllerInstance, documentControllerRef),
+        );
+        let interface = ara2_bridge_sys::access::read_field::<*const ARADocumentControllerInterface>(
+            instance.cast(),
+            offset_of!(ARADocumentControllerInstance, documentControllerInterface),
+        );
+        (instance, controller, interface)
+    };
+    // The host instance is owned by `RawHost`; keep it alive for the controller's lifetime by
+    // leaking it, since this helper returns while the controller stays in use.
+    std::mem::forget(host);
+    let _ = instance;
+    RawController {
+        controller,
+        interface,
+    }
+}
+
+/// A host reference is an opaque token the plug-in hands back to notify changes — it is not a
+/// precondition for creating the object.
+///
+/// Cubase 15 passes `NULL` for `createAudioModification`; the previous code treated that as a
+/// hard rejection, returned `NULL`, and the host then never reached `createPlaybackRegion`, so
+/// the whole timeline stayed empty (`modifications=0 playbackRegions=0`). Melodyne, on the same
+/// project, works — so the handover is correct and the rejection was ours.
+#[test]
+fn model_objects_are_created_even_when_the_host_passes_no_host_reference() {
+    let raw = boot_raw_controller(TestPluginTrace::new());
+    let controller = raw.controller;
+    let interface = raw.interface;
+
+    macro_rules! cb {
+        ($field:ident, $type:ty) => {
+            callback::<$type>(
+                interface,
+                offset_of!(ARADocumentControllerInterface, $field),
+            )
+        };
+    }
+
+    let begin = cb!(beginEditing, unsafe extern "C" fn(ARADocumentControllerRef));
+    // SAFETY: `controller` is live and this callback takes no other identity.
+    unsafe { begin(controller) };
+
+    let context_properties = MusicalContextProperties::new(Some("Context"), 0, None).unwrap();
+    let raw_context = context_properties.as_ffi(ApiGeneration::V23Final).unwrap();
+    let create_context = cb!(
+        createMusicalContext,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAMusicalContextHostRef,
+            *const ARAMusicalContextProperties,
+        ) -> ARAMusicalContextRef
+    );
+    // The decisive call: a NULL host reference must still yield a live model object.
+    let context = unsafe { create_context(controller, null_mut(), raw_context.as_ref().as_ptr()) };
+    assert!(
+        !context.is_null(),
+        "a null hostRef must not reject musical-context creation"
+    );
+
+    let source_properties = test_audio_source_properties().unwrap();
+    let raw_source = source_properties.as_ffi(ApiGeneration::V23Final).unwrap();
+    let create_source = cb!(
+        createAudioSource,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAAudioSourceHostRef,
+            *const ARAAudioSourceProperties,
+        ) -> ARAAudioSourceRef
+    );
+    let source = unsafe { create_source(controller, null_mut(), raw_source.as_ref().as_ptr()) };
+    assert!(
+        !source.is_null(),
+        "a null hostRef must not reject audio-source creation"
+    );
+
+    let modification_properties =
+        AudioModificationProperties::new(Some("Modification"), "modification-1").unwrap();
+    let raw_modification = modification_properties.as_ffi();
+    let create_modification = cb!(
+        createAudioModification,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAAudioSourceRef,
+            ARAAudioModificationHostRef,
+            *const ARAAudioModificationProperties,
+        ) -> ARAAudioModificationRef
+    );
+    // This is the exact call Cubase 15 makes with a NULL host reference.
+    let modification = unsafe {
+        create_modification(
+            controller,
+            source,
+            null_mut(),
+            raw_modification.as_ref().as_ptr(),
+        )
+    };
+    assert!(
+        !modification.is_null(),
+        "a null hostRef must not reject audio-modification creation: the host then never \
+         reaches createPlaybackRegion and the timeline stays empty"
+    );
+
+    let end = cb!(endEditing, unsafe extern "C" fn(ARADocumentControllerRef));
+    // SAFETY: `controller` is live and this ends the edit cycle opened above.
+    unsafe { end(controller) };
+}
+
+/// The degraded objects must still be resolvable, or the host's next step fails.
+#[test]
+fn objects_created_without_a_host_reference_are_resolvable_by_the_host() {
+    let raw = boot_raw_controller(TestPluginTrace::new());
+    let controller = raw.controller;
+    let interface = raw.interface;
+
+    macro_rules! cb {
+        ($field:ident, $type:ty) => {
+            callback::<$type>(
+                interface,
+                offset_of!(ARADocumentControllerInterface, $field),
+            )
+        };
+    }
+
+    let begin = cb!(beginEditing, unsafe extern "C" fn(ARADocumentControllerRef));
+    // SAFETY: `controller` is live and this callback takes no other identity.
+    unsafe { begin(controller) };
+
+    let source_properties = test_audio_source_properties().unwrap();
+    let raw_source = source_properties.as_ffi(ApiGeneration::V23Final).unwrap();
+    let create_source = cb!(
+        createAudioSource,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAAudioSourceHostRef,
+            *const ARAAudioSourceProperties,
+        ) -> ARAAudioSourceRef
+    );
+    let source = unsafe { create_source(controller, null_mut(), raw_source.as_ref().as_ptr()) };
+    assert!(!source.is_null());
+
+    let modification_properties =
+        AudioModificationProperties::new(Some("Modification"), "modification-1").unwrap();
+    let raw_modification = modification_properties.as_ffi();
+    let create_modification = cb!(
+        createAudioModification,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAAudioSourceRef,
+            ARAAudioModificationHostRef,
+            *const ARAAudioModificationProperties,
+        ) -> ARAAudioModificationRef
+    );
+    let modification = unsafe {
+        create_modification(
+            controller,
+            source,
+            null_mut(),
+            raw_modification.as_ref().as_ptr(),
+        )
+    };
+    assert!(!modification.is_null());
+
+    // The host's very next move is to clone it; that must resolve the degraded reference.
+    let clone_properties =
+        AudioModificationProperties::new(Some("Clone"), "modification-2").unwrap();
+    let raw_clone = clone_properties.as_ffi();
+    let clone_modification = cb!(
+        cloneAudioModification,
+        unsafe extern "C" fn(
+            ARADocumentControllerRef,
+            ARAAudioModificationRef,
+            ARAAudioModificationHostRef,
+            *const ARAAudioModificationProperties,
+        ) -> ARAAudioModificationRef
+    );
+    let clone = unsafe {
+        clone_modification(
+            controller,
+            modification,
+            null_mut(),
+            raw_clone.as_ref().as_ptr(),
+        )
+    };
+    assert!(
+        !clone.is_null(),
+        "a modification created without a host reference must still resolve for cloning"
+    );
+
+    let end = cb!(endEditing, unsafe extern "C" fn(ARADocumentControllerRef));
+    // SAFETY: `controller` is live and this ends the edit cycle opened above.
+    unsafe { end(controller) };
 }
 
 struct RawHost {

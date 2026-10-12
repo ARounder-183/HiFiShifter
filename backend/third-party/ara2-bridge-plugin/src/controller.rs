@@ -355,9 +355,6 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAMusicalContextHostRef,
         properties: *const ARAMusicalContextProperties,
     ) -> ARAMusicalContextRef {
-        if host_ref.is_null() {
-            return null_mut();
-        }
         // SAFETY: the ARA callback contract supplies a complete ephemeral property record.
         let Ok(properties) =
             (unsafe { ara2_bridge_core::MusicalContextProperties::copy_from_ffi(properties) })
@@ -368,6 +365,54 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             .runtime()
             .map(PluginRuntime::generation)
             .unwrap_or(ApiGeneration::V23Final);
+        // 【本地补丁 12】与 createAudioSource 同一修法：必须真正走无宿主作用域，否则
+        // 下面 `from_raw` 仍会把 null 拒掉。这里额外保留了 2.0 Draft 之前"补一条隐式
+        // region sequence"的行为 —— 那段逻辑与宿主引用无关，退化路径必须原样带上，
+        // 否则老代数宿主会丢掉整条轨道。
+        if host_ref.is_null() {
+            log::warn!(
+                "[ara] createMusicalContext: the host passed no host reference; the context is \
+                 created without host content access"
+            );
+            let Ok(runtime) = self.runtime_mut() else {
+                log::warn!("[ara] createMusicalContext rejected: document runtime busy or closed");
+                return null_mut();
+            };
+            let result: Result<(RawHandle, ARAMusicalContextRef, Option<RawHandle>), AraError> =
+                (|| {
+                    let mut edit = runtime.callback_edit()?;
+                    let handle = edit.create_musical_context(properties)?;
+                    let reference = edit.musical_context_ref(handle)?;
+                    let raw_reference = reference.as_raw().cast();
+                    let synthetic = if generation < ApiGeneration::V2Draft {
+                        let properties = ara2_bridge_core::RegionSequenceProperties::new(
+                            None,
+                            0,
+                            reference,
+                            None,
+                        )?;
+                        match edit.create_region_sequence(handle, properties) {
+                            Ok(sequence) => Some(sequence.into_raw()),
+                            Err(error) => {
+                                let _ = edit.destroy_musical_context(handle);
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    Ok((handle.into_raw(), raw_reference, synthetic))
+                })();
+            let Ok((handle, reference, synthetic)) = result else {
+                log::error!("[ara] createMusicalContext callback failure");
+                return null_mut();
+            };
+            self.musical_context_hosts.insert(handle, host_ref);
+            if let Some(sequence) = synthetic {
+                self.synthetic_sequences.insert(handle, sequence);
+            }
+            return reference;
+        }
         // SAFETY: the non-null callback identity remains live for the document-controller lifetime.
         let Ok(scoped_host_ref) = (unsafe { HostMusicalContextRef::from_raw(host_ref) }) else {
             return null_mut();
@@ -529,9 +574,48 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAAudioSourceHostRef,
         properties: *const ARAAudioSourceProperties,
     ) -> ARAAudioSourceRef {
+        // 【本地补丁 12】与 createAudioModification 是同一个误判：把回推通知用的不透明
+        // 令牌当成创建模型对象的前提。差别在于这里的 hostRef **确实**参与内容读取
+        //（`create_audio_source_with_host` 要用它去宿主侧取内容），所以不能只加一句警告
+        // 了事 —— 必须真正改走无宿主作用域，否则紧随其后的 `from_raw` 仍会把 null 拒掉，
+        // 日志里那句"created anyway"就是句假话。
+        //
+        // 退化路径是运行时自带的 `create_audio_source`，它内部用
+        // `HostContentScope::unavailable()`，语义明确：本次回调里该源没有宿主内容可查，
+        // 其余一切照旧。
         if host_ref.is_null() {
-            log::error!("ARA createAudioSource rejected: null host reference");
-            return null_mut();
+            log::warn!(
+                "[ara] createAudioSource: the host passed no host reference; the source is \
+                 created without host content access"
+            );
+            // SAFETY: the ARA callback contract supplies complete ephemeral properties and nested
+            // data; this branch parses the same record the non-degraded path would.
+            let Ok(parsed) =
+                (unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) })
+            else {
+                log::error!("[ara] createAudioSource property rejection: null host reference path");
+                return null_mut();
+            };
+            let Ok(runtime) = self.runtime_mut() else {
+                log::error!("[ara] createAudioSource rejected: document runtime busy or closed");
+                return null_mut();
+            };
+            let result: Result<(RawHandle, ARAAudioSourceRef), AraError> = (|| {
+                let mut edit = runtime.callback_edit()?;
+                let handle = edit.create_audio_source(parsed)?;
+                let reference = edit.audio_source_ref(handle)?;
+                Ok((handle.into_raw(), reference.as_raw().cast()))
+            })();
+            return match result {
+                Ok((handle, reference)) => {
+                    self.audio_source_hosts.insert(handle, host_ref);
+                    reference
+                }
+                Err(error) => {
+                    log::error!("[ara] createAudioSource callback failure: {error:?}");
+                    null_mut()
+                }
+            };
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties and nested data.
         let properties = match unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) } {
@@ -789,9 +873,29 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 既看不出宿主有没有调用，也看不出为什么被拒。实测 Cubase 15 的读数恒为
         // `sources=2 modifications=0 regionSequences=1 playbackRegions=0`。
         log::info!("[ara] host createAudioModification");
+        // 【本地补丁 12】null hostRef 必须容忍，不能拒绝 —— 这是 Cubase 15 里"一条片段
+        // 都没有"的**直接成因**：宿主调了本回调（日志里有 `host createAudioModification`），
+        // 我们却因为 `hostRef` 为 null 回了 null，于是宿主拿不到 modification，也就永远
+        // 不会走到 `createPlaybackRegion`，实测读数恒为
+        // `sources=2 modifications=0 regionSequences=1 playbackRegions=0`。
+        //
+        // 【为什么 null 是合法的】hostRef 是宿主交给插件的**不透明令牌**，插件只在
+        // `notifyAudioModificationChanged`、`notifyAnalysisProgress` 这类"回推更新"时原样
+        // 交还宿主。它不是创建模型对象的**前提条件**：模型对象归宿主所有，插件只是登记
+        // 一个引用。对照本文件里 `createRegionSequence` —— 它把 `_host_ref` 整个忽略掉，
+        // 而它在同一次会话里**成功**了（`regionSequences=1`）；同一宿主、同一会话，
+        // 唯独把 hostRef 当强校验的两条回调全部落空。这个对照就足以说明问题在我们的
+        // 校验强度上，不在宿主身上。
+        //
+        // 【容忍之后会缺什么】只有"插件主动回推该对象的变更通知"这一项能力缺失，而
+        // 本插件对 modification 从不做这种回推（`UpdateNotification::AudioModification`
+        // 的发送点不在 v1 的路径上）。代价为零，收益是整条时间线回来了。
         if host_ref.is_null() {
-            log::warn!("[ara] createAudioModification rejected: null host reference");
-            return null_mut();
+            log::warn!(
+                "[ara] createAudioModification: the host passed no host reference; the object is \
+                 created anyway, but this plug-in cannot push change notifications for it back \
+                 to the host"
+            );
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties.
         let Ok(properties) =
@@ -837,8 +941,15 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAAudioModificationHostRef,
         properties: *const ARAAudioModificationProperties,
     ) -> ARAAudioModificationRef {
+        // 【本地补丁 12】与 createAudioModification 同一缺陷、同一修法：hostRef 只是回推
+        // 变更通知用的不透明令牌，不是创建模型对象的前提。把它当强校验会让宿主拿不到
+        // 对象，进而整条下游链路（modification ⇒ playback region ⇒ clip）全部落空。
         if host_ref.is_null() {
-            return null_mut();
+            log::warn!(
+                "[ara] cloneAudioModification: the host passed no host reference; the object is \
+                 created anyway, but this plug-in cannot push change notifications for it back \
+                 to the host"
+            );
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties.
         let Ok(properties) =
@@ -1273,9 +1384,15 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 【本地补丁 10】入口留痕：这一行出现而后面没有 region，才说明问题在创建逻辑里；
         // 它根本不出现，就说明宿主没走到这一步（modification 那步已经断了）。
         log::info!("[ara] host createPlaybackRegion");
+        // 【本地补丁 12】同一缺陷、同一修法：hostRef 是回推变更通知用的不透明令牌。
+        // 拒掉它的代价是**整条片段消失**（宿主拿不到 region ⇒ 没有 clip ⇒ 时间线空），
+        // 而容忍它的代价只是本插件无法主动回推该 region 的变更通知。
         if host_ref.is_null() {
-            log::warn!("[ara] createPlaybackRegion rejected: null host reference");
-            return null_mut();
+            log::warn!(
+                "[ara] createPlaybackRegion: the host passed no host reference; the region is \
+                 created anyway, but this plug-in cannot push change notifications for it back \
+                 to the host"
+            );
         }
         let (modification, sequence, properties) = {
             let Ok(runtime) = self.runtime() else {
