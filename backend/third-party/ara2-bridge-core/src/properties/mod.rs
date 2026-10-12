@@ -83,13 +83,6 @@ pub(crate) unsafe fn copy_optional_display(
     display_string(Some(value.as_str()))
 }
 
-pub(crate) unsafe fn copy_required_id(pointer: *const c_char) -> Result<CString, AraError> {
-    // SAFETY: the enclosing property-copy precondition includes readable nested strings; the
-    // foreign-string validator rejects null and unterminated pointers.
-    let value = unsafe { ForeignStr::copy_persistent_id(pointer, MAX_PROPERTY_STRING_BYTES)? };
-    persistent_id(value.as_str())
-}
-
 /// REAPER对含中文素材会给出UTF-8对象ID，虽偏离SDK七位ASCII要求，也须保留原始身份。
 /// 仅用于宿主AudioSource/AudioModification输入；不放宽插件Factory/Archive ID构造校验。
 /// # Safety

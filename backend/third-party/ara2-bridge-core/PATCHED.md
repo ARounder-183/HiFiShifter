@@ -8,6 +8,7 @@
 |---|---|---|---|---|
 | 1 | `src/properties/model.rs` | 增量 | `PlaybackRegionProperties` 补 `start/duration_in_{modification,playback}_time()` 与 `name()` 读访问器（上游 0.3.0 只有 `transformation_flags()`） | 待查 |
 | 2 | FFI ASCII 校验（`src/properties/model.rs` 的 persistent-ID 输入路径） | **行为** | 有界非空有效 UTF-8 直通（REAPER 对中文素材路径传 UTF-8 对象 ID，严格 ASCII 拒绝会让 REAPER 空指针崩溃）——见下方「REAPER中文宿主对象ID兼容」 | 待查 |
+| 3 | `src/properties/mod.rs` | **删除** | 删掉被 #2 孤立的上游辅助函数 `copy_required_id`（宿主 ID 的严格 ASCII 复制器，调用点已全部换成 `copy_host_object_id`）。保留它只会让整个 workspace 每次编译都报一条 `dead_code` 警告 | 待查 |
 
 ## 1 的细节：`PlaybackRegionProperties` 的四个读访问器 + `name()`
 
