@@ -8,6 +8,7 @@
 
 use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionFactory;
+use ara2_bridge::core::ApiGeneration;
 use ara2_bridge::core::AraError;
 use ara2_bridge::core::PlaybackTransformationFlags;
 use ara2_bridge::plugin::{Factory, FactoryBuilder, FactoryCapabilities, PluginBuilder};
@@ -70,6 +71,28 @@ impl Runtime {
                 "https://github.com/ARounder-183/HiFiShifter",
                 crate::VERSION,
             )
+            // 【为什么必须把最高代数钉在 2.0 Final】库的默认最高代数是 **2.3 Final**，
+            // 而 2.3 的**全部**含义就是一句能力承诺（见 ARA SDK 的 `ARAAPIGeneration`）：
+            //
+            //   "conforming plug-ins will send proper change notifications when their
+            //    persistent state changes via `ARAModelUpdateControllerInterface`,
+            //    allowing the host to only save what has actually changed."
+            //
+            // 本插件**从不**调用 `ARAModelUpdateControllerInterface`（那套接口只出现在
+            // 库与测试宿主里）。照默认值对外宣称 2.3，等于告诉宿主"你可以走增量保存、
+            // 只存我通知过的变化"——而通知永远不来。
+            //
+            // 【为什么这是崩溃级风险，不只是"功能没生效"】宿主据此**改用自己的保存与
+            // 状态记账路径**：Cubase 15 实测在读完 ARAFactory（即选定代数）之后、创建
+            // 文档控制器之前，于 `araservice.dll` 内以空指针 + 0xB0 写入崩溃（异常
+            // `0xc0000005`，参数 `[1, 0xb0]` = 写地址 0xB0）。而**唯一验收过的宿主
+            // REAPER 协商的是 2.0 Final**（日志 `document controller created:
+            // apiGeneration=V2Final`），从未走过 2.3 路径。
+            //
+            // 【为什么钉成单点而不是区间】`[2.0 Final, 2.0 Final]` 正是已被实测接受的
+            // 那一代。我们既不用 2.X Draft 的任何东西，也不实现 2.3 的契约，声明更宽的
+            // 区间只会把宿主引到未验证的语义上，换不到任何东西。
+            .generations(ApiGeneration::V2Final, ApiGeneration::V2Final)
             // 原kernel处理委托的边界包络，head/tail无额外延伸；tempo-reflecting仍不广告。
             .capabilities(
                 FactoryCapabilities::default().with_playback_transformations(

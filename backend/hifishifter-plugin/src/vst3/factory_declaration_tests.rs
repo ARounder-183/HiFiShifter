@@ -9,6 +9,8 @@
 //! 现在三者共用 [`super::class_declaration`]，这组用例把"同源"这件事钉住。
 
 use super::*;
+use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
+use ara2_bridge::core::ApiGeneration;
 use std::ffi::CStr;
 
 /// 读一个 `[c_char; N]` 字段（Windows 上 `c_char` 是 `i8`，必须先按字节重解释）。
@@ -147,4 +149,86 @@ fn plugin_factory3_is_queryable() {
     let result = unsafe { factory_query_interface(factory, unknown.as_ptr(), &mut miss) };
     assert_eq!(result, K_NO_INTERFACE);
     assert!(miss.is_null());
+}
+
+/// **不变量：对外宣称的 ARA 代数必须是我们真正履行的契约。**
+///
+/// 【为什么这是崩溃级回归】库的默认最高代数是 **2.3 Final**，而 2.3 的全部含义是一句
+/// 能力承诺（ARA SDK 的 `ARAAPIGeneration` 注释）：插件会通过
+/// `ARAModelUpdateControllerInterface` 发送持久状态变更通知，宿主因此可以**只保存变化
+/// 的部分**。本插件从不调用那套接口 —— 照默认值宣称 2.3，等于让宿主改用自己的增量保存
+/// 与状态记账路径，而通知永远不来。
+///
+/// 实测：Cubase 15 在读完 `ARAFactory`（即选定代数）之后、创建文档控制器之前，于
+/// `araservice.dll` 内以空指针 + 0xB0 写入崩溃（`0xc0000005`，参数 `[1, 0xb0]`）；
+/// 而唯一验收过的宿主 REAPER 协商的是 2.0 Final（`apiGeneration=V2Final`）。
+#[test]
+fn the_advertised_ara_generation_is_the_one_we_actually_honour() {
+    let runtime = crate::runtime::runtime().expect("进程级 ARA 运行时必须可建");
+    // `ARAFactory` 是**紧凑（packed）**结构（ARA SDK 在 Windows 上按 1 字节对齐生成），
+    // 因此不能直接对字段取引用（E0793）。整份拷出来再读，与库的 `raw_copy` 同一手法。
+    // SAFETY: 工厂泄漏到进程结束，指针在整个用例期间有效；read_unaligned 接受任意对齐。
+    let factory = unsafe { std::ptr::read_unaligned(runtime.factory.factory_raw()) };
+    // 按值读出：对 packed 字段**取引用**是未定义行为（E0793），`assert_eq!` 会取引用，
+    // 所以先把两个值拷进局部变量。
+    let lowest = factory.lowestSupportedApiGeneration;
+    let highest = factory.highestSupportedApiGeneration;
+    assert_eq!(
+        lowest,
+        ApiGeneration::V2Final.as_raw(),
+        "最低代数必须是实测验收过的那一代"
+    );
+    assert_eq!(
+        highest,
+        ApiGeneration::V2Final.as_raw(),
+        "最高代数一旦高于 2.0 Final，就是在宣称我们并不实现的 2.3 变更通知契约"
+    );
+}
+
+/// **不变量：`createInstance` 只交付宿主确实请求的接口。**
+///
+/// 【为什么必须钉住】VST3 契约要求：请求的 IID 不受支持时必须销毁刚建的对象并回
+/// `kNoInterface`。此前主工厂这条分支无条件交出主接口 —— 宿主若问的是别的接口，就会
+/// 拿着**错误的 vtable** 调用方法，故障点落在宿主自己的代码里（那种崩溃现场看不出与
+/// 插件有关，只会看到宿主的模块）。
+#[test]
+fn the_main_factory_instance_honours_the_requested_iid() {
+    let factory = get_plugin_factory();
+    let cid = FACTORY_CID.as_ptr();
+
+    // 不受支持的 IID ⇒ 明确拒绝，且不交出任何指针。
+    let unknown = [
+        0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+        0xFF, 0x00,
+    ];
+    let mut rejected = std::ptr::null_mut();
+    let result = unsafe {
+        factory_create_instance(
+            factory,
+            cid.cast(),
+            unknown.as_ptr().cast(),
+            &mut rejected,
+        )
+    };
+    assert_eq!(result, K_NO_INTERFACE, "不受支持的 IID 必须回 kNoInterface");
+    assert!(rejected.is_null(), "拒绝时不得交出对象");
+
+    // 受支持：FUnknown（基类）与 ARA::IMainFactory 都必须成功交付。
+    let main_factory = ara_iid_words(Ara2Vst3InterfaceKind::MainFactory)
+        .expect("适配器必须声明 IMainFactory 的 IID");
+    for words in [IID_FUNKNOWN, main_factory] {
+        let iid = uid_guid(words);
+        let mut out = std::ptr::null_mut();
+        let result = unsafe {
+            factory_create_instance(factory, cid.cast(), iid.as_ptr().cast(), &mut out)
+        };
+        assert_eq!(result, K_RESULT_OK, "受支持的 IID 必须交付");
+        assert!(!out.is_null());
+        // 交付出去的那一份引用由宿主（这里就是本测试）负责释放。
+        let mut remaining = 0;
+        // SAFETY: out 是本用例刚刚拿到的 owning COM 引用。
+        unsafe { ara2_vst3_release(out, &mut remaining) };
+    }
+    // SAFETY: 归还 `get_plugin_factory` 多拿的那一份工厂引用。
+    unsafe { factory_release(factory) };
 }

@@ -726,14 +726,29 @@ unsafe extern "system" fn factory_create_instance(
                 let Some(adapter) = new_main_factory_adapter() else {
                     return K_NO_INTERFACE;
                 };
+                // VST3 契约：`createInstance` 只交付宿主**确实请求**的接口；请求的 IID
+                // 不受支持时必须销毁刚建的对象并回 `kNoInterface`。此前这里无条件交出
+                // 主接口 —— 宿主若问的是别的接口，就会拿着**错误的 vtable** 去调用方法，
+                // 而故障点会落在宿主的代码里（实测 Cubase 15 在 `araservice.dll` 内
+                // 空指针写入崩溃，我们的模块既不在栈上、也不在崩溃进程的模块表里，
+                // 正是"宿主用了不属于它的接口"这类问题的典型形态）。
+                //
+                // 适配器支持的两个接口：`ARA::IMainFactory`（自身）与 `FUnknown`（基类，
+                // 同一对象基址）。两者都直接把主接口交出去。
+                let supported = unsafe { iid_matches(iid as *const u8, IID_FUNKNOWN) }
+                    || ara_iid_words(Ara2Vst3InterfaceKind::MainFactory)
+                        .is_some_and(|words| unsafe { iid_matches(iid as *const u8, words) });
+                if !supported {
+                    // `adapter` 在此 drop：消耗它唯一的 COM 引用，宿主拿不到对象。
+                    crate::log_line("factory createInstance ARA main factory: unsupported iid");
+                    return K_NO_INTERFACE;
+                }
                 // 【为什么记这一行】创建 ARA 主工厂是宿主**明确要走 ARA 路径**的第一个
                 // 信号（Cubase 实测：加载前创建了它两次）。把它与"之后是否真的绑定了
                 // 文档控制器"放在同一条时间线上，一眼就能看出宿主走到哪一步停住。
                 crate::log_line("factory createInstance ARA main factory");
-                // 宿主会按它请求的 IID（ARA::IMainFactory 或 FUnknown）使用该对象，
-                // 适配器自身的 queryInterface 已支持两者，因此直接把主接口交出去。
                 let raw = adapter.as_raw();
-                // 探针把适配器泄漏给宿主管理引用计数，直到进程结束。
+                // 交付成功：把适配器泄漏给宿主管理引用计数，直到最终 release。
                 std::mem::forget(adapter);
                 // SAFETY: obj 是宿主提供的输出槽。
                 unsafe { *obj = raw };
