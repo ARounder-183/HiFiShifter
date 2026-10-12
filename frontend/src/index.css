@@ -116,6 +116,21 @@
     ::file-selector-button {
         border-color: var(--color-gray-200, currentcolor);
     }
+
+    /*
+     * v3 的 preflight 给 `button` 和 `[role="button"]` 设了 `cursor: pointer`，
+     * v4 删掉了这条 —— 原生 `<button>` 因此退回浏览器默认的箭头光标。本应用大量
+     * 使用原生 `<button>`（增益旋钮、轨道色圆点、走带与工具按钮…），失去手型光标
+     * 会让"这里可以点"的提示消失。这里补回 v3 的行为。
+     *
+     * 放在 base 层：`cursor-*` 工具类（utilities 层）与未分层的自定义样式都能覆盖
+     * 它，`disabled` 的元素也排除在外（禁用不该给手型）。Radix 自己的按钮由
+     * `.rt-BaseButton { cursor: var(--cursor-button) }` 表达，不受此条影响。
+     */
+    button:not(:disabled),
+    [role="button"]:not(:disabled) {
+        cursor: pointer;
+    }
 }
 
 /*
