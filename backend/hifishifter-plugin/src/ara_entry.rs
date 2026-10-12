@@ -179,16 +179,41 @@ unsafe extern "C" fn bind(
             role_names(known),
             role_names(assigned)
         );
-        context
-            .owner
-            .bind_to_document(
-                document,
-                generation,
-                ExtensionRoles::from_bits_truncate(known),
-                ExtensionRoles::from_bits_truncate(assigned),
-                Some(companion),
-            )
-            .map_or(std::ptr::null(), |raw| raw.cast())
+        let document_id = document.id;
+        match context.owner.bind_to_document(
+            document,
+            generation,
+            ExtensionRoles::from_bits_truncate(known),
+            ExtensionRoles::from_bits_truncate(assigned),
+            Some(companion),
+        ) {
+            Ok(raw) => {
+                // 【为什么把接口清单记下来】ARA 契约要求"宿主**分配**的角色必须给出接口"
+                // （`ARAPlugInExtensionInstance` 的文档原文）。少一个接口，宿主拿到的就是
+                // NULL —— 而它会在真正用到的那一刻崩在自己的代码里。Cubase 15 实测：
+                // view 角色漏了接口，崩点就在打开编辑器时 `araservice.dll` 内读空指针，
+                // 现场完全看不出与插件有关。这一行把"我们到底给了宿主什么"变成可读事实。
+                //
+                // SAFETY: 记录由 owner 持有到实例销毁，本调用期间有效；紧凑结构整份拷出
+                // 再读字段（对 packed 字段取引用是 UB）。
+                let instance = unsafe { raw.read_unaligned() };
+                log::info!(
+                    "[ara] extension instance: playback={} editor={} view={}",
+                    !instance.playbackRendererInterface.is_null(),
+                    !instance.editorRendererInterface.is_null(),
+                    !instance.editorViewInterface.is_null()
+                );
+                raw.cast()
+            }
+            Err(error) => {
+                // 静默返回 null 等于把"宿主崩在自己代码里"留给下一个人查。
+                log::error!(
+                    "[ara] binding this instance to document {document_id} failed: {error}; \
+                     handing the host a null extension instance"
+                );
+                std::ptr::null()
+            }
+        }
     }))
     .unwrap_or(std::ptr::null())
 }

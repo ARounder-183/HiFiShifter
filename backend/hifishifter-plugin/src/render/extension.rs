@@ -2473,7 +2473,26 @@ impl ExtensionOwner {
                 }
             },
         );
-        let supported = ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER;
+        // 【为什么 `EDITOR_VIEW` 必须在 `supported` 里】ARA SDK 对
+        // `ARAPlugInExtensionInstance` 的契约是**双向**的：
+        //
+        //   "Plug-ins **must provide all interfaces that have been requested by the host
+        //    through the role assignment**, and suppress interfaces explicitly excluded by
+        //    the roles — e.g. if the host did not assign kARAEditorRendererRole even it was
+        //    known, editorRendererInterface will be NULL."
+        //
+        // 此前这里只声明 playback + editor，于是 `enabled = supported & (!known | assigned)`
+        // **永远不可能**包含 view ⇒ `editorViewInterface` 恒为 NULL。而 Cubase 实测分配的
+        // 正是 `[editor,view]`：它按契约拿 `editorViewInterface` 来通知选区与隐藏
+        // （"Selection and hiding of host entities is communicated to editor view plug-ins"），
+        // 那正好发生在**打开编辑器**的那一刻 —— 实测崩点就在
+        // `IEditController::createView` 之后 7ms，`araservice.dll` 内读空指针。
+        //
+        // 库那边早就实现好了（`ARAEditorViewInterface` 的 notifySelection /
+        // notifyHideRegionSequences），缺的只是我们这一句声明。
+        let supported = ExtensionRoles::PLAYBACK_RENDERER
+            | ExtensionRoles::EDITOR_RENDERER
+            | ExtensionRoles::EDITOR_VIEW;
         let enabled = ExtensionRoles::resolve(known, assigned, supported)?;
         let owned = ExtensionBinding::new_with_renderer_observer(
             generation, known, assigned, supported, observer,
@@ -2793,6 +2812,8 @@ mod assigned_timeline_tests;
 mod bound_tests;
 #[cfg(test)]
 mod editor_document_tests;
+#[cfg(test)]
+mod extension_roles_tests;
 #[cfg(test)]
 mod host_audio_state_tests;
 #[cfg(test)]
