@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 title HiFiShifter App / VST3 打包
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\pack-portable.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build\pack-portable.ps1" %*
 set "HFS_EXITCODE=%ERRORLEVEL%"
 echo.
 if not "%HFS_EXITCODE%"=="0" (

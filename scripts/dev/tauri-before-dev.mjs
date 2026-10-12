@@ -9,7 +9,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const frontendDir = resolve(__dirname, "../frontend");
+const frontendDir = resolve(__dirname, "../../frontend");
 // 【默认值必须是 dev】文件头注释一直写的是 "dev（默认）"，但实现里曾是 `|| "build"`，
 // 两者不一致。后果不只是"多跑一次构建"：`build` 模式经 `npm run build` 提供**生产
 // 包**，而当时内核开关的默认值跟随 `import.meta.env.DEV`（生产为 false），于是

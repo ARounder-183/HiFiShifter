@@ -4,7 +4,7 @@
     "version": "0.1.0-beta.15",
     "identifier": "com.arounder.hifishifter",
     "build": {
-        "beforeDevCommand": "node ../scripts/tauri-before-dev.mjs",
+        "beforeDevCommand": "node ../scripts/dev/tauri-before-dev.mjs",
         "devUrl": "http://localhost:5173",
         "beforeBuildCommand": "npm --prefix ../frontend run build",
         "frontendDist": "../../frontend/dist"

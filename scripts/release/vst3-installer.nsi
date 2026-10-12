@@ -1,8 +1,8 @@
 ﻿; HiFiShifter VST3 安装器（NSIS）。
 ;
 ; 【多语言】文案**不在这里**：本文件只引用 `$(HFS_*)`，取值来自
-; `tools/installer/installer_strings.nsh`，而那份又由
-; `tools/build-installer-strings.mjs` 从五语词表抽出。要改文案请改词表。
+; `scripts/release/installer/installer_strings.nsh`，而那份又由
+; `scripts/release/build-installer-strings.mjs` 从五语词表抽出。要改文案请改词表。
 ;
 ; 【为什么语言声明在页面之后】MUI2 要求 `MUI_LANGUAGE` 排在 `MUI_[UN]PAGE_*`
 ; 之后（否则告警）。代价是 `MUI_WELCOMEPAGE_TEXT` / `MUI_UNCONFIRMPAGE_TEXT_TOP`
@@ -38,7 +38,7 @@ ${UnStrStr}
 ;
 ; 打开后：装到当前用户的临时目录、不要求提权、ARP 写 HKCU、跳过 REAPER 检查。
 ; 其余逻辑（目录对账、卸载段、注册表字段、页面与文案）与发布构建逐字相同。
-; `scripts/check-product-consistency.ps1` 断言默认分支仍是 admin / HKLM /
+; `scripts/checks/check-product-consistency.ps1` 断言默认分支仍是 admin / HKLM /
 ; Common Files —— 防止有人把测试分支误当默认。
 !ifdef HFS_TEST_MODE
   InstallDir "$LOCALAPPDATA\HiFiShifterInstallerTest\VST3"
@@ -51,18 +51,18 @@ ${UnStrStr}
   !define HFS_REAPER_GUARD
 !endif
 
-; LICENSE 的路径由打包脚本以绝对路径传入（`/DHFS_LICENSE=…`）。默认值 `..\LICENSE`
-; 只在从仓库的 `tools\` 目录编译时成立 —— 那种"靠相对位置猜"的写法在测试副本上
+; LICENSE 的路径由打包脚本以绝对路径传入（`/DHFS_LICENSE=…`）。默认值 `..\..\LICENSE`
+; 只在从仓库的 `scripts\release\` 目录编译时成立 —— 那种"靠相对位置猜"的写法在测试副本上
 ; 会指向不存在的文件，报出来的却只是一句 `no files found`。
 !ifndef HFS_LICENSE
-  !define HFS_LICENSE "..\LICENSE"
+  !define HFS_LICENSE "..\..\LICENSE"
 !endif
 ; LGPL-2.1 全文与 SoundTouch 构建期补丁披露（路径由打包脚本传入，默认值同上口径）。
 !ifndef HFS_LGPL
-  !define HFS_LGPL "..\licenses\COPYING.LGPL-2.1"
+  !define HFS_LGPL "..\..\licenses\COPYING.LGPL-2.1"
 !endif
 !ifndef HFS_ST_CHANGES
-  !define HFS_ST_CHANGES "..\licenses\SOUNDTOUCH-CHANGES.md"
+  !define HFS_ST_CHANGES "..\..\licenses\SOUNDTOUCH-CHANGES.md"
 !endif
 
 ; 共享模型库的两个参数由打包脚本传入（`/DHFS_MODELS=…` `/DHFS_MODELS_VERSION=…`）。
@@ -301,7 +301,7 @@ Section "$(HFS_NAME)" SEC_PLUGIN
   ; "标准用户 + 输入管理员密码"提权时会落到**管理员**的配置目录，而运行插件的是标准
   ; 用户 —— 插件找不到模型，症状只是"推理不可用"。ProgramData 谁提权都写对位置。
   ;
-  ; 【为什么目录名带版本号】版本由模型内容派生（tools/write-models-manifest.ps1）。
+  ; 【为什么目录名带版本号】版本由模型内容派生（scripts/build/write-models-manifest.ps1）。
   ; 升级时新版本落新目录，旧代码不会读到新权重；也正因为如此，同版本已存在就能安全
   ; 跳过 —— 重装不必再写 152 MB。
   !if "${HFS_MODELS_VERSION}" != ""

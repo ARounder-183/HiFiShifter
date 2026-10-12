@@ -128,7 +128,7 @@ cd HiFiShifter
 
 ONNX Runtime (DirectML) 由 ort crate 在编译时自动下载，无需额外配置。
 
-也可以运行 `scripts/install_deps_windows.ps1`，通过 Chocolatey 安装 NSIS / CMake / LLVM 并安装 tauri-cli（需要已安装 Chocolatey）。
+也可以运行 `scripts/setup/install_deps_windows.ps1`，通过 Chocolatey 安装 NSIS / CMake / LLVM 并安装 tauri-cli（需要已安装 Chocolatey）。
 
 安装前端依赖：
 
@@ -139,8 +139,8 @@ npm --prefix frontend install
 #### macOS
 
 ```bash
-chmod +x ./scripts/install_deps_macos.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+chmod +x ./scripts/setup/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 ```
 
 #### Linux
@@ -156,8 +156,8 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 运行一键安装脚本：
 
 ```bash
-chmod +x ./scripts/install_deps_linux.sh
-bash ./scripts/install_deps_linux.sh
+chmod +x ./scripts/setup/install_deps_linux.sh
+bash ./scripts/setup/install_deps_linux.sh
 ```
 
 脚本会自动安装系统依赖、Node.js（如未安装）、appimagetool 及前端 npm 依赖。
@@ -170,29 +170,42 @@ npm --prefix frontend ci
 
 ### 3. 第三方源码
 
-SoundTouch、WORLD、Signalsmith Stretch 均在编译时从源码构建，首次构建时会**自动克隆**，无需手动操作。
+第三方源码分两类：
 
-如需离线构建，可提前手动克隆，例如 SoundTouch：
-
-```bash
-cd backend/src-tauri/third_party/soundtouch-static
-git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
-# 校验与 pin 一致：应输出 e83424d5928ab8513d2d082779c275765dee31b9
-# （tools/plugin-sdks.json 的 soundtouch 段；不一致就删掉 soundtouch/ 重新克隆）：
-git -C soundtouch rev-parse HEAD
-```
-
-构建 VST3 插件还需要 ARA 与 VST3 两份 SDK。它们的源码**不随仓库分发**（许可与本仓库的
-MIT 不同），而是由 `tools/plugin-sdks.json` 钉死 revision、构建时下载到 `third_party/sdk/`
-（该目录被 gitignore）。首次构建 VST3 插件前先执行一次：
+- **随仓库分发（vendored）**：WORLD 声码器、Signalsmith Stretch（含 signalsmith-linear）、
+  vslib 导入库都在 `backend/src-tauri/third_party/` 里，克隆仓库即得，构建不联网。
+- **构建期获取**：SoundTouch（codeberg）在首次构建时自动浅克隆；ARA / VST3 两份 SDK
+  （GitHub，许可与本仓库的 MIT 不同，**不随仓库分发**）由 `scripts/env/plugin-sdks.json` 钉死
+  revision、下载到 `third_party/sdk/`（该目录被 gitignore）。首次构建 VST3 插件前先执行一次：
 
 ```powershell
-.\tools\prepare-plugin-sdks.ps1
+.\scripts\setup\prepare-plugin-sdks.ps1
 ```
 
-脚本按 revision 浅克隆并做仓库 + commit + tree 三重校验，重复执行是幂等的。缓存路径的
-唯一事实来源是 `tools/sdk-env.ps1`（它同时定义构建需要的 `ARA_SDK_DIR` /
+脚本按 revision 浅克隆并做仓库 + commit + tree 三重校验，重复执行是幂等的。缓存与镜像
+路径的唯一事实来源是 `scripts/env/sdk-env.ps1`（它同时定义构建需要的 `ARA_SDK_DIR` /
 `ARA_VST3_SDK_DIR` 两个环境变量），构建脚本与 CI 都从它取，不再各自硬编码。
+
+#### 无网络 / 连不上 GitHub 时构建
+
+取源不要求实时访问 GitHub：只要源已在本地（缓存或镜像），取源步骤全程不触网。为此提供
+**本地 SDK 镜像**——一份可整体拷贝的源缓存（含 `ARA_SDK`、`vst3sdk` 与 `soundtouch`）：
+
+```powershell
+# 1) 在一台能联网的机器上导出镜像（默认 third_party/sdk-mirror，被 gitignore）
+.\scripts\setup\export-sdk-mirror.ps1
+#    也可直接写到 U 盘 / 局域网共享：-MirrorDirectory E:\hfs-sdk-mirror
+
+# 2) 在离网机器上指向该镜像并构建（-Offline 禁止一切取源联网）
+$env:HIFISHIFTER_SDK_MIRROR = 'E:\hfs-sdk-mirror'
+.\scripts\setup\prepare-plugin-sdks.ps1 -Offline
+.\pack-portable.bat -Offline
+```
+
+`-Offline`（或环境变量 `HIFISHIFTER_OFFLINE=1`）同时作用于 SDK 取源、SoundTouch 自动克隆
+与 `cargo`（走本地 registry 缓存）。因此离网构建还需具备：一次联网构建留下的 Cargo 依赖
+缓存，以及已安装的 `frontend/node_modules`。缓存或镜像与 pin 不一致时，取源会快速失败并
+指出该跑哪条命令，而不是让 git 去联网。
 
 ### 4. 开发与构建
 
@@ -207,17 +220,17 @@ cargo tauri build
 
 # Linux AppImage（vslib 仅限 Windows，需排除默认 feature）
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
-# 或使用辅助脚本：bash scripts/build-linux-appimage.sh
+# 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
 # Windows 便携版 ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
+.\scripts\build\pack-portable.ps1 -SkipBuild
 
 # Windows VST3 ZIP + 安装器（已有完整 Release 交付）
-.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
-双击 `pack-portable.bat` 可选择 App、VST3 或两者；可用参数见 `scripts/pack-portable.ps1`
-与 `tools/` 下的构建脚本。
+双击 `pack-portable.bat` 可选择 App、VST3 或两者；可用参数见 `scripts/build/pack-portable.ps1`
+与 `scripts/` 下的构建脚本。
 
 前端启动模式可通过环境变量 `TAURI_UI_MODE` 切换：
 

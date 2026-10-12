@@ -8,9 +8,9 @@ param(
     [switch]$Verify
 )
 $ErrorActionPreference='Stop'
-$buildTaskRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-# SDK 缓存位置由 tools/sdk-env.ps1 统一定义。
-. (Join-Path $PSScriptRoot 'sdk-env.ps1')
+$buildTaskRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# SDK 缓存位置由 scripts/env/sdk-env.ps1 统一定义。
+. (Join-Path $PSScriptRoot '..\env\sdk-env.ps1')
 if (!$BuildName) {$BuildName='hfs-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)}
 $buildTaskDelivery=Join-Path $buildTaskRoot ".build-tmp\deliveries\$BuildName"
 $buildTaskBundleName="$BuildName-vst3"
@@ -21,7 +21,7 @@ $buildTaskIncludesPlugin=$Target -in @('All','Plugin')
 if ($buildTaskIncludesPlugin -and (Test-Path -LiteralPath (Join-Path $buildTaskRoot ".build-tmp\$buildTaskBundleName"))) {
     throw 'Plugin bundle already exists; immutable build requires a fresh Name.'
 }
-foreach ($buildTaskRequired in @('frontend\package-lock.json','backend\Cargo.lock','tools\msvc-env.ps1','tools\sdk-env.ps1',
+foreach ($buildTaskRequired in @('frontend\package-lock.json','backend\Cargo.lock','scripts\env\msvc-env.ps1','scripts\env\sdk-env.ps1',
     'backend\src-tauri\resources\models\fcpe\fcpe.onnx','backend\src-tauri\resources\models\hnsep\hnsep.onnx',
     'backend\src-tauri\resources\models\nsf_hifigan\pc_nsf_hifigan.onnx')) {
     if (!(Test-Path -LiteralPath (Join-Path $buildTaskRoot $buildTaskRequired))) {throw "Missing input: $buildTaskRequired"}
@@ -30,7 +30,7 @@ if ($buildTaskIncludesPlugin) {
     $buildTaskSdkRoot=Get-SdkCacheRoot
     foreach ($buildTaskSdk in @('ARA_SDK','vst3sdk')) {
         if (!(Test-Path -LiteralPath (Join-Path $buildTaskSdkRoot "$buildTaskSdk\.git"))) {
-            throw "Missing locked SDK checkout: $buildTaskSdk; run tools/prepare-plugin-sdks.ps1 (this flow never clones or edits SDKs)."
+            throw "Missing locked SDK checkout: $buildTaskSdk; run scripts/setup/prepare-plugin-sdks.ps1 (this flow never clones or edits SDKs)."
         }
     }
 }
@@ -61,7 +61,7 @@ try {
     $buildTaskState=& git status --porcelain
     if ($LASTEXITCODE -ne 0) {throw 'Cannot inspect working changes.'}
     $buildTaskFingerprint=Get-BuildSourceFingerprint
-    . .\tools\msvc-env.ps1
+    . .\scripts\env\msvc-env.ps1
     # vcvars会重设TEMP/TMP，必须在其返回后设置新的工作树私有目录。
     $buildTaskTemp=Join-Path $buildTaskRoot ('.build-tmp\product-build-'+[Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $buildTaskTemp | Out-Null
@@ -129,7 +129,7 @@ try {
         # App 的 NSIS 安装器随交付一起带走（pack-portable 再从交付拷进 dist）。安装器是
         # 产品产物，缺失即视为构建失败 —— 与插件安装器同一条逻辑，而不是"恰好存在就拷"。
         $buildTaskAppInstaller = Get-ChildItem -LiteralPath (Join-Path $buildTaskRoot "backend\target\$buildTaskProfile\bundle\nsis") -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (!$buildTaskAppInstaller) { throw 'Standalone App NSIS installer was not produced; install NSIS (scripts/install_deps_windows.ps1) and retry.' }
+        if (!$buildTaskAppInstaller) { throw 'Standalone App NSIS installer was not produced; install NSIS (scripts/setup/install_deps_windows.ps1) and retry.' }
         $buildTaskAppNsis = Join-Path $buildTaskApp 'bundle\nsis'
         New-Item -ItemType Directory -Path $buildTaskAppNsis -Force | Out-Null
         Copy-Item -LiteralPath $buildTaskAppInstaller.FullName -Destination $buildTaskAppNsis
@@ -137,9 +137,9 @@ try {
     if ($buildTaskIncludesPlugin) {
         $buildTaskPluginArgs=@{SkipFrontend=$true;BundleDirectory=$buildTaskBundleName}
         if ($Configuration -eq 'Release') {$buildTaskPluginArgs.Release=$true}
-        # bundle 组装在 tools/ 下（原先借用 probe/ara 的一次性探针脚本，而那个目录
+        # bundle 组装在 scripts/build/ 下（原先借用 probe/ara 的一次性探针脚本，而那个目录
         # 声明自己是可丢弃的 —— 交付链路不该建在它上面）。
-        & .\tools\build-plugin-bundle.ps1 @buildTaskPluginArgs
+        & .\scripts\build\build-plugin-bundle.ps1 @buildTaskPluginArgs
         $buildTaskPlugin=Join-Path $buildTaskRoot ".build-tmp\$buildTaskBundleName\HiFiShifter.vst3"
         $buildTaskPluginTarget=[IO.Path]::GetFullPath((Join-Path $buildTaskDelivery 'HiFiShifter.vst3'))
         $buildTaskPluginSource=[IO.Path]::GetFullPath($buildTaskPlugin)

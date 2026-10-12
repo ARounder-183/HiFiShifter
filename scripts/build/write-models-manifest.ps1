@@ -9,18 +9,18 @@
 # - 决定是否从 bundle 建立共享库（见 backend/hifishifter-kernel/src/model_store.rs）。
 #
 # 用法：
-#   pwsh -File tools/write-models-manifest.ps1            # 生成
-#   pwsh -File tools/write-models-manifest.ps1 -Check     # 只校验是否最新（CI 用）
+#   pwsh -File scripts/build/write-models-manifest.ps1    # 生成
+#   pwsh -File scripts/build/write-models-manifest.ps1 -Check  # 只校验是否最新（CI 用）
 [CmdletBinding()]
 param([switch]$Check)
 
 $ErrorActionPreference = 'Stop'
-$manifestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$manifestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $manifestModels = Join-Path $manifestRoot 'backend\src-tauri\resources\models'
 $manifestPath = Join-Path $manifestModels 'models.json'
 
 # 只登记真正参与推理的文件。`coreml_pads_patch.txt` 是 macOS CoreML 构建期的
-# 补丁输入（由 scripts/generate-coreml-pads-patch.py 生成、产物入库）——它改变
+# 补丁输入（由 scripts/build/generate-coreml-pads-patch.py 生成、产物入库）——它改变
 # 推理输入的构造方式，必须参与版本计算：换模型忘了重新生成清单时，这里是唯一
 # 会红的地方。`config.json` / `config.yaml` 是模型自带的配置 —— 它们一起改才叫
 # "换模型"，因此一并纳入。目录里的临时产物（models.json 自身）不纳入。
@@ -51,10 +51,10 @@ $manifestJson = [ordered]@{ version = $manifestVersion; files = $manifestFiles }
 $manifestText = ($manifestJson -replace "`r`n", "`n") + "`n"
 
 if ($Check) {
-    if (!(Test-Path -LiteralPath $manifestPath)) { throw "Missing $manifestPath; run tools/write-models-manifest.ps1" }
+    if (!(Test-Path -LiteralPath $manifestPath)) { throw "Missing $manifestPath; run scripts/build/write-models-manifest.ps1" }
     $manifestCurrent = (Get-Content -LiteralPath $manifestPath -Raw) -replace "`r`n", "`n"
     if ($manifestCurrent -ne $manifestText) {
-        throw "models.json is stale; run tools/write-models-manifest.ps1"
+        throw "models.json is stale; run scripts/build/write-models-manifest.ps1"
     }
     Write-Output "models.json is up to date (version $manifestVersion)"
     return

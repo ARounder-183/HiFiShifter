@@ -6,7 +6,7 @@
    entry is a potential DAW crash otherwise. Discipline: docs/thread-model.md.
 
 2. Baseline gates: `.lock().unwrap()` and `error.contains(` are allowed only at
-   the exact occurrences listed in tools/baseline-*.txt (path -> count).
+   the exact occurrences listed in scripts/checks/baseline-*.txt (path -> count).
    New occurrences fail CI. New code must use `lock_or_recover()` (poison
    recovery) and the structured error codes instead of string matching;
    the baselines exist so legacy sites can be paid down without the count
@@ -210,5 +210,5 @@ def ffi_guard_gate(root):
     return 0
 
 if __name__ == '__main__':
-    plugin_src = os.path.join(os.path.dirname(__file__), '..', 'backend', 'hifishifter-plugin', 'src')
+    plugin_src = os.path.join(os.path.dirname(__file__), '..', '..', 'backend', 'hifishifter-plugin', 'src')
     sys.exit(main(plugin_src))

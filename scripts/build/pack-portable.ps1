@@ -33,20 +33,26 @@
 .PARAMETER Installer
     Additionally create the plugin setup.exe using NSIS.
 
+.PARAMETER Offline
+    Never go to the network to fetch third-party sources. Pinned SDKs are taken
+    from the local mirror (HIFISHIFTER_SDK_MIRROR), SoundTouch from the mirror,
+    and cargo runs with --offline against the local registry cache. Use this on
+    a machine that cannot reach GitHub; see README '第三方源码'.
+
 .EXAMPLE
-    .\scripts\pack-portable.ps1
+    .\scripts\build\pack-portable.ps1
     # Full build + packaging
 
 .EXAMPLE
-    .\scripts\pack-portable.ps1 -SkipBuild
+    .\scripts\build\pack-portable.ps1 -SkipBuild
     # Skip build, package existing artifacts
 
 .EXAMPLE
-    .\scripts\pack-portable.ps1 -OutputDir "C:\output"
+    .\scripts\build\pack-portable.ps1 -OutputDir "C:\output"
     # Specify output directory
 
 .EXAMPLE
-    .\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+    .\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
     # Package the latest plugin delivery as ZIP and setup.exe
 #>
 
@@ -58,10 +64,15 @@ param(
     [string]$TargetTriple,
     [ValidateSet('App', 'Plugin', 'All')][string]$PackageTarget = 'App',
     [string]$DeliveryDirectory,
-    [switch]$Installer
+    [switch]$Installer,
+    [switch]$Offline
 )
 
 $ErrorActionPreference = "Stop"
+
+# -Offline：禁止为取第三方源联网（SDK 走本地镜像、SoundTouch 走镜像、cargo 走本地缓存）。
+# 同一个开关写进环境变量，供子进程（prepare-plugin-sdks.ps1、内核 build.rs）继承。
+if ($Offline) { $env:HIFISHIFTER_OFFLINE = '1' }
 
 function Get-ExeArchitecture {
     param([string]$Path)
@@ -103,11 +114,11 @@ function Get-ExeArchitecture {
 }
 
 # ===== Path definitions =====
-$ProjectRoot = Resolve-Path "$PSScriptRoot\.."
+$ProjectRoot = Resolve-Path "$PSScriptRoot\..\.."
 $UnifiedAppDirectory = $null
 $TauriDir = Join-Path $ProjectRoot "backend\src-tauri"
 $TauriTargetRoot = Join-Path $ProjectRoot "backend\target"
-$SetVersionScript = Join-Path $ProjectRoot "scripts\set-version.ps1"
+$SetVersionScript = Join-Path $ProjectRoot "scripts\release\set-version.ps1"
 
 function Resolve-TauriReleaseDir {
     # Artifact layouts in the wild, per profile directory name:
@@ -235,18 +246,20 @@ if (!$SkipBuild) {
         & npm --prefix (Join-Path $ProjectRoot 'frontend') ci
         if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
     }
-    . (Join-Path $ProjectRoot 'tools\msvc-env.ps1')
+    . (Join-Path $ProjectRoot 'scripts\env\msvc-env.ps1')
 }
 if ($PackageTarget -ne 'App') {
     if ($TargetTriple -and $TargetTriple -ne 'x86_64-pc-windows-msvc') { throw 'VST3 packaging currently supports Windows x64 only.' }
     if (!$OutputDir) { $OutputDir = Join-Path $ProjectRoot 'dist' }
     if (!$SkipBuild) {
-        & (Join-Path $ProjectRoot 'tools\prepare-plugin-sdks.ps1')
-        & cargo fetch --manifest-path (Join-Path $ProjectRoot 'backend\Cargo.toml') --locked
+        & (Join-Path $ProjectRoot 'scripts\setup\prepare-plugin-sdks.ps1') -Offline:$Offline
+        $pluginFetchArgs = @('fetch', '--manifest-path', (Join-Path $ProjectRoot 'backend\Cargo.toml'), '--locked')
+        if ($Offline) { $pluginFetchArgs += '--offline' }
+        & cargo @pluginFetchArgs
         if ($LASTEXITCODE -ne 0) { throw 'Cargo dependency fetch failed.' }
         $pluginBuildName = 'portable-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6)
         $pluginBuildTarget = if ($PackageTarget -eq 'All') { 'All' } else { 'Plugin' }
-        & (Join-Path $ProjectRoot 'tools\build-hifishifter.ps1') -Target $pluginBuildTarget -Configuration Release -BuildName $pluginBuildName
+        & (Join-Path $ProjectRoot 'scripts\build\build-hifishifter.ps1') -Target $pluginBuildTarget -Configuration Release -BuildName $pluginBuildName
         $DeliveryDirectory = Join-Path $ProjectRoot ('.build-tmp\deliveries\' + $pluginBuildName)
     } elseif (!$DeliveryDirectory) {
         $pluginDeliveries = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot '.build-tmp\deliveries') -Directory -ErrorAction SilentlyContinue |
@@ -266,7 +279,7 @@ if ($PackageTarget -ne 'App') {
             throw 'All packaging requires a complete App + plugin delivery.'
         }
     }
-    & (Join-Path $ProjectRoot 'tools\package-vst3.ps1') -DeliveryDirectory $DeliveryDirectory -OutputDirectory $OutputDir -NoZip:$NoZip -Installer:$Installer
+    & (Join-Path $ProjectRoot 'scripts\release\package-vst3.ps1') -DeliveryDirectory $DeliveryDirectory -OutputDirectory $OutputDir -NoZip:$NoZip -Installer:$Installer
     if ($PackageTarget -eq 'Plugin') { return }
     # All 已由同一条构建流生成 App 与插件；下面只组装 App，避免再构建一次。
     $SkipBuild = $true
@@ -328,6 +341,9 @@ if (-not $SkipBuild) {
             $CargoArgs += "--target"
             $CargoArgs += $TargetTriple
         }
+        # -Offline 时把 --offline 交给底层 cargo（`--` 之后的参数由 tauri-cli 转发给 cargo，
+        # 与 scripts/build/build-hifishifter.ps1 的用法一致），只用本地 registry 缓存。
+        if ($Offline) { $CargoArgs += @('--', '--offline') }
         & cargo @CargoArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Build failed, exit code: $LASTEXITCODE"
@@ -509,7 +525,7 @@ if (-not $NoZip) {
         Write-Host "[5/5] NSIS installer copied [OK] ($($NsisSizeMB) MB)" -ForegroundColor Green
     }
     elseif ($UnifiedAppDirectory) {
-        # 统一构建（-PackageTarget All）的 App 由 tools/build-hifishifter.ps1 产出，
+        # 统一构建（-PackageTarget All）的 App 由 scripts/build/build-hifishifter.ps1 产出，
         # 它保证交付里带着 App 安装器；缺失即交付不完整，不能悄悄跳过 —— 那正是
         # "安装器看起来应该存在却找不到"的来源。
         throw "Unified App delivery is missing the NSIS installer: $NsisExePath"

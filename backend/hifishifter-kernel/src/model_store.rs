@@ -13,7 +13,7 @@
 //!
 //! 【为什么用版本号目录】模型换一版就必须重建，否则新代码会读到旧权重 —— 那种错误
 //! 不会报错，只会让推理结果悄悄变差。版本号由**内容**派生（见
-//! `tools/write-models-manifest.ps1`），因此模型一变版本就变，不需要人工维护。
+//! `scripts/build/write-models-manifest.ps1`），因此模型一变版本就变，不需要人工维护。
 //!
 //! 【为什么共享库在全机目录而不是用户目录】安装器以管理员运行。若它把 152 MB 写进
 //! `%LOCALAPPDATA%`，"标准用户 + 输入管理员密码"这种提权方式写的就是**管理员**的
@@ -367,7 +367,7 @@ mod tests {
 
     /// 仓库里那份 `models.json` 必须与**真实存在的模型文件**对得上。
     ///
-    /// 【为什么这条必须有】清单是生成物（`tools/write-models-manifest.ps1`），而
+    /// 【为什么这条必须有】清单是生成物（`scripts/build/write-models-manifest.ps1`），而
     /// 运行时要靠它判断共享库是否可用。清单一旦与文件不符（换了模型没重新生成、
     /// 或手工改过），共享库就会被永久判为"不完整"，两个形态每次都退回各自的 bundle
     /// —— 重复占用 152 MB，且没有任何报错。这条测试让它变成构建失败。
@@ -395,7 +395,7 @@ mod tests {
         assert!(missing.is_empty(), "清单列了不存在的文件：{missing:?}");
         assert!(
             looks_complete(&models, &manifest),
-            "清单里的字节数与实际文件不符 —— 重新运行 tools/write-models-manifest.ps1"
+            "清单里的字节数与实际文件不符 —— 重新运行 scripts/build/write-models-manifest.ps1"
         );
     }
 

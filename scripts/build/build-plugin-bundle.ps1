@@ -3,8 +3,8 @@
 #
 # 【为什么从 probe/ara 搬到这里】本脚本原先叫 `probe/ara/build_embedded_editor.ps1`，
 # 而 `probe/ara/README.md` 明写该目录"是一次性实验产物，探针结束后应整体删除，或至少
-# 不得被 backend/、frontend/ 引用"。可产品构建（`tools/build-hifishifter.ps1`）却直接
-# 调用它 —— 一个声明为可丢弃的目录成了交付链路的必经环节。搬进 `tools/` 之后，
+# 不得被 backend/、frontend/ 引用"。可产品构建（`scripts/build/build-hifishifter.ps1`）却直接
+# 调用它 —— 一个声明为可丢弃的目录成了交付链路的必经环节。搬进 `scripts/build/` 之后，
 # `probe/` 可以按它自己的说明被删掉而不影响交付。
 #
 # 本脚本与 `probe/ara/build_embedded_editor.ps1` 的构建语义**逐字一致**（cargo 参数、
@@ -19,9 +19,9 @@ param(
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory = 'embedded-vst3'
 )
 $ErrorActionPreference = 'Stop'
-$pluginBundleRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-# SDK 缓存位置由 tools/sdk-env.ps1 统一定义。
-. (Join-Path $PSScriptRoot 'sdk-env.ps1')
+$pluginBundleRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# SDK 缓存位置由 scripts/env/sdk-env.ps1 统一定义。
+. (Join-Path $PSScriptRoot '..\env\sdk-env.ps1')
 $pluginBundleOutput = Join-Path $pluginBundleRoot ".build-tmp\$BundleDirectory"
 # REAPER 会锁住已加载的 DLL：只允许构建一个全新的目录，绝不覆盖正在使用的 bundle。
 if ((Get-Process reaper -ErrorAction SilentlyContinue) -and
@@ -34,14 +34,14 @@ $pluginBundleResources = Join-Path $pluginBundleBundle 'Contents\Resources\front
 $pluginBundleProfile = if ($Release) { 'release' } else { 'debug' }
 Push-Location $pluginBundleRoot
 try {
-    . .\tools\msvc-env.ps1
+    . .\scripts\env\msvc-env.ps1
     # vcvars 会重设 TEMP/TMP，必须在其返回后设置工作树私有的临时目录。
     $pluginBundleTemp = Join-Path $pluginBundleRoot ('.build-tmp\plugin-bundle-build-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $pluginBundleTemp -Force | Out-Null
     $env:TEMP = $pluginBundleTemp
     $env:TMP = $pluginBundleTemp
-    # SDK 位置由 `tools/sdk-env.ps1` 统一定义（缓存根 third_party/sdk，由
-    # `tools/plugin-sdks.json` 钉死 commit 与 tree）。已存在的环境变量优先，
+    # SDK 位置由 `scripts/env/sdk-env.ps1` 统一定义（缓存根 third_party/sdk，由
+    # `scripts/env/plugin-sdks.json` 钉死 commit 与 tree）。已存在的环境变量优先，
     # 便于 CI 与开发者覆盖。
     Set-SdkEnvironment
 
@@ -98,7 +98,7 @@ try {
     # 两个形态各付一次 150 MB，而症状只是"磁盘占用没变"。
     $pluginBundleModelManifest = Join-Path $pluginBundleRoot 'backend\src-tauri\resources\models\models.json'
     if (!(Test-Path -LiteralPath $pluginBundleModelManifest)) {
-        throw "Missing $pluginBundleModelManifest; run tools/write-models-manifest.ps1"
+        throw "Missing $pluginBundleModelManifest; run scripts/build/write-models-manifest.ps1"
     }
     Copy-Item -LiteralPath $pluginBundleModelManifest -Destination $pluginBundleModels -Force
 

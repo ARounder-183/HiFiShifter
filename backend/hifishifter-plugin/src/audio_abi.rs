@@ -522,7 +522,7 @@ mod layout_tests {
             .arg(format!("/Fe{}", exe.display()))
             .arg(manifest.join("tests/vst3_layout.cpp"))
             .output()
-            .expect("MSVC cl.exe required, load tools/msvc-env.ps1");
+            .expect("MSVC cl.exe required, load scripts/env/msvc-env.ps1");
         assert!(
             compile.status.success(),
             "native ABI oracle compile failed: {compile:?}"

@@ -5,13 +5,13 @@
 # 一次性探针目录……任何一条被破坏都不会报错，只会在某个用户那里表现为"版本显示不对"
 # "设置丢了""多占了 150 MB"。这些恰好是最难从现象反推原因的一类缺陷。
 #
-# 用法：pwsh -File scripts/check-product-consistency.ps1
+# 用法：pwsh -File scripts/checks/check-product-consistency.ps1
 # 退出码非 0 表示有检查未通过；每条检查都会打印它验证的是什么。
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
-$checkRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$checkRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $checkFailures = [System.Collections.Generic.List[string]]::new()
 
 function Test-Consistency {
@@ -37,16 +37,19 @@ Write-Host "Product consistency checks" -ForegroundColor Cyan
 # ── 1. 交付链路不依赖一次性探针目录 ────────────────────────────────────
 #
 # `probe/` 是一次性验证工程，可以整体删除。产品交付链（脚本 / CI / 前端）不得引用
-# 它。插件 SDK 缓存也已移出 probe/，改由 `tools/sdk-env.ps1` 统一定义（third_party/sdk），
+# 它。插件 SDK 缓存也已移出 probe/，改由 `scripts/env/sdk-env.ps1` 统一定义（third_party/sdk），
 # 因此这里不再需要任何例外。
 Test-Consistency '交付链路不引用一次性探针产物' {
-    $scanRoots = @('tools', 'frontend/src', 'backend/build-support', '.github/workflows')
+    $scanRoots = @('scripts', 'frontend/src', 'backend/build-support', '.github/workflows')
     $offenders = @()
     foreach ($scanRoot in $scanRoots) {
         $full = Join-Path $checkRoot $scanRoot
         if (!(Test-Path -LiteralPath $full)) { continue }
         foreach ($file in Get-ChildItem -LiteralPath $full -Recurse -File |
             Where-Object { $_.Extension -in @('.ps1', '.nsi', '.nsh', '.mjs', '.js', '.ts', '.tsx', '.yml', '.json') }) {
+            # 本守卫自己必须写出它要找的模式（`probe/ara`）才能搜索它，那行诊断文案会被
+            # 自己扫到。跳过自身：这是它唯一的"自引用"，不是交付链路依赖探针产物。
+            if ($file.FullName -eq $PSCommandPath) { continue }
             $matches = Select-String -LiteralPath $file.FullName -Pattern 'probe[/\\]ara' -AllMatches -ErrorAction SilentlyContinue
             foreach ($match in $matches) {
                 # 注释里解释"这段代码原先借用过探针脚本"是正当的，不是依赖。
@@ -65,7 +68,7 @@ Test-Consistency '交付链路不引用一次性探针产物' {
         }
     }
     if ($offenders.Count) { throw ("以下位置仍引用 probe/ara 的探针产物：`n         " + ($offenders -join "`n         ")) }
-    '扫描了 tools/ frontend/ backend/ .github/'
+    '扫描了 scripts/ frontend/ backend/ .github/'
 }
 
 # ── 2. 版本号四处一致 ──────────────────────────────────────────────────
@@ -90,7 +93,7 @@ Test-Consistency '产品版本在全部来源中一致' {
     $distinct = @($sources.Values | Select-Object -Unique)
     if ($distinct.Count -ne 1) {
         $report = ($sources.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }) -join "`n         "
-        throw "版本号不一致（跑 scripts/set-version.ps1）：`n         $report"
+        throw "版本号不一致（跑 scripts/release/set-version.ps1）：`n         $report"
     }
     "全部来源 = $($distinct[0])"
 }
@@ -102,11 +105,11 @@ Test-Consistency '产品版本在全部来源中一致' {
 # 双字节字符 —— **换行被吃掉，下一行代码变成注释的一部分**。症状是"某个变量莫名其妙
 # 是 null"，报错指向的是再下一行，与真正的原因隔着两层。
 #
-# 这个坑本仓库已经踩过两次（一次是 `ff432086`，一次是给 `tools/package-vst3.ps1` 加中文
+# 这个坑本仓库已经踩过两次（一次是 `ff432086`，一次是给 `scripts/release/package-vst3.ps1` 加中文
 # 注释却忘了补 BOM）。纯 ASCII 的脚本不需要 BOM，因此判据是"含非 ASCII 且没有 BOM"。
 Test-Consistency '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
     $offenders = @()
-    foreach ($scanRoot in @('tools', 'scripts', 'probe')) {
+    foreach ($scanRoot in @('scripts')) {
         $full = Join-Path $checkRoot $scanRoot
         if (!(Test-Path -LiteralPath $full)) { continue }
         foreach ($file in Get-ChildItem -LiteralPath $full -Recurse -File |
@@ -123,22 +126,22 @@ Test-Consistency '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
         throw ("以下脚本含非 ASCII 却没有 UTF-8 BOM，PowerShell 5.1 会吃掉换行把下一行变成注释：`n         " +
             ($offenders -join "`n         "))
     }
-    'tools/ scripts/ probe/'
+    'scripts/'
 }
 
 # ── 4. 安装器文案与词表一致 ────────────────────────────────────────────
 Test-Consistency '安装器文案与五语词表一致' {
-    & node (Join-Path $checkRoot 'tools/build-installer-strings.mjs') --check
-    if ($LASTEXITCODE -ne 0) { throw 'installer_strings.nsh 与词表不一致（跑 node tools/build-installer-strings.mjs）' }
-    'tools/installer/installer_strings.nsh'
+    & node (Join-Path $checkRoot 'scripts/release/build-installer-strings.mjs') --check
+    if ($LASTEXITCODE -ne 0) { throw 'installer_strings.nsh 与词表不一致（跑 node scripts/release/build-installer-strings.mjs）' }
+    'scripts/release/installer/installer_strings.nsh'
 }
 
 # ── 4. 模型清单与真实模型文件一致 ──────────────────────────────────────
 Test-Consistency '模型清单与真实模型文件一致' {
     # 不 spawn `pwsh`：开发机上常常只有 Windows PowerShell 5.1（CI 有 pwsh）。
     # 同一会话直接调用那份脚本，它自带 -Check 模式、只读不写。
-    & (Join-Path $checkRoot 'tools/write-models-manifest.ps1') -Check
-    if (!$?) { throw 'models.json 过期（跑 tools/write-models-manifest.ps1）' }
+    & (Join-Path $checkRoot 'scripts/build/write-models-manifest.ps1') -Check
+    if (!$?) { throw 'models.json 过期（跑 scripts/build/write-models-manifest.ps1）' }
     'backend/src-tauri/resources/models/models.json'
 }
 
@@ -147,7 +150,7 @@ Test-Consistency '模型清单与真实模型文件一致' {
 # 这三条都是"有人手改回去就会静默丢失一个用户可见能力"的地方：没有卸载项、重复安装
 # 堆积资产、模型又回到 bundle 里各存一份。
 Test-Consistency '安装器注册卸载项、清理受管目录、模型走共享库' {
-    $nsi = Get-RepoText 'tools/vst3-installer.nsi'
+    $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
     foreach ($required in @('WriteUninstaller', 'UninstallString', 'InstallLocation')) {
         if ($nsi -notmatch [regex]::Escape($required)) { throw "vst3-installer.nsi 缺少 $required" }
     }
@@ -161,7 +164,7 @@ Test-Consistency '安装器注册卸载项、清理受管目录、模型走共�
 
 # ── 6. 安装器的发布分支没被测试开关顶掉 ────────────────────────────────
 Test-Consistency '安装器默认分支仍是 admin + HKLM + Common Files' {
-    $nsi = Get-RepoText 'tools/vst3-installer.nsi'
+    $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
     foreach ($required in @('RequestExecutionLevel admin', 'InstallDir "$COMMONFILES64\VST3"', '!define HFS_ARP_ROOT HKLM')) {
         if ($nsi -notmatch [regex]::Escape($required)) { throw "vst3-installer.nsi 的发布分支缺少：$required" }
     }
@@ -174,7 +177,7 @@ Test-Consistency '安装器默认分支仍是 admin + HKLM + Common Files' {
 
 # ── 7. 插件 bundle 只带插件入口，不塞整套 dist ─────────────────────────
 Test-Consistency '插件 bundle 只拷 plugin.html 与 assets' {
-    $bundle = Get-RepoText 'tools/build-plugin-bundle.ps1'
+    $bundle = Get-RepoText 'scripts/build/build-plugin-bundle.ps1'
     if ($bundle -match "Get-ChildItem -LiteralPath 'frontend\\dist'") {
         throw 'build-plugin-bundle.ps1 又把整套 frontend/dist 拷进插件了（index.html / detached.html / waveform-test.html 都是死重量）'
     }
@@ -193,6 +196,32 @@ Test-Consistency '两个 workflow 都声明 concurrency 与 permissions' {
         }
     }
     'build.yml / vst3.yml'
+}
+
+# ── 9. SDK 镜像根只有一处定义 ─────────────────────────────────────────
+#
+# 镜像根是"离网取源"的落点：prepare-plugin-sdks.ps1 与 export-sdk-mirror.ps1 都必须经
+# scripts/env/sdk-env.ps1 的 Get-SdkMirrorRoot 取它。任一脚本硬编码这个路径，改默认位置时就会
+# "导出与消费指向不同目录"——只表现为离网构建找不到源，与原因隔着两层。内核 build.rs
+# 不能点源 PowerShell，只能自己再实现一份默认值，因此这里一并钉住"Rust 侧也认得镜像与
+# 离线开关"，否则 Windows 侧改好了、内核侧悄悄不认，症状同样只在离网时出现。
+Test-Consistency 'SDK 镜像根只在 scripts/env/sdk-env.ps1 定义' {
+    $offenders = @()
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $checkRoot 'scripts') -Recurse -File -Filter '*.ps1') {
+        if ($file.Name -eq 'sdk-env.ps1') { continue }
+        foreach ($hit in Select-String -LiteralPath $file.FullName -Pattern 'third_party[/\\]sdk-mirror' -AllMatches -ErrorAction SilentlyContinue) {
+            if ($hit.Line.Trim() -match '^(#|\.\s*#)') { continue }
+            $offenders += "$($file.Name): $($hit.Line.Trim())"
+        }
+    }
+    if ($offenders.Count) {
+        throw ("以下脚本硬编码了 SDK 镜像根（应经 Get-SdkMirrorRoot 取）：`n         " + ($offenders -join "`n         "))
+    }
+    $buildRs = Get-RepoText 'backend/hifishifter-kernel/build.rs'
+    foreach ($required in @('HIFISHIFTER_SDK_MIRROR', 'HIFISHIFTER_OFFLINE', 'sdk-mirror')) {
+        if ($buildRs -notmatch [regex]::Escape($required)) { throw "内核 build.rs 不再识别镜像/离线开关：$required" }
+    }
+    'scripts/ 经 Get-SdkMirrorRoot；build.rs 识别 HIFISHIFTER_SDK_MIRROR / HIFISHIFTER_OFFLINE'
 }
 
 Write-Host ""

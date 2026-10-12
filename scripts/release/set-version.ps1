@@ -29,10 +29,10 @@
     Target version string.
 
 .EXAMPLE
-    .\scripts\set-version.ps1 -Version "0.1.0-beta.9"
+    .\scripts\release\set-version.ps1 -Version "0.1.0-beta.9"
 
 .EXAMPLE
-    .\scripts\set-version.ps1 -Version "beta9"
+    .\scripts\release\set-version.ps1 -Version "beta9"
 #>
 
 [CmdletBinding()]
@@ -184,7 +184,7 @@ function Set-CargoLockVersion {
     Write-TextFile -FilePath $FilePath -Content $raw
 }
 
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $tauriConfPath = Join-Path $projectRoot "backend\src-tauri\tauri.conf.json"
 $tauriDistConfPath = Join-Path $projectRoot "backend\src-tauri\tauri.conf.dist-dev.json"
 $cargoTomlPath = Join-Path $projectRoot "backend\src-tauri\Cargo.toml"
@@ -226,7 +226,7 @@ if (Test-Path $cargoLockPath) {
     Write-Host "  - backend\Cargo.lock (HiFiShifter, hifishifter-plugin)" -ForegroundColor Green
 }
 
-# 版本来源表：`scripts\check-product-consistency.ps1` 校验同一组文件，这里打印
+# 版本来源表：`scripts\checks\check-product-consistency.ps1` 校验同一组文件，这里打印
 # 一份便于人工核对 —— 漏改一处时两边的输出会不一致。
 Write-Host ""
 Write-Host "Version sources:" -ForegroundColor Cyan

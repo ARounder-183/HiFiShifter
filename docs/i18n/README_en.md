@@ -128,7 +128,7 @@ Make sure the following tools are installed:
 
 ONNX Runtime (DirectML) is automatically downloaded by the ort crate at build time — no extra configuration needed.
 
-Alternatively, run `scripts/install_deps_windows.ps1`, which installs NSIS / CMake / LLVM via Chocolatey and installs tauri-cli (Chocolatey must already be installed).
+Alternatively, run `scripts/setup/install_deps_windows.ps1`, which installs NSIS / CMake / LLVM via Chocolatey and installs tauri-cli (Chocolatey must already be installed).
 
 Install frontend dependencies:
 
@@ -139,8 +139,8 @@ npm --prefix frontend install
 #### macOS
 
 ```bash
-chmod +x ./scripts/install_deps_macos.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+chmod +x ./scripts/setup/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 ```
 
 #### Linux
@@ -156,8 +156,8 @@ Make sure the following tools are installed:
 Run the one-click install script:
 
 ```bash
-chmod +x ./scripts/install_deps_linux.sh
-bash ./scripts/install_deps_linux.sh
+chmod +x ./scripts/setup/install_deps_linux.sh
+bash ./scripts/setup/install_deps_linux.sh
 ```
 
 This script installs system dependencies, Node.js (if missing), appimagetool, and frontend npm dependencies.
@@ -178,7 +178,7 @@ For offline builds, you can pre-clone them manually, for example SoundTouch:
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 # Verify against the pin: expect e83424d5928ab8513d2d082779c275765dee31b9
-# (tools/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
+# (scripts/env/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
 git -C soundtouch rev-parse HEAD
 ```
 
@@ -195,16 +195,16 @@ cargo tauri build
 
 # Linux AppImage (vslib is Windows-only; exclude the default feature)
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
-# Or use the helper script: bash scripts/build-linux-appimage.sh
+# Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
 # Windows portable ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
+.\scripts\build\pack-portable.ps1 -SkipBuild
 
 # Windows VST3 ZIP + installer (a complete Release delivery already exists)
-.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
-Double-clicking `pack-portable.bat` lets you choose App, VST3 or both; see `scripts/pack-portable.ps1` and the scripts under `tools/` for the available switches.
+Double-clicking `pack-portable.bat` lets you choose App, VST3 or both; see `scripts/build/pack-portable.ps1` and the scripts under `scripts/` for the available switches.
 
 You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
 

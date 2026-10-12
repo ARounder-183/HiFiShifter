@@ -220,9 +220,12 @@ squashfs-root/
 .codebuddy
 
 
-# 插件 SDK 检出（ARA_SDK / vst3sdk）：构建期按 tools/plugin-sdks.json 钉死的
-# revision 拉取，不提交（按 pin 下载以控体积并履行许可声明义务）。位置见 tools/sdk-env.ps1。
+# 插件 SDK 检出（ARA_SDK / vst3sdk）：构建期按 scripts/env/plugin-sdks.json 钉死的
+# revision 拉取，不提交（按 pin 下载以控体积并履行许可声明义务）。位置见 scripts/env/sdk-env.ps1。
 third_party/sdk/
+
+# 本地 SDK 镜像（scripts/setup/export-sdk-mirror.ps1 产物）：离网取源用的可拷贝缓存，同样不提交。
+third_party/sdk-mirror/
 
 # 运行时模型只认 backend/src-tauri/resources/models/（解析路径从不查 third_party/，
 # 见 vocoder/hnsep_onnx.rs::resolve_model_path）。下面是曾经误入库的死重副本：

@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Build HiFiShifter AppImage for Linux
-# Usage: ./scripts/build-linux-appimage.sh [--release|--debug]
+# Usage: ./scripts/build/build-linux-appimage.sh [--release|--debug]
 #
 # Prerequisites:
 #   1. Rust toolchain (stable)
-#   2. System deps installed (see scripts/install_deps_linux.sh)
-#   3. appimagetool on PATH (see scripts/install_deps_linux.sh)
+#   2. System deps installed (see scripts/setup/install_deps_linux.sh)
+#   3. appimagetool on PATH (see scripts/setup/install_deps_linux.sh)
 #   4. Frontend built (cd frontend && npm ci && npm run build)
 #   5. SoundTouch source cloned (see build.rs auto-clone or manual clone)
 
@@ -23,7 +23,7 @@ if [ "$PROFILE" = "debug" ] || [ "$PROFILE" = "dev" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BACKEND_DIR="$PROJECT_DIR/backend"
 
 echo "=== HiFiShifter Linux AppImage Build ==="

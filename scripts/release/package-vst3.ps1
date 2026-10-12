@@ -6,7 +6,7 @@ param(
     [switch]$Installer
 )
 $ErrorActionPreference = 'Stop'
-$packageTaskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$packageTaskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $packageTaskDelivery = [IO.Path]::GetFullPath($DeliveryDirectory)
 $packageTaskOutput = [IO.Path]::GetFullPath($OutputDirectory)
 foreach ($packageTaskPath in @($packageTaskDelivery, $packageTaskOutput)) {
@@ -35,7 +35,7 @@ if (Get-ChildItem -LiteralPath $packageTaskBundle -Recurse -File -Filter '*vslib
 $packageTaskModels = Join-Path $packageTaskBundle 'Contents\Resources\models'
 $packageTaskModelsManifest = Join-Path $packageTaskModels 'models.json'
 if (!(Test-Path -LiteralPath $packageTaskModelsManifest)) {
-    throw "Missing $packageTaskModelsManifest; run tools/write-models-manifest.ps1"
+    throw "Missing $packageTaskModelsManifest; run scripts/build/write-models-manifest.ps1"
 }
 $packageTaskModelsVersion = (Get-Content -LiteralPath $packageTaskModelsManifest -Raw | ConvertFrom-Json).version
 if ($packageTaskModelsVersion -notmatch '^[a-z0-9]+$') { throw "Invalid model version: $packageTaskModelsVersion" }
@@ -84,8 +84,8 @@ if ($Installer) {
     & node (Join-Path $PSScriptRoot 'build-installer-strings.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Installer string generation failed.' }
     $packageTaskSetup = Join-Path $packageTaskOutput ($packageTaskName + '-setup.exe')
-    # LICENSE 用绝对路径传入：`vst3-installer.nsi` 里的默认值 `..\LICENSE` 只在从
-    # 仓库的 tools\ 目录编译时成立。
+    # LICENSE 用绝对路径传入：`vst3-installer.nsi` 里的默认值 `..\..\LICENSE` 只在从
+    # 仓库的 scripts\release\ 目录编译时成立。
     & $packageTaskNsis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$packageTaskInstallerBundle" "/DPLUGIN_VERSION=$packageTaskVersion" "/DOUTPUT_FILE=$packageTaskSetup" "/DHFS_LICENSE=$(Join-Path $packageTaskRoot 'LICENSE')" "/DHFS_LGPL=$(Join-Path $packageTaskRoot 'licenses\COPYING.LGPL-2.1')" "/DHFS_ST_CHANGES=$(Join-Path $packageTaskRoot 'licenses\SOUNDTOUCH-CHANGES.md')" "/DHFS_MODELS=$(Join-Path $packageTaskInstallerRoot 'models')" "/DHFS_MODELS_VERSION=$packageTaskModelsVersion" (Join-Path $PSScriptRoot 'vst3-installer.nsi')
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $packageTaskSetup)) { throw 'VST3 installer compilation failed.' }
     Write-Output "Installer: $packageTaskSetup"

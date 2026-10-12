@@ -1,7 +1,7 @@
-﻿; 本文件由 tools/build-installer-strings.mjs 生成 —— 不要手工编辑。
+﻿; 本文件由 scripts/release/build-installer-strings.mjs 生成 —— 不要手工编辑。
 ;
 ; 文案的唯一来源是 frontend/src/i18n/*.ts 里 installer_ 前缀的词条；
-; 直接改这里会在下一次生成时被覆盖，且 scripts/check-product-consistency.ps1
+; 直接改这里会在下一次生成时被覆盖，且 scripts/checks/check-product-consistency.ps1
 ; 会因与本文件不一致而失败。
 
 ; 语言：en-US→English、zh-CN→SimpChinese、zh-TW→TradChinese、ja-JP→Japanese、ko-KR→Korean

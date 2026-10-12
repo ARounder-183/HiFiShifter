@@ -26,13 +26,13 @@ jobs:
       # 每个被宿主调用的 extern "system" 入口都必须自带 panic 守卫
       # （panic 越过 FFI 边界 = abort = DAW 崩溃）。纪律见 docs/thread-model.md。
       - name: FFI panic-guard gate
-        run: python tools/check-ffi-guards.py
+        run: python scripts/checks/check-ffi-guards.py
 
-      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
       # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
       - name: Configure pinned SDK paths
         run: |
-          . ./tools/sdk-env.ps1
+          . ./scripts/env/sdk-env.ps1
           Export-SdkEnvironment
 
       - name: Set up Node.js
@@ -58,7 +58,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install pinned ARA and VST3 SDKs
-        run: ./tools/prepare-plugin-sdks.ps1
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
 
       - name: Install frontend and check regressions
         run: |
@@ -92,7 +92,7 @@ jobs:
       # 前端产物；本流水线到这一步还没有前端 dist（`build-hifishifter.ps1` 之后才建）。
       - name: Run rustfmt and clippy
         run: |
-          . ./tools/msvc-env.ps1
+          . ./scripts/env/msvc-env.ps1
           cargo fmt --manifest-path backend/Cargo.toml --all -- --check
           if ($LASTEXITCODE -ne 0) { throw 'rustfmt check failed.' }
           cargo clippy --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin -p hifishifter-kernel --all-targets -- -D warnings
@@ -103,7 +103,7 @@ jobs:
           New-Item -ItemType Directory -Path .build-tmp -Force | Out-Null
           $ciTestLog = Join-Path $PWD '.build-tmp/plugin-unit-tests.log'
           try {
-            . ./tools/msvc-env.ps1
+            . ./scripts/env/msvc-env.ps1
             cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --lib -- --test-threads=1 *> $ciTestLog
             $ciTestExitCode = $LASTEXITCODE
           } catch {
@@ -128,7 +128,7 @@ jobs:
           # 版本与 `tauri.conf.json` / `Cargo.toml` / `package.json` 一致（文件头自己写着
           # 它已经漂移过一次），后者守卫宿主持久 ID 的解析；两者此前都不在清单里，
           # 等于没有守卫。
-          . ./tools/msvc-env.ps1
+          . ./scripts/env/msvc-env.ps1
           cargo build --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin
           if ($LASTEXITCODE -ne 0) { throw 'Plugin ABI regression prerequisite build failed.' }
           foreach ($contract in @('ara_mapping', 'renderer_assignments', 'vst3_exports', 'no_tauri_in_dependency_tree', 'version_parity', 'host_persistent_ids')) {
@@ -139,14 +139,14 @@ jobs:
       # 手动 dispatch 本流水线可以单独触发，此前门禁是 build.yml 的真子集 ——
       # 绿灯产物可绕过跨文件一致性守卫。检查不依赖编译，几十秒。
       - name: Product consistency gate
-        run: ./scripts/check-product-consistency.ps1
+        run: ./scripts/checks/check-product-consistency.ps1
 
       - name: Build complete VST3 Release delivery
-        run: ./tools/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
+        run: ./scripts/build/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
 
       - name: Package and verify VST3
         run: |
-          ./tools/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
+          ./scripts/release/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
 
       # ── Artifact 命名 ──────────────────────────────────────────────────
       #

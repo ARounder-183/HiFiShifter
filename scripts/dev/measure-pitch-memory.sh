@@ -13,7 +13,7 @@
 # from allocating on other threads while the measurement is in flight.
 #
 # Usage:
-#   ./scripts/measure-pitch-memory.sh
+#   ./scripts/dev/measure-pitch-memory.sh
 #
 # Interpreting the output:
 #   The test prints peak bytes for a 60 s and a 240 s stereo source. The two
@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root/backend/src-tauri"
 
 echo "==> measuring pitch-analysis peak working set"

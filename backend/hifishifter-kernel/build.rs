@@ -273,7 +273,7 @@ fn build_signalsmith_stretch() {
 /// `third_party/soundtouch-static/soundtouch/` —— 那是**给 Tauri 的资源打包用的**
 /// （`tauri.conf.json` 以该相对路径把它打进去），不是给内核用的。
 /// 搬过来之后由本脚本继续写，行为与搬家前一致。
-/// SoundTouch 供给链钉子：`tools/plugin-sdks.json` 的 `soundtouch` 段是唯一事实
+/// SoundTouch 供给链钉子：`scripts/env/plugin-sdks.json` 的 `soundtouch` 段是唯一事实
 /// 来源（与 ARA/VST3 SDK 的 pin 同一份清单）。
 ///
 /// 【为什么必须校验】clone 按 `--branch 2.3.3` 拉，而 tag 是**可变引用** —— 上游
@@ -282,7 +282,7 @@ fn build_signalsmith_stretch() {
 /// plugin-sdks.json 的评审 diff。
 const SOUNDTOUCH_PIN_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tools/plugin-sdks.json"
+    "/../../scripts/env/plugin-sdks.json"
 ));
 
 fn soundtouch_pinned_commit() -> String {
@@ -291,7 +291,7 @@ fn soundtouch_pinned_commit() -> String {
     let section = SOUNDTOUCH_PIN_JSON
         .split("\"soundtouch\"")
         .nth(1)
-        .expect("tools/plugin-sdks.json must contain a soundtouch section");
+        .expect("scripts/env/plugin-sdks.json must contain a soundtouch section");
     let rest = section
         .split("\"commit\": \"")
         .nth(1)
@@ -326,11 +326,58 @@ fn verify_soundtouch_pin(st_src_path: &Path) {
     if !output.status.success() || head != pinned {
         panic!(
             "[soundtouch] checkout HEAD {head} does not match the pinned commit {pinned} \
-             (tools/plugin-sdks.json). Delete the checkout and rebuild to re-clone the \
+             (scripts/env/plugin-sdks.json). Delete the checkout and rebuild to re-clone the \
              pinned revision - a retagged upstream must never reach audio code silently."
         );
     }
     println!("cargo:warning=[soundtouch] pin verified: {head}");
+}
+
+/// 本地 SDK 镜像根：`HIFISHIFTER_SDK_MIRROR`，否则仓库根的 `third_party/sdk-mirror`。
+///
+/// 【为什么在 Rust 里再实现一遍】镜像根的唯一事实来源是 `scripts/env/sdk-env.ps1`
+/// (`Get-SdkMirrorRoot`)，但 build.rs 不能点源 PowerShell。两处默认值必须一致：
+/// 镜像里放一份 SoundTouch 源（`<mirror>/soundtouch`），离网时这里直接取用，不触网。
+fn sdk_mirror_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("HIFISHIFTER_SDK_MIRROR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // 构建脚本的包根是 backend/hifishifter-kernel，仓库根在两级之上。
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("third_party")
+        .join("sdk-mirror")
+}
+
+/// 是否禁止为取第三方源联网（`-Offline` 会把它写进 `HIFISHIFTER_OFFLINE`）。
+fn sdk_offline_requested() -> bool {
+    matches!(
+        std::env::var("HIFISHIFTER_OFFLINE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// 递归复制目录树（用于从本地镜像导入源码，替代联网克隆）。软链接按目标类型解引用。
+fn copy_dir_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        // `Path::is_dir` 跟随软链接，因此软链接目录会被展开复制。
+        if entry.path().is_dir() {
+            copy_dir_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 fn build_soundtouch() {
@@ -343,42 +390,74 @@ fn build_soundtouch() {
 
     let st_src_path = Path::new(&st_src);
     if !st_src_path.join("CMakeLists.txt").exists() {
-        println!("cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning...");
-        if st_src_path.exists() {
-            let _ = std::fs::remove_dir_all(st_src_path);
-        }
-        let parent = st_src_path
-            .parent()
-            .expect("[soundtouch] invalid source path");
-        let _ = std::fs::create_dir_all(parent);
-
-        let mut clone = Command::new("git");
-        clone.args([
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            "2.3.3",
-            "https://codeberg.org/soundtouch/soundtouch.git",
-            "soundtouch",
-        ]);
-        clone.current_dir(parent);
-
-        let status = clone
-            .status()
-            .expect("[soundtouch] failed to run git clone");
-        if !status.success() {
+        let mirror_entry = sdk_mirror_root().join("soundtouch");
+        if mirror_entry.join("CMakeLists.txt").exists() {
+            // 本地镜像优先：离网机器靠它取源，全程不触网（见 scripts/setup/export-sdk-mirror.ps1）。
+            println!(
+                "cargo:warning=[soundtouch] importing source from the local mirror: {}",
+                mirror_entry.display()
+            );
+            if st_src_path.exists() {
+                let _ = std::fs::remove_dir_all(st_src_path);
+            }
+            let parent = st_src_path
+                .parent()
+                .expect("[soundtouch] invalid source path");
+            let _ = std::fs::create_dir_all(parent);
+            copy_dir_tree(&mirror_entry, st_src_path)
+                .expect("[soundtouch] failed to import source from the local mirror");
+            println!("cargo:warning=[soundtouch] SoundTouch source imported from the mirror");
+            verify_soundtouch_pin(st_src_path);
+        } else if sdk_offline_requested() {
             eprintln!("\n========================================");
-            eprintln!("ERROR: Failed to auto-clone SoundTouch source!");
+            eprintln!("ERROR: SoundTouch source is missing and offline mode is on!");
             eprintln!("========================================");
-            eprintln!("\nPlease clone manually:");
-            eprintln!("  cd backend/src-tauri/third_party/soundtouch-static");
-            eprintln!("  git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch");
+            eprintln!("\nHIFISHIFTER_OFFLINE forbids cloning from the network.");
+            eprintln!("Provide it via a local SDK mirror instead:");
+            eprintln!("  set HIFISHIFTER_SDK_MIRROR=<dir containing a soundtouch/ entry>");
+            eprintln!(
+                "(create the mirror with scripts/setup/export-sdk-mirror.ps1 on a networked machine)."
+            );
             eprintln!("========================================\n");
-            panic!("SoundTouch source clone failed. See error message above for instructions.");
+            panic!("SoundTouch source unavailable offline. See the message above.");
+        } else {
+            println!("cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning...");
+            if st_src_path.exists() {
+                let _ = std::fs::remove_dir_all(st_src_path);
+            }
+            let parent = st_src_path
+                .parent()
+                .expect("[soundtouch] invalid source path");
+            let _ = std::fs::create_dir_all(parent);
+
+            let mut clone = Command::new("git");
+            clone.args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "2.3.3",
+                "https://codeberg.org/soundtouch/soundtouch.git",
+                "soundtouch",
+            ]);
+            clone.current_dir(parent);
+
+            let status = clone
+                .status()
+                .expect("[soundtouch] failed to run git clone");
+            if !status.success() {
+                eprintln!("\n========================================");
+                eprintln!("ERROR: Failed to auto-clone SoundTouch source!");
+                eprintln!("========================================");
+                eprintln!("\nPlease clone manually:");
+                eprintln!("  cd backend/src-tauri/third_party/soundtouch-static");
+                eprintln!("  git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch");
+                eprintln!("========================================\n");
+                panic!("SoundTouch source clone failed. See error message above for instructions.");
+            }
+            println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
+            verify_soundtouch_pin(st_src_path);
         }
-        println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
-        verify_soundtouch_pin(st_src_path);
     } else {
         // 已有检出同样校验：本地残留的旧 clone 不该静默参与构建。
         verify_soundtouch_pin(st_src_path);

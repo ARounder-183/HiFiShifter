@@ -128,7 +128,7 @@ cd HiFiShifter
 
 ONNX Runtime (DirectML) 由 ort crate 在編譯時自動下載，無需額外設定。
 
-也可以執行 `scripts/install_deps_windows.ps1`，透過 Chocolatey 安裝 NSIS / CMake / LLVM 並安裝 tauri-cli（需要已安裝 Chocolatey）。
+也可以執行 `scripts/setup/install_deps_windows.ps1`，透過 Chocolatey 安裝 NSIS / CMake / LLVM 並安裝 tauri-cli（需要已安裝 Chocolatey）。
 
 安裝前端依賴：
 
@@ -139,8 +139,8 @@ npm --prefix frontend install
 #### macOS
 
 ```bash
-chmod +x ./scripts/install_deps_macos.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+chmod +x ./scripts/setup/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 ```
 
 #### Linux
@@ -156,8 +156,8 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 執行一鍵安裝腳本：
 
 ```bash
-chmod +x ./scripts/install_deps_linux.sh
-bash ./scripts/install_deps_linux.sh
+chmod +x ./scripts/setup/install_deps_linux.sh
+bash ./scripts/setup/install_deps_linux.sh
 ```
 
 腳本會自動安裝系統依賴、Node.js（如未安裝）、appimagetool 及前端 npm 依賴。
@@ -178,7 +178,7 @@ SoundTouch、WORLD、Signalsmith Stretch 均在編譯時從原始碼構建，首
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 # Verify against the pin: expect e83424d5928ab8513d2d082779c275765dee31b9
-# (tools/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
+# (scripts/env/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
 git -C soundtouch rev-parse HEAD
 ```
 
@@ -195,16 +195,16 @@ cargo tauri build
 
 # Linux AppImage（vslib 僅限 Windows，需排除預設 feature）
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
-# 或使用輔助腳本：bash scripts/build-linux-appimage.sh
+# 或使用輔助腳本：bash scripts/build/build-linux-appimage.sh
 
 # Windows 可攜版 ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
+.\scripts\build\pack-portable.ps1 -SkipBuild
 
 # Windows VST3 ZIP + 安裝程式（已有完整 Release 交付）
-.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
-雙擊 `pack-portable.bat` 可選擇 App、VST3 或兩者；可用參數見 `scripts/pack-portable.ps1` 與 `tools/` 下的構建腳本。
+雙擊 `pack-portable.bat` 可選擇 App、VST3 或兩者；可用參數見 `scripts/build/pack-portable.ps1` 與 `scripts/` 下的構建腳本。
 
 前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
 

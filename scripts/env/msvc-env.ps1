@@ -1,4 +1,4 @@
-﻿# tools/msvc-env.ps1
+﻿# scripts/env/msvc-env.ps1
 #
 # 主要内容：把 MSVC（Visual Studio C++ 工具链）的环境变量导入当前 PowerShell 会话。
 #
@@ -10,11 +10,11 @@
 #       表现为"cl.exe 存在但编译全部失败"。
 #
 # 用法（在 PowerShell 中，先从仓库根目录执行）：
-#       . .\tools\msvc-env.ps1
+#       . .\scripts\env\msvc-env.ps1
 #       cd backend\src-tauri; cargo test
 #
 # 特殊说明：
-#   - 必须用点源（`. .\tools\msvc-env.ps1`）而不是 `.\tools\msvc-env.ps1`，
+#   - 必须用点源（`. .\scripts\env\msvc-env.ps1`）而不是 `.\scripts\env\msvc-env.ps1`，
 #     否则环境变量只存在于子进程里，对后续 cargo 无效。
 #   - 若执行策略禁止未签名脚本（报 "无法加载文件 ... 未对文件进行数字签名"），
 #     用子进程绕过，或在允许的会话里先 `Set-ExecutionPolicy -Scope Process Bypass`。

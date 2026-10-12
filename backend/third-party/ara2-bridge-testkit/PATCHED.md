@@ -68,9 +68,9 @@ cpp-interop 需要 Celemony 的 `ARA_Library` / `ARA_Examples`（Apache-2.0）�
 整目录 gitignore）。准备步骤：
 
 ```powershell
-. .\tools\msvc-env.ps1
-. .\tools\sdk-env.ps1; Set-SdkEnvironment
-.\tools\prepare-plugin-sdks.ps1 -WithTestkit     # 额外拉 ARA_Library / ARA_Examples
+. .\scripts\env\msvc-env.ps1
+. .\scripts\env\sdk-env.ps1; Set-SdkEnvironment
+.\scripts\setup\prepare-plugin-sdks.ps1 -WithTestkit     # 额外拉 ARA_Library / ARA_Examples
 cd backend\third-party\ara2-bridge-testkit
 cargo test --features cpp-interop --test cpp_interop
 cargo test --test plugin_contract                 # 纯 Rust，不需要 C++ SDK

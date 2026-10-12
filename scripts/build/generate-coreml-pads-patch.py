@@ -10,7 +10,7 @@ build.rs also removes the explicit `kernel_shape` attributes from the
 ConvTranspose upsampling nodes because CoreML EP only accepts those nodes
 when kernel_shape is inferred from the constant weight.
 
-Usage:  python scripts/generate-coreml-pads-patch.py
+Usage:  python scripts/build/generate-coreml-pads-patch.py
 Re-run this whenever the stock ONNX model changes.
 """
 import os
@@ -18,7 +18,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "backend", "src-tauri", "resources", "models", "nsf_hifigan", "pc_nsf_hifigan.onnx")
 OUT = os.path.join(ROOT, "backend", "src-tauri", "resources", "models", "nsf_hifigan", "coreml_pads_patch.txt")
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-macos-dmg.sh [options]
+Usage: scripts/build/build-macos-dmg.sh [options]
 
 Options:
   -s, --skip-build   Reuse an existing app/dmg build and only copy it to dist/
@@ -52,12 +52,12 @@ fi
 
 if ! command -v cargo >/dev/null 2>&1 || ! cargo tauri --version >/dev/null 2>&1; then
   echo "[mac-dmg] cargo or Tauri CLI is unavailable." >&2
-  echo "[mac-dmg] Install deps with: SKIP_FRONTEND=1 bash scripts/install_deps_macos.sh" >&2
+  echo "[mac-dmg] Install deps with: SKIP_FRONTEND=1 bash scripts/setup/install_deps_macos.sh" >&2
   echo "[mac-dmg] Then install: cargo install tauri-cli --version '^2'" >&2
   exit 1
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TAURI_DIR="$ROOT/backend/src-tauri"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 mkdir -p "$OUTPUT_DIR"
@@ -115,7 +115,7 @@ if [[ ! -f "$DMG_PATH" ]]; then
   exit 1
 fi
 
-DEST_DMG="$OUTPUT_DIR/$DMG_NAME"
+DEST_DMG="$OUTPUT_DIR/$(basename "$DMG_PATH")"
 cp -f "$DMG_PATH" "$DEST_DMG"
 SIZE_MB="$(du -m "$DEST_DMG" | cut -f1)"
 

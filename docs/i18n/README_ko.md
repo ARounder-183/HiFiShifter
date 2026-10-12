@@ -128,7 +128,7 @@ cd HiFiShifter
 
 ONNX Runtime (DirectML)은 ort crate가 빌드 시 자동으로 다운로드하므로 추가 설정이 필요하지 않습니다.
 
-`scripts/install_deps_windows.ps1` 스크립트를 실행할 수도 있습니다. Chocolatey로 NSIS / CMake / LLVM을 설치한 뒤 tauri-cli를 설치합니다(Chocolatey가 미리 설치되어 있어야 합니다).
+`scripts/setup/install_deps_windows.ps1` 스크립트를 실행할 수도 있습니다. Chocolatey로 NSIS / CMake / LLVM을 설치한 뒤 tauri-cli를 설치합니다(Chocolatey가 미리 설치되어 있어야 합니다).
 
 프론트엔드 종속성 설치:
 
@@ -139,8 +139,8 @@ npm --prefix frontend install
 #### macOS
 
 ```bash
-chmod +x ./scripts/install_deps_macos.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+chmod +x ./scripts/setup/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 ```
 
 #### Linux
@@ -156,8 +156,8 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 원클릭 설치 스크립트 실행:
 
 ```bash
-chmod +x ./scripts/install_deps_linux.sh
-bash ./scripts/install_deps_linux.sh
+chmod +x ./scripts/setup/install_deps_linux.sh
+bash ./scripts/setup/install_deps_linux.sh
 ```
 
 이 스크립트는 시스템 종속성, Node.js(없는 경우), appimagetool 및 프론트엔드 npm 종속성을 설치합니다.
@@ -178,7 +178,7 @@ SoundTouch, WORLD, Signalsmith Stretch는 모두 컴파일 시점에 소스에�
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 # Verify against the pin: expect e83424d5928ab8513d2d082779c275765dee31b9
-# (tools/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
+# (scripts/env/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
 git -C soundtouch rev-parse HEAD
 ```
 
@@ -195,16 +195,16 @@ cargo tauri build
 
 # Linux AppImage (vslib은 Windows 전용이므로 기본 feature 제외)
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
-# 또는 보조 스크립트 사용: bash scripts/build-linux-appimage.sh
+# 또는 보조 스크립트 사용: bash scripts/build/build-linux-appimage.sh
 
 # Windows 포터블 ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
+.\scripts\build\pack-portable.ps1 -SkipBuild
 
 # Windows VST3 ZIP + 설치 프로그램(전체 Release 전달 제공)
-.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
-`pack-portable.bat`을 두 번 클릭하면 App, VST3 또는 둘 다를 선택할 수 있습니다. 사용 가능한 옵션은 `scripts/pack-portable.ps1`과 `tools/` 아래의 빌드 스크립트를 참고하세요.
+`pack-portable.bat`을 두 번 클릭하면 App, VST3 또는 둘 다를 선택할 수 있습니다. 사용 가능한 옵션은 `scripts/build/pack-portable.ps1`과 `scripts/` 아래의 빌드 스크립트를 참고하세요.
 
 `TAURI_UI_MODE` 환경 변수로 프론트엔드 시작 모드를 전환할 수 있습니다:
 

@@ -2,7 +2,7 @@
 
 本应用的 Windows / macOS / Linux 发行物以**动态库**形式分发
 [SoundTouch](https://codeberg.org/soundtouch/soundtouch)（LGPL-2.1）的
-`SoundTouchDLL`。构建期对上游源码（pin 见 `tools/plugin-sdks.json` 的
+`SoundTouchDLL`。构建期对上游源码（pin 见 `scripts/env/plugin-sdks.json` 的
 `soundtouch` 段，tag `2.3.3`）做了以下两处修改，由
 `backend/hifishifter-kernel/build.rs` 在编译时自动打上：
 

@@ -42,7 +42,7 @@ jobs:
         run: npm --prefix frontend ci
 
       - name: Check product consistency
-        run: ./scripts/check-product-consistency.ps1
+        run: ./scripts/checks/check-product-consistency.ps1
 
   frontend-build:
     name: Build Frontend
@@ -96,7 +96,7 @@ jobs:
   #
   # 【为什么 clippy/test 必须在 Windows】`hifishifter-plugin` 的 build.rs 要求
   # `ARA_VST3_SDK_DIR` / `ARA_SDK_DIR`，且它本身是 Windows 的 ARA/VST3 目标 ——
-  # SDK 准备脚本 `tools/prepare-plugin-sdks.ps1` 与 `vst3.yml` 的整套流程都建在
+  # SDK 准备脚本 `scripts/setup/prepare-plugin-sdks.ps1` 与 `vst3.yml` 的整套流程都建在
   # Windows 上。两个 job 共用一份 SDK 缓存，避免重复下载。
   rust-fmt:
     name: Check Rust formatting
@@ -128,11 +128,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
       # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
       - name: Configure pinned SDK paths
         run: |
-          . ./tools/sdk-env.ps1
+          . ./scripts/env/sdk-env.ps1
           Export-SdkEnvironment
 
       - name: Setup Node.js
@@ -169,10 +169,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
       - name: Install pinned ARA and VST3 SDKs
-        run: ./tools/prepare-plugin-sdks.ps1
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
 
       # 告警已清零（清仓时是 190 条），因此这里判死：**告警即失败**。
       #
@@ -182,7 +182,7 @@ jobs:
       # 其余一律默认告警 —— 于是 `-D warnings` 拦到的都是真问题。
       - name: Run clippy
         run: |
-          . ./tools/msvc-env.ps1
+          . ./scripts/env/msvc-env.ps1
           # --locked：build.yml 必须证明"提交的锁"能编译，而不是 CI 临时解析出的依赖树
           # （vst3.yml 一直如此，两边门禁因此等价）。
           cargo clippy --locked --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
@@ -202,11 +202,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # SDK 路径的唯一事实来源在 tools/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
+      # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
       # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
       - name: Configure pinned SDK paths
         run: |
-          . ./tools/sdk-env.ps1
+          . ./scripts/env/sdk-env.ps1
           Export-SdkEnvironment
 
       - name: Setup Node.js
@@ -243,16 +243,16 @@ jobs:
         uses: actions/cache@v5
         with:
           path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
       - name: Install pinned ARA and VST3 SDKs
-        run: ./tools/prepare-plugin-sdks.ps1
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
 
       # `--test-threads=1`：本仓有进程级分配计量测试（`alloc_probe`），其前置条件
       # 就是串行运行（见 `backend/src-tauri/src/lib.rs` 的 `measure_peak_alloc` 说明）。
       - name: Run workspace tests
         run: |
-          . ./tools/msvc-env.ps1
+          . ./scripts/env/msvc-env.ps1
           cargo test --locked --manifest-path backend/Cargo.toml --workspace -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
 
@@ -283,10 +283,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('tools/plugin-sdks.json') }}
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
       - name: Install pinned SDKs with testkit submodules
-        run: ./tools/prepare-plugin-sdks.ps1 -WithTestkit
+        run: ./scripts/setup/prepare-plugin-sdks.ps1 -WithTestkit
 
       # 直接 cargo 调用需要这里导出的 ARA_SDK_DIR（build.rs 读它定位 ARA_API）。
       #
@@ -295,8 +295,8 @@ jobs:
       # *_concurrency）留给本地手动跑，避免在 CI 负载下引入偶发红。
       - name: Run testkit contract and C++ interop tests
         run: |
-          . ./tools/msvc-env.ps1
-          . ./tools/sdk-env.ps1
+          . ./scripts/env/msvc-env.ps1
+          . ./scripts/env/sdk-env.ps1
           Set-SdkEnvironment
           Push-Location backend/third-party/ara2-bridge-testkit
           cargo test --locked --features cpp-interop --test cpp_interop
@@ -526,14 +526,14 @@ jobs:
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          chmod +x ./scripts/install_deps_macos.sh || true
-          SKIP_FRONTEND=1 bash ./scripts/install_deps_macos.sh
+          chmod +x ./scripts/setup/install_deps_macos.sh || true
+          SKIP_FRONTEND=1 bash ./scripts/setup/install_deps_macos.sh
         shell: bash
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\setup\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
       # ── SoundTouch source ──────────────────────────────────────────────
@@ -773,7 +773,7 @@ jobs:
           # Builds run natively without --target and use the dist profile, so
           # Workspace artifacts land in backend/target/dist — no triple path.
           # The script detects the artifact directory itself.
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\build\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
 
       # ── LICENSE alongside artifacts ──────────────────────────────────

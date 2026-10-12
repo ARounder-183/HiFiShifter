@@ -15,14 +15,14 @@
    - App 的同步 Tauri 命令在 WebView IPC 线程内联执行，panic 会穿过 Win32
      消息循环 —— 每条同步命令必须包 `commands/common.rs::guard_command`
      （async 命令由 tokio 任务边界结构性遏制，不需要）。
-   - **CI 门禁**：`tools/check-ffi-guards.py`（vst3.yml 第一步）强制以上两条，
+   - **CI 门禁**：`scripts/checks/check-ffi-guards.py`（vst3.yml 第一步）强制以上两条，
      新的无守卫入口直接红。
 2. **锁毒化必须恢复而不是 panic。** 生产代码禁止 `.lock().unwrap()` —— 用
    `MutexExt::lock_or_recover()`（毒化后取回内部数据继续）或
-   `unwrap_or_else(|e| e.into_inner())`。`tools/check-ffi-guards.py` 的基线门禁
-   禁止新增（`tools/baseline-lock-unwrap.txt`，现存 0 处）。
+   `unwrap_or_else(|e| e.into_inner())`。`scripts/checks/check-ffi-guards.py` 的基线门禁
+   禁止新增（`scripts/checks/baseline-lock-unwrap.txt`，现存 0 处）。
 3. **错误语义不靠子串匹配传播。** 禁止新增 `error.contains("...")` 式的分类
-   （基线 `tools/baseline-error-contains.txt`）。协议语义用结构化错误码
+   （基线 `scripts/checks/baseline-error-contains.txt`）。协议语义用结构化错误码
    （`hifishifter-ara-ipc` 的 `Response.code`；notebook 家族的
    `notebook_*` 稳定码），字符串只做展示。
 

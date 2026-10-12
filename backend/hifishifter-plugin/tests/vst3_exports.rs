@@ -20,7 +20,7 @@ fn the_vst3_module_entry_points_are_exported() {
     let output = std::process::Command::new("dumpbin")
         .args(["/exports", dll.to_str().unwrap()])
         .output()
-        .expect("需要 MSVC 的 dumpbin（先点源 tools/msvc-env.ps1）");
+        .expect("需要 MSVC 的 dumpbin（先点源 scripts/env/msvc-env.ps1）");
     assert!(output.status.success(), "dumpbin 失败: {output:?}");
 
     let text = String::from_utf8_lossy(&output.stdout);

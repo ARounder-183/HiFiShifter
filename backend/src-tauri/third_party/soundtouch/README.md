@@ -17,4 +17,4 @@ Packaging paths:
 
 - `build.rs` links against `SoundTouchDLL_x64.lib` and copies `SoundTouchDLL_x64.dll` next to the built binary.
 - `tauri.conf.json` includes `SoundTouchDLL_x64.dll` in bundle resources.
-- `scripts/pack-portable.ps1` includes `SoundTouchDLL_x64.dll` in the portable package.
+- `scripts/build/pack-portable.ps1` includes `SoundTouchDLL_x64.dll` in the portable package.

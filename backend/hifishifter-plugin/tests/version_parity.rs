@@ -2,7 +2,7 @@
 //!
 //! 【为什么需要这条测试】插件的版本是**用户可见**的：ARA 编辑器的「关于」对话框
 //! 报它，安装器把它写进「程序和功能」的 DisplayVersion。而
-//! `scripts/set-version.ps1` 长期只改 App 那四个文件，插件一直停在 `0.1.0` ——
+//! `scripts/release/set-version.ps1` 长期只改 App 那四个文件，插件一直停在 `0.1.0` ——
 //! 于是同一个产品在两个形态里报出两个版本号，安装器记的版本与 App 也对不上。
 //!
 //! 【为什么用测试而不是只改脚本】改脚本只解决"这次改对了"；漏改一次不会有任何
@@ -14,7 +14,7 @@
 //! 2. 其余副本（`tauri.conf.dist-dev.json` / 两个 `Cargo.toml` / `package.json` /
 //!    `package-lock.json`）必须都等于插件的 `CARGO_PKG_VERSION`。
 //!
-//! 任何一处不一致都说明 `scripts/set-version.ps1` 漏了一个文件。
+//! 任何一处不一致都说明 `scripts/release/set-version.ps1` 漏了一个文件。
 
 use std::path::{Path, PathBuf};
 
@@ -95,7 +95,7 @@ fn every_version_source_agrees_with_the_plugin_crate() {
     assert!(
         mismatches.is_empty(),
         "版本号不一致：hifishifter-plugin = {plugin_version}，但 {}。\
-         运行 scripts/set-version.ps1 -Version {plugin_version} 同步全部来源。",
+         运行 scripts/release/set-version.ps1 -Version {plugin_version} 同步全部来源。",
         mismatches.join("、")
     );
 }

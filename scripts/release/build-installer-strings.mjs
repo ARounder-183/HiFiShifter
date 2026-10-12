@@ -11,8 +11,8 @@
  * esbuild 把它编译成 JS 再求值，拿到的是真正的对象。
  *
  * 用法：
- *   node tools/build-installer-strings.mjs           # 生成
- *   node tools/build-installer-strings.mjs --check    # 只校验已生成的文件是否最新
+ *   node scripts/release/build-installer-strings.mjs           # 生成
+ *   node scripts/release/build-installer-strings.mjs --check    # 只校验已生成的文件是否最新
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(scriptDir, "..");
+const repoRoot = resolve(scriptDir, "..", "..");
 const catalogDir = join(repoRoot, "frontend", "src", "i18n");
 const outputPath = join(scriptDir, "installer", "installer_strings.nsh");
 
@@ -118,10 +118,10 @@ async function collectStrings() {
 
 function render({ keys, catalogs }) {
     const lines = [
-        "; 本文件由 tools/build-installer-strings.mjs 生成 —— 不要手工编辑。",
+        "; 本文件由 scripts/release/build-installer-strings.mjs 生成 —— 不要手工编辑。",
         ";",
         "; 文案的唯一来源是 frontend/src/i18n/*.ts 里 installer_ 前缀的词条；",
-        "; 直接改这里会在下一次生成时被覆盖，且 scripts/check-product-consistency.ps1",
+        "; 直接改这里会在下一次生成时被覆盖，且 scripts/checks/check-product-consistency.ps1",
         "; 会因与本文件不一致而失败。",
         "",
         `; 语言：${LANGUAGES.map((entry) => `${entry.locale}→${entry.nsis}`).join("、")}`,
@@ -173,7 +173,7 @@ async function main() {
         const normalized = current?.replace(/^\uFEFF/, "") ?? null;
         if (normalized !== rendered) {
             throw new Error(
-                `${outputPath} is stale; run: node tools/build-installer-strings.mjs`,
+                `${outputPath} is stale; run: node scripts/release/build-installer-strings.mjs`,
             );
         }
         console.log("installer strings are up to date");
@@ -182,7 +182,7 @@ async function main() {
 
     mkdirSync(dirname(outputPath), { recursive: true });
     // UTF-8 **带 BOM**：`makensis /INPUTCHARSET UTF8` 对 BOM 更宽容，且与仓库里
-    // 其它含非 ASCII 的脚本保持一致（见 tools/*.ps1 的处理）。
+    // 其它含非 ASCII 的脚本保持一致（见 scripts/**/*.ps1 的处理）。
     writeFileSync(outputPath, "\uFEFF" + rendered, "utf8");
     console.log(
         `wrote ${outputPath} (${strings.keys.length} keys × ${LANGUAGES.length} languages)`,

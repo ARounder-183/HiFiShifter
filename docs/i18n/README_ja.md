@@ -128,7 +128,7 @@ cd HiFiShifter
 
 ONNX Runtime (DirectML) は ort crate がビルド時に自動的にダウンロードします。追加設定は不要です。
 
-`scripts/install_deps_windows.ps1` を実行することもできます。Chocolatey で NSIS / CMake / LLVM をインストールし、tauri-cli を導入します（Chocolatey が事前にインストールされている必要があります）。
+`scripts/setup/install_deps_windows.ps1` を実行することもできます。Chocolatey で NSIS / CMake / LLVM をインストールし、tauri-cli を導入します（Chocolatey が事前にインストールされている必要があります）。
 
 フロントエンドの依存関係をインストールします：
 
@@ -139,8 +139,8 @@ npm --prefix frontend install
 #### macOS
 
 ```bash
-chmod +x ./scripts/install_deps_macos.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+chmod +x ./scripts/setup/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 ```
 
 #### Linux
@@ -156,8 +156,8 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 ワンクリックインストールスクリプトを実行：
 
 ```bash
-chmod +x ./scripts/install_deps_linux.sh
-bash ./scripts/install_deps_linux.sh
+chmod +x ./scripts/setup/install_deps_linux.sh
+bash ./scripts/setup/install_deps_linux.sh
 ```
 
 このスクリプトはシステム依存関係、Node.js（存在しない場合）、appimagetool、およびフロントエンドの npm 依存関係をインストールします。
@@ -178,7 +178,7 @@ SoundTouch、WORLD、Signalsmith Stretch はいずれもコンパイル時にソ
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 # Verify against the pin: expect e83424d5928ab8513d2d082779c275765dee31b9
-# (tools/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
+# (scripts/env/plugin-sdks.json, soundtouch section; if it differs, delete soundtouch/ and re-clone):
 git -C soundtouch rev-parse HEAD
 ```
 
@@ -195,16 +195,16 @@ cargo tauri build
 
 # Linux AppImage（vslib は Windows 専用のため、デフォルト機能を除外）
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
-# 補助スクリプトも利用可: bash scripts/build-linux-appimage.sh
+# 補助スクリプトも利用可: bash scripts/build/build-linux-appimage.sh
 
 # Windows ポータブル ZIP
-.\scripts\pack-portable.ps1 -SkipBuild
+.\scripts\build\pack-portable.ps1 -SkipBuild
 
 # Windows VST3 ZIP + インストーラー（完全な Release 交付あり）
-.\scripts\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
-`pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/pack-portable.ps1` と `tools/` 配下のビルドスクリプトを参照してください。
+`pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/build/pack-portable.ps1` と `scripts/` 配下のビルドスクリプトを参照してください。
 
 `TAURI_UI_MODE` 環境変数でフロントエンドの起動モードを切り替えられます：
 
