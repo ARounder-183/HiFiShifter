@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 
 use xcb;
+use xcb::x;
 
 /// REAPER's Linux builds (SWELL) expose clipboard formats under this MIME
 /// prefix. Keep the short name as a fallback for older HiFiShifter versions.
@@ -48,32 +49,40 @@ pub fn write_multi(formats: &[(&str, &[u8])]) -> Result<(), String> {
 
 #[derive(Clone)]
 struct ClipboardEntry {
-    target: xcb::Atom,
+    target: x::Atom,
     data: Vec<u8>,
 }
 
 struct IncrTransfer {
-    requestor: xcb::Window,
-    property: xcb::Atom,
-    target: xcb::Atom,
+    requestor: x::Window,
+    property: x::Atom,
+    target: x::Atom,
     pos: usize,
 }
 
 struct X11Atoms {
-    clipboard: xcb::Atom,
-    targets: xcb::Atom,
-    incr: xcb::Atom,
+    clipboard: x::Atom,
+    targets: x::Atom,
+    incr: x::Atom,
 }
 
 struct X11Context {
     connection: xcb::Connection,
-    window: xcb::Window,
+    window: x::Window,
     atoms: X11Atoms,
 }
 
-fn intern_atom(connection: &xcb::Connection, name: &str) -> Result<xcb::Atom, String> {
-    xcb::intern_atom(connection, false, name)
-        .get_reply()
+/// intern 一个 atom。
+///
+/// xcb 1.x 起不再有 `intern_atom()` 这类自由函数：改成发 `x::InternAtom`
+/// 请求拿 cookie，再 `wait_for_reply`。
+fn intern_atom(connection: &xcb::Connection, name: &str) -> Result<x::Atom, String> {
+    let cookie = connection.send_request(&x::InternAtom {
+        only_if_exists: false,
+        name: name.as_bytes(),
+    });
+    connection
+        .wait_for_reply(cookie)
         .map(|reply| reply.atom())
         .map_err(|error| format!("clipboard_x11_atom_failed ({name}): {error:?}"))
 }
@@ -90,21 +99,20 @@ impl X11Context {
                 .roots()
                 .nth(screen as usize)
                 .ok_or_else(|| "clipboard_x11_no_screen".to_string())?;
-            xcb::create_window(
-                &connection,
-                xcb::COPY_FROM_PARENT as u8,
-                window,
-                root.root(),
-                0,
-                0,
-                1,
-                1,
-                0,
-                xcb::WINDOW_CLASS_INPUT_OUTPUT as u16,
-                root.root_visual(),
-                &[(xcb::CW_EVENT_MASK, xcb::EVENT_MASK_PROPERTY_CHANGE)],
-            );
-            connection.flush();
+            connection.send_request(&x::CreateWindow {
+                depth: x::COPY_FROM_PARENT as u8,
+                wid: window,
+                parent: root.root(),
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                border_width: 0,
+                class: x::WindowClass::InputOutput,
+                visual: root.root_visual(),
+                value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+            });
+            let _ = connection.flush();
         }
 
         let atoms = X11Atoms {
@@ -120,7 +128,7 @@ impl X11Context {
         })
     }
 
-    fn get_atom(&self, name: &str) -> Result<xcb::Atom, String> {
+    fn get_atom(&self, name: &str) -> Result<x::Atom, String> {
         intern_atom(&self.connection, name)
     }
 }
@@ -192,10 +200,17 @@ fn write_x11_multi(formats: &[(&str, &[u8])]) -> Result<(), String> {
     let window = owner.context.window;
     let clipboard = owner.context.atoms.clipboard;
 
-    xcb::set_selection_owner(connection, window, clipboard, xcb::CURRENT_TIME);
-    connection.flush();
+    connection.send_request(&x::SetSelectionOwner {
+        owner: window,
+        selection: clipboard,
+        time: x::Time::CurrentTime as u32,
+    });
+    let _ = connection.flush();
 
-    match xcb::get_selection_owner(connection, clipboard).get_reply() {
+    let cookie = connection.send_request(&x::GetSelectionOwner {
+        selection: clipboard,
+    });
+    match connection.wait_for_reply(cookie) {
         Ok(reply) if reply.owner() == window => Ok(()),
         Ok(_) => Err("clipboard_x11_owner_failed".to_string()),
         Err(error) => Err(format!("clipboard_x11_owner_failed: {error:?}")),
@@ -207,20 +222,21 @@ fn x11_serve(
     entries: Arc<RwLock<Vec<ClipboardEntry>>>,
     refresh: Receiver<()>,
 ) {
-    let mut incr_transfers: HashMap<xcb::Atom, IncrTransfer> = HashMap::new();
+    let mut incr_transfers: HashMap<x::Atom, IncrTransfer> = HashMap::new();
 
     loop {
         while let Ok(()) = refresh.try_recv() {
             incr_transfers.clear();
         }
 
-        let Some(event) = context.connection.wait_for_event() else {
+        // xcb 1.x：事件是 `xcb::Event::X(x::Event::…)` 枚举，不再靠
+        // `response_type()` + `cast_event` 手工还原。
+        let Ok(event) = context.connection.wait_for_event() else {
             continue;
         };
 
-        match event.response_type() & !0x80 {
-            xcb::SELECTION_REQUEST => {
-                let event = unsafe { xcb::cast_event::<xcb::SelectionRequestEvent>(&event) };
+        match event {
+            xcb::Event::X(x::Event::SelectionRequest(event)) => {
                 let Ok(current_entries) = entries.read() else {
                     continue;
                 };
@@ -230,15 +246,13 @@ fn x11_serve(
                     let mut targets = Vec::with_capacity(current_entries.len() + 1);
                     targets.push(context.atoms.targets);
                     targets.extend(current_entries.iter().map(|entry| entry.target));
-                    xcb::change_property(
-                        &context.connection,
-                        xcb::PROP_MODE_REPLACE as u8,
-                        event.requestor(),
-                        event.property(),
-                        xcb::ATOM_ATOM,
-                        32,
-                        &targets,
-                    );
+                    context.connection.send_request(&x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window: event.requestor(),
+                        property: event.property(),
+                        r#type: x::ATOM_ATOM,
+                        data: &targets,
+                    });
                     success = true;
                 } else if let Some(entry) = current_entries
                     .iter()
@@ -246,34 +260,29 @@ fn x11_serve(
                 {
                     let max_length = context.connection.get_maximum_request_length() as usize * 4;
                     if entry.data.len() < max_length.saturating_sub(24) {
-                        xcb::change_property(
-                            &context.connection,
-                            xcb::PROP_MODE_REPLACE as u8,
-                            event.requestor(),
-                            event.property(),
-                            event.target(),
-                            8,
-                            &entry.data,
-                        );
+                        context.connection.send_request(&x::ChangeProperty {
+                            mode: x::PropMode::Replace,
+                            window: event.requestor(),
+                            property: event.property(),
+                            r#type: event.target(),
+                            data: &entry.data,
+                        });
                         success = true;
                     } else {
                         // INCR: the requestor deletes the property after each
                         // chunk and we answer with the next chunk on
                         // PropertyNotify(PROPERTY_DELETE).
-                        xcb::change_window_attributes(
-                            &context.connection,
-                            event.requestor(),
-                            &[(xcb::CW_EVENT_MASK, xcb::EVENT_MASK_PROPERTY_CHANGE)],
-                        );
-                        xcb::change_property(
-                            &context.connection,
-                            xcb::PROP_MODE_REPLACE as u8,
-                            event.requestor(),
-                            event.property(),
-                            context.atoms.incr,
-                            32,
-                            &[entry.data.len().min(u32::MAX as usize) as u32],
-                        );
+                        context.connection.send_request(&x::ChangeWindowAttributes {
+                            window: event.requestor(),
+                            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                        });
+                        context.connection.send_request(&x::ChangeProperty {
+                            mode: x::PropMode::Replace,
+                            window: event.requestor(),
+                            property: event.property(),
+                            r#type: context.atoms.incr,
+                            data: &[entry.data.len().min(u32::MAX as usize) as u32],
+                        });
                         incr_transfers.insert(
                             event.property(),
                             IncrTransfer {
@@ -290,26 +299,25 @@ fn x11_serve(
                 let property = if success {
                     event.property()
                 } else {
-                    xcb::ATOM_NONE
+                    x::ATOM_NONE
                 };
-                xcb::send_event(
-                    &context.connection,
-                    false,
+                let notify = x::SelectionNotifyEvent::new(
+                    event.time(),
                     event.requestor(),
-                    0,
-                    &xcb::SelectionNotifyEvent::new(
-                        event.time(),
-                        event.requestor(),
-                        event.selection(),
-                        event.target(),
-                        property,
-                    ),
+                    event.selection(),
+                    event.target(),
+                    property,
                 );
-                context.connection.flush();
+                context.connection.send_request(&x::SendEvent {
+                    propagate: false,
+                    destination: x::SendEventDest::Window(event.requestor()),
+                    event_mask: x::EventMask::empty(),
+                    event: &notify,
+                });
+                let _ = context.connection.flush();
             }
-            xcb::PROPERTY_NOTIFY => {
-                let event = unsafe { xcb::cast_event::<xcb::PropertyNotifyEvent>(&event) };
-                if event.state() != xcb::PROPERTY_DELETE as u8 {
+            xcb::Event::X(x::Event::PropertyNotify(event)) => {
+                if event.state() != x::Property::Delete {
                     continue;
                 }
 
@@ -329,23 +337,20 @@ fn x11_serve(
 
                 let remaining = entry.data.len().saturating_sub(transfer.pos);
                 let chunk_len = remaining.min(INCR_CHUNK_SIZE);
-                xcb::change_property(
-                    &context.connection,
-                    xcb::PROP_MODE_REPLACE as u8,
-                    transfer.requestor,
-                    transfer.property,
-                    transfer.target,
-                    8,
-                    &entry.data[transfer.pos..transfer.pos + chunk_len],
-                );
+                context.connection.send_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: transfer.requestor,
+                    property: transfer.property,
+                    r#type: transfer.target,
+                    data: &entry.data[transfer.pos..transfer.pos + chunk_len],
+                });
                 transfer.pos += chunk_len;
                 if chunk_len == 0 {
                     incr_transfers.remove(&event.atom());
                 }
-                context.connection.flush();
+                let _ = context.connection.flush();
             }
-            xcb::SELECTION_CLEAR => {
-                let event = unsafe { xcb::cast_event::<xcb::SelectionClearEvent>(&event) };
+            xcb::Event::X(x::Event::SelectionClear(event)) => {
                 if event.selection() == context.atoms.clipboard {
                     if let Ok(mut current_entries) = entries.write() {
                         current_entries.clear();

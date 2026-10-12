@@ -85,7 +85,7 @@ libc = "0.2"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-xcb = { version = "0.8", features = ["thread"] }
+xcb = "1.7"
 wl-clipboard-rs = "0.9"
 
 [features]
