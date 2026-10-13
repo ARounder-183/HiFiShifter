@@ -822,6 +822,8 @@ impl DocumentSession {
         let now = std::time::Instant::now();
         let mut pending_since = self.pending_since.lock_or_recover();
         let mut seen = std::collections::HashSet::new();
+        // 这一趟载荷里出现过的 id（item GUID 或 clip id）。见 `retain` 处的说明。
+        let mut present = std::collections::HashSet::new();
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
@@ -881,13 +883,11 @@ impl DocumentSession {
                         // 超期后**继续**保留起点：否则下一次进来会重新 `or_insert(now)`，
                         // 状态在 `pending` / `unavailable` 之间来回跳。
                         //
-                        // 【为什么 `waiting` 必须是 `false`】`waiting` 唯一的作用就是
-                        // 决定这一条要不要进 `seen`（见下面 `if !waiting { seen.insert }`），
-                        // 而 `seen` 决定 TTL 回收谁。此前这里给的是 `true` ⇒ 超期项不进
-                        // `seen` ⇒ 20 s 后被 TTL 删掉 ⇒ 下一轮 `or_insert(now)` 重新计时
-                        // ⇒ **状态每 20 s 在 pending / unavailable 之间横跳，永不收敛**
-                        // —— 与这行注释宣称的"继续保留起点"正好相反。
-                        ("unavailable", Some(reason), false)
+                        // 【`waiting = true` 是刻意的】`waiting` 决定这一条要不要进 `seen`，
+                        // 而 `seen` 的语义是"**清掉**它的计时"（settled）。超期项不是 settled：
+                        // 它的起点必须留着，否则下一轮重新计时 ⇒ 又变回 `pending`。
+                        // 它真正需要的保护在下面 `retain` 的 `present` 条件里 —— 见那里的说明。
+                        ("unavailable", Some(reason), true)
                     }
                 };
                 clip["host_media"] = serde_json::json!(state);
@@ -895,8 +895,13 @@ impl DocumentSession {
                     clip["host_media_reason"] = serde_json::json!(reason);
                 }
                 if !waiting {
-                    seen.insert(item_id);
+                    seen.insert(item_id.clone());
                 }
+                // 【为什么要单独一份 `present`】`seen` 是"清计时"集合，而"这一趟还在载荷里"
+                // 是另一件事。TTL 只能回收**从载荷里消失**的条目；把两者混用会让"超期但仍
+                // 在载荷里"的条目被 20 s 后删掉、起点重置 ⇒ 状态在 pending / unavailable
+                // 之间横跳（正是上面注释要避免的）。
+                present.insert(item_id);
             }
         }
         // 【H2：所有宿主共有的媒体事实】上面那趟遍历挂在 `ui_tracks` 上，而它只在
@@ -917,8 +922,23 @@ impl DocumentSession {
         {
             let clips = payload["clips"].as_array_mut();
             if let Some(clips) = clips {
+                // 【锁序红线】`regions` 必须先于 `source_failures`（见 `document.rs` 声明的
+                // 层级，`media_in_flight_items` 也是这个顺序）。若在持有
+                // `source_failures` 时去取 `regions`，就与那条路径构成 ABBA。
+                // 所以先把 region→source 映射**取完再释放**，然后才锁 `source_failures`。
+                //
+                // 【为什么不再锁 `pending_since`】它在本函数**开头**就已经被取走并持有到
+                // 结束（见 `let mut pending_since = ...`），标准库的 `Mutex` 不可重入 ——
+                // 在这里再锁一次会当场自锁。实现这一趟时正是这样写的第一版，实测让整份
+                // 测试套件挂死在 `undo_group_diagnostic::…` 上（同一线程二次加锁）。
+                // 直接复用外层那个 guard。
+                let region_source: std::collections::HashMap<u64, String> = self
+                    .regions
+                    .lock_or_recover()
+                    .iter()
+                    .map(|(key, region)| (*key, region.audio_source_persistent_id.clone()))
+                    .collect();
                 let failures = self.source_failures.lock_or_recover();
-                let mut pending_since = self.pending_since.lock_or_recover();
                 let now = std::time::Instant::now();
                 for clip in clips.iter_mut() {
                     if clip.get("host_media").is_some() {
@@ -932,17 +952,13 @@ impl DocumentSession {
                         .is_some_and(|path| !path.is_empty());
                     if has_source {
                         clip["host_media"] = serde_json::json!("ready");
+                        // 拿到音频 ⇒ settled：清掉计时，否则下次掉回"在途"会立刻超期。
                         pending_since.remove(&id);
                         continue;
                     }
-                    // 源身份：clip id 由 region key 派生，用它反查 ARA 源。
+                    // 源身份：clip id 由 region key 派生，用它反查 ARA 源（映射已先取好）。
                     let failed = crate::render::document::parse_region_key_from_clip_id(&id)
-                        .and_then(|key| {
-                            self.regions
-                                .lock_or_recover()
-                                .get(&key)
-                                .map(|region| region.audio_source_persistent_id.clone())
-                        })
+                        .and_then(|key| region_source.get(&key).cloned())
                         .is_some_and(|source| failures.contains_key(&source));
                     if failed {
                         clip["host_media"] = serde_json::json!("unavailable");
@@ -959,12 +975,9 @@ impl DocumentSession {
                         clip["host_media"] = serde_json::json!("unavailable");
                         clip["host_media_reason"] = serde_json::json!("awaiting_region");
                     }
-                    // 【为什么三种态都要进 `seen`】`seen` 的语义是"这一趟在载荷里出现过"
-                    // —— 它决定 TTL 回收谁。只把终态放进去会让 `pending` 每 20 s 被回收
-                    // 一次、起点重置 ⇒ 状态在 pending/unavailable 之间横跳（正是上一条
-                    // 注释要避免的）。放进 `seen` 后，TTL 只回收**从载荷里消失**的 clip，
-                    // 那才是它该管的事。
-                    seen.insert(id.clone());
+                    // 仍在等（`pending` / 超期的 `unavailable`）⇒ 起点必须留着，所以只进
+                    // `present`（"还在载荷里"），不进 `seen`（"清计时"）。
+                    present.insert(id.clone());
                 }
             }
         }
@@ -974,8 +987,18 @@ impl DocumentSession {
         // TTL：在途判定本身只用 2 s（`PENDING_MEDIA_TIMEOUT`），20 s 还没再出现就说明
         // 它确实不会再来了。
         let stale_after = PENDING_MEDIA_TIMEOUT * 10;
-        pending_since
-            .retain(|id, since| !seen.contains(id) && now.duration_since(*since) < stale_after);
+        pending_since.retain(|id, since| {
+            // settled（拿到源 / 终态原因）⇒ 清计时。
+            if seen.contains(id) {
+                return false;
+            }
+            // 【为什么还要看 `present`】这一趟仍在载荷里的条目必须保留起点 —— 否则
+            // "超期未认领"的条目会在 20 s 后被删掉、下一轮 `or_insert(now)` 重新计时，
+            // 状态在 `pending` / `unavailable` 之间每 20 s 横跳一次，永不收敛
+            // （用户看到占位在"转圈"和"报错"之间闪）。TTL 的职责只是回收**从载荷里
+            // 消失**的条目。
+            present.contains(id) || now.duration_since(*since) < stale_after
+        });
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
         // 语言无关地报出数量与原因码，文案由前端 catalog 本地化。
         let skipped = self.skipped_regions.lock_or_recover();
@@ -1073,20 +1096,27 @@ impl DocumentSession {
         //
         // 这里在没有原生宿主时改用 ARA 侧的同一份在途计数（`media_in_flight_items`，
         // 与 `state()` 同源），让两个读数一致。
-        let (state, waiting) = if owner.native_host().is_some() {
-            (status.state, status.waiting_items)
-        } else {
+        // 【为什么是"补充"而不是"替换"】没有原生扩展时 `host_audio_status` 的**唯一**
+        // 写者（`refresh_ui_inventory`）早退，所以它在 Cubase / Nuendo / Studio One 上
+        // 恒为默认的 `Ready`（waiting 0）—— "一条 region 都没匹配上"也被报成一切正常，
+        // 而左下角却在转圈（`EditorSession::state` 用的是另一条 ARA 读数），两个读数
+        // 互相矛盾。
+        //
+        // 但**不能**因此丢掉宿主报的读数：`FolderParentWithoutRegions` 这类状态是宿主
+        // 侧的真实分类（且 `host_audio_status` 允许被直接设置），替换掉它会把"这组永远
+        // 拿不到音频"重新说成"正常"。所以只在宿主报 `Ready` 时用 ARA 在途数**上调**。
+        let mut state = status.state;
+        let mut waiting = status.waiting_items;
+        if state == crate::render::extension::HostAudioState::Ready {
             let timeline = self.timeline.lock_or_recover();
-            let waiting = timeline
+            let in_flight = timeline
                 .as_ref()
                 .map_or(0, |timeline| self.media_in_flight_items(timeline));
-            let state = if waiting == 0 {
-                crate::render::extension::HostAudioState::Ready
-            } else {
-                crate::render::extension::HostAudioState::AwaitingRegions
-            };
-            (state, waiting)
-        };
+            if in_flight > 0 {
+                state = crate::render::extension::HostAudioState::AwaitingRegions;
+                waiting = in_flight;
+            }
+        }
         // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
         // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
         // 里是为了复用前端已有的读数通道，不必新增一条状态链。
