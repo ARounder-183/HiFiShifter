@@ -159,17 +159,17 @@ pub struct AraPlaybackRegion {
 /// | [`LostField::FadeLength`] | `project_ui_fades_locked`（`D_FADE*LEN`） |
 /// | [`LostField::LoopSource`] | `project_host_take_facts_locked`（item 级 `B_LOOPSRC`） |
 /// | [`LostField::ItemGain`] | `display_item_gain`（`D_VOL`） |
-/// | [`LostField::TempoMap`] | 仅**单点**：VST3 `ProcessContext` 播放位置处的 tempo（见下） |
+/// | [`LostField::TempoMap`] | 宿主 ARA 音乐上下文的 `Tempo` / `BarSignatures` 内容（`read_host_musical_content`）；读不到时退回 VST3 `ProcessContext` 的单点 tempo |
 /// | [`LostField::SourceFileFingerprint`] | `Clip::source_file_fingerprint`（宿主文件名 + 内容版本） |
 ///
-/// 【TempoMap 的现状与上表不符的历史】`editor/session.rs` 的补回链只取
-/// `ProcessContext` 里**播放位置处的单点 tempo** 写进 `timeline.bpm`；宿主经 ARA
-/// musical context 给出的多点 Tempo/BarSignature 内容目前零消费
-/// （`model.rs::probe_host_musical_content` 只记条数日志），多点 tempo map 由插件
-/// 设置 + 单点 bpm 合成。含 tempo map 的工程里，小节/拍网格与 musical-time 投影
-/// 因此是近似的（只有 playhead 处是对的）；秒域换算不受影响 —— 曲线 basis 存源
-/// 坐标，与 tempo 无关。真消费多点 tempo map 时应把它折进渲染缓存键
-/// （`PreparedVersion`）。
+/// 【TempoMap 现在怎么补】`create_musical_context` 与 `update_musical_context_content`
+/// 调 `read_host_musical_content` 读入宿主的 `Tempo` / `BarSignatures`，存进
+/// `DocumentSession::host_tempo_map`。投影（`project_plugin_musical_context_locked`）
+/// 按每个音阶点的**位置**取该处的宿主 BPM 与拍号，而不是全曲一个值；该 map 同时是
+/// 投影缓存键的一部分，因此宿主变速会立刻重建网格。读不到内容时退回
+/// `ProcessContext` 的单点 tempo（`host_meter`），行为与改动前一致。
+///
+/// 秒域换算不受影响 —— 曲线 basis 存源坐标，与 tempo 无关。
 ///
 /// 【关键限定：这张表的补回点全是**原生扩展**】ARA 2.x 本身**没有**方向位、循环源、
 /// 声道模式、item 增益这些概念（`ARAPlaybackRegion` 只给四段几何、`isTimestretchEnabled`
@@ -192,7 +192,13 @@ pub enum LostField {
     FadeLength,
     /// Loop source。
     LoopSource,
-    /// Tempo Map（需经 content reader 另取）。
+    /// Tempo Map。
+    ///
+    /// 【为什么仍留在表里】它**不是**"ARA 表达不到"的字段 —— `Tempo` / `BarSignatures`
+    /// 是 ARA 2.0 的一等内容类型，插件现在真的读它（`read_host_musical_content`）。
+    /// 留在表里的理由是这张表的另一个用途：它是"哪些输入依赖宿主扩展"的出处。
+    /// Tempo map 依赖的是**内容读取**（另一种宿主扩展），与方向位/循环源那几项同属
+    /// "宿主不给就只能降级"，因此一并登记，只是补回点不同。
     TempoMap,
     /// Item / Take 增益。
     ItemGain,

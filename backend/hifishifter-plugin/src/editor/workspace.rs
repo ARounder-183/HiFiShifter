@@ -1288,9 +1288,11 @@ impl DocumentSession {
     /// 两条路径都经过它），而 `settings()` 会克隆整份 `UiSettings`。命中缓存时
     /// 只付一次原子读 + 一次互斥。
     pub(crate) fn project_plugin_musical_context_locked(&self, timeline: &mut TimelineState) {
+        let host_tempo_map = self.host_tempo_map.lock_or_recover().clone();
         let key = crate::render::document::MusicalProjectionKey::new(
             crate::settings_store::revision(),
             *self.host_meter.lock_or_recover(),
+            host_tempo_map.clone(),
         );
         let mut cache = self.musical_projection.lock_or_recover();
         if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
@@ -1303,6 +1305,30 @@ impl DocumentSession {
                     meter.numerator,
                     meter.denominator,
                 );
+            // 【为什么要在这里覆盖】内核按**单点**宿主 bpm 给每个音阶点填速度。宿主经
+            // ARA 给出多点 tempo map 时，那个单点值只在 playhead 处对 —— 每个点应当取
+            // **该点位置处**的宿主速度。这里在插件侧按位置逐点改写，因此不需要改内核的
+            // 投影签名（它仍然负责音阶点的生成与排序）。
+            let tempo_map = match (tempo_map, host_tempo_map.as_ref()) {
+                (Some(mut points), Some(host_map)) => {
+                    for point in &mut points {
+                        if let Some(bpm) = host_map.bpm_at(point.position_sec) {
+                            if bpm.is_finite() && bpm > 0.0 {
+                                point.bpm = bpm;
+                            }
+                        }
+                        // 拍号同理：取该点位置处的宿主拍号，而不是全曲一个。
+                        if let Some((numerator, denominator)) =
+                            host_map.meter_at(point.position_sec)
+                        {
+                            point.numerator = Some(numerator);
+                            point.denominator = Some(denominator);
+                        }
+                    }
+                    Some(points)
+                }
+                (points, _) => points,
+            };
             *cache = Some((
                 key,
                 crate::render::document::PluginMusicalProjection {

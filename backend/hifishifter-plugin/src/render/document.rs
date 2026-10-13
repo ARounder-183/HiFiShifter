@@ -198,6 +198,14 @@ pub(crate) struct DocumentSession {
     /// `workspace_timeline_locked` 里跑（`DocumentSession` 上），那里读不到
     /// per-view 的 `ProjectState`。
     pub host_meter: Mutex<HostMeter>,
+    /// 宿主经 ARA 音乐上下文给出的真实 tempo map 与拍号。
+    ///
+    /// 【为什么在文档上】它是**文档级**音乐事实（整个工程一份），不是某个 renderer 的
+    /// 属性；而投影缓存（`musical_projection`）与 `host_meter` 也在文档上 —— 三者必须
+    /// 同源，否则缓存键会漏掉 tempo map 的变化。
+    ///
+    /// `None` = 宿主没提供（或读取失败），投影退回 VST3 的单点 tempo。
+    pub host_tempo_map: Mutex<Option<crate::ara::model::HostTempoMap>>,
     /// 插件自有音乐上下文的投影缓存，键是"输入代次"（见
     /// [`DocumentSession::project_plugin_musical_context_locked`]）。
     pub musical_projection: Mutex<Option<(MusicalProjectionKey, PluginMusicalProjection)>>,
@@ -253,21 +261,31 @@ impl Default for HostMeter {
 ///
 /// 【为什么宿主读数也在键里】BPM/拍号变化不经过设置写入，只看设置代次会让
 /// Tempo Map 的宿主轴停在旧读数上。
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// 【为什么 tempo map 也在键里】宿主经 ARA 给出的多点 tempo map 是**独立于**单点
+/// `host_meter` 的另一条读数（`host_meter` 来自 VST3 `ProcessContext`）。它变了而键
+/// 不变的话，投影会一直用旧速度 —— 用户改工程速度后插件里的小节网格纹丝不动。
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MusicalProjectionKey {
     settings: u64,
     bpm_bits: u64,
     numerator: u32,
     denominator: u32,
+    tempo_map: Option<crate::ara::model::HostTempoMap>,
 }
 
 impl MusicalProjectionKey {
-    pub(crate) fn new(settings: u64, meter: HostMeter) -> Self {
+    pub(crate) fn new(
+        settings: u64,
+        meter: HostMeter,
+        tempo_map: Option<crate::ara::model::HostTempoMap>,
+    ) -> Self {
         Self {
             settings,
             bpm_bits: meter.bpm.to_bits(),
             numerator: meter.numerator,
             denominator: meter.denominator,
+            tempo_map,
         }
     }
 }
@@ -371,6 +389,22 @@ impl DocumentSession {
                 .unwrap_or_else(|| format!("ara-region-{key}")),
         )
     }
+    /// 记录宿主经 ARA 给出的 tempo map；`None` 表示宿主没提供。
+    ///
+    /// 【为什么要比较再写】投影缓存以它为键的一部分，而宿主可能在每次
+    /// `updateMusicalContextContent` 上重复给同一份内容 —— 无条件写会让缓存永远失效、
+    /// 每帧重建 tempo 点。
+    pub(crate) fn set_host_tempo_map(&self, map: Option<crate::ara::model::HostTempoMap>) {
+        let mut slot = self.host_tempo_map.lock_or_recover();
+        if *slot == map {
+            return;
+        }
+        *slot = map;
+        drop(slot);
+        // tempo map 变了 ⇒ 音乐投影必须重建（缓存键含它，这里只是立刻让读数可见）。
+        log::info!("[ara] host tempo map updated");
+    }
+
     /// 编码 ARA 存档载荷（文档级）。
     ///
     /// 【为什么文档级而不是 per-renderer】`storeDocumentToArchive` 是**文档控制器**的

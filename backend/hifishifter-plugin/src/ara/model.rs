@@ -842,7 +842,12 @@ impl MusicalContexts for ModelHandle {
             name: properties.name().map(str::to_owned),
             region_sequences: Vec::new(),
         });
-        probe_host_musical_content(host);
+        // 【为什么要在这里真读】宿主经 ARA 给出的 tempo map / 拍号是音乐上下文的权威
+        // 内容，而 `createMusicalContext` 是它唯一可靠的到达点（有些宿主不会为内容的
+        // 变化单独发 `updateMusicalContextContent`）。读不到时保持 `None`，
+        // 投影退回 VST3 的单点 tempo。
+        self.session
+            .set_host_tempo_map(read_host_musical_content(host));
         Ok(())
     }
 
@@ -866,20 +871,22 @@ impl MusicalContexts for ModelHandle {
         _state: &mut Self::MusicalContext,
         range: Option<ContentTimeRange>,
         flags: ContentUpdateScopes,
-        _host: &HostContentScope<'_, '_>,
+        host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         // 【为什么必须实现】宿主**改工程速度**走的就是这个回调。此前落默认空实现，
         // 于是变速后插件既不知道 tempo map 变了、也不会重算已发布 region 的拉伸比
         // （`playback_rate` 只在宿主重推 region 几何时才会更新）。
         //
-        // 这里不读内容本身（多点 tempo map 的消费是独立一项，见 `probe_host_musical_content`
-        // 的取证结论），但**必须**标脏：下一次刷新会重算映射，至少让 region 的
-        // musical-time 投影与 bpm 跟上。
+        // 这里重读 tempo map：投影缓存以它为键，重读即失效，下一次投影就会用新速度
+        // 重建 tempo 点与拍号网格。同时 `playback_rate` 的更正依赖宿主重推 region
+        // 几何 —— 那一条由 `update_playback_region` 负责，与这里互补。
         log::info!(
             "[ara] musical_context content updated: range={:?} scopes={:?}",
             range,
             flags
         );
+        self.session
+            .set_host_tempo_map(read_host_musical_content(host));
         self.sync_session_derived_tables();
         Ok(())
     }
@@ -909,10 +916,88 @@ impl MusicalContexts for ModelHandle {
 /// 【为什么只记"有没有、几条"】`HostContentScope` 是 `!Send`，只在本次回调内有效，
 /// 而且读事件要按类型逐个解包 —— 先拿到"宿主提供 / 不提供"这一条事实就够决定
 /// 方案形状；真正消费（微分求 BPM、合并拍号）等这一条事实出来再做。
-fn probe_host_musical_content(host: &HostContentScope<'_, '_>) {
+/// 宿主经 ARA 音乐上下文给出的**真实** tempo map 与拍号。
+///
+/// 【为什么必须真读】此前 `probe_host_musical_content` 只把条数记进日志，于是插件只用
+/// VST3 `ProcessContext` 的**单点** tempo —— 带 tempo map 的工程里，小节/拍网格与
+/// musical-time 投影只有 playhead 处是对的。而 `Tempo` / `BarSignatures` 是 ARA 2.0 的
+/// 一等内容类型（`ARAContentTempoEntry` / `ARAContentBarSignature`），拿得到就该用。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HostTempoMap {
+    /// `(位置秒, BPM)`，按位置升序。
+    pub tempo: Vec<(f64, f64)>,
+    /// `(位置秒, 分子, 分母)`，按位置升序。
+    pub meter: Vec<(f64, u32, u32)>,
+}
+
+impl HostTempoMap {
+    /// 指定时刻的 BPM（取不晚于该时刻的最后一个点；早于第一个点则取第一个）。
+    pub(crate) fn bpm_at(&self, position_sec: f64) -> Option<f64> {
+        self.tempo
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= position_sec + 1e-9)
+            .or_else(|| self.tempo.first())
+            .map(|(_, bpm)| *bpm)
+    }
+
+    /// 指定时刻的拍号（同上口径）。
+    pub(crate) fn meter_at(&self, position_sec: f64) -> Option<(u32, u32)> {
+        self.meter
+            .iter()
+            .rev()
+            .find(|(at, _, _)| *at <= position_sec + 1e-9)
+            .or_else(|| self.meter.first())
+            .map(|(_, numerator, denominator)| (*numerator, *denominator))
+    }
+
+    /// 是否含任何可用读数。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.tempo.is_empty() && self.meter.is_empty()
+    }
+}
+
+/// 把"四分音符位置"换算成秒。
+///
+/// 【为什么要换算】`ARAContentTempoEntry` 同时给秒与四分音符位置，而
+/// `ARAContentBarSignature` **只给四分音符位置**。拍号点要落到时间线上，就必须先用
+/// tempo 分段把它折成秒。
+///
+/// 【为什么分段线性】tempo map 的语义就是"每两个相邻 tempo 点之间速度恒定"，
+/// 所以段内 `秒 = 段起点秒 + (q − 段起点q) × 60 / bpm`。
+fn quarters_to_seconds(tempo: &[(f64, f64, f64)], quarter: f64) -> Option<f64> {
+    // `tempo` 是 `(秒, 四分音符, bpm)`，按四分音符升序。
+    let first = tempo.first()?;
+    if quarter <= first.1 {
+        return Some(first.0);
+    }
+    for pair in tempo.windows(2) {
+        let (sec0, q0, bpm) = pair[0];
+        let (sec1, q1, _) = pair[1];
+        if quarter <= q1 {
+            if bpm <= 0.0 {
+                return Some(sec0);
+            }
+            return Some(sec0 + (quarter - q0) * 60.0 / bpm);
+        }
+        let _ = sec1;
+    }
+    // 落在最后一个点之后：按最后一段的速度外推。
+    let (sec, q, bpm) = *tempo.last()?;
+    if bpm <= 0.0 {
+        return Some(sec);
+    }
+    Some(sec + (quarter - q) * 60.0 / bpm)
+}
+
+/// 读取宿主的 tempo map 与拍号；读不到就返回 `None`（调用方退回单点 tempo）。
+///
+/// 【为什么保留 grade 日志】"宿主提不提供内容"是宿主差异的第一手证据，而读取本身
+/// 可能失败。两者分开记，下一次排障时一眼能看出是"宿主不给"还是"我们没读"。
+fn read_host_musical_content(host: &HostContentScope<'_, '_>) -> Option<HostTempoMap> {
     let Some(context) = host.current_musical_context() else {
-        log::info!("[ara][probe] musical content: no current context in this scope");
-        return;
+        log::info!("[ara] musical content: no current context in this scope");
+        return None;
     };
     for (name, grade) in [
         ("tempo", host.musical_context_grade::<Tempo>(context)),
@@ -926,19 +1011,95 @@ fn probe_host_musical_content(host: &HostContentScope<'_, '_>) {
         ),
     ] {
         match grade {
-            Ok(grade) => log::info!("[ara][probe] musical content {name}: grade={grade:?}"),
-            Err(error) => {
-                log::info!("[ara][probe] musical content {name}: unavailable ({error})")
-            }
+            Ok(grade) => log::info!("[ara] musical content {name}: grade={grade:?}"),
+            Err(error) => log::info!("[ara] musical content {name}: unavailable ({error})"),
         }
     }
+
+    // tempo 点：`(秒, 四分音符, bpm)`。BPM 由相邻两点推出（段内速度恒定）。
+    let mut raw_tempo: Vec<(f64, f64, f64)> = Vec::new();
     match host.musical_context::<Tempo>(context, None) {
-        Ok(reader) => log::info!("[ara][probe] tempo entries: {}", reader.len()),
-        Err(error) => log::info!("[ara][probe] tempo entries unavailable: {error}"),
+        Ok(mut reader) => {
+            for index in 0..reader.len() {
+                let Ok(event) = reader.event(index) else {
+                    continue;
+                };
+                raw_tempo.push((event.time_position(), event.quarter_position(), 0.0));
+            }
+        }
+        Err(error) => log::info!("[ara] tempo entries unavailable: {error}"),
     }
+    raw_tempo.sort_by(|a, b| a.1.total_cmp(&b.1));
+    raw_tempo.dedup_by(|a, b| (a.1 - b.1).abs() < 1e-9);
+    for index in 0..raw_tempo.len() {
+        let bpm = if index + 1 < raw_tempo.len() {
+            let (sec0, q0, _) = raw_tempo[index];
+            let (sec1, q1, _) = raw_tempo[index + 1];
+            let dq = q1 - q0;
+            let dt = sec1 - sec0;
+            if dq > 1e-9 && dt > 1e-9 {
+                60.0 * dq / dt
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        raw_tempo[index].2 = bpm;
+    }
+    // 最后一段没有后继点：沿用前一段的速度（tempo map 的常规外推）。
+    if raw_tempo.last().is_some_and(|(_, _, bpm)| *bpm <= 0.0) {
+        // 先取前一段的速度，再写最后一个点 —— 同时借可变与不可变会借用冲突。
+        let previous = raw_tempo
+            .iter()
+            .rev()
+            .find(|(_, _, bpm)| *bpm > 0.0)
+            .map(|(_, _, bpm)| *bpm)
+            .unwrap_or(0.0);
+        if let Some(last) = raw_tempo.last_mut() {
+            last.2 = previous;
+        }
+    }
+    let tempo: Vec<(f64, f64)> = raw_tempo
+        .iter()
+        .filter(|(_, _, bpm)| *bpm > 0.0)
+        .map(|(sec, _, bpm)| (*sec, *bpm))
+        .collect();
+
+    // 拍号点只给四分音符位置：先折成秒再落到时间线上。
+    let mut meter: Vec<(f64, u32, u32)> = Vec::new();
     match host.musical_context::<BarSignatures>(context, None) {
-        Ok(reader) => log::info!("[ara][probe] bar signatures: {}", reader.len()),
-        Err(error) => log::info!("[ara][probe] bar signatures unavailable: {error}"),
+        Ok(mut reader) => {
+            for index in 0..reader.len() {
+                let Ok(event) = reader.event(index) else {
+                    continue;
+                };
+                let Some(sec) = quarters_to_seconds(&raw_tempo, event.position()) else {
+                    continue;
+                };
+                let numerator = u32::try_from(event.numerator()).unwrap_or(0);
+                let denominator = u32::try_from(event.denominator()).unwrap_or(0);
+                if numerator == 0 || denominator == 0 {
+                    continue;
+                }
+                meter.push((sec, numerator, denominator));
+            }
+        }
+        Err(error) => log::info!("[ara] bar signatures unavailable: {error}"),
+    }
+    meter.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let map = HostTempoMap { tempo, meter };
+    if map.is_empty() {
+        log::info!("[ara] musical content: the host supplied no tempo or bar-signature entries");
+        None
+    } else {
+        log::info!(
+            "[ara] musical content: {} tempo point(s), {} bar signature(s)",
+            map.tempo.len(),
+            map.meter.len()
+        );
+        Some(map)
     }
 }
 
@@ -2466,6 +2627,42 @@ mod tests {
         PlaybackRegions::destroy_playback_region(&mut model, 0);
         model.remap_and_log();
         assert!(model.timeline().unwrap().clips.is_empty());
+    }
+
+    /// **宿主 tempo map 的位置查询与四分音符→秒换算必须正确。**
+    ///
+    /// 【为什么这是回归测试】此前 `probe_host_musical_content` 只把条数记进日志，插件
+    /// 只用 VST3 的单点 tempo —— 带 tempo map 的工程里，小节/拍网格只有 playhead 处对。
+    /// 现在真读：tempo 点给出 `(秒, 四分音符)`，BPM 由相邻两点推出；而拍号点**只给
+    /// 四分音符位置**，必须用 tempo 分段折成秒才能落到时间线上。
+    #[test]
+    fn host_tempo_and_bar_signatures_resolve_by_position() {
+        // 120 BPM 一段：每四分音符 0.5 秒。四分音符 0 → 0.0 s，4 → 2.0 s。
+        let raw = vec![(0.0, 0.0, 120.0), (2.0, 4.0, 120.0)];
+        assert_eq!(quarters_to_seconds(&raw, 0.0), Some(0.0));
+        assert_eq!(quarters_to_seconds(&raw, 2.0), Some(1.0));
+        assert_eq!(quarters_to_seconds(&raw, 4.0), Some(2.0));
+        // 末点之后按最后一段速度外推：四分音符 6 → 3.0 s。
+        assert_eq!(quarters_to_seconds(&raw, 6.0), Some(3.0));
+        // 首点之前夹到首点。
+        assert_eq!(quarters_to_seconds(&raw, -1.0), Some(0.0));
+        // 没有 tempo 点时无从换算。
+        assert_eq!(quarters_to_seconds(&[], 1.0), None);
+
+        let map = HostTempoMap {
+            tempo: vec![(0.0, 120.0), (2.0, 60.0)],
+            meter: vec![(0.0, 4, 4), (2.0, 3, 4)],
+        };
+        // 取"不晚于该时刻的最后一个点"。
+        assert_eq!(map.bpm_at(-1.0), Some(120.0));
+        assert_eq!(map.bpm_at(1.0), Some(120.0));
+        assert_eq!(map.bpm_at(2.0), Some(60.0));
+        assert_eq!(map.bpm_at(99.0), Some(60.0));
+        assert_eq!(map.meter_at(0.5), Some((4, 4)));
+        assert_eq!(map.meter_at(2.5), Some((3, 4)));
+        assert!(!map.is_empty());
+        assert!(HostTempoMap::default().is_empty());
+        assert_eq!(HostTempoMap::default().bpm_at(0.0), None);
     }
 
     /// **mutation 回调必须立刻更新 session 的派生表，不等 `endEditing`。**
