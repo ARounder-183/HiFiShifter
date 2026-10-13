@@ -51,6 +51,32 @@ pub(crate) struct RenderInput {
     /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters: BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
 }
+/// 一段混音请求（播放快照与导出共用）。
+///
+/// 【为什么打包】这七个值在两条路径上逐一对应，分开传参数会让
+/// "导出路径少传一个拉伸算法"这类差异看不出来。打包之后两边共用
+/// 同一个口径，漂移会直接变成编译错误。
+struct MixRequest<'a> {
+    timeline: &'a TimelineState,
+    sources: &'a HashMap<String, MixdownPcm>,
+    start_sec: f64,
+    end_sec: f64,
+    sample_rate: u32,
+    cancel: &'a Arc<AtomicBool>,
+    progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
+}
+
+/// 一次导出请求：范围 + 编码目标。
+pub(crate) struct ExportRequest<'a> {
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub output_path: &'a std::path::Path,
+    pub spec: &'a hifishifter_kernel::encode::OutputSpec,
+    pub sample_rate: u32,
+    pub cancel: Arc<AtomicBool>,
+    pub progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
+}
+
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
     pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<PlaybackSnapshot>, String> {
@@ -281,39 +307,135 @@ impl RenderInput {
                 });
                 continue;
             }
-            let run = |view: &TimelineState, lo: f64, hi: f64| {
-                let options = MixdownOptions {
-                    sample_rate,
-                    start_sec: lo,
-                    end_sec: Some(hi),
-                    // 【为什么读内核的解析器而不是写死 SoundTouch】拉伸算法是**用户设置**
-                    // （插件通过 `update_project_stretch_overrides` 收下它，与独立 App
-                    // 共用同一份运行时设置）。此前这里硬编码 `SoundTouchDll`，于是用户在
-                    // 插件里改拉伸算法菜单**毫无效果** —— 一个看起来生效、实际被忽略的
-                    // 设置，比一个明确禁用掉的菜单更糟。解析口径与 App 完全一致：同一个
-                    // `resolved_external_stretch_algorithm()`。
-                    stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(
-                    ),
-                    apply_pitch_edit: true,
-                    output: hifishifter_kernel::encode::OutputSpec::wav_32f(),
-                    quality_preset: QualityPreset::Export,
-                    cancel_flag: Some(cancel.clone()),
-                    progress: progress.clone(),
-                    cache_stats: None,
-                };
-                render_mixdown_with_pcm(view, options, &input)
+            let samples = self.mix_interleaved(MixRequest {
+                timeline,
+                sources: &input,
+                start_sec: start,
+                end_sec: end,
+                sample_rate,
+                cancel: &cancel,
+                progress: progress.clone(),
+            })?;
+            debug_assert_eq!(samples.len(), frames * 2);
+            snapshots.push(PlaybackSnapshot {
+                sample_rate,
+                origin_sample: (start * sample_rate as f64).round() as i64,
+                left: samples.iter().step_by(2).copied().collect(),
+                right: samples.iter().skip(1).step_by(2).copied().collect(),
+                _reservation: Some(reservation),
+            });
+        }
+        Ok(snapshots)
+    }
+
+    /// 授权源 PCM → 混音器要的交错副本。
+    fn interleaved_sources(
+        &self,
+        timeline: &TimelineState,
+    ) -> Result<HashMap<String, MixdownPcm>, String> {
+        let mut sources = HashMap::new();
+        for id in timeline
+            .clips
+            .iter()
+            .filter_map(|clip| clip.source_path.as_ref())
+            .collect::<BTreeSet<_>>()
+        {
+            let pcm = self
+                .sources
+                .get(id)
+                .ok_or_else(|| format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE))?;
+            let channels = pcm.planes.len();
+            let mut samples = Vec::with_capacity(pcm.planes[0].len() * channels);
+            for frame in 0..pcm.planes[0].len() {
+                for plane in &pcm.planes {
+                    samples.push(plane[frame]);
+                }
+            }
+            sources.insert(
+                id.clone(),
+                MixdownPcm {
+                    sample_rate: pcm.sample_rate,
+                    channels: channels as u16,
+                    samples: Arc::new(samples),
+                },
+            );
+        }
+        Ok(sources)
+    }
+
+    /// 把一段工程范围混成**交错立体声**样本。
+    ///
+    /// 【为什么播放与导出必须共用这一条】逐 clip 用各自的源域参数渲染、再按宿主位置
+    /// 累加，是"同一条轨道上有多个片段（含重叠）"唯一正确的算法。导出若另写一份，两份
+    /// 迟早漂移 —— 症状是"导出的音频和听到的不一样"，那比不提供导出更糟。
+    ///
+    /// 【为什么读内核的解析器而不是写死 SoundTouch】拉伸算法是**用户设置**
+    /// （插件通过 `update_project_stretch_overrides` 收下它，与独立 App 共用同一份
+    /// 运行时设置）。此前这里硬编码 `SoundTouchDll`，于是用户在插件里改拉伸算法菜单
+    /// **毫无效果** —— 一个看起来生效、实际被忽略的设置，比一个明确禁用掉的菜单更糟。
+    fn mix_interleaved(&self, request: MixRequest<'_>) -> Result<Vec<f32>, String> {
+        let MixRequest {
+            timeline,
+            sources,
+            start_sec: start,
+            end_sec: end,
+            sample_rate,
+            cancel,
+            progress,
+        } = request;
+        let frames = ((end - start) * sample_rate as f64).round() as usize;
+        let run = |view: &TimelineState, lo: f64, hi: f64| {
+            let options = MixdownOptions {
+                sample_rate,
+                start_sec: lo,
+                end_sec: Some(hi),
+                stretch: hifishifter_kernel::time_stretch::resolved_external_stretch_algorithm(),
+                apply_pitch_edit: true,
+                output: hifishifter_kernel::encode::OutputSpec::wav_32f(),
+                quality_preset: QualityPreset::Export,
+                cancel_flag: Some(cancel.clone()),
+                progress: progress.clone(),
+                cache_stats: None,
             };
-            // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
-            // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
-            let (channels, samples) = if self.clip_parameters.is_empty() {
-                let (_, channels, _, samples) = run(timeline, start, end)?;
-                (channels, samples)
-            } else if timeline.clips.len() == 1 {
-                // 单region直接保留原kernel结果，不另建全长mixed再从part复制一遍。
-                // 参数仍从局部零点投影，所有track保留全局solo/父链；只省去加到零缓冲的复制。
-                let clip = &timeline.clips[0];
+            render_mixdown_with_pcm(view, options, sources)
+        };
+        // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
+        // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
+        let (channels, samples) = if self.clip_parameters.is_empty() {
+            let (_, channels, _, samples) = run(timeline, start, end)?;
+            (channels, samples)
+        } else if timeline.clips.len() == 1 {
+            // 单region直接保留原kernel结果，不另建全长mixed再从part复制一遍。
+            // 参数仍从局部零点投影，所有track保留全局solo/父链；只省去加到零缓冲的复制。
+            let clip = &timeline.clips[0];
+            let mut view = timeline.clone();
+            let (lo, hi) = if let Some(params) = self.clip_parameters.get(&clip.id) {
+                let root = view
+                    .resolve_root_track_id(&clip.track_id)
+                    .ok_or("unknown source parameter root")?;
+                view.params_by_root_track.insert(root, params.clone());
+                view.clips[0].start_sec = 0.;
+                view.project_sec = clip.length_sec;
+                (0., clip.length_sec)
+            } else {
+                (start, end)
+            };
+            let (_, channels, _, mut samples) = run(&view, lo, hi)?;
+            // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
+            for sample in &mut samples {
+                *sample += 0_f32;
+            }
+            (channels, samples)
+        } else {
+            let mut mixed = vec![0_f32; frames * 2];
+            for clip in &timeline.clips {
+                if cancel.load(Ordering::Acquire) {
+                    return Err("host preparation cancelled".into());
+                }
                 let mut view = timeline.clone();
-                let (lo, hi) = if let Some(params) = self.clip_parameters.get(&clip.id) {
+                view.clips = vec![clip.clone()];
+                let local = self.clip_parameters.get(&clip.id);
+                let (lo, hi) = if let Some(params) = local {
                     let root = view
                         .resolve_root_track_id(&clip.track_id)
                         .ok_or("unknown source parameter root")?;
@@ -324,63 +446,79 @@ impl RenderInput {
                 } else {
                     (start, end)
                 };
-                let (_, channels, _, mut samples) = run(&view, lo, hi)?;
-                // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
-                for sample in &mut samples {
-                    *sample += 0_f32;
+                let part_frames = ((hi - lo) * sample_rate as f64).round() as usize;
+                let (_, channels, _, part) = run(&view, lo, hi)?;
+                if channels != 2 || part.len() != part_frames * 2 {
+                    return Err("invalid region parameter output".into());
                 }
-                (channels, samples)
-            } else {
-                let mut mixed = vec![0_f32; frames * 2];
-                for clip in &timeline.clips {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err("host preparation cancelled".into());
-                    }
-                    let mut view = timeline.clone();
-                    view.clips = vec![clip.clone()];
-                    let local = self.clip_parameters.get(&clip.id);
-                    let (lo, hi) = if let Some(params) = local {
-                        let root = view
-                            .resolve_root_track_id(&clip.track_id)
-                            .ok_or("unknown source parameter root")?;
-                        view.params_by_root_track.insert(root, params.clone());
-                        view.clips[0].start_sec = 0.;
-                        view.project_sec = clip.length_sec;
-                        (0., clip.length_sec)
-                    } else {
-                        (start, end)
-                    };
-                    let part_frames = ((hi - lo) * sample_rate as f64).round() as usize;
-                    let (_, channels, _, part) = run(&view, lo, hi)?;
-                    if channels != 2 || part.len() != part_frames * 2 {
-                        return Err("invalid region parameter output".into());
-                    }
-                    let offset = if local.is_some() {
-                        ((clip.start_sec - start) * sample_rate as f64).round() as usize * 2
-                    } else {
-                        0
-                    };
-                    for (sum, value) in mixed.iter_mut().skip(offset).zip(part) {
-                        *sum += value;
-                    }
+                let offset = if local.is_some() {
+                    ((clip.start_sec - start) * sample_rate as f64).round() as usize * 2
+                } else {
+                    0
+                };
+                for (sum, value) in mixed.iter_mut().skip(offset).zip(part) {
+                    *sum += value;
                 }
-                (2, mixed)
-            };
-            if channels != 2
-                || samples.len() != frames * 2
-                || samples.iter().any(|v| !v.is_finite())
-            {
-                return Err("invalid kernel output".into());
             }
-            snapshots.push(PlaybackSnapshot {
-                sample_rate,
-                origin_sample: (start * sample_rate as f64).round() as i64,
-                left: samples.iter().step_by(2).copied().collect(),
-                right: samples.iter().skip(1).step_by(2).copied().collect(),
-                _reservation: Some(reservation),
-            });
+            (2, mixed)
+        };
+        if channels != 2 || samples.len() != frames * 2 || samples.iter().any(|v| !v.is_finite()) {
+            return Err("invalid kernel output".into());
         }
-        Ok(snapshots)
+        Ok(samples)
+    }
+
+    /// 把一段工程范围渲染并**编码到文件**。
+    ///
+    /// 【为什么插件里可行】ARA 对音频读取**没有角色限制**（`ARAInterface.h:1784-1789`），
+    /// 授权 PCM 就在 `self.sources` 里；编码器在内核里（`encode::create_encoder`）。
+    /// 此前 ARA 版**完全没有**这条路径 —— 用户在 Cubase 里做完处理却拿不出文件，
+    /// 这是"ARA 版功能不全"里最大的一项。
+    pub fn export_range_to_file(
+        &self,
+        request: ExportRequest<'_>,
+    ) -> Result<hifishifter_kernel::encode::EncodeSummary, String> {
+        let ExportRequest {
+            start_sec,
+            end_sec,
+            output_path,
+            spec,
+            sample_rate,
+            cancel,
+            progress,
+        } = request;
+        let Some(timeline) = &self.timeline else {
+            return Err("export requires a mapped host timeline".into());
+        };
+        if !(start_sec.is_finite() && end_sec.is_finite()) || end_sec <= start_sec {
+            return Err("invalid export range".into());
+        }
+        if !matches!(sample_rate, 44_100 | 48_000) {
+            return Err("unsupported export sample rate".into());
+        }
+        let sources = self.interleaved_sources(timeline)?;
+        let samples = self.mix_interleaved(MixRequest {
+            timeline,
+            sources: &sources,
+            start_sec,
+            end_sec,
+            sample_rate,
+            cancel: &cancel,
+            progress,
+        })?;
+        let mut encoder = hifishifter_kernel::encode::create_encoder(
+            output_path,
+            spec,
+            2,
+            sample_rate,
+            Some(cancel),
+        )
+        .map_err(|error| error.to_string())?;
+        // 分块推送：编码器内部按块检查取消标志，也避免一次拷一份全长缓冲。
+        for chunk in samples.chunks(8192) {
+            encoder.push(chunk).map_err(|error| error.to_string())?;
+        }
+        encoder.finish().map_err(|error| error.to_string())
     }
 }
 
@@ -1039,5 +1177,104 @@ mod tests {
         assert_eq!(output[1].sample_rate, 48000);
         cancel.store(true, Ordering::Release);
         assert!(input.render(cancel).is_err());
+    }
+    /// **导出到文件必须与播放路径产出同一份音频。**
+    ///
+    /// 【为什么这条是核心】导出若另写一份混合逻辑，两份迟早漂移 —— 症状是"导出的音频
+    /// 和听到的不一样"，那比不提供导出更糟。这里直接比对"导出文件解码回来的样本"与
+    /// "播放路径 `mix_interleaved` 的样本"。
+    #[test]
+    fn exporting_a_range_writes_the_same_audio_the_playback_path_produces() {
+        let frames = 8_000_usize;
+        let seconds = frames as f64 / 44_100.;
+        let mono = (0..frames)
+            .map(|n| ((n as f32) * 0.01).sin() * 0.5)
+            .collect::<Vec<f32>>();
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "a", "name": "A", "order": 0}],
+            "bpm": 120,
+            "project_sec": 1.0,
+            "clips": [{
+                "id": "clip",
+                "track_id": "a",
+                "name": "voice",
+                "start_sec": 0.0,
+                "length_sec": seconds,
+                "takes": [{
+                    "id": "take",
+                    "source_path": "source",
+                    "source_start_sec": 0.0,
+                    "source_end_sec": seconds,
+                    "playback_rate": 1.0
+                }]
+            }]
+        }))
+        .unwrap();
+        timeline.clips[0].normalize_takes();
+        let input = RenderInput {
+            timeline: Some(timeline.clone()),
+            regions: Vec::new(),
+            sources: HashMap::from([(
+                "source".into(),
+                Arc::new(SourcePcm {
+                    sample_rate: 44_100,
+                    planes: vec![mono.clone(), mono],
+                    version: 1,
+                    _reservation: None,
+                }),
+            )]),
+            project_sample_rate: None,
+            clip_parameters: BTreeMap::new(),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sources = input.interleaved_sources(&timeline).unwrap();
+        let expected = input
+            .mix_interleaved(MixRequest {
+                timeline: &timeline,
+                sources: &sources,
+                start_sec: 0.,
+                end_sec: seconds,
+                sample_rate: 44_100,
+                cancel: &cancel,
+                progress: None,
+            })
+            .unwrap();
+        assert!(
+            expected.iter().any(|sample| sample.abs() > 1e-4),
+            "夹具必须产出实际音频，否则这条测试什么也没证明"
+        );
+
+        let dir = std::env::temp_dir().join(format!("hfs-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("range.wav");
+        let _ = std::fs::remove_file(&path);
+        let summary = input
+            .export_range_to_file(ExportRequest {
+                start_sec: 0.,
+                end_sec: seconds,
+                output_path: &path,
+                spec: &hifishifter_kernel::encode::OutputSpec::wav_32f(),
+                sample_rate: 44_100,
+                cancel,
+                progress: None,
+            })
+            .unwrap();
+        assert!(summary.bytes_written > 0, "必须真的写出数据");
+
+        let (rate, channels, written) =
+            hifishifter_kernel::audio_utils::decode_audio_f32_interleaved(&path).unwrap();
+        assert_eq!((rate, channels), (44_100, 2));
+        assert_eq!(
+            written.len(),
+            expected.len(),
+            "写出的样本数必须与播放路径一致"
+        );
+        for (index, (a, b)) in written.iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-6,
+                "第 {index} 个样本与播放路径不一致：{a} vs {b}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

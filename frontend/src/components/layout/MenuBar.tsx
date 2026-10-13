@@ -602,18 +602,29 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             {/* File Menu */}
             {isPluginMode() ? (
                 <DropdownMenu.Root>
-                    <DropdownMenu.Trigger
-                        disabled={!canImportHostAudio()}
-                        title={!canImportHostAudio() ? dawControlledReason() : undefined}
-                        className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
-                    >
+                    {/* 【为什么不按"能否导入音频"禁用整个菜单】导出处理结果不需要任何
+                        宿主写接口 —— 授权 PCM 与编码器都在插件内（见
+                        `editor/commands.rs` 的 `export_audio_advanced`）。此前整个菜单
+                        跟着 `canImportHostAudio()` 一起禁用，于是 ARA-only 宿主上连
+                        "导出"都点不开，而它本来是可用的。 */}
+                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                         <span>{t("menu_file")}</span>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content variant="soft" color="gray">
-                        <DropdownMenu.Item onSelect={() => void handleImportAudioFromMenu()}>
+                        <DropdownMenu.Item
+                            disabled={!canImportHostAudio()}
+                            title={!canImportHostAudio() ? dawControlledReason() : undefined}
+                            onSelect={() => void handleImportAudioFromMenu()}
+                        >
                             {t("menu_import_media")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                 {shortcutLabel("project.importMedia")}
+                            </div>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
+                            {t("menu_export_audio")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.export")}
                             </div>
                         </DropdownMenu.Item>
                         <DropdownMenu.Separator />

@@ -2307,7 +2307,7 @@ impl ExtensionOwner {
     }
 
     /// 调用方在短事务内冻结几何/参数/PCM，只复制本renderer授权源，不执行合成。
-    pub(super) fn capture_render_input(
+    pub(crate) fn capture_render_input(
         &self,
         document: &super::document::DocumentSession,
         edits: &crate::state_channel::EditState,

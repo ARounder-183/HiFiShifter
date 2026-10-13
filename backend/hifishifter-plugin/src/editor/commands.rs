@@ -40,6 +40,253 @@ fn value<T: serde::Serialize>(input: T) -> Result<Value, String> {
 fn args<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid editor arguments: {e}"))
 }
+#[cfg(test)]
+mod export_request_tests {
+    use super::*;
+
+    /// **目标路径解析：显式路径优先，否则目录 + 文件名并补格式扩展名。**
+    ///
+    /// 【为什么这条是契约】导出对话框发的是 `projectOutputDir` + `projectFileName`
+    /// （见前端 `AdvancedExportRequest`），而另一条调用路径发 `projectOutputPath`。
+    /// 两者必须落到同一个文件上，否则"预检说没冲突、导出却写到别处"。
+    #[test]
+    fn the_export_target_prefers_an_explicit_path_and_otherwise_builds_one() {
+        use hifishifter_kernel::encode::OutputFormat;
+        let explicit = serde_json::json!({
+            "projectOutputPath": "C:/tmp/take.wav",
+            "projectOutputDir": "C:/ignored",
+            "projectFileName": "ignored",
+        });
+        assert_eq!(
+            export_output_path(&explicit, OutputFormat::Wav).unwrap(),
+            std::path::PathBuf::from("C:/tmp/take.wav")
+        );
+        let composed = serde_json::json!({
+            "projectOutputDir": "C:/tmp",
+            "projectFileName": "take",
+        });
+        assert_eq!(
+            export_output_path(&composed, OutputFormat::Wav).unwrap(),
+            std::path::PathBuf::from("C:/tmp").join("take.wav")
+        );
+        // 缺目录必须明确拒绝，而不是写到一个猜出来的位置。
+        assert!(export_output_path(&serde_json::json!({}), OutputFormat::Wav).is_err());
+    }
+
+    /// **编码参数：`encoder` 解不出时退回旧协议的 `bitDepth` → WAV。**
+    #[test]
+    fn the_export_spec_falls_back_to_the_legacy_bit_depth() {
+        let with_encoder = serde_json::json!({
+            "encoder": hifishifter_kernel::encode::OutputSpec::wav_32f(),
+        });
+        assert_eq!(
+            export_spec(&with_encoder).unwrap(),
+            hifishifter_kernel::encode::OutputSpec::wav_32f()
+        );
+        let legacy = serde_json::json!({ "bitDepth": 16 });
+        let spec = export_spec(&legacy).unwrap();
+        assert_eq!(spec.format, hifishifter_kernel::encode::OutputFormat::Wav);
+        assert_eq!(
+            spec.wav.bit_depth,
+            hifishifter_kernel::encode::WavBitDepth::I16
+        );
+    }
+
+    /// **分轨导出必须明确拒绝，而不是悄悄导出一份与宿主不一致的分轨。**
+    #[test]
+    fn separated_export_is_refused_with_a_reason() {
+        let request = serde_json::json!({
+            "mode": "separated",
+            "projectOutputDir": "C:/tmp",
+            "projectFileName": "take",
+        });
+        let error = preview_export_audio_plan(&request).unwrap_err();
+        assert!(
+            error.contains("separated"),
+            "拒绝的理由必须说明是分轨不可用：{error}"
+        );
+    }
+
+    /// 预检只报路径与冲突，不渲染。
+    #[test]
+    fn the_preview_reports_the_target_and_existing_conflicts() {
+        let dir = std::env::temp_dir().join(format!("hfs-export-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = serde_json::json!({
+            "mode": "project",
+            "projectOutputDir": dir.to_string_lossy(),
+            "projectFileName": "plan",
+        });
+        let plan = preview_export_audio_plan(&request).unwrap();
+        assert_eq!(plan["ok"], true);
+        assert_eq!(plan["mode"], "project");
+        let target = plan["targets"][0]["path"].as_str().unwrap();
+        assert!(target.ends_with("plan.wav"), "{target}");
+        assert!(
+            plan["existingPaths"].as_array().unwrap().is_empty(),
+            "文件还不存在时不该报冲突"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 导出取消标志。
+///
+/// 【为什么是进程级】导出是"整台机器上一次一个"的操作（与独立 App 的
+/// `install_export_cancel_flag` 同一口径）：它占大量内存，且用户按一次取消就该停。
+static EXPORT_CANCEL: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+    std::sync::Mutex::new(None);
+
+/// 解析导出请求里的编码参数（与独立 App 共用 `OutputSpec`）。
+fn export_spec(
+    request: &serde_json::Value,
+) -> Result<hifishifter_kernel::encode::OutputSpec, String> {
+    // 前端传回的 `encoder` 就是 `OutputSpec` 的 camelCase 形状；解不出就退回
+    // 旧协议的 `bitDepth` → WAV。
+    if let Some(encoder) = request.get("encoder").filter(|value| !value.is_null()) {
+        if let Ok(spec) =
+            serde_json::from_value::<hifishifter_kernel::encode::OutputSpec>(encoder.clone())
+        {
+            return Ok(spec);
+        }
+    }
+    let bit_depth = request["bitDepth"].as_u64().unwrap_or(32) as u32;
+    Ok(hifishifter_kernel::encode::OutputSpec::wav_legacy(
+        bit_depth,
+    ))
+}
+
+/// 解析导出目标路径（`projectOutputPath` 优先，否则目录 + 文件名）。
+fn export_output_path(
+    request: &serde_json::Value,
+    format: hifishifter_kernel::encode::OutputFormat,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = request["projectOutputPath"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+    {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let dir = request["projectOutputDir"]
+        .as_str()
+        .filter(|dir| !dir.is_empty())
+        .ok_or("projectOutputDir is required")?;
+    let name = request["projectFileName"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("export");
+    Ok(
+        std::path::PathBuf::from(dir).join(hifishifter_kernel::encode::with_format_extension(
+            name, format,
+        )),
+    )
+}
+
+/// 导出计划预检：只算路径与冲突，不渲染。
+fn preview_export_audio_plan(request: &serde_json::Value) -> Result<Value, String> {
+    if request["mode"].as_str().unwrap_or("project") != "project" {
+        return Err("separated export is not available in the ARA plugin".into());
+    }
+    let spec = export_spec(request)?;
+    let path = export_output_path(request, spec.format)?;
+    let existing = path.is_file().then(|| path.to_string_lossy().to_string());
+    Ok(serde_json::json!({
+        "ok": true,
+        "mode": "project",
+        "targets": [{"trackId": Value::Null, "path": path.to_string_lossy()}],
+        "existingPaths": existing.into_iter().collect::<Vec<_>>(),
+    }))
+}
+
+/// 把一段工程范围渲染并编码到文件。
+///
+/// 【为什么不支持 separated】分轨导出要按宿主轨道切文件，而"哪条 clip 属于哪条轨道"
+/// 在插件里是**投影**（`workspace_timeline_locked`），与宿主的分组 / 文件夹不同口径。
+/// 与其导出一份与宿主不一致的分轨，不如明确拒绝。
+fn export_audio_to_file(
+    session: &EditorSession,
+    request: &serde_json::Value,
+) -> Result<Value, String> {
+    if request["mode"].as_str().unwrap_or("project") != "project" {
+        return Err("separated export is not available in the ARA plugin".into());
+    }
+    let spec = export_spec(request)?;
+    let path = export_output_path(request, spec.format)?;
+    if !path.is_absolute() {
+        return Err("an absolute export path is required".into());
+    }
+    if !path.parent().is_some_and(std::path::Path::is_dir) {
+        return Err("the export folder does not exist".into());
+    }
+    let sample_rate = match request["sampleRate"].as_u64() {
+        None => 44_100_u32,
+        Some(rate) if matches!(rate, 44_100 | 48_000) => rate as u32,
+        Some(_) => return Err("unsupported export sample rate".into()),
+    };
+    let document = session
+        .document
+        .upgrade()
+        .ok_or("the ARA document is closed")?;
+    let owner = document
+        .renderer_owners()
+        .into_iter()
+        .next()
+        .ok_or("no ARA instance is bound to this document yet")?;
+    let (start_sec, end_sec) = {
+        let timeline = session.timeline.lock_or_recover().clone();
+        let range = &request["range"];
+        match range["kind"].as_str().unwrap_or("all") {
+            "custom" => (
+                range["startSec"]
+                    .as_f64()
+                    .ok_or("a custom export range needs startSec")?,
+                range["endSec"]
+                    .as_f64()
+                    .ok_or("a custom export range needs endSec")?,
+            ),
+            _ => (0., timeline.project_sec),
+        }
+    };
+    // 渲染输入与播放路径**同一份**（授权 PCM + 逐 clip 参数）；
+    // 导出与播放因此共用同一条混合数学（`RenderInput::mix_interleaved`）。
+    let edits = document.edits.lock_or_recover().clone();
+    let (_keys, input) = owner.capture_render_input(&document, &edits, false)?;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *EXPORT_CANCEL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cancel.clone());
+    let outcome = input.export_range_to_file(crate::render::input::ExportRequest {
+        start_sec,
+        end_sec,
+        output_path: &path,
+        spec: &spec,
+        sample_rate,
+        cancel,
+        progress: None,
+    });
+    *EXPORT_CANCEL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    let summary = outcome?;
+    log::info!(
+        "[ara] exported {:.3}s to {} ({} byte(s))",
+        end_sec - start_sec,
+        path.display(),
+        summary.bytes_written
+    );
+    Ok(serde_json::json!({
+        "ok": true,
+        "mode": "project",
+        "path": path.to_string_lossy(),
+        "format": spec.format.as_name(),
+        "output_dir": path
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        "count": 1,
+    }))
+}
+
 /// MIDI 输入路径判据：必须是**用户刚在原生对话框里选过**的绝对文件路径。
 ///
 /// 【为什么不复用 `browser_media_path`】后者要么落在已授权目录内，要么必须是媒体
@@ -1294,6 +1541,57 @@ pub(super) fn dispatch(
                     a.columns,
                 ))
             }
+        }
+        // ── 导出音频到文件 ──
+        //
+        // 【为什么插件里能做】ARA 对音频读取**没有角色限制**
+        // （`ARAInterface.h:1784-1789`），授权 PCM 就在渲染输入里
+        // （`RenderInput::sources`），编码器在内核里。这条路径不碰宿主几何、
+        // 也不要求任何宿主写接口，因此 ARA-only 宿主上同样成立。
+        //
+        // 【为什么这是"功能不全"里最大的一项】独立 App 一直能导出处理结果，
+        // ARA 版此前**完全没有**这条路径 —— 用户在 Cubase 里做完处理却拿不出文件。
+        "export_audio_advanced" => export_audio_to_file(session, &args(input)?),
+        // 冲突预检：只解析目标路径，不渲染。前端据此弹出"是否覆盖"。
+        "preview_export_audio_plan" => preview_export_audio_plan(&args(input)?),
+        "cancel_export_audio" => {
+            let active = EXPORT_CANCEL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|flag| {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                })
+                .is_some();
+            Ok(serde_json::json!({"ok": true, "active": active}))
+        }
+        // 导出对话框的默认值。插件没有"工程文件"，因此输出目录取
+        // 用户已授权目录里的第一个（没有则取用户主目录）。
+        "get_export_audio_defaults" => {
+            let dir = session
+                .browser_roots
+                .lock_or_recover()
+                .first()
+                .map(|path| path.to_string_lossy().to_string())
+                .or_else(|| {
+                    std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .map(|home| std::path::PathBuf::from(home).to_string_lossy().to_string())
+                })
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "ok": true,
+                "projectName": "export",
+                "documentsDir": dir,
+                "projectOutputDir": dir,
+                "projectFileName": "export",
+                "separatedOutputDir": dir,
+                "separatedFileName": "export",
+                "sampleRate": 44100,
+                "bitDepth": 32,
+                "format": "wav",
+                "encoder": hifishifter_kernel::encode::OutputSpec::wav_32f(),
+            }))
         }
         _ => Err(format!("Command unavailable in ARA plugin mode: {command}")),
     }
