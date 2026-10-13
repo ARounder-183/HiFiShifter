@@ -1658,18 +1658,22 @@ impl AudioModifications for ModelHandle {
         self.document
             .audio_modifications
             .push(AraAudioModification {
-                persistent_id,
+                persistent_id: persistent_id.clone(),
                 audio_source_persistent_id,
             });
         if let Some(handle) = context.object_handle() {
             self.modification_index_by_handle.insert(handle, index);
+            // 通知要按宿主句柄投递，而插件侧状态按 persistentID 索引 —— 这里是唯一
+            // 拿得到两者对应关系的时刻（见 `DocumentSession::notify_parameters_changed`）。
+            self.session
+                .register_modification_handle(&persistent_id, handle);
         }
         Ok(index)
     }
 
     fn clone_audio_modification(
         &mut self,
-        _context: &CreateContext,
+        context: &CreateContext,
         source: &Self::AudioModification,
         audio_source: &Self::AudioSource,
         properties: AudioModificationProperties,
@@ -1693,6 +1697,11 @@ impl AudioModifications for ModelHandle {
         let child_persistent_id = cloned.persistent_id.clone();
         let index = self.document.audio_modifications.len();
         self.document.audio_modifications.push(cloned);
+        if let Some(handle) = context.object_handle() {
+            self.modification_index_by_handle.insert(handle, index);
+            self.session
+                .register_modification_handle(&child_persistent_id, handle);
+        }
         // 【P1：宿主显式给出父】`cloneAudioModification` 是 ARA 对"创建独立变体"的
         // 专用原语（`ARAInterface.h:2653-2656`），因此它**就是**复制/分割的回执 ——
         // 与原生路径的 `SplitMediaItem` 回执同形，且不依赖任何原生扩展。把父的源域
@@ -1746,6 +1755,18 @@ impl AudioModifications for ModelHandle {
                 "[ara] audio_modification #{state} persistentID: {previous} -> {}",
                 modification.persistent_id
             );
+            // 通知句柄按 persistentID 索引：换了 ID 就要把登记跟着搬过去，
+            // 否则后续的参数变更通知会投给一个已经不存在的键。
+            let handle = self
+                .modification_index_by_handle
+                .iter()
+                .find(|(_, index)| **index == *state)
+                .map(|(handle, _)| *handle);
+            self.session.forget_modification_handle(&previous);
+            if let Some(handle) = handle {
+                let current = modification.persistent_id.clone();
+                self.session.register_modification_handle(&current, handle);
+            }
         }
         // persistentID 是 region 的引用键：它变了，session 的派生表必须立刻跟上，
         // 否则收口前的读取会拿旧键去查，把所有引用它的 region 判成 `UnknownModification`。
@@ -1762,6 +1783,8 @@ impl AudioModifications for ModelHandle {
         // 下标变了会让 region 的引用边整体错位。只把这一槽标成"已消失"，
         // 映射层看到空 persistentID 就不再认它。
         if let Some(modification) = self.document.audio_modifications.get_mut(state) {
+            self.session
+                .forget_modification_handle(&modification.persistent_id);
             modification.persistent_id.clear();
             modification.audio_source_persistent_id.clear();
         }

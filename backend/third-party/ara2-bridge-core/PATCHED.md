@@ -49,3 +49,27 @@ SDK规定ARAPersistentID为七位ASCII，但REAPER实际对含中文素材路径
 
 那等于重写上游的整个回调委托层（`generated_callbacks` 那些表），规模远大于五行 getter。
 只有当上游在**别的**地方也不可用时，才值得走那条路。
+
+## RawHandle 身份访问器（2026-10-13）
+
+## 补了什么
+
+- `RawHandle::identity()`
+
+## 为什么必须补
+
+上游 0.3.0 的 `RawHandle` 字段全部私有、且**没有任何访问器**。而 ARA 2 的部分存档
+（`storeObjectsToArchive` / `restoreObjectsFromArchive`）交给插件的筛选对象里，
+对象身份正是这个类型（`StoreFilter::audio_modifications()`）。
+
+插件侧的状态按 `persistentID` 索引、句柄按 `RawHandle` 索引，两边必须能对上 ——
+否则"宿主只保存它选中的那几条 modification"这条路径无法实现，插件只能返回
+`kARAFalse`，宿主做增量保存时就会丢数据。
+
+`Handle::index()` / `Handle::session()` 已经是公开的，本补丁只是把同一对值从**擦除后**
+的类型上取回来，不引入任何新的身份语义。
+
+## 影响面
+
+- 只加一个只读访问器，不改任何既有行为。
+- 上游若补了同名访问器，删掉 `src/handles.rs` 里那段标注为"本地补丁"的代码即可。

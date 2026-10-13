@@ -491,7 +491,50 @@ impl ParameterAtlas {
         );
     }
 
-    /// 这条 clip 的稳定身份是否已有权威参数（测试用）。
+    /// 按 ARA 的 `RestoreFilter` 把存档里的 modification ID 重映射到当前 ID。
+    ///
+    /// 【为什么必须做】persistentID 只保证**文档内**唯一，跨文档导入时宿主要求把存档
+    /// ID 映射到当前图里的 ID（`ARAInterface.h:2291-2294` 与 `ARARestoreObjectsFilter`
+    /// 的 `audioModificationArchiveIDs` / `audioModificationCurrentIDs`）。直接按存档 ID
+    /// 合入会把参数挂到一个不存在的键上 —— 静默丢失。
+    pub(crate) fn remap_authorities(&mut self, remap: &[(String, String)]) {
+        if remap.is_empty() {
+            return;
+        }
+        let renamed = remap
+            .iter()
+            .filter(|(archive, current)| archive != current && !archive.is_empty())
+            .filter_map(|(archive, current)| {
+                authority_key(None, archive).map(|key| (key, authority_key(None, current)))
+            })
+            .filter_map(|(from, to)| to.map(|to| (from, to)))
+            .collect::<Vec<_>>();
+        for (from, to) in renamed {
+            if let Some(params) = self.authorities.remove(&from) {
+                self.authorities.insert(to, params);
+            }
+        }
+    }
+
+    /// 只保留给定 modification ID 的权威条目（部分存档的写出侧）。
+    ///
+    /// `None` 表示"全部选中"。`item:` 级条目按它引用的 modification 无法从键本身看出，
+    /// 因此**整份保留** —— 它们是原生宿主上的逐 item 权威，丢掉会让那些工程丢参数。
+    pub(crate) fn retain_authorities_for(
+        &mut self,
+        modifications: Option<&std::collections::BTreeSet<String>>,
+    ) {
+        let Some(modifications) = modifications else {
+            return;
+        };
+        self.authorities
+            .retain(|key, _| match key.strip_prefix("mod:") {
+                Some(id) => modifications.contains(id),
+                None => true,
+            });
+    }
+
+    /// 这条 clip 的稳定身份是否已有权威参数（测试用）。    /// 这条 clip 的稳定身份是否已有权威参数（测试用）。
     #[cfg(test)]
     pub(crate) fn has_authority_parameters(&self, item: Option<&str>, modification: &str) -> bool {
         authority_key(item, modification)

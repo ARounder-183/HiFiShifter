@@ -220,6 +220,29 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// ARA 2 **部分存档**的暂存载荷（`restoreObjectsFromArchive` 的 `Selected` 分支）。
+    ///
+    /// 【为什么不复用 `pending_archive_restore`】那条路径经 `apply` + `merge` 走"整份
+    /// 文档状态替换"，而部分载荷**故意**只带一部分（例如只带一条 modification 的参数），
+    /// 走那条路会用空值覆盖掉其它状态。这里只做**按键合并**：载荷带了什么就覆盖什么。
+    pub pending_partial_restore: Mutex<Vec<crate::state_channel::EditState>>,
+    /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
+    ///
+    /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
+    /// 就会丢数据 —— ARA 在 `ARAModelUpdateControllerInterface` 的三处文档里反复重申
+    /// "必须可靠发送"（`ARAInterface.h:2098-2099` / `:2116-2117` / `:2144-2145`）。
+    /// 此前插件**从未**调用过它（`mark_*` 在生产代码里出现次数为 0）。
+    update_emitter: Mutex<Option<ara2_bridge::plugin::UpdateEmitter>>,
+    /// modification persistentID → 宿主句柄身份 `(index, session)`。
+    ///
+    /// 通知要按**宿主句柄**投递（桥接层用它查 `ARAAudioModificationHostRef`），
+    /// 而插件侧的状态是按 persistentID 索引的。`createAudioModification` /
+    /// `cloneAudioModification` 是唯一拿得到句柄的时刻。
+    ///
+    /// 【为什么两个方向各存一份】通知要 persistentID → 句柄，而部分存档的写出侧
+    /// （`StoreFilter` 只给句柄）要句柄 → persistentID。
+    modification_handles: Mutex<HashMap<String, ara2_bridge::core::RawHandle>>,
+    modification_ids: Mutex<HashMap<(std::num::NonZeroU32, std::num::NonZeroU64), String>>,
     editor: OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
 }
 
@@ -798,6 +821,9 @@ impl DocumentSession {
         }
         let projection = self.workspace_projection_locked(&candidate)?;
         *edits = candidate;
+        // 用户的参数编辑落盘了 ⇒ 告诉宿主"这些 modification 的持久状态变了"。
+        // 宿主只保存它知道变过的部分；不通知就会在它做增量保存时丢掉这次编辑。
+        self.notify_parameters_changed();
         Ok((edits.revision, model, projection))
     }
     /// 合成只在短事务外计算；最终再次核对文档、scope、assignment与编辑代次。
@@ -928,6 +954,186 @@ impl DocumentSession {
         })
     }
 
+    /// 按 ARA 2 的部分存档筛选产出载荷。
+    ///
+    /// 【为什么需要它】整份存档在"只改了一条 modification"时也要重写全部状态，而
+    /// `storeObjectsToArchive` 的筛选正是为了按对象粒度保存（`ARAInterface.h:2979-2988`）。
+    /// 不支持它时宿主会拿到 `kARAFalse`，于是它做增量保存时**丢失**这次编辑。
+    ///
+    /// `modifications == None` 表示"全部选中"；`document_data` 表示是否带上文档级状态
+    /// （参数表 / 分组 / 空白编辑 / 逐片段私有属性）。
+    pub(crate) fn encode_partial(
+        &self,
+        modifications: Option<&std::collections::BTreeSet<String>>,
+        document_data: bool,
+    ) -> Result<Vec<u8>, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        if !self.ready.load(Ordering::Acquire) {
+            return Err("host graph not ready; cannot archive ARA edits".into());
+        }
+        let mut edits = self.edits.lock_or_recover();
+        edits.reconcile(&self.track_bindings.lock_or_recover())?;
+        // 【为什么先整份克隆再裁剪】从 `EditState::default()` 起手会把**所有**状态
+        // 一起丢掉 —— 包括本次真正要保存的那几条 modification 参数。裁剪必须是
+        // "从完整状态里挑出被选中的部分"，而不是"从空状态里填"。
+        let mut partial = edits.clone();
+        // 参数权威是**逐 modification** 的状态：按筛选裁剪。
+        partial.atlas.retain_authorities_for(modifications);
+        partial.atlas.regions.clear();
+        if !document_data {
+            // 文档级状态没被选中 ⇒ 载荷里不带它，恢复端因此不会覆盖它。
+            partial.params.clear();
+            partial.tracks.clear();
+            partial.bindings.clear();
+            partial.fades.clear();
+            partial.clip_local.clear();
+            partial.groups = Default::default();
+            partial.atlas.gaps.clear();
+        }
+        partial.encode()
+    }
+
+    /// 接收 ARA 2 的部分存档载荷，按 `archive → current` 重映射后暂存。
+    pub(crate) fn restore_archive_partial(
+        &self,
+        bytes: &[u8],
+        remap: &[(String, String)],
+    ) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut restored = crate::state_channel::EditState::default();
+        restored.restore(bytes)?;
+        restored.atlas.remap_authorities(remap);
+        self.pending_partial_restore
+            .lock_or_recover()
+            .push(restored);
+        Ok(())
+    }
+
+    /// 把暂存的部分载荷**按键合并**进编辑权威（`prepare_renderers` 收口时调用）。
+    ///
+    /// 【为什么是合并而不是替换】部分载荷只带它被选中的那一部分；替换会把未选中的
+    /// 状态（其它 modification 的参数、文档级参数表）清空。
+    fn merge_partial_restores(&self) {
+        let pending = self
+            .pending_partial_restore
+            .lock_or_recover()
+            .drain(..)
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return;
+        }
+        let mut edits = self.edits.lock_or_recover();
+        for partial in pending {
+            for (key, params) in partial.atlas.authorities {
+                edits.atlas.set_authority(&key, params);
+            }
+            edits.atlas.gaps.extend(partial.atlas.gaps);
+            edits.params.extend(partial.params);
+            if !partial.groups.is_empty() {
+                edits.groups = partial.groups;
+            }
+            edits.fades.extend(partial.fades);
+            edits.clip_local.extend(partial.clip_local);
+            edits.revision = edits.revision.saturating_add(1);
+        }
+    }
+
+    /// 注入 ARA 变更通知队列（`runtime.rs` 构建插件时调用一次）。
+    pub(crate) fn set_update_emitter(&self, emitter: ara2_bridge::plugin::UpdateEmitter) {
+        *self.update_emitter.lock_or_recover() = Some(emitter);
+    }
+
+    /// 登记一个 modification 的宿主句柄（`createAudioModification` / clone 时）。
+    pub(crate) fn register_modification_handle(
+        &self,
+        persistent_id: &str,
+        handle: ara2_bridge::core::RawHandle,
+    ) {
+        if persistent_id.is_empty() {
+            return;
+        }
+        self.modification_ids
+            .lock_or_recover()
+            .insert(handle.identity(), persistent_id.to_owned());
+        self.modification_handles
+            .lock_or_recover()
+            .insert(persistent_id.to_owned(), handle);
+    }
+
+    /// 宿主销毁 / 换掉一个 modification 的 persistentID 时同步。
+    pub(crate) fn forget_modification_handle(&self, persistent_id: &str) {
+        if let Some(handle) = self
+            .modification_handles
+            .lock_or_recover()
+            .remove(persistent_id)
+        {
+            self.modification_ids
+                .lock_or_recover()
+                .remove(&handle.identity());
+        }
+    }
+
+    /// 宿主句柄 → persistentID（部分存档的写出侧筛选）。
+    pub(crate) fn modification_id_for_handle(
+        &self,
+        index: std::num::NonZeroU32,
+        session: std::num::NonZeroU64,
+    ) -> Option<String> {
+        self.modification_ids
+            .lock_or_recover()
+            .get(&(index, session))
+            .cloned()
+    }
+
+    /// **参数变了 ⇒ 告诉宿主这些 modification 的持久状态变了。**
+    ///
+    /// 【为什么宁可多报】通知是幂等且会被合并的（桥接层的 `UpdateTracker`），而漏报
+    /// 会让"只存增量"的宿主丢数据。因此这里按当前登记的全部句柄投递，不做精确差分。
+    ///
+    /// 【为什么信号位为空】音高 / 共振峰 / 气声一变，信号本身就变了，因此
+    /// `ContentUpdateScopes` 不得置 `SIGNAL_REMAINS_UNCHANGED`。
+    pub(crate) fn notify_parameters_changed(&self) {
+        let emitter = self.update_emitter.lock_or_recover().clone();
+        let Some(emitter) = emitter else {
+            return;
+        };
+        let handles = self
+            .modification_handles
+            .lock_or_recover()
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut refused = 0_usize;
+        for handle in handles {
+            if emitter
+                .mark_modification(
+                    handle,
+                    None,
+                    ara2_bridge::core::ContentUpdateScopes::empty(),
+                    ara2_bridge::plugin::UpdateOrigin::Application,
+                )
+                .is_err()
+            {
+                refused += 1;
+            }
+        }
+        if refused > 0 {
+            // 队列是进程内的，失败只可能是"这个句柄不属于当前会话"（宿主换了图）。
+            // 限流留痕：静默吞掉会让"宿主没保存"无从复盘。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.update.refused",
+                format_args!(
+                    "[ara] {refused} modification update notification(s) were refused by the                      queue; the host will not be told those objects changed"
+                ),
+            );
+        }
+        // 文档级私有状态（分组 / 空白编辑 / 参数权威本身）也在同一次编辑里变了。
+        emitter.mark_document(ara2_bridge::plugin::UpdateOrigin::Application);
+    }
+
     /// 工厂成功返回前登记真实 controllerRef，失败或销毁时撤销。
     pub fn register(self: &Arc<Self>, key: usize) {
         self.controller.store(key, Ordering::Release);
@@ -1043,6 +1249,8 @@ impl DocumentSession {
         // 【ARA 存档的落点】存档恢复在模型图重建之前到达，那时还没有 owner 可合并，
         // 所以载荷暂存在文档级。现在图已就绪，把它交给**第一个** owner 的既有合并
         // 路径 —— 编辑权威是文档共享的，交给谁合并都一样（合并写的是 `document.edits`）。
+        // 部分存档先合入（它是按键合并，不会覆盖整份状态），再走整份存档的合并路径。
+        self.merge_partial_restores();
         if let Some(restored) = self.pending_archive_restore.lock_or_recover().take() {
             match owners.first() {
                 Some(owner) => owner.adopt_archive_restore(restored),

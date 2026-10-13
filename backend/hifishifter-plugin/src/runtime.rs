@@ -166,6 +166,11 @@ impl Runtime {
                 let session = model.session();
                 let playback = session.clone();
                 let builder = PluginBuilder::new(model);
+                // 【变更通知通道】宿主只保存"它知道变过"的部分，而插件此前**从未**通知过
+                // 任何持久状态变化（`mark_*` 在生产代码里出现次数为 0）。没有这条，
+                // 只存增量的宿主会丢数据（`ARAInterface.h:2098-2099` 等三处重申）。
+                // 队列在 `notifyModelUpdates` 里由桥接层统一投递，这里只取出句柄。
+                session.set_update_emitter(builder.update_emitter());
                 // 适配器创建失败时降级：不注册快照能力，其余照常（见 `publish_head_tail`）。
                 let builder = match head_tail {
                     Some(adapter) => builder.realtime_head_tail(adapter),
@@ -177,7 +182,10 @@ impl Runtime {
                     // 状态。此前这条能力**从未注册**，四个存档回调全部以 `Unsupported` 告终 ——
                     // 宿主每次存盘都被告知"插件存档失败"，重载时状态全丢。provider 绑定本闭包
                     // 刚创建的文档会话，因此不存在"该服务哪个文档"的歧义。
-                    .persistence(crate::ara::persistence::ArchivePersistence::new(&session))
+                    // 【为什么是 partial 而不是 persistence】`PartialPersistence` 同时
+                    // 覆盖整份与筛选两种存档；只注册整份时，任何带筛选的宿主保存都会拿到
+                    // `kARAFalse`，宿主据此认为"插件存档失败"并在增量保存时丢编辑。
+                    .partial_persistence(crate::ara::persistence::ArchivePersistence::new(&session))
                     .controller_identity(move |key| session.register(key))
                     .host_playback(move |handle| {
                         crate::log_line(&format!(

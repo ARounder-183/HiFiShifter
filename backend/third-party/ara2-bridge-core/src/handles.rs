@@ -32,6 +32,18 @@ pub struct Handle<K> {
     pub(crate) _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl RawHandle {
+    /// Returns the `(index, session)` identity shared with the typed handle it was erased from.
+    ///
+    /// 【本地补丁 16】上游的 `RawHandle` 字段全部私有、且**没有任何访问器**，于是插件侧
+    /// 无法把"部分存档筛选里交出的句柄"映射回自己的 persistentID —— 而
+    /// `StoreFilter::audio_modifications()` / `RestoreFilter` 交出的正是这个类型。
+    /// 只加一个只读身份访问器，不改任何既有行为。
+    pub const fn identity(self) -> (NonZeroU32, NonZeroU64) {
+        (self.index, self.session)
+    }
+}
+
 impl<K> Handle<K> {
     /// Returns the one-based append-only cell index.
     pub const fn index(self) -> NonZeroU32 {

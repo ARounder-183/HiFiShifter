@@ -16,8 +16,9 @@
 //! 不存在"该服务哪个文档"的歧义，也就不需要共享登记表。这是比"猜一个当前文档"更强的
 //! 保证：猜错会把用户的编辑写到别的轨道上。
 
-use ara2_bridge::core::AraError;
-use ara2_bridge::plugin::Persistence;
+use ara2_bridge::core::{AraError, FilterSelection, RestoreFilter, StoreFilter};
+use ara2_bridge::plugin::{PartialPersistence, Persistence};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
 use crate::render::document::DocumentSession;
@@ -72,6 +73,91 @@ impl Persistence for ArchivePersistence {
             AraError::InvalidState("ARA document archive could not be encoded")
         })?;
         log::info!("[ara] document archive stored: {} byte(s)", bytes.len());
+        Ok(bytes)
+    }
+}
+
+/// ARA 2 的**部分存档**：按宿主给出的筛选只保存被选中的对象。
+///
+/// 【为什么必须实现它】宿主可以只保存"它知道变过的"那部分（`storeObjectsToArchive` 的
+/// 筛选正是为此而设，`ARAInterface.h:2979-2988`）。此前只注册了整份存档，于是任何带筛选
+/// 的保存都会拿到 `kARAFalse` —— 宿主据此认为"插件存档失败"，做增量保存时**丢掉**编辑。
+impl PartialPersistence for ArchivePersistence {
+    fn restore_objects(
+        &mut self,
+        filter: &FilterSelection<RestoreFilter>,
+        bytes: &[u8],
+    ) -> Result<(), AraError> {
+        let Some(document) = self.document.upgrade() else {
+            log::warn!("[ara] partial archive restore dropped: the document is already gone");
+            return Err(AraError::InvalidState(
+                "the ARA document was destroyed before its partial archive could be restored",
+            ));
+        };
+        let outcome = match filter {
+            // null 筛选 = 整份文档，走同一条完整恢复路径。
+            FilterSelection::All => document.restore_archive(bytes),
+            FilterSelection::Selected(filter) => {
+                // 【为什么必须做 ID 重映射】persistentID 只保证**文档内**唯一，跨文档导入
+                // 时宿主要求把存档 ID 映射到当前图里的 ID（`ARAInterface.h:2291-2294`）。
+                // 直接按存档 ID 合入会把参数挂到一个不存在的键上 —— 静默丢失。
+                let remap = filter
+                    .audio_modifications()
+                    .iter()
+                    .map(|mapping| {
+                        (
+                            mapping.archive_id().to_owned(),
+                            mapping.current_id().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                document.restore_archive_partial(bytes, &remap)
+            }
+        };
+        outcome.map_err(|error| {
+            log::error!("[ara] partial archive restore failed: {error}");
+            AraError::InvalidState("ARA partial archive could not be decoded")
+        })?;
+        log::info!(
+            "[ara] partial archive restored: {} byte(s); it is merged by key once the model graph              is ready",
+            bytes.len()
+        );
+        Ok(())
+    }
+
+    fn store_objects(
+        &mut self,
+        filter: &FilterSelection<StoreFilter>,
+    ) -> Result<Vec<u8>, AraError> {
+        let Some(document) = self.document.upgrade() else {
+            log::info!("[ara] partial archive requested after teardown; storing empty");
+            return Ok(Vec::new());
+        };
+        let (modifications, document_data) = match filter {
+            FilterSelection::All => (None, true),
+            FilterSelection::Selected(filter) => {
+                // 筛选交出的句柄要映射回插件自己的 persistentID —— 权威表按它索引。
+                let ids = filter
+                    .audio_modifications()
+                    .iter()
+                    .filter_map(|handle| {
+                        document.modification_id_for_handle(handle.index(), handle.session())
+                    })
+                    .collect::<BTreeSet<_>>();
+                (Some(ids), filter.includes_document_data())
+            }
+        };
+        let bytes = document
+            .encode_partial(modifications.as_ref(), document_data)
+            .map_err(|error| {
+                log::error!("[ara] partial archive store failed: {error}");
+                AraError::InvalidState("ARA partial archive could not be encoded")
+            })?;
+        log::info!(
+            "[ara] partial archive stored: {} byte(s); {} modification(s) selected",
+            bytes.len(),
+            modifications.as_ref().map_or(0, BTreeSet::len)
+        );
         Ok(bytes)
     }
 }
@@ -137,6 +223,90 @@ mod tests {
         assert!(
             restored.pending_archive_restore.lock_or_recover().is_some(),
             "恢复必须暂存到文档级，等 `prepare_renderers` 收口时再合入"
+        );
+    }
+
+    /// **部分存档只带被选中的 modification 参数。**
+    ///
+    /// 【为什么这条重要】宿主做增量保存时会用 `storeObjectsToArchive` 的筛选只交出一条
+    /// 或几条 modification。此前插件只注册了整份存档，带筛选的调用一律拿到 `kARAFalse`，
+    /// 宿主据此认为"插件存档失败"，那次编辑就丢了。
+    #[test]
+    fn a_partial_store_keeps_only_the_selected_modification_parameters() {
+        use std::sync::atomic::Ordering;
+        let document = DocumentSession::new(1);
+        document.ready.store(true, Ordering::Release);
+        {
+            let mut edits = document.edits.lock_or_recover();
+            edits
+                .atlas
+                .seed_test_pitch_curve("mod:a", 250., vec![60., 62.]);
+            edits
+                .atlas
+                .seed_test_pitch_curve("mod:b", 250., vec![64., 66.]);
+        }
+        let selected = std::collections::BTreeSet::from(["a".to_owned()]);
+        let bytes = document.encode_partial(Some(&selected), false).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let authorities = payload["edits"]["atlas"]["authorities"]
+            .as_object()
+            .unwrap();
+        assert_eq!(authorities.len(), 1, "只应带上被选中的那一条");
+        assert!(authorities.contains_key("mod:a"));
+        assert!(!authorities.contains_key("mod:b"));
+        // 文档级状态没被选中 ⇒ 载荷里不带它（恢复端因此不会覆盖它）。
+        assert!(payload["edits"]["params"].as_object().unwrap().is_empty());
+    }
+
+    /// **部分恢复必须按 `archive → current` 重映射 ID。**
+    ///
+    /// 【为什么必须重映射】persistentID 只保证**文档内**唯一，跨文档导入时宿主要求把
+    /// 存档 ID 映射到当前图里的 ID（`ARAInterface.h:2291-2294`）。按存档 ID 合入会把
+    /// 参数挂到一个不存在的键上 —— 静默丢失。
+    #[test]
+    fn a_partial_restore_remaps_archive_ids_onto_current_ids() {
+        use std::sync::atomic::Ordering;
+        let source = DocumentSession::new(1);
+        source.ready.store(true, Ordering::Release);
+        source.edits.lock_or_recover().atlas.seed_test_pitch_curve(
+            "mod:archive-a",
+            250.,
+            vec![60., 62.],
+        );
+        let bytes = source.encode_partial(None, false).unwrap();
+
+        let target = DocumentSession::new(2);
+        target.ready.store(true, Ordering::Release);
+        target
+            .restore_archive_partial(&bytes, &[("archive-a".into(), "current-a".into())])
+            .unwrap();
+        target.prepare_renderers();
+        let edits = target.edits.lock_or_recover();
+        assert!(
+            edits.atlas.has_authority_parameters(None, "current-a"),
+            "必须按 current ID 合入"
+        );
+        assert!(
+            !edits.atlas.has_authority_parameters(None, "archive-a"),
+            "不得留下存档 ID"
+        );
+    }
+
+    /// **参数变更必须进入 ARA 通知队列。**
+    ///
+    /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件此前**从未**通知过任何持久
+    /// 状态变化（`mark_*` 在生产代码里出现次数为 0），只存增量的宿主因此会丢数据。
+    #[test]
+    fn parameter_changes_are_queued_for_the_host() {
+        let document = DocumentSession::new(1);
+        // 未绑定 emitter 时是 no-op：不该 panic。
+        document.notify_parameters_changed();
+        let emitter = ara2_bridge::plugin::UpdateEmitter::new();
+        document.set_update_emitter(emitter.clone());
+        document.notify_parameters_changed();
+        assert!(
+            emitter.pending_count() >= 1,
+            "文档级持久状态变化必须排队，否则只存增量的宿主会丢数据"
         );
     }
 
