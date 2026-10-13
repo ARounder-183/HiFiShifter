@@ -900,6 +900,17 @@ impl PlaybackRegionProperties {
         self.transformation_flags
     }
 
+    /// 宿主给这条 region 的颜色（`ARAPlaybackRegionProperties::color`）。
+    ///
+    /// 【为什么补这个访问器】`color` 在解析层已被正确拷贝（见 `copy_from_ffi_with_refs`
+    /// 里 `contains_extent(COLOR)` 的分支），但 `PlaybackRegionProperties` 此前**没有**
+    /// 任何读访问器 —— 宿主给的颜色被解析后即丢弃。`MusicalContextProperties` 与
+    /// `RegionSequenceProperties` 都有，唯独 playback region 缺。补上之后插件才能把
+    /// 宿主片段颜色透到界面。
+    pub const fn color(&self) -> Option<&Color> {
+        self.color.as_ref()
+    }
+
     // ── 本地补丁（HiFiShifter）──────────────────────────────────────────────
     //
     // 【为什么打了这几行】上游 0.3.0 的 `PlaybackRegionProperties` **只有
@@ -1008,11 +1019,19 @@ impl PlaybackRegionProperties {
                 layout::ARAPLAYBACK_REGION_PROPERTIES_REGION_SEQUENCE_REF
             );
             if reference.is_null() {
-                return Err(AraError::InvalidArgument(
-                    "ARA2 playback region requires a region sequence",
-                ));
+                // 【本地补丁 4（core）：null regionSequenceRef 不再让整条 region 消失】
+                //
+                // ARA2 的契约要求这里非 null，但实测宿主会给 null（与
+                // `createAudioSource` 传 null hostRef 同一类问题）。此前直接 `Err` ⇒
+                // `controller.rs` 返回 null ⇒ **整条 playback region 消失**，编辑器里
+                // 一条片段都没有。而归属信息并不依赖它：region→sequence 的权威边由
+                // trait 参数给出（本地补丁 1），`mapping.rs::region_sequence_of` 在
+                // 缺席时也已有"顺序归属"的降级。所以这里记 `None` 并放行，
+                // 由插件侧按顺序归属兜住。
+                (None, None)
+            } else {
+                (None, Some(resolve_sequence(reference)?))
             }
-            (None, Some(resolve_sequence(reference)?))
         } else {
             let reference = field!(
                 ARAMusicalContextRef,
@@ -1196,16 +1215,22 @@ fn validate_playback(
     playback_start: f64,
     playback_duration: f64,
 ) -> Result<(), AraError> {
-    let known = (ara2_bridge_sys::kARAPlaybackTransformationTimestretch
-        | ara2_bridge_sys::kARAPlaybackTransformationTimestretchReflectingTempo
-        | ara2_bridge_sys::kARAPlaybackTransformationContentBasedFadeAtTail
-        | ara2_bridge_sys::kARAPlaybackTransformationContentBasedFadeAtHead)
-        as ARAPlaybackTransformationFlags;
-    if flags & !known != 0 {
-        return Err(AraError::InvalidArgument(
-            "unknown playback transformation flags",
-        ));
-    }
+    // 【本地补丁 3（core）：未知旗标位不再在**解析层**被拒】
+    //
+    // 此前这里对 `flags & !known` 直接 `Err`，而它在 `copy_from_ffi_with_refs` 内、
+    // 读完字段立刻调用 —— 于是插件侧 `controller.rs` 那两段"host flags exceed the
+    // factory's advertised …; the region is created anyway"的**降级日志永远打不出来**：
+    // 解析层已经先把整条 region 判成 null 了。后果是宿主一旦设置任何 ARA 未来版本
+    // 新增的位，整条 playback region 消失（实测 Cubase 15：
+    // `sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有）。
+    //
+    // 【为什么保留未知位而不是在这里清掉】清掉会让下游再也说不出"宿主设了哪些我们
+    // 不认识的位"—— 那正是排查这类兼容问题时唯一有用的信息。位保留在结构里，由
+    // `controller.rs` 与广告集合比对后**降级接受并留痕**；插件侧只读它认识的位
+    // （timestretch / 两个内容淡化），未知位天然被忽略。
+    //
+    // 这里只保留与旗标无关的几何校验。
+    let _ = flags;
     if !modification_start.is_finite()
         || !playback_start.is_finite()
         || !modification_duration.is_finite()

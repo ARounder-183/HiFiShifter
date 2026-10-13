@@ -18,6 +18,8 @@
 | 10 | `controller.rs` 的 `create_audio_modification` / `create_region_sequence` / `create_playback_region` 入口，以及分析状态查询 | 增量 | 入口留痕 + 每条静默拒绝的原因；`isAudioSourceContentAnalysisIncomplete` 答"未完成"时、宿主请求未广告的内容类型时各记一条警告（见下方「宿主没有交出事件内容」） | 待查 |
 | 11 | `controller.rs` 的内容查询与 `notifyModelUpdates` | 增量 | `notifyModelUpdates` 的入口与三条早退原因；`isAudioSourceContentAvailable` / `getAudioSourceContentGrade` / `createAudioSourceContentReader` 的入口与实际答案（见下方「宿主没有交出事件内容」） | 待查 |
 | 12 | `runtime.rs` 的 `CreateContext::for_test` | 增量 | `#[doc(hidden)]` 的测试用构造器：给定代数与 realtime key 造一个上下文。生产路径仍只走 `document()` / `object()`，不改变任何行为 | 新增 |
+| 13 | `runtime.rs` 的 `create_playback_region` / `update_playback_region` 的 sequence 校验 | **行为** | 宿主没声明 `regionSequenceRef` 时以 trait 参数为准（原先 `None != Some(expected)` 恒真 ⇒ 整条 region 被拒）。只在宿主声明了一个**不同**的 sequence 时才拒绝 —— 那才是真冲突 | 新增 |
+| 14 | `controller.rs` 的 7 个生命周期回调 | **行为** | null hostRef 不再让回调裸 `return`，改走无宿主变体（`update_musical_context{,_content}` / `update_audio_source{,_content}` / `set_audio_source_deactivated_with_host` / `set_audio_source_samples_access_with_host` / `destroy_audio_source`）。补丁 12 只让 create 容忍 null hostRef，于是"对象建起来了，但采样读不到、tempo 读不到、源销毁不了" | 新增 |
 
 ## 代数协商的静默失败（补丁 6/7）
 

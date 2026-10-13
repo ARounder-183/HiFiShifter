@@ -686,11 +686,19 @@ impl<P: PluginModel> EditSession<'_, P> {
             return Err(AraError::InvalidState("region sequence is deactivated"));
         }
         if self.runtime.generation >= ApiGeneration::V2Draft {
-            let expected = self.runtime.sequences.model_ref(sequence)?;
-            if properties.region_sequence().map(ModelRef::as_raw) != Some(expected.as_raw()) {
-                return Err(AraError::InvalidArgument(
-                    "playback-region properties reference a different region sequence",
-                ));
+            // 【本地补丁 13】宿主没声明 `regionSequenceRef` 时以 trait 参数为准。
+            //
+            // 契约要求这里非 null，但实测宿主会给 null（同 `createAudioSource` 的 null
+            // hostRef）。此前 `None != Some(expected)` 恒真 ⇒ 整条 region 被拒 ⇒
+            // 编辑器里一条片段都没有。而 trait 参数**就是**权威归属边（本地补丁 1），
+            // 所以只在宿主**声明了**一个不同的 sequence 时才拒绝 —— 那才是真冲突。
+            if let Some(declared) = properties.region_sequence() {
+                let expected = self.runtime.sequences.model_ref(sequence)?;
+                if declared.as_raw() != expected.as_raw() {
+                    return Err(AraError::InvalidArgument(
+                        "playback-region properties reference a different region sequence",
+                    ));
+                }
             }
         } else {
             let expected_context = self.runtime.contexts.model_ref(sequence_node.context)?;
@@ -914,11 +922,19 @@ impl<P: PluginModel> EditSession<'_, P> {
         properties: PlaybackRegionProperties,
     ) -> Result<(), AraError> {
         if self.runtime.generation >= ApiGeneration::V2Draft {
-            let expected = self.runtime.sequences.model_ref(sequence)?;
-            if properties.region_sequence().map(ModelRef::as_raw) != Some(expected.as_raw()) {
-                return Err(AraError::InvalidArgument(
-                    "playback-region properties reference a different region sequence",
-                ));
+            // 【本地补丁 13】宿主没声明 `regionSequenceRef` 时以 trait 参数为准。
+            //
+            // 契约要求这里非 null，但实测宿主会给 null（同 `createAudioSource` 的 null
+            // hostRef）。此前 `None != Some(expected)` 恒真 ⇒ 整条 region 被拒 ⇒
+            // 编辑器里一条片段都没有。而 trait 参数**就是**权威归属边（本地补丁 1），
+            // 所以只在宿主**声明了**一个不同的 sequence 时才拒绝 —— 那才是真冲突。
+            if let Some(declared) = properties.region_sequence() {
+                let expected = self.runtime.sequences.model_ref(sequence)?;
+                if declared.as_raw() != expected.as_raw() {
+                    return Err(AraError::InvalidArgument(
+                        "playback-region properties reference a different region sequence",
+                    ));
+                }
             }
         } else {
             let context = self.runtime.sequences.get(sequence)?.context;

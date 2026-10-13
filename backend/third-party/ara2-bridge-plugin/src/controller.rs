@@ -3,8 +3,8 @@
 use crate::ffi::generated_callbacks::ControllerDelegate;
 use crate::{
     document_controller_interface, ContentObject, ContentReaderSnapshot, ControllerCapabilities,
-    HostAudioSourceRef, HostClients, HostMusicalContextRef, Plugin, PluginModel, PluginRuntime,
-    SemanticCapabilities,
+    HostAudioSourceRef, HostClients, HostContentScope, HostMusicalContextRef, Plugin, PluginModel,
+    PluginRuntime, SemanticCapabilities,
 };
 use ara2_bridge_core::{
     ApiGeneration, AraError, ContentTimeRange, ContentUpdateScopes, DocumentProperties,
@@ -487,16 +487,27 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains controller-owned until destroy.
-        let Ok(host_ref) = (unsafe { HostMusicalContextRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostMusicalContextRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        let Some(host_ref) = host_ref else {
+        // 【为什么 null hostRef 只降级、不丢弃】实测 Cubase 15 会给这些回调传 null
+        // hostRef。补丁 12 让 create 容忍它并把 null 存了进来 —— 若这里仍以
+        // `from_raw` 失败即裸 `return`，整条生命周期回调会静默失效：宿主改名 / 改
+        // 内容 / 换 tempo / 授权 PCM / 销毁源全部不生效（用户看到"授权了却读不到
+        // 采样""tempo 永远读不到"）。改为走**无宿主**变体：语义与 create 的
+        // `HostContentScope::unavailable()` 一致（本次回调没有宿主内容可查，其余照旧）。
+            let Ok(mut edit) = runtime.callback_edit() else {
+                return;
+            };
+            let _ = edit.update_musical_context(handle, properties);
+            return;
+        };
+        let host = &self.host;
         host.with_musical_context_content(host_ref, |scope| {
             let Ok(mut edit) = runtime.callback_edit() else {
                 return;
@@ -558,16 +569,27 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
-        let Ok(host_ref) = (unsafe { HostMusicalContextRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostMusicalContextRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        let Some(host_ref) = host_ref else {
+            // 同上：宿主没给引用时读不到 tempo / 拍号内容，但**必须**照常重读一次
+            // （无宿主变体给的是 unavailable scope），否则变速后插件永远不知道。
+            let Ok(mut edit) = runtime.callback_edit() else {
+                return;
+            };
+            let _ = edit.update_musical_context_content(
+                handle,
+                range,
+                ContentUpdateScopes::from_bits_retain(flags),
+            );
+            return;
+        };
+        let host = &self.host;
         host.with_musical_context_content(host_ref, |scope| {
             let Ok(mut edit) = runtime.callback_edit() else {
                 return;
@@ -693,16 +715,22 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
-        let Ok(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        let Some(host_ref) = host_ref else {
+            // 同上（见 `update_musical_context_properties`）：宿主没给引用时走无宿主变体。
+            let Ok(mut edit) = runtime.callback_edit() else {
+                return;
+            };
+            let _ = edit.update_audio_source(handle, properties);
+            return;
+        };
+        let host = &self.host;
         host.with_audio_source_content(host_ref, |scope| {
             let Ok(mut edit) = runtime.callback_edit() else {
                 return;
@@ -727,20 +755,30 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
-        let Ok(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
-        let result = host.with_audio_source_management(host_ref, |scope| {
-            let mut edit = runtime.callback_edit()?;
-            edit.set_audio_source_deactivated_with_host(handle, deactivating, &scope)
-        });
+        let result = match host_ref {
+            Some(host_ref) => {
+                let host = &self.host;
+                host.with_audio_source_management(host_ref, |scope| {
+                    let mut edit = runtime.callback_edit()?;
+                    edit.set_audio_source_deactivated_with_host(handle, deactivating, &scope)
+                })
+            }
+            // 同上（见 `update_musical_context_properties`）：宿主没给引用时走无宿主变体。
+            None => runtime.callback_edit().and_then(|mut edit| {
+                edit.set_audio_source_deactivated_with_host(
+                    handle,
+                    deactivating,
+                    &HostContentScope::unavailable(),
+                )
+            }),
+        };
         if result.is_err() {
             return;
         }
@@ -750,7 +788,10 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             let _ = self.analysis.cancel(raw);
             self.analysis_events.cancel(raw);
             self.pending_analysis_starts.retain(|source| *source != raw);
-            self.host.revoke_audio_source_readers(host_ref);
+            // 宿主没给引用时没有 reader 可撤（那一次读取本就走的是无宿主路径）。
+            if let Some(host_ref) = host_ref {
+                self.host.revoke_audio_source_readers(host_ref);
+            }
         }
     }
 
@@ -774,16 +815,27 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
-        let Ok(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        let Some(host_ref) = host_ref else {
+            // 同上（见 `update_musical_context_properties`）：宿主没给引用时走无宿主变体。
+            // 内容版本必须照常推进，否则"素材被替换了"插件完全不知道。
+            let Ok(mut edit) = runtime.callback_edit() else {
+                return;
+            };
+            let _ = edit.update_audio_source_content(
+                handle,
+                range,
+                ContentUpdateScopes::from_bits_retain(flags),
+            );
+            return;
+        };
+        let host = &self.host;
         host.with_audio_source_content(host_ref, |scope| {
             let Ok(mut edit) = runtime.callback_edit() else {
                 return;
@@ -819,25 +871,40 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
-        let Ok(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
-            return;
-        };
+        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
         if !self.content_readers.is_empty() {
             return;
         }
-        let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
-        host.with_audio_source_management(host_ref, |scope| {
-            let _ = runtime.set_audio_source_samples_access_with_host(
-                handle,
-                enable != kARAFalse,
-                &scope,
-            );
-        });
+        // 【这一处最要紧】PCM 授权就靠它。宿主没给引用时若丢弃，插件**永远**读不到
+        // 素材（波形空白、无声），而日志里只有"授权了却读不出来"。走无宿主变体后，
+        // 读取会在 `HostContentScope::unavailable()` 下失败并**记下真因**
+        // （`source_failures`），用户至少能看到"源读不出来"而不是一片空白。
+        match host_ref {
+            Some(host_ref) => {
+                let host = &self.host;
+                host.with_audio_source_management(host_ref, |scope| {
+                    let _ = runtime.set_audio_source_samples_access_with_host(
+                        handle,
+                        enable != kARAFalse,
+                        &scope,
+                    );
+                });
+            }
+            None => {
+                let _ = runtime.set_audio_source_samples_access_with_host(
+                    handle,
+                    enable != kARAFalse,
+                    &HostContentScope::unavailable(),
+                );
+            }
+        }
         if enable == kARAFalse {
-            self.host.revoke_audio_source_readers(host_ref);
+            if let Some(host_ref) = host_ref {
+                self.host.revoke_audio_source_readers(host_ref);
+            }
         }
     }
 
@@ -864,21 +931,30 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         // SAFETY: the identity was validated on creation and remains live through this callback.
-        let Ok(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
-            return;
-        };
-        let host = &self.host;
+        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
-        let result = host.with_audio_source_management(host_ref, |scope| {
-            let mut edit = runtime.callback_edit()?;
-            edit.destroy_audio_source_with_host(handle, &scope)
-        });
+        // 【为什么销毁也必须降级】源销毁不了 ⇒ 运行时的 `live_sources` 永不归零 ⇒
+        // `PluginRuntime::destroy()` 报错（调用点用 `let _ =` 吞掉）⇒
+        // `destroy_document` 不跑 ⇒ 文档关闭时状态残留。
+        let result = match host_ref {
+            Some(host_ref) => {
+                let host = &self.host;
+                host.with_audio_source_management(host_ref, |scope| {
+                    let mut edit = runtime.callback_edit()?;
+                    edit.destroy_audio_source_with_host(handle, &scope)
+                })
+            }
+            // 同上（见 `update_musical_context_properties`）：宿主没给引用时走无宿主变体。
+            None => runtime.callback_edit().and_then(|mut edit| edit.destroy_audio_source(handle)),
+        };
         if result.is_err() {
             return;
         }
-        self.host.revoke_audio_source_readers(host_ref);
+        if let Some(host_ref) = host_ref {
+            self.host.revoke_audio_source_readers(host_ref);
+        }
         self.audio_source_hosts.remove(&raw);
     }
 
