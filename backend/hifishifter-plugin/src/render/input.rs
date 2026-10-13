@@ -19,6 +19,25 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// 两条固定率上的空快照。
+///
+/// 【为什么是一个具名函数】"没有可渲染的片段"有三种来源 —— 没有 region、没有 clip、
+/// clip 全部几何非法 —— 它们都应当发布**同一份空快照**，而不是各自报错或各自拼一份。
+/// 此前只有第一种走了空快照，后两种（尤其"空列表"）撞上了 `unsupported host position`
+/// 这个**整份失败**的守卫。合并成一个具名函数后，这个语义只有一处定义。
+fn empty_snapshots() -> Vec<PlaybackSnapshot> {
+    [44100, 48000]
+        .into_iter()
+        .map(|sample_rate| PlaybackSnapshot {
+            sample_rate,
+            origin_sample: 0,
+            left: vec![],
+            right: vec![],
+            _reservation: None,
+        })
+        .collect()
+}
+
 pub(crate) struct RenderInput {
     pub timeline: Option<TimelineState>,
     pub regions: Vec<AraPlaybackRegion>,
@@ -58,16 +77,7 @@ impl RenderInput {
                 .collect();
         };
         if self.regions.is_empty() {
-            return Ok([44100, 48000]
-                .into_iter()
-                .map(|sample_rate| PlaybackSnapshot {
-                    sample_rate,
-                    origin_sample: 0,
-                    left: vec![],
-                    right: vec![],
-                    _reservation: None,
-                })
-                .collect());
+            return Ok(empty_snapshots());
         }
         // 只放行原kernel负责的真实正向时间拉伸；普通PCM mixer不放行，content-based fades另有契约。
         //
@@ -89,19 +99,50 @@ impl RenderInput {
             true,
         )
         .map_err(|e| format!("unsupported host region: {e:?}"))?;
-        let start = timeline
+        // 【为什么不能整份报错】此前这里对全部 clip 求 min/max，然后
+        //     `if start < 0.0 || !start.is_finite() || !end.is_finite() { return Err("unsupported host position") }`
+        // 一条坏 clip 就让整份渲染失败 —— 而调用方（自动应用）在 8 次重试后置 `settled`，
+        // **永久停止自动渲染**，用户看到的是"声音停在旧版本、界面再也不更新"。
+        // 更糟的是空列表也会命中：`fold(INFINITY, min)` 在空列表上得 `INFINITY`，
+        // 于是"没有可渲染的片段"被报成了"宿主位置不支持"，日志指向完全错误的方向。
+        //
+        // 现在逐条降级：非有限几何的 clip 不进渲染（映射层已先按 `SkipReason` 跳过它们，
+        // 这里只是兜底）；窗口起点夹到非负 —— 0 之前的部分本就发布不出去，夹掉它是保内容对齐的。
+        // 一条片段都不剩时发布**空快照**，不是错误。
+        let sanitized = timeline
             .clips
             .iter()
-            .map(|c| c.start_sec)
-            .fold(f64::INFINITY, f64::min);
-        let end = timeline
-            .clips
-            .iter()
-            .map(|c| c.start_sec + c.length_sec)
-            .fold(0.0_f64, f64::max);
-        if start < 0.0 || !start.is_finite() || !end.is_finite() {
-            return Err("unsupported host position".into());
+            .any(|clip| !clip.start_sec.is_finite() || !clip.length_sec.is_finite())
+            .then(|| {
+                let mut view = timeline.clone();
+                view.clips
+                    .retain(|clip| clip.start_sec.is_finite() && clip.length_sec.is_finite());
+                view
+            });
+        let timeline = sanitized.as_ref().unwrap_or(timeline);
+        if let Some(view) = &sanitized {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.render.nonfinite-clip",
+                format_args!(
+                    "[ara] dropped {} clip(s) with non-finite geometry from this render; \
+                     the rest of the timeline is published",
+                    self.timeline
+                        .as_ref()
+                        .map_or(0, |original| original.clips.len() - view.clips.len())
+                ),
+            );
         }
+        let mut start = f64::INFINITY;
+        let mut end = f64::NEG_INFINITY;
+        for clip in &timeline.clips {
+            start = start.min(clip.start_sec);
+            end = end.max(clip.start_sec + clip.length_sec);
+        }
+        if !(start.is_finite() && end.is_finite()) || end <= start.max(0.0) {
+            return Ok(empty_snapshots());
+        }
+        let start = start.max(0.0);
         let mut input = HashMap::new();
         let source_bytes = timeline
             .clips

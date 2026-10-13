@@ -461,6 +461,14 @@ pub enum SkipReason {
     UnknownModification,
     /// 播放时长为 0 或非有限值（零长度 item）。
     NonPositivePlaybackDuration,
+    /// 播放位置非有限（`NaN` / `±inf`）。
+    ///
+    /// 【为什么与"时长非正"分开】两者成因不同：时长非正是宿主表达了一个零长度 item；
+    /// 位置非有限是宿主的几何**坏了**。此前这一条在映射层完全没有校验，坏值一路带进
+    /// `RenderInput::render_with_progress` 的 min/max 守卫，在那里变成**整份**渲染失败
+    /// （`unsupported host position`），8 次重试后自动渲染永久停摆。放到这里逐条跳过，
+    /// 其余片段照常发布。
+    InvalidPlaybackPosition,
     /// region 的源窗口整条落在源之外，没有任何可读素材。
     ///
     /// 【为什么与"源不存在"分开】成因不同、下一步也不同：源不存在是宿主模型有问题；
@@ -477,6 +485,7 @@ impl SkipReason {
             Self::UnknownSource => "unknown_source",
             Self::UnknownModification => "unknown_modification",
             Self::NonPositivePlaybackDuration => "non_positive_duration",
+            Self::InvalidPlaybackPosition => "invalid_playback_position",
             Self::SourceWindowOutsideSource => "source_window_outside_source",
         }
     }
@@ -647,6 +656,13 @@ fn ara_document_to_timeline_reporting_with_identities(
             });
             continue;
         }
+        if !region.start_in_playback_time.is_finite() {
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::InvalidPlaybackPosition,
+            });
+            continue;
+        }
 
         // 【速率】宿主声明的时长比值，再乘"工程速率 / 源速率"的校正。后者修正的是
         // "宿主按工程速率折算修改时长"这一事实（见 `region_playback_rate`）：
@@ -668,67 +684,103 @@ fn ara_document_to_timeline_reporting_with_identities(
             .or_else(|| source.name.clone())
             .unwrap_or_else(|| clip_id.clone());
 
-        // 【源窗口】宿主给出的修改时长时间可以**超出源本身**，而这不是它的错：素材采样率
-        // 与工程采样率不同时，宿主把 `durationInModificationTime` 按**工程**速率折算 ——
-        // 实测 Cubase 15：48 kHz / 1526332 帧素材放进 44.1 kHz 工程，现场读数是
-        // `durationMod = durationPlay = 34.610703`，而 34.610703 × 44100 恰好等于源帧数；
-        // 乘**源**速率 48000 则得 1661314，凭空多出 8.2%。
+        // 【源窗口：整段工程区间一起折算，起点与终点必须同域】
         //
-        // 【有工程速率时按速率折算，而不是夹掉】`playback_rate` 已经把 44100/48000 带上，
-        // 内核消费的源跨度是 `durationPlay × playback_rate` = 34.610703 × 0.91875 =
-        // 31.7986 s，恰好等于整条源 —— **不多要一帧，也不少要一帧**。此时再夹到
-        // `duration_seconds` 是恒等的，所以只在拿不到速率时才需要夹。
+        // 宿主给的 `startInModificationTime` 与 `durationInModificationTime` 同处**工程**速率域
+        // （素材率 ≠ 工程率时宿主把修改时间按工程速率折算 —— 见 `region_playback_rate` 的说明）。
+        // 内核消费的源跨度由 `durationPlay × playback_rate` 决定，而 `playback_rate` 里**已经含了**
+        // `projectRate / sourceRate` 这一项，所以终点的折算一直是**对的**，起点却不是 ——
+        // 这就是"分割越靠后越容易丢片段"的根因：
         //
-        // 【为什么夹而不是报错】拿不到速率时（宿主没通报、也推导不出），夹是**保音高**的：
-        // 源按自身速率播放，缺的部分留白（ARA 对"读到源尾之后"的定义就是静音）。此前这段
-        // 越界一路带到渲染校验，被 `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：
-        // 整条时间线一条片段都发布不出来，用户看到"尚未应用：unsupported host region:
-        // InvalidGeometry"。一个越界的源窗口绝不该赔上整条时间线。
+        //     越界量 = startMod × (1 − projectRate / sourceRate)
+        //
+        // 实测 Cubase 15：48 kHz / 1526332 帧素材放进 44.1 kHz 工程，一条在
+        // 10 / 16 / 20 / 22 / 26 / 28 / 30 s 处被连续分割的 region，日志里
+        // `consumed source window` 的越界量依次是
+        // 0.8125 / 1.3000 / 1.6250 / 1.7875 / 2.1125 / 2.2750 / 2.4375 s，
+        // 与上式**逐条误差为 0**（0.08125 = 1 − 44100/48000）。起点 ≥ 31.1 s 的片段因此整条被判成
+        // "落在源外"（`SourceWindowOutsideSource`）而跳过 —— 用户看到的就是"分割后某个片段失踪"；
+        // 未被跳过的那些则内容整体后移、长度偏短。
+        //
+        // 【为什么起点用 `projectRate / sourceRate` 而不是 `playback_rate`】`playback_rate` 还含
+        // 宿主自带的拉伸比值（`durMod / durPlay`），对真正被拉伸过的 region 不等于速率校正分量。
+        // **位置与拉伸无关**，所以起点只乘速率校正分量；终点仍走内核实际消费的跨度
+        // `durationPlay × playback_rate`（它恒等于 `durMod × projectRate/sourceRate`）。
+        //
+        // 【为什么夹而不是报错】拿不到速率时（宿主没通报），整个窗口都在工程秒域，夹是**保音高**的：
+        // 源按自身速率播放，缺的部分留白（ARA 对"读到源尾之后"的定义就是静音）。此前这段越界
+        // 一路带到渲染校验，被 `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：整条时间线
+        // 一条片段都发布不出来。一个越界的源窗口绝不该赔上整条时间线。
         //
         // 【为什么只在时长已知时才夹】`duration_seconds` 由 `sampleCount / sampleRate` 推出，
-        // 宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条 region 都夹成
-        // 空、进而全部跳过 —— 那比原来的致命拒绝还糟。
-        //
-        // 【有工程速率时先折算再判断】宿主给的 `durationInModificationTime` 是**工程**速率秒，
-        // 内核消费的源跨度是 `durationPlay × playback_rate`。速率已知时这个乘积恰好落在源内
-        // （Cubase 现场：34.610703 × 0.91875 = 31.7986 = 整条源），**不该夹** ——
-        // 夹了反而丢掉真实内容。所以判据从"声明窗口 vs 源长度"换成"折算后的窗口 vs 源长度"。
-        let declared_end = region.start_in_modification_time + region.duration_in_modification_time;
-        let rate_known = project.rate > 0.0 && playback_rate.is_finite() && playback_rate > 0.0;
-        let consumed_end = if rate_known {
-            region.start_in_modification_time + region.duration_in_playback_time * playback_rate
+        // 宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条 region 都夹成空、
+        // 进而全部跳过 —— 那比原来的致命拒绝还糟。
+        let rate_known = project.rate.is_finite()
+            && project.rate > 0.0
+            && source.sample_rate.is_finite()
+            && source.sample_rate > 0.0;
+        let rate_ratio = if rate_known {
+            project.rate / source.sample_rate
         } else {
-            declared_end
+            1.0
         };
+        let raw_start = region.start_in_modification_time * rate_ratio;
+        let raw_end = raw_start
+            + if rate_known {
+                region.duration_in_playback_time * playback_rate
+            } else {
+                region.duration_in_modification_time
+            };
         let known_duration = source.duration_seconds > 0.0;
         let source_span_end = if known_duration {
-            consumed_end.min(source.duration_seconds)
+            raw_end.min(source.duration_seconds)
         } else {
-            consumed_end
+            raw_end
         };
         let source_span_start = if known_duration {
-            region.start_in_modification_time.min(source_span_end)
+            raw_start.min(source_span_end)
         } else {
-            region.start_in_modification_time
+            raw_start
         };
         if known_duration && source_span_end <= source_span_start {
             // 整条 region 都落在源之外：没有可读素材。这与"源不存在"同级 —— 记因、跳过，
             // 不发布一条空 take 让下游去猜。
+            //
+            // 【为什么带上现场数字】此前只有 `index:reason`，下一轮取证必须靠日志反推是哪个窗口
+            // 越界（本轮的根因就是这么找到的）。把四个量直接打出来，下一次不必再反推。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.mapping.window-outside-source",
+                format_args!(
+                    "[ara] playback_region #{index}: source window [{raw_start:.6}, {raw_end:.6}] \
+                     (startMod={:.6} durPlay={:.6} durMod={:.6} ratio={rate_ratio:.6}) lies outside the \
+                     source ({:.6}s at {} Hz); the region is skipped",
+                    region.start_in_modification_time,
+                    region.duration_in_playback_time,
+                    region.duration_in_modification_time,
+                    source.duration_seconds,
+                    source.sample_rate,
+                ),
+            );
             skipped.push(SkippedRegion {
                 index,
                 reason: SkipReason::SourceWindowOutsideSource,
             });
             continue;
         }
-        if source_span_end < consumed_end {
-            log::warn!(
-                "[ara] playback_region #{index}: consumed source window [{:.6}, {:.6}] exceeds the \
-                 source ({:.6}s at {} Hz); clamping to the source so the tail renders as silence \
-                 instead of failing the whole timeline",
-                region.start_in_modification_time,
-                consumed_end,
-                source.duration_seconds,
-                source.sample_rate,
+        if source_span_end < raw_end {
+            // 修好起点折算后这条**不应再出现**（折算后的窗口恰好落在源内）。保留它作为回归哨兵：
+            // 一旦宿主换了折算口径，它会是第一个报警的地方。限流，避免每 region 每次重算都打。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.mapping.window-clamped",
+                format_args!(
+                    "[ara] playback_region #{index}: consumed source window [{raw_start:.6}, {raw_end:.6}] \
+                     exceeds the source ({:.6}s at {} Hz); clamping to the source so the tail renders as \
+                     silence instead of failing the whole timeline",
+                    source.duration_seconds,
+                    source.sample_rate,
+                ),
             );
         }
 
@@ -911,8 +963,72 @@ mod tests {
         doc
     }
 
+    /// **Cubase 15 连续分割的现场读数**：同一条源，七条半段的 `startMod` / `durPlay`
+    /// 直接取自 2026-10-13 真机日志（22:21–22:22 会话）。见
+    /// [`tests::a_nonzero_modification_start_is_converted_into_source_seconds`]。
+    fn cubase_split_document() -> AraDocument {
+        let mut doc = ara_document_from_json(
+            r#"
+            {
+                "documentName": "session",
+                "audioSources": [
+                    { "persistentID": "C:/media/Vocal-5-1.wav", "name": "vocal",
+                      "sampleRate": 48000.0, "sampleCount": 1526332,
+                      "durationSeconds": 31.798583333333334, "channelCount": 2,
+                      "sampleAccessEnabled": true }
+                ],
+                "musicalContexts": [
+                    { "name": "ctx", "regionSequences": [
+                        { "name": "Vocal", "orderIndex": 0, "playbackRegionCount": 8 }
+                    ] }
+                ],
+                "audioModifications": [
+                    { "persistentID": "mod-1", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav" }
+                ],
+                "playbackRegions": [
+                    { "name": "s10", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 10.0, "durationInModificationTime": 24.610703,
+                      "startInPlaybackTime": 10.0, "durationInPlaybackTime": 24.610703 },
+                    { "name": "s16", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 16.0, "durationInModificationTime": 18.610703,
+                      "startInPlaybackTime": 16.0, "durationInPlaybackTime": 18.610703 },
+                    { "name": "s20", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 20.0, "durationInModificationTime": 14.610703,
+                      "startInPlaybackTime": 20.0, "durationInPlaybackTime": 14.610703 },
+                    { "name": "s22", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 22.0, "durationInModificationTime": 12.610703,
+                      "startInPlaybackTime": 22.0, "durationInPlaybackTime": 12.610703 },
+                    { "name": "s26", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 26.0, "durationInModificationTime": 8.610703,
+                      "startInPlaybackTime": 26.0, "durationInPlaybackTime": 8.610703 },
+                    { "name": "s28", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 28.0, "durationInModificationTime": 6.610703,
+                      "startInPlaybackTime": 28.0, "durationInPlaybackTime": 6.610703 },
+                    { "name": "s30", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 30.0, "durationInModificationTime": 4.610703,
+                      "startInPlaybackTime": 30.0, "durationInPlaybackTime": 4.610703 },
+                    { "name": "s32", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 32.0, "durationInModificationTime": 2.610703,
+                      "startInPlaybackTime": 32.0, "durationInPlaybackTime": 2.610703 }
+                ]
+            }"#,
+        )
+        .expect("split document parses");
+        doc.project_sample_rate = Some(44100.0);
+        doc
+    }
+
     /// 宿主通报工程速率时，48 kHz 素材进 44.1 kHz 工程必须得到 0.91875 的播放速率，
     /// 且**不能**再夹源窗口 —— 31.7986 s 的源内容要完整消费。
+
     ///
     /// 【为什么这是回归测试】此前 `playback_rate = durationMod / durationPlay`，两个数同在
     /// 工程速率域，比值恒为 1；真实速率被抹平后，素材按自身速率播完、剩下的工程时间留白，
@@ -944,6 +1060,68 @@ mod tests {
             take.source_end_sec
         );
         assert_close(clip.length_sec, 34.610703);
+    }
+
+    /// **Cubase 15 连续分割的现场读数**：48 kHz / 31.798583 s 素材放进 44.1 kHz 工程，
+    /// 一条 region 在 10 / 16 / 20 / 22 / 26 / 28 / 30 s 处被分割后的七条半段。
+    ///
+    /// 【为什么必须钉住这一条】前三轮（共 75 项）把"分割报错 / 片段消失"归因于祖先歧义与
+    /// 身份派生，全部修完、日志证明生效，用户仍然报错 —— 因为真因是这里：
+    /// `source_span_start` 取了**工程秒**的 `startInModificationTime` 却当成**源秒**用。
+    /// 越界量 = `startMod × (1 − 44100/48000)`，实测七条依次是
+    /// 0.8125 / 1.3000 / 1.6250 / 1.7875 / 2.1125 / 2.2750 / 2.4375 s，与上式**误差为 0**。
+    /// 起点 ≥ 31.1 s 的片段因此整条被判"落在源外"而跳过（"片段失踪"）。
+    ///
+    /// 【为什么既有测试没抓到】所有既有夹具的 `startInModificationTime` 都是 0，而
+    /// `0 × 0.91875 = 0` —— 缺陷在起点为 0 时完全不可见。本测试是全仓第一个起点非零的夹具。
+    #[test]
+    fn a_nonzero_modification_start_is_converted_into_source_seconds() {
+        let doc = cubase_split_document();
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        assert_eq!(outcome.timeline.clips.len(), 8);
+
+        let ratio = 44100.0 / 48000.0;
+        // 八条半段的 `startMod + durPlay` 都等于整条素材的工程秒长度 34.610703，
+        // 所以折算后**每一条的源窗终点都恰好落在源尾**，一条都不该被夹、更不该被跳过。
+        //
+        // 【为什么最后一条是 32.0 s】它是"片段失踪"的边界：`32.0 > 31.798583`（源长），
+        // 所以**起点不折算**时 `source_span_start` 会被夹成源尾、与 `source_span_end` 相等，
+        // 整条被判 `SourceWindowOutsideSource` 跳过 —— 这正是用户看到的"分割后片段失踪"。
+        for (clip, (start_mod, dur_play)) in outcome.timeline.clips.iter().zip([
+            (10.0, 24.610703),
+            (16.0, 18.610703),
+            (20.0, 14.610703),
+            (22.0, 12.610703),
+            (26.0, 8.610703),
+            (28.0, 6.610703),
+            (30.0, 4.610703),
+            (32.0, 2.610703),
+        ]) {
+            let take = &clip.takes[0];
+            // 时间线位置与长度是**工程秒**，原样透传（只有源窗需要折算）。
+            assert!((clip.start_sec - start_mod).abs() < 1e-6);
+            assert!((clip.length_sec - dur_play).abs() < 1e-6);
+            let expected_start = start_mod * ratio;
+            assert!(
+                (take.source_start_sec - expected_start).abs() < 1e-6,
+                "startMod={start_mod}: expected source_start={expected_start}, got {}",
+                take.source_start_sec
+            );
+            // 终点是整条源（34.610703 × 0.91875 = 31.798583）—— 折算把起点带上之后，
+            // 它不再越界；越界曾经正是"片段失踪"的成因。
+            assert!(
+                (take.source_end_sec - 31.798583333333334).abs() < 1e-5,
+                "startMod={start_mod}: expected source_end≈31.7986, got {}",
+                take.source_end_sec
+            );
+            assert_rate(take.playback_rate, ratio);
+            // 位置（不是时长）决定窗口起点，所以 playback_rate 的拉伸分量不参与它。
+            assert!(
+                take.source_end_sec <= 31.798583333333334 + 1e-6,
+                "startMod={start_mod}: window must stay inside the source"
+            );
+        }
     }
 
     /// 拿不到工程速率时**不猜**：退回夹窗口 + 保音高的既有降级，并记下现场数字。
