@@ -118,6 +118,45 @@ jobs:
             throw 'Plugin tests failed; see the error annotation and diagnostics artifact.'
           }
 
+      # 【为什么必须单独跑 kernel】本仓的合成契约（`clip_playback_window_sec` 的窗口数学、
+      # `mixdown` 的源窗消费）在 `hifishifter-kernel` 里，而**此前的 CI 只跑
+      # `-p hifishifter-plugin`** ⇒ kernel 的 85 个内联测试模块在流水线上零覆盖。
+      # 2026-10-13 的 ARA 源窗缺陷（`startInModificationTime` 未做工程速率换算）恰好落在
+      # 这条边界上：插件的测试夹具起点恒为 0，而 kernel 那侧也没有守卫。
+      - name: Run kernel unit tests
+        run: |
+          try {
+            . ./scripts/env/msvc-env.ps1
+            cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-kernel --lib -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Kernel unit tests failed.' }
+          } catch {
+            $_ | Out-String | Write-Output
+            throw
+          }
+
+      # 【为什么再跑一遍并发】`--test-threads=1` 掩盖并发问题，而本插件最容易出事的地方
+      # （重算与自动应用的版本竞态、快照发布与读者回收）**全部是并发敏感的**。
+      # 单线程跑得通不代表正确：用一份独立的日志文件并行再跑一次，失败即视为门禁失败。
+      - name: Run plugin unit tests concurrently
+        run: |
+          New-Item -ItemType Directory -Path .build-tmp -Force | Out-Null
+          $ciTestLog = Join-Path $PWD '.build-tmp/plugin-unit-tests-concurrent.log'
+          try {
+            . ./scripts/env/msvc-env.ps1
+            cargo test --manifest-path backend/Cargo.toml --locked --offline --jobs 2 -p hifishifter-plugin --lib -- --test-threads=4 *> $ciTestLog
+            $ciTestExitCode = $LASTEXITCODE
+          } catch {
+            $_ | Out-String | Set-Content -LiteralPath $ciTestLog
+            $ciTestExitCode = 1
+          }
+          Get-Content -LiteralPath $ciTestLog -Tail 100
+          if ($ciTestExitCode -ne 0) {
+            $ciFailure = (Get-Content -LiteralPath $ciTestLog -Tail 160) -join "`n"
+            $ciFailure = $ciFailure.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Plugin concurrent test failure::$ciFailure"
+            throw 'Plugin tests failed under concurrent execution; see the error annotation.'
+          }
+
       - name: Run plugin integration contracts
         run: |
           # 契约测试（ARA 映射 / renderer 分配 / VST3 导出 / 依赖树无 Tauri / 版本一致性 /
