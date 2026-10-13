@@ -506,7 +506,10 @@ pub struct MappingOutcome {
 pub struct MappingIdentities {
     /// 每条 region 的 ARA region key（0 = 未知，退回位置身份）。
     pub region_keys: Vec<u64>,
-    /// 每条 region sequence 的宿主 persistentID（空串 = 未知，退回位置身份）。
+    /// 每条 region sequence 的宿主 **model-ref key**（空串 = 未知，退回位置身份）。
+    ///
+    /// 【为什么不是 persistentID】`ARARegionSequenceProperties` 没有这个字段（见上方
+    /// `AraRegionSequence` 的说明），宿主给的稳定令牌只有 model-ref key。
     pub sequence_ids: Vec<String>,
 }
 
@@ -521,7 +524,7 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
 /// ARA 文档 → `TimelineState`，带**稳定身份**（推荐入口）。
 ///
 /// 与 [`ara_document_to_timeline_reporting`] 同口径，差别只在 clip / track 的身份来源：
-/// 传了 [`MappingIdentities`] 就按 region key 与 sequence persistentID 派生，
+/// 传了 [`MappingIdentities`] 就按 region key 与 sequence model-ref key 派生，
 /// 否则退回位置派生。生产路径（`ModelHandle::remap_and_log`）必须用这一个。
 pub fn ara_document_to_timeline_with_identities(
     doc: &AraDocument,
@@ -568,28 +571,35 @@ fn ara_document_to_timeline_reporting_with_identities(
 
     let mut tracks: Vec<Value> = Vec::new();
     let mut track_ids: Vec<String> = Vec::new();
-    let mut order = 0;
     for (position, sequence) in doc
         .musical_contexts
         .iter()
         .flat_map(|context| context.region_sequences.iter())
         .enumerate()
     {
-        // 【身份优先用宿主的 persistentID】`ARARegionSequenceProperties` 有 persistentID，
-        // 它是宿主侧的稳定标识，跨"重排 / 改名"都不变。拿不到时才退回位置 —— 后者会在
-        // 宿主删掉一条序列之后让其余 track 的身份整体前移。
+        // 【身份用宿主的 model-ref key，不是 persistentID】`ARARegionSequenceProperties`
+        // 只有 name / orderIndex / musicalContextRef / color（`ARAInterface.h:775-793`）
+        // —— **没有** persistentID（audio source / modification / processing algorithm
+        // 才有）。能拿到的稳定令牌是宿主的 model-ref key，由 `ModelHandle` 经
+        // `MappingIdentities` 传入；拿不到时才退回位置，后者会在宿主删掉一条序列之后
+        // 让其余 track 的身份整体前移。
         let id = identities
             .and_then(|ids| ids.sequence_ids.get(position))
             .filter(|id| !id.is_empty())
             .map(|id| format!("ara-sequence-{id}"))
             .unwrap_or_else(|| format!("ara-track-{position}"));
+        // 【为什么 order 取宿主的 orderIndex 而不是枚举序号】枚举序号是"宿主交给我们的
+        // 顺序"，而 `orderIndex` 是"宿主认为的轨道次序"。两者在宿主重排后不一致，而
+        // 内核按 `order` 排序（`state/model.rs` 的 `siblings.sort_by_key`）—— 用枚举
+        // 序号会让插件里的轨道顺序停在宿主重排之前。这里**只改排序值**：`track_ids`
+        // 仍按扁平位置排列，因为 `region_sequence_of` 返回的就是扁平下标，
+        // 重排数组会让 region→track 归属整体错位。
         tracks.push(json!({
             "id": id,
             "name": sequence.name.clone().unwrap_or_default(),
-            "order": order,
+            "order": sequence.order_index,
         }));
         track_ids.push(id);
-        order += 1;
     }
 
     let ownership = region_sequence_of(doc)?;
@@ -1241,6 +1251,51 @@ mod tests {
         );
         // 几何也跟着走：b 仍在 0.5 s 起。
         assert_close(after.timeline.clips[0].start_sec, 0.5);
+    }
+
+    /// **track 的排序值取宿主的 `orderIndex`，而 region→track 归属仍按扁平位置。**
+    ///
+    /// 【为什么两件事必须分开】内核按 `order` 排序显示轨道，所以 `orderIndex` 是"宿主
+    /// 认为的次序"；而 `region_sequence_of` 返回的是**扁平位置**下标，`track_ids` 必须
+    /// 按同一顺序排列，否则 region 会挂到错误的轨道上。把数组按 orderIndex 重排会同时
+    /// 破坏归属 —— 所以这里只改排序值。
+    #[test]
+    fn track_order_follows_the_host_order_index_while_attribution_stays_positional() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0, "sampleCount": 88200,
+                      "durationSeconds": 2.0, "channelCount": 2, "sampleAccessEnabled": true }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [
+                        { "name": "second", "orderIndex": 5, "playbackRegionCount": 1 },
+                        { "name": "first", "orderIndex": 1, "playbackRegionCount": 1 }
+                    ] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "regionSequenceIndex": 0, "startInModificationTime": 0.0,
+                      "durationInModificationTime": 0.5, "startInPlaybackTime": 0.0,
+                      "durationInPlaybackTime": 0.5 },
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "regionSequenceIndex": 1, "startInModificationTime": 0.5,
+                      "durationInModificationTime": 0.5, "startInPlaybackTime": 0.5,
+                      "durationInPlaybackTime": 0.5 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+        let timeline = ara_document_to_timeline(&doc).expect("document maps");
+        // 排序值来自 orderIndex（5 与 1），不是枚举序号（0 与 1）。
+        assert_eq!(timeline.tracks[0].order, 5);
+        assert_eq!(timeline.tracks[1].order, 1);
+        // 而归属仍按位置：第 0 条 region 挂第 0 条 track，第 1 条挂第 1 条。
+        assert_eq!(timeline.clips[0].track_id, timeline.tracks[0].id);
+        assert_eq!(timeline.clips[1].track_id, timeline.tracks[1].id);
     }
 
     /// 没有身份信息时退回位置派生 —— 探针/测试夹具仍可工作。
