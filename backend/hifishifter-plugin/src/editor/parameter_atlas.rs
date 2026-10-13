@@ -726,11 +726,23 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
+        self.follow_geometry_with(timeline, identities, legacy_atlas_mode())
+    }
+
+    /// [`Self::follow_geometry`] 的实现，带 A/B 开关。
+    fn follow_geometry_with(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        legacy: bool,
+    ) -> Result<Self, String> {
         let mut followed = self.clone();
         // 旧存档只有 per-clip 记录：按旧规则认领一次并折算进权威（一次性）。
-        followed.migrate_legacy_records(timeline, identities);
+        if !legacy {
+            followed.migrate_legacy_records(timeline, identities);
+        }
         // 本帧投影完全由权威派生。clip id 的不稳定在这里不再有影响。
-        followed.regions = followed.derive_regions(timeline, identities)?;
+        followed.regions = followed.derive_regions_with(timeline, identities, legacy)?;
         // 谱系表的有界回收：种子一旦被活记录认领就不再需要。
         //
         // 【为什么现在只需这一条】`regions` 已经是**每帧重建**的派生缓存（上面那行），
@@ -823,6 +835,15 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<BTreeMap<String, RegionParameters>, String> {
+        self.derive_regions_with(timeline, identities, legacy_atlas_mode())
+    }
+
+    fn derive_regions_with(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        legacy: bool,
+    ) -> Result<BTreeMap<String, RegionParameters>, String> {
         let mut derived = BTreeMap::new();
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
@@ -834,7 +855,7 @@ impl ParameterAtlas {
             let Ok(geometry) = geometry(clip) else {
                 continue;
             };
-            let Some(authority) = self.authority(identity, &root, &geometry)? else {
+            let Some(authority) = self.authority_with(legacy, identity, &root, &geometry)? else {
                 continue;
             };
             derived.insert(
@@ -863,6 +884,23 @@ impl ParameterAtlas {
         root: &str,
         geometry: &RegionGeometry,
     ) -> Result<Option<Authority<'a>>, String> {
+        self.authority_with(legacy_atlas_mode(), identity, root, geometry)
+    }
+
+    /// [`Self::authority`] 的实现，带 A/B 开关。
+    fn authority_with<'a>(
+        &'a self,
+        legacy: bool,
+        identity: &RegionIdentity,
+        root: &str,
+        geometry: &RegionGeometry,
+    ) -> Result<Option<Authority<'a>>, String> {
+        // 【A/B 兼容开关】`HIFISHIFTER_ARA_LEGACY_ATLAS=1` 强制退回旧的几何认领路径，
+        // 用于在真机上做对照，确认"参数不再被重置"确实是权威表带来的。
+        // 下一轮删除（连同本分支）。
+        if legacy {
+            return Ok(self.find(identity, root, geometry)?.map(Authority::Legacy));
+        }
         if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
             if let Some(params) = self.authorities.get(&key) {
                 return Ok(Some(Authority::Current(params)));
@@ -1737,6 +1775,16 @@ impl ParameterAtlas {
 /// 这里取真实窗口并把 `reversed` 交给 [`RegionGeometry::map`] 建降序源轴。
 ///
 /// 公开给同 crate 的剪贴板粘贴路径，避免"窗口/方向"这套规则被抄成两份。
+/// A/B 兼容开关：强制退回旧的"按几何指纹认领曲线"路径。
+///
+/// 【为什么保留一轮】真机（Cubase）验证时需要一个对照，确认"参数不再被重置"确实是
+/// 权威表带来的，而不是别的改动。设 `HIFISHIFTER_ARA_LEGACY_ATLAS=1` 即退回旧行为。
+/// **下一轮删除**（连同 `authority_with` / `follow_geometry_with` / `derive_regions_with`
+/// 的 `legacy` 参数）。
+fn legacy_atlas_mode() -> bool {
+    std::env::var("HIFISHIFTER_ARA_LEGACY_ATLAS").is_ok_and(|value| value == "1")
+}
+
 /// 把「锁定参数线」的取值映射成锚点。
 ///
 /// 【语义】`true`（默认）= 锁定：参数跟着**素材**走（源域锚定）。`false` = 不锁定：
@@ -2753,6 +2801,65 @@ mod tests {
         assert_eq!(
             &projected["clip"].pitch_edit[4..9],
             &[60., 61., 62., 63., 64.]
+        );
+    }
+
+    /// **A/B 兼容开关必须真的退回旧的几何认领路径。**
+    ///
+    /// 【为什么需要这条】`HIFISHIFTER_ARA_LEGACY_ATLAS=1` 是真机对照用的开关：
+    /// 打开它应当复现"分割后参数被重置"的旧行为，否则它就不是一个可信的对照。
+    #[test]
+    fn the_legacy_switch_reproduces_the_geometry_claiming_path() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        // 宿主克隆 modification（P1/P2 播种）：两个半段的身份是**新的**。
+        let mut split = atlas.clone();
+        assert!(split.seed_authority("mod:mod", "mod:mod-l"));
+        assert!(split.seed_authority("mod:mod", "mod:mod-r"));
+        let mut halves = host(1., 0.5, 0., 0.5);
+        halves.clips[0].id = "left".into();
+        let mut right = host(1.5, 0.5, 0.5, 0.5).clips.remove(0);
+        right.id = "right".into();
+        halves.clips.push(right);
+        halves.project_sec = 2.;
+        let half_ids = BTreeMap::from([
+            (
+                "left".into(),
+                RegionIdentity {
+                    key: 42,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod-l".into(),
+                    signature: String::new(),
+                },
+            ),
+            (
+                "right".into(),
+                RegionIdentity {
+                    key: 43,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod-r".into(),
+                    signature: String::new(),
+                },
+            ),
+        ]);
+        let modern = split
+            .follow_geometry_with(&halves, &half_ids, false)
+            .unwrap();
+        assert_eq!(
+            modern.regions.len(),
+            2,
+            "新路径：两个半段都按稳定身份从权威拿到参数"
+        );
+        let legacy = split
+            .follow_geometry_with(&halves, &half_ids, true)
+            .unwrap();
+        assert!(
+            legacy.regions.is_empty(),
+            "旧路径必须复现'按几何指纹认领不到父段'的行为，否则这个开关不是可信的对照：{:?}",
+            legacy.regions.keys().collect::<Vec<_>>()
         );
     }
 
