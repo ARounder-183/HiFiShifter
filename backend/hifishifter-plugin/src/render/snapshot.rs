@@ -141,16 +141,18 @@ pub(crate) fn validate_regions_with_fades(
         {
             return Err(SnapshotError::InvalidGeometry);
         }
-        // REAPER的秒域item尾可按源采样网格向上取整一帧（现场ka/n恰好如此）。
-        // 按同一源采样网格round后最多允许一帧零尾。倍率跨f32/f64会留下很小的分数帧，
-        // 不能仅用f64 epsilon拒绝合法的网格边界；不改宿主几何，不绕回源头。
-        let available = source.planes[0].len() as f64;
-        let source_start = region.start_in_modification_time * source.sample_rate as f64;
-        let source_end = (region.start_in_modification_time + region.duration_in_modification_time)
-            * source.sample_rate as f64;
-        if source_start >= available || source_end.round() > available + 1. {
-            return Err(SnapshotError::InvalidGeometry);
-        }
+        // 【为什么源窗口越界不再是错误】源窗口超出源本身是**宿主可以合法给出**的：素材
+        // 采样率与工程采样率不同时，宿主按工程速率折算修改时长（实测 Cubase 15：48kHz
+        // 素材进 44.1kHz 工程，`durationMod=34.610703`，而 34.610703 × 44100 恰好等于源
+        // 帧数；乘源速率 48000 则凭空多出 8.2%）。此前这里回 `InvalidGeometry`，代价是
+        // **整条时间线一条片段都发布不出来**，用户只看到
+        // "尚未应用：unsupported host region: InvalidGeometry"。
+        //
+        // ARA 对"读到源尾之后"的定义就是静音（宿主自己的 reader 也这么返回），所以越界
+        // 只需读成静音，不必赔上整条时间线。映射层已在源头把窗口夹到源长度并记下现场
+        // 数字（`ara/mapping.rs`），这里不再复算一遍 —— 越界的兜底在 `mix_plain_regions`
+        // 的取点处（越界记静音），内核路径则由 `formant_cache` 夹到 `total_sec`。
+        // 分配量取自播放域，与源窗口是否越界无关。
         let start = region.start_in_playback_time * sample_rate as f64;
         let stop =
             (region.start_in_playback_time + region.duration_in_playback_time) * sample_rate as f64;
@@ -220,7 +222,14 @@ pub(crate) fn mix_plain_regions(
                 .enumerate()
             {
                 let plane = &source.planes[channel.min(source.planes.len() - 1)];
-                let first = index.min(plane.len() - 1);
+                // 【为什么越界要记静音，而不是重复最后一个样本】宿主可以合法给出超出源尾的
+                // 修改时长（素材与工程采样率不同时按工程速率折算，见 `validate_regions`）。
+                // 旧写法把 `first`/`second` 都夹到 `len()-1`，于是越界段会**一直重复最后一个
+                // 样本** —— 一段直流，听感上是咔哒或嗡鸣。ARA 对"读到源尾之后"的定义是静音。
+                if index >= plane.len() {
+                    continue;
+                }
+                let first = index;
                 let second = (first + 1).min(plane.len() - 1);
                 target[output] += plane[first] + (plane[second] - plane[first]) * fraction;
             }
@@ -533,9 +542,16 @@ impl Drop for ReadSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// 一帧源尾允许有界补零；超过一帧或全窗口已在EOF之外仍必须拒绝。
+    /// 源窗口越界**不再**是致命错误，且越界段渲染成静音。
+    ///
+    /// 【为什么这条契约变了】宿主按**工程**速率折算修改时长时必然越界：实测 Cubase 15
+    /// 把 48kHz / 1526332 帧素材放进 44.1kHz 工程，给出 `durationMod=34.610703`，而
+    /// 34.610703 × 44100 = 1526332（源帧数）、× 48000 = 1661314（越界 8.2%）。旧行为回
+    /// `InvalidGeometry`，代价是**整条时间线一条片段都发布不出来** —— 用户只看到
+    /// "尚未应用：unsupported host region: InvalidGeometry"。一个越界窗口绝不该赔上整条
+    /// 时间线：ARA 对"读到源尾之后"的定义就是静音。
     #[test]
-    fn source_eof_rounding_does_not_allow_real_out_of_bounds_windows() {
+    fn a_source_window_past_the_end_is_tolerated_and_renders_silence() {
         let mut r = region();
         r.start_in_modification_time = 0.;
         r.duration_in_modification_time = 5. / 44100.;
@@ -551,18 +567,32 @@ mod tests {
             }),
         )]);
         assert!(validate_regions(&[r.clone()], &sources, 44100, false).is_ok());
+        // 曾经被拒的第一种：窗口尾越过源尾一帧以上。
         r.duration_in_modification_time = 5.5 / 44100.;
         r.duration_in_playback_time = r.duration_in_modification_time;
-        assert_eq!(
-            validate_regions(&[r.clone()], &sources, 44100, false),
-            Err(SnapshotError::InvalidGeometry)
+        assert!(
+            validate_regions(&[r.clone()], &sources, 44100, false).is_ok(),
+            "a window running past the source end must not fail the whole timeline"
         );
+        // 曾经被拒的第二种：整个窗口都在源尾之后。
         r.start_in_modification_time = 4. / 44100.;
         r.duration_in_modification_time = 0.5 / 44100.;
         r.duration_in_playback_time = 0.5 / 44100.;
+        assert!(
+            validate_regions(&[r.clone()], &sources, 44100, false).is_ok(),
+            "a window entirely past the source end must not fail the whole timeline"
+        );
+
+        // 越界段必须是**静音**，不是重复最后一个样本：后者是一段直流，听感上是咔哒/嗡鸣。
+        let snapshot = mix_plain_regions(&[r], &sources, 44100).expect("out-of-range window mixes");
+        let nonzero = snapshot
+            .left
+            .iter()
+            .filter(|sample| sample.abs() > f32::EPSILON)
+            .count();
         assert_eq!(
-            validate_regions(&[r], &sources, 44100, false),
-            Err(SnapshotError::InvalidGeometry)
+            nonzero, 0,
+            "a window past the source end must render silence, not a held sample"
         );
     }
 

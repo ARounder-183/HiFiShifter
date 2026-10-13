@@ -339,6 +339,12 @@ pub enum SkipReason {
     UnknownModification,
     /// 播放时长为 0 或非有限值（零长度 item）。
     NonPositivePlaybackDuration,
+    /// region 的源窗口整条落在源之外，没有任何可读素材。
+    ///
+    /// 【为什么与"源不存在"分开】成因不同、下一步也不同：源不存在是宿主模型有问题；
+    /// 这一条是宿主给的修改时长时间整体越界（素材与工程采样率不同时宿主会按工程速率
+    /// 折算修改时长）。合并会让日志指错方向。
+    SourceWindowOutsideSource,
 }
 
 impl SkipReason {
@@ -349,6 +355,7 @@ impl SkipReason {
             Self::UnknownSource => "unknown_source",
             Self::UnknownModification => "unknown_modification",
             Self::NonPositivePlaybackDuration => "non_positive_duration",
+            Self::SourceWindowOutsideSource => "source_window_outside_source",
         }
     }
 }
@@ -467,6 +474,59 @@ pub fn ara_document_to_timeline_reporting(
             .or_else(|| source.name.clone())
             .unwrap_or_else(|| clip_id.clone());
 
+        // 【为什么必须把源窗口夹到源的真实长度】宿主给出的修改时长时间可以**超出源本身**，
+        // 而这不是它的错：素材采样率与工程采样率不同时（实测 Cubase 15：48kHz 素材放进
+        // 44.1kHz 工程），宿主把 `durationInModificationTime` 按**工程**速率折算 ——
+        // 现场读数为 `durationMod=durationPlay=34.610703`，而 34.610703 × 44100 = 1526332
+        // 恰好等于源帧数；乘**源**速率 48000 则得 1661314，凭空多出 8.2%。
+        //
+        // 此前这段越界一路带到渲染校验（`render/snapshot.rs` 用源速率换算），被
+        // `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：整条时间线一条片段都
+        // 发布不出来，用户看到的是"尚未应用：unsupported host region: InvalidGeometry"。
+        // 一个越界的源窗口绝不该赔上整条时间线。
+        //
+        // 【为什么夹到源长度，而不是按工程速率重算】夹是**保音高**的：源按自身速率播放，
+        // 缺的部分留白（ARA 对"读到源尾之后"的定义就是静音，宿主自己的 reader 也这么
+        // 返回）。按工程速率重算会让源 1:1 消费、整体降调 8.2%，那是另一种音乐结果，
+        // 不能在缺少宿主意图证据时替用户决定。宿主确实给出 1:1 证据时（时长差表达了
+        // 拉伸）`playback_rate` 已经把倍率带上了，与这里无关。
+        //
+        // 【为什么只在时长已知时才夹】`duration_seconds` 由 `sampleCount / sampleRate`
+        // 推出，宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条
+        // region 都夹成空、进而全部跳过 —— 那比原来的致命拒绝还糟。
+        let declared_end = region.start_in_modification_time + region.duration_in_modification_time;
+        let known_duration = source.duration_seconds > 0.0;
+        let source_span_end = if known_duration {
+            declared_end.min(source.duration_seconds)
+        } else {
+            declared_end
+        };
+        let source_span_start = if known_duration {
+            region.start_in_modification_time.min(source_span_end)
+        } else {
+            region.start_in_modification_time
+        };
+        if known_duration && source_span_end <= source_span_start {
+            // 整条 region 都落在源之外：没有可读素材。这与"源不存在"同级 —— 记因、跳过，
+            // 不发布一条空 take 让下游去猜。
+            skipped.push(SkippedRegion {
+                index,
+                reason: SkipReason::SourceWindowOutsideSource,
+            });
+            continue;
+        }
+        if source_span_end < declared_end {
+            log::warn!(
+                "[ara] playback_region #{index}: host modification window [{:.6}, {:.6}] exceeds the \
+                 source ({:.6}s at {} Hz); clamping to the source so the tail renders as silence \
+                 instead of failing the whole timeline",
+                region.start_in_modification_time,
+                declared_end,
+                source.duration_seconds,
+                source.sample_rate,
+            );
+        }
+
         clips.push(json!({
             "id": clip_id,
             "track_id": track_id,
@@ -479,9 +539,8 @@ pub fn ara_document_to_timeline_reporting(
                 "id": take_id,
                 "name": clip_name,
                 "source_path": source.persistent_id,
-                "source_start_sec": region.start_in_modification_time,
-                "source_end_sec":
-                    region.start_in_modification_time + region.duration_in_modification_time,
+                "source_start_sec": source_span_start,
+                "source_end_sec": source_span_end,
                 "playback_rate": playback_rate,
                 "source_sample_rate": source.sample_rate as u32,
                 "duration_sec": source.duration_seconds,
@@ -690,6 +749,98 @@ mod tests {
         assert!(!doc.playback_regions[0].is_timestretch_enabled);
         let clip = &ara_document_to_timeline(&doc).unwrap().clips[0];
         assert!((clip.playback_rate - 0.5).abs() < 1e-6);
+    }
+
+    /// 宿主给的修改时长可以超出源本身，而这不是它的错：素材采样率与工程采样率不同时，
+    /// 宿主按**工程**速率折算修改时长。
+    ///
+    /// 实测 Cubase 15：48kHz / 1526332 帧素材进 44.1kHz 工程，宿主给
+    /// `durationMod = durationPlay = 34.610703`，而 34.610703 × 44100 = 1526332，恰好是
+    /// 源帧数；乘源速率 48000 则得 1661314，凭空多出 8.2%。
+    ///
+    /// 旧行为把这个越界一路带到渲染校验，被 `SnapshotError::InvalidGeometry` **致命**
+    /// 拒绝 —— 整条时间线一条片段都发布不出来，用户看到
+    /// "尚未应用：unsupported host region: InvalidGeometry"。这里钉住：越界只夹窗口，
+    /// 绝不赔上整条时间线。
+    #[test]
+    fn a_modification_window_beyond_the_source_is_clamped_not_fatal() {
+        // 源：48000 Hz / 144000 帧 = 3.0 s。region 声明的修改窗口 3.2635 s = 144000/44100，
+        // 正是"宿主按工程速率折算"的形状。
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 48000.0, "sampleCount": 144000,
+                      "durationSeconds": 3.0, "channelCount": 2, "sampleAccessEnabled": true }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 1 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInModificationTime": 0.0, "durationInModificationTime": 3.2635,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 3.2635 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        // 关键断言：**不跳过、不失败** —— clip 必须发布出来。
+        assert!(
+            outcome.skipped.is_empty(),
+            "a window past the source must not drop the clip: {:?}",
+            outcome.skipped.iter().map(|s| s.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(outcome.timeline.clips.len(), 1);
+
+        let clip = &outcome.timeline.clips[0];
+        // 播放几何保持宿主原值：clip 仍是 3.2635 s。
+        assert_close(clip.length_sec, 3.2635);
+        // 源窗口被夹到源的真实长度：越界部分由渲染读成静音，而不是去读不存在的样本。
+        assert_close(clip.source_start_sec, 0.0);
+        assert_close(clip.source_end_sec, 3.0);
+        // 夹窗口**不**引入音高变化：倍率仍是宿主给的比值。
+        assert!((clip.playback_rate - 1.0).abs() < 1e-6);
+    }
+
+    /// 整条 region 都落在源之外时跳过该 clip —— 与"源不存在"分开记因，但同样不失败。
+    #[test]
+    fn a_region_entirely_outside_the_source_is_skipped_with_its_own_reason() {
+        let doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 48000.0, "sampleCount": 144000,
+                      "durationSeconds": 3.0, "channelCount": 2, "sampleAccessEnabled": true }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "playbackRegionCount": 1 }] }
+                ],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "s", "audioModificationPersistentID": "m",
+                      "startInModificationTime": 5.0, "durationInModificationTime": 1.0,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 1.0 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.timeline.clips.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(
+            outcome.skipped[0].reason,
+            SkipReason::SourceWindowOutsideSource
+        );
+        assert_eq!(
+            SkipReason::SourceWindowOutsideSource.as_str(),
+            "source_window_outside_source"
+        );
     }
 
     #[test]
