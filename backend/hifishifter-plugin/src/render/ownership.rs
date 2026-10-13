@@ -35,6 +35,16 @@ impl RegionOwners {
             return Err(OwnershipError::DuplicateRegion);
         }
         self.regions.insert(key, (document, slot));
+        // 【为什么不设硬上限】这张表是**所有权权威**：丢掉一个活 region 的条目会让
+        // `resolve` 判它"不存在"，进而把一次正常渲染变成错误。硬性淘汰比增长更糟。
+        // 真正保证有界的是两条移除路径（region 销毁、文档销毁）；这里只在明显异常时
+        // 留痕，让"宿主既不销毁 region 也不关闭文档"这种泄漏在日志里可见。
+        const REGION_OWNERS_SOFT_LIMIT: usize = 65_536;
+        if self.regions.len() == REGION_OWNERS_SOFT_LIMIT {
+            log::warn!(
+                "[ara] {REGION_OWNERS_SOFT_LIMIT} regions are registered across all documents;                  if the host is not calling destroyPlaybackRegion this table only grows"
+            );
+        }
         Ok(())
     }
 

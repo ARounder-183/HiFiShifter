@@ -36,7 +36,9 @@ struct FileLogger;
 
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Info
+        // 【为什么不再写死 Info】写死会把 `HIFISHIFTER_LOG=debug` 静默降级回 Info ——
+        // 用户以为打开了详细日志，实际什么都没多。跟着已配置的上限走。
+        metadata.level() <= log::max_level()
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -103,11 +105,38 @@ pub fn log_file() -> PathBuf {
         .unwrap_or_else(|| default_log_dir().join(PLUGIN_LOG_FILE))
 }
 
+/// 日志级别：release 默认 `Warn`，debug 默认 `Info`，`HIFISHIFTER_LOG` 可覆盖。
+///
+/// 【为什么 release 不能默认 Info】插件跑在宿主进程里，日志落在用户磁盘上。此前
+/// 无条件设成 `Info`，而宿主回调的节奏（每次重算、每次清单刷新、每次几何查询）都会
+/// 打点 —— 实测一次 40 分钟的会话写满 3 个 8 MiB 轮转件。那些点对开发者有用、对
+/// 用户只是磁盘占用与 I/O。需要时用 `HIFISHIFTER_LOG=info`（或 `debug`/`trace`）
+/// 打开，排查现场的第一步就是它。
+///
+/// 取值与 `log` crate 的过滤名一致：`off`/`error`/`warn`/`info`/`debug`/`trace`。
+fn log_level_from_env() -> log::LevelFilter {
+    if let Ok(value) = std::env::var("HIFISHIFTER_LOG") {
+        if let Some(level) = value
+            .trim()
+            .to_ascii_lowercase()
+            .parse::<log::LevelFilter>()
+            .ok()
+        {
+            return level;
+        }
+    }
+    if cfg!(debug_assertions) {
+        log::LevelFilter::Info
+    } else {
+        log::LevelFilter::Warn
+    }
+}
+
 /// 安装一次进程级日志器；宿主已有日志器时保留宿主的实现。
 pub fn init() {
     INIT.call_once(|| {
         if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log::LevelFilter::Info);
+            log::set_max_level(log_level_from_env());
         }
         // 目录不存在就创建：用户第一次打开 Help 菜单之前，日志文件必须已经可写。
         if let Some(dir) = log_path().and_then(|path| path.parent()) {

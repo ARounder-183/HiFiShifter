@@ -1420,7 +1420,12 @@ impl ModelHandle {
                     crate::render::source::read_source_pcm(
                         host,
                         frames,
-                        source.channel_count as usize,
+                        // 【为什么 `.max(1)`】宿主可能报 0 声道（畸形或未初始化）。
+                        // `read_source_pcm` 会拒它，但拒的措辞是"通道数不在 1..=2" ——
+                        // 那是**素材几何**问题，而 0 声道的真实含义是"未知"，按单声道
+                        // 尝试读更接近宿主意图。对照 `create_audio_source` 里同一处
+                        // 已经这么做了（`source.channel_count.max(1)`）。
+                        source.channel_count.max(1) as usize,
                         source.sample_rate as u32,
                         self.source_content_version(index),
                     )

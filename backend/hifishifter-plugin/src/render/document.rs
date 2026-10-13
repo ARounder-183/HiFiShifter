@@ -685,7 +685,21 @@ impl DocumentSession {
             ));
         }
         let host = self.workspace_timeline_locked()?;
-        let mut edits = self.edits.lock_or_recover();
+        // 【为什么这里用**检查版**取锁】这是"读改写并影响宿主"的路径：`candidate` 由
+        // `edits` 推导，最后写回 `*edits`。若上一次持锁者在 `merge`/`capture_changes`
+        // 中途 panic，`edits` 可能停在半写状态 —— 拿它推导再写回，会把一次局部 panic
+        // 升级成工程级的编辑损坏（而它随后会经 VST3 `getState` 落进宿主工程）。
+        // 宁可放弃这一次编辑并留痕，也不要拿半写状态去改宿主。
+        let (mut edits, poisoned) = self.edits.lock_or_recover_checked();
+        if poisoned {
+            log::error!(
+                "[ara] workspace edit refused: the edit authority was left half-written by an                  earlier panic; this edit is dropped instead of being derived from it"
+            );
+            return Err(
+                "Conflict: edit authority is in an unknown state after a panic; the edit was                  not applied"
+                    .into(),
+            );
+        }
         if self.workspace_projection_locked(&edits)? != previous || base_edit > edits.revision {
             return Err(
                 "Conflict: workspace scope or curves changed; local curves preserved".into(),
@@ -906,6 +920,13 @@ impl DocumentSession {
         *self.edits.lock_or_recover() = Default::default();
         self.sources.lock_or_recover().clear();
         self.edit_sources.lock_or_recover().clear();
+        *self.host_tempo_map.lock_or_recover() = None;
+        *self.pending_archive_restore.lock_or_recover() = None;
+        // 【为什么文档关闭时要清共振峰代次表】那张表在**内核里是进程级**的
+        // （`FORMANT_REBUILD_GENERATIONS`），按 clip_id 索引且只增不减：条目仅在同一个
+        // clip 被再次重建时覆写，而工程切换后旧 clip_id 不会再出现 —— 它的清理函数
+        // 此前**没有任何调用者**。单条很小，但反复导入工程会一直涨。
+        hifishifter_kernel::formant_cache::clear_formant_rebuild_generations();
     }
 
     /// 控制器侧独立保留 lease，companion 先释放时 raw extension 存储仍须存活。

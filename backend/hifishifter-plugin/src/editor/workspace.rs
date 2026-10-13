@@ -892,7 +892,14 @@ impl DocumentSession {
                 }
             }
         }
-        pending_since.retain(|id, _| !seen.contains(id));
+        // 【为什么要加 TTL】`seen` 只收"这一趟已经不在途"的 item，所以**从清单里彻底
+        // 消失**的 GUID 永远进不了 `seen` —— 它会在表里留到文档关闭。那在长会话里是
+        // 逐 GUID 的永久泄漏（用户删掉一个还没授权的 item 就留下一条）。给一个宽裕的
+        // TTL：在途判定本身只用 2 s（`PENDING_MEDIA_TIMEOUT`），20 s 还没再出现就说明
+        // 它确实不会再来了。
+        let stale_after = PENDING_MEDIA_TIMEOUT * 10;
+        pending_since
+            .retain(|id, since| !seen.contains(id) && now.duration_since(*since) < stale_after);
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
         // 语言无关地报出数量与原因码，文案由前端 catalog 本地化。
         let skipped = self.skipped_regions.lock_or_recover();

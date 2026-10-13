@@ -406,15 +406,26 @@ impl SnapshotPublisher {
         retained.0.retain(|entry| {
             std::ptr::eq(&**entry, current) || entry.readers.load(Ordering::SeqCst) != 0
         });
-        retained.1 = retained
-            .0
-            .iter()
-            // `storage_bytes()` 只在字节数溢出 `usize` 时返回 `None`（实际不可能发生）。
-            // 这里**不能** `unwrap` —— 这条路径在每次 `publish`/`has_capacity` 上，
-            // 一次 panic 会毒化发布器的锁、把整个音频链路卡死。按"未知即视为已满"
-            // 处理：宁可拒绝继续发布，也不要 OOM 或 panic。
-            .map(|entry| entry.snapshot.storage_bytes().unwrap_or(usize::MAX))
-            .fold(0usize, usize::saturating_add);
+        // 【为什么未知时**保留旧总量**而不是写 `usize::MAX`】`storage_bytes()` 只在字节数
+        // 溢出 `usize` 时返回 `None`（实际不可能发生）。这里不能 `unwrap` —— 这条路径在
+        // 每次 `publish`/`has_capacity` 上，一次 panic 会毒化发布器的锁、把整个音频链路
+        // 卡死。但也不能写 `usize::MAX`：`publish` 用 `retained.1 + bytes <= limit` 判容量，
+        // 一旦写成 MAX 就**永久**拒绝任何后续发布，而且没有任何复位路径 —— 一次理论上的
+        // 溢出会变成"播放中再也改不动任何东西"。保留上一次的有效总量，语义是"这次算不出
+        // 变化"，容量判据退回上一次的读数。
+        let total = retained.0.iter().try_fold(0usize, |total, entry| {
+            entry
+                .snapshot
+                .storage_bytes()
+                .and_then(|bytes| total.checked_add(bytes))
+        });
+        if let Some(total) = total {
+            retained.1 = total;
+        } else {
+            log::warn!(
+                "[ara] snapshot byte accounting is unknown (size overflow); keeping the previous                  total so publishing is not wedged permanently"
+            );
+        }
     }
     /// 分配下一批音频前回收已退役缓冲，避免全局预算已满时无法进入publish回收。
     pub fn collect_retired(&self) {
@@ -473,7 +484,15 @@ impl SnapshotPublisher {
         let channels = declared.min(2);
         // 静音掩码：先假定**所有**声明声道都静音（未写入的第 3..N 个由 `clear_outputs`
         // 清零，确实静音），再按实际写入的非零值逐位清除。
-        let mut silence: u64 = (1_u64 << declared.min(64)) - 1;
+        // 【为什么不能写成 `1 << declared.min(64)`】`declared >= 64` 时那是 `1u64 << 64`，
+        // 在 debug 下直接 panic（移位溢出）、release 下是未定义结果。宿主给超过 64 声道的
+        // 总线极罕见，但这条路径在**音频线程**上 —— 一次 panic 会带走整个 DAW 会话。
+        // 全静音掩码用 `u64::MAX` 表达，语义上也正好是"所有声道都静音"。
+        let mut silence: u64 = if declared >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << declared) - 1
+        };
         // 源率/目标率之比：把宿主帧号换算成快照帧号。
         let ratio = snapshot
             .map(|snapshot| snapshot.sample_rate as f64 / rate.max(1) as f64)
