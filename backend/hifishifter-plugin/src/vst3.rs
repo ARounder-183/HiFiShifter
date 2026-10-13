@@ -288,6 +288,14 @@ fn class_declaration(index: i32) -> Option<ClassDeclaration> {
         0 => (
             PROCESSOR_CID,
             AUDIO_MODULE_CLASS.to_owned(),
+            // `kOnlyARA` 的语义是"必须 ARA 才能工作，作为普通插入插件不工作"
+            // （`ivstaudioprocessor.h`）。这不是声明与能力的漂移，而是**事实**：
+            // 非 ARA 插入时没有文档、没有授权 PCM，`audio_process` 走的是
+            // "publisher 无快照 ⇒ 输出静音"（`vst3.rs` 的 `copy_block` 返回 false 分支），
+            // 编辑器则报 `ARA_NOT_BOUND` 并说明"请把插件作为轨道的扩展插入"。
+            // 曾经考虑过改成 `Fx` 让插件能作为插入运行，但那需要一条独立的
+            // "插入态素材来源"设计（当前没有任何路径给非 ARA 实例提供 PCM），
+            // 属于产品决策而非声明修正，因此保留 `OnlyARA`。
             "Fx|OnlyARA",
             0,
         ),
