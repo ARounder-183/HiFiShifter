@@ -172,6 +172,12 @@ impl Runtime {
                     None => builder,
                 };
                 builder
+                    // 【为什么在这里注册存档】宿主保存/重载工程时经 ARA 的
+                    // `storeDocumentToArchive` / `beginRestoringDocumentFromArchive` 携带插件
+                    // 状态。此前这条能力**从未注册**，四个存档回调全部以 `Unsupported` 告终 ——
+                    // 宿主每次存盘都被告知"插件存档失败"，重载时状态全丢。provider 绑定本闭包
+                    // 刚创建的文档会话，因此不存在"该服务哪个文档"的歧义。
+                    .persistence(crate::ara::persistence::ArchivePersistence::new(&session))
                     .controller_identity(move |key| session.register(key))
                     .host_playback(move |handle| {
                         crate::log_line(&format!(
@@ -247,8 +253,7 @@ mod tests {
         assert_eq!(analyzeable, 0, "不得广告任何可分析内容类型");
         assert_eq!(
             transformations as u32,
-            (PlaybackTransformationFlags::TIMESTRETCH
-                | PlaybackTransformationFlags::REFLECT_TEMPO)
+            (PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::REFLECT_TEMPO)
                 .bits()
         );
     }

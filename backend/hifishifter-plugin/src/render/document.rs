@@ -201,6 +201,17 @@ pub(crate) struct DocumentSession {
     /// 插件自有音乐上下文的投影缓存，键是"输入代次"（见
     /// [`DocumentSession::project_plugin_musical_context_locked`]）。
     pub musical_projection: Mutex<Option<(MusicalProjectionKey, PluginMusicalProjection)>>,
+    /// ARA 存档恢复出来的编辑，等待模型图就绪后合入。
+    ///
+    /// 【为什么放在文档上而不是 owner 上】`beginRestoringDocumentFromArchive` 在
+    /// **模型图重建之前**到达（ARA 的恢复顺序：先给存档，宿主再重新交付模型）。那一刻
+    /// 可能一个 renderer 都还没绑定，`renderer_owners()` 是空的 —— 所以载荷必须存在
+    /// 文档级，等 `prepare_renderers` 收口时再交给 owner 的既有合并路径。
+    ///
+    /// 【为什么复用 owner 的 `pending_restore`】合并语义（reconcile、身份重绑、冲突
+    /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
+    /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
+    pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
     editor: OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
 }
 
@@ -360,6 +371,40 @@ impl DocumentSession {
                 .unwrap_or_else(|| format!("ara-region-{key}")),
         )
     }
+    /// 编码 ARA 存档载荷（文档级）。
+    ///
+    /// 【为什么文档级而不是 per-renderer】`storeDocumentToArchive` 是**文档控制器**的
+    /// 回调，载荷应当覆盖整份文档的编辑；而 `ExtensionOwner::encode_state` 会按
+    /// "本 renderer 被分配的 region"收窄 —— 那是 VST3 组件状态的语义（一个组件一份
+    /// 状态），不是存档的语义。
+    ///
+    /// 【为什么先 reconcile】`TrackBindings` 是编辑归属的权威边；存档必须只带当前
+    /// 模型图里真实存在的轨道/片段，否则重载后会出现指向不存在对象的编辑。
+    pub(crate) fn encode_archive(&self) -> Result<Vec<u8>, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        if !self.ready.load(Ordering::Acquire) {
+            return Err("host graph not ready; cannot archive ARA edits".into());
+        }
+        let mut edits = self.edits.lock_or_recover();
+        edits.reconcile(&self.track_bindings.lock_or_recover())?;
+        edits.encode()
+    }
+
+    /// 接收 ARA 存档载荷，等模型图就绪后合入。
+    ///
+    /// 【为什么只暂存】恢复到达时模型图通常还没重建（ARA 先给存档、宿主再重新交付
+    /// 模型），此刻没有轨道可绑、也没有 renderer 可合并。暂存到文档级，
+    /// `prepare_renderers` 收口时再交给 owner 的既有合并路径。
+    pub(crate) fn restore_archive(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut restored = crate::state_channel::EditState::default();
+        restored.restore(bytes)?;
+        *self.pending_archive_restore.lock_or_recover() = Some(restored);
+        Ok(())
+    }
+
     /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
     pub(crate) fn parameter_identities_locked(
         &self,
@@ -859,6 +904,22 @@ impl DocumentSession {
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
             .collect::<Vec<_>>();
+        // 【ARA 存档的落点】存档恢复在模型图重建之前到达，那时还没有 owner 可合并，
+        // 所以载荷暂存在文档级。现在图已就绪，把它交给**第一个** owner 的既有合并
+        // 路径 —— 编辑权威是文档共享的，交给谁合并都一样（合并写的是 `document.edits`）。
+        if let Some(restored) = self.pending_archive_restore.lock_or_recover().take() {
+            match owners.first() {
+                Some(owner) => owner.adopt_archive_restore(restored),
+                None => {
+                    // 没有任何 owner：把载荷放回去，等下一次收口再试。
+                    log::warn!(
+                        "[ara] archive restore held back: no renderer is bound yet; it will be \
+                         applied on the next prepare"
+                    );
+                    *self.pending_archive_restore.lock_or_recover() = Some(restored);
+                }
+            }
+        }
         // 先统一恢复全部组件权威，再允许任何后台任务捕获共享revision。
         for owner in &owners {
             if let Err(error) = owner.merge_pending_restore(self) {

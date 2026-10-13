@@ -10,6 +10,7 @@
 
 pub mod mapping;
 pub mod model;
+pub mod persistence;
 pub(crate) mod time_map;
 
 pub use mapping::*;

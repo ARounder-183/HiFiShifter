@@ -1820,6 +1820,20 @@ impl ExtensionOwner {
         self.refresh_document();
         Ok(())
     }
+
+    /// 接收 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
+    ///
+    /// 【为什么不直接写 `document.edits`】合并要做身份重绑、冲突判定、`needs_rebind`
+    /// 处理 —— 这些都在 `merge_pending_restore` 里，而且已经过测试。存档通道只是另一个
+    /// 来源，走同一条路才不会出现两份会漂移的实现。
+    ///
+    /// 【为什么覆盖已有的 `pending_restore`】VST3 组件状态与 ARA 存档携带的是同一份
+    /// `EditState`。两者同时到达时后到的应当胜出（它是宿主更晚保存的那份）；而 ARA 存档
+    /// 在宿主重载工程时是权威来源。
+    pub(crate) fn adopt_archive_restore(&self, restored: crate::state_channel::EditState) {
+        *self.pending_restore.lock_or_recover() = Some(restored);
+        self.refresh_document();
+    }
     /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
     pub(super) fn merge_pending_restore(
         &self,
