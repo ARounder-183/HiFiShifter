@@ -1384,6 +1384,26 @@ impl ExtensionOwner {
     pub(crate) fn renders_playback(&self) -> bool {
         self.role.load(Ordering::Acquire) == 1
     }
+    /// 本实例是否拿到了宿主分配的 playback 角色。
+    ///
+    /// 【为什么不在这里做"没有 playback 实例就让 editor 接管"】那个改法看起来能救
+    /// "宿主一个 playback 角色都不分配"的情形，但它**无法与合法形态区分**：
+    /// 一个只拿到 `EDITOR_RENDERER` 的实例（REAPER 的正常编辑实例）与"宿主没分配
+    /// playback"在文档级完全同形 —— 两者都是"本实例 known=all, assigned=editor"。
+    /// 接管会让编辑实例开始渲染，从而破坏既有的透传契约（`vst3/audio_boundary_tests`
+    /// 明确钉住"editor-only 必须保留宿主音频"）。而 ARA 没有"文档级哪个实例是
+    /// 播放渲染器"的查询。
+    ///
+    /// 所以这里**不改行为**，只把它做成可见的读数（见
+    /// `DocumentSession::report_playback_ownership`）：真要判断 Cubase 是否分配了
+    /// playback，靠日志而不是靠猜。
+    pub(crate) fn has_playback_role(&self) -> bool {
+        self.role.load(Ordering::Acquire) == 1
+    }
+    /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
+    pub(crate) fn writer_id(&self) -> u64 {
+        self.writer_id.load(Ordering::Acquire)
+    }
     /// 记录 `setupProcessing` 声明的采样率（Hz）。非有限/非正数忽略（保持未声明）。
     pub(crate) fn set_setup_sample_rate(&self, rate: f64) {
         let hz = rate.round();
@@ -1454,6 +1474,12 @@ impl ExtensionOwner {
         self.host_item_muted.load(Ordering::Acquire)
     }
     /// editor-only必须透传；未绑定角色不在这里虚构为editor，保留原未绑定安全行为。
+    ///
+    /// 【为什么判据必须是 `role == 2` 而不是"没有 playback 角色"】未绑定的实例
+    /// `role == 0`。`role != 1` 会把**未绑定**也判成 editor-only ⇒ `process` 走透传 ⇒
+    /// 真正该输出快照的实例什么都不输出（`vst3/audio_boundary_tests` 的
+    /// `process_outputs_the_snapshot_...` 等用例正是这个形状）。只有宿主**明确**
+    /// 分配了非 playback 角色（`role == 2`）才是 editor-only。
     pub(crate) fn is_editor_only(&self) -> bool {
         self.role.load(Ordering::Acquire) == 2
     }
@@ -2505,6 +2531,10 @@ impl ExtensionOwner {
                     }
                     // 某轨首次获得分配可能恢复其state并推进共享revision；其它轨也需要最新任务。
                     drop(_transaction);
+                    // 分配变化是角色集合可能改变的第二个时刻：宿主可能在这一步才把
+                    // playback 角色交给某个实例。报一次读数，便于从日志判断
+                    // "到底有没有实例在渲染"。
+                    document.report_playback_ownership();
                     for renderer in owners {
                         renderer.refresh_host_geometry();
                         renderer.prepare();
@@ -2594,6 +2624,10 @@ impl ExtensionOwner {
                 Err(error) => log::warn!("[ara] GUI channel unavailable: {error}"),
             }
         }
+        // 【为什么放在最后】这份读数要看到**全部**实例，包括本实例刚写进去的
+        // `writer_id`。角色集合只有两个时刻会变：绑定（这里）与分配变化
+        // （见 `new_with_renderer_observer` 的观察器），两处都要报。
+        document.report_playback_ownership();
         Ok(raw)
     }
 

@@ -1072,6 +1072,49 @@ impl DocumentSession {
             .collect()
     }
 
+    /// 报告"本档是否真的有实例在渲染"。
+    ///
+    /// 【为什么是读数而不是接管】`renders_playback()` 只认宿主分配的 playback 角色。
+    /// 若宿主一个都不分配，文档里就没有实例渲染音频、`process` 全部走 `pass_through`
+    /// —— 那会让"编辑不改变声音"。但**不能**据此自动接管：一个只拿到 `EDITOR_RENDERER`
+    /// 的实例（REAPER 的正常编辑实例）与"宿主没分配 playback"在文档级**完全同形**，
+    /// 接管会破坏既有的透传契约（`vst3/audio_boundary_tests` 明确钉住）。
+    ///
+    /// 所以这里只把事实说清楚：**"有实例、但没有任何一个持 playback 角色"是一句
+    /// 值得报警的话**。判据要求"已有非 playback 实例"，所以绑定过程中的瞬时态
+    /// （playback 实例还没绑）会在下一次调用时自然消失，不会刷屏。
+    ///
+    /// 调用点：绑定完成时、分配变化时（角色集合唯一可能改变的两个时刻）。
+    pub(crate) fn report_playback_ownership(&self) {
+        let owners = self.renderer_owners();
+        if owners.is_empty() {
+            return;
+        }
+        let playback = owners
+            .iter()
+            .filter(|owner| owner.has_playback_role())
+            .count();
+        if playback > 0 {
+            return;
+        }
+        // 限流：绑定与分配都可能连续触发，这条读数不需要每次都打。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.playback.no-renderer",
+            format_args!(
+                "[ara] playback ownership: {} live renderer instance(s) but NONE holds the \
+                 playback role (writers: {:?}); audio will pass through the host untouched. \
+                 If this host is expected to render the plugin, its role assignment is the \
+                 thing to check",
+                owners.len(),
+                owners
+                    .iter()
+                    .map(|owner| owner.writer_id())
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+
     /// 播放渲染器的诊断快照（诊断包用）。
     ///
     /// 【为什么只要"准备状态"】逐输出的区间读数需要当前分配区间，而诊断包在任意

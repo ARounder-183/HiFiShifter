@@ -379,3 +379,86 @@ fn a_document_without_an_editor_instance_writes_nothing() {
     assert!(payload.get("host_audio").is_none());
     document.close();
 }
+
+/// **只拿到 EDITOR_RENDERER 的实例必须保持透传，即使文档里没有 playback 实例。**
+///
+/// 【为什么这条是"不许改"的契约】"宿主一个 playback 角色都不分配"与"本实例只是
+/// 编辑实例"在文档级**完全同形**（两者都是 known=all, assigned=editor），而 ARA 没有
+/// "文档级哪个实例是播放渲染器"的查询。曾试过让 editor 实例在"没有 playback 实例"
+/// 时接管渲染 —— 它会让这个用例（以及 `vst3/audio_boundary_tests` 的整组透传用例）
+/// 失败：编辑实例开始渲染，宿主音频被清掉。
+///
+/// 所以行为**不变**，只把事实做成读数
+/// （`DocumentSession::report_playback_ownership`，见下一个用例）。
+#[test]
+fn an_editor_only_instance_stays_passthrough_even_without_a_playback_instance() {
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    let editor = Arc::new(ExtensionOwner::default());
+    let _raw = editor
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::EDITOR_RENDERER | ExtensionRoles::EDITOR_VIEW,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !editor.has_playback_role(),
+        "本用例的实例不能拿到宿主分配的 playback 角色"
+    );
+    assert!(
+        !editor.renders_playback(),
+        "没有 playback 角色就不渲染 —— 这条契约是刻意的，见本用例的说明"
+    );
+    assert!(
+        editor.is_editor_only(),
+        "editor-only 必须透传，否则会清掉宿主已经处理好的音频"
+    );
+    document.close();
+}
+
+/// **"有实例但没有任何一个持 playback 角色"必须是可见的读数。**
+///
+/// 这是替代"自动接管"的取证手段：Cubase 上"编辑不改变声音"究竟是不是角色分配造成的，
+/// 靠这一行日志判定，而不是靠改行为去猜。有 playback 实例时则**不报**。
+#[test]
+fn a_document_with_no_playback_instance_reports_it_instead_of_taking_over() {
+    // 只有 editor 实例 ⇒ 应当报警（读数可见）。
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    let editor = Arc::new(ExtensionOwner::default());
+    let _raw = editor
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::EDITOR_RENDERER,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .renderer_owners()
+            .iter()
+            .filter(|owner| owner.has_playback_role())
+            .count(),
+        0,
+        "本用例故意只绑定 editor 实例"
+    );
+    // 只断言读数函数可安全调用（它是限流日志，不断言文本）。
+    document.report_playback_ownership();
+    assert!(editor.is_editor_only(), "报读数**不得**顺带改变行为");
+    document.close();
+
+    // 有 playback 实例 ⇒ 读数不报（此断言通过计数表达：playback 存在）。
+    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    assert!(
+        owners.iter().any(|owner| owner.has_playback_role()),
+        "夹具必须有一个宿主分配的 playback 实例"
+    );
+    document.report_playback_ownership();
+    document.close();
+}
