@@ -61,6 +61,14 @@ pub(crate) struct DocumentSession {
     /// 这条边来自宿主 `createRegionSequence` 的真实键。
     pub sequence_track_index: Mutex<HashMap<u64, usize>>,
     pub regions: Mutex<HashMap<u64, crate::ara::AraPlaybackRegion>>,
+    /// region key → clip id 的**缓存**投影。
+    ///
+    /// 【为什么是缓存而不是权威】权威身份是 region key 本身，clip id 由它派生
+    /// （`ara-region-{key}`，见 `ara::mapping::MappingIdentities`）。这张表只是把
+    /// "key → 当前时间线里的 id"记下来供反查，**缺席不是错误** —— [`Self::clip_id_for`]
+    /// 会按同一个算式补出来。此前三处调用点把缺席当致命错误（`missing assigned clip
+    /// identity` 等），而 `clip_ids` 只在 `end_editing` 时整体重写，于是"region 已分配、
+    /// identity 还没重算"这个窗口里的每次渲染都必然失败。
     pub clip_ids: Mutex<HashMap<u64, String>>,
     pub region_items: Mutex<HashMap<u64, String>>,
     /// ARA 授权那一刻，每个 region 对应 item 的 **active take GUID**（region_key → take GUID）。
@@ -196,6 +204,22 @@ pub(crate) struct DocumentSession {
     editor: OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
 }
 
+/// 从 clip id 反解 region key。
+///
+/// 【为什么需要反解】clip id 由 region key 派生（`ara-region-{key}`，见
+/// `ara::mapping::MappingIdentities`），所以它是自描述的。`clip_ids` 这张缓存表
+/// 由 `remap_and_log` 整体重写，而 region 分配发生在它之前；在两者之间的窗口里
+/// 反查缓存会落空。此时直接从 id 解析出 key，与缓存命中给出同一个值。
+///
+/// 位置派生的旧 id（`ara-clip-{N}`）**不可反解** —— 那正是它被替换掉的原因。
+fn parse_region_key_from_clip_id(clip_id: &str) -> Option<u64> {
+    clip_id
+        .strip_prefix("ara-region-")?
+        .parse::<u64>()
+        .ok()
+        .filter(|key| *key != 0)
+}
+
 /// 宿主音乐读数的快照；默认 120 BPM 4/4（与 `TimelineState::default` 同口径）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HostMeter {
@@ -316,6 +340,27 @@ impl DocumentSession {
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
     }
+    /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。
+    ///
+    /// 【为什么必须补而不是报错】`clip_ids` 由 `remap_and_log` 整体重写，而 region 的
+    /// 分配（`addPlaybackRegion`）发生在**那之前**。两者之间任何一次渲染、提交或投影
+    /// 都会查到缺席。把这个窗口从"致命错误"降成"按 key 派生"—— 派生的 id 与映射层
+    /// 给的完全一致（`ara-region-{key}`），所以下一次重算会把它原样认领回去，
+    /// 会话内身份保持单调稳定。
+    ///
+    /// `key == 0` 是无效键（`region_owners` 也拒它），此时无身份可派生，返回 `None`。
+    pub(crate) fn clip_id_for(&self, key: u64) -> Option<String> {
+        if key == 0 {
+            return None;
+        }
+        Some(
+            self.clip_ids
+                .lock_or_recover()
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| format!("ara-region-{key}")),
+        )
+    }
     /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
     pub(crate) fn parameter_identities_locked(
         &self,
@@ -330,18 +375,26 @@ impl DocumentSession {
             .clips
             .iter()
             .map(|clip| {
-                let (key, _) = ids
+                // 反查 region key：先查缓存，未命中时从 id 本身解析 —— clip id 由 key 派生
+                // （`ara-region-{key}`），所以它是自描述的。此前的硬错误
+                // （`missing actual region parameter edge`）会让"region 已分配、`clip_ids`
+                // 还没重算"这个窗口里的每次投影都失败。
+                let key = ids
                     .iter()
                     .find(|(_, id)| **id == clip.id)
-                    .ok_or("missing actual region parameter edge")?;
+                    .map(|(key, _)| *key)
+                    .or_else(|| parse_region_key_from_clip_id(&clip.id));
+                let Some(key) = key else {
+                    return Err(format!("clip {} has no region identity", clip.id));
+                };
                 let region = regions
-                    .get(key)
+                    .get(&key)
                     .ok_or("missing actual region parameter identity")?;
                 Ok((
                     clip.id.clone(),
                     crate::editor::parameter_atlas::RegionIdentity {
-                        key: *key,
-                        item: self.region_items.lock_or_recover().get(key).cloned(),
+                        key,
+                        item: self.region_items.lock_or_recover().get(&key).cloned(),
                         source: region.audio_source_persistent_id.clone(),
                         modification: region.audio_modification_persistent_id.clone(),
                     },

@@ -2323,14 +2323,14 @@ impl ExtensionOwner {
         document: &super::document::DocumentSession,
     ) -> Result<hifishifter_kernel::state::TimelineState, String> {
         let keys = self.assigned_regions().map_err(|e| e.to_string())?;
-        let identities = document.clip_ids.lock_or_recover();
+        // 身份缺席时按 region key 派生（见 `clip_id_for`）：region 分配早于
+        // `clip_ids` 重算，这个窗口里的渲染不该失败。
         let ids = keys
             .iter()
             .map(|key| {
-                identities
-                    .get(key)
-                    .cloned()
-                    .ok_or("missing assigned clip identity")
+                document
+                    .clip_id_for(*key)
+                    .ok_or("invalid assigned region key")
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut timeline = document

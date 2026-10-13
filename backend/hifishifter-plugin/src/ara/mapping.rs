@@ -81,6 +81,10 @@ pub struct AraMusicalContext {
 }
 
 /// 一个 `ARARegionSequence`（≈ 轨道）。
+///
+/// 【为什么没有 persistentID 字段】`ARARegionSequenceProperties` 只有 name / orderIndex /
+/// musicalContextRef / color（`ARAInterface.h:775-793`）—— **没有** persistentID。
+/// 序列身份取自宿主的 model-ref key，由 `ModelHandle` 经 `MappingIdentities` 传入。
 #[derive(Debug, Clone, Deserialize)]
 pub struct AraRegionSequence {
     /// 序列名 —— REAPER 实测就是轨道名。
@@ -486,12 +490,44 @@ pub struct MappingOutcome {
     pub skipped: Vec<SkippedRegion>,
 }
 
+/// 调用方提供的**稳定身份**，按 `doc.playback_regions` 的下标对齐。
+///
+/// 【为什么需要它】位置派生的身份（`ara-clip-{index+1}` / `ara-track-{N}`）在宿主
+/// 删除、移动或重排 region / track 之后会**整体前移**，而参数表（`params_by_root_track`、
+/// parameter atlas、`track_bindings`）全部按身份索引 —— 于是一次删除就让其余片段的编辑
+/// 挂到错误的 clip 上，或干脆查不到身份。`region_key` 是 ARA 在同一文档内保证稳定的
+/// 令牌，用它派生身份即可消除整类错位。
+///
+/// 【为什么 region 没有 persistentID】`ARAPlaybackRegionProperties` 只有
+/// `transformationFlags`、四段时间、`regionSequenceRef`、`name`、`color`（`ARAInterface.h:1012-1073`）
+/// —— **没有** persistentID。所以会话内身份只能取自 region key（model-ref 键）；
+/// 跨会话身份另见 `TrackBindings` 的 (modification, sequence) 签名。
+#[derive(Debug, Clone, Default)]
+pub struct MappingIdentities {
+    /// 每条 region 的 ARA region key（0 = 未知，退回位置身份）。
+    pub region_keys: Vec<u64>,
+    /// 每条 region sequence 的宿主 persistentID（空串 = 未知，退回位置身份）。
+    pub sequence_ids: Vec<String>,
+}
+
 /// ARA 文档 → `TimelineState`（整份成功或整份失败）。
 ///
 /// 供只需要时间线、不关心跳过明细的调用方使用；坏 region 会被静默丢弃。
 /// 需要逐 region 明细时用 [`ara_document_to_timeline_reporting`]。
 pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, MappingError> {
     Ok(ara_document_to_timeline_reporting(doc)?.timeline)
+}
+
+/// ARA 文档 → `TimelineState`，带**稳定身份**（推荐入口）。
+///
+/// 与 [`ara_document_to_timeline_reporting`] 同口径，差别只在 clip / track 的身份来源：
+/// 传了 [`MappingIdentities`] 就按 region key 与 sequence persistentID 派生，
+/// 否则退回位置派生。生产路径（`ModelHandle::remap_and_log`）必须用这一个。
+pub fn ara_document_to_timeline_with_identities(
+    doc: &AraDocument,
+    identities: &MappingIdentities,
+) -> Result<MappingOutcome, MappingError> {
+    ara_document_to_timeline_reporting_with_identities(doc, Some(identities))
 }
 
 /// ARA 文档 → `TimelineState`，并回报逐 region 的跳过明细。
@@ -504,6 +540,14 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
 /// 归属缺失则退回顺序归属（见 [`region_sequence_of`]），不再整份失败。
 pub fn ara_document_to_timeline_reporting(
     doc: &AraDocument,
+) -> Result<MappingOutcome, MappingError> {
+    ara_document_to_timeline_reporting_with_identities(doc, None)
+}
+
+/// [`ara_document_to_timeline_reporting`] 的实现；`identities` 为 `None` 时用位置身份。
+fn ara_document_to_timeline_reporting_with_identities(
+    doc: &AraDocument,
+    identities: Option<&MappingIdentities>,
 ) -> Result<MappingOutcome, MappingError> {
     let project = resolve_project_rate(doc);
     let sources: HashMap<&str, &AraAudioSource> = doc
@@ -525,17 +569,27 @@ pub fn ara_document_to_timeline_reporting(
     let mut tracks: Vec<Value> = Vec::new();
     let mut track_ids: Vec<String> = Vec::new();
     let mut order = 0;
-    for context in &doc.musical_contexts {
-        for sequence in &context.region_sequences {
-            let id = format!("ara-track-{}", track_ids.len());
-            tracks.push(json!({
-                "id": id,
-                "name": sequence.name.clone().unwrap_or_default(),
-                "order": order,
-            }));
-            track_ids.push(id);
-            order += 1;
-        }
+    for (position, sequence) in doc
+        .musical_contexts
+        .iter()
+        .flat_map(|context| context.region_sequences.iter())
+        .enumerate()
+    {
+        // 【身份优先用宿主的 persistentID】`ARARegionSequenceProperties` 有 persistentID，
+        // 它是宿主侧的稳定标识，跨"重排 / 改名"都不变。拿不到时才退回位置 —— 后者会在
+        // 宿主删掉一条序列之后让其余 track 的身份整体前移。
+        let id = identities
+            .and_then(|ids| ids.sequence_ids.get(position))
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("ara-sequence-{id}"))
+            .unwrap_or_else(|| format!("ara-track-{position}"));
+        tracks.push(json!({
+            "id": id,
+            "name": sequence.name.clone().unwrap_or_default(),
+            "order": order,
+        }));
+        track_ids.push(id);
+        order += 1;
     }
 
     let ownership = region_sequence_of(doc)?;
@@ -582,7 +636,15 @@ pub fn ara_document_to_timeline_reporting(
         // "宿主按工程速率折算修改时长"这一事实（见 `region_playback_rate`）：
         // 48 kHz 素材进 44.1 kHz 工程且宿主不拉伸时，比值 1 × 44100/48000 = 0.91875。
         let playback_rate = region_playback_rate(region, source.sample_rate, project.rate);
-        let clip_id = format!("ara-clip-{}", index + 1);
+        // 【身份优先用 region key】位置派生的 id 会在宿主删掉靠前一条 region 之后整体前移，
+        // 而所有参数表都按 clip id 索引 —— 那正是"编辑操作不更新 ARA"的直接机理。
+        // key 是 ARA 在同一文档内保证稳定的令牌（宿主把它当作不透明句柄），
+        // 销毁只摘除不复用已活 key，所以它不会因删除而重排。
+        let clip_id = identities
+            .and_then(|ids| ids.region_keys.get(index).copied())
+            .filter(|key| *key != 0)
+            .map(|key| format!("ara-region-{key}"))
+            .unwrap_or_else(|| format!("ara-clip-{}", index + 1));
         let take_id = format!("{clip_id}-take-1");
         let clip_name = region
             .name
@@ -1099,6 +1161,95 @@ mod tests {
         assert_close(clip.source_start_sec, 0.0);
         // 源窗口夹到源的真实长度：越界部分由渲染读成静音，而不是去读不存在的样本。
         assert_close(clip.source_end_sec, 3.0);
+    }
+
+    /// **身份必须来自 region key，而不是 region 在文档里的位置。**
+    ///
+    /// 【为什么这是回归测试】`ara-clip-{index+1}` 是位置派生的：宿主删掉靠前一条 region
+    /// 之后，其后所有 clip 的 id 整体前移，而参数表（`params_by_root_track`、
+    /// parameter atlas、`track_bindings`）全部按 id 索引 —— 于是编辑挂到错误的 clip 上，
+    /// 或干脆查不到身份。这正是 Cubase 下"编辑操作不更新 ARA"的直接机理。
+    ///
+    /// 这条测试构造"删掉第一条 region"前后的两份文档，断言**存活** clip 的身份不变。
+    #[test]
+    fn clip_identity_comes_from_the_region_key_not_the_position() {
+        // 三条 region，key 分别是 11 / 22 / 33（同一条源、同一条修改）。
+        let mut doc = ara_document_from_json(
+            r#"{
+                "audioSources": [
+                    { "persistentID": "s", "sampleRate": 44100.0, "sampleCount": 88200,
+                      "durationSeconds": 2.0, "channelCount": 2, "sampleAccessEnabled": true }
+                ],
+                "audioModifications": [
+                    { "persistentID": "m", "audioSourcePersistentID": "s" }
+                ],
+                "musicalContexts": [
+                    { "regionSequences": [{ "name": "T", "orderIndex": 0, "playbackRegionCount": 3 }] }
+                ],
+                "playbackRegions": [
+                    { "name": "a", "audioSourcePersistentID": "s",
+                      "audioModificationPersistentID": "m", "regionSequenceIndex": 0,
+                      "startInModificationTime": 0.0, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 0.5 },
+                    { "name": "b", "audioSourcePersistentID": "s",
+                      "audioModificationPersistentID": "m", "regionSequenceIndex": 0,
+                      "startInModificationTime": 0.5, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 0.5, "durationInPlaybackTime": 0.5 },
+                    { "name": "c", "audioSourcePersistentID": "s",
+                      "audioModificationPersistentID": "m", "regionSequenceIndex": 0,
+                      "startInModificationTime": 1.0, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 1.0, "durationInPlaybackTime": 0.5 }
+                ]
+            }"#,
+        )
+        .expect("document parses");
+        let identities = MappingIdentities {
+            region_keys: vec![11, 22, 33],
+            sequence_ids: vec![String::new()],
+        };
+        let before =
+            ara_document_to_timeline_with_identities(&doc, &identities).expect("document maps");
+        assert_eq!(
+            before
+                .timeline
+                .clips
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ara-region-11", "ara-region-22", "ara-region-33"]
+        );
+
+        // 宿主销毁了第一条 region：文档里只剩 b 与 c，而**它们的 key 不变**。
+        doc.playback_regions.remove(0);
+        let after = ara_document_to_timeline_with_identities(
+            &doc,
+            &MappingIdentities {
+                region_keys: vec![22, 33],
+                sequence_ids: vec![String::new()],
+            },
+        )
+        .expect("document maps");
+        assert_eq!(
+            after
+                .timeline
+                .clips
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ara-region-22", "ara-region-33"],
+            "删除靠前的 region 不能改变其余 clip 的身份"
+        );
+        // 几何也跟着走：b 仍在 0.5 s 起。
+        assert_close(after.timeline.clips[0].start_sec, 0.5);
+    }
+
+    /// 没有身份信息时退回位置派生 —— 探针/测试夹具仍可工作。
+    #[test]
+    fn identity_falls_back_to_the_position_when_no_key_is_supplied() {
+        let doc = probe_shaped_document();
+        let timeline = ara_document_to_timeline(&doc).expect("document maps");
+        assert_eq!(timeline.clips[0].id, "ara-clip-1");
+        assert_eq!(timeline.tracks[0].id, "ara-track-0");
     }
 
     /// 整条 region 都落在源之外时跳过该 clip —— 与"源不存在"分开记因，但同样不失败。

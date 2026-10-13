@@ -77,6 +77,15 @@ pub struct ModelHandle {
     document_id: DocumentId,
     session: Arc<DocumentSession>,
     region_keys: Vec<u64>,
+    /// 每条 region sequence 的宿主 persistentID，下标与
+    /// `document.musical_contexts[].region_sequences` 的扁平顺序一致。
+    ///
+    /// 【为什么要单独存】`AraRegionSequence.persistent_id` 已经带这个值，但序列可能被
+    /// 宿主销毁（`destroyRegionSequence`）；销毁后该槽位要能标成"已消失"而不把后面的
+    /// 序列身份顶上来。这份平行表用空串表示"该槽位的宿主不再承认"。
+    sequence_persistent_ids: Vec<String>,
+    /// 已销毁的 region sequence 槽位（与 `destroyed_regions` 同口径）。
+    destroyed_sequences: HashSet<usize>,
     head_tail: Option<Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
@@ -147,6 +156,8 @@ impl Default for ModelHandle {
             document_id,
             session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
+            sequence_persistent_ids: Vec::new(),
+            destroyed_sequences: HashSet::new(),
             head_tail: {
                 // 【为什么不用 expect】`Default for ModelHandle` 在**每次文档创建**时
                 // 都会跑，而它在宿主进程里 —— 一次 panic 会带走整个 DAW 会话。容量常量
@@ -426,7 +437,28 @@ impl ModelHandle {
             .into_iter()
             .map(|owner| owner.setup_sample_rate())
             .find(|rate| *rate > 0.0);
-        match crate::ara::mapping::ara_document_to_timeline_reporting(&document) {
+        // 【身份：region key + sequence persistentID】位置派生的 id 会在宿主删除/重排之后
+        // 整体前移，而参数表按 id 索引 —— 于是编辑挂错 clip 或查不到身份。key 与
+        // persistentID 都是宿主保证稳定的令牌，由它们派生身份（见 `MappingIdentities`）。
+        let live_keys: Vec<u64> = self
+            .region_keys
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+            .map(|(_, key)| *key)
+            .collect();
+        let identities = crate::ara::mapping::MappingIdentities {
+            region_keys: live_keys,
+            sequence_ids: self
+                .sequence_persistent_ids
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| !self.destroyed_sequences.contains(slot))
+                .map(|(_, id)| id.clone())
+                .collect(),
+        };
+        match crate::ara::mapping::ara_document_to_timeline_with_identities(&document, &identities)
+        {
             Ok(outcome) => {
                 let crate::ara::mapping::MappingOutcome {
                     mut timeline,
@@ -460,27 +492,21 @@ impl ModelHandle {
                 }
                 // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
                 //
-                // 【为什么按 `clip_regions` 对齐而不是顺序 zip】`ara_document_to_timeline`
-                // 现在会逐 region 跳过坏条目；顺序 zip 会在有跳过时整体错位，把身份挂到
-                // 错误的 clip 上。`clip_regions[i]` 是该 clip 在**过滤后**文档里的下标，
-                // 与 `live_keys` 同序。
-                let live_keys: Vec<u64> = self
-                    .region_keys
-                    .iter()
-                    .enumerate()
-                    .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
-                    .map(|(_, key)| *key)
-                    .collect();
-                let mut identities = self.session.clip_ids.lock_or_recover();
-                identities.clear();
-                for (clip, region_index) in timeline.clips.iter_mut().zip(&clip_regions) {
-                    let Some(key) = live_keys.get(*region_index) else {
-                        continue;
-                    };
-                    clip.id = format!("ara-clip-{}", region_index + 1);
-                    identities.insert(*key, clip.id.clone());
+                // 【为什么不再在这里重贴 clip.id】身份已在映射层按 region key 派生
+                // （`ara-region-{key}`），此处重贴成 `ara-clip-{N}` 会把稳定性又抹掉。
+                // 这里只负责把 key → clip id 的映射登记进 `clip_ids` 供反查。
+                //
+                // 【为什么按 `clip_regions` 对齐而不是顺序 zip】映射层会逐 region 跳过
+                // 坏条目；顺序 zip 会在有跳过时整体错位，把身份挂到错误的 clip 上。
+                // `clip_regions[i]` 是该 clip 在**过滤后**文档里的下标，与 `region_keys` 同序。
+                let mut clip_ids = self.session.clip_ids.lock_or_recover();
+                clip_ids.clear();
+                for (clip, region_index) in timeline.clips.iter().zip(&clip_regions) {
+                    if let Some(key) = self.region_keys.get(*region_index).copied() {
+                        clip_ids.insert(key, clip.id.clone());
+                    }
                 }
-                drop(identities);
+                drop(clip_ids);
                 // 身份仅由真实region→sequence边与宿主persistentID构建，不从名字/序号推断。
                 let mut bindings: crate::state_channel::TrackBindings = timeline
                     .tracks
@@ -808,6 +834,17 @@ impl RegionSequences for ModelHandle {
             order_index: properties.order_index(),
             playback_region_count: 0,
         });
+        // 【序列身份取自 realtime key，不是 persistentID】`ARARegionSequenceProperties`
+        // 只有 name / orderIndex / musicalContextRef / color（`ARAInterface.h:775-793`），
+        // **没有** persistentID（audio source / modification / processing algorithm 才有）。
+        // 能拿到的稳定令牌就是宿主的 model-ref key —— 同一文档内它不随重排而变。
+        // 拿不到 key 时记空串，映射层随即退回位置身份。
+        let sequence_key = context.realtime_key().unwrap_or(0);
+        while self.sequence_persistent_ids.len() < index {
+            self.sequence_persistent_ids.push(String::new());
+        }
+        self.sequence_persistent_ids
+            .insert(index, sequence_key.to_string());
         if let Some(handle) = context.object_handle() {
             self.sequence_index_by_handle.insert(handle, index);
         }

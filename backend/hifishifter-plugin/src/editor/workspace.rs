@@ -1358,18 +1358,13 @@ impl DocumentSession {
     }
     pub(crate) fn workspace_timeline_locked(&self) -> Result<TimelineState, String> {
         let scope = self.workspace_scope_locked()?;
-        let identities = self.clip_ids.lock_or_recover();
         let clips = scope
             .regions
             .iter()
-            .map(|key| {
-                identities
-                    .get(key)
-                    .cloned()
-                    .ok_or("workspace clip identity missing")
-            })
+            // 身份缺席时按 region key 派生（见 `clip_id_for`）：工作区投影跑在
+            // region 分配之后、`clip_ids` 重算之前的窗口里，那不是致命错误。
+            .map(|key| self.clip_id_for(*key).ok_or("invalid region key"))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        drop(identities);
         let mut timeline = self
             .timeline
             .lock_or_recover()
