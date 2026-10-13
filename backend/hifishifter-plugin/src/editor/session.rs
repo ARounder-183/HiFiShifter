@@ -25,7 +25,24 @@ use std::time::{Duration, Instant};
 /// 【为什么只统计**真错误**】`"pitch analysis pending"` 是正常在途状态，不是失败：
 /// 一段几分钟素材的分析本来就可能跑很久，按次数计数会把"慢"误判成"不收敛"而提前
 /// 放弃渲染。它由 [`RetryState`] 的 `analysis_pending_since` 单独按**时间**约束。
+///
+/// 【为什么耗尽预算只是**退避**而不是永久停止】此前预算耗尽即 `settled = true`，
+/// 自动渲染**再也不会**启动，直到用户下一次操作。可 8 次重试的间隔是 150 ms ——
+/// 它实际衡量的是"这 1.2 秒里宿主一直在变"，而不是"这件事永远不会成功"。实测 Cubase 15
+/// 上一次 `unsupported host position` 就是 8 次全失败后把界面**永久**冻结在旧版本
+/// （日志 22:22:35 `gave up after 8 attempts`），而那个错误本身是瞬时的。
+/// 改成退到 [`RENDER_RETRY_BACKOFF`] 后，宿主一旦静止就会自然收敛；同时错误读数仍然
+/// 显示给用户（`render_error` 照写），不再有"看起来在工作、其实再也不动了"的状态。
 const RENDER_RETRY_BUDGET: u32 = 8;
+
+/// 重试预算耗尽后的退避间隔（0.2 Hz）。
+///
+/// 仍然重试（不是一个永久终态），但足以让宿主把编辑事务收口。终态错误
+/// （panic 毒化 / 文档关闭 / 租约撤销）在 actor 循环里另有判据，不受本常量影响。
+const RENDER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+/// 预算内的快速重试间隔。
+const RENDER_RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
 /// 分析一直 pending 多久后判定"这条原线不会被产出了"。
 ///
@@ -108,19 +125,37 @@ impl RetryState {
         }
         self.analysis_pending_since = None;
         self.streak = self.streak.saturating_add(1);
-        if self.streak >= RENDER_RETRY_BUDGET {
-            *session.render_error.lock_or_recover() = Some(error.clone());
-            self.settled = true;
-            log::warn!(
-                "[ara] automatic render gave up after {} attempts: {error}",
-                self.streak
-            );
-            return RenderAction::Settled;
-        }
-        if error != "automatic apply superseded" {
+        // 预算内：快速重试（宿主的编辑事务通常会在这 1.2 秒内收口）。
+        if self.streak < RENDER_RETRY_BUDGET {
+            if error != "automatic apply superseded" {
+                *session.render_error.lock_or_recover() = Some(error);
+            }
+        } else {
+            // 预算耗尽：**退避**，不是放弃（见 `RENDER_RETRY_BACKOFF`）。错误读数仍然写出去，
+            // 前端照常显示"尚未应用：{error}"，但自动渲染会在退避后继续尝试。
+            if self.streak == RENDER_RETRY_BUDGET {
+                log::warn!(
+                    "[ara] automatic render is backing off after {} attempts (every {:?}): {error}",
+                    self.streak,
+                    RENDER_RETRY_BACKOFF
+                );
+            }
             *session.render_error.lock_or_recover() = Some(error);
         }
-        RenderAction::Retry(Duration::from_millis(150))
+        render_retry_action(self.streak)
+    }
+}
+
+/// 一次**真错误**之后的处置：预算内快速重试，预算外退避。
+///
+/// 【为什么抽成纯函数】`classify` 需要一整份 `EditorSession`，而 `RetryState` 的其余分支
+/// 又依赖分析 worker 的在途状态 —— 直接在测试里断言"不再 Settled"很贵。这条判据本身是纯的，
+/// 抽出来就能精确钉住"耗尽预算只是退避、不是永久停止"（见 `RENDER_RETRY_BUDGET`）。
+fn render_retry_action(streak: u32) -> RenderAction {
+    if streak < RENDER_RETRY_BUDGET {
+        RenderAction::Retry(RENDER_RETRY_INTERVAL)
+    } else {
+        RenderAction::Retry(RENDER_RETRY_BACKOFF)
     }
 }
 
@@ -1843,6 +1878,42 @@ pub(crate) mod tests {
     use crate::render::source::SourcePcm;
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::ExtensionRoles;
+
+    /// **预算耗尽只是退避，不是永久停止自动渲染。**
+    ///
+    /// 【为什么必须钉住】此前 `streak >= RENDER_RETRY_BUDGET` 即 `settled = true` ——
+    /// 自动渲染**再也不会**启动，直到用户下一次操作。而 8 次重试的间隔是 150 ms：
+    /// 它衡量的是"这 1.2 秒里宿主一直在变"，不是"这件事永远不会成功"。实测 Cubase 15
+    /// 上一次 `unsupported host position` 就是 8 次全失败后把界面**永久**冻结在旧版本
+    /// （日志 22:22:35 `gave up after 8 attempts`），而那个错误本身是瞬时的。
+    #[test]
+    fn exhausting_the_retry_budget_backs_off_instead_of_stopping() {
+        for streak in 1..RENDER_RETRY_BUDGET {
+            match render_retry_action(streak) {
+                RenderAction::Retry(delay) => assert_eq!(
+                    delay, RENDER_RETRY_INTERVAL,
+                    "预算内必须是快速重试（streak={streak}）"
+                ),
+                RenderAction::Settled => panic!("预算内不得判定为终态（streak={streak}）"),
+            }
+        }
+        for streak in [RENDER_RETRY_BUDGET, RENDER_RETRY_BUDGET + 1, 1_000] {
+            match render_retry_action(streak) {
+                RenderAction::Retry(delay) => assert_eq!(
+                    delay, RENDER_RETRY_BACKOFF,
+                    "预算耗尽必须退避而不是停止（streak={streak}）"
+                ),
+                RenderAction::Settled => panic!(
+                    "预算耗尽是**退避**，不是终态：宿主一旦静止就应当自然收敛（streak={streak}）"
+                ),
+            }
+        }
+        assert!(
+            RENDER_RETRY_BACKOFF > RENDER_RETRY_INTERVAL,
+            "退避间隔必须真的更疏，否则这条改动等于没做"
+        );
+    }
+
     /// 参数专用Undo/Redo确实走actor历史，而不是宿主几何；同一分组中的多块曲线只撤一次。
     #[test]
     fn parameter_history_commands_restore_grouped_curve_and_redo_without_geometry_changes() {

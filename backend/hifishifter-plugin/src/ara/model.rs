@@ -118,7 +118,46 @@ pub struct ModelHandle {
     /// 只能靠几何兜底猜祖先，兄弟半段会互相污染（用户报障：分割后 Clip 内产生偏移）。
     /// 记下上一帧就能按**只用 ARA 自己给的量**识别分割（见 `register_host_split_lineage`）。
     lineage_frame: Vec<RegionFrame>,
+    /// 上一次成功重算所消费的模型指纹（见 [`ModelHandle::remap_and_log`]）。
+    ///
+    /// 【为什么需要它】宿主的编辑事务**不是原子的**：一次分割会在同一毫秒里送来多对
+    /// `beginEditing` / `endEditing`，而每次 `end_editing` 都会跑全量重算。实测 Cubase 15
+    /// 的一次分割里同一份模型被重算 **4 次**（日志里同一条 `playback_region #0` 的映射读数
+    /// 连着出现 4 遍，见 2026-10-13 会话 22:20:54）。每次重算都会重跑参数投影、
+    /// `refresh_ui_inventory`、GUID 认领，并可能失效渲染输入 —— 那正是自动应用的
+    /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic apply`
+    /// 的直接来源。模型没变就不重算。
+    remap_stamp: Option<Vec<RemapInput>>,
 }
+
+/// 一次重算所消费的模型输入（每条活 region 一行）。
+///
+/// 【为什么是这些字段】只取**映射真正消费**的量：槽位与 region key（身份）、宿主 item GUID
+/// （`ara-item-*` 认领）、源与修改身份（归属）、序列下标（轨道归属）、四段几何、
+/// 以及源侧 PCM 授权位（决定这条 region 能否出声）。**不含**任何会自行漂移的量
+/// （时间戳、采样计数），否则去重会永久失效。
+///
+/// 【为什么第一个字段是槽位而不是 key】key 由 `allocate_region` 分配，而夹具/恢复路径
+/// 可以直接构造 `playback_regions` 而**不**碰 `region_keys`。若以 key 起头并用 `?` 过滤，
+/// 那些行会被整个丢掉 —— 指纹退化成"空 == 空"，于是**真实变化被当成没变**（这正是
+/// `persisted_b_edits_follow_host_identity_…` 暴露的问题）。以槽位起头、key 允许为 0
+/// （"尚未分配身份"），每一行都稳定贡献自己的几何。
+///
+/// 几何用 `to_bits()` 比较：`f64` 不是 `Ord`，而 `-0.0 == 0.0` 却 `to_bits` 不同 ——
+/// 这里要的是"宿主重发了同一份几何"，位相等比数值相等更严格、也更贴合意图。
+type RemapInput = (
+    usize,
+    u64,
+    Option<String>,
+    String,
+    String,
+    u64,
+    u64,
+    u64,
+    u64,
+    Option<usize>,
+    bool,
+);
 
 /// 一帧里一个活 region 的 ARA 几何（宿主分割结构 diff 的输入）。
 #[derive(Clone, PartialEq)]
@@ -203,6 +242,7 @@ impl Default for ModelHandle {
             destroyed_regions: HashSet::new(),
             sequence_index_by_model_ref: HashMap::new(),
             lineage_frame: Vec::new(),
+            remap_stamp: None,
         }
     }
 }
@@ -495,10 +535,82 @@ impl ModelHandle {
     ///
     /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
+    /// 重算输入的完整指纹，按 region key 排序（见 [`RemapInput`]）。
+    ///
+    /// 【为什么排序】宿主交付同一份模型的顺序不保证一致；排序后"同一份模型"才有
+    /// 同一个指纹，否则去重会因顺序抖动而失效。
+    fn remap_fingerprint(&self) -> Vec<RemapInput> {
+        let items = self.session.region_items.lock_or_recover();
+        let mut rows = self
+            .document
+            .playback_regions
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+            .map(|(slot, region)| {
+                // 未分配身份时用 0（"未知"）而不是把这一行丢掉 —— 丢掉会让指纹退化。
+                let key = self.region_keys.get(slot).copied().unwrap_or(0);
+                let sample_access = self
+                    .document
+                    .audio_sources
+                    .iter()
+                    .find(|source| source.persistent_id == region.audio_source_persistent_id)
+                    .is_some_and(|source| source.sample_access_enabled);
+                (
+                    slot,
+                    key,
+                    items.get(&key).cloned(),
+                    region.audio_source_persistent_id.clone(),
+                    region.audio_modification_persistent_id.clone(),
+                    region.start_in_modification_time.to_bits(),
+                    region.duration_in_modification_time.to_bits(),
+                    region.start_in_playback_time.to_bits(),
+                    region.duration_in_playback_time.to_bits(),
+                    region.region_sequence_index,
+                    sample_access,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    }
+
+    /// 这次 `end_editing` 是否需要重算 —— 即"已发布过时间线、且模型指纹未变"。
+    ///
+    /// 抽成独立函数是为了让判据本身可测：重算的**副作用**（版本推进、清单刷新）散布在
+    /// 好几处，无法从外部观察"到底跑没跑"；而"该不该跑"是一个纯函数。
+    fn remap_is_redundant(&self) -> bool {
+        self.timeline.is_some() && self.remap_stamp.as_ref() == Some(&self.remap_fingerprint())
+    }
+
     fn remap_and_log(&mut self) {
         // 先更新 session 的派生表：它们必须**立刻**反映新图，否则渲染/工作区路径
         // 在收口前就读到旧的 region 集合（见 `sync_session_derived_tables`）。
         self.sync_session_derived_tables();
+        // 【幂等：模型没变就不重算】宿主的编辑事务不是原子的，一次分割会送来多对
+        // `beginEditing` / `endEditing`，每次 `end_editing` 都跑一遍全量重算 —— 实测
+        // Cubase 15 是同**一份模型**连着算 4 遍（见 `ModelHandle::remap_stamp`）。
+        // 已经发布过时间线、且这次交付的模型指纹与上次完全相同 ⇒ 这次重算不会产出
+        // 任何新东西，只会重复失效渲染输入、拉大自动应用的冲突窗口。
+        //
+        // 【为什么不是按时间做去抖】去抖需要一个定时器/线程，而"模型是否相同"是一个
+        // **可判定的事实**：相同就一定不用重算，与经过了多少毫秒无关。用指纹既确定
+        // 又可测（见 `end_editing_skips_the_remap_when_the_model_did_not_change`）。
+        if self.remap_is_redundant() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                "ara.remap.unchanged",
+                format_args!(
+                    "[ara] endEditing delivered an unchanged model ({} region(s)); \
+                     the published timeline is kept without a re-map",
+                    self.remap_stamp.as_ref().map_or(0, Vec::len)
+                ),
+            );
+            // 准备队列仍要保证在跑：宿主可能刚在这一轮授予了 PCM 访问，而那不是模型变化。
+            self.session.prepare_renderers();
+            return;
+        }
+        let fingerprint = self.remap_fingerprint();
         let session = self.session.clone();
         let transaction = session.transaction.lock_or_recover();
         let mut document = self.document.clone();
@@ -743,6 +855,8 @@ impl ModelHandle {
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
                 *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);
+                // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
+                self.remap_stamp = Some(fingerprint);
                 drop(transaction);
             }
             Err(err) => {
@@ -1733,19 +1847,34 @@ impl PlaybackRegions for ModelHandle {
         // `clear_renderers()` 会把 `ready` 反复按回 `false`，而 `ready` 又参与
         // `ensure_loaded` 的"宿主是否冲突"判据 ⇒ 用户每做一次编辑都撞一串
         // "Conflict: host changed"（见会话侧同一处注释）。这里逐项比较，值没动就不失效。
+        // 【为什么用容差比较而不是 `!=`】宿主折算工程速率后会把**同一份几何**重复交付，
+        // 而两个数值可能只差最后几位（float/double 中间量、宿主自己的一次往返）。
+        // `!=` 会把这种"数值等价、位不同"的回调判成变化 ⇒ 每次回调都 `clear_renderers()`
+        // ⇒ `revision` / `render_epoch` 反复推进 ⇒ 用户每次拖动都撞一串
+        // "Conflict: host changed"。判据换成 `host_value_compatible`（与分割检测同一套，
+        // 已实测对 ARA 的 double 时间类型足够），只挡"宿主重复交付同一份几何"，
+        // 不挡真实编辑 —— 真实编辑的位移远大于 1e-6 的相对容差。
         let flags = properties.transformation_flags();
         log_unknown_transformation_flags(flags);
+        let close = crate::host::geometry::host_value_compatible;
         let changed = self
             .document
             .playback_regions
             .get(*state)
             .is_some_and(|region| {
-                region.start_in_modification_time != properties.start_in_modification_time()
-                    || region.duration_in_modification_time
-                        != properties.duration_in_modification_time()
-                    || region.start_in_playback_time != properties.start_in_playback_time()
-                    || region.duration_in_playback_time != properties.duration_in_playback_time()
-                    || region.is_timestretch_enabled != ((flags & 1) != 0)
+                !close(
+                    region.start_in_modification_time,
+                    properties.start_in_modification_time(),
+                ) || !close(
+                    region.duration_in_modification_time,
+                    properties.duration_in_modification_time(),
+                ) || !close(
+                    region.start_in_playback_time,
+                    properties.start_in_playback_time(),
+                ) || !close(
+                    region.duration_in_playback_time,
+                    properties.duration_in_playback_time(),
+                ) || region.is_timestretch_enabled != ((flags & 1) != 0)
                     || region.has_content_based_fade_at_head != ((flags & 8) != 0)
                     || region.has_content_based_fade_at_tail != ((flags & 4) != 0)
             });
@@ -2026,6 +2155,282 @@ mod tests {
         assert!(
             model.session.render_epoch.load(Ordering::Acquire) > before_epoch,
             "新建 region 必须推进快照代次，否则 prepare_job 早退、声音停在旧版本"
+        );
+    }
+
+    /// 建一个只有一条 region 的模型，走**真实的**创建回调（不是直接改 `document`）。
+    ///
+    /// 【为什么不直接改 `document`】直接改会绕开 `allocate_region` 的身份登记、
+    /// `clear_renderers()` 的版本推进与 `sync_session_derived_tables` 的派生表同步 ——
+    /// 而那三件事正是本轮要钉住的。既有 `a_host_split_*` 测试正是因为这个绕行，
+    /// 才没能发现"重算被跑 4 遍"。
+    fn model_with_one_region() -> (ModelHandle, u64) {
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        // 宿主是"先建源与轨、再建 region"，夹具里预置的那条 region 不属于本场景。
+        model.document.playback_regions.clear();
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作不透明 model-ref 地址；`create_playback_region` 只把它当键比较与
+        // 登记（`as_raw() as usize`），从不解引用。地址在调用期间保持有效。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+        let properties =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.0, 0.5, sequence_ref, None, None)
+                .unwrap();
+        let context = CreateContext::for_test(ApiGeneration::V2Final, 0xA1B2C3D4);
+        let modification = 0_usize;
+        let sequence = 0_usize;
+        let slot = PlaybackRegions::create_playback_region(
+            &mut model,
+            &context,
+            &modification,
+            &sequence,
+            properties,
+        )
+        .expect("合法属性必须建出 region");
+        let key = model.region_keys[slot];
+        (model, key)
+    }
+
+    /// 同一份模型重复交付时**不重算**。
+    ///
+    /// 【为什么必须钉住】实测 Cubase 15 的一次分割里同一份模型被算了 4 遍（日志
+    /// 22:20:54：同一条 `playback_region #0` 的映射读数连着出现 4 次）。每次重算都会
+    /// 重跑参数投影与宿主清单刷新、并可能失效渲染输入 —— 那是自动应用
+    /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic
+    /// apply` 的直接来源。
+    #[test]
+    fn end_editing_skips_the_remap_when_the_model_did_not_change() {
+        let (mut model, _key) = model_with_one_region();
+        // 还没发布过时间线 ⇒ 必须算。
+        assert!(!model.remap_is_redundant());
+
+        model.remap_and_log();
+        assert!(model.timeline.is_some(), "首次重算必须发布时间线");
+        assert!(
+            model.remap_is_redundant(),
+            "同一份模型再交付一次时，这次重算必须是冗余的"
+        );
+
+        // 真实编辑（几何变了）⇒ 必须重算。
+        let mut state = 0_usize;
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 同上，只作不透明 model-ref 地址。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+        let moved =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.25, 0.5, sequence_ref, None, None)
+                .unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut state, moved)
+            .expect("移动一条已知 region 必须成功");
+        assert!(
+            !model.remap_is_redundant(),
+            "几何真的变了就必须重算，去重不得吞掉真实变化"
+        );
+
+        model.remap_and_log();
+        assert!(model.remap_is_redundant());
+    }
+
+    /// **指纹不得因"region 没有分配到的身份 key"而退化。**
+    ///
+    /// 【为什么必须钉住】`remap_fingerprint` 曾以 region key 起头并用 `?` 过滤 ——
+    /// 而直接构造 `playback_regions`（恢复路径、夹具）不经过 `allocate_region`，
+    /// `region_keys` 是空的。那些行会被整个丢掉，指纹退化成"空 == 空"，于是**真实变化
+    /// 被当成没变**、重算被跳过（`persisted_b_edits_follow_host_identity_…` 因此失败）。
+    /// 一个"会漏掉输入"的幂等判据比不去重更危险。
+    #[test]
+    fn the_remap_fingerprint_covers_regions_without_an_allocated_key() {
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A", "B"]);
+        assert!(
+            model.region_keys.is_empty(),
+            "本夹具直接构造 document，不经过 allocate_region"
+        );
+        assert_eq!(
+            model.remap_fingerprint().len(),
+            2,
+            "没有身份 key 的 region 也必须留下自己的一行"
+        );
+        model.remap_and_log();
+        assert!(model.remap_is_redundant());
+        // 丢掉一条 region：指纹必须变，重算不得被跳过。
+        model.destroyed_regions.insert(0);
+        assert!(!model.remap_is_redundant(), "真实变化不得被去重吞掉");
+    }
+
+    /// **宿主分割的端到端形状：`destroy(父) + create(左) + create(右)`。**
+    ///
+    /// 【为什么这是本轮最关键的测试缺口】此前的分割测试（`a_host_split_registers_…`）
+    /// **手工构造 `lineage_frame` + 直接改 `document.playback_regions` + 直调
+    /// `register_host_split_lineage()`**，绕过了三个回调本身 —— 也就绕过了每次
+    /// `clear_renderers()` 的版本推进、`allocate_region` 的身份登记与
+    /// `sync_session_derived_tables` 的派生表同步。用户报的"分割后报错 / 片段消失"
+    /// 恰恰发生在这些被绕过的部分里。
+    ///
+    /// 本用例驱动**真实的回调序列**，并断言：
+    ///   1. 两个半段都出现在映射出的时间线里（"片段消失"）；
+    ///   2. 父段身份已从派生表消失；
+    ///   3. 每个 mutation 都失效了渲染版本（否则声音停在旧版本）；
+    ///   4. 收口后的第二次交付同一模型被识别为冗余（"重算被跑 4 遍"）。
+    #[test]
+    fn a_host_split_keeps_both_halves_and_remaps_once() {
+        let (mut model, parent_key) = model_with_one_region();
+        model.remap_and_log();
+        assert!(model.timeline().is_some(), "首次重算必须发布时间线");
+        assert!(
+            model
+                .session
+                .regions
+                .lock_or_recover()
+                .contains_key(&parent_key),
+            "父段此刻应当是活的"
+        );
+        let after_setup = model.session.revision.load(Ordering::Acquire);
+        let epoch_after_setup = model.session.render_epoch.load(Ordering::Acquire);
+
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+
+        // 1) 宿主销毁父段。
+        PlaybackRegions::destroy_playback_region(&mut model, 0_usize);
+        // 2) 宿主新建两个相邻半段（源窗 [0,0.25) 与 [0.25,0.5)，播放位置相邻）。
+        let modification = 0_usize;
+        let sequence = 0_usize;
+        for (key, lo, hi) in [(0x1111_u64, 0.0_f64, 0.25_f64), (0x2222, 0.25, 0.5)] {
+            let properties = PlaybackRegionProperties::for_ara2(
+                0,
+                lo,
+                hi - lo,
+                lo,
+                hi - lo,
+                sequence_ref,
+                None,
+                None,
+            )
+            .unwrap();
+            let context = CreateContext::for_test(ApiGeneration::V2Final, key);
+            PlaybackRegions::create_playback_region(
+                &mut model,
+                &context,
+                &modification,
+                &sequence,
+                properties,
+            )
+            .expect("半段必须建得出来");
+        }
+
+        assert!(
+            model.session.revision.load(Ordering::Acquire) >= after_setup + 3,
+            "destroy + 两次 create 必须各失效一次渲染版本（否则宿主几何清单与快照都不刷新）"
+        );
+        assert!(
+            model.session.render_epoch.load(Ordering::Acquire) > epoch_after_setup,
+            "同一批 mutation 也必须推进快照代次"
+        );
+
+        // 3) 模型真的变了 ⇒ 这一次收口不许被去重跳过。
+        assert!(!model.remap_is_redundant());
+        model.remap_and_log();
+        assert!(model.remap_is_redundant());
+
+        // 4) 两个半段都必须在；父段必须已经不在派生表里。
+        let workspace_keys = model.session.regions.lock_or_recover().clone();
+        assert!(
+            !workspace_keys.contains_key(&parent_key),
+            "父段销毁后不应还留在派生表里"
+        );
+        let timeline = model.timeline().unwrap();
+        assert_eq!(
+            timeline.clips.len(),
+            2,
+            "两个半段都必须出现在时间线里（否则用户看到的是\"分割后片段消失\"）: {:?}",
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **宿主重复交付同一份几何**时不得失效渲染版本。
+    ///
+    /// 【为什么用容差而不是 `!=`】宿主折算工程速率后会把同一份几何重复回调，两个数可能
+    /// 只差最后几位。`!=` 会把这种回调判成变化 ⇒ 每次回调都 `clear_renderers()` ⇒
+    /// `revision` / `render_epoch` 反复推进 ⇒ 用户每次拖动都撞一串 "Conflict: host changed"。
+    #[test]
+    fn redelivering_the_same_geometry_does_not_invalidate_the_render_version() {
+        let (mut model, _key) = model_with_one_region();
+        let mut state = 0_usize;
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+
+        let before_revision = model.session.revision.load(Ordering::Acquire);
+        let before_epoch = model.session.render_epoch.load(Ordering::Acquire);
+
+        // 完全相同的几何。
+        let same =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.0, 0.5, sequence_ref, None, None)
+                .unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut state, same).unwrap();
+        assert_eq!(
+            model.session.revision.load(Ordering::Acquire),
+            before_revision,
+            "重复交付同一份几何不得推进模型代次"
+        );
+        assert_eq!(
+            model.session.render_epoch.load(Ordering::Acquire),
+            before_epoch,
+            "重复交付同一份几何不得推进快照代次"
+        );
+
+        // 只差最后几位的几何（宿主折算工程速率的典型表现）。
+        let jittered = PlaybackRegionProperties::for_ara2(
+            0,
+            0.0,
+            0.5 + 1e-12,
+            0.0,
+            0.5 + 1e-12,
+            sequence_ref,
+            None,
+            None,
+        )
+        .unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut state, jittered).unwrap();
+        assert_eq!(
+            model.session.revision.load(Ordering::Acquire),
+            before_revision,
+            "容差内的抖动不得被当成一次真实编辑"
+        );
+
+        // 真实移动：必须失效。
+        let moved =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.25, 0.5, sequence_ref, None, None)
+                .unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut state, moved).unwrap();
+        assert!(
+            model.session.revision.load(Ordering::Acquire) > before_revision,
+            "真实编辑必须失效渲染版本，否则声音停在旧位置"
         );
     }
 

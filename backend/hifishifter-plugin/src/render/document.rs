@@ -826,10 +826,18 @@ impl DocumentSession {
     ) -> Result<(), String> {
         let (edit, epoch, scope, inputs) = {
             let _transaction = self.transaction.lock_or_recover();
-            if !self.is_alive()
-                || !self.ready.load(Ordering::Acquire)
-                || self.revision.load(Ordering::Acquire) != base_model
-            {
+            // 【为什么不再比较 `revision != base_model`】`revision` 是"模型被失效过几次"的
+            // 计数，宿主一次编辑会把它推进多次（分割在 ARA 侧是 destroy + create + create，
+            // 每次 `clear_renderers()` 都 +1）。用它做冲突判据，等于把"宿主正常的多次交付"
+            // 判成冲突：实测 Cubase 15 上这就报成 `Conflict: host model changed during
+            // automatic apply`，8 次重试后自动渲染永久停摆。
+            //
+            // 真正的正确性判据在下方复核段：`edits.revision` / `render_epoch` /
+            // `scope_revision` / `assigned_regions()` 任一变化都会走 `superseded`（可重试、
+            // 不写 error）。而 `render_epoch` 与 `revision` 是**同时**推进的
+            // （`clear_renderers` 是唯一同时推进两者的原语），所以这里去掉 `revision`
+            // 不丢任何信息 —— 只是不再做那个会误报的快速失败。
+            if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
                 return Err(format!(
                     "{} model changed during automatic apply",
                     crate::editor::errors::CONFLICT_PREFIX
@@ -869,10 +877,9 @@ impl DocumentSession {
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
-        if !self.is_alive()
-            || !self.ready.load(Ordering::Acquire)
-            || self.revision.load(Ordering::Acquire) != base_model
-        {
+        // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且下面那组
+        // 版本/分配没有变。`revision` 不参与 —— 理由同前一处（见上面的说明）。
+        if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
             return Err(format!(
                 "{} model changed during automatic apply",
                 crate::editor::errors::CONFLICT_PREFIX
@@ -1072,17 +1079,18 @@ impl DocumentSession {
             .collect()
     }
 
-    /// 报告"本档是否真的有实例在渲染"。
+    /// 把"本档有没有实例持 playback 角色"这一文档级事实推给每个实例，并报告读数。
     ///
-    /// 【为什么是读数而不是接管】`renders_playback()` 只认宿主分配的 playback 角色。
-    /// 若宿主一个都不分配，文档里就没有实例渲染音频、`process` 全部走 `pass_through`
-    /// —— 那会让"编辑不改变声音"。但**不能**据此自动接管：一个只拿到 `EDITOR_RENDERER`
-    /// 的实例（REAPER 的正常编辑实例）与"宿主没分配 playback"在文档级**完全同形**，
-    /// 接管会破坏既有的透传契约（`vst3/audio_boundary_tests` 明确钉住）。
+    /// 【为什么必须推送而不是让每个实例自己查】`is_editor_only()` 在**音频线程**上求值
+    /// （`vst3.rs::audio_process`），只能读本实例的一个原子量；而"文档上还有没有别的
+    /// playback 实例"是文档级事实。这里在每次绑定/分配变化时算一次并推过去 ——
+    /// 变化频率是"用户增删插件实例"，不是音频帧率。
     ///
-    /// 所以这里只把事实说清楚：**"有实例、但没有任何一个持 playback 角色"是一句
-    /// 值得报警的话**。判据要求"已有非 playback 实例"，所以绑定过程中的瞬时态
-    /// （playback 实例还没绑）会在下一次调用时自然消失，不会刷屏。
+    /// 【为什么这不再破坏透传契约】此前只能比"本实例是不是 editor"，而 REAPER 的正常
+    /// 编辑实例与"Cubase 没分配 playback"在**实例级**确实同形。改比**文档级**事实之后就
+    /// 区分开了：REAPER 的编辑实例另有 playback 兄弟 ⇒ 仍透传；Cubase 的单实例
+    /// 没有任何 playback 兄弟 ⇒ 接管渲染（实测日志：`playback ownership: 1 live
+    /// renderer instance(s) but NONE holds the playback role`，用户报的"编辑不改变声音"）。
     ///
     /// 调用点：绑定完成时、分配变化时（角色集合唯一可能改变的两个时刻）。
     pub(crate) fn report_playback_ownership(&self) {
@@ -1090,26 +1098,31 @@ impl DocumentSession {
         if owners.is_empty() {
             return;
         }
-        let playback = owners
-            .iter()
-            .filter(|owner| owner.has_playback_role())
-            .count();
-        if playback > 0 {
+        let covered = owners.iter().any(|owner| owner.has_playback_role());
+        for owner in &owners {
+            owner.set_playback_covered(covered);
+        }
+        if covered {
             return;
         }
         // 限流：绑定与分配都可能连续触发，这条读数不需要每次都打。
+        //
+        // 【为什么把角色位一起打出来】`bind document` 那一行是 `INFO`，而现场日志可能被
+        // 滤成 `WARN`（实测 Cubase 会话整段零行 INFO）。角色分配恰恰是"编辑听不出来"
+        // 的头号线索，所以这一条必须自带全部信息：每个实例的 writer_id 与角色位。
+        // 1 = playback、2 = editor、4 = view、3 = playback|editor。
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             "ara.playback.no-renderer",
             format_args!(
                 "[ara] playback ownership: {} live renderer instance(s) but NONE holds the \
-                 playback role (writers: {:?}); audio will pass through the host untouched. \
-                 If this host is expected to render the plugin, its role assignment is the \
-                 thing to check",
+                 playback role (writers/roles: {:?}); the sole editor instance takes over \
+                 rendering so that edits are audible. If this host meant to provide a playback \
+                 renderer, its role assignment is the thing to check",
                 owners.len(),
                 owners
                     .iter()
-                    .map(|owner| owner.writer_id())
+                    .map(|owner| (owner.writer_id(), owner.roles_bits()))
                     .collect::<Vec<_>>()
             ),
         );
