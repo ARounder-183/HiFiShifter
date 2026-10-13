@@ -116,11 +116,10 @@ pub fn log_file() -> PathBuf {
 /// 取值与 `log` crate 的过滤名一致：`off`/`error`/`warn`/`info`/`debug`/`trace`。
 fn log_level_from_env() -> log::LevelFilter {
     if let Ok(value) = std::env::var("HIFISHIFTER_LOG") {
-        if let Some(level) = value
+        if let Ok(level) = value
             .trim()
             .to_ascii_lowercase()
             .parse::<log::LevelFilter>()
-            .ok()
         {
             return level;
         }

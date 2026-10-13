@@ -25,6 +25,23 @@ const fn ffi_bool(value: bool) -> ARABool {
     }
 }
 
+/// 一次性留痕：`notifyModelUpdates` 想把某个对象的变化推回宿主，但宿主创建它时没给句柄。
+///
+/// 【为什么只报一次】它是"宿主能力缺失"而不是"每次调用都出错"：Cubase 15 对
+/// `createAudioModification` 恒传 null host（见 `PATCHED.md` 补丁 12），于是每次通知都会
+/// 命中同一条分支。逐次打印会把日志刷满，而这条事实只需要说一遍。
+fn warn_missing_host_reference(kind: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    log::warn!(
+        "[ara] notifyModelUpdates: the host passed no host reference for an {kind}; changes to \
+         that object cannot be pushed back to the host (this message is reported once)"
+    );
+}
+
 struct ControllerAdapter<P: PluginModel> {
     runtime: Option<PluginRuntime<P>>,
     host: HostClients<'static>,
@@ -291,6 +308,12 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             }
         }
         let mut updates = self.updates.take_pending();
+        // 【为什么每条通知都要检查 host_ref】宿主可能在 `createXxx` 时传 null host
+        // （实测 Cubase 15 对 `createAudioModification` 就是这样，见 `PATCHED.md` 补丁 12）。
+        // 那时对象照常建成，但**回推通知没有去处**。此前这里是 `if let Some(..) { .. }`，
+        // 没有 else —— 通知被静默丢弃，日志里完全看不出"插件想说、但宿主没给句柄"。
+        // 一次性留痕：这条路径今天没有生产调用者（产品侧不修改宿主建模的对象），
+        // 但一旦有人开始 `mark_*`，第一个被丢的通知必须可见。
         updates.flush_with(|notification, _| match notification {
             crate::UpdateNotification::AudioSource {
                 source,
@@ -299,6 +322,8 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             } => {
                 if let Some(host_ref) = self.audio_source_hosts.get(&source).copied() {
                     let _ = host.notify_audio_source_changed(host_ref, range.as_ref(), flags);
+                } else {
+                    warn_missing_host_reference("audio source");
                 }
             }
             crate::UpdateNotification::AudioModification {
@@ -308,6 +333,8 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             } => {
                 if let Some(host_ref) = self.audio_modification_hosts.get(&modification).copied() {
                     let _ = host.notify_audio_modification_changed(host_ref, range.as_ref(), flags);
+                } else {
+                    warn_missing_host_reference("audio modification");
                 }
             }
             crate::UpdateNotification::PlaybackRegion {
@@ -317,6 +344,8 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             } => {
                 if let Some(host_ref) = self.playback_region_hosts.get(&region).copied() {
                     let _ = host.notify_playback_region_changed(host_ref, range.as_ref(), flags);
+                } else {
+                    warn_missing_host_reference("playback region");
                 }
             }
             crate::UpdateNotification::Document => {

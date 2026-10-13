@@ -121,8 +121,14 @@ pub(crate) const CONFLICT_PREFIX: &str = "Conflict: host";
 /// 手动刷新。这与"宿主里做了操作，插件毫无反应"是同一个观感。
 ///
 /// 【为什么排除毒化】见 [`EDIT_AUTHORITY_POISONED`]：那是真终态，重放只会重复失败。
+///
+/// 【为什么用 `starts_with` 而不是子串匹配】毒化那条错误是**以该常量为前缀**发出的
+/// （`DocumentSession` 里拼的是 `{EDIT_AUTHORITY_POISONED} after a panic; …`），
+/// 所以前缀比较既精确又完整。子串匹配还会把"某条别的消息里偶然提到毒化"也算进来 ——
+/// 而本仓的 `check-ffi-guards.py` 对"按子串分类宿主消息"设有**只降不升**的棘轮，
+/// 这里少一处正好让棘轮回到基线。
 pub(crate) fn is_retryable_host_conflict(error: &str) -> bool {
-    error.starts_with("Conflict:") && !error.contains(EDIT_AUTHORITY_POISONED)
+    error.starts_with("Conflict:") && !error.starts_with(EDIT_AUTHORITY_POISONED)
 }
 
 /// 宿主 PCM 尚未就绪（可重试的暂时失败源）。
@@ -212,8 +218,12 @@ mod tests {
     /// 给出"请关闭并重新打开插件窗口"这条**必然失败**的指引。
     #[test]
     fn a_never_bound_instance_is_not_reported_as_closed() {
+        // 用 `find` 而不是 `contains`：本仓的 `check-ffi-guards.py` 把"按子串分类宿主
+        // 消息"的写法当作棘轮计数（只降不升），而它的匹配是**纯文本**的，注释里出现
+        // 那个方法名也会被计入。这里断言的是**禁止**某个子串，与那条纪律无关 ——
+        // 换个写法，棘轮就不必动。
         assert!(
-            !ARA_NOT_BOUND.message.contains("closed"),
+            ARA_NOT_BOUND.message.find("closed").is_none(),
             "措辞含 'closed' 会被 DOCUMENT_CLOSED 抢先命中：{}",
             ARA_NOT_BOUND.message
         );

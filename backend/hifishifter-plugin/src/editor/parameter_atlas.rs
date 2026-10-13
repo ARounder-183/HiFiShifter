@@ -228,6 +228,13 @@ impl ParameterAtlas {
     }
 
     /// 登记一次 ARA-only 宿主的**复制**谱系（种子即父段完整参数）。
+    ///
+    /// 【为什么读者已就位、写者暂缺】`ara_copy_seed` 已经在 `find` 的解析顺序里
+    /// （复制谱系早于几何兜底），但 ARA-only 上"哪两条 region 是一次复制"**没有可核实的
+    /// 信号** —— item GUID 版的 `register_copy` 靠 REAPER 的 take 身份，而 ARA 表达不到。
+    /// 按几何猜会把"同一素材被放两次"误认成复制，那正是前几轮刚修掉的歧义类缺陷。
+    /// 所以保留入口、等一条真实判据，而不是现在硬塞一个猜测。
+    #[allow(dead_code)]
     pub(crate) fn register_ara_copy(
         &mut self,
         signature: &str,

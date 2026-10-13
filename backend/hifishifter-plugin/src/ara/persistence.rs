@@ -31,7 +31,7 @@ pub struct ArchivePersistence {
 
 impl ArchivePersistence {
     /// 绑定一份文档会话。
-    pub fn new(document: &Arc<DocumentSession>) -> Self {
+    pub(crate) fn new(document: &Arc<DocumentSession>) -> Self {
         Self {
             document: Arc::downgrade(document),
         }
