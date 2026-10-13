@@ -1972,6 +1972,10 @@ impl ExtensionOwner {
             .iter()
             .map(|clip| clip.id.clone())
             .collect::<BTreeSet<_>>();
+        // 权威侧合并：参数按稳定宿主身份覆盖（恢复的那一份更权威）。
+        for (key, params) in restored.atlas.authorities.clone() {
+            merged.atlas.set_authority(&key, params);
+        }
         merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
         merged.atlas.regions.extend(restored.atlas.regions);
         merged
@@ -2020,6 +2024,24 @@ impl ExtensionOwner {
                 .map(|clip| clip.id.clone())
                 .collect::<BTreeSet<_>>();
             local.atlas.regions.retain(|id, _| clips.contains(id));
+            // 权威表必须按**同一口径**裁剪：键从已裁剪的 regions 派生 —— 那正是本组件
+            // 真实持有的片段身份。不裁剪会让一个组件把另一个组件的参数写进自己的存档
+            // （两个组件共享同一 source/modification 身份时尤其明显）。
+            let allowed_authorities = local
+                .atlas
+                .regions
+                .values()
+                .filter_map(|record| {
+                    crate::editor::parameter_atlas::authority_key(
+                        record.identity.item.as_deref(),
+                        &record.identity.modification,
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            local
+                .atlas
+                .authorities
+                .retain(|key, _| allowed_authorities.contains(key));
             local
                 .atlas
                 .copy_seeds

@@ -294,7 +294,7 @@ impl EditState {
     /// 载荷写 2、带 groups 写 5……旧构建（它只认自己那一代及更低）因此仍能读。写死最高
     /// 代际会让所有旧构建一律拒绝，把"能读"变成"全丢"。这个常量只用于 `restore` 判断
     /// "由更新的插件保存"。
-    const CURRENT_STATE_VERSION: u64 = 6;
+    const CURRENT_STATE_VERSION: u64 = 7;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -307,7 +307,9 @@ impl EditState {
                 return Err("ARA edit identity missing; cannot save edits".into());
             }
         }
-        let version = if !self.clip_local.is_empty() {
+        let version = if !self.atlas.authorities.is_empty() {
+            7
+        } else if !self.clip_local.is_empty() {
             6
         } else if !self.groups.is_empty() {
             5
@@ -318,7 +320,13 @@ impl EditState {
         } else {
             3
         };
-        let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":self}))
+        // 【为什么不直接序列化 `self`】`atlas.regions` 是**每帧派生**的投影缓存，它的
+        // 权威是 `atlas.authorities`。写出派生缓存会让同一份采样在存档里出现两次
+        // （曲线是 `Arc<Vec<f32>>`，内存里共享、序列化时各写一份），而它读回来之后
+        // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
+        let mut trimmed = self.clone();
+        trimmed.atlas.regions.clear();
+        let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
         if bytes.len() > hifishifter_ara_ipc::MAX_FRAME {
             return Err("state exceeds transport budget".into());
@@ -612,7 +620,7 @@ mod tests {
         );
         // 更高版本：明确说"由更新的插件保存"，而不是含混的 unsupported。
         let mut newer = value.clone();
-        newer["version"] = serde_json::json!(7);
+        newer["version"] = serde_json::json!(8);
         let error = state
             .restore(&serde_json::to_vec(&newer).unwrap())
             .unwrap_err();

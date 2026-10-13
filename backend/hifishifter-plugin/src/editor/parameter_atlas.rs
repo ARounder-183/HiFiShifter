@@ -118,6 +118,80 @@ pub(crate) struct RegionParameters {
 fn default_live() -> bool {
     true
 }
+
+/// 参数随宿主编辑如何移动。
+///
+/// 【为什么是每 modification 的属性】用户在编辑途中切换「锁定参数线」时，既有曲线
+/// 不应被重新解释 —— 一条 modification 的锚点在它第一次被播种时就定下，之后沿用。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum ParamAnchor {
+    /// 锁定（默认）：参数跟着**素材**走 —— 源域投影。移动 / 拉伸都带着曲线。
+    #[default]
+    Source,
+    /// 不锁定：参数留在**工程位置** —— 工程域投影。移动片段不会带走曲线。
+    Project,
+}
+
+/// 参数权威键：**宿主给的稳定身份优先**。
+///
+/// 【为什么 item GUID 优先于 modification】REAPER 的 item GUID 跨移动 / 裁剪 / 分割
+/// 稳定，且它能把"同一素材被放两次"区分成两份独立参数 —— 这是原生路径既有的、已被
+/// 测试固定的语义（`ui_inventory_item_identity_survives_mute_region_recreation_...`）。
+/// 若只用 modification，两条共享同一 modification 的 region 会互相覆盖曲线。
+///
+/// 【为什么 ARA-only 退回 modification】没有原生扩展时 `item` 恒为 `None`，此时
+/// modification persistentID 是**唯一**跨会话稳定的身份 —— 而且 ARA 明确要求适配设置
+/// 属于 audio modification state（`ARAInterface.h:950-952`），modification 持久、
+/// playback region 不持久（`:903` / `:953-955`）。
+///
+/// 【为什么两者都与几何无关】这正是本键存在的理由：移动 / 裁剪 / 分割 / 拉伸都不改变
+/// item GUID，也不改变 modification persistentID，因此权威查找在这四种编辑下都命中。
+pub(crate) fn authority_key(item: Option<&str>, modification: &str) -> Option<String> {
+    match item {
+        Some(item) if !item.is_empty() => Some(format!("item:{item}")),
+        _ if !modification.is_empty() => Some(format!("mod:{modification}")),
+        _ => None,
+    }
+}
+
+/// 一份参数权威：某个稳定宿主身份（item GUID 或 modification persistentID）的参数。
+///
+/// 【为什么它同时解决分割】分割之所以需要谱系，只是因为"新的稳定身份从哪来"没有答案。
+/// 而这个答案 ARA 会给（`cloneAudioModification` 显式给出父 modification），即便宿主
+/// 不用它，`end_editing` 的 region 结构 diff 也能给出父（含两个新 item GUID）——
+/// 两条路径都把父的这份参数**整份复制**到两个新键上，此后两半各自独立演化。
+///
+/// 【为什么曲线以源域存储】两个半段的源窗是父段源窗的两个子区间，投影时各取所需；
+/// 移动 / 裁剪 / 拉伸同理。切分或重采样反而会引入误差。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct AuthorityParameters {
+    /// 曲线以**源域**存储；`basis` 是该权威被捕获时的源窗。
+    curves: BTreeMap<String, SourceCurve>,
+    /// 逐轨模板（曲线已清空），与 [`RegionParameters::template`] 同形。
+    template: TrackParamsState,
+    /// 用户是否手动改过音高（对应内核 `pitch_edit_user_modified`）。
+    #[serde(default)]
+    pub(crate) pitch_user_modified: bool,
+    /// 参数随宿主编辑如何移动（见 [`ParamAnchor`]）。
+    #[serde(default)]
+    pub(crate) anchor: ParamAnchor,
+}
+
+impl AuthorityParameters {
+    /// 从一条已解析的 per-clip 记录建立权威条目（迁移与播种共用）。
+    fn from_record(record: &RegionParameters, anchor: ParamAnchor) -> Self {
+        Self {
+            curves: record.curves.clone(),
+            template: record.template.clone(),
+            pitch_user_modified: false,
+            anchor,
+        }
+    }
+    /// 曲线是否为空（空条目等价于"这个身份还没有参数"）。
+    fn has_curves(&self) -> bool {
+        !self.curves.is_empty()
+    }
+}
 /// 项目绝对时间的空白编辑；只保存有效片段，clip源曲线不会被旧位置的整轨数组冒充。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GapSpan {
@@ -139,7 +213,21 @@ pub(crate) struct GapParameters {
 }
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub(crate) struct ParameterAtlas {
+    /// **每帧派生的 per-clip 投影缓存**，键是 clip id（`ara-region-{key}`）。
+    ///
+    /// 【为什么它不是权威】region key 会被 `allocate_region` 复用（`ara/model.rs`），
+    /// 所以 clip id 不是身份。权威是 [`Self::authorities`]；本表每帧由它派生。
+    /// 它仍然被序列化，但只为了**读旧存档**（那时权威表还是空的，需要迁移）；
+    /// `EditState::encode` 在写出前清空它，因此新存档里它是空的。
     pub regions: BTreeMap<String, RegionParameters>,
+    /// **权威**：稳定宿主身份（见 [`authority_key`]）→ 参数。
+    ///
+    /// 【为什么它取代了"几何指纹认领"】旧路径每帧用 `ara_region_signature` 去猜曲线归属，
+    /// 而那个签名含**播放几何** —— 移动 / 裁剪 / 分割 / 拉伸四种编辑每一种都会让它变化，
+    /// 于是认领必然失败、曲线被丢弃（用户看到的"参数被重置"）。本表按与几何无关的稳定
+    /// 身份索引，四种编辑全部命中。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authorities: BTreeMap<String, AuthorityParameters>,
     /// 仅由原生SplitMediaItem回执登记，不允许GUI按源路径伪造分割继承关系。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     split_parents: BTreeMap<String, String>,
@@ -151,22 +239,37 @@ pub(crate) struct ParameterAtlas {
     pub(crate) gaps: BTreeMap<String, GapParameters>,
     /// **ARA-only 宿主的谱系**：右半段签名 → 父段签名。
     ///
-    /// 【为什么需要平行的一套】上面的 `split_parents` / `copy_seeds` 都以宿主 item GUID
-    /// 为键，而 item GUID 只在有**原生扩展**时才拿得到（`region_items` 由
-    /// `refresh_host_geometry` 填，ARA-only 宿主上恒空）。于是 Cubase / Nuendo /
-    /// Studio One 上每条分割都走不了显式谱系，只能落到 `find` 的几何包含兜底 ——
-    /// 两个半段共享同一个 (source, modification) 且窗口相邻，兜底层把它们都判成
-    /// 候选，报 `Conflict: ambiguous source parameter ancestry`。
-    ///
-    /// 这一套改用**region 签名**作键（见 `ara_region_signature`）：它只用 ARA 自己给的量
-    /// （source persistentID + modification persistentID + 播放几何），不依赖任何原生扩展，
-    /// 因此在 ARA-only 宿主上同样稳定。
+    /// 【为什么保留】分割谱系现在由 modification 播种承载（见
+    /// [`ModificationParameters`]），本表只剩读旧存档与原生 GUID 版回退两条用途。
+    /// 新写入一律走 modification 播种。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ara_split_parents: BTreeMap<String, String>,
     /// ARA-only 宿主的复制谱系：新片段签名 → 种子的完整参数记录。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ara_copy_seeds: BTreeMap<String, RegionParameters>,
 }
+
+/// 一条 clip 的参数权威：新路径查权威表，旧存档退回 per-clip 记录。
+enum Authority<'a> {
+    Current(&'a AuthorityParameters),
+    Legacy(&'a RegionParameters),
+}
+
+impl Authority<'_> {
+    fn template(&self) -> &TrackParamsState {
+        match self {
+            Self::Current(params) => &params.template,
+            Self::Legacy(record) => &record.template,
+        }
+    }
+    fn curves(&self) -> &BTreeMap<String, SourceCurve> {
+        match self {
+            Self::Current(params) => &params.curves,
+            Self::Legacy(record) => &record.curves,
+        }
+    }
+}
+
 impl ParameterAtlas {
     /// 一条 region 的**跨会话稳定签名**。
     ///
@@ -255,6 +358,88 @@ impl ParameterAtlas {
         self.ara_copy_seeds.get(signature)
     }
 
+    /// 把一个权威条目的参数**整份复制**给另一个（宿主 clone / 结构 diff 播种）。
+    ///
+    /// 【为什么这是分割的正确形状】分割之所以需要谱系，只是因为"新身份从哪来"没有答案。
+    /// ARA 的 `cloneAudioModification` 直接给出父；宿主不用它时，`end_editing` 的 region
+    /// 结构 diff 也能给出父（且给出两个新 item GUID）。两条路径都落到这里。
+    ///
+    /// 【为什么整份复制而不是切子段】曲线以**源域**存储，两个半段的源窗是父段源窗的两个
+    /// 子区间，投影时各取所需。切分反而引入一次多余的重采样。
+    ///
+    /// 返回是否真的播了种。父没有参数、子已经存在（含宿主直接复用父身份的别名情形）、
+    /// 或键非法时都返回 `false` 且不改动任何状态 —— 保持"从没编辑过"的语义。
+    pub(crate) fn seed_authority(&mut self, parent: &str, child: &str) -> bool {
+        if parent.is_empty() || child.is_empty() || parent == child {
+            return false;
+        }
+        if self.authorities.contains_key(child) || self.authorities.len() >= 16384 {
+            return false;
+        }
+        let Some(params) = self.authorities.get(parent).cloned() else {
+            return false;
+        };
+        // 父没有曲线时不播：一条空权威与"从没编辑过"在投影上等价，播过去只会撑大存档。
+        if !params.has_curves() {
+            return false;
+        }
+        self.authorities.insert(child.to_owned(), params);
+        true
+    }
+
+    /// 写入一个权威条目的参数（`capture` 的权威侧写入）。
+    pub(crate) fn set_authority(&mut self, key: &str, params: AuthorityParameters) {
+        self.authorities.insert(key.to_owned(), params);
+    }
+
+    /// 测试用：给一个权威键种一条源域音高曲线。
+    ///
+    /// 【为什么需要它】模型层的分割回归必须让"父段真的有参数"，而构造 `SourceCurve`
+    /// 需要访问本模块的私有字段。把这件事收在一个测试助手里，而不是放宽生产可见性。
+    #[cfg(test)]
+    pub(crate) fn seed_test_pitch_curve(&mut self, key: &str, frame_ms: f64, values: Vec<f32>) {
+        // 曲线以源域 [0, N·frame_ms) 为 basis：N 个采样点，每格 frame_ms。
+        let span = values.len() as f64 * frame_ms / 1000.;
+        let basis = RegionGeometry {
+            project_start: 0.,
+            project_duration: span,
+            source_start: 0.,
+            source_duration: span,
+            reversed: false,
+        };
+        let mut curves = BTreeMap::new();
+        curves.insert(
+            "pitch_edit".to_owned(),
+            SourceCurve {
+                basis,
+                first_frame: 0,
+                frame_ms,
+                values: Arc::new(values),
+                reservation: None,
+            },
+        );
+        self.authorities.insert(
+            key.to_owned(),
+            AuthorityParameters {
+                curves,
+                template: TrackParamsState {
+                    frame_period_ms: frame_ms,
+                    ..Default::default()
+                },
+                pitch_user_modified: true,
+                anchor: ParamAnchor::Source,
+            },
+        );
+    }
+
+    /// 这条 clip 的稳定身份是否已有权威参数（测试用）。
+    #[cfg(test)]
+    pub(crate) fn has_authority_parameters(&self, item: Option<&str>, modification: &str) -> bool {
+        authority_key(item, modification)
+            .and_then(|key| self.authorities.get(&key))
+            .is_some_and(AuthorityParameters::has_curves)
+    }
+
     /// 剪贴板反序列化的seed必须复验并登记内存额度，不能让外部数据绕过source curve预算。
     pub(crate) fn reserve_copy_seed(seed: RegionParameters) -> Result<RegionParameters, String> {
         let mut atlas = Self::default();
@@ -287,6 +472,13 @@ impl ParameterAtlas {
             if let Err(error) = self.validate() {
                 self.copy_seeds.remove(item);
                 return Err(error);
+            }
+            // 权威侧：复制回执直接给出新 item GUID ⇒ 播种 item 级权威。
+            if let Some(seed) = self.copy_seeds.get(item) {
+                let params = AuthorityParameters::from_record(seed, ParamAnchor::Source);
+                if let Some(key) = authority_key(Some(item), "") {
+                    self.set_authority(&key, params);
+                }
             }
         }
         Ok(())
@@ -345,6 +537,12 @@ impl ParameterAtlas {
             return Err("split lineage budget exceeded".into());
         }
         if let Some(mut seed) = seed {
+            // 权威侧：分割回执给出右半段的新 item GUID（左半段沿用原 item 的 GUID，
+            // 因此它自己的条目无需播种）⇒ 把父段参数整份播给右半段。
+            let params = AuthorityParameters::from_record(&seed, ParamAnchor::Source);
+            if let Some(key) = authority_key(Some(right), "") {
+                self.set_authority(&key, params);
+            }
             seed.live = false;
             self.regions.insert(format!("split-basis:{right}"), seed);
         }
@@ -353,7 +551,10 @@ impl ParameterAtlas {
         Ok(())
     }
     pub fn is_empty(&self) -> bool {
-        self.regions.is_empty() && self.copy_seeds.is_empty() && self.gaps.is_empty()
+        self.authorities.is_empty()
+            && self.regions.is_empty()
+            && self.copy_seeds.is_empty()
+            && self.gaps.is_empty()
     }
     /// 测试用：右半段登记的父 item（宿主分割谱系）。
     #[cfg(test)]
@@ -371,10 +572,15 @@ impl ParameterAtlas {
     pub fn accounted_curve_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let source = self
-            .regions
+            .authorities
             .values()
-            .chain(self.copy_seeds.values())
-            .flat_map(|region| region.curves.values())
+            .flat_map(|params| params.curves.values())
+            .chain(
+                self.regions
+                    .values()
+                    .chain(self.copy_seeds.values())
+                    .flat_map(|region| region.curves.values()),
+            )
             .filter_map(|curve| curve.reservation.as_ref());
         let gaps = self
             .gaps
@@ -390,6 +596,11 @@ impl ParameterAtlas {
     }
     /// 冷绑定布局完全相同时保留GUI原整轨数组（含无音频处编辑），音频仍用区域源basis。
     pub fn same_layout(&self, other: &Self) -> bool {
+        // 权威表按 modification persistentID 索引：键集相同即"没有任何 modification
+        // 身份发生变化"，无需再看几何（曲线是源域的，几何变化由投影吸收）。
+        if self.authorities.keys().eq(other.authorities.keys()) {
+            return true;
+        }
         self.regions.len() == other.regions.len()
             && self.regions.values().all(|old| {
                 other.regions.values().any(|new| {
@@ -404,6 +615,17 @@ impl ParameterAtlas {
     /// 有界state解码后为源曲线重新登记共享512MiB预算；clone共享Arc收费，不按renderer重复收费。
     pub fn reserve_restored(mut self) -> Result<Self, String> {
         self.validate()?;
+        for params in self.authorities.values_mut() {
+            for curve in params.curves.values_mut() {
+                if curve.reservation.is_none() {
+                    curve.reservation = Some(Arc::new(
+                        crate::render::budget::global_budget()
+                            .reserve(curve.values.len() * 4)
+                            .ok_or("source parameter memory budget exceeded")?,
+                    ));
+                }
+            }
+        }
         for record in self
             .regions
             .values_mut()
@@ -435,134 +657,42 @@ impl ParameterAtlas {
         Ok(self)
     }
     /// 只换活图投影与真实key，源basis保持；拆分同modification的新region可继承唯一父范围。
+    ///
+    /// 【为什么从"认领"改成"派生"】此前每帧用几何指纹去 `find` 认领曲线，而几何指纹
+    /// 在移动 / 裁剪 / 分割 / 拉伸四种编辑下**每一种都会变化** ⇒ 认领必然失败 ⇒ 曲线
+    /// 被丢弃（用户看到的"参数被重置"）。现在权威是 modification persistentID，
+    /// 与几何无关：本函数只做一次查表 + 播种迁移，然后重新派生投影缓存。
     pub fn follow_geometry(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
         let mut followed = self.clone();
-        for record in followed.regions.values_mut() {
-            record.live = false;
-        }
-        for clip in &timeline.clips {
-            // 【为什么身份/根缺席也只跳过】与下面几何失败同一条纪律：本函数在**整份**
-            // 接受路径上跑（`capture_render_input`、工作区接受都经过它）。此前这两处
-            // `ok_or(...)?` 排在几何 `continue` **之前**，于是"身份表这一轮还没跟上"
-            // （region 已建、派生表未同步的窗口）会让整份投影失败 —— 而那条降级通道
-            // 明明就在下面几行。挪到同一口径：这一条片段跳过，其余照常。
-            let Some(identity) = identities.get(&clip.id) else {
-                continue;
-            };
-            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
-                continue;
-            };
-            // 【为什么几何失败只跳过而不是报错】本函数在**整份**接受路径上跑
-            // （`capture_render_input`、工作区接受都经过它）。一个片段若在这里 `Err`，
-            // 整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句 `any(reversed)` 是同一个
-            // "把局部状态升级成全局故障"的错。几何不可解（退化窗口等）时如实跳过它。
-            let Ok(geometry) = geometry(clip) else {
-                continue;
-            };
-            if let Some(previous) = self.find(identity, &root, &geometry)? {
-                let mut record = previous.clone();
-                record.identity = identity.clone();
-                record.root = root;
-                record.current = geometry;
-                record.live = true;
-                followed.regions.insert(clip.id.clone(), record);
-            }
-        }
-        // 两段已经绑定后不再保留临时父副本，避免反复分割累计收费/序列化体积。
+        // 旧存档只有 per-clip 记录：按旧规则认领一次并折算进权威（一次性）。
+        followed.migrate_legacy_records(timeline, identities);
+        // 本帧投影完全由权威派生。clip id 的不稳定在这里不再有影响。
+        followed.regions = followed.derive_regions(timeline, identities)?;
+        // 谱系表的有界回收：种子一旦被活记录认领就不再需要。
+        //
+        // 【为什么现在只需这一条】`regions` 已经是**每帧重建**的派生缓存（上面那行），
+        // 因此 `split-basis:*` / `ara-split-basis:*` 副本与历史死记录都随旧表一起消失 ——
+        // 此前那段"并集覆盖回收"（用来清理死祖先）不再需要。留下的只是两张按宿主
+        // 回执索引的谱系表，它们仍会被 `find` 的迁移路径读取，所以按活记录裁剪。
         let bound = followed
             .regions
             .values()
-            .filter(|record| record.live)
             .filter_map(|record| record.identity.item.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        followed.regions.retain(|id, _| {
-            // 【为什么两个前缀都要认】`split-basis:` 是 item 版（`register_split`），
-            // `ara-split-basis:` 是 ARA 签名版（`register_ara_split`）。此前这里只
-            // `strip_prefix("split-basis:")`，而 `"ara-split-basis:x"` 不以它开头 ⇒
-            // 返回 `None` ⇒ `is_none_or` 为真 ⇒ **ARA 版副本永不回收**：每次分割都留下
-            // 一条带完整曲线的记录，长会话里无界增长，`validate()` 到 16384 条后
-            // 整份图集被拒。
-            id.strip_prefix("split-basis:")
-                .or_else(|| id.strip_prefix("ara-split-basis:"))
-                .is_none_or(|right| !bound.contains(right))
-        });
         followed
             .split_parents
             .retain(|right, _| !bound.contains(right));
         followed.copy_seeds.retain(|item, _| !bound.contains(item));
-        // 【为什么回收"被活记录覆盖"的历史祖先】`follow_geometry` 只把历史记录置
-        // `live = false`、从不删除，于是它们随**分割次数**无界累积（每次分割都留下
-        // 分割前的父段）。而几何兜底（`find`）会把这些死记录一并当作候选 ——
-        // 累积越多，"多候选 ⇒ 猜不出"越常见，`regions` 也会在 16384 条时被
-        // `validate()` 整份拒绝。
-        //
-        // 【判据为什么是"被活记录的**并集**覆盖"】一次分割的父段窗口恰好等于左右两半
-        // 的并集：父段 [0,1) 被 left [0,0.5) 与 right [0.5,1) 合起来盖满，但**不被其中
-        // 任何一条单独**包含。所以判据必须是并集，逐条包含判定永远回收不掉分割祖先
-        // （那是本次实现过程中实测到的：逐条判定对分割场景一次都不成立）。
-        //
-        // 【为什么删掉是安全的】父段窗口若被同源同修改的活记录并集完全盖住，它对兜底层
-        // 就不提供任何信息：任何落在它内部的查询窗口必然也落在活记录里。删掉它不改变
-        // 任何解析结果，只让候选池变小。
-        //
-        // 【为什么不动"未被覆盖"的死记录】那可能是用户删掉的片段，撤销/重做会把它
-        // 带回来；它仍是重做后那条片段的祖先。留着是对的（代价是有限的）。
-        let mut coverage: BTreeMap<(String, String), Vec<(f64, f64)>> = BTreeMap::new();
-        for record in followed.regions.values().filter(|record| record.live) {
-            coverage
-                .entry((
-                    record.identity.source.clone(),
-                    record.identity.modification.clone(),
-                ))
-                .or_default()
-                .push((
-                    record.current.source_start,
-                    record.current.source_start + record.current.source_duration,
-                ));
-        }
-        for intervals in coverage.values_mut() {
-            intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut merged: Vec<(f64, f64)> = Vec::with_capacity(intervals.len());
-            for (start, end) in intervals.drain(..) {
-                match merged.last_mut() {
-                    // 相邻/相接也合并：分割产生的是**紧接**的两段。
-                    Some(last) if start <= last.1 + 1e-6 => last.1 = last.1.max(end),
-                    _ => merged.push((start, end)),
-                }
-            }
-            *intervals = merged;
-        }
-        followed.regions.retain(|id, record| {
-            if record.live || id.starts_with("split-basis:") || id.starts_with("ara-split-basis:") {
-                return true;
-            }
-            let end = record.current.source_start + record.current.source_duration;
-            let covered = coverage
-                .get(&(
-                    record.identity.source.clone(),
-                    record.identity.modification.clone(),
-                ))
-                .is_some_and(|intervals| {
-                    intervals.iter().any(|(start, stop)| {
-                        record.current.source_start >= *start - 1e-6 && end <= *stop + 1e-6
-                    })
-                });
-            !covered
-        });
-        // 【为什么也要裁剪签名谱系】`ara_split_parents` / `ara_copy_seeds` 以**签名**为键，
-        // 而签名含播放几何 —— 一条 region 被移动/裁剪后它的签名就变了，旧条目再也不会
-        // 被查到，却一直留着（每次分割/复制加一条，无界）。只保留"右半段签名仍对应某条
-        // 记录"的条目：那正是 `find` 唯一会去查的那些。
-        let live_signatures: std::collections::BTreeSet<String> = followed
+        let live_signatures = followed
             .regions
             .values()
             .map(|record| record.identity.signature.clone())
             .filter(|signature| !signature.is_empty())
-            .collect();
+            .collect::<std::collections::BTreeSet<_>>();
         followed
             .ara_split_parents
             .retain(|right, _| live_signatures.contains(right));
@@ -572,58 +702,140 @@ impl ParameterAtlas {
         followed.validate()?;
         Ok(followed)
     }
+
+    /// 把旧存档里的 per-clip 记录折算进权威表（幂等）。
+    ///
+    /// 【为什么需要它】新存档不再写 `regions`（见 [`ParameterAtlas::regions`]），
+    /// 所以"权威表为空而 per-clip 记录非空"只可能出现在**读旧存档**时。此处用旧规则
+    /// （源 + modification + 几何包含）认领一次，把结果写进权威表；此后所有帧
+    /// （以及后续的宿主分割）都走权威快路径。
+    fn migrate_legacy_records(
+        &mut self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+    ) {
+        if self.regions.is_empty() {
+            return;
+        }
+        let mut migrated = 0_usize;
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) else {
+                continue;
+            };
+            if self.authorities.contains_key(&key) {
+                continue;
+            }
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            // 先克隆再插入：`find` 借用 `self.regions`，不能与 `self.authorities` 的可变借用共存。
+            let seed = match self.find(identity, &root, &geometry) {
+                Ok(Some(record)) => record.clone(),
+                Ok(None) => continue,
+                Err(_) => continue,
+            };
+            self.authorities.insert(
+                key,
+                AuthorityParameters::from_record(&seed, ParamAnchor::Source),
+            );
+            migrated += 1;
+        }
+        if migrated > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.atlas.migrated",
+                format_args!(
+                    "[ara] atlas migrated {migrated} parameter set(s) from legacy per-clip records; \
+                     new archives store them by stable host identity"
+                ),
+            );
+        }
+    }
+
+    /// 从权威表派生本帧的 per-clip 投影缓存（纯函数）。
+    fn derive_regions(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+    ) -> Result<BTreeMap<String, RegionParameters>, String> {
+        let mut derived = BTreeMap::new();
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            let Some(authority) = self.authority(identity, &root, &geometry)? else {
+                continue;
+            };
+            derived.insert(
+                clip.id.clone(),
+                RegionParameters {
+                    identity: identity.clone(),
+                    root,
+                    current: geometry,
+                    live: true,
+                    template: authority.template().clone(),
+                    curves: authority.curves().clone(),
+                },
+            );
+        }
+        Ok(derived)
+    }
+
+    /// 一条 clip 的参数权威。
+    ///
+    /// 【查表顺序】先按稳定宿主身份（[`authority_key`]）查权威表；缺席时退回 per-clip
+    /// 记录（只可能发生在旧存档尚未迁移的窗口内）。两条路径都是**确定性查表**，
+    /// 不做任何几何猜测。
+    fn authority<'a>(
+        &'a self,
+        identity: &RegionIdentity,
+        root: &str,
+        geometry: &RegionGeometry,
+    ) -> Result<Option<Authority<'a>>, String> {
+        if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
+            if let Some(params) = self.authorities.get(&key) {
+                return Ok(Some(Authority::Current(params)));
+            }
+        }
+        // item 级缺席时按 modification 级兜底：宿主 `cloneAudioModification` 只能给出
+        // modification，它播的就是这一级。原生宿主上 item 级一旦被捕获就会抢先命中，
+        // 因此这条兜底只在"克隆刚发生、新 item 还没被编辑过"的窗口里生效。
+        if identity.item.is_some() {
+            if let Some(params) = self
+                .authorities
+                .get(&format!("mod:{}", identity.modification))
+            {
+                return Ok(Some(Authority::Current(params)));
+            }
+        }
+        Ok(self.find(identity, root, geometry)?.map(Authority::Legacy))
+    }
     /// 冷恢复只在本组件真实范围内绑定；重复持久身份且源窗口相同仍拒绝，不能按旧key猜。
+    ///
+    /// 【为什么不再需要几何绑定】权威是 modification persistentID，而它是**跨会话稳定**
+    /// 的（ARA 明确保证，`ARAInterface.h:903` / `:953-955`）。因此冷恢复只需要把旧存档
+    /// 的 per-clip 记录折算进权威表，再按当前活图派生投影缓存 —— 没有"这条记录对应哪条
+    /// clip"这个问题，也就没有"唯一候选 or 失败"这条脆弱判据。
     pub fn rebind(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
-        let mut bound = Self::default();
-        bound.copy_seeds = self.copy_seeds.clone();
-        bound.gaps = self.gaps.clone();
-        for record in self.regions.values().filter(|record| record.live) {
-            let candidates = timeline
-                .clips
-                .iter()
-                // 倒放与正放都参与绑定：几何的 `reversed` 让候选按真实消费窗口比较，
-                // 方向不同即窗口不同，自然区分。
-                .filter(|clip| {
-                    identities.get(&clip.id).is_some_and(|id| {
-                        id.source == record.identity.source
-                            && id.modification == record.identity.modification
-                            && (record.identity.item.is_none() || id.item == record.identity.item)
-                    }) && timeline.resolve_root_track_id(&clip.track_id).as_deref()
-                        == Some(record.root.as_str())
-                })
-                .collect::<Vec<_>>();
-            let matches = if candidates.len() == 1 {
-                candidates
-            } else {
-                candidates
-                    .into_iter()
-                    .filter(|clip| {
-                        geometry(clip).is_ok_and(|geometry| {
-                            geometry.reversed == record.current.reversed
-                                && near(geometry.source_start, record.current.source_start)
-                                && near(geometry.source_duration, record.current.source_duration)
-                        })
-                    })
-                    .collect()
-            };
-            let [clip] = matches.as_slice() else {
-                return Err(
-                    "ARA source parameter identity missing or ambiguous in assigned scope".into(),
-                );
-            };
-            if bound.regions.contains_key(&clip.id) {
-                return Err("ARA source parameter records collapse into one region".into());
-            }
-            let mut record = record.clone();
-            record.identity = identities[&clip.id].clone();
-            record.current = geometry(clip)?;
-            record.live = true;
-            bound.regions.insert(clip.id.clone(), record);
-        }
+        let mut bound = self.clone();
+        bound.migrate_legacy_records(timeline, identities);
+        bound.regions = bound.derive_regions(timeline, identities)?;
         bound.validate()?;
         Ok(bound)
     }
@@ -739,12 +951,15 @@ impl ParameterAtlas {
             let Some(identity) = identities.get(&clip.id) else {
                 continue;
             };
-            if identity.key == 0
-                || identity.source.is_empty()
+            // 【为什么不再要求 `key != 0`】权威是 modification persistentID，而 `key` 是
+            // region 的 model-ref 地址 —— 它 `#[serde(skip)]`、且 `allocate_region` 会复用
+            // 已销毁槽位。此前这条守卫让**任何一次存盘/重载之后一条曲线都捕获不到**。
+            // 现在 `key` 只是诊断字段，身份自相矛盾只看源与 modification。
+            if identity.source.is_empty()
                 || identity.modification.is_empty()
                 || clip.source_path.as_deref() != Some(identity.source.as_str())
             {
-                // 身份自相矛盾（key 为 0 / 源为空 / 与 clip 的源不符）时同样只跳过这一条：
+                // 身份自相矛盾（源为空 / 与 clip 的源不符）时同样只跳过这一条：
                 // 拿一个不可信的身份去写曲线，会把参数挂到错误的片段上 —— 那比不写更糟。
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,
@@ -769,13 +984,15 @@ impl ParameterAtlas {
                 continue;
             };
             let (begin, end) = frame_range(&geometry, params.frame_period_ms)?;
-            let previous = self.find(identity, &root, &geometry)?;
+            // 旧曲线取**权威侧**（modification），旧存档未迁移时退回 per-clip 记录。
+            let authority = self.authority(identity, &root, &geometry)?;
+            let previous = authority.as_ref().map(Authority::curves);
             let mut curves = BTreeMap::new();
             for (key, values) in parameter_curves(params) {
                 if values.is_empty() {
                     continue;
                 }
-                let old = previous.and_then(|previous| previous.curves.get(&key));
+                let old = previous.and_then(|previous| previous.get(&key));
                 let view = previous_view
                     .and_then(|view| view.get(&root))
                     .filter(|view| view.frame_period_ms == params.frame_period_ms);
@@ -861,6 +1078,33 @@ impl ParameterAtlas {
             }
             let mut template = params.clone();
             clear_curves(&mut template);
+            // 权威侧：把这份参数写到稳定宿主身份上（这才是被持久化、且与几何无关的一份）。
+            //
+            // 【为什么锚点沿用已有值】用户在编辑途中切换「锁定参数线」时，既有曲线不应被
+            // 重新解释。第一次播种时定下，之后沿用。
+            if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
+                let anchor = candidate
+                    .authorities
+                    .get(&key)
+                    .map(|existing| existing.anchor)
+                    .unwrap_or_default();
+                if curves.is_empty() {
+                    // 没有任何曲线 ⇒ 不留空条目。空条目与"从没编辑过"在投影上完全等价，
+                    // 却会让存档带上一个无意义的权威段（并抬高状态代际）。
+                    candidate.authorities.remove(&key);
+                } else {
+                    candidate.set_authority(
+                        &key,
+                        AuthorityParameters {
+                            curves: curves.clone(),
+                            template: template.clone(),
+                            pitch_user_modified: params.pitch_edit_user_modified,
+                            anchor,
+                        },
+                    );
+                }
+            }
+            // 派生侧：本帧的 per-clip 投影缓存（供 `project_*` 与渲染输入消费）。
             candidate.regions.insert(
                 clip.id.clone(),
                 RegionParameters {
@@ -919,15 +1163,16 @@ impl ParameterAtlas {
             let Ok(mut geometry) = geometry(clip) else {
                 continue;
             };
-            let Some(record) = self.find(identity, &root, &geometry)? else {
+            // 权威查表（modification persistentID），不做任何几何猜测。
+            let Some(authority) = self.authority(identity, &root, &geometry)? else {
                 continue;
             };
             if local {
                 geometry.project_start = 0.;
             }
-            let mut params = record.template.clone();
+            let mut params = authority.template().clone();
             let frame_ms = params.frame_period_ms;
-            for (key, curve) in &record.curves {
+            for (key, curve) in authority.curves() {
                 set_curve(&mut params, key, curve.project(&geometry, key, frame_ms)?);
             }
             params.pitch_orig_key = None;
@@ -1131,6 +1376,17 @@ impl ParameterAtlas {
         if self.regions.len() > 16384 {
             return Err("parameter atlas region budget exceeded".into());
         }
+        if self.authorities.len() > 16384 {
+            return Err("parameter atlas authority budget exceeded".into());
+        }
+        for params in self.authorities.values() {
+            if !params.template.frame_period_ms.is_finite()
+                || params.template.frame_period_ms < 0.1
+                || params.template.frame_period_ms > 1000.
+            {
+                return Err("invalid authority parameter template".into());
+            }
+        }
         if self.copy_seeds.len() > 16384
             || self
                 .copy_seeds
@@ -1188,6 +1444,13 @@ impl ParameterAtlas {
                 }
             }
         }
+        // 源域曲线：权威表与派生表**共享 Arc**（`ModificationParameters::from_record`
+        // 与 `derive_regions` 都只克隆 `Arc`，不复制采样），因此按指针去重 —— 否则同一份
+        // 采样会被计两次，64MiB 上限会在正常工程上误报。
+        let mut seen = std::collections::BTreeSet::new();
+        for params in self.authorities.values() {
+            Self::validate_source_curves(&params.curves, &mut bytes, &mut seen)?;
+        }
         for record in self.regions.values().chain(self.copy_seeds.values()) {
             if record.identity.source.is_empty()
                 || record.identity.modification.is_empty()
@@ -1204,25 +1467,37 @@ impl ParameterAtlas {
                 return Err("invalid source parameter record".into());
             }
             record.current.map()?;
-            for curve in record.curves.values() {
-                curve.basis.map()?;
-                frame_range(&curve.basis, curve.frame_ms)?;
-                if curve.first_frame >= 1_000_000
-                    || curve
-                        .first_frame
-                        .checked_add(curve.values.len())
-                        .is_none_or(|end| end > 1_000_000)
-                    || curve
-                        .values
-                        .iter()
-                        .any(|v| !v.is_finite() || v.abs() > 10000.)
-                {
-                    return Err("invalid source parameter samples".into());
-                }
-                bytes = bytes
+            Self::validate_source_curves(&record.curves, &mut bytes, &mut seen)?;
+        }
+        Ok(())
+    }
+
+    /// 复验一组源域曲线，并按 `Arc` 指针去重累计字节。
+    fn validate_source_curves(
+        curves: &BTreeMap<String, SourceCurve>,
+        bytes: &mut usize,
+        seen: &mut std::collections::BTreeSet<usize>,
+    ) -> Result<(), String> {
+        for curve in curves.values() {
+            curve.basis.map()?;
+            frame_range(&curve.basis, curve.frame_ms)?;
+            if curve.first_frame >= 1_000_000
+                || curve
+                    .first_frame
+                    .checked_add(curve.values.len())
+                    .is_none_or(|end| end > 1_000_000)
+                || curve
+                    .values
+                    .iter()
+                    .any(|v| !v.is_finite() || v.abs() > 10000.)
+            {
+                return Err("invalid source parameter samples".into());
+            }
+            if seen.insert(Arc::as_ptr(&curve.values) as usize) {
+                *bytes = bytes
                     .checked_add(curve.values.len() * 4)
                     .ok_or("parameter atlas byte overflow")?;
-                if bytes > 64 * 1024 * 1024 {
+                if *bytes > 64 * 1024 * 1024 {
                     return Err("parameter atlas exceeds 64MiB".into());
                 }
             }
@@ -1759,40 +2034,31 @@ mod tests {
         );
     }
 
-    /// 没有谱系、也没有 item GUID 时，几何兜底仍然工作（不回归成硬错误）。
+    /// 没有谱系、也没有 item GUID 时，权威查表仍然工作（不回归成硬错误）。
     #[test]
-    fn an_ara_only_region_without_lineage_still_falls_back_to_geometry() {
+    fn an_ara_only_region_without_lineage_still_resolves_through_the_authority_table() {
         let original = edited();
         let atlas = ParameterAtlas::default()
             .capture(&original, &identities())
             .unwrap();
         let timeline = host(1., 0.5, 0., 0.5);
-        let ids = BTreeMap::from([(
-            "clip".to_string(),
-            RegionIdentity {
-                key: 1,
-                item: None,
-                source: "source".into(),
-                modification: "mod".into(),
-                signature: ParameterAtlas::ara_region_signature("source", "mod", 0.0, 0.5),
-            },
-        )]);
-        // 一个被父窗口包含的片段：唯一候选 ⇒ 解析成功，不报错。
-        let followed = atlas.follow_geometry(&timeline, &ids).unwrap();
-        assert!(followed.regions.contains_key("clip"));
+        let projected = atlas
+            .follow_geometry(&timeline, &identities())
+            .unwrap()
+            .project_local(&timeline, &identities())
+            .expect("权威查表不得因缺少谱系而失败");
+        assert_eq!(projected["clip"].pitch_edit[0], 60.);
     }
 
-    /// **用户报障的回归测试：两次嵌套分割后，一条新片段被两条已死祖先同时包含。**
+    /// **连续拆分不累积记录；删光之后权威仍在（撤销能找回）。**
     ///
-    /// 【为什么必须单独钉住】单次分割的测试**全部通过**而用户仍然报错，因为触发形状
-    /// 是"两次以上嵌套分割"：`follow_geometry` 对历史父记录只置 `live = false`、
-    /// 从不删除，于是祖先会累积。一条源窗跨在两个历史祖先之间的新片段（复制/粘贴、
-    /// 撤销重做后宿主重建、或窗口恰好落在两者交集内）会让几何兜底同时命中 P 与 L，
-    /// 多候选 ⇒ 此前抛 `Conflict: ambiguous source parameter ancestry` ⇒ 整份编辑被拒。
-    ///
-    /// 现在必须：**不报错**，且该片段**不投影曲线**（宁可不画，不可画错）。
+    /// 【为什么这条测试取代了"两个死祖先"那条】旧设计把"曲线归属"存在 per-clip 记录
+    /// 里，于是被删掉的片段留下**死记录**，而几何兜底会把两条死记录同时判成候选 ⇒
+    /// `Conflict: ambiguous source parameter ancestry`。新设计里权威按稳定宿主身份索引，
+    /// 歧义不可能出现；但"删除后撤销要能找回曲线"这条**用户保证**必须继续成立，
+    /// 只是它现在由权威表承载。
     #[test]
-    fn a_region_spanning_two_dead_ancestors_is_not_an_error() {
+    fn nested_splits_do_not_accumulate_records_and_the_authority_survives_deletion() {
         let original = edited();
         let atlas = ParameterAtlas::default()
             .capture(&original, &identities())
@@ -1837,77 +2103,46 @@ mod tests {
             with_signature("right", 43, 1.5, 0.5),
         ]);
         let a2 = a1.follow_geometry(&second, &second_ids).unwrap();
-        // 两级祖先都被各自后代的并集盖满 ⇒ 全部回收，不再累积。
-        assert!(
-            !a2.regions.contains_key("clip") && !a2.regions.contains_key("left"),
-            "嵌套分割的祖先必须被回收，否则每次分割都在候选池里加一条死记录：{:?}",
-            a2.regions.keys().collect::<Vec<_>>()
+        // 派生缓存只包含**当前活着的**片段：祖先不会作为死记录累积在候选池里。
+        assert_eq!(
+            a2.regions.keys().cloned().collect::<Vec<_>>(),
+            vec!["quarter-a", "quarter-b", "right"],
+            "每次分割都在派生缓存里留下祖先，候选池就会随分割次数无界增长"
         );
-        assert!(a2.regions["quarter-a"].live);
-        assert!(a2.regions["quarter-b"].live);
-        assert!(a2.regions["right"].live);
+        // 权威只有一条（三段共享同一个 modification "mod"）—— 它按稳定身份索引，
+        // 不随片段数量增长。
+        assert_eq!(a2.authorities.len(), 1);
+        assert!(a2.has_authority_parameters(None, "mod"));
 
-        // 【歧义的可达形状】并集回收消掉了"分割累积"，但**未被覆盖**的死记录仍然
-        // 存在（用户删掉的片段、撤销/重做会带回来的片段）。两条这样的记录若窗口
-        // 重叠，几何兜底就会同时命中它们 —— 那正是用户报的
-        // `Conflict: ambiguous source parameter ancestry`。
-        //
-        // 摆出该形状：同源同修改的两条片段（同一窗口、不同工程位置），用户把它们
-        // **都删了**（时间线变空 ⇒ 两条记录都变非活，且无活记录可覆盖它们）。
-        let mut two: TimelineState = serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":2.0,"clips":[]
-        }))
-        .unwrap();
-        two.clips.push(host(1., 1., 0., 1.).clips.remove(0));
-        let mut second_copy = host(3., 1., 0., 1.).clips.remove(0);
-        second_copy.id = "clip2".into();
-        two.clips.push(second_copy);
-        let two_ids = BTreeMap::from([
-            with_signature("clip", 41, 1.0, 1.0),
-            with_signature("clip2", 42, 3.0, 1.0),
-        ]);
-        let atlas = ParameterAtlas::default()
-            .capture(&edited(), &identities())
-            .unwrap()
-            .follow_geometry(&two, &two_ids)
-            .unwrap();
-        assert!(atlas.regions["clip"].live && atlas.regions["clip2"].live);
-
-        // 全删：两条记录都变非活，没有任何活记录覆盖它们 ⇒ 都留着（撤销要能找回）。
+        // 全删：派生缓存清空，但**权威仍在** —— 撤销/重做把片段带回来时曲线照旧。
         let empty: TimelineState = serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":2.0,"clips":[]
         }))
         .unwrap();
-        let orphaned = atlas.follow_geometry(&empty, &BTreeMap::new()).unwrap();
-        assert!(!orphaned.regions["clip"].live && !orphaned.regions["clip2"].live);
-        assert_eq!(orphaned.regions.len(), 2, "未被覆盖的死记录必须保留");
+        let orphaned = a2.follow_geometry(&empty, &BTreeMap::new()).unwrap();
+        assert!(
+            orphaned.regions.is_empty(),
+            "没有活片段时派生缓存必须为空：{:?}",
+            orphaned.regions.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            orphaned.has_authority_parameters(None, "mod"),
+            "删光片段不得丢掉权威参数，否则撤销/重做会丢曲线"
+        );
 
-        // 新片段出现，窗口 [0.1,0.9) 同时落在上面两条死记录内 ⇒ 真歧义。
+        // 片段回来（同一 modification）⇒ 曲线立刻重新投影。
         let mut third: TimelineState = serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":4.0,"clips":[]
         }))
         .unwrap();
-        third.clips.push(host(1., 0.8, 0.1, 0.8).clips.remove(0));
-        let third_ids = BTreeMap::from([with_signature("clip", 43, 1.0, 0.8)]);
+        third.clips.push(host(1., 1., 0., 1.).clips.remove(0));
+        let third_ids = BTreeMap::from([with_signature("clip", 46, 1.0, 1.0)]);
         let resolved = orphaned
             .follow_geometry(&third, &third_ids)
-            .expect("猜不出祖先不得让整份编辑失败（用户报障的直接修复）");
-        // 新片段沿用了 id "clip"；关键是它**没有**被认领成 live（即没拿到任何一条
-        // 祖先的曲线），而不是"键不存在"。
-        assert!(
-            !resolved.regions["clip"].live,
-            "猜不出祖先的片段不得拿到曲线（两条死记录仍应保持非活）：{:?}",
-            resolved
-                .regions
-                .iter()
-                .map(|(k, r)| (k.as_str(), r.live))
-                .collect::<Vec<_>>()
-        );
-        assert!(!resolved.regions["clip2"].live);
-        // 投影与编辑接受都必须成功（此前它们都在这里抛 Conflict）。
-        resolved
-            .project_roots(&third, &third_ids)
-            .expect("歧义不得让整份投影失败");
+            .expect("权威查表不得让整份编辑失败");
+        assert!(resolved.regions["clip"].live);
+        let projected = resolved.project_roots(&third, &third_ids).unwrap();
+        assert_eq!(projected["a"].pitch_edit[4], 60., "撤销回来后曲线必须还在");
     }
 
     /// 连续拆分只沿最近活图的唯一父范围，保留历史父记录但不让它阻塞第二次拆分。
@@ -2263,6 +2498,166 @@ mod tests {
             &[62., 62.5, 63., 63.5, 64.]
         );
     }
+    /// **一次宿主分割：两个半段各自拿到父段曲线的对应子段。**
+    ///
+    /// 【为什么这是用户报障的直接回归测试】旧设计里 `ara_region_signature` 含播放几何，
+    /// 分割一发生签名就变、谱系蒸发，两个半段都认领不到父段 ⇒ 曲线被丢弃（"参数被重置"）。
+    /// 新设计按稳定身份查表，父段参数被整份播给两个新身份，投影各取所需。
+    #[test]
+    fn a_host_split_gives_each_half_the_parent_curve_for_its_own_source_window() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        // 宿主克隆 modification：父 "mod" → 左 "mod-l" / 右 "mod-r"（P1 clone 回执或
+        // P2 结构 diff 都落到这里）。
+        let mut split = atlas.clone();
+        assert!(split.seed_authority("mod:mod", "mod:mod-l"));
+        assert!(split.seed_authority("mod:mod", "mod:mod-r"));
+
+        let mut halves = host(1., 0.5, 0., 0.5);
+        halves.clips[0].id = "left".into();
+        let mut right = host(1.5, 0.5, 0.5, 0.5).clips.remove(0);
+        right.id = "right".into();
+        halves.clips.push(right);
+        halves.project_sec = 2.;
+        let half_ids = BTreeMap::from([
+            (
+                "left".into(),
+                RegionIdentity {
+                    key: 42,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod-l".into(),
+                    signature: String::new(),
+                },
+            ),
+            (
+                "right".into(),
+                RegionIdentity {
+                    key: 43,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod-r".into(),
+                    signature: String::new(),
+                },
+            ),
+        ]);
+        let projected = split
+            .follow_geometry(&halves, &half_ids)
+            .unwrap()
+            .project(&halves, &half_ids)
+            .unwrap();
+        // 父曲线在源域 [0,1) 上是 60,61,62,63,64（frame_ms=250 ⇒ 每 0.25s 一格）。
+        // 左半段消费源窗 [0,0.5) ⇒ 60,61,62；右半段消费 [0.5,1) ⇒ 从 62 起。
+        assert_eq!(&projected["left"].pitch_edit[4..7], &[60., 61., 62.]);
+        assert_eq!(projected["right"].pitch_edit[6], 62.);
+        assert_ne!(
+            projected["right"].pitch_edit[4], 60.,
+            "右半段不得整体平移左半段的曲线"
+        );
+    }
+
+    /// **裁剪与取消裁剪都不缩短曲线；取消裁剪不再把整条曲线重置。**
+    ///
+    /// 旧设计的几何兜底是单向"包含"判定：新窗口一旦**超出**旧窗口就返回 `None`
+    /// ⇒ 该片段**一条曲线都没有**（用户看到的"参数被重置"）。新设计的曲线以**源域**
+    /// 存在权威里，裁剪只改变投影窗口，权威里的源曲线不受影响 —— 因此取消裁剪能完整
+    /// 恢复。这条测试同时钉住"裁剪不截短"与"取消裁剪不重置"两件事。
+    #[test]
+    fn trimming_does_not_shorten_the_authority_curve_and_un_trimming_restores_it() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        // 裁剪到源窗 [0.5,1)：宿主几何 + 与之匹配的 GUI 投影一起给，避免把插值当新数据。
+        let mut cropped_host = host(1.5, 0.5, 0.5, 0.5);
+        cropped_host.params_by_root_track.insert(
+            "a".into(),
+            atlas
+                .project(&cropped_host, &ids)
+                .unwrap()
+                .remove("clip")
+                .unwrap(),
+        );
+        let cropped = atlas.capture(&cropped_host, &ids).unwrap();
+
+        // 裁剪态只投影消费窗口内的值。
+        let projected = cropped.project(&cropped_host, &ids).unwrap();
+        assert_eq!(&projected["clip"].pitch_edit[6..9], &[62., 63., 64.]);
+
+        // 用户把左边界拉回去：源窗 [0.5,1) → [0,1)。整条父曲线都回来。
+        let restored = cropped.project(&host(1., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(
+            &restored["clip"].pitch_edit[4..9],
+            &[60., 61., 62., 63., 64.],
+            "取消裁剪必须完整恢复曲线，而不是重置或延展旧末值"
+        );
+    }
+
+    /// **冷重载后 region key 为 0 不再致命。**
+    ///
+    /// `RegionIdentity::key` 是 `#[serde(skip)]` 的 model-ref 地址，重载后恒为 0。
+    /// 旧设计在 `capture` 里以 `key == 0 ⇒ continue` 把**所有**片段跳过，于是任何一次
+    /// 存盘/重载之后一条曲线都捕获不到。权威按稳定宿主身份索引后，key 只是诊断字段。
+    #[test]
+    fn a_cold_reload_restores_curves_without_a_live_region_key() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        // 新存档形状：派生缓存不入档，只有权威表。
+        let mut trimmed = atlas.clone();
+        trimmed.regions.clear();
+        let restored: ParameterAtlas =
+            serde_json::from_slice(&serde_json::to_vec(&trimmed).unwrap()).unwrap();
+        let mut cold_ids = identities();
+        cold_ids.get_mut("clip").unwrap().key = 0;
+        let projected = restored.project(&original, &cold_ids).unwrap();
+        assert_eq!(
+            &projected["clip"].pitch_edit[4..9],
+            &[60., 61., 62., 63., 64.],
+            "key 为 0 不得再让曲线缺席"
+        );
+    }
+
+    /// **旧存档的 per-clip 记录被折算进权威表。**
+    #[test]
+    fn legacy_per_clip_records_migrate_into_the_authority_table() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        assert!(!atlas.regions.is_empty());
+        // 旧存档形状：只有 per-clip 记录，权威表为空。
+        let mut legacy = atlas.clone();
+        legacy.authorities.clear();
+        let migrated = legacy.follow_geometry(&original, &ids).unwrap();
+        assert!(
+            migrated.has_authority_parameters(None, "mod"),
+            "旧存档必须被折算成权威条目"
+        );
+        let projected = migrated.project(&original, &ids).unwrap();
+        assert_eq!(
+            &projected["clip"].pitch_edit[4..9],
+            &[60., 61., 62., 63., 64.]
+        );
+    }
+
+    /// **播种是幂等的、且拒绝无效对。**
+    #[test]
+    fn seeding_a_cloned_identity_copies_the_parent_parameters_once() {
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &identities())
+            .unwrap();
+        let mut seeded = atlas.clone();
+        assert!(seeded.seed_authority("mod:mod", "mod:clone"));
+        assert!(seeded.has_authority_parameters(None, "clone"));
+        // 已经存在 ⇒ 不覆盖（P1 播过之后 P2 再来一次是常态）。
+        assert!(!seeded.seed_authority("mod:mod", "mod:clone"));
+        // 父不存在 / 同键（宿主复用父身份 = 别名）/ 空键 ⇒ 都不播种。
+        assert!(!seeded.seed_authority("mod:missing", "mod:x"));
+        assert!(!seeded.seed_authority("mod:mod", "mod:mod"));
+        assert!(!seeded.seed_authority("", "mod:y"));
+        assert!(!seeded.seed_authority("mod:mod", ""));
+    }
+
     #[test]
     fn repeated_geometry_roundtrips_do_not_recapture_and_blur_unchanged_source_curves() {
         let ids = identities();

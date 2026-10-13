@@ -200,6 +200,14 @@ impl RegionFrame {
             self.play_dur.to_bits(),
         )
     }
+
+    /// 这条 region 的参数权威键（item GUID 优先，否则 modification）。
+    fn authority_key(&self) -> Option<String> {
+        crate::editor::parameter_atlas::authority_key(
+            self.item.as_deref(),
+            &self.audio_modification,
+        )
+    }
 }
 
 impl Default for ModelHandle {
@@ -405,6 +413,30 @@ impl ModelHandle {
         left: &RegionFrame,
         right: &RegionFrame,
     ) {
+        // 【P2：结构 diff 给出的父】宿主不调用 `cloneAudioModification` 时（或调用顺序
+        // 不可预期时），分割只表现为"1 个 region 消失 + 2 个 region 出现"。这里用父
+        // region 的 modification 播种**两个半段各自**的 modification。
+        //
+        // 【为什么两个半段都要播】此前只有右半段有种子（`register_ara_split` 的
+        // `right_signature`），左半段靠"region key 槽位复用"的巧合继承 —— 而
+        // `allocate_region` 复用已销毁槽位，那是巧合而非保证。
+        //
+        // 【为什么这一层对两种宿主都跑】它只用 ARA 自己给的量（region 的
+        // `audio_modification` persistentID），不依赖 item GUID，也不依赖任何原生扩展。
+        // 有 GUID 的宿主走下面两条既有谱系，无 GUID 的宿主此前只能落几何兜底 ——
+        // 现在两条路都先把 modification 播好，兜底层因此不再被需要。
+        {
+            let mut edits = self.session.edits.lock_or_recover();
+            let parent_key = parent.authority_key();
+            for child in [left, right] {
+                let child_key = child.authority_key();
+                if let (Some(parent_key), Some(child_key)) = (parent_key.as_deref(), child_key) {
+                    if edits.atlas.seed_authority(parent_key, &child_key) {
+                        edits.revision = edits.revision.saturating_add(1);
+                    }
+                }
+            }
+        }
         // 【ARA-only 宿主的谱系】没有 item GUID 时（Cubase / Nuendo / Studio One 的常态）
         // 改按 region 签名登记。此前这里直接 return，于是那些宿主上每次分割都退到几何
         // 兜底，兄弟半段被当成合法祖先 —— 用户看到
@@ -1650,6 +1682,7 @@ impl AudioModifications for ModelHandle {
             .get(*source)
             .cloned()
             .unwrap_or_default();
+        let parent_persistent_id = cloned.persistent_id.clone();
         cloned.persistent_id = properties.persistent_id().to_string();
         cloned.audio_source_persistent_id = self
             .document
@@ -1657,8 +1690,37 @@ impl AudioModifications for ModelHandle {
             .get(*audio_source)
             .map(|s| s.persistent_id.clone())
             .unwrap_or_else(|| cloned.audio_source_persistent_id.clone());
+        let child_persistent_id = cloned.persistent_id.clone();
         let index = self.document.audio_modifications.len();
         self.document.audio_modifications.push(cloned);
+        // 【P1：宿主显式给出父】`cloneAudioModification` 是 ARA 对"创建独立变体"的
+        // 专用原语（`ARAInterface.h:2653-2656`），因此它**就是**复制/分割的回执 ——
+        // 与原生路径的 `SplitMediaItem` 回执同形，且不依赖任何原生扩展。把父的源域
+        // 参数整份播给子；此后两者各自独立演化（投影按各自的源窗取子段）。
+        //
+        // 【为什么键是 modification 级】克隆回调只给出 modification persistentID，
+        // 此时还不知道新 region 的 item GUID。因此播到 `mod:` 级；`authority` 的查表
+        // 会在 item 级缺席时回退到它，而原生宿主上 item 级一旦被捕获就抢先命中。
+        //
+        // 【为什么在这里加锁是安全的】本回调由宿主在 `begin_editing`…`end_editing`
+        // 之间调用，而 `remap_and_log` 持 `edits` 时只跑纯投影、不回调宿主 ——
+        // 不存在"持锁重入宿主"的环路。锁序纪律见 `render/document.rs` 头部注释。
+        if let (Some(parent_key), Some(child_key)) = (
+            crate::editor::parameter_atlas::authority_key(None, &parent_persistent_id),
+            crate::editor::parameter_atlas::authority_key(None, &child_persistent_id),
+        ) {
+            if self
+                .session
+                .edits
+                .lock_or_recover()
+                .atlas
+                .seed_authority(&parent_key, &child_key)
+            {
+                log::info!(
+                    "[ara] clone: parameters copied {parent_persistent_id} -> {child_persistent_id}"
+                );
+            }
+        }
         Ok(index)
     }
 
@@ -2364,6 +2426,107 @@ mod tests {
                 .iter()
                 .map(|clip| clip.id.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// **宿主分割后两个半段都保留父段参数**（用户报障的模型级回归）。
+    ///
+    /// 【为什么这是核心回归】旧设计按 `ara_region_signature`（含播放几何）认领曲线，
+    /// 分割一发生签名就变、谱系蒸发，两个半段都拿不到父段记录 —— 用户在 Cubase 里看到的
+    /// 就是"分割后参数被重置"。新设计把参数按稳定宿主身份持有：父段的源域曲线被整份播给
+    /// 两个半段（P1 `cloneAudioModification` 或 P2 结构 diff），投影各取所需。
+    #[test]
+    fn a_host_split_keeps_the_parent_parameters_on_both_halves() {
+        let (mut model, _parent_key) = model_with_one_region();
+        model.remap_and_log();
+        // 用户给父段画了一条音高曲线。
+        model
+            .session
+            .edits
+            .lock_or_recover()
+            .atlas
+            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
+
+        // 宿主克隆 modification：`cloneAudioModification` 是 ARA 对"创建独立变体"的
+        // 专用原语（`ARAInterface.h:2653-2656`），因此它**就是**复制/分割回执。
+        let cloned = AudioModificationProperties::new(None, "host-mod-A-split").unwrap();
+        let source = 0_usize;
+        let clone_index = AudioModifications::clone_audio_modification(
+            &mut model,
+            &CreateContext::for_test(ApiGeneration::V2Final, 0x55),
+            &0_usize,
+            &source,
+            cloned,
+        )
+        .expect("克隆必须成功");
+        assert!(
+            model
+                .session
+                .edits
+                .lock_or_recover()
+                .atlas
+                .has_authority_parameters(None, "host-mod-A-split"),
+            "cloneAudioModification 是 ARA 给出的复制回执：父段参数必须播给新 modification"
+        );
+
+        // 宿主销毁父段、建两个相邻半段，两个半段都引用**克隆出来的** modification。
+        PlaybackRegions::destroy_playback_region(&mut model, 0_usize);
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+        let sequence = 0_usize;
+        for (key, lo, hi) in [(0x11_u64, 0.0_f64, 0.25_f64), (0x22, 0.25, 0.5)] {
+            let properties = PlaybackRegionProperties::for_ara2(
+                0,
+                lo,
+                hi - lo,
+                lo,
+                hi - lo,
+                sequence_ref,
+                None,
+                None,
+            )
+            .unwrap();
+            let context = CreateContext::for_test(ApiGeneration::V2Final, key);
+            PlaybackRegions::create_playback_region(
+                &mut model,
+                &context,
+                &clone_index,
+                &sequence,
+                properties,
+            )
+            .expect("半段必须建得出来");
+        }
+        model.remap_and_log();
+
+        let timeline = model.timeline().unwrap().clone();
+        assert_eq!(timeline.clips.len(), 2, "两个半段都必须出现在时间线里");
+        let identities = model
+            .session
+            .parameter_identities_locked(&timeline)
+            .unwrap();
+        let atlas = model.session.edits.lock_or_recover().atlas.clone();
+        // 渲染路径用的就是 `project_local`：数组以片段自己的零点对齐。
+        let projected = atlas.project_local(&timeline, &identities).unwrap();
+        let mut heads = Vec::new();
+        for clip in &timeline.clips {
+            let params = projected
+                .get(&clip.id)
+                .unwrap_or_else(|| panic!("半段 {} 必须拿到参数", clip.id));
+            heads.push(params.pitch_edit[0]);
+        }
+        heads.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // 父曲线在源域是 60,62,64,66（每 250ms 一格）。左半段消费源窗 [0,0.25) ⇒ 60；
+        // 右半段消费 [0.25,0.5) ⇒ 62。两个半段各自拿到**自己那段**，而不是被重置。
+        assert_eq!(
+            heads,
+            vec![60., 62.],
+            "分割后两个半段必须各自继承父段曲线的对应子段（用户报障的直接形状）"
         );
     }
 

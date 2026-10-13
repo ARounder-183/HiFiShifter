@@ -501,8 +501,8 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         let length = u32::from_le_bytes(stream.bytes[..4].try_into().unwrap()) as usize;
         assert_eq!(stream.bytes.len(), length + 4);
         let saved: serde_json::Value = serde_json::from_slice(&stream.bytes[4..]).unwrap();
-        // source basis已随自动初始化进入v3；仍须证明IBStream仅保存当前组件范围。
-        assert_eq!(saved["version"], 3);
+        // 权威参数按稳定宿主身份存档（v7）；仍须证明IBStream仅保存当前组件范围。
+        assert_eq!(saved["version"], 7);
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(
@@ -510,11 +510,22 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
             if index == 0 { 0.5 } else { 0.25 }
         );
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
-        let regions = saved["edits"]["atlas"]["regions"]
+        // `regions` 是每帧派生的投影缓存，**不进存档**；参数权威落在 `authorities`
+        // 上，它同样必须只包含本组件的范围（两个组件的 modification 身份不同，
+        // 因此各自的权威键也不同）。
+        let authorities = saved["edits"]["atlas"]["authorities"]
             .as_object()
-            .expect("v3 source basis");
-        assert_eq!(regions.len(), 1);
-        assert!(regions.values().all(|region| region["root"] == id));
+            .expect("v7 parameter authority");
+        assert_eq!(authorities.len(), 1);
+        assert!(
+            authorities.keys().all(|key| key.contains(if index == 0 {
+                "modification"
+            } else {
+                "modification-b"
+            })),
+            "保存了另一个组件的参数权威：{:?}",
+            authorities.keys().collect::<Vec<_>>()
+        );
         assert_eq!(
             unsafe { (COMPONENT_VTBL.set_state)(components[index], (&raw mut stream).cast()) },
             K_RESULT_OK
