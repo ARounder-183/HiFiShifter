@@ -169,9 +169,6 @@ pub(crate) struct AuthorityParameters {
     curves: BTreeMap<String, SourceCurve>,
     /// 逐轨模板（曲线已清空），与 [`RegionParameters::template`] 同形。
     template: TrackParamsState,
-    /// 用户是否手动改过音高（对应内核 `pitch_edit_user_modified`）。
-    #[serde(default)]
-    pub(crate) pitch_user_modified: bool,
     /// 参数随宿主编辑如何移动（见 [`ParamAnchor`]）。
     #[serde(default)]
     pub(crate) anchor: ParamAnchor,
@@ -183,7 +180,6 @@ impl AuthorityParameters {
         Self {
             curves: record.curves.clone(),
             template: record.template.clone(),
-            pitch_user_modified: false,
             anchor,
         }
     }
@@ -267,6 +263,16 @@ impl Authority<'_> {
             Self::Current(params) => &params.curves,
             Self::Legacy(record) => &record.curves,
         }
+    }
+    /// 是否持有一条音高编辑曲线。
+    ///
+    /// 【为什么这是"内核不得清空"的判据】内核 `ensure_params_for_root` 在
+    /// `build_root_pitch_key` 变化时会清 `pitch_edit`（除非 `pitch_edit_user_modified`），
+    /// 而那个 key 把每条 clip 的 id / start / length / 倍率都喂进哈希 —— **任何一次分割
+    /// 都会改变它**。这是完全独立于图集的第二条"参数被重置"路径。权威里有一条音高曲线，
+    /// 就说明这份数据是用户意图，不是可丢弃的陈旧分析结果。
+    fn has_pitch_curve(&self) -> bool {
+        self.curves().contains_key("pitch_edit")
     }
 }
 
@@ -426,7 +432,6 @@ impl ParameterAtlas {
                     frame_period_ms: frame_ms,
                     ..Default::default()
                 },
-                pitch_user_modified: true,
                 anchor: ParamAnchor::Source,
             },
         );
@@ -907,6 +912,11 @@ impl ParameterAtlas {
                 if values.is_empty() {
                     continue;
                 }
+                if key == "pitch_edit" {
+                    // 根视图上也要标记，否则编辑器/渲染路径的 `ensure_params_for_root`
+                    // 会把这条来自权威的曲线当陈旧分析结果清掉。
+                    entry.pitch_edit_user_modified = true;
+                }
                 let mut merged = parameter_curves(entry)
                     .into_iter()
                     .find(|(name, _)| *name == key)
@@ -1098,7 +1108,6 @@ impl ParameterAtlas {
                         AuthorityParameters {
                             curves: curves.clone(),
                             template: template.clone(),
-                            pitch_user_modified: params.pitch_edit_user_modified,
                             anchor,
                         },
                     );
@@ -1177,6 +1186,11 @@ impl ParameterAtlas {
             }
             params.pitch_orig_key = None;
             params.dyn_orig_key = None;
+            // 权威持有音高曲线 ⇒ 标记为"用户数据"。内核 `ensure_params_for_root` 会在
+            // `build_root_pitch_key` 变化时清 `pitch_edit`（该 key 把每条 clip 的
+            // id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**）。
+            // 那是独立于图集的第二条重置路径，必须在这里挡住。
+            params.pitch_edit_user_modified = authority.has_pitch_curve();
             projected.insert(clip.id.clone(), params);
         }
         Ok(projected)
@@ -2637,6 +2651,29 @@ mod tests {
         assert_eq!(
             &projected["clip"].pitch_edit[4..9],
             &[60., 61., 62., 63., 64.]
+        );
+    }
+
+    /// **投影必须把"权威持有音高曲线"翻译成内核的"用户数据"标记。**
+    ///
+    /// 【为什么这是一条独立的重置路径】内核 `ensure_params_for_root` 在
+    /// `build_root_pitch_key` 变化时清 `pitch_edit`，而那个 key 把每条 clip 的
+    /// id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**。图集修好了
+    /// 但这里不标记，GUI 上仍然会看到"参数没了"。
+    #[test]
+    fn projecting_an_authority_pitch_curve_marks_it_as_user_data() {
+        let ids = identities();
+        let original = edited();
+        let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
+        let roots = atlas.project_roots(&original, &ids).unwrap();
+        assert!(
+            roots["a"].pitch_edit_user_modified,
+            "根视图必须标记用户音高数据，否则内核会把它当陈旧分析结果清掉"
+        );
+        let local = atlas.project_local(&original, &ids).unwrap();
+        assert!(
+            local["clip"].pitch_edit_user_modified,
+            "渲染输入同样必须带这个标记"
         );
     }
 

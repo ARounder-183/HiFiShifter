@@ -3494,6 +3494,49 @@ mod tests {
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
     static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// **内核不得把"用户数据"标记的音高曲线当陈旧分析结果清掉。**
+    ///
+    /// 【为什么这是独立于图集的重置路径】`build_root_pitch_key` 把每条 clip 的
+    /// id / start_sec / length_sec / 播放倍率都喂进哈希 ⇒ 宿主**分割 / 移动 / 拉伸**
+    /// 都会改变它 ⇒ `ensure_params_for_root` 会清 `pitch_edit`。插件侧现在把
+    /// "权威持有音高曲线"翻译成 `pitch_edit_user_modified`，这条测试钉住内核确实
+    /// 尊重这个标记：只清分析缓存，不动用户曲线。
+    #[test]
+    fn a_changed_root_pitch_key_clears_the_cache_but_keeps_user_marked_curves() {
+        let mut timeline = TimelineState::default();
+        timeline.bpm = 120.;
+        timeline.params_by_root_track.insert(
+            "root".into(),
+            TrackParamsState {
+                frame_period_ms: 250.,
+                pitch_edit_user_modified: true,
+                pitch_orig: vec![57.; 4],
+                pitch_edit: vec![60.; 4],
+                pitch_orig_key: Some("stale-key".into()),
+                ..Default::default()
+            },
+        );
+        timeline.ensure_params_for_root("root");
+        let entry = &timeline.params_by_root_track["root"];
+        assert!(
+            entry.pitch_edit.len() >= 4 && entry.pitch_edit[..4].iter().all(|v| *v == 60.),
+            "用户音高曲线必须保留（数组会被补齐到工程长度，但值不得被清掉）：{:?}",
+            &entry.pitch_edit[..entry.pitch_edit.len().min(8)]
+        );
+        // `resize_curve` 随后会把数组补齐到工程长度（填 0），所以"已清空"的形状是
+        // **全 0** 而不是空数组。
+        assert!(
+            entry.pitch_orig.iter().all(|v| *v == 0.),
+            "分析缓存仍应被清空以触发重分析：{:?}",
+            &entry.pitch_orig[..entry.pitch_orig.len().min(8)]
+        );
+        assert_ne!(
+            entry.pitch_orig_key.as_deref(),
+            Some("stale-key"),
+            "旧缓存键必须被换掉，否则重分析不会发生"
+        );
+    }
+
     /// 算法 id 是前后端与工程文件共用的规范字符串：必须与 serde 的 wire 形式
     /// 逐字一致，且能往返解析。
     #[test]
