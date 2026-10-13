@@ -50,6 +50,31 @@ impl RegionGeometry {
             .into_iter()
             .all(|(a, b)| near(a, b))
     }
+    /// **工程锚定**的投影映射：项目时间原地不动。
+    ///
+    /// 【为什么需要它】「锁定参数线」关闭时，参数应当留在**工程位置**而不是跟着素材走。
+    /// 用恒等映射（项目→项目）做 `current`，配合 [`Self::project_basis`] 存下的恒等
+    /// basis，`previous_project_time` 退化成"同一项目时刻"，曲线因此不随片段移动。
+    fn project_map(&self) -> Result<SourceTimeMap, String> {
+        SourceTimeMap::linear(
+            self.project_start,
+            self.project_duration,
+            self.project_start,
+            self.project_duration,
+        )
+    }
+
+    /// 工程锚定曲线的 basis：把"源轴"当作项目轴，使 `project` 按**绝对项目时间**索引。
+    fn project_basis(&self) -> Self {
+        Self {
+            project_start: self.project_start,
+            project_duration: self.project_duration,
+            source_start: self.project_start,
+            source_duration: self.project_duration,
+            reversed: false,
+        }
+    }
+
     /// 几何只接受已经确认的ARA秒域；未确认raw marker不得在此成为渲染权威。
     ///
     /// 倒放建**降序源轴**（项目起点 ⇒ 消费窗口终点），正放建升序源轴。两者共用
@@ -264,6 +289,15 @@ impl Authority<'_> {
             Self::Legacy(record) => &record.curves,
         }
     }
+    /// 这份权威随宿主编辑如何移动。
+    fn anchor(&self) -> ParamAnchor {
+        match self {
+            Self::Current(params) => params.anchor,
+            // 旧 per-clip 记录没有锚点字段：按源域读，语义与改动前一致。
+            Self::Legacy(_) => ParamAnchor::Source,
+        }
+    }
+
     /// 是否持有一条音高编辑曲线。
     ///
     /// 【为什么这是"内核不得清空"的判据】内核 `ensure_params_for_root` 在
@@ -404,21 +438,41 @@ impl ParameterAtlas {
     /// 需要访问本模块的私有字段。把这件事收在一个测试助手里，而不是放宽生产可见性。
     #[cfg(test)]
     pub(crate) fn seed_test_pitch_curve(&mut self, key: &str, frame_ms: f64, values: Vec<f32>) {
-        // 曲线以源域 [0, N·frame_ms) 为 basis：N 个采样点，每格 frame_ms。
+        self.seed_test_pitch_curve_anchored(key, frame_ms, 0., values, ParamAnchor::Source);
+    }
+
+    /// 测试用：种一条带指定锚点的源域音高曲线。
+    ///
+    /// 【为什么 first_frame 由 project_start 推出】曲线按"第几格"索引，而格点是
+    /// `project_sec * 1000 / frame_ms`；种子必须落在真实格点上，否则投影会整体偏移。
+    #[cfg(test)]
+    pub(crate) fn seed_test_pitch_curve_anchored(
+        &mut self,
+        key: &str,
+        frame_ms: f64,
+        project_start: f64,
+        values: Vec<f32>,
+        anchor: ParamAnchor,
+    ) {
         let span = values.len() as f64 * frame_ms / 1000.;
-        let basis = RegionGeometry {
-            project_start: 0.,
+        let geometry = RegionGeometry {
+            project_start,
             project_duration: span,
             source_start: 0.,
             source_duration: span,
             reversed: false,
         };
+        let basis = match anchor {
+            ParamAnchor::Source => geometry,
+            ParamAnchor::Project => geometry.project_basis(),
+        };
+        let first_frame = (project_start * 1000. / frame_ms).floor() as usize;
         let mut curves = BTreeMap::new();
         curves.insert(
             "pitch_edit".to_owned(),
             SourceCurve {
                 basis,
-                first_frame: 0,
+                first_frame,
                 frame_ms,
                 values: Arc::new(values),
                 reservation: None,
@@ -432,7 +486,7 @@ impl ParameterAtlas {
                     frame_period_ms: frame_ms,
                     ..Default::default()
                 },
-                anchor: ParamAnchor::Source,
+                anchor,
             },
         );
     }
@@ -997,6 +1051,14 @@ impl ParameterAtlas {
             // 旧曲线取**权威侧**（modification），旧存档未迁移时退回 per-clip 记录。
             let authority = self.authority(identity, &root, &geometry)?;
             let previous = authority.as_ref().map(Authority::curves);
+            // 【锚点在一次捕获时定下】既有权威沿用自己那份锚点（用户在编辑途中切换
+            // 「锁定参数线」不该重新解释已有曲线）；全新的权威取当前设置。
+            let key_for_anchor = authority_key(identity.item.as_deref(), &identity.modification);
+            let anchor = key_for_anchor
+                .as_deref()
+                .and_then(|key| candidate.authorities.get(key))
+                .map(|existing| existing.anchor)
+                .unwrap_or_else(default_anchor);
             let mut curves = BTreeMap::new();
             for (key, values) in parameter_curves(params) {
                 if values.is_empty() {
@@ -1019,7 +1081,8 @@ impl ParameterAtlas {
                     }
                 }
                 let adjusted = if let (Some(old), Some(old_view)) = (old, old_view) {
-                    let mut region = old.project(&geometry, &key, params.frame_period_ms)?;
+                    let mut region =
+                        old.project(&geometry, &key, params.frame_period_ms, anchor)?;
                     let selected = timeline
                         .selected_clip_id
                         .as_ref()
@@ -1049,7 +1112,7 @@ impl ParameterAtlas {
                 };
                 let values = adjusted.as_deref().unwrap_or(values);
                 let unchanged = old.is_some_and(|old| {
-                    old.project(&geometry, &key, params.frame_period_ms)
+                    old.project(&geometry, &key, params.frame_period_ms, anchor)
                         .is_ok_and(|projected| {
                             (begin..=end).all(|frame| {
                                 projected[frame]
@@ -1077,7 +1140,12 @@ impl ParameterAtlas {
                         Vec::new()
                     };
                     SourceCurve {
-                        basis: geometry.clone(),
+                        // 工程锚定把 basis 的"源轴"当作项目轴（见 `project_basis`），
+                        // 于是曲线按**绝对项目时间**索引、不随片段移动。
+                        basis: match anchor {
+                            ParamAnchor::Source => geometry.clone(),
+                            ParamAnchor::Project => geometry.project_basis(),
+                        },
                         first_frame: first,
                         frame_ms: params.frame_period_ms,
                         values: Arc::new(samples),
@@ -1092,12 +1160,7 @@ impl ParameterAtlas {
             //
             // 【为什么锚点沿用已有值】用户在编辑途中切换「锁定参数线」时，既有曲线不应被
             // 重新解释。第一次播种时定下，之后沿用。
-            if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
-                let anchor = candidate
-                    .authorities
-                    .get(&key)
-                    .map(|existing| existing.anchor)
-                    .unwrap_or_default();
+            if let Some(key) = key_for_anchor {
                 if curves.is_empty() {
                     // 没有任何曲线 ⇒ 不留空条目。空条目与"从没编辑过"在投影上完全等价，
                     // 却会让存档带上一个无意义的权威段（并抬高状态代际）。
@@ -1181,8 +1244,13 @@ impl ParameterAtlas {
             }
             let mut params = authority.template().clone();
             let frame_ms = params.frame_period_ms;
+            let anchor = authority.anchor();
             for (key, curve) in authority.curves() {
-                set_curve(&mut params, key, curve.project(&geometry, key, frame_ms)?);
+                set_curve(
+                    &mut params,
+                    key,
+                    curve.project(&geometry, key, frame_ms, anchor)?,
+                );
             }
             params.pitch_orig_key = None;
             params.dyn_orig_key = None;
@@ -1669,6 +1737,35 @@ impl ParameterAtlas {
 /// 这里取真实窗口并把 `reversed` 交给 [`RegionGeometry::map`] 建降序源轴。
 ///
 /// 公开给同 crate 的剪贴板粘贴路径，避免"窗口/方向"这套规则被抄成两份。
+/// 把「锁定参数线」的取值映射成锚点。
+///
+/// 【语义】`true`（默认）= 锁定：参数跟着**素材**走（源域锚定）。`false` = 不锁定：
+/// 参数留在**工程位置**（工程域锚定），宿主移动片段不会带走曲线。
+fn anchor_for_lock(locked: bool) -> ParamAnchor {
+    if locked {
+        ParamAnchor::Source
+    } else {
+        ParamAnchor::Project
+    }
+}
+
+/// 新权威在建立时采用的锚点，由用户设置「锁定参数线」决定。
+#[cfg(not(test))]
+fn default_anchor() -> ParamAnchor {
+    anchor_for_lock(crate::settings_store::lock_param_lines())
+}
+
+/// 测试里固定为源域锚定。
+///
+/// 【为什么不读进程级设置】那是**全局**状态，而测试并行运行 —— 一个改设置的测试
+/// 会让另一个正在捕获的测试拿到工程域锚点。锚点行为本身由 `anchor_for_lock` 与
+/// `the_lock_setting_selects_whether_curves_follow_the_material_or_the_project` 覆盖，
+/// 设置到锚点的映射由 `anchor_for_lock` 的测试覆盖。
+#[cfg(test)]
+fn default_anchor() -> ParamAnchor {
+    anchor_for_lock(true)
+}
+
 pub(crate) fn geometry(clip: &hifishifter_kernel::state::Clip) -> Result<RegionGeometry, String> {
     // Loop 有自己的回绕锚点语义，不适用"窗口终点递减"模型；沿用既有的正放近似。
     let reversed = clip.reversed && !clip.loop_enabled;
@@ -1820,9 +1917,14 @@ impl SourceCurve {
         geometry: &RegionGeometry,
         key: &str,
         frame_ms: f64,
+        anchor: ParamAnchor,
     ) -> Result<Vec<f32>, String> {
         let (begin, end) = frame_range(geometry, frame_ms)?;
-        let current = geometry.map()?;
+        // 工程锚定时项目时间原地不动（见 `RegionGeometry::project_map`）。
+        let current = match anchor {
+            ParamAnchor::Source => geometry.map()?,
+            ParamAnchor::Project => geometry.project_map()?,
+        };
         let basis = self.basis.map()?;
         let mut result = vec![pad(key); end + 1];
         for frame in begin..=end {
@@ -2651,6 +2753,72 @@ mod tests {
         assert_eq!(
             &projected["clip"].pitch_edit[4..9],
             &[60., 61., 62., 63., 64.]
+        );
+    }
+
+    /// 「锁定参数线」的取值必须映射成正确的锚点。
+    #[test]
+    fn the_lock_setting_maps_to_the_expected_anchor() {
+        assert_eq!(
+            anchor_for_lock(true),
+            ParamAnchor::Source,
+            "锁定 ⇒ 跟着素材走"
+        );
+        assert_eq!(
+            anchor_for_lock(false),
+            ParamAnchor::Project,
+            "不锁定 ⇒ 留在工程位置"
+        );
+    }
+
+    /// **「锁定参数线」的双锚点：锁定跟素材走，不锁定留在工程位置。**
+    ///
+    /// 【为什么必须实现它】宿主发起的 ARA 编辑不走 `move_clips` / `stretch_*`，因此
+    /// 这条设置此前对**任何宿主编辑**结构性失效（`lock_param_lines` 在
+    /// `hifishifter-plugin/src/` 里出现次数为 0）。现在它由权威的锚点在投影时表达。
+    #[test]
+    fn the_lock_setting_selects_whether_curves_follow_the_material_or_the_project() {
+        let ids = identities();
+        // 曲线在工程 [1,2) 上：60,62,64,66（每 250ms 一格）。
+        let curve = vec![60., 62., 64., 66.];
+
+        // 锁定（源域锚定）：片段从 [1,2) 移到 [3,4)，曲线跟着走。
+        let mut locked = ParameterAtlas::default();
+        locked.seed_test_pitch_curve_anchored(
+            "mod:mod",
+            250.,
+            1.,
+            curve.clone(),
+            ParamAnchor::Source,
+        );
+        let moved = locked.project(&host(3., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(
+            &moved["clip"].pitch_edit[12..16],
+            &[60., 62., 64., 66.],
+            "锁定时参数必须跟着素材移动"
+        );
+
+        // 不锁定（工程域锚定）：曲线留在 [1,2)，移走之后新位置是空的。
+        let mut unlocked = ParameterAtlas::default();
+        unlocked.seed_test_pitch_curve_anchored(
+            "mod:mod",
+            250.,
+            1.,
+            curve.clone(),
+            ParamAnchor::Project,
+        );
+        let moved = unlocked.project(&host(3., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(
+            &moved["clip"].pitch_edit[12..16],
+            &[0., 0., 0., 0.],
+            "不锁定时参数不随片段移动"
+        );
+        // 原位置仍然保留着它。
+        let stayed = unlocked.project(&host(1., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(
+            &stayed["clip"].pitch_edit[4..8],
+            &[60., 62., 64., 66.],
+            "不锁定时参数留在原工程位置"
         );
     }
 

@@ -137,6 +137,28 @@ pub fn save_settings_patch(patch: &serde_json::Value) -> Result<UiSettings, Stri
     result
 }
 
+/// 缓存的「锁定参数线」取值。
+///
+/// 【为什么需要缓存】`settings()` 会克隆整份 `UiSettings`（字段很多），而本值在
+/// 每次参数捕获与投影上都要读。用一个进程级缓存按 [`revision`] 失效，热路径只付
+/// 一次原子读的代价。
+///
+/// 【语义】`true`（默认）= 锁定：参数跟着**素材**走（源域锚定），宿主移动 / 拉伸片段
+/// 时曲线随之移动。`false` = 不锁定：参数留在**工程位置**，移动片段不带走曲线。
+pub fn lock_param_lines() -> bool {
+    static CACHE: Mutex<Option<(u64, bool)>> = Mutex::new(None);
+    let revision = revision();
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, value)) = *guard {
+        if cached == revision {
+            return value;
+        }
+    }
+    let value = settings().lock_param_lines;
+    *guard = Some((revision, value));
+    value
+}
+
 /// 全部前端偏好（前端启动时一次性取走，用于灌进内存缓存）。
 pub fn frontend_prefs() -> BTreeMap<String, String> {
     with_state(|state| state.prefs.clone())
@@ -317,6 +339,22 @@ mod tests {
         let after = delete_frontend_prefs(&["hifishifter.appearance".to_string()]);
         assert!(!after.contains_key("hifishifter.appearance"));
         assert!(after.contains_key("hifishifter.customThemes"));
+    }
+
+    /// 「锁定参数线」的缓存取值必须跟随设置，并在每次写入后失效。
+    ///
+    /// 【为什么缓存要按代次失效】参数捕获与投影每次都要读它，而 `settings()` 会克隆
+    /// 整份 `UiSettings`。代次不推进就会永远停在旧值 —— 用户切换开关却毫无效果。
+    #[test]
+    fn the_lock_param_lines_cache_follows_every_write() {
+        let _serial = exclusive();
+        reset();
+        assert!(lock_param_lines(), "默认是锁定");
+        save_settings_patch(&serde_json::json!({ "lockParamLines": false })).unwrap();
+        assert!(!lock_param_lines(), "关闭后缓存必须失效并读到新值");
+        save_settings_patch(&serde_json::json!({ "lockParamLines": true })).unwrap();
+        assert!(lock_param_lines(), "重新打开后缓存必须再次失效");
+        reset();
     }
 
     /// 界面语言写在约定好的键上并跨重启保留。
