@@ -1452,20 +1452,25 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 properties.transformation_flags() as u32,
             );
             if !self.factory_playback_transformations.contains(requested) {
-                // 【本地补丁 9】这里回 null 就是"整条 playback region 消失"：宿主拿不到
-                // region，于是既没有 clip、也不会调用任何 renderer 的 addPlaybackRegion，
-                // 而**没有任何日志**。实测 Cubase 15 的 ARA region 带
-                // `TimestretchReflectingTempo`（1<<1），插件只广告 TIMESTRETCH 时整批被丢掉
-                // （`sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有）。
-                // 把两边的位都打出来，下一次一眼能看出差在哪一位。
+                // 【本地补丁 9，已从"拒绝"改为"降级"】此前这里回 null，代价是**整条
+                // playback region 消失**：宿主拿不到 region，于是既没有 clip、也不会调用
+                // 任何 renderer 的 addPlaybackRegion（实测 Cubase 15：
+                // `sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有）。
+                //
+                // 【为什么降级是对的】ARA 契约规定宿主**只能**设置工厂广告过的位
+                // （`ARAPlaybackRegionProperties::transformationFlags` 的说明）。宿主若
+                // 越界，正确反应是"按我们能履行的部分渲染并留痕"，而不是把用户的素材
+                // 整条丢掉 —— 一位不认识的旗标绝不该赔上一条 region。这也与插件既有的
+                // 逐 region 降级纪律一致（见 `log_unknown_transformation_flags`）。
+                let unknown = requested.bits() & !self.factory_playback_transformations.bits();
                 log::warn!(
-                    "[ara] playback region rejected: host flags {:#x} are not a subset of the \
-                     factory's advertised {:#x}; the host receives a null region and no clip is \
-                     created for it",
+                    "[ara] playback region: host flags {:#x} exceed the factory's advertised \
+                     {:#x} (unhandled bits {:#x}); the region is created anyway and those bits \
+                     are ignored",
                     requested.bits(),
-                    self.factory_playback_transformations.bits()
+                    self.factory_playback_transformations.bits(),
+                    unknown
                 );
-                return null_mut();
             }
             let Ok(modification) = runtime.resolve_audio_modification(modification_reference)
             else {
@@ -1559,16 +1564,16 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 properties.transformation_flags() as u32,
             );
             if !self.factory_playback_transformations.contains(requested) {
-                // 【本地补丁】静默丢弃更新等于"宿主的编辑莫名不生效"。此前这里直接
-                // `return`，而 create 路径至少会返回 null 让宿主看见。记一行现场数字：
-                // 宿主要的位 vs 我们广告的位，下一步该改哪一边一目了然。
+                // 【本地补丁】与 create 路径同口径：不认识的旗标**降级接受**并留痕，
+                // 而不是丢弃整次更新 —— 一次静默丢弃在用户看来就是"编辑莫名不生效"。
+                let unknown = requested.bits() & !self.factory_playback_transformations.bits();
                 log::warn!(
-                    "[ara] updatePlaybackRegion dropped: the host requested transformation \
-                     flags 0x{:X}, which are not a subset of the advertised 0x{:X}",
+                    "[ara] updatePlaybackRegion: host flags {:#x} exceed the advertised {:#x} \
+                     (unhandled bits {:#x}); the update is applied and those bits are ignored",
                     requested.bits(),
-                    self.factory_playback_transformations.bits()
+                    self.factory_playback_transformations.bits(),
+                    unknown
                 );
-                return;
             }
             let sequence = if let Some(sequence) = properties.region_sequence() {
                 let Ok(sequence) = runtime.resolve_region_sequence(sequence.as_raw().cast()) else {

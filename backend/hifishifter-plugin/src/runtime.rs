@@ -62,6 +62,15 @@ pub struct Runtime {
 }
 
 /// 工厂能力集合：只广告我们**真正履行**的东西。
+/// 【为什么没有 CONTENT_FADES】ARA 契约（`ARAInterface.h:993-996`）规定广告这一位意味着
+/// **宿主把区域边界的淡化职责交给插件**。但我们并不渲染宿主委托的淡化：两个 fade 位只被
+/// 记录与显示，唯一的音频侧消费者是一条**拒绝**路径（`render/snapshot.rs` 在
+/// `allow_fades == false` 时报 `UnsupportedTransform`），而 head/tail 快照恒为 `(0,0)`。
+/// 广告它等于承诺一件做不到的事 —— 宿主不再自己打淡化，边界就会有咔哒。
+///
+/// 【为什么不能"实现它"】ARA 只给"头/尾是否有基于内容的淡化"两个布尔，**不给**淡化长度
+/// 与形状（`LOST_FIELDS::FadeLength` / `FadeShapeAndCurvature` 是真正拿不到的）。
+/// 没有这两个量，插件只能猜一条淡化曲线，那比让宿主用它自己那条正确的曲线更糟。
 ///
 /// 【为什么这里没有可分析内容类型】`analyzeableContentTypes` 保持为空。曾有一个
 /// `HIFISHIFTER_ARA_PROBE_ANALYSIS` 探针用来验证"Cubase 是否因为插件广告不出素材的
@@ -72,9 +81,7 @@ pub struct Runtime {
 /// 探针因此删除，不留一个已经答完的问题的答案。
 fn factory_capabilities() -> FactoryCapabilities {
     FactoryCapabilities::default().with_playback_transformations(
-        PlaybackTransformationFlags::TIMESTRETCH
-            | PlaybackTransformationFlags::REFLECT_TEMPO
-            | PlaybackTransformationFlags::CONTENT_FADES,
+        PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::REFLECT_TEMPO,
     )
 }
 
@@ -129,7 +136,8 @@ impl Runtime {
             //
             // Cubase 的 ARA region 是跟随工程速度拉伸的，于是带上
             // `kARAPlaybackTransformationTimestretchReflectingTempo`（1<<1）。我们此前只
-            // 广告 `TIMESTRETCH | CONTENT_FADES`，于是**每一条** region 都被丢掉。
+            // 广告 `TIMESTRETCH | CONTENT_FADES`（漏了这一位），于是**每一条** region
+            // 都被丢掉。
             //
             // 【为什么广告它是诚实的】SDK 对这个旗标的定义是"区分拉伸是严格线性、还是反映
             // 音乐上下文与素材内容之间的速度关系"。本插件的拉伸比例正是取自 region 声明的
@@ -240,47 +248,41 @@ mod tests {
         assert_eq!(
             transformations as u32,
             (PlaybackTransformationFlags::TIMESTRETCH
-                | PlaybackTransformationFlags::REFLECT_TEMPO
-                | PlaybackTransformationFlags::CONTENT_FADES)
+                | PlaybackTransformationFlags::REFLECT_TEMPO)
                 .bits()
         );
     }
 
-    /// **不变量：工厂广告的 transformation 集合必须覆盖宿主会给出的每一种。**
+    /// **不变量：广告的 transformation 集合必须恰好是"我们能履行的那些"。**
     ///
-    /// 【为什么这是"片段凭空消失"级回归】库在 `create_playback_region` 里用
-    /// `factory_playback_transformations.contains(host_flags)` 校验，不通过就**静默**回
-    /// null region —— 宿主拿不到 region，于是既没有 clip、也不会调用任何 renderer 的
-    /// addPlaybackRegion，而日志里没有任何错误。实测 Cubase 15：
-    /// `sources=1 regionSequences=1 playbackRegions=0`，编辑器里一条片段都没有。
+    /// 【为什么这是"片段凭空消失"级回归】`create_playback_region` 会用广告集合校验宿主
+    /// 旗标。此前的行为是不通过就**静默**回 null region —— 宿主拿不到 region，于是既没有
+    /// clip、也不会调用任何 renderer 的 addPlaybackRegion（实测 Cubase 15：
+    /// `sources=1 regionSequences=1 playbackRegions=0`）。现在那条路径已改为**降级接受
+    /// 并留痕**，所以"少广告一位"不再等于"丢一条片段"。
     ///
     /// `REFLECT_TEMPO`（1<<1）是 Cubase 的 ARA region 必带的一位（它的拉伸跟随工程速度）。
     /// 本插件的拉伸比例取自 region 声明的时长比值，对 tempo-reflecting region 而言那正是
-    /// 宿主算出的速度关系，因此广告它是诚实的；不广告则整条片段消失。
+    /// 宿主算出的速度关系，因此广告它是诚实的。
+    ///
+    /// `CONTENT_FADES` **不广告**：广告它意味着宿主把边界淡化的职责交给插件，而我们不渲染
+    /// 宿主委托的淡化（ARA 只给两个布尔，不给长度与形状 —— `LOST_FIELDS` 里那两项是真的
+    /// 拿不到）。不广告 ⇒ 宿主继续用它自己那条正确的淡化曲线。
     #[test]
-    fn native_factory_advertises_every_transformation_the_host_may_set() {
+    fn native_factory_advertises_exactly_the_transformations_it_honours() {
         let runtime = Runtime::init().unwrap();
         let raw = unsafe { &*runtime.factory.0.as_raw() };
         let advertised = PlaybackTransformationFlags::from_bits_retain(
             raw.supportedPlaybackTransformationFlags as u32,
         );
-        // 宿主实际会给出的组合：Cubase 的 ARA region 跟随工程速度拉伸，因此带 REFLECT_TEMPO。
-        let host_flags = PlaybackTransformationFlags::TIMESTRETCH
-            | PlaybackTransformationFlags::REFLECT_TEMPO
-            | PlaybackTransformationFlags::CONTENT_FADES;
-        // 直接照搬库的判据：这一步就是"宿主能不能拿到 region"的开关。
-        assert!(
-            advertised.contains(host_flags),
-            "库用 contains 校验宿主旗标，不通过就静默回 null region：广告 {:#x} 不含宿主给出的 {:#x}",
-            advertised.bits(),
-            host_flags.bits()
-        );
-        // 反向：也不得多广告我们从未声明要处理的位 —— 那会变成"宣称了不履行的能力"
-        //（与 2.3 变更通知那次同类）。广告集合必须恰好是这三位。
+        let honoured =
+            PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::REFLECT_TEMPO;
         assert_eq!(
             advertised.bits(),
-            host_flags.bits(),
-            "广告集合必须恰好覆盖 TIMESTRETCH / REFLECT_TEMPO / CONTENT_FADES"
+            honoured.bits(),
+            "广告集合必须恰好是能履行的那些位（CONTENT_FADES 不履行，因此不广告）"
         );
+        // 宿主按契约只会设置广告过的位；即便越界，create 路径也只降级不丢弃。
+        assert!(advertised.contains(honoured));
     }
 }
