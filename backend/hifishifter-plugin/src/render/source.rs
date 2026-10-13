@@ -24,13 +24,20 @@ pub(crate) fn read_source_pcm(
     // 不可用。读取路径是**离线**的（不在音频回调里），而下游两处都已经会重采样：
     // `mix_plain_regions` 按 `source.sample_rate` 线性取点，内核路径走
     // `linear_resample_interleaved`。所以这里只需要挡明显不合理的值。
+    // 【为什么这里只收 1..=2 声道，而 `component_get_bus_info` 广告任意声道数】
+    // 那是两个不同的门：**总线**是宿主的输出路由（`copy_block` 处理宽总线 —— 只写前
+    // 两个声道、其余按静音回报），而**素材**是我们要读进来的 PCM，而内部快照恒为
+    // 立体声（`PlaybackSnapshot` 只有 left/right）。多声道素材要进来就必须先定一条
+    // 下混策略（哪些声道映射到 L/R），那是**产品决策**而不是补一个 `contains` 边界。
+    // 在此之前显式拒绝：调用方把原因写进 `source_failures`，用户能看到"这条素材没被
+    // 读入"，而不是拿到一份悄悄只取了前两个声道的音频。
     if !(8000..=384_000).contains(&sample_rate)
         || !(1..=2).contains(&channels)
         || frames == 0
         || frames > i64::MAX as usize
     {
         return Err(AraError::Unsupported(
-            "ARA requires nonempty mono/stereo sources within 8k..=384kHz",
+            "ARA requires nonempty mono/stereo sources within 8k..=384kHz; multichannel              sources need an explicit downmix policy",
         ));
     }
     let source = host
