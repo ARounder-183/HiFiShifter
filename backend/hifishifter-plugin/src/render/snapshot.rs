@@ -972,4 +972,67 @@ mod tests {
         assert!(publisher.has_capacity(&snapshot()));
         assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
     }
+
+    /// **并发压测：读者进入读区与发布回收同时进行时，读者读到的必须仍是有效快照。**
+    ///
+    /// 【为什么需要这条】`enter` 是"载入指针 → 递增该快照读者数"两步，`reclaim` 的自旋
+    /// 条件是 `registering == 0`。安全性依赖一个内存序事实：`enter` 里
+    /// `readers.fetch_add` 与 `registering.fetch_sub` 同为 SeqCst，且**程序序上前者在先**；
+    /// 因此任何观察到 `registering == 0` 的线程，按 SeqCst 的全序必然也观察到那次
+    /// `readers.fetch_add`。也就是说"读者刚载入指针、还没来得及登记就被回收"这个窗口
+    /// 是被封住的 —— 但这层保证只存在于 SeqCst 的全序里，一旦有人把某个序放松就会失效，
+    /// 而既有测试全是单线程的，**测不出**来。
+    ///
+    /// 这里让一个发布者与多个读者真并发跑，读者对读到的样本做校验和累加。若不变式被
+    /// 破坏（读到已释放的内存），在 debug 下通常会 panic、在校验和上会表现为野值 ——
+    /// 两种情况都会让这条测试失败。
+    #[test]
+    fn concurrent_enter_and_publish_never_hand_a_reader_a_reclaimed_snapshot() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let publisher = Arc::new(SnapshotPublisher::new(64 * 1024));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let publisher = Arc::clone(&publisher);
+            let stop = Arc::clone(&stop);
+            readers.push(std::thread::spawn(move || {
+                let mut checksum = 0.0_f64;
+                let mut observed = 0_usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let read = publisher.enter();
+                    if let Some(snapshot) = read.snapshot() {
+                        // 读区内校验：内容必须是发布者写入的那个常量图案。
+                        // 已释放的内存几乎不可能仍处处等于它。
+                        assert_eq!(snapshot.sample_rate, 4);
+                        assert!(snapshot.left.iter().all(|sample| *sample == 0.25));
+                        assert!(snapshot.right.iter().all(|sample| *sample == -0.5));
+                        checksum += snapshot.left.len() as f64;
+                        observed += 1;
+                    }
+                }
+                (checksum, observed)
+            }));
+        }
+        // 发布者持续替换快照，让 `reclaim` 反复尝试回收退役缓冲。
+        for _ in 0..2000 {
+            publisher
+                .publish(PlaybackSnapshot {
+                    sample_rate: 4,
+                    origin_sample: 0,
+                    left: vec![0.25; 2],
+                    right: vec![-0.5; 2],
+                    _reservation: None,
+                })
+                .expect("publish stays within the concurrent budget");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let mut total = 0_usize;
+        for reader in readers {
+            let (_, observed) = reader.join().expect("reader thread must not panic");
+            total += observed;
+        }
+        assert!(total > 0, "读者至少应成功进入过一次读区");
+    }
 }
