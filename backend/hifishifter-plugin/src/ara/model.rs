@@ -1696,6 +1696,25 @@ impl PlaybackRegions for ModelHandle {
             properties.duration_in_playback_time(),
             flags as u32,
         );
+        // 【为什么必须在这里失效】分割在 ARA 侧是 `destroy(父) + create(左) + create(右)`。
+        // `destroy_playback_region` 会失效，但那次失效发生在**两条新 region 还不存在**的
+        // 时刻；而渲染缓存键 `PreparedVersion` 的五个分量（model / edit / epoch / scope /
+        // keys）只要全等，`prepare_job` 就早退。此前 `create` 一条都不失效，于是：
+        //   * `revision` 停在 destroy 那一次的值（`clear_renderers` 是它唯一的推进点）；
+        //   * `scope` 只在宿主调用 `addPlaybackRegion` 时才变 —— 那一步并不保证发生，
+        //     也不保证时序在失效之后。
+        // 结果就是**声音与界面永远停在旧版本**：用户报的"分割后毫无反应"。
+        //
+        // 【为什么不能只依赖 `scope`】`scope_revision` 依赖宿主真的重发
+        // `addPlaybackRegion`；Cubase 的 ARA 角色分配与 REAPER 不同（见 `extension.rs`
+        // 的角色说明），这条路径不保证。`clear_renderers()` 是唯一同时推进 `revision`
+        // 与 `render_epoch` 的原语，用它才是与 `destroy` / `update` 同口径的处置。
+        //
+        // 【顺带修好的第二条】`revision` 也是 `refresh_host_geometry` 的早退判据，而
+        // `region_items`（宿主 item GUID）的唯一写者就在它里面。此前"只新增 region"的
+        // 编辑会让新 region 永远拿不到 item GUID —— 那正是"同一个片段在界面上出现两份、
+        // 一份有波形一份空占位"的成因。
+        self.session.clear_renderers();
         // 立刻同步派生表：新建的 region 要能马上被渲染/工作区路径看到 ——
         // 此前它只在 `end_editing` 才进 `clip_ids`，那之前的每次读取都查不到身份。
         self.sync_session_derived_tables();
@@ -1943,6 +1962,66 @@ mod tests {
             play_start,
             play_dur,
         }
+    }
+
+    /// **新建 region 必须推进渲染版本。**
+    ///
+    /// 【为什么这条是 P0 回归】分割在 ARA 侧是 `destroy(父) + create(左) + create(右)`。
+    /// `destroy_playback_region` 会失效，但那次失效发生在**两条新 region 还不存在**的
+    /// 时刻；若 `create` 不失效，`PreparedVersion` 的五个分量（model / edit / epoch /
+    /// scope / keys）就可能全等 ⇒ `prepare_job` 早退 ⇒ **声音与界面永远停在旧版本**。
+    /// 用户在 Cubase 上看到的就是"分割后毫无反应"。
+    ///
+    /// 断言两个原子值：`revision`（模型代次，也是 `refresh_host_geometry` 的早退判据，
+    /// 关系到新 region 能否拿到宿主 item GUID）与 `render_epoch`（快照代次）。
+    #[test]
+    fn creating_a_playback_region_advances_the_render_version() {
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        let before_revision = model.session.revision.load(Ordering::Acquire);
+        let before_epoch = model.session.render_epoch.load(Ordering::Acquire);
+
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作为不透明 model-ref 地址；下面 `create_playback_region` 只把它当
+        // 键比较与登记（`as_raw() as usize`），从不解引用。地址在调用期间保持有效。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+        let properties = PlaybackRegionProperties::for_ara2(
+            0,
+            0.0,
+            0.5,
+            0.0,
+            0.5,
+            sequence_ref,
+            None,
+            None,
+        )
+        .unwrap();
+        let context = CreateContext::for_test(ApiGeneration::V2Final, 0xABCD);
+        let modification = 0_usize;
+        let sequence = 0_usize;
+        PlaybackRegions::create_playback_region(
+            &mut model,
+            &context,
+            &modification,
+            &sequence,
+            properties,
+        )
+        .expect("合法属性必须建出 region");
+
+        assert!(
+            model.session.revision.load(Ordering::Acquire) > before_revision,
+            "新建 region 必须推进模型代次，否则宿主几何清单不会刷新、\
+             新 region 拿不到 item GUID"
+        );
+        assert!(
+            model.session.render_epoch.load(Ordering::Acquire) > before_epoch,
+            "新建 region 必须推进快照代次，否则 prepare_job 早退、声音停在旧版本"
+        );
     }
 
     /// 分割判据只认"源窗连续 + 播放窗相邻 + 父窗口 = 左 ∪ 右"，且必须同 `audio_source`。

@@ -17,6 +17,7 @@
 | 9 | `controller.rs` 的 `create_playback_region` | 增量 | 记录两种"整条 playback region 变成 null 交给宿主"的原因：宿主旗标不是工厂广告集合的子集、模型侧创建失败（原先都是裸 `return null_mut()`） | 待查 |
 | 10 | `controller.rs` 的 `create_audio_modification` / `create_region_sequence` / `create_playback_region` 入口，以及分析状态查询 | 增量 | 入口留痕 + 每条静默拒绝的原因；`isAudioSourceContentAnalysisIncomplete` 答"未完成"时、宿主请求未广告的内容类型时各记一条警告（见下方「宿主没有交出事件内容」） | 待查 |
 | 11 | `controller.rs` 的内容查询与 `notifyModelUpdates` | 增量 | `notifyModelUpdates` 的入口与三条早退原因；`isAudioSourceContentAvailable` / `getAudioSourceContentGrade` / `createAudioSourceContentReader` 的入口与实际答案（见下方「宿主没有交出事件内容」） | 待查 |
+| 12 | `runtime.rs` 的 `CreateContext::for_test` | 增量 | `#[doc(hidden)]` 的测试用构造器：给定代数与 realtime key 造一个上下文。生产路径仍只走 `document()` / `object()`，不改变任何行为 | 新增 |
 
 ## 代数协商的静默失败（补丁 6/7）
 

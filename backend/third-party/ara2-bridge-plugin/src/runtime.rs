@@ -52,6 +52,24 @@ impl CreateContext {
     pub const fn realtime_key(&self) -> Option<u64> {
         self.realtime_key
     }
+
+    /// 【本地补丁 12】构造一个只用于测试的 `CreateContext`。
+    ///
+    /// 【为什么需要它】插件侧要为一个 P0 回归写测试：`create_playback_region` 必须
+    /// 推进渲染版本（否则分割后新 region 不触发重排，声音与界面停在旧版本 —— 用户报的
+    /// "毫无反应"）。而 `create_playback_region` 的唯一入参就是这个上下文，它的两个
+    /// 构造器都是私有的，插件 crate 无法构造 ⇒ 该行为此前**无法被测试覆盖**。
+    ///
+    /// 这个函数只暴露"给定代数与 realtime key 造一个上下文"，不改变任何既有行为、
+    /// 不绕过任何校验 —— 生产路径仍然只走 `document()` / `object()`。
+    #[doc(hidden)]
+    pub const fn for_test(generation: ApiGeneration, realtime_key: u64) -> Self {
+        Self {
+            generation,
+            object: None,
+            realtime_key: Some(realtime_key),
+        }
+    }
 }
 
 /// Complete required trait set for the safe document-model runtime.
