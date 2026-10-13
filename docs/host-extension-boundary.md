@@ -63,7 +63,18 @@
 | 播放位置与状态 | VST3 `ProcessContext` |
 | 音高 / 参数编辑 | 插件自己的参数模型（kernel） |
 | 内容淡化 / 时间拉伸标志 | `ARAPlaybackRegion::hasContentBasedFade*` / `isTimestretchEnabled` |
+| 参数随编辑保留（移动 / 裁剪 / 分割 / 拉伸 / 取消裁剪） | 插件自己的参数权威表（源域曲线 + 稳定宿主身份） |
+| 宿主保存工程时携带插件状态（含**部分**存档） | `storeObjectsToArchive` / `restoreObjectsFromArchive`（含筛选与 persistentID 重映射） |
+| 告诉宿主"这些对象的持久状态变了" | `ARAModelUpdateControllerInterface`（经 `notifyModelUpdates` 投递） |
 | 淡变形状轴（有 / 无、legacy / continuous） | 原生扩展**报告**版本；ARA-only 恒为"无" |
+
+**参数随宿主编辑保留**（第五轮加入）。参数权威按**稳定宿主身份**索引（有原生扩展时用
+item GUID，否则用 modification persistentID），曲线以**源域**存储，因此移动 / 裁剪 /
+分割 / 拉伸都不再让曲线消失 —— 这是此前"在 Cubase 里编辑一次，参数就被重置"的根因。
+分割时父段参数通过 `cloneAudioModification` 回执或 `end_editing` 的结构 diff 整份播给
+两个半段；取消裁剪能完整恢复曲线（裁剪不缩短权威里的源曲线）。
+「锁定参数线」决定参数跟着**素材**走（源域锚定，默认）还是留在**工程位置**（工程域锚定）。
+设 `HIFISHIFTER_ARA_LEGACY_ATLAS=1` 可退回旧的几何认领路径做真机对照（保留一个发布周期）。
 
 **渲染失效通路必须对两种后端都成立。** `RenderFacts`（`host/geometry.rs`）把"会改变
 渲染结果"的宿主事实收成一张逐 item 的表，任何一项变化都推进 `DocumentSession::render_epoch`。
