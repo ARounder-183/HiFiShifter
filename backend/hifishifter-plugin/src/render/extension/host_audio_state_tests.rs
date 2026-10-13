@@ -380,18 +380,25 @@ fn a_document_without_an_editor_instance_writes_nothing() {
     document.close();
 }
 
-/// **只拿到 EDITOR_RENDERER 的实例必须保持透传，即使文档里没有 playback 实例。**
+/// **文档里没有任何 playback 实例时，唯一的编辑实例必须接管渲染。**
 ///
-/// 【为什么这条是"不许改"的契约】"宿主一个 playback 角色都不分配"与"本实例只是
-/// 编辑实例"在文档级**完全同形**（两者都是 known=all, assigned=editor），而 ARA 没有
-/// "文档级哪个实例是播放渲染器"的查询。曾试过让 editor 实例在"没有 playback 实例"
-/// 时接管渲染 —— 它会让这个用例（以及 `vst3/audio_boundary_tests` 的整组透传用例）
-/// 失败：编辑实例开始渲染，宿主音频被清掉。
+/// 【为什么这条契约反过来了】改行为前这里断言的是"编辑实例保持透传"，理由是
+/// `renders_playback()` 只能比"本实例是不是 editor"，而 REAPER 的编辑实例与
+/// "Cubase 没分配 playback"在**实例级**确实同形。改用**文档级**判据
+/// （`DocumentSession::report_playback_ownership` 推送的 `playback_covered`）之后两者
+/// 就区分开了，而实测证明必须区分：
 ///
-/// 所以行为**不变**，只把事实做成读数
-/// （`DocumentSession::report_playback_ownership`，见下一个用例）。
+/// ```text
+/// [ara] playback ownership: 1 live renderer instance(s) but NONE holds the playback role
+///       (writers: [1]); audio will pass through the host untouched.
+/// ```
+///
+/// 这是 Cubase 15 的**正常**加载形态（只给一个实例、角色 `[editor]`）。保持透传意味着
+/// 插件的任何编辑都不可能被听到 —— 用户报的"编辑操作未能更新 ARA"里，有一半就是它。
+/// 反过来，REAPER 的编辑实例**总有** playback 兄弟，所以它的透传契约不受影响
+/// （见 `an_editor_instance_with_a_playback_sibling_stays_passthrough`）。
 #[test]
-fn an_editor_only_instance_stays_passthrough_even_without_a_playback_instance() {
+fn a_sole_editor_instance_takes_over_rendering() {
     let model = crate::ara::model::ModelHandle::new();
     let document = model.session();
     let editor = Arc::new(ExtensionOwner::default());
@@ -406,27 +413,56 @@ fn an_editor_only_instance_stays_passthrough_even_without_a_playback_instance() 
         .unwrap();
     assert!(
         !editor.has_playback_role(),
-        "本用例的实例不能拿到宿主分配的 playback 角色"
+        "本用例的实例没有拿到宿主分配的 playback 角色"
     );
     assert!(
+        editor.renders_playback(),
+        "文档上没有任何 playback 实例时必须接管渲染，否则编辑永远听不出来"
+    );
+    assert!(!editor.is_editor_only(), "接管渲染的实例不能走透传分支");
+    document.close();
+}
+
+/// **有 playback 兄弟时，编辑实例仍然透传。**（REAPER 的正常形态）
+///
+/// 【为什么要单独钉这一条】接管判据是**文档级**的，它必须精确到"没有任何一个实例
+/// 持 playback"，而不是"本实例不是 playback"。判据一旦写宽，REAPER 上开始播放的一瞬间
+/// 编辑实例会抢着渲染，宿主已经处理好的音频被清掉。
+#[test]
+fn an_editor_instance_with_a_playback_sibling_stays_passthrough() {
+    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    assert!(
+        owners.iter().any(|owner| owner.has_playback_role()),
+        "夹具必须有一个宿主分配的 playback 实例"
+    );
+    let editor = Arc::new(ExtensionOwner::default());
+    let _raw = editor
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::EDITOR_RENDERER | ExtensionRoles::EDITOR_VIEW,
+            None,
+        )
+        .unwrap();
+    assert!(
         !editor.renders_playback(),
-        "没有 playback 角色就不渲染 —— 这条契约是刻意的，见本用例的说明"
+        "另有 playback 实例时，编辑实例不得抢渲染"
     );
     assert!(
         editor.is_editor_only(),
         "editor-only 必须透传，否则会清掉宿主已经处理好的音频"
     );
+    // 覆盖是**文档级**事实：playback 实例自己也必须报告"由自己渲染"。
+    assert!(owners[0].renders_playback());
     document.close();
 }
 
-/// **"有实例但没有任何一个持 playback 角色"必须是可见的读数。**
-///
-/// 这是替代"自动接管"的取证手段：Cubase 上"编辑不改变声音"究竟是不是角色分配造成的，
-/// 靠这一行日志判定，而不是靠改行为去猜。有 playback 实例时则**不报**。
+/// **playback 实例退出后，留下的编辑实例接管渲染**（否则整档静音）。
 #[test]
-fn a_document_with_no_playback_instance_reports_it_instead_of_taking_over() {
-    // 只有 editor 实例 ⇒ 应当报警（读数可见）。
-    let model = crate::ara::model::ModelHandle::new();
+fn losing_the_playback_instance_hands_rendering_to_the_survivor() {
+    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
     let document = model.session();
     let editor = Arc::new(ExtensionOwner::default());
     let _raw = editor
@@ -438,27 +474,15 @@ fn a_document_with_no_playback_instance_reports_it_instead_of_taking_over() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        document
-            .renderer_owners()
-            .iter()
-            .filter(|owner| owner.has_playback_role())
-            .count(),
-        0,
-        "本用例故意只绑定 editor 实例"
-    );
-    // 只断言读数函数可安全调用（它是限流日志，不断言文本）。
-    document.report_playback_ownership();
-    assert!(editor.is_editor_only(), "报读数**不得**顺带改变行为");
-    document.close();
+    assert!(editor.is_editor_only(), "此时仍有 playback 兄弟");
 
-    // 有 playback 实例 ⇒ 读数不报（此断言通过计数表达：playback 存在）。
-    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
-    let document = model.session();
+    // 播放实例全部退出（宿主拆掉它们的组件）。夹具里两个 owner 都带 playback 角色。
+    for owner in &owners {
+        owner.document_closed();
+    }
     assert!(
-        owners.iter().any(|owner| owner.has_playback_role()),
-        "夹具必须有一个宿主分配的 playback 实例"
+        editor.renders_playback(),
+        "最后一个持渲染职责的实例退出后，留下的实例必须接管，而不是整档静音"
     );
-    document.report_playback_ownership();
     document.close();
 }

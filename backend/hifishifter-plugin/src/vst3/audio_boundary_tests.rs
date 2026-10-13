@@ -4,6 +4,29 @@ use super::*;
 use crate::audio_abi::{AudioBusBuffers, ProcessData};
 use crate::sync::MutexExt;
 
+/// 让文档上另有一个实例持 playback 角色。
+///
+/// 【为什么必须要它】"透传"的判据现在是**文档级**的：文档上没有任何 playback 实例时，
+/// 唯一的编辑实例会**接管渲染**（见 `host_audio_state_tests::
+/// a_sole_editor_instance_takes_over_rendering`），因为实测 Cubase 15 正是"只给一个
+/// 编辑实例、于是插件永远不发声"的形态。本文件的用例要测的是"编辑实例与播放实例**并存**时的
+/// 透传"（REAPER 的形态），所以必须把播放实例摆出来。
+fn with_a_playback_sibling(
+    model: &crate::ara::model::ModelHandle,
+) -> std::sync::Arc<crate::render::extension::ExtensionOwner> {
+    let owner = std::sync::Arc::new(crate::render::extension::ExtensionOwner::default());
+    owner
+        .bind_to_document(
+            model.session(),
+            ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),
+            ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .expect("playback sibling must bind");
+    owner
+}
+
 /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
 #[test]
 fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_allocations() {
@@ -19,6 +42,7 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
             None,
         )
         .unwrap();
+    let _playback = with_a_playback_sibling(&model);
     processor.extension_owner.snapshots[0]
         .publish(crate::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
@@ -84,6 +108,7 @@ fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
             None,
         )
         .unwrap();
+    let _playback = with_a_playback_sibling(&model);
     let mut left = [0.05, 0.1, 123.0];
     let mut right = [0.2, 0.3, 456.0];
     let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];

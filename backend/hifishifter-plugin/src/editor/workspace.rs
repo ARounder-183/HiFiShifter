@@ -430,6 +430,12 @@ impl DocumentSession {
         };
         let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
+            // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
+            // 都由**这份**宿主清单派生，所以清单一空，下面两条 `retain` 的条件就都恒不成立
+            // （"不在 present 里就删"遇上空集 = 什么都不删）。真正决定 ARA-only 上
+            // "哪些片段可见"的是 `workspace_timeline_locked` 的 `retain`（按已分配 region
+            // key 过滤），不在这里。所以这里返回是**正确的**，但它是"可见性由别处决定"
+            // 这件事的**唯一**落点 —— 改动可见性语义时要先看这里。
             return;
         }
         // 分割出来的右半段：宿主还没为它分配 region，所以 `authorized_takes` 里没有它。
@@ -1072,9 +1078,15 @@ impl DocumentSession {
     }
     /// 把宿主音频读数写进 GUI 载荷（语言无关分类，文案由前端 catalog 本地化）。
     ///
-    /// 【为什么取编辑器实例的读数】GUI 就挂在这个实例上（role = 2），它才是用户看到的
-    /// 那个窗口；playback 实例没有 GUI。找不到编辑器实例时**不写**该字段 —— 前端沿用
-    /// 上一次已知值，而不是凭空报一个"正常"。
+    /// 【为什么取编辑器实例的读数】GUI 就挂在这个实例上，它才是用户看到的那个窗口；
+    /// playback 实例没有 GUI。找不到编辑器实例时**不写**该字段 —— 前端沿用上一次已知值，
+    /// 而不是凭空报一个"正常"。
+    ///
+    /// 【为什么判据是"非 playback 实例"而不是 `is_editor_only()`】后者还要求"文档上另有
+    /// playback 实例"（它决定要不要透传）。而 GUI 挂在哪个实例上只取决于角色：Cubase 的
+    /// 单实例形态（角色 `[editor, view]`、文档上没有任何 playback 实例）里那个实例同时是
+    /// "唯一的窗口"和"接管渲染的那个"。用 `is_editor_only()` 会在这里直接找不到，
+    /// 读数整段消失 —— 而那正是最需要读数的地方。
     ///
     /// 【为什么分类留在后端】与 `ara_host_fields:` 同一原则：后端只给语言无关的分类
     /// （见 `render::extension::HostAudioState`），文案按 catalog 本地化。
@@ -1082,29 +1094,21 @@ impl DocumentSession {
         let Some(owner) = self
             .renderer_owners()
             .into_iter()
-            .find(|owner| owner.is_editor_only())
+            .find(|owner| owner.is_non_playback())
         else {
             return;
         };
         let status = owner.host_audio_status();
         // 【为什么 ARA-only 上不能直接报 `status`】没有原生扩展时
-        // `refresh_ui_inventory` 早退，而 `host_audio_status` 的**唯一**写者就在它里面
-        // ⇒ 该读数在 Cubase / Nuendo / Studio One 上永远是默认的 `Ready`（waiting 0）。
+        // `refresh_ui_inventory` 早退并把 `host_audio` 复位成默认的 `Ready`（waiting 0），
         // 于是"一条 region 都没匹配上"也被报成一切正常，而左下角却在转圈
         // （`EditorSession::state` 用的是另一条 ARA 读数）—— 两个读数互相矛盾，
         // 排查时会把方向带偏。
         //
-        // 这里在没有原生宿主时改用 ARA 侧的同一份在途计数（`media_in_flight_items`，
-        // 与 `state()` 同源），让两个读数一致。
-        // 【为什么是"补充"而不是"替换"】没有原生扩展时 `host_audio_status` 的**唯一**
-        // 写者（`refresh_ui_inventory`）早退，所以它在 Cubase / Nuendo / Studio One 上
-        // 恒为默认的 `Ready`（waiting 0）—— "一条 region 都没匹配上"也被报成一切正常，
-        // 而左下角却在转圈（`EditorSession::state` 用的是另一条 ARA 读数），两个读数
-        // 互相矛盾。
-        //
-        // 但**不能**因此丢掉宿主报的读数：`FolderParentWithoutRegions` 这类状态是宿主
-        // 侧的真实分类（且 `host_audio_status` 允许被直接设置），替换掉它会把"这组永远
-        // 拿不到音频"重新说成"正常"。所以只在宿主报 `Ready` 时用 ARA 在途数**上调**。
+        // 所以这里用 ARA 侧的同一份在途计数（`media_in_flight_items`，与 `state()` 同源）
+        // 把读数**上调**，让两个读数一致。注意是"补充"而不是"替换"：
+        // `FolderParentWithoutRegions` 这类状态是宿主侧的真实分类，替换掉它会把
+        // "这组永远拿不到音频"重新说成"正常"。所以只在宿主报 `Ready` 时上调。
         let mut state = status.state;
         let mut waiting = status.waiting_items;
         if state == crate::render::extension::HostAudioState::Ready {
@@ -1520,13 +1524,35 @@ impl DocumentSession {
             regions.extend(owner.assigned_regions().map_err(|e| e.to_string())?);
         }
         if !regions.is_empty() {
-            let keys = regions.iter().copied().collect::<Vec<_>>();
-            let (document, _) = region_owners()
-                .lock_or_recover()
-                .resolve(&keys)
-                .map_err(|e| format!("workspace region ownership: {e:?}"))?;
-            if document != self.id {
-                return Err("workspace includes another document".into());
+            // 【为什么逐条过滤而不是整批 `resolve`】`resolve` 是**整批**语义：一批里只要
+            // 有一条 key 未登记（已销毁、或宿主在 `addPlaybackRegion` 里把**已销毁父段的
+            // key** 一并重发），整批就返回 `Err` ⇒ 工作区时间线整份失败 ⇒ 界面一条片段都
+            // 不更新。写路径（`extension.rs` 的分配观察器）早已改成逐条 `owner_of`，
+            // 读路径必须同口径，否则同一次分割在两处得到不同结论。
+            let owners = region_owners().lock_or_recover();
+            let mut dropped = 0_usize;
+            regions.retain(|key| match owners.owner_of(*key) {
+                Some(document) if document == self.id => true,
+                Some(_) => {
+                    dropped += 1;
+                    false
+                }
+                None => {
+                    dropped += 1;
+                    false
+                }
+            });
+            drop(owners);
+            if dropped > 0 {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.workspace.scope-dropped",
+                    format_args!(
+                        "[ara] {dropped} assigned region key(s) are not owned by this document \
+                         (destroyed, or re-sent by the host after a split); the rest of the \
+                         workspace scope is unaffected"
+                    ),
+                );
             }
         }
         Ok(WorkspaceScope { regions })

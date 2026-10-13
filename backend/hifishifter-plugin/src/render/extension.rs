@@ -255,6 +255,23 @@ pub(crate) struct ExtensionOwner {
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
     roles: AtomicI32,
+    /// **文档上是否有别的实例持有 `PLAYBACK_RENDERER` 角色**。
+    ///
+    /// 【为什么需要这个原子量】`is_editor_only()` 要在**音频线程**上无锁求值
+    /// （`vst3.rs::audio_process`），因而不可能现场去查文档（那要取锁）。而"文档上还有没有
+    /// 别的 playback 实例"是**文档级**事实，由 [`super::document::DocumentSession`]
+    /// 在每次绑定/分配变化时算一次并推送到这里；变化频率是"用户增删插件实例"，
+    /// 不是音频帧率。
+    ///
+    /// 【为什么这解决了 Cubase 的"编辑不改变声音"】实测 Cubase 15 只给插件**一个**
+    /// 实例、角色是 `[editor, view]`（日志 `playback ownership: 1 live renderer
+    /// instance(s) but NONE holds the playback role`），于是 `process` 全部走
+    /// `pass_through` —— 用户听到的永远是宿主原声，再正确的编辑也听不出来。
+    /// 有了这个读数就能区分两种在文档级**不同形**的形态：
+    ///   * REAPER：编辑器实例 + 播放实例并存 ⇒ 本实例 `playback_covered = true` ⇒ 继续透传
+    ///     （`vst3/audio_boundary_tests` 的既有契约不变）；
+    ///   * Cubase 单实例：没有任何实例持 playback ⇒ `false` ⇒ 该实例接管渲染。
+    playback_covered: std::sync::atomic::AtomicBool,
     closed: std::sync::atomic::AtomicBool,
     writer_id: AtomicU64,
     /// 当前编辑后端；`None` ⇒ 尚未绑定任何原生扩展（与 `HostBackend::AraOnly` 不同：
@@ -1248,6 +1265,15 @@ impl ExtensionOwner {
             return;
         };
         let host = self.native_host();
+        // 【为什么没有原生扩展就直接返回】本函数采集的是**宿主 item 几何**，而
+        // `document.region_items` 的唯一写者就在它里面。没有原生扩展时
+        // `host_geometry()` / `host_geometries()` 的第一行就
+        // `Err("host extension unavailable")` —— 什么都写不成。此前这里依赖
+        // `before.is_some()`（`before` 来自原生宿主，缺席时为 `None`）让早退**永不成立**，
+        // 于是每个 UI tick 都完整走一遍这条注定失败的路径。早返回等价而省事。
+        if host.is_none() {
+            return;
+        }
         let authorized = || self.host_query_authorized(&stamp);
         let before = host
             .as_ref()
@@ -1380,29 +1406,48 @@ impl ExtensionOwner {
             stamp.0.invalidate_render_input();
         }
     }
-    /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
+    /// 本实例是否负责把处理结果作为音频输出（而非透传宿主原声）。
+    ///
+    /// 判据见 [`ExtensionOwner::is_editor_only`]。**未绑定实例（`roles == 0`）恒为
+    /// `false`** —— 这与改动前的 `role == 1` 一致，是 `process_outputs_the_snapshot_*`
+    /// 等用例依赖的既有行为。
     pub(crate) fn renders_playback(&self) -> bool {
-        self.role.load(Ordering::Acquire) == 1
+        self.is_bound() && !self.is_editor_only()
+    }
+    /// 本实例是否已拿到角色分配（`roles == 0` 表示尚未绑定）。
+    fn is_bound(&self) -> bool {
+        self.roles.load(Ordering::Acquire) != 0
     }
     /// 本实例是否拿到了宿主分配的 playback 角色。
-    ///
-    /// 【为什么不在这里做"没有 playback 实例就让 editor 接管"】那个改法看起来能救
-    /// "宿主一个 playback 角色都不分配"的情形，但它**无法与合法形态区分**：
-    /// 一个只拿到 `EDITOR_RENDERER` 的实例（REAPER 的正常编辑实例）与"宿主没分配
-    /// playback"在文档级完全同形 —— 两者都是"本实例 known=all, assigned=editor"。
-    /// 接管会让编辑实例开始渲染，从而破坏既有的透传契约（`vst3/audio_boundary_tests`
-    /// 明确钉住"editor-only 必须保留宿主音频"）。而 ARA 没有"文档级哪个实例是
-    /// 播放渲染器"的查询。
-    ///
-    /// 所以这里**不改行为**，只把它做成可见的读数（见
-    /// `DocumentSession::report_playback_ownership`）：真要判断 Cubase 是否分配了
-    /// playback，靠日志而不是靠猜。
     pub(crate) fn has_playback_role(&self) -> bool {
-        self.role.load(Ordering::Acquire) == 1
+        self.roles.load(Ordering::Acquire) & ExtensionRoles::PLAYBACK_RENDERER.bits() != 0
+    }
+    /// 本实例已拿到角色分配，但其中**没有** playback 角色（等价于旧代码的 `role == 2`）。
+    ///
+    /// 【为什么与 `is_editor_only()` 分开】后者还要求"文档上另有 playback 实例"，
+    /// 因为那才决定**要不要透传**。而"哪个实例挂着用户的窗口"只取决于角色本身 ——
+    /// Cubase 的单实例形态下这个实例同时是"唯一的 GUI"和"接管渲染的那个"，
+    /// 两个问题在这里答案相同、但判据不同。
+    pub(crate) fn is_non_playback(&self) -> bool {
+        self.is_bound() && !self.has_playback_role()
+    }
+    /// 宿主是否把"渲染"这件事交给了**别的**实例。
+    ///
+    /// 由 [`super::document::DocumentSession::publish_playback_coverage`] 写入；见该函数的说明。
+    pub(crate) fn set_playback_covered(&self, covered: bool) {
+        self.playback_covered.store(covered, Ordering::Release);
     }
     /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
     pub(crate) fn writer_id(&self) -> u64 {
         self.writer_id.load(Ordering::Acquire)
+    }
+    /// 本实例的角色位集合（诊断用）。
+    ///
+    /// 【为什么需要它】`bind document` 那一行是 `INFO`，而现场日志可能是 `WARN` 级
+    /// （实测 Cubase 会话整段没有一行 INFO）。于是"这个实例到底拿到了什么角色"只在
+    /// 报警那条 `WARN` 里才可见 —— 那就得把角色位带上，一条日志说清全部。
+    pub(crate) fn roles_bits(&self) -> i32 {
+        self.roles.load(Ordering::Acquire)
     }
     /// 记录 `setupProcessing` 声明的采样率（Hz）。非有限/非正数忽略（保持未声明）。
     pub(crate) fn set_setup_sample_rate(&self, rate: f64) {
@@ -1481,7 +1526,7 @@ impl ExtensionOwner {
     /// `process_outputs_the_snapshot_...` 等用例正是这个形状）。只有宿主**明确**
     /// 分配了非 playback 角色（`role == 2`）才是 editor-only。
     pub(crate) fn is_editor_only(&self) -> bool {
-        self.role.load(Ordering::Acquire) == 2
+        self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
     pub(crate) fn observe_transport(&self, context: &crate::audio_abi::ProcessContext, mode: i32) {
@@ -2586,7 +2631,11 @@ impl ExtensionOwner {
         document.attach(self, owned.1, companion)?;
         *self.document.lock_or_recover() = Some(Arc::downgrade(&document));
         let weak = Arc::downgrade(self);
-        if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
+        // 【为什么不再只对 playback 角色初始化】文档上没有任何 playback 实例时，编辑实例会
+        // **接管渲染**（见 [`ExtensionOwner::is_editor_only`]），那时它也必须有这条准备队列 ——
+        // 只对 playback 初始化会让接管的实例永远排不出任务（`prepare()` 的 `None => {}`
+        // 分支会静默吞掉），于是"接管"看起来生效了、声音却一直不更新。
+        if !enabled.is_empty() {
             let _ = self
                 .preparation
                 .get_or_init(super::preparation::PreparationQueue::new);
@@ -2651,6 +2700,18 @@ impl ExtensionOwner {
     pub fn document_closed(&self) {
         self.stop_editor();
         self.stop_channel();
+        // 【为什么这里要重算覆盖】本实例退出后，"文档上还有没有 playback 实例"可能翻转
+        // （播放实例先死、留下编辑实例）。`stop_editor` 已把 `closed` 置真，所以
+        // `renderer_owners()` 不再包含自己 —— 重算后留下的那个实例会接管渲染，
+        // 而不是整档静音。
+        let document = self
+            .document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(document) = document {
+            document.report_playback_ownership();
+        }
         self.assignments.lock_or_recover().clear();
         self.sequences.lock_or_recover().clear();
         self.document.lock_or_recover().take();
