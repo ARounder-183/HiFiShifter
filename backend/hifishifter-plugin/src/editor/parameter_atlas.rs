@@ -846,7 +846,13 @@ impl ParameterAtlas {
                 match candidates.as_slice() {
                     [] => {}
                     [record] => return Ok(Some(*record)),
-                    _ => return Err("Conflict: ambiguous confirmed split ancestry".into()),
+                    // 【为什么不再报错】多候选说明"祖先猜不出"，与几何兜底层同一条纪律：
+                    // 返回 `None`（该片段不投影曲线）远好于把一次内部推断失败变成用户的
+                    // "音频块编辑被拒绝"（见 `log_ambiguous_ancestry`）。
+                    _ => {
+                        Self::log_ambiguous_ancestry("confirmed split", identity, candidates.len());
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -891,7 +897,11 @@ impl ParameterAtlas {
                 match candidates.as_slice() {
                     [] => {}
                     [record] => return Ok(Some(*record)),
-                    _ => return Err("Conflict: ambiguous ARA split ancestry".into()),
+                    // 同上：ARA 签名谱系也猜不出时降级为"不投影曲线"，不拒绝整份编辑。
+                    _ => {
+                        Self::log_ambiguous_ancestry("ara split", identity, candidates.len());
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -926,10 +936,44 @@ impl ParameterAtlas {
         match candidates.as_slice() {
             [] => Ok(None),
             [record] => Ok(Some(*record)),
-            // 两条**真正活且重叠**的不同编辑仍是真歧义，不能靠"取最小范围/最后写入"
-            // 掩盖（既有契约，见 `nested_splits_follow_live_ancestry_…`）。
-            _ => Err("Conflict: ambiguous source parameter ancestry".into()),
+            // 【为什么不再报错 —— 用户报障的直接修复】两条候选都合格说明"祖先猜不出"。
+            // 此前这里返回 `Err`，于是**一个片段的曲线身份对不上**被放大成**整份编辑被
+            // 拒绝**：用户在 Cubase 上看到的就是 `Conflict: ambiguous source parameter
+            // ancestry`，而它其实只是一次内部推断的失败，不该由用户为一个插件内部问题负责。
+            //
+            // 返回 `None` 的语义是"这个片段本次不投影曲线"：几何、PCM、其余片段全部照常
+            // 渲染。这正是本层上方注释早就写明的口径（"返回 None 远好于返回 Err"），
+            // 也是与 `geometry()` 不可解时 `continue` 完全同一条纪律。
+            //
+            // 【为什么降级是安全的】真歧义（两条活记录都包含本窗口）本来就没有正确答案：
+            // 取最小范围或"最后写入"都会把**错**的曲线画到片段上，那比不画更糟 ——
+            // 用户会看到参数被莫名改动，却没有任何提示。留一行限流日志，让"某个片段
+            // 丢了曲线"在日志里可复盘，而不是让用户去猜。
+            _ => {
+                Self::log_ambiguous_ancestry("geometric containment", identity, candidates.len());
+                Ok(None)
+            }
         }
+    }
+    /// 祖先推断多候选时的限流留痕。
+    ///
+    /// 【为什么是日志而不是错误】见几何兜底层的长注释：多候选说明"猜不出"，
+    /// 返回 `None`（该片段本次不投影曲线）远好于把一次内部推断失败变成用户的
+    /// "音频块编辑被拒绝"。但静默同样不行 —— "某个片段的曲线没跟上"必须是
+    /// 日志里可复盘的事实，否则用户只会看到"参数不生效"而无从判断原因。
+    ///
+    /// 限流键固定，避免每帧投影都对同一片段重复刷屏。
+    fn log_ambiguous_ancestry(kind: &str, identity: &RegionIdentity, candidates: usize) {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.atlas.ambiguous-ancestry",
+            format_args!(
+                "[ara] parameter ancestry is ambiguous ({kind}): {candidates} candidate(s) for \
+                 source={} modification={}; this clip projects no curves until an edit \
+                 disambiguates it (geometry and audio are unaffected)",
+                identity.source, identity.modification
+            ),
+        );
     }
     /// 当前先保持原安全数量边界；source basis可序列化，但反序列化后也必须复验。
     pub fn validate(&self) -> Result<(), String> {
@@ -1587,6 +1631,93 @@ mod tests {
         assert!(followed.regions.contains_key("clip"));
     }
 
+    /// **用户报障的回归测试：两次嵌套分割后，一条新片段被两条已死祖先同时包含。**
+    ///
+    /// 【为什么必须单独钉住】单次分割的测试**全部通过**而用户仍然报错，因为触发形状
+    /// 是"两次以上嵌套分割"：`follow_geometry` 对历史父记录只置 `live = false`、
+    /// 从不删除，于是祖先会累积。一条源窗跨在两个历史祖先之间的新片段（复制/粘贴、
+    /// 撤销重做后宿主重建、或窗口恰好落在两者交集内）会让几何兜底同时命中 P 与 L，
+    /// 多候选 ⇒ 此前抛 `Conflict: ambiguous source parameter ancestry` ⇒ 整份编辑被拒。
+    ///
+    /// 现在必须：**不报错**，且该片段**不投影曲线**（宁可不画，不可画错）。
+    #[test]
+    fn a_region_spanning_two_dead_ancestors_is_not_an_error() {
+        let original = edited();
+        let atlas = ParameterAtlas::default()
+            .capture(&original, &identities())
+            .unwrap();
+        let with_signature = |id: &str, key: u64, ps: f64, pd: f64| {
+            (
+                id.to_string(),
+                RegionIdentity {
+                    key,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod".into(),
+                    signature: ParameterAtlas::ara_region_signature("source", "mod", ps, pd),
+                },
+            )
+        };
+
+        // 第一次分割：父段 [0,1) -> 左 [0,0.5) + 右 [0.5,1)。
+        let mut first = host(1., 0.5, 0., 0.5);
+        first.clips[0].id = "left".into();
+        let mut right = host(1.5, 0.5, 0.5, 0.5).clips.remove(0);
+        right.id = "right".into();
+        first.clips.push(right);
+        first.project_sec = 2.;
+        let first_ids = BTreeMap::from([
+            with_signature("left", 42, 1.0, 0.5),
+            with_signature("right", 43, 1.5, 0.5),
+        ]);
+        let a1 = atlas.follow_geometry(&first, &first_ids).unwrap();
+
+        // 第二次分割：左半段 [0,0.5) -> [0,0.25) + [0.25,0.5)。
+        let mut second = host(1., 0.25, 0., 0.25);
+        second.clips[0].id = "quarter-a".into();
+        let mut qb = host(1.25, 0.25, 0.25, 0.25).clips.remove(0);
+        qb.id = "quarter-b".into();
+        second.clips.push(qb);
+        second.clips.push(first.clips[1].clone());
+        second.project_sec = 2.;
+        let second_ids = BTreeMap::from([
+            with_signature("quarter-a", 44, 1.0, 0.25),
+            with_signature("quarter-b", 45, 1.25, 0.25),
+            with_signature("right", 43, 1.5, 0.5),
+        ]);
+        let a2 = a1.follow_geometry(&second, &second_ids).unwrap();
+        // 此刻已有两条已死祖先：原父段（源窗 [0,1)）与第一次分割出的左半段（源窗 [0,0.5)）。
+        assert!(!a2.regions["clip"].live);
+        assert!(!a2.regions["left"].live);
+
+        // 第三条 region 出现，源窗 [0.1, 0.4) —— 落在上面两条已死祖先（[0,1) 与
+        // [0,0.5)）的**交集**内，因此被两者同时"包含"。
+        let mut third = second.clone();
+        let mut spanning = host(2., 0.3, 0.1, 0.3).clips.remove(0);
+        spanning.id = "spanning".into();
+        third.clips.push(spanning);
+        third.project_sec = 2.5;
+        let mut third_ids = second_ids.clone();
+        third_ids.insert("spanning".into(), with_signature("spanning", 99, 2.0, 0.3).1);
+
+        let resolved = a2
+            .follow_geometry(&third, &third_ids)
+            .expect("跨两条已死祖先的片段不得让整份编辑失败");
+        assert!(
+            !resolved.regions.contains_key("spanning"),
+            "猜不出祖先的片段不得拿到曲线：{:?}",
+            resolved.regions.keys().collect::<Vec<_>>()
+        );
+        // 其余片段照常解析 —— 这正是"局部降级"与"整份失败"的区别。
+        assert!(resolved.regions["quarter-a"].live);
+        assert!(resolved.regions["quarter-b"].live);
+        assert!(resolved.regions["right"].live);
+        // 投影与编辑接受都必须成功（此前它们都在这里抛 Conflict）。
+        resolved
+            .project_roots(&third, &third_ids)
+            .expect("歧义不得让整份投影失败");
+    }
+
     /// 连续拆分只沿最近活图的唯一父范围，保留历史父记录但不让它阻塞第二次拆分。
     #[test]
     fn nested_splits_follow_live_ancestry_without_losing_history_or_guessing_overlaps() {
@@ -1661,13 +1792,30 @@ mod tests {
         assert_eq!(local["quarter-b"].pitch_edit, &[61., 62.]);
         assert_eq!(local["right"].pitch_edit, &[62., 63., 64.]);
         assert!(!nested.regions["left"].live);
-        // 两条真正活且重叠的不同编辑仍有歧义，不能选最小范围/最后写入来掩盖。
+        // 【为什么不再断言 Err】两条候选都合格说明"祖先猜不出"。此前这里报
+        // `Conflict: ambiguous source parameter ancestry`，于是**一个片段**的曲线身份
+        // 对不上被放大成**整份编辑被拒绝**（用户在 Cubase 上看到的正是这条）。现在降级为
+        // "这个片段本次不投影曲线"：几何、PCM、其余片段全部照常。
+        //
+        // 断言口径随之改为"不报错，且猜不出的那条片段**没有**曲线记录"—— 关键是它
+        // 绝不能拿到**错**的曲线（那比不画更糟，用户会看到参数被莫名改动）。
         let mut ambiguous = followed.clone();
         ambiguous.regions.get_mut("clip").unwrap().live = true;
-        assert!(ambiguous
+        let resolved = ambiguous
             .follow_geometry(&next, &next_ids)
-            .unwrap_err()
-            .contains("ambiguous"));
+            .expect("祖先歧义必须降级为『不投影曲线』，而不是拒绝整份编辑");
+        assert!(
+            !resolved.regions.contains_key("quarter-a"),
+            "猜不出祖先的片段不得拿到曲线：{:?}",
+            resolved.regions.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !resolved.regions.contains_key("quarter-b"),
+            "猜不出祖先的片段不得拿到曲线：{:?}",
+            resolved.regions.keys().collect::<Vec<_>>()
+        );
+        // 与歧义无关的片段完全不受影响。
+        assert!(resolved.regions["right"].live);
     }
     fn host(start: f64, duration: f64, source_start: f64, source_duration: f64) -> TimelineState {
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
