@@ -340,8 +340,7 @@ impl DocumentSession {
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
     }
-    /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。
-    ///
+    /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。    ///
     /// 【为什么必须补而不是报错】`clip_ids` 由 `remap_and_log` 整体重写，而 region 的
     /// 分配（`addPlaybackRegion`）发生在**那之前**。两者之间任何一次渲染、提交或投影
     /// 都会查到缺席。把这个窗口从"致命错误"降成"按 key 派生"—— 派生的 id 与映射层

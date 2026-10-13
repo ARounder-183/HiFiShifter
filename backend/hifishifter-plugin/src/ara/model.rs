@@ -399,13 +399,17 @@ impl ModelHandle {
         self.generation
     }
 
-    /// 把当前文档映射成时间线并记一行摘要。
+    /// 把当前模型图同步进 session 的派生表（`regions` / `clip_ids` / `sequence_*`）。
     ///
-    /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
-    /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
-    fn remap_and_log(&mut self) {
-        let session = self.session.clone();
-        let transaction = session.transaction.lock_or_recover();
+    /// 【为什么与 `remap_and_log` 分开】这两张表是**查询用**的：渲染路径、工作区投影、
+    /// 参数身份都从它们读"现在有哪些 region、每个 region 的 clip id 是什么"。
+    /// `remap_and_log` 是重活（全文档映射 + 参数投影 + 宿主清单刷新），只在
+    /// `end_editing` 跑；而宿主可能在收口之前就来读这些表 —— 那时它们必须是新的，
+    /// 否则读到的是上一代图（用户看到"编辑操作不更新 ARA"）。
+    ///
+    /// 它很便宜（两次表重建 + 一次 clone），因此每个 mutation 回调都可以直接调，
+    /// 不需要置脏、不需要合并。
+    fn sync_session_derived_tables(&mut self) {
         {
             let mut regions = self.session.regions.lock_or_recover();
             regions.clear();
@@ -417,6 +421,32 @@ impl ModelHandle {
                 }
             }
         }
+        // clip id 由 region key 派生（见 `ara::mapping::MappingIdentities`），
+        // 与映射层同算式 —— 收口后重算会把它原样认领回去，会话内身份单调稳定。
+        let live_keys: Vec<u64> = self
+            .region_keys
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+            .map(|(_, key)| *key)
+            .collect();
+        let mut clip_ids = self.session.clip_ids.lock_or_recover();
+        clip_ids.clear();
+        for key in live_keys {
+            clip_ids.insert(key, format!("ara-region-{key}"));
+        }
+    }
+
+    /// 把当前文档映射成时间线并记一行摘要。
+    ///
+    /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
+    /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
+    fn remap_and_log(&mut self) {
+        // 先更新 session 的派生表：它们必须**立刻**反映新图，否则渲染/工作区路径
+        // 在收口前就读到旧的 region 集合（见 `sync_session_derived_tables`）。
+        self.sync_session_derived_tables();
+        let session = self.session.clone();
+        let transaction = session.transaction.lock_or_recover();
         let mut document = self.document.clone();
         document.playback_regions = document
             .playback_regions
@@ -762,6 +792,59 @@ impl MusicalContexts for ModelHandle {
         probe_host_musical_content(host);
         Ok(())
     }
+
+    fn update_musical_context(
+        &mut self,
+        _state: &mut Self::MusicalContext,
+        properties: MusicalContextProperties,
+        _host: &HostContentScope<'_, '_>,
+    ) -> Result<(), AraError> {
+        // 【为什么必须实现】此前落 trait 默认空实现。`MusicalContext = ()`，没有 per-context
+        // 状态可改，但**名字**是文档级的展示信息，宿主改名时插件应当跟上。
+        // 名字落在第一个 context 上（与 `create_region_sequence` 的归属口径一致）。
+        if let Some(context) = self.document.musical_contexts.first_mut() {
+            context.name = properties.name().map(str::to_owned);
+        }
+        Ok(())
+    }
+
+    fn update_musical_context_content(
+        &mut self,
+        _state: &mut Self::MusicalContext,
+        range: Option<ContentTimeRange>,
+        flags: ContentUpdateScopes,
+        _host: &HostContentScope<'_, '_>,
+    ) -> Result<(), AraError> {
+        // 【为什么必须实现】宿主**改工程速度**走的就是这个回调。此前落默认空实现，
+        // 于是变速后插件既不知道 tempo map 变了、也不会重算已发布 region 的拉伸比
+        // （`playback_rate` 只在宿主重推 region 几何时才会更新）。
+        //
+        // 这里不读内容本身（多点 tempo map 的消费是独立一项，见 `probe_host_musical_content`
+        // 的取证结论），但**必须**标脏：下一次刷新会重算映射，至少让 region 的
+        // musical-time 投影与 bpm 跟上。
+        log::info!(
+            "[ara] musical_context content updated: range={:?} scopes={:?}",
+            range,
+            flags
+        );
+        self.sync_session_derived_tables();
+        Ok(())
+    }
+
+    fn destroy_musical_context(&mut self, _state: Self::MusicalContext) {
+        // 【为什么必须实现】此前落 trait 默认空实现。宿主删除 musical context 时，
+        // 它下面的 region sequence 一并消失；不清的话这些序列的身份与参数根边
+        // 会一直留到文档关闭。
+        //
+        // 只处理"最后一个 context"：`create_region_sequence` 也把新序列归到最后一个
+        // context，两者对称。多个 context 并存时宿主极少删除中间的，那种情形由
+        // 上面的序列级销毁各自收口。
+        if self.document.musical_contexts.len() > 1 {
+            self.document.musical_contexts.pop();
+        }
+        log::info!("[ara] musical_context destroyed");
+        self.sync_session_derived_tables();
+    }
 }
 
 /// F-2 取证探针：宿主到底提不提供速度 / 拍号 / 调号内容？
@@ -861,6 +944,78 @@ impl RegionSequences for ModelHandle {
                 .insert(key, index);
         }
         Ok(index)
+    }
+
+    fn update_region_sequence(
+        &mut self,
+        state: &mut Self::RegionSequence,
+        properties: RegionSequenceProperties,
+    ) -> Result<(), AraError> {
+        // 【为什么必须实现】此前落 trait 默认空实现：宿主重命名轨道、或改变序列顺序时
+        // 插件毫无反应，而 `order_index` 被读入后**从未使用**（映射层按枚举顺序排 track），
+        // 于是"宿主把轨往下挪"在插件里看起来什么都没发生。
+        let sequences = self
+            .document
+            .musical_contexts
+            .iter_mut()
+            .flat_map(|context| context.region_sequences.iter_mut())
+            .nth(*state);
+        let Some(sequence) = sequences else {
+            return Err(AraError::InvalidState(
+                "region sequence state is not in the document",
+            ));
+        };
+        sequence.name = properties.name().map(str::to_owned);
+        sequence.order_index = properties.order_index();
+        log::info!(
+            "[ara] region_sequence #{state} updated: name={:?} orderIndex={}",
+            sequence.name,
+            sequence.order_index
+        );
+        self.sync_session_derived_tables();
+        Ok(())
+    }
+
+    fn destroy_region_sequence(&mut self, state: Self::RegionSequence) {
+        // 【为什么必须实现】此前落 trait 默认空实现，而 `region_sequences` 是 push-only 的：
+        // 宿主删除一条轨道后，它的 `ara-track-N` 身份与 `params_by_root_track` 条目
+        // 一直留到文档关闭 —— 用户看到插件里有一条已经不存在的轨，且它的参数还在参与渲染。
+        //
+        // 同 `destroyed_sequences` 口径：不 compact 下标，只把该槽的宿主身份抹掉。
+        // 映射层看到空身份就退回位置身份，而 `sequence_track_index` 由下方清除，
+        // 于是这条序列不再被认成参数根。
+        self.destroyed_sequences.insert(state);
+        if let Some(id) = self.sequence_persistent_ids.get_mut(state) {
+            id.clear();
+        }
+        if let Some(sequences) = self
+            .document
+            .musical_contexts
+            .iter_mut()
+            .flat_map(|context| context.region_sequences.iter_mut())
+            .nth(state)
+        {
+            sequences.name = None;
+            sequences.playback_region_count = 0;
+        }
+        // 清掉"被分配了 sequence 却没有 clip"的参数根边，否则已删除的轨仍会留下。
+        self.session
+            .sequence_regions
+            .lock_or_recover()
+            .retain(|key, _| {
+                self.session
+                    .sequence_track_index
+                    .lock_or_recover()
+                    .get(key)
+                    .copied()
+                    != Some(state)
+            });
+        self.session
+            .sequence_track_index
+            .lock_or_recover()
+            .retain(|_, index| *index != state);
+        log::info!("[ara] region_sequence destroyed #{state}");
+        self.sync_session_derived_tables();
     }
 }
 
@@ -1172,6 +1327,52 @@ impl AudioModifications for ModelHandle {
         self.document.audio_modifications.push(cloned);
         Ok(index)
     }
+
+    fn update_audio_modification(
+        &mut self,
+        state: &mut Self::AudioModification,
+        properties: AudioModificationProperties,
+    ) -> Result<(), AraError> {
+        // 【为什么必须实现】此前落 trait 默认空实现，于是宿主换掉 modification 的
+        // persistentID 时我们毫无反应，而 region 正是按 persistentID 引用它的 ——
+        // 下一次映射会把所有引用它的 region 判成 `UnknownModification` 整条跳过。
+        let Some(modification) = self.document.audio_modifications.get_mut(*state) else {
+            return Err(AraError::InvalidState(
+                "audio modification state is not in the document",
+            ));
+        };
+        let previous = std::mem::replace(
+            &mut modification.persistent_id,
+            properties.persistent_id().to_string(),
+        );
+        if previous != modification.persistent_id {
+            log::info!(
+                "[ara] audio_modification #{state} persistentID: {previous} -> {}",
+                modification.persistent_id
+            );
+        }
+        // persistentID 是 region 的引用键：它变了，session 的派生表必须立刻跟上，
+        // 否则收口前的读取会拿旧键去查，把所有引用它的 region 判成 `UnknownModification`。
+        self.sync_session_derived_tables();
+        Ok(())
+    }
+
+    fn destroy_audio_modification(&mut self, state: Self::AudioModification) {
+        // 【为什么必须实现】此前落 trait 默认空实现，而 `document.audio_modifications`
+        // 是 push-only 的：宿主销毁的 modification 永远留在表里，文档随编辑会话无界增长，
+        // 且引用它的 region 仍能映射成功（拿着一个已不存在的 modification）。
+        //
+        // 这里不 compact 下标（与 `destroyed_regions` 同口径）—— 其余 modification 的
+        // 下标变了会让 region 的引用边整体错位。只把这一槽标成"已消失"，
+        // 映射层看到空 persistentID 就不再认它。
+        if let Some(modification) = self.document.audio_modifications.get_mut(state) {
+            modification.persistent_id.clear();
+            modification.audio_source_persistent_id.clear();
+        }
+        log::info!("[ara] audio_modification destroyed #{state}");
+        // 立刻同步派生表：收口前的渲染/投影不能再看到这个 modification。
+        self.sync_session_derived_tables();
+    }
 }
 
 /// 宿主带来本插件不认识的 `transformationFlags` 位时限流记录一条。
@@ -1276,6 +1477,9 @@ impl PlaybackRegions for ModelHandle {
             properties.duration_in_playback_time(),
             flags as u32,
         );
+        // 立刻同步派生表：新建的 region 要能马上被渲染/工作区路径看到 ——
+        // 此前它只在 `end_editing` 才进 `clip_ids`，那之前的每次读取都查不到身份。
+        self.sync_session_derived_tables();
         Ok(index)
     }
 
@@ -1342,6 +1546,9 @@ impl PlaybackRegions for ModelHandle {
             state,
             region.start_in_playback_time
         );
+        // 立刻同步派生表：收口前的渲染/投影必须读到新几何，否则宿主"移动了 item"
+        // 在插件里看起来什么都没发生。
+        self.sync_session_derived_tables();
         Ok(())
     }
 
@@ -1374,6 +1581,8 @@ impl PlaybackRegions for ModelHandle {
             log::error!("head/tail snapshot failed: {error}");
         }
         log::info!("[ara] playback_region destroyed #{}", state);
+        // 立刻同步派生表：上面的逐键清理只动了这一个 key，而 `regions` 表里它还留着。
+        self.sync_session_derived_tables();
     }
 }
 
@@ -2202,6 +2411,100 @@ mod tests {
         PlaybackRegions::destroy_playback_region(&mut model, 0);
         model.remap_and_log();
         assert!(model.timeline().unwrap().clips.is_empty());
+    }
+
+    /// **mutation 回调必须立刻更新 session 的派生表，不等 `endEditing`。**
+    ///
+    /// 【为什么这是回归测试】`regions` / `clip_ids` 此前**只**由 `remap_and_log` 重写，
+    /// 而它只跑在 `end_editing`。于是宿主在收口之前来读这两张表时，拿到的是上一代图 ——
+    /// 渲染路径报 `missing assigned clip identity`、工作区投影漏掉新片段，用户看到
+    /// "编辑操作不更新 ARA"。
+    ///
+    /// 桥接层的 `end_editing` 在 `content_readers` 非空时还会直接 return（长时间播放时
+    /// 几乎总是如此），所以"等收口"并不总会发生。
+    #[test]
+    fn a_destroyed_region_leaves_the_session_tables_before_end_editing() {
+        let mut model = ModelHandle::new();
+        model.document = crate::ara::ara_document_from_json(include_str!(
+            "../../tests/fixtures/ara-model.reaper.json"
+        ))
+        .unwrap();
+        // 手动登记一个 key（`allocate_region` 在 create 时做，这里直接构造同一形状）。
+        model.region_keys.push(4242);
+        region_owners()
+            .lock_or_recover()
+            .register(4242, model.document_id, 0)
+            .unwrap();
+        model.remap_and_log();
+        let session = model.session();
+        assert!(
+            session.clip_ids.lock_or_recover().contains_key(&4242),
+            "映射之后 clip_ids 必须带上这个 region"
+        );
+        assert!(session.regions.lock_or_recover().contains_key(&4242));
+
+        // 销毁它 —— **不**调 `remap_and_log`，模拟"宿主还没收口就来读"。
+        PlaybackRegions::destroy_playback_region(&mut model, 0);
+        assert!(
+            !session.regions.lock_or_recover().contains_key(&4242),
+            "派生表必须在销毁那一刻就反映新图，不能等 endEditing"
+        );
+        assert!(
+            !session.clip_ids.lock_or_recover().contains_key(&4242),
+            "clip_ids 同理：它已按 key 逐条清理，派生表不能把它加回来"
+        );
+
+        // 而身份仍然可由 key 派生（B1 的降级路径），不会变成致命错误。
+        assert_eq!(
+            session.clip_id_for(4242).as_deref(),
+            Some("ara-region-4242")
+        );
+    }
+
+    /// **被销毁的 region sequence 必须从派生表里消失。**
+    ///
+    /// 【为什么这是回归测试】`destroy_region_sequence` 此前落 trait 默认空实现，
+    /// 而 `region_sequences` 是 push-only 的：宿主删除一条轨道后，它的身份与
+    /// `params_by_root_track` 条目一直留到文档关闭 —— 用户看到插件里有一条已经
+    /// 不存在的轨，且它的参数还在参与渲染。
+    ///
+    /// 【为什么不走 `create_region_sequence`】`CreateContext` 由桥接层在真实回调时构造，
+    /// 测试里无法合成（它持有运行时的借用）。这里直接摆出"创建之后"的状态，只验销毁。
+    #[test]
+    fn a_destroyed_region_sequence_leaves_the_session_tables() {
+        let mut model = ModelHandle::new();
+        let session = model.session();
+        // 摆出"宿主创建了两条序列"之后的状态：`sequence_track_index` 有两条键。
+        session
+            .sequence_track_index
+            .lock_or_recover()
+            .insert(0xAAAA, 0);
+        session
+            .sequence_track_index
+            .lock_or_recover()
+            .insert(0xBBBB, 1);
+        model.sequence_persistent_ids = vec![(0xAAAA).to_string(), (0xBBBB).to_string()];
+
+        // 销毁下标 0 的那条：键 0xAAAA 与下标 0 都必须消失，下标 1 的必须留下。
+        RegionSequences::destroy_region_sequence(&mut model, 0);
+
+        let index = session.sequence_track_index.lock_or_recover();
+        assert!(
+            !index.contains_key(&0xAAAA),
+            "销毁序列必须同时清掉参数根边，否则已删除的轨仍会被认成参数根"
+        );
+        assert!(
+            !index.values().any(|value| *value == 0),
+            "指向该下标的边也要清掉"
+        );
+        assert!(
+            index.contains_key(&0xBBBB) && index.values().any(|value| *value == 1),
+            "另一条序列不能受影响"
+        );
+        assert_eq!(
+            model.sequence_persistent_ids[0], "",
+            "该槽的宿主身份必须抹掉，映射层随即退回位置身份"
+        );
     }
 
     /// 首次映射就失败后，`ready` 必须能在**下一次**成功编辑上自愈，而不是砖化。

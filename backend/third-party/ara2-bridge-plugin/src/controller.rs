@@ -185,7 +185,17 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn end_editing(&mut self) {
+        // 【本地补丁】早退必须留痕。此前这里**无声 return**，于是宿主只要还有 content
+        // reader 活着（长时间播放、或宿主迟迟不回收），`endEditing` 就永远不会收口 ——
+        // 插件停在旧时间线上，用户看到"编辑操作不更新 ARA"，而日志里什么都没有。
+        // 这里只负责把原因说清楚；脏位由 delegate（插件侧 `ModelHandle::end_editing`）
+        // 在真正收口时清理，所以这里不能替它清。
         if !self.content_readers.is_empty() {
+            log::warn!(
+                "[ara] endEditing deferred: {} content reader(s) still live; the model graph \
+                 stays dirty until they are gone",
+                self.content_readers.len()
+            );
             return;
         }
         let host = &self.host;
@@ -203,7 +213,10 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 因此把三条早退原因都记下来。
         log::info!("[ara] host notifyModelUpdates");
         if !self.content_readers.is_empty() {
-            log::warn!("[ara] notifyModelUpdates skipped: {} content reader(s) still live", self.content_readers.len());
+            log::warn!(
+                "[ara] notifyModelUpdates skipped: {} content reader(s) still live",
+                self.content_readers.len()
+            );
             return;
         }
         if self.runtime().map_or(true, PluginRuntime::is_editing) {
@@ -211,7 +224,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         }
         let Some(host) = self.host.model_updates() else {
-            log::warn!("[ara] notifyModelUpdates skipped: the host provided no model-update interface");
+            log::warn!(
+                "[ara] notifyModelUpdates skipped: the host provided no model-update interface"
+            );
             return;
         };
         for source in std::mem::take(&mut self.pending_analysis_starts) {
@@ -386,10 +401,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                     let raw_reference = reference.as_raw().cast();
                     let synthetic = if generation < ApiGeneration::V2Draft {
                         let properties = ara2_bridge_core::RegionSequenceProperties::new(
-                            None,
-                            0,
-                            reference,
-                            None,
+                            None, 0, reference, None,
                         )?;
                         match edit.create_region_sequence(handle, properties) {
                             Ok(sequence) => Some(sequence.into_raw()),
@@ -618,16 +630,23 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             };
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties and nested data.
-        let properties = match unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) } {
-            Ok(properties)=>properties,
-            Err(error)=>{log::error!("ARA createAudioSource property rejection: {error:?}");return null_mut();}
-        };
+        let properties =
+            match unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) } {
+                Ok(properties) => properties,
+                Err(error) => {
+                    log::error!("ARA createAudioSource property rejection: {error:?}");
+                    return null_mut();
+                }
+            };
         // SAFETY: the non-null callback identity remains live for the controller lifetime.
         let Ok(scoped_host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
             return null_mut();
         };
         if !self.content_readers.is_empty() {
-            log::error!("ARA createAudioSource rejected: {} content readers still live",self.content_readers.len());
+            log::error!(
+                "ARA createAudioSource rejected: {} content readers still live",
+                self.content_readers.len()
+            );
             return null_mut();
         }
         let host = &self.host;
@@ -642,9 +661,12 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 let reference = edit.audio_source_ref(handle)?;
                 Ok((handle.into_raw(), reference.as_raw().cast()))
             });
-        let (handle, reference)=match result {
-            Ok(value)=>value,
-            Err(error)=>{log::error!("ARA createAudioSource callback failure: {error:?}");return null_mut();}
+        let (handle, reference) = match result {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!("ARA createAudioSource callback failure: {error:?}");
+                return null_mut();
+            }
         };
         self.audio_source_hosts.insert(handle, host_ref);
         reference
@@ -908,7 +930,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         let (handle, reference) = {
             let Ok(runtime) = self.runtime_mut() else {
-                log::warn!("[ara] createAudioModification rejected: document runtime busy or closed");
+                log::warn!(
+                    "[ara] createAudioModification rejected: document runtime busy or closed"
+                );
                 return null_mut();
             };
             let Ok(source) = runtime.resolve_audio_source(source_reference) else {
@@ -1148,7 +1172,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 【本地补丁 11】宿主向我们索取某类内容的读取器。我们不做分析 ⇒ 交 null，
         // 而宿主可能把它当成"这个插件对这条源没有可读内容"。
         let Some(object) = self.audio_source_object(reference) else {
-            log::warn!("[ara] createAudioSourceContentReader rejected: unknown audio source reference");
+            log::warn!(
+                "[ara] createAudioSourceContentReader rejected: unknown audio source reference"
+            );
             return null_mut();
         };
         // SAFETY: the callback supplies null or one complete aligned ephemeral range.
@@ -1159,7 +1185,11 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         let reader = self.create_reader_for(object, content_type, range);
         log::info!(
             "[ara] host createAudioSourceContentReader(type={content_type}) -> {}",
-            if reader.is_null() { "null (no such content)" } else { "reader" }
+            if reader.is_null() {
+                "null (no such content)"
+            } else {
+                "reader"
+            }
         );
         reader
     }
@@ -1912,7 +1942,9 @@ impl<P: PluginModel + 'static> Plugin<P> {
         }
         // SAFETY: forwarded caller contract; ARA host storage outlives the controller.
         let host = unsafe { HostClients::from_raw(host, generation) }?;
-        if let Some(observer)=self.host_playback {observer(host.playback().map(|client|client.request_handle()));}
+        if let Some(observer) = self.host_playback {
+            observer(host.playback().map(|client| client.request_handle()));
+        }
         // SAFETY: forwarded caller contract for the ephemeral document properties.
         let properties = unsafe { DocumentProperties::copy_from_ffi(properties) }?;
         // Optional controller-tail capabilities were introduced with ARA 2 Final. A plug-in may
@@ -1946,10 +1978,7 @@ impl<P: PluginModel + 'static> Plugin<P> {
             factory_analyzable_content,
             factory_playback_transformations,
         };
-        let instance = crate::ffi::callbacks::controller_instance(
-            Box::new(adapter),
-            interface,
-        );
+        let instance = crate::ffi::callbacks::controller_instance(Box::new(adapter), interface);
         if let Some(observer) = self.controller_identity {
             // SAFETY: allocation 刚完成且尚未交宿主，复制 packed 身份字段不创建未对齐引用。
             let key = unsafe { (*instance).documentControllerRef } as usize;
