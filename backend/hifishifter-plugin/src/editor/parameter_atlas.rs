@@ -16,6 +16,14 @@ pub(crate) struct RegionIdentity {
     pub item: Option<String>,
     pub source: String,
     pub modification: String,
+    /// **跨会话稳定的 region 签名**（见 [`ParameterAtlas::ara_region_signature`]）。
+    ///
+    /// 【为什么与 `item` 并存】`item` 只在有原生扩展时才有值；ARA-only 宿主上它恒为
+    /// `None`，于是谱系、身份认领全部走不通。签名只用 ARA 自己给的量，任何宿主都有。
+    /// 旧归档没有这个字段，`#[serde(default)]` 让它读作空串，随即退回 `item` 路径 ——
+    /// 向后兼容。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct RegionGeometry {
@@ -141,8 +149,105 @@ pub(crate) struct ParameterAtlas {
     /// 与源basis并存的整轨空白编辑；根轨道身份由同一冷恢复映射重绑定。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) gaps: BTreeMap<String, GapParameters>,
+    /// **ARA-only 宿主的谱系**：右半段签名 → 父段签名。
+    ///
+    /// 【为什么需要平行的一套】上面的 `split_parents` / `copy_seeds` 都以宿主 item GUID
+    /// 为键，而 item GUID 只在有**原生扩展**时才拿得到（`region_items` 由
+    /// `refresh_host_geometry` 填，ARA-only 宿主上恒空）。于是 Cubase / Nuendo /
+    /// Studio One 上每条分割都走不了显式谱系，只能落到 `find` 的几何包含兜底 ——
+    /// 两个半段共享同一个 (source, modification) 且窗口相邻，兜底层把它们都判成
+    /// 候选，报 `Conflict: ambiguous source parameter ancestry`。
+    ///
+    /// 这一套改用**region 签名**作键（见 `ara_region_signature`）：它只用 ARA 自己给的量
+    /// （source persistentID + modification persistentID + 播放几何），不依赖任何原生扩展，
+    /// 因此在 ARA-only 宿主上同样稳定。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ara_split_parents: BTreeMap<String, String>,
+    /// ARA-only 宿主的复制谱系：新片段签名 → 种子的完整参数记录。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ara_copy_seeds: BTreeMap<String, RegionParameters>,
 }
 impl ParameterAtlas {
+    /// 一条 region 的**跨会话稳定签名**。
+    ///
+    /// 【为什么用这三个量】`ARAPlaybackRegionProperties` 没有 persistentID
+    /// （`ARAInterface.h:1012-1073`），所以 region 身份在会话内只能用 model-ref key，
+    /// 而 key 跨会话（存档重放）不保证相同。能跨会话稳定的是它引用的两个 persistentID
+    /// 加上播放几何：`audioModificationPersistentID` 在宿主复制/分割一个 item 时会
+    /// 被克隆成新的，`audioSourcePersistentID` 指向同一个文件，播放起止时间则是
+    /// 时间线上的位置。
+    ///
+    /// 【为什么包含播放时间】只靠 (source, modification) 不足以区分同一文件上的多个
+    /// 片段；而 `durationInPlaybackTime` 会随裁剪变化，`startInPlaybackTime` 会随移动
+    /// 变化 —— 两者都在签名里，于是"同一个片段"的判据是"同源、同修改、同位置"。
+    /// 宿主确实移动了它时签名会变，那正是一次需要重新认领的编辑。
+    pub(crate) fn ara_region_signature(
+        source: &str,
+        modification: &str,
+        play_start: f64,
+        play_duration: f64,
+    ) -> String {
+        format!(
+            "ara:{modification}:{source}:{}:{}",
+            play_start.to_bits(),
+            play_duration.to_bits()
+        )
+    }
+
+    /// 登记一次 ARA-only 宿主的**分割**谱系。
+    ///
+    /// 与 `register_split` 同口径（seed 是父段完整窗口、右半段靠包含判定继承），
+    /// 差别只在键：这里用 region 签名而不是 item GUID。
+    pub(crate) fn register_ara_split(
+        &mut self,
+        parent_signature: &str,
+        right_signature: &str,
+        seed: Option<RegionParameters>,
+    ) -> Result<(), String> {
+        if parent_signature == right_signature || parent_signature.is_empty() {
+            return Err("invalid ARA split signature pair".into());
+        }
+        if self.ara_split_parents.len() >= 16384 || self.regions.len() >= 16384 {
+            return Err("ARA split lineage budget exceeded".into());
+        }
+        if let Some(mut seed) = seed {
+            seed.live = false;
+            self.regions
+                .insert(format!("ara-split-basis:{right_signature}"), seed);
+        }
+        self.ara_split_parents
+            .insert(right_signature.to_owned(), parent_signature.to_owned());
+        Ok(())
+    }
+
+    /// 查一个 ARA region 签名的父段签名（分割谱系）。
+    pub(crate) fn ara_split_parent(&self, right_signature: &str) -> Option<&str> {
+        self.ara_split_parents
+            .get(right_signature)
+            .map(String::as_str)
+    }
+
+    /// 登记一次 ARA-only 宿主的**复制**谱系（种子即父段完整参数）。
+    pub(crate) fn register_ara_copy(
+        &mut self,
+        signature: &str,
+        seed: RegionParameters,
+    ) -> Result<(), String> {
+        if signature.is_empty() {
+            return Err("invalid ARA copy signature".into());
+        }
+        if self.ara_copy_seeds.len() >= 16384 {
+            return Err("ARA copy lineage budget exceeded".into());
+        }
+        self.ara_copy_seeds.insert(signature.to_owned(), seed);
+        Ok(())
+    }
+
+    /// 取一个 ARA region 签名的复制种子。
+    pub(crate) fn ara_copy_seed(&self, signature: &str) -> Option<&RegionParameters> {
+        self.ara_copy_seeds.get(signature)
+    }
+
     /// 剪贴板反序列化的seed必须复验并登记内存额度，不能让外部数据绕过source curve预算。
     pub(crate) fn reserve_copy_seed(seed: RegionParameters) -> Result<RegionParameters, String> {
         let mut atlas = Self::default();
@@ -184,6 +289,17 @@ impl ParameterAtlas {
         self.regions
             .values()
             .find(|record| record.live && record.identity.item.as_deref() == Some(parent))
+            .cloned()
+    }
+    /// ARA-only 版 `split_seed`：按 region 签名找父段记录。
+    ///
+    /// 【为什么另写一个而不是合并】`split_seed` 按 item GUID 匹配，而 ARA-only 宿主的
+    /// 记录 `item` 是 `None` —— 合进来会让两条判据在同一次查找里竞争，命中哪一个
+    /// 取决于记录形状而不是宿主类型。分开之后"有 GUID 走 GUID、没有走签名"是显式的。
+    pub(crate) fn ara_split_seed(&self, parent_signature: &str) -> Option<RegionParameters> {
+        self.regions
+            .values()
+            .find(|record| record.live && record.identity.signature == parent_signature)
             .cloned()
     }
     /// 宿主分割可同步重入ARA回流、先缩短左段；保留调用前的父basis供右段继承。
@@ -684,6 +800,13 @@ impl ParameterAtlas {
         {
             return Ok(Some(seed));
         }
+        // 【ARA-only 的复制谱系】没有 item GUID 时（Cubase / Nuendo / Studio One），
+        // 复制种子按 region 签名索引 —— 同一套判定，换一个任何宿主都有的键。
+        if !identity.signature.is_empty() {
+            if let Some(seed) = self.ara_copy_seed(&identity.signature) {
+                return Ok(Some(seed));
+            }
+        }
         let related = self.regions.values().filter(|record| {
             record.identity.source == identity.source
                 && record.identity.modification == identity.modification
@@ -733,6 +856,43 @@ impl ParameterAtlas {
                 .find(|record| record.live && record.identity.key == identity.key)
             {
                 return Ok(Some(record));
+            }
+        }
+        // 【ARA-only 的分割谱系】没有 item GUID 时走签名版：`ara_split_parents` 记的是
+        // "右半段签名 → 父段签名"，父段记录按**签名**匹配而不是 item。
+        //
+        // 【为什么这一层必须在几何兜底之前】Cubase 上报错最多的
+        // `Conflict: ambiguous source parameter ancestry` 就来自几何兜底：两个半段共享
+        // 同一个 (source, modification) 且窗口相邻，兜底层把它们都判成候选。有了显式谱系，
+        // 这里直接命中父段，不再靠猜。
+        if !identity.signature.is_empty() {
+            if let Some(parent_signature) = self.ara_split_parent(&identity.signature) {
+                let parent_signature = parent_signature.to_owned();
+                let candidates = self
+                    .regions
+                    .values()
+                    .filter(|record| {
+                        record.identity.signature == parent_signature
+                            && record.identity.source == identity.source
+                            && record.root == root
+                            && geometry.source_start >= record.current.source_start - 1e-6
+                            && geometry.source_start + geometry.source_duration
+                                <= record.current.source_start
+                                    + record.current.source_duration
+                                    + 1e-6
+                    })
+                    .collect::<Vec<_>>();
+                let live = candidates
+                    .iter()
+                    .copied()
+                    .filter(|record| record.live)
+                    .collect::<Vec<_>>();
+                let candidates = if live.is_empty() { candidates } else { live };
+                match candidates.as_slice() {
+                    [] => {}
+                    [record] => return Ok(Some(*record)),
+                    _ => return Err("Conflict: ambiguous ARA split ancestry".into()),
+                }
             }
         }
         // 【兜底层：没有谱系时按源窗猜祖先 —— 判据必须是**包含**而不是**重叠**】
@@ -1322,6 +1482,7 @@ mod tests {
                 item: Some(item.into()),
                 source: "new-source".into(),
                 modification: "new-mod".into(),
+                signature: String::new(),
             },
         )]);
         let mut pending = ParameterAtlas::default();
@@ -1343,6 +1504,89 @@ mod tests {
             expected.extra_curves["volume"]
         );
     }
+    /// **ARA-only 宿主（无 item GUID）的分割谱系必须按签名命中。**
+    ///
+    /// 【为什么这是回归测试】`find` 的解析顺序此前只认 item GUID：`copy_seeds`、
+    /// 精确 item、`split_parents` 三条路全都要求 `identity.item` 有值，而它在
+    /// Cubase / Nuendo / Studio One 上恒为 `None`（`region_items` 需要原生扩展）。
+    /// 于是每一次分割都落到几何包含兜底 —— 两个半段共享同一个 (source, modification)
+    /// 且窗口相邻，兜底层把它们都判成候选，报
+    /// `Conflict: ambiguous source parameter ancestry`，整份编辑被拒。
+    ///
+    /// 这条测试摆出"有原生扩展时能解析、没有时也能解析"的同一形状，差别只在 item。
+    #[test]
+    fn an_ara_only_split_resolves_by_signature_without_a_host_item_guid() {
+        let original = edited();
+        // 父段的 identity 必须带上签名，`ara_split_seed` 才认得出它 —— 生产路径由
+        // `parameter_identities_locked` 填（见 `DocumentSession`）。
+        let parent_signature = ParameterAtlas::ara_region_signature("source", "mod", 0.0, 1.0);
+        let mut parent_ids = identities();
+        if let Some(identity) = parent_ids.get_mut("clip") {
+            identity.signature = parent_signature.clone();
+        }
+        let atlas = ParameterAtlas::default()
+            .capture(&original, &parent_ids)
+            .unwrap();
+        // 父段（分割前）有曲线，因此有可继承的 seed。
+        assert!(atlas.regions["clip"].live);
+
+        // 一次宿主分割：父段消失，左右两半出现。**都不带 item GUID** —— ARA-only 常态。
+        let right_signature = ParameterAtlas::ara_region_signature("source", "mod", 0.5, 0.5);
+        let mut split = atlas.clone();
+        let seed = split.ara_split_seed(&parent_signature).expect("父段有曲线");
+        split
+            .register_ara_split(&parent_signature, &right_signature, Some(seed))
+            .expect("谱系登记");
+
+        let mut timeline = host(1.5, 0.5, 0.5, 0.5);
+        timeline.clips[0].id = "right".into();
+        timeline.project_sec = 2.;
+        let ids = BTreeMap::from([(
+            "right".to_string(),
+            RegionIdentity {
+                key: 43,
+                item: None,
+                source: "source".into(),
+                modification: "mod".into(),
+                signature: right_signature.clone(),
+            },
+        )]);
+        let followed = split.follow_geometry(&timeline, &ids).unwrap();
+        // 谱系命中父段 ⇒ 右半段继承到曲线，而不是报 ambiguity。
+        assert!(
+            followed.regions.contains_key("right"),
+            "右半段必须拿到一条记录：{:?}",
+            followed.regions.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            split.ara_split_parent(&right_signature),
+            Some(parent_signature.as_str())
+        );
+    }
+
+    /// 没有谱系、也没有 item GUID 时，几何兜底仍然工作（不回归成硬错误）。
+    #[test]
+    fn an_ara_only_region_without_lineage_still_falls_back_to_geometry() {
+        let original = edited();
+        let atlas = ParameterAtlas::default()
+            .capture(&original, &identities())
+            .unwrap();
+        let timeline = host(1., 0.5, 0., 0.5);
+        let ids = BTreeMap::from([(
+            "clip".to_string(),
+            RegionIdentity {
+                key: 1,
+                item: None,
+                source: "source".into(),
+                modification: "mod".into(),
+                signature: ParameterAtlas::ara_region_signature("source", "mod", 0.0, 0.5),
+            },
+        )]);
+        // 一个被父窗口包含的片段：唯一候选 ⇒ 解析成功，不报错。
+        let followed = atlas.follow_geometry(&timeline, &ids).unwrap();
+        assert!(followed.regions.contains_key("clip"));
+    }
+
     /// 连续拆分只沿最近活图的唯一父范围，保留历史父记录但不让它阻塞第二次拆分。
     #[test]
     fn nested_splits_follow_live_ancestry_without_losing_history_or_guessing_overlaps() {
@@ -1364,6 +1608,7 @@ mod tests {
                     item: None,
                     source: "source".into(),
                     modification: "mod".into(),
+                    signature: String::new(),
                 },
             ),
             (
@@ -1373,6 +1618,7 @@ mod tests {
                     item: None,
                     source: "source".into(),
                     modification: "mod".into(),
+                    signature: String::new(),
                 },
             ),
         ]);
@@ -1396,6 +1642,7 @@ mod tests {
                 item: None,
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         );
         next_ids.insert(
@@ -1405,6 +1652,7 @@ mod tests {
                 item: None,
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         );
         let nested = followed.follow_geometry(&next, &next_ids).unwrap();
@@ -1439,6 +1687,7 @@ mod tests {
                 item: None,
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         )])
     }
@@ -1465,6 +1714,7 @@ mod tests {
                 item: Some("item-b".into()),
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         );
         let atlas = ParameterAtlas::default().capture(&initial, &ids).unwrap();
@@ -1584,6 +1834,7 @@ mod tests {
                 item: None,
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         );
         let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
@@ -1620,6 +1871,7 @@ mod tests {
                 item: None,
                 source: "source".into(),
                 modification: "other-mod".into(),
+                signature: String::new(),
             },
         );
         let atlas = ParameterAtlas::default().capture(&initial, &ids).unwrap();
@@ -1734,6 +1986,7 @@ mod tests {
                 item: Some("{55555555-5555-5555-5555-555555555555}".into()),
                 source: "source".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         );
         let mut atlas = ParameterAtlas::default().capture(&initial, &ids).unwrap();
@@ -1751,6 +2004,7 @@ mod tests {
                 item: Some(right.into()),
                 source: "source".into(),
                 modification: "new-mod".into(),
+                signature: String::new(),
             },
         )]);
         let followed = atlas.follow_geometry(&split, &right_ids).unwrap();

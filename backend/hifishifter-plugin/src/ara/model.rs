@@ -126,6 +126,7 @@ struct RegionFrame {
     key: u64,
     item: Option<String>,
     audio_source: String,
+    audio_modification: String,
     mod_start: f64,
     mod_dur: f64,
     play_start: f64,
@@ -133,6 +134,20 @@ struct RegionFrame {
 }
 
 impl RegionFrame {
+    /// 跨会话稳定的 region 签名（见 `ParameterAtlas::ara_region_signature`）。
+    ///
+    /// 【为什么分割谱系需要它】`register_host_split` 此前要求三个半段都有 item GUID，
+    /// 而 GUID 只在有原生扩展时才拿得到 —— Cubase 上恒为空，于是每次分割都退到几何
+    /// 兜底，兄弟半段互相污染。签名只用 ARA 自己给的量，任何宿主都能算。
+    fn signature(&self) -> String {
+        crate::editor::parameter_atlas::ParameterAtlas::ara_region_signature(
+            &self.audio_source,
+            &self.audio_modification,
+            self.play_start,
+            self.play_dur,
+        )
+    }
+
     /// 身份判据：同一个 region 在两次映射之间几何不变时视为"同一帧的同一个对象"。
     ///
     /// 【为什么不用 region key】`allocate_region` 复用已销毁的最小槽位，分割后的左半段
@@ -274,6 +289,7 @@ impl ModelHandle {
                     key,
                     item: items.get(&key).cloned(),
                     audio_source: region.audio_source_persistent_id.clone(),
+                    audio_modification: region.audio_modification_persistent_id.clone(),
                     mod_start: region.start_in_modification_time,
                     mod_dur: region.duration_in_modification_time,
                     play_start: region.start_in_playback_time,
@@ -349,12 +365,49 @@ impl ModelHandle {
         left: &RegionFrame,
         right: &RegionFrame,
     ) {
+        // 【ARA-only 宿主的谱系】没有 item GUID 时（Cubase / Nuendo / Studio One 的常态）
+        // 改按 region 签名登记。此前这里直接 return，于是那些宿主上每次分割都退到几何
+        // 兜底，兄弟半段被当成合法祖先 —— 用户看到
+        // `Conflict: ambiguous source parameter ancestry`，或曲线整体平移一个分割长度。
+        //
+        // 【为什么签名版也要求 seed】与 item 版同口径：seed 是父段**完整**窗口，
+        // 右半段靠包含判定继承。父段没有曲线记录时没有可继承的东西，退回几何兜底
+        // 与改动前完全一致 —— 宁可不登记，也不要造一条解析不出祖先的假谱系。
+        let has_guids = parent.item.is_some() && left.item.is_some() && right.item.is_some();
+        if !has_guids {
+            let mut edits = self.session.edits.lock_or_recover();
+            if let Some(seed) = edits.atlas.ara_split_seed(&parent.signature()) {
+                let seed = seed.clone();
+                match edits.atlas.register_ara_split(
+                    &parent.signature(),
+                    &right.signature(),
+                    Some(seed),
+                ) {
+                    Ok(()) => edits.revision = edits.revision.saturating_add(1),
+                    Err(error) => log::warn!("[ara] ARA split lineage not registered: {error}"),
+                }
+            }
+            drop(edits);
+            // 媒体派生谱系与曲线谱系解耦：右半段的源与父段是同一个文件，
+            // 父段已授权 ⇒ 右半段立刻有波形（与 item 版同一理由）。
+            // `split_media_from` 按 clip id 索引，而 clip id 由 region key 派生
+            // （见 `ara::mapping::MappingIdentities`）—— 两边必须用同一个算式。
+            self.session.split_media_from.lock_or_recover().insert(
+                format!("ara-region-{}", right.key),
+                format!("ara-region-{}", parent.key),
+            );
+            log::info!(
+                "[ara] ARA split detected: parent=ara-region-{} left=ara-region-{} right=ara-region-{}",
+                parent.key, left.key, right.key
+            );
+            return;
+        }
         let (Some(parent_item), Some(left_item), Some(right_item)) = (
             parent.item.as_deref(),
             left.item.as_deref(),
             right.item.as_deref(),
         ) else {
-            // 认不出宿主 item 的 region（还在等清单认领）不能登记：谱系按 item GUID 索引。
+            // 有原生扩展但清单还没认领：此时两个系统都给不出稳定键，只能等下一次。
             return;
         };
         let mut edits = self.session.edits.lock_or_recover();
@@ -1718,6 +1771,7 @@ mod tests {
             key: 0,
             item: Some(item.to_string()),
             audio_source: audio_source.to_string(),
+            audio_modification: "mod".to_string(),
             mod_start,
             mod_dur,
             play_start,
@@ -1794,6 +1848,7 @@ mod tests {
                 item: Some(PARENT.to_string()),
                 source: "src".into(),
                 modification: "mod".into(),
+                signature: String::new(),
             },
         )]);
         model.session.edits.lock_or_recover().atlas = ParameterAtlas::default()

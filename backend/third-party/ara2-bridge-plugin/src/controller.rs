@@ -1559,6 +1559,15 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 properties.transformation_flags() as u32,
             );
             if !self.factory_playback_transformations.contains(requested) {
+                // 【本地补丁】静默丢弃更新等于"宿主的编辑莫名不生效"。此前这里直接
+                // `return`，而 create 路径至少会返回 null 让宿主看见。记一行现场数字：
+                // 宿主要的位 vs 我们广告的位，下一步该改哪一边一目了然。
+                log::warn!(
+                    "[ara] updatePlaybackRegion dropped: the host requested transformation \
+                     flags 0x{:X}, which are not a subset of the advertised 0x{:X}",
+                    requested.bits(),
+                    self.factory_playback_transformations.bits()
+                );
                 return;
             }
             let sequence = if let Some(sequence) = properties.region_sequence() {

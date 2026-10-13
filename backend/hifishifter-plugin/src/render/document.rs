@@ -396,6 +396,15 @@ impl DocumentSession {
                         item: self.region_items.lock_or_recover().get(&key).cloned(),
                         source: region.audio_source_persistent_id.clone(),
                         modification: region.audio_modification_persistent_id.clone(),
+                        // 跨会话签名：只用 ARA 自己给的量，ARA-only 宿主上也有值
+                        // （`item` 在那种宿主上恒为 `None`，谱系全靠它）。
+                        signature:
+                            crate::editor::parameter_atlas::ParameterAtlas::ara_region_signature(
+                                &region.audio_source_persistent_id,
+                                &region.audio_modification_persistent_id,
+                                clip.start_sec,
+                                clip.length_sec,
+                            ),
                     },
                 ))
             })
