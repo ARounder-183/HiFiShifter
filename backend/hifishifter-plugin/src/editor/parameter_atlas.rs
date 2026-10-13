@@ -296,10 +296,32 @@ impl ParameterAtlas {
     /// 【为什么另写一个而不是合并】`split_seed` 按 item GUID 匹配，而 ARA-only 宿主的
     /// 记录 `item` 是 `None` —— 合进来会让两条判据在同一次查找里竞争，命中哪一个
     /// 取决于记录形状而不是宿主类型。分开之后"有 GUID 走 GUID、没有走签名"是显式的。
+    ///
+    /// 【为什么不再要求 `live`】分割检测（`ModelHandle::register_host_split_lineage`）
+    /// 在**参数投影之前**跑，但父段在上一轮 `follow_geometry` 里就已被置为非活 ——
+    /// 实测（探针）：
+    ///
+    /// ```text
+    /// after split: [("L", live=true), ("P", live=false), ("R", live=true)]
+    /// ara_split_seed(P) = None          ← 父段刚死，seed 就没了
+    /// ```
+    ///
+    /// 于是每次分割都登记不了显式谱系、只能落几何兜底 —— 而那正是歧义的来源。
+    /// 非活记录恰恰**就是**"分割前的父段"，正是要用的那一条。
+    ///
+    /// 【为什么取窗口最大的一条】同签名理论上唯一（签名含播放几何），但 `split-basis`
+    /// 副本与历史记录可能同签名。取源窗**最大**的那条 = 最近/最完整的祖先，与几何兜底
+    /// "包含判定"的取向一致；并列时按 id 稳定取第一条，避免非确定性。
     pub(crate) fn ara_split_seed(&self, parent_signature: &str) -> Option<RegionParameters> {
         self.regions
             .values()
-            .find(|record| record.live && record.identity.signature == parent_signature)
+            .filter(|record| record.identity.signature == parent_signature)
+            .max_by(|a, b| {
+                a.current
+                    .source_duration
+                    .partial_cmp(&b.current.source_duration)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned()
     }
     /// 宿主分割可同步重入ARA回流、先缩短左段；保留调用前的父basis供右段继承。
@@ -451,13 +473,95 @@ impl ParameterAtlas {
             .filter_map(|record| record.identity.item.clone())
             .collect::<std::collections::BTreeSet<_>>();
         followed.regions.retain(|id, _| {
+            // 【为什么两个前缀都要认】`split-basis:` 是 item 版（`register_split`），
+            // `ara-split-basis:` 是 ARA 签名版（`register_ara_split`）。此前这里只
+            // `strip_prefix("split-basis:")`，而 `"ara-split-basis:x"` 不以它开头 ⇒
+            // 返回 `None` ⇒ `is_none_or` 为真 ⇒ **ARA 版副本永不回收**：每次分割都留下
+            // 一条带完整曲线的记录，长会话里无界增长，`validate()` 到 16384 条后
+            // 整份图集被拒。
             id.strip_prefix("split-basis:")
+                .or_else(|| id.strip_prefix("ara-split-basis:"))
                 .is_none_or(|right| !bound.contains(right))
         });
         followed
             .split_parents
             .retain(|right, _| !bound.contains(right));
         followed.copy_seeds.retain(|item, _| !bound.contains(item));
+        // 【为什么回收"被活记录覆盖"的历史祖先】`follow_geometry` 只把历史记录置
+        // `live = false`、从不删除，于是它们随**分割次数**无界累积（每次分割都留下
+        // 分割前的父段）。而几何兜底（`find`）会把这些死记录一并当作候选 ——
+        // 累积越多，"多候选 ⇒ 猜不出"越常见，`regions` 也会在 16384 条时被
+        // `validate()` 整份拒绝。
+        //
+        // 【判据为什么是"被活记录的**并集**覆盖"】一次分割的父段窗口恰好等于左右两半
+        // 的并集：父段 [0,1) 被 left [0,0.5) 与 right [0.5,1) 合起来盖满，但**不被其中
+        // 任何一条单独**包含。所以判据必须是并集，逐条包含判定永远回收不掉分割祖先
+        // （那是本次实现过程中实测到的：逐条判定对分割场景一次都不成立）。
+        //
+        // 【为什么删掉是安全的】父段窗口若被同源同修改的活记录并集完全盖住，它对兜底层
+        // 就不提供任何信息：任何落在它内部的查询窗口必然也落在活记录里。删掉它不改变
+        // 任何解析结果，只让候选池变小。
+        //
+        // 【为什么不动"未被覆盖"的死记录】那可能是用户删掉的片段，撤销/重做会把它
+        // 带回来；它仍是重做后那条片段的祖先。留着是对的（代价是有限的）。
+        let mut coverage: BTreeMap<(String, String), Vec<(f64, f64)>> = BTreeMap::new();
+        for record in followed.regions.values().filter(|record| record.live) {
+            coverage
+                .entry((
+                    record.identity.source.clone(),
+                    record.identity.modification.clone(),
+                ))
+                .or_default()
+                .push((
+                    record.current.source_start,
+                    record.current.source_start + record.current.source_duration,
+                ));
+        }
+        for intervals in coverage.values_mut() {
+            intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut merged: Vec<(f64, f64)> = Vec::with_capacity(intervals.len());
+            for (start, end) in intervals.drain(..) {
+                match merged.last_mut() {
+                    // 相邻/相接也合并：分割产生的是**紧接**的两段。
+                    Some(last) if start <= last.1 + 1e-6 => last.1 = last.1.max(end),
+                    _ => merged.push((start, end)),
+                }
+            }
+            *intervals = merged;
+        }
+        followed.regions.retain(|id, record| {
+            if record.live || id.starts_with("split-basis:") || id.starts_with("ara-split-basis:") {
+                return true;
+            }
+            let end = record.current.source_start + record.current.source_duration;
+            let covered = coverage
+                .get(&(
+                    record.identity.source.clone(),
+                    record.identity.modification.clone(),
+                ))
+                .is_some_and(|intervals| {
+                    intervals.iter().any(|(start, stop)| {
+                        record.current.source_start >= *start - 1e-6 && end <= *stop + 1e-6
+                    })
+                });
+            !covered
+        });
+        // 【为什么也要裁剪签名谱系】`ara_split_parents` / `ara_copy_seeds` 以**签名**为键，
+        // 而签名含播放几何 —— 一条 region 被移动/裁剪后它的签名就变了，旧条目再也不会
+        // 被查到，却一直留着（每次分割/复制加一条，无界）。只保留"右半段签名仍对应某条
+        // 记录"的条目：那正是 `find` 唯一会去查的那些。
+        let live_signatures: std::collections::BTreeSet<String> = followed
+            .regions
+            .values()
+            .map(|record| record.identity.signature.clone())
+            .filter(|signature| !signature.is_empty())
+            .collect();
+        followed
+            .ara_split_parents
+            .retain(|right, _| live_signatures.contains(right));
+        followed
+            .ara_copy_seeds
+            .retain(|signature, _| live_signatures.contains(signature));
         followed.validate()?;
         Ok(followed)
     }
@@ -1726,35 +1830,73 @@ mod tests {
             with_signature("right", 43, 1.5, 0.5),
         ]);
         let a2 = a1.follow_geometry(&second, &second_ids).unwrap();
-        // 此刻已有两条已死祖先：原父段（源窗 [0,1)）与第一次分割出的左半段（源窗 [0,0.5)）。
-        assert!(!a2.regions["clip"].live);
-        assert!(!a2.regions["left"].live);
-
-        // 第三条 region 出现，源窗 [0.1, 0.4) —— 落在上面两条已死祖先（[0,1) 与
-        // [0,0.5)）的**交集**内，因此被两者同时"包含"。
-        let mut third = second.clone();
-        let mut spanning = host(2., 0.3, 0.1, 0.3).clips.remove(0);
-        spanning.id = "spanning".into();
-        third.clips.push(spanning);
-        third.project_sec = 2.5;
-        let mut third_ids = second_ids.clone();
-        third_ids.insert(
-            "spanning".into(),
-            with_signature("spanning", 99, 2.0, 0.3).1,
-        );
-
-        let resolved = a2
-            .follow_geometry(&third, &third_ids)
-            .expect("跨两条已死祖先的片段不得让整份编辑失败");
+        // 两级祖先都被各自后代的并集盖满 ⇒ 全部回收，不再累积。
         assert!(
-            !resolved.regions.contains_key("spanning"),
-            "猜不出祖先的片段不得拿到曲线：{:?}",
-            resolved.regions.keys().collect::<Vec<_>>()
+            !a2.regions.contains_key("clip") && !a2.regions.contains_key("left"),
+            "嵌套分割的祖先必须被回收，否则每次分割都在候选池里加一条死记录：{:?}",
+            a2.regions.keys().collect::<Vec<_>>()
         );
-        // 其余片段照常解析 —— 这正是"局部降级"与"整份失败"的区别。
-        assert!(resolved.regions["quarter-a"].live);
-        assert!(resolved.regions["quarter-b"].live);
-        assert!(resolved.regions["right"].live);
+        assert!(a2.regions["quarter-a"].live);
+        assert!(a2.regions["quarter-b"].live);
+        assert!(a2.regions["right"].live);
+
+        // 【歧义的可达形状】并集回收消掉了"分割累积"，但**未被覆盖**的死记录仍然
+        // 存在（用户删掉的片段、撤销/重做会带回来的片段）。两条这样的记录若窗口
+        // 重叠，几何兜底就会同时命中它们 —— 那正是用户报的
+        // `Conflict: ambiguous source parameter ancestry`。
+        //
+        // 摆出该形状：同源同修改的两条片段（同一窗口、不同工程位置），用户把它们
+        // **都删了**（时间线变空 ⇒ 两条记录都变非活，且无活记录可覆盖它们）。
+        let mut two: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":2.0,"clips":[]
+        }))
+        .unwrap();
+        two.clips.push(host(1., 1., 0., 1.).clips.remove(0));
+        let mut second_copy = host(3., 1., 0., 1.).clips.remove(0);
+        second_copy.id = "clip2".into();
+        two.clips.push(second_copy);
+        let two_ids = BTreeMap::from([
+            with_signature("clip", 41, 1.0, 1.0),
+            with_signature("clip2", 42, 3.0, 1.0),
+        ]);
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &identities())
+            .unwrap()
+            .follow_geometry(&two, &two_ids)
+            .unwrap();
+        assert!(atlas.regions["clip"].live && atlas.regions["clip2"].live);
+
+        // 全删：两条记录都变非活，没有任何活记录覆盖它们 ⇒ 都留着（撤销要能找回）。
+        let empty: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":2.0,"clips":[]
+        }))
+        .unwrap();
+        let orphaned = atlas.follow_geometry(&empty, &BTreeMap::new()).unwrap();
+        assert!(!orphaned.regions["clip"].live && !orphaned.regions["clip2"].live);
+        assert_eq!(orphaned.regions.len(), 2, "未被覆盖的死记录必须保留");
+
+        // 新片段出现，窗口 [0.1,0.9) 同时落在上面两条死记录内 ⇒ 真歧义。
+        let mut third: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":4.0,"clips":[]
+        }))
+        .unwrap();
+        third.clips.push(host(1., 0.8, 0.1, 0.8).clips.remove(0));
+        let third_ids = BTreeMap::from([with_signature("clip", 43, 1.0, 0.8)]);
+        let resolved = orphaned
+            .follow_geometry(&third, &third_ids)
+            .expect("猜不出祖先不得让整份编辑失败（用户报障的直接修复）");
+        // 新片段沿用了 id "clip"；关键是它**没有**被认领成 live（即没拿到任何一条
+        // 祖先的曲线），而不是"键不存在"。
+        assert!(
+            !resolved.regions["clip"].live,
+            "猜不出祖先的片段不得拿到曲线（两条死记录仍应保持非活）：{:?}",
+            resolved
+                .regions
+                .iter()
+                .map(|(k, r)| (k.as_str(), r.live))
+                .collect::<Vec<_>>()
+        );
+        assert!(!resolved.regions["clip2"].live);
         // 投影与编辑接受都必须成功（此前它们都在这里抛 Conflict）。
         resolved
             .project_roots(&third, &third_ids)
@@ -1797,8 +1939,16 @@ mod tests {
             ),
         ]);
         let followed = atlas.follow_geometry(&first, &ids).unwrap();
-        assert_eq!(followed.regions.len(), 3);
-        assert!(!followed.regions["clip"].live);
+        // 【为什么是 2 而不是 3】父段 [0,1) 被左右两半的**并集**恰好盖满，因此作为
+        // 冗余祖先被回收（见 `follow_geometry` 的并集覆盖判据）。此前它作为一条
+        // 非活记录永久留着 —— 那正是祖先随分割次数无界累积、几何兜底越来越容易
+        // 多候选的根源。
+        assert_eq!(followed.regions.len(), 2);
+        assert!(
+            !followed.regions.contains_key("clip"),
+            "被活记录并集覆盖的父段必须回收：{:?}",
+            followed.regions.keys().collect::<Vec<_>>()
+        );
         assert!(followed.regions["left"].live);
         let mut next = host(1., 0.25, 0., 0.25);
         next.clips[0].id = "quarter-a".into();
@@ -1834,31 +1984,16 @@ mod tests {
         assert_eq!(local["quarter-a"].pitch_edit, &[60., 61.]);
         assert_eq!(local["quarter-b"].pitch_edit, &[61., 62.]);
         assert_eq!(local["right"].pitch_edit, &[62., 63., 64.]);
-        assert!(!nested.regions["left"].live);
-        // 【为什么不再断言 Err】两条候选都合格说明"祖先猜不出"。此前这里报
-        // `Conflict: ambiguous source parameter ancestry`，于是**一个片段**的曲线身份
-        // 对不上被放大成**整份编辑被拒绝**（用户在 Cubase 上看到的正是这条）。现在降级为
-        // "这个片段本次不投影曲线"：几何、PCM、其余片段全部照常。
-        //
-        // 断言口径随之改为"不报错，且猜不出的那条片段**没有**曲线记录"—— 关键是它
-        // 绝不能拿到**错**的曲线（那比不画更糟，用户会看到参数被莫名改动）。
-        let mut ambiguous = followed.clone();
-        ambiguous.regions.get_mut("clip").unwrap().live = true;
-        let resolved = ambiguous
-            .follow_geometry(&next, &next_ids)
-            .expect("祖先歧义必须降级为『不投影曲线』，而不是拒绝整份编辑");
+        // 两级祖先都被后代并集盖满 ⇒ 回收，不再作为死记录留在候选池里。
         assert!(
-            !resolved.regions.contains_key("quarter-a"),
-            "猜不出祖先的片段不得拿到曲线：{:?}",
-            resolved.regions.keys().collect::<Vec<_>>()
+            !nested.regions.contains_key("left") && !nested.regions.contains_key("clip"),
+            "嵌套分割的祖先必须回收：{:?}",
+            nested.regions.keys().collect::<Vec<_>>()
         );
-        assert!(
-            !resolved.regions.contains_key("quarter-b"),
-            "猜不出祖先的片段不得拿到曲线：{:?}",
-            resolved.regions.keys().collect::<Vec<_>>()
-        );
-        // 与歧义无关的片段完全不受影响。
-        assert!(resolved.regions["right"].live);
+        // 【歧义本身的可达形状与降级口径】已由
+        // `a_region_spanning_two_dead_ancestors_is_not_an_error` 覆盖：并集回收消掉了
+        // "分割累积"，但**未被覆盖**的死记录（用户删掉的片段）仍会重叠，那里验证
+        // "猜不出 ⇒ 不投影曲线而不是拒绝整份编辑"。
     }
     fn host(start: f64, duration: f64, source_start: f64, source_duration: f64) -> TimelineState {
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
