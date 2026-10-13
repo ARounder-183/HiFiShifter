@@ -414,6 +414,18 @@ impl ModelHandle {
             .filter(|(index, _)| !self.destroyed_regions.contains(index))
             .map(|(_, region)| region)
             .collect();
+        // 【为什么要在这里注入工程速率】ARA 本体没有文档采样率（`ARADocumentProperties`
+        // 只有 `structSize` 与 `name`），而映射层必须有它才能把宿主的"工程速率秒"折算成
+        // 源自己的秒 —— 否则 48 kHz 素材进 44.1 kHz 工程时 `playback_rate` 恒为 1，
+        // 素材按自身速率播完、剩下的工程时间留白（用户听感：ARA 前后不一致）。
+        // 唯一权威来源是 VST3 `setupProcessing` 的 `ProcessSetup::sampleRate`，
+        // 它由各 renderer 实例持有，取**第一个非零**值（同一文档的所有 renderer
+        // 共享同一份 companion API 速率，不一致本身就是宿主错误）。
+        document.project_sample_rate = session
+            .renderer_owners()
+            .into_iter()
+            .map(|owner| owner.setup_sample_rate())
+            .find(|rate| *rate > 0.0);
         match crate::ara::mapping::ara_document_to_timeline_reporting(&document) {
             Ok(outcome) => {
                 let crate::ara::mapping::MappingOutcome {

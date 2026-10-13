@@ -22,6 +22,13 @@ pub struct AraDocument {
     /// 宿主给出的文档名。
     #[serde(default, rename = "documentName")]
     pub document_name: String,
+    /// **工程（文档）采样率**，由宿主经 ARA 的 companion API（VST3 `ProcessSetup`）
+    /// 通报。ARA 本体的 `ARADocumentProperties` 只有 `structSize` 与 `name`，没有采样率，
+    /// 因此这一项是插件从 VST3 侧补进来的，**不是** ARA 结构体字段。
+    ///
+    /// `None` / `0` / 非有限值都当作"未知"，映射层随即退回推导或夹窗口。
+    #[serde(default, skip)]
+    pub project_sample_rate: Option<f64>,
     /// 宿主托管的音频源。
     #[serde(default, rename = "audioSources")]
     pub audio_sources: Vec<AraAudioSource>,
@@ -246,6 +253,70 @@ pub fn ara_document_from_json(text: &str) -> Result<AraDocument, MappingError> {
     Ok(serde_json::from_str(text)?)
 }
 
+/// 可接受的工程采样率区间。与 `render/source.rs` 的素材读取门保持一致，
+/// 避免一边拒绝、一边又把它当成权威速率。
+const PLAUSIBLE_SAMPLE_RATE_RANGE: std::ops::RangeInclusive<f64> = 8000.0..=384_000.0;
+
+/// 解析出的工程采样率，连同它是怎么来的。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectRate {
+    /// 工程采样率（Hz）。
+    pub rate: f64,
+    /// 来源，供日志与取证。
+    pub origin: ProjectRateOrigin,
+}
+
+/// 工程采样率的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectRateOrigin {
+    /// 宿主经 ARA companion API（VST3 `ProcessSetup`）通报 —— 唯一权威来源。
+    Host,
+    /// 拿不到任何信号。
+    Unknown,
+}
+
+/// 解析工程采样率。
+///
+/// 【为什么需要它】素材采样率与工程采样率不同时，宿主把
+/// `durationInModificationTime` 按**工程**速率折算（实测 Cubase 15：48 kHz / 1526332 帧
+/// 素材放进 44.1 kHz 工程，给出 `durationMod = durationPlay = 34.610703`，而
+/// 34.610703 × 44100 恰好等于源帧数）。映射层若把修改时长当**源**速率秒，就会多要
+/// 8.2% 的素材，`playback_rate` 也恒等于 1 —— 用户听感是"ARA 前后不一致"。
+///
+/// ARA 本体给不出这个速率：`ARADocumentProperties` 只有 `structSize` 与 `name`
+/// （`ARAInterface.h:670-682`），全 SDK 唯一的 `sampleRate` 在
+/// `ARAAudioSourceProperties` 上（`:856`），那是**源**速率。唯一权威来源是 ARA 的
+/// companion API —— 插件侧就是 VST3 `setupProcessing` 的 `ProcessSetup::sampleRate`。
+///
+/// 【为什么没有"推导"这一级】曾经有一级 `sampleCount / durationMod` 的推导，已删除。
+/// 它在数学上**不可识别**：
+///
+/// ```text
+/// 源跨度（源秒） = durPlay × playback_rate
+///              = durPlay × (durMod / durPlay) × (D / sr)
+///              = durMod × D / sr = sampleCount / sr      ← 与 D 无关，恒等式
+/// ```
+///
+/// 也就是说，"素材率 ≠ 工程率的整条 region"与"被裁剪过的 region"给出的数据**完全一样**，
+/// 任何判据都无法区分。真实反例：REAPER 夹具 44100 Hz / 88200 帧，region 取 0.5 s，
+/// 推导给出 176400 Hz 并据此把源窗口放大 4 倍，参数曲线锚点随之错位。
+/// 宁可没有校正（退回夹窗口、保音高），也不要一个会把未裁剪素材放大四倍的假信号。
+pub fn resolve_project_rate(doc: &AraDocument) -> ProjectRate {
+    if let Some(rate) = doc
+        .project_sample_rate
+        .filter(|rate| rate.is_finite() && PLAUSIBLE_SAMPLE_RATE_RANGE.contains(rate))
+    {
+        return ProjectRate {
+            rate,
+            origin: ProjectRateOrigin::Host,
+        };
+    }
+    ProjectRate {
+        rate: 0.0,
+        origin: ProjectRateOrigin::Unknown,
+    }
+}
+
 /// 先导映射尚未读取ARA Tempo Map；插件层再叠加有效VST3宿主tempo，初始用本体默认值。
 pub const fn default_bpm() -> f64 {
     120.0
@@ -259,10 +330,51 @@ pub fn source_sample_rates(doc: &AraDocument) -> Vec<u32> {
         .collect()
 }
 
-/// 样本里是否存在"两个时长不等"的 region —— 即 ARA 是否真的表达了拉伸。
+/// 一条 region 的播放速率。
+///
+/// 【为什么不能只用时长比值】`durationInModificationTime` 与 `durationInPlaybackTime`
+/// 同在**工程**速率域，它们的比值只表达"宿主自己算出的拉伸"，**不含**素材率与工程率之差。
+/// 素材 48 kHz、工程 44.1 kHz 且宿主没做拉伸时比值是 1，真实速率却是 44100/48000：
+/// 31.7986 s 的源内容要铺满 34.6107 s 的工程时间。缺了 `project_rate / source_rate` 这一项，
+/// 素材被按自身速率播完、剩下的工程时间留白，用户听感即"ARA 前后不一致"。
+///
+/// 拿不到工程速率时（`project_rate` 为 0 / 非有限）**不猜**，按宿主比值原样返回，
+/// 由调用方走夹窗口降级。
+fn region_playback_rate(region: &AraPlaybackRegion, source_rate: f64, project_rate: f64) -> f64 {
+    if !(region.duration_in_playback_time.is_finite() && region.duration_in_playback_time > 0.0) {
+        return 1.0;
+    }
+    let host_ratio = region.duration_in_modification_time / region.duration_in_playback_time;
+    if !host_ratio.is_finite() {
+        return 1.0;
+    }
+    if !(project_rate.is_finite() && project_rate > 0.0)
+        || !(source_rate.is_finite() && source_rate > 0.0)
+    {
+        return host_ratio;
+    }
+    let rate = host_ratio * (project_rate / source_rate);
+    if rate.is_finite() {
+        rate
+    } else {
+        host_ratio
+    }
+}
+
+/// 样本里是否存在真正的播放速率偏离 1 —— 即 ARA 是否真的表达了拉伸。
+///
+/// 【为什么不能直接比较两个时长】宿主按工程速率折算修改时长时（见 [`resolve_project_rate`]），
+/// 两个时长会**相等**而真实速率不是 1。那条路径上时长比较给出 false，调用方据此走"直通"
+/// 绕过内核拉伸，音频就是错的。所以这里用映射层同一条速率算式。
 pub fn has_observed_time_stretch(doc: &AraDocument) -> bool {
+    let project_rate = resolve_project_rate(doc).rate;
     doc.playback_regions.iter().any(|region| {
-        (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9
+        let source_rate = doc
+            .audio_sources
+            .iter()
+            .find(|source| source.persistent_id == region.audio_source_persistent_id)
+            .map_or(0.0, |source| source.sample_rate);
+        (region_playback_rate(region, source_rate, project_rate) - 1.0).abs() > 1e-9
     })
 }
 
@@ -393,6 +505,7 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
 pub fn ara_document_to_timeline_reporting(
     doc: &AraDocument,
 ) -> Result<MappingOutcome, MappingError> {
+    let project = resolve_project_rate(doc);
     let sources: HashMap<&str, &AraAudioSource> = doc
         .audio_sources
         .iter()
@@ -465,7 +578,10 @@ pub fn ara_document_to_timeline_reporting(
             continue;
         }
 
-        let playback_rate = region.duration_in_modification_time / region.duration_in_playback_time;
+        // 【速率】宿主声明的时长比值，再乘"工程速率 / 源速率"的校正。后者修正的是
+        // "宿主按工程速率折算修改时长"这一事实（见 `region_playback_rate`）：
+        // 48 kHz 素材进 44.1 kHz 工程且宿主不拉伸时，比值 1 × 44100/48000 = 0.91875。
+        let playback_rate = region_playback_rate(region, source.sample_rate, project.rate);
         let clip_id = format!("ara-clip-{}", index + 1);
         let take_id = format!("{clip_id}-take-1");
         let clip_name = region
@@ -474,32 +590,43 @@ pub fn ara_document_to_timeline_reporting(
             .or_else(|| source.name.clone())
             .unwrap_or_else(|| clip_id.clone());
 
-        // 【为什么必须把源窗口夹到源的真实长度】宿主给出的修改时长时间可以**超出源本身**，
-        // 而这不是它的错：素材采样率与工程采样率不同时（实测 Cubase 15：48kHz 素材放进
-        // 44.1kHz 工程），宿主把 `durationInModificationTime` 按**工程**速率折算 ——
-        // 现场读数为 `durationMod=durationPlay=34.610703`，而 34.610703 × 44100 = 1526332
-        // 恰好等于源帧数；乘**源**速率 48000 则得 1661314，凭空多出 8.2%。
+        // 【源窗口】宿主给出的修改时长时间可以**超出源本身**，而这不是它的错：素材采样率
+        // 与工程采样率不同时，宿主把 `durationInModificationTime` 按**工程**速率折算 ——
+        // 实测 Cubase 15：48 kHz / 1526332 帧素材放进 44.1 kHz 工程，现场读数是
+        // `durationMod = durationPlay = 34.610703`，而 34.610703 × 44100 恰好等于源帧数；
+        // 乘**源**速率 48000 则得 1661314，凭空多出 8.2%。
         //
-        // 此前这段越界一路带到渲染校验（`render/snapshot.rs` 用源速率换算），被
-        // `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：整条时间线一条片段都
-        // 发布不出来，用户看到的是"尚未应用：unsupported host region: InvalidGeometry"。
-        // 一个越界的源窗口绝不该赔上整条时间线。
+        // 【有工程速率时按速率折算，而不是夹掉】`playback_rate` 已经把 44100/48000 带上，
+        // 内核消费的源跨度是 `durationPlay × playback_rate` = 34.610703 × 0.91875 =
+        // 31.7986 s，恰好等于整条源 —— **不多要一帧，也不少要一帧**。此时再夹到
+        // `duration_seconds` 是恒等的，所以只在拿不到速率时才需要夹。
         //
-        // 【为什么夹到源长度，而不是按工程速率重算】夹是**保音高**的：源按自身速率播放，
-        // 缺的部分留白（ARA 对"读到源尾之后"的定义就是静音，宿主自己的 reader 也这么
-        // 返回）。按工程速率重算会让源 1:1 消费、整体降调 8.2%，那是另一种音乐结果，
-        // 不能在缺少宿主意图证据时替用户决定。宿主确实给出 1:1 证据时（时长差表达了
-        // 拉伸）`playback_rate` 已经把倍率带上了，与这里无关。
+        // 【为什么夹而不是报错】拿不到速率时（宿主没通报、也推导不出），夹是**保音高**的：
+        // 源按自身速率播放，缺的部分留白（ARA 对"读到源尾之后"的定义就是静音）。此前这段
+        // 越界一路带到渲染校验，被 `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：
+        // 整条时间线一条片段都发布不出来，用户看到"尚未应用：unsupported host region:
+        // InvalidGeometry"。一个越界的源窗口绝不该赔上整条时间线。
         //
-        // 【为什么只在时长已知时才夹】`duration_seconds` 由 `sampleCount / sampleRate`
-        // 推出，宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条
-        // region 都夹成空、进而全部跳过 —— 那比原来的致命拒绝还糟。
+        // 【为什么只在时长已知时才夹】`duration_seconds` 由 `sampleCount / sampleRate` 推出，
+        // 宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条 region 都夹成
+        // 空、进而全部跳过 —— 那比原来的致命拒绝还糟。
+        //
+        // 【有工程速率时先折算再判断】宿主给的 `durationInModificationTime` 是**工程**速率秒，
+        // 内核消费的源跨度是 `durationPlay × playback_rate`。速率已知时这个乘积恰好落在源内
+        // （Cubase 现场：34.610703 × 0.91875 = 31.7986 = 整条源），**不该夹** ——
+        // 夹了反而丢掉真实内容。所以判据从"声明窗口 vs 源长度"换成"折算后的窗口 vs 源长度"。
         let declared_end = region.start_in_modification_time + region.duration_in_modification_time;
-        let known_duration = source.duration_seconds > 0.0;
-        let source_span_end = if known_duration {
-            declared_end.min(source.duration_seconds)
+        let rate_known = project.rate > 0.0 && playback_rate.is_finite() && playback_rate > 0.0;
+        let consumed_end = if rate_known {
+            region.start_in_modification_time + region.duration_in_playback_time * playback_rate
         } else {
             declared_end
+        };
+        let known_duration = source.duration_seconds > 0.0;
+        let source_span_end = if known_duration {
+            consumed_end.min(source.duration_seconds)
+        } else {
+            consumed_end
         };
         let source_span_start = if known_duration {
             region.start_in_modification_time.min(source_span_end)
@@ -515,13 +642,13 @@ pub fn ara_document_to_timeline_reporting(
             });
             continue;
         }
-        if source_span_end < declared_end {
+        if source_span_end < consumed_end {
             log::warn!(
-                "[ara] playback_region #{index}: host modification window [{:.6}, {:.6}] exceeds the \
+                "[ara] playback_region #{index}: consumed source window [{:.6}, {:.6}] exceeds the \
                  source ({:.6}s at {} Hz); clamping to the source so the tail renders as silence \
                  instead of failing the whole timeline",
                 region.start_in_modification_time,
-                declared_end,
+                consumed_end,
                 source.duration_seconds,
                 source.sample_rate,
             );
@@ -660,6 +787,169 @@ mod tests {
         );
     }
 
+    /// take 的 `playback_rate` 在 JSON 里是 **f32**（内核模型的列类型），
+    /// 所以按 f32 精度比较，不能用 f64 的 1e-9。
+    fn assert_rate(actual: f32, expected: f64) {
+        assert!(
+            (f64::from(actual) - expected).abs() < 1e-6,
+            "expected {expected}, got {}",
+            actual
+        );
+    }
+
+    /// **Cubase 15 的现场读数**：48 kHz / 1526332 帧素材放进 44.1 kHz 工程。
+    ///
+    /// `durationMod = durationPlay = 34.610703`，而 34.610703 × 44100 恰好等于源帧数 ——
+    /// 宿主把修改时长按**工程**速率折算。真实播放速率是 44100/48000 = 0.91875：
+    /// 31.7986 s 的源内容要铺满 34.6107 s 的工程时间。
+    fn cubase_rate_mismatched_document() -> AraDocument {
+        let mut doc = ara_document_from_json(
+            r#"{
+                "documentName": "session",
+                "audioSources": [
+                    { "persistentID": "C:/media/Vocal-5-1.wav", "name": "vocal",
+                      "sampleRate": 48000.0, "sampleCount": 1526332,
+                      "durationSeconds": 31.798583333333334, "channelCount": 2,
+                      "sampleAccessEnabled": true }
+                ],
+                "musicalContexts": [
+                    { "name": "ctx", "regionSequences": [
+                        { "name": "Vocal", "orderIndex": 0, "playbackRegionCount": 1 }
+                    ] }
+                ],
+                "audioModifications": [
+                    { "persistentID": "mod-1", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav" }
+                ],
+                "playbackRegions": [
+                    { "name": "vocal", "audioSourcePersistentID": "C:/media/Vocal-5-1.wav",
+                      "audioModificationPersistentID": "mod-1", "regionSequenceIndex": 0,
+                      "startInModificationTime": 0.0, "durationInModificationTime": 34.610703,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 34.610703 }
+                ]
+            }"#,
+        )
+        .expect("rate-mismatched document parses");
+        doc.project_sample_rate = Some(44100.0);
+        doc
+    }
+
+    /// 宿主通报工程速率时，48 kHz 素材进 44.1 kHz 工程必须得到 0.91875 的播放速率，
+    /// 且**不能**再夹源窗口 —— 31.7986 s 的源内容要完整消费。
+    ///
+    /// 【为什么这是回归测试】此前 `playback_rate = durationMod / durationPlay`，两个数同在
+    /// 工程速率域，比值恒为 1；真实速率被抹平后，素材按自身速率播完、剩下的工程时间留白，
+    /// 用户听感是"ARA 前后不一致"。而夹窗口那个缓解恰好相反：它保音高、丢内容。
+    #[test]
+    fn a_rate_mismatched_source_is_stretched_not_clamped_when_the_host_reports_the_project_rate() {
+        let doc = cubase_rate_mismatched_document();
+        assert_eq!(
+            resolve_project_rate(&doc).origin,
+            ProjectRateOrigin::Host,
+            "宿主通报的速率必须优先于推导"
+        );
+        assert!(
+            has_observed_time_stretch(&doc),
+            "两个时长相等但速率不是 1：这条 region 确实在拉伸"
+        );
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        let clip = &outcome.timeline.clips[0];
+        let take = &clip.takes[0];
+        assert_rate(take.playback_rate, 44100.0 / 48000.0);
+        assert_close(take.source_start_sec, 0.0);
+        // 源窗口是**折算后**的消费跨度：34.610703 × 0.91875 ≈ 31.7986 s，正好整条源。
+        // 用 1e-5 而不是 1e-9：`playback_rate` 经 JSON 落到 f32，回读时已损失一位。
+        assert!(
+            (take.source_end_sec - 31.798583333333334).abs() < 1e-5,
+            "got {}",
+            take.source_end_sec
+        );
+        assert_close(clip.length_sec, 34.610703);
+    }
+
+    /// 拿不到工程速率时**不猜**：退回夹窗口 + 保音高的既有降级，并记下现场数字。
+    #[test]
+    fn a_rate_mismatched_source_falls_back_to_clamping_when_no_project_rate_is_known() {
+        let mut doc = cubase_rate_mismatched_document();
+        doc.project_sample_rate = None;
+        // 推导路径被 `startInModificationTime > 0` 之外的判据挡住前先确认：
+        // 这条 region 覆盖整条源，所以推导**会**成功 —— 要测"未知"必须连源帧数一并抹掉。
+        doc.audio_sources[0].sample_count = 0;
+        assert_eq!(
+            resolve_project_rate(&doc).origin,
+            ProjectRateOrigin::Unknown
+        );
+
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        let take = &outcome.timeline.clips[0].takes[0];
+        // 速率退回宿主比值（1.0），源窗口夹到源的真实长度。
+        assert_rate(take.playback_rate, 1.0);
+        assert_close(take.source_end_sec, 31.798583333333334);
+    }
+
+    /// 宿主没通报工程速率时**不猜** —— 这条契约曾经被违反过，必须钉住。
+    ///
+    /// 【为什么不能推导】`sampleCount / durationMod` 看似给出工程速率，但它在数学上
+    /// **不可识别**：源跨度折算后恒等于 `sampleCount / sr`，与推导值无关（见
+    /// [`resolve_project_rate`] 的推导）。也就是说"素材率 ≠ 工程率的整条 region"与
+    /// "被裁剪过的 region"给出的数据**完全一样**。真实反例是 REAPER 夹具：44100 Hz /
+    /// 88200 帧、region 取 0.5 s，推导给出 176400 Hz 并据此把源窗口放大 4 倍，
+    /// 参数曲线锚点随之整体错位（`source_parameter_atlas_moves_and_stretches_…`
+    /// 因此由 0.5 步进变成 0.125 步进）。
+    ///
+    /// 所以这里断言：没有宿主通报就没有速率，映射退回夹窗口 + 保音高。
+    #[test]
+    fn no_project_rate_means_no_correction_rather_than_a_guess() {
+        let mut doc = cubase_rate_mismatched_document();
+        doc.project_sample_rate = None;
+        let resolved = resolve_project_rate(&doc);
+        assert_eq!(resolved.origin, ProjectRateOrigin::Unknown);
+        assert_eq!(resolved.rate, 0.0);
+
+        let take = &ara_document_to_timeline_reporting(&doc)
+            .expect("document maps")
+            .timeline
+            .clips[0]
+            .takes[0];
+        // 速率退回宿主比值，源窗口夹到源的真实长度 —— 音高保住了，尾部留白。
+        assert_rate(take.playback_rate, 1.0);
+        assert_close(take.source_end_sec, 31.798583333333334);
+    }
+
+    /// 宿主自己声明的拉伸必须**保留**，不能被速率校正抹掉。
+    #[test]
+    fn a_host_declared_stretch_survives_the_rate_correction() {
+        let doc = probe_shaped_document();
+        let clip = &ara_document_to_timeline(&doc).unwrap().clips[0];
+        // 源率 48000、工程率未知 ⇒ 校正因子缺席，比值 0.5 原样保留。
+        assert_rate(clip.takes[0].playback_rate, 0.5);
+    }
+
+    /// 同源同工程率下，宿主的拉伸比值与速率校正**相乘**。
+    #[test]
+    fn the_rate_correction_multiplies_the_host_ratio() {
+        let mut doc = probe_shaped_document();
+        doc.project_sample_rate = Some(44100.0);
+        // 48 kHz 源、44.1 kHz 工程、宿主声明 0.5 ⇒ 0.5 × 44100/48000。
+        let clip = &ara_document_to_timeline(&doc).unwrap().clips[0];
+        assert_rate(clip.takes[0].playback_rate, 0.5 * 44100.0 / 48000.0);
+    }
+
+    /// 明显荒谬的工程速率必须被拒，不能拿去折算任何东西。
+    #[test]
+    fn an_implausible_reported_project_rate_is_ignored() {
+        let mut doc = cubase_rate_mismatched_document();
+        doc.project_sample_rate = Some(1.0);
+        doc.audio_sources[0].sample_count = 0;
+        assert_eq!(
+            resolve_project_rate(&doc).origin,
+            ProjectRateOrigin::Unknown,
+            "1 Hz 不是可信的工程速率"
+        );
+    }
+
     #[test]
     fn json_round_trip_reads_the_probe_shape() {
         let doc = probe_shaped_document();
@@ -760,10 +1050,15 @@ mod tests {
     ///
     /// 旧行为把这个越界一路带到渲染校验，被 `SnapshotError::InvalidGeometry` **致命**
     /// 拒绝 —— 整条时间线一条片段都发布不出来，用户看到
-    /// "尚未应用：unsupported host region: InvalidGeometry"。这里钉住：越界只夹窗口，
-    /// 绝不赔上整条时间线。
+    /// "尚未应用：unsupported host region: InvalidGeometry"。这里钉住：越界绝不赔上整条时间线。
+    ///
+    /// 【本用例为什么退回夹窗口】这个夹具没有宿主通报的工程速率（`project_sample_rate`
+    /// 缺席），而推导路径已被证明不可识别（见 [`resolve_project_rate`]）。所以速率保持
+    /// 宿主比值 1.0、源窗口夹到源长度 —— 这是**已知会丢尾部内容**的降级，但它保音高、
+    /// 不发明拉伸。真正带速率的那条路径由
+    /// `a_rate_mismatched_source_is_stretched_not_clamped_…` 覆盖。
     #[test]
-    fn a_modification_window_beyond_the_source_is_clamped_not_fatal() {
+    fn a_modification_window_beyond_the_source_is_not_fatal() {
         // 源：48000 Hz / 144000 帧 = 3.0 s。region 声明的修改窗口 3.2635 s = 144000/44100，
         // 正是"宿主按工程速率折算"的形状。
         let doc = ara_document_from_json(
@@ -799,11 +1094,11 @@ mod tests {
         let clip = &outcome.timeline.clips[0];
         // 播放几何保持宿主原值：clip 仍是 3.2635 s。
         assert_close(clip.length_sec, 3.2635);
-        // 源窗口被夹到源的真实长度：越界部分由渲染读成静音，而不是去读不存在的样本。
+        // 没有工程速率 ⇒ 不猜，速率保持宿主比值。
+        assert_rate(clip.takes[0].playback_rate, 1.0);
         assert_close(clip.source_start_sec, 0.0);
+        // 源窗口夹到源的真实长度：越界部分由渲染读成静音，而不是去读不存在的样本。
         assert_close(clip.source_end_sec, 3.0);
-        // 夹窗口**不**引入音高变化：倍率仍是宿主给的比值。
-        assert!((clip.playback_rate - 1.0).abs() < 1e-6);
     }
 
     /// 整条 region 都落在源之外时跳过该 clip —— 与"源不存在"分开记因，但同样不失败。
