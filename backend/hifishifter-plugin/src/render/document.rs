@@ -231,7 +231,7 @@ pub(crate) struct DocumentSession {
 /// 反查缓存会落空。此时直接从 id 解析出 key，与缓存命中给出同一个值。
 ///
 /// 位置派生的旧 id（`ara-clip-{N}`）**不可反解** —— 那正是它被替换掉的原因。
-fn parse_region_key_from_clip_id(clip_id: &str) -> Option<u64> {
+pub(crate) fn parse_region_key_from_clip_id(clip_id: &str) -> Option<u64> {
     clip_id
         .strip_prefix("ara-region-")?
         .parse::<u64>()

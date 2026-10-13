@@ -880,7 +880,14 @@ impl DocumentSession {
                         };
                         // 超期后**继续**保留起点：否则下一次进来会重新 `or_insert(now)`，
                         // 状态在 `pending` / `unavailable` 之间来回跳。
-                        ("unavailable", Some(reason), true)
+                        //
+                        // 【为什么 `waiting` 必须是 `false`】`waiting` 唯一的作用就是
+                        // 决定这一条要不要进 `seen`（见下面 `if !waiting { seen.insert }`），
+                        // 而 `seen` 决定 TTL 回收谁。此前这里给的是 `true` ⇒ 超期项不进
+                        // `seen` ⇒ 20 s 后被 TTL 删掉 ⇒ 下一轮 `or_insert(now)` 重新计时
+                        // ⇒ **状态每 20 s 在 pending / unavailable 之间横跳，永不收敛**
+                        // —— 与这行注释宣称的"继续保留起点"正好相反。
+                        ("unavailable", Some(reason), false)
                     }
                 };
                 clip["host_media"] = serde_json::json!(state);
@@ -889,6 +896,75 @@ impl DocumentSession {
                 }
                 if !waiting {
                     seen.insert(item_id);
+                }
+            }
+        }
+        // 【H2：所有宿主共有的媒体事实】上面那趟遍历挂在 `ui_tracks` 上，而它只在
+        // **有原生扩展**的宿主上被填充（`refresh_ui_inventory` 在 `native_host()` 为
+        // `None` 时直接 return）。于是 Cubase / Nuendo / Studio One 上这一整趟**从不
+        // 执行**：每个 clip 都拿不到 `host_media`，前端只能按默认态显示，而
+        // `media_in_flight_items` 又因 clip id 不是 `ara-item-` 而**无条件**算作在途
+        // ⇒ 左下角永久转圈（"编辑后一直在等"）。
+        //
+        // 这一趟改用**任何 ARA 宿主都有**的事实给剩下的 clip 定态：
+        //   * 有 `source_path` ⇒ `ready`（PCM 已授权；映射层给每条存活 region 都写了源）；
+        //   * 源在 `source_failures` 里 ⇒ `unavailable:source_read_failed`（真故障，终态）；
+        //   * 否则仍在等宿主授权 ⇒ `pending`，并**按 clip id 计时**（`pending_since`），
+        //     超期后转 `unavailable:awaiting_region` 这个终态。
+        //
+        // 【为什么必须计时】"等宿主授权"没有上界：不设 TTL 会让应用状态永久停在
+        // "进行中"，用户对着一个永远转不完的圈，却不知道什么都不会再发生。
+        {
+            let clips = payload["clips"].as_array_mut();
+            if let Some(clips) = clips {
+                let failures = self.source_failures.lock_or_recover();
+                let mut pending_since = self.pending_since.lock_or_recover();
+                let now = std::time::Instant::now();
+                for clip in clips.iter_mut() {
+                    if clip.get("host_media").is_some() {
+                        continue;
+                    }
+                    let Some(id) = clip["id"].as_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    let has_source = clip["source_path"]
+                        .as_str()
+                        .is_some_and(|path| !path.is_empty());
+                    if has_source {
+                        clip["host_media"] = serde_json::json!("ready");
+                        pending_since.remove(&id);
+                        continue;
+                    }
+                    // 源身份：clip id 由 region key 派生，用它反查 ARA 源。
+                    let failed = crate::render::document::parse_region_key_from_clip_id(&id)
+                        .and_then(|key| {
+                            self.regions
+                                .lock_or_recover()
+                                .get(&key)
+                                .map(|region| region.audio_source_persistent_id.clone())
+                        })
+                        .is_some_and(|source| failures.contains_key(&source));
+                    if failed {
+                        clip["host_media"] = serde_json::json!("unavailable");
+                        clip["host_media_reason"] = serde_json::json!("source_read_failed");
+                        pending_since.remove(&id);
+                        continue;
+                    }
+                    let since = *pending_since.entry(id.clone()).or_insert(now);
+                    if now.duration_since(since) < PENDING_MEDIA_TIMEOUT {
+                        clip["host_media"] = serde_json::json!("pending");
+                    } else {
+                        // 超期即终态；起点保留（见上一条 `waiting = false` 的理由），
+                        // 状态不再在 pending / unavailable 之间来回跳。
+                        clip["host_media"] = serde_json::json!("unavailable");
+                        clip["host_media_reason"] = serde_json::json!("awaiting_region");
+                    }
+                    // 【为什么三种态都要进 `seen`】`seen` 的语义是"这一趟在载荷里出现过"
+                    // —— 它决定 TTL 回收谁。只把终态放进去会让 `pending` 每 20 s 被回收
+                    // 一次、起点重置 ⇒ 状态在 pending/unavailable 之间横跳（正是上一条
+                    // 注释要避免的）。放进 `seen` 后，TTL 只回收**从载荷里消失**的 clip，
+                    // 那才是它该管的事。
+                    seen.insert(id.clone());
                 }
             }
         }
@@ -988,13 +1064,36 @@ impl DocumentSession {
             return;
         };
         let status = owner.host_audio_status();
+        // 【为什么 ARA-only 上不能直接报 `status`】没有原生扩展时
+        // `refresh_ui_inventory` 早退，而 `host_audio_status` 的**唯一**写者就在它里面
+        // ⇒ 该读数在 Cubase / Nuendo / Studio One 上永远是默认的 `Ready`（waiting 0）。
+        // 于是"一条 region 都没匹配上"也被报成一切正常，而左下角却在转圈
+        // （`EditorSession::state` 用的是另一条 ARA 读数）—— 两个读数互相矛盾，
+        // 排查时会把方向带偏。
+        //
+        // 这里在没有原生宿主时改用 ARA 侧的同一份在途计数（`media_in_flight_items`，
+        // 与 `state()` 同源），让两个读数一致。
+        let (state, waiting) = if owner.native_host().is_some() {
+            (status.state, status.waiting_items)
+        } else {
+            let timeline = self.timeline.lock_or_recover();
+            let waiting = timeline
+                .as_ref()
+                .map_or(0, |timeline| self.media_in_flight_items(timeline));
+            let state = if waiting == 0 {
+                crate::render::extension::HostAudioState::Ready
+            } else {
+                crate::render::extension::HostAudioState::AwaitingRegions
+            };
+            (state, waiting)
+        };
         // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
         // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
         // 里是为了复用前端已有的读数通道，不必新增一条状态链。
         let skipped = self.skipped_regions.lock_or_recover().len();
         payload["host_audio"] = serde_json::json!({
-            "state": status.state.as_str(),
-            "waiting_clips": status.waiting_items,
+            "state": state.as_str(),
+            "waiting_clips": waiting,
             "skipped_clips": skipped,
         });
     }

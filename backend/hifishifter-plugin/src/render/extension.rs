@@ -2487,14 +2487,26 @@ impl ExtensionOwner {
                     // assignment写入、撤销和最终发布必须共用此短事务，消除check→publish竞态。
                     let _transaction = document.transaction.lock_or_recover();
                     let keys = keys.iter().map(|key| *key as RegionKey).collect::<Vec<_>>();
-                    let valid = keys.is_empty()
-                        || region_owners()
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .resolve(&keys)
-                            .is_ok_and(|(owner, _)| owner == document_id);
-                    let count = keys.len();
-                    let next_keys = if valid { keys.clone() } else { Vec::new() };
+                    // 【为什么逐条过滤而不是整批作废】`resolve` 是整批语义：一条坏 key
+                    // （跨文档/已销毁）就让**整批**返回 `Err`。而宿主会把当前分配整体重发，
+                    // 分割后它常把已销毁父段的 key 也带进来 —— 整批作废会连**新 region**
+                    // 一起丢掉，表现就是"分割后既不出声也不显示"，且没有任何提示。
+                    // 只剔除坏的那条：其余（包括新 region）照常。
+                    let (next_keys, dropped): (Vec<RegionKey>, usize) = {
+                        let owners = region_owners().lock().unwrap_or_else(|p| p.into_inner());
+                        let mut kept = Vec::with_capacity(keys.len());
+                        let mut dropped = 0_usize;
+                        for key in keys.iter().copied() {
+                            if owners.owner_of(key) == Some(document_id) {
+                                kept.push(key);
+                            } else {
+                                dropped += 1;
+                            }
+                        }
+                        (kept, dropped)
+                    };
+                    let valid = dropped == 0;
+                    let count = next_keys.len();
                     let next_sequences =
                         sequences.iter().map(|key| *key as u64).collect::<Vec<_>>();
                     let changed = owner.assignments.lock_or_recover().get(&role.bits())
@@ -2508,7 +2520,7 @@ impl ExtensionOwner {
                         .assignments
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .insert(role.bits(), if valid { keys } else { Vec::new() });
+                        .insert(role.bits(), next_keys);
                     owner.sequences.lock_or_recover().insert(
                         role.bits(),
                         sequences.iter().map(|key| *key as u64).collect(),
@@ -2519,7 +2531,11 @@ impl ExtensionOwner {
                             role.bits()
                         );
                     } else {
-                        log::warn!("[ara] rejected unknown or cross-document renderer assignment");
+                        log::warn!(
+                            "[ara] renderer assignment role={} kept {count} region(s) and \
+                             dropped {dropped} unknown or cross-document key(s)",
+                            role.bits()
+                        );
                     }
                     owner.cancel_preparation();
                     owner.snapshots.iter().for_each(|snapshot| snapshot.clear());

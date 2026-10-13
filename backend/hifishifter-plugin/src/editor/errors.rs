@@ -87,6 +87,14 @@ pub(crate) const ARA_NOT_BOUND: TerminalError = TerminalError {
     message: "plug-in instance is not bound to an ARA document",
 };
 
+/// panic 毒化后的编辑权威错误。
+///
+/// 【为什么它是终态】编辑权威处于未知状态时，重放同一次编辑只会重复失败 ——
+/// 必须由用户显式刷新（或关闭重开窗口）才能重新建立权威。这与"宿主状态变了一次、
+/// 重放就会收敛"的暂时冲突**性质不同**，所以单列出来，并让
+/// [`is_retryable_host_conflict`] 把它排除在可重试之外。
+pub(crate) const EDIT_AUTHORITY_POISONED: &str = "Conflict: edit authority is in an unknown state";
+
 /// 终态表：分类点遍历它做子串匹配（措辞本身来自上面这些常量）。
 const TERMINAL: &[&str] = &[
     DOCUMENT_CLOSED.message,
@@ -98,10 +106,24 @@ const TERMINAL: &[&str] = &[
     LEASE_REVOKED.message,
     INSTANCE_CLOSED.message,
     ARA_NOT_BOUND.message,
+    EDIT_AUTHORITY_POISONED,
 ];
 
 /// "宿主模型冲突"前缀：可重试（宿主把模型带到了真实状态后会收敛）。
 pub(crate) const CONFLICT_PREFIX: &str = "Conflict: host";
+
+/// 这一条错误是不是"宿主状态在我们脚下变了一次"造成的**暂时**冲突。
+///
+/// 【为什么不能只认 `CONFLICT_PREFIX`】`Conflict:` 家族里除了 `Conflict: host …`
+/// 还有若干同源措辞：工作区 scope 变了、编辑代次变了、分配变了、没有活动 renderer。
+/// 它们同样是"重放一次就会收敛"的暂时状态，但此前只有 `Conflict: host` 被判为可
+/// 重试，其余会被写进 `EditorSession::error` 并**永久**挡住自动渲染 —— 用户必须
+/// 手动刷新。这与"宿主里做了操作，插件毫无反应"是同一个观感。
+///
+/// 【为什么排除毒化】见 [`EDIT_AUTHORITY_POISONED`]：那是真终态，重放只会重复失败。
+pub(crate) fn is_retryable_host_conflict(error: &str) -> bool {
+    error.starts_with("Conflict:") && !error.contains(EDIT_AUTHORITY_POISONED)
+}
 
 /// 宿主 PCM 尚未就绪（可重试的暂时失败源）。
 pub(crate) const HOST_PCM_UNAVAILABLE: &str = "host PCM unavailable";

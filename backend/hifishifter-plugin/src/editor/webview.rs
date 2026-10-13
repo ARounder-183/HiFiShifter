@@ -765,7 +765,7 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
                 || split_waiting
                 || media_waiting
                 || reply["ok"] == false
-                    && (error.starts_with(crate::editor::errors::CONFLICT_PREFIX)
+                    && (crate::editor::errors::is_retryable_host_conflict(&error)
                         || error.contains(crate::editor::errors::HOST_PCM_UNAVAILABLE)
                         || error.contains(crate::editor::errors::HOST_MODEL_NOT_READY));
             // 退避：只在到点且未超预算时重投。预算与 `until` 双保险 —— 前者挡住

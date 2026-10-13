@@ -651,7 +651,16 @@ impl EditorSession {
                 if deadline.is_none()
                     && !retry.settled
                     && session.render_requested.load(Ordering::Acquire)
-                    && session.error.lock_or_recover().is_none()
+                    // 【为什么终态错误才停自动渲染】此前只要 `error` 非空就停 —— 而
+                    // `Conflict: workspace scope or curves changed` 这类"宿主状态在我们
+                    // 脚下变了一次"的**暂时**冲突也会被写成 error ⇒ 自动渲染永久停摆，
+                    // 用户必须手动刷新。终态（panic 毒化 / 文档关闭 / 租约撤销）仍然停：
+                    // 那些重放只会重复失败。
+                    && session
+                        .error
+                        .lock_or_recover()
+                        .as_deref()
+                        .is_none_or(|error| super::classify_error(error) != "terminal")
                 {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }

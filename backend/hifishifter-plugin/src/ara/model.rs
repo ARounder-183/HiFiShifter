@@ -388,14 +388,15 @@ impl ModelHandle {
                 }
             }
             drop(edits);
-            // 媒体派生谱系与曲线谱系解耦：右半段的源与父段是同一个文件，
-            // 父段已授权 ⇒ 右半段立刻有波形（与 item 版同一理由）。
-            // `split_media_from` 按 clip id 索引，而 clip id 由 region key 派生
-            // （见 `ara::mapping::MappingIdentities`）—— 两边必须用同一个算式。
-            self.session.split_media_from.lock_or_recover().insert(
-                format!("ara-region-{}", right.key),
-                format!("ara-region-{}", parent.key),
-            );
+            // 【为什么 ARA-only 上**不**登记 `split_media_from`】那条边按 clip id 索引，
+            // 而它的消费方 `derive_split_media` 要先在时间线里找到**父段**才能继承 ——
+            // 但父段在**同一帧**已被销毁（`remap_and_log` 只发布存活 region），
+            // 于是这条边永远读不到，只是把表撑大（且键是会被复用的 region key，
+            // 见 `allocate_region`，复用后会指向语义完全不同的"父段"）。
+            //
+            // 【为什么不需要它】映射层对**每一条**存活 region 都写了 `source_path` 与
+            // 完整 take（`ara/mapping.rs`），PCM 又按 `audio_source.persistent_id` 共享
+            // ⇒ 右半段与父段同源，PCM 早已在位。也就是说 ARA-only 宿主上派生是**多余的**。
             log::info!(
                 "[ara] ARA split detected: parent=ara-region-{} left=ara-region-{} right=ara-region-{}",
                 parent.key, left.key, right.key
@@ -1813,6 +1814,18 @@ impl PlaybackRegions for ModelHandle {
                 .lock_or_recover()
                 .remove(&key);
             self.session.clip_ids.lock_or_recover().remove(&key);
+            // 【为什么媒体派生边也要在这里清】`split_media_from` 按 clip id 索引，
+            // 此前只在**文档销毁**时清 —— 与上面几张表同一类无界增长。而且它的键是
+            // region key 派生的 clip id，而 `allocate_region` 会**复用**已销毁槽位的
+            // key：一条永不回收的 `ara-region-{key}` 边会在 key 被新 region 拿到之后
+            // 指向一个语义完全不同的"父段"，把别的素材的媒体身份借过来。
+            //
+            // 两个方向都要清：本 region 作为**子**的条目（键），以及它作为**父**的条目
+            // （值）—— 后者留着会让后来的片段从一条已不存在的边继承。
+            let clip_id = format!("ara-region-{key}");
+            let mut lineage = self.session.split_media_from.lock_or_recover();
+            lineage.remove(&clip_id);
+            lineage.retain(|_, parent| *parent != clip_id);
         }
         self.destroyed_regions.insert(state);
         if let Err(error) = self.publish_head_tail() {

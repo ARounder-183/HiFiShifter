@@ -40,6 +40,15 @@ struct ControllerAdapter<P: PluginModel> {
     analysis_events: crate::AnalysisEmitter,
     pending_analysis_starts: Vec<RawHandle>,
     content_readers: HashSet<ARAContentReaderRef>,
+    /// 一次被 reader 挡住的 `endEditing` 是否还欠着。
+    ///
+    /// 【为什么必须记下来】`endEditing` 在 content reader 存活时不能收口，而宿主
+    /// **不会**为同一次编辑重发它 —— 此前只 warn 就 return，于是 `runtime.editing`
+    /// 永远保持 true：插件侧 `ModelHandle::end_editing` 不执行、`remap_and_log` 不跑、
+    /// `ready` 永不回真、`notifyModelUpdates` 与存档回调全部因 `is_editing()` 被拒。
+    /// 实例从此砖化，日志里只有那一条 warn。置位后由 `destroy_content_reader` 在
+    /// reader 排空的那一刻补跑。
+    pending_end_editing: bool,
     legacy_restore_reader: Option<ARAArchiveReaderHostRef>,
     factory_analyzable_content: HashSet<i32>,
     factory_playback_transformations: PlaybackTransformationFlags,
@@ -54,6 +63,21 @@ impl<P: PluginModel> ControllerAdapter<P> {
         self.runtime
             .as_ref()
             .ok_or(AraError::InvalidState("document controller is destroyed"))
+    }
+
+    /// 真正收口一次编辑会话；`endEditing` 与"reader 排空后的补跑"共用它。
+    ///
+    /// 【为什么单独抽出来】`endEditing` 可能因 content reader 存活而推迟，而推迟后
+    /// 的补跑必须走**完全相同**的收口路径（同一个 host scope 构造方式），否则两条
+    /// 路径会漂移。抽出来只有一处实现。
+    fn finish_editing(&mut self) {
+        let host = &self.host;
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        host.with_end_editing_content(|scope| {
+            let _ = runtime.end_callback_editing_with_host(&scope);
+        });
     }
 
     fn runtime_mut(&mut self) -> Result<&mut PluginRuntime<P>, AraError> {
@@ -179,33 +203,35 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn begin_editing(&mut self) {
-        let _ = self
+        // 【为什么不再无声吞掉】`runtime_mut()` 在 content reader 非空时返回 `Err`，
+        // 于是 `beginEditing` 完全不生效，而宿主认为会话已开始；随后 `endEditing`
+        // 又因 `!self.editing` 返回 `Err`（同样被吞）。整段编辑的 begin/end 一起
+        // 静默丢失。这里至少把原因说出来。
+        if let Err(error) = self
             .runtime_mut()
-            .and_then(PluginRuntime::begin_callback_editing);
+            .and_then(PluginRuntime::begin_callback_editing)
+        {
+            log::warn!("[ara] beginEditing had no effect: {error}");
+        }
     }
 
     fn end_editing(&mut self) {
-        // 【本地补丁】早退必须留痕。此前这里**无声 return**，于是宿主只要还有 content
-        // reader 活着（长时间播放、或宿主迟迟不回收），`endEditing` 就永远不会收口 ——
-        // 插件停在旧时间线上，用户看到"编辑操作不更新 ARA"，而日志里什么都没有。
-        // 这里只负责把原因说清楚；脏位由 delegate（插件侧 `ModelHandle::end_editing`）
-        // 在真正收口时清理，所以这里不能替它清。
+        // 【本地补丁 15】早退不再丢事件：置位待补跑（见 `pending_end_editing`）。
+        // 此前这里**无声 return**，宿主只要还有 content reader 活着（长时间播放、
+        // 或宿主迟迟不回收），`endEditing` 就永远不会收口 —— 插件停在旧时间线上，
+        // 用户看到"编辑操作不更新 ARA"，而日志里什么都没有。
         if !self.content_readers.is_empty() {
             log::warn!(
-                "[ara] endEditing deferred: {} content reader(s) still live; the model graph \
-                 stays dirty until they are gone",
+                "[ara] endEditing deferred: {} content reader(s) still live; it will be                  retried as soon as the last one is released",
                 self.content_readers.len()
             );
+            self.pending_end_editing = true;
             return;
         }
-        let host = &self.host;
-        let Some(runtime) = self.runtime.as_mut() else {
-            return;
-        };
-        host.with_end_editing_content(|scope| {
-            let _ = runtime.end_callback_editing_with_host(&scope);
-        });
+        self.pending_end_editing = false;
+        self.finish_editing();
     }
+
 
     fn notify_model_updates(&mut self) {
         // 【本地补丁 11】宿主用它让插件把待发的更新推回去（ARA 2.0 起替代旧的归档路径），
@@ -1370,6 +1396,13 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
 
     fn destroy_content_reader(&mut self, reference: ARAContentReaderRef) {
         self.destroy_reader(reference);
+        // 【为什么在这里补跑】reader 排空是"现在可以收口了"的**唯一**时刻，而宿主
+        // 不会为同一次编辑重发 `endEditing`。见 `pending_end_editing` 的说明。
+        if self.content_readers.is_empty() && self.pending_end_editing {
+            self.pending_end_editing = false;
+            log::info!("[ara] endEditing retried after the last content reader was released");
+            self.finish_editing();
+        }
     }
 
     fn create_region_sequence(
@@ -2064,6 +2097,7 @@ impl<P: PluginModel + 'static> Plugin<P> {
             analysis_events: self.analysis_events,
             pending_analysis_starts: Vec::new(),
             content_readers: HashSet::new(),
+            pending_end_editing: false,
             legacy_restore_reader: None,
             factory_analyzable_content,
             factory_playback_transformations,

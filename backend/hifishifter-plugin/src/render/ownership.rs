@@ -75,6 +75,17 @@ impl RegionOwners {
         }
         Ok((*document, slots))
     }
+
+    /// 单个 key 的归属文档（未登记或已销毁时为 `None`）。
+    ///
+    /// 【为什么需要逐 key 查询】`resolve` 是**整批**语义：一批里只要有一条 key 未登记
+    /// （跨文档或已销毁），整批就返回 `Err`。而宿主的 `addPlaybackRegion` 会把当前
+    /// 分配**整体**重发一遍 —— 分割后它可能把已销毁父段的 key 也一起传进来，于是
+    /// 插件把**整批**（包括新 region）清成空 ⇒ 静默"分割后毫无反应"。逐 key 查询让
+    /// 调用方能只剔除坏的那条。
+    pub fn owner_of(&self, key: RegionKey) -> Option<DocumentId> {
+        self.regions.get(&key).map(|(document, _)| *document)
+    }
 }
 
 /// 进程内身份索引；音频回调不得锁此表，必须消费预先发布的 renderer 快照。
