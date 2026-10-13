@@ -179,10 +179,20 @@ pub(crate) fn validate_regions_with_fades(
 }
 
 /// 普通/裁切的纯PCM混音不能用重采样冒充保调拉伸；后者由原kernel管线承担。
+///
+/// 【`project_rate` 是干什么的】`startInModificationTime` 的**单位由宿主决定**：素材率与
+/// 工程率不同时，宿主按**工程**速率折算它（实测 Cubase 15：48 kHz 素材进 44.1 kHz 工程，
+/// `durationMod` 是工程速率秒）。所以从"工程时间"定位到"源样本"必须除以一个速率比值，
+/// 而不是直接用 `source.sample_rate` —— 后者隐含假设了"修改时长是源速率秒"。
+///
+/// 传 `None` 表示拿不到工程速率（宿主没通报、也无法从 ARA 本体取得），此时按宿主的原始
+/// 单位直读，与改动前完全一致。这条路径只在**没有内核渲染**时使用（`RenderInput.timeline`
+/// 为 `None`），而有内核渲染的那条已经由 `ara::mapping` 折算过。
 pub(crate) fn mix_plain_regions(
     regions: &[AraPlaybackRegion],
     sources: &HashMap<String, Arc<SourcePcm>>,
     sample_rate: u32,
+    project_rate: Option<f64>,
 ) -> Result<PlaybackSnapshot, SnapshotError> {
     let (origin, frames) = validate_regions(regions, sources, sample_rate, false)?;
     if regions.is_empty() {
@@ -206,6 +216,14 @@ pub(crate) fn mix_plain_regions(
     };
     for region in regions {
         let source = &sources[&region.audio_source_persistent_id];
+        // 【为什么是 `project / source` 而不是 `source`】宿主给的修改时长是**工程**速率秒，
+        // 要先折回源自己的秒，再乘源速率换算成样本下标。工程速率缺席时退回旧行为。
+        let rate = match project_rate {
+            Some(rate) if rate.is_finite() && rate > 0.0 && source.sample_rate > 0 => {
+                (source.sample_rate as f64 / rate).max(0.0)
+            }
+            _ => source.sample_rate as f64,
+        };
         let begin = (region.start_in_playback_time * sample_rate as f64).round() as i64;
         let finish = ((region.start_in_playback_time + region.duration_in_playback_time)
             * sample_rate as f64)
@@ -213,7 +231,7 @@ pub(crate) fn mix_plain_regions(
         for sample in begin..finish {
             let position = (region.start_in_modification_time + sample as f64 / sample_rate as f64
                 - region.start_in_playback_time)
-                * source.sample_rate as f64;
+                * rate;
             let index = position.max(0.0).floor() as usize;
             let fraction = (position - index as f64) as f32;
             let output = (sample - origin) as usize;
@@ -584,7 +602,8 @@ mod tests {
         );
 
         // 越界段必须是**静音**，不是重复最后一个样本：后者是一段直流，听感上是咔哒/嗡鸣。
-        let snapshot = mix_plain_regions(&[r], &sources, 44100).expect("out-of-range window mixes");
+        let snapshot =
+            mix_plain_regions(&[r], &sources, 44100, None).expect("out-of-range window mixes");
         let nonzero = snapshot
             .left
             .iter()
@@ -671,12 +690,12 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let snapshot = mix_plain_regions(&[r.clone()], &sources, 4).unwrap();
+        let snapshot = mix_plain_regions(&[r.clone()], &sources, 4, None).unwrap();
         assert_eq!(snapshot.left, [0.0, 0.5, 1.0, 1.0]);
         assert_eq!(snapshot.right, [1.0, 0.5, 0.0, 0.0]);
         r.duration_in_playback_time = 0.5;
         assert_eq!(
-            mix_plain_regions(&[r], &sources, 4).unwrap_err(),
+            mix_plain_regions(&[r], &sources, 4, None).unwrap_err(),
             SnapshotError::UnsupportedTransform
         );
     }
@@ -736,10 +755,51 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let snapshot = mix_plain_regions(&[r], &sources, 4).unwrap();
+        let snapshot = mix_plain_regions(&[r], &sources, 4, None).unwrap();
         assert_eq!(snapshot.origin_sample, 2);
         assert_eq!(snapshot.left, [0.2, 0.3]);
         assert_eq!(snapshot.right, [0.2, 0.3]);
+    }
+
+    /// **工程速率已知时，直通路径必须按 `source / project` 折算源下标。**
+    ///
+    /// 【为什么这是回归测试】`mix_plain_regions` 原本用 `source.sample_rate` 直接乘，
+    /// 隐含假设"修改时长是源速率秒"。但宿主按**工程**速率折算修改时长（实测 Cubase 15：
+    /// 48 kHz 素材进 44.1 kHz 工程），那条假设让整条素材被提前 8.2% 读完、尾部留白。
+    /// 有内核渲染的路径已由 `ara::mapping` 折算，直通路径必须同口径，否则两条路径给出
+    /// 不同结果。
+    ///
+    /// 夹具：源 8 Hz / 8 帧（1 s 内容），工程 4 Hz，宿主给的修改时长 1.0 s **工程**秒。
+    /// 折算后源下标 = t × (8/4) = 2t，第 4 个输出帧（下标 8）起越过源尾。
+    #[test]
+    fn the_plain_path_converts_the_project_rate_before_indexing_the_source() {
+        let mut r = region();
+        r.start_in_modification_time = 0.0;
+        r.duration_in_modification_time = 1.0;
+        r.start_in_playback_time = 0.0;
+        r.duration_in_playback_time = 1.0;
+        let sources = [(
+            r.audio_source_persistent_id.clone(),
+            Arc::new(SourcePcm {
+                sample_rate: 8,
+                planes: vec![vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]],
+                version: 0,
+                _reservation: None,
+            }),
+        )]
+        .into_iter()
+        .collect();
+        // 输出率 = 工程率 4 Hz：1.0 s ⇒ 4 帧；折算后源位置 t/2，线性插值取 0.1 / 0.15 / 0.2 / 0.25。
+        let snapshot = mix_plain_regions(&[r.clone()], &sources, 4, Some(4.0)).unwrap();
+        assert_eq!(snapshot.left.len(), 4);
+        assert_eq!(snapshot.left, [0.1, 0.15, 0.2, 0.25]);
+
+        // 同一份输入但**不告诉**工程速率：退回"修改时长即源速率秒"，源按 8 Hz 直读，
+        // 4 帧输出的源位置 t×2 ⇒ 下标 0 / 2 / 4 / 6，即 0.1 / 0.3 / 0.5 / 0.7。
+        let blind = mix_plain_regions(&[r], &sources, 4, None).unwrap();
+        assert_eq!(blind.left.len(), 4);
+        assert_eq!(blind.left, [0.1, 0.3, 0.5, 0.7]);
+        assert_ne!(blind.left, snapshot.left, "两条路径必须给出不同结果");
     }
 
     /// 随机 seek、负时间、尾部补零与撤销必须精确；尾哨兵不得被覆盖。

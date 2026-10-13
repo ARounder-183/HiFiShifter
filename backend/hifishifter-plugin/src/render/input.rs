@@ -23,6 +23,12 @@ pub(crate) struct RenderInput {
     pub timeline: Option<TimelineState>,
     pub regions: Vec<AraPlaybackRegion>,
     pub sources: HashMap<String, Arc<SourcePcm>>,
+    /// 宿主通报的工程采样率（Hz）；`None` = 宿主没给，直通路径按宿主原始单位读。
+    ///
+    /// 【为什么渲染输入需要它】`AraPlaybackRegion` 的修改时长单位由宿主决定：素材率与
+    /// 工程率不同时宿主按工程速率折算它。没有内核渲染时（`timeline == None`），
+    /// `mix_plain_regions` 直接拿它定位源样本，因此必须知道该除以哪个速率。
+    pub project_sample_rate: Option<f64>,
     /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters: BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
 }
@@ -46,7 +52,7 @@ impl RenderInput {
                     if cancel.load(Ordering::Acquire) {
                         return Err("host preparation cancelled".into());
                     }
-                    mix_plain_regions(&self.regions, &self.sources, rate)
+                    mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
                         .map_err(|e| format!("snapshot unavailable: {e:?}"))
                 })
                 .collect();
@@ -64,10 +70,21 @@ impl RenderInput {
                 .collect());
         }
         // 只放行原kernel负责的真实正向时间拉伸；普通PCM mixer不放行，content-based fades另有契约。
+        //
+        // 【为什么用宿主工程率而不是写死的 44100】这个参数只把**播放域**秒换算成输出帧，
+        // 96 kHz / 192 kHz 工程下写死 44.1k 会让 origin/end 算错，进而是整份快照错位。
+        // `setupProcessing` 给出的就是权威工程率；缺席时退回 44100（既有默认档）。
+        // 取整是因为这里只用它做秒→帧换算，与输出帧号同为整数域。
+        let project_rate = self.project_sample_rate.unwrap_or(44100.0);
+        let project_rate = if project_rate.is_finite() && project_rate > 0.0 {
+            project_rate.round().clamp(1.0, u32::MAX as f64) as u32
+        } else {
+            44100
+        };
         super::snapshot::validate_regions_with_fades(
             &self.regions,
             &self.sources,
-            44100,
+            project_rate,
             true,
             true,
         )
@@ -408,6 +425,7 @@ mod tests {
                 ..Default::default()
             }],
             sources: HashMap::from([("source".into(), source.clone())]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), params)]),
         };
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
@@ -502,6 +520,7 @@ mod tests {
                 ..Default::default()
             }],
             sources: HashMap::from([("source".into(), source)]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
         };
         let before = input.render(Arc::new(AtomicBool::new(false))).unwrap();
@@ -549,6 +568,7 @@ mod tests {
                 ..Default::default()
             }],
             sources: HashMap::from([("source".into(), source.clone())]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
         };
         let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
@@ -620,6 +640,7 @@ mod tests {
             timeline: Some(timeline),
             regions: vec![region(0.), region(3600.)],
             sources: HashMap::from([("source".into(), source)]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
         };
         let budget = super::super::budget::global_budget();
@@ -686,6 +707,7 @@ mod tests {
                     _reservation: None,
                 }),
             )]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), parameters)]),
         };
         let before = hifishifter_kernel::hnsep_onnx::separation_cache_stats();
@@ -790,6 +812,7 @@ mod tests {
                     _reservation: None,
                 }),
             )]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::from([
                 ("a".into(), params(0.5)),
                 ("b".into(), params(0.25)),
@@ -829,6 +852,7 @@ mod tests {
             timeline: Some(timeline),
             regions: vec![region],
             sources: HashMap::from([("source".into(), source)]),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
@@ -920,6 +944,7 @@ mod tests {
                 timeline: Some(timeline),
                 regions: vec![region],
                 sources: HashMap::from([("source".into(), source)]),
+                project_sample_rate: None,
                 clip_parameters: BTreeMap::new(),
             };
             let output = input
@@ -953,6 +978,7 @@ mod tests {
             timeline: None,
             regions: vec![region],
             sources: sources.clone(),
+            project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
         };
         sources.insert(

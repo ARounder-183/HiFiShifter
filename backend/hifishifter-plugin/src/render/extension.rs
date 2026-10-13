@@ -2309,6 +2309,9 @@ impl ExtensionOwner {
                 timeline: kernel_render.then_some(timeline),
                 regions,
                 sources,
+                // 宿主通报的工程速率。没有内核渲染时 `mix_plain_regions` 要靠它把宿主的
+                // "工程速率秒"折回源自己的秒（见 `RenderInput::project_sample_rate`）。
+                project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
                 clip_parameters,
             },
         ))
