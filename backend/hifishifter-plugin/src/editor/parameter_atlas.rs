@@ -416,12 +416,17 @@ impl ParameterAtlas {
             record.live = false;
         }
         for clip in &timeline.clips {
-            let identity = identities
-                .get(&clip.id)
-                .ok_or("missing actual ARA parameter identity")?;
-            let root = timeline
-                .resolve_root_track_id(&clip.track_id)
-                .ok_or("unknown parameter root")?;
+            // 【为什么身份/根缺席也只跳过】与下面几何失败同一条纪律：本函数在**整份**
+            // 接受路径上跑（`capture_render_input`、工作区接受都经过它）。此前这两处
+            // `ok_or(...)?` 排在几何 `continue` **之前**，于是"身份表这一轮还没跟上"
+            // （region 已建、派生表未同步的窗口）会让整份投影失败 —— 而那条降级通道
+            // 明明就在下面几行。挪到同一口径：这一条片段跳过，其余照常。
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
             // 【为什么几何失败只跳过而不是报错】本函数在**整份**接受路径上跑
             // （`capture_render_input`、工作区接受都经过它）。一个片段若在这里 `Err`，
             // 整份文档就渲染不出来 —— 与 `ensure_loaded` 里那句 `any(reversed)` 是同一个
@@ -541,10 +546,14 @@ impl ParameterAtlas {
             };
             // 与 `capture_changes` 同一条理由：几何不可解的片段只跳过它自己，
             // 绝不能让一条片段使整份投影失败（本函数在渲染输入路径上）。
-            let root = timeline
-                .resolve_root_track_id(&clip.track_id)
-                .ok_or("unknown parameter root")?;
+            //
+            // 【为什么根解析也排到几何之后】此前 `ok_or("unknown parameter root")?` 排在
+            // 几何 `continue` **之前**，于是"轨道身份这一轮还查不到"会让整份投影失败 ——
+            // 而按设计它本该被下面这条 `continue` 兜住。两处口径统一到"局部跳过"。
             let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
                 continue;
             };
             let Some((begin, end)) = covered_frame_range(&geometry, params.frame_period_ms)? else {
@@ -556,7 +565,20 @@ impl ParameterAtlas {
                 entry
             });
             if entry.frame_period_ms != params.frame_period_ms {
-                return Err("Conflict: source parameter frame periods differ within root".into());
+                // 【为什么不再整份失败】同一根轨道上两条片段声明了不同的帧周期，
+                // 合并它们的曲线会把值按错误的时间轴插值。此前这里 `Err` ⇒ 整份投影
+                // 失败 ⇒ 整份编辑被拒。改为跳过这一条片段：它的曲线本次不并入根视图，
+                // 其余片段照常。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.frame-period-mismatch",
+                    format_args!(
+                        "[ara] clip {} declares {} ms frames but its root already uses {} ms; \
+                         its curves are not merged into the root view",
+                        clip.id, params.frame_period_ms, entry.frame_period_ms
+                    ),
+                );
+                continue;
             }
             for (key, values) in parameter_curves(params) {
                 if values.is_empty() {
@@ -600,19 +622,33 @@ impl ParameterAtlas {
         let mut candidate = self.clone();
         candidate.capture_gaps(timeline, previous_view)?;
         for clip in &timeline.clips {
-            let identity = identities
-                .get(&clip.id)
-                .ok_or("missing actual ARA parameter identity")?;
+            // 【为什么身份缺席只跳过】与几何不可解同一纪律（见下方注释）。此前这里
+            // `ok_or(...)?` 会把"身份表这一轮还没跟上"升级成整份捕获失败，于是用户的
+            // 一次编辑被整份拒绝。跳过它：该片段这次不落曲线，其余片段照常。
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
             if identity.key == 0
                 || identity.source.is_empty()
                 || identity.modification.is_empty()
                 || clip.source_path.as_deref() != Some(identity.source.as_str())
             {
-                return Err("invalid ARA parameter identity".into());
+                // 身份自相矛盾（key 为 0 / 源为空 / 与 clip 的源不符）时同样只跳过这一条：
+                // 拿一个不可信的身份去写曲线，会把参数挂到错误的片段上 —— 那比不写更糟。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.invalid-identity",
+                    format_args!(
+                        "[ara] clip {} has an invalid parameter identity this round; its curves \
+                         are not captured (other clips are unaffected)",
+                        clip.id
+                    ),
+                );
+                continue;
             }
-            let root = timeline
-                .resolve_root_track_id(&clip.track_id)
-                .ok_or("unknown parameter root")?;
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
             let Some(params) = timeline.params_by_root_track.get(&root) else {
                 candidate.regions.remove(&clip.id);
                 continue;
@@ -757,12 +793,16 @@ impl ParameterAtlas {
         self.validate()?;
         let mut projected = BTreeMap::new();
         for clip in &timeline.clips {
-            let identity = identities
-                .get(&clip.id)
-                .ok_or("missing actual ARA parameter identity")?;
-            let root = timeline
-                .resolve_root_track_id(&clip.track_id)
-                .ok_or("unknown parameter root")?;
+            // 【为什么身份/根缺席也只跳过】与下面几何失败同一条纪律。此前这两处
+            // `ok_or(...)?` 排在几何 `continue` 之前，于是"身份表/轨道身份这一轮还没
+            // 跟上"会让整个渲染输入准备失败（本函数在 `capture_render_input` 上）⇒
+            // 快照永不发布 ⇒ 声音停在旧版本。跳过这一条片段即可。
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
             // 几何不可解只跳过该片段：否则整个渲染输入准备都会失败
             // （本函数在 `capture_render_input` 上）。
             let Ok(mut geometry) = geometry(clip) else {
@@ -1698,7 +1738,10 @@ mod tests {
         third.clips.push(spanning);
         third.project_sec = 2.5;
         let mut third_ids = second_ids.clone();
-        third_ids.insert("spanning".into(), with_signature("spanning", 99, 2.0, 0.3).1);
+        third_ids.insert(
+            "spanning".into(),
+            with_signature("spanning", 99, 2.0, 0.3).1,
+        );
 
         let resolved = a2
             .follow_geometry(&third, &third_ids)

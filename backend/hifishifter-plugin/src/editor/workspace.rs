@@ -1081,12 +1081,30 @@ impl DocumentSession {
             .map(|bound| (bound.region_key, bound.geometry))
             .collect::<std::collections::HashMap<_, _>>();
         for clip in &mut timeline.clips {
-            let key = identities
+            // 【为什么身份/区域缺席也只跳过】与下面缺宿主几何那条 `continue` 同一条
+            // 纪律。此前这两处 `ok_or(...)?` 让"身份表这一轮还没跟上"（region 已建、
+            // 派生表未同步的窗口）把整份 `project_audio_fades_locked` 打失败 ——
+            // 而那经 `capture_render_input` 的后果是**整轨静音**。
+            // 一条片段的淡化身份查不到，只是这一条不投影委托淡化。
+            let Some(key) = identities
                 .iter()
                 .find(|(_, id)| id.as_str() == clip.id)
                 .map(|(key, _)| *key)
-                .ok_or("missing fade region edge")?;
-            let region = regions.get(&key).ok_or("missing fade region")?;
+            else {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.fade-region-identity",
+                    format_args!(
+                        "[ara] clip {} has no fade region identity this round; its delegated \
+                         fades are not projected (other clips are unaffected)",
+                        clip.id
+                    ),
+                );
+                continue;
+            };
+            let Some(region) = regions.get(&key) else {
+                continue;
+            };
             if !region.has_content_based_fade_at_head && !region.has_content_based_fade_at_tail {
                 continue;
             }
@@ -1391,13 +1409,35 @@ impl DocumentSession {
     }
     pub(crate) fn workspace_timeline_locked(&self) -> Result<TimelineState, String> {
         let scope = self.workspace_scope_locked()?;
+        let mut invalid_keys = 0_usize;
         let clips = scope
             .regions
             .iter()
             // 身份缺席时按 region key 派生（见 `clip_id_for`）：工作区投影跑在
             // region 分配之后、`clip_ids` 重算之前的窗口里，那不是致命错误。
-            .map(|key| self.clip_id_for(*key).ok_or("invalid region key"))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            //
+            // 【为什么 key==0 也只跳过】`clip_id_for` 只对 key==0 返回 `None`（那是
+            // 无效键，`region_owners` 也拒它）。此前这里的 `ok_or(...)?` + `collect::<Result>()`
+            // 会让**一个无效键**把整份工作区时间线打失败 ⇒ 界面一条片段都不更新。
+            // 逐条过滤：无效键的那条 region 本次不进工作区，其余照常。
+            .filter_map(|key| match self.clip_id_for(*key) {
+                Some(id) => Some(id),
+                None => {
+                    invalid_keys += 1;
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        if invalid_keys > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.workspace.invalid-region-key",
+                format_args!(
+                    "[ara] {invalid_keys} assigned region(s) have no usable key this round; \
+                     they are omitted from the workspace timeline"
+                ),
+            );
+        }
         let mut timeline = self
             .timeline
             .lock_or_recover()

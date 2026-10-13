@@ -1990,17 +1990,9 @@ mod tests {
             )
         }
         .unwrap();
-        let properties = PlaybackRegionProperties::for_ara2(
-            0,
-            0.0,
-            0.5,
-            0.0,
-            0.5,
-            sequence_ref,
-            None,
-            None,
-        )
-        .unwrap();
+        let properties =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.0, 0.5, sequence_ref, None, None)
+                .unwrap();
         let context = CreateContext::for_test(ApiGeneration::V2Final, 0xABCD);
         let modification = 0_usize;
         let sequence = 0_usize;

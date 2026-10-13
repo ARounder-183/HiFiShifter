@@ -440,6 +440,16 @@ impl DocumentSession {
     }
 
     /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
+    ///
+    /// 【为什么不再对单个 clip 硬失败】此前这里对**任意一条** clip 的身份缺席直接
+    /// `Err`，而它在 `map` 内 ⇒ 整份身份表失败 ⇒ 所有 `project_*` / `follow_geometry`
+    /// 调用全部失败 ⇒ 整份投影与整份编辑被拒。这与本文件写在 `clip_id_for` 上的口径
+    /// 自相矛盾：那里已经把"region 已分配、`clip_ids` 还没重算"的窗口降级为按 key
+    /// 派生，而这里仍把它当致命错误。
+    ///
+    /// 现在逐条跳过并限流留痕：缺席的那一条 clip 不参与曲线投影（几何与音频不受影响），
+    /// 其余 clip 照常。返回类型保留 `Result` 是为了调用方签名不变 —— 本函数已不再
+    /// 因单条 clip 而失败。
     pub(crate) fn parameter_identities_locked(
         &self,
         timeline: &hifishifter_kernel::state::TimelineState,
@@ -449,10 +459,13 @@ impl DocumentSession {
     > {
         let ids = self.clip_ids.lock_or_recover();
         let regions = self.regions.lock_or_recover();
-        timeline
+        let items = self.region_items.lock_or_recover();
+        let mut unresolved = 0_usize;
+        let mut first_unresolved: Option<String> = None;
+        let identities = timeline
             .clips
             .iter()
-            .map(|clip| {
+            .filter_map(|clip| {
                 // 反查 region key：先查缓存，未命中时从 id 本身解析 —— clip id 由 key 派生
                 // （`ara-region-{key}`），所以它是自描述的。此前的硬错误
                 // （`missing actual region parameter edge`）会让"region 已分配、`clip_ids`
@@ -462,17 +475,17 @@ impl DocumentSession {
                     .find(|(_, id)| **id == clip.id)
                     .map(|(key, _)| *key)
                     .or_else(|| parse_region_key_from_clip_id(&clip.id));
-                let Some(key) = key else {
-                    return Err(format!("clip {} has no region identity", clip.id));
+                let region = key.and_then(|key| regions.get(&key).map(|region| (key, region)));
+                let Some((key, region)) = region else {
+                    unresolved += 1;
+                    first_unresolved.get_or_insert_with(|| clip.id.clone());
+                    return None;
                 };
-                let region = regions
-                    .get(&key)
-                    .ok_or("missing actual region parameter identity")?;
-                Ok((
+                Some((
                     clip.id.clone(),
                     crate::editor::parameter_atlas::RegionIdentity {
                         key,
-                        item: self.region_items.lock_or_recover().get(&key).cloned(),
+                        item: items.get(&key).cloned(),
                         source: region.audio_source_persistent_id.clone(),
                         modification: region.audio_modification_persistent_id.clone(),
                         // 跨会话签名：只用 ARA 自己给的量，ARA-only 宿主上也有值
@@ -487,7 +500,20 @@ impl DocumentSession {
                     },
                 ))
             })
-            .collect()
+            .collect();
+        if unresolved > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.identity.unresolved-clip",
+                format_args!(
+                    "[ara] {unresolved} of {} clip(s) have no region identity this round \
+                     (first: {:?}); they project no curves until the derived tables catch up",
+                    timeline.clips.len(),
+                    first_unresolved
+                ),
+            );
+        }
+        Ok(identities)
     }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
     pub(crate) fn editor_session(
@@ -603,8 +629,52 @@ impl DocumentSession {
         let mut timeline = self.workspace_timeline_locked()?;
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
         edits.apply(&mut timeline);
-        for clip in &mut timeline.clips {
-            clip.normalize_takes();
+        // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
+        // 此前从不同时持有；`media_in_flight_items` 的锁序是
+        // `regions → region_items → source_failures`。在这里引入 `edit_sources →
+        // source_failures` 会给锁序图加一条新边。id 集合很小（每条 clip 一个），
+        // 先取出来再释放，既省锁也避免新的 ABBA 候选。
+        let available_ids: std::collections::BTreeSet<String> = {
+            let available = self.edit_sources.lock_or_recover();
+            available.keys().cloned().collect()
+        };
+        // 【为什么逐条降级而不是整份失败】此前这里对**每一条** clip 的源做
+        // `ok_or(HOST_PCM_UNAVAILABLE)?` 再 `collect::<Result<_,_>>()?` —— 只要工程里有
+        // **一条** clip 的源还没被 ARA 授权，整个 `workspace_snapshot` 就返回 `Err`，
+        // 而它唯一的调用方 `EditorSession::ensure_loaded` 直接 `?` 上去 ⇒ **插件界面
+        // 一条片段都不更新**。用户看到的是"宿主里做了操作，插件毫无反应"。
+        //
+        // 这与本文件自己写在 `source_failures` 上的纪律直接冲突（见其字段说明：
+        // "把'某个源读不出来'折进 `ready=false` 会让一次样本读取失败被报成'宿主冲突'，
+        // 所以这里单记一份"），也违反项目既有的"局部降级、不整份失败"口径 ——
+        // `mapping.rs` 的逐 region 跳过、`project_audio_fades_locked` 的缺几何降级
+        // 都是同一纪律的既有实现。
+        //
+        // 降级方式沿用内核 `host_pcm` 的"隔离"口径：缺源的 clip **清掉源引用**，
+        // 界面按无源占位渲染（不是消失），原因记进 `source_failures` 供前端显示
+        // "源未授权"。这样其余的 clip、曲线、几何全部照常。
+        {
+            let mut failures = self.source_failures.lock_or_recover();
+            for clip in &mut timeline.clips {
+                for take in &mut clip.takes {
+                    let Some(id) = take.source_path.as_deref() else {
+                        continue;
+                    };
+                    if available_ids.contains(id) {
+                        continue;
+                    }
+                    // 只在没有更具体的原因时记通用码：`refresh_source_pcm` 已经把
+                    // "授权了但读不出来"的真因写在这里，别覆盖它。
+                    failures
+                        .entry(id.to_owned())
+                        .or_insert_with(|| crate::editor::errors::HOST_PCM_UNAVAILABLE.to_owned());
+                    take.source_path = None;
+                    take.source_path_relative = None;
+                }
+                // 活跃 take 的源被清掉后，扁平投影必须跟着清 —— 否则下游会拿一个
+                // 指向已消失源的 `clip.source_path` 去物化，那正是"missing host PCM"。
+                clip.normalize_takes();
+            }
         }
         let available = self.edit_sources.lock_or_recover();
         let ids = timeline
@@ -616,15 +686,12 @@ impl DocumentSession {
             })
             .filter_map(Option::as_ref)
             .collect::<std::collections::BTreeSet<_>>();
+        // 到这里 `ids` 只含已授权的源；仍用 `filter_map` 兜住"授权表在两步之间变化"
+        // 的竞态 —— 那种情况下也只是少一条 PCM，不该赔上整份快照。
         let sources = ids
             .into_iter()
-            .map(|id| {
-                let pcm = available.get(id).ok_or_else(|| {
-                    format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE)
-                })?;
-                Ok((id.clone(), pcm.clone()))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+            .filter_map(|id| available.get(id).map(|pcm| (id.clone(), pcm.clone())))
+            .collect::<Vec<_>>();
         let projection = self.workspace_projection_locked(&edits)?;
         self.project_ui_fades_locked(&mut timeline, &edits.fades);
         self.project_private_group_view(&mut timeline, &edits)?;

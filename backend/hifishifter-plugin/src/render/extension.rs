@@ -2256,16 +2256,36 @@ impl ExtensionOwner {
             );
         }
         let geometry = document.regions.lock_or_recover();
-        let regions = keys
-            .iter()
-            .map(|key| {
-                geometry
-                    .get(key)
-                    .cloned()
-                    .ok_or("assigned region disappeared")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // 【为什么消失的 region 只跳过】此前这里 `ok_or("assigned region disappeared")?`
+        // + `collect::<Result<_,_>>()?`：只要**一条**已分配的 key 不在 `regions` 表里
+        // （宿主销毁了 region、分配还没撤销的窗口），整份 `capture_render_input` 失败 ⇒
+        // `prepare_job` 不发布快照 ⇒ 声音停在旧版本，且界面上只有一条内部错误。
+        // 逐条过滤：消失的那条本次不参与渲染，其余照常。`keys` 与 `regions` 必须
+        // **同长同序**（它们一起进 `RenderInput`），所以两者一起筛。
+        let mut resolved_keys = Vec::with_capacity(keys.len());
+        let mut regions = Vec::with_capacity(keys.len());
+        let mut vanished = 0_usize;
+        for key in &keys {
+            match geometry.get(key) {
+                Some(region) => {
+                    resolved_keys.push(*key);
+                    regions.push(region.clone());
+                }
+                None => vanished += 1,
+            }
+        }
         drop(geometry);
+        if vanished > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.capture.vanished-region",
+                format_args!(
+                    "[ara] {vanished} assigned region(s) are gone from the model this round; \
+                     they are omitted from the render input"
+                ),
+            );
+        }
+        let keys = resolved_keys;
         let stretch = regions.iter().any(|region| {
             (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9
         });
@@ -2339,14 +2359,33 @@ impl ExtensionOwner {
         let keys = self.assigned_regions().map_err(|e| e.to_string())?;
         // 身份缺席时按 region key 派生（见 `clip_id_for`）：region 分配早于
         // `clip_ids` 重算，这个窗口里的渲染不该失败。
+        //
+        // 【为什么无效键只跳过】`clip_id_for` 只对 key==0 返回 `None`。此前这里的
+        // `ok_or(...)?` + `collect::<Result>()` 会让**一个**无效键把整份
+        // `assigned_timeline` 打失败 —— 而它是 `capture_render_input` /
+        // `merge_pending_restore` / `encode_state` 的共同入口 ⇒ 快照不发布 +
+        // 存档保存失败。逐条过滤：那一条 region 本次不参与渲染，其余照常。
+        let mut invalid_keys = 0_usize;
         let ids = keys
             .iter()
-            .map(|key| {
-                document
-                    .clip_id_for(*key)
-                    .ok_or("invalid assigned region key")
+            .filter_map(|key| match document.clip_id_for(*key) {
+                Some(id) => Some(id),
+                None => {
+                    invalid_keys += 1;
+                    None
+                }
             })
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<BTreeSet<_>>();
+        if invalid_keys > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.assigned.invalid-region-key",
+                format_args!(
+                    "[ara] {invalid_keys} assigned region(s) have no usable key this round; \
+                     they are omitted from the render input"
+                ),
+            );
+        }
         let mut timeline = document
             .timeline
             .lock_or_recover()
@@ -2595,16 +2634,30 @@ impl ExtensionOwner {
             .cloned()
             .unwrap_or_default();
         let members = document.sequence_regions.lock_or_recover();
+        let mut unknown_sequences = 0_usize;
         for sequence in sequences {
-            keys.extend(
-                members
-                    .get(&sequence)
-                    .ok_or(AraError::InvalidState("unknown assigned sequence"))?
-                    .iter()
-                    .copied(),
-            );
+            // 【为什么未知 sequence 只跳过】`sequence_regions` 只登记**已经有 region**
+            // 的 sequence（见 `create_playback_region`）。宿主先建 sequence、后建 region
+            // 是正常时序，其间该键必然缺席。此前这里 `ok_or(...)?` 让整份
+            // `assigned_regions()` 失败 ⇒ 经 `workspace_scope_locked` /
+            // `assigned_timeline` 把整份工作区与渲染输入一起打失败 ——
+            // "宿主建了轨道、插件里什么都没有"。跳过即可：该 sequence 本次没有成员。
+            match members.get(&sequence) {
+                Some(regions) => keys.extend(regions.iter().copied()),
+                None => unknown_sequences += 1,
+            }
         }
         drop(members);
+        if unknown_sequences > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                "ara.assigned.unknown-sequence",
+                format_args!(
+                    "[ara] {unknown_sequences} assigned region sequence(s) have no playback \
+                     region yet; they contribute no members this round"
+                ),
+            );
+        }
         let keys = keys.into_iter().collect::<Vec<_>>();
         if !keys.is_empty() {
             let (owner, _) = region_owners()
