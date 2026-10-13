@@ -592,8 +592,15 @@ impl DocumentSession {
         for owner in self.renderer_owners() {
             owner.merge_pending_restore(self)?;
         }
-        let mut timeline = self.workspace_timeline_locked()?;
+        // 【为什么先取 `edits` 再取时间线】文档声明的锁序是
+        // `transaction → timeline → edits → host facts`（见 `DocumentSession` 的说明），
+        // 而 `workspace_timeline_locked` 内部要取 `clip_ids` / `ui_tracks`（host facts）。
+        // 先取时间线就是 `host facts → edits`，与 `accept_workspace_edits_with_groups`
+        // 的 `edits → host facts`（它持 `edits` 时调 `parameter_identities_locked`）
+        // 构成 ABBA —— 两条路径分别跑在编辑器 actor 与 ARA 模型线程上，是真死锁候选。
+        // `workspace_timeline_locked` 本身不碰 `edits`，所以把顺序倒过来是安全的。
         let mut edits = self.edits.lock_or_recover();
+        let mut timeline = self.workspace_timeline_locked()?;
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
         edits.apply(&mut timeline);
         for clip in &mut timeline.clips {
