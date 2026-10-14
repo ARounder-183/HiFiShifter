@@ -777,7 +777,14 @@ fn ara_document_to_timeline_reporting_with_identities(
             });
             continue;
         }
-        if source_span_end < raw_end {
+        // 【为什么带容差】终点是 `raw_start + durPlay × playback_rate` 算出来的，与
+        // `duration = sampleCount / sampleRate` 之间必然有**浮点尾差**（实测 Cubase：
+        // 整段素材的 region 打出 `[0.000000, 31.798583] exceeds (31.798583s)`，两者
+        // 只差最后一个 ulp）。原来的严格 `<` 让**每一条覆盖到源尾的 region** 都命中，
+        // 真机日志里刷了 187 次，把真正需要关注的越界淹掉。容差取一个源采样周期：
+        // 亚采样的越界本来就是 ARA 定义的"读作静音"，不构成需要留痕的事实。
+        let span_epsilon = 1.0 / source.sample_rate.max(1.0);
+        if raw_end > source_span_end + span_epsilon {
             // 修好起点折算后这条**不应再出现**（折算后的窗口恰好落在源内）。保留它作为回归哨兵：
             // 一旦宿主换了折算口径，它会是第一个报警的地方。限流，避免每 region 每次重算都打。
             hifishifter_kernel::log_limiter::emit_limited_key(

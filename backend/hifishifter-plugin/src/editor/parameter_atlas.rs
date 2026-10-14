@@ -2017,6 +2017,13 @@ pub(super) fn pad(key: &str) -> f32 {
         0.
     }
 }
+/// 图集承载的曲线集合。
+///
+/// 【为什么 `pitch_orig` 仍在这里】它是分析基线；渲染侧的**主**来源已改为内容寻址的
+/// 逐 clip 缓存（见 `mixdown::apply_host_pitch_edit`），因此它不再是渲染的关键路径。
+/// 但投影契约（`project_roots` / `capture_inner` / 旧存档迁移）与合成夹具仍把它当作
+/// 一份可往返的曲线 —— 删掉会让"内容缓存尚未建立"的窗口里无 F0 可用。因此本轮保留，
+/// 只把渲染侧改成"内容缓存优先、工程域曲线兜底"。
 pub(super) fn parameter_curves(params: &TrackParamsState) -> Vec<(String, &[f32])> {
     let mut curves = vec![
         ("pitch_orig".into(), params.pitch_orig.as_slice()),

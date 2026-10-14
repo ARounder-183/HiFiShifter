@@ -806,7 +806,33 @@ impl ModelHandle {
                     .iter()
                     .map(|s| (s.index, s.reason.as_str().to_owned()))
                     .collect();
+                // 【默认合成开关：只对**没有持久化编辑记录**的轨道播种，不再每次覆写】
+                //
+                // 此前这里每次重映射都无条件把每条轨道改成 `compose_enabled = true` +
+                // `NsfHifiganOnnx`。那等于用"默认值"盖掉用户的选择：用户关掉合成、
+                // 或把算法换成 WORLD 之后，只要宿主发生一次编辑就被抹回默认。
+                // 而且它把**每一条 clip** 都推进处理器 —— 在 F0 推导出错时，
+                // 这就是"大部分 clip 都中招"的放大器（见 `mixdown::apply_host_pitch_edit`
+                // 的 F0 来源修复）。
+                //
+                // 现在：有持久化记录的轨道完全交给 `EditState::apply`（它在
+                // `workspace_timeline_locked` 里随后叠加用户选择）；只有**新出现**的
+                // 宿主轨道才播种插件默认值，保证开箱即用。
+                //
+                // 【锁序】此处持有 `transaction`（见上方），而文档声明的顺序是
+                // `transaction → timeline → edits → host facts`，先取 `edits` 合法。
+                let seeded: std::collections::BTreeSet<String> = self
+                    .session
+                    .edits
+                    .lock_or_recover()
+                    .tracks
+                    .iter()
+                    .map(|track| track.id.clone())
+                    .collect();
                 for track in &mut timeline.tracks {
+                    if seeded.contains(&track.id) {
+                        continue;
+                    }
                     track.compose_enabled = true;
                     track.pitch_analysis_algo =
                         hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;

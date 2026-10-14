@@ -516,7 +516,33 @@ impl DocumentSession {
                     .find(|(_, id)| **id == clip.id)
                     .map(|(key, _)| *key)
                     .or_else(|| parse_region_key_from_clip_id(&clip.id));
-                let region = key.and_then(|key| regions.get(&key).map(|region| (key, region)));
+                let region = key
+                    .and_then(|key| regions.get(&key).map(|region| (key, region)))
+                    // 【按 key 直查缺席时，按"源 + 播放几何"反查】
+                    //
+                    // 少数情况下 clip id 派生出的 key 不在派生表里（宿主在收口前重投模型，
+                    // 或 region 刚被重建而 `region_keys` 还没跟上）。此前这种情况直接判
+                    // "无身份"，于是这一条 clip 本轮**不投影任何曲线** —— 用户看到的正是
+                    // "编辑之后这一段参数被重置"。
+                    //
+                    // clip 携带的 `source_path` 就是源 persistentID（映射层如此播种），
+                    // `start_sec` / `length_sec` 就是播放起止，三者足以在派生表里确定那条
+                    // region。多于一条匹配说明猜不出（同一源、同一窗口被重复放置），
+                    // 此时仍放弃 —— 不猜。
+                    .or_else(|| {
+                        let source = clip.source_path.as_deref()?;
+                        let mut matches = regions.iter().filter(|(_, region)| {
+                            region.audio_source_persistent_id == source
+                                && (region.start_in_playback_time - clip.start_sec).abs() <= 1e-6
+                                && (region.duration_in_playback_time - clip.length_sec).abs()
+                                    <= 1e-6
+                        });
+                        let (key, region) = matches.next()?;
+                        if matches.next().is_some() {
+                            return None;
+                        }
+                        Some((*key, region))
+                    });
                 let Some((key, region)) = region else {
                     unresolved += 1;
                     first_unresolved.get_or_insert_with(|| clip.id.clone());
