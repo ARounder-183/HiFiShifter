@@ -881,23 +881,11 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
-        self.follow_geometry_with(timeline, identities, legacy_atlas_mode())
-    }
-
-    /// [`Self::follow_geometry`] 的实现，带 A/B 开关。
-    fn follow_geometry_with(
-        &self,
-        timeline: &TimelineState,
-        identities: &BTreeMap<String, RegionIdentity>,
-        legacy: bool,
-    ) -> Result<Self, String> {
         let mut followed = self.clone();
         // 旧存档只有 per-clip 记录：按旧规则认领一次并折算进权威（一次性）。
-        if !legacy {
-            followed.migrate_legacy_records(timeline, identities);
-        }
+        followed.migrate_legacy_records(timeline, identities);
         // 本帧投影完全由权威派生。clip id 的不稳定在这里不再有影响。
-        followed.regions = followed.derive_regions_with(timeline, identities, legacy)?;
+        followed.regions = followed.derive_regions(timeline, identities)?;
         // 谱系表的有界回收：种子一旦被活记录认领就不再需要。
         //
         // 【为什么现在只需这一条】`regions` 已经是**每帧重建**的派生缓存（上面那行），
@@ -990,15 +978,6 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<BTreeMap<String, RegionParameters>, String> {
-        self.derive_regions_with(timeline, identities, legacy_atlas_mode())
-    }
-
-    fn derive_regions_with(
-        &self,
-        timeline: &TimelineState,
-        identities: &BTreeMap<String, RegionIdentity>,
-        legacy: bool,
-    ) -> Result<BTreeMap<String, RegionParameters>, String> {
         let mut derived = BTreeMap::new();
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
@@ -1010,7 +989,7 @@ impl ParameterAtlas {
             let Ok(geometry) = geometry(clip) else {
                 continue;
             };
-            let Some(authority) = self.authority_with(legacy, identity, &root, &geometry)? else {
+            let Some(authority) = self.authority(identity, &root, &geometry)? else {
                 continue;
             };
             derived.insert(
@@ -1030,32 +1009,19 @@ impl ParameterAtlas {
 
     /// 一条 clip 的参数权威。
     ///
-    /// 【查表顺序】先按稳定宿主身份（[`authority_key`]）查权威表；缺席时退回 per-clip
-    /// 记录（只可能发生在旧存档尚未迁移的窗口内）。两条路径都是**确定性查表**，
-    /// 不做任何几何猜测。
+    /// 【查表顺序】先按稳定宿主身份（[`authority_key`]）查权威表；item 级缺席时按
+    /// modification 级兜底；两者都没有才退回 per-clip 记录（旧存档迁移窗口）。
+    /// 除最后一步外都是**确定性查表**，不做任何几何猜测 —— 几何兜底曾是
+    /// "分割后曲线整体平移一个分割长度"的直接来源（兄弟半段的源窗相邻，
+    /// 会被判成合法祖先），因此这里刻意**不读** `split_parents` /
+    /// `ara_split_parents` 那些谱系表：归属由该 clip 自己的源窗与权威曲线的
+    /// 源区间求交决定，不需要推断祖先。
     fn authority<'a>(
         &'a self,
         identity: &RegionIdentity,
         root: &str,
         geometry: &RegionGeometry,
     ) -> Result<Option<Authority<'a>>, String> {
-        self.authority_with(legacy_atlas_mode(), identity, root, geometry)
-    }
-
-    /// [`Self::authority`] 的实现，带 A/B 开关。
-    fn authority_with<'a>(
-        &'a self,
-        legacy: bool,
-        identity: &RegionIdentity,
-        root: &str,
-        geometry: &RegionGeometry,
-    ) -> Result<Option<Authority<'a>>, String> {
-        // 【A/B 兼容开关】`HIFISHIFTER_ARA_LEGACY_ATLAS=1` 强制退回旧的几何认领路径，
-        // 用于在真机上做对照，确认"参数不再被重置"确实是权威表带来的。
-        // 下一轮删除（连同本分支）。
-        if legacy {
-            return Ok(self.find(identity, root, geometry)?.map(Authority::Legacy));
-        }
         if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
             if let Some(params) = self.authorities.get(&key) {
                 return Ok(Some(Authority::Current(params)));
@@ -1957,16 +1923,11 @@ impl ParameterAtlas {
 /// `source_start_sec` 建升序映射，曲线会被整体镜像 —— 与波形/音频对不上。
 /// 这里取真实窗口并把 `reversed` 交给 [`RegionGeometry::map`] 建降序源轴。
 ///
-/// 公开给同 crate 的剪贴板粘贴路径，避免"窗口/方向"这套规则被抄成两份。
-/// A/B 兼容开关：强制退回旧的"按几何指纹认领曲线"路径。
-///
-/// 【为什么保留一轮】真机（Cubase）验证时需要一个对照，确认"参数不再被重置"确实是
-/// 权威表带来的，而不是别的改动。设 `HIFISHIFTER_ARA_LEGACY_ATLAS=1` 即退回旧行为。
-/// **下一轮删除**（连同 `authority_with` / `follow_geometry_with` / `derive_regions_with`
-/// 的 `legacy` 参数）。
-fn legacy_atlas_mode() -> bool {
-    std::env::var("HIFISHIFTER_ARA_LEGACY_ATLAS").is_ok_and(|value| value == "1")
-}
+/// 【为什么把 A/B 开关删掉】这里原有一个 `HIFISHIFTER_ARA_LEGACY_ATLAS=1`，
+/// 它会在**运行时**把权威查表换成"按几何猜祖先"。猜出来的祖先可能是**兄弟半段**
+/// （分割后两半的源窗恰好相邻），于是曲线被整体平移一个分割长度 —— 正是用户报障的
+/// 形状。一个能在环境变量里把已知缺陷开回来的开关，比它带来的对照价值更危险；
+/// 本轮（round8）起谱系推断不再被投影消费，开关因此没有存在理由。
 
 /// 把「锁定参数线」的取值映射成锚点。
 ///
@@ -3388,62 +3349,61 @@ mod tests {
         );
     }
 
-    /// **A/B 兼容开关必须真的退回旧的几何认领路径。**
+    /// **投影只读权威表，不读谱系推断。**
     ///
-    /// 【为什么需要这条】`HIFISHIFTER_ARA_LEGACY_ATLAS=1` 是真机对照用的开关：
-    /// 打开它应当复现"分割后参数被重置"的旧行为，否则它就不是一个可信的对照。
+    /// 【为什么需要这条】`HIFISHIFTER_ARA_LEGACY_ATLAS` 开关已删除（它能在环境变量里
+    /// 把"按几何猜祖先"这个已知缺陷开回来）。删掉之后要保证的是：即便谱系表里塞满
+    /// 条目，投影**一个字都不读它们** —— 归属只由该 clip 自己的源窗与权威曲线的源区间
+    /// 求交决定。这条测试故意把谱系表全部填满，再断言结果与清空时逐帧相同。
     #[test]
-    fn the_legacy_switch_reproduces_the_geometry_claiming_path() {
+    fn projection_ignores_lineage_tables_entirely() {
         let ids = identities();
         let original = edited();
         let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
-        // 宿主克隆 modification（P1/P2 播种）：两个半段的身份是**新的**。
-        let mut split = atlas.clone();
-        assert!(split.seed_authority("mod:mod", "mod:mod-l"));
-        assert!(split.seed_authority("mod:mod", "mod:mod-r"));
-        let mut halves = host(1., 0.5, 0., 0.5);
-        halves.clips[0].id = "left".into();
-        let mut right = host(1.5, 0.5, 0.5, 0.5).clips.remove(0);
-        right.id = "right".into();
-        halves.clips.push(right);
-        halves.project_sec = 2.;
-        let half_ids = BTreeMap::from([
-            (
-                "left".into(),
-                RegionIdentity {
-                    key: 42,
+        let clean = atlas.follow_geometry(&original, &ids).unwrap();
+        let expected = clean.project(&original, &ids).unwrap();
+
+        let mut poisoned = atlas.clone();
+        // 把两张谱系表与种子表全部填上**指向错误片段**的条目：如果投影还读它们，
+        // 这一段就会把曲线接到别的源窗上（"整体平移一个分割长度"的老形状）。
+        // 键用 GUID 形状且父子不同：`validate` 会拒绝畸形/自指的谱系，而这里要测的
+        // 是"结构合法也一个字都不读"，不是"畸形条目会不会被拒绝"。
+        let polluted_child = "{99999999-9999-9999-9999-999999999999}".to_owned();
+        let polluted_parent = "{88888888-8888-8888-8888-888888888888}".to_owned();
+        poisoned
+            .split_parents
+            .insert(polluted_child.clone(), polluted_parent.clone());
+        poisoned
+            .ara_split_parents
+            .insert(polluted_child.clone(), polluted_parent);
+        poisoned.ara_copy_seeds.insert(
+            polluted_child,
+            RegionParameters {
+                identity: RegionIdentity {
+                    key: 0,
                     item: None,
-                    source: "source".into(),
-                    modification: "mod-l".into(),
+                    source: "other-source".into(),
+                    modification: "unrelated".into(),
                     signature: String::new(),
                 },
-            ),
-            (
-                "right".into(),
-                RegionIdentity {
-                    key: 43,
-                    item: None,
-                    source: "source".into(),
-                    modification: "mod-r".into(),
-                    signature: String::new(),
+                root: "a".into(),
+                current: RegionGeometry {
+                    project_start: 1.,
+                    project_duration: 1.,
+                    source_start: 5.,
+                    source_duration: 5.,
+                    reversed: false,
                 },
-            ),
-        ]);
-        let modern = split
-            .follow_geometry_with(&halves, &half_ids, false)
-            .unwrap();
-        assert_eq!(
-            modern.regions.len(),
-            2,
-            "新路径：两个半段都按稳定身份从权威拿到参数"
+                live: false,
+                template: TrackParamsState::default(),
+                curves: BTreeMap::new(),
+            },
         );
-        let legacy = split
-            .follow_geometry_with(&halves, &half_ids, true)
-            .unwrap();
-        assert!(
-            legacy.regions.is_empty(),
-            "旧路径必须复现'按几何指纹认领不到父段'的行为，否则这个开关不是可信的对照：{:?}",
-            legacy.regions.keys().collect::<Vec<_>>()
+        let followed = poisoned.follow_geometry(&original, &ids).unwrap();
+        let projected = followed.project(&original, &ids).unwrap();
+        assert_eq!(
+            projected["clip"].pitch_edit, expected["clip"].pitch_edit,
+            "谱系表不得参与投影：曲线归属只由该 clip 自己的源窗决定"
         );
     }
 
