@@ -210,6 +210,25 @@ impl RegionFrame {
     }
 }
 
+/// 宿主颜色（三个 0..1 分量）转成插件侧时间线用的 `#rrggbb`。
+///
+/// 【为什么要转】宿主给的是 float 分量（`ARAColor`），而内核的时间线用 `#rrggbb`
+/// 字符串（与 `ClipLocalState::color` 同一格式）。任一分量非有限时返回 `None`：
+/// 宁可让轨道留默认色，也不要写一个下游解析不了的字符串。
+fn host_color_hex(color: Option<&ara2_bridge::core::Color>) -> Option<String> {
+    let color = color?;
+    let components = [color.red(), color.green(), color.blue()];
+    if components.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(format!(
+        "#{:02x}{:02x}{:02x}",
+        (components[0].clamp(0., 1.) * 255.).round() as u8,
+        (components[1].clamp(0., 1.) * 255.).round() as u8,
+        (components[2].clamp(0., 1.) * 255.).round() as u8,
+    ))
+}
+
 impl Default for ModelHandle {
     fn default() -> Self {
         static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
@@ -1350,6 +1369,7 @@ impl RegionSequences for ModelHandle {
         sequences.push(AraRegionSequence {
             name: properties.name().map(str::to_owned),
             order_index: properties.order_index(),
+            color: host_color_hex(properties.color()),
             playback_region_count: 0,
         });
         // 【序列身份取自 realtime key，不是 persistentID】`ARARegionSequenceProperties`
@@ -1402,6 +1422,7 @@ impl RegionSequences for ModelHandle {
         };
         sequence.name = properties.name().map(str::to_owned);
         sequence.order_index = properties.order_index();
+        sequence.color = host_color_hex(properties.color());
         log::info!(
             "[ara] region_sequence #{state} updated: name={:?} orderIndex={}",
             sequence.name,
@@ -2159,6 +2180,15 @@ impl Drop for ModelHandle {
     }
 }
 
+/// 【为什么单独测它】分量越界或非有限时宁可返回 `None`（轨道留默认色），
+/// 也不要写一个下游解析不了的字符串。
+#[test]
+fn host_colors_clamp_into_a_parseable_hex_string() {
+    let color = ara2_bridge::core::Color::new(0.2, 0.4, 0.6).unwrap();
+    assert_eq!(host_color_hex(Some(&color)).as_deref(), Some("#336699"));
+    assert_eq!(host_color_hex(None), None);
+}
+
 #[cfg(test)]
 mod tests {
     /// 真实模型稳定收口必须重新投影编辑，不能只有数学helper通过而GUI/authority仍在旧位置。
@@ -2248,6 +2278,7 @@ mod tests {
                 .push(AraRegionSequence {
                     name: Some(name.to_string()),
                     order_index: index as i32,
+                    color: None,
                     playback_region_count: 1,
                 });
             let modification = format!("host-mod-{name}");

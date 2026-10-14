@@ -93,6 +93,13 @@ pub struct AraRegionSequence {
     /// 序号。
     #[serde(default, rename = "orderIndex")]
     pub order_index: i32,
+    /// 宿主给的序列颜色（`#rrggbb`）。
+    ///
+    /// 【为什么值得透传】`ARARegionSequenceProperties::color` 是 ARA 2.0 Draft 就有的
+    /// 字段（`ARAInterface.h:793`），而轨道颜色是用户在宿主里**自己设的**、有意义的
+    /// 视觉身份。此前它被解析后即丢弃，插件里的轨道全是默认色 —— 多轨工程里认不出谁是谁。
+    #[serde(default)]
+    pub color: Option<String>,
     /// 该序列下的 region 数量；`region_sequence_index` 缺席时用它切分。
     #[serde(default, rename = "playbackRegionCount")]
     pub playback_region_count: i64,
@@ -613,6 +620,8 @@ fn ara_document_to_timeline_reporting_with_identities(
             "id": id,
             "name": sequence.name.clone().unwrap_or_default(),
             "order": sequence.order_index,
+            // 轨道色取宿主给的序列色（无则空串 ⇒ 内核用默认色）。
+            "color": sequence.color.clone().unwrap_or_default(),
         }));
         track_ids.push(id);
     }
@@ -1829,5 +1838,38 @@ mod tests {
     #[test]
     fn default_bpm_is_pinned() {
         assert_eq!(default_bpm(), 120.0);
+    }
+
+    /// **宿主给的序列颜色必须透到轨道上。**
+    ///
+    /// 【为什么值得一条测试】`ARARegionSequenceProperties::color` 是 ARA 2.0 Draft 就
+    /// 有的字段（`ARAInterface.h:793`），而此前它被解析后即丢弃 —— 插件里的轨道全是
+    /// 默认色，多轨工程里认不出谁是谁。这条钉住"读进来的颜色确实到了时间线上"。
+    #[test]
+    fn a_host_sequence_color_becomes_the_track_color() {
+        // 【为什么是 `r##"`】载荷里有 `"#3366cc"`，而 `"#` 会提前结束 `r#"` 原始串。
+        let doc = ara_document_from_json(
+            r##"{
+                "documentName": "session",
+                "audioSources": [{ "persistentID": "C:/a.wav", "name": "a", "sampleRate": 48000.0,
+                    "sampleCount": 48000, "durationSeconds": 1.0, "channelCount": 1,
+                    "sampleAccessEnabled": true }],
+                "musicalContexts": [{ "name": "ctx", "regionSequences": [
+                    { "name": "Vocal", "orderIndex": 0, "color": "#3366cc",
+                      "playbackRegionCount": 1 }] }],
+                "audioModifications": [{ "persistentID": "m1", "audioSourcePersistentID": "C:/a.wav" }],
+                "playbackRegions": [{ "name": "r", "audioSourcePersistentID": "C:/a.wav",
+                    "audioModificationPersistentID": "m1", "regionSequenceIndex": 0,
+                    "startInModificationTime": 0.0, "durationInModificationTime": 1.0,
+                    "startInPlaybackTime": 0.0, "durationInPlaybackTime": 1.0 }]
+            }"##,
+        )
+        .expect("document with a colored sequence parses");
+        let outcome = ara_document_to_timeline_reporting(&doc).expect("document maps");
+        assert_eq!(outcome.timeline.tracks.len(), 1);
+        assert_eq!(
+            outcome.timeline.tracks[0].color, "#3366cc",
+            "宿主的序列颜色必须成为轨道颜色"
+        );
     }
 }
