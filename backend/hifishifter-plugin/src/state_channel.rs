@@ -294,7 +294,13 @@ impl EditState {
     /// 载荷写 2、带 groups 写 5……旧构建（它只认自己那一代及更低）因此仍能读。写死最高
     /// 代际会让所有旧构建一律拒绝，把"能读"变成"全丢"。这个常量只用于 `restore` 判断
     /// "由更新的插件保存"。
-    const CURRENT_STATE_VERSION: u64 = 7;
+    ///
+    /// 【为什么第 8 代必须升】第 8 代把权威曲线从"工程帧索引"改成"**源帧**索引"，
+    /// 并把 `SourceCurve.basis` 从对象改成 `null`（见 `SourceCurve::basis`）。
+    /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
+    /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
+    /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
+    const CURRENT_STATE_VERSION: u64 = 8;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -308,7 +314,7 @@ impl EditState {
             }
         }
         let version = if !self.atlas.authorities.is_empty() {
-            7
+            8
         } else if !self.clip_local.is_empty() {
             6
         } else if !self.groups.is_empty() {
@@ -620,7 +626,7 @@ mod tests {
         );
         // 更高版本：明确说"由更新的插件保存"，而不是含混的 unsupported。
         let mut newer = value.clone();
-        newer["version"] = serde_json::json!(8);
+        newer["version"] = serde_json::json!(EditState::CURRENT_STATE_VERSION + 1);
         let error = state
             .restore(&serde_json::to_vec(&newer).unwrap())
             .unwrap_err();

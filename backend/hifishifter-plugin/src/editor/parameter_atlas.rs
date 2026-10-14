@@ -199,7 +199,17 @@ pub(crate) struct AuthorityParameters {
     /// 参数随宿主编辑如何移动（见 [`ParamAnchor`]）。
     #[serde(default)]
     pub(crate) anchor: ParamAnchor,
+    /// 连续多少轮它的 modification 已不在文档图里（孤儿回收的宽限期计数）。
+    ///
+    /// 【为什么 `serde(skip)`】这是**运行时**状态，不是存档数据：它只在本次会话里
+    /// 用来给"宿主销毁了 modification、但用户可能撤销回来"留一段宽限期。
+    /// 写进存档只会让格式多一个没有意义的字段。
+    #[serde(skip)]
+    unseen_rounds: u32,
 }
+
+/// 孤儿权威的宽限期（轮数）。见 [`ParameterAtlas::reclaim_orphans`]。
+const ORPHAN_GRACE_ROUNDS: u32 = 64;
 
 impl AuthorityParameters {
     /// 从一条已解析的 per-clip 记录建立权威条目（迁移与播种共用）。
@@ -208,6 +218,7 @@ impl AuthorityParameters {
             curves: record.curves.clone(),
             template: record.template.clone(),
             anchor,
+            unseen_rounds: 0,
         }
     }
     /// 曲线是否为空（空条目等价于"这个身份还没有参数"）。
@@ -483,8 +494,47 @@ impl ParameterAtlas {
                     ..Default::default()
                 },
                 anchor,
+                unseen_rounds: 0,
             },
         );
+    }
+
+    /// 有界回收**孤儿权威**：它的 modification 已不在文档图里。
+    ///
+    /// 【为什么需要它】宿主销毁 modification 时权威**不能**立刻删 —— 撤销会把同一个
+    /// persistentID 带回来（ARA 允许宿主用 `restoreObjectsFromArchive` 重放）。
+    /// 但也不能永远留着：反复"分割 → 撤销 → 再分割"会持续产生新 ID，孤儿权威只增不减，
+    /// 最终撞上 `validate` 的 64MiB 上限，于是**整个存档写不出去**（用户的编辑全丢）。
+    ///
+    /// 【为什么入参是"整份文档的 modification 集合"而不是"本 renderer 的分配范围"】
+    /// 这是本函数唯一的安全边界。`follow_geometry` 是**逐 renderer** 跑的，而它只看得到
+    /// 自己那一份分配；按那个范围回收会把**别的轨道上没分配给本实例**的权威整批删掉。
+    /// 文档级集合没有这个问题。
+    ///
+    /// 【为什么有宽限期】销毁与撤销之间隔着若干轮 `end_editing`；`ORPHAN_GRACE_ROUNDS`
+    /// 给这段窗口留足余量，也顺带容忍宿主"先删后建同一个 ID"的时序。
+    ///
+    /// 返回回收掉的条数。
+    pub(crate) fn reclaim_orphans(&mut self, live: &std::collections::BTreeSet<String>) -> usize {
+        let mut reclaimed = 0_usize;
+        self.authorities.retain(|key, params| {
+            let orphan = match key.strip_prefix("mod:") {
+                Some(id) => !live.contains(id),
+                // `item:` 级权威无法从键本身看出它引用哪个 modification ⇒ 不回收。
+                None => false,
+            };
+            if !orphan {
+                params.unseen_rounds = 0;
+                return true;
+            }
+            params.unseen_rounds = params.unseen_rounds.saturating_add(1);
+            if params.unseen_rounds < ORPHAN_GRACE_ROUNDS {
+                return true;
+            }
+            reclaimed += 1;
+            false
+        });
+        reclaimed
     }
 
     /// 按 ARA 的 `RestoreFilter` 把存档里的 modification ID 重映射到当前 ID。
@@ -1256,6 +1306,8 @@ impl ParameterAtlas {
                             curves: curves.clone(),
                             template: template.clone(),
                             anchor,
+                            // 正在被一条活 region 认领 ⇒ 宽限期清零。
+                            unseen_rounds: 0,
                         },
                     );
                 }
@@ -3366,6 +3418,118 @@ mod tests {
         assert!(!seeded.seed_authority("mod:mod", "mod:mod"));
         assert!(!seeded.seed_authority("", "mod:y"));
         assert!(!seeded.seed_authority("mod:mod", ""));
+    }
+
+    /// **persistentID 改名必须把权威一起搬走。**
+    ///
+    /// 【为什么这是一条独立的重置路径】`update_audio_modification` 会把
+    /// `persistent_id` 换成宿主给的新值，而权威键正是 `mod:{persistentID}`。
+    /// 不搬 ⇒ 曲线被孤儿化，下一次投影查新键必然落空。
+    #[test]
+    fn remapping_a_modification_id_carries_its_authority() {
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve("mod:old", 250., vec![60., 61.]);
+        atlas.remap_authorities(&[("old".into(), "new".into())]);
+        assert!(!atlas.authorities.contains_key("mod:old"), "旧键必须消失");
+        assert!(
+            atlas.has_authority_parameters(None, "new"),
+            "曲线必须跟着新 ID"
+        );
+        // 恒等映射（整份存档恢复用的就是它）不得改动任何东西。
+        let before = atlas.authorities.clone();
+        atlas.remap_authorities(&[("new".into(), "new".into())]);
+        assert_eq!(atlas.authorities.len(), before.len());
+    }
+
+    /// **孤儿权威只在宽限期之后被回收，且只回收那一条。**
+    ///
+    /// 【为什么需要回收】反复"分割 → 撤销"会持续产生新 modification ID，孤儿权威
+    /// 只增不减，最终撞上 64MiB 上限 ⇒ **整个存档写不出去**（用户的编辑全丢）。
+    /// 【为什么必须有宽限期】撤销会把同一个 persistentID 带回来，立刻删就是丢数据。
+    #[test]
+    fn an_orphan_authority_is_reclaimed_only_after_the_grace_period() {
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve("mod:gone", 250., vec![60., 61.]);
+        atlas.seed_test_pitch_curve("mod:live", 250., vec![62., 63.]);
+        let live = std::collections::BTreeSet::from(["live".to_owned()]);
+        for round in 0..ORPHAN_GRACE_ROUNDS - 1 {
+            assert_eq!(
+                atlas.reclaim_orphans(&live),
+                0,
+                "宽限期内不得回收 (round {round})"
+            );
+        }
+        assert!(atlas.authorities.contains_key("mod:gone"));
+        assert_eq!(atlas.reclaim_orphans(&live), 1, "超过宽限期才回收");
+        assert!(!atlas.authorities.contains_key("mod:gone"));
+        assert!(
+            atlas.authorities.contains_key("mod:live"),
+            "在文档图里的那一条不得被回收"
+        );
+    }
+
+    /// **只要 modification 还在文档图里，宽限期就持续清零。**
+    #[test]
+    fn a_live_authority_never_ages_out() {
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve("mod:live", 250., vec![60.]);
+        let live = std::collections::BTreeSet::from(["live".to_owned()]);
+        for _ in 0..(ORPHAN_GRACE_ROUNDS * 3) {
+            assert_eq!(atlas.reclaim_orphans(&live), 0);
+        }
+        assert!(atlas.authorities.contains_key("mod:live"));
+    }
+
+    /// **旧形状（第 8 代之前）的曲线照旧读得进、且投影正确。**
+    ///
+    /// 【为什么这条必须存在】第 8 代把 `basis` 从对象改成 `null`。旧存档里它是一个
+    /// `RegionGeometry`，必须被解析成 `Some(..)` 并走**旧索引分支** —— 否则升级一次
+    /// 就丢光全部参数。这条同时钉住"两条索引分支共存"这个设计。
+    #[test]
+    fn a_legacy_project_frame_curve_still_projects_after_the_domain_change() {
+        let mut atlas = ParameterAtlas::default();
+        let geometry = RegionGeometry {
+            project_start: 1.,
+            project_duration: 1.,
+            source_start: 0.,
+            source_duration: 1.,
+            reversed: false,
+        };
+        let mut curves = BTreeMap::new();
+        curves.insert(
+            "pitch_edit".to_owned(),
+            SourceCurve {
+                basis: Some(geometry),
+                first_frame: 4,
+                frame_ms: 250.,
+                values: Arc::new(vec![60., 62., 64., 66., 68.]),
+                reservation: None,
+            },
+        );
+        atlas.authorities.insert(
+            "mod:mod".into(),
+            AuthorityParameters {
+                curves,
+                template: TrackParamsState {
+                    frame_period_ms: 250.,
+                    ..Default::default()
+                },
+                anchor: ParamAnchor::Source,
+                unseen_rounds: 0,
+            },
+        );
+        // 往返即升级路径：写出的 `basis` 是对象，读回来必须是 `Some`（旧分支）。
+        let bytes = serde_json::to_vec(&atlas).unwrap();
+        let restored: ParameterAtlas = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            restored.authorities["mod:mod"].curves["pitch_edit"]
+                .basis
+                .is_some(),
+            "旧形状必须读成 `Some(..)`，否则会走错索引分支"
+        );
+        let ids = identities();
+        let view = restored.project(&host(1., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(&view["clip"].pitch_edit[4..9], &[60., 62., 64., 66., 68.]);
     }
 
     #[test]

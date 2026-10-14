@@ -2360,7 +2360,7 @@ pub(crate) mod tests {
         restored.restore(&encoded).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&encoded).unwrap()["version"],
-            7
+            8
         );
         assert_eq!(
             restored.groups,
@@ -3451,8 +3451,8 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 7,
-            "权威参数按稳定宿主身份存档（v7）；旧 v2/v3 解码与范围回归另行保留"
+            saved["version"], 8,
+            "权威参数按稳定宿主身份存档（v8：曲线按源帧索引）；旧 v2/v3 解码与范围回归另行保留"
         );
         assert_eq!(
             &saved["edits"]["params"]["track"]["pitch_edit"]

@@ -453,11 +453,29 @@ impl DocumentSession {
     /// 模型），此刻没有轨道可绑、也没有 renderer 可合并。暂存到文档级，
     /// `prepare_renderers` 收口时再交给 owner 的既有合并路径。
     pub(crate) fn restore_archive(&self, bytes: &[u8]) -> Result<(), String> {
+        // 【为什么整份存档走空映射】ARA 只在**带筛选**的恢复里给出
+        // `audioModificationArchiveIDs → audioModificationCurrentIDs`
+        // （`ARARestoreObjectsFilter`，`ARAInterface.h:2322-2333`）；整份文档恢复
+        // 没有这张表，因为 persistentID 本就是持久的。这里仍走同一条带映射的路径，
+        // 于是"将来宿主给得出映射"时只有调用点需要改，两条路不会各自漂移。
+        self.restore_archive_with_remap(bytes, &[])
+    }
+
+    /// 接收存档载荷并按 `archive → current` 重映射权威键后暂存（两条恢复路径共用）。
+    fn restore_archive_with_remap(
+        &self,
+        bytes: &[u8],
+        remap: &[(String, String)],
+    ) -> Result<(), String> {
         if bytes.is_empty() {
             return Ok(());
         }
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(bytes)?;
+        // 【为什么必须重映射】persistentID 只保证**文档内**唯一，跨文档导入时宿主
+        // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
+        // 静默丢失，症状正是"重载工程后参数被重置"。
+        restored.atlas.remap_authorities(remap);
         *self.pending_archive_restore.lock_or_recover() = Some(restored);
         Ok(())
     }
@@ -1010,7 +1028,6 @@ impl DocumentSession {
             .push(restored);
         Ok(())
     }
-
     /// 把暂存的部分载荷**按键合并**进编辑权威（`prepare_renderers` 收口时调用）。
     ///
     /// 【为什么是合并而不是替换】部分载荷只带它被选中的那一部分；替换会把未选中的

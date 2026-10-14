@@ -502,7 +502,7 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         assert_eq!(stream.bytes.len(), length + 4);
         let saved: serde_json::Value = serde_json::from_slice(&stream.bytes[4..]).unwrap();
         // 权威参数按稳定宿主身份存档（v7）；仍须证明IBStream仅保存当前组件范围。
-        assert_eq!(saved["version"], 7);
+        assert_eq!(saved["version"], 8);
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(

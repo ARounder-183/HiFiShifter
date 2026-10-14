@@ -173,7 +173,7 @@ fn legacy_v2_first_restore_promotes_source_basis_before_host_transform() {
     let saved = owners[0].encode_state().unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["version"],
-        7
+        8
     );
     let atlas = document.edits.lock_or_recover().atlas.clone();
     assert_eq!(atlas.regions.len(), 1);
@@ -249,7 +249,7 @@ fn source_parameter_atlas_state_is_scoped_and_rebound_without_gui() {
         .collect::<Vec<_>>();
     document.close();
     for payload in &payloads {
-        assert_eq!(payload["version"], 7);
+        assert_eq!(payload["version"], 8);
         // 权威参数是**唯一**被序列化的参数存储（`regions` 是每帧派生的投影缓存，
         // 不进存档）—— 因此"只保存本组件范围"这条保证现在落在 `authorities` 上。
         assert_eq!(
@@ -806,7 +806,7 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
     for (index, id) in ["track", "b"].into_iter().enumerate() {
         let bytes = owners[index].encode_state().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(saved["version"], if index == 0 { 2 } else { 7 });
+        assert_eq!(saved["version"], if index == 0 { 2 } else { 8 });
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
