@@ -1431,6 +1431,27 @@ impl ExtensionOwner {
     pub(crate) fn renders_playback(&self) -> bool {
         self.is_bound() && !self.is_editor_only()
     }
+    /// 本实例收到过多少次"重新准备"通知（仅测试构建可见）。
+    ///
+    /// 【为什么暴露成方法而不是把字段改成 pub(crate)】`prepare_requests` 只在
+    /// `#[cfg(test)]` 下存在，字段本身不能带跨模块的 pub 可见性而不连带改变
+    /// 非测试构建的形状。给出一个同样只在 test 下编译的读取器，生产构建里
+    /// 它随之消失，不会多出一个可见的原子量。
+    #[cfg(test)]
+    pub(crate) fn prepare_request_count(&self) -> u64 {
+        self.prepare_requests.load(Ordering::Acquire)
+    }
+    /// 等后台准备任务排空（仅测试构建可见）。
+    ///
+    /// 【为什么需要它】本模块的测试会经 `prepare_renderers` 触发后台任务，而夹具文档
+    /// 在用例结束时就被丢弃。给出一个有界的等待，让用例结尾不与仍在运行的任务抢生命周期
+    /// （不等待的话会出现偶发的访问违例，且与真正的回归难以区分）。
+    #[cfg(test)]
+    pub(crate) fn await_preparation_idle(&self, timeout: std::time::Duration) {
+        if let Some(Ok(worker)) = self.preparation.get() {
+            let _ = worker.wait_idle_until(std::time::Instant::now() + timeout);
+        }
+    }
     /// 本实例是否已拿到角色分配（`roles == 0` 表示尚未绑定）。
     fn is_bound(&self) -> bool {
         self.roles.load(Ordering::Acquire) != 0
@@ -2824,13 +2845,18 @@ impl ExtensionOwner {
     }
 
     /// 宿主模型callback只撤销/排最新准备任务，不在主线程执行WORLD或PCM混音。
+    ///
+    /// 【为什么 `fetch_add` 必须在 `renders_playback()` 之后】计数要衡量的是
+    /// "播放实例收到了多少次通知" —— 这正是 `render_input_invalidation_…`
+    /// 那条不变量测试锁的东西（此前漏掉播放实例的回归就在这里）。放在前面
+    /// 会把编辑器实例的 no-op 也数进去，测试就再也分不出"通知了谁"。
     pub fn prepare(&self) {
         if !self.renders_playback() {
             return;
         }
+        // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
         #[cfg(test)]
         self.prepare_requests.fetch_add(1, Ordering::AcqRel);
-        // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
         let weak = self.prepare_owner.lock_or_recover().clone();
         let Some(weak) = weak else {
             return;

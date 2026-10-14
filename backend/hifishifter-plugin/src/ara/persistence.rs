@@ -292,6 +292,164 @@ mod tests {
         );
     }
 
+    /// **宿主先重建图、后给存档：恢复到达时可能一个 owner 都没有。**
+    ///
+    /// 【为什么必须钉住】用户在 Cubase 上报"撤销/重做后 ARA 不刷新，只有删掉插件重新
+    /// 添加才好"。撤销在 ARA 侧等价于一次"存档还原 + 图重建"会话
+    /// （`ARAInterface.h:2938-2943`：还原会话在概念上就是一次编辑会话）。而还原**到达
+    /// 的时刻早于图就绪**：SDK 明确要求宿主"先配置好该对象的属性，再恢复它的状态"
+    /// （`ARAInterface.h:2922-2924`），所以那一瞬间还没有 renderer 可合并。
+    ///
+    /// 因此载荷必须停在文档级、且**不能被判成失败**。此前这条路径没有测试：若有人把
+    /// "没有 owner"改成"返回 Err"，宿主会以为"插件存档失败"，而恢复就此丢失 ——
+    /// 用户在宿主里继续编辑，看到的却仍是旧曲线。
+    #[test]
+    fn an_archive_arriving_before_the_graph_is_ready_is_held_not_dropped() {
+        use std::sync::atomic::Ordering;
+        let document = DocumentSession::new(7);
+        // 只给"图就绪"，**不**绑定任何 renderer：正是还原先到、图还没建的时刻。
+        document.ready.store(true, Ordering::Release);
+        document
+            .edits
+            .lock_or_recover()
+            .atlas
+            .seed_test_pitch_curve("mod:held", 250., vec![60., 62.]);
+        let mut provider = ArchivePersistence::new(&document);
+        let bytes = provider.store_document().expect("archive encodes");
+        // 载荷先落进一份没有任何 renderer 的文档。
+        *document.pending_archive_restore.lock_or_recover() = None;
+        provider.restore_document(&bytes).expect("restore succeeds");
+        let held = document.pending_archive_restore.lock_or_recover();
+        assert!(
+            held.is_some(),
+            "没有 owner 时载荷必须留在文档级等待下一次收口"
+        );
+        drop(held);
+
+        // 收口：仍然没有 owner ⇒ 载荷必须原样留着，且 `ready` 必须为真。
+        document.prepare_renderers();
+        assert!(
+            document.pending_archive_restore.lock_or_recover().is_some(),
+            "没有 owner 时不得把载荷丢掉：下一次收口还要再试"
+        );
+        assert!(
+            document.ready.load(Ordering::Acquire),
+            "`ready` 是 ensure_loaded 判断\"宿主是否交付了输入\"的依据，假它就是一份 \
+             Conflict；它只能由 prepare_renderers 置真（ARAInterface.h:2954-2958 要求 \
+             插件\"尽量恢复\"而不是把实例打死）"
+        );
+    }
+
+    /// **部分存档必须先于整份存档合入。**
+    ///
+    /// 【为什么顺序不能反】SDK 规定："如果宿主把恢复拆成多次，每一次恢复了某个 audio
+    /// source 状态的调用，必须**同时或先于**恢复依赖它的 audio modification 状态"
+    /// （`ARAInterface.h:2925-2929`）。落到本插件：部分存档是**按键合并**（只覆盖它
+    /// 带上的键），整份存档是**整份替换**。反过来先合整份，部分载荷就会被整份那份
+    /// 冲掉 —— 用户看到"撤销之后只有一部分参数回来了"。
+    ///
+    /// 本用例让两类载荷同时在队列里，断言收口后**两者都在**。
+    ///
+    /// 【为什么断言的是权威表而不是 `params`】整份存档的合入要经 owner 的
+    /// `merge_pending_restore`（它有判据：必须有已分配的角色与绑定），那是
+    /// `render/extension` 的既有路径、另有测试覆盖。本用例要的是**顺序**这件事本身
+    /// —— 而顺序的正确性只由"部分载荷的键有没有活下来"体现：若顺序颠倒，整份那份
+    /// 会把它冲掉。因此这里不绑定 owner（`params` 本就不会变），只验证按键合并不丢。
+    #[test]
+    fn a_partial_archive_is_merged_before_the_full_archive() {
+        use std::sync::atomic::Ordering;
+        let document = DocumentSession::new(8);
+        document.ready.store(true, Ordering::Release);
+        {
+            let mut edits = document.edits.lock_or_recover();
+            edits
+                .atlas
+                .seed_test_pitch_curve("mod:partial", 250., vec![60., 62.]);
+            edits
+                .atlas
+                .seed_test_pitch_curve("mod:full", 250., vec![70., 72.]);
+        }
+        // 部分载荷只带 `mod:partial`（它的值故意与整份那份不同，便于区分谁赢）。
+        let partial = document
+            .encode_partial(
+                Some(&std::collections::BTreeSet::from(["partial".to_owned()])),
+                false,
+            )
+            .unwrap();
+        // 整份载荷同时带上两条权威。
+        let mut full = crate::state_channel::EditState::default();
+        full.atlas
+            .seed_test_pitch_curve("mod:partial", 250., vec![61., 63.]);
+        full.atlas
+            .seed_test_pitch_curve("mod:full", 250., vec![71., 73.]);
+        let full = full.encode().unwrap();
+
+        // 注意入队顺序故意**倒着**来：先整份、后部分。
+        document.restore_archive(&full).unwrap();
+        document.restore_archive_partial(&partial, &[]).unwrap();
+
+        document.prepare_renderers();
+        let edits = document.edits.lock_or_recover();
+        assert!(
+            edits.atlas.has_authority_parameters(None, "partial"),
+            "部分存档带上的键必须存活（它不得被整份存档冲掉）"
+        );
+        assert!(
+            edits.atlas.has_authority_parameters(None, "full"),
+            "整份存档的状态也必须合入"
+        );
+    }
+
+    /// **部分恢复失败不得把实例打成"未就绪"。**
+    ///
+    /// 【为什么必须容忍】SDK 对 `restoreObjectsFromArchive` 的约定是"尽量恢复能恢复的，
+    /// 不要把它当错误处理"（`ARAInterface.h:2954-2958`），并且"与当前图里 persistentID
+    /// 对不上的存档状态直接忽略"（`:2950-1952`）。跨文档导入时"modification 恢复了但
+    /// 它的 source 变了"更是 SDK 明说可能发生的情形（`:2930-2933`）。
+    ///
+    /// 若这里跟着失败把 `ready` 按回 `false`：`ensure_loaded` 会返回
+    /// `Conflict: host changed`，而 `ready` 只能由 `prepare_renderers` 置真 ——
+    /// 宿主若不重发 `endEditing` 就再也回不来（实例永久砖化，症状正是用户报的
+    /// "只有删掉插件再添加才好"）。
+    #[test]
+    fn a_failed_partial_restore_leaves_the_instance_serving() {
+        use std::sync::atomic::Ordering;
+        let document = DocumentSession::new(9);
+        document.ready.store(true, Ordering::Release);
+        {
+            let mut edits = document.edits.lock_or_recover();
+            edits
+                .atlas
+                .seed_test_pitch_curve("mod:keep", 250., vec![60., 62.]);
+        }
+        // 坏载荷：不是本插件的存档格式 ⇒ 恢复必须报错（而不是静默吞掉）。
+        assert!(document
+            .restore_archive_partial(b"not-an-archive", &[])
+            .is_err());
+        // 但坏载荷不得进入待合入队列，更不得影响 `ready`。
+        assert!(
+            document
+                .pending_partial_restore
+                .lock_or_recover()
+                .is_empty(),
+            "解码失败的载荷不该排队：合入它只会再造一次失败"
+        );
+        document.prepare_renderers();
+        assert!(
+            document.ready.load(Ordering::Acquire),
+            "恢复失败也必须保持就绪： ready=false 会让 ensure_loaded 报 Conflict，\
+             而它只能由 prepare_renderers 置真（实例可能永久砖化）"
+        );
+        assert!(
+            document
+                .edits
+                .lock_or_recover()
+                .atlas
+                .has_authority_parameters(None, "keep"),
+            "failed 恢复不得顺手清掉已有的参数权威"
+        );
+    }
+
     /// **参数变更必须进入 ARA 通知队列。**
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件此前**从未**通知过任何持久

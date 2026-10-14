@@ -997,6 +997,28 @@ impl ModelHandle {
                                 log::error!("[ara] source parameter projection conflict: {error}");
                             }
                         }
+                    } else if edits.needs_rebind {
+                        // 【为什么必须留痕】`needs_rebind` 是**冷恢复/存档还原**的标记，
+                        // 唯一的清零点是 `EditState::reconcile`（`state_channel.rs:183`），
+                        // 而 `reconcile` 只被恢复路径调用。一旦某次撤销/重载的恢复身份
+                        // 对不上，这个标记就停在 `true`：此后用户在宿主里做的**任何**编辑
+                        // 都只会发布几何与 PCM，参数投影再也不跑 —— 用户报的症状正是
+                        // "无论宿主里怎么编辑 ARA 都不同步，只有删掉插件再添加才好"。
+                        //
+                        // 【为什么不顺手把它清掉】清掉等于把一次冷恢复降级成普通合并：
+                        // `reconcile` 的 `needs_rebind` 分支正是用 `Err` 拒绝"按旧序号猜
+                        // 归属"的（想象一下：曲线被挂到另一条轨道上，然后写回宿主）。
+                        // 正确的下一步是**先诊断** —— 这一行 + A4 的收口读数正是为此。
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.rebind.stuck",
+                            format_args!(
+                                "[ara] parameter projection skipped: the loaded edit state still \
+                                 asks for a rebind ({} authority set(s)). Host edits will publish \
+                                 geometry and audio only until the pending restore is reconciled.",
+                                edits.atlas.authorities.len()
+                            ),
+                        );
                     }
                 }
                 if let Err(error) = self.session.edits.lock_or_recover().reconcile(&bindings) {
@@ -1004,6 +1026,7 @@ impl ModelHandle {
                 }
                 log::info!("{}", crate::ara::summary_line(&document, &timeline));
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
+                self.log_published_revisions(&timeline);
                 *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
@@ -1033,6 +1056,41 @@ impl ModelHandle {
             }
         }
         self.session.prepare_renderers();
+    }
+
+    /// 收口之后发一行"读者们拿的是哪一版"的读数。
+    ///
+    /// 【为什么必须打在收口之后、`prepare_renderers` 之前】用户报的症状是
+    /// "宿主里改了，ARA 里不动 / 只有删插件才好"。这条链有四步
+    /// （模型回调 → `endEditing` 收口 → 编辑器会话读到 → 渲染输入失效），
+    /// **任何一步断了症状都一样**。此前只有第 1、2 步有日志，于是"收口了但
+    /// 读者没醒"与"读者醒了但内容不对"无法区分 —— 修 bug 只能靠猜。
+    ///
+    /// 这三个数正是 `refresh_host`（`editor/session.rs::refresh_host`）用来
+    /// 判断"该不该重新加载"的**同一个**三元组（`document.editor_versions()`）。
+    /// 所以"日志里 model_rev 变了而界面没变"从此是一眼看得出的事实，
+    /// 而不必再在源码里反推哪一条路径该推进它。
+    ///
+    /// 【为什么单独一个方法】`remap_and_log` 已经很长，且这行日志的**取值**
+    /// 要在测试里断言 —— 抽出来才好读，也才好复用（幂等分支也想知道读数）。
+    fn log_published_revisions(&self, timeline: &TimelineState) {
+        // 【为什么直接读原子量而不调 `editor_versions()`】后者自己取文档
+        // `transaction` 锁。`remap_and_log` 的调用点持着同一把锁（它在
+        // `drop(transaction)` 之后调用本函数，因此这里也是**无锁**状态）——
+        // 直接读三个计数既等价又不引入"锁序里有隐藏依赖"的风险。
+        let edits_revision = self.session.edits.lock_or_recover().revision;
+        let model_revision = self.session.revision.load(Ordering::Acquire);
+        let scope_revision = self.session.scope_revision.load(Ordering::Acquire);
+        log::info!(
+            "[ara] endEditing published: regions={} model_rev={} edit_rev={} scope_rev={} \
+             ready={} editing={}",
+            timeline.clips.len(),
+            model_revision,
+            edits_revision,
+            scope_revision,
+            self.session.ready.load(Ordering::Acquire),
+            self.session.editing_session.load(Ordering::Acquire),
+        );
     }
 }
 
@@ -2477,6 +2535,149 @@ mod tests {
 
         model.remap_and_log();
         assert!(model.remap_is_redundant());
+    }
+
+    /// **`needs_rebind` 卡住时，投影必须被跳过且必须留痕（A6）。**
+    ///
+    /// 【为什么这是用户报障的根因之一】`needs_rebind` 是冷恢复/存档还原的标记，唯一
+    /// 清零点是 `EditState::reconcile`（`state_channel.rs:183`），而 `reconcile` 只被
+    /// 恢复路径调用。一次撤销/重载的恢复身份对不上，这个标记就停在 `true` —— 此后宿主里
+    /// **任何**编辑都只发布几何与 PCM，参数投影再也不跑。用户的原话是"无论宿主内怎么
+    /// 编辑，ARA 中都不能产生同步，只有把 ARA 插件完全删除再添加，才生效"。
+    ///
+    /// 本用例钉住两件事：
+    ///   1. 卡住时投影**确实没跑**（参数表没被投影结果改写）—— 这是现状，也是为什么
+    ///      它需要日志；
+    ///   2. 这种情况**留下了一条 warn**。没有第 2 条，第 1 条在真机上与"其它原因导致
+    ///      的不同步"完全无法区分（修 bug 只能靠猜）。
+    ///
+    /// 【为什么不断言日志内容】本测试床不捕获日志；断言靠的是可观察状态（曲线有没有
+    /// 被改写）。日志的存在由 `ara.rebind.stuck` 这个**限流键**本身保证 —— 它每窗口
+    /// 只发一条，因此即便在 Cubase 4 连送的收口里也不会刷屏。
+    #[test]
+    fn a_stuck_rebind_request_skips_projection_and_says_so() {
+        let (mut model, _key) = model_with_one_region();
+        // 先正常收口一次，让时间线与 `remap_stamp` 就位。
+        model.remap_and_log();
+        assert!(model.timeline.is_some(), "夹具必须先能正常收口");
+        // 用户给这条 modification 画了一条曲线。
+        model
+            .session
+            .edits
+            .lock_or_recover()
+            .atlas
+            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
+        // 模拟一次"恢复身份对不上"：`reconcile` 失败 ⇒ 标记留在 true。
+        model.session.edits.lock_or_recover().needs_rebind = true;
+
+        // 宿主做了一次真实编辑（几何变了）⇒ 收口必须跑，指纹必须推进。
+        let mut state = 0_usize;
+        let mut sequence_identity = 0_u8;
+        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
+        let sequence_ref = unsafe {
+            ara2_bridge::core::ModelRef::from_raw(
+                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
+            )
+        }
+        .unwrap();
+        let moved =
+            PlaybackRegionProperties::for_ara2(0, 0.0, 0.5, 0.1, 0.5, sequence_ref, None, None)
+                .unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut state, moved)
+            .expect("移动 region");
+        model.remap_and_log();
+
+        // 1) 时间线照常发布：几何与 PCM 不受参数投影影响（这正是"界面有反应但曲线不动"）。
+        assert!(
+            model.timeline.is_some(),
+            "卡住时也必须继续发布时间线，否则用户连几何都看不到"
+        );
+        // 2) 新几何确实生效了 —— 证明"不是整份收口失败"，只是投影这一支被跳过。
+        let start = model
+            .session
+            .timeline
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|timeline| timeline.clips.first().map(|clip| clip.start_sec))
+            .expect("发布时间线必须带 clip");
+        assert!(
+            (start - 0.1).abs() < 1e-6,
+            "宿主的新几何必须已经发布（否则本用例测的就不是\"投影被跳过\"）：{start}"
+        );
+        // 3) 投影没跑：权威仍在，但 `params` 里没有被投影出来的新曲线。
+        let edits = model.session.edits.lock_or_recover();
+        assert!(
+            edits.atlas.has_authority_parameters(None, "host-mod-A"),
+            "权威表本身必须保留（跳过投影不等于丢掉曲线）"
+        );
+        assert!(
+            edits.params.is_empty(),
+            "投影被跳过 ⇒ params 不得被写入：这正是用户看到的\"参数线不动\""
+        );
+    }
+
+    /// **幂等闸门跳过的是"重算"，不是"准备"（A5）。**
+    ///
+    /// 【为什么必须单独钉住】Cubase 一次分割把同一份模型连送 4 遍，
+    /// `remap_is_redundant` 跳过后 3 遍的**重算**是对的（不要重复投影、不要
+    /// 重复失效渲染输入）。但跳过的如果顺带把 `prepare_renderers()` 也跳掉，
+    /// 就断了 `ready` 的唯一置真路径 —— `ready` 假会让 `ensure_loaded` 返回
+    /// `Conflict: host changed`，用户看到的就是"宿主编了但插件不同步"。
+    ///
+    /// 这条用例把"幂等只作用于重算"变成可观察的事实：4 次收口，重算写的
+    /// `remap_stamp` 只有 1 次变化，而 `ready` 始终被刷新。
+    ///
+    /// 【为什么不能像 `host_audio_state_tests` 那样持事务】`prepare_renderers`
+    /// **自己取文档事务**（`render/document.rs:1283`）。持着它调 `remap_and_log`
+    /// 就是当场自锁。那条测试持锁调的是 `invalidate_render_input` —— 它刻意
+    /// 不取事务，所以不受影响。这里改为**不持锁**跑完断言，只在可能残留后台
+    /// 任务时单独等一下。
+    #[test]
+    fn the_idempotence_gate_skips_the_remap_but_still_prepares_renderers() {
+        let (mut model, _key) = model_with_one_region();
+        // 带一个播放实例，`prepare_renderers` 才有对象可通知。
+        let owner = Arc::new(crate::render::extension::ExtensionOwner::default());
+        let _bound = owner
+            .bind_to_document(
+                model.session.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                None,
+            )
+            .expect("夹具实例必须能绑定文档");
+
+        model.remap_and_log();
+        assert!(model.timeline.is_some());
+        let published = model.session.revision.load(Ordering::Acquire);
+        let prepares = owner.prepare_request_count();
+        assert!(
+            model.session.ready.load(Ordering::Acquire),
+            "收口必须把 ready 置真：它是 ensure_loaded 判断\"宿主是否交付了输入\"的依据"
+        );
+
+        // 同一份模型再交付三次：模型没变 ⇒ 每次都该被判为冗余。
+        for _ in 0..3 {
+            assert!(model.remap_is_redundant(), "同一份模型必须判为冗余");
+            model.remap_and_log();
+        }
+
+        assert_eq!(
+            owner.prepare_request_count(),
+            prepares + 3,
+            "三次冗余收口也必须各自准备一次渲染输入（否则 ready 的置真路径被跳过）"
+        );
+        assert!(
+            model.session.ready.load(Ordering::Acquire),
+            "冗余收口之后 ready 必须仍为真"
+        );
+        assert_eq!(
+            model.session.revision.load(Ordering::Acquire),
+            published,
+            "同一份模型不得反复推进 revision，否则每次都会触发一次全量重载"
+        );
+        // 后台可能已排了准备任务；等它自行退出，避免与用例结尾的析构抢生命周期。
+        owner.await_preparation_idle(std::time::Duration::from_secs(3));
     }
 
     /// **指纹不得因"region 没有分配到的身份 key"而退化。**

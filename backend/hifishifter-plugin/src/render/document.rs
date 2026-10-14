@@ -1294,7 +1294,16 @@ impl DocumentSession {
         // 路径 —— 编辑权威是文档共享的，交给谁合并都一样（合并写的是 `document.edits`）。
         // 部分存档先合入（它是按键合并，不会覆盖整份状态），再走整份存档的合并路径。
         self.merge_partial_restores();
-        if let Some(restored) = self.pending_archive_restore.lock_or_recover().take() {
+        // 【为什么这里要把 `take()` 与"放回去"分成两次独立的取锁】此前写成
+        // `if let Some(restored) = self.pending_archive_restore.lock_or_recover().take()`
+        // —— 那个 guard 活到整个 `if let` 块结束，而 `None` 分支里又要
+        // `*self.pending_archive_restore.lock_or_recover() = Some(restored)`。
+        // `std::sync::Mutex` 不可重入，于是"没有任何 renderer 绑定时"当场自锁：
+        // `prepare_renderers` 永久挂住，本文档再不响应任何宿主编缉。
+        // 用户报的症状正是"无论宿主里怎么编辑，ARA 中都不能同步，只有把插件删掉再
+        // 添加才好" —— 撤销/重载会送来存档还原，而还原到达时经常还没有 renderer。
+        let held_back = self.pending_archive_restore.lock_or_recover().take();
+        if let Some(restored) = held_back {
             match owners.first() {
                 Some(owner) => owner.adopt_archive_restore(restored),
                 None => {
