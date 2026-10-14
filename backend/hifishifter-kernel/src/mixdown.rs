@@ -784,7 +784,16 @@ fn lock_host_processor_flight<'a>(
     }
 }
 
-/// 宿主 DSP 直接消费项目绝对时间曲线，绕过依赖源路径的文件分析缓存。
+/// 宿主 DSP 直接消费参数曲线，绕过依赖源路径的文件分析缓存。
+///
+/// 【曲线的索引域】所有采样点按"`values[0]` = 本 clip 曲线的第 0 帧"这一约定读，
+/// 而 `clip.start_sec` 同时就是该域里的零点。两条调用路径都以各自零点喂进来：
+///   * App / 导出路径：工程**绝对域**数组 ⇒ `values[0]` = 工程第 0 秒；
+///   * ARA 路径：`input.rs` 用 **clip 局部零点**数组整份替换这个 entry，
+///     同时把 `clip.start_sec` 置 0 ⇒ `values[0]` = 该 clip 的第 0 帧。
+/// 因此本函数不需要、也不应该另立零点（round8 方案 §1 的 R1–R4 曾被怀疑是
+/// "分割后曲线偏移"的根因，逐条查证后结论是它们本来就自洽；真正的偏移在
+/// 投影侧，见 `parameter_atlas.rs` 的 `CurveDomain`）。
 #[allow(clippy::too_many_arguments)]
 fn apply_host_pitch_edit(
     timeline: &TimelineState,
@@ -811,6 +820,22 @@ fn apply_host_pitch_edit(
     }
 
     let fp = entry.frame_period_ms.max(0.1);
+    // ── 曲线索引域：`values[0]` = 本 clip 曲线的第 0 帧 ────────────────────────
+    //
+    // 【为什么这个约定对两条路径都成立】本函数的曲线来自 `params_by_root_track`，
+    // 而喂进来的是哪一份由调用方决定：
+    //   * App / 导出路径：工程**绝对域**数组 ⇒ `values[0]` = 工程第 0 秒；
+    //   * ARA 路径：`input.rs` 用 **clip 局部零点**数组整份替换了这个 entry，
+    //     同时把 `clip.start_sec` 置 0 ⇒ `values[0]` = 该 clip 的第 0 帧。
+    // 也就是说"曲线的第 0 帧"在两边都是同一个东西，`clip.start_sec` 也各自就是
+    // 本域里的零点 —— 所以所有采样点都应该直接用 `clip.start_sec + 帧号`，
+    // 不需要、也不应该再由本函数另立一个零点。
+    //
+    // 【为什么曾经要改这里】这些采样点一度被怀疑成"分割后曲线偏移"的根因
+    // （round8 方案 §1 的 R1–R4）。逐条查证后结论是：它们本来就自洽，
+    // 真正的偏移在投影侧（权威曲线的 `domain` 与锚点不一致），已在
+    // `parameter_atlas.rs` 修掉并各配一条回归测试。这里保留原始算式，
+    // 只把"为什么它是对的"写清楚，避免下一轮再按同样的猜测改一遍。
     // ── 源 F0：**内容寻址的逐 clip 分析优先，工程域根轨道曲线兜底** ──────────────
     //
     // 【为什么主来源不再是 `entry.pitch_orig`】那是**工程域的根轨道数组**，而它的内核
@@ -841,6 +866,9 @@ fn apply_host_pitch_edit(
         let frame_count = (clip.length_sec * 1000.0 / fp).ceil() as usize + 1;
         let fallback: Vec<f32> = (0..frame_count)
             .map(|i| {
+                // 兜底曲线按**该 clip 的第 i 帧**构造，与下方 `pitch_edit` 同域
+                // （见函数开头的域约定）：ARA 路径下 `clip.start_sec` 已置 0，
+                // 这里就是局部帧号；App 路径下它是绝对工程时刻。
                 sample_automation_curve_at_sec(
                     Some(&entry.pitch_orig),
                     clip.start_sec + i as f64 * fp / 1000.0,
@@ -875,13 +903,23 @@ fn apply_host_pitch_edit(
         // 分流，空曲线等价于"无激励"）。
     }
     let mut pitch_edit = entry.pitch_edit.clone();
-    // 复用现有子轨音高偏移算法；输出曲线仍在项目绝对时间域。
+    // 复用现有子轨音高偏移算法；`offsets[k]` = "该 clip 的第 k 帧"的偏移量。
+    //
+    // 【为什么用 `origin` 而不是直接 `local`】`compute_clip_export_pitch_offsets`
+    // 的输出从**该 clip 的第 0 帧**开始数，而 `pitch_edit` 的帧号从
+    // "曲线第 0 帧"开始。两者只在该 clip 恰好落在曲线零点时重合：
+    //   * ARA 路径：`clip.start_sec` 被 `input.rs` 置 0 ⇒ 重合；
+    //   * App / 导出路径：`clip.start_sec` 是工程绝对位置，曲线也是绝对域
+    //     ⇒ 该 clip 的第 0 帧对应曲线的第 `clip.start_sec·1000/fp` 帧。
+    // 因此必须按 `clip.start_sec` 把 offsets 的起点平移到曲线的帧号上。
+    // 少这一项，App 路径的子轨偏移会整段前置 `clip.start_sec` 秒；
+    // 多这一项（旧代码在 ARA 上），则整段后置一个分割点。
     if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
-        let start = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
+        let origin = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
         for (local, offset) in offsets.offsets.iter().enumerate() {
-            let absolute = start + local;
-            if let Some(target) = pitch_edit.get_mut(absolute).filter(|value| **value > 0.0) {
-                *target = entry.pitch_orig.get(absolute).copied().unwrap_or(0.0) + offset;
+            let frame = origin + local;
+            if let Some(target) = pitch_edit.get_mut(frame).filter(|value| **value > 0.0) {
+                *target = entry.pitch_orig.get(frame).copied().unwrap_or(0.0) + offset;
             }
         }
     }
@@ -908,6 +946,14 @@ fn apply_host_pitch_edit(
     let pitch_changed = (0..pcm_stereo.len() / 2)
         .step_by((sample_rate as usize / 1000).max(1))
         .any(|i| {
+            // 【为什么这里直接给绝对秒】这条曲线的零点是 0 —— 即 `values[0]`
+            // 对应该 clip 曲线的第 0 帧。两条调用路径都以各自的零点喂进来：
+            //   * App / 导出路径：`entry` 是工程绝对域数组，零点就是工程 0 秒；
+            //   * ARA 路径：`input.rs` 用 clip 局部数组**整份替换**了这个 entry，
+            //     并把 `clip.start_sec` 置 0 —— 曲线的第 0 帧因此也对应该 clip
+            //     的第 0 帧，同一个算式继续成立。
+            // `seg_start_sec` 本身已是与曲线同域的绝对（或 clip 局部）时刻，
+            // 所以"段落起点 + 段内样本秒"就是正确的采样时刻。
             let time = seg_start_sec + i as f64 / sample_rate as f64;
             let edit = sample_automation_curve_at_sec(Some(&pitch_edit), time, fp, 0.0);
             let orig = sample_automation_curve_at_sec(Some(&entry.pitch_orig), time, fp, 0.0);
@@ -961,6 +1007,13 @@ fn apply_host_pitch_edit(
             channel_index: channel as u16,
             sample_rate,
             source_fingerprint: Some(fingerprint),
+            // 【为什么传 `clip.start_sec`】声码器的两条 f0 回调（`clip_midi_at_time`
+            // 与 `edit_midi_at_time_or_none`）用的是**两组不同的域假设**：前者做
+            // "绝对 − clip_start"取局部，后者直接拿绝对时刻索引。要让它们读到同一
+            // 帧，`clip_start_sec` 必须是**这条曲线的零点** —— 而它就是：
+            // ARA 路径把 `clip.start_sec` 置 0 并同时把曲线换成 clip 局部数组，
+            // App 路径两者都是工程绝对域。两条路径下这个字段都对，因此不需要分叉；
+            // 真正的修正在别处（见 `input.rs` 与方案 §1）。
             clip_start_sec: clip.start_sec,
             seg_start_sec,
             seg_end_sec: if handles_stretch {

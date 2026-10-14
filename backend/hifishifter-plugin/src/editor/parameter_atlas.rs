@@ -1440,7 +1440,11 @@ impl ParameterAtlas {
             };
             // 几何不可解只跳过该片段：否则整个渲染输入准备都会失败
             // （本函数在 `capture_render_input` 上）。
-            let Ok(mut geometry) = geometry(clip) else {
+            //
+            // 【为什么不再 `mut`】投影不再改写几何 —— 输出索引的域由
+            // `CurveDomain::ClipLocal` 显式声明（见 `SourceCurve::project`），
+            // 几何保持它本来的绝对位置，采样坐标才能继续用真实项目时刻。
+            let Ok(geometry) = geometry(clip) else {
                 continue;
             };
             // 权威查表（modification persistentID），不做任何几何猜测。
