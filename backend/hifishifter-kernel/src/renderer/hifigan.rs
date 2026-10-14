@@ -224,13 +224,16 @@ impl HiFiGanRenderer {
             ctx.seg_end_sec
         );
 
-        // clip_midi 为空时明确跳过，与 WORLD 链路行为一致。
-        // Harvest 分析尚未完成时 clip_midi 可能为空，此时返回原始 PCM。
-        if clip_midi.is_empty() {
+        // 源 F0 不可用（空，或非空但全 0 —— 两者对 F0 驱动的声码器是同一语义）
+        // 时明确跳过，与 WORLD 链路行为一致，返回原始 PCM。
+        // 【为什么不是只判 `is_empty`】见 `pitch_curve_is_renderable`：全 0 的曲线
+        // 会穿过去，渲出静音或（有分离时）只剩气声 —— 那正是真机报障的形状。
+        if !crate::renderer::pitch_curve_is_renderable(clip_midi) {
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                 log::warn!(
-                    "HiFiGanRenderer::render: clip_midi is empty (Harvest not ready?), \
-                     skipping inference and returning original PCM"
+                    "HiFiGanRenderer::render: clip_midi is not renderable (len={}, analysis \
+                     missing or all-zero), skipping inference and returning original PCM",
+                    clip_midi.len()
                 );
             }
             return Ok(ctx.mono_pcm.to_vec());
@@ -481,7 +484,10 @@ impl HiFiGanRenderer {
             playback_rate
         );
 
-        if clip_midi.is_empty() {
+        // 与 `render_with_formant` 同一条判据：不可用的源 F0（空或全 0）不推理。
+        // 调用方（`chain`）在进入本函数前已把不可用情形改道外部拉伸，因此这里是
+        // 防御性兜底。
+        if !crate::renderer::pitch_curve_is_renderable(clip_midi) {
             return Ok(ctx.mono_pcm.to_vec());
         }
 

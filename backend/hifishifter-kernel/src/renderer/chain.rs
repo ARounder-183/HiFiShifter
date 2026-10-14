@@ -389,9 +389,9 @@ impl ProcessingStage for HiFiGanStage {
         };
         let renderer = crate::renderer::hifigan::HiFiGanRenderer;
         if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
-            if cc.clip_midi.is_empty() {
-                // 无 F0 无法走 mel 拉伸（HiFiGAN 需要音高激励）：回退外部算法
-                // 原位拉伸，保证输出帧数与"处理器内部拉伸"的承诺一致 ——
+            if !crate::renderer::pitch_curve_is_renderable(cc.clip_midi) {
+                // 源 F0 不可用（空或全 0）无法走 mel 拉伸（HiFiGAN 需要音高激励）：
+                // 回退外部算法原位拉伸，保证输出帧数与"处理器内部拉伸"的承诺一致 ——
                 // 调用方已因此跳过外部预拉伸，这里若再返回原 PCM 就会出现
                 // "外部不拉伸、内部也不拉伸"，输出被截断/补零。
                 return Ok(crate::time_stretch::time_stretch_interleaved(
@@ -456,9 +456,11 @@ impl HiFiGanStage {
         // ── 谐波支施加 Rd 张力（在 mel 分析之前，只动谐波）──────────────
         let tensioned_harmonic = Self::apply_rd_tension(&harmonic, cc, tension_curve);
 
-        // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
+        // 谐波分支：有可用 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；否则
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
-        let processed_harmonic = if cc.clip_midi.is_empty() {
+        // 【判据不是 `is_empty`】非空但全 0 的曲线同样没有激励，必须走回退，
+        // 否则声码器会渲出静音、而噪声支照常混回 ⇒ 只剩气声（真机报障）。
+        let processed_harmonic = if !crate::renderer::pitch_curve_is_renderable(cc.clip_midi) {
             if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
                 crate::time_stretch::time_stretch_interleaved(
                     &tensioned_harmonic,

@@ -276,6 +276,21 @@ fn write(root: &Path, key: blake3::Hash, rate: u32, pcm: &[f32]) -> std::io::Res
 }
 
 pub(crate) fn store(key: blake3::Hash, rate: u32, pcm: &[f32]) {
+    // 【防毒化】全 0 的合成输出几乎总是"F0 不可用被渲成的静音"，而不是真实的静音素材。
+    // 把它写进磁盘缓存会让后续每一次渲染都命中同一条坏结果 —— 即使分析随后补齐也一样
+    // （真机症状因此"顽固且与分析是否补上无关"）。拒绝落盘，代价只是下次重算一遍。
+    if !pcm.is_empty() && pcm.iter().all(|value| *value == 0.0) {
+        crate::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.cache.silent-output",
+            format_args!(
+                "[ara-cache] refusing to store an all-zero synthesis output ({} frames); \
+                 a silent render is almost always a missing-F0 artifact, not real silence",
+                pcm.len()
+            ),
+        );
+        return;
+    }
     let _maintenance = MAINTENANCE.lock().unwrap_or_else(|e| e.into_inner());
     match write(&root(), key, rate, pcm) {
         Ok(()) => {

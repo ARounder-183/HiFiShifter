@@ -29,7 +29,7 @@ pub use traits::{ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, 
 #[allow(unused_imports)]
 pub use traits::{ProcessorCapabilities, RenderContext, RendererCapabilities};
 #[allow(unused_imports)]
-pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none};
+pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none, pitch_curve_is_renderable};
 
 use crate::state::SynthPipelineKind;
 

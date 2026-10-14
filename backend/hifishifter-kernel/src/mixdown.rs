@@ -811,17 +811,69 @@ fn apply_host_pitch_edit(
     }
 
     let fp = entry.frame_period_ms.max(0.1);
-    let frame_count = (clip.length_sec * 1000.0 / fp).ceil() as usize + 1;
-    let clip_midi: Vec<f32> = (0..frame_count)
-        .map(|i| {
-            sample_automation_curve_at_sec(
-                Some(&entry.pitch_orig),
-                clip.start_sec + i as f64 * fp / 1000.0,
-                fp,
-                0.0,
-            )
-        })
-        .collect();
+    // ── 源 F0：**内容寻址的逐 clip 分析优先，工程域根轨道曲线兜底** ──────────────
+    //
+    // 【为什么主来源不再是 `entry.pitch_orig`】那是**工程域的根轨道数组**，而它的内核
+    // 失效判据（`pitch_analysis::build_root_pitch_key`）把每条 clip 的 id / start /
+    // length / 倍率 / 源窗都喂进了哈希 —— 于是**宿主任何一次编辑（分割 / 移动 / 裁剪）
+    // 都改变它**，`ensure_params_for_root` 随即清空 `pitch_orig`；插件侧每次模型更新
+    // 还会把它置为 None。清空后按绝对时间采样得到的是**非空但全 0** 的曲线，绕过声码器
+    // 的 `is_empty` 守卫，渲出静音；再叠加气声分离的"单位增益混回噪声支"，就是真机
+    // 报障的"只剩气声"。
+    //
+    // 内容寻址的逐 clip 缓存（`pitch_clip::get_clip_pitch_midi_global`）key 只含源路径
+    // + 文件签名 + 帧周期，**与 clip 几何无关**，因此分割 / 移动 / 裁剪都不会让它失效。
+    // App 路径（`maybe_apply_pitch_edit_to_clip_segment`）一直用它。
+    let mut clip_midi: Vec<f32> = crate::pitch_editing::build_clip_input_pitch_curve(
+        timeline,
+        clip,
+        clip.start_sec,
+        fp,
+        (clip.playback_rate as f64).max(1e-6),
+        false,
+    )
+    .unwrap_or_default();
+    // 【兜底】内容缓存尚未建立（分析未就绪、或合成夹具直接写曲线）时退回工程域来源。
+    // 生产 ARA 路径上两者同源（`assemble_pitch_orig_from_cache` 也读同一份内容缓存），
+    // 因此这条兜底只在缓存未就绪时有值 —— 那正是"还能出声"的窗口，且它随后仍要过
+    // 下面那条可渲染性守卫。
+    if !crate::renderer::pitch_curve_is_renderable(&clip_midi) {
+        let frame_count = (clip.length_sec * 1000.0 / fp).ceil() as usize + 1;
+        let fallback: Vec<f32> = (0..frame_count)
+            .map(|i| {
+                sample_automation_curve_at_sec(
+                    Some(&entry.pitch_orig),
+                    clip.start_sec + i as f64 * fp / 1000.0,
+                    fp,
+                    0.0,
+                )
+            })
+            .collect();
+        if crate::renderer::pitch_curve_is_renderable(&fallback) {
+            clip_midi = fallback;
+        }
+    }
+    let pitch_pending = entry.pitch_edit_user_modified || entry.has_pitch_adjustment_active;
+    if !crate::renderer::pitch_curve_is_renderable(&clip_midi) {
+        // 需要音高合成却没有可用 F0 ⇒ 本次不渲染，等分析补齐后由重渲染补上。
+        // 直接带着全 0 的 F0 进声码器会产出静音 / 纯气声，比不渲染更糟。
+        if pitch_pending {
+            crate::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.render.f0-unavailable",
+                format_args!(
+                    "[ara] clip {} has a pitch edit but no usable source F0 (len={}); \
+                     skipping synthesis this round and passing the host PCM through",
+                    clip.id,
+                    clip_midi.len(),
+                ),
+            );
+            return Ok(false);
+        }
+        // 纯效果路径（气声 / 张力 / 共振峰）不依赖 F0：保留空曲线，让声码器跳过
+        // 激励、效果照常施加（`chain` 的两条路径都按 `pitch_curve_is_renderable`
+        // 分流，空曲线等价于"无激励"）。
+    }
     let mut pitch_edit = entry.pitch_edit.clone();
     // 复用现有子轨音高偏移算法；输出曲线仍在项目绝对时间域。
     if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
@@ -834,10 +886,6 @@ fn apply_host_pitch_edit(
         }
     }
     let segment_end_sec = seg_start_sec + pcm_stereo.len() as f64 / (2.0 * sample_rate as f64);
-    let has_pitch_change = entry.pitch_edit_user_modified || entry.has_pitch_adjustment_active;
-    if has_pitch_change && entry.pitch_orig.is_empty() && pitch_edit.iter().any(|v| *v > 0.0) {
-        return Err("missing host pitch analysis".into());
-    }
     let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
     let mut extra_curves = clip
         .extra_curves
