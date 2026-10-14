@@ -67,15 +67,47 @@
 | 宿主保存工程时携带插件状态（含**部分**存档） | `storeObjectsToArchive` / `restoreObjectsFromArchive`（含筛选与 persistentID 重映射） |
 | 告诉宿主"这些对象的持久状态变了" | `ARAModelUpdateControllerInterface`（经 `notifyModelUpdates` 投递） |
 | 导出处理结果到音频文件 | 授权 PCM（`ARAAudioAccessControllerInterface`）+ 内核编码器；不需要任何宿主写接口 |
+| 快速导出选中片段 / 合成结果另存 / 导出布局·主题·颤音预设 | 同上（音频）或纯前端数据写文件；不需要任何宿主 API |
+| 宿主编辑器视图的选择同步（宿主里选中 ⇒ 插件跟着选） | `ARAEditorViewInterface::notifySelection`（需 `kARAEditorViewRole`） |
+| 轨道名与**轨道颜色**取宿主真值 | `ARARegionSequenceProperties::name` / `color` |
+| 音高参考 / 链接参数 / 参数剪贴板 | 插件自己的参数模型，只改曲线不碰宿主几何 |
 | 淡变形状轴（有 / 无、legacy / continuous） | 原生扩展**报告**版本；ARA-only 恒为"无" |
 
-**参数随宿主编辑保留**（第五轮加入）。参数权威按**稳定宿主身份**索引（有原生扩展时用
-item GUID，否则用 modification persistentID），曲线以**源域**存储，因此移动 / 裁剪 /
-分割 / 拉伸都不再让曲线消失 —— 这是此前"在 Cubase 里编辑一次，参数就被重置"的根因。
-分割时父段参数通过 `cloneAudioModification` 回执或 `end_editing` 的结构 diff 整份播给
-两个半段；取消裁剪能完整恢复曲线（裁剪不缩短权威里的源曲线）。
+**参数随宿主编辑保留**（第五轮加入主轴，第六轮修完）。参数权威按**稳定宿主身份**索引
+（有原生扩展时用 item GUID，否则用 modification persistentID），曲线以**源域**存储，
+因此移动 / 裁剪 / 分割 / 拉伸都不再让曲线消失。
+
+> **第六轮修掉的那个洞**：权威键是 modification 级（**多条 region 共享**），而曲线当时
+> 按"捕获时那条 region 的**工程帧**"索引（每条**独占**）。Cubase 一次分割产生的所有半段
+> 共享同一个 modification ⇒ 它们写同一个键、后写的覆盖先写的 ⇒ 前几条半段投影时落到界外、
+> 退回基线（用户看到"参数全部归零"）。现在曲线改按**源帧**索引：每条 region 只是同一条
+> 共享曲线上的一个**投影窗口**，各写自己的源区间，互不覆盖。
+> 权威里的曲线与既有部分**取并集**，不再是整份替换。
+
+分割时父段参数通过 `cloneAudioModification` 回执、`end_editing` 的结构 diff
+（判据已放宽为"任意 N 段、源窗首尾相接"）或原生 `SplitMediaItem` 回执播种。
+**共享一个 modification 的半段（Cubase 的常态）不需要任何播种** —— 它们本来就读同一条
+曲线的不同子段（ARA 的别名语义，`ARAInterface.h:950-952`）。
+取消裁剪能完整恢复曲线（裁剪不缩短权威里的源曲线）。
 「锁定参数线」决定参数跟着**素材**走（源域锚定，默认）还是留在**工程位置**（工程域锚定）。
+
+**persistentID 的生命周期必须跟着搬权威**：宿主改名（`updateAudioModificationProperties`）、
+整份 / 部分存档恢复时的 ID 重映射，都要同步把权威表搬过去，否则曲线被孤儿化。
+宿主动销毁 modification 时权威**不立即删**（撤销会把同一个 ID 带回来），
+按"连续 64 轮不在文档图里"回收（避免存档无界增长到 64MiB 上限而写不出去）。
+
+**宿主编辑器视图的选择会被采纳**（`notifySelection` → 插件选区）。采纳是**有条件的**：
+只有与上次采纳的不同才覆盖，空选择与已销毁片段都不清空插件自己的选择 ——
+该回调是"通知"不是"设定"（`ARAInterface.h:3646-3655`），宿主重开一次窗口就会重发。
+
 设 `HIFISHIFTER_ARA_LEGACY_ATLAS=1` 可退回旧的几何认领路径做真机对照（保留一个发布周期）。
+
+**Cubase（ARA 2.0 Draft）不会调用部分存档。** `storeObjectsToArchive` 属于 2.0 Final
+的接口尾部（`ARAInterface.h:2992`），Draft 宿主拿到的是被按代次截短的 vtable ——
+因此它在 Cubase 上的存档保证来自**整份存档**（`storeDocumentToArchive`）。
+（第六轮复核了第五轮"启用 2.0 Final 专属能力会让 Cubase 的控制器创建失败"这一结论：
+它**不成立**。调用点 `ara2-bridge-plugin/src/controller.rs` 会按协商到的代次把能力降级为
+全 false，`ffi/vtable.rs` 那道硬闸门因此永远不会被 Draft 宿主触发。）
 
 **渲染失效通路必须对两种后端都成立。** `RenderFacts`（`host/geometry.rs`）把"会改变
 渲染结果"的宿主事实收成一张逐 item 的表，任何一项变化都推进 `DocumentSession::render_epoch`。
