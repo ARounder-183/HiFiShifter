@@ -778,6 +778,8 @@ export const zhCN = {
     ctx_replace_midi: "替换 MIDI",
     ctx_replace_midi_all: "替换全部 MIDI",
     ctx_split_at_playhead: "在播放头处分割",
+    ctx_split_multi_reason: "需要选中的每条片段都能在播放头处分割",
+    ctx_split_playhead_reason: "播放头需要落在片段范围内",
     ctx_silence_detection: "静音检测...",
     silence_method: "检测方式",
     silence_method_rms: "RMS（能量）",

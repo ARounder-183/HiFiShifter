@@ -940,6 +940,8 @@ export const enUS = {
     ctx_replace_midi: "Replace MIDI",
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
+    ctx_split_multi_reason: "Every selected clip must be splittable at the playhead",
+    ctx_split_playhead_reason: "The playhead must be inside the clip",
     ctx_silence_detection: "Silence Detection...",
     silence_method: "Detection",
     silence_method_rms: "RMS (energy)",

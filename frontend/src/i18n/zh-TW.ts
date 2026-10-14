@@ -779,6 +779,8 @@ export const zhTW = {
     ctx_replace_midi: "取代 MIDI",
     ctx_replace_midi_all: "取代全部 MIDI",
     ctx_split_at_playhead: "在播放頭處分割",
+    ctx_split_multi_reason: "需要選取的每條片段都能在播放頭處分割",
+    ctx_split_playhead_reason: "播放頭需要落在片段範圍內",
     ctx_silence_detection: "靜音偵測...",
     silence_method: "偵測方式",
     silence_method_rms: "RMS（能量）",

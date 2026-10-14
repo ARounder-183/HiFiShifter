@@ -872,6 +872,8 @@ export const koKR = {
     ctx_replace_midi: "MIDI 교체",
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
+    ctx_split_multi_reason: "선택한 모든 클립이 재생 위치에서 분할 가능해야 합니다",
+    ctx_split_playhead_reason: "재생 위치가 클립 범위 안에 있어야 합니다",
     ctx_silence_detection: "무음 감지...",
     silence_method: "감지 방식",
     silence_method_rms: "RMS(에너지)",

@@ -811,6 +811,8 @@ export const jaJP = {
     ctx_replace_midi: "MIDIを置換",
     ctx_replace_midi_all: "すべてのMIDIを置換",
     ctx_split_at_playhead: "再生ヘッドで分割",
+    ctx_split_multi_reason: "選択したすべてのクリップを再生ヘッドで分割できる必要があります",
+    ctx_split_playhead_reason: "再生ヘッドがクリップの範囲内にある必要があります",
     ctx_silence_detection: "無音検出...",
     silence_method: "検出方式",
     silence_method_rms: "RMS（エネルギー）",

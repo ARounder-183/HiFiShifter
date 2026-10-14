@@ -852,7 +852,22 @@ export const ClipContextMenu: React.FC<{
             <MenuItem
                 label={t("ctx_split_at_playhead")}
                 shortcut={splitShortcut}
+                // 【为什么带上原因】分割在插件里被禁用的原因有**两种**，混成一句
+                // "不可用"用户无从判断该换哪个宿主、还是改自己的操作：
+                //   * 宿主不提供分割通道（`hostSplit` 假）⇒ 宿主能力问题，
+                //     用宿主权威文案（与剪贴板 / 删除同一份措辞）；
+                //   * 播放头不在这条片段内 / 多选时不是所有片段都能切 ⇒ 用户操作问题，
+                //     用这条规则自己的说明。
                 disabled={!hostSplit || (isMulti ? !canSplitSelected : !playheadInClip)}
+                title={
+                    !hostSplit
+                        ? hostReason
+                        : isMulti && !canSplitSelected
+                          ? t("ctx_split_multi_reason")
+                          : !playheadInClip
+                            ? t("ctx_split_playhead_reason")
+                            : undefined
+                }
                 onClick={() => {
                     onSplit(ids);
                     close();
