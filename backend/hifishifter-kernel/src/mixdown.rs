@@ -2323,18 +2323,31 @@ mod tests {
             assert!(render_mixdown_with_pcm(&tl, opts(false), &HashMap::new()).is_err());
         }
 
+        /// **回归：分析未就绪期间不得把整份渲染打成错误。**
+        ///
+        /// 【为什么契约变了】旧实现在"有音高编辑但 `pitch_orig` 为空"时返回 `Err`，
+        /// 而那条错误会被放大成**整条时间线渲染失败** —— 用户什么都听不到。真机报障
+        /// （Cubase 分割后只剩气声）的同一现场正是 F0 源被清空。
+        ///
+        /// 新契约：需要音高合成却没有可用 F0 时，本次**放行宿主 PCM**（不处理），
+        /// 等分析补齐后由重渲染补上；既不带着全 0 的 F0 进声码器，也不整份失败。
         #[test]
-        fn pending_host_pitch_analysis_is_an_error_for_an_edit() {
+        fn pending_host_pitch_analysis_passes_the_host_pcm_through_instead_of_failing() {
             let mut tl = timeline("ara://pending");
             let entry = tl.params_by_root_track.get_mut(&tl.tracks[0].id).unwrap();
             entry.pitch_orig.clear();
             entry.pitch_edit.fill(81.0);
-            assert!(render_mixdown_with_pcm(
-                &tl,
-                opts(true),
-                &sources("ara://pending", tone(440.0))
-            )
-            .is_err());
+            let host = tone(440.0);
+            let (_, channels, _, out) =
+                render_mixdown_with_pcm(&tl, opts(true), &sources("ara://pending", host.clone()))
+                    .expect("a pending analysis must not fail the whole render");
+            assert_eq!(channels, 2);
+            assert_eq!(out.len(), host.len(), "the host PCM must keep its length");
+            assert!(
+                out.iter().any(|value| *value != 0.0),
+                "the host PCM must survive the pending-analysis window instead of \
+                 being rendered from an all-zero F0"
+            );
         }
 
         #[test]

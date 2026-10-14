@@ -275,11 +275,17 @@ fn write(root: &Path, key: blake3::Hash, rate: u32, pcm: &[f32]) -> std::io::Res
     result
 }
 
+/// 一段合成输出是否**不值得缓存**。
+///
+/// 全 0 的输出几乎总是"F0 不可用被渲成的静音"，而不是真实的静音素材；把它写进磁盘
+/// 缓存会让后续每一次渲染都命中同一条坏结果 —— 即使分析随后补齐也一样（真机症状
+/// 因此"顽固且与分析是否补上无关"）。代价只是下次重算一遍。
+fn is_unworthy_output(pcm: &[f32]) -> bool {
+    !pcm.is_empty() && pcm.iter().all(|value| *value == 0.0)
+}
+
 pub(crate) fn store(key: blake3::Hash, rate: u32, pcm: &[f32]) {
-    // 【防毒化】全 0 的合成输出几乎总是"F0 不可用被渲成的静音"，而不是真实的静音素材。
-    // 把它写进磁盘缓存会让后续每一次渲染都命中同一条坏结果 —— 即使分析随后补齐也一样
-    // （真机症状因此"顽固且与分析是否补上无关"）。拒绝落盘，代价只是下次重算一遍。
-    if !pcm.is_empty() && pcm.iter().all(|value| *value == 0.0) {
+    if is_unworthy_output(pcm) {
         crate::log_limiter::emit_limited_key(
             log::Level::Warn,
             "ara.cache.silent-output",
@@ -307,6 +313,18 @@ pub fn stats() -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 全 0 的合成输出不得落盘 —— 它是"F0 不可用"的产物，缓存它会固化坏结果。
+    #[test]
+    fn an_all_zero_synthesis_output_is_never_cached() {
+        assert!(is_unworthy_output(&[0.0; 32]));
+        // 只要有一帧非 0 就是真实结果（静音素材里夹一个样本也必须可缓存）。
+        let mut nearly_silent = vec![0.0_f32; 32];
+        nearly_silent[7] = 1e-9;
+        assert!(!is_unworthy_output(&nearly_silent));
+        // 空输出不是"值得缓存"的候选，但也不该被这条判据拦下（长度 0 另由写入侧拒绝）。
+        assert!(!is_unworthy_output(&[]));
+    }
+
     #[test]
     fn content_key_ignores_owner_and_mix_only_curves_but_tracks_all_synthesis_dependencies() {
         use std::collections::HashMap;

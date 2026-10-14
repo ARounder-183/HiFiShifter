@@ -1793,3 +1793,77 @@ fn actual_document_retains_bound_storage_after_owner_is_dropped() {
     drop(model);
     // 模型终止后所有 owner 都已释放，此后不得再访问 raw。
 }
+
+/// **回归：region key 缺席时按"源 + 播放几何"反查身份，而不是判"无身份"。**
+///
+/// 【为什么这条测试是必须的】派生表（`regions` / `clip_ids`）与映射出的 clip id 之间
+/// 存在一个"还没跟上"的窗口（宿主在收口前重投模型、或 region 刚被重建）。旧实现
+/// 在这个窗口里直接判"无身份"，于是那一条 clip 本轮**不投影任何曲线** —— 用户看到的
+/// 正是"编辑之后这一段参数被重置"（真机日志：`N of M clip(s) have no region identity`）。
+/// 新实现按 clip 自带的源与播放几何反查派生表，把它接回同一份参数权威。
+#[test]
+fn a_clip_without_a_live_region_key_still_resolves_by_source_and_geometry() {
+    let (model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    let mut timeline = document
+        .timeline
+        .lock_or_recover()
+        .as_ref()
+        .unwrap()
+        .clone();
+    // 取派生表里一条真实 region 作为"应当被反查到的"目标，并给它一份**唯一**的
+    // 源与播放几何 —— 夹具里两条 region 是克隆关系，不这样做反查会命中两条而
+    // 判为歧义（那是正确行为，但不是这条测试要验证的）。
+    let target_key = *document
+        .regions
+        .lock_or_recover()
+        .keys()
+        .next()
+        .expect("夹具必须有一条 region");
+    let (target_source, target_start, target_length, target_modification) = {
+        let mut regions = document.regions.lock_or_recover();
+        let region = regions.get_mut(&target_key).expect("目标 region 必须存在");
+        region.audio_source_persistent_id = "ara://unique-source".into();
+        region.start_in_playback_time = 7.0;
+        region.duration_in_playback_time = 3.0;
+        (
+            region.audio_source_persistent_id.clone(),
+            region.start_in_playback_time,
+            region.duration_in_playback_time,
+            region.audio_modification_persistent_id.clone(),
+        )
+    };
+
+    let unknown_key = target_key.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    assert!(
+        !document
+            .regions
+            .lock_or_recover()
+            .contains_key(&unknown_key),
+        "构造的 key 必须真的不在派生表里，否则这条测试什么都没验证"
+    );
+
+    let clip_id = {
+        let clip = timeline.clips.first_mut().expect("夹具必须有一条 clip");
+        // clip id 指向一个派生表里不存在的 key，但源与播放几何仍指向那条真实 region。
+        clip.id = format!("ara-region-{unknown_key}");
+        clip.source_path = Some(target_source.clone());
+        clip.start_sec = target_start;
+        clip.length_sec = target_length;
+        clip.id.clone()
+    };
+
+    let identities = {
+        let _transaction = document.transaction.lock_or_recover();
+        document.parameter_identities_locked(&timeline).unwrap()
+    };
+    let identity = identities
+        .get(&clip_id)
+        .expect("身份必须由源 + 播放几何反查出来，而不是判无身份");
+    assert_eq!(identity.source, target_source);
+    assert_eq!(
+        identity.modification, target_modification,
+        "反查出的身份必须指向同一条 modification，否则参数权威仍然接不上"
+    );
+    document.close();
+}

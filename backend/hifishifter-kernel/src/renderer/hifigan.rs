@@ -660,4 +660,70 @@ mod tests {
         // 不同 clip 之间同样隔离
         assert_eq!(cache.get(&cache_key("other", 0, 0)), None);
     }
+
+    /// **回归：不可用的 F0 必须原样放行，而不是渲出静音。**
+    ///
+    /// 【为什么这条测试是必须的】真机报障：分割 clip 之后大多数片段只渲出气声。
+    /// F0 源被清空后按绝对时间采样得到的是**非空但全 0** 的曲线；它绕过了入口
+    /// 的 `is_empty()` 守卫被送进 F0 驱动的声码器 ⇒ 谐波支输出静音，而气声分离的
+    /// 噪声支按单位增益照常混回 ⇒ 听感"只剩气声"。修复后不可用的 F0 直接返回输入
+    /// PCM，绝不进推理。
+    #[test]
+    fn an_unusable_f0_passes_the_input_through_instead_of_rendering_silence() {
+        let params = HashMap::new();
+        let pitch_edit: [f32; 4] = [0.0; 4];
+        let all_zero: [f32; 4] = [0.0; 4];
+        let input: Vec<f32> = (0..64).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
+        let ctx = RenderContext {
+            mono_pcm: &input,
+            channel_index: 0,
+            sample_rate: 44100,
+            seg_start_sec: 0.0,
+            seg_end_sec: 64.0 / 44100.0,
+            clip_start_sec: 0.0,
+            frame_period_ms: 5.0,
+            pitch_edit: &pitch_edit,
+            clip_midi: &all_zero,
+            clip_id: "regression",
+            extra_params: &params,
+        };
+        let out = HiFiGanRenderer
+            .render_with_formant(&ctx, None, None)
+            .expect("the guard must not fail");
+        assert_eq!(
+            out, input,
+            "an unusable F0 must return the input PCM unchanged"
+        );
+        assert!(
+            out.iter().any(|value| *value != 0.0),
+            "the output must not be silence"
+        );
+    }
+
+    /// 空 F0 与全 0 F0 走同一条安全路径（历史行为只覆盖了空曲线）。
+    #[test]
+    fn an_empty_f0_also_passes_the_input_through() {
+        let params = HashMap::new();
+        let empty: [f32; 0] = [];
+        let input = vec![0.25_f32; 16];
+        let ctx = RenderContext {
+            mono_pcm: &input,
+            channel_index: 0,
+            sample_rate: 44100,
+            seg_start_sec: 0.0,
+            seg_end_sec: 16.0 / 44100.0,
+            clip_start_sec: 0.0,
+            frame_period_ms: 5.0,
+            pitch_edit: &empty,
+            clip_midi: &empty,
+            clip_id: "regression-empty",
+            extra_params: &params,
+        };
+        assert_eq!(
+            HiFiGanRenderer
+                .render_with_formant(&ctx, None, None)
+                .expect("the guard must not fail"),
+            input
+        );
+    }
 }

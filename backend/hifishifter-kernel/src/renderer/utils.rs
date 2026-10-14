@@ -121,3 +121,37 @@ pub fn clip_midi_at_time(
         0.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::pitch_curve_is_renderable;
+
+    /// 空曲线与"非空但全 0"的曲线对 F0 驱动的声码器是**同一个语义**。
+    ///
+    /// 【为什么这条判据是回归测试】真机报障（Cubase ARA）：分割 clip 之后大多数片段
+    /// 只渲出气声。根因是 F0 源被清空后按绝对时间采样得到一段**非空但全 0** 的曲线，
+    /// 它绕过了声码器入口的 `is_empty()` 守卫 —— 谐波支因此渲成静音，而气声分离的
+    /// 噪声支按单位增益照常混回。判据必须把两者一起挡住。
+    #[test]
+    fn an_empty_curve_and_an_all_zero_curve_are_both_unusable() {
+        assert!(!pitch_curve_is_renderable(&[]));
+        assert!(!pitch_curve_is_renderable(&[0.0; 64]));
+    }
+
+    /// 只要有一帧可用的 F0 就算可用（无声前导段是合法输入）。
+    #[test]
+    fn a_single_voiced_frame_makes_the_curve_usable() {
+        let mut curve = vec![0.0; 64];
+        curve[40] = 57.0;
+        assert!(pitch_curve_is_renderable(&curve));
+    }
+
+    /// 非有限值不构成"可用"：NaN 会把噪声传播进 STFT，负音高无意义。
+    #[test]
+    fn non_finite_or_negative_values_are_not_usable() {
+        assert!(!pitch_curve_is_renderable(&[f32::NAN; 8]));
+        assert!(!pitch_curve_is_renderable(&[f32::INFINITY; 8]));
+        assert!(!pitch_curve_is_renderable(&[-3.0; 8]));
+        assert!(!pitch_curve_is_renderable(&[0.0, f32::NAN, -1.0]));
+    }
+}
