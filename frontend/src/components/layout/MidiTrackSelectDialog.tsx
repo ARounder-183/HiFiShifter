@@ -714,7 +714,12 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             ? "flex items-center gap-1 cursor-pointer"
                                             : "flex items-center gap-1"
                                     }
-                                    title={clipTargetReason}
+                                    // 【为什么是 data-tooltip】禁用理由必须走项目自定义
+                                    // 气泡：它才能跟随明暗主题、并按本项目排版换行。
+                                    // 原生 title 会把多行折成一行，样式也不受本项目控制
+                                    // （`components/dock/dockTooltips.ts:58-61` 对"不要
+                                    // 改用原生 title"有同样的结论）。
+                                    data-tooltip={clipTargetReason}
                                 >
                                     <RadioGroup.Item
                                         value="pitchRef"

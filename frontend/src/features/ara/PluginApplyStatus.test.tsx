@@ -136,9 +136,17 @@ test("a ready host offers the reload action and reports the applied state", asyn
     await render();
     expect(text()).toContain(enUS.plugin_apply_applied);
     expect(button(enUS.plugin_apply_reload_host)).toBeTruthy();
-    // 修订数与长说明退到 title，不占状态栏宽度。
-    const chip = container.querySelector("[title]");
-    expect(chip?.getAttribute("title")).toContain(enUS.plugin_apply_hint);
+    // 修订数与长说明退到悬停提示，不占状态栏宽度。
+    //
+    // 【为什么断言 `data-tooltip` 而不是 `title`】提示必须走本项目自定义气泡
+    // （`data-tooltip`）：它才能按 `pre-wrap` 渲染两行、并跟随明暗主题；
+    // 原生 `title` 会把两行折成一行。此前这条测的是 `[title]`，等于把
+    // "提示走原生通道"这个分歧固化下来。
+    const chip = container.querySelector("[data-tooltip]");
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute("data-tooltip")).toContain(enUS.plugin_apply_hint);
+    // 同一元素上不得再挂原生 title —— 两个气泡会先后冒出来。
+    expect(chip?.getAttribute("title")).toBeNull();
 });
 
 test("reloading with unapplied edits requires an explicit confirmation", async () => {

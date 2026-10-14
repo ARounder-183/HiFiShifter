@@ -36,6 +36,19 @@ export interface AppStatusChipProps {
     /** 等宽数字，用于会跳动的计数，避免文字宽度抖动。 */
     tabular?: boolean;
     className?: string;
+    /**
+     * 悬停提示（项目自定义气泡，走 `data-tooltip` 通道）。
+     *
+     * 【为什么与 `title` 并存】与 `ui/ListRow.tsx` 同一取舍：`tooltip` 走项目
+     * 自定义气泡（样式/换行/明暗主题一致，且同时服务于无障碍朗读），`title` 是
+     * 浏览器原生提示（延迟长、样式不可控、深色主题下常撞色）。新代码用 `tooltip`。
+     *
+     * 【为什么多行可以是一个字符串】气泡是 `white-space: pre-wrap`
+     * （`index.css:1594`），所以 `\n` 会被如实渲染成换行 —— 这正是
+     * `dock/DockLayoutMenu` 的 `dockDragHint` 两行提示采用的形式。
+     */
+    tooltip?: string;
+    /** 原生浏览器提示。新代码优先用 `tooltip`。 */
     title?: string;
 }
 
@@ -44,19 +57,25 @@ export interface AppStatusChipProps {
  *
  * @example
  * <AppStatusChip tone="accent">{t("common_loading")}</AppStatusChip>
- * <AppStatusChip tone="danger">{errorCount}</AppStatusChip>
+ * <AppStatusChip tone="danger" tooltip={t("why_failed")}>{errorCount}</AppStatusChip>
  */
 export function AppStatusChip({
     children,
     tone = "neutral",
     tabular = false,
     className,
+    tooltip,
     title,
 }: AppStatusChipProps) {
     const { background, color } = TONE_STYLE[tone];
     return (
         <span
             title={title}
+            // 【为什么只写一个属性】与 `AppListRow` 同口径（`ui/ListRow.tsx:166`）：
+            // `data-tooltip` 就是自定义通道的唯一入口，命中判据在
+            // `AppTooltipProvider`（`components/AppTooltip.tsx:256`）。空串与
+            // undefined 都不写，免得"命中了一个空元素"让气泡反复显示空内容。
+            data-tooltip={tooltip || undefined}
             className={cx(
                 "hs-type-mono shrink-0 rounded px-1 py-0 font-medium leading-4",
                 tabular && "tabular-nums",

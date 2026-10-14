@@ -142,7 +142,11 @@ test("plugin locks the target to the pitch curve and explains the missing one", 
     expect(block.radio.getAttribute("aria-checked")).toBe("false");
     // 不可用的选项必须禁用**并给出原因**，而不是留着点了没反应。
     expect(block.radio.disabled).toBe(true);
-    expect(block.label.getAttribute("title")).toBe(enUS.midi_import_clip_plugin_unavailable);
+    // 【为什么是 data-tooltip】原因必须走项目自定义气泡（`data-tooltip`），
+    // 而不是原生 `title`：前者跟随明暗主题并支持本项目排版；后者会把多行
+    // 折成一行，样式也不受控制（见 `AppStatusChip` / `dockTooltips.ts`）。
+    expect(block.label.getAttribute("data-tooltip")).toBe(enUS.midi_import_clip_plugin_unavailable);
+    expect(block.label.getAttribute("title")).toBeNull();
 
     const importButton = buttonNamed(enUS.midi_import);
     expect(importButton).toBeTruthy();

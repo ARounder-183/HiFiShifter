@@ -79,10 +79,16 @@ export function PluginApplyStatus({
             ? t("plugin_apply_pending")
             : t("plugin_apply_applied");
     /*
-     * 修订数与长说明都进 `title`：它们在状态栏里没有位置，但"为什么还没应用"
+     * 修订数与长说明都进 tooltip：它们在状态栏里没有位置，但"为什么还没应用"
      * 恰恰要靠它们判断 —— 塞进片里会把状态栏撑成一条跑道。
+     *
+     * 【为什么用 \n 而不是原生 title】气泡是 `white-space: pre-wrap`
+     * （`index.css:1594`），换行会如实渲染成两行；而原生 `title` 会把 `\n`
+     * 折成一个空格，且样式与明暗主题都不受本项目控制（`dockTooltips.ts:58-61`
+     * 对"不要改用原生 title"有同样的结论）。此前这里正是把两行 `join("\n")`
+     * 塞给 `title` 的 —— 两行挤成一行，且用的是原生气泡。
      */
-    const title = state
+    const tooltip = state
         ? [
               tVars("plugin_apply_generations", {
                   edits: state.generation,
@@ -102,7 +108,7 @@ export function PluginApplyStatus({
 
     return (
         <Flex align="center" gap="1" className="min-w-0">
-            <AppStatusChip tone={tone} title={title}>
+            <AppStatusChip tone={tone} tooltip={tooltip}>
                 {label}
             </AppStatusChip>
             {error && !terminal ? (
@@ -115,7 +121,11 @@ export function PluginApplyStatus({
                     // `plugin_apply_error`（"尚未应用：{error}"）就是为此准备的，
                     // 却一直零引用（一处 i18n 绕过 + 一个死键）。错误内容本身来自
                     // 后端，保持原样；**前缀**走词表。
-                    title={tVars("plugin_apply_error", { error })}
+                    //
+                    // 【为什么不再另挂一个提示】这行文字本身就是完整的
+                    // "尚未应用：{原因}"，再给它加 tooltip 只会重复同样的话 ——
+                    // 此前它挂的原生 `title` 与可见文字逐字相同，纯噪声。
+                    // 需要更多细节的用户可以看日志（后端已限流记录同一条错误）。
                 >
                     {tVars("plugin_apply_error", { error })}
                 </span>

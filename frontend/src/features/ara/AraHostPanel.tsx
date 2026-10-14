@@ -189,7 +189,11 @@ export function AraHostPanel({
             <Flex align="center" gap="2" wrap="wrap">
                 <AppStatusChip
                     tone={error ? "danger" : busy ? "accent" : session ? "success" : "neutral"}
-                    title={
+                    // 【为什么走 `tooltip` 而不是 `title`】修订数是两行放不下的读数，
+                    // 用自定义气泡才能按本项目样式换行显示；原生 `title` 会把
+                    // 多行折成一行，也不跟随明暗主题（与 `PluginApplyStatus`
+                    // 上的同一个取舍）。
+                    tooltip={
                         session
                             ? tVars("ara_revisions", {
                                   revision: session.revision ?? 0,
