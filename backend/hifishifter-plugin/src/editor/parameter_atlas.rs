@@ -55,6 +55,13 @@ impl RegionGeometry {
     /// 【为什么需要它】「锁定参数线」关闭时，参数应当留在**工程位置**而不是跟着素材走。
     /// 用恒等映射（项目→项目）做 `current`，`domain_time` 便退化成"同一项目时刻"，
     /// 曲线按**绝对项目帧**索引，因此不随片段移动（见 `SourceCurve::domain_time`）。
+    ///
+    /// 【为什么它建在 `project_start` 上而不是 0】调用方在需要 clip 局部零点时
+    /// **已经把 `project_start` 归零了**（`project_local`）。这里若再写 0，
+    /// 归零与未归零两种输入会给出同一个映射，"局部 vs 绝对"就再也区分不开；
+    /// 跟着传入的几何走，`project_start == 0` 时它天然就是局部零点，
+    /// `project_start == 绝对时刻` 时它天然就是绝对工程时刻。一个映射表达两种域，
+    /// 不需要额外的分支。
     fn project_map(&self) -> Result<SourceTimeMap, String> {
         SourceTimeMap::linear(
             self.project_start,
@@ -90,6 +97,34 @@ impl RegionGeometry {
         }
     }
 }
+/// 一条曲线的**索引域**：`values[i]` 的第 `i` 帧对应哪个域的什么时刻。
+///
+/// 【为什么必须显式声明】第七轮之前，曲线按工程帧索引；第七轮把它搬到了源帧
+/// （`SourceCurve` 的 `basis` 改成 `Option`，新形状一律 `None`）。但渲染路径上
+/// 仍有四处用**绝对工程时间**去读这些曲线，而那一刻它们已被 `project_local`
+/// 投影成**零点对齐的 clip 局部数组** —— 同一个数组在四个地方被两种不同的时间域
+/// 读，偏移量恰等于 `clip.start_sec`（也就是分割点）。这就是分割后曲线整体偏移
+/// 的根因。把域变成类型系统的一部分，那种混用才可能被编译器或断言抓住。
+///
+/// 【为什么三分而不是二分】二分（源 / 工程）无法表达渲染路径真正消费的那个域：
+/// `project_local` 的产物既不是"源帧"也不是"绝对工程帧"，而是**零点对齐的工程帧**
+/// （`geometry.project_start` 被置 0）。标成 `Project` 会让域校验在 `project_start == 0`
+/// 时恒真（断言形同虚设）；标成 `Source` 则与 `frame_range` 的实际算式矛盾。
+/// 只有第三个取值能让"这条数组该用哪种时间读"成为一个可检查的事实。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum CurveDomain {
+    /// 源域帧：`values[first_frame + k]` = 源时刻 `(first_frame + k)·frame_ms` 处的值。
+    /// 与"是哪条 region 的哪次编辑"无关 —— 共享同一 modification 的多条 region
+    /// 落在同一条曲线的不同区间上，各取所需。
+    Source,
+    /// 工程域帧：`values[i]` = 项目**绝对**时刻 `i·frame_ms` 处的值。
+    /// 只用于根视图合并（`project_roots`）与旧存档未迁移的窗口。
+    Project,
+    /// clip 局部零点帧：`values[i]` = 该 clip 第 `i·frame_ms` 处的值。
+    /// `project_local` 的产物，渲染路径唯一消费域。
+    ClipLocal,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SourceCurve {
     /// **索引域**。`None` = 新形状：`values` 按**源帧**索引（与是哪条 region 无关）。
@@ -105,6 +140,15 @@ struct SourceCurve {
     /// 编辑时自然变成源域（`capture` 一律写 `None`）。
     #[serde(default)]
     basis: Option<RegionGeometry>,
+    /// 本曲线的索引域（见 [`CurveDomain`]）。
+    ///
+    /// 【为什么能从 `basis` 推导却仍然单独存】`basis == None` 确实等价于源域，
+    /// 但"只有源域和工程域两档"这件事本身就是本轮要消除的缺陷：渲染路径消费的
+    /// `project_local` 产物是 **clip 局部零点**，它与前两者都不同。单独存一个字段，
+    /// 让每个写出方都必须声明自己写的是哪个域；缺省时按 `basis` 推导
+    /// （`Some` = 旧工程帧，`None` = 源帧），旧存档读进来即得到与改动前完全一致的解释。
+    #[serde(default = "legacy_curve_domain")]
+    domain: CurveDomain,
     /// `values[0]` 对应的**索引域**帧号（新形状下即源帧）。
     first_frame: usize,
     frame_ms: f64,
@@ -130,6 +174,18 @@ mod arc_values {
         }
         Ok(Arc::new(values))
     }
+}
+
+/// 旧存档缺 `domain` 时的推导：`basis == Some(..)` = 工程帧，`None` = 源帧。
+///
+/// 【为什么不是简单的 `Default`】`Default` 拿不到同一条记录的 `basis`，
+/// 而"旧存档该怎么解释"恰恰由 `basis` 决定。函数级 `serde(default)` 同样只看得到
+/// 本字段，所以这里取两档里与旧实现完全一致的那个：
+/// 第七轮起 `capture_source_curve` 一律写 `basis: None`（源域），旧存档是 `Some`
+/// （工程帧）。取 `Source` 作为缺省与"新存档"一致；`Some` 的旧记录由
+/// [`SourceCurve::domain_time`] 的既有旧分支继续正确处理，两者互不干扰。
+fn legacy_curve_domain() -> CurveDomain {
+    CurveDomain::Source
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RegionParameters {
@@ -461,6 +517,12 @@ impl ParameterAtlas {
     /// 工程锚定的曲线按绝对工程帧索引（种子落在工程 `[project_start, …)`）。
     /// 两者都用 `project_start` 描述"这条曲线当前显示在哪"，但落点不同 ——
     /// 混用会让投影整体偏移。
+    ///
+    /// 【为什么 `domain` 也跟着锚点走】**域不是曲线的属性，是"这条曲线按哪种时间
+    /// 索引"的事实**。源锚定 ⇒ 源帧 ⇒ `CurveDomain::Source`；工程锚定 ⇒ 绝对工程帧
+    /// ⇒ `CurveDomain::Project`。早先这里两种锚点都写 `Source`，于是工程锚定的曲线
+    /// 被按源帧读 —— 采样时 `sample_at` 的下标差一个 `first_frame`，
+    /// 投影整体偏移（本轮 B4 的红测试就是这么抓到的）。
     #[cfg(test)]
     pub(crate) fn seed_test_pitch_curve_anchored(
         &mut self,
@@ -470,15 +532,19 @@ impl ParameterAtlas {
         values: Vec<f32>,
         anchor: ParamAnchor,
     ) {
-        let first_frame = match anchor {
-            ParamAnchor::Source => 0,
-            ParamAnchor::Project => (project_start * 1000. / frame_ms).floor() as usize,
+        let (domain, first_frame) = match anchor {
+            ParamAnchor::Source => (CurveDomain::Source, 0),
+            ParamAnchor::Project => (
+                CurveDomain::Project,
+                (project_start * 1000. / frame_ms).floor() as usize,
+            ),
         };
         let mut curves = BTreeMap::new();
         curves.insert(
             "pitch_edit".to_owned(),
             SourceCurve {
                 basis: None,
+                domain,
                 first_frame,
                 frame_ms,
                 values: Arc::new(values),
@@ -1274,13 +1340,19 @@ impl ParameterAtlas {
                 // ~0.03 音分/次）。判据取"旧曲线投影出来就是这份视图 ⇒ 没有新编辑"，
                 // 与旧实现同口径。
                 let reproduces_view = old.is_some_and(|old| {
-                    old.project(&geometry, &key, params.frame_period_ms, anchor)
-                        .is_ok_and(|projected| {
-                            (begin..=end).all(|frame| {
-                                projected[frame]
-                                    == values.get(frame).copied().unwrap_or_else(|| pad(&key))
-                            })
+                    old.project(
+                        &geometry,
+                        &key,
+                        params.frame_period_ms,
+                        anchor,
+                        CurveDomain::Project,
+                    )
+                    .is_ok_and(|projected| {
+                        (begin..=end).all(|frame| {
+                            projected[frame]
+                                == values.get(frame).copied().unwrap_or_else(|| pad(&key))
                         })
+                    })
                 });
                 let curve = match old {
                     Some(old) if reproduces_view || same_curve(old, &rebuilt) => old.clone(),
@@ -1375,17 +1447,27 @@ impl ParameterAtlas {
             let Some(authority) = self.authority(identity, &root, &geometry)? else {
                 continue;
             };
-            if local {
-                geometry.project_start = 0.;
-            }
+            // 【为什么这里不再把 `project_start` 归零】输出索引的域现在由
+            // `CurveDomain::ClipLocal` 显式声明（见 `SourceCurve::project`），
+            // 而采样坐标必须继续用该 clip 在工程里的**真实**位置。早先靠
+            // "把几何左端归零"来表达"输出是局部的"，那会连坐标一起抹掉 ——
+            // 工程域锚点（「锁定参数线」关闭）下右半段于是用局部 0..1 去读
+            // 绝对 1..2 的帧，整体偏移一个分割长度。归零这件事由索引域承担，
+            // 几何保持完整。
             let mut params = authority.template().clone();
             let frame_ms = params.frame_period_ms;
             let anchor = authority.anchor();
             for (key, curve) in authority.curves() {
+                // 本曲线的输出索引域：局部投影 ⇒ clip 局部零点；否则绝对工程帧。
+                let out_domain = if local {
+                    CurveDomain::ClipLocal
+                } else {
+                    CurveDomain::Project
+                };
                 set_curve(
                     &mut params,
                     key,
-                    curve.project(&geometry, key, frame_ms, anchor)?,
+                    curve.project(&geometry, key, frame_ms, anchor, out_domain)?,
                 );
             }
             params.pitch_orig_key = None;
@@ -2064,26 +2146,66 @@ pub(super) fn set_curve(params: &mut TrackParamsState, key: &str, values: Vec<f3
 }
 impl SourceCurve {
     /// 只生成项目网格投影，原values/basis保持不可变，连续宿主变换不累积插值损失。
+    ///
+    /// 【`out_domain` 声明返回数组的索引域】三条路径消费的不是同一件事：
+    ///   * `CurveDomain::Project` —— 根视图（GUI）：数组按**绝对工程帧**索引；
+    ///   * `CurveDomain::ClipLocal` —— 渲染输入：数组按 **clip 局部零点**索引，
+    ///     但采样坐标仍用该 clip 在工程里的**真实**位置（见下）；
+    ///   * `CurveDomain::Source` —— 只用于"这条曲线本身就是源域"的断言。
+    ///
+    /// 【为什么局部投影不能把 `project_start` 一起归零】早先 `project_local` 直接把
+    /// `geometry.project_start = 0.`，于是"绝对工程时刻"这个坐标被**抹掉**。源域锚点
+    /// 下碰巧还对（映射的左端也跟着变成 0，等价）；但只要锚点是工程域
+    /// （「锁定参数线」关闭，曲线按绝对工程帧存），右半段就会用局部 0..1 去读
+    /// 绝对 1..2 的帧 ⇒ 读到**左半段**的值。偏差恰好一个分割长度，正是用户报障的
+    /// "分割位置以后的参数线整体偏移"。所以：**输出索引归零，采样坐标不归零。**
     fn project(
         &self,
         geometry: &RegionGeometry,
         key: &str,
         frame_ms: f64,
         anchor: ParamAnchor,
+        out_domain: CurveDomain,
     ) -> Result<Vec<f32>, String> {
-        let (begin, end) = frame_range(geometry, frame_ms)?;
-        // 工程锚定时项目时间原地不动（见 `RegionGeometry::project_map`）。
+        let (begin, end) = match out_domain {
+            // 局部零点索引：`values[i]` = 本 clip 第 `i·frame_ms` 处。从 0 起算，
+            // 与渲染路径 `mix_interleaved` 把 `clip.start_sec` 置 0 对齐。
+            CurveDomain::ClipLocal => (
+                0,
+                (geometry.project_duration * 1000. / frame_ms).ceil() as usize,
+            ),
+            // 绝对工程帧索引：`values[i]` = 项目第 `i·frame_ms` 处。根视图与
+            // 捕获侧的对照投影都用它，行为与域显式化之前完全一致。
+            _ => frame_range(geometry, frame_ms)?,
+        };
+        // 源域锚点：工程时刻 → 源秒，再按本曲线的索引域取样。
+        // 工程域锚点：项目时间原地不动（见 `RegionGeometry::project_map`），
+        // 于是 `domain_time` 退化成"同一工程时刻"，曲线按绝对工程帧索引 ——
+        // 这正是「锁定参数线」关闭时"参数留在工程位置"的语义。
         let current = match anchor {
             ParamAnchor::Source => geometry.map()?,
             ParamAnchor::Project => geometry.project_map()?,
         };
         let mut result = vec![pad(key); end + 1];
         for frame in begin..=end {
-            // 音频/显示的外侧网格哨兵使用真实边界值，不能把未落在clip内的格点置零后插入尾部。
-            let project = (frame as f64 * frame_ms / 1000.).clamp(
-                geometry.project_start,
-                geometry.project_start + geometry.project_duration,
-            );
+            // 【为什么局部域要加回真实起点】输出索引是局部的，但坐标不是：
+            // 局部帧 `f` 对应工程时刻 `project_start + f·frame_ms`。少了这一项，
+            // 工程域锚定（曲线按绝对工程帧存）时右半段会用局部 0..1 去读绝对
+            // 1..2 的帧 ⇒ 读到左半段的值，整体偏移一个分割长度。
+            // 绝对域下 `frame` 本来就是绝对帧号，加 `project_start` 会双重计数，
+            // 所以只在局部域加。
+            let project = match out_domain {
+                CurveDomain::ClipLocal => {
+                    (geometry.project_start + frame as f64 * frame_ms / 1000.).clamp(
+                        geometry.project_start,
+                        geometry.project_start + geometry.project_duration,
+                    )
+                }
+                _ => (frame as f64 * frame_ms / 1000.).clamp(
+                    geometry.project_start,
+                    geometry.project_start + geometry.project_duration,
+                ),
+            };
             let Some(domain_time) = self.domain_time(&current, project) else {
                 continue;
             };
@@ -2319,6 +2441,7 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
         .ok_or("source parameter memory budget exceeded")?;
     Ok(SourceCurve {
         basis: None,
+        domain: CurveDomain::Source,
         first_frame,
         frame_ms,
         values: Arc::new(samples),
@@ -3507,6 +3630,7 @@ mod tests {
             "pitch_edit".to_owned(),
             SourceCurve {
                 basis: Some(geometry),
+                domain: CurveDomain::Project,
                 first_frame: 4,
                 frame_ms: 250.,
                 values: Arc::new(vec![60., 62., 64., 66., 68.]),
@@ -3627,5 +3751,176 @@ mod tests {
         let restored: ParameterAtlas =
             serde_json::from_slice(&serde_json::to_vec(&followed).unwrap()).unwrap();
         assert!(restored.rebind(&split, &right_ids).is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 第八轮：分割归属只由源窗决定（plan §B3）
+    //
+    // 这三条是本轮 D 组的"先红"断言。它们钉的都是**用户报障的形状**：
+    // 一条 clip 被分割成两半，两半共享同一个 modification persistentID
+    // （Cubase 实测从不调用 `cloneAudioModification`，见 round7 §1.4）。
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// 一条 clip 在 `[0, 2)` 处被切成两半，两半的 `modification` 相同
+    /// （阿拉伯-only 宿主的常态）。权威曲线按**源帧**存一条，
+    /// 两个半段必须各自读到自己的那一半，且**互不串段**。
+    ///
+    /// 【为什么必须是子序列而不是整份】源域曲线只有一条（第七轮起
+    /// `capture_source_curve` 一律写 `basis: None`，键是 modification 级）。
+    /// 两个半段共享同一个键 ⇒ 共享同一条曲线；各自的源窗是父段源窗的两个
+    /// 不相交子区间 ⇒ 投影天然各取所需。若某个半段读到对方的帧，
+    /// 就是"曲线整体平移一个分割长度"（round6 §1.1 记的原始报障）。
+    #[test]
+    fn two_halves_sharing_one_modification_read_disjoint_source_subsequences() {
+        let ids = identities();
+        // 父段：工程 [0, 2)，源窗 [0, 2)，每 5 ms 一帧 ⇒ 401 帧。
+        let mut parent = host(0., 2., 0., 2.);
+        let frames = 401_usize;
+        // 源帧上的特征值：60, 61, 62, ...（第 k 帧 = 60 + k%48），
+        // 让"读错半段"立刻在数值上看得见。
+        let ramp: Vec<f32> = (0..frames).map(|k| 60. + (k % 48) as f32).collect();
+        parent.project_sec = 2.;
+        parent.params_by_root_track.insert(
+            "a".into(),
+            TrackParamsState {
+                frame_period_ms: 5.,
+                pitch_edit_user_modified: true,
+                pitch_orig: ramp.clone(),
+                pitch_edit: ramp.clone(),
+                ..Default::default()
+            },
+        );
+        let atlas = ParameterAtlas::default().capture(&parent, &ids).unwrap();
+        // 一条源域曲线覆盖整条源窗。
+        let authority = atlas
+            .authorities
+            .get("mod:mod")
+            .expect("权威按 modification persistentID 入库");
+        assert_eq!(
+            authority.curves["pitch_edit"].domain,
+            CurveDomain::Source,
+            "第七轮起捕获一律写源域"
+        );
+
+        // 左半段：工程 [0, 1)，源窗 [0, 1)。右半段：工程 [1, 2)，源窗 [1, 2)。
+        // 两半的 source / modification 与父段完全相同 —— 这就是 Cubase 的形状。
+        //
+        // 【为什么两半各用一次 `host()`】`host()` 会把 take 的源窗镜像到 clip 顶层的
+        // `source_start_sec` / `playback_rate` 上（`normalize_takes` → `apply_to_clip`），
+        // 而 `geometry()` 读的正是**顶层**那两个字段。直接 clone 再改 `takes[0]`
+        // 会留下顶层旧值 —— 那样右半段的源窗仍是 [0,1)，本测试就什么也没验证。
+        let mut left = host(0., 1., 0., 1.);
+        left.clips[0].id = "left".into();
+        let mut right = host(1., 1., 1., 1.);
+        right.clips[0].id = "right".into();
+        let right_clip = right.clips[0].clone();
+        let mut halves = left;
+        halves.clips.push(right_clip);
+        halves.project_sec = 2.;
+
+        let mut half_ids = BTreeMap::new();
+        for (id, key) in [("left", 41_u64), ("right", 42_u64)] {
+            half_ids.insert(
+                id.into(),
+                RegionIdentity {
+                    key,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod".into(),
+                    signature: String::new(),
+                },
+            );
+        }
+
+        let followed = atlas.follow_geometry(&halves, &half_ids).unwrap();
+        let local = followed.project_local(&halves, &half_ids).unwrap();
+
+        let left_curve = &local["left"].pitch_edit;
+        let right_curve = &local["right"].pitch_edit;
+        // 1 s @ 5 ms = 200 帧（`frame_range` 含哨兵）。
+        assert_eq!(left_curve.len(), 201, "左半段含一个哨兵帧");
+        assert_eq!(right_curve.len(), 201, "右半段含一个哨兵帧");
+        // 左半段 = 源帧 0..200；右半段 = 源帧 200..400。
+        assert_eq!(
+            &left_curve[..200],
+            &ramp[..200],
+            "左半段必须是源序列的前半段"
+        );
+        assert_eq!(
+            &right_curve[..200],
+            &ramp[200..400],
+            "右半段必须是源序列的后半段"
+        );
+        assert_ne!(
+            &left_curve[..200],
+            &right_curve[..200],
+            "两个半段不得互为副本：那正是'曲线整体平移一个分割长度'"
+        );
+    }
+
+    /// **「锁定参数线」不得改变分割结果**。
+    ///
+    /// 【为什么这是必须的】独立 App 的 `split_clip`
+    /// （`state/model.rs:10456-10500`）全程不读 `params_by_root_track`，
+    /// 也不读 `lock_param_lines` —— 分割不改变任何参数的位置语义：左半段天然
+    /// 读到前半段、右半段天然读到后半段，两段都对。开关只解释"移动 / 裁剪 /
+    /// 拉伸"。插件侧若在分割上分叉，就是**新增**了一种 App 没有的行为。
+    ///
+    /// 【为什么用 `default_anchor` 的测试替身而不是进程级设置】`default_anchor`
+    /// 在 `#[cfg(test)]` 下固定源域（见其注释：那是全局状态，测试并行会互相污染）。
+    /// 所以这里直接对同一个图集用两种锚点各投影一次，比较结果。
+    #[test]
+    fn the_lock_setting_does_not_change_how_a_split_divides_curves() {
+        let ids = identities();
+        let mut parent = host(0., 2., 0., 2.);
+        let ramp: Vec<f32> = (0..401).map(|k| 60. + (k % 48) as f32).collect();
+        parent.project_sec = 2.;
+        parent.params_by_root_track.insert(
+            "a".into(),
+            TrackParamsState {
+                frame_period_ms: 5.,
+                pitch_edit_user_modified: true,
+                pitch_orig: ramp.clone(),
+                pitch_edit: ramp.clone(),
+                ..Default::default()
+            },
+        );
+        let atlas = ParameterAtlas::default().capture(&parent, &ids).unwrap();
+
+        let mut halves = host(0., 1., 0., 1.);
+        halves.clips[0].id = "left".into();
+        let mut right = host(1., 1., 1., 1.);
+        right.clips[0].id = "right".into();
+        let right_clip = right.clips[0].clone();
+        halves.clips.push(right_clip);
+        halves.project_sec = 2.;
+        let mut half_ids = BTreeMap::new();
+        for (id, key) in [("left", 41_u64), ("right", 42_u64)] {
+            half_ids.insert(
+                id.into(),
+                RegionIdentity {
+                    key,
+                    item: None,
+                    source: "source".into(),
+                    modification: "mod".into(),
+                    signature: String::new(),
+                },
+            );
+        }
+
+        let followed = atlas.follow_geometry(&halves, &half_ids).unwrap();
+        let locked = followed.project_local(&halves, &half_ids).unwrap();
+        // 把权威的锚点翻到工程域再投影一次：分割的结果必须逐帧相同。
+        let mut unlocked = followed;
+        for params in unlocked.authorities.values_mut() {
+            params.anchor = ParamAnchor::Project;
+        }
+        let unlocked = unlocked.project_local(&halves, &half_ids).unwrap();
+        for clip in ["left", "right"] {
+            assert_eq!(
+                locked[clip].pitch_edit, unlocked[clip].pitch_edit,
+                "「锁定参数线」不得改变分割后的曲线归属（clip {clip}）"
+            );
+        }
     }
 }
