@@ -2523,6 +2523,19 @@ function applyHistoryDepths(state: SessionState, undoDepth: number, redoDepth: n
     state.historyRedoDepth = Math.max(0, Math.floor(Number(redoDepth) || 0));
 }
 
+/**
+ * 撤销/重做响应的载荷是否**可解引用**。
+ *
+ * 【为什么需要】本地权威栈（`undo_stack=false`，例如 ARA-only 宿主）在 UI 线程
+ * 立刻返回 `Ok(Value::Null)` —— 真正的结果由随后推送的时间线快照带回。这类响应
+ * 没有 `ok` / `undo_depth` 字段，直接解引用会抛
+ * `TypeError: Cannot read properties of null (reading 'undo_depth')`，
+ * 把整条撤销链路打断（真机日志里可见）。
+ */
+function historyPayloadPresent(payload: unknown): boolean {
+    return payload !== null && payload !== undefined && typeof payload === "object";
+}
+
 /** 登记一次选区恢复请求（requestId 单调，消费方按 id 幂等应用一次）。 */
 function requestParamSelectionRestore(
     state: SessionState,
@@ -5094,6 +5107,11 @@ const sessionSlice = createSlice({
 
             .addCase(undoRemote.fulfilled, (state, action) => {
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
+                // 【为什么必须判空】本地权威栈（`undo_stack=false`，例如 ARA-only 宿主）
+                // 在 UI 线程返回 `Ok(Value::Null)` —— 撤销结果由随后推送的完整时间线
+                // 快照带回，这里没有可套用的载荷。此前直接解引用 `payload.undo_depth`
+                // 会抛 `TypeError: Cannot read properties of null`，把整条撤销链路打断。
+                if (!historyPayloadPresent(action.payload)) return;
                 const payload = action.payload as {
                     ok?: boolean;
                     undo_depth?: number;
@@ -5166,6 +5184,8 @@ const sessionSlice = createSlice({
 
             .addCase(redoRemote.fulfilled, (state, action) => {
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
+                // 同 `undoRemote.fulfilled`：本地权威栈返回 null 载荷，必须判空。
+                if (!historyPayloadPresent(action.payload)) return;
                 const payload = action.payload as {
                     ok?: boolean;
                     undo_depth?: number;
@@ -5225,6 +5245,8 @@ const sessionSlice = createSlice({
 
             .addCase(setHistoryPositionRemote.fulfilled, (state, action) => {
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
+                // 同 `undoRemote.fulfilled`：本地权威栈返回 null 载荷，必须判空。
+                if (!historyPayloadPresent(action.payload)) return;
                 const payload = action.payload as {
                     ok?: boolean;
                     undo_depth?: number;
