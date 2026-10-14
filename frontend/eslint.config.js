@@ -75,5 +75,40 @@ export default defineConfig([
             ],
         },
     },
+    {
+        // ARA / 插件形态的表面只用本项目的自定义 tooltip 通道（`data-tooltip`，
+        // 或最终收敛到它的 `tooltip` prop）。此前这些表面普遍写原生 `title`，
+        // 而原生 tooltip 会把多行折成一行、且撞色/不受排版控制
+        // （见 `components/dock/dockTooltips.ts:58-61` 的结论）。
+        //
+        // 【为什么只禁小写标签上的 title】`title` 也有**合法**用途：自定义组件
+        // （本项目原语与 Radix 组件）的同名 prop，例如 `AppDialog title=` 是
+        // 对话框标题槽，不是悬停提示。而会真的渲染成原生 tooltip 的只有小写
+        // 标签（`<span title=` / `<div title=` ...）。规则因此按标签名判定：
+        // 正则 `/^[a-z]/` 只命中 DOM 元素，大写开头的组件一律放行 —— 于是
+        // 对话框标题槽、`AppStatusChip` 的 title slot、以及 `ui/` 基元内部都不
+        // 受影响，而任何新写的 `<xxx title={reason}>` 都会被立刻拦下。
+        //
+        // 【为什么覆盖这几个目录】它们是用户在宿主与插件里真正会看到的表面
+        // （ARA 面板、主菜单栏、停靠栏）。其余目录的原生 title 迁移留到后续
+        // 轮次（见 docs/i18n/style-guide.md 的说法），不在本轮扩大范围。
+        files: [
+            "src/features/ara/**/*.{ts,tsx}",
+            "src/components/layout/**/*.{ts,tsx}",
+            "src/components/dock/**/*.{ts,tsx}",
+        ],
+        ignores: ["**/*.test.*"],
+        rules: {
+            "no-restricted-syntax": [
+                "error",
+                {
+                    selector:
+                        "JSXOpeningElement[name.name=/^[a-z]/] > JSXAttribute[name.name='title']",
+                    message:
+                        "悬停提示请走本项目自定义 tooltip 通道：项目组件用 tooltip prop（AppStatusChip/AppListRow/AppMenuItem），裸 DOM 用 data-tooltip。原生 title 会把多行折成一行、且不受本项目排版与明暗主题控制。",
+                },
+            ],
+        },
+    },
     eslintConfigPrettier,
 ]);

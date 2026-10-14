@@ -162,6 +162,37 @@ notebook_toolbar_bold: "Bold ({modifier}+B)",
 **未覆盖**：`.ts` 文件里作为**普通字符串**存在的文案（如 `throw new Error("…")`、
 `console.warn("…")`）。这类字符串无法与"日志/协议标识"区分，需要 review。
 
+### 3.5 悬停提示走 `data-tooltip`，不是 `title`
+
+§3.4 管的是"文案有没有走键"，这一条管**走哪条显示通道**。同一个键挂在
+`title` 上还是挂在 `data-tooltip` 上，用户看到的是两样东西：
+
+| 通道 | 换行 | 明暗主题 | 实例 |
+|---|---|---|---|
+| 原生 `title` | `\n` 被折成一个空格 | 跟随浏览器/系统，常与页面撞色 | —— |
+| `data-tooltip`（`components/AppTooltip.tsx`） | 如实渲染（`white-space: pre-wrap`） | 跟随本项目变量 | 状态片、列表行、菜单项 |
+
+因此：**项目组件一律用 `tooltip` prop**（`AppStatusChip` / `AppListRow` /
+`AppMenuItem` / dialog action），裸 DOM 元素写 `data-tooltip`。典型受益者是
+需要两行说明的场景 —— `dock/DockLayoutMenu` 的 `dockDragHint` 与
+`features/ara/PluginApplyStatus` 的修订读数都是靠它才能完整显示。
+
+`title` 的合法用途只有两种，都**不是**悬停提示：自定义组件的标题槽
+（`AppDialog title=` 渲染成 `<h2>` 而不是 DOM 的 `title` 属性），以及
+文本被截断时的完整文本兜底（`keybindingsActionRow` 的做法）。
+自定义组件（大写 JSX 名）上的 `title` prop 一律放行 —— 它不会渲染成原生 tooltip。
+
+由 ESLint 强制（`frontend/eslint.config.js` 的 `no-restricted-syntax`）：
+`src/features/ara`、`src/components/layout`、`src/components/dock` 下
+**小写标签**上的 `title` 直接报错。其余目录尚未纳入，迁移到那一层时把
+`files` 列表扩过去即可，规则本身不用改。
+
+**一个已知例外：菜单项。** `AppTooltipProvider` 在菜单弹出期间全局抑制气泡
+（既定规则，`AppTooltip.tsx:123-130`），所以菜单条目上无论 `title` 还是
+`data-tooltip` 都不会显示。这类"为什么点不了"的理由应当**常驻**渲染成
+第二行弱化小字（见 `MenuBar.tsx` 的 `StandaloneOnlyItem`），而不是挂在
+悬停上 —— 它比悬停多一步，但至少真的看得见。
+
 ---
 
 ## 4. 门禁测试覆盖范围
