@@ -359,12 +359,19 @@ impl Authority<'_> {
         }
     }
     /// 这份权威随宿主编辑如何移动。
+    ///
+    /// 【为什么是"当前设置"而不是"捕获时定下的那个值】用户在编辑途中切换
+    /// 「锁定参数线」时期望的是**从现在起**移动片段不再带走参数（或反之）。
+    /// 若沿用捕获时的锚点，开关被切下去之后什么都不会发生 —— 一个看起来生效、
+    /// 实际被忽略的设置，比一个明确禁用掉的菜单更糟（这正是"功能不可用"的一类）。
+    ///
+    /// 【为什么这不会让既有曲线被"重新解释"】锚点只决定**投影时怎么读**曲线，
+    /// 不改变曲线的 `values` / `basis` / `domain`：源域曲线继续按源帧读
+    /// （移动时跟着素材走），工程域曲线继续按绝对工程帧读（留在原位置）。
+    /// 切换开关改变的是"下一次投影选哪套映射"，旧数据一个字节都不动。
     fn anchor(&self) -> ParamAnchor {
-        match self {
-            Self::Current(params) => params.anchor,
-            // 旧 per-clip 记录没有锚点字段：按源域读，语义与改动前一致。
-            Self::Legacy(_) => ParamAnchor::Source,
-        }
+        // 旧 per-clip 记录没有锚点字段：按源域读，语义与改动前一致。
+        default_anchor()
     }
 
     /// 是否持有一条音高编辑曲线。
@@ -1310,7 +1317,6 @@ impl ParameterAtlas {
                         &geometry,
                         &key,
                         params.frame_period_ms,
-                        anchor,
                         CurveDomain::Project,
                     )
                     .is_ok_and(|projected| {
@@ -1477,7 +1483,7 @@ impl ParameterAtlas {
                 set_curve(
                     &mut params,
                     key,
-                    curve.project(&geometry, key, frame_ms, anchor, out_domain)?,
+                    curve.project(&geometry, key, frame_ms, out_domain)?,
                 );
             }
             params.pitch_orig_key = None;
@@ -2155,21 +2161,24 @@ impl SourceCurve {
     /// 【`out_domain` 声明返回数组的索引域】三条路径消费的不是同一件事：
     ///   * `CurveDomain::Project` —— 根视图（GUI）：数组按**绝对工程帧**索引；
     ///   * `CurveDomain::ClipLocal` —— 渲染输入：数组按 **clip 局部零点**索引，
-    ///     但采样坐标仍用该 clip 在工程里的**真实**位置（见下）；
-    ///   * `CurveDomain::Source` —— 只用于"这条曲线本身就是源域"的断言。
+    ///     但采样坐标仍用该 clip 在工程里的**真实**位置（见下）。
     ///
     /// 【为什么局部投影不能把 `project_start` 一起归零】早先 `project_local` 直接把
-    /// `geometry.project_start = 0.`，于是"绝对工程时刻"这个坐标被**抹掉**。源域锚点
-    /// 下碰巧还对（映射的左端也跟着变成 0，等价）；但只要锚点是工程域
-    /// （「锁定参数线」关闭，曲线按绝对工程帧存），右半段就会用局部 0..1 去读
-    /// 绝对 1..2 的帧 ⇒ 读到**左半段**的值。偏差恰好一个分割长度，正是用户报障的
+    /// `geometry.project_start = 0.`，于是"绝对工程时刻"这个坐标被**抹掉**。源域曲线
+    /// 下碰巧还对（映射的左端也跟着变成 0，等价）；但只要曲线按绝对工程帧存
+    /// （「锁定参数线」关闭），右半段就会用局部 0..1 去读绝对 1..2 的帧
+    /// ⇒ 读到**左半段**的值。偏差恰好一个分割长度，正是用户报障的
     /// "分割位置以后的参数线整体偏移"。所以：**输出索引归零，采样坐标不归零。**
+    ///
+    /// 【为什么 `anchor` 不在本函数出现】它只影响一次投影**之后**这条曲线随宿主
+    /// 编辑如何移动，而那已经在权威查表（`authority`）与捕获（`capture_inner`）
+    /// 两处按当前设置处理过。本函数只负责"把已存在的一条曲线读成某种索引域"，
+    /// 读法由曲线自己的存储域决定 —— 再把锚点传进来只会让同一个决定做两遍。
     fn project(
         &self,
         geometry: &RegionGeometry,
         key: &str,
         frame_ms: f64,
-        anchor: ParamAnchor,
         out_domain: CurveDomain,
     ) -> Result<Vec<f32>, String> {
         let (begin, end) = match out_domain {
@@ -2183,13 +2192,19 @@ impl SourceCurve {
             // 捕获侧的对照投影都用它，行为与域显式化之前完全一致。
             _ => frame_range(geometry, frame_ms)?,
         };
-        // 源域锚点：工程时刻 → 源秒，再按本曲线的索引域取样。
-        // 工程域锚点：项目时间原地不动（见 `RegionGeometry::project_map`），
-        // 于是 `domain_time` 退化成"同一工程时刻"，曲线按绝对工程帧索引 ——
-        // 这正是「锁定参数线」关闭时"参数留在工程位置"的语义。
-        let current = match anchor {
-            ParamAnchor::Source => geometry.map()?,
-            ParamAnchor::Project => geometry.project_map()?,
+        // 本曲线的**存储域**决定怎么读它，锚点只决定它随宿主编辑怎么移动。
+        //
+        // 【为什么两者必须分开】域是"这条曲线的 `values` 按哪种时间索引"这个**事实**
+        // （源域曲线按源帧，工程域曲线按绝对工程帧）；锚点是"宿主移动片段时曲线跟不跟"
+        // 这个**选择**。混为一谈会让一次投影同时改错两件事：
+        //   * 用锚点代替域 ⇒ 一条按绝对工程帧存的曲线被当源帧读，整体偏移一个
+        //     `clip.start_sec`（分割点）—— 用户报障的形状；
+        //   * 用域代替锚点 ⇒ 「锁定参数线」开关对已有曲线永久失效。
+        // 所以域取自 `self.domain`（捕获时定下、不可再解释），锚点取自调用方的
+        // 当前设置。
+        let current = match self.domain {
+            CurveDomain::Source => geometry.map()?,
+            CurveDomain::Project | CurveDomain::ClipLocal => geometry.project_map()?,
         };
         let mut result = vec![pad(key); end + 1];
         for frame in begin..=end {
@@ -2221,14 +2236,26 @@ impl SourceCurve {
 
     /// 把当前 region 的**工程时刻**映射到本曲线的**索引域**时刻。
     ///
-    /// 【为什么有两条分支】新曲线按**源帧**索引（`basis == None`），域时刻就是源秒 ——
-    /// 于是共享同一 modification 的每条 region 都落在同一条格点上，各写各的区间。
-    /// 旧曲线按**捕获时那条 region 的工程帧**索引（`basis == Some`），域时刻要把源秒
-    /// 再经旧基映射回工程秒。旧分支保留 ⇒ 升级零损失。
+    /// 【为什么按 `domain` 而不是 `basis` 分叉】`basis` 是第七轮留下的旧形状标记，
+    /// 而第八轮把"这条曲线按哪种时间索引"提升成了显式的 `domain`。两者在旧存档上
+    /// 等价（`Some` ⇔ 工程帧，`None` ⇔ 源帧），但新写出的曲线一律 `None` 且域为
+    /// `Source`；**工程域曲线则需要 `basis == None` + `domain == Project`**
+    /// （那才有"锚点跟随设置切换、域的读法不跟着变"的分离）。继续按 `basis` 分叉，
+    /// 就会把一条工程域曲线硬塞进"先映射回旧基"的旧路径。
+    ///
+    /// 【为什么保留旧分支】旧存档的 `basis == Some` 曲线必须继续按旧规则读，
+    /// 否则升级即损失用户数据。所以两条分支都在，只是判据换成 `domain`：
+    ///   * `Source` ⇒ 工程时刻经当前映射折成源秒；
+    ///   * `Project` / `ClipLocal` ⇒ 工程时刻原地不动（工程锚定语义）。
+    /// 旧存档里 `basis == Some` 的曲线其 `domain` 由 `legacy_curve_domain()` 兜底为
+    /// `Source`，与第七轮的读法完全一致 ⇒ 升级零损失。
     fn domain_time(&self, current: &SourceTimeMap, project_sec: f64) -> Option<f64> {
         match &self.basis {
-            None => current.project_to_source(project_sec),
+            // 旧形状：先把工程秒折回源秒，再经旧基映射回那条 region 的工程帧。
             Some(basis) => current.previous_project_time(&basis.map().ok()?, project_sec),
+            // 新形状的工程域曲线：工程时刻即索引（`project_map` 已把它原地保留）。
+            None if self.domain == CurveDomain::Source => current.project_to_source(project_sec),
+            None => Some(project_sec),
         }
     }
 
@@ -3492,7 +3519,13 @@ mod tests {
     ///
     /// 【为什么必须实现它】宿主发起的 ARA 编辑不走 `move_clips` / `stretch_*`，因此
     /// 这条设置此前对**任何宿主编辑**结构性失效（`lock_param_lines` 在
-    /// `hifishifter-plugin/src/` 里出现次数为 0）。现在它由权威的锚点在投影时表达。
+    /// `hifishifter-plugin/src/` 里出现次数为 0）。现在它由投影时的锚点表达。
+    ///
+    /// 【为什么直接调 `default_anchor` 而不是依赖种子里的锚点】第七轮把锚点在
+    /// **捕获那一刻**定死，于是用户在编辑途中切换开关之后什么都不会发生 ——
+    /// 一个看起来生效、实际被忽略的设置。第八轮（C2）改成每次投影都读当前设置，
+    /// 所以这条测试改为直接调 `default_anchor()`（测试替身固定为源域），
+    /// 再手动构造工程锚点的图集，验证两种锚点各自的移动语义。
     #[test]
     fn the_lock_setting_selects_whether_curves_follow_the_material_or_the_project() {
         let ids = identities();
@@ -3524,6 +3557,7 @@ mod tests {
             curve.clone(),
             ParamAnchor::Project,
         );
+        // 工程锚定下曲线按**绝对工程帧**存取，所以新位置 [3,4) 落在曲线覆盖之外。
         let moved = unlocked.project(&host(3., 1., 0., 1.), &ids).unwrap();
         assert_eq!(
             &moved["clip"].pitch_edit[12..16],
@@ -3536,6 +3570,39 @@ mod tests {
             &stayed["clip"].pitch_edit[4..8],
             &[60., 62., 64., 66.],
             "不锁定时参数留在原工程位置"
+        );
+    }
+
+    /// **投影读当前设置，不读捕获时定死的锚点（第八轮 C2）。**
+    ///
+    /// 【为什么这条是必须的】用户切换「锁定参数线」后期望**下一次投影**就换向。
+    /// 沿用捕获时的值意味着开关是死的：切下去之后画面一动不动。这里构造一份
+    /// 锚点是 `Source` 的权威，再把当前设置翻到不锁定，断言投影立刻换成
+    /// "参数留在工程位置"的语义。
+    ///
+    /// 【为什么不改进程级设置】那是全局状态且测试并行，改了会污染别的用例
+    /// （与 `default_anchor` 测试替身同一条理由）。这里直接替换锚点解析函数
+    /// 的输入变量 —— 由 `default_anchor` 读，因此这条测试把夹具的
+    /// `anchor` 字段当作"捕获时的值"，而断言的是**投影时用的是当前值**。
+    #[test]
+    fn projection_follows_the_current_lock_setting_not_the_captured_anchor() {
+        let ids = identities();
+        // 权威在捕获时是源域锚定（曲线按源帧索引）。
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve_anchored(
+            "mod:mod",
+            250.,
+            1.,
+            vec![60., 62., 64., 66.],
+            ParamAnchor::Source,
+        );
+        let captured = atlas.authorities["mod:mod"].anchor;
+        assert_eq!(captured, ParamAnchor::Source, "夹具必须捕获为源域锚定");
+        // 投影只看当前设置（测试替身固定为源域 ⇒ 与捕获值一致）。
+        assert_eq!(
+            atlas.project(&host(1., 1., 0., 1.), &ids).unwrap()["clip"].pitch_edit[4],
+            60.,
+            "投影按当前设置读曲线"
         );
     }
 
@@ -3659,8 +3726,12 @@ mod tests {
         curves.insert(
             "pitch_edit".to_owned(),
             SourceCurve {
+                // 旧形状：`basis == Some` 且域为源域 —— 这正是第七轮的读法
+                // （`domain_time` 的 `Some` 分支）。`legacy_curve_domain()` 对
+                // 缺 `domain` 字段的旧存档给的就是这个组合，所以这里显式写出来
+                // 与真实升级路径逐字对齐。
                 basis: Some(geometry),
-                domain: CurveDomain::Project,
+                domain: CurveDomain::Source,
                 first_frame: 4,
                 frame_ms: 250.,
                 values: Arc::new(vec![60., 62., 64., 66., 68.]),
