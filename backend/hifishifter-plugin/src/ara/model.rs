@@ -1661,6 +1661,13 @@ impl AudioModifications for ModelHandle {
                 persistent_id: persistent_id.clone(),
                 audio_source_persistent_id,
             });
+        // 【为什么留痕】分割时宿主到底走 `createAudioModification` 还是
+        // `cloneAudioModification`，决定新半段有没有可继承的父参数。此前两者都无入口
+        // 日志，真机上无法回答这个问题 —— 而它是"分割后参数归零"的第一分叉点。
+        log::info!(
+            "[ara] createAudioModification #{index} persistentID={persistent_id} \
+             (no parent: parameters start empty)"
+        );
         if let Some(handle) = context.object_handle() {
             self.modification_index_by_handle.insert(handle, index);
             // 通知要按宿主句柄投递，而插件侧状态按 persistentID 索引 —— 这里是唯一
@@ -1678,6 +1685,12 @@ impl AudioModifications for ModelHandle {
         audio_source: &Self::AudioSource,
         properties: AudioModificationProperties,
     ) -> Result<Self::AudioModification, AraError> {
+        // 【为什么留痕】与 `create_audio_modification` 成对：两者都写一行，真机日志里
+        // 才能直接读出"分割时宿主用了哪条原语"，而不是靠推断。
+        log::info!(
+            "[ara] cloneAudioModification from #{source} -> persistentID={}",
+            properties.persistent_id()
+        );
         // 克隆出的 modification 基于同一个 source —— 这正是"同一素材被复制成多份"
         // 在 ARA 里的形状，映射层会把它变成同一个 `Clip.source_path` 下的多个 clip。
         let mut cloned = self

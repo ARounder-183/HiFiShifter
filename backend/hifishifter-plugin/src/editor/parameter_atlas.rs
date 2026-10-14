@@ -53,8 +53,8 @@ impl RegionGeometry {
     /// **工程锚定**的投影映射：项目时间原地不动。
     ///
     /// 【为什么需要它】「锁定参数线」关闭时，参数应当留在**工程位置**而不是跟着素材走。
-    /// 用恒等映射（项目→项目）做 `current`，配合 [`Self::project_basis`] 存下的恒等
-    /// basis，`previous_project_time` 退化成"同一项目时刻"，曲线因此不随片段移动。
+    /// 用恒等映射（项目→项目）做 `current`，`domain_time` 便退化成"同一项目时刻"，
+    /// 曲线按**绝对项目帧**索引，因此不随片段移动（见 `SourceCurve::domain_time`）。
     fn project_map(&self) -> Result<SourceTimeMap, String> {
         SourceTimeMap::linear(
             self.project_start,
@@ -62,17 +62,6 @@ impl RegionGeometry {
             self.project_start,
             self.project_duration,
         )
-    }
-
-    /// 工程锚定曲线的 basis：把"源轴"当作项目轴，使 `project` 按**绝对项目时间**索引。
-    fn project_basis(&self) -> Self {
-        Self {
-            project_start: self.project_start,
-            project_duration: self.project_duration,
-            source_start: self.project_start,
-            source_duration: self.project_duration,
-            reversed: false,
-        }
     }
 
     /// 几何只接受已经确认的ARA秒域；未确认raw marker不得在此成为渲染权威。
@@ -103,7 +92,20 @@ impl RegionGeometry {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SourceCurve {
-    basis: RegionGeometry,
+    /// **索引域**。`None` = 新形状：`values` 按**源帧**索引（与是哪条 region 无关）。
+    /// `Some(geometry)` = 旧形状：`values` 按**捕获时那条 region 的工程帧**索引。
+    ///
+    /// 【为什么是 `Option` 而不是换类型或加版本分支】旧存档里这个字段叫 `basis` 且是一个
+    /// 对象；新存档写成 `null`。同一个字段名 + `Option` 让新旧两种形状**天然共存**：
+    /// 旧存档照旧读得进（`Some`），新存档写出去的是源域（`None`），
+    /// 且不需要 `untagged`（那会牺牲错误信息），也不需要改名（那会读不进旧存档）。
+    ///
+    /// 【为什么旧形状必须继续被支持】把旧曲线一次性折算到源域需要重采样，而"用户从没
+    /// 编辑过的地方"不该在升级时被动过。保留旧分支 ⇒ 升级零损失；某条曲线第一次被重新
+    /// 编辑时自然变成源域（`capture` 一律写 `None`）。
+    #[serde(default)]
+    basis: Option<RegionGeometry>,
+    /// `values[0]` 对应的**索引域**帧号（新形状下即源帧）。
     first_frame: usize,
     frame_ms: f64,
     #[serde(with = "arc_values")]
@@ -441,10 +443,13 @@ impl ParameterAtlas {
         self.seed_test_pitch_curve_anchored(key, frame_ms, 0., values, ParamAnchor::Source);
     }
 
-    /// 测试用：种一条带指定锚点的源域音高曲线。
+    /// 测试用：种一条带指定锚点的音高曲线。
     ///
-    /// 【为什么 first_frame 由 project_start 推出】曲线按"第几格"索引，而格点是
-    /// `project_sec * 1000 / frame_ms`；种子必须落在真实格点上，否则投影会整体偏移。
+    /// 【为什么 `first_frame` 随锚点不同】曲线的格号落在**它自己的索引域**上：
+    /// 源锚定的曲线按源帧索引（种子覆盖源 `[0, span)` ⇒ 从源帧 0 开始）；
+    /// 工程锚定的曲线按绝对工程帧索引（种子落在工程 `[project_start, …)`）。
+    /// 两者都用 `project_start` 描述"这条曲线当前显示在哪"，但落点不同 ——
+    /// 混用会让投影整体偏移。
     #[cfg(test)]
     pub(crate) fn seed_test_pitch_curve_anchored(
         &mut self,
@@ -454,24 +459,15 @@ impl ParameterAtlas {
         values: Vec<f32>,
         anchor: ParamAnchor,
     ) {
-        let span = values.len() as f64 * frame_ms / 1000.;
-        let geometry = RegionGeometry {
-            project_start,
-            project_duration: span,
-            source_start: 0.,
-            source_duration: span,
-            reversed: false,
+        let first_frame = match anchor {
+            ParamAnchor::Source => 0,
+            ParamAnchor::Project => (project_start * 1000. / frame_ms).floor() as usize,
         };
-        let basis = match anchor {
-            ParamAnchor::Source => geometry,
-            ParamAnchor::Project => geometry.project_basis(),
-        };
-        let first_frame = (project_start * 1000. / frame_ms).floor() as usize;
         let mut curves = BTreeMap::new();
         curves.insert(
             "pitch_edit".to_owned(),
             SourceCurve {
-                basis,
+                basis: None,
                 first_frame,
                 frame_ms,
                 values: Arc::new(values),
@@ -960,7 +956,26 @@ impl ParameterAtlas {
                 return Ok(Some(Authority::Current(params)));
             }
         }
-        Ok(self.find(identity, root, geometry)?.map(Authority::Legacy))
+        let legacy = self.find(identity, root, geometry)?.map(Authority::Legacy);
+        if legacy.is_none() {
+            // 【为什么这条日志是必需的】权威查表未命中此前是**完全静默**的，而它正是
+            // "参数被重置"的第一现场：没命中 ⇒ 该 clip 不投影曲线 ⇒ 渲染退回根轨道
+            // 基线。真机上因此无法区分"没查到"与"查到了但装的是别人的窗口"——
+            // 那正是这个缺陷能活过上一轮的直接原因。带上身份三要素与键，可判定。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.authority-miss",
+                format_args!(
+                    "[ara] no parameter authority for item={:?} modification={} source={} \
+                     (keys={}); this clip projects no curves this round",
+                    identity.item.as_deref().unwrap_or(""),
+                    identity.modification,
+                    identity.source,
+                    self.authorities.len(),
+                ),
+            );
+        }
+        Ok(legacy)
     }
     /// 冷恢复只在本组件真实范围内绑定；重复持久身份且源窗口相同仍拒绝，不能按旧key猜。
     ///
@@ -1128,10 +1143,10 @@ impl ParameterAtlas {
             let Ok(geometry) = geometry(clip) else {
                 continue;
             };
+            // 几何必须先可解：帧域非法时只跳过这一条片段（见 `frame_range` 的守卫）。
             let (begin, end) = frame_range(&geometry, params.frame_period_ms)?;
             // 旧曲线取**权威侧**（modification），旧存档未迁移时退回 per-clip 记录。
             let authority = self.authority(identity, &root, &geometry)?;
-            let previous = authority.as_ref().map(Authority::curves);
             // 【锚点在一次捕获时定下】既有权威沿用自己那份锚点（用户在编辑途中切换
             // 「锁定参数线」不该重新解释已有曲线）；全新的权威取当前设置。
             let key_for_anchor = authority_key(identity.item.as_deref(), &identity.modification);
@@ -1145,7 +1160,15 @@ impl ParameterAtlas {
                 if values.is_empty() {
                     continue;
                 }
-                let old = previous.and_then(|previous| previous.get(&key));
+                // 【为什么优先取 `candidate` 而不是 `self`】一次 capture 会依次处理
+                // **共享同一个 modification 的多条 region**。前一条刚写进 `candidate`
+                // 的源区间必须作为"既有曲线"参与并集，否则后一条会把它覆盖掉 ——
+                // 那正是"分割后参数完全重置"的原形。
+                let old = key_for_anchor
+                    .as_deref()
+                    .and_then(|key| candidate.authorities.get(key))
+                    .and_then(|params| params.curves.get(&key))
+                    .or_else(|| authority.as_ref().and_then(|a| a.curves().get(&key)));
                 let view = previous_view
                     .and_then(|view| view.get(&root))
                     .filter(|view| view.frame_period_ms == params.frame_period_ms);
@@ -1161,38 +1184,46 @@ impl ParameterAtlas {
                         continue;
                     }
                 }
-                let adjusted = if let (Some(old), Some(old_view)) = (old, old_view) {
-                    let mut region =
-                        old.project(&geometry, &key, params.frame_period_ms, anchor)?;
-                    let selected = timeline
-                        .selected_clip_id
-                        .as_ref()
-                        .and_then(|id| timeline.clips.iter().find(|selected| selected.id == *id))
-                        .filter(|selected| {
-                            timeline
-                                .resolve_root_track_id(&selected.track_id)
-                                .as_deref()
-                                == Some(root.as_str())
-                                && selected.id != clip.id
-                        });
-                    for frame in begin..=end {
-                        let incoming = values.get(frame).copied().unwrap_or_else(|| pad(&key));
-                        let prior = old_view.get(frame).copied().unwrap_or_else(|| pad(&key));
-                        let time = frame as f64 * params.frame_period_ms / 1000.;
-                        let covered = selected.is_some_and(|selected| {
-                            time >= selected.start_sec
-                                && time <= selected.start_sec + selected.length_sec
-                        });
-                        if incoming != prior && !covered {
-                            region[frame] = incoming;
-                        }
-                    }
-                    Some(region)
-                } else {
-                    None
+                if values.len() > 1_000_000
+                    || values.iter().any(|v| !v.is_finite() || v.abs() > 10000.)
+                {
+                    return Err("invalid source parameter samples".into());
+                }
+                // 被另一条选中片段覆盖的工程区间不属于本次编辑（与旧实现同一条纪律）。
+                let protected = timeline
+                    .selected_clip_id
+                    .as_ref()
+                    .and_then(|id| timeline.clips.iter().find(|selected| selected.id == *id))
+                    .filter(|selected| {
+                        timeline
+                            .resolve_root_track_id(&selected.track_id)
+                            .as_deref()
+                            == Some(root.as_str())
+                            && selected.id != clip.id
+                    })
+                    .map(|selected| (selected.start_sec, selected.start_sec + selected.length_sec));
+                let current = match anchor {
+                    ParamAnchor::Source => geometry.map()?,
+                    ParamAnchor::Project => geometry.project_map()?,
                 };
-                let values = adjusted.as_deref().unwrap_or(values);
-                let unchanged = old.is_some_and(|old| {
+                let rebuilt = capture_source_curve(SourceCapture {
+                    existing: old,
+                    old_view,
+                    values,
+                    current: &current,
+                    geometry: &geometry,
+                    key: &key,
+                    frame_ms: params.frame_period_ms,
+                    protected,
+                })?;
+                // 内容没变就保留旧对象：避免无谓的代际推进与存档改写。
+                //
+                // 【为什么先比"投影是否复现这份视图"而不是逐点比曲线】宿主每次几何变化
+                // （非网格移动 / 拉伸）都会让 GUI 视图成为源曲线的一次**插值投影**。
+                // 若把那份投影当新源数据写回，反复往返会逐次模糊原曲线（实测漂移
+                // ~0.03 音分/次）。判据取"旧曲线投影出来就是这份视图 ⇒ 没有新编辑"，
+                // 与旧实现同口径。
+                let reproduces_view = old.is_some_and(|old| {
                     old.project(&geometry, &key, params.frame_period_ms, anchor)
                         .is_ok_and(|projected| {
                             (begin..=end).all(|frame| {
@@ -1201,37 +1232,9 @@ impl ParameterAtlas {
                             })
                         })
                 });
-                let curve = if unchanged {
-                    old.unwrap().clone()
-                } else {
-                    if values.len() > 1_000_000
-                        || values.iter().any(|v| !v.is_finite() || v.abs() > 10000.)
-                    {
-                        return Err("invalid source parameter samples".into());
-                    }
-                    let first = begin.saturating_sub(1);
-                    let last = (end + 2).min(values.len());
-                    let bytes = last.saturating_sub(first) * 4;
-                    let reservation = crate::render::budget::global_budget()
-                        .reserve(bytes)
-                        .ok_or("source parameter memory budget exceeded")?;
-                    let samples = if first < last {
-                        values[first..last].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    SourceCurve {
-                        // 工程锚定把 basis 的"源轴"当作项目轴（见 `project_basis`），
-                        // 于是曲线按**绝对项目时间**索引、不随片段移动。
-                        basis: match anchor {
-                            ParamAnchor::Source => geometry.clone(),
-                            ParamAnchor::Project => geometry.project_basis(),
-                        },
-                        first_frame: first,
-                        frame_ms: params.frame_period_ms,
-                        values: Arc::new(samples),
-                        reservation: Some(Arc::new(reservation)),
-                    }
+                let curve = match old {
+                    Some(old) if reproduces_view || same_curve(old, &rebuilt) => old.clone(),
+                    _ => rebuilt,
                 };
                 curves.insert(key, curve);
             }
@@ -1642,8 +1645,7 @@ impl ParameterAtlas {
         seen: &mut std::collections::BTreeSet<usize>,
     ) -> Result<(), String> {
         for curve in curves.values() {
-            curve.basis.map()?;
-            frame_range(&curve.basis, curve.frame_ms)?;
+            curve.validate()?;
             if curve.first_frame >= 1_000_000
                 || curve
                     .first_frame
@@ -2016,7 +2018,6 @@ impl SourceCurve {
             ParamAnchor::Source => geometry.map()?,
             ParamAnchor::Project => geometry.project_map()?,
         };
-        let basis = self.basis.map()?;
         let mut result = vec![pad(key); end + 1];
         for frame in begin..=end {
             // 音频/显示的外侧网格哨兵使用真实边界值，不能把未落在clip内的格点置零后插入尾部。
@@ -2024,26 +2025,246 @@ impl SourceCurve {
                 geometry.project_start,
                 geometry.project_start + geometry.project_duration,
             );
-            let Some(previous) = current.previous_project_time(&basis, project) else {
+            let Some(domain_time) = self.domain_time(&current, project) else {
                 continue;
             };
-            let index = previous * 1000. / self.frame_ms - self.first_frame as f64;
-            if !index.is_finite() || index < 0. || self.values.is_empty() {
-                continue;
-            }
-            let lo = (index.floor() as usize).min(self.values.len() - 1);
-            let hi = (lo + 1).min(self.values.len() - 1);
-            let fraction = (index - lo as f64).clamp(0., 1.) as f32;
-            let a = self.values[lo];
-            let b = self.values[hi];
-            result[frame] = if key == "pitch_edit" && (a <= 0. || b <= 0.) {
-                a.max(b).max(0.)
-            } else {
-                a + (b - a) * fraction
-            };
+            result[frame] = self.sample_at(domain_time, key).unwrap_or_else(|| pad(key));
         }
         Ok(result)
     }
+
+    /// 把当前 region 的**工程时刻**映射到本曲线的**索引域**时刻。
+    ///
+    /// 【为什么有两条分支】新曲线按**源帧**索引（`basis == None`），域时刻就是源秒 ——
+    /// 于是共享同一 modification 的每条 region 都落在同一条格点上，各写各的区间。
+    /// 旧曲线按**捕获时那条 region 的工程帧**索引（`basis == Some`），域时刻要把源秒
+    /// 再经旧基映射回工程秒。旧分支保留 ⇒ 升级零损失。
+    fn domain_time(&self, current: &SourceTimeMap, project_sec: f64) -> Option<f64> {
+        match &self.basis {
+            None => current.project_to_source(project_sec),
+            Some(basis) => current.previous_project_time(&basis.map().ok()?, project_sec),
+        }
+    }
+
+    /// 取本曲线在**索引域**某一时刻的值（线性插值；界外返回 `None`）。
+    fn sample_at(&self, domain_time: f64, key: &str) -> Option<f32> {
+        let index = domain_time * 1000. / self.frame_ms - self.first_frame as f64;
+        if !index.is_finite() || index < 0. || self.values.is_empty() {
+            return None;
+        }
+        let last = (self.values.len() - 1) as f64;
+        if index > last {
+            return None;
+        }
+        let lo = (index.floor() as usize).min(self.values.len() - 1);
+        let hi = (lo + 1).min(self.values.len() - 1);
+        let fraction = (index - lo as f64).clamp(0., 1.) as f32;
+        let a = self.values[lo];
+        let b = self.values[hi];
+        Some(if key == "pitch_edit" && (a <= 0. || b <= 0.) {
+            a.max(b).max(0.)
+        } else {
+            a + (b - a) * fraction
+        })
+    }
+
+    /// 取本曲线在**源秒**处的值（新形状直接查；旧形状先经它自己的基映射回源）。
+    fn value_at_source(&self, source_sec: f64, key: &str) -> Option<f32> {
+        let domain_time = match &self.basis {
+            None => source_sec,
+            Some(basis) => basis.map().ok()?.source_to_project(source_sec)?,
+        };
+        self.sample_at(domain_time, key)
+    }
+
+    /// 本曲线在**源域**上覆盖的秒区间（含端点）。空曲线返回 `None`。
+    fn source_extent(&self) -> Option<(f64, f64)> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let span = self.values.len() - 1;
+        let lo = self.first_frame as f64 * self.frame_ms / 1000.;
+        let hi = (self.first_frame + span) as f64 * self.frame_ms / 1000.;
+        match &self.basis {
+            None => Some((lo, hi)),
+            Some(basis) => {
+                let map = basis.map().ok()?;
+                let a = map.project_to_source(lo)?;
+                let b = map.project_to_source(hi)?;
+                Some((a.min(b), a.max(b)))
+            }
+        }
+    }
+
+    /// 复验索引域与采样（`validate` 的曲线侧）。
+    fn validate(&self) -> Result<(), String> {
+        match &self.basis {
+            Some(basis) => {
+                basis.map()?;
+                frame_range(basis, self.frame_ms)?;
+            }
+            None => {
+                if !self.frame_ms.is_finite() || !(0.1..=1000.).contains(&self.frame_ms) {
+                    return Err("invalid source parameter frame domain".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 把一条 **project 帧索引**的数组（GUI 视图 / 旧曲线投影）在分数帧处线性取样。
+///
+/// 【为什么需要分数帧】rate == 1 时源格点恰好落在整数工程帧上（无需插值）；
+/// 带拉伸的 region 上源格点落在分数帧，必须插值才能把用户画的那条曲线读准。
+fn sample_project_frames(values: &[f32], frame: f64, key: &str) -> f32 {
+    if values.is_empty() || !frame.is_finite() || frame < 0. {
+        return pad(key);
+    }
+    let lo = frame.floor() as usize;
+    if lo >= values.len() {
+        return pad(key);
+    }
+    let hi = (lo + 1).min(values.len() - 1);
+    let fraction = (frame - lo as f64).clamp(0., 1.) as f32;
+    let a = values[lo];
+    let b = values[hi];
+    if key == "pitch_edit" && (a <= 0. || b <= 0.) {
+        a.max(b).max(0.)
+    } else {
+        a + (b - a) * fraction
+    }
+}
+
+/// 两条曲线是否逐点一致（索引域、起点、采样）。
+///
+/// 【为什么只比这三项】`reservation` 是预算登记的句柄，不是数据；把它算进来会让
+/// "内容没变"被误判成"变了"，于是每次捕获都推进代际、重写存档。
+fn same_curve(a: &SourceCurve, b: &SourceCurve) -> bool {
+    let domain_equal = match (&a.basis, &b.basis) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.equivalent(y),
+        _ => false,
+    };
+    domain_equal
+        && a.first_frame == b.first_frame
+        && a.frame_ms == b.frame_ms
+        && a.values.len() == b.values.len()
+        && a.values.iter().zip(b.values.iter()).all(|(x, y)| x == y)
+}
+
+/// 一次源域捕获的全部输入（打包成一个结构，避免长参数表）。
+struct SourceCapture<'a> {
+    /// 本权威里这条曲线**当前**的形状（同一帧内已写入的部分也算）。
+    existing: Option<&'a SourceCurve>,
+    /// 上一帧 GUI 投影（delta 基准）；`capture`（无基准）时为 `None`。
+    old_view: Option<&'a [f32]>,
+    /// 本帧 GUI 视图（工程帧索引）。
+    values: &'a [f32],
+    /// 本 region 的工程→源映射。
+    current: &'a SourceTimeMap,
+    geometry: &'a RegionGeometry,
+    key: &'a str,
+    frame_ms: f64,
+    /// 被另一条选中片段覆盖的工程区间（该区间不写）。
+    protected: Option<(f64, f64)>,
+}
+
+/// 把一次捕获写回**源域**，返回这条曲线的新形状。
+///
+/// 【为什么必须换域】权威键是 modification 级（多条 region **共享**），而工程帧是
+/// region 级（每条**独占**）。两者不同域 ⇒ 共享的键被逐条 region 覆盖，只剩最后一条的
+/// 窗口 —— 这正是"在 Cubase 里分割后参数完全重置"的根因。改按源帧索引后，共享同一
+/// modification 的每条 region 写的是同一条曲线的**不同区间**，互不覆盖。
+///
+/// 【为什么要与既有曲线取并集】别的半段已经写过的源区间不能被这一次捕获裁掉
+/// （那正是旧实现 `set_authority` 整份覆盖的翻版）。
+fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, String> {
+    let SourceCapture {
+        existing,
+        old_view,
+        values,
+        current,
+        geometry,
+        key,
+        frame_ms,
+        protected,
+    } = request;
+    if !frame_ms.is_finite() || !(0.1..=1000.).contains(&frame_ms) {
+        return Err("invalid source parameter frame domain".into());
+    }
+    let project_end = geometry.project_start + geometry.project_duration;
+    // 本 region 在源域上覆盖的区间。
+    let a = current
+        .project_to_source(geometry.project_start)
+        .ok_or("region start does not map to the source")?;
+    let b = current
+        .project_to_source(project_end)
+        .ok_or("region end does not map to the source")?;
+    let (region_lo, region_hi) = (a.min(b), a.max(b));
+    // 与既有曲线取并集。
+    let (lo, hi) = match existing.and_then(SourceCurve::source_extent) {
+        Some((e_lo, e_hi)) => (region_lo.min(e_lo), region_hi.max(e_hi)),
+        None => (region_lo, region_hi),
+    };
+    let first = (lo * 1000. / frame_ms).floor().max(0.);
+    let last = (hi * 1000. / frame_ms).ceil();
+    if !last.is_finite() || last >= 1_000_000. || last < first {
+        return Err("source parameter projection frame budget exceeded".into());
+    }
+    let first_frame = first as usize;
+    let count = last as usize - first_frame + 1;
+    let mut samples = Vec::with_capacity(count);
+    for k in first_frame..first_frame + count {
+        let source_sec = k as f64 * frame_ms / 1000.;
+        samples.push(
+            existing
+                .and_then(|curve| curve.value_at_source(source_sec, key))
+                .unwrap_or_else(|| pad(key)),
+        );
+    }
+    // 覆盖本 region 源窗内、被用户改动过的格点。
+    //
+    // 【为什么只写 region 自己的格点范围，而不是整段并集】并集边界按 `ceil` 取整，
+    // region 的最后（或最前）一个源格点会落在源窗之外一丁点。它必须被填上边界值，
+    // 否则投影在窗末插值到 `pad`（实测：末格变 0，边界值算成 36 而非 60）。
+    // 但**不能**把这套 clamp 用到整段并集上 —— 那样别的半段已经写好的区间会被
+    // 边界值覆盖（实测：左半段读出右半段的 68）。两者只差一个循环范围。
+    let step = frame_ms / 1000.;
+    let region_first = (region_lo / step).floor().max(0.) as usize;
+    let region_last = (region_hi / step).ceil() as usize;
+    for k in region_first..=region_last.min(first_frame + count - 1) {
+        let source_sec = k as f64 * step;
+        let clamped = source_sec.clamp(region_lo, region_hi);
+        let Some(project_sec) = current.source_to_project(clamped) else {
+            continue;
+        };
+        if project_sec < geometry.project_start || project_sec > project_end {
+            continue;
+        }
+        if protected.is_some_and(|(lo, hi)| project_sec >= lo && project_sec <= hi) {
+            continue;
+        }
+        let project_frame = project_sec * 1000. / frame_ms;
+        let incoming = sample_project_frames(values, project_frame, key);
+        let prior = old_view
+            .map(|view| sample_project_frames(view, project_frame, key))
+            .unwrap_or_else(|| pad(key));
+        if incoming != prior {
+            samples[k - first_frame] = incoming;
+        }
+    }
+    let bytes = samples.len() * 4;
+    let reservation = crate::render::budget::global_budget()
+        .reserve(bytes)
+        .ok_or("source parameter memory budget exceeded")?;
+    Ok(SourceCurve {
+        basis: None,
+        first_frame,
+        frame_ms,
+        values: Arc::new(samples),
+        reservation: Some(Arc::new(reservation)),
+    })
 }
 
 #[cfg(test)]
@@ -2539,6 +2760,140 @@ mod tests {
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64.]
         );
     }
+
+    /// **Cubase 形状**：一条源、**一个 modification**、三条 region 共享它。
+    ///
+    /// 【为什么这是必须的最小夹具】Cubase 一次分割之后，所有半段共享同一个
+    /// `audioModificationPersistentID` —— 仓库里取自真机日志的 `cubase_split_document()`
+    /// （`ara/mapping.rs:969`）就是这个形状（1 条 modification + 8 条 region）。
+    /// 权威键按 modification 索引 ⇒ 多条 region 落到**同一个键**上。
+    /// 上一轮的 24 条回归测试从未造过这个形状，于是"共享键被逐条 region 覆盖"一直没被发现。
+    ///
+    /// 源 [0,3) 被切成三段，各占工程 [0,1) / [1,2) / [2,3)；整轨曲线是 60,61,62,…
+    fn cubase_split_timeline() -> TimelineState {
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":3.,
+            "clips":[
+                {"id":"left","track_id":"a","name":"left","start_sec":0.,"length_sec":1.,
+                 "takes":[{"id":"tl","source_path":"source","source_start_sec":0.,
+                           "source_end_sec":1.,"playback_rate":1.}]},
+                {"id":"mid","track_id":"a","name":"mid","start_sec":1.,"length_sec":1.,
+                 "takes":[{"id":"tm","source_path":"source","source_start_sec":1.,
+                           "source_end_sec":2.,"playback_rate":1.}]},
+                {"id":"right","track_id":"a","name":"right","start_sec":2.,"length_sec":1.,
+                 "takes":[{"id":"tr","source_path":"source","source_start_sec":2.,
+                           "source_end_sec":3.,"playback_rate":1.}]}
+            ]
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        timeline.params_by_root_track.insert(
+            "a".into(),
+            TrackParamsState {
+                frame_period_ms: 250.,
+                pitch_edit_user_modified: true,
+                // 13 个格点覆盖工程 [0,3]（帧 0..=12）。
+                pitch_edit: (0..13).map(|frame| 60. + frame as f32).collect(),
+                ..Default::default()
+            },
+        );
+        timeline
+    }
+
+    /// 三条半段的身份：**同一个 modification**，各自的源窗不同（Cubase 分割后的形状）。
+    fn cubase_shared_identities() -> BTreeMap<String, RegionIdentity> {
+        ["left", "mid", "right"]
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                (
+                    (*id).to_owned(),
+                    RegionIdentity {
+                        key: 100 + index as u64,
+                        item: None,
+                        source: "source".into(),
+                        modification: "mod-1".into(),
+                        signature: String::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// **共享一个 modification 时，每条 region 读的是同一条源曲线上属于自己的那一段。**
+    ///
+    /// 【为什么这是本轮的核心断言】此前权威里的曲线基是**捕获时那一条 region 的几何**，
+    /// 而键是共享的 modification ⇒ 后捕获的半段覆盖先捕获的 ⇒ 前两条半段投影时全部落到
+    /// `pad()`（音高归 0）。这正是用户在 Cubase 里看到的"分割后参数完全重置"。
+    #[test]
+    fn sharing_one_modification_each_region_reads_its_own_source_window() {
+        let timeline = cubase_split_timeline();
+        let ids = cubase_shared_identities();
+        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
+        let view = atlas.project_local(&timeline, &ids).unwrap();
+        assert_eq!(
+            &view["left"].pitch_edit[0..4],
+            &[60., 61., 62., 63.],
+            "左半段必须读源窗 [0,1) 上那一段"
+        );
+        assert_eq!(
+            &view["mid"].pitch_edit[0..4],
+            &[64., 65., 66., 67.],
+            "中半段必须读源窗 [1,2) 上那一段"
+        );
+        assert_eq!(
+            &view["right"].pitch_edit[0..4],
+            &[68., 69., 70., 71.],
+            "右半段必须读源窗 [2,3) 上那一段"
+        );
+    }
+
+    /// **编辑一个半段不得重置其余半段。**（计划 §6 的核心断言）
+    #[test]
+    fn editing_one_half_does_not_reset_the_other_halves() {
+        let timeline = cubase_split_timeline();
+        let ids = cubase_shared_identities();
+        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
+        let before = atlas.project_roots(&timeline, &ids).unwrap();
+
+        // 用户只把左半段第一个格点改成 55。
+        let mut edited_timeline = timeline.clone();
+        let params = edited_timeline.params_by_root_track.get_mut("a").unwrap();
+        params.pitch_edit[0] = 55.;
+        let after = atlas
+            .capture_changes(&edited_timeline, &ids, &before)
+            .unwrap()
+            .project_roots(&edited_timeline, &ids)
+            .unwrap();
+
+        assert_eq!(after["a"].pitch_edit[0], 55., "被编辑的格点必须生效");
+        // 其余格点逐帧不变 —— 包括中、右半段所覆盖的那些。
+        for frame in 1..13 {
+            assert_eq!(
+                after["a"].pitch_edit[frame], before["a"].pitch_edit[frame],
+                "frame {frame} 未被编辑，不得变化"
+            );
+        }
+    }
+
+    /// **三次捕获不得把权威裁到最后一条半段的窗口。**（计划 §6）
+    #[test]
+    fn capturing_three_shared_regions_does_not_shrink_the_authority() {
+        let timeline = cubase_split_timeline();
+        let ids = cubase_shared_identities();
+        let atlas = ParameterAtlas::default().capture(&timeline, &ids).unwrap();
+        // 权威里那条曲线必须仍覆盖整条源 [0,3)：三条半段的源窗都能投影出真实值。
+        let view = atlas.project_local(&timeline, &ids).unwrap();
+        for (id, expected) in [("left", 60.), ("mid", 64.), ("right", 68.)] {
+            assert_eq!(
+                view[id].pitch_edit[0], expected,
+                "{id} 的源窗起点必须仍能取到权威里的值，而不是 pad()"
+            );
+        }
+    }
+
     /// 倒放 clip **参与**参数投影：同一源曲线经降序窗口投影后，项目时间上的取值相对正放
     /// **镜像**（源位置随时间递减）。这条把"倒放无曲线"的老口径钉死为历史。
     #[test]
