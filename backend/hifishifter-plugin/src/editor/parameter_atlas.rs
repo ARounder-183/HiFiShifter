@@ -1427,6 +1427,46 @@ impl ParameterAtlas {
             let mut params = authority.template().clone();
             let frame_ms = params.frame_period_ms;
             let anchor = authority.anchor();
+            // 该 clip 的源窗落在权威曲线覆盖的源区间之外吗？
+            //
+            // 【为什么必须显式判一次】曲线相交为空时，`SourceCurve::project` 的每一帧
+            // 都取 `sample_at` 的界外分支 ⇒ 整条曲线退化成 `pad()`（音高归 0、
+            // `extra:volume` 归 1）。这与"用户从没编辑过"在数值上不可区分，
+            // 而两者的成因完全不同：一个是正常，一个是**源窗算错**或
+            // **归属接错**（后者正是"分割后参数整体偏移"的形状）。
+            // 真机上把这两者分开的唯一办法，就是在这里留一行带窗口数字的限流日志。
+            let missed: Vec<&str> = authority
+                .curves()
+                .iter()
+                .filter(|(_key, curve)| {
+                    let Some((lo, hi)) = curve.source_extent() else {
+                        return false;
+                    };
+                    let window = (
+                        geometry.source_start,
+                        geometry.source_start + geometry.source_duration,
+                    );
+                    window.1 < lo - 1e-6 || window.0 > hi + 1e-6
+                })
+                .map(|(key, _)| key.as_str())
+                .collect();
+            if !missed.is_empty() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.render.split-source-window",
+                    format_args!(
+                        "[ara] clip {} {} anchor={:?}: its source window [{:.6}, {:.6}] does not \
+                         intersect the authority curve cover(s) for {}; those curves project as \
+                         defaults this round",
+                        clip.id,
+                        identity.modification,
+                        anchor,
+                        geometry.source_start,
+                        geometry.source_start + geometry.source_duration,
+                        missed.join(", "),
+                    ),
+                );
+            }
             for (key, curve) in authority.curves() {
                 // 本曲线的输出索引域：局部投影 ⇒ clip 局部零点；否则绝对工程帧。
                 let out_domain = if local {
@@ -3345,6 +3385,32 @@ mod tests {
         let projected = migrated.project(&original, &ids).unwrap();
         assert_eq!(
             &projected["clip"].pitch_edit[4..9],
+            &[60., 61., 62., 63., 64.]
+        );
+    }
+
+    /// **源窗不相交时，该片段退回默认值而不是错读别人的区间。**
+    ///
+    /// 【为什么这条是偏移的防线】"归属接错"在数值上的表现是"读到了别的半段的值"，
+    /// 而"没接上"的表现是"退回默认"。后者留痕（`ara.render.split-source-window`），
+    /// 前者无声 —— 所以判据必须是：**宁可没有，也不要错拿**。这条测试把该 clip 的
+    /// 源窗搬到权威覆盖区间之外，断言整条曲线归默认，而不是出现任何真实数值。
+    #[test]
+    fn a_source_window_outside_the_authority_cover_projects_defaults_not_neighbours() {
+        let ids = identities();
+        let atlas = ParameterAtlas::default().capture(&edited(), &ids).unwrap();
+        // 同一份权威，但该 clip 的源窗整体移到曲线覆盖之外（[0,1) → [9,10)）。
+        let elsewhere = host(1., 1., 9., 1.);
+        let projected = atlas.project(&elsewhere, &ids).unwrap();
+        assert_eq!(
+            &projected["clip"].pitch_edit[4..9],
+            &[0., 0., 0., 0., 0.],
+            "源窗不相交时必须退回默认；读到任何非零值都说明接错了区间"
+        );
+        // 对照组：源窗正确时同一份权威照常给出真实曲线。
+        let correct = atlas.project(&host(1., 1., 0., 1.), &ids).unwrap();
+        assert_eq!(
+            &correct["clip"].pitch_edit[4..9],
             &[60., 61., 62., 63., 64.]
         );
     }
