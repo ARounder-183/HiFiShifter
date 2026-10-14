@@ -2660,7 +2660,13 @@ pub(crate) mod tests {
                 owner.restore_state(bytes).unwrap();
             }
             cold_document.prepare_renderers();
-            let deadline = Instant::now() + Duration::from_secs(15);
+            // 【为什么是 60s 而不是 15s】这里等的是**真实的神经 DSP 预热**
+            // （`PreparationQueue` 跑的是 HiFiGAN / HNSEP 推理），不是被断言的那件事。
+            // 断言的本意是"准备**会**结束"，而 15s 只保证"在空载机器上结束" ——
+            // 实测在同时跑宿主（CPU 被占）时同一段要 ~35s，于是这条成了假阴性。
+            // 本文件对同类 DSP 等待本来就用 30s（见下面的 `analysis` 与 render 等待），
+            // 这里取 60s 给最坏情况留余量。
+            let deadline = Instant::now() + Duration::from_secs(60);
             for (index, owner) in cold_owners.iter().enumerate() {
                 while owner.preparation_state().0 {
                     assert!(Instant::now() < deadline);
