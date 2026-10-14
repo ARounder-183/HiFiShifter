@@ -427,6 +427,23 @@ impl ExtensionOwner {
                 }
             })
     }
+    /// 宿主最近一次编辑器视图选择（`notifySelection`），指针键的副本。
+    ///
+    /// 【为什么可以从任意线程读】`ExtensionState` 只在写入时持锁，这里读的是一份
+    /// 已经拷好的值的克隆 —— 与 `assigned_regions()` 同一个口径。宿主的选择通知本身
+    /// 不触发 `end_editing`，因此**不能**只在模型线程上采：那样它要等到下一次模型变化
+    /// 才可见。编辑器 actor 每次 `ensure_loaded` 采一次即可。
+    pub(crate) fn host_view_selection(
+        &self,
+    ) -> Option<ara2_bridge::plugin::ExtensionViewSelection> {
+        if self.is_closed() {
+            return None;
+        }
+        self.binding
+            .lock_or_recover()
+            .as_ref()
+            .and_then(ara2_bridge::plugin::ExtensionBinding::view_selection)
+    }
     /// 本实例当前是否**真的**挂在一份活的 ARA 文档上。
     ///
     /// 与 `bound_once` 的区别：那个是"曾经绑定过"的单调历史，这个是"此刻有效"。

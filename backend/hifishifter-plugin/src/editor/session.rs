@@ -277,6 +277,13 @@ pub(crate) struct EditorSession {
     transport_probe: bool,
     transport_probe_next: Mutex<Instant>,
     pub(super) suppress_history: AtomicBool,
+    /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
+    ///
+    /// 【为什么要"上次采纳的"而不是"当前选择"】`notifySelection` 是**通知**不是
+    /// **设定**：SDK 明说插件随时可以用自己的 UI 改内部选择
+    /// （`ARAInterface.h:3646-3655`）。记上次采纳的那一条，宿主重复发同一个选择时
+    /// 就不会把用户在插件里刚点的那条抢回去；只有宿主的**新**选择才覆盖。
+    host_selection: Mutex<Option<String>>,
 }
 
 impl Drop for EditorSession {
@@ -464,6 +471,7 @@ impl EditorSession {
             suppress_history: AtomicBool::new(false),
             transport_probe: std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),
             transport_probe_next: Mutex::new(Instant::now()),
+            host_selection: Mutex::new(None),
         });
         let weak = Arc::downgrade(&session);
         let worker = std::thread::Builder::new()
@@ -1020,6 +1028,48 @@ impl EditorSession {
             self.render_requested.store(true, Ordering::Release);
         }
     }
+    /// 把宿主的编辑器视图选择搬进时间线（A5：`notifySelection` → 插件选区）。
+    ///
+    /// 【为什么只在"宿主的选择变了"时才覆盖】`notifySelection` 的契约是"通知插件用户
+    /// 在宿主里做了什么交互，插件按最合适的方式采纳"（`ARAInterface.h:3646-3655`），
+    /// **不是**"这是唯一正确的选择" —— SDK 明说插件随时可以用自己的 UI 改内部选择。
+    /// 因此这里与**上一次采纳过的**宿主选择比对：相同就不动，于是宿主重复发同一个
+    /// 选择不会把用户在插件里刚点的那条抢回去。
+    ///
+    /// 【为什么取第一条】SDK：对象列表**按重要性排序，第一条是 focused**
+    /// （`ARAInterface.h:3685-3689`）。单片段选择的插件只需第一条。
+    ///
+    /// 【为什么解析不出来就什么都不做】被选中的片段可能**已经销毁**（SDK 明说选中
+    /// 不影响对象生命周期，`:3693-3694`），此时正确的反应是保持插件自己的选择，而不是清空。
+    fn apply_host_selection(&self, timeline: &mut TimelineState) {
+        let Ok(document) = self.document.upgrade().ok_or(()) else {
+            return;
+        };
+        let focused = document.renderer_owners().into_iter().find_map(|owner| {
+            let selection = owner.host_view_selection()?;
+            selection
+                .playback_regions()
+                .iter()
+                .find_map(|key| document.clip_id_for(*key as u64))
+        });
+        self.adopt_host_selection(timeline, focused);
+    }
+
+    /// 采纳判据本身（纯逻辑，便于测试）：只有与上次不同的选择才覆盖。
+    fn adopt_host_selection(&self, timeline: &mut TimelineState, observed: Option<String>) {
+        let mut applied = self.host_selection.lock_or_recover();
+        if *applied == observed {
+            return;
+        }
+        *applied = observed.clone();
+        if let Some(clip_id) = observed {
+            log::debug!(
+                "[ara] host editor selection focused clip {clip_id}; adopting it as the                  plugin selection"
+            );
+            timeline.selected_clip_id = Some(clip_id);
+        }
+    }
+
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
         let document = self
             .document
@@ -1153,6 +1203,7 @@ impl EditorSession {
         if timeline.selected_clip_id.is_none() {
             timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
         }
+        self.apply_host_selection(&mut timeline);
         self.project_duration
             .store(timeline.project_sec.to_bits(), Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
@@ -4895,6 +4946,56 @@ pub(crate) mod tests {
         let bytes = owner.encode_state().unwrap();
         let saved: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(saved["edits"]["params"]["track"]["pitch_edit"][0], 64.);
+        editor.close();
+    }
+}
+
+#[cfg(test)]
+mod host_selection_tests {
+    use super::*;
+
+    /// **宿主的选择只在"确实变了"时覆盖插件选区。**
+    ///
+    /// 【为什么这条最要紧】`notifySelection` 是**通知**不是**设定**
+    /// （`ARAInterface.h:3646-3655`）：宿主会把同一个选择反复发（重开窗口、切换视图），
+    /// 若无条件采纳，用户在插件里刚点的那条每次都会被抢回去 —— 插件自己的 UI 就废了。
+    /// 反之，宿主的**新**选择必须被采纳：那正是"在 Cubase 里选中一条 clip，插件跟着选中"
+    /// 这条功能的全部内容。
+    #[test]
+    fn only_a_changed_host_selection_overrides_the_plugin_selection() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        let mut timeline = TimelineState::default();
+
+        // 宿主第一次报 A ⇒ 采纳。
+        editor.adopt_host_selection(&mut timeline, Some("A".into()));
+        assert_eq!(timeline.selected_clip_id.as_deref(), Some("A"));
+
+        // 用户在插件里改选了 B。
+        timeline.selected_clip_id = Some("B".into());
+
+        // 宿主**重复**报 A ⇒ 不得抢回（还是 B）。
+        editor.adopt_host_selection(&mut timeline, Some("A".into()));
+        assert_eq!(
+            timeline.selected_clip_id.as_deref(),
+            Some("B"),
+            "宿主重复同一个选择不得覆盖用户在插件里的选择"
+        );
+
+        // 宿主报一个新的选择 C ⇒ 采纳。
+        editor.adopt_host_selection(&mut timeline, Some("C".into()));
+        assert_eq!(timeline.selected_clip_id.as_deref(), Some("C"));
+
+        // 宿主报"没有任何选择"（空选择合法）⇒ 不覆盖，保持插件自己的选择。
+        timeline.selected_clip_id = Some("D".into());
+        editor.adopt_host_selection(&mut timeline, None);
+        assert_eq!(
+            timeline.selected_clip_id.as_deref(),
+            Some("D"),
+            "宿主清空选择不得连带清空插件里的选择"
+        );
+
+        drop(model);
         editor.close();
     }
 }
