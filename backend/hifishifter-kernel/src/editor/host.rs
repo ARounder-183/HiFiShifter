@@ -72,6 +72,18 @@ pub struct HostCapabilities {
     pub item_clipboard: bool,
     /// 宿主提供淡变形状轴（`fade_axes_v2` 那个布尔之外，"有没有"这一层）。
     pub fade_axes: bool,
+    /// 插件能**导出处理结果到文件**。
+    ///
+    /// 【为什么它属于能力位而不是恒真】导出只读已授权的 PCM 再写用户选定的文件，
+    /// 不需要任何宿主写接口 —— 因此它在 ARA-only 宿主上也成立。把它显式列出来，
+    /// 是为了让前端的 `project.export` 判据有**一个来源**（此前它被 `project.*`
+    /// 前缀规则整段拒掉，`Ctrl+E` 因此是死的）。
+    pub export_audio: bool,
+    /// 插件能导出**纯数据文件**（布局 / 主题 / 颤音预设）。
+    ///
+    /// 【为什么与 `export_audio` 分开】前者要渲染音频，后者只把前端算好的 JSON
+    /// 写成文件；两者失败面完全不同，混用会让"JSON 导出能用"被音频导出拖住。
+    pub export_data: bool,
 }
 
 impl HostCapabilities {
@@ -87,13 +99,17 @@ impl HostCapabilities {
             track_create: false,
             item_clipboard: false,
             fade_axes: false,
+            export_audio: false,
+            export_data: false,
         }
     }
 
-    /// ARA-only 后端：能看 / 能听 / 能渲染 / 能调参，片段几何只读。
+    /// ARA-only 后端：能看 / 能听 / 能渲染 / 能调参 / 能导出，片段几何只读。
     ///
     /// 【为什么 `transport` 是 true】VST3 的 `ProcessContext` 提供播放状态与工程时间，
     /// 与 ARA 无关，任何宿主都给了 —— 所以非 REAPER 宿主上播放光标照常走。
+    /// 【为什么导出是 true】导出只读已授权的 PCM（`ARAAudioAccessControllerInterface`
+    /// 对读取**没有角色限制**）再写用户选定的文件，不碰任何宿主写接口。
     /// 【为什么其余是 false】ARA 2.0 不允许插件改写 region 几何，也没有 item 剪贴板 /
     /// 建轨 / 导入的宿主级入口。这些能力在 ARA-only 后端上是**诚实的"没有"**，不是
     /// "还没实现"——前端据此禁用对应控件，而不是让用户点了之后撞一个字符串错误。
@@ -108,6 +124,8 @@ impl HostCapabilities {
             track_create: false,
             item_clipboard: false,
             fade_axes: false,
+            export_audio: true,
+            export_data: true,
         }
     }
 }

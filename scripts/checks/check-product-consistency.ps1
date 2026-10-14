@@ -224,6 +224,19 @@ Test-Consistency 'SDK 镜像根只在 scripts/env/sdk-env.ps1 定义' {
     'scripts/ 经 Get-SdkMirrorRoot；build.rs 识别 HIFISHIFTER_SDK_MIRROR / HIFISHIFTER_OFFLINE'
 }
 
+# 前端 invoke 面必须落在真实存在的后端命令上。
+#
+# 【为什么需要它】`invoke.ts` 的 switch 是前端能发出的**全部**方法名。其中任何一个
+# 若两边后端都不派发，症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
+# 这条把"界面可点、后端拒绝"从用户会话里搬到 CI。
+Test-Consistency '前端 invoke 面都有后端命令承接' {
+    $script = Join-Path $checkRoot 'scripts/checks/check-command-gating.py'
+    if (-not (Test-Path -LiteralPath $script)) { throw "缺少 $script" }
+    $output = & python $script 2>&1
+    if ($LASTEXITCODE -ne 0) { throw ($output -join "`n") }
+    ($output | Select-Object -First 1)
+}
+
 Write-Host ""
 if ($checkFailures.Count) {
     Write-Host "$($checkFailures.Count) check(s) failed:" -ForegroundColor Red

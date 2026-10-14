@@ -195,6 +195,9 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             track_create: self.can_create_audio_track(),
             item_clipboard: self.can_clipboard_items(),
             fade_axes: self.fade_axes_v2.is_some(),
+            // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
+            export_audio: true,
+            export_data: true,
         }
     }
 

@@ -179,6 +179,32 @@ export function canImportHostAudio(): boolean {
 }
 
 /**
+ * 插件里能不能**导出处理结果到文件**。
+ *
+ * 【为什么插件里成立】导出只读已授权的 PCM（`ARAAudioAccessControllerInterface`
+ * 对读取**没有角色限制**）再写用户选定的文件 —— 不需要任何宿主写接口。插件侧的
+ * `export_audio_advanced` / `quick_export_selected_clips` / `save_synthesized` 全部
+ * 共用播放那条渲染数学（`RenderInput::mix_interleaved`），因此导出与听到的一致。
+ *
+ * 【为什么必须单独一个谓词】此前 `pluginAllowsAction` 把 `project.*` 整段拒绝，
+ * 于是**快捷键**（`Ctrl+E`）是死的 —— 菜单能点、键盘没反应，正是本仓明令禁止的
+ * 静默失效。导出是唯一一条不属于"宿主独占"的 `project.*` 动作。
+ */
+export function canExportAudio(): boolean {
+    return !isPluginMode() || caps()?.exportAudio === true;
+}
+
+/**
+ * 插件里能不能导出**纯数据文件**（布局 / 主题 / 颤音预设）。
+ *
+ * 【为什么插件里成立】三者都是"把前端已经算好的 JSON 存成文件"，不碰宿主、不碰
+ * 音频、不碰时间线。
+ */
+export function canExportDataFiles(): boolean {
+    return !isPluginMode() || caps()?.exportData === true;
+}
+
+/**
  * 插件里能不能**新建一条宿主轨道**。
  *
  * 【为什么不复用 `canImportHostAudio`】导入音频会顺带建轨，所以导入蕴含建轨；但
@@ -271,6 +297,9 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
     // 而下面那条 `project.` 前缀规则会把它一并拒掉 —— 结果就是"菜单能用、快捷键
     // 按了没反应"，正是本仓明令禁止的静默失效。
     if (action === "project.importMidi") return canImportMidiToPitch();
+    // 导出同理：菜单已经涨开导出对话框（`MenuBar.tsx`），而 `project.*` 前缀规则
+    // 会把 `Ctrl+E` 一并拒掉。导出只读授权 PCM + 写用户选定的文件，插件里成立。
+    if (action === "project.export") return canExportAudio();
     if (action === "clip.split") return canSplitHostClips();
     // 新建**宿主**轨道：与 `track.*` 的其余动作不同，它明确要写宿主工程，且已有
     // 原生实现（`create_host_track`）。用独立动作名，免得被下面那条 `track.` 规则
@@ -307,6 +336,18 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
             "edit.deselect",
             "edit.addClipsToParamSelection",
             "edit.removeClipsFromParamSelection",
+            // 纯参数操作：只改插件自己持有的曲线（`set_param_frames` 一族），
+            // 不写任何宿主几何。此前它们被前缀规则一并拒掉，于是钢琴卷帘里
+            // 的移调 / 平滑 / 平均 / 颤音 / 量化全是灰的。
+            "edit.initialize",
+            "edit.setPitch",
+            "edit.transposeCents",
+            "edit.transposeDegrees",
+            "edit.average",
+            "edit.smooth",
+            "edit.addVibrato",
+            "edit.quantize",
+            "edit.meanQuantize",
         ].includes(action);
     }
     return true;

@@ -1400,6 +1400,34 @@ fn configure_browser(
             },
             // 记事本导出 / 附件另存为：需要系统保存对话框（HWND 只有 UI 线程有），
             // 因此不走 actor dispatch。
+            // ── 纯数据导出（布局 / 主题 / 颤音预设）──
+            //
+            // 【为什么插件必须支持它们】三者都是"把前端已经算好的 JSON 存成文件"：
+            // 不碰宿主、不碰音频、不碰时间线 —— 在 ARA-only 宿主上与独立 App 完全同义。
+            // 此前它们落到 `Command unavailable`，于是对应菜单项点了没有任何反应。
+            //
+            // 【为什么对话框必须在 UI 线程】与诊断导出、MIDI 另存为同一条理由：
+            // `IFileSaveDialog` 需要一个父 HWND，而 HWND 只存在于 UI 线程。
+            Some(command @ ("export_layout_json"|"export_theme_json"|"export_vibrato_presets_json"))=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                let json=request["json"].as_str().unwrap_or_default().to_owned();
+                let fallback=match command{
+                    "export_layout_json"=>"hifishifter-layout.json",
+                    "export_theme_json"=>"hifishifter-theme.json",
+                    _=>"hifishifter-vibrato-preset.json",
+                };
+                let requested=request["defaultFileName"].as_str().unwrap_or_default().trim().to_owned();
+                let name=if requested.is_empty(){fallback.to_owned()}else{requested};
+                (||->Result<serde_json::Value,String>{
+                    // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let path=super::browser_files::pick_save_path(hwnd,&name,"json")?;
+                    if link.authorize(&document)?!=lease {return Err("json export dialog editor lease changed".into());}
+                    let Some(path)=path else {return Ok(serde_json::json!({"ok":false,"canceled":true}))};
+                    std::fs::write(&path,json.as_bytes()).map_err(|e|e.to_string())?;
+                    Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()}))
+                })()
+            },
             Some(command @ ("notebook_export_document"|"notebook_save_asset_as"))=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{

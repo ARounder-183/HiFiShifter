@@ -8,7 +8,7 @@ import type { PluginBootstrap } from "./pluginHost";
 
 export type HostCaps = NonNullable<PluginBootstrap["hostCapabilities"]>;
 
-/** ARA-only 基线：能看 / 能听 / 能渲染，写能力全否。 */
+/** ARA-only 基线：能看 / 能听 / 能渲染 / 能导出，写能力全否。 */
 export function araOnlyCaps(overrides: Partial<HostCaps> = {}): HostCaps {
     return {
         transport: true,
@@ -20,6 +20,10 @@ export function araOnlyCaps(overrides: Partial<HostCaps> = {}): HostCaps {
         trackCreate: false,
         itemClipboard: false,
         fadeAxes: false,
+        // 导出与宿主无关（只读授权 PCM + 写用户选定的文件 / 写前端算好的 JSON），
+        // 因此两条后端都为 true —— 见 `hostCapabilities.ts` 的 canExportAudio。
+        exportAudio: true,
+        exportData: true,
         ...overrides,
     };
 }

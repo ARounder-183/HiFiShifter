@@ -59,6 +59,16 @@ export type PluginBootstrap = {
         trackCreate: boolean;
         itemClipboard: boolean;
         fadeAxes: boolean;
+        /**
+         * 插件能否把处理结果导出到文件。
+         *
+         * 【为什么不是恒真】导出只读授权 PCM + 写用户选定的文件，不碰宿主写接口，
+         * 因此两条后端都为 `true`；但它是 `project.export` 判据的唯一来源 ——
+         * 见 `hostCapabilities.ts` 的 `canExportAudio`。
+         */
+        exportAudio: boolean;
+        /** 插件能否导出纯数据文件（布局 / 主题 / 颤音预设）。 */
+        exportData: boolean;
     };
 };
 export interface WebViewMessagePort {

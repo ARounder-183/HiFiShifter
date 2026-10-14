@@ -287,6 +287,45 @@ fn export_audio_to_file(
     }))
 }
 
+/// 快速导出**选中片段**：范围取选中片段在工程时间上的并集，其余走同一条路径。
+///
+/// 【为什么不另写一套渲染】导出与播放共用 `RenderInput::mix_interleaved`
+/// （见 `export_audio_to_file` 的说明）；这里只换范围与目标路径，渲染与编码一字不改。
+fn quick_export_selected_clips(
+    session: &EditorSession,
+    request: &serde_json::Value,
+) -> Result<Value, String> {
+    let clip_ids: Vec<String> = serde_json::from_value(request["clipIds"].clone())
+        .map_err(|_| "invalid clip id list".to_string())?;
+    let (start_sec, end_sec) = {
+        let timeline = session.timeline.lock_or_recover();
+        let mut range: Option<(f64, f64)> = None;
+        for clip in timeline
+            .clips
+            .iter()
+            .filter(|clip| clip_ids.contains(&clip.id))
+        {
+            let lo = clip.start_sec;
+            let hi = clip.start_sec + clip.length_sec;
+            range = Some(match range {
+                Some((a, b)) => (a.min(lo), b.max(hi)),
+                None => (lo, hi),
+            });
+        }
+        range.ok_or("none of the selected clips is in the timeline")?
+    };
+    export_audio_to_file(
+        session,
+        &json!({
+            "mode": "project",
+            "projectOutputDir": request["outputDir"],
+            "projectFileName": request["fileName"],
+            "range": {"kind": "custom", "startSec": start_sec, "endSec": end_sec},
+            "encoder": request.get("encoder").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
 /// MIDI 输入路径判据：必须是**用户刚在原生对话框里选过**的绝对文件路径。
 ///
 /// 【为什么不复用 `browser_media_path`】后者要么落在已授权目录内，要么必须是媒体
@@ -1592,6 +1631,71 @@ pub(super) fn dispatch(
                 "format": "wav",
                 "encoder": hifishifter_kernel::encode::OutputSpec::wav_32f(),
             }))
+        }
+        // ── B 组：不需要任何宿主 API 的命令 ──
+        //
+        // 判据（见方案 §10）：**只读 PCM + 只写插件自己的状态或用户选定的文件**。
+        // 这些命令在 ARA-only 宿主上与独立 App 里完全同义 —— 此前它们落到
+        // `Command unavailable`，于是前端对应的整块控件不可用。
+        "get_clip_linked_params" => {
+            // `extract_*` 取 `&mut self`（为借用便利），但它不改时间线：克隆一份调用。
+            let mut timeline = session.timeline.lock_or_recover().clone();
+            match timeline.extract_clip_linked_params(input["clipId"].as_str().unwrap_or_default())
+            {
+                Some(linked) => Ok(json!({"ok": true, "linkedParams": linked})),
+                None => Ok(json!({"ok": false, "error": "clip_not_found"})),
+            }
+        }
+        "apply_clip_linked_params" => {
+            let clip_id = input["clipId"].as_str().unwrap_or_default().to_owned();
+            let linked: hifishifter_kernel::state::LinkedParamCurvesPayload =
+                args(input.get("linkedParams").cloned().unwrap_or(Value::Null))?;
+            let mut timeline = session.timeline.lock_or_recover();
+            session.checkpoint_timeline(&timeline, HistoryOp::ApplyLinkedParams);
+            let mut candidate = timeline.clone();
+            candidate.apply_linked_params_to_clip(&clip_id, &linked);
+            *timeline = candidate;
+            session.mark_dirty();
+            session.publish_timeline(timeline.clone());
+            drop(timeline);
+            after_write(session, json!({"ok": true}))?;
+            payload(session, false)
+        }
+        // 音高参考：两者都**只改参数**，不碰宿主几何 —— 因此插件里同样成立。
+        "convert_clips_to_pitch_reference" | "update_pitch_reference" => {
+            let clip_ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
+                .map_err(|_| "invalid clip id list".to_string())?;
+            let mut timeline = session.timeline.lock_or_recover();
+            session.checkpoint_timeline(&timeline, HistoryOp::PitchReference);
+            let mut candidate = timeline.clone();
+            if command == "convert_clips_to_pitch_reference" {
+                candidate.convert_clips_to_pitch_reference(&clip_ids);
+            } else {
+                candidate.update_pitch_reference_from_track_params(&clip_ids);
+            }
+            *timeline = candidate;
+            session.mark_dirty();
+            session.publish_timeline(timeline.clone());
+            drop(timeline);
+            after_write(session, json!({"ok": true}))?;
+            payload(session, false)
+        }
+        // 缓存清理：插件**没有**跨会话的渲染 / 波形缓存（它们随进程结束而消失），
+        // 因此这里是**显式成功**的 no-op，而不是"命令不存在" —— 前端据此保留同一个
+        // 菜单项与同一条成功路径，用户不会看到一条指向不存在的功能的失败。
+        "clear_render_cache" | "clear_waveform_cache" => {
+            Ok(json!({"ok": true, "cleared": 0, "detail": "the plugin keeps no persistent cache"}))
+        }
+        // 快速导出选中片段：与 `export_audio_advanced` 共用渲染与编码路径，
+        // 只是把范围取成选中片段的并集、目标路径由 `outputDir` + `fileName` 组成。
+        "quick_export_selected_clips" => quick_export_selected_clips(session, &args(input)?),
+        // 合成结果另存：插件的渲染输出**就是**合成结果，因此与工程导出同一条路径。
+        "save_synthesized" => {
+            let path = input["outputPath"].as_str().unwrap_or_default().to_owned();
+            export_audio_to_file(
+                session,
+                &json!({"mode": "project", "projectOutputPath": path}),
+            )
         }
         _ => Err(format!("Command unavailable in ARA plugin mode: {command}")),
     }

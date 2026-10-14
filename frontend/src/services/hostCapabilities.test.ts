@@ -20,6 +20,8 @@ import {
     canEditFadeS,
     canSelectHostFadeShape,
     canEditTempoMapTempo,
+    canExportAudio,
+    canExportDataFiles,
     hostFadeAxes,
     dawControlledReason,
 } from "./hostCapabilities";
@@ -328,4 +330,55 @@ test("dawControlledReason follows the current locale instead of freezing at modu
         if (stored === null) localStorage.removeItem("hifishifter.locale");
         else localStorage.setItem("hifishifter.locale", stored);
     }
+});
+
+test("export stays available in the plugin and its shortcut is not swallowed", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "export",
+        hostCapabilities: araOnlyCaps(),
+    };
+    // 导出只读授权 PCM + 写用户选定的文件，不碰宿主写接口 —— 插件里成立。
+    expect(canExportAudio()).toBe(true);
+    expect(canExportDataFiles()).toBe(true);
+    // 【为什么这条最要紧】此前 `project.*` 被前缀规则整段拒绝，于是菜单能点、
+    // `Ctrl+E` 按了没反应 —— 正是本仓禁止的静默失效。
+    expect(pluginAllowsAction("project.export", null)).toBe(true);
+    // 其它 `project.*` 仍然拒绝：工程文件由宿主独占。
+    expect(pluginAllowsAction("project.save", null)).toBe(false);
+    expect(pluginAllowsAction("project.new", null)).toBe(false);
+});
+
+test("pure parameter edit actions are not swallowed in the plugin", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "edits",
+        hostCapabilities: araOnlyCaps(),
+    };
+    // 这些只改插件自己持有的曲线（`set_param_frames` 一族），不写宿主几何。
+    for (const action of [
+        "edit.initialize",
+        "edit.setPitch",
+        "edit.transposeCents",
+        "edit.average",
+        "edit.smooth",
+        "edit.addVibrato",
+        "edit.quantize",
+        "edit.meanQuantize",
+    ]) {
+        expect(pluginAllowsAction(action, null), action).toBe(true);
+    }
+    // 宿主 item 级的编辑仍然拒绝（它们要写回片段几何）。
+    expect(pluginAllowsAction("edit.pasteTracks", null)).toBe(false);
+});
+
+test("a backend that reports no export capability gates the export action off", () => {
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "no-export",
+        hostCapabilities: araOnlyCaps({ exportAudio: false, exportData: false }),
+    };
+    expect(canExportAudio()).toBe(false);
+    expect(canExportDataFiles()).toBe(false);
+    expect(pluginAllowsAction("project.export", null)).toBe(false);
 });

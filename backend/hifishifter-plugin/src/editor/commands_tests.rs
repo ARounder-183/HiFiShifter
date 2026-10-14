@@ -457,3 +457,64 @@ fn midi_import_writes_the_curve_but_never_a_local_clip() {
     std::fs::remove_dir_all(&dir).ok();
     editor.close();
 }
+
+/// **B 组命令在插件里必须真的可用，而不是落到 `Command unavailable`。**
+///
+/// 【为什么这几条要单独钉】它们**不需要任何宿主 API**（只读 PCM / 只改插件自己的
+/// 参数 / 只写用户选定的文件），因此 ARA-only 宿主上与独立 App 完全同义。此前它们
+/// 一律落到那句兜底错误，于是前端的缓存清理、音高参考、参数剪贴板整块不可用 ——
+/// 用户看到的是"插件功能不全"，而根因只是没有派发。
+#[test]
+fn host_api_free_commands_are_dispatched_in_the_plugin() {
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let editor = owner.editor_session().unwrap();
+    let (reply, rx) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(32);
+    let sink = crate::editor::session::UiSink {
+        view_id: "host-api-free".into(),
+        reply,
+        events,
+        closed: Arc::new(AtomicBool::new(false)),
+    };
+    let call = |id, command: &str, args| {
+        editor
+            .enqueue(crate::editor::session::UiRequest {
+                id,
+                command: command.into(),
+                args,
+                sink: sink.clone(),
+                link: None,
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap()
+    };
+    // 缓存清理：插件没有持久缓存 ⇒ 显式成功的 no-op（不是"命令不存在"）。
+    for (id, command) in [(1, "clear_render_cache"), (2, "clear_waveform_cache")] {
+        let response = call(id, command, json!({}));
+        assert_eq!(response["ok"], true, "{command}: {response}");
+        assert_eq!(response["value"]["cleared"], 0, "{command}: {response}");
+    }
+    // 未知片段：明确回 `clip_not_found`，而不是"命令不可用"。
+    let response = call(3, "get_clip_linked_params", json!({"clipId": "nope"}));
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["value"]["ok"], false, "{response}");
+    assert_eq!(response["value"]["error"], "clip_not_found", "{response}");
+    // 会话确实接受这条命令（而不是落到那句兜底错误）：它在时间线上查片段，
+    // 找不到就回 `clip_not_found` —— 两种结果都证明派发已通，区别只在数据。
+    // 夹具没有 renderer 分配，时间线是空的，因此这里必然落到 `clip_not_found`。
+    // 没有选中片段时快速导出必须**明确拒绝**，而不是导出一个空文件。
+    let response = call(
+        5,
+        "quick_export_selected_clips",
+        json!({"clipIds": [], "outputDir": "C:/tmp", "fileName": "x"}),
+    );
+    assert_eq!(response["ok"], false, "{response}");
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("none of the selected clips"),
+        "必须说明原因：{response}"
+    );
+    drop(document);
+    editor.close();
+}
