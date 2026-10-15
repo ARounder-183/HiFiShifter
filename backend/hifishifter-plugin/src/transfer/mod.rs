@@ -28,6 +28,7 @@
 //! `transfer-clip-{take}-{n}`）是稳定的。
 
 pub(crate) mod capture;
+pub(crate) mod commands;
 pub(crate) mod timeline;
 
 use crate::render::source::SourcePcm;

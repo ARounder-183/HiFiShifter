@@ -1033,6 +1033,27 @@ struct BootstrapFlags {
     host_kind: &'static str,
     /// **生效的**能力位快照：写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源。
     host_capabilities: hifishifter_kernel::editor::host::HostCapabilities,
+    /// Transfer 通路的观察位；非 Transfer 后端时为 `None`。
+    ///
+    /// 【为什么是"观察位"而不是能力位】它们描述宿主**实际**做了什么（给过位置吗、
+    /// 给过音频吗、走过离线吗），而宿主不会声明这些。前端据此决定显示哪一条引导语：
+    /// 见过位置就能录；没见过位置就该说"这个宿主没有把播放位置交给插件"，
+    /// 而不是让用户对着一个点得动、永远不进度的按钮猜。
+    transfer_caps: Option<TransferBootstrap>,
+}
+
+/// Transfer 的观察位（`hostKind == "transfer"` 时才有值）。
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferBootstrap {
+    /// 宿主给过可用的 `ProcessContext` —— **录制的唯一硬前提**。
+    saw_context: bool,
+    /// 宿主在输入总线上给过音频。
+    saw_input: bool,
+    /// 宿主走过 `kOffline`（bounce / 导出）—— Transfer 体验最好的那条通路。
+    saw_offline: bool,
+    /// 现在能不能录（等价于 `sawContext`，单独给出是为了让前端读一个字段就够）。
+    can_capture: bool,
 }
 
 impl BootstrapFlags {
@@ -1048,6 +1069,8 @@ impl BootstrapFlags {
             // trackCreate / undoStack 都从这里读，不再有并存的顶层布尔。
             "hostKind": self.host_kind,
             "hostCapabilities": self.host_capabilities,
+            // Transfer 的观察位（非 Transfer 后端为 null）：前端据此选择引导语。
+            "transferCaps": self.transfer_caps,
             // 【为什么是常量 true，而不是复用 mediaImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
@@ -1565,6 +1588,24 @@ fn configure_browser(
                 }
             },
             Some(command)=>{
+                // 【为什么 Transfer 命令在视图层拦下】它的全部状态都在
+                // `ExtensionOwner` 上（捕获存储、take、观察位），而会话分发只拿得到
+                // `EditorSession`（它到不了 owner）。这里已经有 `link.owner()`，
+                // 与 `set_transport` 取宿主播放控制是同一条路。
+                if crate::transfer::commands::is_transfer_command(command) {
+                    let link=state.borrow().link.clone();
+                    let outcome=(||->Result<serde_json::Value,String>{
+                        let owner=link.owner()?;
+                        crate::transfer::commands::handle(&owner,command,&request["args"])
+                    })();
+                    let reply=match outcome {
+                        Ok(value)=>serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,"value":value}),
+                        Err(error)=>serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}),
+                    };
+                    let text=wide(&reply.to_string());
+                    browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))?;
+                    return Ok(());
+                }
                 if command=="set_transport" && request["args"]["playheadSec"].is_number() {
                     let link=state.borrow().link.clone();
                     let result=(||->Result<(),String> {
@@ -1657,6 +1698,22 @@ fn configure_browser(
             .owner()
             .map(|owner| owner.host_backend().kind().as_str())
             .unwrap_or("ara_only"),
+        transfer_caps: state
+            .borrow()
+            .link
+            .owner()
+            .ok()
+            .filter(|owner| owner.host_backend().kind()
+                == hifishifter_kernel::editor::host::HostKind::Transfer)
+            .map(|owner| {
+                let status = owner.transfer().status();
+                TransferBootstrap {
+                    saw_context: status.saw_context,
+                    saw_input: status.saw_input,
+                    saw_offline: status.saw_offline,
+                    can_capture: status.saw_context,
+                }
+            }),
         // 写能力/分割/剪贴板/导入/建轨/撤销栈的唯一来源（见 `effective_host_capabilities`）。
         host_capabilities: state
             .borrow()
@@ -1814,6 +1871,7 @@ mod bootstrap_tests {
     fn track_grouping_does_not_depend_on_host_media_apis() {
         for media_import in [true, false] {
             let flags = BootstrapFlags {
+                transfer_caps: None,
                 transport_control: false,
                 fade_axes: None,
                 history_backend: "local",
@@ -1835,6 +1893,7 @@ mod bootstrap_tests {
     #[test]
     fn host_capabilities_pass_through_unchanged() {
         let flags = BootstrapFlags {
+            transfer_caps: None,
             transport_control: true,
             fade_axes: Some("legacy"),
             history_backend: "local",
@@ -1879,6 +1938,7 @@ mod bootstrap_tests {
     #[test]
     fn host_write_capabilities_have_a_single_source() {
         let flags = BootstrapFlags {
+            transfer_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -1907,6 +1967,7 @@ mod bootstrap_tests {
     #[test]
     fn track_creation_is_independent_of_audio_import() {
         let flags = BootstrapFlags {
+            transfer_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -1932,6 +1993,7 @@ mod bootstrap_tests {
     #[test]
     fn an_unknown_fade_axis_set_is_reported_as_null() {
         let flags = BootstrapFlags {
+            transfer_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -1945,6 +2007,7 @@ mod bootstrap_tests {
     #[test]
     fn a_continuous_fade_axis_host_is_reported_as_such() {
         let flags = BootstrapFlags {
+            transfer_caps: None,
             transport_control: false,
             fade_axes: Some("continuous"),
             history_backend: "local",
