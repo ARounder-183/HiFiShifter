@@ -37,6 +37,8 @@ let root: Root;
 let calls: Array<{ command: string; args?: Record<string, unknown> }>;
 let conflict: boolean;
 let staleDirty: boolean;
+/** 让 `ara_connect` 回一个"宿主侧桥接、不接受提交"的会话。 */
+let bridgeSession: boolean;
 
 /** 强制 en-US：文案断言取词表本身，改文案不会让测试失效。 */
 const LOCALE_KEY = "hifishifter.locale";
@@ -45,6 +47,7 @@ beforeEach(() => {
     calls = [];
     conflict = false;
     staleDirty = false;
+    bridgeSession = false;
     localStorage.setItem(LOCALE_KEY, "en-US");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     window.__TAURI__ = {
@@ -52,11 +55,33 @@ beforeEach(() => {
             invoke: async <T,>(command: string, args?: Record<string, unknown>) => {
                 calls.push({ command, args });
                 if (command === "ara_list_instances")
-                    return [{ instance_id: "instance", name: "REAPER vocal", pid: 42 }] as T;
+                    return [
+                        {
+                            instance_id: "instance",
+                            name: "REAPER vocal",
+                            pid: 42,
+                            source_kind: "ara",
+                        },
+                    ] as T;
                 if (command === "ara_submit" && conflict)
                     return Promise.reject("Conflict: host changed");
                 if (command === "ara_connect" && staleDirty && !args?.force)
                     return Promise.reject("dirty_project: confirm replacement of unsaved edits");
+                if (command === "ara_connect" && bridgeSession)
+                    return {
+                        ok: true,
+                        instance_id: "instance",
+                        revision: 2,
+                        model_revision: 3,
+                        source_kind: "bridge",
+                        host_label: "Vegas Pro 22",
+                        negotiated: true,
+                        capabilities: ["host_pcm"],
+                        accepts_commit: false,
+                        gates_geometry: false,
+                        skipped: "1 sources: host-b (sample rate outside 8000..=384000)",
+                        skipped_count: 1,
+                    } as T;
                 return { ok: true, instance_id: "instance", revision: 2, model_revision: 3 } as T;
             },
         },
@@ -180,3 +205,24 @@ test("dirty connect waits for explicit replace confirmation and a canceled confi
 function buttonNamed(label: string): HTMLButtonElement | undefined {
     return buttons().find((b) => b.textContent?.includes(label));
 }
+
+/**
+ * 能力协商的结果必须在界面上**明说**，而不是让用户从"提交失败"里自己猜。
+ *
+ * 桥接未声明 `commit` / `geometry_write` 时：提交按钮直接禁用（点了必然失败），
+ * 并说明"编辑只留在本地"；逐条降级的摘要也要显示出来（"跳过了什么"）。
+ */
+test("a host that accepts neither commits nor geometry writes says so instead of failing silently", async () => {
+    bridgeSession = true;
+    await render(false);
+    await click(enUS.ara_connect);
+    expect(buttonNamed(enUS.ara_submit)?.disabled).toBe(true);
+    const text = container.textContent ?? "";
+    expect(text).toContain(enUS.ara_commit_unsupported);
+    expect(text).toContain(enUS.ara_local_geometry_only);
+    expect(text).toContain("Skipped 1");
+    // 提交按钮禁用时不得再发请求。
+    calls.length = 0;
+    await click(enUS.ara_submit);
+    expect(calls.some((c) => c.command === "ara_submit")).toBe(false);
+});

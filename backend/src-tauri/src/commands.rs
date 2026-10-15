@@ -5,13 +5,25 @@
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
-/// ARA 管道发现与交换均在阻塞池运行，避免阻塞 WebView 消息泵。
+/// 宿主时间轴源的发现与交换均在阻塞池运行，避免阻塞 WebView 消息泵。
+///
+/// `source_kind` 一并返回：前端要能区分"REAPER 的 ARA 实例"与"Vegas 的桥接"，
+/// 而不是一律显示成 "ARA instance"（名字是自由字符串，不够结构化）。
 #[tauri::command]
 pub async fn ara_list_instances() -> Result<Vec<serde_json::Value>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         hifishifter_host_channel::discover().map(|records| {
             records.into_iter().map(|record| {
-                serde_json::json!({"instance_id": record.instance_id, "name": record.name, "pid": record.pid})
+                let source_kind = match record.source_kind {
+                    hifishifter_host_channel::SourceKind::Ara => "ara",
+                    hifishifter_host_channel::SourceKind::Bridge => "bridge",
+                };
+                serde_json::json!({
+                    "instance_id": record.instance_id,
+                    "name": record.name,
+                    "pid": record.pid,
+                    "source_kind": source_kind,
+                })
             }).collect()
         })
     })

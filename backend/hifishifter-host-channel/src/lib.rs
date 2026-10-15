@@ -344,34 +344,70 @@ pub fn exchange(instance: &InstanceRecord, request: &Request) -> Result<Response
     }
 }
 
+/// [`hello`] 的失败原因。
+///
+/// 【为什么要分两类】两者的正确处置完全相反：**传输/解码失败**说明对面根本还没有
+/// `Hello`（历史服务端），客户端应当按既有纪律继续；**schema 不匹配**说明对面是新
+/// 服务端但结构对不上，客户端必须拒连并说清升级哪一侧。用一句字符串就区分不了。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HelloError {
+    /// 请求没能往返或回包无法解码（对面可能不支持 `Hello`）。
+    Transport(String),
+    /// 载荷结构版本不一致；必须拒连。
+    SchemaMismatch {
+        host: u32,
+        local: u32,
+        /// 该升级的那一侧（`"HiFiShifter"` / `"the host extension"`）。
+        upgrade: &'static str,
+    },
+}
+
+impl std::fmt::Display for HelloError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HelloError::Transport(error) => write!(f, "{error}"),
+            HelloError::SchemaMismatch {
+                host,
+                local,
+                upgrade,
+            } => write!(
+                f,
+                "host timeline schema {host} does not match this build's {local}; upgrade {upgrade}"
+            ),
+        }
+    }
+}
+
 /// 能力协商；**任何新客户端的第一个请求**。
 ///
 /// 【为什么把 schema 守卫放在这里而不是让调用方自己比】"版本对不上"的处置是
 /// 协议级承诺：必须**拒连**并说明要升级哪一侧，而不是让每个调用点各自判断。
-pub fn hello(instance: &InstanceRecord, wants: &[Capability]) -> Result<HelloResponse, String> {
-    validate_record(instance)?;
+pub fn hello(instance: &InstanceRecord, wants: &[Capability]) -> Result<HelloResponse, HelloError> {
+    validate_record(instance).map_err(HelloError::Transport)?;
     let request = Request::Hello {
         timeline_schema: TIMELINE_SCHEMA_VERSION,
         wants: wants.to_vec(),
     };
     #[cfg(windows)]
-    let response: HelloResponse = transport::exchange(instance, &request)?;
+    let response: HelloResponse =
+        transport::exchange(instance, &request).map_err(HelloError::Transport)?;
     #[cfg(not(windows))]
     let response: HelloResponse = {
         let _ = &request;
-        return Err("host timeline channel requires Windows".into());
+        return Err(HelloError::Transport(
+            "host timeline channel requires Windows".into(),
+        ));
     };
     if response.timeline_schema != TIMELINE_SCHEMA_VERSION {
-        return Err(format!(
-            "host timeline schema {} does not match this build's {}; upgrade {}",
-            response.timeline_schema,
-            TIMELINE_SCHEMA_VERSION,
-            if response.timeline_schema > TIMELINE_SCHEMA_VERSION {
+        return Err(HelloError::SchemaMismatch {
+            host: response.timeline_schema,
+            local: TIMELINE_SCHEMA_VERSION,
+            upgrade: if response.timeline_schema > TIMELINE_SCHEMA_VERSION {
                 "HiFiShifter"
             } else {
                 "the host extension"
-            }
-        ));
+            },
+        });
     }
     Ok(response)
 }
@@ -648,7 +684,17 @@ mod tests {
         })
         .unwrap();
         let error = hello(server.record(), &[]).unwrap_err();
-        assert!(error.contains("HiFiShifter"), "{error}");
+        assert!(
+            matches!(
+                error,
+                HelloError::SchemaMismatch {
+                    upgrade: "HiFiShifter",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("HiFiShifter"), "{error}");
     }
 
     #[cfg(windows)]

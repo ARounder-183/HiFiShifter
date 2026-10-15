@@ -124,8 +124,19 @@ export function AraHostPanel({
 
     const instanceOptions = instances.map((instance) => ({
         value: instance.instance_id,
-        label: `${instance.name} (${instance.pid})`,
+        // 来源必须显示出来：列表里既有 ARA 实例也有宿主侧桥接，用户要能一眼分清
+        // （两者的能力与"改动会不会回到宿主"完全不同）。
+        label: tVars("ara_instance_option", {
+            name: instance.name,
+            pid: instance.pid,
+            kind: t(instance.source_kind === "bridge" ? "ara_source_bridge" : "ara_source_ara"),
+        }),
     }));
+
+    // 会话级事实：宿主不接受提交 / 几何改动只留在本地 / 有条目被降级。
+    const commitUnsupported = session !== null && session.accepts_commit === false;
+    const geometryLocalOnly = session !== null && session.gates_geometry === false;
+    const skipped = session?.skipped_count ?? 0;
 
     return (
         <div className="hs-scroll-gutter-flush custom-scrollbar flex h-full flex-col gap-qt-4 overflow-y-auto p-qt-5">
@@ -169,7 +180,9 @@ export function AraHostPanel({
                 <AppButton
                     size="sm"
                     intent="primary"
-                    disabled={busy || !session}
+                    // 宿主没在能力协商里声明 `commit` 时，提交必然失败：禁用而不是
+                    // 让用户点一次再吃一个错误。
+                    disabled={busy || !session || commitUnsupported}
                     onClick={() => void submit()}
                 >
                     {t("ara_submit")}
@@ -206,6 +219,29 @@ export function AraHostPanel({
                 </AppStatusChip>
                 <span className="hs-type-caption">{t("ara_reverse_unsupported")}</span>
             </Flex>
+
+            {/*
+             * 能力协商的结果要**明说**，不能让用户从"提交失败"里自己猜：宿主不接受
+             * 提交、几何改动不回宿主，都是明示的事实而不是谜。
+             */}
+            {commitUnsupported && (
+                <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
+                    {t("ara_commit_unsupported")}
+                </span>
+            )}
+            {geometryLocalOnly && (
+                <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
+                    {t("ara_local_geometry_only")}
+                </span>
+            )}
+            {skipped > 0 && (
+                <span className="hs-type-caption" style={{ color: "var(--qt-warning-text)" }}>
+                    {tVars("ara_skipped_summary", {
+                        count: skipped,
+                        detail: session?.skipped ?? "",
+                    })}
+                </span>
+            )}
 
             {error && (
                 <span

@@ -2065,6 +2065,13 @@ export const koKR = {
     ara_panel_title: "ARA 호스트",
     ara_instance_label: "ARA 인스턴스",
     ara_no_instances: "인스턴스를 찾을 수 없음",
+    ara_instance_option: "{name}({pid}) · {kind}",
+    ara_source_ara: "ARA",
+    ara_source_bridge: "브리지",
+    ara_commit_unsupported: "이 호스트는 전송을 받지 않습니다. 편집은 로컬에만 남습니다.",
+    ara_local_geometry_only:
+        "지오메트리 편집은 로컬에만 남습니다(이 호스트는 되돌려 받지 않습니다).",
+    ara_skipped_summary: "{count}개 건너뜀: {detail}",
     ara_refresh_instances: "인스턴스 새로 고침",
     ara_connect: "연결",
     ara_submit: "호스트로 전송",

@@ -2094,6 +2094,13 @@ export const jaJP = {
     ara_panel_title: "ARA ホスト",
     ara_instance_label: "ARA インスタンス",
     ara_no_instances: "インスタンスが見つかりません",
+    ara_instance_option: "{name}（{pid}）· {kind}",
+    ara_source_ara: "ARA",
+    ara_source_bridge: "ブリッジ",
+    ara_commit_unsupported: "このホストは送信を受け付けません。編集はローカルに留まります。",
+    ara_local_geometry_only:
+        "ジオメトリの変更はローカルに留まります（このホストは書き戻しを受け付けません）。",
+    ara_skipped_summary: "{count} 件をスキップしました: {detail}",
     ara_refresh_instances: "インスタンスを更新",
     ara_connect: "接続",
     ara_submit: "ホストに送信",

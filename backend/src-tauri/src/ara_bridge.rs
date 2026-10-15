@@ -1,7 +1,18 @@
-//! ARA GUI 桥接：仅下载宿主授权 PCM，交由既有波形和音高管线处理。
+//! 宿主时间轴通道的客户端：从 ARA 插件实例或宿主侧桥接拉时间轴与 PCM。
+//!
+//! 两条来源共用同一门语言（见 `docs/host-timeline-channel.md`），差别只在准入策略：
+//! ARA 的导入沿用"任何一条不合格即整份拒绝"的既有纪律（逐位保持），桥接的载荷来自
+//! 第三方代码，逐条降级并报出原因，用户才能据以行动。
 
 use crate::state::{AppState, TimelineState};
-use hifishifter_host_channel::{HostPcm, InstanceRecord, Request, Response};
+use hifishifter_host_channel::{
+    Capability, HelloError, HostPcm, InstanceRecord, PcmPayload, Request, Response, SourceKind,
+    TransportState,
+};
+use hifishifter_kernel::editor::host_pcm::PcmView;
+use hifishifter_kernel::editor::host_timeline::{
+    sanitize_host_timeline, Admission, Rejection, SanitizeReport,
+};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -11,6 +22,22 @@ use tauri::Manager;
 
 /// 门禁拒绝时最多报告多少条字段差异；够用户定位即可，不刷屏。
 const HOST_GEOMETRY_DIFF_LIMIT: usize = 8;
+
+/// 客户端理解并会请求的能力集合。
+const WANTED_CAPABILITIES: &[Capability] = &[
+    Capability::Commit,
+    Capability::HostPcm,
+    Capability::Transport,
+    Capability::TempoMap,
+    Capability::GeometryWrite,
+];
+
+/// 内嵌 PCM 的累计字节上限：与既有 IPC 入口的 64 MiB 帧上限同一条判据
+/// （不能借新形态扩大旧传输协议）。
+const INLINE_PCM_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+/// 文件引用 PCM 的累计上限：文件不占帧，因此按**内存**预算给上限
+/// （`materialize_with_byte_limit` 接受的最大值就是 512 MiB）。
+const FILE_PCM_BYTE_LIMIT: usize = 512 * 1024 * 1024;
 
 /// 仅在 Windows 默认临时目录权限拒绝时回退，不修改目录或系统完整性标签。
 fn create_ara_temp_dir_with(
@@ -58,21 +85,91 @@ fn create_ara_temp_dir() -> Result<PathBuf, String> {
     })
 }
 
-/// 写入应用私有 WAV，先验证全部源，绝不将 persistentID 当路径打开。
+/// 把宿主 PCM 落成应用私有的分析 WAV，先做准入校验，绝不将 persistentID 当路径打开。
+///
+/// 【为什么先解析再校验】两种载荷形态的入口不同：内嵌平面直接可用，文件引用要先校验
+/// blake3 再解码（否则就是"读到一个路径就当它是音频"）。解码出的平面必须活到
+/// `materialize` 结束，所以所有权留在本函数里，`PcmView` 只是借它。
+///
+/// 【为什么准入校验要在这里】`materialize` 的纪律是"任何一条不合格即整份失败"。
+/// ARA 沿用它（逐位不变）；桥接的载荷来自第三方代码，先按 `Degrade` 把坏条目摘掉，
+/// 才能让"一条坏 clip"不升级成"整个连接失败"。
 fn materialize_snapshot(
     timeline: TimelineState,
     sources: &[HostPcm],
     dir: &Path,
-) -> Result<(TimelineState, HashMap<String, String>), String> {
-    let views: Vec<_> = sources
-        .iter()
-        .map(|pcm| hifishifter_kernel::editor::host_pcm::PcmView {
-            persistent_id: &pcm.persistent_id,
-            sample_rate: pcm.sample_rate,
-            planes: &pcm.planes,
-        })
-        .collect();
-    hifishifter_kernel::editor::host_pcm::materialize(timeline, &views, dir)
+    admission: Admission,
+) -> Result<(TimelineState, HashMap<String, String>, SanitizeReport), String> {
+    let mut owned: Vec<(String, u32, Vec<Vec<f32>>)> = Vec::new();
+    let mut rejected: Vec<Rejection> = Vec::new();
+    let mut views: Vec<PcmView<'_>> = Vec::new();
+    for pcm in sources {
+        match pcm.payload() {
+            Some(PcmPayload::Inline(planes)) => views.push(PcmView {
+                persistent_id: &pcm.persistent_id,
+                sample_rate: pcm.sample_rate,
+                planes,
+            }),
+            Some(PcmPayload::File(file)) => {
+                match hifishifter_kernel::editor::host_pcm::load_pcm_file(&file.path, &file.blake3) {
+                    // 文件形态以**文件头**的采样率为准（发送方声明的 `sample_rate`
+                    // 只是诊断信息，不能覆盖文件里的事实）。
+                    Ok((sample_rate, planes)) => {
+                        owned.push((pcm.persistent_id.clone(), sample_rate, planes));
+                        if file.ephemeral {
+                            if let Err(error) = std::fs::remove_file(&file.path) {
+                                log::warn!(
+                                    "[host-channel] ephemeral PCM file {} not removed: {error}",
+                                    file.path.display()
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => rejected.push(Rejection {
+                        id: pcm.persistent_id.clone(),
+                        reason: error,
+                    }),
+                }
+            }
+            None => rejected.push(Rejection {
+                id: pcm.persistent_id.clone(),
+                reason: "payload is neither inline planes nor a file reference".into(),
+            }),
+        }
+    }
+    for (persistent_id, sample_rate, planes) in &owned {
+        views.push(PcmView {
+            persistent_id,
+            sample_rate: *sample_rate,
+            planes,
+        });
+    }
+    // 载荷本身无法解析（歧义形态 / 摘要不符 / 解码失败）在严格策略下就是整份失败：
+    // 这与 `materialize` 对"空平面"的既有处置一致，不能让它在"没有 clip 引用它"时
+    // 悄悄变成一个成功。
+    if admission == Admission::Strict && !rejected.is_empty() {
+        return Err(format!("invalid host PCM payload: {}", rejected[0].reason));
+    }
+    // 文件引用不占帧，按内存预算放宽；只要有一份引用形态就用放宽的上限。
+    let byte_limit = if sources.iter().any(|pcm| pcm.file.is_some()) {
+        FILE_PCM_BYTE_LIMIT
+    } else {
+        INLINE_PCM_BYTE_LIMIT
+    };
+    let mut timeline = timeline;
+    let mut report = sanitize_host_timeline(&mut timeline, &mut views, byte_limit, admission)?;
+    if !rejected.is_empty() {
+        rejected.append(&mut report.dropped_sources);
+        report.dropped_sources = rejected;
+    }
+    let (timeline, reverse) = hifishifter_kernel::editor::host_pcm::materialize_with_byte_limit(
+        timeline,
+        &views,
+        dir,
+        byte_limit,
+        hifishifter_kernel::editor::host_pcm::ReversePolicy::Reject,
+    )?;
+    Ok((timeline, reverse, report))
 }
 
 fn guard_replace(state: &AppState, force: bool) -> Result<(), String> {
@@ -98,6 +195,46 @@ struct Session {
     /// 连接时采集的宿主几何投影；提交时用它判断本地是否改过宿主拥有的字段。
     host_geometry_baseline: serde_json::Value,
     project_baseline: serde_json::Value,
+    /// 这个实例是 ARA 插件还是宿主侧桥接。
+    source_kind: SourceKind,
+    /// 协商出的宿主身份与能力（历史服务端没有 `Hello` → `None`）。
+    hello: Option<hifishifter_host_channel::HelloResponse>,
+    /// 最近一次快照的宿主播放位置/状态（仅当授予 `transport`）。
+    transport: Option<TransportState>,
+    /// 最近一次导入的逐条降级报告（"跳过了什么"）。
+    report: SanitizeReport,
+}
+
+impl Session {
+    /// 是否套用几何门禁。
+    ///
+    /// 【为什么 ARA 无条件套用】它的门禁比能力协商更早存在，判据是"宿主拥有的字段
+    /// 有没有被本地改动"，与"宿主接不接受几何写回"是两回事。这里把它钉住，是为了
+    /// 让既有 REAPER 连接流程逐位不变。
+    ///
+    /// 【桥接为什么看 `geometry_write`】授予了说明宿主会接受几何写回，那么"本地几何
+    /// 漂移"就该按 ARA 的同一纪律先拦下（避免把意外漂移写回宿主）；未授予则本地几何
+    /// 改动纯属本地，套用门禁只会误报"你改了宿主字段"而让用户什么都提交不了。
+    fn gates_geometry(&self) -> bool {
+        match self.source_kind {
+            SourceKind::Ara => true,
+            SourceKind::Bridge => self.grants(Capability::GeometryWrite),
+        }
+    }
+
+    /// 宿主是否接受提交。未声明的桥接只能本地编辑。
+    fn accepts_commit(&self) -> bool {
+        match self.source_kind {
+            SourceKind::Ara => true,
+            SourceKind::Bridge => self.grants(Capability::Commit),
+        }
+    }
+
+    fn grants(&self, capability: Capability) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|hello| hello.grants(capability))
+    }
 }
 
 /// 提交门禁的比较对象：**正向**列出宿主拥有、且本地不该改的字段。
@@ -333,8 +470,38 @@ fn check_response(response: &Response) -> Result<(), String> {
 }
 
 fn session_payload(session: &Session) -> serde_json::Value {
-    serde_json::json!({ "ok": true, "instance_id": session.instance.instance_id,
-        "revision": session.revision, "model_revision": session.model_revision })
+    let source_kind = match session.source_kind {
+        SourceKind::Ara => "ara",
+        SourceKind::Bridge => "bridge",
+    };
+    // 语言无关的事实；文案由前端按 catalog 本地化。
+    let mut payload = serde_json::json!({
+        "ok": true,
+        "instance_id": session.instance.instance_id,
+        "revision": session.revision,
+        "model_revision": session.model_revision,
+        "source_kind": source_kind,
+        "host_label": session
+            .hello
+            .as_ref()
+            .map_or_else(|| session.instance.name.clone(), |hello| hello.host_label.clone()),
+        "negotiated": session.hello.is_some(),
+        "capabilities": session
+            .hello
+            .as_ref()
+            .map(|hello| hello.granted.clone())
+            .unwrap_or_default(),
+        "accepts_commit": session.accepts_commit(),
+        "gates_geometry": session.gates_geometry(),
+        "skipped": session.report.summary(),
+        "skipped_count": session.report.dropped_sources.len()
+            + session.report.dropped_clips.len()
+            + session.report.remapped_clips.len(),
+    });
+    if let Some(transport) = session.transport {
+        payload["transport"] = serde_json::to_value(transport).unwrap_or(serde_json::Value::Null);
+    }
+    payload
 }
 
 fn apply_commit_response(session: &mut Session, response: &Response) -> Result<(), String> {
@@ -347,24 +514,31 @@ fn apply_commit_response(session: &mut Session, response: &Response) -> Result<(
 /// 提交时恢复宿主源身份，拒绝把独立文件工程意外提交到仍连接的插件。
 ///
 /// 门禁只比较宿主拥有的几何字段（见 [`host_geometry_projection`]）；参数曲线与
-/// 轨道合成控制是本次提交的内容，不算"本地未保存的宿主编辑"。
+/// 轨道合成控制是本次提交的内容，不算"本地未保存的宿主编辑"。宿主不套用几何门禁时
+/// （桥接未授予 `geometry_write`），几何改动纯属本地，跳过比较而不是误报。
 fn build_commit(session: &Session, mut timeline: TimelineState) -> Result<Request, String> {
-    let geometry = host_geometry_projection(&timeline)?;
-    if geometry != session.host_geometry_baseline {
-        let mut differences = Vec::new();
-        collect_json_differences(
-            &session.host_geometry_baseline,
-            &geometry,
-            "",
-            HOST_GEOMETRY_DIFF_LIMIT,
-            &mut differences,
-        );
-        log::warn!(
-            "[ara] commit refused: host-owned geometry changed locally: {}",
-            differences.join("; ")
-        );
-        // 语言无关的字段路径 + 分类；文案由前端按 catalog 本地化。
-        return Err(format!("ara_host_fields: {}", differences.join("; ")));
+    if !session.accepts_commit() {
+        // 语言无关的分类；文案由前端按 catalog 本地化。
+        return Err("host_does_not_accept_commit".into());
+    }
+    if session.gates_geometry() {
+        let geometry = host_geometry_projection(&timeline)?;
+        if geometry != session.host_geometry_baseline {
+            let mut differences = Vec::new();
+            collect_json_differences(
+                &session.host_geometry_baseline,
+                &geometry,
+                "",
+                HOST_GEOMETRY_DIFF_LIMIT,
+                &mut differences,
+            );
+            log::warn!(
+                "[host-channel] commit refused: host-owned geometry changed locally: {}",
+                differences.join("; ")
+            );
+            // 语言无关的字段路径 + 分类；文案由前端按 catalog 本地化。
+            return Err(format!("ara_host_fields: {}", differences.join("; ")));
+        }
     }
     let ids: HashSet<_> = timeline.clips.iter().map(|clip| clip.id.clone()).collect();
     if ids != session.clip_ids {
@@ -447,6 +621,27 @@ fn import_snapshot_inner(
             .instance
             .clone(),
     };
+    // 能力协商**先行**：客户端要先知道对面是谁、会做什么，才知道该怎么对待它的载荷。
+    let hello = match hifishifter_host_channel::hello(&instance, WANTED_CAPABILITIES) {
+        Ok(hello) => Some(hello),
+        // 传输失败说明对面还没有 `Hello`（历史服务端）。按既有纪律继续，而不是因为
+        // "协商缺失"就拒连 —— 那会把一次可用的连接变成失败。
+        Err(HelloError::Transport(error)) => {
+            log::warn!(
+                "[host-channel] {} does not answer hello: {error}",
+                instance.name
+            );
+            None
+        }
+        // schema 不匹配必须拒连，并说清升级哪一侧。
+        Err(error) => return Err(format!("host capability negotiation failed: {error}")),
+    };
+    let source_kind = hello.as_ref().map_or(instance.source_kind, |h| h.source_kind);
+    // ARA 沿用"整份拒绝"的历史纪律（逐位保持）；桥接逐条降级并报出原因。
+    let admission = match source_kind {
+        SourceKind::Ara => Admission::Strict,
+        SourceKind::Bridge => Admission::Degrade,
+    };
     let response = hifishifter_host_channel::exchange(&instance, &Request::Snapshot)
         .map_err(|e| format!("ARA snapshot IPC: {e}"))?;
     check_response(&response)?;
@@ -454,20 +649,29 @@ fn import_snapshot_inner(
         serde_json::from_value(response.timeline.ok_or("missing ARA timeline")?)
             .map_err(|e| format!("decode ARA snapshot timeline: {e}"))?;
     let dir = create_ara_temp_dir()?;
-    let (mut timeline, reverse_paths) =
-        match materialize_snapshot(timeline, &response.sources, &dir) {
+    let (mut timeline, reverse_paths, report) =
+        match materialize_snapshot(timeline, &response.sources, &dir, admission) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&dir);
                 return Err(format!("materialize ARA snapshot PCM: {error}"));
             }
         };
+    if !report.is_clean() {
+        // 用户报障时最需要的一行事实：跳过了什么、为什么。
+        log::warn!("[host-channel] import degraded: {}", report.summary());
+    }
     inner.owned_dirs.push(dir);
     timeline.playhead_sec = 0.0;
     timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
     timeline.selected_clip_id = timeline.clips.first().map(|clip| clip.id.clone());
     let clip_ids = timeline.clips.iter().map(|clip| clip.id.clone()).collect();
     let host_geometry_baseline = host_geometry_projection(&timeline)?;
+    // 协商出的宿主身份优先；历史服务端没有 `Hello` → 退回实例记录里的名字
+    // （插件侧两者同源，因此 ARA 的项目名逐位不变）。
+    let host_label = hello
+        .as_ref()
+        .map_or_else(|| instance.name.clone(), |hello| hello.host_label.clone());
     let project_baseline;
     {
         let mut current = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -484,7 +688,10 @@ fn import_snapshot_inner(
         let recent = std::mem::take(&mut project.recent);
         *project = crate::state::ProjectState::default();
         project.recent = recent;
-        project.name = format!("ARA / {}", instance.name);
+        project.name = match source_kind {
+            SourceKind::Ara => format!("ARA / {host_label}"),
+            SourceKind::Bridge => format!("Host / {host_label}"),
+        };
         project_baseline = project_projection(&project);
         state.audio_engine.update_timeline(current.clone());
         state.bump_timeline_version();
@@ -500,6 +707,10 @@ fn import_snapshot_inner(
         clip_ids,
         host_geometry_baseline,
         project_baseline,
+        source_kind,
+        hello,
+        transport: response.transport,
+        report,
     });
     let roots: Vec<_> = state
         .timeline
@@ -534,7 +745,7 @@ fn import_snapshot_inner(
                 .count()
         };
         log::info!(
-            "[ara] connected: instance={} revision={} model_revision={} clips={} tracks={} decided_takes={decided}",
+            "[host-channel] connected: instance={} source_kind={source_kind:?} revision={} model_revision={} clips={} tracks={} decided_takes={decided}",
             session.instance.name,
             session.revision,
             session.model_revision,
@@ -682,7 +893,9 @@ mod tests {
         input.clips[0].takes.push(other_take);
         let mut other_pcm = pcm();
         other_pcm.persistent_id = "other-host-id".into();
-        let (timeline, reverse) = materialize_snapshot(input, &[pcm(), other_pcm], &dir).unwrap();
+        let (timeline, reverse, report) =
+            materialize_snapshot(input, &[pcm(), other_pcm], &dir, Admission::Strict).unwrap();
+        assert!(report.is_clean());
         let path = timeline.clips[0].source_path.as_ref().unwrap();
         assert_ne!(path, "host-id");
         assert_eq!(timeline.clips[0].takes[0].source_path.as_ref(), Some(path));
@@ -712,10 +925,33 @@ mod tests {
     #[test]
     fn missing_or_invalid_pcm_never_creates_files() {
         let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
-        assert!(materialize_snapshot(fixture(), &[], &dir).is_err());
+        assert!(materialize_snapshot(fixture(), &[], &dir, Admission::Strict).is_err());
         let mut bad = pcm();
         bad.planes[1].pop();
-        assert!(materialize_snapshot(fixture(), &[bad], &dir).is_err());
+        assert!(materialize_snapshot(fixture(), &[bad], &dir, Admission::Strict).is_err());
+        assert!(!dir.exists());
+    }
+
+    /// 严格策略下"载荷本身解析不出来"必须整份失败，而不是悄悄当成"没有素材"。
+    #[test]
+    fn strict_admission_rejects_an_unresolvable_payload() {
+        let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
+        let mut timeline = fixture();
+        // 连 clip 都清掉：这样"素材没被接受"就不会通过"clip 引用缺失"被间接发现。
+        timeline.clips.clear();
+        let ambiguous = HostPcm {
+            planes: vec![vec![0.0; 2]],
+            file: Some(hifishifter_host_channel::PcmFile {
+                path: PathBuf::from("ambiguous.wav"),
+                blake3: "x".into(),
+                ephemeral: false,
+            }),
+            ..pcm()
+        };
+        assert!(
+            materialize_snapshot(timeline, &[ambiguous], &dir, Admission::Strict).is_err(),
+            "两种形态同时给出是歧义，严格策略必须整份拒绝"
+        );
         assert!(!dir.exists());
     }
 
@@ -750,7 +986,202 @@ mod tests {
             clip_ids: HashSet::from(["clip".into()]),
             host_geometry_baseline: host_geometry_projection(&baseline).unwrap(),
             project_baseline: project_projection(&crate::state::ProjectState::default()),
+            source_kind: SourceKind::Ara,
+            hello: None,
+            transport: None,
+            report: SanitizeReport::default(),
         }
+    }
+
+    /// 桥接会话：来源是 `Bridge`，能力由 `Hello` 协商。
+    fn bridge_session(granted: &[Capability]) -> Session {
+        let mut session = session();
+        session.source_kind = SourceKind::Bridge;
+        session.hello = Some(hifishifter_host_channel::HelloResponse {
+            source_kind: SourceKind::Bridge,
+            timeline_schema: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
+            granted: granted.to_vec(),
+            host_label: "Vegas Pro 22".into(),
+            implementation: "test".into(),
+        });
+        session
+    }
+
+    /// 桥接未授予 `geometry_write`：本地几何改动纯属本地，门禁不得误报。
+    ///
+    /// 【为什么这条必须存在】套用 ARA 的门禁会出现"宿主根本不接受几何写回，本地却
+    /// 因为'改了宿主字段'被拒绝提交" —— 用户什么也做不了。
+    #[test]
+    fn bridge_without_geometry_write_does_not_gate_local_geometry_edits() {
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        let session = bridge_session(&[Capability::Commit, Capability::HostPcm]);
+
+        let mut moved = baseline.clone();
+        moved.clips[0].start_sec = 0.25;
+        moved.tracks[0].name = "renamed locally".into();
+        assert!(build_commit(&session, moved).is_ok(), "本地几何改动不该被门禁拦下");
+    }
+
+    /// 桥接授予 `geometry_write`：沿用 ARA 的同一纪律（先拦下意外漂移）。
+    #[test]
+    fn bridge_with_geometry_write_keeps_the_geometry_gate() {
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        let session = bridge_session(&[Capability::Commit, Capability::GeometryWrite]);
+        let mut moved = baseline.clone();
+        moved.clips[0].start_sec = 0.25;
+        let error = build_commit(&session, moved).expect_err("门禁仍须生效");
+        assert!(error.starts_with("ara_host_fields:"), "{error}");
+    }
+
+    /// 桥接未声明 `commit`：编辑只能留在本地，提交必须被明确拒绝。
+    #[test]
+    fn bridge_without_commit_capability_refuses_submission() {
+        let mut baseline = fixture();
+        baseline.clips[0].takes[0].source_path = Some("owned.wav".into());
+        baseline.clips[0].normalize_takes();
+        let session = bridge_session(&[Capability::HostPcm]);
+        let error = build_commit(&session, baseline).expect_err("未声明 commit 必须拒绝提交");
+        assert_eq!(error, "host_does_not_accept_commit");
+    }
+
+    /// 桥接载荷：坏的条目逐条降级（而不是整份失败），好的照常物化。
+    #[test]
+    fn bridge_snapshot_degrades_bad_items_instead_of_failing_the_connection() {
+        let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
+        let mut input = fixture();
+        // 一条几何坏掉的 clip（长度 0）与一条引用不存在素材的 clip。
+        let mut bad_geometry = input.clips[0].clone();
+        bad_geometry.id = "bad-geometry".into();
+        bad_geometry.length_sec = 0.0;
+        input.clips.push(bad_geometry);
+        let mut missing = input.clips[0].clone();
+        missing.id = "missing-source".into();
+        missing.takes[0].source_path = Some("host-missing".into());
+        input.clips.push(missing);
+
+        let (timeline, _, report) =
+            materialize_snapshot(input, &[pcm()], &dir, Admission::Degrade).unwrap();
+        assert_eq!(
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clip"],
+            "只有好的 clip 留下"
+        );
+        let dropped: Vec<&str> = report
+            .dropped_clips
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(dropped, vec!["bad-geometry", "missing-source"]);
+        assert!(!report.is_clean());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 文件引用形态：摘要不符必须拒收该素材，而不是读到别的音频。
+    #[test]
+    fn bridge_file_payload_is_rejected_when_the_digest_does_not_match() {
+        let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
+        let file_dir = std::env::temp_dir().join(format!("ara-gui-pcm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&file_dir).unwrap();
+        let path = file_dir.join("host.wav");
+        let mut wav = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for sample in [0.25_f32, -0.25] {
+            wav.write_sample(sample).unwrap();
+        }
+        wav.finalize().unwrap();
+
+        let mut timeline = fixture();
+        timeline.clips[0].takes[0].source_path = Some("host-id".into());
+        timeline.clips[0].normalize_takes();
+        // 摘要故意写错：接收端必须拒收该素材，其引用者随之被跳过。
+        let file_pcm = HostPcm {
+            persistent_id: "host-id".into(),
+            sample_rate: 48_000,
+            fingerprint: "test".into(),
+            planes: Vec::new(),
+            file: Some(hifishifter_host_channel::PcmFile {
+                path: path.clone(),
+                blake3: "0000".into(),
+                ephemeral: false,
+            }),
+        };
+        let (timeline, _, report) =
+            materialize_snapshot(timeline, &[file_pcm], &dir, Admission::Degrade).unwrap();
+        assert!(timeline.clips.is_empty(), "摘要不符的素材必须被拒收");
+        assert_eq!(report.dropped_sources.len(), 1);
+        assert!(report.dropped_sources[0].reason.contains("digest mismatch"));
+        assert_eq!(report.dropped_clips.len(), 1);
+        std::fs::remove_dir_all(file_dir).unwrap();
+    }
+
+    /// 文件引用形态：摘要相符时按文件头解码并物化（`ephemeral` 用后即删）。
+    #[test]
+    fn bridge_file_payload_is_verified_decoded_and_materialized() {
+        let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
+        let file_dir = std::env::temp_dir().join(format!("ara-gui-pcm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&file_dir).unwrap();
+        let path = file_dir.join("host.wav");
+        let mut wav = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for sample in [0.25_f32, -0.25, 0.5, -0.5] {
+            wav.write_sample(sample).unwrap();
+        }
+        wav.finalize().unwrap();
+        let blake3 = blake3::hash(&std::fs::read(&path).unwrap())
+            .to_hex()
+            .to_string();
+
+        let mut timeline = fixture();
+        timeline.clips[0].takes[0].source_path = Some("host-id".into());
+        timeline.clips[0].normalize_takes();
+        let file_pcm = HostPcm {
+            persistent_id: "host-id".into(),
+            sample_rate: 48_000,
+            fingerprint: "test".into(),
+            planes: Vec::new(),
+            file: Some(hifishifter_host_channel::PcmFile {
+                path: path.clone(),
+                blake3,
+                ephemeral: true,
+            }),
+        };
+        let (timeline, reverse, report) =
+            materialize_snapshot(timeline, &[file_pcm], &dir, Admission::Degrade).unwrap();
+        assert!(report.is_clean());
+        let owned = timeline.clips[0].source_path.as_ref().unwrap();
+        assert_eq!(reverse.get(owned).map(String::as_str), Some("host-id"));
+        let mut wav = hound::WavReader::open(owned).unwrap();
+        assert_eq!(wav.spec().sample_rate, 48_000);
+        assert_eq!(
+            wav.samples::<f32>().map(Result::unwrap).collect::<Vec<_>>(),
+            vec![0.25, -0.25, 0.5, -0.5]
+        );
+        assert!(!path.exists(), "ephemeral 文件用后必须删除");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1235,7 +1666,7 @@ mod tests {
         let mut timeline = fixture();
         timeline.clips[0].start_sec = f64::NAN;
         let dir = std::env::temp_dir().join(format!("ara-gui-test-{}", uuid::Uuid::new_v4()));
-        assert!(materialize_snapshot(timeline, &[pcm()], &dir).is_err());
+        assert!(materialize_snapshot(timeline, &[pcm()], &dir, Admission::Strict).is_err());
         assert!(!dir.exists());
     }
 
