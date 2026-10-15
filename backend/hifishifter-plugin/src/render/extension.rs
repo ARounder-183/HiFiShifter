@@ -498,10 +498,17 @@ impl ExtensionOwner {
         }
         let backend = self.host_backend();
         let host = backend.app_name().unwrap_or("this host");
-        log::warn!(
+        // 【为什么措辞变了、级别也变了】此前这条是 `warn` 且说"宿主把本插件当普通插入
+        // 效果器运行"，并把用户引向"请从 ARA 入口插入"。现在普通插入是**受支持**的
+        // 形态（Transfer 通路，见 `docs/plans/2026-10-15-vst-transfer-mode.md`）：
+        // 音频从输入总线捕获、按工程时间对到插件时间轴、处理后输出。
+        // 因此这不再是一条错误，而是一条**形态说明** —— 级别降到 `info`，
+        // 内容改为"本实例走 Transfer；想直接编辑宿主片段就从 ARA 入口插入"。
+        log::info!(
             "[ara] no ARA binding {:.0}s after setActive: {host} is running this instance as a \
-             plain insert effect (no document controller was created, so no clip can be edited). \
-             Insert the plug-in from the host's ARA entry rather than a regular effect slot.",
+             plain insert, so this instance uses the Transfer path (capture the host's playback \
+             into the plug-in). Insert the plug-in from the host's ARA entry instead if you want \
+             to edit the host's clips directly.",
             elapsed.as_secs_f32()
         );
     }

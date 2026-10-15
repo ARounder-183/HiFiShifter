@@ -119,6 +119,18 @@ const IID_ICOMPONENT: [u32; 4] = [0xE831_FF31, 0xF2D5_4301, 0x928E_BBEE, 0x2569_
 const IID_IAUDIO_PROCESSOR: [u32; 4] = [0x4204_3F99, 0xB7DA_453C, 0xA569_E79D, 0x9AAE_C33D];
 const IID_IEDIT_CONTROLLER: [u32; 4] = [0xDCD7_BBE3, 0x7742_448D, 0xA874_AACC, 0x979C_759E];
 
+/// `Vst::IProcessContextRequirements`（`ivstaudioprocessor.h`，VST 3.7 起）。
+///
+/// 【为什么这个 IID 是必需的，而不是"锦上添花"】SDK 对该接口的原文：
+/// "To get accurate process context information (Vst::ProcessContext), it is now required
+/// to implement this interface and return the desired bit mask of flags which your audio
+/// effect needs. **If you do not implement this interface, you may not get any information
+/// at all of the process function!**" 此前插件从不实现它，却依赖 `ProcessContext` 的
+/// `kPlaying` 与 `projectTimeSamples` —— 那是在赌宿主发一件我们没声明要的东西。
+/// 3.7 之前的 SDK 会无条件发全量，所以旧行为在旧宿主上"碰巧能用"。
+const IID_IPROCESS_CONTEXT_REQUIREMENTS: [u32; 4] =
+    [0x2A654303, 0xEF764E3D, 0x95B5FE83, 0x730EF6D0];
+
 /// 判断宿主传入的 16 字节 IID 是否等于给定接口（四个 32 位字）。
 ///
 /// 同时接受 GUID 布局与逐字大端布局：Windows 实测是前者，但换一种宿主构建方式
@@ -221,7 +233,7 @@ pub struct PClassInfo2 {
     pub name: [c_char; 64],
     /// 类别标志。
     pub class_flags: u32,
-    /// 子类别（128 字节，ARA 约定 `Fx|OnlyARA`）。
+    /// 子类别（128 字节）。当前是 `"Fx"`（见 `class_declaration` 的说明）。
     pub sub_categories: [c_char; 128],
     /// 厂商覆盖（64 字节）。
     pub vendor: [c_char; 64],
@@ -247,7 +259,7 @@ pub struct PClassInfoW {
     pub name: [u16; 64],
     /// 类别标志。
     pub class_flags: u32,
-    /// 子类别（128 字节，ARA 约定 `Fx|OnlyARA`）。
+    /// 子类别（128 字节）。当前是 `"Fx"`（见 `class_declaration` 的说明）。
     pub sub_categories: [c_char; 128],
     /// 厂商覆盖（UTF-16）。
     pub vendor: [u16; 64],
@@ -288,15 +300,25 @@ fn class_declaration(index: i32) -> Option<ClassDeclaration> {
         0 => (
             PROCESSOR_CID,
             AUDIO_MODULE_CLASS.to_owned(),
-            // `kOnlyARA` 的语义是"必须 ARA 才能工作，作为普通插入插件不工作"
-            // （`ivstaudioprocessor.h`）。这不是声明与能力的漂移，而是**事实**：
-            // 非 ARA 插入时没有文档、没有授权 PCM，`audio_process` 走的是
-            // "publisher 无快照 ⇒ 输出静音"（`vst3.rs` 的 `copy_block` 返回 false 分支），
-            // 编辑器则报 `ARA_NOT_BOUND` 并说明"请把插件作为轨道的扩展插入"。
-            // 曾经考虑过改成 `Fx` 让插件能作为插入运行，但那需要一条独立的
-            // "插入态素材来源"设计（当前没有任何路径给非 ARA 实例提供 PCM），
-            // 属于产品决策而非声明修正，因此保留 `OnlyARA`。
-            "Fx|OnlyARA",
+            // 【为什么不再是 `Fx|OnlyARA`】`kOnlyARA` 的语义是"必须 ARA 才能工作，
+            // 作为普通插入插件不工作"（`ivstaudioprocessor.h`）。这在**当时**是事实：
+            // 非 ARA 插入时没有文档、没有授权 PCM，`audio_process` 只能输出静音。
+            //
+            // 现在它不再是事实 —— 插件有了 **Transfer** 通路：在非 ARA 实例上，
+            // 音频从 VST3 输入总线实时（或离线）捕获，按 `ProcessContext` 的
+            // `projectTimeSamples` 对到插件自己的时间轴上，再照常处理并输出。
+            // 于是"作为普通插入插件"是**真的能工作**的，继续声明 `OnlyARA`
+            // 会变成一句会误导宿主的谎：多数宿主据此不把插件列进普通 FX 列表，
+            // 用户连试都试不了。
+            //
+            // 【为什么绝不能顺手加 `kNoOfflineProcess`】bounce / 导出是 Transfer 的
+            // 第二条（且质量最好的）通路：宿主以 `kOffline` 快于实时地跑完整个区间。
+            // 声明"我不参与离线处理"等于自断一臂。
+            //
+            // 【与 ARA 配对的关系】ARA 契约要求处理器类名与 `ARAFactory.plugInName`
+            // 一致（见 `ClassDeclaration` 的说明）；subCategories 不参与那个配对，
+            // 改它不会让 ARA 入口失效。
+            "Fx",
             0,
         ),
         1 => {
@@ -874,6 +896,26 @@ pub struct AudioProcessorVtbl {
     pub get_tail_samples: unsafe extern "system" fn(*mut c_void) -> u32,
 }
 
+/// `Vst::IProcessContextRequirements` 的 vtbl。
+///
+/// 【为什么是**独立子对象**而不是给 `AudioProcessorVtbl` 追加第 12 个槽】
+/// SDK 的原声明是 `class IProcessContextRequirements : public FUnknown` ——
+/// 它**不**继承 `IAudioProcessor`（对比 `IComponentHandler2 : public FUnknown`、
+/// `IComponentHandler3 : public FUnknown`，这是 VST3 对"扩展接口"的一贯写法）。
+/// 因此它的 vtable 只有 4 个槽：`FUnknown` 的 3 个 + `getProcessContextRequirements`。
+/// 若误按"继承 IAudioProcessor"去追加第 12 槽，宿主会在**槽 3** 上调
+/// `getProcessContextRequirements`，而那里是 `setBusArrangements` —— 宿主会拿着
+/// 一个返回值当位掩码用。这类错误在宿主里表现为随机的图优化异常，极难归因。
+///
+/// 返回指针沿用 `connection_vtbl` 的既有手法：指向对象内嵌的 vtbl 字段，
+/// 由 `base_from_context_requirements` 反解回 `Processor`。
+#[repr(C)]
+pub struct ProcessContextRequirementsVtbl {
+    pub base: crate::editor::connection::UnknownVtbl,
+    /// `IProcessContextRequirements::getProcessContextRequirements`。
+    pub get_process_context_requirements: unsafe extern "system" fn(*mut c_void) -> u32,
+}
+
 /// 处理器对象。
 ///
 /// 前三个字段（组件 vtbl 指针、共享引用计数、处理器子对象 vtbl 指针）是布局契约：
@@ -889,6 +931,13 @@ struct Processor {
     active: AtomicI32,
     connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
     connection: crate::editor::connection::ConnectionState,
+    /// `IProcessContextRequirements` 子对象（见该 vtbl 的说明）。
+    ///
+    /// 【为什么每个实例一份而不是共享静态】子对象身份必须与拥有者一一对应：
+    /// 宿主可能对同一模块的多个实例各查一次，而 `queryInterface` 返回的指针
+    /// 要能被反解回**正确的那个** `Processor`。共享一个静态对象会让两个实例
+    /// 拿到同一个地址。
+    context_requirements_vtbl: *const ProcessContextRequirementsVtbl,
     route: crate::editor::routing::RouteLease,
 }
 
@@ -912,6 +961,7 @@ impl Processor {
             active: AtomicI32::new(0),
             connection_vtbl: &PROCESSOR_CONNECTION_VTBL,
             connection: Default::default(),
+            context_requirements_vtbl: &PROCESS_CONTEXT_REQUIREMENTS_VTBL,
             route,
         }))
     }
@@ -977,6 +1027,17 @@ unsafe extern "system" fn component_query_interface(
                 unsafe {
                     processor_add_ref(processor);
                     *obj = std::ptr::addr_of_mut!((*processor).connection_vtbl).cast();
+                }
+                return K_RESULT_OK;
+            }
+            // `IProcessContextRequirements`（VST 3.7 起 mandatory）。宿主在 Setup Done 时
+            // 查一次并缓存，因此这里必须**先于**通用未命中日志返回，否则日志会把它
+            // 记成"宿主查了个我们不认识的接口"。
+            if unsafe { iid_matches(iid, IID_IPROCESS_CONTEXT_REQUIREMENTS) } {
+                crate::log_line("component queryInterface hit IProcessContextRequirements");
+                unsafe {
+                    processor_add_ref(processor);
+                    *obj = std::ptr::addr_of_mut!((*processor).context_requirements_vtbl).cast();
                 }
                 return K_RESULT_OK;
             }
@@ -2094,6 +2155,111 @@ unsafe fn controller_from_connection(this: *mut c_void) -> *mut EditController {
             .cast()
     }
 }
+
+/// 从 `IProcessContextRequirements` 子对象回到 `Processor`（手法同 `connection_vtbl`）。
+unsafe fn base_from_context_requirements(this: *mut c_void) -> *mut Processor {
+    unsafe {
+        this.cast::<u8>()
+            .sub(offset_of!(Processor, context_requirements_vtbl))
+            .cast()
+    }
+}
+
+// ── 我们要宿主提供哪些 `ProcessContext` 字段 ────────────────────────────────────
+//
+// 【为什么必须精确，而不是"全都要"】这个掩码在 Setup Done 时被问一次，
+// **之后不可更改**（SDK 原文 "It cannot be changed afterwards."）。两个方向都有代价：
+//
+// * 要得**太少** ⇒ 那个字段的有效位永远不置位。代价是**可检测的**（我们本来就读有效位，
+//   读不到就退回上一有效读数），且只影响需要它的那一个功能。
+// * 要得**太多** ⇒ 宿主为**每一个音频块**多做一份用不上的计算（和弦识别、MIDI 时钟
+//   分辨率都要按块算）。代价是**不可检测的**：没有任何日志、没有错误，只表现为
+//   "这个插件让工程变慢了"。
+//
+// 因此这里只要**真正消费**的字段，并逐位注明消费点。将来新增需求时改这一处即可 ——
+// 代价只是"本次会话里旧实例拿不到"，而不是"永远拿不到"。
+
+/// `kSystemTimeValid`：`TransportClock` 的诊断读数（`render/transport.rs` 的 `observe`）。
+const NEED_SYSTEM_TIME: u32 = 1 << 0;
+/// `kContTimeValid`：诊断读数；也是"这一块是不是循环回卷"的旁证。
+const NEED_CONTINUOUS_TIME_SAMPLES: u32 = 1 << 1;
+/// `kProjectTimeMusicValid`：小节/拍显示，以及 Transfer 的区间按小节对齐。
+const NEED_PROJECT_TIME_MUSIC: u32 = 1 << 2;
+/// `kBarPositionValid`：网格吸附（Transfer 的 punch 区间要吸到小节线）。
+const NEED_BAR_POSITION_MUSIC: u32 = 1 << 3;
+/// `kCycleValid`：Transfer 的"只录循环区间"需要循环起止。
+const NEED_CYCLE_MUSIC: u32 = 1 << 4;
+/// `kTempoValid`：`TransportClock::tempo()` 的**唯一**来源。
+const NEED_TEMPO: u32 = 1 << 6;
+/// `kTimeSigValid`：`TransportClock::time_signature()` 的唯一来源。
+const NEED_TIME_SIGNATURE: u32 = 1 << 7;
+/// `kPlaying` / `kCycleActive` / `kRecording`。**没有这一位，`kPlaying` 是未定义的**，
+/// 而 `audio_process_inner` 与 Transfer 录制都靠它区分"停播"与"播放"。
+const NEED_TRANSPORT_STATE: u32 = 1 << 10;
+
+/// `IProcessContextRequirements::getProcessContextRequirements` 的返回值。
+///
+/// 【为什么是**并集**而不是按当前模式二选一】这个值在 Setup Done 时被问一次，
+/// 而那时我们还**不知道**宿主会不会绑定 ARA（ARA 绑定允许发生在这个调用之前，
+/// 见 `ARAVST3.h:165`；但宿主也可以完全不绑）。两条路径的需求不同：
+/// ARA 路径要 tempo / 拍号，Transfer 路径要 transportState / 循环。
+/// 二选一必然有一半场景拿不到数据，所以取并集。
+pub(crate) fn process_context_requirements() -> u32 {
+    NEED_SYSTEM_TIME
+        | NEED_CONTINUOUS_TIME_SAMPLES
+        | NEED_PROJECT_TIME_MUSIC
+        | NEED_BAR_POSITION_MUSIC
+        | NEED_CYCLE_MUSIC
+        | NEED_TEMPO
+        | NEED_TIME_SIGNATURE
+        | NEED_TRANSPORT_STATE
+}
+
+unsafe extern "system" fn pcr_query(
+    this: *mut c_void,
+    iid: *const u8,
+    out: *mut *mut c_void,
+) -> TResult {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+            component_query_interface(base_from_context_requirements(this).cast(), iid, out)
+        })
+    }
+}
+
+unsafe extern "system" fn pcr_add_ref(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        crate::guard_ffi(0, || unsafe {
+            processor_add_ref(base_from_context_requirements(this))
+        })
+    }
+}
+
+unsafe extern "system" fn pcr_release(this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        crate::guard_ffi(0, || unsafe {
+            processor_release(base_from_context_requirements(this))
+        })
+    }
+}
+
+/// `IProcessContextRequirements::getProcessContextRequirements`。
+///
+/// 【为什么忽略 `this`】需求集是**模块级**常量，不随实例变化。`this` 仍参与
+/// `addRef`/`release`（引用计数必须落在拥有者上），但这里不需要反解对象。
+unsafe extern "system" fn pcr_get_process_context_requirements(_this: *mut c_void) -> u32 {
+    {
+        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
+        // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        // 返回 0 的语义是"什么都不要"，是安全的降级：宿主少发信息，我们按有效位退回默认。
+        crate::guard_ffi(0, process_context_requirements)
+    }
+}
+
 unsafe extern "system" fn pc_query(
     this: *mut c_void,
     iid: *const u8,
@@ -2263,6 +2429,16 @@ static PROCESSOR_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
         disconnect: pc_disconnect,
         notify: pc_notify,
     };
+static PROCESS_CONTEXT_REQUIREMENTS_VTBL: ProcessContextRequirementsVtbl =
+    ProcessContextRequirementsVtbl {
+        base: crate::editor::connection::UnknownVtbl {
+            query: pcr_query,
+            add: pcr_add_ref,
+            release: pcr_release,
+        },
+        get_process_context_requirements: pcr_get_process_context_requirements,
+    };
+
 static CONTROLLER_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
     crate::editor::connection::ConnectionVtbl {
         base: crate::editor::connection::UnknownVtbl {
@@ -2283,6 +2459,8 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 
 #[cfg(test)]
 mod audio_boundary_tests;
+#[cfg(test)]
+mod context_requirements_tests;
 #[cfg(test)]
 mod factory_declaration_tests;
 #[cfg(test)]
