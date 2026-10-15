@@ -2174,6 +2174,7 @@ export const enUS = {
         "Recorded. Play the host again to hear the processed result; record once more to replace it.",
     transfer_guide_offline:
         "This host also runs offline renders. You can arm Record and then export or bounce instead of playing in real time.",
+    transfer_not_applicable_ara: "This host provides audio through ARA, so Transfer is not needed.",
     transfer_cannot_capture:
         "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",
     transfer_recording_progress: "Recorded {seconds}s",

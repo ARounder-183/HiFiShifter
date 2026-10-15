@@ -2111,6 +2111,7 @@ export const zhTW = {
     transfer_guide_ready: "已錄好。再次播放宿主即可聽到處理結果；再錄一次會取代它。",
     transfer_guide_offline:
         "這個宿主也支援離線算圖。可以先點「錄製」，再匯出或 bounce，不必即時播放一遍。",
+    transfer_not_applicable_ara: "該宿主已透過 ARA 提供音訊，無需 Transfer。",
     transfer_cannot_capture:
         "這個宿主沒有把播放位置交給外掛，因此無法把音訊對齊到時間軸上。請使用宿主自身的編輯功能，或改用支援 ARA 的宿主。",
     transfer_recording_progress: "已錄 {seconds} 秒",

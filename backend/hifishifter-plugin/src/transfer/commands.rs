@@ -26,27 +26,33 @@ pub(crate) fn handle(
 ) -> Result<Value, String> {
     let transfer = owner.transfer();
     match command {
-        "transfer_status" => Ok(status_json(&transfer.status())),
+        "transfer_status" => Ok(status_json(&transfer.status(), owner.is_ara_bound())),
         "transfer_start" => {
+            // 【为什么必须先挡这一条】宿主已经把音频经 ARA 交给我们时，再从输入总线录一遍
+            // 是**另一条**素材来源，两者会互相覆盖。此前它静默地允许了 —— 用户会在 ARA
+            // 宿主里录出一份与界面显示无关的东西。
+            if owner.is_ara_bound() {
+                return Err("transfer_not_applicable_ara".into());
+            }
             transfer.start()?;
-            Ok(status_json(&transfer.status()))
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
         "transfer_stop" => {
             let take = transfer.stop()?;
             // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
             // 下一次某个不相关的动作把它带起来。
             owner.request_transfer_reload();
-            Ok(json!({ "take": take, "status": status_json(&transfer.status()) }))
+            Ok(json!({ "take": take, "status": status_json(&transfer.status(), owner.is_ara_bound()) }))
         }
         "transfer_cancel" => {
             transfer.cancel();
-            Ok(status_json(&transfer.status()))
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
         "transfer_clear" => {
             transfer.clear();
             // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
             owner.request_transfer_reload();
-            Ok(status_json(&transfer.status()))
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
         "transfer_select_take" => {
             let id = args["takeId"]
@@ -54,7 +60,7 @@ pub(crate) fn handle(
                 .ok_or("transfer_select_take needs a numeric takeId")?;
             transfer.select_take(id)?;
             owner.request_transfer_reload();
-            Ok(status_json(&transfer.status()))
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
         "transfer_set_options" => {
             let current = transfer.options();
@@ -65,7 +71,7 @@ pub(crate) fn handle(
                 segment_sec: args["segmentSec"].as_f64().unwrap_or(current.segment_sec),
                 monitor: args["monitor"].as_bool().unwrap_or(current.monitor),
             });
-            Ok(status_json(&transfer.status()))
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
         other => Err(format!("unknown transfer command: {other}")),
     }
@@ -74,7 +80,12 @@ pub(crate) fn handle(
 /// 状态的线上形状。
 ///
 /// 【为什么 camelCase】与既有 bootstrap / 命令载荷一致；前端只认这一种命名。
-fn status_json(status: &TransferStatus) -> Value {
+/// 状态载荷的线上形状。
+///
+/// `ara_bound` 让界面能说清"这个宿主不需要 Transfer"，而不是让按钮点了没反应 ——
+/// 入口现在是**无条件**可见的（见 `transferEntry`：形态判定要等 5 秒宽限期，不能拿它
+/// 当可见性判据），所以面板必须自己回答"我在这里有没有用"。
+fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
     let recording = status.recording.map(|recording| {
         json!({
             "capturedFrames": recording.captured_frames,
@@ -104,6 +115,8 @@ fn status_json(status: &TransferStatus) -> Value {
         // 录制的**唯一**硬前提是工程位置：音频按 `projectTimeSamples` 对齐，
         // 没有它整条通路不成立。
         "canCapture": status.saw_context,
+        // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
+        "araBound": ara_bound,
     })
 }
 
@@ -126,6 +139,24 @@ mod tests {
         assert!(!is_transfer_command("get_timeline_state"));
     }
 
+    /// 宿主正在通过 ARA 供音时，Transfer 必须**明确拒绝**而不是偷偷再录一份。
+    ///
+    /// 【为什么这条必须有】`transfer_start` 此前不检查这件事：在 ARA 宿主里按下录制会
+    /// 从输入总线再采一份**与界面显示无关**的素材，两条来源互相覆盖，用户听到的东西
+    /// 与他看到的时间线对不上。入口现在无条件可见（见 `transferEntry`），所以后端必须
+    /// 是那道真正的门。
+    #[test]
+    fn arming_is_refused_while_the_host_provides_audio_through_ara() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        assert!(owner.is_ara_bound(), "这个夹具的宿主是绑定了 ARA 的");
+        let error = handle(&owner, "transfer_start", &json!({})).unwrap_err();
+        assert_eq!(error, "transfer_not_applicable_ara");
+        assert!(!owner.transfer().is_armed(), "拒绝之后不能留下已武装状态");
+        // 状态里也要如实报出来，面板才能说清"这个宿主不需要 Transfer"。
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(status["araBound"], true);
+    }
+
     /// 未录制时的状态如实报告"还不能录"，而不是假装可用。
     #[test]
     fn an_untouched_instance_reports_that_it_cannot_capture_yet() {
@@ -139,6 +170,7 @@ mod tests {
             "没见过 ProcessContext 之前不能声称可以录制"
         );
         assert_eq!(status["recording"], Value::Null);
+        assert_eq!(status["araBound"], false, "没绑定 ARA 的实例就是 Transfer 的适用对象");
     }
 
     /// 选项补丁是**逐字段**的：只传一个字段不该把其余字段清掉。

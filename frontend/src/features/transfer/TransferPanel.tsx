@@ -19,7 +19,12 @@ import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppButton, AppField, AppStatusChip } from "../../ui";
 import { pluginBootstrap } from "../../services/hostDetect";
-import { framesToSeconds, transferApi, transferError, type TransferStatus } from "./transferApi";
+import {
+    framesToSeconds,
+    transferApi,
+    transferErrorText,
+    type TransferStatus,
+} from "./transferApi";
 
 /** 轮询间隔：与后端录制读数的更新节奏一致（见 `transfer/mod.rs` 的说明）。 */
 const POLL_MS = 200;
@@ -40,7 +45,7 @@ export function TransferPanel() {
         } catch (cause) {
             // 【为什么不在这里停止轮询】状态查询失败是暂时的（会话未就绪等），
             // 而面板的职责是持续反映真实状态。终态的判定由 `invoke` 的统一闸门做。
-            setError(transferError(cause));
+            setError(transferErrorText(cause, t));
         }
     }, []);
 
@@ -57,7 +62,7 @@ export function TransferPanel() {
                 await action();
                 await refresh();
             } catch (cause) {
-                setError(transferError(cause));
+                setError(transferErrorText(cause, t));
             } finally {
                 setBusy(false);
             }
@@ -66,7 +71,10 @@ export function TransferPanel() {
     );
 
     const recording = status?.recording ?? null;
-    const canCapture = status?.canCapture ?? pluginBootstrap()?.transferCaps?.canCapture ?? false;
+    // 宿主正在通过 ARA 供音 ⇒ Transfer 不适用（后端 `transfer_start` 也会拒）。
+    const araBound = status?.araBound ?? false;
+    const canCapture =
+        !araBound && (status?.canCapture ?? pluginBootstrap()?.transferCaps?.canCapture ?? false);
     const recordingNow = status?.state === "recording";
 
     return (
@@ -85,7 +93,7 @@ export function TransferPanel() {
             </Flex>
 
             {/* 引导：先按播放，再录制。这是本面板存在的首要理由（见文件头）。 */}
-            <p>{guideText(t, canCapture, status)}</p>
+            <p>{araBound ? t("transfer_not_applicable_ara") : guideText(t, canCapture, status)}</p>
 
             <Flex gap="2" wrap="wrap">
                 {recordingNow ? (
@@ -178,6 +186,7 @@ function guideText(
 }
 
 type TransferMessageKey =
+    | "transfer_not_applicable_ara"
     | "transfer_guide_body"
     | "transfer_guide_recording"
     | "transfer_guide_ready"

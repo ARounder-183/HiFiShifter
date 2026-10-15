@@ -10,6 +10,7 @@
  * 形态，且它的代价只是一个整数读取（后端 `transfer_status` 不取渲染锁）。
  */
 import { invoke } from "../../services/invoke";
+import type { MessageKey } from "../../i18n/messages";
 
 /** 录制中的读数。 */
 export interface TransferRecording {
@@ -39,6 +40,13 @@ export interface TransferStatus {
     sawInput: boolean;
     sawOffline: boolean;
     canCapture: boolean;
+    /**
+     * 宿主是否**正在**通过 ARA 供音。
+     *
+     * 【为什么状态里要有它】Transfer 入口现在无条件可见（形态判定要等 5 秒宽限期，
+     * 不能拿它当可见性判据），所以面板必须自己回答"我在这里有没有用"。
+     */
+    araBound: boolean;
 }
 
 export const transferApi = {
@@ -53,6 +61,20 @@ export const transferApi = {
 };
 
 /** 后端错误的可读文本；与 `araError` 同一套解包口径。 */
+/**
+ * 语言无关的分类：宿主正在通过 ARA 供音，Transfer 不适用。
+ *
+ * 【为什么分类在后端、文案在前端】与 `araApi` 同一条纪律：后端只给稳定的分类串，
+ * 文案按 catalog 本地化。这里因此不解析后端的中文/英文句子。
+ */
+const TRANSFER_NOT_APPLICABLE_ARA = "transfer_not_applicable_ara";
+
+/** 后端分类 → 本地化文案；其余错误原样透传（由调用方按既有分支处理）。 */
+export function transferErrorText(error: unknown, t: (key: MessageKey) => string): string {
+    const raw = transferError(error);
+    return raw.includes(TRANSFER_NOT_APPLICABLE_ARA) ? t(TRANSFER_NOT_APPLICABLE_ARA) : raw;
+}
+
 export function transferError(error: unknown): string {
     if (error instanceof Error)
         return error.cause !== undefined ? transferError(error.cause) : error.message;

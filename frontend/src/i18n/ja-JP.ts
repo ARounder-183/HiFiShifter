@@ -2190,6 +2190,7 @@ export const jaJP = {
         "録音できました。もう一度ホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
     transfer_guide_offline:
         "このホストはオフライン書き出しにも対応しています。「録音」を押してから書き出し／バウンスすれば、リアルタイムで再生する必要はありません。",
+    transfer_not_applicable_ara: "このホストは ARA で音声を提供しています。Transfer は不要です。",
     transfer_cannot_capture:
         "このホストは再生位置をプラグインに渡さないため、音声をタイムラインに合わせられません。ホスト側の編集機能を使うか、ARA 対応のホストをご利用ください。",
     transfer_recording_progress: "録音済み {seconds} 秒",

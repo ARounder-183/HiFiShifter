@@ -107,7 +107,7 @@ import { AppDialog } from "../../ui/Dialog";
 import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
 import { PANEL_APPEARANCE, PANEL_ARA_HOST, PANEL_TRANSFER } from "../dock/registerBuiltinPanels";
-import { useTransferInstance } from "../../features/transfer/transferEntry";
+import { showsTransferEntry } from "../../features/transfer/transferEntry";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
 import { logFolderNotice } from "./logFolderNotice";
@@ -233,8 +233,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
     // 随之失效，若直接订阅 state.session，全部菜单定义会以 ≥30Hz 重建。
     const s = useAppSelector(selectMenuBarSession, shallowEqual);
-    // Transfer 录制入口的可见性（见 `transferEntry`）：形态落定之后它会自己出现。
-    const transferInstance = useTransferInstance();
+    // Transfer 录制入口的可见性（见 `transferEntry`）：插件形态下恒可见。
+    const transferInstance = showsTransferEntry();
     const gpuBackend = useAppSelector((state: RootState) => state.session.runtime.gpuBackend);
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
@@ -1186,12 +1186,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </DropdownMenu.Item>
                     )}
                     {/*
-                      Transfer 录制**只在插件形态**里出现，而且只有宿主不给 ARA 时才有意义
-                      —— 因此按"本实例是不是 Transfer 实例"显示（见 `transferEntry`）。
-
-                      【为什么必须有这一条】此前 Transfer 面板只有"窗口打开时自动浮出"一条
-                      入口，而那个判定依赖形态落定（5 秒宽限期之后）。窗口开得早的会话里
-                      入口**完全不存在**：用户看不到任何 Transfer 相关的按钮。
+                      Transfer 录制**只在插件形态**里出现。判据刻意**不**看"宿主给不给
+                      ARA"：那要等 5 秒宽限期才落定，拿它当可见性判据会让入口在窗口开得早的
+                      会话里彻底消失（用户实测）。宿主正在走 ARA 时，面板自己会说清
+                      "不需要 Transfer"（见 `transfer_status.araBound`）。
                     */}
                     {transferInstance && (
                         <DropdownMenu.Item
