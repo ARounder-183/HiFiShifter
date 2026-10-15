@@ -19,6 +19,7 @@ import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
+    hostKind,
     isPluginMode,
     pluginAllowsAction,
     pluginAllowsEditChannel,
@@ -109,6 +110,7 @@ import {
     cycleFocus,
     dissolvePanelCommand,
     maximizeActive,
+    openPanelById,
     toggleFloatActive,
 } from "./features/dock/dockApi";
 import { hydrateDock } from "./features/dock/dockSlice";
@@ -1994,6 +1996,14 @@ function AppInner() {
     useEffect(() => {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
+        // Transfer 形态：窗口一打开就把录制面板浮出来。
+        //
+        // 【为什么不能只放在「视图」菜单里】Transfer 最大的风险不是技术上做不到，而是
+        // 用户不知道"要先让宿主播放、再按录制"（Transfer 方案 §11.4）。窗口打开时面对的
+        // 是一条空时间线，没有任何东西告诉他下一步该做什么 —— 面板里的引导必须自己出现。
+        if (isPluginMode() && hostKind() === "transfer") {
+            openPanelById(dispatch, store.getState, PANEL_TRANSFER);
+        }
         // loadUiSettings 不在这里发起：UI 设置的唯一一次加载由上方"加载 UI
         // 持久化设置"的 effect 持有（unwrap 后回填 MIDI 字段），否则启动会有
         // 两轮 get_ui_settings 往返（后端的 get_ui_settings 不是纯读）。
