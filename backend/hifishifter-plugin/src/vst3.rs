@@ -1659,15 +1659,14 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     if !matches!(shape, Err(crate::audio_abi::BufferError::InvalidArgument)) {
         // SAFETY: 宿主持有 Processor；data 的字段布局由 `validate` 的调用契约保证。
         let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
-        // 【为什么必须要求 32-bit 浮点】非 32-bit 时 `channelBuffers32` 那个联合体成员
-        // 实际是 `channelBuffers64`，按 `f32` 读会读到垃圾。这条与形状判定无关，
-        // 所以单独判。
         // SAFETY: this 是存活的音频接口子对象。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
         // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而"静音"在界面上必须能
         // 说清原因（见 `TransferStore::unsupported_precision`）。这一行与形状判定无关，
         // 所以在 `InvalidArgument` 之外一律记录。
         owner.transfer().note_precision(probe.symbolic_sample_size);
+        // 【为什么必须要求 32-bit 浮点】非 32-bit 时 `channelBuffers32` 那个联合体成员
+        // 实际是 `channelBuffers64`，按 `f32` 读会读到垃圾。
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
