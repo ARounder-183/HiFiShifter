@@ -2152,6 +2152,8 @@ export const enUS = {
         "Clip edits and fade widths sync to the host · the host renders fade audio · Reverse is rendered by HiFiShifter",
     plugin_transport_stop: "Stop playback in the host",
     plugin_transport_play: "Play or pause in the host",
+    plugin_transport_host_only:
+        "The plug-in cannot start the host's transport — press play in the host",
     plugin_standalone_only: "Only available in the standalone app",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
@@ -2171,10 +2173,28 @@ export const enUS = {
     transfer_guide_recording:
         "Recording. Keep the playhead moving and do not seek; press Stop when the part is done.",
     transfer_guide_ready:
-        "Recorded. Play the host again to hear the processed result; record once more to replace it.",
+        "Recorded. Play the host from the recorded range to hear the processed result; record again to replace it.",
     transfer_guide_offline:
-        "This host also runs offline renders. You can arm Record and then export or bounce instead of playing in real time.",
+        "This host also renders offline. Offline renders are two passes: arm Record and export once to capture (that pass is silent), then disarm and export again to get the processed result.",
     transfer_host_not_playing: "The host is not playing, so nothing is being recorded.",
+    transfer_host_playing: "Host is playing",
+    transfer_field_waiting_host: "Waiting for the host to play",
+    transfer_recorded_silent:
+        "Captured {seconds}s, but the input was silent — check that this track's audio actually reaches the plug-in.",
+    transfer_option_monitor: "Monitor the input while recording",
+    transfer_option_monitor_hint:
+        "You hear what is being recorded. Off means silence while recording.",
+    transfer_option_outside: "Play the host's audio outside the recorded range",
+    transfer_option_outside_hint:
+        "Only the recorded range is replaced by the processed result; everything else stays untouched. Off means the whole track goes silent outside it.",
+    transfer_take_label: "Take {id} · {clips} clips",
+    transfer_take_span: "{start}s – {end}s",
+    transfer_take_use: "Use",
+    transfer_take_delete: "Delete",
+    transfer_yes: "yes",
+    transfer_no: "no",
+    transfer_diagnostics:
+        "Host gives: playhead {context} · input audio {input} · offline render {offline}",
     transfer_not_applicable_ara: "This host provides audio through ARA, so Transfer is not needed.",
     transfer_cannot_capture:
         "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",

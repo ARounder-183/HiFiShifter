@@ -277,6 +277,25 @@ impl Capture {
         self.sealed.len()
     }
 
+    /// 本次捕获**已经覆盖**的工程区间（并集，含正在写的那一段）。
+    ///
+    /// 【为什么取并集而不是"首段起点 .. 最后写入位置"】宿主 seek 回退或循环回卷会让
+    /// 后面的段落在前面：那时"最后写入位置"反而在起点左侧，用区间端点算出来的带子会
+    /// 缩回去甚至翻号。界面要的是"我录过哪些地方"，并集才是那个问题的答案。
+    pub(crate) fn span(&self) -> Option<Range<i64>> {
+        let mut start = i64::MAX;
+        let mut end = i64::MIN;
+        for segment in self.sealed.iter().chain(self.active.iter()) {
+            start = start.min(segment.origin);
+            end = end.max(segment.origin + segment.filled as i64);
+        }
+        if let Some(position) = self.last_position {
+            start = start.min(position);
+            end = end.max(position);
+        }
+        (start < end).then_some(start..end)
+    }
+
     /// 已写入的工程帧总数。
     pub(crate) fn captured_frames(&self) -> u64 {
         self.captured_frames
@@ -290,6 +309,11 @@ impl Capture {
     /// 本次捕获的峰值。
     pub(crate) fn peak(&self) -> [f32; 2] {
         self.peak
+    }
+
+    /// 本次捕获的工程采样率（`0` = 尚未确定）。
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// 补充一个备用缓冲（非音频线程）。

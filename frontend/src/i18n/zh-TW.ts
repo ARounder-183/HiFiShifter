@@ -2092,6 +2092,7 @@ export const zhTW = {
     plugin_apply_hint: "片段編輯與漸變寬度同步宿主 · 漸變聲音由宿主處理 · 倒放由 HiFiShifter 渲染",
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暫停",
+    plugin_transport_host_only: "外掛無法啟動宿主播放 —— 請在宿主裡按播放",
     plugin_standalone_only: "僅在獨立 App 中可用",
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
@@ -2108,9 +2109,9 @@ export const zhTW = {
     transfer_guide_body:
         "先在宿主裡按播放，再點「錄製」。外掛會把它接收到的音訊錄下來，並依宿主的時間軸對齊。",
     transfer_guide_recording: "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。",
-    transfer_guide_ready: "已錄好。再次播放宿主即可聽到處理結果；再錄一次會取代它。",
+    transfer_guide_ready: "已錄好。從錄製區間開始播放宿主即可聽到處理結果；再錄一次會取代它。",
     transfer_guide_offline:
-        "這個宿主也支援離線算圖。可以先點「錄製」，再匯出或 bounce，不必即時播放一遍。",
+        "這個宿主也支援離線算圖。離線算圖要兩趟：點「錄製」後匯出一次以擷取（這一趟是靜音），再解除錄製匯出一次，得到的才是處理結果。",
     transfer_host_not_playing: "宿主沒有在播放，錄不到內容。",
     transfer_not_applicable_ara: "該宿主已透過 ARA 提供音訊，無需 Transfer。",
     transfer_cannot_capture:
@@ -2120,6 +2121,22 @@ export const zhTW = {
     transfer_field_gaps: "跳躍次數",
     transfer_field_spares: "剩餘緩衝",
     transfer_field_takes: "錄音數",
+    transfer_host_playing: "宿主正在播放",
+    transfer_field_waiting_host: "等待宿主播放",
+    transfer_recorded_silent:
+        "錄到了 {seconds} 秒，但輸入是靜音 —— 請檢查這條軌道的音訊是否真的進了本外掛。",
+    transfer_option_monitor: "錄製時監聽輸入",
+    transfer_option_monitor_hint: "你會聽到正在錄的內容。關掉則錄製期間靜音。",
+    transfer_option_outside: "錄製區間之外播放宿主原聲",
+    transfer_option_outside_hint:
+        "只有錄製區間被處理結果取代，其餘保持原樣。關掉則區間外整條軌靜音。",
+    transfer_take_label: "錄音 {id} · {clips} 段",
+    transfer_take_span: "{start} 秒 – {end} 秒",
+    transfer_take_use: "使用",
+    transfer_take_delete: "刪除",
+    transfer_yes: "有",
+    transfer_no: "無",
+    transfer_diagnostics: "宿主提供：播放位置 {context} · 輸入音訊 {input} · 離線算圖 {offline}",
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

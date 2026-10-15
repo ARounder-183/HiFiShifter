@@ -15,6 +15,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
+import { TransferControl } from "../../features/transfer/TransferControl";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
@@ -1180,318 +1181,353 @@ export function ActionBar() {
 
             {/* Transport */}
             {/*
-             * 【插件里为什么整组条件渲染】播放由宿主控制；`transportControl` 为假时
-             * 这两个按钮此前是"永久禁用"，只是占位。宿主能控时照常显示（走
-             * `playback.toggle` / `playback.stop` 的宿主通道）。
-             * 录音键在插件里没有对应命令（`recording.*` 全被 `pluginAllowsAction`
-             * 拒掉），一并去掉。
+             * 【插件里为什么不再整组隐藏】此前 `transportControl` 为假时这组按钮**整个
+             * 不渲染**，于是插件里连"宿主现在在不在播放"这个事实都没有任何显示，用户
+             * 面对的是一个光秃秃的界面。按仓库既有纪律（`f8d339fc`）：显示但**说明**
+             * 为什么点不动，而不是静默消失。
+             *
+             * 【为什么用 `aria-disabled` 而不是 `disabled`】原生 `disabled` 的元素不派发
+             * 指针事件，`data-tooltip` 就永远弹不出来 —— 那正是"灰掉了但不说为什么"。
+             * 用 `aria-disabled` 保留提示通道，点击处理里直接早退。
+             *
+             * 录音键在插件里没有对应命令（`recording.*` 全被 `pluginAllowsAction` 拒掉），
+             * 仍然只在独立 App 里出现；插件形态下那个位置是 Transfer 控件。
              */}
-            {(!isPluginMode() || canControlHostTransport()) && (
-                <Flex gap="1" className="shrink-0">
-                    <Button
-                        variant="soft"
-                        color="gray"
-                        size="1"
-                        onClick={() => {
-                            dispatch(stopAudioPlayback({ restoreAnchor: true }));
-                        }}
-                        data-tooltip={
-                            isPluginMode() ? t("plugin_transport_stop") : t("action_stop")
-                        }
-                    >
-                        <StopIcon />
-                    </Button>
-                    <IconButton
-                        variant="solid"
-                        size="1"
-                        onClick={() => {
-                            if (isPlaying) {
-                                dispatch(stopAudioPlayback());
-                                return;
+            {(() => {
+                const hostTransport = canControlHostTransport();
+                const inert = isPluginMode() && !hostTransport;
+                return (
+                    <Flex gap="1" className="shrink-0">
+                        <Button
+                            variant="soft"
+                            color="gray"
+                            size="1"
+                            aria-disabled={inert || undefined}
+                            onClick={() => {
+                                if (inert) return;
+                                dispatch(stopAudioPlayback({ restoreAnchor: true }));
+                            }}
+                            data-tooltip={
+                                inert
+                                    ? t("plugin_transport_host_only")
+                                    : isPluginMode()
+                                      ? t("plugin_transport_stop")
+                                      : t("action_stop")
                             }
-                            dispatch(playOriginal());
-                        }}
-                        data-tooltip={
-                            isPluginMode()
-                                ? t("plugin_transport_play")
-                                : isPlaying
-                                  ? tf("action_pause")
-                                  : t("action_play_out")
-                        }
-                    >
-                        {isPlaying ? <PauseIcon /> : <PlayIcon />}
-                    </IconButton>
-                    {!isPluginMode() && (
-                        <Box style={{ position: "relative" }} data-hs-context-menu>
-                            <IconButton
-                                size="1"
-                                /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
+                        >
+                            <StopIcon />
+                        </Button>
+                        <IconButton
+                            variant="solid"
+                            size="1"
+                            aria-disabled={inert || undefined}
+                            onClick={() => {
+                                if (inert) return;
+                                if (isPlaying) {
+                                    dispatch(stopAudioPlayback());
+                                    return;
+                                }
+                                dispatch(playOriginal());
+                            }}
+                            data-tooltip={
+                                inert
+                                    ? t("plugin_transport_host_only")
+                                    : isPluginMode()
+                                      ? t("plugin_transport_play")
+                                      : isPlaying
+                                        ? tf("action_pause")
+                                        : t("action_play_out")
+                            }
+                        >
+                            {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                        </IconButton>
+                        {!isPluginMode() && (
+                            <Box style={{ position: "relative" }} data-hs-context-menu>
+                                <IconButton
+                                    size="1"
+                                    /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
                                    录音键的"红"只在录制中才出现，语义色缺失） */
-                                variant={recording.active ? "solid" : "soft"}
-                                color="red"
-                                data-tooltip={recordingTooltip}
-                                disabled={recording.busy && recording.countdownRemaining === 0}
-                                onClick={() => {
-                                    if (recording.active) {
-                                        void dispatch(stopRecordingFlow());
-                                    } else if (recording.countdownRemaining > 0) {
-                                        void dispatch(cancelRecordingCountdown());
-                                    } else {
-                                        void dispatch(startRecordingFlow());
-                                    }
-                                }}
-                                onContextMenu={(event) => {
-                                    event.preventDefault();
-                                    if (isPluginMode()) return;
-                                    setRecordingMenuPos({ x: event.clientX, y: event.clientY });
-                                    void dispatch(loadRecordingSettings());
-                                    // 每次打开菜单都强制重新枚举设备/应用，
-                                    // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
-                                    void dispatch(loadRecordingDevices({ force: true }));
-                                    void dispatch(loadRecordingApps({ force: true }));
-                                }}
-                            >
-                                {recording.active ? (
-                                    <svg
-                                        width="15"
-                                        height="15"
-                                        viewBox="0 0 15 15"
-                                        fill="currentColor"
-                                    >
-                                        <rect x="4" y="4" width="7" height="7" rx="1.2" />
-                                    </svg>
-                                ) : (
-                                    <svg
-                                        width="15"
-                                        height="15"
-                                        viewBox="0 0 15 15"
-                                        fill="currentColor"
-                                    >
-                                        <circle cx="7.5" cy="7.5" r="4.2" />
-                                    </svg>
-                                )}
-                            </IconButton>
-                            {recordingMenuPos && (
-                                <AppContextMenu
-                                    x={recordingMenuPos.x}
-                                    y={recordingMenuPos.y}
-                                    ariaLabel={tf("recording_source_mode")}
-                                    onClose={() => setRecordingMenuPos(null)}
-                                    items={[
-                                        {
-                                            key: "mode-heading",
-                                            heading: true,
-                                            label: tf("recording_source_mode"),
-                                        },
-                                        {
-                                            key: "mode-device",
-                                            label: tf("recording_mode_device"),
-                                            checked: recording.settings.captureMode === "device",
-                                            onSelect: () =>
-                                                void applyRecordingSettings({
-                                                    captureMode: "device",
-                                                }),
-                                        },
-                                        {
-                                            key: "mode-loopback",
-                                            label: tf("recording_mode_loopback"),
-                                            checked: recording.settings.captureMode === "loopback",
-                                            onSelect: () =>
-                                                void applyRecordingSettings({
-                                                    captureMode: "loopback",
-                                                }),
-                                        },
-                                        {
-                                            key: "mode-application",
-                                            label: tf("recording_mode_application"),
-                                            checked:
-                                                recording.settings.captureMode === "application",
-                                            onSelect: () =>
-                                                void applyRecordingSettings({
-                                                    captureMode: "application",
-                                                }),
-                                        },
-                                        {
-                                            key: "source-heading",
-                                            heading: true,
-                                            separatorBefore: true,
-                                            label: tf(
-                                                recording.settings.captureMode === "application"
-                                                    ? "recording_application"
-                                                    : "recording_device",
-                                            ),
-                                        },
-                                        ...(recording.settings.captureMode === "device"
-                                            ? [
-                                                  {
-                                                      key: "device-default",
-                                                      label: tf("recording_device_default"),
-                                                      checked:
-                                                          recording.settings.sourceDevice ===
-                                                          "default",
-                                                      onSelect: () =>
-                                                          void applyRecordingSettings({
-                                                              sourceDevice: "default",
-                                                          }),
-                                                  },
-                                                  ...recording.devices
-                                                      .filter(
-                                                          (device) =>
-                                                              !device.isLoopback &&
-                                                              device.id !== "default",
-                                                      )
-                                                      .map((device) => ({
-                                                          key: device.id,
-                                                          label: device.name,
+                                    variant={recording.active ? "solid" : "soft"}
+                                    color="red"
+                                    data-tooltip={recordingTooltip}
+                                    disabled={recording.busy && recording.countdownRemaining === 0}
+                                    onClick={() => {
+                                        if (recording.active) {
+                                            void dispatch(stopRecordingFlow());
+                                        } else if (recording.countdownRemaining > 0) {
+                                            void dispatch(cancelRecordingCountdown());
+                                        } else {
+                                            void dispatch(startRecordingFlow());
+                                        }
+                                    }}
+                                    onContextMenu={(event) => {
+                                        event.preventDefault();
+                                        if (isPluginMode()) return;
+                                        setRecordingMenuPos({ x: event.clientX, y: event.clientY });
+                                        void dispatch(loadRecordingSettings());
+                                        // 每次打开菜单都强制重新枚举设备/应用，
+                                        // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
+                                        void dispatch(loadRecordingDevices({ force: true }));
+                                        void dispatch(loadRecordingApps({ force: true }));
+                                    }}
+                                >
+                                    {recording.active ? (
+                                        <svg
+                                            width="15"
+                                            height="15"
+                                            viewBox="0 0 15 15"
+                                            fill="currentColor"
+                                        >
+                                            <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                                        </svg>
+                                    ) : (
+                                        <svg
+                                            width="15"
+                                            height="15"
+                                            viewBox="0 0 15 15"
+                                            fill="currentColor"
+                                        >
+                                            <circle cx="7.5" cy="7.5" r="4.2" />
+                                        </svg>
+                                    )}
+                                </IconButton>
+                                {recordingMenuPos && (
+                                    <AppContextMenu
+                                        x={recordingMenuPos.x}
+                                        y={recordingMenuPos.y}
+                                        ariaLabel={tf("recording_source_mode")}
+                                        onClose={() => setRecordingMenuPos(null)}
+                                        items={[
+                                            {
+                                                key: "mode-heading",
+                                                heading: true,
+                                                label: tf("recording_source_mode"),
+                                            },
+                                            {
+                                                key: "mode-device",
+                                                label: tf("recording_mode_device"),
+                                                checked:
+                                                    recording.settings.captureMode === "device",
+                                                onSelect: () =>
+                                                    void applyRecordingSettings({
+                                                        captureMode: "device",
+                                                    }),
+                                            },
+                                            {
+                                                key: "mode-loopback",
+                                                label: tf("recording_mode_loopback"),
+                                                checked:
+                                                    recording.settings.captureMode === "loopback",
+                                                onSelect: () =>
+                                                    void applyRecordingSettings({
+                                                        captureMode: "loopback",
+                                                    }),
+                                            },
+                                            {
+                                                key: "mode-application",
+                                                label: tf("recording_mode_application"),
+                                                checked:
+                                                    recording.settings.captureMode ===
+                                                    "application",
+                                                onSelect: () =>
+                                                    void applyRecordingSettings({
+                                                        captureMode: "application",
+                                                    }),
+                                            },
+                                            {
+                                                key: "source-heading",
+                                                heading: true,
+                                                separatorBefore: true,
+                                                label: tf(
+                                                    recording.settings.captureMode === "application"
+                                                        ? "recording_application"
+                                                        : "recording_device",
+                                                ),
+                                            },
+                                            ...(recording.settings.captureMode === "device"
+                                                ? [
+                                                      {
+                                                          key: "device-default",
+                                                          label: tf("recording_device_default"),
                                                           checked:
                                                               recording.settings.sourceDevice ===
-                                                              device.id,
+                                                              "default",
                                                           onSelect: () =>
                                                               void applyRecordingSettings({
-                                                                  sourceDevice: device.id,
+                                                                  sourceDevice: "default",
                                                               }),
-                                                      })),
-                                              ]
-                                            : recording.settings.captureMode === "loopback"
-                                              ? [
-                                                    {
-                                                        key: "loopback-default",
-                                                        label: tf("recording_loopback_default"),
-                                                        checked:
-                                                            recording.settings.loopbackDevice ===
-                                                            "default",
-                                                        onSelect: () =>
-                                                            void applyRecordingSettings({
-                                                                loopbackDevice: "default",
-                                                            }),
-                                                    },
-                                                    ...recording.devices
-                                                        .filter(
-                                                            (device) =>
-                                                                device.isLoopback &&
-                                                                device.id !== "loopback:default",
-                                                        )
-                                                        .map((device) => ({
-                                                            key: device.id,
-                                                            label: device.name,
+                                                      },
+                                                      ...recording.devices
+                                                          .filter(
+                                                              (device) =>
+                                                                  !device.isLoopback &&
+                                                                  device.id !== "default",
+                                                          )
+                                                          .map((device) => ({
+                                                              key: device.id,
+                                                              label: device.name,
+                                                              checked:
+                                                                  recording.settings
+                                                                      .sourceDevice === device.id,
+                                                              onSelect: () =>
+                                                                  void applyRecordingSettings({
+                                                                      sourceDevice: device.id,
+                                                                  }),
+                                                          })),
+                                                  ]
+                                                : recording.settings.captureMode === "loopback"
+                                                  ? [
+                                                        {
+                                                            key: "loopback-default",
+                                                            label: tf("recording_loopback_default"),
                                                             checked:
                                                                 recording.settings
-                                                                    .loopbackDevice === device.id,
+                                                                    .loopbackDevice === "default",
                                                             onSelect: () =>
                                                                 void applyRecordingSettings({
-                                                                    loopbackDevice: device.id,
+                                                                    loopbackDevice: "default",
+                                                                }),
+                                                        },
+                                                        ...recording.devices
+                                                            .filter(
+                                                                (device) =>
+                                                                    device.isLoopback &&
+                                                                    device.id !==
+                                                                        "loopback:default",
+                                                            )
+                                                            .map((device) => ({
+                                                                key: device.id,
+                                                                label: device.name,
+                                                                checked:
+                                                                    recording.settings
+                                                                        .loopbackDevice ===
+                                                                    device.id,
+                                                                onSelect: () =>
+                                                                    void applyRecordingSettings({
+                                                                        loopbackDevice: device.id,
+                                                                    }),
+                                                            })),
+                                                    ]
+                                                  : [
+                                                        ...(recording.settings.captureAppId &&
+                                                        !recording.apps.some(
+                                                            (app) =>
+                                                                app.id ===
+                                                                recording.settings.captureAppId,
+                                                        )
+                                                            ? [
+                                                                  {
+                                                                      key: recording.settings
+                                                                          .captureAppId,
+                                                                      label:
+                                                                          recording.settings
+                                                                              .captureAppName ||
+                                                                          recording.settings
+                                                                              .captureAppId,
+                                                                      checked: true,
+                                                                      onSelect: () =>
+                                                                          void applyRecordingSettings(
+                                                                              {
+                                                                                  captureAppId:
+                                                                                      recording
+                                                                                          .settings
+                                                                                          .captureAppId,
+                                                                                  captureAppName:
+                                                                                      recording
+                                                                                          .settings
+                                                                                          .captureAppName,
+                                                                                  captureAppProcess:
+                                                                                      recording
+                                                                                          .settings
+                                                                                          .captureAppProcess,
+                                                                              },
+                                                                          ),
+                                                                  },
+                                                              ]
+                                                            : []),
+                                                        ...recording.apps.map((app) => ({
+                                                            key: app.id,
+                                                            label: app.name,
+                                                            checked:
+                                                                recording.settings.captureAppId ===
+                                                                app.id,
+                                                            onSelect: () =>
+                                                                void applyRecordingSettings({
+                                                                    captureAppId: app.id,
+                                                                    captureAppName: app.name,
+                                                                    captureAppProcess:
+                                                                        app.processName,
                                                                 }),
                                                         })),
-                                                ]
-                                              : [
-                                                    ...(recording.settings.captureAppId &&
-                                                    !recording.apps.some(
-                                                        (app) =>
-                                                            app.id ===
-                                                            recording.settings.captureAppId,
-                                                    )
-                                                        ? [
-                                                              {
-                                                                  key: recording.settings
-                                                                      .captureAppId,
-                                                                  label:
-                                                                      recording.settings
-                                                                          .captureAppName ||
-                                                                      recording.settings
-                                                                          .captureAppId,
-                                                                  checked: true,
-                                                                  onSelect: () =>
-                                                                      void applyRecordingSettings({
-                                                                          captureAppId:
-                                                                              recording.settings
-                                                                                  .captureAppId,
-                                                                          captureAppName:
-                                                                              recording.settings
-                                                                                  .captureAppName,
-                                                                          captureAppProcess:
-                                                                              recording.settings
-                                                                                  .captureAppProcess,
-                                                                      }),
-                                                              },
-                                                          ]
-                                                        : []),
-                                                    ...recording.apps.map((app) => ({
-                                                        key: app.id,
-                                                        label: app.name,
-                                                        checked:
-                                                            recording.settings.captureAppId ===
-                                                            app.id,
-                                                        onSelect: () =>
-                                                            void applyRecordingSettings({
-                                                                captureAppId: app.id,
-                                                                captureAppName: app.name,
-                                                                captureAppProcess: app.processName,
-                                                            }),
-                                                    })),
-                                                ]),
-                                        {
-                                            key: "settings",
-                                            label: tf("recording_context_settings"),
-                                            separatorBefore: true,
-                                            onSelect: () => {
-                                                setRecordingMenuPos(null);
-                                                setRecordingSettingsOpen(true);
+                                                    ]),
+                                            {
+                                                key: "settings",
+                                                label: tf("recording_context_settings"),
+                                                separatorBefore: true,
+                                                onSelect: () => {
+                                                    setRecordingMenuPos(null);
+                                                    setRecordingSettingsOpen(true);
+                                                },
                                             },
-                                        },
-                                    ]}
-                                />
-                            )}
-                        </Box>
-                    )}
-                    {recording.active || recording.countdownRemaining > 0 ? (
-                        <Flex align="center" gap="1" className="shrink-0">
-                            <span
-                                className="hs-type-label tabular-nums"
-                                style={
-                                    recording.active
-                                        ? { color: "var(--qt-danger-text)" }
-                                        : undefined
-                                }
-                            >
-                                {recording.countdownRemaining > 0
-                                    ? `-${recording.countdownRemaining}`
-                                    : formatRecordingTime(recording.elapsedSec)}
-                            </span>
-                            <div
-                                style={{
-                                    width: 48,
-                                    height: 6,
-                                    borderRadius: "var(--qt-radius-pill)",
-                                    background: "var(--qt-border)",
-                                    overflow: "hidden",
-                                    flexShrink: 0,
-                                }}
-                            >
+                                        ]}
+                                    />
+                                )}
+                            </Box>
+                        )}
+                        {recording.active || recording.countdownRemaining > 0 ? (
+                            <Flex align="center" gap="1" className="shrink-0">
+                                <span
+                                    className="hs-type-label tabular-nums"
+                                    style={
+                                        recording.active
+                                            ? { color: "var(--qt-danger-text)" }
+                                            : undefined
+                                    }
+                                >
+                                    {recording.countdownRemaining > 0
+                                        ? `-${recording.countdownRemaining}`
+                                        : formatRecordingTime(recording.elapsedSec)}
+                                </span>
                                 <div
                                     style={{
-                                        width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
-                                        height: "100%",
-                                        background:
-                                            recording.level > 0.98
-                                                ? "var(--qt-danger-text)"
-                                                : "var(--qt-danger-border)",
-                                        transition: "width 80ms linear",
+                                        width: 48,
+                                        height: 6,
+                                        borderRadius: "var(--qt-radius-pill)",
+                                        background: "var(--qt-border)",
+                                        overflow: "hidden",
+                                        flexShrink: 0,
                                     }}
-                                />
-                            </div>
-                        </Flex>
-                    ) : null}
-                    {recording.error ? (
-                        <span
-                            className="hs-type-label truncate"
-                            data-tooltip={recording.error}
-                            style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
-                        >
-                            {recordingErrorMessage(recording.error)}
-                        </span>
-                    ) : null}
-                </Flex>
-            )}
+                                >
+                                    <div
+                                        style={{
+                                            width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                            height: "100%",
+                                            background:
+                                                recording.level > 0.98
+                                                    ? "var(--qt-danger-text)"
+                                                    : "var(--qt-danger-border)",
+                                            transition: "width 80ms linear",
+                                        }}
+                                    />
+                                </div>
+                            </Flex>
+                        ) : null}
+                        {recording.error ? (
+                            <span
+                                className="hs-type-label truncate"
+                                data-tooltip={recording.error}
+                                style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
+                            >
+                                {recordingErrorMessage(recording.error)}
+                            </span>
+                        ) : null}
+                    </Flex>
+                );
+            })()}
+
+            {/* Transfer：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
+                "录制"的心智模型就是一个传输栏上的键（见 `TransferControl` 的文件头）。 */}
+            {isPluginMode() && <TransferControl />}
 
             <AppToolbarSeparator />
 

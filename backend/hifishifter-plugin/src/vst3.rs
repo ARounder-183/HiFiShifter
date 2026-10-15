@@ -1553,8 +1553,14 @@ unsafe extern "system" fn audio_setup_processing(
             // 记下权威采样率：`process` 用它（而非 `ProcessContext::sample_rate`）选快照，
             // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
             // SAFETY: this 为存活音频接口。
-            unsafe { &(*base_from_audio(this)).extension_owner }
-                .set_setup_sample_rate(setup.sample_rate);
+            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            owner.set_setup_sample_rate(setup.sample_rate);
+            // 【为什么在这里装载 Transfer 的渲染基础设施】`setupProcessing` 是 SDK 保证
+            // 在任何 `process` 之前、且在宿主 UI 线程上被调用的唯一时刻，而宿主时钟、
+            // 合成队列与 `prepare_owner` 都是"第一次 process 之前必须就位"的东西。
+            // 此前它们由 WebView 的 20ms 定时器装载 —— 于是**没开窗口**的会话里宿主位置
+            // 根本没有地方落：插件 UI 的播放光标永远是 0，而用户以为宿主没在播放。
+            owner.arm_transfer_rendering();
             crate::log_line(&format!(
                 "IAudioProcessor::setupProcessing mode={} rate={}",
                 setup.process_mode, setup.sample_rate
@@ -1689,11 +1695,16 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
-            // 【Transfer 通路】在快照输出之前插入，且**不改**下面三行。
-            // 未录制时它只读一个原子就返回 false；录制时它写完输出并返回 true。
-            if owner.transfer_stage(data, context) {
-                return K_RESULT_OK;
-            }
+            // 【Transfer 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
+            // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
+            // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
+            // 而不是把整条轨静音（见 `ExtensionOwner::transfer_output`）。
+            let (snapshot_source, layered) = match owner.transfer_stage(data, context) {
+                crate::render::extension::TransferStage::Handled => return K_RESULT_OK,
+                crate::render::extension::TransferStage::Snapshot { source, layered } => {
+                    (source, layered)
+                }
+            };
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
             if data.process_mode != 2
                 && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
@@ -1704,7 +1715,14 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 原生快照，`copy_block` 会把它线性重采样到宿主输出率。此前这里用
             // `context.sample_rate` 且只认 44.1/48k，其余 `kResultFalse` —— 与 setup 的接受域
             // 不一致，96k 工程里会持续静音甚至被踢出链路（见 `setup_sample_rate`）。
-            let publisher = &owner.snapshots[owner.snapshot_index_for_rate(context.sample_rate)];
+            //
+            // 原始磁带只有一份（它按捕获时的工程率录制），因此不参与按率选择。
+            let publisher = match snapshot_source {
+                crate::render::extension::SnapshotSource::Processed => {
+                    &owner.snapshots[owner.snapshot_index_for_rate(context.sample_rate)]
+                }
+                crate::render::extension::SnapshotSource::Raw => &owner.raw_tape,
+            };
             // 输出率取宿主在 processContext 里报的率（那才是宿主缓冲的真实率）；它缺失/
             // 非法时退回 `setupProcessing` 的声明，避免 0 触发无意义的巨量重采样。
             let output_rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
@@ -1714,12 +1732,30 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             };
             // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
             let ready = unsafe {
-                publisher.copy_block(
-                    context.project_time_samples,
-                    output_rate.max(1.0) as u32,
-                    &mut *data.outputs,
-                    data.num_samples as usize,
-                )
+                if layered {
+                    // 【为什么要重新取一次输入视图】Transfer 要"录过的那一段被替换、其余
+                    // 保持宿主原声"，而"范围外"这个区别只在写之前知道（见
+                    // `copy_block_layered`）。这里不分配：`capture_view` 只借用宿主缓冲。
+                    let input = crate::audio_abi::capture_view(
+                        data,
+                        context.project_time_samples,
+                        context.sample_rate,
+                    );
+                    publisher.copy_block_layered(
+                        context.project_time_samples,
+                        output_rate.max(1.0) as u32,
+                        &mut *data.outputs,
+                        data.num_samples as usize,
+                        &input.planes,
+                    )
+                } else {
+                    publisher.copy_block(
+                        context.project_time_samples,
+                        output_rate.max(1.0) as u32,
+                        &mut *data.outputs,
+                        data.num_samples as usize,
+                    )
+                }
             };
             if data.process_mode == 2 && !ready {
                 return K_RESULT_FALSE;

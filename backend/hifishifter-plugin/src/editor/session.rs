@@ -770,6 +770,14 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
+                // 【为什么补缓冲挂在会话 actor 上】它是**周期性**维护，且必须在音频线程
+                // 取用备用缓冲之前完成。此前它挂在 WebView 的 20ms 定时器上 —— 于是关掉
+                // 插件窗口就断录（2 粒 × 8 秒 = 24 秒后 `NoSpare`）。actor 由会话创建，
+                // 与窗口开没开无关；它空闲时 100ms 一轮（见循环末尾的 `recv_timeout`），
+                // 相对 8 秒一粒的备用缓冲有两个数量级的余量。
+                if let Some(owner) = session.transfer_owner() {
+                    owner.transfer().top_up();
+                }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。
                 if session.reload_requested.swap(false, Ordering::AcqRel) {
@@ -1871,11 +1879,27 @@ impl EditorSession {
         // 保存冷恢复没有本地generation，原线完成仍须重应用，不能永久沿旧源F0快照。
         true
     }
+    /// 本会话的宿主时钟：ARA 形态是文档的，Transfer 形态是 owner 自己的。
+    ///
+    /// 【为什么必须有这一条】`transport()` 与 `playback_state()` 此前只读**文档**时钟，
+    /// 而 Transfer 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
+    /// 钉在 0，且永远认为宿主没在播放。而宿主位置其实一直写着（`observe_transport` 在
+    /// **每个音频块**上写 owner 的时钟），只是没有任何一条命令去读它。
+    ///
+    /// 【为什么 owner 的时钟在这里就一定有值】它由 `setupProcessing` 装载
+    /// （见 `ExtensionOwner::arm_transfer_rendering` 的调用点），而那是宿主在任何
+    /// `process` 之前的确定性时刻 —— 与窗口开没开无关。
+    fn host_clock(&self) -> Option<Arc<crate::render::transport::TransportClock>> {
+        match self.document() {
+            Some(document) => Some(document.clock.clone()),
+            None => self.transfer_owner()?.clock.get().cloned(),
+        }
+    }
+
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self) -> (f64, bool) {
-        self.document()
-            .filter(|document| document.is_alive())
-            .map(|document| document.clock.read())
+        self.host_clock()
+            .map(|clock| clock.read())
             .unwrap_or_else(|| (self.timeline.lock_or_recover().playhead_sec, false))
     }
     /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
@@ -1892,14 +1916,18 @@ impl EditorSession {
     }
     /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
     pub(super) fn playback_state(&self) -> Value {
-        let (position, playing) = self.document()
-            .filter(|document| document.is_alive())
-            .map(|document| document.clock.read())
+        let clock = self.host_clock();
+        let (position, playing) = clock
+            .as_ref()
+            .map(|clock| clock.read())
             .unwrap_or((0., false));
         json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
-            "host_authoritative":true})
+            // 【为什么如实报而不是恒真】这个字段的语义是"上面那个位置来自宿主"。
+            // Transfer 形态下时钟来自 owner（同样是宿主写入的），因此也为真；
+            // 两条都没有时它是假 —— 前端据此知道那个 0 不是"宿主在 0"。
+            "host_authoritative":clock.is_some()})
     }
     /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
     pub(super) fn report_transport_probe(&self) {
@@ -2508,6 +2536,65 @@ pub(crate) mod tests {
             "同一实例必须是同一份会话"
         );
         first.close();
+    }
+
+    /// **Transfer 形态的宿主时钟来自 owner，不是文档。**
+    ///
+    /// 【为什么这是回归测试】`transport()` / `playback_state()` 此前只读**文档**时钟，
+    /// 而 Transfer 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
+    /// 钉在 0，且永远认为宿主没在播放。而宿主位置其实一直在写（`observe_transport` 在
+    /// **每个音频块**上写 owner 的时钟），只是没有任何一条命令去读它。
+    #[test]
+    fn a_transfer_session_reads_the_host_clock_instead_of_a_document() {
+        let owner = Arc::new(ExtensionOwner::default());
+        owner.set_setup_sample_rate(48_000.0);
+        owner.note_binding_window_closed_without_ara();
+        // 时钟的装载点与 `setupProcessing` 里调的是同一个函数。
+        owner.arm_transfer_rendering();
+        let session = owner.transfer_session().unwrap();
+        assert!(session.is_transfer());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(session.transport(), (0.0, false), "还没收到宿主上下文");
+            // 时钟**已经装载**（`setupProcessing` 会做这件事），只是还没收到任何上下文：
+            // 位置是 0、没在播放，而"位置来自宿主"这件事为真 —— 与 ARA 形态同一口径
+            // （那里也恒为真）。前端据此知道那个 0 是"宿主在 0"而不是"读不到"。
+            assert_eq!(session.playback_state()["host_authoritative"], true);
+            // 宿主在播放，位置 1.5 s。
+            owner.observe_transport(
+                &crate::audio_abi::ProcessContext {
+                    state: (1 << 1) | (1 << 10),
+                    sample_rate: 48_000.0,
+                    project_time_samples: 72_000,
+                    ..Default::default()
+                },
+                0,
+            );
+            let (position, playing) = session.transport();
+            assert!(playing, "宿主在播放必须如实报出");
+            assert!(
+                (position - 1.5).abs() < 1e-9,
+                "位置必须来自宿主时钟，实际 {position}"
+            );
+            let state = session.playback_state();
+            assert_eq!(state["is_playing"], true);
+            assert_eq!(state["host_authoritative"], true);
+            assert!((state["position_sec"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+            // 宿主停止 ⇒ 如实回落（面板据此说"宿主没在播放，录不到内容"）。
+            owner.observe_transport(
+                &crate::audio_abi::ProcessContext {
+                    state: 0,
+                    sample_rate: 48_000.0,
+                    project_time_samples: 72_000,
+                    ..Default::default()
+                },
+                0,
+            );
+            assert!(!session.transport().1, "停止播放必须如实回落");
+        }));
+        session.close();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// 建一个**真的录过一段**的 Transfer 实例：没有 ARA 文档，素材来自输入总线。

@@ -299,6 +299,53 @@ impl SignalSource {
     }
 }
 
+/// 本块在 Transfer 通路上的输出结论（见 [`ExtensionOwner::transfer_output`]）。
+///
+/// 【为什么把它做成一个值而不是几个布尔】"没素材时会听到什么"是这条通路唯一的对外
+/// 行为，此前散在 `transfer_stage` 的早退与 `vst3` 的后续分支里。收敛成一个值之后，
+/// 每个分支都能被单独断言，而"静音"只剩"确实没有素材"一个含义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferOutput {
+    /// 本阶段**不介入**：继续走既有快照通路。
+    ///
+    /// 两种场合落在这里：绑在 ARA 文档上的实例（素材由 ARA 授权），以及形态还没落定
+    /// 且**没有**素材的实例。后者是刻意的：那时宿主可能正要绑定 ARA，而
+    /// "未录制就不动输出"是既有契约（见 `an_unarmed_transfer_path_leaves_the_snapshot_output_alone`）。
+    Untouched,
+    /// 正在录制：输出直通（监听）或静音。
+    Recording,
+    /// 有素材，且处理结果就是**当前** take：输出处理结果。
+    Processed,
+    /// 有素材，但处理结果还不是当前 take：输出**原始磁带**（未处理的捕获）。
+    Raw,
+    /// 已确知本实例走 Transfer、但还没有素材：透传宿主原声。
+    PassThrough,
+}
+
+/// [`ExtensionOwner::transfer_stage`] 给调用方的结论。
+pub(crate) enum TransferStage {
+    /// 本阶段已经写完输出：调用方直接返回，不要再走快照通路。
+    Handled,
+    /// 继续走既有快照通路。
+    Snapshot {
+        /// 读哪个发布器。
+        source: SnapshotSource,
+        /// 快照覆盖范围**之外**的帧是否直通宿主原声。
+        ///
+        /// Transfer 是（只替换录过的那一段）；ARA 不是（整条轨由 ARA 接管，区间外静音）。
+        layered: bool,
+    },
+}
+
+/// 快照通路该读哪个发布器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotSource {
+    /// 合成结果（`ExtensionOwner::snapshots`）。
+    Processed,
+    /// 活动 take 的未处理捕获（`ExtensionOwner::raw_tape`）。
+    Raw,
+}
+
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -383,6 +430,23 @@ pub(crate) struct ExtensionOwner {
     #[cfg(test)]
     prepare_requests: AtomicU64,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
+    /// 活动 Transfer take 的**未处理** PCM，与处理结果同形（一份 `PlaybackSnapshot`）。
+    ///
+    /// 【为什么需要它】处理结果要经过神经合成（数秒），而"录完就想听到东西"是用户的
+    /// 最低预期。有了这一份，输出通路的兜底顺序就是"处理后 → 原始 → 区间外直通"，
+    /// 于是**任何**中间状态下都有声音；"静音"于是只剩"确实没有素材"这一个含义。
+    ///
+    /// 【为什么与 `snapshots` 分开而不是塞进去】两者更新节奏不同：处理结果随曲线编辑
+    /// 重发，原始磁带只在 take 变化时重发。合成失败或还没完成时这一份仍然有效。
+    pub raw_tape: super::snapshot::SnapshotPublisher,
+    /// 已发布处理结果对应的 take 号（`0` = 还没发过）。
+    ///
+    /// 【为什么单独记而不是从 `transfer_prepared` 里拆位】那个版本号是
+    /// `take ^ (edit << 32)` 的位运算结果；音频线程要回答的是"已发布的那份是不是
+    /// **当前** take"，一个显式读数比拆位可靠得多（也免得 take 号增长过 32 位时出错）。
+    transfer_ready_take: AtomicU64,
+    /// 已发布原始磁带对应的 take 号（`0` = 还没发过）。
+    raw_tape_take: AtomicU64,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
     channel: Mutex<Option<hifishifter_host_channel::Server>>,
@@ -648,17 +712,13 @@ impl ExtensionOwner {
             return;
         }
         self.note_binding_window_closed_without_ara();
-        // Transfer 形态下**没有任何 ARA 回调**会来驱动这件事，而它是必须周期性发生的：
-        // 备用缓冲要在音频线程取用之前备好。UI 定时器是唯一的现成心跳（20ms），
-        // 且"能录制"本来就要求窗口开着。
-        //
-        // 【为什么不再在这里 `prepare()`】Transfer 的渲染由**编辑器会话**驱动：只有它
-        // 持有带用户曲线的时间线（见 `transfer_prepare_job`）。两个驱动者会让同一份
-        // 合成被并发跑两遍、互相抢快照预算，而它们产出的内容又完全相同 —— 没有收益。
-        if self.mode() == InstanceMode::Transfer {
-            self.arm_transfer_rendering();
-            self.transfer.top_up();
-        }
+        // 【为什么这里不再做任何维护】备用缓冲与宿主时钟此前挂在 UI 定时器上，于是
+        // "关掉窗口就断录"（备用缓冲 2 粒 × 8 秒 = 24 秒后 `NoSpare`）而且没开窗口的
+        // 会话里宿主位置根本没有地方落。现在两者都有与窗口无关的归属：
+        //   * 时钟/合成队列 → `setupProcessing`（见 `arm_transfer_rendering` 的调用点）；
+        //   * 备用缓冲       → 会话 actor（见 `EditorSession::run` 的 `top_up` 调用）。
+        // 这里只剩"形态落定 + 一次性说明"，形态本身仍然是这个 tick 的职责 ——
+        // 它是唯一同时握有 `setActive` 时刻与宽限期的地方。
         if self
             .ara_binding_absent_reported
             .swap(true, Ordering::AcqRel)
@@ -1816,8 +1876,40 @@ impl ExtensionOwner {
     /// 捕获存储、物化分析副本 —— 那是文件 I/O。这里只置一个标志，由会话的 actor 线程
     /// 在下一轮自己加载（加载成功会顺带排一次渲染）。
     pub(crate) fn request_transfer_reload(self: &Arc<Self>) {
+        // 原始磁带要**立刻**跟着 take 走，不能等合成：用户按下停止之后马上就想听到东西，
+        // 而一次神经合成要数秒。这一份也是"换 take 之后绝不播上一份"的保证
+        // （见 `raw_tape_ready` 的 take 比对）。
+        self.sync_raw_tape();
         if let Ok(session) = self.transfer_session() {
             session.request_reload();
+        }
+    }
+
+    /// 把活动 take 的原始捕获发布成一份**未处理**的快照（见 [`Self::raw_tape`]）。
+    ///
+    /// 【为什么幂等】它由命令（UI 线程）与合成准备（actor）两处调用；take 号没变时
+    /// 直接返回，不重复拷贝几十 MB 的 PCM。
+    pub(crate) fn sync_raw_tape(&self) {
+        let Some(take) = self.transfer.active_take_id() else {
+            // 没有活动 take（清空 / 还没录）：撤掉指针，让仲裁落到透传。
+            self.raw_tape.clear();
+            self.raw_tape_take.store(0, Ordering::Release);
+            return;
+        };
+        if self.raw_tape_take.load(Ordering::Acquire) == take {
+            return;
+        }
+        let Some(snapshot) = self.transfer.raw_tape() else {
+            return;
+        };
+        self.raw_tape.collect_retired();
+        if !self.raw_tape.has_capacity(&snapshot) {
+            log::warn!("[transfer] raw tape does not fit the snapshot budget; keeping the previous one");
+            return;
+        }
+        match self.raw_tape.publish(snapshot) {
+            Ok(()) => self.raw_tape_take.store(take, Ordering::Release),
+            Err(error) => log::warn!("[transfer] raw tape publish failed: {error:?}"),
         }
     }
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
@@ -1866,9 +1958,16 @@ impl ExtensionOwner {
         if self.is_bound() {
             return !self.is_editor_only();
         }
-        // 未绑定：只有 Transfer 形态**且已有素材**才渲染。没有素材时保持静音 ——
-        // 那是"用户还没录"的诚实表现，而不是"插件坏了"。
-        self.mode() == InstanceMode::Transfer && self.transfer.has_material()
+        // 【为什么"有素材"本身就是充分证据】素材只有一条产生路径：`transfer_start`
+        // （ARA 绑定时被显式拒绝，见 `transfer/commands.rs`）或组件 state 恢复（绑定的
+        // 实例走上面那一支）。因此"未绑定 + 有素材"只可能是 Transfer。
+        //
+        // 【为什么不能只问 `mode()`】形态判定此前完全依赖编辑器窗口的 20ms 定时器
+        // （`note_editor_tick`）与 `setActive` 之后 5 秒的宽限期。宿主把插件当普通插入
+        // 用时用户很可能**根本没开窗口**，于是 `mode()` 永远是 `Undetermined` ⇒ 这里
+        // 恒假 ⇒ 一条快照都不发布 ⇒ 录制正常、界面正常、**播放时全静音**。
+        // 素材是比时钟更早、更硬的证据：它已经存在，就说明这个实例在录宿主。
+        self.transfer.has_material()
     }
 
     /// Transfer 形态的渲染准备（不经过 ARA 文档）。
@@ -1929,6 +2028,9 @@ impl ExtensionOwner {
         if self.transfer.active_take_id().is_none() {
             return Ok(());
         }
+        // 【为什么这里也要补一次】命令那条路（`request_transfer_reload`）只在用户动作时
+        // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
+        self.sync_raw_tape();
         let (take, edit, input) = self.transfer_render_input()?;
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
         // 合成会被排队几百次。版本里必须**带上编辑代次**：只认 take 会让参数改动
@@ -1968,16 +2070,79 @@ impl ExtensionOwner {
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
         self.transfer_prepared.store(version, Ordering::Release);
+        // 处理结果与当前 take 的对应关系：音频线程据此在"处理结果"与"原始磁带"之间选
+        // （见 `processed_ready`）。换 take 之后这里才更新，所以中间那段空窗由原始磁带兜底。
+        self.transfer_ready_take.store(take, Ordering::Release);
         log::info!("[transfer] prepared take {take} edit {edit}");
         Ok(())
     }
 
+    /// 本块在 Transfer 通路上该怎么输出。**无锁、无分配**，可从音频线程调用。
+    ///
+    /// 【为什么要有这个枚举】"没素材时会听到什么"此前要读者把 `transfer_stage` 的早退
+    /// 与 `vst3` 的后续分支拼起来才能回答。收敛成一个值之后，每个分支都能被单独断言，
+    /// 而"静音"只剩下"确实没有素材"这一个含义。
+    pub(crate) fn transfer_output(&self) -> TransferOutput {
+        // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
+        // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
+        // 形态一旦是 ARA，任何 Transfer 结论都不适用。
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            return TransferOutput::Untouched;
+        }
+        if self.transfer.is_armed() {
+            return TransferOutput::Recording;
+        }
+        if !self.transfer.has_material() {
+            // 【为什么只在"已确知是 Transfer"时才主动写输出】形态未定（窗口还没开过、
+            // 或 `setActive` 后还没过宽限期）时宿主可能正要绑定 ARA，而那时输出由快照
+            // 通路负责 —— 主动写输出会把一个正常渲染的 ARA 实例直通掉。形态一旦落定为
+            // Transfer，就没有那个可能了：透传让插件在录制之前是**透明**的，而不是
+            // "插入即把这条轨静音"（后者是用户最容易误判成"插件坏了"的表现）。
+            return if self.mode() == InstanceMode::Transfer {
+                TransferOutput::PassThrough
+            } else {
+                TransferOutput::Untouched
+            };
+        }
+        if self.processed_ready() {
+            return TransferOutput::Processed;
+        }
+        if self.raw_tape_ready() {
+            return TransferOutput::Raw;
+        }
+        // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声。
+        TransferOutput::PassThrough
+    }
+
+    /// 已发布的**处理结果**是否对应当前活动 take。
+    ///
+    /// 【为什么只比 take、不比编辑代次】编辑代次在会话那一侧，音频线程取不到。而"曲线
+    /// 改了但合成还没跑完"这一档若回落到原始磁带，用户刚调完音高就会听到**未处理的原声**
+    /// —— 那是倒退。只比 take 号：曲线编辑不改 take，于是仍然读处理结果（听到上一版处理，
+    /// 与既有行为一致）；换 take 才回落。
+    fn processed_ready(&self) -> bool {
+        let Some(take) = self.transfer.active_take_id() else {
+            return false;
+        };
+        self.transfer_ready_take.load(Ordering::Acquire) == take
+            && self.snapshots.iter().any(|publisher| publisher.is_ready())
+    }
+
+    /// 已发布的**原始磁带**是否对应当前活动 take。
+    ///
+    /// 【为什么要比 take 号】否则换 take 之后会继续播上一份原始磁带 —— 用户听到的是
+    /// 上一次录制的内容，而界面上已经是新 take。
+    fn raw_tape_ready(&self) -> bool {
+        let Some(take) = self.transfer.active_take_id() else {
+            return false;
+        };
+        self.raw_tape_take.load(Ordering::Acquire) == take && self.raw_tape.is_ready()
+    }
+
     /// 音频线程上的 Transfer 阶段。
     ///
-    /// 返回 `true` = **已经写过输出**，调用方必须直接返回（不要再走快照通路）。
-    ///
     /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
-    /// 未录制时它只读一个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
+    /// 未录制时它只读几个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
     /// 所有既有逻辑之前的前提。
     ///
     /// 【为什么录制中不走快照输出】正在录的那一段，插件手上还没有对应的素材；
@@ -1987,12 +2152,13 @@ impl ExtensionOwner {
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: &crate::audio_abi::ProcessContext,
-    ) -> bool {
+    ) -> TransferStage {
         let transfer = self.transfer();
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
         // "点一次 Transfer 然后导出"，而实时宿主必须真的播一遍。
         // SAFETY: 调用方保证 data 在本回调期间可读。
-        if unsafe { (*data).process_mode } == 2 {
+        let offline = unsafe { (*data).process_mode } == 2;
+        if offline {
             transfer.note_offline();
         }
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
@@ -2008,15 +2174,42 @@ impl ExtensionOwner {
             &block,
             context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
         );
-        if !transfer.is_armed() {
-            return false;
+        // 选项一次取好：它在音频线程上要取一次锁，而下面两个分支都要用。
+        let options = transfer.options();
+        match self.transfer_output() {
+            // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。
+            TransferOutput::Untouched => TransferStage::Snapshot {
+                source: SnapshotSource::Processed,
+                layered: false,
+            },
+            TransferOutput::Recording => {
+                let _ = transfer.on_block(block);
+                // 【为什么离线那一趟不监听】离线渲染（bounce / 导出）若只有一趟，直通会把
+                // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
+                // 错误。静音是诚实的：这一趟的唯一作用是把素材拿进来；第二趟（解除武装后再
+                // 导出）才是结果。实时播放则照旧监听，因为用户要听到自己正在录的东西。
+                if options.monitor && !offline {
+                    // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
+                    let _ = unsafe { crate::audio_abi::pass_through(data) };
+                }
+                TransferStage::Handled
+            },
+            // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
+            // 那段被替换成处理结果，其余保持宿主原声。见 `copy_block_layered`。
+            TransferOutput::Processed => TransferStage::Snapshot {
+                source: SnapshotSource::Processed,
+                layered: options.outside_passthrough,
+            },
+            TransferOutput::Raw => TransferStage::Snapshot {
+                source: SnapshotSource::Raw,
+                layered: options.outside_passthrough,
+            },
+            TransferOutput::PassThrough => {
+                // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
+                let _ = unsafe { crate::audio_abi::pass_through(data) };
+                TransferStage::Handled
+            }
         }
-        let _ = transfer.on_block(block);
-        if transfer.options().monitor {
-            // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
-            let _ = unsafe { crate::audio_abi::pass_through(data) };
-        }
-        true
     }
 
     /// 当前生效的编辑后端。
@@ -2040,8 +2233,15 @@ impl ExtensionOwner {
             InstanceMode::Transfer => {
                 crate::host::adapter::HostBackend::Transfer(crate::host::transfer::TransferHost::new())
             }
-            // `Undetermined` 与 `Ara` 都退到 ARA-only：前者是"还没确定"（此时按 ARA
-            // 准备是安全的，ARA 是更丰富的形态），后者本来就是这个后端。
+            // 【为什么 `Undetermined` 也要看素材】形态要等 `setActive` 之后 5 秒才落定，
+            // 而"宿主把本插件当普通插入"的会话里用户可能从不打开窗口 —— 那时形态永远
+            // 停在 `Undetermined`，按 ARA-only 准备会让 Transfer 的渲染准入失败。
+            // 素材存在本身就是 Transfer 的证明（见 `renders`）。
+            InstanceMode::Undetermined if self.transfer.has_material() => {
+                crate::host::adapter::HostBackend::Transfer(crate::host::transfer::TransferHost::new())
+            }
+            // 剩下的 `Undetermined` 是"还没确定"（此时按 ARA 准备是安全的，ARA 是更丰富的
+            // 形态），`Ara` 本来就是这个后端。
             InstanceMode::Undetermined | InstanceMode::Ara => {
                 crate::host::adapter::HostBackend::from_native(None)
             }
@@ -3570,3 +3770,5 @@ mod host_audio_state_tests;
 mod host_geometries_tests;
 #[cfg(test)]
 mod region_geometry_match_tests;
+#[cfg(test)]
+mod transfer_output_tests;

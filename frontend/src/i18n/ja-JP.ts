@@ -2168,6 +2168,8 @@ export const jaJP = {
         "クリップ編集とフェード幅はホストに同期 · フェード音声はホストが処理 · 逆再生は HiFiShifter が描画",
     plugin_transport_stop: "ホストの再生を停止",
     plugin_transport_play: "ホストの再生/一時停止",
+    plugin_transport_host_only:
+        "プラグインからホストの再生は開始できません — ホストで再生してください",
     plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
@@ -2187,9 +2189,9 @@ export const jaJP = {
     transfer_guide_recording:
         "録音中です。再生位置を動かしたりシークしたりしないでください。終わったら「停止」を押します。",
     transfer_guide_ready:
-        "録音できました。もう一度ホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
+        "録音できました。録音した範囲からホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
     transfer_guide_offline:
-        "このホストはオフライン書き出しにも対応しています。「録音」を押してから書き出し／バウンスすれば、リアルタイムで再生する必要はありません。",
+        "このホストはオフライン書き出しにも対応しています。オフラインは二段階です。「録音」を押して一度書き出すと取り込み（この回は無音）、録音を解除してもう一度書き出すと処理結果が得られます。",
     transfer_host_not_playing: "ホストが再生していません。録音されません。",
     transfer_not_applicable_ara: "このホストは ARA で音声を提供しています。Transfer は不要です。",
     transfer_cannot_capture:
@@ -2199,6 +2201,23 @@ export const jaJP = {
     transfer_field_gaps: "ジャンプ回数",
     transfer_field_spares: "残りバッファ",
     transfer_field_takes: "テイク数",
+    transfer_host_playing: "ホストが再生中",
+    transfer_field_waiting_host: "ホストの再生待ち",
+    transfer_recorded_silent:
+        "{seconds} 秒録音しましたが、入力が無音でした — このトラックの音声が本当にプラグインに届いているか確認してください。",
+    transfer_option_monitor: "録音中に入力をモニター",
+    transfer_option_monitor_hint: "録音中の音が聞こえます。オフにすると録音中は無音になります。",
+    transfer_option_outside: "録音範囲の外はホストの音声を再生",
+    transfer_option_outside_hint:
+        "録音した範囲だけが処理結果に置き換わり、それ以外はそのままです。オフにすると範囲外は無音になります。",
+    transfer_take_label: "テイク {id} · {clips} クリップ",
+    transfer_take_span: "{start} 秒 – {end} 秒",
+    transfer_take_use: "使用",
+    transfer_take_delete: "削除",
+    transfer_yes: "あり",
+    transfer_no: "なし",
+    transfer_diagnostics:
+        "ホストが提供：再生位置 {context} · 入力音声 {input} · オフライン書き出し {offline}",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 

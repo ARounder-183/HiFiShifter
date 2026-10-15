@@ -1,135 +1,77 @@
 /**
- * Transfer 面板（仅在不支持 ARA 的宿主里出现）。
+ * Transfer 的**设置与诊断**面板（仅在不支持 ARA 的宿主里出现）。
  *
- * 【它解决什么】VST3 里插件**无法**请求宿主播放：`IComponentHandler` 的三个版本里
- * 都没有播放请求，工程位置也只有 `ProcessContext` 一个来源。所以用户必须先按播放，
- * 插件才能把音频录进来。这个面板存在的首要理由就是**把这件事说清楚** ——
- * 否则用户面对的是一个按下去没有任何反应的按钮。
- *
- * 【为什么状态是轮询而不是事件】录制进度每 200ms 变一次，宿主不会推送。轮询
- * `transfer_status` 的代价只是一个整数读取（后端那条命令不取渲染锁、不合成）。
+ * 【为什么录制键不在这里】主入口是传输栏上的 [`TransferControl`] —— 用户对"录制"的
+ * 心智模型就是传输栏上的一个键（Melodyne 的 Transfer 也长在那里）。这个面板回答的是
+ * 另外两个问题：**刚发生了什么**（读数、take 列表、为什么没有声音）与**怎么改变行为**
+ * （监听、区间外处理）。
  *
  * 【为什么引导语由观察位决定】`sawContext` / `sawInput` / `sawOffline` 描述宿主
  * **实际**做了什么。没见过位置时不能说"还没播放"（可能宿主永远不给），而要说
  * "这个宿主没有把播放位置交给插件" —— 那是两个不同的、都能让用户据以行动的事实。
+ *
+ * 【为什么状态来自共享 store】它与传输栏上的控件必须看到**同一份**读数；各拉各的会
+ * 让两处错开一帧（控件说"录制中"、面板说"已录好"，用户会当成 bug）。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
-import { AppButton, AppField, AppStatusChip } from "../../ui";
-import { pluginBootstrap } from "../../services/hostDetect";
-import {
-    framesToSeconds,
-    transferApi,
-    transferErrorText,
-    type TransferStatus,
-} from "./transferApi";
+import { AppButton, AppEmptyState, AppField, AppStatusChip, AppSwitchRow } from "../../ui";
+import { framesToSeconds, type TransferStatus } from "./transferApi";
+import { startTransferPolling, transferActions, useTransferSnapshot } from "./transferStore";
 
-/** 轮询间隔：与后端录制读数的更新节奏一致（见 `transfer/mod.rs` 的说明）。 */
-const POLL_MS = 200;
-
-/** 帧→秒显示用的采样率；后端不把它塞进状态里，取不到时按 48k 显示量级即可。 */
-const DISPLAY_SAMPLE_RATE = 48_000;
+/** 帧→秒显示用的兜底采样率；后端还没收到宿主上下文时给 0。 */
+const FALLBACK_SAMPLE_RATE = 48_000;
 
 export function TransferPanel() {
     const { t, tVars } = useI18n();
-    const [status, setStatus] = useState<TransferStatus | null>(null);
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState("");
+    const { status, busy, error } = useTransferSnapshot();
 
-    const refresh = useCallback(async () => {
-        try {
-            setStatus(await transferApi.status());
-            setError("");
-        } catch (cause) {
-            // 【为什么不在这里停止轮询】状态查询失败是暂时的（会话未就绪等），
-            // 而面板的职责是持续反映真实状态。终态的判定由 `invoke` 的统一闸门做。
-            setError(transferErrorText(cause, t));
-        }
-    }, []);
+    useEffect(() => startTransferPolling(), []);
 
-    useEffect(() => {
-        void refresh();
-        const timer = window.setInterval(() => void refresh(), POLL_MS);
-        return () => window.clearInterval(timer);
-    }, [refresh]);
-
-    const run = useCallback(
-        async (action: () => Promise<unknown>) => {
-            setBusy(true);
-            try {
-                await action();
-                await refresh();
-            } catch (cause) {
-                setError(transferErrorText(cause, t));
-            } finally {
-                setBusy(false);
-            }
-        },
-        [refresh],
-    );
-
-    const recording = status?.recording ?? null;
-    // 宿主正在通过 ARA 供音 ⇒ Transfer 不适用（后端 `transfer_start` 也会拒）。
+    const recording = status?.state === "recording";
     const araBound = status?.araBound ?? false;
-    const canCapture =
-        !araBound && (status?.canCapture ?? pluginBootstrap()?.transferCaps?.canCapture ?? false);
-    const recordingNow = status?.state === "recording";
-    // 录制中但宿主没在播放 ⇒ 一个字节也进不来。这是这条通路最常见的失败（用法是
-    // "先按录制、再按播放"），必须直接说出来。
-    const stalled = recordingNow && !(status?.hostPlaying ?? false);
+    const canCapture = !araBound && (status?.canCapture ?? false);
+    const rate =
+        status?.capture?.sampleRate || status?.material?.sampleRate || FALLBACK_SAMPLE_RATE;
 
     return (
         <Flex direction="column" gap="3" p="3">
             <Flex align="center" gap="2">
-                <AppStatusChip tone={recordingNow ? "warning" : "accent"} tabular>
+                <AppStatusChip tone={recording ? "warning" : "accent"} tabular>
                     {t(statusKey(status?.state))}
                 </AppStatusChip>
                 {recording ? (
                     <span>
                         {tVars("transfer_recording_progress", {
-                            seconds: framesToSeconds(recording.capturedFrames, DISPLAY_SAMPLE_RATE),
+                            seconds: framesToSeconds(status?.recording?.capturedFrames ?? 0, rate),
                         })}
                     </span>
                 ) : null}
+                {status?.hostPlaying ? (
+                    <AppStatusChip tone="success">{t("transfer_host_playing")}</AppStatusChip>
+                ) : null}
             </Flex>
 
-            {/* 引导：先按播放，再录制。这是本面板存在的首要理由（见文件头）。 */}
-            <p>{araBound ? t("transfer_not_applicable_ara") : guideText(t, canCapture, status)}</p>
+            {/* 引导：先按播放，再录制。这是这条通路存在的首要理由（见文件头）。 */}
+            <p>{guideText(t, status, canCapture)}</p>
+
+            {/* 【为什么"录到了但没有内容"单独一条】全静音的录制不产生片段，于是时间轴
+                空白、面板却说"已录制" —— 三个读数互相矛盾。这一条把原因说穿。 */}
+            {status?.material?.silent ? (
+                <span role="alert" style={{ color: "var(--qt-warning-text)" }}>
+                    {tVars("transfer_recorded_silent", {
+                        seconds: framesToSeconds(status.material.capturedFrames, rate),
+                    })}
+                </span>
+            ) : null}
 
             <Flex gap="2" wrap="wrap">
-                {recordingNow ? (
-                    <>
-                        <AppButton
-                            intent="primary"
-                            onClick={() => void run(transferApi.stop)}
-                            disabled={busy}
-                        >
-                            {t("transfer_stop")}
-                        </AppButton>
-                        <AppButton
-                            intent="subtle"
-                            onClick={() => void run(transferApi.cancel)}
-                            disabled={busy}
-                        >
-                            {t("transfer_cancel")}
-                        </AppButton>
-                    </>
-                ) : (
-                    <AppButton
-                        intent="primary"
-                        onClick={() => void run(transferApi.start)}
-                        disabled={busy || !canCapture}
-                        data-tooltip={canCapture ? undefined : t("transfer_cannot_capture")}
-                    >
-                        {t("transfer_start")}
-                    </AppButton>
-                )}
                 <AppButton
                     intent="danger"
-                    onClick={() => void run(transferApi.clear)}
                     disabled={busy || (status?.takeCount ?? 0) === 0}
+                    onClick={() => void transferActions.clear()}
                 >
                     {t("transfer_clear")}
                 </AppButton>
@@ -138,29 +80,102 @@ export function TransferPanel() {
             {recording ? (
                 <Flex direction="column" gap="2">
                     <AppField label={t("transfer_field_segments")}>
-                        {String(recording.sealedSegments)}
+                        {String(status?.recording?.sealedSegments ?? 0)}
                     </AppField>
-                    <AppField label={t("transfer_field_gaps")}>{String(recording.gaps)}</AppField>
+                    <AppField label={t("transfer_field_gaps")}>
+                        {String(status?.recording?.gaps ?? 0)}
+                    </AppField>
                     {/* 备用缓冲见底 = 录制即将停止；这条读数让"为什么停了"有据可查。 */}
                     <AppField label={t("transfer_field_spares")}>
-                        {String(recording.spares)}
+                        {String(status?.recording?.spares ?? 0)}
                     </AppField>
                 </Flex>
             ) : null}
 
-            {status && status.takeCount > 0 ? (
-                <AppField label={t("transfer_field_takes")}>{String(status.takeCount)}</AppField>
-            ) : null}
+            {status && status.takes.length > 0 ? (
+                <Flex direction="column" gap="2">
+                    <AppField label={t("transfer_field_takes")}>
+                        {String(status.takes.length)}
+                    </AppField>
+                    {status.takes.map((take) => (
+                        <Flex key={take.id} align="center" gap="2">
+                            <AppStatusChip tone={take.active ? "accent" : "neutral"} tabular>
+                                {tVars("transfer_take_label", {
+                                    id: String(take.id),
+                                    clips: String(take.clips),
+                                })}
+                            </AppStatusChip>
+                            {take.startSec !== null && take.endSec !== null ? (
+                                <span className="hs-type-caption">
+                                    {tVars("transfer_take_span", {
+                                        start: take.startSec.toFixed(2),
+                                        end: take.endSec.toFixed(2),
+                                    })}
+                                </span>
+                            ) : null}
+                            <AppButton
+                                size="sm"
+                                disabled={busy || take.active}
+                                onClick={() => void transferActions.selectTake(take.id)}
+                            >
+                                {t("transfer_take_use")}
+                            </AppButton>
+                            <AppButton
+                                size="sm"
+                                intent="subtle"
+                                disabled={busy}
+                                onClick={() => void transferActions.deleteTake(take.id)}
+                            >
+                                {t("transfer_take_delete")}
+                            </AppButton>
+                        </Flex>
+                    ))}
+                </Flex>
+            ) : (
+                <AppEmptyState size="compact">{t("transfer_status_empty")}</AppEmptyState>
+            )}
 
-            {stalled ? (
-                <span className="hs-type-caption" style={{ color: "var(--qt-warning-text)" }}>
-                    {t("transfer_host_not_playing")}
+            <Flex direction="column" gap="2">
+                <AppSwitchRow
+                    control="switch"
+                    label={t("transfer_option_monitor")}
+                    hint={t("transfer_option_monitor_hint")}
+                    checked={status?.options.monitor ?? true}
+                    disabled={busy}
+                    onCheckedChange={(checked) =>
+                        void transferActions.setOptions({ monitor: checked })
+                    }
+                />
+                <AppSwitchRow
+                    control="switch"
+                    label={t("transfer_option_outside")}
+                    hint={t("transfer_option_outside_hint")}
+                    checked={status?.options.outsidePassthrough ?? true}
+                    disabled={busy}
+                    onCheckedChange={(checked) =>
+                        void transferActions.setOptions({ outsidePassthrough: checked })
+                    }
+                />
+            </Flex>
+
+            {/* 观察位：宿主**实际**做了什么。它是"为什么现在不能录"的唯一判据来源。 */}
+            <Flex direction="column" gap="1">
+                <span className="hs-type-caption">
+                    {tVars("transfer_diagnostics", {
+                        context: yesNo(t, status?.sawContext),
+                        input: yesNo(t, status?.sawInput),
+                        offline: yesNo(t, status?.sawOffline),
+                    })}
                 </span>
-            ) : null}
+            </Flex>
 
             {error ? <span role="alert">{error}</span> : null}
         </Flex>
     );
+}
+
+function yesNo(t: (key: TransferMessageKey) => string, value: boolean | undefined): string {
+    return value ? t("transfer_yes") : t("transfer_no");
 }
 
 /** 状态 → 词表键。不拼字符串。 */
@@ -184,9 +199,10 @@ function statusKey(state: TransferStatus["state"] | undefined) {
  */
 function guideText(
     t: (key: TransferMessageKey) => string,
-    canCapture: boolean,
     status: TransferStatus | null,
+    canCapture: boolean,
 ): string {
+    if (status?.araBound) return t("transfer_not_applicable_ara");
     if (status?.state === "recording") return t("transfer_guide_recording");
     if (status?.state === "ready") return t("transfer_guide_ready");
     if (status?.sawOffline) return t("transfer_guide_offline");
@@ -197,8 +213,17 @@ function guideText(
 type TransferMessageKey =
     | "transfer_not_applicable_ara"
     | "transfer_host_not_playing"
+    | "transfer_host_playing"
     | "transfer_guide_body"
     | "transfer_guide_recording"
     | "transfer_guide_ready"
     | "transfer_guide_offline"
-    | "transfer_cannot_capture";
+    | "transfer_cannot_capture"
+    | "transfer_option_monitor"
+    | "transfer_option_monitor_hint"
+    | "transfer_option_outside"
+    | "transfer_option_outside_hint"
+    | "transfer_take_use"
+    | "transfer_take_delete"
+    | "transfer_yes"
+    | "transfer_no";

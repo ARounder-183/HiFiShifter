@@ -62,6 +62,15 @@ pub(crate) fn handle(
             owner.request_transfer_reload();
             Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
+        "transfer_delete_take" => {
+            let id = args["takeId"]
+                .as_u64()
+                .ok_or("transfer_delete_take needs a numeric takeId")?;
+            transfer.delete_take(id)?;
+            // 时间线、原始磁带与合成结果都要跟着走：删掉的可能正是活动 take。
+            owner.request_transfer_reload();
+            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+        }
         "transfer_set_options" => {
             let current = transfer.options();
             transfer.set_options(TransferOptions {
@@ -70,6 +79,9 @@ pub(crate) fn handle(
                     .unwrap_or(current.max_duration_sec),
                 segment_sec: args["segmentSec"].as_f64().unwrap_or(current.segment_sec),
                 monitor: args["monitor"].as_bool().unwrap_or(current.monitor),
+                outside_passthrough: args["outsidePassthrough"]
+                    .as_bool()
+                    .unwrap_or(current.outside_passthrough),
             });
             Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
@@ -80,7 +92,6 @@ pub(crate) fn handle(
 /// 状态的线上形状。
 ///
 /// 【为什么 camelCase】与既有 bootstrap / 命令载荷一致；前端只认这一种命名。
-/// 状态载荷的线上形状。
 ///
 /// `ara_bound` 让界面能说清"这个宿主不需要 Transfer"，而不是让按钮点了没反应 ——
 /// 入口现在是**无条件**可见的（见 `transferEntry`：形态判定要等 5 秒宽限期，不能拿它
@@ -96,16 +107,63 @@ fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
             "spares": recording.spares,
         })
     });
+    // 【为什么把"录制长到哪了"发出来】录制过程中界面上必须有东西在动。没有这一项，
+    // 用户只能看到一个"已录 0.0 秒"的数字，而时间轴毫无变化 —— 这正是"不知道自己
+    // 录了什么"的来源。带子由前端画，几何由这里给。
+    let capture = status.capture.map(|capture| {
+        json!({
+            "startFrame": capture.start_frame,
+            "endFrame": capture.end_frame,
+            "positionFrame": capture.position_frame,
+            "sampleRate": capture.sample_rate,
+        })
+    });
+    // 【为什么把"录到了但没有内容"单独报出来】全静音的录制不产生片段，于是时间轴空白、
+    // 面板却说"已录制"。把捕获帧数与片段数一起给出来，界面就能说"录到了 12.5 秒，
+    // 但输入总线是静音"，而不是让用户面对三个互相矛盾的读数。
+    let material = status.material.map(|material| {
+        json!({
+            "clips": material.clips,
+            "capturedFrames": material.captured_frames,
+            "coveredFrames": material.covered_frames,
+            "spannedFrames": material.spanned_frames,
+            "sampleRate": material.sample_rate,
+            "silent": material.is_silent(),
+        })
+    });
+    let takes = status
+        .takes
+        .iter()
+        .map(|take| {
+            json!({
+                "id": take.id,
+                "active": take.active,
+                "clips": take.clips,
+                "startSec": take.span_sec.map(|span| span.0),
+                "endSec": take.span_sec.map(|span| span.1),
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "state": status.state,
         "recording": recording,
+        "capture": capture,
+        "material": material,
+        "hasMaterial": status.has_material,
+        "span": status.span.map(|span| json!({
+            "startFrame": span.start_frame,
+            "endFrame": span.end_frame,
+            "sampleRate": span.sample_rate,
+        })),
         "options": {
             "maxDurationSec": status.options.max_duration_sec,
             "segmentSec": status.options.segment_sec,
             "monitor": status.options.monitor,
+            "outsidePassthrough": status.options.outside_passthrough,
         },
         "takeCount": status.take_count,
         "activeTake": status.active_take,
+        "takes": takes,
         // 【为什么这三项是"观察到过"而不是"声明过"】它们描述宿主**实际**做了什么，
         // 而宿主不会声明。前端据此决定显示哪一条引导语：见过位置就能录，没见过位置
         // 就该说"这个宿主没有把播放位置交给插件"，而不是让用户对着按钮猜。

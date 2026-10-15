@@ -912,11 +912,14 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { message: args[0], detail: args[1] ?? null };
 
         // ── Transfer（仅插件形态）─────────────────────────────────────────
-        // 【为什么带参的两条在这里显式登记】`transfer_select_take` 与
-        // `transfer_set_options` 是唯一携带参数的 Transfer 命令；其余五条无参，
-        // 登记在下方 `NO_ARG_COMMANDS`。不登记就会返回 `__unwired`，前端乐观更新
-        // 生效而后端从未收到 —— 这条静默分叉在本仓已发生过三次。
+        // 【为什么带参的三条在这里显式登记】`transfer_select_take` /
+        // `transfer_delete_take` / `transfer_set_options` 是仅有的携带参数的 Transfer
+        // 命令；其余五条无参，登记在下方 `NO_ARG_COMMANDS`。不登记就会返回 `__unwired`，
+        // 前端乐观更新生效而后端从未收到 —— 这条静默分叉在本仓已发生过三次。
         case "transfer_select_take":
+            return { takeId: args[0] };
+
+        case "transfer_delete_take":
             return { takeId: args[0] };
 
         case "transfer_set_options":

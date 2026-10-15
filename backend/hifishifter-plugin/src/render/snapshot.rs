@@ -552,6 +552,124 @@ impl SnapshotPublisher {
         output.silence_flags = silence;
         snapshot.is_some()
     }
+
+    /// 与 [`Self::copy_block`] 相同，但快照覆盖范围**之外**的帧取输入总线。
+    ///
+    /// 【为什么必须区分"范围内静音"与"范围外"】`copy_block` 把范围外也写成 0，调用方
+    /// 无法在事后补救 —— 写完之后两种零一模一样。Transfer 要的是"录过的那一段被替换成
+    /// 处理结果、其余保持宿主原声"，这个区别只能在写之前知道。
+    ///
+    /// 【为什么按帧判断而不是整段替换】快照与宿主的块并不对齐：一段录制可以在任何一帧
+    /// 开始和结束，宿主块的首帧也一样。
+    ///
+    /// 【没有快照时怎么办】整块取输入 —— 于是"刚录完、合成还没好"这一段是宿主原声，
+    /// 而不是静音。这是本函数存在的另一个理由：它让"没有输出"不可能发生。
+    ///
+    /// # Safety
+    /// 与 [`Self::copy_block`] 相同；`planes` 中每个非空切片至少含 `frames` 帧。
+    pub unsafe fn copy_block_layered(
+        &self,
+        sample: i64,
+        rate: u32,
+        output: &mut AudioBusBuffers,
+        frames: usize,
+        planes: &[Option<&[f32]>; 2],
+    ) -> bool {
+        if output.num_channels == 0 || output.channel_buffers.is_null() {
+            return false;
+        }
+        let read_guard = self.enter();
+        // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
+        let snapshot = read_guard.snapshot();
+        if snapshot.is_none() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        let declared = output.num_channels as usize;
+        let channels = declared.min(2);
+        let mut silence: u64 = if declared >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << declared) - 1
+        };
+        let ratio = snapshot
+            .map(|snapshot| snapshot.sample_rate as f64 / rate.max(1) as f64)
+            .unwrap_or(1.0);
+        let resampling = (ratio - 1.0).abs() > 1e-9;
+        // 输入是单声道时两个输出声道取同一个平面（与 `pass_through` 的展开一致）。
+        let input_channels = planes.iter().filter(|plane| plane.is_some()).count();
+        let input_at = |channel: usize, offset: usize| -> Option<f32> {
+            let index = if input_channels <= 1 { 0 } else { channel };
+            planes
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(|plane| plane.get(offset))
+                .copied()
+        };
+        let read = |channel: usize, offset: usize| -> f32 {
+            let Some(snapshot) = snapshot else {
+                return input_at(channel, offset).unwrap_or(0.0);
+            };
+            let local = sample
+                .checked_add(offset as i64)
+                .and_then(|sample| sample.checked_sub(snapshot.origin_sample));
+            let Some(local) = local else {
+                return input_at(channel, offset).unwrap_or(0.0);
+            };
+            let at = |position: f64| -> Option<f32> {
+                if position < 0.0 {
+                    return None;
+                }
+                let index = usize::try_from(position as u64).ok()?;
+                if channel == 0 || snapshot.right.is_empty() {
+                    snapshot.left.get(index).copied()
+                } else {
+                    snapshot.right.get(index).copied()
+                }
+            };
+            // 快照的覆盖范围是 `[0, left.len())` 帧（`origin_sample` 已扣掉）。
+            let inside = |position: f64| position >= 0.0 && position < snapshot.left.len() as f64;
+            if !resampling {
+                let position = local as f64;
+                return if inside(position) {
+                    at(position).unwrap_or(0.0)
+                } else {
+                    input_at(channel, offset).unwrap_or(0.0)
+                };
+            }
+            let position = local as f64 * ratio;
+            if !inside(position) {
+                return input_at(channel, offset).unwrap_or(0.0);
+            }
+            let base = position.floor();
+            let frac = (position - base) as f32;
+            let a = at(base).unwrap_or(0.0);
+            // 末尾一帧没有后继：保持最后一个采样（不外推、不补零）。
+            let b = at(base + 1.0).unwrap_or(a);
+            a + (b - a) * frac
+        };
+        for channel in 0..channels {
+            // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            for offset in 0..frames {
+                let value = if channels == 1 {
+                    (read(0, offset) + read(1, offset)) * 0.5
+                } else {
+                    read(channel, offset)
+                };
+                // SAFETY: 宿主提供至少 frames 样本的可写平面。
+                unsafe { plane.add(offset).write(value) };
+                if value != 0.0 {
+                    silence &= !(1 << channel);
+                }
+            }
+        }
+        output.silence_flags = silence;
+        snapshot.is_some()
+    }
 }
 /// 一个实时读区的 guard：持有它期间，它登记的那份快照不会因回收而释放。
 struct ReadSection {
@@ -1113,5 +1231,64 @@ mod tests {
             total += observed;
         }
         assert!(total > 0, "读者至少应成功进入过一次读区");
+    }
+
+    /// **区间外直通输入**：录过的那一段被替换成快照，其余保持宿主原声。
+    ///
+    /// 【为什么这是回归测试】`copy_block` 把快照范围外也写成 0 —— 于是"只录了 10 秒"
+    /// 表现成"整条轨静音"，用户以为自己录坏了。这一条同时钉住两件事：范围内取快照、
+    /// 范围外取输入总线（而不是零）。
+    #[test]
+    fn layered_copy_substitutes_only_the_snapshot_span() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 2,
+                left: vec![0.2, 0.3],
+                right: vec![0.4, 0.5],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [0.0_f32; 4];
+        let mut right = [0.0_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        // 输入总线是常量，便于识别"这一帧取的是输入"。
+        let input_left = [7.0_f32; 4];
+        let input_right = [8.0_f32; 4];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        // 块首 sample=0、4 帧：快照覆盖 [2,4) ⇒ 前两帧取输入，后两帧取快照。
+        assert!(unsafe { publisher.copy_block_layered(0, 4, &mut bus, 4, &input) });
+        assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
+        assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
+    }
+
+    /// **没有快照时整块取输入**：于是"刚录完、合成还没好"这一段是宿主原声，不是静音。
+    ///
+    /// 【为什么这是这条通路存在的第二个理由】它是"任何中间状态下都有声音"的最后一层
+    /// 兜底 —— 用户按下停止之后立刻听到东西，而不是等一次神经合成跑完。
+    #[test]
+    fn layered_copy_falls_back_to_the_input_without_a_snapshot() {
+        let publisher = SnapshotPublisher::new(1024);
+        let mut left = [0.0_f32; 2];
+        let mut right = [0.0_f32; 2];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = [0.5_f32; 2];
+        // 单声道输入（右平面缺失）⇒ 两个输出声道都取左。
+        let input = [Some(&input_left[..]), None];
+        assert!(!unsafe { publisher.copy_block_layered(0, 4, &mut bus, 2, &input) });
+        assert_eq!(left, [0.5, 0.5]);
+        assert_eq!(right, [0.5, 0.5]);
+        assert_eq!(bus.silence_flags, 0, "有非零输出就不该报静音");
     }
 }

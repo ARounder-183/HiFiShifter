@@ -2139,6 +2139,8 @@ export const koKR = {
         "클립 편집과 페이드 너비는 호스트에 동기화 · 페이드 오디오는 호스트가 처리 · 역재생은 HiFiShifter가 렌더링",
     plugin_transport_stop: "호스트에서 재생 정지",
     plugin_transport_play: "호스트에서 재생/일시 정지",
+    plugin_transport_host_only:
+        "플러그인이 호스트 재생을 시작할 수 없습니다 — 호스트에서 재생하세요",
     plugin_standalone_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
     plugin_reverse_unavailable:
@@ -2158,9 +2160,9 @@ export const koKR = {
     transfer_guide_recording:
         "녹음 중입니다. 재생 위치를 옮기거나 탐색하지 마세요. 끝나면 「정지」를 누릅니다.",
     transfer_guide_ready:
-        "녹음되었습니다. 호스트를 다시 재생하면 처리 결과를 들을 수 있습니다. 다시 녹음하면 대체됩니다.",
+        "녹음되었습니다. 녹음한 구간부터 호스트를 재생하면 처리 결과를 들을 수 있습니다. 다시 녹음하면 대체됩니다.",
     transfer_guide_offline:
-        "이 호스트는 오프라인 렌더도 지원합니다. 「녹음」을 누른 뒤 내보내기나 바운스를 하면 실시간으로 재생할 필요가 없습니다.",
+        "이 호스트는 오프라인 렌더도 지원합니다. 오프라인은 두 단계입니다. 「녹음」을 누르고 한 번 내보내면 수집되고(이 회차는 무음), 녹음을 해제하고 다시 내보내면 처리 결과가 나옵니다.",
     transfer_host_not_playing: "호스트가 재생 중이 아닙니다. 녹음되지 않습니다.",
     transfer_not_applicable_ara:
         "이 호스트는 ARA로 오디오를 제공합니다. Transfer는 필요하지 않습니다.",
@@ -2171,6 +2173,23 @@ export const koKR = {
     transfer_field_gaps: "점프 횟수",
     transfer_field_spares: "남은 버퍼",
     transfer_field_takes: "테이크 수",
+    transfer_host_playing: "호스트 재생 중",
+    transfer_field_waiting_host: "호스트 재생 대기 중",
+    transfer_recorded_silent:
+        "{seconds}초를 녹음했지만 입력이 무음입니다 — 이 트랙의 오디오가 실제로 플러그인에 들어오는지 확인하세요.",
+    transfer_option_monitor: "녹음 중 입력 모니터",
+    transfer_option_monitor_hint: "녹음 중인 소리가 들립니다. 끄면 녹음 중에는 무음이 됩니다.",
+    transfer_option_outside: "녹음 구간 밖은 호스트 원음을 재생",
+    transfer_option_outside_hint:
+        "녹음한 구간만 처리 결과로 바뀌고 나머지는 그대로입니다. 끄면 구간 밖은 무음이 됩니다.",
+    transfer_take_label: "테이크 {id} · 클립 {clips}개",
+    transfer_take_span: "{start}초 – {end}초",
+    transfer_take_use: "사용",
+    transfer_take_delete: "삭제",
+    transfer_yes: "있음",
+    transfer_no: "없음",
+    transfer_diagnostics:
+        "호스트 제공: 재생 위치 {context} · 입력 오디오 {input} · 오프라인 렌더 {offline}",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
 

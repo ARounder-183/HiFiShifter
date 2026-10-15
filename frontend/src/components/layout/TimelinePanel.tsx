@@ -218,6 +218,7 @@ import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRan
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
 import { useTimelineDragDrop } from "./timeline/hooks/useTimelineDragDrop";
+import { useTransferReveal } from "./timeline/hooks/useTransferReveal";
 import {
     createTimelineViewportAccess,
     type TimelineViewportAccess,
@@ -717,6 +718,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportAccessRef.current = createTimelineViewportAccess({ scrollRef, kernelHostRef });
     }
     const viewportAccess = viewportAccessRef.current;
+
+    // 录完之后把视口移到刚录好的区间（见 `useTransferReveal` 的文件头）。
+    useTransferReveal(viewportAccessRef);
 
     /**
      * 标尺播放头（竖线 + 倒三角）的**挂载定位**。

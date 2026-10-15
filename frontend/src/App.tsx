@@ -14,7 +14,6 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { TransferPanel } from "./features/transfer/TransferPanel";
-import { isTransferInstance } from "./features/transfer/transferEntry";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
@@ -110,7 +109,6 @@ import {
     cycleFocus,
     dissolvePanelCommand,
     maximizeActive,
-    openPanelById,
     toggleFloatActive,
 } from "./features/dock/dockApi";
 import { hydrateDock } from "./features/dock/dockSlice";
@@ -1534,20 +1532,13 @@ function AppInner() {
         // 事件用 `try_send`（队列满即丢），丢一个 `active:false` 就会让状态栏片
         // **永久亮着**。快照说"不在渲染"时强制熄灭；事件只负责进度与快速点亮。
         // 独立 App 不订阅：那边没有插件 actor，也没有这条丢包路径。
-        // 【Transfer 面板的自动浮出】Transfer 最大的风险不是技术上做不到，而是用户不知道
-        // "要先让宿主播放、再按录制"（Transfer 方案 §11.4）—— 窗口打开时面对的是一条空
-        // 时间线，面板里的引导必须自己出现。判据见 `isTransferInstance`（两个来源取并集，
-        // 因为形态要等 5 秒宽限期才落定，而 bootstrap 是窗口创建那一刻算的）。
+        // 【Transfer 面板为什么不再自动浮出】录制的主入口现在是**传输栏上的控件**
+        // （`ActionBar` 里的 `TransferControl`），而面板退成了"设置与诊断"。自动弹一个
+        // 诊断面板是噪音：用户要的是那个键，不是一屏读数。入口留在「视图」菜单里。
         //
-        // 只开一次：用户手动关掉之后不该被它反复弹回来（入口留在「视图」菜单里）。
-        const unsubscribeTransferPanel = isPluginMode()
-            ? subscribePluginApply(() => {
-                  if (transferPanelOpenedRef.current) return;
-                  if (!isTransferInstance()) return;
-                  transferPanelOpenedRef.current = true;
-                  openPanelById(dispatch, store.getState, PANEL_TRANSFER);
-              })
-            : () => undefined;
+        // （此前自动浮出的理由是"用户不知道要先播放再录制"，而那件事现在由控件自己的
+        // tooltip 与状态说明承担 —— 它就在用户要点的地方。）
+        const unsubscribeTransferPanel = () => undefined;
 
         const unsubscribeApply = isPluginMode()
             ? subscribePluginApply(() => {
@@ -1770,8 +1761,6 @@ function AppInner() {
     // 后者必须拦下。
     const renderPassRef = useRef<number | null>(null);
     const renderProgressRef = useRef(0);
-    /// Transfer 面板的自动浮出只做一次：用户手动关掉之后不该被它反复弹回。
-    const transferPanelOpenedRef = useRef(false);
 
     const closeWindowNow = useCallback(async () => {
         try {

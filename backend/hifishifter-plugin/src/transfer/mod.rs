@@ -32,6 +32,7 @@ pub(crate) mod commands;
 pub(crate) mod sidecar;
 pub(crate) mod timeline;
 
+use crate::render::snapshot::PlaybackSnapshot;
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
 use capture::{Capture, CaptureOutcome, ClosedReason, Segment};
@@ -71,6 +72,11 @@ pub(crate) struct TransferOptions {
     pub segment_sec: f64,
     /// 录制时是否直通监听（`false` = 输出静音，只听处理结果）。
     pub monitor: bool,
+    /// 素材覆盖范围**之外**是否直通宿主原声（`false` = 区间外静音）。
+    ///
+    /// 【为什么默认直通】只录了 10 秒的素材不该把整条轨变成静音。直通让"录过的那一段
+    /// 被替换"这件事在听感上可分辨，而不是让用户以为插件把整条轨吃掉了。
+    pub outside_passthrough: bool,
 }
 
 impl Default for TransferOptions {
@@ -79,6 +85,7 @@ impl Default for TransferOptions {
             max_duration_sec: DEFAULT_MAX_DURATION_SEC,
             segment_sec: SEGMENT_SECONDS,
             monitor: true,
+            outside_passthrough: true,
         }
     }
 }
@@ -114,12 +121,76 @@ pub(crate) struct RecordingStatus {
     pub spares: usize,
 }
 
+/// 录制中的工程几何（给时间轴上的实时录制带）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CaptureSpan {
+    /// 已经覆盖到的工程区间（并集）。
+    pub start_frame: i64,
+    pub end_frame: i64,
+    /// 当前块首（= 实时右边缘）。
+    pub position_frame: i64,
+    pub sample_rate: u32,
+}
+
+/// 活动素材的摘要。
+///
+/// 【为什么需要它】"录到了但时间轴是空的"此前是一句无法归因的现象：可能是宿主没给
+/// 位置、可能是输入总线是静音、也可能是宿主压根没播放。这几个数把它们分开：
+/// `captured_frames > 0 && clips == 0` 就只可能是"全静音"。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MaterialSummary {
+    /// 投影出的片段数（全静音区间不产生片段）。
+    pub clips: usize,
+    /// 捕获到的工程帧数（含静音块）。
+    pub captured_frames: u64,
+    /// 片段覆盖的工程帧数（不含静音空洞）。
+    pub covered_frames: u64,
+    /// 整条素材跨越的工程帧数（含空洞）。
+    pub spanned_frames: u64,
+    pub sample_rate: u32,
+}
+
+impl MaterialSummary {
+    /// 录到了东西，但没有任何有声内容。
+    pub(crate) fn is_silent(&self) -> bool {
+        self.captured_frames > 0 && self.clips == 0
+    }
+}
+
+/// 一个 take 的只读清单条目。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TakeSummary {
+    pub id: u64,
+    pub active: bool,
+    pub clips: usize,
+    /// 工程秒跨度（`None` = 没有任何片段）。
+    pub span_sec: Option<(f64, f64)>,
+}
+
+/// 已 promote 素材的工程跨度（给"录制落在哪"的自动定位）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MaterialSpan {
+    pub start_frame: i64,
+    pub end_frame: i64,
+    pub sample_rate: u32,
+}
+
 /// 对外状态。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TransferStatus {
     /// `"empty"` / `"recording"` / `"ready"`。
     pub state: &'static str,
     pub recording: Option<RecordingStatus>,
+    /// 录制中正在长出来的区间（`None` = 没在录）。
+    pub capture: Option<CaptureSpan>,
+    /// 活动素材的摘要（`None` = 没有 take）。
+    pub material: Option<MaterialSummary>,
+    /// 有没有可渲染的素材（与 [`TransferStore::has_material`] 同一口径）。
+    pub has_material: bool,
+    /// 活动素材的工程跨度（`None` = 没有片段）。
+    pub span: Option<MaterialSpan>,
+    /// 全部 take 的清单。
+    pub takes: Vec<TakeSummary>,
     pub options: TransferOptions,
     pub take_count: usize,
     pub active_take: Option<u64>,
@@ -227,6 +298,7 @@ impl TransferStore {
             max_duration_sec: options.max_duration_sec.clamp(1.0, 3600.0),
             segment_sec: options.segment_sec.clamp(1.0, 60.0),
             monitor: options.monitor,
+            outside_passthrough: options.outside_passthrough,
         };
     }
 
@@ -371,6 +443,27 @@ impl TransferStore {
         Ok(())
     }
 
+    /// 删掉一个 take。
+    ///
+    /// 【为什么落盘副本进回收站而不是直接删】录了几分钟的东西被误删是不可接受的，
+    /// 与 [`Self::clear`] 同一处置。活动 take 被删时退到剩余里**编号最大**的那个
+    /// （= 最近录的），一个都不剩就回到"没有素材"。
+    pub(crate) fn delete_take(&self, id: u64) -> Result<(), String> {
+        let mut takes = self.takes.lock_or_recover();
+        let Some(index) = takes.iter().position(|take| take.id == id) else {
+            return Err(format!("unknown transfer take {id}"));
+        };
+        let take = takes.remove(index);
+        if let Some(path) = take.sidecar {
+            sidecar::remove(&path);
+        }
+        if self.active_take.load(Ordering::Acquire) == id {
+            let next = takes.iter().map(|take| take.id).max().unwrap_or(0);
+            self.active_take.store(next, Ordering::Release);
+        }
+        Ok(())
+    }
+
     /// 音频线程入口：本实例是否正在录制，以及本块要不要直通。
     ///
     /// 【为什么整段逻辑在 `try_lock` 之内】捕获状态的写入必须与"封口/收段"互斥。
@@ -424,9 +517,15 @@ impl TransferStore {
     /// 非音频线程：补充备用缓冲并收走已封口的段。
     ///
     /// 【为什么由调用方周期性驱动】音频线程不能分配，所以"下一个段用哪个缓冲"必须由
-    /// 非音频线程提前备好。这个函数就是那条供给线。它在没有窗口打开时不会被调用 ——
-    /// 而录制本来就必须由窗口里的用户动作发起。
+    /// 非音频线程提前备好。这个函数就是那条供给线。
+    ///
+    /// 【为什么未武装时直接返回】补缓冲只服务于"正在录制"这件事：`start()` 已经同步
+    /// 备好了第一批。没有这道早退，一个空闲的 Transfer 实例会在每一轮心跳里分配
+    /// `SPARE_BUFFERS` 粒缓冲（2 × 8 秒立体声 ≈ 6 MB）并永久持有 —— 而它什么都没在录。
     pub(crate) fn top_up(&self) {
+        if !self.is_armed() {
+            return;
+        }
         let options = self.options();
         let rate = self.project_rate.load(Ordering::Acquire);
         if rate <= 0 {
@@ -447,6 +546,71 @@ impl TransferStore {
         }
     }
 
+    /// 录制中的工程几何（给时间轴上的实时录制带）。
+    ///
+    /// 【为什么单独一个访问器】它是"录制正在长出来"这件事的唯一读数来源。没有它，
+    /// 用户在录制过程中看不到任何东西 —— 而"不知道自己录了什么"正是这条通路最常见的
+    /// 失败感（见 `docs/plans/2026-10-15-vst-transfer-monitor-and-ux.md`）。
+    pub(crate) fn capture_span(&self) -> Option<CaptureSpan> {
+        if !self.is_armed() {
+            return None;
+        }
+        let capture = self.capture.lock_or_recover();
+        let span = capture.span()?;
+        let sample_rate = capture.sample_rate();
+        Some(CaptureSpan {
+            start_frame: span.start,
+            end_frame: span.end,
+            position_frame: capture.last_position().unwrap_or(span.end),
+            sample_rate,
+        })
+    }
+
+    /// 活动素材的摘要。
+    pub(crate) fn material_summary(&self) -> Option<MaterialSummary> {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        let take = takes.iter().find(|take| take.id == active)?;
+        Some(MaterialSummary {
+            clips: take.summary.clips,
+            captured_frames: take
+                .segments
+                .iter()
+                .map(|segment| segment.filled as u64)
+                .sum(),
+            covered_frames: take.summary.covered_frames,
+            spanned_frames: take.summary.spanned_frames,
+            sample_rate: take.sample_rate,
+        })
+    }
+
+    /// 全部 take 的只读清单（面板的 take 列表与"录制在哪"的定位都用它）。
+    pub(crate) fn take_summaries(&self) -> Vec<TakeSummary> {
+        let active = self.active_take.load(Ordering::Acquire);
+        self.takes
+            .lock_or_recover()
+            .iter()
+            .map(|take| {
+                let rate = take.sample_rate.max(1) as f64;
+                let span = take.summary.spanned_frames;
+                TakeSummary {
+                    id: take.id,
+                    active: take.id == active,
+                    clips: take.summary.clips,
+                    span_sec: (span > 0).then(|| {
+                        let start = take
+                            .segments
+                            .iter()
+                            .map(|segment| segment.origin)
+                            .min()
+                            .unwrap_or(0);
+                        (start as f64 / rate, (start + span as i64) as f64 / rate)
+                    }),
+                }
+            })
+            .collect()
+    }
+
     /// 录制中读数。
     pub(crate) fn recording_status(&self) -> Option<RecordingStatus> {
         if !self.is_armed() {
@@ -464,6 +628,27 @@ impl TransferStore {
         })
     }
 
+    /// 活动素材的工程跨度（用于"录完把视口移到录制区间"）。
+    pub(crate) fn material_span(&self) -> Option<MaterialSpan> {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        let take = takes.iter().find(|take| take.id == active)?;
+        if take.summary.spanned_frames == 0 {
+            return None;
+        }
+        let start = take
+            .segments
+            .iter()
+            .map(|segment| segment.origin)
+            .min()
+            .unwrap_or(0);
+        Some(MaterialSpan {
+            start_frame: start,
+            end_frame: start + take.summary.spanned_frames as i64,
+            sample_rate: take.sample_rate,
+        })
+    }
+
     /// 对外状态。
     pub(crate) fn status(&self) -> TransferStatus {
         let armed = self.is_armed();
@@ -478,6 +663,11 @@ impl TransferStore {
                 "empty"
             },
             recording: self.recording_status(),
+            capture: self.capture_span(),
+            material: self.material_summary(),
+            has_material: self.has_material(),
+            span: self.material_span(),
+            takes: self.take_summaries(),
             options: self.options(),
             take_count,
             active_take: (active > 0).then_some(active),
@@ -546,6 +736,70 @@ impl TransferStore {
             .find(|take| take.id == active)
             .map(|take| take.sources.clone())
             .unwrap_or_default()
+    }
+
+    /// 活动 take 的**未处理** PCM，做成一份可直接发布的快照。
+    ///
+    /// 【为什么用 `PlaybackSnapshot` 的形状】处理结果与原始磁带同形，于是音频线程只有
+    /// "选哪个发布器"一个分支：不需要第二条读取通路、第二套预算、第二套回收。
+    /// 段的覆盖语义也在这里自然落地 —— 按录制顺序拷贝，后来的段盖住先前的。
+    ///
+    /// 【为什么在发布方分配而不是让音频线程给缓冲】发布只在 take 变化时发生一次，
+    /// 而发布方（UI 线程 / 会话 actor）本来就不是实时线程。
+    pub(crate) fn raw_tape(&self) -> Option<PlaybackSnapshot> {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        let take = takes.iter().find(|take| take.id == active)?;
+        if take.segments.is_empty() {
+            return None;
+        }
+        let origin = take.segments.iter().map(|segment| segment.origin).min()?;
+        let end = take
+            .segments
+            .iter()
+            .map(|segment| segment.origin + segment.filled as i64)
+            .max()?;
+        let frames = usize::try_from(end.checked_sub(origin)?).ok()?;
+        if frames == 0 {
+            return None;
+        }
+        let bytes = frames.checked_mul(8)?;
+        let reservation = crate::render::budget::global_budget().reserve(bytes)?;
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        for segment in &take.segments {
+            let start = usize::try_from(segment.origin.checked_sub(origin)?).ok()?;
+            let Some(source_left) = segment.planes.first() else {
+                continue;
+            };
+            // 防御式取长：封口后的段本应 `filled == planes[ch].len()`，但这里在
+            // 非音频线程上做一次性拷贝，宁可少拷也不越界。
+            let count = segment
+                .filled
+                .min(source_left.len())
+                .min(frames.saturating_sub(start));
+            if count == 0 {
+                continue;
+            }
+            left[start..start + count].copy_from_slice(&source_left[..count]);
+            match segment.planes.get(1) {
+                Some(source_right) if source_right.len() >= count => {
+                    right[start..start + count].copy_from_slice(&source_right[..count]);
+                }
+                // 单声道捕获：两个输出平面同内容（与 `pass_through` 的单声道展开一致）。
+                _ => right[start..start + count].copy_from_slice(&source_left[..count]),
+            }
+        }
+        let mut snapshot = PlaybackSnapshot {
+            sample_rate: take.sample_rate,
+            origin_sample: origin,
+            left,
+            right,
+            _reservation: Some(reservation),
+        };
+        // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
+        let _ = snapshot.compact_mono();
+        Some(snapshot)
     }
 
     /// 把封口的段提升成一个 take。
@@ -822,11 +1076,13 @@ mod tests {
             max_duration_sec: -5.0,
             segment_sec: 1e9,
             monitor: false,
+            outside_passthrough: false,
         });
         let options = store.options();
         assert!(options.max_duration_sec >= 1.0);
         assert!(options.segment_sec <= 60.0);
         assert!(!options.monitor);
+        assert!(!options.outside_passthrough);
     }
 
     /// 临时目录（每个用例一个）。

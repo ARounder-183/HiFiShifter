@@ -22,16 +22,63 @@ export interface TransferRecording {
     spares: number;
 }
 
+/** 录制中正在长出来的工程区间（时间轴据此画实时录制带）。 */
+export interface TransferCapture {
+    startFrame: number;
+    endFrame: number;
+    positionFrame: number;
+    sampleRate: number;
+}
+
+/** 活动素材的摘要。 */
+export interface TransferMaterial {
+    clips: number;
+    capturedFrames: number;
+    coveredFrames: number;
+    spannedFrames: number;
+    sampleRate: number;
+    /**
+     * 录到了东西，但没有任何有声内容。
+     *
+     * 【为什么必须有这个判据】全静音的录制不产生片段，于是"面板说已录制、时间轴空白、
+     * 播放无声"三个读数互相矛盾。有了它，界面能直接说清是**输入总线没声音**。
+     */
+    silent: boolean;
+}
+
+/** 已 promote 素材的工程跨度。 */
+export interface TransferSpan {
+    startFrame: number;
+    endFrame: number;
+    sampleRate: number;
+}
+
+/** 一个 take 的清单条目。 */
+export interface TransferTake {
+    id: number;
+    active: boolean;
+    clips: number;
+    startSec: number | null;
+    endSec: number | null;
+}
+
 export interface TransferOptions {
     maxDurationSec: number;
     segmentSec: number;
     monitor: boolean;
+    /** 素材覆盖范围之外是否直通宿主原声（`false` = 区间外静音）。 */
+    outsidePassthrough: boolean;
 }
 
 export interface TransferStatus {
     /** `"empty"` / `"recording"` / `"ready"`。 */
     state: "empty" | "recording" | "ready";
     recording: TransferRecording | null;
+    capture: TransferCapture | null;
+    material: TransferMaterial | null;
+    hasMaterial: boolean;
+    span: TransferSpan | null;
+    takes: TransferTake[];
     options: TransferOptions;
     takeCount: number;
     activeTake: number | null;
@@ -64,6 +111,7 @@ export const transferApi = {
     cancel: () => invoke<TransferStatus>("transfer_cancel"),
     clear: () => invoke<TransferStatus>("transfer_clear"),
     selectTake: (takeId: number) => invoke<TransferStatus>("transfer_select_take", takeId),
+    deleteTake: (takeId: number) => invoke<TransferStatus>("transfer_delete_take", takeId),
     setOptions: (patch: Partial<TransferOptions>) =>
         invoke<TransferStatus>("transfer_set_options", patch),
 };
@@ -93,4 +141,15 @@ export function transferError(error: unknown): string {
 export function framesToSeconds(frames: number, sampleRate: number): string {
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) return "0.0";
     return (frames / sampleRate).toFixed(1);
+}
+
+/**
+ * 工程帧 → 秒。
+ *
+ * 【为什么要有它】录制带的几何来自后端（工程帧），而时间轴与视口都以秒为单位。
+ * 换算只在这一处发生，避免每个调用点各写一遍"除以哪个采样率"。
+ */
+export function frameToSec(frame: number, sampleRate: number): number {
+    if (!Number.isFinite(sampleRate) || sampleRate <= 0) return 0;
+    return frame / sampleRate;
 }
