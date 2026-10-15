@@ -1267,15 +1267,15 @@ fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
             key as *mut _,
         );
     }
-    let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
+    let snapshot = owner.handle_request(hifishifter_host_channel::Request::Snapshot);
     assert!(snapshot.ok, "{:?}", snapshot.error);
     let mut client = snapshot.timeline.unwrap();
     assert_eq!(client["clips"].as_array().unwrap().len(), 1);
     client["tracks"][0]["volume"] = serde_json::json!(0.5);
-    let response = owner.handle_request(hifishifter_ara_ipc::Request::Commit {
+    let response = owner.handle_request(hifishifter_host_channel::Request::Commit {
         base_revision: snapshot.revision,
         model_revision: snapshot.model_revision,
-        schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
+        schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
         timeline: client,
     });
     assert!(response.ok, "{:?}", response.error);
@@ -1330,13 +1330,13 @@ fn gui_request_commits_parameters_and_rejects_stale_document_revision() {
             None,
         )
         .unwrap();
-    let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
+    let snapshot = owner.handle_request(hifishifter_host_channel::Request::Snapshot);
     assert!(snapshot.ok, "{:?}", snapshot.error);
     let client = snapshot.timeline.unwrap();
-    let commit = hifishifter_ara_ipc::Request::Commit {
+    let commit = hifishifter_host_channel::Request::Commit {
         base_revision: snapshot.revision,
         model_revision: snapshot.model_revision,
-        schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
+        schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
         timeline: client,
     };
     let response = owner.handle_request(commit.clone());
@@ -1346,7 +1346,7 @@ fn gui_request_commits_parameters_and_rejects_stale_document_revision() {
     document.clear_renderers();
     assert!(
         !owner
-            .handle_request(hifishifter_ara_ipc::Request::Snapshot)
+            .handle_request(hifishifter_host_channel::Request::Snapshot)
             .ok
     );
     drop(model);
@@ -1364,7 +1364,7 @@ fn copied_tracks_share_sources_but_keep_instance_state_isolated() {
 }
 fn two_renderer_case(shared_identity: bool) {
     use crate::render::source::SourcePcm;
-    use hifishifter_ara_ipc::Request;
+    use hifishifter_host_channel::Request;
     let model = crate::ara::model::ModelHandle::new();
     let document = model.session();
     // 四样本只验证复制/权限/保存与逐轨gain，显式旁路；真实音高自动应用另有WORLD/模型oracle。
@@ -1454,7 +1454,7 @@ fn two_renderer_case(shared_identity: bool) {
         let response = owners[index].handle_request(Request::Commit {
             base_revision: snapshot.revision,
             model_revision: snapshot.model_revision,
-            schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
+            schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
             timeline: client,
         });
         assert!(response.ok, "{:?}", response.error);

@@ -21,15 +21,19 @@ impl Server {
     /// 新建只接受本机请求的实例，真实监听成功后才发布记录。
     pub fn start(
         name: String,
-        handler: impl Fn(Request) -> Response + Send + 'static,
+        handler: impl Fn(Request) -> Reply + Send + 'static,
     ) -> Result<Self, String> {
         Self::start_at(name, instance_dir()?, handler)
     }
     /// 指定发现目录，便于隔离部署而不触碰用户的其他实例。
+    ///
+    /// 【为什么实例永远登记为 `Ara`】本实现就是 ARA 插件侧的通道；桥接实例由宿主
+    /// 扩展自己写记录（`SourceKind::Bridge`）。来源写死在这里而不是交给 handler，
+    /// 是因为 handler 可能因文档未绑定而根本不被调用，而记录必须在监听成功时就已完整。
     pub fn start_at(
         name: String,
         root: PathBuf,
-        handler: impl Fn(Request) -> Response + Send + 'static,
+        handler: impl Fn(Request) -> Reply + Send + 'static,
     ) -> Result<Self, String> {
         let instance_id = uuid::Uuid::new_v4().to_string();
         let pid = std::process::id();
@@ -41,6 +45,7 @@ impl Server {
             name,
             heartbeat_ms: now_ms(),
             protocol: PROTOCOL,
+            source_kind: SourceKind::Ara,
         };
         let file = create_pipe(&record.pipe_name)?;
         std::fs::create_dir_all(&root)
@@ -56,7 +61,7 @@ impl Server {
         let mut heartbeat = record.clone();
         let heartbeat_path = path.clone();
         let worker = std::thread::Builder::new()
-            .name("hfs-ara-ipc".into())
+            .name("hfs-host-channel".into())
             .spawn(move || {
                 let mut last_heartbeat = Instant::now();
                 while !flag.load(Ordering::Acquire) {
@@ -75,28 +80,30 @@ impl Server {
                         continue;
                     }
                     let mut io = PipeIo::new(&file, Some(&flag));
-                    log::info!("[ara-ipc] client connected");
+                    log::info!("[host-channel] client connected");
                     io.deadline = Instant::now() + Duration::from_secs(5);
-                    let response = match read_frame::<Envelope>(&mut io) {
+                    let reply = match read_frame::<Envelope>(&mut io) {
                         Ok(envelope)
                             if envelope.protocol == PROTOCOL
                                 && envelope.token == heartbeat.token =>
                         {
-                            log::info!("[ara-ipc] request authenticated");
+                            log::info!("[host-channel] request authenticated");
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 handler(envelope.request)
                             }))
-                            .unwrap_or_else(|_| Response {
-                                error: Some("plugin request panicked".into()),
-                                ..Default::default()
+                            .unwrap_or_else(|_| {
+                                Reply::Response(Response {
+                                    error: Some("plugin request panicked".into()),
+                                    ..Default::default()
+                                })
                             })
                         }
-                        Ok(_) => Response {
+                        Ok(_) => Reply::Response(Response {
                             error: Some("ARA authentication failed".into()),
                             ..Default::default()
-                        },
+                        }),
                         Err(error) => {
-                            log::warn!("[ara-ipc] request read failed: {error}");
+                            log::warn!("[host-channel] request read failed: {error}");
                             unsafe {
                                 DisconnectNamedPipe(file.as_raw_handle());
                             }
@@ -104,8 +111,8 @@ impl Server {
                         }
                     };
                     io.deadline = Instant::now() + Duration::from_secs(120);
-                    if write_frame(&mut io, &response).is_ok() {
-                        log::info!("[ara-ipc] response written ok={}", response.ok);
+                    if write_frame(&mut io, &reply).is_ok() {
+                        log::info!("[host-channel] response written ok={}", reply.is_ok());
                         // 客户端读完后确认，避免Disconnect丢弃仍在管道缓冲里的尾部数据。
                         let mut ack = [0];
                         let _ = io.read_exact(&mut ack);
@@ -317,7 +324,12 @@ impl Write for PipeIo<'_> {
     }
 }
 
-pub(super) fn exchange(record: &InstanceRecord, request: &Request) -> Result<Response, String> {
+/// 一次有界请求/响应往返；回包类型由调用方按**自己发出的请求**决定
+/// （`Hello` → `HelloResponse`，其余 → `Response`）。
+pub(super) fn exchange<R: for<'a> Deserialize<'a>>(
+    record: &InstanceRecord,
+    request: &Request,
+) -> Result<R, String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let name = record
         .pipe_name

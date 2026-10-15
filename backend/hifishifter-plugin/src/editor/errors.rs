@@ -6,11 +6,11 @@
 //! 终态判成 transient（或反之），且无编译期信号（"19,056 次轮询"那类缺陷的
 //! 温床）。现在产生点引用这里的常量，分类点匹配同一常量：改措辞只改一处。
 //!
-//! 协议码随回执下发（回执 JSON 的 `errorCode` / `hifishifter-ara-ipc`
+//! 协议码随回执下发（回执 JSON 的 `errorCode` / `hifishifter-host-channel`
 //! `Response.code`），客户端按码分类；字符串只做展示。**码的取值是协议承诺：
 //! 只增不改**。分类判定看码，码不存在（旧产生点/旧服务端）才退回字符串匹配。
 
-use hifishifter_ara_ipc::error_code;
+use hifishifter_host_channel::error_code;
 
 /// 一条错误的稳定措辞与协议码。
 pub(crate) struct TerminalError {

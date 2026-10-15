@@ -385,7 +385,7 @@ pub(crate) struct ExtensionOwner {
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
-    channel: Mutex<Option<hifishifter_ara_ipc::Server>>,
+    channel: Mutex<Option<hifishifter_host_channel::Server>>,
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
     prepare_owner: Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
@@ -2442,9 +2442,9 @@ impl ExtensionOwner {
     /// 参数/快照在短事务内校验；外部提交合成同样不能持锁阻塞宿主模型回调。
     pub(crate) fn handle_request(
         &self,
-        request: hifishifter_ara_ipc::Request,
-    ) -> hifishifter_ara_ipc::Response {
-        use hifishifter_ara_ipc::{HostPcm, Request, Response};
+        request: hifishifter_host_channel::Request,
+    ) -> hifishifter_host_channel::Response {
+        use hifishifter_host_channel::{HostPcm, Request, Response};
         let document = self
             .document
             .lock_or_recover()
@@ -2453,7 +2453,7 @@ impl ExtensionOwner {
         let Some(document) = document else {
             return Response {
                 error: Some(crate::editor::errors::DOCUMENT_CLOSED.error()),
-                code: Some(hifishifter_ara_ipc::error_code::DOCUMENT_CLOSED),
+                code: Some(hifishifter_host_channel::error_code::DOCUMENT_CLOSED),
                 ..Default::default()
             };
         };
@@ -2467,13 +2467,13 @@ impl ExtensionOwner {
             // timeline 载荷的结构版本守卫：未知的新版本拒收（旧客户端的 0 = 版本化
             // 之前，按 pre-versioning 接受）。否则一次不认识的 JSON 会被静默合并进
             // 编辑会话。
-            if schema_version != 0 && schema_version != hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION
+            if schema_version != 0 && schema_version != hifishifter_host_channel::TIMELINE_SCHEMA_VERSION
             {
                 return Response {
                     ok: false,
                     error: Some(format!(
                         "unsupported timeline schema version {schema_version} (expected {}); refresh the app",
-                        hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION
+                        hifishifter_host_channel::TIMELINE_SCHEMA_VERSION
                     )),
                     ..Default::default()
                 };
@@ -2518,6 +2518,7 @@ impl ExtensionOwner {
                             sample_rate: pcm.sample_rate,
                             fingerprint: pcm_fingerprint(pcm),
                             planes: pcm.planes.clone(),
+                            file: None,
                         });
                     }
                     let mut clips = timeline.clips.iter().collect::<Vec<_>>();
@@ -2548,6 +2549,11 @@ impl ExtensionOwner {
                     // "plugin request panicked"，提交被静默丢掉）。返回错误更诚实。
                     Err("commit request reached the non-commit dispatcher".to_string())
                 }
+                Request::Hello { .. } => {
+                    // 同理由：`Hello` 在服务器闭包层就被回答（它必须在文档守卫**之前**
+                    // 返回，见 `bind_to_document` 的 server 闭包），到不了这里。
+                    Err("hello request reached the timeline dispatcher".to_string())
+                }
             }
         })();
         let mut response = outcome.unwrap_or_else(|error| Response {
@@ -2567,7 +2573,7 @@ impl ExtensionOwner {
         base_edit: u64,
         base_model: u64,
         client: serde_json::Value,
-    ) -> hifishifter_ara_ipc::Response {
+    ) -> hifishifter_host_channel::Response {
         let outcome = (|| {
             let (candidate, epoch, scope, inputs) = {
                 let _transaction = document.transaction.lock_or_recover();
@@ -2668,7 +2674,7 @@ impl ExtensionOwner {
             Ok::<(), String>(())
         })();
         let error = outcome.err();
-        hifishifter_ara_ipc::Response {
+        hifishifter_host_channel::Response {
             ok: error.is_none(),
             code: error
                 .as_deref()
@@ -3070,13 +3076,32 @@ impl ExtensionOwner {
                 Some(app) => format!("HiFiShifter / {app}"),
                 None => "HiFiShifter".to_string(),
             };
-            match hifishifter_ara_ipc::Server::start(server_name, move |request| {
-                weak.upgrade()
-                    .map(|owner| owner.handle_request(request))
-                    .unwrap_or_else(|| hifishifter_ara_ipc::Response {
-                        error: Some(crate::editor::errors::INSTANCE_CLOSED.error()),
-                        ..Default::default()
-                    })
+            // 能力协商：本实例是 ARA 实现，能回 `Snapshot`/`Commit` 与宿主 PCM，
+            // 不能写回宿主几何（ARA 2.0 禁止），也不提供播放位置/tempo map。
+            let hello = hifishifter_host_channel::HelloResponse {
+                source_kind: hifishifter_host_channel::SourceKind::Ara,
+                timeline_schema: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
+                granted: vec![
+                    hifishifter_host_channel::Capability::Commit,
+                    hifishifter_host_channel::Capability::HostPcm,
+                ],
+                host_label: server_name.clone(),
+                implementation: format!("hifishifter-ara {}", env!("CARGO_PKG_VERSION")),
+            };
+            match hifishifter_host_channel::Server::start(server_name, move |request| {
+                // `Hello` 在文档守卫**之前**回答：它不是时间轴操作，且客户端要在
+                // 拿到 `source_kind`/`granted` 之后才知道该怎么继续。
+                if matches!(request, hifishifter_host_channel::Request::Hello { .. }) {
+                    return hifishifter_host_channel::Reply::Hello(hello.clone());
+                }
+                hifishifter_host_channel::Reply::Response(
+                    weak.upgrade()
+                        .map(|owner| owner.handle_request(request))
+                        .unwrap_or_else(|| hifishifter_host_channel::Response {
+                            error: Some(crate::editor::errors::INSTANCE_CLOSED.error()),
+                            ..Default::default()
+                        }),
+                )
             }) {
                 Ok(server) => {
                     log::info!(

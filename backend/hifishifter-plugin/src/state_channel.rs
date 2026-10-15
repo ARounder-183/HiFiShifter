@@ -334,7 +334,7 @@ impl EditState {
         trimmed.atlas.regions.clear();
         let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
-        if bytes.len() > hifishifter_ara_ipc::MAX_FRAME {
+        if bytes.len() > hifishifter_host_channel::MAX_FRAME {
             return Err("state exceeds transport budget".into());
         }
         Ok(bytes)
@@ -344,7 +344,7 @@ impl EditState {
         if bytes.is_empty() {
             return Ok(());
         }
-        if bytes.len() > hifishifter_ara_ipc::MAX_FRAME {
+        if bytes.len() > hifishifter_host_channel::MAX_FRAME {
             return Err("state too large".into());
         }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;

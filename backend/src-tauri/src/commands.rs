@@ -9,7 +9,7 @@
 #[tauri::command]
 pub async fn ara_list_instances() -> Result<Vec<serde_json::Value>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        hifishifter_ara_ipc::discover().map(|records| {
+        hifishifter_host_channel::discover().map(|records| {
             records.into_iter().map(|record| {
                 serde_json::json!({"instance_id": record.instance_id, "name": record.name, "pid": record.pid})
             }).collect()

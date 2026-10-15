@@ -14,8 +14,8 @@ dependencies = [
  "clipboard-win",
  "cpal",
  "encoding_rs",
- "hifishifter-ara-ipc",
  "hifishifter-clipboard",
+ "hifishifter-host-channel",
  "hifishifter-kernel",
  "hound",
  "id3",
@@ -2003,17 +2003,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hifishifter-ara-ipc"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde",
- "serde_json",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "hifishifter-clipboard"
 version = "0.1.0"
 dependencies = [
@@ -2025,6 +2014,17 @@ dependencies = [
  "objc2-foundation",
  "wl-clipboard-rs",
  "xcb",
+]
+
+[[package]]
+name = "hifishifter-host-channel"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2075,8 +2075,8 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "chrono",
- "hifishifter-ara-ipc",
  "hifishifter-clipboard",
+ "hifishifter-host-channel",
  "hifishifter-kernel",
  "log",
  "serde",

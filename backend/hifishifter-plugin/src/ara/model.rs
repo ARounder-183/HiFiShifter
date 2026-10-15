@@ -3425,7 +3425,7 @@ mod tests {
     #[test]
     fn same_snapshot_commit_survives_access_toggle_but_not_real_source_changes() {
         use ara2_bridge::plugin::{ExtensionRoles, HostAudioSourceRef, HostClients};
-        use hifishifter_ara_ipc::{Request, Response};
+        use hifishifter_host_channel::{Request, Response};
         let mut model = ModelHandle::new();
         model.document = identity_document(&["B"]);
         model.document.audio_sources[0].sample_count = 4;
@@ -3479,7 +3479,7 @@ mod tests {
             Request::Commit {
                 base_revision: snapshot.revision,
                 model_revision: snapshot.model_revision,
-                schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
+                schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
                 timeline: client,
             }
         };

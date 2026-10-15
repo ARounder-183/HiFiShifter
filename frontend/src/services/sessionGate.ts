@@ -17,7 +17,7 @@
  */
 
 /**
- * 后端协议码，与 `backend/hifishifter-ara-ipc/src/lib.rs` 的 `error_code` 一一对应。
+ * 后端协议码，与 `backend/hifishifter-host-channel/src/lib.rs` 的 `error_code` 一一对应。
  *
  * 【为什么在前端也写一份】它是**协议承诺**（只增不改）。前端按码分支（例如区分
  * "会话已结束"与"宿主从未绑定 ARA"），不解析错误文本 —— 与 `pluginHost.ts` 里

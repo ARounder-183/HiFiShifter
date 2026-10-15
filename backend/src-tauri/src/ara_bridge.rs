@@ -1,7 +1,7 @@
 //! ARA GUI 桥接：仅下载宿主授权 PCM，交由既有波形和音高管线处理。
 
 use crate::state::{AppState, TimelineState};
-use hifishifter_ara_ipc::{HostPcm, InstanceRecord, Request, Response};
+use hifishifter_host_channel::{HostPcm, InstanceRecord, Request, Response};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -392,7 +392,7 @@ fn build_commit(session: &Session, mut timeline: TimelineState) -> Result<Reques
     Ok(Request::Commit {
         base_revision: session.revision,
         model_revision: session.model_revision,
-        schema_version: hifishifter_ara_ipc::TIMELINE_SCHEMA_VERSION,
+        schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
         timeline: serde_json::to_value(timeline).map_err(|e| e.to_string())?,
     })
 }
@@ -436,7 +436,7 @@ fn import_snapshot_inner(
     let bridge = app.state::<AraBridge>();
     let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
     let instance = match instance_id {
-        Some(id) => hifishifter_ara_ipc::discover()?
+        Some(id) => hifishifter_host_channel::discover()?
             .into_iter()
             .find(|record| record.instance_id == id)
             .ok_or("ARA instance unavailable")?,
@@ -447,7 +447,7 @@ fn import_snapshot_inner(
             .instance
             .clone(),
     };
-    let response = hifishifter_ara_ipc::exchange(&instance, &Request::Snapshot)
+    let response = hifishifter_host_channel::exchange(&instance, &Request::Snapshot)
         .map_err(|e| format!("ARA snapshot IPC: {e}"))?;
     check_response(&response)?;
     let timeline: TimelineState =
@@ -570,7 +570,7 @@ pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String
         return Err("invalid ARA commit request".into());
     };
     let submitted_parameters = supported_projection(sent_timeline)?;
-    let response = hifishifter_ara_ipc::exchange(&session.instance, &request)?;
+    let response = hifishifter_host_channel::exchange(&session.instance, &request)?;
     apply_commit_response(session, &response)?;
     clear_committed_parameter_dirty(&state, session, version, &submitted_parameters);
     Ok(session_payload(session))
@@ -668,6 +668,7 @@ mod tests {
             sample_rate: 48000,
             planes: vec![vec![0.25, -0.5], vec![0.75, -1.0]],
             fingerprint: "test".into(),
+            file: None,
         }
     }
 
@@ -741,6 +742,7 @@ mod tests {
                 name: "host".into(),
                 heartbeat_ms: 0,
                 protocol: 1,
+                source_kind: hifishifter_host_channel::SourceKind::Ara,
             },
             revision: 7,
             model_revision: 9,

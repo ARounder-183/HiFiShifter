@@ -1,8 +1,8 @@
 //! 本地一次性通信诊断，只请求宿主快照并输出摘要，不输出token或音频。
 fn main() {
-    let instances = hifishifter_ara_ipc::discover().expect("instance discovery");
+    let instances = hifishifter_host_channel::discover().expect("instance discovery");
     for instance in instances {
-        match hifishifter_ara_ipc::exchange(&instance, &hifishifter_ara_ipc::Request::Snapshot) {
+        match hifishifter_host_channel::exchange(&instance, &hifishifter_host_channel::Request::Snapshot) {
             Ok(response) => println!(
                 "{} ok={} error={:?} revision={} clips={} sources={}",
                 instance.name,

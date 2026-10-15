@@ -3,7 +3,7 @@
 //! # 为什么不能嵌进组件 state
 //!
 //! `IComponent::getState` 的载荷是宿主存档的一部分，会被写进每一次保存、撤销快照与
-//! 模板。而 `MAX_FRAME` 是 64 MiB（`hifishifter-ara-ipc`），4 分钟立体声 96 kHz 已是
+//! 模板。而 `MAX_FRAME` 是 64 MiB（`hifishifter-host-channel`），4 分钟立体声 96 kHz 已是
 //! 184 MB —— 是上限的三倍。**即使放得下也不该放**：把上百 MB 音频塞进宿主存档，
 //! 等于让用户的工程文件与撤销历史一起爆炸。
 //!

@@ -1,6 +1,6 @@
 # 本机 ARA 编辑通道；与 GUI/插件共享协议，不依赖 Tauri 或音频设备。
 [package]
-name = "hifishifter-ara-ipc"
+name = "hifishifter-host-channel"
 version = "0.1.0"
 edition = "2021"
 publish = false
