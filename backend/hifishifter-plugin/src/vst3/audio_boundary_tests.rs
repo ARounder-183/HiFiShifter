@@ -919,3 +919,82 @@ fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
     assert_eq!(left, [0.7_f32; 4], "未录制时必须输出快照，而不是直通宿主输入");
     assert_eq!(right, [0.7_f32; 4]);
 }
+
+/// **渲染旁路**：录完之后插件必须发布自己的快照，而不是永远静音。
+///
+/// 【为什么这条是 Transfer 的验收核心】捕获、投影、时间线都可以全绿，而插件**没有
+/// 声音** —— 只要 `renders()` 没算上 Transfer，或者 `prepare()` 因为没有 ARA 文档
+/// 而静默早退。这条用例走完整条路：录 → 停 → `renders()` → 准备 → 读快照。
+#[test]
+fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活。
+    let owner = unsafe { (*raw).extension_owner.clone() };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    assert!(!owner.renders(), "还没录，不该渲染（应保持静音）");
+
+    owner.transfer().start().expect("已声明 48 kHz");
+    let frames = 64_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.6_f32; frames].into_boxed_slice());
+    for block in 0..8_i64 {
+        let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+        let mut input = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: input_planes.as_mut_ptr(),
+        };
+        let mut left = [0.0_f32; 64];
+        let mut right = [0.0_f32; 64];
+        let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 3,
+            channel_buffers: output_planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            state: 1 << 1,
+            sample_rate: 48_000.0,
+            project_time_samples: block * frames as i64,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 0,
+            num_samples: frames as i32,
+            num_inputs: 1,
+            num_outputs: 1,
+            inputs: &raw mut input,
+            outputs: &raw mut output,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
+        assert_eq!(result, K_RESULT_OK);
+    }
+    owner.transfer().stop().expect("应当产生一个 take");
+    assert!(owner.renders(), "有素材之后必须接管渲染");
+
+    owner.arm_transfer_rendering();
+    // 同步准备一次（生产路径由 UI 定时器排队驱动；这里直接调以免依赖线程调度）。
+    owner
+        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .expect("准备必须成功");
+
+    // 按**真实读者路径**取音：48 kHz 工程落在 48k 快照上。
+    let mut left = vec![0.0_f32; 64];
+    let mut right = vec![0.0_f32; 64];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    // SAFETY: bus 的形状与长度由本用例保证；publisher 由 owner 保留。
+    let ready = unsafe { owner.snapshots[1].copy_block(0, 48_000, &mut bus, 64) };
+    assert!(ready, "录制之后必须有一份可读的快照");
+    // 【为什么不比对具体样本值】这条通路下游是内核的合成（可能含神经网络声码器），
+    // 具体波形不是本用例的契约。契约是"有内容、且不是全零静音"。
+    let energy: f32 = left.iter().chain(right.iter()).map(|s| s.abs()).sum();
+    assert!(energy > 0.0, "发布出来的快照不能是全零（那就是没出音）");
+}

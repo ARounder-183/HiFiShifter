@@ -168,6 +168,16 @@ impl TransferStore {
         self.armed.load(Ordering::Acquire)
     }
 
+    /// 活动 take 号（`None` = 还没有 take）。
+    ///
+    /// 【为什么单独一个访问器】渲染路径用它做版本闸：`prepare()` 由 UI 定时器每 20ms
+    /// 驱动一次，而一次合成要好几秒。这个读数必须**不取 takes 锁** —— 那把锁在
+    /// 合成期间会被占住，而版本闸恰恰要在那之前问一次。
+    pub(crate) fn active_take_id(&self) -> Option<u64> {
+        let active = self.active_take.load(Ordering::Acquire);
+        (active > 0).then_some(active)
+    }
+
     /// 有没有可渲染的素材（决定 [`SignalSource`](crate::render::extension::SignalSource)）。
     pub(crate) fn has_material(&self) -> bool {
         self.takes.lock_or_recover().iter().any(|take| {

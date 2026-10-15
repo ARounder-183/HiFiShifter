@@ -428,6 +428,12 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
     /// 一个在放；共享存储会让它们互相覆盖对方的 take。
     transfer: crate::transfer::TransferStore,
+    /// 最近一次为 Transfer 发布快照的 take 号（`0` = 还没发过）。
+    ///
+    /// 【为什么需要它】`prepare()` 由 UI 定时器每 20ms 驱动一次，而一次合成要好几秒。
+    /// 没有这道闸，同一次录制会被反复排队 —— 每次都在音频线程之外占满 CPU，
+    /// 用户看到的是界面变卡而声音没有任何变化。
+    transfer_prepared: AtomicU64,
 }
 
 /// `setActive(true)` 之后允许 ARA 绑定出现的宽限时间（见 [`ExtensionOwner::note_editor_tick`]）。
@@ -595,7 +601,7 @@ impl ExtensionOwner {
     /// 【为什么在 UI 定时器上做而不是开线程】插件 DLL 可能被宿主卸载；一个 sleep 5 秒
     /// 的分离线程会在模块卸载后回到已消失的代码。UI 定时器天然与视图同寿，且已经在
     /// 每 20ms 跑一次。
-    pub(crate) fn note_editor_tick(&self) {
+    pub(crate) fn note_editor_tick(self: &Arc<Self>) {
         if self.is_ara_bound() {
             return;
         }
@@ -612,6 +618,14 @@ impl ExtensionOwner {
         // 后端选择、能力位与前端面板都会跟着翻到 Transfer（见 `host_backend`）。
         // 它写在"只报一次"的早退**之前** —— 形态是事实，与是否要打日志无关。
         self.note_binding_window_closed_without_ara();
+        // Transfer 形态下**没有任何 ARA 回调**会来驱动这两件事，而它们都是必须周期性
+        // 发生的：备用缓冲要在音频线程取用之前备好，快照要在录制结束后发布一次。
+        // UI 定时器是唯一的现成心跳（20ms），且"能录制"本来就要求窗口开着。
+        if self.mode() == InstanceMode::Transfer {
+            self.arm_transfer_rendering();
+            self.transfer.top_up();
+            self.prepare();
+        }
         if self
             .ara_binding_absent_reported
             .swap(true, Ordering::AcqRel)
@@ -1763,6 +1777,84 @@ impl ExtensionOwner {
     /// Transfer 通路的捕获存储。
     pub(crate) fn transfer(&self) -> &crate::transfer::TransferStore {
         &self.transfer
+    }
+
+    /// 本实例是否**应当**发布快照。
+    ///
+    /// 【为什么不能直接改 `renders_playback()`】那个读数的语义是"本文档的播放由本实例
+    /// 渲染"，它被 `report_playback_ownership` 与诊断用于回答"文档上还有没有人在渲染"。
+    /// Transfer 实例**不在任何 ARA 文档上**，把它算进去会让那两处以为文档有播放实例。
+    /// 这里另立一个"要不要出音"的判据，只在渲染准入点使用。
+    pub(crate) fn renders(&self) -> bool {
+        if self.is_bound() {
+            return !self.is_editor_only();
+        }
+        // 未绑定：只有 Transfer 形态**且已有素材**才渲染。没有素材时保持静音 ——
+        // 那是"用户还没录"的诚实表现，而不是"插件坏了"。
+        self.mode() == InstanceMode::Transfer && self.transfer.has_material()
+    }
+
+    /// Transfer 形态的渲染准备（不经过 ARA 文档）。
+    ///
+    /// 【为什么必须有一份独立的实现】`prepare_job` 的第一件事就是取 ARA 文档，
+    /// 取不到直接返回错误。Transfer 实例**永远**没有文档，所以那条路对它等于
+    /// "永远不准备 ⇒ 永远静音"。
+    ///
+    /// 【为什么复用 `RenderInput` 而不是另写一条】Transfer 的投影产出的正是
+    /// `(TimelineState, Vec<AraPlaybackRegion>, sources)` —— 与 ARA 路径同一组类型
+    /// （见 `transfer::TransferStore::render_input`）。于是校验、渲染、压缩、双率发布
+    /// 全部是同一份代码，Transfer 不需要第二条渲染通路。
+    pub(crate) fn transfer_prepare_job(
+        &self,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        let Some(take) = self.transfer.active_take_id() else {
+            return Ok(());
+        };
+        // 【为什么要版本闸】`prepare()` 由 UI 定时器每 20ms 驱动一次。没有这道闸，
+        // 一次 8 秒的合成会被排队 400 次。
+        if self.transfer_prepared.load(Ordering::Acquire) == take
+            && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
+        {
+            return Ok(());
+        }
+        let Some((timeline, regions, sources)) = self.transfer.render_input() else {
+            return Ok(());
+        };
+        let input = super::input::RenderInput {
+            timeline: Some(timeline),
+            regions,
+            sources,
+            project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
+            // 【为什么参数曲线这里为空】Transfer 的参数编辑走 `EditState`，由编辑器
+            // actor 应用；本路径只负责"把录进来的音频渲染出来"。参数生效后 actor 会
+            // 带着自己的曲线走它那条 `capture_render_input`（见 §9.2 的缓存键设计）。
+            clip_parameters: std::collections::BTreeMap::new(),
+        };
+        for publisher in &self.snapshots {
+            publisher.collect_retired();
+        }
+        let mut snapshots = input.render(cancel)?;
+        super::snapshot::compact_prepared(&mut snapshots)?;
+        if self.is_closed() {
+            return Ok(());
+        }
+        if !self
+            .snapshots
+            .iter()
+            .zip(&snapshots)
+            .all(|(publisher, snapshot)| publisher.has_capacity(snapshot))
+        {
+            return Err("retired snapshot budget exhausted".into());
+        }
+        for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
+            publisher
+                .publish(snapshot)
+                .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
+        }
+        self.transfer_prepared.store(take, Ordering::Release);
+        log::info!("[transfer] prepared take {take}");
+        Ok(())
     }
 
     /// 音频线程上的 Transfer 阶段。
@@ -3052,8 +3144,31 @@ impl ExtensionOwner {
     /// "播放实例收到了多少次通知" —— 这正是 `render_input_invalidation_…`
     /// 那条不变量测试锁的东西（此前漏掉播放实例的回归就在这里）。放在前面
     /// 会把编辑器实例的 no-op 也数进去，测试就再也分不出"通知了谁"。
+    /// 为 Transfer 形态准备渲染基础设施。
+    ///
+    /// 【为什么必须有这一步】`prepare()` 依赖 `prepare_owner` 与 `preparation`，而这两样
+    /// 此前**只在 ARA 绑定时**建立（`bind_to_document`）。Transfer 实例从不绑定，于是
+    /// 它的 `prepare()` 会在第一个早退处静默返回 —— 录制正常、界面正常、就是没有声音。
+    /// 这类"线都接好了但没插电"的故障最难归因，所以这里显式补上那部分与 ARA 无关的
+    /// 初始化。
+    ///
+    /// 【为什么可以重复调用】三处都是 `OnceLock` / 覆盖式赋值，重复调用无副作用；
+    /// 它由 20ms 的 UI 定时器驱动，因此必须幂等。
+    pub(crate) fn arm_transfer_rendering(self: &Arc<Self>) {
+        let _ = self
+            .preparation
+            .get_or_init(super::preparation::PreparationQueue::new);
+        *self.prepare_owner.lock_or_recover() = Some(Arc::downgrade(self));
+        // 时钟：Transfer 没有 ARA 文档的共享时钟，自己起一个。宿主播放位置由
+        // `audio_process_inner` 的 `observe_transport` 照常写入（它与 ARA 无关）。
+        let _ = self.clock.set(Arc::new(super::transport::TransportClock::default()));
+        static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
+        self.writer_id
+            .store(NEXT_WRITER.fetch_add(1, Ordering::Relaxed), Ordering::Release);
+    }
+
     pub fn prepare(&self) {
-        if !self.renders_playback() {
+        if !self.renders() {
             return;
         }
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
@@ -3099,6 +3214,12 @@ impl ExtensionOwner {
     }
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
     pub(crate) fn prepare_offline_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+        // 【为什么 Transfer 要在这里同步准备】bounce / 导出是 Transfer 的**第二条通路**，
+        // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
+        // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
+        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+            return self.transfer_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        }
         if !self.renders_playback() {
             return Ok(());
         }
@@ -3158,6 +3279,11 @@ impl ExtensionOwner {
     }
     /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
     fn prepare_job(&self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Result<(), String> {
+        // Transfer 形态没有 ARA 文档；在取文档**之前**分流，否则它会以
+        // "document closed" 收场，而那条路对 Transfer 是常态而非错误。
+        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+            return self.transfer_prepare_job(cancel);
+        }
         let Some(document) = self
             .document
             .lock_or_recover()
