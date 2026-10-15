@@ -80,8 +80,7 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
             ..Default::default()
         };
         crate::test_allocator::begin();
-        let result =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
         let allocations = crate::test_allocator::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
@@ -461,8 +460,7 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
     for mode in [0, 2] {
         data.process_mode = mode;
         crate::test_allocator::begin();
-        let result =
-            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
         let allocations = crate::test_allocator::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
@@ -771,4 +769,153 @@ fn setup_rejects_invalid_rate_block_and_format() {
             assert_eq!(audio_setup_processing(this, &raw mut setup), expected);
         }
     }
+}
+
+/// **Transfer 通路的端到端**：宿主播放中的音频按 `projectTimeSamples` 录进插件时间轴。
+///
+/// 【为什么值得一条走真实 `process` 的用例】`transfer::` 自己的用例测的是机制，
+/// 而这条测的是**接线**：输入总线怎么读、`ProcessContext` 怎么被用、输出走哪条路。
+/// 接线错了（例如把输入当成输出、或用了 `context.sample_rate` 而不是声明率）
+/// 机制测试全绿也发现不了。
+#[test]
+fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
+    let mut processor = Processor::create().unwrap();
+    // 【为什么先取裸指针】`process` 需要 `*mut Processor`，而 owner 要从同一个对象里
+    // 借出来。经由裸指针取 owner 之后两者不再互相借，调用点保持原样。
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活；extension_owner 是它的字段。
+    let owner = unsafe { &(*raw).extension_owner };
+    // 过了宽限期仍未绑定 ⇒ 本实例是 Transfer 形态。
+    owner.note_binding_window_closed_without_ara();
+    assert_eq!(
+        owner.mode(),
+        crate::render::extension::InstanceMode::Transfer,
+        "未绑定 ARA 的实例必须被判成 Transfer，否则下面这条通路根本不会被走到"
+    );
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().expect("48 kHz 已声明，可以开始录制");
+
+    let block_frames = 8_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
+    for block in 0..3_i64 {
+        let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+        let mut input = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: input_planes.as_mut_ptr(),
+        };
+        let mut left = [0.0_f32; 8];
+        let mut right = [0.0_f32; 8];
+        let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 3,
+            channel_buffers: output_planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            // kPlaying 必须置位：停播时宿主仍在 process 固定光标位置。
+            state: 1 << 1,
+            sample_rate: 48_000.0,
+            project_time_samples: block * block_frames as i64,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 0,
+            num_samples: block_frames as i32,
+            num_inputs: 1,
+            num_outputs: 1,
+            inputs: &raw mut input,
+            outputs: &raw mut output,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        crate::test_allocator::begin();
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
+        let allocations = crate::test_allocator::end();
+        assert_eq!(result, K_RESULT_OK);
+        // 录制中必须直通（默认监视）：用户要能听到宿主原声，而不是自己的旧快照。
+        assert_eq!(allocations, 0, "录制路径不得在音频线程上分配");
+        assert_eq!(
+            left,
+            [0.5_f32; 8],
+            "录制中必须把宿主输入原样送出去（monitor 默认开）"
+        );
+        assert_eq!(right, [0.5_f32; 8]);
+    }
+
+    let take = owner.transfer().stop().expect("应当产生一个 take");
+    let (timeline, regions, sources) = owner.transfer().render_input().expect("有素材");
+    assert_eq!(timeline.clips.len(), 1, "三个连续块应合成一个片段");
+    assert_eq!(regions.len(), 1);
+    assert_eq!(sources.len(), 1);
+    let clip = &timeline.clips[0];
+    // 24 帧 @ 48 kHz = 0.0005 秒，起点是工程位置 0。
+    assert!(clip.start_sec.abs() < 1e-12);
+    assert!((clip.length_sec - 24.0 / 48_000.0).abs() < 1e-12);
+    assert_eq!(owner.transfer().status().active_take, Some(take));
+}
+
+/// 未录制时 Transfer 通路必须**完全不介入**：既不写输出，也不碰任何状态。
+///
+/// 【为什么这条是契约】它是"插进任何宿主都不会改变原有行为"的全部依据。
+/// 一旦未录制时它也写输出，ARA 宿主上正常渲染的实例就会被静音或直通掉。
+#[test]
+fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
+    let model = crate::ara::model::ModelHandle::new();
+    let mut processor = Processor::create().unwrap();
+    processor
+        .extension_owner
+        .bind_to_document(
+            model.session(),
+            ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),
+            ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
+    processor.extension_owner.snapshots[0]
+        .publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate: 44100,
+            origin_sample: 0,
+            left: vec![0.7; 4],
+            right: vec![0.7; 4],
+            _reservation: None,
+        })
+        .unwrap();
+    let mut source = [0.1_f32; 4];
+    let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+    let mut input = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: input_planes.as_mut_ptr(),
+    };
+    let mut left = [9.0_f32; 4];
+    let mut right = [9.0_f32; 4];
+    let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 3,
+        channel_buffers: output_planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: 1 << 1,
+        sample_rate: 44100.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: 4,
+        num_inputs: 1,
+        num_outputs: 1,
+        inputs: &raw mut input,
+        outputs: &raw mut output,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    let result =
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+    assert_eq!(result, K_RESULT_OK);
+    assert_eq!(left, [0.7_f32; 4], "未录制时必须输出快照，而不是直通宿主输入");
+    assert_eq!(right, [0.7_f32; 4]);
 }

@@ -418,11 +418,16 @@ pub(crate) struct ExtensionOwner {
     ///
     /// 【为什么必须记下来】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
     /// `setActive` **之前**调用。宿主一旦激活组件就再也不会给这个实例绑定机会 ——
-    /// 那一刻之后仍无绑定，就是"宿主把本插件当普通插入效果器"的确证。此前这件事
-    /// 只能靠读者对比两个会话的日志才能推断出来（见 `note_editor_tick`）。
+    /// 那一刻之后仍无绑定，就是"宿主把本插件当普通插入"的确证，也就是 Transfer 形态
+    /// （见 [`InstanceMode`]）。此前这件事只能靠读者对比两个会话的日志才能推断出来。
     set_active_at: Mutex<Option<std::time::Instant>>,
     /// "激活后仍无 ARA 绑定"这条诊断是否已经报过（一次性）。
     ara_binding_absent_reported: std::sync::atomic::AtomicBool,
+    /// Transfer 通路的捕获存储。
+    ///
+    /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
+    /// 一个在放；共享存储会让它们互相覆盖对方的 take。
+    transfer: crate::transfer::TransferStore,
 }
 
 /// `setActive(true)` 之后允许 ARA 绑定出现的宽限时间（见 [`ExtensionOwner::note_editor_tick`]）。
@@ -1616,6 +1621,10 @@ impl ExtensionOwner {
         let hz = rate.round();
         if hz.is_finite() && hz > 0.0 && hz <= f64::from(i32::MAX) {
             self.setup_sample_rate.store(hz as i32, Ordering::Release);
+            // Transfer 的段容量也按这个率算（一"段"是 8 **秒**，不是 8 万帧）。
+            // 在这里转发而不是让调用点各记一次：宿主声明的工程率只有一个来源，
+            // 两处分别记录必然漂移。
+            self.transfer.note_project_rate(hz);
         }
     }
     /// `setupProcessing` 声明的采样率（Hz；未声明为 `0`）。
@@ -1751,6 +1760,50 @@ impl ExtensionOwner {
     /// 【为什么是"一等后端"而不是 `None`】ARA-only 后端照样能看 / 能听 / 能渲染 /
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
+    /// Transfer 通路的捕获存储。
+    pub(crate) fn transfer(&self) -> &crate::transfer::TransferStore {
+        &self.transfer
+    }
+
+    /// 音频线程上的 Transfer 阶段。
+    ///
+    /// 返回 `true` = **已经写过输出**，调用方必须直接返回（不要再走快照通路）。
+    ///
+    /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
+    /// 未录制时它只读一个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
+    /// 所有既有逻辑之前的前提。
+    ///
+    /// 【为什么录制中不走快照输出】正在录的那一段，插件手上还没有对应的素材；
+    /// 输出上一次的快照会让用户听到**旧内容盖在新演奏上**。所以录制中按选项输出
+    /// 直通（默认，让用户听到宿主原声）或静音。
+    pub(crate) fn transfer_stage(
+        &self,
+        data: *mut crate::audio_abi::ProcessData,
+        context: &crate::audio_abi::ProcessContext,
+    ) -> bool {
+        let transfer = self.transfer();
+        // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
+        // "点一次 Transfer 然后导出"，而实时宿主必须真的播一遍。
+        // SAFETY: 调用方保证 data 在本回调期间可读。
+        if unsafe { (*data).process_mode } == 2 {
+            transfer.note_offline();
+        }
+        if !transfer.is_armed() {
+            return false;
+        }
+        // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
+        // 的切片只在本次回调内有效，而 `on_block` 同步消费完就返回。
+        let block = unsafe {
+            crate::audio_abi::capture_view(data, context.project_time_samples, context.sample_rate)
+        };
+        let _ = transfer.on_block(block);
+        if transfer.options().monitor {
+            // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
+            let _ = unsafe { crate::audio_abi::pass_through(data) };
+        }
+        true
+    }
+
     /// 当前生效的编辑后端。
     ///
     /// 【为什么不能只返回字段里的那份】字段在 `initialize` 期间写入，而那时 ARA 绑定

@@ -324,6 +324,59 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
     Ok(())
 }
 
+/// 从输入总线构造捕获视图（Transfer 通路）。
+///
+/// 【为什么放在本文件而不是 `transfer/`】读输入总线是 **VST3 ABI** 的知识：
+/// `AudioBusBuffers` 的字段布局、`silence_flags` 的位序、inactive plane 可以为 null。
+/// `transfer::capture` 刻意不认识这些（它只面对 `InputBlock`），这样捕获逻辑可以
+/// 在完全不碰宿主 ABI 的情况下单测。
+///
+/// 【`silence_flags` 为什么只是"当作没有输入"】SDK 原文：该位可选，宿主可以支持也可以
+/// 不支持，且"置位表示每个样本都是 0"。它不是"跳过这段"的许可 —— 捕获层收到 `None`
+/// 会写**等长的零**，时间轴因此保持连续。真正会出错的用法是"因为静音就不写"，
+/// 那会让段长度与工程时间对不上，后面所有内容静默错位。
+///
+/// # Safety
+/// 与 [`validate`] 相同的前提：`data` 指向本回调独占的合法 SDK 结构，且输入总线的
+/// 每个非空 plane 至少有 `num_samples` 帧可读。**返回的切片只在本次回调内有效**，
+/// 调用方不得把它们存起来或带出回调。
+pub(crate) unsafe fn capture_view<'a>(
+    data: *const ProcessData,
+    start: i64,
+    sample_rate: f64,
+) -> crate::transfer::capture::InputBlock<'a> {
+    // SAFETY: 调用方保证 data 在本调用期间可读。
+    let data = unsafe { &*data };
+    let frames = data.num_samples.max(0) as usize;
+    let mut planes: [Option<&'a [f32]>; 2] = [None, None];
+    if frames > 0 && data.num_inputs > 0 && !data.inputs.is_null() {
+        // SAFETY: validate 已确认唯一输入总线非空。
+        let bus = unsafe { &*data.inputs };
+        if !bus.channel_buffers.is_null() {
+            // 只取前两个声道：内部快照恒为立体声（`PlaybackSnapshot` 只有左右），
+            // 多声道需要一条显式的下混策略，那是产品决策而不是补一个边界。
+            for channel in 0..(bus.num_channels.max(0) as usize).min(2) {
+                if bus.silence_flags & (1u64 << channel) != 0 {
+                    continue;
+                }
+                // SAFETY: channel < min(num_channels, 2) ≤ 声明数量，宿主提供对应指针。
+                let plane = unsafe { *bus.channel_buffers.add(channel) };
+                if plane.is_null() {
+                    continue;
+                }
+                // SAFETY: 宿主声明该 plane 至少有 num_samples 帧（validate 已查形状）。
+                planes[channel] = Some(unsafe { std::slice::from_raw_parts(plane, frames) });
+            }
+        }
+    }
+    crate::transfer::capture::InputBlock {
+        start,
+        frames,
+        sample_rate,
+        planes,
+    }
+}
+
 /// 手写 ABI 结构体的**完整布局清单**（`类型.字段` / `类型.size` / `类型.align` → 字节）。
 ///
 /// 【为什么抽成函数】它是跨平台布局基准的唯一来源：

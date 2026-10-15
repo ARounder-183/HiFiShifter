@@ -1689,6 +1689,11 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
+            // 【Transfer 通路】在快照输出之前插入，且**不改**下面三行。
+            // 未录制时它只读一个原子就返回 false；录制时它写完输出并返回 true。
+            if owner.transfer_stage(data, context) {
+                return K_RESULT_OK;
+            }
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
             if data.process_mode != 2 && context.state & (1 << 1) == 0 {
                 return K_RESULT_OK;
