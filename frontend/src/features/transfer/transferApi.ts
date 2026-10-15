@@ -97,6 +97,14 @@ export interface TransferStatus {
      */
     hostPlaying: boolean;
     /**
+     * 宿主在用**非 32-bit 浮点**跑本实例（`kSample64`）。
+     *
+     * 【为什么要单独一档】那种情况下插件的样本平面是 64 位的，插件读不了 ⇒ 捕获与输出
+     * 都按设计静音。它表现为"插上插件就没声音、也录不到东西"，而补救是**用户可执行的**：
+     * 把宿主的处理精度切回 32-bit 浮点。
+     */
+    unsupportedPrecision: boolean;
+    /**
      * 宿主是否**正在**通过 ARA 供音。
      *
      * 【为什么状态里要有它】Transfer 入口现在无条件可见（形态判定要等 5 秒宽限期，

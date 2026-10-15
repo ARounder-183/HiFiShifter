@@ -59,6 +59,16 @@ export function TransferPanel() {
 
             {/* 【为什么"录到了但没有内容"单独一条】全静音的录制不产生片段，于是时间轴
                 空白、面板却说"已录制" —— 三个读数互相矛盾。这一条把原因说穿。 */}
+            {/* 宿主在播放、却一帧都没到 ⇒ 插件没拿到音频。这条与"没在播放"分开说，
+                因为要做的事完全不同（检查路由 vs 去按播放）。 */}
+            {status?.state === "recording" &&
+            status.hostPlaying &&
+            (status.recording?.capturedFrames ?? 0) === 0 ? (
+                <span role="alert" style={{ color: "var(--qt-danger-text)" }}>
+                    {t("transfer_no_audio_arriving")}
+                </span>
+            ) : null}
+
             {status?.material?.silent ? (
                 <span role="alert" style={{ color: "var(--qt-warning-text)" }}>
                     {tVars("transfer_recorded_silent", {
@@ -195,11 +205,15 @@ function guideText(
     status: TransferStatus | null,
     canCapture: boolean,
 ): string {
+    if (status?.unsupportedPrecision) return t("transfer_unsupported_precision");
     if (status?.araBound) return t("transfer_not_applicable_ara");
     if (status?.state === "recording") return t("transfer_guide_recording");
     if (status?.state === "ready") return t("transfer_guide_ready");
     if (status?.sawOffline) return t("transfer_guide_offline");
-    if (canCapture) return t("transfer_guide_body");
+    if (canCapture) {
+        // 有位置、没有输入：这条通路在这个宿主上"通了但没料"，用户要检查的是路由。
+        return status?.sawInput ? t("transfer_guide_body") : t("transfer_no_input_audio");
+    }
     return t("transfer_cannot_capture");
 }
 
@@ -212,6 +226,9 @@ type TransferMessageKey =
     | "transfer_guide_ready"
     | "transfer_guide_offline"
     | "transfer_cannot_capture"
+    | "transfer_no_input_audio"
+    | "transfer_no_audio_arriving"
+    | "transfer_unsupported_precision"
     | "transfer_option_monitor"
     | "transfer_option_monitor_hint"
     | "transfer_option_outside"

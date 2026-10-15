@@ -2198,6 +2198,14 @@ export const enUS = {
     transfer_not_applicable_ara: "This host provides audio through ARA, so Transfer is not needed.",
     transfer_cannot_capture:
         "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",
+    transfer_no_input_audio:
+        "This host gives the plug-in a playhead but no audio on its input bus — put the plug-in on the track whose audio you want, and check that the host routes that track into it.",
+    transfer_no_audio_arriving:
+        "The host is playing, but no audio is reaching this instance — check that the plug-in sits on the track you want and that the host routes that track into it.",
+    transfer_field_no_audio: "No audio arriving",
+    transfer_unsupported_precision:
+        "This host processes the plug-in at 64-bit sample precision, which the plug-in cannot read yet, so it stays silent. Switch the host's processing precision to 32-bit float.",
+    transfer_field_precision: "64-bit host",
     transfer_recording_progress: "Recorded {seconds}s",
     transfer_field_segments: "Segments",
     transfer_field_gaps: "Jumps",

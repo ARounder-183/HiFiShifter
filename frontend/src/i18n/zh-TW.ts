@@ -2117,6 +2117,14 @@ export const zhTW = {
     transfer_not_applicable_ara: "該宿主已透過 ARA 提供音訊，無需 Transfer。",
     transfer_cannot_capture:
         "這個宿主沒有把播放位置交給外掛，因此無法把音訊對齊到時間軸上。請使用宿主自身的編輯功能，或改用支援 ARA 的宿主。",
+    transfer_no_input_audio:
+        "這個宿主給了外掛播放位置，但沒有把音訊送到外掛的輸入總線 —— 請把外掛放在你要處理的軌道上，並確認宿主把那條軌道的音訊路由進了本外掛。",
+    transfer_no_audio_arriving:
+        "宿主正在播放，但沒有任何音訊到達本實例 —— 請確認外掛插在你要處理的軌道上，並確認宿主把那條軌道路由進了本外掛。",
+    transfer_field_no_audio: "沒有音訊進來",
+    transfer_unsupported_precision:
+        "這個宿主以 64 位元浮點精度處理本外掛，外掛目前讀不了這種樣本，因此保持靜音。請把宿主的處理精度切換為 32 位元浮點。",
+    transfer_field_precision: "宿主為 64 位元",
     transfer_recording_progress: "已錄 {seconds} 秒",
     transfer_field_segments: "分段數",
     transfer_field_gaps: "跳躍次數",

@@ -47,6 +47,7 @@ function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
         sawOffline: false,
         canCapture: true,
         hostPlaying: false,
+        unsupportedPrecision: false,
         araBound: false,
         ...overrides,
     };
@@ -127,6 +128,39 @@ test("ARA 宿主里如实说明不需要 Transfer", async () => {
     await render();
     expect(button(enUS.transfer_start)!.getAttribute("data-tooltip")).toBe(
         enUS.transfer_not_applicable_ara,
+    );
+});
+
+test("宿主在播放却一帧都没到 ⇒ 直接说是音频没进来", async () => {
+    invokeMock.mockResolvedValue(
+        status({
+            state: "recording",
+            hostPlaying: true,
+            // 录了 0 帧：宿主在播，插件却没收到任何输入。
+            recording: {
+                capturedFrames: 0,
+                sealedSegments: 0,
+                position: 0,
+                peak: [0, 0],
+                gaps: 0,
+                spares: 2,
+            },
+            capture: null,
+        }),
+    );
+    await render();
+    expect(text()).toContain(enUS.transfer_field_no_audio);
+    expect(text(), "不能把「没在播放」与「没拿到音频」混成一句").not.toContain(
+        enUS.transfer_field_waiting_host,
+    );
+});
+
+test("宿主用 64 位精度时说明原因与补救（这是用户可修的一档）", async () => {
+    invokeMock.mockResolvedValue(status({ unsupportedPrecision: true }));
+    await render();
+    expect(text()).toContain(enUS.transfer_field_precision);
+    expect(button(enUS.transfer_start)!.getAttribute("data-tooltip")).toBe(
+        enUS.transfer_unsupported_precision,
     );
 });
 

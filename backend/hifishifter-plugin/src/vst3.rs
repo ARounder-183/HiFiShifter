@@ -1410,6 +1410,9 @@ unsafe extern "system" fn audio_set_bus_arrangements(
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
         crate::guard_ffi(K_RESULT_FALSE, || {
+            // 【为什么 0 也算不支持】宿主提出"这条总线不要了"时，正确的回答是
+            // `kResultFalse`（"我做不到动态增减总线"），宿主于是沿用我们声明的 1 进 1 出。
+            // 假装接受会让 `getBusCount` 与 `getBusInfo` 互相矛盾 —— 对宿主撒谎。
             if num_inputs != 1 || num_outputs != 1 {
                 return K_RESULT_FALSE;
             }
@@ -1424,9 +1427,6 @@ unsafe extern "system" fn audio_set_bus_arrangements(
             // 宁可部分工作，也不要从插槽里消失（渲染面见 `PlaybackSnapshot::copy_block`，
             // 清零点见 `audio_abi::clear_outputs`）。
             let (input, output) = unsafe { (*inputs, *outputs) };
-            if input == 0 || output == 0 {
-                return K_RESULT_FALSE;
-            }
             // 记下协商结果：`getBusArrangement` 必须如实回吐，否则宿主按错误声道数组织缓冲。
             // SAFETY: this 为存活音频接口。
             unsafe { &(*base_from_audio(this)).extension_owner }
@@ -1649,7 +1649,33 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     if this.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    match unsafe { crate::audio_abi::validate(data.cast()) } {
+    let shape = unsafe { crate::audio_abi::validate(data.cast()) };
+    // 【为什么 Transfer 的观察与捕获在形状判定**之前】** 见 `ExtensionOwner::transfer_observe`：
+    // 录制只依赖"宿主给的位置"与"宿主给的输入"，与输出总线的形状无关。此前它在下面的
+    // `num_outputs == 0` 早退之后 —— 于是"宿主没接我们的输出"这一个无关事实会让插件
+    // 既录不到东西，又让 `sawContext` 永不置位（界面上的录制键一直是灰的）。
+    //
+    // 只跳过 `InvalidArgument`（data 本身非法）：那种情况下连字段读取都不该做。
+    if !matches!(shape, Err(crate::audio_abi::BufferError::InvalidArgument)) {
+        // SAFETY: 宿主持有 Processor；data 的字段布局由 `validate` 的调用契约保证。
+        let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
+        // 【为什么必须要求 32-bit 浮点】非 32-bit 时 `channelBuffers32` 那个联合体成员
+        // 实际是 `channelBuffers64`，按 `f32` 读会读到垃圾。这条与形状判定无关，
+        // 所以单独判。
+        // SAFETY: this 是存活的音频接口子对象。
+        let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+        // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而"静音"在界面上必须能
+        // 说清原因（见 `TransferStore::unsupported_precision`）。这一行与形状判定无关，
+        // 所以在 `InvalidArgument` 之外一律记录。
+        owner.transfer().note_precision(probe.symbolic_sample_size);
+        if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
+            // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
+            let context = unsafe { &*probe.process_context };
+            owner.observe_transport(context, probe.process_mode);
+            owner.transfer_observe(probe, context);
+        }
+    }
+    match shape {
         Ok(()) => {
             // SAFETY: 宿主持有 Processor，validate已验证当前数据和音频总线。
             let data = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
@@ -1658,9 +1684,6 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             }
             // SAFETY: this 是存活的音频接口子对象。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-            if !data.process_context.is_null() {
-                owner.observe_transport(unsafe { &*data.process_context }, data.process_mode);
-            }
             if owner.is_editor_only() {
                 // 纯编辑角色不是歌曲播放renderer；保留宿主已经处理的fade/gain/前级FX，包括停播监听。
                 return match unsafe { crate::audio_abi::pass_through(data) } {
@@ -1699,7 +1722,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
             // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
             // 而不是把整条轨静音（见 `ExtensionOwner::transfer_output`）。
-            let (snapshot_source, layered) = match owner.transfer_stage(data, context) {
+            let (snapshot_source, layered) = match owner.transfer_stage(data) {
                 crate::render::extension::TransferStage::Handled => return K_RESULT_OK,
                 crate::render::extension::TransferStage::Snapshot { source, layered } => {
                     (source, layered)

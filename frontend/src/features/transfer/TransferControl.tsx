@@ -36,6 +36,12 @@ export function TransferControl() {
     // 录制中但宿主没在播放 ⇒ 一个字节也进不来。这是这条通路最常见的失败
     // （用法是"先按录制、再按播放"），必须直接说出来。
     const stalled = recording && !(status?.hostPlaying ?? false);
+    // 宿主在播放、却一帧都没到 ⇒ 插件没拿到音频。**必须与"没在播放"分开**：
+    // 前者要去检查路由（插件插错轨 / 宿主没把它接进链路），后者只要按播放。
+    const silentInput =
+        recording &&
+        (status?.hostPlaying ?? false) &&
+        (status?.recording?.capturedFrames ?? 0) === 0;
     const captured = status?.recording
         ? framesToSeconds(
               status.recording.capturedFrames,
@@ -43,15 +49,22 @@ export function TransferControl() {
           )
         : null;
 
-    const tooltip = araBound
-        ? t("transfer_not_applicable_ara")
-        : !canCapture
-          ? t("transfer_cannot_capture")
-          : recording
-            ? t("transfer_guide_recording")
-            : (status?.takeCount ?? 0) > 0
-              ? t("transfer_guide_ready")
-              : t("transfer_guide_body");
+    // 【为什么"有位置但没输入"排在"不能录"之前】两者都是"点了也没用"，但要做的事
+    // 完全不同：前者要去检查宿主的路由（插件是不是插错了轨道），后者是宿主根本不给位置。
+    const noInput = canCapture && status?.sawInput === false;
+    const tooltip = status?.unsupportedPrecision
+        ? t("transfer_unsupported_precision")
+        : araBound
+          ? t("transfer_not_applicable_ara")
+          : !canCapture
+            ? t("transfer_cannot_capture")
+            : noInput
+              ? t("transfer_no_input_audio")
+              : recording
+                ? t("transfer_guide_recording")
+                : (status?.takeCount ?? 0) > 0
+                  ? t("transfer_guide_ready")
+                  : t("transfer_guide_body");
 
     return (
         <Flex align="center" gap="1" className="shrink-0" data-transfer-control>
@@ -90,6 +103,24 @@ export function TransferControl() {
                     data-tooltip={t("transfer_host_not_playing")}
                 >
                     {t("transfer_field_waiting_host")}
+                </span>
+            ) : null}
+            {silentInput ? (
+                <span
+                    className="hs-type-caption"
+                    style={{ color: "var(--qt-danger-text)" }}
+                    data-tooltip={t("transfer_no_audio_arriving")}
+                >
+                    {t("transfer_field_no_audio")}
+                </span>
+            ) : null}
+            {status?.unsupportedPrecision ? (
+                <span
+                    className="hs-type-caption"
+                    style={{ color: "var(--qt-danger-text)" }}
+                    data-tooltip={t("transfer_unsupported_precision")}
+                >
+                    {t("transfer_field_precision")}
                 </span>
             ) : null}
             {error ? (

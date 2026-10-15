@@ -77,8 +77,8 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     let owner = insert_owner();
     assert_eq!(
         owner.transfer_output(),
-        TransferOutput::Untouched,
-        "形态未定且没有素材时不介入输出 —— 宿主可能正要绑定 ARA"
+        TransferOutput::PassThrough,
+        "没有素材时插件必须**透明** —— 静音会让「插上插件这条轨就哑了」"
     );
     record(&owner, 256);
     assert_eq!(
@@ -110,22 +110,26 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     owner.transfer().cancel();
 }
 
-/// **形态落定为 Transfer 且还没有素材时透传**，而不是把整条轨静音。
+/// **还没有素材时一律透传**，而不是把整条轨静音。
 ///
-/// 【为什么单列这一条】"插入插件 → 整条轨没声音"是用户最容易误判成"插件坏了"的表现。
-/// 但这条只在**确知是 Transfer**时才允许（形态未定时宿主可能正要绑定 ARA，
-/// 那时输出归快照通路管）。
+/// 【为什么这条是"没声音"的回归测试】此前只有"形态已落定为 Transfer"才透传，于是
+/// 窗口没开过、宽限期未过的会话（`Undetermined`）在**任何素材之前**都是静音 ——
+/// 用户把插件插到一条有声音的轨道上，得到的是"整条轨哑了"。
+/// 真正的契约是"不要覆盖一个正常渲染的 ARA 实例的输出"，而那由 `is_bound()` /
+/// `bound_once` 守卫负责（见下一条用例）。
 #[test]
-fn a_known_transfer_instance_is_transparent_before_the_first_recording() {
+fn an_instance_without_material_is_transparent_regardless_of_mode() {
     let owner = insert_owner();
-    owner.note_binding_window_closed_without_ara();
-    assert_eq!(owner.mode(), InstanceMode::Transfer);
-    assert!(!owner.renders(), "没有素材就没什么可发布的");
+    assert_eq!(owner.mode(), InstanceMode::Undetermined, "窗口没开过、宽限期未过");
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::PassThrough,
-        "还没录制时插件必须是透明的"
+        "形态未定也不是把这条轨静音的理由"
     );
+    owner.note_binding_window_closed_without_ara();
+    assert_eq!(owner.mode(), InstanceMode::Transfer);
+    assert!(!owner.renders(), "没有素材就没什么可发布的");
+    assert_eq!(owner.transfer_output(), TransferOutput::PassThrough);
 }
 
 /// **换 take 之后绝不播上一份**：两份发布都按 take 号比对。
@@ -176,8 +180,8 @@ fn clearing_the_takes_retracts_the_raw_tape() {
     assert!(!owner.renders());
     assert_eq!(
         owner.transfer_output(),
-        TransferOutput::Untouched,
-        "素材清空之后回到「不介入」，而不是继续播一份已经不存在的原始磁带"
+        TransferOutput::PassThrough,
+        "素材清空之后回到「透明」，而不是继续播一份已经不存在的原始磁带"
     );
 }
 

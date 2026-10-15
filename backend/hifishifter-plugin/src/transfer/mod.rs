@@ -205,6 +205,8 @@ pub(crate) struct TransferStatus {
     pub saw_offline: bool,
     /// 宿主**此刻**是否在播放（实时，不是"曾经播过"）。
     pub host_playing: bool,
+    /// 宿主在用非 32-bit 浮点跑本实例（插件按设计静音，见字段说明）。
+    pub unsupported_precision: bool,
 }
 
 /// 每个插件实例一份的 Transfer 存储。
@@ -244,6 +246,19 @@ pub(crate) struct TransferStore {
     /// "先按录制、再按播放"）。实时读数让面板能直接说"宿主没有在播放"，而不是让用户对着
     /// 一个 0.00 秒的读数猜。
     host_playing: AtomicBool,
+    /// 宿主用**非 32-bit 浮点**（`kSample64`）在跑本实例。
+    ///
+    /// 【为什么要单独一个读数】那种情况下插件的平面是 64 位的（联合体同一地址），
+    /// 我们既不能捕获也不能直通，输出**按设计**是静音。此前这件事只存在于一行日志里，
+    /// 而它表现为"插上插件就没声音、也录不到东西" —— 与"宿主没给输入"完全同形。
+    /// 它有一个用户可执行的补救：把宿主的处理精度切回 32-bit 浮点。
+    unsupported_precision: AtomicBool,
+    /// "宿主给了位置但从来没给过输入"这条诊断是否已经报过（一次性）。
+    ///
+    /// 【为什么要它】这是"插件没声音、也录不到东西"最可能的原因，而它此前**只**表现为
+    /// 一条条静音的读数。音频线程不能写日志（文件 IO），所以由非音频的会话 actor
+    /// 在心跳里检查并只报一次（见 [`TransferStore::report_missing_input_once`]）。
+    missing_input_reported: AtomicBool,
 }
 
 impl Default for TransferStore {
@@ -261,6 +276,8 @@ impl Default for TransferStore {
             saw_input: AtomicBool::new(false),
             saw_offline: AtomicBool::new(false),
             host_playing: AtomicBool::new(false),
+            unsupported_precision: AtomicBool::new(false),
+            missing_input_reported: AtomicBool::new(false),
         }
     }
 }
@@ -321,6 +338,17 @@ impl TransferStore {
             })
             .collect();
         f(&input)
+    }
+
+    /// 记录本块的样本精度（`ProcessData::symbolic_sample_size`）。
+    pub(crate) fn note_precision(&self, symbolic_sample_size: i32) {
+        self.unsupported_precision
+            .store(symbolic_sample_size != 0, Ordering::Release);
+    }
+
+    /// 宿主是否在用非 32-bit 浮点（那种情况下本插件按设计静音，见字段说明）。
+    pub(crate) fn precision_unsupported(&self) -> bool {
+        self.unsupported_precision.load(Ordering::Acquire)
     }
 
     /// 记录宿主声明的工程率（`setupProcessing`）。
@@ -535,6 +563,24 @@ impl TransferStore {
         }
         self.host_playing.store(playing, Ordering::Release);
     }
+    /// 只报一次"宿主给了位置、却从来没有给过输入"。
+    ///
+    /// 【为什么由非音频线程调用】它要写日志（文件 IO），音频线程不允许。
+    /// 【为什么值得单独一条日志】这条现象此前在界面上只是"什么都不动"：录制读数停在
+    /// 0.0 秒、时间轴空白、播放无声。把结论写进日志，用户（或我们）不必再去猜
+    /// 是"没位置"、"没输入"还是"没播放"。
+    pub(crate) fn report_missing_input_once(&self) {
+        if self.saw_input.load(Ordering::Acquire) || !self.saw_context.load(Ordering::Acquire) {
+            return;
+        }
+        if self.missing_input_reported.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        log::warn!(
+            "[transfer] the host supplies a playhead but this instance has never received an              audio input bus; Transfer cannot record anything and the plug-in has nothing to              pass through. Put the plug-in on the track whose audio you want, and check that              the host routes that track into it."
+        );
+    }
+
     pub(crate) fn on_block(&self, block: InputBlock<'_>) -> TransferBlockOutcome {
         if !self.is_armed() {
             return TransferBlockOutcome::Idle;
@@ -739,6 +785,7 @@ impl TransferStore {
             saw_input: self.saw_input.load(Ordering::Acquire),
             saw_offline: self.saw_offline.load(Ordering::Acquire),
             host_playing: self.host_playing.load(Ordering::Acquire),
+            unsupported_precision: self.precision_unsupported(),
         }
     }
 

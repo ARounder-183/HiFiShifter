@@ -777,6 +777,8 @@ impl EditorSession {
                 // 相对 8 秒一粒的备用缓冲有两个数量级的余量。
                 if let Some(owner) = session.transfer_owner() {
                     owner.transfer().top_up();
+                    // 一次性诊断：宿主给了位置却从来没给过输入（见该方法的说明）。
+                    owner.transfer().report_missing_input_once();
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。

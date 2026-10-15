@@ -130,6 +130,9 @@ fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
     );
     assert_eq!(left, [0.05, 0.1, 123.0]);
     assert_eq!(right, [0.2, 0.3, 456.0]);
+    // 【为什么置了 silence_flags 仍然读样本】SDK 原文：该位只是给插件省算力的**可选**
+    // 提示，且置位时缓冲"仍必须指向有效内存"。把它当成"没有输入"会让一条本来有声的
+    // 轨道被插件静音掉（实测用户报障的正是这种"全静音"）。唯一算没有输入的是空指针。
     bus.silence_flags = 1;
     planes[1] = std::ptr::null_mut();
     let mut out_left = [9.0; 3];
@@ -146,9 +149,9 @@ fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
         K_RESULT_OK
     );
-    assert_eq!(out_left, [0.0, 0.0, 9.0]);
-    assert_eq!(out_right, [0.0, 0.0, 9.0]);
-    assert_eq!(output.silence_flags, 3);
+    assert_eq!(out_left, [0.05, 0.1, 9.0], "置位只是提示，样本才是事实");
+    assert_eq!(out_right, [0.0, 0.0, 9.0], "空指针才是「没有输入」");
+    assert_eq!(output.silence_flags, 2, "只有真正没有来源的声道报静音");
     bus.channel_buffers = std::ptr::null_mut();
     out_left = [7.0; 3];
     data.inputs = &raw mut bus;
@@ -162,7 +165,21 @@ fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
 /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
 #[test]
 fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
+    let model = crate::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
+    // 【为什么必须绑定文档】本用例测的是"播放实例把快照送出去"。未绑定的实例是
+    // Transfer 形态（没有素材时透明、有素材时出自己的内容），根本不是这条通路的形状；
+    // 用一个未绑定实例当"播放实例"的替身，只会让用例在别的改动上误报。
+    processor
+        .extension_owner
+        .bind_to_document(
+            model.session(),
+            ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),
+            ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
     processor.extension_owner.snapshots[0]
         .publish(crate::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
@@ -314,7 +331,19 @@ fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_c
 /// 离线缺快照/上下文必须显式失败；实时仍安全静音，全部回调保持零分配。
 #[test]
 fn offline_missing_snapshot_is_failure_not_successful_silence() {
+    let model = crate::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
+    // 同上：离线"缺快照必须显式失败"是 ARA 播放实例的契约。
+    processor
+        .extension_owner
+        .bind_to_document(
+            model.session(),
+            ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),
+            ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
     let mut left = [9_f32; 4];
     let mut right = [9_f32; 4];
     let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -363,7 +392,19 @@ fn run(data: *mut ProcessData) -> TResult {
 /// 停播重复process同一帧必须静音；离线导出没有kPlaying也必须保留音频。
 #[test]
 fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
+    let model = crate::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
+    // 同上：这是"播放实例 + 快照"的契约，未绑定实例不是那个形状。
+    processor
+        .extension_owner
+        .bind_to_document(
+            model.session(),
+            ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),
+            ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
     processor.extension_owner.snapshots[0]
         .publish(crate::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
@@ -853,6 +894,120 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
     assert!(clip.start_sec.abs() < 1e-12);
     assert!((clip.length_sec - 24.0 / 48_000.0).abs() < 1e-12);
     assert_eq!(owner.transfer().status().active_take, Some(take));
+}
+
+/// **输入总线的 `silence_flags` 不是"没有输入"** —— 样本才是事实。
+///
+/// 【为什么这是"全静音"的回归测试】此前捕获与直通都把置位当成"这个声道没有输入"，
+/// 于是把该位当作"未初始化/不关心"的宿主会让插件**录制与输出全静音**，而它其实一直在
+/// 喂音频。用户报障的现象（录制与输出都全为静音、宿主里明明有音频）正是这个形状。
+#[test]
+fn a_silence_flagged_input_bus_is_still_captured_and_passed_through() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().expect("48 kHz 已声明");
+
+    let frames = 16_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.25_f32; frames].into_boxed_slice());
+    let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+    let mut input = AudioBusBuffers {
+        num_channels: 2,
+        // 宿主声称"这两个声道全是零"，但缓冲里其实是真实音频。
+        silence_flags: 3,
+        channel_buffers: input_planes.as_mut_ptr(),
+    };
+    let mut left = [0.0_f32; 16];
+    let mut right = [0.0_f32; 16];
+    let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 3,
+        channel_buffers: output_planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: 1 << 1,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: frames as i32,
+        num_inputs: 1,
+        num_outputs: 1,
+        inputs: &raw mut input,
+        outputs: &raw mut output,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
+        K_RESULT_OK
+    );
+    assert_eq!(left, [0.25_f32; 16], "录制中必须把宿主输入原样送出去");
+    assert_eq!(right, [0.25_f32; 16]);
+    assert_eq!(output.silence_flags, 0, "有非零输出就不该报静音");
+
+    owner.transfer().stop().expect("应当产生一个 take");
+    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    assert_eq!(timeline.clips.len(), 1, "被标成静音的输入也必须录进时间轴");
+}
+
+/// **捕获不依赖输出总线**：`num_outputs == 0` 时也要录到音频。
+///
+/// 【为什么这是回归测试】观察与捕获此前挂在 `process` 的 `num_outputs == 0` 早退**之后**，
+/// 于是"宿主没接我们的输出"这一个与录制无关的事实会让插件既录不到东西，
+/// 又让 `sawContext` 永不置位（界面上的录制键一直是灰的）。
+#[test]
+fn capture_happens_even_when_the_host_supplies_no_output_bus() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().expect("48 kHz 已声明");
+
+    let frames = 16_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.4_f32; frames].into_boxed_slice());
+    let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+    let mut input = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: input_planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: 1 << 1,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: frames as i32,
+        num_inputs: 1,
+        num_outputs: 0,
+        inputs: &raw mut input,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
+        K_RESULT_OK
+    );
+    let status = owner.transfer().status();
+    assert!(status.saw_context, "有工程位置就必须记下来，否则录制键永远是灰的");
+    assert!(status.saw_input, "有输入总线就必须记下来");
+    owner.transfer().stop().expect("应当产生一个 take");
+    assert_eq!(
+        owner.transfer().render_input().map(|(t, _, _)| t.clips.len()),
+        Some(1),
+        "没有输出总线也必须录到音频"
+    );
 }
 
 /// 未录制时 Transfer 通路必须**完全不介入**：既不写输出，也不碰任何状态。

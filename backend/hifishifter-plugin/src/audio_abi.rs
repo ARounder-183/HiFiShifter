@@ -264,7 +264,10 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
     let sources: [*mut f32; 2] = std::array::from_fn(|channel| match &input {
         Some(bus) if input_channels > 0 => {
             let index = if input_channels == 1 { 0 } else { channel };
-            if index >= input_channels || bus.silence_flags & (1 << index) != 0 {
+            // 【为什么不看 `silence_flags`】与 `capture_view` 同一理由：该位只是可选提示，
+            // 而置位时缓冲**仍必须可读**。把它当成"没有输入"会让一条本来有声的轨道
+            // 被插件静音掉 —— 用户看到的是"插上插件就没声音了"。
+            if index >= input_channels {
                 std::ptr::null_mut()
             } else {
                 // SAFETY: `index < input_channels <= 2`，宿主提供对应数量的 plane 指针。
@@ -340,10 +343,14 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
 /// `transfer::capture` 刻意不认识这些（它只面对 `InputBlock`），这样捕获逻辑可以
 /// 在完全不碰宿主 ABI 的情况下单测。
 ///
-/// 【`silence_flags` 为什么只是"当作没有输入"】SDK 原文：该位可选，宿主可以支持也可以
-/// 不支持，且"置位表示每个样本都是 0"。它不是"跳过这段"的许可 —— 捕获层收到 `None`
-/// 会写**等长的零**，时间轴因此保持连续。真正会出错的用法是"因为静音就不写"，
-/// 那会让段长度与工程时间对不上，后面所有内容静默错位。
+/// 【为什么不看 `silence_flags`】SDK 原文：该位"置位表示每个样本都是 0"，
+/// **且置位时缓冲仍必须指向有效内存**；它是给插件省算力的**可选**提示
+/// （"This flag is optional. A host is free to support it or not."）。
+///
+/// 此前这里把置位当作"这个声道没有输入"（`planes[channel] = None`），代价是
+/// **捕获写零 + 直通写零**：一个把该位当作"未初始化/不关心"的宿主会让插件
+/// **录制与输出全静音**，而它其实一直在喂音频。读样本永远是对的（宿主保证可读），
+/// 跳过只省一次拷贝 —— 用"可能全哑"换一次拷贝不值得。
 ///
 /// # Safety
 /// 与 [`validate`] 相同的前提：`data` 指向本回调独占的合法 SDK 结构，且输入总线的
@@ -365,11 +372,9 @@ pub(crate) unsafe fn capture_view<'a>(
             // 只取前两个声道：内部快照恒为立体声（`PlaybackSnapshot` 只有左右），
             // 多声道需要一条显式的下混策略，那是产品决策而不是补一个边界。
             for channel in 0..(bus.num_channels.max(0) as usize).min(2) {
-                if bus.silence_flags & (1u64 << channel) != 0 {
-                    continue;
-                }
                 // SAFETY: channel < min(num_channels, 2) ≤ 声明数量，宿主提供对应指针。
                 let plane = unsafe { *bus.channel_buffers.add(channel) };
+                // 【唯一算"没有输入"的情形是 plane 为空】那是 SDK 允许的 inactive 声道。
                 if plane.is_null() {
                     continue;
                 }

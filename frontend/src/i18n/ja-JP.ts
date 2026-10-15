@@ -2197,6 +2197,14 @@ export const jaJP = {
     transfer_not_applicable_ara: "このホストは ARA で音声を提供しています。Transfer は不要です。",
     transfer_cannot_capture:
         "このホストは再生位置をプラグインに渡さないため、音声をタイムラインに合わせられません。ホスト側の編集機能を使うか、ARA 対応のホストをご利用ください。",
+    transfer_no_input_audio:
+        "このホストは再生位置は渡しますが、入力バスに音声を送っていません — 処理したいトラックにプラグインを挿し、そのトラックの音声がプラグインにルーティングされているか確認してください。",
+    transfer_no_audio_arriving:
+        "ホストは再生中ですが、このインスタンスには音声が届いていません — プラグインが目的のトラックに挿さっているか、そのトラックがプラグインにルーティングされているか確認してください。",
+    transfer_field_no_audio: "音声が届いていません",
+    transfer_unsupported_precision:
+        "このホストはプラグインを 64 ビット精度で処理しています。プラグインはそのサンプルを読めないため無音のままです。ホストの処理精度を 32 ビット浮動小数点に切り替えてください。",
+    transfer_field_precision: "ホストが 64 ビット",
     transfer_recording_progress: "録音済み {seconds} 秒",
     transfer_field_segments: "セグメント数",
     transfer_field_gaps: "ジャンプ回数",

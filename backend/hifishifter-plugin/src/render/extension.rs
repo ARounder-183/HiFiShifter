@@ -2094,16 +2094,13 @@ impl ExtensionOwner {
             return TransferOutput::Recording;
         }
         if !self.transfer.has_material() {
-            // 【为什么只在"已确知是 Transfer"时才主动写输出】形态未定（窗口还没开过、
-            // 或 `setActive` 后还没过宽限期）时宿主可能正要绑定 ARA，而那时输出由快照
-            // 通路负责 —— 主动写输出会把一个正常渲染的 ARA 实例直通掉。形态一旦落定为
-            // Transfer，就没有那个可能了：透传让插件在录制之前是**透明**的，而不是
-            // "插入即把这条轨静音"（后者是用户最容易误判成"插件坏了"的表现）。
-            return if self.mode() == InstanceMode::Transfer {
-                TransferOutput::PassThrough
-            } else {
-                TransferOutput::Untouched
-            };
+            // 【为什么没有素材就一定透传】"不要覆盖一个正常渲染的 ARA 实例的输出"
+            // 这条契约由上面的 `is_bound()` / `bound_once` 守卫负责：形态一旦是 ARA，
+            // 这里根本走不到。此前这里还额外要求"形态已落定为 Transfer"，于是窗口没开过、
+            // 宽限期未过的会话（`Undetermined`）在**任何素材之前**都是静音 ——
+            // 用户把插件插到一条有声音的轨道上，得到的是"整条轨哑了"。
+            // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
+            return TransferOutput::PassThrough;
         }
         if self.processed_ready() {
             return TransferOutput::Processed;
@@ -2142,33 +2139,44 @@ impl ExtensionOwner {
             && self.raw_tape.is_ready()
     }
 
-    /// 音频线程上的 Transfer 阶段。
+    /// 每个音频块的**观察与捕获**：只依赖输入总线与工程位置，**不依赖输出形状**。
     ///
-    /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
-    /// 未录制时它只读几个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
-    /// 所有既有逻辑之前的前提。
+    /// 【为什么必须与输出阶段分开 —— 这是"录制与输出全静音"的一个直接原因】
+    /// 这两件事此前都长在 [`Self::transfer_stage`] 里，而后者被 `process` 在
+    /// `num_samples == 0 || num_outputs == 0` 的早退**之后**才调用。于是"宿主没接我们的
+    /// 输出总线"这一个与录制**无关**的事实，会让插件：
+    ///   * 永远捕获不到任何东西（录制静音）；
+    ///   * `saw_context` 永不置位 ⇒ 界面上的录制键一直是灰的（连录都录不了）。
+    /// 录制只关心两件事：宿主给的**工程位置**、宿主给的**输入**。
     ///
-    /// 【为什么录制中不走快照输出】正在录的那一段，插件手上还没有对应的素材；
-    /// 输出上一次的快照会让用户听到**旧内容盖在新演奏上**。所以录制中按选项输出
-    /// 直通（默认，让用户听到宿主原声）或静音。
-    pub(crate) fn transfer_stage(
+    /// 前置条件（由调用方保证）：`data` 的样本是 32-bit 浮点、`process_context` 非空。
+    /// 非 32-bit 时平面是 64 位（联合体同地址），按 `f32` 读会读到垃圾。
+    pub(crate) fn transfer_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: &crate::audio_abi::ProcessContext,
-    ) -> TransferStage {
+    ) {
         let transfer = self.transfer();
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
         // "点一次 Transfer 然后导出"，而实时宿主必须真的播一遍。
         // SAFETY: 调用方保证 data 在本回调期间可读。
-        let offline = unsafe { (*data).process_mode } == 2;
-        if offline {
+        if unsafe { (*data).process_mode } == 2 {
             transfer.note_offline();
         }
+        // 【为什么采样率有兜底】`ProcessContext::sample_rate` 是 SDK 标注 always valid 的
+        // 字段，但真出现过宿主不填它的情形；而**没有率就无法把工程帧换算成秒**，
+        // 捕获会把每一块都当成"没有位置"丢掉（用户看到的是"录了 0.0 秒"）。
+        // `setupProcessing` 声明过的率是同一件事的权威来源，用它兜底不引入新语义。
+        let declared = self.setup_sample_rate();
+        let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
+            context.sample_rate
+        } else {
+            declared
+        };
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
         // 的切片只在本次回调内有效，而消费方同步读完就返回。
-        let block = unsafe {
-            crate::audio_abi::capture_view(data, context.project_time_samples, context.sample_rate)
-        };
+        let block =
+            unsafe { crate::audio_abi::capture_view(data, context.project_time_samples, rate) };
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
@@ -2177,6 +2185,30 @@ impl ExtensionOwner {
             &block,
             context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
         );
+        if transfer.is_armed() {
+            let _ = transfer.on_block(block);
+        }
+    }
+
+    /// 音频线程上的 Transfer **输出**阶段。
+    ///
+    /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
+    /// 未录制时它只读几个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
+    /// 所有既有逻辑之前的前提。
+    ///
+    /// 【为什么录制中不走快照输出】正在录的那一段，插件手上还没有对应的素材；
+    /// 输出上一次的快照会让用户听到**旧内容盖在新演奏上**。所以录制中按选项输出
+    /// 直通（默认，让用户听到宿主原声）或静音。
+    ///
+    /// 【为什么捕获不在这里】见 [`Self::transfer_observe`]：它必须发生在任何输出形状
+    /// 判定之前，否则"宿主没接输出"会让录制一起失效。
+    pub(crate) fn transfer_stage(
+        &self,
+        data: *mut crate::audio_abi::ProcessData,
+    ) -> TransferStage {
+        let transfer = self.transfer();
+        // SAFETY: 调用方保证 data 在本回调期间可读。
+        let offline = unsafe { (*data).process_mode } == 2;
         // 选项一次取好：它在音频线程上要取一次锁，而下面两个分支都要用。
         let options = transfer.options();
         match self.transfer_output() {
@@ -2186,7 +2218,6 @@ impl ExtensionOwner {
                 layered: false,
             },
             TransferOutput::Recording => {
-                let _ = transfer.on_block(block);
                 // 【为什么离线那一趟不监听】离线渲染（bounce / 导出）若只有一趟，直通会把
                 // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
                 // 错误。静音是诚实的：这一趟的唯一作用是把素材拿进来；第二趟（解除武装后再

@@ -167,6 +167,9 @@ fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
         "canCapture": status.saw_context,
         // 宿主**此刻**是否在播放：按了录制却没声音进来时，面板据此说清原因。
         "hostPlaying": status.host_playing,
+        // 宿主在用 64 位浮点跑本实例 ⇒ 插件按设计静音（平面是 64 位的）。
+        // 这是"插上就没声音"的一个**用户可修复**的原因：把宿主精度切回 32-bit。
+        "unsupportedPrecision": status.unsupported_precision,
         // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
         "araBound": ara_bound,
     })

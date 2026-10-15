@@ -2114,6 +2114,14 @@ export const zhCN = {
     transfer_not_applicable_ara: "该宿主已通过 ARA 提供音频，无需 Transfer。",
     transfer_cannot_capture:
         "这个宿主没有把播放位置交给插件，因此无法把音频对齐到时间轴上。请使用宿主自身的编辑功能，或换用支持 ARA 的宿主。",
+    transfer_no_input_audio:
+        "这个宿主给了插件播放位置，但没有把音频送到插件的输入总线 —— 请把插件放在你要处理的轨道上，并确认宿主把那条轨道的音频路由进了本插件。",
+    transfer_no_audio_arriving:
+        "宿主在播放，但没有任何音频到达本实例 —— 请确认插件插在你要处理的轨道上，并确认宿主把那条轨道路由进了本插件。",
+    transfer_field_no_audio: "没有音频进来",
+    transfer_unsupported_precision:
+        "这个宿主以 64 位浮点精度处理本插件，插件目前读不了这种样本，因此保持静音。请把宿主的处理精度切换为 32 位浮点。",
+    transfer_field_precision: "宿主为 64 位",
     transfer_recording_progress: "已录 {seconds} 秒",
     transfer_field_segments: "分段数",
     transfer_field_gaps: "跳跃次数",

@@ -2169,6 +2169,14 @@ export const koKR = {
         "이 호스트는 ARA로 오디오를 제공합니다. Transfer는 필요하지 않습니다.",
     transfer_cannot_capture:
         "이 호스트는 재생 위치를 플러그인에 전달하지 않아 오디오를 타임라인에 맞출 수 없습니다. 호스트 자체 편집 기능을 쓰거나 ARA를 지원하는 호스트를 사용하세요.",
+    transfer_no_input_audio:
+        "이 호스트는 재생 위치는 주지만 입력 버스로 오디오를 보내지 않습니다 — 처리할 트랙에 플러그인을 두고, 그 트랙의 오디오가 플러그인으로 라우팅되는지 확인하세요.",
+    transfer_no_audio_arriving:
+        "호스트는 재생 중이지만 이 인스턴스에 오디오가 도달하지 않습니다 — 플러그인이 처리할 트랙에 있는지, 그 트랙이 플러그인으로 라우팅되는지 확인하세요.",
+    transfer_field_no_audio: "오디오가 들어오지 않음",
+    transfer_unsupported_precision:
+        "이 호스트는 플러그인을 64비트 정밀도로 처리합니다. 플러그인이 그 샘플을 읽을 수 없어 무음으로 남습니다. 호스트의 처리 정밀도를 32비트 부동소수점으로 바꾸세요.",
+    transfer_field_precision: "호스트가 64비트",
     transfer_recording_progress: "{seconds}초 녹음됨",
     transfer_field_segments: "세그먼트 수",
     transfer_field_gaps: "점프 횟수",

@@ -49,6 +49,7 @@ function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
         sawOffline: false,
         canCapture: true,
         hostPlaying: false,
+        unsupportedPrecision: false,
         araBound: false,
         ...overrides,
     };
