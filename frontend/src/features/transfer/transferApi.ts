@@ -41,6 +41,14 @@ export interface TransferStatus {
     sawOffline: boolean;
     canCapture: boolean;
     /**
+     * 宿主**此刻**是否在播放。
+     *
+     * 【为什么要它】Transfer 的用法是"先按录制、再按播放"，所以"按了录制却忘了播放"
+     * 是这条通路最常见的失败。实时读数让面板直接说出来，而不是让用户对着一个 0.00 秒的
+     * 读数猜。`canCapture` 不依赖它：那条只回答"这个宿主给不给位置"。
+     */
+    hostPlaying: boolean;
+    /**
      * 宿主是否**正在**通过 ARA 供音。
      *
      * 【为什么状态里要有它】Transfer 入口现在无条件可见（形态判定要等 5 秒宽限期，

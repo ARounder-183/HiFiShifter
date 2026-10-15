@@ -1695,7 +1695,9 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 return K_RESULT_OK;
             }
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
-            if data.process_mode != 2 && context.state & (1 << 1) == 0 {
+            if data.process_mode != 2
+                && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
+            {
                 return K_RESULT_OK;
             }
             // 按 `setupProcessing` 的**权威率**选快照：非原生率（96k/192k…）取最近的已声明

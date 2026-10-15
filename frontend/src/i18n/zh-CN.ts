@@ -2108,6 +2108,7 @@ export const zhCN = {
     transfer_guide_ready: "已录好。再次播放宿主即可听到处理结果；再录一次会替换掉它。",
     transfer_guide_offline:
         "这个宿主也支持离线渲染。可以先点「录制」，再导出或 bounce，不必实时播放一遍。",
+    transfer_host_not_playing: "宿主没有在播放，录不到内容。",
     transfer_not_applicable_ara: "该宿主已通过 ARA 提供音频，无需 Transfer。",
     transfer_cannot_capture:
         "这个宿主没有把播放位置交给插件，因此无法把音频对齐到时间轴上。请使用宿主自身的编辑功能，或换用支持 ARA 的宿主。",

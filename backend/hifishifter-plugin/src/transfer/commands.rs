@@ -115,6 +115,8 @@ fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
         // 录制的**唯一**硬前提是工程位置：音频按 `projectTimeSamples` 对齐，
         // 没有它整条通路不成立。
         "canCapture": status.saw_context,
+        // 宿主**此刻**是否在播放：按了录制却没声音进来时，面板据此说清原因。
+        "hostPlaying": status.host_playing,
         // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
         "araBound": ara_bound,
     })
@@ -137,6 +139,38 @@ mod tests {
         assert!(is_transfer_command("transfer_status"));
         assert!(!is_transfer_command("set_transport"));
         assert!(!is_transfer_command("get_timeline_state"));
+    }
+
+    /// 录制按钮（`canCapture`）必须**在武装之前**就能变真。
+    ///
+    /// 【为什么这条必须有】此前 `saw_context` 只在武装之后更新，而按钮由它门控 ——
+    /// 于是"必须先录一次才能录"：按钮永远是灰的，Transfer 在所有宿主上都用不了。
+    /// 这条走的是面板真正读的那条路（`transfer_status`）。
+    #[test]
+    fn the_record_button_unlocks_before_anything_is_recorded() {
+        let owner = owner();
+        assert_eq!(
+            handle(&owner, "transfer_status", &json!({})).unwrap()["canCapture"],
+            false,
+            "还没见过宿主上下文时不能声称可以录制"
+        );
+        let samples: &'static [f32] = Box::leak(vec![0.1_f32; 64].into_boxed_slice());
+        // 注意：**没有** `transfer_start` —— 观察必须与武装无关。
+        owner.transfer().observe(
+            &crate::transfer::InputBlock {
+                start: 0,
+                frames: 64,
+                sample_rate: 48_000.0,
+                planes: [Some(samples), None],
+            },
+            false,
+        );
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(
+            status["canCapture"], true,
+            "见过宿主上下文之后按钮必须可用，否则用户没有办法开始"
+        );
+        assert_eq!(status["hostPlaying"], false, "此刻宿主没在播放，如实报出来");
     }
 
     /// 宿主正在通过 ARA 供音时，Transfer 必须**明确拒绝**而不是偷偷再录一份。

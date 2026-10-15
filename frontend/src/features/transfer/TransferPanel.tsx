@@ -76,6 +76,9 @@ export function TransferPanel() {
     const canCapture =
         !araBound && (status?.canCapture ?? pluginBootstrap()?.transferCaps?.canCapture ?? false);
     const recordingNow = status?.state === "recording";
+    // 录制中但宿主没在播放 ⇒ 一个字节也进不来。这是这条通路最常见的失败（用法是
+    // "先按录制、再按播放"），必须直接说出来。
+    const stalled = recordingNow && !(status?.hostPlaying ?? false);
 
     return (
         <Flex direction="column" gap="3" p="3">
@@ -149,6 +152,12 @@ export function TransferPanel() {
                 <AppField label={t("transfer_field_takes")}>{String(status.takeCount)}</AppField>
             ) : null}
 
+            {stalled ? (
+                <span className="hs-type-caption" style={{ color: "var(--qt-warning-text)" }}>
+                    {t("transfer_host_not_playing")}
+                </span>
+            ) : null}
+
             {error ? <span role="alert">{error}</span> : null}
         </Flex>
     );
@@ -187,6 +196,7 @@ function guideText(
 
 type TransferMessageKey =
     | "transfer_not_applicable_ara"
+    | "transfer_host_not_playing"
     | "transfer_guide_body"
     | "transfer_guide_recording"
     | "transfer_guide_ready"

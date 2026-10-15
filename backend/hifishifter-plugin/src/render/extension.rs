@@ -1995,14 +1995,22 @@ impl ExtensionOwner {
         if unsafe { (*data).process_mode } == 2 {
             transfer.note_offline();
         }
-        if !transfer.is_armed() {
-            return false;
-        }
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
-        // 的切片只在本次回调内有效，而 `on_block` 同步消费完就返回。
+        // 的切片只在本次回调内有效，而消费方同步读完就返回。
         let block = unsafe {
             crate::audio_abi::capture_view(data, context.project_time_samples, context.sample_rate)
         };
+        // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
+        // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
+        // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
+        // 代价是几个原子写 + 一次缓冲形状检查（不分配、不读样本）。
+        transfer.observe(
+            &block,
+            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
+        );
+        if !transfer.is_armed() {
+            return false;
+        }
         let _ = transfer.on_block(block);
         if transfer.options().monitor {
             // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。

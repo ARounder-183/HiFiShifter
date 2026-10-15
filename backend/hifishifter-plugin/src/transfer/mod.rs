@@ -129,6 +129,8 @@ pub(crate) struct TransferStatus {
     pub saw_input: bool,
     /// 宿主走过 `kOffline`（bounce / 导出）。
     pub saw_offline: bool,
+    /// 宿主**此刻**是否在播放（实时，不是"曾经播过"）。
+    pub host_playing: bool,
 }
 
 /// 每个插件实例一份的 Transfer 存储。
@@ -151,6 +153,12 @@ pub(crate) struct TransferStore {
     saw_context: AtomicBool,
     saw_input: AtomicBool,
     saw_offline: AtomicBool,
+    /// 宿主**此刻**是否在播放（实时读数，不是"曾经播过"）。
+    ///
+    /// 【为什么是实时的】按了录制却没在播放，是这个功能最容易踩的坑（Transfer 的用法是
+    /// "先按录制、再按播放"）。实时读数让面板能直接说"宿主没有在播放"，而不是让用户对着
+    /// 一个 0.00 秒的读数猜。
+    host_playing: AtomicBool,
 }
 
 impl Default for TransferStore {
@@ -166,6 +174,7 @@ impl Default for TransferStore {
             saw_context: AtomicBool::new(false),
             saw_input: AtomicBool::new(false),
             saw_offline: AtomicBool::new(false),
+            host_playing: AtomicBool::new(false),
         }
     }
 }
@@ -367,16 +376,30 @@ impl TransferStore {
     /// 【为什么整段逻辑在 `try_lock` 之内】捕获状态的写入必须与"封口/收段"互斥。
     /// 拿不到锁只意味着**非音频线程正持有它**（补缓冲、收段、promote），而那一刻
     /// 我们唯一正确的选择是跳过这一块 —— 阻塞会把这变成 DAW 的音频线程卡顿。
-    pub(crate) fn on_block(&self, block: InputBlock<'_>) -> TransferBlockOutcome {
-        if !self.is_armed() {
-            return TransferBlockOutcome::Idle;
-        }
+    /// 观察位：宿主**实际**做了什么。与是否武装**无关**。
+    ///
+    /// 【为什么必须与武装解耦 —— 这是 Transfer 曾经在所有宿主上都用不了的原因】
+    /// 面板的录制按钮由 `canCapture`（= `saw_context`）门控，而 `saw_context` 此前只在
+    /// **武装之后**的 `on_block` 里更新 —— 于是"必须先录一次才能录"：按钮永远是灰的，
+    /// 用户根本没有办法开始。观察的代价只是几个原子写 + 一次缓冲形状检查
+    /// （`capture_view` 不分配、不读样本），可以在每个音频块上做。
+    ///
+    /// 【为什么播放状态是实时的】见 `host_playing` 字段。
+    pub(crate) fn observe(&self, block: &InputBlock<'_>, playing: bool) {
         if block.sample_rate.is_finite() && block.sample_rate > 0.0 {
             self.saw_context.store(true, Ordering::Release);
         }
         if block.has_audio() {
             self.saw_input.store(true, Ordering::Release);
         }
+        self.host_playing.store(playing, Ordering::Release);
+    }
+    pub(crate) fn on_block(&self, block: InputBlock<'_>) -> TransferBlockOutcome {
+        if !self.is_armed() {
+            return TransferBlockOutcome::Idle;
+        }
+        // 观察不在这里做：它必须在**未武装**时也发生（见 `observe`），所以由每个音频块的
+        // 唯一入口 `transfer_stage` 负责。这里只管捕获。
         let Ok(mut capture) = self.capture.try_lock() else {
             // 记一次"没跟上"，但**不改**任何捕获状态。
             return TransferBlockOutcome::Busy;
@@ -461,6 +484,7 @@ impl TransferStore {
             saw_context: self.saw_context.load(Ordering::Acquire),
             saw_input: self.saw_input.load(Ordering::Acquire),
             saw_offline: self.saw_offline.load(Ordering::Acquire),
+            host_playing: self.host_playing.load(Ordering::Acquire),
         }
     }
 
@@ -721,23 +745,56 @@ mod tests {
         assert!(!store.has_material());
     }
 
-    /// 录制前的观察位如实反映"宿主给过什么"。
+    /// 观察位如实反映"宿主给过什么"，而且**不需要先武装**。
+    ///
+    /// 【为什么"不需要武装"是这条测试的重点】面板的录制按钮由 `canCapture`
+    /// （= `saw_context`）门控，而观察此前发生在武装之后 —— 于是"必须先录一次才能录"，
+    /// 按钮永远是灰的，Transfer 在**所有**宿主上都用不了。观察必须与武装无关。
     #[test]
-    fn observation_bits_record_what_the_host_actually_did() {
+    fn observation_bits_record_what_the_host_did_without_being_armed() {
         let store = store();
         let status = store.status();
         assert!(!status.saw_context && !status.saw_input && !status.saw_offline);
+        assert!(!status.host_playing);
         store.note_offline();
-        store.start().unwrap();
         let samples: &'static [f32] = Box::leak(vec![0.1_f32; 256].into_boxed_slice());
-        store.on_block(InputBlock {
-            start: 0,
-            frames: 256,
-            sample_rate: 48_000.0,
-            planes: [Some(samples), None],
-        });
+        // 注意：**没有** `store.start()` —— 这正是回归点。
+        store.observe(
+            &InputBlock {
+                start: 0,
+                frames: 256,
+                sample_rate: 48_000.0,
+                planes: [Some(samples), None],
+            },
+            true,
+        );
         let status = store.status();
-        assert!(status.saw_context && status.saw_input && status.saw_offline);
+        assert!(
+            status.saw_context,
+            "见过 ProcessContext 就必须记下来，否则录制按钮永远点不动"
+        );
+        assert!(status.saw_input && status.saw_offline);
+        assert!(status.host_playing, "播放状态是实时读数");
+        assert!(!store.is_armed(), "观察不该顺手把录制武装起来");
+    }
+
+    /// 播放状态是**实时**读数：停止之后必须回落，否则面板会一直说"宿主在播放"。
+    #[test]
+    fn the_playing_reading_follows_the_host_instead_of_latching() {
+        let store = store();
+        let samples: &'static [f32] = Box::leak(vec![0.1_f32; 16].into_boxed_slice());
+        let block = InputBlock {
+            start: 0,
+            frames: 16,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+        };
+        store.observe(&block, true);
+        assert!(store.status().host_playing);
+        store.observe(&block, false);
+        assert!(!store.status().host_playing, "停止播放必须如实回落");
+        // 而"见过上下文"是**单调**的：它描述历史，不描述此刻。
+        assert!(store.status().saw_context);
     }
 
     /// 未录制时 `on_block` 完全不动状态（音频线程上的零成本早退）。

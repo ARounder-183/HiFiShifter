@@ -43,6 +43,15 @@ pub(crate) struct FrameRate {
     pub flags: u32,
 }
 
+/// `ProcessContext::state` 的 `kPlaying` 位。
+///
+/// 【为什么需要它】"宿主**正在**播放"与"宿主给了工程位置"是两件事：后者（
+/// `projectTimeSamples`，SDK 标为 always valid）只说明这条通路成立，前者才决定按了录制
+/// 之后**有没有东西进来**。面板据此把"按了录制却没有声音"的原因说清楚。
+///
+/// 取值来自 SDK `ivstprocesscontext.h` 的 `StatesAndFlags::kPlaying = 1 << 1`。
+pub(crate) const PROCESS_CONTEXT_PLAYING: u32 = 1 << 1;
+
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
 #[derive(Default)]

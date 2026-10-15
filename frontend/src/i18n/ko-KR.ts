@@ -2161,6 +2161,7 @@ export const koKR = {
         "녹음되었습니다. 호스트를 다시 재생하면 처리 결과를 들을 수 있습니다. 다시 녹음하면 대체됩니다.",
     transfer_guide_offline:
         "이 호스트는 오프라인 렌더도 지원합니다. 「녹음」을 누른 뒤 내보내기나 바운스를 하면 실시간으로 재생할 필요가 없습니다.",
+    transfer_host_not_playing: "호스트가 재생 중이 아닙니다. 녹음되지 않습니다.",
     transfer_not_applicable_ara:
         "이 호스트는 ARA로 오디오를 제공합니다. Transfer는 필요하지 않습니다.",
     transfer_cannot_capture:
