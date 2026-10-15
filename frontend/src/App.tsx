@@ -1534,6 +1534,28 @@ function AppInner() {
         // 事件用 `try_send`（队列满即丢），丢一个 `active:false` 就会让状态栏片
         // **永久亮着**。快照说"不在渲染"时强制熄灭；事件只负责进度与快速点亮。
         // 独立 App 不订阅：那边没有插件 actor，也没有这条丢包路径。
+        // 【Transfer 面板的自动浮出】不能只放在「视图」菜单里：Transfer 最大的风险不是
+        // 技术上做不到，而是用户不知道"要先让宿主播放、再按录制"（Transfer 方案 §11.4）。
+        // 窗口打开时面对的是一条空时间线，面板里的引导必须自己出现。
+        //
+        // 判据有两条来源，因为**形态判定要等 setActive 之后 5 秒宽限期才落定**：
+        //   * bootstrap 的 `hostKind`：窗口创建时形态已经落定的情况（用户稍后才开窗）；
+        //   * 状态快照的 `mode`：窗口打开得早、bootstrap 里还是 `ara_only` 的情况。
+        // 只开一次（`transferPanelOpened`）：用户手动关掉之后不该被它反复弹回来。
+        const unsubscribeTransferPanel = isPluginMode()
+            ? subscribePluginApply(() => {
+                  if (transferPanelOpenedRef.current) return;
+                  if (
+                      hostKind() !== "transfer" &&
+                      getPluginApplySnapshot().state?.mode !== "transfer"
+                  ) {
+                      return;
+                  }
+                  transferPanelOpenedRef.current = true;
+                  openPanelById(dispatch, store.getState, PANEL_TRANSFER);
+              })
+            : () => undefined;
+
         const unsubscribeApply = isPluginMode()
             ? subscribePluginApply(() => {
                   const state = getPluginApplySnapshot().state;
@@ -1557,6 +1579,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
             if (unsubscribeApply) unsubscribeApply();
+            unsubscribeTransferPanel();
         };
     }, [dispatch]);
 
@@ -1754,6 +1777,8 @@ function AppInner() {
     // 后者必须拦下。
     const renderPassRef = useRef<number | null>(null);
     const renderProgressRef = useRef(0);
+    /// Transfer 面板的自动浮出只做一次：用户手动关掉之后不该被它反复弹回。
+    const transferPanelOpenedRef = useRef(false);
 
     const closeWindowNow = useCallback(async () => {
         try {
@@ -1996,14 +2021,7 @@ function AppInner() {
     useEffect(() => {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
-        // Transfer 形态：窗口一打开就把录制面板浮出来。
-        //
-        // 【为什么不能只放在「视图」菜单里】Transfer 最大的风险不是技术上做不到，而是
-        // 用户不知道"要先让宿主播放、再按录制"（Transfer 方案 §11.4）。窗口打开时面对的
-        // 是一条空时间线，没有任何东西告诉他下一步该做什么 —— 面板里的引导必须自己出现。
-        if (isPluginMode() && hostKind() === "transfer") {
-            openPanelById(dispatch, store.getState, PANEL_TRANSFER);
-        }
+
         // loadUiSettings 不在这里发起：UI 设置的唯一一次加载由上方"加载 UI
         // 持久化设置"的 effect 持有（unwrap 后回填 MIDI 字段），否则启动会有
         // 两轮 get_ui_settings 往返（后端的 get_ui_settings 不是纯读）。
