@@ -414,6 +414,13 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么不能省】退避不能牺牲响应速度：用户拖完 item 必须立刻看到新几何，
     /// 而不是等 4 秒。代次一变就清零档位，这条是唯一的保证。
     last_failed_revision: Mutex<Option<Option<i32>>>,
+    /// Transfer 形态的编辑器会话（**没有** ARA 文档的那一份）。
+    ///
+    /// 【为什么挂在 owner 上而不是文档上】文档是 ARA 的容器，而 Transfer 实例永远没有
+    /// 文档 —— 会话必须有一个不依赖文档的归属。它与 ARA 会话是同一个类型：时间线、历史、
+    /// 参数、分析、命令分发全部共用，差别只在 `SessionBacking`（见 `editor::session`）。
+    transfer_session:
+        std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
     /// 宿主调用 `setActive(true)` 的时刻；`None` = 还没激活。
     ///
     /// 【为什么必须记下来】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
@@ -618,13 +625,16 @@ impl ExtensionOwner {
         // 后端选择、能力位与前端面板都会跟着翻到 Transfer（见 `host_backend`）。
         // 它写在"只报一次"的早退**之前** —— 形态是事实，与是否要打日志无关。
         self.note_binding_window_closed_without_ara();
-        // Transfer 形态下**没有任何 ARA 回调**会来驱动这两件事，而它们都是必须周期性
-        // 发生的：备用缓冲要在音频线程取用之前备好，快照要在录制结束后发布一次。
-        // UI 定时器是唯一的现成心跳（20ms），且"能录制"本来就要求窗口开着。
+        // Transfer 形态下**没有任何 ARA 回调**会来驱动这件事，而它是必须周期性发生的：
+        // 备用缓冲要在音频线程取用之前备好。UI 定时器是唯一的现成心跳（20ms），
+        // 且"能录制"本来就要求窗口开着。
+        //
+        // 【为什么不再在这里 `prepare()`】Transfer 的渲染由**编辑器会话**驱动：只有它
+        // 持有带用户曲线的时间线（见 `transfer_prepare_job`）。两个驱动者会让同一份
+        // 合成被并发跑两遍、互相抢快照预算，而它们产出的内容又完全相同 —— 没有收益。
         if self.mode() == InstanceMode::Transfer {
             self.arm_transfer_rendering();
             self.transfer.top_up();
-            self.prepare();
         }
         if self
             .ara_binding_absent_reported
@@ -1738,10 +1748,43 @@ impl ExtensionOwner {
         }
     }
     /// 真实组件仅作为授权入口，原GUI共享同文档唯一actor/history。
+    ///
+    /// 【为什么 Transfer 走另一支】宿主没给 ARA 时 `editor_document()` 必然失败
+    /// （那是 `ARA_NOT_BOUND` 的语义），而 Transfer 的编辑界面**必须**能用 ——
+    /// 否则"录进来由插件处理"无从发生：用户改不了音高，也就没有处理可言。
+    /// 两个分支产出同一个类型，因此命令分发、历史、参数、分析全部共用。
     pub(crate) fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
+        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+            return self.transfer_session();
+        }
         self.editor_document()?.editor_session()
+    }
+
+    /// Transfer 形态的会话；每个实例唯一（`OnceLock`）。
+    ///
+    /// 【为什么与 ARA 会话分开持有】ARA 会话按**文档**唯一（文档上多个实例共享一个
+    /// actor，这样同文档的视图能看到同一份编辑）。Transfer 实例不在任何文档上，
+    /// 因此"每个实例一份"才是与 ARA 同构的粒度（见 Transfer 方案 §5.1 第 3 条：
+    /// 同一文档上两个实例必须能独立工作）。
+    pub(crate) fn transfer_session(
+        self: &Arc<Self>,
+    ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
+        self.transfer_session
+            .get_or_init(|| crate::editor::session::EditorSession::new_transfer(self))
+            .clone()
+    }
+
+    /// 让 Transfer 编辑器会话重新加载时间线并重渲染（录制结束 / 切换 take / 清空之后）。
+    ///
+    /// 【为什么不在命令里直接做】`transfer_*` 命令在视图层（UI 线程）执行，而加载要读
+    /// 捕获存储、物化分析副本 —— 那是文件 I/O。这里只置一个标志，由会话的 actor 线程
+    /// 在下一轮自己加载（加载成功会顺带排一次渲染）。
+    pub(crate) fn request_transfer_reload(self: &Arc<Self>) {
+        if let Ok(session) = self.transfer_session() {
+            session.request_reload();
+        }
     }
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
     /// 宿主淡化轴的版本语义；`None` 表示版本读不出来（前端应保持只读）。
@@ -1804,33 +1847,71 @@ impl ExtensionOwner {
     /// `(TimelineState, Vec<AraPlaybackRegion>, sources)` —— 与 ARA 路径同一组类型
     /// （见 `transfer::TransferStore::render_input`）。于是校验、渲染、压缩、双率发布
     /// 全部是同一份代码，Transfer 不需要第二条渲染通路。
+    /// Transfer 形态的渲染输入，以及它的版本 `(take, edit)`。
+    ///
+    /// 【为什么只有 owner 够得着两边】几何与 PCM 在捕获存储上，用户曲线在编辑器会话上。
+    /// **播放与导出共用这一份** —— 于是"导出的音频与听到的不一样"这一类漂移不可能发生。
+    ///
+    /// 【为什么优先用会话的那份时间线】它带着用户的参数曲线，而曲线就是 Transfer 形态下
+    /// "处理"的全部内容。用捕获存储那份（只有几何）会让"改了音高却不重算"变成一个静默的
+    /// 失效：界面变了，声音还是旧的。
+    pub(crate) fn transfer_render_input(
+        &self,
+    ) -> Result<(u64, u64, super::input::RenderInput), String> {
+        let take = self
+            .transfer
+            .active_take_id()
+            .ok_or("no active Transfer take")?;
+        let session = self
+            .transfer_session
+            .get()
+            .and_then(|session| session.as_ref().ok())
+            .filter(|session| session.is_loaded())
+            .cloned();
+        let (timeline, edit) = match &session {
+            Some(session) => (session.render_timeline()?, session.edit_generation()),
+            // 会话还没加载（窗口还没开、或前端还没问过时间线）：退回捕获存储的几何。
+            // 那时也没有用户在编辑，两者等价。
+            None => (self.transfer.session_timeline().0, 0),
+        };
+        let input = super::input::RenderInput {
+            regions: self.transfer.regions_for_timeline(&timeline),
+            sources: self.transfer.active_sources(),
+            timeline: Some(timeline),
+            project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
+            // 【为什么参数曲线这里为空】Transfer 的曲线就在时间线里（它**就是**参数权威），
+            // 于是 `mix_interleaved` 走"直接按时间线合成"那一支。ARA 需要图谱投影是因为
+            // 它的时间线每次都被宿主重建、clip 身份由 region key 派生 —— Transfer 没有
+            // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
+            clip_parameters: std::collections::BTreeMap::new(),
+        };
+        Ok((take, edit, input))
+    }
+
     pub(crate) fn transfer_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
-        let Some(take) = self.transfer.active_take_id() else {
+        if self.transfer.active_take_id().is_none() {
             return Ok(());
-        };
-        // 【为什么要版本闸】`prepare()` 由 UI 定时器每 20ms 驱动一次。没有这道闸，
-        // 一次 8 秒的合成会被排队 400 次。
-        if self.transfer_prepared.load(Ordering::Acquire) == take
+        }
+        let (take, edit, input) = self.transfer_render_input()?;
+        // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
+        // 合成会被排队几百次。版本里必须**带上编辑代次**：只认 take 会让参数改动
+        // 永远不重算。
+        let version = take ^ (edit << 32);
+        if self.transfer_prepared.load(Ordering::Acquire) == version
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
         {
             return Ok(());
         }
-        let Some((timeline, regions, sources)) = self.transfer.render_input() else {
+        if input
+            .timeline
+            .as_ref()
+            .is_none_or(|timeline| timeline.clips.is_empty())
+        {
             return Ok(());
-        };
-        let input = super::input::RenderInput {
-            timeline: Some(timeline),
-            regions,
-            sources,
-            project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
-            // 【为什么参数曲线这里为空】Transfer 的参数编辑走 `EditState`，由编辑器
-            // actor 应用；本路径只负责"把录进来的音频渲染出来"。参数生效后 actor 会
-            // 带着自己的曲线走它那条 `capture_render_input`（见 §9.2 的缓存键设计）。
-            clip_parameters: std::collections::BTreeMap::new(),
-        };
+        }
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }
@@ -1852,8 +1933,8 @@ impl ExtensionOwner {
                 .publish(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
-        self.transfer_prepared.store(take, Ordering::Release);
-        log::info!("[transfer] prepared take {take}");
+        self.transfer_prepared.store(version, Ordering::Release);
+        log::info!("[transfer] prepared take {take} edit {edit}");
         Ok(())
     }
 

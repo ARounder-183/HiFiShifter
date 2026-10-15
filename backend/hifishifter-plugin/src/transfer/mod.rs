@@ -34,7 +34,10 @@ pub(crate) mod timeline;
 
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
-use capture::{Capture, CaptureOutcome, ClosedReason, InputBlock, Segment};
+use capture::{Capture, CaptureOutcome, ClosedReason, Segment};
+// 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
+// 而 `capture` 是私有子模块。
+pub(crate) use capture::InputBlock;
 use hifishifter_kernel::state::TimelineState;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -483,6 +486,42 @@ impl TransferStore {
             regions_for(&take.timeline),
             take.sources.clone(),
         ))
+    }
+
+    /// 会话用的时间线 + 素材（**不**构造渲染区域）。
+    ///
+    /// 【为什么与 `render_input` 分开】渲染那条路要的是 `AraPlaybackRegion`；编辑器要的
+    /// 是"界面该显示什么"。没有活动 take（用户还没录）时编辑器必须拿到一条**空的**
+    /// 时间线，而不是 `None` —— 否则界面停在"没有时间线"，而不是"还没有内容，请录制"。
+    pub(crate) fn session_timeline(&self) -> (TimelineState, HashMap<String, Arc<SourcePcm>>) {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        match takes.iter().find(|take| take.id == active) {
+            Some(take) => (take.timeline.clone(), take.sources.clone()),
+            None => (timeline::build(&[], active, 120.0).0, HashMap::new()),
+        }
+    }
+
+    /// 用**给定的**时间线构造渲染区域，素材取活动 take 的那一份。
+    ///
+    /// 【为什么要能换时间线】编辑器会话持有的那份带着用户曲线（参数就是 Transfer 形态下
+    /// "处理"的全部内容），而捕获存储那份只有几何。渲染要用前者的曲线、后者的 PCM。
+    pub(crate) fn regions_for_timeline(
+        &self,
+        timeline: &TimelineState,
+    ) -> Vec<crate::ara::AraPlaybackRegion> {
+        regions_for(timeline)
+    }
+
+    /// 活动 take 的素材表（按源 id 索引）。
+    pub(crate) fn active_sources(&self) -> HashMap<String, Arc<SourcePcm>> {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        takes
+            .iter()
+            .find(|take| take.id == active)
+            .map(|take| take.sources.clone())
+            .unwrap_or_default()
     }
 
     /// 把封口的段提升成一个 take。

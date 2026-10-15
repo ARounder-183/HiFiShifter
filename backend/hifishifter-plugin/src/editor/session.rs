@@ -237,8 +237,31 @@ struct Loaded {
     projection: String,
     reverse_paths: HashMap<String, String>,
 }
+/// 本会话的**时间线/参数从哪里来**。
+///
+/// 【为什么需要一个显式来源，而不是"有没有文档"这个隐含判据】`EditorSession` 此前
+/// 只服务 ARA：文档既是时间线的来源，也是几何/撤销的权威。Transfer 形态（宿主没给
+/// ARA，音频从 VST3 输入总线录进来）**永远没有文档**，但它的编辑界面必须能用 ——
+/// 否则"录进来由插件处理"这件事根本无从发生（用户改不了音高）。
+///
+/// 两者的差别被收敛成两件事，其余（历史、参数、分析、波形、命令分发）完全共用：
+///   * 时间线从哪来：ARA 是宿主投影；Transfer 是捕获存储。
+///   * 谁是权威：ARA 的几何/撤销属于宿主；Transfer 的一切都属于本会话。
+#[derive(Clone)]
+pub(crate) enum SessionBacking {
+    /// ARA 文档：时间线是宿主投影，几何/撤销由宿主拥有。
+    Ara(Weak<DocumentSession>),
+    /// Transfer：没有 ARA 文档；时间线由捕获存储构建，之后完全由本会话拥有。
+    Transfer(Weak<crate::render::extension::ExtensionOwner>),
+}
+
 pub(crate) struct EditorSession {
-    pub(super) document: Weak<DocumentSession>,
+    /// 时间线/参数来源（[`SessionBacking`]）。
+    ///
+    /// 【为什么不拆成两个字段】两者互斥，而且几乎每个使用点都要先回答"我有没有文档"。
+    /// 一个枚举让"Transfer 没有文档"成为**编译期可见**的事实，而不是一个可能被忽略的
+    /// `Option`。取值一律通过 [`Self::document`] / [`Self::require_document`]。
+    backing: SessionBacking,
     pub(crate) timeline: Mutex<TimelineState>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
@@ -284,6 +307,13 @@ pub(crate) struct EditorSession {
     /// （`ARAInterface.h:3646-3655`）。记上次采纳的那一条，宿主重复发同一个选择时
     /// 就不会把用户在插件里刚点的那条抢回去；只有宿主的**新**选择才覆盖。
     host_selection: Mutex<Option<String>>,
+    /// "下一轮 tick 重新加载时间线"的一次性请求。
+    ///
+    /// 【为什么需要它】ARA 形态下宿主变化由文档版本推动（`refresh_host`）。Transfer
+    /// 形态**没有任何宿主回调**：录制结束、切换 take、清空 take 都发生在视图层
+    /// （`transfer::commands`），而加载时间线要做文件 I/O —— 不能在那条 UI 线程上做。
+    /// 于是那里只置一个标志，由 actor 线程在下一轮自己加载。
+    reload_requested: AtomicBool,
 }
 
 impl Drop for EditorSession {
@@ -328,10 +358,6 @@ impl EditorSession {
         index: usize,
         parent: Option<String>,
     ) -> Result<(), String> {
-        let document = self
-            .document
-            .upgrade()
-            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let before = self.timeline.lock_or_recover().clone();
         if !before.tracks.iter().any(|track| track.id == id) || index > 10000 {
             return Err("unknown private track or invalid index".into());
@@ -348,6 +374,17 @@ impl EditorSession {
         {
             return Err("private track parent is missing or cyclic".into());
         }
+        // Transfer：轨道是本会话自己的，父子边**就是**权威（没有宿主会覆盖它）。
+        // 只记一次历史并通知，不走宿主分组通道 —— 那条通道写的是宿主撤销栈。
+        let Some(document) = self.document() else {
+            self.checkpoint_timeline(&before, HistoryOp::MoveTrack);
+            *self.timeline.lock_or_recover() = candidate;
+            self.mark_dirty();
+            self.render_requested.store(true, Ordering::Release);
+            self.schedule_analysis();
+            self.notify_timeline();
+            return Ok(());
+        };
         let groups = super::private_groups::TrackGroups::capture(
             &candidate,
             &document.group_aliases(&self.namespace),
@@ -397,6 +434,21 @@ impl EditorSession {
     }
     /// 每个真实文档唯一actor；worker与会话均用weak，不形成document→actor→document循环。
     pub(crate) fn new(document: &Arc<DocumentSession>) -> Result<Arc<Self>, String> {
+        Self::new_with(SessionBacking::Ara(Arc::downgrade(document)))
+    }
+
+    /// Transfer 形态的会话：宿主没给 ARA，时间线来自捕获存储。
+    ///
+    /// 【为什么可以没有文档】Transfer 的全部内容都是本插件自己录进来的：没有宿主
+    /// 几何、没有宿主撤销栈、参数就是权威。文档在这里唯一的作用是"时间线从哪来"，
+    /// 而那件事由 [`SessionBacking`] 回答。
+    pub(crate) fn new_transfer(
+        owner: &Arc<crate::render::extension::ExtensionOwner>,
+    ) -> Result<Arc<Self>, String> {
+        Self::new_with(SessionBacking::Transfer(Arc::downgrade(owner)))
+    }
+
+    fn new_with(backing: SessionBacking) -> Result<Arc<Self>, String> {
         super::resources::initialize_models();
         // 本机数据目录里的 `pcm` / `webview` 子目录按会话/进程新建，只在 Drop 时清理；
         // 宿主被强杀时它们会永久留下（实测攒到 838 MB）。启动时扫一次已退出进程的目录。
@@ -435,7 +487,7 @@ impl EditorSession {
             project
         };
         let session = Arc::new(Self {
-            document: Arc::downgrade(document),
+            backing,
             timeline: Mutex::new(TimelineState::default()),
             history: Mutex::new(Default::default()),
             project: Mutex::new(initial_project),
@@ -472,6 +524,7 @@ impl EditorSession {
             transport_probe: std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),
             transport_probe_next: Mutex::new(Instant::now()),
             host_selection: Mutex::new(None),
+            reload_requested: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&session);
         let worker = std::thread::Builder::new()
@@ -482,20 +535,91 @@ impl EditorSession {
         super::events::register(&session);
         Ok(session)
     }
+
+    /// 本会话是否服务 Transfer 形态（没有 ARA 文档）。
+    pub(crate) fn is_transfer(&self) -> bool {
+        matches!(self.backing, SessionBacking::Transfer(_))
+    }
+
+    /// 活着的 ARA 文档；Transfer 形态恒为 `None`。
+    pub(super) fn document(&self) -> Option<Arc<DocumentSession>> {
+        match &self.backing {
+            SessionBacking::Ara(document) => document.upgrade(),
+            SessionBacking::Transfer(_) => None,
+        }
+    }
+
+    /// 需要文档的路径用这个取；Transfer 形态给出与"文档已关闭"同一句错误。
+    fn require_document(&self) -> Result<Arc<DocumentSession>, String> {
+        self.document()
+            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())
+    }
+
+    /// Transfer 形态的 owner；ARA 形态恒为 `None`。
+    pub(super) fn transfer_owner(&self) -> Option<Arc<crate::render::extension::ExtensionOwner>> {
+        match &self.backing {
+            SessionBacking::Transfer(owner) => owner.upgrade(),
+            SessionBacking::Ara(_) => None,
+        }
+    }
+
+    /// 当前编辑代次：用户每做一次会改变声音的写入就前进。
+    ///
+    /// 【用途】Transfer 的渲染版本闸要带上它 —— 只认 take 会让"改了音高却不重算"
+    /// 变成一个静默的失效。
+    pub(crate) fn edit_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// 时间线是否已经加载过（Transfer 的渲染要等这一份就绪才用得上用户曲线）。
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded.lock_or_recover().initialized
+    }
+
+    /// 把界面时间线还原成**音频权威**形态，供 Transfer 渲染使用。
+    ///
+    /// 【为什么必须还原】界面上的 `source_path` 是本会话的私有分析副本路径（波形要从
+    /// 磁盘读），而 `RenderInput.sources` 按**源 id** 索引 —— 不做这一步，渲染会因为
+    /// "找不到素材"失败。参数曲线不受影响：它就是时间线本身。
+    pub(crate) fn render_timeline(&self) -> Result<TimelineState, String> {
+        self.native_timeline(self.timeline.lock_or_recover().clone())
+    }
+
+    /// 宿主撤销栈是否在途（"宿主正在写，别插队"）。
+    ///
+    /// 【为什么 Transfer 恒为 false】宿主撤销栈是有原生扩展 / ARA 写口的后端才有的
+    /// 概念，Transfer 的每一次写入都是本会话自己的。文档缺席同理不是理由：ARA 下
+    /// "文档消失"意味着会话已结束，而 Transfer 根本没有文档。
+    fn host_write_pending(&self) -> bool {
+        match self.document() {
+            Some(document) => document.host_undo.pending.load(Ordering::Acquire),
+            None => !self.is_transfer(),
+        }
+    }
+
+    /// 请求"下一轮 tick 重新加载时间线"。
+    ///
+    /// 由视图层的 `transfer_*` 命令在录制结束 / 切换 take / 清空之后调用。加载要读
+    /// 捕获存储并物化分析副本（文件 I/O），不能在那条 UI 线程上做。
+    pub(crate) fn request_reload(&self) {
+        self.reload_requested.store(true, Ordering::Release);
+        // 与用户做了一次编辑同义：推进票据，让 actor 立刻重新调度。
+        self.submitted.fetch_add(1, Ordering::AcqRel);
+    }
     /// 有界32任务FIFO；关view取消回信，真实组件入口撤销则拒绝排队请求执行。
     pub fn enqueue(&self, request: UiRequest) -> Result<(), String> {
         if self.closed.load(Ordering::Acquire) {
             return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
         }
-        let document = self
-            .document
-            .upgrade()
-            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
-        let lease = request
-            .link
-            .as_ref()
-            .map(|link| link.authorize(&document))
-            .transpose()?;
+        // 【为什么 Transfer 允许没有文档】ARA 形态下 route 租约回答的是"这个视图属于
+        // **这份文档**吗"（`EditorLink::authorize` 最后比的正是文档身份）。Transfer
+        // 没有文档，视图的归属由 `EditorLink` 自己的 owner 决定 —— 那条校验在
+        // `webview` 建链时已经做过一次，这里不必（也无法）再比文档。
+        let document = self.document();
+        let lease = match (document.as_ref(), request.link.as_ref()) {
+            (Some(document), Some(link)) => Some(link.authorize(document)?),
+            _ => None,
+        };
         if request.sink.view_id.is_empty()
             || (request.link.is_some() && request.sink.closed.load(Ordering::Acquire))
         {
@@ -517,12 +641,12 @@ impl EditorSession {
         // 播放观察不排到神经合成后面。这里只读原子缓存，不执行actor命令/host API/IO。
         // 原始view身份及同文档route授权仍与普通队列入口一致。
         if request.command == "get_playback_state" {
-            if !document.is_alive() {
+            if document.as_ref().is_some_and(|document| !document.is_alive()) {
                 return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
             }
             let value = self.playback_state();
-            if let Some(link) = &request.link {
-                if Some(link.authorize(&document)?) != lease {
+            if let (Some(document), Some(link)) = (document.as_ref(), request.link.as_ref()) {
+                if Some(link.authorize(document)?) != lease {
                     return Err("editor route changed".into());
                 }
             }
@@ -571,7 +695,7 @@ impl EditorSession {
     }
     /// 在组件stop返回前撤销其回信/订阅；排队任务仍会独立核对原始route代次。
     pub(crate) fn revoke_closed_views(&self) {
-        let document = self.document.upgrade();
+        let document = self.document();
         self.views.lock_or_recover().retain(|_, view| {
             let valid = view.route.as_ref().is_none_or(|(link, lease)| {
                 document.as_ref().is_some_and(|document| {
@@ -646,13 +770,18 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
+                // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
+                // 不能做文件 I/O）。加载在这里消费。
+                if session.reload_requested.swap(false, Ordering::AcqRel) {
+                    if let Err(error) = session.ensure_loaded(true) {
+                        *session.error.lock_or_recover() = Some(error);
+                    }
+                    session.emit_state();
+                }
                 if let Some(render) = session.render_task.lock_or_recover().as_ref() {
                     if render.ticket != session.submitted.load(Ordering::Acquire)
                         || render.generation != session.generation.load(Ordering::Acquire)
-                        || session
-                            .document
-                            .upgrade()
-                            .is_none_or(|doc| doc.host_undo.pending.load(Ordering::Acquire))
+                        || session.host_write_pending()
                     {
                         render.cancel.store(true, Ordering::Release);
                     }
@@ -711,9 +840,7 @@ impl EditorSession {
                 if !retry.settled && deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
                     if session.render_task.lock_or_recover().is_some()
-                        || session
-                            .document
-                            .upgrade()
+                        || session.document()
                             .is_some_and(|doc| doc.host_undo.pending.load(Ordering::Acquire))
                     {
                         deadline = Some(Instant::now() + Duration::from_millis(50));
@@ -763,11 +890,16 @@ impl EditorSession {
                     let mutates = super::commands::mutates_audio(&request.command);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Some(link) = &request.link {
-                            let document = session
-                                .document
-                                .upgrade()
-                                .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
-                            if Some(link.authorize(&document)?) != lease {
+                            // 【为什么 Transfer 跳过租约复核】租约是"视图属于这份文档"的
+                            // 凭据（`authorize` 比的是文档身份）；Transfer 没有文档，
+                            // 视图身份由下面的 view 表比对回答。
+                            if let Some(document) = session.document() {
+                                if Some(link.authorize(&document)?) != lease {
+                                    return Err(
+                                        crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error()
+                                    );
+                                }
+                            } else if lease.is_some() {
                                 return Err(
                                     crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error()
                                 );
@@ -856,13 +988,13 @@ impl EditorSession {
             let loaded = self.loaded.lock_or_recover();
             (loaded.edit, loaded.model, loaded.projection.clone())
         };
-        let document = self
-            .document
-            .upgrade()
-            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        let document = self.require_document()?;
         Ok((document, edit, model, projection))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
+        if self.is_transfer() {
+            return self.start_transfer_render(ticket);
+        }
         let (document, edit, model, projection) = self.prepare_apply()?;
         let generation = self.generation.load(Ordering::Acquire);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -913,6 +1045,57 @@ impl EditorSession {
         *self.render_task.lock_or_recover() = Some(worker);
         Ok(())
     }
+
+    /// Transfer 形态的渲染：把**带用户曲线的时间线**交给 owner 的 Transfer 渲染准备。
+    ///
+    /// 【为什么参数在这里能生效】Transfer 的时间线**就是**参数权威（没有宿主会重建它），
+    /// 于是 `RenderInput.timeline` 里带着 `params_by_root_track`；`clip_parameters` 为空
+    /// 时内核直接按时间线合成（见 `render/input.rs::mix_interleaved` 的第一支）。
+    /// ARA 之所以需要参数图谱（`atlas.project_local`），是因为它的时间线每次都被宿主
+    /// 重建、clip 身份由 region key 派生 —— Transfer 没有那个问题。
+    ///
+    /// 【为什么要票据复核】渲染期间用户又改了参数 ⇒ 本次结果作废。与 ARA 的
+    /// `apply_workspace_edits_with_progress` 的收尾复核同一条语义。
+    fn start_transfer_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
+        if let Some(error) = self.error.lock_or_recover().clone() {
+            return Err(error);
+        }
+        self.complete_cached_analysis();
+        if let Some(error) = self.error.lock_or_recover().clone() {
+            return Err(error);
+        }
+        if Self::requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
+        let Some(owner) = self.transfer_owner() else {
+            return Err("transfer host is gone".into());
+        };
+        let generation = self.generation.load(Ordering::Acquire);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let current = self.clone();
+        let job_cancel = cancel.clone();
+        self.emit(
+            "playback_rendering_state",
+            json!({"active":true,"progress":0.0,"target":"background"}),
+        );
+        let worker = RenderTask::spawn(ticket, generation, cancel, move || {
+            owner.transfer_prepare_job(job_cancel.clone())?;
+            if current.closed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if current.submitted.load(Ordering::Acquire) != ticket
+                || current.generation.load(Ordering::Acquire) != generation
+            {
+                // 有更新的编辑在等着，本次结果已被后来者取代：让 actor 重新排一次。
+                current.render_requested.store(true, Ordering::Release);
+                return Err("transfer render superseded".into());
+            }
+            Ok(())
+        })?;
+        *self.render_task.lock_or_recover() = Some(worker);
+        Ok(())
+    }
+
     #[cfg(test)]
     fn apply(
         &self,
@@ -1042,7 +1225,7 @@ impl EditorSession {
     /// 【为什么解析不出来就什么都不做】被选中的片段可能**已经销毁**（SDK 明说选中
     /// 不影响对象生命周期，`:3693-3694`），此时正确的反应是保持插件自己的选择，而不是清空。
     fn apply_host_selection(&self, timeline: &mut TimelineState) {
-        let Ok(document) = self.document.upgrade().ok_or(()) else {
+        let Ok(document) = self.document().ok_or(()) else {
             return;
         };
         let focused = document.renderer_owners().into_iter().find_map(|owner| {
@@ -1071,10 +1254,10 @@ impl EditorSession {
     }
 
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
-        let document = self
-            .document
-            .upgrade()
-            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        if self.is_transfer() {
+            return self.load_transfer_timeline(force);
+        }
+        let document = self.require_document()?;
         // GUI清单有独立代次：粘贴/删除可以先于ARA模型回调，不能被模型缓存早退吞掉。
         if self.loaded.lock_or_recover().initialized
             && document.renderer_owners().is_empty()
@@ -1243,6 +1426,134 @@ impl EditorSession {
         );
         Ok(())
     }
+
+    /// Transfer 形态的加载：几何来自捕获存储，参数保留本会话已编辑的曲线。
+    ///
+    /// 【为什么每次都重建几何】捕获存储只有"活动 take"这一个版本量，没有 ARA 那样的
+    /// 多级代次。重建的代价被 `materialize` 的内容寻址摊平（同一份 PCM 直接复用已有的
+    /// 分析副本，见 `host_pcm::matches_authorized_pcm`），收益是"录制结束 / 切换 take /
+    /// 清空之后界面必然跟着变"—— 不需要再维护一条失效通知通道。
+    ///
+    /// 【为什么参数要**保留**】`params_by_root_track` 是用户在这个会话里做的编辑，而捕获
+    /// 存储产出的时间线只有几何：整份替换会把曲线清掉（那正是"改了音高，一录就又没了"
+    /// 那类不可见错误）。轨道身份（`transfer-track`）跨 take 稳定，因此按键保留是安全的。
+    fn load_transfer_timeline(&self, force: bool) -> Result<(), String> {
+        let owner = self.transfer_owner().ok_or("transfer host is gone")?;
+        let version = owner.transfer().active_take_id().unwrap_or(0);
+        {
+            let loaded = self.loaded.lock_or_recover();
+            if loaded.initialized && !force && loaded.model == version {
+                return Ok(());
+            }
+        }
+        let (timeline, sources) = owner.transfer().session_timeline();
+        let kept: HashMap<String, TrackParamsState> = self
+            .timeline
+            .lock_or_recover()
+            .params_by_root_track
+            .iter()
+            .map(|(root, params)| (root.clone(), params.clone()))
+            .collect();
+        let views: Vec<PcmView<'_>> = sources
+            .iter()
+            .map(|(id, pcm)| PcmView {
+                persistent_id: id,
+                sample_rate: pcm.sample_rate,
+                planes: &pcm.planes,
+            })
+            .collect();
+        let dir = self.pcm_dir.join("sources");
+        let (mut timeline, reverse_paths) = materialize_with_byte_limit(
+            timeline,
+            &views,
+            &dir,
+            crate::render::budget::global_budget().limit(),
+            hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
+        )?;
+        // 先命名空间化，再按键对曲线 —— 保留的那份键已经是命名空间化的。
+        self.rewrite_ids(&mut timeline, true);
+        let roots = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        // 只有"当前时间线上还存在的根"的旧曲线会被带过来；被删掉的那条不留残渣。
+        timeline.params_by_root_track = roots
+            .iter()
+            .filter_map(|root| kept.get(root).map(|params| (root.clone(), params.clone())))
+            .collect();
+        // 无论有没有旧曲线都要走这一步：它把曲线规整到当前工程长度的目标帧数，并按
+        // 新的源清掉对不上的原线缓存（保留用户显式编辑过的那部分）。
+        for root in roots {
+            timeline.ensure_params_for_root(&root);
+        }
+        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
+        for params in timeline.params_by_root_track.values_mut() {
+            params.pitch_orig_key = None;
+            params.dyn_orig_key = None;
+        }
+        // 宿主音乐读数是**只读**的宿主权威：Transfer 没有文档，读 owner 自己的时钟。
+        if let Some(clock) = owner.clock.get() {
+            if let Some(tempo) = clock.tempo() {
+                if tempo.is_finite() && tempo > 0.0 {
+                    timeline.bpm = tempo;
+                }
+            }
+            if let Some((numerator, denominator)) = clock.time_signature() {
+                let mut project = self.project.lock_or_recover();
+                project.beats_per_bar = (numerator as u32).clamp(1, 32);
+                project.time_signature_denominator = (denominator as u32).clamp(1, 32);
+            }
+        }
+        {
+            let previous = self.timeline.lock_or_recover();
+            if previous
+                .selected_track_id
+                .as_ref()
+                .is_some_and(|id| timeline.tracks.iter().any(|track| &track.id == id))
+            {
+                timeline.selected_track_id = previous.selected_track_id.clone();
+            }
+            if previous
+                .selected_clip_id
+                .as_ref()
+                .is_some_and(|id| timeline.clips.iter().any(|clip| &clip.id == id))
+            {
+                timeline.selected_clip_id = previous.selected_clip_id.clone();
+            }
+        }
+        if timeline.selected_track_id.is_none() {
+            timeline.selected_track_id = timeline.tracks.first().map(|t| t.id.clone());
+        }
+        if timeline.selected_clip_id.is_none() {
+            timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
+        }
+        self.project_duration
+            .store(timeline.project_sec.to_bits(), Ordering::Release);
+        *self.timeline.lock_or_recover() = timeline;
+        *self.loaded.lock_or_recover() = Loaded {
+            initialized: true,
+            edit: 0,
+            model: version,
+            scope: version,
+            audio: version,
+            reverse_paths,
+            projection: format!("transfer:{version}"),
+        };
+        *self.error.lock_or_recover() = None;
+        *self.render_error.lock_or_recover() = None;
+        self.peaks.lock_or_recover().clear();
+        self.complete_cached_analysis();
+        self.schedule_analysis();
+        self.render_requested.store(true, Ordering::Release);
+        self.host_version.fetch_add(1, Ordering::AcqRel);
+        self.emit(
+            "plugin_host_changed",
+            json!({"version":self.host_version.load(Ordering::Acquire)}),
+        );
+        Ok(())
+    }
+
     /// 清单结构与普通fade独立同步；ARA未ready时也通知新增/删除，不清空曲线、选择或历史。
     pub(super) fn refresh_ui_geometry(&self, document: &DocumentSession) {
         let version = document.ui_geometry_revision.load(Ordering::Acquire);
@@ -1292,7 +1603,7 @@ impl EditorSession {
     }
     /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
     fn refresh_host(&self) {
-        let Some(document) = self.document.upgrade() else {
+        let Some(document) = self.document() else {
             return;
         };
         let (initialized, edit, model, scope, audio) = {
@@ -1419,7 +1730,7 @@ impl EditorSession {
     }
     /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
     fn retain_display_waveforms(&self, timeline: &mut TimelineState, restore: bool) {
-        let Some(document) = self.document.upgrade() else {
+        let Some(document) = self.document() else {
             return;
         };
         let tracks = document.ui_tracks.lock_or_recover();
@@ -1474,7 +1785,7 @@ impl EditorSession {
     /// 算出同一个键，因此不再需要这个会造成键漂移的绕过。
     fn analysis_timeline(&self) -> TimelineState {
         let mut timeline = self.timeline.lock_or_recover().clone();
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             let ids = document.clip_ids.lock_or_recover();
             timeline.clips.retain(|clip| {
                 ids.values()
@@ -1562,29 +1873,26 @@ impl EditorSession {
     }
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self) -> (f64, bool) {
-        self.document
-            .upgrade()
+        self.document()
             .filter(|document| document.is_alive())
             .map(|document| document.clock.read())
             .unwrap_or_else(|| (self.timeline.lock_or_recover().playhead_sec, false))
     }
     /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
     pub(super) fn decorate_host_fades(&self, payload: &mut Value) {
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             document.decorate_host_fades(payload, &self.namespace);
         }
     }
     /// 宿主音频读数：与 `decorate_host_fades` 同一路径，只多一个语言无关的分类字段。
     pub(super) fn decorate_host_audio(&self, payload: &mut Value) {
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             document.decorate_host_audio(payload);
         }
     }
     /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
     pub(super) fn playback_state(&self) -> Value {
-        let (position, playing) = self
-            .document
-            .upgrade()
+        let (position, playing) = self.document()
             .filter(|document| document.is_alive())
             .map(|document| document.clock.read())
             .unwrap_or((0., false));
@@ -1605,9 +1913,7 @@ impl EditorSession {
         }
         *next = now + Duration::from_secs(1);
         drop(next);
-        if let Some(clock) = self
-            .document
-            .upgrade()
+        if let Some(clock) = self.document()
             .map(|document| document.clock.clone())
         {
             log::info!("[ara] transport diagnostic {}", clock.diagnostics());
@@ -1652,14 +1958,14 @@ impl EditorSession {
     /// 别的调用点使用（增量刷新等），把两条职责焊死会让"只想刷清单"的调用方
     /// 意外触发一次事实投影。分开命名、由调用方显式成对调用，边界才清楚。
     fn project_host_facts(&self, timeline: &mut TimelineState) {
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             document.project_host_take_facts_locked(timeline);
         }
     }
     /// 只将已授权私有分析路径还原到ARA身份，未知路径明确失败。
     fn native_timeline(&self, mut timeline: TimelineState) -> Result<TimelineState, String> {
         self.rewrite_ids(&mut timeline, false);
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             if !document.ui_tracks.lock_or_recover().is_empty() {
                 // GUI占位、名字/排序及可见总时长不进入音频权威；只取参数/轨道可编辑值。
                 let mut host = document.workspace_timeline()?;
@@ -1704,7 +2010,7 @@ impl EditorSession {
             }
         }
         // 宿主显示占位没有ARA音频授权，只提交真实活动图，不能把占位送入分析/合成。
-        if let Some(document) = self.document.upgrade() {
+        if let Some(document) = self.document() {
             let ids = document.clip_ids.lock_or_recover();
             timeline
                 .clips
@@ -1762,10 +2068,11 @@ impl EditorSession {
         {
             return Ok(());
         }
-        let document = self
-            .document
-            .upgrade()
-            .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+        // Transfer：没有"宿主的 region 参数"可投影 —— 时间线里的曲线本来就是权威，
+        // 不存在"选中的那条素材另有一份曲线"这件事。
+        let Some(document) = self.document() else {
+            return Ok(());
+        };
         let current = self.native_timeline(self.timeline.lock_or_recover().clone())?;
         let roots = document.selected_source_parameters(&current)?;
         let mut timeline = self.timeline.lock_or_recover();
@@ -1777,7 +2084,7 @@ impl EditorSession {
         Ok(())
     }
     pub(super) fn emit(&self, event: &str, payload: Value) {
-        let document = self.document.upgrade();
+        let document = self.document();
         let views = {
             let mut views = self.views.lock_or_recover();
             views.retain(|_, view| {
@@ -1809,9 +2116,7 @@ impl EditorSession {
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
-        let states = self
-            .document
-            .upgrade()
+        let states = self.document()
             .map(|document| {
                 document
                     .renderer_owners()
@@ -1830,8 +2135,7 @@ impl EditorSession {
         // （`media_in_flight_items`，与 `decorate_host_media_locked` 同一套分类）。
         let inventory_pending = {
             let timeline = self.timeline.lock_or_recover();
-            self.document
-                .upgrade()
+            self.document()
                 .is_some_and(|document| document.media_in_flight_items(&timeline) > 0)
         };
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
@@ -1872,11 +2176,14 @@ impl ParamHost for EditorSession {
         }
     }
     fn publish_timeline(&self, timeline: TimelineState) {
+        // Transfer：没有宿主可写回 —— 参数就是权威，落在本会话的时间线上。
+        // 只需要排一次重渲染（owner 的 Transfer 渲染准备会读这份时间线）。
+        if self.is_transfer() {
+            self.render_requested.store(true, Ordering::Release);
+            return;
+        }
         let result = (|| {
-            let document = self
-                .document
-                .upgrade()
-                .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())?;
+            let document = self.require_document()?;
             let groups = document.edits.lock_or_recover().groups.clone();
             let groups =
                 if groups.is_empty() {
@@ -2172,9 +2479,178 @@ pub(crate) mod tests {
         editor.close();
     }
 
+    /// 建一个**真的录过一段**的 Transfer 实例：没有 ARA 文档，素材来自输入总线。
+    fn transfer_owner_with_a_take() -> Arc<ExtensionOwner> {
+        let owner = Arc::new(ExtensionOwner::default());
+        owner.set_setup_sample_rate(48_000.0);
+        // 绑定窗口关闭且没有绑定 ⇒ 形态是 Transfer（宿主没给 ARA）。
+        owner.note_binding_window_closed_without_ara();
+        assert_eq!(
+            owner.mode(),
+            crate::render::extension::InstanceMode::Transfer,
+            "这个夹具的全部意义就是宿主没给 ARA"
+        );
+        let transfer = owner.transfer();
+        transfer.note_project_rate(48_000.0);
+        transfer.start().unwrap();
+        let samples: &'static [f32] = Box::leak(vec![0.4_f32; 4096].into_boxed_slice());
+        for index in 0..4_i64 {
+            transfer.on_block(crate::transfer::InputBlock {
+                start: index * 4096,
+                frames: 4096,
+                sample_rate: 48_000.0,
+                planes: [Some(samples), Some(samples)],
+            });
+        }
+        transfer.stop().unwrap();
+        owner
+    }
+
+    /// **Transfer 形态没有 ARA 文档，但界面必须能用。**
+    ///
+    /// 【为什么这条必须有】`EditorSession` 此前只能从 `DocumentSession` 创建，于是非 ARA
+    /// 宿主里每一条会话级命令都返回 `ARA_NOT_BOUND` —— 界面整页报"会话不可用"，用户既录
+    /// 不了也改不了音高。这条钉住四件事：会话存在、时间线来自捕获存储、用户曲线在重投影
+    /// 之后仍然在、渲染用的时间线回到源 id 域。
+    #[test]
+    fn a_transfer_session_edits_without_any_ara_document() {
+        let owner = transfer_owner_with_a_take();
+        let session = owner.editor_session().expect("Transfer 形态必须有会话");
+        // 【为什么要包 catch_unwind】断言失败会 unwind，而会话的 worker 线程只在
+        // `close()` 里 join —— 不兜住就会留下一个活着的线程与进程，整套测试挂住。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transfer_session_body(&session);
+        }));
+        session.close();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Transfer 的渲染输入：带**用户曲线**的时间线 + 捕获存储的 PCM，且与导出共用。
+    ///
+    /// 【为什么这条必须存在】播放（`transfer_prepare_job`）与导出
+    /// （`export_audio_to_file`）都取这一份。若其中一条退回"只有几何的捕获存储时间线"，
+    /// 用户就会听到处理后的声音、导出未处理的（或反过来）—— 而那是最难排查的一类不一致。
+    #[test]
+    fn transfer_render_input_carries_the_user_curves_for_both_playback_and_export() {
+        let owner = transfer_owner_with_a_take();
+        let session = owner.editor_session().unwrap();
+        session.ensure_loaded(true).unwrap();
+        let (take, edit, input) = owner.transfer_render_input().unwrap();
+        assert!(take > 0, "渲染输入必须绑定到活动 take");
+        assert_eq!(edit, session.edit_generation());
+        let timeline = input.timeline.as_ref().unwrap();
+        assert_eq!(timeline.clips.len(), 1);
+        assert!(
+            timeline.clips[0]
+                .source_path
+                .as_deref()
+                .unwrap()
+                .starts_with("transfer://"),
+            "渲染时间线必须在源 id 域（`RenderInput.sources` 按 id 索引）"
+        );
+        assert!(!input.sources.is_empty(), "素材必须随输入一起给出");
+        assert!(!input.regions.is_empty(), "区域必须由同一条时间线派生");
+        // 用户改一次参数 ⇒ 编辑代次前进 ⇒ 渲染版本变化。不变的话"改了音高却不重算"
+        // 就是一个静默的失效：界面变了，声音还是旧的。
+        let before = edit;
+        session.mark_dirty();
+        assert_ne!(
+            owner.transfer_render_input().unwrap().1,
+            before,
+            "参数写入必须推进渲染版本"
+        );
+        session.close();
+    }
+
+    fn transfer_session_body(session: &Arc<EditorSession>) {
+        session.ensure_loaded(true).unwrap();
+
+        let (root, path) = {
+            let timeline = session.timeline.lock_or_recover();
+            assert_eq!(timeline.tracks.len(), 1, "Transfer 只有一条自建轨道");
+            assert_eq!(timeline.clips.len(), 1, "录进来的音频必须出现在时间线上");
+            assert_eq!(
+                timeline.params_by_root_track.len(),
+                1,
+                "根轨道必须有参数状态，否则音高编辑器没有可改的东西"
+            );
+            let path = timeline.clips[0].source_path.clone().unwrap();
+            assert!(
+                std::path::Path::new(&path).exists(),
+                "界面上的源必须是本会话物化出来的私有副本：{path}"
+            );
+            (
+                timeline.params_by_root_track.keys().next().unwrap().clone(),
+                path,
+            )
+        };
+
+        // 用户改曲线 ⇒ 重新投影不能把它清掉。
+        //
+        // 【为什么必须置 `pitch_edit_user_modified`】内核的既有规则是"未显式编辑过的
+        // 曲线在源变化时清空（它是从旧原线推导出来的），显式编辑过的保留"。真实的参数
+        // 写入会置这一位（`ParamHost` 的写入路径），测试要按同一形状喂。
+        {
+            let mut timeline = session.timeline.lock_or_recover();
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.pitch_edit = vec![62.0; 8];
+            params.pitch_edit_user_modified = true;
+        }
+        session.ensure_loaded(true).unwrap();
+        {
+            let timeline = session.timeline.lock_or_recover();
+            let params = timeline.params_by_root_track.get(&root).unwrap();
+            // 【为什么不断言长度】`ensure_params_for_root` 会把曲线规整到"当前工程长度的
+            // 目标帧数"（这里比 8 长），那是它的既定职责。要看的是**用户写下的那几个值
+            // 还在不在** —— 丢了就等于"改完音高又白改"，而且界面上看不出来。
+            assert!(
+                params.pitch_edit[..8].iter().all(|value| *value == 62.0),
+                "重投影清掉用户曲线（前 8 个值应仍是 62.0）：{:?}",
+                &params.pitch_edit[..8]
+            );
+            assert!(
+                params.pitch_edit_user_modified,
+                "用户显式编辑过这一位必须保留，否则下一次源变化会把曲线清掉"
+            );
+        }
+
+        // 渲染要的是源 id 域（`RenderInput.sources` 按 id 索引），不是私有副本路径。
+        let render = session.render_timeline().unwrap();
+        let id = render.clips[0].source_path.clone().unwrap();
+        assert!(
+            id.starts_with("transfer://"),
+            "渲染时间线的源引用必须是源 id：{id}"
+        );
+        assert_ne!(id, path);
+
+        // 没有文档时播放读数、传输读数、发布都仍然可用（界面每 250ms 问一次）。
+        assert_eq!(session.playback_state()["ok"], true);
+        assert!(!session.transport().1, "Transfer 没有宿主播放控制");
+        let current = session.timeline.lock_or_recover().clone();
+        session.publish_timeline(current);
+        assert!(
+            session.error.lock_or_recover().is_none(),
+            "Transfer 的发布不得因为没有文档而失败：{:?}",
+            session.error.lock_or_recover()
+        );
+
+        // 命令分发走的是同一条会话（前端启动扇出全是它）。
+        let payload = crate::editor::commands::dispatch(
+            &session,
+            "get_timeline_state",
+            serde_json::json!({}),
+        )
+        .expect("Transfer 形态下时间线命令必须可用");
+        assert!(
+            payload["clips"].as_array().is_some_and(|clips| clips.len() == 1),
+            "时间线载荷必须带着录进来的那条片段：{payload}"
+        );
+    }
+
     /// 只替代真实DAW的建图/授权边界；使用真正owner、native扩展、actor与state编码。
-    pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {
-        let model = ModelHandle::new();
+    pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {        let model = ModelHandle::new();
         let document = model.session();
         let mut timeline:TimelineState=serde_json::from_value(json!({
             "tracks":[{"id":"track","name":"host","order":0,"pitch_analysis_algo":"none"}],

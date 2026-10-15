@@ -33,9 +33,9 @@ pub(crate) fn handle(
         }
         "transfer_stop" => {
             let take = transfer.stop()?;
-            // 录完立刻排一次合成：用户按下停止之后期待听到处理结果，而不是等下一次
-            // 某个不相关的动作把渲染带起来。
-            owner.prepare();
+            // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
+            // 下一次某个不相关的动作把它带起来。
+            owner.request_transfer_reload();
             Ok(json!({ "take": take, "status": status_json(&transfer.status()) }))
         }
         "transfer_cancel" => {
@@ -44,6 +44,8 @@ pub(crate) fn handle(
         }
         "transfer_clear" => {
             transfer.clear();
+            // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
+            owner.request_transfer_reload();
             Ok(status_json(&transfer.status()))
         }
         "transfer_select_take" => {
@@ -51,7 +53,7 @@ pub(crate) fn handle(
                 .as_u64()
                 .ok_or("transfer_select_take needs a numeric takeId")?;
             transfer.select_take(id)?;
-            owner.prepare();
+            owner.request_transfer_reload();
             Ok(status_json(&transfer.status()))
         }
         "transfer_set_options" => {

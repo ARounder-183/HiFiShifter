@@ -223,15 +223,6 @@ fn export_audio_to_file(
         Some(rate) if matches!(rate, 44_100 | 48_000) => rate as u32,
         Some(_) => return Err("unsupported export sample rate".into()),
     };
-    let document = session
-        .document
-        .upgrade()
-        .ok_or("the ARA document is closed")?;
-    let owner = document
-        .renderer_owners()
-        .into_iter()
-        .next()
-        .ok_or("no ARA instance is bound to this document yet")?;
     let (start_sec, end_sec) = {
         let timeline = session.timeline.lock_or_recover().clone();
         let range = &request["range"];
@@ -247,10 +238,28 @@ fn export_audio_to_file(
             _ => (0., timeline.project_sec),
         }
     };
-    // 渲染输入与播放路径**同一份**（授权 PCM + 逐 clip 参数）；
+    // 渲染输入与播放路径**同一份**（PCM + 逐 clip 参数）；
     // 导出与播放因此共用同一条混合数学（`RenderInput::mix_interleaved`）。
-    let edits = document.edits.lock_or_recover().clone();
-    let (_keys, input) = owner.capture_render_input(&document, &edits, false)?;
+    let input = if session.is_transfer() {
+        // Transfer：几何与 PCM 在捕获存储上，用户曲线在会话时间线上 —— owner 是唯一
+        // 同时够得着两边的对象（见 `ExtensionOwner::transfer_render_input`）。
+        session
+            .transfer_owner()
+            .ok_or("the Transfer host is gone")?
+            .transfer_render_input()?
+            .2
+    } else {
+        let document = session
+            .document()
+            .ok_or("the ARA document is closed")?;
+        let owner = document
+            .renderer_owners()
+            .into_iter()
+            .next()
+            .ok_or("no ARA instance is bound to this document yet")?;
+        let edits = document.edits.lock_or_recover().clone();
+        owner.capture_render_input(&document, &edits, false)?.1
+    };
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     *EXPORT_CANCEL
         .lock()
@@ -422,7 +431,14 @@ pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     payload.redo_depth = Some(redo);
     let project = session.project.lock_or_recover().clone();
     payload.project = Some(hifishifter_kernel::models::ProjectMetaPayload {
-        name: "HiFiShifter ARA".into(),
+        // 形态名字要说实话：Transfer 实例与 ARA 文档是两种东西（用户报障时这是
+        // 第一个要问的问题）。
+        name: if session.is_transfer() {
+            "HiFiShifter Transfer"
+        } else {
+            "HiFiShifter ARA"
+        }
+        .into(),
         path: None,
         dirty: session.generation.load(Ordering::Acquire)
             != session.applied.load(Ordering::Acquire),
@@ -512,7 +528,7 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
 /// 不违反"派生物会被重建"那条纪律 —— 它会在每次重建后由
 /// `project_plugin_musical_context_locked` 重新算出来。
 fn after_musical_context_write(session: &EditorSession) {
-    let Some(document) = session.document.upgrade() else {
+    let Some(document) = session.document() else {
         return;
     };
     document.project_plugin_musical_context_locked(&mut session.timeline.lock_or_recover());
@@ -623,14 +639,14 @@ pub(super) fn dispatch(
         "plugin_editor_barrier" => return Ok(json!({"ok":true})),
         "get_timeline_inventory" => {
             // 媒体写入回执只取结构，不为显示新GUID先物化整份宿主PCM或跑分析。
-            if let Some(document) = session.document.upgrade() {
+            if let Some(document) = session.document() {
                 session.refresh_ui_geometry(&document);
             }
             return payload(session, false);
         }
         "select_track" | "select_clip" => {
             // 选择已确认的GUI对象不必等PCM；新粘贴片段先选中，再由后台补音频/波形。
-            if let Some(document) = session.document.upgrade() {
+            if let Some(document) = session.document() {
                 session.refresh_ui_geometry(&document);
             }
             if command == "select_track" {
@@ -776,7 +792,7 @@ pub(super) fn dispatch(
     }
     if let Err(error) = session.ensure_loaded(false) {
         if matches!(command, "get_timeline_state" | "get_timeline_state_lite") {
-            if let Some(document) = session.document.upgrade() {
+            if let Some(document) = session.document() {
                 if !document.ui_tracks.lock_or_recover().is_empty() {
                     {
                         let mut timeline = session.timeline.lock_or_recover();

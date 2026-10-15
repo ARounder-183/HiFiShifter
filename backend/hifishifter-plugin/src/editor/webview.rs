@@ -102,6 +102,35 @@ fn host_group_id_for(clip_ids: &[String]) -> i32 {
     (u32::from_le_bytes(bytes) % crate::host::host_edit::HOST_GROUP_ID_MAX as u32 + 1) as i32
 }
 
+/// 一次模态交互（文件对话框）前后的视图身份。
+///
+/// 两个分量，缺一不可：
+/// * **owner 指针** —— 每个组件一个 owner。它回答"对话框开着的时候用户换了实例 / 关了窗吗"。
+/// * **文档租约代次**（只有 ARA 形态有）—— 它回答"还属于同一份文档吗"。同一 owner 上换了
+///   ARA 文档时 owner 指针不变，光看它会让对话框选出的路径落到新文档上。
+///
+/// 【为什么不能只用 `authorize`】它需要一份文档，而 Transfer 形态**永远没有**文档 ——
+/// 那些对话框（文件夹选择、另存为、打开 MIDI、导出布局/主题/记事本）与"哪个文档"无关，
+/// 却会因为一个与它们无关的前置条件整块不可用。
+type InteractionIdentity = (usize, Option<u64>);
+
+fn interaction_identity(
+    link: &super::routing::EditorLink,
+) -> Result<InteractionIdentity, String> {
+    let owner = link.owner()?;
+    let lease = match owner.editor_document() {
+        Ok(document) => Some(link.authorize(&document)?),
+        // Transfer：没有文档可租；身份退化成 owner 本身。
+        Err(_) => None,
+    };
+    Ok((Arc::as_ptr(&owner) as usize, lease))
+}
+
+/// 与 [`interaction_identity`] 配对：身份没变即这次交互仍然有效。
+fn interaction_unchanged(link: &super::routing::EditorLink, before: &InteractionIdentity) -> bool {
+    interaction_identity(link).is_ok_and(|now| now == *before)
+}
+
 struct BrowserState {
     hwnd: HWND,
     closed: bool,
@@ -1261,10 +1290,10 @@ fn configure_browser(
             Some("pick_directory")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let editor=owner.editor_session()?;
                     let path=super::browser_files::pick_directory(hwnd)?;
-                    if link.authorize(&document)?!=lease {return Err("folder picker editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("folder picker editor lease changed".into());}
                     match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":editor.grant_browser_directory(&path)?})),
                         None=>Ok(serde_json::json!({"ok":true,"canceled":true}))}
                 })()
@@ -1337,11 +1366,11 @@ fn configure_browser(
             Some("pick_diagnostics_output_path")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let name=super::plugin_diagnostics::default_file_name();
                     let path=super::browser_files::pick_save_path(hwnd,&name,"zip")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
-                    if link.authorize(&document)?!=lease {return Err("diagnostics picker editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("diagnostics picker editor lease changed".into());}
                     match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":path.to_string_lossy()})),
                         None=>Ok(serde_json::json!({"ok":false,"canceled":true}))}
                 })()
@@ -1354,10 +1383,10 @@ fn configure_browser(
             Some("pick_midi_output_path")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_save_path(hwnd,"export.mid","mid")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
-                    if link.authorize(&document)?!=lease {return Err("MIDI picker editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                     match path {
                         Some(path)=>Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()})),
                         None=>Ok(serde_json::json!({"ok":true,"canceled":true})),
@@ -1373,10 +1402,10 @@ fn configure_browser(
             Some("open_midi_dialog")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_open_path(hwnd,"MIDI","mid")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
-                    if link.authorize(&document)?!=lease {return Err("MIDI picker editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                     match path {
                         Some(path)=>Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()})),
                         None=>Ok(serde_json::json!({"ok":true,"canceled":true})),
@@ -1389,7 +1418,11 @@ fn configure_browser(
                     let output=request["args"]["outputPath"].as_str().ok_or("diagnostics output path missing")?;
                     let out=std::path::PathBuf::from(output);
                     if !out.is_absolute() {return Err("diagnostics output path must be absolute".into());}
-                    let owner=link.owner()?;let document=owner.editor_document()?;
+                    let owner=link.owner()?;
+                    // Transfer 形态没有文档：时钟退化到 owner 自己的那份，渲染者列表为空
+                    // （没有 ARA renderer 租约）。诊断包在两种形态下都必须能导出 ——
+                    // 用户报障时它正是第一件要拿到的东西。
+                    let document=owner.editor_document().ok();
                     let backend=owner.host_backend();
                     let system=serde_json::json!({
                         "product":"HiFiShifter ARA plugin",
@@ -1405,11 +1438,13 @@ fn configure_browser(
                         "backend":{"kind":backend.kind().as_str(),
                             "nativeAdapter":backend.native().is_some(),
                             "capabilities":backend.capabilities()},
-                        "transport":document.clock.diagnostics(),
+                        "transport":document.as_ref().map(|document|document.clock.diagnostics())
+                            .or_else(||owner.clock.get().map(|clock|clock.diagnostics())),
                         // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
                         // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。
                         "audioPanicCount":crate::vst3::audio_panic_count(),
-                        "renderers":document.renderer_diagnostics(),
+                        "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
+                            .unwrap_or_else(||serde_json::json!([])),
                     });
                     let settings=serde_json::json!({
                         "plugin":crate::settings_store::settings(),
@@ -1443,9 +1478,9 @@ fn configure_browser(
                 let name=if requested.is_empty(){fallback.to_owned()}else{requested};
                 (||->Result<serde_json::Value,String>{
                     // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_save_path(hwnd,&name,"json")?;
-                    if link.authorize(&document)?!=lease {return Err("json export dialog editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("json export dialog editor lease changed".into());}
                     let Some(path)=path else {return Ok(serde_json::json!({"ok":false,"canceled":true}))};
                     std::fs::write(&path,json.as_bytes()).map_err(|e|e.to_string())?;
                     Ok(serde_json::json!({"ok":true,"canceled":false,"path":path.to_string_lossy()}))
@@ -1455,9 +1490,9 @@ fn configure_browser(
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
                     // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
                     let result=super::notebook::export_with_dialog(hwnd,command,&request["args"])?;
-                    if link.authorize(&document)?!=lease {return Err("notebook dialog editor lease changed".into());}
+                    if !interaction_unchanged(&link,&identity) {return Err("notebook dialog editor lease changed".into());}
                     Ok(result)
                 })()
             },
@@ -1547,8 +1582,12 @@ fn configure_browser(
             // **实现**，`history_authority()` 永远返回一个权威（见 `host::history`）。
             Some("get_history_state")=>{
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
-                    owner.history_authority().snapshot(&||link.authorize(&document).is_ok_and(|current|current==lease))
+                    // 【为什么不再先取文档】历史权威有两套实现：宿主栈（需要文档）与本地栈
+                    // （不需要）。此前这里无条件先取文档，于是 Transfer 形态 —— 它**只有**
+                    // 本地栈 —— 连"读一次历史状态"都失败。
+                    let owner=link.owner()?;
+                    let identity=interaction_identity(&link)?;
+                    owner.history_authority().snapshot(&||interaction_unchanged(&link,&identity))
                 })()
             },
             Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position"))=>{
