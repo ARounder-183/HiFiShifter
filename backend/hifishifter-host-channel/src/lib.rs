@@ -697,6 +697,34 @@ mod tests {
         assert!(error.to_string().contains("HiFiShifter"), "{error}");
     }
 
+    /// 桥接实例的记录必须自报 `source_kind: bridge`：客户端的准入策略按它选。
+    #[cfg(windows)]
+    #[test]
+    fn bridge_instances_register_their_source_kind() {
+        let root = std::env::temp_dir().join(format!("hfs-ipc-bridge-{}", uuid::Uuid::new_v4()));
+        let server = Server::start_at_as(
+            "Vegas Pro 22".into(),
+            SourceKind::Bridge,
+            root.clone(),
+            |_| {
+                Reply::Hello(HelloResponse {
+                    source_kind: SourceKind::Bridge,
+                    timeline_schema: TIMELINE_SCHEMA_VERSION,
+                    granted: Vec::new(),
+                    host_label: "Vegas Pro 22".into(),
+                    implementation: "test".into(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(server.record().source_kind, SourceKind::Bridge);
+        let path = root.join(format!("{}.json", server.record().instance_id));
+        let record: InstanceRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record.source_kind, SourceKind::Bridge);
+        assert_eq!(record.name, "Vegas Pro 22");
+    }
+
     #[cfg(windows)]
     #[test]
     fn real_pipe_transfers_pcm_larger_than_the_kernel_pipe_buffer() {
