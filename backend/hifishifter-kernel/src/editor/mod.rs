@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod history;
 pub mod host;
 pub mod host_pcm;
+pub mod host_timeline;
 pub mod midi_import;
 pub mod params;
 pub mod selection;

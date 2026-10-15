@@ -226,6 +226,54 @@ pub fn materialize_with_byte_limit(
     Ok((timeline, reverse))
 }
 
+/// 校验并解码宿主提供的 PCM 文件，返回 `(采样率, 平面)`。
+///
+/// 【为什么必须校验摘要】路径是**可变的**：宿主写完、接收端读之前，那个文件可能被
+/// 别的东西覆盖（临时目录清理、用户操作）。不校验就会静默地把**别的音频**当成用户的
+/// 编辑存进工程 —— 那是最难排查的一类故障，所以摘要不符时**拒收**，绝不"凑合读"。
+///
+/// 【为什么只认 32-bit float WAV】契约把它写死为唯一形态：一种格式 = 一种判据，
+/// 不必为"某个宿主的容器"维护解码分支。宿主侧转成正向 float WAV 是一行的事，
+/// 而倒放等需要宿主侧先渲染成正向（见契约 §6.9）。
+pub fn load_pcm_file(path: &Path, expected_blake3: &str) -> Result<(u32, Vec<Vec<f32>>), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("open host PCM file {}: {e}", path.display()))?;
+    // 流式摘要：文件可能很大，不在内存里再放一份完整副本。
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("read host PCM file {}: {e}", path.display()))?;
+    let digest = hasher.finalize().to_hex().to_string();
+    if !digest.eq_ignore_ascii_case(expected_blake3.trim()) {
+        return Err(format!(
+            "host PCM file {} digest mismatch (expected {}, got {digest})",
+            path.display(),
+            expected_blake3.trim()
+        ));
+    }
+    let mut wav = hound::WavReader::open(path)
+        .map_err(|e| format!("decode host PCM file {}: {e}", path.display()))?;
+    let spec = wav.spec();
+    if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
+        return Err(format!(
+            "host PCM file {} must be a 32-bit float WAV",
+            path.display()
+        ));
+    }
+    let channels = spec.channels as usize;
+    if !(1..=2).contains(&channels) {
+        return Err(format!(
+            "host PCM file {} has {channels} channels (1 or 2 expected)",
+            path.display()
+        ));
+    }
+    let mut planes = vec![Vec::new(); channels];
+    for (index, sample) in wav.samples::<f32>().enumerate() {
+        let sample = sample.map_err(|e| format!("decode host PCM file {}: {e}", path.display()))?;
+        planes[index % channels].push(sample);
+    }
+    Ok((spec.sample_rate, planes))
+}
+
 /// 授权 PCM 的私有分析文件是否可复用。
 ///
 /// 【为什么不再逐样本回读比对】缓存文件名 `source-{blake3}.wav` 已经把**整份授权内容**
@@ -498,6 +546,73 @@ mod tests {
                 "{sample_rate} Hz 的源必须拿到物化路径，否则会话整体加载失败"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件引用形态：摘要相符才解码，摘要不符必须**拒收**而不是读错音频。
+    #[test]
+    fn pcm_file_reference_verifies_the_digest_before_decoding() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-host-pcm-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host.wav");
+        let mut wav = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        // 用二进制可精确表示的样本，逐位比较才有意义。
+        let left = [0.5_f32, 0.25, 0.125, 0.0625];
+        for sample in left {
+            wav.write_sample(sample).unwrap();
+            wav.write_sample(-sample).unwrap();
+        }
+        wav.finalize().unwrap();
+        let digest = blake3::hash(&std::fs::read(&path).unwrap())
+            .to_hex()
+            .to_string();
+
+        let (rate, planes) = load_pcm_file(&path, &digest).unwrap();
+        assert_eq!(rate, 48_000);
+        assert_eq!(planes.len(), 2);
+        assert_eq!(planes[0], left.to_vec());
+        assert_eq!(planes[1], left.iter().map(|s| -s).collect::<Vec<_>>());
+
+        // 路径没变、内容变了 —— 这正是摘要要拦的那类故障。
+        std::fs::write(&path, b"not the audio you were promised").unwrap();
+        let error = load_pcm_file(&path, &digest).unwrap_err();
+        assert!(error.contains("digest mismatch"), "{error}");
+
+        // 非 float WAV：契约只认一种形态。
+        let int_path = dir.join("host-int.wav");
+        let mut int_wav = hound::WavWriter::create(
+            &int_path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 44_100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        int_wav.write_sample(0_i16).unwrap();
+        int_wav.finalize().unwrap();
+        let int_digest = blake3::hash(&std::fs::read(&int_path).unwrap())
+            .to_hex()
+            .to_string();
+        let error = load_pcm_file(&int_path, &int_digest).unwrap_err();
+        assert!(error.contains("32-bit float WAV"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
