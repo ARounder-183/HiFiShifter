@@ -2212,7 +2212,6 @@ export const jaJP = {
         "録音した範囲だけが処理結果に置き換わり、それ以外はそのままです。オフにすると範囲外は無音になります。",
     transfer_take_label: "テイク {id} · {clips} クリップ",
     transfer_take_span: "{start} 秒 – {end} 秒",
-    transfer_take_use: "使用",
     transfer_take_delete: "削除",
     transfer_yes: "あり",
     transfer_no: "なし",

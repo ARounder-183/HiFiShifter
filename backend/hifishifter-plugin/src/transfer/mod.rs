@@ -36,6 +36,7 @@ use crate::render::snapshot::PlaybackSnapshot;
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
 use capture::{Capture, CaptureOutcome, ClosedReason, Segment};
+use timeline::ProjectionTake;
 // 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
 // 而 `capture` 是私有子模块。
 pub(crate) use capture::InputBlock;
@@ -96,10 +97,12 @@ pub(crate) struct TransferTake {
     pub sample_rate: u32,
     pub channels: u8,
     pub segments: Vec<Segment>,
-    pub timeline: TimelineState,
+    /// 本次录制自己的摘要（面板的 take 列表用它）。
+    ///
+    /// 【为什么不留一份时间线】投影是**跨全部 take** 的，单 take 的时间线没有任何
+    /// 消费者；而它和 `sources`（每段 PCM 的副本）一起，会让一次录制在内存里存两份
+    /// PCM。投影与源表都在读取时按需构造（`with_projection` + `sources_for`）。
     pub summary: timeline::TimelineSummary,
-    /// 段 → 源 PCM，键是 [`timeline::source_id`]。
-    pub sources: HashMap<String, Arc<SourcePcm>>,
     /// PCM 的落盘位置（`None` = 没写成，重启后不可恢复）。
     pub sidecar: Option<PathBuf>,
 }
@@ -215,8 +218,19 @@ pub(crate) struct TransferStore {
     /// **绝不阻塞**。非音频线程持有它做补缓冲/收段/promote。
     capture: Mutex<Capture>,
     takes: Mutex<Vec<TransferTake>>,
-    active_take: AtomicU64,
     next_take_id: AtomicU64,
+    /// "手上有可渲染的素材"的 O(1) 读数。
+    ///
+    /// 【为什么不能现场投影】`transfer_output()` 在**音频线程**上问这个问题（它决定本块
+    /// 该不该出音）。投影要取 takes 锁并遍历全部段 —— 那两件事都不能发生在音频回调里。
+    /// 因此这里维护一个由**变更点**（promote / 删除 / 清空 / 恢复）负责的原子读数。
+    material_present: AtomicBool,
+    /// 素材代次：**任何** take 的变化（新增 / 删除 / 清空 / 恢复）都会推进它。
+    ///
+    /// 【为什么不能再用"活动 take 号"当版本】投影现在是**跨全部 take** 的
+    /// （后录的胜出），于是"删掉一个较早的 take"同样会改变时间线 —— 而 take 号本身
+    /// 在那一刻没变。用一个只增的代次表达"素材变过"，渲染版本闸与会话重载才不会漏。
+    revision: AtomicU64,
     options: Mutex<TransferOptions>,
     /// 宿主在 `setupProcessing` 声明的工程率（`0` = 尚未声明）。
     project_rate: AtomicI32,
@@ -238,8 +252,9 @@ impl Default for TransferStore {
             armed: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
-            active_take: AtomicU64::new(0),
             next_take_id: AtomicU64::new(1),
+            material_present: AtomicBool::new(false),
+            revision: AtomicU64::new(0),
             options: Mutex::new(TransferOptions::default()),
             project_rate: AtomicI32::new(0),
             saw_context: AtomicBool::new(false),
@@ -256,21 +271,56 @@ impl TransferStore {
         self.armed.load(Ordering::Acquire)
     }
 
-    /// 活动 take 号（`None` = 还没有 take）。
+    /// 素材代次（`0` = 从来没有过任何 take）。
     ///
     /// 【为什么单独一个访问器】渲染路径用它做版本闸：`prepare()` 由 UI 定时器每 20ms
     /// 驱动一次，而一次合成要好几秒。这个读数必须**不取 takes 锁** —— 那把锁在
     /// 合成期间会被占住，而版本闸恰恰要在那之前问一次。
-    pub(crate) fn active_take_id(&self) -> Option<u64> {
-        let active = self.active_take.load(Ordering::Acquire);
-        (active > 0).then_some(active)
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    /// 最近一次录制的 take 号（`None` = 还没有 take）。**派生**读数，只给界面用。
+    ///
+    /// 【为什么是派生的】"活动 take"曾是一个可被用户切换的存储字段，而那时它决定
+    /// 渲染什么 —— 于是补录一句会把整条时间轴换掉。现在投影取全部 take，"最新一次录制"
+    /// 就只是 take 号里最大的那个，不需要（也不该）有一个独立的可变状态。
+    pub(crate) fn latest_take(&self) -> Option<u64> {
+        self.takes.lock_or_recover().iter().map(|take| take.id).max()
     }
 
     /// 有没有可渲染的素材（决定 [`SignalSource`](crate::render::extension::SignalSource)）。
+    ///
+    /// 【为什么是"任意一个 take"】投影跨全部 take，所以任何一次录制都可能贡献内容。
     pub(crate) fn has_material(&self) -> bool {
-        self.takes.lock_or_recover().iter().any(|take| {
-            !take.timeline.clips.is_empty() && take.id == self.active_take.load(Ordering::Acquire)
-        })
+        self.material_present.load(Ordering::Acquire)
+    }
+
+    /// 重算 [`Self::has_material`]（**只允许非音频线程**：它要取 takes 锁）。
+    fn refresh_material_present(&self) {
+        let present = self
+            .takes
+            .lock_or_recover()
+            .iter()
+            .any(|take| take.summary.clips > 0);
+        self.material_present.store(present, Ordering::Release);
+    }
+
+    /// 在持锁期间投影：`f` 拿到跨全部 take 的投影输入。
+    ///
+    /// 【为什么把闭包而不是 `Vec<ProjectionTake>` 交出去】段是几十 MB 的 PCM 缓冲，
+    /// 投影不该克隆它们；而"借用"要求 takes 锁在投影期间活着。闭包是唯一能同时表达
+    /// 这两件事的形状：输入的生命周期被关在调用内部，逃不出去。
+    pub(crate) fn with_projection<T>(&self, f: impl FnOnce(&[ProjectionTake<'_>]) -> T) -> T {
+        let takes = self.takes.lock_or_recover();
+        let input: Vec<ProjectionTake<'_>> = takes
+            .iter()
+            .map(|take| ProjectionTake {
+                id: take.id,
+                segments: &take.segments,
+            })
+            .collect();
+        f(&input)
     }
 
     /// 记录宿主声明的工程率（`setupProcessing`）。
@@ -354,7 +404,8 @@ impl TransferStore {
                 sidecar::remove(&path);
             }
         }
-        self.active_take.store(0, Ordering::Release);
+        self.material_present.store(false, Ordering::Release);
+        self.bump_revision();
     }
 
     /// 组件 state 里的 Transfer 清单。
@@ -362,15 +413,17 @@ impl TransferStore {
     /// 【为什么只存路径而不存 PCM】`MAX_FRAME` 是 64 MiB，而 4 分钟立体声 96 kHz
     /// 已是 184 MB；何况组件 state 会进宿主的每一次保存与撤销快照。清单是几 KB。
     pub(crate) fn manifest(&self) -> serde_json::Value {
-        let active = self.active_take.load(Ordering::Acquire);
         let takes = self.takes.lock_or_recover();
+        let latest = takes.iter().map(|take| take.id).max();
         let entries: Vec<_> = takes
             .iter()
             .map(|take| {
                 serde_json::json!({
                     "id": take.id,
                     "sidecar": take.sidecar.as_ref().map(|path| path.to_string_lossy()),
-                    "active": take.id == active,
+                    // 【为什么保留这个字段】它是清单格式的一部分（老工程里有），
+                    // 语义是"最近一次录制"。读回时只用于显示，不再决定渲染什么。
+                    "active": Some(take.id) == latest,
                 })
             })
             .collect();
@@ -386,6 +439,7 @@ impl TransferStore {
             return Ok(());
         };
         let mut highest = 0_u64;
+        let mut restored = 0_usize;
         for entry in entries {
             let Some(id) = entry["id"].as_u64() else {
                 continue;
@@ -406,62 +460,56 @@ impl TransferStore {
             };
             let sample_rate = segments[0].sample_rate;
             let channels = segments[0].planes.len().clamp(1, 2) as u8;
-            let (timeline, summary) = timeline::build(&segments, id, 120.0);
-            let sources = build_sources(id, &segments);
+            let (_, summary) = timeline::build(&segments, id, 120.0);
             self.takes.lock_or_recover().push(TransferTake {
                 id,
                 sample_rate,
                 channels,
                 segments,
-                timeline,
                 summary,
-                sources,
                 sidecar: Some(path),
             });
-            if entry["active"].as_bool() == Some(true) {
-                self.active_take.store(id, Ordering::Release);
-            }
+            restored += 1;
         }
         // take 号分配器必须跳过已恢复的号，否则下一次录制会覆盖一个已存在的文件。
         if highest > 0 {
             self.next_take_id.fetch_max(highest + 1, Ordering::AcqRel);
         }
-        if self.active_take.load(Ordering::Acquire) == 0 {
-            if let Some(first) = self.takes.lock_or_recover().first().map(|take| take.id) {
-                self.active_take.store(first, Ordering::Release);
-            }
+        if restored > 0 {
+            // 【为什么要推进代次】恢复改变了素材 ⇒ 时间线与渲染都必须重来。不推进的话
+            // 一个刚打开的工程会停在"没有素材"的状态上，直到用户做一次别的动作。
+            self.refresh_material_present();
+            self.bump_revision();
         }
-        Ok(())
-    }
-
-    /// 选择一个 take 作为活动 take。
-    pub(crate) fn select_take(&self, id: u64) -> Result<(), String> {
-        if !self.takes.lock_or_recover().iter().any(|take| take.id == id) {
-            return Err(format!("unknown transfer take {id}"));
-        }
-        self.active_take.store(id, Ordering::Release);
         Ok(())
     }
 
     /// 删掉一个 take。
     ///
     /// 【为什么落盘副本进回收站而不是直接删】录了几分钟的东西被误删是不可接受的，
-    /// 与 [`Self::clear`] 同一处置。活动 take 被删时退到剩余里**编号最大**的那个
-    /// （= 最近录的），一个都不剩就回到"没有素材"。
+    /// 与 [`Self::clear`] 同一处置。
+    ///
+    /// 【为什么没有"选择 take"】投影跨全部 take（后录的胜出），所以"哪一个是活动的"
+    /// 不再决定任何事 —— 保留一个不决定行为的开关只会让用户以为它有用。要换一条录音
+    /// 的听感，就删掉盖住它的那一次。
     pub(crate) fn delete_take(&self, id: u64) -> Result<(), String> {
         let mut takes = self.takes.lock_or_recover();
         let Some(index) = takes.iter().position(|take| take.id == id) else {
             return Err(format!("unknown transfer take {id}"));
         };
         let take = takes.remove(index);
+        drop(takes);
         if let Some(path) = take.sidecar {
             sidecar::remove(&path);
         }
-        if self.active_take.load(Ordering::Acquire) == id {
-            let next = takes.iter().map(|take| take.id).max().unwrap_or(0);
-            self.active_take.store(next, Ordering::Release);
-        }
+        self.refresh_material_present();
+        self.bump_revision();
         Ok(())
+    }
+
+    /// 推进素材代次（任何改变 take 集合的动作都要调它）。
+    fn bump_revision(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
     /// 音频线程入口：本实例是否正在录制，以及本块要不要直通。
@@ -566,36 +614,49 @@ impl TransferStore {
         })
     }
 
-    /// 活动素材的摘要。
+    /// 素材的摘要（跨全部 take 的**投影**结果）。
+    ///
+    /// 【为什么片段数取投影而不是逐 take 相加】用户看到的是投影后的时间线：被补录盖住
+    /// 的部分已经不在那里了。逐 take 相加会报出一个用户看不见的数字。
     pub(crate) fn material_summary(&self) -> Option<MaterialSummary> {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        let take = takes.iter().find(|take| take.id == active)?;
-        Some(MaterialSummary {
-            clips: take.summary.clips,
-            captured_frames: take
-                .segments
+        self.with_projection(|input| {
+            if input.iter().all(|take| take.segments.is_empty()) {
+                return None;
+            }
+            let captured_frames: u64 = input
                 .iter()
+                .flat_map(|take| take.segments.iter())
                 .map(|segment| segment.filled as u64)
-                .sum(),
-            covered_frames: take.summary.covered_frames,
-            spanned_frames: take.summary.spanned_frames,
-            sample_rate: take.sample_rate,
+                .sum();
+            let sample_rate = input
+                .iter()
+                .flat_map(|take| take.segments.iter())
+                .map(|segment| segment.sample_rate)
+                .max()
+                .unwrap_or(0);
+            let (_, summary) = timeline::project(input, 120.0);
+            Some(MaterialSummary {
+                clips: summary.clips,
+                captured_frames,
+                covered_frames: summary.covered_frames,
+                spanned_frames: summary.spanned_frames,
+                sample_rate,
+            })
         })
     }
 
     /// 全部 take 的只读清单（面板的 take 列表与"录制在哪"的定位都用它）。
     pub(crate) fn take_summaries(&self) -> Vec<TakeSummary> {
-        let active = self.active_take.load(Ordering::Acquire);
-        self.takes
-            .lock_or_recover()
+        let takes = self.takes.lock_or_recover();
+        let latest = takes.iter().map(|take| take.id).max();
+        takes
             .iter()
             .map(|take| {
                 let rate = take.sample_rate.max(1) as f64;
                 let span = take.summary.spanned_frames;
                 TakeSummary {
                     id: take.id,
-                    active: take.id == active,
+                    active: Some(take.id) == latest,
                     clips: take.summary.clips,
                     span_sec: (span > 0).then(|| {
                         let start = take
@@ -628,24 +689,28 @@ impl TransferStore {
         })
     }
 
-    /// 活动素材的工程跨度（用于"录完把视口移到录制区间"）。
+    /// 素材的工程跨度（用于"录完把视口移到录制区间"）。
+    ///
+    /// 【为什么是全部 take 的并集】用户问的是"我刚录的那段在哪" —— 每一次录制都算。
+    /// 只报最近一次会让补录一句之后的定位跳到那个小句子上，而用户想看的是整段成果。
     pub(crate) fn material_span(&self) -> Option<MaterialSpan> {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        let take = takes.iter().find(|take| take.id == active)?;
-        if take.summary.spanned_frames == 0 {
-            return None;
-        }
-        let start = take
-            .segments
-            .iter()
-            .map(|segment| segment.origin)
-            .min()
-            .unwrap_or(0);
-        Some(MaterialSpan {
-            start_frame: start,
-            end_frame: start + take.summary.spanned_frames as i64,
-            sample_rate: take.sample_rate,
+        self.with_projection(|input| {
+            let mut start = i64::MAX;
+            let mut end = i64::MIN;
+            let mut sample_rate = 0_u32;
+            for segment in input.iter().flat_map(|take| take.segments.iter()) {
+                if segment.span().is_empty() || segment.has_nonfinite() {
+                    continue;
+                }
+                start = start.min(segment.origin);
+                end = end.max(segment.origin + segment.filled as i64);
+                sample_rate = sample_rate.max(segment.sample_rate);
+            }
+            (start < end).then_some(MaterialSpan {
+                start_frame: start,
+                end_frame: end,
+                sample_rate,
+            })
         })
     }
 
@@ -653,7 +718,6 @@ impl TransferStore {
     pub(crate) fn status(&self) -> TransferStatus {
         let armed = self.is_armed();
         let take_count = self.takes.lock_or_recover().len();
-        let active = self.active_take.load(Ordering::Acquire);
         TransferStatus {
             state: if armed {
                 "recording"
@@ -670,7 +734,7 @@ impl TransferStore {
             takes: self.take_summaries(),
             options: self.options(),
             take_count,
-            active_take: (active > 0).then_some(active),
+            active_take: self.latest_take(),
             saw_context: self.saw_context.load(Ordering::Acquire),
             saw_input: self.saw_input.load(Ordering::Acquire),
             saw_offline: self.saw_offline.load(Ordering::Acquire),
@@ -678,10 +742,14 @@ impl TransferStore {
         }
     }
 
-    /// 活动 take 的渲染输入。
+    /// 全部素材的渲染输入。
     ///
     /// 返回 `(timeline, regions, sources)` —— 与 ARA 路径**同一组类型**，
     /// 因此下游（渲染、导出、快照）完全共用，不需要为 Transfer 分叉。
+    ///
+    /// 【为什么没有可渲染内容时返回 `None`】渲染那条路以"有没有东西可渲染"为判据
+    /// （见 `renders()` 与 `transfer_prepare_job` 的早退）。空时间线在那里是"还没录"，
+    /// 不是"有一条空轨"。
     pub(crate) fn render_input(
         &self,
     ) -> Option<(
@@ -689,34 +757,32 @@ impl TransferStore {
         Vec<crate::ara::AraPlaybackRegion>,
         HashMap<String, Arc<SourcePcm>>,
     )> {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        let take = takes.iter().find(|take| take.id == active)?;
-        if take.timeline.clips.is_empty() {
-            return None;
-        }
-        Some((
-            take.timeline.clone(),
-            regions_for(&take.timeline),
-            take.sources.clone(),
-        ))
+        self.with_projection(|input| {
+            let (timeline, _) = timeline::project(input, 120.0);
+            if timeline.clips.is_empty() {
+                return None;
+            }
+            Some((
+                timeline.clone(),
+                regions_for(&timeline),
+                sources_for(input),
+            ))
+        })
     }
 
     /// 会话用的时间线 + 素材（**不**构造渲染区域）。
     ///
     /// 【为什么与 `render_input` 分开】渲染那条路要的是 `AraPlaybackRegion`；编辑器要的
-    /// 是"界面该显示什么"。没有活动 take（用户还没录）时编辑器必须拿到一条**空的**
+    /// 是"界面该显示什么"。还没有素材（用户还没录）时编辑器必须拿到一条**空的**
     /// 时间线，而不是 `None` —— 否则界面停在"没有时间线"，而不是"还没有内容，请录制"。
     pub(crate) fn session_timeline(&self) -> (TimelineState, HashMap<String, Arc<SourcePcm>>) {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        match takes.iter().find(|take| take.id == active) {
-            Some(take) => (take.timeline.clone(), take.sources.clone()),
-            None => (timeline::build(&[], active, 120.0).0, HashMap::new()),
-        }
+        self.with_projection(|input| {
+            let (timeline, _) = timeline::project(input, 120.0);
+            (timeline, sources_for(input))
+        })
     }
 
-    /// 用**给定的**时间线构造渲染区域，素材取活动 take 的那一份。
+    /// 用**给定的**时间线构造渲染区域。
     ///
     /// 【为什么要能换时间线】编辑器会话持有的那份带着用户曲线（参数就是 Transfer 形态下
     /// "处理"的全部内容），而捕获存储那份只有几何。渲染要用前者的曲线、后者的 PCM。
@@ -727,79 +793,36 @@ impl TransferStore {
         regions_for(timeline)
     }
 
-    /// 活动 take 的素材表（按源 id 索引）。
-    pub(crate) fn active_sources(&self) -> HashMap<String, Arc<SourcePcm>> {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        takes
-            .iter()
-            .find(|take| take.id == active)
-            .map(|take| take.sources.clone())
-            .unwrap_or_default()
+    /// 全部素材的源 PCM 表（按源 id 索引）。
+    pub(crate) fn material_sources(&self) -> HashMap<String, Arc<SourcePcm>> {
+        self.with_projection(sources_for)
     }
 
-    /// 活动 take 的**未处理** PCM，做成一份可直接发布的快照。
+    /// 素材的**未处理** PCM，做成一份可直接发布的快照（"原始磁带"）。
     ///
     /// 【为什么用 `PlaybackSnapshot` 的形状】处理结果与原始磁带同形，于是音频线程只有
     /// "选哪个发布器"一个分支：不需要第二条读取通路、第二套预算、第二套回收。
-    /// 段的覆盖语义也在这里自然落地 —— 按录制顺序拷贝，后来的段盖住先前的。
     ///
-    /// 【为什么在发布方分配而不是让音频线程给缓冲】发布只在 take 变化时发生一次，
+    /// 【为什么复用 `mix_plain_regions` 而不是自己铺段】原始磁带要表达的正是"把投影出的
+    /// 时间线原样播一遍"。自己铺段等于把覆盖语义、源窗、单声道展开再实现一遍 —— 而那
+    /// 三条已经在快照那条路上有唯一实现（并且被单测覆盖）。
+    ///
+    /// 【为什么在发布方分配而不是让音频线程给缓冲】发布只在素材变化时发生一次，
     /// 而发布方（UI 线程 / 会话 actor）本来就不是实时线程。
     pub(crate) fn raw_tape(&self) -> Option<PlaybackSnapshot> {
-        let active = self.active_take.load(Ordering::Acquire);
-        let takes = self.takes.lock_or_recover();
-        let take = takes.iter().find(|take| take.id == active)?;
-        if take.segments.is_empty() {
-            return None;
-        }
-        let origin = take.segments.iter().map(|segment| segment.origin).min()?;
-        let end = take
-            .segments
-            .iter()
-            .map(|segment| segment.origin + segment.filled as i64)
-            .max()?;
-        let frames = usize::try_from(end.checked_sub(origin)?).ok()?;
-        if frames == 0 {
-            return None;
-        }
-        let bytes = frames.checked_mul(8)?;
-        let reservation = crate::render::budget::global_budget().reserve(bytes)?;
-        let mut left = vec![0.0_f32; frames];
-        let mut right = vec![0.0_f32; frames];
-        for segment in &take.segments {
-            let start = usize::try_from(segment.origin.checked_sub(origin)?).ok()?;
-            let Some(source_left) = segment.planes.first() else {
-                continue;
-            };
-            // 防御式取长：封口后的段本应 `filled == planes[ch].len()`，但这里在
-            // 非音频线程上做一次性拷贝，宁可少拷也不越界。
-            let count = segment
-                .filled
-                .min(source_left.len())
-                .min(frames.saturating_sub(start));
-            if count == 0 {
-                continue;
+        self.with_projection(|input| {
+            let (timeline, _) = timeline::project(input, 120.0);
+            if timeline.clips.is_empty() {
+                return None;
             }
-            left[start..start + count].copy_from_slice(&source_left[..count]);
-            match segment.planes.get(1) {
-                Some(source_right) if source_right.len() >= count => {
-                    right[start..start + count].copy_from_slice(&source_right[..count]);
-                }
-                // 单声道捕获：两个输出平面同内容（与 `pass_through` 的单声道展开一致）。
-                _ => right[start..start + count].copy_from_slice(&source_left[..count]),
-            }
-        }
-        let mut snapshot = PlaybackSnapshot {
-            sample_rate: take.sample_rate,
-            origin_sample: origin,
-            left,
-            right,
-            _reservation: Some(reservation),
-        };
-        // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
-        let _ = snapshot.compact_mono();
-        Some(snapshot)
+            let sources = sources_for(input);
+            let regions = regions_for(&timeline);
+            // 捕获在采样率变化时会停止本次录制（见 `capture::CaptureOutcome::RateChanged`），
+            // 因此素材的率是单一的；取最大值只是兜底，不改变语义。
+            let rate = sources.values().map(|pcm| pcm.sample_rate).max()?;
+            crate::render::snapshot::mix_plain_regions(&regions, &sources, rate, Some(rate as f64))
+                .ok()
+        })
     }
 
     /// 把封口的段提升成一个 take。
@@ -815,8 +838,7 @@ impl TransferStore {
         let id = self.next_take_id.fetch_add(1, Ordering::AcqRel);
         let sample_rate = all[0].sample_rate;
         let channels = all[0].planes.len().clamp(1, 2) as u8;
-        let (timeline, summary) = timeline::build(&all, id, 120.0);
-        let sources = build_sources(id, &all);
+        let (_, summary) = timeline::build(&all, id, 120.0);
         // 【为什么在 promote 时就落盘，而不是等 `getState`】落盘是**一次**几十 MB 的
         // 写；放在 `getState` 里就等于在宿主每次自动保存时都写一遍。而 promote 是
         // 用户刚做完的动作，等它有明确的语义（"我刚录完"），且只发生一次。
@@ -835,9 +857,7 @@ impl TransferStore {
             sample_rate,
             channels,
             segments: all,
-            timeline,
             summary,
-            sources,
             sidecar,
         };
         let mut takes = self.takes.lock_or_recover();
@@ -845,7 +865,9 @@ impl TransferStore {
         // `max_duration_sec` 与全局预算共同约束；显式清理由 `clear()` 承担。
         takes.push(take);
         drop(takes);
-        self.active_take.store(id, Ordering::Release);
+        // 【为什么要推进代次】新增素材 ⇒ 时间线、原始磁带与合成结果全都要重来。
+        self.refresh_material_present();
+        self.bump_revision();
         Ok(id)
     }
 }
@@ -886,24 +908,22 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
 }
 
 /// 段 → 源 PCM。一个段一份源，键是 [`timeline::source_id`]。
-fn build_sources(
-    take_id: u64,
-    segments: &[Segment],
-) -> HashMap<String, Arc<SourcePcm>> {
+fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> {
     let mut sources = HashMap::new();
-    for segment in segments {
-        let id = timeline::source_id(take_id, segment.id);
-        // 【为什么按段而不是按 take 建源】段的采样率与内容各不相同，且时间线里的
-        // clip 源窗是**段内偏移** —— 一份源对应一个段，窗口语义才自洽。
-        sources.insert(
-            id,
-            Arc::new(SourcePcm {
-                sample_rate: segment.sample_rate,
-                planes: segment.planes.clone(),
-                version: segment.id,
-                _reservation: None,
-            }),
-        );
+    for take in takes {
+        for segment in take.segments {
+            // 【为什么按段而不是按 take 建源】段的采样率与内容各不相同，且时间线里的
+            // clip 源窗是**段内偏移** —— 一份源对应一个段，窗口语义才自洽。
+            sources.insert(
+                timeline::source_id(take.id, segment.id),
+                Arc::new(SourcePcm {
+                    sample_rate: segment.sample_rate,
+                    planes: segment.planes.clone(),
+                    version: segment.id,
+                    _reservation: None,
+                }),
+            );
+        }
     }
     sources
 }
@@ -1125,7 +1145,7 @@ mod tests {
         store.note_project_rate(48_000.0);
         store.restore_manifest(&manifest).unwrap();
         assert_eq!(store.status().take_count, 1);
-        assert_eq!(store.active_take_id(), Some(5));
+        assert_eq!(store.latest_take(), Some(5));
         assert!(store.has_material(), "恢复之后必须立刻可渲染");
         let (timeline, regions, sources) = store.render_input().expect("恢复的 take 应当可用");
         assert_eq!(timeline.clips.len(), 1);
@@ -1152,7 +1172,7 @@ mod tests {
         let store = TransferStore::default();
         store.restore_manifest(&manifest).unwrap();
         assert_eq!(store.status().take_count, 1, "只有存在的那个 take 被恢复");
-        assert_eq!(store.active_take_id(), Some(1));
+        assert_eq!(store.latest_take(), Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

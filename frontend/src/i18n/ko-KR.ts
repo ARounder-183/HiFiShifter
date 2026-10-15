@@ -2184,7 +2184,6 @@ export const koKR = {
         "녹음한 구간만 처리 결과로 바뀌고 나머지는 그대로입니다. 끄면 구간 밖은 무음이 됩니다.",
     transfer_take_label: "테이크 {id} · 클립 {clips}개",
     transfer_take_span: "{start}초 – {end}초",
-    transfer_take_use: "사용",
     transfer_take_delete: "삭제",
     transfer_yes: "있음",
     transfer_no: "없음",

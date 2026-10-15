@@ -2189,7 +2189,6 @@ export const enUS = {
         "Only the recorded range is replaced by the processed result; everything else stays untouched. Off means the whole track goes silent outside it.",
     transfer_take_label: "Take {id} · {clips} clips",
     transfer_take_span: "{start}s – {end}s",
-    transfer_take_use: "Use",
     transfer_take_delete: "Delete",
     transfer_yes: "yes",
     transfer_no: "no",

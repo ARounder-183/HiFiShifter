@@ -81,6 +81,7 @@ export interface TransferStatus {
     takes: TransferTake[];
     options: TransferOptions;
     takeCount: number;
+    /** 最近一次录制的 take 号（派生读数；投影取全部 take，见后端 `latest_take`）。 */
     activeTake: number | null;
     /** 宿主给过可用的 `ProcessContext` —— 录制的唯一硬前提。 */
     sawContext: boolean;
@@ -110,7 +111,6 @@ export const transferApi = {
     stop: () => invoke<{ take: number; status: TransferStatus }>("transfer_stop"),
     cancel: () => invoke<TransferStatus>("transfer_cancel"),
     clear: () => invoke<TransferStatus>("transfer_clear"),
-    selectTake: (takeId: number) => invoke<TransferStatus>("transfer_select_take", takeId),
     deleteTake: (takeId: number) => invoke<TransferStatus>("transfer_delete_take", takeId),
     setOptions: (patch: Partial<TransferOptions>) =>
         invoke<TransferStatus>("transfer_set_options", patch),

@@ -54,14 +54,6 @@ pub(crate) fn handle(
             owner.request_transfer_reload();
             Ok(status_json(&transfer.status(), owner.is_ara_bound()))
         }
-        "transfer_select_take" => {
-            let id = args["takeId"]
-                .as_u64()
-                .ok_or("transfer_select_take needs a numeric takeId")?;
-            transfer.select_take(id)?;
-            owner.request_transfer_reload();
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
-        }
         "transfer_delete_take" => {
             let id = args["takeId"]
                 .as_u64()
@@ -288,11 +280,11 @@ mod tests {
         assert!(handle(&owner, "transfer_frobnicate", &json!({})).is_err());
     }
 
-    /// 选择不存在的 take 是错误，而不是静默改成"没有活动 take"。
+    /// 删除不存在的 take 是错误，而不是静默成功。
     #[test]
-    fn selecting_an_unknown_take_is_rejected() {
+    fn deleting_an_unknown_take_is_rejected() {
         let owner = owner();
-        assert!(handle(&owner, "transfer_select_take", &json!({ "takeId": 99 })).is_err());
+        assert!(handle(&owner, "transfer_delete_take", &json!({ "takeId": 99 })).is_err());
     }
 
     /// 没声明工程率时不能开始录制，且错误要说明**怎么才能行**。

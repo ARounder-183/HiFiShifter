@@ -439,14 +439,14 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么与 `snapshots` 分开而不是塞进去】两者更新节奏不同：处理结果随曲线编辑
     /// 重发，原始磁带只在 take 变化时重发。合成失败或还没完成时这一份仍然有效。
     pub raw_tape: super::snapshot::SnapshotPublisher,
-    /// 已发布处理结果对应的 take 号（`0` = 还没发过）。
+    /// 已发布处理结果对应的**素材代次**（`0` = 还没发过）。
     ///
     /// 【为什么单独记而不是从 `transfer_prepared` 里拆位】那个版本号是
-    /// `take ^ (edit << 32)` 的位运算结果；音频线程要回答的是"已发布的那份是不是
-    /// **当前** take"，一个显式读数比拆位可靠得多（也免得 take 号增长过 32 位时出错）。
-    transfer_ready_take: AtomicU64,
-    /// 已发布原始磁带对应的 take 号（`0` = 还没发过）。
-    raw_tape_take: AtomicU64,
+    /// `revision ^ (edit << 32)` 的位运算结果；音频线程要回答的是"已发布的那份是不是
+    /// **当前**素材"，一个显式读数比拆位可靠得多（也免得代次增长过 32 位时出错）。
+    transfer_ready_revision: AtomicU64,
+    /// 已发布原始磁带对应的素材代次（`0` = 还没发过）。
+    raw_tape_revision: AtomicU64,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
     channel: Mutex<Option<hifishifter_host_channel::Server>>,
@@ -1890,13 +1890,14 @@ impl ExtensionOwner {
     /// 【为什么幂等】它由命令（UI 线程）与合成准备（actor）两处调用；take 号没变时
     /// 直接返回，不重复拷贝几十 MB 的 PCM。
     pub(crate) fn sync_raw_tape(&self) {
-        let Some(take) = self.transfer.active_take_id() else {
-            // 没有活动 take（清空 / 还没录）：撤掉指针，让仲裁落到透传。
+        if !self.transfer.has_material() {
+            // 没有素材（清空 / 还没录 / 全是静音）：撤掉指针，让仲裁落到透传。
             self.raw_tape.clear();
-            self.raw_tape_take.store(0, Ordering::Release);
+            self.raw_tape_revision.store(0, Ordering::Release);
             return;
-        };
-        if self.raw_tape_take.load(Ordering::Acquire) == take {
+        }
+        let revision = self.transfer.revision();
+        if self.raw_tape_revision.load(Ordering::Acquire) == revision {
             return;
         }
         let Some(snapshot) = self.transfer.raw_tape() else {
@@ -1908,7 +1909,7 @@ impl ExtensionOwner {
             return;
         }
         match self.raw_tape.publish(snapshot) {
-            Ok(()) => self.raw_tape_take.store(take, Ordering::Release),
+            Ok(()) => self.raw_tape_revision.store(revision, Ordering::Release),
             Err(error) => log::warn!("[transfer] raw tape publish failed: {error:?}"),
         }
     }
@@ -1991,10 +1992,10 @@ impl ExtensionOwner {
     pub(crate) fn transfer_render_input(
         &self,
     ) -> Result<(u64, u64, super::input::RenderInput), String> {
-        let take = self
-            .transfer
-            .active_take_id()
-            .ok_or("no active Transfer take")?;
+        if !self.transfer.has_material() {
+            return Err("no Transfer material".into());
+        }
+        let revision = self.transfer.revision();
         let session = self
             .transfer_session
             .get()
@@ -2009,7 +2010,7 @@ impl ExtensionOwner {
         };
         let input = super::input::RenderInput {
             regions: self.transfer.regions_for_timeline(&timeline),
-            sources: self.transfer.active_sources(),
+            sources: self.transfer.material_sources(),
             timeline: Some(timeline),
             project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
             // 【为什么参数曲线这里为空】Transfer 的曲线就在时间线里（它**就是**参数权威），
@@ -2018,24 +2019,24 @@ impl ExtensionOwner {
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
         };
-        Ok((take, edit, input))
+        Ok((revision, edit, input))
     }
 
     pub(crate) fn transfer_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
-        if self.transfer.active_take_id().is_none() {
+        if !self.transfer.has_material() {
             return Ok(());
         }
         // 【为什么这里也要补一次】命令那条路（`request_transfer_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let (take, edit, input) = self.transfer_render_input()?;
+        let (revision, edit, input) = self.transfer_render_input()?;
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
         // 合成会被排队几百次。版本里必须**带上编辑代次**：只认 take 会让参数改动
         // 永远不重算。
-        let version = take ^ (edit << 32);
+        let version = revision ^ (edit << 32);
         if self.transfer_prepared.load(Ordering::Acquire) == version
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
         {
@@ -2072,8 +2073,8 @@ impl ExtensionOwner {
         self.transfer_prepared.store(version, Ordering::Release);
         // 处理结果与当前 take 的对应关系：音频线程据此在"处理结果"与"原始磁带"之间选
         // （见 `processed_ready`）。换 take 之后这里才更新，所以中间那段空窗由原始磁带兜底。
-        self.transfer_ready_take.store(take, Ordering::Release);
-        log::info!("[transfer] prepared take {take} edit {edit}");
+        self.transfer_ready_revision.store(revision, Ordering::Release);
+        log::info!("[transfer] prepared material revision {revision} edit {edit}");
         Ok(())
     }
 
@@ -2121,10 +2122,11 @@ impl ExtensionOwner {
     /// —— 那是倒退。只比 take 号：曲线编辑不改 take，于是仍然读处理结果（听到上一版处理，
     /// 与既有行为一致）；换 take 才回落。
     fn processed_ready(&self) -> bool {
-        let Some(take) = self.transfer.active_take_id() else {
+        if !self.transfer.has_material() {
             return false;
-        };
-        self.transfer_ready_take.load(Ordering::Acquire) == take
+        }
+        let revision = self.transfer.revision();
+        self.transfer_ready_revision.load(Ordering::Acquire) == revision
             && self.snapshots.iter().any(|publisher| publisher.is_ready())
     }
 
@@ -2133,10 +2135,11 @@ impl ExtensionOwner {
     /// 【为什么要比 take 号】否则换 take 之后会继续播上一份原始磁带 —— 用户听到的是
     /// 上一次录制的内容，而界面上已经是新 take。
     fn raw_tape_ready(&self) -> bool {
-        let Some(take) = self.transfer.active_take_id() else {
+        if !self.transfer.has_material() {
             return false;
-        };
-        self.raw_tape_take.load(Ordering::Acquire) == take && self.raw_tape.is_ready()
+        }
+        self.raw_tape_revision.load(Ordering::Acquire) == self.transfer.revision()
+            && self.raw_tape.is_ready()
     }
 
     /// 音频线程上的 Transfer 阶段。

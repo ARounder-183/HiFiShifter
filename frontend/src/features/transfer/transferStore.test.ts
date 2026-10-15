@@ -97,8 +97,6 @@ test("没有区间时也推进票据，但不要求视口跳转", async () => {
 
 test("带参命令把参数发出去（takeId）", async () => {
     invokeMock.mockResolvedValue(status({ takeCount: 2 }));
-    await transferActions.selectTake(7);
-    expect(invokeMock).toHaveBeenCalledWith("transfer_select_take", 7);
     await transferActions.deleteTake(9);
     expect(invokeMock).toHaveBeenCalledWith("transfer_delete_take", 9);
 });

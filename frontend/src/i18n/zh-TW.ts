@@ -2132,7 +2132,6 @@ export const zhTW = {
         "只有錄製區間被處理結果取代，其餘保持原樣。關掉則區間外整條軌靜音。",
     transfer_take_label: "錄音 {id} · {clips} 段",
     transfer_take_span: "{start} 秒 – {end} 秒",
-    transfer_take_use: "使用",
     transfer_take_delete: "刪除",
     transfer_yes: "有",
     transfer_no: "無",

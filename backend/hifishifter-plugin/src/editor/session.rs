@@ -1447,7 +1447,9 @@ impl EditorSession {
     /// 那类不可见错误）。轨道身份（`transfer-track`）跨 take 稳定，因此按键保留是安全的。
     fn load_transfer_timeline(&self, force: bool) -> Result<(), String> {
         let owner = self.transfer_owner().ok_or("transfer host is gone")?;
-        let version = owner.transfer().active_take_id().unwrap_or(0);
+        // 【为什么版本是"素材代次"而不是 take 号】投影跨全部 take（后录的胜出），
+        // 删掉一个较早的 take 同样会改变时间线 —— 而那一刻 take 号没变。
+        let version = owner.transfer().revision();
         {
             let loaded = self.loaded.lock_or_recover();
             if loaded.initialized && !force && loaded.model == version {

@@ -179,7 +179,6 @@ export const transferActions = {
     stop: () => act(() => transferApi.stop().then((reply) => reply.status), noteRecorded),
     cancel: () => act(() => transferApi.cancel()),
     clear: () => act(() => transferApi.clear()),
-    selectTake: (takeId: number) => act(() => transferApi.selectTake(takeId)),
     deleteTake: (takeId: number) => act(() => transferApi.deleteTake(takeId)),
     setOptions: (patch: Partial<TransferOptions>) => act(() => transferApi.setOptions(patch)),
     /** 手动刷新（面板打开时用一次，不必等 200ms）。 */

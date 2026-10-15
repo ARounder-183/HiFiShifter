@@ -115,13 +115,6 @@ export function TransferPanel() {
                             ) : null}
                             <AppButton
                                 size="sm"
-                                disabled={busy || take.active}
-                                onClick={() => void transferActions.selectTake(take.id)}
-                            >
-                                {t("transfer_take_use")}
-                            </AppButton>
-                            <AppButton
-                                size="sm"
                                 intent="subtle"
                                 disabled={busy}
                                 onClick={() => void transferActions.deleteTake(take.id)}
@@ -223,7 +216,6 @@ type TransferMessageKey =
     | "transfer_option_monitor_hint"
     | "transfer_option_outside"
     | "transfer_option_outside_hint"
-    | "transfer_take_use"
     | "transfer_take_delete"
     | "transfer_yes"
     | "transfer_no";

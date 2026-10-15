@@ -2129,7 +2129,6 @@ export const zhCN = {
         "只有录制区间被处理结果替换，其余保持原样。关掉则区间外整条轨静音。",
     transfer_take_label: "录音 {id} · {clips} 段",
     transfer_take_span: "{start} 秒 – {end} 秒",
-    transfer_take_use: "使用",
     transfer_take_delete: "删除",
     transfer_yes: "有",
     transfer_no: "无",

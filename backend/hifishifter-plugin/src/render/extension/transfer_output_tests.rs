@@ -94,8 +94,8 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     );
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_take
-        .store(owner.transfer.active_take_id().unwrap(), Ordering::Release);
+        .transfer_ready_revision
+        .store(owner.transfer.revision(), Ordering::Release);
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::Processed,
@@ -136,8 +136,8 @@ fn a_new_take_invalidates_both_publishers() {
     owner.sync_raw_tape();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_take
-        .store(owner.transfer.active_take_id().unwrap(), Ordering::Release);
+        .transfer_ready_revision
+        .store(owner.transfer.revision(), Ordering::Release);
     assert_eq!(owner.transfer_output(), TransferOutput::Processed);
 
     // 又录一遍：take 号前进，两份发布都还停留在上一个 take。
@@ -161,17 +161,17 @@ fn clearing_the_takes_retracts_the_raw_tape() {
     let owner = insert_owner();
     record(&owner, 256);
     owner.sync_raw_tape();
-    let take = owner.transfer.active_take_id().unwrap();
-    assert_eq!(owner.raw_tape_take.load(Ordering::Acquire), take);
+    let revision = owner.transfer.revision();
+    assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), revision);
     assert!(owner.raw_tape.is_ready());
 
-    // 幂等：take 没变就不重复拷贝 PCM。
+    // 幂等：素材没变就不重复拷贝 PCM。
     owner.sync_raw_tape();
-    assert_eq!(owner.raw_tape_take.load(Ordering::Acquire), take);
+    assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), revision);
 
     owner.transfer().clear();
     owner.sync_raw_tape();
-    assert_eq!(owner.raw_tape_take.load(Ordering::Acquire), 0);
+    assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), 0);
     assert!(!owner.raw_tape.is_ready(), "没有 take 就不该留下指针");
     assert!(!owner.renders());
     assert_eq!(
