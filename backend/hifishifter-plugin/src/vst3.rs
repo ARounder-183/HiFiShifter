@@ -1697,18 +1697,22 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                     }
                 };
             }
-            // 【为什么不用 expect】这里在**音频线程**上，panic 会跨越 VST3 的 FFI 边界
-            // 展开进 REAPER 的音频回调。`validate` 已经查过布局，但校验与使用之间若出现
-            // 任何不一致（例如宿主给了我们没预料到的总线形状），宁可返回错误码让宿主把
-            // 这一帧当静音，也不能让整个 DAW 崩掉。
-            if unsafe { crate::audio_abi::clear_outputs(data) }.is_err() {
-                return K_RESULT_FALSE;
-            }
+            // 【为什么不再无条件先清输出 —— 这是"插件在链路里却没有一点输出"的直接原因】
+            // 宿主**可以合法地把同一个缓冲同时当输入和输出**（in-place：`inputs` 与
+            // `outputs` 指向同一份内存，甚至同一个 `AudioBusBuffers`）。先清输出就把
+            // **输入**一起抹掉了，而下面两条通路都要读它：直通会把零送出去、分层拷贝在
+            // 快照范围外也会把零送出去。于是插件在链路里、却一点声音都没有。
+            //
+            // 现在的纪律是：**只有"本通路确实不写整块"时才清**（见 `layered` 与停止/静音
+            // 分支）。写满整块的路径（直通、分层拷贝）自己覆盖每一帧，不需要也不允许先清。
             if owner.host_item_muted() {
+                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
             }
             if data.process_context.is_null() {
                 owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed);
+                // 没有工程位置就无从选择输出内容：与改动前一致地静音。
+                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return if data.process_mode == 2 {
                     K_RESULT_FALSE
                 } else {
@@ -1728,10 +1732,19 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 }
             };
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
+            // 停播时不输出任何东西 ⇒ 必须清（否则输出里留着上一块的残留）。
             if data.process_mode != 2
                 && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
             {
+                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
+            }
+            // 【为什么分层拷贝前不能清】它写满整块（快照范围内取快照、范围外取**输入**），
+            // 而 in-place 宿主下"输入"就是这块缓冲本身 —— 先清等于把要拷的东西删掉。
+            if !layered && unsafe { crate::audio_abi::clear_outputs(data) }.is_err() {
+                // 【为什么不用 expect】这里在**音频线程**上，panic 会跨越 VST3 的 FFI 边界
+                // 展开进宿主的音频回调。宁可返回错误码让宿主把这一帧当静音。
+                return K_RESULT_FALSE;
             }
             // 按 `setupProcessing` 的**权威率**选快照：非原生率（96k/192k…）取最近的已声明
             // 原生快照，`copy_block` 会把它线性重采样到宿主输出率。此前这里用
@@ -1752,7 +1765,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             } else {
                 owner.setup_sample_rate()
             };
-            // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
+            // SAFETY: 缓冲经 validate 校验；`layered` 时未清但由 `copy_block_layered`
+            // 逐帧覆盖，其余路径已由上面的 clear_outputs 清过。publisher 由 owner 保留。
             let ready = unsafe {
                 if layered {
                     // 【为什么要重新取一次输入视图】Transfer 要"录过的那一段被替换、其余
@@ -1781,6 +1795,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             };
             if data.process_mode == 2 && !ready {
                 return K_RESULT_FALSE;
+            }
+            // 【为什么 in-place 时要把掩码压平】见 `input_output_share_bus`：快照写下的
+            // "这一段是静音"会在下一块被我们自己的捕获读成"宿主没给输入"。掩码只是提示，
+            // 压平成"非静音"永远是安全的（最坏情况是宿主少省一次算力）。
+            if unsafe { crate::audio_abi::input_output_share_bus(data) } {
+                // SAFETY: 输出总线已在上面校验过；同一份结构在回调期间存活。
+                unsafe { (*data.outputs).silence_flags = 0 };
             }
             K_RESULT_OK
         }

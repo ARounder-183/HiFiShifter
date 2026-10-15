@@ -147,6 +147,20 @@ pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError>
     Ok(())
 }
 
+/// 输入与输出是否**共用同一份总线结构**（in-place 宿主）。
+///
+/// 【为什么必须知道这件事】`silence_flags` 是**写在总线结构里**的。宿主可以合法地把
+/// 同一个 `AudioBusBuffers` 同时当输入和输出（见 `pass_through` 的说明），于是一个插件
+/// 给自己输出写的"全是静音"掩码，会在**下一块**被它自己当作"宿主说这个输入是静音的"
+/// 读回来 —— 自己把自己录成静音、也把自己直通成静音。掩码只是给宿主省算力的**可选**
+/// 提示，in-place 时省掉它没有任何代价。
+pub(crate) fn input_output_share_bus(data: &ProcessData) -> bool {
+    data.num_inputs > 0
+        && data.num_outputs > 0
+        && !data.inputs.is_null()
+        && data.inputs == data.outputs
+}
+
 /// 仅在完整校验后清输出；playback renderer失败/停播仍清零，纯editor不走此入口。
 /// # Safety
 /// 与validate相同，非空output plane必须有至少num_samples可写帧。
@@ -175,7 +189,11 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
             unsafe { std::ptr::write_bytes(plane, 0, data.num_samples as usize) };
         }
     }
-    output.silence_flags = (1_u64 << channels.min(64)) - 1;
+    // 【为什么 in-place 时不写这个掩码】见 [`input_output_share_bus`]：写进去的
+    // "全静音"会在下一块被我们自己的 `capture_view` 读成"宿主没给输入"。
+    if !input_output_share_bus(data) {
+        output.silence_flags = (1_u64 << channels.min(64)) - 1;
+    }
     Ok(())
 }
 

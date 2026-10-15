@@ -896,6 +896,115 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
     assert_eq!(owner.transfer().status().active_take, Some(take));
 }
 
+/// **in-place 宿主下录制必须拿到宿主的音频**（而不是我们自己写下的静音掩码）。
+///
+/// 【为什么这是"录出来是噪音/静音"的回归测试】`silence_flags` 写在总线结构里，而宿主
+/// 可以合法地把同一个结构同时当输入和输出。此前 `clear_outputs` 会往里写"全静音"，
+/// 于是**下一块**的捕获把它读成"宿主没给输入"：插件自己把自己录成了静音。
+#[test]
+fn in_place_buffers_still_capture_the_host_audio() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().expect("48 kHz 已声明");
+
+    let frames = 16_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.3_f32; frames].into_boxed_slice());
+    for block in 0..3_i64 {
+        let mut planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            state: 1 << 1,
+            sample_rate: 48_000.0,
+            project_time_samples: block * frames as i64,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 0,
+            num_samples: frames as i32,
+            num_inputs: 1,
+            num_outputs: 1,
+            // in-place：输入与输出是同一个结构（也就同一份掩码）。
+            inputs: &raw mut bus,
+            outputs: &raw mut bus,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
+            K_RESULT_OK
+        );
+        assert_eq!(bus.silence_flags, 0, "in-place 时不能写下自己的静音掩码");
+    }
+    owner.transfer().stop().expect("应当产生一个 take");
+    let (_, _, sources) = owner.transfer().render_input().expect("有素材");
+    let plane = sources
+        .values()
+        .next()
+        .and_then(|pcm| pcm.planes.first())
+        .expect("至少要有一条平面");
+    assert!(
+        plane.iter().all(|sample| (*sample - 0.3).abs() < 1e-6),
+        "录下来的必须是宿主的样本（in-place 下也不能变成零），实际首样本 {:?}",
+        plane.first()
+    );
+}
+
+/// **宿主把同一个缓冲同时当输入和输出（in-place）时，直通必须仍然出声。**
+///
+/// 【为什么这是「一点输出也没有」的回归测试】`process` 此前无条件**先清输出**，而 in-place
+/// 宿主下那等于把**输入**一起抹掉：直通随后读到的全是零，用户听到的是"插件在链路里、
+/// 却一点声音都没有"。这是宿主**合法**的做法（同一个缓冲两用是 SDK 明说的），
+/// 所以插件必须自己守住"读之前不许清"。
+#[test]
+fn in_place_buffers_still_pass_the_host_audio_through() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+
+    let mut plane_left = [0.3_f32; 8];
+    let mut plane_right = [0.6_f32; 8];
+    let mut planes = [plane_left.as_mut_ptr(), plane_right.as_mut_ptr()];
+    let mut bus = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: 1 << 1,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: 8,
+        num_inputs: 1,
+        num_outputs: 1,
+        // 【同一个缓冲】这就是 in-place：输入与输出共用一份内存。
+        inputs: &raw mut bus,
+        outputs: &raw mut bus,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
+        K_RESULT_OK
+    );
+    assert_eq!(plane_left, [0.3_f32; 8], "in-place 时输入必须原样留在缓冲里");
+    assert_eq!(plane_right, [0.6_f32; 8]);
+}
+
 /// **输入总线的 `silence_flags` 不是"没有输入"** —— 样本才是事实。
 ///
 /// 【为什么这是"全静音"的回归测试】此前捕获与直通都把置位当成"这个声道没有输入"，

@@ -2087,6 +2087,12 @@ impl ExtensionOwner {
         // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
         // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
         // 形态一旦是 ARA，任何 Transfer 结论都不适用。
+        //
+        // 【已知边界】`bound_once` 为真而文档已关的实例（宿主绑定过 ARA、文档后来又关掉）
+        // 在这里仍然判成"不介入"。那种实例在界面上本来就是终态（`editor_session` 会以
+        // DOCUMENT_CLOSED 收场，整页显示"会话不可用"），所以它不是"有界面却不出声"的
+        // 现场；要收掉这条边界得先给"文档是否还活着"一个**无锁**读数（音频线程不能取
+        // `document` 那把锁），那是独立一期的事。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return TransferOutput::Untouched;
         }
@@ -2095,10 +2101,10 @@ impl ExtensionOwner {
         }
         if !self.transfer.has_material() {
             // 【为什么没有素材就一定透传】"不要覆盖一个正常渲染的 ARA 实例的输出"
-            // 这条契约由上面的 `is_bound()` / `bound_once` 守卫负责：形态一旦是 ARA，
-            // 这里根本走不到。此前这里还额外要求"形态已落定为 Transfer"，于是窗口没开过、
-            // 宽限期未过的会话（`Undetermined`）在**任何素材之前**都是静音 ——
-            // 用户把插件插到一条有声音的轨道上，得到的是"整条轨哑了"。
+            // 这条契约由上面的 `is_bound()` 守卫负责：有活的文档时这里根本走不到。
+            // 此前这里还额外要求"形态已落定为 Transfer"，于是窗口没开过、宽限期未过的
+            // 会话（`Undetermined`）在**任何素材之前**都是静音 —— 用户把插件插到一条
+            // 有声音的轨道上，得到的是"整条轨哑了"。
             // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
             return TransferOutput::PassThrough;
         }

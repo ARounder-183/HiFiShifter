@@ -850,26 +850,13 @@ impl TransferStore {
     /// 【为什么用 `PlaybackSnapshot` 的形状】处理结果与原始磁带同形，于是音频线程只有
     /// "选哪个发布器"一个分支：不需要第二条读取通路、第二套预算、第二套回收。
     ///
-    /// 【为什么复用 `mix_plain_regions` 而不是自己铺段】原始磁带要表达的正是"把投影出的
-    /// 时间线原样播一遍"。自己铺段等于把覆盖语义、源窗、单声道展开再实现一遍 —— 而那
-    /// 三条已经在快照那条路上有唯一实现（并且被单测覆盖）。
+    /// 【为什么铺片这件事在 `timeline` 里】它必须与投影共用同一套覆盖规则（后来的胜出、
+    /// 静音片不出现），否则"听到的原始磁带"与"时间轴上看到的"会分叉。
     ///
     /// 【为什么在发布方分配而不是让音频线程给缓冲】发布只在素材变化时发生一次，
     /// 而发布方（UI 线程 / 会话 actor）本来就不是实时线程。
     pub(crate) fn raw_tape(&self) -> Option<PlaybackSnapshot> {
-        self.with_projection(|input| {
-            let (timeline, _) = timeline::project(input, 120.0);
-            if timeline.clips.is_empty() {
-                return None;
-            }
-            let sources = sources_for(input);
-            let regions = regions_for(&timeline);
-            // 捕获在采样率变化时会停止本次录制（见 `capture::CaptureOutcome::RateChanged`），
-            // 因此素材的率是单一的；取最大值只是兜底，不改变语义。
-            let rate = sources.values().map(|pcm| pcm.sample_rate).max()?;
-            crate::render::snapshot::mix_plain_regions(&regions, &sources, rate, Some(rate as f64))
-                .ok()
-        })
+        self.with_projection(timeline::raw_tape)
     }
 
     /// 把封口的段提升成一个 take。

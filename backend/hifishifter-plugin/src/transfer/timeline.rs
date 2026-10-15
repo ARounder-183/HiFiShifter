@@ -20,6 +20,7 @@
 //! "用了哪个率"这个唯一重要的问题。
 
 use super::capture::{ClosedReason, Segment, SegmentLoss};
+use crate::render::snapshot::PlaybackSnapshot;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
 use std::ops::Range;
@@ -182,6 +183,92 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         .map(|clip| clip.start_sec + clip.length_sec)
         .fold(0.0_f64, f64::max);
     (timeline, summary)
+}
+
+/// 素材的**未处理** PCM：把投影出的片段按工程位置原样铺成一份快照（"原始磁带"）。
+///
+/// 【为什么必须直接拷段，而不是复用 `mix_plain_regions`】那个函数服务的是 **ARA** 通路，
+/// 它的 `start_in_modification_time` 遵循**宿主**的单位约定（见该函数的说明与
+/// `the_plain_path_converts_the_project_rate_before_indexing_the_source`）。
+/// Transfer 的区间用的是**我们自己的**单位（源速率秒），两者并不相同 —— 实测按它读时
+/// 会把"秒"当成"样本下标"，铺出来是一段阶梯状的垃圾：**听感上就是噪音**。
+///
+/// 原始磁带要表达的东西极其简单："把捕获到的样本原样播一遍"。那就**直接拷样本**：
+/// 没有单位换算、没有重采样、没有插值，因而不可能因为约定不一致而出错。
+pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot> {
+    let pieces = coalesce(resolve(
+        takes
+            .iter()
+            .flat_map(|take| {
+                take.segments.iter().filter_map(move |segment| {
+                    let span = segment.span();
+                    (!span.is_empty() && !segment.has_nonfinite()).then_some(Piece {
+                        span,
+                        take: take.id,
+                        segment,
+                        offset: 0,
+                    })
+                })
+            })
+            .collect(),
+    ));
+    if pieces.is_empty() {
+        return None;
+    }
+    // 【为什么取最大采样率当输出域】捕获在采样率变化时会停止本次录制，因此同一批素材
+    // 的率必然一致；取最大只是兜底，不改变语义。
+    let rate = pieces
+        .iter()
+        .map(|piece| piece.segment.sample_rate)
+        .max()
+        .filter(|rate| *rate > 0)?;
+    let start = pieces.iter().map(|piece| piece.span.start).min()?;
+    let end = pieces.iter().map(|piece| piece.span.end).max()?;
+    let frames = usize::try_from(end.checked_sub(start)?).ok()?;
+    if frames == 0 {
+        return None;
+    }
+    let bytes = frames.checked_mul(8)?;
+    let reservation = crate::render::budget::global_budget().reserve(bytes)?;
+    let mut left = vec![0.0_f32; frames];
+    let mut right = vec![0.0_f32; frames];
+    for piece in pieces {
+        let segment = piece.segment;
+        let Some(source_left) = segment.planes.first() else {
+            continue;
+        };
+        // 逐片按**它自己的**采样率换算到输出域（同率时是恒等，异率时按比例定位）。
+        let scale = segment.sample_rate.max(1) as f64 / rate as f64;
+        let base = ((piece.span.start - start) as f64 * scale).round() as i64;
+        let count = frames_of(&piece.span);
+        // 防御式取长：封口后的段本应 `filled == planes[ch].len()`，但这里在非音频线程上
+        // 做一次性拷贝，宁可少拷也不越界。
+        let available = count.min(source_left.len().saturating_sub(piece.offset));
+        for index in 0..available {
+            let target = base + (index as f64 * scale).round() as i64;
+            if target < 0 || target as usize >= frames {
+                continue;
+            }
+            let target = target as usize;
+            let source = piece.offset + index;
+            left[target] = source_left[source];
+            right[target] = match segment.planes.get(1) {
+                // 单声道捕获：两个输出平面同内容（与 `pass_through` 的展开一致）。
+                Some(plane) if plane.len() > source => plane[source],
+                _ => source_left[source],
+            };
+        }
+    }
+    let mut snapshot = PlaybackSnapshot {
+        sample_rate: rate,
+        origin_sample: start,
+        left,
+        right,
+        _reservation: Some(reservation),
+    };
+    // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
+    let _ = snapshot.compact_mono();
+    Some(snapshot)
 }
 
 /// 单个 take 的投影（便利入口；语义与 [`project`] 逐字段一致）。
@@ -514,6 +601,58 @@ mod tests {
             );
         }
         assert!(timeline.project_sec > 0.0);
+    }
+
+    /// **原始磁带必须是捕获样本的逐样本拷贝。**
+    ///
+    /// 【为什么这是"录出来是噪音"的回归测试】此前原始磁带用 ARA 通路的
+    /// `mix_plain_regions` 铺片，而那个函数的 `start_in_modification_time` 遵循**宿主**的
+    /// 单位约定（工程速率秒）。Transfer 给的是**源速率秒**，于是"秒"被当成"样本下标"读：
+    /// 一秒之内反复读同一个样本，铺出来是阶梯状的垃圾 —— 听感上就是噪音。
+    #[test]
+    fn the_raw_tape_is_a_verbatim_copy_of_the_captured_samples() {
+        let mut segment = segment(1, 4800, &[0.0; 8]);
+        segment.planes = vec![
+            (0..8).map(|index| index as f32).collect(),
+            (0..8).map(|index| -(index as f32)).collect(),
+        ];
+        let snapshot = raw_tape(&[ProjectionTake {
+            id: 1,
+            segments: &[segment],
+        }])
+        .expect("有段就有原始磁带");
+        assert_eq!(snapshot.sample_rate, 1000);
+        assert_eq!(snapshot.origin_sample, 4800, "起点必须是工程位置，不是 0");
+        assert_eq!(
+            snapshot.left,
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "原始磁带必须逐样本等于捕获到的内容"
+        );
+        assert_eq!(snapshot.right, vec![0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]);
+    }
+
+    /// **原始磁带与时间轴必须给出同一份覆盖关系**（否则"听到的"与"看到的"分叉）。
+    #[test]
+    fn the_raw_tape_follows_the_same_overlap_rules_as_the_timeline() {
+        let first = vec![segment(1, 0, &[1.0; 100])];
+        let second = vec![segment(1, 40, &[2.0; 20])];
+        let takes = [
+            ProjectionTake {
+                id: 1,
+                segments: &first,
+            },
+            ProjectionTake {
+                id: 2,
+                segments: &second,
+            },
+        ];
+        let snapshot = raw_tape(&takes).expect("有段就有原始磁带");
+        let (timeline, _) = project(&takes, 120.0);
+        assert_eq!(snapshot.left.len(), 100);
+        assert_eq!(snapshot.left[..40], [1.0; 40], "补录之前是第一次录制");
+        assert_eq!(snapshot.left[40..60], [2.0; 20], "补录覆盖它盖住的那一段");
+        assert_eq!(snapshot.left[60..], [1.0; 40], "补录之后回到第一次录制");
+        assert_eq!(timeline.clips.len(), 3, "时间轴与它说的是同一件事");
     }
 
     /// 没有任何 take（或全是静音）时给出一条**空的**时间线，而不是 `None`。
