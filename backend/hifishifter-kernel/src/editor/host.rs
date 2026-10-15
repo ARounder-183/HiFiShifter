@@ -26,6 +26,13 @@ pub enum HostKind {
     Reaper,
     /// 仅提供 ARA 2.0 的通用宿主：能看 / 能听 / 能渲染 / 能调参，片段几何只读。
     AraOnly,
+    /// 宿主既不提供原生扩展、也没有把本实例绑定到 ARA。
+    ///
+    /// 【为什么这是一等身份而不是"未绑定"】它描述的是宿主**把音频交给我们的方式**：
+    /// 不是逐个 region 授权（那是 ARA），而是把播放中的音频从 VST3 输入总线流过来。
+    /// 插件据此把音频捕获进自己的时间轴（Transfer 通路）。把它与"尚未绑定任何后端"
+    /// 混为一谈，会让前端在**受支持**的形态下显示"会话不可用"。
+    Transfer,
 }
 
 impl HostKind {
@@ -33,6 +40,7 @@ impl HostKind {
         match self {
             HostKind::Reaper => "reaper",
             HostKind::AraOnly => "ara_only",
+            HostKind::Transfer => "transfer",
         }
     }
 
@@ -41,6 +49,7 @@ impl HostKind {
     /// 【为什么挂在身份上而不是只放能力位】ARA 2.0 的契约不允许插件改写 region 几何，
     /// 所以"ARA-only ⇒ 只读"是**身份蕴含**的结论，不是某一台宿主碰巧缺了某个 API。
     /// 两者分开表达会让"ARA-only 但能力位写错成可写"变成一个可编译的状态。
+    /// Transfer 同理：**根本没有宿主片段可写** —— 素材是我们自己录进来的。
     pub const fn clip_write_allowed(self) -> bool {
         matches!(self, HostKind::Reaper)
     }
@@ -84,6 +93,14 @@ pub struct HostCapabilities {
     /// 【为什么与 `export_audio` 分开】前者要渲染音频，后者只把前端算好的 JSON
     /// 写成文件；两者失败面完全不同，混用会让"JSON 导出能用"被音频导出拖住。
     pub export_data: bool,
+    /// 后端从 VST3 输入总线取得素材（Transfer 通路）。
+    ///
+    /// 【为什么它是一个能力位而不是恒真的"是不是 Transfer 形态"】它与 `HostKind::Transfer`
+    /// 回答的是两个不同的问题：身份说"我是哪个后端"，这一位说"这条通路**当前可用**"。
+    /// 在 Transfer 后端上它可能是 `false` —— 宿主从不提供 `ProcessContext`（拿不到工程
+    /// 位置）时录制无法工作，前端要据此**禁用按钮并说明原因**，而不是让用户对着一个
+    /// 点得动、永远不进度的控件。
+    pub transfer: bool,
 }
 
 impl HostCapabilities {
@@ -101,6 +118,7 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: false,
             export_data: false,
+            transfer: false,
         }
     }
 
@@ -126,6 +144,41 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: true,
             export_data: true,
+            transfer: false,
+        }
+    }
+
+    /// Transfer 后端（宿主既无原生扩展、也没绑定 ARA）。
+    ///
+    /// 【为什么 `transport` 是 true】与 `ara_only` 同一条理由：VST3 的 `ProcessContext`
+    /// 与 ARA 无关，任何宿主都提供播放状态与工程时间。而且对 Transfer 来说它不只是
+    /// "光标能走"—— 它是**录制能工作的前提**：音频按 `projectTimeSamples` 对齐到
+    /// 插件时间轴，没有它整条通路不成立。
+    ///
+    /// 【为什么 `clip_geometry` 是 false，而 `ara_only` 是 true】这是两种形态最本质的
+    /// 差别。ARA 宿主交给我们 region 几何（位置 / 长度 / 源窗），我们只是不能改；
+    /// Transfer 宿主**一个片段都不告诉我们** —— 时间轴上的片段是我们在录制时按
+    /// 连续性自己切出来的。声明 true 会让前端去读一份不存在的几何。
+    ///
+    /// 【为什么导出仍是 true】与 `ara_only` 同源：导出只渲染自己的 PCM 再写用户选定的
+    /// 文件，不碰任何宿主接口。
+    ///
+    /// 【为什么其余是 false】没有 item 剪贴板、没有建轨、没有导入、没有宿主撤销栈 ——
+    /// 宿主连片段都不给我们，这些概念在它那里不存在。这是**诚实的"没有"**。
+    pub const fn transfer_backend() -> Self {
+        Self {
+            transport: true,
+            clip_geometry: false,
+            clip_write: false,
+            split: false,
+            undo_stack: false,
+            media_import: false,
+            track_create: false,
+            item_clipboard: false,
+            fade_axes: false,
+            export_audio: true,
+            export_data: true,
+            transfer: true,
         }
     }
 }
@@ -202,5 +255,48 @@ mod tests {
             serde_json::json!("ara_only")
         );
         assert_eq!(HostKind::Reaper.as_str(), "reaper");
+        assert_eq!(
+            serde_json::to_value(HostKind::Transfer).unwrap(),
+            serde_json::json!("transfer")
+        );
+        assert_eq!(HostKind::Transfer.as_str(), "transfer");
+    }
+
+    /// Transfer 后端的能力契约：**能录、能听、能导出，但没有任何宿主片段几何**。
+    ///
+    /// 【为什么钉死 `clip_geometry == false`】这是 Transfer 与 ARA-only 最本质的差别，
+    /// 也是最容易顺手写错的一位（照抄 `ara_only()` 就会写成 true）。写成 true 的后果
+    /// 不是崩溃，而是前端去读一份**从来不存在**的宿主几何：时间线空着，却没有任何
+    /// 解释。这条断言把那个错误变成编译期/测试期可见。
+    #[test]
+    fn transfer_backend_captures_audio_but_owns_no_host_geometry() {
+        let caps = HostCapabilities::transfer_backend();
+        assert!(caps.transfer, "这一位就是本后端存在的理由");
+        assert!(
+            caps.transport,
+            "ProcessContext 的工程时间是录制对齐的前提，不是可选装饰"
+        );
+        assert!(
+            !caps.clip_geometry,
+            "Transfer 宿主一个片段都不给 —— 片段是我们按录制连续性切出来的"
+        );
+        assert!(!caps.clip_write);
+        assert!(!caps.split);
+        assert!(!caps.undo_stack, "本地栈承载撤销");
+        assert!(!caps.media_import);
+        assert!(!caps.track_create);
+        assert!(!caps.item_clipboard);
+        assert!(!caps.fade_axes);
+        assert!(caps.export_audio, "导出只渲染自己的 PCM，不碰宿主接口");
+        assert!(caps.export_data);
+        assert!(!HostKind::Transfer.clip_write_allowed());
+    }
+
+    /// `transfer` 这一位只在 Transfer 后端上为真 —— 它不能靠"是不是别的后端"推出来。
+    #[test]
+    fn only_the_transfer_backend_claims_the_capture_capability() {
+        assert!(!HostCapabilities::none().transfer);
+        assert!(!HostCapabilities::ara_only().transfer);
+        assert!(HostCapabilities::transfer_backend().transfer);
     }
 }

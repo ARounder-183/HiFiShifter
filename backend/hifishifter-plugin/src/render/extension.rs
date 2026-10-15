@@ -236,6 +236,69 @@ pub(crate) fn classify_host_audio(
     }
 }
 
+/// 本实例的**运行形态**：宿主把音频交给我们的方式。
+///
+/// 【为什么需要一个显式形态，而不是"一堆布尔"】它要回答的问题在音频线程上被问
+/// （`audio_process_inner` 每块一次），因此必须能**无锁**求值；而"绑定过没有"、
+/// "绑定窗口关没关"这些事实各自都在别处、各自都可能取锁。把结论收敛成一个原子读数，
+/// 音频线程只读它，判断点就不会散开。
+///
+/// 【为什么 `Undetermined` 是一等状态】ARA 绑定**允许**发生在 `setActive` 之前，
+/// 而本插件在 `initialize` 时就已经存在。在窗口关闭之前断言"宿主不给我们 ARA"
+/// 是**早的** —— 多数支持 ARA 的宿主正在这段时间里完成绑定。此前把"没绑"直接当成
+/// "ARA-only"，正是 `bound_once` 那套措辞分支要解决的问题的同一个根源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstanceMode {
+    /// 绑定窗口仍开着：宿主还可能把本实例绑到 ARA 文档。
+    Undetermined,
+    /// 宿主把本实例绑到了 ARA 文档：素材由 ARA 逐个 region 授权。
+    Ara,
+    /// 宿主没有绑定 ARA：素材只能从 VST3 输入总线捕获（Transfer 通路）。
+    Transfer,
+}
+
+impl InstanceMode {
+    const fn from_raw(raw: i32) -> Self {
+        match raw {
+            1 => InstanceMode::Ara,
+            2 => InstanceMode::Transfer,
+            _ => InstanceMode::Undetermined,
+        }
+    }
+
+    const fn raw(self) -> i32 {
+        match self {
+            InstanceMode::Undetermined => 0,
+            InstanceMode::Ara => 1,
+            InstanceMode::Transfer => 2,
+        }
+    }
+}
+
+/// 本实例此刻**素材从哪来**。
+///
+/// 【为什么与 `InstanceMode` 是两个概念而不是一个】形态是"宿主打算怎么用我们"，
+/// 信号来源是"我们手上有没有东西可渲染"。同一个形态会先后经历两个信号来源：
+/// Transfer 形态在录制之前是 `None`（没有任何素材，界面该显示引导），录制之后是 `Bus`。
+/// 合成一个枚举会让"还没录"与"宿主不给我们音频"变成同一个值 —— 而它们的用户可见
+/// 行为完全不同（前者要引导，后者要报错）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignalSource {
+    /// ARA 授权 PCM（宿主逐个 region 交给我们）。
+    Ara,
+    /// 从 VST3 输入总线捕获的 PCM（Transfer）。
+    Bus,
+    /// 两者都没有：没有可渲染的素材。
+    None,
+}
+
+impl SignalSource {
+    /// 本信号来源此刻有没有可渲染的素材。
+    pub(crate) fn has_material(self) -> bool {
+        matches!(self, SignalSource::Ara | SignalSource::Bus)
+    }
+}
+
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -255,6 +318,17 @@ pub(crate) struct ExtensionOwner {
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
     roles: AtomicI32,
+    /// 本实例的运行形态（[`InstanceMode`] 的 `raw()`）。
+    ///
+    /// 【为什么是原子而不是锁下的字段】`audio_process_inner` 在**音频线程**上每块都要
+    /// 问一次"要不要走捕获通路"，那里不能取锁。而写入点只有两个（ARA 绑定成功、
+    /// 绑定窗口关闭），频率是"每次会话一次"，所以原子读写绰绰有余。
+    ///
+    /// 【为什么单调（只前进、不回落）】两个取值都是**关于过去**的事实：
+    /// "宿主绑过我们"与"宿主过了宽限期仍未绑"。它们不会因为后来的事件变成假的。
+    /// 唯一的例外是宿主违反 ARA 契约、在 `setActive` 之后才绑定 —— 那时写入点会
+    /// 覆盖成 `Ara`，而 `Ara` 本来就该赢（`signal_source` 也先查实时绑定）。
+    binding_mode: AtomicI32,
     /// **文档上是否有别的实例持有 `PLAYBACK_RENDERER` 角色**。
     ///
     /// 【为什么需要这个原子量】`is_editor_only()` 要在**音频线程**上无锁求值
@@ -456,6 +530,44 @@ impl ExtensionOwner {
             .is_some_and(|document| document.is_alive())
     }
 
+    /// 本实例的运行形态。**无锁**，可从音频线程调用。
+    ///
+    /// 【为什么先看 `bound_once` 再看原子】两者本该一致，但 `bound_once` 是既有的、
+    /// 已被测试覆盖的读数，而 `binding_mode` 是本轮新增的。取"任一说 ARA 就是 ARA"
+    /// 的交集语义，让新字段在任何写入点漏掉时**退化成旧行为**（AraOnly），
+    /// 而不是退化成 Transfer —— 后者会让一个正常绑定的实例去录制自己的输出。
+    pub(crate) fn mode(&self) -> InstanceMode {
+        if self.bound_once.load(Ordering::Acquire) {
+            return InstanceMode::Ara;
+        }
+        InstanceMode::from_raw(self.binding_mode.load(Ordering::Acquire))
+    }
+
+    /// 记录"宿主把本实例绑到了 ARA 文档"。
+    pub(crate) fn note_ara_bound(&self) {
+        self.binding_mode
+            .store(InstanceMode::Ara.raw(), Ordering::Release);
+    }
+
+    /// 记录"绑定窗口已关闭且没有绑定" —— 本实例是 Transfer 形态。
+    ///
+    /// 【为什么由调用方判定"窗口已关闭"而不是这里自己看时钟】判据是
+    /// `setActive` 之后过了宽限期（见 [`Self::note_editor_tick`]），那需要读
+    /// `set_active_at` 这个锁下的值。这里只负责**写入结论**，判定留在唯一的调用点，
+    /// 避免同一判据出现两份。
+    pub(crate) fn note_binding_window_closed_without_ara(&self) {
+        // 已经绑过就不回落：那会把一个正常工作的 ARA 实例降级成 Transfer。
+        if self.bound_once.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.binding_mode.compare_exchange(
+            InstanceMode::Undetermined.raw(),
+            InstanceMode::Transfer.raw(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
     /// 记录宿主调用 `setActive(true)` 的时刻。
     ///
     /// 【为什么在这里记而不是轮询宿主】`setActive` 是 ARA 绑定窗口的**关闭点**：
@@ -490,6 +602,11 @@ impl ExtensionOwner {
         if elapsed < ARA_BINDING_GRACE {
             return;
         }
+        // 【为什么形态判定在这里落地】这里正是"过了宽限期仍未绑定"这个结论**唯一**
+        // 的判定点：`set_active_at` 只有这里有，宽限常数只有这里用。形态一旦确定，
+        // 后端选择、能力位与前端面板都会跟着翻到 Transfer（见 `host_backend`）。
+        // 它写在"只报一次"的早退**之前** —— 形态是事实，与是否要打日志无关。
+        self.note_binding_window_closed_without_ara();
         if self
             .ara_binding_absent_reported
             .swap(true, Ordering::AcqRel)
@@ -1634,11 +1751,33 @@ impl ExtensionOwner {
     /// 【为什么是"一等后端"而不是 `None`】ARA-only 后端照样能看 / 能听 / 能渲染 /
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
+    /// 当前生效的编辑后端。
+    ///
+    /// 【为什么不能只返回字段里的那份】字段在 `initialize` 期间写入，而那时 ARA 绑定
+    /// 窗口还开着（见 `HostBackend::from_native` 的说明），所以字段里那份在
+    /// "宿主会绑定 ARA"的场合是 `AraOnly`、在"宿主不会绑定"的场合**也是** `AraOnly` ——
+    /// 它区分不了这两种形态。形态由 [`Self::mode`] 在窗口关闭后给出，这里据此把
+    /// "无原生扩展且无 ARA" 解析成 [`crate::host::adapter::HostBackend::Transfer`]。
+    ///
+    /// 【为什么原生扩展优先】REAPER 既有原生扩展**又**会绑定 ARA；只要字段里有
+    /// `Native`，形态问题就不存在（它一定走 ARA），直接返回它。
     pub(crate) fn host_backend(&self) -> crate::host::adapter::HostBackend {
-        self.host
-            .lock_or_recover()
-            .clone()
-            .unwrap_or_else(|| crate::host::adapter::HostBackend::from_native(None))
+        let stored = self.host.lock_or_recover().clone();
+        if let Some(backend) = stored {
+            if backend.native().is_some() {
+                return backend;
+            }
+        }
+        match self.mode() {
+            InstanceMode::Transfer => {
+                crate::host::adapter::HostBackend::Transfer(crate::host::transfer::TransferHost::new())
+            }
+            // `Undetermined` 与 `Ara` 都退到 ARA-only：前者是"还没确定"（此时按 ARA
+            // 准备是安全的，ARA 是更丰富的形态），后者本来就是这个后端。
+            InstanceMode::Undetermined | InstanceMode::Ara => {
+                crate::host::adapter::HostBackend::from_native(None)
+            }
+        }
     }
     /// 原生宿主适配器（未绑定时 `None`）。
     ///
@@ -2719,6 +2858,9 @@ impl ExtensionOwner {
         // 绑定成功即置"曾经绑定过"。此后 `editor_document()` 的措辞走 DOCUMENT_CLOSED
         // 而不是 ARA_NOT_BOUND —— 两者对用户的含义完全不同（见该访问器的说明）。
         self.bound_once.store(true, Ordering::Release);
+        // 形态也随之确定：这个实例永远走 ARA 通路（`mode()` 先看 `bound_once`，
+        // 这里再写原子是为了让不查 `bound_once` 的读者也拿到一致读数）。
+        self.note_ara_bound();
         self.roles.store(enabled.bits(), Ordering::Release);
         self.role.store(
             if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {

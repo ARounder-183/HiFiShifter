@@ -198,6 +198,11 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
             export_audio: true,
             export_data: true,
+            // 【为什么恒为 false】REAPER 走的是原生扩展 + ARA，素材由 ARA 逐个 region
+            // 授权。Transfer 是"宿主不给片段几何时"的替代通路，两者不会同时成立；
+            // 声明 true 会让前端在 REAPER 上也露出录制入口，而它录进来的东西
+            // 会和 ARA 已经提供的 region 打架。
+            transfer: false,
         }
     }
 
