@@ -2106,6 +2106,7 @@ export const zhTW = {
     transfer_stop: "停止",
     transfer_cancel: "取消",
     transfer_clear: "丟棄全部錄音",
+    transfer_cancel_hint: "丟棄這一次錄製，不留錄音",
     transfer_guide_body:
         "先在宿主裡按播放，再點「錄製」。外掛會把它接收到的音訊錄下來，並依宿主的時間軸對齊。",
     transfer_guide_recording: "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。",

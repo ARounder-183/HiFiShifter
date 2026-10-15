@@ -2155,6 +2155,7 @@ export const koKR = {
     transfer_stop: "정지",
     transfer_cancel: "취소",
     transfer_clear: "모든 테이크 버리기",
+    transfer_cancel_hint: "이 녹음을 버리고 테이크를 남기지 않습니다",
     transfer_guide_body:
         "호스트에서 재생을 시작한 뒤 「녹음」을 누르세요. 플러그인이 지나가는 오디오를 받아 호스트 타임라인에 맞춰 정렬합니다.",
     transfer_guide_recording:

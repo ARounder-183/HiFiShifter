@@ -2103,6 +2103,7 @@ export const zhCN = {
     transfer_stop: "停止",
     transfer_cancel: "取消",
     transfer_clear: "丢弃全部录音",
+    transfer_cancel_hint: "丢弃这一次录制，不留录音",
     transfer_guide_body:
         "先在宿主里按播放，再点「录制」。插件会把它接收到的音频录下来，并按宿主的时间轴对齐。",
     transfer_guide_recording: "正在录制。请不要移动播放位置或跳转；录完点「停止」。",

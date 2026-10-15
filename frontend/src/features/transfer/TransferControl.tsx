@@ -66,9 +66,22 @@ export function TransferControl() {
                 {recording ? t("transfer_stop") : t("transfer_start")}
             </AppButton>
             {recording ? (
-                <AppStatusChip tone="warning" tabular tooltip={t("transfer_guide_recording")}>
-                    {tVars("transfer_recording_progress", { seconds: captured ?? "0.0" })}
-                </AppStatusChip>
+                <>
+                    {/* 【为什么留着"取消"】录制键就在传输栏上，误触很便宜 —— 而没有取消
+                        的话，唯一的出路是"先停止（产生一个 take）再删掉它"。 */}
+                    <AppButton
+                        intent="subtle"
+                        size="sm"
+                        disabled={busy}
+                        data-tooltip={t("transfer_cancel_hint")}
+                        onClick={() => void transferActions.cancel()}
+                    >
+                        {t("transfer_cancel")}
+                    </AppButton>
+                    <AppStatusChip tone="warning" tabular tooltip={t("transfer_guide_recording")}>
+                        {tVars("transfer_recording_progress", { seconds: captured ?? "0.0" })}
+                    </AppStatusChip>
+                </>
             ) : null}
             {stalled ? (
                 <span

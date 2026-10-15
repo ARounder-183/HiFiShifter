@@ -2184,6 +2184,7 @@ export const jaJP = {
     transfer_stop: "停止",
     transfer_cancel: "キャンセル",
     transfer_clear: "すべてのテイクを破棄",
+    transfer_cancel_hint: "この録音を破棄する（テイクを残さない）",
     transfer_guide_body:
         "ホストで再生を開始してから「録音」を押してください。プラグインは通ってきた音声を取り込み、ホストのタイムラインに合わせます。",
     transfer_guide_recording:

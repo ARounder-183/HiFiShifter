@@ -2168,6 +2168,7 @@ export const enUS = {
     transfer_stop: "Stop",
     transfer_cancel: "Cancel",
     transfer_clear: "Discard all takes",
+    transfer_cancel_hint: "Discard this recording without keeping a take",
     transfer_guide_body:
         "Press play in the host, then Record. The plug-in captures what passes through it and lines it up with the host's timeline.",
     transfer_guide_recording:
