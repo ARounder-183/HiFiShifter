@@ -1290,7 +1290,8 @@ fn configure_browser(
             Some("pick_directory")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let owner=link.owner()?;
+                    let identity=interaction_identity(&link)?;
                     let editor=owner.editor_session()?;
                     let path=super::browser_files::pick_directory(hwnd)?;
                     if !interaction_unchanged(&link,&identity) {return Err("folder picker editor lease changed".into());}
@@ -1366,7 +1367,7 @@ fn configure_browser(
             Some("pick_diagnostics_output_path")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let identity=interaction_identity(&link)?;
                     let name=super::plugin_diagnostics::default_file_name();
                     let path=super::browser_files::pick_save_path(hwnd,&name,"zip")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
@@ -1383,7 +1384,7 @@ fn configure_browser(
             Some("pick_midi_output_path")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_save_path(hwnd,"export.mid","mid")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                     if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
@@ -1402,7 +1403,7 @@ fn configure_browser(
             Some("open_midi_dialog")=>{
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_open_path(hwnd,"MIDI","mid")?;
                     // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                     if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
@@ -1478,7 +1479,7 @@ fn configure_browser(
                 let name=if requested.is_empty(){fallback.to_owned()}else{requested};
                 (||->Result<serde_json::Value,String>{
                     // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let identity=interaction_identity(&link)?;
                     let path=super::browser_files::pick_save_path(hwnd,&name,"json")?;
                     if !interaction_unchanged(&link,&identity) {return Err("json export dialog editor lease changed".into());}
                     let Some(path)=path else {return Ok(serde_json::json!({"ok":false,"canceled":true}))};
@@ -1490,7 +1491,7 @@ fn configure_browser(
                 let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
                 (||->Result<serde_json::Value,String>{
                     // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
-                    let owner=link.owner()?;let identity=interaction_identity(&link)?;
+                    let identity=interaction_identity(&link)?;
                     let result=super::notebook::export_with_dialog(hwnd,command,&request["args"])?;
                     if !interaction_unchanged(&link,&identity) {return Err("notebook dialog editor lease changed".into());}
                     Ok(result)
@@ -1722,6 +1723,12 @@ fn configure_browser(
         .ok()
         .and_then(|owner| owner.host_fade_axes())
         .map(|axes_new| if axes_new { "continuous" } else { "legacy" });
+    // 【为什么在算 bootstrap 之前落定形态】`hostKind` / `transferCaps` 是前端按形态分流
+    // 的唯一依据（面板、探活、几何只读），而窗口打开的那一刻必然早于 5 秒宽限期 ——
+    // 不在这里按需求值，bootstrap 永远报 `ara_only`，非 ARA 宿主会被当成 ARA-only 对待。
+    if let Ok(owner) = state.borrow().link.owner() {
+        owner.resolve_binding_mode();
+    }
     let boot = BootstrapFlags {
         transport_control,
         fade_axes,

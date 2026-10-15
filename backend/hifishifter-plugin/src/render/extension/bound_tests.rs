@@ -1867,3 +1867,60 @@ fn a_clip_without_a_live_region_key_still_resolves_by_source_and_geometry() {
     );
     document.close();
 }
+
+/// 形态判定：**激活之前不能落定**，激活之后过宽限期才落定成 Transfer。
+///
+/// 【为什么这两条一起**】此前判定只发生在 UI 定时器里，而 bootstrap（`hostKind`）与编辑器
+/// 会话都要在那之前读形态 —— 于是窗口打开的那一刻永远读到 `Undetermined`，
+/// `host_backend()` 退成 ARA-only。判定改成可**按需求值**（`resolve_binding_mode`）之后，
+/// 这两条边界必须钉住：不能早（绑定窗口还开着），也不能不落定。
+#[test]
+fn the_binding_mode_resolves_only_after_the_grace_period() {
+    let owner = Arc::new(ExtensionOwner::default());
+    // 宿主还没激活：绑定窗口仍然开着，任何结论都是早的。
+    owner.resolve_binding_mode();
+    assert_eq!(owner.mode(), InstanceMode::Undetermined);
+
+    // 激活但还在宽限期内：同样不落定。
+    owner.note_component_activated();
+    owner.resolve_binding_mode();
+    assert_eq!(owner.mode(), InstanceMode::Undetermined);
+
+    // 过了宽限期仍未绑定 ⇒ Transfer。
+    *owner.set_active_at.lock_or_recover() = std::time::Instant::now()
+        .checked_sub(ARA_BINDING_GRACE + std::time::Duration::from_secs(1));
+    owner.resolve_binding_mode();
+    assert_eq!(owner.mode(), InstanceMode::Transfer);
+    assert_eq!(
+        owner.host_backend().kind(),
+        hifishifter_kernel::editor::host::HostKind::Transfer,
+        "形态落定之后后端选择必须跟着翻"
+    );
+}
+/// 绑定过又关闭的实例**不能**悄悄变成 Transfer：那才是真的"会话已结束"。
+///
+/// 【为什么这条与"从未绑定过就给 Transfer 会话"成对】判据是 `bound_once`（单调历史）
+/// 而不是"此刻有没有文档"。只看后者的话，一个 ARA 会话结束之后界面会静默变成 Transfer
+/// 实例 —— 用户看到的是"宿主的内容没了、只剩一条空轨"，而没有任何地方说会话已经结束。
+#[test]
+fn an_instance_whose_ara_session_ended_does_not_fall_back_to_transfer() {
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let session = owner.editor_session().unwrap();
+    document.close();
+    let error = match owner.editor_session() {
+        Ok(_) => panic!("绑定过又关闭必须如实报错，而不是换成 Transfer 会话"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::editor::errors::classify_error(&error),
+        "terminal",
+        "会话结束是终态：{error}"
+    );
+    assert!(
+        owner.transfer_session.get().is_none(),
+        "不该顺手造一份 Transfer 会话"
+    );
+    session.close();
+}
+

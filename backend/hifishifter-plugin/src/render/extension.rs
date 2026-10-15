@@ -608,22 +608,45 @@ impl ExtensionOwner {
     /// 【为什么在 UI 定时器上做而不是开线程】插件 DLL 可能被宿主卸载；一个 sleep 5 秒
     /// 的分离线程会在模块卸载后回到已消失的代码。UI 定时器天然与视图同寿，且已经在
     /// 每 20ms 跑一次。
+    /// 绑定窗口是否已经关闭：宿主激活过，且过了宽限期仍没有 ARA 绑定。
+    ///
+    /// 【为什么不能只看 UI 定时器】UI 定时器要等 WebView 起来才跑，而 bootstrap
+    /// （`hostKind` / `transferCaps`）与编辑器会话都在**那之前**就要读形态 ——
+    /// 于是"窗口打开的那一刻"读到的永远是 `Undetermined`，`host_backend()` 退成
+    /// ARA-only，前端所有按形态分流的地方（面板、探活）在前 5 秒里全是错的。
+    /// 判定因此必须能按需求值，而不是只在一个定时器里发生。
+    fn binding_window_closed(&self) -> bool {
+        self.set_active_at
+            .lock_or_recover()
+            .is_some_and(|at| at.elapsed() >= ARA_BINDING_GRACE)
+    }
+
+    /// 在**非音频线程**上把形态判定落定（幂等，可在任何读形态之前调用）。
+    ///
+    /// 读 `set_active_at` 要取锁，因此绝不能在音频线程调用 —— 音频线程只读
+    /// [`Self::mode`] 那个原子结论。
+    pub(crate) fn resolve_binding_mode(&self) {
+        if self.is_ara_bound() {
+            return;
+        }
+        if self.binding_window_closed() {
+            self.note_binding_window_closed_without_ara();
+        }
+    }
+
     pub(crate) fn note_editor_tick(self: &Arc<Self>) {
         if self.is_ara_bound() {
             return;
         }
-        let Some(at) = *self.set_active_at.lock_or_recover() else {
-            // 宿主还没激活：绑定窗口仍然开着，任何结论都是早的。
-            return;
-        };
-        let elapsed = at.elapsed();
-        if elapsed < ARA_BINDING_GRACE {
+        // 【为什么形态判定在这里落地】这里正是"过了宽限期仍未绑定"这个结论的判定点：
+        // `set_active_at` 只有这里与 `binding_window_closed` 读，宽限常数只有这两处用。
+        // 形态一旦确定，后端选择、能力位与前端面板都会跟着翻到 Transfer（见
+        // `host_backend`）。判定写在"只报一次"的早退**之前** —— 形态是事实，与是否要
+        // 打日志无关。
+        if !self.binding_window_closed() {
+            // 宿主还没激活，或还在宽限期内：绑定窗口仍然开着，任何结论都是早的。
             return;
         }
-        // 【为什么形态判定在这里落地】这里正是"过了宽限期仍未绑定"这个结论**唯一**
-        // 的判定点：`set_active_at` 只有这里有，宽限常数只有这里用。形态一旦确定，
-        // 后端选择、能力位与前端面板都会跟着翻到 Transfer（见 `host_backend`）。
-        // 它写在"只报一次"的早退**之前** —— 形态是事实，与是否要打日志无关。
         self.note_binding_window_closed_without_ara();
         // Transfer 形态下**没有任何 ARA 回调**会来驱动这件事，而它是必须周期性发生的：
         // 备用缓冲要在音频线程取用之前备好。UI 定时器是唯一的现成心跳（20ms），
@@ -644,6 +667,10 @@ impl ExtensionOwner {
         }
         let backend = self.host_backend();
         let host = backend.app_name().unwrap_or("this host");
+        // 诊断里要报"激活之后过了多久"，判据本身只问"窗口关没关"（见 `binding_window_closed`）。
+        let elapsed = (*self.set_active_at.lock_or_recover())
+            .map(|at| at.elapsed())
+            .unwrap_or_default();
         // 【为什么措辞变了、级别也变了】此前这条是 `warn` 且说"宿主把本插件当普通插入
         // 效果器运行"，并把用户引向"请从 ARA 入口插入"。现在普通插入是**受支持**的
         // 形态（Transfer 通路，见 `docs/plans/2026-10-15-vst-transfer-mode.md`）：
@@ -1756,9 +1783,16 @@ impl ExtensionOwner {
     pub(crate) fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
-        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+        if !self.is_bound() && !self.bound_once.load(Ordering::Acquire) {
+            // 【为什么"形态还没落定"也要给会话】形态要等 `setActive` 之后
+            // `ARA_BINDING_GRACE`（5 秒）才落定，而**窗口打开的那一刻必然早于它**：
+            // 那时拒绝服务就等于"非 ARA 宿主永远打不开界面"—— 探活拿到
+            // `ARA_NOT_BOUND`（终态），整页替换成"插件会话不可用"，而且不可恢复。
+            // 从未绑定过 ARA 的实例只有一条能服务界面的路（Transfer 会话），所以这里
+            // 不按形态分支。宿主**真的**绑上 ARA 之后 `is_bound()` 为真，自然走文档那份。
             return self.transfer_session();
         }
+        // 绑定过又关闭：那才是真的"会话已结束"，必须如实报错而不是悄悄变成 Transfer。
         self.editor_document()?.editor_session()
     }
 

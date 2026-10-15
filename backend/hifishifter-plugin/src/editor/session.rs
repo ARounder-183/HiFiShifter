@@ -2138,7 +2138,13 @@ impl EditorSession {
             self.document()
                 .is_some_and(|document| document.media_in_flight_items(&timeline) > 0)
         };
-        json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
+        json!({
+            // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
+            // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
+            // `ara_only`，前端按形态分流的地方（录制面板的自动浮出）拿不到真实答案。
+            // 状态快照每 250ms 轮询一次，是现成的、不依赖时序的通道。
+            "mode":if self.is_transfer(){"transfer"}else{"ara"},
+            "generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
             // `rendering_active` 是**派生状态**，前端据此点亮/熄灭"渲染中"片，而不是
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
@@ -2477,6 +2483,31 @@ pub(crate) mod tests {
         assert_eq!(native.clips[0].gain, 1.);
         assert_eq!(native.clips[0].takes[0].gain, 1.);
         editor.close();
+    }
+
+    /// **从未绑定过 ARA 的实例必须能拿到编辑器会话 —— 哪怕形态还没落定。**
+    ///
+    /// 【为什么这条是那个 bug 的回归】形态要等 `setActive` 之后 `ARA_BINDING_GRACE`
+    /// （5 秒）才落定，而**窗口打开的那一刻必然早于它**。此前 `editor_session()` 要求
+    /// `mode() == Transfer`，于是探活拿到 `ARA_NOT_BOUND`（终态）⇒ 整页替换成
+    /// "插件会话不可用"，且不可恢复 —— 非 ARA 宿主永远打不开界面。
+    #[test]
+    fn an_instance_that_never_bound_ara_is_served_by_the_transfer_session() {
+        let owner = Arc::new(ExtensionOwner::default());
+        assert_eq!(
+            owner.mode(),
+            crate::render::extension::InstanceMode::Undetermined,
+            "没有 setActive 也没有绑定 ⇒ 形态未定（这正是窗口刚打开时的样子）"
+        );
+        let first = owner
+            .editor_session()
+            .expect("未绑定的实例必须有可用的编辑器会话");
+        assert!(first.is_transfer());
+        assert!(
+            Arc::ptr_eq(&first, &owner.editor_session().unwrap()),
+            "同一实例必须是同一份会话"
+        );
+        first.close();
     }
 
     /// 建一个**真的录过一段**的 Transfer 实例：没有 ARA 文档，素材来自输入总线。
