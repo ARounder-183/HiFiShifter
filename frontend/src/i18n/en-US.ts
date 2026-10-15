@@ -2150,6 +2150,30 @@ export const enUS = {
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",
+    // ── Transfer（不支持 ARA 的宿主里录制宿主播放）──────────────────────
+    panel_transfer: "Transfer",
+    transfer_status_empty: "Nothing recorded",
+    transfer_status_recording: "Recording",
+    transfer_status_ready: "Recorded",
+    transfer_start: "Record",
+    transfer_stop: "Stop",
+    transfer_cancel: "Cancel",
+    transfer_clear: "Discard all takes",
+    transfer_guide_body:
+        "Press play in the host, then Record. The plug-in captures what passes through it and lines it up with the host's timeline.",
+    transfer_guide_recording:
+        "Recording. Keep the playhead moving and do not seek; press Stop when the part is done.",
+    transfer_guide_ready:
+        "Recorded. Play the host again to hear the processed result; record once more to replace it.",
+    transfer_guide_offline:
+        "This host also runs offline renders. You can arm Record and then export or bounce instead of playing in real time.",
+    transfer_cannot_capture:
+        "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",
+    transfer_recording_progress: "Recorded {seconds}s",
+    transfer_field_segments: "Segments",
+    transfer_field_gaps: "Jumps",
+    transfer_field_spares: "Buffers left",
+    transfer_field_takes: "Takes",
     plugin_daw_controlled_reason:
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
 

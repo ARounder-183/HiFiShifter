@@ -2089,6 +2089,28 @@ export const zhTW = {
     plugin_standalone_only: "僅在獨立 App 中可用",
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
+    // ── Transfer（不支援 ARA 的宿主裡錄製宿主播放）──────────────────────
+    panel_transfer: "Transfer",
+    transfer_status_empty: "尚未錄製",
+    transfer_status_recording: "錄製中",
+    transfer_status_ready: "已錄製",
+    transfer_start: "錄製",
+    transfer_stop: "停止",
+    transfer_cancel: "取消",
+    transfer_clear: "丟棄全部錄音",
+    transfer_guide_body:
+        "先在宿主裡按播放，再點「錄製」。外掛會把它接收到的音訊錄下來，並依宿主的時間軸對齊。",
+    transfer_guide_recording: "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。",
+    transfer_guide_ready: "已錄好。再次播放宿主即可聽到處理結果；再錄一次會取代它。",
+    transfer_guide_offline:
+        "這個宿主也支援離線算圖。可以先點「錄製」，再匯出或 bounce，不必即時播放一遍。",
+    transfer_cannot_capture:
+        "這個宿主沒有把播放位置交給外掛，因此無法把音訊對齊到時間軸上。請使用宿主自身的編輯功能，或改用支援 ARA 的宿主。",
+    transfer_recording_progress: "已錄 {seconds} 秒",
+    transfer_field_segments: "分段數",
+    transfer_field_gaps: "跳躍次數",
+    transfer_field_spares: "剩餘緩衝",
+    transfer_field_takes: "錄音數",
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

@@ -2136,6 +2136,30 @@ export const koKR = {
     plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
     plugin_reverse_unavailable:
         "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
+    // ── Transfer（ARA 미지원 호스트에서의 녹음）─────────────────────────
+    panel_transfer: "Transfer",
+    transfer_status_empty: "녹음 없음",
+    transfer_status_recording: "녹음 중",
+    transfer_status_ready: "녹음됨",
+    transfer_start: "녹음",
+    transfer_stop: "정지",
+    transfer_cancel: "취소",
+    transfer_clear: "모든 테이크 버리기",
+    transfer_guide_body:
+        "호스트에서 재생을 시작한 뒤 「녹음」을 누르세요. 플러그인이 지나가는 오디오를 받아 호스트 타임라인에 맞춰 정렬합니다.",
+    transfer_guide_recording:
+        "녹음 중입니다. 재생 위치를 옮기거나 탐색하지 마세요. 끝나면 「정지」를 누릅니다.",
+    transfer_guide_ready:
+        "녹음되었습니다. 호스트를 다시 재생하면 처리 결과를 들을 수 있습니다. 다시 녹음하면 대체됩니다.",
+    transfer_guide_offline:
+        "이 호스트는 오프라인 렌더도 지원합니다. 「녹음」을 누른 뒤 내보내기나 바운스를 하면 실시간으로 재생할 필요가 없습니다.",
+    transfer_cannot_capture:
+        "이 호스트는 재생 위치를 플러그인에 전달하지 않아 오디오를 타임라인에 맞출 수 없습니다. 호스트 자체 편집 기능을 쓰거나 ARA를 지원하는 호스트를 사용하세요.",
+    transfer_recording_progress: "{seconds}초 녹음됨",
+    transfer_field_segments: "세그먼트 수",
+    transfer_field_gaps: "점프 횟수",
+    transfer_field_spares: "남은 버퍼",
+    transfer_field_takes: "테이크 수",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
 

@@ -85,13 +85,14 @@ test("外观设置的三个声明：居中浮出、不可停靠、不进窗口�
     expect(panel?.singleton).toBe(true);
 });
 
-test("默认注册表里恰好只有外观设置与 ARA 宿主会话被排除", () => {
+test("默认注册表里恰好只有外观设置与两个宿主会话面板被排除", () => {
     /*
      * 这条是"排除清单不能悄悄扩大"的守卫：每加一个被排除的面板都必须改这个测试，
      * 从而在 code review 里被看见。
      *
-     * ARA 宿主会话（独立 App 的宿主连接）与外观设置同属"低频、打开、办完一轮、
-     * 离开"的表面，因此同样不进「窗口」菜单；入口在「视图 → ARA 宿主连接」。
+     * ARA 宿主会话（独立 App 的宿主连接）与 Transfer（不支持 ARA 的宿主里录制）
+     * 同属"低频、打开、办完一轮、离开"的表面，因此同样不进「窗口」菜单；
+     * 入口在「视图」菜单里各自的会话项。两者互斥出现，由后端 `hostKind` 决定。
      */
     resetPanelRegistryForTests();
     registerBuiltinPanels();
@@ -100,5 +101,5 @@ test("默认注册表里恰好只有外观设置与 ARA 宿主会话被排除", 
         .filter((panel) => panel.excludeFromWindowMenu)
         .map((panel) => panel.id)
         .sort();
-    expect(excluded).toEqual(["appearance", "araHost"]);
+    expect(excluded).toEqual(["appearance", "araHost", "transfer"]);
 });

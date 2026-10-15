@@ -70,6 +70,24 @@ export type PluginBootstrap = {
         /** 插件能否导出纯数据文件（布局 / 主题 / 颤音预设）。 */
         exportData: boolean;
     };
+    /**
+     * Transfer 通路的**观察位**（`hostKind === "transfer"` 时才有值，否则 `null`）。
+     *
+     * 【为什么是"观察到过"而不是能力声明】它们描述宿主**实际**做了什么 —— 给过播放
+     * 位置吗、把音频送到输入总线了吗、走过离线（bounce）吗。宿主不会声明这些，
+     * 所以只能观察。前端据此选引导语：见过位置就能录；没见过位置就该明说
+     * "这个宿主没有把播放位置交给插件"，而不是让用户对着按钮猜。
+     *
+     * 【为什么不放进 `hostCapabilities`】那里回答"宿主能做什么"，这里回答
+     * "我们观察到了什么"。混在一起会让"宿主不支持"与"还没播放过"变成同一个值。
+     */
+    transferCaps?: {
+        sawContext: boolean;
+        sawInput: boolean;
+        sawOffline: boolean;
+        /** 现在能不能录（等于 `sawContext`；单独给出让前端读一个字段就够）。 */
+        canCapture: boolean;
+    } | null;
 };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;

@@ -911,6 +911,18 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "log_frontend_error":
             return { message: args[0], detail: args[1] ?? null };
 
+        // ── Transfer（仅插件形态）─────────────────────────────────────────
+        // 【为什么带参的两条在这里显式登记】`transfer_select_take` 与
+        // `transfer_set_options` 是唯一携带参数的 Transfer 命令；其余五条无参，
+        // 登记在下方 `NO_ARG_COMMANDS`。不登记就会返回 `__unwired`，前端乐观更新
+        // 生效而后端从未收到 —— 这条静默分叉在本仓已发生过三次。
+        case "transfer_select_take":
+            return { takeId: args[0] };
+
+        case "transfer_set_options":
+            // 补丁是逐字段的：只传用户改过的键，后端按字段覆盖。
+            return { ...(args[0] as Record<string, unknown> | undefined) };
+
         default:
             // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
             // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
@@ -929,6 +941,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
  * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
  */
 const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    // Transfer 的无参命令（仅插件形态；见 `transfer/commands.rs`）。
+    "transfer_status",
+    "transfer_start",
+    "transfer_stop",
+    "transfer_cancel",
+    "transfer_clear",
     "plugin_get_apply_state",
     "ara_list_instances",
     "ara_submit",

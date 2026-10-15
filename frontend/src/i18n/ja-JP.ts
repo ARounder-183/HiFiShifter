@@ -2165,6 +2165,30 @@ export const jaJP = {
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
+    // ── Transfer（ARA 非対応ホストでの録音）────────────────────────────
+    panel_transfer: "Transfer",
+    transfer_status_empty: "未録音",
+    transfer_status_recording: "録音中",
+    transfer_status_ready: "録音済み",
+    transfer_start: "録音",
+    transfer_stop: "停止",
+    transfer_cancel: "キャンセル",
+    transfer_clear: "すべてのテイクを破棄",
+    transfer_guide_body:
+        "ホストで再生を開始してから「録音」を押してください。プラグインは通ってきた音声を取り込み、ホストのタイムラインに合わせます。",
+    transfer_guide_recording:
+        "録音中です。再生位置を動かしたりシークしたりしないでください。終わったら「停止」を押します。",
+    transfer_guide_ready:
+        "録音できました。もう一度ホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
+    transfer_guide_offline:
+        "このホストはオフライン書き出しにも対応しています。「録音」を押してから書き出し／バウンスすれば、リアルタイムで再生する必要はありません。",
+    transfer_cannot_capture:
+        "このホストは再生位置をプラグインに渡さないため、音声をタイムラインに合わせられません。ホスト側の編集機能を使うか、ARA 対応のホストをご利用ください。",
+    transfer_recording_progress: "録音済み {seconds} 秒",
+    transfer_field_segments: "セグメント数",
+    transfer_field_gaps: "ジャンプ回数",
+    transfer_field_spares: "残りバッファ",
+    transfer_field_takes: "テイク数",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 
