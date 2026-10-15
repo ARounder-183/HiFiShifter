@@ -66,6 +66,7 @@ mod sync;
 mod test_allocator;
 #[cfg(test)]
 mod test_host;
+mod transfer;
 mod vst3;
 
 use std::ffi::c_void;
