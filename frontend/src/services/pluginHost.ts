@@ -41,7 +41,14 @@ export type PluginBootstrap = {
      * 【为什么前端需要它】ARA-only 后端上片段几何**只读**（ARA 2.0 不允许插件改 region
      * 几何），前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
      */
-    hostKind?: "reaper" | "ara_only";
+    /**
+     * 当前编辑后端身份。
+     *
+     * `"transfer"` = 宿主没给 ARA，素材从 VST3 输入总线录进来（见 Transfer 方案）。
+     * 它与 `"ara_only"` 的区别是**实质性的**：Transfer 的时间线由捕获存储构建、
+     * 完全属于插件自己，而 ara_only 的时间线是宿主投影。
+     */
+    hostKind?: "reaper" | "ara_only" | "transfer";
     /**
      * 生效的宿主能力位快照：**写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源**。
      *
