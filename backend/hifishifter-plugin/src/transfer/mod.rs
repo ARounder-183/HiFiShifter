@@ -29,6 +29,7 @@
 
 pub(crate) mod capture;
 pub(crate) mod commands;
+pub(crate) mod sidecar;
 pub(crate) mod timeline;
 
 use crate::render::source::SourcePcm;
@@ -36,6 +37,7 @@ use crate::sync::MutexExt;
 use capture::{Capture, CaptureOutcome, ClosedReason, InputBlock, Segment};
 use hifishifter_kernel::state::TimelineState;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -88,6 +90,8 @@ pub(crate) struct TransferTake {
     pub summary: timeline::TimelineSummary,
     /// 段 → 源 PCM，键是 [`timeline::source_id`]。
     pub sources: HashMap<String, Arc<SourcePcm>>,
+    /// PCM 的落盘位置（`None` = 没写成，重启后不可恢复）。
+    pub sidecar: Option<PathBuf>,
 }
 
 /// 录制中的读数（给状态栏）。
@@ -256,12 +260,94 @@ impl TransferStore {
         *capture = Capture::default();
     }
 
-    /// 丢弃全部 take。
+    /// 丢弃全部 take（含落盘副本）。
     pub(crate) fn clear(&self) {
         self.armed.store(false, Ordering::Release);
         *self.capture.lock_or_recover() = Capture::default();
-        self.takes.lock_or_recover().clear();
+        for take in self.takes.lock_or_recover().drain(..) {
+            // 移入回收站而不是直接删：录了几分钟的东西被误删是不可接受的。
+            if let Some(path) = take.sidecar {
+                sidecar::remove(&path);
+            }
+        }
         self.active_take.store(0, Ordering::Release);
+    }
+
+    /// 组件 state 里的 Transfer 清单。
+    ///
+    /// 【为什么只存路径而不存 PCM】`MAX_FRAME` 是 64 MiB，而 4 分钟立体声 96 kHz
+    /// 已是 184 MB；何况组件 state 会进宿主的每一次保存与撤销快照。清单是几 KB。
+    pub(crate) fn manifest(&self) -> serde_json::Value {
+        let active = self.active_take.load(Ordering::Acquire);
+        let takes = self.takes.lock_or_recover();
+        let entries: Vec<_> = takes
+            .iter()
+            .map(|take| {
+                serde_json::json!({
+                    "id": take.id,
+                    "sidecar": take.sidecar.as_ref().map(|path| path.to_string_lossy()),
+                    "active": take.id == active,
+                })
+            })
+            .collect();
+        serde_json::json!({ "version": 1, "takes": entries })
+    }
+
+    /// 从清单恢复 take。
+    ///
+    /// 【为什么失败的条目只跳过】一个 sidecar 被用户删了、或在别的机器上不存在，
+    /// 不该让**整份**清单失败 —— 其余 take 仍然是好的。逐条降级，与渲染路径同一纪律。
+    pub(crate) fn restore_manifest(&self, manifest: &serde_json::Value) -> Result<(), String> {
+        let Some(entries) = manifest["takes"].as_array() else {
+            return Ok(());
+        };
+        let mut highest = 0_u64;
+        for entry in entries {
+            let Some(id) = entry["id"].as_u64() else {
+                continue;
+            };
+            highest = highest.max(id);
+            let Some(path) = entry["sidecar"].as_str().map(PathBuf::from) else {
+                continue;
+            };
+            if self.takes.lock_or_recover().iter().any(|take| take.id == id) {
+                continue;
+            }
+            let segments = match sidecar::read(&path) {
+                Ok(segments) => segments,
+                Err(error) => {
+                    log::warn!("[transfer] take {id} could not be restored: {error}");
+                    continue;
+                }
+            };
+            let sample_rate = segments[0].sample_rate;
+            let channels = segments[0].planes.len().clamp(1, 2) as u8;
+            let (timeline, summary) = timeline::build(&segments, id, 120.0);
+            let sources = build_sources(id, &segments);
+            self.takes.lock_or_recover().push(TransferTake {
+                id,
+                sample_rate,
+                channels,
+                segments,
+                timeline,
+                summary,
+                sources,
+                sidecar: Some(path),
+            });
+            if entry["active"].as_bool() == Some(true) {
+                self.active_take.store(id, Ordering::Release);
+            }
+        }
+        // take 号分配器必须跳过已恢复的号，否则下一次录制会覆盖一个已存在的文件。
+        if highest > 0 {
+            self.next_take_id.fetch_max(highest + 1, Ordering::AcqRel);
+        }
+        if self.active_take.load(Ordering::Acquire) == 0 {
+            if let Some(first) = self.takes.lock_or_recover().first().map(|take| take.id) {
+                self.active_take.store(first, Ordering::Release);
+            }
+        }
+        Ok(())
     }
 
     /// 选择一个 take 作为活动 take。
@@ -414,6 +500,19 @@ impl TransferStore {
         let channels = all[0].planes.len().clamp(1, 2) as u8;
         let (timeline, summary) = timeline::build(&all, id, 120.0);
         let sources = build_sources(id, &all);
+        // 【为什么在 promote 时就落盘，而不是等 `getState`】落盘是**一次**几十 MB 的
+        // 写；放在 `getState` 里就等于在宿主每次自动保存时都写一遍。而 promote 是
+        // 用户刚做完的动作，等它有明确的语义（"我刚录完"），且只发生一次。
+        let sidecar = sidecar::default_dir().and_then(|dir| {
+            match sidecar::write(&dir, id, &all) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    // 落盘失败不该丢掉这次录制：内存里那份仍然可用，只是重启后不在。
+                    log::warn!("[transfer] take {id} was not persisted: {error}");
+                    None
+                }
+            }
+        });
         let take = TransferTake {
             id,
             sample_rate,
@@ -422,6 +521,7 @@ impl TransferStore {
             timeline,
             summary,
             sources,
+            sidecar,
         };
         let mut takes = self.takes.lock_or_recover();
         // 【为什么保留旧 take 而不是覆盖】用户要能在两次录制之间比较。内存由
@@ -631,6 +731,113 @@ mod tests {
         assert!(options.max_duration_sec >= 1.0);
         assert!(options.segment_sec <= 60.0);
         assert!(!options.monitor);
+    }
+
+    /// 临时目录（每个用例一个）。
+    fn temp_dir() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("hfs-xfer-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn captured_segment() -> Segment {
+        Segment {
+            id: 1,
+            origin: 0,
+            sample_rate: 48_000,
+            planes: vec![vec![0.4_f32; 512], vec![0.4_f32; 512]],
+            filled: 512,
+            loss: capture::SegmentLoss::First,
+            peak: [0.4; 2],
+            closed: ClosedReason::Stopped,
+            _reservation: None,
+        }
+    }
+
+    /// **重启后录音仍在**：清单指向 sidecar，恢复后能直接渲染。
+    ///
+    /// 【为什么这是持久化的唯一验收】落盘的价值全在"下次打开还在"。只测"写了文件"
+    /// 是不够的 —— 恢复路径要能把段读回来、重建成时间线、并让 `has_material` 为真，
+    /// 否则用户看到的是一个空面板加一个存在于磁盘上的文件。
+    #[test]
+    fn a_manifest_restores_takes_from_their_sidecars() {
+        let dir = temp_dir();
+        let path = sidecar::write(&dir, 5, &[captured_segment()]).unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "takes": [{ "id": 5, "sidecar": path.to_string_lossy(), "active": true }],
+        });
+        let store = TransferStore::default();
+        store.note_project_rate(48_000.0);
+        store.restore_manifest(&manifest).unwrap();
+        assert_eq!(store.status().take_count, 1);
+        assert_eq!(store.active_take_id(), Some(5));
+        assert!(store.has_material(), "恢复之后必须立刻可渲染");
+        let (timeline, regions, sources) = store.render_input().expect("恢复的 take 应当可用");
+        assert_eq!(timeline.clips.len(), 1);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(sources.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 一个 sidecar 不见了**只跳过它**，其余 take 照常恢复。
+    ///
+    /// 【为什么逐条降级】用户可能清了缓存、或把工程拷到了另一台机器。一条缺失不该
+    /// 让整份清单失败 —— 那会把"少了一条录音"变成"所有录音都没了"。
+    #[test]
+    fn a_missing_sidecar_is_skipped_without_losing_the_other_takes() {
+        let dir = temp_dir();
+        let present = sidecar::write(&dir, 1, &[captured_segment()]).unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "takes": [
+                { "id": 1, "sidecar": present.to_string_lossy(), "active": true },
+                { "id": 2, "sidecar": dir.join("gone.hfx").to_string_lossy(), "active": false },
+            ],
+        });
+        let store = TransferStore::default();
+        store.restore_manifest(&manifest).unwrap();
+        assert_eq!(store.status().take_count, 1, "只有存在的那个 take 被恢复");
+        assert_eq!(store.active_take_id(), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 恢复后新录的 take 不能复用已存在的号（否则会覆盖一个已有的 sidecar 文件）。
+    #[test]
+    fn restoring_bumps_the_take_id_allocator_past_the_restored_ids() {
+        let dir = temp_dir();
+        let path = sidecar::write(&dir, 9, &[captured_segment()]).unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "takes": [{ "id": 9, "sidecar": path.to_string_lossy(), "active": true }],
+        });
+        let store = TransferStore::default();
+        store.note_project_rate(48_000.0);
+        store.restore_manifest(&manifest).unwrap();
+        store.start().unwrap();
+        let samples: &'static [f32] = Box::leak(vec![0.3_f32; 256].into_boxed_slice());
+        store.on_block(InputBlock {
+            start: 0,
+            frames: 256,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+        });
+        let id = store.stop().unwrap();
+        assert!(id > 9, "新 take 号必须跳过已恢复的 9，实际 {id}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清单为空或形状不对时不报错（老工程里根本没有这一段）。
+    #[test]
+    fn an_empty_or_absent_manifest_is_not_an_error() {
+        let store = TransferStore::default();
+        assert!(store.restore_manifest(&serde_json::json!({})).is_ok());
+        assert!(store
+            .restore_manifest(&serde_json::json!({ "version": 1, "takes": [] }))
+            .is_ok());
+        assert_eq!(store.status().take_count, 0);
     }
 
     /// 合成的播放区间必须与片段的源窗自洽（否则下游几何校验会拒绝整份）。

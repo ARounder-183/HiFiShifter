@@ -53,6 +53,7 @@
 pub mod ara;
 mod ara_entry;
 mod audio_abi;
+mod component_state;
 mod diagnostics;
 mod editor;
 mod fade;

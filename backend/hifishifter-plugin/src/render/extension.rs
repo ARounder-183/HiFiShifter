@@ -2214,8 +2214,23 @@ impl ExtensionOwner {
         if bytes.is_empty() {
             return Ok(());
         }
+        // 容器解析对**历史格式**（裸 `EditState`）是透明的：没有魔数就整块按旧格式读。
+        // 读不出来的后果是把用户已有的编辑弄丢，所以这条兼容不是可选项。
+        let state = crate::component_state::ComponentState::decode(bytes)?;
+        if let Some(manifest) = state.transfer.as_deref() {
+            match serde_json::from_slice::<serde_json::Value>(manifest) {
+                // 【为什么清单失败只记日志】PCM 丢了不该让参数曲线也读不出来 ——
+                // 那是两件独立的用户资产，而参数是更贵的那一份。
+                Ok(value) => {
+                    if let Err(error) = self.transfer.restore_manifest(&value) {
+                        log::warn!("[transfer] manifest restore failed: {error}");
+                    }
+                }
+                Err(error) => log::warn!("[transfer] manifest is not valid JSON: {error}"),
+            }
+        }
         let mut restored = crate::state_channel::EditState::default();
-        restored.restore(bytes)?;
+        restored.restore(&state.edits)?;
         *self.pending_restore.lock_or_recover() = Some(restored);
         self.refresh_document();
         Ok(())
@@ -2333,7 +2348,7 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        if let Some(document) = document {
+        let edits = if let Some(document) = document {
             document.flush_editor()?;
             let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire) {
@@ -2384,14 +2399,44 @@ impl ExtensionOwner {
                 local.fades.retain(|item, _| items.contains(item));
             }
             local.bindings.retain(|id, _| allowed.contains(id));
-            local.encode()
+            local.encode()?
         } else {
             self.pending_restore
                 .lock_or_recover()
                 .as_ref()
                 .unwrap_or(&self.edits.lock_or_recover())
-                .encode()
+                .encode()?
+        };
+        self.wrap_component_state(edits)
+    }
+
+    /// 把 `EditState` 字节与 Transfer 清单包成组件 state。
+    ///
+    /// 【为什么清单只带路径】PCM 在 sidecar 文件里（见 `transfer::sidecar`）：
+    /// `MAX_FRAME` 是 64 MiB，而 4 分钟立体声 96 kHz 已是 184 MB，何况组件 state
+    /// 会进宿主的每一次保存与撤销快照。清单是几 KB。
+    fn wrap_component_state(&self, edits: Vec<u8>) -> Result<Vec<u8>, String> {
+        let transfer = self.transfer.manifest();
+        let has_takes = transfer["takes"]
+            .as_array()
+            .is_some_and(|takes| !takes.is_empty());
+        // 【为什么没有 Transfer 数据时返回**裸** `EditState` 字节】两重理由：
+        //
+        // 1. 那些实例没有任何额外信息要存，套一层容器纯是开销；
+        // 2. 更重要的是**兼容性**：此前 `encode_state` 的输出就是 `EditState` 的
+        //    编码（ARA 路径下是一段 JSON）。加容器会让每一个既有消费者与既有工程
+        //    都读到看不懂的东西 —— 而它们本来完全正常。
+        //
+        // 于是格式变成"有 Transfer 数据才是容器，否则是历史格式"，而 `decode`
+        // 两种都认。这条不对称是有意的：新信息需要新格式，旧信息不需要。
+        if !has_takes {
+            return Ok(edits);
         }
+        Ok(crate::component_state::ComponentState {
+            edits,
+            transfer: Some(transfer.to_string().into_bytes()),
+        }
+        .encode())
     }
 
     /// 参数/快照在短事务内校验；外部提交合成同样不能持锁阻塞宿主模型回调。
