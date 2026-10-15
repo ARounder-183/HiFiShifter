@@ -2077,8 +2077,8 @@ export const enUS = {
     vibrato_unit_cycles: "cycles",
 
     // ── ARA host session（独立 App 的宿主连接会话）─────────────────────
-    ara_panel_title: "ARA Host",
-    ara_instance_label: "ARA instance",
+    ara_panel_title: "Host Timeline",
+    ara_instance_label: "Host timeline source",
     ara_no_instances: "No instances found",
     ara_instance_option: "{name} ({pid}) · {kind}",
     ara_source_ara: "ARA",
@@ -2130,7 +2130,7 @@ export const enUS = {
         "The project has unsaved changes. Replace it with the host snapshot?",
     ara_replace_dirty_confirm: "Replace Unsaved Project",
     ara_revisions: "Revision {revision} · Model {model}",
-    menu_ara_host: "Connect to ARA Host...",
+    menu_ara_host: "Connect to Host Timeline...",
 
     // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
     plugin_apply_waiting_host: "Waiting for host audio",
@@ -2158,6 +2158,7 @@ export const enUS = {
         "Reversing is a host item operation; use the host to reverse this clip",
     // ── Transfer（不支持 ARA 的宿主里录制宿主播放）──────────────────────
     panel_transfer: "Transfer",
+    menu_transfer: "Transfer from Host...",
     transfer_status_empty: "Nothing recorded",
     transfer_status_recording: "Recording",
     transfer_status_ready: "Recorded",

@@ -14,12 +14,12 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraHostPanel } from "./features/ara/AraHostPanel";
 import { TransferPanel } from "./features/transfer/TransferPanel";
+import { isTransferInstance } from "./features/transfer/transferEntry";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
-    hostKind,
     isPluginMode,
     pluginAllowsAction,
     pluginAllowsEditChannel,
@@ -1534,23 +1534,16 @@ function AppInner() {
         // 事件用 `try_send`（队列满即丢），丢一个 `active:false` 就会让状态栏片
         // **永久亮着**。快照说"不在渲染"时强制熄灭；事件只负责进度与快速点亮。
         // 独立 App 不订阅：那边没有插件 actor，也没有这条丢包路径。
-        // 【Transfer 面板的自动浮出】不能只放在「视图」菜单里：Transfer 最大的风险不是
-        // 技术上做不到，而是用户不知道"要先让宿主播放、再按录制"（Transfer 方案 §11.4）。
-        // 窗口打开时面对的是一条空时间线，面板里的引导必须自己出现。
+        // 【Transfer 面板的自动浮出】Transfer 最大的风险不是技术上做不到，而是用户不知道
+        // "要先让宿主播放、再按录制"（Transfer 方案 §11.4）—— 窗口打开时面对的是一条空
+        // 时间线，面板里的引导必须自己出现。判据见 `isTransferInstance`（两个来源取并集，
+        // 因为形态要等 5 秒宽限期才落定，而 bootstrap 是窗口创建那一刻算的）。
         //
-        // 判据有两条来源，因为**形态判定要等 setActive 之后 5 秒宽限期才落定**：
-        //   * bootstrap 的 `hostKind`：窗口创建时形态已经落定的情况（用户稍后才开窗）；
-        //   * 状态快照的 `mode`：窗口打开得早、bootstrap 里还是 `ara_only` 的情况。
-        // 只开一次（`transferPanelOpened`）：用户手动关掉之后不该被它反复弹回来。
+        // 只开一次：用户手动关掉之后不该被它反复弹回来（入口留在「视图」菜单里）。
         const unsubscribeTransferPanel = isPluginMode()
             ? subscribePluginApply(() => {
                   if (transferPanelOpenedRef.current) return;
-                  if (
-                      hostKind() !== "transfer" &&
-                      getPluginApplySnapshot().state?.mode !== "transfer"
-                  ) {
-                      return;
-                  }
+                  if (!isTransferInstance()) return;
                   transferPanelOpenedRef.current = true;
                   openPanelById(dispatch, store.getState, PANEL_TRANSFER);
               })

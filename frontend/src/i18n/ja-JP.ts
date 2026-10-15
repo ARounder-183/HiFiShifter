@@ -2091,8 +2091,8 @@ export const jaJP = {
     vibrato_unit_cycles: "周期",
 
     // ── ARA host session（スタンドアロン版のホスト接続セッション）──────
-    ara_panel_title: "ARA ホスト",
-    ara_instance_label: "ARA インスタンス",
+    ara_panel_title: "ホストタイムライン",
+    ara_instance_label: "ホストタイムラインのソース",
     ara_no_instances: "インスタンスが見つかりません",
     ara_instance_option: "{name}（{pid}）· {kind}",
     ara_source_ara: "ARA",
@@ -2146,7 +2146,7 @@ export const jaJP = {
         "プロジェクトに未保存の変更があります。ホストのスナップショットで置き換えますか？",
     ara_replace_dirty_confirm: "未保存のプロジェクトを置き換え",
     ara_revisions: "リビジョン {revision} · モデル {model}",
-    menu_ara_host: "ARA ホストに接続...",
+    menu_ara_host: "ホストタイムラインに接続...",
 
     // ── プラグインホストの自動適用状態（ステータスバーのチップ）───────
     plugin_apply_waiting_host: "ホストのオーディオを待機中",
@@ -2174,6 +2174,7 @@ export const jaJP = {
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
     // ── Transfer（ARA 非対応ホストでの録音）────────────────────────────
     panel_transfer: "Transfer",
+    menu_transfer: "ホストから Transfer...",
     transfer_status_empty: "未録音",
     transfer_status_recording: "録音中",
     transfer_status_ready: "録音済み",

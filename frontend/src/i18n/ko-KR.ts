@@ -2062,8 +2062,8 @@ export const koKR = {
     vibrato_unit_cycles: "주기",
 
     // ── ARA host session（독립 실행형 앱의 호스트 연결 세션）──────────
-    ara_panel_title: "ARA 호스트",
-    ara_instance_label: "ARA 인스턴스",
+    ara_panel_title: "호스트 타임라인",
+    ara_instance_label: "호스트 타임라인 소스",
     ara_no_instances: "인스턴스를 찾을 수 없음",
     ara_instance_option: "{name}({pid}) · {kind}",
     ara_source_ara: "ARA",
@@ -2117,7 +2117,7 @@ export const koKR = {
         "프로젝트에 저장되지 않은 변경 사항이 있습니다. 호스트 스냅샷으로 교체할까요?",
     ara_replace_dirty_confirm: "저장되지 않은 프로젝트 교체",
     ara_revisions: "리비전 {revision} · 모델 {model}",
-    menu_ara_host: "ARA 호스트 연결...",
+    menu_ara_host: "호스트 타임라인 연결...",
 
     // ── 플러그인 호스트의 자동 적용 상태（상태 표시줄 칩）─────────────
     plugin_apply_waiting_host: "호스트 오디오 대기 중",
@@ -2145,6 +2145,7 @@ export const koKR = {
         "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
     // ── Transfer（ARA 미지원 호스트에서의 녹음）─────────────────────────
     panel_transfer: "Transfer",
+    menu_transfer: "호스트에서 Transfer...",
     transfer_status_empty: "녹음 없음",
     transfer_status_recording: "녹음 중",
     transfer_status_ready: "녹음됨",

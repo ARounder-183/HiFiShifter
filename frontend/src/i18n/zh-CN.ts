@@ -2019,8 +2019,8 @@ export const zhCN = {
     vibrato_unit_cycles: "周期",
 
     // ── ARA host session（独立 App 的宿主连接会话）─────────────────────
-    ara_panel_title: "ARA 宿主",
-    ara_instance_label: "ARA 实例",
+    ara_panel_title: "宿主时间轴",
+    ara_instance_label: "宿主时间轴源",
     ara_no_instances: "未发现实例",
     ara_instance_option: "{name}（{pid}）· {kind}",
     ara_source_ara: "ARA",
@@ -2070,7 +2070,7 @@ export const zhCN = {
     ara_replace_dirty_message: "当前工程有未保存修改，替换为宿主快照？",
     ara_replace_dirty_confirm: "替换未保存工程",
     ara_revisions: "修订 {revision} · 模型 {model}",
-    menu_ara_host: "ARA 宿主连接...",
+    menu_ara_host: "连接宿主时间轴...",
 
     // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
     plugin_apply_waiting_host: "等待宿主音频",
@@ -2094,6 +2094,7 @@ export const zhCN = {
     plugin_reverse_unavailable: "倒放是宿主 item 操作；请在宿主里倒放这一条",
     // ── Transfer（不支持 ARA 的宿主里录制宿主播放）──────────────────────
     panel_transfer: "Transfer",
+    menu_transfer: "从宿主 Transfer 录制...",
     transfer_status_empty: "尚未录制",
     transfer_status_recording: "录制中",
     transfer_status_ready: "已录制",
