@@ -286,6 +286,10 @@ pub fn clear_pitch_analysis_state() -> u64 {
         set.clear();
         set.shrink_to_fit();
     }
+    if let Ok(mut set) = global_unproducible().lock() {
+        set.clear();
+        set.shrink_to_fit();
+    }
     if let Ok(mut sig) = global_file_sig_cache().lock() {
         sig.clear();
         sig.shrink_to_fit();
@@ -598,7 +602,15 @@ fn store_clip_pitch_cache(cached: CachedClipPitch) {
     let weight = cached_pitch_bytes(&cached);
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     // 逐出由 `ByteBudgetCache` 按真 LRU + 字节预算处理（见缓存定义的注释）。
-    cache.insert(content_key, cached, weight);
+    cache.insert(content_key.clone(), cached, weight);
+    drop(cache);
+    // 【为什么要撤销负记忆】同一份内容这次产出了数据（例如上一次是临时读不到文件），
+    // 那么"它产不出原线"这条结论已经不成立 —— 留着会让渲染门禁继续放行降级渲染，
+    // 用户就听不到本来已经能算出来的处理结果。
+    global_unproducible()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&content_key);
 }
 
 /// 遍历 timeline 中所有可见 clip，对缓存未命中的 clip 异步提交分析任务
@@ -665,14 +677,6 @@ pub fn schedule_clip_pitch_jobs_scoped(
                 continue;
             }
         };
-        if !file_exists_cached(Path::new(source_path)) {
-            debug_eprintln!(
-                "[pitch_clip] clip '{}' skipped: file not found: {}",
-                clip.id,
-                source_path
-            );
-            continue;
-        }
 
         // 入选条件：见 [`clip_is_analysis_candidate`]（门禁侧用的是同一个函数）。
         {
@@ -695,6 +699,20 @@ pub fn schedule_clip_pitch_jobs_scoped(
             Some(k) => k,
             None => continue,
         };
+
+        // 【为什么文件检查要排在键之后】门禁（`clip_pitch_analysis_can_be_produced`）
+        // 要靠**这个键**知道"这一份内容已经被证明产不出东西"，从而不再为它挡住渲染。
+        // 检查排在键之前时键还没算出来，就没有地方记这条结论 —— 于是源文件缺失会让
+        // 渲染门禁永远为真：渲染一次都不跑，状态栏永久停在"正在自动应用"（用户报障）。
+        if !file_exists_cached(Path::new(source_path)) {
+            debug_eprintln!(
+                "[pitch_clip] clip '{}' skipped: file not found: {}",
+                clip.id,
+                source_path
+            );
+            mark_unproducible(&ck.key);
+            continue;
+        }
 
         // 缓存命中则跳过（以内容哈希为 key，相同源文件的 clip 共享缓存）
         {
@@ -964,6 +982,19 @@ pub fn schedule_clip_pitch_jobs_scoped(
                 let _ =
                     tx.send(crate::engine_command::EngineCommand::ClipPitchReady { clip_id: cid });
             }
+        } else {
+            // 【为什么"没有数据"要记进负记忆】分析确实跑过了、也确实什么都没产出
+            // （解码失败 / 全静音到没有任何帧级结果）。此时缓存里没有条目、也没有
+            // 任何通知，于是下一次调度会**再**排一个一模一样的任务 —— 而渲染门禁在
+            // 这中间一直是"在等"，于是渲染一次都不跑，用户看到的是一句永不收敛的
+            // "正在自动应用"（用户报障）。记下这条结论之后，门禁不再为它等待：
+            // 降级输出（内核在缺少原线时的既定回退）远好过一次白等。
+            mark_unproducible(&job.ck.key);
+            log::warn!(
+                "[pitch_clip] clip '{}' produced no analysis data; the render gate will stop \
+                 waiting for its original pitch line",
+                job.clip.name
+            );
         }
 
         // 所有 clip 完成后，重置全局进度状态
@@ -1320,6 +1351,80 @@ pub fn clip_is_analysis_candidate(
     let render_gate_open =
         crate::pitch_editing::does_clip_need_processor_render(tl, clip, clip.start_sec);
     (compose_enabled || dyn_needed || render_gate_open) && (fcpe_available || dyn_needed)
+}
+
+/// 已被**证明产出不了**原线的内容键（见 [`clip_pitch_analysis_can_be_produced`]）。
+///
+/// 【为什么需要一份"负记忆"】渲染门禁问的是"要不要等这根的原线"。等待是对的（原线是
+/// 渲染的输入之一），但**必须是有限度的**：当调度侧已经证明这份内容产出不了任何东西
+/// （源文件不在、分析跑完却没有任何数据）时，继续等就是等一个不会来的东西 —— 渲染
+/// 一次都不跑，用户既听不到处理结果也看不到进展（用户报障：状态栏永久停在"正在自动
+/// 应用"，画完的参数线一次都没生效）。
+///
+/// 记在**内容键**上而不是 clip id 上：产出能力是内容（源文件）的性质，与它落在时间轴
+/// 哪里无关，而且换一份素材自然就是一个新键。
+///
+/// 【为什么不由门禁自己写】门禁是纯查询。这份记忆只由**调度侧与产出侧**写：它们才是
+/// "已经试过、确实产不出"的证据来源。
+static GLOBAL_UNPRODUCIBLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// 负记忆的条数上限。到顶就整体清空 —— 它只是"别再等这一份"的加速器，丢掉的代价是
+/// 多等一次分析（并最终由超时兜底），而不是正确性。
+const UNPRODUCIBLE_CAP: usize = 512;
+
+fn global_unproducible() -> &'static Mutex<HashSet<String>> {
+    GLOBAL_UNPRODUCIBLE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 记下"这份内容产出不了原线"（调度侧的结构性跳过 / 分析跑完却没有数据）。
+fn mark_unproducible(key: &str) {
+    let mut set = global_unproducible()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if set.len() >= UNPRODUCIBLE_CAP {
+        set.clear();
+    }
+    set.insert(key.to_owned());
+}
+
+/// 这份内容是否已经被证明产出不了原线。
+fn is_unproducible(key: &str) -> bool {
+    global_unproducible()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(key)
+}
+
+/// 这个 clip 的原线**还有可能产出吗** —— 也就是"再等下去真的会有结果"。
+///
+/// 【为什么门禁必须问这一条，而不是"能不能分析"】[`clip_is_analysis_candidate`] 回答的是
+/// 一个**静态**问题：只要后端可用、只要这条 clip 有源文件，它就一直为真 —— 包括
+/// **分析已经跑完却没有产出任何东西**之后。而渲染门禁问的是"要不要等"。两者用同一个
+/// 静态判据时，"在等"并不蕴含"会产出"：调度侧会跳过（源文件不在 / 片段长度非正 /
+/// 结果为空所以没写缓存），门禁却照旧为真 —— 于是渲染一次都不跑（用户报障）。
+///
+/// 所以这一条在静态判据之上再减去两个**动态**事实：键都建不起来（调度侧必然跳过），
+/// 以及这份内容已经被证明产不出东西（见 [`global_unproducible`]）。
+///
+/// 两者都不成立 ⇒ 没有人会产出它 ⇒ 门禁必须放行渲染。内核在缺少原线时本来就有既定
+/// 回退语义（见 [`crate::pitch_editing::PitchCurvesSnapshot::midi_at_time`] 的
+/// "Allow it to work even when `pitch_orig` is missing (all zeros)"）：
+/// **降级输出永远好过一条无法被满足的等待** —— 前者至少还能听见东西。
+pub fn clip_pitch_analysis_can_be_produced(
+    tl: &TimelineState,
+    clip: &crate::state::Clip,
+    root_track_id: &str,
+    frame_period_ms: f64,
+) -> bool {
+    if !clip_is_analysis_candidate(tl, clip, crate::fcpe_onnx::is_available()) {
+        return false;
+    }
+    // 源路径缺失 / 片段长度非正 ⇒ 调度侧同样跳过（`build_clip_pitch_key` 返回 `None`），
+    // 门禁不能声称"会产出"一个调度侧根本不会调度的东西。
+    let Some(ck) = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms) else {
+        return false;
+    };
+    !is_unproducible(&ck.key)
 }
 
 /// 逐帧分析曲线（电平/音高皆可）从**全量源音频域**映射到 clip 可见区间。

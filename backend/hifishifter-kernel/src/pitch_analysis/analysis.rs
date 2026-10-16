@@ -60,7 +60,7 @@ fn assembly_gate_open(tl: &TimelineState, root_track_id: &str) -> bool {
     })
 }
 
-/// 该根轨的 pitch 原线**能不能真的被产出**。
+/// 该根轨的 pitch 原线**会不会真的产出**。
 ///
 /// 【为什么它必须与门禁合并成一条判据】上面那条不变量（门禁 ⊇ 渲染门禁）只解决了
 /// "门禁在等、调度不跑"的一半。另一半是**没有任何后端能产出**：调度侧会跳过
@@ -70,13 +70,22 @@ fn assembly_gate_open(tl: &TimelineState, root_track_id: &str) -> bool {
 /// 一条无法被满足的等待比降级输出更糟：降级至少还能听见未处理的音频。所以
 /// "可产出"这一条必须**收窄**门禁，而不是指望调度侧凭空产出。
 ///
-/// 实现上直接复用调度侧的入选判据（[`crate::pitch_clip::clip_is_analysis_candidate`]）：
-/// 两边是同一个函数，所以"在等"与"会产出"在结构上不可能相反。
+/// 【为什么问的是"还有可能产出吗"而不是"能不能分析"】"能不能"是静态的：分析跑完却没
+/// 产出之后它仍然为真，门禁于是永远在等一个不会再来的东西（用户报障：状态栏永久停在
+/// "正在自动应用"，画完的参数线一次都没生效）。"还有可能"在静态判据之上再减去调度侧
+/// 已经证明产不出的那些内容（源文件不在 / 分析跑完却没有数据）。实现上直接复用
+/// [`crate::pitch_clip::clip_pitch_analysis_can_be_produced`] —— 与调度侧是同一个
+/// 函数，所以"在等"与"会产出"在结构上不可能相反。
 pub fn pitch_analysis_can_run(tl: &TimelineState, root_track_id: &str) -> bool {
-    let fcpe_available = crate::fcpe_onnx::is_available();
+    let frame_period_ms = tl.frame_period_ms();
     tl.clips.iter().any(|clip| {
         tl.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_track_id)
-            && crate::pitch_clip::clip_is_analysis_candidate(tl, clip, fcpe_available)
+            && crate::pitch_clip::clip_pitch_analysis_can_be_produced(
+                tl,
+                clip,
+                root_track_id,
+                frame_period_ms,
+            )
     })
 }
 
@@ -132,7 +141,23 @@ mod tests {
     use super::*;
     use crate::state::TrackParamsState;
 
+    /// 一根根轨 + 一条**可分析**的 clip（有源路径、长度为正）。
+    ///
+    /// 【为什么源路径是必需的】门禁问的是"这条原线还产不产得出来"，而"产得出来"的
+    /// 前提是调度侧能算出内容键 —— 那要求 clip 有源路径且长度为正（见
+    /// `build_clip_pitch_key`）。没有源路径的 clip 谁都产不出东西，门禁**必须**为假
+    /// （否则就是一条永远无法被满足的等待）。
+    ///
     fn timeline(compose: bool) -> TimelineState {
+        timeline_with_source(compose, "C:/hifishifter-tests/analysis-gate/root.wav")
+    }
+
+    /// 同 [`timeline`]，但可以指定源路径。
+    ///
+    /// 【为什么要能换路径】负记忆（"这一份产不出原线"）按内容键记账，而内容键含源路径
+    /// 字符串。同一进程里并行的两条测试若共用路径，一条的结论就会泄漏给另一条 ——
+    /// 那种失败会随调度顺序出现或消失，是最难查的一类。
+    fn timeline_with_source(compose: bool, source_path: &str) -> TimelineState {
         let mut tl = TimelineState::default();
         tl.tracks = serde_json::from_value(serde_json::json!([
             {"id":"root","name":"root","order":0,"compose_enabled":compose,
@@ -141,6 +166,7 @@ mod tests {
         .unwrap();
         tl.clips = serde_json::from_value(serde_json::json!([
             {"id":"clip","track_id":"root","name":"source","start_sec":0.0,"length_sec":1.0,
+             "source_path":source_path,
              "takes":[{"id":"take","source_start_sec":0.0,"source_end_sec":1.0}]}
         ]))
         .unwrap();
@@ -213,5 +239,74 @@ mod tests {
             .unwrap()
             .pitch_edit_user_modified = true;
         assert!(!root_pitch_assembly_pending(&tl, "root"));
+    }
+
+    /// **只挂了 HiFiGAN 效果（没有手绘音高）时也必须等原线。**
+    ///
+    /// 【为什么这条要单独钉】效果（气声 / 张力 / 共振峰）与音高共用同一条原线：少了它
+    /// 效果会被静默丢掉 —— 界面上的勾还在，声音里没有。这与"手绘曲线"是两条不同的
+    /// 成因，都要能唤起分析（见 `assembly_gate_open` 的不变量注释）。
+    #[test]
+    fn an_effect_only_root_also_waits_for_the_original_line() {
+        let mut tl = timeline(true);
+        {
+            let params = tl.params_by_root_track.get_mut("root").unwrap();
+            params.frame_period_ms = 10.0;
+            params
+                .extra_curves
+                .insert("formant_shift_cents".into(), vec![100.0; 200]);
+        }
+        assert!(
+            tl.clips.iter().any(
+                |clip| crate::pitch_editing::does_clip_need_processor_render(
+                    &tl,
+                    clip,
+                    clip.start_sec
+                )
+            ),
+            "前提：只有效果时渲染门禁也为真"
+        );
+        assert!(
+            root_pitch_assembly_pending(&tl, "root"),
+            "效果需要原线 ⇒ 分析门禁必须能产出它，否则渲染永久 pending"
+        );
+    }
+
+    /// **已经证明产不出的原线不许继续挡着渲染。**
+    ///
+    /// 【为什么这条必须存在】"要不要等"与"产不产得出来"是两件事。等待有理由（原线是
+    /// 渲染的输入之一），但**没有终点**的等待会让渲染一次都不跑：用户画完参数线听不到
+    /// 任何变化，状态栏永久停在"正在自动应用"，而且**没有任何东西会来解开它** ——
+    /// 用户报障的正是这个。这条把"调度侧一旦证明产不出，门禁就必须放行"钉住。
+    ///
+    /// 【为什么走真调度而不是手写标记】负记忆的唯一写入者是调度侧与产出侧；测试自己
+    /// 塞一条标记就只是测了自己。这里喂一条源文件不存在的 clip（真实宿主的常见情形：
+    /// 素材被移走 / 物化副本还没落盘），让真的调度器给出结论。
+    #[test]
+    fn a_root_whose_line_can_never_be_produced_stops_blocking_the_render() {
+        let mut tl = timeline_with_source(
+            true,
+            "C:/hifishifter-tests/analysis-gate/missing-source.wav",
+        );
+        {
+            let params = tl.params_by_root_track.get_mut("root").unwrap();
+            params.pitch_edit_user_modified = true;
+            params.frame_period_ms = 10.0;
+            params.pitch_edit = vec![1.0; 200];
+        }
+        assert!(
+            root_pitch_assembly_pending(&tl, "root"),
+            "前提：这条根确实在等原线（手绘曲线 + 渲染门禁为真）"
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+        crate::pitch_clip::schedule_clip_pitch_jobs_scoped(
+            &tl,
+            &tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert!(
+            !root_pitch_assembly_pending(&tl, "root"),
+            "调度侧已经证明这条源产出不了原线 ⇒ 门禁必须放行渲染，而不是永远等下去"
+        );
     }
 }
