@@ -44,15 +44,17 @@ const RENDER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 /// 预算内的快速重试间隔。
 const RENDER_RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
-/// 分析一直 pending 多久后判定"这条原线不会被产出了"。
+/// 分析 pending 的**绝对**上限：超过它就**不再等这条原线**，本次渲染直接放行。
 ///
-/// 触发条件是两个**可核实的**事实同时成立：没有任何分析 worker 在跑，且已经等了
-/// 这么久。仅凭时间不足以判定（慢分析合法），仅凭"没有 worker"也不足以（worker 刚
-/// 结束、结果还在通道里）。两者都成立 ⇒ 再等也不会变好，如实报错并停止空转。
-const ANALYSIS_STALL_GRACE: Duration = Duration::from_secs(2);
-
-/// 分析 pending 的**绝对**上限：即使 worker 还在跑，超过它就放弃（防"活锁"——
-/// worker 反复重排却永远不置位 `pitch_orig_key`）。
+/// 【为什么只留一个上限，不再有"2 秒没有 worker 就算不收敛"】那条判据问的是本会话
+/// 自己的 worker 表，而"表里没有"在两种完全正常的情形下都成立（任务刚排出去、或同一份
+/// 内容的分析由别的会话在跑），于是它把正常等待判成死局并永久停掉自动渲染。现在
+/// "要不要等"由内核门禁回答（见 `pitch_analysis_can_run`），等待永远有理由 ——
+/// 只剩一个上限兜住**真的卡死**（后端初始化失败、worker 永久阻塞）。
+///
+/// 【为什么到顶是"放弃等它"而不是"放弃渲染"】把渲染一起停掉是最坏的选择：用户既听不到
+/// 处理结果，也看不到任何进展。到顶后那根被记进 `analysis_abandoned`，渲染立刻放行，
+/// 内核走它在缺少原线时的既定回退 —— 降级输出永远好过一条无法被满足的等待。
 const ANALYSIS_PENDING_CEILING: Duration = Duration::from_secs(60);
 
 /// "pitch analysis pending" 的重试间隔。
@@ -70,18 +72,21 @@ struct RetryState {
     submitted: u64,
     /// 连续**真错误**的次数。
     streak: u32,
-    /// 已判定"不收敛"：不再重排、不再发 `active:true`。
-    settled: bool,
     /// "pitch analysis pending" 从什么时候开始（有进展即清零）。
     analysis_pending_since: Option<Instant>,
 }
 
 /// 一次渲染尝试失败后的处置。
+///
+/// 【为什么只有"稍后重试"】这个枚举此前还有一个 `Settled`（"不再重排、不再发
+/// `active:true`"），而它唯一的来源是"分析不收敛"的判定 —— 那条判定本身是错的
+/// （它问的是**本会话自己的** worker 表，见 [`RetryState::classify`]）。真正的失败
+/// 现在一律是退避重试：错误读数照写（前端显示"尚未应用：{error}"），宿主的瞬时冲突
+/// 一旦收口就自然收敛；而**终态**错误（panic 毒化 / 文档关闭 / 租约撤销）在 actor
+/// 循环里另有判据，不受这里影响。于是"自动渲染永久停摆"这个状态不存在了。
 enum RenderAction {
     /// 稍后重试。
     Retry(Duration),
-    /// 停止重试；错误已写进 `render_error`。
-    Settled,
 }
 
 impl RetryState {
@@ -89,7 +94,6 @@ impl RetryState {
         Self {
             submitted,
             streak: 0,
-            settled: false,
             analysis_pending_since: None,
         }
     }
@@ -97,7 +101,6 @@ impl RetryState {
     /// 用户做了新操作 / 分析有新进展 ⇒ 清零预算并重新武装。
     fn rearm(&mut self) {
         self.streak = 0;
-        self.settled = false;
         self.analysis_pending_since = None;
     }
 
@@ -162,8 +165,8 @@ impl RetryState {
 /// 一次**真错误**之后的处置：预算内快速重试，预算外退避。
 ///
 /// 【为什么抽成纯函数】`classify` 需要一整份 `EditorSession`，而 `RetryState` 的其余分支
-/// 又依赖分析 worker 的在途状态 —— 直接在测试里断言"不再 Settled"很贵。这条判据本身是纯的，
-/// 抽出来就能精确钉住"耗尽预算只是退避、不是永久停止"（见 `RENDER_RETRY_BUDGET`）。
+/// 又依赖分析 worker 的在途状态 —— 直接在测试里断言"预算耗尽的间隔"很贵。这条判据本身
+/// 是纯的，抽出来就能精确钉住"耗尽预算只是退避、不是永久停止"（见 `RENDER_RETRY_BUDGET`）。
 fn render_retry_action(streak: u32) -> RenderAction {
     if streak < RENDER_RETRY_BUDGET {
         RenderAction::Retry(RENDER_RETRY_INTERVAL)
@@ -867,15 +870,10 @@ impl EditorSession {
                                 *session.render_error.lock_or_recover() = None;
                                 retry.rearm();
                             }
-                            Err(error) => match retry.classify(&session, error) {
-                                RenderAction::Retry(delay) => {
-                                    deadline = Some(Instant::now() + delay);
-                                }
-                                RenderAction::Settled => {
-                                    session.render_requested.store(false, Ordering::Release);
-                                    deadline = None;
-                                }
-                            },
+                            Err(error) => {
+                                let RenderAction::Retry(delay) = retry.classify(&session, error);
+                                deadline = Some(Instant::now() + delay);
+                            }
                         }
                     } else {
                         deadline = Some(Instant::now() + Duration::from_millis(150));
@@ -889,7 +887,6 @@ impl EditorSession {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 if deadline.is_none()
-                    && !retry.settled
                     && session.render_requested.load(Ordering::Acquire)
                     // 【为什么终态错误才停自动渲染】此前只要 `error` 非空就停 —— 而
                     // `Conflict: workspace scope or curves changed` 这类"宿主状态在我们
@@ -905,7 +902,7 @@ impl EditorSession {
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
-                if !retry.settled && deadline.is_some_and(|d| d <= Instant::now()) {
+                if deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
                     if session.render_task.lock_or_recover().is_some()
                         || session.document()
@@ -923,15 +920,8 @@ impl EditorSession {
                         deadline = None;
                         if let Err(error) = session.start_render(ticket) {
                             session.emit("playback_rendering_state",json!({"active":false,"progress":None::<f64>,"target":"background"}));
-                            match retry.classify(&session, error) {
-                                RenderAction::Retry(delay) => {
-                                    deadline = Some(Instant::now() + delay);
-                                }
-                                RenderAction::Settled => {
-                                    session.render_requested.store(false, Ordering::Release);
-                                    deadline = None;
-                                }
-                            }
+                            let RenderAction::Retry(delay) = retry.classify(&session, error);
+                            deadline = Some(Instant::now() + delay);
                             session.emit_state();
                         }
                     }
@@ -2402,24 +2392,18 @@ pub(crate) mod tests {
     #[test]
     fn exhausting_the_retry_budget_backs_off_instead_of_stopping() {
         for streak in 1..RENDER_RETRY_BUDGET {
-            match render_retry_action(streak) {
-                RenderAction::Retry(delay) => assert_eq!(
-                    delay, RENDER_RETRY_INTERVAL,
-                    "预算内必须是快速重试（streak={streak}）"
-                ),
-                RenderAction::Settled => panic!("预算内不得判定为终态（streak={streak}）"),
-            }
+            let RenderAction::Retry(delay) = render_retry_action(streak);
+            assert_eq!(
+                delay, RENDER_RETRY_INTERVAL,
+                "预算内必须是快速重试（streak={streak}）"
+            );
         }
         for streak in [RENDER_RETRY_BUDGET, RENDER_RETRY_BUDGET + 1, 1_000] {
-            match render_retry_action(streak) {
-                RenderAction::Retry(delay) => assert_eq!(
-                    delay, RENDER_RETRY_BACKOFF,
-                    "预算耗尽必须退避而不是停止（streak={streak}）"
-                ),
-                RenderAction::Settled => panic!(
-                    "预算耗尽是**退避**，不是终态：宿主一旦静止就应当自然收敛（streak={streak}）"
-                ),
-            }
+            let RenderAction::Retry(delay) = render_retry_action(streak);
+            assert_eq!(
+                delay, RENDER_RETRY_BACKOFF,
+                "预算耗尽必须退避而不是停止（streak={streak}）"
+            );
         }
         assert!(
             RENDER_RETRY_BACKOFF > RENDER_RETRY_INTERVAL,
