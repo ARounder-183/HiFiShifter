@@ -376,12 +376,19 @@ impl TransferStore {
     }
 
     /// 重算 [`Self::has_material`]（**只允许非音频线程**：它要取 takes 锁）。
+    ///
+    /// 【为什么"有片段"不是"有素材"的等价说法】投影会把**整片全静音**的部分裁掉
+    /// （`timeline::project` 的 `is_silent` 分支），于是一次全是静音的录制 —— 例如宿主
+    /// 没有把这条轨的音频送进本插件 —— 会得到 `clips == 0`。那种时候用户确实录到了
+    /// 一段时间，把它算成"没有素材"会让输出仲裁跳过 `Raw`、直接落到透传宿主原声，
+    /// 而**那听起来是有声音的**，于是"编辑没生效"反而更难发现。
+    /// 素材的存在由"有没有 take"回答，而不是由"投影后还剩几条片段"回答。
     fn refresh_material_present(&self) {
         let present = self
             .takes
             .lock_or_recover()
             .iter()
-            .any(|take| take.summary.clips > 0);
+            .any(|take| !take.segments.is_empty());
         self.material_present.store(present, Ordering::Release);
     }
 
@@ -1204,6 +1211,46 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert_eq!(sources.len(), 1);
         assert!(store.has_material());
+    }
+
+    /// **一次全是静音的录制仍然是素材。**
+    ///
+    /// 【为什么这条必须存在】投影会把整片全静音的部分裁掉（`timeline::project` 的
+    /// `is_silent` 分支），所以一次全静音的录制 `summary.clips == 0`。而 `has_material`
+    /// 此前正是按 `clips > 0` 判的 —— 于是"插件没被接到这条轨的音频上"这种最常见的
+    /// 失败会被算成"没有素材"：输出仲裁跳过原始磁带那一档、直接落到**透传宿主原声**。
+    /// 那听起来是有声音的，于是"编辑没生效"反而比静音更难发现。
+    ///
+    /// 素材的存在由"有没有 take"回答，不是由"投影后还剩几条片段"回答。
+    #[test]
+    fn an_all_silent_recording_is_still_material() {
+        let store = store();
+        store.start().unwrap();
+        let silence: &'static [f32] = Box::leak(vec![0.0_f32; 4096].into_boxed_slice());
+        for index in 0..2_i64 {
+            store.on_block(InputBlock {
+                start: index * 4096,
+                frames: 4096,
+                sample_rate: 48_000.0,
+                planes: [Some(silence), Some(silence)],
+                playing: true,
+            });
+        }
+        store.stop().unwrap();
+        assert_eq!(store.status().take_count, 1, "录到了一段时间");
+        assert_eq!(
+            store.takes.lock_or_recover()[0].summary.clips,
+            0,
+            "前提：投影确实把它全裁掉了（这就是此前的失效现场）"
+        );
+        assert!(
+            store.has_material(),
+            "有 take 就有素材 —— 否则静音录制后仲裁会掉到透传宿主原声"
+        );
+        assert!(
+            store.raw_tape().is_some(),
+            "原始磁带必须建得出来（全零，但语义正确）"
+        );
     }
 
     /// 取消录制不留 take。
