@@ -2320,6 +2320,14 @@ impl ExtensionOwner {
                 if options.monitor && !offline {
                     // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                     let _ = unsafe { crate::audio_abi::pass_through(data) };
+                } else {
+                    // 【为什么"不监听"必须显式清空】本分支**整块都不写**，而调用方拿到
+                    // `Handled` 就立刻返回（见 `audio_process_inner`）—— 于是输出缓冲里
+                    // 留着上一次的内容：in-place 宿主下那是**输入原声**（关掉监听反而
+                    // 听得见），非 in-place 宿主下是未定义字节。本文件头那条纪律正是
+                    // "只有本通路确实不写整块时才清"，这里就是那种情形。
+                    // SAFETY: 与上面同一份数据；`clear_outputs` 自己会校验形状。
+                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 }
                 TransferStage::Handled
             },

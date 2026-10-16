@@ -105,21 +105,34 @@ impl RetryState {
     fn classify(&mut self, session: &EditorSession, error: String) -> RenderAction {
         if error == "pitch analysis pending" {
             // 正常在途：不计入次数预算，只按时间约束。
+            //
+            // 【为什么这里不再判"没有 worker 在跑"】这条判据此前是"分析不收敛"的
+            // 主要来源，而它问的是**本会话自己的** worker 表 —— 于是两种完全正常的
+            // 情形都被它判死：分析任务刚被排出去（表里还没有），以及同一个源文件的
+            // 分析由**别的会话**在跑（`GLOBAL_CLIP_PITCH_INFLIGHT` 去重，结果会进
+            // 全局缓存，本会话的组装照样能取到）。判死的后果是 `settled`：自动渲染
+            // 从此不再启动，状态栏永久停在"正在自动应用"，而用户画的那条线一次都没
+            // 生效。现在"要不要等"由内核的门禁统一回答（它只在**真的有任务会产出**
+            // 时为真，见 `pitch_analysis_can_run`），所以等待本身永远是有理由的 ——
+            // 这里只剩一个绝对上限，用来兜住"任务卡死"。
             let since = *self.analysis_pending_since.get_or_insert_with(Instant::now);
-            let stalled = !session.analysis_in_flight() && since.elapsed() > ANALYSIS_STALL_GRACE;
-            let abandoned = since.elapsed() > ANALYSIS_PENDING_CEILING;
-            if stalled || abandoned {
-                *session.render_error.lock_or_recover() = Some(
-                    "pitch analysis did not converge; the original pitch line for this track was never produced"
-                        .into(),
-                );
-                self.settled = true;
+            if since.elapsed() > ANALYSIS_PENDING_CEILING {
+                // 【为什么是"放弃等它"而不是"放弃渲染"】分析卡死（例如声码器/分析
+                // 后端初始化失败）时，把渲染一起停掉是最坏的选择：用户既听不到处理
+                // 结果，也看不到任何进展，只能对着一个永远转不完的状态。这里改为
+                // **放行**这次渲染（内核在缺少原线时有既定回退语义），并把这个根记进
+                // `analysis_abandoned`，于是后续渲染不再等它。
+                for root in session.pending_analysis_roots() {
+                    session.analysis_abandoned.lock_or_recover().insert(root);
+                }
                 log::warn!(
-                    "[ara] giving up on pitch analysis after {:?} (workers in flight: {})",
+                    "[ara] pitch analysis did not produce a line after {:?}; rendering without it \
+                     instead of freezing (workers in flight: {})",
                     since.elapsed(),
                     session.analysis_in_flight()
                 );
-                return RenderAction::Settled;
+                self.analysis_pending_since = None;
+                return RenderAction::Retry(RENDER_RETRY_INTERVAL);
             }
             return RenderAction::Retry(ANALYSIS_PENDING_RETRY);
         }
@@ -300,6 +313,16 @@ pub(crate) struct EditorSession {
     /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
     /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
     timeline_revision: AtomicU64,
+    /// 已经**放弃等待**原线分析的根轨道（见 [`RetryState::classify`] 的上限分支）。
+    ///
+    /// 【为什么需要这份状态】等待本身是对的（原线是渲染的输入之一），但等待必须**有界**：
+    /// 一个卡死的分析任务会让渲染永远不跑，用户既听不到处理结果也看不到进展。超时之后
+    /// 把它记在这里，于是后续渲染不再等它 —— 内核在缺少原线时有既定回退语义，降级输出
+    /// 永远好过一条无法被满足的等待。
+    ///
+    /// 【什么时候清】素材变化时（重新加载时间线把 `pitch_orig_key` 全部清空的那一刻）：
+    /// 那是"该为新素材重新分析"的唯一语义点，也是一次新的、值得等待的机会。
+    analysis_abandoned: Mutex<std::collections::BTreeSet<String>>,
     submitted: AtomicU64,
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
@@ -524,6 +547,7 @@ impl EditorSession {
             analysis_workers: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
             timeline_revision: AtomicU64::new(0),
+            analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
             submitted: AtomicU64::new(0),
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -799,6 +823,15 @@ impl EditorSession {
                 // `start()` 会把它们覆盖掉 —— "到点自动停"于是变成"到点丢掉"。
                 if let Some(owner) = session.transfer_owner() {
                     owner.transfer().service();
+                    // 【为什么原始磁带也要在这里补】它此前只在**用户动作**上发布
+                    // （`transfer_stop` / 清空 / 删 take 都走 `request_transfer_reload`）。
+                    // 而 take 还有第二条来源：宿主重开工程时从组件 state 的清单恢复
+                    // （`restore_manifest`）。那种会话里没有任何用户动作，原始磁带就
+                    // 一份都没有 —— 于是输出仲裁落到"透传宿主原声"：用户播放时听到的
+                    // 永远是直通，而素材明明在时间轴上（用户报障）。挂在 actor 心跳上
+                    // 之后，"有素材就有声音兜底"不再取决于谁碰过按钮。
+                    // 幂等：素材代次没变时它只做一次原子比较。
+                    owner.sync_raw_tape();
                     // 一次性诊断：宿主给了位置却从来没给过输入（见该方法的说明）。
                     owner.transfer().report_missing_input_once();
                     // 宿主链接的回写监视。与补缓冲同一个理由挂在会话 actor 上：
@@ -1016,7 +1049,7 @@ impl EditorSession {
             return Err(error);
         }
         // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
-        if Self::requires_analysis(&self.timeline.lock_or_recover()) {
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
         let (edit, model, projection) = {
@@ -1099,7 +1132,7 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        if Self::requires_analysis(&self.timeline.lock_or_recover()) {
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
         let Some(owner) = self.transfer_owner() else {
@@ -1159,19 +1192,45 @@ impl EditorSession {
     /// 分析任务，`prepare_apply` 因此永远返回 `"pitch analysis pending"`（用户报障：
     /// 关掉合成后左下角一直"渲染中"）。现在分析门禁**覆盖**渲染门禁（见
     /// `assembly_gate_open` 的不变量注释），所以"pending"一定意味着"真的有人会产出它"。
-    fn requires_analysis(timeline: &TimelineState) -> bool {
+    /// 【为什么还要减去 `analysis_abandoned`】"门禁在等"只说明**有理由等**，不说明
+    /// "值得无限等"。一个卡死的分析任务（后端初始化失败、worker 永久阻塞）会让渲染
+    /// 永远不跑；超时之后那根被记进 `analysis_abandoned`，这里就不再为它挡住渲染 ——
+    /// 降级输出（内核在缺少原线时有既定回退）永远好过一条无法被满足的等待。
+    fn requires_analysis(&self, timeline: &TimelineState) -> bool {
+        let abandoned = self.analysis_abandoned.lock_or_recover();
         timeline.params_by_root_track.keys().any(|root| {
-            hifishifter_kernel::pitch_analysis::analysis::root_pitch_assembly_pending(
-                timeline, root,
-            ) && timeline.clips.iter().any(|clip| {
-                timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root.as_str())
-                    && hifishifter_kernel::pitch_editing::does_clip_need_processor_render(
-                        timeline,
-                        clip,
-                        clip.start_sec,
-                    )
-            })
+            !abandoned.contains(root)
+                && hifishifter_kernel::pitch_analysis::analysis::root_pitch_assembly_pending(
+                    timeline, root,
+                )
+                && timeline.clips.iter().any(|clip| {
+                    timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root.as_str())
+                        && hifishifter_kernel::pitch_editing::does_clip_need_processor_render(
+                            timeline,
+                            clip,
+                            clip.start_sec,
+                        )
+                })
         })
+    }
+
+    /// 此刻**正在等原线**的那些根（`RetryState` 的超时分支据此记账）。
+    ///
+    /// 【为什么取锁要分开】调用方（actor 循环）随后要写 `analysis_abandoned`，而
+    /// `requires_analysis` 会在**持时间线锁**的情况下读它。两把锁的获取顺序必须处处
+    /// 一致（先时间线、后 abandoned），所以这里先算完、把时间线锁放掉再交给调用方。
+    fn pending_analysis_roots(&self) -> Vec<String> {
+        let timeline = self.timeline.lock_or_recover();
+        timeline
+            .params_by_root_track
+            .keys()
+            .filter(|root| {
+                hifishifter_kernel::pitch_analysis::analysis::root_pitch_assembly_pending(
+                    &timeline, root,
+                )
+            })
+            .cloned()
+            .collect()
     }
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
@@ -1385,6 +1444,11 @@ impl EditorSession {
             hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
         )?;
         // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
+        //
+        // 【为什么这里要撤销"放弃等待"】这一刻是"该为新素材重新分析"的唯一语义点：
+        // 上一轮素材上卡死的分析结论不该跟着新素材走，否则新录的东西会被当成
+        // "算不出来"，直接降级渲染（见 `analysis_abandoned` 的字段说明）。
+        self.analysis_abandoned.lock_or_recover().clear();
         for params in timeline.params_by_root_track.values_mut() {
             params.pitch_orig_key = None;
             params.dyn_orig_key = None;
@@ -1525,6 +1589,8 @@ impl EditorSession {
             timeline.ensure_params_for_root(&root);
         }
         // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
+        // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
+        self.analysis_abandoned.lock_or_recover().clear();
         for params in timeline.params_by_root_track.values_mut() {
             params.pitch_orig_key = None;
             params.dyn_orig_key = None;
@@ -2199,7 +2265,7 @@ impl EditorSession {
             .unwrap_or_default();
         let host_pending = states.iter().any(|state| state.0);
         let host_error = states.into_iter().find_map(|state| state.1);
-        let analysis_pending = Self::requires_analysis(&self.timeline.lock_or_recover());
+        let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
         // 【为什么不是"有片段缺 source_path 就算在途"】`unavailable` 的三类成因都是终态
         // （folder 父轨 / 样本读取失败 / 超期未认领）。把它们也算作"进行中"会让应用状态
@@ -2742,6 +2808,157 @@ pub(crate) mod tests {
             "参数写入必须推进渲染版本"
         );
         session.close();
+    }
+
+    /// 临时测量：素材长度 → 从画线到收敛要多久（用来判断 60 秒上限够不够）。
+    #[test]
+    #[ignore]
+    fn measure_convergence_against_material_length() {
+        for seconds in [2_u32, 10, 30] {
+            let owner = Arc::new(ExtensionOwner::default());
+            owner.set_setup_sample_rate(48_000.0);
+            owner.note_binding_window_closed_without_ara();
+            let transfer = owner.transfer();
+            transfer.note_project_rate(48_000.0);
+            transfer.start().unwrap();
+            let frames = 48_000_usize;
+            let samples: &'static [f32] =
+                Box::leak(vec![0.4_f32; frames].into_boxed_slice());
+            for index in 0..i64::from(seconds) {
+                transfer.on_block(crate::transfer::InputBlock {
+                    start: index * frames as i64,
+                    frames,
+                    sample_rate: 48_000.0,
+                    planes: [Some(samples), Some(samples)],
+                    playing: true,
+                });
+            }
+            transfer.stop().unwrap();
+            let session = owner.editor_session().unwrap();
+            session.ensure_loaded(true).unwrap();
+            let root = session
+                .timeline
+                .lock_or_recover()
+                .params_by_root_track
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let (reply, reply_rx) = mpsc::channel();
+            let (events, _events_rx) = mpsc::sync_channel(4096);
+            session
+                .enqueue(UiRequest {
+                    id: 1,
+                    command: "set_param_frames".into(),
+                    args: json!({
+                        "trackId": root,
+                        "param": "pitch",
+                        "startFrame": 0,
+                        "values": vec![7.0_f32; 16],
+                        "checkpoint": true,
+                    }),
+                    sink: UiSink {
+                        view_id: "measure".into(),
+                        reply,
+                        events,
+                        closed: Arc::new(AtomicBool::new(false)),
+                    },
+                    link: None,
+                })
+                .unwrap();
+            let _ = reply_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let started = Instant::now();
+            let deadline = Instant::now() + Duration::from_secs(600);
+            while Instant::now() < deadline && session.state()["pending"] == true {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            println!(
+                "MEASURE seconds={seconds} pending={} elapsed={:?}",
+                session.state()["pending"],
+                started.elapsed()
+            );
+            session.close();
+        }
+    }
+
+    /// **画完参数线之后，播放必须真的听到处理结果 —— 由 actor 自己收敛。**
+    ///
+    /// 【为什么这条必须存在】前面两条只钉到"渲染输入里带着曲线"，而用户的判据是
+    /// **听到**。中间还有三步会各自静默失效：分析门禁（`start_transfer_render` 早退）、
+    /// 版本闸（跳过这次合成）、输出仲裁（发布出来的不是处理结果）。
+    ///
+    /// 【为什么必须让**真 actor** 跑】自动应用的重试与放弃全部发生在 actor 循环里
+    /// （`RetryState::classify` 的 2 秒判定、60 秒上限、`settled`）。手工一步步调
+    /// `start_transfer_render` 会把那一整套绕过去 —— 而用户报障的正是"卡在正在自动
+    /// 应用"：那恰恰是 `settled` 之后的状态。所以这里只投一条真实命令，剩下交给 actor。
+    #[test]
+    fn a_drawn_curve_reaches_the_processed_output() {
+        let owner = transfer_owner_with_a_take();
+        let session = owner.editor_session().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.ensure_loaded(true).unwrap();
+            let root = session
+                .timeline
+                .lock_or_recover()
+                .params_by_root_track
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            assert!(owner.transfer().has_material(), "夹具必须真的录到了素材");
+            // 与前端完全同一条路：排队 → actor 分发 → `params::set_param_frames`。
+            // 这就是"用户画了一条音高线"，而 actor 会因此自己排一次自动渲染。
+            let (reply, reply_rx) = mpsc::channel();
+            let (events, _events_rx) = mpsc::sync_channel(4096);
+            session
+                .enqueue(UiRequest {
+                    id: 1,
+                    command: "set_param_frames".into(),
+                    args: json!({
+                        "trackId": root,
+                        "param": "pitch",
+                        "startFrame": 0,
+                        "values": vec![7.0_f32; 16],
+                        "checkpoint": true,
+                    }),
+                    sink: UiSink {
+                        view_id: "curve-test".into(),
+                        reply,
+                        events,
+                        closed: Arc::new(AtomicBool::new(false)),
+                    },
+                    link: None,
+                })
+                .unwrap();
+            let reply = reply_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("画线命令必须有回信");
+            assert_eq!(reply["ok"], true, "画一条音高线必须成功：{reply}");
+            // 现在**什么都不做**，只等 actor 自己收敛。
+            let deadline = Instant::now() + Duration::from_secs(180);
+            while Instant::now() < deadline
+                && (session.state()["pending"] == true
+                    || owner.transfer_output()
+                        != crate::render::extension::TransferOutput::Processed)
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(
+                owner.transfer_output(),
+                crate::render::extension::TransferOutput::Processed,
+                "画完参数线之后必须听到处理结果，而不是直通/原始磁带"
+            );
+            assert_eq!(
+                session.state()["pending"],
+                false,
+                "状态栏必须收敛到「已应用」，而不是永远停在「正在自动应用」：{}",
+                session.state()
+            );
+        }));
+        session.close();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// **只发布、不标脏的曲线改动也必须推进渲染版本。**
@@ -4869,7 +5086,15 @@ pub(crate) mod tests {
         assert!(editor.render_error.lock_or_recover().is_none());
         document.close();
     }
-    /// 没有手绘pitch的HiFiGAN气声/张力/共振峰也要等原线；None与纯混音仍能立即应用。
+    /// 没有手绘pitch的HiFiGAN气声/张力/共振峰也**要求**原线；None与纯混音不要求。
+    ///
+    /// 【为什么断言的是渲染门禁而不是 `requires_analysis`】"这条配置要不要原线"是**静态**
+    /// 事实（`does_clip_need_processor_render`），而"现在要不要等"是**动态**问题 ——
+    /// 后者还要减去"已经证明产不出"的那些内容（见 `clip_pitch_analysis_can_be_produced`）。
+    /// 用一个会随调度时机变化的读数去钉静态事实，测出来的只会是时序：夹具的 4 帧素材
+    /// 本来就分析不出东西，它的内容键随时可能被标成"产不出"。所以这条按内核的静态判据
+    /// 断言，动态那一半由 `a_root_whose_line_can_never_be_produced_stops_blocking_the_render`
+    /// 在**内核侧**钉住。
     #[test]
     fn effect_only_analysis_gate_does_not_block_none_or_plain_mix() {
         let (_model, owner, _identity) = fixture();
@@ -4880,6 +5105,15 @@ pub(crate) mod tests {
         timeline.ensure_params_for_root(&root);
         timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::NsfHifiganOnnx;
         timeline.tracks[0].compose_enabled = true;
+        let needs_render = |timeline: &TimelineState| {
+            timeline.clips.iter().any(|clip| {
+                hifishifter_kernel::pitch_editing::does_clip_need_processor_render(
+                    timeline,
+                    clip,
+                    clip.start_sec,
+                )
+            })
+        };
         for effect in ["breath_enabled", "hifigan_tension", "formant_shift_cents"] {
             let params = timeline.params_by_root_track.get_mut(&root).unwrap();
             params.extra_params.clear();
@@ -4895,17 +5129,27 @@ pub(crate) mod tests {
             params.pitch_orig_key = None;
             assert!(!params.pitch_edit_user_modified);
             assert!(
-                EditorSession::requires_analysis(&timeline),
-                "{effect}缺原线不能先发布未处理PCM"
+                needs_render(&timeline),
+                "{effect}缺原线必须要求处理器渲染（否则效果会被静默丢掉）"
             );
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::None;
-            assert!(!EditorSession::requires_analysis(&timeline));
+            assert!(
+                !needs_render(&timeline),
+                "算法为 None 时纯混音不该要求处理器"
+            );
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::NsfHifiganOnnx;
         }
         let params = timeline.params_by_root_track.get_mut(&root).unwrap();
         params.extra_params.clear();
         params.extra_curves.clear();
-        assert!(!EditorSession::requires_analysis(&timeline));
+        assert!(
+            !needs_render(&timeline),
+            "没有曲线也没有效果 ⇒ 不要求处理器"
+        );
+        assert!(
+            !editor.requires_analysis(&timeline),
+            "没有任何东西要求原线 ⇒ 绝不能把渲染判成 pending"
+        );
         editor.close();
     }
     /// 三分钟真实授权PCM同进程Arc冻结，原GUI流式分析副本不受旧30秒门禁或整源复制影响。
