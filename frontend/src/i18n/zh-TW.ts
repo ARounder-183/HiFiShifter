@@ -2156,6 +2156,7 @@ export const zhTW = {
     transfer_option_limit_unlimited: "不限",
     transfer_output_processed: "處理結果",
     transfer_output_raw: "原始錄音（合成中）",
+    transfer_output_stale: "處理結果（上一版）",
     transfer_output_passthrough: "宿主原聲",
     transfer_output_recording: "正在直通宿主",
     transfer_now_playing: "目前聽到：{what}",

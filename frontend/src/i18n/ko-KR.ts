@@ -2208,6 +2208,7 @@ export const koKR = {
     transfer_option_limit_unlimited: "제한 없음",
     transfer_output_processed: "처리 결과",
     transfer_output_raw: "원본 녹음(합성 중)",
+    transfer_output_stale: "처리 결과(이전 테이크)",
     transfer_output_passthrough: "호스트 원음",
     transfer_output_recording: "호스트 통과 중",
     transfer_now_playing: "지금 듣는 것: {what}",

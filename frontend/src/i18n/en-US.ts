@@ -2223,6 +2223,7 @@ export const enUS = {
     transfer_option_limit_unlimited: "No limit",
     transfer_output_processed: "Processed",
     transfer_output_raw: "Raw take (synthesising)",
+    transfer_output_stale: "Processed (previous take)",
     transfer_output_passthrough: "Host audio",
     transfer_output_recording: "Passing the host through",
     transfer_now_playing: "Now hearing: {what}",
