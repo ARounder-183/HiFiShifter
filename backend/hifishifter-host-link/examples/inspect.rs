@@ -2,7 +2,7 @@
 //!
 //! 交接是文件，所以"用户出问题了给我看什么"这个问题的答案从"复现一次连接"
 //! 变成"把这个目录发给我"。这个工具就是把那个目录变成一段可读的报告 ——
-//! 也是 `docs/host-timeline-channel.md` 里那份「症状 → 原因」表的新后端。
+//! 也是 `docs/host-link.md` 里那份「症状 → 原因」表的新后端。
 //!
 //! ```text
 //! cargo run -p hifishifter-host-link --example inspect -- <工作区目录> [--audio]

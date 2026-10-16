@@ -219,7 +219,7 @@ pub struct SourceEntry {
 /// 一条**没能进来**的东西。
 ///
 /// 【为什么要结构化，而不是一句字符串】管道时代被跳过的 clip 会**消失**
-/// （`docs/host-timeline-channel.md` 原文：「跳过的 clip 会消失，不是变成『空 clip』」），
+/// （`docs/host-link.md` 原文：「跳过的 clip 会消失，不是变成『空 clip』」），
 /// 而用户看到的只有一句「跳过了 N 项」。把 id 与原因留下来，面板才能说清**是什么**没进来。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LossEntry {
@@ -243,7 +243,7 @@ pub struct LinkManifest {
     pub host_label: String,
     pub created_unix_ms: u64,
     pub producer: Producer,
-    /// `TimelineState`。字段契约见 `docs/host-timeline-channel.md`。
+    /// `TimelineState`。字段契约见 `docs/host-link.md`。
     ///
     /// 【为什么仍是自由 JSON】生产者**可以是第三方**的宿主扩展，
     /// 而 `TimelineState` 的类型住在内核里。协议 crate 不依赖内核 —— 那份契约的价值
