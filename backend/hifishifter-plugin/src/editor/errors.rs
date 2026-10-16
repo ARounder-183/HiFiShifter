@@ -10,7 +10,7 @@
 //! `Response.code`），客户端按码分类；字符串只做展示。**码的取值是协议承诺：
 //! 只增不改**。分类判定看码，码不存在（旧产生点/旧服务端）才退回字符串匹配。
 
-use hifishifter_host_channel::error_code;
+use hifishifter_host_link::error_code;
 
 /// 一条错误的稳定措辞与协议码。
 pub(crate) struct TerminalError {

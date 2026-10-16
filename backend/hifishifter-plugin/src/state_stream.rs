@@ -39,7 +39,7 @@ pub(crate) unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> 
         done += actual as usize;
     }
     let length = u32::from_le_bytes(prefix) as usize;
-    if length > hifishifter_host_channel::MAX_FRAME {
+    if length > hifishifter_host_link::MAX_COMPONENT_STATE {
         return Err("state too large".into());
     }
     let mut bytes = vec![0; length];
@@ -63,7 +63,7 @@ pub(crate) unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> 
 }
 /// 宿主拥有有效可写IBStream；全部字节完成前不报告成功。
 pub(crate) unsafe fn write_state(stream: *mut c_void, bytes: &[u8]) -> Result<(), String> {
-    if stream.is_null() || bytes.len() > hifishifter_host_channel::MAX_FRAME {
+    if stream.is_null() || bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
         return Err("invalid state stream/length".into());
     }
     let vtbl = unsafe { &**stream.cast::<*const StreamVtbl>() };

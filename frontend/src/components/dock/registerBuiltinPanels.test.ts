@@ -20,7 +20,7 @@ import { getPanel } from "../../features/dock/panelRegistry";
 import { isFormFloating, isFormVisible } from "../../features/dock/dockTree";
 import type { DockLayout } from "../../features/dock/dockTypes";
 import {
-    PANEL_ARA_HOST,
+    PANEL_HOST_LINK,
     PANEL_NOTEBOOK,
     PANEL_UNDO_HISTORY,
     registerBuiltinPanels,
@@ -100,20 +100,20 @@ test("components/dock/registerBuiltinPanels.test.ts default float placements", (
 });
 
 /**
- * ARA 宿主会话面板的声明契约。
+ * 宿主链接面板的声明契约。
  *
  * 【要钉死什么】它此前是 App 与工作区之间的一整条**常驻横条**：独立 App 的多数
  * 用户从不连宿主，却一直占着工作区高度。改成面板之后，"默认关闭 + 不进窗口菜单 +
  * 不可停靠"这三条声明就是"不再常驻"的全部依据 —— 少任何一条都会让它重新变成
  * 用户无法回避的表面（例如混进「窗口」菜单就与日常面板等价了）。
  */
-test("the ARA host session panel is an opt-in floating panel, never part of the work layout", () => {
+test("the host link panel is an opt-in floating panel, never part of the work layout", () => {
     registerBuiltinPanels();
     const base = ensureRegisteredPanels(createDefaultDockLayout());
-    assert(!isFormVisible(base, PANEL_ARA_HOST), "the ARA host panel is closed by default");
+    assert(!isFormVisible(base, PANEL_HOST_LINK), "the host link panel is closed by default");
 
-    const definition = getPanel(PANEL_ARA_HOST);
-    if (!definition) throw new Error("the ARA host panel is registered");
+    const definition = getPanel(PANEL_HOST_LINK);
+    if (!definition) throw new Error("the host link panel is registered");
     assert(
         definition.excludeFromWindowMenu === true,
         "low-frequency entries stay out of the Window menu",
@@ -121,6 +121,6 @@ test("the ARA host session panel is an opt-in floating panel, never part of the 
     assert(definition.dockable === false, "a session panel must not be woven into the layout");
     assert(definition.singleton === true, "reopening focuses the same session window");
 
-    const opened = openPanelInLayout(base, PANEL_ARA_HOST);
-    assert(isFormFloating(opened, PANEL_ARA_HOST), "the ARA host panel opens floating");
+    const opened = openPanelInLayout(base, PANEL_HOST_LINK);
+    assert(isFormFloating(opened, PANEL_HOST_LINK), "the host link panel opens floating");
 });

@@ -609,6 +609,19 @@ pub(super) fn dispatch(
             ));
         }
         "plugin_get_apply_state" => return Ok(session.state()),
+        // 宿主链接：导出工作区供独立 App 编辑，并回报当前状态。
+        //
+        // 【为什么导出是异步的】它要写音频（可能上百 MB）。命令分发与 actor 循环是
+        // 同一个线程，同步写完会让 UI 在整个导出期间无响应 —— 而"点一下导出，
+        // 然后去独立 App 里编辑"正是这个功能唯一的用法。结果由 `host_link_status` 轮询。
+        "host_link_export" => {
+            let owner = session
+                .transfer_owner()
+                .ok_or("host link needs this instance to be bound to a host document")?;
+            return crate::render::link::start_export(owner);
+        }
+        "host_link_status" => return Ok(crate::render::link::status()),
+        "host_link_release" => return Ok(crate::render::link::release()),
         // Help 菜单的「打开日志目录」。
         //
         // 【为什么同时回报路径】打开资源管理器是尽力而为（[`reveal_directory`]）；

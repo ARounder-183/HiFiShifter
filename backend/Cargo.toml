@@ -8,7 +8,7 @@
 # 设计依据：docs/superpowers/specs/2026-10-04-ara-plugin-v1-design.md §4.1
 [workspace]
 resolver = "2"
-members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin", "hifishifter-host-channel", "hifishifter-clipboard"]
+members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin", "hifishifter-host-link", "hifishifter-clipboard"]
 # 打补丁的第三方 crate 不进 workspace（它有自己的构建语义，也不该被
 # `cargo test --workspace` 拉进来）。testkit 同理：它是独立工作区根，
 # 且 cpp-interop 会拉 C++ SDK 构建，绝不能被常规 `--workspace` 连带编译。

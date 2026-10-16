@@ -12,10 +12,11 @@ import {
 import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
-import { AraHostPanel } from "./features/ara/AraHostPanel";
+import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { TransferPanel } from "./features/transfer/TransferPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
+import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
@@ -94,7 +95,7 @@ import { DockRoot } from "./components/dock/DockRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
-    PANEL_ARA_HOST,
+    PANEL_HOST_LINK,
     PANEL_TRANSFER,
     PANEL_FILE_BROWSER,
     PANEL_NOTEBOOK,
@@ -3726,10 +3727,10 @@ function AppInner() {
     // 外观设置：曾经是独立 OS 窗口（`appearance.html` + 独立 React 根），现在复用
     // 停靠机制 —— 居中浮出、不可停靠、不进「窗口」菜单（见注册表声明）。
     setPanelRenderer(PANEL_APPEARANCE, (form) => <AppearanceSettingsPanel formId={form.id} />);
-    // ARA 宿主会话（仅独立 App）：默认关闭的浮出面板，入口在「视图」菜单。
-    // 曾经是一整条常驻横条，一直占着工作区高度（见注册表声明里的取舍）。
-    setPanelRenderer(PANEL_ARA_HOST, () => (
-        <AraHostPanel
+    // 宿主链接（仅独立 App）：默认关闭的浮出面板，入口在「视图」菜单。
+    // 它取代了旧的 "ARA 宿主连接" —— 宿主导出的是一份磁盘上的工作区，没有实例可连。
+    setPanelRenderer(PANEL_HOST_LINK, () => (
+        <HostLinkPanel
             dirty={projectDirty}
             onTimelineChanged={async () => {
                 await dispatch(fetchTimeline()).unwrap();
@@ -4465,11 +4466,19 @@ function AppInner() {
                   带动本组件重渲染。）
                 */}
                 {isPluginMode() ? (
-                    <PluginApplyStatus
-                        onTimelineChanged={async () => {
-                            await dispatch(fetchTimeline()).unwrap();
-                        }}
-                    />
+                    <>
+                        <PluginApplyStatus
+                            onTimelineChanged={async () => {
+                                await dispatch(fetchTimeline()).unwrap();
+                            }}
+                        />
+                        {/*
+                          「导出到 HiFiShifter」：插件把工作区导出到磁盘，用户再在独立
+                          App 里打开它编辑。它同样是一段状态读数 + 一个动作，归状态栏
+                          （见 `HostLinkExportControl` 的文件头）。
+                        */}
+                        <HostLinkExportControl />
+                    </>
                 ) : null}
             </Flex>
         </Flex>

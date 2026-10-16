@@ -236,7 +236,7 @@ describe("表单控件：走设计系统原语", () => {
      * 它们正是"绕开原语"这类回归的原始出处。
      */
     const CONVERTED_SURFACES = [
-        join("src", "features", "ara", "AraHostPanel.tsx"),
+        join("src", "features", "hostLink", "HostLinkPanel.tsx"),
         join("src", "features", "ara", "PluginApplyStatus.tsx"),
         join("src", "components", "layout", "keybindings", "KeybindingsActionRow.tsx"),
     ];

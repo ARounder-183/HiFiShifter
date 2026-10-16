@@ -15,6 +15,7 @@ pub(crate) mod budget;
 pub(crate) mod document;
 pub(crate) mod extension;
 pub(crate) mod input;
+pub(crate) mod link;
 pub(crate) mod ownership;
 pub(crate) mod preparation;
 pub(crate) mod snapshot;

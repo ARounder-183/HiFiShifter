@@ -412,3 +412,338 @@ mod tests {
         assert!(report.dropped_sources[0].reason.contains("byte budget"));
     }
 }
+
+// ─── 宿主几何归属 ─────────────────────────────────────────────────────────────
+
+/// 几何差异列表的上限。
+///
+/// 【为什么有上限】拒绝原因是给人看的。一条规则动辄产生上百项差异时，
+/// 列全反而没有信息量；前八项足以定位用户动了什么。
+pub const GEOMETRY_DIFF_LIMIT: usize = 8;
+
+/// 宿主拥有、本地不该改的字段的**正向**投影。
+///
+/// 【为什么是正向名单，而不是「整份状态减掉几个例外」】旧判据把整个 `TimelineState`
+/// 序列化后手工挖掉十几项，等于用「整份状态相等」表达「这几个字段不许变」。
+/// 但 `TimelineState` 是独立 App 的**活状态**：后台子系统（假立体声折叠扫描、
+/// 波形/音高分析、渲染缓存回填）会在用户**没有做任何编辑**时写它。只要写到的字段
+/// 不在例外名单里，提交就被拒 —— 而报错文案固定指控「几何/增益/名字」，与实际原因无关。
+///
+/// 正向名单把判据变成「我知道宿主拥有哪些字段，只比这些」。
+///
+/// 【为什么 `bpm` / `project_sec` 不在名单里】二者都由宿主单方面决定：插件每次导出都
+/// 从宿主时钟重读 `bpm`，并重算 `project_sec`。本地改动既提交不上去，
+/// 也不代表「未保存的宿主编辑」，放进判据只会制造假失败。
+///
+/// 【为什么放在内核里】两侧都要用它：**消费者**导出时留下基线，**生产者**在回写时
+/// 比对。两处各写一份必然漂移，而漂移的症状是「门禁在两边给出不同答案」——
+/// 最难排查的一类。判据只有一份实现。
+pub fn host_geometry_projection(timeline: &TimelineState) -> serde_json::Value {
+    let mut normalized = timeline.clone();
+    // 【为什么要按 take 归一化，而不是按扁平投影】拖 clip 的扁平字段是**投影**，
+    // `takes` 才是权威。宿主侧的一次"访问切换"会重新派生时间轴，扁平字段的填充
+    // 时机随之改变 —— 实测同一份宿主状态下 `source_end_sec` 会从 `0.0` 变成
+    // `9.07e-5`，于是判据把"什么都没发生"报成"你改了宿主字段"。
+    //
+    // 反方向（扁平 → take）就是旧实现的写法，它把投影当成了真值，正是这类抖动的来源。
+    // 按 take 归一化之后，判据只依赖权威表示，与扁平字段恰好在哪一次被填充无关。
+    for clip in &mut normalized.clips {
+        clip.normalize_takes();
+    }
+    let clips: Vec<_> = normalized
+        .clips
+        .iter()
+        .map(|clip| {
+            serde_json::json!({
+                "id": clip.id,
+                "track_id": clip.track_id,
+                "name": clip.name,
+                "start_sec": clip.start_sec,
+                "length_sec": clip.length_sec,
+                "source_start_sec": clip.source_start_sec,
+                "source_end_sec": clip.source_end_sec,
+                "playback_rate": clip.playback_rate,
+                "clip_playback_rate": clip.clip_playback_rate,
+                "gain": clip.gain,
+                "muted": clip.muted,
+                "snap_offset_sec": clip.snap_offset_sec,
+                "fade_in_sec": clip.fade_in_sec,
+                "fade_out_sec": clip.fade_out_sec,
+                "fade_in_shape": clip.fade_in_shape,
+                "fade_out_shape": clip.fade_out_shape,
+                "fade_in_dir": clip.fade_in_dir,
+                "fade_out_dir": clip.fade_out_dir,
+                "auto_fade_in_sec": clip.auto_fade_in_sec,
+                "auto_fade_out_sec": clip.auto_fade_out_sec,
+            })
+        })
+        .collect();
+    let tracks: Vec<_> = normalized
+        .tracks
+        .iter()
+        .map(|track| {
+            serde_json::json!({
+                "id": track.id,
+                "name": track.name,
+                "order": track.order,
+                "parent_id": track.parent_id,
+            })
+        })
+        .collect();
+    serde_json::json!({ "clips": clips, "tracks": tracks })
+}
+
+/// 逐路径收集两棵几何投影的差异，最多 [`GEOMETRY_DIFF_LIMIT`] 条。
+///
+/// 拒绝时用户唯一能据以行动的信息就是这份路径列表：说「几何变了」没有用，
+/// 说 `clips[2].start_sec: 0.0 -> 0.25` 才有用。
+pub fn geometry_differences(baseline: &serde_json::Value, current: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_json_differences(baseline, current, "", GEOMETRY_DIFF_LIMIT, &mut out);
+    out
+}
+
+fn collect_json_differences(
+    baseline: &serde_json::Value,
+    current: &serde_json::Value,
+    path: &str,
+    limit: usize,
+    out: &mut Vec<String>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    match (baseline, current) {
+        (serde_json::Value::Object(before), serde_json::Value::Object(after)) => {
+            for (key, value) in before {
+                if out.len() >= limit {
+                    return;
+                }
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match after.get(key) {
+                    Some(other) => collect_json_differences(value, other, &child, limit, out),
+                    None => out.push(format!("{child}: removed")),
+                }
+            }
+            for key in after.keys() {
+                if out.len() >= limit {
+                    return;
+                }
+                if !before.contains_key(key) {
+                    let child = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    out.push(format!("{child}: added"));
+                }
+            }
+        }
+        (serde_json::Value::Array(before), serde_json::Value::Array(after)) => {
+            if before.len() != after.len() {
+                out.push(format!("{path}: length {} -> {}", before.len(), after.len()));
+                return;
+            }
+            for (index, (x, y)) in before.iter().zip(after.iter()).enumerate() {
+                if out.len() >= limit {
+                    return;
+                }
+                collect_json_differences(x, y, &format!("{path}[{index}]"), limit, out);
+            }
+        }
+        _ => {
+            if !json_values_agree(baseline, current) {
+                out.push(format!(
+                    "{path}: {} -> {}",
+                    compact_json_value(baseline),
+                    compact_json_value(current)
+                ));
+            }
+        }
+    }
+}
+
+/// 两个标量是否**在判据意义上**相等。
+///
+/// 【为什么浮点要带容差】这个判据回答的是「宿主的时间轴变了吗」，不是「比特相同吗」。
+/// 而同一份 `TimelineState` 经过不同的计算路径会给出最后一位不同的浮点值：
+/// 实测同一份导出，`length_sec` 在两次投影之间差 1 ULP（`9.0702947845805e-5` 对
+/// `9.070294784580499e-5`）。把这种噪声报成"你改了宿主字段"，正是旧实现里
+/// 用户无法据以行动的那一类假失败。
+///
+/// 【容差为什么是 1e-9】它只在**远小于**任何真实编辑的尺度上放行：最细的编辑也是
+/// 一个采样点（48 kHz 下 20 µs = 2e-5 s），比容差大四个数量级；
+/// 而 ULP 噪声在 1e-4 这个量级上只有 1e-20 s，比容差小十一个数量级。
+/// 两边各有巨大的余量，所以它既不会掩饰真实改动，也不会再制造假失败。
+fn json_values_agree(baseline: &serde_json::Value, current: &serde_json::Value) -> bool {
+    if let (Some(a), Some(b)) = (baseline.as_f64(), current.as_f64()) {
+        return (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
+    }
+    baseline == current
+}
+
+fn compact_json_value(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= 64 {
+        return text;
+    }
+    let mut truncated: String = text.chars().take(61).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    use crate::state::TimelineState;
+
+    fn timeline_with_one_clip() -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "bpm": 120.0,
+            "project_sec": 8.0,
+            "tracks": [{"id": "t1", "name": "Track", "order": 0}],
+            "clips": [{
+                "id": "c1", "track_id": "t1", "name": "Clip",
+                "start_sec": 0.0, "length_sec": 2.0,
+                "source_start_sec": 0.0, "source_end_sec": 2.0,
+                "playback_rate": 1.0,
+            }],
+        }))
+        .unwrap()
+    }
+
+    /// 同一份时间线的两次投影必须逐位相同 —— 否则每次提交都会误报漂移。
+    #[test]
+    fn the_projection_is_deterministic() {
+        let timeline = timeline_with_one_clip();
+        assert_eq!(
+            host_geometry_projection(&timeline),
+            host_geometry_projection(&timeline)
+        );
+    }
+
+    /// **参数改动不是几何漂移。** 曲线与轨道混音由用户拥有，不属于正向名单。
+    #[test]
+    fn parameter_edits_are_not_geometry_drift() {
+        let before = timeline_with_one_clip();
+        let mut after = before.clone();
+        after.tracks[0].volume = 0.5;
+        after.tracks[0].muted = true;
+        after.params_by_root_track.insert(
+            "t1".into(),
+            serde_json::from_value(serde_json::json!({
+                "frame_period_ms": 10.0,
+                "pitch_edit": [1.0, 2.0],
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            host_geometry_projection(&before),
+            host_geometry_projection(&after)
+        );
+        assert!(geometry_differences(
+            &host_geometry_projection(&before),
+            &host_geometry_projection(&after)
+        )
+        .is_empty());
+    }
+
+    /// **几何改动必须被指名字段地报出来。**
+    #[test]
+    fn geometry_drift_names_the_field() {
+        let before = timeline_with_one_clip();
+        let mut after = before.clone();
+        after.clips[0].start_sec = 0.25;
+        after.clips[0].fade_in_sec = 0.1;
+        let differences = geometry_differences(
+            &host_geometry_projection(&before),
+            &host_geometry_projection(&after),
+        );
+        assert!(
+            differences
+                .iter()
+                .any(|line| line.contains("clips[0].start_sec")),
+            "{differences:?}"
+        );
+        assert!(
+            differences
+                .iter()
+                .any(|line| line.contains("clips[0].fade_in_sec")),
+            "{differences:?}"
+        );
+    }
+
+    /// 删除与新增都是差异，且长度变化被单独指出。
+    #[test]
+    fn clip_add_and_remove_are_both_drift() {
+        let before = timeline_with_one_clip();
+        let mut after = before.clone();
+        after.clips.clear();
+        assert!(
+            geometry_differences(
+                &host_geometry_projection(&before),
+                &host_geometry_projection(&after)
+            )
+            .iter()
+            .any(|line| line.contains("length 1 -> 0")),
+            "整条 clips 数组的变化必须被指出"
+        );
+    }
+
+    /// **最后一位的浮点噪声不是漂移**，而真实的编辑仍然是漂移。
+    ///
+    /// 【为什么这条必须钉住】同一份时间轴经过不同的计算路径会给出 1 ULP 的差
+    /// （JSON 往返、f32/f64、take 归一化顺序都会）。把噪声报成"你改了宿主字段"，
+    /// 用户拿到的是一句无法据以行动的指控 —— 这正是旧实现最大的可用性问题。
+    #[test]
+    fn last_bit_float_noise_is_not_drift_but_a_real_edit_is() {
+        let mut before = timeline_with_one_clip();
+        before.clips[0].length_sec = 9.0702947845805e-5;
+        let mut noisy = before.clone();
+        noisy.clips[0].length_sec = 9.070294784580499e-5;
+        assert!(
+            geometry_differences(
+                &host_geometry_projection(&before),
+                &host_geometry_projection(&noisy)
+            )
+            .is_empty(),
+            "1 ULP 的差不是漂移"
+        );
+
+        // 一个采样点（48 kHz 下 20 µs）是真实编辑，必须被报出来。
+        let mut edited = before.clone();
+        edited.clips[0].length_sec += 2.0e-5;
+        let differences = geometry_differences(
+            &host_geometry_projection(&before),
+            &host_geometry_projection(&edited),
+        );
+        assert!(
+            differences.iter().any(|line| line.contains("length_sec")),
+            "{differences:?}"
+        );
+    }
+
+    /// 差异列表必须有上限 —— 拒绝原因是给人看的。
+    #[test]
+    fn differences_are_bounded() {
+        let before = timeline_with_one_clip();
+        let mut after = before.clone();
+        let mut clips = Vec::new();
+        for index in 0..64 {
+            let mut clip = after.clips[0].clone();
+            clip.id = format!("c{index}");
+            clip.start_sec = index as f64;
+            clips.push(clip);
+        }
+        after.clips = clips;
+        let differences = geometry_differences(
+            &host_geometry_projection(&before),
+            &host_geometry_projection(&after),
+        );
+        assert!(differences.len() <= GEOMETRY_DIFF_LIMIT, "{differences:?}");
+    }
+}

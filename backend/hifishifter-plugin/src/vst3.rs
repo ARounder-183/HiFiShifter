@@ -997,9 +997,6 @@ unsafe fn processor_release(processor: *mut Processor) -> u32 {
     let remaining = previous - 1;
     if remaining == 0 {
         unsafe {
-            (*processor).extension_owner.stop_channel();
-        }
-        unsafe {
             (*processor).extension_owner.stop_editor();
         }
         // SAFETY: 引用计数归零，且没有其它持有者。
@@ -1799,7 +1796,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 【为什么 in-place 时要把掩码压平】见 `input_output_share_bus`：快照写下的
             // "这一段是静音"会在下一块被我们自己的捕获读成"宿主没给输入"。掩码只是提示，
             // 压平成"非静音"永远是安全的（最坏情况是宿主少省一次算力）。
-            if unsafe { crate::audio_abi::input_output_share_bus(data) } {
+            if crate::audio_abi::input_output_share_bus(data) {
                 // SAFETY: 输出总线已在上面校验过；同一份结构在回调期间存活。
                 unsafe { (*data.outputs).silence_flags = 0 };
             }

@@ -186,7 +186,7 @@ export interface ProjectMeta {
  * 两种处境，处置方式不同：前者是用法问题、要给具体指引，后者只是等待。把两者压成
  * 一个布尔，界面就只能给出一句对谁都不准的泛泛提示。
  *
- * 后端只给**语言无关**的分类名，文案按 catalog 本地化（与 `araApi.araErrorText`
+ * 后端只给**语言无关**的分类名，文案按 catalog 本地化（与 `hostLinkApi.hostLinkErrorText`
  * 同一原则）。
  *
  * 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务多个

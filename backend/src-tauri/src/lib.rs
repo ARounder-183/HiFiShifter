@@ -65,7 +65,7 @@ mod app_events;
 pub mod logging;
 mod zip_util;
 
-mod ara_bridge;
+mod link_bridge;
 mod audio_engine;
 pub(crate) mod commands;
 #[path = "audio/hfspeaks_v2.rs"]
@@ -302,7 +302,7 @@ pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::default())
-        .manage(ara_bridge::AraBridge::default())
+        .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // ── AppImage Mesa/EGL driver path ──────────────────────────
@@ -632,11 +632,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::ara_list_instances,
-            commands::ara_connect,
-            commands::ara_submit,
-            commands::ara_refresh,
-            commands::ara_disconnect,
+            commands::host_link_list,
+            commands::host_link_open,
+            commands::host_link_refresh,
+            commands::host_link_submit,
+            commands::host_link_release,
             commands::ping,
             commands::get_about_info,
             commands::analyze_clip_formants,

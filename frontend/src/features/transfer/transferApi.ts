@@ -1,10 +1,10 @@
 /**
  * Transfer 命令的前端门面。
  *
- * 【为什么与 `araApi` 分开】两条通路的目标完全不同：`araApi` 面向**独立 App** 连
- * 宿主，走 Tauri 命令；Transfer 面向**插件自己的窗口**，走插件 webview 的命令通道
- * （`invoke` 在插件模式下就是 postMessage）。放在一起会让"这个命令在哪种形态下可用"
- * 变得要靠读者推断。
+ * 【为什么与 `hostLinkApi` 分开】两条通路的目标完全不同：`hostLinkApi` 面向
+ * **独立 App** 打开宿主导出的工作区，走 Tauri 命令；Transfer 面向**插件自己的窗口**，
+ * 走插件 webview 的命令通道（`invoke` 在插件模式下就是 postMessage）。放在一起会让
+ * "这个命令在哪种形态下可用"变得要靠读者推断。
  *
  * 【为什么状态是拉取式】录制进度每 100ms 变一次，而宿主不会推送；轮询是唯一可行的
  * 形态，且它的代价只是一个整数读取（后端 `transfer_status` 不取渲染锁）。
@@ -124,11 +124,11 @@ export const transferApi = {
         invoke<TransferStatus>("transfer_set_options", patch),
 };
 
-/** 后端错误的可读文本；与 `araError` 同一套解包口径。 */
+/** 后端错误的可读文本；与 `hostLinkError` 同一套解包口径。 */
 /**
  * 语言无关的分类：宿主正在通过 ARA 供音，Transfer 不适用。
  *
- * 【为什么分类在后端、文案在前端】与 `araApi` 同一条纪律：后端只给稳定的分类串，
+ * 【为什么分类在后端、文案在前端】与 `hostLinkApi` 同一条纪律：后端只给稳定的分类串，
  * 文案按 catalog 本地化。这里因此不解析后端的中文/英文句子。
  */
 const TRANSFER_NOT_APPLICABLE_ARA = "transfer_not_applicable_ara";

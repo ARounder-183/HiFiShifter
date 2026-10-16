@@ -35,6 +35,13 @@ pub enum ReversePolicy {
     Materialize,
 }
 
+/// 宿主 PCM 的累计字节上限。
+///
+/// 【为什么不再是 512 MiB】那个数字来自"载荷要穿过一条 64 MiB 的 IPC 帧"的年代：
+/// 它守的是**传输**，不是磁盘。工作区交接把音频落成磁盘文件之后，唯一需要防的是
+/// "一次导入把内存吃光"，而不是"这一份能不能过管道"。16 GiB 留作一条理智线。
+pub const MAX_HOST_PCM_BYTES: usize = 16 * 1024 * 1024 * 1024;
+
 /// 在所有源/几何校验成功后生成只用于波形与分析的WAV，返回路径→宿主ID反向表。
 /// 音频渲染仍从ARA授权PCM注入；不回读这些文件作为宿主供音。
 pub fn materialize(
@@ -60,7 +67,7 @@ pub fn materialize_with_byte_limit(
     byte_limit: usize,
     reverse_policy: ReversePolicy,
 ) -> Result<(TimelineState, HashMap<String, String>), String> {
-    if byte_limit == 0 || byte_limit > 512 * 1024 * 1024 {
+    if byte_limit == 0 || byte_limit > MAX_HOST_PCM_BYTES {
         return Err("invalid host PCM byte limit".into());
     }
     if !timeline.bpm.is_finite()

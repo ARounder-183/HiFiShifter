@@ -15,7 +15,7 @@ dependencies = [
  "cpal",
  "encoding_rs",
  "hifishifter-clipboard",
- "hifishifter-host-channel",
+ "hifishifter-host-link",
  "hifishifter-kernel",
  "hound",
  "id3",
@@ -2017,14 +2017,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "hifishifter-host-channel"
+name = "hifishifter-host-link"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "hound",
  "log",
  "serde",
  "serde_json",
- "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2076,7 +2076,7 @@ dependencies = [
  "blake3",
  "chrono",
  "hifishifter-clipboard",
- "hifishifter-host-channel",
+ "hifishifter-host-link",
  "hifishifter-kernel",
  "log",
  "serde",

@@ -5,66 +5,55 @@
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
-/// 宿主时间轴源的发现与交换均在阻塞池运行，避免阻塞 WebView 消息泵。
+/// 宿主链接：把一台宿主导出的**工作区**打开成一份可编辑的工程。
 ///
-/// `source_kind` 一并返回：前端要能区分"REAPER 的 ARA 实例"与"Vegas 的桥接"，
-/// 而不是一律显示成 "ARA instance"（名字是自由字符串，不够结构化）。
+/// 【为什么不再有"连接"】工作区是磁盘上的目录，不随宿主进程生灭。
+/// 旧的一组命令（`ara_list_instances` / `ara_connect` / `ara_refresh` /
+/// `ara_submit` / `ara_disconnect`）在此之上多出了一整套生命周期：
+/// 发现目录、心跳、令牌、单客户端上限 —— 那些都是把文件内容塞进命名管道带来的，
+/// 写在文件里就都不需要了。
+///
+/// 全部在阻塞池上跑：它们要读/写音频文件，不能在 WebView 的消息泵上做。
 #[tauri::command]
-pub async fn ara_list_instances() -> Result<Vec<serde_json::Value>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        hifishifter_host_channel::discover().map(|records| {
-            records.into_iter().map(|record| {
-                let source_kind = match record.source_kind {
-                    hifishifter_host_channel::SourceKind::Ara => "ara",
-                    hifishifter_host_channel::SourceKind::Bridge => "bridge",
-                };
-                serde_json::json!({
-                    "instance_id": record.instance_id,
-                    "name": record.name,
-                    "pid": record.pid,
-                    "source_kind": source_kind,
-                })
-            }).collect()
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn ara_connect(
-    app: tauri::AppHandle,
-    instance_id: String,
-    force: bool,
-) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::ara_bridge::import_snapshot(&app, Some(instance_id), force)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn ara_refresh(app: tauri::AppHandle, force: bool) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::ara_bridge::import_snapshot(&app, None, force)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn ara_submit(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::submit(&app))
+pub async fn host_link_list(directory: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::link_bridge::list(directory))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn ara_disconnect(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::disconnect(&app))
+pub async fn host_link_open(
+    app: tauri::AppHandle,
+    directory: String,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::link_bridge::open(&app, directory, force))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn host_link_refresh(
+    app: tauri::AppHandle,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::link_bridge::refresh(&app, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn host_link_submit(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::link_bridge::submit(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn host_link_release(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::link_bridge::release(&app)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[path = "commands/cache.rs"]

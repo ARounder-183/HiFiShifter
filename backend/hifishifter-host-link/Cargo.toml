@@ -1,0 +1,14 @@
+# 宿主链接：宿主工程与独立 App 之间的工作区交接。
+# 与 GUI/插件共享契约，不依赖 Tauri、音频设备、内核，也不依赖任何平台 API。
+[package]
+name = "hifishifter-host-link"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+hound = "3"
+log = "0.4"

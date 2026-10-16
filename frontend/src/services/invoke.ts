@@ -176,10 +176,15 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_ui_locale":
             return { locale: args[0] };
 
-        case "ara_connect":
-            return { instanceId: args[0], force: args[1] ?? false };
+        case "host_link_list":
+            // 可选单参：不传目录时后端用默认根目录。不传就返回 undefined，让
+            // Tauri 侧以"无命名参数"调用（与 `get_track_summary` 同一形态）。
+            return args[0] === undefined ? undefined : { directory: args[0] };
 
-        case "ara_refresh":
+        case "host_link_open":
+            return { directory: args[0], force: args[1] ?? false };
+
+        case "host_link_refresh":
             return { force: args[0] ?? false };
         case "plugin_refresh":
             return { force: args[0] ?? false };
@@ -948,9 +953,11 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "transfer_cancel",
     "transfer_clear",
     "plugin_get_apply_state",
-    "ara_list_instances",
-    "ara_submit",
-    "ara_disconnect",
+    "host_link_submit",
+    "host_link_release",
+    // 插件侧的宿主链接命令（仅插件形态；与 `host_link_list/open/refresh` 同名不同通道）。
+    "host_link_export",
+    "host_link_status",
     "cancel_background_render",
     "cancel_export_audio",
     "check_source_files_changed",

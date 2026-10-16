@@ -732,6 +732,311 @@ fn render_test_edits(
     input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
 }
 
+// ─── 交接（host-link）测试脚手架 ─────────────────────────────────────────────
+//
+// 管道时代的 `Request::Snapshot` 返回的是**本实例被分配**的那一窄份视图，而
+// `ExtensionOwner::export_link` 导出的是**整个文档**（见那里的说明：导出的东西是
+// 「这个工程」，不是「这个插件窗口」）。因此这里的脚手架把两者分开：
+//   * [`LinkExport`] 是一次真实导出（临时目录 + 清单 + 清单里的文档时间线），
+//     供断言代次/来源/几何，并据此构造回写载荷；
+//   * [`assigned_view`] 保留旧快照的**实例视角**（`assigned_timeline` 叠加已存编辑），
+//     用于那些本来就在验证「本实例只能看见/提交自己分配到的轨道」的断言。
+
+/// 指向一个导出好的工作区的临时根目录；`Drop` 清掉整棵树。
+struct LinkExport {
+    root: std::path::PathBuf,
+    manifest: hifishifter_host_link::LinkManifest,
+    /// 清单里的**整份文档**时间线（导出返回的那一份）。
+    timeline: hifishifter_kernel::state::TimelineState,
+}
+
+/// 一个不重复的临时根目录（与 `hifishifter-host-link/src/workspace.rs` 的测试同形）。
+fn link_temp_root(tag: &str) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "hfs-link-{tag}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+    ))
+}
+
+impl LinkExport {
+    fn take(owner: &ExtensionOwner, tag: &str) -> Self {
+        let root = link_temp_root(tag);
+        let (manifest, _workspace) = owner.export_link(&root).expect("export_link");
+        let timeline = serde_json::from_value(manifest.timeline.clone())
+            .expect("manifest timeline is a TimelineState");
+        Self {
+            root,
+            manifest,
+            timeline,
+        }
+    }
+
+    /// 回写载荷：`params`/`tracks` 是用户想合并的值，其余（身份、代次、宿主几何）
+    /// 取本次导出时的读数 —— 这正是消费者会送去的那一份。
+    fn edit(
+        &self,
+        params: serde_json::Value,
+        tracks: serde_json::Value,
+    ) -> hifishifter_host_link::EditManifest {
+        hifishifter_host_link::EditManifest {
+            format: hifishifter_host_link::EDIT_FORMAT.into(),
+            format_version: hifishifter_host_link::FORMAT_VERSION,
+            link_id: self.manifest.link_id.clone(),
+            base_revisions: self.manifest.revisions,
+            // 基线**原样回送**清单里那一份（见 `LinkManifest::host_geometry`）：
+            // 自己重算会把 JSON 往返里的最后一位浮点差变成一次假漂移。
+            host_geometry: self.manifest.host_geometry.clone(),
+            params,
+            tracks,
+        }
+    }
+
+    /// 把一份时间线的用户可写字段（曲线 + 逐轨 5 个字段）打包成回写载荷。
+    fn edit_from_timeline(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> hifishifter_host_link::EditManifest {
+        self.edit(
+            serde_json::to_value(&timeline.params_by_root_track).unwrap(),
+            serde_json::to_value(&timeline.tracks).unwrap(),
+        )
+    }
+}
+
+impl Drop for LinkExport {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// 旧 `Request::Snapshot` 的等价物：本实例被分配的视图，叠加已持久化的编辑。
+fn assigned_view(
+    owner: &ExtensionOwner,
+    document: &super::super::document::DocumentSession,
+) -> hifishifter_kernel::state::TimelineState {
+    let mut timeline = owner.assigned_timeline(document).unwrap();
+    document.edits.lock_or_recover().apply(&mut timeline);
+    timeline
+}
+
+/// 最小可导出的文档：一条轨、一个片段（引用 `ara://pcm`）、一个已分配 region，
+/// 以及（可选）一份授权 PCM。返回值里的 `Box` 让 region 的不透明身份活到调用方结束。
+fn linkable_document(
+    pcm: Option<Vec<Vec<f32>>>,
+) -> (
+    crate::ara::model::ModelHandle,
+    Arc<super::super::document::DocumentSession>,
+    Arc<ExtensionOwner>,
+    Box<u8>,
+) {
+    use crate::render::source::SourcePcm;
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    let mut timeline: hifishifter_kernel::state::TimelineState =
+        serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"host","order":0}],
+            "clips":[{"id":"one","track_id":"track","name":"one","start_sec":0,"length_sec":4.0/44100.0,
+                "takes":[{"id":"take","name":"one","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]}],
+            "bpm":120,"project_sec":2
+        }))
+        .unwrap();
+    for clip in &mut timeline.clips {
+        clip.normalize_takes();
+    }
+    *document.timeline.lock_or_recover() = Some(timeline);
+    document.track_bindings.lock_or_recover().insert(
+        "track".into(),
+        vec![("host-mod".into(), "ara://pcm".into())],
+    );
+    if let Some(planes) = pcm {
+        document.edit_sources.lock_or_recover().insert(
+            "ara://pcm".into(),
+            Arc::new(SourcePcm {
+                sample_rate: 44100,
+                planes,
+                version: 0,
+                _reservation: None,
+            }),
+        );
+    }
+    let identity = Box::new(0_u8);
+    let key = (&*identity as *const u8) as u64;
+    region_owners()
+        .lock_or_recover()
+        .register(key, document.id, 0)
+        .unwrap();
+    document
+        .clip_ids
+        .lock_or_recover()
+        .insert(key, "one".into());
+    document.regions.lock_or_recover().insert(
+        key,
+        crate::ara::AraPlaybackRegion {
+            audio_source_persistent_id: "ara://pcm".into(),
+            audio_modification_persistent_id: "host-mod".into(),
+            duration_in_modification_time: 4.0 / 44100.0,
+            duration_in_playback_time: 4.0 / 44100.0,
+            ..Default::default()
+        },
+    );
+    document.ready.store(true, Ordering::Release);
+    let owner = Arc::new(ExtensionOwner::default());
+    let raw = owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
+            None,
+        )
+        .unwrap();
+    // SAFETY: owner 与 document 都保留到调用方结束。
+    unsafe {
+        let ext = &*raw;
+        ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+            ext.playbackRendererRef,
+            key as *mut _,
+        );
+    }
+    (model, document, owner, identity)
+}
+
+/// 一次真实导出必须落成一份**磁盘上的工作区**：清单与音频都能被独立读者读回。
+#[test]
+fn an_export_lands_as_a_readable_workspace_directory() {
+    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let root = link_temp_root("workspace-roundtrip");
+    let (manifest, workspace) = owner.export_link(&root).unwrap();
+    assert!(workspace.root().starts_with(&root), "目录名由身份派生");
+    assert!(workspace.looks_like_workspace());
+
+    let reread = workspace.read_manifest().unwrap();
+    assert_eq!(reread.link_id, manifest.link_id);
+    assert_eq!(reread.clip_count(), 1);
+    assert_eq!(manifest.audio_summary(), (1, 0, 0));
+
+    // complete 素材的音频确实写在了工作区里，且能被摘要校验读回。
+    let entry = manifest
+        .sources
+        .iter()
+        .find(|entry| entry.key == "ara://pcm")
+        .unwrap();
+    assert!(workspace
+        .resolve(entry.file.as_ref().unwrap())
+        .is_file());
+    assert_eq!(
+        workspace.read_audio(entry).unwrap().planes,
+        vec![vec![0.1, 0.2, 0.3, 0.4]]
+    );
+
+    // 导出同时写下一份「还没发生过编辑」的初值状态。
+    let status = workspace.read_status().unwrap();
+    assert!(status.is_current(&manifest.link_id));
+    assert!(status.ok);
+    // 临时目录不留半个文件。
+    let leftovers: Vec<_> = std::fs::read_dir(workspace.root().join(".tmp"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(leftovers.is_empty(), "临时文件必须被改名走");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 没有授权 PCM 的素材以 `partial` 登记：几何保留、音频槽留空，**整份导出不失败**。
+#[test]
+fn a_source_without_audio_exports_as_partial() {
+    let (_model, _document, owner, _identity) = linkable_document(None);
+    let export = LinkExport::take(&owner, "partial-audio");
+    assert_eq!(export.manifest.clip_count(), 1, "几何必须保留");
+    assert_eq!(export.manifest.audio_summary(), (0, 1, 0));
+    let entry = &export.manifest.sources[0];
+    assert_eq!(entry.state, hifishifter_host_link::AudioState::Partial);
+    assert!(entry.file.is_none());
+    assert!(entry.note.is_some(), "必须说明为什么没有音频");
+    export.manifest.validate().unwrap();
+}
+
+/// 一份不属于本清单的编辑必须被身份判据拒收（`LINK_MISMATCH`）。
+#[test]
+fn an_edit_for_another_link_is_rejected_by_identity() {
+    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let export = LinkExport::take(&owner, "identity-mismatch");
+    let mut edit = export.edit_from_timeline(&export.timeline);
+    edit.link_id = "ara:SomeOtherHost:deadbeef".into();
+    let status = owner.apply_link_edit(&export.manifest.link_id, &edit);
+    assert!(!status.ok, "{:?}", status.error);
+    assert_eq!(
+        status.code,
+        Some(hifishifter_host_link::error_code::LINK_MISMATCH)
+    );
+    assert!(status.error.unwrap().contains("this edit belongs to"));
+}
+
+/// **宿主几何在导出之后变了**（宿主侧的本地编辑），回写必须被拒绝并**指名字段**。
+///
+/// 【为什么判据在生产侧】消费者只有打开时的一份几何拷贝，而它自己的活状态
+/// （波形回填、假立体声折叠扫描）一直在写本地时间线。把判据放在生产者侧之后，
+/// 只有**宿主真的改了**才会被拒 —— 这正是旧实现里「用户编辑几何就被拒」的反面。
+#[test]
+fn a_host_geometry_change_since_export_is_rejected_and_named() {
+    let (_model, document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let export = LinkExport::take(&owner, "geometry-drift");
+    let edit = export.edit_from_timeline(&export.timeline);
+    // 宿主侧（几何的真正权威）挪动了片段起点。
+    document
+        .timeline
+        .lock_or_recover()
+        .as_mut()
+        .unwrap()
+        .clips[0]
+        .start_sec = 0.25;
+    let status = owner.apply_link_edit(&export.manifest.link_id, &edit);
+    assert!(!status.ok, "{:?}", status.error);
+    assert_eq!(
+        status.code,
+        Some(hifishifter_host_link::error_code::GEOMETRY_CHANGED)
+    );
+    let error = status.error.unwrap();
+    assert!(error.contains("ara_host_fields:"), "{error}");
+    assert!(error.contains("clips[0].start_sec"), "{error}");
+}
+
+/// export → 写 `edits.hfsedit` → 读回 → 应用：走一遍真实的工作区文件往返。
+#[test]
+fn an_edit_round_trips_through_the_workspace_file() {
+    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let root = link_temp_root("edit-roundtrip");
+    let (manifest, workspace) = owner.export_link(&root).unwrap();
+    let mut client: hifishifter_kernel::state::TimelineState =
+        serde_json::from_value(manifest.timeline.clone()).unwrap();
+    client.tracks[0].volume = 0.5;
+    let edit = hifishifter_host_link::EditManifest {
+        format: hifishifter_host_link::EDIT_FORMAT.into(),
+        format_version: hifishifter_host_link::FORMAT_VERSION,
+        link_id: manifest.link_id.clone(),
+        base_revisions: manifest.revisions,
+        host_geometry: manifest.host_geometry.clone(),
+        params: serde_json::to_value(&client.params_by_root_track).unwrap(),
+        tracks: serde_json::to_value(&client.tracks).unwrap(),
+    };
+    workspace.write_edit(&edit).unwrap();
+    let reread = workspace.read_edit().unwrap();
+    assert_eq!(reread.link_id, edit.link_id);
+    assert_eq!(reread.tracks, edit.tracks);
+
+    let status = owner.apply_link_edit(&reread.link_id, &reread);
+    assert!(status.ok, "{:?}", status.error);
+    assert_eq!(status.revisions.edits, 1);
+    // 生产者把回答落盘：成功与被拒**同一份可见**。
+    workspace.write_status(&status).unwrap();
+    let answer = workspace.read_status().unwrap();
+    assert!(answer.ok);
+    assert_eq!(answer.revisions.edits, 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 只读提取已提交REAPER旧归档的原始组件JSON，不调用当前encoder生成兼容证据。
 fn task34_archived_v2_states() -> Vec<Vec<u8>> {
     use base64::Engine as _;
@@ -1267,18 +1572,21 @@ fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
             key as *mut _,
         );
     }
-    let snapshot = owner.handle_request(hifishifter_host_channel::Request::Snapshot);
-    assert!(snapshot.ok, "{:?}", snapshot.error);
-    let mut client = snapshot.timeline.unwrap();
-    assert_eq!(client["clips"].as_array().unwrap().len(), 1);
-    client["tracks"][0]["volume"] = serde_json::json!(0.5);
-    let response = owner.handle_request(hifishifter_host_channel::Request::Commit {
-        base_revision: snapshot.revision,
-        model_revision: snapshot.model_revision,
-        schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
-        timeline: client,
-    });
-    assert!(response.ok, "{:?}", response.error);
+    let export = LinkExport::take(&owner, "gui-commit");
+    // 导出的是**整个文档**（两个片段），与管道时代的实例视图不同。
+    assert_eq!(export.manifest.timeline["clips"].as_array().unwrap().len(), 2);
+    assert_eq!(export.manifest.sources.len(), 1);
+    assert_eq!(
+        export.manifest.sources[0].state,
+        hifishifter_host_link::AudioState::Complete
+    );
+    // 而提交的权威仍是本实例的分配视图 —— 只有它自己那一个片段。
+    let mut client = owner.assigned_timeline(&document).unwrap();
+    assert_eq!(client.clips.len(), 1);
+    client.tracks[0].volume = 0.5;
+    let edit = export.edit_from_timeline(&client);
+    let status = owner.apply_link_edit(&export.manifest.link_id, &edit);
+    assert!(status.ok, "{:?}", status.error);
     let companion = Arc::new(ExtensionOwner::default());
     companion
         .bind_to_document(
@@ -1291,7 +1599,7 @@ fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
         .unwrap();
     assert_eq!(
         companion.edit_state().lock_or_recover().revision,
-        response.revision
+        status.revisions.edits
     );
     assert_eq!(
         companion.edit_state().lock_or_recover().tracks[0].volume,
@@ -1330,25 +1638,31 @@ fn gui_request_commits_parameters_and_rejects_stale_document_revision() {
             None,
         )
         .unwrap();
-    let snapshot = owner.handle_request(hifishifter_host_channel::Request::Snapshot);
-    assert!(snapshot.ok, "{:?}", snapshot.error);
-    let client = snapshot.timeline.unwrap();
-    let commit = hifishifter_host_channel::Request::Commit {
-        base_revision: snapshot.revision,
-        model_revision: snapshot.model_revision,
-        schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
-        timeline: client,
-    };
-    let response = owner.handle_request(commit.clone());
-    assert!(response.ok, "{:?}", response.error);
-    assert_eq!(response.revision, 1);
-    assert!(!owner.handle_request(commit).ok);
-    document.clear_renderers();
-    assert!(
-        !owner
-            .handle_request(hifishifter_host_channel::Request::Snapshot)
-            .ok
+    let export = LinkExport::take(&owner, "stale-revision");
+    // 空的文档导出：没有 clip、没有素材，但身份/代次齐备。
+    assert_eq!(export.manifest.clip_count(), 0);
+    let edit = export.edit_from_timeline(&export.timeline);
+    let status = owner.apply_link_edit(&export.manifest.link_id, &edit);
+    assert!(status.ok, "{:?}", status.error);
+    assert_eq!(status.revisions.edits, 1);
+    // 同一份载荷再交一次：它的基准**编辑**代次已经过期，必须被拒。
+    let stale = owner.apply_link_edit(&export.manifest.link_id, &edit);
+    assert!(!stale.ok, "{:?}", stale.error);
+    // 针对过期**宿主模型**代次的载荷被明确判为冲突（`CONFLICT`），并指名字段。
+    let mut model_stale = edit.clone();
+    model_stale.base_revisions.model = edit.base_revisions.model + 1;
+    let conflict = owner.apply_link_edit(&export.manifest.link_id, &model_stale);
+    assert!(!conflict.ok, "{:?}", conflict.error);
+    assert_eq!(
+        conflict.code,
+        Some(hifishifter_host_link::error_code::CONFLICT)
     );
+    assert!(conflict.error.unwrap().contains("host model is"));
+    // 渲染器被撤销后文档不再 ready ⇒ 导出失败（旧实现里快照同样失败）。
+    document.clear_renderers();
+    let failed_root = link_temp_root("stale-revision-fail");
+    assert!(owner.export_link(&failed_root).is_err());
+    let _ = std::fs::remove_dir_all(&failed_root);
     drop(model);
 }
 
@@ -1364,7 +1678,6 @@ fn copied_tracks_share_sources_but_keep_instance_state_isolated() {
 }
 fn two_renderer_case(shared_identity: bool) {
     use crate::render::source::SourcePcm;
-    use hifishifter_host_channel::Request;
     let model = crate::ara::model::ModelHandle::new();
     let document = model.session();
     // 四样本只验证复制/权限/保存与逐轨gain，显式旁路；真实音高自动应用另有WORLD/模型oracle。
@@ -1445,19 +1758,27 @@ fn two_renderer_case(shared_identity: bool) {
         owners.push(owner);
     }
     for (index, id) in ["a", "b"].into_iter().enumerate() {
-        let snapshot = owners[index].handle_request(Request::Snapshot);
-        assert!(snapshot.ok, "{:?}", snapshot.error);
-        assert_eq!(snapshot.revision, index as u64, "B先刷新最新共享revision");
-        let mut client = snapshot.timeline.unwrap();
-        client["tracks"][0]["volume"] = serde_json::json!(if index == 0 { 0.5 } else { 0.25 });
-        client["params_by_root_track"] = serde_json::json!({id:{"frame_period_ms":5.0,"pitch_edit":[61.0+index as f32,63.0+index as f32]}});
-        let response = owners[index].handle_request(Request::Commit {
-            base_revision: snapshot.revision,
-            model_revision: snapshot.model_revision,
-            schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
-            timeline: client,
-        });
-        assert!(response.ok, "{:?}", response.error);
+        let export = LinkExport::take(&owners[index], &format!("two-renderer-{index}"));
+        assert_eq!(
+            export.manifest.revisions.edits, index as u64,
+            "B先刷新最新共享revision"
+        );
+        // 每个 renderer 只能提交它自己分配到的轨道（旧快照的实例视角）。
+        let mut client = owners[index].assigned_timeline(&document).unwrap();
+        assert_eq!(client.tracks.len(), 1, "分配视图只含本实例的轨道");
+        client.tracks[0].volume = if index == 0 { 0.5 } else { 0.25 };
+        client.params_by_root_track.clear();
+        client.params_by_root_track.insert(
+            id.into(),
+            hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![61.0 + index as f32, 63.0 + index as f32],
+                ..Default::default()
+            },
+        );
+        let edit = export.edit_from_timeline(&client);
+        let status = owners[index].apply_link_edit(&export.manifest.link_id, &edit);
+        assert!(status.ok, "{:?}", status.error);
     }
     for (index, id) in ["a", "b"].into_iter().enumerate() {
         let saved: serde_json::Value =
@@ -1481,23 +1802,19 @@ fn two_renderer_case(shared_identity: bool) {
         for (actual, original) in output[0].left.iter().zip([0.1_f32, 0.2, 0.3, 0.4]) {
             assert!((*actual - original * factor).abs() < 1e-6);
         }
-        let current = owners[index].handle_request(Request::Snapshot);
-        assert!(current.ok);
-        assert_eq!(
-            current.timeline.unwrap()["tracks"][0]["volume"],
-            serde_json::json!(factor)
-        );
+        let current = assigned_view(&owners[index], &document);
+        assert_eq!(current.clips.len(), 1);
+        assert_eq!(current.tracks[0].volume, factor);
     }
     if shared_identity {
         let original = owners[0].encode_state().unwrap();
         let second = owners[1].encode_state().unwrap();
         // REAPER复制插件：同一源身份由另一实例的实际assignment限定到B，不能改写A。
         owners[1].restore_state(&original).unwrap();
-        let a = owners[0].handle_request(Request::Snapshot);
-        let b = owners[1].handle_request(Request::Snapshot);
-        assert!(a.ok && b.ok, "{:?} {:?}", a.error, b.error);
-        assert_eq!(a.timeline.unwrap()["tracks"][0]["volume"], 0.5);
-        assert_eq!(b.timeline.unwrap()["tracks"][0]["volume"], 0.5);
+        let a = assigned_view(&owners[0], &document);
+        let b = assigned_view(&owners[1], &document);
+        assert_eq!(a.tracks[0].volume, 0.5);
+        assert_eq!(b.tracks[0].volume, 0.5);
         assert_eq!(
             document.edits.lock_or_recover().params["b"].pitch_edit,
             [61., 63.]

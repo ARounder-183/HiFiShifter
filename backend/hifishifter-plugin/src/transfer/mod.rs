@@ -438,7 +438,7 @@ impl TransferStore {
 
     /// 组件 state 里的 Transfer 清单。
     ///
-    /// 【为什么只存路径而不存 PCM】`MAX_FRAME` 是 64 MiB，而 4 分钟立体声 96 kHz
+    /// 【为什么只存路径而不存 PCM】组件 state 的预算是 64 MiB，而 4 分钟立体声 96 kHz
     /// 已是 184 MB；何况组件 state 会进宿主的每一次保存与撤销快照。清单是几 KB。
     pub(crate) fn manifest(&self) -> serde_json::Value {
         let takes = self.takes.lock_or_recover();

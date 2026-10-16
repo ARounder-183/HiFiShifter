@@ -3425,7 +3425,7 @@ mod tests {
     #[test]
     fn same_snapshot_commit_survives_access_toggle_but_not_real_source_changes() {
         use ara2_bridge::plugin::{ExtensionRoles, HostAudioSourceRef, HostClients};
-        use hifishifter_host_channel::{Request, Response};
+        use hifishifter_host_link as link;
         let mut model = ModelHandle::new();
         model.document = identity_document(&["B"]);
         model.document.audio_sources[0].sample_count = 4;
@@ -3471,18 +3471,33 @@ mod tests {
                 key as *mut _,
             );
         }
-        let snapshot = owner.handle_request(Request::Snapshot);
-        assert!(snapshot.ok, "{:?}", snapshot.error);
-        let request = |snapshot: Response| {
-            let mut client = snapshot.timeline.unwrap();
-            client["tracks"][0]["volume"] = serde_json::json!(0.5);
-            Request::Commit {
-                base_revision: snapshot.revision,
-                model_revision: snapshot.model_revision,
-                schema_version: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
-                timeline: client,
-            }
+        // 管道时代的 `Request::Snapshot` 换成了对**工作区**的导出：清单的 `revisions`
+        // 与 `host_geometry` 正是消费者会原样送回来的那份读数。每次导出都返回一份带
+        // 当前代次的载荷，供「旧读数被实际源变更作废」的断言使用。
+        let root = std::env::temp_dir().join(format!(
+            "hfs-link-model-{}-{}",
+            std::process::id(),
+            link::now_ms()
+        ));
+        let export_edit = |owner: &crate::render::extension::ExtensionOwner,
+                           root: &std::path::Path| {
+            let (manifest, _workspace) = owner.export_link(root).unwrap();
+            let mut timeline: hifishifter_kernel::state::TimelineState =
+                serde_json::from_value(manifest.timeline.clone()).unwrap();
+            timeline.tracks[0].volume = 0.5;
+            let edit = link::EditManifest {
+                format: link::EDIT_FORMAT.into(),
+                format_version: link::FORMAT_VERSION,
+                link_id: manifest.link_id.clone(),
+                base_revisions: manifest.revisions,
+                host_geometry:
+                    hifishifter_kernel::editor::host_timeline::host_geometry_projection(&timeline),
+                params: serde_json::to_value(&timeline.params_by_root_track).unwrap(),
+                tracks: serde_json::to_value(&timeline.tracks).unwrap(),
+            };
+            (manifest.link_id.clone(), edit)
         };
+        let (link_id, initial) = export_edit(&owner, &root);
         clients
             .with_audio_source_management(source, |scope| {
                 AudioSources::enable_audio_source_samples_access(
@@ -3507,11 +3522,11 @@ mod tests {
             fixture.created.load(Ordering::Acquire),
             fixture.destroyed.load(Ordering::Acquire)
         );
-        let committed = owner.handle_request(request(snapshot));
+        let committed = owner.apply_link_edit(&link_id, &initial);
         assert!(committed.ok, "{:?}", committed.error);
         for change in 0..3 {
-            let old = owner.handle_request(Request::Snapshot);
-            assert!(old.ok, "{:?}", old.error);
+            let (old_link_id, old) = export_edit(&owner, &root);
+            assert_eq!(old_link_id, link_id, "同一份文档只对应一个工作区身份");
             if change == 0 {
                 let id = model.document.audio_sources[0].persistent_id.clone();
                 let properties =
@@ -3550,9 +3565,25 @@ mod tests {
                 PlaybackRegions::update_playback_region(&mut model, &mut 0, properties).unwrap();
                 model.remap_and_log();
             }
-            let rejected = owner.handle_request(request(old));
+            let rejected = owner.apply_link_edit(&link_id, &old);
             assert!(!rejected.ok);
-            assert!(rejected.error.unwrap().contains("host model changed"));
+            // 【为什么第三种改法报几何而不是代次】它改的正是 playback region 的时长 ——
+            // 那就是宿主拥有的几何。判据先报几何并**指名字段**，比一句"代次对不上"
+            // 更可行动（两者都以"在宿主里改完再重新导出"收尾）。
+            // 前两种改的是素材属性/内容，几何不变，于是由代次判据拒绝。
+            if change == 2 {
+                assert_eq!(rejected.code, Some(link::error_code::GEOMETRY_CHANGED));
+                assert!(
+                    rejected.error.unwrap().contains("ara_host_fields:"),
+                    "几何变了必须指名字段"
+                );
+            } else {
+                assert_eq!(rejected.code, Some(link::error_code::CONFLICT));
+                assert!(
+                    rejected.error.unwrap().contains("host model is"),
+                    "宿主模型代次变了必须被指名为冲突"
+                );
+            }
             clients
                 .with_audio_source_management(source, |scope| {
                     AudioSources::enable_audio_source_samples_access(
@@ -3586,6 +3617,7 @@ mod tests {
             })
             .unwrap();
         assert!(model.session.ready.load(Ordering::Acquire));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。

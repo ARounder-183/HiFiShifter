@@ -779,6 +779,9 @@ impl EditorSession {
                     owner.transfer().top_up();
                     // 一次性诊断：宿主给了位置却从来没给过输入（见该方法的说明）。
                     owner.transfer().report_missing_input_once();
+                    // 宿主链接的回写监视。与补缓冲同一个理由挂在会话 actor 上：
+                    // actor 由**会话**创建，与"插件窗口开没开"无关（见 `render::link::poll`）。
+                    crate::render::link::poll(&owner);
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。

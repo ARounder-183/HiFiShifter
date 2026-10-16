@@ -106,7 +106,7 @@ import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
 import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
-import { PANEL_APPEARANCE, PANEL_ARA_HOST, PANEL_TRANSFER } from "../dock/registerBuiltinPanels";
+import { PANEL_APPEARANCE, PANEL_HOST_LINK, PANEL_TRANSFER } from "../dock/registerBuiltinPanels";
 import { showsTransferEntry } from "../../features/transfer/transferEntry";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
@@ -1172,17 +1172,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_appearance_settings")}
                     </DropdownMenu.Item>
                     {/*
-                      ARA 宿主会话**只在独立 App**里出现：插件模式下前端由原生
-                      bootstrap 直接驱动，没有"连接哪个实例"这一步（宿主是谁与这里无关）。
-                      它同样是浮出面板 + `togglePanelVisible`（见注册表声明）。
+                      宿主链接**只在独立 App**里出现：插件模式下工作区由插件自己导出，
+                      "打开哪个工作区"这一步属于接收侧。它同样是浮出面板 +
+                      `togglePanelVisible`（见注册表声明）。
                     */}
                     {!isPluginMode() && (
                         <DropdownMenu.Item
                             onSelect={() =>
-                                togglePanelVisible(dispatch, store.getState, PANEL_ARA_HOST)
+                                togglePanelVisible(dispatch, store.getState, PANEL_HOST_LINK)
                             }
                         >
-                            {tf("menu_ara_host")}
+                            {tf("menu_host_link")}
                         </DropdownMenu.Item>
                     )}
                     {/*

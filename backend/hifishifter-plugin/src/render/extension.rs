@@ -8,19 +8,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// 全PCM内容参与身份，重开时同路径不同音频不能命中旧缓存。
-pub(super) fn pcm_fingerprint(pcm: &super::source::SourcePcm) -> String {
-    let mut hash = blake3::Hasher::new();
-    hash.update(&pcm.sample_rate.to_le_bytes());
-    hash.update(&(pcm.planes.len() as u64).to_le_bytes());
-    for plane in &pcm.planes {
-        for sample in plane {
-            hash.update(&sample.to_le_bytes());
-        }
-    }
-    hash.finalize().to_hex().to_string()
-}
-
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
 ///
 /// `value` 是**逐 region** 的绑定列表，不是一个实例一个几何：挂在 REAPER folder
@@ -449,7 +436,6 @@ pub(crate) struct ExtensionOwner {
     raw_tape_revision: AtomicU64,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
-    channel: Mutex<Option<hifishifter_host_channel::Server>>,
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
     prepare_owner: Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
@@ -2532,11 +2518,6 @@ impl ExtensionOwner {
             .and_then(|document| document.playback.lock_or_recover().clone())
     }
     /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
-    pub fn stop_channel(&self) {
-        let channel = self.channel.lock_or_recover().take();
-        drop(channel);
-    }
-
     /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
     // 组件state访问器保留，供未绑定路径读取。
     #[cfg(test)]
@@ -2776,7 +2757,7 @@ impl ExtensionOwner {
     /// 把 `EditState` 字节与 Transfer 清单包成组件 state。
     ///
     /// 【为什么清单只带路径】PCM 在 sidecar 文件里（见 `transfer::sidecar`）：
-    /// `MAX_FRAME` 是 64 MiB，而 4 分钟立体声 96 kHz 已是 184 MB，何况组件 state
+    /// 组件 state 的预算是 `MAX_COMPONENT_STATE`（64 MiB），而 4 分钟立体声 96 kHz 已是 184 MB，何况组件 state
     /// 会进宿主的每一次保存与撤销快照。清单是几 KB。
     fn wrap_component_state(&self, edits: Vec<u8>) -> Result<Vec<u8>, String> {
         let transfer = self.transfer.manifest();
@@ -2802,169 +2783,355 @@ impl ExtensionOwner {
         .encode())
     }
 
-    /// 参数/快照在短事务内校验；外部提交合成同样不能持锁阻塞宿主模型回调。
-    pub(crate) fn handle_request(
+    /// 文档级的宿主时间线（**不**按实例收窄）。
+    ///
+    /// 【为什么与 `assigned_timeline` 分开】后者把 clip 收窄到本实例被分配的 region，
+    /// 因为渲染必须只碰自己的那一份。而导出与几何判据要的是**整个文档**：
+    /// 用户的心智模型是「这个工程」，不是「这个插件窗口」。
+    fn document_timeline(
         &self,
-        request: hifishifter_host_channel::Request,
-    ) -> hifishifter_host_channel::Response {
-        use hifishifter_host_channel::{HostPcm, Request, Response};
+        document: &super::document::DocumentSession,
+    ) -> Result<hifishifter_kernel::state::TimelineState, String> {
+        let mut timeline = document
+            .timeline
+            .lock_or_recover()
+            .clone()
+            .ok_or("host timeline unavailable")?;
+        if let Some(tempo) = document.clock.tempo() {
+            timeline.bpm = tempo;
+        }
+        document.project_plugin_musical_context_locked(&mut timeline);
+        Ok(timeline)
+    }
+
+    /// 把**整个文档**导出成一个工作区。
+    ///
+    /// 【为什么是文档级而不是实例级】管道时代的服务端挂在实例上，于是导出的 clip
+    /// 被收窄到「本实例拥有的 region」，10 条轨就有 10 个候选，而 `nMaxInstances = 1`
+    /// 只能连一个。内核侧早就有这个唯一性（一个文档一个 `EditorSession`）。
+    /// ARA 契约关心的是 per playback region 只有一个 editor renderer ——
+    /// 导出不新增任何 renderer。
+    ///
+    /// 【为什么素材缺音频不再是失败】没有授权 PCM 的素材以
+    /// [`hifishifter_host_link::AudioState::Partial`] 登记：几何保留、音频槽留空。
+    /// 管道时代这会让**整份导入**失败，而用户看到的是「连接失败」。
+    pub(crate) fn export_link(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<(hifishifter_host_link::LinkManifest, hifishifter_host_link::Workspace), String> {
+        use hifishifter_host_link as link;
         let document = self
             .document
             .lock_or_recover()
             .as_ref()
-            .and_then(std::sync::Weak::upgrade);
-        let Some(document) = document else {
-            return Response {
-                error: Some(crate::editor::errors::DOCUMENT_CLOSED.error()),
-                code: Some(hifishifter_host_channel::error_code::DOCUMENT_CLOSED),
-                ..Default::default()
-            };
-        };
-        if let Request::Commit {
-            base_revision,
-            model_revision,
-            schema_version,
-            timeline,
-        } = request
-        {
-            // timeline 载荷的结构版本守卫：未知的新版本拒收（旧客户端的 0 = 版本化
-            // 之前，按 pre-versioning 接受）。否则一次不认识的 JSON 会被静默合并进
-            // 编辑会话。
-            if schema_version != 0 && schema_version != hifishifter_host_channel::TIMELINE_SCHEMA_VERSION
-            {
-                return Response {
-                    ok: false,
-                    error: Some(format!(
-                        "unsupported timeline schema version {schema_version} (expected {}); refresh the app",
-                        hifishifter_host_channel::TIMELINE_SCHEMA_VERSION
-                    )),
-                    ..Default::default()
-                };
-            }
-            return self.commit_request(&document, base_revision, model_revision, timeline);
-        }
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| crate::editor::errors::DOCUMENT_CLOSED.error())?;
         let _transaction = document.transaction.lock_or_recover();
-        if let Err(error) = self.merge_pending_restore(&document) {
-            return Response {
-                code: crate::editor::errors::terminal_error_code(&error),
-                error: Some(error),
-                ..Default::default()
-            };
+        self.merge_pending_restore(&document)?;
+        if !document.ready.load(Ordering::Acquire) {
+            return Err(format!(
+                "{}; edit something in the host and try again",
+                crate::editor::errors::HOST_MODEL_NOT_READY
+            ));
         }
         let model_revision = document.revision.load(Ordering::Acquire);
-        let mut edits = document.edits.lock_or_recover();
-        let outcome = (|| {
-            if !document.ready.load(Ordering::Acquire) {
-                return Err(format!(
-                    "{}; refresh after editing",
-                    crate::editor::errors::HOST_MODEL_NOT_READY
-                ));
-            }
-            edits.reconcile(&document.track_bindings.lock_or_recover())?;
-            let mut timeline = self.assigned_timeline(&document)?;
-            match request {
-                Request::Snapshot => {
-                    edits.apply(&mut timeline);
-                    let available = document.edit_sources.lock_or_recover();
-                    let mut sources = Vec::new();
-                    for id in timeline
-                        .clips
-                        .iter()
-                        .filter_map(|clip| clip.source_path.as_ref())
-                        .collect::<BTreeSet<_>>()
-                    {
-                        let pcm = available.get(id).ok_or_else(|| {
-                            format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE)
-                        })?;
-                        sources.push(HostPcm {
-                            persistent_id: id.clone(),
+        let mut timeline = self.document_timeline(&document)?;
+        let edits_revision = {
+            let edits = document.edits.lock_or_recover();
+            // 导出的是**用户现在看到的**那一份，所以要把已保存的曲线叠上去；
+            // 否则每次重新导出都会让 App 丢掉它上次提交的编辑。
+            edits.apply(&mut timeline);
+            edits.revision
+        };
+
+        let host_label = self
+            .host_backend()
+            .app_name()
+            .unwrap_or("Host")
+            .to_string();
+        let doc_key = self.document_key(&document);
+        let identity = link::link_id(link::SourceKind::Ara, &host_label, &doc_key);
+        // 【为什么目录名就是身份】重新导出必须落在**同一个**工作区上，否则每次导出
+        // 都在用户磁盘上留一个新目录。身份稳定，目录名就稳定。
+        let workspace = link::Workspace::at(root.join(identity.replace(':', "-")));
+
+        let mut sources = Vec::new();
+        {
+            let available = document.edit_sources.lock_or_recover();
+            let keys: BTreeSet<String> = timeline
+                .clips
+                .iter()
+                .filter_map(|clip| clip.source_path.clone())
+                .collect();
+            for key in keys {
+                let Some(pcm) = available.get(&key) else {
+                    sources.push(link::SourceEntry {
+                        key,
+                        sample_rate: 0,
+                        channels: 0,
+                        frames: 0,
+                        state: link::AudioState::Partial,
+                        file: None,
+                        blake3: None,
+                        bytes: None,
+                        note: Some(crate::editor::errors::HOST_PCM_UNAVAILABLE.to_string()),
+                    });
+                    continue;
+                };
+                match workspace.write_audio(&key, pcm.sample_rate, &pcm.planes) {
+                    Ok(audio) => sources.push(link::SourceEntry {
+                        key,
+                        sample_rate: pcm.sample_rate,
+                        channels: pcm.planes.len() as u32,
+                        frames: pcm.planes.first().map_or(0, Vec::len) as u64,
+                        state: link::AudioState::Complete,
+                        file: Some(audio.file),
+                        blake3: Some(audio.blake3),
+                        bytes: Some(audio.bytes),
+                        note: None,
+                    }),
+                    Err(error) => {
+                        log::warn!("[link] cannot write audio for {key}: {error}");
+                        sources.push(link::SourceEntry {
+                            key,
                             sample_rate: pcm.sample_rate,
-                            fingerprint: pcm_fingerprint(pcm),
-                            planes: pcm.planes.clone(),
+                            channels: pcm.planes.len() as u32,
+                            frames: pcm.planes.first().map_or(0, Vec::len) as u64,
+                            state: link::AudioState::Partial,
                             file: None,
+                            blake3: None,
+                            bytes: None,
+                            note: Some(error),
                         });
                     }
-                    let mut clips = timeline.clips.iter().collect::<Vec<_>>();
-                    clips.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
-                    let ranges = clips
-                        .iter()
-                        .take(8)
-                        .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
-                        .collect::<Vec<_>>();
-                    let diagnostics=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
-                        let (busy,error)=owner.local_preparation_state();
-                        let prepared=owner.prepared_snapshot();
-                        serde_json::json!({"busy":busy,"error":error,"prepared":prepared,
-                            "outputs":owner.snapshots.iter().map(|snapshot|snapshot.diagnose(&ranges)).collect::<Vec<_>>()})
-                    }).collect::<Vec<_>>();
-                    Ok(Response {
-                        ok: true,
-                        timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?),
-                        sources,
-                        diagnostics: Some(serde_json::json!({"renderers":diagnostics})),
-                        ..Default::default()
-                    })
-                }
-                Request::Commit { .. } => {
-                    // 结构性守卫：`Commit` 在进入本分发前就被拦下（见上方早分发）。
-                    // 用 `unreachable!` 的话，一旦以后新增请求变体或早分发条件变动，
-                    // 这里会在 IPC 工作线程上 panic（`catch_unwind` 会把它降级成
-                    // "plugin request panicked"，提交被静默丢掉）。返回错误更诚实。
-                    Err("commit request reached the non-commit dispatcher".to_string())
-                }
-                Request::Hello { .. } => {
-                    // 同理由：`Hello` 在服务器闭包层就被回答（它必须在文档守卫**之前**
-                    // 返回，见 `bind_to_document` 的 server 闭包），到不了这里。
-                    Err("hello request reached the timeline dispatcher".to_string())
                 }
             }
-        })();
-        let mut response = outcome.unwrap_or_else(|error| Response {
-            code: crate::editor::errors::terminal_error_code(&error),
-            error: Some(error),
-            ..Default::default()
-        });
-        response.revision = edits.revision;
-        response.model_revision = model_revision;
-        response
+        }
+
+        // 逐条降级报告：宿主里被跳过、进不来的东西。空表示**没有丢掉任何东西**。
+        let losses: Vec<link::LossEntry> = document
+            .skipped_regions
+            .lock_or_recover()
+            .iter()
+            .map(|(index, reason)| link::LossEntry {
+                id: format!("region #{index}"),
+                reason: reason.clone(),
+                detail: None,
+            })
+            .collect();
+
+        let manifest = link::LinkManifest {
+            format: link::FORMAT.into(),
+            format_version: link::FORMAT_VERSION,
+            link_id: identity.clone(),
+            source_kind: link::SourceKind::Ara,
+            host_label,
+            created_unix_ms: link::now_ms(),
+            producer: link::Producer {
+                implementation: format!("hifishifter-ara {}", crate::VERSION),
+                pid: Some(std::process::id()),
+            },
+            // 【为什么不写 `project_sec` 以外的推导值】时间轴就是宿主事实的投影；
+            // 这里是唯一一处把 `TimelineState` 交给外部的出口。
+            timeline: serde_json::to_value(&timeline).map_err(|error| error.to_string())?,
+            // 【为什么在这里算，而不是让消费者算】见 `LinkManifest::host_geometry`：
+            // 判据的两边必须出自同一次计算，否则任何浮点归一化差异都会变成假漂移。
+            host_geometry: hifishifter_kernel::editor::host_timeline::host_geometry_projection(
+                &timeline,
+            ),
+            sources,
+            granted: vec![link::Capability::Commit, link::Capability::Audio],
+            revisions: link::Revisions {
+                edits: edits_revision,
+                model: model_revision,
+            },
+            admission: link::Admission::Strict,
+            losses,
+            diagnostics: Some(self.link_diagnostics(&document, &timeline)),
+        };
+        workspace.write_manifest(&manifest)?;
+        workspace.write_status(&link::LinkStatus::initial(&identity, manifest.revisions))?;
+        Ok((manifest, workspace))
     }
 
-    /// 一期外部客户端保持同步结果契约，但捕获/计算/提交分开，失败不改变参数权威。
-    fn commit_request(
+    /// 文档身份：`TrackBindings` 的 `(modification, source)` 签名。
+    ///
+    /// 【为什么不用 region key】region key 只在会话内稳定。`TrackBindings` 是既有的、
+    /// 被文档注释称为「跨会话身份」的那一份（见 `ara/model.rs` 的 `publish_track_bindings`），
+    /// 它由宿主给的两个 persistentID 组成，重开宿主工程后仍然相同。
+    fn document_key(&self, document: &super::document::DocumentSession) -> String {
+        let bindings = document.track_bindings.lock_or_recover();
+        if bindings.is_empty() {
+            return "unknown-document".to_string();
+        }
+        let mut pairs: Vec<String> = bindings
+            .values()
+            .flatten()
+            .map(|(modification, source)| format!("{modification}|{source}"))
+            .collect();
+        pairs.sort();
+        pairs.dedup();
+        let joined = pairs.join(",");
+        // 摘要而非原文：身份要短、要稳定、要能进文件名，而原文可以很长。
+        blake3::hash(joined.as_bytes()).to_hex().to_string()[..16].to_string()
+    }
+
+    /// 只读现场诊断：渲染器就绪度，以及**已发布输出对片段范围的覆盖**。
+    ///
+    /// 【为什么这次真的会有人读】管道时代它被生产出来后在 App 侧**没有任何消费者** ——
+    /// 一条只写不读的线。现在它随清单落盘，面板上直接显示
+    /// 「宿主渲染器尚未就绪」「该片段在宿主侧是静音」。
+    ///
+    /// 【为什么要按片段给覆盖与峰值，而不是只报 ready】用户真正的疑问是
+    /// 「我导出的是不是有声音」。就绪只说明快照发布了，不说明那一段**有内容**。
+    fn link_diagnostics(
         &self,
-        document: &Arc<super::document::DocumentSession>,
-        base_edit: u64,
-        base_model: u64,
-        client: serde_json::Value,
-    ) -> hifishifter_host_channel::Response {
-        let outcome = (|| {
-            let (candidate, epoch, scope, inputs) = {
+        document: &super::document::DocumentSession,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> serde_json::Value {
+        // 与面板显示的顺序一致：按起点排前 8 条，避免长工程把清单撑大。
+        let mut clips = timeline.clips.iter().collect::<Vec<_>>();
+        clips.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+        let ranges = clips
+            .iter()
+            .take(8)
+            .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
+            .collect::<Vec<_>>();
+        let renderers = document
+            .renderer_owners()
+            .into_iter()
+            .filter(|owner| owner.renders_playback())
+            .map(|owner| {
+                let (busy, error) = owner.local_preparation_state();
+                serde_json::json!({
+                    "busy": busy,
+                    "error": error,
+                    "prepared": owner.prepared_snapshot(),
+                    "outputs": owner
+                        .snapshots
+                        .iter()
+                        .map(|snapshot| snapshot.diagnose(&ranges))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "renderers": renderers })
+    }
+
+    /// 合并一份**回写**的编辑，并返回要落盘的状态。
+    ///
+    /// 【几何归属判据为什么在这里算】消费者只有宿主几何的一份拷贝，生产者才有权威。
+    /// 判据放在生产者侧之后，消费者侧的**活状态**（后台的假立体声折叠扫描、
+    /// 波形回填、音高分析都在写它）再也不可能打穿判据 —— 于是那个用于压制后台子系统
+    /// 的进程级全局开关也随之消失。
+    pub(crate) fn apply_link_edit(
+        &self,
+        identity: &str,
+        edit: &hifishifter_host_link::EditManifest,
+    ) -> hifishifter_host_link::LinkStatus {
+        use hifishifter_host_link as link;
+        let mut status = link::LinkStatus {
+            format: link::STATUS_FORMAT.into(),
+            format_version: link::FORMAT_VERSION,
+            link_id: identity.to_string(),
+            ok: false,
+            code: None,
+            error: None,
+            revisions: link::Revisions::default(),
+            updated_unix_ms: link::now_ms(),
+        };
+        let outcome = (|| -> Result<(), (u32, String)> {
+            let document = self
+                .document
+                .lock_or_recover()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or((
+                    link::error_code::DOCUMENT_CLOSED,
+                    crate::editor::errors::DOCUMENT_CLOSED.error(),
+                ))?;
+            if edit.link_id != identity {
+                return Err((
+                    link::error_code::LINK_MISMATCH,
+                    format!("this edit belongs to {}, not {identity}", edit.link_id),
+                ));
+            }
+            // ── 捕获：短事务内冻结几何、参数与渲染输入 ─────────────────────
+            //
+            // 【为什么必须是一个独立的作用域】`transaction` 是**不可重入**的互斥量，
+            // 而下面"提交"那一半还要再取一次。第一份守护必须在这里释放 ——
+            // 否则第二次获取就是一次必然的死锁（而且它阻塞的是宿主回调）。
+            // 同理，渲染也不能在事务里做：那会把宿主挡住整个渲染时长。
+            let (base_model, candidate, epoch, scope, inputs) = {
                 let _transaction = document.transaction.lock_or_recover();
-                self.merge_pending_restore(document)?;
+                self.merge_pending_restore(&document).map_err(Self::invalid_edit)?;
                 if !document.ready.load(Ordering::Acquire) {
-                    return Err(format!(
-                        "{}; refresh after editing",
-                        crate::editor::errors::HOST_MODEL_NOT_READY
+                    return Err((
+                        link::error_code::MODEL_NOT_READY,
+                        format!(
+                            "{}; edit something in the host",
+                            crate::editor::errors::HOST_MODEL_NOT_READY
+                        ),
                     ));
                 }
-                if document.revision.load(Ordering::Acquire) != base_model {
-                    return Err(format!(
-                        "{} model changed; refresh",
-                        crate::editor::errors::CONFLICT_PREFIX
+                let base_model = document.revision.load(Ordering::Acquire);
+                // 几何归属：宿主拥有的字段变了就拒绝，并**指名字段**。
+                // 判据在这里算而不是在消费者侧 —— 只有生产者有权威，
+                // 而消费者的活状态（后台的假立体声折叠、波形回填）因此再也打不穿它。
+                let current = self.document_timeline(&document).map_err(Self::invalid_edit)?;
+                let differences = hifishifter_kernel::editor::host_timeline::geometry_differences(
+                    &edit.host_geometry,
+                    &hifishifter_kernel::editor::host_timeline::host_geometry_projection(&current),
+                );
+                if !differences.is_empty() {
+                    return Err((
+                        link::error_code::GEOMETRY_CHANGED,
+                        format!("ara_host_fields: {}", differences.join("; ")),
                     ));
                 }
+                if base_model != edit.base_revisions.model {
+                    return Err((
+                        link::error_code::CONFLICT,
+                        format!(
+                            "{} the host model is {base_model} but this edit was written against {}",
+                            crate::editor::errors::CONFLICT_PREFIX,
+                            edit.base_revisions.model
+                        ),
+                    ));
+                }
+                let params: std::collections::BTreeMap<
+                    String,
+                    hifishifter_kernel::state::TrackParamsState,
+                > = serde_json::from_value(edit.params.clone()).map_err(Self::invalid_edit)?;
+                let tracks: Vec<hifishifter_kernel::state::Track> =
+                    serde_json::from_value(edit.tracks.clone()).map_err(Self::invalid_edit)?;
                 let mut edits = document.edits.lock_or_recover();
-                edits.reconcile(&document.track_bindings.lock_or_recover())?;
-                let client = serde_json::from_value(client).map_err(|e| e.to_string())?;
-                let mut candidate =
-                    edits.merge(&self.assigned_timeline(document)?, &client, base_edit)?;
-                let mut curve_timeline = self.assigned_timeline(document)?;
+                edits
+                    .reconcile(&document.track_bindings.lock_or_recover())
+                    .map_err(Self::invalid_edit)?;
+                let mut candidate = edits
+                    .merge_params(
+                        &self.assigned_timeline(&document).map_err(Self::invalid_edit)?,
+                        &params,
+                        &tracks,
+                        edit.base_revisions.edits,
+                    )
+                    .map_err(Self::invalid_edit)?;
+                let mut curve_timeline =
+                    self.assigned_timeline(&document).map_err(Self::invalid_edit)?;
                 candidate.apply(&mut curve_timeline);
-                candidate.atlas = edits.atlas.capture(
-                    &curve_timeline,
-                    &document.parameter_identities_locked(&curve_timeline)?,
-                )?;
-                candidate.reconcile(&document.track_bindings.lock_or_recover())?;
+                candidate.atlas = edits
+                    .atlas
+                    .capture(
+                        &curve_timeline,
+                        &document
+                            .parameter_identities_locked(&curve_timeline)
+                            .map_err(Self::invalid_edit)?,
+                    )
+                    .map_err(Self::invalid_edit)?;
+                candidate
+                    .reconcile(&document.track_bindings.lock_or_recover())
+                    .map_err(Self::invalid_edit)?;
                 drop(edits);
                 let inputs = document
                     .renderer_owners()
@@ -2972,83 +3139,130 @@ impl ExtensionOwner {
                     .filter(|owner| owner.renders_playback())
                     .map(|owner| {
                         let (keys, input) =
-                            owner.capture_render_input(document, &candidate, true)?;
+                            owner.capture_render_input(&document, &candidate, true)?;
                         Ok((owner, keys, input))
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(Self::invalid_edit)?;
                 (
+                    base_model,
                     candidate,
                     document.render_epoch.load(Ordering::Acquire),
                     document.scope_revision.load(Ordering::Acquire),
                     inputs,
                 )
             };
+            // ── 渲染：**不持事务锁** ──────────────────────────────────────
             let mut prepared = Vec::new();
             for (owner, keys, input) in inputs {
                 for publisher in &owner.snapshots {
                     publisher.collect_retired();
                 }
-                let mut snapshots =
-                    input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))?;
-                super::snapshot::compact_prepared(&mut snapshots)?;
+                let mut snapshots = input
+                    .render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                    .map_err(Self::invalid_edit)?;
+                super::snapshot::compact_prepared(&mut snapshots).map_err(Self::invalid_edit)?;
                 prepared.push((owner, keys, snapshots));
             }
+            // ── 提交：短事务内复核（渲染期间一切可能都变了）并发布 ──────────
             let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire)
                 || document.revision.load(Ordering::Acquire) != base_model
             {
-                return Err("Conflict: host model changed during commit".into());
+                return Err((
+                    link::error_code::CONFLICT,
+                    "host model changed while the edit was being applied; export again".into(),
+                ));
             }
             let mut edits = document.edits.lock_or_recover();
-            if edits.revision != base_edit {
-                return Err("Conflict: edit revision changed during commit".into());
+            if edits.revision != edit.base_revisions.edits {
+                return Err((
+                    link::error_code::CONFLICT,
+                    "edit revision changed while the edit was being applied; export again".into(),
+                ));
             }
             if document.render_epoch.load(Ordering::Acquire) != epoch
                 || document.scope_revision.load(Ordering::Acquire) != scope
             {
-                return Err("host audio access/scope changed during commit; retry".into());
+                return Err((
+                    link::error_code::CONFLICT,
+                    "host audio access changed while the edit was being applied; try again".into(),
+                ));
             }
             for (owner, keys, snapshots) in &prepared {
-                if owner.assigned_regions().map_err(|e| e.to_string())? != *keys {
-                    return Err("Conflict: assigned regions changed during commit".into());
+                if owner.assigned_regions().map_err(Self::invalid_edit)? != *keys {
+                    return Err((
+                        link::error_code::CONFLICT,
+                        "assigned regions changed while the edit was being applied; try again"
+                            .into(),
+                    ));
                 }
                 if !owner
                     .snapshots
                     .iter()
                     .zip(snapshots)
-                    .all(|(p, s)| p.has_capacity(s))
+                    .all(|(publisher, snapshot)| publisher.has_capacity(snapshot))
                 {
-                    return Err("retired snapshot budget exhausted; reopen instance".into());
+                    return Err((
+                        link::error_code::CONFLICT,
+                        "retired snapshot budget exhausted; reopen the plug-in window".into(),
+                    ));
                 }
             }
             for (owner, keys, snapshots) in prepared {
                 for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                     publisher
                         .publish(snapshot)
-                        .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
+                        .map_err(|error| format!("snapshot publish failed: {error:?}"))
+                        .map_err(Self::invalid_edit)?;
                 }
                 owner.record_prepared(base_model, candidate.revision, epoch, scope, keys);
             }
             *edits = candidate;
             log::info!(
-                "[ara] GUI commit ready revision={} model={base_model}",
+                "[link] applied an edit revision={} model={base_model}",
                 edits.revision
             );
-            Ok::<(), String>(())
+            Ok(())
         })();
-        let error = outcome.err();
-        hifishifter_host_channel::Response {
-            ok: error.is_none(),
-            code: error
-                .as_deref()
-                .and_then(crate::editor::errors::terminal_error_code),
-            error,
-            revision: document.edits.lock_or_recover().revision,
-            model_revision: document.revision.load(Ordering::Acquire),
-            ..Default::default()
+        match outcome {
+            Ok(()) => status.ok = true,
+            Err((code, error)) => {
+                log::warn!("[link] rejected an edit: {error}");
+                status.code = Some(code);
+                status.error = Some(error);
+            }
+        }
+        status.revisions = self.link_revisions();
+        status
+    }
+
+    fn link_revisions(&self) -> hifishifter_host_link::Revisions {
+        let document = self
+            .document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        match document {
+            Some(document) => hifishifter_host_link::Revisions {
+                edits: document.edits.lock_or_recover().revision,
+                model: document.revision.load(Ordering::Acquire),
+            },
+            None => hifishifter_host_link::Revisions::default(),
         }
     }
 
+    /// 把一条内部错误规整成「协议码 + 文本」。
+    ///
+    /// 【为什么统一走 `INVALID_EDIT`】能走到这里的失败都属于「这份编辑本身不合格」：
+    /// 曲线非有限、轨道未知、音量越界、JSON 形状不对。消费者据此**不要重试**，
+    /// 而是把 `error` 显示给用户 —— 与 `CONFLICT`（重导一次就好）处置相反。
+    fn invalid_edit(error: impl std::fmt::Display) -> (u32, String) {
+        (
+            hifishifter_host_link::error_code::INVALID_EDIT,
+            error.to_string(),
+        )
+    }
     /// 调用方在短事务内冻结几何/参数/PCM，只复制本renderer授权源，不执行合成。
     pub(crate) fn capture_render_input(
         &self,
@@ -3430,52 +3644,6 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         drop(current);
-        if enabled.contains(ExtensionRoles::EDITOR_RENDERER) {
-            let weak = Arc::downgrade(self);
-            // 【为什么不写死宿主名】IPC 服务器名对所有连接的客户端可见；此前硬编码
-            // `"HiFiShifter / REAPER"`，在 Studio One / Cubase 等宿主上会报出错误的
-            // 宿主身份。从当前后端派生（`app_name` 只用于诊断，不参与分支）。
-            let server_name = match self.host_backend().app_name() {
-                Some(app) => format!("HiFiShifter / {app}"),
-                None => "HiFiShifter".to_string(),
-            };
-            // 能力协商：本实例是 ARA 实现，能回 `Snapshot`/`Commit` 与宿主 PCM，
-            // 不能写回宿主几何（ARA 2.0 禁止），也不提供播放位置/tempo map。
-            let hello = hifishifter_host_channel::HelloResponse {
-                source_kind: hifishifter_host_channel::SourceKind::Ara,
-                timeline_schema: hifishifter_host_channel::TIMELINE_SCHEMA_VERSION,
-                granted: vec![
-                    hifishifter_host_channel::Capability::Commit,
-                    hifishifter_host_channel::Capability::HostPcm,
-                ],
-                host_label: server_name.clone(),
-                implementation: format!("hifishifter-ara {}", env!("CARGO_PKG_VERSION")),
-            };
-            match hifishifter_host_channel::Server::start(server_name, move |request| {
-                // `Hello` 在文档守卫**之前**回答：它不是时间轴操作，且客户端要在
-                // 拿到 `source_kind`/`granted` 之后才知道该怎么继续。
-                if matches!(request, hifishifter_host_channel::Request::Hello { .. }) {
-                    return hifishifter_host_channel::Reply::Hello(hello.clone());
-                }
-                hifishifter_host_channel::Reply::Response(
-                    weak.upgrade()
-                        .map(|owner| owner.handle_request(request))
-                        .unwrap_or_else(|| hifishifter_host_channel::Response {
-                            error: Some(crate::editor::errors::INSTANCE_CLOSED.error()),
-                            ..Default::default()
-                        }),
-                )
-            }) {
-                Ok(server) => {
-                    log::info!(
-                        "[ara] GUI channel ready instance={}",
-                        server.record().instance_id
-                    );
-                    *self.channel.lock_or_recover() = Some(server);
-                }
-                Err(error) => log::warn!("[ara] GUI channel unavailable: {error}"),
-            }
-        }
         // 【为什么放在最后】这份读数要看到**全部**实例，包括本实例刚写进去的
         // `writer_id`。角色集合只有两个时刻会变：绑定（这里）与分配变化
         // （见 `new_with_renderer_observer` 的观察器），两处都要报。
@@ -3486,7 +3654,6 @@ impl ExtensionOwner {
     /// 文档侧已撤销 lease；保留 binding 以供宿主最后几次合法移除/释放回调访问。
     pub fn document_closed(&self) {
         self.stop_editor();
-        self.stop_channel();
         // 【为什么这里要重算覆盖】本实例退出后，"文档上还有没有 playback 实例"可能翻转
         // （播放实例先死、留下编辑实例）。`stop_editor` 已把 `closed` 置真，所以
         // `renderer_owners()` 不再包含自己 —— 重算后留下的那个实例会接管渲染，

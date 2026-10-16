@@ -186,25 +186,46 @@ impl EditState {
     }
 
     /// 只复制用户曲线与已有轨道参数，不接受客户端移动/替换clip。
+    ///
+    /// 【为什么现在只是转调】工作区交接的回写载荷**只装它真正会被读的字段**
+    /// （曲线 + 每条轨道的 5 个可写字段），不再传一整份 `TimelineState`。
+    /// 校验规则一条没变，只是入口收窄了 —— 于是这里保留成对
+    /// [`EditState::merge_params`] 的一层壳，供既有测试与调用点沿用。
     pub fn merge(
         &self,
         host: &TimelineState,
         client: &TimelineState,
         base_revision: u64,
     ) -> Result<Self, String> {
+        self.merge_params(
+            host,
+            &client.params_by_root_track,
+            &client.tracks,
+            base_revision,
+        )
+    }
+
+    /// 校验并合并**用户拥有的**两类东西：参数曲线与轨道混音。
+    ///
+    /// 【为什么不接受 clip 几何】宿主拥有几何。客户端把几何发上来只会被丢弃 ——
+    /// 而"发一个会被丢弃的东西、再在接收侧校验它"正是旧协议里最大的一处误解来源
+    /// （旧 `Commit` 传整份 `TimelineState`，这里只读其中两项）。
+    pub fn merge_params(
+        &self,
+        host: &TimelineState,
+        params: &BTreeMap<String, TrackParamsState>,
+        tracks: &[Track],
+        base_revision: u64,
+    ) -> Result<Self, String> {
         if base_revision != self.revision {
             return Err("Conflict: edit revision changed".into());
         }
         let host_ids: BTreeSet<_> = host.tracks.iter().map(|track| track.id.as_str()).collect();
-        let client_ids: BTreeSet<_> = client
-            .tracks
-            .iter()
-            .map(|track| track.id.as_str())
-            .collect();
+        let client_ids: BTreeSet<_> = tracks.iter().map(|track| track.id.as_str()).collect();
         if host_ids.len() != host.tracks.len()
-            || client_ids.len() != client.tracks.len()
+            || client_ids.len() != tracks.len()
             || client_ids != host_ids
-            || client.tracks.iter().any(|track| {
+            || tracks.iter().any(|track| {
                 !host.tracks.iter().any(|known| known.id == track.id)
                     || !track.volume.is_finite()
                     || !(0.0..=4.0).contains(&track.volume)
@@ -212,7 +233,7 @@ impl EditState {
         {
             return Err("invalid or unknown track".into());
         }
-        for (id, params) in &client.params_by_root_track {
+        for (id, params) in params {
             if !host.tracks.iter().any(|track| track.id == *id)
                 || !params.frame_period_ms.is_finite()
                 || !(0.1..=100.0).contains(&params.frame_period_ms)
@@ -242,14 +263,12 @@ impl EditState {
         }
         let mut merged = self.clone();
         merged.revision = self.revision.checked_add(1).ok_or("revision exhausted")?;
-        merged
-            .params
-            .retain(|id, _| !host_ids.contains(id.as_str()));
-        merged.params.extend(client.params_by_root_track.clone());
+        merged.params.retain(|id, _| !host_ids.contains(id.as_str()));
+        merged.params.extend(params.clone());
         merged
             .tracks
             .retain(|track| !host_ids.contains(track.id.as_str()));
-        merged.tracks.extend(client.tracks.clone());
+        merged.tracks.extend(tracks.iter().cloned());
         Ok(merged)
     }
     /// 当前宿主几何上叠加持久化参数，旧轨道记录不会创造虚构轨道。
@@ -334,7 +353,7 @@ impl EditState {
         trimmed.atlas.regions.clear();
         let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
-        if bytes.len() > hifishifter_host_channel::MAX_FRAME {
+        if bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
             return Err("state exceeds transport budget".into());
         }
         Ok(bytes)
@@ -344,7 +363,7 @@ impl EditState {
         if bytes.is_empty() {
             return Ok(());
         }
-        if bytes.len() > hifishifter_host_channel::MAX_FRAME {
+        if bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
             return Err("state too large".into());
         }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
