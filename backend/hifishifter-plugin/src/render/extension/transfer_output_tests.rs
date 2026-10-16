@@ -43,6 +43,58 @@ fn processed_snapshot() -> crate::render::snapshot::PlaybackSnapshot {
     }
 }
 
+/// **关着窗口、形态从未落定的会话，也必须能合成并发布处理结果。**
+///
+/// 【为什么这条是"永远是直通"的正面验收】处理结果的唯一生产者此前只在两处出现：
+/// `prepare_job` 的 Transfer 分流（条件 `mode() == Transfer`），以及会话 actor。
+/// 而形态由 `note_editor_tick` 落定 —— 它的唯一调用点是 WebView 的 20ms 定时器；
+/// 会话则只在 `webview.rs` 的命令分发里惰性创建。**两者都要求窗口开着。**
+/// 于是宿主把插件当普通插入、用户录完关掉窗口再播放时，一条处理结果都没合成过，
+/// 仲裁落到 `PassThrough`：用户听到的永远是直通。
+///
+/// 【为什么不跑真神经合成】本用例钉的是"分流与产出链通不通"，不是合成质量。
+/// `transfer_prepare_job` 走的是与生产同一份 `RenderInput::render`。
+#[test]
+fn a_closed_window_session_still_reaches_the_processed_output() {
+    let owner = insert_owner();
+    // 前提：形态确实没落定（没有 `setActive`、没有 `note_editor_tick`）。
+    assert_eq!(owner.mode(), InstanceMode::Undetermined);
+    record(&owner, 256);
+    // `setupProcessing` 装载合成队列；不碰任何 UI 定时器。
+    owner.clone().arm_transfer_rendering();
+    owner
+        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .expect("有素材就必须能准备出处理结果");
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Processed,
+        "关着窗口、形态未落定也得出处理结果 —— 否则播放时永远是直通"
+    );
+}
+
+/// **分流判据必须是"未绑定 + 有素材"，而不是 `mode()`。**
+///
+/// 【为什么单独钉这一条】上面那条走的是 `arm_transfer_rendering` 之后的完整链路；
+/// 这里单独钉 `prepare_job` 的分流本身，免得将来有人把判据改回 `mode()` 而只有
+/// 集成用例能发现。
+#[test]
+fn the_prepare_split_does_not_depend_on_the_binding_mode() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.clone().arm_transfer_rendering();
+    assert_eq!(
+        owner.mode(),
+        InstanceMode::Undetermined,
+        "前提：形态没落定（窗口没开过）"
+    );
+    let before = owner.prepare_request_count();
+    owner.prepare();
+    assert!(
+        owner.prepare_request_count() > before,
+        "有素材就必须排队准备，与形态无关"
+    );
+}
+
 /// **素材本身就是"这个实例是 Transfer"的证明。**
 ///
 /// 【为什么这是回归测试】形态判定此前只由编辑器窗口的 20ms 定时器写入，且要等
@@ -156,7 +208,15 @@ fn an_instance_without_material_is_transparent_regardless_of_mode() {
     assert_eq!(owner.transfer_output(), TransferOutput::PassThrough);
 }
 
-/// **换 take 之后绝不播上一份**：两份发布都按 take 号比对。
+/// **换 take 之后绝不播上一份的原始磁带；但上一版处理结果比宿主原声更接近真相。**
+///
+/// 【为什么这一条改了】此前新 take 落到 `PassThrough`：两份发布都还没跟上时要求"透传
+/// 宿主原声"。但那段空档里用户刚录完，听到的是**与自己素材无关的那一轨** —— 听起来
+/// 有声音，于是"编辑没生效"反而更难发现。上一版处理结果是**这份素材的上一版**，
+/// 且 `copy_block_layered` 仍按区间取输入总线，区间外不会静音。
+///
+/// 【为什么原始磁带那一半的判据不变】`raw_tape_ready()` 仍按 take 号比对 —— 换 take
+/// 后播上一份原始磁带是"听到了上一次录制的内容"，那是真正必须挡住的。
 #[test]
 fn a_new_take_invalidates_both_publishers() {
     let owner = insert_owner();
@@ -172,14 +232,39 @@ fn a_new_take_invalidates_both_publishers() {
     record(&owner, 256);
     assert_eq!(
         owner.transfer_output(),
-        TransferOutput::PassThrough,
-        "新 take 的两份发布都还没跟上 ⇒ 透传宿主原声，而不是播上一个 take 的内容"
+        TransferOutput::StaleProcessed,
+        "新 take 的合成还没跑完时，上一版处理结果好过宿主原声"
     );
     owner.sync_raw_tape();
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::Raw,
-        "原始磁带跟上新 take 之后就该听到它"
+        "原始磁带跟上新 take 之后就该听到它 —— 它比上一版处理结果新"
+    );
+}
+
+/// **从未发布过处理结果时不凭空造一档**：那时只能透传。
+///
+/// 【为什么这条必须单独钉住】`StaleProcessed` 的判据是"发布器非空"。若它在
+/// `has_material()` 为真时无条件生效，第一次录制之后、第一次合成之前就会凭空出现
+/// 一个"上一版结果"，而那时根本不存在任何一版。
+#[test]
+fn no_published_result_never_invents_a_stale_one() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Raw,
+        "原始磁带先到位"
+    );
+    // 撤掉原始磁带、且从未发布过处理结果 ⇒ 只能是透传。
+    owner.raw_tape.clear();
+    owner.raw_tape_revision.store(0, Ordering::Release);
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::PassThrough,
+        "没有发布过任何结果时不得凭空造一档"
     );
 }
 
@@ -269,9 +354,56 @@ fn the_first_blocks_of_playback_are_not_swallowed() {
         "位置钉住不动就是在停"
     );
     // 起播：位置开始走，而播放位（此刻还没置上）不参与判断。
+    //
+    // 【为什么现在是"连着两步"才成立】"位置变了"与"宿主在播"不是一件事：停播状态下
+    // 移动播放头也会变一次，而那一次足以放出一块**新位置**的音频 —— 用户报障的
+    // "很短、内容不对的一声，之后约 1 秒无声，换位置也一样"正是这样来的。
+    // 位置**连续向前**才是真在播的可核实证据。代价是多等一块（≈10 ms），
+    // 而它换掉的是"每次移动光标都漏一小块"。
     assert!(
-        transport_running_after(&owner, 0, 480),
-        "位置在前进就必须照常输出，否则每次播放都吞掉开头"
+        !transport_running_after(&owner, 0, 480),
+        "单次跳变不是证据：seek / 循环回卷 / 宿主重排都会跳一次"
+    );
+    // 此时上一块是 480、已累计一步。再走一块 ⇒ 两步 ⇒ 判定在播。
+    // （不能重复喂 480：位置钉住会清零累计 —— 那正是"停播"的定义。）
+    owner.note_block_position(960);
+    assert!(
+        owner.transfer_transport_running(),
+        "连着两步向前后就必须照常输出，否则每次播放都吞掉开头"
+    );
+}
+
+/// **后退不算"前进"**：停播时把播放头往前挪一次，不该放出一块音频。
+///
+/// 【为什么这条必须存在】旧的判据是 `previous != start`，方向无关。于是停播状态下
+/// 移动播放头会放出一小块新位置的音频，而用户此刻并没有在播放 —— 那正是报障里
+/// "很短、内容不对"的那一声。
+#[test]
+fn a_backward_seek_does_not_unlock_a_block() {
+    let owner = insert_owner();
+    owner.note_block_position(96_000);
+    owner.note_block_position(48_000);
+    assert!(
+        !owner.transfer_transport_running(),
+        "位置倒退不是播放：那是一次 seek 或循环回卷"
+    );
+    // 之后的连续前进仍然能正常识别。
+    owner.note_block_position(48_480);
+    owner.note_block_position(48_960);
+    assert!(owner.transfer_transport_running());
+}
+
+/// **停播时移动一次播放头 ⇒ 仍然静音**（旧实现会放出一块）。
+#[test]
+fn a_single_jump_while_stopped_stays_silent() {
+    let owner = insert_owner();
+    // 位置钉在 0 很久（停播），然后用户把光标拖到 10 秒处：只跳了一次。
+    owner.note_block_position(0);
+    owner.note_block_position(0);
+    owner.note_block_position(480_000);
+    assert!(
+        !owner.transfer_transport_running(),
+        "一次跳变后再无前进 ⇒ 仍在停播，不得放出一块"
     );
 }
 

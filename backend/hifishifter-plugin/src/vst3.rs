@@ -1718,6 +1718,26 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
+            // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
+            // 停播时不输出任何东西 ⇒ 必须清（否则输出里留着上一块的残留）。
+            //
+            // 【为什么还要看"位置在不在前进"】`kPlaying` 与位置不是原子更新的：宿主从
+            // "停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前只按
+            // 播放位判断，于是**每次播放都吞掉开头**（用户报障：播放后约 1 秒没有输出）。
+            // 位置在前进是宿主无关的硬事实 —— 真在播就必然前进（见
+            // `ExtensionOwner::transfer_transport_running`）。
+            //
+            // 【为什么这一支必须排在 `transfer_stage` **之前**】门控判"要静音"时若已经
+            // 写过快照，清输出就清不掉那一块的内容 —— 于是每次停播/移动光标都会漏出一
+            // 小块**新位置**的音频（用户报障："很短、内容不对的一声"）。先判、后写，
+            // "清输出"才是真的清。
+            if data.process_mode != 2
+                && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
+                && !owner.transfer_transport_running()
+            {
+                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                return K_RESULT_OK;
+            }
             // 【Transfer 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
             // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
             // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
@@ -1728,21 +1748,6 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                     (source, layered)
                 }
             };
-            // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
-            // 停播时不输出任何东西 ⇒ 必须清（否则输出里留着上一块的残留）。
-            //
-            // 【为什么还要看"位置在不在前进"】`kPlaying` 与位置不是原子更新的：宿主从
-            // "停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前只按
-            // 播放位判断，于是**每次播放都吞掉开头**（用户报障：播放后约 1 秒没有输出）。
-            // 位置在前进是宿主无关的硬事实 —— 真在播就必然前进（见
-            // `ExtensionOwner::transfer_transport_running`）。
-            if data.process_mode != 2
-                && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
-                && !owner.transfer_transport_running()
-            {
-                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                return K_RESULT_OK;
-            }
             // 【为什么分层拷贝前不能清】它写满整块（快照范围内取快照、范围外取**输入**），
             // 而 in-place 宿主下"输入"就是这块缓冲本身 —— 先清等于把要拷的东西删掉。
             if !layered && unsafe { crate::audio_abi::clear_outputs(data) }.is_err() {

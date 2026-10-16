@@ -5,7 +5,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
@@ -303,6 +303,15 @@ pub(crate) enum TransferOutput {
     Recording,
     /// 有素材，且处理结果就是**当前** take：输出处理结果。
     Processed,
+    /// 有素材、有已发布的处理结果，但那一份属于**上一个** take（新的合成还没跑完）。
+    ///
+    /// 【为什么要有这一档而不是掉到 `PassThrough`】`promote()` 会 `bump_revision()`，
+    /// 于是换 take 的瞬间 `processed_ready()` 立刻变假，而一次神经合成要数秒。此前这段
+    /// 空档落到"透传宿主原声" —— 用户刚录完，听到的却是与自己素材无关的那一轨。
+    /// 上一版处理结果虽然不是当前 take，但它是**这份素材的上一版**，且
+    /// `copy_block_layered` 仍按区间取输入总线，区间外不会变成静音。
+    /// 与 `Processed` 分成两个变体是为了让界面能如实说"上一版"，而不是假装是最新的。
+    StaleProcessed,
     /// 有素材，但处理结果还不是当前 take：输出**原始磁带**（未处理的捕获）。
     Raw,
     /// 已确知本实例走 Transfer、但还没有素材：透传宿主原声。
@@ -320,6 +329,7 @@ impl TransferOutput {
             TransferOutput::Untouched => "untouched",
             TransferOutput::Recording => "recording",
             TransferOutput::Processed => "processed",
+            TransferOutput::StaleProcessed => "stale_processed",
             TransferOutput::Raw => "raw",
             TransferOutput::PassThrough => "passthrough",
         }
@@ -462,6 +472,13 @@ pub(crate) struct ExtensionOwner {
     last_block_position: AtomicI64,
     /// 见过至少一个块的位置（`false` 时 [`Self::last_block_position`] 没有意义）。
     has_block_position: AtomicBool,
+    /// 连续"位置向前"的块数（[`Self::note_block_position`] 用它排除单次跳变）。
+    ///
+    /// 【为什么"连续性"要单独记】"位置变了"与"宿主在播"不是一件事：停播状态下移动
+    /// 播放头也会变一次，而那一次足以骗过门控、放出一小块**新位置**的音频 —— 听感是
+    /// "一声不对的短音，然后约一秒无声，换位置也一样"。真在播时位置必然**连续向前**，
+    /// 于是"连着两步向前"才是可核实的证据；单次跳变（seek、循环回卷、宿主重排）不算。
+    forward_streak: AtomicU32,
     /// 本块的位置相对上一块是否在前进（见 [`Self::transfer_transport_running`]）。
     position_advancing: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
@@ -2161,6 +2178,16 @@ impl ExtensionOwner {
         if self.raw_tape_ready() {
             return TransferOutput::Raw;
         }
+        // 【为什么"上一版处理结果"好过宿主原声】换 take 到合成完成之间的空档里，
+        // 唯一与"用户刚录的东西"有关的内容就是上一版处理结果。透传宿主原声听起来
+        // **有声音**，反而更难发现编辑没生效 —— 那是比静音更坏的失败。
+        //
+        // 【为什么只在这一档里才敢放宽】`has_material()` 已为真（上面的早退保证），
+        // 所以"发布过一份"不可能来自另一个实例或另一个文档；而从未发布过时不凭空生效
+        // （`snapshots` 为空 ⇒ 落到下面的 `PassThrough`）。
+        if self.snapshots.iter().any(|publisher| publisher.is_ready()) {
+            return TransferOutput::StaleProcessed;
+        }
         // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声。
         TransferOutput::PassThrough
     }
@@ -2171,14 +2198,31 @@ impl ExtensionOwner {
     /// `transfer_observe` 里，测试就只能复制一遍那段逻辑 —— 而复制出来的判据测的不是
     /// 生产代码。
     ///
-    /// 【为什么第一个块一律不算"前进"】那时没有可比对象，而两个方向的错法不对称：
-    /// 判成"前进"会在宿主停播时多送出一块音频（听起来是咔哒声），判成"没前进"最多
-    /// 让起播的第一个块静音（约 10 毫秒，听不出来）。选无害的那一侧。
+    /// 【为什么必须是"连续**向前**"而不是"变了"】"位置变了"与"宿主在播"不是一件事：
+    /// 停播状态下移动播放头也会变一次，而那一次足以骗过门控、放出一小块**新位置**
+    /// 的音频 —— 用户报障的原话是"播放后有一段很短、内容不对的音频，之后约 1 秒
+    /// 完全无声，无论播放位置在哪里"。第三节的三段现象全部来自这一条判据：
+    ///   * 后退 seek 也算"变" ⇒ 放出一小块错误位置的音频（那一声）；
+    ///   * 放完这一块位置就钉住了 ⇒ 后续块重新被清（那一秒无声）；
+    ///   * 换播放位置只是再骗出一块（"无论位置在哪里"都一样）。
+    /// 真在播时位置必然**连续向前**，所以判据改成"连着两步向前"。
+    ///
+    /// 【为什么首块仍不算"前进"，但不判死】那时没有可比对象，而两个方向的错法不对称：
+    /// 判成"前进"会在宿主停播时多送出一块音频（听起来是咔哒声），判成"没前进"最多让
+    /// 起播的第一个块静音（约 10 毫秒，听不出来）。首块记为"向前一步"但不满两步，
+    /// 于是它保守地静音，而**第二块只要真的向前就能出声** —— 不必等 `kPlaying` 置位。
     pub(crate) fn note_block_position(&self, start: i64) {
         let had = self.has_block_position.swap(true, Ordering::Relaxed);
         let previous = self.last_block_position.swap(start, Ordering::Relaxed);
-        self.position_advancing
-            .store(had && previous != start, Ordering::Release);
+        // 首块没有可比对象，按"向前"记但不让它独立成立（见上面的理由）。
+        let forward = !had || start > previous;
+        let streak = if forward {
+            self.forward_streak.load(Ordering::Relaxed).saturating_add(1)
+        } else {
+            0
+        };
+        self.forward_streak.store(streak, Ordering::Relaxed);
+        self.position_advancing.store(streak >= 2, Ordering::Release);
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2333,7 +2377,7 @@ impl ExtensionOwner {
             },
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
             // 那段被替换成处理结果，其余保持宿主原声。见 `copy_block_layered`。
-            TransferOutput::Processed => TransferStage::Snapshot {
+            TransferOutput::Processed | TransferOutput::StaleProcessed => TransferStage::Snapshot {
                 source: SnapshotSource::Processed,
                 layered: options.outside_passthrough,
             },
@@ -3876,6 +3920,23 @@ impl ExtensionOwner {
         static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
         self.writer_id
             .store(NEXT_WRITER.fetch_add(1, Ordering::Relaxed), Ordering::Release);
+        // 【为什么在这里也要把会话立起来】处理结果的**唯一**生产者是会话 actor
+        // （`start_transfer_render` → `transfer_prepare_job`），而会话此前只在
+        // `webview.rs` 的命令分发里惰性创建 —— 于是"从未打开过插件窗口"的会话里
+        // 没有任何东西会把带曲线的渲染排出去：录制正常、时间轴有内容、
+        // **播放时永远直通宿主原声**（用户报障）。
+        // `setupProcessing` 是 SDK 保证在任何 `process` 之前、且在宿主 UI 线程上被
+        // 调用的唯一时刻；actor 由会话创建，与窗口开没开无关，所以建在这里就够了。
+        //
+        // 【为什么只在有素材时才建】会话会起一个线程、初始化模型并建临时目录
+        // （`EditorSession::new_with`）。一个插在母线上、用户早已忘记的实例不该在
+        // 每次 `setupProcessing` 上都付这份代价；而没有素材时它也没有任何东西可渲染。
+        if self.transfer.has_material() {
+            if let Ok(session) = self.clone().transfer_session() {
+                // 让 actor 下一轮加载时间线并排一次渲染（幂等：已加载时它只推票据）。
+                session.request_reload();
+            }
+        }
     }
 
     pub fn prepare(&self) {
@@ -3928,7 +3989,10 @@ impl ExtensionOwner {
         // 【为什么 Transfer 要在这里同步准备】bounce / 导出是 Transfer 的**第二条通路**，
         // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
         // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
-        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+        // 【为什么判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里
+        // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
+        // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
+        if !self.is_bound() && self.transfer.has_material() {
             return self.transfer_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
         }
         if !self.renders_playback() {
@@ -3992,7 +4056,15 @@ impl ExtensionOwner {
     fn prepare_job(&self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Result<(), String> {
         // Transfer 形态没有 ARA 文档；在取文档**之前**分流，否则它会以
         // "document closed" 收场，而那条路对 Transfer 是常态而非错误。
-        if !self.is_bound() && self.mode() == InstanceMode::Transfer {
+        //
+        // 【为什么判据是"未绑定 + 有素材"而不是 `mode()`】形态由 `note_editor_tick`
+        // 落定，而它的唯一调用点是 WebView 的 20ms 定时器 —— **窗口不开就没有这个
+        // tick**，而且即便开了也要等 `setActive` 之后 5 秒。于是宿主把插件当普通插入、
+        // 用户录完关掉窗口再播放的会话里 `mode()` 恒为 `Undetermined` ⇒ 这里永不分流
+        // ⇒ 一条处理结果都没合成过 ⇒ 仲裁落到直通。
+        // `renders()` 早就因为同一理由绕开了 `mode()`（见它的注释）；准入侧与产出侧
+        // 必须问同一个问题，否则"该出声"与"还没到时候"会各自漂移。
+        if !self.is_bound() && self.transfer.has_material() {
             return self.transfer_prepare_job(cancel);
         }
         let Some(document) = self
