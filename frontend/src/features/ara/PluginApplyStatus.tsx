@@ -71,13 +71,23 @@ export function PluginApplyStatus({
             : state?.ready
               ? "success"
               : "neutral";
+    /*
+     * 【为什么要按"在等什么"分档】"正在自动应用..."是一句没有信息量的话：它既不说
+     * 进度、也不说还要多久，更不说"现在听到的是什么"。而这三件事后端全都知道 ——
+     * 尤其是**音高分析**，它是这条链路上唯一会持续很久的一步（几分钟素材的神经分析
+     * 本来就慢），却和"在合成"共用同一句话，于是用户无法区分"卡住了"与"在正常跑"。
+     */
     const label = terminal
         ? terminalLabel
         : !state?.ready
           ? t("plugin_apply_waiting_host")
-          : state.pending
-            ? t("plugin_apply_pending")
-            : t("plugin_apply_applied");
+          : state.analysis_pending
+            ? t("plugin_apply_analyzing")
+            : state.rendering_active
+              ? t("plugin_apply_rendering")
+              : state.pending
+                ? t("plugin_apply_pending")
+                : t("plugin_apply_applied");
     /*
      * 修订数与长说明都进 tooltip：它们在状态栏里没有位置，但"为什么还没应用"
      * 恰恰要靠它们判断 —— 塞进片里会把状态栏撑成一条跑道。
@@ -94,8 +104,12 @@ export function PluginApplyStatus({
                   edits: state.generation,
                   audio: state.applied_generation,
               }),
+              // 分析在途时先说清"这一步本来就这么慢"，否则用户会以为它卡死了。
+              state.analysis_pending ? t("plugin_apply_analyzing_hint") : null,
               t("plugin_apply_hint"),
-          ].join("\n")
+          ]
+              .filter((line): line is string => line !== null)
+              .join("\n")
         : undefined;
 
     function requestReload() {

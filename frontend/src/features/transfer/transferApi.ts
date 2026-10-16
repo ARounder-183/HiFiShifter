@@ -71,8 +71,16 @@ export interface TransferOptions {
 }
 
 export interface TransferStatus {
-    /** `"empty"` / `"recording"` / `"ready"`。 */
-    state: "empty" | "recording" | "ready";
+    /**
+     * `"empty"` / `"standby"` / `"recording"` / `"ready"`。
+     *
+     * 【为什么"待命"是独立一档】武装之后、宿主播放之前，素材一定还是零 —— 而那与
+     * "正在录"是两种不同的等待：前者等用户**去按播放**，后者在积累素材。合成一个
+     * "已录 0.0 秒"会让待命看起来像失败（用户反馈里的"点了录制没反应"）。
+     */
+    state: "empty" | "standby" | "recording" | "ready";
+    /** 已武装但宿主还没播过（= `state === "standby"` 的布尔形式）。 */
+    standby: boolean;
     recording: TransferRecording | null;
     capture: TransferCapture | null;
     material: TransferMaterial | null;
@@ -105,12 +113,37 @@ export interface TransferStatus {
      */
     unsupportedPrecision: boolean;
     /**
+     * 距单次录制上限不足 10 秒。
+     *
+     * 【为什么要预警】上限到点会**自己停**，而那是用户设的一个数值 —— 不预警的话
+     * 用户只能看到"录着录着就断了"。
+     */
+    limitWarning: boolean;
+    /**
+     * 上一次录制**自己**停下的原因（`null` = 没有过、或那一次是用户按的停）。
+     *
+     * 取值与后端 `ClosedReason::as_str` 一致：`"limit_reached"` / `"no_spare"` /
+     * `"rate_changed"` / `"budget_full"` / `"jump"`。三者的补救完全不同，所以分开报。
+     */
+    stoppedReason: string | null;
+    /**
      * 宿主是否**正在**通过 ARA 供音。
      *
      * 【为什么状态里要有它】Transfer 入口现在无条件可见（形态判定要等 5 秒宽限期，
      * 不能拿它当可见性判据），所以面板必须自己回答"我在这里有没有用"。
      */
     araBound: boolean;
+    /**
+     * **此刻听到的是哪一版**（后端输出仲裁的结论）。
+     *
+     * 取值与后端 `TransferOutput::as_str` 一致：`"processed"` / `"raw"` /
+     * `"passthrough"` / `"recording"` / `"untouched"`。
+     *
+     * 【为什么它值得占一行】处理结果、原始录音与宿主原声听起来都"像那么回事"，而它们
+     * 之间的差别正是"我的编辑生效了没有" —— 用户无法自己判断。后端已经在仲裁，界面
+     * 只是把它说出来。
+     */
+    output: string;
 }
 
 export const transferApi = {

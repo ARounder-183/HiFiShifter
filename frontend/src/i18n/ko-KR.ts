@@ -2188,6 +2188,30 @@ export const koKR = {
     panel_transfer: "Transfer",
     menu_transfer: "호스트에서 Transfer...",
     transfer_status_empty: "녹음 없음",
+    transfer_status_standby: "재생 대기 중",
+    transfer_field_limit_soon: "곳 한계 임박",
+    transfer_field_peak: "피크 {left} / {right}",
+    transfer_field_segments_value: "{count}개 섹션 확정",
+    transfer_guide_standby:
+        "준비되었습니다. 호스트를 재생하세요 —— 재생과 함께 녹음이 시작됩니다. 정지는 일시정지이며, 다시 재생하면 같은 테이크를 이어서 녹음합니다.",
+    transfer_limit_warning: "녹음 한계까지 10초 미만 남았습니다. 자동으로 정지합니다.",
+    transfer_stopped_limit: "녹음 한계에 도달해 자동으로 정지했습니다.",
+    transfer_stopped_no_spare:
+        "메모리가 따라가지 못해 자동으로 정지했습니다. 한계를 줄이거나 오래된 테이크를 지우세요.",
+    transfer_stopped_rate_changed: "호스트가 샘플레이트를 바꿔 정지했습니다.",
+    transfer_stopped_budget_full:
+        "PCM 메모리 예산이 소진되어 정지했습니다. 오래된 테이크를 지우세요.",
+    transfer_stopped_jump: "재생 위치가 건너뛰었습니다. 그 이후 내용은 연속적이지 않습니다.",
+    transfer_option_limit: "1회 녹음 한계(초)",
+    transfer_option_limit_hint:
+        "한계에 도달하면 자동으로 정지하고 녹음된 내용은 유지됩니다. 한계가 클수록 메모리를 더 쓵니다.",
+    transfer_option_limit_seconds: "{seconds}초",
+    transfer_option_limit_unlimited: "제한 없음",
+    transfer_output_processed: "처리 결과",
+    transfer_output_raw: "원본 녹음(합성 중)",
+    transfer_output_passthrough: "호스트 원음",
+    transfer_output_recording: "호스트 통과 중",
+    transfer_now_playing: "지금 듣는 것: {what}",
     transfer_status_recording: "녹음 중",
     transfer_status_ready: "녹음됨",
     transfer_start: "녹음",
@@ -2237,6 +2261,10 @@ export const koKR = {
     transfer_no: "없음",
     transfer_diagnostics:
         "호스트 제공: 재생 위치 {context} · 입력 오디오 {input} · 오프라인 렌더 {offline}",
+    plugin_apply_analyzing: "피치 분석 중...",
+    plugin_apply_analyzing_hint:
+        "이 단계는 소재 길이에 따라 몇 초에서 몇 분 걸립니다. 분석 중에는 원본 녹음을 재생합니다.",
+    plugin_apply_rendering: "합성 중...",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
 

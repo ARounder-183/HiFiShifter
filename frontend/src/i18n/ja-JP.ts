@@ -2219,6 +2219,30 @@ export const jaJP = {
     panel_transfer: "Transfer",
     menu_transfer: "ホストから Transfer...",
     transfer_status_empty: "未録音",
+    transfer_status_standby: "再生待ち",
+    transfer_field_limit_soon: "まもなく上限",
+    transfer_field_peak: "ピーク {left} / {right}",
+    transfer_field_segments_value: "{count} セグメントを確定",
+    transfer_guide_standby:
+        "準備完了。ホストを再生してください —— 再生と同時に録音が始まります。停止は一時停止で、再び再生すると同じテイクの続きを録ります。",
+    transfer_limit_warning: "録音上限まで残り 10 秒未満です。自動的に停止します。",
+    transfer_stopped_limit: "録音上限に達したため自動的に停止しました。",
+    transfer_stopped_no_spare:
+        "メモリが追いつかず自動的に停止しました。上限を短くするか古いテイクを消してください。",
+    transfer_stopped_rate_changed: "ホストのサンプルレートが変わったため停止しました。",
+    transfer_stopped_budget_full:
+        "PCM のメモリ予算を使い切ったため停止しました。古いテイクを消してください。",
+    transfer_stopped_jump: "再生位置がジャンプしました。その先の内容は連続していません。",
+    transfer_option_limit: "1 回の録音上限（秒）",
+    transfer_option_limit_hint:
+        "上限に達すると自動停止し、録れた内容は保持されます。上限が大きいほどメモリを使います。",
+    transfer_option_limit_seconds: "{seconds} 秒",
+    transfer_option_limit_unlimited: "無制限",
+    transfer_output_processed: "処理結果",
+    transfer_output_raw: "生録音（合成中）",
+    transfer_output_passthrough: "ホストの原音",
+    transfer_output_recording: "ホストをスルー中",
+    transfer_now_playing: "再生中: {what}",
     transfer_status_recording: "録音中",
     transfer_status_ready: "録音済み",
     transfer_start: "録音",
@@ -2267,6 +2291,10 @@ export const jaJP = {
     transfer_no: "なし",
     transfer_diagnostics:
         "ホストが提供：再生位置 {context} · 入力音声 {input} · オフライン書き出し {offline}",
+    plugin_apply_analyzing: "ピッチを解析中...",
+    plugin_apply_analyzing_hint:
+        "この工程は素材の長さに比例して数秒から数分かかります。解析中は生録音を再生します。",
+    plugin_apply_rendering: "合成中...",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
 

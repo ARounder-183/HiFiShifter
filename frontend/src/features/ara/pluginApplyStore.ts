@@ -32,6 +32,14 @@ export interface PluginApplyState {
      */
     rendering_active?: boolean;
     /**
+     * 后端是否在等**音高分析**。
+     *
+     * 【为什么必须与 `pending` 分开】分析是这条链路上**唯一会持续很久**的一步
+     * （几分钟素材的神经分析本来就慢），而它此前被 `pending` 一句话盖住 ——
+     * 用户无法区分"卡住了"与"在正常跑"。状态栏据此分成"在分析 / 在合成 / 在应用"。
+     */
+    analysis_pending?: boolean;
+    /**
      * 本实例的运行形态（`"transfer"` / `"ara"`）。
      *
      * 【为什么不能只读 bootstrap 的 `hostKind`】bootstrap 是窗口创建那一刻算的，而形态
@@ -93,6 +101,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.connected === b.connected &&
         a.ready === b.ready &&
         a.rendering_active === b.rendering_active &&
+        a.analysis_pending === b.analysis_pending &&
         a.error === b.error
     );
 }

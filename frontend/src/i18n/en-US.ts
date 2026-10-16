@@ -2202,6 +2202,31 @@ export const enUS = {
     panel_transfer: "Transfer",
     menu_transfer: "Transfer from Host...",
     transfer_status_empty: "Nothing recorded",
+    transfer_status_standby: "Waiting for playback",
+    transfer_field_limit_soon: "Limit soon",
+    transfer_field_peak: "Peak {left} / {right}",
+    transfer_field_segments_value: "{count} segment sealed|{count} segments sealed",
+    transfer_guide_standby:
+        "Ready. Play the host - recording starts with playback. Stopping the transport only pauses; playing again resumes the same take.",
+    transfer_limit_warning:
+        "Less than 10 seconds until the recording limit; it will stop automatically.",
+    transfer_stopped_limit: "The recording limit was reached, so recording stopped automatically.",
+    transfer_stopped_no_spare:
+        "The capture fell behind on memory and stopped. Shorten the limit or discard older takes.",
+    transfer_stopped_rate_changed: "The host changed its sample rate, so recording stopped.",
+    transfer_stopped_budget_full:
+        "The PCM memory budget ran out, so recording stopped. Discard older takes.",
+    transfer_stopped_jump: "The playhead jumped; content after that point is not continuous.",
+    transfer_option_limit: "Recording limit (seconds)",
+    transfer_option_limit_hint:
+        "Recording stops automatically at the limit and keeps what was captured. A larger limit uses more memory.",
+    transfer_option_limit_seconds: "{seconds} s",
+    transfer_option_limit_unlimited: "No limit",
+    transfer_output_processed: "Processed",
+    transfer_output_raw: "Raw take (synthesising)",
+    transfer_output_passthrough: "Host audio",
+    transfer_output_recording: "Passing the host through",
+    transfer_now_playing: "Now hearing: {what}",
     transfer_status_recording: "Recording",
     transfer_status_ready: "Recorded",
     transfer_start: "Record",
@@ -2251,6 +2276,10 @@ export const enUS = {
     transfer_field_gaps: "Jumps",
     transfer_field_spares: "Buffers left",
     transfer_field_takes: "Takes",
+    plugin_apply_analyzing: "Analysing pitch...",
+    plugin_apply_analyzing_hint:
+        "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",
+    plugin_apply_rendering: "Synthesising...",
     plugin_daw_controlled_reason:
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
 

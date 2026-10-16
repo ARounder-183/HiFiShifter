@@ -9,7 +9,7 @@
 //! 于是这个模块的接入对既有命令**零影响**。
 
 use crate::render::extension::ExtensionOwner;
-use crate::transfer::{TransferOptions, TransferStatus};
+use crate::transfer::TransferOptions;
 use serde_json::{json, Value};
 use std::sync::Arc;
 

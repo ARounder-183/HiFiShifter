@@ -65,6 +65,10 @@ function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
         hostPlaying: true,
         unsupportedPrecision: false,
         araBound: false,
+        standby: false,
+        limitWarning: false,
+        stoppedReason: null,
+        output: "passthrough",
         ...overrides,
     };
 }

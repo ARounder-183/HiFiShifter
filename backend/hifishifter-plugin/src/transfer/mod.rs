@@ -67,7 +67,11 @@ const DEFAULT_MAX_DURATION_SEC: f64 = 600.0;
 /// Transfer 的选项。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TransferOptions {
-    /// 单次录制的最长工程时长（秒）。
+    /// 单次录制的最长工程时长（秒）。**`0` = 不限**。
+    ///
+    /// 【为什么 0 是一个合法值】"不限"是用户的真实选择（他可能就是要录一整场），
+    /// 而它必须与"我填了个笔误"区分开：负数与非有限值一律退回 1 秒，只有**恰好 0**
+    /// 才被读成"不限"。一个笔误不该悄悄把上限关掉。
     pub max_duration_sec: f64,
     /// 单段容量（秒）。
     pub segment_sec: f64,
@@ -95,7 +99,6 @@ impl Default for TransferOptions {
 pub(crate) struct TransferTake {
     pub id: u64,
     pub sample_rate: u32,
-    pub channels: u8,
     pub segments: Vec<Segment>,
     /// 本次录制自己的摘要（面板的 take 列表用它）。
     ///
@@ -397,8 +400,19 @@ impl TransferStore {
         let mut current = self.options.lock_or_recover();
         // 【为什么在这里夹取值而不是信任调用方】上限决定内存占用，段长决定延迟；
         // 两者都不该由前端的一个笔误变成 0 或 1e9。
+        //
+        // 【为什么上限要单独一支】`0` 是"不限"的哨兵值（见字段说明），而"笔误"
+        // （负数、非有限值）必须退回最小值 —— 两者不能共用一条 `clamp`。
+        let limit = options.max_duration_sec;
+        let limit = if limit == 0.0 {
+            0.0
+        } else if limit.is_finite() {
+            limit.clamp(1.0, 3600.0)
+        } else {
+            1.0
+        };
         *current = TransferOptions {
-            max_duration_sec: options.max_duration_sec.clamp(1.0, 3600.0),
+            max_duration_sec: limit,
             segment_sec: options.segment_sec.clamp(1.0, 60.0),
             monitor: options.monitor,
             outside_passthrough: options.outside_passthrough,
@@ -525,12 +539,10 @@ impl TransferStore {
                 }
             };
             let sample_rate = segments[0].sample_rate;
-            let channels = segments[0].planes.len().clamp(1, 2) as u8;
             let (_, summary) = timeline::build(&segments, id, 120.0);
             self.takes.lock_or_recover().push(TransferTake {
                 id,
                 sample_rate,
-                channels,
                 segments,
                 summary,
                 sidecar: Some(path),
@@ -970,7 +982,6 @@ impl TransferStore {
         }
         let id = self.next_take_id.fetch_add(1, Ordering::AcqRel);
         let sample_rate = all[0].sample_rate;
-        let channels = all[0].planes.len().clamp(1, 2) as u8;
         let (_, summary) = timeline::build(&all, id, 120.0);
         // 【为什么在 promote 时就落盘，而不是等 `getState`】落盘是**一次**几十 MB 的
         // 写；放在 `getState` 里就等于在宿主每次自动保存时都写一遍。而 promote 是
@@ -988,7 +999,6 @@ impl TransferStore {
         let take = TransferTake {
             id,
             sample_rate,
-            channels,
             segments: all,
             summary,
             sidecar,
@@ -1247,6 +1257,9 @@ mod tests {
     }
 
     /// 选项被夹到合法区间：一个笔误不该变成 0 秒或 1e9 秒。
+    ///
+    /// 【为什么 0 要单独断言】`0` 是"不限"的哨兵值，而负数必须退回最小值 ——
+    /// 两者混起来会让一个笔误悄悄把上限关掉（"不限"= 进程预算的敌人）。
     #[test]
     fn options_are_clamped_to_a_usable_range() {
         let store = TransferStore::default();
@@ -1257,10 +1270,25 @@ mod tests {
             outside_passthrough: false,
         });
         let options = store.options();
-        assert!(options.max_duration_sec >= 1.0);
+        assert!(
+            options.max_duration_sec >= 1.0,
+            "负数（笔误）必须退回最小值，不能变成 0 = 不限"
+        );
         assert!(options.segment_sec <= 60.0);
         assert!(!options.monitor);
         assert!(!options.outside_passthrough);
+        // 恰好 0 = 不限：它是用户的真实选择，必须被保留。
+        store.set_options(TransferOptions {
+            max_duration_sec: 0.0,
+            ..options
+        });
+        assert_eq!(store.options().max_duration_sec, 0.0, "0 必须原样保留为不限");
+        // 超大的值仍被夹到上限。
+        store.set_options(TransferOptions {
+            max_duration_sec: 1e9,
+            ..options
+        });
+        assert!(store.options().max_duration_sec <= 3600.0);
     }
 
     /// 临时目录（每个用例一个）。
