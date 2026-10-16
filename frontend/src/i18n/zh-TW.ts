@@ -2140,9 +2140,8 @@ export const zhTW = {
     menu_transfer: "從宿主 Transfer 錄製...",
     transfer_status_empty: "尚未錄製",
     transfer_status_standby: "等待播放",
-    transfer_field_limit_soon: "即將到上限",
-    transfer_field_peak: "峰值 {left} / {right}",
-    transfer_field_segments_value: "已封口 {count} 段",
+    transfer_field_peak: "峰值",
+    transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
         "已就緒。請播放実主 —— 播放開始後會自動開始錄製，停止播放只是暫停，接著播會接著錄。",
     transfer_limit_warning: "還有不到 10 秒到達單次錄製上限，屆時會自動停止。",
@@ -2164,7 +2163,6 @@ export const zhTW = {
     transfer_status_ready: "已錄製",
     transfer_start: "錄製",
     transfer_stop: "停止",
-    transfer_cancel: "取消",
     transfer_clear: "丟棄全部錄音",
     transfer_cancel_hint: "丟棄這一次錄製，不留錄音",
     transfer_guide_body:
@@ -2186,6 +2184,7 @@ export const zhTW = {
         "這個宿主以 64 位元浮點精度處理本外掛，外掛目前讀不了這種樣本，因此保持靜音。請把宿主的處理精度切換為 32 位元浮點。",
     transfer_field_precision: "宿主為 64 位元",
     transfer_recording_progress: "已錄 {seconds} 秒",
+    transfer_recording_elapsed: "{seconds}秒",
     transfer_field_segments: "分段數",
     transfer_field_gaps: "跳躍次數",
     transfer_field_spares: "剩餘緩衝",

@@ -2203,9 +2203,8 @@ export const enUS = {
     menu_transfer: "Transfer from Host...",
     transfer_status_empty: "Nothing recorded",
     transfer_status_standby: "Waiting for playback",
-    transfer_field_limit_soon: "Limit soon",
-    transfer_field_peak: "Peak {left} / {right}",
-    transfer_field_segments_value: "{count} segment sealed|{count} segments sealed",
+    transfer_field_peak: "Peak",
+    transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
         "Ready. Play the host - recording starts with playback. Stopping the transport only pauses; playing again resumes the same take.",
     transfer_limit_warning:
@@ -2231,7 +2230,6 @@ export const enUS = {
     transfer_status_ready: "Recorded",
     transfer_start: "Record",
     transfer_stop: "Stop",
-    transfer_cancel: "Cancel",
     transfer_clear: "Discard all takes",
     transfer_cancel_hint: "Discard this recording without keeping a take",
     transfer_guide_body:
@@ -2272,6 +2270,7 @@ export const enUS = {
         "This host processes the plug-in at 64-bit sample precision, which the plug-in cannot read yet, so it stays silent. Switch the host's processing precision to 32-bit float.",
     transfer_field_precision: "64-bit host",
     transfer_recording_progress: "Recorded {seconds}s",
+    transfer_recording_elapsed: "{seconds}s",
     transfer_field_segments: "Segments",
     transfer_field_gaps: "Jumps",
     transfer_field_spares: "Buffers left",

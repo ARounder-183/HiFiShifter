@@ -2189,9 +2189,8 @@ export const koKR = {
     menu_transfer: "호스트에서 Transfer...",
     transfer_status_empty: "녹음 없음",
     transfer_status_standby: "재생 대기 중",
-    transfer_field_limit_soon: "곳 한계 임박",
-    transfer_field_peak: "피크 {left} / {right}",
-    transfer_field_segments_value: "{count}개 섹션 확정",
+    transfer_field_peak: "피크",
+    transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
         "준비되었습니다. 호스트를 재생하세요 —— 재생과 함께 녹음이 시작됩니다. 정지는 일시정지이며, 다시 재생하면 같은 테이크를 이어서 녹음합니다.",
     transfer_limit_warning: "녹음 한계까지 10초 미만 남았습니다. 자동으로 정지합니다.",
@@ -2216,7 +2215,6 @@ export const koKR = {
     transfer_status_ready: "녹음됨",
     transfer_start: "녹음",
     transfer_stop: "정지",
-    transfer_cancel: "취소",
     transfer_clear: "모든 테이크 버리기",
     transfer_cancel_hint: "이 녹음을 버리고 테이크를 남기지 않습니다",
     transfer_guide_body:
@@ -2241,6 +2239,7 @@ export const koKR = {
         "이 호스트는 플러그인을 64비트 정밀도로 처리합니다. 플러그인이 그 샘플을 읽을 수 없어 무음으로 남습니다. 호스트의 처리 정밀도를 32비트 부동소수점으로 바꾸세요.",
     transfer_field_precision: "호스트가 64비트",
     transfer_recording_progress: "{seconds}초 녹음됨",
+    transfer_recording_elapsed: "{seconds}초",
     transfer_field_segments: "세그먼트 수",
     transfer_field_gaps: "점프 횟수",
     transfer_field_spares: "남은 버퍼",

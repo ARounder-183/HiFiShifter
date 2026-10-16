@@ -119,6 +119,15 @@ export function TransferPanel() {
                     <AppField label={t("transfer_field_spares")}>
                         {String(status?.recording?.spares ?? 0)}
                     </AppField>
+                    {/* 【为什么峰值读数在这一栏】它此前长在工具栏上，而工具栏是宿主窗口
+                        里的一条单行容器 —— 峰值与分段数、备用缓冲同一性质（都是"刚发生了
+                        什么"），所以它们应当在一起（面板），而不是挤在键旁边。 */}
+                    <AppField label={t("transfer_field_peak")}>
+                        {tVars("transfer_field_peak_value", {
+                            left: (status?.recording?.peak?.[0] ?? 0).toFixed(2),
+                            right: (status?.recording?.peak?.[1] ?? 0).toFixed(2),
+                        })}
+                    </AppField>
                 </Flex>
             ) : null}
 

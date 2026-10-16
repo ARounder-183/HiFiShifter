@@ -2136,9 +2136,8 @@ export const zhCN = {
     menu_transfer: "从宿主 Transfer 录制...",
     transfer_status_empty: "尚未录制",
     transfer_status_standby: "等待播放",
-    transfer_field_limit_soon: "即将到上限",
-    transfer_field_peak: "峰值 {left} / {right}",
-    transfer_field_segments_value: "已封口 {count} 段",
+    transfer_field_peak: "峰值",
+    transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
         "已就绪。请播放実主 —— 播放开始后会自动开始录制，停止播放只是暂停，接着播会接着录。",
     transfer_limit_warning: "还有不到 10 秒到达单次录制上限，届时会自动停止。",
@@ -2160,7 +2159,6 @@ export const zhCN = {
     transfer_status_ready: "已录制",
     transfer_start: "录制",
     transfer_stop: "停止",
-    transfer_cancel: "取消",
     transfer_clear: "丢弃全部录音",
     transfer_cancel_hint: "丢弃这一次录制，不留录音",
     transfer_guide_body:
@@ -2182,6 +2180,7 @@ export const zhCN = {
         "这个宿主以 64 位浮点精度处理本插件，插件目前读不了这种样本，因此保持静音。请把宿主的处理精度切换为 32 位浮点。",
     transfer_field_precision: "宿主为 64 位",
     transfer_recording_progress: "已录 {seconds} 秒",
+    transfer_recording_elapsed: "{seconds}s",
     transfer_field_segments: "分段数",
     transfer_field_gaps: "跳跃次数",
     transfer_field_spares: "剩余缓冲",

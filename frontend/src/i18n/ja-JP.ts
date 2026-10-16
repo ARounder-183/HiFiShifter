@@ -2220,9 +2220,8 @@ export const jaJP = {
     menu_transfer: "ホストから Transfer...",
     transfer_status_empty: "未録音",
     transfer_status_standby: "再生待ち",
-    transfer_field_limit_soon: "まもなく上限",
-    transfer_field_peak: "ピーク {left} / {right}",
-    transfer_field_segments_value: "{count} セグメントを確定",
+    transfer_field_peak: "ピーク",
+    transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
         "準備完了。ホストを再生してください —— 再生と同時に録音が始まります。停止は一時停止で、再び再生すると同じテイクの続きを録ります。",
     transfer_limit_warning: "録音上限まで残り 10 秒未満です。自動的に停止します。",
@@ -2247,7 +2246,6 @@ export const jaJP = {
     transfer_status_ready: "録音済み",
     transfer_start: "録音",
     transfer_stop: "停止",
-    transfer_cancel: "キャンセル",
     transfer_clear: "すべてのテイクを破棄",
     transfer_cancel_hint: "この録音を破棄する（テイクを残さない）",
     transfer_guide_body:
@@ -2271,6 +2269,7 @@ export const jaJP = {
         "このホストはプラグインを 64 ビット精度で処理しています。プラグインはそのサンプルを読めないため無音のままです。ホストの処理精度を 32 ビット浮動小数点に切り替えてください。",
     transfer_field_precision: "ホストが 64 ビット",
     transfer_recording_progress: "録音済み {seconds} 秒",
+    transfer_recording_elapsed: "{seconds}秒",
     transfer_field_segments: "セグメント数",
     transfer_field_gaps: "ジャンプ回数",
     transfer_field_spares: "残りバッファ",
