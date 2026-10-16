@@ -2794,7 +2794,16 @@ pub(crate) mod tests {
         session.close();
     }
 
-    /// 临时测量：素材长度 → 从画线到收敛要多久（用来判断 60 秒上限够不够）。
+    /// **诊断**：素材长度 → "画一条线"到"输出是处理结果"要多久。
+    ///
+    /// 【为什么值得留着】它回答的是 `ANALYSIS_PENDING_CEILING` 那个 60 秒到底合不合理：
+    /// 上限太低会把**正常**的慢分析判成卡死，太高则让真卡死多冻用户一分钟。本机实测
+    /// （48 kHz，含首次加载 ONNX 会话）：2 秒素材 ≈ 9.9 s、10 秒 ≈ 5.3 s、30 秒 ≈ 5.7 s
+    /// —— 时间**几乎全在一次性模型加载**上，不随素材长度增长。所以 60 秒对常规素材有
+    /// 两个数量级的余量，而真正需要调的是"卡死"那一侧（现在到顶只放弃**等待**，
+    /// 不再放弃渲染）。
+    ///
+    /// 默认忽略：它要跑一次真分析 + 真合成（数十秒），不属于每次都要跑的回归。
     #[test]
     #[ignore]
     fn measure_convergence_against_material_length() {
@@ -2806,8 +2815,7 @@ pub(crate) mod tests {
             transfer.note_project_rate(48_000.0);
             transfer.start().unwrap();
             let frames = 48_000_usize;
-            let samples: &'static [f32] =
-                Box::leak(vec![0.4_f32; frames].into_boxed_slice());
+            let samples: &'static [f32] = Box::leak(vec![0.4_f32; frames].into_boxed_slice());
             for index in 0..i64::from(seconds) {
                 transfer.on_block(crate::transfer::InputBlock {
                     start: index * frames as i64,
