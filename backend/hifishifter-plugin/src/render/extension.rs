@@ -2024,7 +2024,15 @@ impl ExtensionOwner {
             .filter(|session| session.is_loaded())
             .cloned();
         let (timeline, edit, with_curves) = match &session {
-            Some(session) => (session.render_timeline()?, session.edit_generation(), true),
+            // 【为什么用"发布代次"而不是"编辑代次"】渲染读的就是这份被发布的时间线，
+            // 而 `generation` 只由 `mark_dirty` 推进 —— 有命令改了曲线却不标脏
+            // （`convert_mix_param`），只认 `generation` 会让那种改动不推进版本 ⇒
+            // 渲染被跳过 ⇒ 曲线永远不生效。
+            Some(session) => (
+                session.render_timeline()?,
+                session.timeline_revision(),
+                true,
+            ),
             // 会话还没加载（窗口还没开、或前端还没问过时间线）：退回捕获存储的几何。
             // 那时也没有用户在编辑，两者等价 —— 但**必须把这个事实带进版本号**
             // （见 `transfer_prepare_job` 的 `with_curves` 位）。

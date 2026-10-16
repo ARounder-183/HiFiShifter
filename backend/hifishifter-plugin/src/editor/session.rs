@@ -286,6 +286,20 @@ pub(crate) struct EditorSession {
     analysis_workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     views: Mutex<HashMap<String, RegisteredView>>,
     pub(super) generation: AtomicU64,
+    /// 时间线代次：`mark_dirty`（编辑）与 `publish_timeline`（发布）**任一**都推进它。
+    ///
+    /// 【为什么必须是两者的并集】Transfer 的渲染版本闸以它为据，而它要回答的是
+    /// "渲染读的东西变了没有"。两个来源各有一半：
+    ///
+    /// - `mark_dirty` 覆盖"编辑"这一层语义，但它**不是**曲线改动的必要条件 ——
+    ///   `convert_mix_param` 把音量曲线换算成 dyn 曲线并发布，却不标脏。只认它会让
+    ///   那种改动不推进版本 ⇒ 渲染被跳过 ⇒ 曲线永远不生效（用户报障：
+    ///   "画完参数线不生效"）。
+    /// - `publish_timeline` 覆盖"时间线被发布"，也就是渲染实际读的那份数据。
+    ///
+    /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
+    /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
+    timeline_revision: AtomicU64,
     submitted: AtomicU64,
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
@@ -509,6 +523,7 @@ impl EditorSession {
             analysis_cancel: Arc::new(AtomicBool::new(false)),
             analysis_workers: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
+            timeline_revision: AtomicU64::new(0),
             submitted: AtomicU64::new(0),
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -563,12 +578,14 @@ impl EditorSession {
         }
     }
 
-    /// 当前编辑代次：用户每做一次会改变声音的写入就前进。
+    /// 时间线代次（`mark_dirty` 与 `publish_timeline` 任一都推进）。
     ///
-    /// 【用途】Transfer 的渲染版本闸要带上它 —— 只认 take 会让"改了音高却不重算"
-    /// 变成一个静默的失效。
-    pub(crate) fn edit_generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+    /// 【用途】Transfer 渲染的版本闸。它比 `generation` 更贴近"渲染读的东西变没变"：
+    /// 任何改了时间线的路径都会推进它，包括不标脏的那些（见字段说明）。
+    /// `generation` 本身不再对外暴露 —— 它留在 `pending`/`applied` 那套进度读数里，
+    /// 而那套读数问的是"编辑应用了没有"，与"渲染读的东西变没变"是两件事。
+    pub(crate) fn timeline_revision(&self) -> u64 {
+        self.timeline_revision.load(Ordering::Acquire)
     }
 
     /// 时间线是否已经加载过（Transfer 的渲染要等这一份就绪才用得上用户曲线）。
@@ -2233,6 +2250,8 @@ impl ParamHost for EditorSession {
     }
     fn mark_dirty(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+        // 见 `timeline_revision` 的字段说明：它是"编辑 ∪ 发布"的并集。
+        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         let views = self.views.lock_or_recover();
         for view in views.values() {
             if let Some((link, _)) = &view.route {
@@ -2241,6 +2260,11 @@ impl ParamHost for EditorSession {
         }
     }
     fn publish_timeline(&self, timeline: TimelineState) {
+        // 【为什么在分支之前】这是"时间线变了"的**唯一**统一信号：所有曲线写入
+        // （set_param_frames / restore / convert_mix_param / set_static_param /
+        // stretch_track_linked_params）与撤销重做都会走到这里。Transfer 的渲染版本闸
+        // 以它为据，因此不标脏的改动也不会被跳过（见字段说明）。
+        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         // Transfer：没有宿主可写回 —— 参数就是权威，落在本会话的时间线上。
         // 只需要排一次重渲染（owner 的 Transfer 渲染准备会读这份时间线）。
         if self.is_transfer() {
@@ -2687,9 +2711,15 @@ pub(crate) mod tests {
         let owner = transfer_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, _with_curves, input) = owner.transfer_render_input().unwrap();
+        let (take, edit, with_curves, input) = owner.transfer_render_input().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
-        assert_eq!(edit, session.edit_generation());
+        assert!(
+            with_curves,
+            "会话已加载 ⇒ 这份时间线必须带着用户曲线（否则画完线不会生效）"
+        );
+        // 【为什么比的是"发布代次"】它是渲染版本闸的据：任何改了时间线并发布的路径
+        // 都会推进它，包括不标脏的那些（见 `timeline_revision` 的字段说明）。
+        assert_eq!(edit, session.timeline_revision());
         let timeline = input.timeline.as_ref().unwrap();
         assert_eq!(timeline.clips.len(), 1);
         assert!(
@@ -2712,6 +2742,34 @@ pub(crate) mod tests {
             "参数写入必须推进渲染版本"
         );
         session.close();
+    }
+
+    /// **只发布、不标脏的曲线改动也必须推进渲染版本。**
+    ///
+    /// 【为什么这条必须存在】`convert_mix_param`（前端"换算"菜单）把音量曲线换算成
+    /// dyn 曲线并 `publish_timeline`，但**不调 `mark_dirty`**。版本闸若只认编辑代次，
+    /// 那种改动不会推进版本 ⇒ 渲染被跳过 ⇒ 换算完的曲线永远不生效 —— 用户看到的就是
+    /// "画完参数线不生效"。这里按同一形状喂（只发布），把这条钉住。
+    #[test]
+    fn a_published_timeline_change_advances_the_render_version_without_marking_dirty() {
+        let owner = transfer_owner_with_a_take();
+        let session = owner.editor_session().unwrap();
+        session.ensure_loaded(true).unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let before = owner.transfer_render_input().unwrap().1;
+            // 模拟 `convert_mix_param` 的收尾：发布，但不标脏。
+            let snapshot = session.timeline.lock_or_recover().clone();
+            session.publish_timeline(snapshot);
+            assert_ne!(
+                owner.transfer_render_input().unwrap().1,
+                before,
+                "发布过的时间线必须推进渲染版本，否则这类改动会被版本闸静默跳过"
+            );
+        }));
+        session.close();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     fn transfer_session_body(session: &Arc<EditorSession>) {
