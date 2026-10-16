@@ -339,21 +339,19 @@ impl TransferStore {
         self.host_playing.load(Ordering::Acquire)
     }
 
-    /// 此刻是否**真的在录**（= 已武装，且本次录制真的在往素材里写）。
+    /// 此刻是否**真的在录**（= 已武装，且宿主已经开始播放）。
     ///
-    /// 【为什么不再把 `host_playing` 当充分条件】录完之后用户没有按停止是常态：那时
-    /// `armed` 仍为真，而宿主一开始播放 `host_playing` 立刻为真 ⇒ 整次播放都被判成
-    /// "录制中" ⇒ 输出仲裁走直通（或静音），**压过已经合成好的处理结果** —— 用户
-    /// 听到的一直是宿主原声，而界面上说素材已经录好了。
+    /// 【为什么需要"或 host_playing"】`capture_started` 由音频线程在 `on_block` 里置位，
+    /// 而输出仲裁在**同一个回调里稍后**才发生（`transfer_observe` 在前、
+    /// `transfer_stage` 在后）—— 两者本来同拍。但"宿主正在播放"是更强、更早可得的
+    /// 事实：只要它在播，我们就必须按"录制中"处理输出，否则输出会写进输入缓冲
+    /// （in-place 宿主）而被下一块捕获录进去。
     ///
-    /// 【in-place 保护为什么仍然成立】要守的是"别把自己的输出写进捕获要读的输入缓冲"，
-    /// 而那只可能发生在**捕获真的在写这一块**的时候（`on_block` 在 `!block.playing`
-    /// 时直接返回 `NotPlaying`，一个样本都不写）。`capture_started` 描述的正是这件事：
-    /// 它由 `on_block` 在真的写入后置位，在每次 `start` 时清零。于是"armed 但这一块
-    /// 没在写"的时刻（待命 / 暂停 / 到上限之后）不再无谓地直通 —— 那些时刻本来也不
-    /// 存在污染捕获的风险。
+    /// 【为什么"录完之后没按停止"不会卡住这里】`stop()` / `cancel()` / `clear()` 都会清
+    /// `armed`，而捕获自己停下时 `on_block` 也会清它（见 `Stopped` 分支）。所以"录完了
+    /// 但还武装着"这个状态不存在 —— 那正是"处理结果被直通压过"的怀疑对象，实测不成立。
     pub(crate) fn is_recording(&self) -> bool {
-        self.is_armed() && self.capture_started()
+        self.is_armed() && (self.capture_started() || self.host_playing())
     }
 
     /// 素材代次（`0` = 从来没有过任何 take）。
@@ -1341,7 +1339,14 @@ mod tests {
     /// 【为什么 in-place 保护没丢】只在捕获真的往素材里写时才需要直通，而那正是
     /// `capture_started` 的语义（`on_block` 在 `!playing` 时一个样本都不写）。
     #[test]
-    fn a_finished_recording_is_not_recording_when_the_host_plays_again() {
+    /// **录完并停止之后，宿主再播放不再是"录制中"。**
+    ///
+    /// 【为什么钉这一条】"处理结果被直通压过"的一个怀疑对象是"录完没按停止 ⇒
+    /// `armed` 留着 ⇒ 下次播放整段被判成录制中"。实测不成立：`stop()` 会清 `armed`
+    /// （`cancel` / `clear` / 捕获自己停下时同样），所以那个状态根本不存在。
+    /// 把结论钉成用例，免得以后有人再按这个假设去改 `is_recording`。
+    #[test]
+    fn stopping_recording_releases_the_output_to_the_result_again() {
         let store = store();
         let samples: &'static [f32] = Box::leak(vec![0.25_f32; 4096].into_boxed_slice());
         store.start().unwrap();
@@ -1354,8 +1359,7 @@ mod tests {
         });
         assert!(store.is_recording(), "真的在写 ⇒ 录制中");
         store.stop().unwrap();
-        // 用户没按停止就再播一次（另一种常见形态：录完直接按播放试听）。
-        store.start().unwrap();
+        // 宿主仍在播（用户录完直接继续播放试听）。
         store.observe(&InputBlock {
             start: 999_999,
             frames: 16,
@@ -1363,23 +1367,11 @@ mod tests {
             planes: [Some(samples), Some(samples)],
             playing: true,
         });
-        assert!(
-            store.host_playing(),
-            "前提：宿主确实在播（旧实现据此判成录制中）"
-        );
+        assert!(store.host_playing(), "前提：宿主确实在播");
         assert!(
             !store.is_recording(),
-            "本次录制还没写进任何素材 ⇒ 不该抢走处理结果的播放权"
+            "停止之后必须把播放权交还给处理结果 —— armed 已被 `stop()` 清掉"
         );
-        // 一旦真的开始写，就立刻回到"录制中"（in-place 保护）。
-        store.on_block(InputBlock {
-            start: 0,
-            frames: 4096,
-            sample_rate: 48_000.0,
-            planes: [Some(samples), Some(samples)],
-            playing: true,
-        });
-        assert!(store.is_recording(), "真的在写 ⇒ 必须回到录制中");
     }
 
     /// 未录制时 `on_block` 完全不动状态（音频线程上的零成本早退）。
@@ -1575,3 +1567,4 @@ mod tests {
         }
     }
 }
+
