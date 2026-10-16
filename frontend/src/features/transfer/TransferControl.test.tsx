@@ -192,3 +192,42 @@ test("录制中给出停止与取消，并说出「宿主没在播放」", async
     await click(button(enUS.transfer_stop));
     expect(invokeMock).toHaveBeenCalledWith("transfer_stop");
 });
+
+/**
+ * **待命必须说成"等待播放"，而不是"已录 0.0 秒"。**
+ *
+ * 【为什么这条是用户反馈的回归测试】用户按了录制、宿主还没播，界面显示的是一个
+ * "已录 0.0 秒"的读数 —— 那看起来像失败，而实际是"等你去按播放"。这两件事对用户的
+ * 下一步完全不同，所以待命必须是一个**独立**的说法。
+ */
+test("按了录制但宿主还没播放 ⇒ 说成等待播放，而不是 0.0 秒", async () => {
+    invokeMock.mockResolvedValue(status({ state: "standby", standby: true }));
+    await render();
+    expect(text()).toContain(enUS.transfer_status_standby);
+    expect(text(), "待命期不该出现录制读数").not.toContain("0.0");
+    // 键变成"停止"（本次录制已经开始了，只是还没收到素材）。
+    expect(button(enUS.transfer_stop)).toBeTruthy();
+    await click(button(enUS.transfer_stop));
+    expect(invokeMock).toHaveBeenCalledWith("transfer_stop");
+});
+
+/** 距上限不足 10 秒时给出预警 —— 上限到点会自己停。 */
+test("接近录制上限时给出预警", async () => {
+    invokeMock.mockResolvedValue(
+        status({
+            state: "recording",
+            hostPlaying: true,
+            limitWarning: true,
+            recording: {
+                capturedFrames: 48_000,
+                sealedSegments: 0,
+                position: 48_000,
+                peak: [0.1, 0.1],
+                gaps: 0,
+                spares: 2,
+            },
+        }),
+    );
+    await render();
+    expect(text()).toContain(enUS.transfer_field_limit_soon);
+});
