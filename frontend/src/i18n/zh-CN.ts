@@ -2139,11 +2139,11 @@ export const zhCN = {
     transfer_field_peak: "峰值",
     transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
-        "已就绪。请播放実主 —— 播放开始后会自动开始录制，停止播放只是暂停，接着播会接着录。",
+        "已就绪。请播放宿主 —— 播放开始后会自动开始录制，停止播放只是暂停，接着播会接着录。",
     transfer_limit_warning: "还有不到 10 秒到达单次录制上限，届时会自动停止。",
     transfer_stopped_limit: "已到达单次录制上限，自动停止了。",
     transfer_stopped_no_spare: "内存没跟上，自动停止了。请缩短上限或清掉旧录音。",
-    transfer_stopped_rate_changed: "実主改变了采样率，自动停止了。",
+    transfer_stopped_rate_changed: "宿主改变了采样率，自动停止了。",
     transfer_stopped_budget_full: "PCM 内存预算用尽，自动停止了。请清掉旧录音。",
     transfer_stopped_jump: "播放位置跳转过，这一段之后的内容不连续。",
     transfer_option_limit: "单次录制上限（秒）",
@@ -2152,8 +2152,8 @@ export const zhCN = {
     transfer_option_limit_unlimited: "不限",
     transfer_output_processed: "处理结果",
     transfer_output_raw: "原始录音（合成中）",
-    transfer_output_passthrough: "実主原声",
-    transfer_output_recording: "正在直通実主",
+    transfer_output_passthrough: "宿主原声",
+    transfer_output_recording: "正在直通宿主",
     transfer_now_playing: "当前听到：{what}",
     transfer_status_recording: "录制中",
     transfer_status_ready: "已录制",
@@ -2164,7 +2164,7 @@ export const zhCN = {
     transfer_guide_body:
         "先在宿主里按播放，再点「录制」。插件会把它接收到的音频录下来，并按宿主的时间轴对齐。",
     transfer_guide_recording:
-        "正在录制。请不要移动播放位置或跳转；录完点「停止」。录制期间听到的是実主原声，停止后恢复处理结果。",
+        "正在录制。请不要移动播放位置或跳转；录完点「停止」。录制期间听到的是宿主原声，停止后恢复处理结果。",
     transfer_guide_ready: "已录好。从录制区间开始播放宿主即可听到处理结果；再录一次会替换掉它。",
     transfer_guide_offline:
         "这个宿主也支持离线渲染。离线渲染要两趟：点「录制」后导出一次以采集（这一趟是静音），再解除录制导出一次，得到的才是处理结果。",

@@ -2143,11 +2143,11 @@ export const zhTW = {
     transfer_field_peak: "峰值",
     transfer_field_peak_value: "{left} / {right}",
     transfer_guide_standby:
-        "已就緒。請播放実主 —— 播放開始後會自動開始錄製，停止播放只是暫停，接著播會接著錄。",
+        "已就緒。請播放宿主 —— 播放開始後會自動開始錄製，停止播放只是暫停，接著播會接著錄。",
     transfer_limit_warning: "還有不到 10 秒到達單次錄製上限，屆時會自動停止。",
     transfer_stopped_limit: "已到達單次錄製上限，自動停止了。",
     transfer_stopped_no_spare: "記憶體沒跟上，自動停止了。請縮短上限或清掉舊錄音。",
-    transfer_stopped_rate_changed: "実主改變了取樣率，自動停止了。",
+    transfer_stopped_rate_changed: "宿主改變了取樣率，自動停止了。",
     transfer_stopped_budget_full: "PCM 記憶體預算用盡，自動停止了。請清掉舊錄音。",
     transfer_stopped_jump: "播放位置跳轉過，這一段之後的內容不連續。",
     transfer_option_limit: "單次錄製上限（秒）",
@@ -2156,8 +2156,8 @@ export const zhTW = {
     transfer_option_limit_unlimited: "不限",
     transfer_output_processed: "處理結果",
     transfer_output_raw: "原始錄音（合成中）",
-    transfer_output_passthrough: "実主原聲",
-    transfer_output_recording: "正在直通実主",
+    transfer_output_passthrough: "宿主原聲",
+    transfer_output_recording: "正在直通宿主",
     transfer_now_playing: "目前聽到：{what}",
     transfer_status_recording: "錄製中",
     transfer_status_ready: "已錄製",
@@ -2168,7 +2168,7 @@ export const zhTW = {
     transfer_guide_body:
         "先在宿主裡按播放，再點「錄製」。外掛會把它接收到的音訊錄下來，並依宿主的時間軸對齊。",
     transfer_guide_recording:
-        "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。錄製期間聽到的是実主原聲，停止後恢復處理結果。",
+        "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。錄製期間聽到的是宿主原聲，停止後恢復處理結果。",
     transfer_guide_ready: "已錄好。從錄製區間開始播放宿主即可聽到處理結果；再錄一次會取代它。",
     transfer_guide_offline:
         "這個宿主也支援離線算圖。離線算圖要兩趟：點「錄製」後匯出一次以擷取（這一趟是靜音），再解除錄製匯出一次，得到的才是處理結果。",
