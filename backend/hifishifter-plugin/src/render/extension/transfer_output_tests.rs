@@ -63,7 +63,9 @@ fn a_closed_window_session_still_reaches_the_processed_output() {
     // `setupProcessing` 装载合成队列；不碰任何 UI 定时器。
     owner.clone().arm_transfer_rendering();
     owner
-        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
         .expect("有素材就必须能准备出处理结果");
     assert_eq!(
         owner.transfer_output(),
