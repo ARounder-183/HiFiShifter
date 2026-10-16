@@ -2163,7 +2163,8 @@ export const zhCN = {
     transfer_cancel_hint: "丢弃这一次录制，不留录音",
     transfer_guide_body:
         "先在宿主里按播放，再点「录制」。插件会把它接收到的音频录下来，并按宿主的时间轴对齐。",
-    transfer_guide_recording: "正在录制。请不要移动播放位置或跳转；录完点「停止」。",
+    transfer_guide_recording:
+        "正在录制。请不要移动播放位置或跳转；录完点「停止」。录制期间听到的是実主原声，停止后恢复处理结果。",
     transfer_guide_ready: "已录好。从录制区间开始播放宿主即可听到处理结果；再录一次会替换掉它。",
     transfer_guide_offline:
         "这个宿主也支持离线渲染。离线渲染要两趟：点「录制」后导出一次以采集（这一趟是静音），再解除录制导出一次，得到的才是处理结果。",

@@ -243,6 +243,17 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "id": TRANSFER_TRACK_ID,
             "name": TRANSFER_TRACK_NAME,
             "order": 0,
+            // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
+            // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
+            // `gate_hifigan_effect_curves` 整条剥掉（设计如此：听到未经改动的原音频）。
+            // 而这条轨道**只为被处理而存在** —— 它是插件自己造出来的编辑轨，宿主那边
+            // 没有任何"原声"语义需要保留。默认关着会让"画完参数线不生效"成为默认行为，
+            // 而界面上只有一个不说原因的空结果。
+            //
+            // 【为什么默认开启不改变"还没画线时"的声音】`does_clip_need_processor_render`
+            // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
+            // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
+            "compose_enabled": true,
         }))
         .expect("Transfer 轨道的必填字段是固定的"),
     );
@@ -830,5 +841,21 @@ mod tests {
         assert!(silent.clips.is_empty(), "全静音不产生片段（素材为空的判据）");
         assert_eq!(summary.spanned_frames, 32, "跨过的工程帧数仍要如实报出");
         assert_eq!(summary.covered_frames, 0, "没有任何可听内容");
+    }
+
+    /// **Transfer 轨道默认开启合成** —— 否则"画完参数线不生效"是默认行为。
+    ///
+    /// 【为什么这条必须钉住】`compose_enabled` 是"要不要处理这条轨"的总开关。这条轨道
+    /// 只为被处理而存在（它是插件自己造的编辑轨，宿主那边没有"原声"语义要保留），
+    /// 所以默认必须是开。默认关着的时候，用户画完线拿到的是一份**静默未处理**的结果。
+    #[test]
+    fn the_transfer_track_processes_by_default() {
+        let (timeline, _) = one(1, &[segment(0, &[0.5; 10])]);
+        let track = &timeline.tracks[0];
+        assert_eq!(track.id, TRANSFER_TRACK_ID);
+        assert!(
+            track.compose_enabled,
+            "Transfer 轨道默认必须开启合成，否则画完参数线不会有任何变化"
+        );
     }
 }

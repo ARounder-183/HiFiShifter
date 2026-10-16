@@ -674,28 +674,11 @@ pub fn schedule_clip_pitch_jobs_scoped(
             continue;
         }
 
-        // 入选条件（任一满足）：
-        // - 根轨道开启 Compose（音高曲线需要它）；
-        // - 该根轨道需要动态（DYN）的原声电平。
-        //
-        // 第二条**刻意不看 compose_enabled**：动态是混音级参数，与"是否合成"
-        // 无关，未开启合成的原始音频轨道同样支持。
+        // 入选条件：见 [`clip_is_analysis_candidate`]（门禁侧用的是同一个函数）。
         {
-            let root_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-            let root_track = tl.tracks.iter().find(|t| t.id == root_id);
-            let compose_enabled = root_track.map(|t| t.compose_enabled).unwrap_or(false);
-            let dyn_needed = dyn_needs_level_analysis(tl, &root_id);
-            if !compose_enabled && !dyn_needed {
+            if !clip_is_analysis_candidate(tl, clip, fcpe_available) {
                 debug_eprintln!(
-                    "[pitch_clip] clip '{}' skipped: compose_enabled=false and dyn unused for root '{}'",
-                    clip.id, root_id
-                );
-                continue;
-            }
-            if !fcpe_available && !dyn_needed {
-                // 音高需要 FCPE；没有 FCPE 又不需要电平时没有可产出的数据。
-                debug_eprintln!(
-                    "[pitch_clip] clip '{}' skipped: FCPE unavailable and dyn unused",
+                    "[pitch_clip] clip '{}' is not an analysis candidate (compose / dyn / render gate)",
                     clip.id
                 );
                 continue;
@@ -1298,6 +1281,45 @@ pub fn dyn_needs_level_analysis(tl: &TimelineState, root_track_id: &str) -> bool
 pub fn dyn_panel_open_roots() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static ROOTS: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 本 clip 是否**入选分析**（调度侧与门禁侧共用的唯一判据）。
+///
+/// # 为什么两边必须是同一个函数
+///
+/// 渲染门禁问的是"要不要等这根的原线"（`root_pitch_assembly_pending`），而分析调度问的是
+/// "要不要为这个 clip 跑分析"。两者一旦相反就是**死锁**：门禁在等一个永远不会被调度的
+/// 任务，渲染永久 pending —— 用户看到的是"画完参数线不生效"，外加状态栏一个永不收敛的
+/// 错误。这条不变量在 `pitch_analysis::analysis::assembly_gate_open` 的注释里写着，而
+/// 这里此前是**另写一份**条件，于是真的相反了两次：
+///
+/// 1. **手绘曲线 + 关掉 Compose**：门禁靠兜底判据（`does_clip_need_processor_render`）
+///    为真，而这里只认 compose/dyn ⇒ 调度跳过 ⇒ 永久等待。
+/// 2. **FCPE 不可用**：这里跳过（没有可产出的数据），而门禁照旧为真 ⇒ 永久等待。
+///
+/// 现在两边都调这个函数，"相反"在结构上不可能发生。`fcpe_available` 作为参数而不是在
+/// 内部查询，是为了让"没有 FCPE"这条分支可被测试覆盖（`fcpe_onnx::is_available` 在测试
+/// 里是乐观的 true）。
+///
+/// 入选条件（任一满足）：
+/// - 根轨道开启 Compose（音高曲线需要它）；
+/// - 该根轨道需要动态（DYN）的原声电平 —— **刻意不看 compose**：动态是混音级参数，
+///   未开启合成的原始音频轨道同样支持；
+/// - 渲染门禁需要它（手绘曲线、已生效的音高调整、内部拉伸、子轨共振峰偏移……）。
+///
+/// 且必须有可产出的数据：F0 要 FCPE，dyn 电平与音高同一次解码产出、不依赖 FCPE。
+pub fn clip_is_analysis_candidate(
+    tl: &TimelineState,
+    clip: &crate::state::Clip,
+    fcpe_available: bool,
+) -> bool {
+    let root_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
+    let root_track = tl.tracks.iter().find(|t| t.id == root_id);
+    let compose_enabled = root_track.map(|t| t.compose_enabled).unwrap_or(false);
+    let dyn_needed = dyn_needs_level_analysis(tl, &root_id);
+    let render_gate_open =
+        crate::pitch_editing::does_clip_need_processor_render(tl, clip, clip.start_sec);
+    (compose_enabled || dyn_needed || render_gate_open) && (fcpe_available || dyn_needed)
 }
 
 /// 逐帧分析曲线（电平/音高皆可）从**全量源音频域**映射到 clip 可见区间。

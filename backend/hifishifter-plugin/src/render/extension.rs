@@ -2005,9 +2005,14 @@ impl ExtensionOwner {
     /// 【为什么优先用会话的那份时间线】它带着用户的参数曲线，而曲线就是 Transfer 形态下
     /// "处理"的全部内容。用捕获存储那份（只有几何）会让"改了音高却不重算"变成一个静默的
     /// 失效：界面变了，声音还是旧的。
+    /// 返回 `(素材代次, 编辑代次, 这份时间线带不带用户曲线, 渲染输入)`。
+    ///
+    /// 【为什么"带不带曲线"要作为一项返回】会话还没加载时拿到的是**不含用户曲线**的
+    /// 几何，而那时 `edit` 恒为 0 —— 若调用方把它当成"已准备"，会话加载之后版本不变、
+    /// 这次渲染被跳过，用户画完线永远听不到变化（见 `transfer_prepare_job` 的版本闸）。
     pub(crate) fn transfer_render_input(
         &self,
-    ) -> Result<(u64, u64, super::input::RenderInput), String> {
+    ) -> Result<(u64, u64, bool, super::input::RenderInput), String> {
         if !self.transfer.has_material() {
             return Err("no Transfer material".into());
         }
@@ -2018,11 +2023,12 @@ impl ExtensionOwner {
             .and_then(|session| session.as_ref().ok())
             .filter(|session| session.is_loaded())
             .cloned();
-        let (timeline, edit) = match &session {
-            Some(session) => (session.render_timeline()?, session.edit_generation()),
+        let (timeline, edit, with_curves) = match &session {
+            Some(session) => (session.render_timeline()?, session.edit_generation(), true),
             // 会话还没加载（窗口还没开、或前端还没问过时间线）：退回捕获存储的几何。
-            // 那时也没有用户在编辑，两者等价。
-            None => (self.transfer.session_timeline().0, 0),
+            // 那时也没有用户在编辑，两者等价 —— 但**必须把这个事实带进版本号**
+            // （见 `transfer_prepare_job` 的 `with_curves` 位）。
+            None => (self.transfer.session_timeline().0, 0, false),
         };
         let input = super::input::RenderInput {
             regions: self.transfer.regions_for_timeline(&timeline),
@@ -2035,7 +2041,7 @@ impl ExtensionOwner {
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
         };
-        Ok((revision, edit, input))
+        Ok((revision, edit, with_curves, input))
     }
 
     pub(crate) fn transfer_prepare_job(
@@ -2048,11 +2054,16 @@ impl ExtensionOwner {
         // 【为什么这里也要补一次】命令那条路（`request_transfer_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let (revision, edit, input) = self.transfer_render_input()?;
+        let (revision, edit, with_curves, input) = self.transfer_render_input()?;
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
         // 合成会被排队几百次。版本里必须**带上编辑代次**：只认 take 会让参数改动
         // 永远不重算。
-        let version = revision ^ (edit << 32);
+        //
+        // 【为什么还要带上"这份时间线有没有曲线"】会话没加载时拿到的是**不含用户曲线**
+        // 的几何（`edit` 恒为 0）。若把它算作"已准备"，会话加载之后版本不变 ⇒ 这次
+        // 渲染被跳过 ⇒ 用户画完线永远听不到变化。把这个事实编进版本号，会话一加载
+        // 版本就变，于是恰好补一次渲染，而没加载时也不会反复重算。
+        let version = revision ^ (edit << 32) ^ if with_curves { 0 } else { 1 << 63 };
         if self.transfer_prepared.load(Ordering::Acquire) == version
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
         {
@@ -2112,7 +2123,19 @@ impl ExtensionOwner {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return TransferOutput::Untouched;
         }
-        if self.transfer.is_armed() {
+        /*
+         * 【为什么"武装"不再直接等于"录制中"】武装之后、宿主开始播放之前是**待命**：
+         * 那段时间里没有任何素材在产生，所以"用旧内容盖住新演奏"这个风险根本不存在
+         * （那正是录制中要直通的理由）。而此前 `is_armed()` 直接返回 `Recording` ⇒
+         * 待命期输出直通宿主原声，用户画完参数线听不到任何变化 —— 表现就是
+         * **"参数线不生效"**，而界面只说"等待播放"，两件事对不上。
+         *
+         * 一旦宿主开始播放就立刻回到 `Recording`：捕获读的是输入总线，而输出可能写进
+         * 同一块缓冲（in-place 宿主），直通才不会让捕获录到我们自己的输出。
+         * `transfer_observe` 在 `transfer_stage` 之前更新 `host_playing`，所以起播的
+         * 第一块就已经是 `Recording`，捕获读到的是宿主原声。
+         */
+        if self.transfer.is_recording() {
             return TransferOutput::Recording;
         }
         if !self.transfer.has_material() {

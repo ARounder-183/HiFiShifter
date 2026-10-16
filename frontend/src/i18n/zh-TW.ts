@@ -2167,7 +2167,8 @@ export const zhTW = {
     transfer_cancel_hint: "丟棄這一次錄製，不留錄音",
     transfer_guide_body:
         "先在宿主裡按播放，再點「錄製」。外掛會把它接收到的音訊錄下來，並依宿主的時間軸對齊。",
-    transfer_guide_recording: "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。",
+    transfer_guide_recording:
+        "正在錄製。請不要移動播放位置或跳轉；錄完點「停止」。錄製期間聽到的是実主原聲，停止後恢復處理結果。",
     transfer_guide_ready: "已錄好。從錄製區間開始播放宿主即可聽到處理結果；再錄一次會取代它。",
     transfer_guide_offline:
         "這個宿主也支援離線算圖。離線算圖要兩趟：點「錄製」後匯出一次以擷取（這一趟是靜音），再解除錄製匯出一次，得到的才是處理結果。",

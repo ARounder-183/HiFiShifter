@@ -2235,7 +2235,7 @@ export const enUS = {
     transfer_guide_body:
         "Press play in the host, then Record. The plug-in captures what passes through it and lines it up with the host's timeline.",
     transfer_guide_recording:
-        "Recording. Keep the playhead moving and do not seek; press Stop when the part is done.",
+        "Recording. Keep the playhead moving and do not seek; press Stop when the part is done. You hear the host's own audio while recording; the processed result comes back when you stop.",
     transfer_guide_ready:
         "Recorded. Play the host from the recorded range to hear the processed result; record again to replace it.",
     transfer_guide_offline:

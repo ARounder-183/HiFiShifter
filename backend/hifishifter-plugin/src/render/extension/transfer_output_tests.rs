@@ -105,10 +105,33 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     owner.transfer().start().unwrap();
     assert_eq!(
         owner.transfer_output(),
+        TransferOutput::Processed,
+        "武装之后、宿主还没播的那一段是**待命**：没有任何素材在产生，因此没有\
+         「用旧内容盖住新演奏」的风险。此时仍须输出处理结果 —— 否则用户画完参数线\
+         听不到任何变化（「参数线不生效」）"
+    );
+    // 宿主开始播放 ⇒ 立刻回到直通，否则捕获会把我们自己的输出录进去
+    // （in-place 宿主里输入与输出是同一块缓冲）。
+    owner.note_block_position(0);
+    owner.note_block_position(480);
+    owner.transfer().observe(&crate::transfer::InputBlock {
+        start: 480,
+        frames: 480,
+        sample_rate: 48_000.0,
+        planes: [None, None],
+        playing: true,
+    });
+    assert_eq!(
+        owner.transfer_output(),
         TransferOutput::Recording,
-        "录制中走直通/静音，而不是播上一次的快照"
+        "宿主一开始播放就必须直通，而不是播上一次的快照"
     );
     owner.transfer().cancel();
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Processed,
+        "取消之后回到处理结果（素材还在）"
+    );
 }
 
 /// **还没有素材时一律透传**，而不是把整条轨静音。

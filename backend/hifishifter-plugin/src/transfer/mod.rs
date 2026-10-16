@@ -237,6 +237,14 @@ pub(crate) struct TransferStatus {
 pub(crate) struct TransferStore {
     /// 音频线程只读这一个原子就能早退。
     armed: AtomicBool,
+    /// 本次捕获**是否已经收到过宿主播放的音频**（`false` = 待命）。
+    ///
+    /// 【为什么要有这个原子副本】输出仲裁在**音频线程**上问"现在到底在不在录"
+    /// （见 `ExtensionOwner::transfer_output`），而权威在 `capture` 锁下的
+    /// `Capture::is_started()` —— 音频线程不能为它去取锁。这个原子由音频线程自己在
+    /// `on_block` 里镜像（那里本来就持有锁），其余写入点是 `start`/`stop`/`cancel`/`clear`
+    /// 这些非音频路径。
+    capture_started: AtomicBool,
     /// 捕获状态。音频线程只 `try_lock` —— 拿不到就跳过这一块并计数，
     /// **绝不阻塞**。非音频线程持有它做补缓冲/收段/promote。
     capture: Mutex<Capture>,
@@ -292,6 +300,7 @@ impl Default for TransferStore {
     fn default() -> Self {
         Self {
             armed: AtomicBool::new(false),
+            capture_started: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
             next_take_id: AtomicU64::new(1),
@@ -314,6 +323,31 @@ impl TransferStore {
     /// 音频线程早退用的廉价判据。
     pub(crate) fn is_armed(&self) -> bool {
         self.armed.load(Ordering::Acquire)
+    }
+
+    /// 本次捕获是否**已经收到过宿主播放的音频**（音频线程可读，无锁）。
+    ///
+    /// 【它回答什么】"现在到底在不在录"。武装之后宿主还没播的那一段是**待命** ——
+    /// 那段时间里没有任何素材在产生，因此输出仲裁不该把它当成"录制中"
+    /// （见 `ExtensionOwner::transfer_output`）。
+    pub(crate) fn capture_started(&self) -> bool {
+        self.capture_started.load(Ordering::Acquire)
+    }
+
+    /// 宿主**此刻**是否在播放（音频线程可读，无锁）。
+    pub(crate) fn host_playing(&self) -> bool {
+        self.host_playing.load(Ordering::Acquire)
+    }
+
+    /// 此刻是否**真的在录**（= 已武装，且宿主已经开始播放）。
+    ///
+    /// 【为什么需要"或 host_playing"】`capture_started` 由音频线程在 `on_block` 里置位，
+    /// 而输出仲裁在**同一个回调里稍后**才发生（`transfer_observe` 在前、
+    /// `transfer_stage` 在后）—— 两者本来同拍。但"宿主正在播放"是更强、更早可得的
+    /// 事实：只要它在播，我们就必须按"录制中"处理输出，否则输出会写进输入缓冲
+    /// （in-place 宿主）而被下一块捕获录进去。
+    pub(crate) fn is_recording(&self) -> bool {
+        self.is_armed() && (self.capture_started() || self.host_playing())
     }
 
     /// 素材代次（`0` = 从来没有过任何 take）。
@@ -454,6 +488,7 @@ impl TransferStore {
             .start(2, capacity, spares, max_frames);
         // 新的一次录制：上一次的停止原因不再与用户相关。
         self.last_closed.store(0, Ordering::Release);
+        self.capture_started.store(false, Ordering::Release);
         self.armed.store(true, Ordering::Release);
         Ok(())
     }
@@ -461,6 +496,7 @@ impl TransferStore {
     /// 停止录制并 promote 成一个 take。
     pub(crate) fn stop(&self) -> Result<u64, String> {
         self.armed.store(false, Ordering::Release);
+        self.capture_started.store(false, Ordering::Release);
         let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
         self.promote(segments)
     }
@@ -468,6 +504,7 @@ impl TransferStore {
     /// 取消录制：丢弃本次捕获，不留 take。
     pub(crate) fn cancel(&self) {
         self.armed.store(false, Ordering::Release);
+        self.capture_started.store(false, Ordering::Release);
         let mut capture = self.capture.lock_or_recover();
         let _ = capture.finish(ClosedReason::Stopped);
         *capture = Capture::default();
@@ -477,6 +514,7 @@ impl TransferStore {
     /// 丢弃全部 take（含落盘副本）。
     pub(crate) fn clear(&self) {
         self.armed.store(false, Ordering::Release);
+        self.capture_started.store(false, Ordering::Release);
         *self.capture.lock_or_recover() = Capture::default();
         for take in self.takes.lock_or_recover().drain(..) {
             // 移入回收站而不是直接删：录了几分钟的东西被误删是不可接受的。
@@ -652,6 +690,8 @@ impl TransferStore {
         }
         match capture.on_block(block) {
             CaptureOutcome::Captured | CaptureOutcome::SilentInput => {
+                // 镜像"已经开始录"这个事实给无锁读者（输出仲裁）。
+                self.capture_started.store(true, Ordering::Release);
                 TransferBlockOutcome::Capturing
             }
             CaptureOutcome::NoPosition => TransferBlockOutcome::NoPosition,

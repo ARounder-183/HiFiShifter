@@ -247,7 +247,7 @@ fn export_audio_to_file(
             .transfer_owner()
             .ok_or("the Transfer host is gone")?
             .transfer_render_input()?
-            .2
+            .3
     } else {
         let document = session
             .document()

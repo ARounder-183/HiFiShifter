@@ -60,18 +60,40 @@ fn assembly_gate_open(tl: &TimelineState, root_track_id: &str) -> bool {
     })
 }
 
+/// 该根轨的 pitch 原线**能不能真的被产出**。
+///
+/// 【为什么它必须与门禁合并成一条判据】上面那条不变量（门禁 ⊇ 渲染门禁）只解决了
+/// "门禁在等、调度不跑"的一半。另一半是**没有任何后端能产出**：调度侧会跳过
+/// （`!fcpe_available && !dyn_needed`），而门禁照旧为真 —— 于是渲染永远 pending，
+/// 用户看到的是"画完参数线不生效" + 状态栏一个永不收敛的错误。
+///
+/// 一条无法被满足的等待比降级输出更糟：降级至少还能听见未处理的音频。所以
+/// "可产出"这一条必须**收窄**门禁，而不是指望调度侧凭空产出。
+///
+/// 实现上直接复用调度侧的入选判据（[`crate::pitch_clip::clip_is_analysis_candidate`]）：
+/// 两边是同一个函数，所以"在等"与"会产出"在结构上不可能相反。
+pub fn pitch_analysis_can_run(tl: &TimelineState, root_track_id: &str) -> bool {
+    let fcpe_available = crate::fcpe_onnx::is_available();
+    tl.clips.iter().any(|clip| {
+        tl.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_track_id)
+            && crate::pitch_clip::clip_is_analysis_candidate(tl, clip, fcpe_available)
+    })
+}
+
 /// 该根轨道是否有**待组装**的原线（`pitch_orig_key` 尚未置位）。
 ///
 /// 【用途】渲染门禁的"要不要等分析"判据：返回 `false` 表示"没有组装任务"，调用方
 /// **不应**把渲染判为 pending —— 否则一个永远不会被调度任务满足的等待会把渲染卡死。
 /// 与 `build_pitch_job` 共用 [`assembly_gate_open`]，因此"分析器要不要分析"与"门禁
-/// 要不要等"永远一致。
+/// 要不要等"永远一致；再与 [`pitch_analysis_can_run`] 相与，保证"在等"蕴含"会产出"。
 pub fn root_pitch_assembly_pending(tl: &TimelineState, root_track_id: &str) -> bool {
-    assembly_gate_open(tl, root_track_id)
-        && tl
-            .params_by_root_track
-            .get(root_track_id)
-            .is_some_and(|e| e.pitch_orig_key.is_none())
+    // 【为什么把最便宜的那一条放最前】它是一条 map 查询，而后面两条都要遍历该根的
+    // clip 并求值渲染门禁。稳态（原线已组装好）下这一条就短路了。
+    tl.params_by_root_track
+        .get(root_track_id)
+        .is_some_and(|e| e.pitch_orig_key.is_none())
+        && assembly_gate_open(tl, root_track_id)
+        && pitch_analysis_can_run(tl, root_track_id)
 }
 
 /// 判定某根轨道当前是否需要（重新）组装 `pitch_orig`；需要时返回本次装配的缓存 key。

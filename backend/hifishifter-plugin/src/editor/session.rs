@@ -1541,6 +1541,21 @@ impl EditorSession {
             {
                 timeline.selected_clip_id = previous.selected_clip_id.clone();
             }
+            // 【为什么要带过轨道自身的设置】投影每次都重建轨道，于是"用户在轨道头上
+            // 关掉了合成 / 换了分析算法"会在下一次录制或删 take 之后被静默重置 ——
+            // 而那两件事都会触发一次重新加载。轨道级设置与选择同性质：它们是**用户的
+            // 选择**，不属于"素材的几何"。只在同名轨道确实存在过时才带过，因此
+            // "第一次创建"仍然拿到投影给的默认值（合成开启，见 `transfer/timeline.rs`）。
+            for track in &mut timeline.tracks {
+                let Some(old) = previous.tracks.iter().find(|t| t.id == track.id) else {
+                    continue;
+                };
+                track.compose_enabled = old.compose_enabled;
+                track.pitch_analysis_algo = old.pitch_analysis_algo.clone();
+                track.volume = old.volume;
+                track.muted = old.muted;
+                track.solo = old.solo;
+            }
         }
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|t| t.id.clone());
@@ -2672,7 +2687,7 @@ pub(crate) mod tests {
         let owner = transfer_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, input) = owner.transfer_render_input().unwrap();
+        let (take, edit, _with_curves, input) = owner.transfer_render_input().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
         assert_eq!(edit, session.edit_generation());
         let timeline = input.timeline.as_ref().unwrap();

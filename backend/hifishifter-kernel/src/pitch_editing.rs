@@ -678,6 +678,75 @@ mod tests {
         );
     }
 
+    /// 一根根轨 + 一个 clip + 可选的手绘音高曲线的测试夹具。
+    fn timeline_with_curve(compose: bool, drawn: bool) -> (TimelineState, String) {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        if let Some(track) = timeline.tracks.iter_mut().find(|t| t.id == root) {
+            track.compose_enabled = compose;
+            track.pitch_analysis_algo = PitchAnalysisAlgo::NsfHifiganOnnx;
+        }
+        let mut clip = make_clip();
+        clip.track_id = root.clone();
+        timeline.clips.push(clip);
+        let mut entry = TrackParamsState {
+            frame_period_ms: 5.0,
+            ..Default::default()
+        };
+        if drawn {
+            entry.pitch_edit = vec![60.0; 64];
+            entry.pitch_edit_user_modified = true;
+        }
+        timeline.params_by_root_track.insert(root.clone(), entry);
+        (timeline, root)
+    }
+
+    /// **渲染门禁与"分析会不会跑"必须一致** —— 不一致就是死锁，而用户看到的是
+    /// "画完参数线不生效"。
+    ///
+    /// 【为什么需要一条测试专门钉这个】这两件事此前是**两份独立的条件**，于是真的相反过：
+    /// 门禁靠兜底判据（`does_clip_need_processor_render`，手绘曲线让它为真）在等，
+    /// 而调度侧只认 compose/dyn ⇒ 没有任何任务会产出原线 ⇒ 渲染永久 pending，
+    /// 状态栏挂着一个永不收敛的错误。现在两边共用
+    /// [`crate::pitch_clip::clip_is_analysis_candidate`]，这条测试把"共用"钉住：
+    /// **门禁在等的每一个组合，调度侧都必须会跑。**
+    #[test]
+    fn the_render_gate_and_the_analysis_scheduler_agree() {
+        for compose in [false, true] {
+            for drawn in [false, true] {
+                let (timeline, root) = timeline_with_curve(compose, drawn);
+                let waiting = crate::pitch_analysis::analysis::root_pitch_assembly_pending(
+                    &timeline, &root,
+                );
+                let will_run = timeline
+                    .clips
+                    .iter()
+                    .any(|clip| crate::pitch_clip::clip_is_analysis_candidate(&timeline, clip, true));
+                if waiting {
+                    assert!(
+                        will_run,
+                        "门禁在等原线，调度侧就必须会跑（compose={compose}, drawn={drawn}）\
+                         —— 否则是一次永不收敛的等待"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **没有 FCPE 又不需要 dyn 时谁都不许等**：一条无法被满足的等待比降级输出更糟
+    /// （降级至少还能听见未处理的音频）。
+    #[test]
+    fn without_fcpe_nothing_waits_for_the_original_pitch_line() {
+        let (timeline, _root) = timeline_with_curve(true, true);
+        let clip = &timeline.clips[0];
+        assert!(
+            !crate::pitch_clip::clip_is_analysis_candidate(&timeline, clip, false),
+            "没有可产出的数据 ⇒ 这个 clip 不该入选分析"
+        );
+        // 门禁那一侧用同一个函数判断"能不能产出"（`pitch_analysis_can_run`），
+        // 所以它同样不会再等 —— 两边是同一个判据，不是两份。
+    }
+
     fn make_clip() -> Clip {
         Clip {
             id: "clip-a".to_string(),
