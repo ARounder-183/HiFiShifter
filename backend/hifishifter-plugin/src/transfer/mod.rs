@@ -43,7 +43,7 @@ pub(crate) use capture::InputBlock;
 use hifishifter_kernel::state::TimelineState;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 单段容量（秒）。
@@ -155,8 +155,13 @@ pub(crate) struct MaterialSummary {
 
 impl MaterialSummary {
     /// 录到了东西，但没有任何有声内容。
+    ///
+    /// 【为什么判据是"覆盖帧数为零"而不是"片段数为零"】片段数此前是唯一可用的代理，
+    /// 因为全静音区间被逐片丢弃。现在静音**留在片段里**（见 `timeline.rs` 的模块头），
+    /// 于是"有没有片段"不再等价于"有没有声音"。而这条判据要回答的始终是后者 ——
+    /// 它决定界面说不说"输入总线是静音"，也决定插件要不要把这条轨替换掉。
     pub(crate) fn is_silent(&self) -> bool {
-        self.captured_frames > 0 && self.clips == 0
+        self.captured_frames > 0 && self.covered_frames == 0
     }
 }
 
@@ -181,8 +186,14 @@ pub(crate) struct MaterialSpan {
 /// 对外状态。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TransferStatus {
-    /// `"empty"` / `"recording"` / `"ready"`。
+    /// `"empty"` / `"standby"` / `"recording"` / `"ready"`。
     pub state: &'static str,
+    /// 已武装但宿主还没播过：**等的是用户去按播放**，不是在积累素材。
+    ///
+    /// 【为什么与 `state == "recording"` 分开】两者对用户是完全不同的等待。
+    /// 合成一个"已录 0.0 秒"会让待命看起来像失败 —— 而这正是用户反馈里
+    /// "点了录制没反应"的来源。
+    pub standby: bool,
     pub recording: Option<RecordingStatus>,
     /// 录制中正在长出来的区间（`None` = 没在录）。
     pub capture: Option<CaptureSpan>,
@@ -207,6 +218,13 @@ pub(crate) struct TransferStatus {
     pub host_playing: bool,
     /// 宿主在用非 32-bit 浮点跑本实例（插件按设计静音，见字段说明）。
     pub unsupported_precision: bool,
+    /// 距单次录制上限不足 10 秒。
+    pub limit_warning: bool,
+    /// 上一次录制**自己**停下的原因（`None` = 没有过、或那一次是用户按的停）。
+    ///
+    /// 【为什么要它】"录着录着就断了"是一句无法归因的现象：可能是到上限、可能是内存
+    /// 没跟上、也可能是宿主换了采样率。这三种的补救完全不同，所以必须分开报。
+    pub stopped_reason: Option<&'static str>,
 }
 
 /// 每个插件实例一份的 Transfer 存储。
@@ -259,6 +277,12 @@ pub(crate) struct TransferStore {
     /// 一条条静音的读数。音频线程不能写日志（文件 IO），所以由非音频的会话 actor
     /// 在心跳里检查并只报一次（见 [`TransferStore::report_missing_input_once`]）。
     missing_input_reported: AtomicBool,
+    /// 上一次录制**自己**停下的原因（`0` = 没有过）。
+    ///
+    /// 【为什么是原子而不是锁下的字段】写它的可能是**音频线程**（到上限、备用缓冲用尽、
+    /// 采样率变化都是音频线程先发现的），而音频线程不能取会与 UI 争用的锁。
+    /// 一个 u8 的编码值是唯一能同时满足"音频线程可写"与"UI 可读"的形状。
+    last_closed: AtomicU8,
 }
 
 impl Default for TransferStore {
@@ -278,6 +302,7 @@ impl Default for TransferStore {
             host_playing: AtomicBool::new(false),
             unsupported_precision: AtomicBool::new(false),
             missing_input_reported: AtomicBool::new(false),
+            last_closed: AtomicU8::new(0),
         }
     }
 }
@@ -381,6 +406,10 @@ impl TransferStore {
     }
 
     /// 开始录制。返回失败原因（宿主没给工程率时无法确定段容量）。
+    ///
+    /// 【为什么它现在只进入"待命"】录制键按下之后不会立刻产生素材：素材的第一帧由
+    /// **宿主起播**决定（见 `capture.rs` 的文件头）。于是"先按录制、再按播放"这个
+    /// 自然的操作顺序不再有任何代价 —— 这正是用户反馈里那条"必须先播放才能录"。
     pub(crate) fn start(&self) -> Result<(), String> {
         if self.is_armed() {
             return Ok(());
@@ -393,16 +422,24 @@ impl TransferStore {
                     .into(),
             );
         }
+        // 【为什么在这里先收尾】`service()` 会自动 promote 自己停下的捕获，但万一它还没
+        // 跑过（插件窗口从未打开 ⇒ 会话 actor 从未创建），那些段就会在下面被
+        // `capture.start` 覆盖掉 —— 静默的数据丢失。收尾把它变成一次正常的 take。
+        self.finish_auto_stopped();
         let options = self.options();
         let capacity = ((options.segment_sec * rate as f64).round() as usize).max(1);
-        let channels = 2_u8;
-        let mut capture = self.capture.lock_or_recover();
+        // 【为什么上限在这里换算成帧】`max_duration_sec` 是用户单位（秒），而音频线程
+        // 上的判据只能是帧（一次整数比较）。换算点必须唯一，否则两处会漂移。
+        let max_frames = (options.max_duration_sec * rate as f64).round().max(0.0) as u64;
         let spares = (0..SPARE_BUFFERS)
-            .map(|_| allocate_spare(capacity, channels))
+            .map(|_| allocate_spare(capacity, 2))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| "not enough PCM budget for the transfer buffers".to_owned())?;
-        capture.start(channels, capacity, spares);
-        drop(capture);
+        self.capture
+            .lock_or_recover()
+            .start(2, capacity, spares, max_frames);
+        // 新的一次录制：上一次的停止原因不再与用户相关。
+        self.last_closed.store(0, Ordering::Release);
         self.armed.store(true, Ordering::Release);
         Ok(())
     }
@@ -420,6 +457,7 @@ impl TransferStore {
         let mut capture = self.capture.lock_or_recover();
         let _ = capture.finish(ClosedReason::Stopped);
         *capture = Capture::default();
+        self.last_closed.store(0, Ordering::Release);
     }
 
     /// 丢弃全部 take（含落盘副本）。
@@ -540,29 +578,32 @@ impl TransferStore {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 音频线程入口：本实例是否正在录制，以及本块要不要直通。
+    /// 音频线程入口：记录"宿主实际做了什么"，并（若已武装）捕获本块。
+    ///
+    /// 【为什么观察与捕获在同一个函数里】两者读的是**同一个块视图**（位置、采样率、
+    /// 输入平面、播放位）。分成两个入口就要把那个视图传两遍，而它们的先后顺序
+    /// （观察在前、捕获在后）是必须保持的：`saw_context` 是录制键的门，它必须在
+    /// 捕获之前就已更新。
     ///
     /// 【为什么整段逻辑在 `try_lock` 之内】捕获状态的写入必须与"封口/收段"互斥。
     /// 拿不到锁只意味着**非音频线程正持有它**（补缓冲、收段、promote），而那一刻
     /// 我们唯一正确的选择是跳过这一块 —— 阻塞会把这变成 DAW 的音频线程卡顿。
-    /// 观察位：宿主**实际**做了什么。与是否武装**无关**。
     ///
-    /// 【为什么必须与武装解耦 —— 这是 Transfer 曾经在所有宿主上都用不了的原因】
+    /// 【为什么观察与武装无关 —— 这是 Transfer 曾经在所有宿主上都用不了的原因】
     /// 面板的录制按钮由 `canCapture`（= `saw_context`）门控，而 `saw_context` 此前只在
     /// **武装之后**的 `on_block` 里更新 —— 于是"必须先录一次才能录"：按钮永远是灰的，
     /// 用户根本没有办法开始。观察的代价只是几个原子写 + 一次缓冲形状检查
     /// （`capture_view` 不分配、不读样本），可以在每个音频块上做。
-    ///
-    /// 【为什么播放状态是实时的】见 `host_playing` 字段。
-    pub(crate) fn observe(&self, block: &InputBlock<'_>, playing: bool) {
+    pub(crate) fn observe(&self, block: &InputBlock<'_>) {
         if block.sample_rate.is_finite() && block.sample_rate > 0.0 {
             self.saw_context.store(true, Ordering::Release);
         }
         if block.has_audio() {
             self.saw_input.store(true, Ordering::Release);
         }
-        self.host_playing.store(playing, Ordering::Release);
+        self.host_playing.store(block.playing, Ordering::Release);
     }
+
     /// 只报一次"宿主给了位置、却从来没有给过输入"。
     ///
     /// 【为什么由非音频线程调用】它要写日志（文件 IO），音频线程不允许。
@@ -577,7 +618,10 @@ impl TransferStore {
             return;
         }
         log::warn!(
-            "[transfer] the host supplies a playhead but this instance has never received an              audio input bus; Transfer cannot record anything and the plug-in has nothing to              pass through. Put the plug-in on the track whose audio you want, and check that              the host routes that track into it."
+            "[transfer] the host supplies a playhead but this instance has never received an \
+             audio input bus; Transfer cannot record anything and the plug-in has nothing to \
+             pass through. Put the plug-in on the track whose audio you want, and check that \
+             the host routes that track into it."
         );
     }
 
@@ -585,14 +629,12 @@ impl TransferStore {
         if !self.is_armed() {
             return TransferBlockOutcome::Idle;
         }
-        // 观察不在这里做：它必须在**未武装**时也发生（见 `observe`），所以由每个音频块的
-        // 唯一入口 `transfer_stage` 负责。这里只管捕获。
         let Ok(mut capture) = self.capture.try_lock() else {
             // 记一次"没跟上"，但**不改**任何捕获状态。
             return TransferBlockOutcome::Busy;
         };
         if capture.is_stopped() {
-            // 捕获已经结束（备用缓冲用尽 / 采样率变化）；等非音频线程 promote。
+            // 捕获已经结束（备用缓冲用尽 / 采样率变化 / 到上限）；等非音频线程 promote。
             self.armed.store(false, Ordering::Release);
             return TransferBlockOutcome::Stopped;
         }
@@ -601,23 +643,39 @@ impl TransferStore {
                 TransferBlockOutcome::Capturing
             }
             CaptureOutcome::NoPosition => TransferBlockOutcome::NoPosition,
-            CaptureOutcome::RateChanged | CaptureOutcome::OutOfSpares => {
+            // 待命或暂停：本块没写。**不改任何状态** —— 这正是"停播不结束录制"的落点。
+            CaptureOutcome::NotPlaying => TransferBlockOutcome::NotPlaying,
+            CaptureOutcome::RateChanged | CaptureOutcome::OutOfSpares | CaptureOutcome::LimitReached => {
+                // 【为什么这里要记原因】这三条都是"不是用户按的停"，而它们的补救完全不同
+                // （换采样率 / 腾内存 / 改上限）。音频线程不能写日志，只能留一个读数。
+                let reason = capture
+                    .stopped_reason()
+                    .unwrap_or(ClosedReason::RateChanged);
+                if reason.is_notable() {
+                    self.last_closed.store(reason.code(), Ordering::Release);
+                }
                 self.armed.store(false, Ordering::Release);
                 TransferBlockOutcome::Stopped
             }
         }
     }
 
-    /// 非音频线程：补充备用缓冲并收走已封口的段。
+    /// 非音频线程：补充备用缓冲、收走已封口的段、并把"自己停下的捕获"promote 成 take。
     ///
     /// 【为什么由调用方周期性驱动】音频线程不能分配，所以"下一个段用哪个缓冲"必须由
     /// 非音频线程提前备好。这个函数就是那条供给线。
     ///
-    /// 【为什么未武装时直接返回】补缓冲只服务于"正在录制"这件事：`start()` 已经同步
+    /// 【为什么未武装时也要进来】捕获会**自己**停下（到上限、备用缓冲用尽、采样率变化），
+    /// 而那些时刻没有任何用户动作。若这里在未武装时直接早退，那些已经录好的段就会
+    /// 一直留在捕获里：界面显示"尚未录制"、素材却在内存里，而下一次 `start()` 会把它
+    /// 覆盖掉 —— "到点自动停"于是变成"到点丢掉"。自动 promote 是这条的正面回答。
+    ///
+    /// 【为什么未武装时不补缓冲】补缓冲只服务于"正在录制"这件事：`start()` 已经同步
     /// 备好了第一批。没有这道早退，一个空闲的 Transfer 实例会在每一轮心跳里分配
     /// `SPARE_BUFFERS` 粒缓冲（2 × 8 秒立体声 ≈ 6 MB）并永久持有 —— 而它什么都没在录。
-    pub(crate) fn top_up(&self) {
+    pub(crate) fn service(&self) {
         if !self.is_armed() {
+            self.finish_auto_stopped();
             return;
         }
         let options = self.options();
@@ -640,24 +698,68 @@ impl TransferStore {
         }
     }
 
-    /// 录制中的工程几何（给时间轴上的实时录制带）。
+    /// 把"自己停下"的捕获 promote 成一个 take（**只允许非音频线程**：它要取锁与写盘）。
     ///
-    /// 【为什么单独一个访问器】它是"录制正在长出来"这件事的唯一读数来源。没有它，
-    /// 用户在录制过程中看不到任何东西 —— 而"不知道自己录了什么"正是这条通路最常见的
-    /// 失败感（见 `docs/plans/2026-10-15-vst-transfer-monitor-and-ux.md`）。
-    pub(crate) fn capture_span(&self) -> Option<CaptureSpan> {
+    /// 返回是否真的 promote 了。用户按的停（`stop()`）不走这里：那条路上
+    /// `armed` 是用户自己清掉的，语义不同（用户要的是"这一次录完了"）。
+    fn finish_auto_stopped(&self) -> bool {
+        let segments = {
+            let mut capture = self.capture.lock_or_recover();
+            if !capture.is_stopped() {
+                return false;
+            }
+            let reason = capture.stopped_reason().unwrap_or(ClosedReason::Stopped);
+            let segments = capture.finish(reason);
+            *capture = Capture::default();
+            segments
+        };
+        if segments.is_empty() {
+            return false;
+        }
+        if self.promote(segments).is_err() {
+            return false;
+        }
+        log::info!("[transfer] a self-stopped capture was promoted into a take");
+        true
+    }
+
+    /// 一次取锁读出的全部捕获读数（非音频线程）。
+    ///
+    /// 【为什么合成一次读】录制读数、录制带与两个布尔此前各取一次 `capture` 锁，而音频
+    /// 线程在同一把锁上用 `try_lock` 写入 —— 拿不到就**跳过这一块音频**。UI 每 200 ms
+    /// 轮询一次，三次取锁就是三次丢块的机会。合成一次把概率降到三分之一，顺带让读数
+    /// 天然一致（不会出现"位置来自这一毫秒、分段数来自下一毫秒"这种自相矛盾的快照）。
+    fn capture_readings(&self) -> CaptureReadings {
         if !self.is_armed() {
-            return None;
+            // 【为什么未武装就不取锁】那 99% 的轮询里没有任何录制在进行，而
+            // `capture` 里也不会长出新的东西（`start()` 是唯一的写入点之一）。
+            return CaptureReadings::default();
         }
         let capture = self.capture.lock_or_recover();
-        let span = capture.span()?;
+        let span = capture.span();
         let sample_rate = capture.sample_rate();
-        Some(CaptureSpan {
-            start_frame: span.start,
-            end_frame: span.end,
-            position_frame: capture.last_position().unwrap_or(span.end),
-            sample_rate,
-        })
+        let started = capture.is_started();
+        CaptureReadings {
+            started,
+            limit_warning: capture.limit_warning(),
+            // 【为什么待命期没有录制读数】那些读数（已录帧数、峰值、分段数）在宿主播放
+            // 之前全是零，而"已录 0.0 秒"正是用户把待命误读成失败的那句话。待命的答案
+            // 是"等你去按播放"，不是"已经录了零"。
+            recording: started.then(|| RecordingStatus {
+                captured_frames: capture.captured_frames(),
+                sealed_segments: capture.sealed_len(),
+                position: capture.last_position().unwrap_or(0),
+                peak: capture.peak(),
+                gaps: capture.gaps,
+                spares: capture.spare_count(),
+            }),
+            span: span.map(|span| CaptureSpan {
+                start_frame: span.start,
+                end_frame: span.end,
+                position_frame: capture.last_position().unwrap_or(span.end),
+                sample_rate,
+            }),
+        }
     }
 
     /// 素材的摘要（跨全部 take 的**投影**结果）。
@@ -718,23 +820,6 @@ impl TransferStore {
             .collect()
     }
 
-    /// 录制中读数。
-    pub(crate) fn recording_status(&self) -> Option<RecordingStatus> {
-        if !self.is_armed() {
-            return None;
-        }
-        let capture = self.capture.lock_or_recover();
-        let sealed = capture.sealed_len();
-        Some(RecordingStatus {
-            captured_frames: capture.captured_frames(),
-            sealed_segments: sealed,
-            position: capture.last_position().unwrap_or(0),
-            peak: capture.peak(),
-            gaps: capture.gaps,
-            spares: capture.spare_count(),
-        })
-    }
-
     /// 素材的工程跨度（用于"录完把视口移到录制区间"）。
     ///
     /// 【为什么是全部 take 的并集】用户问的是"我刚录的那段在哪" —— 每一次录制都算。
@@ -764,16 +849,26 @@ impl TransferStore {
     pub(crate) fn status(&self) -> TransferStatus {
         let armed = self.is_armed();
         let take_count = self.takes.lock_or_recover().len();
-        TransferStatus {
-            state: if armed {
+        let readings = self.capture_readings();
+        // 【为什么"待命"是独立一档】武装之后、宿主播放之前，素材一定还是零 —— 而那与
+        // "正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。合成一句
+        // "已录 0.0 秒"会让待命看起来像失败（用户反馈里的"点了录制没反应"）。
+        let state = if armed {
+            if readings.started {
                 "recording"
-            } else if take_count > 0 {
-                "ready"
             } else {
-                "empty"
-            },
-            recording: self.recording_status(),
-            capture: self.capture_span(),
+                "standby"
+            }
+        } else if take_count > 0 {
+            "ready"
+        } else {
+            "empty"
+        };
+        TransferStatus {
+            state,
+            standby: armed && !readings.started,
+            recording: readings.recording,
+            capture: readings.span,
             material: self.material_summary(),
             has_material: self.has_material(),
             span: self.material_span(),
@@ -786,6 +881,10 @@ impl TransferStore {
             saw_offline: self.saw_offline.load(Ordering::Acquire),
             host_playing: self.host_playing.load(Ordering::Acquire),
             unsupported_precision: self.precision_unsupported(),
+            limit_warning: readings.limit_warning,
+            stopped_reason: ClosedReason::from_code(self.last_closed.load(Ordering::Acquire))
+                .filter(|reason| reason.is_notable())
+                .map(ClosedReason::as_str),
         }
     }
 
@@ -906,6 +1005,19 @@ impl TransferStore {
     }
 }
 
+/// 一次取锁读出的全部捕获读数（见 [`TransferStore::capture_readings`]）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct CaptureReadings {
+    /// 宿主是否已经播过至少一块（`false` = 待命）。
+    started: bool,
+    /// 距单次录制上限不足 10 秒。
+    limit_warning: bool,
+    /// 录制中读数（未武装时 `None`）。
+    recording: Option<RecordingStatus>,
+    /// 录制中正在长出来的工程区间。
+    span: Option<CaptureSpan>,
+}
+
 /// 本块在 Transfer 通路上的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferBlockOutcome {
@@ -917,6 +1029,8 @@ pub(crate) enum TransferBlockOutcome {
     Busy,
     /// 宿主没给可用的工程位置。
     NoPosition,
+    /// 宿主此刻没在播放：本块未写入（待命或暂停）。
+    NotPlaying,
     /// 捕获已结束（等 promote）。
     Stopped,
 }
@@ -929,7 +1043,6 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
     let bytes = capacity.checked_mul(channels as usize)?.checked_mul(4)?;
     let reservation = crate::render::budget::global_budget().reserve(bytes)?;
     Some(Segment {
-        id: 0,
         origin: 0,
         sample_rate: 0,
         planes: vec![vec![0.0; capacity]; channels as usize],
@@ -941,25 +1054,31 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
     })
 }
 
-/// 段 → 源 PCM。一个段一份源，键是 [`timeline::source_id`]。
+/// take 的段 → 源 PCM。**一个 take 一份源**（键是 [`timeline::source_id`]）。
+///
+/// 【为什么不是一段一份】片段可以跨段（见 `timeline.rs` 的模块头），而一个片段只能引用
+/// 一份源与一个连续源窗 —— 段一份源会让跨段片段无法表达。源域因此是**素材带**：
+/// 段按录制顺序首尾相接，带内偏移就是源窗的坐标系。
+///
+/// 【为什么在这里拼而不是让每个消费方各拼一遍】源表是渲染与波形的共同输入，
+/// 而"带 = 段的顺序拼接"这条规则只能有一处实现 —— 两处实现必然漂移，
+/// 表现为"听到的与看到的不是同一段音频"。
 fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> {
-    let mut sources = HashMap::new();
-    for take in takes {
-        for segment in take.segments {
-            // 【为什么按段而不是按 take 建源】段的采样率与内容各不相同，且时间线里的
-            // clip 源窗是**段内偏移** —— 一份源对应一个段，窗口语义才自洽。
-            sources.insert(
-                timeline::source_id(take.id, segment.id),
+    let (tapes, _) = timeline::build_tapes(takes);
+    tapes
+        .iter()
+        .map(|tape| {
+            (
+                timeline::source_id(tape.take),
                 Arc::new(SourcePcm {
-                    sample_rate: segment.sample_rate,
-                    planes: segment.planes.clone(),
-                    version: segment.id,
+                    sample_rate: tape.sample_rate,
+                    planes: tape.concat_planes(),
+                    version: tape.take,
                     _reservation: None,
                 }),
-            );
-        }
-    }
-    sources
+            )
+        })
+        .collect()
 }
 
 /// 由时间线合成 ARA 形状的播放区间。
@@ -1022,6 +1141,7 @@ mod tests {
                 frames: 4096,
                 sample_rate: 48_000.0,
                 planes: [Some(samples), Some(samples)],
+                playing: true,
             });
         }
         let id = store.stop().unwrap();
@@ -1047,6 +1167,7 @@ mod tests {
             frames: 1024,
             sample_rate: 48_000.0,
             planes: [Some(samples), Some(samples)],
+            playing: true,
         });
         store.cancel();
         assert_eq!(store.status().take_count, 0);
@@ -1067,15 +1188,13 @@ mod tests {
         store.note_offline();
         let samples: &'static [f32] = Box::leak(vec![0.1_f32; 256].into_boxed_slice());
         // 注意：**没有** `store.start()` —— 这正是回归点。
-        store.observe(
-            &InputBlock {
-                start: 0,
-                frames: 256,
-                sample_rate: 48_000.0,
-                planes: [Some(samples), None],
-            },
-            true,
-        );
+        store.observe(&InputBlock {
+            start: 0,
+            frames: 256,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), None],
+            playing: true,
+        });
         let status = store.status();
         assert!(
             status.saw_context,
@@ -1096,10 +1215,14 @@ mod tests {
             frames: 16,
             sample_rate: 48_000.0,
             planes: [Some(samples), Some(samples)],
+            playing: true,
         };
-        store.observe(&block, true);
+        store.observe(&block);
         assert!(store.status().host_playing);
-        store.observe(&block, false);
+        store.observe(&InputBlock {
+            playing: false,
+            ..block
+        });
         assert!(!store.status().host_playing, "停止播放必须如实回落");
         // 而"见过上下文"是**单调**的：它描述历史，不描述此刻。
         assert!(store.status().saw_context);
@@ -1116,6 +1239,7 @@ mod tests {
                 frames: 256,
                 sample_rate: 48_000.0,
                 planes: [Some(samples), None],
+                playing: true,
             }),
             TransferBlockOutcome::Idle
         );
@@ -1150,7 +1274,6 @@ mod tests {
 
     fn captured_segment() -> Segment {
         Segment {
-            id: 1,
             origin: 0,
             sample_rate: 48_000,
             planes: vec![vec![0.4_f32; 512], vec![0.4_f32; 512]],
@@ -1229,6 +1352,7 @@ mod tests {
             frames: 256,
             sample_rate: 48_000.0,
             planes: [Some(samples), Some(samples)],
+            playing: true,
         });
         let id = store.stop().unwrap();
         assert!(id > 9, "新 take 号必须跳过已恢复的 9，实际 {id}");
@@ -1258,6 +1382,7 @@ mod tests {
                 frames: 2048,
                 sample_rate: 48_000.0,
                 planes: [Some(samples), Some(samples)],
+                playing: true,
             });
         }
         store.stop().unwrap();

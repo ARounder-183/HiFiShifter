@@ -26,6 +26,7 @@ fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
             frames,
             sample_rate: 48_000.0,
             planes: [Some(samples), Some(samples)],
+            playing: true,
         });
     }
     owner.transfer().stop().unwrap();
@@ -212,4 +213,70 @@ fn the_recording_monitor_option_is_reachable() {
         ..owner.transfer().options()
     });
     assert!(!owner.transfer().options().monitor);
+}
+
+/// 按音频线程的真实顺序喂两个块位置，回答"守卫认为宿主在不在推进位置"。
+///
+/// 【为什么走生产代码而不是自己算】判据长在 `note_block_position` 里；测试自己再算
+/// 一遍就只是测了自己。
+fn transport_running_after(owner: &Arc<ExtensionOwner>, previous: i64, current: i64) -> bool {
+    owner.note_block_position(previous);
+    owner.note_block_position(current);
+    owner.transfer_transport_running()
+}
+
+/// **起播的头几块不能被吞掉。**
+///
+/// 【为什么这是本轮"播放后约 1 秒没声音"的回归测试】停播清输出是对的，但那个分支此前
+/// 只看 `kPlaying` —— 而它与 `projectTimeSamples` 不是原子更新的。宿主从"停止"切到
+/// "播放"的那几块里位置已经在走、播放位可能还没置上，于是**每次播放都吞掉开头**。
+///
+/// 判据必须是"位置在不在前进"：真在播就必然前进，钉住不动就是在停。
+#[test]
+fn the_first_blocks_of_playback_are_not_swallowed() {
+    let owner = insert_owner();
+    // 停播：位置钉在 0，反复 process ⇒ 不前进 ⇒ 清输出是对的。
+    owner.note_block_position(0);
+    assert!(
+        !owner.transfer_transport_running(),
+        "第一个块没有可比对象，必须保守判成没在前进"
+    );
+    assert!(
+        !transport_running_after(&owner, 0, 0),
+        "位置钉住不动就是在停"
+    );
+    // 起播：位置开始走，而播放位（此刻还没置上）不参与判断。
+    assert!(
+        transport_running_after(&owner, 0, 480),
+        "位置在前进就必须照常输出，否则每次播放都吞掉开头"
+    );
+}
+
+/// 真的停播时**仍然**清输出：位置钉住不动。
+///
+/// 【为什么这条必须与上一条同时钉住】只放宽不放守会让 REAPER 停播时把同一小段音频
+/// 反复送出去 —— 听起来是一个嗡嗡声，比静音更糟。
+#[test]
+fn a_really_stopped_host_is_not_treated_as_running() {
+    let owner = insert_owner();
+    assert!(
+        !transport_running_after(&owner, 96_000, 96_000),
+        "钉住不动 = 停播"
+    );
+}
+
+/// **ARA 实例的守卫恒为假**：它的输出语义由 ARA 通路决定。
+///
+/// 【为什么必须钉住】这个守卫写在 `process` 里所有实例都会经过的地方。若它对绑定实例
+/// 返回真，"停播即静音"这条既有契约就在 ARA 宿主里静默失效 —— 那是整条 ARA 通路的
+/// 输出行为变化，而不是一次修 bug。
+#[test]
+fn a_bound_ara_instance_keeps_its_output() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    assert!(owner.is_bound());
+    assert!(
+        !transport_running_after(&owner, 0, 48_000),
+        "绑定的实例必须保持『停播即静音』的既有行为"
+    );
+    model.session().close();
 }

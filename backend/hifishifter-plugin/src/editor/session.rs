@@ -770,13 +770,18 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
-                // 【为什么补缓冲挂在会话 actor 上】它是**周期性**维护，且必须在音频线程
-                // 取用备用缓冲之前完成。此前它挂在 WebView 的 20ms 定时器上 —— 于是关掉
-                // 插件窗口就断录（2 粒 × 8 秒 = 24 秒后 `NoSpare`）。actor 由会话创建，
-                // 与窗口开没开无关；它空闲时 100ms 一轮（见循环末尾的 `recv_timeout`），
-                // 相对 8 秒一粒的备用缓冲有两个数量级的余量。
+                // 【为什么补给线与自动 promote 挂在会话 actor 上】它是**周期性**维护，
+                // 且必须在音频线程取用备用缓冲之前完成。此前它挂在 WebView 的 20ms
+                // 定时器上 —— 于是关掉插件窗口就断录（2 粒 × 8 秒 = 24 秒后 `NoSpare`）。
+                // actor 由会话创建，与窗口开没开无关；它空闲时 100ms 一轮（见循环末尾的
+                // `recv_timeout`），相对 8 秒一粒的备用缓冲有两个数量级的余量。
+                //
+                // 【为什么还要在这里 promote】捕获会**自己**停下（到上限、备用缓冲用尽、
+                // 采样率变化），而那些时刻没有任何用户动作。没有这一条，已经录好的段会
+                // 一直留在捕获里：界面显示"尚未录制"、素材却在内存里，而下一次
+                // `start()` 会把它们覆盖掉 —— "到点自动停"于是变成"到点丢掉"。
                 if let Some(owner) = session.transfer_owner() {
-                    owner.transfer().top_up();
+                    owner.transfer().service();
                     // 一次性诊断：宿主给了位置却从来没给过输入（见该方法的说明）。
                     owner.transfer().report_missing_input_once();
                     // 宿主链接的回写监视。与补缓冲同一个理由挂在会话 actor 上：
@@ -2180,6 +2185,10 @@ impl EditorSession {
             // 状态快照每 250ms 轮询一次，是现成的、不依赖时序的通道。
             "mode":if self.is_transfer(){"transfer"}else{"ara"},
             "generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
+            // 【为什么把"在等分析"单独报出来】它是**唯一会持续很久**的一步（几分钟素材的
+            // 神经分析本来就慢），而它此前被 `pending` 一句话盖住 —— 用户无法区分
+            // "卡住了"与"在正常跑"。前端据此把状态栏片分成"在分析 / 在合成 / 在应用"。
+            "analysis_pending":analysis_pending,
             // `rendering_active` 是**派生状态**，前端据此点亮/熄灭"渲染中"片，而不是
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
@@ -2625,6 +2634,7 @@ pub(crate) mod tests {
                 frames: 4096,
                 sample_rate: 48_000.0,
                 planes: [Some(samples), Some(samples)],
+                playing: true,
             });
         }
         transfer.stop().unwrap();

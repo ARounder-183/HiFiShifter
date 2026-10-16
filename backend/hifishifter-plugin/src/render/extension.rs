@@ -5,7 +5,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
@@ -309,6 +309,23 @@ pub(crate) enum TransferOutput {
     PassThrough,
 }
 
+impl TransferOutput {
+    /// 语言无关的分类名；前端按此查 catalog。
+    ///
+    /// 【为什么要有它】"现在听到的是哪一版"是用户**无法自己判断**的一件事：处理结果、
+    /// 原始录音与宿主原声听起来都可以"像那么回事"，而它们之间的差别正是"我的编辑生效了
+    /// 没有"。把仲裁结论如实报给界面，用户就不必猜。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TransferOutput::Untouched => "untouched",
+            TransferOutput::Recording => "recording",
+            TransferOutput::Processed => "processed",
+            TransferOutput::Raw => "raw",
+            TransferOutput::PassThrough => "passthrough",
+        }
+    }
+}
+
 /// [`ExtensionOwner::transfer_stage`] 给调用方的结论。
 pub(crate) enum TransferStage {
     /// 本阶段已经写完输出：调用方直接返回，不要再走快照通路。
@@ -434,6 +451,19 @@ pub(crate) struct ExtensionOwner {
     transfer_ready_revision: AtomicU64,
     /// 已发布原始磁带对应的素材代次（`0` = 还没发过）。
     raw_tape_revision: AtomicU64,
+    /// 上一块的工程位置（`projectTimeSamples`），用于判断"位置在不在前进"。
+    ///
+    /// 【为什么要它】停播时清输出是对的（否则固定光标处会把同一小段反复送出去，
+    /// 听起来是一个嗡嗡声），但 `kPlaying` 位与位置**不是原子更新**的：宿主从"停止"
+    /// 切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前那个清输出分支
+    /// 把两者当成同一件事，于是**每次播放都吞掉开头**。
+    ///
+    /// 位置是否前进是宿主无关的硬事实：真在播就必然前进，钉住不动就是在停。
+    last_block_position: AtomicI64,
+    /// 见过至少一个块的位置（`false` 时 [`Self::last_block_position`] 没有意义）。
+    has_block_position: AtomicBool,
+    /// 本块的位置相对上一块是否在前进（见 [`Self::transfer_transport_running`]）。
+    position_advancing: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
@@ -2104,6 +2134,41 @@ impl ExtensionOwner {
         TransferOutput::PassThrough
     }
 
+    /// 记录本块的工程位置，并更新"位置是否在前进"（音频线程，无锁无分配）。
+    ///
+    /// 【为什么单独成一个函数】`process` 与测试都要走**同一条**判据；把它摊在
+    /// `transfer_observe` 里，测试就只能复制一遍那段逻辑 —— 而复制出来的判据测的不是
+    /// 生产代码。
+    ///
+    /// 【为什么第一个块一律不算"前进"】那时没有可比对象，而两个方向的错法不对称：
+    /// 判成"前进"会在宿主停播时多送出一块音频（听起来是咔哒声），判成"没前进"最多
+    /// 让起播的第一个块静音（约 10 毫秒，听不出来）。选无害的那一侧。
+    pub(crate) fn note_block_position(&self, start: i64) {
+        let had = self.has_block_position.swap(true, Ordering::Relaxed);
+        let previous = self.last_block_position.swap(start, Ordering::Relaxed);
+        self.position_advancing
+            .store(had && previous != start, Ordering::Release);
+    }
+
+    /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
+    ///
+    /// 【为什么要这个判据而不是 `kPlaying`】`kPlaying` 与 `projectTimeSamples` 不是原子
+    /// 更新的：宿主从"停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。
+    /// 而"位置在前进"是宿主无关的硬事实 —— 真在播就必然前进，钉住不动就是在停。
+    ///
+    /// 它服务的唯一决定是"停播时要不要清输出"：清是对的（固定光标处不清就会把同一小段
+    /// 反复送出去，听起来是个嗡嗡声），但**不能拿播放位当唯一的判据** —— 那会让每次
+    /// 播放都吞掉开头（用户报障：播放后约 1 秒没有输出）。
+    ///
+    /// 【为什么 ARA 实例恒为假】它的输出语义由 ARA 通路决定，这个守卫必须对它完全无效
+    /// （见 `a_bound_instance_keeps_its_output`）。返回假 ⇒ 保持"停播即静音"的既有行为。
+    pub(crate) fn transfer_transport_running(&self) -> bool {
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            return false;
+        }
+        self.position_advancing.load(Ordering::Acquire)
+    }
+
     /// 已发布的**处理结果**是否对应当前活动 take。
     ///
     /// 【为什么只比 take、不比编辑代次】编辑代次在会话那一侧，音频线程取不到。而"曲线
@@ -2167,19 +2232,26 @@ impl ExtensionOwner {
         };
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
         // 的切片只在本次回调内有效，而消费方同步读完就返回。
-        let block =
-            unsafe { crate::audio_abi::capture_view(data, context.project_time_samples, rate) };
+        let block = unsafe {
+            crate::audio_abi::capture_view(
+                data,
+                context.project_time_samples,
+                rate,
+                context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
+            )
+        };
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
         // 代价是几个原子写 + 一次缓冲形状检查（不分配、不读样本）。
-        transfer.observe(
-            &block,
-            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
-        );
-        if transfer.is_armed() {
-            let _ = transfer.on_block(block);
-        }
+        transfer.observe(&block);
+        // 【为什么位置是否前进要在这里记】它决定"停播时要不要清输出"，而那是本块稍后
+        // 就要做的决定（见 `transfer_transport_running`）。必须在**每个**块上更新，
+        // 与是否武装无关 —— 停播期间的块正是这个判据的信息来源。
+        self.note_block_position(block.start);
+        // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
+        // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
+        let _ = transfer.on_block(block);
     }
 
     /// 音频线程上的 Transfer **输出**阶段。

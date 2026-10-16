@@ -239,3 +239,6 @@ third_party/vocal-remover/model/hnsep_240512_vr/model.pt
 third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/model.ckpt
 third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/pc_nsf_hifigan.onnx
 
+
+# 本地临时工作目录（构建日志 / 一次性脚本）
+.tmp/

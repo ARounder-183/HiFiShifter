@@ -27,8 +27,32 @@
 //! 段之间可以重叠（宿主 seek 回退、循环回卷）。这里不做合并 —— 合并是**时间线视图**
 //! 的事（`timeline.rs`），规则是"后来的段胜出"。音频线程只负责把每一块准确地写到
 //! 它该在的工程位置上。
+//!
+//! # 素材位置由**播放**决定，不由按键决定
+//!
+//! 一次捕获有两个阶段：
+//!
+//! | 阶段 | 条件 | 音频线程做什么 |
+//! |---|---|---|
+//! | **待命**（standby） | 已武装，但宿主还没播过 | **什么都不写** |
+//! | **录制中** | 宿主播放过至少一块 | 按工程位置写 |
+//!
+//! 起播的那一刻（第一块 `playing == true`）记下 [`Capture::anchor`] —— 素材的第一帧
+//! 就在那里。**这是本模块最重要的一条语义**：用户按录制键的时机与宿主播放的时机是
+//! 两件独立的事，而"素材从哪开始"只由后者决定。否则同一个动作（先按录制、再按播放）
+//! 会得到两种结果，取决于用户按得多快 —— 行为随按键时机漂移是最难被用户理解的一类缺陷。
+//!
+//! 停播**不结束**这次捕获：它只是让素材停止增长。用户会停下来听一遍、再接着录，
+//! 那是同一次录制的继续。因此 `playing == false` 的块一律跳过 —— 既包括待命期的块，
+//! 也包括停播后宿主仍会送来的那些"位置钉住不动"的块（REAPER 就是这样）。
 
 use std::ops::Range;
+
+/// 距单次录制上限还有这么多秒时开始预警。
+///
+/// 【为什么是 10 秒】它要足够长到用户能**做完手上的事**（唱完这一句、把光标挪开），
+/// 又要足够短到不会被当成常驻噪声。10 秒在 120 BPM 下是 5 小节，覆盖绝大多数乐句。
+const LIMIT_WARNING_SEC: u64 = 10;
 
 /// 一个段的**结束原因**。它是用户可见诊断的一部分：为什么录到这里就断了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,14 +63,18 @@ pub(crate) enum ClosedReason {
     Jump,
     /// 用户停止。
     Stopped,
+    /// 到达用户设定的单次录制上限（`TransferOptions::max_duration_sec`）。
+    ///
+    /// 【为什么它必须是一个**结束**原因】上限的意义就是"不要超过它"：到点必须真的停，
+    /// 而不是记一笔然后继续录。它是本文件里唯一由**用户设置**触发的中止，因此也是唯一
+    /// 需要提前预警（见 [`Capture::limit_warning`]）的那一个。
+    LimitReached,
     /// 全局 PCM 预算耗尽。
     BudgetFull,
     /// 备用缓冲用尽（非音频线程没跟上）。
     NoSpare,
     /// 宿主工程的采样率变了：本 take 的样本域不再一致。
     RateChanged,
-    /// 宿主停止播放。
-    TransportStopped,
 }
 
 impl ClosedReason {
@@ -56,16 +84,50 @@ impl ClosedReason {
             ClosedReason::Full => "full",
             ClosedReason::Jump => "jump",
             ClosedReason::Stopped => "stopped",
+            ClosedReason::LimitReached => "limit_reached",
             ClosedReason::BudgetFull => "budget_full",
             ClosedReason::NoSpare => "no_spare",
             ClosedReason::RateChanged => "rate_changed",
-            ClosedReason::TransportStopped => "transport_stopped",
         }
     }
 
     /// 这个原因是否意味着"用户需要知道"（正常切段不需要提示）。
+    ///
+    /// 【为什么 `LimitReached` 算"需要知道"】录制自己停了，而原因是用户自己设的一个
+    /// 数值 —— 不说清就只能是"录着录着就断了"。它与 `NoSpare`（内存没跟上）同一类：
+    /// 都是"不是用户按的停"，都必须能被归因。
     pub(crate) fn is_notable(self) -> bool {
         !matches!(self, ClosedReason::Full | ClosedReason::Stopped)
+    }
+
+    /// 稳定的编码值（`0` = 没有）。**只增不改**。
+    ///
+    /// 【为什么不用 `as u8`】显式编码让"哪个数字是哪一条"成为契约的一部分：
+    /// 将来插入或重排枚举成员不会静默改变已写出去的数字。
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            ClosedReason::Full => 1,
+            ClosedReason::Jump => 2,
+            ClosedReason::Stopped => 3,
+            ClosedReason::LimitReached => 4,
+            ClosedReason::BudgetFull => 5,
+            ClosedReason::NoSpare => 6,
+            ClosedReason::RateChanged => 7,
+        }
+    }
+
+    /// [`Self::code`] 的逆。未知编码返回 `None`（而不是猜一个）。
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(ClosedReason::Full),
+            2 => Some(ClosedReason::Jump),
+            3 => Some(ClosedReason::Stopped),
+            4 => Some(ClosedReason::LimitReached),
+            5 => Some(ClosedReason::BudgetFull),
+            6 => Some(ClosedReason::NoSpare),
+            7 => Some(ClosedReason::RateChanged),
+            _ => None,
+        }
     }
 }
 
@@ -85,24 +147,12 @@ pub(crate) enum SegmentLoss {
     First,
 }
 
-impl SegmentLoss {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            SegmentLoss::None => "none",
-            SegmentLoss::Gap { .. } => "gap",
-            SegmentLoss::Backward => "backward",
-            SegmentLoss::First => "first",
-        }
-    }
-}
-
 /// 一段**物理连续**捕获的音频。
 ///
 /// 【不变式】封口后 `span().len() == planes[ch].len()`，且所有平面等长。
 /// 活跃期间平面长度是**容量**，`filled` 才是有效长度 —— 封口时截断。
 #[derive(Debug)]
 pub(crate) struct Segment {
-    pub id: u64,
     /// 工程采样域起点（`projectTimeSamples` 的域）。
     pub origin: i64,
     pub sample_rate: u32,
@@ -128,16 +178,11 @@ impl Segment {
         self.origin..self.origin + self.filled as i64
     }
 
-    /// 段内的采样是否**全部**为零（且没有非有限值）。
+    /// 段的采样区间是否**全部**为零（且没有非有限值）。
     ///
-    /// 【为什么要这个判据】全零段在时间线视图里合并成"静音"，不产生片段 ——
+    /// 【为什么要这个判据】全零段在时间线视图里与相邻内容合并，不单独成片 ——
     /// 这既省内存，也让"用户录了一段静音"与"用户没录"在界面上可区分。
-    pub(crate) fn is_silent(&self) -> bool {
-        self.planes
-            .iter()
-            .all(|plane| plane.iter().all(|sample| *sample == 0.0))
-    }
-
+    ///
     /// 段内是否含非有限采样。含 NaN/Inf 的段不能进渲染。
     pub(crate) fn has_nonfinite(&self) -> bool {
         self.planes
@@ -157,13 +202,15 @@ pub(crate) struct InputBlock<'a> {
     pub sample_rate: f64,
     /// 至多两条输入平面；`None` = 该声道缺失或宿主标记为静音。
     pub planes: [Option<&'a [f32]>; 2],
+    /// 宿主此刻是否在播放（`ProcessContext::state` 的 `kPlaying`）。
+    ///
+    /// 【为什么它必须与音频一起给出来】位置、采样率、样本与"在不在播放"是**同一个块**的
+    /// 属性，而捕获对四者缺一不可：没有播放位就分不出"待命"与"录制中"，也就无法保证
+    /// "素材从宿主起播那一帧开始"（见文件头的说明）。
+    pub playing: bool,
 }
 
 impl InputBlock<'_> {
-    pub(crate) fn span(&self) -> Range<i64> {
-        self.start..self.start + self.frames as i64
-    }
-
     /// 本块有没有**任何**可用输入。
     pub(crate) fn has_audio(&self) -> bool {
         self.planes.iter().any(|plane| plane.is_some())
@@ -179,10 +226,18 @@ pub(crate) enum CaptureOutcome {
     SilentInput,
     /// 宿主没给可用的工程位置或采样率：**丢弃**本块（写进去会污染时间轴）。
     NoPosition,
+    /// 宿主此刻没在播放：**不写**本块。
+    ///
+    /// 待命期（还没起播）与停播期（已录了一段、用户按了暂停）都是这一条 ——
+    /// 两者的**动作**相同（什么都不写），区别只在状态读数上，由 [`Capture::is_started`]
+    /// 回答。分开成两个枚举值会让调用方为同一件事写两个分支。
+    NotPlaying,
     /// 采样率与本次捕获不一致：已停止捕获。
     RateChanged,
     /// 备用缓冲用尽：已停止捕获。
     OutOfSpares,
+    /// 到达用户设定的单次录制上限：已停止捕获。
+    LimitReached,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -201,8 +256,6 @@ pub(crate) struct Capture {
     channels: u8,
     /// 单段容量（帧）。
     capacity: usize,
-    /// 段 id 分配器。
-    next_id: u64,
     /// 停止原因；`Some` = 捕获已结束，等非音频线程 promote。
     stopped: Option<ClosedReason>,
     /// 已写入的工程帧总数（含静音块）。
@@ -211,6 +264,14 @@ pub(crate) struct Capture {
     last_position: Option<i64>,
     /// 本次捕获的峰值（各段峰值的最大值）。
     peak: [f32; 2],
+    /// 宿主是否**已经播过**至少一块（`false` = 待命）。
+    ///
+    /// 【为什么是一个单调位】它只从假变真一次（用户按下录制之后、宿主第一次播放）。
+    /// 待命与录制中的区别就是它 —— 而这两个状态对用户是**完全不同**的两件事
+    /// （一个在等外部事件、一个在积累素材），界面必须分得开。
+    started: bool,
+    /// 单次录制的帧数上限（`0` = 不限）。
+    max_frames: u64,
     /// 诊断计数。
     pub gaps: u64,
     pub backwards: u64,
@@ -229,11 +290,12 @@ impl Default for Capture {
             sample_rate: 0,
             channels: 0,
             capacity: 0,
-            next_id: 1,
             stopped: None,
             captured_frames: 0,
             last_position: None,
             peak: [0.0; 2],
+            started: false,
+            max_frames: 0,
             gaps: 0,
             backwards: 0,
             dropouts: 0,
@@ -247,14 +309,43 @@ impl Capture {
     /// 开始一次捕获。
     ///
     /// `capacity_frames` 是单段容量；`spares` 是调用方**预先分配好**的备用缓冲
-    /// （每个都是空的、长度为容量的平面）。非音频线程调用。
-    pub(crate) fn start(&mut self, channels: u8, capacity_frames: usize, mut spares: Vec<Segment>) {
+    /// （每个都是空的、长度为容量的平面）；`max_frames` 是本次录制的帧数上限
+    /// （`0` = 不限）。非音频线程调用。
+    pub(crate) fn start(
+        &mut self,
+        channels: u8,
+        capacity_frames: usize,
+        mut spares: Vec<Segment>,
+        max_frames: u64,
+    ) {
         *self = Self {
             spares: std::mem::take(&mut spares),
             channels,
             capacity: capacity_frames,
+            max_frames,
             ..Self::default()
         };
+    }
+
+    /// 宿主是否**已经播过**至少一块（`false` = 待命）。
+    ///
+    /// 【为什么界面需要它】待命与录制中是两种不同的等待：前者等的是**用户去按播放**，
+    /// 后者等的是**时间积累**。合成一个"已录 0.0 秒"会让待命看起来像失败。
+    pub(crate) fn is_started(&self) -> bool {
+        self.started
+    }
+
+    /// 距单次录制上限不足 [`LIMIT_WARNING_SEC`] 秒。
+    ///
+    /// 【为什么要有预警】上限到点会**自己停**，而那是用户设的一个数值 —— 不预警的话
+    /// 用户只能看到"录着录着就断了"。预警必须早于上限，且必须由后端给（只有它知道
+    /// 已捕获多少帧）。
+    pub(crate) fn limit_warning(&self) -> bool {
+        if self.max_frames == 0 || self.sample_rate == 0 {
+            return false;
+        }
+        let remaining = self.max_frames.saturating_sub(self.captured_frames);
+        remaining < u64::from(self.sample_rate) * LIMIT_WARNING_SEC
     }
 
     /// 是否已经结束（等 promote）。
@@ -346,12 +437,27 @@ impl Capture {
         if self.stopped.is_some() {
             return CaptureOutcome::Captured;
         }
+        // 【为什么"没在播放"必须排在位置与采样率之前】停播后宿主仍会送块（REAPER 会把
+        // 位置钉在光标处反复 process），而那些块的位置往往**与已录内容不相邻** ——
+        // 让它们走进下面的连续性判据会凭空多出一次"跳跃"，把一次正常暂停记成一次异常。
+        // 先按播放位挡掉，暂停就是暂停。
+        if !block.playing {
+            return CaptureOutcome::NotPlaying;
+        }
         // 【为什么非法位置要丢弃而不是当 0】把一块音频写到工程位置 0 会**污染**时间轴：
         // 用户听到的那一小段会出现在开头。丢弃只损失这一块，且被计数。
         let Some(rate) = normalize_rate(block.sample_rate) else {
             self.dropouts = self.dropouts.saturating_add(1);
             return CaptureOutcome::NoPosition;
         };
+        // 起播：素材从这一块开始。**待命期一个样本都不写** —— 这就是"素材位置由播放
+        // 决定、不由按键决定"的落点（见文件头）。
+        //
+        // 【为什么排在采样率校验之后】一块"在播放但报不出采样率"的块不算起播：
+        // 那时我们连样本域都不知道，没有资格宣称素材已经开始。
+        if !self.started {
+            self.started = true;
+        }
         if block.frames == 0 {
             return CaptureOutcome::Captured;
         }
@@ -471,6 +577,12 @@ impl Capture {
                 self.sealed.push(seal(active, ClosedReason::Full));
             }
         }
+        // 【为什么上限在音频线程判】只有这里知道"已经捕获了多少帧"，而判据只是一次
+        // 整数比较。放到非音频线程会有一个块的滞后 —— 而上限的全部意义就是**不要超**。
+        if self.max_frames > 0 && self.captured_frames >= self.max_frames {
+            self.stop(ClosedReason::LimitReached);
+            return CaptureOutcome::LimitReached;
+        }
         if silent {
             CaptureOutcome::SilentInput
         } else {
@@ -527,7 +639,6 @@ mod tests {
     /// 造一个长度为 `frames` 的备用缓冲。
     fn spare(capacity: usize, channels: u8) -> Segment {
         Segment {
-            id: 0,
             origin: 0,
             sample_rate: 0,
             planes: vec![vec![0.0; capacity]; channels as usize],
@@ -555,13 +666,27 @@ mod tests {
                 frames,
                 sample_rate: rate,
                 planes: [Some(samples), None],
+                playing: true,
             },
         )
     }
 
+    /// 同一个块，但宿主**没在播放**（停播后仍会 process 的那种）。
+    fn paused(view: InputBlock<'_>) -> InputBlock<'_> {
+        InputBlock {
+            playing: false,
+            ..view
+        }
+    }
+
     fn started(capacity: usize, spares: usize) -> Capture {
         let mut capture = Capture::default();
-        capture.start(1, capacity, (0..spares).map(|_| spare(capacity, 1)).collect());
+        capture.start(
+            1,
+            capacity,
+            (0..spares).map(|_| spare(capacity, 1)).collect(),
+            0,
+        );
         capture
     }
 
@@ -682,6 +807,7 @@ mod tests {
             frames: 4,
             sample_rate: 48_000.0,
             planes: [None, None],
+            playing: true,
         };
         assert_eq!(capture.on_block(silent), CaptureOutcome::SilentInput);
         let sealed = capture.finish(ClosedReason::Stopped);
@@ -699,6 +825,7 @@ mod tests {
             frames: 4,
             sample_rate: f64::NAN,
             planes: [None, None],
+            playing: true,
         };
         assert_eq!(capture.on_block(bad), CaptureOutcome::NoPosition);
         assert_eq!(capture.dropouts, 1);
@@ -711,12 +838,13 @@ mod tests {
         let left: &'static [f32] = Box::leak(vec![-0.5, 0.25].into_boxed_slice());
         let right: &'static [f32] = Box::leak(vec![0.75, -0.1].into_boxed_slice());
         let mut capture = Capture::default();
-        capture.start(2, 64, vec![spare(64, 2)]);
+        capture.start(2, 64, vec![spare(64, 2)], 0);
         let view = InputBlock {
             start: 0,
             frames: 2,
             sample_rate: 44_100.0,
             planes: [Some(left), Some(right)],
+            playing: true,
         };
         capture.on_block(view);
         let sealed = capture.finish(ClosedReason::Stopped);
@@ -724,19 +852,173 @@ mod tests {
         assert!((sealed[0].peak[1] - 0.75).abs() < 1e-6);
     }
 
-    /// 全零段被识别为静音（时间线视图据此合并）。
+    /// 没有输入时写下的段**全为零**，且不含非有限值。
+    ///
+    /// 【为什么这条仍然要钉住】投影层按素材带上的窗口判静音（`timeline::Tape::is_silent`），
+    /// 而那个判据读的就是这里写下的样本 —— 如果捕获在这里留下的是残留值而不是零，
+    /// "全静音的录制"就会在时间轴上变成一段噪声。
     #[test]
-    fn an_all_zero_segment_is_reported_as_silent() {
+    fn a_segment_without_input_is_all_zero() {
         let mut capture = started(64, 2);
         let silent = InputBlock {
             start: 0,
             frames: 8,
             sample_rate: 48_000.0,
             planes: [None, None],
+            playing: true,
         };
         capture.on_block(silent);
         let sealed = capture.finish(ClosedReason::Stopped);
-        assert!(sealed[0].is_silent());
+        assert!(sealed[0]
+            .planes
+            .iter()
+            .all(|plane| plane.iter().all(|sample| *sample == 0.0)));
         assert!(!sealed[0].has_nonfinite());
+    }
+
+    /// **待命期一个样本都不写**：宿主没播放时按下的录制不产生任何素材。
+    ///
+    /// 【为什么这是本模块最重要的回归点】"素材位置由播放决定、不由按键决定"这条语义
+    /// 全靠它。待命期若写了东西，素材就会落在"按录制时宿主恰好停在哪"这个与用户
+    /// 意图无关的位置上，而同一个动作（先按录制、再按播放）会因按键快慢得到两种结果。
+    #[test]
+    fn standby_writes_nothing_until_the_host_plays() {
+        let mut capture = started(64, 2);
+        // 宿主没播放：反复送块也不该有任何素材。
+        for start in [0, 4, 8, 12] {
+            let (_, view) = block(start, 4, 48_000.0);
+            assert_eq!(
+                capture.on_block(paused(view)),
+                CaptureOutcome::NotPlaying,
+                "宿主没在播放时不该写任何块"
+            );
+        }
+        assert!(!capture.is_started(), "没播过就还是待命");
+        assert_eq!(capture.captured_frames(), 0);
+        assert!(capture.finish(ClosedReason::Stopped).is_empty());
+    }
+
+    /// **素材的第一帧是宿主起播的那一帧，不是按下录制时宿主停在哪。**
+    ///
+    /// 【为什么这条钉的是"位置随播放走"】它是用户反馈"先点录制再播放录不到"的直接
+    /// 修复点：宿主从 20 秒处起播，素材就必须从 20 秒开始 —— 哪怕用户在宿主停在
+    /// 0 秒时就按下了录制。
+    #[test]
+    fn the_first_frame_follows_the_host_not_the_button() {
+        let mut capture = started(64, 2);
+        // 用户按下录制时宿主停在 0，并在那里反复 process。
+        for start in [0, 0, 0] {
+            let (_, view) = block(start, 4, 48_000.0);
+            assert_eq!(capture.on_block(paused(view)), CaptureOutcome::NotPlaying);
+        }
+        assert!(!capture.is_started(), "宿主没播放就还是待命");
+        // 用户按了播放，宿主从 20 帧处开始。
+        let (_, first) = block(20, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        assert!(capture.is_started());
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(
+            sealed[0].span(),
+            20..24,
+            "素材起点必须是宿主起播的位置，而不是按下录制时宿主停的位置"
+        );
+    }
+
+    /// **停播不封口**：暂停只让素材停止增长，重新起播且位置相接时无缝续录。
+    ///
+    /// 【为什么停播不能结束本次录制】用户会停下来听一遍、再接着录，那是同一次录制的
+    /// 继续。若停播就 promote，用户必须重新按一次录制 —— 而那一次会重新待命，
+    /// 于是"接着录"这个动作变得不可能。
+    #[test]
+    fn a_paused_transport_keeps_the_take_and_resumes_seamlessly() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        capture.on_block(first);
+        // 停播：宿主把位置钉在 4 处反复 process（REAPER 的行为）。
+        for _ in 0..5 {
+            let (_, stalled) = block(4, 4, 48_000.0);
+            assert_eq!(capture.on_block(paused(stalled)), CaptureOutcome::NotPlaying);
+        }
+        assert!(!capture.is_stopped(), "停播不该结束这次捕获");
+        // 重新起播，位置正好接上。
+        let (_, resumed) = block(4, 4, 48_000.0);
+        assert_eq!(capture.on_block(resumed), CaptureOutcome::Captured);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "续录必须落在同一个段里");
+        assert_eq!(sealed[0].span(), 0..8);
+        assert_eq!(capture.backwards, 0, "暂停不该被记成一次位置倒退");
+        assert_eq!(capture.gaps, 0, "暂停不该被记成一次跳跃");
+    }
+
+    /// 停播后从**别处**续录：位置不相接 ⇒ 按跳跃切段，而不是被当成连续。
+    #[test]
+    fn resuming_somewhere_else_is_a_jump_not_a_continuation() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        capture.on_block(first);
+        let (_, stalled) = block(4, 4, 48_000.0);
+        capture.on_block(paused(stalled));
+        let (_, elsewhere) = block(100, 4, 48_000.0);
+        assert_eq!(capture.on_block(elsewhere), CaptureOutcome::Captured);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[1].loss, SegmentLoss::Gap { skipped_frames: 96 });
+    }
+
+    /// **到达上限就真的停**，且原因可归因。
+    ///
+    /// 【为什么必须真的停】上限的意义就是"不要超过它"。记一笔然后继续录等于没有上限，
+    /// 而用户会据此以为"10 分钟后自动停"是可信的 —— 一个不生效的上限比没有上限更糟。
+    #[test]
+    fn the_duration_limit_stops_the_capture() {
+        let mut capture = Capture::default();
+        capture.start(1, 64, vec![spare(64, 1)], 8);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        let (_, second) = block(4, 4, 48_000.0);
+        assert_eq!(capture.on_block(second), CaptureOutcome::LimitReached);
+        assert!(capture.is_stopped());
+        assert_eq!(capture.stopped_reason(), Some(ClosedReason::LimitReached));
+        // 上限是**结束**原因：它必须让用户知道。
+        assert!(ClosedReason::LimitReached.is_notable());
+    }
+
+    /// 上限预警在到达前 10 秒触发。
+    ///
+    /// 【为什么要走真实采样率】采样率是"帧 ↔ 秒"换算的唯一依据，而捕获只接受
+    /// `8000..=384000`（`normalize_rate`）—— 用一个玩具率（如 1 Hz）写测试会让每一块
+    /// 都被判成"没有可用位置"，于是测的其实是别的东西。
+    #[test]
+    fn the_limit_warning_fires_ten_seconds_early() {
+        let rate = 48_000.0;
+        // 上限 20 秒 = 960000 帧；段容量够大，让 11 秒素材落在一个段里。
+        let mut capture = Capture::default();
+        capture.start(1, 600_000, vec![spare(600_000, 1)], 960_000);
+        // 1 秒一块。
+        for second in 0..11_i64 {
+            let (_, view) = block(second * 48_000, 48_000, rate);
+            capture.on_block(view);
+            if second == 0 {
+                assert!(
+                    !capture.limit_warning(),
+                    "还剩 19 秒时不该预警（预警线是 10 秒）"
+                );
+            }
+        }
+        // 已录 11 秒 ⇒ 还剩 9 秒 < 10 秒。
+        assert!(capture.limit_warning(), "还剩 9 秒时必须预警");
+        assert!(!capture.is_stopped(), "预警不是停止：还没到上限");
+    }
+
+    /// 不限时长（`max_frames == 0`）时永不预警、永不自停。
+    #[test]
+    fn an_unlimited_capture_never_warns() {
+        let mut capture = started(64, 2);
+        for start in [0, 4, 8, 12] {
+            let (_, view) = block(start, 4, 48_000.0);
+            capture.on_block(view);
+        }
+        assert!(!capture.limit_warning());
+        assert!(!capture.is_stopped());
     }
 }

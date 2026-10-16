@@ -26,7 +26,7 @@ pub(crate) fn handle(
 ) -> Result<Value, String> {
     let transfer = owner.transfer();
     match command {
-        "transfer_status" => Ok(status_json(&transfer.status(), owner.is_ara_bound())),
+        "transfer_status" => Ok(status_json(owner)),
         "transfer_start" => {
             // 【为什么必须先挡这一条】宿主已经把音频经 ARA 交给我们时，再从输入总线录一遍
             // 是**另一条**素材来源，两者会互相覆盖。此前它静默地允许了 —— 用户会在 ARA
@@ -35,24 +35,24 @@ pub(crate) fn handle(
                 return Err("transfer_not_applicable_ara".into());
             }
             transfer.start()?;
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+            Ok(status_json(owner))
         }
         "transfer_stop" => {
             let take = transfer.stop()?;
             // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
             // 下一次某个不相关的动作把它带起来。
             owner.request_transfer_reload();
-            Ok(json!({ "take": take, "status": status_json(&transfer.status(), owner.is_ara_bound()) }))
+            Ok(json!({ "take": take, "status": status_json(owner) }))
         }
         "transfer_cancel" => {
             transfer.cancel();
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+            Ok(status_json(owner))
         }
         "transfer_clear" => {
             transfer.clear();
             // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
             owner.request_transfer_reload();
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+            Ok(status_json(owner))
         }
         "transfer_delete_take" => {
             let id = args["takeId"]
@@ -61,7 +61,7 @@ pub(crate) fn handle(
             transfer.delete_take(id)?;
             // 时间线、原始磁带与合成结果都要跟着走：删掉的可能正是活动 take。
             owner.request_transfer_reload();
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+            Ok(status_json(owner))
         }
         "transfer_set_options" => {
             let current = transfer.options();
@@ -75,7 +75,7 @@ pub(crate) fn handle(
                     .as_bool()
                     .unwrap_or(current.outside_passthrough),
             });
-            Ok(status_json(&transfer.status(), owner.is_ara_bound()))
+            Ok(status_json(owner))
         }
         other => Err(format!("unknown transfer command: {other}")),
     }
@@ -88,7 +88,9 @@ pub(crate) fn handle(
 /// `ara_bound` 让界面能说清"这个宿主不需要 Transfer"，而不是让按钮点了没反应 ——
 /// 入口现在是**无条件**可见的（见 `transferEntry`：形态判定要等 5 秒宽限期，不能拿它
 /// 当可见性判据），所以面板必须自己回答"我在这里有没有用"。
-fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
+fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
+    let status = owner.transfer().status();
+    let ara_bound = owner.is_ara_bound();
     let recording = status.recording.map(|recording| {
         json!({
             "capturedFrames": recording.captured_frames,
@@ -138,6 +140,10 @@ fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
         .collect::<Vec<_>>();
     json!({
         "state": status.state,
+        // 【为什么"待命"是一个独立读数】武装之后、宿主播放之前，素材一定还是零 —— 而那
+        // 与"正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。前端据此
+        // 说"等待宿主播放"而不是"已录 0.0 秒"（后者看起来像失败）。
+        "standby": status.standby,
         "recording": recording,
         "capture": capture,
         "material": material,
@@ -170,6 +176,16 @@ fn status_json(status: &TransferStatus, ara_bound: bool) -> Value {
         // 宿主在用 64 位浮点跑本实例 ⇒ 插件按设计静音（平面是 64 位的）。
         // 这是"插上就没声音"的一个**用户可修复**的原因：把宿主精度切回 32-bit。
         "unsupportedPrecision": status.unsupported_precision,
+        // 【为什么上限要预警】上限到点会**自己停**，而那是用户设的一个数值 —— 不预警
+        // 的话用户只能看到"录着录着就断了"。见 `Capture::limit_warning`。
+        "limitWarning": status.limit_warning,
+        // 上一次录制**自己**停下的原因（`null` = 没有过、或那一次是用户按的停）。
+        // 到上限 / 内存没跟上 / 宿主换了采样率：三者的补救完全不同，所以分开报。
+        "stoppedReason": status.stopped_reason,
+        // 【为什么把"现在听到的是哪一版"报出来】处理结果、原始录音与宿主原声听起来都
+        // "像那么回事"，而它们之间的差别正是"我的编辑生效了没有" —— 用户无法自己判断。
+        // 如实报出仲裁结论，他就不必猜（见 `TransferOutput::as_str`）。
+        "output": owner.transfer_output().as_str(),
         // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
         "araBound": ara_bound,
     })
@@ -209,15 +225,13 @@ mod tests {
         );
         let samples: &'static [f32] = Box::leak(vec![0.1_f32; 64].into_boxed_slice());
         // 注意：**没有** `transfer_start` —— 观察必须与武装无关。
-        owner.transfer().observe(
-            &crate::transfer::InputBlock {
-                start: 0,
-                frames: 64,
-                sample_rate: 48_000.0,
-                planes: [Some(samples), None],
-            },
-            false,
-        );
+        owner.transfer().observe(&crate::transfer::InputBlock {
+            start: 0,
+            frames: 64,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), None],
+            playing: false,
+        });
         let status = handle(&owner, "transfer_status", &json!({})).unwrap();
         assert_eq!(
             status["canCapture"], true,
@@ -299,5 +313,110 @@ mod tests {
             error.contains("setupProcessing"),
             "错误必须指向可执行的下一步，而不是只说'失败'：{error}"
         );
+    }
+
+    /// 一个长度为 `frames` 的播放中的块。
+    fn playing_block(frames: usize) -> crate::transfer::InputBlock<'static> {
+        let samples: &'static [f32] = Box::leak(vec![0.2_f32; frames].into_boxed_slice());
+        crate::transfer::InputBlock {
+            start: 0,
+            frames,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+            playing: true,
+        }
+    }
+
+    /// **武装之后、宿主播放之前是"待命"，不是"已录 0.0 秒"。**
+    ///
+    /// 【为什么这条是用户反馈的回归测试】"点了录制没反应"就是待命被显示成"录制中
+    /// 但已录 0.0 秒"。两者对用户是不同的等待：一个要他**去按播放**，一个在积累素材。
+    #[test]
+    fn arming_before_the_host_plays_reports_standby() {
+        let owner = owner();
+        handle(&owner, "transfer_start", &json!({})).unwrap();
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(status["state"], "standby", "宿主还没播放 ⇒ 待命");
+        assert_eq!(status["standby"], true);
+        assert_eq!(status["recording"], Value::Null, "待命期没有任何读数");
+        assert_eq!(status["canCapture"], false, "没见过上下文 ⇒ 还不能录");
+
+        // 宿主开始播放 ⇒ 进入录制中。
+        owner.transfer().on_block(playing_block(64));
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(status["state"], "recording");
+        assert_eq!(status["standby"], false);
+        assert!(status["recording"].is_object(), "录制中必须有读数");
+    }
+
+    /// 上限预警与"自己停下的原因"都要如实报出来。
+    ///
+    /// 【为什么两者都要】上限到点会自己停，而那是用户设的一个数值；不预警 + 不归因，
+    /// 用户只能看到"录着录着就断了"，且没有任何依据知道该怎么改。
+    #[test]
+    fn the_limit_warning_and_the_stop_reason_are_reported() {
+        let owner = owner();
+        handle(
+            &owner,
+            "transfer_set_options",
+            &json!({ "maxDurationSec": 20.0 }),
+        )
+        .unwrap();
+        handle(&owner, "transfer_start", &json!({})).unwrap();
+        // 一秒一块（48000 帧）。上限 20 秒，录到 1 秒时还剩 19 秒 ⇒ 不该预警。
+        let second = |index: i64| crate::transfer::InputBlock {
+            start: index * 48_000,
+            frames: 48_000,
+            sample_rate: 48_000.0,
+            planes: [None, None],
+            playing: true,
+        };
+        owner.transfer().on_block(second(0));
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(status["limitWarning"], false, "还剩 19 秒时不该预警");
+        // 录到 11 秒 ⇒ 还剩 9 秒 < 预警线 10 秒 ⇒ 必须预警。
+        for index in 1..11_i64 {
+            owner.transfer().on_block(second(index));
+        }
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(status["limitWarning"], true, "还剩不到 10 秒必须预警");
+        assert_eq!(status["stoppedReason"], Value::Null, "还没停，没有停止原因");
+    }
+
+    /// **到上限后素材不能丢**：`service()` 把它 promote 成一个 take。
+    ///
+    /// 【为什么这是"到点自动停"的正面验收】捕获自己停下时没有任何用户动作。若没有
+    /// 自动 promote，那些段会一直留在捕获里 —— 界面显示"尚未录制"、素材却在内存里，
+    /// 而下一次 `transfer_start` 会把它们覆盖掉："自动停"于是变成"自动丢"。
+    #[test]
+    fn a_capture_that_stopped_itself_is_promoted_by_the_service_tick() {
+        let owner = owner();
+        // 上限 1 秒（选项的下限，`set_options` 会夹到 1.0）@ 48 kHz = 48000 帧；
+        // 下面每块 24000 帧（0.5 秒）⇒ 第二块到点。
+        handle(
+            &owner,
+            "transfer_set_options",
+            &json!({ "maxDurationSec": 1.0 }),
+        )
+        .unwrap();
+        handle(&owner, "transfer_start", &json!({})).unwrap();
+        for index in 0..4_i64 {
+            owner.transfer().on_block(crate::transfer::InputBlock {
+                start: index * 24_000,
+                frames: 24_000,
+                sample_rate: 48_000.0,
+                planes: [None, None],
+                playing: true,
+            });
+        }
+        assert!(!owner.transfer().is_armed(), "到上限后必须已解除武装");
+        // 会话 actor 的心跳：这一轮应当把素材收成一个 take。
+        owner.transfer().service();
+        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        assert_eq!(
+            status["takeCount"], 1,
+            "自己停下的捕获必须被 promote，否则素材会随下一次录制一起消失"
+        );
+        assert_eq!(status["stoppedReason"], "limit_reached");
     }
 }

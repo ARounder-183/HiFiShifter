@@ -374,10 +374,15 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
 /// 与 [`validate`] 相同的前提：`data` 指向本回调独占的合法 SDK 结构，且输入总线的
 /// 每个非空 plane 至少有 `num_samples` 帧可读。**返回的切片只在本次回调内有效**，
 /// 调用方不得把它们存起来或带出回调。
+///
+/// `playing` 由调用方从 `ProcessContext::state` 的 `kPlaying` 位给出（见
+/// `crate::audio_abi::PROCESS_CONTEXT_PLAYING`）：它与位置、采样率、样本同属**同一个块**，
+/// 因此在这里一次性装进视图，而不是让每个消费方各自去读一遍上下文。
 pub(crate) unsafe fn capture_view<'a>(
     data: *const ProcessData,
     start: i64,
     sample_rate: f64,
+    playing: bool,
 ) -> crate::transfer::capture::InputBlock<'a> {
     // SAFETY: 调用方保证 data 在本调用期间可读。
     let data = unsafe { &*data };
@@ -406,6 +411,7 @@ pub(crate) unsafe fn capture_view<'a>(
         frames,
         sample_rate,
         planes,
+        playing,
     }
 }
 

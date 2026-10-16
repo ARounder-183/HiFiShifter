@@ -131,7 +131,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
     }
     let count = cursor.u32()? as usize;
     let mut segments = Vec::with_capacity(count.min(1024));
-    for index in 0..count {
+    for _ in 0..count {
         let origin = cursor.i64()?;
         let sample_rate = cursor.u32()?;
         let channels = cursor.u32()?;
@@ -154,11 +154,6 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             planes.push(plane);
         }
         segments.push(Segment {
-            // 【为什么在这里重新编号】段 id 是**段内身份**：`timeline::source_id`
-            // 用它拼素材键。若全部读成 0，一个 take 里所有段的素材会挤在同一个键上，
-            // 时间线只认最后一个 —— 界面看起来"只录到一段"。文件里存 id 没有意义
-            // （它只在一次会话内唯一），所以按读入顺序重编。
-            id: index as u64 + 1,
             origin,
             sample_rate,
             planes,
@@ -234,9 +229,8 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
 
-    fn segment(id: u64, origin: i64, values: &[f32]) -> Segment {
+    fn segment(origin: i64, values: &[f32]) -> Segment {
         Segment {
-            id,
             origin,
             sample_rate: 48_000,
             planes: vec![values.to_vec(), values.to_vec()],
@@ -265,8 +259,8 @@ mod tests {
     fn a_round_trip_preserves_geometry_and_samples() {
         let dir = temp_dir();
         let segments = vec![
-            segment(1, 0, &[0.25, -0.5, 0.75]),
-            segment(2, 9600, &[1.0, 0.0]),
+            segment(0, &[0.25, -0.5, 0.75]),
+            segment(9600, &[1.0, 0.0]),
         ];
         let path = write(&dir, 7, &segments).unwrap();
         let restored = read(&path).unwrap();
@@ -288,7 +282,7 @@ mod tests {
     #[test]
     fn a_truncated_file_is_rejected_instead_of_read_as_half_audio() {
         let dir = temp_dir();
-        let path = write(&dir, 1, &[segment(1, 0, &[0.1, 0.2, 0.3, 0.4])]).unwrap();
+        let path = write(&dir, 1, &[segment(0, &[0.1, 0.2, 0.3, 0.4])]).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 12]).unwrap();
         let error = read(&path).unwrap_err();
@@ -303,7 +297,7 @@ mod tests {
     #[test]
     fn a_corrupted_payload_is_rejected() {
         let dir = temp_dir();
-        let path = write(&dir, 2, &[segment(1, 0, &[0.1, 0.2])]).unwrap();
+        let path = write(&dir, 2, &[segment(0, &[0.1, 0.2])]).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         let last_sample = bytes.len() - DIGEST_LEN - 1;
         bytes[last_sample] ^= 0xFF;
@@ -326,7 +320,7 @@ mod tests {
     #[test]
     fn a_successful_write_leaves_no_partial_file_behind() {
         let dir = temp_dir();
-        let path = write(&dir, 3, &[segment(1, 0, &[0.5])]).unwrap();
+        let path = write(&dir, 3, &[segment(0, &[0.5])]).unwrap();
         assert!(path.exists());
         assert!(
             !path.with_extension("hfx.part").exists(),
@@ -340,8 +334,8 @@ mod tests {
     fn the_path_is_derived_from_the_take_id() {
         let dir = temp_dir();
         assert_eq!(take_path(&dir, 12), dir.join("take-12.hfx"));
-        let first = write(&dir, 12, &[segment(1, 0, &[0.1])]).unwrap();
-        let second = write(&dir, 12, &[segment(1, 0, &[0.9])]).unwrap();
+        let first = write(&dir, 12, &[segment(0, &[0.1])]).unwrap();
+        let second = write(&dir, 12, &[segment(0, &[0.9])]).unwrap();
         assert_eq!(first, second);
         assert_eq!(read(&second).unwrap()[0].planes[0], vec![0.9]);
         let _ = std::fs::remove_dir_all(&dir);

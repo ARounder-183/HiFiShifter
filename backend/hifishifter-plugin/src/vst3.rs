@@ -1730,8 +1730,15 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             };
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
             // 停播时不输出任何东西 ⇒ 必须清（否则输出里留着上一块的残留）。
+            //
+            // 【为什么还要看"位置在不在前进"】`kPlaying` 与位置不是原子更新的：宿主从
+            // "停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前只按
+            // 播放位判断，于是**每次播放都吞掉开头**（用户报障：播放后约 1 秒没有输出）。
+            // 位置在前进是宿主无关的硬事实 —— 真在播就必然前进（见
+            // `ExtensionOwner::transfer_transport_running`）。
             if data.process_mode != 2
                 && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
+                && !owner.transfer_transport_running()
             {
                 let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
@@ -1773,6 +1780,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         data,
                         context.project_time_samples,
                         context.sample_rate,
+                        context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
                     );
                     publisher.copy_block_layered(
                         context.project_time_samples,

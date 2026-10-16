@@ -1,4 +1,4 @@
-//! 把捕获到的段投影成 [`TimelineState`]：解决覆盖关系、合并相邻段、生成片段。
+//! 把捕获到的段投影成 [`TimelineState`]：解决覆盖关系、合并相邻片、生成片段。
 //!
 //! # 为什么这一层必须存在
 //!
@@ -8,10 +8,35 @@
 //!
 //! # 覆盖规则：后来的胜出
 //!
-//! 段按 `(take, segment)` 排序后依次铺开；每铺一段，就把它覆盖到的已有区间**剪掉**。
-//! `(take, segment)` 就是**录制顺序**：take 号随每次录制递增，段号在 take 内递增。
+//! 段按 `(take, 带内偏移)` 排序后依次铺开；每铺一段，就把它覆盖到的已有区间**剪掉**。
+//! 那个排序键就是**录制顺序**：take 号随每次录制递增，带内偏移在一趟连续录制里递增。
 //! 于是"第 2 圈覆盖第 1 圈"与"补录的那一句覆盖它盖住的部分"都是同一个规则的自然结果，
 //! 不需要为循环或补录写任何特例。
+//!
+//! # 素材带（[`Tape`]）—— 段是容器，带才是内容
+//!
+//! 段是**内存容器**（8 秒定长，见 `capture.rs`），而一次录制的内容是一条连续演奏。
+//! 一个 clip 只能引用**一份源**与**一个连续源窗**，所以"跨段"的东西必须先有一个连续
+//! 的源域 —— 那就是素材带：一个 take 的段按录制顺序首尾相接，段 k 的带内起点等于
+//! 前面所有段的帧数之和。
+//!
+//! 这一层带来两件事，都是用户可见的：
+//!
+//! 1. **段边界对用户不存在**。40 秒录制在时间轴上是**一个**片段，不是五个。
+//!    段容量是内存策略，不该漏到时间线上（它此前正是那样漏出去的：合并要求"同一个段"）。
+//! 2. **片段的身份是 `(take, 带内偏移)`** —— "这是哪一次录制的哪一段音频"。它与
+//!    "这片由几个段拼成""落在工程时间哪里"都无关，因此重投影不会让用户的编辑错位。
+//!
+//! # 静音不是洞
+//!
+//! 静音**留在片段里**（源窗含静音，波形上是一段平的）。它此前被逐片丢弃，于是
+//! "这两秒我没出声"从时间轴上消失、后面的内容前移，工程时间与素材对不上。
+//! 现在只有**真的没有数据**（宿主停播、位置跳跃）才会切断片段 —— 那时时间线上是
+//! 一段**空**，而空是诚实的：那里确实什么都没录。
+//!
+//! 整段录音全静音时仍然**不产生片段**（素材为空的判据是"有没有可听内容"，
+//! 见 [`MaterialSummary::is_silent`](super::MaterialSummary::is_silent)）：一个全静音的
+//! take 若算作"有素材"，插件就会把这条轨替换成静音 —— 那是"插件把我的轨道弄哑了"。
 //!
 //! # 单位
 //!
@@ -19,7 +44,7 @@
 //! 各自独立换算（段起点、段长、段内偏移），不合到一起算 —— 合起来写会掩盖
 //! "用了哪个率"这个唯一重要的问题。
 
-use super::capture::{ClosedReason, Segment, SegmentLoss};
+use super::capture::Segment;
 use crate::render::snapshot::PlaybackSnapshot;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
@@ -38,11 +63,123 @@ pub(crate) const TRANSFER_TRACK_ID: &str = "transfer-track";
 /// 轨道显示名。
 pub(crate) const TRANSFER_TRACK_NAME: &str = "Transfer";
 
-/// 跨 take 投影的输入：一个 take 的 id 与它的段。
+/// 投影的输入：一个 take 的 id 与它的段（按录制顺序）。
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectionTake<'a> {
     pub id: u64,
     pub segments: &'a [Segment],
+}
+
+/// 一个 take 的**素材带**：它的段按录制顺序首尾相接（见模块头）。
+pub(crate) struct Tape<'a> {
+    /// 录制序号（take 号）。
+    pub(crate) take: u64,
+    /// 本带的采样率。同一 take 内必然一致 —— 捕获在采样率变化时停止。
+    pub(crate) sample_rate: u32,
+    /// 参与本带的段（**已剔除**含 NaN/Inf 的那些）。
+    segments: Vec<&'a Segment>,
+    /// 每段在带上的起点（帧），与 `segments` 同序。
+    offsets: Vec<usize>,
+    /// 带的总帧数。
+    frames: usize,
+}
+
+impl<'a> Tape<'a> {
+    /// 带的总帧数。
+    pub(crate) fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// 把带上 `[offset, offset + frames)` 这一段切成"每段一段"的切片。
+    ///
+    /// 产出 `(段, 段内起点, 段内终点)`，按带内顺序。落在带外的部分被裁掉 ——
+    /// 调用方给的窗口永远应当落在带内，这里的裁剪是防御。
+    fn slices(
+        &self,
+        offset: usize,
+        frames: usize,
+    ) -> impl Iterator<Item = (&'a Segment, usize, usize)> + '_ {
+        let end = offset.saturating_add(frames);
+        self.segments
+            .iter()
+            .zip(&self.offsets)
+            .filter_map(move |(segment, base)| {
+                let base = *base;
+                let lo = offset.max(base);
+                let hi = end.min(base + segment.filled);
+                (lo < hi).then_some((*segment, lo - base, hi - base))
+            })
+    }
+
+    /// 带上这一段是否**全部**为零（任一声道非零即不是）。
+    ///
+    /// 【为什么必须看全部声道】此前只看第一条平面 —— 于是"只有右声道有内容"的一段
+    /// 会被判成静音而整片丢弃。那是最难排查的一类：用户明明录到了东西，时间轴却空着。
+    fn is_silent(&self, offset: usize, frames: usize) -> bool {
+        self.slices(offset, frames).all(|(segment, lo, hi)| {
+            segment
+                .planes
+                .iter()
+                .all(|plane| plane[lo..hi].iter().all(|sample| *sample == 0.0))
+        })
+    }
+
+    /// 把整条带拼成可直接交给渲染的平面。
+    ///
+    /// 【为什么在这里拼而不是让消费方各拼一遍】源 PCM 是渲染与波形共用的输入，
+    /// 而"带 = 段的顺序拼接"这条规则只能有一处实现 —— 两处实现必然漂移，
+    /// 表现为"听到的和看到的不是同一段音频"。
+    pub(crate) fn concat_planes(&self) -> Vec<Vec<f32>> {
+        let channels = self
+            .segments
+            .iter()
+            .map(|segment| segment.planes.len())
+            .max()
+            .unwrap_or(0);
+        let mut planes = vec![vec![0.0_f32; self.frames]; channels];
+        for (segment, base) in self.segments.iter().zip(&self.offsets) {
+            for (channel, plane) in segment.planes.iter().enumerate() {
+                planes[channel][*base..*base + segment.filled].copy_from_slice(plane);
+            }
+        }
+        planes
+    }
+}
+
+/// 由全部 take 建出素材带，并报出被剔除的段数。
+///
+/// 【为什么剔除段而不是整条 take】含 NaN/Inf 的段不能进渲染，但同一次录制里的其余段
+/// 是好的 —— 让一段坏音频抹掉整次录制，与 `render/input.rs` 的既有纪律（逐条降级）不符。
+pub(crate) fn build_tapes<'a>(takes: &[ProjectionTake<'a>]) -> (Vec<Tape<'a>>, usize) {
+    let mut dropped = 0usize;
+    let mut tapes = Vec::with_capacity(takes.len());
+    for take in takes {
+        let mut segments = Vec::with_capacity(take.segments.len());
+        let mut offsets = Vec::with_capacity(take.segments.len());
+        let mut frames = 0usize;
+        let mut sample_rate = 0u32;
+        for segment in take.segments {
+            if segment.span().is_empty() || segment.has_nonfinite() {
+                dropped += 1;
+                continue;
+            }
+            offsets.push(frames);
+            frames += segment.filled;
+            sample_rate = sample_rate.max(segment.sample_rate);
+            segments.push(segment);
+        }
+        if segments.is_empty() {
+            continue;
+        }
+        tapes.push(Tape {
+            take: take.id,
+            sample_rate,
+            segments,
+            offsets,
+            frames,
+        });
+    }
+    (tapes, dropped)
 }
 
 /// 工程区间的帧数。
@@ -53,16 +190,14 @@ fn frames_of(span: &Range<i64>) -> usize {
     (span.end - span.start).max(0) as usize
 }
 
-/// 一段已解决覆盖关系的工程区间，指向某个 take 的某个段的某个偏移。
+/// 一段已解决覆盖关系的工程区间，指向某条素材带上的一个连续窗口。
 #[derive(Debug, Clone)]
-struct Piece<'a> {
+struct Piece {
     /// 工程采样区间（左闭右开）。
     span: Range<i64>,
-    /// 所属 take 号（= 录制顺序）。
-    take: u64,
-    /// 素材段。判静音与取采样率都要它。
-    segment: &'a Segment,
-    /// 该区间起点在段内的帧偏移。
+    /// 所属素材带（`tapes` 的下标）。
+    tape: usize,
+    /// 该区间起点在带内的帧偏移。
     offset: usize,
 }
 
@@ -88,23 +223,7 @@ pub(crate) struct TimelineSummary {
 /// 【为什么非法段是"丢弃"而不是"报错"】一段含 NaN 的音频不该让整条时间线消失 ——
 /// 其余段是好的，用户要能听见它们。丢弃并计数，与 `render/input.rs` 的既有纪律一致。
 pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, TimelineSummary) {
-    let mut seeds: Vec<Piece<'_>> = Vec::new();
-    let mut dropped_segments = 0usize;
-    for take in takes {
-        for segment in take.segments {
-            if segment.span().is_empty() || segment.has_nonfinite() {
-                dropped_segments += 1;
-                continue;
-            }
-            seeds.push(Piece {
-                span: segment.span(),
-                take: take.id,
-                segment,
-                offset: 0,
-            });
-        }
-    }
-
+    let (tapes, dropped_segments) = build_tapes(takes);
     let mut summary = TimelineSummary {
         dropped_segments,
         ..TimelineSummary::default()
@@ -128,27 +247,31 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         .expect("Transfer 轨道的必填字段是固定的"),
     );
 
-    let pieces = coalesce(resolve(seeds));
+    let pieces = coalesce(resolve(seeds(&tapes)));
 
     let mut index = 0_usize;
     for piece in pieces {
-        let segment = piece.segment;
-        let rate = segment.sample_rate.max(1) as f64;
+        let tape = &tapes[piece.tape];
+        let rate = tape.sample_rate.max(1) as f64;
         let frames = frames_of(&piece.span);
         summary.spanned_frames += frames as u64;
         // 【为什么逐片判静音而不是逐段】一个段可以是"前半段有声、后半段静音"
         // （用户在某处停止演奏）。按段判定会把有声的部分一起丢掉。
-        if is_silent(segment, piece.offset, frames) {
+        //
+        // 【为什么判据是"整片"而不是"逐块"】静音**留在片段里**（见模块头）：只有整片
+        // 都没有可听内容时才不产生片段，而那种片只可能出现在"两次录制之间"或
+        // "整次录制都是静音"这两种场合 —— 前者那里本来就该是空的。
+        if tape.is_silent(piece.offset, frames) {
             continue;
         }
         summary.covered_frames += frames as u64;
         index += 1;
-        let source = source_id(piece.take, segment.id);
+        let source = source_id(tape.take);
         let start_sec = piece.span.start as f64 / rate;
         let length_sec = frames as f64 / rate;
         let source_start_sec = piece.offset as f64 / rate;
         let source_end_sec = (piece.offset + frames) as f64 / rate;
-        let id = clip_id(piece.take, segment.id, piece.offset);
+        let id = clip_id(tape.take, piece.offset);
         let name = format!("#{index} @ {start_sec:.3}s");
         let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
             "id": id,
@@ -158,15 +281,18 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "length_sec": length_sec,
         }))
         .expect("片段的必填字段是固定的");
+        // 【为什么 `duration_*` 是整条带的长度】它是"这份媒体有多长"，而不是"这一片有多
+        // 长"。片段自己的长度在 `length_sec` 里，两者此前混用同一个量，于是源窗一旦
+        // 不等于整段（被切过之后就是如此）就自相矛盾。
         let take: hifishifter_kernel::state::ClipTake = serde_json::from_value(json!({
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
             "source_start_sec": source_start_sec,
             "source_end_sec": source_end_sec,
-            "source_sample_rate": segment.sample_rate,
-            "duration_sec": frames_of(&segment.span()) as f64 / rate,
-            "duration_frames": frames_of(&segment.span()) as u64,
+            "source_sample_rate": tape.sample_rate,
+            "duration_sec": tape.frames() as f64 / rate,
+            "duration_frames": tape.frames() as u64,
             "playback_rate": 1.0,
         }))
         .expect("take 的必填字段是固定的");
@@ -187,7 +313,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
 
 /// 素材的**未处理** PCM：把投影出的片段按工程位置原样铺成一份快照（"原始磁带"）。
 ///
-/// 【为什么必须直接拷段，而不是复用 `mix_plain_regions`】那个函数服务的是 **ARA** 通路，
+/// 【为什么必须直接拷样本，而不是复用 `mix_plain_regions`】那个函数服务的是 **ARA** 通路，
 /// 它的 `start_in_modification_time` 遵循**宿主**的单位约定（见该函数的说明与
 /// `the_plain_path_converts_the_project_rate_before_indexing_the_source`）。
 /// Transfer 的区间用的是**我们自己的**单位（源速率秒），两者并不相同 —— 实测按它读时
@@ -196,30 +322,16 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
 /// 原始磁带要表达的东西极其简单："把捕获到的样本原样播一遍"。那就**直接拷样本**：
 /// 没有单位换算、没有重采样、没有插值，因而不可能因为约定不一致而出错。
 pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot> {
-    let pieces = coalesce(resolve(
-        takes
-            .iter()
-            .flat_map(|take| {
-                take.segments.iter().filter_map(move |segment| {
-                    let span = segment.span();
-                    (!span.is_empty() && !segment.has_nonfinite()).then_some(Piece {
-                        span,
-                        take: take.id,
-                        segment,
-                        offset: 0,
-                    })
-                })
-            })
-            .collect(),
-    ));
+    let (tapes, _) = build_tapes(takes);
+    let pieces = coalesce(resolve(seeds(&tapes)));
     if pieces.is_empty() {
         return None;
     }
     // 【为什么取最大采样率当输出域】捕获在采样率变化时会停止本次录制，因此同一批素材
     // 的率必然一致；取最大只是兜底，不改变语义。
-    let rate = pieces
+    let rate = tapes
         .iter()
-        .map(|piece| piece.segment.sample_rate)
+        .map(|tape| tape.sample_rate)
         .max()
         .filter(|rate| *rate > 0)?;
     let start = pieces.iter().map(|piece| piece.span.start).min()?;
@@ -233,30 +345,31 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
     let mut left = vec![0.0_f32; frames];
     let mut right = vec![0.0_f32; frames];
     for piece in pieces {
-        let segment = piece.segment;
-        let Some(source_left) = segment.planes.first() else {
-            continue;
-        };
+        let tape = &tapes[piece.tape];
         // 逐片按**它自己的**采样率换算到输出域（同率时是恒等，异率时按比例定位）。
-        let scale = segment.sample_rate.max(1) as f64 / rate as f64;
+        let scale = tape.sample_rate.max(1) as f64 / rate as f64;
         let base = ((piece.span.start - start) as f64 * scale).round() as i64;
         let count = frames_of(&piece.span);
-        // 防御式取长：封口后的段本应 `filled == planes[ch].len()`，但这里在非音频线程上
-        // 做一次性拷贝，宁可少拷也不越界。
-        let available = count.min(source_left.len().saturating_sub(piece.offset));
-        for index in 0..available {
-            let target = base + (index as f64 * scale).round() as i64;
-            if target < 0 || target as usize >= frames {
+        let mut written = 0usize;
+        for (segment, lo, hi) in tape.slices(piece.offset, count) {
+            let Some(source_left) = segment.planes.first() else {
+                written += hi - lo;
                 continue;
-            }
-            let target = target as usize;
-            let source = piece.offset + index;
-            left[target] = source_left[source];
-            right[target] = match segment.planes.get(1) {
-                // 单声道捕获：两个输出平面同内容（与 `pass_through` 的展开一致）。
-                Some(plane) if plane.len() > source => plane[source],
-                _ => source_left[source],
             };
+            for local in lo..hi {
+                let target = base + (written as f64 * scale).round() as i64;
+                written += 1;
+                if target < 0 || target as usize >= frames {
+                    continue;
+                }
+                let target = target as usize;
+                left[target] = source_left[local];
+                right[target] = match segment.planes.get(1) {
+                    // 单声道捕获：两个输出平面同内容（与 `pass_through` 的展开一致）。
+                    Some(plane) if plane.len() > local => plane[local],
+                    _ => source_left[local],
+                };
+            }
         }
     }
     let mut snapshot = PlaybackSnapshot {
@@ -282,52 +395,58 @@ pub(crate) fn build(segments: &[Segment], take_id: u64, bpm: f64) -> (TimelineSt
     )
 }
 
-/// 素材 id。段与素材一一对应：一个段的 PCM 就是一份源。
+/// 素材 id：**一个 take 一份源**。
 ///
-/// 【为什么带 take 号】同一个段的音频在两次 take 里是不同的录制结果，共用一个 id
-/// 会让"上一次 take 的源"被这一次引用 —— 而它们的内容不同。
-pub(crate) fn source_id(take_id: u64, segment_id: u64) -> String {
-    format!("transfer://{take_id}/{segment_id}")
+/// 【为什么不是一段一份】片段可以跨段（见模块头），而一个片段只能引用一份源 ——
+/// 段一份源会让跨段片段无法表达。带上 take 号是必须的：两次录制的内容不同，
+/// 共用一个 id 会让"上一次 take 的源"被这一次引用。
+pub(crate) fn source_id(take_id: u64) -> String {
+    format!("transfer://{take_id}")
 }
 
-/// 片段 id。**稳定**：同一个 take 的同一个段的同一个偏移永远是同一个 id。
+/// 片段 id。**稳定**：同一个 take 的同一段带内音频永远是同一个 id。
 ///
-/// 【为什么键是 `(take, segment, offset)` 而不是投影序号】补录一次会让后面的片整体
+/// 【为什么键是 `(take, 带内偏移)` 而不是投影序号或段号】补录一次会让后面的片整体
 /// 后移，序号随之全变 —— 用户在那个片段上的选择与编辑会在重新投影后错位到别的片段上。
-/// `(take, segment, offset)` 只描述"这是哪一段素材的哪一截"，与投影结果无关：没被覆盖
-/// 的片保持 id 不变，被覆盖的片本来就该换一个身份。
-pub(crate) fn clip_id(take_id: u64, segment_id: u64, offset: usize) -> String {
-    format!("transfer-clip-{take_id}-{segment_id}-{offset}")
+/// 段号则会随**内存容器**的划分变化（8 秒一段），而容器与内容无关。
+/// `(take, 带内偏移)` 只描述"这是哪一次录制的哪一段音频"：没被覆盖的片保持 id 不变，
+/// 被覆盖的片本来就该换一个身份。
+pub(crate) fn clip_id(take_id: u64, offset: usize) -> String {
+    format!("transfer-clip-{take_id}-{offset}")
 }
 
-/// 区间是否全零。
-fn is_silent(segment: &Segment, offset: usize, frames: usize) -> bool {
-    let end = (offset + frames).min(segment.planes.first().map_or(0, Vec::len));
-    let Some(plane) = segment.planes.first() else {
-        return true;
-    };
-    plane[offset.min(plane.len())..end]
-        .iter()
-        .all(|sample| *sample == 0.0)
+/// 由素材带铺出覆盖前的初始片：一段一片，带内偏移就是段在带上的起点。
+fn seeds(tapes: &[Tape<'_>]) -> Vec<Piece> {
+    let mut seeds = Vec::new();
+    for (index, tape) in tapes.iter().enumerate() {
+        for (segment, offset) in tape.segments.iter().zip(&tape.offsets) {
+            seeds.push(Piece {
+                span: segment.span(),
+                tape: index,
+                offset: *offset,
+            });
+        }
+    }
+    seeds
 }
 
-/// 按"后来的胜出"把段铺成互不相交的区间。
-fn resolve(mut seeds: Vec<Piece<'_>>) -> Vec<Piece<'_>> {
-    // 【排序键是录制顺序 `(take, segment)` 而不是 `origin`】"后来者胜出"里的"后来"
-    // 指的是**录制顺序**，而 take 号与段号正是录制顺序。按位置排序会把规则弄反：
-    // 位置靠前但录得晚的段会先被铺下，再被位置靠后但录得早的段覆盖 —— 于是循环录制的
-    // **最后一圈反而输给第一圈**，补录的一句也会输给它替换掉的那一句。
-    seeds.sort_by_key(|piece| (piece.take, piece.segment.id));
-    let mut pieces: Vec<Piece<'_>> = Vec::new();
+/// 按"后来的胜出"把片铺成互不相交的区间。
+fn resolve(mut seeds: Vec<Piece>) -> Vec<Piece> {
+    // 【排序键是录制顺序 `(take, 带内偏移)` 而不是工程位置】"后来者胜出"里的"后来"
+    // 指的是**录制顺序**，而 take 号与带内偏移正是录制顺序（带是段按录制顺序拼起来的）。
+    // 按位置排序会把规则弄反：位置靠前但录得晚的片会先被铺下，再被位置靠后但录得早的片
+    // 覆盖 —— 于是循环录制的**最后一圈反而输给第一圈**，补录的一句也会输给它替换掉的那一句。
+    seeds.sort_by_key(|piece| (piece.tape, piece.offset));
+    let mut pieces: Vec<Piece> = Vec::new();
     for seed in seeds {
         let span = seed.span.clone();
-        let mut next: Vec<Piece<'_>> = Vec::with_capacity(pieces.len() + 1);
+        let mut next: Vec<Piece> = Vec::with_capacity(pieces.len() + 1);
         for piece in pieces.drain(..) {
             if piece.span.end <= span.start || piece.span.start >= span.end {
                 next.push(piece);
                 continue;
             }
-            // 左残段：偏移不变（它离段起点还是那么远）。
+            // 左残段：偏移不变（它离带起点还是那么远）。
             if piece.span.start < span.start {
                 next.push(Piece {
                     span: piece.span.start..span.start,
@@ -351,22 +470,25 @@ fn resolve(mut seeds: Vec<Piece<'_>>) -> Vec<Piece<'_>> {
     pieces
 }
 
-/// 合并首尾相接且源偏移也连续的片：它们是同一个段里的一段连续音频。
+/// 合并工程方向与**带内方向**都首尾相接的片：它们是同一段连续音频。
 ///
-/// 【为什么要求**两个**方向都连续】只要求工程方向连续会把"工程上相邻但源上跳了"
-/// 的两段拼成一个 clip，而 clip 的源窗是**连续**区间 —— 那样源窗会跨过一段不存在
-/// 的素材，渲染出错误的内容。
+/// 【为什么不再要求"同一个段"】那是把**内存容器**的边界当成了内容边界 —— 一次 40 秒
+/// 录制（5 个段）在时间轴上会变成 5 个片段，而"为什么被切成 5 段"对用户毫无意义。
+/// 带（[`Tape`]）已经让跨段的偏移连续，因此那一条限制自然消失了。
+///
+/// 【为什么要求**两个**方向都连续】只要求工程方向连续会把"工程上相邻但带上跳了"
+/// 的两段拼成一个 clip，而 clip 的源窗是**连续**区间 —— 那样源窗会跨过一段不存在的
+/// 素材，渲染出错误的内容。
 ///
 /// 【为什么还要求同一个 take】不同 take 的段是两次不同的录制，即使工程上首尾相接、
-/// 源偏移也连续，把它们拼成一个 clip 会让"这是哪一次录的"消失 —— 而 take 号是
+/// 带内偏移也连续，把它们拼成一个 clip 会让"这是哪一次录的"消失 —— 而 take 号是
 /// 曲线上与清单里的身份。
-fn coalesce(pieces: Vec<Piece<'_>>) -> Vec<Piece<'_>> {
-    let mut out: Vec<Piece<'_>> = Vec::new();
+fn coalesce(pieces: Vec<Piece>) -> Vec<Piece> {
+    let mut out: Vec<Piece> = Vec::new();
     for piece in pieces {
         match out.last_mut() {
             Some(last)
-                if last.take == piece.take
-                    && last.segment.id == piece.segment.id
+                if last.tape == piece.tape
                     && last.span.end == piece.span.start
                     && last.offset + frames_of(&last.span) == piece.offset =>
             {
@@ -378,32 +500,13 @@ fn coalesce(pieces: Vec<Piece<'_>>) -> Vec<Piece<'_>> {
     out
 }
 
-/// 段的结束原因是否意味着"用户需要知道"。
-pub(crate) fn notable_reasons(segments: &[Segment]) -> Vec<ClosedReason> {
-    let mut reasons: Vec<ClosedReason> = segments
-        .iter()
-        .map(|segment| segment.closed)
-        .filter(|reason| reason.is_notable())
-        .collect();
-    reasons.dedup();
-    reasons
-}
-
-/// 段集合里有没有"时间倒退"的痕迹（循环回卷）。
-pub(crate) fn has_backward(segments: &[Segment]) -> bool {
-    segments
-        .iter()
-        .any(|segment| matches!(segment.loss, SegmentLoss::Backward))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transfer::capture::SegmentLoss;
+    use crate::transfer::capture::{ClosedReason, SegmentLoss};
 
-    fn segment(id: u64, origin: i64, values: &[f32]) -> Segment {
+    fn segment(origin: i64, values: &[f32]) -> Segment {
         Segment {
-            id,
             origin,
             sample_rate: 1000,
             planes: vec![values.to_vec(), values.to_vec()],
@@ -423,7 +526,7 @@ mod tests {
     /// 不相交的两段各生成一个片段，且**位置就是工程位置**。
     #[test]
     fn disjoint_segments_become_clips_at_their_project_positions() {
-        let segments = vec![segment(1, 0, &[0.1; 10]), segment(2, 100, &[0.2; 10])];
+        let segments = vec![segment(0, &[0.1; 10]), segment(100, &[0.2; 10])];
         let (timeline, summary) = one(7, &segments);
         assert_eq!(summary.clips, 2);
         assert_eq!(timeline.clips.len(), 2);
@@ -433,38 +536,40 @@ mod tests {
         assert!((timeline.clips[1].start_sec - 0.1).abs() < 1e-9);
     }
 
-    /// **重叠时后来的胜出**，且被覆盖的部分从胜出者的偏移 0 开始。
+    /// **重叠时后来的胜出**，且被覆盖的部分从胜出者的**带内**偏移开始。
     #[test]
     fn a_later_segment_overwrites_an_earlier_overlap() {
         // 段 1 覆盖 [0,20)，段 2 覆盖 [10,30)。
-        let segments = vec![segment(1, 0, &[1.0; 20]), segment(2, 10, &[2.0; 20])];
+        let segments = vec![segment(0, &[1.0; 20]), segment(10, &[2.0; 20])];
         let (timeline, summary) = one(1, &segments);
         assert_eq!(summary.clips, 2, "应切成 [0,10) 与 [10,30) 两片");
         // 第一片：段 1 的 [0,10)。
         assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
         assert!((timeline.clips[0].length_sec - 0.01).abs() < 1e-9);
         assert!((timeline.clips[0].source_start_sec - 0.0).abs() < 1e-9);
-        // 第二片：段 2 的 [10,30)，偏移 0。
+        // 第二片：段 2 的 [10,30)。它的带内起点是 20（段 1 有 20 帧），因此源窗从
+        // **带上**的 20 开始 —— 不是从 0。这是"一个 take 一份源"的直接后果：源域是
+        // 整条带，而段 2 落在带的后半。
         assert!((timeline.clips[1].start_sec - 0.01).abs() < 1e-9);
         assert!((timeline.clips[1].length_sec - 0.02).abs() < 1e-9);
-        assert!((timeline.clips[1].source_start_sec - 0.0).abs() < 1e-9);
+        assert!((timeline.clips[1].source_start_sec - 0.02).abs() < 1e-9);
         assert!(timeline.clips[1]
             .takes
             .first()
-            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1/2")));
+            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1")));
     }
 
     /// 后来的段完全盖住早先的段 ⇒ 早先那段整个消失。
     #[test]
     fn a_later_segment_can_swallow_an_earlier_one_whole() {
-        let segments = vec![segment(1, 10, &[1.0; 10]), segment(2, 0, &[2.0; 40])];
+        let segments = vec![segment(10, &[1.0; 10]), segment(0, &[2.0; 40])];
         let (timeline, summary) = one(1, &segments);
         assert_eq!(summary.clips, 1);
         assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
         assert!(timeline.clips[0]
             .takes
             .first()
-            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1/2")));
+            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1")));
     }
 
     /// **补录一句只替换它盖住的那一段**（跨 take 的 later-wins）。
@@ -474,8 +579,8 @@ mod tests {
     /// 保留"，并且剩下的片仍然指向**原来那一次**录制的素材。
     #[test]
     fn a_second_take_replaces_only_the_range_it_covers() {
-        let first = vec![segment(1, 0, &[1.0; 100])];
-        let second = vec![segment(1, 40, &[2.0; 20])];
+        let first = vec![segment(0, &[1.0; 100])];
+        let second = vec![segment(40, &[2.0; 20])];
         let (timeline, summary) = project(
             &[
                 ProjectionTake {
@@ -506,7 +611,7 @@ mod tests {
             .collect();
         assert_eq!(
             sources,
-            vec!["transfer://1/1", "transfer://2/1", "transfer://1/1"],
+            vec!["transfer://1", "transfer://2", "transfer://1"],
             "补录只替换它盖住的那一段，两侧仍是第一次录制"
         );
         // 尾片的源偏移必须跟着被切掉的长度走（否则源窗会跨过不存在的素材）。
@@ -514,19 +619,77 @@ mod tests {
         assert!((tail.source_start_sec - 0.06).abs() < 1e-9);
     }
 
-    /// 全零区间不产生片段；有声区间照常。
+    /// **一次连续录制横跨多个段 ⇒ 时间轴上是**一个**片段。
+    ///
+    /// 【为什么这是本轮最重要的回归测试】段是内存容器（8 秒定长），而"一次演奏"是内容。
+    /// 此前合并要求"同一个段"，于是一次 40 秒录制（5 段）在时间轴上是 5 个片段 ——
+    /// 用户看到一条被切碎的时间轴，而切分原因对他毫无意义。带（[`Tape`]）让跨段的
+    /// 偏移连续之后，这条限制才真正消失。
     #[test]
-    fn silent_regions_produce_no_clip() {
-        let segments = vec![segment(1, 0, &[0.0; 10]), segment(2, 10, &[0.5; 10])];
+    fn one_recording_becomes_one_clip_across_many_segments() {
+        // 五个首尾相接的段，工程上连续、带内也连续 —— 就是"段满自动切段"的形状。
+        let segments = vec![
+            segment(0, &[0.1; 8]),
+            segment(8, &[0.1; 8]),
+            segment(16, &[0.1; 8]),
+            segment(24, &[0.1; 8]),
+            segment(32, &[0.1; 8]),
+        ];
+        let (timeline, summary) = one(3, &segments);
+        assert_eq!(
+            summary.clips, 1,
+            "跨段的连续音频必须合成一个片段，而不是一段一个"
+        );
+        assert_eq!(timeline.clips.len(), 1);
+        assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
+        assert!(
+            (timeline.clips[0].length_sec - 0.04).abs() < 1e-9,
+            "片段必须覆盖全部 40 帧，实际 {}",
+            timeline.clips[0].length_sec
+        );
+        // 源窗必须**逐字**覆盖整条带：这正是"跨段也能是一个连续源窗"的证据。
+        let take = timeline.clips[0].active_take();
+        assert!((take.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((take.source_end_sec - 0.04).abs() < 1e-9);
+        // 整条带一份源。
+        assert_eq!(take.source_path.as_deref(), Some("transfer://3"));
+    }
+
+    /// **静音留在片段里**：起唱前的静音不再把乐句切成两半。
+    ///
+    /// 【为什么这条必须钉住】静音此前被逐片丢弃，于是"我在这两秒停了手"从时间轴上
+    /// 消失、后面的内容前移 —— 用户对着自己工程里的位置找不到刚录的东西。
+    #[test]
+    fn silence_inside_a_continuous_recording_stays_in_the_clip() {
+        // 一段全零（用户还没开口）紧接一段有声：两者工程连续、带内也连续。
+        let segments = vec![segment(0, &[0.0; 10]), segment(10, &[0.5; 10])];
         let (timeline, summary) = one(1, &segments);
-        assert_eq!(summary.clips, 1);
-        assert!((timeline.clips[0].start_sec - 0.01).abs() < 1e-9);
+        assert_eq!(summary.clips, 1, "静音不该把乐句切成两半");
+        assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
+        assert!(
+            (timeline.clips[0].length_sec - 0.02).abs() < 1e-9,
+            "片段必须从录制起点开始，含前面那段静音"
+        );
+        assert_eq!(summary.covered_frames, 20);
+    }
+
+    /// **只有右声道有内容时不算静音**。
+    ///
+    /// 【为什么这条必须钉住】静音判据此前只看第一条平面 —— 于是一个"左声道没接上"
+    /// 的宿主会让用户录到的内容整片消失，而时间轴上空着、没有任何解释。
+    #[test]
+    fn content_on_the_second_channel_is_not_silence() {
+        let mut segment = segment(0, &[0.0; 10]);
+        segment.planes = vec![vec![0.0; 10], vec![0.4; 10]];
+        let (timeline, summary) = one(1, &[segment]);
+        assert_eq!(summary.clips, 1, "右声道有内容就必须产生片段");
+        assert_eq!(timeline.clips.len(), 1);
     }
 
     /// 同一个段里连续的片合并成一个片段（不是一片一个）。
     #[test]
     fn contiguous_pieces_from_one_segment_merge_into_a_single_clip() {
-        let segments = vec![segment(1, 0, &[0.3; 30])];
+        let segments = vec![segment(0, &[0.3; 30])];
         let (timeline, summary) = one(1, &segments);
         assert_eq!(summary.clips, 1);
         assert!((timeline.clips[0].length_sec - 0.03).abs() < 1e-9);
@@ -535,9 +698,9 @@ mod tests {
     /// 含非有限采样的段被丢弃，其余照常 —— 一段坏音频不该让整条时间线消失。
     #[test]
     fn a_segment_with_nonfinite_samples_is_dropped_without_losing_the_rest() {
-        let mut bad = segment(1, 0, &[0.1; 10]);
+        let mut bad = segment(0, &[0.1; 10]);
         bad.planes[0][3] = f32::NAN;
-        let segments = vec![bad, segment(2, 20, &[0.2; 10])];
+        let segments = vec![bad, segment(20, &[0.2; 10])];
         let (timeline, summary) = one(1, &segments);
         assert_eq!(summary.dropped_segments, 1);
         assert_eq!(summary.clips, 1);
@@ -547,7 +710,7 @@ mod tests {
     /// 片段 id 稳定：没被覆盖的片在补录之后仍然是同一个 id（否则用户的编辑会错位）。
     #[test]
     fn clip_ids_are_stable_across_reprojection() {
-        let segments = vec![segment(1, 0, &[0.1; 10]), segment(2, 100, &[0.2; 10])];
+        let segments = vec![segment(0, &[0.1; 10]), segment(100, &[0.2; 10])];
         let first = one(42, &segments).0;
         let second = one(42, &segments).0;
         let ids = |timeline: &TimelineState| {
@@ -558,13 +721,14 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(&first), ids(&second));
+        // 键是 `(take, 带内偏移)`：段 2 落在带上的第 10 帧。
         assert_eq!(
             ids(&first),
-            vec!["transfer-clip-42-1-0", "transfer-clip-42-2-0"]
+            vec!["transfer-clip-42-0", "transfer-clip-42-10"]
         );
 
         // 再录一遍（盖住后半段）：前一片的 id 不变，尾片的偏移变了 ⇒ 换 id。
-        let overlay = vec![segment(1, 100, &[0.3; 10])];
+        let overlay = vec![segment(100, &[0.3; 10])];
         let merged = project(
             &[
                 ProjectionTake {
@@ -579,13 +743,13 @@ mod tests {
             120.0,
         )
         .0;
-        assert_eq!(ids(&merged)[0], "transfer-clip-42-1-0", "未被覆盖的片保持 id");
+        assert_eq!(ids(&merged)[0], "transfer-clip-42-0", "未被覆盖的片保持 id");
     }
 
     /// 投影出的时间线必须能被内核的渲染入口接受（源窗与几何自洽）。
     #[test]
     fn the_projection_is_renderable() {
-        let segments = vec![segment(1, 0, &[0.1; 10]), segment(2, 100, &[0.2; 10])];
+        let segments = vec![segment(0, &[0.1; 10]), segment(100, &[0.2; 10])];
         let (timeline, _) = one(1, &segments);
         assert_eq!(timeline.tracks.len(), 1);
         for clip in &timeline.clips {
@@ -611,7 +775,7 @@ mod tests {
     /// 一秒之内反复读同一个样本，铺出来是阶梯状的垃圾 —— 听感上就是噪音。
     #[test]
     fn the_raw_tape_is_a_verbatim_copy_of_the_captured_samples() {
-        let mut segment = segment(1, 4800, &[0.0; 8]);
+        let mut segment = segment(4800, &[0.0; 8]);
         segment.planes = vec![
             (0..8).map(|index| index as f32).collect(),
             (0..8).map(|index| -(index as f32)).collect(),
@@ -634,8 +798,8 @@ mod tests {
     /// **原始磁带与时间轴必须给出同一份覆盖关系**（否则"听到的"与"看到的"分叉）。
     #[test]
     fn the_raw_tape_follows_the_same_overlap_rules_as_the_timeline() {
-        let first = vec![segment(1, 0, &[1.0; 100])];
-        let second = vec![segment(1, 40, &[2.0; 20])];
+        let first = vec![segment(0, &[1.0; 100])];
+        let second = vec![segment(40, &[2.0; 20])];
         let takes = [
             ProjectionTake {
                 id: 1,
@@ -662,8 +826,9 @@ mod tests {
         assert!(timeline.clips.is_empty());
         assert_eq!(timeline.tracks.len(), 1, "界面要有一条空轨可以显示");
         assert_eq!(summary.clips, 0);
-        let (silent, summary) = one(1, &[segment(1, 0, &[0.0; 32])]);
-        assert!(silent.clips.is_empty());
+        let (silent, summary) = one(1, &[segment(0, &[0.0; 32])]);
+        assert!(silent.clips.is_empty(), "全静音不产生片段（素材为空的判据）");
         assert_eq!(summary.spanned_frames, 32, "跨过的工程帧数仍要如实报出");
+        assert_eq!(summary.covered_frames, 0, "没有任何可听内容");
     }
 }
