@@ -294,6 +294,11 @@ function outputText(t: (key: TransferMessageKey) => string, output: string): str
             return t("transfer_output_raw");
         case "recording":
             return t("transfer_output_recording");
+        // 【为什么要单独一档】它说的不是"还没有素材"，而是"素材已经在了，但处理
+        // 结果还没算出来"。两者输出内容相同（都是宿主原声），含义却完全不同：
+        // 后者是"该有结果却没有"，用户据此知道该等、还是该报障。
+        case "pending_synthesis":
+            return t("transfer_output_pending");
         case "passthrough":
         case "untouched":
             return t("transfer_output_passthrough");
@@ -360,6 +365,7 @@ type TransferMessageKey =
     | "transfer_output_stale"
     | "transfer_output_raw"
     | "transfer_output_recording"
+    | "transfer_output_pending"
     | "transfer_output_passthrough"
     | "transfer_status_standby"
     | "transfer_yes"

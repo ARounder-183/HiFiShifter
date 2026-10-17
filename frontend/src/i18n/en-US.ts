@@ -2225,6 +2225,7 @@ export const enUS = {
     transfer_output_raw: "Raw take (synthesising)",
     transfer_output_stale: "Processed (previous take)",
     transfer_output_passthrough: "Host audio",
+    transfer_output_pending: "Take ready, waiting for synthesis",
     transfer_output_recording: "Passing the host through",
     transfer_now_playing: "Now hearing: {what}",
     transfer_status_recording: "Recording",

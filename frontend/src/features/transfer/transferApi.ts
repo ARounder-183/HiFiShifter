@@ -137,7 +137,10 @@ export interface TransferStatus {
      * **此刻听到的是哪一版**（后端输出仲裁的结论）。
      *
      * 取值与后端 `TransferOutput::as_str` 一致：`"processed"` / `"raw"` /
-     * `"passthrough"` / `"recording"` / `"untouched"`。
+     * `"passthrough"` / `"pending_synthesis"` / `"recording"` / `"untouched"`。
+     *
+     * `pending_synthesis` 与 `passthrough` 的**输出内容**相同（都是宿主原声），
+     * 区别是前者"素材已在、结果未出"，后者"还没有素材"。
      *
      * 【为什么它值得占一行】处理结果、原始录音与宿主原声听起来都"像那么回事"，而它们
      * 之间的差别正是"我的编辑生效了没有" —— 用户无法自己判断。后端已经在仲裁，界面
