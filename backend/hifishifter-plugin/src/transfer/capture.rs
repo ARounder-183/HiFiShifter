@@ -1710,6 +1710,11 @@ impl Capture {
                 }
             }
         };
+        // 正向跳跃（seek 到别处）退出当前循环 pass：后续段不能继承 loop_start，
+        // 否则投影会把一段非循环内容误并进循环组。
+        if matches!(loss, SegmentLoss::Gap { .. }) {
+            self.current_loop_start = None;
+        }
 
         // 段满或跳跃 ⇒ 换段。跳跃必须换段，否则一个段里会含两段不相邻的工程时间。
         let needs_new = match &self.active {
