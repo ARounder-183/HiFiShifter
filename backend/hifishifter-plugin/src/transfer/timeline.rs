@@ -48,7 +48,6 @@ use super::capture::Segment;
 use crate::render::snapshot::PlaybackSnapshot;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
-use std::collections::HashMap;
 use std::ops::Range;
 
 /// Transfer 时间轴上唯一的轨道 id。
@@ -202,162 +201,19 @@ struct Piece {
     offset: usize,
 }
 
-/// 一次录制里的一个连续 pass（遇到 gap / 回卷 / seek 就结束）。
-#[derive(Debug, Clone)]
-struct Pass {
-    /// 所属素材带。
-    tape: usize,
-    /// 所属 take（跨 take 的显式循环分组用）。
-    take: u64,
-    /// 段在 `Tape::segments` 中的下标（按录制顺序）。
-    segments: Vec<usize>,
-    /// 工程区间。
-    span: Range<i64>,
-    /// 录制顺序 `(take, pass 序号)`。
-    order: (u64, usize),
-    /// 循环起点（`Some` = 宿主明确给出了 cycle 元数据）。
-    loop_start: Option<i64>,
-}
-
-/// 由素材带切出 pass。段是内存容器，pass 才是“一次连续演奏”。
-fn build_passes(tapes: &[Tape<'_>]) -> Vec<Pass> {
-    let mut passes = Vec::new();
-    for (tape_index, tape) in tapes.iter().enumerate() {
-        let mut start = 0usize;
-        let mut pass_index = 0usize;
-        let mut previous_end: Option<i64> = None;
-        let mut previous_loop: Option<i64> = None;
-        for (index, segment) in tape.segments.iter().enumerate() {
-            let span = segment.span();
-            let begins_new = match previous_end {
-                None => true,
-                Some(end) => span.start != end || segment.loop_start != previous_loop,
-            };
-            if begins_new && index > start {
-                passes.push(make_pass(tape_index, tape, start, index, pass_index));
-                pass_index += 1;
-                start = index;
-            }
-            previous_end = Some(span.end);
-            previous_loop = segment.loop_start;
-        }
-        if start < tape.segments.len() {
-            passes.push(make_pass(
-                tape_index,
-                tape,
-                start,
-                tape.segments.len(),
-                pass_index,
-            ));
-        }
-    }
-    passes
-}
-
-fn make_pass(
-    tape_index: usize,
-    tape: &Tape<'_>,
-    start: usize,
-    end: usize,
-    pass_index: usize,
-) -> Pass {
-    let first = tape.segments[start];
-    let last = tape.segments[end - 1];
-    Pass {
-        tape: tape_index,
-        take: tape.take,
-        segments: (start..end).collect(),
-        span: first.span().start..last.span().end,
-        order: (tape.take, pass_index),
-        loop_start: first.loop_start,
-    }
-}
-
-/// 把“同一循环起点上的多圈”收敛成一个原子组：最新一圈替换整组。
+/// 把全部素材带里的段变成"待铺开的片"。
 ///
-/// 【为什么必须原子】最后一圈半途停止时，如果只按“后来的胜出”覆盖已到达的部分，
-/// 上一圈的尾段会留下来，时间线上就是两个相邻 clip。用户要的是“我刚录的这一遍”，
-/// 不是“这一遍 + 上一遍的尾巴”。
-fn atomic_loop_groups(passes: Vec<Pass>) -> Vec<Pass> {
-    let mut keep = vec![true; passes.len()];
-
-    // 1) 显式分组：宿主给出了 cycle 起点。允许跨 take —— 重录同一循环区间时，
-    //    新 take 应原子替换旧组。
-    let mut explicit: HashMap<i64, Vec<usize>> = HashMap::new();
-    for (index, pass) in passes.iter().enumerate() {
-        if let Some(loop_start) = pass.loop_start {
-            explicit.entry(loop_start).or_default().push(index);
-        }
-    }
-    for group in explicit.values() {
-        supersede_group(&passes, group, &mut keep);
-    }
-
-    // 2) 隐式分组：没有 cycle 元数据时，同一 take 内两个以上 pass 从同一个工程
-    //    位置开始，就当作循环回卷。只跨 pass、不跨 take（避免把普通同点补录误判）。
-    let mut implicit: HashMap<(u64, i64), Vec<usize>> = HashMap::new();
-    for (index, pass) in passes.iter().enumerate() {
-        if pass.loop_start.is_none() {
-            implicit
-                .entry((pass.take, pass.span.start))
-                .or_default()
-                .push(index);
-        }
-    }
-    for group in implicit.values() {
-        supersede_group(&passes, group, &mut keep);
-    }
-
-    passes
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, pass)| keep[index].then_some(pass))
-        .collect()
-}
-
-fn supersede_group(passes: &[Pass], group: &[usize], keep: &mut [bool]) {
-    if group.len() < 2 {
-        return;
-    }
-    let Some(latest) = group
-        .iter()
-        .copied()
-        .max_by_key(|&index| passes[index].order)
-    else {
-        return;
-    };
-    let group_start = group
-        .iter()
-        .map(|&index| passes[index].span.start)
-        .min()
-        .unwrap_or(0);
-    let group_end = group
-        .iter()
-        .map(|&index| passes[index].span.end)
-        .max()
-        .unwrap_or(0);
-    for &index in group {
-        if index == latest {
-            continue;
-        }
-        let pass = &passes[index];
-        // 只移除完全落在循环组内的旧 pass；跨越组边界的 pass 可能还包含组外内容，
-        // 交给 later-wins 逐段处理，避免误删。
-        if pass.span.start >= group_start && pass.span.end <= group_end {
-            keep[index] = false;
-        }
-    }
-}
-
-fn pieces_from_passes(passes: &[Pass], tapes: &[Tape<'_>]) -> Vec<Piece> {
+/// 【为什么不再先切成 pass】pass 只服务"最后一圈原子替换整圈"那条规则，而那条规则
+/// 正是"循环录制只剩开头一小段"的直接成因（完整的一圈被后到的半圈整段删除）。
+/// 循环的语义应当与普通补录一致：**逐样本按录制顺序后来者胜出，没被覆盖的部分保留**
+/// —— 那正是 [`resolve`] 已经实现的东西。少一层推断，就少一处会吞掉用户素材的地方。
+fn pieces_from_tapes(tapes: &[Tape<'_>]) -> Vec<Piece> {
     let mut seeds = Vec::new();
-    for pass in passes {
-        let tape = &tapes[pass.tape];
-        for &index in &pass.segments {
-            let segment = tape.segments[index];
+    for (tape_index, tape) in tapes.iter().enumerate() {
+        for (index, segment) in tape.segments.iter().enumerate() {
             if let Some(piece) = clamp_piece(Piece {
                 span: segment.span(),
-                tape: pass.tape,
+                tape: tape_index,
                 offset: tape.offsets[index],
             }) {
                 seeds.push(piece);
@@ -367,10 +223,9 @@ fn pieces_from_passes(passes: &[Pass], tapes: &[Tape<'_>]) -> Vec<Piece> {
     seeds
 }
 
-/// 投影与原始磁带共用的“最终片”入口。
+/// 投影与原始磁带共用的"最终片"入口。
 fn resolved_pieces(tapes: &[Tape<'_>]) -> Vec<Piece> {
-    let passes = atomic_loop_groups(build_passes(tapes));
-    coalesce(resolve(pieces_from_passes(&passes, tapes)))
+    coalesce(resolve(pieces_from_tapes(tapes)))
 }
 
 /// 一次投影的结果摘要（给状态栏与诊断用）。
@@ -384,6 +239,12 @@ pub(crate) struct TimelineSummary {
     pub spanned_frames: u64,
     /// 被丢弃的倒放/非法段数。
     pub dropped_segments: usize,
+    /// 带循环身份的段数（宿主给了 cycle 元数据，或捕获侧识别出回卷）。
+    ///
+    /// 【为什么它是诊断而不是投影规则】循环身份**不参与**覆盖判定（覆盖只看录制
+    /// 顺序，见 [`resolved_pieces`]）。留着它是为了让"这段素材是循环录出来的"在
+    /// 状态栏与诊断包里可读 —— 排查"为什么循环录制少了一段"时需要它。
+    pub loop_passes: usize,
 }
 
 /// 把**全部** take 的段投影成一条时间线。`bpm` 由调用方给出（宿主 tempo 未知时用默认值）。
@@ -398,6 +259,11 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     let (tapes, dropped_segments) = build_tapes(takes);
     let mut summary = TimelineSummary {
         dropped_segments,
+        loop_passes: tapes
+            .iter()
+            .flat_map(|tape| tape.segments.iter())
+            .filter(|segment| segment.loop_start.is_some())
+            .count(),
         ..TimelineSummary::default()
     };
 
@@ -1208,20 +1074,36 @@ mod tests {
         assert_eq!(timeline.clips[0].source_end_sec, 2.5);
     }
 
-    /// **最后一圈半途停止：整个循环组原子替换，不留下上一圈的尾巴。**
+    /// **完整的第一圈不得被后到的半圈整段删除。**
+    ///
+    /// 【为什么这是本轮最重要的循环回归】用户报障：FL Studio 里循环录制，从头播到尾、
+    /// 宿主回卷、用户随即停止 —— 结果"只有开头一小段被录下来"。根因是旧规则让**最新**
+    /// 的一圈（也就是停止时正在录的那半圈）替换整组，把完整的第一圈整段删掉。
+    ///
+    /// 正确的语义与普通补录一致：后来的圈覆盖**它走到的那一段**，没走到的部分保留。
+    /// 于是完整的一圈仍然是完整的一圈，只是开头被第二圈重录了一遍。
     #[test]
-    fn a_partial_last_loop_pass_replaces_the_whole_group() {
+    fn a_complete_loop_pass_survives_a_later_partial_one() {
         let segments = vec![
             segment_loop(0, &[1.0; 100], 0),
             segment_loop(0, &[2.0; 40], 0),
         ];
         let (timeline, summary) = one(1, &segments);
-        assert_eq!(summary.clips, 1, "同一循环起点只能有一个可见 clip");
-        assert_eq!(timeline.clips.len(), 1);
+        assert_eq!(summary.covered_frames, 100, "素材范围必须是完整的第一圈");
+        assert_eq!(summary.spanned_frames, 100);
+        // 第一圈的 [0,40) 被第二圈覆盖，[40,100) 保留 —— 两段不相邻的源窗。
+        assert_eq!(timeline.clips.len(), 2);
         assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
+        assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
         assert!(
-            (timeline.clips[0].length_sec - 0.04).abs() < 1e-9,
-            "可见范围到最后一圈实际走到的位置为止"
+            (timeline.clips[0].active_take().source_start_sec - 0.1).abs() < 1e-9,
+            "开头来自第二圈（带内偏移 100 帧）"
+        );
+        assert!((timeline.clips[1].start_sec - 0.04).abs() < 1e-9);
+        assert!((timeline.clips[1].length_sec - 0.06).abs() < 1e-9);
+        assert!(
+            (timeline.clips[1].active_take().source_start_sec - 0.04).abs() < 1e-9,
+            "尾部必须来自第一圈，而不是被删掉"
         );
     }
 
@@ -1242,18 +1124,27 @@ mod tests {
         );
     }
 
-    /// **没有 cycle 元数据时，同一 take 内重复起点仍按循环组处理。**
+    /// **没有 cycle 元数据时，行为与有元数据完全一致。**
+    ///
+    /// 【为什么必须一致】投影不再按 `loop_start` 分组（那条推断正是问题三的成因），
+    /// 所以有没有宿主元数据都只能由"录制顺序 + 覆盖范围"决定。
     #[test]
-    fn an_implicit_loop_group_requires_two_passes_with_the_same_start() {
+    fn an_implicit_loop_pass_merges_by_coverage_not_by_metadata() {
         let segments = vec![segment(0, &[1.0; 100]), segment(0, &[2.0; 40])];
         let (timeline, summary) = one(1, &segments);
-        assert_eq!(summary.clips, 1);
+        assert_eq!(summary.covered_frames, 100, "素材范围必须是完整的第一遍");
+        assert_eq!(timeline.clips.len(), 2);
         assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
+        assert!((timeline.clips[1].length_sec - 0.06).abs() < 1e-9);
     }
 
-    /// **显式循环起点跨 take：重录同一循环区间会原子替换旧组。**
+    /// **跨 take：新 take 只覆盖它走到的那一段，旧 take 的其余部分保留。**
+    ///
+    /// 【为什么不再"整组替换"】跨 take 的整组替换同样是推断出来的：投影无法知道
+    /// 用户是"重录整个循环"还是"只补了开头"。按覆盖范围处理是唯一不会丢素材的
+    /// 解释；要整体丢弃旧 take，应该用 take 管理显式删除。
     #[test]
-    fn a_new_take_with_the_same_loop_start_replaces_the_old_group() {
+    fn a_new_take_replaces_only_the_range_it_covers() {
         let first = vec![segment_loop(0, &[1.0; 100], 0)];
         let second = vec![segment_loop(0, &[2.0; 40], 0)];
         let (timeline, summary) = project(
@@ -1269,12 +1160,19 @@ mod tests {
             ],
             120.0,
         );
-        assert_eq!(summary.clips, 1);
-        assert_eq!(timeline.clips.len(), 1);
+        assert_eq!(summary.covered_frames, 100);
+        assert_eq!(timeline.clips.len(), 2);
         assert_eq!(
             timeline.clips[0].active_take().source_path.as_deref(),
-            Some("transfer://2")
+            Some("transfer://2"),
+            "被新 take 覆盖的开头来自新 take"
+        );
+        assert_eq!(
+            timeline.clips[1].active_take().source_path.as_deref(),
+            Some("transfer://1"),
+            "新 take 没走到的尾部必须保留旧 take"
         );
         assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
+        assert!((timeline.clips[1].length_sec - 0.06).abs() < 1e-9);
     }
 }
