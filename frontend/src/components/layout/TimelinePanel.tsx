@@ -6249,10 +6249,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         // 整棵刻度子树不必每帧重渲染。内核模式下水平滚动由内核在 rAF 内直接写
         // 内容层 transform（不经 React），这条量化约定依然成立。
         <TimeRuler
-            // 交互换算（悬停时间 / Tempo Map 可见段 / 播放头）用**尽可能新**的滚动
-            // 位置；刻度切片用下面的量化锚点。一个字段身兼两职时，量化值会把悬停
-            // 时间算偏最多一个量化步长（≤255px 的位移对应的秒数）。
+            // `scrollLeft` 仍是量化 state：只服务随 React 重渲染的低频几何
+            // （Tempo Map 可见段 / 浮动标签）。鼠标交互换算一律走 `scrollLeftLive`
+            // 读取内核逐帧真值 —— 用 state 会把 ToolTip/点击落点算偏一个量化残差。
             scrollLeft={scrollLeft}
+            scrollLeftLive={state.getScrollLeftLive}
             tickWindowAnchorPx={rulerScrollLeft}
             ticks={timelineTicks}
             pxPerSec={pxPerSec}

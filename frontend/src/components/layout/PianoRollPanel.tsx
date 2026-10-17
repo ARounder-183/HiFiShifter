@@ -1666,6 +1666,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 渲染时根 ?BPM 换算 pxPerBeat：pxPerBeat = pxPerSec × (60 / bpm)
     const pxPerBeat = pxPerSec * (60 / Math.max(1e-6, s.bpm));
     const scrollLeftRef = useRef(scrollLeft);
+    /** 标尺交互用的实时滚动位置；与内核绘制同源，stable 引用避免 TimeRuler 重渲。 */
+    const getScrollLeftLive = useCallback(
+        () => hostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
+        [],
+    );
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
     // 同步开关的 ref 镜像：rAF 原子提交与宿主帧回调读取最新值，避免陈旧闭包。
@@ -9152,6 +9157,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
                     <TimeRuler
                         scrollLeft={scrollLeft}
+                        scrollLeftLive={getScrollLeftLive}
                         tickWindowAnchorPx={prTickAxis.anchorPx}
                         ticks={timelineTicks}
                         pxPerSec={pxPerSec}

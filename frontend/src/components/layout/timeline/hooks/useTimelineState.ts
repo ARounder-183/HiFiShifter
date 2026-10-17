@@ -177,6 +177,8 @@ export interface TimelineStateResult {
 
     // State values
     scrollLeft: number;
+    /** 绘制视口的实时滚动位置（标尺 ToolTip / 点击定位的唯一来源）。 */
+    getScrollLeftLive: () => number;
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
     viewportWidth: number;
@@ -384,6 +386,14 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     /** 最近一次真正提交给 React 的 scrollLeft（量化基准）。 */
     const reactCommittedScrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
+    /**
+     * 量化残差的收尾定时器。
+     *
+     * 内核每跨过 256px 才提交一次 React state；最后一次不足一步的位移若没有收尾，
+     * state 会永久停在上一个 256px 边界。滚动停止 120ms 后把实时 ref 原样提交一次，
+     * 只影响低频几何（刻度窗口/浮动标签），热路径仍保持量化。
+     */
+    const scrollCommitTimerRef = useRef<number | null>(null);
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
     paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
     const timelineSyncApplyingRef = useRef(false);
@@ -434,6 +444,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 cancelAnimationFrame(scrollStateRafRef.current);
                 scrollStateRafRef.current = null;
             }
+            if (scrollCommitTimerRef.current != null) {
+                window.clearTimeout(scrollCommitTimerRef.current);
+                scrollCommitTimerRef.current = null;
+            }
         };
     }, []);
 
@@ -474,6 +488,23 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             return pxPerSecRef.current;
         },
         [kernelHostRef],
+    );
+
+    /**
+     * 立刻把实时滚动值提交给 React（只用于手势结束/静默收尾）。
+     *
+     * 与 `syncScrollLeft` 内部的量化提交分开：后者在滚动热路径上按 256px 跳步，
+     * 本函数在停止后补一次精确值。缩放进行中不提交（由缩放落地路径成对写入）。
+     */
+    const commitScrollLeftNow = React.useCallback(
+        function commitScrollLeftNow() {
+            if (Math.abs(livePxPerSec() - pxPerSecRef.current) > 1e-9) return;
+            const next = scrollLeftRef.current;
+            if (Math.abs(next - reactCommittedScrollLeftRef.current) < 0.5) return;
+            reactCommittedScrollLeftRef.current = next;
+            setScrollLeft(next);
+        },
+        [livePxPerSec],
     );
 
     const syncScrollLeft = React.useCallback(
@@ -535,8 +566,16 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                     setScrollLeft(next);
                 });
             }
+            // 停止滚动 120ms 后补一次精确提交：覆盖最后一次不足 256px 的残差。
+            if (scrollCommitTimerRef.current != null) {
+                window.clearTimeout(scrollCommitTimerRef.current);
+            }
+            scrollCommitTimerRef.current = window.setTimeout(() => {
+                scrollCommitTimerRef.current = null;
+                commitScrollLeftNow();
+            }, 120);
         },
-        [livePxPerSec],
+        [livePxPerSec, commitScrollLeftNow],
     );
 
     /**
@@ -577,6 +616,18 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             }
         },
         [livePxPerSec],
+    );
+
+    /**
+     * 绘制视口的实时滚动位置（标尺交互换算的唯一来源）。
+     *
+     * 优先读内核真值：标尺内容层的 `translateX` 就是它；未挂载内核时退回逐帧 ref。
+     * **不要**在鼠标交互里用 `scrollLeft` state —— 它按 256px 量化，残差会让
+     * ToolTip/点击落点稳定偏移。
+     */
+    const getScrollLeftLive = React.useCallback(
+        () => kernelHostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
+        [kernelHostRef],
     );
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
@@ -1167,6 +1218,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         rowHeightRef,
 
         scrollLeft,
+        /**
+         * 绘制视口的实时滚动位置（标尺交互用；见 `getScrollLeftLive` 的说明）。
+         */
+        getScrollLeftLive,
         pxPerSec,
         setPxPerSec,
         viewportWidth,

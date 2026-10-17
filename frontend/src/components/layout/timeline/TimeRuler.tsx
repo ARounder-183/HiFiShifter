@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { AppContextMenu, type AppMenuItemSpec } from "../../../ui/Menu";
 import { AppConfirmDialog } from "../../../ui";
 import { Box } from "@radix-ui/themes";
-import { screenXToWorldSec } from "./runtime/timelineWorld.js";
+import { timeAtPointerX } from "./runtime/timeAtPointer.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
@@ -494,14 +494,23 @@ function TimeRulerContextMenu({
 
 const TimeRulerInner: React.FC<{
     /**
-     * **真实**水平滚动位置（绘制坐标）。
+     * 低频渲染用的滚动位置（通常是按 `REACT_SCROLL_STEP_PX` 量化提交的 state）。
      *
-     * 用于交互换算（悬停时间、Tempo Map 行的可见段、播放头定位）——这些地方需要
-     * 尽可能接近用户看到的滚动位置。**不**用于刻度切片：切片用
-     * `tickWindowAnchorPx`（量化锚点），两者相差不超过一个量化步长，切片缓冲足以
-     * 覆盖。曾经一个字段身兼两职，量化值会把悬停时间算偏最多一个步长。
+     * 只用于随 React 重渲染的几何（Tempo Map 行可见段、浮动标签、播放头初值）。
+     * **不要**用它做鼠标交互换算：它可能与绘制视口相差最多一个量化步长。
+     * 交互一律走 [`Self::scrollLeftLive`]。
      */
     scrollLeft: number;
+    /**
+     * **绘制视口**的实时滚动位置（内核真值），供交互换算使用。
+     *
+     * 【为什么必须是 getter 而不是数字】标尺内容层由内核在 rAF 里用精确值
+     * `translateX(-scrollLeft)` 平移；而 React state 按 256px 量化提交，最后一次
+     * 不足一步的残差可能永不提交。用 state 算悬停时间/点击落点会稳定偏一个残差
+     * （用户报告的“ToolTip 比标尺快约 0.088s”）。缺省时退回 `scrollLeft`
+     * （测试 / 尚未接实时源的旧调用）。
+     */
+    scrollLeftLive?: () => number;
     /**
      * 刻度切片用的量化锚点（`createTickAxis` 的产物）。
      *
@@ -564,6 +573,7 @@ const TimeRulerInner: React.FC<{
     subscribeViewport?: (listener: (scrollLeft: number, pxPerSec: number) => void) => () => void;
 }> = ({
     scrollLeft,
+    scrollLeftLive,
     tickWindowAnchorPx,
     ticks,
     pxPerSec,
@@ -778,18 +788,15 @@ const TimeRulerInner: React.FC<{
                 return;
             }
             const bounds = e.currentTarget.getBoundingClientRect();
-            const sec = Math.max(
-                0,
-                screenXToWorldSec(e.clientX - bounds.left, {
-                    pxPerSec,
-                    rowHeight: 1,
-                    scrollLeftPx: scrollLeft,
-                    scrollTopPx: 0,
-                }),
-            );
+            const sec = timeAtPointerX({
+                clientX: e.clientX,
+                boundsLeft: bounds.left,
+                scrollLeft: scrollLeftLive?.() ?? scrollLeft,
+                pxPerSec,
+            });
             setHover({ x: e.clientX - bounds.left, y: e.clientY - bounds.top, sec });
         },
-        [ctxMenu, tempoDialogOpen, tempoInteracting, pxPerSec, scrollLeft],
+        [ctxMenu, tempoDialogOpen, tempoInteracting, pxPerSec, scrollLeft, scrollLeftLive],
     );
 
     const hoverTime = hover
@@ -836,11 +843,11 @@ const TimeRulerInner: React.FC<{
                 if (e.button !== 0) return;
                 const bounds = e.currentTarget.getBoundingClientRect();
                 onMouseDownAtSec?.(
-                    screenXToWorldSec(e.clientX - bounds.left, {
+                    timeAtPointerX({
+                        clientX: e.clientX,
+                        boundsLeft: bounds.left,
+                        scrollLeft: scrollLeftLive?.() ?? scrollLeft,
                         pxPerSec,
-                        rowHeight: 1,
-                        scrollLeftPx: scrollLeft,
-                        scrollTopPx: 0,
                     }),
                     e,
                 );
@@ -855,15 +862,12 @@ const TimeRulerInner: React.FC<{
                 e.preventDefault();
                 e.stopPropagation();
                 const bounds = e.currentTarget.getBoundingClientRect();
-                const sec = Math.max(
-                    0,
-                    screenXToWorldSec(e.clientX - bounds.left, {
-                        pxPerSec,
-                        rowHeight: 1,
-                        scrollLeftPx: scrollLeft,
-                        scrollTopPx: 0,
-                    }),
-                );
+                const sec = timeAtPointerX({
+                    clientX: e.clientX,
+                    boundsLeft: bounds.left,
+                    scrollLeft: scrollLeftLive?.() ?? scrollLeft,
+                    pxPerSec,
+                });
                 setHover(null);
                 setCtxMenu({ x: e.clientX, y: e.clientY, sec });
             }}
