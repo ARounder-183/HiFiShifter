@@ -5,7 +5,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
@@ -314,6 +314,14 @@ pub(crate) enum TransferOutput {
     StaleProcessed,
     /// 有素材，但处理结果还不是当前 take：输出**原始磁带**（未处理的捕获）。
     Raw,
+    /// 有素材，但**两份发布器都还没就绪**（刚录完、后台合成尚未完成）。
+    ///
+    /// 【为什么必须与 `PassThrough` 分开】两者的输出内容相同（都透传宿主原声），
+    /// 但含义完全不同：`PassThrough` 是"还没有素材，插件保持透明"，本档是
+    /// "素材已经在了，只是处理结果还没算出来"。用户听到的都是宿主原声，但前者是
+    /// 正常状态，后者是**该有结果却没有**。此前两者共用一个名字，于是"合成从来没被
+    /// 调度过"这件事在界面上完全看不出来（用户报障时只能看到"宿主原声"）。
+    PendingSynthesis,
     /// 已确知本实例走 Transfer、但还没有素材：透传宿主原声。
     PassThrough,
 }
@@ -331,6 +339,7 @@ impl TransferOutput {
             TransferOutput::Processed => "processed",
             TransferOutput::StaleProcessed => "stale_processed",
             TransferOutput::Raw => "raw",
+            TransferOutput::PendingSynthesis => "pending_synthesis",
             TransferOutput::PassThrough => "passthrough",
         }
     }
@@ -461,6 +470,12 @@ pub(crate) struct ExtensionOwner {
     transfer_ready_revision: AtomicU64,
     /// 已发布原始磁带对应的素材代次（`0` = 还没发过）。
     raw_tape_revision: AtomicU64,
+    /// 上一次"有素材但没有处理结果"已经警告过的素材代次（`0` = 还没警告过）。
+    ///
+    /// 【为什么按代次只报一次】这是一个**状态**，不是事件：每 100ms 心跳都写一行
+    /// 日志会把日志刷满，而按代次去重之后，一次真正的卡死只会留下一条可检索的记录，
+    /// 合成成功后自然不再出现。
+    pending_reported_revision: AtomicU64,
     /// 上一块的工程位置（`projectTimeSamples`），用于判断"位置在不在前进"。
     ///
     /// 【为什么要它】停播时清输出是对的（否则固定光标处会把同一小段反复送出去，
@@ -469,18 +484,32 @@ pub(crate) struct ExtensionOwner {
     /// 把两者当成同一件事，于是**每次播放都吞掉开头**。
     ///
     /// 位置是否前进是宿主无关的硬事实：真在播就必然前进，钉住不动就是在停。
-    last_block_position: AtomicI64,
-    /// 见过至少一个块的位置（`false` 时 [`Self::last_block_position`] 没有意义）。
-    has_block_position: AtomicBool,
-    /// 连续"位置向前"的块数（[`Self::note_block_position`] 用它排除单次跳变）。
+    /// 上一块的**结束**位置（`projectTimeSamples + numSamples`）。
     ///
-    /// 【为什么"连续性"要单独记】"位置变了"与"宿主在播"不是一件事：停播状态下移动
-    /// 播放头也会变一次，而那一次足以骗过门控、放出一小块**新位置**的音频 —— 听感是
-    /// "一声不对的短音，然后约一秒无声，换位置也一样"。真在播时位置必然**连续向前**，
-    /// 于是"连着两步向前"才是可核实的证据；单次跳变（seek、循环回卷、宿主重排）不算。
-    forward_streak: AtomicU32,
+    /// 【为什么判据要问块尾而不是块头】块长由宿主决定（SDK 只承诺
+    /// `numSamples <= maxSamplesPerBlock`；本仓库实测目标平台单块可达 6 秒，见
+    /// `docs/plans/2026-10-15-vst-transfer-mode.md:323`）。只看块头时，一个 1 秒的
+    /// 起播块 `start > previous` 只成立一次 ⇒ 累计不到"两步" ⇒ 门控把**整块 1 秒**
+    /// 清成静音（用户报障："约 1 秒完全无声，无论位置"）。块尾是同一个事实的完整读数。
+    last_block_end: AtomicI64,
+    /// 见过至少一个块的位置（`false` 时上面几个读数没有意义）。
+    has_block_position: AtomicBool,
     /// 本块的位置相对上一块是否在前进（见 [`Self::transfer_transport_running`]）。
+    ///
+    /// 【为什么不再要求"连续两步"】那个判据的初衷是挡住"停播时移动播放头"，
+    /// 但它隐含要求宿主把一次起播切成**至少两个块** —— 宿主没有这个义务。代价是
+    /// 起播第一个块被整块静音，而块可以很长（实测上限 6 秒）。现在的判据是
+    /// **"本块的块尾是否越过了上一块的块尾"**：停播钉住时块尾不变（静音），
+    /// 真在播时块尾必然前进（出声）。停播时移动播放头会让块尾前进一次，代价是
+    /// 放出**一块**音频 —— 那是可接受的（一次 seek 的一声），而整秒静音不可接受。
     position_advancing: AtomicBool,
+    /// 音频线程发现"有素材、但处理结果不是当前代次"时置位；actor 心跳消费它并
+    /// 重新排一次渲染（见 [`Self::transfer_stage`]）。
+    ///
+    /// 【为什么音频线程只置位、不调度】合成要数秒且要取锁/分配，绝不能进音频线程。
+    /// 这里只是一次原子写；真正的调度仍由会话 actor 的渲染任务完成 —— 它自带
+    /// 在途检查、取消与重试预算，比从音频线程另开一条合成通路安全得多。
+    render_wanted: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
@@ -2176,6 +2205,9 @@ impl ExtensionOwner {
             return TransferOutput::Processed;
         }
         if self.raw_tape_ready() {
+            // 【为什么在这里置位】有素材、但处理结果不是当前代次 ⇒ 该有一次合成在跑。
+            // 音频线程只记一个原子；调度仍由会话 actor 完成（见 `render_wanted`）。
+            self.render_wanted.store(true, Ordering::Release);
             return TransferOutput::Raw;
         }
         // 【为什么"上一版处理结果"好过宿主原声】换 take 到合成完成之间的空档里，
@@ -2184,12 +2216,44 @@ impl ExtensionOwner {
         //
         // 【为什么只在这一档里才敢放宽】`has_material()` 已为真（上面的早退保证），
         // 所以"发布过一份"不可能来自另一个实例或另一个文档；而从未发布过时不凭空生效
-        // （`snapshots` 为空 ⇒ 落到下面的 `PassThrough`）。
+        // （`snapshots` 为空 ⇒ 落到下面的 `PendingSynthesis`）。
         if self.snapshots.iter().any(|publisher| publisher.is_ready()) {
+            self.render_wanted.store(true, Ordering::Release);
             return TransferOutput::StaleProcessed;
         }
-        // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声。
-        TransferOutput::PassThrough
+        // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
+        // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
+        self.render_wanted.store(true, Ordering::Release);
+        TransferOutput::PendingSynthesis
+    }
+
+    /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
+    pub(crate) fn take_render_wanted(&self) -> bool {
+        self.render_wanted.swap(false, Ordering::AcqRel)
+    }
+
+    /// 一次性诊断：有素材，但处理结果不是当前代次（非音频线程调用）。
+    ///
+    /// 【为什么需要它】"合成从来没被调度过"此前在界面上与"没有素材"共用同一个
+    /// `passthrough` 读数，用户和我们都看不出区别。这条日志把结论直接写下来：
+    /// 素材代次是多少、处理结果代次停在哪。合成成功后它自然不再出现。
+    pub(crate) fn report_pending_synthesis_once(&self) {
+        if !self.transfer.has_material() {
+            return;
+        }
+        let revision = self.transfer.revision();
+        let ready = self.transfer_ready_revision.load(Ordering::Acquire);
+        if ready == revision {
+            return;
+        }
+        // 按代次去重：同一份素材只报一次。
+        if self.pending_reported_revision.swap(revision, Ordering::AcqRel) == revision {
+            return;
+        }
+        log::warn!(
+            "[transfer] material revision {revision} has no processed result yet \
+             (last published revision {ready}); the render scheduler has not caught up"
+        );
     }
 
     /// 记录本块的工程位置，并更新"位置是否在前进"（音频线程，无锁无分配）。
@@ -2198,31 +2262,28 @@ impl ExtensionOwner {
     /// `transfer_observe` 里，测试就只能复制一遍那段逻辑 —— 而复制出来的判据测的不是
     /// 生产代码。
     ///
-    /// 【为什么必须是"连续**向前**"而不是"变了"】"位置变了"与"宿主在播"不是一件事：
-    /// 停播状态下移动播放头也会变一次，而那一次足以骗过门控、放出一小块**新位置**
-    /// 的音频 —— 用户报障的原话是"播放后有一段很短、内容不对的音频，之后约 1 秒
-    /// 完全无声，无论播放位置在哪里"。第三节的三段现象全部来自这一条判据：
-    ///   * 后退 seek 也算"变" ⇒ 放出一小块错误位置的音频（那一声）；
-    ///   * 放完这一块位置就钉住了 ⇒ 后续块重新被清（那一秒无声）；
-    ///   * 换播放位置只是再骗出一块（"无论位置在哪里"都一样）。
-    /// 真在播时位置必然**连续向前**，所以判据改成"连着两步向前"。
+    /// 【为什么判据是"块尾是否越过上一块的块尾"】块长由宿主决定（SDK 只承诺
+    /// `numSamples <= maxSamplesPerBlock`，本仓库实测目标平台单块可达 6 秒）。此前的
+    /// "连着两步向前"隐含要求宿主把一次起播切成至少两个块 —— 宿主没有这个义务：
+    /// 一个 1 秒的起播块只算"一步"，于是**整块 1 秒被清成静音**（用户报障："播放后
+    /// 约 1 秒完全没有音频输出，无论播放位置在哪里"）。块尾把"整块推进了多少"读全了，
+    /// 一个块就足以证明时间轴在走。
     ///
-    /// 【为什么首块仍不算"前进"，但不判死】那时没有可比对象，而两个方向的错法不对称：
-    /// 判成"前进"会在宿主停播时多送出一块音频（听起来是咔哒声），判成"没前进"最多让
-    /// 起播的第一个块静音（约 10 毫秒，听不出来）。首块记为"向前一步"但不满两步，
-    /// 于是它保守地静音，而**第二块只要真的向前就能出声** —— 不必等 `kPlaying` 置位。
-    pub(crate) fn note_block_position(&self, start: i64) {
+    /// 【代价与取舍】停播时移动播放头会让块尾前进一次，因而放出**一块**音频；而整秒
+    /// 静音是不可接受的。两者不对称，所以选前者。
+    ///
+    /// 【首块】没有可比对象，判成"没前进"（保守）：起播的第一个块若与停播时的光标块
+    /// 完全重合（`start` 与 `frames` 都不变），它本来就是同一个位置，静音是对的；
+    /// 只要它真的推进了时间轴，块尾就立刻给出证据。
+    pub(crate) fn note_block_position(&self, start: i64, frames: usize) {
         let had = self.has_block_position.swap(true, Ordering::Relaxed);
-        let previous = self.last_block_position.swap(start, Ordering::Relaxed);
-        // 首块没有可比对象，按"向前"记但不让它独立成立（见上面的理由）。
-        let forward = !had || start > previous;
-        let streak = if forward {
-            self.forward_streak.load(Ordering::Relaxed).saturating_add(1)
-        } else {
-            0
-        };
-        self.forward_streak.store(streak, Ordering::Relaxed);
-        self.position_advancing.store(streak >= 2, Ordering::Release);
+        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+        let end = start.saturating_add(i64::from(frames));
+        let previous_end = self.last_block_end.swap(end, Ordering::Relaxed);
+        // 首块没有可比对象 ⇒ 保守判成没在前进（最多让一个块静音）。
+        // 之后块尾严格向前才算"时间轴在走"。
+        let forward = had && end > previous_end;
+        self.position_advancing.store(forward, Ordering::Release);
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2234,6 +2295,9 @@ impl ExtensionOwner {
     /// 它服务的唯一决定是"停播时要不要清输出"：清是对的（固定光标处不清就会把同一小段
     /// 反复送出去，听起来是个嗡嗡声），但**不能拿播放位当唯一的判据** —— 那会让每次
     /// 播放都吞掉开头（用户报障：播放后约 1 秒没有输出）。
+    ///
+    /// 【判据的粒度是"整块"】见 [`Self::note_block_position`]：块尾前进即算在走。
+    /// 这保证门控**永远不会**清掉一个真正推进了时间轴的块，无论它有多长。
     ///
     /// 【为什么 ARA 实例恒为假】它的输出语义由 ARA 通路决定，这个守卫必须对它完全无效
     /// （见 `a_bound_instance_keeps_its_output`）。返回假 ⇒ 保持"停播即静音"的既有行为。
@@ -2323,7 +2387,10 @@ impl ExtensionOwner {
         // 【为什么位置是否前进要在这里记】它决定"停播时要不要清输出"，而那是本块稍后
         // 就要做的决定（见 `transfer_transport_running`）。必须在**每个**块上更新，
         // 与是否武装无关 —— 停播期间的块正是这个判据的信息来源。
-        self.note_block_position(block.start);
+        //
+        // 【为什么把块长一起传下去】块长由宿主决定，单块可以很长；只比较块头会把
+        // 一个长块误判成"只前进了一步"（见 `note_block_position`）。
+        self.note_block_position(block.start, block.frames);
         // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
         // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
         let _ = transfer.on_block(block);
@@ -2385,7 +2452,11 @@ impl ExtensionOwner {
                 source: SnapshotSource::Raw,
                 layered: options.outside_passthrough,
             },
-            TransferOutput::PassThrough => {
+            // 【为什么与 `PassThrough` 输出相同】素材在，但还没有任何可播的版本；
+            // 唯一诚实的输出仍是宿主原声（静音会让整条轨"哑掉"）。区别只在**读数**：
+            // 这一档让界面能说"素材已就绪，等待合成"，从而把"合成没跑"暴露出来。
+            // `transfer_output` 已置好 `render_wanted`，actor 会补排一次合成。
+            TransferOutput::PendingSynthesis | TransferOutput::PassThrough => {
                 // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                 let _ = unsafe { crate::audio_abi::pass_through(data) };
                 TransferStage::Handled

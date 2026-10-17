@@ -126,6 +126,41 @@ fn material_alone_makes_an_unbound_instance_transfer() {
     );
 }
 
+/// **处理结果缺失时必须置位"该合成一次"。**
+///
+/// 【为什么这是"合成被饿死"的兜底】合成此前只由用户动作触发。一旦那条调度链出事
+/// （票据自锁、actor 停摆），就没有任何东西会把结果补出来，而界面照样显示素材已就绪。
+/// 音频线程只置一个原子；actor 心跳据此补排一次渲染（见 `render_wanted`）。
+#[test]
+fn a_missing_processed_result_asks_the_actor_to_render() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    assert!(
+        !owner.take_render_wanted(),
+        "前提：还没有任何东西请求过合成"
+    );
+    owner.sync_raw_tape();
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Raw,
+        "原始磁带可播、但处理结果缺失"
+    );
+    assert!(
+        owner.take_render_wanted(),
+        "结果缺失 ⇒ 必须请求一次合成，否则 actor 停摆时永远没人补"
+    );
+    // 处理结果就绪之后不再请求。
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner
+        .transfer_ready_revision
+        .store(owner.transfer.revision(), Ordering::Release);
+    assert_eq!(owner.transfer_output(), TransferOutput::Processed);
+    assert!(
+        !owner.take_render_wanted(),
+        "结果已就绪时不得再请求合成（否则会无谓地反复重算）"
+    );
+}
+
 /// **输出仲裁的真值表：有素材之后，任何中间状态都不允许是静音。**
 #[test]
 fn the_output_arbiter_degrades_instead_of_going_silent() {
@@ -138,8 +173,13 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     record(&owner, 256);
     assert_eq!(
         owner.transfer_output(),
-        TransferOutput::PassThrough,
-        "素材有了但两份都还没发布：透传宿主原声，不是静音"
+        TransferOutput::PendingSynthesis,
+        "素材有了但两份都还没发布：输出仍是宿主原声，但必须**如实报成等待合成** \
+         （与「没有素材」共用 `passthrough` 会让「合成从没被调度」完全不可见）"
+    );
+    assert!(
+        owner.take_render_wanted(),
+        "发现素材没有对应结果时必须置位「该合成一次」，否则 actor 停摆时永远没人补"
     );
     owner.sync_raw_tape();
     assert_eq!(
@@ -166,8 +206,8 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     );
     // 宿主开始播放 ⇒ 立刻回到直通，否则捕获会把我们自己的输出录进去
     // （in-place 宿主里输入与输出是同一块缓冲）。
-    owner.note_block_position(0);
-    owner.note_block_position(480);
+    owner.note_block_position(0, 480);
+    owner.note_block_position(480, 480);
     owner.transfer().observe(&crate::transfer::InputBlock {
         start: 480,
         frames: 480,
@@ -245,7 +285,7 @@ fn a_new_take_invalidates_both_publishers() {
     );
 }
 
-/// **从未发布过处理结果时不凭空造一档**：那时只能透传。
+/// **从未发布过处理结果时不凭空造一档**：那时只能报"等待合成"。
 ///
 /// 【为什么这条必须单独钉住】`StaleProcessed` 的判据是"发布器非空"。若它在
 /// `has_material()` 为真时无条件生效，第一次录制之后、第一次合成之前就会凭空出现
@@ -260,13 +300,13 @@ fn no_published_result_never_invents_a_stale_one() {
         TransferOutput::Raw,
         "原始磁带先到位"
     );
-    // 撤掉原始磁带、且从未发布过处理结果 ⇒ 只能是透传。
+    // 撤掉原始磁带、且从未发布过处理结果 ⇒ 只能是"等待合成"。
     owner.raw_tape.clear();
     owner.raw_tape_revision.store(0, Ordering::Release);
     assert_eq!(
         owner.transfer_output(),
-        TransferOutput::PassThrough,
-        "没有发布过任何结果时不得凭空造一档"
+        TransferOutput::PendingSynthesis,
+        "没有发布过任何结果时不得凭空造一档（既不是 StaleProcessed，也不是 Raw）"
     );
 }
 
@@ -329,83 +369,90 @@ fn the_recording_monitor_option_is_reachable() {
 ///
 /// 【为什么走生产代码而不是自己算】判据长在 `note_block_position` 里；测试自己再算
 /// 一遍就只是测了自己。
-fn transport_running_after(owner: &Arc<ExtensionOwner>, previous: i64, current: i64) -> bool {
-    owner.note_block_position(previous);
-    owner.note_block_position(current);
+fn transport_running_after(
+    owner: &Arc<ExtensionOwner>,
+    previous: (i64, usize),
+    current: (i64, usize),
+) -> bool {
+    owner.note_block_position(previous.0, previous.1);
+    owner.note_block_position(current.0, current.1);
     owner.transfer_transport_running()
 }
 
-/// **起播的头几块不能被吞掉。**
+/// **起播的第一个块不能被吞掉。**
 ///
-/// 【为什么这是本轮"播放后约 1 秒没声音"的回归测试】停播清输出是对的，但那个分支此前
-/// 只看 `kPlaying` —— 而它与 `projectTimeSamples` 不是原子更新的。宿主从"停止"切到
-/// "播放"的那几块里位置已经在走、播放位可能还没置上，于是**每次播放都吞掉开头**。
-///
-/// 判据必须是"位置在不在前进"：真在播就必然前进，钉住不动就是在停。
+/// 【为什么这是"播放后约 1 秒没声音"的回归测试】停播清输出是对的，但判据此前是
+/// "连着两步向前"。它隐含要求宿主把一次起播切成至少两个块 —— 宿主没有这个义务：
+/// 块长由宿主决定（实测上限 6 秒）。于是一个 1 秒的起播块只算"一步"，**整块 1 秒
+/// 被清成静音**。判据改成"块尾是否越过上一块的块尾"之后，一个块就足以证明时间轴在走。
 #[test]
 fn the_first_blocks_of_playback_are_not_swallowed() {
     let owner = insert_owner();
-    // 停播：位置钉在 0，反复 process ⇒ 不前进 ⇒ 清输出是对的。
-    owner.note_block_position(0);
+    // 第一个块：没有可比对象 ⇒ 保守判成没在前进。
+    owner.note_block_position(0, 480);
     assert!(
         !owner.transfer_transport_running(),
         "第一个块没有可比对象，必须保守判成没在前进"
     );
+    // 停播：同一个块被反复 process ⇒ 块尾不动 ⇒ 不前进 ⇒ 清输出是对的。
     assert!(
-        !transport_running_after(&owner, 0, 0),
+        !transport_running_after(&owner, (0, 480), (0, 480)),
         "位置钉住不动就是在停"
     );
-    // 起播：位置开始走，而播放位（此刻还没置上）不参与判断。
-    //
-    // 【为什么现在是"连着两步"才成立】"位置变了"与"宿主在播"不是一件事：停播状态下
-    // 移动播放头也会变一次，而那一次足以放出一块**新位置**的音频 —— 用户报障的
-    // "很短、内容不对的一声，之后约 1 秒无声，换位置也一样"正是这样来的。
-    // 位置**连续向前**才是真在播的可核实证据。代价是多等一块（≈10 ms），
-    // 而它换掉的是"每次移动光标都漏一小块"。
+    // 起播：块尾前进 ⇒ 立刻出声，不再需要第二个块确认。
     assert!(
-        !transport_running_after(&owner, 0, 480),
-        "单次跳变不是证据：seek / 循环回卷 / 宿主重排都会跳一次"
-    );
-    // 此时上一块是 480、已累计一步。再走一块 ⇒ 两步 ⇒ 判定在播。
-    // （不能重复喂 480：位置钉住会清零累计 —— 那正是"停播"的定义。）
-    owner.note_block_position(960);
-    assert!(
-        owner.transfer_transport_running(),
-        "连着两步向前后就必须照常输出，否则每次播放都吞掉开头"
+        transport_running_after(&owner, (0, 480), (480, 480)),
+        "块尾前进就是证据，不得多等一块"
     );
 }
 
-/// **后退不算"前进"**：停播时把播放头往前挪一次，不该放出一块音频。
+/// **一个长块也必须算前进。**
 ///
-/// 【为什么这条必须存在】旧的判据是 `previous != start`，方向无关。于是停播状态下
-/// 移动播放头会放出一小块新位置的音频，而用户此刻并没有在播放 —— 那正是报障里
-/// "很短、内容不对"的那一声。
+/// 【为什么单独钉住】这正是用户报障的现场：宿主把起播压成一个约 1 秒的块。
+/// 只看块头时它只算"一步"；块尾把整块的长度算进来，于是立刻成立。
+#[test]
+fn a_single_long_block_at_playback_start_is_not_swallowed() {
+    let owner = insert_owner();
+    owner.note_block_position(0, 512); // 停播时的光标块
+    owner.note_block_position(0, 48_000); // 起播：宿主一次给 1 秒
+    assert!(
+        owner.transfer_transport_running(),
+        "一个长块也必须算前进，否则整秒会被清空"
+    );
+}
+
+/// **后退不算"前进"**：停播时把播放头往回挪，不该放出一块音频。
 #[test]
 fn a_backward_seek_does_not_unlock_a_block() {
     let owner = insert_owner();
-    owner.note_block_position(96_000);
-    owner.note_block_position(48_000);
+    owner.note_block_position(96_000, 480);
+    owner.note_block_position(48_000, 480);
     assert!(
         !owner.transfer_transport_running(),
         "位置倒退不是播放：那是一次 seek 或循环回卷"
     );
     // 之后的连续前进仍然能正常识别。
-    owner.note_block_position(48_480);
-    owner.note_block_position(48_960);
+    owner.note_block_position(48_480, 480);
     assert!(owner.transfer_transport_running());
 }
 
-/// **停播时移动一次播放头 ⇒ 仍然静音**（旧实现会放出一块）。
+/// **停播时向前拖一次播放头，代价是至多一块音频。**
+///
+/// 【为什么接受这个代价】另一个方向的错法是把**整块**（可达数秒）静音。一次 seek
+/// 出一声是 DAW 里预期内的行为，而整秒无声不是。判据一旦能分辨"钉住"与"前进"，
+/// 就不该再为单次跳变牺牲一个块。
 #[test]
-fn a_single_jump_while_stopped_stays_silent() {
+fn a_forward_jump_while_stopped_costs_at_most_one_block() {
     let owner = insert_owner();
-    // 位置钉在 0 很久（停播），然后用户把光标拖到 10 秒处：只跳了一次。
-    owner.note_block_position(0);
-    owner.note_block_position(0);
-    owner.note_block_position(480_000);
+    // 位置钉在 0 很久（停播），然后用户把光标拖到 10 秒处：块尾前进一次。
+    owner.note_block_position(0, 480);
+    owner.note_block_position(0, 480);
+    owner.note_block_position(480_000, 480);
+    assert!(owner.transfer_transport_running(), "前进一次即算在走");
+    // 下一块钉在新位置 ⇒ 立刻回到静音，不会持续出声。
     assert!(
-        !owner.transfer_transport_running(),
-        "一次跳变后再无前进 ⇒ 仍在停播，不得放出一块"
+        !transport_running_after(&owner, (480_000, 480), (480_000, 480)),
+        "钉住不动 = 停播"
     );
 }
 
@@ -417,7 +464,7 @@ fn a_single_jump_while_stopped_stays_silent() {
 fn a_really_stopped_host_is_not_treated_as_running() {
     let owner = insert_owner();
     assert!(
-        !transport_running_after(&owner, 96_000, 96_000),
+        !transport_running_after(&owner, (96_000, 480), (96_000, 480)),
         "钉住不动 = 停播"
     );
 }
@@ -432,7 +479,7 @@ fn a_bound_ara_instance_keeps_its_output() {
     let (model, owner, _identity) = crate::editor::session::tests::fixture();
     assert!(owner.is_bound());
     assert!(
-        !transport_running_after(&owner, 0, 48_000),
+        !transport_running_after(&owner, (0, 48_000), (48_000, 48_000)),
         "绑定的实例必须保持『停播即静音』的既有行为"
     );
     model.session().close();

@@ -204,6 +204,13 @@ pub(crate) struct UiRequest {
 enum Job {
     Request(UiRequest, Option<u64>),
     Barrier(mpsc::Sender<()>),
+    /// 只唤醒 actor 回到循环顶部，不携带命令、不推进任何票据。
+    ///
+    /// 【为什么需要它】`request_reload` 要"立刻"被看到，但它不是用户编辑。
+    /// 此前它借用 `submitted` 票据来唤醒 actor，结果把账本推进到 `processed`
+    /// 永远追不上的位置（见 `request_reload` 的说明）。专用唤醒把"叫醒"与
+    /// "记账"彻底分开。
+    Wake,
     Close,
 }
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
@@ -647,8 +654,17 @@ impl EditorSession {
     /// 捕获存储并物化分析副本（文件 I/O），不能在那条 UI 线程上做。
     pub(crate) fn request_reload(&self) {
         self.reload_requested.store(true, Ordering::Release);
-        // 与用户做了一次编辑同义：推进票据，让 actor 立刻重新调度。
-        self.submitted.fetch_add(1, Ordering::AcqRel);
+        // 【为什么不再推进 `submitted`】`submitted` / `processed` 是"**用户编辑**"的账本：
+        // `processed` 只在 `Job::Request` 到达且 `mutates_audio` 为真时兑付（:984），
+        // 而重载既不产生 `Job::Request`、也不在 `mutates_audio` 里
+        // （`commands.rs:11-31`）。推进它会让 `processed < submitted`（:912）恒真 ⇒
+        // actor 每 1ms 空转一次、`start_render` 永远走不到 ⇒ 一次合成都排不出去 ⇒
+        // 用户永远只听到直通（用户报障）。
+        //
+        // 重载的即时性改由一个**专用唤醒**保证：它只让 actor 立刻回到循环顶部，
+        // 不占用任何票据。队列满时（有界 32）`try_send` 失败也没关系 ——
+        // `reload_requested` 已经置位，actor 最迟在空闲的 100ms 轮询里消费它。
+        let _ = self.queue.try_send(Job::Wake);
     }
     /// 有界32任务FIFO；关view取消回信，真实组件入口撤销则拒绝排队请求执行。
     pub fn enqueue(&self, request: UiRequest) -> Result<(), String> {
@@ -840,6 +856,19 @@ impl EditorSession {
                     // 宿主链接的回写监视。与补缓冲同一个理由挂在会话 actor 上：
                     // actor 由**会话**创建，与"插件窗口开没开"无关（见 `render::link::poll`）。
                     crate::render::link::poll(&owner);
+                    // 【为什么这里补一次调度】音频线程发现"有素材但处理结果不是当前代次"
+                    // 时只置一个原子（`ExtensionOwner::transfer_stage` 的 `render_wanted`）。
+                    // 真正的合成仍由本 actor 的渲染任务执行 —— 它自带在途检查、取消与
+                    // 重试预算。此前合成只由用户动作触发，一次票据事故就能让它无限期
+                    // 停摆，而界面照样显示素材已就绪（用户报障："永远是直通"）。
+                    if owner.take_render_wanted()
+                        && !session.render_requested.load(Ordering::Acquire)
+                    {
+                        session.render_requested.store(true, Ordering::Release);
+                        deadline = Some(Instant::now());
+                    }
+                    // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
+                    owner.report_pending_synthesis_once();
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。
@@ -937,6 +966,9 @@ impl EditorSession {
                 Ok(Job::Barrier(sender)) => {
                     let _ = sender.send(());
                 }
+                // 一次重载是"用户确实做了个动作"，因此把重试预算也重新武装：
+                // 否则此前失败过的合成会因预算耗尽而拒绝这一次的新请求。
+                Ok(Job::Wake) => retry.rearm(),
                 Ok(Job::Request(request, lease)) => {
                     let Some(session) = weak.upgrade() else {
                         break;
@@ -2979,6 +3011,53 @@ pub(crate) mod tests {
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
+    }
+
+    /// **重载不得占用"用户编辑"的票据。**
+    ///
+    /// 【为什么这是"永远是直通"的回归测试】`request_reload` 此前自增 `submitted`，
+    /// 而 `processed` 只在 `Job::Request` 到达且 `mutates_audio` 为真时兑付
+    /// （`transfer_*` 不在那个名单里，它也不产生 `Job::Request`）。于是
+    /// `processed < submitted` 恒真 ⇒ actor 每 1ms 空转一次、`start_render` 永远
+    /// 走不到 ⇒ 一次合成都排不出去 ⇒ 用户听到的永远是直通。
+    #[test]
+    fn a_reload_does_not_consume_the_edit_ticket() {
+        // 【为什么用没有素材的会话】本用例只钉票据账本，不该付一次真合成的代价
+        // （debug 构建下模型加载可达分钟级）。空时间线同样会走 `request_reload`
+        // 的完整路径：置标志 → 唤醒 actor → 消费重载。
+        let owner = Arc::new(ExtensionOwner::default());
+        owner.set_setup_sample_rate(48_000.0);
+        owner.note_binding_window_closed_without_ara();
+        let session = owner.editor_session().unwrap();
+        let submitted = session.submitted.load(Ordering::Acquire);
+        let processed = session.processed.load(Ordering::Acquire);
+        session.request_reload();
+        assert_eq!(
+            session.submitted.load(Ordering::Acquire),
+            submitted,
+            "重载不是用户编辑，不得推进票据"
+        );
+        assert_eq!(
+            session.processed.load(Ordering::Acquire),
+            processed,
+            "重载也不得伪造一次『已处理』"
+        );
+        assert!(
+            session.processed.load(Ordering::Acquire)
+                >= session.submitted.load(Ordering::Acquire),
+            "票据必须保持可兑付；否则 actor 永远停在『还有未处理变更』那一支，\
+             渲染调度永远走不到（用户报障：永远只听到直通）"
+        );
+        // 专用唤醒必须真的到达 actor，并且重载标志最终被消费。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && session.reload_requested.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !session.reload_requested.load(Ordering::Acquire),
+            "actor 必须在唤醒后消费重载标志"
+        );
+        session.close();
     }
 
     fn transfer_session_body(session: &Arc<EditorSession>) {
