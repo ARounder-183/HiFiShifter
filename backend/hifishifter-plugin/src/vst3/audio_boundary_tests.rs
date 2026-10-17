@@ -80,7 +80,8 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
             ..Default::default()
         };
         crate::test_allocator::begin();
-        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let result =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
         let allocations = crate::test_allocator::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
@@ -501,7 +502,8 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
     for mode in [0, 2] {
         data.process_mode = mode;
         crate::test_allocator::begin();
-        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+        let result =
+            unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
         let allocations = crate::test_allocator::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
@@ -834,7 +836,10 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
         "未绑定 ARA 的实例必须被判成 Transfer，否则下面这条通路根本不会被走到"
     );
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().expect("48 kHz 已声明，可以开始录制");
+    owner
+        .transfer()
+        .start()
+        .expect("48 kHz 已声明，可以开始录制");
 
     let block_frames = 8_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
@@ -877,8 +882,7 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
         // 录制中必须直通（默认监视）：用户要能听到宿主原声，而不是自己的旧快照。
         assert_eq!(allocations, 0, "录制路径不得在音频线程上分配");
         assert_eq!(
-            left,
-            [0.5_f32; 8],
+            left, [0.5_f32; 8],
             "录制中必须把宿主输入原样送出去（monitor 默认开）"
         );
         assert_eq!(right, [0.5_f32; 8]);
@@ -1001,7 +1005,10 @@ fn in_place_buffers_still_pass_the_host_audio_through() {
         unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
         K_RESULT_OK
     );
-    assert_eq!(plane_left, [0.3_f32; 8], "in-place 时输入必须原样留在缓冲里");
+    assert_eq!(
+        plane_left, [0.3_f32; 8],
+        "in-place 时输入必须原样留在缓冲里"
+    );
     assert_eq!(plane_right, [0.6_f32; 8]);
 }
 
@@ -1109,11 +1116,17 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
         K_RESULT_OK
     );
     let status = owner.transfer().status();
-    assert!(status.saw_context, "有工程位置就必须记下来，否则录制键永远是灰的");
+    assert!(
+        status.saw_context,
+        "有工程位置就必须记下来，否则录制键永远是灰的"
+    );
     assert!(status.saw_input, "有输入总线就必须记下来");
     owner.transfer().stop().expect("应当产生一个 take");
     assert_eq!(
-        owner.transfer().render_input().map(|(t, _, _)| t.clips.len()),
+        owner
+            .transfer()
+            .render_input()
+            .map(|(t, _, _)| t.clips.len()),
         Some(1),
         "没有输出总线也必须录到音频"
     );
@@ -1180,7 +1193,10 @@ fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
     let result =
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
     assert_eq!(result, K_RESULT_OK);
-    assert_eq!(left, [0.7_f32; 4], "未录制时必须输出快照，而不是直通宿主输入");
+    assert_eq!(
+        left, [0.7_f32; 4],
+        "未录制时必须输出快照，而不是直通宿主输入"
+    );
     assert_eq!(right, [0.7_f32; 4]);
 }
 
@@ -1242,7 +1258,9 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
     owner.arm_transfer_rendering();
     // 同步准备一次（生产路径由 UI 定时器排队驱动；这里直接调以免依赖线程调度）。
     owner
-        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
         .expect("准备必须成功");
 
     // 按**真实读者路径**取音：48 kHz 工程落在 48k 快照上。
@@ -1320,7 +1338,11 @@ fn a_negative_preroll_block_is_recorded_from_project_zero() {
     assert_eq!(clip.start_sec, 0.0, "负 pre-roll 不得进入 clip");
     assert!((clip.length_sec - 4.0 / 48_000.0).abs() < 1e-12);
     assert_eq!(
-        owner.transfer().capture_diagnostics().unwrap().preroll_frames_dropped,
+        owner
+            .transfer()
+            .capture_diagnostics()
+            .unwrap()
+            .preroll_frames_dropped,
         4
     );
 }
@@ -1383,7 +1405,14 @@ fn a_lagging_playing_bit_still_captures_the_first_process_block() {
         (clip.length_sec - 16.0 / 48_000.0).abs() < 1e-12,
         "两块都要在 take 里（第一块由 lookbehind 补回）"
     );
-    assert_eq!(owner.transfer().capture_diagnostics().unwrap().pending_committed, 1);
+    assert_eq!(
+        owner
+            .transfer()
+            .capture_diagnostics()
+            .unwrap()
+            .pending_committed,
+        1
+    );
 }
 
 /// **停播/预渲染留下的远位置不能把起播块清成静音。**
@@ -1436,10 +1465,142 @@ fn a_stale_prefetch_block_does_not_silence_the_playback_start() {
         assert_eq!(result, K_RESULT_OK);
         observed.push((index, left, right));
     }
-    assert_eq!(observed[0].1, [0.0; 8], "第一块没有可比对象，保守静音");
+    assert_eq!(
+        observed[0].1, [0.5; 8],
+        "本流第一次出现 ⇒ 允许出音一次（重复由区间去重抑制）"
+    );
     assert_eq!(
         observed[1].1, [0.5; 8],
         "块首从旧位置回到播放头 ⇒ 不得被旧高水位清掉"
     );
     assert_eq!(observed[1].2, [0.5; 8]);
+}
+
+/// 通过真实 `process` 入口跑一块，返回输出左右平面。
+fn run_stream_block(
+    processor: &mut Processor,
+    mode: i32,
+    state: u32,
+    start: i64,
+    frames: usize,
+    value: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut input_left = vec![value; frames];
+    let mut input_right = vec![value; frames];
+    let mut input_planes = [input_left.as_mut_ptr(), input_right.as_mut_ptr()];
+    let mut input = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: input_planes.as_mut_ptr(),
+    };
+    let mut output_left = vec![0.0_f32; frames];
+    let mut output_right = vec![0.0_f32; frames];
+    let mut output_planes = [output_left.as_mut_ptr(), output_right.as_mut_ptr()];
+    let mut output = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 3,
+        channel_buffers: output_planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state,
+        sample_rate: 48_000.0,
+        project_time_samples: start,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: mode,
+        num_samples: frames as i32,
+        num_inputs: 1,
+        num_outputs: 1,
+        inputs: &raw mut input,
+        outputs: &raw mut output,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(processor), (&raw mut data).cast()) };
+    assert_eq!(result, K_RESULT_OK);
+    (output_left, output_right)
+}
+
+/// **prefetch 块（`kPlaying == 0`）的输出不得被实时传输状态清空。**
+///
+/// 【为什么这是“开头 0.7 s 空洞”的回归】ASIO Guard 会在起播前预取；这批输出
+/// 稍后才被播放。此刻的 `kPlaying` 与内容正确性无关。
+#[test]
+fn a_prefetch_block_without_playing_still_outputs_audio() {
+    let mut processor = Processor::create().unwrap();
+    processor
+        .extension_owner
+        .note_binding_window_closed_without_ara();
+    for _ in 0..2 {
+        let (left, right) = run_stream_block(&mut processor, 1, 0, 0, 8, 0.5);
+        assert_eq!(left, vec![0.5; 8], "prefetch 输出不得被清空");
+        assert_eq!(right, vec![0.5; 8]);
+    }
+    let diagnostics = processor.extension_owner.block_diagnostics_json(0);
+    assert_eq!(
+        diagnostics["streams"]["prefetch"]["gate_cleared"], 0,
+        "prefetch 的清零必须是 0"
+    );
+}
+
+/// **同一实时区间重复投递：第一次出音，之后静音。**
+///
+/// 【为什么不能靠“首块保守静音”】那会把真正起播的第一块吞掉；区间去重才能
+/// 同时满足“第一次必须能听到”和“停播光标不嗡嗡响”。
+#[test]
+fn a_repeated_realtime_block_is_silenced_after_the_first_occurrence() {
+    let mut processor = Processor::create().unwrap();
+    processor
+        .extension_owner
+        .note_binding_window_closed_without_ara();
+    let (first, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
+    assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
+    let (second, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
+    assert_eq!(second, vec![0.0; 8], "同一区间的重复必须静音");
+    let diagnostics = processor.extension_owner.block_diagnostics_json(0);
+    assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
+}
+
+/// **prefetch/实时交错时，捕获只跟随被选举的那条流，开头窗口完整。**
+#[test]
+fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {
+    let mut processor = Processor::create().unwrap();
+    processor
+        .extension_owner
+        .note_binding_window_closed_without_ara();
+    processor.extension_owner.set_setup_sample_rate(48_000.0);
+    processor.extension_owner.transfer().start().unwrap();
+    let frames = 1024_usize;
+    for (mode, start, length) in [
+        (1_i32, 0_i64, frames),
+        (0, 0, 64),
+        (1, frames as i64, frames),
+        (0, 64, 64),
+    ] {
+        let _ = run_stream_block(&mut processor, mode, 0, start, length, 0.5);
+    }
+    let take = processor.extension_owner.transfer().stop().unwrap();
+    assert_eq!(take, 1);
+    let diagnostics = processor
+        .extension_owner
+        .transfer()
+        .capture_diagnostics()
+        .unwrap();
+    assert_eq!(
+        diagnostics.elected,
+        Some(crate::transfer::capture::ProcessStream::Prefetch),
+        "prefetch-only 的起播窗口必须由 prefetch 供料"
+    );
+    assert_eq!(diagnostics.stream_switches, 0);
+    let (timeline, _, _) = processor.extension_owner.transfer().render_input().unwrap();
+    assert_eq!(timeline.clips.len(), 1);
+    let clip = &timeline.clips[0];
+    assert_eq!(clip.start_sec, 0.0);
+    let expected = (2 * frames) as f64 / 48_000.0;
+    assert!(
+        (clip.length_sec - expected).abs() < 1e-9,
+        "两块 prefetch 都必须进 take（实际 {}，期望 {expected}）",
+        clip.length_sec
+    );
 }

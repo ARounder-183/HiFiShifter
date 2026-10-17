@@ -1657,6 +1657,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     // 既录不到东西，又让 `sawContext` 永不置位（界面上的录制键一直是灰的）。
     //
     // 只跳过 `InvalidArgument`（data 本身非法）：那种情况下连字段读取都不该做。
+    let mut evidence = None;
     if !matches!(shape, Err(crate::audio_abi::BufferError::InvalidArgument)) {
         // SAFETY: 宿主持有 Processor；data 的字段布局由 `validate` 的调用契约保证。
         let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
@@ -1672,7 +1673,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
             owner.observe_transport(context, probe.process_mode);
-            owner.transfer_observe(probe, context);
+            evidence = owner.transfer_observe(probe, context);
         }
     }
     match shape {
@@ -1737,9 +1738,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // "清输出"才是真的清。
             if data.process_mode != 2
                 && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
-                && !owner.transfer_transport_running()
+                && !owner.transfer_should_emit(evidence)
             {
-                owner.note_gate_cleared();
+                owner.note_gate_cleared(
+                    evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
+                        ev.stream
+                    }),
+                );
                 let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
             }
@@ -1747,7 +1752,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
             // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
             // 而不是把整条轨静音（见 `ExtensionOwner::transfer_output`）。
-            let (snapshot_source, layered) = match owner.transfer_stage(data) {
+            let (snapshot_source, layered) = match owner.transfer_stage(data, evidence) {
                 crate::render::extension::TransferStage::Handled => return K_RESULT_OK,
                 crate::render::extension::TransferStage::Snapshot { source, layered } => {
                     (source, layered)

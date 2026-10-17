@@ -238,7 +238,11 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
 #[test]
 fn an_instance_without_material_is_transparent_regardless_of_mode() {
     let owner = insert_owner();
-    assert_eq!(owner.mode(), InstanceMode::Undetermined, "窗口没开过、宽限期未过");
+    assert_eq!(
+        owner.mode(),
+        InstanceMode::Undetermined,
+        "窗口没开过、宽限期未过"
+    );
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::PassThrough,
@@ -358,10 +362,12 @@ fn a_bound_instance_stays_on_the_ara_path() {
 fn the_recording_monitor_option_is_reachable() {
     let owner = insert_owner();
     assert!(owner.transfer().options().monitor, "默认监听");
-    owner.transfer().set_options(crate::transfer::TransferOptions {
-        monitor: false,
-        ..owner.transfer().options()
-    });
+    owner
+        .transfer()
+        .set_options(crate::transfer::TransferOptions {
+            monitor: false,
+            ..owner.transfer().options()
+        });
     assert!(!owner.transfer().options().monitor);
 }
 
@@ -388,11 +394,11 @@ fn transport_running_after(
 #[test]
 fn the_first_blocks_of_playback_are_not_swallowed() {
     let owner = insert_owner();
-    // 第一个块：没有可比对象 ⇒ 保守判成没在前进。
+    // 第一个块：本流的首次出现 ⇒ 允许出音一次（重复由 last_emitted 抑制）。
     owner.note_block_position(0, 480);
     assert!(
-        !owner.transfer_transport_running(),
-        "第一个块没有可比对象，必须保守判成没在前进"
+        owner.transfer_transport_running(),
+        "本流第一块必须能出音一次，而不是保守清空"
     );
     // 停播：同一个块被反复 process ⇒ 块尾不动 ⇒ 不前进 ⇒ 清输出是对的。
     assert!(
@@ -596,9 +602,12 @@ fn the_block_trace_records_a_lagging_start() {
         owner.note_block_trace(
             0,
             0,
+            ProcessStream::Realtime,
             start,
             512,
             false,
+            true,
+            true,
             true,
             crate::transfer::TransferBlockOutcome::NotPlaying.code(),
             false,
@@ -616,4 +625,96 @@ fn the_block_trace_records_a_lagging_start() {
     assert!(owner.take_trace_wanted(), "可疑窗口必须请求一次落盘");
     assert!(!owner.take_trace_wanted(), "同一次窗口不得重复请求");
     owner.transfer().cancel();
+}
+
+/// **prefetch 的移动不能替实时流的重复块作“在前进”的证。**
+///
+/// 【为什么这是“开头小段反复播放”的最小回归】两条流共用 `last_block_start` 时，
+/// prefetch 每移动一次，实时流就会被判一次“前进”，门控随即放行同一小段。
+#[test]
+fn prefetch_movement_does_not_unlock_a_repeated_realtime_block() {
+    let owner = insert_owner();
+    assert!(
+        owner
+            .note_stream_position(ProcessStream::Realtime, 48_000, 512)
+            .0
+    );
+    assert!(
+        owner
+            .note_stream_position(ProcessStream::Prefetch, 480_000, 32_768)
+            .0
+    );
+    let (flow, had) = owner.note_stream_position(ProcessStream::Realtime, 48_000, 512);
+    assert!(had);
+    assert!(
+        !flow,
+        "同一个实时块在 prefetch 移动之后仍然是“重复”，不得被解锁"
+    );
+    assert!(!owner.transfer_transport_running());
+}
+
+/// **prefetch/offline 的输出永远不被传输状态门控。**
+#[test]
+fn prefetch_and_offline_never_look_stopped() {
+    let owner = insert_owner();
+    for stream in [ProcessStream::Prefetch, ProcessStream::Offline] {
+        let evidence = BlockEvidence {
+            stream,
+            start: 0,
+            frames: 512,
+            playing: false,
+            recording: false,
+            flow: false,
+            had_previous: true,
+            allow_output: false,
+        };
+        assert!(
+            owner.transfer_should_emit(Some(evidence)),
+            "{stream:?} 的输出稍后才被播放，不能因为此刻 kPlaying=0 被清空"
+        );
+    }
+    let realtime = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        start: 0,
+        frames: 512,
+        playing: false,
+        recording: false,
+        flow: false,
+        had_previous: true,
+        allow_output: false,
+    };
+    assert!(!owner.transfer_should_emit(Some(realtime)));
+    assert!(owner.transfer_should_emit(Some(BlockEvidence {
+        allow_output: true,
+        ..realtime
+    })));
+}
+
+/// **面板读数按流取 OR：prefetch 的 0 不能清掉实时流的 1。**
+#[test]
+fn prefetch_playing_zero_does_not_clear_realtime_playing() {
+    let owner = insert_owner();
+    let samples: &'static [f32] = Box::leak(vec![0.25_f32; 8].into_boxed_slice());
+    let realtime = InputBlock {
+        start: 0,
+        frames: 8,
+        sample_rate: 48_000.0,
+        planes: [Some(samples), Some(samples)],
+        playing: true,
+    };
+    owner
+        .transfer()
+        .observe_with_stream(&realtime, ProcessStream::Realtime);
+    let prefetch = InputBlock {
+        playing: false,
+        ..realtime
+    };
+    owner
+        .transfer()
+        .observe_with_stream(&prefetch, ProcessStream::Prefetch);
+    assert!(
+        owner.transfer().host_playing(),
+        "prefetch 的 kPlaying=0 不得覆盖实时流的 kPlaying=1"
+    );
+    assert!(!owner.transfer().capture_stream_playing(), "尚未选举捕获流");
 }

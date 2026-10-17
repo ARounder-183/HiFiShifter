@@ -2,10 +2,13 @@
 
 use super::ownership::{region_owners, RegionKey};
 use crate::sync::MutexExt;
+use crate::transfer::capture::{BlockContext, ProcessStream};
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{Arc, Mutex};
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
@@ -382,6 +385,36 @@ pub(crate) enum SnapshotSource {
     Raw,
 }
 
+/// 一次 `process` 回调里**本块**的完整证据。
+///
+/// 【为什么在同一个回调内传递】门控（停播清空）、输出仲裁（直通/处理结果）与捕获
+/// （lookbehind）必须看到**同一块**。此前它们分别读实例级 `position_advancing` /
+/// `host_playing`，而另一条进程流或另一个线程可以在两次读之间覆盖结论。这个值由
+/// `transfer_observe` 算出，原样交给 `transfer_stage` 与记录器。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockEvidence {
+    pub stream: ProcessStream,
+    pub start: i64,
+    pub frames: usize,
+    pub playing: bool,
+    pub recording: bool,
+    /// 本流内：首块、块首移动，或同头块变长。
+    pub flow: bool,
+    /// 本流内是否见过上一块。
+    pub had_previous: bool,
+    /// 门控是否允许本块写出内容（仅实时流会因“同区间重复”为假）。
+    pub allow_output: bool,
+}
+
+/// 一条进程流自己的块几何（音频线程写，无锁）。
+#[derive(Default)]
+struct StreamGeometry {
+    seen: AtomicBool,
+    last_start: AtomicI64,
+    last_frames: AtomicU32,
+    blocks: AtomicU64,
+}
+
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -489,29 +522,34 @@ pub(crate) struct ExtensionOwner {
     /// 日志会把日志刷满，而按代次去重之后，一次真正的卡死只会留下一条可检索的记录，
     /// 合成成功后自然不再出现。
     pending_reported_revision: AtomicU64,
-    /// 上一块的块首工程位置（`projectTimeSamples`）。
-    last_block_start: AtomicI64,
-    /// 上一块的帧数（`numSamples`）。
-    last_block_frames: AtomicU32,
-    /// 见过至少一个块的位置（`false` 时上面几个读数没有意义）。
-    has_block_position: AtomicBool,
-    /// 本块相对上一块是否提供了"位置流在推进"的证据（见
-    /// [`Self::transfer_transport_running`]）。
+    /// 每条进程流自己的块几何。**绝不跨流比较**。
     ///
-    /// 【判据只问当前块与上一块的关系】此前问的是"本块块尾是否越过上一块块尾"，
-    /// 但 `last_block_end` 跨停播/seek 保留：宿主预渲染/ASIO Guard 让最后一块的块尾
-    /// 落在播放头**之前**时，起播后的所有块都要等到播放头越过那个旧值才出声 ——
-    /// 用户听到的正是"开头约 0.7 秒"的静音/卡顿。现在只看：
-    ///   * 块首变了（seek/循环/起播） ⇒ 推进；
-    ///   * 块首没变但块变长（起播的第一个长块与停播块同头） ⇒ 推进；
-    ///   * 块首没变且块不变长/变短 ⇒ 没有推进（钉住/重复）。
-    /// 这不是"宿主一定在播"，而是"不是同一块被重复"；清输出还要求 `kPlaying == 0`。
-    position_advancing: AtomicBool,
+    /// 【为什么必须分开】SDK 允许 `kRealtime` 与 `kPrefetch` 交替调用同一实例
+    /// （`ivstaudioprocessor.h:138-143`）。共用一份 `last_block_start` 时，prefetch
+    /// 的位置移动会让实时流的“同一块重复”被误判成“在前进”，门控于是反复放行同一
+    /// 小段（用户听到的“开头 0.7 秒反复播放”）；捕获的 `expected_next` 同样会被
+    /// 两条流撕成每块一段。
+    streams: [StreamGeometry; 3],
+    /// 仅实时流的最近一次推进结论（兼容旧测试与诊断；ARA 实例恒为假）。
+    realtime_flow: AtomicBool,
+    /// 实时流上一次**实际写出内容**的区间；用于抑制停播光标处的同区间重复。
+    rt_last_emitted_start: AtomicI64,
+    rt_last_emitted_frames: AtomicU32,
+    rt_last_emitted_valid: AtomicBool,
+    /// 实时流上一块的播放位（用于 `kPlaying` 上升沿复位重复抑制）。
+    rt_playing: AtomicBool,
     /// 块级诊断计数：收到的块、`kPlaying` 块、位置推进但未置播放位的块、被门控清掉的块。
     blocks_seen: AtomicU64,
     blocks_playing: AtomicU64,
     blocks_flow_without_playing: AtomicU64,
     gate_cleared: AtomicU64,
+    /// 按进程流分开的同一组计数。
+    stream_blocks: [AtomicU64; 3],
+    stream_playing_blocks: [AtomicU64; 3],
+    stream_flow_without_playing: [AtomicU64; 3],
+    stream_gate_cleared: [AtomicU64; 3],
+    /// 因“同一区间重复”被抑制输出的实时块数。
+    repeats_suppressed: AtomicU64,
     /// 宿主在 `setupProcessing` 声明的单块上限（`0` = 未声明）。
     max_samples_per_block: AtomicI32,
     /// 音频线程发现值得留证的起播窗口时置位；actor 心跳消费并落一次日志。
@@ -1984,7 +2022,9 @@ impl ExtensionOwner {
         };
         self.raw_tape.collect_retired();
         if !self.raw_tape.has_capacity(&snapshot) {
-            log::warn!("[transfer] raw tape does not fit the snapshot budget; keeping the previous one");
+            log::warn!(
+                "[transfer] raw tape does not fit the snapshot budget; keeping the previous one"
+            );
             return;
         }
         match self.raw_tape.publish(snapshot) {
@@ -2177,7 +2217,8 @@ impl ExtensionOwner {
         self.transfer_prepared.store(version, Ordering::Release);
         // 处理结果与当前 take 的对应关系：音频线程据此在"处理结果"与"原始磁带"之间选
         // （见 `processed_ready`）。换 take 之后这里才更新，所以中间那段空窗由原始磁带兜底。
-        self.transfer_ready_revision.store(revision, Ordering::Release);
+        self.transfer_ready_revision
+            .store(revision, Ordering::Release);
         log::info!("[transfer] prepared material revision {revision} edit {edit}");
         Ok(())
     }
@@ -2188,6 +2229,11 @@ impl ExtensionOwner {
     /// 与 `vst3` 的后续分支拼起来才能回答。收敛成一个值之后，每个分支都能被单独断言，
     /// 而"静音"只剩下"确实没有素材"这一个含义。
     pub(crate) fn transfer_output(&self) -> TransferOutput {
+        self.transfer_output_with(None)
+    }
+
+    /// 与 [`Self::transfer_output`] 相同，但使用**本块**的流/播放证据。
+    pub(crate) fn transfer_output_with(&self, evidence: Option<BlockEvidence>) -> TransferOutput {
         // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
         // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
         // 形态一旦是 ARA，任何 Transfer 结论都不适用。
@@ -2216,10 +2262,15 @@ impl ExtensionOwner {
         // 只按 `capture_started || host_playing` 判断时，那一块会被当成"待命"，
         // 输出上一版 `Processed` —— 旧内容盖在新演奏上。位置流在推进时按录制中直通，
         // 最多在几何变化的瞬间多直通一块；重复块随即回到 `Processed`，待命语义不变。
-        if self
-            .transfer
-            .is_recording_with_flow(self.transfer_transport_running())
-        {
+        // 没有本块证据的调用（旧测试/旧入口）退回实例级实时流读数；生产路径
+        // 永远由 `transfer_observe` 提供证据，因此不会读到另一条流的结论。
+        let recording = if evidence.is_some() {
+            self.transfer.is_recording_with_evidence(evidence)
+        } else {
+            self.transfer
+                .is_recording_with_flow(self.transfer_transport_running())
+        };
+        if recording {
             return TransferOutput::Recording;
         }
         if !self.transfer.has_material() {
@@ -2277,7 +2328,11 @@ impl ExtensionOwner {
             return;
         }
         // 按代次去重：同一份素材只报一次。
-        if self.pending_reported_revision.swap(revision, Ordering::AcqRel) == revision {
+        if self
+            .pending_reported_revision
+            .swap(revision, Ordering::AcqRel)
+            == revision
+        {
             return;
         }
         log::warn!(
@@ -2299,15 +2354,38 @@ impl ExtensionOwner {
     /// 压住：播放头还没越过旧块尾时，每一块都被判成"没前进"（用户报障：开头约
     /// 0.7 秒静音/卡顿）。当前块与上一块的关系不会跨停播残留。
     ///
-    /// 【首块】没有可比对象，返回 `false`（保守）。捕获侧的 lookbehind 会把它补回。
+    /// 【首块】`flow == true`（本流第一次出现）。门控允许它出音一次；重复抑制由
+    /// [`Self::rt_last_emitted`] 负责，不再靠“首块保守静音”。
     pub(crate) fn note_block_position(&self, start: i64, frames: usize) -> bool {
+        self.note_stream_position(ProcessStream::Realtime, start, frames)
+            .0
+    }
+
+    /// 只更新**本流**的几何并回答 `(flow, had_previous)`。
+    ///
+    /// 【为什么必须带 stream】`kPrefetch` 与 `kRealtime` 的位置节奏不同；跨流比较
+    /// 会让 prefetch 的移动给实时块的重复投递作“在前进”的伪证。
+    pub(crate) fn note_stream_position(
+        &self,
+        stream: ProcessStream,
+        start: i64,
+        frames: usize,
+    ) -> (bool, bool) {
+        let geometry = &self.streams[stream.index()];
+        geometry.blocks.fetch_add(1, Ordering::Relaxed);
+        if frames == 0 {
+            // 零帧块是参数 flush，不代表时间轴在走。
+            return (false, geometry.seen.load(Ordering::Relaxed));
+        }
         let frames = u32::try_from(frames).unwrap_or(u32::MAX);
-        let had = self.has_block_position.swap(true, Ordering::Relaxed);
-        let last_start = self.last_block_start.swap(start, Ordering::Relaxed);
-        let last_frames = self.last_block_frames.swap(frames, Ordering::Relaxed);
-        let flow = had && (start != last_start || frames > last_frames);
-        self.position_advancing.store(flow, Ordering::Release);
-        flow
+        let had = geometry.seen.swap(true, Ordering::Relaxed);
+        let last_start = geometry.last_start.swap(start, Ordering::Relaxed);
+        let last_frames = geometry.last_frames.swap(frames, Ordering::Relaxed);
+        let flow = !had || start != last_start || frames > last_frames;
+        if stream == ProcessStream::Realtime {
+            self.realtime_flow.store(flow, Ordering::Release);
+        }
+        (flow, had)
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2329,7 +2407,25 @@ impl ExtensionOwner {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return false;
         }
-        self.position_advancing.load(Ordering::Acquire)
+        self.realtime_flow.load(Ordering::Acquire)
+    }
+
+    /// 门控问“本块是否可以不清空”。
+    ///
+    /// 【真值表】ARA 实例：`false`（保持“停播即静音”的既有语义，由调用方的
+    /// `!kPlaying` 决定）。未绑定实例：offline/prefetch 恒真（它们的输出稍后才被
+    /// 播放，不能用此刻的传输状态挖洞）；实时流看本块证据。
+    pub(crate) fn transfer_should_emit(&self, evidence: Option<BlockEvidence>) -> bool {
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            return false;
+        }
+        match evidence {
+            Some(evidence) => match evidence.stream {
+                ProcessStream::Offline | ProcessStream::Prefetch => true,
+                ProcessStream::Realtime => evidence.allow_output,
+            },
+            None => false,
+        }
     }
 
     /// 已发布的**处理结果**是否对应当前活动 take。
@@ -2375,12 +2471,14 @@ impl ExtensionOwner {
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: &crate::audio_abi::ProcessContext,
-    ) {
+    ) -> Option<BlockEvidence> {
         let transfer = self.transfer();
+        // SAFETY: 调用方保证 data 在本回调期间可读。
+        let mode = unsafe { (*data).process_mode };
+        let stream = ProcessStream::from_mode(mode);
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
         // "点一次 Transfer 然后导出"，而实时宿主必须真的播一遍。
-        // SAFETY: 调用方保证 data 在本回调期间可读。
-        if unsafe { (*data).process_mode } == 2 {
+        if stream == ProcessStream::Offline {
             transfer.note_offline();
         }
         // 【为什么采样率有兜底】`ProcessContext::sample_rate` 是 SDK 标注 always valid 的
@@ -2393,45 +2491,119 @@ impl ExtensionOwner {
         } else {
             declared
         };
+        let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
+        let recording = context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0;
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
         // 的切片只在本次回调内有效，而消费方同步读完就返回。
         let block = unsafe {
-            crate::audio_abi::capture_view(
-                data,
-                context.project_time_samples,
-                rate,
-                context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
-            )
+            crate::audio_abi::capture_view(data, context.project_time_samples, rate, playing)
         };
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
         // 代价是几个原子写 + 一次缓冲形状检查（不分配、不读样本）。
-        transfer.observe(&block);
-        // 【为什么位置是否前进要在这里记】它决定"停播时要不要清输出"，而那是本块稍后
-        // 就要做的决定（见 `transfer_transport_running`）。必须在**每个**块上更新，
-        // 与是否武装无关 —— 停播期间的块正是这个判据的信息来源。
-        //
-        // 【为什么把块长一起传下去】块长由宿主决定，单块可以很长；起播的第一个长块
-        // 可能与停播块同头，必须靠"同头但更长"识别为推进（见 `note_block_position`）。
-        // 【为什么把 flow 一起传下去】`kPlaying` 可能在起播窗口里滞后（或宿主用
-        // ASIO Guard / anticipative FX 提前处理）。捕获需要这个弱证据来暂存第一块，
-        // 等下一块连续时再提交（见 `Capture::on_block_with_flow`）。
-        let flow = self.note_block_position(block.start, block.frames);
+        transfer.observe_with_stream(&block, stream);
+        // 【为什么位置是否前进要按流记】它决定"停播时要不要清输出"与捕获的
+        // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
+        // 实时流“在前进”的证据（用户听到的开头小段循环）。
+        let (flow, had_previous) = self.note_stream_position(stream, block.start, block.frames);
+        // `kPlaying` 上升沿意味着一次新的播放会话：允许同一区间再出音一次。
+        if stream == ProcessStream::Realtime {
+            let was = self.rt_playing.swap(playing, Ordering::Relaxed);
+            if playing && !was {
+                self.rt_last_emitted_valid.store(false, Ordering::Release);
+            }
+        }
+        let allow_output = self.allow_output_for(stream, &block, flow);
         // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
         // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
-        let outcome = transfer.on_block_with_flow(block, flow);
+        let outcome = transfer.on_block_with_context(
+            block,
+            BlockContext {
+                stream,
+                playing,
+                recording,
+                flow,
+            },
+        );
         self.note_block_trace(
             context.state,
-            // SAFETY: 调用方保证 data 在本回调期间可读。
-            unsafe { (*data).process_mode },
+            mode,
+            stream,
             block.start,
             block.frames,
-            block.playing,
+            playing,
             flow,
+            had_previous,
+            allow_output,
             outcome.code(),
             transfer.capture_started(),
         );
+        Some(BlockEvidence {
+            stream,
+            start: block.start,
+            frames: block.frames,
+            playing,
+            recording,
+            flow,
+            had_previous,
+            allow_output,
+        })
+    }
+
+    /// 本块是否允许写出内容。
+    ///
+    /// 【真值表】离线/prefetch：永远允许（它们的输出稍后才被播放，此刻的传输状态
+    /// 与内容正确性无关）。实时：`kPlaying`、本流推进、或“这个区间还没出过音”
+    /// 允许；同一区间在停播光标处重复到达则抑制（避免小段循环/嗡嗡声）。
+    fn allow_output_for(
+        &self,
+        stream: ProcessStream,
+        block: &crate::transfer::capture::InputBlock<'_>,
+        flow: bool,
+    ) -> bool {
+        // ARA 的“停播即静音”由 vst3 的门控单独处理；这里不参与。
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            return true;
+        }
+        match stream {
+            ProcessStream::Offline | ProcessStream::Prefetch => true,
+            ProcessStream::Realtime => {
+                if block.playing || flow {
+                    return true;
+                }
+                let same = self.rt_last_emitted_valid.load(Ordering::Acquire)
+                    && self.rt_last_emitted_start.load(Ordering::Acquire) == block.start
+                    && self.rt_last_emitted_frames.load(Ordering::Acquire)
+                        == u32::try_from(block.frames).unwrap_or(u32::MAX);
+                if same {
+                    self.repeats_suppressed.fetch_add(1, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /// 记录“本块确实写出了内容”（由 [`Self::transfer_stage`] 在写入分支调用）。
+    fn note_emitted(&self, evidence: Option<BlockEvidence>) {
+        let Some(evidence) = evidence else {
+            return;
+        };
+        if evidence.stream != ProcessStream::Realtime
+            || self.is_bound()
+            || self.bound_once.load(Ordering::Acquire)
+        {
+            return;
+        }
+        self.rt_last_emitted_start
+            .store(evidence.start, Ordering::Release);
+        self.rt_last_emitted_frames.store(
+            u32::try_from(evidence.frames).unwrap_or(u32::MAX),
+            Ordering::Release,
+        );
+        self.rt_last_emitted_valid.store(true, Ordering::Release);
     }
 
     /// 音频线程上的 Transfer **输出**阶段。
@@ -2449,13 +2621,14 @@ impl ExtensionOwner {
     pub(crate) fn transfer_stage(
         &self,
         data: *mut crate::audio_abi::ProcessData,
+        evidence: Option<BlockEvidence>,
     ) -> TransferStage {
         let transfer = self.transfer();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let offline = unsafe { (*data).process_mode } == 2;
-        // 选项一次取好：它在音频线程上要取一次锁，而下面两个分支都要用。
+        // 选项是无锁快照（见 `TransferStore::options`）。
         let options = transfer.options();
-        let output = self.transfer_output();
+        let output = self.transfer_output_with(evidence);
         self.note_output_rung(output);
         match output {
             // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。
@@ -2471,6 +2644,7 @@ impl ExtensionOwner {
                 if options.monitor && !offline {
                     // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                     let _ = unsafe { crate::audio_abi::pass_through(data) };
+                    self.note_emitted(evidence);
                 } else {
                     // 【为什么"不监听"必须显式清空】本分支**整块都不写**，而调用方拿到
                     // `Handled` 就立刻返回（见 `audio_process_inner`）—— 于是输出缓冲里
@@ -2481,17 +2655,23 @@ impl ExtensionOwner {
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 }
                 TransferStage::Handled
-            },
+            }
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
             // 那段被替换成处理结果，其余保持宿主原声。见 `copy_block_layered`。
-            TransferOutput::Processed | TransferOutput::StaleProcessed => TransferStage::Snapshot {
-                source: SnapshotSource::Processed,
-                layered: options.outside_passthrough,
-            },
-            TransferOutput::Raw => TransferStage::Snapshot {
-                source: SnapshotSource::Raw,
-                layered: options.outside_passthrough,
-            },
+            TransferOutput::Processed | TransferOutput::StaleProcessed => {
+                self.note_emitted(evidence);
+                TransferStage::Snapshot {
+                    source: SnapshotSource::Processed,
+                    layered: options.outside_passthrough,
+                }
+            }
+            TransferOutput::Raw => {
+                self.note_emitted(evidence);
+                TransferStage::Snapshot {
+                    source: SnapshotSource::Raw,
+                    layered: options.outside_passthrough,
+                }
+            }
             // 【为什么与 `PassThrough` 输出相同】素材在，但还没有任何可播的版本；
             // 唯一诚实的输出仍是宿主原声（静音会让整条轨"哑掉"）。区别只在**读数**：
             // 这一档让界面能说"素材已就绪，等待合成"，从而把"合成没跑"暴露出来。
@@ -2499,6 +2679,7 @@ impl ExtensionOwner {
             TransferOutput::PendingSynthesis | TransferOutput::PassThrough => {
                 // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                 let _ = unsafe { crate::audio_abi::pass_through(data) };
+                self.note_emitted(evidence);
                 TransferStage::Handled
             }
         }
@@ -2522,15 +2703,17 @@ impl ExtensionOwner {
             }
         }
         match self.mode() {
-            InstanceMode::Transfer => {
-                crate::host::adapter::HostBackend::Transfer(crate::host::transfer::TransferHost::new())
-            }
+            InstanceMode::Transfer => crate::host::adapter::HostBackend::Transfer(
+                crate::host::transfer::TransferHost::new(),
+            ),
             // 【为什么 `Undetermined` 也要看素材】形态要等 `setActive` 之后 5 秒才落定，
             // 而"宿主把本插件当普通插入"的会话里用户可能从不打开窗口 —— 那时形态永远
             // 停在 `Undetermined`，按 ARA-only 准备会让 Transfer 的渲染准入失败。
             // 素材存在本身就是 Transfer 的证明（见 `renders`）。
             InstanceMode::Undetermined if self.transfer.has_material() => {
-                crate::host::adapter::HostBackend::Transfer(crate::host::transfer::TransferHost::new())
+                crate::host::adapter::HostBackend::Transfer(
+                    crate::host::transfer::TransferHost::new(),
+                )
             }
             // 剩下的 `Undetermined` 是"还没确定"（此时按 ARA 准备是安全的，ARA 是更丰富的
             // 形态），`Ara` 本来就是这个后端。
@@ -3084,7 +3267,13 @@ impl ExtensionOwner {
     pub(crate) fn export_link(
         &self,
         root: &std::path::Path,
-    ) -> Result<(hifishifter_host_link::LinkManifest, hifishifter_host_link::Workspace), String> {
+    ) -> Result<
+        (
+            hifishifter_host_link::LinkManifest,
+            hifishifter_host_link::Workspace,
+        ),
+        String,
+    > {
         use hifishifter_host_link as link;
         let document = self
             .document
@@ -3110,11 +3299,7 @@ impl ExtensionOwner {
             edits.revision
         };
 
-        let host_label = self
-            .host_backend()
-            .app_name()
-            .unwrap_or("Host")
-            .to_string();
+        let host_label = self.host_backend().app_name().unwrap_or("Host").to_string();
         let doc_key = self.document_key(&document);
         let identity = link::link_id(link::SourceKind::Ara, &host_label, &doc_key);
         // 【为什么目录名就是身份】重新导出必须落在**同一个**工作区上，否则每次导出
@@ -3330,7 +3515,8 @@ impl ExtensionOwner {
             // 同理，渲染也不能在事务里做：那会把宿主挡住整个渲染时长。
             let (base_model, candidate, epoch, scope, inputs) = {
                 let _transaction = document.transaction.lock_or_recover();
-                self.merge_pending_restore(&document).map_err(Self::invalid_edit)?;
+                self.merge_pending_restore(&document)
+                    .map_err(Self::invalid_edit)?;
                 if !document.ready.load(Ordering::Acquire) {
                     return Err((
                         link::error_code::MODEL_NOT_READY,
@@ -3344,7 +3530,9 @@ impl ExtensionOwner {
                 // 几何归属：宿主拥有的字段变了就拒绝，并**指名字段**。
                 // 判据在这里算而不是在消费者侧 —— 只有生产者有权威，
                 // 而消费者的活状态（后台的假立体声折叠、波形回填）因此再也打不穿它。
-                let current = self.document_timeline(&document).map_err(Self::invalid_edit)?;
+                let current = self
+                    .document_timeline(&document)
+                    .map_err(Self::invalid_edit)?;
                 let differences = hifishifter_kernel::editor::host_timeline::geometry_differences(
                     &edit.host_geometry,
                     &hifishifter_kernel::editor::host_timeline::host_geometry_projection(&current),
@@ -3377,14 +3565,17 @@ impl ExtensionOwner {
                     .map_err(Self::invalid_edit)?;
                 let mut candidate = edits
                     .merge_params(
-                        &self.assigned_timeline(&document).map_err(Self::invalid_edit)?,
+                        &self
+                            .assigned_timeline(&document)
+                            .map_err(Self::invalid_edit)?,
                         &params,
                         &tracks,
                         edit.base_revisions.edits,
                     )
                     .map_err(Self::invalid_edit)?;
-                let mut curve_timeline =
-                    self.assigned_timeline(&document).map_err(Self::invalid_edit)?;
+                let mut curve_timeline = self
+                    .assigned_timeline(&document)
+                    .map_err(Self::invalid_edit)?;
                 candidate.apply(&mut curve_timeline);
                 candidate.atlas = edits
                     .atlas
@@ -4028,10 +4219,14 @@ impl ExtensionOwner {
         *self.prepare_owner.lock_or_recover() = Some(Arc::downgrade(self));
         // 时钟：Transfer 没有 ARA 文档的共享时钟，自己起一个。宿主播放位置由
         // `audio_process_inner` 的 `observe_transport` 照常写入（它与 ARA 无关）。
-        let _ = self.clock.set(Arc::new(super::transport::TransportClock::default()));
+        let _ = self
+            .clock
+            .set(Arc::new(super::transport::TransportClock::default()));
         static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
-        self.writer_id
-            .store(NEXT_WRITER.fetch_add(1, Ordering::Relaxed), Ordering::Release);
+        self.writer_id.store(
+            NEXT_WRITER.fetch_add(1, Ordering::Relaxed),
+            Ordering::Release,
+        );
         // 【为什么在这里也要把会话立起来】处理结果的**唯一**生产者是会话 actor
         // （`start_transfer_render` → `transfer_prepare_job`），而会话此前只在
         // `webview.rs` 的命令分发里惰性创建 —— 于是"从未打开过插件窗口"的会话里
@@ -4267,10 +4462,13 @@ struct BlockTraceRecord {
     seq: AtomicU64,
     state: AtomicU32,
     mode: AtomicI32,
+    stream: AtomicU8,
     start: AtomicI64,
     frames: AtomicU32,
     playing: AtomicBool,
     flow: AtomicBool,
+    had_previous: AtomicBool,
+    emitted: AtomicBool,
     capture: AtomicU8,
     capture_started: AtomicBool,
     rung: AtomicU8,
@@ -4297,10 +4495,13 @@ impl BlockTraceRing {
         &self,
         state: u32,
         mode: i32,
+        stream: ProcessStream,
         start: i64,
         frames: usize,
         playing: bool,
         flow: bool,
+        had_previous: bool,
+        emitted: bool,
         capture: u8,
         capture_started: bool,
     ) {
@@ -4309,13 +4510,15 @@ impl BlockTraceRing {
         record.seq.fetch_add(1, Ordering::Relaxed);
         record.state.store(state, Ordering::Relaxed);
         record.mode.store(mode, Ordering::Relaxed);
+        record.stream.store(stream.code(), Ordering::Relaxed);
         record.start.store(start, Ordering::Relaxed);
-        record.frames.store(
-            u32::try_from(frames).unwrap_or(u32::MAX),
-            Ordering::Relaxed,
-        );
+        record
+            .frames
+            .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
         record.playing.store(playing, Ordering::Relaxed);
         record.flow.store(flow, Ordering::Relaxed);
+        record.had_previous.store(had_previous, Ordering::Relaxed);
+        record.emitted.store(emitted, Ordering::Relaxed);
         record.capture.store(capture, Ordering::Relaxed);
         record
             .capture_started
@@ -4353,10 +4556,13 @@ impl BlockTraceRing {
             }
             let state = record.state.load(Ordering::Relaxed);
             let mode = record.mode.load(Ordering::Relaxed);
+            let stream = record.stream.load(Ordering::Relaxed);
             let start = record.start.load(Ordering::Relaxed);
             let frames = record.frames.load(Ordering::Relaxed);
             let playing = record.playing.load(Ordering::Relaxed);
             let flow = record.flow.load(Ordering::Relaxed);
+            let had_previous = record.had_previous.load(Ordering::Relaxed);
+            let emitted = record.emitted.load(Ordering::Relaxed);
             let capture = record.capture.load(Ordering::Relaxed);
             let capture_started = record.capture_started.load(Ordering::Relaxed);
             let rung = record.rung.load(Ordering::Relaxed);
@@ -4367,10 +4573,13 @@ impl BlockTraceRing {
                 "seq": first / 2,
                 "state": state,
                 "mode": mode,
+                "stream": stream,
                 "start": start,
                 "frames": frames,
                 "playing": playing,
                 "flow": flow,
+                "had_previous": had_previous,
+                "emitted": emitted,
                 "capture": capture,
                 "capture_started": capture_started,
                 "rung": rung,
@@ -4384,7 +4593,9 @@ impl BlockTraceRing {
 impl ExtensionOwner {
     /// 预分配块级诊断环（非音频线程；幂等）。
     pub(crate) fn init_block_trace(&self) {
-        let _ = self.block_trace.get_or_init(|| Box::new(BlockTraceRing::new()));
+        let _ = self
+            .block_trace
+            .get_or_init(|| Box::new(BlockTraceRing::new()));
     }
 
     /// 记录 `setupProcessing` 声明的单块上限（诊断用）。
@@ -4393,9 +4604,10 @@ impl ExtensionOwner {
             .store(value.max(0), Ordering::Release);
     }
 
-    /// 门控清掉一块（诊断用）。
-    pub(crate) fn note_gate_cleared(&self) {
+    /// 门控清掉一块（诊断用）。按流分开计数：prefetch/offline 的清零必须是 0。
+    pub(crate) fn note_gate_cleared(&self, stream: ProcessStream) {
         self.gate_cleared.fetch_add(1, Ordering::Relaxed);
+        self.stream_gate_cleared[stream.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     /// 本块最终走了哪一档输出仲裁（由 `transfer_stage` 在决定后调用）。
@@ -4420,20 +4632,26 @@ impl ExtensionOwner {
         &self,
         state: u32,
         mode: i32,
+        stream: ProcessStream,
         start: i64,
         frames: usize,
         playing: bool,
         flow: bool,
+        had_previous: bool,
+        allow_output: bool,
         capture: u8,
         capture_started: bool,
     ) {
         self.blocks_seen.fetch_add(1, Ordering::Relaxed);
+        self.stream_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
         if playing {
             self.blocks_playing.fetch_add(1, Ordering::Relaxed);
+            self.stream_playing_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
         }
         if flow && !playing {
             self.blocks_flow_without_playing
                 .fetch_add(1, Ordering::Relaxed);
+            self.stream_flow_without_playing[stream.index()].fetch_add(1, Ordering::Relaxed);
         }
         // 只在确实与 Transfer 有关的实例上留证，避免给纯 ARA 实例刷日志。
         // 同一次可疑窗口只报一次：`trace_logged` 由 actor 在 dump 后置位，
@@ -4452,10 +4670,13 @@ impl ExtensionOwner {
             ring.write(
                 state,
                 mode,
+                stream,
                 start,
                 frames,
                 playing,
                 flow,
+                had_previous,
+                allow_output,
                 capture,
                 capture_started,
             );
@@ -4478,13 +4699,32 @@ impl ExtensionOwner {
                 "oversized_blocks": capture.oversized_blocks,
                 "silent_blocks": capture.silent_blocks,
                 "spares": capture.spared,
+                "elected": capture.elected.map(|stream| stream.as_str()),
+                "stream_switches": capture.stream_switches,
+                "repeated_blocks": capture.repeated_blocks,
+                "overlapped_frames": capture.overlapped_frames,
             })
         });
+        let stream = |index: usize| {
+            serde_json::json!({
+                "blocks": self.stream_blocks[index].load(Ordering::Acquire),
+                "playing": self.stream_playing_blocks[index].load(Ordering::Acquire),
+                "flow_without_playing": self.stream_flow_without_playing[index]
+                    .load(Ordering::Acquire),
+                "gate_cleared": self.stream_gate_cleared[index].load(Ordering::Acquire),
+            })
+        };
         serde_json::json!({
             "blocks_seen": self.blocks_seen.load(Ordering::Acquire),
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
             "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "streams": {
+                "realtime": stream(ProcessStream::Realtime.index()),
+                "prefetch": stream(ProcessStream::Prefetch.index()),
+                "offline": stream(ProcessStream::Offline.index()),
+            },
+            "repeats_suppressed": self.repeats_suppressed.load(Ordering::Acquire),
             "max_samples_per_block": self.max_samples_per_block.load(Ordering::Acquire),
             "capture": capture,
             "trace": self

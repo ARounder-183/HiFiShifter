@@ -217,6 +217,143 @@ impl InputBlock<'_> {
     }
 }
 
+/// 本块属于 VST3 的哪条进程流。
+///
+/// 【为什么这不是诊断字段】SDK 明确允许宿主在 `kRealtime` 与 `kPrefetch` 之间切换，
+/// 且切换不需要 `setupProcessing`（`ivstaudioprocessor.h:138-143`）。两条流的
+/// `projectTimeSamples` 节奏、块长与“此刻是否被听到”都不同；把它们塞进同一份
+/// `last_block_*` / `expected_next` 会让一条流替另一条流作证。捕获与输出都必须
+/// 按流隔离状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessStream {
+    /// `kRealtime`（0）。
+    Realtime,
+    /// `kPrefetch`（1）。
+    Prefetch,
+    /// `kOffline`（2）。
+    Offline,
+}
+
+impl ProcessStream {
+    pub(crate) fn from_mode(mode: i32) -> Self {
+        match mode {
+            1 => Self::Prefetch,
+            2 => Self::Offline,
+            _ => Self::Realtime,
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Realtime => 0,
+            Self::Prefetch => 1,
+            Self::Offline => 2,
+        }
+    }
+
+    /// 捕获侧预分配缓冲的下标：离线与实时互斥，共用 0。
+    fn pending_slot(self) -> usize {
+        match self {
+            Self::Prefetch => 1,
+            Self::Realtime | Self::Offline => 0,
+        }
+    }
+
+    /// 稳定编码（只增不改，诊断用）。
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Realtime => 1,
+            Self::Prefetch => 2,
+            Self::Offline => 3,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Realtime),
+            2 => Some(Self::Prefetch),
+            3 => Some(Self::Offline),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Prefetch => "prefetch",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// 一块音频的进程流上下文（与样本视图分开：`InputBlock` 仍然只描述音频）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockContext {
+    pub stream: ProcessStream,
+    /// 本块的 `kPlaying`（与样本一起使用的强证据）。
+    pub playing: bool,
+    /// `ProcessContext::state & kRecording`。
+    pub recording: bool,
+    /// 本流内：首块、块首移动，或同头块变长。
+    pub flow: bool,
+}
+
+impl BlockContext {
+    pub(crate) fn realtime(flow: bool) -> Self {
+        Self {
+            stream: ProcessStream::Realtime,
+            playing: false,
+            recording: false,
+            flow,
+        }
+    }
+}
+
+/// 一条流在捕获侧被接管前需要连续看到的块数。
+///
+/// 【为什么不是 1】单块交错（ASIO Guard 与实时线程各送一块）不能证明宿主换了流；
+/// 持续供料才是证据。8 块在 512 帧/48 kHz 下约 85 ms，足够短到不丢音乐。
+const HANDOVER_BLOCKS: u32 = 8;
+
+/// 单条进程流的候选状态（只存整数，不分配）。
+#[derive(Debug, Clone, Copy, Default)]
+struct StreamCandidate {
+    seen: bool,
+    last_start: i64,
+    last_frames: usize,
+    last_end: i64,
+    /// 本流内部首尾相接的连续块数。
+    contiguous: u32,
+    playing_blocks: u32,
+    recording_blocks: u32,
+    non_silent_blocks: u32,
+    /// 最后一次见到的全局块序号（诊断用）。
+    last_seen_seq: u64,
+}
+
+/// 一条流的 lookbehind 缓冲。
+///
+/// 【为什么每流一份】候选首块在选举之前就要暂存；两条流共用一个 `pending` 会让
+/// 后到的流覆盖先到的流。备用缓冲在 `start()` 里一次性分配，音频线程只改 `filled`。
+struct Pending {
+    buffer: Option<Segment>,
+    ready: bool,
+    key: Option<(i64, u32, u32)>,
+    /// 这块候选属于哪条流。离线与实时共用 0 号槽，因此不能只看槽位。
+    stream: Option<ProcessStream>,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            buffer: None,
+            ready: false,
+            key: None,
+            stream: None,
+        }
+    }
+}
+
 /// 一次 `on_block` 的结果（给调用方决定输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaptureOutcome {
@@ -232,6 +369,12 @@ pub(crate) enum CaptureOutcome {
     /// 两者的**动作**相同（什么都不写），区别只在状态读数上，由 [`Capture::is_started`]
     /// 回答。分开成两个枚举值会让调用方为同一件事写两个分支。
     NotPlaying,
+    /// 同一流把**同一个工程区间**又送了一遍：不是新素材，跳过（不产生段）。
+    ///
+    /// 【为什么不是 `NotPlaying`】两者都“没写”，但原因不同：后者是宿主没在播，
+    /// 前者是宿主在播（或预取）却重复投递同一块。诊断必须能分开，否则
+    /// “开头为什么有重复内容”无法归因。
+    Repeated,
     /// 采样率与本次捕获不一致：已停止捕获。
     RateChanged,
     /// 备用缓冲用尽：已停止捕获。
@@ -255,6 +398,14 @@ pub(crate) struct CaptureDiagnostics {
     pub oversized_blocks: u64,
     pub silent_blocks: u64,
     pub spared: usize,
+    /// 当前为捕获供料的进程流（`None` = 尚未选举）。
+    pub elected: Option<ProcessStream>,
+    /// 进程流交接次数。
+    pub stream_switches: u64,
+    /// 同一区间被重复投递而跳过的块数。
+    pub repeated_blocks: u64,
+    /// 交接/重叠处被裁掉的前缀帧数。
+    pub overlapped_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -279,21 +430,30 @@ pub(crate) struct Capture {
     captured_frames: u64,
     /// 最后写入的工程位置终点。
     last_position: Option<i64>,
-    /// 尚未确认的候选首块（一块 lookbehind）。
+    /// 每条流自己的候选首块（一块 lookbehind）。
     ///
     /// 【为什么需要它】宿主可以在 `kPlaying` 置位之前就送来起播的第一块
     /// （ASIO Guard / anticipative FX / pre-roll）。只按 `kPlaying` 判断会丢掉这块；
     /// 一看到位置推进就写又会把“停播时 seek 的一块”录进来。先暂存一块，等下一块
     /// **首尾相接**才提交，才能同时满足两边。
-    pending: Option<Segment>,
-    /// `pending` 里是否已经装了**候选内容**（`false` = 它只是空缓冲）。
     ///
-    /// 【为什么不能只看 `Option`】`pending` 是预分配缓冲：它在 `start()` 时就是
-    /// `Some`，但还没有任何块被暂存。用 `take()` 判断会把这块空缓冲当成候选
-    /// 丢掉，于是真正的第一块再也无处可放。
-    pending_ready: bool,
-    /// 待确认块的键 `(origin, frames, sample_rate)`；同一个钉住块重复到达时跳过拷贝。
-    pending_key: Option<(i64, u32, u32)>,
+    /// 【为什么每流一份】选举之前两条流都可能送来首块；共用一份会让后到的流
+    /// 覆盖先到的流（见 [`Pending`]）。
+    pendings: [Pending; 2],
+    /// 当前为捕获供料的流。
+    elected: Option<ProcessStream>,
+    /// 每条流自己的候选读数（选举与交接）。
+    candidates: [StreamCandidate; 3],
+    /// 当前流连续供料了多少块。
+    elected_run: u32,
+    /// 当前流之后又有多少块来自别的流（用于判断“另一条流是否接管”）。
+    elected_idle: u32,
+    /// 当前流连续给出静音块的次数（用于“真正的输入在另一条流上”的接管）。
+    elected_silent_blocks: u32,
+    /// 全局块序号（只用于诊断）。
+    block_seq: u64,
+    /// 当前流上一块**实际写入**的区间；用于识别同一区间的重复投递。
+    last_written: Option<(i64, usize)>,
     /// 本次捕获的峰值（各段峰值的最大值）。
     peak: [f32; 2],
     /// 宿主是否**已经播过**至少一块（`false` = 待命）。
@@ -316,6 +476,12 @@ pub(crate) struct Capture {
     pub pending_stashed: u64,
     pub pending_committed: u64,
     pub pending_discarded: u64,
+    /// 流交接次数。
+    pub stream_switches: u64,
+    /// 同一区间被重复投递而跳过的块数。
+    pub repeated_blocks: u64,
+    /// 交接/重叠处被裁掉的前缀帧数。
+    pub overlapped_frames: u64,
 }
 
 impl Default for Capture {
@@ -331,9 +497,14 @@ impl Default for Capture {
             stopped: None,
             captured_frames: 0,
             last_position: None,
-            pending: None,
-            pending_ready: false,
-            pending_key: None,
+            pendings: Default::default(),
+            elected: None,
+            candidates: Default::default(),
+            elected_run: 0,
+            elected_idle: 0,
+            elected_silent_blocks: 0,
+            block_seq: 0,
+            last_written: None,
             peak: [0.0; 2],
             started: false,
             max_frames: 0,
@@ -346,6 +517,9 @@ impl Default for Capture {
             pending_stashed: 0,
             pending_committed: 0,
             pending_discarded: 0,
+            stream_switches: 0,
+            repeated_blocks: 0,
+            overlapped_frames: 0,
         }
     }
 }
@@ -354,20 +528,23 @@ impl Capture {
     /// 开始一次捕获。
     ///
     /// `capacity_frames` 是单段容量；`spares` 是调用方**预先分配好**的备用缓冲
-    /// （每个都是空的、长度为容量的平面）；`pending` 是 lookbehind 的专用缓冲
-    /// （`None` = 本机预算不足，关闭 lookbehind）；`max_frames` 是本次录制的帧数上限
-    /// （`0` = 不限）。非音频线程调用。
+    /// （每个都是空的、长度为容量的平面）；`pendings` 是两条流各自的 lookbehind
+    /// 专用缓冲（`None` = 本机预算不足，关闭该流的 lookbehind）；`max_frames` 是
+    /// 本次录制的帧数上限（`0` = 不限）。非音频线程调用。
     pub(crate) fn start(
         &mut self,
         channels: u8,
         capacity_frames: usize,
         mut spares: Vec<Segment>,
-        pending: Option<Segment>,
+        pendings: [Option<Segment>; 2],
         max_frames: u64,
     ) {
         *self = Self {
             spares: std::mem::take(&mut spares),
-            pending,
+            pendings: pendings.map(|buffer| Pending {
+                buffer,
+                ..Pending::default()
+            }),
             channels,
             capacity: capacity_frames,
             max_frames,
@@ -459,6 +636,9 @@ impl Capture {
     pub(crate) fn reset_after_promote(&mut self) {
         let diagnostics = self.diagnostics();
         *self = Self {
+            // 保留“这次录制最后用哪条流供料”的读数：用户按下停止后仍要能诊断
+            // 起播窗口，而不是一停止就变成 `None`。
+            elected: diagnostics.elected,
             gaps: diagnostics.gaps,
             backwards: diagnostics.backwards,
             dropouts: diagnostics.dropouts,
@@ -468,6 +648,9 @@ impl Capture {
             pending_stashed: diagnostics.pending_stashed,
             pending_committed: diagnostics.pending_committed,
             pending_discarded: diagnostics.pending_discarded,
+            stream_switches: diagnostics.stream_switches,
+            repeated_blocks: diagnostics.repeated_blocks,
+            overlapped_frames: diagnostics.overlapped_frames,
             ..Self::default()
         };
     }
@@ -479,15 +662,24 @@ impl Capture {
             pending_stashed: self.pending_stashed,
             pending_committed: self.pending_committed,
             pending_discarded: self.pending_discarded,
-            pending_ready: self.pending_ready,
-            pending_available: self.pending.is_some(),
+            pending_ready: self.pendings.iter().any(|pending| pending.ready),
+            pending_available: self.pendings.iter().any(|pending| pending.buffer.is_some()),
             gaps: self.gaps,
             backwards: self.backwards,
             dropouts: self.dropouts,
             oversized_blocks: self.oversized_blocks,
             silent_blocks: self.silent_blocks,
             spared: self.spares.len(),
+            elected: self.elected,
+            stream_switches: self.stream_switches,
+            repeated_blocks: self.repeated_blocks,
+            overlapped_frames: self.overlapped_frames,
         }
+    }
+
+    /// 当前为捕获供料的进程流（`None` = 尚未选举）。
+    pub(crate) fn elected_stream(&self) -> Option<ProcessStream> {
+        self.elected
     }
 
     /// 本次捕获的峰值。
@@ -519,9 +711,12 @@ impl Capture {
     /// 【为什么 pending 直接丢弃】它只是“尚未被下一块证明”的候选首块；用户按下
     /// stop 时，没有证据的那一块不能算素材（否则一次误按会产生一个幽灵 take）。
     pub(crate) fn finish(&mut self, reason: ClosedReason) -> Vec<Segment> {
-        self.pending = None;
-        self.pending_ready = false;
-        self.pending_key = None;
+        for pending in &mut self.pendings {
+            pending.buffer = None;
+            pending.ready = false;
+            pending.key = None;
+            pending.stream = None;
+        }
         if let Some(active) = self.active.take() {
             self.sealed.push(seal(active, reason));
         }
@@ -545,9 +740,23 @@ impl Capture {
         block: InputBlock<'_>,
         flow: bool,
     ) -> CaptureOutcome {
+        self.on_block_with_context(block, BlockContext::realtime(flow))
+    }
+
+    /// 音频线程入口：带进程流与块流证据。
+    ///
+    /// 【职责划分】本函数只做三件事：夹掉 pre-roll、更新**本流**候选、决定是否
+    /// 选举/交接；真正的 lookbehind 与写入是 [`Self::capture_elected`]。这样
+    /// “哪条流供料”与“这一块怎么写”不会在同一个 if 树里互相污染。
+    pub(crate) fn on_block_with_context(
+        &mut self,
+        block: InputBlock<'_>,
+        ctx: BlockContext,
+    ) -> CaptureOutcome {
         if self.stopped.is_some() {
             return CaptureOutcome::Captured;
         }
+        self.block_seq = self.block_seq.wrapping_add(1);
         // 【为什么零帧块要单独处理】旧的语义是“在播放的零帧块 ⇒ 起播”，
         // 它不产生素材但会把状态从待命推进到录制中。负时间裁剪不能把这个语义吃掉。
         if block.frames == 0 {
@@ -568,88 +777,311 @@ impl Capture {
         // 负的部分不可听；若原样存进段，投影会生成负起点 clip，而渲染侧把窗口
         // 起点夹到 0 时**不会**同步平移源窗口 —— 整段内容会前移一个 pre-roll。
         // 夹掉是对齐的唯一正确做法：源偏移跟着跳过同样的帧数。
-        let skip = block
-            .start
-            .saturating_neg()
-            .min(block.frames as i64)
-            .max(0) as usize;
+        let skip = block.start.saturating_neg().min(block.frames as i64).max(0) as usize;
         let start = block.start.saturating_add(skip as i64);
         let frames = block.frames - skip;
         if skip > 0 {
-            self.preroll_frames_dropped = self
-                .preroll_frames_dropped
-                .saturating_add(skip as u64);
+            self.preroll_frames_dropped = self.preroll_frames_dropped.saturating_add(skip as u64);
         }
         if frames == 0 {
             // 整块都在工程 0 之前：没有可听内容，也不把状态推进到“录制中”。
             return CaptureOutcome::NotPlaying;
         }
 
-        // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
-        if block.playing {
-            if self.pending_ready {
-                let contiguous = self.pending.as_ref().is_some_and(|pending| {
-                    pending.sample_rate == rate
-                        && pending.origin.saturating_add(pending.filled as i64) == start
-                });
-                if contiguous {
-                    if let Some(pending) = self.pending.take() {
-                        self.commit_pending(pending);
-                    }
+        let audible = block_has_signal(&block, skip, frames);
+        let ctx = BlockContext {
+            playing: block.playing,
+            ..ctx
+        };
+        self.note_candidate(ctx, start, frames, audible);
+
+        match self.elected {
+            Some(elected) if elected == ctx.stream => {
+                self.elected_idle = 0;
+                self.elected_run = self.elected_run.saturating_add(1);
+                if audible {
+                    self.elected_silent_blocks = 0;
                 } else {
-                    self.discard_pending();
+                    self.elected_silent_blocks = self.elected_silent_blocks.saturating_add(1);
                 }
             }
-            self.started = true;
-            return self.write_block(&block, start, frames, skip, rate);
-        }
-
-        // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
-        if flow {
-            if self.pending_ready {
-                let contiguous = self.pending.as_ref().is_some_and(|pending| {
-                    pending.sample_rate == rate
-                        && pending.origin.saturating_add(pending.filled as i64) == start
-                });
-                if contiguous {
-                    if let Some(pending) = self.pending.take() {
-                        self.commit_pending(pending);
-                        return self.write_block(&block, start, frames, skip, rate);
-                    }
-                } else {
-                    self.discard_pending();
+            Some(_) => {
+                self.elected_idle = self.elected_idle.saturating_add(1);
+                if !self.should_handover(ctx) {
+                    // 非供料流的块只更新候选；它自己的 pending 留给之后的交接。
+                    self.stash_if_needed(ctx.stream, &block, start, frames, skip, rate);
+                    return CaptureOutcome::NotPlaying;
+                }
+                self.switch_to(ctx.stream, start, frames, rate);
+            }
+            None => {
+                if !self.try_elect(ctx.stream) {
+                    // 选举之前也要暂存：首块的 lookbehind 是下一块能提交它的前提。
+                    self.stash_if_needed(ctx.stream, &block, start, frames, skip, rate);
+                    return CaptureOutcome::NotPlaying;
                 }
             }
-            if !self.started {
-                self.stash_pending(&block, start, frames, skip, rate);
-                return CaptureOutcome::NotPlaying;
-            }
-            // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
-            if self.expected_next == Some(start) {
-                return self.write_block(&block, start, frames, skip, rate);
-            }
-            return CaptureOutcome::NotPlaying;
         }
 
-        // 没有播放位、也没有位置推进：可能是钉住的停播块，也可能是“同头同长”的
-        // 起播第一块。先暂存；下一块连续时由上面的分支提交。
-        if !self.started {
-            self.stash_pending(&block, start, frames, skip, rate);
-        }
-        CaptureOutcome::NotPlaying
+        self.capture_elected(ctx.stream, &block, start, frames, skip, rate, ctx.flow)
     }
 
-    /// 把一块写成 pending（只拷贝，不改变“是否已开始”的状态）。
-    fn stash_pending(
+    /// 更新**本流**的候选读数；绝不与另一条流比较。
+    fn note_candidate(&mut self, ctx: BlockContext, start: i64, frames: usize, audible: bool) {
+        let candidate = &mut self.candidates[ctx.stream.index()];
+        if candidate.seen && candidate.last_end == start {
+            candidate.contiguous = candidate.contiguous.saturating_add(1);
+        } else {
+            candidate.contiguous = 1;
+        }
+        candidate.seen = true;
+        candidate.last_start = start;
+        candidate.last_frames = frames;
+        candidate.last_end = start.saturating_add(frames as i64);
+        if ctx.playing {
+            candidate.playing_blocks = candidate.playing_blocks.saturating_add(1);
+        }
+        if ctx.recording {
+            candidate.recording_blocks = candidate.recording_blocks.saturating_add(1);
+        }
+        if audible {
+            candidate.non_silent_blocks = candidate.non_silent_blocks.saturating_add(1);
+        }
+        candidate.last_seen_seq = self.block_seq;
+    }
+
+    /// 首次选举。返回是否成功选出一条流。
+    ///
+    /// 【证据顺序】离线（显式）> 录音中 > 播放位 > 本流连续两块 >
+    /// 非静音（仅在多个候选都已连续时打破平局）。非静音不能单独当选：用户真实的
+    /// 静音演奏也必须能被录下来。
+    fn try_elect(&mut self, stream: ProcessStream) -> bool {
+        if stream == ProcessStream::Offline {
+            self.elect(stream);
+            return true;
+        }
+        let candidate = self.candidates[stream.index()];
+        let viable = candidate.playing_blocks > 0
+            || candidate.recording_blocks > 0
+            || candidate.contiguous >= 2;
+        if !viable {
+            return false;
+        }
+        if candidate.playing_blocks == 0
+            && candidate.recording_blocks == 0
+            && candidate.non_silent_blocks == 0
+        {
+            let better = self.candidates.iter().enumerate().any(|(index, other)| {
+                index != stream.index()
+                    && other.seen
+                    && other.contiguous >= 2
+                    && other.non_silent_blocks > 0
+            });
+            if better {
+                return false;
+            }
+        }
+        self.elect(stream);
+        true
+    }
+
+    fn elect(&mut self, stream: ProcessStream) {
+        self.elected = Some(stream);
+        self.elected_run = 1;
+        self.elected_idle = 0;
+        self.elected_silent_blocks = 0;
+    }
+
+    /// 另一条流是否已经提供了“可以接管”的持续证据。
+    fn should_handover(&self, ctx: BlockContext) -> bool {
+        if ctx.stream == ProcessStream::Offline {
+            return true;
+        }
+        let candidate = self.candidates[ctx.stream.index()];
+        // `kRecording` 是强证据：录音轨上的真实输入在实时路径上，晚接管会丢掉正在录的
+        // 第一块。其余证据仍要求持续供料，避免单块交错导致乒乓切换。
+        ctx.recording
+            || (ctx.playing && candidate.contiguous >= HANDOVER_BLOCKS)
+            || (self.elected_idle >= HANDOVER_BLOCKS && candidate.contiguous >= 2)
+            || (self.elected_silent_blocks >= HANDOVER_BLOCKS
+                && candidate.non_silent_blocks >= HANDOVER_BLOCKS
+                && candidate.contiguous >= 2)
+    }
+
+    /// 把供料流切换到 `next`。
+    ///
+    /// 【交接时的三条纪律】1) 旧 active 必须封口；2) 新流在选举前暂存的首块，
+    /// 若与当前块连续/半重叠就提交（它可能是真正的起播第一块）；3) 其他流的候选
+    /// 一律丢弃，避免它们在 next 的槽位里冒充。
+    fn switch_to(&mut self, next: ProcessStream, start: i64, frames: usize, rate: u32) {
+        for stream in [
+            ProcessStream::Realtime,
+            ProcessStream::Prefetch,
+            ProcessStream::Offline,
+        ] {
+            if stream != next {
+                self.discard_pending(stream);
+            }
+        }
+        let slot = next.pending_slot();
+        let commit = self.pendings[slot].ready
+            && self.pendings[slot].stream == Some(next)
+            && self.pendings[slot].buffer.as_ref().is_some_and(|pending| {
+                let end = pending.origin.saturating_add(pending.filled as i64);
+                pending.sample_rate == rate
+                    && (self.sample_rate == 0 || self.sample_rate == pending.sample_rate)
+                    && (end == start || (start < end && start + frames as i64 > pending.origin))
+            });
+        if let Some(active) = self.active.take() {
+            self.sealed.push(seal(active, ClosedReason::Jump));
+        }
+        self.expected_next = None;
+        self.last_written = None;
+        if commit {
+            let _ = self.commit_pending(next);
+        } else {
+            self.discard_pending(next);
+        }
+        self.elected = Some(next);
+        self.elected_run = 1;
+        self.elected_idle = 0;
+        self.elected_silent_blocks = 0;
+        self.stream_switches = self.stream_switches.saturating_add(1);
+    }
+
+    /// 选举之前暂存候选首块；同一流已有连续候选时保留最早那块。
+    fn stash_if_needed(
         &mut self,
+        stream: ProcessStream,
         block: &InputBlock<'_>,
         start: i64,
         frames: usize,
         skip: usize,
         rate: u32,
     ) {
+        if self.started {
+            return;
+        }
+        if self.pending_ready_for(stream) {
+            if self.pending_is_contiguous(stream, start, rate) {
+                // 首块已经证明是这段连续播放的起点；不要用后续块覆盖它。
+                return;
+            }
+            self.discard_pending(stream);
+        }
+        self.stash_pending(stream, block, start, frames, skip, rate);
+    }
+
+    /// 被选举流上的 lookbehind + 写入判定。
+    fn capture_elected(
+        &mut self,
+        stream: ProcessStream,
+        block: &InputBlock<'_>,
+        start: i64,
+        frames: usize,
+        skip: usize,
+        rate: u32,
+        flow: bool,
+    ) -> CaptureOutcome {
+        // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
+        if block.playing {
+            if self.pending_ready_for(stream) {
+                if self.pending_is_contiguous(stream, start, rate) {
+                    let _ = self.commit_pending(stream);
+                } else {
+                    self.discard_pending(stream);
+                }
+            }
+            self.started = true;
+            return self.write_block(block, start, frames, skip, rate);
+        }
+
+        // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
+        if flow {
+            if self.pending_ready_for(stream) {
+                if self.pending_is_contiguous(stream, start, rate) {
+                    if self.commit_pending(stream) {
+                        return self.write_block(block, start, frames, skip, rate);
+                    }
+                } else {
+                    self.discard_pending(stream);
+                }
+            }
+            if !self.started {
+                self.stash_pending(stream, block, start, frames, skip, rate);
+                return CaptureOutcome::NotPlaying;
+            }
+            // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
+            // `expected_next == None` 是流交接后的第一块：没有可比的终点，直接写。
+            if self.expected_next.is_none() || self.expected_next == Some(start) {
+                return self.write_block(block, start, frames, skip, rate);
+            }
+            return CaptureOutcome::NotPlaying;
+        }
+
+        // 没有播放位、也没有位置推进：可能是钉住的停播块，也可能是“同头同长”的
+        // 起播第一块。先暂存；下一块连续时由上面的分支提交。
+        if self.started && self.expected_next.is_none() {
+            // 刚交接：新流的第一块没有可比终点，即使没有 flow 也要写。
+            return self.write_block(block, start, frames, skip, rate);
+        }
+        if !self.started {
+            self.stash_pending(stream, block, start, frames, skip, rate);
+        }
+        CaptureOutcome::NotPlaying
+    }
+
+    fn pending_slot_ready(&self, slot: usize, stream: ProcessStream) -> bool {
+        let pending = &self.pendings[slot];
+        pending.ready && pending.stream == Some(stream)
+    }
+
+    fn pending_ready_for(&self, stream: ProcessStream) -> bool {
+        self.pending_slot_ready(stream.pending_slot(), stream)
+    }
+
+    fn pending_is_contiguous(&self, stream: ProcessStream, start: i64, rate: u32) -> bool {
+        let pending = &self.pendings[stream.pending_slot()];
+        pending.ready
+            && pending.stream == Some(stream)
+            && pending.buffer.as_ref().is_some_and(|pending| {
+                pending.sample_rate == rate
+                    && pending.origin.saturating_add(pending.filled as i64) == start
+            })
+    }
+
+    fn take_pending(&mut self, stream: ProcessStream) -> Option<Segment> {
+        let pending = &mut self.pendings[stream.pending_slot()];
+        if !pending.ready || pending.stream != Some(stream) {
+            return None;
+        }
+        pending.ready = false;
+        pending.key = None;
+        pending.stream = None;
+        pending.buffer.take()
+    }
+
+    /// 把一块写成某条流的 pending（只拷贝，不改变“是否已开始”的状态）。
+    fn stash_pending(
+        &mut self,
+        stream: ProcessStream,
+        block: &InputBlock<'_>,
+        start: i64,
+        frames: usize,
+        skip: usize,
+        rate: u32,
+    ) {
+        let slot = stream.pending_slot();
+        // 槽位可能被另一条流占着（离线与实时共用 0 号）：先清掉，避免把它的内容
+        // 冒充成当前流的候选。
+        if self.pendings[slot].ready && self.pendings[slot].stream != Some(stream) {
+            self.pendings[slot].ready = false;
+            self.pendings[slot].key = None;
+            self.pendings[slot].stream = None;
+            self.pending_discarded = self.pending_discarded.saturating_add(1);
+        }
         let capacity = self.capacity;
-        let Some(pending) = self.pending.as_mut() else {
+        let Some(pending) = self.pendings[slot].buffer.as_mut() else {
             return;
         };
         let writable = frames
@@ -659,7 +1091,7 @@ impl Capture {
             return;
         }
         let key = (start, writable as u32, rate);
-        if self.pending_key == Some(key) && pending.filled == writable {
+        if self.pendings[slot].key == Some(key) && pending.filled == writable {
             // 宿主停在一个光标处反复送同一块：内容与长度都没变，不必每块重拷。
             return;
         }
@@ -686,31 +1118,45 @@ impl Capture {
             });
             pending.peak[channel] = peak;
         }
-        self.pending_key = Some(key);
-        self.pending_ready = true;
+        self.pendings[slot].key = Some(key);
+        self.pendings[slot].ready = true;
+        self.pendings[slot].stream = Some(stream);
         self.pending_stashed = self.pending_stashed.saturating_add(1);
     }
 
-    /// 把 pending 提升为 active；下一块的连续性从它的终点开始。
-    fn commit_pending(&mut self, pending: Segment) {
+    /// 把某条流的 pending 提升为 active；下一块的连续性从它的终点开始。
+    ///
+    /// 返回是否提交。采样率与既有捕获不一致时丢弃（本 take 的样本域不再一致，
+    /// 交给 `write_block` 的 `RateChanged` 处理，而不是把两份不同率的样本拼进一段）。
+    fn commit_pending(&mut self, stream: ProcessStream) -> bool {
+        let Some(pending) = self.take_pending(stream) else {
+            return false;
+        };
+        if self.sample_rate != 0 && self.sample_rate != pending.sample_rate {
+            self.pending_discarded = self.pending_discarded.saturating_add(1);
+            return false;
+        }
         self.sample_rate = pending.sample_rate;
         self.channels = pending.planes.len().clamp(1, 2) as u8;
         self.expected_next = Some(pending.origin.saturating_add(pending.filled as i64));
-        self.captured_frames = pending.filled as u64;
+        self.captured_frames = self.captured_frames.saturating_add(pending.filled as u64);
         self.last_position = self.expected_next;
-        self.peak = pending.peak;
+        self.peak[0] = self.peak[0].max(pending.peak[0]);
+        self.peak[1] = self.peak[1].max(pending.peak[1]);
+        self.last_written = Some((pending.origin, pending.filled));
         self.active = Some(pending);
         self.started = true;
-        self.pending_ready = false;
-        self.pending_key = None;
         self.pending_committed = self.pending_committed.saturating_add(1);
+        true
     }
 
-    /// 丢弃 pending（非音频线程不参与；只由音频线程在状态切换时调用）。
-    fn discard_pending(&mut self) {
-        if self.pending_ready {
-            self.pending_ready = false;
-            self.pending_key = None;
+    /// 丢弃某条流的 pending（非音频线程不参与；只由音频线程在状态切换时调用）。
+    fn discard_pending(&mut self, stream: ProcessStream) {
+        let pending = &mut self.pendings[stream.pending_slot()];
+        if pending.ready && pending.stream == Some(stream) {
+            pending.ready = false;
+            pending.key = None;
+            pending.stream = None;
             self.pending_discarded = self.pending_discarded.saturating_add(1);
         }
     }
@@ -731,6 +1177,35 @@ impl Capture {
             // 工程率变了：本 take 里已录样本的"秒"与后续块的"秒"不再可比。
             self.stop(ClosedReason::RateChanged);
             return CaptureOutcome::RateChanged;
+        }
+
+        // 【为什么先裁半重叠】两条流在交接处经常给出首尾重叠的块（prefetch 已铺到
+        // `P+N`，实时流从 `P+N-M` 开始）。把整个块当 `Backward` 另起一段会让同一段
+        // 内容被写两次；裁掉已经录过的前缀、只写新增部分，才是“同一遍的延续”。
+        //
+        // 完全落在已录区间内的块只有两种情况：宿主重复投递同一区间（跳过），
+        // 或真正的循环回卷/seek（保留既有“另起一段、后来者胜出”）。
+        let raw = (start, frames);
+        let mut start = start;
+        let mut frames = frames;
+        let mut skip = skip;
+        if let Some(expected) = self.expected_next {
+            if start < expected {
+                let covered = usize::try_from(expected - start).unwrap_or(usize::MAX);
+                if covered < frames {
+                    skip = skip.saturating_add(covered);
+                    frames -= covered;
+                    start = expected;
+                    self.overlapped_frames = self.overlapped_frames.saturating_add(covered as u64);
+                } else if self.last_written == Some(raw) {
+                    self.repeated_blocks = self.repeated_blocks.saturating_add(1);
+                    return CaptureOutcome::Repeated;
+                }
+            }
+        }
+        if frames == 0 {
+            self.repeated_blocks = self.repeated_blocks.saturating_add(1);
+            return CaptureOutcome::Repeated;
         }
 
         // 连续性：上一块的终点是否正好接上这一块的首点。
@@ -760,8 +1235,7 @@ impl Capture {
         let needs_new = match &self.active {
             None => true,
             Some(active) => {
-                active.filled + frames > self.capacity
-                    || !matches!(loss, SegmentLoss::None)
+                active.filled + frames > self.capacity || !matches!(loss, SegmentLoss::None)
             }
         };
         if needs_new {
@@ -829,6 +1303,7 @@ impl Capture {
         }
         active.filled += writable;
         self.expected_next = Some(start + writable as i64);
+        self.last_written = Some(raw);
         self.captured_frames = self.captured_frames.saturating_add(writable as u64);
         self.last_position = self.expected_next;
         self.peak[0] = self.peak[0].max(active.peak[0]);
@@ -878,6 +1353,20 @@ fn seal(mut segment: Segment, reason: ClosedReason) -> Segment {
 }
 
 /// 采样率必须是有限的正常值，否则本块没有可用的时间基。
+/// 本块是否有任何非零样本（选举的辅助证据）。
+///
+/// 【为什么可以扫全块】它只在音频线程上做一次顺序读，和随后的拷贝同一量级；
+/// 而“哪条流有真正的输入”是判断 ASIO Guard 静音流不能覆盖 prefetch 内容的关键。
+/// 任意声道有非零即算有信号；NaN/Inf 也按“有内容”处理（它们会走后续的丢弃规则）。
+fn block_has_signal(block: &InputBlock<'_>, skip: usize, frames: usize) -> bool {
+    block.planes.iter().flatten().any(|plane| {
+        let end = skip.saturating_add(frames).min(plane.len());
+        plane
+            .get(skip..end)
+            .is_some_and(|samples| samples.iter().any(|sample| *sample != 0.0))
+    })
+}
+
 fn normalize_rate(rate: f64) -> Option<u32> {
     if !rate.is_finite() || rate <= 0.0 {
         return None;
@@ -948,10 +1437,19 @@ mod tests {
             1,
             capacity,
             (0..spares).map(|_| spare(capacity, 1)).collect(),
-            Some(spare(capacity, 1)),
+            [Some(spare(capacity, 1)), None],
             0,
         );
         capture
+    }
+
+    fn ctx(stream: ProcessStream, playing: bool, recording: bool, flow: bool) -> BlockContext {
+        BlockContext {
+            stream,
+            playing,
+            recording,
+            flow,
+        }
     }
 
     /// 连续块必须写进**同一个**段，且样本落在正确的段内偏移上。
@@ -990,12 +1488,7 @@ mod tests {
         assert_eq!(sealed[0].span(), 0..4);
         assert_eq!(sealed[0].closed, ClosedReason::Jump);
         assert_eq!(sealed[1].span(), 100..104);
-        assert_eq!(
-            sealed[1].loss,
-            SegmentLoss::Gap {
-                skipped_frames: 96
-            }
-        );
+        assert_eq!(sealed[1].loss, SegmentLoss::Gap { skipped_frames: 96 });
         assert_eq!(capture.gaps, 1);
     }
 
@@ -1102,7 +1595,7 @@ mod tests {
         let left: &'static [f32] = Box::leak(vec![-0.5, 0.25].into_boxed_slice());
         let right: &'static [f32] = Box::leak(vec![0.75, -0.1].into_boxed_slice());
         let mut capture = Capture::default();
-        capture.start(2, 64, vec![spare(64, 2)], None, 0);
+        capture.start(2, 64, vec![spare(64, 2)], [None, None], 0);
         let view = InputBlock {
             start: 0,
             frames: 2,
@@ -1201,7 +1694,10 @@ mod tests {
         // 停播：宿主把位置钉在 4 处反复 process（REAPER 的行为）。
         for _ in 0..5 {
             let (_, stalled) = block(4, 4, 48_000.0);
-            assert_eq!(capture.on_block(paused(stalled)), CaptureOutcome::NotPlaying);
+            assert_eq!(
+                capture.on_block(paused(stalled)),
+                CaptureOutcome::NotPlaying
+            );
         }
         assert!(!capture.is_stopped(), "停播不该结束这次捕获");
         // 重新起播，位置正好接上。
@@ -1236,7 +1732,7 @@ mod tests {
     #[test]
     fn the_duration_limit_stops_the_capture() {
         let mut capture = Capture::default();
-        capture.start(1, 64, vec![spare(64, 1)], None, 8);
+        capture.start(1, 64, vec![spare(64, 1)], [None, None], 8);
         let (_, first) = block(0, 4, 48_000.0);
         assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
         let (_, second) = block(4, 4, 48_000.0);
@@ -1257,7 +1753,7 @@ mod tests {
         let rate = 48_000.0;
         // 上限 20 秒 = 960000 帧；段容量够大，让 11 秒素材落在一个段里。
         let mut capture = Capture::default();
-        capture.start(1, 600_000, vec![spare(600_000, 1)], None, 960_000);
+        capture.start(1, 600_000, vec![spare(600_000, 1)], [None, None], 960_000);
         // 1 秒一块。
         for second in 0..11_i64 {
             let (_, view) = block(second * 48_000, 48_000, rate);
@@ -1383,4 +1879,123 @@ mod tests {
         assert!(capture.pending_discarded >= 1);
     }
 
+    fn capture_with_both_streams(capacity: usize, spares: usize) -> Capture {
+        let mut capture = Capture::default();
+        capture.start(
+            1,
+            capacity,
+            (0..spares).map(|_| spare(capacity, 1)).collect(),
+            [Some(spare(capacity, 1)), Some(spare(capacity, 1))],
+            0,
+        );
+        capture
+    }
+
+    /// **宿主只用 prefetch：捕获必须跟随它，而不是一直等实时流。**
+    #[test]
+    fn a_prefetch_only_host_is_captured_with_its_own_lookbehind() {
+        let mut capture = capture_with_both_streams(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(
+                paused(first),
+                ctx(ProcessStream::Prefetch, false, false, true)
+            ),
+            CaptureOutcome::NotPlaying,
+            "首块先暂存"
+        );
+        let (_, second) = block(4, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(
+                paused(second),
+                ctx(ProcessStream::Prefetch, false, false, true)
+            ),
+            CaptureOutcome::Captured,
+            "同一流连续两块 ⇒ 选举并提交首块"
+        );
+        assert_eq!(capture.elected_stream(), Some(ProcessStream::Prefetch));
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].span(), 0..8, "开头那一块不能丢");
+    }
+
+    /// **两条流交错：每块都另起一段的旧行为必须消失。**
+    #[test]
+    fn interleaved_streams_do_not_fragment_the_capture() {
+        let mut capture = capture_with_both_streams(64, 2);
+        let feeds = [
+            (ProcessStream::Prefetch, 0, 4),
+            (ProcessStream::Realtime, 0, 4),
+            (ProcessStream::Prefetch, 4, 4),
+            (ProcessStream::Realtime, 4, 4),
+        ];
+        for (stream, start, frames) in feeds {
+            let (_, view) = block(start, frames, 48_000.0);
+            let _ = capture.on_block_with_context(paused(view), ctx(stream, false, false, true));
+        }
+        assert_eq!(capture.elected_stream(), Some(ProcessStream::Prefetch));
+        assert_eq!(capture.backwards, 0, "另一条流不能把 expected_next 撕碎");
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].span(), 0..8);
+        assert_eq!(capture.stream_switches, 0);
+    }
+
+    /// **交接处的半重叠必须裁剪前缀，而不是另起一段。**
+    #[test]
+    fn a_partially_overlapping_block_continues_the_same_segment() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        let (_, overlap) = block(2, 4, 48_000.0);
+        assert_eq!(capture.on_block(overlap), CaptureOutcome::Captured);
+        assert_eq!(capture.overlapped_frames, 2);
+        assert_eq!(capture.captured_frames(), 6);
+        assert_eq!(capture.span(), Some(0..6));
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "半重叠不是跳跃，不得切段");
+        assert_eq!(sealed[0].span(), 0..6);
+    }
+
+    /// **同一区间的整块重复不是新素材。**
+    #[test]
+    fn an_exact_repeat_of_the_same_interval_is_skipped() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        let (_, repeat) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(repeat), CaptureOutcome::Repeated);
+        assert_eq!(capture.repeated_blocks, 1);
+        assert_eq!(capture.captured_frames(), 4);
+        assert_eq!(capture.span(), Some(0..4));
+    }
+
+    /// **`kRecording` 出现时立即从 prefetch 交接给实时流。**
+    #[test]
+    fn a_recording_block_hands_over_to_the_realtime_stream_immediately() {
+        let mut capture = capture_with_both_streams(64, 2);
+        for start in [0, 4] {
+            let (_, view) = block(start, 4, 48_000.0);
+            let _ = capture.on_block_with_context(
+                paused(view),
+                ctx(ProcessStream::Prefetch, false, false, true),
+            );
+        }
+        assert_eq!(capture.elected_stream(), Some(ProcessStream::Prefetch));
+        let (_, live) = block(8, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(
+                paused(live),
+                ctx(ProcessStream::Realtime, false, true, true)
+            ),
+            CaptureOutcome::Captured,
+            "录音流的第一块不能被一条安静的首块延迟掉"
+        );
+        assert_eq!(capture.elected_stream(), Some(ProcessStream::Realtime));
+        assert_eq!(capture.stream_switches, 1);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2, "交接必须封口旧段");
+        assert_eq!(sealed[0].span(), 0..8);
+        assert_eq!(sealed[1].span(), 8..12);
+    }
 }

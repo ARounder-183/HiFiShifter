@@ -35,7 +35,7 @@ pub(crate) mod timeline;
 use crate::render::snapshot::PlaybackSnapshot;
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
-use capture::{Capture, CaptureOutcome, ClosedReason, Segment};
+use capture::{BlockContext, Capture, CaptureOutcome, ClosedReason, ProcessStream, Segment};
 use timeline::ProjectionTake;
 // 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
 // 而 `capture` 是私有子模块。
@@ -43,7 +43,7 @@ pub(crate) use capture::InputBlock;
 use hifishifter_kernel::state::TimelineState;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 单段容量（秒）。
@@ -262,19 +262,27 @@ pub(crate) struct TransferStore {
     /// （后录的胜出），于是"删掉一个较早的 take"同样会改变时间线 —— 而 take 号本身
     /// 在那一刻没变。用一个只增的代次表达"素材变过"，渲染版本闸与会话重载才不会漏。
     revision: AtomicU64,
-    options: Mutex<TransferOptions>,
+    /// 选项的原子快照。音频线程每块都要读它，**不能取互斥锁**。
+    options_max_duration_bits: AtomicU64,
+    options_segment_bits: AtomicU64,
+    options_monitor: AtomicBool,
+    options_outside_passthrough: AtomicBool,
     /// 宿主在 `setupProcessing` 声明的工程率（`0` = 尚未声明）。
     project_rate: AtomicI32,
     /// 观察位：这三项描述宿主**实际**在做什么，前端据此决定引导语。
     saw_context: AtomicBool,
     saw_input: AtomicBool,
     saw_offline: AtomicBool,
-    /// 宿主**此刻**是否在播放（实时读数，不是"曾经播过"）。
+    /// 宿主**此刻**是否在播放，**按进程流分开**。
     ///
-    /// 【为什么是实时的】按了录制却没在播放，是这个功能最容易踩的坑（Transfer 的用法是
-    /// "先按录制、再按播放"）。实时读数让面板能直接说"宿主没有在播放"，而不是让用户对着
-    /// 一个 0.00 秒的读数猜。
-    host_playing: AtomicBool,
+    /// 【为什么不能共用一个原子】`kPrefetch` 与 `kRealtime` 是两条流；prefetch 块
+    /// 可能带着 `kPlaying == 0` 覆盖实时流刚写入的 `1`，让录制监听在起播窗口里
+    /// 在“直通”和“旧处理结果”之间抖动。面板读 OR，输出仲裁读**当前捕获流**。
+    stream_playing: [AtomicBool; 3],
+    /// 当前为捕获供料的进程流（`0` = 尚未选举；其余见 `ProcessStream::code`）。
+    ///
+    /// 音频线程在捕获锁内写，输出仲裁无锁读。
+    capture_stream: AtomicU8,
     /// 宿主用**非 32-bit 浮点**（`kSample64`）在跑本实例。
     ///
     /// 【为什么要单独一个读数】那种情况下插件的平面是 64 位的（联合体同一地址），
@@ -306,12 +314,16 @@ impl Default for TransferStore {
             next_take_id: AtomicU64::new(1),
             material_present: AtomicBool::new(false),
             revision: AtomicU64::new(0),
-            options: Mutex::new(TransferOptions::default()),
+            options_max_duration_bits: AtomicU64::new(DEFAULT_MAX_DURATION_SEC.to_bits()),
+            options_segment_bits: AtomicU64::new(SEGMENT_SECONDS.to_bits()),
+            options_monitor: AtomicBool::new(true),
+            options_outside_passthrough: AtomicBool::new(true),
             project_rate: AtomicI32::new(0),
             saw_context: AtomicBool::new(false),
             saw_input: AtomicBool::new(false),
             saw_offline: AtomicBool::new(false),
-            host_playing: AtomicBool::new(false),
+            stream_playing: std::array::from_fn(|_| AtomicBool::new(false)),
+            capture_stream: AtomicU8::new(0),
             unsupported_precision: AtomicBool::new(false),
             missing_input_reported: AtomicBool::new(false),
             last_closed: AtomicU8::new(0),
@@ -334,9 +346,29 @@ impl TransferStore {
         self.capture_started.load(Ordering::Acquire)
     }
 
-    /// 宿主**此刻**是否在播放（音频线程可读，无锁）。
+    /// 宿主**此刻**是否在播放（面板读数；任一未绑定进程流说在播即算在播）。
+    ///
+    /// 【为什么是 OR】prefetch 的 `kPlaying == 0` 不能在实时流说 1 时把面板打回
+    /// “未播放”。输出仲裁另有更严格的 [`Self::capture_stream_playing`]。
     pub(crate) fn host_playing(&self) -> bool {
-        self.host_playing.load(Ordering::Acquire)
+        // 离线是一趟独立导出，不是“此刻在播”；把它算进来会让面板在导出结束后
+        // 一直显示“播放中”。
+        self.stream_playing[ProcessStream::Realtime.index()].load(Ordering::Acquire)
+            || self.stream_playing[ProcessStream::Prefetch.index()].load(Ordering::Acquire)
+    }
+
+    /// 当前捕获流的播放位（输出仲裁用）。
+    ///
+    /// 【为什么不能也用 OR】停播后 prefetch 可能留下陈旧的 1；OR 会让
+    /// `is_recording` 永远为真，用户就永远只听到直通、听不到处理结果。
+    pub(crate) fn capture_stream_playing(&self) -> bool {
+        self.capture_stream()
+            .is_some_and(|stream| self.stream_playing[stream.index()].load(Ordering::Acquire))
+    }
+
+    /// 当前为捕获供料的进程流（`None` = 尚未选举）。
+    pub(crate) fn capture_stream(&self) -> Option<ProcessStream> {
+        ProcessStream::from_code(self.capture_stream.load(Ordering::Acquire))
     }
 
     /// 此刻是否**真的在录**（= 已武装，且宿主已经开始播放）。
@@ -356,12 +388,26 @@ impl TransferStore {
 
     /// 与 [`Self::is_recording`] 相同，但把“块流在推进”也算作起播证据。
     ///
-    /// 【为什么需要参数】`kPlaying` 可能在起播第一块才滞后置位；只按
-    /// `capture_started || host_playing` 判断时，那一块会被当成待命，输出上一版
-    /// `Processed`。`flow` 由音频线程的 `note_block_position` 提供，调用点仍在
-    /// `transfer_output`（它先过 `is_bound` 守卫，所以 ARA 实例走不到这里）。
+    /// 【首块的 flow 不算录制证据】`flow == true && had_previous == false` 只说明
+    /// 这是本流的第一块；把它当起播会让“武装后宿主还钉在光标处”的第一个块直通一次。
     pub(crate) fn is_recording_with_flow(&self, flow: bool) -> bool {
-        self.is_armed() && (self.capture_started() || self.host_playing() || flow)
+        self.is_armed() && (self.capture_started() || self.capture_stream_playing() || flow)
+    }
+
+    /// 带“本块证据”的录制判定（输出仲裁的唯一入口）。
+    pub(crate) fn is_recording_with_evidence(
+        &self,
+        evidence: Option<crate::render::extension::BlockEvidence>,
+    ) -> bool {
+        if !self.is_armed() {
+            return false;
+        }
+        if self.capture_started() || self.capture_stream_playing() {
+            return true;
+        }
+        evidence.is_some_and(|evidence| {
+            evidence.playing || evidence.recording || (evidence.flow && evidence.had_previous)
+        })
     }
 
     /// 素材代次（`0` = 从来没有过任何 take）。
@@ -379,7 +425,11 @@ impl TransferStore {
     /// 渲染什么 —— 于是补录一句会把整条时间轴换掉。现在投影取全部 take，"最新一次录制"
     /// 就只是 take 号里最大的那个，不需要（也不该）有一个独立的可变状态。
     pub(crate) fn latest_take(&self) -> Option<u64> {
-        self.takes.lock_or_recover().iter().map(|take| take.id).max()
+        self.takes
+            .lock_or_recover()
+            .iter()
+            .map(|take| take.id)
+            .max()
     }
 
     /// 有没有可渲染的素材（决定 [`SignalSource`](crate::render::extension::SignalSource)）。
@@ -447,12 +497,19 @@ impl TransferStore {
         self.saw_offline.store(true, Ordering::Release);
     }
 
+    /// 选项快照。**无锁**：音频线程每块都要读它（见 `transfer_stage`）。
     pub(crate) fn options(&self) -> TransferOptions {
-        *self.options.lock_or_recover()
+        TransferOptions {
+            max_duration_sec: f64::from_bits(
+                self.options_max_duration_bits.load(Ordering::Acquire),
+            ),
+            segment_sec: f64::from_bits(self.options_segment_bits.load(Ordering::Acquire)),
+            monitor: self.options_monitor.load(Ordering::Acquire),
+            outside_passthrough: self.options_outside_passthrough.load(Ordering::Acquire),
+        }
     }
 
     pub(crate) fn set_options(&self, options: TransferOptions) {
-        let mut current = self.options.lock_or_recover();
         // 【为什么在这里夹取值而不是信任调用方】上限决定内存占用，段长决定延迟；
         // 两者都不该由前端的一个笔误变成 0 或 1e9。
         //
@@ -466,12 +523,18 @@ impl TransferStore {
         } else {
             1.0
         };
-        *current = TransferOptions {
-            max_duration_sec: limit,
-            segment_sec: options.segment_sec.clamp(1.0, 60.0),
-            monitor: options.monitor,
-            outside_passthrough: options.outside_passthrough,
-        };
+        // 每个字段独立原子写；音频线程可能看到“上一个上限 + 这一个段长”的瞬时组合，
+        // 但每一项都在合法域内，且没有任何一项会与另一项配对成分配爆炸。
+        self.options_max_duration_bits
+            .store(limit.to_bits(), Ordering::Release);
+        self.options_segment_bits.store(
+            options.segment_sec.clamp(1.0, 60.0).to_bits(),
+            Ordering::Release,
+        );
+        self.options_monitor
+            .store(options.monitor, Ordering::Release);
+        self.options_outside_passthrough
+            .store(options.outside_passthrough, Ordering::Release);
     }
 
     /// 开始录制。返回失败原因（宿主没给工程率时无法确定段容量）。
@@ -504,21 +567,23 @@ impl TransferStore {
             .map(|_| allocate_spare(capacity, 2))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| "not enough PCM budget for the transfer buffers".to_owned())?;
-        // lookbehind 的候选块是**额外**的一块：它不占 spares，也不会因为
-        // `service()` 的补充节奏而被挤掉。预算不足时关闭 lookbehind（不是关录制）。
-        let pending = allocate_spare(capacity, 2);
-        if pending.is_none() {
+        // lookbehind 的候选块是**额外**的两块（实时 / prefetch 各一份）：它们不占
+        // spares，也不会因为 `service()` 的补充节奏而被挤掉。预算不足时关闭该流的
+        // lookbehind（不是关录制）。
+        let pendings = [allocate_spare(capacity, 2), allocate_spare(capacity, 2)];
+        if pendings.iter().any(Option::is_none) {
             log::warn!(
-                "[transfer] no PCM budget for the lookbehind buffer; \
-                 the first block of a lagging transport start may be lost"
+                "[transfer] no PCM budget for one of the lookbehind buffers; \
+                 the first block of a lagging transport start may be lost on that stream"
             );
         }
         self.capture
             .lock_or_recover()
-            .start(2, capacity, spares, pending, max_frames);
+            .start(2, capacity, spares, pendings, max_frames);
         // 新的一次录制：上一次的停止原因不再与用户相关。
         self.last_closed.store(0, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.capture_stream.store(0, Ordering::Release);
         self.armed.store(true, Ordering::Release);
         Ok(())
     }
@@ -527,6 +592,7 @@ impl TransferStore {
     pub(crate) fn stop(&self) -> Result<u64, String> {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.capture_stream.store(0, Ordering::Release);
         let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
         self.promote(segments)
     }
@@ -535,6 +601,7 @@ impl TransferStore {
     pub(crate) fn cancel(&self) {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.capture_stream.store(0, Ordering::Release);
         let mut capture = self.capture.lock_or_recover();
         let _ = capture.finish(ClosedReason::Stopped);
         *capture = Capture::default();
@@ -545,6 +612,7 @@ impl TransferStore {
     pub(crate) fn clear(&self) {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.capture_stream.store(0, Ordering::Release);
         *self.capture.lock_or_recover() = Capture::default();
         for take in self.takes.lock_or_recover().drain(..) {
             // 移入回收站而不是直接删：录了几分钟的东西被误删是不可接受的。
@@ -596,7 +664,12 @@ impl TransferStore {
             let Some(path) = entry["sidecar"].as_str().map(PathBuf::from) else {
                 continue;
             };
-            if self.takes.lock_or_recover().iter().any(|take| take.id == id) {
+            if self
+                .takes
+                .lock_or_recover()
+                .iter()
+                .any(|take| take.id == id)
+            {
                 continue;
             }
             let segments = match sidecar::read(&path) {
@@ -675,13 +748,18 @@ impl TransferStore {
     /// 用户根本没有办法开始。观察的代价只是几个原子写 + 一次缓冲形状检查
     /// （`capture_view` 不分配、不读样本），可以在每个音频块上做。
     pub(crate) fn observe(&self, block: &InputBlock<'_>) {
+        self.observe_with_stream(block, ProcessStream::Realtime);
+    }
+
+    /// 与 [`Self::observe`] 相同，但把播放位写到**本流**的槽位。
+    pub(crate) fn observe_with_stream(&self, block: &InputBlock<'_>, stream: ProcessStream) {
         if block.sample_rate.is_finite() && block.sample_rate > 0.0 {
             self.saw_context.store(true, Ordering::Release);
         }
         if block.has_audio() {
             self.saw_input.store(true, Ordering::Release);
         }
-        self.host_playing.store(block.playing, Ordering::Release);
+        self.stream_playing[stream.index()].store(block.playing, Ordering::Release);
     }
 
     /// 只报一次"宿主给了位置、却从来没有给过输入"。
@@ -706,15 +784,24 @@ impl TransferStore {
     }
 
     pub(crate) fn on_block(&self, block: InputBlock<'_>) -> TransferBlockOutcome {
-        self.on_block_with_flow(block, false)
+        self.on_block_with_context(block, BlockContext::realtime(false))
     }
 
     /// 与 [`Self::on_block`] 相同，但带上“块流在推进”的弱证据（见
-    /// [`Capture::on_block_with_flow`]）。音频线程调用。
+    /// [`Capture::on_block_with_context`]）。兼容既有测试/调用。
     pub(crate) fn on_block_with_flow(
         &self,
         block: InputBlock<'_>,
         flow: bool,
+    ) -> TransferBlockOutcome {
+        self.on_block_with_context(block, BlockContext::realtime(flow))
+    }
+
+    /// 音频线程入口：带进程流与块流证据。
+    pub(crate) fn on_block_with_context(
+        &self,
+        block: InputBlock<'_>,
+        ctx: BlockContext,
     ) -> TransferBlockOutcome {
         if !self.is_armed() {
             return TransferBlockOutcome::Idle;
@@ -726,9 +813,15 @@ impl TransferStore {
         if capture.is_stopped() {
             // 捕获已经结束（备用缓冲用尽 / 采样率变化 / 到上限）；等非音频线程 promote。
             self.armed.store(false, Ordering::Release);
+            self.capture_stream.store(0, Ordering::Release);
             return TransferBlockOutcome::Stopped;
         }
-        match capture.on_block_with_flow(block, flow) {
+        let outcome = capture.on_block_with_context(block, ctx);
+        // 选举结果给输出仲裁一个无锁读数。
+        if let Some(stream) = capture.elected_stream() {
+            self.capture_stream.store(stream.code(), Ordering::Release);
+        }
+        match outcome {
             CaptureOutcome::Captured | CaptureOutcome::SilentInput => {
                 // 镜像"已经开始录"这个事实给无锁读者（输出仲裁）。
                 self.capture_started.store(true, Ordering::Release);
@@ -737,7 +830,11 @@ impl TransferStore {
             CaptureOutcome::NoPosition => TransferBlockOutcome::NoPosition,
             // 待命或暂停：本块没写。**不改任何状态** —— 这正是"停播不结束录制"的落点。
             CaptureOutcome::NotPlaying => TransferBlockOutcome::NotPlaying,
-            CaptureOutcome::RateChanged | CaptureOutcome::OutOfSpares | CaptureOutcome::LimitReached => {
+            // 同一区间被重复投递：不是新素材，但也不是“宿主没在播”。
+            CaptureOutcome::Repeated => TransferBlockOutcome::Repeated,
+            CaptureOutcome::RateChanged
+            | CaptureOutcome::OutOfSpares
+            | CaptureOutcome::LimitReached => {
                 // 【为什么这里要记原因】这三条都是"不是用户按的停"，而它们的补救完全不同
                 // （换采样率 / 腾内存 / 改上限）。音频线程不能写日志，只能留一个读数。
                 let reason = capture
@@ -747,6 +844,7 @@ impl TransferStore {
                     self.last_closed.store(reason.code(), Ordering::Release);
                 }
                 self.armed.store(false, Ordering::Release);
+                self.capture_stream.store(0, Ordering::Release);
                 TransferBlockOutcome::Stopped
             }
         }
@@ -805,6 +903,7 @@ impl TransferStore {
             capture.reset_after_promote();
             segments
         };
+        self.capture_stream.store(0, Ordering::Release);
         if segments.is_empty() {
             return false;
         }
@@ -947,7 +1046,10 @@ impl TransferStore {
     /// 【为什么不用阻塞锁】诊断可能在 actor 心跳里被调用；持有 `capture` 锁会让音频
     /// 线程的 `try_lock` 失败并整块跳过。诊断读不到下一轮再读，不能反过来影响录制。
     pub(crate) fn capture_diagnostics(&self) -> Option<capture::CaptureDiagnostics> {
-        self.capture.try_lock().ok().map(|capture| capture.diagnostics())
+        self.capture
+            .try_lock()
+            .ok()
+            .map(|capture| capture.diagnostics())
     }
 
     /// 对外状态。
@@ -984,7 +1086,7 @@ impl TransferStore {
             saw_context: self.saw_context.load(Ordering::Acquire),
             saw_input: self.saw_input.load(Ordering::Acquire),
             saw_offline: self.saw_offline.load(Ordering::Acquire),
-            host_playing: self.host_playing.load(Ordering::Acquire),
+            host_playing: self.host_playing(),
             unsupported_precision: self.precision_unsupported(),
             limit_warning: readings.limit_warning,
             stopped_reason: ClosedReason::from_code(self.last_closed.load(Ordering::Acquire))
@@ -1013,11 +1115,7 @@ impl TransferStore {
             if timeline.clips.is_empty() {
                 return None;
             }
-            Some((
-                timeline.clone(),
-                regions_for(&timeline),
-                sources_for(input),
-            ))
+            Some((timeline.clone(), regions_for(&timeline), sources_for(input)))
         })
     }
 
@@ -1070,6 +1168,7 @@ impl TransferStore {
         all.extend(capture.drain_sealed());
         capture.reset_after_promote();
         drop(capture);
+        self.capture_stream.store(0, Ordering::Release);
         if all.is_empty() {
             return Err("nothing was captured".into());
         }
@@ -1134,6 +1233,8 @@ pub(crate) enum TransferBlockOutcome {
     NoPosition,
     /// 宿主此刻没在播放：本块未写入（待命或暂停）。
     NotPlaying,
+    /// 同一流把同一个工程区间重复投递：不产生新素材。
+    Repeated,
     /// 捕获已结束（等 promote）。
     Stopped,
 }
@@ -1148,6 +1249,7 @@ impl TransferBlockOutcome {
             TransferBlockOutcome::NoPosition => 3,
             TransferBlockOutcome::NotPlaying => 4,
             TransferBlockOutcome::Stopped => 5,
+            TransferBlockOutcome::Repeated => 6,
         }
     }
 }
@@ -1474,7 +1576,11 @@ mod tests {
             max_duration_sec: 0.0,
             ..options
         });
-        assert_eq!(store.options().max_duration_sec, 0.0, "0 必须原样保留为不限");
+        assert_eq!(
+            store.options().max_duration_sec,
+            0.0,
+            "0 必须原样保留为不限"
+        );
         // 超大的值仍被夹到上限。
         store.set_options(TransferOptions {
             max_duration_sec: 1e9,
@@ -1623,4 +1729,3 @@ mod tests {
         }
     }
 }
-

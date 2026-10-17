@@ -52,6 +52,12 @@ pub(crate) struct FrameRate {
 /// 取值来自 SDK `ivstprocesscontext.h` 的 `StatesAndFlags::kPlaying = 1 << 1`。
 pub(crate) const PROCESS_CONTEXT_PLAYING: u32 = 1 << 1;
 
+/// `ProcessContext::state` 的 `kRecording` 位（SDK `ivstprocesscontext.h:104`）。
+///
+/// 捕获选举用它优先实时流：录音轨上的真实输入在实时路径上，prefetch 可能只是
+/// 预计算。它仍只是提示；缺席时由连续块与非静音证据决定。
+pub(crate) const PROCESS_CONTEXT_RECORDING: u32 = 1 << 3;
+
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
 #[derive(Default)]
