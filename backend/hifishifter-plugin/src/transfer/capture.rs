@@ -161,6 +161,11 @@ pub(crate) struct Segment {
     /// 已写入的帧数。
     pub filled: usize,
     pub loss: SegmentLoss,
+    /// 本段所属循环 pass 的工程起点（`None` = 不是循环回卷产生的段）。
+    ///
+    /// 【为什么跟着段走】一个 pass 可能被容量切成多段；投影需要把它们认成同一圈，
+    /// 才能把“最后一圈原子替换整圈”落在同一组里。它不影响音频，只影响投影分组。
+    pub loop_start: Option<i64>,
     /// 每声道峰值（绝对值的最大值）。
     pub peak: [f32; 2],
     pub closed: ClosedReason,
@@ -286,6 +291,132 @@ impl ProcessStream {
     }
 }
 
+/// 一块音频相对“同一流上一块”的传输相位。
+///
+/// 【为什么不能只看 `kPlaying`】宿主可以在停播时仍置 `kPlaying`（FL Studio），也可以
+/// 在起播第一块滞后置位（VEGAS/REAPER）。真正能跨宿主成立的判据只有“位置是否在
+/// 推进”。`Resting` 表示同一块首已经出现过：这不是新素材，也不是新的输出位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TransportPhase {
+    /// 本流首块，或 `kPlaying`/`kRecording` 上升沿后的第一块。
+    #[default]
+    Start,
+    /// 块首相对上一块发生了变化（前进、后退、seek、循环回卷）。
+    Rolling,
+    /// 同一块首已经至少出现过一次：位置钉住 / 停播重复。
+    Resting,
+}
+
+impl TransportPhase {
+    /// 稳定编码（只增不改，诊断用）。
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Start => 1,
+            Self::Rolling => 2,
+            Self::Resting => 3,
+        }
+    }
+}
+
+/// 本块有效工程位置的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PositionSource {
+    /// `projectTimeSamples`（正常路径）。
+    #[default]
+    Project,
+    /// 工程位置钉住、`continuousTimeSamples` 在前进：用增量锚定。
+    Continuous,
+    /// 工程位置钉住、`projectTimeMusic` 在前进：用音乐时间增量锚定。
+    Music,
+    /// 循环播放：使用会回卷的工程位置（不是 continuous）。
+    Cycle,
+}
+
+impl PositionSource {
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Project => 1,
+            Self::Continuous => 2,
+            Self::Music => 3,
+            Self::Cycle => 4,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Project),
+            2 => Some(Self::Continuous),
+            3 => Some(Self::Music),
+            4 => Some(Self::Cycle),
+            _ => None,
+        }
+    }
+}
+
+/// 一个宿主块在循环边界处切分出的一段。
+///
+/// 【为什么需要它】SDK 明确允许宿主不按 cycle 边界切块；一个块的后半段可能已经是
+/// 下一圈的开头。按原位置整块写入会把那一段放到 loop 终点之后，形成悬挂尾巴。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SubBlock {
+    /// 这一段在工程时间轴上的起点（回卷后是 cycle start）。
+    pub position: i64,
+    /// 这一段在宿主块内的帧偏移。
+    pub input_offset: usize,
+    pub frames: usize,
+}
+
+impl SubBlock {
+    pub(crate) const EMPTY: Self = Self {
+        position: 0,
+        input_offset: 0,
+        frames: 0,
+    };
+}
+
+/// 一个宿主块的切分结果（1 或 2 段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockSplit {
+    pub parts: [SubBlock; 2],
+    pub count: u8,
+}
+
+impl Default for BlockSplit {
+    fn default() -> Self {
+        Self {
+            parts: [SubBlock::EMPTY; 2],
+            count: 1,
+        }
+    }
+}
+
+impl BlockSplit {
+    pub(crate) fn whole(position: i64, frames: usize) -> Self {
+        Self {
+            parts: [
+                SubBlock {
+                    position,
+                    input_offset: 0,
+                    frames,
+                },
+                SubBlock::EMPTY,
+            ],
+            count: 1,
+        }
+    }
+
+    pub(crate) fn split(first: SubBlock, second: SubBlock) -> Self {
+        Self {
+            parts: [first, second],
+            count: 2,
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &SubBlock> {
+        self.parts[..self.count.clamp(1, 2) as usize].iter()
+    }
+}
+
 /// 一块音频的进程流上下文（与样本视图分开：`InputBlock` 仍然只描述音频）。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockContext {
@@ -294,8 +425,20 @@ pub(crate) struct BlockContext {
     pub playing: bool,
     /// `ProcessContext::state & kRecording`。
     pub recording: bool,
-    /// 本流内：首块、块首移动，或同头块变长。
-    pub flow: bool,
+    /// 本流内：块首、块首移动、或同一块首的重复。
+    pub phase: TransportPhase,
+    /// `kPlaying` 从 0 变 1 的那一块。
+    pub playing_rising: bool,
+    /// `kRecording` 从 0 变 1 的那一块。
+    pub recording_rising: bool,
+    /// 本块由一次循环回卷开始（块首可以与上一块相同）。
+    pub cycle_wrap: bool,
+    /// 循环起点（工程采样域；`None` = 宿主没给可用的 cycle 元数据）。
+    pub cycle_start: Option<i64>,
+    /// 本块开始了一个新的 pass（回卷或位置后退）。
+    pub new_pass: bool,
+    /// 本段属于循环切分的第几段（0 = 第一段；只有 0 更新候选/几何计数）。
+    pub part: u8,
 }
 
 impl BlockContext {
@@ -304,16 +447,29 @@ impl BlockContext {
             stream: ProcessStream::Realtime,
             playing: false,
             recording: false,
-            flow,
+            phase: if flow {
+                TransportPhase::Rolling
+            } else {
+                TransportPhase::Start
+            },
+            playing_rising: false,
+            recording_rising: false,
+            cycle_wrap: false,
+            cycle_start: None,
+            new_pass: false,
+            part: 0,
         }
     }
 }
 
-/// 一条流在捕获侧被接管前需要连续看到的块数。
+/// 交接所需的最少连续块数。
 ///
-/// 【为什么不是 1】单块交错（ASIO Guard 与实时线程各送一块）不能证明宿主换了流；
-/// 持续供料才是证据。8 块在 512 帧/48 kHz 下约 85 ms，足够短到不丢音乐。
-const HANDOVER_BLOCKS: u32 = 8;
+/// 【为什么不是 8】块长由宿主决定；0.7 s 的块长下 8 块是 5.6 s，静音/错误的流
+/// 会长期占着捕获。块数只作为“避免单块交错”的下限，真正的量级由
+/// [`HANDOVER_SEC`] 决定。
+const HANDOVER_BLOCKS: u32 = 2;
+/// 交接所需的连续供料时长（秒）。长块宿主上一块即可超过它。
+const HANDOVER_SEC: f64 = 0.12;
 
 /// 单条进程流的候选状态（只存整数，不分配）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -324,11 +480,43 @@ struct StreamCandidate {
     last_end: i64,
     /// 本流内部首尾相接的连续块数。
     contiguous: u32,
+    /// 本流内部首尾相接的连续帧数（长块宿主上比块数更有意义）。
+    contiguous_frames: u32,
     playing_blocks: u32,
     recording_blocks: u32,
     non_silent_blocks: u32,
+    /// 本流内位置真的在推进（相位非 Resting）的块数 / 帧数。
+    moving_blocks: u32,
+    moving_frames: u32,
+    /// 本流内非静音的帧数。
+    non_silent_frames: u32,
+    playing_frames: u32,
+    recording_frames: u32,
     /// 最后一次见到的全局块序号（诊断用）。
     last_seen_seq: u64,
+}
+
+/// 候选流的证据强度（用于首次选举的平局）。
+///
+/// 【为什么把 recording/playing 放在最前】它们是宿主对“这一块是不是真实播放/录音”
+/// 的直接声明；位置推进与非静音是辅助证据。元组按字典序比较，越靠后的项只在
+/// 前面完全相等时才起作用。
+fn candidate_evidence(candidate: &StreamCandidate) -> (u8, u32, u32, u32) {
+    let tier = if candidate.recording_frames > 0 {
+        3
+    } else if candidate.playing_frames > 0 {
+        2
+    } else if candidate.moving_frames > 0 {
+        1
+    } else {
+        0
+    };
+    (
+        tier,
+        candidate.moving_frames,
+        candidate.non_silent_frames,
+        candidate.contiguous_frames,
+    )
 }
 
 /// 一条流的 lookbehind 缓冲。
@@ -406,6 +594,16 @@ pub(crate) struct CaptureDiagnostics {
     pub repeated_blocks: u64,
     /// 交接/重叠处被裁掉的前缀帧数。
     pub overlapped_frames: u64,
+    /// 因 `Resting` 被抑制的块数 / 帧数。
+    pub resting_blocks: u64,
+    pub resting_frames: u64,
+    /// 上升沿覆盖写：块数 / 帧数。
+    pub overwritten_blocks: u64,
+    pub overwritten_frames: u64,
+    /// 回卷时裁掉的悬挂尾巴帧数。
+    pub overhang_trimmed_frames: u64,
+    /// 循环边界切分次数。
+    pub cycle_splits: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -448,10 +646,16 @@ pub(crate) struct Capture {
     elected_run: u32,
     /// 当前流之后又有多少块来自别的流（用于判断“另一条流是否接管”）。
     elected_idle: u32,
+    /// 当前流之后别的流累计供料的帧数（长块宿主上的交接证据）。
+    elected_idle_frames: u32,
     /// 当前流连续给出静音块的次数（用于“真正的输入在另一条流上”的接管）。
     elected_silent_blocks: u32,
+    /// 当前流连续静音的帧数。
+    elected_silent_frames: u32,
     /// 全局块序号（只用于诊断）。
     block_seq: u64,
+    /// 当前 pass 的循环起点；容量切段时由后续段继承。
+    current_loop_start: Option<i64>,
     /// 当前流上一块**实际写入**的区间；用于识别同一区间的重复投递。
     last_written: Option<(i64, usize)>,
     /// 本次捕获的峰值（各段峰值的最大值）。
@@ -482,6 +686,16 @@ pub(crate) struct Capture {
     pub repeated_blocks: u64,
     /// 交接/重叠处被裁掉的前缀帧数。
     pub overlapped_frames: u64,
+    /// 因 `Resting` 被抑制的块数 / 帧数。
+    pub resting_blocks: u64,
+    pub resting_frames: u64,
+    /// 上升沿覆盖写：块数 / 帧数。
+    pub overwritten_blocks: u64,
+    pub overwritten_frames: u64,
+    /// 回卷时裁掉的悬挂尾巴帧数。
+    pub overhang_trimmed_frames: u64,
+    /// 循环边界切分次数。
+    pub cycle_splits: u64,
 }
 
 impl Default for Capture {
@@ -502,8 +716,11 @@ impl Default for Capture {
             candidates: Default::default(),
             elected_run: 0,
             elected_idle: 0,
+            elected_idle_frames: 0,
             elected_silent_blocks: 0,
+            elected_silent_frames: 0,
             block_seq: 0,
+            current_loop_start: None,
             last_written: None,
             peak: [0.0; 2],
             started: false,
@@ -520,6 +737,12 @@ impl Default for Capture {
             stream_switches: 0,
             repeated_blocks: 0,
             overlapped_frames: 0,
+            resting_blocks: 0,
+            resting_frames: 0,
+            overwritten_blocks: 0,
+            overwritten_frames: 0,
+            overhang_trimmed_frames: 0,
+            cycle_splits: 0,
         }
     }
 }
@@ -651,6 +874,12 @@ impl Capture {
             stream_switches: diagnostics.stream_switches,
             repeated_blocks: diagnostics.repeated_blocks,
             overlapped_frames: diagnostics.overlapped_frames,
+            resting_blocks: diagnostics.resting_blocks,
+            resting_frames: diagnostics.resting_frames,
+            overwritten_blocks: diagnostics.overwritten_blocks,
+            overwritten_frames: diagnostics.overwritten_frames,
+            overhang_trimmed_frames: diagnostics.overhang_trimmed_frames,
+            cycle_splits: diagnostics.cycle_splits,
             ..Self::default()
         };
     }
@@ -674,6 +903,12 @@ impl Capture {
             stream_switches: self.stream_switches,
             repeated_blocks: self.repeated_blocks,
             overlapped_frames: self.overlapped_frames,
+            resting_blocks: self.resting_blocks,
+            resting_frames: self.resting_frames,
+            overwritten_blocks: self.overwritten_blocks,
+            overwritten_frames: self.overwritten_frames,
+            overhang_trimmed_frames: self.overhang_trimmed_frames,
+            cycle_splits: self.cycle_splits,
         }
     }
 
@@ -793,21 +1028,62 @@ impl Capture {
             playing: block.playing,
             ..ctx
         };
+        // 循环 pass 的元数据：新一圈开始时记下 cycle start；同一 pass 的容量切段
+        // 继续继承它。没有 cycle 元数据时保持 None（投影会按相同起点隐式分组）。
+        if ctx.part > 0 {
+            if ctx.cycle_start.is_some() {
+                self.current_loop_start = ctx.cycle_start;
+            }
+        } else if ctx.new_pass || self.active.is_none() || ctx.cycle_wrap {
+            self.current_loop_start = ctx.cycle_start;
+        }
+        // 【Resting 必须在候选/选举/写入之前拦下】同一块首的重复既不是新素材，
+        // 也不能替另一条流作证。上升沿例外：真正的起播首块可能与停播块同几何。
+        if ctx.phase == TransportPhase::Resting && !ctx.playing_rising && !ctx.recording_rising {
+            self.resting_blocks = self.resting_blocks.saturating_add(1);
+            self.resting_frames = self.resting_frames.saturating_add(frames as u64);
+            return CaptureOutcome::NotPlaying;
+        }
+        if ctx.part > 0 {
+            // 循环切分的第二段复用第一段选出的流；不重复更新候选/交接计数。
+            if self.elected == Some(ctx.stream) {
+                return self.capture_elected(
+                    ctx.stream,
+                    &block,
+                    start,
+                    frames,
+                    skip,
+                    rate,
+                    true,
+                    ctx.playing_rising || ctx.recording_rising,
+                    ctx.part,
+                );
+            }
+            return CaptureOutcome::NotPlaying;
+        }
         self.note_candidate(ctx, start, frames, audible);
 
         match self.elected {
             Some(elected) if elected == ctx.stream => {
                 self.elected_idle = 0;
+                self.elected_idle_frames = 0;
                 self.elected_run = self.elected_run.saturating_add(1);
                 if audible {
                     self.elected_silent_blocks = 0;
+                    self.elected_silent_frames = 0;
                 } else {
                     self.elected_silent_blocks = self.elected_silent_blocks.saturating_add(1);
+                    self.elected_silent_frames = self
+                        .elected_silent_frames
+                        .saturating_add(u32::try_from(frames).unwrap_or(u32::MAX));
                 }
             }
             Some(_) => {
                 self.elected_idle = self.elected_idle.saturating_add(1);
-                if !self.should_handover(ctx) {
+                self.elected_idle_frames = self
+                    .elected_idle_frames
+                    .saturating_add(u32::try_from(frames).unwrap_or(u32::MAX));
+                if !self.should_handover(ctx, rate) {
                     // 非供料流的块只更新候选；它自己的 pending 留给之后的交接。
                     self.stash_if_needed(ctx.stream, &block, start, frames, skip, rate);
                     return CaptureOutcome::NotPlaying;
@@ -823,16 +1099,29 @@ impl Capture {
             }
         }
 
-        self.capture_elected(ctx.stream, &block, start, frames, skip, rate, ctx.flow)
+        self.capture_elected(
+            ctx.stream,
+            &block,
+            start,
+            frames,
+            skip,
+            rate,
+            ctx.phase == TransportPhase::Rolling,
+            ctx.playing_rising || ctx.recording_rising,
+            ctx.part,
+        )
     }
 
     /// 更新**本流**的候选读数；绝不与另一条流比较。
     fn note_candidate(&mut self, ctx: BlockContext, start: i64, frames: usize, audible: bool) {
+        let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
         let candidate = &mut self.candidates[ctx.stream.index()];
         if candidate.seen && candidate.last_end == start {
             candidate.contiguous = candidate.contiguous.saturating_add(1);
+            candidate.contiguous_frames = candidate.contiguous_frames.saturating_add(frames32);
         } else {
             candidate.contiguous = 1;
+            candidate.contiguous_frames = frames32;
         }
         candidate.seen = true;
         candidate.last_start = start;
@@ -840,21 +1129,27 @@ impl Capture {
         candidate.last_end = start.saturating_add(frames as i64);
         if ctx.playing {
             candidate.playing_blocks = candidate.playing_blocks.saturating_add(1);
+            candidate.playing_frames = candidate.playing_frames.saturating_add(frames32);
         }
         if ctx.recording {
             candidate.recording_blocks = candidate.recording_blocks.saturating_add(1);
+            candidate.recording_frames = candidate.recording_frames.saturating_add(frames32);
+        }
+        if ctx.phase != TransportPhase::Resting {
+            candidate.moving_blocks = candidate.moving_blocks.saturating_add(1);
+            candidate.moving_frames = candidate.moving_frames.saturating_add(frames32);
         }
         if audible {
             candidate.non_silent_blocks = candidate.non_silent_blocks.saturating_add(1);
+            candidate.non_silent_frames = candidate.non_silent_frames.saturating_add(frames32);
         }
         candidate.last_seen_seq = self.block_seq;
     }
 
     /// 首次选举。返回是否成功选出一条流。
     ///
-    /// 【证据顺序】离线（显式）> 录音中 > 播放位 > 本流连续两块 >
-    /// 非静音（仅在多个候选都已连续时打破平局）。非静音不能单独当选：用户真实的
-    /// 静音演奏也必须能被录下来。
+    /// 【证据顺序】离线（显式）> 录音中 > 播放位 > 位置真的在推进 >
+    /// 非静音。非静音不能单独当选：用户真实的静音演奏也必须能被录下来。
     fn try_elect(&mut self, stream: ProcessStream) -> bool {
         if stream == ProcessStream::Offline {
             self.elect(stream);
@@ -867,19 +1162,15 @@ impl Capture {
         if !viable {
             return false;
         }
-        if candidate.playing_blocks == 0
-            && candidate.recording_blocks == 0
-            && candidate.non_silent_blocks == 0
-        {
-            let better = self.candidates.iter().enumerate().any(|(index, other)| {
-                index != stream.index()
-                    && other.seen
-                    && other.contiguous >= 2
-                    && other.non_silent_blocks > 0
-            });
-            if better {
-                return false;
-            }
+        let mine = candidate_evidence(&candidate);
+        let better = self.candidates.iter().enumerate().any(|(index, other)| {
+            index != stream.index()
+                && other.seen
+                && other.contiguous >= 2
+                && candidate_evidence(other) > mine
+        });
+        if better {
+            return false;
         }
         self.elect(stream);
         true
@@ -889,31 +1180,50 @@ impl Capture {
         self.elected = Some(stream);
         self.elected_run = 1;
         self.elected_idle = 0;
+        self.elected_idle_frames = 0;
         self.elected_silent_blocks = 0;
+        self.elected_silent_frames = 0;
     }
 
     /// 另一条流是否已经提供了“可以接管”的持续证据。
-    fn should_handover(&self, ctx: BlockContext) -> bool {
+    fn should_handover(&self, ctx: BlockContext, rate: u32) -> bool {
         if ctx.stream == ProcessStream::Offline {
             return true;
         }
         let candidate = self.candidates[ctx.stream.index()];
+        let frames_needed = ((rate as f64) * HANDOVER_SEC)
+            .round()
+            .clamp(1.0, u32::MAX as f64) as u32;
         // `kRecording` 是强证据：录音轨上的真实输入在实时路径上，晚接管会丢掉正在录的
-        // 第一块。其余证据仍要求持续供料，避免单块交错导致乒乓切换。
+        // 第一块。其余证据要求“块数下限 + 帧数阈值”，长块宿主不会退化成按块数等数秒。
         ctx.recording
-            || (ctx.playing && candidate.contiguous >= HANDOVER_BLOCKS)
-            || (self.elected_idle >= HANDOVER_BLOCKS && candidate.contiguous >= 2)
+            || (ctx.playing
+                && candidate.contiguous >= HANDOVER_BLOCKS
+                && candidate.contiguous_frames >= frames_needed)
+            || (self.elected_idle >= HANDOVER_BLOCKS
+                && self.elected_idle_frames >= frames_needed
+                && candidate.contiguous >= HANDOVER_BLOCKS
+                && candidate.contiguous_frames >= frames_needed)
             || (self.elected_silent_blocks >= HANDOVER_BLOCKS
+                && self.elected_silent_frames >= frames_needed
                 && candidate.non_silent_blocks >= HANDOVER_BLOCKS
-                && candidate.contiguous >= 2)
+                && candidate.non_silent_frames >= frames_needed
+                && candidate.contiguous >= HANDOVER_BLOCKS)
     }
 
     /// 把供料流切换到 `next`。
     ///
-    /// 【交接时的三条纪律】1) 旧 active 必须封口；2) 新流在选举前暂存的首块，
-    /// 若与当前块连续/半重叠就提交（它可能是真正的起播第一块）；3) 其他流的候选
-    /// 一律丢弃，避免它们在 next 的槽位里冒充。
+    /// 【交接时的四条纪律】1) 新流接着当前时间线时**不封口**（同一遍播放不能因为
+    /// 流切换被切成两段）；2) 只有真正的跳跃才封口；3) 新流在选举前暂存的首块，
+    /// 若与当前块连续/半重叠就提交；4) 其他流的候选一律丢弃。
     fn switch_to(&mut self, next: ProcessStream, start: i64, frames: usize, rate: u32) {
+        let continues = match (
+            self.active.as_ref().map(|active| active.origin),
+            self.expected_next,
+        ) {
+            (Some(origin), Some(end)) => start >= origin && start <= end,
+            _ => false,
+        };
         for stream in [
             ProcessStream::Realtime,
             ProcessStream::Prefetch,
@@ -922,6 +1232,19 @@ impl Capture {
             if stream != next {
                 self.discard_pending(stream);
             }
+        }
+        if continues {
+            // 新流覆盖的是 active 已经写过的区间（或正好接在终点）：同一遍播放。
+            // pending 只会与 active 重叠，丢弃它比把重复内容再写一次更安全。
+            self.discard_pending(next);
+            self.elected = Some(next);
+            self.elected_run = 1;
+            self.elected_idle = 0;
+            self.elected_idle_frames = 0;
+            self.elected_silent_blocks = 0;
+            self.elected_silent_frames = 0;
+            self.stream_switches = self.stream_switches.saturating_add(1);
+            return;
         }
         let slot = next.pending_slot();
         let commit = self.pendings[slot].ready
@@ -945,7 +1268,9 @@ impl Capture {
         self.elected = Some(next);
         self.elected_run = 1;
         self.elected_idle = 0;
+        self.elected_idle_frames = 0;
         self.elected_silent_blocks = 0;
+        self.elected_silent_frames = 0;
         self.stream_switches = self.stream_switches.saturating_add(1);
     }
 
@@ -982,6 +1307,8 @@ impl Capture {
         skip: usize,
         rate: u32,
         flow: bool,
+        rising: bool,
+        part: u8,
     ) -> CaptureOutcome {
         // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
         if block.playing {
@@ -993,7 +1320,7 @@ impl Capture {
                 }
             }
             self.started = true;
-            return self.write_block(block, start, frames, skip, rate);
+            return self.write_block(block, start, frames, skip, rate, rising, part);
         }
 
         // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
@@ -1001,7 +1328,7 @@ impl Capture {
             if self.pending_ready_for(stream) {
                 if self.pending_is_contiguous(stream, start, rate) {
                     if self.commit_pending(stream) {
-                        return self.write_block(block, start, frames, skip, rate);
+                        return self.write_block(block, start, frames, skip, rate, rising, part);
                     }
                 } else {
                     self.discard_pending(stream);
@@ -1014,7 +1341,7 @@ impl Capture {
             // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
             // `expected_next == None` 是流交接后的第一块：没有可比的终点，直接写。
             if self.expected_next.is_none() || self.expected_next == Some(start) {
-                return self.write_block(block, start, frames, skip, rate);
+                return self.write_block(block, start, frames, skip, rate, rising, part);
             }
             return CaptureOutcome::NotPlaying;
         }
@@ -1023,7 +1350,7 @@ impl Capture {
         // 起播第一块。先暂存；下一块连续时由上面的分支提交。
         if self.started && self.expected_next.is_none() {
             // 刚交接：新流的第一块没有可比终点，即使没有 flow 也要写。
-            return self.write_block(block, start, frames, skip, rate);
+            return self.write_block(block, start, frames, skip, rate, rising, part);
         }
         if !self.started {
             self.stash_pending(stream, block, start, frames, skip, rate);
@@ -1129,13 +1456,14 @@ impl Capture {
     /// 返回是否提交。采样率与既有捕获不一致时丢弃（本 take 的样本域不再一致，
     /// 交给 `write_block` 的 `RateChanged` 处理，而不是把两份不同率的样本拼进一段）。
     fn commit_pending(&mut self, stream: ProcessStream) -> bool {
-        let Some(pending) = self.take_pending(stream) else {
+        let Some(mut pending) = self.take_pending(stream) else {
             return false;
         };
         if self.sample_rate != 0 && self.sample_rate != pending.sample_rate {
             self.pending_discarded = self.pending_discarded.saturating_add(1);
             return false;
         }
+        pending.loop_start = self.current_loop_start;
         self.sample_rate = pending.sample_rate;
         self.channels = pending.planes.len().clamp(1, 2) as u8;
         self.expected_next = Some(pending.origin.saturating_add(pending.filled as i64));
@@ -1161,7 +1489,109 @@ impl Capture {
         }
     }
 
+    /// 用本块的样本覆盖 active 段内一段**已经写过**的区间。
+    ///
+    /// 【为什么需要它】停播/预卷时宿主可能先送一块同几何的块（被写成素材），真正
+    /// 起播时再送同一几何、不同内容的首块。几何判重会把真正的首块当成重复丢掉；
+    /// 上升沿时改为覆盖写，才是“这一遍真的开始了”。
+    ///
+    /// 覆盖不增加 `captured_frames`，也不改变 `expected_next`。目标必须完全落在
+    /// active 的已写范围内；落在已封口段时返回 false（由调用方退化为 Repeated）。
+    fn overwrite_range(
+        &mut self,
+        start: i64,
+        frames: usize,
+        block: &InputBlock<'_>,
+        skip: usize,
+    ) -> bool {
+        if frames == 0 {
+            return false;
+        }
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let origin = active.origin;
+        if start < origin {
+            return false;
+        }
+        let Ok(offset) = usize::try_from(start - origin) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(frames) else {
+            return false;
+        };
+        if end > active.filled {
+            return false;
+        }
+        for (channel, plane) in active.planes.iter_mut().enumerate() {
+            let target = &mut plane[offset..end];
+            match block.planes.get(channel).copied().flatten() {
+                Some(source) if source.len() >= skip.saturating_add(frames) => {
+                    target.copy_from_slice(&source[skip..skip + frames]);
+                }
+                _ => target.fill(0.0),
+            }
+        }
+        // 峰值只服务 UI；覆盖后保守地重算整段峰值，避免显示一个已经不存在的峰值。
+        for (channel, plane) in active.planes.iter().enumerate() {
+            let peak = plane[..active.filled].iter().fold(0.0_f32, |acc, value| {
+                if value.is_finite() {
+                    acc.max(value.abs())
+                } else {
+                    acc
+                }
+            });
+            active.peak[channel.min(1)] = peak;
+        }
+        let peak = active.peak;
+        self.peak[0] = self.peak[0].max(peak[0]);
+        self.peak[1] = self.peak[1].max(peak[1]);
+        true
+    }
+
+    /// 回卷/向后跳跃时裁掉 active 末尾的“悬挂尾巴”。
+    ///
+    /// 【裁到哪里】只从**最后一次写入的块首**开始裁：更早的块一定属于上一遍的有效
+    /// 内容，不能因为新一遍从更早的位置开始就把它们删掉。代价是至多损失一个块在
+    /// 回卷点之前的有效音频；换来的是不会把错位的下一圈开头留在 loop 终点之后。
+    fn trim_active_tail_to(&mut self, new_start: i64) -> bool {
+        let last_written = self.last_written;
+        let Some(active) = self.active.as_ref() else {
+            return false;
+        };
+        let end = active.origin.saturating_add(active.filled as i64);
+        if new_start >= end {
+            return false;
+        }
+        let from = match last_written {
+            Some((last_start, _)) => new_start.max(last_start),
+            None => new_start,
+        };
+        if from <= active.origin || from >= end {
+            return false;
+        }
+        let keep = (from - active.origin) as usize;
+        let dropped = active.filled - keep;
+        if let Some(active) = self.active.as_mut() {
+            active.filled = keep;
+        }
+        self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
+        self.expected_next = Some(from);
+        self.last_position = Some(from);
+        self.last_written = None;
+        self.overhang_trimmed_frames = self.overhang_trimmed_frames.saturating_add(dropped as u64);
+        if keep == 0 {
+            self.active = None;
+        }
+        true
+    }
+
     /// 真正写入一块（裁剪后的 `start`/`frames`，源偏移 `skip`）。
+    ///
+    /// `rising` = 本块是 `kPlaying`/`kRecording` 的上升沿：允许用新内容覆盖停播时
+    /// 写过的同几何块。`part` = 循环切分段号；第 1 段是**有意**的向后换位，不参与
+    /// “重复/裁剪”判定。
+    #[allow(clippy::too_many_arguments)]
     fn write_block(
         &mut self,
         block: &InputBlock<'_>,
@@ -1169,6 +1599,8 @@ impl Capture {
         frames: usize,
         skip: usize,
         rate: u32,
+        rising: bool,
+        part: u8,
     ) -> CaptureOutcome {
         if self.sample_rate == 0 {
             self.sample_rate = rate;
@@ -1183,23 +1615,58 @@ impl Capture {
         // `P+N`，实时流从 `P+N-M` 开始）。把整个块当 `Backward` 另起一段会让同一段
         // 内容被写两次；裁掉已经录过的前缀、只写新增部分，才是“同一遍的延续”。
         //
-        // 完全落在已录区间内的块只有两种情况：宿主重复投递同一区间（跳过），
-        // 或真正的循环回卷/seek（保留既有“另起一段、后来者胜出”）。
+        // 完全落在已录区间内的块：宿主重复投递同一区间（跳过），或真正的循环回卷/
+        // seek（另起一段、后来者胜出）。循环切分的第 1 段是有意换位，跳过这一整段
+        // 判定，直接按 Backward 开新段。
         let raw = (start, frames);
         let mut start = start;
         let mut frames = frames;
         let mut skip = skip;
-        if let Some(expected) = self.expected_next {
-            if start < expected {
-                let covered = usize::try_from(expected - start).unwrap_or(usize::MAX);
-                if covered < frames {
-                    skip = skip.saturating_add(covered);
-                    frames -= covered;
-                    start = expected;
-                    self.overlapped_frames = self.overlapped_frames.saturating_add(covered as u64);
-                } else if self.last_written == Some(raw) {
-                    self.repeated_blocks = self.repeated_blocks.saturating_add(1);
-                    return CaptureOutcome::Repeated;
+        if part == 1 {
+            self.cycle_splits = self.cycle_splits.saturating_add(1);
+        }
+        if part == 0 {
+            if let Some(expected) = self.expected_next {
+                if start < expected {
+                    let covered = usize::try_from(expected - start).unwrap_or(usize::MAX);
+                    if covered < frames {
+                        // 上升沿：先覆盖已写前缀（若仍在 active 内），再写新增尾部。
+                        if rising {
+                            let _ = self.overwrite_range(start, covered, block, skip);
+                        }
+                        skip = skip.saturating_add(covered);
+                        frames -= covered;
+                        start = expected;
+                        self.overlapped_frames =
+                            self.overlapped_frames.saturating_add(covered as u64);
+                    } else if self.last_written == Some(raw) {
+                        if rising && self.overwrite_range(start, frames, block, skip) {
+                            self.overwritten_blocks = self.overwritten_blocks.saturating_add(1);
+                            self.overwritten_frames =
+                                self.overwritten_frames.saturating_add(frames as u64);
+                            return CaptureOutcome::Captured;
+                        }
+                        self.repeated_blocks = self.repeated_blocks.saturating_add(1);
+                        return CaptureOutcome::Repeated;
+                    } else if rising {
+                        if self.overwrite_range(start, frames, block, skip) {
+                            self.overwritten_blocks = self.overwritten_blocks.saturating_add(1);
+                            self.overwritten_frames =
+                                self.overwritten_frames.saturating_add(frames as u64);
+                            return CaptureOutcome::Captured;
+                        }
+                        self.repeated_blocks = self.repeated_blocks.saturating_add(1);
+                        return CaptureOutcome::Repeated;
+                    } else if self
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| start > active.origin)
+                    {
+                        // 落在 active 内部（不是段首）的完全重复：不是新素材。
+                        // 段首的向后跳跃可能是循环回卷/seek，必须继续走到 Backward 分支。
+                        self.repeated_blocks = self.repeated_blocks.saturating_add(1);
+                        return CaptureOutcome::Repeated;
+                    }
                 }
             }
         }
@@ -1208,26 +1675,39 @@ impl Capture {
             return CaptureOutcome::Repeated;
         }
 
+        // 循环回卷的兜底：没有 cycle 元数据时，把上一段末尾“越过新起点”的尾巴裁掉。
+        // 只从**最后一次写入的块首**开始裁：更早的块一定属于上一遍的有效内容。
+        let trimmed = if part == 0 {
+            self.trim_active_tail_to(start)
+        } else {
+            false
+        };
+
         // 连续性：上一块的终点是否正好接上这一块的首点。
-        let loss = match self.expected_next {
-            None => SegmentLoss::First,
-            Some(expected) if expected == start => SegmentLoss::None,
-            Some(expected) if start > expected => {
-                self.gaps = self.gaps.saturating_add(1);
-                SegmentLoss::Gap {
-                    skipped_frames: (start - expected) as u64,
+        let loss = if trimmed {
+            self.backwards = self.backwards.saturating_add(1);
+            SegmentLoss::Backward
+        } else {
+            match self.expected_next {
+                None => SegmentLoss::First,
+                Some(expected) if expected == start => SegmentLoss::None,
+                Some(expected) if start > expected => {
+                    self.gaps = self.gaps.saturating_add(1);
+                    SegmentLoss::Gap {
+                        skipped_frames: (start - expected) as u64,
+                    }
                 }
-            }
-            Some(_) => {
-                // 位置倒退：宿主 seek 回退或**循环回卷**。
-                //
-                // 【为什么是"另起一段"而不是"丢弃"】循环录制是本功能的主要用法之一：
-                // 用户让宿主循环播放，唱一遍、再唱一遍。每一圈都是**新内容**，
-                // 丢掉第二圈等于把用户刚唱的那一遍扔了。另起一段之后，覆盖关系交给
-                // 时间线视图按"后来的胜出"解决（`timeline.rs`），默认留下最后一圈 ——
-                // 这正是 Melodyne 式 Transfer 的默认语义。
-                self.backwards = self.backwards.saturating_add(1);
-                SegmentLoss::Backward
+                Some(_) => {
+                    // 位置倒退：宿主 seek 回退或**循环回卷**。
+                    //
+                    // 【为什么是"另起一段"而不是"丢弃"】循环录制是本功能的主要用法之一：
+                    // 用户让宿主循环播放，唱一遍、再唱一遍。每一圈都是**新内容**，
+                    // 丢掉第二圈等于把用户刚唱的那一遍扔了。另起一段之后，覆盖关系交给
+                    // 时间线视图按"后来的胜出"解决（`timeline.rs`），默认留下最后一圈 ——
+                    // 这正是 Melodyne 式 Transfer 的默认语义。
+                    self.backwards = self.backwards.saturating_add(1);
+                    SegmentLoss::Backward
+                }
             }
         };
 
@@ -1256,6 +1736,7 @@ impl Capture {
             spare.origin = start;
             spare.sample_rate = rate;
             spare.loss = loss;
+            spare.loop_start = self.current_loop_start;
             spare.filled = 0;
             spare.peak = [0.0; 2];
             spare.closed = ClosedReason::Full;
@@ -1396,6 +1877,7 @@ mod tests {
             planes: vec![vec![0.0; capacity]; channels as usize],
             filled: 0,
             loss: SegmentLoss::First,
+            loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Full,
             _reservation: None,
@@ -1448,7 +1930,30 @@ mod tests {
             stream,
             playing,
             recording,
-            flow,
+            phase: if flow {
+                TransportPhase::Rolling
+            } else {
+                TransportPhase::Start
+            },
+            playing_rising: false,
+            recording_rising: false,
+            cycle_wrap: false,
+            cycle_start: None,
+            new_pass: false,
+            part: 0,
+        }
+    }
+
+    fn ctx_phase(
+        stream: ProcessStream,
+        playing: bool,
+        phase: TransportPhase,
+        playing_rising: bool,
+    ) -> BlockContext {
+        BlockContext {
+            phase,
+            playing_rising,
+            ..ctx(stream, playing, false, false)
         }
     }
 
@@ -1994,8 +2499,80 @@ mod tests {
         assert_eq!(capture.elected_stream(), Some(ProcessStream::Realtime));
         assert_eq!(capture.stream_switches, 1);
         let sealed = capture.finish(ClosedReason::Stopped);
-        assert_eq!(sealed.len(), 2, "交接必须封口旧段");
-        assert_eq!(sealed[0].span(), 0..8);
-        assert_eq!(sealed[1].span(), 8..12);
+        assert_eq!(
+            sealed.len(),
+            1,
+            "连续交接必须留在同一段里，不能因换流而切段"
+        );
+        assert_eq!(sealed[0].span(), 0..12);
+    }
+
+    /// **Resting 块即使带着 `kPlaying` 也不写。**
+    #[test]
+    fn a_resting_block_is_not_written_even_when_playing() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        let (_, repeat) = block(0, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(
+                repeat,
+                ctx_phase(
+                    ProcessStream::Realtime,
+                    true,
+                    TransportPhase::Resting,
+                    false
+                )
+            ),
+            CaptureOutcome::NotPlaying
+        );
+        assert_eq!(capture.captured_frames(), 4);
+        assert_eq!(capture.resting_blocks, 1);
+    }
+
+    /// **上升沿用新内容覆盖停播时写过的同几何块，而不是把它当成重复丢掉。**
+    #[test]
+    fn a_rising_edge_overwrites_the_stopped_same_geometry_block() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(0, 4, 48_000.0);
+        assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
+        let samples: &'static [f32] = Box::leak(vec![0.5_f32; 4].into_boxed_slice());
+        let replacement = InputBlock {
+            start: 0,
+            frames: 4,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), None],
+            playing: true,
+        };
+        assert_eq!(
+            capture.on_block_with_context(
+                replacement,
+                ctx_phase(ProcessStream::Realtime, true, TransportPhase::Resting, true)
+            ),
+            CaptureOutcome::Captured
+        );
+        assert_eq!(capture.captured_frames(), 4, "覆盖写不是新增帧");
+        assert_eq!(capture.overwritten_blocks, 1);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed[0].planes[0], vec![0.5; 4]);
+    }
+
+    /// **回卷时裁掉上一段越过新起点的尾巴。**
+    #[test]
+    fn a_backward_wrap_trims_the_overhang_tail() {
+        let mut capture = started(64, 2);
+        for start in [100, 104] {
+            let (_, view) = block(start, 4, 48_000.0);
+            assert_eq!(capture.on_block(view), CaptureOutcome::Captured);
+        }
+        // 同一循环起点重新开始：上一段 [100,108) 的 [104,108) 是越界的尾巴。
+        let (_, wrap) = block(100, 4, 48_000.0);
+        assert_eq!(capture.on_block(wrap), CaptureOutcome::Captured);
+        assert_eq!(capture.overhang_trimmed_frames, 4);
+        assert_eq!(capture.captured_frames(), 8, "4 - 4 + 4 + 4");
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[0].span(), 100..104);
+        assert_eq!(sealed[1].span(), 100..104);
     }
 }

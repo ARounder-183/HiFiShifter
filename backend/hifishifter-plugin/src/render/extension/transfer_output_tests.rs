@@ -604,9 +604,13 @@ fn the_block_trace_records_a_lagging_start() {
             0,
             ProcessStream::Realtime,
             start,
+            start,
             512,
             false,
-            true,
+            TransportPhase::Rolling,
+            false,
+            false,
+            1,
             true,
             true,
             crate::transfer::TransferBlockOutcome::NotPlaying.code(),
@@ -660,34 +664,45 @@ fn prefetch_and_offline_never_look_stopped() {
     for stream in [ProcessStream::Prefetch, ProcessStream::Offline] {
         let evidence = BlockEvidence {
             stream,
-            start: 0,
+            position: 0,
             frames: 512,
             playing: false,
             recording: false,
-            flow: false,
+            playing_rising: false,
+            recording_rising: false,
+            phase: TransportPhase::Rolling,
             had_previous: true,
             allow_output: false,
+            new_pass: false,
+            split: BlockSplit::whole(0, 512),
         };
         assert!(
-            owner.transfer_should_emit(Some(evidence)),
+            owner.transfer_should_emit(Some(evidence), false),
             "{stream:?} 的输出稍后才被播放，不能因为此刻 kPlaying=0 被清空"
         );
     }
     let realtime = BlockEvidence {
         stream: ProcessStream::Realtime,
-        start: 0,
+        position: 0,
         frames: 512,
         playing: false,
         recording: false,
-        flow: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Rolling,
         had_previous: true,
         allow_output: false,
+        new_pass: false,
+        split: BlockSplit::whole(0, 512),
     };
-    assert!(!owner.transfer_should_emit(Some(realtime)));
-    assert!(owner.transfer_should_emit(Some(BlockEvidence {
-        allow_output: true,
-        ..realtime
-    })));
+    assert!(!owner.transfer_should_emit(Some(realtime), false));
+    assert!(owner.transfer_should_emit(
+        Some(BlockEvidence {
+            allow_output: true,
+            ..realtime
+        }),
+        false
+    ));
 }
 
 /// **面板读数按流取 OR：prefetch 的 0 不能清掉实时流的 1。**
@@ -717,4 +732,145 @@ fn prefetch_playing_zero_does_not_clear_realtime_playing() {
         "prefetch 的 kPlaying=0 不得覆盖实时流的 kPlaying=1"
     );
     assert!(!owner.transfer().capture_stream_playing(), "尚未选举捕获流");
+}
+
+/// **位置钉住：第一块之后进入 Resting，块长抖动不能把它重新判成前进。**
+#[test]
+fn a_pinned_stream_enters_resting_after_the_first_block() {
+    let owner = insert_owner();
+    assert!(
+        owner
+            .note_stream_position(ProcessStream::Realtime, 0, 512)
+            .0,
+        "首块允许一次"
+    );
+    assert!(
+        !owner
+            .note_stream_position(ProcessStream::Realtime, 0, 512)
+            .0,
+        "同一块首的第二次出现是 Resting"
+    );
+    assert!(
+        !owner
+            .note_stream_position(ProcessStream::Realtime, 0, 480)
+            .0,
+        "停播时块长抖动不是位置推进"
+    );
+}
+
+/// **停播块之后出现一个显著更大的块：只允许一次扩展，然后回到 Resting。**
+#[test]
+fn a_pinned_start_that_grows_once_is_allowed_then_rests() {
+    let owner = insert_owner();
+    owner.note_stream_position(ProcessStream::Realtime, 0, 512);
+    assert!(
+        !owner
+            .note_stream_position(ProcessStream::Realtime, 0, 512)
+            .0
+    );
+    assert!(
+        owner
+            .note_stream_position(ProcessStream::Realtime, 0, 32_768)
+            .0,
+        "显著更大的块是起播候选，允许一次"
+    );
+    assert!(
+        !owner
+            .note_stream_position(ProcessStream::Realtime, 0, 32_768)
+            .0,
+        "扩展只允许一次，重复块必须 Resting"
+    );
+}
+
+/// **真正播放：每个块首都在前进，永远不进入 Resting。**
+#[test]
+fn a_real_playback_never_rests() {
+    let owner = insert_owner();
+    for index in 0..8_i64 {
+        assert!(
+            owner
+                .note_stream_position(ProcessStream::Realtime, index * 512, 512)
+                .0,
+            "连续前进的第 {index} 块不能 Resting"
+        );
+    }
+}
+
+/// **工程位置钉住、continuous 前进：有效位置按增量跟随。**
+#[test]
+fn a_pinned_project_position_follows_continuous_time() {
+    use crate::audio_abi::ProcessContext;
+    let owner = insert_owner();
+    let mut context = ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_CONTINUOUS_VALID,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        continuous_time_samples: 0,
+        ..Default::default()
+    };
+    let first = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(first.position, 0);
+    context.continuous_time_samples = 512;
+    let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(second.position, 512);
+    assert_eq!(second.position_source, PositionSource::Continuous);
+    context.continuous_time_samples = 1_024;
+    let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(third.position, 1_024);
+    assert_eq!(third.phase, TransportPhase::Rolling);
+}
+
+/// **短循环：块首相同但 continuous 前进 ⇒ cycle_wrap，强制 Rolling。**
+#[test]
+fn a_short_cycle_wrap_is_not_resting() {
+    use crate::audio_abi::ProcessContext;
+    let owner = insert_owner();
+    let mut context = ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_CYCLE_ACTIVE
+            | crate::audio_abi::PROCESS_CONTEXT_CYCLE_VALID
+            | crate::audio_abi::PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID
+            | crate::audio_abi::PROCESS_CONTEXT_TEMPO_VALID
+            | crate::audio_abi::PROCESS_CONTEXT_CONTINUOUS_VALID,
+        sample_rate: 1_000.0,
+        project_time_samples: 0,
+        continuous_time_samples: 0,
+        project_time_music: 0.0,
+        cycle_start_music: 0.0,
+        cycle_end_music: 1.0,
+        tempo: 60.0,
+        ..Default::default()
+    };
+    let first = owner.note_stream_block(ProcessStream::Realtime, &context, 1_000, false, false);
+    assert_eq!(first.phase, TransportPhase::Start);
+    context.continuous_time_samples = 1_000;
+    let second = owner.note_stream_block(ProcessStream::Realtime, &context, 1_000, false, false);
+    assert!(second.cycle_wrap, "continuous 前进而块首相同就是回卷");
+    assert_eq!(second.phase, TransportPhase::Rolling);
+}
+
+/// **块跨越循环终点：切成两段，后半段回到 cycle start。**
+#[test]
+fn a_block_crossing_the_cycle_end_is_split() {
+    use crate::audio_abi::ProcessContext;
+    let owner = insert_owner();
+    let context = ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_CYCLE_ACTIVE
+            | crate::audio_abi::PROCESS_CONTEXT_CYCLE_VALID
+            | crate::audio_abi::PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID
+            | crate::audio_abi::PROCESS_CONTEXT_TEMPO_VALID,
+        sample_rate: 1_000.0,
+        project_time_samples: 3_900,
+        project_time_music: 3.9,
+        cycle_start_music: 0.0,
+        cycle_end_music: 4.0,
+        tempo: 60.0,
+        ..Default::default()
+    };
+    let split = owner.block_split(&context, 200, 1_000.0, 3_900);
+    assert_eq!(split.count, 2);
+    assert_eq!(split.parts[0].position, 3_900);
+    assert_eq!(split.parts[0].frames, 100);
+    assert_eq!(split.parts[1].position, 0);
+    assert_eq!(split.parts[1].input_offset, 100);
+    assert_eq!(split.parts[1].frames, 100);
 }

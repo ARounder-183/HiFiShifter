@@ -48,6 +48,7 @@ use super::capture::Segment;
 use crate::render::snapshot::PlaybackSnapshot;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Transfer 时间轴上唯一的轨道 id。
@@ -201,6 +202,177 @@ struct Piece {
     offset: usize,
 }
 
+/// 一次录制里的一个连续 pass（遇到 gap / 回卷 / seek 就结束）。
+#[derive(Debug, Clone)]
+struct Pass {
+    /// 所属素材带。
+    tape: usize,
+    /// 所属 take（跨 take 的显式循环分组用）。
+    take: u64,
+    /// 段在 `Tape::segments` 中的下标（按录制顺序）。
+    segments: Vec<usize>,
+    /// 工程区间。
+    span: Range<i64>,
+    /// 录制顺序 `(take, pass 序号)`。
+    order: (u64, usize),
+    /// 循环起点（`Some` = 宿主明确给出了 cycle 元数据）。
+    loop_start: Option<i64>,
+}
+
+/// 由素材带切出 pass。段是内存容器，pass 才是“一次连续演奏”。
+fn build_passes(tapes: &[Tape<'_>]) -> Vec<Pass> {
+    let mut passes = Vec::new();
+    for (tape_index, tape) in tapes.iter().enumerate() {
+        let mut start = 0usize;
+        let mut pass_index = 0usize;
+        let mut previous_end: Option<i64> = None;
+        let mut previous_loop: Option<i64> = None;
+        for (index, segment) in tape.segments.iter().enumerate() {
+            let span = segment.span();
+            let begins_new = match previous_end {
+                None => true,
+                Some(end) => span.start != end || segment.loop_start != previous_loop,
+            };
+            if begins_new && index > start {
+                passes.push(make_pass(tape_index, tape, start, index, pass_index));
+                pass_index += 1;
+                start = index;
+            }
+            previous_end = Some(span.end);
+            previous_loop = segment.loop_start;
+        }
+        if start < tape.segments.len() {
+            passes.push(make_pass(
+                tape_index,
+                tape,
+                start,
+                tape.segments.len(),
+                pass_index,
+            ));
+        }
+    }
+    passes
+}
+
+fn make_pass(
+    tape_index: usize,
+    tape: &Tape<'_>,
+    start: usize,
+    end: usize,
+    pass_index: usize,
+) -> Pass {
+    let first = tape.segments[start];
+    let last = tape.segments[end - 1];
+    Pass {
+        tape: tape_index,
+        take: tape.take,
+        segments: (start..end).collect(),
+        span: first.span().start..last.span().end,
+        order: (tape.take, pass_index),
+        loop_start: first.loop_start,
+    }
+}
+
+/// 把“同一循环起点上的多圈”收敛成一个原子组：最新一圈替换整组。
+///
+/// 【为什么必须原子】最后一圈半途停止时，如果只按“后来的胜出”覆盖已到达的部分，
+/// 上一圈的尾段会留下来，时间线上就是两个相邻 clip。用户要的是“我刚录的这一遍”，
+/// 不是“这一遍 + 上一遍的尾巴”。
+fn atomic_loop_groups(passes: Vec<Pass>) -> Vec<Pass> {
+    let mut keep = vec![true; passes.len()];
+
+    // 1) 显式分组：宿主给出了 cycle 起点。允许跨 take —— 重录同一循环区间时，
+    //    新 take 应原子替换旧组。
+    let mut explicit: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (index, pass) in passes.iter().enumerate() {
+        if let Some(loop_start) = pass.loop_start {
+            explicit.entry(loop_start).or_default().push(index);
+        }
+    }
+    for group in explicit.values() {
+        supersede_group(&passes, group, &mut keep);
+    }
+
+    // 2) 隐式分组：没有 cycle 元数据时，同一 take 内两个以上 pass 从同一个工程
+    //    位置开始，就当作循环回卷。只跨 pass、不跨 take（避免把普通同点补录误判）。
+    let mut implicit: HashMap<(u64, i64), Vec<usize>> = HashMap::new();
+    for (index, pass) in passes.iter().enumerate() {
+        if pass.loop_start.is_none() {
+            implicit
+                .entry((pass.take, pass.span.start))
+                .or_default()
+                .push(index);
+        }
+    }
+    for group in implicit.values() {
+        supersede_group(&passes, group, &mut keep);
+    }
+
+    passes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, pass)| keep[index].then_some(pass))
+        .collect()
+}
+
+fn supersede_group(passes: &[Pass], group: &[usize], keep: &mut [bool]) {
+    if group.len() < 2 {
+        return;
+    }
+    let Some(latest) = group
+        .iter()
+        .copied()
+        .max_by_key(|&index| passes[index].order)
+    else {
+        return;
+    };
+    let group_start = group
+        .iter()
+        .map(|&index| passes[index].span.start)
+        .min()
+        .unwrap_or(0);
+    let group_end = group
+        .iter()
+        .map(|&index| passes[index].span.end)
+        .max()
+        .unwrap_or(0);
+    for &index in group {
+        if index == latest {
+            continue;
+        }
+        let pass = &passes[index];
+        // 只移除完全落在循环组内的旧 pass；跨越组边界的 pass 可能还包含组外内容，
+        // 交给 later-wins 逐段处理，避免误删。
+        if pass.span.start >= group_start && pass.span.end <= group_end {
+            keep[index] = false;
+        }
+    }
+}
+
+fn pieces_from_passes(passes: &[Pass], tapes: &[Tape<'_>]) -> Vec<Piece> {
+    let mut seeds = Vec::new();
+    for pass in passes {
+        let tape = &tapes[pass.tape];
+        for &index in &pass.segments {
+            let segment = tape.segments[index];
+            if let Some(piece) = clamp_piece(Piece {
+                span: segment.span(),
+                tape: pass.tape,
+                offset: tape.offsets[index],
+            }) {
+                seeds.push(piece);
+            }
+        }
+    }
+    seeds
+}
+
+/// 投影与原始磁带共用的“最终片”入口。
+fn resolved_pieces(tapes: &[Tape<'_>]) -> Vec<Piece> {
+    let passes = atomic_loop_groups(build_passes(tapes));
+    coalesce(resolve(pieces_from_passes(&passes, tapes)))
+}
+
 /// 一次投影的结果摘要（给状态栏与诊断用）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TimelineSummary {
@@ -230,7 +402,11 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     };
 
     let mut timeline = TimelineState {
-        bpm: if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 },
+        bpm: if bpm.is_finite() && bpm > 0.0 {
+            bpm
+        } else {
+            120.0
+        },
         ..TimelineState::default()
     };
     // 【为什么必须先清空】`TimelineState::default()` 自带一条 "Main" 轨（它服务于
@@ -258,7 +434,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         .expect("Transfer 轨道的必填字段是固定的"),
     );
 
-    let pieces = coalesce(resolve(seeds(&tapes)));
+    let pieces = resolved_pieces(&tapes);
 
     let mut index = 0_usize;
     for piece in pieces {
@@ -312,7 +488,9 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         clip.normalize_takes();
         timeline.clips.push(clip);
     }
-    timeline.clips.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+    timeline
+        .clips
+        .sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
     summary.clips = timeline.clips.len();
     timeline.project_sec = timeline
         .clips
@@ -334,7 +512,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
 /// 没有单位换算、没有重采样、没有插值，因而不可能因为约定不一致而出错。
 pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot> {
     let (tapes, _) = build_tapes(takes);
-    let pieces = coalesce(resolve(seeds(&tapes)));
+    let pieces = resolved_pieces(&tapes);
     if pieces.is_empty() {
         return None;
     }
@@ -396,7 +574,11 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
 }
 
 /// 单个 take 的投影（便利入口；语义与 [`project`] 逐字段一致）。
-pub(crate) fn build(segments: &[Segment], take_id: u64, bpm: f64) -> (TimelineState, TimelineSummary) {
+pub(crate) fn build(
+    segments: &[Segment],
+    take_id: u64,
+    bpm: f64,
+) -> (TimelineState, TimelineSummary) {
     project(
         &[ProjectionTake {
             id: take_id,
@@ -502,23 +684,6 @@ fn clamp_piece(piece: Piece) -> Option<Piece> {
     })
 }
 
-/// 由素材带铺出覆盖前的初始片：一段一片，带内偏移就是段在带上的起点。
-fn seeds(tapes: &[Tape<'_>]) -> Vec<Piece> {
-    let mut seeds = Vec::new();
-    for (index, tape) in tapes.iter().enumerate() {
-        for (segment, offset) in tape.segments.iter().zip(&tape.offsets) {
-            if let Some(piece) = clamp_piece(Piece {
-                span: segment.span(),
-                tape: index,
-                offset: *offset,
-            }) {
-                seeds.push(piece);
-            }
-        }
-    }
-    seeds
-}
-
 /// 按"后来的胜出"把片铺成互不相交的区间。
 fn resolve(mut seeds: Vec<Piece>) -> Vec<Piece> {
     // 【排序键是录制顺序 `(take, 带内偏移)` 而不是工程位置】"后来者胜出"里的"后来"
@@ -601,9 +766,18 @@ mod tests {
             planes: vec![values.to_vec(), values.to_vec()],
             filled: values.len(),
             loss: SegmentLoss::First,
+            loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             _reservation: None,
+        }
+    }
+
+    /// 带循环起点的段（模拟 capture 在回卷时写下的 `loop_start`）。
+    fn segment_loop(origin: i64, values: &[f32], loop_start: i64) -> Segment {
+        Segment {
+            loop_start: Some(loop_start),
+            ..segment(origin, values)
         }
     }
 
@@ -881,7 +1055,10 @@ mod tests {
             vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
             "原始磁带必须逐样本等于捕获到的内容"
         );
-        assert_eq!(snapshot.right, vec![0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]);
+        assert_eq!(
+            snapshot.right,
+            vec![0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]
+        );
     }
 
     /// **原始磁带与时间轴必须给出同一份覆盖关系**（否则"听到的"与"看到的"分叉）。
@@ -916,7 +1093,10 @@ mod tests {
         assert_eq!(timeline.tracks.len(), 1, "界面要有一条空轨可以显示");
         assert_eq!(summary.clips, 0);
         let (silent, summary) = one(1, &[segment(0, &[0.0; 32])]);
-        assert!(silent.clips.is_empty(), "全静音不产生片段（素材为空的判据）");
+        assert!(
+            silent.clips.is_empty(),
+            "全静音不产生片段（素材为空的判据）"
+        );
         assert_eq!(summary.spanned_frames, 32, "跨过的工程帧数仍要如实报出");
         assert_eq!(summary.covered_frames, 0, "没有任何可听内容");
     }
@@ -1028,4 +1208,73 @@ mod tests {
         assert_eq!(timeline.clips[0].source_end_sec, 2.5);
     }
 
+    /// **最后一圈半途停止：整个循环组原子替换，不留下上一圈的尾巴。**
+    #[test]
+    fn a_partial_last_loop_pass_replaces_the_whole_group() {
+        let segments = vec![
+            segment_loop(0, &[1.0; 100], 0),
+            segment_loop(0, &[2.0; 40], 0),
+        ];
+        let (timeline, summary) = one(1, &segments);
+        assert_eq!(summary.clips, 1, "同一循环起点只能有一个可见 clip");
+        assert_eq!(timeline.clips.len(), 1);
+        assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
+        assert!(
+            (timeline.clips[0].length_sec - 0.04).abs() < 1e-9,
+            "可见范围到最后一圈实际走到的位置为止"
+        );
+    }
+
+    /// **两圈完整循环：只留下最后一圈，仍然是一个 clip。**
+    #[test]
+    fn two_complete_loop_passes_leave_one_clip() {
+        let segments = vec![
+            segment_loop(0, &[1.0; 100], 0),
+            segment_loop(0, &[2.0; 100], 0),
+        ];
+        let (timeline, summary) = one(1, &segments);
+        assert_eq!(summary.clips, 1);
+        assert!((timeline.clips[0].length_sec - 0.1).abs() < 1e-9);
+        let take = timeline.clips[0].active_take();
+        assert!(
+            (take.source_start_sec - 0.1).abs() < 1e-9,
+            "内容必须来自第二圈（带内偏移 100 帧），而不是第一圈"
+        );
+    }
+
+    /// **没有 cycle 元数据时，同一 take 内重复起点仍按循环组处理。**
+    #[test]
+    fn an_implicit_loop_group_requires_two_passes_with_the_same_start() {
+        let segments = vec![segment(0, &[1.0; 100]), segment(0, &[2.0; 40])];
+        let (timeline, summary) = one(1, &segments);
+        assert_eq!(summary.clips, 1);
+        assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
+    }
+
+    /// **显式循环起点跨 take：重录同一循环区间会原子替换旧组。**
+    #[test]
+    fn a_new_take_with_the_same_loop_start_replaces_the_old_group() {
+        let first = vec![segment_loop(0, &[1.0; 100], 0)];
+        let second = vec![segment_loop(0, &[2.0; 40], 0)];
+        let (timeline, summary) = project(
+            &[
+                ProjectionTake {
+                    id: 1,
+                    segments: &first,
+                },
+                ProjectionTake {
+                    id: 2,
+                    segments: &second,
+                },
+            ],
+            120.0,
+        );
+        assert_eq!(summary.clips, 1);
+        assert_eq!(timeline.clips.len(), 1);
+        assert_eq!(
+            timeline.clips[0].active_take().source_path.as_deref(),
+            Some("transfer://2")
+        );
+        assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
+    }
 }

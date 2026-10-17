@@ -467,6 +467,25 @@ impl SnapshotPublisher {
         output: &mut AudioBusBuffers,
         frames: usize,
     ) -> bool {
+        // SAFETY: 与 `copy_block_at` 相同；输出偏移为 0。
+        unsafe { self.copy_block_at(sample, rate, output, 0, frames) }
+    }
+
+    /// 把快照的一段写到输出缓冲的 `out_offset` 处。
+    ///
+    /// 【为什么需要偏移】宿主可以不按循环边界切块；一个块的后半段要写到输出缓冲的
+    /// 对应偏移上，而不是从 0 开始覆盖前半段。
+    ///
+    /// # Safety
+    /// 非空输出 plane 至少含 `out_offset + frames` 个可写样本。
+    pub unsafe fn copy_block_at(
+        &self,
+        sample: i64,
+        rate: u32,
+        output: &mut AudioBusBuffers,
+        out_offset: usize,
+        frames: usize,
+    ) -> bool {
         // 【为什么接受任意声道数】宿主可能给 5.1 / 7.1 总线（见 `audio_abi::validate_bus`）。
         // 我们只处理**前两个**声道，其余保持调用方（`clear_outputs`）已经写好的静音，
         // 并把它们记进静音掩码 —— 拒绝整条总线会让宿主把插件踢出插槽。
@@ -542,8 +561,8 @@ impl SnapshotPublisher {
                 } else {
                     read(channel, offset)
                 };
-                // SAFETY: 宿主提供至少 frames 样本的可写平面。
-                unsafe { plane.add(offset).write(value) };
+                // SAFETY: 宿主提供至少 out_offset + frames 个可写样本。
+                unsafe { plane.add(out_offset + offset).write(value) };
                 if value != 0.0 {
                     silence &= !(1 << channel);
                 }
@@ -575,6 +594,29 @@ impl SnapshotPublisher {
         frames: usize,
         planes: &[Option<&[f32]>; 2],
     ) -> bool {
+        // SAFETY: 与 `copy_block_layered_at` 相同；输入/输出偏移均为 0。
+        unsafe { self.copy_block_layered_at(sample, rate, output, 0, frames, planes, 0) }
+    }
+
+    /// [`Self::copy_block_layered`] 的带偏移版本。
+    ///
+    /// `out_offset` = 写到输出缓冲的哪里；`input_offset` = 从输入平面读的起点。
+    /// 循环切分的第 2 段两者都等于第一段的帧数。
+    ///
+    /// # Safety
+    /// 与 [`Self::copy_block_layered`] 相同，且非空输入平面至少含
+    /// `input_offset + frames` 帧、非空输出平面至少含 `out_offset + frames` 个样本。
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn copy_block_layered_at(
+        &self,
+        sample: i64,
+        rate: u32,
+        output: &mut AudioBusBuffers,
+        out_offset: usize,
+        frames: usize,
+        planes: &[Option<&[f32]>; 2],
+        input_offset: usize,
+    ) -> bool {
         if output.num_channels == 0 || output.channel_buffers.is_null() {
             return false;
         }
@@ -603,7 +645,7 @@ impl SnapshotPublisher {
                 .get(index)
                 .copied()
                 .flatten()
-                .and_then(|plane| plane.get(offset))
+                .and_then(|plane| plane.get(input_offset + offset))
                 .copied()
         };
         let read = |channel: usize, offset: usize| -> f32 {
@@ -660,8 +702,8 @@ impl SnapshotPublisher {
                 } else {
                     read(channel, offset)
                 };
-                // SAFETY: 宿主提供至少 frames 样本的可写平面。
-                unsafe { plane.add(offset).write(value) };
+                // SAFETY: 宿主提供至少 out_offset + frames 个可写样本。
+                unsafe { plane.add(out_offset + offset).write(value) };
                 if value != 0.0 {
                     silence &= !(1 << channel);
                 }
@@ -1266,6 +1308,64 @@ mod tests {
         assert!(unsafe { publisher.copy_block_layered(0, 4, &mut bus, 4, &input) });
         assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
         assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
+    }
+
+    /// **带输出偏移的拷贝只覆盖请求的子区间。**
+    #[test]
+    fn copy_block_at_writes_only_the_requested_output_range() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 0,
+                left: vec![1.0, 2.0, 3.0, 4.0],
+                right: vec![5.0, 6.0, 7.0, 8.0],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [9.0_f32; 6];
+        let mut right = [9.0_f32; 6];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        // SAFETY: 输出平面提供 6 帧；写入 [2, 6)。
+        assert!(unsafe { publisher.copy_block_at(0, 4, &mut bus, 2, 4) });
+        assert_eq!(left, [9.0, 9.0, 1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(right, [9.0, 9.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+
+    /// **分层拷贝的输入偏移与输出偏移各自独立。**
+    #[test]
+    fn layered_copy_uses_independent_input_and_output_offsets() {
+        let publisher = SnapshotPublisher::new(16);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 2,
+                left: vec![0.2, 0.3],
+                right: vec![0.4, 0.5],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [9.0_f32; 5];
+        let mut right = [9.0_f32; 5];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let input_right = [10.0_f32, 11.0, 12.0, 13.0, 14.0, 15.0];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        // SAFETY: 输入/输出都提供 offset + frames 的长度。
+        assert!(unsafe { publisher.copy_block_layered_at(2, 4, &mut bus, 1, 4, &input, 2) });
+        // [0] 保留原值；[1..3) 取快照；[3..5) 取输入下标 4、5。
+        assert_eq!(left, [9.0, 0.2, 0.3, 4.0, 5.0]);
+        assert_eq!(right, [9.0, 0.4, 0.5, 14.0, 15.0]);
     }
 
     /// **没有快照时整块取输入**：于是"刚录完、合成还没好"这一段是宿主原声，不是静音。

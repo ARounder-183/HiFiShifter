@@ -2,7 +2,9 @@
 
 use super::ownership::{region_owners, RegionKey};
 use crate::sync::MutexExt;
-use crate::transfer::capture::{BlockContext, ProcessStream};
+use crate::transfer::capture::{
+    BlockContext, BlockSplit, PositionSource, ProcessStream, SubBlock, TransportPhase,
+};
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
@@ -394,16 +396,26 @@ pub(crate) enum SnapshotSource {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockEvidence {
     pub stream: ProcessStream,
-    pub start: i64,
+    /// 本块的有效工程起点（可能来自 continuous/music 回退）。
+    ///
+    /// 有切分时这是**第一段**的起点；逐段几何以 `split` 为准。
+    pub position: i64,
     pub frames: usize,
     pub playing: bool,
     pub recording: bool,
-    /// 本流内：首块、块首移动，或同头块变长。
-    pub flow: bool,
+    /// `kPlaying` / `kRecording` 的上升沿。
+    pub playing_rising: bool,
+    pub recording_rising: bool,
+    /// 本块相对同流上一块的传输相位。
+    pub phase: TransportPhase,
     /// 本流内是否见过上一块。
     pub had_previous: bool,
-    /// 门控是否允许本块写出内容（仅实时流会因“同区间重复”为假）。
+    /// 门控是否允许本块写出内容（仅实时流会因 `Resting` 为假）。
     pub allow_output: bool,
+    /// 本块是否开始了一个新的 pass（回卷或位置后退）。
+    pub new_pass: bool,
+    /// 循环边界切分（1 或 2 段）。
+    pub split: BlockSplit,
 }
 
 /// 一条进程流自己的块几何（音频线程写，无锁）。
@@ -412,7 +424,75 @@ struct StreamGeometry {
     seen: AtomicBool,
     last_start: AtomicI64,
     last_frames: AtomicU32,
+    last_end: AtomicI64,
+    /// 同一个块首连续出现的次数。
+    same_start: AtomicU32,
+    /// 本块首上是否已经允许过一次“显著更大”的扩展块。
+    extension_used: AtomicBool,
+    /// 有效位置的连续性锚点。
+    last_raw_start: AtomicI64,
+    last_continuous: AtomicI64,
+    last_music_bits: AtomicU64,
+    anchor_valid: AtomicBool,
+    virtual_position: AtomicI64,
+    last_position: AtomicI64,
+    last_source: AtomicU8,
     blocks: AtomicU64,
+    rolling_blocks: AtomicU64,
+    resting_blocks: AtomicU64,
+    rising_edges: AtomicU64,
+    continuous_used: AtomicU64,
+    music_used: AtomicU64,
+    position_resyncs: AtomicU64,
+    cycle_wraps: AtomicU64,
+    cycle_wrap_unknown: AtomicU64,
+}
+
+/// 一条流在本块上的位置/相位结论。
+#[derive(Clone, Copy, Debug)]
+struct StreamBlock {
+    /// 本块的有效工程起点（可能来自 continuous/music 回退）。
+    position: i64,
+    /// 宿主原始 `projectTimeSamples`。
+    raw_start: i64,
+    phase: TransportPhase,
+    had_previous: bool,
+    cycle_wrap: bool,
+    /// 本块开始了一个新的 pass（循环回卷或位置后退）。
+    new_pass: bool,
+    position_source: PositionSource,
+}
+
+/// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
+#[derive(Clone, Copy, Default)]
+struct StreamTime {
+    continuous: Option<i64>,
+    music: Option<f64>,
+    tempo: Option<f64>,
+    cycle_active: bool,
+    cycle_valid: bool,
+    cycle_start_music: f64,
+    cycle_end_music: f64,
+}
+
+impl StreamTime {
+    fn from_context(context: &crate::audio_abi::ProcessContext) -> Self {
+        let state = context.state;
+        let continuous_ok = state & crate::audio_abi::PROCESS_CONTEXT_CONTINUOUS_VALID != 0;
+        let music_ok = state & crate::audio_abi::PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID != 0;
+        let tempo_ok = state & crate::audio_abi::PROCESS_CONTEXT_TEMPO_VALID != 0;
+        let cycle_ok = state & crate::audio_abi::PROCESS_CONTEXT_CYCLE_VALID != 0;
+        Self {
+            continuous: continuous_ok.then_some(context.continuous_time_samples),
+            music: music_ok.then_some(context.project_time_music),
+            tempo: (tempo_ok && context.tempo.is_finite() && context.tempo > 0.0)
+                .then_some(context.tempo),
+            cycle_active: state & crate::audio_abi::PROCESS_CONTEXT_CYCLE_ACTIVE != 0,
+            cycle_valid: cycle_ok,
+            cycle_start_music: context.cycle_start_music,
+            cycle_end_music: context.cycle_end_music,
+        }
+    }
 }
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
@@ -536,8 +616,8 @@ pub(crate) struct ExtensionOwner {
     rt_last_emitted_start: AtomicI64,
     rt_last_emitted_frames: AtomicU32,
     rt_last_emitted_valid: AtomicBool,
-    /// 实时流上一块的播放位（用于 `kPlaying` 上升沿复位重复抑制）。
-    rt_playing: AtomicBool,
+    /// 每条进程流的上一块 `kRecording` 位（用于上升沿覆盖写）。
+    stream_recording: [AtomicBool; 3],
     /// 块级诊断计数：收到的块、`kPlaying` 块、位置推进但未置播放位的块、被门控清掉的块。
     blocks_seen: AtomicU64,
     blocks_playing: AtomicU64,
@@ -548,6 +628,15 @@ pub(crate) struct ExtensionOwner {
     stream_playing_blocks: [AtomicU64; 3],
     stream_flow_without_playing: [AtomicU64; 3],
     stream_gate_cleared: [AtomicU64; 3],
+    /// 每流的相位计数与位置来源计数（诊断）。
+    stream_resting_blocks: [AtomicU64; 3],
+    stream_rolling_blocks: [AtomicU64; 3],
+    continuous_used: AtomicU64,
+    music_used: AtomicU64,
+    position_resyncs: AtomicU64,
+    cycle_wraps: AtomicU64,
+    cycle_wrap_unknown: AtomicU64,
+    cycle_splits: AtomicU64,
     /// 因“同一区间重复”被抑制输出的实时块数。
     repeats_suppressed: AtomicU64,
     /// 宿主在 `setupProcessing` 声明的单块上限（`0` = 未声明）。
@@ -2371,21 +2460,245 @@ impl ExtensionOwner {
         start: i64,
         frames: usize,
     ) -> (bool, bool) {
+        let block = self.note_stream_geometry(
+            stream,
+            start,
+            frames,
+            48_000.0,
+            StreamTime::default(),
+            false,
+            false,
+        );
+        (block.phase != TransportPhase::Resting, block.had_previous)
+    }
+
+    /// 生产入口：从完整 `ProcessContext` 计算有效位置与相位。
+    fn note_stream_block(
+        &self,
+        stream: ProcessStream,
+        context: &crate::audio_abi::ProcessContext,
+        frames: usize,
+        playing_rising: bool,
+        recording_rising: bool,
+    ) -> StreamBlock {
+        let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
+            context.sample_rate
+        } else {
+            f64::from(self.setup_sample_rate())
+        };
+        self.note_stream_geometry(
+            stream,
+            context.project_time_samples,
+            frames,
+            rate,
+            StreamTime::from_context(context),
+            playing_rising,
+            recording_rising,
+        )
+    }
+
+    /// 每流几何 + 有效位置 + 相位。音频线程调用：只读写原子，不分配。
+    ///
+    /// 【有效位置的两条回退】宿主在起播窗口里可能把 `projectTimeSamples` 钉住，
+    /// 但 `continuousTimeSamples`（或 `projectTimeMusic`）仍在前进。此时用**增量
+    /// 锚定**跟随它：只在“工程位置与上一块完全相同”时启用，且只累加差值，不比较
+    /// 绝对原点。循环播放不启用 continuous（它不回卷），改用会回卷的工程位置。
+    #[allow(clippy::too_many_arguments)]
+    fn note_stream_geometry(
+        &self,
+        stream: ProcessStream,
+        raw_start: i64,
+        frames: usize,
+        rate: f64,
+        time: StreamTime,
+        playing_rising: bool,
+        recording_rising: bool,
+    ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
+        let had = geometry.seen.load(Ordering::Acquire);
         if frames == 0 {
             // 零帧块是参数 flush，不代表时间轴在走。
-            return (false, geometry.seen.load(Ordering::Relaxed));
+            return StreamBlock {
+                position: raw_start,
+                raw_start,
+                phase: if had {
+                    TransportPhase::Resting
+                } else {
+                    TransportPhase::Start
+                },
+                had_previous: had,
+                cycle_wrap: false,
+                new_pass: false,
+                position_source: PositionSource::Project,
+            };
         }
-        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
-        let had = geometry.seen.swap(true, Ordering::Relaxed);
-        let last_start = geometry.last_start.swap(start, Ordering::Relaxed);
-        let last_frames = geometry.last_frames.swap(frames, Ordering::Relaxed);
-        let flow = !had || start != last_start || frames > last_frames;
+        let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
+        let rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            48_000.0
+        };
+
+        let last_position = geometry.last_position.load(Ordering::Acquire);
+        let last_raw = geometry.last_raw_start.load(Ordering::Acquire);
+        let last_continuous = geometry.last_continuous.load(Ordering::Acquire);
+        let last_music = f64::from_bits(geometry.last_music_bits.load(Ordering::Acquire));
+        let last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
+            .unwrap_or(PositionSource::Project);
+
+        let cycle_wrap = if time.cycle_active {
+            let continuous_advanced = time
+                .continuous
+                .is_some_and(|continuous| continuous > last_continuous);
+            let music_wrapped = time.music.is_some_and(|music| music + 1e-9 < last_music);
+            let music_boundary = time.cycle_valid
+                && time.continuous.is_none()
+                && time.music.is_some_and(|music| {
+                    music <= time.cycle_start_music + 1e-6
+                        && last_music >= time.cycle_end_music - 1e-6
+                });
+            had && (raw_start < last_raw
+                || (raw_start == last_raw
+                    && (continuous_advanced || music_wrapped || music_boundary)))
+        } else {
+            false
+        };
+
+        let mut position =
+            if had && raw_start == last_raw && geometry.anchor_valid.load(Ordering::Acquire) {
+                geometry.virtual_position.load(Ordering::Acquire)
+            } else {
+                raw_start
+            };
+        let mut source = if time.cycle_active {
+            PositionSource::Cycle
+        } else {
+            PositionSource::Project
+        };
+        if !time.cycle_active && had && raw_start == last_raw {
+            let sane = (frames as i64).saturating_mul(4).max(64);
+            if let Some(continuous) = time.continuous {
+                let delta = continuous.saturating_sub(last_continuous);
+                if delta > 0 && delta <= sane {
+                    position = position.saturating_add(delta);
+                    source = PositionSource::Continuous;
+                    self.continuous_used.fetch_add(1, Ordering::Relaxed);
+                    geometry.continuous_used.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if source == PositionSource::Project {
+                if let (Some(music), Some(tempo)) = (time.music, time.tempo) {
+                    let beats = music - last_music;
+                    if beats > 0.0 {
+                        let delta = (beats * 60.0 / tempo * rate).round() as i64;
+                        if delta > 0 && delta <= sane {
+                            position = position.saturating_add(delta);
+                            source = PositionSource::Music;
+                            self.music_used.fetch_add(1, Ordering::Relaxed);
+                            geometry.music_used.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 工程位置重新前进：以它为准，并记录一次 resync（说明回退曾被使用过）。
+        if had && raw_start != last_raw {
+            if matches!(
+                last_source,
+                PositionSource::Continuous | PositionSource::Music
+            ) {
+                self.position_resyncs.fetch_add(1, Ordering::Relaxed);
+                geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
+            }
+            source = if time.cycle_active {
+                PositionSource::Cycle
+            } else {
+                PositionSource::Project
+            };
+        }
+
+        let phase = if !had {
+            geometry.same_start.store(0, Ordering::Release);
+            geometry.extension_used.store(false, Ordering::Release);
+            TransportPhase::Start
+        } else if cycle_wrap || position != last_position {
+            geometry.same_start.store(0, Ordering::Release);
+            geometry.extension_used.store(false, Ordering::Release);
+            TransportPhase::Rolling
+        } else if playing_rising || recording_rising {
+            geometry.same_start.store(0, Ordering::Release);
+            geometry.extension_used.store(false, Ordering::Release);
+            TransportPhase::Start
+        } else {
+            geometry.same_start.fetch_add(1, Ordering::AcqRel);
+            let extension_min = (rate / 20.0).round().max(1.0) as u32;
+            let last_frames = geometry.last_frames.load(Ordering::Acquire);
+            if frames32 > last_frames.saturating_add(extension_min)
+                && !geometry.extension_used.swap(true, Ordering::AcqRel)
+            {
+                TransportPhase::Rolling
+            } else {
+                TransportPhase::Resting
+            }
+        };
+
+        if playing_rising || recording_rising {
+            geometry.rising_edges.fetch_add(1, Ordering::Relaxed);
+        }
+        match phase {
+            TransportPhase::Resting => {
+                geometry.resting_blocks.fetch_add(1, Ordering::Relaxed);
+                self.stream_resting_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
+            }
+            TransportPhase::Start | TransportPhase::Rolling => {
+                geometry.rolling_blocks.fetch_add(1, Ordering::Relaxed);
+                self.stream_rolling_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if cycle_wrap {
+            self.cycle_wraps.fetch_add(1, Ordering::Relaxed);
+            geometry.cycle_wraps.fetch_add(1, Ordering::Relaxed);
+        } else if time.cycle_active && had && raw_start == last_raw && !playing_rising {
+            // 同一块首、cycle 有效但没有可用的回卷证据：可能是短循环，也可能是停播。
+            // 不能据此写入；只记一个读数，交给 T2.5 的判据解释。
+            geometry.cycle_wrap_unknown.fetch_add(1, Ordering::Relaxed);
+        }
+
+        geometry.seen.store(true, Ordering::Release);
+        geometry.last_start.store(position, Ordering::Release);
+        geometry.last_frames.store(frames32, Ordering::Release);
+        geometry
+            .last_end
+            .store(position.saturating_add(frames as i64), Ordering::Release);
+        geometry.last_position.store(position, Ordering::Release);
+        geometry.last_raw_start.store(raw_start, Ordering::Release);
+        geometry.last_continuous.store(
+            time.continuous.unwrap_or(last_continuous),
+            Ordering::Release,
+        );
+        geometry.last_music_bits.store(
+            time.music.unwrap_or(last_music).to_bits(),
+            Ordering::Release,
+        );
+        geometry.virtual_position.store(position, Ordering::Release);
+        geometry.anchor_valid.store(true, Ordering::Release);
+        geometry.last_source.store(source.code(), Ordering::Release);
         if stream == ProcessStream::Realtime {
-            self.realtime_flow.store(flow, Ordering::Release);
+            self.realtime_flow
+                .store(phase != TransportPhase::Resting, Ordering::Release);
         }
-        (flow, had)
+
+        StreamBlock {
+            position,
+            raw_start,
+            phase,
+            had_previous: had,
+            cycle_wrap,
+            new_pass: had && (cycle_wrap || position < last_position),
+            position_source: source,
+        }
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2415,16 +2728,25 @@ impl ExtensionOwner {
     /// 【真值表】ARA 实例：`false`（保持“停播即静音”的既有语义，由调用方的
     /// `!kPlaying` 决定）。未绑定实例：offline/prefetch 恒真（它们的输出稍后才被
     /// 播放，不能用此刻的传输状态挖洞）；实时流看本块证据。
-    pub(crate) fn transfer_should_emit(&self, evidence: Option<BlockEvidence>) -> bool {
+    pub(crate) fn transfer_should_emit(
+        &self,
+        evidence: Option<BlockEvidence>,
+        playing: bool,
+    ) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            return false;
+            // ARA 实例保持既有“停播即静音”语义：由调用方的 kPlaying 决定。
+            return playing;
         }
         match evidence {
             Some(evidence) => match evidence.stream {
-                ProcessStream::Offline | ProcessStream::Prefetch => true,
+                ProcessStream::Offline => true,
+                // prefetch 的输出稍后才被播放；重复请求可能是参数变化后的重算，
+                // 抑制会留下旧结果。传输状态与重复判定都不适用于它。
+                ProcessStream::Prefetch => true,
                 ProcessStream::Realtime => evidence.allow_output,
             },
-            None => false,
+            // 没有上下文证据时退回宿主播放位（旧测试/退化路径）。
+            None => playing,
         }
     }
 
@@ -2489,7 +2811,7 @@ impl ExtensionOwner {
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
-            declared
+            f64::from(declared)
         };
         let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
         let recording = context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0;
@@ -2502,53 +2824,174 @@ impl ExtensionOwner {
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
         // 代价是几个原子写 + 一次缓冲形状检查（不分配、不读样本）。
-        transfer.observe_with_stream(&block, stream);
-        // 【为什么位置是否前进要按流记】它决定"停播时要不要清输出"与捕获的
+        let playing_rising = transfer.observe_with_stream(&block, stream);
+        let was_recording = self.stream_recording[stream.index()].swap(recording, Ordering::AcqRel);
+        let recording_rising = recording && !was_recording;
+        // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
-        let (flow, had_previous) = self.note_stream_position(stream, block.start, block.frames);
+        let stream_block = self.note_stream_block(
+            stream,
+            context,
+            block.frames,
+            playing_rising,
+            recording_rising,
+        );
         // `kPlaying` 上升沿意味着一次新的播放会话：允许同一区间再出音一次。
-        if stream == ProcessStream::Realtime {
-            let was = self.rt_playing.swap(playing, Ordering::Relaxed);
-            if playing && !was {
-                self.rt_last_emitted_valid.store(false, Ordering::Release);
-            }
+        if stream == ProcessStream::Realtime && playing_rising {
+            self.rt_last_emitted_valid.store(false, Ordering::Release);
         }
-        let allow_output = self.allow_output_for(stream, &block, flow);
+        let split = self.block_split(context, block.frames, rate, stream_block.position);
+        let cycle_start = self.cycle_start_position(context, rate);
+        let allow_output = self.allow_output_for(
+            stream,
+            &block,
+            stream_block.position,
+            stream_block.phase,
+            playing_rising,
+            recording_rising,
+        );
         // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
         // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
-        let outcome = transfer.on_block_with_context(
-            block,
-            BlockContext {
-                stream,
+        let mut outcome = crate::transfer::TransferBlockOutcome::Idle;
+        for (index, part) in split.iter().enumerate() {
+            let planes = [
+                slice_plane(block.planes[0], part),
+                slice_plane(block.planes[1], part),
+            ];
+            let sub = crate::transfer::capture::InputBlock {
+                start: part.position,
+                frames: part.frames,
+                sample_rate: block.sample_rate,
+                planes,
                 playing,
-                recording,
-                flow,
-            },
-        );
+            };
+            let part_outcome = transfer.on_block_with_context(
+                sub,
+                BlockContext {
+                    stream,
+                    playing,
+                    recording,
+                    phase: stream_block.phase,
+                    playing_rising,
+                    recording_rising,
+                    cycle_wrap: stream_block.cycle_wrap,
+                    cycle_start,
+                    new_pass: stream_block.new_pass,
+                    part: index.min(u8::MAX as usize) as u8,
+                },
+            );
+            outcome = if index == 0 {
+                part_outcome
+            } else {
+                combine_transfer_outcomes(outcome, part_outcome)
+            };
+        }
         self.note_block_trace(
             context.state,
             mode,
             stream,
-            block.start,
+            stream_block.raw_start,
+            stream_block.position,
             block.frames,
             playing,
-            flow,
-            had_previous,
+            stream_block.phase,
+            playing_rising,
+            stream_block.cycle_wrap,
+            split.count,
+            stream_block.had_previous,
             allow_output,
             outcome.code(),
             transfer.capture_started(),
         );
         Some(BlockEvidence {
             stream,
-            start: block.start,
+            position: stream_block.position,
             frames: block.frames,
             playing,
             recording,
-            flow,
-            had_previous,
+            playing_rising,
+            recording_rising,
+            phase: stream_block.phase,
+            had_previous: stream_block.had_previous,
             allow_output,
+            new_pass: stream_block.new_pass,
+            split,
         })
+    }
+
+    /// 循环起点在工程采样域中的位置（`None` = 元数据不足）。
+    ///
+    /// 只用于把同一圈的多个段标记成同一组；不参与音频定位（音频定位由
+    /// `block_split` 的逐段位置负责）。
+    fn cycle_start_position(
+        &self,
+        context: &crate::audio_abi::ProcessContext,
+        rate: f64,
+    ) -> Option<i64> {
+        let time = StreamTime::from_context(context);
+        if !time.cycle_active || !time.cycle_valid {
+            return None;
+        }
+        let (Some(tempo), Some(music)) = (time.tempo, time.music) else {
+            return None;
+        };
+        let beats = music - time.cycle_start_music;
+        let frames = (beats * 60.0 / tempo * rate).round() as i64;
+        Some(context.project_time_samples.saturating_sub(frames).max(0))
+    }
+
+    /// 计算循环边界切分。只有在 cycle 元数据完整、且本块确实横跨 loop 终点时才切。
+    ///
+    /// 【为什么用音乐时间算】`ProcessContext` 不提供“循环终点对应的采样位置”，但
+    /// 给了 `projectTimeMusic` / `cycleEndMusic` / `tempo`。三者有效时，
+    /// `(cycle_end − project_time_music) × 60/tempo × rate` 就是本块到终点的帧数。
+    fn block_split(
+        &self,
+        context: &crate::audio_abi::ProcessContext,
+        frames: usize,
+        rate: f64,
+        position: i64,
+    ) -> BlockSplit {
+        let time = StreamTime::from_context(context);
+        let (Some(tempo), Some(music)) = (time.tempo, time.music) else {
+            return BlockSplit::whole(position, frames);
+        };
+        if !time.cycle_active || !time.cycle_valid {
+            return BlockSplit::whole(position, frames);
+        }
+        let loop_beats = time.cycle_end_music - time.cycle_start_music;
+        if !(loop_beats > 0.0) {
+            return BlockSplit::whole(position, frames);
+        }
+        let beats_to_end = time.cycle_end_music - music;
+        let to_end = (beats_to_end * 60.0 / tempo * rate).round();
+        if !(to_end > 0.0) || to_end >= frames as f64 {
+            return BlockSplit::whole(position, frames);
+        }
+        let length = (loop_beats * 60.0 / tempo * rate).round() as i64;
+        if length <= 0 {
+            return BlockSplit::whole(position, frames);
+        }
+        let to_end = to_end as usize;
+        let wrapped = context
+            .project_time_samples
+            .saturating_add(to_end as i64)
+            .saturating_sub(length)
+            .max(0);
+        self.cycle_splits.fetch_add(1, Ordering::Relaxed);
+        BlockSplit::split(
+            SubBlock {
+                position: context.project_time_samples,
+                input_offset: 0,
+                frames: to_end,
+            },
+            SubBlock {
+                position: wrapped,
+                input_offset: to_end,
+                frames: frames - to_end,
+            },
+        )
     }
 
     /// 本块是否允许写出内容。
@@ -2560,20 +3003,30 @@ impl ExtensionOwner {
         &self,
         stream: ProcessStream,
         block: &crate::transfer::capture::InputBlock<'_>,
-        flow: bool,
+        position: i64,
+        phase: TransportPhase,
+        playing_rising: bool,
+        recording_rising: bool,
     ) -> bool {
         // ARA 的“停播即静音”由 vst3 的门控单独处理；这里不参与。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return true;
         }
         match stream {
-            ProcessStream::Offline | ProcessStream::Prefetch => true,
+            ProcessStream::Offline => true,
+            // prefetch 的输出稍后才被播放；重复请求可能是参数变化后的重算，
+            // 抑制会留下旧结果。
+            ProcessStream::Prefetch => true,
             ProcessStream::Realtime => {
-                if block.playing || flow {
+                if playing_rising || recording_rising {
                     return true;
                 }
+                if phase == TransportPhase::Resting {
+                    self.repeats_suppressed.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
                 let same = self.rt_last_emitted_valid.load(Ordering::Acquire)
-                    && self.rt_last_emitted_start.load(Ordering::Acquire) == block.start
+                    && self.rt_last_emitted_start.load(Ordering::Acquire) == position
                     && self.rt_last_emitted_frames.load(Ordering::Acquire)
                         == u32::try_from(block.frames).unwrap_or(u32::MAX);
                 if same {
@@ -2598,7 +3051,7 @@ impl ExtensionOwner {
             return;
         }
         self.rt_last_emitted_start
-            .store(evidence.start, Ordering::Release);
+            .store(evidence.position, Ordering::Release);
         self.rt_last_emitted_frames.store(
             u32::try_from(evidence.frames).unwrap_or(u32::MAX),
             Ordering::Release,
@@ -2626,6 +3079,19 @@ impl ExtensionOwner {
         let transfer = self.transfer();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let offline = unsafe { (*data).process_mode } == 2;
+        // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来
+        // 改动绕过门控时把停播重复块写出去。ARA 实例保持原语义（不参与）。
+        if let Some(evidence) = evidence {
+            if evidence.stream == ProcessStream::Realtime
+                && !evidence.allow_output
+                && !self.is_bound()
+                && !self.bound_once.load(Ordering::Acquire)
+            {
+                // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
+                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                return TransferStage::Handled;
+            }
+        }
         // 选项是无锁快照（见 `TransferStore::options`）。
         let options = transfer.options();
         let output = self.transfer_output_with(evidence);
@@ -4464,9 +4930,15 @@ struct BlockTraceRecord {
     mode: AtomicI32,
     stream: AtomicU8,
     start: AtomicI64,
+    position: AtomicI64,
+    position_source: AtomicU8,
     frames: AtomicU32,
     playing: AtomicBool,
+    playing_rising: AtomicBool,
+    phase: AtomicU8,
     flow: AtomicBool,
+    cycle_wrap: AtomicBool,
+    split: AtomicU8,
     had_previous: AtomicBool,
     emitted: AtomicBool,
     capture: AtomicU8,
@@ -4496,10 +4968,15 @@ impl BlockTraceRing {
         state: u32,
         mode: i32,
         stream: ProcessStream,
-        start: i64,
+        raw_start: i64,
+        position: i64,
+        position_source: PositionSource,
         frames: usize,
         playing: bool,
-        flow: bool,
+        playing_rising: bool,
+        phase: TransportPhase,
+        cycle_wrap: bool,
+        split: u8,
         had_previous: bool,
         emitted: bool,
         capture: u8,
@@ -4511,12 +4988,24 @@ impl BlockTraceRing {
         record.state.store(state, Ordering::Relaxed);
         record.mode.store(mode, Ordering::Relaxed);
         record.stream.store(stream.code(), Ordering::Relaxed);
-        record.start.store(start, Ordering::Relaxed);
+        record.start.store(raw_start, Ordering::Relaxed);
+        record.position.store(position, Ordering::Relaxed);
+        record
+            .position_source
+            .store(position_source.code(), Ordering::Relaxed);
         record
             .frames
             .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
         record.playing.store(playing, Ordering::Relaxed);
-        record.flow.store(flow, Ordering::Relaxed);
+        record
+            .playing_rising
+            .store(playing_rising, Ordering::Relaxed);
+        record.phase.store(phase.code(), Ordering::Relaxed);
+        record
+            .flow
+            .store(phase != TransportPhase::Resting, Ordering::Relaxed);
+        record.cycle_wrap.store(cycle_wrap, Ordering::Relaxed);
+        record.split.store(split, Ordering::Relaxed);
         record.had_previous.store(had_previous, Ordering::Relaxed);
         record.emitted.store(emitted, Ordering::Relaxed);
         record.capture.store(capture, Ordering::Relaxed);
@@ -4558,9 +5047,15 @@ impl BlockTraceRing {
             let mode = record.mode.load(Ordering::Relaxed);
             let stream = record.stream.load(Ordering::Relaxed);
             let start = record.start.load(Ordering::Relaxed);
+            let position = record.position.load(Ordering::Relaxed);
+            let position_source = record.position_source.load(Ordering::Relaxed);
             let frames = record.frames.load(Ordering::Relaxed);
             let playing = record.playing.load(Ordering::Relaxed);
+            let playing_rising = record.playing_rising.load(Ordering::Relaxed);
+            let phase = record.phase.load(Ordering::Relaxed);
             let flow = record.flow.load(Ordering::Relaxed);
+            let cycle_wrap = record.cycle_wrap.load(Ordering::Relaxed);
+            let split = record.split.load(Ordering::Relaxed);
             let had_previous = record.had_previous.load(Ordering::Relaxed);
             let emitted = record.emitted.load(Ordering::Relaxed);
             let capture = record.capture.load(Ordering::Relaxed);
@@ -4575,9 +5070,15 @@ impl BlockTraceRing {
                 "mode": mode,
                 "stream": stream,
                 "start": start,
+                "position": position,
+                "position_source": position_source,
                 "frames": frames,
                 "playing": playing,
+                "playing_rising": playing_rising,
+                "phase": phase,
                 "flow": flow,
+                "cycle_wrap": cycle_wrap,
+                "split": split,
                 "had_previous": had_previous,
                 "emitted": emitted,
                 "capture": capture,
@@ -4633,10 +5134,14 @@ impl ExtensionOwner {
         state: u32,
         mode: i32,
         stream: ProcessStream,
-        start: i64,
+        raw_start: i64,
+        position: i64,
         frames: usize,
         playing: bool,
-        flow: bool,
+        phase: TransportPhase,
+        playing_rising: bool,
+        cycle_wrap: bool,
+        split: u8,
         had_previous: bool,
         allow_output: bool,
         capture: u8,
@@ -4648,6 +5153,7 @@ impl ExtensionOwner {
             self.blocks_playing.fetch_add(1, Ordering::Relaxed);
             self.stream_playing_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
         }
+        let flow = phase != TransportPhase::Resting;
         if flow && !playing {
             self.blocks_flow_without_playing
                 .fetch_add(1, Ordering::Relaxed);
@@ -4656,7 +5162,7 @@ impl ExtensionOwner {
         // 只在确实与 Transfer 有关的实例上留证，避免给纯 ARA 实例刷日志。
         // 同一次可疑窗口只报一次：`trace_logged` 由 actor 在 dump 后置位，
         // 直到宿主回到“钉住/停播”才复位，下一次起播再报。
-        let suspicious = (!playing && flow) || start < 0;
+        let suspicious = (!playing && flow) || raw_start < 0;
         if (self.transfer.is_armed() || self.transfer.has_material())
             && suspicious
             && !self.trace_logged.load(Ordering::Relaxed)
@@ -4667,14 +5173,26 @@ impl ExtensionOwner {
             self.trace_logged.store(false, Ordering::Release);
         }
         if let Some(ring) = self.block_trace.get() {
+            let source = self
+                .streams
+                .get(stream.index())
+                .and_then(|geometry| {
+                    PositionSource::from_code(geometry.last_source.load(Ordering::Relaxed))
+                })
+                .unwrap_or(PositionSource::Project);
             ring.write(
                 state,
                 mode,
                 stream,
-                start,
+                raw_start,
+                position,
+                source,
                 frames,
                 playing,
-                flow,
+                playing_rising,
+                phase,
+                cycle_wrap,
+                split,
                 had_previous,
                 allow_output,
                 capture,
@@ -4703,6 +5221,12 @@ impl ExtensionOwner {
                 "stream_switches": capture.stream_switches,
                 "repeated_blocks": capture.repeated_blocks,
                 "overlapped_frames": capture.overlapped_frames,
+                "resting_blocks": capture.resting_blocks,
+                "resting_frames": capture.resting_frames,
+                "overwritten_blocks": capture.overwritten_blocks,
+                "overwritten_frames": capture.overwritten_frames,
+                "overhang_trimmed_frames": capture.overhang_trimmed_frames,
+                "cycle_splits": capture.cycle_splits,
             })
         });
         let stream = |index: usize| {
@@ -4712,6 +5236,8 @@ impl ExtensionOwner {
                 "flow_without_playing": self.stream_flow_without_playing[index]
                     .load(Ordering::Acquire),
                 "gate_cleared": self.stream_gate_cleared[index].load(Ordering::Acquire),
+                "resting": self.stream_resting_blocks[index].load(Ordering::Acquire),
+                "rolling": self.stream_rolling_blocks[index].load(Ordering::Acquire),
             })
         };
         serde_json::json!({
@@ -4719,6 +5245,12 @@ impl ExtensionOwner {
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
             "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "continuous_used": self.continuous_used.load(Ordering::Acquire),
+            "music_used": self.music_used.load(Ordering::Acquire),
+            "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
+            "cycle_wraps": self.cycle_wraps.load(Ordering::Acquire),
+            "cycle_wrap_unknown": self.cycle_wrap_unknown.load(Ordering::Acquire),
+            "cycle_splits": self.cycle_splits.load(Ordering::Acquire),
             "streams": {
                 "realtime": stream(ProcessStream::Realtime.index()),
                 "prefetch": stream(ProcessStream::Prefetch.index()),
@@ -4733,6 +5265,30 @@ impl ExtensionOwner {
                 .map(|ring| ring.snapshot(trace_limit))
                 .unwrap_or_default(),
         })
+    }
+}
+
+/// 取宿主缓冲中属于某个循环切分段的那一片。
+fn slice_plane<'a>(plane: Option<&'a [f32]>, part: &SubBlock) -> Option<&'a [f32]> {
+    plane.and_then(|samples| {
+        let end = part.input_offset.checked_add(part.frames)?;
+        samples.get(part.input_offset..end)
+    })
+}
+
+/// 合并循环切分两段的捕获结论：只要有一段真的写了，就报 `Capturing`。
+fn combine_transfer_outcomes(
+    first: crate::transfer::TransferBlockOutcome,
+    second: crate::transfer::TransferBlockOutcome,
+) -> crate::transfer::TransferBlockOutcome {
+    use crate::transfer::TransferBlockOutcome;
+    if first == TransferBlockOutcome::Capturing || second == TransferBlockOutcome::Capturing {
+        return TransferBlockOutcome::Capturing;
+    }
+    if first != TransferBlockOutcome::Idle {
+        first
+    } else {
+        second
     }
 }
 

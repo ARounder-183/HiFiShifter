@@ -35,7 +35,9 @@ pub(crate) mod timeline;
 use crate::render::snapshot::PlaybackSnapshot;
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
-use capture::{BlockContext, Capture, CaptureOutcome, ClosedReason, ProcessStream, Segment};
+use capture::{
+    BlockContext, Capture, CaptureOutcome, ClosedReason, ProcessStream, Segment, TransportPhase,
+};
 use timeline::ProjectionTake;
 // 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
 // 而 `capture` 是私有子模块。
@@ -402,11 +404,24 @@ impl TransferStore {
         if !self.is_armed() {
             return false;
         }
+        // 【Resting 是“位置没动”的最强证据】即使捕获流上一块的 kPlaying 还是 1，
+        // 同一块首的重复也不能被当成“仍在录制”。上升沿例外：真正的起播首块可以与
+        // 停播块同几何。
+        if let Some(evidence) = evidence {
+            if evidence.phase == TransportPhase::Resting
+                && !evidence.playing_rising
+                && !evidence.recording_rising
+            {
+                return false;
+            }
+        }
         if self.capture_started() || self.capture_stream_playing() {
             return true;
         }
         evidence.is_some_and(|evidence| {
-            evidence.playing || evidence.recording || (evidence.flow && evidence.had_previous)
+            evidence.playing
+                || evidence.recording
+                || (evidence.phase != TransportPhase::Resting && evidence.had_previous)
         })
     }
 
@@ -752,14 +767,22 @@ impl TransferStore {
     }
 
     /// 与 [`Self::observe`] 相同，但把播放位写到**本流**的槽位。
-    pub(crate) fn observe_with_stream(&self, block: &InputBlock<'_>, stream: ProcessStream) {
+    ///
+    /// 返回 `kPlaying` 的**上升沿**（上一块为假、本块为真）。捕获用它在停播块
+    /// 与真正的起播首块之间做“覆盖写”，输出用它在同一区间上重新放行一次。
+    pub(crate) fn observe_with_stream(
+        &self,
+        block: &InputBlock<'_>,
+        stream: ProcessStream,
+    ) -> bool {
         if block.sample_rate.is_finite() && block.sample_rate > 0.0 {
             self.saw_context.store(true, Ordering::Release);
         }
         if block.has_audio() {
             self.saw_input.store(true, Ordering::Release);
         }
-        self.stream_playing[stream.index()].store(block.playing, Ordering::Release);
+        let was = self.stream_playing[stream.index()].swap(block.playing, Ordering::AcqRel);
+        block.playing && !was
     }
 
     /// 只报一次"宿主给了位置、却从来没有给过输入"。
@@ -1267,6 +1290,7 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         planes: vec![vec![0.0; capacity]; channels as usize],
         filled: 0,
         loss: capture::SegmentLoss::First,
+        loop_start: None,
         peak: [0.0; 2],
         closed: ClosedReason::Full,
         _reservation: Some(reservation),
@@ -1605,6 +1629,7 @@ mod tests {
             planes: vec![vec![0.4_f32; 512], vec![0.4_f32; 512]],
             filled: 512,
             loss: capture::SegmentLoss::First,
+            loop_start: None,
             peak: [0.4; 2],
             closed: ClosedReason::Stopped,
             _reservation: None,

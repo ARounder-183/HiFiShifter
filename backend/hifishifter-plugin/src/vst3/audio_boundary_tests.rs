@@ -1562,6 +1562,29 @@ fn a_repeated_realtime_block_is_silenced_after_the_first_occurrence() {
     assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
 }
 
+/// **FL Studio 形态：停播仍置 `kPlaying = 1`，同一块反复到达也不能反复出音。**
+///
+/// 【为什么这条是问题四的回归】旧门控只在 `kPlaying == 0` 时才清输出；只要宿主
+/// 一直置 1，位置钉住的块就会每块都把同一段快照重写一遍。
+#[test]
+fn a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence() {
+    let mut processor = Processor::create().unwrap();
+    processor
+        .extension_owner
+        .note_binding_window_closed_without_ara();
+    let playing = crate::audio_abi::PROCESS_CONTEXT_PLAYING;
+    let (first, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
+    assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
+    let (second, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
+    assert_eq!(
+        second,
+        vec![0.0; 8],
+        "kPlaying 常置 1 不能把同一位置的重复块变成连续输出"
+    );
+    let diagnostics = processor.extension_owner.block_diagnostics_json(0);
+    assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
+}
+
 /// **prefetch/实时交错时，捕获只跟随被选举的那条流，开头窗口完整。**
 #[test]
 fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {

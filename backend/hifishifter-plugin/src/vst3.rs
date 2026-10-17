@@ -1736,10 +1736,12 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 写过快照，清输出就清不掉那一块的内容 —— 于是每次停播/移动光标都会漏出一
             // 小块**新位置**的音频（用户报障："很短、内容不对的一声"）。先判、后写，
             // "清输出"才是真的清。
-            if data.process_mode != 2
-                && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
-                && !owner.transfer_should_emit(evidence)
-            {
+            // 【为什么不能再以 `kPlaying == 0` 为前提】FL Studio 停播时仍可能保持
+            // `kPlaying == 1`；此时门控必须由“本块是否真的在推进”（`allow_output`）
+            // 独立决定。`transfer_should_emit` 对 ARA 实例仍返回 `kPlaying`，所以
+            // “停播即静音”的既有语义不变。
+            let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
+            if data.process_mode != 2 && !owner.transfer_should_emit(evidence, playing) {
                 owner.note_gate_cleared(
                     evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
                         ev.stream
@@ -1784,33 +1786,65 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             } else {
                 owner.setup_sample_rate()
             };
-            // SAFETY: 缓冲经 validate 校验；`layered` 时未清但由 `copy_block_layered`
+            // SAFETY: 缓冲经 validate 校验；`layered` 时未清但由 `copy_block_layered_at`
             // 逐帧覆盖，其余路径已由上面的 clear_outputs 清过。publisher 由 owner 保留。
             let ready = unsafe {
                 if layered {
                     // 【为什么要重新取一次输入视图】Transfer 要"录过的那一段被替换、其余
                     // 保持宿主原声"，而"范围外"这个区别只在写之前知道（见
-                    // `copy_block_layered`）。这里不分配：`capture_view` 只借用宿主缓冲。
+                    // `copy_block_layered_at`）。这里不分配：`capture_view` 只借用宿主缓冲。
                     let input = crate::audio_abi::capture_view(
                         data,
                         context.project_time_samples,
                         context.sample_rate,
                         context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
                     );
-                    publisher.copy_block_layered(
-                        context.project_time_samples,
-                        output_rate.max(1.0) as u32,
-                        &mut *data.outputs,
-                        data.num_samples as usize,
-                        &input.planes,
-                    )
+                    match evidence {
+                        Some(evidence) => {
+                            let mut ready = true;
+                            for part in evidence.split.iter() {
+                                ready &= publisher.copy_block_layered_at(
+                                    part.position,
+                                    output_rate.max(1.0) as u32,
+                                    &mut *data.outputs,
+                                    part.input_offset,
+                                    part.frames,
+                                    &input.planes,
+                                    part.input_offset,
+                                );
+                            }
+                            ready
+                        }
+                        None => publisher.copy_block_layered(
+                            context.project_time_samples,
+                            output_rate.max(1.0) as u32,
+                            &mut *data.outputs,
+                            data.num_samples as usize,
+                            &input.planes,
+                        ),
+                    }
                 } else {
-                    publisher.copy_block(
-                        context.project_time_samples,
-                        output_rate.max(1.0) as u32,
-                        &mut *data.outputs,
-                        data.num_samples as usize,
-                    )
+                    match evidence {
+                        Some(evidence) => {
+                            let mut ready = true;
+                            for part in evidence.split.iter() {
+                                ready &= publisher.copy_block_at(
+                                    part.position,
+                                    output_rate.max(1.0) as u32,
+                                    &mut *data.outputs,
+                                    part.input_offset,
+                                    part.frames,
+                                );
+                            }
+                            ready
+                        }
+                        None => publisher.copy_block(
+                            context.project_time_samples,
+                            output_rate.max(1.0) as u32,
+                            &mut *data.outputs,
+                            data.num_samples as usize,
+                        ),
+                    }
                 }
             };
             if data.process_mode == 2 && !ready {

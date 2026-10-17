@@ -58,6 +58,21 @@ pub(crate) const PROCESS_CONTEXT_PLAYING: u32 = 1 << 1;
 /// 预计算。它仍只是提示；缺席时由连续块与非静音证据决定。
 pub(crate) const PROCESS_CONTEXT_RECORDING: u32 = 1 << 3;
 
+/// `ProcessContext::state` 的 `kCycleActive` 位（SDK `ivstprocesscontext.h:105`）。
+pub(crate) const PROCESS_CONTEXT_CYCLE_ACTIVE: u32 = 1 << 2;
+
+/// `projectTimeMusic` 是否有效（SDK `ivstprocesscontext.h:111`）。
+pub(crate) const PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID: u32 = 1 << 9;
+
+/// `tempo` 是否有效（SDK `ivstprocesscontext.h:112`）。
+pub(crate) const PROCESS_CONTEXT_TEMPO_VALID: u32 = 1 << 10;
+
+/// `cycleStartMusic` / `cycleEndMusic` 是否有效（SDK `ivstprocesscontext.h:114`）。
+pub(crate) const PROCESS_CONTEXT_CYCLE_VALID: u32 = 1 << 12;
+
+/// `continuousTimeSamples` 是否有效（SDK `ivstprocesscontext.h:113`）。
+pub(crate) const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
+
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
 #[derive(Default)]

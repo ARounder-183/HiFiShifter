@@ -14,13 +14,14 @@
 //!
 //! ```text
 //! magic    8 字节  "HFSXFER1"
-//! version  u32     = 1
+//! version  u32     = 2（v1 仍可读）
 //! segments u32
 //! 每段:
 //!   origin   i64    工程采样起点
 //!   rate     u32    采样率
 //!   channels u32
 //!   frames   u64
+//!   loop     i64    循环起点（`i64::MIN` = 非循环段；仅 v2）
 //!   samples  frames × channels × f32（小端，平面顺序）
 //! digest   32 字节 BLAKE3（覆盖以上全部内容）
 //! ```
@@ -40,7 +41,9 @@ use std::path::{Path, PathBuf};
 /// 文件魔数（含版本，便于将来一眼分辨）。
 const MAGIC: &[u8; 8] = b"HFSXFER1";
 /// 载荷版本。
-const VERSION: u32 = 1;
+///
+/// v2 在每段几何后多写一个 `loop_start`（`i64::MIN` = 非循环段）；v1 仍可读。
+const VERSION: u32 = 2;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -76,6 +79,7 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
         payload.extend_from_slice(&segment.sample_rate.to_le_bytes());
         payload.extend_from_slice(&channels.to_le_bytes());
         payload.extend_from_slice(&(segment.filled as u64).to_le_bytes());
+        payload.extend_from_slice(&segment.loop_start.unwrap_or(i64::MIN).to_le_bytes());
         for plane in &segment.planes {
             for sample in plane {
                 payload.extend_from_slice(&sample.to_le_bytes());
@@ -123,7 +127,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         return Err(format!("{}: not a transfer sidecar", path.display()));
     }
     let version = cursor.u32()?;
-    if version != VERSION {
+    if !(1..=VERSION).contains(&version) {
         return Err(format!(
             "{}: unsupported transfer sidecar version {version}",
             path.display()
@@ -136,6 +140,12 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         let sample_rate = cursor.u32()?;
         let channels = cursor.u32()?;
         let frames = cursor.u64()?;
+        let loop_start = if version >= 2 {
+            let raw = cursor.i64()?;
+            (raw != i64::MIN).then_some(raw)
+        } else {
+            None
+        };
         if !(1..=2).contains(&channels) || frames == 0 || frames > MAX_FRAMES {
             return Err(format!(
                 "{}: implausible segment shape (channels={channels}, frames={frames})",
@@ -162,6 +172,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             // **本次捕获**的诊断事实，不是音频的属性。载入时没有前一段可比，
             // 谎报 `None`（"连续"）会让界面显示一条不存在的连续性保证。
             loss: SegmentLoss::First,
+            loop_start,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             _reservation: None,
@@ -236,6 +247,7 @@ mod tests {
             planes: vec![values.to_vec(), values.to_vec()],
             filled: values.len(),
             loss: SegmentLoss::First,
+            loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             _reservation: None,
@@ -258,10 +270,7 @@ mod tests {
     #[test]
     fn a_round_trip_preserves_geometry_and_samples() {
         let dir = temp_dir();
-        let segments = vec![
-            segment(0, &[0.25, -0.5, 0.75]),
-            segment(9600, &[1.0, 0.0]),
-        ];
+        let segments = vec![segment(0, &[0.25, -0.5, 0.75]), segment(9600, &[1.0, 0.0])];
         let path = write(&dir, 7, &segments).unwrap();
         let restored = read(&path).unwrap();
         assert_eq!(restored.len(), 2);
@@ -338,6 +347,46 @@ mod tests {
         let second = write(&dir, 12, &[segment(0, &[0.9])]).unwrap();
         assert_eq!(first, second);
         assert_eq!(read(&second).unwrap()[0].planes[0], vec![0.9]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v2 往返必须保留循环 pass 的起点；None 也必须原样回来。
+    #[test]
+    fn a_round_trip_preserves_the_loop_start_metadata() {
+        let dir = temp_dir();
+        let mut looped = segment(0, &[0.1, 0.2]);
+        looped.loop_start = Some(9_600);
+        let plain = segment(4, &[0.3]);
+        let path = write(&dir, 4, &[looped, plain]).unwrap();
+        let restored = read(&path).unwrap();
+        assert_eq!(restored[0].loop_start, Some(9_600));
+        assert_eq!(restored[1].loop_start, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1 文件（没有 loop_start 字段）仍必须可读，且按“非循环段”解释。
+    #[test]
+    fn a_version_one_sidecar_still_loads() {
+        let dir = temp_dir();
+        let path = dir.join("legacy.hfx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(MAGIC);
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&0_i64.to_le_bytes());
+        payload.extend_from_slice(&48_000_u32.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&2_u64.to_le_bytes());
+        payload.extend_from_slice(&0.25_f32.to_le_bytes());
+        payload.extend_from_slice(&0.5_f32.to_le_bytes());
+        let digest = blake3::hash(&payload);
+        payload.extend_from_slice(digest.as_bytes());
+        std::fs::write(&path, payload).unwrap();
+
+        let restored = read(&path).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].loop_start, None);
+        assert_eq!(restored[0].planes[0], vec![0.25, 0.5]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
