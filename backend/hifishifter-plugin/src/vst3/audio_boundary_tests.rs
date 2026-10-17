@@ -1262,3 +1262,184 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
     let energy: f32 = left.iter().chain(right.iter()).map(|s| s.abs()).sum();
     assert!(energy > 0.0, "发布出来的快照不能是全零（那就是没出音）");
 }
+
+/// **负的 pre-roll 通过真实 process 入口也会被夹到工程 0。**
+///
+/// 【为什么在 ABI 边界再测一次】Capture 的单元测试只证明状态机；这里证明
+/// `audio_process_inner` → `transfer_observe` → `on_block_with_flow` 这条真实链路
+/// 也把负位置夹掉，从而不会再生成负起点 clip。
+#[test]
+fn a_negative_preroll_block_is_recorded_from_project_zero() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活；extension_owner 是它的字段。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().unwrap();
+
+    let block_frames = 8_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
+    let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+    let mut input = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: input_planes.as_mut_ptr(),
+    };
+    let mut left = [0.0_f32; 8];
+    let mut right = [0.0_f32; 8];
+    let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 3,
+        channel_buffers: output_planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: 1 << 1,
+        sample_rate: 48_000.0,
+        // 4 帧 pre-roll + 4 帧工程内容。
+        project_time_samples: -4,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: block_frames as i32,
+        num_inputs: 1,
+        num_outputs: 1,
+        inputs: &raw mut input,
+        outputs: &raw mut output,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
+    assert_eq!(result, K_RESULT_OK);
+    let take = owner.transfer().stop().unwrap();
+    assert_eq!(take, 1);
+    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    let clip = &timeline.clips[0];
+    assert_eq!(clip.start_sec, 0.0, "负 pre-roll 不得进入 clip");
+    assert!((clip.length_sec - 4.0 / 48_000.0).abs() < 1e-12);
+    assert_eq!(
+        owner.transfer().capture_diagnostics().unwrap().preroll_frames_dropped,
+        4
+    );
+}
+
+/// **`kPlaying` 滞后一块：真实 process 入口用下一块的连续性把开头补回来。**
+#[test]
+fn a_lagging_playing_bit_still_captures_the_first_process_block() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活；extension_owner 是它的字段。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+    owner.set_setup_sample_rate(48_000.0);
+    owner.transfer().start().unwrap();
+
+    let block_frames = 8_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
+    for block in 0..2_i64 {
+        let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+        let mut input = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: input_planes.as_mut_ptr(),
+        };
+        let mut left = [0.0_f32; 8];
+        let mut right = [0.0_f32; 8];
+        let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 3,
+            channel_buffers: output_planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            // 起播窗口：宿主还没有置 kPlaying。
+            state: 0,
+            sample_rate: 48_000.0,
+            project_time_samples: block * block_frames as i64,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 0,
+            num_samples: block_frames as i32,
+            num_inputs: 1,
+            num_outputs: 1,
+            inputs: &raw mut input,
+            outputs: &raw mut output,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
+        assert_eq!(result, K_RESULT_OK);
+    }
+
+    let take = owner.transfer().stop().unwrap();
+    assert_eq!(take, 1);
+    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    let clip = &timeline.clips[0];
+    assert_eq!(clip.start_sec, 0.0);
+    assert!(
+        (clip.length_sec - 16.0 / 48_000.0).abs() < 1e-12,
+        "两块都要在 take 里（第一块由 lookbehind 补回）"
+    );
+    assert_eq!(owner.transfer().capture_diagnostics().unwrap().pending_committed, 1);
+}
+
+/// **停播/预渲染留下的远位置不能把起播块清成静音。**
+///
+/// 【为什么在 ABI 边界测】`note_block_position` 的单元测试只证明判据；这里证明
+/// `audio_process_inner` 的门控真的按新判据放行，且输出仍是宿主原声（没有素材时）。
+#[test]
+fn a_stale_prefetch_block_does_not_silence_the_playback_start() {
+    let mut processor = Processor::create().unwrap();
+    let raw = (&mut *processor) as *mut Processor;
+    // SAFETY: processor 在本次用例期间存活；extension_owner 是它的字段。
+    let owner = unsafe { &(*raw).extension_owner };
+    owner.note_binding_window_closed_without_ara();
+
+    let block_frames = 8_usize;
+    let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
+    let mut observed = Vec::new();
+    for (index, start) in [480_000_i64, 48_000].into_iter().enumerate() {
+        let mut input_planes = [source.as_mut_ptr(), source.as_mut_ptr()];
+        let mut input = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: input_planes.as_mut_ptr(),
+        };
+        let mut left = [0.0_f32; 8];
+        let mut right = [0.0_f32; 8];
+        let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 3,
+            channel_buffers: output_planes.as_mut_ptr(),
+        };
+        let mut context = crate::audio_abi::ProcessContext {
+            state: 0,
+            sample_rate: 48_000.0,
+            project_time_samples: start,
+            ..Default::default()
+        };
+        let mut data = ProcessData {
+            process_mode: 0,
+            num_samples: block_frames as i32,
+            num_inputs: 1,
+            num_outputs: 1,
+            inputs: &raw mut input,
+            outputs: &raw mut output,
+            process_context: &raw mut context,
+            ..Default::default()
+        };
+        let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
+        assert_eq!(result, K_RESULT_OK);
+        observed.push((index, left, right));
+    }
+    assert_eq!(observed[0].1, [0.0; 8], "第一块没有可比对象，保守静音");
+    assert_eq!(
+        observed[1].1, [0.5; 8],
+        "块首从旧位置回到播放头 ⇒ 不得被旧高水位清掉"
+    );
+    assert_eq!(observed[1].2, [0.5; 8]);
+}

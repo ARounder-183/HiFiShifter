@@ -869,6 +869,14 @@ impl EditorSession {
                     }
                     // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
                     owner.report_pending_synthesis_once();
+                    // 起播窗口的块级 trace：只在音频线程标记了可疑窗口时落一次。
+                    // 一次即可回答“0.7 s 是一个大块还是很多 kPlaying=0 的小块”。
+                    if owner.take_trace_wanted() {
+                        log::info!(
+                            "[transfer] suspicious start-window block trace {}",
+                            owner.block_diagnostics_json(64)
+                        );
+                    }
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。

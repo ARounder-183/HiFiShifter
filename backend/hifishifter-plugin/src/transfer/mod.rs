@@ -351,7 +351,17 @@ impl TransferStore {
     /// `armed`，而捕获自己停下时 `on_block` 也会清它（见 `Stopped` 分支）。所以"录完了
     /// 但还武装着"这个状态不存在 —— 那正是"处理结果被直通压过"的怀疑对象，实测不成立。
     pub(crate) fn is_recording(&self) -> bool {
-        self.is_armed() && (self.capture_started() || self.host_playing())
+        self.is_recording_with_flow(false)
+    }
+
+    /// 与 [`Self::is_recording`] 相同，但把“块流在推进”也算作起播证据。
+    ///
+    /// 【为什么需要参数】`kPlaying` 可能在起播第一块才滞后置位；只按
+    /// `capture_started || host_playing` 判断时，那一块会被当成待命，输出上一版
+    /// `Processed`。`flow` 由音频线程的 `note_block_position` 提供，调用点仍在
+    /// `transfer_output`（它先过 `is_bound` 守卫，所以 ARA 实例走不到这里）。
+    pub(crate) fn is_recording_with_flow(&self, flow: bool) -> bool {
+        self.is_armed() && (self.capture_started() || self.host_playing() || flow)
     }
 
     /// 素材代次（`0` = 从来没有过任何 take）。
@@ -494,9 +504,18 @@ impl TransferStore {
             .map(|_| allocate_spare(capacity, 2))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| "not enough PCM budget for the transfer buffers".to_owned())?;
+        // lookbehind 的候选块是**额外**的一块：它不占 spares，也不会因为
+        // `service()` 的补充节奏而被挤掉。预算不足时关闭 lookbehind（不是关录制）。
+        let pending = allocate_spare(capacity, 2);
+        if pending.is_none() {
+            log::warn!(
+                "[transfer] no PCM budget for the lookbehind buffer; \
+                 the first block of a lagging transport start may be lost"
+            );
+        }
         self.capture
             .lock_or_recover()
-            .start(2, capacity, spares, max_frames);
+            .start(2, capacity, spares, pending, max_frames);
         // 新的一次录制：上一次的停止原因不再与用户相关。
         self.last_closed.store(0, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
@@ -687,6 +706,16 @@ impl TransferStore {
     }
 
     pub(crate) fn on_block(&self, block: InputBlock<'_>) -> TransferBlockOutcome {
+        self.on_block_with_flow(block, false)
+    }
+
+    /// 与 [`Self::on_block`] 相同，但带上“块流在推进”的弱证据（见
+    /// [`Capture::on_block_with_flow`]）。音频线程调用。
+    pub(crate) fn on_block_with_flow(
+        &self,
+        block: InputBlock<'_>,
+        flow: bool,
+    ) -> TransferBlockOutcome {
         if !self.is_armed() {
             return TransferBlockOutcome::Idle;
         }
@@ -699,7 +728,7 @@ impl TransferStore {
             self.armed.store(false, Ordering::Release);
             return TransferBlockOutcome::Stopped;
         }
-        match capture.on_block(block) {
+        match capture.on_block_with_flow(block, flow) {
             CaptureOutcome::Captured | CaptureOutcome::SilentInput => {
                 // 镜像"已经开始录"这个事实给无锁读者（输出仲裁）。
                 self.capture_started.store(true, Ordering::Release);
@@ -773,7 +802,7 @@ impl TransferStore {
             }
             let reason = capture.stopped_reason().unwrap_or(ClosedReason::Stopped);
             let segments = capture.finish(reason);
-            *capture = Capture::default();
+            capture.reset_after_promote();
             segments
         };
         if segments.is_empty() {
@@ -873,7 +902,7 @@ impl TransferStore {
                         let start = take
                             .segments
                             .iter()
-                            .map(|segment| segment.origin)
+                            .map(|segment| segment.origin.max(0))
                             .min()
                             .unwrap_or(0);
                         (start as f64 / rate, (start + span as i64) as f64 / rate)
@@ -896,8 +925,13 @@ impl TransferStore {
                 if segment.span().is_empty() || segment.has_nonfinite() {
                     continue;
                 }
-                start = start.min(segment.origin);
-                end = end.max(segment.origin + segment.filled as i64);
+                let segment_start = segment.origin.max(0);
+                let segment_end = segment.origin.saturating_add(segment.filled as i64);
+                if segment_end <= segment_start {
+                    continue;
+                }
+                start = start.min(segment_start);
+                end = end.max(segment_end);
                 sample_rate = sample_rate.max(segment.sample_rate);
             }
             (start < end).then_some(MaterialSpan {
@@ -906,6 +940,14 @@ impl TransferStore {
                 sample_rate,
             })
         })
+    }
+
+    /// 捕获侧诊断快照（**try_lock**；非音频线程）。
+    ///
+    /// 【为什么不用阻塞锁】诊断可能在 actor 心跳里被调用；持有 `capture` 锁会让音频
+    /// 线程的 `try_lock` 失败并整块跳过。诊断读不到下一轮再读，不能反过来影响录制。
+    pub(crate) fn capture_diagnostics(&self) -> Option<capture::CaptureDiagnostics> {
+        self.capture.try_lock().ok().map(|capture| capture.diagnostics())
     }
 
     /// 对外状态。
@@ -1026,7 +1068,7 @@ impl TransferStore {
         let mut capture = self.capture.lock_or_recover();
         let mut all = segments;
         all.extend(capture.drain_sealed());
-        *capture = Capture::default();
+        capture.reset_after_promote();
         drop(capture);
         if all.is_empty() {
             return Err("nothing was captured".into());
@@ -1094,6 +1136,20 @@ pub(crate) enum TransferBlockOutcome {
     NotPlaying,
     /// 捕获已结束（等 promote）。
     Stopped,
+}
+
+impl TransferBlockOutcome {
+    /// 稳定的编码值（只用于诊断）。**只增不改**。
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            TransferBlockOutcome::Idle => 0,
+            TransferBlockOutcome::Capturing => 1,
+            TransferBlockOutcome::Busy => 2,
+            TransferBlockOutcome::NoPosition => 3,
+            TransferBlockOutcome::NotPlaying => 4,
+            TransferBlockOutcome::Stopped => 5,
+        }
+    }
 }
 
 /// 分配一个空的段缓冲，并计入全局 PCM 预算。
@@ -1338,7 +1394,7 @@ mod tests {
     ///
     /// 【为什么 in-place 保护没丢】只在捕获真的往素材里写时才需要直通，而那正是
     /// `capture_started` 的语义（`on_block` 在 `!playing` 时一个样本都不写）。
-    #[test]
+    ///
     /// **录完并停止之后，宿主再播放不再是"录制中"。**
     ///
     /// 【为什么钉这一条】"处理结果被直通压过"的一个怀疑对象是"录完没按停止 ⇒

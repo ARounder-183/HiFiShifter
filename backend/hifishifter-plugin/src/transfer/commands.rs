@@ -27,6 +27,8 @@ pub(crate) fn handle(
     let transfer = owner.transfer();
     match command {
         "transfer_status" => Ok(status_json(owner)),
+        // 整圈块级 trace（诊断包/前端按需拉取）。不做限流：这是用户显式动作。
+        "transfer_block_trace" => Ok(owner.block_diagnostics_json(256)),
         "transfer_start" => {
             // 【为什么必须先挡这一条】宿主已经把音频经 ARA 交给我们时，再从输入总线录一遍
             // 是**另一条**素材来源，两者会互相覆盖。此前它静默地允许了 —— 用户会在 ARA
@@ -186,6 +188,9 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
         // "像那么回事"，而它们之间的差别正是"我的编辑生效了没有" —— 用户无法自己判断。
         // 如实报出仲裁结论，他就不必猜（见 `TransferOutput::as_str`）。
         "output": owner.transfer_output().as_str(),
+        // 块级诊断（计数 + 捕获侧 lookbehind 结果）。trace 本身走独立命令，
+        // 避免 200ms 的状态轮询拖着 256 条记录。
+        "blockDiagnostics": owner.block_diagnostics_json(0),
         // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
         "araBound": ara_bound,
     })

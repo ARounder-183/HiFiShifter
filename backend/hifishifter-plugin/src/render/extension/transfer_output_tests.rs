@@ -421,19 +421,22 @@ fn a_single_long_block_at_playback_start_is_not_swallowed() {
     );
 }
 
-/// **后退不算"前进"**：停播时把播放头往回挪，不该放出一块音频。
+/// **停播时向后 seek，代价至多一块音频**。
+///
+/// 【为什么不再要求"完全不放声"】预渲染/ASIO Guard 的块在门控看来就是"位置向后
+/// 跳"；如果向后一律判停，起播窗口会在"清/不清"之间反复切（用户听到的正是开头
+/// 卡顿）。一次 seek 的一声是 DAW 里预期内的瞬态，与第七轮已经接受的向前 seek
+/// 代价对称。
 #[test]
-fn a_backward_seek_does_not_unlock_a_block() {
+fn a_backward_seek_costs_at_most_one_block() {
     let owner = insert_owner();
     owner.note_block_position(96_000, 480);
-    owner.note_block_position(48_000, 480);
     assert!(
-        !owner.transfer_transport_running(),
-        "位置倒退不是播放：那是一次 seek 或循环回卷"
+        owner.note_block_position(48_000, 480),
+        "块首移动就是推进证据；不能因为方向向后就清掉起播/预渲染块"
     );
     // 之后的连续前进仍然能正常识别。
-    owner.note_block_position(48_480, 480);
-    assert!(owner.transfer_transport_running());
+    assert!(owner.note_block_position(48_480, 480));
 }
 
 /// **停播时向前拖一次播放头，代价是至多一块音频。**
@@ -483,4 +486,134 @@ fn a_bound_ara_instance_keeps_its_output() {
         "绑定的实例必须保持『停播即静音』的既有行为"
     );
     model.session().close();
+}
+
+/// **停播/预渲染留下的旧高水位不能压住起播块。**
+///
+/// 【为什么这条是用户报障的回归】旧实现比较“本块块尾是否越过上一块块尾”。
+/// 宿主预渲染的块可以落在播放头**之后**；起播后播放头还没追上它时，每一块都被
+/// 判成“没前进”，于是开头约 0.7 秒被清成静音/卡顿。新判据只看当前块与上一块：
+/// 块首从旧位置移到播放头 ⇒ 立刻是推进。
+#[test]
+fn a_stale_prefetch_position_does_not_suppress_the_start() {
+    let owner = insert_owner();
+    owner.note_block_position(480_000, 512); // 预渲染/停播留下的远位置
+    assert!(
+        owner.note_block_position(48_000, 512),
+        "块首回到播放头就是推进；不能等播放头越过旧高水位"
+    );
+}
+
+/// **乱序/重复块不再让门控在“清/不清”之间抖动。**
+#[test]
+fn out_of_order_blocks_do_not_toggle_the_gate() {
+    let owner = insert_owner();
+    owner.note_block_position(48_000, 512);
+    for (start, frames) in [(48_512, 512), (48_000, 512), (48_512, 512)] {
+        assert!(
+            owner.note_block_position(start, frames),
+            "块首变化就是推进证据；乱序不能把整块清掉"
+        );
+    }
+}
+
+/// **停播时 `kPlaying == 0` 且块首钉住：仍然判停。**
+#[test]
+fn a_pinned_block_with_the_same_geometry_is_still_stopped() {
+    let owner = insert_owner();
+    owner.note_block_position(48_000, 512);
+    assert!(
+        !owner.note_block_position(48_000, 512),
+        "同头同长 = 停播证据（唯一的例外是起播第一块，捕获侧用 lookbehind 补）"
+    );
+}
+
+/// **武装 + `kPlaying` 滞后的起播：输出立刻按“录制中”直通，而不是旧处理结果。**
+#[test]
+fn an_armed_lagging_start_does_not_play_the_previous_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner
+        .transfer_ready_revision
+        .store(owner.transfer.revision(), Ordering::Release);
+    owner.transfer().start().unwrap();
+    // 起播：位置前进，但宿主还没置 kPlaying。
+    owner.note_block_position(0, 512);
+    owner.note_block_position(512, 512);
+    owner.transfer().observe(&crate::transfer::InputBlock {
+        start: 512,
+        frames: 512,
+        sample_rate: 48_000.0,
+        planes: [None, None],
+        playing: false,
+    });
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Recording,
+        "位置流在推进 ⇒ 不能再把上一版处理结果盖在新演奏上"
+    );
+    owner.transfer().cancel();
+}
+
+/// **待命时重复块最终回到处理结果。**
+#[test]
+fn armed_standby_returns_to_the_processed_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner
+        .transfer_ready_revision
+        .store(owner.transfer.revision(), Ordering::Release);
+    owner.transfer().start().unwrap();
+    owner.note_block_position(0, 512);
+    assert!(!owner.note_block_position(0, 512), "钉住 = 停播");
+    owner.transfer().observe(&crate::transfer::InputBlock {
+        start: 0,
+        frames: 512,
+        sample_rate: 48_000.0,
+        planes: [None, None],
+        playing: false,
+    });
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::Processed,
+        "待命不是录制：重复块必须回到处理结果（否则参数线又不生效）"
+    );
+    owner.transfer().cancel();
+}
+
+/// **块级 trace 能区分“kPlaying 滞后但位置在推进”的起播窗口。**
+#[test]
+fn the_block_trace_records_a_lagging_start() {
+    let owner = insert_owner();
+    owner.init_block_trace();
+    owner.transfer().note_project_rate(48_000.0);
+    owner.transfer().start().unwrap();
+    for start in [0_i64, 512] {
+        owner.note_block_trace(
+            0,
+            0,
+            start,
+            512,
+            false,
+            true,
+            crate::transfer::TransferBlockOutcome::NotPlaying.code(),
+            false,
+        );
+    }
+    let diagnostics = owner.block_diagnostics_json(8);
+    assert_eq!(diagnostics["blocks_seen"], 2);
+    assert_eq!(diagnostics["blocks_flow_without_playing"], 2);
+    let trace = diagnostics["trace"].as_array().expect("trace array");
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0]["start"], 0);
+    assert_eq!(trace[0]["playing"], false);
+    assert_eq!(trace[0]["flow"], true);
+    assert_eq!(trace[1]["start"], 512);
+    assert!(owner.take_trace_wanted(), "可疑窗口必须请求一次落盘");
+    assert!(!owner.take_trace_wanted(), "同一次窗口不得重复请求");
+    owner.transfer().cancel();
 }

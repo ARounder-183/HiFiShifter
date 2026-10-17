@@ -5,7 +5,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
@@ -343,6 +343,19 @@ impl TransferOutput {
             TransferOutput::PassThrough => "passthrough",
         }
     }
+
+    /// 稳定的编码值（只用于块级诊断）。**只增不改**。
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            TransferOutput::Untouched => 0,
+            TransferOutput::Recording => 1,
+            TransferOutput::Processed => 2,
+            TransferOutput::StaleProcessed => 3,
+            TransferOutput::Raw => 4,
+            TransferOutput::PendingSynthesis => 5,
+            TransferOutput::PassThrough => 6,
+        }
+    }
 }
 
 /// [`ExtensionOwner::transfer_stage`] 给调用方的结论。
@@ -476,33 +489,37 @@ pub(crate) struct ExtensionOwner {
     /// 日志会把日志刷满，而按代次去重之后，一次真正的卡死只会留下一条可检索的记录，
     /// 合成成功后自然不再出现。
     pending_reported_revision: AtomicU64,
-    /// 上一块的工程位置（`projectTimeSamples`），用于判断"位置在不在前进"。
-    ///
-    /// 【为什么要它】停播时清输出是对的（否则固定光标处会把同一小段反复送出去，
-    /// 听起来是一个嗡嗡声），但 `kPlaying` 位与位置**不是原子更新**的：宿主从"停止"
-    /// 切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前那个清输出分支
-    /// 把两者当成同一件事，于是**每次播放都吞掉开头**。
-    ///
-    /// 位置是否前进是宿主无关的硬事实：真在播就必然前进，钉住不动就是在停。
-    /// 上一块的**结束**位置（`projectTimeSamples + numSamples`）。
-    ///
-    /// 【为什么判据要问块尾而不是块头】块长由宿主决定（SDK 只承诺
-    /// `numSamples <= maxSamplesPerBlock`；本仓库实测目标平台单块可达 6 秒，见
-    /// `docs/plans/2026-10-15-vst-transfer-mode.md:323`）。只看块头时，一个 1 秒的
-    /// 起播块 `start > previous` 只成立一次 ⇒ 累计不到"两步" ⇒ 门控把**整块 1 秒**
-    /// 清成静音（用户报障："约 1 秒完全无声，无论位置"）。块尾是同一个事实的完整读数。
-    last_block_end: AtomicI64,
+    /// 上一块的块首工程位置（`projectTimeSamples`）。
+    last_block_start: AtomicI64,
+    /// 上一块的帧数（`numSamples`）。
+    last_block_frames: AtomicU32,
     /// 见过至少一个块的位置（`false` 时上面几个读数没有意义）。
     has_block_position: AtomicBool,
-    /// 本块的位置相对上一块是否在前进（见 [`Self::transfer_transport_running`]）。
+    /// 本块相对上一块是否提供了"位置流在推进"的证据（见
+    /// [`Self::transfer_transport_running`]）。
     ///
-    /// 【为什么不再要求"连续两步"】那个判据的初衷是挡住"停播时移动播放头"，
-    /// 但它隐含要求宿主把一次起播切成**至少两个块** —— 宿主没有这个义务。代价是
-    /// 起播第一个块被整块静音，而块可以很长（实测上限 6 秒）。现在的判据是
-    /// **"本块的块尾是否越过了上一块的块尾"**：停播钉住时块尾不变（静音），
-    /// 真在播时块尾必然前进（出声）。停播时移动播放头会让块尾前进一次，代价是
-    /// 放出**一块**音频 —— 那是可接受的（一次 seek 的一声），而整秒静音不可接受。
+    /// 【判据只问当前块与上一块的关系】此前问的是"本块块尾是否越过上一块块尾"，
+    /// 但 `last_block_end` 跨停播/seek 保留：宿主预渲染/ASIO Guard 让最后一块的块尾
+    /// 落在播放头**之前**时，起播后的所有块都要等到播放头越过那个旧值才出声 ——
+    /// 用户听到的正是"开头约 0.7 秒"的静音/卡顿。现在只看：
+    ///   * 块首变了（seek/循环/起播） ⇒ 推进；
+    ///   * 块首没变但块变长（起播的第一个长块与停播块同头） ⇒ 推进；
+    ///   * 块首没变且块不变长/变短 ⇒ 没有推进（钉住/重复）。
+    /// 这不是"宿主一定在播"，而是"不是同一块被重复"；清输出还要求 `kPlaying == 0`。
     position_advancing: AtomicBool,
+    /// 块级诊断计数：收到的块、`kPlaying` 块、位置推进但未置播放位的块、被门控清掉的块。
+    blocks_seen: AtomicU64,
+    blocks_playing: AtomicU64,
+    blocks_flow_without_playing: AtomicU64,
+    gate_cleared: AtomicU64,
+    /// 宿主在 `setupProcessing` 声明的单块上限（`0` = 未声明）。
+    max_samples_per_block: AtomicI32,
+    /// 音频线程发现值得留证的起播窗口时置位；actor 心跳消费并落一次日志。
+    trace_wanted: AtomicBool,
+    /// 本次可疑起播窗口是否已经落过日志（避免每 100ms 刷同一段 trace）。
+    trace_logged: AtomicBool,
+    /// 预分配的块级环形记录（非音频线程初始化；音频线程只写，不分配）。
+    block_trace: std::sync::OnceLock<Box<BlockTraceRing>>,
     /// 音频线程发现"有素材、但处理结果不是当前代次"时置位；actor 心跳消费它并
     /// 重新排一次渲染（见 [`Self::transfer_stage`]）。
     ///
@@ -2069,7 +2086,7 @@ impl ExtensionOwner {
             .and_then(|session| session.as_ref().ok())
             .filter(|session| session.is_loaded())
             .cloned();
-        let (timeline, edit, with_curves) = match &session {
+        let (mut timeline, edit, with_curves) = match &session {
             // 【为什么用"发布代次"而不是"编辑代次"】渲染读的就是这份被发布的时间线，
             // 而 `generation` 只由 `mark_dirty` 推进 —— 有命令改了曲线却不标脏
             // （`convert_mix_param`），只认 `generation` 会让那种改动不推进版本 ⇒
@@ -2084,6 +2101,12 @@ impl ExtensionOwner {
             // （见 `transfer_prepare_job` 的 `with_curves` 位）。
             None => (self.transfer.session_timeline().0, 0, false),
         };
+        let trimmed = crate::transfer::timeline::clamp_timeline_to_project(&mut timeline);
+        if trimmed > 0 {
+            log::warn!(
+                "[transfer] removed pre-roll from {trimmed} clip(s) before rendering; the material domain starts at project time 0"
+            );
+        }
         let input = super::input::RenderInput {
             regions: self.transfer.regions_for_timeline(&timeline),
             sources: self.transfer.material_sources(),
@@ -2189,7 +2212,14 @@ impl ExtensionOwner {
          * `transfer_observe` 在 `transfer_stage` 之前更新 `host_playing`，所以起播的
          * 第一块就已经是 `Recording`，捕获读到的是宿主原声。
          */
-        if self.transfer.is_recording() {
+        // 【为什么把块流证据也算进"录制中"】`kPlaying` 可能在起播第一块才滞后置位；
+        // 只按 `capture_started || host_playing` 判断时，那一块会被当成"待命"，
+        // 输出上一版 `Processed` —— 旧内容盖在新演奏上。位置流在推进时按录制中直通，
+        // 最多在几何变化的瞬间多直通一块；重复块随即回到 `Processed`，待命语义不变。
+        if self
+            .transfer
+            .is_recording_with_flow(self.transfer_transport_running())
+        {
             return TransferOutput::Recording;
         }
         if !self.transfer.has_material() {
@@ -2256,34 +2286,28 @@ impl ExtensionOwner {
         );
     }
 
-    /// 记录本块的工程位置，并更新"位置是否在前进"（音频线程，无锁无分配）。
+    /// 记录本块的几何，并回答"位置流是否在推进"（音频线程，无锁无分配）。
     ///
-    /// 【为什么单独成一个函数】`process` 与测试都要走**同一条**判据；把它摊在
-    /// `transfer_observe` 里，测试就只能复制一遍那段逻辑 —— 而复制出来的判据测的不是
-    /// 生产代码。
+    /// 【判据：块首变化，或同头块变长】块长由宿主决定（SDK 只承诺
+    /// `numSamples <= maxSamplesPerBlock`），起播第一个块可以很大，也可以与停播块
+    /// 同头。因此：
+    ///   * 块首移动 ⇒ 时间轴在走（seek / 循环回卷也算，代价是至多一块瞬态）；
+    ///   * 块首没动但块变长 ⇒ 起播给了更大的块，也是在走；
+    ///   * 块首没动且块不变长/变短 ⇒ 钉住/重复（或宿主在停播时缩小了块）。
     ///
-    /// 【为什么判据是"块尾是否越过上一块的块尾"】块长由宿主决定（SDK 只承诺
-    /// `numSamples <= maxSamplesPerBlock`，本仓库实测目标平台单块可达 6 秒）。此前的
-    /// "连着两步向前"隐含要求宿主把一次起播切成至少两个块 —— 宿主没有这个义务：
-    /// 一个 1 秒的起播块只算"一步"，于是**整块 1 秒被清成静音**（用户报障："播放后
-    /// 约 1 秒完全没有音频输出，无论播放位置在哪里"）。块尾把"整块推进了多少"读全了，
-    /// 一个块就足以证明时间轴在走。
+    /// 【为什么不比较块尾/历史高水位】那会让停播/预渲染留下的旧位置把起播块
+    /// 压住：播放头还没越过旧块尾时，每一块都被判成"没前进"（用户报障：开头约
+    /// 0.7 秒静音/卡顿）。当前块与上一块的关系不会跨停播残留。
     ///
-    /// 【代价与取舍】停播时移动播放头会让块尾前进一次，因而放出**一块**音频；而整秒
-    /// 静音是不可接受的。两者不对称，所以选前者。
-    ///
-    /// 【首块】没有可比对象，判成"没前进"（保守）：起播的第一个块若与停播时的光标块
-    /// 完全重合（`start` 与 `frames` 都不变），它本来就是同一个位置，静音是对的；
-    /// 只要它真的推进了时间轴，块尾就立刻给出证据。
-    pub(crate) fn note_block_position(&self, start: i64, frames: usize) {
-        let had = self.has_block_position.swap(true, Ordering::Relaxed);
+    /// 【首块】没有可比对象，返回 `false`（保守）。捕获侧的 lookbehind 会把它补回。
+    pub(crate) fn note_block_position(&self, start: i64, frames: usize) -> bool {
         let frames = u32::try_from(frames).unwrap_or(u32::MAX);
-        let end = start.saturating_add(i64::from(frames));
-        let previous_end = self.last_block_end.swap(end, Ordering::Relaxed);
-        // 首块没有可比对象 ⇒ 保守判成没在前进（最多让一个块静音）。
-        // 之后块尾严格向前才算"时间轴在走"。
-        let forward = had && end > previous_end;
-        self.position_advancing.store(forward, Ordering::Release);
+        let had = self.has_block_position.swap(true, Ordering::Relaxed);
+        let last_start = self.last_block_start.swap(start, Ordering::Relaxed);
+        let last_frames = self.last_block_frames.swap(frames, Ordering::Relaxed);
+        let flow = had && (start != last_start || frames > last_frames);
+        self.position_advancing.store(flow, Ordering::Release);
+        flow
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2296,8 +2320,8 @@ impl ExtensionOwner {
     /// 反复送出去，听起来是个嗡嗡声），但**不能拿播放位当唯一的判据** —— 那会让每次
     /// 播放都吞掉开头（用户报障：播放后约 1 秒没有输出）。
     ///
-    /// 【判据的粒度是"整块"】见 [`Self::note_block_position`]：块尾前进即算在走。
-    /// 这保证门控**永远不会**清掉一个真正推进了时间轴的块，无论它有多长。
+    /// 【判据的粒度是"当前块 vs 上一块"】见 [`Self::note_block_position`]：
+    /// 块首移动或同头块变长即算在走。门控**不会**被停播/预渲染留下的历史位置卡住。
     ///
     /// 【为什么 ARA 实例恒为假】它的输出语义由 ARA 通路决定，这个守卫必须对它完全无效
     /// （见 `a_bound_instance_keeps_its_output`）。返回假 ⇒ 保持"停播即静音"的既有行为。
@@ -2388,12 +2412,26 @@ impl ExtensionOwner {
         // 就要做的决定（见 `transfer_transport_running`）。必须在**每个**块上更新，
         // 与是否武装无关 —— 停播期间的块正是这个判据的信息来源。
         //
-        // 【为什么把块长一起传下去】块长由宿主决定，单块可以很长；只比较块头会把
-        // 一个长块误判成"只前进了一步"（见 `note_block_position`）。
-        self.note_block_position(block.start, block.frames);
+        // 【为什么把块长一起传下去】块长由宿主决定，单块可以很长；起播的第一个长块
+        // 可能与停播块同头，必须靠"同头但更长"识别为推进（见 `note_block_position`）。
+        // 【为什么把 flow 一起传下去】`kPlaying` 可能在起播窗口里滞后（或宿主用
+        // ASIO Guard / anticipative FX 提前处理）。捕获需要这个弱证据来暂存第一块，
+        // 等下一块连续时再提交（见 `Capture::on_block_with_flow`）。
+        let flow = self.note_block_position(block.start, block.frames);
         // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
         // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
-        let _ = transfer.on_block(block);
+        let outcome = transfer.on_block_with_flow(block, flow);
+        self.note_block_trace(
+            context.state,
+            // SAFETY: 调用方保证 data 在本回调期间可读。
+            unsafe { (*data).process_mode },
+            block.start,
+            block.frames,
+            block.playing,
+            flow,
+            outcome.code(),
+            transfer.capture_started(),
+        );
     }
 
     /// 音频线程上的 Transfer **输出**阶段。
@@ -2417,7 +2455,9 @@ impl ExtensionOwner {
         let offline = unsafe { (*data).process_mode } == 2;
         // 选项一次取好：它在音频线程上要取一次锁，而下面两个分支都要用。
         let options = transfer.options();
-        match self.transfer_output() {
+        let output = self.transfer_output();
+        self.note_output_rung(output);
+        match output {
             // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。
             TransferOutput::Untouched => TransferStage::Snapshot {
                 source: SnapshotSource::Processed,
@@ -3981,6 +4021,7 @@ impl ExtensionOwner {
     /// 【为什么可以重复调用】三处都是 `OnceLock` / 覆盖式赋值，重复调用无副作用；
     /// 它由 20ms 的 UI 定时器驱动，因此必须幂等。
     pub(crate) fn arm_transfer_rendering(self: &Arc<Self>) {
+        self.init_block_trace();
         let _ = self
             .preparation
             .get_or_init(super::preparation::PreparationQueue::new);
@@ -4214,6 +4255,244 @@ impl ExtensionOwner {
             keys.len()
         );
         Ok(())
+    }
+}
+
+/// 块级诊断环的容量。256 块在 48 kHz/512 帧下约 2.7 秒的实时历史。
+const BLOCK_TRACE_CAPACITY: usize = 256;
+
+/// 一条块级记录。字段全部是原子，读者用 seqlock 校验一致性。
+#[derive(Default)]
+struct BlockTraceRecord {
+    seq: AtomicU64,
+    state: AtomicU32,
+    mode: AtomicI32,
+    start: AtomicI64,
+    frames: AtomicU32,
+    playing: AtomicBool,
+    flow: AtomicBool,
+    capture: AtomicU8,
+    capture_started: AtomicBool,
+    rung: AtomicU8,
+}
+
+/// 预分配的块级环形记录（SPSC：音频线程写、actor/诊断读）。
+struct BlockTraceRing {
+    head: AtomicU64,
+    records: Vec<BlockTraceRecord>,
+}
+
+impl BlockTraceRing {
+    fn new() -> Self {
+        Self {
+            head: AtomicU64::new(0),
+            records: (0..BLOCK_TRACE_CAPACITY)
+                .map(|_| BlockTraceRecord::default())
+                .collect(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write(
+        &self,
+        state: u32,
+        mode: i32,
+        start: i64,
+        frames: usize,
+        playing: bool,
+        flow: bool,
+        capture: u8,
+        capture_started: bool,
+    ) {
+        let index = self.head.fetch_add(1, Ordering::Relaxed) as usize % self.records.len();
+        let record = &self.records[index];
+        record.seq.fetch_add(1, Ordering::Relaxed);
+        record.state.store(state, Ordering::Relaxed);
+        record.mode.store(mode, Ordering::Relaxed);
+        record.start.store(start, Ordering::Relaxed);
+        record.frames.store(
+            u32::try_from(frames).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
+        record.playing.store(playing, Ordering::Relaxed);
+        record.flow.store(flow, Ordering::Relaxed);
+        record.capture.store(capture, Ordering::Relaxed);
+        record
+            .capture_started
+            .store(capture_started, Ordering::Relaxed);
+        record.rung.store(0, Ordering::Relaxed);
+        record.seq.fetch_add(1, Ordering::Release);
+    }
+
+    fn update_last_rung(&self, rung: u8) {
+        let head = self.head.load(Ordering::Relaxed);
+        if head == 0 {
+            return;
+        }
+        let index = (head - 1) as usize % self.records.len();
+        let record = &self.records[index];
+        record.seq.fetch_add(1, Ordering::Relaxed);
+        record.rung.store(rung, Ordering::Relaxed);
+        record.seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 最近的 `limit` 条记录（按写入顺序）。撕裂的记录直接跳过。
+    fn snapshot(&self, limit: usize) -> Vec<serde_json::Value> {
+        let head = self.head.load(Ordering::Acquire);
+        let count = usize::try_from(head)
+            .unwrap_or(usize::MAX)
+            .min(self.records.len())
+            .min(limit);
+        let mut out = Vec::with_capacity(count);
+        for offset in 0..count {
+            let index = (head.saturating_sub(1 + offset as u64)) as usize % self.records.len();
+            let record = &self.records[index];
+            let first = record.seq.load(Ordering::Acquire);
+            if first & 1 != 0 {
+                continue;
+            }
+            let state = record.state.load(Ordering::Relaxed);
+            let mode = record.mode.load(Ordering::Relaxed);
+            let start = record.start.load(Ordering::Relaxed);
+            let frames = record.frames.load(Ordering::Relaxed);
+            let playing = record.playing.load(Ordering::Relaxed);
+            let flow = record.flow.load(Ordering::Relaxed);
+            let capture = record.capture.load(Ordering::Relaxed);
+            let capture_started = record.capture_started.load(Ordering::Relaxed);
+            let rung = record.rung.load(Ordering::Relaxed);
+            if record.seq.load(Ordering::Acquire) != first {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "seq": first / 2,
+                "state": state,
+                "mode": mode,
+                "start": start,
+                "frames": frames,
+                "playing": playing,
+                "flow": flow,
+                "capture": capture,
+                "capture_started": capture_started,
+                "rung": rung,
+            }));
+        }
+        out.reverse();
+        out
+    }
+}
+
+impl ExtensionOwner {
+    /// 预分配块级诊断环（非音频线程；幂等）。
+    pub(crate) fn init_block_trace(&self) {
+        let _ = self.block_trace.get_or_init(|| Box::new(BlockTraceRing::new()));
+    }
+
+    /// 记录 `setupProcessing` 声明的单块上限（诊断用）。
+    pub(crate) fn note_max_samples_per_block(&self, value: i32) {
+        self.max_samples_per_block
+            .store(value.max(0), Ordering::Release);
+    }
+
+    /// 门控清掉一块（诊断用）。
+    pub(crate) fn note_gate_cleared(&self) {
+        self.gate_cleared.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 本块最终走了哪一档输出仲裁（由 `transfer_stage` 在决定后调用）。
+    pub(crate) fn note_output_rung(&self, output: TransferOutput) {
+        if let Some(ring) = self.block_trace.get() {
+            ring.update_last_rung(output.code());
+        }
+    }
+
+    /// 取走“该落一次块级 trace”的意图（非音频线程）。
+    pub(crate) fn take_trace_wanted(&self) -> bool {
+        let wanted = self.trace_wanted.swap(false, Ordering::AcqRel);
+        if wanted {
+            self.trace_logged.store(true, Ordering::Release);
+        }
+        wanted
+    }
+
+    /// 音频线程：计数并写入一条块级记录。无锁、无分配。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_block_trace(
+        &self,
+        state: u32,
+        mode: i32,
+        start: i64,
+        frames: usize,
+        playing: bool,
+        flow: bool,
+        capture: u8,
+        capture_started: bool,
+    ) {
+        self.blocks_seen.fetch_add(1, Ordering::Relaxed);
+        if playing {
+            self.blocks_playing.fetch_add(1, Ordering::Relaxed);
+        }
+        if flow && !playing {
+            self.blocks_flow_without_playing
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        // 只在确实与 Transfer 有关的实例上留证，避免给纯 ARA 实例刷日志。
+        // 同一次可疑窗口只报一次：`trace_logged` 由 actor 在 dump 后置位，
+        // 直到宿主回到“钉住/停播”才复位，下一次起播再报。
+        let suspicious = (!playing && flow) || start < 0;
+        if (self.transfer.is_armed() || self.transfer.has_material())
+            && suspicious
+            && !self.trace_logged.load(Ordering::Relaxed)
+        {
+            self.trace_wanted.store(true, Ordering::Release);
+        }
+        if !playing && !flow && (self.transfer.is_armed() || self.transfer.has_material()) {
+            self.trace_logged.store(false, Ordering::Release);
+        }
+        if let Some(ring) = self.block_trace.get() {
+            ring.write(
+                state,
+                mode,
+                start,
+                frames,
+                playing,
+                flow,
+                capture,
+                capture_started,
+            );
+        }
+    }
+
+    /// 块级诊断的 JSON（非音频线程）。`trace_limit` 控制环形记录条数。
+    pub(crate) fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
+        let capture = self.transfer.capture_diagnostics().map(|capture| {
+            serde_json::json!({
+                "preroll_frames_dropped": capture.preroll_frames_dropped,
+                "pending_stashed": capture.pending_stashed,
+                "pending_committed": capture.pending_committed,
+                "pending_discarded": capture.pending_discarded,
+                "pending_ready": capture.pending_ready,
+                "pending_available": capture.pending_available,
+                "gaps": capture.gaps,
+                "backwards": capture.backwards,
+                "dropouts": capture.dropouts,
+                "oversized_blocks": capture.oversized_blocks,
+                "silent_blocks": capture.silent_blocks,
+                "spares": capture.spared,
+            })
+        });
+        serde_json::json!({
+            "blocks_seen": self.blocks_seen.load(Ordering::Acquire),
+            "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
+            "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
+            "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "max_samples_per_block": self.max_samples_per_block.load(Ordering::Acquire),
+            "capture": capture,
+            "trace": self
+                .block_trace
+                .get()
+                .map(|ring| ring.snapshot(trace_limit))
+                .unwrap_or_default(),
+        })
     }
 }
 

@@ -240,6 +240,23 @@ pub(crate) enum CaptureOutcome {
     LimitReached,
 }
 
+/// 捕获侧诊断快照（`transfer_status` 与诊断包读取）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CaptureDiagnostics {
+    pub preroll_frames_dropped: u64,
+    pub pending_stashed: u64,
+    pub pending_committed: u64,
+    pub pending_discarded: u64,
+    pub pending_ready: bool,
+    pub pending_available: bool,
+    pub gaps: u64,
+    pub backwards: u64,
+    pub dropouts: u64,
+    pub oversized_blocks: u64,
+    pub silent_blocks: u64,
+    pub spared: usize,
+}
+
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
 pub(crate) struct Capture {
     /// 正在写的段；`None` = 尚未开始或已停止。
@@ -262,6 +279,21 @@ pub(crate) struct Capture {
     captured_frames: u64,
     /// 最后写入的工程位置终点。
     last_position: Option<i64>,
+    /// 尚未确认的候选首块（一块 lookbehind）。
+    ///
+    /// 【为什么需要它】宿主可以在 `kPlaying` 置位之前就送来起播的第一块
+    /// （ASIO Guard / anticipative FX / pre-roll）。只按 `kPlaying` 判断会丢掉这块；
+    /// 一看到位置推进就写又会把“停播时 seek 的一块”录进来。先暂存一块，等下一块
+    /// **首尾相接**才提交，才能同时满足两边。
+    pending: Option<Segment>,
+    /// `pending` 里是否已经装了**候选内容**（`false` = 它只是空缓冲）。
+    ///
+    /// 【为什么不能只看 `Option`】`pending` 是预分配缓冲：它在 `start()` 时就是
+    /// `Some`，但还没有任何块被暂存。用 `take()` 判断会把这块空缓冲当成候选
+    /// 丢掉，于是真正的第一块再也无处可放。
+    pending_ready: bool,
+    /// 待确认块的键 `(origin, frames, sample_rate)`；同一个钉住块重复到达时跳过拷贝。
+    pending_key: Option<(i64, u32, u32)>,
     /// 本次捕获的峰值（各段峰值的最大值）。
     peak: [f32; 2],
     /// 宿主是否**已经播过**至少一块（`false` = 待命）。
@@ -278,6 +310,12 @@ pub(crate) struct Capture {
     pub dropouts: u64,
     pub oversized_blocks: u64,
     pub silent_blocks: u64,
+    /// 负时间（宿主 pre-roll）被夹掉的帧数。工程时间轴从 0 开始，这部分不可听。
+    pub preroll_frames_dropped: u64,
+    /// lookbehind 的三个结果（诊断用）。
+    pub pending_stashed: u64,
+    pub pending_committed: u64,
+    pub pending_discarded: u64,
 }
 
 impl Default for Capture {
@@ -293,6 +331,9 @@ impl Default for Capture {
             stopped: None,
             captured_frames: 0,
             last_position: None,
+            pending: None,
+            pending_ready: false,
+            pending_key: None,
             peak: [0.0; 2],
             started: false,
             max_frames: 0,
@@ -301,6 +342,10 @@ impl Default for Capture {
             dropouts: 0,
             oversized_blocks: 0,
             silent_blocks: 0,
+            preroll_frames_dropped: 0,
+            pending_stashed: 0,
+            pending_committed: 0,
+            pending_discarded: 0,
         }
     }
 }
@@ -309,17 +354,20 @@ impl Capture {
     /// 开始一次捕获。
     ///
     /// `capacity_frames` 是单段容量；`spares` 是调用方**预先分配好**的备用缓冲
-    /// （每个都是空的、长度为容量的平面）；`max_frames` 是本次录制的帧数上限
+    /// （每个都是空的、长度为容量的平面）；`pending` 是 lookbehind 的专用缓冲
+    /// （`None` = 本机预算不足，关闭 lookbehind）；`max_frames` 是本次录制的帧数上限
     /// （`0` = 不限）。非音频线程调用。
     pub(crate) fn start(
         &mut self,
         channels: u8,
         capacity_frames: usize,
         mut spares: Vec<Segment>,
+        pending: Option<Segment>,
         max_frames: u64,
     ) {
         *self = Self {
             spares: std::mem::take(&mut spares),
+            pending,
             channels,
             capacity: capacity_frames,
             max_frames,
@@ -377,10 +425,16 @@ impl Capture {
         let mut start = i64::MAX;
         let mut end = i64::MIN;
         for segment in self.sealed.iter().chain(self.active.iter()) {
-            start = start.min(segment.origin);
-            end = end.max(segment.origin + segment.filled as i64);
+            let segment_start = segment.origin.max(0);
+            let segment_end = segment.origin.saturating_add(segment.filled as i64);
+            if segment_end <= segment_start {
+                continue;
+            }
+            start = start.min(segment_start);
+            end = end.max(segment_end);
         }
         if let Some(position) = self.last_position {
+            let position = position.max(0);
             start = start.min(position);
             end = end.max(position);
         }
@@ -395,6 +449,45 @@ impl Capture {
     /// 最后写入的工程位置终点。
     pub(crate) fn last_position(&self) -> Option<i64> {
         self.last_position
+    }
+
+    /// promote 之后重置捕获状态，但保留诊断计数。
+    ///
+    /// 【为什么保留】录音结束后正是用户最需要看"开头丢了多少 pre-roll / lookbehind
+    /// 补了几块"的时刻；`*capture = default()` 会把这些读数一起清掉，诊断就永远只能
+    /// 在录制**过程中**读到。
+    pub(crate) fn reset_after_promote(&mut self) {
+        let diagnostics = self.diagnostics();
+        *self = Self {
+            gaps: diagnostics.gaps,
+            backwards: diagnostics.backwards,
+            dropouts: diagnostics.dropouts,
+            oversized_blocks: diagnostics.oversized_blocks,
+            silent_blocks: diagnostics.silent_blocks,
+            preroll_frames_dropped: diagnostics.preroll_frames_dropped,
+            pending_stashed: diagnostics.pending_stashed,
+            pending_committed: diagnostics.pending_committed,
+            pending_discarded: diagnostics.pending_discarded,
+            ..Self::default()
+        };
+    }
+
+    /// 捕获侧诊断快照（非音频线程调用）。
+    pub(crate) fn diagnostics(&self) -> CaptureDiagnostics {
+        CaptureDiagnostics {
+            preroll_frames_dropped: self.preroll_frames_dropped,
+            pending_stashed: self.pending_stashed,
+            pending_committed: self.pending_committed,
+            pending_discarded: self.pending_discarded,
+            pending_ready: self.pending_ready,
+            pending_available: self.pending.is_some(),
+            gaps: self.gaps,
+            backwards: self.backwards,
+            dropouts: self.dropouts,
+            oversized_blocks: self.oversized_blocks,
+            silent_blocks: self.silent_blocks,
+            spared: self.spares.len(),
+        }
     }
 
     /// 本次捕获的峰值。
@@ -422,7 +515,13 @@ impl Capture {
     }
 
     /// 收走全部段：封口当前段 + 已封口的（promote 用，非音频线程）。
+    ///
+    /// 【为什么 pending 直接丢弃】它只是“尚未被下一块证明”的候选首块；用户按下
+    /// stop 时，没有证据的那一块不能算素材（否则一次误按会产生一个幽灵 take）。
     pub(crate) fn finish(&mut self, reason: ClosedReason) -> Vec<Segment> {
+        self.pending = None;
+        self.pending_ready = false;
+        self.pending_key = None;
         if let Some(active) = self.active.take() {
             self.sealed.push(seal(active, reason));
         }
@@ -432,16 +531,30 @@ impl Capture {
         self.drain_sealed()
     }
 
-    /// 音频线程入口。
+    /// 音频线程入口（兼容既有调用：没有块流证据时等价于“只在 `kPlaying` 时写”）。
     pub(crate) fn on_block(&mut self, block: InputBlock<'_>) -> CaptureOutcome {
+        self.on_block_with_flow(block, false)
+    }
+
+    /// 音频线程入口，带“本块相对上一块是否在推进”的弱证据。
+    ///
+    /// 【为什么 `flow` 不能直接等于“写”】位置推进既可能是起播，也可能是停播时
+    /// 拖了一次播放头。弱证据先暂存一块，下一块**首尾相接**才提交（lookbehind）。
+    pub(crate) fn on_block_with_flow(
+        &mut self,
+        block: InputBlock<'_>,
+        flow: bool,
+    ) -> CaptureOutcome {
         if self.stopped.is_some() {
             return CaptureOutcome::Captured;
         }
-        // 【为什么"没在播放"必须排在位置与采样率之前】停播后宿主仍会送块（REAPER 会把
-        // 位置钉在光标处反复 process），而那些块的位置往往**与已录内容不相邻** ——
-        // 让它们走进下面的连续性判据会凭空多出一次"跳跃"，把一次正常暂停记成一次异常。
-        // 先按播放位挡掉，暂停就是暂停。
-        if !block.playing {
+        // 【为什么零帧块要单独处理】旧的语义是“在播放的零帧块 ⇒ 起播”，
+        // 它不产生素材但会把状态从待命推进到录制中。负时间裁剪不能把这个语义吃掉。
+        if block.frames == 0 {
+            if block.playing {
+                self.started = true;
+                return CaptureOutcome::Captured;
+            }
             return CaptureOutcome::NotPlaying;
         }
         // 【为什么非法位置要丢弃而不是当 0】把一块音频写到工程位置 0 会**污染**时间轴：
@@ -450,20 +563,170 @@ impl Capture {
             self.dropouts = self.dropouts.saturating_add(1);
             return CaptureOutcome::NoPosition;
         };
-        // 起播：素材从这一块开始。**待命期一个样本都不写** —— 这就是"素材位置由播放
-        // 决定、不由按键决定"的落点（见文件头）。
-        //
-        // 【为什么排在采样率校验之后】一块"在播放但报不出采样率"的块不算起播：
-        // 那时我们连样本域都不知道，没有资格宣称素材已经开始。
-        if !self.started {
+        // 【为什么负时间必须在这里夹掉】`projectTimeSamples < 0` 是宿主 pre-roll
+        // （Cubase 的 ASIO Guard / PDC 会给出负位置）。工程时间轴从 0 开始，
+        // 负的部分不可听；若原样存进段，投影会生成负起点 clip，而渲染侧把窗口
+        // 起点夹到 0 时**不会**同步平移源窗口 —— 整段内容会前移一个 pre-roll。
+        // 夹掉是对齐的唯一正确做法：源偏移跟着跳过同样的帧数。
+        let skip = block
+            .start
+            .saturating_neg()
+            .min(block.frames as i64)
+            .max(0) as usize;
+        let start = block.start.saturating_add(skip as i64);
+        let frames = block.frames - skip;
+        if skip > 0 {
+            self.preroll_frames_dropped = self
+                .preroll_frames_dropped
+                .saturating_add(skip as u64);
+        }
+        if frames == 0 {
+            // 整块都在工程 0 之前：没有可听内容，也不把状态推进到“录制中”。
+            return CaptureOutcome::NotPlaying;
+        }
+
+        // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
+        if block.playing {
+            if self.pending_ready {
+                let contiguous = self.pending.as_ref().is_some_and(|pending| {
+                    pending.sample_rate == rate
+                        && pending.origin.saturating_add(pending.filled as i64) == start
+                });
+                if contiguous {
+                    if let Some(pending) = self.pending.take() {
+                        self.commit_pending(pending);
+                    }
+                } else {
+                    self.discard_pending();
+                }
+            }
             self.started = true;
+            return self.write_block(&block, start, frames, skip, rate);
         }
-        if block.frames == 0 {
-            return CaptureOutcome::Captured;
+
+        // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
+        if flow {
+            if self.pending_ready {
+                let contiguous = self.pending.as_ref().is_some_and(|pending| {
+                    pending.sample_rate == rate
+                        && pending.origin.saturating_add(pending.filled as i64) == start
+                });
+                if contiguous {
+                    if let Some(pending) = self.pending.take() {
+                        self.commit_pending(pending);
+                        return self.write_block(&block, start, frames, skip, rate);
+                    }
+                } else {
+                    self.discard_pending();
+                }
+            }
+            if !self.started {
+                self.stash_pending(&block, start, frames, skip, rate);
+                return CaptureOutcome::NotPlaying;
+            }
+            // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
+            if self.expected_next == Some(start) {
+                return self.write_block(&block, start, frames, skip, rate);
+            }
+            return CaptureOutcome::NotPlaying;
         }
+
+        // 没有播放位、也没有位置推进：可能是钉住的停播块，也可能是“同头同长”的
+        // 起播第一块。先暂存；下一块连续时由上面的分支提交。
+        if !self.started {
+            self.stash_pending(&block, start, frames, skip, rate);
+        }
+        CaptureOutcome::NotPlaying
+    }
+
+    /// 把一块写成 pending（只拷贝，不改变“是否已开始”的状态）。
+    fn stash_pending(
+        &mut self,
+        block: &InputBlock<'_>,
+        start: i64,
+        frames: usize,
+        skip: usize,
+        rate: u32,
+    ) {
+        let capacity = self.capacity;
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        let writable = frames
+            .min(capacity)
+            .min(pending.planes.first().map_or(0, Vec::len));
+        if writable == 0 {
+            return;
+        }
+        let key = (start, writable as u32, rate);
+        if self.pending_key == Some(key) && pending.filled == writable {
+            // 宿主停在一个光标处反复送同一块：内容与长度都没变，不必每块重拷。
+            return;
+        }
+        pending.origin = start;
+        pending.sample_rate = rate;
+        pending.filled = writable;
+        pending.loss = SegmentLoss::First;
+        pending.closed = ClosedReason::Full;
+        pending.peak = [0.0; 2];
+        for (channel, plane) in pending.planes.iter_mut().enumerate() {
+            let target = &mut plane[..writable];
+            match block.planes.get(channel).copied().flatten() {
+                Some(source) if source.len() >= skip + writable => {
+                    target.copy_from_slice(&source[skip..skip + writable]);
+                }
+                _ => target.fill(0.0),
+            }
+            let peak = target.iter().fold(0.0_f32, |acc, value| {
+                if value.is_finite() {
+                    acc.max(value.abs())
+                } else {
+                    acc
+                }
+            });
+            pending.peak[channel] = peak;
+        }
+        self.pending_key = Some(key);
+        self.pending_ready = true;
+        self.pending_stashed = self.pending_stashed.saturating_add(1);
+    }
+
+    /// 把 pending 提升为 active；下一块的连续性从它的终点开始。
+    fn commit_pending(&mut self, pending: Segment) {
+        self.sample_rate = pending.sample_rate;
+        self.channels = pending.planes.len().clamp(1, 2) as u8;
+        self.expected_next = Some(pending.origin.saturating_add(pending.filled as i64));
+        self.captured_frames = pending.filled as u64;
+        self.last_position = self.expected_next;
+        self.peak = pending.peak;
+        self.active = Some(pending);
+        self.started = true;
+        self.pending_ready = false;
+        self.pending_key = None;
+        self.pending_committed = self.pending_committed.saturating_add(1);
+    }
+
+    /// 丢弃 pending（非音频线程不参与；只由音频线程在状态切换时调用）。
+    fn discard_pending(&mut self) {
+        if self.pending_ready {
+            self.pending_ready = false;
+            self.pending_key = None;
+            self.pending_discarded = self.pending_discarded.saturating_add(1);
+        }
+    }
+
+    /// 真正写入一块（裁剪后的 `start`/`frames`，源偏移 `skip`）。
+    fn write_block(
+        &mut self,
+        block: &InputBlock<'_>,
+        start: i64,
+        frames: usize,
+        skip: usize,
+        rate: u32,
+    ) -> CaptureOutcome {
         if self.sample_rate == 0 {
             self.sample_rate = rate;
-            self.channels = channels_of(&block);
+            self.channels = channels_of(block);
         } else if self.sample_rate != rate {
             // 工程率变了：本 take 里已录样本的"秒"与后续块的"秒"不再可比。
             self.stop(ClosedReason::RateChanged);
@@ -473,11 +736,11 @@ impl Capture {
         // 连续性：上一块的终点是否正好接上这一块的首点。
         let loss = match self.expected_next {
             None => SegmentLoss::First,
-            Some(expected) if expected == block.start => SegmentLoss::None,
-            Some(expected) if block.start > expected => {
+            Some(expected) if expected == start => SegmentLoss::None,
+            Some(expected) if start > expected => {
                 self.gaps = self.gaps.saturating_add(1);
                 SegmentLoss::Gap {
-                    skipped_frames: (block.start - expected) as u64,
+                    skipped_frames: (start - expected) as u64,
                 }
             }
             Some(_) => {
@@ -497,7 +760,7 @@ impl Capture {
         let needs_new = match &self.active {
             None => true,
             Some(active) => {
-                active.filled + block.frames > self.capacity
+                active.filled + frames > self.capacity
                     || !matches!(loss, SegmentLoss::None)
             }
         };
@@ -516,7 +779,7 @@ impl Capture {
                 self.stop(ClosedReason::NoSpare);
                 return CaptureOutcome::OutOfSpares;
             };
-            spare.origin = block.start;
+            spare.origin = start;
             spare.sample_rate = rate;
             spare.loss = loss;
             spare.filled = 0;
@@ -533,8 +796,8 @@ impl Capture {
 
         // 【为什么超大块只截断并计数】容量是 8 秒而宿主单块通常 ≤ 6 秒；超过说明宿主
         // 行为异常。截断只损失超出部分，而"整块丢弃"会留下一个洞。
-        let writable = block.frames.min(self.capacity.saturating_sub(active.filled));
-        if writable < block.frames {
+        let writable = frames.min(self.capacity.saturating_sub(active.filled));
+        if writable < frames {
             self.oversized_blocks = self.oversized_blocks.saturating_add(1);
         }
         if writable == 0 {
@@ -547,8 +810,8 @@ impl Capture {
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[active.filled..active.filled + writable];
             match block.planes.get(channel).copied().flatten() {
-                Some(source) if source.len() >= writable => {
-                    target.copy_from_slice(&source[..writable]);
+                Some(source) if source.len() >= skip + writable => {
+                    target.copy_from_slice(&source[skip..skip + writable]);
                 }
                 // 声道缺失 / 宿主标记静音 / 平面比声明的帧数短：写零。
                 // 【为什么不能跳过不写】跳过会把**上一次使用的残留**留在缓冲里 ——
@@ -565,7 +828,7 @@ impl Capture {
             active.peak[channel] = active.peak[channel].max(peak);
         }
         active.filled += writable;
-        self.expected_next = Some(block.start + writable as i64);
+        self.expected_next = Some(start + writable as i64);
         self.captured_frames = self.captured_frames.saturating_add(writable as u64);
         self.last_position = self.expected_next;
         self.peak[0] = self.peak[0].max(active.peak[0]);
@@ -685,6 +948,7 @@ mod tests {
             1,
             capacity,
             (0..spares).map(|_| spare(capacity, 1)).collect(),
+            Some(spare(capacity, 1)),
             0,
         );
         capture
@@ -838,7 +1102,7 @@ mod tests {
         let left: &'static [f32] = Box::leak(vec![-0.5, 0.25].into_boxed_slice());
         let right: &'static [f32] = Box::leak(vec![0.75, -0.1].into_boxed_slice());
         let mut capture = Capture::default();
-        capture.start(2, 64, vec![spare(64, 2)], 0);
+        capture.start(2, 64, vec![spare(64, 2)], None, 0);
         let view = InputBlock {
             start: 0,
             frames: 2,
@@ -972,7 +1236,7 @@ mod tests {
     #[test]
     fn the_duration_limit_stops_the_capture() {
         let mut capture = Capture::default();
-        capture.start(1, 64, vec![spare(64, 1)], 8);
+        capture.start(1, 64, vec![spare(64, 1)], None, 8);
         let (_, first) = block(0, 4, 48_000.0);
         assert_eq!(capture.on_block(first), CaptureOutcome::Captured);
         let (_, second) = block(4, 4, 48_000.0);
@@ -993,7 +1257,7 @@ mod tests {
         let rate = 48_000.0;
         // 上限 20 秒 = 960000 帧；段容量够大，让 11 秒素材落在一个段里。
         let mut capture = Capture::default();
-        capture.start(1, 600_000, vec![spare(600_000, 1)], 960_000);
+        capture.start(1, 600_000, vec![spare(600_000, 1)], None, 960_000);
         // 1 秒一块。
         for second in 0..11_i64 {
             let (_, view) = block(second * 48_000, 48_000, rate);
@@ -1021,4 +1285,102 @@ mod tests {
         assert!(!capture.limit_warning());
         assert!(!capture.is_stopped());
     }
+    /// **宿主 pre-roll（负 `projectTimeSamples`）在写入前被夹掉。**
+    ///
+    /// 【为什么这是数据正确性】负起点会被投影成负 clip；渲染侧只夹窗口、不平移
+    /// 源窗口，整段内容会前移一个 pre-roll。夹掉负部分、源偏移同步跳过，才是正确对齐。
+    #[test]
+    fn a_negative_preroll_block_is_clamped_into_the_project_domain() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(-8, 16, 48_000.0);
+        assert_eq!(capture.on_block(view), CaptureOutcome::Captured);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].span(), 0..8, "只能写工程 0 之后的部分");
+        assert!(
+            (sealed[0].planes[0][0] - 8.0 / 1024.0).abs() < 1e-9,
+            "源偏移必须跳过与 pre-roll 等长的帧数，否则内容整体前移"
+        );
+        assert_eq!(capture.preroll_frames_dropped, 8);
+    }
+
+    /// **整块都在工程 0 之前：不写、也不推进到“录制中”。**
+    #[test]
+    fn a_fully_negative_block_does_not_start_the_capture() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(-16, 16, 48_000.0);
+        assert_eq!(capture.on_block(view), CaptureOutcome::NotPlaying);
+        assert!(!capture.is_started());
+        assert_eq!(capture.captured_frames(), 0);
+        assert!(capture.finish(ClosedReason::Stopped).is_empty());
+        assert_eq!(capture.preroll_frames_dropped, 16);
+    }
+
+    /// **`kPlaying` 滞后但位置连续推进：第一块由 lookbehind 补回。**
+    ///
+    /// 【为什么这条是用户报障的回归】宿主在起播窗口里用 ASIO Guard / anticipative
+    /// FX 提前处理时，前几块可能 `playing == false`。只按播放位判断会把开头整段丢掉。
+    #[test]
+    fn a_lagging_playing_bit_still_captures_the_first_block() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(100, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_flow(paused(first), true),
+            CaptureOutcome::NotPlaying,
+            "第一块只暂存，等下一块证明连续性"
+        );
+        assert!(!capture.is_started());
+        assert_eq!(capture.span(), None, "pending 不是素材");
+        let (_, second) = block(108, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_flow(paused(second), true),
+            CaptureOutcome::Captured,
+            "第二块连续 ⇒ 提交 pending 并继续写"
+        );
+        assert!(capture.is_started());
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].span(), 100..116);
+        assert_eq!(sealed[0].filled, 16, "开头那一块不能丢");
+        assert_eq!(capture.pending_committed, 1);
+    }
+
+    /// **`kPlaying` 在第二块才置位：第一块同样从 pending 补回。**
+    #[test]
+    fn a_playing_edge_on_the_second_block_commits_the_pending_first_one() {
+        let mut capture = started(64, 2);
+        let (_, first) = block(20, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_flow(paused(first), true),
+            CaptureOutcome::NotPlaying
+        );
+        let (_, second) = block(28, 8, 48_000.0);
+        assert_eq!(capture.on_block(second), CaptureOutcome::Captured);
+        assert!(capture.is_started());
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed[0].span(), 20..36);
+        assert_eq!(sealed[0].filled, 16);
+    }
+
+    /// **停播时向前 seek 一块，再继续钉住：不能把它录成素材。**
+    #[test]
+    fn a_seek_block_while_stopped_is_discarded_by_the_lookbehind() {
+        let mut capture = started(64, 2);
+        let (_, seek) = block(100, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_flow(paused(seek), true),
+            CaptureOutcome::NotPlaying
+        );
+        // 下一块换了位置（不是首尾相接）⇒ pending 被替换，丢弃旧的候选。
+        let (_, elsewhere) = block(200, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_flow(paused(elsewhere), true),
+            CaptureOutcome::NotPlaying
+        );
+        assert!(!capture.is_started());
+        assert_eq!(capture.captured_frames(), 0);
+        assert!(capture.finish(ClosedReason::Stopped).is_empty());
+        assert!(capture.pending_discarded >= 1);
+    }
+
 }

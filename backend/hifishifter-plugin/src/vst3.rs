@@ -1501,6 +1501,10 @@ unsafe extern "system" fn audio_setup_processing(
             {
                 return K_INVALID_ARGUMENT;
             }
+            // SAFETY: this 是存活的音频接口；setupProcessing 在 process 之前调用。
+            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            // 诊断：宿主声明的单块上限（不是分配上限；当前实现不依赖它分配）。
+            owner.note_max_samples_per_block(setup.max_samples_per_block);
             // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
             // 收到 `kResultFalse` 会把插件**整条踢出链路**：96k/192k 工程里用户看到"插件不见了"，
             // 没有任何提示。内部渲染仍按 44.1/48k 出快照，其余率由
@@ -1735,6 +1739,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 && context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING == 0
                 && !owner.transfer_transport_running()
             {
+                owner.note_gate_cleared();
                 let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
             }

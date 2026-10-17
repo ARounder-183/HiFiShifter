@@ -426,16 +426,94 @@ pub(crate) fn clip_id(take_id: u64, offset: usize) -> String {
     format!("transfer-clip-{take_id}-{offset}")
 }
 
+/// 把一条**已经组装好的** Transfer 时间线里的负起点 clip 夹到工程 0。
+///
+/// 【为什么投影之外还要这一层】旧工程/旧会话可能在本次修复之前就投影出了负起点
+/// clip。渲染器拿到负起点时只会把窗口起点夹到 0，**不会**平移源窗口；这里在
+/// Transfer 的渲染输入上做同样的裁剪（窗口 + 源偏移 + 淡入/吸附偏移同时移动），
+/// 于是即使投影这一层被绕过，raw 与 processed 也不会相差一个 pre-roll。
+///
+/// 返回被裁剪的 clip 数（调用方据此记一次限流日志）。
+pub(crate) fn clamp_timeline_to_project(timeline: &mut TimelineState) -> usize {
+    let mut trimmed = 0_usize;
+    timeline.clips.retain_mut(|clip| {
+        if !clip.start_sec.is_finite() || clip.start_sec >= 0.0 {
+            return true;
+        }
+        let pre = -clip.start_sec;
+        if !pre.is_finite() || !clip.length_sec.is_finite() || clip.length_sec <= pre {
+            return false;
+        }
+        clip.start_sec = 0.0;
+        clip.length_sec -= pre;
+        let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+            clip.playback_rate as f64
+        } else {
+            1.0
+        };
+        let source_shift = pre * rate;
+        if clip.reversed {
+            clip.source_end_sec -= source_shift;
+        } else {
+            clip.source_start_sec += source_shift;
+        }
+        // 淡入与吸附偏移都相对 clip 起点；起点前移了 pre，它们也前移同样的量。
+        clip.fade_in_sec = (clip.fade_in_sec - pre).max(0.0);
+        clip.snap_offset_sec = (clip.snap_offset_sec - pre).max(0.0);
+        trimmed += 1;
+        true
+    });
+    if trimmed > 0 {
+        timeline.project_sec = timeline
+            .clips
+            .iter()
+            .map(|clip| clip.start_sec + clip.length_sec)
+            .fold(0.0_f64, f64::max);
+    }
+    trimmed
+}
+
+/// 把负的工程区间夹到素材域 `[0, ∞)`。
+///
+/// 【为什么投影也要做一次】捕获侧已经不再写负起点（pre-roll 在进入捕获时夹掉），
+/// 但旧工程从 sidecar 恢复的 take 仍可能带负 origin。渲染侧把窗口起点夹到 0 时
+/// **不会**同步平移源窗口 —— 于是内容会整体前移一个 pre-roll。这里在**唯一的**
+/// 投影入口把区间和源偏移一起裁剪，`project` 与 `raw_tape` 因此看到同一份域。
+fn clamp_piece(piece: Piece) -> Option<Piece> {
+    if piece.span.start >= 0 {
+        return Some(piece);
+    }
+    let frames = frames_of(&piece.span);
+    if frames == 0 {
+        return None;
+    }
+    let skip = piece
+        .span
+        .start
+        .saturating_neg()
+        .min(i64::try_from(frames).unwrap_or(i64::MAX)) as usize;
+    if skip >= frames {
+        return None;
+    }
+    Some(Piece {
+        span: 0..piece.span.end,
+        offset: piece.offset.saturating_add(skip),
+        ..piece
+    })
+}
+
 /// 由素材带铺出覆盖前的初始片：一段一片，带内偏移就是段在带上的起点。
 fn seeds(tapes: &[Tape<'_>]) -> Vec<Piece> {
     let mut seeds = Vec::new();
     for (index, tape) in tapes.iter().enumerate() {
         for (segment, offset) in tape.segments.iter().zip(&tape.offsets) {
-            seeds.push(Piece {
+            if let Some(piece) = clamp_piece(Piece {
                 span: segment.span(),
                 tape: index,
                 offset: *offset,
-            });
+            }) {
+                seeds.push(piece);
+            }
         }
     }
     seeds
@@ -858,4 +936,96 @@ mod tests {
             "Transfer 轨道默认必须开启合成，否则画完参数线不会有任何变化"
         );
     }
+    /// **负 origin 的段在投影时被夹到工程 0，源窗口同步前移。**
+    ///
+    /// 【为什么必须同时移动源窗口】渲染侧把窗口起点夹到 0 时不会平移源窗口；
+    /// 只夹 `span.start` 会让 clip 从源的第 0 帧开始播放 —— 整段内容提前一个 pre-roll。
+    #[test]
+    fn a_negative_origin_segment_is_clamped_and_keeps_its_source_alignment() {
+        let values: Vec<f32> = (0..10).map(|index| index as f32).collect();
+        let segments = vec![segment(-5, &values)];
+        let (timeline, summary) = one(11, &segments);
+        assert_eq!(summary.clips, 1);
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.start_sec, 0.0, "素材域从工程 0 开始");
+        assert_eq!(clip.length_sec, 5.0 / 1000.0, "只保留工程 0 之后的 5 帧");
+        assert_eq!(
+            clip.source_start_sec,
+            5.0 / 1000.0,
+            "源窗口必须跳过与 pre-roll 等长的帧数"
+        );
+
+        // raw_tape 与投影看到同一个域：工程 0 对应源第 5 帧。
+        let raw = raw_tape(&[ProjectionTake {
+            id: 11,
+            segments: &segments,
+        }])
+        .expect("非空素材必须生成原始带");
+        assert_eq!(raw.origin_sample, 0);
+        assert_eq!(raw.left[0], 5.0);
+        assert_eq!(raw.left.len(), 5);
+    }
+
+    /// **整段都在 0 之前：不产生 clip，也不产生原始带。**
+    #[test]
+    fn a_fully_negative_segment_projects_to_nothing() {
+        let values = [1.0_f32; 4];
+        let segments = vec![segment(-4, &values)];
+        let (timeline, summary) = one(12, &segments);
+        assert!(timeline.clips.is_empty());
+        assert_eq!(summary.clips, 0);
+        assert!(raw_tape(&[ProjectionTake {
+            id: 12,
+            segments: &segments,
+        }])
+        .is_none());
+    }
+
+    /// **已在内存里的负起点 clip：渲染输入裁剪会同时移动窗口与源偏移。**
+    #[test]
+    fn clamp_timeline_to_project_moves_the_window_and_the_source() {
+        let mut timeline = TimelineState::default();
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+            "id": "clip",
+            "track_id": "track",
+            "name": "clip",
+            "start_sec": -0.5,
+            "length_sec": 2.0,
+            "source_start_sec": 1.0,
+            "source_end_sec": 3.0,
+            "playback_rate": 1.0,
+        }))
+        .unwrap();
+        clip.fade_in_sec = 0.75;
+        clip.snap_offset_sec = 0.25;
+        timeline.clips.push(clip);
+        assert_eq!(clamp_timeline_to_project(&mut timeline), 1);
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.start_sec, 0.0);
+        assert_eq!(clip.length_sec, 1.5);
+        assert_eq!(clip.source_start_sec, 1.5);
+        assert_eq!(clip.source_end_sec, 3.0);
+        assert_eq!(clip.fade_in_sec, 0.25);
+        assert_eq!(clip.snap_offset_sec, 0.0);
+
+        // 倒放：被裁掉的是源窗口的**尾端**。
+        let mut reversed: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+            "id": "reversed",
+            "track_id": "track",
+            "name": "reversed",
+            "start_sec": -0.5,
+            "length_sec": 2.0,
+            "source_start_sec": 1.0,
+            "source_end_sec": 3.0,
+            "playback_rate": 1.0,
+            "reversed": true,
+        }))
+        .unwrap();
+        reversed.normalize_takes();
+        let mut timeline = TimelineState::default();
+        timeline.clips.push(reversed);
+        assert_eq!(clamp_timeline_to_project(&mut timeline), 1);
+        assert_eq!(timeline.clips[0].source_end_sec, 2.5);
+    }
+
 }
