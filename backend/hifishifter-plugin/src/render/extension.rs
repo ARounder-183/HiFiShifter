@@ -3446,6 +3446,15 @@ impl ExtensionOwner {
     }
 
     /// 恢复/undo组件状态后刷新整张文档，各renderer保持原分配。
+    ///
+    /// 【为什么拆成两个】这个方法会在 `transaction` 之外被调用（`restore_state`），
+    /// 也会在**已经持有** `transaction` 的地方被调用（`DocumentSession::prepare_renderers`
+    /// 的存档合入路径）。`std::sync::Mutex` 不可重入，两条路径共用一个"自己取锁"的
+    /// 实现就会自锁 —— 用户报的"重开 ARA 工程宿主未响应"正是那一次。
+    ///
+    /// 现在的契约：本方法是**无锁入口**，自己取 `transaction`；
+    /// [`Self::refresh_document_locked`] 要求调用方已经持有它。任何未来调用点必须
+    /// 显式二选一，不存在"隐含取锁"的版本。
     pub fn refresh_document(&self) {
         let document = self
             .document
@@ -3453,18 +3462,25 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
-            {
-                let _transaction = document.transaction.lock_or_recover();
-                let owners = document.renderer_owners();
-                for owner in &owners {
-                    if let Err(error) = owner.merge_pending_restore(&document) {
-                        log::warn!("[ara] instance state unresolved: {error}");
-                    }
-                }
-                for owner in owners {
-                    owner.prepare();
-                }
+            let _transaction = document.transaction.lock_or_recover();
+            self.refresh_document_locked(&document);
+        }
+    }
+
+    /// [`Self::refresh_document`] 的持锁版本：**调用方必须已持有** `document.transaction`。
+    ///
+    /// 【为什么参数是 `&DocumentSession` 而不是自己 upgrade】持锁调用方本来就有那个
+    /// 引用（`prepare_renderers` 就是 `self`），传进来既省一次 Weak 升级，也让
+    /// "哪份文档的锁被持有"在签名上是唯一的。
+    pub(crate) fn refresh_document_locked(&self, document: &super::document::DocumentSession) {
+        let owners = document.renderer_owners();
+        for owner in &owners {
+            if let Err(error) = owner.merge_pending_restore(document) {
+                log::warn!("[ara] instance state unresolved: {error}");
             }
+        }
+        for owner in owners {
+            owner.prepare();
         }
     }
 
@@ -3495,7 +3511,7 @@ impl ExtensionOwner {
         Ok(())
     }
 
-    /// 接收 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
+    /// 暂存 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
     ///
     /// 【为什么不直接写 `document.edits`】合并要做身份重绑、冲突判定、`needs_rebind`
     /// 处理 —— 这些都在 `merge_pending_restore` 里，而且已经过测试。存档通道只是另一个
@@ -3504,9 +3520,13 @@ impl ExtensionOwner {
     /// 【为什么覆盖已有的 `pending_restore`】VST3 组件状态与 ARA 存档携带的是同一份
     /// `EditState`。两者同时到达时后到的应当胜出（它是宿主更晚保存的那份）；而 ARA 存档
     /// 在宿主重载工程时是权威来源。
-    pub(crate) fn adopt_archive_restore(&self, restored: crate::state_channel::EditState) {
+    ///
+    /// 【为什么这里**不**刷新文档】唯一的调用点是 `DocumentSession::prepare_renderers`，
+    /// 它已经持有 `transaction`，而刷新要取同一把不可重入的锁 —— 那就是用户报的
+    /// "重开工程宿主未响应"。合入由 `prepare_renderers` 紧随其后的
+    /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
+    pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
         *self.pending_restore.lock_or_recover() = Some(restored);
-        self.refresh_document();
     }
     /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
     pub(super) fn merge_pending_restore(

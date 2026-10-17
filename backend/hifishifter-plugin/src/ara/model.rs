@@ -1053,6 +1053,10 @@ impl ModelHandle {
                     "[ara] keeping the previously published timeline; the host model will be \
                      re-mapped on the next edit"
                 );
+                // 【为什么必须显式释放】下面 `prepare_renderers()` 要取同一把
+                // `transaction`；`std::sync::Mutex` 不可重入，持着它调用会当场自锁
+                // （重开工程时映射失败即触发）。`Ok` 分支已在上面 `drop`，这里必须对齐。
+                drop(transaction);
             }
         }
         self.session.prepare_renderers();

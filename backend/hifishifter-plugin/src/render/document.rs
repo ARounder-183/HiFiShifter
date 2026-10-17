@@ -327,6 +327,37 @@ mod tests {
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
 
+    /// **持着 `transaction` 刷新文档不得自锁。**
+    ///
+    /// 【为什么必须有这条】用户报的"重新打开含本插件的 ARA 工程，宿主直接未响应"
+    /// 就是一次同线程自锁：`prepare_renderers` 持着 `transaction` 调了
+    /// `adopt_archive_restore` → `refresh_document`，后者又要取同一把不可重入的锁。
+    /// 这里把契约钉在 `refresh_document_locked` 上：它**不得**再取 `transaction`。
+    ///
+    /// 【为什么用线程 + 超时而不是直接调用】自锁的失败形态是"永远不返回"，直接调用
+    /// 会把测试套件一起挂死；有超时才是一个可判定的断言。
+    #[test]
+    fn refreshing_while_the_transaction_is_held_does_not_deadlock() {
+        use std::time::Duration;
+        let document = Arc::new(DocumentSession::new(1));
+        let owner = Arc::new(ExtensionOwner::default());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let document = Arc::clone(&document);
+            let owner = Arc::clone(&owner);
+            std::thread::spawn(move || {
+                let _transaction = document.transaction.lock_or_recover();
+                owner.refresh_document_locked(&document);
+                let _ = sender.send(());
+            })
+        };
+        assert!(
+            receiver.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "持锁刷新必须返回：`refresh_document_locked` 不得再取 `transaction`"
+        );
+        worker.join().expect("worker must not panic");
+    }
+
     /// 真正的工厂必须在把控制器交给宿主前登记身份，空文档也必须可绑定。
     #[test]
     fn native_factory_registers_the_actual_controller_identity() {
@@ -1305,7 +1336,10 @@ impl DocumentSession {
         let held_back = self.pending_archive_restore.lock_or_recover().take();
         if let Some(restored) = held_back {
             match owners.first() {
-                Some(owner) => owner.adopt_archive_restore(restored),
+                // 【为什么只暂存、不在这里刷新】本函数已经持有 `transaction`，而刷新要取
+                // 同一把不可重入的锁 —— 那会当场自锁（用户报的"重开 ARA 工程宿主未
+                // 响应"）。合入由紧随其后的 `merge_pending_restore` 循环完成。
+                Some(owner) => owner.stash_archive_restore(restored),
                 None => {
                     // 没有任何 owner：把载荷放回去，等下一次收口再试。
                     log::warn!(
