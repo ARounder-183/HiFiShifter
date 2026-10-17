@@ -3027,7 +3027,12 @@ impl ExtensionOwner {
         let recording_rising = recording && !was_recording;
         // 【为什么要在相位判定之前记】`note_stream_geometry` 的"音频在流动"证据
         // 来自本块的指纹与上一块的比较；晚一步记录就永远读到上一块的结论。
-        self.streams[stream.index()].note_activity(block_activity_hash(&block));
+        //
+        // 【为什么零帧块不记】它是参数 flush，不代表时间轴在走。把它记成一次"内容
+        // 变化"会让紧随其后的真实块被当成新素材（多出一块本不该有的位移）。
+        if block.frames > 0 {
+            self.streams[stream.index()].note_activity(block_activity_hash(&block));
+        }
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
