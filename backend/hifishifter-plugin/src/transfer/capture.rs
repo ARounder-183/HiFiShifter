@@ -330,6 +330,13 @@ pub(crate) enum PositionSource {
     Music,
     /// 循环播放：使用会回卷的工程位置（不是 continuous）。
     Cycle,
+    /// 工程位置钉住、但输入音频在流动：位置由本插件按块长自行推进。
+    ///
+    /// 【为什么这是合法的记账】宿主在起播窗口里可能把 `projectTimeSamples` 钉在
+    /// 起点不动，却已经按自己的块长连续送时间上相邻的样本。此时"每块前进 frames"
+    /// 是唯一自洽的换算 —— 它同时也是**可核对**的：宿主位置一恢复前进就立刻以
+    /// 宿主为准（记一次 `position_resyncs`）。
+    Synthesized,
 }
 
 impl PositionSource {
@@ -339,6 +346,7 @@ impl PositionSource {
             Self::Continuous => 2,
             Self::Music => 3,
             Self::Cycle => 4,
+            Self::Synthesized => 5,
         }
     }
 
@@ -348,6 +356,7 @@ impl PositionSource {
             2 => Some(Self::Continuous),
             3 => Some(Self::Music),
             4 => Some(Self::Cycle),
+            5 => Some(Self::Synthesized),
             _ => None,
         }
     }
@@ -439,6 +448,12 @@ pub(crate) struct BlockContext {
     pub new_pass: bool,
     /// 本段属于循环切分的第几段（0 = 第一段；只有 0 更新候选/几何计数）。
     pub part: u8,
+    /// 本流最近是否观测到"输入内容在变化"（音频在流动）。
+    ///
+    /// 【为什么捕获需要它】停播时宿主会重复投递同一区间（内容逐块**相同**）；
+    /// 循环回卷时块首也会回到同一位置，但内容仍在变化。只按几何无法区分两者 ——
+    /// 前者必须丢弃，后者必须另起一段。
+    pub advancing: bool,
 }
 
 impl BlockContext {
@@ -458,6 +473,7 @@ impl BlockContext {
             cycle_start: None,
             new_pass: false,
             part: 0,
+            advancing: flow,
         }
     }
 }
@@ -1057,6 +1073,7 @@ impl Capture {
                     true,
                     ctx.playing_rising || ctx.recording_rising,
                     ctx.part,
+                    ctx.advancing,
                 );
             }
             return CaptureOutcome::NotPlaying;
@@ -1109,6 +1126,7 @@ impl Capture {
             ctx.phase == TransportPhase::Rolling,
             ctx.playing_rising || ctx.recording_rising,
             ctx.part,
+            ctx.advancing,
         )
     }
 
@@ -1309,6 +1327,7 @@ impl Capture {
         flow: bool,
         rising: bool,
         part: u8,
+        advancing: bool,
     ) -> CaptureOutcome {
         // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
         if block.playing {
@@ -1320,7 +1339,7 @@ impl Capture {
                 }
             }
             self.started = true;
-            return self.write_block(block, start, frames, skip, rate, rising, part);
+            return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
         }
 
         // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
@@ -1328,7 +1347,9 @@ impl Capture {
             if self.pending_ready_for(stream) {
                 if self.pending_is_contiguous(stream, start, rate) {
                     if self.commit_pending(stream) {
-                        return self.write_block(block, start, frames, skip, rate, rising, part);
+                        return self.write_block(
+                            block, start, frames, skip, rate, rising, part, advancing,
+                        );
                     }
                 } else {
                     self.discard_pending(stream);
@@ -1341,7 +1362,7 @@ impl Capture {
             // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
             // `expected_next == None` 是流交接后的第一块：没有可比的终点，直接写。
             if self.expected_next.is_none() || self.expected_next == Some(start) {
-                return self.write_block(block, start, frames, skip, rate, rising, part);
+                return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
             }
             return CaptureOutcome::NotPlaying;
         }
@@ -1350,7 +1371,7 @@ impl Capture {
         // 起播第一块。先暂存；下一块连续时由上面的分支提交。
         if self.started && self.expected_next.is_none() {
             // 刚交接：新流的第一块没有可比终点，即使没有 flow 也要写。
-            return self.write_block(block, start, frames, skip, rate, rising, part);
+            return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
         }
         if !self.started {
             self.stash_pending(stream, block, start, frames, skip, rate);
@@ -1601,6 +1622,7 @@ impl Capture {
         rate: u32,
         rising: bool,
         part: u8,
+        advancing: bool,
     ) -> CaptureOutcome {
         if self.sample_rate == 0 {
             self.sample_rate = rate;
@@ -1657,10 +1679,11 @@ impl Capture {
                         }
                         self.repeated_blocks = self.repeated_blocks.saturating_add(1);
                         return CaptureOutcome::Repeated;
-                    } else if self
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| start > active.origin)
+                    } else if !advancing
+                        && self
+                            .active
+                            .as_ref()
+                            .is_some_and(|active| start > active.origin)
                     {
                         // 落在 active 内部（不是段首）的完全重复：不是新素材。
                         // 段首的向后跳跃可能是循环回卷/seek，必须继续走到 Backward 分支。
@@ -1712,7 +1735,17 @@ impl Capture {
         };
         // 正向跳跃（seek 到别处）退出当前循环 pass：后续段不能继承 loop_start，
         // 否则投影会把一段非循环内容误并进循环组。
-        if matches!(loss, SegmentLoss::Gap { .. }) {
+        //
+        // 【为什么小跳跃不算】起播窗口里宿主把位置钉住、恢复前进时可能留下一个
+        // 块级的小缺口（本插件按块长记账的终点与宿主真实位置之间的取整差）。那不是
+        // "跳到了别处"，只是记账误差；按它清掉循环身份会把同一圈拆成两组。
+        let small_gap = match loss {
+            SegmentLoss::Gap { skipped_frames } => {
+                skipped_frames <= (frames as u64).saturating_mul(4).max(64)
+            }
+            _ => false,
+        };
+        if matches!(loss, SegmentLoss::Gap { .. }) && !small_gap {
             self.current_loop_start = None;
         }
 
@@ -1946,6 +1979,7 @@ mod tests {
             cycle_start: None,
             new_pass: false,
             part: 0,
+            advancing: flow,
         }
     }
 
@@ -2579,5 +2613,100 @@ mod tests {
         assert_eq!(sealed.len(), 2);
         assert_eq!(sealed[0].span(), 100..104);
         assert_eq!(sealed[1].span(), 100..104);
+    }
+
+    /// **回卷块不能被"完全覆盖"判定吞掉。**
+    ///
+    /// 【为什么这是问题三的一个直接成因】停播时宿主会重复投递同一区间（内容相同），
+    /// 那必须跳过；循环回卷时块首也会回到同一位置，但**音频仍在流动**。此前两者
+    /// 共用"完全落在已录区间内 ⇒ Repeated"，于是每一圈的首块都被丢掉，那一圈永远
+    /// 开不了头。
+    #[test]
+    fn a_wrap_block_with_live_audio_starts_a_new_pass() {
+        let mut capture = started(16, 2);
+        for start in [0, 4, 8] {
+            let (_, view) = block(start, 4, 48_000.0);
+            assert_eq!(capture.on_block(view), CaptureOutcome::Captured);
+        }
+        // 回卷：位置回到 0，音频仍在流动。
+        let (_, view) = block(0, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_wrap = true;
+        context.new_pass = true;
+        assert_eq!(
+            capture.on_block_with_context(view, context),
+            CaptureOutcome::Captured,
+            "回卷首块必须写入"
+        );
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2, "回卷必须另起一段");
+        assert_eq!(sealed[1].origin, 0, "新一圈从回卷点开始");
+    }
+
+    /// 停播时同一区间的重复投递仍然必须跳过（与上一条互为反例）。
+    #[test]
+    fn a_repeat_without_live_audio_is_still_skipped() {
+        let mut capture = started(16, 2);
+        for start in [0, 4, 8] {
+            let (_, view) = block(start, 4, 48_000.0);
+            capture.on_block(view);
+        }
+        let (_, view) = block(4, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, false);
+        context.phase = TransportPhase::Rolling;
+        context.advancing = false;
+        assert_eq!(
+            capture.on_block_with_context(view, context),
+            CaptureOutcome::Repeated,
+            "没有音频流动的证据时，落在段内部的同一区间就是重复"
+        );
+    }
+
+    /// **起播窗口结束时的小缺口不得清掉循环身份。**
+    ///
+    /// 【为什么】位置被钉住期间由本插件按块长记账，恢复前进时可能留下一个块级的取整
+    /// 差。那不是"跳到了别处"，按它清掉 `loop_start` 会把同一圈拆成两个组。
+    #[test]
+    fn a_small_start_window_gap_keeps_the_loop_identity() {
+        let mut capture = started(64, 2);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_start = Some(0);
+        context.new_pass = true;
+        let (_, view) = block(0, 4, 48_000.0);
+        capture.on_block_with_context(view, context);
+
+        // 记账取整差：期望 4，实际 8 —— 只差一个块。
+        let (_, view) = block(8, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_start = Some(0);
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[0].loop_start, Some(0));
+        assert_eq!(
+            sealed[1].loop_start,
+            Some(0),
+            "块级缺口不是 seek，循环身份必须保留"
+        );
+    }
+
+    /// 真正的大跳跃（seek 到别处）仍然退出循环 pass。
+    #[test]
+    fn a_large_jump_leaves_the_loop_pass() {
+        let mut capture = started(64, 2);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_start = Some(0);
+        context.new_pass = true;
+        let (_, view) = block(0, 4, 48_000.0);
+        capture.on_block_with_context(view, context);
+
+        let (_, view) = block(1_000, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_start = Some(0);
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed[1].loop_start, None, "大跳跃必须退出循环组");
     }
 }

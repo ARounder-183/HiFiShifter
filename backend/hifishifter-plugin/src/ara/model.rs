@@ -3494,8 +3494,9 @@ mod tests {
                 format_version: link::FORMAT_VERSION,
                 link_id: manifest.link_id.clone(),
                 base_revisions: manifest.revisions,
-                host_geometry:
-                    hifishifter_kernel::editor::host_timeline::host_geometry_projection(&timeline),
+                host_geometry: hifishifter_kernel::editor::host_timeline::host_geometry_projection(
+                    &timeline,
+                ),
                 params: serde_json::to_value(&timeline.params_by_root_track).unwrap(),
                 tracks: serde_json::to_value(&timeline.tracks).unwrap(),
             };

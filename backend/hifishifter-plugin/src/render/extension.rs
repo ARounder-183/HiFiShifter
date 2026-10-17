@@ -412,8 +412,6 @@ pub(crate) struct BlockEvidence {
     pub had_previous: bool,
     /// 门控是否允许本块写出内容（仅实时流会因 `Resting` 为假）。
     pub allow_output: bool,
-    /// 本块是否开始了一个新的 pass（回卷或位置后退）。
-    pub new_pass: bool,
     /// 循环边界切分（1 或 2 段）。
     pub split: BlockSplit,
 }
@@ -446,6 +444,112 @@ struct StreamGeometry {
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
+    /// 最近 8 个块里"输入内容与上一块不同"的位图。
+    ///
+    /// 【为什么是"内容变化"而不是"有信号"】停播时宿主也可能持续送同一份非零内容
+    /// （FL Studio 就是如此）。"有信号"会把停播判成播放；"内容在变"才是音频**正在
+    /// 流动**的证据 —— 同一段内容反复出现说明时间没有前进。
+    activity_changed: AtomicU32,
+    /// 已经观测过的块数（饱和）。
+    activity_seen: AtomicU32,
+    /// 上一块的内容指纹。
+    activity_hash: AtomicU64,
+    activity_hash_valid: AtomicBool,
+    /// 连续"内容没变"的块数（有变化就清零）。
+    unchanged_run: AtomicU32,
+    /// 本块处理**之前**是否处在"内容连续不变"的静止段。
+    ///
+    /// 【为什么要单独记】`unchanged_run` 在内容一变就清零，而相位判定发生在那之后；
+    /// 想回答"这一块是不是刚从静止转入流动"就必须把结论留到那时。
+    was_stationary: AtomicBool,
+    /// 位置被钉住、但音频在流动 ⇒ 有效位置由本插件按块长推进（见
+    /// [`crate::transfer::capture::PositionSource::Synthesized`]）。
+    synthesized: AtomicBool,
+    /// 位置被钉住期间**已送来**的帧数（不含当前块）。
+    ///
+    /// 【为什么需要它而不是"上一位置 + 本块长"】钉住的起点不一定在第一个块上：
+    /// 起播窗口可能先有几个静音块。累加"已送来的帧数"让位置从一开始就对齐，
+    /// 而不必依赖 latch 在哪一块打开。
+    pinned_frames: AtomicU64,
+    /// 用 `Synthesized` 记账过的块数（诊断）。
+    synthesized_blocks: AtomicU64,
+}
+
+/// "音频在流动"的观测窗口（块数）。
+///
+/// 【为什么是 8】窗口同时决定两件事：判据的灵敏度（至少 2 块有变化才成立）与
+/// **停播后的尾巴**（最多 8 块 ≈ 85 ms @ 512/48k）。再大就会让"停下之后"继续出声；
+/// 再小则一次气口（静音块）就能把起播窗口打断。
+const ACTIVITY_WINDOW_BLOCKS: u32 = 8;
+/// 窗口内至少这么多块的内容有变化，才认为音频在流动。
+///
+/// 【为什么是 1】停播时宿主重复投递的是**同一份**内容（逐块相同），而真正在播放
+/// 时相邻块几乎不可能完全相同。要求 2 块会让起播第一块被判成停播而丢失（那正是
+/// 用户报的"开头一小段录不到"）。单块误判的代价只是多出一块（约 5 ms），
+/// 与丢一块的代价同量级，而"宁可多录"是本轮的既定方向。
+const ACTIVITY_MIN_CHANGES: u32 = 1;
+/// 位置钉住后，连续这么多块内容不变就撤销"自行推进"。
+///
+/// 【为什么是 16】它只在**已经观测到内容变化**之后才生效（停播时 latch 从不打开），
+/// 因此只需要容忍起播窗口里的短暂静音；16 块 ≈ 170 ms 足够覆盖一个气口，又不会让
+/// 停止后的输出拖得太久。
+const SYNTHESIZED_STALL_BLOCKS: u32 = 16;
+
+impl StreamGeometry {
+    /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
+    fn note_activity(&self, hash: u64) -> bool {
+        let previous_valid = self.activity_hash_valid.swap(true, Ordering::AcqRel);
+        let previous = self.activity_hash.swap(hash, Ordering::AcqRel);
+        let changed = previous_valid && previous != hash;
+        self.was_stationary.store(
+            self.unchanged_run.load(Ordering::Acquire) > 0,
+            Ordering::Release,
+        );
+        if changed {
+            self.unchanged_run.store(0, Ordering::Release);
+        } else if previous_valid {
+            self.unchanged_run.fetch_add(1, Ordering::Relaxed);
+        }
+        // 只保留最近 8 位；`changed` 占最低位。
+        let window = self.activity_changed.load(Ordering::Acquire);
+        let window = (window << 1) | u32::from(changed);
+        self.activity_changed.store(
+            window & ((1 << ACTIVITY_WINDOW_BLOCKS) - 1),
+            Ordering::Release,
+        );
+        self.activity_seen
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seen| {
+                Some(seen.saturating_add(1))
+            })
+            .ok();
+        changed
+    }
+
+    /// 最近窗口里是否有足够多的"内容变化"块。
+    fn activity_moving(&self) -> bool {
+        self.activity_changed.load(Ordering::Acquire).count_ones() >= ACTIVITY_MIN_CHANGES
+    }
+}
+
+/// 输入块的内容指纹（只用来回答"是不是同一份内容"）。
+///
+/// 【为什么可以抽样】它不参与任何音频计算，只区分"这一块与上一块不同"。步长 8 让
+/// 成本降到每声道 `frames/8` 次读；而任何真正在流动的音频在 20 ms 内都不可能只在
+/// 未抽样的位置上变化。
+///
+/// 【为什么把块长也拌进去】宿主在停播时可能把块长缩小/放大而内容不变 —— 那不是
+/// 时间在前进。
+fn block_activity_hash(block: &crate::transfer::capture::InputBlock<'_>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for plane in block.planes.iter().flatten() {
+        let mut index = 0;
+        while index < plane.len() {
+            hash ^= u64::from(plane[index].to_bits());
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            index += 8;
+        }
+    }
+    hash ^ (block.frames as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// 一条流在本块上的位置/相位结论。
@@ -460,7 +564,8 @@ struct StreamBlock {
     cycle_wrap: bool,
     /// 本块开始了一个新的 pass（循环回卷或位置后退）。
     new_pass: bool,
-    position_source: PositionSource,
+    /// 本流最近是否观测到"输入内容在变化"（音频在流动）。
+    activity_moving: bool,
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
@@ -633,6 +738,8 @@ pub(crate) struct ExtensionOwner {
     stream_rolling_blocks: [AtomicU64; 3],
     continuous_used: AtomicU64,
     music_used: AtomicU64,
+    /// 起播窗口里"位置被钉住、由本插件按块长推进"的块数（诊断）。
+    synthesized_blocks: AtomicU64,
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
@@ -691,6 +798,13 @@ pub(crate) struct ExtensionOwner {
     /// 参数、分析、命令分发全部共用，差别只在 `SessionBacking`（见 `editor::session`）。
     transfer_session:
         std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
+    /// 组件 state 里恢复出来、但**会话还没创建**的 Transfer 用户编辑。
+    ///
+    /// 【为什么需要 owner 级暂存】`IComponent::setState` 到达时用户可能从没开过编辑器
+    /// 窗口 —— 那一刻没有会话可投递。而 `getState` 又**不能**为了存档去创建一个会话
+    /// （那会拉起 actor 与文件 I/O）。所以字节块先落在这里，由
+    /// [`Self::transfer_session`] 在会话真正创建时补投一次。
+    pending_transfer_edits: Mutex<Option<Vec<u8>>>,
     /// 宿主调用 `setActive(true)` 的时刻；`None` = 还没激活。
     ///
     /// 【为什么必须记下来】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
@@ -2071,9 +2185,35 @@ impl ExtensionOwner {
     pub(crate) fn transfer_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
-        self.transfer_session
+        let session = self
+            .transfer_session
             .get_or_init(|| crate::editor::session::EditorSession::new_transfer(self))
-            .clone()
+            .clone();
+        // 【为什么在这里补投】`setState` 可能早于会话创建（用户从没开过窗口）。
+        // 取走即清，幂等；失败只记日志 —— 一份读不出来的存档不该让界面打不开。
+        let session = session?;
+        if let Some(bytes) = self.pending_transfer_edits.lock_or_recover().take() {
+            if let Err(error) = session.stash_serialized_transfer_edits(&bytes) {
+                log::warn!("[transfer] restored edits could not be applied: {error}");
+            } else {
+                session.request_reload();
+            }
+        }
+        Ok(session)
+    }
+
+    /// 已经创建过的 Transfer 会话；**不会**创建。
+    ///
+    /// 【为什么 `getState` 必须用这个】存档发生在宿主的主线程上，而创建一个会话会拉起
+    /// actor 线程、扫临时目录、初始化模型资源。用户没开过窗口时"没有曲线可存"是正确
+    /// 结论，不需要为此付出一次会话的代价。
+    pub(crate) fn transfer_session_if_initialized(
+        &self,
+    ) -> Option<Arc<crate::editor::session::EditorSession>> {
+        self.transfer_session
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .cloned()
     }
 
     /// 让 Transfer 编辑器会话重新加载时间线并重渲染（录制结束 / 切换 take / 清空之后）。
@@ -2530,7 +2670,7 @@ impl ExtensionOwner {
                 had_previous: had,
                 cycle_wrap: false,
                 new_pass: false,
-                position_source: PositionSource::Project,
+                activity_moving: false,
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
@@ -2603,11 +2743,66 @@ impl ExtensionOwner {
             }
         }
 
+        // 【起播窗口的位置记账】宿主把 `projectTimeSamples` 钉住、又不给
+        // `continousTimeSamples` / `projectTimeMusic` 时，上面两条回退都失效。此时
+        // **音频在流动**（内容逐块变化）是唯一还成立的证据：宿主既然按自己的块长
+        // 连续送时间上相邻的样本，有效位置就只能按"已送来的帧数"前进。
+        //
+        // 门是"内容有变化"而不是"有信号"：停播时宿主也可能持续送同一份非零内容，
+        // 那份内容逐块**相同** ⇒ latch 不打开 ⇒ 仍判 Resting（FL Studio 的既有回归）。
+        // 内容连续不变达到 `SYNTHESIZED_STALL_BLOCKS` 时撤销 latch，让"停止后继续
+        // 出声"最多只拖 170 ms。
+        let activity_moving = geometry.activity_moving();
+        // 【为什么 `!had` 也算钉住】第一块是"钉住区间"的起点：它的帧数必须计入，
+        // 下一块才能落在 `P + frames` 而不是 `P`。
+        let pinned = !had || (raw_start == last_raw && !time.cycle_active);
+        let mut pinned_before = if pinned {
+            geometry.pinned_frames.load(Ordering::Acquire)
+        } else {
+            0
+        };
+        let mut synthesizing = geometry.synthesized.load(Ordering::Acquire);
+        if pinned {
+            if activity_moving {
+                if !synthesizing {
+                    // 【为什么这里可能要清零】从"静止"转入"流动"时，之前累积的帧数是
+                    // 停播期间**重复投递**的块，不是时间推进。判据是"本块之前已经连续
+                    // 不变"（`was_stationary`）—— 真正的起播窗口里内容一直在变，
+                    // 那个计数是 0。
+                    if geometry.was_stationary.load(Ordering::Acquire) {
+                        pinned_before = 0;
+                    }
+                    synthesizing = true;
+                    geometry.synthesized.store(true, Ordering::Release);
+                }
+            } else if geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS {
+                synthesizing = false;
+                geometry.synthesized.store(false, Ordering::Release);
+            }
+        } else {
+            synthesizing = false;
+            geometry.synthesized.store(false, Ordering::Release);
+        }
+        if pinned && source == PositionSource::Project && synthesizing {
+            position = raw_start.saturating_add(pinned_before as i64);
+            source = PositionSource::Synthesized;
+            self.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
+            geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
+        }
+        if pinned {
+            geometry.pinned_frames.store(
+                pinned_before.saturating_add(frames as u64),
+                Ordering::Release,
+            );
+        } else {
+            geometry.pinned_frames.store(0, Ordering::Release);
+        }
+
         // 工程位置重新前进：以它为准，并记录一次 resync（说明回退曾被使用过）。
         if had && raw_start != last_raw {
             if matches!(
                 last_source,
-                PositionSource::Continuous | PositionSource::Music
+                PositionSource::Continuous | PositionSource::Music | PositionSource::Synthesized
             ) {
                 self.position_resyncs.fetch_add(1, Ordering::Relaxed);
                 geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
@@ -2623,7 +2818,10 @@ impl ExtensionOwner {
             geometry.same_start.store(0, Ordering::Release);
             geometry.extension_used.store(false, Ordering::Release);
             TransportPhase::Start
-        } else if cycle_wrap || position != last_position {
+        } else if cycle_wrap || position != last_position || activity_moving {
+            // 【为什么音频在流动也算 Rolling】起播窗口里宿主可以把位置钉住，而音频
+            // 已经在按块长流动。此时"位置没变"不成立 —— 我们刚刚按块长推进了它，
+            // 或者（循环播放里）位置由宿主回卷而内容仍在变化。两条都是"时间在走"。
             geometry.same_start.store(0, Ordering::Release);
             geometry.extension_used.store(false, Ordering::Release);
             TransportPhase::Rolling
@@ -2697,7 +2895,7 @@ impl ExtensionOwner {
             had_previous: had,
             cycle_wrap,
             new_pass: had && (cycle_wrap || position < last_position),
-            position_source: source,
+            activity_moving,
         }
     }
 
@@ -2827,6 +3025,9 @@ impl ExtensionOwner {
         let playing_rising = transfer.observe_with_stream(&block, stream);
         let was_recording = self.stream_recording[stream.index()].swap(recording, Ordering::AcqRel);
         let recording_rising = recording && !was_recording;
+        // 【为什么要在相位判定之前记】`note_stream_geometry` 的"音频在流动"证据
+        // 来自本块的指纹与上一块的比较；晚一步记录就永远读到上一块的结论。
+        self.streams[stream.index()].note_activity(block_activity_hash(&block));
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
@@ -2840,6 +3041,9 @@ impl ExtensionOwner {
         // `kPlaying` 上升沿意味着一次新的播放会话：允许同一区间再出音一次。
         if stream == ProcessStream::Realtime && playing_rising {
             self.rt_last_emitted_valid.store(false, Ordering::Release);
+            // 【为什么帧数也要清】起播第一块与停播最后一块可能同起点、同长度；
+            // 只清 `valid` 已经足够，但把帧数一并归零让"下一次比较"不依赖旧值。
+            self.rt_last_emitted_frames.store(0, Ordering::Release);
         }
         let split = self.block_split(context, block.frames, rate, stream_block.position);
         let cycle_start = self.cycle_start_position(context, rate);
@@ -2879,6 +3083,7 @@ impl ExtensionOwner {
                     cycle_start,
                     new_pass: stream_block.new_pass,
                     part: index.min(u8::MAX as usize) as u8,
+                    advancing: stream_block.activity_moving,
                 },
             );
             outcome = if index == 0 {
@@ -2915,7 +3120,6 @@ impl ExtensionOwner {
             phase: stream_block.phase,
             had_previous: stream_block.had_previous,
             allow_output,
-            new_pass: stream_block.new_pass,
             split,
         })
     }
@@ -3079,23 +3283,29 @@ impl ExtensionOwner {
         let transfer = self.transfer();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let offline = unsafe { (*data).process_mode } == 2;
-        // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来
-        // 改动绕过门控时把停播重复块写出去。ARA 实例保持原语义（不参与）。
-        if let Some(evidence) = evidence {
-            if evidence.stream == ProcessStream::Realtime
-                && !evidence.allow_output
-                && !self.is_bound()
-                && !self.bound_once.load(Ordering::Acquire)
-            {
-                // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
-                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                return TransferStage::Handled;
-            }
-        }
         // 选项是无锁快照（见 `TransferStore::options`）。
         let options = transfer.options();
+        // 【为什么先仲裁、再做防御性清空】录制中的输出是**宿主正在送进来的原声**
+        // （用户监听自己），它不该被"停播重复抑制"影响 —— 那个判据描述的是"同一段
+        // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
+        // 于是一次误判就能把监听整块抹掉。
         let output = self.transfer_output_with(evidence);
         self.note_output_rung(output);
+        // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来
+        // 改动绕过门控时把停播重复块写出去。ARA 实例保持原语义（不参与）。
+        if output != TransferOutput::Recording {
+            if let Some(evidence) = evidence {
+                if evidence.stream == ProcessStream::Realtime
+                    && !evidence.allow_output
+                    && !self.is_bound()
+                    && !self.bound_once.load(Ordering::Acquire)
+                {
+                    // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
+                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                    return TransferStage::Handled;
+                }
+            }
+        }
         match output {
             // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。
             TransferOutput::Untouched => TransferStage::Snapshot {
@@ -3504,6 +3714,23 @@ impl ExtensionOwner {
                 Err(error) => log::warn!("[transfer] manifest is not valid JSON: {error}"),
             }
         }
+        // 【Transfer 的用户曲线走会话，不走 `pending_restore`】`pending_restore` 的读者
+        // 是 `merge_pending_restore`，它只服务 ARA 文档；没有文档时那条路是 no-op
+        // （见 `refresh_document`）。把曲线投给会话，它会在下一次时间线加载时叠上去。
+        //
+        // 会话可能还不存在（用户从没开过窗口）—— 那时先暂存在 owner 上，
+        // `transfer_session()` 创建会话时补投。
+        if let Some(transfer_edits) = state.transfer_edits.as_deref() {
+            match self.transfer_session_if_initialized() {
+                Some(session) => {
+                    session.stash_serialized_transfer_edits(transfer_edits)?;
+                    session.request_reload();
+                }
+                None => {
+                    *self.pending_transfer_edits.lock_or_recover() = Some(transfer_edits.to_vec());
+                }
+            }
+        }
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state.edits)?;
         *self.pending_restore.lock_or_recover() = Some(restored);
@@ -3627,7 +3854,7 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let edits = if let Some(document) = document {
+        let (edits, transfer_edits) = if let Some(document) = document {
             document.flush_editor()?;
             let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire) {
@@ -3678,15 +3905,36 @@ impl ExtensionOwner {
                 local.fades.retain(|item, _| items.contains(item));
             }
             local.bindings.retain(|id, _| allowed.contains(id));
-            local.encode()?
+            (local.encode()?, None)
         } else {
-            self.pending_restore
+            // 【Transfer 形态：用户曲线在会话上，不在这里】`self.edits` 从未被任何
+            // Transfer 生产路径写过 —— 序列化它只会得到一个语法合法、语义为空的
+            // `EditState`（那正是"重开工程参数全丢"的直接原因）。真正的权威是
+            // `EditorSession::timeline`，见 `editor::transfer_edits`。
+            //
+            // `edits` 仍然写一份默认 `EditState`：`restore_state` 要能把它读回来，
+            // 而 ARA 字段在 Transfer 下本来就该是空的。
+            let edits = self
+                .pending_restore
                 .lock_or_recover()
                 .as_ref()
                 .unwrap_or(&self.edits.lock_or_recover())
-                .encode()?
+                .encode()?;
+            let transfer_edits = match self.transfer_session_if_initialized() {
+                Some(session) => {
+                    // 【为什么保存前要 flush】与 ARA 分支的 `document.flush_editor()` 同
+                    // 一条纪律：actor 可能还没处理完最后一条编辑命令，不等它就存会存到
+                    // 旧曲线。失败不传播 —— 一次 flush 超时不该让整个工程存不下来。
+                    if let Err(error) = session.flush() {
+                        log::warn!("[transfer] flush before save failed: {error}");
+                    }
+                    Some(session.serialize_transfer_edits()?)
+                }
+                None => None,
+            };
+            (edits, transfer_edits)
         };
-        self.wrap_component_state(edits)
+        self.wrap_component_state(edits, transfer_edits)
     }
 
     /// 把 `EditState` 字节与 Transfer 清单包成组件 state。
@@ -3694,7 +3942,11 @@ impl ExtensionOwner {
     /// 【为什么清单只带路径】PCM 在 sidecar 文件里（见 `transfer::sidecar`）：
     /// 组件 state 的预算是 `MAX_COMPONENT_STATE`（64 MiB），而 4 分钟立体声 96 kHz 已是 184 MB，何况组件 state
     /// 会进宿主的每一次保存与撤销快照。清单是几 KB。
-    fn wrap_component_state(&self, edits: Vec<u8>) -> Result<Vec<u8>, String> {
+    fn wrap_component_state(
+        &self,
+        edits: Vec<u8>,
+        transfer_edits: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
         let transfer = self.transfer.manifest();
         let has_takes = transfer["takes"]
             .as_array()
@@ -3708,12 +3960,14 @@ impl ExtensionOwner {
         //
         // 于是格式变成"有 Transfer 数据才是容器，否则是历史格式"，而 `decode`
         // 两种都认。这条不对称是有意的：新信息需要新格式，旧信息不需要。
-        if !has_takes {
+        let transfer_edits = transfer_edits.filter(|bytes| !bytes.is_empty());
+        if !has_takes && transfer_edits.is_none() {
             return Ok(edits);
         }
         Ok(crate::component_state::ComponentState {
             edits,
-            transfer: Some(transfer.to_string().into_bytes()),
+            transfer: has_takes.then(|| transfer.to_string().into_bytes()),
+            transfer_edits,
         }
         .encode())
     }
@@ -5258,6 +5512,9 @@ impl ExtensionOwner {
                 "gate_cleared": self.stream_gate_cleared[index].load(Ordering::Acquire),
                 "resting": self.stream_resting_blocks[index].load(Ordering::Acquire),
                 "rolling": self.stream_rolling_blocks[index].load(Ordering::Acquire),
+                "synthesized": self.streams[index]
+                    .synthesized_blocks
+                    .load(Ordering::Acquire),
             })
         };
         serde_json::json!({
@@ -5267,6 +5524,7 @@ impl ExtensionOwner {
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),
+            "synthesized_blocks": self.synthesized_blocks.load(Ordering::Acquire),
             "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
             "cycle_wraps": self.cycle_wraps.load(Ordering::Acquire),
             "cycle_wrap_unknown": self.cycle_wrap_unknown.load(Ordering::Acquire),

@@ -673,7 +673,6 @@ fn prefetch_and_offline_never_look_stopped() {
             phase: TransportPhase::Rolling,
             had_previous: true,
             allow_output: false,
-            new_pass: false,
             split: BlockSplit::whole(0, 512),
         };
         assert!(
@@ -692,7 +691,6 @@ fn prefetch_and_offline_never_look_stopped() {
         phase: TransportPhase::Rolling,
         had_previous: true,
         allow_output: false,
-        new_pass: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(!owner.transfer_should_emit(Some(realtime), false));
@@ -813,7 +811,14 @@ fn a_pinned_project_position_follows_continuous_time() {
     context.continuous_time_samples = 512;
     let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(second.position, 512);
-    assert_eq!(second.position_source, PositionSource::Continuous);
+    assert_eq!(
+        PositionSource::from_code(
+            owner.streams[ProcessStream::Realtime.index()]
+                .last_source
+                .load(Ordering::Acquire)
+        ),
+        Some(PositionSource::Continuous)
+    );
     context.continuous_time_samples = 1_024;
     let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(third.position, 1_024);
@@ -873,4 +878,216 @@ fn a_block_crossing_the_cycle_end_is_split() {
     assert_eq!(split.parts[1].position, 0);
     assert_eq!(split.parts[1].input_offset, 100);
     assert_eq!(split.parts[1].frames, 100);
+}
+
+/// 在会话时间线上写一条用户曲线（Transfer 形态下"处理"的全部内容）。
+fn seed_transfer_curve(owner: &Arc<ExtensionOwner>) -> Arc<crate::editor::session::EditorSession> {
+    let session = owner.transfer_session().expect("transfer session");
+    {
+        let mut timeline = session.timeline.lock_or_recover();
+        timeline.tracks.clear();
+        timeline.tracks.push(hifishifter_kernel::state::Track {
+            id: "transfer-track".into(),
+            name: "Transfer".into(),
+            parent_id: None,
+            order: 0,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: true,
+            pitch_analysis_algo: Default::default(),
+            color: String::new(),
+        });
+        let mut params = hifishifter_kernel::state::TrackParamsState::default();
+        params.pitch_edit = vec![61.0, 63.0];
+        params.pitch_edit_user_modified = true;
+        timeline
+            .params_by_root_track
+            .insert("transfer-track".into(), params);
+    }
+    session
+}
+
+/// **非 ARA 的曲线必须进组件 state。**
+///
+/// 【为什么这是本轮最重要的回归之一】用户报"保存工程后重开，参数全丢"。根因是
+/// `encode_state` 在没有 ARA 文档时序列化 `self.edits` —— 一个从未被 Transfer
+/// 路径写过的默认字段。这条钉住真正的权威（会话时间线）确实被存了进去。
+#[test]
+fn transfer_curves_are_saved_with_the_component_state() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    let session = seed_transfer_curve(&owner);
+
+    let bytes = owner.encode_state().expect("save succeeds");
+    let state = crate::component_state::ComponentState::decode(&bytes).unwrap();
+    let edits = crate::editor::transfer_edits::TransferEdits::decode(
+        state
+            .transfer_edits
+            .as_deref()
+            .expect("Transfer 编辑必须随组件 state 保存"),
+    )
+    .unwrap();
+    assert_eq!(
+        edits.params_by_root_track["transfer-track"].pitch_edit,
+        vec![61.0, 63.0]
+    );
+    assert!(edits.params_by_root_track["transfer-track"].pitch_edit_user_modified);
+    session.close();
+}
+
+/// **恢复时没有会话也不能丢**：字节块先暂存在 owner 上，创建会话时补投。
+///
+/// 【为什么必须有这一条】`setState` 到达时用户往往从没开过编辑器窗口 —— 那一刻没有
+/// 会话可投递。若那条路直接返回，恢复就静默丢失（与修复前的症状完全一样）。
+#[test]
+fn a_saved_transfer_curve_reaches_the_session_created_after_restore() {
+    let source = insert_owner();
+    record(&source, 256);
+    let session = seed_transfer_curve(&source);
+    let bytes = source.encode_state().expect("save succeeds");
+    session.close();
+
+    let target = insert_owner();
+    assert!(
+        target.transfer_session_if_initialized().is_none(),
+        "前提：目标实例还没有会话"
+    );
+    target.restore_state(&bytes).expect("restore succeeds");
+    let restored = target
+        .transfer_session()
+        .expect("session is created on demand");
+    assert_eq!(
+        restored.staged_transfer_edit_roots(),
+        vec!["transfer-track".to_string()],
+        "恢复的曲线必须在会话创建时补投"
+    );
+    restored.close();
+}
+
+/// **没开过窗口时保存不能失败。**
+///
+/// 【为什么必须钉住】`encode_state` 会把 `Err` 变成 `K_RESULT_FALSE`，宿主据此提示
+/// "插件存档失败"。用户没开窗口只是"没有曲线"，不是错误。
+#[test]
+fn saving_without_an_open_editor_succeeds_and_has_no_transfer_edits() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    let bytes = owner
+        .encode_state()
+        .expect("save succeeds without a session");
+    let state = crate::component_state::ComponentState::decode(&bytes).unwrap();
+    assert!(
+        state.transfer_edits.is_none(),
+        "没有会话 ⇒ 没有用户曲线可存，但清单仍然要在"
+    );
+    assert!(state.transfer.is_some(), "take 清单必须仍然随存档走");
+}
+
+/// 一个"位置钉住、音频在流动"的宿主上下文（VEGAS 起播窗口的形状）。
+fn pinned_context(position: i64) -> crate::audio_abi::ProcessContext {
+    crate::audio_abi::ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+        sample_rate: 48_000.0,
+        project_time_samples: position,
+        ..Default::default()
+    }
+}
+
+/// **位置钉住但音频在流动 ⇒ 位置由本插件按块长推进。**
+///
+/// 【为什么这是问题一/二的回归】VEGAS 起播窗口里 `projectTimeSamples` 不动，而输入
+/// 已经在按块长流动。判据若只看位置，这些块会被判成 `Resting`：捕获拒绝写入、输出
+/// 被清空。这条钉住"内容变化 ⇒ 位置前进"。
+#[test]
+fn a_pinned_start_with_live_audio_advances_the_position() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    let mut seen = Vec::new();
+    for index in 0..5_u64 {
+        // 每块内容不同 ⇒ 音频在流动。
+        owner.streams[stream.index()].note_activity(0x1000 + index);
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        seen.push((block.position, block.phase));
+    }
+    assert_eq!(seen[0].0, 1_000, "首块落在宿主报的位置上");
+    assert_eq!(seen[1].0, 1_256, "第二块必须前进一个块长");
+    assert_eq!(seen[2].0, 1_512);
+    assert_eq!(seen[3].0, 1_768);
+    assert_eq!(seen[4].0, 2_024);
+    assert_eq!(
+        PositionSource::from_code(
+            owner.streams[stream.index()]
+                .last_source
+                .load(Ordering::Acquire)
+        ),
+        Some(PositionSource::Synthesized)
+    );
+    for (position, phase) in &seen[1..] {
+        assert_eq!(
+            *phase,
+            TransportPhase::Rolling,
+            "位置 {position} 必须被当成在走，否则捕获与输出都会被拒绝"
+        );
+    }
+    assert_eq!(
+        owner.synthesized_blocks.load(Ordering::Acquire),
+        4,
+        "四块由本插件记账"
+    );
+}
+
+/// **停播时同一份内容反复到达仍然判 `Resting`。**
+///
+/// 【为什么这条必须同时存在】放宽"位置不动 ⇒ 停播"的方向正好是"停播时不得出声"。
+/// 若只按"有信号"判流动，FL Studio 停播时会把同一段非零内容判成播放，用户又会听到
+/// 反复播放的一小段。判据必须是"内容**在变**"。
+#[test]
+fn a_pinned_silent_repeat_stays_resting() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    for index in 0..20_u64 {
+        // 同一份内容 ⇒ 时间没有前进。
+        owner.streams[stream.index()].note_activity(0x2000);
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        if index > 0 {
+            assert_eq!(
+                block.phase,
+                TransportPhase::Resting,
+                "第 {index} 块的同一份内容不得被判成在走"
+            );
+            assert_eq!(block.position, 1_000, "位置必须保持钉住");
+        }
+    }
+    assert_eq!(owner.synthesized_blocks.load(Ordering::Acquire), 0);
+}
+
+/// **从停播转入播放时，停播期间累积的帧数必须清零。**
+///
+/// 【为什么必须有这一条】宿主可以一直报 `kPlaying` 却钉住位置（停播）。那些重复块
+/// 会累积"已送来的帧数"。若不清零，用户一按播放，第一块就会落到停播时长的后面 ——
+/// 音频与工程位置整体错位。
+#[test]
+fn a_stationary_stretch_does_not_offset_the_real_start() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    // 先停 40 块（同一份内容），再开始流动。
+    for index in 0..40_u64 {
+        owner.streams[stream.index()].note_activity(0x3000);
+        owner.note_stream_block(stream, &context, 256, index == 0, false);
+    }
+    let mut seen = Vec::new();
+    for index in 0..3_u64 {
+        owner.streams[stream.index()].note_activity(0x4000 + index);
+        let block = owner.note_stream_block(stream, &context, 256, false, false);
+        seen.push(block.position);
+    }
+    assert_eq!(
+        seen,
+        vec![1_000, 1_256, 1_512],
+        "真实起播必须从宿主报的位置开始，不能被停播期间的重复块推后"
+    );
 }

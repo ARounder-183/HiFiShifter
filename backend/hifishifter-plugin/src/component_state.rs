@@ -15,12 +15,17 @@
 //!
 //! ```text
 //! magic     8 字节  "HFSSTATE"
-//! version   u32     = 1
+//! version   u32     = 2（v1 仍可读）
 //! edits_len u32
 //! edits     edits_len 字节（`EditState::encode()` 的输出）
 //! xfer_len  u32     （0 = 没有 Transfer 清单）
 //! xfer      xfer_len 字节（清单 JSON）
+//! tedits_len u32    （v2 起；0 = 没有 Transfer 用户编辑）
+//! tedits    tedits_len 字节（`TransferEdits` 的 JSON）
 //! ```
+//!
+//! 【为什么 v2 只**追加**一段】v1 的每个字段都是长度前缀，读到 `xfer` 结束就是一个
+//! 完整载荷。追加段让旧工程（v1）照样读得出来，新版本也不会把旧载荷误判成截断。
 //!
 //! 【为什么清单是 JSON 而不是二进制】它是几十到几百字节的元数据，且**需要能被诊断
 //! 工具读**（"这个 take 的 sidecar 在哪"是排查"重启后录音不见了"的第一个问题）。
@@ -29,7 +34,9 @@
 /// 容器魔数。
 const MAGIC: &[u8; 8] = b"HFSSTATE";
 /// 容器版本。
-const VERSION: u32 = 1;
+///
+/// v2 追加 Transfer 用户编辑段（曲线 / 音阶 / Tempo Map / 轨道设置）。
+const VERSION: u32 = 2;
 
 /// 一次组件 state 的载荷。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,19 +45,26 @@ pub(crate) struct ComponentState {
     pub edits: Vec<u8>,
     /// Transfer 清单 JSON；`None` = 这个实例没有 Transfer 数据。
     pub transfer: Option<Vec<u8>>,
+    /// Transfer 用户编辑 JSON（见 `editor::transfer_edits`）；`None` = 没有编辑。
+    pub transfer_edits: Option<Vec<u8>>,
 }
 
 impl ComponentState {
     /// 编码成宿主存取的字节块。
     pub(crate) fn encode(&self) -> Vec<u8> {
         let transfer = self.transfer.as_deref().unwrap_or(&[]);
-        let mut out = Vec::with_capacity(MAGIC.len() + 12 + self.edits.len() + transfer.len());
+        let transfer_edits = self.transfer_edits.as_deref().unwrap_or(&[]);
+        let mut out = Vec::with_capacity(
+            MAGIC.len() + 16 + self.edits.len() + transfer.len() + transfer_edits.len(),
+        );
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
         out.extend_from_slice(&(self.edits.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.edits);
         out.extend_from_slice(&(transfer.len() as u32).to_le_bytes());
         out.extend_from_slice(transfer);
+        out.extend_from_slice(&(transfer_edits.len() as u32).to_le_bytes());
+        out.extend_from_slice(transfer_edits);
         out
     }
 
@@ -61,13 +75,17 @@ impl ComponentState {
             return Ok(Self {
                 edits: bytes.to_vec(),
                 transfer: None,
+                transfer_edits: None,
             });
         }
         let mut cursor = MAGIC.len();
         let version = read_u32(bytes, &mut cursor)?;
-        if version != VERSION {
+        // 【为什么 v1 与 v2 都接受、更高版本拒绝】v1 是已经存在于用户工程里的格式，
+        // 读不出来等于把他们的编辑弄丢；v3 及以后我们不知道它追加了什么，硬按 v2
+        // 解析会把未知段当成截断错误 —— 明确拒绝并说明"来自更新的版本"才是可执行的。
+        if !(1..=VERSION).contains(&version) {
             return Err(format!(
-                "unsupported component state version {version} (expected {VERSION}); \
+                "unsupported component state version {version} (expected <= {VERSION}); \
                  this project was written by a newer build"
             ));
         }
@@ -81,15 +99,30 @@ impl ComponentState {
         } else {
             Some(take(bytes, &mut cursor, transfer_len)?.to_vec())
         };
-        Ok(Self { edits, transfer })
+        // v1 到此结束；v2 后面还有一段。**按剩余长度判断**而不是只看版本号：
+        // 这样即便某个宿主把载荷补零（或未来出现 v1 的变体），也不会把 0 字节当成
+        // 一段有效的空编辑。
+        let transfer_edits = if version >= 2 && cursor < bytes.len() {
+            let len = read_u32(bytes, &mut cursor)? as usize;
+            if len == 0 {
+                None
+            } else {
+                Some(take(bytes, &mut cursor, len)?.to_vec())
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            edits,
+            transfer,
+            transfer_edits,
+        })
     }
 }
 
 fn read_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
     let slice = take(bytes, cursor, 4)?;
-    Ok(u32::from_le_bytes([
-        slice[0], slice[1], slice[2], slice[3],
-    ]))
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 fn take<'a>(bytes: &'a [u8], cursor: &mut usize, count: usize) -> Result<&'a [u8], String> {
@@ -111,6 +144,7 @@ mod tests {
         let state = ComponentState {
             edits: vec![1, 2, 3, 4],
             transfer: Some(br#"{"version":1,"takes":[]}"#.to_vec()),
+            transfer_edits: Some(br#"{"params_by_root_track":{}}"#.to_vec()),
         };
         let decoded = ComponentState::decode(&state.encode()).unwrap();
         assert_eq!(decoded, state);
@@ -122,8 +156,31 @@ mod tests {
         let state = ComponentState {
             edits: vec![9, 9],
             transfer: None,
+            transfer_edits: None,
         };
         assert_eq!(ComponentState::decode(&state.encode()).unwrap(), state);
+    }
+
+    /// **v1 载荷必须仍然可读**：用户已经存过的工程里就是带清单的 v1。
+    ///
+    /// 【为什么这是本文件第二重要的一条】v2 只是追加一段；把 v1 判成"截断"会让
+    /// 所有既有工程在升级后**完全读不出编辑**。
+    #[test]
+    fn a_v1_container_is_read_without_a_transfer_edits_section() {
+        let edits = b"edit-bytes";
+        let transfer = br#"{"version":1,"takes":[]}"#;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(edits.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(edits);
+        bytes.extend_from_slice(&(transfer.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(transfer);
+
+        let decoded = ComponentState::decode(&bytes).unwrap();
+        assert_eq!(decoded.edits, edits.to_vec());
+        assert_eq!(decoded.transfer, Some(transfer.to_vec()));
+        assert_eq!(decoded.transfer_edits, None);
     }
 
     /// **历史格式必须仍然可读**：用户已经存过的工程里就是裸的 `EditState` 字节。
@@ -142,7 +199,10 @@ mod tests {
     #[test]
     fn a_short_blob_is_not_mistaken_for_a_container() {
         assert_eq!(ComponentState::decode(b"").unwrap().edits, Vec::<u8>::new());
-        assert_eq!(ComponentState::decode(b"HFS").unwrap().edits, b"HFS".to_vec());
+        assert_eq!(
+            ComponentState::decode(b"HFS").unwrap().edits,
+            b"HFS".to_vec()
+        );
     }
 
     /// 未来版本必须被明确拒绝，而不是按当前版本硬解析。
@@ -151,11 +211,15 @@ mod tests {
         let mut bytes = ComponentState {
             edits: vec![1],
             transfer: None,
+            transfer_edits: None,
         }
         .encode();
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
         let error = ComponentState::decode(&bytes).unwrap_err();
-        assert!(error.contains("newer build"), "错误要指向可执行的结论：{error}");
+        assert!(
+            error.contains("newer build"),
+            "错误要指向可执行的结论：{error}"
+        );
     }
 
     /// 截断的容器被明确拒绝，不返回半个 `EditState`。
@@ -164,6 +228,7 @@ mod tests {
         let bytes = ComponentState {
             edits: vec![1, 2, 3, 4, 5, 6],
             transfer: Some(vec![7, 8]),
+            transfer_edits: Some(vec![9, 10, 11]),
         }
         .encode();
         assert!(ComponentState::decode(&bytes[..bytes.len() - 3]).is_err());

@@ -286,6 +286,12 @@ pub(crate) struct EditorSession {
     /// `Option`。取值一律通过 [`Self::document`] / [`Self::require_document`]。
     backing: SessionBacking,
     pub(crate) timeline: Mutex<TimelineState>,
+    /// 组件 state 恢复出来的 Transfer 用户编辑，等待下一次时间线加载时叠上去。
+    ///
+    /// 【为什么放在会话上而不是 owner 上】它是"要应用进本会话时间线的数据"，
+    /// 与 `load_transfer_timeline` 的 `kept` 机制是同一件事。owner 只负责在会话
+    /// **还不存在**时把字节块暂存下来（见 `ExtensionOwner::pending_transfer_edits`）。
+    pub(super) pending_transfer_edits: Mutex<Option<super::transfer_edits::TransferEdits>>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
@@ -536,6 +542,7 @@ impl EditorSession {
         let session = Arc::new(Self {
             backing,
             timeline: Mutex::new(TimelineState::default()),
+            pending_transfer_edits: Mutex::new(None),
             history: Mutex::new(Default::default()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
@@ -636,6 +643,42 @@ impl EditorSession {
         self.native_timeline(self.timeline.lock_or_recover().clone())
     }
 
+    /// 把本会话里**属于用户**的那一部分时间线序列化出来（Transfer 存档用）。
+    ///
+    /// 【为什么只带用户内容】几何（片段、轨道集合）由捕获存储重新投影 —— 素材变了，
+    /// 几何就必须跟着变。把旧几何存回去会让片段指向不存在的音频。详见
+    /// `editor::transfer_edits`。
+    ///
+    /// 【为什么 ARA 形态也允许调用】调用方已经按形态分支；这里不做形态判断，
+    /// 是为了让"存的是不是用户内容"这一条只有一个定义。
+    pub(crate) fn serialize_transfer_edits(&self) -> Result<Vec<u8>, String> {
+        super::transfer_edits::capture(&self.timeline.lock_or_recover()).encode()
+    }
+
+    /// 暂存从组件 state 恢复出来的用户内容，等下一次时间线加载时叠上去。
+    ///
+    /// 【为什么只暂存、不立刻应用】`load_transfer_timeline` 会用投影重建整份时间线；
+    /// 在它之前写进 `self.timeline` 的内容要么被重建覆盖，要么与 `kept` 机制打架。
+    /// 暂存下来、由加载路径统一叠加，是唯一不会丢失的时序。
+    pub(crate) fn stash_serialized_transfer_edits(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let edits = super::transfer_edits::TransferEdits::decode(bytes)?;
+        *self.pending_transfer_edits.lock_or_recover() = Some(edits);
+        Ok(())
+    }
+
+    /// 暂存里的根轨道 id（测试用）。
+    #[cfg(test)]
+    pub(crate) fn staged_transfer_edit_roots(&self) -> Vec<String> {
+        self.pending_transfer_edits
+            .lock_or_recover()
+            .as_ref()
+            .map(|edits| edits.params_by_root_track.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// 宿主撤销栈是否在途（"宿主正在写，别插队"）。
     ///
     /// 【为什么 Transfer 恒为 false】宿主撤销栈是有原生扩展 / ARA 写口的后端才有的
@@ -701,7 +744,10 @@ impl EditorSession {
         // 播放观察不排到神经合成后面。这里只读原子缓存，不执行actor命令/host API/IO。
         // 原始view身份及同文档route授权仍与普通队列入口一致。
         if request.command == "get_playback_state" {
-            if document.as_ref().is_some_and(|document| !document.is_alive()) {
+            if document
+                .as_ref()
+                .is_some_and(|document| !document.is_alive())
+            {
                 return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
             }
             let value = self.playback_state();
@@ -942,7 +988,8 @@ impl EditorSession {
                 if deadline.is_some_and(|d| d <= Instant::now()) {
                     let ticket = session.submitted.load(Ordering::Acquire);
                     if session.render_task.lock_or_recover().is_some()
-                        || session.document()
+                        || session
+                            .document()
                             .is_some_and(|doc| doc.host_undo.pending.load(Ordering::Acquire))
                     {
                         deadline = Some(Instant::now() + Duration::from_millis(50));
@@ -1578,13 +1625,28 @@ impl EditorSession {
             }
         }
         let (timeline, sources) = owner.transfer().session_timeline();
-        let kept: HashMap<String, TrackParamsState> = self
-            .timeline
-            .lock_or_recover()
-            .params_by_root_track
-            .iter()
-            .map(|(root, params)| (root.clone(), params.clone()))
-            .collect();
+        // 【为什么恢复载荷要并进 `kept`】它必须与"本会话已编辑的曲线"走同一条规整
+        // （`ensure_params_for_root`）。直接 insert 会绕过那一步，曲线长度对不上工程时
+        // 界面会画到末尾之外。存档只在工程打开时到达，此时 `kept` 为空，因此让 `kept`
+        // 覆盖存档是安全的：真同时存在时，用户当前的编辑更权威。
+        let restored = self.pending_transfer_edits.lock_or_recover().take();
+        let mut kept: HashMap<String, TrackParamsState> = restored
+            .as_ref()
+            .map(|edits| {
+                edits
+                    .params_by_root_track
+                    .iter()
+                    .map(|(root, params)| (root.clone(), params.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        kept.extend(
+            self.timeline
+                .lock_or_recover()
+                .params_by_root_track
+                .iter()
+                .map(|(root, params)| (root.clone(), params.clone())),
+        );
         let views: Vec<PcmView<'_>> = sources
             .iter()
             .map(|(id, pcm)| PcmView {
@@ -1617,6 +1679,11 @@ impl EditorSession {
         // 新的源清掉对不上的原线缓存（保留用户显式编辑过的那部分）。
         for root in roots {
             timeline.ensure_params_for_root(&root);
+        }
+        // 曲线已随 `kept` 过完规整；其余用户内容（音阶 / Tempo Map / 私有分组 /
+        // 轨道设置）只在这里叠一次 —— 它们在投影里没有对应来源。
+        if let Some(edits) = restored.as_ref() {
+            super::transfer_edits::apply_project_state(&mut timeline, edits);
         }
         // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
         // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
@@ -2081,9 +2148,7 @@ impl EditorSession {
         }
         *next = now + Duration::from_secs(1);
         drop(next);
-        if let Some(clock) = self.document()
-            .map(|document| document.clock.clone())
-        {
+        if let Some(clock) = self.document().map(|document| document.clock.clone()) {
             log::info!("[ara] transport diagnostic {}", clock.diagnostics());
         }
     }
@@ -2284,7 +2349,8 @@ impl EditorSession {
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
-        let states = self.document()
+        let states = self
+            .document()
             .map(|document| {
                 document
                     .renderer_owners()
@@ -3051,8 +3117,7 @@ pub(crate) mod tests {
             "重载也不得伪造一次『已处理』"
         );
         assert!(
-            session.processed.load(Ordering::Acquire)
-                >= session.submitted.load(Ordering::Acquire),
+            session.processed.load(Ordering::Acquire) >= session.submitted.load(Ordering::Acquire),
             "票据必须保持可兑付；否则 actor 永远停在『还有未处理变更』那一支，\
              渲染调度永远走不到（用户报障：永远只听到直通）"
         );
@@ -3148,13 +3213,16 @@ pub(crate) mod tests {
         )
         .expect("Transfer 形态下时间线命令必须可用");
         assert!(
-            payload["clips"].as_array().is_some_and(|clips| clips.len() == 1),
+            payload["clips"]
+                .as_array()
+                .is_some_and(|clips| clips.len() == 1),
             "时间线载荷必须带着录进来的那条片段：{payload}"
         );
     }
 
     /// 只替代真实DAW的建图/授权边界；使用真正owner、native扩展、actor与state编码。
-    pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {        let model = ModelHandle::new();
+    pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {
+        let model = ModelHandle::new();
         let document = model.session();
         let mut timeline:TimelineState=serde_json::from_value(json!({
             "tracks":[{"id":"track","name":"host","order":0,"pitch_analysis_algo":"none"}],
