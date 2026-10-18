@@ -20,6 +20,12 @@
 use hifishifter_kernel::state::model::{PitchAnalysisAlgo, TempoPointData, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::io::{Read, Write};
+
+/// 压缩载荷的魔数；解码时据此区分 JSON 与 deflate。
+const COMPRESS_MAGIC: &[u8; 4] = b"HFSZ";
+/// 超过这个大小才压缩：小载荷压缩后的头部/CPU 开销不划算。
+const COMPRESS_THRESHOLD: usize = 1024 * 1024;
 
 /// 一条轨道里属于用户的设置。
 ///
@@ -68,18 +74,84 @@ pub(crate) struct TransferEdits {
 
 impl TransferEdits {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(self).map_err(|error| format!("transfer edits encode: {error}"))
+        let json = serde_json::to_vec(self)
+            .map_err(|error| format!("transfer edits encode: {error}"))?;
+        if json.len() <= COMPRESS_THRESHOLD {
+            return Ok(json);
+        }
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::with_capacity(json.len() / 3),
+            flate2::Compression::fast(),
+        );
+        encoder
+            .write_all(&json)
+            .map_err(|error| format!("transfer edits compress: {error}"))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|error| format!("transfer edits compress: {error}"))?;
+        if compressed.len() >= json.len() {
+            return Ok(json);
+        }
+        log::info!(
+            "[transfer] edits payload compressed {} -> {} byte(s)",
+            json.len(),
+            compressed.len()
+        );
+        let mut out = Vec::with_capacity(COMPRESS_MAGIC.len() + compressed.len());
+        out.extend_from_slice(COMPRESS_MAGIC);
+        out.extend_from_slice(&compressed);
+        Ok(out)
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|error| format!("transfer edits decode: {error}"))
+        let json = if bytes.starts_with(COMPRESS_MAGIC) {
+            let mut decoder = flate2::read::DeflateDecoder::new(&bytes[COMPRESS_MAGIC.len()..]);
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|error| format!("transfer edits decompress: {error}"))?;
+            out
+        } else {
+            bytes.to_vec()
+        };
+        let mut edits: Self = serde_json::from_slice(&json)
+            .map_err(|error| format!("transfer edits decode: {error}"))?;
+        // 【为什么解码时就归一化】旧版本把会话命名空间写进了键。解码是唯一能
+        // 同时覆盖"新会话读取旧载荷"与"旧会话读取旧载荷"的位置。
+        edits.stabilize();
+        Ok(edits)
+    }
+
+    /// 去掉所有会话命名空间前缀，得到与进程/会话无关的稳定键。
+    pub(crate) fn stabilize(&mut self) {
+        stabilize_map(&mut self.params_by_root_track);
+        stabilize_map(&mut self.track_settings);
+    }
+
+    /// 把稳定键绑定到**当前会话**的命名空间。
+    ///
+    /// 【为什么必须做】`load_transfer_timeline` 会把投影时间线的 id 改写成当前
+    /// 命名空间；载荷里的键如果不跟着改，`kept.get(root)` 永远 miss，曲线被静默丢弃。
+    pub(crate) fn bind_to_namespace(&mut self, namespace: &str) {
+        bind_map(&mut self.params_by_root_track, namespace);
+        bind_map(&mut self.track_settings, namespace);
+        // `disabled_group_ids` 不是轨道 id，`rewrite_ids` 从不改写它们 —— 保持原样。
     }
 }
 
-/// 从一条时间线抽出用户内容。
-pub(crate) fn capture(timeline: &hifishifter_kernel::state::TimelineState) -> TransferEdits {
-    TransferEdits {
-        params_by_root_track: timeline.params_by_root_track.clone(),
+/// 从一条时间线抽出用户内容。`namespace` 是当前会话的临时前缀，写盘前剥掉。
+pub(crate) fn capture(
+    timeline: &hifishifter_kernel::state::TimelineState,
+    namespace: &str,
+) -> TransferEdits {
+    let mut params_by_root_track = BTreeMap::new();
+    for (root, params) in &timeline.params_by_root_track {
+        if let Some(compact) = compact_params(params) {
+            params_by_root_track.insert(root.clone(), compact);
+        }
+    }
+    let mut edits = TransferEdits {
+        params_by_root_track,
         project_scale_notes: timeline.project_scale_notes.clone(),
         tempo_map: timeline.tempo_map.clone(),
         disabled_group_ids: timeline.disabled_group_ids.clone(),
@@ -101,6 +173,113 @@ pub(crate) fn capture(timeline: &hifishifter_kernel::state::TimelineState) -> Tr
                 )
             })
             .collect(),
+    };
+    // 先按当前命名空间精确剥离，再用通用模式兜住历史载荷。
+    strip_namespace_map(&mut edits.params_by_root_track, namespace);
+    strip_namespace_map(&mut edits.track_settings, namespace);
+    edits.stabilize();
+    edits
+}
+
+/// 只保留**用户数据**：分析产物（`pitch_orig` / `tension_orig` / `dyn_orig`）全部丢弃，
+/// 未编辑的默认曲线也丢弃。
+///
+/// 【为什么派生数组不能存】它们由源 PCM 重新分析得到，长工程里比用户曲线大一个数量级；
+/// 组件 state 有 64 MiB 硬上限，把它们塞进去会让保存直接失败。
+fn compact_params(params: &TrackParamsState) -> Option<TrackParamsState> {
+    let mut compact = params.clone();
+    compact.pitch_orig.clear();
+    compact.tension_orig.clear();
+    compact.dyn_orig.clear();
+    compact.pitch_orig_key = None;
+    compact.dyn_orig_key = None;
+    compact.dyn_orig_source_key = None;
+    compact.pending_pitch_offset = None;
+    sanitize_curve(&mut compact.pitch_edit);
+    sanitize_curve(&mut compact.tension_edit);
+    for curve in compact.extra_curves.values_mut() {
+        sanitize_curve(curve);
+    }
+    compact.extra_curves.retain(|_, curve| !curve.is_empty());
+    for value in compact.extra_params.values_mut() {
+        if !value.is_finite() {
+            *value = 0.0;
+        }
+    }
+    // `pitch_edit_user_modified` 为假 ⇒ 曲线是分析派生的默认值，恢复时会重建。
+    if !params.pitch_edit_user_modified {
+        compact.pitch_edit.clear();
+    }
+    // tension 没有 user_modified 标志：默认值是 0.0（见 `state::model` 的 resize）。
+    if compact.tension_edit.iter().all(|value| *value == 0.0) {
+        compact.tension_edit.clear();
+    }
+    (!compact.is_empty_project_data()).then_some(compact)
+}
+
+/// 非有限样本会让 `serde_json` 写成 `null`，恢复端按 `Vec<f32>` 解析失败。
+/// 在写盘前清洗，把"一次分析异常"降级成"几个样本归零"。
+fn sanitize_curve(curve: &mut [f32]) {
+    for sample in curve.iter_mut() {
+        if !sample.is_finite() {
+            *sample = 0.0;
+        }
+    }
+}
+
+fn strip_namespace_map<V>(map: &mut BTreeMap<String, V>, namespace: &str) {
+    if namespace.is_empty() {
+        return;
+    }
+    let old = std::mem::take(map);
+    for (key, value) in old {
+        let stable = key.strip_prefix(namespace).unwrap_or(&key).to_owned();
+        map.insert(stable, value);
+    }
+}
+
+fn stabilize_map<V>(map: &mut BTreeMap<String, V>) {
+    if map.is_empty() {
+        return;
+    }
+    let old = std::mem::take(map);
+    for (key, value) in old {
+        map.insert(strip_session_namespace(&key).to_owned(), value);
+    }
+}
+
+fn bind_map<V>(map: &mut BTreeMap<String, V>, namespace: &str) {
+    if map.is_empty() || namespace.is_empty() {
+        return;
+    }
+    let old = std::mem::take(map);
+    for (key, value) in old {
+        map.insert(
+            format!("{namespace}{}", strip_session_namespace(&key)),
+            value,
+        );
+    }
+}
+
+/// `hfs-ui-{pid}-{n}-{rest}` → `{rest}`；不是这个形状时原样返回。
+///
+/// 【为什么不用 `split('-')`】轨道 id 本身可能含 `-`；`splitn(3)` 只吃掉两个数字段，
+/// 其余（含连字符）完整保留。
+fn strip_session_namespace(key: &str) -> &str {
+    let Some(rest) = key.strip_prefix("hfs-ui-") else {
+        return key;
+    };
+    let mut parts = rest.splitn(3, '-');
+    let pid = parts.next().unwrap_or_default();
+    let seq = parts.next().unwrap_or_default();
+    let Some(tail) = parts.next() else {
+        return key;
+    };
+    let numeric = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    if numeric(pid) && numeric(seq) {
+        tail
+    } else {
+        key
     }
 }
 
@@ -200,7 +379,7 @@ mod tests {
     #[test]
     fn a_curve_round_trips_through_the_payload() {
         let timeline = timeline_with_curve();
-        let bytes = capture(&timeline).encode().unwrap();
+        let bytes = capture(&timeline, "").encode().unwrap();
         let restored = TransferEdits::decode(&bytes).unwrap();
         let mut target = TimelineState::default();
         target.tracks = timeline.tracks.clone();
@@ -210,6 +389,124 @@ mod tests {
             vec![60.0, 62.0]
         );
         assert!(target.params_by_root_track["transfer-track"].pitch_edit_user_modified);
+    }
+
+    /// **曲线必须跨会话命名空间存活。**
+    ///
+    /// 【为什么这是回归测试】`TransferEdits` 的键曾经带 `hfs-ui-{pid}-{n}-` 前缀；
+    /// 重开工程后新会话的前缀不同，`load_transfer_timeline` 的 `kept.get(root)`
+    /// 永远 miss，曲线被静默丢弃 —— 用户看到的就是"完全未编辑"。
+    #[test]
+    fn curves_survive_a_new_session_namespace() {
+        let mut timeline = timeline_with_curve();
+        let old_key = "hfs-ui-1234-1-transfer-track".to_string();
+        timeline.tracks[0].id = old_key.clone();
+        let params = timeline
+            .params_by_root_track
+            .remove("transfer-track")
+            .unwrap();
+        timeline.params_by_root_track.insert(old_key, params);
+
+        let bytes = capture(&timeline, "hfs-ui-1234-1-").encode().unwrap();
+        let mut restored = TransferEdits::decode(&bytes).unwrap();
+        assert!(
+            restored.params_by_root_track.contains_key("transfer-track"),
+            "载荷必须写稳定键"
+        );
+
+        restored.bind_to_namespace("hfs-ui-1234-2-");
+        assert!(
+            restored
+                .params_by_root_track
+                .contains_key("hfs-ui-1234-2-transfer-track"),
+            "恢复时必须绑定到当前会话的命名空间"
+        );
+    }
+
+    /// **旧载荷里的命名空间前缀在解码时被剥掉。**
+    #[test]
+    fn legacy_namespaced_keys_are_normalized_on_decode() {
+        let mut payload = TransferEdits::default();
+        payload.params_by_root_track.insert(
+            "hfs-ui-9-9-transfer-track".into(),
+            TrackParamsState::default(),
+        );
+        let decoded = TransferEdits::decode(&payload.encode().unwrap()).unwrap();
+        assert!(decoded
+            .params_by_root_track
+            .contains_key("transfer-track"));
+    }
+
+    /// **派生分析数组不落盘。**
+    #[test]
+    fn derived_analysis_arrays_are_not_persisted() {
+        let mut timeline = timeline_with_curve();
+        let params = timeline
+            .params_by_root_track
+            .get_mut("transfer-track")
+            .unwrap();
+        params.pitch_orig = vec![60.0; 1024];
+        params.tension_orig = vec![0.5; 1024];
+        // 只有派生数据、没有用户编辑的轨道：整条记录都不该落盘。
+        let mut derived_only = TrackParamsState::default();
+        derived_only.pitch_orig = vec![60.0; 1024];
+        timeline
+            .params_by_root_track
+            .insert("derived-only".into(), derived_only);
+
+        let edits = capture(&timeline, "");
+        let stored = &edits.params_by_root_track["transfer-track"];
+        assert!(stored.pitch_orig.is_empty(), "pitch_orig 是分析产物");
+        assert!(stored.tension_orig.is_empty(), "tension_orig 是分析产物");
+        assert_eq!(
+            stored.pitch_edit,
+            vec![60.0, 62.0],
+            "用户编辑的曲线必须保留"
+        );
+        assert!(
+            !edits.params_by_root_track.contains_key("derived-only"),
+            "只有派生数据的轨道不该落盘"
+        );
+    }
+
+    /// **非有限样本在写盘前被清洗。**
+    #[test]
+    fn non_finite_curve_samples_are_sanitized() {
+        let mut timeline = timeline_with_curve();
+        let params = timeline
+            .params_by_root_track
+            .get_mut("transfer-track")
+            .unwrap();
+        params.pitch_edit = vec![f32::NAN, f32::INFINITY, 62.0];
+        params.pitch_edit_user_modified = true;
+        let edits = capture(&timeline, "");
+        let stored = &edits.params_by_root_track["transfer-track"].pitch_edit;
+        assert!(stored.iter().all(|value| value.is_finite()));
+        assert_eq!(stored[2], 62.0);
+        // 清洗后的载荷必须能真正往返（NaN 写成 null 会让恢复端解析失败）。
+        let bytes = edits.encode().unwrap();
+        TransferEdits::decode(&bytes).unwrap();
+    }
+
+    /// **大载荷压缩后仍能原样恢复。**
+    #[test]
+    fn a_large_payload_is_compressed_and_round_trips() {
+        let mut timeline = timeline_with_curve();
+        let params = timeline
+            .params_by_root_track
+            .get_mut("transfer-track")
+            .unwrap();
+        params.pitch_edit = (0..400_000).map(|index| 60.0 + index as f32 * 0.0001).collect();
+        params.pitch_edit_user_modified = true;
+        let bytes = capture(&timeline, "").encode().unwrap();
+        assert!(
+            bytes.starts_with(COMPRESS_MAGIC),
+            "超过 1 MiB 的载荷必须压缩"
+        );
+        let restored = TransferEdits::decode(&bytes).unwrap();
+        let curve = &restored.params_by_root_track["transfer-track"].pitch_edit;
+        assert_eq!(curve.len(), 400_000);
+        assert!((curve[399_999] - (60.0 + 399_999.0 * 0.0001)).abs() < 1e-3);
     }
 
     /// **应用是叠加，不是替换。**
@@ -228,11 +525,12 @@ mod tests {
         let mut payload_source = TimelineState::default();
         let mut only = TrackParamsState::default();
         only.pitch_edit = vec![70.0];
+        only.pitch_edit_user_modified = true;
         payload_source
             .params_by_root_track
             .insert("transfer-track".into(), only);
 
-        apply(&mut timeline, &capture(&payload_source));
+        apply(&mut timeline, &capture(&payload_source, ""));
         assert_eq!(
             timeline.params_by_root_track["transfer-track"].pitch_edit,
             vec![70.0],
