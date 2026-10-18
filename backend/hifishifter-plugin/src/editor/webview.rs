@@ -657,6 +657,18 @@ unsafe extern "system" fn window_proc(
                     // 失败而立即返回，诊断挂在它内部永远不会执行。视图定时器与视图
                     // 同寿，且已经在每 20ms 跑一次。
                     owner.note_editor_tick();
+                    // 【为什么在定时器上补发】窗口可能先于 ARA 绑定打开；绑定后
+                    // `hostKind` 与能力位都变了，而导航前注入的 bootstrap 是静态快照。
+                    // 只在已有会话时发事件 —— 这里绝不创建会话。
+                    if owner.take_bootstrap_changed() {
+                        if let Some(session) = owner.existing_editor_session() {
+                            let view_id = state.borrow().view_id.clone();
+                            session.emit(
+                                "plugin_bootstrap_changed",
+                                bootstrap_json(&link, &view_id),
+                            );
+                        }
+                    }
                 }
                 if !state.borrow().closed {
                     deliver(&state);
@@ -1111,6 +1123,55 @@ impl BootstrapFlags {
     }
 }
 
+/// 当前 bootstrap 快照。导航前注入与绑定后的补发共用同一份事实。
+fn bootstrap_json(
+    link: &super::routing::EditorLink,
+    view_id: &str,
+) -> serde_json::Value {
+    let owner = link.owner().ok();
+    // 【为什么先落定形态】窗口打开时可能还在 ARA 绑定宽限期内；不按需求值，
+    // `hostKind` 会停在 `ara_only`，非 ARA 宿主会被当成 ARA-only 对待。
+    if let Some(owner) = &owner {
+        owner.resolve_binding_mode();
+    }
+    BootstrapFlags {
+        transport_control: owner
+            .as_ref()
+            .is_some_and(|owner| owner.host_playback().is_some()),
+        fade_axes: owner
+            .as_ref()
+            .and_then(|owner| owner.host_fade_axes())
+            .map(|axes_new| if axes_new { "continuous" } else { "legacy" }),
+        history_backend: owner
+            .as_ref()
+            .map_or("local", |owner| owner.history_backend()),
+        host_kind: owner
+            .as_ref()
+            .map(|owner| owner.host_backend().kind().as_str())
+            .unwrap_or("ara_only"),
+        transfer_caps: owner
+            .as_ref()
+            .filter(|owner| {
+                owner.host_backend().kind()
+                    == hifishifter_kernel::editor::host::HostKind::Transfer
+            })
+            .map(|owner| {
+                let status = owner.transfer().status();
+                TransferBootstrap {
+                    saw_context: status.saw_context,
+                    saw_input: status.saw_input,
+                    saw_offline: status.saw_offline,
+                    can_capture: status.saw_context,
+                }
+            }),
+        host_capabilities: owner
+            .as_ref()
+            .map(|owner| owner.effective_host_capabilities())
+            .unwrap_or_else(hifishifter_kernel::editor::host::HostCapabilities::none),
+    }
+    .to_json(view_id)
+}
+
 fn configure_browser(
     state: &Rc<RefCell<BrowserState>>,
     controller: &ICoreWebView2Controller,
@@ -1253,6 +1314,39 @@ fn configure_browser(
         }
         // 普通命令只排队；UI回调不得分析、推理、读文件或等待worker。
         let result = match request["command"].as_str() {
+            // 【为什么必须内联】启动探活发生在宿主重开工程的那一刻，而 `editor_session()`
+            // 可能正在做模型加载 / actor 创建。探活只需要 owner 的原子读数，不能排在
+            // 会话队列后面 —— 那正是 `get_runtime_info` 30 s 超时的来源。
+            Some("plugin_health") => {
+                let link = state.borrow().link.clone();
+                link.owner().map(|owner| owner.health_snapshot())
+            }
+            // ARA 绑定后补发 bootstrap：前端拿到新快照后更新 hostKind / 能力位。
+            Some("get_plugin_bootstrap") => {
+                let state = state.borrow();
+                Ok(bootstrap_json(&state.link, &state.view_id))
+            }
+            // 【为什么也内联】状态栏在启动扇出里会问一次。它会创建会话、走 actor 队列；
+            // 重开工程时那正是最慢的一段。这里只读 owner 的原子读数，返回同样的形状。
+            Some("get_runtime_info") => {
+                let link = state.borrow().link.clone();
+                link.owner().map(|owner| {
+                    let health = owner.health_snapshot();
+                    let clip_count = health["clip_count"].as_u64().unwrap_or(0);
+                    let transfer = health["host_kind"].as_str() == Some("transfer");
+                    serde_json::json!({
+                        "ok": true,
+                        "device": if transfer { "Host / Transfer" } else { "Host / ARA" },
+                        "model_loaded": health["model_available"].as_bool().unwrap_or(false),
+                        "audio_loaded": clip_count > 0,
+                        "has_synthesized": false,
+                        "is_playing": false,
+                        "playback_target": serde_json::Value::Null,
+                        "gpu_backend": "",
+                        "clip_count": clip_count,
+                    })
+                })
+            }
             Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
                 "connected":state.borrow().link.owner().is_ok()})),
             Some("log_frontend_error") => {
@@ -1710,65 +1804,7 @@ fn configure_browser(
         Ok(())
     })),&mut token)?;
     }
-    let transport_control = state
-        .borrow()
-        .link
-        .owner()
-        .is_ok_and(|owner| owner.host_playback().is_some());
-    // 宿主用哪一套淡化轴。版本读不出来时是 `None`，前端据此整块保持只读。
-    let fade_axes = state
-        .borrow()
-        .link
-        .owner()
-        .ok()
-        .and_then(|owner| owner.host_fade_axes())
-        .map(|axes_new| if axes_new { "continuous" } else { "legacy" });
-    // 【为什么在算 bootstrap 之前落定形态】`hostKind` / `transferCaps` 是前端按形态分流
-    // 的唯一依据（面板、探活、几何只读），而窗口打开的那一刻必然早于 5 秒宽限期 ——
-    // 不在这里按需求值，bootstrap 永远报 `ara_only`，非 ARA 宿主会被当成 ARA-only 对待。
-    if let Ok(owner) = state.borrow().link.owner() {
-        owner.resolve_binding_mode();
-    }
-    let boot = BootstrapFlags {
-        transport_control,
-        fade_axes,
-        history_backend: state
-            .borrow()
-            .link
-            .owner()
-            .map(|owner| owner.history_authority().backend())
-            .unwrap_or("local"),
-        host_kind: state
-            .borrow()
-            .link
-            .owner()
-            .map(|owner| owner.host_backend().kind().as_str())
-            .unwrap_or("ara_only"),
-        transfer_caps: state
-            .borrow()
-            .link
-            .owner()
-            .ok()
-            .filter(|owner| owner.host_backend().kind()
-                == hifishifter_kernel::editor::host::HostKind::Transfer)
-            .map(|owner| {
-                let status = owner.transfer().status();
-                TransferBootstrap {
-                    saw_context: status.saw_context,
-                    saw_input: status.saw_input,
-                    saw_offline: status.saw_offline,
-                    can_capture: status.saw_context,
-                }
-            }),
-        // 写能力/分割/剪贴板/导入/建轨/撤销栈的唯一来源（见 `effective_host_capabilities`）。
-        host_capabilities: state
-            .borrow()
-            .link
-            .owner()
-            .map(|owner| owner.effective_host_capabilities())
-            .unwrap_or_else(|_| hifishifter_kernel::editor::host::HostCapabilities::none()),
-    }
-    .to_json(&state.borrow().view_id);
+    let boot = bootstrap_json(&state.borrow().link, &state.borrow().view_id);
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let weak = Rc::downgrade(state);
     let navigate = browser.clone();

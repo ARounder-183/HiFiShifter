@@ -329,6 +329,13 @@ pub(crate) struct EditorSession {
     /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
     /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
     timeline_revision: AtomicU64,
+    /// 已发布时间线的片段数（健康探活用，避免取 `timeline` 锁）。
+    ///
+    /// 【为什么不在 `plugin_health` 里直接读 `timeline.lock()`】探活发生在宿主 UI
+    /// 线程上，而 actor 可能正在做长任务并持有时间线锁；一个只回答"几段"的状态查询
+    /// 不该排在那后面。写入点只有 `publish_timeline` / `load_transfer_timeline` /
+    /// `ensure_loaded` 三处。
+    clip_count: AtomicU64,
     /// 已经**放弃等待**原线分析的根轨道（见 [`RetryState::classify`] 的上限分支）。
     ///
     /// 【为什么需要这份状态】等待本身是对的（原线是渲染的输入之一），但等待必须**有界**：
@@ -502,10 +509,10 @@ impl EditorSession {
     }
 
     fn new_with(backing: SessionBacking) -> Result<Arc<Self>, String> {
+        // 【为什么这里不再做 temp sweep】`remove_dir_all` 在 Windows 上可能耗时数秒；
+        // 本函数跑在宿主 UI 线程上，而它的 ARA 调用点还持有 `DocumentSession::transaction`。
+        // 清扫改由会话 actor 的空闲 tick 分片执行（见 `temp_sweep::sweep_step`）。
         super::resources::initialize_models();
-        // 本机数据目录里的 `pcm` / `webview` 子目录按会话/进程新建，只在 Drop 时清理；
-        // 宿主被强杀时它们会永久留下（实测攒到 838 MB）。启动时扫一次已退出进程的目录。
-        super::temp_sweep::sweep_stale_temp_dirs();
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let namespace = format!(
             "hfs-ui-{}-{}-",
@@ -564,6 +571,7 @@ impl EditorSession {
             analysis_workers: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
             timeline_revision: AtomicU64::new(0),
+            clip_count: AtomicU64::new(0),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
             submitted: AtomicU64::new(0),
             processed: AtomicU64::new(0),
@@ -634,6 +642,25 @@ impl EditorSession {
         self.loaded.lock_or_recover().initialized
     }
 
+    /// 已发布片段数；健康探活/状态栏用，不取时间线锁。
+    pub(crate) fn clip_count(&self) -> u64 {
+        self.clip_count.load(Ordering::Acquire)
+    }
+
+    /// 时间线上是否有**可保存的用户内容**（不要求 `is_loaded`）。
+    ///
+    /// 【为什么不能只看 `is_loaded`】`setState` 恢复后、actor 第一次加载前，时间线
+    /// 可能已经被测试/恢复路径直接写入；此时 live 编辑就是权威，不能因为"还没走
+    /// 加载流程"而回落到空载荷。
+    pub(crate) fn has_live_transfer_edits(&self) -> bool {
+        let timeline = self.timeline.lock_or_recover();
+        !timeline.params_by_root_track.is_empty()
+            || !timeline.tracks.is_empty()
+            || !timeline.project_scale_notes.is_empty()
+            || timeline.tempo_map.is_some()
+            || !timeline.disabled_group_ids.is_empty()
+    }
+
     /// 把界面时间线还原成**音频权威**形态，供 Transfer 渲染使用。
     ///
     /// 【为什么必须还原】界面上的 `source_path` 是本会话的私有分析副本路径（波形要从
@@ -652,7 +679,19 @@ impl EditorSession {
     /// 【为什么 ARA 形态也允许调用】调用方已经按形态分支；这里不做形态判断，
     /// 是为了让"存的是不是用户内容"这一条只有一个定义。
     pub(crate) fn serialize_transfer_edits(&self) -> Result<Vec<u8>, String> {
-        super::transfer_edits::capture(&self.timeline.lock_or_recover()).encode()
+        super::transfer_edits::capture(&self.timeline.lock_or_recover(), &self.namespace).encode()
+    }
+
+    /// 会话尚未加载时间线时，序列化**恢复载荷**。
+    ///
+    /// 【为什么需要】`setState` 恢复出来的曲线先暂存在这里；用户重开工程后如果
+    /// 没打开插件窗口就再次保存，`serialize_transfer_edits()` 会读到一份空的
+    /// `self.timeline`，把恢复出来的曲线覆盖成默认值。
+    pub(crate) fn serialize_pending_transfer_edits(&self) -> Option<Vec<u8>> {
+        self.pending_transfer_edits
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|edits| edits.encode().ok())
     }
 
     /// 暂存从组件 state 恢复出来的用户内容，等下一次时间线加载时叠上去。
@@ -788,16 +827,26 @@ impl EditorSession {
     /// 上限从 30 s 收到 10 s：仍足以排空正常积压，又不会在异常情况下把宿主 UI 线程
     /// 卡到用户以为程序死了。
     pub fn flush(&self) -> Result<(), String> {
+        self.flush_with_budget(Duration::from_secs(10))
+    }
+
+    /// 有预算的 flush：**不阻塞宿主保存线程**。
+    ///
+    /// 【为什么用 `try_send`】队列是有界 32 的同步通道；`send` 在队列满时会阻塞，
+    /// 而调用点是宿主的保存线程。保存预算内排不进去就应该立即返回"没排空"，
+    /// 让调用方用最后一份已提交状态继续，而不是把宿主 UI 冻住。
+    pub(crate) fn flush_with_budget(&self, budget: Duration) -> Result<(), String> {
         if self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
         let (sender, receiver) = mpsc::channel();
-        self.queue
-            .send(Job::Barrier(sender))
-            .map_err(|e| e.to_string())?;
-        receiver
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|e| format!("editor flush: {e}"))
+        match self.queue.try_send(Job::Barrier(sender)) {
+            Ok(()) => receiver
+                .recv_timeout(budget)
+                .map_err(|e| format!("editor flush: {e}")),
+            Err(mpsc::TrySendError::Full(_)) => Err("editor queue busy".into()),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err("editor queue closed".into()),
+        }
     }
     /// 在组件stop返回前撤销其回信/订阅；排队任务仍会独立核对原始route代次。
     pub(crate) fn revoke_closed_views(&self) {
@@ -1091,6 +1140,14 @@ impl EditorSession {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // 【为什么在这里清扫】只有队列空闲时才删一个陈旧临时目录。一次只删
+                    // 一个，命令队列在下一个 tick 就能被处理 —— 不再出现"重开工程时
+                    // 同步删 838 MB，把 get_runtime_info 拖到 30 s 超时"。
+                    //
+                    // 【为什么测试里不跑】测试进程会扫描/删除真实用户目录，既慢又危险
+                    // （删一个大的 WebView2 profile 会让测试退出卡住）。
+                    #[cfg(not(test))]
+                    super::temp_sweep::sweep_step();
                     // 回到顶部统一调度，不要求命令队列出现空闲间隙。
                 }
             }
@@ -1565,6 +1622,8 @@ impl EditorSession {
         self.apply_host_selection(&mut timeline);
         self.project_duration
             .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.clip_count
+            .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
         {
             let loaded = self.loaded.lock_or_recover();
@@ -1629,7 +1688,13 @@ impl EditorSession {
         // （`ensure_params_for_root`）。直接 insert 会绕过那一步，曲线长度对不上工程时
         // 界面会画到末尾之外。存档只在工程打开时到达，此时 `kept` 为空，因此让 `kept`
         // 覆盖存档是安全的：真同时存在时，用户当前的编辑更权威。
-        let restored = self.pending_transfer_edits.lock_or_recover().take();
+        let mut restored = self.pending_transfer_edits.lock_or_recover().take();
+        // 【为什么在这里绑定命名空间】载荷里的键是稳定的（不带 `hfs-ui-...-`），而
+        // 下面 `rewrite_ids` 会把投影时间线改写成**当前会话**的命名空间。不绑定，
+        // `kept.get(root)` 永远 miss —— 那正是"重开工程参数全丢"的直接原因。
+        if let Some(edits) = restored.as_mut() {
+            edits.bind_to_namespace(&self.namespace);
+        }
         let mut kept: HashMap<String, TrackParamsState> = restored
             .as_ref()
             .map(|edits| {
@@ -1745,6 +1810,8 @@ impl EditorSession {
         }
         self.project_duration
             .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.clip_count
+            .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
         *self.loaded.lock_or_recover() = Loaded {
             initialized: true,
@@ -2427,6 +2494,8 @@ impl ParamHost for EditorSession {
         // stretch_track_linked_params）与撤销重做都会走到这里。Transfer 的渲染版本闸
         // 以它为据，因此不标脏的改动也不会被跳过（见字段说明）。
         self.timeline_revision.fetch_add(1, Ordering::AcqRel);
+        self.clip_count
+            .store(timeline.clips.len() as u64, Ordering::Release);
         // Transfer：没有宿主可写回 —— 参数就是权威，落在本会话的时间线上。
         // 只需要排一次重渲染（owner 的 Transfer 渲染准备会读这份时间线）。
         if self.is_transfer() {
@@ -3797,7 +3866,12 @@ pub(crate) mod tests {
         assert_eq!(local.params_by_root_track[tb].pitch_edit[100], 64.);
         drop(local);
         assert_eq!(editor.state()["pending"], true);
-        assert!(owners[0].encode_state().unwrap_err().contains("not ready"));
+        // 【为什么不再要求失败】宿主保存线程不能因为"图还没就绪"而拿不到状态；
+        // 保存一份当前可用的载荷，恢复端再逐条 reconcile。
+        assert!(
+            owners[0].encode_state().is_ok(),
+            "图未就绪时保存也必须成功"
+        );
         document.close();
     }
     /// 最后一个renderer入口撤销后，actor屏障/空范围应用/文档join都不等待不存在的renderer。
