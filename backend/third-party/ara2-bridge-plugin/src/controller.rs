@@ -206,6 +206,26 @@ impl<P: PluginModel> ControllerAdapter<P> {
     }
 }
 
+impl<P: PluginModel> ControllerAdapter<P> {
+    /// 补跑一次被 content reader 挡住的 `endEditing`。
+    ///
+    /// 【为什么需要它】`endEditing` 在 reader 存活时不能收口，而宿主**不会**为同一次
+    /// 编辑重发它。不补跑就意味着 `ModelHandle::end_editing` 永不执行 ⇒
+    /// `remap_and_log()` 不跑 ⇒ `document.timeline` 永不更新 ⇒ `region_items` 永不
+    /// 填充 ⇒ `claimed_items` 保持 0 ⇒ 界面停在"等待宿主音频"。
+    ///
+    /// 【为什么有多个补跑点】"reader 排空"只是**最可能**的那一刻。宿主可以在 reader
+    /// 还活着的时候开启样本访问、或周期性调 `notifyModelUpdates`；这两个入口同样
+    /// 意味着"插件侧又可以动了"。任一处能收口就收口，别等那个唯一时刻。
+    fn retry_deferred_end_editing(&mut self, reason: &str) {
+        if self.pending_end_editing && self.content_readers.is_empty() {
+            self.pending_end_editing = false;
+            log::info!("[ara] endEditing retried: {reason}");
+            self.finish_editing();
+        }
+    }
+}
+
 impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     fn destroy_document_controller(&mut self) {
         self.clear_readers();
@@ -249,7 +269,6 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         self.finish_editing();
     }
 
-
     fn notify_model_updates(&mut self) {
         // 【本地补丁 11】宿主用它让插件把待发的更新推回去（ARA 2.0 起替代旧的归档路径），
         // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
@@ -266,6 +285,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             log::warn!("[ara] notifyModelUpdates skipped: the document is in an editing session");
             return;
         }
+        // reader 已经排空、文档也不在编辑会话：这正是被推迟的 `endEditing` 能收口的
+        // 状态。宿主周期性调用本入口，所以它是独立的第二个补跑点。
+        self.retry_deferred_end_editing("notifyModelUpdates found the document idle");
         let Some(host) = self.host.model_updates() else {
             log::warn!(
                 "[ara] notifyModelUpdates skipped: the host provided no model-update interface"
@@ -550,12 +572,12 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             return;
         };
         let Some(host_ref) = host_ref else {
-        // 【为什么 null hostRef 只降级、不丢弃】实测 Cubase 15 会给这些回调传 null
-        // hostRef。补丁 12 让 create 容忍它并把 null 存了进来 —— 若这里仍以
-        // `from_raw` 失败即裸 `return`，整条生命周期回调会静默失效：宿主改名 / 改
-        // 内容 / 换 tempo / 授权 PCM / 销毁源全部不生效（用户看到"授权了却读不到
-        // 采样""tempo 永远读不到"）。改为走**无宿主**变体：语义与 create 的
-        // `HostContentScope::unavailable()` 一致（本次回调没有宿主内容可查，其余照旧）。
+            // 【为什么 null hostRef 只降级、不丢弃】实测 Cubase 15 会给这些回调传 null
+            // hostRef。补丁 12 让 create 容忍它并把 null 存了进来 —— 若这里仍以
+            // `from_raw` 失败即裸 `return`，整条生命周期回调会静默失效：宿主改名 / 改
+            // 内容 / 换 tempo / 授权 PCM / 销毁源全部不生效（用户看到"授权了却读不到
+            // 采样""tempo 永远读不到"）。改为走**无宿主**变体：语义与 create 的
+            // `HostContentScope::unavailable()` 一致（本次回调没有宿主内容可查，其余照旧）。
             let Ok(mut edit) = runtime.callback_edit() else {
                 return;
             };
@@ -961,6 +983,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 self.host.revoke_audio_source_readers(host_ref);
             }
         }
+        // 样本访问是"素材开始流动"的时刻：此刻 reader 已经排空（上面提前返回过），
+        // 因此它也是被推迟的 `endEditing` 的一个独立补跑点。
+        self.retry_deferred_end_editing("samples access settled with no reader live");
     }
 
     fn destroy_audio_source(&mut self, reference: ARAAudioSourceRef) {
@@ -1002,7 +1027,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 })
             }
             // 同上（见 `update_musical_context_properties`）：宿主没给引用时走无宿主变体。
-            None => runtime.callback_edit().and_then(|mut edit| edit.destroy_audio_source(handle)),
+            None => runtime
+                .callback_edit()
+                .and_then(|mut edit| edit.destroy_audio_source(handle)),
         };
         if result.is_err() {
             return;
@@ -1425,13 +1452,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
 
     fn destroy_content_reader(&mut self, reference: ARAContentReaderRef) {
         self.destroy_reader(reference);
-        // 【为什么在这里补跑】reader 排空是"现在可以收口了"的**唯一**时刻，而宿主
-        // 不会为同一次编辑重发 `endEditing`。见 `pending_end_editing` 的说明。
-        if self.content_readers.is_empty() && self.pending_end_editing {
-            self.pending_end_editing = false;
-            log::info!("[ara] endEditing retried after the last content reader was released");
-            self.finish_editing();
-        }
+        self.retry_deferred_end_editing("the last content reader was released");
     }
 
     fn create_region_sequence(

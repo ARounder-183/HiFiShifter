@@ -20,6 +20,7 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "unmatched_regions",
     "awaiting_samples_access",
     "source_read_failed",
+    "region_rejected",
 ]);
 
 /**
@@ -91,6 +92,17 @@ export function needsUnmatchedRegionsNotice(status: HostAudioPayload | null): bo
  */
 export function needsSourceReadFailedNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "source_read_failed";
+}
+
+/**
+ * 是否需要"本插件拒收了 region"这条提示。
+ *
+ * 【为什么必须与 `awaiting_regions` 分开】两者在界面上长得一样（都在等），但处置
+ * 相反：`awaiting_regions` 该继续等，`region_rejected` 再等也不会来 ——
+ * 用户唯一能做的是重载插件。混成一句话会让用户无限期等一个永不到达的东西。
+ */
+export function needsRegionRejectedNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "region_rejected";
 }
 
 /**

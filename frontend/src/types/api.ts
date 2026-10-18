@@ -213,7 +213,8 @@ export type HostAudioState =
     /** region 已分配，但宿主还没开启样本访问。 */
     | "awaiting_samples_access"
     /** 宿主开启了访问，但样本读取失败（终态）。 */
-    | "source_read_failed";
+    | "source_read_failed"
+    | "region_rejected";
 
 export interface HostAudioPayload {
     state: HostAudioState;
@@ -226,6 +227,12 @@ export interface HostAudioPayload {
      * 否则这些片段在插件里**静默消失**，用户以为内容丢了。
      */
     skipped_clips?: number;
+    /**
+     * 真故障档（`region_rejected` / `source_read_failed`）的真因；其余档不带。
+     *
+     * 缺省 = 旧后端或正常中间态（视为无真因）。
+     */
+    reason?: string | null;
 }
 
 export interface TimelineState {

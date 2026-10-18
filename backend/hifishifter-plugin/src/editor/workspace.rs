@@ -1121,12 +1121,28 @@ impl DocumentSession {
                 waiting = in_flight;
             }
         }
-        // 【为什么再分两档】"宿主还没交付 region"与"region 有了、样本访问还没开"
+        // 【为什么再分三档】"宿主还没交付 region"与"region 有了、样本访问还没开"
         // 对用户的可执行动作不同；读取失败则是终态，必须给出真因而不是继续转圈。
+        // 而"插件自己拒收了 region"是第三档：它看起来和"还在等"一模一样，但再等也不
+        // 会来 —— 报成 `awaiting_regions` 会让用户无限期等一个永不到达的东西。
         let failures = self.source_failures.lock_or_recover().len();
+        // 拒绝真因只在"确实进了 RegionRejected 档"时才出现在载荷里；先克隆出来，
+        // 避免下面按值绑走后再也取不到。
+        let rejection = self.last_region_rejection();
+        let rejection_reason = rejection.clone();
         if failures > 0 {
             state = crate::render::extension::HostAudioState::SourceReadFailed;
             waiting = failures;
+        } else if rejection.is_some() {
+            // 只在"我们确实一条 region 都没拿到"时上报：拒收之后宿主就不再交付了，
+            // 这正是 `regions_assigned == 0` 的形状。已经拿到 region 的场合里，
+            // 历史拒收（例如一次失败的分割）不该盖住正常工作。
+            if state == crate::render::extension::HostAudioState::AwaitingRegions
+                || state == crate::render::extension::HostAudioState::AwaitingSamplesAccess
+            {
+                state = crate::render::extension::HostAudioState::RegionRejected;
+                waiting = waiting.max(1);
+            }
         } else if state == crate::render::extension::HostAudioState::AwaitingRegions
             && !self.samples_access_granted.load(Ordering::Acquire)
         {
@@ -1140,6 +1156,11 @@ impl DocumentSession {
             "state": state.as_str(),
             "waiting_clips": waiting,
             "skipped_clips": skipped,
+            // 只在真故障档带上真因：`awaiting_regions` 是正常的中间态，
+            // 给它挂一个 null 只会让前端多一条要处理的分支。
+            "reason": rejection_reason.filter(|_| {
+                state == crate::render::extension::HostAudioState::RegionRejected
+            }),
         });
     }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。

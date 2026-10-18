@@ -133,6 +133,15 @@ fn classification_names_are_stable_catalog_keys() {
         HostAudioState::FolderParentWithoutRegions.as_str(),
         "「分配了但绑不上」不是「没拿到 region」"
     );
+    // 【为什么单独钉住这一条】"插件拒收了 region"看起来与"还在等"一模一样，但处置
+    // 相反：后者该等，前者再等也不会来。混成一个名字会让用户无限期等一个永不到达
+    // 的东西，而他唯一能做的是重载插件。
+    assert_eq!(HostAudioState::RegionRejected.as_str(), "region_rejected");
+    assert_ne!(
+        HostAudioState::RegionRejected.as_str(),
+        HostAudioState::AwaitingRegions.as_str(),
+        "「插件拒收」不是「宿主还没交付」"
+    );
 }
 
 /// **不变量：渲染输入失效必须通知本文档的**全部** owner，而不只是发现变化的那个实例。**

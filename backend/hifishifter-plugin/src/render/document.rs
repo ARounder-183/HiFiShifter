@@ -166,6 +166,15 @@ pub(crate) struct DocumentSession {
     /// `host_media_reason` 报成真因（`source_read_failed`），而不是含混的
     /// `awaiting_region`。
     pub source_failures: Mutex<HashMap<String, String>>,
+    /// 本插件拒绝创建 region 的原因（有界环形缓冲，最新的在尾部）。
+    ///
+    /// 【为什么要单独一张表】"等待宿主音频"是用户可见的唯一状态，而它把两种截然
+    /// 不同的事实混成一句话：宿主**还没**交付，和插件**拒收**了交付。后者是
+    /// 可行动的故障 —— `HostAudioState::RegionRejected` 就是为它加的。
+    ///
+    /// 【为什么有界】它只在故障路径上写；不设上限的话一个反复失败的宿主会把内存
+    /// 吃光。32 条足够覆盖"前因 + 若干次重复"。
+    pub region_rejections: Mutex<std::collections::VecDeque<String>>,
     /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
     pub editor_audio_revision: AtomicU64,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
@@ -1377,7 +1386,9 @@ impl DocumentSession {
         crate::render::ownership::region_owners()
             .lock_or_recover()
             .retain_alive_documents(&|document| alive_ids.contains(&document));
-        controllers().lock_or_recover().insert(key, Arc::downgrade(self));
+        controllers()
+            .lock_or_recover()
+            .insert(key, Arc::downgrade(self));
     }
 
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
@@ -1433,6 +1444,7 @@ impl DocumentSession {
         self.authorized_sources.lock_or_recover().clear();
         self.split_media_from.lock_or_recover().clear();
         self.source_failures.lock_or_recover().clear();
+        self.region_rejections.lock_or_recover().clear();
         self.pending_since.lock_or_recover().clear();
         self.skipped_regions.lock_or_recover().clear();
         self.ui_tracks.lock_or_recover().clear();
@@ -1655,7 +1667,8 @@ impl DocumentSession {
             owner.cancel_preparation();
             // 让 revision 门（`processed_ready` / `raw_tape_ready`）与输出代次失效，
             // 但不动 `current` —— 上一份快照继续可听。
-            owner.snapshots
+            owner
+                .snapshots
                 .iter()
                 .for_each(|snapshot| snapshot.invalidate_generation());
             owner.raw_tape.invalidate_generation();
@@ -1713,6 +1726,26 @@ impl DocumentSession {
             owner.cancel_preparation();
             owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
+    }
+
+    /// 记录一次"本插件拒绝了 region 创建"。
+    ///
+    /// 【为什么必须留下真因】`create_playback_region` 失败对宿主只表现为一个 null
+    /// region，插件侧唯一的痕迹是一条 error 日志。把它接进状态链之后，
+    /// `decorate_host_audio` 能把 `awaiting_regions` 换成 `region_rejected`，
+    /// 用户看到的是"插件拒收了"而不是"还在等"。
+    pub fn note_region_rejection(&self, reason: impl Into<String>) {
+        const REGION_REJECTION_LIMIT: usize = 32;
+        let mut rejections = self.region_rejections.lock_or_recover();
+        if rejections.len() == REGION_REJECTION_LIMIT {
+            rejections.pop_front();
+        }
+        rejections.push_back(reason.into());
+    }
+
+    /// 最近一条 region 拒绝原因（没有则为 `None`）。
+    pub fn last_region_rejection(&self) -> Option<String> {
+        self.region_rejections.lock_or_recover().back().cloned()
     }
 
     /// 只借出仍存活的文档，拒绝已销毁或非本插件的控制器。

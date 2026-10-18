@@ -436,6 +436,55 @@ fn existing_binding_raw_disappears_once_the_owner_is_closed() {
     );
 }
 
+/// **文档关闭后同一实例必须能重绑到新文档。**
+///
+/// 【为什么这是问题二的回归】REAPER 重开工程时对同一个 FX 槽**复用同一个实例**。
+/// `document_closed()` 已把上一份文档的记号线撤掉，若 `bind_to_document` 一律拒绝
+/// "already bound"，`ara_entry::bind` 只能把 null 交给宿主 —— 插件加载了却永远不绑，
+/// 界面停在"等待宿主音频"，而删掉插件再添加就好（那会建一个全新实例）。
+#[test]
+fn an_instance_can_rebind_to_a_new_document_after_its_first_closed() {
+    let (first_model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let first_document = first_model.session();
+    let owner = Arc::new(ExtensionOwner::default());
+    owner
+        .bind_to_document(
+            first_document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
+    assert_eq!(owner.rebind_generation_count(), 0, "首次绑定不算重绑");
+
+    first_document.close();
+    assert!(owner.is_closed(), "关闭后实例应当处于关闭态");
+
+    let (second_model, _owners2, _ids2) = crate::editor::session::tests::workspace_fixture();
+    let second_document = second_model.session();
+    owner
+        .bind_to_document(
+            second_document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .expect("文档关闭后同一实例必须能重绑到新文档");
+
+    assert_eq!(owner.rebind_generation_count(), 1, "必须记录一次重绑");
+    assert!(
+        !owner.is_closed(),
+        "重绑成功必须解除关闭态，否则编辑器永久不可用"
+    );
+    assert!(
+        owner.existing_binding_raw().is_some(),
+        "重绑后宿主应当拿到有效的扩展实例"
+    );
+    assert!(owner.is_ara_bound(), "重绑后实例应当真的挂在新文档上");
+}
+
 /// 隐藏getter重入关闭唯一GUI入口后，不能借另一活owner继续该入口的采集批次。
 #[test]
 fn task38b_hidden_getter_revokes_closed_editor_batch_before_next_renderer() {
@@ -906,7 +955,8 @@ fn linkable_document(
 /// 一次真实导出必须落成一份**磁盘上的工作区**：清单与音频都能被独立读者读回。
 #[test]
 fn an_export_lands_as_a_readable_workspace_directory() {
-    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let (_model, _document, owner, _identity) =
+        linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
     let root = link_temp_root("workspace-roundtrip");
     let (manifest, workspace) = owner.export_link(&root).unwrap();
     assert!(workspace.root().starts_with(&root), "目录名由身份派生");
@@ -923,9 +973,7 @@ fn an_export_lands_as_a_readable_workspace_directory() {
         .iter()
         .find(|entry| entry.key == "ara://pcm")
         .unwrap();
-    assert!(workspace
-        .resolve(entry.file.as_ref().unwrap())
-        .is_file());
+    assert!(workspace.resolve(entry.file.as_ref().unwrap()).is_file());
     assert_eq!(
         workspace.read_audio(entry).unwrap().planes,
         vec![vec![0.1, 0.2, 0.3, 0.4]]
@@ -961,7 +1009,8 @@ fn a_source_without_audio_exports_as_partial() {
 /// 一份不属于本清单的编辑必须被身份判据拒收（`LINK_MISMATCH`）。
 #[test]
 fn an_edit_for_another_link_is_rejected_by_identity() {
-    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let (_model, _document, owner, _identity) =
+        linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
     let export = LinkExport::take(&owner, "identity-mismatch");
     let mut edit = export.edit_from_timeline(&export.timeline);
     edit.link_id = "ara:SomeOtherHost:deadbeef".into();
@@ -981,17 +1030,12 @@ fn an_edit_for_another_link_is_rejected_by_identity() {
 /// 只有**宿主真的改了**才会被拒 —— 这正是旧实现里「用户编辑几何就被拒」的反面。
 #[test]
 fn a_host_geometry_change_since_export_is_rejected_and_named() {
-    let (_model, document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let (_model, document, owner, _identity) =
+        linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
     let export = LinkExport::take(&owner, "geometry-drift");
     let edit = export.edit_from_timeline(&export.timeline);
     // 宿主侧（几何的真正权威）挪动了片段起点。
-    document
-        .timeline
-        .lock_or_recover()
-        .as_mut()
-        .unwrap()
-        .clips[0]
-        .start_sec = 0.25;
+    document.timeline.lock_or_recover().as_mut().unwrap().clips[0].start_sec = 0.25;
     let status = owner.apply_link_edit(&export.manifest.link_id, &edit);
     assert!(!status.ok, "{:?}", status.error);
     assert_eq!(
@@ -1006,7 +1050,8 @@ fn a_host_geometry_change_since_export_is_rejected_and_named() {
 /// export → 写 `edits.hfsedit` → 读回 → 应用：走一遍真实的工作区文件往返。
 #[test]
 fn an_edit_round_trips_through_the_workspace_file() {
-    let (_model, _document, owner, _identity) = linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
+    let (_model, _document, owner, _identity) =
+        linkable_document(Some(vec![vec![0.1, 0.2, 0.3, 0.4]]));
     let root = link_temp_root("edit-roundtrip");
     let (manifest, workspace) = owner.export_link(&root).unwrap();
     let mut client: hifishifter_kernel::state::TimelineState =
@@ -1136,10 +1181,7 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
     owners[0].restore_state(&states[1]).unwrap();
     // 【为什么不再要求失败】身份歧义只该让这一份恢复不套用，不该让宿主保存失败；
     // 权威仍保留原曲线（下面两条断言）。
-    assert!(
-        owners[0].encode_state().is_ok(),
-        "身份歧义不能让保存失败"
-    );
+    assert!(owners[0].encode_state().is_ok(), "身份歧义不能让保存失败");
     assert_eq!(document.edits.lock_or_recover().revision, before);
     assert_eq!(
         document.edits.lock_or_recover().params["b"].pitch_edit[200],
@@ -1591,7 +1633,10 @@ fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
     }
     let export = LinkExport::take(&owner, "gui-commit");
     // 导出的是**整个文档**（两个片段），与管道时代的实例视图不同。
-    assert_eq!(export.manifest.timeline["clips"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        export.manifest.timeline["clips"].as_array().unwrap().len(),
+        2
+    );
     assert_eq!(export.manifest.sources.len(), 1);
     assert_eq!(
         export.manifest.sources[0].state,
@@ -2257,4 +2302,3 @@ fn an_instance_whose_ara_session_ended_does_not_fall_back_to_transfer() {
     );
     session.close();
 }
-

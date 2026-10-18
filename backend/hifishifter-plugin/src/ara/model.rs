@@ -327,7 +327,14 @@ impl ModelHandle {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .register(key, self.document_id, index)
-            .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
+            .map_err(|error| {
+                // 【为什么必须把真因接进状态链】失败对宿主只表现为一个 null region，
+                // 而宿主随后**完全停止交付 region** —— 界面停在"等待宿主音频"，
+                // 用户唯一能做的是删掉插件再添加，而他不知道原因。
+                let reason = format!("region identity rejected: {error:?}");
+                self.session.note_region_rejection(reason);
+                AraError::InvalidState("region identity already owned or invalid")
+            })?;
         match reused {
             Some(slot) => {
                 self.region_keys[slot] = key;

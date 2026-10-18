@@ -2168,6 +2168,9 @@ export const enUS = {
     ara_host_audio_source_failed_title: "Host audio could not be read",
     ara_host_audio_source_failed_body:
         "the host granted sample access, but the plug-in could not read the audio (unsupported media format, sample rate, or range). These clips will stay silent; check the media or export diagnostics.",
+    ara_host_audio_region_rejected_title: "The plug-in rejected the host's audio region",
+    ara_host_audio_region_rejected_body:
+        "the host delivered this material, but the plug-in refused to create a region for it. Waiting will not help; remove the plug-in from this track and insert it again.",
     ara_clip_syncing_host_audio: "Waiting for the host to finish assigning audio",
     ara_clip_waiting_for_host_audio: "Waiting for the host to hand over audio",
     ara_clip_host_source_read_failed:

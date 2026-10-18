@@ -2154,6 +2154,9 @@ export const koKR = {
     ara_host_audio_source_failed_title: "호스트 오디오를 읽을 수 없습니다",
     ara_host_audio_source_failed_body:
         "호스트가 샘플 접근을 허용했지만 오디오를 읽을 수 없습니다(미디어 형식·샘플레이트·범위가 지원되지 않을 수 있습니다). 이 클립은 무음으로 남습니다. 미디어를 확인하거나 진단 로그를 내보내 보고하세요.",
+    ara_host_audio_region_rejected_title: "플러그인이 호스트의 오디오 영역을 거부했습니다",
+    ara_host_audio_region_rejected_body:
+        "호스트가 이 자료를 전달했지만 플러그인이 해당 영역 생성을 거부했습니다. 기다려도 해결되지 않습니다. 이 트랙에서 플러그인을 제거했다가 다시 추가하세요.",
     ara_clip_syncing_host_audio: "호스트의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:

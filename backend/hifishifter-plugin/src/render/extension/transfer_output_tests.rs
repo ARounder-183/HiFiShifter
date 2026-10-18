@@ -1386,7 +1386,8 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
         "透传到处理结果必须淡入而不是叠加（中点实测 {mid}）"
     );
     assert_eq!(
-        left[frames - 1], 0.3,
+        left[frames - 1],
+        0.3,
         "淡入结束必须精确落在新值上（实测 {}）",
         left[frames - 1]
     );

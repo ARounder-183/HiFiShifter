@@ -772,6 +772,12 @@ pub(crate) struct ExtensionOwner {
     ///     （`vst3/audio_boundary_tests` 的既有契约不变）；
     ///   * Cubase 单实例：没有任何实例持 playback ⇒ `false` ⇒ 该实例接管渲染。
     playback_covered: std::sync::atomic::AtomicBool,
+    /// 文档关闭后重绑到另一份文档的次数（诊断）。
+    ///
+    /// 【为什么必须是计数】"重开工程复用同一实例"正是用户报的
+    /// "只有删掉插件再添加才好"的机制。计数让诊断包能回答"发生过几次重绑"，
+    /// 也用来验证 T6 真的接上了（不重绑时永远是 0）。
+    rebind_generation: std::sync::atomic::AtomicU64,
     /// 文档级"没有任何实例持 playback 角色"时被提升为渲染者的次数（诊断）。
     ///
     /// 【为什么必须是计数】这是"宿主没有给我们 playback renderer"的现场证据，
@@ -1087,11 +1093,17 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let document_alive = document.as_ref().is_some_and(|document| document.is_alive());
+        let document_alive = document
+            .as_ref()
+            .is_some_and(|document| document.is_alive());
         let clip_count = transfer
             .as_ref()
             .map_or(0, |session| session.clip_count())
-            .max(document.as_ref().map_or(0, |document| document.editor_clip_count()));
+            .max(
+                document
+                    .as_ref()
+                    .map_or(0, |document| document.editor_clip_count()),
+            );
         let mode = match self.mode() {
             InstanceMode::Ara => "ara",
             InstanceMode::Transfer => "transfer",
@@ -2154,6 +2166,10 @@ impl ExtensionOwner {
             // 门控是**实例级**的：单 region 时等同于该 item 的 mute（与既有语义一致）；
             // 多 region 时只有全部绑定 item 都静音才静音整组 —— 一个子轨静音不该让
             // 整组哑掉。逐 item 的独立门控需要渲染路径支持，见方案 Task 5.2 的已知边界。
+            // 【为什么不给这个读数去抖】"静音 ⇒ 不出声"是一条**基本契约**，
+            // 每一次迟滞都会让用户多听一段本该静音的内容。take 切换瞬间的误读是
+            // 宿主侧异常，用状态去掩盖它会把"多响了"换成"该静音时还在响"——
+            // 后者更难定位。宁可忠实地按宿主读数门控。
             self.host_item_muted.store(
                 geometry
                     .as_ref()
@@ -2256,6 +2272,10 @@ impl ExtensionOwner {
     /// 被提升为渲染者的次数（诊断）。
     pub(crate) fn promoted_renderer_count(&self) -> u64 {
         self.promoted_to_renderer.load(Ordering::Acquire)
+    }
+    /// 文档关闭后重绑到另一份文档的次数（诊断）。
+    pub(crate) fn rebind_generation_count(&self) -> u64 {
+        self.rebind_generation.load(Ordering::Acquire)
     }
     /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
     pub(crate) fn writer_id(&self) -> u64 {
@@ -2858,32 +2878,32 @@ impl ExtensionOwner {
             if state.last_token.swap(token, Ordering::AcqRel) == token {
                 // 同一份快照、同一个版本：没有切换，不做任何淡化。
             } else {
-            // 【为什么"透传 → 处理结果"不交叉淡化】`PendingSynthesis` / `PassThrough`
-            // 输出的是**宿主原声**，`Processed` 输出的是神经声码器结果。两者内容根本
-            // 不同源，交叉淡化会把两段不同内容叠在一起（听感是"两声并发"）。
-            // 那种场合改为对结果做一次线性淡入。
-            let previous_kind = (previous_token & 0xFF) as u8;
-            let crossfade = !Self::should_fade_in_instead_of_crossfading(previous_kind);
-            if crossfade {
-                for channel in 0..2 {
-                    for index in 0..OUTPUT_DECLICK_FRAMES {
-                        state.fade_from[channel][index].store(
-                            state.tail[channel][index].load(Ordering::Relaxed),
-                            Ordering::Relaxed,
-                        );
+                // 【为什么"透传 → 处理结果"不交叉淡化】`PendingSynthesis` / `PassThrough`
+                // 输出的是**宿主原声**，`Processed` 输出的是神经声码器结果。两者内容根本
+                // 不同源，交叉淡化会把两段不同内容叠在一起（听感是"两声并发"）。
+                // 那种场合改为对结果做一次线性淡入。
+                let previous_kind = (previous_token & 0xFF) as u8;
+                let crossfade = !Self::should_fade_in_instead_of_crossfading(previous_kind);
+                if crossfade {
+                    for channel in 0..2 {
+                        for index in 0..OUTPUT_DECLICK_FRAMES {
+                            state.fade_from[channel][index].store(
+                                state.tail[channel][index].load(Ordering::Relaxed),
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
+                } else {
+                    // 淡入：把"旧信号"置零，于是 `old * (1 - t) + current * t` 退化成
+                    // 对当前输出的线性淡入。
+                    for channel in 0..2 {
+                        for index in 0..OUTPUT_DECLICK_FRAMES {
+                            state.fade_from[channel][index].store(0, Ordering::Relaxed);
+                        }
                     }
                 }
-            } else {
-                // 淡入：把"旧信号"置零，于是 `old * (1 - t) + current * t` 退化成
-                // 对当前输出的线性淡入。
-                for channel in 0..2 {
-                    for index in 0..OUTPUT_DECLICK_FRAMES {
-                        state.fade_from[channel][index].store(0, Ordering::Relaxed);
-                    }
-                }
-            }
-            state.fade_pos.store(0, Ordering::Release);
-            state.fade_active.store(true, Ordering::Release);
+                state.fade_pos.store(0, Ordering::Release);
+                state.fade_active.store(true, Ordering::Release);
             }
         }
         let channels = (output.num_channels as usize).min(2);
@@ -2899,10 +2919,9 @@ impl ExtensionOwner {
                 }
                 for index in 0..count {
                     let t = (position + index + 1) as f32 / OUTPUT_DECLICK_FRAMES as f32;
-                    let old =
-                        f32::from_bits(state.fade_from[channel][position + index].load(
-                            Ordering::Relaxed,
-                        ));
+                    let old = f32::from_bits(
+                        state.fade_from[channel][position + index].load(Ordering::Relaxed),
+                    );
                     // SAFETY: `index < frames`，调用方保证平面至少这么长。
                     let current = unsafe { *plane.add(index) };
                     unsafe {
@@ -3178,9 +3197,7 @@ impl ExtensionOwner {
                 (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64,
                 Ordering::Release,
             );
-            geometry
-                .pinned_window_open
-                .store(true, Ordering::Release);
+            geometry.pinned_window_open.store(true, Ordering::Release);
             geometry
                 .pinned_window_open_count
                 .fetch_add(1, Ordering::Relaxed);
@@ -3248,7 +3265,8 @@ impl ExtensionOwner {
                 }
             } else if !window_open
                 && geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS
-            {                synthesizing = false;
+            {
+                synthesizing = false;
                 geometry.synthesized.store(false, Ordering::Release);
             }
         } else {
@@ -3841,9 +3859,7 @@ impl ExtensionOwner {
                     // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                     // 从上一块尾巴淡到零，避免停播/清空处的阶跃。
-                    unsafe {
-                        self.apply_output_declick(stream, &mut *(*data).outputs, frames)
-                    };
+                    unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
                     return TransferStage::Handled;
                 }
             }
@@ -4523,9 +4539,7 @@ impl ExtensionOwner {
                     (bytes, None)
                 }
                 Err(error) => {
-                    log::error!(
-                        "[ara] state encode failed: {error}; using the last good snapshot"
-                    );
+                    log::error!("[ara] state encode failed: {error}; using the last good snapshot");
                     (
                         self.last_ara_state
                             .lock_or_recover()
@@ -5358,9 +5372,32 @@ impl ExtensionOwner {
         if current.is_some() {
             // 已绑定再绑定是**不变量违反**（一个实例只绑一个文档）。真实宿主的重复
             // `bindDocumentToExtension` 会在更早的 companion 层被拒（"already bound"），
-            // 由 `ara_entry::bind` 幂等复用既有实例处理（见那里的说明）—— 所以这里保持
-            // 防御性错误，不在此做语义变更。
-            return Err(AraError::InvalidState("extension already bound"));
+            // 由 `ara_entry::bind` 幂等复用既有实例处理（见那里的说明）。
+            //
+            // 【为什么文档关闭后允许重绑】宿主重开工程时对同一个 FX 槽**复用同一个
+            // 实例**（REAPER 实测如此），而 `document_closed()` 已经把上一份文档的
+            // 记号线全部撤掉。若这里一律拒绝，重开工程时 `ara_entry::bind` 只能把
+            // null 交给宿主 —— 插件加载了却永远不绑，界面停在"等待宿主音频"，
+            // 而删掉插件再添加就好（那会建一个全新实例）。允许重绑让"重开工程"与
+            // "删了再加"走同一条正确路径。
+            //
+            // 【为什么不清 `bound_once`】它是历史事实："这个实例绑定过 ARA"。清了它
+            // 会让 "document closed" 静默退化成 `ARA_NOT_BOUND`，那是在陈述一件
+            // 没发生过的事。
+            if !self.closed.load(Ordering::Acquire) {
+                return Err(AraError::InvalidState("extension already bound"));
+            }
+            log::info!(
+                "[ara] writer {} rebinds to document {} after its previous document closed",
+                self.writer_id(),
+                document.id
+            );
+            self.rebind_generation.fetch_add(1, Ordering::Relaxed);
+            self.closed.store(false, Ordering::Release);
+            self.assignments.lock_or_recover().clear();
+            self.sequences.lock_or_recover().clear();
+            self.document.lock_or_recover().take();
+            *current = None;
         }
         let owner = Arc::downgrade(self);
         let document_id = document.id;
@@ -6179,6 +6216,10 @@ impl ExtensionOwner {
                 "overhang_trimmed_frames": capture.overhang_trimmed_frames,
                 "cycle_splits": capture.cycle_splits,
                 "resync_bridged_frames": capture.resync_bridged_frames,
+                // 起播窗口整段都没写下、由 resync 兜底补出一个段的次数。
+                // T1 让窗口内记账连续后这个数应当长期为 0；只要它 > 0，说明暂存/
+                // 提交链路上仍有漏，但 T2 保证了时间线不断。
+                "bridged_window_blocks": capture.bridged_window_blocks,
             })
         });
         let stream = |index: usize| {
@@ -6224,12 +6265,11 @@ impl ExtensionOwner {
                 )
             });
         // 从未开过窗口：归零读数，避免把"未初始化"显示成"因 0 号原因收口"。
-        let pinned_window_closed_by =
-            if pinned_window_opens == 0 && pinned_window_frames == 0 {
-                0
-            } else {
-                pinned_window_closed_by
-            };
+        let pinned_window_closed_by = if pinned_window_opens == 0 && pinned_window_frames == 0 {
+            0
+        } else {
+            pinned_window_closed_by
+        };
         serde_json::json!({
             "blocks_seen": self.blocks_seen.load(Ordering::Acquire),
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
@@ -6240,6 +6280,13 @@ impl ExtensionOwner {
             "music_used": self.music_used.load(Ordering::Acquire),
             "synthesized_blocks": self.synthesized_blocks.load(Ordering::Acquire),
             "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
+            "bound_fallback": {
+                "snapshot_missing_blocks": self.bound_snapshot_fallback.load(Ordering::Acquire),
+                "promoted_to_renderer": self
+                    .promoted_to_renderer
+                    .load(Ordering::Acquire),
+                "rebind_count": self.rebind_generation.load(Ordering::Acquire),
+            },
             "pinned_window": {
                 "opens": pinned_window_opens,
                 "frames_used": pinned_window_frames,

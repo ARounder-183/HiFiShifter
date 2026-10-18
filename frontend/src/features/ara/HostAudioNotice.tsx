@@ -30,6 +30,7 @@ import type { HostAudioPayload } from "../../types/api";
 import {
     needsFolderTrackNotice,
     needsSkippedClipsNotice,
+    needsRegionRejectedNotice,
     needsSourceReadFailedNotice,
     needsUnmatchedRegionsNotice,
 } from "./hostAudio";
@@ -66,6 +67,17 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
             <Notice
                 title={t("ara_host_audio_source_failed_title")}
                 body={t("ara_host_audio_source_failed_body")}
+            />
+        );
+    }
+    // 拒收排在 `source_read_failed` 之后、`unmatched_regions` 之前：它是终态故障，
+    // 但比"读取失败"更罕见（T4/T5 修好后应当永不出现），所以排在更常见的那条后面
+    // 不会掩盖真相。
+    if (needsRegionRejectedNotice(status)) {
+        return (
+            <Notice
+                title={t("ara_host_audio_region_rejected_title")}
+                body={t("ara_host_audio_region_rejected_body")}
             />
         );
     }
