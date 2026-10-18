@@ -1698,6 +1698,11 @@ impl AudioSources for ModelHandle {
         if let Some(source) = self.document.audio_sources.get_mut(*state) {
             source.sample_access_enabled = enable;
         }
+        if enable {
+            self.session
+                .samples_access_granted
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         log::info!("[ara] audio_source samples_access enable={enable}");
         self.refresh_source_pcm(*state, host);
         if enable && std::env::var_os("HIFISHIFTER_ARA_PCM_PROBE").is_some() {

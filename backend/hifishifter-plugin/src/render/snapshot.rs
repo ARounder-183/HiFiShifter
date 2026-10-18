@@ -280,6 +280,8 @@ pub(crate) struct SnapshotPublisher {
     registering: AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
+    /// 快照内容代次：每次 `publish` / `clear` 前进。音频线程据此判断"输出源变了"。
+    generation: AtomicU64,
 }
 impl Default for SnapshotPublisher {
     /// 【为什么从全局预算派生而不是写死 512 MiB】每个 owner 有 **2 个** publisher（两个
@@ -338,7 +340,13 @@ impl SnapshotPublisher {
             registering: AtomicUsize::new(0),
             limit,
             misses: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
         }
+    }
+
+    /// 当前快照代次；音频线程无锁读取。
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
     /// 非实时发布。
     pub fn publish(&self, mut snapshot: PlaybackSnapshot) -> Result<(), SnapshotError> {
@@ -373,12 +381,14 @@ impl SnapshotPublisher {
         retained.0.push(entry);
         retained.1 = total;
         self.current.store(pointer, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.reclaim(&mut retained);
         Ok(())
     }
     /// 撤销只切换原子指针，不在音频线程释放存储。
     pub fn clear(&self) {
         self.current.store(std::ptr::null_mut(), Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
     /// 必须持发布锁且仅在非实时线程调用。
     ///

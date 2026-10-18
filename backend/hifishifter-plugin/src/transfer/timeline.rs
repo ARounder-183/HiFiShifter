@@ -62,6 +62,12 @@ use std::ops::Range;
 pub(crate) const TRANSFER_TRACK_ID: &str = "transfer-track";
 /// 轨道显示名。
 pub(crate) const TRANSFER_TRACK_NAME: &str = "Transfer";
+/// 每个投影 clip 的外部边界淡化（秒）。
+///
+/// 【为什么需要】Transfer 的 clip 起点/终点可能落在波形中间；硬切会产生"咔"。
+/// 2 ms 在听感上不可闻，却足以消除阶跃。内部段边界在 `coalesce` 之后已经不存在，
+/// 因此这个淡化只作用于真正的 take 边界。
+const TRANSFER_EDGE_FADE_SEC: f64 = 0.002;
 
 /// 投影的输入：一个 take 的 id 与它的段（按录制顺序）。
 #[derive(Clone, Copy)]
@@ -326,12 +332,16 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         let source_end_sec = (piece.offset + frames) as f64 / rate;
         let id = clip_id(tape.take, piece.offset);
         let name = format!("#{index} @ {start_sec:.3}s");
+        // 短 clip 不能两侧各淡 2 ms（会叠在一起），按半长夹一下。
+        let edge_fade = TRANSFER_EDGE_FADE_SEC.min(length_sec / 2.0);
         let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
             "id": id,
             "track_id": TRANSFER_TRACK_ID,
             "name": name,
             "start_sec": start_sec,
             "length_sec": length_sec,
+            "fade_in_sec": edge_fade,
+            "fade_out_sec": edge_fade,
         }))
         .expect("片段的必填字段是固定的");
         // 【为什么 `duration_*` 是整条带的长度】它是"这份媒体有多长"，而不是"这一片有多
@@ -650,6 +660,27 @@ mod tests {
     /// 单 take 的便利投影。
     fn one(take: u64, segments: &[Segment]) -> (TimelineState, TimelineSummary) {
         build(segments, take, 120.0)
+    }
+
+    /// **投影 clip 的外部边界必须有微淡化。**
+    ///
+    /// 【为什么这是问题一的回归】Transfer 的 clip 可能从波形中间开始；没有淡化时
+    /// 播放/停止会听到阶跃。2 ms 不可闻，但足以消除"咔"。
+    #[test]
+    fn projected_clips_get_a_micro_fade_at_their_edges() {
+        let (timeline, _) = one(1, &[segment(0, &[0.5; 100])]);
+        let clip = &timeline.clips[0];
+        assert!((clip.fade_in_sec - 0.002).abs() < 1e-9);
+        assert!((clip.fade_out_sec - 0.002).abs() < 1e-9);
+    }
+
+    /// 很短的 clip 两侧各淡半长，避免淡入淡出叠在一起。
+    #[test]
+    fn a_short_clip_clamps_the_edge_fade_to_half_its_length() {
+        let (timeline, _) = one(1, &[segment(0, &[0.5; 2])]);
+        let clip = &timeline.clips[0];
+        assert!((clip.fade_in_sec - 0.001).abs() < 1e-9);
+        assert!((clip.fade_out_sec - 0.001).abs() < 1e-9);
     }
 
     /// 不相交的两段各生成一个片段，且**位置就是工程位置**。

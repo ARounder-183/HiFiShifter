@@ -54,6 +54,14 @@ use std::ops::Range;
 /// 又要足够短到不会被当成常驻噪声。10 秒在 120 BPM 下是 5 小节，覆盖绝大多数乐句。
 const LIMIT_WARNING_SEC: u64 = 10;
 
+/// resync 接缝处的去咔长度（帧）。48 kHz 下约 5.3 ms。
+///
+/// 【为什么必须在捕获侧做】空洞两端的样本都在源 PCM 里；在源上做淡入淡出后，
+/// 处理结果与原始磁带都会听到同一个平滑边界，不需要输出层再猜哪里是接缝。
+const DECLICK_FRAMES: usize = 256;
+/// 向前桥接的上限（秒）。超过它就不是"记账纠正"，而是真实 seek。
+const MAX_BRIDGE_SEC: u64 = 2;
+
 /// 一个段的**结束原因**。它是用户可见诊断的一部分：为什么录到这里就断了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClosedReason {
@@ -454,6 +462,14 @@ pub(crate) struct BlockContext {
     /// 循环回卷时块首也会回到同一位置，但内容仍在变化。只按几何无法区分两者 ——
     /// 前者必须丢弃，后者必须另起一段。
     pub advancing: bool,
+    /// 本块是**位置回退结束后的第一块**（`Synthesized`/`Continuous`/`Music` → `Project`）。
+    ///
+    /// 【为什么捕获需要它】起播窗口里我们自己推进的位置与宿主恢复后的位置可能差
+    /// 一小段。那不是 seek，是我们记账的纠正：向前用静音桥接、向后裁掉多记的尾巴，
+    /// 两种都**继续同一段**，不能切 clip。
+    pub resync: bool,
+    /// 允许当作"记账纠正"的最大帧差（本流钉住期间送来的帧数 + 本块）。
+    pub resync_limit_frames: u64,
 }
 
 impl BlockContext {
@@ -474,6 +490,8 @@ impl BlockContext {
             new_pass: false,
             part: 0,
             advancing: flow,
+            resync: false,
+            resync_limit_frames: 0,
         }
     }
 }
@@ -620,6 +638,8 @@ pub(crate) struct CaptureDiagnostics {
     pub overhang_trimmed_frames: u64,
     /// 循环边界切分次数。
     pub cycle_splits: u64,
+    /// 起播 resync 时用静音桥接的帧数。
+    pub resync_bridged_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -712,6 +732,8 @@ pub(crate) struct Capture {
     pub overhang_trimmed_frames: u64,
     /// 循环边界切分次数。
     pub cycle_splits: u64,
+    /// 起播 resync 时用静音桥接的帧数。
+    pub resync_bridged_frames: u64,
 }
 
 impl Default for Capture {
@@ -759,6 +781,7 @@ impl Default for Capture {
             overwritten_frames: 0,
             overhang_trimmed_frames: 0,
             cycle_splits: 0,
+            resync_bridged_frames: 0,
         }
     }
 }
@@ -896,6 +919,7 @@ impl Capture {
             overwritten_frames: diagnostics.overwritten_frames,
             overhang_trimmed_frames: diagnostics.overhang_trimmed_frames,
             cycle_splits: diagnostics.cycle_splits,
+            resync_bridged_frames: diagnostics.resync_bridged_frames,
             ..Self::default()
         };
     }
@@ -925,6 +949,7 @@ impl Capture {
             overwritten_frames: self.overwritten_frames,
             overhang_trimmed_frames: self.overhang_trimmed_frames,
             cycle_splits: self.cycle_splits,
+            resync_bridged_frames: self.resync_bridged_frames,
         }
     }
 
@@ -1074,6 +1099,8 @@ impl Capture {
                     ctx.playing_rising || ctx.recording_rising,
                     ctx.part,
                     ctx.advancing,
+                    false,
+                    0,
                 );
             }
             return CaptureOutcome::NotPlaying;
@@ -1127,6 +1154,8 @@ impl Capture {
             ctx.playing_rising || ctx.recording_rising,
             ctx.part,
             ctx.advancing,
+            ctx.resync,
+            ctx.resync_limit_frames,
         )
     }
 
@@ -1328,6 +1357,8 @@ impl Capture {
         rising: bool,
         part: u8,
         advancing: bool,
+        resync: bool,
+        resync_limit_frames: u64,
     ) -> CaptureOutcome {
         // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
         if block.playing {
@@ -1339,7 +1370,18 @@ impl Capture {
                 }
             }
             self.started = true;
-            return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
+            return self.write_block(
+                block,
+                start,
+                frames,
+                skip,
+                rate,
+                rising,
+                part,
+                advancing,
+                resync,
+                resync_limit_frames,
+            );
         }
 
         // 弱证据：位置流在推进。第一块只暂存，第二块连续才提交。
@@ -1348,7 +1390,16 @@ impl Capture {
                 if self.pending_is_contiguous(stream, start, rate) {
                     if self.commit_pending(stream) {
                         return self.write_block(
-                            block, start, frames, skip, rate, rising, part, advancing,
+                            block,
+                            start,
+                            frames,
+                            skip,
+                            rate,
+                            rising,
+                            part,
+                            advancing,
+                            resync,
+                            resync_limit_frames,
                         );
                     }
                 } else {
@@ -1362,7 +1413,18 @@ impl Capture {
             // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
             // `expected_next == None` 是流交接后的第一块：没有可比的终点，直接写。
             if self.expected_next.is_none() || self.expected_next == Some(start) {
-                return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
+                return self.write_block(
+                    block,
+                    start,
+                    frames,
+                    skip,
+                    rate,
+                    rising,
+                    part,
+                    advancing,
+                    resync,
+                    resync_limit_frames,
+                );
             }
             return CaptureOutcome::NotPlaying;
         }
@@ -1371,7 +1433,18 @@ impl Capture {
         // 起播第一块。先暂存；下一块连续时由上面的分支提交。
         if self.started && self.expected_next.is_none() {
             // 刚交接：新流的第一块没有可比终点，即使没有 flow 也要写。
-            return self.write_block(block, start, frames, skip, rate, rising, part, advancing);
+            return self.write_block(
+                block,
+                start,
+                frames,
+                skip,
+                rate,
+                rising,
+                part,
+                advancing,
+                resync,
+                resync_limit_frames,
+            );
         }
         if !self.started {
             self.stash_pending(stream, block, start, frames, skip, rate);
@@ -1607,6 +1680,104 @@ impl Capture {
         true
     }
 
+    /// 把 active 裁到**精确**的工程位置（resync 向后纠正）。
+    ///
+    /// 【为什么不能用 `trim_active_tail_to`】那个函数只从"最后一次写入的块首"开始裁，
+    /// 目的是保住循环回卷前的有效内容；resync 向后纠正时，多记的整段都是我们按块长
+    /// 推出来的，宿主已经明确告诉我们真实位置在更前面 —— 必须精确裁到 `new_start`。
+    fn trim_active_tail_exact(&mut self, new_start: i64) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let end = active.origin.saturating_add(active.filled as i64);
+        if new_start <= active.origin || new_start >= end {
+            return false;
+        }
+        let keep = (new_start - active.origin) as usize;
+        let dropped = active.filled - keep;
+        active.filled = keep;
+        self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
+        self.expected_next = Some(new_start);
+        self.last_position = Some(new_start);
+        self.last_written = None;
+        self.overhang_trimmed_frames = self.overhang_trimmed_frames.saturating_add(dropped as u64);
+        true
+    }
+
+    /// 用静音桥接 `frames` 帧（resync 向前纠正）。
+    ///
+    /// 返回是否全部写入；备用缓冲不够时返回 false，调用方退回"新开段"的旧行为。
+    /// 桥接帧计入 `captured_frames`（它是 take 的一部分），也计入
+    /// `resync_bridged_frames`（诊断）。
+    fn bridge_silence(&mut self, frames: usize) -> bool {
+        let mut remaining = frames;
+        while remaining > 0 {
+            if self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.filled >= self.capacity)
+            {
+                if let Some(active) = self.active.take() {
+                    self.sealed.push(seal(active, ClosedReason::Full));
+                }
+            }
+            if self.active.is_none() {
+                let Some(mut spare) = self.spares.pop() else {
+                    return false;
+                };
+                spare.origin = self.expected_next.unwrap_or(0);
+                spare.sample_rate = self.sample_rate;
+                spare.loss = SegmentLoss::None;
+                spare.loop_start = self.current_loop_start;
+                spare.filled = 0;
+                spare.peak = [0.0; 2];
+                spare.closed = ClosedReason::Full;
+                self.active = Some(spare);
+            }
+            let Some(active) = self.active.as_mut() else {
+                return false;
+            };
+            let writable = remaining.min(self.capacity.saturating_sub(active.filled));
+            if writable == 0 {
+                return false;
+            }
+            let start = active.origin.saturating_add(active.filled as i64);
+            for plane in active.planes.iter_mut() {
+                plane[active.filled..active.filled + writable].fill(0.0);
+            }
+            active.filled += writable;
+            let next = active.origin.saturating_add(active.filled as i64);
+            self.expected_next = Some(next);
+            self.last_position = Some(next);
+            self.last_written = Some((start, writable));
+            self.captured_frames = self.captured_frames.saturating_add(writable as u64);
+            self.resync_bridged_frames = self
+                .resync_bridged_frames
+                .saturating_add(writable as u64);
+            remaining -= writable;
+        }
+        true
+    }
+
+    /// 对 active 末尾 `frames` 帧做线性淡出（桥接前的去咔）。
+    fn fade_active_tail_out(&mut self, frames: usize) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let end = active.filled;
+        let fade = frames.min(end);
+        if fade == 0 {
+            return;
+        }
+        let start = end - fade;
+        for plane in active.planes.iter_mut() {
+            for (index, sample) in plane[start..end].iter_mut().enumerate() {
+                let gain = 1.0 - (index + 1) as f32 / fade as f32;
+                *sample *= gain;
+            }
+        }
+    }
+
     /// 真正写入一块（裁剪后的 `start`/`frames`，源偏移 `skip`）。
     ///
     /// `rising` = 本块是 `kPlaying`/`kRecording` 的上升沿：允许用新内容覆盖停播时
@@ -1623,6 +1794,8 @@ impl Capture {
         rising: bool,
         part: u8,
         advancing: bool,
+        resync: bool,
+        resync_limit_frames: u64,
     ) -> CaptureOutcome {
         if self.sample_rate == 0 {
             self.sample_rate = rate;
@@ -1646,6 +1819,25 @@ impl Capture {
         let mut skip = skip;
         if part == 1 {
             self.cycle_splits = self.cycle_splits.saturating_add(1);
+        }
+        // 【resync 纠正：这不是 seek】起播窗口里我们自己推进的位置与宿主恢复后的位置
+        // 可能差一小段。向前用静音桥接（缺的正是真实播放的静音），向后裁掉多记的
+        // 尾巴；两种都继续同一段，不能因为一个记账误差把 take 切成两个 clip。
+        let mut resync_continued = false;
+        if part == 0 && resync {
+            if let Some(expected) = self.expected_next {
+                let delta = start.saturating_sub(expected);
+                let limit = resync_limit_frames.max(64);
+                if delta > 0
+                    && delta as u64 <= limit
+                    && (delta as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
+                {
+                    self.fade_active_tail_out(DECLICK_FRAMES);
+                    resync_continued = self.bridge_silence(delta as usize);
+                } else if delta < 0 && delta.unsigned_abs() <= limit {
+                    resync_continued = self.trim_active_tail_exact(start);
+                }
+            }
         }
         if part == 0 {
             if let Some(expected) = self.expected_next {
@@ -1700,14 +1892,17 @@ impl Capture {
 
         // 循环回卷的兜底：没有 cycle 元数据时，把上一段末尾“越过新起点”的尾巴裁掉。
         // 只从**最后一次写入的块首**开始裁：更早的块一定属于上一遍的有效内容。
-        let trimmed = if part == 0 {
+        let trimmed = if part == 0 && !resync_continued {
             self.trim_active_tail_to(start)
         } else {
             false
         };
 
         // 连续性：上一块的终点是否正好接上这一块的首点。
-        let loss = if trimmed {
+        let loss = if resync_continued {
+            // 桥接/精确裁剪已经把 `expected_next` 对齐到 `start`；这是同一段的延续。
+            SegmentLoss::None
+        } else if trimmed {
             self.backwards = self.backwards.saturating_add(1);
             SegmentLoss::Backward
         } else {
@@ -1800,6 +1995,7 @@ impl Capture {
         if silent {
             self.silent_blocks = self.silent_blocks.saturating_add(1);
         }
+        let written_offset = active.filled;
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[active.filled..active.filled + writable];
             match block.planes.get(channel).copied().flatten() {
@@ -1827,6 +2023,20 @@ impl Capture {
         self.last_position = self.expected_next;
         self.peak[0] = self.peak[0].max(active.peak[0]);
         self.peak[1] = self.peak[1].max(active.peak[1]);
+        if resync_continued {
+            // 桥接/裁剪后的第一块开头做淡入；与桥接前的淡出配对，接缝不再有阶跃。
+            let fade = DECLICK_FRAMES.min(writable);
+            if fade > 0 {
+                for plane in active.planes.iter_mut() {
+                    for (index, sample) in plane[written_offset..written_offset + fade]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        *sample *= (index + 1) as f32 / fade as f32;
+                    }
+                }
+            }
+        }
 
         // 恰好写满 ⇒ 立刻封口，让非音频线程尽早拿到完整段。
         if active.filled >= self.capacity {
@@ -1980,6 +2190,8 @@ mod tests {
             new_pass: false,
             part: 0,
             advancing: flow,
+            resync: false,
+            resync_limit_frames: 0,
         }
     }
 
@@ -2708,5 +2920,62 @@ mod tests {
 
         let sealed = capture.finish(ClosedReason::Stopped);
         assert_eq!(sealed[1].loop_start, None, "大跳跃必须退出循环组");
+    }
+
+    /// **起播 resync 的小缺口用静音桥接，且不新开段。**
+    #[test]
+    fn a_resync_gap_is_bridged_into_one_segment() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(0, 4, 48_000.0);
+        capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true));
+
+        // 宿主恢复后的位置比我们自己记账的终点晚 12 帧。
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.resync = true;
+        context.resync_limit_frames = 100;
+        let (_, view) = block(16, 4, 48_000.0);
+        capture.on_block_with_context(view, context);
+
+        assert_eq!(capture.resync_bridged_frames, 12);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "记账纠正不能把 take 切成两段");
+        assert_eq!(sealed[0].span(), 0..20);
+    }
+
+    /// **起播 resync 的向后纠正裁掉多记的尾巴，并继续同一段。**
+    #[test]
+    fn a_backward_resync_continues_the_same_segment() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(0, 16, 48_000.0);
+        capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true));
+
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.resync = true;
+        context.resync_limit_frames = 100;
+        let (_, view) = block(8, 4, 48_000.0);
+        capture.on_block_with_context(view, context);
+
+        assert!(capture.overhang_trimmed_frames >= 8);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "向后纠正不能把 take 切成两段");
+        assert_eq!(sealed[0].span(), 0..12);
+    }
+
+    /// **真实 seek 不会被 resync 桥接吞掉。**
+    #[test]
+    fn a_real_seek_still_starts_a_new_segment() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(0, 4, 48_000.0);
+        capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true));
+
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.resync = true;
+        context.resync_limit_frames = 10;
+        let (_, view) = block(1_000, 4, 48_000.0);
+        capture.on_block_with_context(view, context);
+
+        assert_eq!(capture.resync_bridged_frames, 0);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2, "超出纠正上限的跳跃仍然另起一段");
     }
 }

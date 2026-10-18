@@ -1325,16 +1325,28 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
 }
 
 unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_void) -> TResult {
-    if this.is_null() {
+    if this.is_null() || state.is_null() {
         return K_INVALID_ARGUMENT;
     }
+    // 【为什么恢复失败也回 OK】`setState` 返回失败时，宿主可能中止该实例的恢复，
+    // 或者在重开工程时把插件标成"状态损坏"。一份读不出来的旧存档只该丢掉那份
+    // 编辑，不该让整份工程加载失败。
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let bytes = unsafe { crate::state_stream::read_state(state) }?;
+        let bytes = match unsafe { crate::state_stream::read_state(state) } {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::warn!("[state] component setState ignored: unreadable stream: {error}");
+                return;
+            }
+        };
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
-        owner.restore_state(&bytes)?;
-        Ok::<_, String>(())
+        if let Err(error) = owner.restore_state(&bytes) {
+            log::error!(
+                "[state] component setState ignored: {error}; the host document load continues"
+            );
+        }
     }));
-    if matches!(outcome, Ok(Ok(()))) {
+    if outcome.is_ok() {
         K_RESULT_OK
     } else {
         K_RESULT_FALSE
@@ -1342,12 +1354,17 @@ unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_v
 }
 
 unsafe extern "system" fn component_get_state(this: *mut c_void, state: *mut c_void) -> TResult {
-    if this.is_null() {
+    if this.is_null() || state.is_null() {
         return K_INVALID_ARGUMENT;
     }
+    // 【为什么编码失败也回 OK】`encode_state` 的契约是"永远给出一份可用载荷"；
+    // 即使它意外失败，也要写一份合法的空状态，而不是让宿主把这次保存当成失败。
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
-        let bytes = owner.encode_state()?;
+        let bytes = owner.encode_state().unwrap_or_else(|error| {
+            log::error!("[state] component getState degraded to an empty payload: {error}");
+            Vec::new()
+        });
         unsafe { crate::state_stream::write_state(state, &bytes) }
     }));
     if matches!(outcome, Ok(Ok(()))) {
@@ -1847,6 +1864,19 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                     }
                 }
             };
+            // 【为什么在快照写完以后】接缝去咔需要"上一块输出的尾巴"与"这一块的新信号"
+            // 做交叉淡化；写完再混，才不会把新源的第一帧直接硬切到旧源的最后帧。
+            let declick_stream = evidence.map_or(
+                crate::transfer::capture::ProcessStream::Realtime,
+                |evidence| evidence.stream,
+            );
+            unsafe {
+                owner.apply_output_declick(
+                    declick_stream,
+                    &mut *data.outputs,
+                    data.num_samples as usize,
+                )
+            };
             if data.process_mode == 2 && !ready {
                 return K_RESULT_FALSE;
             }
@@ -1956,6 +1986,12 @@ struct EditController {
     connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
     connection: crate::editor::connection::ConnectionState,
     editor_link: Arc<crate::editor::routing::EditorLink>,
+    /// 控制器先于路由拿到状态时的暂存。
+    ///
+    /// 【为什么需要】宿主可以只走 `IEditController` 通道；`setComponentState` /
+    /// `setState` 往往发生在 `createView` 与视图连接之前，此时 `editor_link` 还没有
+    /// owner。先存下来，等 `setComponentHandler` / `createView` 时补投。
+    pending_state: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl EditController {
@@ -1966,6 +2002,75 @@ impl EditController {
             connection_vtbl: &CONTROLLER_CONNECTION_VTBL,
             connection: Default::default(),
             editor_link: Arc::new(Default::default()),
+            pending_state: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 把暂存状态交给 owner；owner 还不可用时原样放回。
+    fn flush_pending_state(&self) {
+        let bytes = self
+            .pending_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some(bytes) = bytes else {
+            return;
+        };
+        match self.editor_link.owner() {
+            Ok(owner) => {
+                if let Err(error) = owner.restore_state(&bytes) {
+                    log::error!(
+                        "[state] controller pending state ignored: {error}; the host load continues"
+                    );
+                }
+            }
+            Err(_) => {
+                *self
+                    .pending_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(bytes);
+            }
+        }
+    }
+
+    /// 控制器通道的状态载荷：owner 可用时镜像组件状态，否则用暂存/空状态。
+    fn state_bytes(&self) -> Vec<u8> {
+        if let Ok(owner) = self.editor_link.owner() {
+            return owner.encode_state().unwrap_or_else(|error| {
+                log::error!("[state] controller getState degraded to an empty payload: {error}");
+                Vec::new()
+            });
+        }
+        self.pending_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .unwrap_or_else(|| {
+                crate::state_channel::EditState::default()
+                    .encode()
+                    .unwrap_or_default()
+            })
+    }
+
+    /// 控制器通道的恢复：owner 可用就直接应用，否则暂存。
+    fn restore_bytes(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        match self.editor_link.owner() {
+            Ok(owner) => {
+                if let Err(error) = owner.restore_state(&bytes) {
+                    log::error!(
+                        "[state] controller setState ignored: {error}; the host load continues"
+                    );
+                }
+            }
+            Err(_) => {
+                *self
+                    .pending_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(bytes);
+            }
         }
     }
 }
@@ -2078,36 +2183,69 @@ unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResul
 }
 
 unsafe extern "system" fn edit_controller_set_component_state(
-    _this: *mut c_void,
-    _state: *mut c_void,
+    this: *mut c_void,
+    state: *mut c_void,
 ) -> TResult {
-    {
-        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    if this.is_null() || state.is_null() {
+        return K_INVALID_ARGUMENT;
     }
+    // 【为什么不再回 `E_NOTIMPL`】少数宿主只走控制器通道；回 not-implemented 会让
+    // 它们保存/恢复不到任何编辑。这里与 `IComponent::setState` 共用同一份恢复逻辑。
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        let controller = unsafe { &*(this as *const EditController) };
+        match unsafe { crate::state_stream::read_state(state) } {
+            Ok(bytes) => {
+                controller.restore_bytes(bytes);
+                K_RESULT_OK
+            }
+            Err(error) => {
+                log::warn!("[state] controller setComponentState ignored: {error}");
+                K_RESULT_OK
+            }
+        }
+    })
 }
 
 unsafe extern "system" fn edit_controller_set_state(
-    _this: *mut c_void,
-    _state: *mut c_void,
+    this: *mut c_void,
+    state: *mut c_void,
 ) -> TResult {
-    {
-        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    if this.is_null() || state.is_null() {
+        return K_INVALID_ARGUMENT;
     }
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        let controller = unsafe { &*(this as *const EditController) };
+        match unsafe { crate::state_stream::read_state(state) } {
+            Ok(bytes) => {
+                controller.restore_bytes(bytes);
+                K_RESULT_OK
+            }
+            Err(error) => {
+                log::warn!("[state] controller setState ignored: {error}");
+                K_RESULT_OK
+            }
+        }
+    })
 }
 
 unsafe extern "system" fn edit_controller_get_state(
-    _this: *mut c_void,
-    _state: *mut c_void,
+    this: *mut c_void,
+    state: *mut c_void,
 ) -> TResult {
-    {
-        // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-        // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+    if this.is_null() || state.is_null() {
+        return K_INVALID_ARGUMENT;
     }
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        let controller = unsafe { &*(this as *const EditController) };
+        let bytes = controller.state_bytes();
+        match unsafe { crate::state_stream::write_state(state, &bytes) } {
+            Ok(()) => K_RESULT_OK,
+            Err(error) => {
+                log::warn!("[state] controller getState could not write: {error}");
+                K_RESULT_FALSE
+            }
+        }
+    })
 }
 
 unsafe extern "system" fn edit_controller_get_parameter_count(_this: *mut c_void) -> i32 {
@@ -2230,6 +2368,8 @@ unsafe extern "system" fn edit_controller_set_component_handler(
                     "connected"
                 }
             ));
+            // 宿主连接控制器后，路由通常已经建立；补投早到的控制器状态。
+            controller.flush_pending_state();
             K_RESULT_OK
         })
     }
@@ -2250,11 +2390,11 @@ unsafe extern "system" fn edit_controller_create_view(
                 return std::ptr::null_mut();
             }
             crate::log_line("IEditController::createView -> native editor");
-            crate::editor::create_view_with_link(
-                unsafe { &*(this as *const EditController) }
-                    .editor_link
-                    .clone(),
-            )
+            let controller = unsafe { &*(this as *const EditController) };
+            let view = crate::editor::create_view_with_link(controller.editor_link.clone());
+            // 视图创建后路由可能已可用；把早到的控制器状态补投一次（不可用则放回）。
+            controller.flush_pending_state();
+            view
         })
     }
 }

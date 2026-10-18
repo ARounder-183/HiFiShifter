@@ -1034,7 +1034,7 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
     assert_eq!(
         owner.synthesized_blocks.load(Ordering::Acquire),
         4,
-        "四块由本插件记账"
+        "四块由内容变化推进"
     );
 }
 
@@ -1049,9 +1049,9 @@ fn a_pinned_silent_repeat_stays_resting() {
     let stream = ProcessStream::Realtime;
     let context = pinned_context(1_000);
     for index in 0..20_u64 {
-        // 同一份内容 ⇒ 时间没有前进。
+        // 同一份内容、**没有**播放上升沿 ⇒ 这是停播重复，不是起播窗口。
         owner.streams[stream.index()].note_activity(0x2000);
-        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        let block = owner.note_stream_block(stream, &context, 256, false, false);
         if index > 0 {
             assert_eq!(
                 block.phase,
@@ -1064,6 +1064,47 @@ fn a_pinned_silent_repeat_stays_resting() {
     assert_eq!(owner.synthesized_blocks.load(Ordering::Acquire), 0);
 }
 
+/// **起播窗口里的静音/持续音也必须按块长推进。**
+///
+/// 【为什么这是问题一的回归】VEGAS 在钉住窗口里可能先送 0.4 s 静音，再送内容。
+/// 只按"内容变化"判流动会把这 0.4 s 当成停播；resync 时整段缺失，时间线在 0.66 s
+/// 处被切成两个 clip。上升沿给出的一次性窗口必须覆盖它。
+#[test]
+fn a_pinned_silent_start_advances_the_position() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    let mut seen = Vec::new();
+    for index in 0..40_u64 {
+        // 同一份内容、且是全零：没有"内容变化"证据，但上升沿锁存必须推进。
+        owner.streams[stream.index()].note_activity(0x6000);
+        owner.streams[stream.index()].note_block_silence(true);
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        seen.push(block.position);
+    }
+    assert_eq!(seen[0], 1_000, "首块落在宿主报的位置上");
+    assert_eq!(
+        seen[39],
+        1_000 + 39 * 256,
+        "上升沿之后 1 秒内的静音块必须按块长推进"
+    );
+    assert!(
+        owner.streams[stream.index()]
+            .pinned_advance_blocks
+            .load(Ordering::Acquire)
+            > 0,
+        "必须记录锁存推进的块数"
+    );
+    assert_eq!(
+        PositionSource::from_code(
+            owner.streams[stream.index()]
+                .last_source
+                .load(Ordering::Acquire)
+        ),
+        Some(PositionSource::Synthesized)
+    );
+}
+
 /// **从停播转入播放时，停播期间累积的帧数必须清零。**
 ///
 /// 【为什么必须有这一条】宿主可以一直报 `kPlaying` 却钉住位置（停播）。那些重复块
@@ -1074,15 +1115,16 @@ fn a_stationary_stretch_does_not_offset_the_real_start() {
     let owner = insert_owner();
     let stream = ProcessStream::Realtime;
     let context = pinned_context(1_000);
-    // 先停 40 块（同一份内容），再开始流动。
-    for index in 0..40_u64 {
+    // 先停 40 块（同一份内容）—— 这一段**没有**播放上升沿，它只是停播重复。
+    for _ in 0..40_u64 {
         owner.streams[stream.index()].note_activity(0x3000);
-        owner.note_stream_block(stream, &context, 256, index == 0, false);
+        owner.note_stream_block(stream, &context, 256, false, false);
     }
     let mut seen = Vec::new();
     for index in 0..3_u64 {
         owner.streams[stream.index()].note_activity(0x4000 + index);
-        let block = owner.note_stream_block(stream, &context, 256, false, false);
+        // 真正的起播上升沿在第一块流动块上。
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
         seen.push(block.position);
     }
     assert_eq!(

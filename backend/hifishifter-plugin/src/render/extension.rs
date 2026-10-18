@@ -167,6 +167,10 @@ pub(crate) enum HostAudioState {
     /// （见 [`BindingReport`]）。用户界面上没有任何对应物：时间线是空的，没有任何说明。
     /// 把它接进状态链之后，日志可以安静，用户拿到的是**一句可读的说明**。
     UnmatchedRegions,
+    /// region 已分配，但宿主还没开启样本访问。
+    AwaitingSamplesAccess,
+    /// 宿主开启了访问，但样本读取失败（真故障，终态）。
+    SourceReadFailed,
 }
 
 impl HostAudioState {
@@ -177,6 +181,8 @@ impl HostAudioState {
             HostAudioState::AwaitingRegions => "awaiting_regions",
             HostAudioState::FolderParentWithoutRegions => "folder_parent_without_regions",
             HostAudioState::UnmatchedRegions => "unmatched_regions",
+            HostAudioState::AwaitingSamplesAccess => "awaiting_samples_access",
+            HostAudioState::SourceReadFailed => "source_read_failed",
         }
     }
 }
@@ -473,6 +479,19 @@ struct StreamGeometry {
     pinned_frames: AtomicU64,
     /// 用 `Synthesized` 记账过的块数（诊断）。
     synthesized_blocks: AtomicU64,
+    /// 起播/录音上升沿之后剩余的"内容不变也推进"帧数。
+    ///
+    /// 【为什么需要】VEGAS 的钉住窗口里前段可能是静音或持续音；只按"内容变化"
+    /// 判流动会把这 0.4 s 当成停播，resync 时整段缺失。上升沿给出一次性的
+    /// [`PINNED_PLAYBACK_SEC`] 窗口，窗口内每一块都按块长推进。
+    pinned_advance_frames: AtomicU64,
+    /// 由锁存（而非内容变化）推进的块数（诊断）。
+    pinned_advance_blocks: AtomicU64,
+    /// 本块是否全零。
+    ///
+    /// 【为什么需要】起播锁存只在**静音**块上生效：FL 停播时重复的是非零内容，
+    /// 不能把它判成播放；VEGAS 起播窗口的前段静音则必须按块长推进。
+    last_block_silent: AtomicBool,
 }
 
 /// "音频在流动"的观测窗口（块数）。
@@ -494,6 +513,12 @@ const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 因此只需要容忍起播窗口里的短暂静音；16 块 ≈ 170 ms 足够覆盖一个气口，又不会让
 /// 停止后的输出拖得太久。
 const SYNTHESIZED_STALL_BLOCKS: u32 = 16;
+/// 起播/录音上升沿之后，允许"内容不变也按块长前进"的时长（秒）。
+///
+/// 【为什么是 1 秒且不续期】VEGAS 的钉住窗口约 0.66 s，1 秒足够覆盖；它是一次性窗口，
+/// 不因为"内容在变"而续期，于是 FL 停播（`kPlaying` 仍为 1）最多在起播后 1 秒耗尽，
+/// 不会在停播后继续推进。超过 1 秒的静音由捕获侧的 resync 零桥接补齐。
+const PINNED_PLAYBACK_SEC: f64 = 1.0;
 
 impl StreamGeometry {
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
@@ -525,6 +550,11 @@ impl StreamGeometry {
         changed
     }
 
+    /// 记录本块是否全零（由 `transfer_observe` 在几何判定之前调用）。
+    fn note_block_silence(&self, silent: bool) {
+        self.last_block_silent.store(silent, Ordering::Release);
+    }
+
     /// 最近窗口里是否有足够多的"内容变化"块。
     fn activity_moving(&self) -> bool {
         self.activity_changed.load(Ordering::Acquire).count_ones() >= ACTIVITY_MIN_CHANGES
@@ -539,6 +569,15 @@ impl StreamGeometry {
 ///
 /// 【为什么把块长也拌进去】宿主在停播时可能把块长缩小/放大而内容不变 —— 那不是
 /// 时间在前进。
+/// 本块是否全零（锁存推进只对静音块生效）。
+fn block_is_silent(block: &crate::transfer::capture::InputBlock<'_>) -> bool {
+    block
+        .planes
+        .iter()
+        .flatten()
+        .all(|plane| plane.iter().all(|sample| *sample == 0.0))
+}
+
 fn block_activity_hash(block: &crate::transfer::capture::InputBlock<'_>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for plane in block.planes.iter().flatten() {
@@ -566,6 +605,10 @@ struct StreamBlock {
     new_pass: bool,
     /// 本流最近是否观测到"输入内容在变化"（音频在流动）。
     activity_moving: bool,
+    /// 本块是位置回退结束后的第一块（`Synthesized`/`Continuous`/`Music` → `Project`）。
+    resync: bool,
+    /// 允许当作"记账纠正"的最大帧差（钉住期间送来的帧数 + 本块）。
+    resync_limit_frames: u64,
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
@@ -600,6 +643,46 @@ impl StreamTime {
     }
 }
 
+/// 输出源切换的去咔长度（帧）。48 kHz 下约 1.3 ms，足以消除阶跃。
+const OUTPUT_DECLICK_FRAMES: usize = 64;
+
+/// 一条进程流的输出接缝状态（音频线程写，无锁）。
+///
+/// 【为什么按流分开】prefetch 与 realtime 的块会交替到达；共用一份 tail 会让
+/// 一条流把另一条流的"上一块"当成自己的接缝。
+struct OutputDeclickState {
+    /// 上一块输出的最后 `OUTPUT_DECLICK_FRAMES` 帧（f32 位模式）。
+    tail: [Vec<AtomicU32>; 2],
+    /// 源切换那一刻抓下来的旧信号，供跨块淡入淡出。
+    fade_from: [Vec<AtomicU32>; 2],
+    fade_pos: AtomicU32,
+    fade_active: AtomicBool,
+    last_token: AtomicU64,
+    /// 是否已经处理过本流的第一块。
+    ///
+    /// 【为什么需要】第一块没有"上一块输出的尾巴"；从零淡入会改变宿主直通/录制监听
+    /// 的样本（测试与真实行为都要求第一块原样输出）。只在**后续源切换**时去咔。
+    primed: AtomicBool,
+}
+
+impl Default for OutputDeclickState {
+    fn default() -> Self {
+        let zeros = || {
+            (0..OUTPUT_DECLICK_FRAMES)
+                .map(|_| AtomicU32::new(0))
+                .collect::<Vec<_>>()
+        };
+        Self {
+            tail: [zeros(), zeros()],
+            fade_from: [zeros(), zeros()],
+            fade_pos: AtomicU32::new(0),
+            fade_active: AtomicBool::new(false),
+            last_token: AtomicU64::new(0),
+            primed: AtomicBool::new(false),
+        }
+    }
+}
+
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -630,6 +713,12 @@ pub(crate) struct ExtensionOwner {
     /// 唯一的例外是宿主违反 ARA 契约、在 `setActive` 之后才绑定 —— 那时写入点会
     /// 覆盖成 `Ara`，而 `Ara` 本来就该赢（`signal_source` 也先查实时绑定）。
     binding_mode: AtomicI32,
+    /// ARA 绑定发生后，需要给已经打开的视图补发一次 bootstrap。
+    ///
+    /// 【为什么需要】窗口可能在绑定之前打开，那时 `hostKind` 只能报
+    /// `ara_only`/`transfer`；绑定后能力位与形态都变了，而 bootstrap 是导航前注入的
+    /// 静态快照。视图定时器看到这个标记就推一条 `plugin_bootstrap_changed`。
+    bootstrap_changed: AtomicBool,
     /// **文档上是否有别的实例持有 `PLAYBACK_RENDERER` 角色**。
     ///
     /// 【为什么需要这个原子量】`is_editor_only()` 要在**音频线程**上无锁求值
@@ -693,6 +782,10 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么与 `snapshots` 分开而不是塞进去】两者更新节奏不同：处理结果随曲线编辑
     /// 重发，原始磁带只在 take 变化时重发。合成失败或还没完成时这一份仍然有效。
     pub raw_tape: super::snapshot::SnapshotPublisher,
+    /// 本块输出源的稳定 token（种类 + 快照代次）；音频线程据此识别源切换。
+    output_token: AtomicU64,
+    /// 每条进程流的输出接缝状态。
+    declick: [OutputDeclickState; 3],
     /// 已发布处理结果对应的**素材代次**（`0` = 还没发过）。
     ///
     /// 【为什么单独记而不是从 `transfer_prepared` 里拆位】那个版本号是
@@ -763,6 +856,12 @@ pub(crate) struct ExtensionOwner {
     render_wanted: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// 最后一次成功编码的 ARA `EditState` 字节。
+    ///
+    /// 【为什么需要】文档已经关闭（`bound_once == true && document == None`）时，
+    /// 宿主仍可能调用 `getState`。此前会落到 Transfer 分支，序列化一份从未被 ARA
+    /// 写过的空 `EditState`，把用户的 ARA 编辑覆盖掉。这里保留最后一份成功载荷。
+    last_ara_state: Mutex<Option<Vec<u8>>>,
     preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
     prepare_owner: Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
@@ -861,6 +960,13 @@ pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Durati
 /// 的尝试次数上限提前退出，不必空等到这个上限。
 pub(crate) const OFFLINE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// 一份合法的空 `EditState` 字节；编码失败时返回空块（`restore` 把空块当 no-op）。
+fn default_edit_state_bytes() -> Vec<u8> {
+    crate::state_channel::EditState::default()
+        .encode()
+        .unwrap_or_default()
+}
+
 impl ExtensionOwner {
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
     pub(crate) fn is_closed(&self) -> bool {
@@ -920,6 +1026,45 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(ara2_bridge::plugin::ExtensionBinding::view_selection)
     }
+    /// 健康探活快照：**只读原子/弱引用，不创建会话、不取文档事务、不排队**。
+    ///
+    /// 【为什么需要它】启动探活此前用 `get_runtime_info`，而那条命令会走
+    /// `editor_session()` + actor 队列。重开工程时 `EditorSession::new` 的初始化
+    /// （以及曾经的同步临时目录清扫）可能远超 30 s IPC 超时，于是用户看到
+    /// `Backend invoke failed: plugin:get_runtime_info`。探活只需要回答"会话还在不在、
+    /// 形态是什么、有没有片段"，这些都能从原子读数得到。
+    pub(crate) fn health_snapshot(&self) -> serde_json::Value {
+        let transfer = self.transfer_session_if_initialized();
+        let document = self
+            .document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let document_alive = document.as_ref().is_some_and(|document| document.is_alive());
+        let clip_count = transfer
+            .as_ref()
+            .map_or(0, |session| session.clip_count())
+            .max(document.as_ref().map_or(0, |document| document.editor_clip_count()));
+        let mode = match self.mode() {
+            InstanceMode::Ara => "ara",
+            InstanceMode::Transfer => "transfer",
+            InstanceMode::Undetermined => "undetermined",
+        };
+        serde_json::json!({
+            "ok": true,
+            "closed": self.is_closed(),
+            "bound": self.is_bound(),
+            "bound_once": self.bound_once.load(Ordering::Acquire),
+            "mode": mode,
+            "document_alive": document_alive,
+            "session_initialized": transfer.is_some()
+                || document.as_ref().is_some_and(|document| document.editor_initialized()),
+            "host_kind": self.host_backend().kind().as_str(),
+            "model_available": hifishifter_kernel::world_vocoder::is_available(),
+            "clip_count": clip_count,
+        })
+    }
+
     /// 本实例当前是否**真的**挂在一份活的 ARA 文档上。
     ///
     /// 与 `bound_once` 的区别：那个是"曾经绑定过"的单调历史，这个是"此刻有效"。
@@ -949,6 +1094,13 @@ impl ExtensionOwner {
     pub(crate) fn note_ara_bound(&self) {
         self.binding_mode
             .store(InstanceMode::Ara.raw(), Ordering::Release);
+        // 已打开的视图可能是在绑定之前创建的：让视图定时器补发一次 bootstrap。
+        self.bootstrap_changed.store(true, Ordering::Release);
+    }
+
+    /// 取走"bootstrap 需要补发"的标记（视图定时器调用）。
+    pub(crate) fn take_bootstrap_changed(&self) -> bool {
+        self.bootstrap_changed.swap(false, Ordering::AcqRel)
     }
 
     /// 记录"绑定窗口已关闭且没有绑定" —— 本实例是 Transfer 形态。
@@ -2216,6 +2368,20 @@ impl ExtensionOwner {
             .cloned()
     }
 
+    /// 已经存在的编辑器会话（Transfer 或 ARA），**不创建**。
+    pub(crate) fn existing_editor_session(
+        &self,
+    ) -> Option<Arc<crate::editor::session::EditorSession>> {
+        if let Some(session) = self.transfer_session_if_initialized() {
+            return Some(session);
+        }
+        self.document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|document| document.existing_editor_session())
+    }
+
     /// 让 Transfer 编辑器会话重新加载时间线并重渲染（录制结束 / 切换 take / 清空之后）。
     ///
     /// 【为什么不在命令里直接做】`transfer_*` 命令在视图层（UI 线程）执行，而加载要读
@@ -2537,6 +2703,109 @@ impl ExtensionOwner {
         TransferOutput::PendingSynthesis
     }
 
+    /// 输出源 token：种类 + 快照代次。任一项变化都意味着"用户听到的信号换了源"。
+    fn output_token_for(&self, output: TransferOutput) -> u64 {
+        let kind = u64::from(output.code());
+        let revision = match output {
+            // 处理结果换版（曲线编辑 / 换 take）也要去咔。
+            TransferOutput::Processed | TransferOutput::StaleProcessed => {
+                self.snapshots[0].generation()
+            }
+            TransferOutput::Raw => self.raw_tape.generation(),
+            _ => 0,
+        };
+        kind | (revision << 8)
+    }
+
+    /// 记录本块输出源，并做接缝去咔。
+    ///
+    /// 【为什么在写完输出之后调用】先用新源写满整块，再把前 `OUTPUT_DECLICK_FRAMES`
+    /// 帧与"上一块输出的尾巴"交叉淡化；尾巴就是用户刚刚听到的旧源信号，与旧源连续，
+    /// 不需要再持有旧快照。所有状态都是原子 + 预分配缓冲，音频线程不分配、不取锁。
+    ///
+    /// # Safety
+    /// `output` 必须是本回调内有效的 VST3 输出总线；`frames` 不超过其平面长度。
+    pub(crate) unsafe fn apply_output_declick(
+        &self,
+        stream: ProcessStream,
+        output: &mut crate::audio_abi::AudioBusBuffers,
+        frames: usize,
+    ) {
+        if frames == 0 || output.num_channels <= 0 || output.channel_buffers.is_null() {
+            return;
+        }
+        let token = self.output_token.load(Ordering::Acquire);
+        let Some(state) = self.declick.get(stream.index()) else {
+            return;
+        };
+        // 【为什么首块不淡化】第一块没有"上一块输出的尾巴"；从零淡入会改写宿主直通
+        // 或录制监听的样本。只在后续源切换（Raw ↔ Processed、快照换版）时去咔。
+        let first = !state.primed.swap(true, Ordering::AcqRel);
+        if first {
+            state.last_token.store(token, Ordering::Release);
+        } else if state.last_token.swap(token, Ordering::AcqRel) != token {
+            for channel in 0..2 {
+                for index in 0..OUTPUT_DECLICK_FRAMES {
+                    state.fade_from[channel][index].store(
+                        state.tail[channel][index].load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            state.fade_pos.store(0, Ordering::Release);
+            state.fade_active.store(true, Ordering::Release);
+        }
+        let channels = (output.num_channels as usize).min(2);
+        if state.fade_active.load(Ordering::Acquire) {
+            let position = state.fade_pos.load(Ordering::Acquire) as usize;
+            let remaining = OUTPUT_DECLICK_FRAMES.saturating_sub(position);
+            let count = remaining.min(frames);
+            for channel in 0..channels {
+                // SAFETY: 调用方保证输出总线有 `channels` 个可写平面。
+                let plane = unsafe { *output.channel_buffers.add(channel) };
+                if plane.is_null() {
+                    continue;
+                }
+                for index in 0..count {
+                    let t = (position + index + 1) as f32 / OUTPUT_DECLICK_FRAMES as f32;
+                    let old =
+                        f32::from_bits(state.fade_from[channel][position + index].load(
+                            Ordering::Relaxed,
+                        ));
+                    // SAFETY: `index < frames`，调用方保证平面至少这么长。
+                    let current = unsafe { *plane.add(index) };
+                    unsafe {
+                        *plane.add(index) = old * (1.0 - t) + current * t;
+                    }
+                }
+            }
+            let next = position + count;
+            state.fade_pos.store(next as u32, Ordering::Release);
+            if next >= OUTPUT_DECLICK_FRAMES {
+                state.fade_active.store(false, Ordering::Release);
+            }
+        }
+        // 保存本块输出的尾巴，供下一次源切换使用。
+        let start = frames.saturating_sub(OUTPUT_DECLICK_FRAMES);
+        let written = frames - start;
+        for channel in 0..channels {
+            // SAFETY: 同上。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            for index in 0..written {
+                unsafe {
+                    state.tail[channel][index]
+                        .store((*plane.add(start + index)).to_bits(), Ordering::Relaxed);
+                }
+            }
+            for index in written..OUTPUT_DECLICK_FRAMES {
+                state.tail[channel][index].store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
     pub(crate) fn take_render_wanted(&self) -> bool {
         self.render_wanted.swap(false, Ordering::AcqRel)
@@ -2671,6 +2940,8 @@ impl ExtensionOwner {
                 cycle_wrap: false,
                 new_pass: false,
                 activity_moving: false,
+                resync: false,
+                resync_limit_frames: 0,
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
@@ -2756,38 +3027,76 @@ impl ExtensionOwner {
         // 【为什么 `!had` 也算钉住】第一块是"钉住区间"的起点：它的帧数必须计入，
         // 下一块才能落在 `P + frames` 而不是 `P`。
         let pinned = !had || (raw_start == last_raw && !time.cycle_active);
+        // 【为什么先记下来】`pinned_frames` 在位置恢复前进时会被清零；resync 的
+        // 允许误差必须用**清零前**的钉住帧数来算。
+        let prior_pinned_frames = geometry.pinned_frames.load(Ordering::Acquire);
+        // 【为什么上升沿要开一个一次性窗口】VEGAS 的钉住窗口里前段可能是静音/持续音；
+        // 只按"内容变化"判流动会把它当成停播，resync 时整段缺失。窗口只在上升沿充满，
+        // 不因内容变化续期 —— FL 停播（kPlaying 仍为 1）最多在起播后 1 秒耗尽。
+        if playing_rising || recording_rising {
+            geometry.pinned_advance_frames.store(
+                (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64,
+                Ordering::Release,
+            );
+        }
+        let latch_frames = geometry.pinned_advance_frames.load(Ordering::Acquire);
+        // 【为什么只对静音块生效】FL 停播时重复的是**非零**内容；把它当成播放会让
+        // 停播光标继续出声。VEGAS 起播窗口的前段静音才是需要锁存推进的那一段。
+        let silent = geometry.last_block_silent.load(Ordering::Acquire);
+        let latch = pinned && latch_frames > 0 && silent;
+        let advancing = activity_moving || latch;
         let mut pinned_before = if pinned {
             geometry.pinned_frames.load(Ordering::Acquire)
         } else {
             0
         };
+        // 【为什么上升沿要清零】上升沿是"这次播放从这里开始"的权威信号；它之前累积的
+        // 钉住帧属于停播/预卷，不能把真实起点推后。VEGAS 的起播窗口里这个值是 0；
+        // "停播一段再按播放"的宿主则靠这一步把停播时长扣掉。
+        if pinned && (playing_rising || recording_rising) {
+            pinned_before = 0;
+        }
         let mut synthesizing = geometry.synthesized.load(Ordering::Acquire);
         if pinned {
-            if activity_moving {
+            if advancing {
                 if !synthesizing {
                     // 【为什么这里可能要清零】从"静止"转入"流动"时，之前累积的帧数是
                     // 停播期间**重复投递**的块，不是时间推进。判据是"本块之前已经连续
                     // 不变"（`was_stationary`）—— 真正的起播窗口里内容一直在变，
                     // 那个计数是 0。
-                    if geometry.was_stationary.load(Ordering::Acquire) {
+                    //
+                    // 【为什么 latch 期间不清】latch 表示"宿主刚刚开始播放"；即使前段
+                    // 是静音，那段时间也是真实播放时间，不能从位置里扣掉。
+                    if !latch && geometry.was_stationary.load(Ordering::Acquire) {
                         pinned_before = 0;
                     }
                     synthesizing = true;
                     geometry.synthesized.store(true, Ordering::Release);
                 }
-            } else if geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS {
+            } else if !latch
+                && geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS
+            {
                 synthesizing = false;
                 geometry.synthesized.store(false, Ordering::Release);
             }
         } else {
             synthesizing = false;
             geometry.synthesized.store(false, Ordering::Release);
+            // 位置重新前进：锁存与钉住计数都归零，下一段钉住重新开始。
+            geometry.pinned_advance_frames.store(0, Ordering::Release);
         }
         if pinned && source == PositionSource::Project && synthesizing {
             position = raw_start.saturating_add(pinned_before as i64);
             source = PositionSource::Synthesized;
             self.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
             geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
+        }
+        if latch {
+            geometry.pinned_advance_frames.store(
+                latch_frames.saturating_sub(frames as u64),
+                Ordering::Release,
+            );
+            geometry.pinned_advance_blocks.fetch_add(1, Ordering::Relaxed);
         }
         if pinned {
             geometry.pinned_frames.store(
@@ -2888,6 +3197,16 @@ impl ExtensionOwner {
                 .store(phase != TransportPhase::Resting, Ordering::Release);
         }
 
+        // 【resync 候选】上一块用的是位置回退（我们自己在记账），这一块宿主位置
+        // 重新前进 —— 这不是 seek，是宿主在纠正我们的记账。真正的差值判定在
+        // 捕获侧（它才持有 `expected_next`），这里只给上限。
+        let resync = had
+            && raw_start != last_raw
+            && !time.cycle_active
+            && matches!(
+                last_source,
+                PositionSource::Continuous | PositionSource::Music | PositionSource::Synthesized
+            );
         StreamBlock {
             position,
             raw_start,
@@ -2896,6 +3215,8 @@ impl ExtensionOwner {
             cycle_wrap,
             new_pass: had && (cycle_wrap || position < last_position),
             activity_moving,
+            resync,
+            resync_limit_frames: prior_pinned_frames.saturating_add(frames as u64),
         }
     }
 
@@ -3032,6 +3353,10 @@ impl ExtensionOwner {
         // 变化"会让紧随其后的真实块被当成新素材（多出一块本不该有的位移）。
         if block.frames > 0 {
             self.streams[stream.index()].note_activity(block_activity_hash(&block));
+            // 【为什么要求 `has_audio`】"宿主没接输入总线"与"宿主送了静音"是两件事。
+            // 前者不能证明时间在走；只有确实有输入平面且全零时，锁存才该推进。
+            self.streams[stream.index()]
+                .note_block_silence(block.has_audio() && block_is_silent(&block));
         }
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
@@ -3089,6 +3414,8 @@ impl ExtensionOwner {
                     new_pass: stream_block.new_pass,
                     part: index.min(u8::MAX as usize) as u8,
                     advancing: stream_block.activity_moving,
+                    resync: stream_block.resync,
+                    resync_limit_frames: stream_block.resync_limit_frames,
                 },
             );
             outcome = if index == 0 {
@@ -3290,11 +3617,16 @@ impl ExtensionOwner {
         let offline = unsafe { (*data).process_mode } == 2;
         // 选项是无锁快照（见 `TransferStore::options`）。
         let options = transfer.options();
+        // 去咔状态按进程流隔离；块长取宿主本回调声明的帧数。
+        let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
+        let frames = unsafe { (*data).num_samples as usize };
         // 【为什么先仲裁、再做防御性清空】录制中的输出是**宿主正在送进来的原声**
         // （用户监听自己），它不该被"停播重复抑制"影响 —— 那个判据描述的是"同一段
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
         let output = self.transfer_output_with(evidence);
+        self.output_token
+            .store(self.output_token_for(output), Ordering::Release);
         self.note_output_rung(output);
         // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来
         // 改动绕过门控时把停播重复块写出去。ARA 实例保持原语义（不参与）。
@@ -3307,6 +3639,10 @@ impl ExtensionOwner {
                 {
                     // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                    // 从上一块尾巴淡到零，避免停播/清空处的阶跃。
+                    unsafe {
+                        self.apply_output_declick(stream, &mut *(*data).outputs, frames)
+                    };
                     return TransferStage::Handled;
                 }
             }
@@ -3335,6 +3671,7 @@ impl ExtensionOwner {
                     // SAFETY: 与上面同一份数据；`clear_outputs` 自己会校验形状。
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 }
+                unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
                 TransferStage::Handled
             }
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
@@ -3361,6 +3698,7 @@ impl ExtensionOwner {
                 // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                 let _ = unsafe { crate::audio_abi::pass_through(data) };
                 self.note_emitted(evidence);
+                unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
                 TransferStage::Handled
             }
         }
@@ -3446,6 +3784,19 @@ impl ExtensionOwner {
     /// 一条被跳过的分支，是 `undo_timeline` / `redo_timeline` / `set_history_position`
     /// 在非 REAPER 宿主上不再静默失效的关键。只有在文档/会话都还没建起来时才退到
     /// `NullHistory`（诚实的空栈），仍然不是 `None`。
+    /// 撤销历史的承载者分类（`"host"` / `"local"`），**不创建会话**。
+    ///
+    /// 【为什么与 `history_authority` 分开】bootstrap/健康探活只需要一个字符串；
+    /// `history_authority` 在没有宿主历史时会创建编辑器会话（见其实现），
+    /// 而探活必须能在会话尚未创建时回答。
+    pub(crate) fn history_backend(&self) -> &'static str {
+        if self.project_history_host().is_some() {
+            "host"
+        } else {
+            "local"
+        }
+    }
+
     pub(crate) fn history_authority(
         self: &Arc<Self>,
     ) -> Arc<dyn crate::host::history::HostHistory> {
@@ -3853,6 +4204,11 @@ impl ExtensionOwner {
     }
 
     /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
+    ///
+    /// 【契约】只有"调用方给的 state stream 非法"才可能失败；**任何**图未就绪、
+    /// flush 超时、reconcile 失败、fade 元数据在途、payload 超限都降级为"返回当前
+    /// 可用的最佳载荷"。宿主把 `getState` 的失败当成"插件存档失败"，而那比保存一份
+    /// 稍旧的快照糟得多。
     pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
         let document = self
             .document
@@ -3860,57 +4216,128 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         let (edits, transfer_edits) = if let Some(document) = document {
-            document.flush_editor()?;
+            // 【为什么 flush 失败不再传播】actor 可能正在跑一次长合成；等 10 秒再失败
+            // 会把宿主保存线程冻住，而且仍然存不下。短预算 + 用当前权威继续编码。
+            if let Err(error) =
+                document.flush_editor_with_budget(std::time::Duration::from_millis(200))
+            {
+                log::warn!("[ara] flush before save failed: {error}; saving the committed state");
+            }
             let _transaction = document.transaction.lock_or_recover();
             if !document.ready.load(Ordering::Acquire) {
-                return Err("host graph not ready; cannot save ARA edits".into());
+                log::warn!(
+                    "[ara] save requested before the host graph is ready; using the last good \
+                     snapshot"
+                );
+                let edits = self
+                    .pending_restore
+                    .lock_or_recover()
+                    .as_ref()
+                    .and_then(|state| state.encode().ok())
+                    .or_else(|| document.archive_cache.lock_or_recover().clone())
+                    .or_else(|| document.edits.lock_or_recover().encode().ok())
+                    .unwrap_or_else(default_edit_state_bytes);
+                return self.wrap_component_state(edits, None);
             }
-            self.merge_pending_restore(&document)?;
+            if let Err(error) = self.merge_pending_restore(&document) {
+                log::warn!("[ara] merge pending restore before save failed: {error}");
+            }
             let mut edits = document.edits.lock_or_recover();
-            edits.reconcile(&document.track_bindings.lock_or_recover())?;
-            let host = self.assigned_timeline(&document)?;
-            let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
-            let mut local = edits.clone();
-            local.params.retain(|id, _| allowed.contains(id));
-            local.tracks.retain(|t| allowed.contains(&t.id));
-            let clips = host
-                .clips
-                .iter()
-                .map(|clip| clip.id.clone())
-                .collect::<BTreeSet<_>>();
-            local.atlas.regions.retain(|id, _| clips.contains(id));
-            // 权威表必须按**同一口径**裁剪：键从已裁剪的 regions 派生 —— 那正是本组件
-            // 真实持有的片段身份。不裁剪会让一个组件把另一个组件的参数写进自己的存档
-            // （两个组件共享同一 source/modification 身份时尤其明显）。
-            let allowed_authorities = local
-                .atlas
-                .regions
-                .values()
-                .filter_map(|record| {
-                    crate::editor::parameter_atlas::authority_key(
-                        record.identity.item.as_deref(),
-                        &record.identity.modification,
-                    )
-                })
-                .collect::<BTreeSet<_>>();
-            local
-                .atlas
-                .authorities
-                .retain(|key, _| allowed_authorities.contains(key));
-            local
-                .atlas
-                .copy_seeds
-                .retain(|_, seed| allowed.contains(&seed.root));
-            local.atlas.gaps.retain(|root, _| allowed.contains(root));
-            if !local.fades.is_empty() {
-                let items = document.fade_items_locked(&clips);
-                if items.is_empty() && !clips.is_empty() {
-                    return Err("fade ownership metadata pending for save".into());
-                }
-                local.fades.retain(|item, _| items.contains(item));
+            if let Err(error) = edits.reconcile(&document.track_bindings.lock_or_recover()) {
+                log::warn!(
+                    "[ara] reconcile before save failed: {error}; saving the unpruned state"
+                );
             }
-            local.bindings.retain(|id, _| allowed.contains(id));
-            (local.encode()?, None)
+            let mut local = edits.clone();
+            match self.assigned_timeline(&document) {
+                Ok(host) => {
+                    let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
+                    local.params.retain(|id, _| allowed.contains(id));
+                    local.tracks.retain(|t| allowed.contains(&t.id));
+                    let clips = host
+                        .clips
+                        .iter()
+                        .map(|clip| clip.id.clone())
+                        .collect::<BTreeSet<_>>();
+                    local.atlas.regions.retain(|id, _| clips.contains(id));
+                    // 权威表必须按**同一口径**裁剪：键从已裁剪的 regions 派生 —— 那正是本组件
+                    // 真实持有的片段身份。不裁剪会让一个组件把另一个组件的参数写进自己的存档
+                    // （两个组件共享同一 source/modification 身份时尤其明显）。
+                    let allowed_authorities = local
+                        .atlas
+                        .regions
+                        .values()
+                        .filter_map(|record| {
+                            crate::editor::parameter_atlas::authority_key(
+                                record.identity.item.as_deref(),
+                                &record.identity.modification,
+                            )
+                        })
+                        .collect::<BTreeSet<_>>();
+                    local
+                        .atlas
+                        .authorities
+                        .retain(|key, _| allowed_authorities.contains(key));
+                    local
+                        .atlas
+                        .copy_seeds
+                        .retain(|_, seed| allowed.contains(&seed.root));
+                    local.atlas.gaps.retain(|root, _| allowed.contains(root));
+                    if !local.fades.is_empty() {
+                        let items = document.fade_items_locked(&clips);
+                        // 【为什么这里不再失败】fade 元数据在途时保留整份 fade 表；
+                        // 恢复端会按 clip 身份逐条 reconcile，丢几条好过整份存不下。
+                        if items.is_empty() && !clips.is_empty() {
+                            log::warn!(
+                                "[ara] fade ownership metadata pending; saving the unpruned fades"
+                            );
+                        } else {
+                            local.fades.retain(|item, _| items.contains(item));
+                        }
+                    }
+                    local.bindings.retain(|id, _| allowed.contains(id));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[ara] assigned timeline unavailable during save: {error}; saving the \
+                         full state"
+                    );
+                }
+            }
+            match local.encode() {
+                Ok(bytes) => {
+                    *self.last_ara_state.lock_or_recover() = Some(bytes.clone());
+                    (bytes, None)
+                }
+                Err(error) => {
+                    log::error!(
+                        "[ara] state encode failed: {error}; using the last good snapshot"
+                    );
+                    (
+                        self.last_ara_state
+                            .lock_or_recover()
+                            .clone()
+                            .unwrap_or_else(default_edit_state_bytes),
+                        None,
+                    )
+                }
+            }
+        } else if self.bound_once.load(Ordering::Acquire) {
+            // 【为什么不能落到 Transfer 分支】这个实例曾经绑定过 ARA，只是文档已经
+            // 关闭。Transfer 的 `self.edits` 从未被 ARA 写过；序列化它等于用一份空
+            // 状态覆盖用户全部编辑。保留最后一份成功载荷（或尚未合入的恢复载荷）。
+            let edits = self
+                .last_ara_state
+                .lock_or_recover()
+                .clone()
+                .or_else(|| {
+                    self.pending_restore
+                        .lock_or_recover()
+                        .as_ref()
+                        .and_then(|state| state.encode().ok())
+                })
+                .unwrap_or_else(default_edit_state_bytes);
+            (edits, None)
         } else {
             // 【Transfer 形态：用户曲线在会话上，不在这里】`self.edits` 从未被任何
             // Transfer 生产路径写过 —— 序列化它只会得到一个语法合法、语义为空的
@@ -3923,23 +4350,48 @@ impl ExtensionOwner {
                 .pending_restore
                 .lock_or_recover()
                 .as_ref()
-                .unwrap_or(&self.edits.lock_or_recover())
-                .encode()?;
-            let transfer_edits = match self.transfer_session_if_initialized() {
-                Some(session) => {
-                    // 【为什么保存前要 flush】与 ARA 分支的 `document.flush_editor()` 同
-                    // 一条纪律：actor 可能还没处理完最后一条编辑命令，不等它就存会存到
-                    // 旧曲线。失败不传播 —— 一次 flush 超时不该让整个工程存不下来。
-                    if let Err(error) = session.flush() {
-                        log::warn!("[transfer] flush before save failed: {error}");
-                    }
-                    Some(session.serialize_transfer_edits()?)
-                }
-                None => None,
-            };
+                .and_then(|state| state.encode().ok())
+                .or_else(|| self.edits.lock_or_recover().encode().ok())
+                .unwrap_or_else(default_edit_state_bytes);
+            let transfer_edits = self.transfer_edits_for_save();
             (edits, transfer_edits)
         };
         self.wrap_component_state(edits, transfer_edits)
+    }
+
+    /// 保存 Transfer 用户编辑：优先 live 会话，其次恢复载荷，最后 owner 暂存。
+    ///
+    /// 【为什么顺序不能反】live 编辑是用户刚做的事，最权威；恢复载荷是"还没合入
+    /// 时间线"的存档；owner 暂存是"连会话都还没建"。反过来会让一次保存把用户刚
+    /// 画的曲线覆盖成旧存档。
+    fn transfer_edits_for_save(&self) -> Option<Vec<u8>> {
+        match self.transfer_session_if_initialized() {
+            Some(session) => {
+                // 【为什么不是只看 `is_loaded`】恢复后、actor 第一次加载前，时间线可能
+                // 已经被写入（恢复路径/测试）；那仍是 live 权威，不能回落到空载荷。
+                let live = if session.is_loaded() || session.has_live_transfer_edits() {
+                    if let Err(error) =
+                        session.flush_with_budget(std::time::Duration::from_millis(200))
+                    {
+                        log::warn!(
+                            "[transfer] flush before save exceeded the budget: {error}; using \
+                             the last committed curves"
+                        );
+                    }
+                    match session.serialize_transfer_edits() {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) => {
+                            log::error!("[transfer] serialize before save failed: {error}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                live.or_else(|| session.serialize_pending_transfer_edits())
+            }
+            None => self.pending_transfer_edits.lock_or_recover().clone(),
+        }
     }
 
     /// 把 `EditState` 字节与 Transfer 清单包成组件 state。
@@ -5506,6 +5958,7 @@ impl ExtensionOwner {
                 "overwritten_frames": capture.overwritten_frames,
                 "overhang_trimmed_frames": capture.overhang_trimmed_frames,
                 "cycle_splits": capture.cycle_splits,
+                "resync_bridged_frames": capture.resync_bridged_frames,
             })
         });
         let stream = |index: usize| {
@@ -5519,6 +5972,9 @@ impl ExtensionOwner {
                 "rolling": self.stream_rolling_blocks[index].load(Ordering::Acquire),
                 "synthesized": self.streams[index]
                     .synthesized_blocks
+                    .load(Ordering::Acquire),
+                "pinned_advance": self.streams[index]
+                    .pinned_advance_blocks
                     .load(Ordering::Acquire),
             })
         };

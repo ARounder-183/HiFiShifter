@@ -1121,6 +1121,17 @@ impl DocumentSession {
                 waiting = in_flight;
             }
         }
+        // 【为什么再分两档】"宿主还没交付 region"与"region 有了、样本访问还没开"
+        // 对用户的可执行动作不同；读取失败则是终态，必须给出真因而不是继续转圈。
+        let failures = self.source_failures.lock_or_recover().len();
+        if failures > 0 {
+            state = crate::render::extension::HostAudioState::SourceReadFailed;
+            waiting = failures;
+        } else if state == crate::render::extension::HostAudioState::AwaitingRegions
+            && !self.samples_access_granted.load(Ordering::Acquire)
+        {
+            state = crate::render::extension::HostAudioState::AwaitingSamplesAccess;
+        }
         // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
         // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
         // 里是为了复用前端已有的读数通道，不必新增一条状态链。
