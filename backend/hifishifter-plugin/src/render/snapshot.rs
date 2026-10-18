@@ -386,8 +386,22 @@ impl SnapshotPublisher {
         Ok(())
     }
     /// 撤销只切换原子指针，不在音频线程释放存储。
+    ///
+    /// 【什么时候才该调用】只有"这个实例从此不再渲染"（文档关闭、编辑器停止）。
+    /// 宿主编辑造成的失效用 [`Self::invalidate_generation`]，否则清空 `current`
+    /// 会让 bound 实例的每一个音频块都写出纯零 —— 用户听到的就是间歇性完全无声。
     pub fn clear(&self) {
         self.current.store(std::ptr::null_mut(), Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 只推进代次，**不**动 `current`。
+    ///
+    /// 【为什么需要它】revision 门（`processed_ready` / `raw_tape_ready`、以及 ARA 侧
+    /// `PreparedVersion`）通过比较代次判断"这份快照是不是当前内容"。宿主编辑时需要
+    /// 让这个比较失效以触发重排，但**不能**同时把可听的快照撤掉：撤掉之后
+    /// `copy_block_at` 逐样本写零，而 bound 实例固定 `layered == false`，没有兜底。
+    pub(crate) fn invalidate_generation(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
     /// 必须持发布锁且仅在非实时线程调用。

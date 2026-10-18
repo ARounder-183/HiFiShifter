@@ -1033,8 +1033,8 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
     }
     assert_eq!(
         owner.synthesized_blocks.load(Ordering::Acquire),
-        4,
-        "四块由内容变化推进"
+        5,
+        "起播窗口是**区间**：上升沿之后的 5 块都按块长推进，包括首块"
     );
 }
 
@@ -1105,6 +1105,105 @@ fn a_pinned_silent_start_advances_the_position() {
     );
 }
 
+/// **起播窗口里"前段静音 + 后段内容"整段都要按块长推进。**
+///
+/// 【为什么这是问题一 1a 的回归】VEGAS 的窗口约 0.66 s：前 0.4 s 静音、后 0.26 s 内容。
+/// 旧的逐块锁存只保护静音块；内容一变化，`was_stationary` 清零与
+/// `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
+/// 用户听到的就是"0.4 s 处咔"与"0.66 s 断成两个 clip"。区间锁存必须让两段连起来。
+#[test]
+fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    let mut seen = Vec::new();
+    // 20 块静音（0.4 s @ 256/48k 约 20 块）+ 20 块内容 = 40 块 / 10240 帧 ≈ 0.21 s。
+    // 小于 1 s 窗口，所以 40 块全在窗口内；这条钉的是"静音段与内容段连起来"。
+    for index in 0..40_u64 {
+        if index < 20 {
+            // 前 20 块静音：内容指纹相同、且标记为静音。
+            owner.streams[stream.index()].note_activity(0x7000);
+            owner.streams[stream.index()].note_block_silence(true);
+        } else {
+            // 后 20 块内容在变。
+            owner.streams[stream.index()].note_activity(0x7000 + index);
+            owner.streams[stream.index()].note_block_silence(false);
+        }
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        seen.push(block.position);
+    }
+    for (index, position) in seen.iter().enumerate() {
+        assert_eq!(
+            *position,
+            1_000 + index as i64 * 256,
+            "第 {index} 块必须落在记账位置上（窗口是区间，不因内容从静音转为有声而中断）"
+        );
+    }
+    let geometry = &owner.streams[stream.index()];
+    assert_eq!(
+        geometry.pinned_window_open_count.load(Ordering::Acquire),
+        1,
+        "一次起播只开一个窗口"
+    );
+    assert_eq!(
+        geometry.pinned_window_closed_by.load(Ordering::Acquire),
+        0,
+        "40 块还在 1 s 窗口内：窗口尚未收口，因此没有收口原因"
+    );
+    assert!(
+        geometry.pinned_window_open.load(Ordering::Acquire),
+        "窗口仍然开着"
+    );
+    assert_eq!(
+        geometry.pinned_advance_frames_used.load(Ordering::Acquire),
+        40 * 256,
+        "窗口内推进的帧数必须覆盖整个窗口"
+    );
+    assert_eq!(
+        owner.synthesized_blocks.load(Ordering::Acquire),
+        40,
+        "40 块全部按块长记账：静音段与内容段都不能被抹掉"
+    );
+}
+
+/// **窗口一旦见到"逐块完全相同的非零内容"就立刻作废。**
+///
+/// 【为什么这条与上一条并存】FL Studio 停播时 `kPlaying` 仍为 1、内容逐块相同。
+/// 若窗口不看内容就把同一段重复判成播放，停播光标会继续出声。这也是唯一能与
+/// VEGAS 起播窗口区分的证据：VEGAS 送的是静音，FL 送的是同一份非零内容。
+#[test]
+fn a_repeated_nonzero_block_closes_the_window_immediately() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    let mut positions = Vec::new();
+    for index in 0..20_u64 {
+        // 同一份非零内容：`unchanged_run` 会累加，`last_block_silent` 为 false。
+        owner.streams[stream.index()].note_activity(0x8000);
+        owner.streams[stream.index()].note_block_silence(false);
+        let block = owner.note_stream_block(stream, &context, 256, index == 0, false);
+        positions.push(block.position);
+    }
+    assert_eq!(positions[0], 1_000, "首块落在宿主报的位置上");
+    for (index, position) in positions.iter().enumerate().skip(1) {
+        assert_eq!(
+            *position, 1_000,
+            "第 {index} 块的位置必须保持钉住：重复内容当场收口窗口"
+        );
+    }
+    let geometry = &owner.streams[stream.index()];
+    assert_eq!(
+        geometry.pinned_window_closed_by.load(Ordering::Acquire),
+        super::PINNED_WINDOW_REPEATED_CONTENT,
+        "窗口必须因重复内容而收口"
+    );
+    assert_eq!(
+        owner.synthesized_blocks.load(Ordering::Acquire),
+        1,
+        "只有起播那一块被记账，之后的重复内容不得继续推进"
+    );
+}
+
 /// **从停播转入播放时，停播期间累积的帧数必须清零。**
 ///
 /// 【为什么必须有这一条】宿主可以一直报 `kPlaying` 却钉住位置（停播）。那些重复块
@@ -1131,5 +1230,164 @@ fn a_stationary_stretch_does_not_offset_the_real_start() {
         seen,
         vec![1_000, 1_256, 1_512],
         "真实起播必须从宿主报的位置开始，不能被停播期间的重复块推后"
+    );
+}
+
+/// **输出源切换必须去咔：第一块原样，第二块不得阶跃。**
+///
+/// 【为什么这是问题一 1c 的回归】咔声位置不固定的三个来源之一是"上一轮播放收在
+/// `Raw`、这一轮首块是 `Processed`"。那种场合 `primed` 逻辑会整段跳过去咔，
+/// 用户听到一次硬切。这条钉住"种类变化就淡化"。
+#[test]
+fn a_source_kind_change_on_the_first_block_still_fades() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let frames = super::OUTPUT_DECLICK_FRAMES;
+    // 缓冲必须活到 `apply_output_declick` 返回之后：clang 里的临时 Vec 会在闭包
+    // 返回时被释放，指针立刻变野指针（实测 STATUS_STACK_BUFFER_OVERRUN）。
+    let mut first_left = vec![0.5_f32; frames];
+    let mut first_right = vec![0.5_f32; frames];
+    let mut first_planes = [first_left.as_mut_ptr(), first_right.as_mut_ptr()];
+    let mut first = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: first_planes.as_mut_ptr(),
+    };
+
+    // 第一块：真首块（种类 4）。`primed_kind` 从 0 变成 4 ⇒ 原样输出。
+    owner
+        .output_token
+        .store(4, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut first, frames) };
+    assert_eq!(
+        first_left,
+        vec![0.5; frames],
+        "真首块必须原样输出：没有上一块可淡"
+    );
+
+    // 第二块：换到 Processed（种类 2），内容也完全不同。
+    let mut second_left = vec![1.0_f32; frames];
+    let mut second_right = vec![1.0_f32; frames];
+    let mut second_planes = [second_left.as_mut_ptr(), second_right.as_mut_ptr()];
+    let mut second = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: second_planes.as_mut_ptr(),
+    };
+    owner
+        .output_token
+        .store(2, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut second, frames) };
+    // 开头必须还在旧值附近（从 0.5 走向 1.0），不能第一帧就是 1.0。
+    assert!(
+        second_left[0] < 0.9,
+        "源切换的第一帧必须留在旧值附近（实测 {}）",
+        second_left[0]
+    );
+    assert!(
+        second_left[frames - 1] > 0.9,
+        "淡化的最后一帧必须到达新值（实测 {}）",
+        second_left[frames - 1]
+    );
+}
+
+/// **本流从未去过咔、但上一轮停在另一种源上时，首块也要淡化。**
+///
+/// 【为什么单独一条】`primed_kind` 的语义是"本流已知的最后种类"。上一轮播放收在
+/// `Raw`，`primed_kind` 停在 4；这一轮第一块就是 `Processed`（种类 2）——
+/// `first_kind != kind` 分支必须触发淡化，而不是走"真首块原样输出"。
+#[test]
+fn a_carryover_source_kind_still_triggers_a_fade() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let frames = super::OUTPUT_DECLICK_FRAMES;
+    let mut tail_left = vec![0.5_f32; frames];
+    let mut tail_right = vec![0.5_f32; frames];
+    let mut tail_planes = [tail_left.as_mut_ptr(), tail_right.as_mut_ptr()];
+    let mut tail = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: tail_planes.as_mut_ptr(),
+    };
+
+    // 上一轮：输出过 Raw（种类 4），给 tail 留下 0.5。
+    owner
+        .output_token
+        .store(4, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut tail, frames) };
+    assert_eq!(tail_left, vec![0.5; frames], "上一轮首块原样输出");
+
+    // 这一轮：首块直接是 Processed（种类 2），内容 1.0。
+    let mut left = vec![1.0_f32; frames];
+    let mut right = vec![1.0_f32; frames];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    owner
+        .output_token
+        .store(2, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut output, frames) };
+    assert!(
+        left[0] < 0.9,
+        "上一轮停在另一种源上时，本轮首块必须淡化（实测 {}）",
+        left[0]
+    );
+}
+
+/// **"透传宿主原声 → 处理结果"必须淡入，而不是把两段内容叠在一起。**
+///
+/// 【为什么与上一条不同】`PendingSynthesis` / `PassThrough` 输出的是宿主原声，
+/// `Processed` 输出的是神经声码器结果。两者内容根本不同源，交叉淡化会把两段不同
+/// 内容叠加（听感是"两声并发"）。那种场合改为对结果做一次线性淡入：旧信号置零后
+/// `old * (1 - t) + current * t` 退化成 `current * t`。
+#[test]
+fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let frames = super::OUTPUT_DECLICK_FRAMES;
+    let mut host_left = vec![0.8_f32; frames];
+    let mut host_right = vec![0.8_f32; frames];
+    let mut host_planes = [host_left.as_mut_ptr(), host_right.as_mut_ptr()];
+    let mut host = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: host_planes.as_mut_ptr(),
+    };
+
+    // 第一块：透传宿主原声（种类 5 = PendingSynthesis）。
+    owner
+        .output_token
+        .store(5, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut host, frames) };
+    assert_eq!(host_left, vec![0.8; frames], "透传首块原样输出");
+
+    // 第二块：处理结果（种类 2），内容 0.3。
+    let mut left = vec![0.3_f32; frames];
+    let mut right = vec![0.3_f32; frames];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut output = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    owner
+        .output_token
+        .store(2, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut output, frames) };
+
+    // 淡入：不应出现"宿主原声 × (1-t) + 结果 × t"的叠加值。
+    // 叠加会在 t≈0.5 处给出约 0.55，而纯淡入给出约 0.15。
+    let mid = left[frames / 2];
+    assert!(
+        mid < 0.25,
+        "透传到处理结果必须淡入而不是叠加（中点实测 {mid}）"
+    );
+    assert_eq!(
+        left[frames - 1], 0.3,
+        "淡入结束必须精确落在新值上（实测 {}）",
+        left[frames - 1]
     );
 }

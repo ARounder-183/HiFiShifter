@@ -1334,11 +1334,50 @@ impl DocumentSession {
     }
 
     /// 工厂成功返回前登记真实 controllerRef，失败或销毁时撤销。
+    ///
+    /// 【为什么在这里清扫】region 身份表是**进程级**的，而上一次文档可能没有走完
+    /// `destroy_document`（宿主不按 leaf-first 销毁）就留下了无主 key。新文档注册时
+    /// 主动扫掉"归属文档已死"的登记，让"重开工程"不依赖后续创建顺序就能摆脱上一次
+    /// 的残留 —— 否则 `create_playback_region` 会在同一批地址上撞车，
+    /// 宿主从此不再交付任何 region，界面永远停在"等待宿主音频"。
+    ///
+    /// 【为什么逐个问存活】同一进程里可以同时有多份文档（多个工程窗口）。只清死
+    /// 文档的登记，绝不能全表清空。
     pub fn register(self: &Arc<Self>, key: usize) {
         self.controller.store(key, Ordering::Release);
-        controllers()
+        let mut table = controllers().lock_or_recover();
+        let dead: Vec<usize> = table
+            .iter()
+            .filter(|(_, weak)| {
+                weak.upgrade()
+                    .is_none_or(|session| !session.alive.load(Ordering::Acquire))
+            })
+            .map(|(controller, _)| *controller)
+            .collect();
+        for controller in &dead {
+            table.remove(controller);
+        }
+        if !dead.is_empty() {
+            log::info!(
+                "[ara] swept {} controller entrie(s) of dead document(s) before registering \
+                 document {}",
+                dead.len(),
+                self.id
+            );
+        }
+        // 同一份存活判定扫 region 表：controller 表活着但文档已 close 的也算死
+        // （`close()` 已经把它从表里摘掉，因此这里看到的一定是活的）。
+        let alive_ids: Vec<u64> = table
+            .values()
+            .filter_map(|weak| weak.upgrade())
+            .filter(|session| session.alive.load(Ordering::Acquire))
+            .map(|session| session.id)
+            .collect();
+        drop(table);
+        crate::render::ownership::region_owners()
             .lock_or_recover()
-            .insert(key, Arc::downgrade(self));
+            .retain_alive_documents(&|document| alive_ids.contains(&document));
+        controllers().lock_or_recover().insert(key, Arc::downgrade(self));
     }
 
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
@@ -1518,11 +1557,33 @@ impl DocumentSession {
             return;
         }
         let covered = owners.iter().any(|owner| owner.has_playback_role());
-        for owner in &owners {
-            owner.set_playback_covered(covered);
-        }
         if covered {
+            for owner in &owners {
+                owner.set_playback_covered(true);
+            }
             return;
+        }
+        // 没有任何实例带 playback 角色：把**已经准备好快照**的 editor 实例提为渲染者。
+        //
+        // 【为什么必须提升】`set_playback_covered(false)` 会让编辑实例的
+        // `is_editor_only()` 翻真，于是它从"透传宿主原声"改走快照通路；而它很可能
+        // 从未 `prepare()` 过（`prepare()` 在 `!renders_playback()` 时直接返回），
+        // 快照是空的 —— 此时每一个音频块都是纯零。反过来，若播放实例先关闭而编辑
+        // 实例没被提升，同样没人出声。两侧都指向同一个动作：挑一个能出声的实例。
+        //
+        // 【为什么要求"已经准备好"】没准备过的实例没有可发布的快照，提升它只会把
+        // 静音从"一个实例"扩大成"另一个实例"。挑不到的场合保持 `covered = false`，
+        // 让所有实例都透传宿主原声 —— 至少不是静音。
+        let promoted = owners
+            .iter()
+            .find(|owner| owner.has_prepared_snapshot())
+            .or_else(|| owners.first());
+        for owner in &owners {
+            owner.set_playback_covered(false);
+        }
+        if let Some(promoted) = promoted {
+            promoted.set_playback_covered(false);
+            promoted.promote_to_renderer();
         }
         // 限流：绑定与分配都可能连续触发，这条读数不需要每次都打。
         //
@@ -1535,9 +1596,9 @@ impl DocumentSession {
             "ara.playback.no-renderer",
             format_args!(
                 "[ara] playback ownership: {} live renderer instance(s) but NONE holds the \
-                 playback role (writers/roles: {:?}); the sole editor instance takes over \
-                 rendering so that edits are audible. If this host meant to provide a playback \
-                 renderer, its role assignment is the thing to check",
+                 playback role (writers/roles: {:?}); an instance takes over rendering so that \
+                 edits are audible. If this host meant to provide a playback renderer, its role \
+                 assignment is the thing to check",
                 owners.len(),
                 owners
                     .iter()
@@ -1569,11 +1630,36 @@ impl DocumentSession {
         serde_json::json!({ "renderers": renderers })
     }
 
-    /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。
+    /// 在旧内容可能被改变前立即撤销**渲染许可与代次**；不撤已发布快照本身。
+    ///
+    /// 【为什么不再清空快照】`clear_renderers()` 被一次宿主编辑触发**多次**
+    /// （`ara/model.rs` 里 8 处调用）。清空 `current` 之后，`copy_block_at` 的读闭包
+    /// 逐样本返回 `0.0`，而 bound 实例固定 `layered == false`，于是**每个音频块都是
+    /// 纯零** —— 用户听到的就是"有概率完全没声音"。清空与后台合成还要再叠一层
+    /// `prepare_job` 的版本重检丢弃（`extension.rs`），空窗最长可达一次神经合成的时长。
+    ///
+    /// 保留上一份快照永远好过静音：它对应上一次稳定状态，`publish` 会在新快照算完后
+    /// **原子**替换 `current`，音频线程的 `enter()` 要么拿到旧的、要么拿到新的，
+    /// 不会拿到空。真正该清空的是"这个实例从此不再渲染"——那由 [`Self::close`]
+    /// 与 `ExtensionOwner::stop_editor` 负责，它们会调 [`Self::revoke_snapshots`]。
+    ///
+    /// 【为什么仍然按回落 `ready`】`ready` 回答的是"现在能不能重排并发布"，宿主编辑
+    /// 期间答案确实是否；把它留在 true 会让"还没重排完"被误判成"已经就绪"。
+    /// 它与"已发布的快照还在不在"是两个问题，本轮只改后者。
     pub fn clear_renderers(&self) {
         let _transaction = self.transaction.lock_or_recover();
         self.revision.fetch_add(1, Ordering::AcqRel);
-        self.revoke_snapshots();
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        self.ready.store(false, Ordering::Release);
+        for owner in self.renderer_owners() {
+            owner.cancel_preparation();
+            // 让 revision 门（`processed_ready` / `raw_tape_ready`）与输出代次失效，
+            // 但不动 `current` —— 上一份快照继续可听。
+            owner.snapshots
+                .iter()
+                .for_each(|snapshot| snapshot.invalidate_generation());
+            owner.raw_tape.invalidate_generation();
+        }
     }
 
     /// 授权开关只撤销播放许可，不改变宿主内容/布局的乐观并发版本。

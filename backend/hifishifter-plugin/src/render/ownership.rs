@@ -18,10 +18,20 @@ pub(crate) enum OwnershipError {
 #[derive(Default)]
 pub(crate) struct RegionOwners {
     regions: HashMap<RegionKey, (DocumentId, usize)>,
+    /// 本次进程里"文档已销毁"的次数（诊断：宿主是否按 leaf-first 销毁）。
+    reclaimed: u64,
 }
 
 impl RegionOwners {
     /// 登记 region 的真实 model-ref 键，不用会随删除变化的 clip 下标代替身份。
+    ///
+    /// 【跨文档重复是认领，不是错误】key 是宿主持有的指针值，宿主进程内地址会复用。
+    /// 上一次文档没有走完 `destroy_document`（宿主不按 leaf-first 销毁时
+    /// `PluginRuntime::destroy` 会整份放弃）就会留下无主 key；这一次文档在同一批
+    /// 操作序列下拿到同一个地址。把它判成 `DuplicateRegion` 会让
+    /// `create_playback_region` 一路冒到宿主脸上 —— 宿主从此不再交付任何 region，
+    /// 界面永远停在"等待宿主音频"，而删掉插件再添加就好（新指针值）。
+    /// 同**一**份文档内的重复才是真的冲突，仍然拒绝。
     pub fn register(
         &mut self,
         key: RegionKey,
@@ -31,8 +41,17 @@ impl RegionOwners {
         if key == 0 || document == 0 {
             return Err(OwnershipError::InvalidIdentity);
         }
-        if self.regions.contains_key(&key) {
-            return Err(OwnershipError::DuplicateRegion);
+        match self.regions.get(&key).copied() {
+            Some((owner, _)) if owner == document => return Err(OwnershipError::DuplicateRegion),
+            Some((owner, _)) => {
+                // 上一个文档的遗留：撤销旧归属，按新文档登记。
+                self.reclaimed = self.reclaimed.saturating_add(1);
+                log::info!(
+                    "[ara] region key {key} reclaimed by document {document} from dead document \
+                     {owner}"
+                );
+            }
+            None => {}
         }
         self.regions.insert(key, (document, slot));
         // 【为什么不设硬上限】这张表是**所有权权威**：丢掉一个活 region 的条目会让
@@ -86,6 +105,31 @@ impl RegionOwners {
     pub fn owner_of(&self, key: RegionKey) -> Option<DocumentId> {
         self.regions.get(&key).map(|(document, _)| *document)
     }
+
+    /// 只保留"归属文档仍然活着"的登记。
+    ///
+    /// 【为什么需要它】`register` 的跨文档认领只在**下一次 create** 才生效；如果宿主
+    /// 重开后创建的是 audio source / region sequence 而 region 那一步始终没走到，
+    /// 遗留 key 就一直占位。新文档注册时主动清扫一次，让"重开工程"不依赖
+    /// 后续创建顺序就能把上一次的残留清干净。
+    ///
+    /// 【为什么必须逐个问存活】同一进程里可以同时有多份文档（多个工程窗口）。
+    /// 全表清空会打断另一份正在用的工程。
+    pub fn retain_alive_documents(&mut self, is_alive: &impl Fn(DocumentId) -> bool) -> usize {
+        let before = self.regions.len();
+        self.regions
+            .retain(|_, (document, _)| is_alive(*document));
+        let removed = before.saturating_sub(self.regions.len());
+        if removed > 0 {
+            log::info!("[ara] swept {removed} region entrie(s) owned by dead document(s)");
+        }
+        removed
+    }
+
+    /// 跨文档认领发生的次数（诊断）。
+    pub fn reclaimed(&self) -> u64 {
+        self.reclaimed
+    }
 }
 
 /// 进程内身份索引；音频回调不得锁此表，必须消费预先发布的 renderer 快照。
@@ -129,7 +173,10 @@ mod tests {
         assert_eq!(owners.resolve(&[202]).unwrap(), (2, vec![0]));
     }
 
-    /// 不允许空身份或重复登记静默覆盖现有归属。
+    /// 不允许空身份；**同一份文档内**的重复登记仍然被拒，并且不覆盖归属。
+    ///
+    /// 跨文档的同一个 key 不是重复而是认领（见 `register` 的说明），由
+    /// `a_dead_documents_key_is_reclaimed_rather_than_rejected` 钉住。
     #[test]
     fn duplicate_or_zero_identity_does_not_replace_the_owner() {
         let mut owners = RegionOwners::default();
@@ -143,9 +190,41 @@ mod tests {
         );
         owners.register(101, 1, 0).unwrap();
         assert_eq!(
-            owners.register(101, 2, 9),
+            owners.register(101, 1, 9),
             Err(OwnershipError::DuplicateRegion)
         );
         assert_eq!(owners.resolve(&[101]).unwrap(), (1, vec![0]));
+        assert_eq!(owners.reclaimed(), 0);
+    }
+
+    /// 上一个文档遗留的 key 必须能被新文档认领，否则宿主重开工程时拿不到任何 region。
+    ///
+    /// 【为什么必须是这条语义】REAPER 的 region 分配器在相同操作序列下复用地址；
+    /// 而宿主不按 leaf-first 销毁时 `destroy_document` 不执行、遗留 key 一直留在
+    /// 这张进程级表里。把跨文档重复判成错误，症状就是"重开只显示等待宿主音频，
+    /// 删掉插件再添加就好"。
+    #[test]
+    fn a_dead_documents_key_is_reclaimed_rather_than_rejected() {
+        let mut owners = RegionOwners::default();
+        owners.register(101, 1, 0).unwrap();
+        // 文档 1 没有走完销毁流程（`remove_document` 从未被调用）。
+        assert_eq!(owners.register(101, 2, 4), Ok(()));
+        assert_eq!(owners.owner_of(101), Some(2));
+        assert_eq!(owners.resolve(&[101]).unwrap(), (2, vec![4]));
+        assert_eq!(owners.reclaimed(), 1);
+    }
+
+    /// 清扫只动已死文档的登记，活文档的一条都不碰（多工程窗口并存）。
+    #[test]
+    fn the_alive_sweep_keeps_every_live_documents_regions() {
+        let mut owners = RegionOwners::default();
+        owners.register(101, 1, 0).unwrap();
+        owners.register(102, 1, 1).unwrap();
+        owners.register(202, 2, 0).unwrap();
+        let swept = owners.retain_alive_documents(&|document| document == 2);
+        assert_eq!(swept, 2);
+        assert_eq!(owners.owner_of(101), None);
+        assert_eq!(owners.owner_of(102), None);
+        assert_eq!(owners.resolve(&[202]).unwrap(), (2, vec![0]));
     }
 }

@@ -1764,6 +1764,19 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         ev.stream
                     }),
                 );
+                // 【为什么要先去咔再清零】起播窗口里 `allow_output` 可能逐块翻转
+                // （`Resting` 重复抑制），于是出现"有声 → 清零 → 有声"。直接从有声
+                // 阶跃到零就是用户听到的"咔"。先用上一块的尾巴把本块前 64 帧淡出到
+                // 与新信号（这里是零）之间的过渡，再清剩余部分。
+                unsafe {
+                    owner.apply_output_declick(
+                        evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
+                            ev.stream
+                        }),
+                        &mut *data.outputs,
+                        data.num_samples as usize,
+                    );
+                }
                 let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
             }

@@ -3671,6 +3671,45 @@ mod tests {
         assert!(region_owners().lock_or_recover().resolve(&[key]).is_err());
     }
 
+    /// 重开工程时宿主会复用同一批 region 地址，而上一份文档可能没有走完销毁。
+    ///
+    /// 【为什么必须是这条语义】这正是用户报的"重开只显示等待宿主音频、删掉插件再
+    /// 添加就好"：key 是宿主持有的指针值，不按 leaf-first 销毁时遗留 key 一直留在
+    /// 进程级表里；判成 `DuplicateRegion` 会让 `create_playback_region` 回 null，
+    /// 宿主从此不再交付任何 region。删除插件让宿主重建 FX 槽、拿到不同指针值，
+    /// 所以"删了再加就好"——这条测试把那个可Observable的事实钉住。
+    #[test]
+    fn a_reopened_document_reclaims_the_previous_documents_region_key() {
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        let old = ModelHandle::new();
+        region_owners()
+            .lock_or_recover()
+            .register(key, old.document_id, 7)
+            .unwrap();
+        // `old` 必须一直活着，否则它的 Drop 会把 key 撤销掉，这条语义就测不到了。
+        let old_document = old.document_id;
+        let reopened = ModelHandle::new();
+        assert_ne!(old_document, reopened.document_id);
+        assert_eq!(
+            region_owners()
+                .lock_or_recover()
+                .register(key, reopened.document_id, 0),
+            Ok(())
+        );
+        assert_eq!(
+            region_owners().lock_or_recover().resolve(&[key]).unwrap(),
+            (reopened.document_id, vec![0])
+        );
+        // 同一份文档内的重复仍然是真错误。
+        assert_eq!(
+            region_owners()
+                .lock_or_recover()
+                .register(key, reopened.document_id, 1),
+            Err(crate::render::ownership::OwnershipError::DuplicateRegion)
+        );
+    }
+
     /// 宿主移动与拉伸更新必须替换现存区间，不能新增重复 clip 或忽略更新。
     #[test]
     fn host_region_update_changes_the_mapped_clip() {

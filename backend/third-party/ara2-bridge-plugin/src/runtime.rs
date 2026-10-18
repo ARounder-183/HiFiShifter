@@ -374,17 +374,20 @@ impl<P: PluginModel> PluginRuntime<P> {
     }
 
     /// Tears down an empty document and returns its application delegate.
+    ///
+    /// 【为什么不再整份拒绝】宿主常常不按 leaf-first 销毁（例如先释放 controller，
+    /// 或根本跳过 `destroyPlaybackRegion`）。旧的"图非空就放弃"让 `destroy_document`
+    /// 永不执行，于是进程级 region 身份表留下死文档的 key；下一次文档在同一批地址上
+    /// `create_playback_region` 直接撞 `DuplicateRegion`，宿主从此不再交付任何 region，
+    /// 界面永远停在"等待宿主音频"——而删掉插件再添加就好（指针值变了）。
+    /// 强制销毁一个已经没人引用的图，比让下一次工程不可用安全得多。
     pub fn destroy(mut self) -> Result<P, AraError> {
-        if self.live_contexts
-            + self.live_sequences
-            + self.live_sources
-            + self.live_modifications
-            + self.live_regions
-            != 0
-        {
-            return Err(AraError::InvalidState(
-                "document graph must be destroyed leaf-first before controller teardown",
-            ));
+        let forced = self.force_destroy_remaining();
+        if forced > 0 {
+            log::error!(
+                "[ara] forced teardown of {forced} live object(s) before document destruction; \
+                 the host did not destroy the graph leaf-first"
+            );
         }
         let document = self
             .document
@@ -392,6 +395,50 @@ impl<P: PluginModel> PluginRuntime<P> {
             .expect("live runtime retains document state");
         self.delegate.destroy_document(document);
         Ok(self.delegate)
+    }
+
+    /// Destroys whatever is still live, leaves first, counting what it had to force.
+    ///
+    /// The host is supposed to tear down leaf-first. When it does not, this walks
+    /// the graph in reverse dependency order so the document delegate finally sees
+    /// `destroy_document` and can revoke its process-level region identities.
+    fn force_destroy_remaining(&mut self) -> usize {
+        // The destroy helpers live on `EditSession`; build one directly rather than
+        // going through `callback_edit`, because teardown must work while the host's
+        // editing session is already gone. `owns_state: false` keeps `Drop` from
+        // ending an editing session that is not ours.
+        let mut edit = EditSession {
+            runtime: self,
+            finished: false,
+            owns_state: false,
+        };
+        let host = HostContentScope::unavailable();
+        // Regions first: they are the leaves and the only objects holding a
+        // process-level identity that a later document can collide with.
+        for handle in edit.runtime.regions.handles().collect::<Vec<_>>() {
+            if edit.destroy_playback_region(handle).is_err() {
+                break;
+            }
+        }
+        for handle in edit.runtime.modifications.handles().collect::<Vec<_>>() {
+            let _ = edit.destroy_audio_modification(handle);
+        }
+        for handle in edit.runtime.sources.handles().collect::<Vec<_>>() {
+            let _ = edit.destroy_audio_source_with_host(handle, &host);
+        }
+        for handle in edit.runtime.sequences.handles().collect::<Vec<_>>() {
+            let _ = edit.destroy_region_sequence(handle);
+        }
+        for handle in edit.runtime.contexts.handles().collect::<Vec<_>>() {
+            let _ = edit.destroy_musical_context(handle);
+        }
+        drop(edit);
+        let runtime = &*self;
+        runtime.live_contexts
+            + runtime.live_sequences
+            + runtime.live_sources
+            + runtime.live_modifications
+            + runtime.live_regions
     }
 }
 

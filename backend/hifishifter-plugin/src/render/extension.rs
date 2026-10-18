@@ -171,6 +171,16 @@ pub(crate) enum HostAudioState {
     AwaitingSamplesAccess,
     /// 宿主开启了访问，但样本读取失败（真故障，终态）。
     SourceReadFailed,
+    /// 宿主交付了素材，但本插件**拒绝**了 region 创建（真故障，终态）。
+    ///
+    /// 【为什么必须与 `AwaitingRegions` 分开】"等待"暗示用户应该继续等，而这一态
+    /// 说的是"插件自己拒了，再等也不会来"。混为一谈会把一个可行动的故障显示成
+    /// 一个无限期的等待 —— 用户唯一能做的是重载插件，而他不知道原因。
+    ///
+    /// 【为什么 T4/T5 修好后应该永不出现】跨文档认领 + 强制销毁之后，
+    /// `create_playback_region` 不再因为遗留身份而失败。真出现时
+    /// `DocumentSession::region_rejections` 里带着第一条原因。
+    RegionRejected,
 }
 
 impl HostAudioState {
@@ -183,6 +193,7 @@ impl HostAudioState {
             HostAudioState::UnmatchedRegions => "unmatched_regions",
             HostAudioState::AwaitingSamplesAccess => "awaiting_samples_access",
             HostAudioState::SourceReadFailed => "source_read_failed",
+            HostAudioState::RegionRejected => "region_rejected",
         }
     }
 }
@@ -487,12 +498,35 @@ struct StreamGeometry {
     pinned_advance_frames: AtomicU64,
     /// 由锁存（而非内容变化）推进的块数（诊断）。
     pinned_advance_blocks: AtomicU64,
+    /// 起播/录音上升沿之后，"内容不变也按块长前进"的窗口是否仍然有效。
+    ///
+    /// 【为什么必须是区间而不是逐块】VEGAS 的钉住窗口约 0.66 s，前 0.4 s 几乎一定是
+    /// 静音或持续音。逐块判据只保护静音块；内容一变化，`was_stationary` 清零与
+    /// `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
+    /// 那正是用户听到的"0.4 s 处咔"与"0.66 s 断成两个 clip"。区间锁存在窗口内
+    /// 压制这两条内容证据，让整段窗口都按真实播放时间记账。
+    pinned_window_open: AtomicBool,
+    /// 窗口被打开过的次数（诊断）。
+    pinned_window_open_count: AtomicU64,
+    /// 窗口内实际按块长推进的帧数（诊断）。
+    pinned_advance_frames_used: AtomicU64,
+    /// 窗口最近一次收口的原因（诊断；见 `PINNED_WINDOW_*`）。
+    pinned_window_closed_by: AtomicU32,
     /// 本块是否全零。
     ///
-    /// 【为什么需要】起播锁存只在**静音**块上生效：FL 停播时重复的是非零内容，
-    /// 不能把它判成播放；VEGAS 起播窗口的前段静音则必须按块长推进。
+    /// 【为什么还需要它】它不再参与"要不要推进"的判定（那是区间做的事），只作为
+    /// 诊断读数：窗口内有多少块是静音，用来判断宿主起播窗口的形状。
     last_block_silent: AtomicBool,
 }
+
+/// 起播窗口因宿主位置恢复前进而收口。
+pub(crate) const PINNED_WINDOW_HOST_MOVED: u32 = 1;
+/// 起播窗口因帧窗口耗尽而收口。
+pub(crate) const PINNED_WINDOW_EXHAUSTED: u32 = 2;
+/// 起播窗口因宿主撤掉 `playing` / `recording` 而收口。
+pub(crate) const PINNED_WINDOW_PLAYING_FELL: u32 = 3;
+/// 起播窗口因出现"逐块完全相同的非零内容"（停播重复投递）而收口。
+pub(crate) const PINNED_WINDOW_REPEATED_CONTENT: u32 = 4;
 
 /// "音频在流动"的观测窗口（块数）。
 ///
@@ -658,11 +692,13 @@ struct OutputDeclickState {
     fade_pos: AtomicU32,
     fade_active: AtomicBool,
     last_token: AtomicU64,
-    /// 是否已经处理过本流的第一块。
+    /// 本流上一次输出源的**种类**（0 = 还没见过任何输出）。
     ///
-    /// 【为什么需要】第一块没有"上一块输出的尾巴"；从零淡入会改变宿主直通/录制监听
-    /// 的样本（测试与真实行为都要求第一块原样输出）。只在**后续源切换**时去咔。
-    primed: AtomicBool,
+    /// 【为什么记种类而不是一个 bool】真首块没有"上一块输出的尾巴"，从零淡入会改变
+    /// 宿主直通/录制监听的样本（测试与真实行为都要求第一块原样输出）。但"上一轮播放
+    /// 收在 `Raw`、这一轮首块是 `Processed`"仍然是一次源切换 —— 那种场合必须去咔，
+    /// 否则用户听到的正是"咔声位置不固定"。种类相同才允许首块原样通过。
+    primed_kind: AtomicU32,
 }
 
 impl Default for OutputDeclickState {
@@ -678,7 +714,7 @@ impl Default for OutputDeclickState {
             fade_pos: AtomicU32::new(0),
             fade_active: AtomicBool::new(false),
             last_token: AtomicU64::new(0),
-            primed: AtomicBool::new(false),
+            primed_kind: AtomicU32::new(0),
         }
     }
 }
@@ -736,6 +772,12 @@ pub(crate) struct ExtensionOwner {
     ///     （`vst3/audio_boundary_tests` 的既有契约不变）；
     ///   * Cubase 单实例：没有任何实例持 playback ⇒ `false` ⇒ 该实例接管渲染。
     playback_covered: std::sync::atomic::AtomicBool,
+    /// 文档级"没有任何实例持 playback 角色"时被提升为渲染者的次数（诊断）。
+    ///
+    /// 【为什么必须是计数】这是"宿主没有给我们 playback renderer"的现场证据，
+    /// 而它每次都只打一条限流的 WARN。计数让诊断包能回答"发生过几次"，
+    /// 也用来验证 T11 的提升真的发生了。
+    promoted_to_renderer: std::sync::atomic::AtomicU64,
     closed: std::sync::atomic::AtomicBool,
     writer_id: AtomicU64,
     /// 当前编辑后端；`None` ⇒ 尚未绑定任何原生扩展（与 `HostBackend::AraOnly` 不同：
@@ -821,6 +863,11 @@ pub(crate) struct ExtensionOwner {
     blocks_playing: AtomicU64,
     blocks_flow_without_playing: AtomicU64,
     gate_cleared: AtomicU64,
+    /// ARA 实例在快照未就绪时退到 layered（宿主原声兜底）的块数。
+    ///
+    /// 【为什么必须是诊断】它等于"本该由我们出声、实际让宿主原声顶替"的次数。
+    /// T9/T10 修好后这个数应该长期为 0；一旦上升，说明快照清空/合成丢弃又回来了。
+    bound_snapshot_fallback: AtomicU64,
     /// 按进程流分开的同一组计数。
     stream_blocks: [AtomicU64; 3],
     stream_playing_blocks: [AtomicU64; 3],
@@ -2187,6 +2234,29 @@ impl ExtensionOwner {
     pub(crate) fn set_playback_covered(&self, covered: bool) {
         self.playback_covered.store(covered, Ordering::Release);
     }
+    /// 本实例是否已经有可发布的快照。
+    ///
+    /// 【为什么提升前要问它】文档级"没有任何实例持 playback 角色"时需要挑一个实例
+    /// 接管渲染。挑一个从未 `prepare()` 过的实例只会把静音从"一个实例"搬到"另一个
+    /// 实例"；只有已经发布过快照的实例才真的能出声。见
+    /// [`super::document::DocumentSession::report_playback_ownership`]。
+    pub(crate) fn has_prepared_snapshot(&self) -> bool {
+        self.snapshots.iter().any(|publisher| publisher.is_ready())
+    }
+    /// 把本实例标记为"接管渲染"（诊断计数 + 日志）。
+    pub(crate) fn promote_to_renderer(&self) {
+        self.promoted_to_renderer.fetch_add(1, Ordering::Relaxed);
+        log::warn!(
+            "[ara] writer {} takes over rendering: no instance on this document holds the \
+             playback role (roles={:#x})",
+            self.writer_id(),
+            self.roles.load(Ordering::Acquire)
+        );
+    }
+    /// 被提升为渲染者的次数（诊断）。
+    pub(crate) fn promoted_renderer_count(&self) -> u64 {
+        self.promoted_to_renderer.load(Ordering::Acquire)
+    }
     /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
     pub(crate) fn writer_id(&self) -> u64 {
         self.writer_id.load(Ordering::Acquire)
@@ -2725,6 +2795,21 @@ impl ExtensionOwner {
     ///
     /// # Safety
     /// `output` 必须是本回调内有效的 VST3 输出总线；`frames` 不超过其平面长度。
+    /// 从一个透传源切到处理结果时，应当**淡入**而不是交叉淡化。
+    ///
+    /// 【为什么】`PendingSynthesis` / `PassThrough` / `Untouched` 输出的是**宿主原声**
+    /// （或根本不介入），而 `Processed` / `Raw` 输出的是本插件算出来的内容。两者
+    /// 不同源：交叉淡化会把两段不同内容叠在一起，听感是"两声并发"而非一次接缝。
+    /// 那种场合改为对新内容做一次线性淡入。
+    fn should_fade_in_instead_of_crossfading(previous_kind: u8) -> bool {
+        matches!(
+            previous_kind,
+            code if code == TransferOutput::PendingSynthesis.code()
+                || code == TransferOutput::PassThrough.code()
+                || code == TransferOutput::Untouched.code()
+        )
+    }
+
     pub(crate) unsafe fn apply_output_declick(
         &self,
         stream: ProcessStream,
@@ -2738,22 +2823,68 @@ impl ExtensionOwner {
         let Some(state) = self.declick.get(stream.index()) else {
             return;
         };
-        // 【为什么首块不淡化】第一块没有"上一块输出的尾巴"；从零淡入会改写宿主直通
-        // 或录制监听的样本。只在后续源切换（Raw ↔ Processed、快照换版）时去咔。
-        let first = !state.primed.swap(true, Ordering::AcqRel);
-        if first {
+        // 【为什么按"种类"判首块】种类变化（Raw ↔ Processed、Processed →
+        // PendingSynthesis）才是用户听得出的接缝，同种类的版本更新（曲线编辑后重渲）
+        // 由下面的 `last_token` 分支处理。第一块的种类若与本流已知的最后种类不同，
+        // 说明上一轮播放停在另一种源上 —— 那一跳正是"咔声位置不固定"的来源之一。
+        let kind = (token & 0xFF) as u32;
+        let first_kind = state.primed_kind.swap(kind, Ordering::AcqRel);
+        if first_kind == 0 {
+            // 真首块：没有"上一块输出的尾巴"，原样输出。
             state.last_token.store(token, Ordering::Release);
-        } else if state.last_token.swap(token, Ordering::AcqRel) != token {
+        } else if first_kind != kind {
+            // 本轮从未去过咔、但上一轮停在另一种源上：仍然要去咔。至于是交叉淡化
+            // 还是淡入，取决于上一个源是不是透传（见 `should_fade_in_...`）。
+            let previous_kind = first_kind as u8;
+            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind) {
+                0
+            } else {
+                u32::MAX
+            };
             for channel in 0..2 {
                 for index in 0..OUTPUT_DECLICK_FRAMES {
-                    state.fade_from[channel][index].store(
-                        state.tail[channel][index].load(Ordering::Relaxed),
-                        Ordering::Relaxed,
-                    );
+                    let old = state.tail[channel][index].load(Ordering::Relaxed);
+                    // 淡入时把旧信号掩成 0；交叉淡化时保留原值。
+                    state.fade_from[channel][index].store(old & keep, Ordering::Relaxed);
                 }
             }
             state.fade_pos.store(0, Ordering::Release);
             state.fade_active.store(true, Ordering::Release);
+            state.last_token.store(token, Ordering::Release);
+        } else {
+            // 【为什么先取旧的再交换】"要不要交叉淡化"取决于**上一个**源是什么；
+            // `swap` 一执行旧值就没了，所以必须先读。
+            let previous_token = state.last_token.load(Ordering::Acquire);
+            if state.last_token.swap(token, Ordering::AcqRel) == token {
+                // 同一份快照、同一个版本：没有切换，不做任何淡化。
+            } else {
+            // 【为什么"透传 → 处理结果"不交叉淡化】`PendingSynthesis` / `PassThrough`
+            // 输出的是**宿主原声**，`Processed` 输出的是神经声码器结果。两者内容根本
+            // 不同源，交叉淡化会把两段不同内容叠在一起（听感是"两声并发"）。
+            // 那种场合改为对结果做一次线性淡入。
+            let previous_kind = (previous_token & 0xFF) as u8;
+            let crossfade = !Self::should_fade_in_instead_of_crossfading(previous_kind);
+            if crossfade {
+                for channel in 0..2 {
+                    for index in 0..OUTPUT_DECLICK_FRAMES {
+                        state.fade_from[channel][index].store(
+                            state.tail[channel][index].load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
+            } else {
+                // 淡入：把"旧信号"置零，于是 `old * (1 - t) + current * t` 退化成
+                // 对当前输出的线性淡入。
+                for channel in 0..2 {
+                    for index in 0..OUTPUT_DECLICK_FRAMES {
+                        state.fade_from[channel][index].store(0, Ordering::Relaxed);
+                    }
+                }
+            }
+            state.fade_pos.store(0, Ordering::Release);
+            state.fade_active.store(true, Ordering::Release);
+            }
         }
         let channels = (output.num_channels as usize).min(2);
         if state.fade_active.load(Ordering::Acquire) {
@@ -2877,6 +3008,8 @@ impl ExtensionOwner {
             StreamTime::default(),
             false,
             false,
+            false,
+            false,
         );
         (block.phase != TransportPhase::Resting, block.had_previous)
     }
@@ -2903,6 +3036,8 @@ impl ExtensionOwner {
             StreamTime::from_context(context),
             playing_rising,
             recording_rising,
+            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
+            context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0,
         )
     }
 
@@ -2922,6 +3057,8 @@ impl ExtensionOwner {
         time: StreamTime,
         playing_rising: bool,
         recording_rising: bool,
+        playing: bool,
+        recording: bool,
     ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
@@ -3030,20 +3167,49 @@ impl ExtensionOwner {
         // 【为什么先记下来】`pinned_frames` 在位置恢复前进时会被清零；resync 的
         // 允许误差必须用**清零前**的钉住帧数来算。
         let prior_pinned_frames = geometry.pinned_frames.load(Ordering::Acquire);
-        // 【为什么上升沿要开一个一次性窗口】VEGAS 的钉住窗口里前段可能是静音/持续音；
-        // 只按"内容变化"判流动会把它当成停播，resync 时整段缺失。窗口只在上升沿充满，
-        // 不因内容变化续期 —— FL 停播（kPlaying 仍为 1）最多在起播后 1 秒耗尽。
+        // 【为什么要一个"区间开/关"而不是逐块判据】VEGAS 的钉住窗口约 0.66 s，
+        // 前 0.4 s 几乎一定是静音或持续音。逐块判据只保护**静音块**；内容一变化，
+        // `was_stationary` 清零与 `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，
+        // 把已经记账的 0.4 s 抹掉 —— 那正是用户听到的"0.4 s 处咔"与
+        // "0.66 s 断成两个 clip"。区间锁存在窗口内压制这两条内容证据，
+        // 让整段窗口都按真实播放时间记账。
         if playing_rising || recording_rising {
             geometry.pinned_advance_frames.store(
                 (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64,
                 Ordering::Release,
             );
+            geometry
+                .pinned_window_open
+                .store(true, Ordering::Release);
+            geometry
+                .pinned_window_open_count
+                .fetch_add(1, Ordering::Relaxed);
         }
         let latch_frames = geometry.pinned_advance_frames.load(Ordering::Acquire);
-        // 【为什么只对静音块生效】FL 停播时重复的是**非零**内容；把它当成播放会让
-        // 停播光标继续出声。VEGAS 起播窗口的前段静音才是需要锁存推进的那一段。
-        let silent = geometry.last_block_silent.load(Ordering::Acquire);
-        let latch = pinned && latch_frames > 0 && silent;
+        // 【为什么静音段要放行、而"同一份非零内容"不放行】窗口内有两种"内容没变"：
+        //   * VEGAS 起播窗口的前段是**静音**（或一段持续音的头几个采样全零）；
+        //   * FL Studio 停播时重复投递同一份**非零**内容。
+        // 前者是真实播放时间，必须记账；后者是宿主把同一段内容又送了一遍，
+        // 把它当成播放会让停播光标继续出声。判据用"内容没变**且**有信号"。
+        //
+        // 【为什么这也覆盖持续音】一段持续音在窗口内**逐块在变**（相邻块的样本值
+        // 不同），`unchanged_run == 0` ⇒ 不在这个分支里。真正会命中的只有
+        // "逐块完全相同"，而那正是重复投递的形状。
+        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0
+            && !geometry.last_block_silent.load(Ordering::Acquire);
+        // 【为什么要在这里收口】"逐块完全相同的非零内容"是 FL Studio 停播重复投递的
+        // 形状，也是唯一能与 VEGAS 起播窗口区分的证据。窗口一旦见到它就应当立刻作废：
+        // 否则窗口内剩余的时间还会把同一段内容判成播放，停播光标继续出声
+        // （`a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence`）。
+        if repeated_nonzero && geometry.pinned_window_open.load(Ordering::Acquire) {
+            geometry.pinned_window_open.store(false, Ordering::Release);
+            geometry.pinned_advance_frames.store(0, Ordering::Release);
+            geometry
+                .pinned_window_closed_by
+                .store(PINNED_WINDOW_REPEATED_CONTENT, Ordering::Release);
+        }
+        let window_open = geometry.pinned_window_open.load(Ordering::Acquire);
+        let latch = pinned && window_open;
         let advancing = activity_moving || latch;
         let mut pinned_before = if pinned {
             geometry.pinned_frames.load(Ordering::Acquire)
@@ -3057,33 +3223,43 @@ impl ExtensionOwner {
             pinned_before = 0;
         }
         let mut synthesizing = geometry.synthesized.load(Ordering::Acquire);
+        // 【为什么这里要补一次撤销】窗口因"逐块完全相同的非零内容"收口时，本块正是
+        // 那段重复内容的第一块 —— 而此时 `synthesizing` 可能已经在上一块被置真
+        // （起播第一块），`if !synthesizing` 的守卫会跳过撤销，于是位置继续按块长
+        // 推进，停播光标继续出声。这里显式按下来。
+        if repeated_nonzero && synthesizing {
+            synthesizing = false;
+            geometry.synthesized.store(false, Ordering::Release);
+        }
         if pinned {
             if advancing {
                 if !synthesizing {
                     // 【为什么这里可能要清零】从"静止"转入"流动"时，之前累积的帧数是
                     // 停播期间**重复投递**的块，不是时间推进。判据是"本块之前已经连续
-                    // 不变"（`was_stationary`）—— 真正的起播窗口里内容一直在变，
-                    // 那个计数是 0。
+                    // 不变"（`was_stationary`）。
                     //
-                    // 【为什么 latch 期间不清】latch 表示"宿主刚刚开始播放"；即使前段
-                    // 是静音，那段时间也是真实播放时间，不能从位置里扣掉。
-                    if !latch && geometry.was_stationary.load(Ordering::Acquire) {
+                    // 【为什么窗口内不清】窗口表示"宿主刚刚开始播放"；即使前段是静音或
+                    // 持续音，那段时间也是真实播放时间，不能从位置里扣掉。
+                    if !window_open && geometry.was_stationary.load(Ordering::Acquire) {
                         pinned_before = 0;
                     }
                     synthesizing = true;
                     geometry.synthesized.store(true, Ordering::Release);
                 }
-            } else if !latch
+            } else if !window_open
                 && geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS
-            {
-                synthesizing = false;
+            {                synthesizing = false;
                 geometry.synthesized.store(false, Ordering::Release);
             }
         } else {
             synthesizing = false;
             geometry.synthesized.store(false, Ordering::Release);
-            // 位置重新前进：锁存与钉住计数都归零，下一段钉住重新开始。
+            // 位置重新前进：窗口与钉住计数都归零，下一段钉住重新开始。
             geometry.pinned_advance_frames.store(0, Ordering::Release);
+            geometry.pinned_window_open.store(false, Ordering::Release);
+            geometry
+                .pinned_window_closed_by
+                .store(PINNED_WINDOW_HOST_MOVED, Ordering::Release);
         }
         if pinned && source == PositionSource::Project && synthesizing {
             position = raw_start.saturating_add(pinned_before as i64);
@@ -3091,12 +3267,34 @@ impl ExtensionOwner {
             self.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
             geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
         }
+        // 窗口收口：帧窗口耗尽、或宿主明确不再播放。两者都让"内容证据"重新说话 ——
+        // 于是 FL 停播（`kPlaying` 仍为 1、内容逐块相同）最多在起播后
+        // `PINNED_PLAYBACK_SEC` 耗尽，不会在停播后继续推进。
         if latch {
-            geometry.pinned_advance_frames.store(
-                latch_frames.saturating_sub(frames as u64),
-                Ordering::Release,
-            );
-            geometry.pinned_advance_blocks.fetch_add(1, Ordering::Relaxed);
+            let remaining = latch_frames.saturating_sub(frames as u64);
+            geometry
+                .pinned_advance_frames
+                .store(remaining, Ordering::Release);
+            geometry
+                .pinned_advance_frames_used
+                .fetch_add(frames as u64, Ordering::Relaxed);
+            geometry
+                .pinned_advance_blocks
+                .fetch_add(1, Ordering::Relaxed);
+            if remaining == 0 {
+                geometry.pinned_window_open.store(false, Ordering::Release);
+                geometry
+                    .pinned_window_closed_by
+                    .store(PINNED_WINDOW_EXHAUSTED, Ordering::Release);
+            }
+        }
+        // 宿主把 `playing` 撤了：窗口立刻收口，不等帧窗口耗尽。
+        if window_open && !playing && !recording {
+            geometry.pinned_window_open.store(false, Ordering::Release);
+            geometry.pinned_advance_frames.store(0, Ordering::Release);
+            geometry
+                .pinned_window_closed_by
+                .store(PINNED_WINDOW_PLAYING_FELL, Ordering::Release);
         }
         if pinned {
             geometry.pinned_frames.store(
@@ -3416,6 +3614,9 @@ impl ExtensionOwner {
                     advancing: stream_block.activity_moving,
                     resync: stream_block.resync,
                     resync_limit_frames: stream_block.resync_limit_frames,
+                    // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
+                    // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
+                    accounting_start: part.position,
                 },
             );
             outcome = if index == 0 {
@@ -3649,10 +3850,22 @@ impl ExtensionOwner {
         }
         match output {
             // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。
-            TransferOutput::Untouched => TransferStage::Snapshot {
-                source: SnapshotSource::Processed,
-                layered: false,
-            },
+            //
+            // 【为什么快照没就绪时要 layered】这是 ARA 实例（`is_bound()` / `bound_once`）
+            // 唯一会走到的输出分支。快照被 `clear_renderers()` / `stop_editor()` /
+            // `document_closed()` 清空后，`copy_block_at` 的读闭包逐样本返回 `0.0`，
+            // 而 `layered == false` 时 `audio_process_inner` 既不预清也不兜底 ——
+            // 于是每个音频块都是纯零，用户听到的就是"有概率完全没声音"。
+            // layered 让 `copy_block_layered_at` 在快照缺失处回退取宿主输入
+            // （`snapshot.rs` 的 `input_at`），至少保住宿主原声而不是静音。
+            TransferOutput::Untouched => {
+                let ready = self.snapshots[0].is_ready();
+                self.note_bound_snapshot_fallback(!ready);
+                TransferStage::Snapshot {
+                    source: SnapshotSource::Processed,
+                    layered: !ready,
+                }
+            }
             TransferOutput::Recording => {
                 // 【为什么离线那一趟不监听】离线渲染（bounce / 导出）若只有一趟，直通会把
                 // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
@@ -5842,6 +6055,13 @@ impl ExtensionOwner {
         self.stream_gate_cleared[stream.index()].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// ARA 实例因快照未就绪而退回宿主原声（见 `transfer_stage` 的 `Untouched` 分支）。
+    pub(crate) fn note_bound_snapshot_fallback(&self, fell_back: bool) {
+        if fell_back {
+            self.bound_snapshot_fallback.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// 本块最终走了哪一档输出仲裁（由 `transfer_stage` 在决定后调用）。
     pub(crate) fn note_output_rung(&self, output: TransferOutput) {
         if let Some(ring) = self.block_trace.get() {
@@ -5976,17 +6196,55 @@ impl ExtensionOwner {
                 "pinned_advance": self.streams[index]
                     .pinned_advance_blocks
                     .load(Ordering::Acquire),
+                // 起播窗口：开过几次、窗口内推进了多少帧、最近一次为什么收口。
+                // 1 = 宿主位置前进、2 = 帧窗口耗尽、3 = 宿主撤掉 playing/recording。
+                "pinned_window_open": self.streams[index]
+                    .pinned_window_open_count
+                    .load(Ordering::Acquire),
+                "pinned_window_frames_used": self.streams[index]
+                    .pinned_advance_frames_used
+                    .load(Ordering::Acquire),
+                "pinned_window_closed_by": self.streams[index]
+                    .pinned_window_closed_by
+                    .load(Ordering::Acquire),
             })
         };
+        // 起播窗口读数：开过几次、窗口内推进了多少帧、最近一次为什么收口。
+        // `serde_json::json!` 不接受语句块作为值，所以先算好。
+        let (pinned_window_opens, pinned_window_frames, pinned_window_closed_by) = self
+            .streams
+            .iter()
+            .fold((0u64, 0u64, 0u32), |(opens, frames, _), geometry| {
+                (
+                    opens.saturating_add(geometry.pinned_window_open_count.load(Ordering::Acquire)),
+                    frames.saturating_add(
+                        geometry.pinned_advance_frames_used.load(Ordering::Acquire),
+                    ),
+                    geometry.pinned_window_closed_by.load(Ordering::Acquire),
+                )
+            });
+        // 从未开过窗口：归零读数，避免把"未初始化"显示成"因 0 号原因收口"。
+        let pinned_window_closed_by =
+            if pinned_window_opens == 0 && pinned_window_frames == 0 {
+                0
+            } else {
+                pinned_window_closed_by
+            };
         serde_json::json!({
             "blocks_seen": self.blocks_seen.load(Ordering::Acquire),
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
             "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "bound_snapshot_fallback": self.bound_snapshot_fallback.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),
             "synthesized_blocks": self.synthesized_blocks.load(Ordering::Acquire),
             "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
+            "pinned_window": {
+                "opens": pinned_window_opens,
+                "frames_used": pinned_window_frames,
+                "last_closed_by": pinned_window_closed_by,
+            },
             "cycle_wraps": self.cycle_wraps.load(Ordering::Acquire),
             "cycle_wrap_unknown": self.cycle_wrap_unknown.load(Ordering::Acquire),
             "cycle_splits": self.cycle_splits.load(Ordering::Acquire),

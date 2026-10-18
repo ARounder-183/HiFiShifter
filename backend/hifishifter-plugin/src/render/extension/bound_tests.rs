@@ -1244,9 +1244,19 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 两个平面都是四帧；只检查真实publisher，不能由计算出的expected镜像掩盖覆盖。
+        //
+        // 【为什么宿主模型变化后快照仍然可读】`clear_renderers()` 的本职是"撤销渲染
+        // 许可并让代次失效"，不再是"撤掉已发布的快照"。撤掉会让 bound 实例的每一个
+        // 音频块写出纯零（`layered == false`，没有兜底）—— 那正是用户报的间歇性
+        // 完全无声。上一份快照继续可听，新快照算完后由 `publish` 原子替换。
         let available = unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) };
-        assert_eq!(available, !model_changed);
-        assert_eq!(left, if model_changed { [0.0; 4] } else { [0.25; 4] });
+        assert!(available);
+        assert_eq!(left, [0.25; 4]);
+        assert_eq!(right, [0.5; 4]);
+        // 真正"这个实例不再渲染"的路径仍然清空：那里由文档关闭负责。
+        document.revoke_renderers();
+        let available = unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) };
+        assert!(!available);
         drop(model);
     }
 }
