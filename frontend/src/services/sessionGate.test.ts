@@ -17,6 +17,7 @@ import {
     markBackendTerminal,
     resetSessionGateForTests,
     sessionTerminal,
+    setStartupGraceForTests,
     subscribeSessionGate,
 } from "./sessionGate";
 
@@ -42,6 +43,18 @@ test("marking the gate is idempotent and keeps the first code", () => {
     markBackendTerminal("FX processor closed", ERROR_CODE.FX_PROCESSOR_CLOSED);
     expect(sessionTerminal()?.code).toBe(ERROR_CODE.ARA_NOT_BOUND);
     expect(sessionTerminal()?.message).toContain("not bound");
+});
+
+test("a document-closed during the startup grace is transient, not terminal", () => {
+    setStartupGraceForTests(60_000);
+    // 宿主重开工程时先销毁旧文档、再创建新文档：这一秒里的 DOCUMENT_CLOSED 不是终态。
+    markBackendTerminal("document closed", ERROR_CODE.DOCUMENT_CLOSED);
+    expect(isBackendTerminal()).toBe(false);
+
+    // 真正的组件销毁不会自愈，宽限不适用于它。
+    markBackendTerminal("FX processor closed", ERROR_CODE.FX_PROCESSOR_CLOSED);
+    expect(isBackendTerminal()).toBe(true);
+    expect(sessionTerminal()?.code).toBe(ERROR_CODE.FX_PROCESSOR_CLOSED);
 });
 
 test("a missing code is stored as null rather than guessed", () => {

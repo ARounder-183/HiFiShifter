@@ -298,6 +298,22 @@ export function getPluginHost(): PluginHostBridge | null {
     const port = window.chrome?.webview;
     if (!port) throw new Error("Plugin bootstrap present but native message port unavailable");
     active = createPluginHost(port, window.__HFS_PLUGIN_BOOTSTRAP__);
+    // 【为什么监听 bootstrap 变化】窗口可能先于 ARA 绑定打开；绑定后后端会补发一条
+    // `plugin_bootstrap_changed`。这里更新全局快照，并广播一个 DOM 事件让关心形态的
+    // 界面在下一轮渲染时重新读取 `hostCapabilities` / `hostKind`。
+    void active.listen("plugin_bootstrap_changed", (event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== "object") return;
+        const current = window.__HFS_PLUGIN_BOOTSTRAP__;
+        if (!current) return;
+        window.__HFS_PLUGIN_BOOTSTRAP__ = {
+            ...current,
+            ...(payload as Partial<PluginBootstrap>),
+            // 视图身份属于本窗口，不能被事件载荷覆盖。
+            viewId: current.viewId,
+        };
+        window.dispatchEvent(new Event("hfs-plugin-bootstrap-changed"));
+    });
     window.addEventListener("pagehide", () => active?.dispose(), { once: true });
     return active;
 }

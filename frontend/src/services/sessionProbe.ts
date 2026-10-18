@@ -6,11 +6,13 @@
  * `Invoke failed`。闸门拦不住它们（IPC 往返约 200ms，大部分命令在第一个响应回来前就
  * 发出去了），只有在扇出**之前**问一次才拦得住。
  *
- * 【为什么不能用 `ping`】`ping` 在 `editor/webview.rs` 里是**内联**处理的：它只回
- * `{"ok":true,"connected":link.owner().is_ok()}`，**不经过 `editor_session()`** ——
- * 也就是说"宿主从未绑定 ARA"时它照样回 `ok`。用它探活会得到一个假的健康信号，整条保护
- * 静默失效。必须用一个真正走命令队列的命令；`get_runtime_info` 正好合适（它本就在启动
- * 扇出里，返回值有用，这次往返不浪费）。
+ * 【为什么不用 `ping`】`ping` 只回 `link.owner().is_ok()`，不检查 owner 是否已关闭、
+ * 也不报告形态；它无法区分"会话正常"与"组件已销毁但路由还在"。
+ *
+ * 【为什么不再用 `get_runtime_info`】它会走 `editor_session()` + actor 队列。重开
+ * ARA 工程时，会话创建（模型加载 / actor 创建）可能远超 30 s IPC 超时，于是探活本身
+ * 变成用户看到的 `Backend invoke failed: plugin:get_runtime_info`。
+ * `plugin_health` 是内联命令：只读 owner 的原子/弱引用，不创建会话、不排队。
  */
 import { hostKind, isPluginMode } from "./hostCapabilities";
 import { invoke, invokeErrorKind } from "./invoke";
@@ -36,7 +38,7 @@ export function sessionUnavailableFrom(error: unknown): boolean {
 export async function probeSession(): Promise<"ready" | "unavailable"> {
     if (!isPluginMode()) return "ready";
     try {
-        await invoke("get_runtime_info");
+        await invoke("plugin_health");
         return "ready";
     } catch (error) {
         return sessionUnavailableFrom(error) ? "unavailable" : "ready";

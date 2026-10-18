@@ -54,6 +54,28 @@ export type SessionTerminal = {
 let terminal: SessionTerminal | null = null;
 const listeners = new Set<() => void>();
 
+/**
+ * 启动宽限：编辑器视图刚创建时，文档可能正在被宿主重建。
+ *
+ * 【为什么只对 `DOCUMENT_CLOSED` 生效】它是重开工程时唯一会**暂时**出现的终态码：
+ * 宿主先销毁旧文档、再创建新文档，中间任何一次查询都会看到"文档已关闭"。真正的
+ * 组件销毁（`FX_PROCESSOR_CLOSED`）与实例关闭（`INSTANCE_CLOSED`）不会自愈，仍然
+ * 立即置位。宽限过后再看到 `DOCUMENT_CLOSED` 就按真终态处理。
+ *
+ * 【为什么需要它】闸门一旦置位就不可逆；一次启动窗口里的假终态会让整个界面永远
+ * 停在"会话不可用"，而宿主其实几秒后就把新文档送来了。
+ */
+const STARTUP_GRACE_MS = 15_000;
+/** 测试里默认关闭；生产里从视图创建开始计时。 */
+let startupGraceMs = import.meta.env.MODE === "test" ? 0 : STARTUP_GRACE_MS;
+const pageStartedAt = typeof performance !== "undefined" ? performance.now() : 0;
+
+function withinStartupGrace(code: number | null): boolean {
+    if (code !== ERROR_CODE.DOCUMENT_CLOSED || startupGraceMs <= 0) return false;
+    if (typeof performance === "undefined") return false;
+    return performance.now() - pageStartedAt < startupGraceMs;
+}
+
 function notify(): void {
     for (const listener of Array.from(listeners)) {
         try {
@@ -73,7 +95,11 @@ function notify(): void {
  */
 export function markBackendTerminal(message: string, code?: number | null): void {
     if (terminal) return;
-    terminal = { code: typeof code === "number" ? code : null, message };
+    const codeOrNull = typeof code === "number" ? code : null;
+    // 【为什么在置位前拦截】启动窗口里的 `DOCUMENT_CLOSED` 是宿主重建文档的瞬态；
+    // 置位后不可逆，拦在这里是唯一不会让界面永久卡死的位置。
+    if (withinStartupGrace(codeOrNull)) return;
+    terminal = { code: codeOrNull, message };
     notify();
 }
 
@@ -109,4 +135,11 @@ export function getSessionGateSnapshot(): SessionTerminal | null {
 export function resetSessionGateForTests(): void {
     terminal = null;
     listeners.clear();
+    // 默认关闭宽限，让既有测试仍然能立即观察终态。
+    startupGraceMs = 0;
+}
+
+/** 仅供测试开启启动宽限（验证瞬态 `DOCUMENT_CLOSED` 不置位）。 */
+export function setStartupGraceForTests(milliseconds: number): void {
+    startupGraceMs = Math.max(0, milliseconds);
 }

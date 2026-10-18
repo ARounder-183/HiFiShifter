@@ -953,6 +953,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "transfer_cancel",
     "transfer_clear",
     "plugin_get_apply_state",
+    "plugin_health",
     "host_link_submit",
     "host_link_release",
     // 插件侧的宿主链接命令（仅插件形态；与 `host_link_list/open/refresh` 同名不同通道）。
