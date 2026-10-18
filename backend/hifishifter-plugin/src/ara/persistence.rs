@@ -422,10 +422,12 @@ mod tests {
                 .atlas
                 .seed_test_pitch_curve("mod:keep", 250., vec![60., 62.]);
         }
-        // 坏载荷：不是本插件的存档格式 ⇒ 恢复必须报错（而不是静默吞掉）。
+        // 坏载荷：不是本插件的存档格式 ⇒ 忽略并返回成功。
+        // 【为什么不能报错】宿主把恢复失败当成"整份文档恢复失败"，会中止 region 交付；
+        // 丢一份解不出的编辑是局部损失，让宿主卡在 `awaiting_regions` 是整份工程不可用。
         assert!(document
             .restore_archive_partial(b"not-an-archive", &[])
-            .is_err());
+            .is_ok());
         // 但坏载荷不得进入待合入队列，更不得影响 `ready`。
         assert!(
             document
@@ -468,15 +470,20 @@ mod tests {
         );
     }
 
-    /// 未就绪的图**不能**存档：半张图存出去等于把编辑丢了。
+    /// 未就绪的图**不能**让宿主看到存档失败；退化为当前可用的合法载荷。
+    ///
+    /// 【为什么契约变了】宿主把 `storeDocumentToArchive` 的错误当成"插件存档失败"，
+    /// 有些宿主会因此跳过这份状态。存一份稍旧/稍空的载荷永远好过让宿主丢掉整块状态。
     #[test]
-    fn archiving_is_refused_while_the_host_graph_is_not_ready() {
+    fn archiving_degrades_to_a_valid_payload_while_the_host_graph_is_not_ready() {
         let document = DocumentSession::new(1);
         let mut provider = ArchivePersistence::new(&document);
-        let error = provider.store_document().unwrap_err();
-        assert!(
-            format!("{error:?}").contains("could not be encoded"),
-            "必须明确拒绝而不是存一份不完整的编辑：{error:?}"
-        );
+        let bytes = provider
+            .store_document()
+            .expect("存档不能因为图未就绪而失败");
+        let mut restored = crate::state_channel::EditState::default();
+        restored
+            .restore(&bytes)
+            .expect("降级载荷仍必须是可解析的 EditState");
     }
 }

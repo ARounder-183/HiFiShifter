@@ -1134,7 +1134,12 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
     }
     let before = document.edits.lock_or_recover().revision;
     owners[0].restore_state(&states[1]).unwrap();
-    assert!(owners[0].encode_state().unwrap_err().contains("ambiguous"));
+    // 【为什么不再要求失败】身份歧义只该让这一份恢复不套用，不该让宿主保存失败；
+    // 权威仍保留原曲线（下面两条断言）。
+    assert!(
+        owners[0].encode_state().is_ok(),
+        "身份歧义不能让保存失败"
+    );
     assert_eq!(document.edits.lock_or_recover().revision, before);
     assert_eq!(
         document.edits.lock_or_recover().params["b"].pitch_edit[200],
@@ -1149,7 +1154,9 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
         "b".into(),
         vec![("unknown-b".into(), "ara://source".into())],
     );
-    assert!(owners[0].encode_state().unwrap_err().contains("identity"));
+    // 【为什么不再要求失败】缺身份只该让这次恢复不套用；保存仍要成功，
+    // 权威保留原曲线（下面一条断言）。
+    assert!(owners[0].encode_state().is_ok(), "缺身份不能让保存失败");
     assert_eq!(
         document.edits.lock_or_recover().params["b"].pitch_edit[200],
         64.

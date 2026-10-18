@@ -176,6 +176,11 @@ pub(crate) struct DocumentSession {
     /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
     pub ui_geometry_revision: AtomicU64,
     pub ready: AtomicBool,
+    /// 宿主是否至少给过一个源样本访问授权。
+    ///
+    /// 【用途】把"宿主还没交付 region"与"region 有了、但样本访问还没开"分开显示；
+    /// 两者对用户的可执行动作不同。
+    pub samples_access_granted: AtomicBool,
     /// 宿主是否处在一次 `beginEditing` / `endEditing` 会话中。
     ///
     /// 【为什么与 `ready` 分开】`ready` 的语义是"ARA 是否已重新交付可用输入"，
@@ -226,6 +231,14 @@ pub(crate) struct DocumentSession {
     /// 文档状态替换"，而部分载荷**故意**只带一部分（例如只带一条 modification 的参数），
     /// 走那条路会用空值覆盖掉其它状态。这里只做**按键合并**：载荷带了什么就覆盖什么。
     pub pending_partial_restore: Mutex<Vec<crate::state_channel::EditState>>,
+    /// 最后一次成功编码的完整存档。
+    ///
+    /// 【为什么需要】宿主可以在模型图尚未 ready 时调用 `storeDocumentToArchive`
+    /// （加载中的自动保存、工程关闭）。此前 `encode_archive` 直接返回
+    /// `host graph not ready`，宿主据此认为插件存档失败，重开时编辑全丢。
+    /// 现在 `ready == false` 时返回这份快照；恢复到达时也会先写一份，保证
+    /// "恢复后还没合入就保存"不会把编辑覆盖成空。
+    pub archive_cache: Mutex<Option<Vec<u8>>>,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -470,12 +483,43 @@ impl DocumentSession {
     /// 模型图里真实存在的轨道/片段，否则重载后会出现指向不存在对象的编辑。
     pub(crate) fn encode_archive(&self) -> Result<Vec<u8>, String> {
         let _transaction = self.transaction.lock_or_recover();
+        // 【为什么不再硬失败】`storeDocumentToArchive` 返回错误时宿主会认为"插件存档
+        // 失败"，有些宿主会据此跳过这份工程状态。图未就绪（加载中的自动保存、关闭时
+        // 保存）不是"没有编辑可存"，而是"这次还没合并完"；返回最后一份成功快照
+        // 永远好过让宿主丢掉整块状态。
         if !self.ready.load(Ordering::Acquire) {
-            return Err("host graph not ready; cannot archive ARA edits".into());
+            if let Some(cached) = self.archive_cache.lock_or_recover().clone() {
+                log::warn!(
+                    "[ara] archive store uses the last good snapshot ({} byte(s)); the host \
+                     graph is not ready",
+                    cached.len()
+                );
+                return Ok(cached);
+            }
+            let edits = self.edits.lock_or_recover();
+            return match edits.encode() {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => {
+                    log::error!("[ara] archive store degraded to an empty payload: {error}");
+                    Ok(Vec::new())
+                }
+            };
         }
         let mut edits = self.edits.lock_or_recover();
-        edits.reconcile(&self.track_bindings.lock_or_recover())?;
-        edits.encode()
+        if let Err(error) = edits.reconcile(&self.track_bindings.lock_or_recover()) {
+            // 身份暂时对不上不该让整份存档失败；保留未裁剪状态，恢复端会逐条 reconcile。
+            log::warn!("[ara] archive store reconcile failed: {error}");
+        }
+        match edits.encode() {
+            Ok(bytes) => {
+                *self.archive_cache.lock_or_recover() = Some(bytes.clone());
+                Ok(bytes)
+            }
+            Err(error) => {
+                log::error!("[ara] archive store degraded to an empty payload: {error}");
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// 接收 ARA 存档载荷，等模型图就绪后合入。
@@ -502,11 +546,25 @@ impl DocumentSession {
             return Ok(());
         }
         let mut restored = crate::state_channel::EditState::default();
-        restored.restore(bytes)?;
+        // 【为什么解码失败也只记日志】宿主把 `beginRestoringDocumentFromArchive`
+        // 的失败当成"整份文档恢复失败"：region 不再交付、界面永远停在
+        // `awaiting_regions`。丢一份编辑是局部损失，让宿主中止恢复是整份工程不可用。
+        if let Err(error) = restored.restore(bytes) {
+            log::error!(
+                "[ara] archive restore ignored: {error}; the host document restore continues \
+                 without these edits"
+            );
+            return Ok(());
+        }
         // 【为什么必须重映射】persistentID 只保证**文档内**唯一，跨文档导入时宿主
         // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
         // 静默丢失，症状正是"重载工程后参数被重置"。
         restored.atlas.remap_authorities(remap);
+        // 恢复后到合入前，宿主可能再次保存（甚至还没等模型图 ready）。先把这份状态
+        // 写进 cache，`encode_archive` 在 `ready == false` 时就有东西可交。
+        if let Ok(cached) = restored.encode() {
+            *self.archive_cache.lock_or_recover() = Some(cached);
+        }
         *self.pending_archive_restore.lock_or_recover() = Some(restored);
         Ok(())
     }
@@ -617,17 +675,55 @@ impl DocumentSession {
     pub(crate) fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
-        let _transaction = self.transaction.lock_or_recover();
-        if !self.is_alive() {
-            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
+        // 【为什么先释放事务再建会话】`EditorSession::new` 会加载模型、创建 actor、
+        // 扫临时目录；这些都不是"读文档状态"，却会把 `transaction` 按住数秒。
+        // ARA 模型线程（`remap_and_log` / `prepare_renderers`）等同一把锁，宿主于是
+        // 表现为未响应；UI 线程上的 `get_runtime_info` 也会排在这段时间后面。
+        // 事务只用来回答"文档此刻还活着吗"这一个原子问题。
+        {
+            let _transaction = self.transaction.lock_or_recover();
+            if !self.is_alive() {
+                return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
+            }
         }
+        // 初始化期间文档可能被关闭：会话只弱引用文档，后续命令会自然返回
+        // `DOCUMENT_CLOSED`，不需要在这里把构造失败当成终态。
         self.editor
             .get_or_init(|| crate::editor::session::EditorSession::new(self))
             .clone()
     }
-    pub(crate) fn flush_editor(&self) -> Result<(), String> {
+    /// 编辑器会话是否已经创建（不创建、不取事务）。
+    pub(crate) fn editor_initialized(&self) -> bool {
+        self.editor
+            .get()
+            .is_some_and(|result| result.as_ref().is_ok())
+    }
+
+    /// 已发布片段数（健康探活用；不创建会话）。
+    pub(crate) fn editor_clip_count(&self) -> u64 {
+        self.editor
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |session| session.clip_count())
+    }
+
+    /// 已经创建的编辑器会话（**不创建**）。
+    pub(crate) fn existing_editor_session(
+        &self,
+    ) -> Option<Arc<crate::editor::session::EditorSession>> {
+        self.editor
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .cloned()
+    }
+
+    /// 有预算的编辑器 flush；用于宿主保存线程，不能等 10 秒。
+    pub(crate) fn flush_editor_with_budget(
+        &self,
+        budget: std::time::Duration,
+    ) -> Result<(), String> {
         if let Some(Ok(editor)) = self.editor.get() {
-            editor.flush()?;
+            editor.flush_with_budget(budget)?;
         }
         Ok(())
     }
@@ -1044,10 +1140,26 @@ impl DocumentSession {
     ) -> Result<Vec<u8>, String> {
         let _transaction = self.transaction.lock_or_recover();
         if !self.ready.load(Ordering::Acquire) {
-            return Err("host graph not ready; cannot archive ARA edits".into());
+            // 部分存档没有"最后一份同筛选快照"可复用；返回完整缓存是安全的超集，
+            // 宿主恢复时会按文档状态合入。没有缓存才返回空载荷（而不是失败）。
+            if let Some(cached) = self.archive_cache.lock_or_recover().clone() {
+                log::warn!(
+                    "[ara] partial archive store uses the last full snapshot ({} byte(s)); \
+                     the host graph is not ready",
+                    cached.len()
+                );
+                return Ok(cached);
+            }
+            log::warn!(
+                "[ara] partial archive store degraded to an empty payload; the host graph is \
+                 not ready"
+            );
+            return Ok(Vec::new());
         }
         let mut edits = self.edits.lock_or_recover();
-        edits.reconcile(&self.track_bindings.lock_or_recover())?;
+        if let Err(error) = edits.reconcile(&self.track_bindings.lock_or_recover()) {
+            log::warn!("[ara] partial archive reconcile failed: {error}");
+        }
         // 【为什么先整份克隆再裁剪】从 `EditState::default()` 起手会把**所有**状态
         // 一起丢掉 —— 包括本次真正要保存的那几条 modification 参数。裁剪必须是
         // "从完整状态里挑出被选中的部分"，而不是"从空状态里填"。
@@ -1065,7 +1177,13 @@ impl DocumentSession {
             partial.groups = Default::default();
             partial.atlas.gaps.clear();
         }
-        partial.encode()
+        match partial.encode() {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                log::error!("[ara] partial archive store degraded to an empty payload: {error}");
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// 接收 ARA 2 的部分存档载荷，按 `archive → current` 重映射后暂存。
@@ -1078,7 +1196,14 @@ impl DocumentSession {
             return Ok(());
         }
         let mut restored = crate::state_channel::EditState::default();
-        restored.restore(bytes)?;
+        // 与整份恢复同一条纪律：解码失败不能让宿主中止恢复。
+        if let Err(error) = restored.restore(bytes) {
+            log::error!(
+                "[ara] partial archive restore ignored: {error}; the host document restore \
+                 continues without these edits"
+            );
+            return Ok(());
+        }
         restored.atlas.remap_authorities(remap);
         self.pending_partial_restore
             .lock_or_recover()
