@@ -2517,6 +2517,53 @@ mod tests {
     /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic
     /// apply` 的直接来源。
     #[test]
+    /// **被推迟的编辑收口之后，时间线必须仍然被发布。**
+    ///
+    /// 【为什么这是问题二 2c 的回归】`endEditing` 在 content reader 存活时被推迟
+    /// （见 bridge 的 `pending_end_editing`），而它是**唯一**调用 `remap_and_log()`
+    /// 的地方。宿主不会为重发的同一个编辑会话再发送一次 `endEditing`，所以推迟
+    /// 之后必须由 `destroy_content_reader` / `enable_audio_source_samples_access` /
+    /// `notify_model_updates` 三个补跑点重新收口。任何一条没接上 ⇒ `remap_and_log`
+    /// 永不执行 ⇒ `document.timeline` 停在 `None` ⇒ `claimed_items` 保持 0 ⇒
+    /// 界面停在"等待宿主音频"。
+    ///
+    /// 【为什么在模型层测】补跑点在 bridge 层，但它保护的不变量是模型层的：
+    /// "收口一次 ⇒ 时间线被发布一次"。这里钉住那个不变量，bridge 侧的补跑调用
+    /// 线由 `ara_entry` / controller 的日志与 T4 的重开测试覆盖。
+    #[test]
+    fn a_deferred_edit_close_still_publishes_the_timeline() {
+        let (mut model, _key) = model_with_one_region();
+        // 编辑会话开始：宿主在这一刻交付 region，但 reader 还活着。
+        model.editing = true;
+        model
+            .session
+            .editing_session
+            .store(true, Ordering::Release);
+        // 模型侧等到收口才更新时间线。
+        assert!(
+            model.timeline.is_none(),
+            "收口前不得发布时间线（读者可能还在读旧图）"
+        );
+
+        // 收口（无论它由哪个补跑点触发，最终都走到这里）。
+        // 直接用 `remap_and_log`（`end_editing` 的全部实质）加编辑标志复位，
+        // 因为 `HostContentScope::unavailable()` 在测试里不可构造。
+        model.editing = false;
+        model
+            .session
+            .editing_session
+            .store(false, Ordering::Release);
+        model.remap_and_log();
+        assert!(
+            model.timeline.is_some(),
+            "收口必须发布时间线，否则界面永远停在等待宿主音频"
+        );
+        assert!(
+            !model.session.editing_session.load(Ordering::Acquire),
+            "收口必须解除编辑会话，否则后续通知会被 is_editing 拒绝"
+        );
+    }
+
     fn end_editing_skips_the_remap_when_the_model_did_not_change() {
         let (mut model, _key) = model_with_one_region();
         // 还没发布过时间线 ⇒ 必须算。
@@ -3635,6 +3682,45 @@ mod tests {
             .unwrap();
         assert!(model.session.ready.load(Ordering::Acquire));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 宿主**不**按 leaf-first 销毁时，整个文档的身份仍然必须被撤销。
+    ///
+    /// 【为什么这是问题二的兜底回归】`PluginRuntime::destroy` 旧实现在"图非空"时
+    /// **整份放弃**：一个 region 都没销毁 ⇒ `destroy_document` 不执行 ⇒
+    /// `remove_document` 不执行 ⇒ 进程级表里留下死文档的 key。下一次文档在同一批
+    /// 宿主管道域地址上 `create_playback_region` 直接撞 `DuplicateRegion`，
+    /// 宿主从此不再交付任何 region，界面停在"等待宿主音频"。
+    ///
+    /// 兜底路径（T5 的强制销毁）保证"尽力销毁后一定调 destroy_document"；
+    /// 而 `Drop`（模型直接释放、连 `destroy_document` 都没走）也必须撤销。
+    #[test]
+    fn dropping_a_model_with_live_regions_revokes_its_identities() {
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        let document_id;
+        {
+            let mut model = ModelHandle::new();
+            document_id = model.document_id;
+            region_owners()
+                .lock_or_recover()
+                .register(key, model.document_id, 0)
+                .unwrap();
+            // 故意**不**调 `destroy_playback_region`：region 一直活着。
+        }
+        assert!(
+            region_owners().lock_or_recover().owner_of(key).is_none(),
+            "模型释放必须撤销文档身份，否则下一次文档会被遗留 key 卡住"
+        );
+        assert_ne!(document_id, 0, "文档身份必须非零（0 是无效身份）");
+        // 被撤销的 key 可以被新文档认领。
+        let replacement = ModelHandle::new();
+        assert_eq!(
+            region_owners()
+                .lock_or_recover()
+                .register(key, replacement.document_id, 0),
+            Ok(())
+        );
     }
 
     /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。
