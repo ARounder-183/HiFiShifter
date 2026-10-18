@@ -30,6 +30,7 @@ import type { HostAudioPayload } from "../../types/api";
 import {
     needsFolderTrackNotice,
     needsSkippedClipsNotice,
+    needsSourceReadFailedNotice,
     needsUnmatchedRegionsNotice,
 } from "./hostAudio";
 
@@ -59,6 +60,15 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
     const { t, plural } = useI18n();
     // 【为什么排在 folder 之前】"宿主分配了区域但一条都对不上"比"还没拿到区域"更具体：
     // 它排除了"宿主尚未分配"这一成因，用户不必再等。
+    // 读取失败是终态故障：比"还没拿到 region"更具体，也最需要用户知道。
+    if (needsSourceReadFailedNotice(status)) {
+        return (
+            <Notice
+                title={t("ara_host_audio_source_failed_title")}
+                body={t("ara_host_audio_source_failed_body")}
+            />
+        );
+    }
     if (needsUnmatchedRegionsNotice(status)) {
         return (
             <Notice

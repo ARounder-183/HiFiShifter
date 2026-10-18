@@ -2165,6 +2165,9 @@ export const enUS = {
     ara_host_audio_unmatched_title: "Assigned regions do not match any clip",
     ara_host_audio_unmatched_body:
         "the host assigned this plug-in a group of audio regions, but none of them matches a clip on this track (the candidate count differs from the region count, or position and length differ), so those clips have no content. Make sure the clips on this plug-in's track correspond one-to-one with the regions it was assigned; if the plug-in sits on a folder parent track, move it to the actual audio child track.",
+    ara_host_audio_source_failed_title: "Host audio could not be read",
+    ara_host_audio_source_failed_body:
+        "the host granted sample access, but the plug-in could not read the audio (unsupported media format, sample rate, or range). These clips will stay silent; check the media or export diagnostics.",
     ara_clip_syncing_host_audio: "Waiting for the host to finish assigning audio",
     ara_clip_waiting_for_host_audio: "Waiting for the host to hand over audio",
     ara_clip_host_source_read_failed:

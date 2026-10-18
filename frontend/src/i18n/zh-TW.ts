@@ -2107,6 +2107,9 @@ export const zhTW = {
     ara_host_audio_unmatched_title: "宿主分配的區域對不上片段",
     ara_host_audio_unmatched_body:
         "宿主已將此外掛掛到一組音訊區域上，但其中沒有一條能對上本軌的片段（候選片段數與區域數不一致，或位置／長度不相等），因此這些片段沒有內容。請確認此外掛所在軌道的片段與它被分配的區域一一對應；folder 父軌上的外掛請改掛到具體的音訊子軌。",
+    ara_host_audio_source_failed_title: "讀取宿主音訊失敗",
+    ara_host_audio_source_failed_body:
+        "宿主已授權樣本存取，但外掛讀不出音訊（可能是素材格式、取樣率或範圍不受支援）。這些片段不會出聲；請檢查素材，或匯出診斷紀錄回報。",
     ara_clip_syncing_host_audio: "正在等待宿主完成音訊分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音訊",
     ara_clip_host_source_read_failed:

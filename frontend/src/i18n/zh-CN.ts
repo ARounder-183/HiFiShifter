@@ -2103,6 +2103,9 @@ export const zhCN = {
     ara_host_audio_unmatched_title: "宿主分配的区域对不上片段",
     ara_host_audio_unmatched_body:
         "宿主已把这个插件挂到一组音频区域上，但其中没有一条能对上本轨的片段（候选片段数与区域数不一致，或位置/长度不相等），因此这些片段没有内容。请确认本插件所在轨道的片段与它被分配的区域一一对应；folder 父轨上的插件请改挂到具体的音频子轨。",
+    ara_host_audio_source_failed_title: "宿主音频读取失败",
+    ara_host_audio_source_failed_body:
+        "宿主已授权样本访问，但插件读不出音频（可能是素材格式、采样率或范围不受支持）。这些片段不会出声；请检查素材，或导出诊断日志反馈。",
     ara_clip_syncing_host_audio: "正在等待宿主完成音频分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音频",
     ara_clip_host_source_read_failed:

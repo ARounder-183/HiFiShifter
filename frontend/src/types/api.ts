@@ -209,7 +209,11 @@ export type HostAudioState =
      * 那一态是"一个 region 都没拿到"，这一态是"拿到了，但按几何唯一匹配对不上"
      * （folder 父轨的 FX 会拿到整组 region，而候选 item 数少于 region 数）。
      */
-    | "unmatched_regions";
+    | "unmatched_regions"
+    /** region 已分配，但宿主还没开启样本访问。 */
+    | "awaiting_samples_access"
+    /** 宿主开启了访问，但样本读取失败（终态）。 */
+    | "source_read_failed";
 
 export interface HostAudioPayload {
     state: HostAudioState;

@@ -2151,6 +2151,9 @@ export const koKR = {
     ara_host_audio_unmatched_title: "할당된 리전이 클립과 일치하지 않습니다",
     ara_host_audio_unmatched_body:
         "호스트가 이 플러그인에 여러 오디오 리전을 할당했지만, 이 트랙의 클립과 일치하는 리전이 없습니다(후보 수와 리전 수가 다르거나 위치·길이가 일치하지 않음). 따라서 이 클립에는 내용이 없습니다. 플러그인이 있는 트랙의 클립과 할당된 리전이 일대일로 대응하는지 확인하고, folder 상위 트랙에 있다면 실제 오디오 하위 트랙으로 옮기세요.",
+    ara_host_audio_source_failed_title: "호스트 오디오를 읽을 수 없습니다",
+    ara_host_audio_source_failed_body:
+        "호스트가 샘플 접근을 허용했지만 오디오를 읽을 수 없습니다(미디어 형식·샘플레이트·범위가 지원되지 않을 수 있습니다). 이 클립은 무음으로 남습니다. 미디어를 확인하거나 진단 로그를 내보내 보고하세요.",
     ara_clip_syncing_host_audio: "호스트의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:

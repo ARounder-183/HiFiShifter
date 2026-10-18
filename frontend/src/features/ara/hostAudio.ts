@@ -18,6 +18,8 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "awaiting_regions",
     "folder_parent_without_regions",
     "unmatched_regions",
+    "awaiting_samples_access",
+    "source_read_failed",
 ]);
 
 /**
@@ -79,6 +81,16 @@ export function needsFolderTrackNotice(status: HostAudioPayload | null): boolean
  */
 export function needsUnmatchedRegionsNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "unmatched_regions";
+}
+
+/**
+ * 是否需要"宿主授权了样本，但插件读不出来"这条提示。
+ *
+ * 【为什么必须与 `awaiting_samples_access` 分开】前者是**终态故障**（等下去不会好），
+ * 后者是正常加载中间态。把它们都说成"等待宿主音频"会让用户永远等一个不会来的结果。
+ */
+export function needsSourceReadFailedNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "source_read_failed";
 }
 
 /**
