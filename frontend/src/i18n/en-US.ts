@@ -2171,6 +2171,9 @@ export const enUS = {
     ara_host_audio_region_rejected_title: "The plug-in rejected the host's audio region",
     ara_host_audio_region_rejected_body:
         "the host delivered this material, but the plug-in refused to create a region for it. Waiting will not help; remove the plug-in from this track and insert it again.",
+    ara_host_audio_restore_title: "The plug-in could not read back the saved parameters",
+    ara_host_audio_restore_body:
+        "the parameters and curves saved with this project were not merged in, so the defaults are shown. Audio still works; reopen the project to retry, and restore the settings manually in the host if it persists. Reason: ",
     ara_clip_syncing_host_audio: "Waiting for the host to finish assigning audio",
     ara_clip_waiting_for_host_audio: "Waiting for the host to hand over audio",
     ara_clip_host_source_read_failed:

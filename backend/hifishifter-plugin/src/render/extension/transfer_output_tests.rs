@@ -1392,3 +1392,144 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
         left[frames - 1]
     );
 }
+
+/// **门控清零必须是"淡到零"，而不是阶跃到零。**
+///
+/// 【为什么这是问题一的直接回归】`vst3.rs` 曾在门控分支里"先去咔、再
+/// `clear_outputs`"：去咔把前 64 帧写好，紧接着的清零又把它们抹掉 —— 输出仍然是
+/// 一次纯阶跃。`apply_gate_fade_out` 自己写满整块，调用方因此不再清零。
+#[test]
+fn the_emit_gate_fades_to_zero_instead_of_stepping() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    // 块长 8（< 64）：门控必须在**本块内**淡到零，不能把非零尾巴留下。
+    let frames = 8;
+    let mut left = [1.0_f32; 8];
+    let mut right = [1.0_f32; 8];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    // 先让上一块输出满幅信号，把尾巴存进去（用同一块长，保证尾巴真实）。
+    unsafe { owner.apply_output_declick(stream, &mut bus, frames) };
+    left.fill(1.0);
+    right.fill(1.0);
+    unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };
+    assert!(
+        left[0] > 0.0 && left[0] < 1.0,
+        "首帧必须是上一块尾巴的淡出起点（实测 {}）",
+        left[0]
+    );
+    assert!(
+        left[0] > left[1] && left[1] > left[2],
+        "淡出必须单调下降（实测 {:?}）",
+        &left[..4]
+    );
+    assert_eq!(left[frames - 1], 0.0, "块内必须精确落到零");
+}
+
+/// **预取块不因 `kPlaying == 0` 被静音（bound 实例同样适用）。**
+///
+/// 【为什么必须覆盖 bound】REAPER 的 ARA 播放渲染器就在预取流上工作；它会把输出
+/// 缓存下来稍后播放。按 `kPlaying` 清零等于往缓存里写静音 —— 用户听到的是
+/// "有概率完全没声音"。实时流仍保持"停播即静音"。
+#[test]
+fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
+    let owner = insert_owner();
+    owner.roles.store(
+        ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER.bits(),
+        std::sync::atomic::Ordering::Release,
+    );
+    let prefetch = BlockEvidence {
+        stream: ProcessStream::Prefetch,
+        position: 0,
+        frames: 512,
+        playing: false,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Resting,
+        had_previous: true,
+        allow_output: false,
+        split: BlockSplit::whole(0, 512),
+    };
+    assert!(
+        owner.transfer_should_emit(Some(prefetch), false),
+        "预取输出稍后才被播放，不能因为此刻 kPlaying=0 被清空"
+    );
+    let realtime = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        ..prefetch
+    };
+    assert!(
+        !owner.transfer_should_emit(Some(realtime), false),
+        "实时流的光标重复块仍然必须静音"
+    );
+    assert!(
+        owner.transfer_should_emit(Some(realtime), true),
+        "真实播放时实时流照常出声"
+    );
+}
+
+/// **快照就绪探测必须查"实际会被读取的那一份"。**
+///
+/// 【为什么是 48 kHz】`snapshot_index_for_rate` 对 48 kHz 及倍率返回 1。此前
+/// `transfer_stage` 固定查 `snapshots[0]`，于是"48 kHz 那份还没就绪"会被判成
+/// 就绪 ⇒ `layered == false` ⇒ 预清后逐样本写零。
+#[test]
+fn the_snapshot_readiness_probe_uses_the_publisher_that_is_read() {
+    let owner = insert_owner(); // setup_rate = 48 kHz
+    assert_eq!(owner.snapshot_index_for_rate(48_000.0), 1);
+    // 只发布 44.1 kHz 那一份：48 kHz 工程实际读的是索引 1，必须报"未就绪"。
+    owner.snapshots[0]
+        .publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate: 44_100,
+            origin_sample: 0,
+            left: vec![0.1, 0.2],
+            right: vec![0.1, 0.2],
+            _reservation: None,
+        })
+        .unwrap();
+    assert!(
+        !owner.processed_snapshot_ready(),
+        "48 kHz 工程读索引 1，索引 0 就绪不等于实际发布器就绪"
+    );
+    owner.set_setup_sample_rate(44_100.0);
+    assert!(
+        owner.processed_snapshot_ready(),
+        "44.1 kHz 工程读索引 0，就绪探测必须跟着 setup 率走"
+    );
+}
+
+/// **恢复失败必须变成可读状态，而不是一行日志。**
+#[test]
+fn a_failed_restore_is_reported_not_swallowed() {
+    let owner = insert_owner();
+    assert!(!owner.restore_failed(), "从未恢复过时不是失败");
+    owner.note_restore_pending();
+    assert!(!owner.restore_failed(), "待恢复不是故障");
+    owner.note_restore_failed("fade ownership metadata pending");
+    assert!(owner.restore_failed());
+    let (status, error, applied) = owner.restore_report();
+    assert_eq!(status, super::RESTORE_FAILED);
+    assert_eq!(error.as_deref(), Some("fade ownership metadata pending"));
+    assert_eq!(applied, 0, "失败不能计入已应用");
+}
+
+/// **ARA 实例首次发布快照必须改变输出 token。**
+///
+/// 【为什么是问题一的 ARA 版本】bound 实例的仲裁恒为 `Untouched`；token 只含"种类"
+/// 时，快照从无到有（此前逐样本写零）不会触发去咔，用户听到的是从零到有声的硬切。
+#[test]
+fn an_ara_snapshot_publish_changes_the_output_token() {
+    let owner = insert_owner();
+    let before = owner.output_token_for(TransferOutput::Untouched);
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    let after = owner.output_token_for(TransferOutput::Untouched);
+    assert_ne!(
+        before, after,
+        "快照发布必须改变 token，否则 ARA 的接缝拿不到 1.3 ms 淡化"
+    );
+}

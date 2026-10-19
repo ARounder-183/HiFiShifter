@@ -2188,6 +2188,9 @@ export const jaJP = {
     ara_host_audio_region_rejected_title: "プラグインがホストのオーディオ領域を拒否しました",
     ara_host_audio_region_rejected_body:
         "ホストはこの素材を渡しましたが、プラグインはその領域を作成しませんでした。待っても改善しません。このトラックからプラグインを削除して再度追加してください。",
+    ara_host_audio_restore_title: "プラグインは保存されたパラメーターを読み戻せませんでした",
+    ara_host_audio_restore_body:
+        "このプロジェクトと一緒に保存されたパラメーターとカーブをマージできず、既定値が表示されています。音声は正常です。プロジェクトを開き直して再試行し、直らない場合はホスト側で手動で復元してください。理由：",
     ara_clip_syncing_host_audio: "ホストの音声割り当て完了を待っています",
     ara_clip_waiting_for_host_audio: "ホストからの音声を待機中",
     ara_clip_host_source_read_failed:

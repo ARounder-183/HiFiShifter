@@ -19,7 +19,7 @@ use ara2_bridge::companion::vst3::ffi::{
     Ara2Vst3InterfaceKind, ARA2_VST3_OK,
 };
 use ara2_bridge::companion::vst3::Vst3MainFactoryAdapter;
-use ara2_bridge::companion::{CompanionProcessorBinding, CompanionRoles};
+use ara2_bridge::companion::CompanionRoles;
 use std::ffi::{c_char, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -946,12 +946,19 @@ impl Processor {
     /// 这样多个实例不会互相抢同一次绑定。
     fn create() -> Option<Box<Processor>> {
         let runtime = crate::runtime::runtime()?;
-        let binding =
-            CompanionProcessorBinding::new([runtime.companion.clone()], CompanionRoles::all())
-                .ok()?;
         let extension_owner = Arc::new(ExtensionOwner::default());
         let route = crate::editor::routing::RouteLease::new(&extension_owner);
-        let entry = HostEntry::new(binding, crate::CLASS_NAME, extension_owner.clone()).ok()?;
+        // 【为什么把 factory/roles 交给 HostEntry】companion 的 "already bound" 是
+        // 处理器级的：宿主重开工程会复用同一个 `Processor`，而上一份文档关闭后
+        // 这个一次性标志仍然为真。`HostEntry` 必须在同一个位置重建一个等价绑定，
+        // 所以它需要原始构造参数，而不是只拿一次创建好的对象。
+        let entry = HostEntry::new(
+            runtime.companion.clone(),
+            CompanionRoles::all(),
+            crate::CLASS_NAME,
+            extension_owner.clone(),
+        )
+        .ok()?;
         Some(Box::new(Processor {
             component_vtbl: &COMPONENT_VTBL,
             refcount: AtomicI32::new(1),
@@ -1341,6 +1348,10 @@ unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_v
         };
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
         if let Err(error) = owner.restore_state(&bytes) {
+            // 【为什么仍回 OK】见上面的说明：一份读不出来的旧存档只该丢掉那份编辑，
+            // 不该让整份工程加载失败。但"丢掉"必须是**可见的**：把真因记进恢复状态，
+            // 界面报 `restore_unresolved`，诊断包里能读到原因。
+            owner.note_restore_failed(&error);
             log::error!(
                 "[state] component setState ignored: {error}; the host document load continues"
             );
@@ -1766,10 +1777,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 );
                 // 【为什么要先去咔再清零】起播窗口里 `allow_output` 可能逐块翻转
                 // （`Resting` 重复抑制），于是出现"有声 → 清零 → 有声"。直接从有声
-                // 阶跃到零就是用户听到的"咔"。先用上一块的尾巴把本块前 64 帧淡出到
-                // 与新信号（这里是零）之间的过渡，再清剩余部分。
+                // 阶跃到零就是用户听到的"咔"。
+                //
+                // 【为什么用 `apply_gate_fade_out` 而不是"先去咔再 `clear_outputs`"】
+                // 后者先把整块写零，去咔产物随即被销毁 —— 那不是去咔，是把去咔白做
+                // 一遍。本函数自己按"尾巴 → 0"写满整块，因此**不能再调用**清零。
                 unsafe {
-                    owner.apply_output_declick(
+                    owner.apply_gate_fade_out(
                         evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
                             ev.stream
                         }),
@@ -1777,7 +1791,6 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         data.num_samples as usize,
                     );
                 }
-                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 return K_RESULT_OK;
             }
             // 【Transfer 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么

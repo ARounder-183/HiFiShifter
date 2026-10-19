@@ -1435,6 +1435,16 @@ impl DocumentSession {
         self.sequence_regions.lock_or_recover().clear();
         self.sequence_track_index.lock_or_recover().clear();
         self.regions.lock_or_recover().clear();
+        // 【为什么先取本文档的 clip id 再清表】共振峰代次表在内核里是**进程级**的，
+        // 同一进程可以同时开着多份工程（多个 ARA 文档）。整表清会把另一份仍在编辑的
+        // 工程的活跃代次一并抹掉 —— 那边的后台重建随后会以为代次过期而静默放弃，
+        // 表现为"另一个工程里的波形/共振峰不再更新"。只清本文档持有的那些。
+        let owned_clip_ids = self
+            .clip_ids
+            .lock_or_recover()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         self.clip_ids.lock_or_recover().clear();
         self.region_items.lock_or_recover().clear();
         // 授权/事实映射随文档一起释放：此前 `region_items` / `authorized_takes` /
@@ -1463,7 +1473,10 @@ impl DocumentSession {
         // （`FORMANT_REBUILD_GENERATIONS`），按 clip_id 索引且只增不减：条目仅在同一个
         // clip 被再次重建时覆写，而工程切换后旧 clip_id 不会再出现 —— 它的清理函数
         // 此前**没有任何调用者**。单条很小，但反复导入工程会一直涨。
-        hifishifter_kernel::formant_cache::clear_formant_rebuild_generations();
+        // 只清本文档的 id，别动同进程里的另一份工程。
+        hifishifter_kernel::formant_cache::forget_formant_rebuild_generations(
+            owned_clip_ids.iter().map(String::as_str),
+        );
     }
 
     /// 控制器侧独立保留 lease，companion 先释放时 raw extension 存储仍须存活。
@@ -1724,6 +1737,10 @@ impl DocumentSession {
             .collect::<Vec<_>>();
         for owner in owners {
             owner.cancel_preparation();
+            // 【为什么这里是**硬清**而不是只推进代次】`revoke_renderers()` 的语义是
+            // "宿主撤销了源权限 / 源内容变了"：继续播旧快照等于播一份已经失效的
+            // 渲染结果。真正被频繁调用、且**不该**造成静音的是 `clear_renderers()`
+            // （一次宿主编辑触发多次）—— 那一条已经改成只 `invalidate_generation()`。
             owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
     }

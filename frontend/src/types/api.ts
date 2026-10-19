@@ -214,7 +214,14 @@ export type HostAudioState =
     | "awaiting_samples_access"
     /** 宿主开启了访问，但样本读取失败（终态）。 */
     | "source_read_failed"
-    | "region_rejected";
+    | "region_rejected"
+    /**
+     * 绑定与音频通路都正常，但上一次保存的参数/曲线没能合并进来。
+     *
+     * 【为什么要单独一态】用户看到的是"设置没回来"，而不是"没有声音"。它可行动
+     * （重载插件会丢掉的设置已经丢了），但此前的界面完全不提这件事。
+     */
+    | "restore_unresolved";
 
 export interface HostAudioPayload {
     state: HostAudioState;

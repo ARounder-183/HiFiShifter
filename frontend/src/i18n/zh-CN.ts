@@ -2109,6 +2109,9 @@ export const zhCN = {
     ara_host_audio_region_rejected_title: "插件拒收了宿主的音频区域",
     ara_host_audio_region_rejected_body:
         "宿主确实交付了这段素材，但插件拒绝为它创建区域。继续等待不会好转；请从本轨道移除插件后重新插入。",
+    ara_host_audio_restore_title: "插件没能读回上次保存的参数",
+    ara_host_audio_restore_body:
+        "上次保存的参数与曲线没能合并进来，当前显示的是默认值。音频通路正常；如需找回设置，请重新打开工程，仍不行时在宿主里手动恢复。原因：",
     ara_clip_syncing_host_audio: "正在等待宿主完成音频分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音频",
     ara_clip_host_source_read_failed:

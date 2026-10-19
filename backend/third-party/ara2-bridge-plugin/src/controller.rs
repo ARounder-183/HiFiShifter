@@ -25,6 +25,13 @@ const fn ffi_bool(value: bool) -> ARABool {
     }
 }
 
+/// 被 content reader 挡住的 `endEditing` 最多等多久。
+///
+/// 【为什么是 2 秒】正常宿主在几十毫秒内释放 reader（一次回调的跨度）；2 秒足够覆盖
+/// 慢宿主与重排，同时把"宿主泄漏 reader"和"宿主只是慢"分开。超过它，时间线不发布的
+/// 代价已经大于强收口一次映射的代价。
+const DEFERRED_EDITING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 一次性留痕：`notifyModelUpdates` 想把某个对象的变化推回宿主，但宿主创建它时没给句柄。
 ///
 /// 【为什么只报一次】它是"宿主能力缺失"而不是"每次调用都出错"：Cubase 15 对
@@ -66,6 +73,13 @@ struct ControllerAdapter<P: PluginModel> {
     /// 实例从此砖化，日志里只有那一条 warn。置位后由 `destroy_content_reader` 在
     /// reader 排空的那一刻补跑。
     pending_end_editing: bool,
+    /// 这次 `endEditing` 是从哪一个时刻开始被推迟的。
+    ///
+    /// 【为什么需要时间】"reader 排空"是补跑的正常条件，但宿主**可以**泄漏一个
+    /// content reader（从不调 `destroyContentReader`）。那时排空永不到来，补跑也就
+    /// 永不发生：`runtime.editing` 保持 true，`remap_and_log` 不跑，时间线永不发布。
+    /// 丢一次映射是局部损失，让整个工程不可用是全局损失 —— 超过宽限就必须强制收口。
+    deferred_end_editing_since: Option<std::time::Instant>,
     legacy_restore_reader: Option<ARAArchiveReaderHostRef>,
     factory_analyzable_content: HashSet<i32>,
     factory_playback_transformations: PlaybackTransformationFlags,
@@ -218,9 +232,32 @@ impl<P: PluginModel> ControllerAdapter<P> {
     /// 还活着的时候开启样本访问、或周期性调 `notifyModelUpdates`；这两个入口同样
     /// 意味着"插件侧又可以动了"。任一处能收口就收口，别等那个唯一时刻。
     fn retry_deferred_end_editing(&mut self, reason: &str) {
-        if self.pending_end_editing && self.content_readers.is_empty() {
+        if !self.pending_end_editing {
+            return;
+        }
+        let drained = self.content_readers.is_empty();
+        if drained {
             self.pending_end_editing = false;
+            self.deferred_end_editing_since = None;
             log::info!("[ara] endEditing retried: {reason}");
+            self.finish_editing();
+            return;
+        }
+        // 【为什么要强制收口】宿主泄漏 content reader 时"排空"永不到来。继续等下去
+        // 等于让 `runtime.editing` 永久为真：时间线永不发布，存档回调也全部被拒。
+        // 超过宽限后按事实收口，并把"这是被逼的"写进日志 —— 丢一次映射好过整档砖化。
+        let elapsed = self
+            .deferred_end_editing_since
+            .map_or(std::time::Duration::ZERO, |since| since.elapsed());
+        if elapsed >= DEFERRED_EDITING_GRACE {
+            log::error!(
+                "[ara] forcing endEditing after {:.1}s with {} content reader(s) still live \
+                 ({reason}); the host appears to have leaked a reader",
+                elapsed.as_secs_f32(),
+                self.content_readers.len()
+            );
+            self.pending_end_editing = false;
+            self.deferred_end_editing_since = None;
             self.finish_editing();
         }
     }
@@ -240,6 +277,8 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn begin_editing(&mut self) {
+        // 宿主开始新一次编辑：先看上一次被推迟的收口是否已经等够宽限。
+        self.retry_deferred_end_editing("beginEditing observed a new edit session");
         // 【为什么不再无声吞掉】`runtime_mut()` 在 content reader 非空时返回 `Err`，
         // 于是 `beginEditing` 完全不生效，而宿主认为会话已开始；随后 `endEditing`
         // 又因 `!self.editing` 返回 `Err`（同样被吞）。整段编辑的 begin/end 一起
@@ -262,10 +301,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 "[ara] endEditing deferred: {} content reader(s) still live; it will be                  retried as soon as the last one is released",
                 self.content_readers.len()
             );
+            if !self.pending_end_editing {
+                self.deferred_end_editing_since = Some(std::time::Instant::now());
+            }
             self.pending_end_editing = true;
             return;
         }
         self.pending_end_editing = false;
+        self.deferred_end_editing_since = None;
         self.finish_editing();
     }
 
@@ -419,7 +462,25 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
 
     fn store_document_to_archive(&mut self, writer: ARAArchiveWriterHostRef) -> ARABool {
         if self.runtime().map_or(true, PluginRuntime::is_editing) {
-            return kARAFalse;
+            // 【为什么这里要强收口】宿主若开启了 `beginRestoringDocumentFromArchive`
+            // 却从未配对调用 `endRestoringDocumentFromArchive`，`runtime.editing` 会
+            // 永久为真 —— 此后**每一次**存档都返回 `kARAFalse`：用户以为存上了，其实
+            // 一次都没存。这种未配对的会话是本插件侧就能判定的事实，按它收口比让存档
+            // 静默丢失安全得多。真正的宿主编辑会话（`legacy_restore_reader == None`）
+            // 仍然照旧拒绝，避免在编辑中途落盘一份半写状态。
+            if self.legacy_restore_reader.is_some() {
+                log::error!(
+                    "[ara] archive restore was never ended by the host; forcing the editing \
+                     session closed so this save can proceed"
+                );
+                let _ = self
+                    .runtime_mut()
+                    .and_then(PluginRuntime::end_callback_editing);
+                self.legacy_restore_reader = None;
+            }
+            if self.runtime().map_or(true, PluginRuntime::is_editing) {
+                return kARAFalse;
+            }
         }
         let Ok(bytes) = self.capabilities.store_document() else {
             return kARAFalse;
@@ -2148,6 +2209,7 @@ impl<P: PluginModel + 'static> Plugin<P> {
             pending_analysis_starts: Vec::new(),
             content_readers: HashSet::new(),
             pending_end_editing: false,
+            deferred_end_editing_since: None,
             legacy_restore_reader: None,
             factory_analyzable_content,
             factory_playback_transformations,

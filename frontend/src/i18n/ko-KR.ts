@@ -2157,6 +2157,9 @@ export const koKR = {
     ara_host_audio_region_rejected_title: "플러그인이 호스트의 오디오 영역을 거부했습니다",
     ara_host_audio_region_rejected_body:
         "호스트가 이 자료를 전달했지만 플러그인이 해당 영역 생성을 거부했습니다. 기다려도 해결되지 않습니다. 이 트랙에서 플러그인을 제거했다가 다시 추가하세요.",
+    ara_host_audio_restore_title: "플러그인이 저장된 파라미터를 다시 읽지 못했습니다",
+    ara_host_audio_restore_body:
+        "이 프로젝트와 함께 저장된 파라미터와 곡선을 병합하지 못해 기본값이 표시됩니다. 오디오는 정상입니다. 프로젝트를 다시 열어 재시도하고, 계속되면 호스트에서 직접 복원하세요. 이유: ",
     ara_clip_syncing_host_audio: "호스트의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:

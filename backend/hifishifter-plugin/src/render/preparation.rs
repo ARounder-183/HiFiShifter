@@ -80,6 +80,14 @@ impl PreparationQueue {
             mailbox.error.clone(),
         )
     }
+    /// 队列是否已被 `close()` 永久关闭。
+    ///
+    /// 【为什么需要这个读数】关闭是终结性的：`request()` 此后恒失败。持有者（renderer）
+    /// 在文档关闭后重绑时必须能区分"还没有队列"与"队列已死"，否则 `Option` 上的一次
+    /// `is_none()` 检查会把死队列当成可用队列继续用。
+    pub fn is_closed(&self) -> bool {
+        self.state.mailbox.lock_or_recover().closed
+    }
     /// actor已核对代次并成功发布全部PCM时，空闲邮箱不能继续报告之前失败的错误。
     /// 运行/待办中的任务仍保留自己的结果权威，不抢先清掉尚未完成的失败信息。
     pub fn acknowledge_idle_success(&self) {

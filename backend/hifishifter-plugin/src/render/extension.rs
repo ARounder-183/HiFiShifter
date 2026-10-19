@@ -181,6 +181,12 @@ pub(crate) enum HostAudioState {
     /// `create_playback_region` 不再因为遗留身份而失败。真出现时
     /// `DocumentSession::region_rejections` 里带着第一条原因。
     RegionRejected,
+    /// 宿主与绑定都正常，但本插件未能把上一次保存的状态合并进来（可行动）。
+    ///
+    /// 【为什么必须与 `Ready` 分开】这一态的音频通路是通的（时间线会出来、播放有声），
+    /// 唯独参数/曲线停在上一次成功合并的版本。用户看到的不是"没声音"，而是"设置没回来"——
+    /// 而此前这件事只写一行 `log::warn!`，界面上完全不可见。
+    RestoreUnresolved,
 }
 
 impl HostAudioState {
@@ -194,6 +200,7 @@ impl HostAudioState {
             HostAudioState::AwaitingSamplesAccess => "awaiting_samples_access",
             HostAudioState::SourceReadFailed => "source_read_failed",
             HostAudioState::RegionRejected => "region_rejected",
+            HostAudioState::RestoreUnresolved => "restore_unresolved",
         }
     }
 }
@@ -547,6 +554,13 @@ const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 因此只需要容忍起播窗口里的短暂静音；16 块 ≈ 170 ms 足够覆盖一个气口，又不会让
 /// 停止后的输出拖得太久。
 const SYNTHESIZED_STALL_BLOCKS: u32 = 16;
+
+/// 持久化状态已成功合并（`0` = 从未尝试）。
+pub(crate) const RESTORE_APPLIED: u8 = 1;
+/// 持久化状态已到达，但文档还没就绪 / 仍在重试（不是故障）。
+pub(crate) const RESTORE_PENDING: u8 = 2;
+/// 持久化状态合并失败，且没有可重试的路径（真故障）。
+pub(crate) const RESTORE_FAILED: u8 = 3;
 /// 起播/录音上升沿之后，允许"内容不变也按块长前进"的时长（秒）。
 ///
 /// 【为什么是 1 秒且不续期】VEGAS 的钉住窗口约 0.66 s，1 秒足够覆盖；它是一次性窗口，
@@ -755,6 +769,21 @@ pub(crate) struct ExtensionOwner {
     /// `ara_only`/`transfer`；绑定后能力位与形态都变了，而 bootstrap 是导航前注入的
     /// 静态快照。视图定时器看到这个标记就推一条 `plugin_bootstrap_changed`。
     bootstrap_changed: AtomicBool,
+    /// companion 层"已绑定过"被复位重建的次数（诊断）。
+    ///
+    /// 【为什么值得单独计数】正常宿主一次工程生命周期只复位一次（重开工程的那一刻）。
+    /// 持续增长说明宿主在反复重绑，而复位本身要丢弃控制器绑定 —— 那是需要被看见的事实。
+    companion_resets: std::sync::atomic::AtomicU64,
+    /// 上一次"恢复宿主持久化状态"的结果（`RESTORE_*`）。
+    ///
+    /// 【为什么需要它】参数/曲线的恢复有两条载体（ARA 存档与 VST3 `setState`），
+    /// 而合并失败此前**只写一行 `log::warn!`** —— 用户无法回答"参数到底读回来没有"，
+    /// 诊断包里也找不到答案。把结果变成状态之后，界面与诊断包都能说真话。
+    restore_status: std::sync::atomic::AtomicU8,
+    /// 最近一次恢复失败的真因（有界；成功时清空）。
+    restore_error: Mutex<Option<String>>,
+    /// 成功合并过一次持久化状态的次数（诊断）。
+    restore_applied_generation: std::sync::atomic::AtomicU64,
     /// **文档上是否有别的实例持有 `PLAYBACK_RENDERER` 角色**。
     ///
     /// 【为什么需要这个原子量】`is_editor_only()` 要在**音频线程**上无锁求值
@@ -915,7 +944,14 @@ pub(crate) struct ExtensionOwner {
     /// 宿主仍可能调用 `getState`。此前会落到 Transfer 分支，序列化一份从未被 ARA
     /// 写过的空 `EditState`，把用户的 ARA 编辑覆盖掉。这里保留最后一份成功载荷。
     last_ara_state: Mutex<Option<Vec<u8>>>,
-    preparation: std::sync::OnceLock<Result<super::preparation::PreparationQueue, String>>,
+    /// 后台准备队列。
+    ///
+    /// 【为什么不是 `OnceLock`】`stop_editor()` 会 `close()` 它（`mailbox.closed`
+    /// 永久置真且 worker 已 join），而 `OnceLock::get_or_init` 在文档关闭后重绑时
+    /// 只会把**同一个死队列**交回来 —— 重绑成功的实例可以收 region、可以绑定，
+    /// 却永远排不出快照（`request()` 恒返回 `"host preparation closed"`），
+    /// 表现就是重开工程后时间线空、播放无声。队列因此必须是可替换的。
+    preparation: Mutex<Option<Arc<super::preparation::PreparationQueue>>>,
     prepare_owner: Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock: std::sync::OnceLock<Arc<super::transport::TransportClock>>,
     /// 最近一次清单刷新得出的宿主音频读数；GUI 载荷读它（见 [`HostAudioStatus`]）。
@@ -1041,6 +1077,53 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .map(ara2_bridge::plugin::ExtensionBinding::as_raw)
+    }
+    /// 本实例**是否绑定过** ARA 文档（历史事实，不随文档关闭回落）。
+    ///
+    /// 【为什么 ara_entry 需要它】companion 层的"already bound"既可能是"宿主重复绑定
+    /// 同一文档"（幂等复用即可），也可能是"宿主重开工程、同一实例要求绑新文档"
+    /// （必须复位 companion 再绑）。前者复用，后者复位 —— 两种处理不能互换：
+    /// 复用会把已销毁文档的绑定交给宿主，复位则会把还在用的绑定拆掉。
+    pub(crate) fn was_bound_before(&self) -> bool {
+        self.bound_once.load(Ordering::Acquire)
+    }
+    /// 记录一次 companion 绑定复位（见 [`Self::companion_reset_count`]）。
+    pub(crate) fn note_companion_reset(&self) {
+        self.companion_resets.fetch_add(1, Ordering::Relaxed);
+    }
+    /// companion 绑定复位的累计次数（诊断）。
+    pub(crate) fn companion_reset_count(&self) -> u64 {
+        self.companion_resets.load(Ordering::Relaxed)
+    }
+    /// 记录"有一份持久化状态待恢复"。
+    pub(crate) fn note_restore_pending(&self) {
+        // 已经从"失败"进入"重试中"时保留错误原文，直到真正成功才清 ——
+        // 用户看到的应当是"仍在尝试（上次失败原因：…）"。
+        self.restore_status.store(RESTORE_PENDING, Ordering::Release);
+    }
+    /// 记录"持久化状态已成功合并"。
+    fn note_restore_applied(&self) {
+        self.restore_status.store(RESTORE_APPLIED, Ordering::Release);
+        *self.restore_error.lock_or_recover() = None;
+        self.restore_applied_generation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// 记录"持久化状态合并失败"。
+    pub(crate) fn note_restore_failed(&self, error: &str) {
+        self.restore_status.store(RESTORE_FAILED, Ordering::Release);
+        *self.restore_error.lock_or_recover() = Some(error.to_owned());
+    }
+    /// 持久化状态的恢复读数：`(status, error, applied_generation)`。
+    pub(crate) fn restore_report(&self) -> (u8, Option<String>, u64) {
+        (
+            self.restore_status.load(Ordering::Acquire),
+            self.restore_error.lock_or_recover().clone(),
+            self.restore_applied_generation.load(Ordering::Relaxed),
+        )
+    }
+    /// 状态是否落在"失败"档（供 `HostAudioState` 分类）。
+    pub(crate) fn restore_failed(&self) -> bool {
+        self.restore_status.load(Ordering::Acquire) == RESTORE_FAILED
     }
     pub(crate) fn editor_document(&self) -> Result<Arc<super::document::DocumentSession>, String> {
         if self.is_closed() {
@@ -2223,10 +2306,39 @@ impl ExtensionOwner {
     /// （不等待的话会出现偶发的访问违例，且与真正的回归难以区分）。
     #[cfg(test)]
     pub(crate) fn await_preparation_idle(&self, timeout: std::time::Duration) {
-        if let Some(Ok(worker)) = self.preparation.get() {
+        if let Some(worker) = self.preparation() {
             let _ = worker.wait_idle_until(std::time::Instant::now() + timeout);
         }
     }
+    /// 当前准备队列（取自锁后的克隆；没有则 `None`）。
+    ///
+    /// 【为什么返回 `Arc` 而不是 guard】调用方要在队列表上做 `state()` / `request()`
+    /// 这类可能短暂阻塞的操作；持着槽位锁做它们会把"换队列"（重绑）拖住。
+    fn preparation(&self) -> Option<Arc<super::preparation::PreparationQueue>> {
+        self.preparation.lock_or_recover().clone()
+    }
+
+    /// 确保存在一条**可用**的准备队列；已被 `close()` 的旧队列在这里被替换。
+    ///
+    /// 【为什么必须检查 `is_closed()`】`stop_editor()` 关闭队列后，`Arc` 仍可能被
+    /// 队列自身的 worker 或 UI 读数短暂持有。只判 `Option::is_none()` 会漏掉
+    /// "槽位里躺着一个死队列"这一档，而那正是重绑时最常见的形状。
+    fn ensure_preparation(&self) {
+        let mut slot = self.preparation.lock_or_recover();
+        if slot.as_ref().is_some_and(|queue| !queue.is_closed()) {
+            return;
+        }
+        match super::preparation::PreparationQueue::new() {
+            Ok(queue) => *slot = Some(Arc::new(queue)),
+            Err(error) => {
+                // 【为什么只记日志】绑定本身仍然有效；没有准备队列只会让快照停在
+                // "尚未就绪"，那由 `HostAudioState` 的合成中读数暴露，不需要让绑定失败。
+                log::warn!("[ara] preparation worker unavailable: {error}");
+                *slot = None;
+            }
+        }
+    }
+
     /// 本实例是否已拿到角色分配（`roles == 0` 表示尚未绑定）。
     fn is_bound(&self) -> bool {
         self.roles.load(Ordering::Acquire) != 0
@@ -2258,6 +2370,16 @@ impl ExtensionOwner {
     /// [`super::document::DocumentSession::report_playback_ownership`]。
     pub(crate) fn has_prepared_snapshot(&self) -> bool {
         self.snapshots.iter().any(|publisher| publisher.is_ready())
+    }
+    /// 处理结果发布器是否对**实际会被读取的那一份**就绪。
+    ///
+    /// 【为什么不能固定查 `snapshots[0]`】真正被读的是
+    /// `snapshots[snapshot_index_for_rate(...)]`：48 kHz 及倍率工程读索引 1。
+    /// 探测错发布器会让"实际那份还没就绪"被判成就绪，于是 `layered == false`、
+    /// 输出被预清后逐样本写零（用户听到的"有概率完全没声音"）。
+    pub(crate) fn processed_snapshot_ready(&self) -> bool {
+        let index = self.snapshot_index_for_rate(self.setup_sample_rate());
+        self.snapshots[index].is_ready()
     }
     /// 把本实例标记为"接管渲染"（诊断计数 + 日志）。
     pub(crate) fn promote_to_renderer(&self) {
@@ -2798,8 +2920,20 @@ impl ExtensionOwner {
         let kind = u64::from(output.code());
         let revision = match output {
             // 处理结果换版（曲线编辑 / 换 take）也要去咔。
-            TransferOutput::Processed | TransferOutput::StaleProcessed => {
-                self.snapshots[0].generation()
+            //
+            // 【为什么 `Untouched` 也要编进代次】bound 实例的输出仲裁恒为 `Untouched`
+            // （它走既有快照通路），而 `transfer_stage` 存下的 token 只含"种类"。
+            // 于是快照第一次发布（此前逐样本写零）或换版时 token 不变 ⇒
+            // `apply_output_declick` 认为"没有切换"⇒ 用户听到一次从零到有声的硬切。
+            // 把两份发布器的代次编进来，ARA 的接缝也能拿到同样的 1.3 ms 淡化。
+            //
+            // 【为什么两份都编】真正被读的是 `snapshots[snapshot_index_for_rate(...)]`
+            // （48 kHz 及倍率工程读索引 1）。只编索引 0 会让"实际读的是另一份"的宿主
+            // 在换版时拿不到去咔。
+            TransferOutput::Processed
+            | TransferOutput::StaleProcessed
+            | TransferOutput::Untouched => {
+                self.snapshots[0].generation() ^ self.snapshots[1].generation().rotate_left(32)
             }
             TransferOutput::Raw => self.raw_tape.generation(),
             _ => 0,
@@ -2936,6 +3070,10 @@ impl ExtensionOwner {
             }
         }
         // 保存本块输出的尾巴，供下一次源切换使用。
+        //
+        // 【为什么短块仍放在数组开头】`fade_from[index]` 按 `index` 直接取尾巴：
+        // 块长不足 64 时，最近的真实样本必须落在索引 0 起的位置，后面才是零。
+        // 把它们右移成"最近 64 帧"会改变索引语义，让淡化读到一段旧零。
         let start = frames.saturating_sub(OUTPUT_DECLICK_FRAMES);
         let written = frames - start;
         for channel in 0..channels {
@@ -2954,6 +3092,70 @@ impl ExtensionOwner {
                 state.tail[channel][index].store(0, Ordering::Relaxed);
             }
         }
+    }
+
+    /// 门控清零时的去咔：把上一块的尾巴在首段内线性淡到零，其余帧写零。
+    ///
+    /// 【为什么必须独立于 `apply_output_declick`】后者就地做
+    /// `old*(1-t) + current*t`，依赖"当前缓冲里已经写着本块的新内容"。门控分支里
+    /// 缓冲里是**上一块的残留**（in-place 宿主下更是等于输入），而且紧跟着的
+    /// `clear_outputs` 会把整块（含刚淡好的 64 帧）一起写零 —— 先淡后清等于白淡，
+    /// 先清后淡则 `current` 恒为 0。两条都得不到"从上一块尾巴淡到零"。
+    ///
+    /// 本函数自己写满整块：前 `min(frames, OUTPUT_DECLICK_FRAMES)` 帧按尾巴淡出，
+    /// 其余为零，并把尾巴清零。调用方因此**不要**再调 `clear_outputs`。
+    ///
+    /// # Safety
+    /// `output` 必须是本回调内有效的 VST3 输出总线；`frames` 不超过其平面长度。
+    pub(crate) unsafe fn apply_gate_fade_out(
+        &self,
+        stream: ProcessStream,
+        output: &mut crate::audio_abi::AudioBusBuffers,
+        frames: usize,
+    ) {
+        if frames == 0 || output.num_channels <= 0 || output.channel_buffers.is_null() {
+            return;
+        }
+        let Some(state) = self.declick.get(stream.index()) else {
+            return;
+        };
+        let declared = output.num_channels as usize;
+        let fade = frames.min(OUTPUT_DECLICK_FRAMES);
+        for channel in 0..declared {
+            // SAFETY: 宿主声明 `num_channels` 个平面指针，非空平面至少含 `frames` 帧。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            if channel < 2 {
+                for index in 0..fade {
+                    let old = f32::from_bits(state.tail[channel][index].load(Ordering::Relaxed));
+                    // 分母用 `fade` 而不是常量：块短于 64 帧时也必须在本块内淡到零，
+                    // 否则块尾留下非零值，下一块从零起就是一次新的阶跃。
+                    let gain = 1.0 - (index + 1) as f32 / fade as f32;
+                    // SAFETY: index < fade ≤ frames。
+                    unsafe { *plane.add(index) = old * gain };
+                }
+                for index in fade..frames {
+                    // SAFETY: index < frames。
+                    unsafe { *plane.add(index) = 0.0 };
+                }
+            } else {
+                // SAFETY: 同上；多声道总线的后几个平面不在尾巴里，直接写零。
+                unsafe { std::ptr::write_bytes(plane, 0, frames) };
+            }
+        }
+        // 本块含一段淡出，不是全静音；保守地报"非静音"（宿主不会因此跳过处理）。
+        output.silence_flags = 0;
+        // 尾巴与输出源一起归零：下一块从静音起，不需要（也不该）再交叉淡化。
+        for channel in 0..declared.min(2) {
+            for index in 0..OUTPUT_DECLICK_FRAMES {
+                state.tail[channel][index].store(0, Ordering::Relaxed);
+            }
+        }
+        state.fade_active.store(false, Ordering::Release);
+        state.primed_kind.store(0, Ordering::Release);
+        state.last_token.store(0, Ordering::Release);
     }
 
     /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
@@ -3469,8 +3671,19 @@ impl ExtensionOwner {
         playing: bool,
     ) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            // ARA 实例保持既有“停播即静音”语义：由调用方的 kPlaying 决定。
-            return playing;
+            // 【为什么 ARA 实例也要区分流】REAPER 在预取 / 擦洗 / 循环折返时会
+            // **合法地**以 `kPlaying == 0` 调用 `process`，而预取块会被它缓存并真的
+            // 播出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
+            // offline / prefetch 与 Transfer 实例同一判据：输出稍后才被播放，此刻的
+            // 传输状态不适用。实时流仍保持 ARA 的"停播即静音"语义：光标处的重复块
+            // 不该循环出声，而真实起播由 `kPlaying` 与捕获侧证据驱动。
+            return match evidence {
+                Some(evidence) => match evidence.stream {
+                    ProcessStream::Offline | ProcessStream::Prefetch => true,
+                    ProcessStream::Realtime => playing,
+                },
+                None => playing,
+            };
         }
         match evidence {
             Some(evidence) => match evidence.stream {
@@ -3763,7 +3976,10 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
     ) -> bool {
-        // ARA 的“停播即静音”由 vst3 的门控单独处理；这里不参与。
+        // 【为什么 bound 实例不参与这里的判据】它的"停播即静音"由
+        // `transfer_should_emit` 直接读 `kPlaying` 决定（见那里的说明：预取/offline
+        // 恒真、实时流看播放位）。若这里也参与，`evidence.allow_output` 会在"停播
+        // 光标处的重复块"上翻假，把 ARA 的既有语义改掉。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return true;
         }
@@ -3856,10 +4072,9 @@ impl ExtensionOwner {
                     && !self.is_bound()
                     && !self.bound_once.load(Ordering::Acquire)
                 {
-                    // SAFETY: 与下面同一份数据；`clear_outputs` 自己会校验形状。
-                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                    // 从上一块尾巴淡到零，避免停播/清空处的阶跃。
-                    unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
+                    // 从上一块尾巴淡到零。本函数写满整块，**不能**再调 `clear_outputs`
+                    // —— 那会把刚写好的淡出一起抹掉（见其文档）。
+                    unsafe { self.apply_gate_fade_out(stream, &mut *(*data).outputs, frames) };
                     return TransferStage::Handled;
                 }
             }
@@ -3875,7 +4090,7 @@ impl ExtensionOwner {
             // layered 让 `copy_block_layered_at` 在快照缺失处回退取宿主输入
             // （`snapshot.rs` 的 `input_at`），至少保住宿主原声而不是静音。
             TransferOutput::Untouched => {
-                let ready = self.snapshots[0].is_ready();
+                let ready = self.processed_snapshot_ready();
                 self.note_bound_snapshot_fallback(!ready);
                 TransferStage::Snapshot {
                     source: SnapshotSource::Processed,
@@ -4163,13 +4378,16 @@ impl ExtensionOwner {
         drop(host);
         self.host_geometry.lock_or_recover().take();
         self.cancel_preparation();
-        if let Some(Ok(worker)) = self.preparation.get() {
+        // 【为什么 take 掉而不是留在槽位里】`close()` 是终结性的；留下一个
+        // `closed == true` 的队列表只会让下一次重绑再次踩到同一个死队列。
+        // 重绑时 `ensure_preparation()` 会建一条新的。
+        if let Some(worker) = self.preparation.lock_or_recover().take() {
             worker.close();
         }
     }
     /// 模型撤销时立即取消待准备作业；保持worker可供后续重新授权使用。
     pub(crate) fn cancel_preparation(&self) {
-        if let Some(Ok(worker)) = self.preparation.get() {
+        if let Some(worker) = self.preparation() {
             worker.cancel();
         }
     }
@@ -4197,9 +4415,8 @@ impl ExtensionOwner {
         self.local_preparation_state()
     }
     pub(crate) fn local_preparation_state(&self) -> (bool, Option<String>) {
-        match self.preparation.get() {
-            Some(Ok(worker)) => worker.state(),
-            Some(Err(error)) => (false, Some(error.clone())),
+        match self.preparation() {
+            Some(worker) => worker.state(),
             None => (false, None),
         }
     }
@@ -4319,6 +4536,7 @@ impl ExtensionOwner {
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state.edits)?;
         *self.pending_restore.lock_or_recover() = Some(restored);
+        self.note_restore_pending();
         self.refresh_document();
         Ok(())
     }
@@ -4339,9 +4557,38 @@ impl ExtensionOwner {
     /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
     pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
         *self.pending_restore.lock_or_recover() = Some(restored);
+        self.note_restore_pending();
     }
     /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
+    ///
+    /// 【为什么外面再包一层】恢复失败此前只有调用点的 `log::warn!`，用户与诊断包都
+    /// 看不到"参数到底读回来没有"。包装层把结果写进 `restore_status`，四个调用点
+    /// 不必各自重复这件事。
     pub(super) fn merge_pending_restore(
+        &self,
+        document: &super::document::DocumentSession,
+    ) -> Result<(), String> {
+        // 【为什么要先看有没有载荷】成功路径会 `take()` 掉 pending；只有"进来时有、
+        // 出去时没有"才说明这一次真的把状态合进去了。没有这个前提，一个从未收到
+        // 载荷的实例也会被记成"恢复成功"。
+        let had_pending = self.pending_restore.lock_or_recover().is_some();
+        let result = self.merge_pending_restore_inner(document);
+        match &result {
+            Ok(()) => {
+                if self.pending_restore.lock_or_recover().is_some() {
+                    // 仍有载荷挂着（文档未就绪 / 空轨 / 缺 fade 元数据）：不是失败，
+                    // 只是还不能收口。
+                    self.note_restore_pending();
+                } else if had_pending {
+                    self.note_restore_applied();
+                }
+            }
+            Err(error) => self.note_restore_failed(error),
+        }
+        result
+    }
+
+    fn merge_pending_restore_inner(
         &self,
         document: &super::document::DocumentSession,
     ) -> Result<(), String> {
@@ -5519,9 +5766,9 @@ impl ExtensionOwner {
         // 只对 playback 初始化会让接管的实例永远排不出任务（`prepare()` 的 `None => {}`
         // 分支会静默吞掉），于是"接管"看起来生效了、声音却一直不更新。
         if !enabled.is_empty() {
-            let _ = self
-                .preparation
-                .get_or_init(super::preparation::PreparationQueue::new);
+            // 【为什么是 ensure 而不是 get_or_init】见 `preparation` 字段说明：
+            // 上一份文档关闭时队列已被 close，重绑必须拿到一条**新**队列。
+            self.ensure_preparation();
         }
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock_or_recover() = Some(weak);
@@ -5660,9 +5907,7 @@ impl ExtensionOwner {
     /// 它由 20ms 的 UI 定时器驱动，因此必须幂等。
     pub(crate) fn arm_transfer_rendering(self: &Arc<Self>) {
         self.init_block_trace();
-        let _ = self
-            .preparation
-            .get_or_init(super::preparation::PreparationQueue::new);
+        self.ensure_preparation();
         *self.prepare_owner.lock_or_recover() = Some(Arc::downgrade(self));
         // 时钟：Transfer 没有 ARA 文档的共享时钟，自己起一个。宿主播放位置由
         // `audio_process_inner` 的 `observe_transport` 照常写入（它与 ARA 无关）。
@@ -5704,8 +5949,8 @@ impl ExtensionOwner {
         let Some(weak) = weak else {
             return;
         };
-        match self.preparation.get() {
-            Some(Ok(worker)) => {
+        match self.preparation() {
+            Some(worker) => {
                 if let Err(error) = worker.request(Box::new(move |cancel| {
                     weak.upgrade()
                         .ok_or("renderer closed".to_owned())?
@@ -5714,7 +5959,6 @@ impl ExtensionOwner {
                     log::warn!("[ara] preparation unavailable: {error}");
                 }
             }
-            Some(Err(error)) => log::warn!("[ara] preparation unavailable: {error}"),
             None => {}
         }
     }
@@ -5734,7 +5978,7 @@ impl ExtensionOwner {
             scope,
             keys,
         });
-        if let Some(Ok(queue)) = self.preparation.get() {
+        if let Some(queue) = self.preparation() {
             queue.acknowledge_idle_success();
         }
     }
@@ -5787,11 +6031,8 @@ impl ExtensionOwner {
                 return Err("offline preparation timed out".into());
             }
             let worker = self
-                .preparation
-                .get()
-                .ok_or("offline preparation worker missing")?
-                .as_ref()
-                .map_err(Clone::clone)?;
+                .preparation()
+                .ok_or("offline preparation worker missing")?;
             if !worker.state().0 {
                 attempts += 1;
                 if attempts > 2 {
@@ -6286,6 +6527,19 @@ impl ExtensionOwner {
                     .promoted_to_renderer
                     .load(Ordering::Acquire),
                 "rebind_count": self.rebind_generation.load(Ordering::Acquire),
+                // companion 的一次性绑定被复位重建了几次。重开工程正常是 1；
+                // 持续增长说明宿主在反复重绑。
+                "companion_resets": self.companion_reset_count(),
+            },
+            // 【为什么恢复读数要进诊断包】恢复失败此前只有一行 `log::warn!`，
+            // 用户无法回答"参数到底读回来没有"。这里的三个字段就是那个答案：
+            // 0 = 从未尝试、1 = 已应用、2 = 待文档就绪/重试中、3 = 失败。
+            "restore": {
+                "status": self.restore_status.load(Ordering::Acquire),
+                "error": self.restore_error.lock_or_recover().clone(),
+                "applied_generation": self
+                    .restore_applied_generation
+                    .load(Ordering::Relaxed),
             },
             "pinned_window": {
                 "opens": pinned_window_opens,

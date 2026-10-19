@@ -11,6 +11,7 @@ import {
     hostMediaState,
     isAwaitingHostAudio,
     needsFolderTrackNotice,
+    needsRestoreUnresolvedNotice,
     needsSkippedClipsNotice,
     needsUnmatchedRegionsNotice,
     parseHostAudio,
@@ -191,5 +192,27 @@ describe("unmatched_regions", () => {
             ),
         ).toBe(false);
         expect(needsFolderTrackNotice(status)).toBe(false);
+    });
+});
+
+/**
+ * `restore_unresolved`：音频通路正常，唯独上次保存的参数/曲线没合并进来。
+ *
+ * 【为什么必须单列一条判定】它与"等音频"完全不同：片段有内容、播放有声，
+ * 用户丢的是设置。把它混进 `awaiting_regions` 会让用户去等一个不会来的东西。
+ */
+describe("restore_unresolved", () => {
+    test("分类名被接受，且只有它触发恢复提示", () => {
+        const status = parseHostAudio({ state: "restore_unresolved", waiting_clips: 1 });
+        expect(status).toEqual({ state: "restore_unresolved", waiting_clips: 1 });
+        expect(needsRestoreUnresolvedNotice(status)).toBe(true);
+        expect(
+            needsRestoreUnresolvedNotice(parseHostAudio({ state: "ready", waiting_clips: 0 })),
+        ).toBe(false);
+        expect(
+            needsRestoreUnresolvedNotice(
+                parseHostAudio({ state: "awaiting_regions", waiting_clips: 2 }),
+            ),
+        ).toBe(false);
     });
 });

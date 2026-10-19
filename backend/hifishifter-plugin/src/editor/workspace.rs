@@ -1148,19 +1148,44 @@ impl DocumentSession {
         {
             state = crate::render::extension::HostAudioState::AwaitingSamplesAccess;
         }
+        // 【为什么恢复失败要单独报】它与"等 region / 读不到样本"不是同一件事：音频通路
+        // 是通的，用户丢的是参数与曲线。恢复由**哪个实例**完成取决于宿主把载荷发给了谁，
+        // 所以要看文档上全部 renderer，而不是手里这一个。读取失败与拒收 region 更紧急，
+        // 保持它们的优先级。
+        let restore_failed = self
+            .renderer_owners()
+            .iter()
+            .any(|owner| owner.restore_failed());
+        if restore_failed
+            && state != crate::render::extension::HostAudioState::SourceReadFailed
+            && state != crate::render::extension::HostAudioState::RegionRejected
+        {
+            state = crate::render::extension::HostAudioState::RestoreUnresolved;
+            waiting = waiting.max(1);
+        }
+        let restore_reason = if restore_failed {
+            self.renderer_owners()
+                .iter()
+                .find_map(|owner| owner.restore_report().1)
+        } else {
+            None
+        };
         // 被跳过的 playback region 数量随宿主读数一起给：只 log 会让 MIDI / 零长度 item
         // 在插件里静默消失（见 `DocumentSession::skipped_regions`）。放在 `host_audio`
         // 里是为了复用前端已有的读数通道，不必新增一条状态链。
         let skipped = self.skipped_regions.lock_or_recover().len();
+        let reason = match state {
+            crate::render::extension::HostAudioState::RegionRejected => rejection_reason,
+            crate::render::extension::HostAudioState::RestoreUnresolved => restore_reason,
+            _ => None,
+        };
         payload["host_audio"] = serde_json::json!({
             "state": state.as_str(),
             "waiting_clips": waiting,
             "skipped_clips": skipped,
             // 只在真故障档带上真因：`awaiting_regions` 是正常的中间态，
             // 给它挂一个 null 只会让前端多一条要处理的分支。
-            "reason": rejection_reason.filter(|_| {
-                state == crate::render::extension::HostAudioState::RegionRejected
-            }),
+            "reason": reason,
         });
     }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。

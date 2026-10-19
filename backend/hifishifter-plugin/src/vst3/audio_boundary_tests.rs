@@ -1544,6 +1544,23 @@ fn a_prefetch_block_without_playing_still_outputs_audio() {
     );
 }
 
+
+/// 门控清零的新语义：块内不得重新输出重复内容，只允许上一块尾巴的淡出。
+///
+/// 【为什么不再断言"全零"】去咔要求门控**淡到零**而不是阶跃到零；短块（< 1.3 ms）
+/// 会整块都是这段淡出。判据因此是"单调衰减且块尾归零"，而不是"每个样本都是零"。
+fn assert_gate_faded_out(block: &[f32], what: &str) {
+    assert_eq!(
+        block.last().copied(),
+        Some(0.0),
+        "{what}：块尾必须精确归零（实测 {block:?}）"
+    );
+    assert!(
+        block.windows(2).all(|pair| pair[0] >= pair[1]),
+        "{what}：只允许单调淡出，不得重新输出重复内容（实测 {block:?}）"
+    );
+}
+
 /// **同一实时区间重复投递：第一次出音，之后静音。**
 ///
 /// 【为什么不能靠“首块保守静音”】那会把真正起播的第一块吞掉；区间去重才能
@@ -1557,7 +1574,7 @@ fn a_repeated_realtime_block_is_silenced_after_the_first_occurrence() {
     let (first, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
     assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
     let (second, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
-    assert_eq!(second, vec![0.0; 8], "同一区间的重复必须静音");
+    assert_gate_faded_out(&second, "同一区间的重复必须静音");
     let diagnostics = processor.extension_owner.block_diagnostics_json(0);
     assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
 }
@@ -1576,10 +1593,9 @@ fn a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence() {
     let (first, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
     assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
     let (second, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
-    assert_eq!(
-        second,
-        vec![0.0; 8],
-        "kPlaying 常置 1 不能把同一位置的重复块变成连续输出"
+    assert_gate_faded_out(
+        &second,
+        "kPlaying 常置 1 不能把同一位置的重复块变成连续输出",
     );
     let diagnostics = processor.extension_owner.block_diagnostics_json(0);
     assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);

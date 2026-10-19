@@ -21,6 +21,7 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "awaiting_samples_access",
     "source_read_failed",
     "region_rejected",
+    "restore_unresolved",
 ]);
 
 /**
@@ -103,6 +104,17 @@ export function needsSourceReadFailedNotice(status: HostAudioPayload | null): bo
  */
 export function needsRegionRejectedNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "region_rejected";
+}
+
+/**
+ * 是否需要"上一次保存的参数/曲线没能读回来"这条提示。
+ *
+ * 【为什么必须单列】它和上面几条的**症状不同**：音频通路是通的（片段有内容、能播），
+ * 用户丢的是参数与曲线。不提示的话，唯一的线索是一行后端日志 —— 而用户会以为自己
+ * 记错了设置。
+ */
+export function needsRestoreUnresolvedNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "restore_unresolved";
 }
 
 /**

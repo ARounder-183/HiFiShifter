@@ -130,6 +130,21 @@ pub fn clear_formant_rebuild_generations() {
     }
 }
 
+/// 只清掉指定 clip 的代次条目（文档关闭时使用）。
+///
+/// 【为什么不能整表清】这张表是**进程级**的，而同一进程里可以同时开着多份工程
+/// （多个 ARA 文档）。整表清会把另一份仍在编辑的工程的活跃代次一并抹掉 —— 那些
+/// clip 的后台重建随后会以为自己的代次已经过期而静默放弃，表现为"另一个工程里的
+/// 波形/共振峰不再更新"。按 id 清才是与"本文档持有这些 clip"一致的动作。
+pub fn forget_formant_rebuild_generations<'a>(clip_ids: impl IntoIterator<Item = &'a str>) {
+    let Ok(mut map) = global_formant_rebuild_generations().lock() else {
+        return;
+    };
+    for clip_id in clip_ids {
+        map.remove(clip_id);
+    }
+}
+
 fn quantize_i64(value: f64, scale: f64) -> i64 {
     (value * scale).round() as i64
 }

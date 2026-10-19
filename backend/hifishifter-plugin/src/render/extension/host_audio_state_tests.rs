@@ -196,7 +196,7 @@ fn render_input_invalidation_reaches_the_playback_instance() {
     drop(held);
     // 放行后等后台排空，避免用例结束时与仍在运行的任务抢生命周期。
     for owner in [&playback, &owners[1]] {
-        if let Some(Ok(worker)) = owner.preparation.get() {
+        if let Some(worker) = owner.preparation() {
             let _ = worker
                 .wait_idle_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
         }

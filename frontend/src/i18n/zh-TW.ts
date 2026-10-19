@@ -2113,6 +2113,9 @@ export const zhTW = {
     ara_host_audio_region_rejected_title: "外掛拒收了宿主的音訊區域",
     ara_host_audio_region_rejected_body:
         "宿主確實交付了這段素材，但外掛拒絕為它建立區域。繼續等待不會好轉；請從本軌道移除外掛後重新插入。",
+    ara_host_audio_restore_title: "外掛沒能讀回上次儲存的參數",
+    ara_host_audio_restore_body:
+        "上次儲存的參數與曲線沒能合併進來，目前顯示的是預設值。音訊通路正常；如需找回設定，請重新開啟專案，仍不行時在宿主裡手動恢復。原因：",
     ara_clip_syncing_host_audio: "正在等待宿主完成音訊分配",
     ara_clip_waiting_for_host_audio: "等待宿主提供音訊",
     ara_clip_host_source_read_failed:

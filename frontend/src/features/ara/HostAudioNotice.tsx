@@ -31,6 +31,7 @@ import {
     needsFolderTrackNotice,
     needsSkippedClipsNotice,
     needsRegionRejectedNotice,
+    needsRestoreUnresolvedNotice,
     needsSourceReadFailedNotice,
     needsUnmatchedRegionsNotice,
 } from "./hostAudio";
@@ -86,6 +87,16 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
             <Notice
                 title={t("ara_host_audio_unmatched_title")}
                 body={t("ara_host_audio_unmatched_body")}
+            />
+        );
+    }
+    // 恢复失败与"没有音频"是两件事：片段有内容、能播，丢的是参数与曲线。
+    // 排在上面几条之后，因为那些会让人完全看不到内容，更紧急。
+    if (needsRestoreUnresolvedNotice(status)) {
+        return (
+            <Notice
+                title={t("ara_host_audio_restore_title")}
+                body={t("ara_host_audio_restore_body")}
             />
         );
     }
