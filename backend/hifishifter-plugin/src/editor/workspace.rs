@@ -593,12 +593,58 @@ impl DocumentSession {
                 timeline.project_sec = timeline.project_sec.max(g.start_sec + g.duration_sec);
             }
         }
-        timeline.clips.retain(|clip| {
-            !clip.id.starts_with(&prefix("ara-item-")) || present.contains(&clip.id)
-        });
-        timeline.clips.retain(|clip| {
-            !owned.contains(&clip.track_id) || !clip.id.starts_with(&prefix("ara-clip-"))
-        });
+        // 【T8：clip 的去留按**实体**判定，不按 id 的字符串前缀】
+        //
+        // 旧实现有两条按前缀的 retain：`ara-item-*` 必须在本轮 `present` 里，
+        // `ara-clip-*` 不得挂在 `owned` 轨上。而同一个 clip 的身份会从
+        // `ara-region-{key}` 升级成 `ara-item-{guid}` —— 升级瞬间就换了一套过滤
+        // 规则。于是"升级完成、清单尚未枚举到新 GUID"的那一轮，clip 被第一条删掉；
+        // 尚未升级的反而两条都不匹配而存活。这正是用户报的"原轨 Clip 全消失、
+        // 新轨 Clip 健康"。
+        //
+        // 正确的判据只有一条：**它代表的 region 还在不在**。`regions` 是文档级权威
+        // （`destroy_playback_region` 按 key 删除），而宿主清单的职责是新增/更新，
+        // 不是删除 —— 清单滞后不是"宿主删掉了它"的证据。
+        {
+            let live = self.regions.lock_or_recover();
+            let region_items = self.region_items.lock_or_recover();
+            let clip_ids = self.clip_ids.lock_or_recover();
+            // 活着的 region 当前登记的 clip id（可能仍是 key 形态，也可能已升级）。
+            let mut live_clip_ids: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            // 活着的 region 绑定的宿主 item GUID。
+            let mut live_item_ids: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for key in live.keys() {
+                if let Some(id) = clip_ids.get(key) {
+                    live_clip_ids.insert(id.clone());
+                }
+                live_clip_ids.insert(format!("{namespace}ara-region-{key}"));
+                if let Some(item) = region_items.get(key) {
+                    live_item_ids.insert(item.clone());
+                }
+            }
+            let item_prefix = prefix("ara-item-");
+            let region_prefix = prefix("ara-region-");
+            let clip_prefix = prefix("ara-clip-");
+            timeline.clips.retain(|clip| {
+                if let Some(guid) = clip.id.strip_prefix(&item_prefix) {
+                    // 已升级到宿主 item GUID：本轮清单仍报告它，或它仍绑在一个
+                    // 活着的 region 上，就留下。
+                    return present.contains(&clip.id) || live_item_ids.contains(guid);
+                }
+                if clip.id.starts_with(&region_prefix) {
+                    // 还没升级：region key 仍活着就留下。
+                    return live_clip_ids.contains(&clip.id);
+                }
+                if clip.id.starts_with(&clip_prefix) {
+                    // 没有宿主身份的 ARA clip：沿用旧语义 —— 挂在宿主已知轨道上时
+                    // 剔除（它认领不到 item GUID，界面无法给出可操作的读数）。
+                    return !owned.contains(&clip.track_id);
+                }
+                true
+            });
+        }
         // 分割谱系回收：两段都不在宿主清单里时删掉这条边，免得它随分割次数无限增长
         // （与 `ParameterAtlas::split_parents` 的 retain 同一手法）。
         {
@@ -631,6 +677,36 @@ impl DocumentSession {
         // 记下"父级由宿主 folder 决定"的轨道，供私有分组呈现时让路
         // （见 `host_folder_children`）。
         *self.host_folder_children.lock_or_recover() = folder_children;
+        // 【T9：让"多出一条轨"成为可归因事实】此前这里完全沉默 —— 删轨在渲染路径有
+        // 日志，而清单侧的重复/过渡态没有任何痕迹，于是用户报的"分割后多出一条轨"
+        // 只能靠肉眼复现。判据刻意取"多于一条轨且其中至少一条本轮没有任何 clip"：
+        // 正常的单轨工程、以及真实的多轨工程都不会命中。
+        if timeline.tracks.len() > 1 {
+            let orphans: Vec<&str> = timeline
+                .tracks
+                .iter()
+                .filter(|track| {
+                    !timeline
+                        .clips
+                        .iter()
+                        .any(|clip| clip.track_id == track.id)
+                })
+                .map(|track| track.id.as_str())
+                .collect();
+            if !orphans.is_empty() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.inventory.orphan-track",
+                    format_args!(
+                        "[ara] presenting {} track(s), {} of them without any clip: {:?} \
+                         (a split is likely publishing two identities for one host sequence)",
+                        timeline.tracks.len(),
+                        orphans.len(),
+                        orphans
+                    ),
+                );
+            }
+        }
         timeline.tracks.sort_by_key(|track| track.order);
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
@@ -1106,10 +1182,15 @@ impl DocumentSession {
         let Some(owner) = owner else {
             // renderer 存在但都不属于本会话的文档：报一个**终态、可行动**的读数，
             // 而不是沿用另一份文档的 `Ready`。
-            let bound_elsewhere = owners.iter().any(|owner| {
-                owner.is_non_playback()
-                    && owner.editor_document().is_ok_and(|bound| bound.id != self.id)
-            });
+            //
+            // 【T10：不再要求 `is_non_playback()`】这里要表达的事实是"有 renderer，
+            // 但都不服务于这份文档"，与它承担哪个角色无关。旧判据只看非 playback
+            // 实例，于是"所有 owner 都是 playback 且都绑在别的文档上"会落到下面那条
+            // 完全沉默的 `return` —— 屏幕上什么都不更新，用户看到的是"没有报错、
+            // 但片段一直等着"。把角色从判据里去掉，这两种形状得到同一个可行动读数。
+            let bound_elsewhere = owners
+                .iter()
+                .any(|owner| owner.editor_document().is_ok_and(|bound| bound.id != self.id));
             if bound_elsewhere {
                 let waiting = payload["clips"].as_array().map_or(0, |clips| {
                     clips
@@ -2194,6 +2275,92 @@ mod tests {
                 .iter()
                 .any(|track| track.id == "host-leaving"),
             "不再属于宿主清单的轨道要按普通 ARA 轨道保留"
+        );
+        document.close();
+    }
+
+    /// **T8：已升级到 `ara-item-{guid}` 的 clip，在清单尚未追上的那一轮不得被删。**
+    ///
+    /// 【为什么这是"分割后原轨 Clip 全消失"的回归】旧实现要求 `ara-item-*` 必须出现在
+    /// 本轮的 `present` 里。分割后右半段的 GUID 是新 mint 的，而 `ui_tracks` 的枚举是
+    /// 节流的 —— 升级完成、清单尚未追上的那一轮，clip 被删掉；尚未升级的
+    /// （`ara-region-*` / `ara-clip-*`）反而两条 retain 都不匹配而存活。
+    /// 判据必须是"它代表的 region 还在不在"，而不是 id 长什么样。
+    #[test]
+    fn an_upgraded_clip_survives_a_round_where_the_inventory_has_not_caught_up() {
+        let model = ModelHandle::new();
+        let document = model.session();
+        // `present_host_inventory` 在清单为空时整体早退；这里给一条**没有任何 item**
+        // 的宿主轨道，让函数真正跑到 clip 的 retain。
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "host-only-track".into();
+        track.guid = "{88888888-8888-8888-8888-888888888888}".into();
+        track.items.clear();
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        // 一条活着的 region：已绑定宿主 item，但本轮 `ui_tracks` 还没有枚举到它。
+        document
+            .regions
+            .lock_or_recover()
+            .insert(7, crate::ara::AraPlaybackRegion::default());
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(7, "{NEW-GUID}".into());
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(7, "ara-item-{NEW-GUID}".into());
+
+        let mut timeline = TimelineState::default();
+        timeline.tracks = vec![serde_json::from_value(
+            serde_json::json!({"id":"ara-sequence-1","name":"t","order":0}),
+        )
+        .unwrap()];
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id": "ara-item-{NEW-GUID}",
+            "track_id": "ara-sequence-1",
+            "name": "split half",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+        }))
+        .unwrap()];
+
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            timeline
+                .clips
+                .iter()
+                .any(|clip| clip.id == "ara-item-{NEW-GUID}"),
+            "清单滞后不是删除证据：region 还活着，clip 就必须留下"
+        );
+
+        // 对照：region 真的被销毁之后，同一个 clip 必须被剔除。
+        document.regions.lock_or_recover().remove(&7);
+        let mut timeline = TimelineState::default();
+        timeline.tracks = vec![serde_json::from_value(
+            serde_json::json!({"id":"ara-sequence-1","name":"t","order":0}),
+        )
+        .unwrap()];
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id": "ara-item-{NEW-GUID}",
+            "track_id": "ara-sequence-1",
+            "name": "split half",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+        }))
+        .unwrap()];
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            timeline.clips.is_empty(),
+            "region 已销毁且清单不再报告它时，clip 必须被剔除"
         );
         document.close();
     }

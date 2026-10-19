@@ -1488,20 +1488,57 @@ impl RegionSequences for ModelHandle {
                 region_sequences: Vec::new(),
             });
         }
-        let index = self
+        // 【T7：优先复用已销毁的槽位】`destroy_region_sequence` 只抹掉槽位的身份，
+        // 不删除占位条目（删除会让后续序列前移、身份整体错位）。如果这里继续
+        // "永远追加"，宿主每做一次"销毁 + 重建"就会让扁平向量增长一格，而
+        // `sequence_refs` / `sequence_persistent_ids` / `live_sequences` 全部跟着长。
+        // 复用一个已销毁槽位与 `allocate_region` 复用已销毁 region 槽位是同一手法：
+        // 下标稳定 ⇒ `region_sequence_index` 与 `sequence_model_ref` 的映射天然稳定。
+        let reused = self
             .document
             .musical_contexts
             .iter()
-            .map(|context| context.region_sequences.len())
-            .sum();
-        let context_index = self.document.musical_contexts.len() - 1;
-        let sequences = &mut self.document.musical_contexts[context_index].region_sequences;
-        sequences.push(AraRegionSequence {
-            name: properties.name().map(str::to_owned),
-            order_index: properties.order_index(),
-            color: host_color_hex(properties.color()),
-            playback_region_count: 0,
-        });
+            .flat_map(|context| context.region_sequences.iter())
+            .enumerate()
+            .find(|(slot, _)| self.destroyed_sequences.contains(slot))
+            .map(|(slot, _)| slot);
+        let index = match reused {
+            Some(index) => {
+                // 就地覆盖占位条目：`destroy_region_sequence` 保留了它的位置。
+                if let Some(slot) = self
+                    .document
+                    .musical_contexts
+                    .iter_mut()
+                    .flat_map(|context| context.region_sequences.iter_mut())
+                    .nth(index)
+                {
+                    slot.name = properties.name().map(str::to_owned);
+                    slot.order_index = properties.order_index();
+                    slot.color = host_color_hex(properties.color());
+                    slot.playback_region_count = 0;
+                }
+                self.destroyed_sequences.remove(&index);
+                index
+            }
+            None => {
+                let index = self
+                    .document
+                    .musical_contexts
+                    .iter()
+                    .map(|context| context.region_sequences.len())
+                    .sum();
+                let context_index = self.document.musical_contexts.len() - 1;
+                self.document.musical_contexts[context_index]
+                    .region_sequences
+                    .push(AraRegionSequence {
+                        name: properties.name().map(str::to_owned),
+                        order_index: properties.order_index(),
+                        color: host_color_hex(properties.color()),
+                        playback_region_count: 0,
+                    });
+                index
+            }
+        };
         // 【序列身份取自 realtime key，不是 persistentID】`ARARegionSequenceProperties`
         // 只有 name / orderIndex / musicalContextRef / color（`ARAInterface.h:775-793`），
         // **没有** persistentID（audio source / modification / processing algorithm 才有）。
@@ -1581,6 +1618,21 @@ impl RegionSequences for ModelHandle {
         if let Some(id) = self.sequence_persistent_ids.get_mut(state) {
             id.clear();
         }
+        // 【T7：把宿主身份从 ref 表与反向表里一起抹掉】只清 `sequence_persistent_ids`
+        // 不够 —— `region_sequence_of` **首选**按 `sequence_model_ref` 解析
+        // （`mapping.rs`），旧 ref 若还留在表里，存活 region 会继续解析到这个语义
+        // 已变的槽位，于是同一批 clip 被分到两条轨（用户报的"分割后多出一条轨"）。
+        // 清零而不是删除：`sequence_refs` 的下标必须与 `sequence_persistent_ids` /
+        // `live_sequences` 对齐，删除会让后续序列前移、身份整体错位。
+        if let Some(reference) = self.document.sequence_refs.get_mut(state) {
+            let old = *reference;
+            *reference = 0;
+            if old != 0 {
+                self.sequence_index_by_model_ref.remove(&(old as usize));
+            }
+        }
+        self.sequence_index_by_handle
+            .retain(|_, index| *index != state);
         if let Some(sequences) = self
             .document
             .musical_contexts
@@ -4120,9 +4172,30 @@ mod tests {
             .lock_or_recover()
             .insert(0xBBBB, 1);
         model.sequence_persistent_ids = vec![(0xAAAA).to_string(), (0xBBBB).to_string()];
+        // T7 的原料：`region_sequence_of` **首选**按 `sequence_model_ref` 解析，
+        // 所以"销毁"必须同时从 ref 表与反向表里抹掉，否则存活 region 会继续
+        // 解析到这个语义已变的槽位（"分割后多出一条轨"）。
+        model.document.sequence_refs = vec![0xAAAA, 0xBBBB];
+        model.sequence_index_by_model_ref.insert(0xAAAA, 0);
+        model.sequence_index_by_model_ref.insert(0xBBBB, 1);
 
         // 销毁下标 0 的那条：键 0xAAAA 与下标 0 都必须消失，下标 1 的必须留下。
         RegionSequences::destroy_region_sequence(&mut model, 0);
+
+        assert_eq!(
+            model.document.sequence_refs,
+            vec![0, 0xBBBB],
+            "已销毁槽位的 ref 必须清零（下标保持对齐），否则旧 ref 仍可被解析"
+        );
+        assert!(
+            !model.sequence_index_by_model_ref.contains_key(&0xAAAA),
+            "反向表必须同时清理旧 key"
+        );
+        assert_eq!(
+            model.sequence_index_by_model_ref.get(&0xBBBB),
+            Some(&1),
+            "另一条序列的映射不能受影响"
+        );
 
         let index = session.sequence_track_index.lock_or_recover();
         assert!(
