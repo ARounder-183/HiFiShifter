@@ -380,12 +380,37 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
         // 因此把三条早退原因都记下来。
         log::info!("[ara] host notifyModelUpdates");
+        // 【T2：content reader 不再是硬门】`flush_pending_model_updates` 做的是**重映射**
+        // （`remap_and_log`），它不释放、不移动任何 reader 已持有的快照：publish 用读者
+        // 计数，`ReadSection` 期间旧盒只在最后一个读者离开时才释放（见
+        // `snapshot.rs` 的 `ReadSection`/`Drop`）。因此重映射不存在"reader 正在读半态"
+        // 的风险。把它当成硬门，代价是宿主泄漏一个 reader 就终身拿不到任何模型更新 ——
+        // 而 reader 的释放时机不在我们的控制之内（`createContentReader` 的宿主调用
+        // 完全由它自己决定）。
         if !self.content_readers.is_empty() {
             log::warn!(
-                "[ara] notifyModelUpdates skipped: {} content reader(s) still live",
+                "[ara] notifyModelUpdates continues with {} content reader(s) live; \
+                 pending model changes are published from a fresh snapshot while readers \
+                 keep the snapshot they already hold",
                 self.content_readers.len()
             );
-            return;
+        }
+        // 【T2：编辑会话本身也可能永远不关闭】宿主打开 `beginEditing` 之后可以再也不发
+        // `endEditing`（工程加载中断 / 后台挂起 / 恢复失败）。那时 `is_editing()` 会永久
+        // 挡住唯一的 flush 入口，而 `pending_end_editing` 那条兜底只管"endEditing 来了
+        // 但被 reader 挡住"的形状。用同一个宽限期强制收口，让两种"永不收敛"得到同一种处理。
+        let stuck_editing = self
+            .runtime
+            .as_ref()
+            .and_then(PluginRuntime::editing_elapsed)
+            .is_some_and(|elapsed| elapsed >= DEFERRED_EDITING_GRACE);
+        if stuck_editing {
+            log::error!(
+                "[ara] forcing endEditing after the edit session stayed open longer than {:.1}s; \
+                 the host never closed it, so pending model changes could not be published",
+                DEFERRED_EDITING_GRACE.as_secs_f32()
+            );
+            self.finish_editing();
         }
         if self.runtime().map_or(true, PluginRuntime::is_editing) {
             log::warn!("[ara] notifyModelUpdates skipped: the document is in an editing session");
@@ -969,8 +994,16 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
         let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
+        // 【T2：reader 不再是硬门】停用/恢复只改一个布尔并（恢复时）重读 PCM；
+        // 已发布的快照由读者计数保护，重读只会让**下一次** prepare 用新内容，
+        // 不会回收 reader 正在读的那一份。把它当硬门会让"宿主泄漏一个 reader"
+        // 变成"源永远停在已停用"，表现正是"后台回来之后 Clip 一直等宿主音频"。
         if !self.content_readers.is_empty() {
-            return;
+            log::warn!(
+                "[ara] audio source {} continues with {} content reader(s) live",
+                if deactivating { "deactivation" } else { "reactivation" },
+                self.content_readers.len()
+            );
         }
         let Some(runtime) = self.runtime.as_mut() else {
             return;

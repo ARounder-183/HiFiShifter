@@ -1033,6 +1033,13 @@ pub(crate) struct ExtensionOwner {
     /// 20ms，枚举降到 [`HOST_ENUMERATION_INTERVAL`]。宿主真的变了时，下一次节流点就会
     /// 捕捉到（≤100ms 延迟），用户不可感。
     last_enumeration: Mutex<Option<std::time::Instant>>,
+    /// 上一次视图定时器 tick 的时刻（见 [`Self::refresh_host_transport_tick`]）。
+    ///
+    /// 【为什么需要它】宿主把插件放到后台时，20 ms 的视图定时器会被挂起或大幅降频；
+    /// 回到前台后的第一次 tick 与上一次之间会出现一个远大于 20 ms 的间隔。那个间隔
+    /// 是"刚刚恢复前台"的**本地**证据 —— 不依赖宿主是否重发 `setActive`，也不依赖
+    /// 子窗口收不收得到 `WM_ACTIVATEAPP`（本编辑器窗口是 `WS_CHILD`，收不到它）。
+    last_view_tick: Mutex<Option<std::time::Instant>>,
     /// 上一次对外报告过的绑定读数（见 [`BindingReport`]）。
     binding_report: Mutex<Option<BindingReport>>,
     /// 连续"结构性绑定失败"的次数（见 [`ExtensionOwner::enumeration_interval`]）。
@@ -1114,6 +1121,14 @@ pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Durati
 /// 与 `FACTS_REFRESH_INTERVAL` 同量级：正常路径每 1s 必然重采一次，超过它说明
 /// 定时器确实漏跑了。
 const STALE_SAMPLE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 视图定时器两次 tick 之间超过这个间隔，就认为它曾停摆（宿主在后台）。
+///
+/// 【为什么是 500 ms】正常周期是 20 ms；25 个周期足够把"一次调度抖动"与
+/// "进程被挂起/降频"分开，又短到用户切回前台后的第一帧就能触发重同步。
+/// 与 `STALE_SAMPLE_GRACE` 分工不同：后者是"采样数据陈旧"，这条是"**事件源**
+/// 曾经停止"。前者可以靠其它路径补，后者只能由恢复后的第一次 tick 自己发现。
+const FOREGROUND_RESUME_GAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// VST3 离线 `setupProcessing` 里等待后台准备的最长时间。
 ///
@@ -1567,12 +1582,47 @@ impl ExtensionOwner {
     fn host_query_stamp(
         &self,
     ) -> Result<(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>), String> {
-        let document = self.editor_document()?;
+        let document = match self.editor_document() {
+            Ok(document) => document,
+            Err(error) => {
+                // 【为什么这条静默早退必须留痕】它是枚举、几何刷新与前台自愈的**共同**
+                // 第一行。此前它失败时什么都不写，于是"重开工程后界面停在等待宿主音频"
+                // 与"宿主没给原生扩展"在日志里完全同形（T6）。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.stamp.no-document",
+                    format_args!("[ara] host query skipped (no document): {error}"),
+                );
+                return Err(error);
+            }
+        };
         let _transaction = document.transaction.lock_or_recover();
         if self.is_closed() || !document.is_alive() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.stamp.closed",
+                format_args!(
+                    "[ara] host query skipped: owner closed={} document alive={}",
+                    self.is_closed(),
+                    document.is_alive()
+                ),
+            );
             return Err("host query document/owner closed".into());
         }
-        let keys = self.host_assigned_regions(&document)?;
+        let keys = match self.host_assigned_regions(&document) {
+            Ok(keys) => keys,
+            Err(error) => {
+                // 【为什么单独一条 key】`assignments` 为空是本轮症状二/三最可疑的
+                // 静默早退点（见 `bind_to_document` 的 rebind 分支）。把它与
+                // "文档已关闭"分开计数，真机日志才能直接指认。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.stamp.no-assignment",
+                    format_args!("[ara] host query skipped (no usable assignment): {error}"),
+                );
+                return Err(error);
+            }
+        };
         let model = document.revision.load(Ordering::Acquire);
         let scope = document.scope_revision.load(Ordering::Acquire);
         drop(_transaction);
@@ -1607,7 +1657,7 @@ impl ExtensionOwner {
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
-        let sequences = self
+        let declared = self
             .sequences
             .lock_or_recover()
             .values()
@@ -1615,14 +1665,30 @@ impl ExtensionOwner {
             .copied()
             .collect::<BTreeSet<_>>();
         let members = document.sequence_regions.lock_or_recover();
+        // 【T3：本实例还没被告知分配时，从文档级派生候选】
+        //
+        // `assignments` / `sequences` 只由 renderer-assignment observer 填充
+        // （见 `bind_to_document`）。重开工程时宿主常直接复用 ARA 图并重绑扩展实例，
+        // 却不再重发 `addPlaybackRegion` —— 于是两者都为空，而 `host_query_stamp()`
+        // 是**所有**枚举、几何刷新与前台自愈的第一行，整条链就此静默死亡。
+        //
+        // 【为什么文档级派生是安全的】`DocumentSession` 按 **controller key** 注册
+        // （`DocumentSession::register`），一个 ARA 文档就是一个插件实例。因此
+        // `document.sequence_regions` 的并集就是本实例的 region 全集，不存在
+        // "误伤同一轨道上的兄弟实例"。多个 extension owner（编辑/视图/播放）
+        // 共享同一份文档，本来就该看到同一批 region。
+        let sequences: BTreeSet<u64> = if keys.is_empty() && declared.is_empty() {
+            members.keys().copied().collect()
+        } else {
+            declared
+        };
         for sequence in sequences {
-            keys.extend(
-                members
-                    .get(&sequence)
-                    .ok_or("unknown host assigned sequence")?
-                    .iter()
-                    .copied(),
-            );
+            let Some(regions) = members.get(&sequence) else {
+                // 只有"宿主明确声明过、文档却查不到"才算错。派生分支的 key 直接取自
+                // 同一张表，不可能落到这里。
+                return Err("unknown host assigned sequence".into());
+            };
+            keys.extend(regions.iter().copied());
         }
         drop(members);
         let keys = keys.into_iter().collect::<Vec<_>>();
@@ -1940,7 +2006,52 @@ impl ExtensionOwner {
     /// 剪贴板）与测试依赖它**同步**把新几何取回来；节流在那里会把"刚写完就读到新值"
     /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
     pub(crate) fn refresh_host_transport_tick(&self) {
+        // 【T5：前台恢复的本地信号】编辑器窗口是 `WS_CHILD`，收不到 `WM_ACTIVATEAPP`；
+        // 而 `resume_resync()` 的唯一调用点是 `setActive(true)`，宿主切窗口焦点时不会重发。
+        // 于是"后台→前台"没有任何入口。这里用**定时器自身的间隔**补上：20 ms 的定时器
+        // 被挂起/降频后，恢复后的第一次 tick 与上一次之间的间隔必然远大于一个周期。
+        // 它不需要任何宿主配合，也不改变线程模型。
+        let resumed = {
+            let mut last = self.last_view_tick.lock_or_recover();
+            let now = std::time::Instant::now();
+            let resumed = last.is_some_and(|at| now.duration_since(at) >= FOREGROUND_RESUME_GAP);
+            *last = Some(now);
+            resumed
+        };
+        if resumed {
+            log::info!(
+                "[ara] the view timer resumed after a long gap; resyncing host geometry and inventory"
+            );
+            self.resume_resync();
+        }
+        // 【T4：自愈必须先于 gating】`refresh_host_transport_inner` 的第一行是
+        // `host_query_stamp()` 的早退，而自愈原本写在它**之后**。恰恰在重开工程 /
+        // `assignments` 为空时 stamp 拿不到 —— 于是最需要自愈的场景一行都不执行，
+        // 且完全沉默（这是"round 16 加了自愈却仍然复现"的直接原因）。
+        //
+        // "我们多久没成功采过样"不需要任何授权：它是本侧的时钟事实。把"记录需求"
+        // 与"执行动作"分开之后，随后的枚举仍会被原来的 gating 拦下（正确），
+        // 但恢复需求已经被记下来了，下一次 stamp 可用时会真正执行。
+        self.heal_stale_inventory_stamp();
         self.refresh_host_transport_inner(true);
+    }
+
+    /// 距上次成功采样超过 `STALE_SAMPLE_GRACE` 就清掉采样时刻，让下一次真正执行强制重采。
+    ///
+    /// 【为什么它不取 `host_query_stamp`】那条路径会因为"没有 document / 没有分配 /
+    /// 已关闭"而失败，而这三者正是"后台恢复后界面不刷新"的常见形状。时钟维护
+    /// 不能依赖它们。
+    fn heal_stale_inventory_stamp(&self) {
+        let Ok(document) = self.editor_document() else {
+            return;
+        };
+        let stale = document
+            .ui_inventory_sampled_at
+            .lock_or_recover()
+            .is_none_or(|at| at.elapsed() >= STALE_SAMPLE_GRACE);
+        if stale {
+            *document.ui_inventory_sampled_at.lock_or_recover() = None;
+        }
     }
 
     fn refresh_host_transport_inner(&self, throttled: bool) {
@@ -3655,7 +3766,11 @@ impl ExtensionOwner {
         let mut preceding_silent_frames =
             geometry.trailing_silent_frames.load(Ordering::Acquire);
         let mut discard_pre_roll = false;
-        let pinned_since_last = had && raw_start == last_raw && !time.cycle_active;
+        // 【T12：第一块也要算"钉住"】VEGAS 的起播窗口从**第一块**开始就在钉住位置。
+        // `had == false` 时旧判据为假，第一块的静音一次都没被累积 —— 于是窗口前段的
+        // 静音要么全丢、要么要多两块才立起来，恰好解释用户听到的"0.4 s 附近浮动"。
+        // 循环切分不是起播起点，仍排除。
+        let pinned_since_last = !time.cycle_active && (!had || raw_start == last_raw);
         let max_pre_roll = (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64;
         // 【停播很久后的上升沿必须扣掉停播静音】用户停在光标处时宿主也会反复投递
         // 同一块静音；那段静音不是播放时间，不能变成 take 的前导。判据用钉住时长：
@@ -4108,10 +4223,15 @@ impl ExtensionOwner {
         // 变化"会让紧随其后的真实块被当成新素材（多出一块本不该有的位移）。
         if block.frames > 0 {
             self.streams[stream.index()].note_activity(block_activity_hash(&block));
-            // 【为什么要求 `has_audio`】"宿主没接输入总线"与"宿主送了静音"是两件事。
-            // 前者不能证明时间在走；只有确实有输入平面且全零时，锁存才该推进。
-            self.streams[stream.index()]
-                .note_block_silence(block.has_audio() && block_is_silent(&block));
+            // 【T12：不再要求 `has_audio()`】宿主在 pre-roll 期间标 `silence_flags` /
+            // 给空输入平面是**正常**的（`capture.rs` 的 `let silent = !block.has_audio();`
+            // 就在用同一语义判定"这一块是静音"）。把它当成"没有证据"，等于告诉自己
+            // "宿主标了静音 ⇒ 不是静音" —— 整段起播窗口的静音一次都记不下来，
+            // `take_pre_roll` 永远是 0。空平面与全零平面对本判据是同一件事。
+            //
+            // 注意：`has_audio()` 的其它读点（"这条总线接没接"）保持原样，本次只改
+            // 沉默累积这一个调用点。
+            self.streams[stream.index()].note_block_silence(block_is_silent(&block));
         }
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成

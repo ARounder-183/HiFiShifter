@@ -131,6 +131,14 @@ pub struct PluginRuntime<P: PluginModel> {
     live_modifications: usize,
     live_regions: usize,
     editing: bool,
+    /// 当前编辑会话从何时开始（`None` = 不在会话中）。
+    ///
+    /// 【为什么需要时间】宿主可以打开 `beginEditing` 之后再也不发 `endEditing`
+    /// （工程加载中断、后台挂起、宿主崩溃恢复）。那时 `editing` 永远为真，
+    /// `notifyModelUpdates` 会被 `is_editing()` 挡在门外 —— 而它是积压模型变化
+    /// 唯一的收口入口。`endEditing` 侧已有 `DEFERRED_EDITING_GRACE` 的强制收口，
+    /// 这条时间让同一套兜底也覆盖"会话本身没被关闭"的形状。
+    editing_since: Option<std::time::Instant>,
 }
 
 impl<P: PluginModel> PluginRuntime<P> {
@@ -178,6 +186,7 @@ impl<P: PluginModel> PluginRuntime<P> {
             live_modifications: 0,
             live_regions: 0,
             editing: false,
+            editing_since: None,
         })
     }
 
@@ -199,6 +208,11 @@ impl<P: PluginModel> PluginRuntime<P> {
         self.editing
     }
 
+    /// 当前编辑会话已经持续了多久（`None` = 不在会话中）。
+    pub(crate) fn editing_elapsed(&self) -> Option<std::time::Duration> {
+        self.editing_since.map(|since| since.elapsed())
+    }
+
     /// 让委托方把 `end_editing` 之外积压的模型变化收口一次。
     pub(crate) fn flush_pending_model_updates(&mut self) -> bool {
         self.delegate.flush_pending_model_updates()
@@ -215,6 +229,7 @@ impl<P: PluginModel> PluginRuntime<P> {
             .ok_or(AraError::InvalidState("document has been destroyed"))?;
         self.delegate.begin_editing(document)?;
         self.editing = true;
+        self.editing_since = Some(std::time::Instant::now());
         Ok(EditSession {
             runtime: self,
             finished: false,
@@ -232,6 +247,7 @@ impl<P: PluginModel> PluginRuntime<P> {
             .ok_or(AraError::InvalidState("document has been destroyed"))?;
         self.delegate.begin_editing(document)?;
         self.editing = true;
+        self.editing_since = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -253,6 +269,7 @@ impl<P: PluginModel> PluginRuntime<P> {
             .ok_or(AraError::InvalidState("document has been destroyed"))?;
         self.delegate.end_editing(document, host)?;
         self.editing = false;
+        self.editing_since = None;
         Ok(())
     }
 

@@ -366,6 +366,25 @@ mod tests {
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
 
+    /// **每一个 `ready = false` 的写点都必须留下"宿主刚改过内容"的时刻。**
+    ///
+    /// 【为什么这是重开工程的回归】宿主授权 PCM 走的是
+    /// `refresh_source_pcm` → `revoke_renderers()` → `revoke_snapshots()`。
+    /// 那条路径此前**不写** `last_content_change`，于是 `ensure_loaded` 把它当成
+    /// "宿主声称输入不可用、而我们没有观察到任何变化" —— 直接返回
+    /// `Conflict: host changed; local curves preserved, host is not ready`，
+    /// 时间线再也刷不出来（用户看到的就是"所有 Clip 只显示等待宿主音频"）。
+    #[test]
+    fn revoking_renderers_records_a_content_change() {
+        let document = Arc::new(DocumentSession::new(1));
+        *document.last_content_change.lock_or_recover() = None;
+        document.revoke_renderers();
+        assert!(
+            document.last_content_change.lock_or_recover().is_some(),
+            "撤销渲染许可必须记下观察时刻，否则会被误判成宿主冲突"
+        );
+    }
+
     /// **持着 `transaction` 刷新文档不得自锁。**
     ///
     /// 【为什么必须有这条】用户报的"重新打开含本插件的 ARA 工程，宿主直接未响应"
@@ -1425,6 +1444,9 @@ impl DocumentSession {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         self.playback.lock_or_recover().take();
         self.ready.store(false, Ordering::Release);
+        // 【T1】文档关闭也是"渲染许可失效"的一种。对这份文档本身已无意义，
+        // 但让三个置假点语义一致是显式不变量，避免后来者只改其中两个。
+        self.note_content_change();
         // 文档关闭时不存在"进行中的宿主会话"；留着会让下一次 ensure_loaded 误判为暂缓。
         self.editing_session.store(false, Ordering::Release);
         let leases = {
@@ -1693,6 +1715,18 @@ impl DocumentSession {
         serde_json::json!({ "renderers": renderers })
     }
 
+    /// 记一次"宿主侧发生了变化，渲染许可随之失效"。
+    ///
+    /// 【为什么必须共用一个 helper】`ready` 有三个置假点（`close` / `clear_renderers` /
+    /// `revoke_snapshots`），而 `ensure_loaded` 靠这个时刻把"宿主正在收敛"与
+    /// "宿主永不收敛"分开（见字段说明）。漏写任何一个，就把那一类变化误报成
+    /// 用户级冲突 —— 正是重开工程后仍然出现的那条 `Conflict: host changed`：
+    /// 宿主授权 PCM 走的是 `refresh_source_pcm` → `revoke_renderers()` →
+    /// `revoke_snapshots()`，而它此前**没有**落这个时刻。
+    fn note_content_change(&self) {
+        *self.last_content_change.lock_or_recover() = Some(std::time::Instant::now());
+    }
+
     /// 在旧内容可能被改变前立即撤销**渲染许可与代次**；不撤已发布快照本身。
     ///
     /// 【为什么不再清空快照】`clear_renderers()` 被一次宿主编辑触发**多次**
@@ -1716,7 +1750,7 @@ impl DocumentSession {
         self.ready.store(false, Ordering::Release);
         // 记下"宿主刚刚改过内容"：`ensure_loaded` 据此把紧随其后的未就绪窗口
         // 当成"等宿主收口"而不是"宿主冲突"（见字段说明）。
-        *self.last_content_change.lock_or_recover() = Some(std::time::Instant::now());
+        self.note_content_change();
         for owner in self.renderer_owners() {
             owner.cancel_preparation();
             // 让 revision 门（`processed_ready` / `raw_tape_ready`）与输出代次失效，
@@ -1770,6 +1804,10 @@ impl DocumentSession {
     fn revoke_snapshots(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         self.ready.store(false, Ordering::Release);
+        // 【T1】这里同样是一次"宿主侧变化"（源权限撤销 / 源内容变了），必须与
+        // `clear_renderers()` 一样留下观察时刻。漏掉它会让 `ensure_loaded` 把
+        // `refresh_source_pcm` 造成的未就绪窗口判成真实冲突。
+        self.note_content_change();
         let owners = self
             .renderers
             .lock_or_recover()
