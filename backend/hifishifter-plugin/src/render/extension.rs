@@ -2463,15 +2463,13 @@ impl ExtensionOwner {
                 Ordering::Release,
             );
             if let Ok(bound) = &geometry {
-                // 【为什么按本轮枚举结果回收】这张表此前只插不删：宿主销毁一条 region
-                // 之后，旧 key → item GUID 的边会永远留着。`present_host_inventory`
-                // 的 `present` 集合与 `decorate_host_media_locked` 的 `claimed` 都读它，
-                // 于是分割后旧边会让"升级成 ara-item-{guid} 的 clip"被误判为仍在
-                // 清单里（或反过来），出现"原轨片段消失 / 新轨多出来"的中间态。
-                // 入参是 `host_geometries()` 的完整枚举，没出现的 key 就是宿主
-                // 已不再报告的那一批。
+                // 【为什么按**存活 region 集合**回收，而不是按本轮 `bound`】`bound`
+                // 是**本实例**分配到的子集：同一文档上的编辑实例与播放实例各有自己
+                // 的分配，用其中一个子集做 retain 会把另一个实例的边整批删掉。
+                // `regions` 是文档级权威（`destroy_playback_region` 已按 key 删除），
+                // 按它回收既清掉陈旧边，又不会误伤兄弟实例。
                 let live: std::collections::BTreeSet<u64> =
-                    bound.iter().map(|entry| entry.region_key).collect();
+                    stamp.0.regions.lock_or_recover().keys().copied().collect();
                 let mut items = stamp.0.region_items.lock_or_recover();
                 items.retain(|key, _| live.contains(key));
                 for entry in bound {
