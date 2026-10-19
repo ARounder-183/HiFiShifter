@@ -72,6 +72,16 @@ pub(crate) struct CallbackState {
     lowest: ApiGeneration,
     highest: ApiGeneration,
     selection: Mutex<Option<Selection>>,
+    /// 最近一次成功协商的代数；`uninitialize` **不清**。
+    ///
+    /// 【为什么需要它】ARA SDK 允许 initialize/uninitialize 在模块不卸载的情况下
+    /// 多次配对调用；但真实宿主（尤其工程加载/关闭路径）可能只做一半：工程关闭时
+    /// `uninitializeARA`，重开时不再 `initializeARAWithConfiguration`。此时
+    /// `createDocumentControllerWithDocument` 会因为 `selection == None` 返回 null，
+    /// 宿主随后拿不到任何文档控制器 —— 界面"等待宿主音频"。
+    /// 保留最近一次代数让控制器创建在这种情况下仍能继续；真正的模块卸载会销毁
+    /// 整个 `CallbackState`，不存在跨模块使用陈旧代数的风险。
+    last_generation: Mutex<Option<ApiGeneration>>,
     create_controller: Option<Arc<ControllerCreator>>,
     factory: AtomicPtr<ARAFactory>,
 }
@@ -86,6 +96,7 @@ impl CallbackState {
             lowest,
             highest,
             selection: Mutex::new(None),
+            last_generation: Mutex::new(None),
             create_controller,
             factory: AtomicPtr::new(std::ptr::null_mut()),
         }
@@ -152,7 +163,17 @@ impl CallbackState {
         }
 
         let mut selection = lock(&self.selection);
-        if selection.is_some() {
+        if let Some(existing) = selection.as_ref() {
+            // 【为什么同配置重复初始化是幂等的】宿主可能在每次工程加载时重新
+            // initialize，却不保证先 uninitialize。规格允许重复调用；把它当错误
+            // 会让后续 `createDocumentController` 仍然能用（selection 还在），
+            // 但日志会持续报"被拒"，掩盖真正的问题。同代数/同 assert 地址直接
+            // 返回 Ok；不同配置才拒绝（那才是真正的协议冲突）。
+            if existing.generation == generation
+                && existing.assert_address == assert_address as usize
+            {
+                return Ok(());
+            }
             return Err(AraError::InvalidState("factory is already initialized"));
         }
         let selected = Selection {
@@ -161,6 +182,7 @@ impl CallbackState {
         };
         acquire_assertion(generation, selected.assert_address)?;
         *selection = Some(selected);
+        *lock(&self.last_generation) = Some(generation);
         Ok(())
     }
 
@@ -170,11 +192,28 @@ impl CallbackState {
             .take()
             .ok_or(AraError::InvalidState("factory is not initialized"))?;
         release_assertion(selected);
+        // 刻意保留 `last_generation`：见字段说明。模块卸载时整个 state 析构，
+        // 不存在跨模块误用。
         Ok(())
     }
 
     pub(crate) fn generation(&self) -> Option<ApiGeneration> {
-        lock(&self.selection).map(|selection| selection.generation)
+        if let Some(selection) = lock(&self.selection).as_ref() {
+            return Some(selection.generation);
+        }
+        let fallback = *lock(&self.last_generation);
+        if fallback.is_some() {
+            use std::sync::atomic::AtomicBool;
+            static REPORTED: AtomicBool = AtomicBool::new(false);
+            if !REPORTED.swap(true, Ordering::AcqRel) {
+                log::warn!(
+                    "[ara] creating a document controller after the host uninitialized the \
+                     factory; using the last negotiated API generation instead of handing the \
+                     host a null controller"
+                );
+            }
+        }
+        fallback
     }
 }
 

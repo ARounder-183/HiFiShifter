@@ -7,9 +7,9 @@ use crate::{
     PluginRuntime, SemanticCapabilities,
 };
 use ara2_bridge_core::{
-    ApiGeneration, AraError, ContentTimeRange, ContentUpdateScopes, DocumentProperties,
-    ForeignSlice, Handle, LicenseRequest, PlaybackTransformationFlags, RawHandle,
-    RegionSequenceKind, RestoreFilter, SizedInput, StoreFilter,
+    ApiGeneration, AraError, AudioSourceKind, ContentTimeRange, ContentUpdateScopes,
+    DocumentProperties, ForeignSlice, Handle, LicenseRequest, PlaybackTransformationFlags,
+    RawHandle, RegionSequenceKind, RestoreFilter, SizedInput, StoreFilter,
 };
 use ara2_bridge_sys::*;
 use std::collections::{HashMap, HashSet};
@@ -80,6 +80,8 @@ struct ControllerAdapter<P: PluginModel> {
     /// 永不发生：`runtime.editing` 保持 true，`remap_and_log` 不跑，时间线永不发布。
     /// 丢一次映射是局部损失，让整个工程不可用是全局损失 —— 超过宽限就必须强制收口。
     deferred_end_editing_since: Option<std::time::Instant>,
+    /// 上一次重试失败源读取的时刻（限流；见 `retry_failed_source_reads`）。
+    last_source_retry: Option<std::time::Instant>,
     legacy_restore_reader: Option<ARAArchiveReaderHostRef>,
     factory_analyzable_content: HashSet<i32>,
     factory_playback_transformations: PlaybackTransformationFlags,
@@ -231,6 +233,44 @@ impl<P: PluginModel> ControllerAdapter<P> {
     /// 【为什么有多个补跑点】"reader 排空"只是**最可能**的那一刻。宿主可以在 reader
     /// 还活着的时候开启样本访问、或周期性调 `notifyModelUpdates`；这两个入口同样
     /// 意味着"插件侧又可以动了"。任一处能收口就收口，别等那个唯一时刻。
+    /// 重试"已授权但读取失败"的源（限流 1 s）。
+    ///
+    /// 【为什么在 notifyModelUpdates】后台/前台恢复的瞬间，宿主可能还没准备好样本；
+    /// 一次失败会被模型记成终态，而之后没有回调保证再次读取。这里是空闲时唯一
+    /// 稳定到达、且能构造源访问 scope 的入口。
+    fn retry_failed_source_reads(&mut self) {
+        if self
+            .last_source_retry
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        self.last_source_retry = Some(std::time::Instant::now());
+        let sources = self
+            .audio_source_hosts
+            .iter()
+            .map(|(handle, host_ref)| (*handle, *host_ref))
+            .collect::<Vec<_>>();
+        if sources.is_empty() {
+            return;
+        }
+        let host = &self.host;
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        for (raw, host_ref) in sources {
+            let Ok(handle) = Handle::<AudioSourceKind>::try_from_raw(raw) else {
+                continue;
+            };
+            let Some(host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }).ok() else {
+                continue;
+            };
+            host.with_audio_source_management(host_ref, |scope| {
+                let _ = runtime.retry_failed_source_read(handle, &scope);
+            });
+        }
+    }
+
     fn retry_deferred_end_editing(&mut self, reason: &str) {
         if !self.pending_end_editing {
             return;
@@ -279,14 +319,37 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     fn begin_editing(&mut self) {
         // 宿主开始新一次编辑：先看上一次被推迟的收口是否已经等够宽限。
         self.retry_deferred_end_editing("beginEditing observed a new edit session");
-        // 【为什么不再无声吞掉】`runtime_mut()` 在 content reader 非空时返回 `Err`，
-        // 于是 `beginEditing` 完全不生效，而宿主认为会话已开始；随后 `endEditing`
-        // 又因 `!self.editing` 返回 `Err`（同样被吞）。整段编辑的 begin/end 一起
-        // 静默丢失。这里至少把原因说出来。
-        if let Err(error) = self
-            .runtime_mut()
-            .and_then(PluginRuntime::begin_callback_editing)
-        {
+        // 【为什么必须在 reader 仍未排空时也强制收口】上一次 `endEditing` 可能因为
+        // content reader 还活着而被推迟，`runtime.editing` 仍为 true。新的编辑会话
+        // 不能建立在一个仍然 editing 的 runtime 上；让 begin 以
+        // "editing is already active" 失败，宿主随后创建的所有对象都会因
+        // `callback_edit()` 返回 Err 而被丢弃 —— 整份图建不起来。
+        if self.pending_end_editing && self.runtime().is_ok_and(|runtime| runtime.is_editing()) {
+            log::warn!(
+                "[ara] forcing the previous endEditing before a new edit session \
+                 ({} content reader(s) still live)",
+                self.content_readers.len()
+            );
+            self.pending_end_editing = false;
+            self.deferred_end_editing_since = None;
+            self.finish_editing();
+        }
+        // 【为什么不再经过 `runtime_mut()`】content reader 是**快照**，它的正确性
+        // 不依赖"模型不能变"。SDK 允许 reader 存活期间开始编辑；把它当成全局闸门
+        // 会让宿主只要留下一个 reader，`beginEditing` 就静默失效，随后
+        // createAudioSource / createPlaybackRegion 全部返回 null。
+        // 这里只记一条 WARN，会话照常开始。
+        if !self.content_readers.is_empty() {
+            log::warn!(
+                "[ara] beginEditing with {} live content reader(s); model readers are \
+                 snapshots and do not block this edit session",
+                self.content_readers.len()
+            );
+        }
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        if let Err(error) = runtime.begin_callback_editing() {
             log::warn!("[ara] beginEditing had no effect: {error}");
         }
     }
@@ -331,6 +394,18 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // reader 已经排空、文档也不在编辑会话：这正是被推迟的 `endEditing` 能收口的
         // 状态。宿主周期性调用本入口，所以它是独立的第二个补跑点。
         self.retry_deferred_end_editing("notifyModelUpdates found the document idle");
+        // 【为什么在这里 flush】宿主可能在工程加载/后台恢复时直接重建图却不发
+        // begin/endEditing。`notifyModelUpdates` 是 SDK 保证的空闲入口；只在
+        // 委托方确实有积压变化时重算，避免每个心跳都跑一次全量映射。
+        if let Some(runtime) = self.runtime.as_mut() {
+            if runtime.flush_pending_model_updates() {
+                log::info!(
+                    "[ara] notifyModelUpdates published model changes that arrived outside \
+                     an editing session"
+                );
+            }
+        }
+        self.retry_failed_source_reads();
         let Some(host) = self.host.model_updates() else {
             log::warn!(
                 "[ara] notifyModelUpdates skipped: the host provided no model-update interface"
@@ -1005,14 +1080,17 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             self.analysis_events.cancel(raw);
             self.pending_analysis_starts.retain(|source| *source != raw);
         }
-        let Some(host_ref) = self.audio_source_hosts.get(&raw).copied() else {
-            return;
-        };
-        // SAFETY: the identity was validated on creation and remains live until destroy.
-        let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
-        if !self.content_readers.is_empty() {
-            return;
-        }
+        let host_ref = self
+            .audio_source_hosts
+            .get(&raw)
+            .copied()
+            .and_then(|host_ref| {
+                // SAFETY: the identity was validated on creation and remains live until destroy.
+                unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok()
+            });
+        // 【为什么不再因 content reader 非空而提前返回】reader 读的是**我们的快照**，
+        // 与"我们读宿主源 PCM"是两件事。把它当成闸门会让 enable/disable 被静默丢弃，
+        // 源的访问状态永久停留在旧值 —— 后台/前台或 undo 之后就是"等待宿主音频"。
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
@@ -1044,9 +1122,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 self.host.revoke_audio_source_readers(host_ref);
             }
         }
-        // 样本访问是"素材开始流动"的时刻：此刻 reader 已经排空（上面提前返回过），
-        // 因此它也是被推迟的 `endEditing` 的一个独立补跑点。
-        self.retry_deferred_end_editing("samples access settled with no reader live");
+        // 样本访问是"素材开始流动/停止流动"的时刻：它也是被推迟的 `endEditing`
+        // 的独立补跑点（不依赖 reader 是否排空）。
+        self.retry_deferred_end_editing("samples access changed");
     }
 
     fn destroy_audio_source(&mut self, reference: ARAAudioSourceRef) {
@@ -2210,6 +2288,7 @@ impl<P: PluginModel + 'static> Plugin<P> {
             content_readers: HashSet::new(),
             pending_end_editing: false,
             deferred_end_editing_since: None,
+            last_source_retry: None,
             legacy_restore_reader: None,
             factory_analyzable_content,
             factory_playback_transformations,

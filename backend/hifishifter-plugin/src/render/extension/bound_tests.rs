@@ -2017,15 +2017,11 @@ fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
     let association = unsafe { CompanionFactory::from_raw("bound", &*factory.as_raw()) }.unwrap();
     let owner = Arc::new(ExtensionOwner::default());
     // `HostEntry` 现在自己建 companion（重开工程时要能重建），所以传原始 factory。
-    let entry = HostEntry::new(
-        association,
-        CompanionRoles::all(),
-        "bound",
-        owner.clone(),
-    )
-    .unwrap();
+    let entry = HostEntry::new(association, CompanionRoles::all(), "bound", owner.clone()).unwrap();
     // 探针必须指向**真正被绑定**的那一份 (HostEntry 内部的绑定)。
-    let probe = entry.lifetime_probe().expect("HostEntry 必须持有初始绑定探针");
+    let probe = entry
+        .lifetime_probe()
+        .expect("HostEntry 必须持有初始绑定探针");
     let mut extension_raw = std::ptr::null();
     // SAFETY: real C++ shim 调真实产品 bind，controller 存活且已登记。
     assert_eq!(
@@ -2442,4 +2438,71 @@ fn a_closed_preparation_queue_is_replaced_on_rebind() {
         !Arc::ptr_eq(&first, &second),
         "必须真的换了对象，而不是复用已关闭的那条"
     );
+}
+
+/// **文档关闭不能丢掉原生宿主适配器；只有组件销毁才释放它。**
+///
+/// 【为什么这是问题二/三的主回归】`stop_editor()` 同时服务"文档结束"与"组件结束"。
+/// 合并在一起会在一份文档关闭时把 REAPER 扩展适配器永久丢掉；宿主复用处理器
+/// 重开工程后 `native_host()` 永远是 None，不枚举 item、不填 `region_items`，
+/// 界面停在"等待宿主音频"。
+#[test]
+fn a_document_close_keeps_the_native_host_adapter() {
+    let owner = ExtensionOwner::default();
+    let host = crate::host::reaper::MockHost::new();
+    // SAFETY: MockHost 的 context 在测试期间存活。
+    unsafe { owner.bind_host_adapter(host.context()) };
+    assert!(owner.native_host().is_some(), "前提：宿主适配器已绑定");
+
+    owner.document_closed();
+    assert!(
+        owner.native_host().is_some(),
+        "文档关闭不是组件结束：宿主适配器必须保留给下一份文档"
+    );
+
+    owner.stop_editor();
+    assert!(owner.native_host().is_none(), "组件销毁必须释放宿主适配器");
+}
+
+/// **旧文档还活着时，实例仍必须能迁移到新文档。**
+///
+/// 【为什么不能只允许 `closed == true` 后重绑】宿主顺序不可控：REAPER 可能在旧
+/// 文档还没关闭时就为新工程发出 bind。此时若拒绝，新文档永远拿不到 renderer。
+#[test]
+fn a_live_document_does_not_block_rebinding_to_another_document() {
+    use ara2_bridge::core::ApiGeneration;
+    use ara2_bridge::plugin::ExtensionRoles;
+
+    let owner = Arc::new(ExtensionOwner::default());
+    let first = crate::render::document::DocumentSession::new(101);
+    let first_raw = owner
+        .bind_to_document(
+            first.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::all(),
+            None,
+        )
+        .expect("第一份文档必须能绑定");
+    assert!(!first_raw.is_null());
+
+    let second = crate::render::document::DocumentSession::new(102);
+    let second_raw = owner
+        .bind_to_document(
+            second.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::all(),
+            None,
+        )
+        .expect("旧文档仍活着时也必须能迁移到新文档");
+    assert!(!second_raw.is_null());
+    assert_eq!(owner.bound_document_id(), Some(102));
+    assert!(
+        first.renderer_owners().is_empty(),
+        "旧文档不得继续持有本实例的租约"
+    );
+    assert_eq!(second.renderer_owners().len(), 1);
+    first.close();
+    second.close();
 }

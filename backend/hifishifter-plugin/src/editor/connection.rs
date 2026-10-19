@@ -193,6 +193,15 @@ impl ConnectionState {
         // SAFETY: host 是本状态持有的 IHostApplication 引用（QI 成功后登记）。
         unsafe { record_host_name(host) };
     }
+    /// 本组件持有的宿主应用接口（`IHostApplication*`）。
+    ///
+    /// 【为什么可以在 `setActive` 上重新绑定】`NativeHost::from_context` 只需要一个
+    /// `FUnknown*` 去 QI `IReaperHostApplication`。组件初始化时 QI 成功得到的
+    /// `IHostApplication` 引用在本组件生命周期内一直有效；宿主若在另一个线程上
+    /// 调用 `setActive`，用同一个引用重建适配器就能把线程亲和性纠正到实际模型线程。
+    pub(crate) fn host_raw(&self) -> *mut c_void {
+        *self.host.lock().unwrap_or_else(|e| e.into_inner()) as *mut c_void
+    }
     pub unsafe fn connect(&self, peer: *mut c_void) -> TResult {
         if peer.is_null() {
             return K_INVALID_ARGUMENT;

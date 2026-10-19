@@ -672,16 +672,14 @@ impl SnapshotPublisher {
                 .and_then(|plane| plane.get(input_offset + offset))
                 .copied()
         };
-        let read = |channel: usize, offset: usize| -> f32 {
-            let Some(snapshot) = snapshot else {
-                return input_at(channel, offset).unwrap_or(0.0);
-            };
+        // 【为什么把"快照读取"与"宿主输入"分开】覆盖边界需要把两者**同时**取到
+        // 才能做交叉淡化。旧实现的 `read` 在快照外直接返回输入，调用方无法再区分
+        // "这里没有快照"与"快照值恰好等于输入"。
+        let snapshot_at = |channel: usize, offset: usize| -> Option<f32> {
+            let snapshot = snapshot?;
             let local = sample
                 .checked_add(offset as i64)
-                .and_then(|sample| sample.checked_sub(snapshot.origin_sample));
-            let Some(local) = local else {
-                return input_at(channel, offset).unwrap_or(0.0);
-            };
+                .and_then(|sample| sample.checked_sub(snapshot.origin_sample))?;
             let at = |position: f64| -> Option<f32> {
                 if position < 0.0 {
                     return None;
@@ -697,22 +695,79 @@ impl SnapshotPublisher {
             let inside = |position: f64| position >= 0.0 && position < snapshot.left.len() as f64;
             if !resampling {
                 let position = local as f64;
-                return if inside(position) {
-                    at(position).unwrap_or(0.0)
-                } else {
-                    input_at(channel, offset).unwrap_or(0.0)
-                };
+                return inside(position).then(|| at(position).unwrap_or(0.0));
             }
             let position = local as f64 * ratio;
             if !inside(position) {
-                return input_at(channel, offset).unwrap_or(0.0);
+                return None;
             }
             let base = position.floor();
             let frac = (position - base) as f32;
             let a = at(base).unwrap_or(0.0);
             // 末尾一帧没有后继：保持最后一个采样（不外推、不补零）。
             let b = at(base + 1.0).unwrap_or(a);
-            a + (b - a) * frac
+            Some(a + (b - a) * frac)
+        };
+        // 覆盖边界（宿主帧域）。快照外沿是"宿主原声 ↔ 处理结果"的切换点；
+        // 它可能落在任意块中间，必须在边界带内交叉淡化，否则就是一次波形阶跃。
+        let (coverage_start, coverage_end) = snapshot.map_or((i64::MAX, i64::MIN), |snapshot| {
+            let host_len = if resampling {
+                (snapshot.left.len() as f64 / ratio).ceil() as i64
+            } else {
+                snapshot.left.len() as i64
+            };
+            (
+                snapshot.origin_sample,
+                snapshot.origin_sample.saturating_add(host_len),
+            )
+        });
+        let edge_fade = coverage_end.saturating_sub(coverage_start) > 2 * COVERAGE_EDGE_FADE_FRAMES;
+        let edge_weight = |position: i64| -> f32 {
+            const EDGE: i64 = COVERAGE_EDGE_FADE_FRAMES;
+            if coverage_start == i64::MAX {
+                return 0.0;
+            }
+            if !edge_fade {
+                // 快照短于两条淡化带：没有"中间稳定段"可保留，整段淡化等于把
+                // 内容整体衰减。短快照（测试夹具/极短片段）按原样硬切。
+                return if position >= coverage_start && position < coverage_end {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
+            if position < coverage_start - EDGE {
+                return 0.0;
+            }
+            if position < coverage_start + EDGE {
+                return ((position - (coverage_start - EDGE)) as f32 / (2.0 * EDGE as f32))
+                    .clamp(0.0, 1.0);
+            }
+            if position < coverage_end - EDGE {
+                return 1.0;
+            }
+            if position < coverage_end + EDGE {
+                return ((coverage_end + EDGE - position) as f32 / (2.0 * EDGE as f32))
+                    .clamp(0.0, 1.0);
+            }
+            0.0
+        };
+        let mix = |channel: usize, offset: usize| -> f32 {
+            let global = sample.saturating_add(offset as i64);
+            let old = input_at(channel, offset).unwrap_or(0.0);
+            if snapshot.is_none() {
+                return old;
+            }
+            let t = edge_weight(global);
+            let current = snapshot_at(channel, offset)
+                .unwrap_or_else(|| input_at(channel, offset).unwrap_or(0.0));
+            if t <= 0.0 {
+                old
+            } else if t >= 1.0 {
+                current
+            } else {
+                old * (1.0 - t) + current * t
+            }
         };
         for channel in 0..channels {
             // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。
@@ -721,10 +776,11 @@ impl SnapshotPublisher {
                 continue;
             }
             for offset in 0..frames {
+                // 单声道总线取左右平均（与 `copy_block_at` 的下混口径一致）。
                 let value = if channels == 1 {
-                    (read(0, offset) + read(1, offset)) * 0.5
+                    (mix(0, offset) + mix(1, offset)) * 0.5
                 } else {
-                    read(channel, offset)
+                    mix(channel, offset)
                 };
                 // SAFETY: 宿主提供至少 out_offset + frames 个可写样本。
                 unsafe { plane.add(out_offset + offset).write(value) };
@@ -737,6 +793,13 @@ impl SnapshotPublisher {
         snapshot.is_some()
     }
 }
+
+/// 快照覆盖边界（快照首/尾）的交叉淡化长度（宿主帧）。
+///
+/// 【为什么是 64】与 `extension.rs` 的 `OUTPUT_DECLICK_FRAMES` 同值（48 kHz 下
+/// ≈ 1.3 ms）：足以消除阶跃，又短到不会被听成一次淡入淡出。边界之外的帧完全
+/// 不做处理；只在覆盖起点/终点两侧的这条带里把"宿主输入"与"快照"线性混合。
+const COVERAGE_EDGE_FADE_FRAMES: i64 = 64;
 /// 一个实时读区的 guard：持有它期间，它登记的那份快照不会因回收而释放。
 struct ReadSection {
     snapshot: *const RetainedSnapshot,
@@ -1332,6 +1395,59 @@ mod tests {
         assert!(unsafe { publisher.copy_block_layered(0, 4, &mut bus, 4, &input) });
         assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
         assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
+    }
+
+    /// **快照覆盖边界必须交叉淡化，而不是阶跃。**
+    ///
+    /// 【为什么这是问题一的主回归】快照起点可以落在任意宿主块中间。旧实现逐帧
+    /// 二选一（输入或快照），边界处就是一次波形阶跃 —— 用户听到的"咔"。这里让
+    /// 输入恒为 7、快照恒为 0.2，断言边界带内单调过渡，而不是 7 → 0.2 的跳变。
+    #[test]
+    fn a_snapshot_coverage_edge_crossfades_instead_of_stepping() {
+        let publisher = SnapshotPublisher::new(4096);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 48_000,
+                origin_sample: 64,
+                left: vec![0.2_f32; 512],
+                right: vec![0.2_f32; 512],
+                _reservation: None,
+            })
+            .unwrap();
+        let frames = 192;
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = vec![7.0_f32; frames];
+        let input_right = vec![7.0_f32; frames];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe {
+            publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
+        });
+        assert!(
+            (left[0] - 7.0).abs() < 1e-6,
+            "边界带之前必须还是宿主输入（实测 {}）",
+            left[0]
+        );
+        assert!(
+            left.windows(2).all(|pair| pair[0] >= pair[1]),
+            "边界带内必须单调过渡，不得先跳变再回来"
+        );
+        assert!(
+            (left[frames - 1] - 0.2).abs() < 1e-3,
+            "边界带之后必须已经是快照（实测 {}）",
+            left[frames - 1]
+        );
+        assert!(
+            left[64] > 0.2 && left[64] < 7.0,
+            "边界正中间必须是混合值，而不是二选一（实测 {}）",
+            left[64]
+        );
     }
 
     /// **带输出偏移的拷贝只覆盖请求的子区间。**

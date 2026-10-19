@@ -470,6 +470,14 @@ pub(crate) struct BlockContext {
     pub resync: bool,
     /// 允许当作"记账纠正"的最大帧差（本流钉住期间送来的帧数 + 本块）。
     pub resync_limit_frames: u64,
+    /// 本块之前连续静音的帧数（起播窗口的前导静音）。
+    ///
+    /// 【为什么捕获需要它】宿主可能先送 0.4 s 静音再送内容；静音块被 `Resting`
+    /// 早退丢掉时，快照会从内容起点才开始覆盖，播放时就在 0.4 s 发生块内源切换。
+    /// 捕获侧只需要帧数，就能在段首合成等长静音，把段起点前移到播放起点。
+    pub preceding_silent_frames: u64,
+    /// 本块是钉住区间结束后的第一块：位置差值应视为记账纠正，不是 seek。
+    pub pinned_recent: bool,
     /// 本块在**插件记账域**里的位置（起播窗口里它不等于宿主报的位置）。
     ///
     /// 【为什么需要它】起播窗口内宿主把 `projectTimeSamples` 钉在 `P`，而插件按块长
@@ -501,6 +509,8 @@ impl BlockContext {
             advancing: flow,
             resync: false,
             resync_limit_frames: 0,
+            preceding_silent_frames: 0,
+            pinned_recent: false,
             accounting_start: 0,
         }
     }
@@ -656,6 +666,8 @@ pub(crate) struct CaptureDiagnostics {
     /// 一小段"，前者是"窗口里的块一个都没留下来"。T1 生效后这个数应该为 0；
     /// 只要它 > 0，说明暂存/提交链路上仍有漏，但 T2 保证了时间线不断。
     pub bridged_window_blocks: u64,
+    /// 因前导静音扩展段首的帧数（诊断）。
+    pub pre_roll_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -714,6 +726,21 @@ pub(crate) struct Capture {
     /// 两者的唯一差别就是这里。没有它，`the_first_frame_follows_the_host_not_the_button`
     /// 会把"按下录制时停的位置"桥进素材。
     window_rolled: bool,
+    /// 当前块之前连续静音的帧数（由 `BlockContext` 带来）。
+    ///
+    /// 【为什么放在 Capture 而不是每次调用传参】`write_block` 有 10 个参数，
+    /// 而这两个值描述的是"当前块"，与 `resync` 同属块级证据；存成字段后
+    /// 所有既有调用点不必改签名。
+    block_preceding_silent: u64,
+    /// 当前块是钉住区间结束后的第一块（位置差值应视为记账纠正）。
+    block_pinned_recent: bool,
+    /// 将要成为第一段段首的那一块携带的前导静音帧数。
+    ///
+    /// 【为什么不能直接用当前块的值】lookbehind 会先把首块暂存、由**第二块**提交并
+    /// 触发 `write_block`；第二块的前导静音是 0。必须在暂存首块时把值记下来。
+    pending_pre_roll: u64,
+    /// 因前导静音扩展段首的累计帧数（诊断）。
+    pub pre_roll_frames: u64,
     /// 当前为捕获供料的流。
     elected: Option<ProcessStream>,
     /// 每条流自己的候选读数（选举与交接）。
@@ -799,6 +826,10 @@ impl Default for Capture {
             window_anchor: None,
             window_pending_frames: 0,
             window_rolled: false,
+            block_preceding_silent: 0,
+            block_pinned_recent: false,
+            pending_pre_roll: 0,
+            pre_roll_frames: 0,
             elected: None,
             candidates: Default::default(),
             elected_run: 0,
@@ -971,6 +1002,7 @@ impl Capture {
             cycle_splits: diagnostics.cycle_splits,
             resync_bridged_frames: diagnostics.resync_bridged_frames,
             bridged_window_blocks: diagnostics.bridged_window_blocks,
+            pre_roll_frames: diagnostics.pre_roll_frames,
             ..Self::default()
         };
     }
@@ -1002,6 +1034,7 @@ impl Capture {
             cycle_splits: self.cycle_splits,
             resync_bridged_frames: self.resync_bridged_frames,
             bridged_window_blocks: self.bridged_window_blocks,
+            pre_roll_frames: self.pre_roll_frames,
         }
     }
 
@@ -1153,6 +1186,9 @@ impl Capture {
                     ctx.advancing,
                     false,
                     0,
+                    // 循环切分的第二段不是起播起点：前导静音/钉住纠正只属于第一段。
+                    0,
+                    false,
                 );
             }
             return CaptureOutcome::NotPlaying;
@@ -1208,6 +1244,8 @@ impl Capture {
             ctx.advancing,
             ctx.resync,
             ctx.resync_limit_frames,
+            ctx.preceding_silent_frames,
+            ctx.pinned_recent,
         )
     }
 
@@ -1411,7 +1449,16 @@ impl Capture {
         advancing: bool,
         resync: bool,
         resync_limit_frames: u64,
+        preceding_silent_frames: u64,
+        pinned_recent: bool,
     ) -> CaptureOutcome {
+        self.block_preceding_silent = preceding_silent_frames;
+        self.block_pinned_recent = pinned_recent;
+        // 【为什么在这里记】lookbehind 会先把首块暂存、由第二块提交；第二块的
+        // 前导静音是 0。只有"尚未开始、也还没有任何段"时的这一块才是段首候选。
+        if !self.started && self.last_written.is_none() && self.active.is_none() {
+            self.pending_pre_roll = preceding_silent_frames;
+        }
         // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
         if block.playing {
             if self.pending_ready_for(stream) {
@@ -1800,6 +1847,7 @@ impl Capture {
         self.window_anchor = None;
         self.window_pending_frames = 0;
         self.window_rolled = false;
+        self.pending_pre_roll = 0;
     }
 
     /// 用静音桥接 `frames` 帧（resync 向前纠正）。
@@ -1849,9 +1897,7 @@ impl Capture {
             self.last_position = Some(next);
             self.last_written = Some((start, writable));
             self.captured_frames = self.captured_frames.saturating_add(writable as u64);
-            self.resync_bridged_frames = self
-                .resync_bridged_frames
-                .saturating_add(writable as u64);
+            self.resync_bridged_frames = self.resync_bridged_frames.saturating_add(writable as u64);
             remaining -= writable;
         }
         true
@@ -1924,20 +1970,30 @@ impl Capture {
         let mut resync_continued = false;
         if part == 0 {
             match self.expected_next {
-                Some(expected) if resync => {
+                Some(expected) => {
                     let delta = start.saturating_sub(expected);
                     let limit = resync_limit_frames.max(64);
-                    if delta > 0
-                        && delta as u64 <= limit
-                        && (delta as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
-                    {
-                        self.fade_active_tail_out(DECLICK_FRAMES);
-                        resync_continued = self.bridge_silence(delta as usize);
-                    } else if delta < 0 && delta.unsigned_abs() <= limit {
-                        resync_continued = self.trim_active_tail_exact(start);
+                    // 【为什么 `pinned_recent` 也能开启纠正】`resync` 由流级证据算出；
+                    // 没有上升沿的钉住窗口里 `last_source` 一直是 Project，于是窗口
+                    // 结束时哪怕只差几帧也会被判成 `Gap` 并另起一段。只要"刚刚还在
+                    // 钉住区间里"，这个差值就是记账纠正，不是 seek。
+                    let correction = resync
+                        || (self.block_pinned_recent
+                            && delta.unsigned_abs() <= limit
+                            && delta.unsigned_abs()
+                                <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC));
+                    if correction {
+                        if delta > 0
+                            && delta as u64 <= limit
+                            && (delta as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
+                        {
+                            self.fade_active_tail_out(DECLICK_FRAMES);
+                            resync_continued = self.bridge_silence(delta as usize);
+                        } else if delta < 0 && delta.unsigned_abs() <= limit {
+                            resync_continued = self.trim_active_tail_exact(start);
+                        }
                     }
                 }
-                Some(_) => {}
                 None => {
                     // 起播窗口整段都没写过：窗口内的块被 `stash_pending` 暂存后
                     // 因连续性判据不通过而逐个 `discard_pending`，`expected_next`
@@ -1959,19 +2015,14 @@ impl Capture {
                     // 【为什么仍然不会把真正的 seek 桥成静音】只有 `last_written`
                     // 与 `active` 都为空（这张 take 还一段都没写）时才允许；一旦写过
                     // 任何一块，seek 仍旧走下面的 `SegmentLoss::First` 另起一段。
-                    if self.last_written.is_none()
-                        && self.active.is_none()
-                        && self.window_rolled
-                    {
+                    if self.last_written.is_none() && self.active.is_none() && self.window_rolled {
                         if let Some(anchor) = self.window_anchor {
                             let gap = start.saturating_sub(anchor);
                             // 【为什么上限取 `window_pending_frames + 本块`】`resync`
                             // 为假时 `resync_limit_frames` 是 0（默认上下文），只留
                             // `.max(64)` 会把 0.66 s 的窗口挡在门外。真正可桥的跨度
                             // 就是我们**看见过却没写下来**的帧数 —— 用事实而不是常量。
-                            let observed = self
-                                .window_pending_frames
-                                .saturating_add(frames as u64);
+                            let observed = self.window_pending_frames.saturating_add(frames as u64);
                             let limit = resync_limit_frames.max(observed).max(64);
                             if gap > 0
                                 && gap as u64 <= limit
@@ -1980,9 +2031,8 @@ impl Capture {
                                 // 先把窗口起点立成 active 段的原点，再桥接，最后本块
                                 // 接着同一段写 —— 全程一个段。
                                 self.begin_segment_at(anchor, rate);
-                                self.resync_bridged_frames = self
-                                    .resync_bridged_frames
-                                    .saturating_add(gap as u64);
+                                self.resync_bridged_frames =
+                                    self.resync_bridged_frames.saturating_add(gap as u64);
                                 resync_continued = self.bridge_silence(gap as usize);
                                 self.bridged_window_blocks =
                                     self.bridged_window_blocks.saturating_add(1);
@@ -2104,6 +2154,14 @@ impl Capture {
                 active.filled + frames > self.capacity || !matches!(loss, SegmentLoss::None)
             }
         };
+        // 【前导静音只属于整张 take 的第一段】捕获起点可能晚于播放起点（宿主先送
+        // 0.4 s 静音，内容出现时才进入 Rolling）。这段静音没有 PCM 可写，但它的
+        // **帧数**是真实的播放时间：把它补在段首，快照就从播放起点开始覆盖，
+        // 播放时不会在 0.4 s 发生块内源切换。后续段绝不向前看。
+        let first_segment = self.active.is_none()
+            && self.last_written.is_none()
+            && self.captured_frames == 0
+            && matches!(loss, SegmentLoss::First);
         if needs_new {
             if let Some(active) = self.active.take() {
                 let reason = if matches!(loss, SegmentLoss::None) {
@@ -2119,11 +2177,26 @@ impl Capture {
                 self.stop(ClosedReason::NoSpare);
                 return CaptureOutcome::OutOfSpares;
             };
-            spare.origin = start;
+            let pre_roll = if first_segment {
+                self.pending_pre_roll
+                    .min(self.capacity.saturating_sub(frames) as u64)
+                    // 工程位置 0 之前不可写：origin 不能为负。
+                    .min(start.max(0) as u64) as usize
+            } else {
+                0
+            };
+            if pre_roll > 0 {
+                for plane in &mut spare.planes {
+                    plane[..pre_roll].fill(0.0);
+                }
+                self.pre_roll_frames = self.pre_roll_frames.saturating_add(pre_roll as u64);
+            }
+            self.pending_pre_roll = 0;
+            spare.origin = start.saturating_sub(pre_roll as i64);
             spare.sample_rate = rate;
             spare.loss = loss;
             spare.loop_start = self.current_loop_start;
-            spare.filled = 0;
+            spare.filled = pre_roll;
             spare.peak = [0.0; 2];
             spare.closed = ClosedReason::Full;
             self.active = Some(spare);
@@ -2215,6 +2288,7 @@ impl Capture {
         if let Some(active) = self.active.take() {
             self.sealed.push(seal(active, reason));
         }
+        self.pending_pre_roll = 0;
         if self.stopped.is_none() {
             self.stopped = Some(reason);
         }
@@ -2345,6 +2419,8 @@ mod tests {
             advancing: flow,
             resync: false,
             resync_limit_frames: 0,
+            preceding_silent_frames: 0,
+            pinned_recent: false,
             accounting_start: 0,
         }
     }
@@ -3185,11 +3261,7 @@ mod tests {
         );
         let sealed = capture.finish(ClosedReason::Stopped);
         assert_eq!(sealed.len(), 1, "兜底不得把 take 切成两段");
-        assert_eq!(
-            sealed[0].span().start,
-            0,
-            "段必须从窗口锚点开始"
-        );
+        assert_eq!(sealed[0].span().start, 0, "段必须从窗口锚点开始");
         assert!(
             sealed[0].span().end >= 16,
             "段必须覆盖宿主恢复后的位置（实测 {:?}）",
@@ -3268,4 +3340,56 @@ mod tests {
         );
     }
 
+    /// **起播窗口的静音前导必须补进段首。**
+    ///
+    /// 【为什么这是问题一的主回归】宿主先送 0.4 s 静音、内容出现时才进入 Rolling。
+    /// 静音块被 `Resting` 早退丢掉时，段会从内容起点才开始；播放时就在内容起点发生
+    /// 一次块内源切换。把"本块之前连续静音的帧数"补成段首，快照覆盖范围才与播放
+    /// 起点一致。
+    #[test]
+    fn a_pinned_silent_lead_in_extends_the_take_backward() {
+        let mut capture = started(1024, 4);
+        // 第一块内容在 P+8；它之前有 8 帧静音。
+        let (_, view) = block(8, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.phase = TransportPhase::Rolling;
+        context.preceding_silent_frames = 8;
+        capture.on_block_with_context(view, context);
+        let (_, view) = block(12, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.phase = TransportPhase::Rolling;
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "前导静音不得把 take 切成两段");
+        assert_eq!(
+            sealed[0].span(),
+            0..16,
+            "段必须从静音起点开始、内容仍在 P+8 之后"
+        );
+        assert_eq!(capture.pre_roll_frames, 8, "前导静音帧数必须可诊断");
+    }
+
+    /// **钉住区间结束后的几帧差值按记账纠正，不另起一段。**
+    ///
+    /// 【为什么不能只靠 `resync`】没有 `kPlaying` 上升沿的窗口里 `last_source`
+    /// 一直是 Project；宿主位置恢复后的取整差会被判成 `Gap`，把 take 切成两个 clip。
+    #[test]
+    fn a_small_pinned_resync_does_not_split_the_take() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(0, 4, 48_000.0);
+        capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true));
+
+        let (_, view) = block(7, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.resync = false;
+        context.resync_limit_frames = 64;
+        context.pinned_recent = true;
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "小差值不得另起一段");
+        assert_eq!(sealed[0].span(), 0..11);
+        assert_eq!(capture.gaps, 0, "记账纠正不是 Gap");
+    }
 }

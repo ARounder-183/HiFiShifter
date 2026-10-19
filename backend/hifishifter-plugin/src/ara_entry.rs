@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex};
 /// 把它误当成"宿主重复绑定"，返回 null 扩展实例，插件从此永远不绑：既有 ARA 数据与
 /// 新导入音频都不加载，只有删掉插件再添加才好（那会建一个全新的 `Processor`）。
 ///
-/// 【为什么可以换掉整个对象】`bound` 是 `CompanionProcessorBinding` 内部的状态，而
-/// `CompanionControllerBinding` 自己持有同一份 `Arc<BindingState>`。丢弃处理器侧的
-/// binding 不会释放控制器侧的墓碑状态，也不会打断宿主已经拿到的扩展实例；换一个新
-/// 对象就是把它重置回"从未绑定"。这比改外部 crate 小得多，也不依赖上游发布新版。
+/// 【为什么绑定要**惰性**创建】companion 的 `bind` 要求"当前线程 == 创建绑定的线程"。
+/// 处理器可能在工程加载线程上创建、在 UI/模型线程上被 bind；在 `Processor::create`
+/// 里立刻创建会把 `model_thread` 钉在错误的线程上。第一次 `bind` 时再创建，
+/// 捕获的正是宿主实际使用的模型线程；每次复位后在新的 bind 线程上重建。
 struct CompanionSlot {
     factory: CompanionFactory<'static>,
     supported_roles: CompanionRoles,
@@ -35,51 +35,59 @@ impl CompanionSlot {
         factory: CompanionFactory<'static>,
         supported_roles: CompanionRoles,
     ) -> Result<Self, AraError> {
-        let binding =
-            CompanionProcessorBinding::new([factory.clone()], supported_roles)?;
         Ok(Self {
             factory,
             supported_roles,
-            binding: Mutex::new(Some(binding)),
+            binding: Mutex::new(None),
         })
     }
 
-    /// 用同一批 factory / roles 换一个全新的绑定对象。
+    /// 在当前线程上（惰性）创建绑定并执行一次 bind。
+    fn bind(
+        &self,
+        controller: *mut c_void,
+        known_roles: CompanionRoles,
+        assigned_roles: CompanionRoles,
+    ) -> Result<ara2_bridge::companion::CompanionControllerBinding<'static>, AraError> {
+        let mut slot = self.binding.lock_or_recover();
+        if slot.is_none() {
+            *slot = Some(CompanionProcessorBinding::new(
+                [self.factory.clone()],
+                self.supported_roles,
+            )?);
+        }
+        let binding = slot.as_ref().expect("companion binding was just created");
+        // SAFETY: 调用方保证 controller 是本处理器工厂给出的活引用。
+        unsafe { binding.bind(controller.cast(), known_roles, assigned_roles) }
+    }
+
+    /// 丢弃当前绑定对象，下一次 `bind` 会在新的线程上重建。
     ///
     /// 【为什么必须保持 factory 与 roles 不变】它们决定宿主看到的关联与角色集合；
     /// 重开工程不是"换产品形态"，只是"换文档"。
-    fn reset(&self) -> Result<(), AraError> {
-        let fresh = CompanionProcessorBinding::new([self.factory.clone()], self.supported_roles)?;
-        *self.binding.lock_or_recover() = Some(fresh);
-        Ok(())
+    fn reset(&self) {
+        *self.binding.lock_or_recover() = None;
     }
 
-    /// 在**当前**绑定上查询工厂（`get_factory` 回调）。
-    fn factory_raw(&self, class_name: &str) -> *const c_void {
-        self.binding
-            .lock_or_recover()
-            .as_ref()
-            .and_then(|binding| binding.factory_for_id(class_name))
-            .map_or(std::ptr::null(), |factory| factory.as_raw().cast())
+    /// `get_factory` 回调：工厂指针本身就是进程级稳定的，不依赖当前绑定对象。
+    fn factory_raw(&self) -> *const c_void {
+        self.factory.as_raw().cast()
     }
 
-    /// 初始绑定的生命周期探针（仅测试）。
-    ///
-    /// 【为什么探针要记在创建时】复位会换掉整个 `CompanionProcessorBinding`，
-    /// 而复位后旧对象已经被丢弃 —— 想观察"宿主的实际销毁是否把控制器侧一并
-    /// tombstone"就只能持有创建时那一份的弱引用。
+    /// 当前绑定的生命周期探针（仅测试）。
     #[cfg(test)]
     fn lifetime_probe(&self) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
-        self.binding
-            .lock_or_recover()
-            .as_ref()
-            .map(|binding| binding.lifetime_probe())
+        let mut slot = self.binding.lock_or_recover();
+        if slot.is_none() {
+            *slot =
+                CompanionProcessorBinding::new([self.factory.clone()], self.supported_roles).ok();
+        }
+        slot.as_ref().map(|binding| binding.lifetime_probe())
     }
 }
 
 struct Context {
     companion: CompanionSlot,
-    class_name: String,
     owner: Arc<ExtensionOwner>,
 }
 
@@ -104,22 +112,12 @@ impl HostEntry {
         owner: Arc<ExtensionOwner>,
     ) -> Result<Self, AraError> {
         let companion = CompanionSlot::new(factory, supported_roles)?;
-        if companion
-            .binding
-            .lock_or_recover()
-            .as_ref()
-            .is_none_or(|binding| binding.factory_for_id(class_name).is_none())
-        {
+        if companion.factory.id() != class_name {
             return Err(AraError::InvalidArgument("unknown factory association"));
         }
         #[cfg(test)]
         let probe = companion.lifetime_probe();
-        let context = Box::into_raw(Box::new(Context {
-            companion,
-            class_name: class_name.into(),
-            owner,
-        }))
-        .cast();
+        let context = Box::into_raw(Box::new(Context { companion, owner })).cast();
         let callbacks = Ara2Vst3PluginEntryCallbacks {
             context,
             get_factory: Some(get_factory),
@@ -174,7 +172,7 @@ unsafe extern "C" fn get_factory(context: *mut c_void) -> *const c_void {
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: 原生对象保留 Context 到最终 release。
         let context = unsafe { &*context.cast::<Context>() };
-        context.companion.factory_raw(&context.class_name)
+        context.companion.factory_raw()
     }))
     .unwrap_or(std::ptr::null())
 }
@@ -207,57 +205,79 @@ unsafe extern "C" fn bind(
         // SAFETY: Context 由 shim 保留，宿主按 ARA/VST3 契约提供完整实例记录。
         let context = unsafe { &*context.cast::<Context>() };
         if controller.is_null() {
+            log::error!("[ara] bindDocumentToExtension called with a null controller reference");
             return std::ptr::null();
         }
         let Some(known_roles) = CompanionRoles::from_bits(known) else {
+            log::error!("[ara] bind rejected: unknown known-roles bits {known:#x}");
             return std::ptr::null();
         };
         let Some(assigned_roles) = CompanionRoles::from_bits(assigned) else {
+            log::error!("[ara] bind rejected: unknown assigned-roles bits {assigned:#x}");
             return std::ptr::null();
         };
         // ARAVST3.h 与 shim 的实参是 ARADocumentControllerRef；它不透明，禁止解引用。
         let Some(document) = DocumentSession::lookup(controller as usize) else {
+            // 【为什么要把 live keys 打出来】"控制器不在表里"可能是 create 失败、
+            // initialize 状态丢失，或宿主传了另一份 ref。没有这行日志，现场只能看到
+            // 一个 null 扩展实例，无法区分三种完全不同的处置。
+            log::error!(
+                "[ara] bind target controller key={:#x} is not a live document; live keys={:?}; \
+                 bound_once={} has_binding={} closed={}",
+                controller as usize,
+                DocumentSession::live_controller_keys(),
+                context.owner.was_bound_before(),
+                context.owner.has_binding(),
+                context.owner.is_closed()
+            );
             return std::ptr::null();
         };
         let Some(generation) = *document.generation.lock_or_recover() else {
+            log::error!(
+                "[ara] bind rejected: document {} has no negotiated ARA generation \
+                 (createDocumentController did not complete)",
+                document.id
+            );
             return std::ptr::null();
         };
+        log::info!(
+            "[ara] bind request: document={} controller={:#x} owner_bound_document={:?} \
+             closed={} has_binding={}",
+            document.id,
+            controller as usize,
+            context.owner.bound_document_id(),
+            context.owner.is_closed(),
+            context.owner.has_binding()
+        );
         // SAFETY: lookup 已确认来自本产品的仍存活文档，guard 将在实际 document close 撤销。
         //
         // 【为什么要一个重试循环】companion 的 `bound` 是**一次性**的，而处理器实例
         // 跨工程存活。重开工程时宿主复用同一 FX 槽 ⇒ 同一个处理器 ⇒ 第二次 bind 必然
-        // 被 "already bound" 拒绝。此时如果上一份文档已经关闭，正确动作是**换掉整个
-        // companion 绑定对象**再试一次，而不是把 null 交给宿主。
+        // 被 "already bound" 拒绝。此时正确动作是**换掉整个 companion 绑定对象**再试一次，
+        // 而不是把 null 交给宿主。
         //
         // 【为什么最多两次】一次正常尝试 + 一次复位后的重试。复位后仍然失败说明不是
         // "遗留绑定"这一种成因，继续循环只会反复拆建、把现场搅得更难诊断。
         let mut attempt = 0;
         let companion = loop {
-            let bound = {
-                let slot = context.companion.binding.lock_or_recover();
-                let Some(binding) = slot.as_ref() else {
-                    return std::ptr::null();
-                };
-                // SAFETY: 调用方保证 controller 是本处理器工厂给出的活引用。
-                unsafe { binding.bind(controller.cast(), known_roles, assigned_roles) }
-            };
-            match bound {
+            match context.companion.bind(controller, known_roles, assigned_roles) {
                 Ok(companion) => break companion,
                 Err(AraError::InvalidState("companion processor is already bound")) => {
-                    // 第一优先：本实例仍有**活的**绑定（宿主重复 bindDocumentToExtension）。
-                    // 幂等复用既有扩展实例：不新建 companion，也就不需要释放旧 companion。
-                    if let Some(raw) = context.owner.existing_binding_raw() {
+                    // 第一优先：本实例仍**活在同一份文档**上（宿主重复 bindDocumentToExtension）。
+                    // 只有文档身份也相同才允许幂等复用；旧文档还活着时把它的指针交给
+                    // 新文档，会让新文档永远收不到 renderer 分配。
+                    if let Some(raw) = context.owner.existing_binding_raw_for(document.id) {
                         log::warn!(
-                            "[ara] duplicate bindDocumentToExtension; reusing the existing \
-                             extension instance (document={})",
+                            "[ara] duplicate bindDocumentToExtension for the same live document {}; \
+                             reusing the existing extension instance",
                             document.id
                         );
                         return raw.cast();
                     }
-                    // 走到这里说明 binding 已被 `document_closed()` 关闭。从未绑定过的
-                    // 实例撞上 "already bound" 是真异常，不能复位（复位会把它变成"看起来
-                    // 绑过"的状态，掩盖真相）。
-                    if !context.owner.was_bound_before() {
+                    // 走到这里说明 binding 要么属于另一份文档，要么已被
+                    // `document_closed()` 关闭。从未绑定过的实例撞上 "already bound"
+                    // 是真异常，不能复位（复位会把它变成"看起来绑过"的状态，掩盖真相）。
+                    if !context.owner.was_bound_before() && !context.owner.has_binding() {
                         log::error!(
                             "[ara] companion reports already bound but this instance never \
                              bound; refusing to reset a binding we do not own"
@@ -272,23 +292,21 @@ unsafe extern "C" fn bind(
                         return std::ptr::null();
                     }
                     attempt += 1;
-                    // 【为什么在这里复位是安全的】上一份文档已经关闭（
-                    // `document_closed()` 已清掉 assignments/document，并撤销了 lease）。
-                    // 旧的 `CompanionControllerBinding` 仍被 owner 的 `binding` 持有，
-                    // 它自己握有 `Arc<BindingState>` —— 丢弃处理器侧对象不会让它悬空。
-                    if let Err(error) = context.companion.reset() {
-                        log::error!("[ara] companion reset failed: {error}");
-                        return std::ptr::null();
-                    }
+                    // 【为什么在这里复位是安全的】旧的 `CompanionControllerBinding` 仍被
+                    // owner 的 `binding` / retired 列表持有，它自己握有 `Arc<BindingState>`
+                    // —— 丢弃处理器侧对象不会让它悬空。
+                    context.companion.reset();
                     context.owner.note_companion_reset();
                     log::info!(
                         "[ara] reset the one-shot companion binding so document {} can bind \
-                         after the previous project closed",
-                        document.id
+                         (previous document {:?}, closed={})",
+                        document.id,
+                        context.owner.bound_document_id(),
+                        context.owner.is_closed()
                     );
                 }
                 Err(error) => {
-                    log::warn!("[ara] companion bind failed: {error}");
+                    log::error!("[ara] companion bind failed: {error}");
                     return std::ptr::null();
                 }
             }

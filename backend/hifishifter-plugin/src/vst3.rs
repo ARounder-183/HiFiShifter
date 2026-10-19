@@ -1313,12 +1313,27 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
             // SAFETY: processor 是活动对象。
             let owner = unsafe { (*processor).extension_owner.clone() };
             if state != 0 {
+                // 【为什么在 setActive 上重建宿主适配器】组件初始化线程与宿主真正
+                // 运行模型/UI 回调的线程可能不同（工程加载线程 vs UI 线程），而
+                // `NativeHost` 的所有查询都要求回到它绑定的线程。旧适配器线程不匹配
+                // 时，`refresh_ui_inventory` / `refresh_host_geometry` 会静默失败，
+                // 表现为"等待宿主音频"。这里用组件持有的 `IHostApplication` 引用
+                // 在**当前**线程重建一次；失败只降级为 ARA-only，不会比现状更糟。
+                let host = unsafe { (*processor).connection.host_raw() };
+                if !host.is_null()
+                    && (owner.native_host().is_none() || owner.host_adapter_thread_mismatch())
+                {
+                    unsafe { owner.rebind_host_adapter(host) };
+                }
                 // 【为什么记这一行】`setActive` 是 ARA 绑定窗口的关闭点：契约规定
                 // `bindToDocumentControllerWithRoles` 只能在它之前调用（ARAVST3.h 的
                 // `IPlugInEntryPoint2`）。`ara_bound` 为假就是"宿主把本插件当普通插入
                 // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
                 // 直接说出这件事，得靠对比两个会话才能推断。
                 owner.note_component_activated();
+                // 后台/前台切换后宿主可能已重建几何或恢复源访问；主动枚举一次，
+                // 不等下一次 UI tick 的节流窗口。
+                owner.resume_resync();
                 crate::log_line(&format!(
                     "IComponent::setActive({state}): ara_bound={}",
                     owner.is_ara_bound()

@@ -1091,14 +1091,87 @@ impl DocumentSession {
     /// 【为什么分类留在后端】与 `ara_host_fields:` 同一原则：后端只给语言无关的分类
     /// （见 `render::extension::HostAudioState`），文案按 catalog 本地化。
     pub(crate) fn decorate_host_audio(&self, payload: &mut serde_json::Value) {
-        let Some(owner) = self
-            .renderer_owners()
-            .into_iter()
-            .find(|owner| owner.is_non_playback())
-        else {
+        let owners = self.renderer_owners();
+        let Some(owner) = owners.iter().find(|owner| owner.is_non_playback()).cloned() else {
+            // 有 renderer 但没有非 playback 实例：GUI 挂在别的角色上，沿用旧行为
+            // （不写读数），不能误报成"未绑定"。
+            if !owners.is_empty() {
+                return;
+            }
+            // 【为什么没有 owner 也要写读数】此前这里直接 return，前端沿用上一次
+            // 已知值 —— bind 失败/文档缺失时界面永远停在"等待宿主音频"。现在把
+            // "根本没有 renderer" 报成 `not_bound`（终态、可行动），并带上诊断
+            // 读数回答"到底绑没绑上"。
+            let waiting = payload["clips"].as_array().map_or(0, |clips| {
+                clips
+                    .iter()
+                    .filter(|clip| {
+                        clip.get("source_path")
+                            .and_then(|value| value.as_str())
+                            .is_none_or(str::is_empty)
+                    })
+                    .count()
+            });
+            if !self.ever_had_renderer() && waiting == 0 {
+                return;
+            }
+            payload["host_audio"] = serde_json::json!({
+                "state": "not_bound",
+                "waiting_clips": waiting,
+                "skipped_clips": self.skipped_regions.lock_or_recover().len(),
+                "reason": "no-renderer",
+            });
+            payload["ara_binding"] = serde_json::json!({
+                "bound": false,
+                "bound_once": self.ever_had_renderer(),
+                "renderers": owners.len(),
+                "reason": "no-renderer",
+            });
             return;
         };
         let status = owner.host_audio_status();
+        payload["ara_binding"] = serde_json::json!({
+            "bound": owner.is_ara_bound(),
+            "bound_once": owner.was_bound_before(),
+            "document_alive": owner.editor_document().is_ok(),
+            "native_host": owner.native_host().is_some(),
+            "bound_document_id": owner.bound_document_id(),
+            "closed": owner.is_closed(),
+            "renderers": owners.len(),
+        });
+        // 【为什么恢复读数要在这里写】恢复由**哪个实例**完成取决于宿主把载荷发给了谁；
+        // 用户要回答"参数到底读回来没有"，所以看文档上全部 renderer，而不只是手里
+        // 这一个。pending 不是失败：`pending_reason` 说明在等什么。
+        let restore_failed = owners.iter().any(|owner| owner.restore_failed());
+        let restore_pending = owners
+            .iter()
+            .any(|owner| owner.restore_status_name() == "pending");
+        let restore_status = if restore_failed {
+            "failed"
+        } else if restore_pending {
+            "pending"
+        } else if owners
+            .iter()
+            .any(|owner| owner.restore_status_name() == "applied")
+        {
+            "applied"
+        } else {
+            "never"
+        };
+        payload["ara_restore"] = serde_json::json!({
+            "status": restore_status,
+            "applied_generation": owners
+                .iter()
+                .map(|owner| owner.restore_report().2)
+                .max()
+                .unwrap_or(0),
+            "pending_reason": owners
+                .iter()
+                .find_map(|owner| owner.restore_pending_reason()),
+            "error": owners
+                .iter()
+                .find_map(|owner| owner.restore_report().1),
+        });
         // 【为什么 ARA-only 上不能直接报 `status`】没有原生扩展时
         // `refresh_ui_inventory` 早退并把 `host_audio` 复位成默认的 `Ready`（waiting 0），
         // 于是"一条 region 都没匹配上"也被报成一切正常，而左下角却在转圈

@@ -151,6 +151,7 @@ fn a_missing_processed_result_asks_the_actor_to_render() {
     );
     // 处理结果就绪之后不再请求。
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
         .transfer_ready_revision
         .store(owner.transfer.revision(), Ordering::Release);
@@ -188,6 +189,7 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
         "处理结果还没合成好时必须能听到**原始磁带**"
     );
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
         .transfer_ready_revision
         .store(owner.transfer.revision(), Ordering::Release);
@@ -269,6 +271,7 @@ fn a_new_take_invalidates_both_publishers() {
     record(&owner, 256);
     owner.sync_raw_tape();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
         .transfer_ready_revision
         .store(owner.transfer.revision(), Ordering::Release);
@@ -541,6 +544,7 @@ fn an_armed_lagging_start_does_not_play_the_previous_result() {
     record(&owner, 256);
     owner.sync_raw_tape();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
         .transfer_ready_revision
         .store(owner.transfer.revision(), Ordering::Release);
@@ -570,6 +574,7 @@ fn armed_standby_returns_to_the_processed_result() {
     record(&owner, 256);
     owner.sync_raw_tape();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
         .transfer_ready_revision
         .store(owner.transfer.revision(), Ordering::Release);
@@ -657,6 +662,77 @@ fn prefetch_movement_does_not_unlock_a_repeated_realtime_block() {
     assert!(!owner.transfer_transport_running());
 }
 
+/// **起播窗口内的静音不能被门控清掉。**
+///
+/// 【为什么这是问题一的输出侧回归】窗口内的前段可能是静音；按
+/// `allow_output == false` 清掉它，内容出现时就是一次零→内容的阶跃。
+/// `repeated_nonzero` 仍然必须阻止 FL 停播继续出声。
+#[test]
+fn the_start_window_keeps_the_output_open_across_pinned_silence() {
+    let owner = insert_owner();
+    let evidence = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        position: 0,
+        frames: 512,
+        playing: false,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Resting,
+        had_previous: true,
+        allow_output: false,
+        start_window: true,
+        repeated_nonzero: false,
+        split: BlockSplit::whole(0, 512),
+    };
+    assert!(
+        owner.transfer_should_emit(Some(evidence), false),
+        "窗口内静音必须放行，否则内容出现时是零→内容的阶跃"
+    );
+    let repeated = BlockEvidence {
+        repeated_nonzero: true,
+        ..evidence
+    };
+    assert!(
+        !owner.transfer_should_emit(Some(repeated), false),
+        "FL 停播的重复非零内容仍然必须被门控"
+    );
+}
+
+/// **门控清零后的第一块必须淡入，而不是原样输出。**
+#[test]
+fn a_gate_clear_arms_a_fade_in_on_resume() {
+    let owner = insert_owner();
+    let frames = 64_usize;
+    let mut first = vec![0.5_f32; frames];
+    let mut second = vec![0.5_f32; frames];
+    let mut planes = [first.as_mut_ptr(), second.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    // 先建立"上一块输出的尾巴"。
+    unsafe { owner.apply_output_declick(ProcessStream::Realtime, &mut bus, frames) };
+    // 门控清零：写尾巴→0，并武装下一次淡入。
+    unsafe { owner.apply_gate_fade_out(ProcessStream::Realtime, &mut bus, frames) };
+    assert_eq!(first[frames - 1], 0.0);
+    // 恢复：整块内容为 0.5，前 64 帧必须从 0 单调升到 0.5。
+    for sample in first.iter_mut().chain(second.iter_mut()) {
+        *sample = 0.5;
+    }
+    unsafe { owner.apply_output_declick(ProcessStream::Realtime, &mut bus, frames) };
+    assert!(
+        first.windows(2).all(|pair| pair[0] <= pair[1]),
+        "恢复后的前 64 帧必须单调淡入"
+    );
+    assert!(
+        first[0] < 0.1 && (first[frames - 1] - 0.5).abs() < 1e-6,
+        "第一帧接近 0、最后一帧到完整幅度（实测 {:?}）",
+        (first[0], first[frames - 1])
+    );
+}
+
 /// **prefetch/offline 的输出永远不被传输状态门控。**
 #[test]
 fn prefetch_and_offline_never_look_stopped() {
@@ -673,6 +749,8 @@ fn prefetch_and_offline_never_look_stopped() {
             phase: TransportPhase::Rolling,
             had_previous: true,
             allow_output: false,
+            start_window: false,
+            repeated_nonzero: false,
             split: BlockSplit::whole(0, 512),
         };
         assert!(
@@ -691,6 +769,8 @@ fn prefetch_and_offline_never_look_stopped() {
         phase: TransportPhase::Rolling,
         had_previous: true,
         allow_output: false,
+        start_window: false,
+        repeated_nonzero: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(!owner.transfer_should_emit(Some(realtime), false));
@@ -1453,6 +1533,8 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         phase: TransportPhase::Resting,
         had_previous: true,
         allow_output: false,
+        start_window: false,
+        repeated_nonzero: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(
@@ -1527,6 +1609,7 @@ fn an_ara_snapshot_publish_changes_the_output_token() {
     let owner = insert_owner();
     let before = owner.output_token_for(TransferOutput::Untouched);
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
     let after = owner.output_token_for(TransferOutput::Untouched);
     assert_ne!(
         before, after,

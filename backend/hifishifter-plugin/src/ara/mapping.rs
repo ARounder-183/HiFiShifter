@@ -67,6 +67,13 @@ pub struct AraAudioSource {
     /// 宿主是否已授予样本访问权。
     #[serde(default, rename = "sampleAccessEnabled")]
     pub sample_access_enabled: bool,
+    /// 宿主是否因 undo/离线把源停用（`deactivateAudioSourceForUndoHistory(true)`）。
+    ///
+    /// 【为什么与 `sample_access_enabled` 分开】两者是正交的：宿主可以只关闭访问
+    /// 而不把源放进 undo 历史，也可以只停用而保留访问。把两者折成一个布尔会让
+    /// "重新激活"无法恢复正确的读取状态。
+    #[serde(default, rename = "deactivated")]
+    pub deactivated: bool,
 }
 
 /// 一个 `ARAMusicalContext`。

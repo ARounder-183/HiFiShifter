@@ -51,6 +51,8 @@ pub(crate) struct WorkspaceSnapshot {
 pub(crate) struct DocumentSession {
     controller: AtomicUsize,
     alive: AtomicBool,
+    /// 本文档是否曾经成功 attach 过 renderer（重绑/关闭后用于区分"还没绑"与"绑过又没了"）。
+    ever_had_renderer: AtomicBool,
     renderers: Mutex<Vec<RendererLease>>,
     pub generation: Mutex<Option<ApiGeneration>>,
     pub sequence_regions: Mutex<HashMap<u64, HashSet<u64>>>,
@@ -1495,7 +1497,28 @@ impl DocumentSession {
             _companion: companion,
             owner: Arc::downgrade(owner),
         });
+        self.ever_had_renderer.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// 本文档是否曾经有过 renderer（用于区分"还没绑定"与"绑定过又丢了"）。
+    pub(crate) fn ever_had_renderer(&self) -> bool {
+        self.ever_had_renderer.load(Ordering::Acquire)
+    }
+
+    /// 把某个 owner 的 lease 从本文档摘掉（文档本身仍存活）。
+    ///
+    /// 【为什么需要它】宿主复用同一个处理器、把实例从旧文档迁到新文档时，旧文档
+    /// 可能仍然活着。此时必须只摘掉**这一个** owner 的租约，不能关闭整份文档，
+    /// 也不能打断同文档里其他实例（多工程窗口/多实例）。
+    pub(crate) fn detach_owner(&self, owner: &Arc<ExtensionOwner>) {
+        let mut renderers = self.renderers.lock_or_recover();
+        renderers.retain(|lease| {
+            !lease
+                .owner
+                .upgrade()
+                .is_some_and(|current| Arc::ptr_eq(&current, owner))
+        });
     }
 
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
@@ -1772,5 +1795,24 @@ impl DocumentSession {
             .get(&key)
             .and_then(Weak::upgrade)
             .filter(|session| session.alive.load(Ordering::Acquire))
+    }
+
+    /// 当前进程里仍存活的控制器键（诊断；有界）。
+    ///
+    /// 【为什么需要它】`bind` 拿到一个不在表里的 controller ref 时，必须能一眼看出
+    /// "是表里根本没有新文档"还是"新文档用了另一个 ref"。只返回前若干条，避免
+    /// 多工程/异常宿主把日志撑爆。
+    pub(crate) fn live_controller_keys() -> Vec<usize> {
+        const MAX_KEYS: usize = 16;
+        controllers()
+            .lock_or_recover()
+            .iter()
+            .filter(|(_, weak)| {
+                weak.upgrade()
+                    .is_some_and(|session| session.alive.load(Ordering::Acquire))
+            })
+            .map(|(key, _)| *key)
+            .take(MAX_KEYS)
+            .collect()
     }
 }

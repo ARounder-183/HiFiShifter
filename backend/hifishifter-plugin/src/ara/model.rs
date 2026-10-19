@@ -95,6 +95,13 @@ pub struct ModelHandle {
     generation: Option<ApiGeneration>,
     /// 源授权可能在宿主事务中回调；完整图收口前不能准备/关联恢复编辑。
     editing: bool,
+    /// 自上次成功发布时间线以来，模型是否发生过变化。
+    ///
+    /// 【为什么需要它】`remap_and_log()` 的唯一调用点是 `end_editing()`。宿主若在
+    /// 工程加载/后台恢复时直接重建图却不发 `beginEditing/endEditing`，时间线永远
+    /// 不会发布，region→item 认领与参数恢复都停在半路。`notifyModelUpdates` 是
+    /// SDK 保证宿主在空闲时会周期性调用的入口；靠这个标记只在真有变化时重算。
+    model_dirty: bool,
     /// region sequence 句柄 → 我们数组里的下标。
     sequence_index_by_handle: HashMap<HandleKey, usize>,
     /// source 句柄 → 数组下标。
@@ -262,6 +269,7 @@ impl Default for ModelHandle {
             timeline: None,
             generation: None,
             editing: false,
+            model_dirty: false,
             sequence_index_by_handle: HashMap::new(),
             source_index_by_handle: HashMap::new(),
             modification_index_by_handle: HashMap::new(),
@@ -689,6 +697,11 @@ impl ModelHandle {
         self.timeline.is_some() && self.remap_stamp.as_ref() == Some(&self.remap_fingerprint())
     }
 
+    /// 记下"自上次成功发布以来模型变过"（见 [`Self::model_dirty`]）。
+    fn mark_model_dirty(&mut self) {
+        self.model_dirty = true;
+    }
+
     fn remap_and_log(&mut self) {
         // 先更新 session 的派生表：它们必须**立刻**反映新图，否则渲染/工作区路径
         // 在收口前就读到旧的 region 集合（见 `sync_session_derived_tables`）。
@@ -729,6 +742,7 @@ impl ModelHandle {
         // **可判定的事实**：相同就一定不用重算，与经过了多少毫秒无关。用指纹既确定
         // 又可测（见 `end_editing_skips_the_remap_when_the_model_did_not_change`）。
         if self.remap_is_redundant() {
+            self.model_dirty = false;
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Debug,
                 "ara.remap.unchanged",
@@ -961,8 +975,14 @@ impl ModelHandle {
                     };
                     let mut takes = self.session.authorized_takes.lock_or_recover();
                     let mut sources = self.session.authorized_sources.lock_or_recover();
-                    takes.clear();
-                    sources.clear();
+                    // 【为什么不再 `clear()`】这两张表按 region key 索引，key 的终点
+                    // 只有两条：`destroy_playback_region` 逐 key 删除、
+                    // `DocumentSession::close` 整表清空。一次 remap 看不到某个 key，
+                    // 只说明"这一轮清单/几何还没来"（后台恢复、节流、宿主适配器暂时
+                    // 不可用），不等于授权失效。整体清空会让 `sync_host_takes` 在
+                    // 下一次清单刷新时把所有 Clip 的 `source_path` 清掉 —— 用户看到
+                    // 的就是"正在等待宿主完成音频分配"。真正的 take 切换由
+                    // `sync_host_takes` 的 GUID 比对处理，不需要在这里清授权。
                     for (key, item) in items.iter() {
                         if let Some(take) = take_by_item.get(item) {
                             takes.insert(*key, take.clone());
@@ -1038,6 +1058,7 @@ impl ModelHandle {
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
                 self.remap_stamp = Some(fingerprint);
+                self.model_dirty = false;
                 drop(transaction);
             }
             Err(err) => {
@@ -1162,6 +1183,15 @@ impl DocumentLifecycle for ModelHandle {
             .remove_document(self.document_id);
         log::info!("[ara] document destroyed");
     }
+
+    fn flush_pending_model_updates(&mut self) -> bool {
+        if !self.model_dirty {
+            return false;
+        }
+        log::info!("[ara] flushing pending model changes without endEditing");
+        self.remap_and_log();
+        true
+    }
 }
 
 impl MusicalContexts for ModelHandle {
@@ -1173,6 +1203,7 @@ impl MusicalContexts for ModelHandle {
         properties: MusicalContextProperties,
         host: &HostContentScope<'_, '_>,
     ) -> Result<Self::MusicalContext, AraError> {
+        self.mark_model_dirty();
         self.document.musical_contexts.push(AraMusicalContext {
             name: properties.name().map(str::to_owned),
             region_sequences: Vec::new(),
@@ -1195,6 +1226,7 @@ impl MusicalContexts for ModelHandle {
         // 【为什么必须实现】此前落 trait 默认空实现。`MusicalContext = ()`，没有 per-context
         // 状态可改，但**名字**是文档级的展示信息，宿主改名时插件应当跟上。
         // 名字落在第一个 context 上（与 `create_region_sequence` 的归属口径一致）。
+        self.mark_model_dirty();
         if let Some(context) = self.document.musical_contexts.first_mut() {
             context.name = properties.name().map(str::to_owned);
         }
@@ -1220,6 +1252,7 @@ impl MusicalContexts for ModelHandle {
             range,
             flags
         );
+        self.mark_model_dirty();
         self.session
             .set_host_tempo_map(read_host_musical_content(host));
         self.sync_session_derived_tables();
@@ -1227,6 +1260,7 @@ impl MusicalContexts for ModelHandle {
     }
 
     fn destroy_musical_context(&mut self, _state: Self::MusicalContext) {
+        self.mark_model_dirty();
         // 【为什么必须实现】此前落 trait 默认空实现。宿主删除 musical context 时，
         // 它下面的 region sequence 一并消失；不清的话这些序列的身份与参数根边
         // 会一直留到文档关闭。
@@ -1446,6 +1480,7 @@ impl RegionSequences for ModelHandle {
         context: &CreateContext,
         properties: RegionSequenceProperties,
     ) -> Result<Self::RegionSequence, AraError> {
+        self.mark_model_dirty();
         // 归到第一个（通常也是唯一一个）musical context 下；没有就现建一个。
         if self.document.musical_contexts.is_empty() {
             self.document.musical_contexts.push(AraMusicalContext {
@@ -1504,6 +1539,7 @@ impl RegionSequences for ModelHandle {
         // 【为什么必须实现】此前落 trait 默认空实现：宿主重命名轨道、或改变序列顺序时
         // 插件毫无反应，而 `order_index` 被读入后**从未使用**（映射层按枚举顺序排 track），
         // 于是"宿主把轨往下挪"在插件里看起来什么都没发生。
+        self.mark_model_dirty();
         let sequences = self
             .document
             .musical_contexts
@@ -1528,6 +1564,7 @@ impl RegionSequences for ModelHandle {
     }
 
     fn destroy_region_sequence(&mut self, state: Self::RegionSequence) {
+        self.mark_model_dirty();
         // 【为什么必须实现】此前落 trait 默认空实现，而 `region_sequences` 是 push-only 的：
         // 宿主删除一条轨道后，它的 `ara-track-N` 身份与 `params_by_root_track` 条目
         // 一直留到文档关闭 —— 用户看到插件里有一条已经不存在的轨，且它的参数还在参与渲染。
@@ -1580,6 +1617,7 @@ impl AudioSources for ModelHandle {
         properties: AudioSourceProperties,
         host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        self.mark_model_dirty();
         let source = self
             .document
             .audio_sources
@@ -1605,13 +1643,17 @@ impl AudioSources for ModelHandle {
         Ok(())
     }
 
-    /// undo history 中停用源时立即撤销准备好的 PCM；恢复后等待宿主重新授予访问。
+    /// undo history 中停用源时立即撤销准备好的 PCM；恢复后重新读取。
     fn deactivate_audio_source(
         &mut self,
         state: &mut Self::AudioSource,
         deactivate: bool,
         host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        self.mark_model_dirty();
+        if let Some(source) = self.document.audio_sources.get_mut(*state) {
+            source.deactivated = deactivate;
+        }
         if deactivate {
             self.session.clear_renderers();
             if let Some(source) = self.document.audio_sources.get(*state) {
@@ -1620,16 +1662,17 @@ impl AudioSources for ModelHandle {
                     .lock_or_recover()
                     .remove(&source.persistent_id);
             }
-            if let Some(source) = self.document.audio_sources.get_mut(*state) {
-                source.sample_access_enabled = false;
-            }
-            self.refresh_source_pcm(*state, host);
         }
+        // 【为什么两个方向都要刷新】旧实现只在 `deactivate == true` 时刷新，重新
+        // 激活（`false`）什么都不做：源永远停在"已停用 + 无 PCM"的状态，界面显示
+        // "正在等待宿主完成音频分配"。重新激活必须重读 PCM 并重排快照。
+        self.refresh_source_pcm(*state, host);
         Ok(())
     }
 
     /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
     fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
+        self.mark_model_dirty();
         self.session.clear_renderers();
         if let Some(source) = self.document.audio_sources.get(state) {
             self.session
@@ -1643,12 +1686,40 @@ impl AudioSources for ModelHandle {
         self.refresh_source_pcm(state, host);
     }
 
+    fn retry_failed_source_read(
+        &mut self,
+        state: &mut Self::AudioSource,
+        host: &HostContentScope<'_, '_>,
+    ) -> bool {
+        let Some(source) = self.document.audio_sources.get(*state) else {
+            return false;
+        };
+        let id = source.persistent_id.clone();
+        let readable = source.sample_access_enabled && !source.deactivated;
+        if !readable
+            || !self
+                .session
+                .source_failures
+                .lock_or_recover()
+                .contains_key(&id)
+        {
+            return false;
+        }
+        self.refresh_source_pcm(*state, host);
+        !self
+            .session
+            .source_failures
+            .lock_or_recover()
+            .contains_key(&id)
+    }
+
     fn create_audio_source(
         &mut self,
         context: &CreateContext,
         properties: AudioSourceProperties,
         _host: &HostContentScope<'_, '_>,
     ) -> Result<Self::AudioSource, AraError> {
+        self.mark_model_dirty();
         let persistent_id = properties.persistent_id().to_string();
         let sample_rate = properties.sample_rate();
         let sample_count = properties.sample_count();
@@ -1666,6 +1737,7 @@ impl AudioSources for ModelHandle {
             },
             channel_count: properties.channel_count(),
             sample_access_enabled: false,
+            deactivated: false,
         });
         if let Some(handle) = context.object_handle() {
             self.source_index_by_handle.insert(handle, index);
@@ -1684,6 +1756,7 @@ impl AudioSources for ModelHandle {
         host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
+        self.mark_model_dirty();
         self.session.clear_renderers();
         if let Some(source) = self.document.audio_sources.get(*state) {
             self.session
@@ -1753,7 +1826,11 @@ impl ModelHandle {
             .sources
             .lock_or_recover()
             .remove(&source.persistent_id);
-        if source.sample_access_enabled {
+        // 【为什么还要看 `deactivated`】宿主把源放进 undo 历史后，规范明确
+        // "更新属性/内容或读取其内容都不再有效"。停用期间保留 `sample_access_enabled`
+        // 原值（那是宿主对访问的许可，与 undo 状态正交），但**不读**；重新激活时
+        // 同一次 `refresh_source_pcm` 会把 PCM 读回来。
+        if source.sample_access_enabled && !source.deactivated {
             let result = usize::try_from(source.sample_count)
                 .ok()
                 .filter(|_| source.sample_rate == source.sample_rate.round())
@@ -1841,6 +1918,7 @@ impl AudioModifications for ModelHandle {
         source: &Self::AudioSource,
         properties: AudioModificationProperties,
     ) -> Result<Self::AudioModification, AraError> {
+        self.mark_model_dirty();
         let persistent_id = properties.persistent_id().to_string();
         // 这条边（modification → source）来自本地补丁的 trait 参数：上游把它丢了。
         let audio_source_persistent_id = self
@@ -1880,6 +1958,7 @@ impl AudioModifications for ModelHandle {
         audio_source: &Self::AudioSource,
         properties: AudioModificationProperties,
     ) -> Result<Self::AudioModification, AraError> {
+        self.mark_model_dirty();
         // 【为什么留痕】与 `create_audio_modification` 成对：两者都写一行，真机日志里
         // 才能直接读出"分割时宿主用了哪条原语"，而不是靠推断。
         log::info!(
@@ -1949,6 +2028,7 @@ impl AudioModifications for ModelHandle {
         // 【为什么必须实现】此前落 trait 默认空实现，于是宿主换掉 modification 的
         // persistentID 时我们毫无反应，而 region 正是按 persistentID 引用它的 ——
         // 下一次映射会把所有引用它的 region 判成 `UnknownModification` 整条跳过。
+        self.mark_model_dirty();
         let Some(modification) = self.document.audio_modifications.get_mut(*state) else {
             return Err(AraError::InvalidState(
                 "audio modification state is not in the document",
@@ -1993,6 +2073,7 @@ impl AudioModifications for ModelHandle {
     }
 
     fn destroy_audio_modification(&mut self, state: Self::AudioModification) {
+        self.mark_model_dirty();
         // 【为什么必须实现】此前落 trait 默认空实现，而 `document.audio_modifications`
         // 是 push-only 的：宿主销毁的 modification 永远留在表里，文档随编辑会话无界增长，
         // 且引用它的 region 仍能映射成功（拿着一个已不存在的 modification）。
@@ -2055,6 +2136,7 @@ impl PlaybackRegions for ModelHandle {
     ) -> Result<Self::PlaybackRegion, AraError> {
         // 这两条边（region → modification / region → sequence）来自本地补丁的 trait 参数。
         // 上游的委托层把它们**丢掉**了，而这正是建时间线缺的那两块拼图。
+        self.mark_model_dirty();
         let sequence_index = Some(*sequence);
         let modification_persistent_id = self
             .document
@@ -2159,6 +2241,7 @@ impl PlaybackRegions for ModelHandle {
         // 不挡真实编辑 —— 真实编辑的位移远大于 1e-6 的相对容差。
         let flags = properties.transformation_flags();
         log_unknown_transformation_flags(flags);
+        self.mark_model_dirty();
         let close = crate::host::geometry::host_value_compatible;
         let changed = self
             .document
@@ -2225,6 +2308,7 @@ impl PlaybackRegions for ModelHandle {
 
     /// 标记已销毁区间，编辑结束时只映射存活的区域。
     fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
+        self.mark_model_dirty();
         self.session.clear_renderers();
         if let Some(key) = self.region_keys.get(state) {
             let key = *key;
@@ -2535,10 +2619,7 @@ mod tests {
         let (mut model, _key) = model_with_one_region();
         // 编辑会话开始：宿主在这一刻交付 region，但 reader 还活着。
         model.editing = true;
-        model
-            .session
-            .editing_session
-            .store(true, Ordering::Release);
+        model.session.editing_session.store(true, Ordering::Release);
         // 模型侧等到收口才更新时间线。
         assert!(
             model.timeline.is_none(),
@@ -3484,6 +3565,68 @@ mod tests {
         );
     }
 
+    /// **源从 undo 历史恢复时必须重读 PCM。**
+    ///
+    /// 【为什么这是问题三的回归】旧实现只在 `deactivate == true` 时刷新；重新激活
+    /// （`false`）什么都不做，源永远停在"已停用 + 无 PCM"，界面显示"正在等待宿主
+    /// 完成音频分配"。后台/前台切换若走 undo 停用路径，就是这个形状。
+    #[test]
+    fn a_source_deactivated_for_undo_is_restored_on_reactivation() {
+        use ara2_bridge::plugin::{HostAudioSourceRef, HostClients};
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["B"]);
+        model.document.audio_sources[0].sample_count = 4;
+        let mut fixture = crate::test_host::HostFixture::new(vec![vec![0.1, 0.2, 0.3, 0.4]]);
+        let host = fixture.instance();
+        // SAFETY: fixture 与不透明源身份保留到所有 scope 被释放。
+        let clients = unsafe { HostClients::from_raw(&host, ApiGeneration::V2Final) }.unwrap();
+        let mut identity = 0_u8;
+        let source = unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap();
+        let mut slot = 0;
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::enable_audio_source_samples_access(
+                    &mut model, &mut slot, true, &scope,
+                )
+            })
+            .unwrap();
+        let id = model.document.audio_sources[0].persistent_id.clone();
+        assert!(
+            model
+                .session
+                .edit_sources
+                .lock_or_recover()
+                .contains_key(&id),
+            "前提：授权后必须已有 PCM"
+        );
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)
+            })
+            .unwrap();
+        assert!(
+            !model
+                .session
+                .edit_sources
+                .lock_or_recover()
+                .contains_key(&id),
+            "停用后必须撤销 PCM"
+        );
+        clients
+            .with_audio_source_management(source, |scope| {
+                AudioSources::deactivate_audio_source(&mut model, &mut slot, false, &scope)
+            })
+            .unwrap();
+        assert!(
+            model
+                .session
+                .edit_sources
+                .lock_or_recover()
+                .contains_key(&id),
+            "重新激活必须重读 PCM，而不是停在无源状态"
+        );
+    }
+
     /// 同一GUI快照经历真实授权开关可提交；实际源几何/内容通知仍使旧提交失效。
     #[test]
     fn same_snapshot_commit_survives_access_toggle_but_not_real_source_changes() {
@@ -4066,5 +4209,33 @@ mod tests {
         assert_eq!(model.region_keys[0], key(0));
         assert_eq!(model.region_keys[1], key(3));
         assert_eq!(model.region_keys[2], key(2));
+    }
+
+    /// **没有 `endEditing` 时，`notifyModelUpdates` 也必须能发布模型。**
+    ///
+    /// 【为什么这是问题二的回归】宿主在工程加载/后台恢复时可能直接重建图却不发
+    /// begin/end。`model_dirty` + `flush_pending_model_updates` 是那条通路的收口点；
+    /// 没有它，`document.timeline` 永远是 None，region→item 认领与参数恢复全部停住。
+    #[test]
+    fn a_model_update_without_end_editing_still_publishes_the_timeline() {
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["B"]);
+        let key = 5150_u64;
+        model.region_keys.push(key);
+        region_owners()
+            .lock_or_recover()
+            .register(key, model.document_id, 0)
+            .unwrap();
+        assert!(model.timeline.is_none(), "前提：还没有发布过时间线");
+        model.mark_model_dirty();
+        assert!(
+            DocumentLifecycle::flush_pending_model_updates(&mut model),
+            "dirty 模型必须被收口"
+        );
+        assert!(model.timeline.is_some(), "没有 endEditing 也必须发布时间线");
+        assert!(
+            !DocumentLifecycle::flush_pending_model_updates(&mut model),
+            "没有新变化时不得重复重算"
+        );
     }
 }

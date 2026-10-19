@@ -44,6 +44,18 @@ pub trait DocumentLifecycle {
 
     /// Observes document teardown after all child identities are invalidated.
     fn destroy_document(&mut self, _document: Self::Document) {}
+
+    /// Flushes model changes that arrived outside an editing session.
+    ///
+    /// 【为什么需要它】`end_editing` 是唯一保证“模型已稳定、可以发布”的时机，但
+    /// 真实宿主在工程加载/后台恢复时可能直接重建图而不发 begin/end。`notifyModelUpdates`
+    /// 是 SDK 保证的空闲入口；插件在这里把积压的变化收口一次。默认 no-op 保持既有
+    /// 插件零行为变化。
+    ///
+    /// 返回是否真的重算过（供限流日志与测试使用）。
+    fn flush_pending_model_updates(&mut self) -> bool {
+        false
+    }
 }
 
 /// Owns application state for musical contexts.
@@ -169,6 +181,19 @@ pub trait AudioSources {
         _state: Self::AudioSource,
         _host: &HostContentScope<'_, '_>,
     ) {
+    }
+
+    /// 重试一次"已授权但读取失败"的源。返回是否已经不再失败。
+    ///
+    /// 【为什么需要它】后台/前台恢复的瞬间，宿主可能还没准备好样本；一次读取
+    /// 失败会被记成终态，而之后没有任何回调保证会再次触发读取。`notifyModelUpdates`
+    /// 是空闲时的安全重试点；默认 no-op 保持既有插件行为不变。
+    fn retry_failed_source_read(
+        &mut self,
+        _state: &mut Self::AudioSource,
+        _host: &HostContentScope<'_, '_>,
+    ) -> bool {
+        false
     }
 }
 

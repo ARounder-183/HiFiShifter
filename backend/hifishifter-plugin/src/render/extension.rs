@@ -187,6 +187,13 @@ pub(crate) enum HostAudioState {
     /// 唯独参数/曲线停在上一次成功合并的版本。用户看到的不是"没声音"，而是"设置没回来"——
     /// 而此前这件事只写一行 `log::warn!`，界面上完全不可见。
     RestoreUnresolved,
+    /// 本实例根本没有可用的 ARA renderer / 文档绑定。
+    ///
+    /// 【为什么必须单列】"等待宿主分配 region"暗示"继续等会来"；这一态说明
+    /// bind 失败、文档控制器缺失或旧文档仍占着实例 —— 再等也不会来，用户唯一
+    /// 能做的是重载插件。此前界面沿用上一次的 `awaiting_regions`，把一个终态
+    /// 显示成无限期等待。
+    NotBound,
 }
 
 impl HostAudioState {
@@ -201,6 +208,7 @@ impl HostAudioState {
             HostAudioState::SourceReadFailed => "source_read_failed",
             HostAudioState::RegionRejected => "region_rejected",
             HostAudioState::RestoreUnresolved => "restore_unresolved",
+            HostAudioState::NotBound => "not_bound",
         }
     }
 }
@@ -436,6 +444,17 @@ pub(crate) struct BlockEvidence {
     pub had_previous: bool,
     /// 门控是否允许本块写出内容（仅实时流会因 `Resting` 为假）。
     pub allow_output: bool,
+    /// 起播/录音上升沿打开的钉住窗口仍开着。
+    ///
+    /// 【为什么门控需要它】窗口内的前段可能是静音；按 `allow_output == false`
+    /// 清掉它，内容出现时就是一次零→内容的阶跃（"咔"）。窗口本身就是"宿主刚
+    /// 开始播放"的证据，窗口开着时输出应当连续。
+    pub start_window: bool,
+    /// 本块与上一块逐块完全相同且非零（FL 停播重复投递的形状）。
+    ///
+    /// 【为什么门控需要它】`start_window` 放行静音时不能把 FL 的停播重复内容
+    /// 一起放行；这条是唯一能区分两者的证据。
+    pub repeated_nonzero: bool,
     /// 循环边界切分（1 或 2 段）。
     pub split: BlockSplit,
 }
@@ -495,6 +514,13 @@ struct StreamGeometry {
     /// 起播窗口可能先有几个静音块。累加"已送来的帧数"让位置从一开始就对齐，
     /// 而不必依赖 latch 在哪一块打开。
     pinned_frames: AtomicU64,
+    /// 本流在位置钉住期间**紧接在本块之前**的连续静音帧数。
+    ///
+    /// 【为什么需要】宿主可能先送 0.4 s 静音再送内容（VEGAS 起播窗口）。这段静音
+    /// 没有被写入捕获时，快照会从内容起点才开始覆盖，播放时就在 0.4 s 发生一次
+    /// 块内源切换（"咔"）。捕获侧只需要帧数，不需要 PCM —— 它可以在第一段开头
+    /// 合成等长静音，把段起点前移到播放起点。上限由 `PINNED_PLAYBACK_SEC` 约束。
+    trailing_silent_frames: AtomicU64,
     /// 用 `Synthesized` 记账过的块数（诊断）。
     synthesized_blocks: AtomicU64,
     /// 起播/录音上升沿之后剩余的"内容不变也推进"帧数。
@@ -555,6 +581,8 @@ const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 停止后的输出拖得太久。
 const SYNTHESIZED_STALL_BLOCKS: u32 = 16;
 
+/// 持久化状态从未尝试恢复。
+pub(crate) const RESTORE_NEVER: u8 = 0;
 /// 持久化状态已成功合并（`0` = 从未尝试）。
 pub(crate) const RESTORE_APPLIED: u8 = 1;
 /// 持久化状态已到达，但文档还没就绪 / 仍在重试（不是故障）。
@@ -657,6 +685,21 @@ struct StreamBlock {
     resync: bool,
     /// 允许当作"记账纠正"的最大帧差（钉住期间送来的帧数 + 本块）。
     resync_limit_frames: u64,
+    /// 本块之前连续静音的帧数（见 `StreamGeometry::trailing_silent_frames`）。
+    preceding_silent_frames: u64,
+    /// 本块是钉住区间结束后的第一块（记账差值应视为纠正，不是 seek）。
+    ///
+    /// 【为什么不能只看 `resync`】`resync` 由 `last_source` 是否曾为
+    /// Continuous/Music/Synthesized 决定；没有上升沿的钉住窗口里它一直是 Project。
+    /// 但"刚刚还在钉住区间里"本身就是记账纠正的证据 —— 宿主位置恢复后哪怕只差
+    /// 几帧，也不能另起一段。
+    pinned_recent: bool,
+    /// 起播/录音上升沿打开的窗口仍开着（门控据此放行窗口内静音）。
+    start_window: bool,
+    /// 本块与上一块逐块完全相同且非零（FL 停播重复投递的形状）。
+    repeated_nonzero: bool,
+    /// 本块是否全零（门控/前导静音判据）。
+    silent: bool,
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
@@ -737,6 +780,19 @@ impl Default for OutputDeclickState {
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
     binding: Mutex<Option<ExtensionBinding>>,
+    /// 已退役的扩展实例存储。
+    ///
+    /// 【为什么不能立刻 drop】宿主可能仍持有上一份文档的
+    /// `ARAPlugInExtensionInstance*`，并在同一次 bind 回调之后补发最后几次
+    /// `removePlaybackRegion`。立刻释放是 use-after-free；把它们留到组件销毁
+    /// （`ExtensionOwner` 析构）再统一释放，代价是"一个处理器一生绑定过的文档数"
+    /// 条额外存储，上界极小。
+    retired: Mutex<Vec<ExtensionBinding>>,
+    /// 最近一次 bind 的目标文档 id（仅诊断；`0` = 从未绑定）。
+    ///
+    /// 【为什么不用 `document` 反查】文档关闭后 `document` 被清空，而诊断需要
+    /// 回答"上一次绑的是谁、这次绑的是谁"。
+    bound_document_id: AtomicU64,
     document: Mutex<Option<std::sync::Weak<super::document::DocumentSession>>>,
     /// 本实例**曾经**成功绑定过 ARA 文档（一旦置真永不回落）。
     ///
@@ -782,6 +838,12 @@ pub(crate) struct ExtensionOwner {
     restore_status: std::sync::atomic::AtomicU8,
     /// 最近一次恢复失败的真因（有界；成功时清空）。
     restore_error: Mutex<Option<String>>,
+    /// 恢复载荷仍挂着、但还没到可合并时机的可读原因（成功/失败时清空）。
+    ///
+    /// 【为什么需要它】`host timeline unavailable` 这类"文档还没就绪"不是失败；
+    /// 把它报成 failed 会让用户在正常重开过程中看到一条误导性的终态。这里把
+    /// "在等什么"单独记下来，UI 报 `restore_pending`，诊断包能回答"卡在哪一步"。
+    restore_pending_reason: Mutex<Option<String>>,
     /// 成功合并过一次持久化状态的次数（诊断）。
     restore_applied_generation: std::sync::atomic::AtomicU64,
     /// **文档上是否有别的实例持有 `PLAYBACK_RENDERER` 角色**。
@@ -1067,6 +1129,13 @@ impl ExtensionOwner {
     /// （`companion processor is already bound`），`ara_entry::bind` 据此**幂等复用**
     /// 既有实例而不是返回 null —— 否则宿主认为插件未绑定、插件完全无法加载。这里只
     /// 暴露"复用"所需的只读指针，**不改绑定语义**。
+    ///
+    /// 【为什么还需要 `_for(document)`】只检查 `is_closed()` 会漏掉更常见的一种
+    /// 顺序：宿主先绑新文档、旧文档稍后才关闭。此时实例仍绑在旧文档上，
+    /// `existing_binding_raw()` 会把**旧文档的扩展实例指针**交回给新文档 ——
+    /// 宿主随后对新文档调用 `addPlaybackRegion`，却落在旧文档的 observer 上。
+    /// 调用方必须比对文档身份；`existing_binding_raw()` 只保留给"同文档重复绑定"
+    /// 的诊断/测试路径。
     pub(crate) fn existing_binding_raw(
         &self,
     ) -> Option<*const ara2_bridge::sys::ARAPlugInExtensionInstance> {
@@ -1077,6 +1146,28 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .map(ara2_bridge::plugin::ExtensionBinding::as_raw)
+    }
+    /// 仅当"未关闭、且确实绑定在 `document` 上"时复用既有扩展实例。
+    pub(crate) fn existing_binding_raw_for(
+        &self,
+        document: super::ownership::DocumentId,
+    ) -> Option<*const ara2_bridge::sys::ARAPlugInExtensionInstance> {
+        if self.is_closed()
+            || self.bound_document_id.load(Ordering::Acquire) != document
+            || self.bound_document_id.load(Ordering::Acquire) == 0
+        {
+            return None;
+        }
+        self.existing_binding_raw()
+    }
+    /// 当前绑定的**活**文档 id；已关闭/从未绑定为 `None`。
+    pub(crate) fn bound_document_id(&self) -> Option<super::ownership::DocumentId> {
+        let id = self.bound_document_id.load(Ordering::Acquire);
+        (id != 0).then_some(id)
+    }
+    /// 是否还持有一份扩展绑定（不区分它是哪份文档）。
+    pub(crate) fn has_binding(&self) -> bool {
+        self.binding.lock_or_recover().is_some()
     }
     /// 本实例**是否绑定过** ARA 文档（历史事实，不随文档关闭回落）。
     ///
@@ -1099,12 +1190,24 @@ impl ExtensionOwner {
     pub(crate) fn note_restore_pending(&self) {
         // 已经从"失败"进入"重试中"时保留错误原文，直到真正成功才清 ——
         // 用户看到的应当是"仍在尝试（上次失败原因：…）"。
-        self.restore_status.store(RESTORE_PENDING, Ordering::Release);
+        self.restore_status
+            .store(RESTORE_PENDING, Ordering::Release);
+    }
+    /// 记录"仍在等一个明确的时机，不是失败"。
+    ///
+    /// 【为什么与 `note_restore_pending` 分开】pending 只说明"有载荷"；这一条
+    /// 回答"在等什么"（时间线未发布 / 轨道为空 / fade 元数据未就绪）。
+    pub(crate) fn note_restore_waiting(&self, reason: &str) {
+        self.restore_status
+            .store(RESTORE_PENDING, Ordering::Release);
+        *self.restore_pending_reason.lock_or_recover() = Some(reason.to_owned());
     }
     /// 记录"持久化状态已成功合并"。
     fn note_restore_applied(&self) {
-        self.restore_status.store(RESTORE_APPLIED, Ordering::Release);
+        self.restore_status
+            .store(RESTORE_APPLIED, Ordering::Release);
         *self.restore_error.lock_or_recover() = None;
+        *self.restore_pending_reason.lock_or_recover() = None;
         self.restore_applied_generation
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -1112,6 +1215,7 @@ impl ExtensionOwner {
     pub(crate) fn note_restore_failed(&self, error: &str) {
         self.restore_status.store(RESTORE_FAILED, Ordering::Release);
         *self.restore_error.lock_or_recover() = Some(error.to_owned());
+        *self.restore_pending_reason.lock_or_recover() = None;
     }
     /// 持久化状态的恢复读数：`(status, error, applied_generation)`。
     pub(crate) fn restore_report(&self) -> (u8, Option<String>, u64) {
@@ -1120,6 +1224,26 @@ impl ExtensionOwner {
             self.restore_error.lock_or_recover().clone(),
             self.restore_applied_generation.load(Ordering::Relaxed),
         )
+    }
+    /// 恢复状态的语言无关名（前端按它查 catalog）。
+    pub(crate) fn restore_status_name(&self) -> &'static str {
+        match self.restore_status.load(Ordering::Acquire) {
+            RESTORE_APPLIED => "applied",
+            RESTORE_PENDING => "pending",
+            RESTORE_FAILED => "failed",
+            _ => "never",
+        }
+    }
+    /// 恢复仍挂着时的可读原因（成功/失败/无载荷时为 `None`）。
+    pub(crate) fn restore_pending_reason(&self) -> Option<String> {
+        self.restore_pending_reason.lock_or_recover().clone()
+    }
+    /// 清空本实例的恢复读数（重绑到新文档时用）。
+    fn reset_restore_report(&self) {
+        self.restore_status.store(RESTORE_NEVER, Ordering::Release);
+        *self.restore_error.lock_or_recover() = None;
+        *self.restore_pending_reason.lock_or_recover() = None;
+        self.restore_applied_generation.store(0, Ordering::Relaxed);
     }
     /// 状态是否落在"失败"档（供 `HostAudioState` 分类）。
     pub(crate) fn restore_failed(&self) -> bool {
@@ -1364,8 +1488,34 @@ impl ExtensionOwner {
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
     pub(crate) unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
+        // SAFETY: 调用方保证 context 是宿主初始化期间存活的 FUnknown。
+        unsafe { self.bind_host_adapter_inner(context, false) }
+    }
+
+    /// 在 `setActive` 等"宿主明确进入新阶段"的入口强制重建宿主适配器。
+    ///
+    /// 【为什么需要强制变体】`bind_host_adapter` 在文档已绑定时要求
+    /// `host_query_stamp()` 成功；工程刚加载、模型还没发布时它必然失败，于是
+    /// 适配器不会被创建。而宿主可能在另一个线程上调用 `setActive`，
+    /// 旧适配器的线程亲和性不再成立。强制变体只要求组件未关闭：宿主接口属于
+    /// 组件，不属于文档，可以在任何阶段重建。
+    ///
+    /// # Safety
+    /// `context` 必须是本组件持有的、在组件生命周期内有效的宿主接口。
+    pub(crate) unsafe fn rebind_host_adapter(&self, context: *mut std::ffi::c_void) {
+        // SAFETY: 同 `bind_host_adapter`。
+        unsafe { self.bind_host_adapter_inner(context, true) }
+    }
+
+    /// 当前宿主适配器是否与调用线程不匹配（`false` = 没有适配器或线程一致）。
+    pub(crate) fn host_adapter_thread_mismatch(&self) -> bool {
+        self.native_host()
+            .is_some_and(|host| host.bound_thread() != std::thread::current().id())
+    }
+
+    unsafe fn bind_host_adapter_inner(&self, context: *mut std::ffi::c_void, force: bool) {
         let bound = self.document.lock_or_recover().is_some();
-        let stamp = if bound {
+        let stamp = if bound && !force {
             match self.host_query_stamp() {
                 Ok(stamp) => Some(stamp),
                 Err(_) => return,
@@ -1377,7 +1527,10 @@ impl ExtensionOwner {
             !self.is_closed()
                 && match &stamp {
                     Some(stamp) => self.host_query_authorized(stamp),
-                    None => self.document.lock_or_recover().is_none(),
+                    // 非强制路径保持既有语义：初始化期间若文档已经出现，说明
+                    // 宿主正在绑定，此时不抢建适配器；强制路径（setActive）则
+                    // 只要求组件未关闭。
+                    None => force || self.document.lock_or_recover().is_none(),
                 }
         };
         let host = unsafe { crate::host::NativeHost::from_context(context, authorized) }
@@ -1386,8 +1539,9 @@ impl ExtensionOwner {
             return;
         }
         crate::log_line(&format!(
-            "native host extension available={}",
-            host.is_some()
+            "native host extension available={} (force={force}, thread={:?})",
+            host.is_some(),
+            std::thread::current().id()
         ));
         let old = std::mem::replace(&mut *self.host.lock_or_recover(), host);
         drop(old);
@@ -1734,6 +1888,25 @@ impl ExtensionOwner {
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
     pub(crate) fn refresh_host_transport(&self) {
         self.refresh_host_transport_inner(false);
+    }
+
+    /// 前台恢复/重新激活时主动重同步一次。
+    ///
+    /// 【为什么不能等 UI 定时器】后台期间定时器可能停摆；回来后第一次 tick 仍会
+    /// 命中"令牌未变 + 1 s 内采样过"的早退，`ui_tracks` 与 `region_items` 可能是
+    /// 暂停前的快照。这里清掉采样时刻，强制一次完整枚举，并让每个 renderer 重排
+    /// 快照 —— 用户切回前台后不必再等下一次编辑才恢复。
+    pub(crate) fn resume_resync(&self) {
+        if let Ok(document) = self.editor_document() {
+            *document.ui_inventory_sampled_at.lock_or_recover() = None;
+        }
+        self.refresh_host_geometry();
+        self.refresh_ui_inventory();
+        if let Ok(document) = self.editor_document() {
+            for owner in document.renderer_owners() {
+                owner.prepare();
+            }
+        }
     }
 
     /// UI 定时器路径：时钟每次跟，几何/清单按 [`ExtensionOwner::enumeration_interval`] 节流。
@@ -3073,7 +3246,8 @@ impl ExtensionOwner {
         //
         // 【为什么短块仍放在数组开头】`fade_from[index]` 按 `index` 直接取尾巴：
         // 块长不足 64 时，最近的真实样本必须落在索引 0 起的位置，后面才是零。
-        // 把它们右移成"最近 64 帧"会改变索引语义，让淡化读到一段旧零。
+        // 把它们右移成"最近 64 帧"会改变索引语义，让淡化读到一段旧零（门控淡出
+        // 的首帧会从 0 开始，听感是"先静音再淡出"）。
         let start = frames.saturating_sub(OUTPUT_DECLICK_FRAMES);
         let written = frames - start;
         for channel in 0..channels {
@@ -3154,7 +3328,15 @@ impl ExtensionOwner {
             }
         }
         state.fade_active.store(false, Ordering::Release);
-        state.primed_kind.store(0, Ordering::Release);
+        // 【为什么不是 0】`primed_kind == 0` 的语义是"这个流从未输出过任何东西"，
+        // 下一块会被当成真首块**原样输出** —— 而本块刚刚输出了一整段淡出到零的
+        // 静音。从零直接跳到完整内容就是用户听到的"咔"。借用 PassThrough 的语义：
+        // 它让 `apply_output_declick` 把 `fade_from` 视为全零，于是下一块做一次
+        // 线性淡入。
+        state.primed_kind.store(
+            u32::from(TransferOutput::PassThrough.code()),
+            Ordering::Release,
+        );
         state.last_token.store(0, Ordering::Release);
     }
 
@@ -3300,6 +3482,11 @@ impl ExtensionOwner {
                 activity_moving: false,
                 resync: false,
                 resync_limit_frames: 0,
+                preceding_silent_frames: geometry.trailing_silent_frames.load(Ordering::Acquire),
+                pinned_recent: false,
+                start_window: geometry.pinned_window_open.load(Ordering::Acquire),
+                repeated_nonzero: false,
+                silent: geometry.last_block_silent.load(Ordering::Acquire),
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
@@ -3388,6 +3575,23 @@ impl ExtensionOwner {
         // 【为什么先记下来】`pinned_frames` 在位置恢复前进时会被清零；resync 的
         // 允许误差必须用**清零前**的钉住帧数来算。
         let prior_pinned_frames = geometry.pinned_frames.load(Ordering::Acquire);
+        let silent = geometry.last_block_silent.load(Ordering::Acquire);
+        // 【为什么先读旧值再更新】`preceding_silent_frames` 的语义是"本块之前连续
+        // 静音的帧数"。本块是内容块时必须返回之前累积的那一段，不能先把它清零。
+        let preceding_silent_frames = geometry.trailing_silent_frames.load(Ordering::Acquire);
+        let pinned_since_last = had && raw_start == last_raw && !time.cycle_active;
+        let max_pre_roll = (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64;
+        if silent && pinned_since_last && !(playing_rising || recording_rising) {
+            geometry.trailing_silent_frames.store(
+                preceding_silent_frames
+                    .saturating_add(frames as u64)
+                    .min(max_pre_roll),
+                Ordering::Release,
+            );
+        } else {
+            geometry.trailing_silent_frames.store(0, Ordering::Release);
+        }
+        let pinned_recent = had && raw_start != last_raw && prior_pinned_frames > 0;
         // 【为什么要一个"区间开/关"而不是逐块判据】VEGAS 的钉住窗口约 0.66 s，
         // 前 0.4 s 几乎一定是静音或持续音。逐块判据只保护**静音块**；内容一变化，
         // `was_stationary` 清零与 `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，
@@ -3459,7 +3663,25 @@ impl ExtensionOwner {
                     //
                     // 【为什么窗口内不清】窗口表示"宿主刚刚开始播放"；即使前段是静音或
                     // 持续音，那段时间也是真实播放时间，不能从位置里扣掉。
-                    if !window_open && geometry.was_stationary.load(Ordering::Acquire) {
+                    //
+                    // 【为什么钉住时间不超过一个起播窗口时也不清】VEGAS 在没有
+                    // `kPlaying` 上升沿时，前 0.4 s 静音 + 0.26 s 内容看起来和
+                    // "停播后内容变化"一模一样。把这段静音扣掉会把内容提前 0.4 s，
+                    // 随后宿主位置恢复时再补一次 Gap。钉住时间超过 `PINNED_PLAYBACK_SEC`
+                    // 才按停播处理 —— FL 的停播回归仍然成立，且误差被钉在上限内。
+                    //
+                    // 【为什么因 `repeated_nonzero` 收口的窗口不在这里塌回】窗口已经
+                    // 把"逐块完全相同的非零内容"判成停播重复；但位置是在这段时间里
+                    // 真实推进过的（宿主按块长送来了音频）。塌回起点会让内容与
+                    // `expected_next` 重叠。保留 `pinned_before`，让 T2 的
+                    // `pinned_recent` 把跳过的帧当记账纠正桥接掉。
+                    let collapse_after_stall = !window_open
+                        && geometry.pinned_window_closed_by.load(Ordering::Acquire)
+                            != PINNED_WINDOW_REPEATED_CONTENT;
+                    if collapse_after_stall
+                        && geometry.was_stationary.load(Ordering::Acquire)
+                        && pinned_before > max_pre_roll
+                    {
                         pinned_before = 0;
                     }
                     synthesizing = true;
@@ -3635,6 +3857,11 @@ impl ExtensionOwner {
             activity_moving,
             resync,
             resync_limit_frames: prior_pinned_frames.saturating_add(frames as u64),
+            preceding_silent_frames,
+            pinned_recent,
+            start_window: geometry.pinned_window_open.load(Ordering::Acquire),
+            repeated_nonzero,
+            silent,
         }
     }
 
@@ -3691,7 +3918,13 @@ impl ExtensionOwner {
                 // prefetch 的输出稍后才被播放；重复请求可能是参数变化后的重算，
                 // 抑制会留下旧结果。传输状态与重复判定都不适用于它。
                 ProcessStream::Prefetch => true,
-                ProcessStream::Realtime => evidence.allow_output,
+                ProcessStream::Realtime => {
+                    // 【为什么起播窗口要放行】窗口内的前段可能是静音；按
+                    // `allow_output == false` 清掉它，内容出现时就是一次零→内容的
+                    // 阶跃（"咔"）。窗口本身是"宿主刚开始播放"的证据，输出应当
+                    // 连续。`repeated_nonzero` 仍然阻止 FL 停播继续出声。
+                    evidence.allow_output || (evidence.start_window && !evidence.repeated_nonzero)
+                }
             },
             // 没有上下文证据时退回宿主播放位（旧测试/退化路径）。
             None => playing,
@@ -3710,7 +3943,10 @@ impl ExtensionOwner {
         }
         let revision = self.transfer.revision();
         self.transfer_ready_revision.load(Ordering::Acquire) == revision
-            && self.snapshots.iter().any(|publisher| publisher.is_ready())
+            // 【为什么不能 any()】实际读取的是
+            // `snapshots[snapshot_index_for_rate(...)]`；只就绪另一份发布器时
+            // `any()` 会误判"就绪"，随后在空发布器上逐样本写零 ⇒ 从有声阶跃到零。
+            && self.processed_snapshot_ready()
     }
 
     /// 已发布的**原始磁带**是否对应当前活动 take。
@@ -3845,6 +4081,13 @@ impl ExtensionOwner {
                     advancing: stream_block.activity_moving,
                     resync: stream_block.resync,
                     resync_limit_frames: stream_block.resync_limit_frames,
+                    // 循环切分的第二段不是起播起点：前导静音/钉住纠正只属于第一段。
+                    preceding_silent_frames: if index == 0 {
+                        stream_block.preceding_silent_frames
+                    } else {
+                        0
+                    },
+                    pinned_recent: index == 0 && stream_block.pinned_recent,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
                     // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
                     accounting_start: part.position,
@@ -3884,6 +4127,8 @@ impl ExtensionOwner {
             phase: stream_block.phase,
             had_previous: stream_block.had_previous,
             allow_output,
+            start_window: stream_block.start_window,
+            repeated_nonzero: stream_block.repeated_nonzero,
             split,
         })
     }
@@ -4352,8 +4597,24 @@ impl ExtensionOwner {
         }
         target.ok_or_else(|| "clip has no unique directly bound host take".into())
     }
-    /// 组件/文档终止时停止实例worker；不要在音频process调用。
+    /// 组件终止时停止实例 worker 并释放宿主适配器；不要在音频 process 调用。
+    ///
+    /// 【为什么与文档关闭分开】`stop_editor()` 同时服务两种语义：文档结束
+    /// （组件还活着，下一份文档还会来）与组件结束（宿主适配器确实该释放）。
+    /// 合并在一起会在一份文档关闭时把 REAPER 原生扩展适配器永久丢掉 ——
+    /// 宿主复用处理器实例重开工程时，重绑后 `native_host()` 永远是 `None`，
+    /// 于是不枚举 item、不填 `region_items`、界面停在"等待宿主音频"。
+    /// 文档关闭必须走 [`Self::stop_editor_for_document`]。
     pub(crate) fn stop_editor(&self) {
+        self.stop_editor_inner(false);
+    }
+
+    /// 文档结束：停止 worker、清快照与 per-document 缓存，**保留**宿主适配器。
+    pub(crate) fn stop_editor_for_document(&self) {
+        self.stop_editor_inner(true);
+    }
+
+    fn stop_editor_inner(&self, keep_host: bool) {
         let document = {
             self.document
                 .lock_or_recover()
@@ -4374,15 +4635,52 @@ impl ExtensionOwner {
             self.closed.store(true, Ordering::Release);
             self.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
-        let host = self.host.lock_or_recover().take();
-        drop(host);
+        if !keep_host {
+            let host = self.host.lock_or_recover().take();
+            drop(host);
+        }
         self.host_geometry.lock_or_recover().take();
+        *self.host_audio.lock_or_recover() = HostAudioStatus::default();
+        self.binding_report.lock_or_recover().take();
+        *self.last_enumeration.lock_or_recover() = None;
         self.cancel_preparation();
         // 【为什么 take 掉而不是留在槽位里】`close()` 是终结性的；留下一个
         // `closed == true` 的队列表只会让下一次重绑再次踩到同一个死队列。
         // 重绑时 `ensure_preparation()` 会建一条新的。
         if let Some(worker) = self.preparation.lock_or_recover().take() {
             worker.close();
+        }
+    }
+
+    /// 把本实例的**每份文档**缓存清到"尚未绑定"状态（宿主切换文档时用）。
+    ///
+    /// 【为什么不能只清 `assignments / sequences / document`】这些字段的名字都带
+    /// "当前文档"的语义，但它们的读者分布在音频线程、UI 定时器与诊断包里；
+    /// 留下旧文档的恢复状态、几何缓存、宿主音频读数或快照，会让新文档的第一帧
+    /// 输出/第一份 UI 载荷读到上一份工程的结论。宿主适配器（`host`）**不在**
+    /// 这里清 —— 它属于组件，不属于文档。
+    fn prepare_rebind_from_previous_document(&self) {
+        self.snapshots.iter().for_each(|snapshot| snapshot.clear());
+        self.raw_tape.clear();
+        *self.prepared.lock_or_recover() = None;
+        self.reset_restore_report();
+        self.binding_report.lock_or_recover().take();
+        *self.host_audio.lock_or_recover() = HostAudioStatus::default();
+        *self.last_enumeration.lock_or_recover() = None;
+        *self.last_failed_revision.lock_or_recover() = None;
+        self.enumeration_backoff.store(0, Ordering::Release);
+        self.host_item_muted.store(false, Ordering::Release);
+        self.playback_covered.store(false, Ordering::Release);
+        self.rt_last_emitted_valid.store(false, Ordering::Release);
+        self.rt_last_emitted_frames.store(0, Ordering::Release);
+        self.trace_wanted.store(false, Ordering::Release);
+        self.trace_logged.store(false, Ordering::Release);
+        self.render_wanted.store(false, Ordering::Release);
+        // 【为什么不在这里清 `pending_restore`】组件 `setState` 可能先于 ARA bind
+        // 到达（宿主在 setActive 之前恢复组件状态）。那份载荷属于**即将到来的**
+        // 新文档，清掉等于把用户参数丢掉。旧文档遗留的载荷由下一次成功合并覆盖。
+        if self.pending_restore.lock_or_recover().is_some() {
+            self.note_restore_waiting("waiting for the new document graph");
         }
     }
     /// 模型撤销时立即取消待准备作业；保持worker可供后续重新授权使用。
@@ -4572,6 +4870,10 @@ impl ExtensionOwner {
         // 出去时没有"才说明这一次真的把状态合进去了。没有这个前提，一个从未收到
         // 载荷的实例也会被记成"恢复成功"。
         let had_pending = self.pending_restore.lock_or_recover().is_some();
+        if had_pending {
+            // 本轮重新判定"在等什么"；inner 会为已知原因写回。
+            *self.restore_pending_reason.lock_or_recover() = None;
+        }
         let result = self.merge_pending_restore_inner(document);
         match &result {
             Ok(()) => {
@@ -4579,6 +4881,10 @@ impl ExtensionOwner {
                     // 仍有载荷挂着（文档未就绪 / 空轨 / 缺 fade 元数据）：不是失败，
                     // 只是还不能收口。
                     self.note_restore_pending();
+                    if self.restore_pending_reason.lock_or_recover().is_none() {
+                        *self.restore_pending_reason.lock_or_recover() =
+                            Some("waiting-for-host-model".to_owned());
+                    }
                 } else if had_pending {
                     self.note_restore_applied();
                 }
@@ -4597,6 +4903,14 @@ impl ExtensionOwner {
             return Ok(());
         };
         if !document.ready.load(Ordering::Acquire) {
+            self.note_restore_waiting("document-not-ready");
+            return Ok(());
+        }
+        // 【为什么先看 timeline】`assigned_timeline` 在时间线还没发布时会返回
+        // "host timeline unavailable"；把它当失败会让正常重开过程显示
+        // `RestoreUnresolved`。这里把它归为"还在等宿主收口"，并留下可读原因。
+        if document.timeline.lock_or_recover().is_none() {
+            self.note_restore_waiting("host-timeline-not-ready");
             return Ok(());
         }
         let host = self.assigned_timeline(document)?;
@@ -4610,6 +4924,8 @@ impl ExtensionOwner {
                     .checked_add(1)
                     .ok_or("edit revision exhausted")?;
                 *pending = None;
+            } else {
+                self.note_restore_waiting("host-timeline-empty");
             }
             return Ok(());
         }
@@ -4669,7 +4985,11 @@ impl ExtensionOwner {
         merged.atlas.gaps.extend(restored.atlas.gaps);
         let items = document.fade_items_locked(&clip_ids);
         if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
-            return Err("fade ownership metadata pending for restore".into());
+            // 【为什么是 pending 而不是失败】fade 归属元数据要等宿主几何刷新后
+            // 才能算出来；这是一次可重试的暂缓，不是身份冲突。保留载荷，下一次
+            // `prepare_renderers` / 分配变化会再试。
+            self.note_restore_waiting("fade-metadata-pending");
+            return Ok(());
         }
         merged.fades.retain(|item, _| !items.contains(item));
         merged.fades.extend(restored.fades);
@@ -5617,34 +5937,55 @@ impl ExtensionOwner {
     ) -> Result<*const ara2_bridge::sys::ARAPlugInExtensionInstance, AraError> {
         let mut current = self.binding.lock().unwrap_or_else(|p| p.into_inner());
         if current.is_some() {
-            // 已绑定再绑定是**不变量违反**（一个实例只绑一个文档）。真实宿主的重复
-            // `bindDocumentToExtension` 会在更早的 companion 层被拒（"already bound"），
-            // 由 `ara_entry::bind` 幂等复用既有实例处理（见那里的说明）。
+            // 已绑定再绑定：只有"同一份仍然活着的文档"才是重复绑定。
             //
-            // 【为什么文档关闭后允许重绑】宿主重开工程时对同一个 FX 槽**复用同一个
-            // 实例**（REAPER 实测如此），而 `document_closed()` 已经把上一份文档的
-            // 记号线全部撤掉。若这里一律拒绝，重开工程时 `ara_entry::bind` 只能把
-            // null 交给宿主 —— 插件加载了却永远不绑，界面停在"等待宿主音频"，
-            // 而删掉插件再添加就好（那会建一个全新实例）。允许重绑让"重开工程"与
-            // "删了再加"走同一条正确路径。
+            // 【为什么不变量从"一个实例只绑一个文档"改成"同一时刻只服务一份活文档"】
+            // 宿主顺序不可控：REAPER 可能在旧文档还没关闭时就为新工程发出 bind。
+            // 此时 `closed` 仍是 false，若一律拒绝，新文档永远拿不到 renderer
+            // （用户报的"重开只显示等待宿主音频，删掉插件再加就好"）。
             //
             // 【为什么不清 `bound_once`】它是历史事实："这个实例绑定过 ARA"。清了它
             // 会让 "document closed" 静默退化成 `ARA_NOT_BOUND`，那是在陈述一件
             // 没发生过的事。
-            if !self.closed.load(Ordering::Acquire) {
+            let same_live_document = self.bound_document_id.load(Ordering::Acquire) == document.id
+                && !self.closed.load(Ordering::Acquire);
+            if same_live_document {
                 return Err(AraError::InvalidState("extension already bound"));
             }
-            log::info!(
-                "[ara] writer {} rebinds to document {} after its previous document closed",
+            let previous_document = self
+                .document
+                .lock_or_recover()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+            let previous_id = previous_document.as_ref().map(|document| document.id);
+            if let Some(previous) = previous_document {
+                // 旧文档可能仍活着：只摘掉本实例的租约，不关闭整份文档。
+                previous.detach_owner(self);
+                previous.report_playback_ownership();
+            }
+            log::warn!(
+                "[ara] writer {} moves from document {:?} to {} (previous document {}); \
+                 retiring the old extension binding",
                 self.writer_id(),
-                document.id
+                previous_id,
+                document.id,
+                if self.closed.load(Ordering::Acquire) {
+                    "already closed"
+                } else {
+                    "still alive"
+                }
             );
-            self.rebind_generation.fetch_add(1, Ordering::Relaxed);
-            self.closed.store(false, Ordering::Release);
+            self.stop_editor_for_document();
+            // 旧扩展实例不能立刻 drop：宿主可能还有最后一次合法回调。
+            if let Some(old) = current.take() {
+                self.retired.lock_or_recover().push(old);
+            }
+            self.prepare_rebind_from_previous_document();
             self.assignments.lock_or_recover().clear();
             self.sequences.lock_or_recover().clear();
             self.document.lock_or_recover().take();
-            *current = None;
+            self.rebind_generation.fetch_add(1, Ordering::Relaxed);
+            self.closed.store(false, Ordering::Release);
         }
         let owner = Arc::downgrade(self);
         let document_id = document.id;
@@ -5779,6 +6120,7 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         *current = Some(owned.0);
+        self.bound_document_id.store(document.id, Ordering::Release);
         // 绑定成功即置"曾经绑定过"。此后 `editor_document()` 的措辞走 DOCUMENT_CLOSED
         // 而不是 ARA_NOT_BOUND —— 两者对用户的含义完全不同（见该访问器的说明）。
         self.bound_once.store(true, Ordering::Release);
@@ -5804,7 +6146,10 @@ impl ExtensionOwner {
 
     /// 文档侧已撤销 lease；保留 binding 以供宿主最后几次合法移除/释放回调访问。
     pub fn document_closed(&self) {
-        self.stop_editor();
+        // 【为什么不是 `stop_editor`】文档结束不等于组件结束：宿主复用同一个
+        // 处理器重开工程时，原生扩展适配器必须保留，否则重绑后永远枚举不到
+        // 宿主 item（见 `stop_editor_for_document` 的说明）。
+        self.stop_editor_for_document();
         // 【为什么这里要重算覆盖】本实例退出后，"文档上还有没有 playback 实例"可能翻转
         // （播放实例先死、留下编辑实例）。`stop_editor` 已把 `closed` 置真，所以
         // `renderer_owners()` 不再包含自己 —— 重算后留下的那个实例会接管渲染，
@@ -6461,6 +6806,8 @@ impl ExtensionOwner {
                 // T1 让窗口内记账连续后这个数应当长期为 0；只要它 > 0，说明暂存/
                 // 提交链路上仍有漏，但 T2 保证了时间线不断。
                 "bridged_window_blocks": capture.bridged_window_blocks,
+                // 起播前导静音：捕获起点晚于播放起点时，这一段被合成进段首。
+                "pre_roll_frames": capture.pre_roll_frames,
             })
         });
         let stream = |index: usize| {

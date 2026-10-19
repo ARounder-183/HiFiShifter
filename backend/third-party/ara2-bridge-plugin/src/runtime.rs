@@ -117,10 +117,13 @@ pub struct PluginRuntime<P: PluginModel> {
     // 本地补丁（HiFiShifter）：这几个关联类型现在在多个 trait 里都声明了
     // （为了让 `AudioModifications` / `PlaybackRegions` 的方法能收到父子边），
     // 所以要写全限定路径消歧 —— 它们指向的始终是定义该类型的那一个 trait。
-    sequences: Registry<RegionSequenceKind, RegionSequenceNode<<P as RegionSequences>::RegionSequence>>,
+    sequences:
+        Registry<RegionSequenceKind, RegionSequenceNode<<P as RegionSequences>::RegionSequence>>,
     sources: Registry<AudioSourceKind, Node<<P as AudioSources>::AudioSource>>,
-    modifications:
-        Registry<AudioModificationKind, AudioModificationNode<<P as AudioModifications>::AudioModification>>,
+    modifications: Registry<
+        AudioModificationKind,
+        AudioModificationNode<<P as AudioModifications>::AudioModification>,
+    >,
     regions: Registry<PlaybackRegionKind, PlaybackRegionNode<P::PlaybackRegion>>,
     live_contexts: usize,
     live_sequences: usize,
@@ -194,6 +197,11 @@ impl<P: PluginModel> PluginRuntime<P> {
 
     pub(crate) const fn is_editing(&self) -> bool {
         self.editing
+    }
+
+    /// 让委托方把 `end_editing` 之外积压的模型变化收口一次。
+    pub(crate) fn flush_pending_model_updates(&mut self) -> bool {
+        self.delegate.flush_pending_model_updates()
     }
 
     /// Begins an exclusive graph mutation session.
@@ -354,6 +362,19 @@ impl<P: PluginModel> PluginRuntime<P> {
         let state = self.sources.get_mut(source)?.live_value();
         self.delegate
             .enable_audio_source_samples_access(state, enable, host)
+    }
+
+    /// 重试一次失败的源读取（见 `AudioSources::retry_failed_source_read`）。
+    pub(crate) fn retry_failed_source_read(
+        &mut self,
+        source: Handle<AudioSourceKind>,
+        host: &HostContentScope<'_, '_>,
+    ) -> bool {
+        let Ok(node) = self.sources.get_mut(source) else {
+            return false;
+        };
+        let state = node.live_value();
+        self.delegate.retry_failed_source_read(state, host)
     }
 
     pub(crate) fn validate_audio_source_destruction(
@@ -783,7 +804,12 @@ impl<P: PluginModel> EditSession<'_, P> {
                 .value
                 .as_ref()
                 .expect("committed region sequence contains application state");
-            delegate.create_playback_region(&context, modification_value, sequence_value, properties)
+            delegate.create_playback_region(
+                &context,
+                modification_value,
+                sequence_value,
+                properties,
+            )
         };
         match result {
             Ok(value) => {

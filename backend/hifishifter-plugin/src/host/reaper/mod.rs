@@ -154,6 +154,14 @@ pub(crate) struct NativeHost {
 }
 
 impl NativeHost {
+    /// 适配器绑定的线程（宿主查询必须回到这个线程）。
+    ///
+    /// 【为什么需要公开】`component_set_active` 要在另一个线程上判断"是否该用
+    /// 同一个宿主接口重建适配器"；没有这个读数就只能猜。
+    pub(crate) fn bound_thread(&self) -> std::thread::ThreadId {
+        self.thread
+    }
+
     /// 宿主用哪一套淡化轴（`Some(true)` = 7.81+ 的连续 curvature/S 两轴）。
     ///
     /// 【为什么需要公开】"能不能编辑淡变形状"取决于它：旧轴写 `C_FADE*SHAPE`，
