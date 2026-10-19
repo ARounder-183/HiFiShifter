@@ -2154,12 +2154,15 @@ export const koKR = {
     ara_host_audio_source_failed_title: "호스트 오디오를 읽을 수 없습니다",
     ara_host_audio_source_failed_body:
         "호스트가 샘플 접근을 허용했지만 오디오를 읽을 수 없습니다(미디어 형식·샘플레이트·범위가 지원되지 않을 수 있습니다). 이 클립은 무음으로 남습니다. 미디어를 확인하거나 진단 로그를 내보내 보고하세요.",
+    ara_host_audio_not_bound_title: "플러그인이 ARA 문서에 바인딩되지 않았습니다",
+    ara_host_audio_not_bound_body:
+        "이 인스턴스에는 사용 가능한 ARA 렌더러가 없습니다. 플러그인을 다시 로드(또는 제거 후 다시 삽입)하면 복구됩니다. 그래도 해결되지 않으면 진단 패키지를 내보내세요.",
     ara_host_audio_region_rejected_title: "플러그인이 호스트의 오디오 영역을 거부했습니다",
     ara_host_audio_region_rejected_body:
         "호스트가 이 자료를 전달했지만 플러그인이 해당 영역 생성을 거부했습니다. 기다려도 해결되지 않습니다. 이 트랙에서 플러그인을 제거했다가 다시 추가하세요.",
     ara_host_audio_restore_title: "플러그인이 저장된 파라미터를 다시 읽지 못했습니다",
     ara_host_audio_restore_body:
-        "이 프로젝트와 함께 저장된 파라미터와 곡선을 병합하지 못해 기본값이 표시됩니다. 오디오는 정상입니다. 프로젝트를 다시 열어 재시도하고, 계속되면 호스트에서 직접 복원하세요. 이유: ",
+        "이 프로젝트와 함께 저장된 파라미터와 곡선을 병합하지 못해 기본값이 표시됩니다. 오디오는 정상입니다. 프로젝트를 다시 열어 재시도하고, 계속되면 호스트에서 직접 복원하세요.",
     ara_clip_syncing_host_audio: "호스트의 오디오 할당 완료를 기다리는 중",
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:

@@ -2110,6 +2110,9 @@ export const zhTW = {
     ara_host_audio_source_failed_title: "讀取宿主音訊失敗",
     ara_host_audio_source_failed_body:
         "宿主已授權樣本存取，但外掛讀不出音訊（可能是素材格式、取樣率或範圍不受支援）。這些片段不會出聲；請檢查素材，或匯出診斷紀錄回報。",
+    ara_host_audio_not_bound_title: "外掛沒有綁定到 ARA 文件",
+    ara_host_audio_not_bound_body:
+        "這個實例沒有可用的 ARA renderer。重新載入外掛（或刪除後重新插入）可以恢復；若仍不行，請匯出診斷包。",
     ara_host_audio_region_rejected_title: "外掛拒收了宿主的音訊區域",
     ara_host_audio_region_rejected_body:
         "宿主確實交付了這段素材，但外掛拒絕為它建立區域。繼續等待不會好轉；請從本軌道移除外掛後重新插入。",

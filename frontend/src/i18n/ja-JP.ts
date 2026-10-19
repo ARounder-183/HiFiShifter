@@ -2185,6 +2185,9 @@ export const jaJP = {
     ara_host_audio_source_failed_title: "ホスト音声の読み取りに失敗しました",
     ara_host_audio_source_failed_body:
         "ホストはサンプルアクセスを許可しましたが、音声を読み取れませんでした（メディア形式・サンプルレート・範囲が非対応の可能性があります）。これらのクリップは無音のままです。素材を確認するか、診断ログを書き出して報告してください。",
+    ara_host_audio_not_bound_title: "プラグインが ARA ドキュメントにバインドされていません",
+    ara_host_audio_not_bound_body:
+        "このインスタンスには利用可能な ARA レンダラーがありません。プラグインを再読み込み（または削除して再挿入）すると復旧します。それでも直らない場合は診断パッケージを書き出してください。",
     ara_host_audio_region_rejected_title: "プラグインがホストのオーディオ領域を拒否しました",
     ara_host_audio_region_rejected_body:
         "ホストはこの素材を渡しましたが、プラグインはその領域を作成しませんでした。待っても改善しません。このトラックからプラグインを削除して再度追加してください。",

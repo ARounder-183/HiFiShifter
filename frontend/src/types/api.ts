@@ -221,7 +221,14 @@ export type HostAudioState =
      * 【为什么要单独一态】用户看到的是"设置没回来"，而不是"没有声音"。它可行动
      * （重载插件会丢掉的设置已经丢了），但此前的界面完全不提这件事。
      */
-    | "restore_unresolved";
+    | "restore_unresolved"
+    /**
+     * 本实例没有可用的 ARA renderer / 文档绑定。
+     *
+     * 【为什么必须与 `awaiting_regions` 分开】后者是"继续等会来"，这一态是
+     * bind 失败或旧文档仍占着实例 —— 再等也不会来，必须给用户一个可行动结论。
+     */
+    | "not_bound";
 
 export interface HostAudioPayload {
     state: HostAudioState;
@@ -262,6 +269,24 @@ export interface TimelineState {
      * 缺省 = 本次响应与宿主音频状态无关，消费端沿用上一次已知值。
      */
     host_audio?: HostAudioPayload;
+    /** 本实例的 ARA 绑定读数（诊断/提示用；旧后端缺省）。 */
+    ara_binding?: {
+        bound: boolean;
+        bound_once: boolean;
+        document_alive?: boolean;
+        native_host?: boolean;
+        bound_document_id?: number | null;
+        closed?: boolean;
+        renderers?: number;
+        reason?: string;
+    };
+    /** 参数/曲线的恢复结果（`pending` 不是失败，`pending_reason` 说明在等什么）。 */
+    ara_restore?: {
+        status: "never" | "pending" | "applied" | "failed";
+        applied_generation: number;
+        pending_reason?: string | null;
+        error?: string | null;
+    };
     /**
      * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
      *

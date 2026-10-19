@@ -2106,6 +2106,9 @@ export const zhCN = {
     ara_host_audio_source_failed_title: "宿主音频读取失败",
     ara_host_audio_source_failed_body:
         "宿主已授权样本访问，但插件读不出音频（可能是素材格式、采样率或范围不受支持）。这些片段不会出声；请检查素材，或导出诊断日志反馈。",
+    ara_host_audio_not_bound_title: "插件没有绑定到 ARA 文档",
+    ara_host_audio_not_bound_body:
+        "这个实例没有可用的 ARA renderer。重新加载插件（或删掉后重新插入）可以恢复；若仍不行，请导出诊断包。",
     ara_host_audio_region_rejected_title: "插件拒收了宿主的音频区域",
     ara_host_audio_region_rejected_body:
         "宿主确实交付了这段素材，但插件拒绝为它创建区域。继续等待不会好转；请从本轨道移除插件后重新插入。",

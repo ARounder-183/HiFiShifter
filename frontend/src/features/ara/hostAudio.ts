@@ -22,6 +22,7 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
     "source_read_failed",
     "region_rejected",
     "restore_unresolved",
+    "not_bound",
 ]);
 
 /**
@@ -115,6 +116,17 @@ export function needsRegionRejectedNotice(status: HostAudioPayload | null): bool
  */
 export function needsRestoreUnresolvedNotice(status: HostAudioPayload | null): boolean {
     return status?.state === "restore_unresolved";
+}
+
+/**
+ * 是否需要"这个实例根本没有绑定到 ARA 文档"这条提示。
+ *
+ * 【为什么必须与 `awaiting_regions` 分开】后者是"宿主还没分配 region，继续等会来"；
+ * 这一态是 bind 失败 / 文档控制器缺失 / 旧文档仍占着实例 —— 再等也不会来，用户
+ * 唯一能做的是重载插件。把终态显示成无限期等待，正是本轮要修的用户体验问题。
+ */
+export function needsNotBoundNotice(status: HostAudioPayload | null): boolean {
+    return status?.state === "not_bound";
 }
 
 /**

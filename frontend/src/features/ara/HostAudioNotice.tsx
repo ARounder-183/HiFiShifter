@@ -29,6 +29,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import type { HostAudioPayload } from "../../types/api";
 import {
     needsFolderTrackNotice,
+    needsNotBoundNotice,
     needsSkippedClipsNotice,
     needsRegionRejectedNotice,
     needsRestoreUnresolvedNotice,
@@ -79,6 +80,16 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
             <Notice
                 title={t("ara_host_audio_region_rejected_title")}
                 body={t("ara_host_audio_region_rejected_body")}
+            />
+        );
+    }
+    // 未绑定是终态：再等也不会来。排在"等待 region"之前，避免把一个可行动的
+    // 故障显示成无限期等待。
+    if (needsNotBoundNotice(status)) {
+        return (
+            <Notice
+                title={t("ara_host_audio_not_bound_title")}
+                body={t("ara_host_audio_not_bound_body")}
             />
         );
     }

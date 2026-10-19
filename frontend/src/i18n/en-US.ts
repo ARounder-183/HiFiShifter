@@ -2168,12 +2168,15 @@ export const enUS = {
     ara_host_audio_source_failed_title: "Host audio could not be read",
     ara_host_audio_source_failed_body:
         "the host granted sample access, but the plug-in could not read the audio (unsupported media format, sample rate, or range). These clips will stay silent; check the media or export diagnostics.",
+    ara_host_audio_not_bound_title: "The plug-in is not bound to an ARA document",
+    ara_host_audio_not_bound_body:
+        "This instance has no usable ARA renderer. Reload the plug-in (or remove and re-insert it) to recover; if that fails, export the diagnostics package.",
     ara_host_audio_region_rejected_title: "The plug-in rejected the host's audio region",
     ara_host_audio_region_rejected_body:
         "the host delivered this material, but the plug-in refused to create a region for it. Waiting will not help; remove the plug-in from this track and insert it again.",
     ara_host_audio_restore_title: "The plug-in could not read back the saved parameters",
     ara_host_audio_restore_body:
-        "the parameters and curves saved with this project were not merged in, so the defaults are shown. Audio still works; reopen the project to retry, and restore the settings manually in the host if it persists. Reason: ",
+        "the parameters and curves saved with this project were not merged in, so the defaults are shown. Audio still works; reopen the project to retry, and restore the settings manually in the host if it persists.",
     ara_clip_syncing_host_audio: "Waiting for the host to finish assigning audio",
     ara_clip_waiting_for_host_audio: "Waiting for the host to hand over audio",
     ara_clip_host_source_read_failed:
