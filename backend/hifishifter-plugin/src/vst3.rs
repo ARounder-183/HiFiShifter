@@ -1751,7 +1751,19 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 现在的纪律是：**只有"本通路确实不写整块"时才清**（见 `layered` 与停止/静音
             // 分支）。写满整块的路径（直通、分层拷贝）自己覆盖每一帧，不需要也不允许先清。
             if owner.host_item_muted() {
-                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                // 【为什么不再直接 clear】宿主静音是一次"有声 → 静音"的源切换；
+                // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
+                // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
+                // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
+                let stream =
+                    crate::transfer::capture::ProcessStream::from_mode(unsafe { (*data).process_mode });
+                let frames = unsafe { (*data).num_samples as usize };
+                let outputs = unsafe { (*data).outputs };
+                if outputs.is_null() {
+                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                } else {
+                    unsafe { owner.apply_gate_fade_out(stream, &mut *outputs, frames) };
+                }
                 return K_RESULT_OK;
             }
             if data.process_context.is_null() {

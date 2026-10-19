@@ -694,6 +694,8 @@ struct StreamBlock {
     /// 但"刚刚还在钉住区间里"本身就是记账纠正的证据 —— 宿主位置恢复后哪怕只差
     /// 几帧，也不能另起一段。
     pinned_recent: bool,
+    /// 本块是停播很久之后的上升沿：此前累积的静音必须从 take 前导里扣掉。
+    discard_pre_roll: bool,
     /// 起播/录音上升沿打开的窗口仍开着（门控据此放行窗口内静音）。
     start_window: bool,
     /// 本块与上一块逐块完全相同且非零（FL 停播重复投递的形状）。
@@ -922,7 +924,11 @@ pub(crate) struct ExtensionOwner {
     /// 重发，原始磁带只在 take 变化时重发。合成失败或还没完成时这一份仍然有效。
     pub raw_tape: super::snapshot::SnapshotPublisher,
     /// 本块输出源的稳定 token（种类 + 快照代次）；音频线程据此识别源切换。
-    output_token: AtomicU64,
+    ///
+    /// 【为什么按流分开】prefetch 与 realtime 的块会交替到达；共用一个 token 会让
+    /// prefetch 的块改写 realtime 流看到的"上一块源"，于是实时流在**没有真正切换**
+    /// 的时刻做一次淡化（或反过来漏掉真正的切换）。与 `declick` 同一粒度。
+    output_token: [AtomicU64; 3],
     /// 每条进程流的输出接缝状态。
     declick: [OutputDeclickState; 3],
     /// 已发布处理结果对应的**素材代次**（`0` = 还没发过）。
@@ -3146,7 +3152,7 @@ impl ExtensionOwner {
         if frames == 0 || output.num_channels <= 0 || output.channel_buffers.is_null() {
             return;
         }
-        let token = self.output_token.load(Ordering::Acquire);
+        let token = self.output_token[stream.index()].load(Ordering::Acquire);
         let Some(state) = self.declick.get(stream.index()) else {
             return;
         };
@@ -3244,26 +3250,46 @@ impl ExtensionOwner {
         }
         // 保存本块输出的尾巴，供下一次源切换使用。
         //
-        // 【为什么短块仍放在数组开头】`fade_from[index]` 按 `index` 直接取尾巴：
-        // 块长不足 64 时，最近的真实样本必须落在索引 0 起的位置，后面才是零。
-        // 把它们右移成"最近 64 帧"会改变索引语义，让淡化读到一段旧零（门控淡出
-        // 的首帧会从 0 开始，听感是"先静音再淡出"）。
-        let start = frames.saturating_sub(OUTPUT_DECLICK_FRAMES);
-        let written = frames - start;
-        for channel in 0..channels {
-            // SAFETY: 同上。
-            let plane = unsafe { *output.channel_buffers.add(channel) };
-            if plane.is_null() {
-                continue;
-            }
-            for index in 0..written {
-                unsafe {
-                    state.tail[channel][index]
-                        .store((*plane.add(start + index)).to_bits(), Ordering::Relaxed);
+        // 【为什么短块要左移历史、把新样本追加在末尾】`tail` 的索引语义是
+        // "0 = 最近 64 帧里最旧的一帧、63 = 最新一帧"。块长不足 64 时，若像旧实现
+        // 那样把样本放在 0 起、右边补零，淡出会从**本块第一帧**开始、然后读到零，
+        // 与"边界处的最新样本"差出整整一个块长 —— 短块宿主上每次接缝都会多一次
+        // 阶跃。左移历史再追加，才能保持"最后 64 帧"这一不变量。
+        if frames >= OUTPUT_DECLICK_FRAMES {
+            let start = frames - OUTPUT_DECLICK_FRAMES;
+            for channel in 0..channels {
+                // SAFETY: 同上。
+                let plane = unsafe { *output.channel_buffers.add(channel) };
+                if plane.is_null() {
+                    continue;
+                }
+                for index in 0..OUTPUT_DECLICK_FRAMES {
+                    unsafe {
+                        state.tail[channel][index]
+                            .store((*plane.add(start + index)).to_bits(), Ordering::Relaxed);
+                    }
                 }
             }
-            for index in written..OUTPUT_DECLICK_FRAMES {
-                state.tail[channel][index].store(0, Ordering::Relaxed);
+        } else {
+            let written = frames;
+            for channel in 0..channels {
+                // SAFETY: 同上。
+                let plane = unsafe { *output.channel_buffers.add(channel) };
+                if plane.is_null() {
+                    continue;
+                }
+                for index in 0..(OUTPUT_DECLICK_FRAMES - written) {
+                    let value = state.tail[channel][index + written].load(Ordering::Relaxed);
+                    state.tail[channel][index].store(value, Ordering::Relaxed);
+                }
+                for index in 0..written {
+                    unsafe {
+                        state.tail[channel][OUTPUT_DECLICK_FRAMES - written + index].store(
+                            (*plane.add(index)).to_bits(),
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
             }
         }
     }
@@ -3295,6 +3321,9 @@ impl ExtensionOwner {
         };
         let declared = output.num_channels as usize;
         let fade = frames.min(OUTPUT_DECLICK_FRAMES);
+        // `tail` 里 0 是最旧的、63 是最新的；短块淡出必须从**最新的 fade 帧**开始，
+        // 否则边界处仍会从一段旧样本跳到零。
+        let base = OUTPUT_DECLICK_FRAMES - fade;
         for channel in 0..declared {
             // SAFETY: 宿主声明 `num_channels` 个平面指针，非空平面至少含 `frames` 帧。
             let plane = unsafe { *output.channel_buffers.add(channel) };
@@ -3303,7 +3332,9 @@ impl ExtensionOwner {
             }
             if channel < 2 {
                 for index in 0..fade {
-                    let old = f32::from_bits(state.tail[channel][index].load(Ordering::Relaxed));
+                    let old = f32::from_bits(
+                        state.tail[channel][base + index].load(Ordering::Relaxed),
+                    );
                     // 分母用 `fade` 而不是常量：块短于 64 帧时也必须在本块内淡到零，
                     // 否则块尾留下非零值，下一块从零起就是一次新的阶跃。
                     let gain = 1.0 - (index + 1) as f32 / fade as f32;
@@ -3484,6 +3515,7 @@ impl ExtensionOwner {
                 resync_limit_frames: 0,
                 preceding_silent_frames: geometry.trailing_silent_frames.load(Ordering::Acquire),
                 pinned_recent: false,
+                discard_pre_roll: false,
                 start_window: geometry.pinned_window_open.load(Ordering::Acquire),
                 repeated_nonzero: false,
                 silent: geometry.last_block_silent.load(Ordering::Acquire),
@@ -3578,17 +3610,32 @@ impl ExtensionOwner {
         let silent = geometry.last_block_silent.load(Ordering::Acquire);
         // 【为什么先读旧值再更新】`preceding_silent_frames` 的语义是"本块之前连续
         // 静音的帧数"。本块是内容块时必须返回之前累积的那一段，不能先把它清零。
-        let preceding_silent_frames = geometry.trailing_silent_frames.load(Ordering::Acquire);
+        let mut preceding_silent_frames =
+            geometry.trailing_silent_frames.load(Ordering::Acquire);
+        let mut discard_pre_roll = false;
         let pinned_since_last = had && raw_start == last_raw && !time.cycle_active;
         let max_pre_roll = (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64;
-        if silent && pinned_since_last && !(playing_rising || recording_rising) {
+        // 【停播很久后的上升沿必须扣掉停播静音】用户停在光标处时宿主也会反复投递
+        // 同一块静音；那段静音不是播放时间，不能变成 take 的前导。判据用钉住时长：
+        // 一个起播窗口（`PINNED_PLAYBACK_SEC`）之内的累积属于"刚开始播放的前段
+        // 静音"；超过它说明宿主已经停在那里很久（与 `pinned_before` 的清零同口径）。
+        if (playing_rising || recording_rising) && prior_pinned_frames > max_pre_roll {
+            preceding_silent_frames = 0;
+            discard_pre_roll = true;
+        }
+        // 【为什么上升沿也要保留累积】起播窗口里 `kPlaying` 的上升沿可能落在**静音块**
+        // 上（宿主先送 0.4 s 静音、内容出现时才把播放位置置 1）。旧代码在上升沿那一块
+        // 直接清零，于是紧随其后的内容块读到的 `preceding_silent_frames` 是 0 ——
+        // round 15 的 T1 因此拿不到前导静音。
+        let keep_silence = silent && pinned_since_last;
+        if keep_silence {
             geometry.trailing_silent_frames.store(
                 preceding_silent_frames
                     .saturating_add(frames as u64)
                     .min(max_pre_roll),
                 Ordering::Release,
             );
-        } else {
+        } else if !silent {
             geometry.trailing_silent_frames.store(0, Ordering::Release);
         }
         let pinned_recent = had && raw_start != last_raw && prior_pinned_frames > 0;
@@ -3859,6 +3906,7 @@ impl ExtensionOwner {
             resync_limit_frames: prior_pinned_frames.saturating_add(frames as u64),
             preceding_silent_frames,
             pinned_recent,
+            discard_pre_roll,
             start_window: geometry.pinned_window_open.load(Ordering::Acquire),
             repeated_nonzero,
             silent,
@@ -4088,6 +4136,7 @@ impl ExtensionOwner {
                         0
                     },
                     pinned_recent: index == 0 && stream_block.pinned_recent,
+                    discard_pre_roll: index == 0 && stream_block.discard_pre_roll,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
                     // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
                     accounting_start: part.position,
@@ -4305,7 +4354,7 @@ impl ExtensionOwner {
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
         let output = self.transfer_output_with(evidence);
-        self.output_token
+        self.output_token[stream.index()]
             .store(self.output_token_for(output), Ordering::Release);
         self.note_output_rung(output);
         // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来

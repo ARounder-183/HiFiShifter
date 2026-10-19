@@ -487,6 +487,12 @@ pub(crate) struct BlockContext {
     /// resync 分支整段跳过 ⇒ 窗口内容全丢 + `SegmentLoss::Gap` ⇒ 两个 clip。
     /// 改比记账域后第二块就能续上，`expected_next` 及时置位。
     pub accounting_start: i64,
+    /// 本块是"停播很久之后的上升沿"：之前累积的静音属于停播，不是播放时间。
+    ///
+    /// 【为什么需要单独一位】`preceding_silent_frames` 在这一块被置 0，但捕获侧
+    /// 可能已经从停播块暂存了前导值。只靠"本块的值是 0"无法撤销它，
+    /// 必须显式要求丢弃。
+    pub discard_pre_roll: bool,
 }
 
 impl BlockContext {
@@ -512,6 +518,7 @@ impl BlockContext {
             preceding_silent_frames: 0,
             pinned_recent: false,
             accounting_start: 0,
+            discard_pre_roll: false,
         }
     }
 }
@@ -734,11 +741,17 @@ pub(crate) struct Capture {
     block_preceding_silent: u64,
     /// 当前块是钉住区间结束后的第一块（位置差值应视为记账纠正）。
     block_pinned_recent: bool,
-    /// 将要成为第一段段首的那一块携带的前导静音帧数。
+    /// 整张 take 第一段的前导静音帧数（只消费一次）。
     ///
-    /// 【为什么不能直接用当前块的值】lookbehind 会先把首块暂存、由**第二块**提交并
-    /// 触发 `write_block`；第二块的前导静音是 0。必须在暂存首块时把值记下来。
-    pending_pre_roll: u64,
+    /// 【为什么不是"将要成为段首那一块的值"】lookbehind 会先把首块暂存、由**第二块**
+    /// 提交；提交那一刻 `active` 已存在、`started` 已为真，`write_block` 的
+    /// `first_segment` 恒为假（round 15 的 T1 因此在生产路径上整段丢失）。
+    /// 前导静音的归属是"整张 take 的第一段"，与"哪一次调用建段"无关，
+    /// 所以它必须是一次性的段属性，由 [`Self::commit_pending`] 与
+    /// `write_block` 的兜底分支共同消费，`take_pre_roll_taken` 保证只生效一次。
+    take_pre_roll: u64,
+    /// 前导静音是否已经消费（或已确定这一张 take 没有前导）。
+    take_pre_roll_taken: bool,
     /// 因前导静音扩展段首的累计帧数（诊断）。
     pub pre_roll_frames: u64,
     /// 当前为捕获供料的流。
@@ -828,7 +841,8 @@ impl Default for Capture {
             window_rolled: false,
             block_preceding_silent: 0,
             block_pinned_recent: false,
-            pending_pre_roll: 0,
+            take_pre_roll: 0,
+            take_pre_roll_taken: false,
             pre_roll_frames: 0,
             elected: None,
             candidates: Default::default(),
@@ -1154,6 +1168,13 @@ impl Capture {
             playing: block.playing,
             ..ctx
         };
+        // 本块的前导静音证据必须在这里落到 Capture 上：选举之前的 `stash_if_needed`
+        // 也会暂存首块，而那条路径不经过 `capture_elected`。
+        self.block_preceding_silent = ctx.preceding_silent_frames;
+        // 停播很久之后的上升沿：此前暂存的前导属于停播时间，整段作废。
+        if ctx.discard_pre_roll && !self.take_pre_roll_taken {
+            self.take_pre_roll = 0;
+        }
         // 循环 pass 的元数据：新一圈开始时记下 cycle start；同一 pass 的容量切段
         // 继续继承它。没有 cycle 元数据时保持 None（投影会按相同起点隐式分组）。
         if ctx.part > 0 {
@@ -1454,10 +1475,11 @@ impl Capture {
     ) -> CaptureOutcome {
         self.block_preceding_silent = preceding_silent_frames;
         self.block_pinned_recent = pinned_recent;
-        // 【为什么在这里记】lookbehind 会先把首块暂存、由第二块提交；第二块的
-        // 前导静音是 0。只有"尚未开始、也还没有任何段"时的这一块才是段首候选。
-        if !self.started && self.last_written.is_none() && self.active.is_none() {
-            self.pending_pre_roll = preceding_silent_frames;
+        // 【为什么取 max 而不是覆盖】内容块读到的是完整跨度（它之前累积的静音），
+        // 紧随其后的连续块读到的是 0；覆盖会把已经观察到的跨度抹掉。只增不减
+        // 同时保证"停播很久后的上升沿"由上层传 0 时不会被旧值污染。
+        if !self.take_pre_roll_taken && self.last_written.is_none() && self.active.is_none() {
+            self.take_pre_roll = self.take_pre_roll.max(preceding_silent_frames);
         }
         // 强证据：宿主自己说在播放。直接开始（若 pending 恰好连续，先把那一块补上）。
         if block.playing {
@@ -1595,6 +1617,12 @@ impl Capture {
         rate: u32,
     ) {
         let slot = stream.pending_slot();
+        // 【前导静音的证据跟着**被暂存的那一块**走】暂存块才是将来提交成段首的
+        // 候选；提交它的那一块（下一块）读到的前导是 0。只增不减，避免连续的
+        // 后续块把已经观察到的跨度覆盖掉。
+        if !self.take_pre_roll_taken && self.last_written.is_none() && self.active.is_none() {
+            self.take_pre_roll = self.take_pre_roll.max(self.block_preceding_silent);
+        }
         // 槽位可能被另一条流占着（离线与实时共用 0 号）：先清掉，避免把它的内容
         // 冒充成当前流的候选。
         if self.pendings[slot].ready && self.pendings[slot].stream != Some(stream) {
@@ -1669,12 +1697,41 @@ impl Capture {
         pending.loop_start = self.current_loop_start;
         self.sample_rate = pending.sample_rate;
         self.channels = pending.planes.len().clamp(1, 2) as u8;
-        self.expected_next = Some(pending.origin.saturating_add(pending.filled as i64));
-        self.captured_frames = self.captured_frames.saturating_add(pending.filled as u64);
+        // 【记账终点先按**内容**算】前导静音只扩展段的覆盖范围，不推进播放记账：
+        // `expected_next` / `captured_frames` / `last_written` 都必须留在内容域，
+        // 否则下一块的连续性判定与重复投递判定会整体前移。
+        let content_origin = pending.origin;
+        let content_frames = pending.filled;
+        // 整张 take 的第一段在这里补前导静音。为什么必须在 `commit_pending`：
+        // lookbehind 提交的这一刻就是首段被立起来的那一刻，而随后的 `write_block`
+        // 看到的 `active` 已存在，`first_segment` 恒假（见 `take_pre_roll` 的说明）。
+        if !self.take_pre_roll_taken {
+            let plane_len = pending.planes.first().map_or(0, Vec::len);
+            let pre_roll = (self.take_pre_roll as usize)
+                .min(self.capacity.saturating_sub(content_frames))
+                .min(plane_len.saturating_sub(content_frames))
+                // 工程位置 0 之前不可写：origin 不能为负。
+                .min(content_origin.max(0) as usize);
+            if pre_roll > 0 {
+                pending.origin = content_origin.saturating_sub(pre_roll as i64);
+                for plane in &mut pending.planes {
+                    // 段是连续平面缓冲：origin 前移后内容必须跟着平移，
+                    // 否则段覆盖区间与实际样本错位。前导只补全零。
+                    plane.copy_within(..content_frames, pre_roll);
+                    plane[..pre_roll].fill(0.0);
+                }
+                pending.filled = content_frames + pre_roll;
+                self.pre_roll_frames = self.pre_roll_frames.saturating_add(pre_roll as u64);
+            }
+            self.take_pre_roll = 0;
+            self.take_pre_roll_taken = true;
+        }
+        self.expected_next = Some(content_origin.saturating_add(content_frames as i64));
+        self.captured_frames = self.captured_frames.saturating_add(content_frames as u64);
         self.last_position = self.expected_next;
         self.peak[0] = self.peak[0].max(pending.peak[0]);
         self.peak[1] = self.peak[1].max(pending.peak[1]);
-        self.last_written = Some((pending.origin, pending.filled));
+        self.last_written = Some((content_origin, content_frames));
         self.active = Some(pending);
         self.started = true;
         // 第一块已经写下来：窗口锚点与暂存跨度不再需要（见 `begin_segment_at`）。
@@ -1847,7 +1904,9 @@ impl Capture {
         self.window_anchor = None;
         self.window_pending_frames = 0;
         self.window_rolled = false;
-        self.pending_pre_roll = 0;
+        // 这一段从窗口锚点开始、已经把起播前的静音桥接进来；前导静音不再叠加。
+        self.take_pre_roll = 0;
+        self.take_pre_roll_taken = true;
     }
 
     /// 用静音桥接 `frames` 帧（resync 向前纠正）。
@@ -2177,8 +2236,8 @@ impl Capture {
                 self.stop(ClosedReason::NoSpare);
                 return CaptureOutcome::OutOfSpares;
             };
-            let pre_roll = if first_segment {
-                self.pending_pre_roll
+            let pre_roll = if first_segment && !self.take_pre_roll_taken {
+                self.take_pre_roll
                     .min(self.capacity.saturating_sub(frames) as u64)
                     // 工程位置 0 之前不可写：origin 不能为负。
                     .min(start.max(0) as u64) as usize
@@ -2191,7 +2250,10 @@ impl Capture {
                 }
                 self.pre_roll_frames = self.pre_roll_frames.saturating_add(pre_roll as u64);
             }
-            self.pending_pre_roll = 0;
+            // 无论这次取到多少，第一段一旦建立，前导静音的消费就结束了：
+            // 后续段绝不向前看（容量切段、循环回卷、seek 都不该把开头静音再补一遍）。
+            self.take_pre_roll = 0;
+            self.take_pre_roll_taken = true;
             spare.origin = start.saturating_sub(pre_roll as i64);
             spare.sample_rate = rate;
             spare.loss = loss;
@@ -2288,7 +2350,8 @@ impl Capture {
         if let Some(active) = self.active.take() {
             self.sealed.push(seal(active, reason));
         }
-        self.pending_pre_roll = 0;
+        self.take_pre_roll = 0;
+        self.take_pre_roll_taken = true;
         if self.stopped.is_none() {
             self.stopped = Some(reason);
         }
@@ -2422,6 +2485,7 @@ mod tests {
             preceding_silent_frames: 0,
             pinned_recent: false,
             accounting_start: 0,
+            discard_pre_roll: false,
         }
     }
 
@@ -3338,6 +3402,88 @@ mod tests {
             20..24,
             "素材起点必须是宿主起播的位置，而不是按下录制时的停位"
         );
+    }
+
+    /// **lookbehind 提交首块时，前导静音必须仍然落地。**
+    ///
+    /// 【为什么这是 round 15 未闭合的主回归】round 15 只在 `write_block` 的
+    /// `first_segment` 分支消费前导，而该分支要求 `active.is_none()`；VEGAS 的
+    /// 正常形状是"首块暂存、第二块经 `commit_pending` 提成 active、才写"——
+    /// 那一刻 `active` 已存在，前导恒为 0。本用例驱动**弱证据**（`playing=false`）
+    /// 的真实形状，钉住"提交时消费"。
+    #[test]
+    fn a_pinned_silent_lead_in_survives_the_lookbehind_commit() {
+        let mut capture = started(1024, 4);
+        // 块 1：内容在 P+8，之前有 8 帧静音；宿主没有 kPlaying（弱证据）。
+        let (_, view) = block(8, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, false, false, true);
+        context.phase = TransportPhase::Rolling;
+        context.preceding_silent_frames = 8;
+        assert_eq!(
+            capture.on_block_with_context(paused(view), context),
+            CaptureOutcome::NotPlaying,
+            "弱证据的第一块只暂存"
+        );
+        // 块 2 与块 1 首尾相接：lookbehind 提交块 1，再由块 2 继续写。
+        let (_, view) = block(12, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, false, false, true);
+        context.phase = TransportPhase::Rolling;
+        capture.on_block_with_context(paused(view), context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "lookbehind 提交不得把 take 切成两段");
+        assert_eq!(
+            sealed[0].span(),
+            0..16,
+            "段必须从静音起点开始，内容仍在 P+8 之后"
+        );
+        assert_eq!(
+            capture.pre_roll_frames, 8,
+            "前导静音必须在 commit_pending 时落地"
+        );
+        assert_eq!(
+            sealed[0].planes[0][8..12],
+            block(8, 4, 48_000.0).0[..],
+            "前导只补零，不得移动内容"
+        );
+    }
+
+    /// **停播很久之后的上升沿不得把停播静音当成前导。**
+    ///
+    /// 【为什么必须有这条】T2 让上升沿不再清空已观察到的静音（起播窗口里上升沿
+    /// 可能落在静音块上）；但用户停在光标处时宿主也会反复投递静音，那段不是
+    /// 播放时间。`discard_pre_roll` 是这两者的分界。
+    #[test]
+    fn a_rising_edge_after_a_long_stop_discards_the_stopped_silence() {
+        let mut capture = started(1024, 4);
+        // 停播：位置钉在 20，反复送同一块静音，前导累积到 8 帧。
+        for _ in 0..2 {
+            let (_, view) = block(20, 4, 48_000.0);
+            let mut context = ctx(ProcessStream::Realtime, false, false, false);
+            context.phase = TransportPhase::Start;
+            context.preceding_silent_frames = 8;
+            capture.on_block_with_context(paused(view), context);
+        }
+        // 上升沿：前导必须被显式作废（上层把 preceding 置 0 并带上 discard 位）。
+        let (_, view) = block(20, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, false);
+        context.phase = TransportPhase::Rolling;
+        context.playing_rising = true;
+        context.preceding_silent_frames = 0;
+        context.discard_pre_roll = true;
+        capture.on_block_with_context(view, context);
+        let (_, view) = block(24, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.phase = TransportPhase::Rolling;
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(
+            sealed[0].span(),
+            20..28,
+            "素材起点必须是起播位置，停播静音不得被补进来"
+        );
+        assert_eq!(capture.pre_roll_frames, 0);
     }
 
     /// **起播窗口的静音前导必须补进段首。**

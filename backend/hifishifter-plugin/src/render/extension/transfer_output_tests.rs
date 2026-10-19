@@ -1336,7 +1336,7 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
 
     // 第一块：真首块（种类 4）。`primed_kind` 从 0 变成 4 ⇒ 原样输出。
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut first, frames) };
     assert_eq!(
@@ -1355,7 +1355,7 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         channel_buffers: second_planes.as_mut_ptr(),
     };
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut second, frames) };
     // 开头必须还在旧值附近（从 0.5 走向 1.0），不能第一帧就是 1.0。
@@ -1392,7 +1392,7 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
 
     // 上一轮：输出过 Raw（种类 4），给 tail 留下 0.5。
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut tail, frames) };
     assert_eq!(tail_left, vec![0.5; frames], "上一轮首块原样输出");
@@ -1407,7 +1407,7 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
         channel_buffers: planes.as_mut_ptr(),
     };
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut output, frames) };
     assert!(
@@ -1439,7 +1439,7 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
 
     // 第一块：透传宿主原声（种类 5 = PendingSynthesis）。
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(5, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut host, frames) };
     assert_eq!(host_left, vec![0.8; frames], "透传首块原样输出");
@@ -1454,7 +1454,7 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
         channel_buffers: planes.as_mut_ptr(),
     };
     owner
-        .output_token
+        .output_token[stream.index()]
         .store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut output, frames) };
 
