@@ -63,11 +63,12 @@ impl CompanionSlot {
             .map_or(std::ptr::null(), |factory| factory.as_raw().cast())
     }
 
-    /// 初始绑定的生命周期探针（测试/诊断）。
+    /// 初始绑定的生命周期探针（仅测试）。
     ///
     /// 【为什么探针要记在创建时】复位会换掉整个 `CompanionProcessorBinding`，
     /// 而复位后旧对象已经被丢弃 —— 想观察"宿主的实际销毁是否把控制器侧一并
     /// tombstone"就只能持有创建时那一份的弱引用。
+    #[cfg(test)]
     fn lifetime_probe(&self) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
         self.binding
             .lock_or_recover()
@@ -85,11 +86,12 @@ struct Context {
 /// 唯一 Rust owning native COM 引用；查询返回的引用另由宿主释放。
 pub(crate) struct HostEntry {
     interface: NonNull<c_void>,
-    /// 初始 companion 绑定的生命周期探针。
+    /// 初始 companion 绑定的生命周期探针（仅测试使用）。
     ///
     /// 【为什么在创建时抓一份】Context 归原生 shim 所有，Rust 侧只留接口指针；
     /// 测试要观察"真实销毁是否把控制器侧一并 tombstone"，就必须在创建时留下弱引用。
     /// 复位会换掉绑定对象，而这一份探针仍然指向被宿主实际用过的那个状态。
+    #[cfg(test)]
     probe: Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>>,
 }
 
@@ -110,6 +112,7 @@ impl HostEntry {
         {
             return Err(AraError::InvalidArgument("unknown factory association"));
         }
+        #[cfg(test)]
         let probe = companion.lifetime_probe();
         let context = Box::into_raw(Box::new(Context {
             companion,
@@ -133,10 +136,12 @@ impl HostEntry {
         }
         Ok(Self {
             interface: NonNull::new(interface).ok_or(AraError::Abi("null native entry"))?,
+            #[cfg(test)]
             probe,
         })
     }
-    /// 初始 companion 绑定的生命周期探针（测试/诊断）。
+    /// 初始 companion 绑定的生命周期探针（测试）。
+    #[cfg(test)]
     pub(crate) fn lifetime_probe(
         &self,
     ) -> Option<&ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
