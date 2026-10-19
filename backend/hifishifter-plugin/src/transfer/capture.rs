@@ -698,6 +698,22 @@ pub(crate) struct Capture {
     ///
     /// 【什么时候清】真正写下第一块时清（那时 `expected_next` 已经接管）。
     window_anchor: Option<i64>,
+    /// 起播窗口里被暂存过、但随后因不连续而丢弃的帧数累计。
+    ///
+    /// 【为什么需要】窗口整段没写下时，兜底要从锚点桥出静音。可桥的跨度不能凭空
+    /// 取 `MAX_BRIDGE_SEC`：真正的 seek 也会走到同一支。这个计数回答"我们究竟看见过
+    /// 多少帧却没写下来"，把桥接上限钉在事实之上。
+    window_pending_frames: u64,
+    /// 暂存块里是否出现过"流在推进"的证据（`phase == Rolling`）。
+    ///
+    /// 【为什么必须区分】暂存发生在两种完全不同的处境：
+    ///   * 宿主停在光标处反复送同一块（用户先按录制、后按播放）—— 那些帧**不是**
+    ///     播放时间，绝不能桥接；
+    ///   * 起播窗口内宿主把位置钉住、但相位是 `Rolling`（内容在按块长流动）——
+    ///     那些帧是真实播放过的时间，事后必须补出来。
+    /// 两者的唯一差别就是这里。没有它，`the_first_frame_follows_the_host_not_the_button`
+    /// 会把"按下录制时停的位置"桥进素材。
+    window_rolled: bool,
     /// 当前为捕获供料的流。
     elected: Option<ProcessStream>,
     /// 每条流自己的候选读数（选举与交接）。
@@ -781,6 +797,8 @@ impl Default for Capture {
             last_position: None,
             pendings: Default::default(),
             window_anchor: None,
+            window_pending_frames: 0,
+            window_rolled: false,
             elected: None,
             candidates: Default::default(),
             elected_run: 0,
@@ -1442,6 +1460,9 @@ impl Capture {
             }
             if !self.started {
                 self.stash_pending(stream, block, start, frames, skip, rate);
+                // 这一块来自"位置流在推进"的弱证据分支：相位是 Rolling，说明宿主
+                // 确实在按块长送时间上相邻的音频。只有这种暂存才允许事后桥接。
+                self.window_rolled = true;
                 return CaptureOutcome::NotPlaying;
             }
             // 已经开录之后，只有“接着上一块”的滞后续录才写；停播时的 seek 块不写。
@@ -1582,6 +1603,8 @@ impl Capture {
         });
         self.pendings[slot].stream = Some(stream);
         self.pending_stashed = self.pending_stashed.saturating_add(1);
+        // 暂存过多少帧，就是"看见过但还没写下来"的跨度；兜底桥接的上限读它。
+        self.window_pending_frames = self.window_pending_frames.saturating_add(writable as u64);
     }
 
     /// 把某条流的 pending 提升为 active；下一块的连续性从它的终点开始。
@@ -1607,6 +1630,10 @@ impl Capture {
         self.last_written = Some((pending.origin, pending.filled));
         self.active = Some(pending);
         self.started = true;
+        // 第一块已经写下来：窗口锚点与暂存跨度不再需要（见 `begin_segment_at`）。
+        self.window_anchor = None;
+        self.window_pending_frames = 0;
+        self.window_rolled = false;
         self.pending_committed = self.pending_committed.saturating_add(1);
         true
     }
@@ -1768,6 +1795,11 @@ impl Capture {
         self.expected_next = Some(origin);
         self.last_position = Some(origin);
         self.started = true;
+        // 段已经立起来，窗口锚点/暂存跨度完成使命。留着它们会让后续一次
+        // `expected_next == None`（换流交接）从很久以前的锚点桥出一段静音。
+        self.window_anchor = None;
+        self.window_pending_frames = 0;
+        self.window_rolled = false;
     }
 
     /// 用静音桥接 `frames` 帧（resync 向前纠正）。
@@ -1890,9 +1922,9 @@ impl Capture {
         // 可能差一小段。向前用静音桥接（缺的正是真实播放的静音），向后裁掉多记的尾巴；
         // 两种都继续同一段，不能因为一个记账误差把 take 切成两个 clip。
         let mut resync_continued = false;
-        if part == 0 && resync {
+        if part == 0 {
             match self.expected_next {
-                Some(expected) => {
+                Some(expected) if resync => {
                     let delta = start.saturating_sub(expected);
                     let limit = resync_limit_frames.max(64);
                     if delta > 0
@@ -1905,6 +1937,7 @@ impl Capture {
                         resync_continued = self.trim_active_tail_exact(start);
                     }
                 }
+                Some(_) => {}
                 None => {
                     // 起播窗口整段都没写过：窗口内的块被 `stash_pending` 暂存后
                     // 因连续性判据不通过而逐个 `discard_pending`，`expected_next`
@@ -1915,23 +1948,45 @@ impl Capture {
                     // 这里用 pending 里那一块的记账位置作锚：它记录的是窗口**起点**。
                     // 从它到 `start` 的一段是真实播放过的时间，用静音补出来，
                     // clip 才能从窗口起点开始、内容位置才正确。
-                    let anchor = self.window_anchor;
-                    if let Some(anchor) = anchor {
-                        let gap = start.saturating_sub(anchor);
-                        let limit = resync_limit_frames.max(64);
-                        if gap > 0
-                            && gap as u64 <= limit
-                            && (gap as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
-                        {
-                            // 先把窗口起点立成 active 段的原点，再桥接，最后本块
-                            // 接着同一段写 —— 全程一个段。
-                            self.begin_segment_at(anchor, rate);
-                            self.resync_bridged_frames = self
-                                .resync_bridged_frames
-                                .saturating_add(gap as u64);
-                            resync_continued = self.bridge_silence(gap as usize);
-                            self.bridged_window_blocks =
-                                self.bridged_window_blocks.saturating_add(1);
+                    //
+                    // 【为什么这一支不再要求 `resync`】`resync` 由**流级**位置证据算出
+                    // （`last_source ∈ Continuous/Music/Synthesized`）。起播窗口里宿主
+                    // 位置被钉住、位置回退从未启用时，`last_source` 停在 `Project` ——
+                    // 于是"窗口整段没写"这个最需要兜底的形状恰好拿不到 `resync`，
+                    // 兜底代码从未执行。把判据换成**本捕获自己的状态**（一段都没写过）
+                    // 之后，它与宿主是否提供回退证据无关。
+                    //
+                    // 【为什么仍然不会把真正的 seek 桥成静音】只有 `last_written`
+                    // 与 `active` 都为空（这张 take 还一段都没写）时才允许；一旦写过
+                    // 任何一块，seek 仍旧走下面的 `SegmentLoss::First` 另起一段。
+                    if self.last_written.is_none()
+                        && self.active.is_none()
+                        && self.window_rolled
+                    {
+                        if let Some(anchor) = self.window_anchor {
+                            let gap = start.saturating_sub(anchor);
+                            // 【为什么上限取 `window_pending_frames + 本块`】`resync`
+                            // 为假时 `resync_limit_frames` 是 0（默认上下文），只留
+                            // `.max(64)` 会把 0.66 s 的窗口挡在门外。真正可桥的跨度
+                            // 就是我们**看见过却没写下来**的帧数 —— 用事实而不是常量。
+                            let observed = self
+                                .window_pending_frames
+                                .saturating_add(frames as u64);
+                            let limit = resync_limit_frames.max(observed).max(64);
+                            if gap > 0
+                                && gap as u64 <= limit
+                                && (gap as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
+                            {
+                                // 先把窗口起点立成 active 段的原点，再桥接，最后本块
+                                // 接着同一段写 —— 全程一个段。
+                                self.begin_segment_at(anchor, rate);
+                                self.resync_bridged_frames = self
+                                    .resync_bridged_frames
+                                    .saturating_add(gap as u64);
+                                resync_continued = self.bridge_silence(gap as usize);
+                                self.bridged_window_blocks =
+                                    self.bridged_window_blocks.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -3106,6 +3161,9 @@ mod tests {
         // （真实宿主形状见上面的说明；这里直接构造那个状态来钉兜底行为。）
         capture.expected_next = None;
         capture.active = None;
+        // 这些暂存来自推进相位（真实窗口里 `phase == Rolling`）；只有这种暂存
+        // 才允许事后桥接，见 `window_rolled`。
+        capture.window_rolled = true;
 
         // 宿主位置恢复到 16，`kPlaying` 置 1，并标记这是记账纠正。
         let (_, view) = block(16, 4, 48_000.0);
@@ -3138,4 +3196,76 @@ mod tests {
             sealed[0].span()
         );
     }
+    /// **窗口整段没写下时，兜底不依赖宿主的 `resync` 证据。**
+    ///
+    /// 【为什么这是问题一的主回归】`resync` 由**流级**位置回退算出：窗口里宿主把
+    /// 位置钉住、`continuous`/`music` 又都没给时，`last_source` 停在 `Project`，
+    /// `resync` 恒为假 —— 而"窗口整段没写"恰好就是这种形状。兜底此前被
+    /// `if resync` 整段挡住，于是它从未执行过。现在判据换成捕获自己的状态
+    /// （一段都没写过 + 暂存块确实处在推进相位）。
+    #[test]
+    fn an_untracked_start_window_bridges_without_a_resync_flag() {
+        let mut capture = started(64, 2);
+        // 构造"窗口整段没写下"的状态：暂存过三块（锚点 0），但 pending 全部因
+        // 不连续被丢弃，`expected_next` 仍是 None。`window_rolled` 标记这些暂存
+        // 来自推进相位（真实窗口里 `phase == Rolling` 是唯一能说这件事的证据）。
+        for start in [0, 4, 8] {
+            let (_, view) = block(start, 4, 48_000.0);
+            let mut context = ctx(ProcessStream::Realtime, false, false, false);
+            context.phase = TransportPhase::Start;
+            context.accounting_start = start;
+            capture.on_block_with_context(paused(view), context);
+        }
+        capture.expected_next = None;
+        capture.active = None;
+        capture.window_anchor = Some(0);
+        capture.window_pending_frames = 12;
+        capture.window_rolled = true;
+
+        // 宿主位置恢复到 16；本块**没有** `resync` 标记（last_source 仍是 Project）。
+        let (_, view) = block(16, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.phase = TransportPhase::Rolling;
+        context.resync = false;
+        context.resync_limit_frames = 0;
+        context.accounting_start = 16;
+        capture.on_block_with_context(view, context);
+
+        assert_eq!(
+            capture.bridged_window_blocks, 1,
+            "没有 resync 标记也必须补出窗口（上限取实际暂存过的帧数）"
+        );
+        assert!(capture.resync_bridged_frames >= 16);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "兜底不得把 take 切成两段");
+        assert_eq!(sealed[0].span().start, 0);
+    }
+
+    /// **停在光标处的暂存块不参与桥接。**
+    ///
+    /// 【为什么必须与上一条并存】用户在宿主停在 0 时按下录制、随后从 20 起播：
+    /// 那三块"停在 0 的重复投递"没有推进相位，不是播放时间，绝不能补进素材。
+    #[test]
+    fn standby_stashes_never_bridge_into_the_take() {
+        let mut capture = started(64, 2);
+        for _ in 0..3 {
+            let (_, view) = block(0, 4, 48_000.0);
+            let mut context = ctx(ProcessStream::Realtime, false, false, false);
+            context.phase = TransportPhase::Start;
+            capture.on_block_with_context(paused(view), context);
+        }
+        assert!(!capture.window_rolled, "待命阶段的暂存不算推进");
+        let (_, view) = block(20, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, false);
+        context.resync = false;
+        capture.on_block_with_context(view, context);
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(
+            sealed[0].span(),
+            20..24,
+            "素材起点必须是宿主起播的位置，而不是按下录制时的停位"
+        );
+    }
+
 }
