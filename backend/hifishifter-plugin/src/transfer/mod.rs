@@ -108,6 +108,13 @@ pub(crate) struct TransferTake {
     /// 消费者；而它和 `sources`（每段 PCM 的副本）一起，会让一次录制在内存里存两份
     /// PCM。投影与源表都在读取时按需构造（`with_projection` + `sources_for`）。
     pub summary: timeline::TimelineSummary,
+    /// 本次录制因前导静音扩展段首的帧数（诊断）。
+    ///
+    /// 【为什么随 take 保存】它描述的是"快照从哪一帧开始覆盖"，而那个决定发生在
+    /// 捕获期、之后再也无法从段本身反推（前导是全零，与真实静音不可区分）。
+    /// 界面上"播放起播处有一次咔"与它直接相关：只要它是 0，快照的覆盖起点就
+    /// 落在内容起点而不是播放起点。
+    pub pre_roll_frames: u64,
     /// PCM 的落盘位置（`None` = 没写成，重启后不可恢复）。
     pub sidecar: Option<PathBuf>,
 }
@@ -156,6 +163,13 @@ pub(crate) struct MaterialSummary {
     /// 整条素材跨越的工程帧数（含空洞）。
     pub spanned_frames: u64,
     pub sample_rate: u32,
+    /// 跨全部 take 因前导静音扩展段首的帧数（诊断）。
+    ///
+    /// 【为什么要把它抬到这里】round 16 修好了"前导静音如何进入段"的机制，
+    /// 但没有任何读数能回答"它到底有没有进入"。用户报的"起播 0.7 s 内的咔"
+    /// 恰好可以由它是否为 0 来二分：0 ⇒ 覆盖起点悬空（机制没拿到证据）；
+    /// 非 0 ⇒ 证据拿到了，问题在下游的收口或覆盖边界。
+    pub pre_roll_frames: u64,
 }
 
 impl MaterialSummary {
@@ -701,6 +715,10 @@ impl TransferStore {
                 sample_rate,
                 segments,
                 summary,
+                // 侧车格式不携带前导帧数（它只是段 PCM 的落盘副本）。恢复的 take
+                // 因此报 0：这是"未知"，不是"确认为零"。T11 的告警只在 promote
+                // 路径上发出，不会被恢复路径误报。
+                pre_roll_frames: 0,
                 sidecar: Some(path),
             });
             restored += 1;
@@ -981,29 +999,40 @@ impl TransferStore {
     /// 【为什么片段数取投影而不是逐 take 相加】用户看到的是投影后的时间线：被补录盖住
     /// 的部分已经不在那里了。逐 take 相加会报出一个用户看不见的数字。
     pub(crate) fn material_summary(&self) -> Option<MaterialSummary> {
-        self.with_projection(|input| {
-            if input.iter().all(|take| take.segments.is_empty()) {
-                return None;
-            }
-            let captured_frames: u64 = input
-                .iter()
-                .flat_map(|take| take.segments.iter())
-                .map(|segment| segment.filled as u64)
-                .sum();
-            let sample_rate = input
-                .iter()
-                .flat_map(|take| take.segments.iter())
-                .map(|segment| segment.sample_rate)
-                .max()
-                .unwrap_or(0);
-            let (_, summary) = timeline::project(input, 120.0);
-            Some(MaterialSummary {
-                clips: summary.clips,
-                captured_frames,
-                covered_frames: summary.covered_frames,
-                spanned_frames: summary.spanned_frames,
-                sample_rate,
+        let takes = self.takes.lock_or_recover();
+        if takes.iter().all(|take| take.segments.is_empty()) {
+            return None;
+        }
+        let captured_frames: u64 = takes
+            .iter()
+            .flat_map(|take| take.segments.iter())
+            .map(|segment| segment.filled as u64)
+            .sum();
+        let sample_rate = takes
+            .iter()
+            .flat_map(|take| take.segments.iter())
+            .map(|segment| segment.sample_rate)
+            .max()
+            .unwrap_or(0);
+        let pre_roll_frames = takes
+            .iter()
+            .map(|take| take.pre_roll_frames)
+            .fold(0_u64, u64::saturating_add);
+        let input: Vec<ProjectionTake<'_>> = takes
+            .iter()
+            .map(|take| ProjectionTake {
+                id: take.id,
+                segments: &take.segments,
             })
+            .collect();
+        let (_, summary) = timeline::project(&input, 120.0);
+        Some(MaterialSummary {
+            clips: summary.clips,
+            captured_frames,
+            covered_frames: summary.covered_frames,
+            spanned_frames: summary.spanned_frames,
+            sample_rate,
+            pre_roll_frames,
         })
     }
 
@@ -1138,6 +1167,9 @@ impl TransferStore {
             if timeline.clips.is_empty() {
                 return None;
             }
+            // T14：覆盖起点必须落在**最早被捕获的段起点**上；晚于它就说明前导静音
+            // 在投影阶段被丢掉了，播放会在那个位置发生一次源切换。
+            note_coverage_start_gap(input, &timeline);
             Some((timeline.clone(), regions_for(&timeline), sources_for(input)))
         })
     }
@@ -1189,6 +1221,9 @@ impl TransferStore {
         let mut capture = self.capture.lock_or_recover();
         let mut all = segments;
         all.extend(capture.drain_sealed());
+        // 【为什么在 `reset_after_promote` 之前读】诊断里的前导帧数与暂存计数都在
+        // reset 时清零；它们是"这次录制到底拿到了什么证据"的唯一现场。
+        let diagnostics = capture.diagnostics();
         capture.reset_after_promote();
         drop(capture);
         self.capture_stream.store(0, Ordering::Release);
@@ -1197,6 +1232,23 @@ impl TransferStore {
         }
         let id = self.next_take_id.fetch_add(1, Ordering::AcqRel);
         let sample_rate = all[0].sample_rate;
+        // 【为什么这条日志是必需的】round 16 的 T1 让前导静音能进入段首，但没有任何
+        // 读数回答"它到底有没有进入"。`pre_roll_frames == 0` 而这次确实走过起播窗口
+        // （有块被暂存 / 窗口被桥接）时，快照的覆盖起点就落在**内容起点**而不是
+        // 播放起点 —— 播放时会在那个位置发生一次"宿主原声 → 处理结果"的切换，
+        // 听感就是用户报的"起播 0.7 s 内的一次咔"。这条日志把那个结论变成可观测事实，
+        // 不改任何行为。
+        if diagnostics.pre_roll_frames == 0
+            && (diagnostics.pending_stashed > 0 || diagnostics.bridged_window_blocks > 0)
+        {
+            log::warn!(
+                "[transfer] take {id}: the start window was observed ({} stashed block(s), \
+                 {} bridged window block(s)) but no silent lead-in was recorded; \
+                 the snapshot starts at the content start, not at the playback start",
+                diagnostics.pending_stashed,
+                diagnostics.bridged_window_blocks
+            );
+        }
         let (_, summary) = timeline::build(&all, id, 120.0);
         // 【为什么在 promote 时就落盘，而不是等 `getState`】落盘是**一次**几十 MB 的
         // 写；放在 `getState` 里就等于在宿主每次自动保存时都写一遍。而 promote 是
@@ -1216,6 +1268,7 @@ impl TransferStore {
             sample_rate,
             segments: all,
             summary,
+            pre_roll_frames: diagnostics.pre_roll_frames,
             sidecar,
         };
         let mut takes = self.takes.lock_or_recover();
@@ -1322,6 +1375,56 @@ fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> 
             )
         })
         .collect()
+}
+
+/// 投影后的覆盖起点若晚于**最早被捕获的段起点**，说明前导静音在投影阶段被丢掉了。
+///
+/// 【为什么这条日志值得存在】快照的 `origin_sample` 直接取自最早 clip 的起点
+/// （`render/input.rs`）。一旦它晚于最早的段起点，播放时就会在那个位置从"宿主原声"
+/// 切到"处理结果" —— 用户听到的就是一次"咔"。这条日志把"覆盖起点悬空"从
+/// 一句无法归因的现象变成可测量的差值（T14）。它只读事实，不改变任何行为。
+fn note_coverage_start_gap(takes: &[ProjectionTake<'_>], timeline: &TimelineState) {
+    let earliest_segment = takes
+        .iter()
+        .flat_map(|take| take.segments.iter())
+        .filter(|segment| !segment.span().is_empty() && !segment.has_nonfinite())
+        .map(|segment| segment.origin.max(0))
+        .min();
+    let Some(segment_start) = earliest_segment else {
+        return;
+    };
+    let rate = takes
+        .iter()
+        .flat_map(|take| take.segments.iter())
+        .map(|segment| segment.sample_rate)
+        .max()
+        .unwrap_or(0);
+    if rate == 0 {
+        return;
+    }
+    let Some(clip_start_sec) = timeline
+        .clips
+        .iter()
+        .map(|clip| clip.start_sec)
+        .reduce(f64::min)
+    else {
+        return;
+    };
+    let clip_start = (clip_start_sec * rate as f64).round() as i64;
+    // 一个块的量级（20 ms）。小于它属于块内对齐误差，不值得报。
+    let grace = (rate as i64 / 50).max(1);
+    if clip_start > segment_start.saturating_add(grace) {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "transfer.coverage-start-gap",
+            format_args!(
+                "[transfer] the earliest captured segment starts at frame {segment_start} but \
+                 the published coverage starts at {clip_start} ({} frames later); the silent \
+                 lead-in was dropped during projection, so playback will switch sources there",
+                clip_start.saturating_sub(segment_start)
+            ),
+        );
+    }
 }
 
 /// 由时间线合成 ARA 形状的播放区间。

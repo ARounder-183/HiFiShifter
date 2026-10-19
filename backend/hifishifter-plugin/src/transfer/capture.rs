@@ -1864,6 +1864,20 @@ impl Capture {
             return false;
         }
         let keep = (new_start - active.origin) as usize;
+        // 【T13：先淡出边界前的一小段，再裁】向前纠正（`bridge_silence`）早就有
+        // `fade_active_tail_out(DECLICK_FRAMES)` 与后续块的淡入配对；向后纠正此前
+        // 只有 `truncate`，于是保留下来的最后一帧是满幅，而紧随其后的新块从零淡入
+        // —— 边界处是一次"满幅 → 零"的阶跃，被原样烤进快照，播放时如实还原。
+        // 把淡化放进本函数而不是调用点，是为了让"裁剪必然伴随淡化"成为不变式。
+        let fade = DECLICK_FRAMES.min(keep);
+        if fade > 0 {
+            let from = keep - fade;
+            for plane in active.planes.iter_mut() {
+                for (index, sample) in plane[from..keep].iter_mut().enumerate() {
+                    *sample *= 1.0 - (index + 1) as f32 / fade as f32;
+                }
+            }
+        }
         let dropped = active.filled - keep;
         active.filled = keep;
         self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
@@ -3537,5 +3551,42 @@ mod tests {
         assert_eq!(sealed.len(), 1, "小差值不得另起一段");
         assert_eq!(sealed[0].span(), 0..11);
         assert_eq!(capture.gaps, 0, "记账纠正不是 Gap");
+    }
+
+    /// **T13：向后 resync 纠正必须在裁掉的边界前淡出。**
+    ///
+    /// 【为什么这是问题一的回归】向后纠正只做 `truncate`，保留下来的最后一帧是满幅；
+    /// 紧随其后的新块从零淡入 —— 边界处是一次"满幅 → 零"的阶跃，被原样烤进快照，
+    /// 播放时如实还原成一声"咔"。向前纠正早就有 `fade_active_tail_out` 配对，
+    /// 向后纠正此前没有。
+    #[test]
+    fn a_backward_resync_fades_before_it_trims() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(0, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true)),
+            CaptureOutcome::Captured
+        );
+
+        // 宿主位置比我们少记 4 帧：向后纠正到 4，并把 4..8 裁掉。
+        let (_, view) = block(4, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.resync_limit_frames = 64;
+        context.pinned_recent = true;
+        capture.on_block_with_context(view, context);
+
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 1, "纠正不是 seek，不得另起一段");
+        assert_eq!(sealed[0].span(), 0..8);
+        let plane = &sealed[0].planes[0];
+        assert_eq!(
+            plane[3], 0.0,
+            "边界前的最后一帧必须已经淡到零（原值是 3/1024）"
+        );
+        assert!(
+            plane[2] < 2.0 / 1024.0 * 0.5,
+            "边界前的整段淡出必须真的衰减：{}",
+            plane[2]
+        );
     }
 }

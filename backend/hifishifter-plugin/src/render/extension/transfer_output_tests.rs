@@ -1246,6 +1246,57 @@ fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
     );
 }
 
+/// **T12：第一块是静音时，它的帧数也必须计入前导静音。**
+///
+/// 【为什么这是问题一的回归】VEGAS 的窗口从**第一块**开始就钉住位置。旧判据
+/// `had && raw_start == last_raw` 在第一块上恒假（`had == false`），于是第一块的
+/// 静音一次都没被累积 —— 窗口前段的静音要么全丢、要么要多两块才立起来，
+/// 表现为"0.4 s 附近浮动"的一次源切换。
+#[test]
+fn the_first_silent_block_accumulates_the_lead_in() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let context = pinned_context(1_000);
+    owner.streams[stream.index()].note_activity(0x9000);
+    owner.streams[stream.index()].note_block_silence(true);
+    let first = owner.note_stream_block(stream, &context, 256, true, false);
+    assert_eq!(first.preceding_silent_frames, 0, "本块之前没有任何静音");
+
+    // 第二块仍静音：它读到的 `preceding_silent_frames` 必须包含第一块的 256 帧。
+    owner.streams[stream.index()].note_activity(0x9000);
+    owner.streams[stream.index()].note_block_silence(true);
+    let second = owner.note_stream_block(stream, &context, 256, false, false);
+    assert_eq!(
+        second.preceding_silent_frames, 256,
+        "第一块（had == false）的静音必须被累积"
+    );
+}
+
+/// **T12：没有输入平面（宿主标了 silence_flags）与全零平面在沉默判据上是同一件事。**
+///
+/// 【为什么必须钉住】`note_block_silence` 旧入参要求 `block.has_audio()`，于是
+/// "宿主标了静音"被当成"没有证据" —— 整段起播窗口的静音一次都记不下来。
+#[test]
+fn a_block_without_audio_planes_counts_as_silent() {
+    let block = crate::transfer::capture::InputBlock {
+        start: 0,
+        frames: 8,
+        sample_rate: 48_000.0,
+        planes: [None, None],
+        playing: true,
+    };
+    assert!(block_is_silent(&block), "空平面必须被判成静音");
+    let zeros: &'static [f32] = Box::leak(vec![0.0_f32; 8].into_boxed_slice());
+    let block = crate::transfer::capture::InputBlock {
+        start: 0,
+        frames: 8,
+        sample_rate: 48_000.0,
+        planes: [Some(zeros), Some(zeros)],
+        playing: true,
+    };
+    assert!(block_is_silent(&block), "全零平面同样判成静音");
+}
+
 /// **窗口一旦见到"逐块完全相同的非零内容"就立刻作废。**
 ///
 /// 【为什么这条与上一条并存】FL Studio 停播时 `kPlaying` 仍为 1、内容逐块相同。
