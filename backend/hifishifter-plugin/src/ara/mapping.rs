@@ -41,6 +41,15 @@ pub struct AraDocument {
     /// 播放区间（≈ Clip）。
     #[serde(default, rename = "playbackRegions")]
     pub playback_regions: Vec<AraPlaybackRegion>,
+    /// 每个 region sequence 的宿主句柄，**与扁平序列顺序一一对应**（0 = 已销毁）。
+    ///
+    /// 【为什么不放进 `AraRegionSequence`】序列属性里没有句柄（ARA 的
+    /// `ARARegionSequenceProperties` 只有 name / orderIndex / color），能拿到稳定
+    /// 令牌的只有 `createRegionSequence` 的 model-ref key。它与 `region_sequence_index`
+    /// 共用同一套扁平下标，两者对齐才能把"region 身上的旧下标"翻译成"它真正所属的
+    /// 序列槽位"。
+    #[serde(default, skip)]
+    pub sequence_refs: Vec<u64>,
 }
 
 /// 一个 `ARAAudioSource`。
@@ -139,6 +148,14 @@ pub struct AraPlaybackRegion {
     /// 探针的 dump 没有这一项，因此允许缺席。
     #[serde(default, rename = "regionSequenceIndex")]
     pub region_sequence_index: Option<usize>,
+    /// 宿主给的 region sequence 句柄（`ARARegionSequenceRef` 的原始地址）。
+    ///
+    /// 【为什么需要它】`region_sequence_index` 是**扁平位置下标**：宿主销毁一条
+    /// 序列再建一条时，新序列换 slot、换 key，而存活 region 仍带着旧下标。按位置
+    /// 归属会让同一批 clip 分裂到两个 track id（用户看到"分割后多出一条轨"）。
+    /// 句柄在文档内稳定，按它重新解析才能把 region 钉回它真正的序列。
+    #[serde(default, rename = "regionSequenceRef")]
+    pub sequence_model_ref: Option<u64>,
     /// 在修改时间轴上的起点（秒）。
     #[serde(default, rename = "startInModificationTime")]
     pub start_in_modification_time: f64,
@@ -402,8 +419,50 @@ pub fn has_observed_time_stretch(doc: &AraDocument) -> bool {
     })
 }
 
-/// 每条 region 归属的 region sequence 下标。
+/// 每条 region 归属的 region sequence 下标（**未压缩的扁平槽位**）。
 fn region_sequence_of(doc: &AraDocument) -> Result<Vec<usize>, MappingError> {
+    // 【首选：按宿主句柄解析】`sequence_model_ref` 在文档内稳定，不受"宿主销毁一条
+    // 序列再建一条"影响。`region_sequence_index` 是扁平位置下标，序列重建后会让
+    // 存活 region 指向一个语义已变的槽位 —— 那正是"分割后同一批 clip 分裂到两条轨"
+    // 的来源。
+    if !doc.sequence_refs.is_empty() {
+        let mut ref_to_slot: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for (slot, reference) in doc.sequence_refs.iter().enumerate() {
+            if *reference != 0 {
+                ref_to_slot.entry(*reference).or_insert(slot);
+            }
+        }
+        let mut unresolved = 0usize;
+        let resolved = doc
+            .playback_regions
+            .iter()
+            .map(|region| {
+                let by_ref = region
+                    .sequence_model_ref
+                    .and_then(|reference| ref_to_slot.get(&reference).copied());
+                if by_ref.is_none() && region.sequence_model_ref.is_some() {
+                    unresolved += 1;
+                }
+                by_ref
+                    // 句柄查不到（旧宿主 / 探针 dump）：退回 region 自己记的位置。
+                    .or(region.region_sequence_index)
+                    // 两者都没有：归到首序列（与既有兜底同口径）。
+                    .unwrap_or(0)
+            })
+            .collect();
+        if unresolved > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.region-sequence-ref",
+                format_args!(
+                    "[ara] {unresolved} playback region(s) reference an unknown region \
+                     sequence; falling back to their recorded slot"
+                ),
+            );
+        }
+        return Ok(resolved);
+    }
     if doc
         .playback_regions
         .iter()
@@ -539,7 +598,18 @@ pub struct MappingIdentities {
     ///
     /// 【为什么不是 persistentID】`ARARegionSequenceProperties` 没有这个字段（见上方
     /// `AraRegionSequence` 的说明），宿主给的稳定令牌只有 model-ref key。
+    ///
+    /// 【为什么是**全长度**（含已销毁槽位）】它与 `AraDocument::sequence_refs`、
+    /// `region_sequence_index` 共用同一套扁平下标。过滤掉已销毁槽位会让后续所有
+    /// 身份整体前移一位 —— 新序列拿到别人的 id、真正的新轨退回位置身份，
+    /// 正是"分割后多出一条轨"的形状。已销毁槽位在这里留空串，由
+    /// [`Self::live_sequences`] 单独表达"这条轨不该出现"。
     pub sequence_ids: Vec<String>,
+    /// 与 `sequence_ids` 同下标的存活位（`false` = 该序列已被宿主销毁）。
+    ///
+    /// 【为什么必须与 `sequence_ids` 分开】空串既可能是"已销毁"，也可能是
+    /// "宿主没给 key 的活序列"。前者不该出现在时间线上，后者应按位置身份保留。
+    pub live_sequences: Vec<bool>,
 }
 
 /// ARA 文档 → `TimelineState`（整份成功或整份失败）。
@@ -599,13 +669,26 @@ fn ara_document_to_timeline_reporting_with_identities(
         .collect();
 
     let mut tracks: Vec<Value> = Vec::new();
-    let mut track_ids: Vec<String> = Vec::new();
+    // 【为什么是 `Option`】已销毁的序列槽位在时间线上**不该出现**。宿主分割时
+    // 常销毁旧序列、建新序列；旧槽位若仍生成一条 `ara-track-{position}` 轨，
+    // 用户就会看到"原轨空了、新轨有片段"的两轨中间态。`None` 让该槽位不产生
+    // 轨道，但保留下标对齐（`ownership` 用的仍是未压缩的扁平槽位）。
+    let mut track_ids: Vec<Option<String>> = Vec::new();
+    let live_sequences = identities.map(|ids| ids.live_sequences.as_slice());
     for (position, sequence) in doc
         .musical_contexts
         .iter()
         .flat_map(|context| context.region_sequences.iter())
         .enumerate()
     {
+        let live = live_sequences
+            .and_then(|live| live.get(position))
+            .copied()
+            .unwrap_or(true);
+        if !live {
+            track_ids.push(None);
+            continue;
+        }
         // 【身份用宿主的 model-ref key，不是 persistentID】`ARARegionSequenceProperties`
         // 只有 name / orderIndex / musicalContextRef / color（`ARAInterface.h:775-793`）
         // —— **没有** persistentID（audio source / modification / processing algorithm
@@ -630,8 +713,11 @@ fn ara_document_to_timeline_reporting_with_identities(
             // 轨道色取宿主给的序列色（无则空串 ⇒ 内核用默认色）。
             "color": sequence.color.clone().unwrap_or_default(),
         }));
-        track_ids.push(id);
+        track_ids.push(Some(id));
     }
+    // 第一条存活轨道：region 指向已销毁序列时的落点（同一批片段不能因为宿主
+    // 重建序列而整批消失）。
+    let fallback_track = track_ids.iter().flatten().next().cloned();
 
     let ownership = region_sequence_of(doc)?;
     let mut clips: Vec<Value> = Vec::new();
@@ -639,7 +725,14 @@ fn ara_document_to_timeline_reporting_with_identities(
     let mut skipped: Vec<SkippedRegion> = Vec::new();
     for (index, region) in doc.playback_regions.iter().enumerate() {
         let sequence_index = ownership.get(index).copied().unwrap_or(0);
-        let Some(track_id) = track_ids.get(sequence_index) else {
+        // 【越界与"已销毁槽位"是两件事】越界说明文档本身不一致（宿主给了不存在的
+        // 下标）—— 跳过，与既有语义一致。已销毁槽位（`Some(None)`）则是宿主分割时
+        // 重建序列的常态：落回第一条存活轨道，片段不能因此整批消失。
+        let track_id = match track_ids.get(sequence_index) {
+            Some(slot) => slot.clone().or_else(|| fallback_track.clone()),
+            None => None,
+        };
+        let Some(track_id) = track_id else {
             skipped.push(SkippedRegion {
                 index,
                 reason: SkipReason::UnknownRegionSequence,
@@ -1422,6 +1515,7 @@ mod tests {
         let identities = MappingIdentities {
             region_keys: vec![11, 22, 33],
             sequence_ids: vec![String::new()],
+            live_sequences: vec![true],
         };
         let before =
             ara_document_to_timeline_with_identities(&doc, &identities).expect("document maps");
@@ -1442,6 +1536,7 @@ mod tests {
             &MappingIdentities {
                 region_keys: vec![22, 33],
                 sequence_ids: vec![String::new()],
+                live_sequences: vec![true],
             },
         )
         .expect("document maps");
@@ -1884,6 +1979,64 @@ mod tests {
         assert_eq!(
             outcome.timeline.tracks[0].color, "#3366cc",
             "宿主的序列颜色必须成为轨道颜色"
+        );
+    }
+
+    /// **宿主重建 region sequence 不得把同一批片段拆到两条轨。**
+    ///
+    /// 【为什么这是问题四的主回归】宿主分割 item 时常 `destroyRegionSequence(旧)` +
+    /// `createRegionSequence(新)`。旧实现按扁平位置下标归属，新序列换 slot 后
+    /// 存活 region 仍指向旧槽 ⇒ 旧槽生成一条空轨、新槽生成一条有片段的轨 ——
+    /// 用户看到"第 1 次分割多出一条轨，第 2 次分割旧轨才消失"。
+    #[test]
+    fn a_rebuilt_region_sequence_does_not_split_one_take_across_two_tracks() {
+        let mut doc: AraDocument = serde_json::from_str(
+            r#"{
+                "audioSources": [{ "persistentID": "src", "sampleRate": 48000, "sampleCount": 480000 }],
+                "audioModifications": [{ "persistentID": "mod", "audioSourcePersistentID": "src" }],
+                "musicalContexts": [{ "regionSequences": [
+                    { "name": "old", "orderIndex": 0 },
+                    { "name": "new", "orderIndex": 0 }] }],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "src", "audioModificationPersistentID": "mod",
+                      "regionSequenceIndex": 1, "regionSequenceRef": 42,
+                      "startInModificationTime": 0.0, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 0.5 },
+                    { "audioSourcePersistentID": "src", "audioModificationPersistentID": "mod",
+                      "regionSequenceIndex": 1, "regionSequenceRef": 42,
+                      "startInModificationTime": 0.5, "durationInModificationTime": 0.5,
+                      "startInPlaybackTime": 0.5, "durationInPlaybackTime": 0.5 }]
+            }"#,
+        )
+        .expect("document parses");
+        // 旧序列 7 已被宿主销毁，新序列 42 存活。
+        doc.sequence_refs = vec![7, 42];
+        let identities = MappingIdentities {
+            region_keys: vec![11, 22],
+            sequence_ids: vec!["old".into(), "new".into()],
+            live_sequences: vec![false, true],
+        };
+        let outcome =
+            ara_document_to_timeline_with_identities(&doc, &identities).expect("document maps");
+        assert_eq!(
+            outcome.timeline.tracks.len(),
+            1,
+            "已销毁的序列不得留下一条空轨"
+        );
+        assert_eq!(outcome.timeline.clips.len(), 2, "两个半段都必须保留");
+        assert!(
+            outcome
+                .timeline
+                .clips
+                .iter()
+                .all(|clip| clip.track_id == "ara-sequence-new"),
+            "两个半段必须落在同一条存活轨道上：{:?}",
+            outcome
+                .timeline
+                .clips
+                .iter()
+                .map(|clip| clip.track_id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 }

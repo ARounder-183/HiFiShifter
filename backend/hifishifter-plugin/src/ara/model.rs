@@ -791,12 +791,12 @@ impl ModelHandle {
             .collect();
         let identities = crate::ara::mapping::MappingIdentities {
             region_keys: live_keys,
-            sequence_ids: self
-                .sequence_persistent_ids
-                .iter()
-                .enumerate()
-                .filter(|(slot, _)| !self.destroyed_sequences.contains(slot))
-                .map(|(_, id)| id.clone())
+            // 【为什么不再过滤已销毁槽位】过滤会让后续身份整体前移一位：新序列
+            // 拿到别人的 id、真正的新轨退回位置身份（"分割后多出一条轨"的成因）。
+            // 已销毁槽位在这里保留空串，由 `live_sequences` 表达"不生成轨道"。
+            sequence_ids: self.sequence_persistent_ids.clone(),
+            live_sequences: (0..self.sequence_persistent_ids.len())
+                .map(|slot| !self.destroyed_sequences.contains(&slot))
                 .collect(),
         };
         match crate::ara::mapping::ara_document_to_timeline_with_identities(&document, &identities)
@@ -1513,6 +1513,11 @@ impl RegionSequences for ModelHandle {
         }
         self.sequence_persistent_ids
             .insert(index, sequence_key.to_string());
+        // 与扁平序列槽位一一对应：region 的 `sequence_model_ref` 靠它翻译回槽位。
+        while self.document.sequence_refs.len() < index {
+            self.document.sequence_refs.push(0);
+        }
+        self.document.sequence_refs.insert(index, sequence_key);
         if let Some(handle) = context.object_handle() {
             self.sequence_index_by_handle.insert(handle, index);
         }
@@ -2167,6 +2172,11 @@ impl PlaybackRegions for ModelHandle {
                 audio_source_persistent_id: source_persistent_id.clone(),
                 audio_modification_persistent_id: modification_persistent_id,
                 region_sequence_index: sequence_index,
+                // 宿主句柄：按它解析归属，不受"序列重建换 slot"影响（见
+                // `AraPlaybackRegion::sequence_model_ref`）。
+                sequence_model_ref: properties
+                    .region_sequence()
+                    .map(|reference| reference.as_raw() as u64),
                 start_in_modification_time: properties.start_in_modification_time(),
                 duration_in_modification_time: properties.duration_in_modification_time(),
                 start_in_playback_time: properties.start_in_playback_time(),
@@ -2295,6 +2305,10 @@ impl PlaybackRegions for ModelHandle {
         region.is_timestretch_enabled = (flags & 1) != 0;
         region.has_content_based_fade_at_head = (flags & 8) != 0;
         region.has_content_based_fade_at_tail = (flags & 4) != 0;
+        // 句柄跟随宿主的最新交付：序列重建后 region 会被重新挂到新序列上。
+        region.sequence_model_ref = properties
+            .region_sequence()
+            .map(|reference| reference.as_raw() as u64);
         log::info!(
             "[ara] playback_region updated #{}: startPlay={:.6}",
             state,

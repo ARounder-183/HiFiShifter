@@ -1536,9 +1536,36 @@ impl EditorSession {
                     return Ok(());
                 }
             } else if !document.workspace_timeline()?.clips.is_empty() {
-                return Err(
-                    "Conflict: host changed; local curves preserved, host is not ready".into(),
-                );
+                // 【为什么不再一律返回 Conflict】宿主改完内容后可能既不发
+                // `endEditing` 也不发 `notifyModelUpdates`（后台恢复、工程加载的
+                // 中段）。那不是用户能处置的冲突 —— 报错只会让窗口永久停在旧读数上，
+                // 而每一次后续操作都重复同一个错误。只要**我们确实观察到了**这次
+                // 内容变化（`last_content_change` 有记录），就继续用最后一份已发布的
+                // 时间线刷新界面（本地曲线仍叠加在上面），等宿主收口后由
+                // `remap_and_log` 自然覆盖。
+                //
+                // 没有观察记录却拿到 `ready == false` 才是真冲突：那说明宿主声称
+                // 输入不可用，而我们没有任何可归因的变化 —— 报出来，不要静默。
+                let observed_change = document.last_content_change.lock_or_recover().is_some();
+                if !observed_change {
+                    return Err(
+                        "Conflict: host changed; local curves preserved, host is not ready".into(),
+                    );
+                }
+                let stale = document
+                    .last_content_change
+                    .lock_or_recover()
+                    .is_none_or(|at| at.elapsed() >= crate::render::document::EDIT_SETTLE_GRACE);
+                if stale {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.ready.stale",
+                        format_args!(
+                            "[ara] the host changed the model but never closed the edit \
+                             session; publishing the last timeline until it does"
+                        ),
+                    );
+                }
             }
         }
         let (snapshot, scope, projection) = document.workspace_snapshot()?;

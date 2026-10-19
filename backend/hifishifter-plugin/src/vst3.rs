@@ -1756,9 +1756,9 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
                 let stream =
-                    crate::transfer::capture::ProcessStream::from_mode(unsafe { (*data).process_mode });
-                let frames = unsafe { (*data).num_samples as usize };
-                let outputs = unsafe { (*data).outputs };
+                    crate::transfer::capture::ProcessStream::from_mode((*data).process_mode);
+                let frames = (*data).num_samples as usize;
+                let outputs = (*data).outputs;
                 if outputs.is_null() {
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 } else {

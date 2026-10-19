@@ -1105,6 +1105,16 @@ const HOST_ENUMERATION_INTERVAL: std::time::Duration = std::time::Duration::from
 /// 忽略，又足以让用户在放手后立刻看到倒放生效。
 pub(crate) const FACTS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// 超过这个时间没有成功完整采样过，就认为 UI 定时器曾停摆（后台/挂起）。
+///
+/// 【为什么需要】`resume_resync` 只挂在 `IComponent::setActive(true)` 上，而宿主
+/// 仅切换窗口焦点时不会再调 `setActive`。后台期间定时器被降频或停摆后，前台回来
+/// 的第一轮仍会命中"令牌未变 + 1s 内采样过"的早退，`ui_tracks` / `region_items`
+/// 停在暂停前的快照 —— 用户看到 Clip 重新变成"等待宿主完成音频分配"。
+/// 与 `FACTS_REFRESH_INTERVAL` 同量级：正常路径每 1s 必然重采一次，超过它说明
+/// 定时器确实漏跑了。
+const STALE_SAMPLE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// VST3 离线 `setupProcessing` 里等待后台准备的最长时间。
 ///
 /// 【为什么是 15 s 而不是更短】这个调用在宿主的 prepare 线程/UI 线程上同步等待，而
@@ -1956,13 +1966,27 @@ impl ExtensionOwner {
         if !self.host_query_authorized(&stamp) {
             return;
         }
-        if throttled {
+        // 【前台恢复不依赖 setActive】后台期间定时器可能停摆；超过一个刷新周期
+        // 没有成功采样过，就强制一次完整枚举（清掉采样时刻，让 `refresh_ui_inventory`
+        // 跳过"令牌未变"的早退），并跳过实例级节流。强制重采在事实未变时无副作用
+        // （见 `refresh_ui_inventory` 的 `token_changed` 分支）。
+        let stale_sample = stamp
+            .0
+            .ui_inventory_sampled_at
+            .lock_or_recover()
+            .is_none_or(|at| at.elapsed() >= STALE_SAMPLE_GRACE);
+        if stale_sample {
+            *stamp.0.ui_inventory_sampled_at.lock_or_recover() = None;
+        }
+        if throttled && !stale_sample {
             let mut last = self.last_enumeration.lock_or_recover();
             let now = std::time::Instant::now();
             if last.is_some_and(|last| now.duration_since(last) < self.enumeration_interval()) {
                 return;
             }
             *last = Some(now);
+        } else if throttled {
+            *self.last_enumeration.lock_or_recover() = Some(std::time::Instant::now());
         }
         self.refresh_host_geometry();
         // editor-only通常没有所属take；一个工程GUI必须驱动真正隐藏playback实例的只读采集。
@@ -2439,7 +2463,17 @@ impl ExtensionOwner {
                 Ordering::Release,
             );
             if let Ok(bound) = &geometry {
+                // 【为什么按本轮枚举结果回收】这张表此前只插不删：宿主销毁一条 region
+                // 之后，旧 key → item GUID 的边会永远留着。`present_host_inventory`
+                // 的 `present` 集合与 `decorate_host_media_locked` 的 `claimed` 都读它，
+                // 于是分割后旧边会让"升级成 ara-item-{guid} 的 clip"被误判为仍在
+                // 清单里（或反过来），出现"原轨片段消失 / 新轨多出来"的中间态。
+                // 入参是 `host_geometries()` 的完整枚举，没出现的 key 就是宿主
+                // 已不再报告的那一批。
+                let live: std::collections::BTreeSet<u64> =
+                    bound.iter().map(|entry| entry.region_key).collect();
                 let mut items = stamp.0.region_items.lock_or_recover();
+                items.retain(|key, _| live.contains(key));
                 for entry in bound {
                     items.insert(entry.region_key, entry.geometry.item_id.clone());
                 }
@@ -6190,6 +6224,14 @@ impl ExtensionOwner {
         // `writer_id`。角色集合只有两个时刻会变：绑定（这里）与分配变化
         // （见 `new_with_renderer_observer` 的观察器），两处都要报。
         document.report_playback_ownership();
+        // 【新文档必须从一次完整枚举开始】`ui_tracks` / `region_items` 是文档级
+        // 缓存，重绑后是一份空表；只靠 20ms 定时器要等到节流窗口过期才会填。
+        // 这里同步采一次，界面在绑定成功的当帧就能看到 item 与授权媒体。
+        for renderer in document.renderer_owners() {
+            renderer.refresh_host_geometry();
+            renderer.refresh_ui_inventory();
+            renderer.prepare();
+        }
         Ok(raw)
     }
 

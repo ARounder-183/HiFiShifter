@@ -1092,7 +1092,53 @@ impl DocumentSession {
     /// （见 `render::extension::HostAudioState`），文案按 catalog 本地化。
     pub(crate) fn decorate_host_audio(&self, payload: &mut serde_json::Value) {
         let owners = self.renderer_owners();
-        let Some(owner) = owners.iter().find(|owner| owner.is_non_playback()).cloned() else {
+        // 【为什么必须比对文档身份】重开工程时常见"新旧文档各有一个 renderer"
+        // （旧文档还没关）。此时 `owners` 非空，随便挑一个非 playback 实例会拿到
+        // **另一份文档**的读数（通常是 `Ready`），而本会话的界面其实什么都没拿到 ——
+        // 用户看到的是"没有报错、但没有片段，删掉插件再加才好"。
+        let owner = owners
+            .iter()
+            .find(|owner| {
+                owner.is_non_playback()
+                    && owner.editor_document().is_ok_and(|bound| bound.id == self.id)
+            })
+            .cloned();
+        let Some(owner) = owner else {
+            // renderer 存在但都不属于本会话的文档：报一个**终态、可行动**的读数，
+            // 而不是沿用另一份文档的 `Ready`。
+            let bound_elsewhere = owners.iter().any(|owner| {
+                owner.is_non_playback()
+                    && owner.editor_document().is_ok_and(|bound| bound.id != self.id)
+            });
+            if bound_elsewhere {
+                let waiting = payload["clips"].as_array().map_or(0, |clips| {
+                    clips
+                        .iter()
+                        .filter(|clip| {
+                            clip.get("source_path")
+                                .and_then(|value| value.as_str())
+                                .is_none_or(str::is_empty)
+                        })
+                        .count()
+                });
+                payload["host_audio"] = serde_json::json!({
+                    "state": "not_bound",
+                    "waiting_clips": waiting,
+                    "skipped_clips": self.skipped_regions.lock_or_recover().len(),
+                    "reason": "bound-to-other-document",
+                });
+                payload["ara_binding"] = serde_json::json!({
+                    "bound": false,
+                    "bound_once": self.ever_had_renderer(),
+                    "renderers": owners.len(),
+                    "reason": "bound-to-other-document",
+                    "documents": owners
+                        .iter()
+                        .filter_map(|owner| owner.bound_document_id())
+                        .collect::<Vec<_>>(),
+                });
+                return;
+            }
             // 有 renderer 但没有非 playback 实例：GUI 挂在别的角色上，沿用旧行为
             // （不写读数），不能误报成"未绑定"。
             if !owners.is_empty() {
@@ -1772,6 +1818,26 @@ impl DocumentSession {
             {
                 return Err("workspace track parent cycle".into());
             }
+        }
+        // 【为什么留一行日志】"旧轨在第 2 次分割时才消失"曾是用户报障的一部分：
+        // 一条 ARA 轨既没有 clip、也不在宿主清单里，它被丢掉本身是对的，但没有任何
+        // 痕迹能回答"它是什么时候、为什么消失的"。限流日志让这条时序可归因。
+        let dropped: Vec<String> = timeline
+            .tracks
+            .iter()
+            .filter(|track| !tracks.contains(&track.id))
+            .map(|track| track.id.clone())
+            .collect();
+        if !dropped.is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.workspace.track-dropped",
+                format_args!(
+                    "[ara] dropping {} track(s) with no clip and no host entry: {}",
+                    dropped.len(),
+                    dropped.join(",")
+                ),
+            );
         }
         timeline.tracks.retain(|track| tracks.contains(&track.id));
         timeline

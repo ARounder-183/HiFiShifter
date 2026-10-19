@@ -47,9 +47,15 @@ pub(crate) struct WorkspaceSnapshot {
 ///   不会互相阻塞到死锁。
 /// - 单把锁内的长操作（宿主 API 调用、神经推理）必须先把数据 `clone` 出来再解锁 ——
 ///   见 `render/extension.rs` 的"宿主调用始终不持内部锁"。
+/// 宿主内容变化后等待其收口的宽限期。
+///
+/// 与 bridge 的 `DEFERRED_EDITING_GRACE` 同量级：一次编辑从内容回调到
+/// `endEditing` 通常在毫秒级；超过这个窗口仍未收口，就按"宿主不再收口"处理 ——
+/// 保留最后一份已发布的时间线继续刷新界面，而不是把窗口永久锁在冲突状态上。
+pub(crate) const EDIT_SETTLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Default)]
-pub(crate) struct DocumentSession {
-    controller: AtomicUsize,
+pub(crate) struct DocumentSession {    controller: AtomicUsize,
     alive: AtomicBool,
     /// 本文档是否曾经成功 attach 过 renderer（重绑/关闭后用于区分"还没绑"与"绑过又没了"）。
     ever_had_renderer: AtomicBool,
@@ -201,6 +207,15 @@ pub(crate) struct DocumentSession {
     /// 有了这个标志，会话中的未就绪窗口被识别为**暂缓**而不是冲突 —— 它会随
     /// `endEditing` 自然收敛，不需要用户干预，也不该报错。
     pub editing_session: AtomicBool,
+    /// 最近一次因宿主内容变化而撤销渲染许可的时刻（见 [`Self::clear_renderers`]）。
+    ///
+    /// 【为什么需要它】`ready == false` 有两种完全不同的来源：宿主正在一次编辑
+    /// 会话中（`editing_session` 已表达，必然收敛），与宿主改完内容后**不再收口**
+    /// （不发 `endEditing`、也不发 `notifyModelUpdates`）。后者此前被
+    /// `ensure_loaded` 当成"宿主冲突"永久拒绝，用户每做一次操作就看到一条
+    /// `Conflict: host changed`，而窗口再也刷不出来。用这个时刻把"刚刚才变过、
+    /// 正在等宿主收口"与"确实没有可用输入"分开。
+    pub last_content_change: Mutex<Option<std::time::Instant>>,
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
@@ -1699,6 +1714,9 @@ impl DocumentSession {
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         self.ready.store(false, Ordering::Release);
+        // 记下"宿主刚刚改过内容"：`ensure_loaded` 据此把紧随其后的未就绪窗口
+        // 当成"等宿主收口"而不是"宿主冲突"（见字段说明）。
+        *self.last_content_change.lock_or_recover() = Some(std::time::Instant::now());
         for owner in self.renderer_owners() {
             owner.cancel_preparation();
             // 让 revision 门（`processed_ready` / `raw_tape_ready`）与输出代次失效，

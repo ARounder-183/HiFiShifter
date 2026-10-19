@@ -1341,6 +1341,8 @@ fn regions_for(timeline: &TimelineState) -> Vec<crate::ara::AraPlaybackRegion> {
                 audio_source_persistent_id: source,
                 audio_modification_persistent_id: clip.id.clone(),
                 region_sequence_index: Some(0),
+                // Transfer 的时间线只有一个合成序列，没有宿主句柄可归属。
+                sequence_model_ref: None,
                 start_in_modification_time: take.source_start_sec,
                 duration_in_modification_time: take.source_end_sec - take.source_start_sec,
                 start_in_playback_time: clip.start_sec,
