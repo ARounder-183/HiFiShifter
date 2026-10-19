@@ -523,8 +523,17 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
         K_RESULT_OK
     );
-    assert_eq!(&left[..4], &[0.25; 4]);
-    assert_eq!(&right[..4], &[0.5; 4]);
+    // 解除静音是一次"静音 → 有声"的源切换：去咔会给前 64 帧做淡入，而不是
+    // 直接跳到目标电平（阶跃正是用户听到的"咔"）。这里断言淡入的形状与方向，
+    // 不要求第一帧就到目标值。
+    assert!(
+        left[0] > 0.0 && left[3] < 0.25 && left[0] < left[1] && left[1] < left[2] && left[2] < left[3],
+        "解除静音必须从零单调淡入：{left:?}"
+    );
+    assert!(
+        right[0] > 0.0 && right[3] < 0.5 && right[0] < right[1] && right[1] < right[2] && right[2] < right[3],
+        "解除静音必须从零单调淡入：{right:?}"
+    );
     document.close();
 }
 

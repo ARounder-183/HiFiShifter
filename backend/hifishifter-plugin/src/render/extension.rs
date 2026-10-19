@@ -3358,6 +3358,7 @@ impl ExtensionOwner {
         // `tail` 里 0 是最旧的、63 是最新的；短块淡出必须从**最新的 fade 帧**开始，
         // 否则边界处仍会从一段旧样本跳到零。
         let base = OUTPUT_DECLICK_FRAMES - fade;
+        let mut any_signal = false;
         for channel in 0..declared {
             // SAFETY: 宿主声明 `num_channels` 个平面指针，非空平面至少含 `frames` 帧。
             let plane = unsafe { *output.channel_buffers.add(channel) };
@@ -3369,6 +3370,9 @@ impl ExtensionOwner {
                     let old = f32::from_bits(
                         state.tail[channel][base + index].load(Ordering::Relaxed),
                     );
+                    if old != 0.0 {
+                        any_signal = true;
+                    }
                     // 分母用 `fade` 而不是常量：块短于 64 帧时也必须在本块内淡到零，
                     // 否则块尾留下非零值，下一块从零起就是一次新的阶跃。
                     let gain = 1.0 - (index + 1) as f32 / fade as f32;
@@ -3384,8 +3388,14 @@ impl ExtensionOwner {
                 unsafe { std::ptr::write_bytes(plane, 0, frames) };
             }
         }
-        // 本块含一段淡出，不是全静音；保守地报"非静音"（宿主不会因此跳过处理）。
-        output.silence_flags = 0;
+        // 【为什么按实际输出报静音位】本块通常含一段淡出（非静音）；但尾巴本来就
+        // 全零时（首次静音、或连续静音的第二块），整块确实全是零 —— 这时如实报
+        // 静音，宿主才能跳过下游处理。恒报"非静音"会在每次静音开始时白跑一整条链路。
+        output.silence_flags = if any_signal {
+            0
+        } else {
+            (1_u64 << declared.min(64)) - 1
+        };
         // 尾巴与输出源一起归零：下一块从静音起，不需要（也不该）再交叉淡化。
         for channel in 0..declared.min(2) {
             for index in 0..OUTPUT_DECLICK_FRAMES {

@@ -4894,6 +4894,30 @@ pub(crate) mod tests {
         );
         editor.close();
     }
+    /// **宿主改完内容却不再收口时，窗口必须继续可用，而不是永久 Conflict。**
+    ///
+    /// 【为什么这是问题二/三的主回归】`clear_renderers` 把 `ready` 按回 false，
+    /// 而它只在宿主发 `endEditing` / `notifyModelUpdates` 时才被 `remap_and_log`
+    /// 置回真。后台恢复与工程加载的中段常常两者都不发 —— 旧行为会让之后每一次
+    /// `ensure_loaded` 都返回 Conflict，窗口永久停在旧读数上。
+    #[test]
+    fn an_observed_change_without_end_editing_keeps_publishing() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+
+        // 宿主内容变化（记录时刻），随后不发收口。
+        document.clear_renderers();
+        document.editing_session.store(false, Ordering::Release);
+        document.revision.fetch_add(1, Ordering::AcqRel);
+        let result = editor.ensure_loaded(false);
+        assert!(
+            result.is_ok(),
+            "已观察到的内容变化必须继续发布最后一份时间线：{result:?}"
+        );
+        editor.close();
+    }
     /// 同一已打开会话只改变GUI清单代次，读取仍采纳新增/删除；不依赖重开或定时器抢跑。
     #[test]
     fn inventory_only_read_refreshes_existing_editor_without_resetting_parameter_history() {
