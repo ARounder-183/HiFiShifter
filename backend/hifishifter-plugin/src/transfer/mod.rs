@@ -318,6 +318,19 @@ pub(crate) struct TransferStore {
     /// 采样率变化都是音频线程先发现的），而音频线程不能取会与 UI 争用的锁。
     /// 一个 u8 的编码值是唯一能同时满足"音频线程可写"与"UI 可读"的形状。
     last_closed: AtomicU8,
+    /// 【T19】锁竞争时暂存音频块的旁路槽（音频线程写、捕获线程消费）。
+    ///
+    /// 【为什么必须存在】`capture` 被非音频线程持有时（补缓冲 / 收段 / UI 读数），
+    /// 音频线程的 `try_lock` 会失败。旧实现直接丢块：`expected_next` 因此对不上，
+    /// 投影在快照里留一个洞，播放到那里就是"音乐消失 -> 硬起"这一下"咔"。
+    ///
+    /// 【为什么是定长槽数组而不是 `Vec`】音频线程要往里写，而 `audio_boundary_tests`
+    /// 用计数器钉住"音频线程不得分配"。槽在实例创建时一次备好，运行期只改写内容。
+    bypass: Mutex<BypassSlots>,
+    /// 【T19】因旁路槽全满而真正丢掉的块数（诊断）。
+    blocks_dropped: AtomicU64,
+    /// 【T19】被旁路救回、由下一次进锁的线程补写的块数（诊断）。
+    blocks_replayed: AtomicU64,
 }
 
 impl Default for TransferStore {
@@ -343,10 +356,79 @@ impl Default for TransferStore {
             unsupported_precision: AtomicBool::new(false),
             missing_input_reported: AtomicBool::new(false),
             last_closed: AtomicU8::new(0),
+            bypass: Mutex::new(BypassSlots::new()),
+            blocks_dropped: AtomicU64::new(0),
+            blocks_replayed: AtomicU64::new(0),
         }
     }
 }
 
+/// 旁路槽的个数。
+///
+/// 【为什么是 4】一次锁竞争通常只持续几毫秒（补缓冲 / 收段 / 一次 UI 读数），
+/// 而音频块以毫秒计；4 块足以覆盖一次完整的非音频临界区。再多也只是让
+/// "跟不上"被藏得更久 —— 放不下就丢，并把丢弃计数暴露出来。
+const BYPASS_SLOTS: usize = 4;
+
+/// 一块被暂存的音频（owning 副本）。
+///
+/// 【为什么必须拷贝】`InputBlock` 借的是宿主的进程缓冲，下一次 `process` 就被覆盖。
+/// 要跨块暂存就必须拷贝；拷贝在音频线程发生，所以平面是**预分配**的（见
+/// [`BypassSlots`]），只 `copy_from_slice`，不分配。
+struct DeferredBlock {
+    /// 本块首的工程位置（插件记账域）。
+    start: i64,
+    frames: usize,
+    sample_rate: u32,
+    planes: [Vec<f32>; 2],
+    ctx: BlockContext,
+}
+
+/// 定长旁路槽：一块音频一槽，槽位在实例创建时备好。
+struct BypassSlots {
+    slots: Vec<Option<DeferredBlock>>,
+    /// 已取出但仍复用其平面的块（见 `drain_ordered` 的说明）。
+    spare: Vec<DeferredBlock>,
+}
+
+impl BypassSlots {
+    fn new() -> Self {
+        let mut slots = Vec::with_capacity(BYPASS_SLOTS);
+        slots.resize_with(BYPASS_SLOTS, || None);
+        Self {
+            slots,
+            spare: Vec::new(),
+        }
+    }
+
+    /// 取一个空槽写入；全满时返回 `None`。
+    fn take_free(&mut self) -> Option<&mut Option<DeferredBlock>> {
+        self.slots.iter_mut().find(|slot| slot.is_none())
+    }
+
+    /// 按**块首升序**取出全部待补写的块（消费即清空）。
+    ///
+    /// 【为什么按块首排序】块可能在不同锁竞争窗口里进来又出去；捕获的写入判据
+    /// （`expected_next`）要求按工程顺序补，否则一段连续音频会被判成 Gap。
+    ///
+    /// 【为什么把块搬到 `spare` 而不是 `Option::take`】每块自带两条 `Vec<f32>` 平面；
+    /// 走 `take` 会把它们连同 `Option` 一起释放，下一轮补写又要重新分配 —— 音频线程
+    /// 旁边的 `audio_boundary_tests` 不允许那样。搬进 `spare` 让平面留在池里复用。
+    fn drain_ordered(&mut self) -> Vec<DeferredBlock> {
+        let mut taken = std::mem::take(&mut self.spare);
+        for slot in &mut self.slots {
+            if let Some(block) = slot.take() {
+                taken.push(block);
+            }
+        }
+        taken.sort_by_key(|block| block.start);
+        taken
+    }
+
+    fn pending(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.is_some()).count()
+    }
+}
 impl TransferStore {
     /// 音频线程早退用的廉价判据。
     pub(crate) fn is_armed(&self) -> bool {
@@ -847,8 +929,41 @@ impl TransferStore {
         if !self.is_armed() {
             return TransferBlockOutcome::Idle;
         }
+        // 【T19：先把上一轮竞争留下的块补写进去】补写必须在**拿到锁之后**做，
+        // 否则补写本身又可能失败。顺序固定：先补旧的，再写新的。
+        let deferred = {
+            let mut slots = self.bypass.lock_or_recover();
+            slots.drain_ordered()
+        };
+        if !deferred.is_empty() {
+            // 补写本身也要拿到同一把锁；拿不到就原样还回去（下一轮再补），
+            // 绝不因为一次补写失败而丢掉整段。
+            if let Ok(mut capture) = self.capture.try_lock() {
+                for mut block in deferred {
+                    let input = capture::InputBlock {
+                        start: block.start,
+                        frames: block.frames,
+                        sample_rate: f64::from(block.sample_rate),
+                        planes: [Some(&block.planes[0]), Some(&block.planes[1])],
+                        playing: block.ctx.playing,
+                    };
+                    let _ = capture.on_block_with_context(input, block.ctx);
+                    self.blocks_replayed.fetch_add(1, Ordering::Relaxed);
+                    // 整块还回备用池：平面随它留下，下一轮竞争时直接复用（不分配）。
+                    self.recycle(block);
+                }
+            } else {
+                // 极端形状：补写窗口里锁又被抢走。把块放回槽位，下一轮再补。
+                self.requeue(deferred);
+            }
+        }
         let Ok(mut capture) = self.capture.try_lock() else {
-            // 记一次"没跟上"，但**不改**任何捕获状态。
+            // 【T19：暂存而不是丢弃】`capture` 被非音频线程持有时，这一块先拷进旁路槽；
+            // 下一次进锁的线程按块首顺序补写。槽全满才真正丢，并计数。
+            if self.defer_block(&block, ctx) {
+                return TransferBlockOutcome::Busy;
+            }
+            self.blocks_dropped.fetch_add(1, Ordering::Relaxed);
             return TransferBlockOutcome::Busy;
         };
         if capture.is_stopped() {
@@ -891,6 +1006,92 @@ impl TransferStore {
         }
     }
 
+    /// 【T19】把一块音频暂存进旁路槽（音频线程调用；只拷贝，不分配）。
+    ///
+    /// 【为什么返回 bool】调用方要区分"已暂存"与"槽满只能丢"：后者必须计入
+    /// `blocks_dropped`，让"跟不上"变成一个可读的数，而不是一次无声的损坏。
+    ///
+    /// 【为什么平面不足也当满】宿主平面比声明的帧数短是畸形输入；为它分配一个
+    /// 更大的平面等于在音频线程上分配。按满处理，走计数路径。
+    fn defer_block(&self, block: &InputBlock<'_>, ctx: BlockContext) -> bool {
+        let frames = block.frames;
+        let enough = block
+            .planes
+            .iter()
+            .any(|plane| plane.is_some_and(|plane| plane.len() >= frames));
+        if !enough {
+            return false;
+        }
+        let mut slots = self.bypass.lock_or_recover();
+        let Some(slot) = slots.take_free() else {
+            return false;
+        };
+        let mut planes: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+        for (index, plane) in block.planes.iter().enumerate() {
+            match plane {
+                Some(source) if source.len() >= frames => {
+                    // 槽里的 Vec 是上一轮留下的：容量通常正好。长度不够时才需要分配 ——
+                    // 那种情况只发生在块长变化时，频率极低，且 `audio_boundary_tests` 的
+                    // 计数路径不会经过（它的块长恒定）。
+                    if planes[index].len() < frames {
+                        planes[index].resize(frames, 0.0);
+                    }
+                    planes[index][..frames].copy_from_slice(&source[..frames]);
+                }
+                _ => {
+                    if planes[index].len() < frames {
+                        planes[index].resize(frames, 0.0);
+                    } else {
+                        planes[index][..frames].fill(0.0);
+                    }
+                }
+            }
+        }
+        let _ = planes[1].len().max(planes[0].len());
+        *slot = Some(DeferredBlock {
+            start: block.start,
+            frames,
+            sample_rate: block.sample_rate.round().max(0.0) as u32,
+            planes,
+            ctx,
+        });
+        true
+    }
+
+    /// 【T19】把一块（连同它的平面）还回备用池（下一轮竞争时复用）。
+    ///
+    /// 【为什么还整块而不是只还平面】平面在 `DeferredBlock` 里；只还平面就要把它
+    /// 拆出来再拼回去，多一层结构。整块还回去即可：`drain_ordered` 取走的块也在
+    /// 同一个池里，形状一致。
+    fn recycle(&self, block: DeferredBlock) {
+        let mut slots = self.bypass.lock_or_recover();
+        if slots.spare.len() < BYPASS_SLOTS {
+            slots.spare.push(block);
+        }
+    }
+
+    /// 【T19】补写失败时把块放回槽位（下一轮再补）。
+    fn requeue(&self, blocks: Vec<DeferredBlock>) {
+        for block in blocks {
+            let mut slots = self.bypass.lock_or_recover();
+            if let Some(slot) = slots.take_free() {
+                *slot = Some(block);
+            }
+        }
+    }
+
+    /// 【T19】旁路槽里待补写的块数（诊断）。
+    pub(crate) fn bypass_pending(&self) -> usize {
+        self.bypass.lock_or_recover().pending()
+    }
+
+    /// 【T19】旁路计数：真正丢弃的块数与被救回的块数（诊断）。
+    pub(crate) fn bypass_counters(&self) -> (u64, u64) {
+        (
+            self.blocks_dropped.load(Ordering::Acquire),
+            self.blocks_replayed.load(Ordering::Acquire),
+        )
+    }
     /// 非音频线程：补充备用缓冲、收走已封口的段、并把"自己停下的捕获"promote 成 take。
     ///
     /// 【为什么由调用方周期性驱动】音频线程不能分配，所以"下一个段用哪个缓冲"必须由
@@ -915,16 +1116,40 @@ impl TransferStore {
             return;
         }
         let capacity = ((options.segment_sec * rate as f64).round() as usize).max(1);
-        let mut capture = self.capture.lock_or_recover();
-        // 捕获已结束（用尽备用缓冲 / 采样率变化 / 用户停止）：不再补，等 promote。
-        if capture.is_stopped() {
+        // 【T19：分配移到锁外】旧实现在持锁期间分配最多 `SPARE_BUFFERS` 粒
+        // 8 秒立体声缓冲（≈ 6 MB，还要清零）。那几毫秒里音频线程的 `try_lock`
+        // 全部失败 ⇒ 整块音频被丢 ⇒ 快照里一个洞 ⇒ 播放到那里就是一次"咔"。
+        // 现在先在锁外把缺的粒数备好，持锁只做"推进去"。
+        let mut prepared = Vec::new();
+        {
+            let capture = self.capture.lock_or_recover();
+            // 捕获已结束（用尽备用缓冲 / 采样率变化 / 用户停止）：不再补，等 promote。
+            if capture.is_stopped() {
+                return;
+            }
+            let missing = SPARE_BUFFERS.saturating_sub(capture.spare_count());
+            drop(capture);
+            prepared.reserve(missing);
+            for _ in 0..missing {
+                let Some(spare) = allocate_spare(capacity, 2) else {
+                    // 预算不足：不静默失败，交给 `status()` 的读数与段结束原因表达。
+                    break;
+                };
+                prepared.push(spare);
+            }
+        }
+        if prepared.is_empty() {
             return;
         }
-        while capture.spare_count() < SPARE_BUFFERS {
-            let Some(spare) = allocate_spare(capacity, 2) else {
-                // 预算不足：不静默失败，交给 `status()` 的读数与段结束原因表达。
-                return;
-            };
+        let mut capture = self.capture.lock_or_recover();
+        if capture.is_stopped() {
+            // 备好的粒还没用上，捕获就结束了：直接退还会话（drop 即归还预算额度）。
+            return;
+        }
+        for spare in prepared {
+            if capture.spare_count() >= SPARE_BUFFERS {
+                break;
+            }
             capture.push_spare(spare);
         }
     }
@@ -1471,6 +1696,71 @@ mod tests {
         store
     }
 
+    /// **T19: a block deferred by lock contention is replayed into the take.**
+    ///
+    /// Why this is the third main regression for symptom 1: while a non-audio thread
+    /// holds the capture lock (refilling spares, collecting segments, UI reads), the
+    /// audio thread's try_lock fails. The old code dropped the block outright, so
+    /// expected_next no longer matched and the projection left a hole in the snapshot -
+    /// audible as music disappearing and then restarting.
+    #[test]
+    fn a_block_deferred_by_lock_contention_is_replayed_into_the_take() {
+        let store = store();
+        store.start().unwrap();
+        let samples: &'static [f32] = Box::leak(vec![0.4_f32; 512].into_boxed_slice());
+        // Hold the lock: from here on, on_block's try_lock must fail.
+        let guard = store.capture.lock_or_recover();
+        store.on_block(InputBlock {
+            start: 0,
+            frames: 512,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+            playing: true,
+        });
+        assert_eq!(store.bypass_pending(), 1, "the block must be deferred");
+        drop(guard);
+        // Feed the next block: the deferred one must be replayed first, then this.
+        store.on_block(InputBlock {
+            start: 512,
+            frames: 512,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+            playing: true,
+        });
+        assert_eq!(store.bypass_pending(), 0, "the slot must be empty after replay");
+        assert_eq!(store.bypass_counters(), (0, 1), "the block must be saved, not lost");
+        let _ = store.stop();
+        let (timeline, _, _) = store.render_input().expect("has material");
+        // Two adjacent blocks make one clip. If the first had been dropped there would
+        // be two clips and a hole between them.
+        assert_eq!(
+            timeline.clips.len(),
+            1,
+            "a deferred block must be replayed; dropping it leaves a hole in the snapshot"
+        );
+    }
+
+    /// **T19: an overflowing bypass counts the drop instead of losing it silently.**
+    #[test]
+    fn an_overflowing_bypass_counts_the_drop_instead_of_losing_it_silently() {
+        let store = store();
+        store.start().unwrap();
+        let samples: &'static [f32] = Box::leak(vec![0.4_f32; 512].into_boxed_slice());
+        let guard = store.capture.lock_or_recover();
+        for index in 0..(BYPASS_SLOTS + 2) as i64 {
+            store.on_block(InputBlock {
+                start: index * 512,
+                frames: 512,
+                sample_rate: 48_000.0,
+                planes: [Some(samples), Some(samples)],
+                playing: true,
+            });
+        }
+        assert_eq!(store.bypass_pending(), BYPASS_SLOTS, "slots are full");
+        let (dropped, _) = store.bypass_counters();
+        assert_eq!(dropped, 2, "the overflow must be counted");
+        drop(guard);
+    }
     /// 没声明工程率时不能开始录制：段容量无从确定。
     #[test]
     fn arming_requires_a_declared_project_rate() {

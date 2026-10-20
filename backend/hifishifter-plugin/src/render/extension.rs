@@ -7261,6 +7261,9 @@ impl ExtensionOwner {
                 "bridged_window_blocks": capture.bridged_window_blocks,
                 // 起播前导静音：捕获起点晚于播放起点时，这一段被合成进段首。
                 "pre_roll_frames": capture.pre_roll_frames,
+                // T19：旁路队列。竞争时暂存、下一次进锁时补写；`dropped > 0` 说明
+                // 槽全满而竞争又在持续 —— 那时快照里会有洞。
+                "bypass_pending": self.transfer.bypass_pending(),
             })
         });
         let stream = |index: usize| {
