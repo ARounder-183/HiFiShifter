@@ -269,6 +269,8 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// **静默消失**：用户看到"我明明有这一段"，界面却什么都没有，也没有任何提示。
     /// 记在这里，载荷给一句"N 个片段未显示（宿主数据无法映射）"，用户至少知道该查什么。
     pub skipped_regions: Mutex<Vec<(usize, String)>>,
+    /// 上一次打印的诊断行（去重用；见 `log_diag_if_changed`）。
+    last_diag: Mutex<Option<String>>,
     /// 最近一次**完整**宿主清单采集的代次令牌 `(change_count, model, scope)`。
     ///
     /// 【为什么是文档级、不是实例级】`ui_tracks` / `render_facts` 都是文档级共享状态，
@@ -546,6 +548,38 @@ mod tests {
     /// 钉住三件事：① 收回时**渲染权威表**撤掉（不能继续播旧采样）、**编辑侧副本**保留
     /// （波形不消失）；② 状态记为 `Revoked`（界面据此说"暂时收回"而不是"还在分配"）；
     /// ③ 重新授权后状态回到 `Published`。
+    /// **B0：诊断行必须指名断在哪一环，且同样的读数只打一次。**
+    ///
+    /// 【为什么钉这两件事】19 轮排查没有拿到过真机日志，一半原因是读数不成形、
+    /// 另一半是日志被同一条重复行刷满。这一行是"下一份报告可读"的全部基础。
+    #[test]
+    fn the_diag_line_names_the_ring_that_broke_and_prints_once() {
+        let document = Arc::new(DocumentSession::new(41));
+        // 宿主交付了 item，但授权表是空的 —— 重开工程最典型的断点形状。
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(7, "item-a".to_owned());
+        let line = document.diag_line();
+        assert!(line.starts_with("[hfs] diag v1"), "{line}");
+        assert!(line.contains("items=1"), "{line}");
+        assert!(line.contains("authorized=0"), "{line}");
+        assert!(line.contains("pcm=0"), "{line}");
+        assert!(line.contains("clips_src=0"), "{line}");
+        // 授权表补上之后，读数必须跟着变（否则它回答不了"是不是授权没写"）。
+        document
+            .authorized_takes
+            .lock_or_recover()
+            .insert(7, "take-a".to_owned());
+        assert!(document.diag_line().contains("authorized=1"));
+        // 同样的读数不重复打印。
+        document.log_diag_if_changed();
+        let first = document.last_diag.lock_or_recover().clone();
+        assert!(first.is_some());
+        document.log_diag_if_changed();
+        assert_eq!(document.last_diag.lock_or_recover().clone(), first);
+    }
+
     /// **I3-1：解不开的存档也必须原样交回宿主。**
     ///
     /// 【为什么这是"参数全丢"的最后一环】解码失败时 `restore_archive_with_remap` 只
@@ -1985,6 +2019,9 @@ impl DocumentSession {
             }
         }
         drop(_transaction);
+        // 【B0】收口之后打一行读数（同样的读数不重复）。放在释放事务之后：
+        // `diag_line` 要取多个文档锁，而本函数的锁序已经足够长，没必要再加一层。
+        self.log_diag_if_changed();
         for owner in owners {
             owner.refresh_host_state_for_model();
             owner.prepare();
@@ -2250,7 +2287,71 @@ impl DocumentSession {
             ui_tracks,
             region_items,
             graph.map_or_else(|| "graph=unbound".to_owned(), |line| line),
+        ) + "\n"
+            + &self.diag_line()
+    }
+
+    /// 一行可复制的诊断读数：把"这条 clip 为什么没有音频"拆成五个可数的整数。
+    ///
+    /// 【为什么必须存在这一行】19 轮排查里没有拿到过一次真机日志 —— 用户不知道去哪
+    /// 找，日志里也没有一个读数能把"哪一环断了"回答清楚。整条链是
+    /// regions → items → authorized → pcm → clips_src，每一环都能用一个整数回答，
+    /// 于是"重开工程后全部 Clip 都在等音频"不再需要猜：
+    ///   * items=0 且 regions>0 ⇒ 宿主几何/清单没通（原生扩展那一环）；
+    ///   * authorized=0 而 items>0 ⇒ 授权表没写（`authorized_takes` 的写者没跑）；
+    ///   * authorized>0 而 pcm=0 ⇒ PCM 没读出来（源那一层）；
+    ///   * pcm>0 而 clips_src=0 ⇒ **身份链断了**（媒体身份没挂到 clip 上）。
+    ///
+    /// 【为什么只在这些字段上】它们都是**计数**，不随宿主型号或工程内容变化，
+    /// 因此可以直接对比两次运行。
+    pub(crate) fn diag_line(&self) -> String {
+        let regions = self.regions.lock_or_recover().len();
+        let items = self.region_items.lock_or_recover().len();
+        let authorized = self.authorized_takes.lock_or_recover().len();
+        let pcm = self.edit_sources.lock_or_recover().len();
+        let (published, failed) = {
+            let states = self.source_states.lock_or_recover();
+            (
+                states
+                    .values()
+                    .filter(|state| **state == SourceState::Published)
+                    .count(),
+                states
+                    .values()
+                    .filter(|state| **state == SourceState::Failed)
+                    .count(),
+            )
+        };
+        let (clips, clips_src) = {
+            let timeline = self.timeline.lock_or_recover();
+            let clips = timeline.as_ref().map_or(0, |timeline| timeline.clips.len());
+            let with_source = timeline.as_ref().map_or(0, |timeline| {
+                timeline
+                    .clips
+                    .iter()
+                    .filter(|clip| clip.source_path.is_some())
+                    .count()
+            });
+            (clips, with_source)
+        };
+        format!(
+            "[hfs] diag v1 ara{{regions={regions} items={items} authorized={authorized} \
+pcm={pcm} published={published} failed={failed} clips={clips} clips_src={clips_src}}}"
         )
+    }
+
+    /// 诊断读数变化时打一行（同样的读数不重复）。
+    ///
+    /// 【为什么去重】它在每次收口都会跑（宿主每做一次编辑就一次）。不去重会把日志
+    /// 刷成一条恒定的重复行，而那正是"没人看得下去"的原因。
+    pub(crate) fn log_diag_if_changed(&self) {
+        let line = self.diag_line();
+        let mut last = self.last_diag.lock_or_recover();
+        if last.as_deref() == Some(line.as_str()) {
+            return;
+        }
+        *last = Some(line.clone());
+        log::info!("{line}");
     }
 
     /// 测试专用：把两个截止期的起点回拨到"早已超期"。
