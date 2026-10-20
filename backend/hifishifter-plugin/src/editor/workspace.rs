@@ -510,8 +510,48 @@ impl DocumentSession {
         // 由宿主 folder 得到父级的轨道；它们才是私有分组必须让路的那些（见
         // `host_folder_children`）。
         let mut folder_children = std::collections::BTreeSet::new();
+        // 【T12：宿主轨的 id 只是**线索**，不是权威】
+        //
+        // `ui_tracks[guid].id` 是上一轮"重贴标签"的结果，而重贴标签依赖
+        // `clip_ids[key]` 与已发布时间线里的 clip id **同形**。只要有一轮对不上
+        // （`sync_session_derived_tables` 曾把它打回 `ara-region-` 形态），这里就会拿到
+        // 一个**过期**的轨道 id：它在 `timeline.tracks` 里找不到 ⇒ 旧实现新建一条轨，
+        // 并把这条宿主轨上的**所有 clip 无条件搬过去** ⇒ 用户看到"原轨空了、新轨全有"。
+        //
+        // 正确的顺序是**先解析、后使用**：这条宿主轨上的 item 若已被某条活 region 认领，
+        // 那么真正的轨道身份来自那条 clip（模型侧），而不是宿主轨上残留的字符串。
+        // 【为什么写成嵌套 `fn` 而不是闭包】闭包会不可变借用 `timeline`，而下面同一个
+        // 循环要可变借用它（推轨、推 clip）。嵌套函数不捕获环境，借用冲突自然消失。
+        fn resolve_model_track(
+            timeline: &hifishifter_kernel::state::TimelineState,
+            items: &std::collections::HashMap<u64, String>,
+            ids: &std::collections::HashMap<u64, String>,
+            host: &crate::host::UiTrack,
+        ) -> Option<String> {
+            for item in &host.items {
+                let Some((key, _)) = items
+                    .iter()
+                    .find(|(_, guid)| **guid == item.geometry.item_id)
+                else {
+                    continue;
+                };
+                let Some(clip_id) = ids.get(key) else {
+                    continue;
+                };
+                if let Some(clip) = timeline.clips.iter().find(|clip| &clip.id == clip_id) {
+                    return Some(clip.track_id.clone());
+                }
+            }
+            None
+        }
         for host in tracks.values() {
-            let track_id = prefix(&host.id);
+            // 解析成功 ⇒ 用模型轨；解析不到 ⇒ 退回宿主 id（未认领的 item 走占位路径）。
+            let resolved = {
+                let items = self.region_items.lock_or_recover();
+                let ids = self.clip_ids.lock_or_recover();
+                resolve_model_track(&timeline, &items, &ids, host)
+            };
+            let track_id = resolved.clone().unwrap_or_else(|| prefix(&host.id));
             owned.insert(track_id.clone());
             // 宿主 folder 父子 → 时间线参数根。
             //
@@ -553,7 +593,23 @@ impl DocumentSession {
             }
             for item in &host.items {
                 let g = &item.geometry;
-                let id = prefix(&format!("ara-item-{}", g.item_id));
+                // 【T3：同一个宿主 item 在一轮载荷里最多对应**一条** clip】
+                //
+                // clip 的身份会从 `ara-region-{key}` 升级成 `ara-item-{guid}`
+                // （见 `remap_and_log`），而升级需要清单先枚举到它 —— 于是升级未完成
+                // 的那一轮里，按 GUID 找不到已有 clip，旧实现就会**再造一条无源占位**：
+                // 同一个 item 同时有"真 clip"与"占位 clip"。先按 region 边解析，
+                // 解析得到就复用那条 clip 的身份，不再凭空造一条。
+                let claimed_id = {
+                    let items = self.region_items.lock_or_recover();
+                    let ids = self.clip_ids.lock_or_recover();
+                    items
+                        .iter()
+                        .find(|(_, guid)| **guid == g.item_id)
+                        .and_then(|(key, _)| ids.get(key).cloned())
+                };
+                let id =
+                    claimed_id.unwrap_or_else(|| prefix(&format!("ara-item-{}", g.item_id)));
                 present.insert(id.clone());
                 if !timeline.clips.iter().any(|clip| clip.id == id) {
                     // 同上的 panic 纪律：宿主给一个非有限 `playback_rate`（离线/损坏素材）

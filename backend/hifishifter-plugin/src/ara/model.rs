@@ -617,6 +617,17 @@ impl ModelHandle {
     ///
     /// 它很便宜（两次表重建 + 一次 clone），因此每个 mutation 回调都可以直接调，
     /// 不需要置脏、不需要合并。
+    /// 把 `slots[index]` 设为 `value`；必要时先把向量补到 `index + 1`。
+    ///
+    /// 【为什么不是 `insert`】见 `create_region_sequence` 的说明：这里要的是**覆盖**
+    /// 一个已存在的槽位。`insert` 在 `index < len` 时会右移，把身份表整体错位。
+    fn set_sequence_slot<T: Default>(slots: &mut Vec<T>, index: usize, value: T) {
+        if slots.len() <= index {
+            slots.resize_with(index + 1, T::default);
+        }
+        slots[index] = value;
+    }
+
     fn sync_session_derived_tables(&mut self) {
         {
             let mut regions = self.session.regions.lock_or_recover();
@@ -629,8 +640,16 @@ impl ModelHandle {
                 }
             }
         }
-        // clip id 由 region key 派生（见 `ara::mapping::MappingIdentities`），
-        // 与映射层同算式 —— 收口后重算会把它原样认领回去，会话内身份单调稳定。
+        // 【T13：`clip_ids` 只能有**一个**写者，而那个写者是 `remap_and_log`】
+        //
+        // 此前这里会把整张表重写成 `ara-region-{key}`，而 `remap_and_log` 随后把它
+        // 升级成 `ara-item-{guid}`。于是**任何**一次模型回调（尤其是 REAPER 在工程
+        // 加载时发的 `updateMusicalContextContent`）都会把 id 打回 `ara-region-` 形态。
+        // 而清单侧的"重贴标签"要拿 `clip_ids[key]` 去已发布的时间线里找同 id 的 clip
+        // —— 形态对不上就永远匹配不到，宿主轨的 id 停在上一轮的值，`present_host_inventory`
+        // 于是**凭一个过期 id 新建一条轨并把所有 clip 搬过去**（"分割后多出一条轨"）。
+        //
+        // 这里只补**缺席**的 key（新 region 在 `remap` 之前也要有身份），绝不覆盖已有值。
         let live_keys: Vec<u64> = self
             .region_keys
             .iter()
@@ -639,9 +658,10 @@ impl ModelHandle {
             .map(|(_, key)| *key)
             .collect();
         let mut clip_ids = self.session.clip_ids.lock_or_recover();
-        clip_ids.clear();
+        // 已销毁的槽位在这里清掉；存活槽位**保留已发布的形态**。
+        clip_ids.retain(|key, _| live_keys.contains(key));
         for key in live_keys {
-            clip_ids.insert(key, format!("ara-region-{key}"));
+            clip_ids.entry(key).or_insert_with(|| format!("ara-region-{key}"));
         }
     }
 
@@ -1569,16 +1589,23 @@ impl RegionSequences for ModelHandle {
         // 能拿到的稳定令牌就是宿主的 model-ref key —— 同一文档内它不随重排而变。
         // 拿不到 key 时记空串，映射层随即退回位置身份。
         let sequence_key = context.realtime_key().unwrap_or(0);
-        while self.sequence_persistent_ids.len() < index {
-            self.sequence_persistent_ids.push(String::new());
-        }
-        self.sequence_persistent_ids
-            .insert(index, sequence_key.to_string());
+        // 【T10：这里是**覆盖**一个槽位，不是插入一个新槽位】
+        //
+        // `reused` 分支保证 `index < len`（被销毁的槽位仍占着位置），而 `Vec::insert`
+        // 在 `index < len` 时是"插入并右移"：两张表各长一格，`index` 之后的所有序列
+        // 身份整体错位一位。后果按严重度排列：
+        //   * 第二条真实序列的 id 变成空串 ⇒ 轨道 id 退化成 `ara-track-{slot}` ⇒
+        //     用户看到一条"新轨"，参数/名字/颜色/顺序全丢；
+        //   * `region_sequence_of` 按 ref 解析时命中被右移过的槽位 ⇒ 同一批 clip
+        //     分裂到两条轨（"分割后多出一条轨"）；
+        //   * 每 split 一次两张表各长一格，长会话里是无界增长。
+        //
+        // 覆盖语义只能用 `assign`。三张表（`sequence_persistent_ids` /
+        // `sequence_refs` / `region_sequences`）必须**严格同长、同下标**，
+        // 否则 `MappingIdentities::live_sequences`（按第一张表的长度生成）会错位。
+        Self::set_sequence_slot(&mut self.sequence_persistent_ids, index, sequence_key.to_string());
         // 与扁平序列槽位一一对应：region 的 `sequence_model_ref` 靠它翻译回槽位。
-        while self.document.sequence_refs.len() < index {
-            self.document.sequence_refs.push(0);
-        }
-        self.document.sequence_refs.insert(index, sequence_key);
+        Self::set_sequence_slot(&mut self.document.sequence_refs, index, sequence_key);
         if let Some(handle) = context.object_handle() {
             self.sequence_index_by_handle.insert(handle, index);
         }
