@@ -554,6 +554,45 @@ mod tests {
     /// 钉住三件事：① 收回时**渲染权威表**撤掉（不能继续播旧采样）、**编辑侧副本**保留
     /// （波形不消失）；② 状态记为 `Revoked`（界面据此说"暂时收回"而不是"还在分配"）；
     /// ③ 重新授权后状态回到 `Published`。
+    /// **I3-1：解不开的存档也必须原样交回宿主。**
+    ///
+    /// 【为什么这是"参数全丢"的最后一环】解码失败时 `restore_archive_with_remap` 只
+    /// 记一行日志就 `Ok(())` —— 宿主以为恢复成功。此后宿主任何一次保存都会问
+    /// `store_document`，而旧实现用空 `edits` 重编码并**覆盖** `archive_cache`：
+    /// 磁盘上从此只剩默认值，没有任何一步报错。
+    #[test]
+    fn an_undecodable_archive_is_still_handed_back() {
+        let document = Arc::new(DocumentSession::new(31));
+        let payload = b"{ this is not a valid archive".to_vec();
+        document.restore_archive(&payload).expect("host restore continues");
+        assert_eq!(
+            document.archive_cache.lock_or_recover().as_ref(),
+            Some(&payload),
+            "解码失败不得丢掉宿主交给我们的字节"
+        );
+        assert_eq!(document.encode_archive().unwrap(), payload);
+    }
+
+    /// **I3-2：载荷还没合入时，存档必须交回它，而不是用内存态覆盖。**
+    ///
+    /// 【为什么连续保存三次】第一次覆盖之后用户数据就不在磁盘上了；只测一次会漏掉
+    /// "第一次侥幸还留着、第二次被固化"的那种退化。
+    #[test]
+    fn a_pending_restore_is_never_overwritten_by_the_in_memory_state() {
+        let document = Arc::new(DocumentSession::new(32));
+        let mut saved = crate::state_channel::EditState::default();
+        saved.revision = 7;
+        let bytes = saved.encode().unwrap();
+        document.restore_archive(&bytes).expect("archive restores");
+        for round in 0..3 {
+            assert_eq!(
+                document.encode_archive().unwrap(),
+                bytes,
+                "第 {round} 次保存改写了未合入的载荷"
+            );
+        }
+    }
+
     #[test]
     fn a_revoked_source_keeps_its_editor_copy_and_reports_revoked() {
         use crate::render::document::SourceState;
@@ -807,6 +846,30 @@ impl DocumentSession {
     /// 模型图里真实存在的轨道/片段，否则重载后会出现指向不存在对象的编辑。
     pub(crate) fn encode_archive(&self) -> Result<Vec<u8>, String> {
         let _transaction = self.transaction.lock_or_recover();
+        // 【I3：只要还有一份**没合入**的载荷，交回宿主的就是那一份】
+        //
+        // 这是"永不回退"最直接的一条实现，也是本轮把"修不好"与"丢数据"解耦的地方：
+        // 内存里的 `edits` 此时**不是**用户的数据（载荷还没合进去），用它重编码再
+        // 覆盖 `archive_cache`，等于在磁盘上把用户的参数换成默认值 —— 而宿主此后
+        // 每一次保存都会把这个结果固化下去。
+        //
+        // 判据取"有没有未合入的载荷"，不取"合并成不成功"：合并成功时载荷已被取走，
+        // 走下面的正常路径；合并不成功时载荷仍在，这里就把宿主当初给的那份原样还回去。
+        if self.has_unmerged_restore() {
+            let cached = self.archive_cache.lock_or_recover().clone();
+            let pending = self
+                .renderer_owners()
+                .iter()
+                .find_map(|owner| owner.pending_restore_bytes());
+            if let Some(bytes) = cached.or(pending) {
+                log::warn!(
+                    "[ara] archive store returns the unmerged payload ({} byte(s)); the saved \
+                     parameters are preserved instead of being replaced by the in-memory state",
+                    bytes.len()
+                );
+                return Ok(bytes);
+            }
+        }
         // 【为什么不再硬失败】`storeDocumentToArchive` 返回错误时宿主会认为"插件存档
         // 失败"，有些宿主会据此跳过这份工程状态。图未就绪（加载中的自动保存、关闭时
         // 保存）不是"没有编辑可存"，而是"这次还没合并完"；返回最后一份成功快照
@@ -824,8 +887,12 @@ impl DocumentSession {
             return match edits.encode() {
                 Ok(bytes) => Ok(bytes),
                 Err(error) => {
-                    log::error!("[ara] archive store degraded to an empty payload: {error}");
-                    Ok(Vec::new())
+                    // 【为什么退回"最后一份成功快照"而不是空块】空块是**可解析的空编辑**：
+                    // 宿主会把它当成"这个工程没有任何用户参数"写进文件，而恢复端读到的
+                    // 是一份合法的、全默认的状态 —— 没有任何一处会报错。那正是用户看到
+                    // "重开工程后参数全丢"的最后一环。
+                    log::error!("[ara] archive store degraded to the last good snapshot: {error}");
+                    Ok(self.archive_cache.lock_or_recover().clone().unwrap_or_default())
                 }
             };
         }
@@ -840,8 +907,9 @@ impl DocumentSession {
                 Ok(bytes)
             }
             Err(error) => {
-                log::error!("[ara] archive store degraded to an empty payload: {error}");
-                Ok(Vec::new())
+                // 同上：能交回上一份成功载荷就绝不交空块。
+                log::error!("[ara] archive store degraded to the last good snapshot: {error}");
+                Ok(self.archive_cache.lock_or_recover().clone().unwrap_or_default())
             }
         }
     }
@@ -869,6 +937,12 @@ impl DocumentSession {
         if bytes.is_empty() {
             return Ok(());
         }
+        // 【I3-2：先存后解】在尝试解码**之前**就把宿主给的字节留在 `archive_cache` 里。
+        //
+        // 解码失败时下面的 `return Ok(())` 会让宿主以为恢复成功，而内存里什么都没有；
+        // 此时若宿主再保存一次，旧实现会用空 `edits` 重编码并覆盖 cache —— 磁盘上
+        // 从此只剩默认值。先把原始字节存下来，`encode_archive` 才有东西可以还回去。
+        *self.archive_cache.lock_or_recover() = Some(bytes.to_vec());
         let mut restored = crate::state_channel::EditState::default();
         // 【为什么解码失败也只记日志】宿主把 `beginRestoringDocumentFromArchive`
         // 的失败当成"整份文档恢复失败"：region 不再交付、界面永远停在
@@ -884,11 +958,13 @@ impl DocumentSession {
         // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
         // 静默丢失，症状正是"重载工程后参数被重置"。
         restored.atlas.remap_authorities(remap);
-        // 恢复后到合入前，宿主可能再次保存（甚至还没等模型图 ready）。先把这份状态
-        // 写进 cache，`encode_archive` 在 `ready == false` 时就有东西可交。
-        if let Ok(cached) = restored.encode() {
-            *self.archive_cache.lock_or_recover() = Some(cached);
-        }
+        // 【为什么不再把 `restored` 重编码后写回 cache】恢复后到合入前，宿主可能再次
+        // 保存（甚至还没等模型图 ready），需要一份"能交回去的东西" —— 那已经在函数
+        // 开头存好了：**宿主给的原始字节**。再写一份重编码的副本有两个害处：
+        // ① 它经过 `restore` 的 revision 前进，与宿主手里的那份不再逐字相同，
+        //    "原样还回去"这条不变量就断了；
+        // ② 它是"我们的"字节，而宿主下一次保存会把它当成权威 —— 一旦合并逻辑还有
+        //    缺陷，被固化的就是我们的误解，而不是用户的数据。
         *self.pending_archive_restore.lock_or_recover() = Some(restored);
         Ok(())
     }
@@ -1920,6 +1996,20 @@ impl DocumentSession {
         }
     }
 
+    /// 是否还有一份**没合入**的持久化载荷（文档级 ARA 存档或任一实例的组件状态）。
+    ///
+    /// 【为什么存档路径要问它】`store_document` 唯一正确的回答是"把宿主交给我们的
+    /// 那一份还回去"。只要还有载荷挂着，内存里的 `edits` 就**不是**用户的数据；
+    /// 用它在覆盖 `archive_cache`，等于在磁盘上把用户参数换成默认值，而宿主此后
+    /// 每一次保存都会把这个结果固化下去。
+    pub(crate) fn has_unmerged_restore(&self) -> bool {
+        if self.pending_archive_restore.lock_or_recover().is_some() {
+            return true;
+        }
+        self.renderer_owners()
+            .iter()
+            .any(|owner| owner.has_pending_restore())
+    }
     /// 同一ARA文档的编辑权威共享，输出仍按各renderer分配隔离。
     pub fn renderer_owners(&self) -> Vec<Arc<ExtensionOwner>> {
         self.renderers

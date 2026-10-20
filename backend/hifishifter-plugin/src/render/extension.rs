@@ -636,6 +636,22 @@ pub(crate) const RESTORE_APPLIED: u8 = 1;
 pub(crate) const RESTORE_PENDING: u8 = 2;
 /// 持久化状态合并失败，且没有可重试的路径（真故障）。
 pub(crate) const RESTORE_FAILED: u8 = 3;
+/// 一份恢复载荷最多等宿主图重建多久，之后改报"没等到"并转入慢重试。
+///
+/// 【为什么必须有上界】此前"身份对不上 ⇒ 继续等"（T18）**没有截止时刻**：载荷永远
+/// 挂着、界面永远说"正在等待"，而 `encode_archive` 在此期间会把这份**没合入**的
+/// 状态当成权威写回磁盘。用户看到的是"参数没了"，日志里一行错都没有。
+///
+/// 【为什么是 10 秒】重开工程时宿主交付几何的典型跨度是几百毫秒到几秒；10 秒足够
+/// 覆盖慢宿主与磁盘慢的工程，又短到让用户在"参数没回来"时能立刻得到一个可读的结论。
+pub(crate) const RESTORE_GIVE_UP_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// 放弃等待之后的重试间隔。
+///
+/// 【为什么"放弃"还要重试】放弃的只是**界面读数**（从"等待"改成"没等到"），载荷本身
+/// 必须留着：宿主随时可能补发几何，而那时合入一次就能把用户参数全部找回来。
+pub(crate) const RESTORE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// 兜底的尝试次数上界（宿主 tick 极快时，时间窗可能还没到就已经试了很多次）。
+pub(crate) const RESTORE_GIVE_UP_ATTEMPTS: u32 = 400;
 /// 起播/录音上升沿之后，允许"内容不变也按块长前进"的时长（秒）。
 ///
 /// 【为什么是 1 秒且不续期】VEGAS 的钉住窗口约 0.66 s，1 秒足够覆盖；它是一次性窗口，
@@ -1088,6 +1104,12 @@ pub(crate) struct ExtensionOwner {
     render_wanted: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// 第一份恢复载荷到达的时刻（"有界等待"的起点；成功后清空）。
+    restore_first_attempt: Mutex<Option<std::time::Instant>>,
+    /// 放弃等待之后的下一次重试时刻（`None` = 不在退避中）。
+    restore_next_attempt: Mutex<Option<std::time::Instant>>,
+    /// 已尝试合并的次数（诊断：区分"刚来"与"等了两百轮"）。
+    restore_attempts: std::sync::atomic::AtomicU32,
     /// 最后一次成功编码的 ARA `EditState` 字节。
     ///
     /// 【为什么需要】文档已经关闭（`bound_once == true && document == None`）时，
@@ -5344,6 +5366,7 @@ impl ExtensionOwner {
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state.edits)?;
         *self.pending_restore.lock_or_recover() = Some(restored);
+        self.reset_restore_budget();
         self.note_restore_pending();
         self.refresh_document();
         Ok(())
@@ -5365,7 +5388,28 @@ impl ExtensionOwner {
     /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
     pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
         *self.pending_restore.lock_or_recover() = Some(restored);
+        self.reset_restore_budget();
         self.note_restore_pending();
+    }
+    /// 新载荷到达 ⇒ 等待预算从头计时（否则上一份载荷用完的 10 s 会立刻压到这一份上）。
+    fn reset_restore_budget(&self) {
+        self.restore_attempts.store(0, Ordering::Relaxed);
+        *self.restore_first_attempt.lock_or_recover() = None;
+        *self.restore_next_attempt.lock_or_recover() = None;
+    }
+    /// 是否还有一份**没合入**的持久化载荷（组件状态或 ARA 存档）。
+    ///
+    /// 【为什么需要这个只读问题】存档路径必须能判断"内存里的编辑是不是用户的数据"。
+    /// 载荷还在 ⇒ 不是。见 `DocumentSession::has_unmerged_restore`。
+    pub(crate) fn has_pending_restore(&self) -> bool {
+        self.pending_restore.lock_or_recover().is_some()
+    }
+    /// 未合入载荷的编码形式（存档路径的兜底：宁可交回它，也不交空块）。
+    pub(crate) fn pending_restore_bytes(&self) -> Option<Vec<u8>> {
+        self.pending_restore
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|state| state.encode().ok())
     }
     /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
     ///
@@ -5381,25 +5425,79 @@ impl ExtensionOwner {
         // 载荷的实例也会被记成"恢复成功"。
         let had_pending = self.pending_restore.lock_or_recover().is_some();
         if had_pending {
+            // 【退避中：不重试、也不改读数】"放弃等待"只改**界面读数**，不改载荷的
+            // 去留。这一条挡住的是"每一轮 prepare 都把 failed 翻回 pending"——
+            // 那样用户永远看不到结论，而日志会刷满。
+            if self
+                .restore_next_attempt
+                .lock_or_recover()
+                .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Ok(());
+            }
+            *self.restore_next_attempt.lock_or_recover() = None;
             // 本轮重新判定"在等什么"；inner 会为已知原因写回。
             *self.restore_pending_reason.lock_or_recover() = None;
         }
+        let first = if had_pending {
+            *self
+                .restore_first_attempt
+                .lock_or_recover()
+                .get_or_insert_with(std::time::Instant::now)
+        } else {
+            std::time::Instant::now()
+        };
+        let attempts = if had_pending {
+            self.restore_attempts
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1)
+        } else {
+            self.restore_attempts.load(Ordering::Relaxed)
+        };
         let result = self.merge_pending_restore_inner(document);
         match &result {
             Ok(()) => {
                 if self.pending_restore.lock_or_recover().is_some() {
-                    // 仍有载荷挂着（文档未就绪 / 空轨 / 缺 fade 元数据）：不是失败，
-                    // 只是还不能收口。
-                    self.note_restore_pending();
-                    if self.restore_pending_reason.lock_or_recover().is_none() {
-                        *self.restore_pending_reason.lock_or_recover() =
-                            Some("waiting-for-host-model".to_owned());
+                    // 【有界等待】"身份对不上 ⇒ 继续等"必须有一个上界，否则界面永远停在
+                    // "正在等待"，而用户无法判断"再等等"与"它不会来了"。超过上界后：
+                    // 报一次可读的失败原因（含它在等什么），**载荷留着**，转入慢重试。
+                    let waited = first.elapsed();
+                    if attempts >= RESTORE_GIVE_UP_ATTEMPTS || waited >= RESTORE_GIVE_UP_WINDOW {
+                        let reason = self
+                            .restore_pending_reason
+                            .lock_or_recover()
+                            .clone()
+                            .unwrap_or_else(|| "waiting-for-host-model".to_owned());
+                        self.note_restore_failed(&format!(
+                            "the host graph did not rebuild within {:.1}s ({reason}); the saved payload is kept and retried every {}s",
+                            waited.as_secs_f64(),
+                            RESTORE_RETRY_INTERVAL.as_secs()
+                        ));
+                        *self.restore_next_attempt.lock_or_recover() =
+                            Some(std::time::Instant::now() + RESTORE_RETRY_INTERVAL);
+                    } else {
+                        // 仍有载荷挂着（文档未就绪 / 空轨 / 缺 fade 元数据）：不是失败，
+                        // 只是还不能收口。
+                        self.note_restore_pending();
+                        if self.restore_pending_reason.lock_or_recover().is_none() {
+                            *self.restore_pending_reason.lock_or_recover() =
+                                Some("waiting-for-host-model".to_owned());
+                        }
                     }
                 } else if had_pending {
                     self.note_restore_applied();
+                    // 收口成功 ⇒ 等待预算归零，下一份载荷从头计时。
+                    self.restore_attempts.store(0, Ordering::Relaxed);
+                    *self.restore_first_attempt.lock_or_recover() = None;
+                    *self.restore_next_attempt.lock_or_recover() = None;
                 }
             }
-            Err(error) => self.note_restore_failed(error),
+            Err(error) => {
+                self.note_restore_failed(error);
+                // 真失败也要退避：否则每一轮 prepare 都重试一次、刷一行 warn。
+                *self.restore_next_attempt.lock_or_recover() =
+                    Some(std::time::Instant::now() + RESTORE_RETRY_INTERVAL);
+            }
         }
         result
     }

@@ -52,6 +52,22 @@ pub(crate) struct EditState {
     /// 组件恢复时延迟到完整ARA图ready后再关联，禁止逐对象创建时误套新序号。
     #[serde(skip)]
     pub needs_rebind: bool,
+    /// **没能拿到可持久化身份**的条目（轨道 id）。
+    ///
+    /// 【为什么必须有这一档】身份缺失此前是一个**全局**判据：只要有一条记录没有绑定，
+    /// 整份载荷就被判无效（`restore` 报错、`encode` 报错）。而"这条轨现在没有 region"
+    /// 是**正常状态**（用户刚插了插件、刚删光了一条轨上的 item、或者宿主还没交付几何），
+    /// 于是最常见的一种工程形状 —— 有一条空轨 —— 就让整份存档失效。
+    /// 失效的下游是 `encode_archive` 退回空载荷：用户所有的参数曲线被**写进磁盘的
+    /// 空块**覆盖掉。这是数据销毁，不是显示问题。
+    ///
+    /// 现在身份缺失只影响它自己那一条：数据留着、不套用、不进 `bindings`，
+    /// 并在诊断里报成 `unbound=N`。见 [`EditState::apply`] 的过滤器。
+    ///
+    /// 【为什么不进存档】它就是"bindings 里没有这一条"的同义词，写出去只是重复。
+    /// 恢复时由 [`EditState::restore`] 按同一判据重新算出来，因此不占格式代际。
+    #[serde(skip)]
+    pub unbound: BTreeSet<String>,
 }
 
 impl EditState {
@@ -85,9 +101,18 @@ impl EditState {
         Ok(())
     }
     /// live图已明确归属时刷新成员；restore只接受唯一完整身份集合，失败保留原state。
+    ///
+    /// 【T-C6：没有身份的条目不再让整份失败】它进 `unbound`：数据留着、不套用、
+    /// 不进 `bindings`。此前"没有身份"与"身份对不上"共用一条 `Err`，而那条 `Err`
+    /// 的上游是"整份存档作废"，代价与收益完全不成比例 —— 一条空轨就能触发它。
+    ///
+    /// 【红线没动】**有**身份却匹配不到唯一轨道时仍然 `Err`：按会话序号猜归属会把
+    /// 参数挂到别人的轨道上，那是比"少恢复一条"严重得多的错误。两者的区别是
+    /// "这条从来没被绑定过"与"这条被绑定过、但现在对不上"。
     pub fn reconcile(&mut self, current: &TrackBindings) -> Result<(), String> {
         let mut candidate = self.clone();
         let mut mapping = BTreeMap::new();
+        let mut unbound: BTreeSet<String> = BTreeSet::new();
         let ids: BTreeSet<_> = self
             .tracks
             .iter()
@@ -95,21 +120,24 @@ impl EditState {
             .chain(self.params.keys().cloned())
             .collect();
         for old in &ids {
+            // 存档里这一条的身份（缺席与空向量同义：没有可匹配的东西）。
+            let saved = self.bindings.get(old).cloned().unwrap_or_default();
             let (new, identity) = if self.needs_rebind {
-                let identity = self
-                    .bindings
-                    .get(old)
-                    .ok_or("ARA edit identity missing; cannot restore by session track number")?;
+                if saved.is_empty() {
+                    // 没有身份可匹配 —— 不是"对不上"，是"从来没能绑定"。
+                    unbound.insert(old.clone());
+                    continue;
+                }
                 let matches: Vec<_> = current
                     .iter()
-                    .filter(|(_, known)| *known == identity)
+                    .filter(|(_, known)| **known == saved)
                     .collect();
-                if identity.is_empty() || matches.len() != 1 {
+                if matches.len() != 1 {
                     return Err(
                         "ARA edit identity missing or ambiguous in rebuilt host graph".into(),
                     );
                 }
-                (matches[0].0.clone(), identity.clone())
+                (matches[0].0.clone(), saved)
             } else {
                 // live轨道已由真实sequence边明确关联，不因轨内成员增删而丢掉编辑。
                 let Some(identity) = current.get(old) else {
@@ -118,16 +146,15 @@ impl EditState {
                 // mute/空轨不是身份丢失；live序列仍明确，保留此前持久成员供解除/保存。
                 // 冷恢复分支仍拒绝空或歧义身份，不能用旧轨道序号猜归属。
                 if identity.is_empty() {
-                    mapping.insert(
-                        old.clone(),
-                        (
-                            old.clone(),
-                            self.bindings.get(old).cloned().unwrap_or_default(),
-                        ),
-                    );
-                    continue;
+                    if saved.is_empty() {
+                        // 两侧都没有身份：live 也给不出，存档也给不出 ⇒ 无法持久化。
+                        unbound.insert(old.clone());
+                        continue;
+                    }
+                    (old.clone(), saved)
+                } else {
+                    (old.clone(), identity.clone())
                 }
-                (old.clone(), identity.clone())
             };
             // live归属已由宿主区域分配证明；复制轨道合法共享modification/source。
             // restore仍要求候选集中恰好一个身份匹配，不能仅按旧轨道序号猜测。
@@ -143,23 +170,34 @@ impl EditState {
             }
             mapping.insert(old.clone(), (new, identity));
         }
+        // 【为什么 unbound 的条目要**原样留下**】它们的数据是用户的资产（曲线、
+        // 混音、算法选择）。丢掉它们等于"因为认不出是谁的，所以扔了"。留着之后：
+        // `apply` 按 `unbound` 跳过（不猜归属），`encode` 原样写回（下一版
+        // 插件或下一次宿主几何稳定后仍有机会恢复）。
         candidate.params = self
             .params
             .iter()
-            .filter_map(|(id, p)| mapping.get(id).map(|(new, _)| (new.clone(), p.clone())))
+            .filter_map(|(id, p)| match mapping.get(id) {
+                Some((new, _)) => Some((new.clone(), p.clone())),
+                None if unbound.contains(id) => Some((id.clone(), p.clone())),
+                None => None,
+            })
             .collect();
         candidate.tracks = self
             .tracks
             .iter()
-            .filter_map(|track| {
-                mapping.get(&track.id).map(|(new, _)| {
+            .filter_map(|track| match mapping.get(&track.id) {
+                Some((new, _)) => {
                     let mut track = track.clone();
                     track.id = new.clone();
-                    track
-                })
+                    Some(track)
+                }
+                None if unbound.contains(&track.id) => Some(track.clone()),
+                None => None,
             })
             .collect();
         candidate.bindings = mapping.values().cloned().collect();
+        candidate.unbound = unbound;
         for record in candidate.atlas.regions.values_mut() {
             if let Some((root, _)) = mapping.get(&record.root) {
                 record.root = root.clone();
@@ -277,13 +315,24 @@ impl EditState {
         if self.needs_rebind {
             return;
         }
+        // 【为什么按条目过滤而不是整份返回】身份缺失是**逐条**的事实：一条空轨没有
+        // region，不代表同一份载荷里另外十条轨的曲线也该被丢掉。判据用
+        // [`Self::unbound`]（"这条从来没被绑定过"），而不是 `needs_rebind`
+        // （"整份还没关联"）—— 后者一旦为真就什么都不套，正是"全部参数丢失"的
+        // 另一种写法。
         timeline.params_by_root_track = self
             .params
             .iter()
-            .filter(|(id, _)| timeline.tracks.iter().any(|t| t.id == **id))
+            .filter(|(id, _)| {
+                !self.unbound.contains(*id)
+                    && timeline.tracks.iter().any(|t| t.id == **id)
+            })
             .map(|(id, p)| (id.clone(), p.clone()))
             .collect();
         for track in &mut timeline.tracks {
+            if self.unbound.contains(&track.id) {
+                continue;
+            }
             if let Some(edited) = self.tracks.iter().find(|t| t.id == track.id) {
                 track.compose_enabled = edited.compose_enabled;
                 track.pitch_analysis_algo = edited.pitch_analysis_algo.clone();
@@ -327,11 +376,14 @@ impl EditState {
         self.atlas.validate()?;
         self.validate_fades()?;
         self.validate_clip_local()?;
-        for id in self.tracks.iter().map(|t| &t.id).chain(self.params.keys()) {
-            if self.bindings.get(id).is_none_or(Vec::is_empty) {
-                return Err("ARA edit identity missing; cannot save edits".into());
-            }
-        }
+        // 【为什么不再拒绝"没有身份"的条目】此前这里返回 `Err`，而它唯一的调用方
+        // `encode_archive` 把错误降级成 `Ok(Vec::new())` —— 宿主于是收到一份**空存档**
+        // 并把它写进工程文件。一条空轨（没有 region、因此没有身份）就足以触发它，
+        // 而"有一条空轨"是最常见的工程形状之一。
+        //
+        // 契约应当是**往返对称**：`restore(encode(s))` 对任意 `s` 都能成功。
+        // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
+        // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
         let version = if !self.atlas.authorities.is_empty() {
             8
         } else if !self.clip_local.is_empty() {
@@ -388,15 +440,23 @@ impl EditState {
         if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
         }
-        if restored
+        // 【为什么逐条降级而不是整份拒绝】此前这里只要有一条记录没有身份就 `Err`，
+        // 而两条恢复通道对这个错误的处置都是"整份不恢复"：ARA 存档那条只 `log::error!`
+        // 然后 `return Ok(())`（宿主以为成功），VST3 `setState` 那条把错误传上去
+        // （整块组件状态一起失败）。两种结局都是"用户所有参数变回默认值"。
+        //
+        // 现在：没有身份的条目进 `unbound`，其余照常。它们的**数据不丢**（仍在
+        // `params` / `tracks` 里，也会被原样写回下一份存档），只是**不套用** ——
+        // 按会话序号猜归属是被明确禁止的（见 `reconcile` 的冷恢复分支），
+        // 而"保留但不猜"既守住了那条红线，又不再拿整份载荷陪葬。
+        restored.unbound = restored
             .tracks
             .iter()
             .map(|t| &t.id)
             .chain(restored.params.keys())
-            .any(|id| restored.bindings.get(id).is_none_or(Vec::is_empty))
-        {
-            return Err("ARA edit identity missing in saved state".into());
-        }
+            .filter(|id| restored.bindings.get(*id).is_none_or(Vec::is_empty))
+            .cloned()
+            .collect();
         restored.needs_rebind = !restored.tracks.is_empty() || !restored.params.is_empty();
         restored.validate_clip_local()?;
         restored.revision = self
@@ -657,6 +717,81 @@ mod tests {
             .restore(&serde_json::to_vec(&missing).unwrap())
             .unwrap_err()
             .contains("unsupported"));
+    }
+
+    fn params_fixture() -> TrackParamsState {
+        serde_json::from_value(serde_json::json!({"frame_period_ms": 5.0})).unwrap()
+    }
+    fn track_fixture(id: &str) -> Track {
+        serde_json::from_value(serde_json::json!({"id": id, "name": id, "order": 0})).unwrap()
+    }
+
+    /// **I3-3：往返对称 —— 任意一份编辑都必须能被自己读回来。**
+    ///
+    /// 【为什么这条曾经不成立】`encode` 与 `restore` 对"没有身份"用了两套严格度：
+    /// 写的那一侧允许 `reconcile` 留下空绑定，读的那一侧却要求每条都有非空绑定，
+    /// 于是 `restore(encode(s))` 对 `s` 报错。而 `encode` 自己也会因为同一条记录
+    /// 失败 —— 它的调用方 `encode_archive` 把失败降级成**空载荷**，宿主据此把用户的
+    /// 全部参数写成"没有编辑"。一条空轨就足够触发：它没有 region ⇒ 没有身份。
+    #[test]
+    fn encode_then_restore_round_trips_every_key() {
+        let mut state = EditState::default();
+        for id in ["T_empty", "T_a", "T_b"] {
+            state.tracks.push(track_fixture(id));
+            state.params.insert(id.to_owned(), params_fixture());
+        }
+        state
+            .bindings
+            .insert("T_a".into(), vec![("m1".into(), "s1".into())]);
+        state
+            .bindings
+            .insert("T_b".into(), vec![("m2".into(), "s2".into())]);
+        let bytes = state.encode().expect("一条空轨不得让整份存档失败");
+        let mut restored = EditState::default();
+        restored.restore(&bytes).expect("自己写的存档必须自己读得回来");
+        let keys = |value: &EditState| value.params.keys().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(keys(&restored), keys(&state));
+        assert_eq!(restored.tracks.len(), state.tracks.len());
+        assert_eq!(
+            restored.unbound,
+            BTreeSet::from(["T_empty".to_owned()]),
+            "只有真正没有身份的那一条进 unbound"
+        );
+        // 再存一次仍然带着全部三条（数据不因"认不出是谁的"而被丢掉）。
+        let again = EditState::default().encode().unwrap();
+        assert!(!again.is_empty());
+        assert_eq!(restored.params.len(), 3);
+    }
+
+    /// **I3-3 的另一半：没有身份的条目不得被"套用"到一条同名的 live 轨上。**
+    ///
+    /// 【为什么这条是红线】`ara-track-N` 是会话内的槽位号，跨会话并不稳定。
+    /// 按它猜归属会把参数挂到别人的轨道上 —— 那比"少恢复一条"严重得多。
+    /// 正确的处置是：数据留着、不套用、在诊断里报成 `unbound=N`。
+    #[test]
+    fn a_track_without_regions_is_kept_but_never_applied_by_slot_number() {
+        let mut state = EditState::default();
+        state.tracks.push(track_fixture("ara-track-2"));
+        state.tracks[0].volume = 0.25;
+        state
+            .params
+            .insert("ara-track-2".to_owned(), params_fixture());
+        // live 图：这条轨存在，但没有任何 region ⇒ 身份是空向量，存档里也没有记录。
+        state
+            .reconcile(&BTreeMap::from([("ara-track-2".into(), vec![])]))
+            .expect("没有身份不是失败");
+        assert!(state.unbound.contains("ara-track-2"));
+        assert!(state.bindings.is_empty(), "不得凭空造一个身份");
+        assert_eq!(state.params.len(), 1, "数据必须留着");
+        state.encode().expect("存档必须成功");
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "ara-track-2", "name": "t", "order": 0}],
+            "clips": [], "bpm": 120, "project_sec": 1
+        }))
+        .unwrap();
+        state.apply(&mut timeline);
+        assert_eq!(timeline.tracks[0].volume, 1.0, "按槽位号猜归属是红线");
+        assert!(timeline.params_by_root_track.is_empty());
     }
 
     #[test]
