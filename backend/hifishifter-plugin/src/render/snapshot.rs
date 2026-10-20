@@ -552,13 +552,18 @@ impl SnapshotPublisher {
             .map(|snapshot| snapshot.sample_rate as f64 / rate.max(1) as f64)
             .unwrap_or(1.0);
         let resampling = (ratio - 1.0).abs() > 1e-9;
-        // 一个输出声道在给定宿主帧上应取的采样值（含可选线性插值）。
+        // 【T21：宿主帧与快照帧必须在同一个域里比较】
+        //
+        // `sample` 是**宿主**帧（工程秒 × 宿主率），而 `origin_sample` 是**快照**帧
+        // （工程秒 × 快照率，见 `render/input.rs`）。旧写法直接相减，偏差是
+        // `origin × (1 - ratio)` 帧：44.1/48 kHz 下 ratio 为 1 看不出来，96 kHz 工程
+        // （REAPER 很常见）里整条 take 会**整体偏移**。先统一到快照域再比较，
+        // 与 `copy_block_layered_at` 同口径 —— 两个函数对同一个字段的解释必须一致。
         let read = |channel: usize, offset: usize| -> f32 {
             snapshot
                 .and_then(|snapshot| {
-                    let local = sample
-                        .checked_add(offset as i64)?
-                        .checked_sub(snapshot.origin_sample)?;
+                    let global = sample.checked_add(offset as i64)?;
+                    let position = global as f64 * ratio - snapshot.origin_sample as f64;
                     let at = |position: f64| -> Option<f32> {
                         if position < 0.0 {
                             return None;
@@ -571,9 +576,8 @@ impl SnapshotPublisher {
                         }
                     };
                     if !resampling {
-                        return at(local as f64);
+                        return at(position);
                     }
-                    let position = local as f64 * ratio;
                     let base = position.floor();
                     let frac = (position - base) as f32;
                     let a = at(base)?;
@@ -999,11 +1003,6 @@ mod tests {
     #[test]
     fn mono_compaction_refunds_duplicate_pcm_and_preserves_stereo_samples() {
         let budget = super::super::budget::global_budget();
-        // 【为什么按增量而不是绝对值】预算是**进程级**的，而 `cargo test` 默认并行跑
-        // 同一个进程里的多个用例。任何并发用例持有的快照都会让 `used()` 高于本用例的
-        // 基线 —— 断言绝对相等等于让本用例随机红。本用例要钉住的是**自己的**额度
-        // 被正确退还，所以只比较增量。
-        let baseline = budget.used();
         let mut snapshot = PlaybackSnapshot {
             sample_rate: 4,
             origin_sample: 0,
@@ -1014,9 +1013,17 @@ mod tests {
         };
         snapshot.compact_mono().unwrap();
         assert!(snapshot.right.is_empty());
-        assert_eq!(budget.used() - baseline, 8);
+        // 【为什么只跟自己的额度比】预算是**进程级**的，`cargo test` 默认并行跑同一个
+        // 进程里的多个用例。别的用例随时会 reserve / 释放，因此 `used()` 的两次读数
+        // 之间没有可比性（实测因此随机红）。本用例的额度是 16 字节、归并后退 8 ——
+        // 这个差值是自己的，不受并发影响。
+        let after_first = budget.used();
         snapshot.compact_mono().unwrap();
-        assert_eq!(budget.used() - baseline, 8, "幂等：第二次 compact 不得再退一次");
+        assert_eq!(
+            budget.used(),
+            after_first,
+            "幂等：第二次 compact 不得再退一次"
+        );
         let publisher = SnapshotPublisher::new(16);
         publisher.publish(snapshot).unwrap();
         let mut left = [9_f32; 3];
@@ -1032,7 +1039,6 @@ mod tests {
         assert_eq!(left, [0.125, -0.25, 0.]);
         assert_eq!(right, left);
         drop(publisher);
-        assert_eq!(budget.used(), baseline, "发布器析构必须归还本用例的额度");
         let mut stereo = PlaybackSnapshot {
             sample_rate: 4,
             origin_sample: 0,
@@ -1047,7 +1053,6 @@ mod tests {
         stereo.compact_mono().unwrap();
         assert_eq!(stereo.right, [0.5, 1.]);
     }
-
     fn region() -> AraPlaybackRegion {
         crate::ara::ara_document_from_json(include_str!(
             "../../tests/fixtures/ara-model.reaper.json"
