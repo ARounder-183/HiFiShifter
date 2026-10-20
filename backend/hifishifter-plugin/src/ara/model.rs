@@ -661,7 +661,9 @@ impl ModelHandle {
         // 已销毁的槽位在这里清掉；存活槽位**保留已发布的形态**。
         clip_ids.retain(|key, _| live_keys.contains(key));
         for key in live_keys {
-            clip_ids.entry(key).or_insert_with(|| format!("ara-region-{key}"));
+            clip_ids
+                .entry(key)
+                .or_insert_with(|| format!("ara-region-{key}"));
         }
     }
 
@@ -1603,7 +1605,11 @@ impl RegionSequences for ModelHandle {
         // 覆盖语义只能用 `assign`。三张表（`sequence_persistent_ids` /
         // `sequence_refs` / `region_sequences`）必须**严格同长、同下标**，
         // 否则 `MappingIdentities::live_sequences`（按第一张表的长度生成）会错位。
-        Self::set_sequence_slot(&mut self.sequence_persistent_ids, index, sequence_key.to_string());
+        Self::set_sequence_slot(
+            &mut self.sequence_persistent_ids,
+            index,
+            sequence_key.to_string(),
+        );
         // 与扁平序列槽位一一对应：region 的 `sequence_model_ref` 靠它翻译回槽位。
         Self::set_sequence_slot(&mut self.document.sequence_refs, index, sequence_key);
         if let Some(handle) = context.object_handle() {

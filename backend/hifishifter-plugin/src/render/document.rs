@@ -63,8 +63,7 @@ pub(crate) const EDIT_SETTLE_GRACE: std::time::Duration = std::time::Duration::f
 /// 收口，等于在用户拖动到一半时把模型提交一次 —— 曲线会跳、撤销栈会碎。
 ///
 /// 取 8 秒：足够覆盖任何正常交互，又短到"宿主真的挂了"时用户不必等太久。
-pub(crate) const FORCED_EDIT_CLOSE_GRACE: std::time::Duration =
-    std::time::Duration::from_secs(8);
+pub(crate) const FORCED_EDIT_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// 一个 ARA 音频源相对本插件的**可读性**。
 ///

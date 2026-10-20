@@ -608,8 +608,7 @@ impl DocumentSession {
                         .find(|(_, guid)| **guid == g.item_id)
                         .and_then(|(key, _)| ids.get(key).cloned())
                 };
-                let id =
-                    claimed_id.unwrap_or_else(|| prefix(&format!("ara-item-{}", g.item_id)));
+                let id = claimed_id.unwrap_or_else(|| prefix(&format!("ara-item-{}", g.item_id)));
                 present.insert(id.clone());
                 if !timeline.clips.iter().any(|clip| clip.id == id) {
                     // 同上的 panic 纪律：宿主给一个非有限 `playback_rate`（离线/损坏素材）
