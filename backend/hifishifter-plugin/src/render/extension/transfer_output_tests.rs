@@ -113,7 +113,7 @@ fn the_read_position_jump_is_a_pure_judgement() {
     // ⑤ 差 1 秒 ⇒ 跳变，且幅度可读。
     owner.note_read_position_for_test(1);
     assert_eq!(owner.read_position_jump(Some(evidence)), Some(47_999));
-  
+
     // ⑥ 反向跳变同样算（回退 = 重播已听内容）。
     owner.note_read_position_for_test(96_000);
     assert_eq!(owner.read_position_jump(Some(evidence)), Some(48_000));

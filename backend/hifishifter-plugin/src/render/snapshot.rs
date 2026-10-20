@@ -848,7 +848,9 @@ impl SnapshotPublisher {
                 return true;
             }
             // 区间升序不重叠 ⇒ 二分。
-            let index = snapshot.covered.partition_point(|range| range.end <= global);
+            let index = snapshot
+                .covered
+                .partition_point(|range| range.end <= global);
             snapshot
                 .covered
                 .get(index)
@@ -1583,8 +1585,14 @@ mod tests {
             left[4128]
         );
         // 空洞之前与之后必须是快照（稳定段内权重 1.0）。
-        assert!((left[2048] - 0.2).abs() < 1e-6, "before the hole the snapshot wins");
-        assert!((left[6144] - 0.2).abs() < 1e-6, "after the hole the snapshot wins");
+        assert!(
+            (left[2048] - 0.2).abs() < 1e-6,
+            "before the hole the snapshot wins"
+        );
+        assert!(
+            (left[6144] - 0.2).abs() < 1e-6,
+            "after the hole the snapshot wins"
+        );
     }
 
     /// **T1：空洞结束、内容重新开始的那一侧要淡化，两侧不能阶跃。**
@@ -1616,10 +1624,16 @@ mod tests {
         assert!(unsafe {
             publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
         });
-        assert!((left[128] - 7.0).abs() < 1e-6, "inside the hole the dry signal wins");
+        assert!(
+            (left[128] - 7.0).abs() < 1e-6,
+            "inside the hole the dry signal wins"
+        );
         let step = (left[257] - left[256]).abs();
         assert!(step < 1.0, "the onset must ramp, not step (saw {step})");
-        assert!((left[400] - 0.2).abs() < 1e-6, "after the ramp the snapshot wins");
+        assert!(
+            (left[400] - 0.2).abs() < 1e-6,
+            "after the ramp the snapshot wins"
+        );
     }
 
     /// **T1：没有 coverage 时保持"整份快照都算录到"的旧语义。**
