@@ -675,11 +675,24 @@ impl SnapshotPublisher {
         // 【为什么把"快照读取"与"宿主输入"分开】覆盖边界需要把两者**同时**取到
         // 才能做交叉淡化。旧实现的 `read` 在快照外直接返回输入，调用方无法再区分
         // "这里没有快照"与"快照值恰好等于输入"。
+        // 【T21：宿主帧与快照帧**必须在同一个域里比较**】
+        //
+        // `sample` 是**宿主**帧（工程秒 × 宿主率），而 `origin_sample` 是**快照**帧
+        // （工程秒 × 快照率，见 `render/input.rs`）。旧写法 `(sample - origin) * ratio`
+        // 把两个域直接相减，偏差是 `origin * (1 - ratio)` 帧 —— 44.1/48 kHz 下 ratio 为 1
+        // 看不出来，96 kHz 工程（REAPER 很常见）里整条 take 会**整体偏移**，
+        // 而且覆盖边带落在错误的帧上（于是边界处是一次硬切）。
+        //
+        // 正确做法：先把宿主帧换算成快照帧，再与快照自己的坐标相减；覆盖范围
+        // 与边带因此全部落在快照域里（`[0, left.len())`）。
+        let snapshot_position = |offset: usize| -> Option<f64> {
+            let global = sample.checked_add(offset as i64)?;
+            let origin = snapshot?.origin_sample;
+            Some(global as f64 * ratio - origin as f64)
+        };
         let snapshot_at = |channel: usize, offset: usize| -> Option<f32> {
             let snapshot = snapshot?;
-            let local = sample
-                .checked_add(offset as i64)
-                .and_then(|sample| sample.checked_sub(snapshot.origin_sample))?;
+            let position = snapshot_position(offset)?;
             let at = |position: f64| -> Option<f32> {
                 if position < 0.0 {
                     return None;
@@ -691,13 +704,11 @@ impl SnapshotPublisher {
                     snapshot.right.get(index).copied()
                 }
             };
-            // 快照的覆盖范围是 `[0, left.len())` 帧（`origin_sample` 已扣掉）。
+            // 快照的覆盖范围是 `[0, left.len())` 帧（已经换到快照域）。
             let inside = |position: f64| position >= 0.0 && position < snapshot.left.len() as f64;
             if !resampling {
-                let position = local as f64;
                 return inside(position).then(|| at(position).unwrap_or(0.0));
             }
-            let position = local as f64 * ratio;
             if !inside(position) {
                 return None;
             }
@@ -710,16 +721,21 @@ impl SnapshotPublisher {
         };
         // 覆盖边界（宿主帧域）。快照外沿是"宿主原声 ↔ 处理结果"的切换点；
         // 它可能落在任意块中间，必须在边界带内交叉淡化，否则就是一次波形阶跃。
+        // 【T21：边带也在**宿主帧域**里比较】`origin_sample` 是快照帧，而下面逐帧
+        // 求值用的是宿主帧（`global`）。此前直接把它当宿主帧用，非原生率下边带整体
+        // 错位 `origin*(1-ratio)` 帧 —— 覆盖率边沿因此是一次硬切。
         let (coverage_start, coverage_end) = snapshot.map_or((i64::MAX, i64::MIN), |snapshot| {
             let host_len = if resampling {
                 (snapshot.left.len() as f64 / ratio).ceil() as i64
             } else {
                 snapshot.left.len() as i64
             };
-            (
-                snapshot.origin_sample,
-                snapshot.origin_sample.saturating_add(host_len),
-            )
+            let origin_host = if resampling {
+                (snapshot.origin_sample as f64 / ratio).round() as i64
+            } else {
+                snapshot.origin_sample
+            };
+            (origin_host, origin_host.saturating_add(host_len))
         });
         // 【T16：两条边用**不同的宽度**与**等功率**权重】
         //
@@ -738,7 +754,7 @@ impl SnapshotPublisher {
         let start_edge = COVERAGE_START_FADE_FRAMES.min(span / 2).max(1);
         let edge_gain = |position: i64| -> (f32, f32) {
             const END: i64 = COVERAGE_EDGE_FADE_FRAMES;
-            let START: i64 = start_edge;
+            let start = start_edge;
             if coverage_start == i64::MAX {
                 return (1.0, 0.0);
             }
@@ -754,14 +770,14 @@ impl SnapshotPublisher {
             // 【为什么淡化带**向内**而不是横跨边界】覆盖之外根本没有快照采样
             // （`snapshot_at` 返回 `None`），所以边界之外只能是宿主原声。要让
             // "快照 → 原声"不产生阶跃，淡化必须发生在**覆盖范围之内**：
-            // 在 `coverage_start` 处从 0 起、到 `coverage_start + START` 满；
+            // 在 `coverage_start` 处从 0 起、到 `coverage_start + start` 满；
             // 在 `coverage_end` 处降到 0、从 `coverage_end - END` 开始降。
             // 边界之外一律 (1, 0)（纯原声）—— 这正是"不宣称我们没录到的覆盖"。
             if position < coverage_start || position >= coverage_end {
                 return (1.0, 0.0);
             }
-            if position < coverage_start + START {
-                let t = ((position - coverage_start) as f32 / START as f32).clamp(0.0, 1.0);
+            if position < coverage_start + start {
+                let t = ((position - coverage_start) as f32 / start as f32).clamp(0.0, 1.0);
                 // 等功率：out² + in² = 1。
                 let angle = t * std::f32::consts::FRAC_PI_2;
                 return (angle.cos(), angle.sin());
