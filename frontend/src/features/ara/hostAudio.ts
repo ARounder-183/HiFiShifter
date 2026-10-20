@@ -31,7 +31,13 @@ export const HOST_AUDIO_STATES: ReadonlySet<string> = new Set<HostAudioState>([
  */
 export function parseHostAudio(raw: unknown): HostAudioPayload | null {
     if (typeof raw !== "object" || raw === null) return null;
-    const candidate = raw as { state?: unknown; waiting_clips?: unknown; skipped_clips?: unknown };
+    const candidate = raw as {
+        state?: unknown;
+        waiting_clips?: unknown;
+        skipped_clips?: unknown;
+        reason?: unknown;
+        restore?: unknown;
+    };
     if (typeof candidate.state !== "string" || !HOST_AUDIO_STATES.has(candidate.state)) {
         return null;
     }
@@ -45,9 +51,19 @@ export function parseHostAudio(raw: unknown): HostAudioPayload | null {
     if (Number.isFinite(skipped) && skipped > 0) {
         payload.skipped_clips = Math.floor(skipped);
     }
+    // 【为什么必须保留 `reason`】它是后端给出的**机器可读**原因码；丢了它，界面只能说
+    // "等待宿主音频"这一句话，而这句话同时覆盖"可等"与"用法错了"两种处置相反的处境。
+    // 空串与缺失同义（一样按没有处理）。
+    if (typeof candidate.reason === "string" && candidate.reason.length > 0) {
+        payload.reason = candidate.reason;
+    }
+    // 【为什么必须保留 `restore`】参数/曲线恢复读数与宿主音频是两件事（前者丢的是
+    // 参数、后者丢的是音频），但它出现在同一屏上。缺省 = 本实例没有可报的恢复事实。
+    if (candidate.restore && typeof candidate.restore === "object") {
+        payload.restore = candidate.restore as HostAudioPayload["restore"];
+    }
     return payload;
 }
-
 /**
  * 是否有片段被宿主提供了、但插件**无法映射**而跳过（MIDI / 零长度 item…）。
  *

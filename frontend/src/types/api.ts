@@ -247,6 +247,16 @@ export interface HostAudioPayload {
      * 缺省 = 旧后端或正常中间态（视为无真因）。
      */
     reason?: string | null;
+    /**
+     * 参数/曲线的恢复读数（后端 `ara_restore` 的镜像）。
+     *
+     * 【为什么要镜像到这里】恢复失败的用户可见症状与宿主音频是两件事（片段有内容、
+     * 能播，丢的是参数），但它出现在同一屏上。镜像之后 `HostAudioNotice` 一处就能
+     * 同时给出两边的真因，不必让 App 再订阅一次 TimelineState 里的大字段。
+     *
+     * 缺省 = 本实例没有可报的恢复事实。
+     */
+    restore?: TimelineState["ara_restore"] | null;
 }
 
 export interface TimelineState {

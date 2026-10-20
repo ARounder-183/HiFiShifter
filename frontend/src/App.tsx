@@ -552,6 +552,8 @@ function AppInner() {
      * 变成一条可见提示，因此这里订阅的代价只有一次浅比较。
      */
     const hostAudio = useAppSelector((state) => state.session.hostAudio);
+    // 参数/曲线恢复读数：恢复失败时必须连同真因一起显示（见 `HostAudioNotice`）。
+    const hostAudioRestore = useAppSelector((state) => state.session.hostAudio?.restore ?? null);
     // 注意：playbackPositionSec 以 ~30Hz 持续变化，这里不能订阅（否则每次
     // 播放 tick 都重渲 AppInner）；需要它的地方（录音自动停止）在回调内经
     // store.getState() 同步读取最新值。
@@ -4402,7 +4404,9 @@ function AppInner() {
              * 状态栏里：这条提示要给出原因与下一步，状态栏那个高度装不下；而它出现时
              * 用户看到的正是一片没有内容的片段，提示必须紧挨着那片区域。
              */}
-            {isPluginMode() ? <HostAudioNotice status={hostAudio} /> : null}
+            {isPluginMode() ? (
+                <HostAudioNotice status={hostAudio} restore={hostAudioRestore} />
+            ) : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。

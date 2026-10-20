@@ -45,6 +45,38 @@ describe("parseHostAudio", () => {
         expect(parseHostAudio("folder_parent_without_regions")).toBeNull();
     });
 
+    /*
+     * 【为什么必须保留 reason】它是后端给出的机器可读原因码。此前它被本函数丢掉，
+     * 于是界面只剩"等待宿主音频"这一句话 —— 而它同时覆盖"可等"与"用法错了"
+     * 两种处置相反的处境。丢了它，用户能看到的只有一句没有信息量的话。
+     */
+    test("reason 被保留，空串与缺失同义", () => {
+        expect(parseHostAudio({ state: "restore_unresolved", reason: "decode failed" })).toEqual({
+            state: "restore_unresolved",
+            waiting_clips: 0,
+            reason: "decode failed",
+        });
+        // 空串与"没有原因"同义，不带该字段。
+        expect(parseHostAudio({ state: "source_read_failed", reason: "" })).toEqual({
+            state: "source_read_failed",
+            waiting_clips: 0,
+        });
+        // 非字符串不入库。
+        expect(parseHostAudio({ state: "source_read_failed", reason: 7 })).toEqual({
+            state: "source_read_failed",
+            waiting_clips: 0,
+        });
+    });
+
+    test("restore 读数被保留", () => {
+        const restore = { status: "failed" as const, applied_generation: 0, error: "boom" };
+        expect(parseHostAudio({ state: "restore_unresolved", restore })).toEqual({
+            state: "restore_unresolved",
+            waiting_clips: 0,
+            restore,
+        });
+    });
+
     /* 计数只用于展示，非法值收敛到 0 —— 绝不把 NaN / 负数渲染到界面上。 */
     test("非法计数收敛到 0", () => {
         for (const bad of [undefined, null, "many", Number.NaN, -4, {}]) {

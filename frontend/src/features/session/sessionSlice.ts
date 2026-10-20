@@ -5084,6 +5084,13 @@ const sessionSlice = createSlice({
                  * 沿用上一次已知值，而不是清空或猜测（见 `parseHostAudio`）。
                  */
                 const nextHostAudio = parseHostAudio(payload.host_audio);
+                // 【为什么在这里补 restore】恢复读数在 TimelineState 的顶层
+                // （`ara_restore`），而宿主提示条订阅的是 `session.hostAudio`。把它
+                // 镜像进宿主读数，提示条一处就能同时给出"音频为什么没到"与"参数为什么
+                // 没读回"两边的真因 —— 后者此前只有一行后端日志。
+                if (nextHostAudio && payload.ara_restore) {
+                    nextHostAudio.restore = payload.ara_restore;
+                }
                 if (nextHostAudio) state.hostAudio = nextHostAudio;
                 applyTimelineState(state, payload, {
                     force: true,

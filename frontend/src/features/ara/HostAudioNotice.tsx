@@ -59,7 +59,14 @@ function Notice({ title, body }: { title: string; body: ReactNode }) {
     );
 }
 
-export function HostAudioNotice({ status }: { status: HostAudioPayload | null }) {
+export function HostAudioNotice({
+    status,
+    restore,
+}: {
+    status: HostAudioPayload | null;
+    /** 参数/曲线恢复读数；缺失 = 本实例没有可报的恢复事实。 */
+    restore?: HostAudioPayload["restore"] | null;
+}) {
     const { t, plural } = useI18n();
     // 【为什么排在 folder 之前】"宿主分配了区域但一条都对不上"比"还没拿到区域"更具体：
     // 它排除了"宿主尚未分配"这一成因，用户不必再等。
@@ -104,12 +111,15 @@ export function HostAudioNotice({ status }: { status: HostAudioPayload | null })
     // 恢复失败与"没有音频"是两件事：片段有内容、能播，丢的是参数与曲线。
     // 排在上面几条之后，因为那些会让人完全看不到内容，更紧急。
     if (needsRestoreUnresolvedNotice(status)) {
-        return (
-            <Notice
-                title={t("ara_host_audio_restore_title")}
-                body={t("ara_host_audio_restore_body")}
-            />
-        );
+        // 【为什么把原因拼在正文后面】后端给的中文案本身以"原因："结尾，而它携带的
+        // `error` 才是唯一能回答"为什么没读回"的东西。此前这个字段被 `parseHostAudio`
+        // 丢掉，用户看到的是一个空着的"原因：" —— 那一屏比没有提示更糟。
+        const detail = restore?.error ?? restore?.pending_reason ?? null;
+        const body =
+            detail && detail.length > 0
+                ? t("ara_host_audio_restore_body") + ` ${detail}`
+                : t("ara_host_audio_restore_body");
+        return <Notice title={t("ara_host_audio_restore_title")} body={body} />;
     }
     const skipped = needsSkippedClipsNotice(status);
     if (skipped > 0) {
