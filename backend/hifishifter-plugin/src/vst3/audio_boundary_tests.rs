@@ -1582,8 +1582,13 @@ fn a_repeated_realtime_block_is_silenced_after_the_first_occurrence() {
         .note_binding_window_closed_without_ara();
     let (first, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
     assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
+    // 【T20：单块抖动不静音】门控要求**连续两块**都不推进才淡出。播放中途的
+    // 一次调度抖动 / 一次区间复用只命中单块，若逐块静音，用户听到的是一次
+    // 1.3 ms 的掉零 —— 那正是"播放过程中随机地咔"。
     let (second, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
-    assert_gate_faded_out(&second, "同一区间的重复必须静音");
+    assert_eq!(second, vec![0.5; 8], "单块重复仍要出声（抖动不该变成咔）");
+    let (third, _) = run_stream_block(&mut processor, 0, 0, 0, 8, 0.5);
+    assert_gate_faded_out(&third, "连续不推进才允许静音");
     let diagnostics = processor.extension_owner.block_diagnostics_json(0);
     assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
 }
@@ -1601,9 +1606,12 @@ fn a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence() {
     let playing = crate::audio_abi::PROCESS_CONTEXT_PLAYING;
     let (first, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
     assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
+    // 【T20】同上去抖：连续两块不推进才静音。
     let (second, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
+    assert_eq!(second, vec![0.5; 8], "单块重复仍要出声");
+    let (third, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
     assert_gate_faded_out(
-        &second,
+        &third,
         "kPlaying 常置 1 不能把同一位置的重复块变成连续输出",
     );
     let diagnostics = processor.extension_owner.block_diagnostics_json(0);

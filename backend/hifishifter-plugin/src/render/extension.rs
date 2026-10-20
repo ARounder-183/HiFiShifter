@@ -1022,6 +1022,14 @@ pub(crate) struct ExtensionOwner {
     cycle_splits: AtomicU64,
     /// 因“同一区间重复”被抑制输出的实时块数。
     repeats_suppressed: AtomicU64,
+    /// 连续多少块被判定为"不该出声"（停播 / 重复区间）。
+    ///
+    /// 【为什么需要计数而不是逐块判定】逐块判定的后果是：播放中途只要**一块**被
+    /// 判成 Resting（一次调度抖动、一次宿主复用同一区间），就会触发一次
+    /// `apply_gate_fade_out` —— 那是 64 帧淡到零、下一块再淡回来（约 1.3 ms 的掉零）。
+    /// 听感正是"播放过程中随机地咔"。真实停播会**连续**满足判据，所以用"连续两块"
+    /// 作为分界：单块抖动继续出声，连续不推进才静音（代价是停播后多 10 ms 声音）。
+    gate_resting_run: AtomicU32,
     /// 宿主在 `setupProcessing` 声明的单块上限（`0` = 未声明）。
     max_samples_per_block: AtomicI32,
     /// 音频线程发现值得留证的起播窗口时置位；actor 心跳消费并落一次日志。
@@ -1162,6 +1170,14 @@ const STALE_SAMPLE_GRACE: std::time::Duration = std::time::Duration::from_secs(1
 /// 与 `STALE_SAMPLE_GRACE` 分工不同：后者是"采样数据陈旧"，这条是"**事件源**
 /// 曾经停止"。前者可以靠其它路径补，后者只能由恢复后的第一次 tick 自己发现。
 const FOREGROUND_RESUME_GAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 连续多少块"不推进"才允许门控静音（见 `ExtensionOwner::gate_resting_run`）。
+///
+/// 【为什么是 2】真实停播会**连续**满足判据；而一次调度抖动、一次宿主复用同一区间
+/// 只会命中**单块**。逐块判定会把后者变成一次 1.3 ms 的掉零 —— 用户听到的就是
+/// "播放过程中随机地咔"。取 2 的代价是停播后多出约一个块（10 ms）的声音，
+/// 听感上察觉不到。
+const GATE_SETTLE_BLOCKS: u32 = 2;
 
 /// VST3 离线 `setupProcessing` 里等待后台准备的最长时间。
 ///
@@ -3908,11 +3924,25 @@ impl ExtensionOwner {
         // 循环切分不是起播起点，仍排除。
         let pinned_since_last = !time.cycle_active && (!had || raw_start == last_raw);
         let max_pre_roll = (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64;
-        // 【停播很久后的上升沿必须扣掉停播静音】用户停在光标处时宿主也会反复投递
-        // 同一块静音；那段静音不是播放时间，不能变成 take 的前导。判据用钉住时长：
-        // 一个起播窗口（`PINNED_PLAYBACK_SEC`）之内的累积属于"刚开始播放的前段
-        // 静音"；超过它说明宿主已经停在那里很久（与 `pinned_before` 的清零同口径）。
-        if (playing_rising || recording_rising) && prior_pinned_frames > max_pre_roll {
+        // 【T17："停播静音"必须与"起播窗口的静音"分开，而**帧数不是判据**】
+        //
+        // 用户停在光标处时宿主会反复投递同一块；那段不是播放时间，不能变成前导。
+        // 旧判据是"钉住帧数超过一个起播窗口"—— 而 `pinned_frames` **没有上界**，
+        // 只要宿主在停住的状态下继续调 `process` 就一直在涨。于是最常见的操作顺序
+        // 「武装 → 等一会儿（>1 s）→ 按播放」会让**第一次真实上升沿**带上一个巨大的
+        // 累积值，被判成"停播静音"而丢弃 —— 而 VEGAS 的 `kPlaying` 上升沿本来就晚
+        // （见 `capture.rs` 的说明），这条几乎必然命中。
+        //
+        // 真正能区分两者的是**上升沿之前那一块的内容**：
+        //   * 起播窗口：宿主先送**静音**，内容出现时才把播放位置置 1；
+        //   * 停播重复投递：宿主把**同一段有内容的音频**反复送（`repeated_nonzero`）。
+        // 所以判据改成"钉住够久 **且** 上一块不是静音"。静音的那一支保留前导 ——
+        // 那正是起播窗口的形状。
+        let last_block_silent = geometry.last_block_silent.load(Ordering::Acquire);
+        if (playing_rising || recording_rising)
+            && prior_pinned_frames > max_pre_roll
+            && !last_block_silent
+        {
             preceding_silent_frames = 0;
             discard_pre_roll = true;
         }
@@ -4582,22 +4612,25 @@ impl ExtensionOwner {
             ProcessStream::Prefetch => true,
             ProcessStream::Realtime => {
                 if playing_rising || recording_rising {
+                    self.gate_resting_run.store(0, Ordering::Release);
                     return true;
-                }
-                if phase == TransportPhase::Resting {
-                    self.repeats_suppressed.fetch_add(1, Ordering::Relaxed);
-                    return false;
                 }
                 let same = self.rt_last_emitted_valid.load(Ordering::Acquire)
                     && self.rt_last_emitted_start.load(Ordering::Acquire) == position
                     && self.rt_last_emitted_frames.load(Ordering::Acquire)
                         == u32::try_from(block.frames).unwrap_or(u32::MAX);
-                if same {
-                    self.repeats_suppressed.fetch_add(1, Ordering::Relaxed);
-                    false
-                } else {
-                    true
+                let quiet = phase == TransportPhase::Resting || same;
+                if !quiet {
+                    self.gate_resting_run.store(0, Ordering::Release);
+                    return true;
                 }
+                // 【T20：单块抖动不静音】见 `gate_resting_run` 的字段说明。
+                let run = self.gate_resting_run.fetch_add(1, Ordering::AcqRel) + 1;
+                if run < GATE_SETTLE_BLOCKS {
+                    return true;
+                }
+                self.repeats_suppressed.fetch_add(1, Ordering::Relaxed);
+                false
             }
         }
     }
