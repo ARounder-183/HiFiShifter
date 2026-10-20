@@ -1603,6 +1603,38 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
     );
 }
 
+/// **T18: an identity mismatch during restore is pending, not a failure.**
+///
+/// Why this matters to the user: when a project is reopened the host's graph may not be
+/// rebuilt yet, so the saved track identities cannot be matched. That used to be reported as
+/// "the saved parameters could not be read back" - a terminal-sounding message that sends the
+/// user looking for settings that would have come back on the next edit anyway.
+///
+/// The strict reconcile contract is untouched (guessing an owner would attach parameters to
+/// the wrong track); only how its failure is classified changed.
+#[test]
+fn an_identity_mismatch_during_restore_is_reported_as_pending() {
+    // The three identity errors `state_channel` can produce.
+    for message in [
+        "ARA edit identity missing; cannot restore by session track number",
+        "ARA edit identity missing or ambiguous in rebuilt host graph",
+        "ARA saved edit identities are ambiguous; multiple records target one host track",
+    ] {
+        assert_eq!(
+            ExtensionOwner::classify_restore_identity_error(message),
+            RestoreIdentityVerdict::AwaitingHostGraph,
+            "a missing host identity is a 'not rebuilt yet' case: {message}"
+        );
+    }
+    // Everything else stays fatal - a broken archive must still be reported as such.
+    for message in ["edit revision exhausted", "unsupported state version"] {
+        assert_eq!(
+            ExtensionOwner::classify_restore_identity_error(message),
+            RestoreIdentityVerdict::Fatal,
+            "{message}"
+        );
+    }
+}
 /// **门控清零必须是"淡到零"，而不是阶跃到零。**
 ///
 /// 【为什么这是问题一的直接回归】`vst3.rs` 曾在门控分支里"先去咔、再

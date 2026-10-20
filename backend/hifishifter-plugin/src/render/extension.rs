@@ -246,6 +246,14 @@ impl HostAudioState {
     }
 }
 
+/// 【T18】`reconcile` 身份失败的两种归属。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreIdentityVerdict {
+    /// 宿主的图还没长成（重开工程时 region 尚未交付）：继续等，报 `pending`。
+    AwaitingHostGraph,
+    /// 真失败（存档损坏、修订号耗尽）：报 `failed`。
+    Fatal,
+}
 /// 最近一次清单刷新得出的宿主音频读数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HostAudioStatus {
@@ -5396,6 +5404,27 @@ impl ExtensionOwner {
         result
     }
 
+    /// 【T18】`reconcile` 的身份失败属于"等宿主图重建"还是"真失败"。
+    ///
+    /// 【为什么抽成纯函数】它是本轮的**唯一判据**，而它决定用户看到"还在等"还是
+    /// "没读回来" —— 那两句话的可执行动作完全相反。纯函数让六个边界可单测，
+    /// 不必构造一整份 ARA 文档。
+    ///
+    /// 【为什么按措辞判而不是错误类型】`reconcile` 返回 `Result<(), String>`
+    /// （`state_channel` 不依赖本模块的错误类型），三条身份错误都带 `identity`：
+    /// "ARA edit identity missing…" / "…missing or ambiguous in rebuilt host graph" /
+    /// "ARA saved edit identities are ambiguous…"。其余错误（修订号耗尽）是真失败。
+    fn classify_restore_identity_error(error: &str) -> RestoreIdentityVerdict {
+        // 【为什么是 `identit` 而不是 `identity`】`state_channel` 的三条措辞分别是
+        // "identity missing"、"identity missing or ambiguous" 与
+        // **"identities are ambiguous"** —— 第三条是复数，用全词会漏掉它，
+        // 而那正是"两条存档记录指向同一条宿主轨"这个最需要继续等的形状。
+        if error.contains("identit") {
+            RestoreIdentityVerdict::AwaitingHostGraph
+        } else {
+            RestoreIdentityVerdict::Fatal
+        }
+    }
     fn merge_pending_restore_inner(
         &self,
         document: &super::document::DocumentSession,
@@ -5440,7 +5469,27 @@ impl ExtensionOwner {
             .map(|(id, identity)| (id.clone(), identity.clone()))
             .collect();
         let mut restored = saved.clone();
-        restored.reconcile(&bindings)?;
+        // 【T18：身份对不上是"还在等"，不是"失败"】
+        //
+        // `reconcile` 的契约是严格的：任何一条旧轨在新图里找不到唯一身份，它就返回
+        // `Err`（这条契约由 `restored_edits_refuse_ambiguous_empty_and_missing_host_identity`
+        // 等用例钉住，本轮**不动**它 —— 猜测归属会把参数挂到别人的轨道上）。
+        //
+        // 但"对不上"有两种成因，处置相反：
+        //   * 存档坏了 / 身份本身为空 —— 真失败，报 `failed`；
+        //   * 宿主**这一次**的图还没长成（重开工程时 region 尚未交付、轨道还在重建）——
+        //     该继续等，报 `pending` 并说明在等什么。
+        // 此前两者都走 `?` ⇒ `note_restore_failed` ⇒ 界面显示"没能读回参数"，而实际
+        // 上再等一轮（或用户在宿主里做一次编辑）就好了。
+        if let Err(error) = restored.reconcile(&bindings) {
+            match Self::classify_restore_identity_error(&error) {
+                RestoreIdentityVerdict::AwaitingHostGraph => {
+                    self.note_restore_waiting(&format!("host-graph-not-rebuilt: {error}"));
+                    return Ok(());
+                }
+                RestoreIdentityVerdict::Fatal => return Err(error),
+            }
+        }
         restored.atlas.migrate_legacy_gaps(&restored.params)?;
         let mut changed_geometry = false;
         if !restored.atlas.is_empty() {
