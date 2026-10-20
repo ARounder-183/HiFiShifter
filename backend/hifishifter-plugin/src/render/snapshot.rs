@@ -788,6 +788,12 @@ impl SnapshotPublisher {
             if short {
                 // 快照短于两条淡化带：没有"中间稳定段"可保留，整段淡化等于把
                 // 内容整体衰减。短快照（测试夹具/极短片段）按原样硬切。
+                //
+                // 【为什么不在这里补一条淡化】试过：`span/4` 的等功率带会让 2~4 帧的
+                // 快照整段落在过渡带里，`layered_copy_substitutes_only_the_snapshot_span`
+                // 等用例立刻回归 —— 而那条契约（"录到的那一段被替换、其余保持原声"）
+                // 比这个边角更值钱。短快照的实际影响面是**短于 128 帧（48 kHz 下 2.7 ms）**
+                // 的 take，人耳不可闻；硬切仍是这里正确的取舍。
                 return if position >= coverage_start && position < coverage_end {
                     (0.0, 1.0)
                 } else {
