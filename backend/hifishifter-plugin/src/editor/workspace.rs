@@ -241,12 +241,54 @@ fn sync_host_takes(
             };
             Some((index, owned))
         }
-        None => inherited_media.and_then(|media| {
-            item.takes
-                .iter()
-                .position(|take| take.active)
-                .map(|index| (index, media.clone()))
-        }),
+        None => inherited_media
+            .and_then(|media| {
+                item.takes
+                    .iter()
+                    .position(|take| take.active)
+                    .map(|index| (index, media.clone()))
+            })
+            // 【T22：**没有记录**不等于**没有授权**】
+            //
+            // `authorized_takes` / `authorized_sources` 是"某一刻观察到的授权事实"，
+            // 而它只有一个写者（`remap_and_log`），且要求 `region_items` 与 `ui_tracks`
+            // 在同一刻都就绪。重开工程时这个条件常常不成立（几何缓存被 `clear_renderers`
+            // 的 revision 推进作废、`assignments` 尚未重发、宿主 item 几何还没稳定），
+            // 于是那张表被写成**空**的。
+            //
+            // 此前这里把"查不到记录"直接当成"未授权"：重建出来的 take 一个都不带
+            // `source_path`，`normalize_takes()` 再把扁平投影一起清掉 ⇒ **一次清单轮次
+            // 剥掉全部 clip 的源**。用户看到的就是"重开工程后所有 Clip 都在等宿主音频"，
+            // 而音频其实一直在 `edit_sources` 里。
+            //
+            // 正确的解释是**未知**：既然这一刻观察不到，就保留这条 clip 已经有的媒体
+            // 身份（它本来就是上一次观察的结果）。真正要拦的是"宿主换了 active take" ——
+            // 那个形状 `authorized_take` 是 `Some` 却匹配不上，走的是上面 `granted`
+            // 的另一条分支，**不受这里影响**。
+            .or_else(|| {
+                // 【判据必须是"**完全没有记录**"，而不是"记录没匹配上"】
+                // 后者是宿主真的换了 active take（授权指向另一个 take），必须继续拦；
+                // 只有前者才属于"这一刻观察不到"。两者的区别就是这张表里有没有这个 key。
+                if authorized_take.is_some() || authorized_source.is_some() {
+                    return None;
+                }
+                // 只有"已经有源"时才保留；从未有过源的 clip 仍然显示占位（宁可不挂）。
+                //
+                // 【为什么两处都要看】扁平投影（`clip.source_path`）是 `normalize_takes()`
+                // 的产物，而清单刷新可能跑在它之前；take 列表里那一份才是真正的存储。
+                let owned = clip
+                    .takes
+                    .iter()
+                    .find(|take| take.source_path.is_some())
+                    .cloned()
+                    .or_else(|| {
+                        clip.source_path
+                            .as_ref()
+                            .map(|_| hifishifter_kernel::state::ClipTake::from_clip(clip))
+                    })?;
+                let index = item.takes.iter().position(|take| take.active)?;
+                Some((index, owned))
+            }),
     };
     if let Some((index, media)) = media {
         apply_take_media(&mut rebuilt[index], &media);
@@ -1777,8 +1819,32 @@ impl DocumentSession {
             return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         let mut regions = BTreeSet::new();
+        let mut derived = false;
         for owner in self.renderer_owners() {
-            regions.extend(owner.assigned_regions().map_err(|e| e.to_string())?);
+            // 【T1：走同一个判据，并允许文档级派生】本函数的结果是**本文档全部 owner
+            // 的并集**（工作区要显示整份工程），因此"本实例还没被告知分配"在这里
+            // 完全可以用文档级的 `sequence_regions` 补上 —— 补出来的并集正是它要的。
+            //
+            // 【为什么不再用 `assigned_regions()`】那条路径是**逐实例**语义（渲染输入
+            // 只许渲染自己那一份），且此前用整批 `resolve`：一条陈旧 key 就让整份
+            // 工作区为空 ⇒ `ensure_loaded` 整份 Err ⇒ 界面回落到只有宿主清单占位的
+            // 降级视图（"所有 Clip 都在等宿主音频"）。
+            let scope = owner
+                .assigned_scope(self, None, true)
+                .map_err(|e| e.to_string())?;
+            derived |= scope.source == crate::render::extension::ScopeSource::DocumentDerived;
+            regions.extend(scope.keys);
+        }
+        if derived {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.scope.document-derived",
+                format_args!(
+                    "[ara] no renderer assignment this round; the workspace scope was derived \
+                     from the document's region sequences ({} region(s))",
+                    regions.len()
+                ),
+            );
         }
         if !regions.is_empty() {
             // 【为什么逐条过滤而不是整批 `resolve`】`resolve` 是**整批**语义：一批里只要

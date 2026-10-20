@@ -56,6 +56,27 @@ pub trait DocumentLifecycle {
     fn flush_pending_model_updates(&mut self) -> bool {
         false
     }
+
+    /// 插件侧请求的"强制收口一次编辑会话"（**取走即清**）。
+    ///
+    /// 【为什么需要这个通道】`ready` 回到真只依赖宿主发起的四个入口（`endEditing`、
+    /// `notifyModelUpdates`、样本访问变更、存档恢复）。宿主一旦 `beginEditing` 之后
+    /// 再也不收口，插件就永久停在未就绪 —— 而唯一的出路是删掉插件再加。
+    ///
+    /// 委托方（插件）在**任意非 ARA 线程**上置位一个原子量，控制器在每一次回调入口
+    /// 调用本方法取走它。默认 `false` 保持既有插件零行为变化。
+    fn take_forced_edit_close(&mut self) -> bool {
+        false
+    }
+
+    /// 插件侧请求的"把积压的模型变化 flush 一次"（取走即清）。
+    ///
+    /// 【为什么不复用 `take_forced_edit_close`】两者的前置状态不同：前者要求
+    /// "在会话中"，后者要求"不在会话中但模型脏"。合成一个就会在会话内触发一次
+    /// 不必要的重映射。
+    fn take_forced_model_flush(&mut self) -> bool {
+        false
+    }
 }
 
 /// Owns application state for musical contexts.

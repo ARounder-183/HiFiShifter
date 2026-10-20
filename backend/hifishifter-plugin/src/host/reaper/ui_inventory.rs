@@ -897,6 +897,79 @@ mod tests {
         document.close();
     }
 
+    /// **T22：授权记录缺席不等于撤销授权。**
+    ///
+    /// 【为什么这是"重开工程后所有 Clip 都在等宿主音频"的回归】`authorized_takes` /
+    /// `authorized_sources` 是"某一刻观察到的授权事实"，只有一个写者
+    /// （`remap_and_log`），而它要求 `region_items` 与 `ui_tracks` 在同一刻都就绪。
+    /// 重开工程时这个条件常常不成立（几何缓存被 `clear_renderers` 的 revision 推进
+    /// 作废、`assignments` 还没重发），于是那张表被写成空的。
+    ///
+    /// 旧实现把"查不到记录"直接当成"未授权"：清单重建出来的 take 一个都不带
+    /// `source_path`，`normalize_takes()` 再把扁平投影一起清掉 ⇒ **一次清单轮次剥掉
+    /// 全部 clip 的源**。正确解释是"未知"：保留 clip 已有的媒体身份。
+    ///
+    /// 【与下面那条 take_switch 用例的分界】那边记录**存在**但匹配不上（宿主真的换了
+    /// active take）⇒ 必须继续拦。判据是"这张表里有没有这个 key"，不是"匹配没匹配上"。
+    #[test]
+    fn media_is_not_withheld_when_the_authorization_record_is_missing() {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_takes(2);
+        fixture.enable_media();
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(9876);
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        // 该 item 已被某条活 region 认领 —— 但授权记录**一条都没有**（重开工程的形状）。
+        document
+            .regions
+            .lock_or_recover()
+            .insert(7, crate::ara::AraPlaybackRegion::default());
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(7, item_id.clone());
+        assert!(document.authorized_takes.lock_or_recover().is_empty());
+
+        let mut timeline: hifishifter_kernel::state::TimelineState =
+            serde_json::from_value(serde_json::json!({
+                "tracks":[{"id":"ui-host-track","name":"T","order":0}],
+                "bpm":120.,"project_sec":1.,
+                "clips":[{"id":format!("ui-ara-item-{item_id}"),"track_id":"ui-host-track",
+                    "name":"C","start_sec":0.,"length_sec":4.0/44100.,
+                    "takes":[{"id":"ara-clip-1-take-1","source_path":"authorized-source",
+                        "source_start_sec":0.,"source_end_sec":4.0/44100.}]}],
+            }))
+            .unwrap();
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(
+            timeline.clips[0].source_path.as_deref(),
+            Some("authorized-source"),
+            "记录缺席只说明这一刻观察不到，不说明宿主撤销了授权：\
+             把它当成撤销会一次性剥掉全部 clip 的源（重开工程后全屏'等待宿主音频'）"
+        );
+
+        // 对照：记录**存在**但指向另一个 take ⇒ 仍然不许沿用旧采样。
+        document
+            .authorized_takes
+            .lock_or_recover()
+            .insert(7, "{00000000-0000-0000-0000-000000000000}".into());
+        let mut again = hifishifter_kernel::state::TimelineState {
+            clips: vec![timeline.clips[0].clone()],
+            ..Default::default()
+        };
+        document.present_host_inventory(&mut again, "ui-");
+        assert!(
+            again.clips[0].source_path.is_none(),
+            "记录存在却对不上 = 宿主真的换了 take，必须继续拦"
+        );
+        document.close();
+    }
+
     /// 用户把 active take 换成**同一个文件**的另一个 take 时，授权媒体仍要挂得上。
     ///
     /// 【为什么这条测试存在】媒体嫁接此前只认 take GUID 相等。复制 take / 切换 active

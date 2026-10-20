@@ -113,11 +113,58 @@ impl<P: PluginModel> ControllerAdapter<P> {
         });
     }
 
+    /// 消费插件侧置位的"强制收口"请求（T23）。
+    ///
+    /// 【为什么必须存在】`ready` 回到真只依赖宿主发起的四个入口（`endEditing`、
+    /// `notifyModelUpdates`、样本访问变更、存档恢复）。宿主一旦 `beginEditing` 之后
+    /// 再也不收口，或者积压了模型变化却不再调 `notifyModelUpdates`，插件就永久停在
+    /// 未就绪 —— 用户唯一的出路是删掉插件再加。这不是某个 bug，是**没有出口**。
+    ///
+    /// 出口由插件侧提供：它在自己的定时器/音频线程上置一个原子量，这里在**每一次**
+    /// 回调入口取走并执行。置位与消费之间不需要任何共享状态。
+    fn service_forced_settle(&mut self) {
+        let force_close = self
+            .runtime
+            .as_mut()
+            .is_some_and(PluginRuntime::take_forced_edit_close);
+        if force_close {
+            log::warn!(
+                "[ara] the host never closed its editing session; the plugin forced the settle"
+            );
+            self.finish_editing();
+        }
+        let force_flush = self
+            .runtime
+            .as_mut()
+            .is_some_and(PluginRuntime::take_forced_model_flush);
+        if force_flush && self.runtime.as_ref().is_some_and(|r| !r.is_editing()) {
+            if let Some(runtime) = self.runtime.as_mut() {
+                if runtime.flush_pending_model_updates() {
+                    log::warn!(
+                        "[ara] the host never published pending model changes; the plugin \
+                         flushed them"
+                    );
+                }
+            }
+        }
+    }
+
     fn runtime_mut(&mut self) -> Result<&mut PluginRuntime<P>, AraError> {
+        // 【T23】先消费插件侧的强制收口请求 —— 它必须早于"reader 闸门"与任何模型操作，
+        // 否则一条卡住的会话会让**每一次**后续回调都在这里返回 Err。
+        self.service_forced_settle();
+        // 【T5：content reader 不再是硬门】reader 读的是**不可变快照**
+        // （`ReaderCell.snapshot`），模型变更既不移动它也不释放它（`publish` 用读者
+        // 计数，旧盒只在最后一个读者离开时回收）。把它当硬门等于"宿主多留一个 reader，
+        // 插件就再也建不出任何模型对象"—— 而 create/update 返回 null 的后果是
+        // **宿主自己停止交付**，现场只剩一行 "document runtime busy"，用户看到的是
+        // "所有 Clip 都在等宿主音频，删掉插件再加就好"。
         if !self.content_readers.is_empty() {
-            return Err(AraError::InvalidState(
-                "model operation conflicts with an active content reader",
-            ));
+            log::warn!(
+                "[ara] model operation continues with {} content reader(s) live; readers hold \
+                 immutable snapshots and are unaffected by graph changes",
+                self.content_readers.len()
+            );
         }
         self.runtime
             .as_mut()
@@ -380,6 +427,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
         // 因此把三条早退原因都记下来。
         log::info!("[ara] host notifyModelUpdates");
+        // 【T23】这是宿主空闲时最可靠的一次到达：先把插件侧置位的强制收口消费掉，
+        // 再走下面既有的收口/补跑逻辑。
+        self.service_forced_settle();
         // 【T2：content reader 不再是硬门】`flush_pending_model_updates` 做的是**重映射**
         // （`remap_and_log`），它不释放、不移动任何 reader 已持有的快照：publish 用读者
         // 计数，`ReadSection` 期间旧盒只在最后一个读者离开时才释放（见

@@ -146,6 +146,39 @@ struct PreparedVersion {
 /// 【措辞红线】不得表述为"ARA 规范不支持跨轨"：ARA 2.0 规范**允许**一个实例服务
 /// 多个 region sequence，是 **REAPER 选择按轨道管理 ARA 实例**。错的解释会把日后
 /// 真正可行的改进方向带偏。
+/// 本实例这一轮"该看到哪些 region"的结论，连同**它是怎么得出来的**。
+///
+/// 【为什么要把来源也带出来】"宿主没给"与"宿主给了空的"在界面上长得一模一样，
+/// 但处置完全相反：前者是**暂缓**（下一次回调会补上），后者才是**真空**（这份工程
+/// 真的没有 region）。只返回一个集合，调用方只能二选一地猜 —— 那正是"重开工程后
+/// 界面停在等待宿主音频、却没有任何可行动提示"的成因之一。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeSource {
+    /// 宿主明确告知过（`addPlaybackRegion` / 分配观察器）。
+    HostAssignment,
+    /// 宿主还没告知，从文档级 `sequence_regions` 派生（只服务并集语义的调用方）。
+    DocumentDerived,
+    /// 宿主告知过、结果确实是空的；或派生之后仍然为空。
+    Empty,
+}
+
+impl ScopeSource {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::HostAssignment => "host-assignment",
+            Self::DocumentDerived => "document-derived",
+            Self::Empty => "empty",
+        }
+    }
+}
+
+/// [`ScopeSource`] 与 region 集合的配对。
+#[derive(Clone, Debug)]
+pub(crate) struct AssignedScope {
+    pub keys: Vec<u64>,
+    pub source: ScopeSource,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum HostAudioState {
     /// 没有等待中的 item（含空工程）—— 无可抱怨。
@@ -1645,64 +1678,117 @@ impl ExtensionOwner {
                 .host_assigned_regions(document)
                 .is_ok_and(|current| current == *keys)
     }
+    /// 本实例这一轮应当看到哪些 region —— **全仓库唯一的判据**（T1）。
+    ///
+    /// 【为什么必须收敛成一个函数】此前有两个各写一遍的实现：`host_assigned_regions`
+    /// （inventory / 几何 / 传输的入口，round 17 给它加了"文档级派生"兜底）与
+    /// `assigned_regions`（**时间线**与**渲染输入**的入口，没有兜底）。两者在同一个
+    /// tick 里给出**互相矛盾**的结论：几何刷新说"这个 item 我认得"，工作区投影说
+    /// "这条 region 不归你"。界面于是显示"有 item、有轨道、但 clip 没内容"。
+    ///
+    /// 【三条纪律】
+    /// 1. **逐条过滤，不整批作废**：宿主在一次分割里会把已销毁父段的 key 一并重发
+    ///    （`workspace_scope_locked` 的注释早已记录这个形状），整批 `resolve` 会让
+    ///    **一条**陈旧 key 把**整份**工作区打成空。
+    /// 2. **空集合要区分"宿主没给"与"宿主给了空的"**：前者回退文档级，后者才是真空。
+    /// 3. **不可用不是错误**：返回 `AssignedScope`（带来源），由调用方决定怎么呈现。
+    ///
+    /// 【`allow_document_derived` 为什么是参数而不是常量】只有**并集语义**的调用方
+    /// 可以派生：`workspace_scope_locked` 本来就是"本文档全部 owner 的并集"，
+    /// 而 REAPER 的一个 ARA 文档上同时挂着多条轨道的实例，派生出来的并集正是它要的。
+    /// **渲染输入不能派生** —— 每个实例只许渲染自己的分配，否则同一段音频会被渲染两次。
+    /// `role` 为 `None` 时取**全部角色**的并集（枚举/几何路径：它们服务整条轨道），
+    /// `Some(bits)` 时只取该角色（**渲染路径**：playback 实例只许渲染自己那一份）。
+    pub(crate) fn assigned_scope(
+        &self,
+        document: &super::document::DocumentSession,
+        role: Option<u32>,
+        allow_document_derived: bool,
+    ) -> Result<AssignedScope, String> {
+        let pick = |map: &std::collections::HashMap<i32, Vec<u64>>| -> BTreeSet<u64> {
+            match role {
+                Some(bits) => map
+                    .get(&(bits as i32))
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                None => map.values().flatten().copied().collect(),
+            }
+        };
+        let mut keys = {
+            let assignments = self.assignments.lock_or_recover();
+            pick(&assignments)
+        };
+        let declared = {
+            let sequences = self.sequences.lock_or_recover();
+            pick(&sequences)
+        };
+        let members = document.sequence_regions.lock_or_recover();
+        // 【为什么两者都空才派生】只要宿主给过任何一条线索（region key 或 sequence），
+        // 就以它为准 —— 派生只补"本实例还没被告知"，不覆盖"已经被告知为空"。
+        let derived = keys.is_empty() && declared.is_empty() && allow_document_derived;
+        let mut source = if derived {
+            ScopeSource::DocumentDerived
+        } else {
+            ScopeSource::HostAssignment
+        };
+        if derived {
+            for regions in members.values() {
+                keys.extend(regions.iter().copied());
+            }
+        } else {
+            for sequence in declared {
+                // 【为什么未知 sequence 只跳过】宿主先建 sequence、后建 region 是正常
+                // 时序，其间该键必然缺席。此前 `ok_or(...)?` 让整份 scope 失败。
+                if let Some(regions) = members.get(&sequence) {
+                    keys.extend(regions.iter().copied());
+                }
+            }
+        }
+        drop(members);
+        // 【纪律 1：逐条过滤】`resolve` 是**整批**语义，一条坏 key 就整体 Err。
+        // 写路径（assignment observer）早已改成逐条 `owner_of`，读路径必须同口径，
+        // 否则同一次分割在两处得到不同结论。
+        let mut dropped = 0usize;
+        let keys = {
+            let owners = region_owners().lock_or_recover();
+            keys.into_iter()
+                .filter(|key| {
+                    if owners.owner_of(*key) == Some(document.id) {
+                        true
+                    } else {
+                        dropped += 1;
+                        false
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if dropped > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.scope.dropped",
+                format_args!(
+                    "[ara] {dropped} assigned region key(s) are not owned by this document \
+                     (destroyed, or re-sent by the host after a split); the rest of the scope \
+                     is unaffected"
+                ),
+            );
+        }
+        if keys.is_empty() {
+            source = ScopeSource::Empty;
+        }
+        Ok(AssignedScope { keys, source })
+    }
+
     /// 几何绑定必须覆盖owner的全部已分配角色，不能只拿playback子集隐藏editor歧义。
     fn host_assigned_regions(
         &self,
         document: &super::document::DocumentSession,
     ) -> Result<Vec<u64>, String> {
-        let mut keys = self
-            .assignments
-            .lock_or_recover()
-            .values()
-            .flatten()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let declared = self
-            .sequences
-            .lock_or_recover()
-            .values()
-            .flatten()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let members = document.sequence_regions.lock_or_recover();
-        // 【T3：本实例还没被告知分配时，从文档级派生候选】
-        //
-        // `assignments` / `sequences` 只由 renderer-assignment observer 填充
-        // （见 `bind_to_document`）。重开工程时宿主常直接复用 ARA 图并重绑扩展实例，
-        // 却不再重发 `addPlaybackRegion` —— 于是两者都为空，而 `host_query_stamp()`
-        // 是**所有**枚举、几何刷新与前台自愈的第一行，整条链就此静默死亡。
-        //
-        // 【为什么文档级派生是安全的】`DocumentSession` 按 **controller key** 注册
-        // （`DocumentSession::register`），一个 ARA 文档就是一个插件实例。因此
-        // `document.sequence_regions` 的并集就是本实例的 region 全集，不存在
-        // "误伤同一轨道上的兄弟实例"。多个 extension owner（编辑/视图/播放）
-        // 共享同一份文档，本来就该看到同一批 region。
-        let sequences: BTreeSet<u64> = if keys.is_empty() && declared.is_empty() {
-            members.keys().copied().collect()
-        } else {
-            declared
-        };
-        for sequence in sequences {
-            let Some(regions) = members.get(&sequence) else {
-                // 只有"宿主明确声明过、文档却查不到"才算错。派生分支的 key 直接取自
-                // 同一张表，不可能落到这里。
-                return Err("unknown host assigned sequence".into());
-            };
-            keys.extend(regions.iter().copied());
-        }
-        drop(members);
-        let keys = keys.into_iter().collect::<Vec<_>>();
-        if !keys.is_empty()
-            && region_owners()
-                .lock_or_recover()
-                .resolve(&keys)
-                .map_err(|_| "invalid host assigned region")?
-                .0
-                != document.id
-        {
-            return Err("host assigned region belongs to another document".into());
-        }
-        Ok(keys)
+        // 枚举 / 几何 / 传输三条路径都是**读**：它们可以接受文档级派生（见
+        // `assigned_scope` 的说明），但绝不能因为一条陈旧 key 就整份失败。
+        Ok(self.assigned_scope(document, None, true)?.keys)
     }
     /// 仅UI/model线程读取；唯一assignment先成立，位置/长度仅用于绑定后相容核对。
     ///
@@ -2033,7 +2119,33 @@ impl ExtensionOwner {
         // 与"执行动作"分开之后，随后的枚举仍会被原来的 gating 拦下（正确），
         // 但恢复需求已经被记下来了，下一次 stamp 可用时会真正执行。
         self.heal_stale_inventory_stamp();
+        // 【T23】视图定时器是"宿主不再回调"时唯一还会跑的节拍：在这里提出收口请求。
+        self.request_settle_if_overdue();
         self.refresh_host_transport_inner(true);
+    }
+
+    /// **T23**：把"宿主不再收口"这件事从插件侧提出来。
+    ///
+    /// 【为什么需要它】`ready` 回到真只依赖宿主发起的四个入口。宿主一旦 `beginEditing`
+    /// 之后再也不收口，或者积压了模型变化却不再调 `notifyModelUpdates`，插件就永久
+    /// 停在未就绪 —— 用户唯一的出路是删掉插件再加。
+    ///
+    /// 本函数只**置位**（文档上的两个原子量），真正的收口由 ARA 控制器在它下一次
+    /// 回调里执行（见 `ControllerAdapter::service_forced_settle`）。桥的 `PluginRuntime`
+    /// 不是 `Send`/`Sync`，从这条线程直接调用它是未定义行为。
+    ///
+    /// 【为什么用 `try_lock`】音频线程也会调它。拿不到文档槽就跳过 —— 下一次块
+    /// （10 ms 后）会再来，而"宽限期"本来就是秒级，漏一拍没有影响。
+    pub(crate) fn request_settle_if_overdue(&self) {
+        let Ok(slot) = self.document.try_lock() else {
+            return;
+        };
+        let document = slot.as_ref().and_then(std::sync::Weak::upgrade);
+        drop(slot);
+        let Some(document) = document else {
+            return;
+        };
+        document.request_settle_if_overdue();
     }
 
     /// 距上次成功采样超过 `STALE_SAMPLE_GRACE` 就清掉采样时刻，让下一次真正执行强制重采。
@@ -2583,8 +2695,32 @@ impl ExtensionOwner {
                     stamp.0.regions.lock_or_recover().keys().copied().collect();
                 let mut items = stamp.0.region_items.lock_or_recover();
                 items.retain(|key, _| live.contains(key));
+                // 【T22：授权记录在这里也有一个写者】此前 `authorized_takes` /
+                // `authorized_sources` 只有一个写者（`remap_and_log`），而它要求
+                // `region_items` 与 `ui_tracks` **在同一刻都就绪**。重开工程时这个条件
+                // 常常不成立（几何缓存被 `clear_renderers` 的 revision 推进作废、
+                // `assignments` 还没重发），于是那张表被写成空的 —— 而清单侧把"没有记录"
+                // 当成"未授权"，一次性剥掉全部 clip 的源。
+                //
+                // 【为什么用 `or_insert` 而不是覆盖】这张表的语义是"ARA **授权那一刻**的
+                // active take"。每轮清单都覆盖的话，用户在 REAPER 里切换 active take
+                // 会被静默接受（GUID 永远相等），`take_switched` 这条真因就再也报不出来。
+                // 只在**缺席**时补记 —— 那正是"这一刻才第一次观察到它"的语义。
+                //
+                // 【锁序】`region_items` → `authorized_takes` → `authorized_sources`，
+                // 与 `document.rs` 声明的层级一致。
+                let mut takes = stamp.0.authorized_takes.lock_or_recover();
+                let mut sources = stamp.0.authorized_sources.lock_or_recover();
                 for entry in bound {
-                    items.insert(entry.region_key, entry.geometry.item_id.clone());
+                    let key = entry.region_key;
+                    let item = entry.geometry.item_id.clone();
+                    takes
+                        .entry(key)
+                        .or_insert_with(|| entry.geometry.take_id.clone());
+                    if let Some(name) = entry.geometry.source_file_name.clone() {
+                        sources.entry(key).or_insert(name);
+                    }
+                    items.insert(key, item);
                 }
             }
             *cached = Some(CachedHostGeometry {
@@ -6399,58 +6535,18 @@ impl ExtensionOwner {
             .and_then(std::sync::Weak::upgrade)
             .ok_or(AraError::InvalidState("document no longer available"))?;
         let role = self.role.load(Ordering::Acquire);
-        let mut keys = self
-            .assignments
-            .lock_or_recover()
-            .get(&role)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let sequences = self
-            .sequences
-            .lock_or_recover()
-            .get(&role)
-            .cloned()
-            .unwrap_or_default();
-        let members = document.sequence_regions.lock_or_recover();
-        let mut unknown_sequences = 0_usize;
-        for sequence in sequences {
-            // 【为什么未知 sequence 只跳过】`sequence_regions` 只登记**已经有 region**
-            // 的 sequence（见 `create_playback_region`）。宿主先建 sequence、后建 region
-            // 是正常时序，其间该键必然缺席。此前这里 `ok_or(...)?` 让整份
-            // `assigned_regions()` 失败 ⇒ 经 `workspace_scope_locked` /
-            // `assigned_timeline` 把整份工作区与渲染输入一起打失败 ——
-            // "宿主建了轨道、插件里什么都没有"。跳过即可：该 sequence 本次没有成员。
-            match members.get(&sequence) {
-                Some(regions) => keys.extend(regions.iter().copied()),
-                None => unknown_sequences += 1,
-            }
-        }
-        drop(members);
-        if unknown_sequences > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Debug,
-                "ara.assigned.unknown-sequence",
-                format_args!(
-                    "[ara] {unknown_sequences} assigned region sequence(s) have no playback \
-                     region yet; they contribute no members this round"
-                ),
-            );
-        }
-        let keys = keys.into_iter().collect::<Vec<_>>();
-        if !keys.is_empty() {
-            let (owner, _) = region_owners()
-                .lock_or_recover()
-                .resolve(&keys)
-                .map_err(|_| AraError::InvalidState("invalid assigned region"))?;
-            if owner != document.id {
-                return Err(AraError::InvalidState(
-                    "assigned region belongs to another document",
-                ));
-            }
-        }
-        Ok(keys)
+        // 【T1：与枚举/几何路径共用同一个判据】此前这里是第二份实现，且用的是
+        // **整批** `resolve` —— 宿主在一次分割里把已销毁父段的 key 一并重发时，
+        // 一条陈旧 key 就让整份 scope 失败（→ `ensure_loaded` 整份 Err → 界面回落到
+        // 只有宿主清单占位的降级视图）。现在两条路径共用 `assigned_scope`：
+        // 逐条过滤、不整批作废。
+        //
+        // 【为什么这里**不**允许文档级派生】渲染输入是**逐实例**的：REAPER 的一个 ARA
+        // 文档上挂着多条轨道的实例，派生出来的并集会让同一段音频被渲染两次。
+        // 派生只服务并集语义的调用方（工作区、几何、传输）。
+        self.assigned_scope(&document, Some(role as u32), false)
+            .map(|scope| scope.keys)
+            .map_err(|error| AraError::InvalidState(error.leak()))
     }
 
     /// 宿主模型callback只撤销/排最新准备任务，不在主线程执行WORLD或PCM混音。

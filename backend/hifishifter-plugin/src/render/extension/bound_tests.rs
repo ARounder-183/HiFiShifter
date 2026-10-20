@@ -2142,6 +2142,107 @@ fn editor_sequence_selection_is_expanded_and_deduplicated() {
     assert!(owner.assigned_regions().is_err());
 }
 
+/// **T1：一条陈旧 key 不得把整份 scope 打成空。**
+///
+/// 【为什么这是"重开工程后所有 Clip 都在等宿主音频"的回归】宿主在一次分割里会把
+/// **已销毁父段的 key** 一并重发（`workspace_scope_locked` 的注释早已记录这个形状）。
+/// 旧实现用整批 `resolve`：只要有一条 key 未登记，整个 `assigned_regions` 就返回 Err
+/// ⇒ `workspace_scope_locked` 返回 Err ⇒ `ensure_loaded` 整份 Err ⇒ 界面回落到
+/// "只由宿主清单拼出来的占位"（永远没有源、也不重试）。
+///
+/// 写路径（assignment observer）早已改成逐条 `owner_of`；读路径必须同口径。
+#[test]
+fn a_stale_region_key_does_not_empty_the_scope() {
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    let owner = Arc::new(ExtensionOwner::default());
+    let raw = owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
+            None,
+        )
+        .unwrap();
+    let live = Box::new(0_u8);
+    let stale = Box::new(0_u8);
+    let a = (&*live as *const u8) as u64;
+    let dead = (&*stale as *const u8) as u64;
+    region_owners()
+        .lock_or_recover()
+        .register(a, document.id, 0)
+        .unwrap();
+    // `dead` **从未登记**（等价于宿主重发了一条已销毁父段的 key）。
+    // SAFETY: binding 与不透明身份在调用期间存活。
+    unsafe {
+        let extension = &*raw;
+        let api = &*extension.playbackRendererInterface;
+        api.addPlaybackRegion.unwrap()(extension.playbackRendererRef, a as *mut _);
+        api.addPlaybackRegion.unwrap()(extension.playbackRendererRef, dead as *mut _);
+    }
+    let scope = owner
+        .assigned_scope(&document, None, false)
+        .expect("一条陈旧 key 不得让整份 scope 失败");
+    assert_eq!(scope.keys, vec![a], "存活的那条 key 必须留下");
+    assert_eq!(owner.assigned_regions().unwrap(), vec![a]);
+    document.close();
+    drop(model);
+}
+
+/// **T1：本实例还没被告知分配时，并集语义的调用方可以回退文档级。**
+///
+/// 【为什么只给并集语义的调用方】工作区要显示整份工程，它的 scope 本来就是"本文档
+/// 全部 owner 的并集"；而渲染输入是逐实例的（REAPER 一个文档上挂着多条轨道的实例），
+/// 派生会让同一段音频被渲染两次。
+#[test]
+fn a_rebound_owner_derives_the_scope_without_the_assignment_observer() {
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    let owner = Arc::new(ExtensionOwner::default());
+    let raw = owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
+            None,
+        )
+        .unwrap();
+    let region = Box::new(0_u8);
+    let sequence = Box::new(0_u8);
+    let key = (&*region as *const u8) as u64;
+    let seq = (&*sequence as *const u8) as u64;
+    region_owners()
+        .lock_or_recover()
+        .register(key, document.id, 0)
+        .unwrap();
+    document
+        .sequence_regions
+        .lock_or_recover()
+        .insert(seq, [key].into_iter().collect());
+    // 刻意**不**调用 addPlaybackRegion / addRegionSequence：这正是重开工程时
+    // "宿主复用了 ARA 图却不再重发分配"的形状。
+    let derived = owner
+        .assigned_scope(&document, None, true)
+        .expect("派生不得失败");
+    assert_eq!(derived.keys, vec![key]);
+    assert_eq!(
+        derived.source,
+        crate::render::extension::ScopeSource::DocumentDerived,
+        "必须如实报出「这份 scope 是派生的」，界面才能给出正确的可行动提示"
+    );
+    // 渲染路径不允许派生：逐实例语义，派生会让同一段音频被渲染两次。
+    let audio = owner
+        .assigned_scope(&document, Some(1), false)
+        .expect("逐实例路径不得失败");
+    assert!(audio.keys.is_empty(), "渲染输入不派生");
+    assert_eq!(audio.source, crate::render::extension::ScopeSource::Empty);
+    document.close();
+    drop(model);
+    let _ = raw;
+}
+
 /// companion 先销毁时 controller lease 必须独立保留真实 raw storage。
 #[test]
 fn actual_document_retains_bound_storage_after_owner_is_dropped() {

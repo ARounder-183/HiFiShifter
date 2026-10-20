@@ -54,6 +54,18 @@ pub(crate) struct WorkspaceSnapshot {
 /// 保留最后一份已发布的时间线继续刷新界面，而不是把窗口永久锁在冲突状态上。
 pub(crate) const EDIT_SETTLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// 插件侧强制收口一次**从未关闭**的编辑会话的宽限期。
+///
+/// 【为什么比 `EDIT_SETTLE_GRACE` 长得多】那一条判的是"宿主已经发过 `endEditing`，
+/// 只是被 reader 挡住了"——收敛是必然的，短一点没有风险。这一条判的是"宿主**根本
+/// 没打算收口**"，而合法的编辑会话可以持续很久：宿主通常在鼠标按下时
+/// `beginEditing`、抬起时 `endEditing`，一次慢速拖拽就能超过 2 秒。用 2 秒去强制
+/// 收口，等于在用户拖动到一半时把模型提交一次 —— 曲线会跳、撤销栈会碎。
+///
+/// 取 8 秒：足够覆盖任何正常交互，又短到"宿主真的挂了"时用户不必等太久。
+pub(crate) const FORCED_EDIT_CLOSE_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(8);
+
 #[derive(Default)]
 pub(crate) struct DocumentSession {    controller: AtomicUsize,
     alive: AtomicBool,
@@ -207,6 +219,27 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 有了这个标志，会话中的未就绪窗口被识别为**暂缓**而不是冲突 —— 它会随
     /// `endEditing` 自然收敛，不需要用户干预，也不该报错。
     pub editing_session: AtomicBool,
+    /// 编辑会话开始的**单调毫秒**（0 = 不在会话中）。
+    ///
+    /// 【为什么与 `editing_session` 并存】那个布尔回答"是不是在会话中"，这个数回答
+    /// "在会话中多久了"。而"多久"正是插件侧唯一能自主判断"宿主不会再来收口"的依据
+    /// （见 [`Self::request_settle_if_overdue`]）。两者分开是因为布尔在音频线程上读，
+    /// 而这个数只在非音频线程上读 —— 语义不同，读者也不同。
+    pub editing_since_ms: std::sync::atomic::AtomicU64,
+    /// 模型自上次成功发布以来**第一次变脏**的单调毫秒（0 = 干净）。
+    ///
+    /// 【为什么要它】`ModelHandle::model_dirty` 是模型线程私有的布尔，插件侧看不到；
+    /// 而"脏了多久还没被 flush"正是第二条死路的判据（宿主既不 `endEditing` 也不
+    /// `notifyModelUpdates` 时，唯一的 flush 入口永远到不了）。
+    pub model_dirty_since_ms: std::sync::atomic::AtomicU64,
+    /// 插件侧请求"强制收口一次编辑会话"（由非 ARA 线程置位，由 ARA 线程消费）。
+    ///
+    /// 【为什么必须是**请求**而不是直接调用】桥的 `PluginRuntime` 由文档控制器独占，
+    /// 不是 `Send`/`Sync`；从视图定时器直接调用它是未定义行为。这个原子量是两者之间
+    /// 唯一的通道：谁都可以置位，控制器在**下一次任何回调**的入口消费它。
+    pub forced_edit_close: AtomicBool,
+    /// 插件侧请求"把积压的模型变化 flush 一次"（同上的通道）。
+    pub forced_model_flush: AtomicBool,
     /// 最近一次因宿主内容变化而撤销渲染许可的时刻（见 [`Self::clear_renderers`]）。
     ///
     /// 【为什么需要它】`ready == false` 有两种完全不同的来源：宿主正在一次编辑
@@ -383,6 +416,74 @@ mod tests {
             document.last_content_change.lock_or_recover().is_some(),
             "撤销渲染许可必须记下观察时刻，否则会被误判成宿主冲突"
         );
+    }
+
+    /// **T23：宿主不再收口时，插件侧必须能把这件事变成一次可执行的请求。**
+    ///
+    /// 【为什么这是"删掉插件再加就好"的回归】`ready` 回到真只依赖宿主发起的四个
+    /// 入口（`endEditing`、`notifyModelUpdates`、样本访问变更、存档恢复）。宿主一旦
+    /// `beginEditing` 之后再也不收口，四个入口**一个都不会来** —— 插件永久停在未就绪，
+    /// 而用户唯一能做的就是重装插件。
+    ///
+    /// 这里钉住三件事：① 会话开始的时刻被记下；② 超过宽限期后请求被置位；
+    /// ③ 请求**取走即清**（否则每次回调都会重跑一次全量重映射）。
+    #[test]
+    fn an_overdue_edit_session_becomes_a_settle_request() {
+        let document = Arc::new(DocumentSession::new(11));
+        assert!(document.editing_elapsed().is_none(), "初始不在会话中");
+        document.note_editing_started();
+        assert!(document.editing_session.load(Ordering::Acquire));
+        // 刚开始：还没到宽限期，不该请求。
+        document.request_settle_if_overdue();
+        assert!(!document.forced_edit_close.load(Ordering::Acquire));
+        // 把起点推到宽限期之外（模拟"宿主再也不发 endEditing"）。
+        document.backdate_settle();
+        document.request_settle_if_overdue();
+        assert!(
+            document.forced_edit_close.load(Ordering::Acquire),
+            "超过宽限期的会话必须变成一次可执行的收口请求"
+        );
+        // 取走即清：同一次请求只消费一次。
+        assert!(document.forced_edit_close.swap(false, Ordering::AcqRel));
+        assert!(!document.forced_edit_close.swap(false, Ordering::AcqRel));
+        // 收口之后截止期归零，不再反复请求。
+        document.note_editing_finished();
+        document.request_settle_if_overdue();
+        assert!(!document.forced_edit_close.load(Ordering::Acquire));
+        document.close();
+    }
+
+    /// **T23：积压的模型变化同样有截止期。**
+    ///
+    /// 【为什么要单独一条】它与"会话没关"是两件不同的事：宿主可能根本不开编辑会话，
+    /// 却在后台重建了图。那时唯一的 flush 入口是 `notifyModelUpdates`，宿主不调用就
+    /// 永远不 flush —— 界面停在旧时间线上，而 `ready` 可能是真的（更隐蔽）。
+    #[test]
+    fn an_overdue_model_change_becomes_a_flush_request() {
+        let document = Arc::new(DocumentSession::new(12));
+        assert!(document.model_dirty_elapsed().is_none());
+        document.note_model_dirty();
+        document.note_model_dirty(); // 重复置脏不得推迟截止期
+        let first = document.model_dirty_since_ms.load(Ordering::Acquire);
+        assert_eq!(
+            document.model_dirty_since_ms.load(Ordering::Acquire),
+            first,
+            "截止期从**第一次**变脏算起"
+        );
+        document.request_settle_if_overdue();
+        assert!(!document.forced_model_flush.load(Ordering::Acquire));
+        document.backdate_settle();
+        document.request_settle_if_overdue();
+        assert!(document.forced_model_flush.load(Ordering::Acquire));
+        // 消费掉这一次请求，再看"干净之后不再请求"。
+        assert!(document.forced_model_flush.swap(false, Ordering::AcqRel));
+        document.note_model_clean();
+        document.request_settle_if_overdue();
+        assert!(
+            !document.forced_model_flush.load(Ordering::Acquire),
+            "已发布的模型不得再触发 flush 请求"
+        );
+        document.close();
     }
 
     /// **持着 `transaction` 刷新文档不得自锁。**
@@ -1725,6 +1826,115 @@ impl DocumentSession {
     /// `revoke_snapshots()`，而它此前**没有**落这个时刻。
     fn note_content_change(&self) {
         *self.last_content_change.lock_or_recover() = Some(std::time::Instant::now());
+    }
+
+    /// 进程内单调毫秒。0 保留给"没有事件"。
+    ///
+    /// 【为什么不用 `Instant` + `Mutex`】这几个时刻要在**音频线程**上读
+    /// （`request_settle_if_overdue` 由 `process` 顺带调用），而 `Mutex` 在实时线程上
+    /// 是不可接受的。整数毫秒既无锁又足够（宽限期是秒级）。
+    fn monotonic_ms() -> u64 {
+        static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let epoch = EPOCH.get_or_init(std::time::Instant::now);
+        // +1 保证"刚发生"也不等于 0（0 是哨兵）。
+        (epoch.elapsed().as_millis() as u64).saturating_add(1)
+    }
+
+    /// 记下编辑会话的开始（`begin_editing`）。
+    pub(crate) fn note_editing_started(&self) {
+        self.editing_session.store(true, Ordering::Release);
+        self.editing_since_ms
+            .store(Self::monotonic_ms(), Ordering::Release);
+    }
+
+    /// 记下编辑会话的结束（`end_editing`）。
+    pub(crate) fn note_editing_finished(&self) {
+        self.editing_session.store(false, Ordering::Release);
+        self.editing_since_ms.store(0, Ordering::Release);
+    }
+
+    /// 记下"模型变脏了"（首次才落时刻：后续脏不推迟截止期）。
+    pub(crate) fn note_model_dirty(&self) {
+        let now = Self::monotonic_ms();
+        let _ = self.model_dirty_since_ms.compare_exchange(
+            0,
+            now,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// 记下"模型已成功发布"。
+    pub(crate) fn note_model_clean(&self) {
+        self.model_dirty_since_ms.store(0, Ordering::Release);
+    }
+
+    /// 距模型变脏已经过去多久（`None` = 干净）。
+    pub(crate) fn model_dirty_elapsed(&self) -> Option<std::time::Duration> {
+        let since = self.model_dirty_since_ms.load(Ordering::Acquire);
+        (since != 0).then(|| Self::elapsed_since(since))
+    }
+
+    /// 距编辑会话开始已经过去多久（`None` = 不在会话中）。
+    pub(crate) fn editing_elapsed(&self) -> Option<std::time::Duration> {
+        let since = self.editing_since_ms.load(Ordering::Acquire);
+        (since != 0).then(|| Self::elapsed_since(since))
+    }
+
+    /// **T23：给"宿主不再回调"的三条死路一个插件侧出口。**
+    ///
+    /// 【为什么必须有它】`ready` 回到真只依赖四个入口：`endEditing`、
+    /// `notifyModelUpdates`（→ flush）、`refresh_source_pcm`（要求 `!editing`）、
+    /// ARA 存档恢复。**四个全在宿主手里。** 宿主一旦 `beginEditing` 之后再也不收口，
+    /// 或者积压了模型变化却不再调 `notifyModelUpdates`，插件就永久停在未就绪 ——
+    /// 用户唯一的出路是删掉插件再加。这不是"某个 bug"，是**没有出口**。
+    ///
+    /// 【为什么是"置位请求"而不是直接收口】桥的 `PluginRuntime` 由文档控制器独占、
+    /// 不是 `Send`/`Sync`，从视图定时器直接调它是未定义行为。这里只置两个原子量，
+    /// 由控制器在**下一次任何回调**的入口消费（`runtime_mut` 与 `notifyModelUpdates`）。
+    ///
+    /// 【为什么可以重复调用】纯原子读 + 幂等置位，音频线程也可以调。
+    ///
+    /// 【边界】宿主连一次回调都不再发时，这里也只能等到下一次回调。那一段的兜底是
+    /// VST3 侧的 `getState` / `setActive`（宿主存盘与激活）—— 本函数不假装能覆盖它。
+    /// 单调毫秒差的哨兵：`u64::MAX` 表示"起点被回拨到无穷远"（仅测试使用）。
+    const BACKDATED: u64 = u64::MAX;
+
+    /// 由起点算已过去多久；`BACKDATED` 视为远超任何宽限期。
+    fn elapsed_since(since: u64) -> std::time::Duration {
+        if since == Self::BACKDATED {
+            // 比任何宽限期都大，但仍是有限值 —— 调用方可能对它做加法。
+            return std::time::Duration::from_secs(86_400);
+        }
+        std::time::Duration::from_millis(Self::monotonic_ms().saturating_sub(since))
+    }
+
+    /// 测试专用：把两个截止期的起点回拨到"早已超期"。
+    ///
+    /// 【为什么需要】真实场景里"宿主卡了 30 秒"无法在单测中等待；把起点回拨等价，
+    /// 而且不会引入 `sleep`（那会让整个套件变慢且不稳定）。
+    #[cfg(test)]
+    pub(crate) fn backdate_settle(&self) {
+        for slot in [&self.editing_since_ms, &self.model_dirty_since_ms] {
+            if slot.load(Ordering::Acquire) != 0 {
+                slot.store(Self::BACKDATED, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn request_settle_if_overdue(&self) {
+        if self
+            .editing_elapsed()
+            .is_some_and(|elapsed| elapsed >= FORCED_EDIT_CLOSE_GRACE)
+        {
+            self.forced_edit_close.store(true, Ordering::Release);
+        }
+        if self
+            .model_dirty_elapsed()
+            .is_some_and(|elapsed| elapsed >= EDIT_SETTLE_GRACE)
+        {
+            self.forced_model_flush.store(true, Ordering::Release);
+        }
     }
 
     /// 在旧内容可能被改变前立即撤销**渲染许可与代次**；不撤已发布快照本身。

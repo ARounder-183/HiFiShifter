@@ -1706,6 +1706,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
         // SAFETY: this 是存活的音频接口子对象。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+        // 【T23】`process` 是宿主**一定会周期性到达**的少数入口之一，因此它是"宿主不再
+        // 回调"这条死路在插件侧最可靠的出口。本函数只读两个原子量并按需置位，
+        // 真正的收口仍由 ARA 控制器在下一次回调里执行（`runtime_mut` 的头部）。
+        //
+        // 【为什么在音频线程上也敢调】它不取任何 `Mutex` 的阻塞路径（文档槽用
+        // `try_lock`，拿不到就跳过）—— 下一次块（10 ms 后）会再来。
+        owner.request_settle_if_overdue();
         // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而"静音"在界面上必须能
         // 说清原因（见 `TransferStore::unsupported_precision`）。这一行与形状判定无关，
         // 所以在 `InvalidArgument` 之外一律记录。

@@ -700,6 +700,9 @@ impl ModelHandle {
     /// 记下"自上次成功发布以来模型变过"（见 [`Self::model_dirty`]）。
     fn mark_model_dirty(&mut self) {
         self.model_dirty = true;
+        // 【T23】把"脏了多久"变成插件侧可读的事实：`model_dirty` 是本模型私有的布尔，
+        // 而"宿主不再 flush"这条死路需要非 ARA 线程也能判断截止期。
+        self.session.note_model_dirty();
     }
 
     fn remap_and_log(&mut self) {
@@ -743,6 +746,9 @@ impl ModelHandle {
         // 又可测（见 `end_editing_skips_the_remap_when_the_model_did_not_change`）。
         if self.remap_is_redundant() {
             self.model_dirty = false;
+            // 【T23】"模型没变"也是一次成功收口：截止期必须跟着清，否则下一轮
+            // `request_settle_if_overdue` 会对一份已经收敛的模型反复请求 flush。
+            self.session.note_model_clean();
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Debug,
                 "ara.remap.unchanged",
@@ -1059,6 +1065,7 @@ impl ModelHandle {
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
                 self.remap_stamp = Some(fingerprint);
                 self.model_dirty = false;
+                self.session.note_model_clean();
                 drop(transaction);
             }
             Err(err) => {
@@ -1155,9 +1162,9 @@ impl DocumentLifecycle for ModelHandle {
     /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
         self.editing = true;
-        self.session
-            .editing_session
-            .store(true, std::sync::atomic::Ordering::Release);
+        // 【T23】连同**开始时刻**一起记：`editing_session` 只回答"在不在会话里"，
+        // 而"在会话里多久了"才是插件侧判定"宿主不会再来收口"的唯一依据。
+        self.session.note_editing_started();
         log::info!("[ara] begin_editing");
         Ok(())
     }
@@ -1168,9 +1175,7 @@ impl DocumentLifecycle for ModelHandle {
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         self.editing = false;
-        self.session
-            .editing_session
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.session.note_editing_finished();
         self.remap_and_log();
         Ok(())
     }
@@ -1191,6 +1196,24 @@ impl DocumentLifecycle for ModelHandle {
         log::info!("[ara] flushing pending model changes without endEditing");
         self.remap_and_log();
         true
+    }
+
+    /// 【T23】取走插件侧置位的"强制收口编辑会话"请求。
+    ///
+    /// 【为什么读的是文档原子量】置位者可能是视图定时器或音频线程，而本方法在 ARA
+    /// 模型线程上跑 —— 两者之间唯一的合法通道就是一个原子量。`swap` 保证同一次请求
+    /// 只被消费一次（否则每次回调都会重跑一次全量重映射）。
+    fn take_forced_edit_close(&mut self) -> bool {
+        self.session
+            .forced_edit_close
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// 【T23】取走"把积压模型变化 flush 一次"的请求。
+    fn take_forced_model_flush(&mut self) -> bool {
+        self.session
+            .forced_model_flush
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 }
 

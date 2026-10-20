@@ -218,6 +218,16 @@ impl<P: PluginModel> PluginRuntime<P> {
         self.delegate.flush_pending_model_updates()
     }
 
+    /// 取走委托方置位的"强制收口编辑会话"请求（见 `PluginModel::take_forced_edit_close`）。
+    pub(crate) fn take_forced_edit_close(&mut self) -> bool {
+        self.delegate.take_forced_edit_close()
+    }
+
+    /// 取走委托方置位的"flush 积压模型变化"请求。
+    pub(crate) fn take_forced_model_flush(&mut self) -> bool {
+        self.delegate.take_forced_model_flush()
+    }
+
     /// Begins an exclusive graph mutation session.
     pub fn begin_editing(&mut self) -> Result<EditSession<'_, P>, AraError> {
         if self.editing {
