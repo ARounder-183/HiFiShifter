@@ -323,9 +323,13 @@ impl ModelHandle {
     }
 
     /// 本地补丁：接管上游控制器已建好的账本（T8）。
-    pub(crate) fn adopt_ledger(&mut self, ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>) {
+    pub(crate) fn adopt_ledger(
+        &mut self,
+        ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>,
+    ) {
         // 两处都要：诊断路径从文档侧读（`stuck_report`），模型自己在收口时打读数。
-        self.session.set_graph_ledger(std::sync::Arc::clone(&ledger));
+        self.session
+            .set_graph_ledger(std::sync::Arc::clone(&ledger));
         self.ledger = ledger;
     }
     /// 新建一份空模型。
