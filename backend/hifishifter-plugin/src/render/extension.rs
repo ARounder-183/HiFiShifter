@@ -3456,19 +3456,31 @@ impl ExtensionOwner {
     ///
     /// # Safety
     /// `output` 必须是本回调内有效的 VST3 输出总线；`frames` 不超过其平面长度。
-    /// 从一个透传源切到处理结果时，应当**淡入**而不是交叉淡化。
+    /// 从一个源切到另一个源时，是否应该**淡入**而不是交叉淡化。
     ///
-    /// 【为什么】`PendingSynthesis` / `PassThrough` / `Untouched` 输出的是**宿主原声**
-    /// （或根本不介入），而 `Processed` / `Raw` 输出的是本插件算出来的内容。两者
-    /// 不同源：交叉淡化会把两段不同内容叠在一起，听感是"两声并发"而非一次接缝。
-    /// 那种场合改为对新内容做一次线性淡入。
-    fn should_fade_in_instead_of_crossfading(previous_kind: u8) -> bool {
-        matches!(
-            previous_kind,
-            code if code == TransferOutput::PendingSynthesis.code()
+    /// 【为什么看两侧而不只看上一侧】透传源（宿主原声）与处理结果**不同源**：前者是
+    /// 宿主正在播的东西，后者是插件算出来的东西。两者交叉淡化叠出的是"两声并发"，
+    /// 不是一次接缝 —— 那种场合必须淡入。但**两个处理结果之间**（Raw ↔ Processed）
+    /// 同样是不同源：Raw 是原始捕获，Processed 是神经声码器的输出，内容毫不相干。
+    /// 只看上一侧会把 `Processed → Raw` 判成"同源切换"，于是 64 帧里把两段不相干的
+    /// 信号线性叠在一起 —— 用户听到的随机"咔"正是它。
+    ///
+    /// 因此判据是**异源**：只要两侧有一个是透传类，或者两侧不属于同一个"已算出的"
+    /// 内容族（Raw 与 Processed 分属不同族），就淡入。
+    fn should_fade_in_instead_of_crossfading(previous_kind: u8, kind: u8) -> bool {
+        let passthrough = |code: u8| {
+            code == TransferOutput::PendingSynthesis.code()
                 || code == TransferOutput::PassThrough.code()
                 || code == TransferOutput::Untouched.code()
-        )
+        };
+        // 任一侧是透传 ⇒ 异源。
+        if passthrough(previous_kind) || passthrough(kind) {
+            return true;
+        }
+        // Raw 与 Processed/StaleProcessed 之间也是异源：前者是原始捕获，
+        // 后者是声码器输出（或上一版渲染）。两者内容毫不相干。
+        let is_raw = |code: u8| code == TransferOutput::Raw.code();
+        is_raw(previous_kind) != is_raw(kind)
     }
 
     pub(crate) unsafe fn apply_output_declick(
@@ -3497,7 +3509,7 @@ impl ExtensionOwner {
             // 本轮从未去过咔、但上一轮停在另一种源上：仍然要去咔。至于是交叉淡化
             // 还是淡入，取决于上一个源是不是透传（见 `should_fade_in_...`）。
             let previous_kind = first_kind as u8;
-            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind) {
+            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind, kind as u8) {
                 0
             } else {
                 u32::MAX
@@ -3524,7 +3536,9 @@ impl ExtensionOwner {
                 // 不同源，交叉淡化会把两段不同内容叠在一起（听感是"两声并发"）。
                 // 那种场合改为对结果做一次线性淡入。
                 let previous_kind = (previous_token & 0xFF) as u8;
-                let crossfade = !Self::should_fade_in_instead_of_crossfading(previous_kind);
+                let current_kind = (token & 0xFF) as u8;
+                let crossfade =
+                    !Self::should_fade_in_instead_of_crossfading(previous_kind, current_kind);
                 if crossfade {
                     for channel in 0..2 {
                         for index in 0..OUTPUT_DECLICK_FRAMES {
@@ -4673,6 +4687,13 @@ impl ExtensionOwner {
                     return true;
                 }
                 // 【T20：单块抖动不静音】见 `gate_resting_run` 的字段说明。
+                //
+                // 【为什么不用 `kPlaying` 当分界】试过，会把 FL Studio 的回归打破：
+                // 那边停播时 `kPlaying` 常置 1，而同一位置的重复块**必须**被淡出，
+                // 否则固定光标处同一小段会被反复重写（用户听到嗡嗡声）。因此判据
+                // 只能是"连续多少块不推进"——`a_repeated_realtime_block_is_silenced`
+                // 与 `a_pinned_block_with_playing_one_is_silenced` 两条用例把这个
+                // 契约钉在两侧：单块抖动必须出声，连续不推进必须淡出。
                 let run = self.gate_resting_run.fetch_add(1, Ordering::AcqRel) + 1;
                 if run < GATE_SETTLE_BLOCKS {
                     return true;

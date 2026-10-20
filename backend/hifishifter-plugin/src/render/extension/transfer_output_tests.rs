@@ -118,6 +118,41 @@ fn the_read_position_jump_is_a_pure_judgement() {
     owner.note_read_position_for_test(96_000);
     assert_eq!(owner.read_position_jump(Some(evidence)), Some(48_000));
 }
+/// **T5: Raw and Processed are different sources, so switching between them fades in.**
+///
+/// Why this is a regression for the random click: the old judgement looked only at the
+/// previous rung, so `Processed -> Raw` (a re-render starting) was treated as same-source
+/// and crossfaded. Raw is the captured tape; Processed is the vocoder output. They are
+/// unrelated signals, and a 64-frame linear blend of them is an audible "two things at
+/// once" - a click, not a transition.
+#[test]
+fn a_rung_change_between_unrelated_signals_fades_in() {
+    let code = TransferOutput::code as fn(TransferOutput) -> u8;
+    let raw = code(TransferOutput::Raw);
+    let processed = code(TransferOutput::Processed);
+    let stale = code(TransferOutput::StaleProcessed);
+    let passthrough = code(TransferOutput::PassThrough);
+    // Unrelated on both sides: fade in, never crossfade.
+    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
+        processed, raw
+    ));
+    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(raw, processed));
+    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
+        stale, raw
+    ));
+    // A passthrough on either side is also unrelated.
+    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
+        passthrough, processed
+    ));
+    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
+        processed, passthrough
+    ));
+    // Same content family (a re-render of the same take): crossfade is correct.
+    assert!(!ExtensionOwner::should_fade_in_instead_of_crossfading(
+        processed, stale
+    ));
+    assert!(!ExtensionOwner::should_fade_in_instead_of_crossfading(raw, raw));
+}
 /// **分流判据必须是"未绑定 + 有素材"，而不是 `mode()`。**
 ///
 /// 【为什么单独钉这一条】上面那条走的是 `arm_transfer_rendering` 之后的完整链路；
