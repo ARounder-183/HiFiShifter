@@ -762,11 +762,15 @@ impl SnapshotPublisher {
         // 宽度也不同：起点边允许 20 ms（一条 take 只有一次），而结束边与内部边保持
         // 64 帧 —— 把内部边也放宽等于用更大的模糊掩盖位置错误，是本文明确不做的事。
         let span = coverage_end.saturating_sub(coverage_start).max(0);
-        let short = span <= 2 * COVERAGE_EDGE_FADE_FRAMES;
+        let short = span <= SHORT_SNAPSHOT_FRAMES;
         // 【为什么起点边还要按快照长度夹一次】极短快照（测试夹具、被裁到几十帧的
         // 片段）若用固定的 20 ms 淡化，整段都会落在过渡带里 —— 那等于把内容整体
         // 衰减。夹到半长保证"过渡带 + 稳定段"始终成立。
         let start_edge = COVERAGE_START_FADE_FRAMES.min(span / 2).max(1);
+        // 【结束边为什么夹到 1/4 而不是 1/2】起点边与结束边都要留出"稳定段"，否则
+        // 两条斜坡会连成一条三角包络（整段内容被衰减）。各取 1/4 保证中间至少有一半
+        // 是满电平。
+        let end_edge = COVERAGE_EDGE_FADE_FRAMES.min(span / 4).max(1);
         // 【T1：真实覆盖边】没有 coverage 时只有首尾两条边（旧语义）；有 coverage 时
         // 每个"未覆盖 → 覆盖"的翻转点都是边。空洞的两侧都是宿主原声，本身不混合；
         // 要淡化的只有"原声 → 处理结果"这一种翻转。
@@ -780,8 +784,8 @@ impl SnapshotPublisher {
             })
             .collect();
         let edge_gain = |position: i64| -> (f32, f32) {
-            const END: i64 = COVERAGE_EDGE_FADE_FRAMES;
             let start = start_edge;
+            let end = end_edge;
             if coverage_start == i64::MAX {
                 return (1.0, 0.0);
             }
@@ -815,17 +819,29 @@ impl SnapshotPublisher {
                 let angle = t * std::f32::consts::FRAC_PI_2;
                 return (angle.cos(), angle.sin());
             }
-            if position >= coverage_end - END {
-                let t = ((coverage_end - position) as f32 / END as f32).clamp(0.0, 1.0);
+            if position >= coverage_end - end {
+                let t = ((coverage_end - position) as f32 / end as f32).clamp(0.0, 1.0);
                 let angle = t * std::f32::consts::FRAC_PI_2;
                 return (angle.cos(), angle.sin());
             }
-            // 【T1：空洞的"内容重新开始"那一侧也要淡化】它同样是
-            // "宿主原声 → 处理结果"的切换。用同一条等功率带（64 帧），
-            // 起点在空洞结束处。空洞内部本身不混合（两侧都是原声）。
+            // 【B4：空洞的**两侧**都要淡化】
+            //
+            // 洞的出口（`hole.end`）此前有斜坡，入口（`hole.start`）没有 ——
+            // 于是"处理结果 → 宿主原声"在洞的开头是一次硬切。洞出现在素材中间时
+            // 两侧都是满电平音乐，那一下就是用户听到的"播放中途随机咔"。
+            //
+            // 【为什么入口的斜坡在洞**之前**】覆盖之外没有快照采样，边界之外只能是
+            // 宿主原声；所以淡化必须发生在覆盖范围**之内** —— 在 `hole.start - end`
+            // 处还是纯处理结果，到 `hole.start` 降到纯原声。
             for hole in &holes {
-                if position >= hole.end && position < hole.end + END {
-                    let t = ((position - hole.end) as f32 / END as f32).clamp(0.0, 1.0);
+                if position >= hole.end && position < hole.end + end {
+                    let t = ((position - hole.end) as f32 / end as f32).clamp(0.0, 1.0);
+                    let angle = t * std::f32::consts::FRAC_PI_2;
+                    return (angle.cos(), angle.sin());
+                }
+                if position >= hole.start - end && position < hole.start {
+                    // 与出口同一条等功率曲线，方向相反：`t = 0` 处满内容、`t = 1` 处满原声。
+                    let t = ((hole.start - position) as f32 / end as f32).clamp(0.0, 1.0);
                     let angle = t * std::f32::consts::FRAC_PI_2;
                     return (angle.cos(), angle.sin());
                 }
@@ -908,24 +924,33 @@ impl SnapshotPublisher {
     }
 }
 
-/// 快照覆盖边界（快照首/尾）的交叉淡化长度（宿主帧）。
+/// 快照覆盖边界（快照首/尾、覆盖洞的两侧）的淡化长度（宿主帧）。48 kHz 下 20 ms。
 ///
-/// 【为什么是 64】与 `extension.rs` 的 `OUTPUT_DECLICK_FRAMES` 同值（48 kHz 下
-/// ≈ 1.3 ms）：足以消除阶跃，又短到不会被听成一次淡入淡出。
+/// 【为什么从 64 帧改成 960 帧】这些边界的两侧都是**互不相干**的信号：一侧是本插件
+/// 渲染出来的内容，另一侧是宿主原声（我们没录到的那一段）。1.3 ms 的线性混合对两个
+/// 不相关信号不是淡化，是一次能量凹陷（线性中点 −3.9 dB）—— 听感就是"咔"。
 ///
-/// 只用于**结束边**（以及短快照的整段判定）。起点边用
-/// [`COVERAGE_START_FADE_FRAMES`]，理由见那里。
-const COVERAGE_EDGE_FADE_FRAMES: i64 = 64;
+/// 【为什么之前只放宽起点边】当时的理由是"结束边之外就是宿主原声，宿主自己通常有
+/// 淡出"。那只在片段**末尾**成立；覆盖洞出现在素材**中间**时，洞的两侧都是满电平
+/// 音乐，而那条边界只有 1.3 ms —— 用户听到的"播放中途随机咔"里有一份就是它。
+///
+/// 【为什么不担心"用更大的模糊掩盖位置错误"】这里的边界位置来自**覆盖事实**
+/// （这一帧到底录没录到），不是来自猜测；模糊不掩盖任何错误，只是让真实的信号切换
+/// 不以阶跃的形式出现。
+const COVERAGE_EDGE_FADE_FRAMES: i64 = 960;
 
 /// 快照**起点**边的混合宽度（宿主帧）。48 kHz 下 20 ms。
 ///
-/// 【为什么比结束边宽得多】起点边是"宿主原声 → 处理结果"的切换，两侧是**互不
-/// 相干**的信号。1.3 ms 的线性混合对两个不相关信号不是淡化，是一次能量凹陷
-/// （线性中点 −3.9 dB）—— 听感就是"咔"。
-///
-/// 【为什么结束边不一起放宽】结束边之外就是宿主原声，宿主自己通常有淡出；把内部
-/// 边界也放宽等于用更大的模糊掩盖位置错误（本方案明确不做）。
+/// 【为什么与结束边同宽】两者都是"宿主原声 → 处理结果"的切换，没有理由不同。
+/// 保留成独立常量是因为起点边还要按快照长度夹一次（见 `edge_gain` 的 `start_edge`）。
 const COVERAGE_START_FADE_FRAMES: i64 = 960;
+
+/// 短于这个长度（宿主帧）的快照没有"稳定段"可留，按原样硬切。
+///
+/// 【为什么是 128】它是 48 kHz 下 2.7 ms —— 比任何可听的乐句都短，只可能来自测试夹具
+/// 或被裁到几十帧的片段。给这类快照套 20 ms 淡化会把整段内容衰减成一条斜坡，
+/// 反而破坏"录到的那一段被替换、其余保持原声"这条更值钱的契约。
+const SHORT_SNAPSHOT_FRAMES: i64 = 128;
 /// 一个实时读区的 guard：持有它期间，它登记的那份快照不会因回收而释放。
 struct ReadSection {
     snapshot: *const RetainedSnapshot,
@@ -1595,21 +1620,27 @@ mod tests {
         );
     }
 
-    /// **T1：空洞结束、内容重新开始的那一侧要淡化，两侧不能阶跃。**
+    /// **B4：覆盖洞的**两侧**都要淡化 —— 入口不能硬切到原声。**
+    ///
+    /// 【为什么入口也要有】洞出现在素材中间时，两侧都是满电平音乐；入口处从
+    /// 「我们渲染的内容」直接跳到「宿主原声」就是一次阶跃 —— 用户听到的
+    /// 「播放中途随机咔」里有一份正是它。出口此前已经淡化，入口没有。
     #[test]
-    fn a_content_onset_after_a_hole_is_crossfaded() {
+    fn both_sides_of_a_hole_are_crossfaded() {
+        // 8192 帧（48 kHz 下 170 ms），洞在 2048..4096：两侧各留出远超一条淡化带
+        // 的稳定段，断言才不会被边界的斜坡吞掉。
+        let frames = 8192;
         let publisher = SnapshotPublisher::default();
         publisher
             .publish(PlaybackSnapshot {
                 sample_rate: 48_000,
                 origin_sample: 0,
-                left: vec![0.2_f32; 512],
-                right: vec![0.2_f32; 512],
-                covered: vec![256..512],
+                left: vec![0.2_f32; frames],
+                right: vec![0.2_f32; frames],
+                covered: vec![0..2048, 4096..8192],
                 _reservation: None,
             })
             .unwrap();
-        let frames = 512;
         let mut left = vec![0.0_f32; frames];
         let mut right = vec![0.0_f32; frames];
         let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -1624,15 +1655,28 @@ mod tests {
         assert!(unsafe {
             publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
         });
+        // 稳定段：起点边（0..960）之后、洞的入口斜坡（1088..2048）之前。
         assert!(
-            (left[128] - 7.0).abs() < 1e-6,
-            "inside the hole the dry signal wins"
+            (left[1000] - 0.2).abs() < 1e-6,
+            "the stable middle of the first covered run is ours"
         );
-        let step = (left[257] - left[256]).abs();
-        assert!(step < 1.0, "the onset must ramp, not step (saw {step})");
+        // 入口斜坡的末端已经接近纯原声 —— 这正是「不硬切」的定义。
         assert!(
-            (left[400] - 0.2).abs() < 1e-6,
-            "after the ramp the snapshot wins"
+            (left[2047] - 7.0).abs() < 0.05,
+            "the hole entry must ramp to the dry signal (saw {})",
+            left[2047]
+        );
+        // 洞内部：纯宿主原声（既不是零，也不是快照）。
+        assert!((left[3000] - 7.0).abs() < 1e-6, "inside the hole the dry signal wins");
+        // 出口：第一帧仍是原声，且下一帧不阶跃。
+        assert!((left[4096] - 7.0).abs() < 1e-6, "the onset starts from the dry signal");
+        let step = (left[4097] - left[4096]).abs();
+        assert!(step < 1.0, "the onset must ramp, not step (saw {step})");
+        // 斜坡之后（4096 + 960）恢复为快照。
+        assert!(
+            (left[4096 + 968] - 0.2).abs() < 1e-6,
+            "after the ramp the snapshot wins (saw {})",
+            left[4096 + 968]
         );
     }
 
