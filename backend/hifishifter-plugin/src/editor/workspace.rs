@@ -1008,6 +1008,8 @@ impl DocumentSession {
         });
         let now = std::time::Instant::now();
         let mut pending_since = self.pending_since.lock_or_recover();
+        // 【锁序】`ever_had_source` 与 `pending_since` 同属 host facts 层，同向取锁。
+        let mut ever_had_source = self.ever_had_source.lock_or_recover();
         let mut seen = std::collections::HashSet::new();
         // 这一趟载荷里出现过的 id（item GUID 或 clip id）。见 `retain` 处的说明。
         let mut present = std::collections::HashSet::new();
@@ -1026,6 +1028,10 @@ impl DocumentSession {
                 let has_source = clip["source_path"]
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
+                // T14：记下"这个 item 至少有过一次源"——历史事实，只增不减。
+                if has_source {
+                    ever_had_source.insert(item_id.clone());
+                }
                 // `waiting` 表示"这条还在等 ARA 音频"：只有它继续计时。其余状态
                 // （拿到源、folder 父轨）都必须清掉起点，否则陈旧的起点会让下一次
                 // 掉回"在途"时立刻被判超期。
@@ -1053,6 +1059,18 @@ impl DocumentSession {
                     ("unavailable", Some("source_revoked"), false)
                 } else if folder_parent && !claimed.contains(&item_id) {
                     ("unavailable", Some("folder_parent"), false)
+                } else if ever_had_source.contains(&item_id) {
+                    // 【T14："刚刚没有"与"从来没有"是两件事】
+                    //
+                    // 这个 item 曾经有过源，那么它现在没有，只可能是宿主**暂时**收回了样本
+                    // 访问（后台、undo 历史、宿主整理缓存）。那一类由插件侧自己重读，不该显示成
+                    // "宿主正在分配"，更不该走进 2 秒计时 —— 计时会把
+                    // "等一个 tick 就会好"说成"等不到了"。
+                    //
+                    // 【waiting = true 是刻意的】起点必须留着：它一旦被清，下一轮又会重新计时。
+                    // 真正让这一态收敛的是 source_states 翻回 Published（插件侧重读成功），
+                    // 不是这里的计时。
+                    ("pending", None, true)
                 } else {
                     // 还没拿到音频：先按"在途"记时，超期再判原因。
                     let since = *pending_since.entry(item_id.clone()).or_insert(now);
@@ -1148,6 +1166,9 @@ impl DocumentSession {
                         .as_str()
                         .is_some_and(|path| !path.is_empty());
                     if has_source {
+                        // T14：第二趟同样记"至少有过一次源"——没有原生扩展的宿主
+                        // （Cubase/Nuendo/Studio One）只走这一趟。
+                        ever_had_source.insert(id.clone());
                         clip["host_media"] = serde_json::json!("ready");
                         // 拿到音频 ⇒ settled：清掉计时，否则下次掉回"在途"会立刻超期。
                         pending_since.remove(&id);
@@ -1161,6 +1182,12 @@ impl DocumentSession {
                         clip["host_media"] = serde_json::json!("unavailable");
                         clip["host_media_reason"] = serde_json::json!("source_read_failed");
                         pending_since.remove(&id);
+                        continue;
+                    }
+                    // T14：曾经有过源的 item 不进 2 秒计时（理由见上一趟的同名分支）。
+                    if ever_had_source.contains(&id) {
+                        clip["host_media"] = serde_json::json!("pending");
+                        present.insert(id.clone());
                         continue;
                     }
                     let since = *pending_since.entry(id.clone()).or_insert(now);
@@ -2229,6 +2256,63 @@ mod tests {
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::ExtensionRoles;
     use std::sync::Arc;
+
+    /// **T14: an item that once had a source never enters the 2 s wait timeout.**
+    ///
+    /// Why this is the misreading symptom 3 was built on: the timer started for any clip
+    /// without a source, so a source the host had temporarily withdrawn was reported as
+    /// "host is finishing assigning audio", and 2 s later as "never got it". Both send the
+    /// user to look at region assignment, while the real action was in the source layer.
+    ///
+    /// Exercised through the pass that runs for every host (no native extension needed):
+    /// a clip whose id derives from a region key.
+    #[test]
+    fn an_item_that_once_had_a_source_never_enters_the_wait_timeout() {
+        let document = DocumentSession::new(40_001);
+        let mut payload = serde_json::json!({
+            "clips": [{"id": "ara-region-11", "track_id": "t",
+                       "start_sec": 0.0, "length_sec": 1.0}],
+        });
+        // This clip had a source; the host withdrew access (background, undo history).
+        document
+            .ever_had_source
+            .lock_or_recover()
+            .insert("ara-region-11".to_owned());
+        // A start time already far past the timeout, to prove the timer is never entered.
+        document.pending_since.lock_or_recover().insert(
+            "ara-region-11".to_owned(),
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        );
+        document.decorate_host_media_locked(&mut payload, "");
+        let clip = &payload["clips"][0];
+        assert_eq!(clip["host_media"], "pending");
+        assert!(
+            clip.get("host_media_reason").is_none(),
+            "an item that once had a source must not be reported as waiting for assignment"
+        );
+    }
+
+    /// **T14: an item that never had a source still times out with a reason.**
+    ///
+    /// The other side of the contract: "never had" is the only case where the user should
+    /// be told the host has not delivered yet, and the 2 s bound keeps the application out
+    /// of a permanent in-progress state.
+    #[test]
+    fn an_item_that_never_had_a_source_still_times_out_with_a_reason() {
+        let document = DocumentSession::new(40_002);
+        let mut payload = serde_json::json!({
+            "clips": [{"id": "ara-region-12", "track_id": "t",
+                       "start_sec": 0.0, "length_sec": 1.0}],
+        });
+        document.pending_since.lock_or_recover().insert(
+            "ara-region-12".to_owned(),
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        );
+        document.decorate_host_media_locked(&mut payload, "");
+        let clip = &payload["clips"][0];
+        assert_eq!(clip["host_media"], "unavailable");
+        assert_eq!(clip["host_media_reason"], "awaiting_region");
+    }
 
     fn fixture() -> (
         ModelHandle,

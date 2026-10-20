@@ -260,6 +260,16 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// Take"换了 active take，而 ARA 不再重发模型 ⇒ `authorized_takes` 永久陈旧）。
     /// 记下时刻就能把"在途"与"等不到了"分开：超过阈值仍无源 ⇒ 转 `unavailable` 并给出
     /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
+    /// 本地补丁（T14）：**曾经**有过音频的 item（item GUID 集合）。
+    ///
+    /// 【为什么需要它】"没有 source_path"有两种成因，界面却只有一句"正在等待宿主编配"：
+    ///   * 从未有过源（宿主还在分配 region）—— 该显示"在途"，并可以等 2 秒；
+    ///   * 有过源、刚刚又没了（宿主暂时收回了样本访问）—— 那是**一瞬间**的事，
+     
+    ///     插件自己会在下一个 tick 重读。把它也说成"正在分配"会把用户引向错误的方向。
+    /// 【为什么只增不减】集合的语义是"这个 item 至少有过一次源"；那是一个历史事实，
+    /// 不随当前状态变化。按 item GUID 回收（同 `pending_since` 的 TTL 口径）。
+    pub ever_had_source: Mutex<std::collections::HashSet<String>>,
     pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
     /// 最近一次映射里被**跳过**的 playback region（下标 + 语言无关原因码）。
     ///

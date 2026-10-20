@@ -1907,12 +1907,11 @@ impl AudioSources for ModelHandle {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
         self.mark_model_dirty();
         self.session.clear_renderers();
-        if let Some(source) = self.document.audio_sources.get(*state) {
-            self.session
-                .edit_sources
-                .lock_or_recover()
-                .remove(&source.persistent_id);
-        }
+        // 【T12：读到新版本之后再替换】旧实现在这里**先删**已发布的编辑侧副本，再尝试重读。
+        // 那一刻若样本访问还没开（后台、undo 历史、宿主整理缓存），新版本读不出来，
+        // 而旧版本已经删了 ⇒ 编辑侧 PCM 永久消失，界面只能显示占位（用户看到的
+        // "回前台后 Clip 一直等音频"）。现在只推进版本号，替换交给
+        // `refresh_source_pcm` 在**读到新版本之后**做。
         self.source_content_version_bump(*state);
         self.refresh_source_pcm(*state, host);
         Ok(())
