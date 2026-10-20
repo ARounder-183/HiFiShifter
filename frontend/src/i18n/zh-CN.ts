@@ -2119,6 +2119,8 @@ export const zhCN = {
     ara_clip_waiting_for_host_audio: "等待宿主提供音频",
     ara_clip_host_source_read_failed:
         "宿主已为这一条授予样本访问权，但读取失败；在宿主补上音频之前，这个片段无法渲染",
+    ara_clip_host_source_revoked:
+        "宿主暂时收回了这段音频的访问权限，插件会自动重试；若持续出现，请在宿主里重新激活该片段。",
     ara_clip_host_take_switched:
         "宿主换了这一条的当前 Take，插件还没拿到它的音频；在宿主里撤销，或再编辑一下让它重新分配",
 

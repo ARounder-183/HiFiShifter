@@ -2123,6 +2123,8 @@ export const zhTW = {
     ara_clip_waiting_for_host_audio: "等待宿主提供音訊",
     ara_clip_host_source_read_failed:
         "宿主已為這一條授予樣本存取權，但讀取失敗；在宿主補上音訊之前，這個片段無法算繪",
+    ara_clip_host_source_revoked:
+        "宿主暫時收回了這段音訊的存取權限，外掛會自動重試；若持續出現，請在宿主裡重新啟用該片段。",
     ara_clip_host_take_switched:
         "宿主換了這一條的目前 Take，外掛還沒拿到它的音訊；在宿主裡復原，或再編輯一下讓它重新分配",
 

@@ -1066,6 +1066,7 @@ impl ModelHandle {
                 self.remap_stamp = Some(fingerprint);
                 self.model_dirty = false;
                 self.session.note_model_clean();
+                self.publish_readiness();
                 drop(transaction);
             }
             Err(err) => {
@@ -1760,6 +1761,13 @@ impl AudioSources for ModelHandle {
                 .lock_or_recover()
                 .remove(&source.persistent_id);
         }
+        // 【T7】源被**销毁**是"已发布 PCM 必须消失"的三种情形之一：这里连同状态一起清掉。
+        if let Some(source) = self.document.audio_sources.get(state) {
+            self.session
+                .source_states
+                .lock_or_recover()
+                .remove(&source.persistent_id);
+        }
         if let Some(source) = self.document.audio_sources.get_mut(state) {
             source.sample_access_enabled = false;
         }
@@ -1776,13 +1784,18 @@ impl AudioSources for ModelHandle {
         };
         let id = source.persistent_id.clone();
         let readable = source.sample_access_enabled && !source.deactivated;
-        if !readable
-            || !self
-                .session
-                .source_failures
-                .lock_or_recover()
-                .contains_key(&id)
-        {
+        if !readable {
+            return false;
+        }
+        // 【T9：重试不再只服务"读失败"】宿主收回一次样本访问之后，源会停在
+        // `Revoked`（PCM 仍然保留），而恢复**不能**只押在"宿主记得再发一次 enable"
+        // 上 —— 那条回调丢了就再也不会来。这里把"可读但没有 PCM / 上一次读失败"
+        // 都纳入重试，由桥在 `notifyModelUpdates` 与样本访问变更时驱动（限流 1 s）。
+        let needs_read = {
+            let states = self.session.source_states.lock_or_recover();
+            states.get(&id) != Some(&crate::render::document::SourceState::Published)
+        };
+        if !needs_read {
             return false;
         }
         self.refresh_source_pcm(*state, host);
@@ -1897,69 +1910,159 @@ impl AudioSources for ModelHandle {
 
 impl ModelHandle {
     /// 授权刷新撤销旧快照；内容/几何回调另行推进模型版本，仅从授权scope读取。
+    ///
+    /// 【T7：已发布的 PCM 只在三种情况下消失】源被销毁、内容版本换了且新版本就绪、
+    /// 文档关闭。其余一切"暂时不可读"（样本访问被收回、源被放进 undo 历史、后台、
+    /// 读取失败）都**保留**上一份，只改状态。
+    ///
+    /// 【为什么这条是"后台切回来之后 Clip 一直等宿主音频"的根因】旧实现在最开头
+    /// 无条件 `sources.remove(...)`：宿主收回一次访问就等于永久丢掉音频，而恢复
+    /// 只依赖"宿主记得再发一次 enable"——那条回调丢了就再也不会来。用户唯一的
+    /// 出路是删掉插件再加。
+    ///
+    /// 【为什么不会让旧音频盖住新内容】内容变化时 `source_content_version` 会前进，
+    /// 而 `SourcePcm` 带 `version`，渲染缓存键含它。保留旧 PCM 的那一窗口里渲染读到
+    /// 的是**上一版内容**——与 Transfer 的 `StaleProcessed` 是同一条既有纪律。
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
         self.session.revoke_renderers();
         let Some(source) = self.document.audio_sources.get(index) else {
             return;
         };
-        self.session
-            .sources
-            .lock_or_recover()
-            .remove(&source.persistent_id);
-        // 【为什么还要看 `deactivated`】宿主把源放进 undo 历史后，规范明确
-        // "更新属性/内容或读取其内容都不再有效"。停用期间保留 `sample_access_enabled`
-        // 原值（那是宿主对访问的许可，与 undo 状态正交），但**不读**；重新激活时
-        // 同一次 `refresh_source_pcm` 会把 PCM 读回来。
-        if source.sample_access_enabled && !source.deactivated {
-            let result = usize::try_from(source.sample_count)
-                .ok()
-                .filter(|_| source.sample_rate == source.sample_rate.round())
-                .ok_or(AraError::InvalidArgument("unsupported sample geometry"))
-                .and_then(|frames| {
-                    crate::render::source::read_source_pcm(
-                        host,
-                        frames,
-                        // 【为什么 `.max(1)`】宿主可能报 0 声道（畸形或未初始化）。
-                        // `read_source_pcm` 会拒它，但拒的措辞是"通道数不在 1..=2" ——
-                        // 那是**素材几何**问题，而 0 声道的真实含义是"未知"，按单声道
-                        // 尝试读更接近宿主意图。对照 `create_audio_source` 里同一处
-                        // 已经这么做了（`source.channel_count.max(1)`）。
-                        source.channel_count.max(1) as usize,
-                        source.sample_rate as u32,
-                        self.source_content_version(index),
-                    )
-                });
-            match result {
-                Ok(pcm) => {
-                    log::info!(
-                        "[ara] host PCM ready source={index} frames={} version={}",
-                        source.sample_count,
-                        pcm.version
-                    );
-                    let pcm = Arc::new(pcm);
-                    self.session
-                        .source_failures
-                        .lock_or_recover()
-                        .remove(&source.persistent_id);
-                    self.session
-                        .publish_source_pcm(source.persistent_id.clone(), pcm);
-                }
-                Err(error) => {
-                    // 【为什么单记一份真因】此前只 `log::warn`，于是"授权了却读不出来"
-                    // 在界面上与"还没认领"长得一模一样（都报 `awaiting_region`）——
-                    // 用户对着一个永远转不完的占位，无从判断该做什么。记下真因后
-                    // `decorate_host_media_locked` 把它报成 `source_read_failed`。
-                    log::warn!("[ara] host PCM unavailable: {error:?}");
-                    self.session
-                        .source_failures
-                        .lock_or_recover()
-                        .insert(source.persistent_id.clone(), format!("{error:?}"));
-                }
+        let id = source.persistent_id.clone();
+        let readable = source.sample_access_enabled && !source.deactivated;
+        if !readable {
+            // 【T7】渲染权威表必须撤掉（宿主收回了访问，不能继续播旧采样），但
+            // **编辑侧的物化副本保留** —— 那是界面波形的来源，丢了就等于"整条轨
+            // 突然空了"。这一对区分正是"暂时不可读"与"从来没有过"的落点。
+            self.session.sources.lock_or_recover().remove(&id);
+            self.session
+                .source_states
+                .lock_or_recover()
+                .insert(id, crate::render::document::SourceState::Revoked);
+            self.publish_readiness();
+            if !self.editing {
+                self.session.prepare_renderers();
+            }
+            return;
+        }
+        let result = usize::try_from(source.sample_count)
+            .ok()
+            .filter(|_| source.sample_rate == source.sample_rate.round())
+            .ok_or(AraError::InvalidArgument("unsupported sample geometry"))
+            .and_then(|frames| {
+                crate::render::source::read_source_pcm(
+                    host,
+                    frames,
+                    // 【为什么 `.max(1)`】宿主可能报 0 声道（畸形或未初始化）。
+                    // `read_source_pcm` 会拒它，但拒的措辞是"通道数不在 1..=2" ——
+                    // 那是**素材几何**问题，而 0 声道的真实含义是"未知"，按单声道
+                    // 尝试读更接近宿主意图。对照 `create_audio_source` 里同一处
+                    // 已经这么做了（`source.channel_count.max(1)`）。
+                    source.channel_count.max(1) as usize,
+                    source.sample_rate as u32,
+                    self.source_content_version(index),
+                )
+            });
+        match result {
+            Ok(pcm) => {
+                log::info!(
+                    "[ara] host PCM ready source={index} frames={} version={}",
+                    source.sample_count,
+                    pcm.version
+                );
+                let pcm = Arc::new(pcm);
+                self.session.source_failures.lock_or_recover().remove(&id);
+                self.session
+                    .source_states
+                    .lock_or_recover()
+                    .insert(id.clone(), crate::render::document::SourceState::Published);
+                self.session.publish_source_pcm(id, pcm);
+            }
+            Err(error) => {
+                // 【为什么单记一份真因】此前只 `log::warn`，于是"授权了却读不出来"
+                // 在界面上与"还没认领"长得一模一样（都报 `awaiting_region`）——
+                // 用户对着一个永远转不完的占位，无从判断该做什么。记下真因后
+                // `decorate_host_media_locked` 把它报成 `source_read_failed`。
+                log::warn!("[ara] host PCM unavailable: {error:?}");
+                // 【T7】读取失败同样**保留**上一份：宿主样本侧的一次抖动不该让整条轨静音。
+                self.session
+                    .source_states
+                    .lock_or_recover()
+                    .insert(id.clone(), crate::render::document::SourceState::Failed);
+                self.session
+                    .source_failures
+                    .lock_or_recover()
+                    .insert(id, format!("{error:?}"));
             }
         }
+        self.publish_readiness();
         if !self.editing {
             self.session.prepare_renderers();
         }
+    }
+
+    /// 把"输入到底可用到什么程度"算成一份读数并发给文档（T2）。
+    ///
+    /// 【为什么由模型侧算】`audio_sources` / `source_states` / `edit_sources` 三者
+    /// 只有模型这一侧能同时看到；文档侧要判这件事就只能反向引用模型。
+    ///
+    /// 【为什么"有 region 但 0 个源"要单独成一档】那正是重开工程最典型的形状：
+    /// 宿主给了 region、却没交付任何音频源。把它与"源有了但还没读出来"分开之后，
+    /// 界面第一次能说出"宿主没有交付音频"，而不是永远一句"等待中"。
+    fn publish_readiness(&self) {
+        let regions = self.session.regions.lock_or_recover().len();
+        let with_source = self
+            .session
+            .regions
+            .lock_or_recover()
+            .values()
+            .filter(|region| {
+                self.session
+                    .edit_sources
+                    .lock_or_recover()
+                    .contains_key(&region.audio_source_persistent_id)
+            })
+            .count();
+        let states = self.session.source_states.lock_or_recover();
+        let sources = self.document.audio_sources.len();
+        let authorized = self
+            .document
+            .audio_sources
+            .iter()
+            .filter(|source| source.sample_access_enabled && !source.deactivated)
+            .count();
+        let published = states
+            .values()
+            .filter(|state| **state == crate::render::document::SourceState::Published)
+            .count();
+        let failed = states
+            .values()
+            .filter(|state| **state == crate::render::document::SourceState::Failed)
+            .count();
+        drop(states);
+        let model_published = self.session.timeline.lock_or_recover().is_some();
+        let verdict = if sources == 0 {
+            crate::render::document::InputVerdict::AwaitingRegions
+        } else if failed > 0 {
+            crate::render::document::InputVerdict::Degraded
+        } else if authorized == 0 {
+            crate::render::document::InputVerdict::AwaitingSamples
+        } else if published == 0 {
+            crate::render::document::InputVerdict::AwaitingSamples
+        } else {
+            crate::render::document::InputVerdict::Ready
+        };
+        self.session
+            .note_readiness(crate::render::document::InputReadiness {
+                regions,
+                regions_with_source: with_source,
+                sources,
+                sources_authorized: authorized,
+                sources_published: published,
+                sources_failed: failed,
+                model_published,
+                verdict,
+            });
     }
 
     /// 内容版本自增。

@@ -938,6 +938,14 @@ impl DocumentSession {
             .keys()
             .cloned()
             .collect();
+        // 【T8】被宿主暂时收回访问的源：会自己好，但**不是**"还在分配 region"。
+        let revoked_sources: std::collections::HashSet<String> = self
+            .source_states
+            .lock_or_recover()
+            .iter()
+            .filter(|(_, state)| **state == crate::render::document::SourceState::Revoked)
+            .map(|(id, _)| id.clone())
+            .collect();
         // folder 父轨：本实例**永远**拿不到组内子轨的音频（见 `HostAudioState`）。
         let folder_parent = self.renderer_owners().into_iter().any(|owner| {
             owner.host_audio_status().state
@@ -978,6 +986,16 @@ impl DocumentSession {
                 {
                     // 源已授权、读取却失败：这不是"在途"，立刻报真因，不启动计时。
                     ("unavailable", Some("source_read_failed"), false)
+                } else if source_by_item
+                    .get(&item_id)
+                    .is_some_and(|source| revoked_sources.contains(source))
+                {
+                    // 【T8："暂时被收回"必须与"还在分配 region"分开】两者的处置**相反**：
+                    // 这一条要做的是"等一个 tick，插件自己会重读"，后者要做的是"去宿主里
+                    // 做一次编辑让 observer 重跑"。此前它们共用 `pending` → `awaiting_region`，
+                    // 于是"宿主收回了一次样本访问"被说成"宿主还在分配 region" ——
+                    // 三轮排查都被引到分配的时序上，而真正的动作发生在**源**这一层。
+                    ("unavailable", Some("source_revoked"), false)
                 } else if folder_parent && !claimed.contains(&item_id) {
                     ("unavailable", Some("folder_parent"), false)
                 } else {

@@ -66,6 +66,98 @@ pub(crate) const EDIT_SETTLE_GRACE: std::time::Duration = std::time::Duration::f
 pub(crate) const FORCED_EDIT_CLOSE_GRACE: std::time::Duration =
     std::time::Duration::from_secs(8);
 
+/// 一个 ARA 音频源相对本插件的**可读性**。
+///
+/// 【为什么是三态而不是一个布尔】三种"没有 PCM"的处置完全不同：
+/// * `Published` —— 有 PCM，正常；
+/// * `Revoked` —— 宿主暂时收回了样本访问（或把源放进了 undo 历史）。**会自己好**：
+///   下一次授权 / 插件侧重试都能恢复，界面上不该说成"等待分配"；
+/// * `Failed` —— 授权在，但读取失败（真故障，需要留真因）。
+///
+/// 把它们压成一个布尔，正是"后台切回来之后 Clip 一直等宿主音频"看起来像
+/// "宿主还在分配 region"的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceState {
+    /// 已读到并发布了 PCM。
+    Published,
+    /// 宿主暂时不可读（样本访问被收回 / 源被停用），但**已发布的 PCM 仍然保留**。
+    Revoked,
+    /// 授权在、读取失败。
+    Failed,
+}
+
+impl SourceState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Revoked => "revoked",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// 输入可用性的**综合判定**。
+///
+/// 【为什么不是一个布尔】`ready` 只回答"渲染许可恢复过没有"，它不回答"PCM 到底在不在"。
+/// 于是"宿主授权了 0 个源"与"一切正常"在插件自己看来是同一种状态，界面也只能说一句
+/// 含糊的"等待宿主音频"。这个判据把四种处境分开，每一处都对应一个不同的下一步。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputVerdict {
+    /// 有 region、有授权、有已发布的 PCM。
+    Ready,
+    /// 宿主还没交付任何音频源（还没分配 region / 还没建 source）。
+    AwaitingRegions,
+    /// 源有了，但样本访问没开、或还没读出来。
+    AwaitingSamples,
+    /// 授权在却读不出来，或部分源失败 —— 可行动的真故障。
+    Degraded,
+}
+
+impl InputVerdict {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::AwaitingRegions => "awaiting_regions",
+            Self::AwaitingSamples => "awaiting_samples",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// 一次输入可用性的完整读数（见 [`InputVerdict`]）。
+///
+/// 【为什么带这么多计数】用户报障时最需要回答的是"卡在哪一步"。只给一个 verdict，
+/// 下一轮仍然只能靠猜；把"几条 region、几个源、几个授权、几个已发布、几个失败"
+/// 一起给出来，一行日志就能指认。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InputReadiness {
+    pub regions: usize,
+    pub regions_with_source: usize,
+    pub sources: usize,
+    pub sources_authorized: usize,
+    pub sources_published: usize,
+    pub sources_failed: usize,
+    pub model_published: bool,
+    pub verdict: InputVerdict,
+}
+
+impl InputReadiness {
+    /// 一行可读的读数（诊断包与 `stuck_report` 共用）。
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "verdict={} regions={}/{} sources={} authorized={} published={} failed={} model={}",
+            self.verdict.as_str(),
+            self.regions_with_source,
+            self.regions,
+            self.sources,
+            self.sources_authorized,
+            self.sources_published,
+            self.sources_failed,
+            self.model_published,
+        )
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct DocumentSession {    controller: AtomicUsize,
     alive: AtomicBool,
@@ -113,6 +205,25 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 【边界不可松动】这只回退到**已被 ARA 授权的那份 PCM**；路径为空或读不到时
     /// 仍然"宁可不挂"（无源占位是看得见的，挂错采样是听不见的错）。
     pub authorized_sources: Mutex<HashMap<u64, String>>,
+    /// 每个 ARA 音频源（persistentID → 状态）的**可读性**，供界面与自愈判定。
+    ///
+    /// 【为什么需要它】此前"源暂时不可读"与"源从来没读到过"在实现里是同一件事：
+    /// `refresh_source_pcm` 无论什么原因都先把已发布的 PCM 删掉，再"若可读则重读"。
+    /// 于是宿主收回一次样本访问（后台、undo 历史、宿主自己整理缓存）就等于**永久**
+    /// 丢掉音频 —— 恢复只依赖"宿主记得再发一次 enable"，而那条回调丢了就没了。
+    ///
+    /// 把状态记下来之后：已发布的 PCM 只在"源被销毁 / 内容版本换了且新版本就绪 /
+    /// 文档关闭"这三种情况下被替换，其余一切暂时不可读都只是状态变化。
+    pub source_states: Mutex<HashMap<String, SourceState>>,
+    /// 最近一次由**模型侧**算出的输入可用性读数（`None` = 还没算过，按旧行为处理）。
+    ///
+    /// 【为什么由模型侧写、文档侧读】`audio_sources` 是 `ModelHandle` 的私有数据，
+    /// 文档看不到；而判定结果要给 `ensure_loaded` / `capture_render_input` / 诊断包用。
+    /// 让模型在每次源变化之后写一份读数，是两者之间唯一不需要反向引用的通道。
+    ///
+    /// 【`None` 为什么等于旧行为】没有跑过任何源回调的会话（测试夹具、纯几何会话）
+    /// 不该因为"没算过"被判成未就绪 —— 那会把未知变成否定，正是本轮要修的那类错误。
+    pub readiness: Mutex<Option<InputReadiness>>,
     pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
     /// 由 REAPER folder 结构**得到父级**的轨道 id（见 `host::folder`）。
@@ -415,6 +526,58 @@ mod tests {
         assert!(
             document.last_content_change.lock_or_recover().is_some(),
             "撤销渲染许可必须记下观察时刻，否则会被误判成宿主冲突"
+        );
+    }
+
+    /// **T7/T8：源暂时不可读不得删掉已发布的编辑侧 PCM。**
+    ///
+    /// 【为什么这是"后台切回前台之后 Clip 一直等音频"的回归】旧实现无论什么原因都先
+    /// 把 PCM 删掉、再"若可读则重读"。宿主收回一次样本访问（后台、undo 历史、宿主
+    /// 自己整理缓存）就等于永久丢掉音频，而恢复只依赖"宿主记得再发一次 enable" ——
+    /// 那条回调丢了就再也不会来。
+    ///
+    /// 钉住三件事：① 收回时**渲染权威表**撤掉（不能继续播旧采样）、**编辑侧副本**保留
+    /// （波形不消失）；② 状态记为 `Revoked`（界面据此说"暂时收回"而不是"还在分配"）；
+    /// ③ 重新授权后状态回到 `Published`。
+    #[test]
+    fn a_revoked_source_keeps_its_editor_copy_and_reports_revoked() {
+        use crate::render::document::SourceState;
+        let document = Arc::new(DocumentSession::new(21));
+        let id = "ara://source".to_string();
+        let pcm = Arc::new(crate::render::source::SourcePcm {
+            sample_rate: 44100,
+            planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
+            version: 0,
+            _reservation: None,
+        });
+        document.publish_source_pcm(id.clone(), pcm);
+        document
+            .source_states
+            .lock_or_recover()
+            .insert(id.clone(), SourceState::Published);
+        // 宿主收回访问：渲染权威表撤掉，编辑侧副本保留。
+        document.sources.lock_or_recover().remove(&id);
+        document
+            .source_states
+            .lock_or_recover()
+            .insert(id.clone(), SourceState::Revoked);
+        assert!(
+            document.edit_sources.lock_or_recover().contains_key(&id),
+            "收回样本访问不得让界面丢掉已经物化的副本（那正是'整条轨突然空了'）"
+        );
+        assert!(
+            !document.sources.lock_or_recover().contains_key(&id),
+            "渲染权威表必须撤掉：宿主已经收回访问，不能继续播旧采样"
+        );
+        assert_eq!(
+            document.source_states.lock_or_recover().get(&id),
+            Some(&SourceState::Revoked),
+            "状态必须如实记为 Revoked，界面才能说'暂时收回'而不是'还在分配'"
+        );
+        document.close();
+        assert!(
+            document.source_states.lock_or_recover().is_empty(),
+            "文档关闭必须清空源状态表"
         );
     }
 
@@ -1594,6 +1757,7 @@ impl DocumentSession {
         self.authorized_sources.lock_or_recover().clear();
         self.split_media_from.lock_or_recover().clear();
         self.source_failures.lock_or_recover().clear();
+        self.source_states.lock_or_recover().clear();
         self.region_rejections.lock_or_recover().clear();
         self.pending_since.lock_or_recover().clear();
         self.skipped_regions.lock_or_recover().clear();
@@ -1662,6 +1826,17 @@ impl DocumentSession {
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
     pub fn prepare_renderers(&self) {
         let _transaction = self.transaction.lock_or_recover();
+        // 【T2：`ready` 的语义收窄为"模型已收口"，不再假装"输入可用"】
+        //
+        // 它此前同时承担两件事："我们跑过一次 settle"与"宿主交付了可用输入"。
+        // 后者根本无从判断（宿主可以授权 0 个源而一切"成功"），于是重开工程后
+        // 界面一片"等待宿主音频"、而日志里没有任何异常。
+        //
+        // 【为什么**不**在这里按 `input_verdict` 置假】那样会把"宿主还没交音频"
+        // 变成"渲染许可失效"，让 `capture_render_input` 在每一次正常的加载窗口里
+        // 都失败一次 —— 而失败的下游是"快照停在上一版"，比静音更难排查。
+        // 判据的真正消费者是**呈现**：`ensure_loaded` 据此区分"等音频"与"真冲突"，
+        // `decorate_host_audio` 据此给出可行动的分类（见 `input_verdict` 的读者）。
         self.ready.store(true, Ordering::Release);
         let owners = self
             .renderers
@@ -1907,6 +2082,50 @@ impl DocumentSession {
             return std::time::Duration::from_secs(86_400);
         }
         std::time::Duration::from_millis(Self::monotonic_ms().saturating_sub(since))
+    }
+
+    /// 发布一份由模型侧算出的输入可用性读数（见 [`InputReadiness`]）。
+    pub(crate) fn note_readiness(&self, readiness: InputReadiness) {
+        *self.readiness.lock_or_recover() = Some(readiness);
+    }
+
+    /// 当前读数（`None` = 还没算过）。
+    pub(crate) fn readiness(&self) -> Option<InputReadiness> {
+        *self.readiness.lock_or_recover()
+    }
+
+    /// 当前判据；`None` 表示"未知"，调用方按旧行为处理。
+    pub(crate) fn input_verdict(&self) -> Option<InputVerdict> {
+        self.readiness().map(|readiness| readiness.verdict)
+    }
+
+    /// **T6：把"卡住了"变成一份自我描述的读数。**
+    ///
+    /// 【为什么必须存在】这四类症状反复复发的真正原因不是某个 bug，而是**失败不可
+    /// 归因**：十几条路径都能静默早退，而它们留下的现场几乎同形。这一行把每一条早退
+    /// 都变成一个具名的数，下一轮不必再从位掩码与调用顺序反推。
+    ///
+    /// 只在 `verdict != Ready` 时打印，并由调用方限流。
+    pub(crate) fn stuck_report(&self) -> String {
+        let readiness = self.readiness();
+        let scope_regions = self.sequence_regions.lock_or_recover().len();
+        let assignments = self.renderer_owners().len();
+        let ui_tracks = self.ui_tracks.lock_or_recover().len();
+        let region_items = self.region_items.lock_or_recover().len();
+        let editing = self.editing_elapsed().map(|elapsed| elapsed.as_millis());
+        format!(
+            "doc={} {} ready={} editing={:?} dirty={:?} sequences={} renderers={} \
+             ui_tracks={} region_items={}",
+            self.id,
+            readiness.map_or_else(|| "verdict=unknown".to_owned(), |r| r.summary()),
+            self.ready.load(Ordering::Acquire),
+            editing,
+            self.model_dirty_elapsed().map(|elapsed| elapsed.as_millis()),
+            scope_regions,
+            assignments,
+            ui_tracks,
+            region_items,
+        )
     }
 
     /// 测试专用：把两个截止期的起点回拨到"早已超期"。

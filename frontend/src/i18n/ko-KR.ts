@@ -2167,6 +2167,8 @@ export const koKR = {
     ara_clip_waiting_for_host_audio: "호스트의 오디오를 기다리는 중",
     ara_clip_host_source_read_failed:
         "호스트가 이 항목의 샘플 접근을 허용했지만 읽기에 실패했습니다. 호스트가 오디오를 제공할 때까지 이 클립은 렌더링할 수 없습니다",
+    ara_clip_host_source_revoked:
+        "호스트가 이 오디오에 대한 접근을 일시적으로 회수했습니다. 플러그인이 자동으로 다시 시도합니다. 계속되면 호스트에서 클립을 다시 활성화하세요.",
     ara_clip_host_take_switched:
         "호스트가 이 항목의 현재 테이크를 바꿨지만 플러그인이 아직 그 오디오를 받지 못했습니다. 호스트에서 실행 취소하거나 한 번 더 편집해 다시 할당되게 하세요",
 

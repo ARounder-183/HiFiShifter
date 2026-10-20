@@ -374,6 +374,17 @@ pub(crate) struct EditorSession {
     /// （`transfer::commands`），而加载时间线要做文件 I/O —— 不能在那条 UI 线程上做。
     /// 于是那里只置一个标志，由 actor 线程在下一轮自己加载。
     reload_requested: AtomicBool,
+    /// 首次加载失败后的下一次重试时刻（见 `refresh_host` 的慢速重试）。
+    ///
+    /// 【为什么需要它】`refresh_host` 此前在 `!initialized` 时**直接返回**。而
+    /// `initialized` 只在 `ensure_loaded` **成功**的末尾置真 —— 于是"第一次加载失败"
+    /// 就变成"此后这条路径永远什么都不做"。窗口里只剩 UI 的 `get_timeline_state`
+    /// 还在重试；窗口一关（REAPER 会销毁 view），就再也没有驱动者，工程永久停在
+    /// 一份读不出来的状态上。
+    ///
+    /// 【为什么是 1 s】`ensure_loaded` 会做实打实的 materialize（写 WAV）；没有模型的
+    /// 会话里 1 Hz 是安全上界，也远快于用户感知。
+    initial_retry_at: Mutex<Option<Instant>>,
 }
 
 impl Drop for EditorSession {
@@ -589,6 +600,7 @@ impl EditorSession {
             transport_probe_next: Mutex::new(Instant::now()),
             host_selection: Mutex::new(None),
             reload_requested: AtomicBool::new(false),
+            initial_retry_at: Mutex::new(None),
         });
         let weak = Arc::downgrade(&session);
         let worker = std::thread::Builder::new()
@@ -1546,8 +1558,25 @@ impl EditorSession {
                 //
                 // 没有观察记录却拿到 `ready == false` 才是真冲突：那说明宿主声称
                 // 输入不可用，而我们没有任何可归因的变化 —— 报出来，不要静默。
+                // 【T2：先问"输入到底卡在哪一步"，再决定要不要报冲突】
+                // `ready == false` 有三种完全不同的成因，此前共用一条 Conflict：
+                //   * 宿主暂时收回了样本访问 / 还没读出 PCM（`AwaitingSamples`）——
+                //     **不是冲突**，等一个 tick 就会好，报错只会让窗口停在旧读数上；
+                //   * 宿主还没交付任何音频源（`AwaitingRegions`）—— 同上；
+                //   * 授权在却读不出来（`Degraded`）—— 真故障，但它是**可行动**的，
+                //     该由 `host_audio` 的分类说清楚，而不是一句"host changed"。
+                // 只有"既没有读数、也没有观察记录"才保留原来的 Conflict 语义。
+                let verdict = document.input_verdict();
+                let known_cause = matches!(
+                    verdict,
+                    Some(
+                        crate::render::document::InputVerdict::AwaitingSamples
+                            | crate::render::document::InputVerdict::AwaitingRegions
+                            | crate::render::document::InputVerdict::Degraded
+                    )
+                );
                 let observed_change = document.last_content_change.lock_or_recover().is_some();
-                if !observed_change {
+                if !observed_change && !known_cause {
                     return Err(
                         "Conflict: host changed; local curves preserved, host is not ready".into(),
                     );
@@ -1926,8 +1955,40 @@ impl EditorSession {
             )
         };
         if !initialized {
+            // 【T4：失败一次不得变成永久失败】`initialized` 只在 `ensure_loaded` **成功**
+            // 的末尾置真。此前这里直接返回 ⇒ 冷启动第一次加载失败之后，这条路径再也
+            // 什么都不做，只剩 UI 命令还在重试；窗口一关就彻底没有驱动者。
+            //
+            // 慢速重试（1 s）把"失败一次"降级成"暂时失败"：成功即恢复正常节奏，
+            // 成功路径的行为一个字都没变。
+            let due = {
+                let mut next = self.initial_retry_at.lock_or_recover();
+                match *next {
+                    Some(at) if at > Instant::now() => false,
+                    _ => {
+                        *next = Some(Instant::now() + Duration::from_secs(1));
+                        true
+                    }
+                }
+            };
+            if due {
+                if let Err(error) = self.ensure_loaded(false) {
+                    if error.starts_with("Conflict") || error.starts_with("Unsupported") {
+                        let changed = {
+                            let mut current = self.error.lock_or_recover();
+                            let changed = current.as_deref() != Some(error.as_str());
+                            *current = Some(error);
+                            changed
+                        };
+                        if changed {
+                            self.emit_state();
+                        }
+                    }
+                }
+            }
             return;
         }
+        *self.initial_retry_at.lock_or_recover() = None;
         self.refresh_ui_geometry(&document);
         // 原生媒体写入的短Undo窗口先回执GUI结构；音频物化留给写入收尾后的后台加载。
         if !document.host_undo.pending.load(Ordering::Acquire)
@@ -2018,7 +2079,35 @@ impl EditorSession {
                 }
             }
         }
+        // 【T6】心跳末尾自检：卡住时必须留下一份可归因的读数。
+        self.report_stuck_if_needed();
     }
+    /// **T6：把"卡住了"写成一份可归因的读数。**
+    ///
+    /// 【为什么必须存在】这四类症状反复复发的真正原因不是某个 bug，而是**失败不可
+    /// 归因**：十几条路径都能静默早退，而它们留下的现场几乎同形。这一行把每一条早退
+    /// 都变成一个具名的数（verdict / region / 源 / 授权 / 发布 / 失败 / 会话 / 脏期），
+    /// 下一轮不必再从位掩码与调用顺序反推。
+    ///
+    /// 【为什么在这里、且限流】`refresh_host` 是 actor 的心跳，与窗口开没开无关；
+    /// 限流由 `emit_limited_key` 负责（同 key 只打一次），因此不会刷屏。
+    fn report_stuck_if_needed(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
+        let Some(verdict) = document.input_verdict() else {
+            return;
+        };
+        if verdict == crate::render::document::InputVerdict::Ready {
+            return;
+        }
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.stuck",
+            format_args!("[ara] stuck: {}", document.stuck_report()),
+        );
+    }
+
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
     pub(super) fn check_source(&self, path: &str) -> Result<(), String> {
         if self

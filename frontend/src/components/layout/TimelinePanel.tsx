@@ -3960,6 +3960,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             if (reason === "source_read_failed") {
                                 return t("ara_clip_host_source_read_failed");
                             }
+                            if (reason === "source_revoked") {
+                                return t("ara_clip_host_source_revoked");
+                            }
                             return t("ara_clip_waiting_for_host_audio");
                         })();
                         break;

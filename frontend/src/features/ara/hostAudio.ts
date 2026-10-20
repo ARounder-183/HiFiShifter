@@ -193,6 +193,10 @@ export function hostMediaState(clip: {
  * - `awaiting_region` —— 等超时了仍没有 region；多半是宿主侧出了别的岔子。
  * - `source_read_failed` —— ARA 已授权样本访问，但读取失败（宿主样本侧故障）。
  *   与 `awaiting_region` 分开：这里不是"还没轮到它"，而是"拿不到就是拿不到"。
+ * - `source_revoked` —— 宿主**暂时**收回了样本访问（后台、undo 历史、宿主整理缓存）。
+ *   与 `awaiting_region` 分开的理由是处置**相反**：这一条要做的是"等一个 tick，
+ *   插件自己会重读"，后者要做的是"去宿主里做一次编辑让 observer 重跑"。
+ *   把它们压成一句，正是"后台切回来一直等音频"被误判成"还在分配 region"的原因。
  */
 export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
     "take_switched",
@@ -200,10 +204,16 @@ export const HOST_MEDIA_REASONS: ReadonlySet<string> = new Set([
     "folder_parent",
     "awaiting_region",
     "source_read_failed",
+    "source_revoked",
 ]);
 
 export type HostMediaReason =
-    "take_switched" | "unclaimed" | "folder_parent" | "awaiting_region" | "source_read_failed";
+    | "take_switched"
+    | "unclaimed"
+    | "folder_parent"
+    | "awaiting_region"
+    | "source_read_failed"
+    | "source_revoked";
 
 /**
  * 该片段 `unavailable` 的原因码；未知或缺失返回 `null`（调用方退回通用文案）。
