@@ -576,13 +576,14 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "pending");
     }
 
-    /// "等待 REAPER 完成音频分配"不能是吸收态：等超期后必须转成带**原因码**的
-    /// `unavailable`，否则用户对着一个永远转不完的占位，无从判断该做什么。
+    /// "宿主换了 active take"是**可证明**的事实：我们同时有"授权那一刻的 take GUID"
+    /// 与"宿主现在报的 take GUID"，两者不同就立刻能说，不必等超时。
     ///
-    /// 典型触发是 REAPER 的"倒放 Item 为新 Take"：宿主换了 active take，而 ARA 不再
-    /// 重发模型 ⇒ `authorized_takes` 永久陈旧 ⇒ 没有 take 拿到 `source_path`。
+    /// 【为什么这条取代了"等超期再报 `awaiting_region`"】超时是把"没观察到"说成"不会
+    /// 来了"，而 `take_switched` 恰恰是唯一不需要等的那一类：它的处置明确（撤销，
+    /// 或再编辑一次让 observer 重跑）。
     #[test]
-    fn a_stale_pending_item_becomes_an_actionable_unavailable() {
+    fn a_switched_take_is_reported_immediately_and_stays_idempotent() {
         let fixture = super::super::MockHost::new();
         fixture.enable_takes(0);
         fixture.enable_media();
@@ -608,25 +609,12 @@ mod tests {
         let mut payload = serde_json::json!({"clips": [
             {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
         ]});
-        // 第一轮：刚进入"在途"，不报原因（宿主可能马上就好）。
-        document.decorate_host_media_locked(&mut payload, "ui-");
-        assert_eq!(payload["clips"][0]["host_media"], "pending");
-        assert!(payload["clips"][0].get("host_media_reason").is_none());
-
-        // 把"开始等待的时刻"倒推到阈值之前，模拟"等了很久仍无源"。
-        {
-            let mut since = document.pending_since.lock_or_recover();
-            since.insert(
-                item_id.clone(),
-                std::time::Instant::now() - std::time::Duration::from_secs(10),
-            );
-        }
+        // 第一轮就该说出来：判据是两条 GUID 不相等，与"等了多久"无关。
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "unavailable");
         assert_eq!(payload["clips"][0]["host_media_reason"], "take_switched");
 
-        // 幂等：再次呈现仍是 `unavailable` + 同一原因，不能在 pending/unavailable
-        // 之间来回跳（起点被保留，不会重新 `or_insert(now)`）。
+        // 幂等：再次呈现仍是 `unavailable` + 同一原因。
         document.decorate_host_media_locked(&mut payload, "ui-");
         assert_eq!(payload["clips"][0]["host_media"], "unavailable");
         assert_eq!(payload["clips"][0]["host_media_reason"], "take_switched");
@@ -747,7 +735,7 @@ mod tests {
         let mut payload = serde_json::json!({"clips": [
             {"id": format!("ui-ara-item-{item_id}"), "source_path": null, "reversed": false}
         ]});
-        // 已被认领、也没有"授权指向另一个 take" ⇒ 超期后剩下的成因只有"等 ARA 分配"。
+        // 已被认领、也没有"授权指向另一个 take" ⇒ 唯一的诚实结论是"还在等"。
         document
             .region_items
             .lock_or_recover()
@@ -756,6 +744,8 @@ mod tests {
         assert!(payload["clips"][0]["reversed_known"].is_null());
         assert_eq!(payload["clips"][0]["host_media"], "pending");
 
+        // 【B4：等多久都不改结论】旧实现在这里转成 `unavailable:awaiting_region` ——
+        // 一句我们无法证明的断言，而它在界面上就是"等待宿主提供音频"。
         {
             let mut since = document.pending_since.lock_or_recover();
             since.insert(
@@ -764,8 +754,9 @@ mod tests {
             );
         }
         document.decorate_host_media_locked(&mut payload, "ui-");
-        assert_eq!(payload["clips"][0]["host_media"], "unavailable");
-        assert_eq!(payload["clips"][0]["host_media_reason"], "awaiting_region");
+        assert_eq!(payload["clips"][0]["host_media"], "pending");
+        assert!(payload["clips"][0].get("host_media_reason").is_none());
+        assert_eq!(payload["clips"][0]["wait_seconds"].as_u64(), Some(10));
     }
 
     /// 多 take 投影进显示 Clip：全部 take 到位、active 一个、**都不带 source_path**。

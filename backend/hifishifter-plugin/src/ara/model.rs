@@ -1994,10 +1994,27 @@ impl ModelHandle {
             // **编辑侧的物化副本保留** —— 那是界面波形的来源，丢了就等于"整条轨
             // 突然空了"。这一对区分正是"暂时不可读"与"从来没有过"的落点。
             self.session.sources.lock_or_recover().remove(&id);
-            self.session
-                .source_states
-                .lock_or_recover()
-                .insert(id, crate::render::document::SourceState::Revoked);
+            // 【B5：从未授权 ≠ 被收回】
+            //
+            // 旧实现在这里**无条件**写 `Revoked`，于是"宿主还没给过访问权"与"宿主
+            // 刚刚收回了访问权"变成同一件事。而 `decorate_host_media_locked` 把
+            // `Revoked` 报成 `unavailable:source_revoked` —— 一句**终态**断言。
+            // 重开工程时宿主通常先建源、后授权：那一小段时间里**每一个** clip 都会被
+            // 写成"源被收回"，而正确的说法是"还没有访问权"。
+            //
+            // 判据取"我们手里有没有这份 PCM"：有 ⇒ 确实是被收回（保留 `Revoked`，
+            // 界面说"暂时收回"）；没有 ⇒ 什么都不写（缺席即"从未授权"）。
+            let had_pcm = {
+                // 【锁序】`edit_sources` 先于 `source_states`（与 `publish_readiness` 同向）。
+                self.session.edit_sources.lock_or_recover().contains_key(&id)
+            };
+            let mut states = self.session.source_states.lock_or_recover();
+            if had_pcm {
+                states.insert(id, crate::render::document::SourceState::Revoked);
+            } else {
+                states.remove(&id);
+            }
+            drop(states);
             self.publish_readiness();
             if !self.editing {
                 self.session.prepare_renderers();

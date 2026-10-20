@@ -5,6 +5,7 @@ pub(crate) mod connection;
 pub(crate) mod errors;
 mod events;
 mod formant;
+pub(crate) mod media_identity;
 mod notebook;
 pub(crate) mod parameter_atlas;
 mod plugin_diagnostics;

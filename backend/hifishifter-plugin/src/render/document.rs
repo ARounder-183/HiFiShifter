@@ -254,22 +254,14 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 每个尚未拿到音频的 item 是**从什么时候**开始等的（item GUID → 首次进入
     /// "在途"的时刻）。
     ///
-    /// 【为什么必须记时刻】"等待 REAPER 完成音频分配"此前是**吸收态**：只要一个 item
-    /// 没有 `source_path`、又不是 folder 父轨、方向位也读不出来，它就永远显示"正在
-    /// 等待"，无论等多久、用户做什么都出不来（典型触发：REAPER 的"倒放 Item 为新
-    /// Take"换了 active take，而 ARA 不再重发模型 ⇒ `authorized_takes` 永久陈旧）。
-    /// 记下时刻就能把"在途"与"等不到了"分开：超过阈值仍无源 ⇒ 转 `unavailable` 并给出
-    /// 可执行的原因，而不是让用户对着一个永远转不完的占位。
-    /// 本地补丁（T14）：**曾经**有过音频的 item（item GUID 集合）。
+    /// 【为什么曾经需要它】"等待宿主完成音频分配"此前是**吸收态**：一个 item 没有
+    /// `source_path`、又不是 folder 父轨，就永远显示"正在等待"，用户做什么都出不来。
+    /// 记下时刻是为了"超过 2 s 就转 `unavailable` 并给出原因"。
     ///
-    /// 【为什么需要它】"没有 source_path"有两种成因，界面却只有一句"正在等待宿主编配"：
-    ///   * 从未有过源（宿主还在分配 region）—— 该显示"在途"，并可以等 2 秒；
-    ///   * 有过源、刚刚又没了（宿主暂时收回了样本访问）—— 那是**一瞬间**的事，
-     
-    ///     插件自己会在下一个 tick 重读。把它也说成"正在分配"会把用户引向错误的方向。
-    /// 【为什么只增不减】集合的语义是"这个 item 至少有过一次源"；那是一个历史事实，
-    /// 不随当前状态变化。按 item GUID 回收（同 `pending_since` 的 TTL 口径）。
-    pub ever_had_source: Mutex<std::collections::HashSet<String>>,
+    /// 【为什么它现在**不**决定状态】那个终态把"我们这一轮没观察到"说成了"宿主不会
+    /// 交付了"，而后者是一句我们无法证明的断言 —— 只要展示侧的身份链断一次，所有片段
+    /// 都会被盖上同一句话（用户看到的正是"无论什么情况，所有 Clip 都在等"）。
+    /// 现在它只回答"等了多久"（`wait_seconds`），状态恒为 `pending`。
     pub pending_since: Mutex<HashMap<String, std::time::Instant>>,
     /// 最近一次映射里被**跳过**的 playback region（下标 + 语言无关原因码）。
     ///
@@ -1248,7 +1240,6 @@ impl DocumentSession {
         // 界面按无源占位渲染（不是消失），原因记进 `source_failures` 供前端显示
         // "源未授权"。这样其余的 clip、曲线、几何全部照常。
         {
-            let mut failures = self.source_failures.lock_or_recover();
             for clip in &mut timeline.clips {
                 for take in &mut clip.takes {
                     let Some(id) = take.source_path.as_deref() else {
@@ -1257,11 +1248,15 @@ impl DocumentSession {
                     if available_ids.contains(id) {
                         continue;
                     }
-                    // 只在没有更具体的原因时记通用码：`refresh_source_pcm` 已经把
-                    // "授权了但读不出来"的真因写在这里，别覆盖它。
-                    failures
-                        .entry(id.to_owned())
-                        .or_insert_with(|| crate::editor::errors::HOST_PCM_UNAVAILABLE.to_owned());
+                    // 【B2：这里**不再**写 `source_failures`】
+                    //
+                    // 旧实现在这里给每个"这一轮不在 `edit_sources` 里"的源记一条
+                    // `HOST_PCM_UNAVAILABLE`，而 `decorate_host_media_locked` 把"有失败记录"
+                    // 判成 `unavailable:source_read_failed` —— 一个**终态**。于是"这一轮还没读到"
+                    // 被永久写成了"读不出来"，而它本来下一个 tick 就会自愈（插件侧会重读）。
+                    //
+                    // 真正读不出来的真因只有一个写者：`refresh_source_pcm` 的 `Err` 分支。
+                    // 让那一条独占这张表，"等"与"坏"才分得开。
                     take.source_path = None;
                     take.source_path_relative = None;
                 }

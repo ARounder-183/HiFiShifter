@@ -142,6 +142,12 @@ fn sync_host_takes(
     // 右半段没有自己的 region，所以 `authorized_take` 是 `None`；但它的源与父段是
     // 同一个文件、父段已授权 ⇒ 可以借用。这是**显示**的补位，不是新的授权。
     inherited_media: Option<&hifishifter_kernel::state::ClipTake>,
+    // 本实例**手里有 PCM** 的那份身份（活着的 region 指向它，且它在 `edit_sources` 里）。
+    //
+    // 【为什么这一环比"保留上一轮"更强】它每一轮都能**重新求值**：clip 被整份重建
+    // （`ara-region-*` 升级成 `ara-item-*`）时"上一轮"已经不存在了，而 region → source →
+    // PCM 这条链仍然在。这正是"重开工程后全部 Clip 都在等音频"的那条断链。
+    pcm_media: Option<&crate::editor::media_identity::PcmFacts>,
 ) {
     let expected: Vec<String> = item
         .takes
@@ -225,70 +231,73 @@ fn sync_host_takes(
     // 把媒体身份搬到该搬的那个 take 上。只搬**媒体身份**字段：源窗口 / 倍率 / 名字 /
     // 声道模式都是宿主几何，由上面的清单提供。
     //
-    // 【搬到哪一个】
-    // - 自己的 region 已认领（`granted`）→ 挂到 GUID 与授权记录相等的那一个 take；
-    // - 分割出来的右半段（`inherited_media`）→ 挂到自己的 active take —— 它的源与父段
-    //   是同一个文件，所以父段的媒体身份对它是成立的；
-    // - 都不是 → 一个都不挂（宁可显示占位，也不把别的 take 的采样挂上来）。
-    let media: Option<(usize, hifishifter_kernel::state::ClipTake)> = match granted {
-        Some(index) => {
-            // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
-            // 无 take 的扁平 clip 退回投影本身。
-            let owned = if clip.takes.is_empty() {
-                hifishifter_kernel::state::ClipTake::from_clip(clip)
-            } else {
-                clip.active_take().clone()
-            };
-            Some((index, owned))
+    // 【搬到哪一个】判据收敛在 `media_identity::choose_link`（单一入口，可单测）：
+    // - 宿主这一次的观察与 item 对得上（`granted`）→ 挂到 GUID 相等的那一个 take；
+    // - 分割出来的右半段（`inherited_media`）→ 挂到自己的 active take；
+    // - **本实例手里有 PCM**（`pcm_media`）→ 挂到 active take；
+    // - 前三环都缺席 → 保留上一轮已有的身份；
+    // - 宿主换了 take → 一个都不挂（宁可占位，也不挂错的采样）。
+    let host_switched_take = granted.is_none() && (authorized_take.is_some() || authorized_source.is_some());
+    // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
+    // 无 take 的扁平 clip 退回投影本身。
+    let owned_media = || {
+        if clip.takes.is_empty() {
+            hifishifter_kernel::state::ClipTake::from_clip(clip)
+        } else {
+            clip.active_take().clone()
         }
-        None => inherited_media
-            .and_then(|media| {
-                item.takes
-                    .iter()
-                    .position(|take| take.active)
-                    .map(|index| (index, media.clone()))
-            })
-            // 【T22：**没有记录**不等于**没有授权**】
-            //
-            // `authorized_takes` / `authorized_sources` 是"某一刻观察到的授权事实"，
-            // 而它只有一个写者（`remap_and_log`），且要求 `region_items` 与 `ui_tracks`
-            // 在同一刻都就绪。重开工程时这个条件常常不成立（几何缓存被 `clear_renderers`
-            // 的 revision 推进作废、`assignments` 尚未重发、宿主 item 几何还没稳定），
-            // 于是那张表被写成**空**的。
-            //
-            // 此前这里把"查不到记录"直接当成"未授权"：重建出来的 take 一个都不带
-            // `source_path`，`normalize_takes()` 再把扁平投影一起清掉 ⇒ **一次清单轮次
-            // 剥掉全部 clip 的源**。用户看到的就是"重开工程后所有 Clip 都在等宿主音频"，
-            // 而音频其实一直在 `edit_sources` 里。
-            //
-            // 正确的解释是**未知**：既然这一刻观察不到，就保留这条 clip 已经有的媒体
-            // 身份（它本来就是上一次观察的结果）。真正要拦的是"宿主换了 active take" ——
-            // 那个形状 `authorized_take` 是 `Some` 却匹配不上，走的是上面 `granted`
-            // 的另一条分支，**不受这里影响**。
+    };
+    let active_index = || item.takes.iter().position(|take| take.active);
+    let inherited = inherited_media.and_then(|media| active_index().map(|index| (index, media.clone())));
+    let pcm = pcm_media.and_then(|facts| {
+        active_index().map(|index| {
+            let mut media = owned_media();
+            facts.apply(&mut media);
+            (index, media)
+        })
+    });
+    // 【T22：**没有记录**不等于**没有授权**】
+    //
+    // `authorized_takes` / `authorized_sources` 是"某一刻观察到的授权事实"，
+    // 而它只有一个写者（`remap_and_log`），且要求 `region_items` 与 `ui_tracks`
+    // 在同一刻都就绪。重开工程时这个条件常常不成立（几何缓存被 `clear_renderers`
+    // 的 revision 推进作废、`assignments` 尚未重发、宿主 item 几何还没稳定），
+    // 于是那张表被写成**空**的。
+    //
+    // 此前这里把"查不到记录"直接当成"未授权"：重建出来的 take 一个都不带
+    // `source_path`，`normalize_takes()` 再把扁平投影一起清掉 ⇒ **一次清单轮次
+    // 剥掉全部 clip 的源**。用户看到的就是"重开工程后所有 Clip 都在等宿主音频"。
+    let last_known = || {
+        // 只有"已经有源"时才保留；从未有过源的 clip 仍然显示占位（宁可不挂）。
+        //
+        // 【为什么两处都要看】扁平投影（`clip.source_path`）是 `normalize_takes()`
+        // 的产物，而清单刷新可能跑在它之前；take 列表里那一份才是真正的存储。
+        let owned = clip
+            .takes
+            .iter()
+            .find(|take| take.source_path.is_some())
+            .cloned()
             .or_else(|| {
-                // 【判据必须是"**完全没有记录**"，而不是"记录没匹配上"】
-                // 后者是宿主真的换了 active take（授权指向另一个 take），必须继续拦；
-                // 只有前者才属于"这一刻观察不到"。两者的区别就是这张表里有没有这个 key。
-                if authorized_take.is_some() || authorized_source.is_some() {
-                    return None;
-                }
-                // 只有"已经有源"时才保留；从未有过源的 clip 仍然显示占位（宁可不挂）。
-                //
-                // 【为什么两处都要看】扁平投影（`clip.source_path`）是 `normalize_takes()`
-                // 的产物，而清单刷新可能跑在它之前；take 列表里那一份才是真正的存储。
-                let owned = clip
-                    .takes
-                    .iter()
-                    .find(|take| take.source_path.is_some())
-                    .cloned()
-                    .or_else(|| {
-                        clip.source_path
-                            .as_ref()
-                            .map(|_| hifishifter_kernel::state::ClipTake::from_clip(clip))
-                    })?;
-                let index = item.takes.iter().position(|take| take.active)?;
-                Some((index, owned))
-            }),
+                clip.source_path
+                    .as_ref()
+                    .map(|_| hifishifter_kernel::state::ClipTake::from_clip(clip))
+            })?;
+        Some((active_index()?, owned))
+    };
+    // 宿主换了 take ⇒ 一个都不挂，连"记忆"也不许用（见 `choose_link` 的说明）。
+    let remembered = if host_switched_take { None } else { last_known() };
+    let media = match crate::editor::media_identity::choose_link(
+        host_switched_take,
+        granted.is_some(),
+        inherited.is_some(),
+        pcm.is_some(),
+        remembered.is_some(),
+    ) {
+        crate::editor::media_identity::Link::Authorized => granted.map(|index| (index, owned_media())),
+        crate::editor::media_identity::Link::Inherited => inherited,
+        crate::editor::media_identity::Link::Pcm => pcm,
+        crate::editor::media_identity::Link::LastKnown => remembered,
+        crate::editor::media_identity::Link::None => None,
     };
     if let Some((index, media)) = media {
         apply_take_media(&mut rebuilt[index], &media);
@@ -470,6 +479,50 @@ impl DocumentSession {
                 })
                 .collect()
         };
+        // item GUID → 本实例**手里那份 PCM** 的身份（`Pcm` 环，见 `media_identity`）。
+        //
+        // 【为什么这一环是"重开工程后全部 Clip 都在等音频"的断点】上面两张表都来自
+        // **宿主的一次观察**（`authorized_takes` / `authorized_sources`），而它们的唯一
+        // 写者要求 `region_items` 与 `ui_tracks` 在同一刻就绪 —— 重开工程时这个条件
+        // 常常不成立，于是两张表是空的，重建出来的 take 一个都不带 `source_path`。
+        // 而音频其实一直在 `edit_sources` 里，并且"活着的 region 指向哪个源"是**文档级**
+        // 事实（`regions` 由 `addPlaybackRegion` 写入，与宿主几何无关）。
+        //
+        // 【锁序】`region_items` → `regions` → `edit_sources`，与 `publish_readiness` 同向；
+        // 前两张表先取完、立刻释放，最后才取 `edit_sources`（那里也是 `publish_source_pcm`
+        // 的位置）。
+        let pcm_by_item: std::collections::HashMap<
+            String,
+            crate::editor::media_identity::PcmFacts,
+        > = {
+            let pairs: Vec<(String, String)> = {
+                let items = self.region_items.lock_or_recover();
+                let regions = self.regions.lock_or_recover();
+                items
+                    .iter()
+                    .filter_map(|(key, item)| {
+                        let region = regions.get(key)?;
+                        Some((item.clone(), region.audio_source_persistent_id.clone()))
+                    })
+                    .collect()
+            };
+            let sources = self.edit_sources.lock_or_recover();
+            pairs
+                .into_iter()
+                .filter_map(|(item, source)| {
+                    let pcm = sources.get(&source)?;
+                    Some((
+                        item,
+                        crate::editor::media_identity::PcmFacts {
+                            source_id: source,
+                            sample_rate: pcm.sample_rate,
+                            channels: pcm.planes.len().max(1) as u16,
+                            frames: pcm.planes.first().map(Vec::len).unwrap_or(0),
+                        },
+                    ))
+                })
+                .collect()
+        };
         let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
             // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
@@ -642,6 +695,7 @@ impl DocumentSession {
                     authorized_takes.get(&g.item_id).map(String::as_str),
                     authorized_sources.get(&g.item_id).map(String::as_str),
                     inherited_media.get(&g.item_id),
+                    pcm_by_item.get(&g.item_id),
                 );
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
@@ -1008,8 +1062,10 @@ impl DocumentSession {
         });
         let now = std::time::Instant::now();
         let mut pending_since = self.pending_since.lock_or_recover();
-        // 【锁序】`ever_had_source` 与 `pending_since` 同属 host facts 层，同向取锁。
-        let mut ever_had_source = self.ever_had_source.lock_or_recover();
+        // 【T-B4：`ever_had_source` 已删除】它存在的唯一理由是"曾经有过源的 item 不走进
+        // 超时终态"。既然终态本身被去掉了（见下面的等待分支），这张表就没有读者了 ——
+        // 而它的两个写点用了**不同的键空间**（第一趟写 item GUID、第二趟写 clip id），
+        // 保留它只会留下一个永远对不上的集合。
         let mut seen = std::collections::HashSet::new();
         // 这一趟载荷里出现过的 id（item GUID 或 clip id）。见 `retain` 处的说明。
         let mut present = std::collections::HashSet::new();
@@ -1028,10 +1084,6 @@ impl DocumentSession {
                 let has_source = clip["source_path"]
                     .as_str()
                     .is_some_and(|path| !path.is_empty());
-                // T14：记下"这个 item 至少有过一次源"——历史事实，只增不减。
-                if has_source {
-                    ever_had_source.insert(item_id.clone());
-                }
                 // `waiting` 表示"这条还在等 ARA 音频"：只有它继续计时。其余状态
                 // （拿到源、folder 父轨）都必须清掉起点，否则陈旧的起点会让下一次
                 // 掉回"在途"时立刻被判超期。
@@ -1059,51 +1111,33 @@ impl DocumentSession {
                     ("unavailable", Some("source_revoked"), false)
                 } else if folder_parent && !claimed.contains(&item_id) {
                     ("unavailable", Some("folder_parent"), false)
-                } else if ever_had_source.contains(&item_id) {
-                    // 【T14："刚刚没有"与"从来没有"是两件事】
-                    //
-                    // 这个 item 曾经有过源，那么它现在没有，只可能是宿主**暂时**收回了样本
-                    // 访问（后台、undo 历史、宿主整理缓存）。那一类由插件侧自己重读，不该显示成
-                    // "宿主正在分配"，更不该走进 2 秒计时 —— 计时会把
-                    // "等一个 tick 就会好"说成"等不到了"。
-                    //
-                    // 【waiting = true 是刻意的】起点必须留着：它一旦被清，下一轮又会重新计时。
-                    // 真正让这一态收敛的是 source_states 翻回 Published（插件侧重读成功），
-                    // 不是这里的计时。
-                    ("pending", None, true)
+                } else if authorized_by_item.get(&item_id).is_some_and(|authorized| {
+                    // 【为什么这一条**保留**终态】它是**可证明**的事实，不是计时器的产物：
+                    // 我们手里同时有"授权那一刻的 take GUID"与"宿主现在报的 take GUID"，
+                    // 两者不同就说明用户换过 take 而 ARA 还没重新认领。处置明确（撤销或
+                    // 再编辑一次让 observer 重跑），所以值得立刻说出来。
+                    item.takes
+                        .iter()
+                        .find(|take| take.active)
+                        .is_none_or(|take| &take.geometry.take_id != authorized)
+                }) {
+                    ("unavailable", Some("take_switched"), false)
                 } else {
-                    // 还没拿到音频：先按"在途"记时，超期再判原因。
+                    // 【B4：不再把"我们没观察到"升级成"宿主不会来了"】
+                    //
+                    // 旧实现在这里等 2 s，然后把这一条判成 `unavailable:unclaimed /
+                    // `awaiting_region` —— 而这两个原因码的**真实含义**只是"这一轮没看到"。
+                    // 它们不是宿主说的话，是我们自己的计时器到点了。代价是：只要展示侧的身份
+                    // 链断一次（见 `media_identity` 的四环），2 s 之后**每一个** clip 都会被
+                    // 盖上一个断言了错误原因的终态，而终态在界面上是"等待宿主提供音频"——
+                    // 用户看到的正是"无论什么情况，所有 Clip 都在等"。
+                    //
+                    // 现在：一直报 `pending`（"还在等"），并把 `wait_seconds` 作为读数发出去。
+                    // 等待没有上界这件事由**读数**承担（用户与诊断包都能看到等了多久），
+                    // 而不是由一句错误的断言承担。
                     let since = *pending_since.entry(item_id.clone()).or_insert(now);
-                    if now.duration_since(since) < PENDING_MEDIA_TIMEOUT {
-                        ("pending", None, true)
-                    } else {
-                        // 【为什么这里才给原因】未超期时原因往往是"马上就好了"
-                        // （宿主正在分配 region），报原因等于制造噪声。超期后原因才
-                        // 是用户真正需要的那条信息。
-                        let reason = if !claimed.contains(&item_id) {
-                            "unclaimed"
-                        } else if authorized_by_item.get(&item_id).is_some_and(|authorized| {
-                            item.takes
-                                .iter()
-                                .find(|take| take.active)
-                                .is_none_or(|take| &take.geometry.take_id != authorized)
-                        }) {
-                            // ARA 授权的是**另一个** take 的 PCM，当前 active take 与它
-                            // 不符 —— 典型来源是"倒放 Item 为新 Take"（新 take 换了文件，
-                            // 而 ARA 没有重新认领）。
-                            "take_switched"
-                        } else {
-                            "awaiting_region"
-                        };
-                        // 超期后**继续**保留起点：否则下一次进来会重新 `or_insert(now)`，
-                        // 状态在 `pending` / `unavailable` 之间来回跳。
-                        //
-                        // 【`waiting = true` 是刻意的】`waiting` 决定这一条要不要进 `seen`，
-                        // 而 `seen` 的语义是"**清掉**它的计时"（settled）。超期项不是 settled：
-                        // 它的起点必须留着，否则下一轮重新计时 ⇒ 又变回 `pending`。
-                        // 它真正需要的保护在下面 `retain` 的 `present` 条件里 —— 见那里的说明。
-                        ("unavailable", Some(reason), true)
-                    }
+                    clip["wait_seconds"] = serde_json::json!(now.duration_since(since).as_secs());
+                    ("pending", None, true)
                 };
                 clip["host_media"] = serde_json::json!(state);
                 if let Some(reason) = reason {
@@ -1166,9 +1200,6 @@ impl DocumentSession {
                         .as_str()
                         .is_some_and(|path| !path.is_empty());
                     if has_source {
-                        // T14：第二趟同样记"至少有过一次源"——没有原生扩展的宿主
-                        // （Cubase/Nuendo/Studio One）只走这一趟。
-                        ever_had_source.insert(id.clone());
                         clip["host_media"] = serde_json::json!("ready");
                         // 拿到音频 ⇒ settled：清掉计时，否则下次掉回"在途"会立刻超期。
                         pending_since.remove(&id);
@@ -1184,23 +1215,15 @@ impl DocumentSession {
                         pending_since.remove(&id);
                         continue;
                     }
-                    // T14：曾经有过源的 item 不进 2 秒计时（理由见上一趟的同名分支）。
-                    if ever_had_source.contains(&id) {
-                        clip["host_media"] = serde_json::json!("pending");
-                        present.insert(id.clone());
-                        continue;
-                    }
+                    // 【B4：与第一趟同一契约 —— 等待不升级成终态】
+                    // 没有原生扩展的宿主（Cubase / Nuendo / Studio One）只走这一趟，
+                    // 于是这里曾经是"这些宿主上所有 clip 都会在 2 s 后变成等待宿主音频"
+                    // 的唯一来源。
                     let since = *pending_since.entry(id.clone()).or_insert(now);
-                    if now.duration_since(since) < PENDING_MEDIA_TIMEOUT {
-                        clip["host_media"] = serde_json::json!("pending");
-                    } else {
-                        // 超期即终态；起点保留（见上一条 `waiting = false` 的理由），
-                        // 状态不再在 pending / unavailable 之间来回跳。
-                        clip["host_media"] = serde_json::json!("unavailable");
-                        clip["host_media_reason"] = serde_json::json!("awaiting_region");
-                    }
-                    // 仍在等（`pending` / 超期的 `unavailable`）⇒ 起点必须留着，所以只进
-                    // `present`（"还在载荷里"），不进 `seen`（"清计时"）。
+                    clip["host_media"] = serde_json::json!("pending");
+                    clip["wait_seconds"] = serde_json::json!(now.duration_since(since).as_secs());
+                    // 仍在等 ⇒ 起点必须留着，所以只进 `present`（"还在载荷里"），
+                    // 不进 `seen`（"清计时"）。
                     present.insert(id.clone());
                 }
             }
@@ -2257,30 +2280,25 @@ mod tests {
     use ara2_bridge::plugin::ExtensionRoles;
     use std::sync::Arc;
 
-    /// **T14: an item that once had a source never enters the 2 s wait timeout.**
+    /// **B4：等得再久也仍然是"在等"，不会升级成一句断言了原因的话。**
     ///
-    /// Why this is the misreading symptom 3 was built on: the timer started for any clip
-    /// without a source, so a source the host had temporarily withdrawn was reported as
-    /// "host is finishing assigning audio", and 2 s later as "never got it". Both send the
-    /// user to look at region assignment, while the real action was in the source layer.
+    /// 【为什么这条取代了 T14 的两个用例】T14 修的是"曾经有过源的不该走进超时"，
+    /// 而超时本身才是病根：它把"我们这一轮没观察到"说成"宿主不会交付了"。那句断言
+    /// 在界面上就是"等待宿主提供音频"，于是只要展示侧的身份链断一次，**每一个** clip
+    /// 都会被盖上同一句话 —— 用户报的"无论什么情况全部 Clip 都在等"正是它。
     ///
-    /// Exercised through the pass that runs for every host (no native extension needed):
-    /// a clip whose id derives from a region key.
+    /// 现在等待没有终态：状态恒为 `pending`，等待时长作为读数（`wait_seconds`）发出。
+    /// 走的是**任何宿主都会跑**的那一趟（不需要原生扩展）。
     #[test]
-    fn an_item_that_once_had_a_source_never_enters_the_wait_timeout() {
-        let document = DocumentSession::new(40_001);
+    fn a_clip_that_waits_forever_still_says_it_is_waiting() {
+        let document = DocumentSession::new(40_002);
         let mut payload = serde_json::json!({
-            "clips": [{"id": "ara-region-11", "track_id": "t",
+            "clips": [{"id": "ara-region-12", "track_id": "t",
                        "start_sec": 0.0, "length_sec": 1.0}],
         });
-        // This clip had a source; the host withdrew access (background, undo history).
-        document
-            .ever_had_source
-            .lock_or_recover()
-            .insert("ara-region-11".to_owned());
-        // A start time already far past the timeout, to prove the timer is never entered.
+        // 起点早在 60 s 之前：旧实现会在这一轮判成终态。
         document.pending_since.lock_or_recover().insert(
-            "ara-region-11".to_owned(),
+            "ara-region-12".to_owned(),
             std::time::Instant::now() - std::time::Duration::from_secs(60),
         );
         document.decorate_host_media_locked(&mut payload, "");
@@ -2288,31 +2306,16 @@ mod tests {
         assert_eq!(clip["host_media"], "pending");
         assert!(
             clip.get("host_media_reason").is_none(),
-            "an item that once had a source must not be reported as waiting for assignment"
+            "等待不得附带原因码：原因码在界面上是一句断言"
+        );
+        assert_eq!(
+            clip["wait_seconds"].as_u64(),
+            Some(60),
+            "等了多久必须作为读数发出，等待才有上界可言"
         );
     }
 
-    /// **T14: an item that never had a source still times out with a reason.**
-    ///
-    /// The other side of the contract: "never had" is the only case where the user should
-    /// be told the host has not delivered yet, and the 2 s bound keeps the application out
-    /// of a permanent in-progress state.
-    #[test]
-    fn an_item_that_never_had_a_source_still_times_out_with_a_reason() {
-        let document = DocumentSession::new(40_002);
-        let mut payload = serde_json::json!({
-            "clips": [{"id": "ara-region-12", "track_id": "t",
-                       "start_sec": 0.0, "length_sec": 1.0}],
-        });
-        document.pending_since.lock_or_recover().insert(
-            "ara-region-12".to_owned(),
-            std::time::Instant::now() - std::time::Duration::from_secs(60),
-        );
-        document.decorate_host_media_locked(&mut payload, "");
-        let clip = &payload["clips"][0];
-        assert_eq!(clip["host_media"], "unavailable");
-        assert_eq!(clip["host_media_reason"], "awaiting_region");
-    }
+
 
     fn fixture() -> (
         ModelHandle,
