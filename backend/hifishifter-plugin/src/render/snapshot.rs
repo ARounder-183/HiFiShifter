@@ -721,36 +721,57 @@ impl SnapshotPublisher {
                 snapshot.origin_sample.saturating_add(host_len),
             )
         });
-        let edge_fade = coverage_end.saturating_sub(coverage_start) > 2 * COVERAGE_EDGE_FADE_FRAMES;
-        let edge_weight = |position: i64| -> f32 {
-            const EDGE: i64 = COVERAGE_EDGE_FADE_FRAMES;
+        // 【T16：两条边用**不同的宽度**与**等功率**权重】
+        //
+        // 起点边是"宿主原声 → 处理结果"的切换点，两侧是**互不相干**的信号（干声 vs
+        // 神经声码器输出）。线性混合在中间点的能量只有 −3.9 dB —— 那不是一个淡化，
+        // 那是一次可听见的能量凹陷（用户描述为"咔"）。等功率（cos/sin）才是两个
+        // 不相关信号正确的叠加方式。
+        //
+        // 宽度也不同：起点边允许 20 ms（一条 take 只有一次），而结束边与内部边保持
+        // 64 帧 —— 把内部边也放宽等于用更大的模糊掩盖位置错误，是本文明确不做的事。
+        let span = coverage_end.saturating_sub(coverage_start).max(0);
+        let short = span <= 2 * COVERAGE_EDGE_FADE_FRAMES;
+        // 【为什么起点边还要按快照长度夹一次】极短快照（测试夹具、被裁到几十帧的
+        // 片段）若用固定的 20 ms 淡化，整段都会落在过渡带里 —— 那等于把内容整体
+        // 衰减。夹到半长保证"过渡带 + 稳定段"始终成立。
+        let start_edge = COVERAGE_START_FADE_FRAMES.min(span / 2).max(1);
+        let edge_gain = |position: i64| -> (f32, f32) {
+            const END: i64 = COVERAGE_EDGE_FADE_FRAMES;
+            let START: i64 = start_edge;
             if coverage_start == i64::MAX {
-                return 0.0;
+                return (1.0, 0.0);
             }
-            if !edge_fade {
+            if short {
                 // 快照短于两条淡化带：没有"中间稳定段"可保留，整段淡化等于把
                 // 内容整体衰减。短快照（测试夹具/极短片段）按原样硬切。
                 return if position >= coverage_start && position < coverage_end {
-                    1.0
+                    (0.0, 1.0)
                 } else {
-                    0.0
+                    (1.0, 0.0)
                 };
             }
-            if position < coverage_start - EDGE {
-                return 0.0;
+            // 【为什么淡化带**向内**而不是横跨边界】覆盖之外根本没有快照采样
+            // （`snapshot_at` 返回 `None`），所以边界之外只能是宿主原声。要让
+            // "快照 → 原声"不产生阶跃，淡化必须发生在**覆盖范围之内**：
+            // 在 `coverage_start` 处从 0 起、到 `coverage_start + START` 满；
+            // 在 `coverage_end` 处降到 0、从 `coverage_end - END` 开始降。
+            // 边界之外一律 (1, 0)（纯原声）—— 这正是"不宣称我们没录到的覆盖"。
+            if position < coverage_start || position >= coverage_end {
+                return (1.0, 0.0);
             }
-            if position < coverage_start + EDGE {
-                return ((position - (coverage_start - EDGE)) as f32 / (2.0 * EDGE as f32))
-                    .clamp(0.0, 1.0);
+            if position < coverage_start + START {
+                let t = ((position - coverage_start) as f32 / START as f32).clamp(0.0, 1.0);
+                // 等功率：out² + in² = 1。
+                let angle = t * std::f32::consts::FRAC_PI_2;
+                return (angle.cos(), angle.sin());
             }
-            if position < coverage_end - EDGE {
-                return 1.0;
+            if position >= coverage_end - END {
+                let t = ((coverage_end - position) as f32 / END as f32).clamp(0.0, 1.0);
+                let angle = t * std::f32::consts::FRAC_PI_2;
+                return (angle.cos(), angle.sin());
             }
-            if position < coverage_end + EDGE {
-                return ((coverage_end + EDGE - position) as f32 / (2.0 * EDGE as f32))
-                    .clamp(0.0, 1.0);
-            }
-            0.0
+            (0.0, 1.0)
         };
         let mix = |channel: usize, offset: usize| -> f32 {
             let global = sample.saturating_add(offset as i64);
@@ -758,15 +779,21 @@ impl SnapshotPublisher {
             if snapshot.is_none() {
                 return old;
             }
-            let t = edge_weight(global);
-            let current = snapshot_at(channel, offset)
-                .unwrap_or_else(|| input_at(channel, offset).unwrap_or(0.0));
-            if t <= 0.0 {
+            // 【为什么没有快照时必须**直接**返回输入，而不是"用输入当 current 再混合"】
+            // 等功率的两个增益之和不是 1（中点处是 √2）。若在这一帧没有快照采样，
+            // `current` 会回退成输入，于是 `old*(a) + old*(b)` = `old*(a+b)` —— 在
+            // 过渡带中点把宿主原声放大到 1.41 倍。线性混合没有这个陷阱（a+b≡1），
+            // 所以这是换成等功率之后**必须**同时改的一处。
+            let Some(current) = snapshot_at(channel, offset) else {
+                return old;
+            };
+            let (out_gain, in_gain) = edge_gain(global);
+            if in_gain <= 0.0 {
                 old
-            } else if t >= 1.0 {
+            } else if out_gain <= 0.0 {
                 current
             } else {
-                old * (1.0 - t) + current * t
+                old * out_gain + current * in_gain
             }
         };
         for channel in 0..channels {
@@ -797,9 +824,21 @@ impl SnapshotPublisher {
 /// 快照覆盖边界（快照首/尾）的交叉淡化长度（宿主帧）。
 ///
 /// 【为什么是 64】与 `extension.rs` 的 `OUTPUT_DECLICK_FRAMES` 同值（48 kHz 下
-/// ≈ 1.3 ms）：足以消除阶跃，又短到不会被听成一次淡入淡出。边界之外的帧完全
-/// 不做处理；只在覆盖起点/终点两侧的这条带里把"宿主输入"与"快照"线性混合。
+/// ≈ 1.3 ms）：足以消除阶跃，又短到不会被听成一次淡入淡出。
+///
+/// 只用于**结束边**（以及短快照的整段判定）。起点边用
+/// [`COVERAGE_START_FADE_FRAMES`]，理由见那里。
 const COVERAGE_EDGE_FADE_FRAMES: i64 = 64;
+
+/// 快照**起点**边的混合宽度（宿主帧）。48 kHz 下 20 ms。
+///
+/// 【为什么比结束边宽得多】起点边是"宿主原声 → 处理结果"的切换，两侧是**互不
+/// 相干**的信号。1.3 ms 的线性混合对两个不相关信号不是淡化，是一次能量凹陷
+/// （线性中点 −3.9 dB）—— 听感就是"咔"。
+///
+/// 【为什么结束边不一起放宽】结束边之外就是宿主原声，宿主自己通常有淡出；把内部
+/// 边界也放宽等于用更大的模糊掩盖位置错误（本方案明确不做）。
+const COVERAGE_START_FADE_FRAMES: i64 = 960;
 /// 一个实时读区的 guard：持有它期间，它登记的那份快照不会因回收而释放。
 struct ReadSection {
     snapshot: *const RetainedSnapshot,
@@ -1414,7 +1453,10 @@ mod tests {
                 _reservation: None,
             })
             .unwrap();
-        let frames = 192;
+        // 【为什么块长要 400】起点边现在是 20 ms（48 kHz 下 960 帧，按快照半长夹到
+        // 256），过渡带覆盖 [-192, 320)。块必须长到"过渡带结束之后还有稳定段"，
+        // 否则整块都在过渡里，测不到"带之后就是快照"。
+        let frames = 400;
         let mut left = vec![0.0_f32; frames];
         let mut right = vec![0.0_f32; frames];
         let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -1429,25 +1471,50 @@ mod tests {
         assert!(unsafe {
             publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
         });
+        // 覆盖范围之外（这里是 [0, 64)）没有快照采样 ⇒ 必须是纯宿主原声。
         assert!(
             (left[0] - 7.0).abs() < 1e-6,
-            "边界带之前必须还是宿主输入（实测 {}）",
+            "覆盖范围之外必须还是宿主输入（实测 {}）",
             left[0]
         );
+        // 【为什么不再是"单调不增"】等功率律下，两个幅度相差很大的信号相加会在
+        // 过渡带前段略微超过较大的那一个（这里约 7.02）—— 那是等功率的定义使然，
+        // 不是缺陷。真正要钉住的是"**没有阶跃**"：相邻样本的差必须远小于
+        // 7 → 0.2 那一步。
+        let max_step = left
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
         assert!(
-            left.windows(2).all(|pair| pair[0] >= pair[1]),
-            "边界带内必须单调过渡，不得先跳变再回来"
+            max_step < 0.2,
+            "边界必须平滑过渡，不得出现阶跃（实测最大相邻差 {max_step}，阶跃会是 6.8）"
         );
         assert!(
-            (left[frames - 1] - 0.2).abs() < 1e-3,
-            "边界带之后必须已经是快照（实测 {}）",
-            left[frames - 1]
+            (left[350] - 0.2).abs() < 1e-6,
+            "起点过渡带之后必须已经是纯快照（实测 {}）",
+            left[350]
         );
+        // 起点边宽 256，所以 `coverage_start + 128` 正好是过渡带的中点。
         assert!(
-            left[64] > 0.2 && left[64] < 7.0,
-            "边界正中间必须是混合值，而不是二选一（实测 {}）",
-            left[64]
+            left[192] > 0.2 && left[192] < 7.0,
+            "起点过渡带正中必须是混合值，而不是二选一（实测 {}）",
+            left[192]
         );
+        // 【T16：起点边是**等功率**混合】两侧是互不相干的信号（干声 vs 声码器输出），
+        // 线性混合在中间点只剩 −3.9 dB —— 那是一次可听见的能量凹陷。等功率要求
+        // `out² + in² == 1`：把实测的两侧增益还原出来验一遍。
+        {
+            // 起点边宽 256（夹到 512/2），position 192 落在 t = 0.5；
+            // 等功率下两侧增益都是 sin(π/4) = cos(π/4) ≈ 0.7071。
+            let gain = std::f32::consts::FRAC_1_SQRT_2;
+            let expected = 7.0 * gain + 0.2 * gain;
+            assert!(
+                (left[192] - expected).abs() < 0.05,
+                "起点边必须是等功率混合（期望 {expected}，实测 {}）；线性混合会给出 3.6，\
+                 那正是用户听到的能量凹陷",
+                left[192]
+            );
+        }
     }
 
     /// **带输出偏移的拷贝只覆盖请求的子区间。**

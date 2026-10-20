@@ -1705,24 +1705,24 @@ impl Capture {
         // 整张 take 的第一段在这里补前导静音。为什么必须在 `commit_pending`：
         // lookbehind 提交的这一刻就是首段被立起来的那一刻，而随后的 `write_block`
         // 看到的 `active` 已存在，`first_segment` 恒假（见 `take_pre_roll` 的说明）。
+        // 【T15：前导静音只**记录**，不再**前插**】
+        //
+        // 旧做法是在段首插入 N 帧零、并把 origin 前移 N（`plane.copy_within` + `fill`）。
+        // 它假设"这段没录到的窗口里，素材本来就是静音"—— 而那只在"用户从静音处起播"
+        // 时成立。从波形中间起播时，那 N 帧里是**有内容的音乐**，于是：
+        //
+        //   * 快照的覆盖范围被扩大到播放起点之前，覆盖范围内却是一段**纯零**；
+        //   * 而渲染侧的覆盖权重在范围内恒为 1.0（`snapshot.rs` 的 `edge_weight`），
+        //     于是那段零**按满幅输出**，把宿主原声整个盖掉；
+        //   * 紧接着是内容的第一帧 —— 一次无淡化的硬起。
+        //
+        // 用户听到的就是"音乐消失 → 静音 0.4 s → 咔"。
+        //
+        // 正确的做法是把"我们没录到"如实表达成**不覆盖**：段仍从内容起点开始，
+        // 那一段由宿主原声照常播放（`copy_block_layered_at` 在覆盖范围外回退到输入）。
+        // `take_pre_roll` 保留为**诊断读数**（`pre_roll_frames`），不再改变几何。
         if !self.take_pre_roll_taken {
-            let plane_len = pending.planes.first().map_or(0, Vec::len);
-            let pre_roll = (self.take_pre_roll as usize)
-                .min(self.capacity.saturating_sub(content_frames))
-                .min(plane_len.saturating_sub(content_frames))
-                // 工程位置 0 之前不可写：origin 不能为负。
-                .min(content_origin.max(0) as usize);
-            if pre_roll > 0 {
-                pending.origin = content_origin.saturating_sub(pre_roll as i64);
-                for plane in &mut pending.planes {
-                    // 段是连续平面缓冲：origin 前移后内容必须跟着平移，
-                    // 否则段覆盖区间与实际样本错位。前导只补全零。
-                    plane.copy_within(..content_frames, pre_roll);
-                    plane[..pre_roll].fill(0.0);
-                }
-                pending.filled = content_frames + pre_roll;
-                self.pre_roll_frames = self.pre_roll_frames.saturating_add(pre_roll as u64);
-            }
+            self.pre_roll_frames = self.pre_roll_frames.saturating_add(self.take_pre_roll);
             self.take_pre_roll = 0;
             self.take_pre_roll_taken = true;
         }
@@ -2250,29 +2250,25 @@ impl Capture {
                 self.stop(ClosedReason::NoSpare);
                 return CaptureOutcome::OutOfSpares;
             };
-            let pre_roll = if first_segment && !self.take_pre_roll_taken {
-                self.take_pre_roll
-                    .min(self.capacity.saturating_sub(frames) as u64)
-                    // 工程位置 0 之前不可写：origin 不能为负。
-                    .min(start.max(0) as u64) as usize
-            } else {
-                0
-            };
-            if pre_roll > 0 {
-                for plane in &mut spare.planes {
-                    plane[..pre_roll].fill(0.0);
-                }
-                self.pre_roll_frames = self.pre_roll_frames.saturating_add(pre_roll as u64);
+            // 【T15：前导静音只记录、不前插】见 `commit_pending` 里同一段说明。
+            // 这里曾经把 `pre_roll` 帧零写进段首并把 origin 前移 —— 于是快照的覆盖
+            // 范围扩大到播放起点之前，而那一段是**纯零**，在覆盖权重 1.0 下把宿主
+            // 原声整个盖掉，紧接着就是内容的第一帧。用户听到的是"静音 0.4 s → 咔"。
+            //
+            // 现在只把"我们没录到多少帧"记进诊断（`pre_roll_frames`），几何不动：
+            // 段从内容起点开始，之前那段由宿主原声照常播放。
+            if first_segment && !self.take_pre_roll_taken {
+                self.pre_roll_frames = self.pre_roll_frames.saturating_add(self.take_pre_roll);
             }
             // 无论这次取到多少，第一段一旦建立，前导静音的消费就结束了：
             // 后续段绝不向前看（容量切段、循环回卷、seek 都不该把开头静音再补一遍）。
             self.take_pre_roll = 0;
             self.take_pre_roll_taken = true;
-            spare.origin = start.saturating_sub(pre_roll as i64);
+            spare.origin = start;
             spare.sample_rate = rate;
             spare.loss = loss;
             spare.loop_start = self.current_loop_start;
-            spare.filled = pre_roll;
+            spare.filled = 0;
             spare.peak = [0.0; 2];
             spare.closed = ClosedReason::Full;
             self.active = Some(spare);
@@ -3446,19 +3442,26 @@ mod tests {
 
         let sealed = capture.finish(ClosedReason::Stopped);
         assert_eq!(sealed.len(), 1, "lookbehind 提交不得把 take 切成两段");
+        // 【T15：前导只**记录**，不前插】旧实现把 8 帧零插到段首、把 origin 前移 8，
+        // 于是快照的覆盖范围扩大到播放起点之前，而那一段是纯零 —— 在覆盖权重 1.0
+        // 下按满幅输出，把宿主原声整个盖掉，紧接着就是内容的第一帧（用户听到的
+        // "静音 0.4 s → 咔"）。
+        //
+        // 现在段从**内容起点**开始（8..12），那段没录到的窗口由宿主原声照常播放；
+        // `pre_roll_frames` 保留为诊断读数，回答"我们到底漏了多少帧"。
         assert_eq!(
             sealed[0].span(),
-            0..16,
-            "段必须从静音起点开始，内容仍在 P+8 之后"
+            8..16,
+            "段必须从内容起点开始：没录到的那一段不许被写成零并宣称覆盖"
         );
         assert_eq!(
             capture.pre_roll_frames, 8,
-            "前导静音必须在 commit_pending 时落地"
+            "漏掉的帧数必须仍然可诊断"
         );
         assert_eq!(
-            sealed[0].planes[0][8..12],
+            sealed[0].planes[0][..4],
             block(8, 4, 48_000.0).0[..],
-            "前导只补零，不得移动内容"
+            "段首必须直接是内容，不得先垫一段零"
         );
     }
 
@@ -3500,14 +3503,18 @@ mod tests {
         assert_eq!(capture.pre_roll_frames, 0);
     }
 
-    /// **起播窗口的静音前导必须补进段首。**
+    /// **起播窗口的静音前导只记录、不前插。**
     ///
-    /// 【为什么这是问题一的主回归】宿主先送 0.4 s 静音、内容出现时才进入 Rolling。
-    /// 静音块被 `Resting` 早退丢掉时，段会从内容起点才开始；播放时就在内容起点发生
-    /// 一次块内源切换。把"本块之前连续静音的帧数"补成段首，快照覆盖范围才与播放
-    /// 起点一致。
+    /// 【为什么契约反过来了】round 15/16 的做法是把"本块之前连续静音的帧数"补成
+    /// 段首，理由是"让快照覆盖范围与播放起点一致"。但补进去的是**零**，而渲染侧在
+    /// 覆盖范围内按 1.0 权重输出 —— 于是那段零把宿主原声整个盖掉，随后是内容的第一
+    /// 帧。用户听到的正是"静音 0.4 s → 咔"，而且这段静音会随素材变化（取决于漏了
+    /// 多少内容）。
+    ///
+    /// 现在：段从内容起点开始，没录到的那段由宿主原声照常播放；漏掉的帧数记进
+    /// `pre_roll_frames` 供诊断。这才是"不宣称我们没录到的覆盖"。
     #[test]
-    fn a_pinned_silent_lead_in_extends_the_take_backward() {
+    fn a_pinned_silent_lead_in_is_recorded_but_not_prepended() {
         let mut capture = started(1024, 4);
         // 第一块内容在 P+8；它之前有 8 帧静音。
         let (_, view) = block(8, 4, 48_000.0);
@@ -3524,10 +3531,13 @@ mod tests {
         assert_eq!(sealed.len(), 1, "前导静音不得把 take 切成两段");
         assert_eq!(
             sealed[0].span(),
-            0..16,
-            "段必须从静音起点开始、内容仍在 P+8 之后"
+            8..16,
+            "段必须从内容起点开始：没录到的那一段不许被写成零并宣称覆盖"
         );
-        assert_eq!(capture.pre_roll_frames, 8, "前导静音帧数必须可诊断");
+        assert_eq!(
+            capture.pre_roll_frames, 8,
+            "漏掉的帧数必须仍然可诊断（它决定下一轮要不要继续查采集）"
+        );
     }
 
     /// **钉住区间结束后的几帧差值按记账纠正，不另起一段。**
