@@ -659,6 +659,19 @@ pub(crate) const RESTORE_GIVE_UP_ATTEMPTS: u32 = 400;
 /// 不会在停播后继续推进。超过 1 秒的静音由捕获侧的 resync 零桥接补齐。
 const PINNED_PLAYBACK_SEC: f64 = 1.0;
 
+/// 宿主位置与我们的累积时钟相差多少以内就**忽略宿主读数**（秒）。
+///
+/// 【为什么必须大于一个起播窗口】VEGAS 的钉住窗口最长 1.0 s（`PINNED_PLAYBACK_SEC`）。
+/// 窗口收口时，宿主的位置只前进了"它承认的那一段"，与我们已经送出的帧数相差几百
+/// 毫秒 —— 那是**宿主的位置字段滞后**，不是用户跳了。取 1.5 s 把它整段包住。
+///
+/// 【为什么不能更大】一次真实的 seek 通常远大于 1.5 s；再放宽就会把"用户拖了光标"
+/// 也当成滞后，于是播放停在原地读旧内容。
+///
+/// 【为什么不做成可配置项】它是**推导出来的**：下界是钉住窗口、上界是一次 seek 的
+/// 典型量级，两者之间没有第三种真实形状。
+const POSITION_DRIFT_TOLERANCE_SEC: f64 = 1.5;
+
 impl StreamGeometry {
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
     fn note_activity(&self, hash: u64) -> bool {
@@ -1069,6 +1082,14 @@ pub(crate) struct ExtensionOwner {
     ///
     /// 【为什么按流记】两条流交替到达；跨流比较会把另一条流的位置当成纠正依据。
     last_synthetic_position: [AtomicI64; 3],
+    /// 【B3】因「宿主位置滞后」而被忽略的次数（诊断）。
+    ///
+    /// 【为什么需要这个读数】忽略宿主读数是一件危险的事：它必须可数，否则没人能
+    /// 判断这条判据是在修接缝，还是在吞掉用户的 seek。正常会话里它只在起播窗口
+    /// 收口后的几块内增长。
+    drift_ignored: AtomicU64,
+    /// 【B3】被忽略的漂移的**最大**绝对值（帧）。与 drift_ignored 一起回答「偏差有多大」。
+    max_drift_frames: AtomicU64,
     /// 【T3】读游标被纠正的次数（起播窗口收口、循环回卷、流交接）。
     ///
     /// 【为什么必须是诊断】输出侧按块首 `position` 读快照，而捕获侧另有自己的一套
@@ -4167,6 +4188,35 @@ impl ExtensionOwner {
             geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
             self.last_synthetic_position[stream.index()]
                 .store(position.saturating_add(frames as i64), Ordering::Release);
+        }
+        // 【B3：窗口收口后保持**累积时钟**，不让位置跳回去】
+        //
+        // 窗口内位置由「已送来的帧数」累积（pinned_before 与它是同一个量）；窗口一
+        // 收口，旧实现把位置换回宿主的 raw_start —— 而那个读数比我们已经送出的帧数
+        // **落后**一个钉住窗口。于是相邻两块之间读写位置相差 Δ 帧：记录时在 take 里
+        // 留下 Δ 帧的空洞或重叠，回放时同一处再跳一次 ⇒ 用户听到的
+        // 「起播 0.4~0.7 s 必有一次咔」。
+        //
+        // 现在：只要宿主位置与累积时钟的差落在 POSITION_DRIFT_TOLERANCE_SEC 之内，
+        // 就判成**宿主读数滞后**（VEGAS 的形状），继续用累积时钟。记录与回放共用这
+        // 一个位置，所以两者天然一致 —— 这一条把「两个域」从定义上消灭掉，而不是在
+        // 输出侧再补一次淡化。
+        //
+        // 【什么时候仍然听宿主的】起播/录音上升沿、循环回卷、门控静音（上一块停在
+        // Resting）以及 |drift| 超出容差（真实 seek）。它们都会让 last_source 不再是
+        // Synthesized，于是这条判据自然退出。
+        if !pinned && had && last_source == PositionSource::Synthesized {
+            let previous_frames = i64::from(geometry.last_frames.load(Ordering::Acquire));
+            let expected = last_position.saturating_add(previous_frames);
+            let drift = raw_start.saturating_sub(expected);
+            let tolerance = (rate * POSITION_DRIFT_TOLERANCE_SEC).round().max(1.0) as i64;
+            if drift.unsigned_abs() <= tolerance as u64 {
+                position = expected;
+                source = PositionSource::Synthesized;
+                self.drift_ignored.fetch_add(1, Ordering::Relaxed);
+                self.max_drift_frames
+                    .fetch_max(drift.unsigned_abs(), Ordering::Relaxed);
+            }
         }
         // 窗口收口：帧窗口耗尽、或宿主明确不再播放。两者都让"内容证据"重新说话 ——
         // 于是 FL 停播（`kPlaying` 仍为 1、内容逐块相同）最多在起播后
