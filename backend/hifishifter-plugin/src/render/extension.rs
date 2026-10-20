@@ -996,6 +996,20 @@ pub(crate) struct ExtensionOwner {
     realtime_flow: AtomicBool,
     /// 实时流上一次**实际写出内容**的区间；用于抑制停播光标处的同区间重复。
     rt_last_emitted_start: AtomicI64,
+    /// 【T3】实时流上一次**实际读快照**的位置（用于发现读游标跳变）。
+    rt_last_read_position: AtomicI64,
+    /// 【T3】本块**不读快照**（读游标跳过了超过一个淡化带）。
+    ///
+    /// 【为什么是"不读"而不是"淡一次"】跳变的幅度可能远大于一个淡化带（起播窗口
+    /// 收口时可达数十毫秒）。那时候读快照会把**另一段**内容写进总线；淡一次只是把
+    /// 阶跃抹软，内容仍然是错的那一段。不读 ⇒ 这一段回退宿主原声，下一块从新位置
+    /// 继续 —— 那一小段是宿主演示过的真实内容，用户听到的是连续的音乐。
+    ///
+    /// 【为什么不用"把 token 清零"表达】token 的低 8 位是**种类**；清零会让
+    /// `apply_output_declick` 把"没有种类"当成一次种类切换，进而走交叉淡化分支 ——
+    /// 而 `tail` 在短块会话的前几块里是**从未写过的零**，淡出来等于把输出静音
+    /// 一小段（实测打出 `a_stale_prefetch_block_does_not_silence_the_playback_start` 回归）。
+    skip_snapshot_read: [AtomicBool; 3],
     rt_last_emitted_frames: AtomicU32,
     rt_last_emitted_valid: AtomicBool,
     /// 每条进程流的上一块 `kRecording` 位（用于上升沿覆盖写）。
@@ -1027,6 +1041,19 @@ pub(crate) struct ExtensionOwner {
     cycle_wrap_unknown: AtomicU64,
     cycle_splits: AtomicU64,
     /// 因“同一区间重复”被抑制输出的实时块数。
+    /// 【T3】上一块在**合成域**里的读位置（`-1` = 上一块不在合成域）。
+    ///
+    /// 【为什么按流记】两条流交替到达；跨流比较会把另一条流的位置当成纠正依据。
+    last_synthetic_position: [AtomicI64; 3],
+    /// 【T3】读游标被纠正的次数（起播窗口收口、循环回卷、流交接）。
+    ///
+    /// 【为什么必须是诊断】输出侧按块首 `position` 读快照，而捕获侧另有自己的一套
+    /// 记账（`expected_next`）。窗口收口时两侧可能出现几帧到几十帧的差；不纠正就是
+    /// 一次读游标跳变 —— 回退=重播已听内容，前进=跳过内容。两种都是"咔"。记下来才能
+    /// 在下一次复现时回答"到底跳了多少帧"。
+    position_corrections: AtomicU64,
+    /// 【T3】最近一次纠正的帧差（绝对值）。
+    max_correction_frames: AtomicU64,
     repeats_suppressed: AtomicU64,
     /// 连续多少块被判定为"不该出声"（停播 / 重复区间）。
     ///
@@ -4078,12 +4105,24 @@ impl ExtensionOwner {
             geometry
                 .pinned_window_closed_by
                 .store(PINNED_WINDOW_HOST_MOVED, Ordering::Release);
+            // 【T3：把"读游标跳了多少帧"变成可读的数】上一块还在合成域（我们按块长
+            // 推进），这一块回到宿主域。两侧的差就是用户在起播 0.4~0.7 s 听到的那次
+            // 阶跃的幅度：回退=重播已听内容，前进=跳过内容。
+            let previous = self.last_synthetic_position[stream.index()]
+                .swap(-1, Ordering::AcqRel);
+            if previous >= 0 {
+                let jump = raw_start.saturating_sub(previous).unsigned_abs();
+                self.position_corrections.fetch_add(1, Ordering::Relaxed);
+                self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
+            }
         }
         if pinned && source == PositionSource::Project && synthesizing {
             position = raw_start.saturating_add(pinned_before as i64);
             source = PositionSource::Synthesized;
             self.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
             geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
+            self.last_synthetic_position[stream.index()]
+                .store(position.saturating_add(frames as i64), Ordering::Release);
         }
         // 窗口收口：帧窗口耗尽、或宿主明确不再播放。两者都让"内容证据"重新说话 ——
         // 于是 FL 停播（`kPlaying` 仍为 1、内容逐块相同）最多在起播后
@@ -4421,6 +4460,9 @@ impl ExtensionOwner {
             // 【为什么帧数也要清】起播第一块与停播最后一块可能同起点、同长度；
             // 只清 `valid` 已经足够，但把帧数一并归零让"下一次比较"不依赖旧值。
             self.rt_last_emitted_frames.store(0, Ordering::Release);
+            // 【T3：新的播放会话从零开始】读位置也必须清：上一轮停在任意位置，
+            // 新会话第一块的位置天然与它不同 —— 那不是读游标跳变，是一次新的起播。
+            self.rt_last_read_position.store(0, Ordering::Release);
         }
         let split = self.block_split(context, block.frames, rate, stream_block.position);
         let cycle_start = self.cycle_start_position(context, rate);
@@ -4652,6 +4694,9 @@ impl ExtensionOwner {
         {
             return;
         }
+        // 【T3：读位置单独记一份】输出侧按 `position` 读快照；跳变就是读游标阶跃。
+        self.rt_last_read_position
+            .store(evidence.position, Ordering::Release);
         self.rt_last_emitted_start
             .store(evidence.position, Ordering::Release);
         self.rt_last_emitted_frames.store(
@@ -4661,6 +4706,48 @@ impl ExtensionOwner {
         self.rt_last_emitted_valid.store(true, Ordering::Release);
     }
 
+    /// 【T3】本块是否要**整块**回退宿主原声（读游标跳过了超过一个淡化带）。
+    ///
+    /// 【为什么由音频线程问、而不是让快照路径自己判】跳变判据依赖"上一块读到哪"，
+    /// 那在 `transfer_stage` 里才知道；而真正读快照的在 `vst3.rs` 的分支里。一个
+    /// 取走即清（swap）的访问器把两者接起来，不新增状态。
+    pub(crate) fn take_skip_snapshot_read(
+        &self,
+        stream: crate::transfer::capture::ProcessStream,
+    ) -> bool {
+        self.skip_snapshot_read[stream.index()].swap(false, Ordering::AcqRel)
+    }
+    /// 测试专用：直接写"上一块读到哪个位置"（T3 判据的唯一输入）。
+    #[cfg(test)]
+    pub(crate) fn note_read_position_for_test(&self, position: i64) {
+        self.rt_last_read_position.store(position, Ordering::Release);
+    }
+
+    /// 测试专用：标记"上一块写出过内容"（T3 判据的第二个输入）。
+    #[cfg(test)]
+    pub(crate) fn mark_emitted_for_test(&self) {
+        self.rt_last_emitted_valid.store(true, Ordering::Release);
+    }
+    /// 【T3】这一块的读位置与上一块差了多少帧（`None` = 不存在跳变）。
+    ///
+    /// 三条纪律（都是纯函数，可单测）：
+    /// 1. **没有上一块就不存在跳变**：`rt_last_read_position <= 0` 或上一块没写出过
+    ///    内容 ⇒ `None`。否则会话刚开始的两次不同位置会被当成跳变。
+    /// 2. **位置相同不是跳变**。
+    /// 3. **小于一个淡化带的差被淡化吸收**：那种场合读快照的那一小段与上一块只差几帧，
+    ///    64 帧的交叉淡化足够；再淡一次反而多一次能量塌陷。
+    fn read_position_jump(&self, evidence: Option<BlockEvidence>) -> Option<u64> {
+        let evidence = evidence?;
+        let previous = self.rt_last_read_position.load(Ordering::Acquire);
+        if previous <= 0
+            || previous == evidence.position
+            || !self.rt_last_emitted_valid.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        let jump = evidence.position.saturating_sub(previous).unsigned_abs();
+        (jump > u64::try_from(OUTPUT_DECLICK_FRAMES).unwrap_or(u64::MAX)).then_some(jump)
+    }
     /// 音频线程上的 Transfer **输出**阶段。
     ///
     /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
@@ -4691,6 +4778,14 @@ impl ExtensionOwner {
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
         let output = self.transfer_output_with(evidence);
+        // 【T3：读游标跳变 ⇒ 这一块不读快照】种类与代次都没变，但这一块读的位置与
+        // 上一块不同（起播窗口收口、循环回卷、流交接）。那时读快照等于把**另一段**
+        // 内容写进总线 —— 一次单样本阶跃。判据在 `read_position_jump`，纯函数、可单测。
+        if let Some(jump) = self.read_position_jump(evidence) {
+            self.position_corrections.fetch_add(1, Ordering::Relaxed);
+            self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
+            self.skip_snapshot_read[stream.index()].store(true, Ordering::Release);
+        }
         self.output_token[stream.index()]
             .store(self.output_token_for(output), Ordering::Release);
         self.note_output_rung(output);
@@ -7260,6 +7355,9 @@ impl ExtensionOwner {
                 "offline": stream(ProcessStream::Offline.index()),
             },
             "repeats_suppressed": self.repeats_suppressed.load(Ordering::Acquire),
+        // T3：读游标纠正。跳变幅度是"起播 0.4~0.7 s 一次咔"最直接的量。
+        "position_corrections": self.position_corrections.load(Ordering::Acquire),
+        "max_correction_frames": self.max_correction_frames.load(Ordering::Acquire),
             "max_samples_per_block": self.max_samples_per_block.load(Ordering::Acquire),
             "capture": capture,
             "trace": self

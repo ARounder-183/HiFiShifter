@@ -75,6 +75,49 @@ fn a_closed_window_session_still_reaches_the_processed_output() {
     );
 }
 
+/// **T3：读游标跳变是纯判据：没有上一块、位置相同、小于一个淡化带都不算跳变。**
+///
+/// 【为什么单独钉判据】它决定"这一块要不要整块回退宿主原声"。三条边界各自都会被
+/// 真实宿主碰到：会话刚开始（没有上一块）、停播光标（位置相同）、以及窗口收口时
+/// 只差几帧（小于一个淡化带，被淡化吸收）。
+#[test]
+fn the_read_position_jump_is_a_pure_judgement() {
+    let owner = insert_owner();
+    let evidence = BlockEvidence {
+        stream: crate::transfer::capture::ProcessStream::Realtime,
+        position: 48_000,
+        frames: 256,
+        playing: true,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: crate::transfer::capture::TransportPhase::Rolling,
+        had_previous: true,
+        allow_output: true,
+        start_window: false,
+        repeated_nonzero: false,
+        split: BlockSplit::whole(48_000, 256),
+    };
+    // ① 没有上一块 ⇒ 没有跳变。
+    assert_eq!(owner.read_position_jump(Some(evidence)), None);
+    // ② 上一块没写出过内容 ⇒ 仍然没有（`tail` 里是零）。
+    owner.note_read_position_for_test(0);
+    assert_eq!(owner.read_position_jump(Some(evidence)), None);
+    // ③ 上一块写出过、位置相同 ⇒ 不是跳变。
+    owner.mark_emitted_for_test();
+    owner.note_read_position_for_test(48_000);
+    assert_eq!(owner.read_position_jump(Some(evidence)), None);
+    // ④ 只差几帧（小于一个淡化带）⇒ 被淡化吸收，不是跳变。
+    owner.note_read_position_for_test(47_990);
+    assert_eq!(owner.read_position_jump(Some(evidence)), None);
+    // ⑤ 差 1 秒 ⇒ 跳变，且幅度可读。
+    owner.note_read_position_for_test(1);
+    assert_eq!(owner.read_position_jump(Some(evidence)), Some(47_999));
+  
+    // ⑥ 反向跳变同样算（回退 = 重播已听内容）。
+    owner.note_read_position_for_test(96_000);
+    assert_eq!(owner.read_position_jump(Some(evidence)), Some(48_000));
+}
 /// **分流判据必须是"未绑定 + 有素材"，而不是 `mode()`。**
 ///
 /// 【为什么单独钉这一条】上面那条走的是 `arm_transfer_rendering` 之后的完整链路；
