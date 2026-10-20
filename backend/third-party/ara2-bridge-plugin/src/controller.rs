@@ -85,6 +85,35 @@ struct ControllerAdapter<P: PluginModel> {
     legacy_restore_reader: Option<ARAArchiveReaderHostRef>,
     factory_analyzable_content: HashSet<i32>,
     factory_playback_transformations: PlaybackTransformationFlags,
+    /// 图账本：让"宿主没发"与"我们拒了"可区分（T8）。
+    ledger: std::sync::Arc<crate::GraphLedger>,
+}
+
+impl<P: PluginModel> ControllerAdapter<P> {
+    /// 图账本（诊断与插件的证据包都读它）。
+    #[allow(dead_code)]
+    pub fn ledger(&self) -> &crate::GraphLedger {
+        &self.ledger
+    }
+
+    /// content reader 不再是闸门：绕过它，但留痕。
+    ///
+    /// 【为什么不再是硬门】reader 读的是**不可变快照**（`ReaderCell.snapshot`）：
+    /// 模型图变化既不移动它也不释放它（`publish` 用读者计数，旧盒只在最后一个读者离开时
+    /// 回收）。把它当闸门等于"宿主多留一个 reader，插件就再也建不出任何模型对象" ——
+    /// 而 create/update 返回 null 的后果是**宿主自己停止交付**：重开工程时只见一片
+    /// "等待宿主音频"，删掉插件再加就好。
+    fn note_reader_gate(&self, callback: &str) {
+        if self.content_readers.is_empty() {
+            return;
+        }
+        self.ledger.note_gate_bypassed(crate::GateKind::ContentReader);
+        log::warn!(
+            "[ara] {callback} continuing with {} content reader(s) live; readers hold immutable \
+             snapshots and are unaffected by graph changes",
+            self.content_readers.len()
+        );
+    }
 }
 
 struct ReaderCell {
@@ -364,6 +393,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn begin_editing(&mut self) {
+        self.ledger.note_begin_editing();
         // 宿主开始新一次编辑：先看上一次被推迟的收口是否已经等够宽限。
         self.retry_deferred_end_editing("beginEditing observed a new edit session");
         // 【为什么必须在 reader 仍未排空时也强制收口】上一次 `endEditing` 可能因为
@@ -402,6 +432,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn end_editing(&mut self) {
+        self.ledger.note_end_editing();
         // 【本地补丁 15】早退不再丢事件：置位待补跑（见 `pending_end_editing`）。
         // 此前这里**无声 return**，宿主只要还有 content reader 活着（长时间播放、
         // 或宿主迟迟不回收），`endEditing` 就永远不会收口 —— 插件停在旧时间线上，
@@ -423,6 +454,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn notify_model_updates(&mut self) {
+        self.ledger.note_notify_model_updates();
         // 【本地补丁 11】宿主用它让插件把待发的更新推回去（ARA 2.0 起替代旧的归档路径），
         // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
         // 因此把三条早退原因都记下来。
@@ -573,6 +605,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         &mut self,
         reader: ARAArchiveReaderHostRef,
     ) -> ARABool {
+        self.ledger.note_restore_archive();
         if self.legacy_restore_reader.is_some() {
             return kARAFalse;
         }
@@ -611,6 +644,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn store_document_to_archive(&mut self, writer: ARAArchiveWriterHostRef) -> ARABool {
+        self.ledger.note_store_archive();
         if self.runtime().map_or(true, PluginRuntime::is_editing) {
             // 【为什么这里要强收口】宿主若开启了 `beginRestoringDocumentFromArchive`
             // 却从未配对调用 `endRestoringDocumentFromArchive`，`runtime.editing` 会
@@ -658,6 +692,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAMusicalContextHostRef,
         properties: *const ARAMusicalContextProperties,
     ) -> ARAMusicalContextRef {
+        self.ledger.note_create(crate::GraphStage::MusicalContext);
         // SAFETY: the ARA callback contract supplies a complete ephemeral property record.
         let Ok(properties) =
             (unsafe { ara2_bridge_core::MusicalContextProperties::copy_from_ffi(properties) })
@@ -717,9 +752,10 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         let Ok(scoped_host_ref) = (unsafe { HostMusicalContextRef::from_raw(host_ref) }) else {
             return null_mut();
         };
-        if !self.content_readers.is_empty() {
-            return null_mut();
-        }
+        // T7：reader 不再是闸门（见 `note_reader_gate`）。此前这里直接 `return null`，
+        // 而 createMusicalContext 是整张图的**第一步** —— 宿主多留一个 reader，
+        // 后面的一切对象都建不起来，且这一条**连日志都没有**。
+        self.note_reader_gate("createMusicalContext");
         let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             return null_mut();
@@ -776,9 +812,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         // SAFETY: the identity was validated on creation and remains controller-owned until destroy.
         let host_ref = unsafe { HostMusicalContextRef::from_raw(host_ref) }.ok();
-        if !self.content_readers.is_empty() {
-            return;
-        }
+        self.note_reader_gate("updateMusicalContextProperties");
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
@@ -858,9 +892,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
         let host_ref = unsafe { HostMusicalContextRef::from_raw(host_ref) }.ok();
-        if !self.content_readers.is_empty() {
-            return;
-        }
+        self.note_reader_gate("updateMusicalContextContent");
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
@@ -896,6 +928,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAAudioSourceHostRef,
         properties: *const ARAAudioSourceProperties,
     ) -> ARAAudioSourceRef {
+        self.ledger.note_create(crate::GraphStage::AudioSource);
         // 【本地补丁 12】与 createAudioModification 是同一个误判：把回推通知用的不透明
         // 令牌当成创建模型对象的前提。差别在于这里的 hostRef **确实**参与内容读取
         //（`create_audio_source_with_host` 要用它去宿主侧取内容），所以不能只加一句警告
@@ -952,13 +985,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         let Ok(scoped_host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
             return null_mut();
         };
-        if !self.content_readers.is_empty() {
-            log::error!(
-                "ARA createAudioSource rejected: {} content readers still live",
-                self.content_readers.len()
-            );
-            return null_mut();
-        }
+        // T7：reader 不再是闸门。此前这里直接 `return null`，后果是整张图建不起来、
+        // 工程里只见"等待宿主音频"，而宿主拿不到 region 就再也不交付任何东西。
+        self.note_reader_gate("createAudioSource");
         let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
             log::error!("ARA createAudioSource rejected: document runtime closed");
@@ -1004,9 +1033,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
         let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
-        if !self.content_readers.is_empty() {
-            return;
-        }
+        self.note_reader_gate("updateAudioSourceProperties");
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
@@ -1112,9 +1139,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         };
         // SAFETY: the identity was validated on creation and remains live until destroy.
         let host_ref = unsafe { HostAudioSourceRef::from_raw(host_ref) }.ok();
-        if !self.content_readers.is_empty() {
-            return;
-        }
+        self.note_reader_gate("updateAudioSourceContent");
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
@@ -1268,6 +1293,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAAudioModificationHostRef,
         properties: *const ARAAudioModificationProperties,
     ) -> ARAAudioModificationRef {
+        self.ledger.note_create(crate::GraphStage::AudioModification);
         // 【本地补丁 10】入口留痕 + 每条静默拒绝的原因。
         //
         // 宿主拿不到 modification 就不会建 playback region，于是**一条片段都没有**，
@@ -1682,6 +1708,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         _host_ref: ARARegionSequenceHostRef,
         properties: *const ARARegionSequenceProperties,
     ) -> ARARegionSequenceRef {
+        self.ledger.note_create(crate::GraphStage::RegionSequence);
         // 【本地补丁 10】与 createAudioModification 同一理由：入口留痕，便于对照宿主
         // 究竟走到哪一步。
         log::info!("[ara] host createRegionSequence");
@@ -1792,6 +1819,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         host_ref: ARAPlaybackRegionHostRef,
         properties: *const ARAPlaybackRegionProperties,
     ) -> ARAPlaybackRegionRef {
+        self.ledger.note_create(crate::GraphStage::PlaybackRegion);
         // 【本地补丁 10】入口留痕：这一行出现而后面没有 region，才说明问题在创建逻辑里；
         // 它根本不出现，就说明宿主没走到这一步（modification 那步已经断了）。
         log::info!("[ara] host createPlaybackRegion");
@@ -2022,6 +2050,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         if self.runtime().map_or(true, |runtime| !runtime.is_editing()) {
             return kARAFalse;
         }
+        self.ledger.note_restore_archive();
         // SAFETY: the callback supplies a null/all filter or a complete filter with live nested IDs.
         let Ok(filter) = (unsafe { RestoreFilter::copy_selection_from_ffi(filter) }) else {
             return kARAFalse;
@@ -2041,6 +2070,7 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         writer: ARAArchiveWriterHostRef,
         filter: *const ARAStoreObjectsFilter,
     ) -> ARABool {
+        self.ledger.note_store_archive();
         let Ok(runtime) = self.runtime() else {
             return kARAFalse;
         };
@@ -2176,9 +2206,11 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         let Ok(runtime) = self.runtime() else {
             return kARAFalse;
         };
-        if runtime.is_editing() || !self.content_readers.is_empty() {
+        // T7：编辑会话仍然拒绝（半写状态的存档不该落盘），reader 不再是理由。
+        if runtime.is_editing() {
             return kARAFalse;
         }
+        self.note_reader_gate("storeAudioSourceToAudioFileChunk");
         let Ok(source) = runtime.resolve_audio_source(source_reference) else {
             return kARAFalse;
         };
@@ -2375,6 +2407,8 @@ impl<P: PluginModel + 'static> Plugin<P> {
             legacy_restore_reader: None,
             factory_analyzable_content,
             factory_playback_transformations,
+            // T8: the ledger is accounted per document controller.
+            ledger: self.graph_ledger.clone(),
         };
         let instance = crate::ffi::callbacks::controller_instance(Box::new(adapter), interface);
         if let Some(observer) = self.controller_identity {

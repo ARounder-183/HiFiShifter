@@ -161,11 +161,16 @@ impl Runtime {
                 // 缺了它，就说明请求在更早的地方被静默拒掉（代数落在区间外 / 宿主没
                 // 提供 assert 指针），宿主随后拿到的是一个 null 控制器。
                 log::info!("[ara] host requested a document controller");
-                let model = crate::ara::model::ModelHandle::new();
+                let mut model = crate::ara::model::ModelHandle::new();
                 let head_tail = model.head_tail();
                 let session = model.session();
                 let playback = session.clone();
-                let builder = PluginBuilder::new(model);
+                // T8: one ledger per document controller, created here so a reopened project
+                // never inherits the previous controller's counts. The builder adopts the same
+                // handle below, so both views read one set of counters.
+                let ledger = std::sync::Arc::new(ara2_bridge::plugin::GraphLedger::default());
+                model.adopt_ledger(ledger.clone());
+                let builder = PluginBuilder::new(model).graph_ledger(ledger);
                 // 【变更通知通道】宿主只保存"它知道变过"的部分，而插件此前**从未**通知过
                 // 任何持久状态变化（`mark_*` 在生产代码里出现次数为 0）。没有这条，
                 // 只存增量的宿主会丢数据（`ARAInterface.h:2098-2099` 等三处重申）。

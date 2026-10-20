@@ -135,6 +135,12 @@ pub struct ModelHandle {
     /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic apply`
     /// 的直接来源。模型没变就不重算。
     remap_stamp: Option<Vec<RemapInput>>,
+    /// 本地补丁：本模型所属文档控制器的图账本（T8）。
+    ///
+    /// 【为什么模型持有它】桥的账本在 `ControllerAdapter` 里，而诊断路径在插件侧。
+    /// `document_controller(|| ...)` 闭包每建一份模型就跑一次，正好在那里把句柄取回来。
+    /// 缺席时降级为空账本：图账本是纯观测，拿不到也必须让插件继续工作。
+    ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>,
 }
 
 /// 一次重算所消费的模型输入（每条活 region 一行）。
@@ -278,6 +284,7 @@ impl Default for ModelHandle {
             sequence_index_by_model_ref: HashMap::new(),
             lineage_frame: Vec::new(),
             remap_stamp: None,
+            ledger: std::sync::Arc::new(ara2_bridge::plugin::GraphLedger::default()),
         }
     }
 }
@@ -308,6 +315,16 @@ impl ModelHandle {
     /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
     pub(crate) fn session(&self) -> Arc<DocumentSession> {
         self.session.clone()
+    }
+
+    /// 本地补丁：本模型的图账本（T8）。诊断路径读它，模型侧只负责交出句柄。
+    pub fn ledger(&self) -> &std::sync::Arc<ara2_bridge::plugin::GraphLedger> {
+        &self.ledger
+    }
+
+    /// 本地补丁：接管上游控制器已建好的账本（T8）。
+    pub(crate) fn adopt_ledger(&mut self, ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>) {
+        self.ledger = ledger;
     }
     /// 新建一份空模型。
     pub fn new() -> Self {

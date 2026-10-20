@@ -54,6 +54,7 @@ mod extension;
 mod factory;
 pub mod ffi;
 mod host;
+mod ledger;
 mod model;
 mod persistence;
 mod processing;
@@ -79,6 +80,7 @@ pub use host::{
     HostAudioSourceRef, HostClients, HostContentReader, HostContentScope, HostMusicalContextRef,
     ModelUpdateAccess, PlaybackAccess, PlaybackRequestHandle, SampleFormat,
 };
+pub use ledger::{GateKind, GraphLedger, GraphStage};
 pub use persistence::PersistenceAdapter;
 pub use processing::{AudioFileChunk, Plugin, PluginBuilder, SemanticCapabilities};
 pub use realtime::RealtimeHeadTailAdapter;

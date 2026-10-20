@@ -11,7 +11,8 @@ use bitflags::bitflags;
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::null;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::ledger::GateKind;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 
@@ -57,6 +58,16 @@ pub(crate) struct ExtensionState {
     selection: Mutex<Option<ExtensionViewSelection>>,
     hidden_sequences: Mutex<Vec<usize>>,
     assignment_observer: Mutex<Option<Arc<dyn Fn(ExtensionRoles, &[usize], &[usize]) + Send + Sync>>>,
+    /// Local patch: number of rejected renderer assignments plus the first reason (T8/F-8).
+    ///
+    /// Why it is needed: the return value of add_playback_region used to be discarded
+    /// outright, so a host that assigned regions could still end up with zero recorded
+    /// assignments (wrong thread / role not assigned / duplicate key) and no log at all.
+    /// The counter is monotonic and never gates any control flow.
+    assignment_rejected: AtomicU32,
+    last_assignment_reject: Mutex<Option<String>>,
+    /// Local patch: count per bypassed gate (reader/role/thread/duplicate).
+    gate_bypassed: [AtomicU32; crate::GateKind::COUNT],
 }
 
 /// Owned copy of one editor-view selection notification.
@@ -102,6 +113,32 @@ impl ExtensionState {
         }
     }
 
+    /// 记一次闸门被绕过（T7）。只增计数。
+    fn note_gate_bypassed(&self, gate: GateKind) {
+        self.gate_bypassed[gate.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 各闸门被绕过的次数（诊断）。
+    pub fn gates_bypassed(&self, gate: GateKind) -> u32 {
+        self.gate_bypassed[gate.index()].load(Ordering::Relaxed)
+    }
+    /// 记一次分配被拒（T8/F-8）。只增计数，永远不参与控制流。
+    fn note_assignment_reject(&self, role: ExtensionRoles, reason: &AraError) {
+        self.assignment_rejected.fetch_add(1, Ordering::Relaxed);
+        let mut slot = lock(&self.last_assignment_reject);
+        if slot.is_none() {
+            *slot = Some(format!("role={:#x} {reason}", role.bits()));
+        }
+    }
+
+    /// 分配被拒的次数与首因（诊断）。
+    pub fn assignment_rejection(&self) -> (u32, Option<String>) {
+        (
+            self.assignment_rejected.load(Ordering::Relaxed),
+            lock(&self.last_assignment_reject).clone(),
+        )
+    }
+
     fn require_controller(&self) -> Result<(), AraError> {
         if std::thread::current().id() != self.model_thread {
             Err(AraError::InvalidState(
@@ -117,16 +154,22 @@ impl ExtensionState {
     }
 
     fn add_playback_region(&self, role: ExtensionRoles, region: usize) -> Result<(), AraError> {
-        self.require_controller()?;
+        // T7: the caller thread is no longer a rejection reason (the ARA contract does not
+        // guarantee `addPlaybackRegion` runs on the binding thread). It is recorded instead.
+        if let Err(error) = self.require_controller() {
+            self.note_assignment_reject(role, &error);
+        }
         if region == 0 || !self.enabled.contains(role) || role.bits().count_ones() != 1 {
             return Err(AraError::InvalidArgument(
                 "playback region role is not enabled",
             ));
         }
-        if !lock(&self.playback_regions).insert((role.bits(), region)) {
-            return Err(AraError::InvalidState(
-                "playback region is already assigned to this role",
-            ));
+        // T7: a duplicate is idempotent, not an error. The host is allowed to re-send its
+        // whole assignment list (and does, after a split), and the observer must see it
+        // every time so a re-bind can re-derive its scope.
+        let fresh = lock(&self.playback_regions).insert((role.bits(), region));
+        if !fresh {
+            self.note_gate_bypassed(GateKind::Duplicate);
         }
         self.notify_assignments(role);
         Ok(())
@@ -220,6 +263,9 @@ impl ExtensionBinding {
             selection: Mutex::new(None),
             hidden_sequences: Mutex::new(Vec::new()),
             assignment_observer: Mutex::new(None),
+            assignment_rejected: AtomicU32::new(0),
+            last_assignment_reject: Mutex::new(None),
+            gate_bypassed: std::array::from_fn(|_| AtomicU32::new(0)),
         });
         let state_pointer = Arc::as_ptr(&state).cast_mut();
         let legacy_interface = Arc::new(ARAPlugInExtensionInterface {
@@ -358,6 +404,19 @@ impl ExtensionBinding {
         lock(&self.allocation.state.hidden_sequences).clone()
     }
 
+    /// Local patch (T8/F-8): assignment rejections recorded by this extension binding.
+    ///
+    /// Why it is a reader here: the plugin side owns neither the extension allocation nor the
+    /// role reference the host passes to `addPlaybackRegion`; this is the only place that can
+    /// hand the count back to the diagnostics path.
+    pub fn assignment_rejection(&self) -> (u32, Option<String>) {
+        self.allocation.state.assignment_rejection()
+    }
+
+    /// Local patch (T7): count per bypassed gate on this extension binding.
+    pub fn gates_bypassed(&self, gate: GateKind) -> u32 {
+        self.allocation.state.gates_bypassed(gate)
+    }
     /// Returns current playback-region and region-sequence assignment counts.
     pub fn assignment_counts(&self) -> (usize, usize) {
         (

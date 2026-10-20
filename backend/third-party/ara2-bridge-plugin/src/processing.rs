@@ -1,15 +1,12 @@
 //! Plug-in composition and optional processing capabilities.
 
 use crate::{
-    document_controller_interface, AnalysisEmitter, AnalysisProvider, ContentObject,
-    ContentProvider, ContentReaderSnapshot, ControllerCapabilities, ControllerInterface,
-    PartialPersistence, Persistence, PluginModel, PluginRuntime, RealtimeHeadTailAdapter,
-    UpdateEmitter,
+    AnalysisEmitter, AnalysisProvider, ContentObject, ContentProvider, ContentReaderSnapshot,
+    ControllerCapabilities, PartialPersistence, Persistence, RealtimeHeadTailAdapter, UpdateEmitter,
 };
 use ara2_bridge_core::{
-    ApiGeneration, AraError, ContentGrade, ContentTimeRange, DocumentProperties, FilterSelection,
-    LicenseCapabilities, LicenseRequest, PlaybackTransformationFlags, ProcessingAlgorithmCatalog,
-    RawHandle, RestoreFilter, StoreFilter,
+    AraError, ContentGrade, ContentTimeRange, FilterSelection, LicenseCapabilities, LicenseRequest,
+    PlaybackTransformationFlags, ProcessingAlgorithmCatalog, RawHandle, RestoreFilter, StoreFilter,
 };
 use ara2_bridge_sys::{
     kARAContentTypeBarSignatures, kARAContentTypeKeySignatures, kARAContentTypeNotes,
@@ -261,12 +258,23 @@ pub struct PluginBuilder<P> {
     analysis_events: AnalysisEmitter,
     controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     host_playback:Option<Arc<dyn Fn(Option<crate::PlaybackRequestHandle>) + Send + Sync>>,
+    /// 本地补丁：图账本的共享句柄（T8）。
+    graph_ledger: Arc<crate::GraphLedger>,
 }
 
 impl<P> PluginBuilder<P> {
     /// 本地补丁：只交付可撤销且线程受限的已验证宿主播放租约。
     pub fn host_playback(mut self,observer:impl Fn(Option<crate::PlaybackRequestHandle>)+Send+Sync+'static)->Self {
         self.host_playback=Some(Arc::new(observer));self
+    }
+    /// Local patch (T8): adopt a caller-created ledger for this controller.
+    ///
+    /// Why it exists: the plugin side needs the same counters the controller records, but it
+    /// only sees `PluginBuilder` (not the controller). Passing its own `Arc` in keeps one set
+    /// of counters shared by both views.
+    pub fn graph_ledger(mut self, ledger: Arc<crate::GraphLedger>) -> Self {
+        self.graph_ledger = ledger;
+        self
     }
     /// 本地补丁：工厂分配真实 controllerRef 后的模型线程通知。
     pub fn controller_identity(mut self, observer: impl Fn(usize) + Send + Sync + 'static) -> Self {
@@ -283,6 +291,7 @@ impl<P> PluginBuilder<P> {
             analysis_events: AnalysisEmitter::new(),
             controller_identity: None,
             host_playback:None,
+            graph_ledger: Arc::new(crate::GraphLedger::default()),
         }
     }
 
@@ -410,6 +419,7 @@ impl<P> PluginBuilder<P> {
             analysis_events: self.analysis_events,
             controller_identity: self.controller_identity,
             host_playback:self.host_playback,
+            graph_ledger: self.graph_ledger,
         })
     }
 }
@@ -423,51 +433,20 @@ pub struct Plugin<P> {
     pub(crate) analysis_events: AnalysisEmitter,
     pub(crate) controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     pub(crate) host_playback:Option<Arc<dyn Fn(Option<crate::PlaybackRequestHandle>)+Send+Sync>>,
+    pub(crate) graph_ledger: Arc<crate::GraphLedger>,
 }
-
 impl<P> Plugin<P> {
-    /// Borrows the retained required model.
-    pub const fn model(&self) -> &P {
-        &self.model
+    /// Borrows the registered composition handles (capabilities, emitters, observers).
+    pub fn model_mut(&mut self) -> &mut P {
+        &mut self.model
     }
 
-    /// Borrows optional semantic capability state.
-    pub const fn capabilities(&self) -> &SemanticCapabilities {
-        &self.capabilities
-    }
-
-    /// Mutably borrows optional semantic capability state.
-    pub fn capabilities_mut(&mut self) -> &mut SemanticCapabilities {
-        &mut self.capabilities
-    }
-
-    /// Clones the application update emitter owned by this future controller.
-    pub fn update_emitter(&self) -> UpdateEmitter {
-        self.updates.clone()
-    }
-
-    /// Clones the analysis progress emitter owned by this future controller.
-    pub fn analysis_emitter(&self) -> AnalysisEmitter {
-        self.analysis_events.clone()
-    }
-
-    /// Builds the exact document-controller prefix for a negotiated generation.
-    pub fn document_controller_interface(
-        &self,
-        generation: ApiGeneration,
-    ) -> Result<ControllerInterface, AraError> {
-        document_controller_interface(generation, self.controller_capabilities)
-    }
-}
-
-impl<P: PluginModel> Plugin<P> {
-    /// Consumes this definition and creates one safe document runtime.
-    pub fn into_runtime(
-        self,
-        generation: ApiGeneration,
-        properties: DocumentProperties,
-    ) -> Result<(PluginRuntime<P>, SemanticCapabilities), AraError> {
-        let runtime = PluginRuntime::new(self.model, generation, properties)?;
-        Ok((runtime, self.capabilities))
+    /// Local patch: the graph ledger for this document controller (T8).
+    ///
+    /// Why it is a getter: the plugin side needs to read the ledger from its own
+    /// diagnostics path, but `Plugin` is built once per factory while the ledger is
+    /// created per controller. Sharing it through `Arc` keeps one owner of truth.
+    pub fn graph_ledger(&self) -> &std::sync::Arc<crate::GraphLedger> {
+        &self.graph_ledger
     }
 }

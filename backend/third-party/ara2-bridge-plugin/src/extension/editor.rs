@@ -10,7 +10,10 @@ pub(crate) unsafe extern "C" fn add_playback_region(
     // SAFETY: the role reference is an ExtensionState pointer for the callback lifetime.
     unsafe {
         with_state(reference.cast(), (), |state| {
-            let _ = state.add_playback_region(ExtensionRoles::EDITOR_RENDERER, region as usize);
+            if let Err(error) = state.add_playback_region(ExtensionRoles::EDITOR_RENDERER, region as usize) {
+                // T7/F-8: refusal is now recorded, never silently dropped.
+                state.note_assignment_reject(ExtensionRoles::EDITOR_RENDERER, &error);
+            }
         })
     }
 }
