@@ -324,6 +324,8 @@ impl ModelHandle {
 
     /// 本地补丁：接管上游控制器已建好的账本（T8）。
     pub(crate) fn adopt_ledger(&mut self, ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>) {
+        // 两处都要：诊断路径从文档侧读（`stuck_report`），模型自己在收口时打读数。
+        self.session.set_graph_ledger(std::sync::Arc::clone(&ledger));
         self.ledger = ledger;
     }
     /// 新建一份空模型。
@@ -1098,6 +1100,10 @@ impl ModelHandle {
                 }
                 log::info!("{}", crate::ara::summary_line(&document, &timeline));
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
+                // 【T8：每次收口把图读数打一遍】这是宿主交付模型之后唯一稳定的时间点；
+                // 它给出"五个 create 各发生几次、被拒几次"，因而能回答
+                // "region 是宿主没发、还是我们拒了"。
+                log::info!("[ara] {}", self.ledger.summary());
                 self.log_published_revisions(&timeline);
                 *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);

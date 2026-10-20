@@ -222,6 +222,12 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     ///
     /// 【`None` 为什么等于旧行为】没有跑过任何源回调的会话（测试夹具、纯几何会话）
     /// 不该因为"没算过"被判成未就绪 —— 那会把未知变成否定，正是本轮要修的那类错误。
+    /// 本地补丁（T8）：本份文档控制器的图账本。
+    ///
+    /// 【为什么文档持有它】桥把账本记在 `ControllerAdapter` 上，而诊断路径在文档侧。
+    /// `document_controller` 闭包每建一份模型就运行一次，模型在那里接管句柄并转存到
+    /// 这里 —— 一条不需要反向引用的通道。缺席时降级为空账本（账本是纯观测）。
+    pub graph_ledger: Mutex<Option<std::sync::Arc<ara2_bridge::plugin::GraphLedger>>>,
     pub readiness: Mutex<Option<InputReadiness>>,
     pub ui_tracks: Mutex<std::collections::BTreeMap<String, crate::host::UiTrack>>,
     pub ui_known_tracks: Mutex<HashSet<String>>,
@@ -1547,6 +1553,23 @@ impl DocumentSession {
         }
     }
 
+    /// 本地补丁（T8）：接管本份文档控制器的图账本。
+    ///
+    /// 【为什么在文档上而不是各处传】诊断路径（`stuck_report` / 证据包）只需要
+    /// "这一份文档的图走到哪一步"。记在这里就不必让每个调用方持有桥的类型。
+    /// 【幂等】宿主每建一个控制器就接管一次；重绑时换成新账本，旧读数随之失效 ——
+    /// 那正是我们要的（新文档从零开始记账）。
+    pub(crate) fn set_graph_ledger(
+        &self,
+        ledger: std::sync::Arc<ara2_bridge::plugin::GraphLedger>,
+    ) {
+        *self.graph_ledger.lock_or_recover() = Some(ledger);
+    }
+
+    /// 图账本（没有接管过时为 `None`）。
+    pub(crate) fn graph_ledger(&self) -> Option<std::sync::Arc<ara2_bridge::plugin::GraphLedger>> {
+        self.graph_ledger.lock_or_recover().clone()
+    }
     /// 注入 ARA 变更通知队列（`runtime.rs` 构建插件时调用一次）。
     pub(crate) fn set_update_emitter(&self, emitter: ara2_bridge::plugin::UpdateEmitter) {
         *self.update_emitter.lock_or_recover() = Some(emitter);
@@ -2112,9 +2135,16 @@ impl DocumentSession {
         let ui_tracks = self.ui_tracks.lock_or_recover().len();
         let region_items = self.region_items.lock_or_recover().len();
         let editing = self.editing_elapsed().map(|elapsed| elapsed.as_millis());
+        // 【T11：图账本进这一行】没有它，"宿主没发图"与"我们拒了图"在这里完全同形 ——
+        // 而那正是四类症状反复复发的共同形状：两条路径共用一句读数。
+        let graph = self
+            .graph_ledger
+            .lock_or_recover()
+            .as_ref()
+            .map(|ledger| ledger.summary());
         format!(
             "doc={} {} ready={} editing={:?} dirty={:?} sequences={} renderers={} \
-             ui_tracks={} region_items={}",
+             ui_tracks={} region_items={} {}",
             self.id,
             readiness.map_or_else(|| "verdict=unknown".to_owned(), |r| r.summary()),
             self.ready.load(Ordering::Acquire),
@@ -2124,6 +2154,7 @@ impl DocumentSession {
             assignments,
             ui_tracks,
             region_items,
+            graph.map_or_else(|| "graph=unbound".to_owned(), |line| line),
         )
     }
 

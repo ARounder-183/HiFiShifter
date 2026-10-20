@@ -293,6 +293,12 @@ pub(crate) fn classify_host_audio(
     }
 }
 
+/// 图账本的一行读数（T8）。缺席时给一行可读的"没有接管账本"，而不是空串。
+fn graph_summary_of(document: &super::document::DocumentSession) -> String {
+    document
+        .graph_ledger()
+        .map_or_else(|| "graph=unbound".to_owned(), |ledger| ledger.summary())
+}
 /// 本实例的**运行形态**：宿主把音频交给我们的方式。
 ///
 /// 【为什么需要一个显式形态，而不是"一堆布尔"】它要回答的问题在音频线程上被问
@@ -6529,6 +6535,10 @@ impl ExtensionOwner {
             renderer.refresh_ui_inventory();
             renderer.prepare();
         }
+        // 【T8：把图读数打出来】绑定成功的那一刻宿主的图通常还没建（region 在之后才到），
+        // 所以这一行几乎总是全零 —— 它的价值在于**当它停在零**：下一次重启报障时，
+        // 若这里 ctx=0，说明宿主要么没发图、要么被我们拒了，不必再从位掩码反推。
+        log::info!("[ara] {} (document={})", graph_summary_of(&document), document.id);
         Ok(raw)
     }
 
