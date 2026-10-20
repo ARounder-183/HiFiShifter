@@ -33,6 +33,7 @@ fn empty_snapshots() -> Vec<PlaybackSnapshot> {
             origin_sample: 0,
             left: vec![],
             right: vec![],
+            covered: Vec::new(),
             _reservation: None,
         })
         .collect()
@@ -303,6 +304,7 @@ impl RenderInput {
                     origin_sample: (start * sample_rate as f64).round() as i64,
                     left,
                     right,
+                    covered: Vec::new(),
                     _reservation: Some(reservation),
                 });
                 continue;
@@ -322,6 +324,7 @@ impl RenderInput {
                 origin_sample: (start * sample_rate as f64).round() as i64,
                 left: samples.iter().step_by(2).copied().collect(),
                 right: samples.iter().skip(1).step_by(2).copied().collect(),
+                covered: Vec::new(),
                 _reservation: Some(reservation),
             });
         }

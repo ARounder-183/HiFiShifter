@@ -1346,6 +1346,9 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         loop_start: None,
         peak: [0.0; 2],
         closed: ClosedReason::Full,
+        coverage: std::array::from_fn(|_| 0..0),
+        coverage_len: 0,
+        coverage_overrun: false,
         _reservation: Some(reservation),
     })
 }
@@ -1737,6 +1740,9 @@ mod tests {
             loop_start: None,
             peak: [0.4; 2],
             closed: ClosedReason::Stopped,
+            coverage: std::array::from_fn(|_| 0..0),
+            coverage_len: 0,
+            coverage_overrun: false,
             _reservation: None,
         }
     }

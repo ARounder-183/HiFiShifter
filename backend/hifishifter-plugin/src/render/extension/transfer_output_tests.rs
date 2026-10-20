@@ -39,6 +39,7 @@ fn processed_snapshot() -> crate::render::snapshot::PlaybackSnapshot {
         origin_sample: 0,
         left: vec![0.1, 0.2],
         right: vec![0.1, 0.2],
+        covered: Vec::new(),
         _reservation: None,
     }
 }
@@ -1622,6 +1623,7 @@ fn the_snapshot_readiness_probe_uses_the_publisher_that_is_read() {
             origin_sample: 0,
             left: vec![0.1, 0.2],
             right: vec![0.1, 0.2],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();

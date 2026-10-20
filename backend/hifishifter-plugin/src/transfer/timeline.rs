@@ -117,6 +117,45 @@ impl<'a> Tape<'a> {
             })
     }
 
+    /// 带内这一段里，哪些帧是**真的从宿主样本拷过来的**。
+    ///
+    /// 【为什么渲染快照要问它】零不等于静音：起播窗口桥接、Gap 空洞、循环回卷裁缝
+    /// 都会在带内留下我们没拿到的帧。把它们按权重 1.0 输出就会盖掉宿主真实播放的
+    /// 原声 —— 那正是"起播 0.4~0.7 s 一次咔"的机理。
+    ///
+    /// 没有 coverage 的段（旧 sidecar / 测试夹具）按"整段都算录到了"处理，
+    /// 那正是既有语义。
+    fn covered_slices(
+        &self,
+        offset: usize,
+        frames: usize,
+    ) -> impl Iterator<Item = (&'a Segment, usize, usize)> + '_ {
+        let end = offset.saturating_add(frames);
+        self.segments
+            .iter()
+            .zip(&self.offsets)
+            .filter_map(move |(segment, base)| {
+                let base = *base;
+                let lo = offset.max(base);
+                let hi = end.min(base + segment.filled);
+                (lo < hi).then_some((*segment, lo - base, hi - base))
+            })
+            .flat_map(move |(segment, lo, hi)| {
+                // 没有记录、或槽位用尽时退化为"整段都算录到"（旧语义）。
+                let has = segment.coverage_len > 0 && !segment.coverage_overrun;
+                if !has {
+                    return Vec::from([(segment, lo, hi)]);
+                }
+                segment.coverage[..segment.coverage_len]
+                    .iter()
+                    .filter_map(move |range| {
+                        let a = lo.max(range.start);
+                        let b = hi.min(range.end);
+                        (a < b).then_some((segment, a, b))
+                    })
+                    .collect::<Vec<_>>()
+            })
+    }
     /// 带上这一段是否**全部**为零（任一声道非零即不是）。
     ///
     /// 【为什么必须看全部声道】此前只看第一条平面 —— 于是"只有右声道有内容"的一段
@@ -409,6 +448,9 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
     let reservation = crate::render::budget::global_budget().reserve(bytes)?;
     let mut left = vec![0.0_f32; frames];
     let mut right = vec![0.0_f32; frames];
+    // 【T1：宿主帧域的真实覆盖区间】只有"从宿主样本里拷过来"的帧才进这里。
+    // 空表示"整份快照都算录到了"（旧 sidecar / ARA 通路的既有语义）。
+    let mut covered: Vec<std::ops::Range<i64>> = Vec::new();
     for piece in pieces {
         let tape = &tapes[piece.tape];
         // 逐片按**它自己的**采样率换算到输出域（同率时是恒等，异率时按比例定位）。
@@ -416,7 +458,7 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
         let base = ((piece.span.start - start) as f64 * scale).round() as i64;
         let count = frames_of(&piece.span);
         let mut written = 0usize;
-        for (segment, lo, hi) in tape.slices(piece.offset, count) {
+        for (segment, lo, hi) in tape.covered_slices(piece.offset, count) {
             let Some(source_left) = segment.planes.first() else {
                 written += hi - lo;
                 continue;
@@ -434,6 +476,12 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
                     Some(plane) if plane.len() > local => plane[local],
                     _ => source_left[local],
                 };
+                // 记下"这一帧在宿主帧域属于我们"；相邻就地合并。
+                let host = start.saturating_add(target as i64);
+                match covered.last_mut() {
+                    Some(last) if last.end == host => last.end = host.saturating_add(1),
+                    _ => covered.push(host..host.saturating_add(1)),
+                }
             }
         }
     }
@@ -442,6 +490,7 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
         origin_sample: start,
         left,
         right,
+        covered,
         _reservation: Some(reservation),
     };
     // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
@@ -645,6 +694,9 @@ mod tests {
             loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
+            coverage: std::array::from_fn(|_| 0..0),
+            coverage_len: 0,
+            coverage_overrun: false,
             _reservation: None,
         }
     }

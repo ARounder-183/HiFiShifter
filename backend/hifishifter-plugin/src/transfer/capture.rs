@@ -177,12 +177,89 @@ pub(crate) struct Segment {
     /// 每声道峰值（绝对值的最大值）。
     pub peak: [f32; 2],
     pub closed: ClosedReason,
+    /// 本段**真正有宿主样本**的帧区间（段内相对帧、升序、不重叠；空 = 整段都有）。
+    ///
+    /// 【为什么必须有它】旧的隐含契约是"`span()` 之内都属于我们"，于是以下四类
+    /// **零**都会按权重 1.0 盖掉宿主原声，而它们全都是"我们没拿到样本"而不是
+    /// "录到静音"：① 起播窗口里宿主送来的静音块；② 窗口整段用静音桥接；
+    /// ③ 丢块造成的 Gap 空洞；④ 循环回卷裁掉尾巴后的接缝。
+    /// 用户听到的是"音乐消失 -> 静音 -> 硬起"这一下"咔"。
+    ///
+    /// 只有从宿主块里真正拷贝过样本的帧才登记；桥接、空洞、预卷一律不登记 ——
+    /// 于是"我们没有"会退回宿主原声，而原声正是那段时间里真实播放的内容。
+    /// 本段**真正有宿主样本**的帧区间（段内相对帧、升序、不重叠）。
+    ///
+    /// 【为什么是定长内联数组而不是 `Vec`】这一字段写在**音频线程**上：一次 `Vec`
+    /// push 就是一次分配，而 `audio_boundary_tests` 用计数器钉住"录制路径不得在
+    /// 音频线程上分配"。`COVERAGE_SLOTS = 8` 足够覆盖一段里的全部空洞（一段 8 秒，
+    /// 空洞只可能来自丢块与桥接，实测是个位数）；溢出时置 `coverage_overrun`，
+    /// 语义退化为"整段都算录到"（旧行为）—— 宁可少过滤，也不能分配。
+    pub coverage: [std::ops::Range<usize>; COVERAGE_SLOTS],
+    pub coverage_len: usize,
+    pub coverage_overrun: bool,
     /// 该段 PCM 占用的全局预算额度。
     ///
     /// 【为什么额度跟着段走而不是由 store 统一持有】段一旦封口就不再增长，
     /// 它的额度也就固定了。跟着段走意味着"丢弃一个段"立刻归还额度，
     /// 不需要 store 再维护一张并行的账。
     pub _reservation: Option<crate::render::budget::Reservation>,
+}
+
+/// 一段里能登记的覆盖区间个数上限。
+///
+/// 【为什么是 8】一段是 8 秒；空洞只来自丢块与桥接，两者在正常宿主上都是个位数。
+/// 8 给足余量，又不让 `Segment` 变得更大。
+pub(crate) const COVERAGE_SLOTS: usize = 8;
+
+/// 只保留 `limit` 之前（段内相对帧）的覆盖区间。
+///
+/// 【为什么单独一个函数】`trim_active_tail_exact`（resync 向后纠正）与容量封口都会让
+/// `filled` 收缩；coverage 必须**同时**收缩，否则输出侧会把已经裁掉的内容当成
+/// 真实录到的帧。零散区间就地裁剪，不分配。
+fn retain_before(coverage: &mut [std::ops::Range<usize>], len: &mut usize, limit: usize) {
+    let mut write = 0_usize;
+    for read in 0..*len {
+        let mut range = coverage[read].clone();
+        if range.start >= limit {
+            continue;
+        }
+        if range.end > limit {
+            range.end = limit;
+        }
+        coverage[write] = range;
+        write += 1;
+    }
+    *len = write;
+}
+
+/// 把一段帧并进覆盖集合（相邻就合并）。
+///
+/// 返回 false 表示**槽位用尽**：调用方必须把该段标记成 overrun（语义退化为
+/// "整段都算录到"），而不是分配一个 `Vec` —— 这里是音频线程。
+fn cover_range(
+    coverage: &mut [std::ops::Range<usize>],
+    len: &mut usize,
+    range: std::ops::Range<usize>,
+) -> bool {
+    if range.is_empty() {
+        return true;
+    }
+    if *len == 0 {
+        coverage[0] = range;
+        *len = 1;
+        return true;
+    }
+    let last = *len - 1;
+    if coverage[last].end == range.start {
+        coverage[last].end = range.end;
+        return true;
+    }
+    if *len >= coverage.len() {
+        return false;
+    }
+    coverage[*len] = range;
+    *len += 1;
+    true
 }
 
 impl Segment {
@@ -1787,6 +1864,11 @@ impl Capture {
         if end > active.filled {
             return false;
         }
+        // 【T1：覆盖写入同样是"真的拷了样本"】上升沿允许用新内容覆盖停播时写过的
+        // 同几何块；那段因此变成真实录到的内容，必须并进 coverage。
+        let transcribed = block.planes.iter().any(|plane| {
+            plane.is_some_and(|plane| plane.len() >= skip.saturating_add(frames))
+        });
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[offset..end];
             match block.planes.get(channel).copied().flatten() {
@@ -1795,6 +1877,11 @@ impl Capture {
                 }
                 _ => target.fill(0.0),
             }
+        }
+        if transcribed
+            && !cover_range(&mut active.coverage, &mut active.coverage_len, offset..end)
+        {
+            active.coverage_overrun = true;
         }
         // 峰值只服务 UI；覆盖后保守地重算整段峰值，避免显示一个已经不存在的峰值。
         for (channel, plane) in active.planes.iter().enumerate() {
@@ -1838,6 +1925,8 @@ impl Capture {
         let dropped = active.filled - keep;
         if let Some(active) = self.active.as_mut() {
             active.filled = keep;
+            // 【T1：与 `filled` 同步收缩】回卷裁掉的尾巴不再是真实录到的帧。
+            retain_before(&mut active.coverage, &mut active.coverage_len, keep);
         }
         self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
         self.expected_next = Some(from);
@@ -1880,6 +1969,9 @@ impl Capture {
         }
         let dropped = active.filled - keep;
         active.filled = keep;
+        // 【T1：被裁掉的帧不再是"录到了"】coverage 与 filled 必须同步收缩，
+        // 否则输出侧会把已经裁掉的内容当成真实录到的帧输出。
+        retain_before(&mut active.coverage, &mut active.coverage_len, keep);
         self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
         self.expected_next = Some(new_start);
         self.last_position = Some(new_start);
@@ -1926,9 +2018,20 @@ impl Capture {
     /// 用静音桥接 `frames` 帧（resync 向前纠正）。
     ///
     /// 返回是否全部写入；备用缓冲不够时返回 false，调用方退回"新开段"的旧行为。
+    /// **只推进记账，不写样本**：起播窗口里我们没录到的那一段（T2）。
+    ///
+    /// 【为什么不再写零】旧实现在这里 `fill(0.0)`，于是"我们没拿到样本"被写成
+    /// "我们录到了静音"，并按覆盖权重 1.0 盖掉宿主原声 —— 用户听到的是
+    /// "音乐消失 -> 0.4~0.66 s 静音 -> 内容硬起"这一下"咔"，且它的长度随宿主
+    /// 在钉住窗口里到底送了多少块而浮动。
+    ///
+    /// 几何仍然照常推进：`filled` / `expected_next` 必须保持，否则后面所有帧的位置
+    /// 都会错。只是这些帧**不进 coverage**，输出侧于是回退到宿主原声 ——
+    /// 而那正是这段时间里真实播放的内容。
+    ///
     /// 桥接帧计入 `captured_frames`（它是 take 的一部分），也计入
     /// `resync_bridged_frames`（诊断）。
-    fn bridge_silence(&mut self, frames: usize) -> bool {
+    fn advance_without_samples(&mut self, frames: usize) -> bool {
         let mut remaining = frames;
         while remaining > 0 {
             if self
@@ -1961,6 +2064,9 @@ impl Capture {
                 return false;
             }
             let start = active.origin.saturating_add(active.filled as i64);
+            // 【为什么仍然清零这一片】下一段内容可能不会写满整片，而残留的旧采样
+            // 会在被 coverage 排除之后**不再可能被读到**；但万一区间被误登记，
+            // 残留就是随机的爆音。清零让"没被覆盖"与"没有被写"都无法变成声音。
             for plane in active.planes.iter_mut() {
                 plane[active.filled..active.filled + writable].fill(0.0);
             }
@@ -1975,7 +2081,6 @@ impl Capture {
         }
         true
     }
-
     /// 对 active 末尾 `frames` 帧做线性淡出（桥接前的去咔）。
     fn fade_active_tail_out(&mut self, frames: usize) {
         let Some(active) = self.active.as_mut() else {
@@ -2061,7 +2166,7 @@ impl Capture {
                             && (delta as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
                         {
                             self.fade_active_tail_out(DECLICK_FRAMES);
-                            resync_continued = self.bridge_silence(delta as usize);
+                            resync_continued = self.advance_without_samples(delta as usize);
                         } else if delta < 0 && delta.unsigned_abs() <= limit {
                             resync_continued = self.trim_active_tail_exact(start);
                         }
@@ -2106,7 +2211,7 @@ impl Capture {
                                 self.begin_segment_at(anchor, rate);
                                 self.resync_bridged_frames =
                                     self.resync_bridged_frames.saturating_add(gap as u64);
-                                resync_continued = self.bridge_silence(gap as usize);
+                                resync_continued = self.advance_without_samples(gap as usize);
                                 self.bridged_window_blocks =
                                     self.bridged_window_blocks.saturating_add(1);
                             }
@@ -2294,6 +2399,16 @@ impl Capture {
             self.silent_blocks = self.silent_blocks.saturating_add(1);
         }
         let written_offset = active.filled;
+        // 【T1：只有真正从宿主样本里拷过来的帧才算"录到了"】
+        //
+        // 判据是**平面可用且真的拷了样本**，而不是"帧数为正"：
+        //   * 宿主标记静音、或平面比声名的帧数短 —— 连样本都没有，更不能算录到；
+        //   * 起播窗口里宿主送来的是**真实音频但那段时间属于窗口**—— 那种由上面的
+        //     `advance_without_samples` 处理，它不登记 coverage。
+        // 只有"有声明的平面且拷到了样本"才把这段并进 coverage；其余回退宿主原声。
+        let transcribed = block.planes.iter().any(|plane| {
+            plane.is_some_and(|plane| plane.len() >= skip + writable)
+        });
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[active.filled..active.filled + writable];
             match block.planes.get(channel).copied().flatten() {
@@ -2315,6 +2430,16 @@ impl Capture {
             active.peak[channel] = active.peak[channel].max(peak);
         }
         active.filled += writable;
+        if transcribed
+            && !cover_range(
+                &mut active.coverage,
+                &mut active.coverage_len,
+                written_offset..written_offset + writable,
+            )
+        {
+            // 槽位用尽：退化为"整段都算录到"（旧语义）。不分配 —— 这是音频线程。
+            active.coverage_overrun = true;
+        }
         self.expected_next = Some(start + writable as i64);
         self.last_written = Some(raw);
         self.captured_frames = self.captured_frames.saturating_add(writable as u64);
@@ -2367,7 +2492,6 @@ impl Capture {
         }
     }
 }
-
 /// 封口：把平面截到实际写入长度，让"平面长度 == 段长度"成为交付不变式。
 ///
 /// 【为什么 `truncate` 可以在音频线程做】对 `f32` 它只改长度字段，不释放、不分配、
@@ -2428,6 +2552,9 @@ mod tests {
             loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Full,
+            coverage: std::array::from_fn(|_| 0..0),
+            coverage_len: 0,
+            coverage_overrun: false,
             _reservation: None,
         }
     }

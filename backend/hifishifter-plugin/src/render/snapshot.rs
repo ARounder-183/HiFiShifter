@@ -19,6 +19,15 @@ pub(crate) struct PlaybackSnapshot {
     pub left: Vec<f32>,
     /// worker逐bit校验相同后可省去右平面；空右平面表示读取左平面，不是右侧静音。
     pub right: Vec<f32>,
+    /// 本快照**真的录到/渲染出**的宿主帧区间（升序、不重叠）。
+    ///
+    /// 【为什么必须有它】旧契约是"`[origin, origin+len)` 全属于我们"，于是快照里的
+    /// 任何零都按权重 1.0 盖掉宿主原声。而零的来源只有一半是"录到了静音"，另一半是
+    /// "我们根本没拿到样本"（起播窗口桥接、Gap 空洞、循环回卷裁缝）。后者必须回退
+    /// 宿主原声 —— 那正是那段时间里真实播放的内容。
+    ///
+    /// **空 = 整份快照都算覆盖**（旧语义，供 ARA 通路与既有测试保持行为）。
+    pub covered: Vec<std::ops::Range<i64>>,
     pub _reservation: Option<super::budget::Reservation>,
 }
 
@@ -201,6 +210,7 @@ pub(crate) fn mix_plain_regions(
             origin_sample: 0,
             left: vec![],
             right: vec![],
+            covered: Vec::new(),
             _reservation: None,
         });
     }
@@ -212,6 +222,7 @@ pub(crate) fn mix_plain_regions(
         origin_sample: origin,
         left: vec![0.0; frames],
         right: vec![0.0; frames],
+        covered: Vec::new(),
         _reservation: Some(reservation),
     };
     for region in regions {
@@ -752,6 +763,18 @@ impl SnapshotPublisher {
         // 片段）若用固定的 20 ms 淡化，整段都会落在过渡带里 —— 那等于把内容整体
         // 衰减。夹到半长保证"过渡带 + 稳定段"始终成立。
         let start_edge = COVERAGE_START_FADE_FRAMES.min(span / 2).max(1);
+        // 【T1：真实覆盖边】没有 coverage 时只有首尾两条边（旧语义）；有 coverage 时
+        // 每个"未覆盖 → 覆盖"的翻转点都是边。空洞的两侧都是宿主原声，本身不混合；
+        // 要淡化的只有"原声 → 处理结果"这一种翻转。
+        let holes: Vec<std::ops::Range<i64>> = snapshot
+            .map(|snapshot| snapshot.covered.as_slice())
+            .unwrap_or(&[])
+            .windows(2)
+            .filter_map(|pair| {
+                let (left, right) = (&pair[0], &pair[1]);
+                (left.end < right.start).then(|| left.end..right.start)
+            })
+            .collect();
         let edge_gain = |position: i64| -> (f32, f32) {
             const END: i64 = COVERAGE_EDGE_FADE_FRAMES;
             let start = start_edge;
@@ -787,12 +810,48 @@ impl SnapshotPublisher {
                 let angle = t * std::f32::consts::FRAC_PI_2;
                 return (angle.cos(), angle.sin());
             }
+            // 【T1：空洞的"内容重新开始"那一侧也要淡化】它同样是
+            // "宿主原声 → 处理结果"的切换。用同一条等功率带（64 帧），
+            // 起点在空洞结束处。空洞内部本身不混合（两侧都是原声）。
+            for hole in &holes {
+                if position >= hole.end && position < hole.end + END {
+                    let t = ((position - hole.end) as f32 / END as f32).clamp(0.0, 1.0);
+                    let angle = t * std::f32::consts::FRAC_PI_2;
+                    return (angle.cos(), angle.sin());
+                }
+            }
             (0.0, 1.0)
+        };
+        // 【T1：这一帧真的属于我们吗】区间未覆盖 ⇒ 直接返回宿主原声。
+        //
+        // 未覆盖的三种来源都不会有可听内容：起播窗口桥接、Gap 空洞、循环回卷裁缝。
+        // 快照里那些位置是零（防御性清零），按旧契约会被当成"录到的静音"输出 ——
+        // 于是用户听到"音乐消失 -> 静音 -> 硬起"这一下"咔"。
+        //
+        // **空 covered = 整份覆盖**（旧语义）：ARA 通路零改动，旧 sidecar 与测试夹具
+        // 也照旧。
+        let is_covered = |global: i64| -> bool {
+            let Some(snapshot) = snapshot else {
+                return false;
+            };
+            if snapshot.covered.is_empty() {
+                return true;
+            }
+            // 区间升序不重叠 ⇒ 二分。
+            let index = snapshot.covered.partition_point(|range| range.end <= global);
+            snapshot
+                .covered
+                .get(index)
+                .is_some_and(|range| range.start <= global)
         };
         let mix = |channel: usize, offset: usize| -> f32 {
             let global = sample.saturating_add(offset as i64);
             let old = input_at(channel, offset).unwrap_or(0.0);
             if snapshot.is_none() {
+                return old;
+            }
+            // 【T1】先问覆盖，再问快照：没有覆盖 ⇒ 宿主原声。
+            if !is_covered(global) {
                 return old;
             }
             // 【为什么没有快照时必须**直接**返回输入，而不是"用输入当 current 再混合"】
@@ -940,19 +999,24 @@ mod tests {
     #[test]
     fn mono_compaction_refunds_duplicate_pcm_and_preserves_stereo_samples() {
         let budget = super::super::budget::global_budget();
+        // 【为什么按增量而不是绝对值】预算是**进程级**的，而 `cargo test` 默认并行跑
+        // 同一个进程里的多个用例。任何并发用例持有的快照都会让 `used()` 高于本用例的
+        // 基线 —— 断言绝对相等等于让本用例随机红。本用例要钉住的是**自己的**额度
+        // 被正确退还，所以只比较增量。
         let baseline = budget.used();
         let mut snapshot = PlaybackSnapshot {
             sample_rate: 4,
             origin_sample: 0,
             left: vec![0.125, -0.25],
             right: vec![0.125, -0.25],
+            covered: Vec::new(),
             _reservation: Some(budget.reserve(16).unwrap()),
         };
         snapshot.compact_mono().unwrap();
         assert!(snapshot.right.is_empty());
-        assert_eq!(budget.used(), baseline + 8);
+        assert_eq!(budget.used() - baseline, 8);
         snapshot.compact_mono().unwrap();
-        assert_eq!(budget.used(), baseline + 8);
+        assert_eq!(budget.used() - baseline, 8, "幂等：第二次 compact 不得再退一次");
         let publisher = SnapshotPublisher::new(16);
         publisher.publish(snapshot).unwrap();
         let mut left = [9_f32; 3];
@@ -968,12 +1032,13 @@ mod tests {
         assert_eq!(left, [0.125, -0.25, 0.]);
         assert_eq!(right, left);
         drop(publisher);
-        assert_eq!(budget.used(), baseline);
+        assert_eq!(budget.used(), baseline, "发布器析构必须归还本用例的额度");
         let mut stereo = PlaybackSnapshot {
             sample_rate: 4,
             origin_sample: 0,
             left: vec![0., 1.],
             right: vec![-0., 1.],
+            covered: Vec::new(),
             _reservation: None,
         };
         stereo.compact_mono().unwrap();
@@ -1035,6 +1100,7 @@ mod tests {
                 origin_sample: 0,
                 left: source.clone(),
                 right: source.clone(),
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1133,6 +1199,7 @@ mod tests {
                 origin_sample: 2,
                 left: vec![0.2, 0.3],
                 right: vec![0.4, 0.5],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1172,6 +1239,7 @@ mod tests {
                 origin_sample: 0,
                 left: vec![0.2, 0.4, 0.6, 0.8],
                 right: vec![0.4, 0.8, 1.2, 1.6],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1225,6 +1293,7 @@ mod tests {
                 origin_sample: 0,
                 left: vec![0.2, 0.4, 0.6],
                 right: vec![0.4, 0.8, 1.2],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1268,6 +1337,7 @@ mod tests {
             origin_sample: 0,
             left: vec![1.0, 2.0],
             right: vec![3.0, 4.0],
+            covered: Vec::new(),
             _reservation: None,
         };
         publisher.publish(snapshot()).unwrap();
@@ -1290,6 +1360,7 @@ mod tests {
                     origin_sample: 0,
                     left: vec![number as f32; 2],
                     right: vec![number as f32; 2],
+                    covered: Vec::new(),
                     _reservation: None,
                 })
                 .unwrap();
@@ -1313,6 +1384,7 @@ mod tests {
             // 左右不同 ⇒ 不触发 compact_mono，每份占 16 字节，预算 32 = 两份。
             left: vec![1.; 2],
             right: vec![2.; 2],
+            covered: Vec::new(),
             _reservation: None,
         };
         publisher.publish(snapshot()).unwrap();
@@ -1343,6 +1415,7 @@ mod tests {
             origin_sample: 0,
             left: vec![1.; 2],
             right: vec![1.; 2],
+            covered: Vec::new(),
             _reservation: None,
         };
         publisher.publish(snapshot()).unwrap();
@@ -1404,6 +1477,7 @@ mod tests {
                     origin_sample: 0,
                     left: vec![0.25; 2],
                     right: vec![-0.5; 2],
+                    covered: Vec::new(),
                     _reservation: None,
                 })
                 .expect("publish stays within the concurrent budget");
@@ -1431,6 +1505,7 @@ mod tests {
                 origin_sample: 2,
                 left: vec![0.2, 0.3],
                 right: vec![0.4, 0.5],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1452,6 +1527,122 @@ mod tests {
         assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
     }
 
+    /// **T1：空洞里的帧回退宿主原声，而不是快照里的零。**
+    ///
+    /// 【为什么这是问题一的第二主回归】起播窗口桥接、Gap 空洞、循环回卷裁缝都会在
+    /// take 内留下"我们没拿到样本"的帧。旧契约把它们当成"录到的静音"按权重 1.0
+    /// 输出 —— 用户听到"音乐消失 -> 0.4~0.66 s 静音 -> 硬起"这一下"咔"。
+    /// 现在覆盖是显式的：空洞区间一律取宿主原声。
+    #[test]
+    fn a_hole_inside_the_take_falls_back_to_the_host_signal() {
+        // 覆盖 [0, 4096) 与 [4160, 8192)，中间 [4096, 4160) 是一个 64 帧空洞。
+        // 【为什么是 8192 帧】起点淡化带是 `COVERAGE_START_FADE_FRAMES`（960 帧），
+        // 快照必须远长于两条淡化带，否则"空洞前"会落在起点淡化里，测不到稳定段。
+        // 【为什么用默认 publisher】`new(4096)` 的限额是 4096 **字节**，装不下这份 stereo 快照。
+        let publisher = SnapshotPublisher::default();
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 48_000,
+                origin_sample: 0,
+                left: vec![0.2_f32; 8192],
+                right: vec![0.2_f32; 8192],
+                covered: vec![0..4096, 4160..8192],
+                _reservation: None,
+            })
+            .unwrap();
+        let frames = 8192;
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = vec![7.0_f32; frames];
+        let input_right = vec![7.0_f32; frames];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe {
+            publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
+        });
+        // 空洞正中央必须是纯宿主原声（既不是零，也不是快照）。
+        assert!(
+            (left[4128] - 7.0).abs() < 1e-6,
+            "hole must fall back to the host signal (saw {})",
+            left[4128]
+        );
+        // 空洞之前与之后必须是快照（稳定段内权重 1.0）。
+        assert!((left[2048] - 0.2).abs() < 1e-6, "before the hole the snapshot wins");
+        assert!((left[6144] - 0.2).abs() < 1e-6, "after the hole the snapshot wins");
+    }
+
+    /// **T1：空洞结束、内容重新开始的那一侧要淡化，两侧不能阶跃。**
+    #[test]
+    fn a_content_onset_after_a_hole_is_crossfaded() {
+        let publisher = SnapshotPublisher::default();
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 48_000,
+                origin_sample: 0,
+                left: vec![0.2_f32; 512],
+                right: vec![0.2_f32; 512],
+                covered: vec![256..512],
+                _reservation: None,
+            })
+            .unwrap();
+        let frames = 512;
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = vec![7.0_f32; frames];
+        let input_right = vec![7.0_f32; frames];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe {
+            publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
+        });
+        assert!((left[128] - 7.0).abs() < 1e-6, "inside the hole the dry signal wins");
+        let step = (left[257] - left[256]).abs();
+        assert!(step < 1.0, "the onset must ramp, not step (saw {step})");
+        assert!((left[400] - 0.2).abs() < 1e-6, "after the ramp the snapshot wins");
+    }
+
+    /// **T1：没有 coverage 时保持"整份快照都算录到"的旧语义。**
+    ///
+    /// 【为什么必须保留】ARA 通路与旧 sidecar 不产生 coverage；把它们也过滤一遍会
+    /// 改变既有语义。空集合是唯一的"我不知道"表达，按旧行为处理。
+    #[test]
+    fn an_empty_coverage_keeps_the_whole_clip_semantics() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 2,
+                left: vec![0.2, 0.3],
+                right: vec![0.4, 0.5],
+                covered: Vec::new(),
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [0.0_f32; 4];
+        let mut right = [0.0_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = [7.0_f32; 4];
+        let input_right = [8.0_f32; 4];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe { publisher.copy_block_layered(0, 4, &mut bus, 4, &input) });
+        assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
+        assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
+    }
     /// **快照覆盖边界必须交叉淡化，而不是阶跃。**
     ///
     /// 【为什么这是问题一的主回归】快照起点可以落在任意宿主块中间。旧实现逐帧
@@ -1466,6 +1657,7 @@ mod tests {
                 origin_sample: 64,
                 left: vec![0.2_f32; 512],
                 right: vec![0.2_f32; 512],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1543,6 +1735,7 @@ mod tests {
                 origin_sample: 0,
                 left: vec![1.0, 2.0, 3.0, 4.0],
                 right: vec![5.0, 6.0, 7.0, 8.0],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();
@@ -1570,6 +1763,7 @@ mod tests {
                 origin_sample: 2,
                 left: vec![0.2, 0.3],
                 right: vec![0.4, 0.5],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();

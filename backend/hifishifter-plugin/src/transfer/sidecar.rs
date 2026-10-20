@@ -43,7 +43,8 @@ const MAGIC: &[u8; 8] = b"HFSXFER1";
 /// 载荷版本。
 ///
 /// v2 在每段几何后多写一个 `loop_start`（`i64::MIN` = 非循环段）；v1 仍可读。
-const VERSION: u32 = 2;
+/// v3 再多写一段 coverage（段内相对帧的覆盖区间）；v1/v2 仍可读，读出来是"整段都算录到"。
+const VERSION: u32 = 3;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -80,6 +81,17 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
         payload.extend_from_slice(&channels.to_le_bytes());
         payload.extend_from_slice(&(segment.filled as u64).to_le_bytes());
         payload.extend_from_slice(&segment.loop_start.unwrap_or(i64::MIN).to_le_bytes());
+        // v3：覆盖区间。槽位用尽时写 0 个区间 —— 读回来就是"整段都算录到"。
+        let ranges = if segment.coverage_overrun {
+            &segment.coverage[..0]
+        } else {
+            &segment.coverage[..segment.coverage_len.min(segment.coverage.len())]
+        };
+        payload.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+        for range in ranges {
+            payload.extend_from_slice(&(range.start as u32).to_le_bytes());
+            payload.extend_from_slice(&(range.end as u32).to_le_bytes());
+        }
         for plane in &segment.planes {
             for sample in plane {
                 payload.extend_from_slice(&sample.to_le_bytes());
@@ -146,6 +158,37 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         } else {
             None
         };
+        // v3：覆盖区间。按声明长度读，越界就是文件损坏。
+        // 槽位用尽 ⇒ 整段都算录到（旧语义）：宁可少过滤，也不能分配。
+        let mut coverage = std::array::from_fn(|_| 0_usize..0_usize);
+        let mut coverage_len = 0_usize;
+        if version >= 3 {
+            let count = cursor.u32()?;
+            let count = usize::try_from(count).unwrap_or(usize::MAX);
+            if count > frames as usize {
+                return Err(format!(
+                    "{}: implausible coverage range count ({count} > {frames})",
+                    path.display()
+                ));
+            }
+            for _ in 0..count {
+                let start = cursor.u32()? as usize;
+                let end = cursor.u32()? as usize;
+                if start >= end || end > frames as usize {
+                    return Err(format!(
+                        "{}: invalid coverage range {start}..{end} (frames={frames})",
+                        path.display()
+                    ));
+                }
+                if coverage_len >= super::capture::COVERAGE_SLOTS {
+                    // 超出版本允许的槽位：整段都算录到。
+                    coverage_len = 0;
+                    break;
+                }
+                coverage[coverage_len] = start..end;
+                coverage_len += 1;
+            }
+        }
         if !(1..=2).contains(&channels) || frames == 0 || frames > MAX_FRAMES {
             return Err(format!(
                 "{}: implausible segment shape (channels={channels}, frames={frames})",
@@ -175,6 +218,9 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             loop_start,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
+            coverage,
+            coverage_len,
+            coverage_overrun: false,
             _reservation: None,
         });
     }
@@ -250,6 +296,9 @@ mod tests {
             loop_start: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
+            coverage: std::array::from_fn(|_| 0..0),
+            coverage_len: 0,
+            coverage_overrun: false,
             _reservation: None,
         }
     }

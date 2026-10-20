@@ -1234,6 +1234,7 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
                 origin_sample: 0,
                 left: vec![0.25; 4],
                 right: vec![0.5; 4],
+                covered: Vec::new(),
                 _reservation: None,
             })
             .unwrap();

@@ -49,6 +49,7 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
             origin_sample: 0,
             left: vec![0.9; 4],
             right: vec![0.9; 4],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();
@@ -187,6 +188,7 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
             origin_sample: 10,
             left: vec![0.1, 0.2],
             right: vec![0.3, 0.4],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();
@@ -412,6 +414,7 @@ fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
             origin_sample: 0,
             left: vec![0.25; 4],
             right: vec![0.5; 4],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();
@@ -476,6 +479,7 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
             origin_sample: 0,
             left: vec![0.25; 4],
             right: vec![0.5; 4],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();
@@ -1165,6 +1169,7 @@ fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
             origin_sample: 0,
             left: vec![0.7; 4],
             right: vec![0.7; 4],
+            covered: Vec::new(),
             _reservation: None,
         })
         .unwrap();
