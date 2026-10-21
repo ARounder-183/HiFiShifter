@@ -734,23 +734,35 @@ impl SnapshotPublisher {
             let b = at(base + 1.0).unwrap_or(a);
             Some(a + (b - a) * frac)
         };
-        // 覆盖边界（宿主帧域）。快照外沿是"宿主原声 ↔ 处理结果"的切换点；
-        // 它可能落在任意块中间，必须在边界带内交叉淡化，否则就是一次波形阶跃。
-        // 【T21：边带也在**宿主帧域**里比较】`origin_sample` 是快照帧，而下面逐帧
-        // 求值用的是宿主帧（`global`）。此前直接把它当宿主帧用，非原生率下边带整体
-        // 错位 `origin*(1-ratio)` 帧 —— 覆盖率边沿因此是一次硬切。
+        // 【T-S1-2：覆盖边界一律在**快照帧域**里算，且锚在真实的第一个/最后一个覆盖帧】
+        //
+        // 快照外沿是"宿主原声 ↔ 处理结果"的切换点；它可能落在任意块中间，必须在边界
+        // 带内交叉淡化，否则就是一次波形阶跃。
+        //
+        // 【为什么不再用宿主帧】`origin_sample` 是快照帧，而 `global` 是宿主帧。此前
+        // 把两者直接相减/相加，非原生率下边带整体错位 `origin*(1-ratio)` 帧 —— 覆盖
+        // 边沿因此是一次硬切。现在整块逻辑统一在快照帧域：`snapshot_frame(offset)`
+        // 把宿主帧换算成快照帧，覆盖表、空洞、边带全部用它。
+        //
+        // 【为什么锚点必须是"第一个覆盖帧"而不是"快照起点"】起播窗口的桥接会在素材
+        // 开头留下一段**我们没录到**的洞。那时快照起点离第一个覆盖帧已有 0.4~0.7 s，
+        // 按快照起点算的上升斜坡**早就走完**了 —— 用户听到的仍是内容起点那一下硬起。
+        // 锚在第一个覆盖帧上，斜坡才真正落在"原声 → 处理结果"的切换处。
+        let snapshot_frame = |offset: usize| -> i64 {
+            let global = sample.saturating_add(offset as i64);
+            (global as f64 * ratio).round() as i64
+        };
         let (coverage_start, coverage_end) = snapshot.map_or((i64::MAX, i64::MIN), |snapshot| {
-            let host_len = if resampling {
-                (snapshot.left.len() as f64 / ratio).ceil() as i64
-            } else {
-                snapshot.left.len() as i64
-            };
-            let origin_host = if resampling {
-                (snapshot.origin_sample as f64 / ratio).round() as i64
-            } else {
-                snapshot.origin_sample
-            };
-            (origin_host, origin_host.saturating_add(host_len))
+            let origin = snapshot.origin_sample;
+            let mut start = origin;
+            let mut end = origin.saturating_add(snapshot.left.len() as i64);
+            // 有覆盖表时进一步收到真实的第一个/最后一个覆盖帧（表已升序不重叠）。
+            if let (Some(first), Some(last)) = (snapshot.covered.first(), snapshot.covered.last())
+            {
+                start = start.max(first.start);
+                end = end.min(last.end);
+            }
+            (start, end)
         });
         // 【T16：两条边用**不同的宽度**与**等功率**权重】
         //
@@ -885,7 +897,7 @@ impl SnapshotPublisher {
         //
         // **空 covered = 整份覆盖**（旧语义）：ARA 通路零改动，旧 sidecar 与测试夹具
         // 也照旧。
-        let is_covered = |global: i64| -> bool {
+        let is_covered = |frame: i64| -> bool {
             let Some(snapshot) = snapshot else {
                 return false;
             };
@@ -895,11 +907,11 @@ impl SnapshotPublisher {
             // 区间升序不重叠 ⇒ 二分。
             let index = snapshot
                 .covered
-                .partition_point(|range| range.end <= global);
+                .partition_point(|range| range.end <= frame);
             snapshot
                 .covered
                 .get(index)
-                .is_some_and(|range| range.start <= global)
+                .is_some_and(|range| range.start <= frame)
         };
         let mix = |channel: usize, offset: usize| -> f32 {
             let global = sample.saturating_add(offset as i64);
@@ -908,7 +920,9 @@ impl SnapshotPublisher {
                 return old;
             }
             // 【T1】先问覆盖，再问快照：没有覆盖 ⇒ 宿主原声。
-            if !is_covered(global) {
+            // 覆盖表在**快照帧域**，所以这一帧也要先换算（见 `snapshot_frame`）。
+            let frame = snapshot_frame(offset);
+            if !is_covered(frame) {
                 return old;
             }
             // 【为什么没有快照时必须**直接**返回输入，而不是"用输入当 current 再混合"】
@@ -919,7 +933,7 @@ impl SnapshotPublisher {
             let Some(current) = snapshot_at(channel, offset) else {
                 return old;
             };
-            let (out_gain, in_gain) = edge_gain(global);
+            let (out_gain, in_gain) = edge_gain(frame);
             if in_gain <= 0.0 {
                 old
             } else if out_gain <= 0.0 {
@@ -1024,6 +1038,7 @@ mod tests {
         let sources = HashMap::from([(
             r.audio_source_persistent_id.clone(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![vec![0.1; 4]],
                 version: 0,
@@ -1135,6 +1150,7 @@ mod tests {
         let sources = [(
             r.audio_source_persistent_id.clone(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 2,
                 planes: vec![vec![0.0, 1.0], vec![1.0, 0.0]],
                 version: 0,
@@ -1201,6 +1217,7 @@ mod tests {
         let sources = [(
             r.audio_source_persistent_id.clone(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 4,
                 planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
                 version: 0,
@@ -1235,6 +1252,7 @@ mod tests {
         let sources = [(
             r.audio_source_persistent_id.clone(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 8,
                 planes: vec![vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]],
                 version: 0,
@@ -1646,6 +1664,105 @@ mod tests {
         assert!(
             (left[6144] - 0.2).abs() < 1e-6,
             "after the hole the snapshot wins"
+        );
+    }
+
+    /// **起播斜坡必须锚在第一个覆盖帧上，而不是快照起点。**
+    ///
+    /// 【为什么这是"起播 0.4~0.7 s 必有一次咔"的最后一环】起播窗口的桥接会在素材
+    /// 开头留下一段我们没录到的洞。那时快照起点离第一个覆盖帧已有 0.4~0.7 s，而
+    /// 上升斜坡是按**快照起点**算的 —— 于是它早就走完了，切换处仍然是一次从零到
+    /// 满幅的硬起。用户听到的正是那一下"咔"。
+    ///
+    /// 本用例把快照内容全填 0（模拟"我们没录到"），宿主原声是常量 7。若斜坡锚对了，
+    /// 第一个覆盖帧处必须仍是**纯原声**，并在一个淡化带之后降到 0。
+    #[test]
+    fn the_start_ramp_anchors_on_the_first_covered_frame() {
+        let frames = 8192;
+        let publisher = SnapshotPublisher::default();
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 48_000,
+                origin_sample: 0,
+                left: vec![0.0_f32; frames],
+                right: vec![0.0_f32; frames],
+                // 前 4096 帧是洞（起播窗口的形状），之后才是我们录到的。
+                covered: vec![4096..8192],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = vec![7.0_f32; frames];
+        let input_right = vec![7.0_f32; frames];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe {
+            publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
+        });
+        // 洞内：纯宿主原声。
+        assert!((left[1000] - 7.0).abs() < 1e-6, "the hole plays the host signal");
+        // 第一个覆盖帧：斜坡的 t=0，必须仍是纯原声（锚错的话这里已经是 0）。
+        assert!(
+            (left[4096] - 7.0).abs() < 1e-3,
+            "the ramp must start at the first covered frame (saw {})",
+            left[4096]
+        );
+        // 一个淡化带之后：完全是快照内容。
+        assert!(
+            left[4096 + 960].abs() < 1e-3,
+            "a full fade band later the snapshot owns the signal (saw {})",
+            left[4096 + 960]
+        );
+    }
+
+    /// **洞的入口不能产生阶跃。**
+    ///
+    /// 【为什么用"相邻样本最大差"当判据】"咔"的物理定义就是一次波形阶跃。把它写成
+    /// 一个可断言的数之后，"这里有没有咔"不再需要靠耳朵。宿主原声是常量、快照是零，
+    /// 所以任何超过阈值的相邻差都只可能来自边界处理本身。
+    #[test]
+    fn a_hole_never_produces_a_step() {
+        let frames = 8192;
+        let publisher = SnapshotPublisher::default();
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 48_000,
+                origin_sample: 0,
+                left: vec![0.0_f32; frames],
+                right: vec![0.0_f32; frames],
+                covered: vec![4096..8192],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        let input_left = vec![7.0_f32; frames];
+        let input_right = vec![7.0_f32; frames];
+        let input = [Some(&input_left[..]), Some(&input_right[..])];
+        assert!(unsafe {
+            publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
+        });
+        // 只看覆盖边界那一小段（4096 起的两个淡化带），那里的变化必须是斜坡。
+        let boundary = &left[4096..4096 + 1920];
+        let step = boundary
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            step < 0.05,
+            "a covered edge must not step (largest adjacent delta {step})"
         );
     }
 

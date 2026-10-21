@@ -156,6 +156,36 @@ impl<'a> Tape<'a> {
                     .collect::<Vec<_>>()
             })
     }
+    /// 带上哪些帧是**真的从宿主样本里拷过来的**（带内帧域，升序、不重叠）。
+    ///
+    /// 【为什么需要它】`raw_tape` 一直把覆盖如实发布给播放侧（洞的位置回退宿主原声），
+    /// 但**处理结果**读的是 `concat_planes()` —— 洞在那里就是数字零，覆盖信息**不随源
+    /// 传递**。于是"我们没录到"在原始磁带里是"不是我们的"，在处理结果里却变成
+    /// "我们录到的静音"，播放时既不回退也不淡化，洞的两侧各是一次硬切。
+    ///
+    /// 这份读数就是那条断链的接线端：它跟着源走到渲染输入，再走到发布快照。
+    ///
+    /// 空 = "整份都算录到了"（旧语义，也是没有覆盖记录的段的语义）。
+    pub(crate) fn covered_ranges(&self) -> Vec<Range<usize>> {
+        let mut covered: Vec<Range<usize>> = Vec::new();
+        for (segment, base) in self.segments.iter().zip(&self.offsets) {
+            let has = segment.coverage_len > 0 && !segment.coverage_overrun;
+            if !has {
+                // 没有记录（旧 sidecar / 测试夹具）：整段都算录到。
+                push_merged(&mut covered, *base..*base + segment.filled);
+                continue;
+            }
+            for range in &segment.coverage[..segment.coverage_len] {
+                let start = (*base + range.start).min(*base + segment.filled);
+                let end = (*base + range.end).min(*base + segment.filled);
+                if start < end {
+                    push_merged(&mut covered, start..end);
+                }
+            }
+        }
+        covered
+    }
+
     /// 带上这一段是否**全部**为零（任一声道非零即不是）。
     ///
     /// 【为什么必须看全部声道】此前只看第一条平面 —— 于是"只有右声道有内容"的一段
@@ -188,6 +218,21 @@ impl<'a> Tape<'a> {
             }
         }
         planes
+    }
+}
+
+/// 把一个区间并进**升序、不重叠**的列表（相邻或相交就合并）。
+///
+/// 【为什么只有一处实现】`raw_tape` 与 `Tape::covered_ranges` 必须给出**同一种形状**的
+/// 覆盖：前者是播放侧读的那份，后者是渲染输入读的那份。两份实现必然漂移，而漂移的表现
+/// 是"听到的"与"算出来的"在洞的位置上差几个采样 —— 那正是最难查的一类。
+fn push_merged(covered: &mut Vec<Range<usize>>, range: Range<usize>) {
+    if range.start >= range.end {
+        return;
+    }
+    match covered.last_mut() {
+        Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+        _ => covered.push(range),
     }
 }
 
@@ -712,6 +757,71 @@ mod tests {
     /// 单 take 的便利投影。
     fn one(take: u64, segments: &[Segment]) -> (TimelineState, TimelineSummary) {
         build(segments, take, 120.0)
+    }
+
+    /// **桥接出来的洞不能被宣称成"我们录到的素材"。**
+    ///
+    /// 【为什么这是"起播 0.4~0.7 s 一次咔"的接线端】起播窗口里我们没拿到样本的帧
+    /// 在段里是数字零、在 `Segment::coverage` 里是**不存在**。`raw_tape` 一直如实发布
+    /// 这份覆盖，而**处理结果**读的是 `Tape::concat_planes()` —— 覆盖在那里丢了，于是
+    /// "我们没录到"被当成"我们录到的静音"按满幅输出，洞的两侧各是一次硬切。
+    ///
+    /// 本用例钉住 `Tape::covered_ranges()` 的形状：它必须与段的覆盖逐帧对应，
+    /// 且**不含**洞。
+    #[test]
+    fn a_bridged_hole_is_not_claimed_as_our_material() {
+        let mut with_hole = segment(0, &[0.5; 100]);
+        // 前 40 帧与后 40 帧是真拷来的样本，中间 20 帧是桥接出来的零。
+        with_hole.coverage[0] = 0..40;
+        with_hole.coverage[1] = 60..100;
+        with_hole.coverage_len = 2;
+        let segments = [with_hole];
+        let (tapes, dropped) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            tapes[0].covered_ranges(),
+            vec![0..40, 60..100],
+            "覆盖必须逐帧对应，洞不得被算进来"
+        );
+    }
+
+    /// 没有覆盖记录的段（旧 sidecar / 测试夹具）按"整段都算录到了"处理。
+    ///
+    /// 【为什么必须与上一条并存】覆盖是**可选**信息：把它当成"缺省为洞"会让所有
+    /// 旧工程与全部 ARA 通路变成"我们不拥有任何帧"，整条轨回退宿主原声。
+    #[test]
+    fn a_segment_without_a_coverage_record_counts_as_fully_ours() {
+        let segments = [segment(0, &[0.5; 100])];
+        let (tapes, _) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(tapes[0].covered_ranges(), vec![0..100]);
+    }
+
+    /// **多段拼接时覆盖必须平移到带内偏移并合并。**
+    ///
+    /// 【为什么要单独钉】源窗是**带内**坐标系：段 k 的带内起点等于前面所有段的帧数
+    /// 之和。覆盖若留在段内坐标，渲染侧会把第 2 段的洞画到第 1 段里去。
+    #[test]
+    fn coverage_follows_the_tape_offset_across_segments() {
+        let first = segment(0, &[0.5; 10]);
+        let mut second = segment(10, &[0.5; 10]);
+        second.coverage[0] = 5..10;
+        second.coverage_len = 1;
+        let segments = [first, second];
+        let (tapes, _) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(
+            tapes[0].covered_ranges(),
+            vec![0..10, 15..20],
+            "第二段的覆盖必须从带内偏移 10 起算"
+        );
     }
 
     /// **投影 clip 的外部边界必须有微淡化。**

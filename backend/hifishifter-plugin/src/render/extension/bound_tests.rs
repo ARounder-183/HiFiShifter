@@ -25,6 +25,7 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
         region.has_content_based_fade_at_head = true;
     }
     let pcm = Arc::new(super::super::source::SourcePcm {
+        covered: Vec::new(),
         sample_rate: 44100,
         planes: vec![vec![0.5; 44100]],
         version: 0,
@@ -903,6 +904,7 @@ fn linkable_document(
         document.edit_sources.lock_or_recover().insert(
             "ara://pcm".into(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes,
                 version: 0,
@@ -1373,6 +1375,7 @@ fn cold_restores_are_merged_document_wide_before_background_jobs_start() {
     }
     *document.timeline.lock_or_recover() = Some(timeline);
     let pcm = Arc::new(super::super::source::SourcePcm {
+        covered: Vec::new(),
         sample_rate: 44100,
         planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
         version: 0,
@@ -1585,6 +1588,7 @@ fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
     document.edit_sources.lock_or_recover().insert(
         "ara://pcm".into(),
         Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
             version: 0,
@@ -1755,6 +1759,7 @@ fn two_renderer_case(shared_identity: bool) {
     document.edit_sources.lock_or_recover().insert(
         "ara://pcm".into(),
         Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
             version: 0,

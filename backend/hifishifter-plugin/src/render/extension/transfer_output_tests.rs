@@ -159,13 +159,17 @@ fn a_contiguous_block_advance_is_not_a_jump() {
     assert_eq!(owner.read_position_jump(Some(jumped)), Some(47_744));
 }
 
-/// **T5: Raw and Processed are different sources, so switching between them fades in.**
+/// **T-S1-4: Raw ↔ Processed 用 20 ms 等功率交叉，而不是 1.3 ms 淡入。**
 ///
-/// Why this is a regression for the random click: the old judgement looked only at the
-/// previous rung, so `Processed -> Raw` (a re-render starting) was treated as same-source
-/// and crossfaded. Raw is the captured tape; Processed is the vocoder output. They are
-/// unrelated signals, and a 64-frame linear blend of them is an audible "two things at
-/// once" - a click, not a transition.
+/// Why this replaced the old "always fade in" rule: Raw (the captured tape) and
+/// Processed (the vocoder output) are two *processings of the same material*. They are
+/// highly correlated, so an equal-power crossfade does not stack two audible sources -
+/// it is a transition. The old rule forced a 64-frame fade-in instead, which only hides
+/// the step and leaves an audible timbre jump. That jump lands exactly 0.4-0.7 s after
+/// the transport starts when the render finishes mid-playback.
+///
+/// A passthrough on either side is a genuinely unrelated signal (the host dry signal),
+/// so that case must still fade in rather than crossfade.
 #[test]
 fn a_rung_change_between_unrelated_signals_fades_in() {
     let code = TransferOutput::code as fn(TransferOutput) -> u8;
@@ -173,26 +177,46 @@ fn a_rung_change_between_unrelated_signals_fades_in() {
     let processed = code(TransferOutput::Processed);
     let stale = code(TransferOutput::StaleProcessed);
     let passthrough = code(TransferOutput::PassThrough);
-    // Unrelated on both sides: fade in, never crossfade.
-    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
-        processed, raw
-    ));
-    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(raw, processed));
-    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
-        stale, raw
-    ));
-    // A passthrough on either side is also unrelated.
-    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
-        passthrough, processed
-    ));
-    assert!(ExtensionOwner::should_fade_in_instead_of_crossfading(
-        processed, passthrough
-    ));
-    // Same content family (a re-render of the same take): crossfade is correct.
-    assert!(!ExtensionOwner::should_fade_in_instead_of_crossfading(
-        processed, stale
-    ));
-    assert!(!ExtensionOwner::should_fade_in_instead_of_crossfading(raw, raw));
+    // Two processings of the same take: a wide equal-power crossfade.
+    assert_eq!(ExtensionOwner::seam(processed, raw), Seam::WideCrossfade);
+    assert_eq!(ExtensionOwner::seam(raw, processed), Seam::WideCrossfade);
+    assert_eq!(ExtensionOwner::seam(stale, raw), Seam::WideCrossfade);
+    // A passthrough on either side is a different source: fade in.
+    assert_eq!(ExtensionOwner::seam(passthrough, processed), Seam::FadeIn);
+    assert_eq!(ExtensionOwner::seam(processed, passthrough), Seam::FadeIn);
+    // Same content family (a re-render of the same take): plain crossfade.
+    assert_eq!(ExtensionOwner::seam(processed, stale), Seam::Crossfade);
+    assert_eq!(ExtensionOwner::seam(raw, raw), Seam::Crossfade);
+}
+
+/// **Raw ↔ Processed 的交叉淡化必须是 20 ms，其余接缝仍是 1.3 ms。**
+///
+/// Why pin the width: the whole point of `Seam::WideCrossfade` is that 64 frames is too
+/// short for two *correlated but differently timbred* signals. If the width ever falls
+/// back to the default, the timbre jump returns and nothing else would notice.
+#[test]
+fn a_wide_crossfade_is_twenty_milliseconds() {
+    let owner = insert_owner();
+    let state = &owner.declick[ProcessStream::Realtime.index()];
+    owner.arm_seam(state, Seam::WideCrossfade);
+    assert_eq!(
+        state.fade_len.load(Ordering::Acquire) as usize,
+        OUTPUT_WIDE_CROSSFADE_FRAMES
+    );
+    assert!(
+        OUTPUT_WIDE_CROSSFADE_FRAMES >= 15 * 48,
+        "20 ms at 48 kHz is the floor for two different timbres"
+    );
+    owner.arm_seam(state, Seam::Crossfade);
+    assert_eq!(
+        state.fade_len.load(Ordering::Acquire) as usize,
+        OUTPUT_DECLICK_FRAMES
+    );
+    owner.arm_seam(state, Seam::FadeIn);
+    assert_eq!(
+        state.fade_len.load(Ordering::Acquire) as usize,
+        OUTPUT_DECLICK_FRAMES
+    );
 }
 /// **分流判据必须是"未绑定 + 有素材"，而不是 `mode()`。**
 ///
@@ -1493,7 +1517,11 @@ fn a_stationary_stretch_does_not_offset_the_real_start() {
 fn a_source_kind_change_on_the_first_block_still_fades() {
     let owner = insert_owner();
     let stream = ProcessStream::Realtime;
-    let frames = super::OUTPUT_DECLICK_FRAMES;
+    // 【T-S1-4：块长必须覆盖整条淡化带】Raw → Processed 是**同一段素材的两种处理**，
+    // 走 20 ms 等功率交叉。用 64 帧的块去验一条 960 帧的淡化，"最后一帧到达新值"
+    // 这条断言必然不成立 —— 那不是回归，是断言写错了对象。这里用与淡化带同宽的块，
+    // 让"从旧值走到新值"在一屏之内可见。
+    let frames = super::OUTPUT_WIDE_CROSSFADE_FRAMES;
     // 缓冲必须活到 `apply_output_declick` 返回之后：clang 里的临时 Vec 会在闭包
     // 返回时被释放，指针立刻变野指针（实测 STATUS_STACK_BUFFER_OVERRUN）。
     let mut first_left = vec![0.5_f32; frames];
@@ -1539,6 +1567,12 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         second_left[frames - 1] > 0.9,
         "淡化的最后一帧必须到达新值（实测 {}）",
         second_left[frames - 1]
+    );
+    // 等功率：中点两侧各约 0.707，且不得出现线性混合那种能量凹陷。
+    let middle = second_left[frames / 2];
+    assert!(
+        (0.35..0.95).contains(&middle),
+        "中点必须落在两条信号的等功率交叠区（实测 {middle}）"
     );
 }
 

@@ -3432,6 +3432,7 @@ pub(crate) mod tests {
         document.edit_sources.lock_or_recover().insert(
             "ara://source".into(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
                 version: 0,
@@ -3740,6 +3741,7 @@ pub(crate) mod tests {
             })
             .collect();
         let pcm = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![samples],
             version: 0,
@@ -5530,6 +5532,7 @@ pub(crate) mod tests {
         let budget = crate::render::budget::global_budget();
         let baseline = budget.used();
         let pcm = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.125; frames]],
             version: 1,
@@ -5595,6 +5598,7 @@ pub(crate) mod tests {
         let seconds = 180.;
         let source = |value| {
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![vec![value; frames]],
                 version: 1,
@@ -5823,6 +5827,7 @@ pub(crate) mod tests {
         document.publish_source_pcm(
             "ara://source".into(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![vec![0.4, 0.3, 0.2, 0.1]],
                 version: 0,
@@ -5910,6 +5915,7 @@ pub(crate) mod tests {
         {
             let _transaction = document.transaction.lock_or_recover();
             let pcm = Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![samples],
                 version: 1,
@@ -6096,6 +6102,7 @@ pub(crate) mod tests {
         document.edit_sources.lock_or_recover().insert(
             "ara://source".into(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![samples],
                 version: 0,

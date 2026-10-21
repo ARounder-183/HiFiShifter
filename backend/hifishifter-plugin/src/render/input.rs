@@ -52,6 +52,124 @@ pub(crate) struct RenderInput {
     /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters: BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
 }
+/// 输出帧域的"这些帧真的属于我们"覆盖区间（升序、不重叠，已夹进快照窗口）。
+///
+/// 【为什么这份计算必须存在】捕获期有若干种"我们没拿到样本"的形状 —— 起播窗口的
+/// 桥接、掉块、循环回卷的裁缝。它们在素材里是数字零，在 `Segment::coverage` 里是
+/// **不存在**。`raw_tape` 一直如实发布这份覆盖，而**处理结果**从来没有：它读的是
+/// `Tape::concat_planes()`，覆盖在那里丢了。于是播放侧把"我们没录到"当成"我们录到的
+/// 静音"按满幅输出，既不会回退宿主原声、也不会在边界淡化 —— 洞的两侧各是一次硬切。
+/// 用户听到的就是"起播 0.4~0.7 s 必然一次咔"（起播窗口就是最大的那个洞）以及播放
+/// 途中的随机咔（录制期每一次 resync/掉块留下的小洞）。
+///
+/// 【为什么不在这里做任何"修补"】洞是"我们没录到"，正确语义是"这一段交给宿主原声"，
+/// 不是"编一段出来"。本函数只如实描述事实，让播放侧既有的回退与淡化机制接管。
+///
+/// 【空 = 整份都算】没有覆盖信息的源（ARA 通路：宿主授权的就是整份素材）与
+/// 窗口被整段覆盖的情形都返回空，与旧语义逐字相同。
+fn snapshot_covered(
+    timeline: &TimelineState,
+    sources: &HashMap<String, Arc<SourcePcm>>,
+    start_sec: f64,
+    end_sec: f64,
+    sample_rate: u32,
+) -> Vec<std::ops::Range<i64>> {
+    let rate = sample_rate as f64;
+    let origin = (start_sec * rate).round() as i64;
+    let limit = (end_sec * rate).round() as i64;
+    let mut covered: Vec<std::ops::Range<i64>> = Vec::new();
+    for clip in &timeline.clips {
+        let Some(id) = clip.source_path.as_ref() else {
+            // 没有源就没有可播放的内容：这一段交给宿主原声（不宣称覆盖）。
+            continue;
+        };
+        let Some(pcm) = sources.get(id) else {
+            continue;
+        };
+        let clip_start = clip.start_sec;
+        let clip_end = clip.start_sec + clip.length_sec;
+        if !(clip_start.is_finite() && clip_end.is_finite()) || clip_end <= clip_start {
+            continue;
+        }
+        // 【为什么取 active take 的倍率】它是**源窗**的权威：扁平投影上的
+        // `clip.playback_rate` 只是 `normalize_takes()` 的产物，在反序列化边界之前可以是 0。
+        // 用错倍率会把洞画到错误的帧上 —— 那比"没有覆盖"更糟。
+        let take = clip
+            .takes
+            .get(clip.active_take_index())
+            .or_else(|| clip.takes.first());
+        let rate_ratio = take
+            .map(|take| f64::from(take.playback_rate))
+            .unwrap_or(f64::from(clip.playback_rate));
+        // 【为什么倒放/循环源退回"整段都算"】倒放把源窗口镜像、循环源对整份媒体取模
+        // 回绕，两种映射都比这里能表达的复杂。它们**不是**本缺陷的现场（Transfer 的
+        // 片段恒为正向、不循环），而为它们猜一个近似映射会在真正的洞上制造假的边界。
+        // 退回整段 = 与改动前逐字相同，不引入新的错误方向。
+        if clip.reversed || take.is_some_and(|take| take.loop_enabled) {
+            push_covered(&mut covered, origin..limit);
+            continue;
+        }
+        if !rate_ratio.is_finite() || rate_ratio <= 0.0 {
+            push_covered(&mut covered, origin..limit);
+            continue;
+        }
+        if pcm.covered.is_empty() {
+            push_covered(&mut covered, origin..limit);
+            continue;
+        }
+        let source_rate = f64::from(pcm.sample_rate.max(1));
+        let source_start = clip.source_start_sec;
+        // 源帧 → 播放秒 → 输出帧。倍率把源时长折算成播放时长（`playback_rate` 大
+        // 表示同样的源跨度在时间轴上更短）。
+        let map = |frame: usize| -> i64 {
+            let source_sec = frame as f64 / source_rate;
+            let play_sec = clip_start + (source_sec - source_start) / rate_ratio;
+            (play_sec * rate).round() as i64
+        };
+        for range in &pcm.covered {
+            let from = map(range.start).max(origin).max((clip_start * rate).round() as i64);
+            let to = map(range.end).min(limit).min((clip_end * rate).round() as i64);
+            if from < to {
+                push_covered(&mut covered, from..to);
+            }
+        }
+    }
+    // 【为什么这里要排序再合并】片段之间可以重叠、顺序也不保证按时间排 —— 直接按
+    // "与上一条合并"累积会给出一个**非升序**的列表，而 `is_covered` 对它做二分。
+    // 非升序的覆盖表会让"有源"与"没源"随机互换，那是比原来的缺陷更坏的错法。
+    normalize_covered(&mut covered);
+    // 整段窗口都被覆盖 ⇒ 返回空（"全算"，与旧语义同一件事，且不给 `edge_gain`
+    // 多一条等价的边界）。
+    if covered.len() == 1 && covered[0].start <= origin && covered[0].end >= limit {
+        return Vec::new();
+    }
+    covered
+}
+
+/// 把一堆可能乱序、可能重叠的区间整理成**升序、不重叠**的列表。
+fn normalize_covered(covered: &mut Vec<std::ops::Range<i64>>) {
+    covered.retain(|range| range.start < range.end);
+    if covered.len() < 2 {
+        return;
+    }
+    covered.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<i64>> = Vec::with_capacity(covered.len());
+    for range in covered.drain(..) {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    *covered = merged;
+}
+
+/// 记下一个覆盖区间（不合并；由 `normalize_covered` 统一整理）。
+fn push_covered(covered: &mut Vec<std::ops::Range<i64>>, range: std::ops::Range<i64>) {
+    if range.start < range.end {
+        covered.push(range);
+    }
+}
+
 /// 一段混音请求（播放快照与导出共用）。
 ///
 /// 【为什么打包】这七个值在两条路径上逐一对应，分开传参数会让
@@ -304,7 +422,9 @@ impl RenderInput {
                     origin_sample: (start * sample_rate as f64).round() as i64,
                     left,
                     right,
-                    covered: Vec::new(),
+                    // 48 k 这一份是 44.1 k 的重采样，但**覆盖**是按时间算的：直接按
+                    // 本档率重算一次，比按比例缩放区间少一整类舍入错误。
+                    covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
                     _reservation: Some(reservation),
                 });
                 continue;
@@ -324,7 +444,7 @@ impl RenderInput {
                 origin_sample: (start * sample_rate as f64).round() as i64,
                 left: samples.iter().step_by(2).copied().collect(),
                 right: samples.iter().skip(1).step_by(2).copied().collect(),
-                covered: Vec::new(),
+                covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
                 _reservation: Some(reservation),
             });
         }
@@ -529,6 +649,100 @@ impl RenderInput {
 mod tests {
     use super::*;
     use crate::sync::MutexExt;
+
+    /// 一份只有覆盖信息不同的源（其余字段无关）。
+    fn source_with_coverage(covered: Vec<std::ops::Range<usize>>) -> Arc<SourcePcm> {
+        Arc::new(SourcePcm {
+            sample_rate: 48_000,
+            planes: vec![vec![0.5; 96_000], vec![0.5; 96_000]],
+            version: 1,
+            covered,
+            _reservation: None,
+        })
+    }
+
+    /// 一条正向、不循环、单源的 clip。
+    fn plain_clip() -> hifishifter_kernel::state::TimelineState {
+        let mut timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "t", "name": "t", "order": 0}],
+            "clips": [{
+                "id": "c", "track_id": "t", "name": "c",
+                "start_sec": 0.0, "length_sec": 2.0,
+                "takes": [{
+                    "id": "k", "source_path": "src",
+                    "source_start_sec": 0.0, "source_end_sec": 2.0, "playback_rate": 1.0
+                }]
+            }],
+            "bpm": 120.0, "project_sec": 2.0
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        timeline
+    }
+
+    /// **处理结果的快照必须如实标注"我们没录到"的洞。**
+    ///
+    /// 【为什么这是"咔"的根因级回归】`raw_tape` 一直带覆盖，而**处理结果**从来没有：
+    /// 它读的是 `Tape::concat_planes()`，洞在那里就是数字零。播放侧于是把"我们没录到"
+    /// 当成"我们录到的静音"按满幅输出，既不回退宿主原声也不淡化 —— 洞的两侧各是一次硬切。
+    #[test]
+    fn the_published_snapshot_marks_the_hole() {
+        let timeline = plain_clip();
+        let mut sources: HashMap<String, Arc<SourcePcm>> = HashMap::new();
+        // 源里 48000..50000 这 2000 帧是桥接出来的洞。
+        sources.insert(
+            "src".into(),
+            source_with_coverage(vec![0..48_000, 50_000..96_000]),
+        );
+        let covered = snapshot_covered(&timeline, &sources, 0.0, 2.0, 48_000);
+        assert_eq!(
+            covered,
+            vec![0..48_000, 50_000..96_000],
+            "the hole must survive into the published coverage"
+        );
+    }
+
+    /// 没有覆盖信息的源（ARA 通路）与"整段都覆盖"的情形都退化成空表。
+    ///
+    /// 【为什么要钉】空表 = "整份都是我们的"，与改动前逐字相同。若这里返回一张满表，
+    /// `edge_gain` 会凭空多出一条边界，ARA 通路的输出就会出现一次本不该有的淡化。
+    #[test]
+    fn a_source_without_coverage_stays_fully_ours() {
+        let timeline = plain_clip();
+        let mut sources: HashMap<String, Arc<SourcePcm>> = HashMap::new();
+        sources.insert("src".into(), source_with_coverage(Vec::new()));
+        assert!(snapshot_covered(&timeline, &sources, 0.0, 2.0, 48_000).is_empty());
+    }
+
+    /// 覆盖区间必须按时间排序并合并：片段之间可以重叠、顺序也不保证。
+    ///
+    /// 【为什么这条最要紧】`is_covered` 对覆盖表做**二分**。一张非升序的表会让
+    /// "有源"与"没源"随机互换 —— 那是比原来的缺陷更坏的错法。
+    #[test]
+    fn overlapping_clips_yield_one_sorted_coverage_table() {
+        let mut timeline = plain_clip();
+        // 第二条 clip 与前一条重叠，且排在后面（时间上更早）。
+        let mut second = timeline.clips[0].clone();
+        second.id = "c2".into();
+        second.start_sec = 1.0;
+        second.length_sec = 0.5;
+        second.takes[0].source_start_sec = 0.0;
+        second.takes[0].source_end_sec = 0.5;
+        second.normalize_takes();
+        timeline.clips.push(second);
+        let mut sources: HashMap<String, Arc<SourcePcm>> = HashMap::new();
+        sources.insert(
+            "src".into(),
+            source_with_coverage(vec![0..24_000, 26_000..48_000]),
+        );
+        let covered = snapshot_covered(&timeline, &sources, 0.0, 2.0, 48_000);
+        assert!(
+            covered.windows(2).all(|pair| pair[0].end <= pair[1].start),
+            "the table must stay sorted and disjoint: {covered:?}"
+        );
+    }
     /// 用已核对的windows crate typed API读取真实进程高水位，不用PCM额度冒充RSS。
     #[cfg(windows)]
     fn process_memory_profile() -> (usize, usize, usize) {
@@ -576,6 +790,7 @@ mod tests {
             })
             .collect();
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![samples],
             version: 1,
@@ -686,6 +901,7 @@ mod tests {
         })).unwrap();
         timeline.clips[0].normalize_takes();
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![(0..2205)
                 .map(|index| ((index * 113) % 257) as f32 / 512.)
@@ -730,6 +946,7 @@ mod tests {
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.25; frames]],
             version: 1,
@@ -806,6 +1023,7 @@ mod tests {
             clip.normalize_takes();
         }
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.25; 44100]],
             version: 1,
@@ -883,6 +1101,7 @@ mod tests {
             sources: HashMap::from([(
                 "source".into(),
                 Arc::new(SourcePcm {
+                    covered: Vec::new(),
                     sample_rate: 44100,
                     planes: vec![pcm],
                     version: 0,
@@ -988,6 +1207,7 @@ mod tests {
             sources: HashMap::from([(
                 "source".into(),
                 Arc::new(SourcePcm {
+                    covered: Vec::new(),
                     sample_rate: 44100,
                     planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
                     version: 0,
@@ -1012,6 +1232,7 @@ mod tests {
             .map(|n| (2.0 * std::f64::consts::PI * 220.0 * n as f64 / 44100.0).sin() as f32 * 0.2)
             .collect();
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![pcm],
             version: 0,
@@ -1100,6 +1321,7 @@ mod tests {
                 .map(|frame| (std::f32::consts::TAU * 220. * frame as f32 / 44100.).sin() * 0.2)
                 .collect();
             let source = Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![pcm],
                 version: 0,
@@ -1144,6 +1366,7 @@ mod tests {
     #[test]
     fn frozen_pcm_is_independent_of_replacement_and_cancel_is_respected() {
         let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
             version: 0,
@@ -1166,6 +1389,7 @@ mod tests {
         sources.insert(
             "fixture".into(),
             Arc::new(SourcePcm {
+                covered: Vec::new(),
                 sample_rate: 44100,
                 planes: vec![vec![0.9; 4]],
                 version: 1,
@@ -1220,6 +1444,7 @@ mod tests {
             sources: HashMap::from([(
                 "source".into(),
                 Arc::new(SourcePcm {
+                    covered: Vec::new(),
                     sample_rate: 44_100,
                     planes: vec![mono.clone(), mono],
                     version: 1,

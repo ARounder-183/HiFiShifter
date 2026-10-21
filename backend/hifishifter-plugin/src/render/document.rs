@@ -644,6 +644,7 @@ mod tests {
         let document = Arc::new(DocumentSession::new(21));
         let id = "ara://source".to_string();
         let pcm = Arc::new(crate::render::source::SourcePcm {
+            covered: Vec::new(),
             sample_rate: 44100,
             planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
             version: 0,

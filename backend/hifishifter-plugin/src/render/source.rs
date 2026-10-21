@@ -8,6 +8,20 @@ pub(crate) struct SourcePcm {
     pub sample_rate: u32,
     pub planes: Vec<Vec<f32>>,
     pub version: u64,
+    /// 这份源的**哪些帧真的存在**（源帧域，升序、不重叠）。空 = 整份都算。
+    ///
+    /// 【为什么 PCM 必须带着它走】捕获期有若干种"我们没拿到样本"的形状：起播窗口的
+    /// 桥接、掉块、循环回卷的裁缝。它们在段里是数字零，在 `Segment::coverage` 里是
+    /// **不存在**。此前只有"原始磁带"这条通路读 coverage，而**处理结果**读的是
+    /// `Tape::concat_planes()` —— 覆盖信息在那里丢失，于是"我们没录到"被当成
+    /// "我们录到的静音"按满幅输出，洞的两侧各是一次硬切（用户听到的"咔"）。
+    ///
+    /// 把覆盖跟着源一起走，播放侧那些**已经存在**的机制（`is_covered` 回退宿主原声、
+    /// `edge_gain` 的 20 ms 等功率淡化、洞的 U 形曲线）才第一次真正拿到数据。
+    ///
+    /// ARA 通路的源没有这个概念（宿主授权的就是整份素材），因此它是空的 —— 与旧
+    /// 语义逐字相同，零回归面。
+    pub covered: Vec<std::ops::Range<usize>>,
     pub _reservation: Option<super::budget::Reservation>,
 }
 
@@ -75,6 +89,8 @@ pub(crate) fn read_source_pcm(
         sample_rate,
         planes,
         version,
+        // 宿主授权的是一整份素材：整份都算录到了（与 `covered` 为空同义）。
+        covered: Vec::new(),
         _reservation: Some(reservation),
     })
 }

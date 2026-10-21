@@ -1595,6 +1595,10 @@ fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> 
             (
                 timeline::source_id(tape.take),
                 Arc::new(SourcePcm {
+                    // 【T-S1-1：覆盖跟着源一起走】`concat_planes` 把"我们没拿到样本"
+                    // 的帧写成数字零；不带覆盖的话，下游无法把那段零与"用户真的安静"
+                    // 分开，于是它按满幅输出、盖掉宿主原声 —— 洞的两侧各是一次硬切。
+                    covered: tape.covered_ranges(),
                     sample_rate: tape.sample_rate,
                     planes: tape.concat_planes(),
                     version: tape.take,

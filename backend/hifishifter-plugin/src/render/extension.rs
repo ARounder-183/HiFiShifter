@@ -845,7 +845,40 @@ impl StreamTime {
 }
 
 /// 输出源切换的去咔长度（帧）。48 kHz 下约 1.3 ms，足以消除阶跃。
+///
+/// 【它现在是**默认**宽度，不再是唯一宽度】异源切换（透传 ↔ 处理结果）只能淡入，
+/// 1.3 ms 足够躲开阶跃；而**同一段素材的两种处理**（原始磁带 ↔ 处理结果）内容高度
+/// 相关，正确处置是 20 ms 等功率交叉 —— 见 [`OUTPUT_WIDE_CROSSFADE_FRAMES`]。
 const OUTPUT_DECLICK_FRAMES: usize = 64;
+
+/// 接缝状态保留的历史长度（帧）。48 kHz 下 20 ms。
+///
+/// 【为什么缓冲区要比默认淡化宽】要交叉淡化 20 ms，就必须手里有上一块输出的
+/// 20 ms 尾巴。缓冲区按最大宽度开，具体一次淡化用多宽由 `fade_len` 决定 ——
+/// 于是"64 帧淡入"与"960 帧交叉"共用同一份状态，音频线程仍然只写原子、不分配。
+const DECLICK_HISTORY_FRAMES: usize = 960;
+
+/// `Raw ↔ Processed` 的交叉淡化宽度（帧）。48 kHz 下 20 ms。
+///
+/// 【为什么这一对要宽得多】两者是**同一段素材的两种处理**：原始磁带是捕获原样，
+/// 处理结果是声码器输出。它们高度相关，所以等功率交叉**不会**叠出双声；而 1.3 ms
+/// 只够躲开阶跃，躲不开"音色突变"的听感 —— 用户描述的"播放中途随机咔"里有一份
+/// 正是渲染恰好在起播后 0.4~0.7 s 完成、把 Raw 换成 Processed 的那一下。
+const OUTPUT_WIDE_CROSSFADE_FRAMES: usize = 960;
+
+/// 一次接缝该怎么处理。
+///
+/// 【为什么是一个枚举而不是布尔】此前只有"淡入 / 交叉淡化"两档，于是"同一段素材的
+/// 两种处理"被迫归到淡入 —— 那会在 1.3 ms 里把处理结果从零拉满，听感仍是一次突变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    /// 异源（任一侧是透传）：对当前结果线性淡入，宽度 `OUTPUT_DECLICK_FRAMES`。
+    FadeIn,
+    /// 同一族内的版本切换：交叉淡化，宽度 `OUTPUT_DECLICK_FRAMES`。
+    Crossfade,
+    /// 同一段素材的两种处理（Raw ↔ Processed）：等功率交叉，宽度 20 ms。
+    WideCrossfade,
+}
 
 /// 读游标跳变超过这个宽度就**整块直通**宿主原声（而不是淡化）。
 ///
@@ -863,12 +896,14 @@ const POSITION_RESYNC_PASS_THROUGH_FRAMES: u64 = 2_400;
 /// 【为什么按流分开】prefetch 与 realtime 的块会交替到达；共用一份 tail 会让
 /// 一条流把另一条流的"上一块"当成自己的接缝。
 struct OutputDeclickState {
-    /// 上一块输出的最后 `OUTPUT_DECLICK_FRAMES` 帧（f32 位模式）。
+    /// 上一块输出的最后 `DECLICK_HISTORY_FRAMES` 帧（f32 位模式）。
     tail: [Vec<AtomicU32>; 2],
-    /// 源切换那一刻抓下来的旧信号，供跨块淡入淡出。
+    /// 源切换那一刻抓下来的旧信号，供跨块淡入淡出（前 `fade_len` 项有效）。
     fade_from: [Vec<AtomicU32>; 2],
     fade_pos: AtomicU32,
     fade_active: AtomicBool,
+    /// 本次淡化用多宽（帧）。0 = 还没设过（按 `OUTPUT_DECLICK_FRAMES` 处理）。
+    fade_len: AtomicU32,
     last_token: AtomicU64,
     /// 本流上一次输出源的**种类**（0 = 还没见过任何输出）。
     ///
@@ -882,7 +917,7 @@ struct OutputDeclickState {
 impl Default for OutputDeclickState {
     fn default() -> Self {
         let zeros = || {
-            (0..OUTPUT_DECLICK_FRAMES)
+            (0..DECLICK_HISTORY_FRAMES)
                 .map(|_| AtomicU32::new(0))
                 .collect::<Vec<_>>()
         };
@@ -891,6 +926,7 @@ impl Default for OutputDeclickState {
             fade_from: [zeros(), zeros()],
             fade_pos: AtomicU32::new(0),
             fade_active: AtomicBool::new(false),
+            fade_len: AtomicU32::new(0),
             last_token: AtomicU64::new(0),
             primed_kind: AtomicU32::new(0),
         }
@@ -1147,6 +1183,16 @@ pub(crate) struct ExtensionOwner {
     position_corrections: AtomicU64,
     /// 【T3】最近一次纠正的帧差（绝对值）。
     max_correction_frames: AtomicU64,
+    /// 【T-S1-6】最近一次发布里，素材**带覆盖信息**的源有几个洞、洞有多少帧。
+    ///
+    /// 【为什么必须可读】"起播 0.4~0.7 s 一次咔"的直接原因是素材开头有一段我们
+    /// 没录到的洞，而那段洞在**处理结果**里一度被当成"我们录到的静音"。把洞的个数
+    /// 与总帧数打出来之后，"这里到底有没有洞"不再需要靠耳朵判断 —— 而 `holes=0`
+    /// 正是"洞假设不成立、该去查别的原因"的判据。
+    tape_holes: AtomicU64,
+    tape_hole_frames: AtomicU64,
+    /// 上一次打印的素材覆盖读数（去重用）。
+    last_tape_diag: Mutex<Option<String>>,
     repeats_suppressed: AtomicU64,
     /// 连续多少块被判定为"不该出声"（停播 / 重复区间）。
     ///
@@ -1408,12 +1454,14 @@ impl ExtensionOwner {
     pub(crate) fn seam_summary(&self) -> String {
         let geometry = &self.streams[crate::transfer::capture::ProcessStream::Realtime.index()];
         format!(
-            "seam(pos={} corr={} max={} offset={} used={})",
+            "seam(pos={} corr={} max={} offset={} used={} cov(holes={} frames={}))",
             self.rt_last_read_position.load(Ordering::Acquire),
             self.position_corrections.load(Ordering::Relaxed),
             self.max_correction_frames.load(Ordering::Relaxed),
             geometry.host_clock_offset.load(Ordering::Acquire),
             geometry.offset_used.load(Ordering::Relaxed),
+            self.tape_holes.load(Ordering::Relaxed),
+            self.tape_hole_frames.load(Ordering::Relaxed),
         )
     }
     /// 记录一次 companion 绑定复位（见 [`Self::companion_reset_count`]）。
@@ -3411,6 +3459,8 @@ impl ExtensionOwner {
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
         let (revision, edit, with_curves, input) = self.transfer_render_input()?;
+        // 【T-S1-6】发布前把"素材里有多少个洞"变成可读的数（去重打印）。
+        self.note_tape_coverage(&input);
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
         // 合成会被排队几百次。版本里必须**带上编辑代次**：只认 take 会让参数改动
         // 永远不重算。
@@ -3460,6 +3510,60 @@ impl ExtensionOwner {
             .store(revision, Ordering::Release);
         log::info!("[transfer] prepared material revision {revision} edit {edit}");
         Ok(())
+    }
+
+    /// 把这一份渲染输入里"我们没录到"的帧数记成读数（诊断线程读）。
+    ///
+    /// 【为什么不打印逐源的明细】一条 take 通常只有一份源；有洞时真正想知道的是
+    /// "有几个洞、一共多少帧"。源数为 0（全是 ARA 通路那种"整份都算"）时这一行
+    /// 不会出现 —— 那正是"没有洞可谈"的正确表达。
+    fn note_tape_coverage(&self, input: &super::input::RenderInput) {
+        let mut holes = 0_u64;
+        let mut hole_frames = 0_u64;
+        let mut covered_sources = 0_u64;
+        for pcm in input.sources.values() {
+            if pcm.covered.is_empty() {
+                continue;
+            }
+            covered_sources += 1;
+            let total = pcm.planes.first().map_or(0, Vec::len) as i64;
+            let covered: i64 = pcm
+                .covered
+                .iter()
+                .map(|range| (range.end - range.start) as i64)
+                .sum();
+            let gap = total.saturating_sub(covered);
+            if gap <= 0 {
+                continue;
+            }
+            hole_frames = hole_frames.saturating_add(gap as u64);
+            // 首/尾之外的每一段都算一个洞；段与段之间的空档也算一个。
+            holes = holes.saturating_add((pcm.covered.len() as u64).saturating_sub(1));
+            if pcm.covered.first().is_some_and(|range| range.start > 0) {
+                holes = holes.saturating_add(1);
+            }
+            if pcm
+                .covered
+                .last()
+                .is_some_and(|range| (range.end as i64) < total)
+            {
+                holes = holes.saturating_add(1);
+            }
+        }
+        self.tape_holes.store(holes, Ordering::Relaxed);
+        self.tape_hole_frames.store(hole_frames, Ordering::Relaxed);
+        if covered_sources == 0 {
+            return;
+        }
+        let line = format!(
+            "[transfer] tape coverage: sources={covered_sources} holes={holes} \
+             hole_frames={hole_frames}"
+        );
+        let mut last = self.last_tape_diag.lock_or_recover();
+        if last.as_deref() != Some(line.as_str()) {
+            *last = Some(line.clone());
+            log::info!("{line}");
+        }
     }
 
     /// 本块在 Transfer 通路上该怎么输出。**无锁、无分配**，可从音频线程调用。
@@ -3592,20 +3696,50 @@ impl ExtensionOwner {
     ///
     /// 因此判据是**异源**：只要两侧有一个是透传类，或者两侧不属于同一个"已算出的"
     /// 内容族（Raw 与 Processed 分属不同族），就淡入。
-    fn should_fade_in_instead_of_crossfading(previous_kind: u8, kind: u8) -> bool {
+    fn seam(previous_kind: u8, kind: u8) -> Seam {
         let passthrough = |code: u8| {
             code == TransferOutput::PendingSynthesis.code()
                 || code == TransferOutput::PassThrough.code()
                 || code == TransferOutput::Untouched.code()
         };
-        // 任一侧是透传 ⇒ 异源。
+        // 任一侧是透传 ⇒ 异源：另一侧是我们算出来的内容，叠起来就是"两声并发"。
         if passthrough(previous_kind) || passthrough(kind) {
-            return true;
+            return Seam::FadeIn;
         }
-        // Raw 与 Processed/StaleProcessed 之间也是异源：前者是原始捕获，
-        // 后者是声码器输出（或上一版渲染）。两者内容毫不相干。
+        // Raw 与 Processed/StaleProcessed 是**同一段素材的两种处理**：内容高度相关，
+        // 该用 20 ms 等功率交叉，而不是 1.3 ms 的淡入。
         let is_raw = |code: u8| code == TransferOutput::Raw.code();
-        is_raw(previous_kind) != is_raw(kind)
+        if is_raw(previous_kind) != is_raw(kind) {
+            return Seam::WideCrossfade;
+        }
+        Seam::Crossfade
+    }
+
+    /// 按接缝种类装填一次淡化：抓下旧信号、定宽度、复位进度。
+    ///
+    /// 【为什么宽度也进状态】三种接缝的宽度不同（1.3 ms / 1.3 ms / 20 ms），而淡化
+    /// 可能跨块继续。把宽度存进原子量之后，淡化的**每一块**都读到同一个值。
+    fn arm_seam(&self, state: &OutputDeclickState, seam: Seam) {
+        let len = match seam {
+            Seam::FadeIn | Seam::Crossfade => OUTPUT_DECLICK_FRAMES,
+            Seam::WideCrossfade => OUTPUT_WIDE_CROSSFADE_FRAMES,
+        };
+        // 淡入 = 把旧信号掩成 0；交叉淡化保留旧信号。
+        let keep = match seam {
+            Seam::FadeIn => 0,
+            _ => u32::MAX,
+        };
+        // 旧信号是"上一块输出的最后 `len` 帧"，在历史缓冲里位于末尾。
+        let base = DECLICK_HISTORY_FRAMES - len;
+        for channel in 0..2 {
+            for index in 0..len {
+                let old = state.tail[channel][base + index].load(Ordering::Relaxed);
+                state.fade_from[channel][index].store(old & keep, Ordering::Relaxed);
+            }
+        }
+        state.fade_len.store(len as u32, Ordering::Release);
+        state.fade_pos.store(0, Ordering::Release);
+        state.fade_active.store(true, Ordering::Release);
     }
 
     pub(crate) unsafe fn apply_output_declick(
@@ -3634,20 +3768,7 @@ impl ExtensionOwner {
             // 本轮从未去过咔、但上一轮停在另一种源上：仍然要去咔。至于是交叉淡化
             // 还是淡入，取决于上一个源是不是透传（见 `should_fade_in_...`）。
             let previous_kind = first_kind as u8;
-            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind, kind as u8) {
-                0
-            } else {
-                u32::MAX
-            };
-            for channel in 0..2 {
-                for index in 0..OUTPUT_DECLICK_FRAMES {
-                    let old = state.tail[channel][index].load(Ordering::Relaxed);
-                    // 淡入时把旧信号掩成 0；交叉淡化时保留原值。
-                    state.fade_from[channel][index].store(old & keep, Ordering::Relaxed);
-                }
-            }
-            state.fade_pos.store(0, Ordering::Release);
-            state.fade_active.store(true, Ordering::Release);
+            self.arm_seam(state, Self::seam(previous_kind, kind as u8));
             state.last_token.store(token, Ordering::Release);
         } else if self.force_declick[stream.index()].swap(false, Ordering::AcqRel) {
             // 【T-A1-1：同一份源内部的读位置跳变】token 没变，但音频在块边界上确实
@@ -3655,19 +3776,7 @@ impl ExtensionOwner {
             // 输出的样本，与旧位置连续 —— 用它做一次等功率交叉，比"整块换源"轻得多。
             let previous_token = state.last_token.load(Ordering::Acquire);
             let previous_kind = (previous_token & 0xFF) as u8;
-            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind, kind as u8) {
-                0
-            } else {
-                u32::MAX
-            };
-            for channel in 0..2 {
-                for index in 0..OUTPUT_DECLICK_FRAMES {
-                    let old = state.tail[channel][index].load(Ordering::Relaxed);
-                    state.fade_from[channel][index].store(old & keep, Ordering::Relaxed);
-                }
-            }
-            state.fade_pos.store(0, Ordering::Release);
-            state.fade_active.store(true, Ordering::Release);
+            self.arm_seam(state, Self::seam(previous_kind, kind as u8));
             state.last_token.store(token, Ordering::Release);
         } else {
             // 【为什么先取旧的再交换】"要不要交叉淡化"取决于**上一个**源是什么；
@@ -3682,34 +3791,18 @@ impl ExtensionOwner {
                 // 那种场合改为对结果做一次线性淡入。
                 let previous_kind = (previous_token & 0xFF) as u8;
                 let current_kind = (token & 0xFF) as u8;
-                let crossfade =
-                    !Self::should_fade_in_instead_of_crossfading(previous_kind, current_kind);
-                if crossfade {
-                    for channel in 0..2 {
-                        for index in 0..OUTPUT_DECLICK_FRAMES {
-                            state.fade_from[channel][index].store(
-                                state.tail[channel][index].load(Ordering::Relaxed),
-                                Ordering::Relaxed,
-                            );
-                        }
-                    }
-                } else {
-                    // 淡入：把"旧信号"置零，于是 `old * (1 - t) + current * t` 退化成
-                    // 对当前输出的线性淡入。
-                    for channel in 0..2 {
-                        for index in 0..OUTPUT_DECLICK_FRAMES {
-                            state.fade_from[channel][index].store(0, Ordering::Relaxed);
-                        }
-                    }
-                }
-                state.fade_pos.store(0, Ordering::Release);
-                state.fade_active.store(true, Ordering::Release);
+                self.arm_seam(state, Self::seam(previous_kind, current_kind));
             }
         }
         let channels = (output.num_channels as usize).min(2);
         if state.fade_active.load(Ordering::Acquire) {
+            // 宽度由 `arm_seam` 定：透传接缝与同族切换 64 帧，Raw ↔ Processed 960 帧。
+            let len = match state.fade_len.load(Ordering::Acquire) as usize {
+                0 => OUTPUT_DECLICK_FRAMES,
+                len => len.min(DECLICK_HISTORY_FRAMES),
+            };
             let position = state.fade_pos.load(Ordering::Acquire) as usize;
-            let remaining = OUTPUT_DECLICK_FRAMES.saturating_sub(position);
+            let remaining = len.saturating_sub(position);
             let count = remaining.min(frames);
             for channel in 0..channels {
                 // SAFETY: 调用方保证输出总线有 `channels` 个可写平面。
@@ -3718,7 +3811,7 @@ impl ExtensionOwner {
                     continue;
                 }
                 for index in 0..count {
-                    let t = (position + index + 1) as f32 / OUTPUT_DECLICK_FRAMES as f32;
+                    let t = (position + index + 1) as f32 / len as f32;
                     let old = f32::from_bits(
                         state.fade_from[channel][position + index].load(Ordering::Relaxed),
                     );
@@ -3731,7 +3824,7 @@ impl ExtensionOwner {
             }
             let next = position + count;
             state.fade_pos.store(next as u32, Ordering::Release);
-            if next >= OUTPUT_DECLICK_FRAMES {
+            if next >= len {
                 state.fade_active.store(false, Ordering::Release);
             }
         }
@@ -3742,15 +3835,15 @@ impl ExtensionOwner {
         // 那样把样本放在 0 起、右边补零，淡出会从**本块第一帧**开始、然后读到零，
         // 与"边界处的最新样本"差出整整一个块长 —— 短块宿主上每次接缝都会多一次
         // 阶跃。左移历史再追加，才能保持"最后 64 帧"这一不变量。
-        if frames >= OUTPUT_DECLICK_FRAMES {
-            let start = frames - OUTPUT_DECLICK_FRAMES;
+        if frames >= DECLICK_HISTORY_FRAMES {
+            let start = frames - DECLICK_HISTORY_FRAMES;
             for channel in 0..channels {
                 // SAFETY: 同上。
                 let plane = unsafe { *output.channel_buffers.add(channel) };
                 if plane.is_null() {
                     continue;
                 }
-                for index in 0..OUTPUT_DECLICK_FRAMES {
+                for index in 0..DECLICK_HISTORY_FRAMES {
                     unsafe {
                         state.tail[channel][index]
                             .store((*plane.add(start + index)).to_bits(), Ordering::Relaxed);
@@ -3765,13 +3858,13 @@ impl ExtensionOwner {
                 if plane.is_null() {
                     continue;
                 }
-                for index in 0..(OUTPUT_DECLICK_FRAMES - written) {
+                for index in 0..(DECLICK_HISTORY_FRAMES - written) {
                     let value = state.tail[channel][index + written].load(Ordering::Relaxed);
                     state.tail[channel][index].store(value, Ordering::Relaxed);
                 }
                 for index in 0..written {
                     unsafe {
-                        state.tail[channel][OUTPUT_DECLICK_FRAMES - written + index].store(
+                        state.tail[channel][DECLICK_HISTORY_FRAMES - written + index].store(
                             (*plane.add(index)).to_bits(),
                             Ordering::Relaxed,
                         );
@@ -3810,7 +3903,7 @@ impl ExtensionOwner {
         let fade = frames.min(OUTPUT_DECLICK_FRAMES);
         // `tail` 里 0 是最旧的、63 是最新的；短块淡出必须从**最新的 fade 帧**开始，
         // 否则边界处仍会从一段旧样本跳到零。
-        let base = OUTPUT_DECLICK_FRAMES - fade;
+        let base = DECLICK_HISTORY_FRAMES - fade;
         let mut any_signal = false;
         for channel in 0..declared {
             // SAFETY: 宿主声明 `num_channels` 个平面指针，非空平面至少含 `frames` 帧。
