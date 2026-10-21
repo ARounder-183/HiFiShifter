@@ -271,6 +271,8 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     pub skipped_regions: Mutex<Vec<(usize, String)>>,
     /// 上一次打印的诊断行（去重用；见 `log_diag_if_changed`）。
     last_diag: Mutex<Option<String>>,
+    /// 上一次打印的逐 clip 媒体读数（去重用；见 `decorate_host_media_locked`）。
+    pub(crate) last_media_diag: Mutex<Option<String>>,
     /// 最近一次**完整**宿主清单采集的代次令牌 `(change_count, model, scope)`。
     ///
     /// 【为什么是文档级、不是实例级】`ui_tracks` / `render_facts` 都是文档级共享状态，
@@ -296,6 +298,16 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     pub render_facts: Mutex<crate::host::geometry::RenderFacts>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
+    /// 每个宿主 item 最近一次观察到的**媒体事实**（item GUID → 源身份）。**只增不减**。
+    ///
+    /// 【为什么需要它】显示身份此前完全依赖"这一轮我们有没有 PCM"。而宿主随时可以收回
+    /// 样本访问（ARA 的访问默认关闭、由宿主开关），那一刻 `edit_sources` 仍有副本，
+    /// 但**新文档**的 `edit_sources` 一开始是空的 —— 于是"这一轮有没有 PCM"直接决定
+    /// "这一轮有没有身份"，一次收回就让**所有** clip 一起变占位。
+    ///
+    /// 这张表把"我们知道它是哪个源"与"这一轮有没有采样"分开：事实只增不减，
+    /// 只在 region 集合与文档关闭时按 key 回收。
+    pub media_facts: Mutex<std::collections::BTreeMap<String, crate::editor::media_identity::PcmFacts>>,
     /// 已授权但**读取失败**的 ARA 音频源（`audioSource.persistentID` → 原因）。
     ///
     /// 【为什么必须与 `ready` 分开】`ready` 的语义是"ARA 是否已重新交付输入"，它还
@@ -1235,8 +1247,14 @@ impl DocumentSession {
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
     pub(crate) fn workspace_snapshot(&self) -> Result<(WorkspaceSnapshot, u64, String), String> {
         let _transaction = self.transaction.lock_or_recover();
+        // 【T-D7：恢复失败不能连坐显示】这里以前用 `?` 把恢复的**致命**错误传播出去，
+        // 于是一份坏存档会让整份工作区快照失败 ⇒ 界面停在空时间线（用户看到的不是
+        // "参数没读回来"，而是"什么都没有"）。恢复的载荷与显示的载荷是两件事：
+        // 前者失败只该改读数，后者必须照常产出。
         for owner in self.renderer_owners() {
-            owner.merge_pending_restore(self)?;
+            if let Err(error) = owner.merge_pending_restore(self) {
+                log::warn!("[ara] instance state unresolved: {error}");
+            }
         }
         // 【为什么先取 `edits` 再取时间线】文档声明的锁序是
         // `transaction → timeline → edits → host facts`（见 `DocumentSession` 的说明），
@@ -1254,51 +1272,17 @@ impl DocumentSession {
         // `regions → region_items → source_failures`。在这里引入 `edit_sources →
         // source_failures` 会给锁序图加一条新边。id 集合很小（每条 clip 一个），
         // 先取出来再释放，既省锁也避免新的 ABBA 候选。
-        let available_ids: std::collections::BTreeSet<String> = {
-            let available = self.edit_sources.lock_or_recover();
-            available.keys().cloned().collect()
-        };
-        // 【为什么逐条降级而不是整份失败】此前这里对**每一条** clip 的源做
-        // `ok_or(HOST_PCM_UNAVAILABLE)?` 再 `collect::<Result<_,_>>()?` —— 只要工程里有
-        // **一条** clip 的源还没被 ARA 授权，整个 `workspace_snapshot` 就返回 `Err`，
-        // 而它唯一的调用方 `EditorSession::ensure_loaded` 直接 `?` 上去 ⇒ **插件界面
-        // 一条片段都不更新**。用户看到的是"宿主里做了操作，插件毫无反应"。
+
+        // 【T-C2：不再提前清源】
         //
-        // 这与本文件自己写在 `source_failures` 上的纪律直接冲突（见其字段说明：
-        // "把'某个源读不出来'折进 `ready=false` 会让一次样本读取失败被报成'宿主冲突'，
-        // 所以这里单记一份"），也违反项目既有的"局部降级、不整份失败"口径 ——
-        // `mapping.rs` 的逐 region 跳过、`project_audio_fades_locked` 的缺几何降级
-        // 都是同一纪律的既有实现。
+        // 旧实现在这里把"这一轮不在 `edit_sources` 里"的 take 源**全部清掉**，因为
+        // 下游 `materialize_with_byte_limit` 见到一个未知 id 就会让整份快照失败。
+        // 代价是"这一轮有没有 PCM"直接决定"这一轮有没有身份"：宿主一收回样本访问
+        // （ARA 默认关闭、由宿主开关，停播/切后台都会发生），所有 clip 一起变占位，
+        // 而 `last_known` 读的正是刚被清空的自己 —— 永远回不来。
         //
-        // 降级方式沿用内核 `host_pcm` 的"隔离"口径：缺源的 clip **清掉源引用**，
-        // 界面按无源占位渲染（不是消失），原因记进 `source_failures` 供前端显示
-        // "源未授权"。这样其余的 clip、曲线、几何全部照常。
-        {
-            for clip in &mut timeline.clips {
-                for take in &mut clip.takes {
-                    let Some(id) = take.source_path.as_deref() else {
-                        continue;
-                    };
-                    if available_ids.contains(id) {
-                        continue;
-                    }
-                    // 【B2：这里**不再**写 `source_failures`】
-                    //
-                    // 旧实现在这里给每个"这一轮不在 `edit_sources` 里"的源记一条
-                    // `HOST_PCM_UNAVAILABLE`，而 `decorate_host_media_locked` 把"有失败记录"
-                    // 判成 `unavailable:source_read_failed` —— 一个**终态**。于是"这一轮还没读到"
-                    // 被永久写成了"读不出来"，而它本来下一个 tick 就会自愈（插件侧会重读）。
-                    //
-                    // 真正读不出来的真因只有一个写者：`refresh_source_pcm` 的 `Err` 分支。
-                    // 让那一条独占这张表，"等"与"坏"才分得开。
-                    take.source_path = None;
-                    take.source_path_relative = None;
-                }
-                // 活跃 take 的源被清掉后，扁平投影必须跟着清 —— 否则下游会拿一个
-                // 指向已消失源的 `clip.source_path` 去物化，那正是"missing host PCM"。
-                clip.normalize_takes();
-            }
-        }
+        // 现在物化侧**逐条降级**：缺 PCM 的那几条只在这份快照里没有源，其余照常；
+        // 身份留在文档侧（`media_facts` / ARA 映射），下一次读到采样就恢复。
         let available = self.edit_sources.lock_or_recover();
         let ids = timeline
             .clips
@@ -1908,6 +1892,7 @@ impl DocumentSession {
         *self.edits.lock_or_recover() = Default::default();
         self.sources.lock_or_recover().clear();
         self.edit_sources.lock_or_recover().clear();
+        self.media_facts.lock_or_recover().clear();
         *self.host_tempo_map.lock_or_recover() = None;
         *self.pending_archive_restore.lock_or_recover() = None;
         // 【为什么文档关闭时要清共振峰代次表】那张表在**内核里是进程级**的
@@ -2274,9 +2259,15 @@ impl DocumentSession {
             .lock_or_recover()
             .as_ref()
             .map(|ledger| ledger.summary());
+        // 【T-B0-3】读游标接缝读数：块级，不进音频线程（这里是诊断线程）。
+        let seam = self
+            .renderer_owners()
+            .first()
+            .map(|owner| owner.seam_summary())
+            .unwrap_or_else(|| "seam=none".to_owned());
         format!(
             "doc={} {} ready={} editing={:?} dirty={:?} sequences={} renderers={} \
-             ui_tracks={} region_items={} {}",
+             ui_tracks={} region_items={} {} {}",
             self.id,
             readiness.map_or_else(|| "verdict=unknown".to_owned(), |r| r.summary()),
             self.ready.load(Ordering::Acquire),
@@ -2287,6 +2278,7 @@ impl DocumentSession {
             ui_tracks,
             region_items,
             graph.map_or_else(|| "graph=unbound".to_owned(), |line| line),
+            seam,
         ) + "\n"
             + &self.diag_line()
     }
@@ -2309,6 +2301,7 @@ impl DocumentSession {
         let items = self.region_items.lock_or_recover().len();
         let authorized = self.authorized_takes.lock_or_recover().len();
         let pcm = self.edit_sources.lock_or_recover().len();
+        let facts = self.media_facts.lock_or_recover().len();
         let (published, failed) = {
             let states = self.source_states.lock_or_recover();
             (
@@ -2336,7 +2329,8 @@ impl DocumentSession {
         };
         format!(
             "[hfs] diag v1 ara{{regions={regions} items={items} authorized={authorized} \
-pcm={pcm} published={published} failed={failed} clips={clips} clips_src={clips_src}}}"
+pcm={pcm} facts={facts} published={published} failed={failed} clips={clips} \
+clips_src={clips_src}}}"
         )
     }
 
@@ -2477,6 +2471,17 @@ pcm={pcm} published={published} failed={failed} clips={clips} clips_src={clips_s
             // （一次宿主编辑触发多次）—— 那一条已经改成只 `invalidate_generation()`。
             owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
+    }
+
+    /// 是否至少有一个实例正在实时播放（音频线程在推进）。
+    ///
+    /// 【用途】内容更新要不要**立刻**撤渲染许可，取决于这一刻有没有人在听。播放中撤掉
+    /// 快照等于给用户一个空洞；而"旧快照"对应的是上一版内容，与 `StaleProcessed`
+    /// 是同一条既有纪律。
+    pub(crate) fn realtime_playing(&self) -> bool {
+        self.renderer_owners()
+            .iter()
+            .any(|owner| owner.realtime_flow_active())
     }
 
     /// 记录一次"本插件拒绝了 region 创建"。

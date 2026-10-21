@@ -249,6 +249,7 @@ fn sync_host_takes(
     };
     let active_index = || item.takes.iter().position(|take| take.active);
     let inherited = inherited_media.and_then(|media| active_index().map(|index| (index, media.clone())));
+    // 【T-C1】"知道它是哪个源"与"这一轮有采样"分开：前者永远成立，后者看 has_pcm。
     let pcm = pcm_media.and_then(|facts| {
         active_index().map(|index| {
             let mut media = owned_media();
@@ -256,6 +257,7 @@ fn sync_host_takes(
             (index, media)
         })
     });
+    let has_pcm = pcm_media.is_some_and(|facts| facts.has_pcm);
     // 【T22：**没有记录**不等于**没有授权**】
     //
     // `authorized_takes` / `authorized_sources` 是"某一刻观察到的授权事实"，
@@ -290,13 +292,15 @@ fn sync_host_takes(
         host_switched_take,
         granted.is_some(),
         inherited.is_some(),
-        pcm.is_some(),
-        remembered.is_some(),
+        has_pcm,
+        remembered.is_some() || pcm.is_some(),
     ) {
         crate::editor::media_identity::Link::Authorized => granted.map(|index| (index, owned_media())),
         crate::editor::media_identity::Link::Inherited => inherited,
+        // 【为什么 LastKnown 还要再退一次到 pcm】那是"只有身份、这一轮没有采样"的
+        // 事实：采样会在下一次读到时回来，而身份一旦丢掉就再也找不回来。
         crate::editor::media_identity::Link::Pcm => pcm,
-        crate::editor::media_identity::Link::LastKnown => remembered,
+        crate::editor::media_identity::Link::LastKnown => remembered.or(pcm),
         crate::editor::media_identity::Link::None => None,
     };
     if let Some((index, media)) = media {
@@ -518,10 +522,27 @@ impl DocumentSession {
                             sample_rate: pcm.sample_rate,
                             channels: pcm.planes.len().max(1) as u16,
                             frames: pcm.planes.first().map(Vec::len).unwrap_or(0),
+                            has_pcm: true,
                         },
                     ))
                 })
                 .collect()
+        };
+        // item GUID → 本轮的媒体事实：**本轮 PCM 优先，其次历史事实**（只增不减）。
+        //
+        // 【为什么两层而不是只读 `edit_sources`】宿主收回样本访问时 `edit_sources` 的
+        // 条目会保留，但**新文档**里它是空的；而"我们知道这条 item 的源是哪个 ARA
+        // source"是文档级的既有事实，不该跟着采样一起消失。
+        let media_by_item: std::collections::HashMap<
+            String,
+            crate::editor::media_identity::PcmFacts,
+        > = {
+            let mut facts: std::collections::HashMap<String, crate::editor::media_identity::PcmFacts> =
+                self.media_facts.lock_or_recover().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (item, pcm) in &pcm_by_item {
+                facts.insert(item.clone(), pcm.clone());
+            }
+            facts
         };
         let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
@@ -558,6 +579,8 @@ impl DocumentSession {
                 .collect()
         };
         timeline.tracks.retain(|track| track.id != "track_main");
+        // 这一轮学到的媒体事实（循环结束后一次性写回，避免在遍历中反复取锁）。
+        let mut learned: Vec<(String, crate::editor::media_identity::PcmFacts)> = Vec::new();
         let mut present = std::collections::BTreeSet::new();
         let mut owned = std::collections::BTreeSet::new();
         // 由宿主 folder 得到父级的轨道；它们才是私有分组必须让路的那些（见
@@ -695,8 +718,21 @@ impl DocumentSession {
                     authorized_takes.get(&g.item_id).map(String::as_str),
                     authorized_sources.get(&g.item_id).map(String::as_str),
                     inherited_media.get(&g.item_id),
-                    pcm_by_item.get(&g.item_id),
+                    media_by_item.get(&g.item_id),
                 );
+                // 【只增不减】把这一轮学到的身份记进事实表（没有 PCM 时 has_pcm=false）。
+                if let Some(id) = clip.source_path.clone() {
+                    learned.push((
+                        g.item_id.clone(),
+                        crate::editor::media_identity::PcmFacts {
+                            source_id: id,
+                            sample_rate: 0,
+                            channels: 0,
+                            frames: 0,
+                            has_pcm: pcm_by_item.contains_key(&g.item_id),
+                        },
+                    ));
+                }
                 display_item_gain(clip, g.item_gain);
                 clip.track_id = track_id.clone();
                 // 【为什么空名不覆盖】宿主 take 名可能为空（`GetTakeName` 返回空串）。
@@ -742,6 +778,18 @@ impl DocumentSession {
                     clip.fade_out_dir = style.out_dir;
                 }
                 timeline.project_sec = timeline.project_sec.max(g.start_sec + g.duration_sec);
+            }
+        }
+        if !learned.is_empty() {
+            let mut facts = self.media_facts.lock_or_recover();
+            for (item, fact) in learned {
+                // 【只增不减】永不用"这一轮没有 PCM"覆盖已有的真 PCM 事实。
+                match facts.get(&item) {
+                    Some(known) if known.has_pcm && !fact.has_pcm => {}
+                    _ => {
+                        facts.insert(item, fact);
+                    }
+                }
             }
         }
         // 【T8：clip 的去留按**实体**判定，不按 id 的字符串前缀】
@@ -1246,6 +1294,35 @@ impl DocumentSession {
             // 消失**的条目。
             present.contains(id) || now.duration_since(*since) < stale_after
         });
+        // 【T-B0-4】一行逐 clip 媒体读数：只要计数变了就打印一次。
+        //
+        // 【为什么是计数而不是逐条】用户报障时"所有 clip 都在等"与"两条在等"是两种
+        // 完全不同的形状；计数能直接分开它们，而逐条会把日志刷成一份清单。
+        {
+            let (mut ready, mut pending, mut unavailable, mut unknown) = (0usize, 0usize, 0usize, 0usize);
+            let mut total = 0usize;
+            if let Some(clips) = payload["clips"].as_array() {
+                total = clips.len();
+                for clip in clips {
+                    match clip["host_media"].as_str() {
+                        Some("ready") => ready += 1,
+                        Some("pending") => pending += 1,
+                        Some("unavailable") => unavailable += 1,
+                        _ => unknown += 1,
+                    }
+                }
+            }
+            let line = format!(
+                "[hfs] media ready={ready} pending={pending} unavailable={unavailable} \
+unknown={unknown} clips={total} facts={}",
+                self.media_facts.lock_or_recover().len()
+            );
+            let mut last = self.last_media_diag.lock_or_recover();
+            if last.as_deref() != Some(line.as_str()) {
+                *last = Some(line.clone());
+                log::info!("{line}");
+            }
+        }
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
         // 语言无关地报出数量与原因码，文案由前端 catalog 本地化。
         let skipped = self.skipped_regions.lock_or_recover();
@@ -1517,10 +1594,14 @@ impl DocumentSession {
         // 是通的，用户丢的是参数与曲线。恢复由**哪个实例**完成取决于宿主把载荷发给了谁，
         // 所以要看文档上全部 renderer，而不是手里这一个。读取失败与拒收 region 更紧急，
         // 保持它们的优先级。
+        // 【T-D6：只有"载荷还挂着"才算未解决】`restore_failed` 是一个**历史**读数：
+        // 一次失败之后它就是真的，哪怕下一次已经合入成功。原来的条件只要它真就抬成
+        // `RestoreUnresolved`，于是音频完全正常的片段也会被挂上"参数没读回来"的横幅。
+        // 现在必须同时满足"手里确实还有未合入的载荷"——那一份才是用户真正缺的东西。
         let restore_failed = self
             .renderer_owners()
             .iter()
-            .any(|owner| owner.restore_failed());
+            .any(|owner| owner.restore_failed() && owner.has_pending_restore());
         if restore_failed
             && state != crate::render::extension::HostAudioState::SourceReadFailed
             && state != crate::render::extension::HostAudioState::RegionRejected
@@ -1544,10 +1625,20 @@ impl DocumentSession {
             crate::render::extension::HostAudioState::RestoreUnresolved => restore_reason,
             _ => None,
         };
+        // 【T-C6】把"是哪一环断了"的计数一起给界面：用户截图就能指认，不必再要日志。
+        let debug = serde_json::json!({
+            "regions": self.regions.lock_or_recover().len(),
+            "items": self.region_items.lock_or_recover().len(),
+            "authorized": self.authorized_takes.lock_or_recover().len(),
+            "pcm": self.edit_sources.lock_or_recover().len(),
+            "facts": self.media_facts.lock_or_recover().len(),
+            "renderers": self.renderer_owners().len(),
+        });
         payload["host_audio"] = serde_json::json!({
             "state": state.as_str(),
             "waiting_clips": waiting,
             "skipped_clips": skipped,
+            "debug": debug,
             // 只在真故障档带上真因：`awaiting_regions` 是正常的中间态，
             // 给它挂一个 null 只会让前端多一条要处理的分支。
             "reason": reason,
