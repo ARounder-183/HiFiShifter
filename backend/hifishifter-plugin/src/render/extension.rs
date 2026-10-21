@@ -1279,6 +1279,14 @@ pub(crate) struct ExtensionOwner {
     /// `[transfer] pass` / `[transfer] clock` 两行的去重指纹（非实时线程用）。
     last_pass_diag: Mutex<Option<String>>,
     last_clock_diag: Mutex<Option<String>>,
+    /// `[transfer] ctx` 的去重指纹（非实时线程用）。
+    last_ctx_diag: Mutex<Option<String>>,
+    /// 输出写满审计的读数（`HIFISHIFTER_BUFFER_AUDIT=1`；音频线程只写原子）。
+    buffer_audit_channels: AtomicU32,
+    buffer_audit_frames: AtomicU32,
+    buffer_audit_unwritten: AtomicU64,
+    buffer_audit_active: AtomicBool,
+    last_buffer_diag: Mutex<Option<String>>,
     repeats_suppressed: AtomicU64,
     /// 连续多少块被判定为"不该出声"（停播 / 重复区间）。
     ///
@@ -1930,11 +1938,17 @@ impl ExtensionOwner {
                 // 【为什么这条静默早退必须留痕】它是枚举、几何刷新与前台自愈的**共同**
                 // 第一行。此前它失败时什么都不写，于是"重开工程后界面停在等待宿主音频"
                 // 与"宿主没给原生扩展"在日志里完全同形（T6）。
-                hifishifter_kernel::log_limiter::emit_limited_key(
-                    log::Level::Warn,
-                    "ara.stamp.no-document",
-                    format_args!("[ara] host query skipped (no document): {error}"),
-                );
+                //
+                // 【为什么 Transfer 实例不报】它**永远**没有 ARA 文档 —— 那不是故障，
+                // 是形态。此前这一行每 10 秒报一次，40 分钟的现场日志里刷了 480 行，
+                // 把真正的错误整片淹掉；而"看不到读数"正是本轮要修的第一件事。
+                if self.mode() != InstanceMode::Transfer {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.stamp.no-document",
+                        format_args!("[ara] host query skipped (no document): {error}"),
+                    );
+                }
                 return Err(error);
             }
         };
@@ -3574,8 +3588,14 @@ impl ExtensionOwner {
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }
+        // 【为什么要量这一步】"起播 0.4–0.7 s 一次咔"的两个候选成因（起播窗口 vs
+        // 处理结果晚到）在这一个数上就能分开：若 `render_ms` 与用户听到的时间同量级，
+        // 那一段就是"素材在、结果还没算出来"；若它远大于 0.7 s，那 0.4 s 只能来自
+        // 起播窗口。没有这个数时，两者在日志里完全同形。
+        let render_started = std::time::Instant::now();
         let mut snapshots = input.render(cancel)?;
         super::snapshot::compact_prepared(&mut snapshots)?;
+        let render_ms = render_started.elapsed().as_millis() as u64;
         if self.is_closed() {
             return Ok(());
         }
@@ -3597,7 +3617,7 @@ impl ExtensionOwner {
         // （见 `processed_ready`）。换 take 之后这里才更新，所以中间那段空窗由原始磁带兜底。
         self.transfer_ready_revision
             .store(revision, Ordering::Release);
-        log::info!("[transfer] prepared material revision {revision} edit {edit}");
+        log::warn!("[transfer] prepared material revision {revision} edit {edit} in {render_ms} ms");
         Ok(())
     }
 
@@ -3934,6 +3954,29 @@ impl ExtensionOwner {
     pub(crate) fn log_click_report(&self) {
         for line in self.click.drain_suspicious() {
             log::warn!("[click] {line}");
+        }
+    }
+
+    /// 把**最近一块**的宿主上下文打成一行（非实时线程；由会话 actor 驱动）。
+    ///
+    /// 【为什么必须有这一行】排查"起播窗口/位置钉住"时，唯一的硬事实是**宿主到底
+    /// 给了什么**：`state` 的哪一位、`projectTimeSamples` 动不动、
+    /// `continousTimeSamples` 有没有值、`projectTimeMusic` 有没有值。此前这些字段
+    /// 一个都没有被打出来，于是每一轮都只能靠"用户再听一遍"来猜是哪一种形状。
+    ///
+    /// 【为什么读环形记录而不是新开一组原子】环里已经逐块记下了全部字段（音频线程
+    /// 只写原子、不分配），复用它就不必再维护第二份会漂移的读数。
+    pub(crate) fn log_transfer_context(&self) {
+        let Some(ring) = self.block_trace.get() else {
+            return;
+        };
+        let Some(line) = ring.last_context_line() else {
+            return;
+        };
+        let mut last = self.last_ctx_diag.lock_or_recover();
+        if last.as_deref() != Some(line.as_str()) {
+            *last = Some(line.clone());
+            log::warn!("{line}");
         }
     }
 
@@ -5153,6 +5196,9 @@ impl ExtensionOwner {
             allow_output,
             outcome.code(),
             transfer.capture_started(),
+            StreamTime::from_context(context),
+            rate,
+            stream_block.counted,
         );
         Some(BlockEvidence {
             stream,
@@ -7837,6 +7883,16 @@ struct BlockTraceRecord {
     capture: AtomicU8,
     capture_started: AtomicBool,
     rung: AtomicU8,
+    // ── 宿主时间字段（`[transfer] ctx` 用它回答"宿主到底给了什么"）──
+    continuous: AtomicI64,
+    continuous_valid: AtomicBool,
+    music_bits: AtomicU64,
+    music_valid: AtomicBool,
+    /// `0` = 非循环；`1` = 循环且元数据完整；`2` = 循环但元数据不完整。
+    cycle: AtomicU8,
+    rate_bits: AtomicU64,
+    /// 本块位置是否由**计数器**推进（见 `StreamBlock::counted`）。
+    counted: AtomicBool,
 }
 
 /// 预分配的块级环形记录（SPSC：音频线程写、actor/诊断读）。
@@ -7874,6 +7930,9 @@ impl BlockTraceRing {
         emitted: bool,
         capture: u8,
         capture_started: bool,
+        time: StreamTime,
+        rate: f64,
+        counted: bool,
     ) {
         let index = self.head.fetch_add(1, Ordering::Relaxed) as usize % self.records.len();
         let record = &self.records[index];
@@ -7906,6 +7965,26 @@ impl BlockTraceRing {
             .capture_started
             .store(capture_started, Ordering::Relaxed);
         record.rung.store(0, Ordering::Relaxed);
+        record
+            .continuous
+            .store(time.continuous.unwrap_or(i64::MIN), Ordering::Relaxed);
+        record
+            .continuous_valid
+            .store(time.continuous.is_some(), Ordering::Relaxed);
+        record
+            .music_bits
+            .store(time.music.unwrap_or(f64::NAN).to_bits(), Ordering::Relaxed);
+        record.music_valid.store(time.music.is_some(), Ordering::Relaxed);
+        record.cycle.store(
+            if time.cycle_active {
+                1 + u8::from(!time.cycle_valid)
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
+        record.rate_bits.store(rate.to_bits(), Ordering::Relaxed);
+        record.counted.store(counted, Ordering::Relaxed);
         record.seq.fetch_add(1, Ordering::Release);
     }
 
@@ -7919,6 +7998,96 @@ impl BlockTraceRing {
         record.seq.fetch_add(1, Ordering::Relaxed);
         record.rung.store(rung, Ordering::Relaxed);
         record.seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 最近一块的宿主上下文，格式化成 `[transfer] ctx: …` 一行。
+    ///
+    /// 【为什么只有一块】它回答的是"宿主此刻给的是什么形状"，不是历史。需要历史时
+    /// 用 `snapshot`（诊断包里的块级 trace）。
+    fn last_context_line(&self) -> Option<String> {
+        let head = self.head.load(Ordering::Acquire);
+        if head == 0 {
+            return None;
+        }
+        let index = (head - 1) as usize % self.records.len();
+        let record = &self.records[index];
+        // seqlock：读两遍一致才算稳定（音频线程可能正在写同一个槽）。
+        let first = record.seq.load(Ordering::Acquire);
+        if first % 2 != 0 {
+            return None;
+        }
+        let read = || {
+            (
+                record.state.load(Ordering::Relaxed),
+                record.mode.load(Ordering::Relaxed),
+                record.stream.load(Ordering::Relaxed),
+                record.start.load(Ordering::Relaxed),
+                record.position.load(Ordering::Relaxed),
+                record.frames.load(Ordering::Relaxed),
+                record.phase.load(Ordering::Relaxed),
+                record.playing.load(Ordering::Relaxed),
+                record.playing_rising.load(Ordering::Relaxed),
+                record.cycle_wrap.load(Ordering::Relaxed),
+                record.had_previous.load(Ordering::Relaxed),
+                record.continuous.load(Ordering::Relaxed),
+                record.continuous_valid.load(Ordering::Relaxed),
+                record.music_bits.load(Ordering::Relaxed),
+                record.music_valid.load(Ordering::Relaxed),
+                record.cycle.load(Ordering::Relaxed),
+                record.rate_bits.load(Ordering::Relaxed),
+                record.counted.load(Ordering::Relaxed),
+                record.emitted.load(Ordering::Relaxed),
+                record.capture.load(Ordering::Relaxed),
+            )
+        };
+        let values = read();
+        if record.seq.load(Ordering::Acquire) != first {
+            return None;
+        }
+        let (
+            state,
+            mode,
+            stream,
+            raw_start,
+            position,
+            frames,
+            phase,
+            playing,
+            playing_rising,
+            cycle_wrap,
+            had_previous,
+            continuous,
+            continuous_valid,
+            music_bits,
+            music_valid,
+            cycle,
+            rate_bits,
+            counted,
+            emitted,
+            capture,
+        ) = values;
+        let rate = f64::from_bits(rate_bits);
+        let music = f64::from_bits(music_bits);
+        Some(format!(
+            "[transfer] ctx: stream={} mode={mode} state=0x{state:x} \
+             raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
+             playing={} rising={} cycle={} had_prev={} \
+             cont={}{} music={}{} rate={rate:.0} counted={} capture={} \
+             emitted={}",
+            ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
+            position.saturating_sub(raw_start),
+            u8::from(playing),
+            u8::from(playing_rising),
+            cycle_wrap,
+            u8::from(had_previous),
+            if continuous_valid { continuous } else { 0 },
+            if continuous_valid { "(valid)" } else { "(absent)" },
+            if music_valid { music } else { 0.0 },
+            if music_valid { "(valid)" } else { "(absent)" },
+            u8::from(counted),
+            emitted,
+            capture,
+        ))
     }
 
     /// 最近的 `limit` 条记录（按写入顺序）。撕裂的记录直接跳过。
@@ -7998,6 +8167,45 @@ impl ExtensionOwner {
             .store(value.max(0), Ordering::Release);
     }
 
+    /// 记一次**输出写满审计**（`HIFISHIFTER_BUFFER_AUDIT=1` 时由 vst3 层调用）。
+    ///
+    /// 【它回答什么】"这一块有没有哪一帧根本没被写过"。立体声下每条分支都写满整块，
+    /// 所以这个数应当恒为 0；非零只有三种来源：>2 声道的总线（`pass_through` 只写前
+    /// 两个平面）、短块、或者某条新分支漏写。三种都是"用户听到上一次的内容"。
+    ///
+    /// 【为什么按档位去重打印】它由音频线程记原子，格式化留给 actor；一次播放里同一档位
+    /// 只报一次，避免每块一行。
+    pub(crate) fn note_buffer_audit(&self, channels: usize, unwritten: usize, frames: usize) {
+        self.buffer_audit_channels.store(channels as u32, Ordering::Relaxed);
+        self.buffer_audit_frames.store(frames as u32, Ordering::Relaxed);
+        self.buffer_audit_unwritten
+            .fetch_max(unwritten as u64, Ordering::Relaxed);
+    }
+
+    /// 把写满审计的结论打成一行（非实时线程）。
+    pub(crate) fn log_buffer_audit(&self) {
+        if !self.buffer_audit_active.swap(true, Ordering::AcqRel) {
+            // 第一次调用只置位：没有读数可报。
+            return;
+        }
+        let unwritten = self.buffer_audit_unwritten.load(Ordering::Acquire);
+        let line = format!(
+            "[buf] audit: channels={} frames={} unwritten={unwritten} output={}",
+            self.buffer_audit_channels.load(Ordering::Acquire),
+            self.buffer_audit_frames.load(Ordering::Acquire),
+            self.transfer_output().as_str(),
+        );
+        let mut last = self.last_buffer_diag.lock_or_recover();
+        if last.as_deref() != Some(line.as_str()) {
+            *last = Some(line.clone());
+            if unwritten > 0 {
+                log::warn!("{line}");
+            } else {
+                log::info!("{line}");
+            }
+        }
+    }
+
     /// 门控清掉一块（诊断用）。按流分开计数：prefetch/offline 的清零必须是 0。
     pub(crate) fn note_gate_cleared(&self, stream: ProcessStream) {
         self.gate_cleared.fetch_add(1, Ordering::Relaxed);
@@ -8065,6 +8273,9 @@ impl ExtensionOwner {
         allow_output: bool,
         capture: u8,
         capture_started: bool,
+        time: StreamTime,
+        rate: f64,
+        counted: bool,
     ) {
         self.blocks_seen.fetch_add(1, Ordering::Relaxed);
         self.stream_blocks[stream.index()].fetch_add(1, Ordering::Relaxed);
@@ -8116,6 +8327,9 @@ impl ExtensionOwner {
                 allow_output,
                 capture,
                 capture_started,
+                time,
+                rate,
+                counted,
             );
         }
     }

@@ -770,6 +770,9 @@ fn the_block_trace_records_a_lagging_start() {
             true,
             crate::transfer::TransferBlockOutcome::NotPlaying.code(),
             false,
+            super::StreamTime::default(),
+            48_000.0,
+            false,
         );
     }
     let diagnostics = owner.block_diagnostics_json(8);
@@ -2051,4 +2054,60 @@ fn an_ara_snapshot_publish_changes_the_output_token() {
         before, after,
         "快照发布必须改变 token，否则 ARA 的接缝拿不到 1.3 ms 淡化"
     );
+}
+
+/// **[transfer] ctx 必须把宿主给的时间字段如实报出来。**
+///
+/// 【为什么这条要有】排查"起播窗口/位置钉住"时唯一的硬事实是**宿主到底给了什么**。
+/// 这一行此前根本不存在，于是每一轮都只能靠"用户再听一遍"猜是哪一种形状。
+#[test]
+fn the_context_line_reports_the_host_time_fields() {
+    let owner = insert_owner();
+    owner.init_block_trace();
+    let time = super::StreamTime {
+        continuous: Some(4_200),
+        music: None,
+        tempo: None,
+        cycle_active: false,
+        cycle_valid: false,
+        cycle_start_music: 0.0,
+        cycle_end_music: 0.0,
+    };
+    owner.note_block_trace(
+        crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+        0,
+        ProcessStream::Realtime,
+        4_096,
+        4_096,
+        512,
+        true,
+        TransportPhase::Rolling,
+        true,
+        false,
+        1,
+        true,
+        true,
+        crate::transfer::TransferBlockOutcome::Capturing.code(),
+        true,
+        time,
+        48_000.0,
+        false,
+    );
+    let line = owner
+        .block_trace
+        .get()
+        .and_then(|ring| ring.last_context_line())
+        .expect("必须能格式化出一行 ctx");
+    assert!(line.starts_with("[transfer] ctx:"), "{line}");
+    assert!(line.contains("raw=4096"), "宿主报的位置必须出现：{line}");
+    assert!(
+        line.contains("cont=4200(valid)"),
+        "continuous 必须带 valid 标记：{line}"
+    );
+    assert!(
+        line.contains("music=0(absent)"),
+        "没有 music 时必须明确写 absent，而不是写一个 0：{line}"
+    );
+    assert!(line.contains("rate=48000"), "{line}");
+    assert!(line.contains("counted=0"), "{line}");
 }

@@ -605,6 +605,15 @@ pub(crate) struct LeadIn {
     pub synthetic_frames: u64,
     /// 第一个**非零**样本在带内的偏移（秒）。`None` = 整条带都是零。
     pub first_signal_sec: Option<f64>,
+    /// **假洞**：`synthetic_frames` 之前存在非零样点。
+    ///
+    /// 【为什么这条断言值得存在】覆盖表只该宣称"这一段我们拷过"。如果它把一段**真实
+    /// 录音**排除在外，播放侧就会在那一段回退宿主原声（参数线不生效），并在边界处做
+    /// 一次源切换 —— 那就是用户听到的"起播 0.4~0.7 s 一次咔"。
+    ///
+    /// round 23 就是这样：`trusted = [31568, …]` 把 0.658 s 的真实音乐声明成了洞。
+    /// 当时唯一的发现途径是用户复听。这条断言把同一件事变成一行 ERROR。
+    pub falsified: bool,
 }
 
 /// 量一次录制的前导（见 [`LeadIn`]）。**纯读**。
@@ -633,9 +642,17 @@ pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
             break;
         }
     }
+    // 【假洞】第一个非零样点落在"我们宣称不属于自己"的那一段里。
+    //
+    // 留 1 帧容差：`synthetic_frames` 与 `first_signal_sec` 都按帧取整，边界上的
+    // 一个采样不应该被算成"整段都是我们的"。
+    let falsified = first_signal_sec.is_some_and(|sec| {
+        (sec * rate).round() as u64 + 1 < synthetic_frames
+    });
     LeadIn {
         synthetic_frames,
         first_signal_sec,
+        falsified,
     }
 }
 
@@ -1521,4 +1538,38 @@ mod tests {
         assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
         assert!((timeline.clips[1].length_sec - 0.06).abs() < 1e-9);
     }
+    /// **`lead_in` 必须能识别"把一段真实录音声明成洞"。**
+    ///
+    /// 【为什么这条是本轮的回归】round 23 的 `trusted` 表把 0.658 s 的真实音乐排除出
+    /// 覆盖，播放侧于是在那一段回退宿主原声（参数线不生效）并在边界咔一下。当时唯一的
+    /// 发现途径是用户复听；这条断言把同一件事变成一行 ERROR。
+    #[test]
+    fn a_falsified_lead_in_is_reported() {
+        // 覆盖从第 8 帧起，但第 0 帧就已经有信号 ⇒ 那一段是真实录音，不该被声明成洞。
+        let mut covered = segment(0, &[0.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+        covered.coverage[0] = 8..10;
+        covered.coverage_len = 1;
+        let lead = lead_in(&[covered]);
+        assert_eq!(lead.synthetic_frames, 8);
+        assert!(
+            lead.falsified,
+            "第 0 帧有信号而覆盖从第 8 帧起 ⇒ 这是假洞"
+        );
+    }
+
+    /// 真实的前导静音（整段全零）**不是**假洞。
+    #[test]
+    fn a_genuine_silent_lead_in_is_not_falsified() {
+        let mut covered = segment(0, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.6]);
+        covered.coverage[0] = 8..10;
+        covered.coverage_len = 1;
+        let lead = lead_in(&[covered]);
+        assert_eq!(lead.synthetic_frames, 8);
+        assert!(
+            !lead.falsified,
+            "前 8 帧确实是静音：覆盖表是对的，不得误报"
+        );
+        assert_eq!(lead.first_signal_sec, Some(0.008));
+    }
+
 }

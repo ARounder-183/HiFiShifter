@@ -1480,11 +1480,24 @@ impl TransferStore {
         let lead_in = timeline::lead_in(&all);
         let rate = sample_rate.max(1) as f64;
         let (coverage_ranges, coverage_gaps) = coverage_shape(&all);
+        // 【假洞】`lead_in` 之前若存在非零样点，说明我们把一段**真实录音**声明成了洞。
+        // 播放侧会在那里回退宿主原声（参数线不生效）并在边界咔一下 —— 那正是 round 23
+        // 的形状。这条读数是 ERROR 级：它一旦为真，问题一定在覆盖表，不在别处。
+        if lead_in.falsified {
+            log::error!(
+                "[transfer] take {id}: FALSIFIED LEAD-IN — coverage claims the first {} frame(s) \
+                 are not ours, but the first non-zero sample is at {} ({:.3}s). Playback will fall \
+                 back to host audio there and switch sources at the boundary (that is the click)",
+                lead_in.synthetic_frames,
+                lead_in.first_signal_sec.unwrap_or(0.0) * rate,
+                lead_in.first_signal_sec.unwrap_or(0.0),
+            );
+        }
         log::warn!(
             "[transfer] take {id}: frames={} ({:.3}s) rate={} coverage={} gaps={} \
              lead_in={} ({:.3}s) first_signal_at={} pre_roll_frames={} pending_stashed={} \
              bridged_window_blocks={} resync_bridged_frames={} counted_blocks={} \
-             counted_frames={} migrated_from_v4={}",
+             counted_frames={} migrated_from_v4={} falsified_lead_in={}",
             all.iter().map(|segment| segment.filled as u64).sum::<u64>(),
             all.iter().map(|segment| segment.filled as u64).sum::<u64>() as f64 / rate,
             sample_rate,
@@ -1503,6 +1516,7 @@ impl TransferStore {
             diagnostics.counted_blocks,
             diagnostics.counted_frames,
             u8::from(all.iter().any(|segment| segment.migrated_from_v4)),
+            u8::from(lead_in.falsified),
         );
         if diagnostics.pre_roll_frames == 0
             && (diagnostics.pending_stashed > 0 || diagnostics.bridged_window_blocks > 0)

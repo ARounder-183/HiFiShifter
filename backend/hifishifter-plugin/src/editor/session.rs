@@ -984,6 +984,18 @@ impl EditorSession {
                             owner.block_diagnostics_json(64)
                         );
                     }
+                    // 【为什么这些读数挂在这里】`[transfer] pass` / `[transfer] clock` /
+                    // `[transfer] ctx` 此前只由 `ExtensionOwner::prepare()` 驱动，而
+                    // VST3 宿主**在播放期间根本不会调 prepare()** —— 40 分钟的现场日志里
+                    // 这三行一行都没有，于是每一轮排查都只能靠"用户再听一遍"。
+                    //
+                    // 会话 actor 是唯一"与窗口开没开无关、又不在音频线程上"的周期点：
+                    // 它在录制结束时就存在（`arm_transfer_rendering` 建它），并且每轮
+                    // 都会跑。音频线程只写原子，格式化留在这里。
+                    owner.log_click_report();
+                    owner.log_transfer_context();
+                    owner.log_transfer_report();
+                    owner.log_buffer_audit();
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。

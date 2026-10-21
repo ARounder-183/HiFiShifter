@@ -1665,6 +1665,95 @@ pub(crate) fn audio_panic_count() -> u64 {
     AUDIO_PANIC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 输出写满审计是否开启（HIFISHIFTER_BUFFER_AUDIT=1）。
+///
+/// 【为什么用环境变量而不是设置项】它是排查工具，不是产品行为；用户永远不会打开它，
+/// 而我们要能在不改构建的情况下让用户跑一遍。读一次就缓存。
+fn buffer_audit_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HIFISHIFTER_BUFFER_AUDIT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// 把输出平面预填成 NaN（审计哨兵）。
+///
+/// # Safety
+/// data 由宿主提供；只按声明长度写，形状非法时由后续的 validate 拦下。
+unsafe fn poison_outputs(data: *mut c_void) {
+    if data.is_null() {
+        return;
+    }
+    // SAFETY: 调用方保证 data 指向宿主提供的 ProcessData。
+    let process = unsafe { &*data.cast::<crate::audio_abi::ProcessData>() };
+    if process.outputs.is_null() || process.num_outputs <= 0 || process.num_samples <= 0 {
+        return;
+    }
+    let frames = process.num_samples as usize;
+    for bus in 0..process.num_outputs as usize {
+        // SAFETY: 宿主声明了 num_outputs 个总线。
+        let bus_ref = unsafe { &*process.outputs.add(bus) };
+        if bus_ref.channel_buffers.is_null() || bus_ref.num_channels <= 0 {
+            continue;
+        }
+        for channel in 0..bus_ref.num_channels as usize {
+            // SAFETY: 宿主声明了 num_channels 个平面，每个至少 num_samples 帧。
+            let plane = unsafe { *bus_ref.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            for index in 0..frames {
+                // SAFETY: index < frames。
+                unsafe { *plane.add(index) = f32::NAN };
+            }
+        }
+    }
+}
+
+/// 扫描输出平面里仍未被写过的帧，并按档位记一次读数。
+///
+/// # Safety
+/// 与 poison_outputs 相同。
+unsafe fn report_unwritten(this: *mut c_void, data: *mut c_void) {
+    if data.is_null() {
+        return;
+    }
+    // SAFETY: 调用方保证 this 是存活的音频接口子对象。
+    let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+    // SAFETY: 同一份 ProcessData。
+    let process = unsafe { &*data.cast::<crate::audio_abi::ProcessData>() };
+    if process.outputs.is_null() || process.num_outputs <= 0 || process.num_samples <= 0 {
+        return;
+    }
+    let frames = process.num_samples as usize;
+    let mut unwritten = 0_usize;
+    let mut channels = 0_usize;
+    for bus in 0..process.num_outputs as usize {
+        // SAFETY: 宿主声明了 num_outputs 个总线。
+        let bus_ref = unsafe { &*process.outputs.add(bus) };
+        if bus_ref.channel_buffers.is_null() || bus_ref.num_channels <= 0 {
+            continue;
+        }
+        for channel in 0..bus_ref.num_channels as usize {
+            // SAFETY: 宿主声明了 num_channels 个平面。
+            let plane = unsafe { *bus_ref.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            channels = channels.max(channel + 1);
+            for index in 0..frames {
+                // SAFETY: index < frames。
+                if unsafe { *plane.add(index) }.is_nan() {
+                    unwritten += 1;
+                }
+            }
+        }
+    }
+    owner.note_buffer_audit(channels, unwritten, frames);
+}
+
 /// 宿主音频回调：完整渲染调度 + PCM 快照输出都在 `audio_process_inner` 里完成；
 /// 本层只负责 panic 遏制。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
@@ -1673,9 +1762,25 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
     // `component_get_state` 早就包了这一层，音频路径此前没有 —— 一条最不该崩的路径
     // 反而最没有保护。捕获后输出静音（不留上一次的残留），并只做一次原子计数：
     // 音频线程不得写文件、不得加锁等待。
+    // 【输出写满审计（HIFISHIFTER_BUFFER_AUDIT=1）】把输出平面预填成 NaN，回调返回后
+    // 扫一遍：任何仍是 NaN 的帧都说明某条分支**没有写满整块**，于是宿主会把上一次的
+    // 内容（in-place 时甚至是**输入原声**）当作这一次的输出播出去。
+    //
+    // 【为什么这值得一次额外扫描】"输出缓冲残留"是用户提出的方向之一。逐条看分支可以
+    // 论证它在立体声下不成立，但论证不是证据；这条审计把"到底有没有漏写、漏在哪一档"
+    // 变成一次播放就能读到的一行。默认关闭（每块两次内存扫描，约 2 µs）。
+    let auditing = buffer_audit_enabled();
+    if auditing {
+        // SAFETY: data 由宿主提供；形状非法时下面的 validate 会拦下，不会走到输出。
+        unsafe { poison_outputs(data) };
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         audio_process_inner(this, data)
     }));
+    if auditing {
+        // SAFETY: 与 audio_process_inner 同一份宿主提供的 ProcessData。
+        unsafe { report_unwritten(this, data) };
+    }
     match outcome {
         Ok(result) => result,
         Err(_) => {
