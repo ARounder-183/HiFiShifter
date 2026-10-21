@@ -29,6 +29,14 @@ const TRANSIENT_MARKERS: readonly string[] = [
     "is not ready",
     "not ready",
     "Conflict: host",
+    // 【为什么加这一条】后端的提交闸在"宿主在我编辑期间动过"时会报
+    // `Conflict: workspace …`（此前是 `Conflict: workspace scope or curves changed`，
+    // 现在是 `Conflict: workspace edits could not be rebased`）。两者都是**可重基**的
+    // 瞬时状态：后端自己会换基线重放，用户不需要做任何事。此前它落在白名单外，
+    // 于是每次"移动 item 后顺手调一下参数"都闪一次"音频块编辑被拒绝" —— 而编辑
+    // 其实已经生效。
+    "Conflict: workspace",
+    "could not be rebased",
     "refresh required",
     "budget exceeded",
     "lease revoked",
