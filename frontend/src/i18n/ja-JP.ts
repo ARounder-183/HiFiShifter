@@ -2253,7 +2253,6 @@ export const jaJP = {
     transfer_option_limit_unlimited: "無制限",
     transfer_output_processed: "処理結果",
     transfer_output_raw: "生録音（合成中）",
-    transfer_output_stale: "処理結果（前のテイク）",
     transfer_output_passthrough: "ホストの原音",
     transfer_output_pending: "素材は準備済み、合成待ち",
     transfer_output_recording: "ホストをスルー中",

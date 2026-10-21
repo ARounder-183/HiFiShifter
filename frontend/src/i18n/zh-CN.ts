@@ -2166,7 +2166,6 @@ export const zhCN = {
     transfer_option_limit_unlimited: "不限",
     transfer_output_processed: "处理结果",
     transfer_output_raw: "原始录音（合成中）",
-    transfer_output_stale: "处理结果（上一版）",
     transfer_output_passthrough: "宿主原声",
     transfer_output_pending: "素材已就绪，等待合成",
     transfer_output_recording: "正在直通宿主",

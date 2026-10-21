@@ -285,11 +285,10 @@ function outputText(t: (key: TransferMessageKey) => string, output: string): str
     switch (output) {
         case "processed":
             return t("transfer_output_processed");
-        // 【为什么要单独一档】它说的是"上一版处理结果，新的还没合成好"。与
-        // `processed` 共用一句会让用户以为听到的就是最新编辑 —— 而那正是他无法自己
-        // 判断的那一件事（见 `outputText` 上方对"现在听到哪一版"的说明）。
-        case "stale_processed":
-            return t("transfer_output_stale");
+        // 【`stale_processed` 这一档已经被后端删掉】它曾经表示"上一版处理结果，新的
+        // 还没合成好"。而那一档的产物读的是 `snapshots[...]`，也就是**上一段素材**：
+        // 换 take 之后播它，等于用旧录音盖住新演奏，而用户会把它当成"编辑生效了"。
+        // 现在那段空档由 `raw`（这一份 take 的原始捕获）覆盖，所以这里不再有对应键。
         case "raw":
             return t("transfer_output_raw");
         case "recording":
@@ -362,7 +361,6 @@ type TransferMessageKey =
     | "transfer_stopped_jump"
     | "transfer_now_playing"
     | "transfer_output_processed"
-    | "transfer_output_stale"
     | "transfer_output_raw"
     | "transfer_output_recording"
     | "transfer_output_pending"
