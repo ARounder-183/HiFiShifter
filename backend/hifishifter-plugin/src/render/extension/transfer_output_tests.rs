@@ -1665,6 +1665,33 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
     );
 }
 
+/// **透传的首块必须原样输出：那是宿主自己的信号，它已经连续。**
+///
+/// 【为什么这条必须与"首块淡入"并存】首块淡入只解决"我们自己算出来的内容从任意
+/// 相位开始"。透传的样本就是宿主正在播的东西 —— 给它加淡入等于削掉宿主音频的前
+/// 5 ms，而那既不是我们该做的事，也会让录制监听（`Recording`）少一截。
+#[test]
+fn a_passthrough_first_block_is_left_verbatim() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    let stream = ProcessStream::Realtime;
+    let frames = 64;
+    let mut left = vec![0.5_f32; frames];
+    let mut right = vec![0.5_f32; frames];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    // 种类 6 = `PassThrough`（宿主原声）。
+    owner
+        .output_token[stream.index()]
+        .store(6, std::sync::atomic::Ordering::Release);
+    unsafe { owner.apply_output_declick(stream, &mut bus, frames) };
+    assert_eq!(left, vec![0.5_f32; frames], "透传首块必须逐样本原样输出");
+}
 /// **"透传宿主原声 → 处理结果"必须淡入，而不是把两段内容叠在一起。**
 ///
 /// 【为什么与上一条不同】`PendingSynthesis` / `PassThrough` 输出的是宿主原声，

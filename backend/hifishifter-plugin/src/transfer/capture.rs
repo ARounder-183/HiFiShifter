@@ -2618,7 +2618,7 @@ mod tests {
             coverage_overrun: false,
             trusted: std::array::from_fn(|_| 0..0),
             trusted_len: 0,
-            trusted_known: true,
+            trusted_known: false,
             _reservation: None,
         }
     }

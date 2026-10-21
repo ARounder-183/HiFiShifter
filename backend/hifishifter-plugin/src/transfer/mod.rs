@@ -1599,6 +1599,9 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         coverage_overrun: false,
         trusted: std::array::from_fn(|_| 0..0),
         trusted_len: 0,
+        // 【新段的初始状态：**记录过**可信度，且一帧都还不信】与 `coverage` 的空表
+        // 不同 —— 那一位区分的是"没有记录（旧档 ⇒ 全信）"与"记录了但一帧不可信"
+        // （整段都在钉住窗口里）。这里必须是后者。
         trusted_known: true,
         _reservation: Some(reservation),
     })
@@ -2065,7 +2068,7 @@ mod tests {
             coverage_overrun: false,
             trusted: std::array::from_fn(|_| 0..0),
             trusted_len: 0,
-            trusted_known: true,
+            trusted_known: false,
             _reservation: None,
         }
     }

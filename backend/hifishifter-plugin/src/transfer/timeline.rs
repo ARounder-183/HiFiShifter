@@ -147,9 +147,10 @@ impl<'a> Tape<'a> {
                     segment.coverage_len,
                     segment.coverage_overrun,
                     segment.filled,
+                    true,
                 );
                 let trusted = if segment.trusted_known {
-                    segment_ranges(&segment.trusted, segment.trusted_len, false, segment.filled)
+                    segment_ranges(&segment.trusted, segment.trusted_len, false, segment.filled, false)
                 } else {
                     vec![0..segment.filled]
                 };
@@ -188,6 +189,8 @@ impl<'a> Tape<'a> {
                 segment.coverage_len,
                 segment.coverage_overrun,
                 segment.filled,
+                // `coverage` 的旧语义：没有记录 = 整段都算录到。
+                true,
             );
             let trusted = if segment.trusted_known {
                 segment_ranges(
@@ -195,6 +198,8 @@ impl<'a> Tape<'a> {
                     segment.trusted_len,
                     false,
                     segment.filled,
+                    // `trusted` 的空表**不是**"整段可信"（见 `Segment::trusted_known`）。
+                    false,
                 )
             } else {
                 // 没有可信度记录（旧 sidecar / 测试夹具 / 槽位用尽）：按"整段都可信"。
@@ -256,9 +261,13 @@ fn segment_ranges(
     len: usize,
     overrun: bool,
     filled: usize,
+    empty_means_whole: bool,
 ) -> Vec<Range<usize>> {
-    if overrun || len == 0 {
+    if overrun || (len == 0 && empty_means_whole) {
         return vec![0..filled];
+    }
+    if len == 0 {
+        return Vec::new();
     }
     ranges[..len.min(ranges.len())]
         .iter()
@@ -869,7 +878,7 @@ mod tests {
             coverage_overrun: false,
             trusted: std::array::from_fn(|_| 0..0),
             trusted_len: 0,
-            trusted_known: true,
+            trusted_known: false,
             _reservation: None,
         }
     }
@@ -916,6 +925,82 @@ mod tests {
         );
     }
 
+    /// **位置不可信的帧不得被宣称成我们的素材。**
+    ///
+    /// 【为什么这是"起播 0.4~0.7 s 一次咔"的回归测试】起播窗口里宿主把
+    /// `projectTimeSamples` 钉住不动，而插件按块长自行推进（`Synthesized`）。那时
+    /// 样本确实从宿主块里拷到了（`coverage` 有），但它属于哪个位置**是我们推的**
+    /// （`trusted` 没有）。交集为空 ⇒ 播放侧回退宿主原声，而不是把一串零按满幅输出。
+    #[test]
+    fn a_synthesized_position_is_not_claimed_as_our_material() {
+        let mut synthesized = segment(0, &[0.5; 100]);
+        synthesized.coverage[0] = 0..100;
+        synthesized.coverage_len = 1;
+        // 位置不可信：trusted 是空表，但 `trusted_known` 为真（这是"记录过，且没有
+        // 一帧可信"，不是"没有记录"）。
+        synthesized.trusted_len = 0;
+        synthesized.trusted_known = true;
+        let segments = [synthesized];
+        let (tapes, _) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(
+            tapes[0].covered_ranges(),
+            Vec::new(),
+            "位置不可信的帧一帧都不能宣称"
+        );
+    }
+
+    /// 宿主权威给出位置的块照常宣称（用户真的安静时那一段也是我们的）。
+    #[test]
+    fn a_project_position_is_still_claimed() {
+        let mut trusted = segment(0, &[0.0; 100]);
+        trusted.coverage[0] = 0..100;
+        trusted.coverage_len = 1;
+        trusted.trusted[0] = 0..100;
+        trusted.trusted_len = 1;
+        trusted.trusted_known = true;
+        let segments = [trusted];
+        let (tapes, _) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(tapes[0].covered_ranges(), vec![0..100]);
+    }
+
+    /// 覆盖与可信度的**交集**：中间那一段不可信 ⇒ 两侧各留一段，中间是洞。
+    #[test]
+    fn only_the_intersection_of_samples_and_trusted_positions_is_ours() {
+        let mut mixed = segment(0, &[0.5; 100]);
+        mixed.coverage[0] = 0..100;
+        mixed.coverage_len = 1;
+        mixed.trusted[0] = 0..40;
+        mixed.trusted[1] = 60..100;
+        mixed.trusted_len = 2;
+        mixed.trusted_known = true;
+        let segments = [mixed];
+        let (tapes, _) = build_tapes(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+        }]);
+        assert_eq!(tapes[0].covered_ranges(), vec![0..40, 60..100]);
+    }
+
+    /// 洞**不**给内部边界加 2 ms 边缘淡化：那份工作只属于覆盖边（一份实现）。
+    #[test]
+    fn a_hole_does_not_add_an_edge_fade_to_the_inner_boundary() {
+        // 第一段 [0,100) 与第二段 [200,300) 在工程上不相邻 ⇒ 投影出两条 clip。
+        let segments = [segment(0, &[0.5; 100]), segment(200, &[0.5; 100])];
+        let (timeline, _) = one(1, &segments);
+        assert_eq!(timeline.clips.len(), 2);
+        // 第一条是 take 的头（有淡入），但它**不是** take 的尾（后面还有内容）
+        // ⇒ 不得有淡出；第二条反过来。
+        assert!(timeline.clips[0].fade_in_sec > 0.0, "take 头要有淡入");
+        assert_eq!(timeline.clips[0].fade_out_sec, 0.0, "内部边界不得再淡一次");
+        assert_eq!(timeline.clips[1].fade_in_sec, 0.0, "内部边界不得再淡一次");
+        assert!(timeline.clips[1].fade_out_sec > 0.0, "take 尾要有淡出");
+    }
     /// 没有覆盖记录的段（旧 sidecar / 测试夹具）按"整段都算录到了"处理。
     ///
     /// 【为什么必须与上一条并存】覆盖是**可选**信息：把它当成"缺省为洞"会让所有

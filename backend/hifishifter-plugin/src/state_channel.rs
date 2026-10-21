@@ -820,6 +820,51 @@ mod tests {
     /// 【为什么这是症状三的主回归】保存的身份是"这条轨上所有 region 的对"。宿主分割
     /// 一次就多一条，而旧判据要求逐项相等 —— 于是存档从此再也合不进来，用户每次编辑
     /// 都看到"没能读回上次保存的参数"。交集唯一时接受，才符合"身份是同一批源"的事实。
+    /// **这一轮看不到的轨必须留着数据，而不是被删掉。**
+    ///
+    /// 【为什么这是"移动一下 item / 切个屏回来，参数全没了"的回归测试】轨道 id 来自
+    /// 宿主的 **realtime key**，而宿主重建 region sequence 时它必然改变。旧实现在
+    /// live 分支里对"查不到的旧轨"直接 `continue` ⇒ 不建 mapping ⇒ 下面被 filter 掉。
+    /// 删除是**不可逆**的数据销毁；保留只让这条记录这一轮不参与投影。
+    #[test]
+    fn a_temporarily_missing_track_keeps_its_parameters() {
+        let mut state = EditState {
+            params: BTreeMap::from([("a".to_owned(), params_fixture())]),
+            tracks: vec![track_fixture("a")],
+            bindings: BTreeMap::from([("a".to_owned(), vec![("mod-a".into(), "src".into())])]),
+            ..EditState::default()
+        };
+        // 宿主这一轮只交出了另一条轨（或者什么都没交出来）。
+        let current = TrackBindings::from([(
+            "other".to_owned(),
+            vec![("mod-b".to_owned(), "src".to_owned())],
+        )]);
+        state.reconcile(&current).unwrap();
+        assert!(state.params.contains_key("a"), "数据必须留着");
+        assert!(state.tracks.iter().any(|track| track.id == "a"));
+        assert!(state.unbound.contains("a"), "留着但不套用");
+        // `apply` 必须跳过它：猜归属比"这一轮不显示"严重得多。
+        let mut host = host();
+        host.tracks.push(track_fixture("a"));
+        state.apply(&mut host);
+        assert!(!host.params_by_root_track.contains_key("a"));
+    }
+
+    /// **一张空的绑定图不是证据**：它只说明"这一轮什么都没看到"。
+    #[test]
+    fn an_empty_binding_graph_never_erases_the_edit_state() {
+        let state = EditState {
+            params: BTreeMap::from([("a".to_owned(), params_fixture())]),
+            tracks: vec![track_fixture("a")],
+            bindings: BTreeMap::from([("a".to_owned(), vec![("mod-a".into(), "src".into())])]),
+            ..EditState::default()
+        };
+        let mut live = state.clone();
+        live.reconcile(&TrackBindings::new()).unwrap();
+        assert_eq!(live.params.len(), 1, "空图不得清空参数");
+        assert_eq!(live.tracks.len(), 1);
+        assert!(live.unbound.is_empty(), "什么都没看到 ≠ 认不出这一条");
+    }
     #[test]
     fn an_extra_region_does_not_invalidate_the_track_identity() {
         let mut edited = host();

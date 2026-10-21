@@ -430,7 +430,11 @@ pub(crate) fn merge_root_projection(
                 if from >= to {
                     continue;
                 }
-                merged.resize(to, pad(&key));
+                // 【为什么只在不够长时扩】`Vec::resize` 往**小**改会截断：原曲线
+                // 比这一段长时，截断等于把这一段之后的用户曲线整段丢掉。
+                if merged.len() < to {
+                    merged.resize(to, pad(&key));
+                }
                 merged[from..to].copy_from_slice(&values[from..to]);
             }
             set_curve(existing, &key, merged);
@@ -2739,6 +2743,59 @@ mod tests {
         timeline
     }
     /// 空白编辑参与保存/回流；非网格clip两侧不能重新变成零，局部音频哨兵也保持边界值。
+    /// **不完整的根视图只能覆盖它真的投影过的帧。**
+    ///
+    /// 【为什么这是"移动一下 item，整轨参数被抹平"的回归测试】旧实现是
+    /// `params.extend(roots)` —— 对已存在的键**整值替换**。而 `project_roots` 只能
+    /// 投影"有权威且几何可解"的 clip，其余帧是 `pad()`。一条 clip 拿不到权威就足以
+    /// 用"一段默认值 + 半条真曲线"盖掉用户原来的整条曲线。
+    fn root_params() -> TrackParamsState {
+        serde_json::from_value(serde_json::json!({"frame_period_ms": 5.0})).unwrap()
+    }
+
+    #[test]
+    fn an_incomplete_root_projection_only_overwrites_its_own_frames() {
+        let mut existing = root_params();
+        existing.pitch_edit = vec![60.0; 100];
+        existing.tension_edit = vec![0.5; 100];
+        let mut target = BTreeMap::from([("a".to_owned(), existing)]);
+        // 这一轮只投影到了 [10, 20) 这一段（其余帧没有信息）。
+        let mut partial = root_params();
+        partial.pitch_edit = vec![70.0; 100];
+        partial.tension_edit = vec![0.5; 100];
+        merge_root_projection(
+            &mut target,
+            BTreeMap::from([(
+                "a".to_owned(),
+                RootProjection {
+                    params: partial,
+                    frames: vec![10..20],
+                    complete: false,
+                },
+            )]),
+        );
+        let merged = &target["a"];
+        assert_eq!(&merged.pitch_edit[10..20], &[70.0; 10][..], "覆盖到的帧必须更新");
+        assert_eq!(merged.pitch_edit[0], 60.0, "没投影到的帧必须保持原值");
+        assert_eq!(merged.pitch_edit[50], 60.0);
+        assert_eq!(merged.pitch_edit[99], 60.0);
+        assert_eq!(merged.tension_edit[0], 0.5);
+    }
+
+    /// 整轨投影（空白编辑）照常整份覆盖。
+    #[test]
+    fn a_whole_root_projection_replaces_every_frame() {
+        let mut existing = root_params();
+        existing.pitch_edit = vec![60.0; 100];
+        let mut target = BTreeMap::from([("a".to_owned(), existing)]);
+        let mut whole = root_params();
+        whole.pitch_edit = vec![70.0; 100];
+        merge_root_projection(
+            &mut target,
+            BTreeMap::from([("a".to_owned(), RootProjection::whole(whole))]),
+        );
+        assert!(target["a"].pitch_edit.iter().all(|value| *value == 70.0));
+    }
     #[test]
     fn gap_layer_keeps_continuous_curves_and_non_grid_boundary_samples() {
         let timeline = continuous_track();

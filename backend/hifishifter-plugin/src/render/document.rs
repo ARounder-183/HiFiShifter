@@ -548,6 +548,42 @@ pub(crate) struct PluginMusicalProjection {
 }
 
 #[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    /// **编辑器视图按指纹存取：冲突重基的唯一基线。**
+    ///
+    /// 【为什么这是"移动 item 后参数回退"的回归测试】提交闸要回答"这次编辑基于哪一份
+    /// 视图"。旧实现拿**现在算出来的**投影当基线，于是宿主移动造成的几何差异被当成
+    /// "用户改了参数"写回源曲线（抹平）；拿"编辑器读到的那一份"当基线时，用户没碰的
+    /// 片段两侧逐字相同 ⇒ 一条都不写回。
+    #[test]
+    fn the_editor_baseline_is_remembered_by_its_projection_fingerprint() {
+        let document = DocumentSession::new(1);
+        let params = std::collections::BTreeMap::from([(
+            "root".to_owned(),
+            hifishifter_kernel::state::TrackParamsState::default(),
+        )]);
+        document.remember_workspace_view("fingerprint-a", &params);
+        assert!(document.workspace_baseline("fingerprint-a").is_some());
+        assert!(
+            document.workspace_baseline("fingerprint-b").is_none(),
+            "别的指纹不得命中（那会把一次编辑重基到另一份视图上）"
+        );
+        // 换一份视图 ⇒ 旧指纹不再可用。
+        document.remember_workspace_view("fingerprint-b", &params);
+        assert!(document.workspace_baseline("fingerprint-a").is_none());
+    }
+
+    /// 没有基线时**仍然拒绝**：猜一份基线等于把曲线写到错误的帧上。
+    #[test]
+    fn a_missing_baseline_is_never_guessed() {
+        let document = DocumentSession::new(2);
+        assert!(document.workspace_baseline("unknown").is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ara2_bridge::core::ApiGeneration;
