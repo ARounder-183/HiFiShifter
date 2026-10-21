@@ -141,24 +141,18 @@ impl<'a> Tape<'a> {
                 (lo < hi).then_some((*segment, lo - base, hi - base))
             })
             .flat_map(move |(segment, lo, hi)| {
-                // 与 `covered_ranges` 同一口径：**样本 ∩ 可信位置**。
+                // 与 `covered_ranges` 同一口径：**只认我们真的拷过样本的帧**。
                 let samples = segment_ranges(
                     &segment.coverage,
                     segment.coverage_len,
                     segment.coverage_overrun,
                     segment.filled,
-                    true,
                 );
-                let trusted = if segment.trusted_known {
-                    segment_ranges(&segment.trusted, segment.trusted_len, false, segment.filled, false)
-                } else {
-                    vec![0..segment.filled]
-                };
-                intersect(&samples, &trusted)
+                samples
                     .into_iter()
-                    .filter_map(move |(start, end)| {
-                        let a = lo.max(start);
-                        let b = hi.min(end);
+                    .filter_map(move |range| {
+                        let a = lo.max(range.start);
+                        let b = hi.min(range.end);
                         (a < b).then_some((segment, a, b))
                     })
                     .collect::<Vec<_>>()
@@ -178,36 +172,28 @@ impl<'a> Tape<'a> {
         let mut covered: Vec<Range<usize>> = Vec::new();
         for (segment, base) in self.segments.iter().zip(&self.offsets) {
             let limit = *base + segment.filled;
-            // 【T-A1-1】"有没有样本"与"这个位置算不算数"是两个独立的事实，取交集：
-            //   * `coverage` —— 我们真的从宿主块里拷过样本；
-            //   * `trusted`  —— 那些样本属于的位置是宿主**权威给出**的。
-            // 只有两者都成立，这一段才属于我们。起播窗口里宿主把位置钉住、由我们按
-            // 块长自行推进（`Synthesized`）时，样本在、位置不在 —— 交集为空，于是
-            // 播放侧回退宿主原声，而那正是那段时间里真实播放的内容。
+            // 【T-A1-1】覆盖只回答一个问题："这一段样本，我们从宿主块里拷过吗"。
+            //
+            // 【为什么不再叠一张"位置可信度"表】round 23 曾经加过一张 `trusted`，
+            // 把"位置由我们按块长推进"（起播窗口）判成"不属于我们"。而那是**合法记账**：
+            // 宿主在窗口里钉住 `projectTimeSamples`、却已经按块长送来时间上相邻的样本，
+            // 我们接着数下去的位置与宿主恢复后给出的读数一致到块级（实测偏移 0.658 s，
+            // 一直被 `POSITION_DRIFT_TOLERANCE_SEC` 接受）。把那段标成"不是我们的"，
+            // 等于把一段真实录音声明成洞 —— 播放侧于是回退宿主原声（前 0.658 s 不受
+            // 参数线影响），并在边界处做一次源切换（那一下"咔"）。
+            //
+            // 【真正的"不属于我们"是什么形状】是"根本没写"：桥接、丢块、回卷裁缝都
+            // 不登记 coverage。所以一张表就够了。
             let samples = segment_ranges(
                 &segment.coverage,
                 segment.coverage_len,
                 segment.coverage_overrun,
                 segment.filled,
                 // `coverage` 的旧语义：没有记录 = 整段都算录到。
-                true,
             );
-            let trusted = if segment.trusted_known {
-                segment_ranges(
-                    &segment.trusted,
-                    segment.trusted_len,
-                    false,
-                    segment.filled,
-                    // `trusted` 的空表**不是**"整段可信"（见 `Segment::trusted_known`）。
-                    false,
-                )
-            } else {
-                // 没有可信度记录（旧 sidecar / 测试夹具 / 槽位用尽）：按"整段都可信"。
-                vec![0..segment.filled]
-            };
-            for (a, b) in intersect(&samples, &trusted) {
-                let start = (*base + a).min(limit);
-                let end = (*base + b).min(limit);
+            for range in samples {
+                let start = (*base + range.start).min(limit);
+                let end = (*base + range.end).min(limit);
                 if start < end {
                     push_merged(&mut covered, start..end);
                 }
@@ -251,23 +237,18 @@ impl<'a> Tape<'a> {
     }
 }
 
-/// 一张定长区间表 → `Vec`（`overrun` 或空表 ⇒ 整段）。
+/// 一张定长覆盖表 → `Vec`（`overrun` 或空表 ⇒ 整段）。
 ///
-/// 【为什么空表要解释成"整段"】那是`coverage` 的旧语义（没有记录 = 都算录到）。
-/// `trusted` 的"没有记录"由 `trusted_known` 单独表达，不靠空表 —— 两者共用一个
-/// 形状但语义相反，所以解释权必须留在调用方。
+/// 【为什么空表要解释成"整段"】那是 `coverage` 的语义：没有记录 = 都算录到。
+/// 旧 sidecar、测试夹具、槽位用尽三种情形都靠它退化成改动前的行为。
 fn segment_ranges(
     ranges: &[Range<usize>],
     len: usize,
     overrun: bool,
     filled: usize,
-    empty_means_whole: bool,
 ) -> Vec<Range<usize>> {
-    if overrun || (len == 0 && empty_means_whole) {
+    if overrun || len == 0 {
         return vec![0..filled];
-    }
-    if len == 0 {
-        return Vec::new();
     }
     ranges[..len.min(ranges.len())]
         .iter()
@@ -276,25 +257,6 @@ fn segment_ranges(
         .collect()
 }
 
-/// 两张**升序、不重叠**的区间表的交集（结果同样升序、不重叠）。
-fn intersect(left: &[Range<usize>], right: &[Range<usize>]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let (mut a, mut b) = (0_usize, 0_usize);
-    while a < left.len() && b < right.len() {
-        let start = left[a].start.max(right[b].start);
-        let end = left[a].end.min(right[b].end);
-        if start < end {
-            out.push((start, end));
-        }
-        // 谁先结束就推进谁：另一段还可能覆盖它之后的部分。
-        if left[a].end <= right[b].end {
-            a += 1;
-        } else {
-            b += 1;
-        }
-    }
-    out
-}
 
 /// 把一个区间并进**升序、不重叠**的列表（相邻或相交就合并）。
 ///
@@ -876,9 +838,7 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            trusted: std::array::from_fn(|_| 0..0),
-            trusted_len: 0,
-            trusted_known: false,
+            migrated_from_v4: false,
             _reservation: None,
         }
     }
@@ -925,68 +885,48 @@ mod tests {
         );
     }
 
-    /// **位置不可信的帧不得被宣称成我们的素材。**
+    /// **"位置由我们按块长接着数"的帧仍然是我们的素材。**
     ///
-    /// 【为什么这是"起播 0.4~0.7 s 一次咔"的回归测试】起播窗口里宿主把
-    /// `projectTimeSamples` 钉住不动，而插件按块长自行推进（`Synthesized`）。那时
-    /// 样本确实从宿主块里拷到了（`coverage` 有），但它属于哪个位置**是我们推的**
-    /// （`trusted` 没有）。交集为空 ⇒ 播放侧回退宿主原声，而不是把一串零按满幅输出。
+    /// 【为什么这条契约与 round 23 相反】round 23 曾把 `PositionSource::Synthesized`
+    /// （现名 `Carried`）期间的帧从覆盖里排除，理由是"位置是我们推的"。实测否掉了它：
+    /// 宿主在起播窗口里钉住 `projectTimeSamples`、却已经按块长送来时间上相邻的样本，
+    /// 而我们接着数下去的位置与宿主恢复后给出的读数**一致到块级**（偏移 0.658 s，
+    /// 一直被 `POSITION_DRIFT_TOLERANCE_SEC` 接受）。把这些帧标成"不是我们的"，
+    /// 等于把一段真实录音声明成洞：播放侧于是回退宿主原声（前 0.658 s 不受参数线
+    /// 影响），并在边界处做一次源切换 —— 那正是用户听到的那一下"咔"。
+    ///
+    /// 【真正的"不属于我们"是什么形状】是"根本没写"：桥接、丢块、回卷裁缝都不登记
+    /// `coverage`。所以一张表就够了，这条用例钉住的就是"只有一张表"。
     #[test]
-    fn a_synthesized_position_is_not_claimed_as_our_material() {
-        let mut synthesized = segment(0, &[0.5; 100]);
-        synthesized.coverage[0] = 0..100;
-        synthesized.coverage_len = 1;
-        // 位置不可信：trusted 是空表，但 `trusted_known` 为真（这是"记录过，且没有
-        // 一帧可信"，不是"没有记录"）。
-        synthesized.trusted_len = 0;
-        synthesized.trusted_known = true;
-        let segments = [synthesized];
+    fn a_carried_position_is_still_our_material() {
+        let mut carried = segment(0, &[0.5; 100]);
+        carried.coverage[0] = 0..100;
+        carried.coverage_len = 1;
+        let segments = [carried];
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
         }]);
         assert_eq!(
             tapes[0].covered_ranges(),
-            Vec::new(),
-            "位置不可信的帧一帧都不能宣称"
+            vec![0..100],
+            "拷到了样本就是我们的素材，位置是怎么来的不参与这个判断"
         );
     }
 
-    /// 宿主权威给出位置的块照常宣称（用户真的安静时那一段也是我们的）。
+    /// 用户真的安静时那一段也是我们的（覆盖不等于"有信号"）。
     #[test]
-    fn a_project_position_is_still_claimed() {
-        let mut trusted = segment(0, &[0.0; 100]);
-        trusted.coverage[0] = 0..100;
-        trusted.coverage_len = 1;
-        trusted.trusted[0] = 0..100;
-        trusted.trusted_len = 1;
-        trusted.trusted_known = true;
-        let segments = [trusted];
+    fn a_silent_but_transcribed_block_is_still_claimed() {
+        let mut silent = segment(0, &[0.0; 100]);
+        silent.coverage[0] = 0..100;
+        silent.coverage_len = 1;
+        let segments = [silent];
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
         }]);
         assert_eq!(tapes[0].covered_ranges(), vec![0..100]);
     }
-
-    /// 覆盖与可信度的**交集**：中间那一段不可信 ⇒ 两侧各留一段，中间是洞。
-    #[test]
-    fn only_the_intersection_of_samples_and_trusted_positions_is_ours() {
-        let mut mixed = segment(0, &[0.5; 100]);
-        mixed.coverage[0] = 0..100;
-        mixed.coverage_len = 1;
-        mixed.trusted[0] = 0..40;
-        mixed.trusted[1] = 60..100;
-        mixed.trusted_len = 2;
-        mixed.trusted_known = true;
-        let segments = [mixed];
-        let (tapes, _) = build_tapes(&[ProjectionTake {
-            id: 1,
-            segments: &segments,
-        }]);
-        assert_eq!(tapes[0].covered_ranges(), vec![0..40, 60..100]);
-    }
-
     /// 洞**不**给内部边界加 2 ms 边缘淡化：那份工作只属于覆盖边（一份实现）。
     #[test]
     fn a_hole_does_not_add_an_edge_fade_to_the_inner_boundary() {

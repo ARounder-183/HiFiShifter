@@ -197,26 +197,13 @@ pub(crate) struct Segment {
     pub coverage: [std::ops::Range<usize>; COVERAGE_SLOTS],
     pub coverage_len: usize,
     pub coverage_overrun: bool,
-    /// 本段里哪些帧的**位置是宿主权威给出的**（`coverage` 的子集；段内相对帧）。
+    /// 本段是从一份**带 `trusted` 表的 v4 sidecar** 读回来的（那张表已被丢弃）。
     ///
-    /// 【为什么覆盖之外还要一张可信度表】"我们从宿主块里拷了样本"与"这段样本属于这个
-    /// 位置"是两个**独立**的事实。起播窗口里宿主把 `projectTimeSamples` 钉住不动，而
-    /// 插件按块长自行推进（`PositionSource::Synthesized`）—— 那时样本确实拷到了，但它
-    /// 属于哪个位置**是我们推的**，不是宿主说的。把它们按满幅输出，就是在"我们不知道
-    /// 这段该放哪"的地方放一段声音：内容起点是一次 0 → 满电平的阶跃，用户听到的就是
-    /// "起播 0.4~0.7 s 一次咔"。
-    ///
-    /// 于是：`coverage` 回答"有没有样本"，`trusted` 回答"这个位置算不算数"。
-    /// 播放侧只认两者的交集（见 `Tape::covered_ranges`）；交集之外回退宿主原声，
-    /// 而那正是那段时间里真实播放的内容。
-    pub trusted: [std::ops::Range<usize>; COVERAGE_SLOTS],
-    pub trusted_len: usize,
-    /// 本段是否**记录过**可信度（`false` = 旧 sidecar / 测试夹具 ⇒ 按"全部可信"解释）。
-    ///
-    /// 【为什么需要这一位而不是"空表 = 全可信"】新录制的段完全可能**一帧都不可信**
-    /// （整段都在钉住窗口里）。用"空表"表达"全可信"会让那种段反过来被整段宣称，
-    /// 于是这个字段的语义与它的用途正好相反 —— 那是最坏的一种编码。
-    pub trusted_known: bool,
+    /// 【为什么留这个读数】"读了旧文件"与"新录了一段"在音频上无法区分，但在排查上
+    /// 完全不同：前者意味着这次播放的覆盖形状来自一份**用错判据写出来的存档**，
+    /// 而我们已经主动忽略了那段数据。它出现在 `[transfer] take` 行里，用户报障时
+    /// 一眼就能看出"这段素材是旧版本录的"。
+    pub migrated_from_v4: bool,
     /// 该段 PCM 占用的全局预算额度。
     ///
     /// 【为什么额度跟着段走而不是由 store 统一持有】段一旦封口就不再增长，
@@ -424,6 +411,19 @@ impl TransportPhase {
 }
 
 /// 本块有效工程位置的来源。
+///
+/// 【唯一的纪律：这些都是**合法记账**，没有一档是"不可信"】
+///
+/// 宿主在起播窗口里可能把 `projectTimeSamples` 钉在起点不动，却已经按自己的块长
+/// 连续送时间上相邻的样本。此时"每块前进 frames"是唯一自洽的换算 —— 它同时也是
+/// **可核对**的：宿主位置一恢复前进，插件立刻用宿主读数校正自己的累积时钟，而校正量
+/// 必须落在 `POSITION_DRIFT_TOLERANCE_SEC` 之内才被接受。实测 VEGAS 的偏移是 0.658 s，
+/// 一直被接受 —— 那正是"我们接着数的位置与宿主一致到块级"的最强证据。
+///
+/// 【所以它不参与覆盖判定】覆盖只回答一件事："这一段样本，我们从宿主块里拷过吗"。
+/// round 23 曾把 `Carried` 判成"位置不可信"并排除出覆盖，结果是把一段真实录音声明成
+/// 洞：播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次源切换 ——
+/// 那一下就是用户听到的"咔"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PositionSource {
     /// `projectTimeSamples`（正常路径）。
@@ -435,13 +435,12 @@ pub(crate) enum PositionSource {
     Music,
     /// 循环播放：使用会回卷的工程位置（不是 continuous）。
     Cycle,
-    /// 工程位置钉住、但输入音频在流动：位置由本插件按块长自行推进。
+    /// 工程位置钉住、但输入音频在流动：位置由本插件按块长**接着数**下去。
     ///
-    /// 【为什么这是合法的记账】宿主在起播窗口里可能把 `projectTimeSamples` 钉在
-    /// 起点不动，却已经按自己的块长连续送时间上相邻的样本。此时"每块前进 frames"
-    /// 是唯一自洽的换算 —— 它同时也是**可核对**的：宿主位置一恢复前进就立刻以
-    /// 宿主为准（记一次 `position_resyncs`）。
-    Synthesized,
+    /// 【名字为什么是 `Carried` 而不是 `Carried`】后者会被读成"我们编的"，而
+    /// 实际语义是"从宿主给的起点开始，按宿主自己的块长接着数"。名字决定读代码的人
+    /// 怎么想 —— round 23 的整条错判就建立在那个名字的暗示上。
+    Carried,
 }
 
 impl PositionSource {
@@ -451,7 +450,7 @@ impl PositionSource {
             Self::Continuous => 2,
             Self::Music => 3,
             Self::Cycle => 4,
-            Self::Synthesized => 5,
+            Self::Carried => 5,
         }
     }
 
@@ -461,7 +460,7 @@ impl PositionSource {
             2 => Some(Self::Continuous),
             3 => Some(Self::Music),
             4 => Some(Self::Cycle),
-            5 => Some(Self::Synthesized),
+            5 => Some(Self::Carried),
             _ => None,
         }
     }
@@ -537,10 +536,9 @@ pub(crate) struct BlockContext {
     pub stream: ProcessStream,
     /// 本块有效工程位置的来源（见 [`PositionSource`]）。
     ///
-    /// 【为什么捕获需要它】`Synthesized` 的语义就是"宿主没给我们可信位置，这个位置
-    /// 是我们自己按块长推的"。既然位置是推出来的，这一块拷到的样本就**不属于**那个
-    /// 位置 —— 它必须被排除在覆盖之外（见 `Segment::trusted`），否则播放侧会把
-    /// 宿主静音/重复内容当成我们录到的素材按满幅输出。
+    /// 【为什么捕获需要它】它让诊断能区分"宿主给的坐标"与"我们按块长接着数的坐标"。
+    /// 两者**都是合法记账**（见 `PositionSource::Carried` 的说明），所以它**不**参与
+    /// 覆盖判定 —— 覆盖只回答一件事："这一段样本我们拷过吗"。
     pub position_source: PositionSource,
     /// 本块的 `kPlaying`（与样本一起使用的强证据）。
     pub playing: bool,
@@ -566,7 +564,7 @@ pub(crate) struct BlockContext {
     /// 循环回卷时块首也会回到同一位置，但内容仍在变化。只按几何无法区分两者 ——
     /// 前者必须丢弃，后者必须另起一段。
     pub advancing: bool,
-    /// 本块是**位置回退结束后的第一块**（`Synthesized`/`Continuous`/`Music` → `Project`）。
+    /// 本块是**位置回退结束后的第一块**（`Carried`/`Continuous`/`Music` → `Project`）。
     ///
     /// 【为什么捕获需要它】起播窗口里我们自己推进的位置与宿主恢复后的位置可能差
     /// 一小段。那不是 seek，是我们记账的纠正：向前用静音桥接、向后裁掉多记的尾巴，
@@ -780,6 +778,14 @@ pub(crate) struct CaptureDiagnostics {
     pub bridged_window_blocks: u64,
     /// 因前导静音扩展段首的帧数（诊断）。
     pub pre_roll_frames: u64,
+    /// 位置由插件**接着数**（`PositionSource::Carried`）而写入的块数 / 帧数。
+    ///
+    /// 【为什么这是 I-3 的读数】起播窗口里宿主钉住 `projectTimeSamples`，我们按块长
+    /// 推进位置。这些帧**是**我们的素材（见 `Segment::coverage` 的说明），但"位置是
+    /// 我们接着数的"这件事必须可观测：它是"宿主时钟偏移锁存是否生效"的唯一证据，
+    /// 也是下一轮排查"位置为什么会跳"时第一个要看的数。
+    pub carried_blocks: u64,
+    pub carried_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -849,6 +855,11 @@ pub(crate) struct Capture {
     /// 【为什么放在 `self` 上而不是加一个参数】`write_block` 已经有 9 个参数，而
     /// 这是**当前块**的属性，与 `block_preceding_silent` / `block_pinned_recent`
     /// 同源、同寿命、同写法。三者一起在 `on_block_with_context` 里落下。
+    /// 本块位置是否由我们接着数（见 `PositionSource::Carried`）。
+    ///
+    /// 【为什么保留这个读数】它不再参与覆盖判定（覆盖只回答"这一段我们拷过吗"），
+    /// 但"位置是谁给的"是诊断里最需要分开的一件事：`carried_blocks` 突然变多，
+    /// 说明宿主在钉住位置；`carried_frames` 与写入帧数一致，说明时钟没被丢掉。
     block_position_source: PositionSource,
     /// 当前块是钉住区间结束后的第一块（位置差值应视为记账纠正）。
     block_pinned_recent: bool,
@@ -931,6 +942,9 @@ pub(crate) struct Capture {
     /// 一小段"，前者是"窗口里的块一个都没留下来"。T1 生效后这个数应该为 0；
     /// 只要它 > 0，说明暂存/提交链路上仍有漏，但 T2 保证了时间线不断。
     pub bridged_window_blocks: u64,
+    /// 位置由插件接着数而写入的块数 / 帧数（见 `CaptureDiagnostics` 的同名字段）。
+    pub carried_blocks: u64,
+    pub carried_frames: u64,
 }
 
 impl Default for Capture {
@@ -989,6 +1003,8 @@ impl Default for Capture {
             cycle_splits: 0,
             resync_bridged_frames: 0,
             bridged_window_blocks: 0,
+            carried_blocks: 0,
+            carried_frames: 0,
         }
     }
 }
@@ -1161,6 +1177,8 @@ impl Capture {
             resync_bridged_frames: self.resync_bridged_frames,
             bridged_window_blocks: self.bridged_window_blocks,
             pre_roll_frames: self.pre_roll_frames,
+            carried_blocks: self.carried_blocks,
+            carried_frames: self.carried_frames,
         }
     }
 
@@ -1963,7 +1981,6 @@ impl Capture {
             active.filled = keep;
             // 【T1：与 `filled` 同步收缩】回卷裁掉的尾巴不再是真实录到的帧。
             retain_before(&mut active.coverage, &mut active.coverage_len, keep);
-            retain_before(&mut active.trusted, &mut active.trusted_len, keep);
         }
         self.captured_frames = self.captured_frames.saturating_sub(dropped as u64);
         self.expected_next = Some(from);
@@ -2221,7 +2238,7 @@ impl Capture {
                     // clip 才能从窗口起点开始、内容位置才正确。
                     //
                     // 【为什么这一支不再要求 `resync`】`resync` 由**流级**位置证据算出
-                    // （`last_source ∈ Continuous/Music/Synthesized`）。起播窗口里宿主
+                    // （`last_source ∈ Continuous/Music/Carried`）。起播窗口里宿主
                     // 位置被钉住、位置回退从未启用时，`last_source` 停在 `Project` ——
                     // 于是"窗口整段没写"这个最需要兜底的形状恰好拿不到 `resync`，
                     // 兜底代码从未执行。把判据换成**本捕获自己的状态**（一段都没写过）
@@ -2467,6 +2484,10 @@ impl Capture {
             active.peak[channel] = active.peak[channel].max(peak);
         }
         active.filled += writable;
+        if self.block_position_source == PositionSource::Carried {
+            self.carried_blocks = self.carried_blocks.saturating_add(1);
+            self.carried_frames = self.carried_frames.saturating_add(writable as u64);
+        }
         if transcribed
             && !cover_range(
                 &mut active.coverage,
@@ -2476,30 +2497,6 @@ impl Capture {
         {
             // 槽位用尽：退化为"整段都算录到"（旧语义）。不分配 —— 这是音频线程。
             active.coverage_overrun = true;
-        }
-        // 【T-A1-1】位置**可信**才登记"这段属于我们"。
-        //
-        // 【为什么覆盖之外还要这一道】`coverage` 只回答"我们拷到了样本"。起播窗口里
-        // 宿主把 `projectTimeSamples` 钉住不动、而插件按块长自行推进时，样本确实拷到了，
-        // 但它属于哪个位置**是我们推的**（`PositionSource::Synthesized`）。把这些帧按
-        // 满幅输出，就是在"我们不知道这段该放哪"的地方放一段声音 —— 内容起点是一次
-        // 0 → 满电平的阶跃，也就是用户听到的"起播 0.4~0.7 s 一次咔"。
-        //
-        // 【为什么槽位用尽时退化为"全部可信"而不是"全部不可信"】`trusted` 永远是
-        // `coverage` 的**子集**（相邻区间按同一规则合并），所以它只能在 `coverage`
-        // 也溢出时溢出；而那种段的既有语义已经是"整段都算录到"。两处退化到同一个
-        // 结论，行为才与改动前逐字相同。
-        if transcribed {
-            let trusted = self.block_position_source != PositionSource::Synthesized;
-            if trusted
-                && !cover_range(
-                    &mut active.trusted,
-                    &mut active.trusted_len,
-                    written_offset..written_offset + writable,
-                )
-            {
-                active.trusted_known = false;
-            }
         }
         self.expected_next = Some(start + writable as i64);
         self.last_written = Some(raw);
@@ -2616,9 +2613,7 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            trusted: std::array::from_fn(|_| 0..0),
-            trusted_len: 0,
-            trusted_known: false,
+            migrated_from_v4: false,
             _reservation: None,
         }
     }

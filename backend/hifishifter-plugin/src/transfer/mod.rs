@@ -1463,18 +1463,33 @@ impl TransferStore {
         // 播放起点 —— 播放时会在那个位置发生一次"宿主原声 → 处理结果"的切换，
         // 听感就是用户报的"起播 0.7 s 内的一次咔"。这条日志把那个结论变成可观测事实，
         // 不改任何行为。
-        // 【T-A0-4】把"这次录制的前导到底长什么样"打成一行可判定的读数。
+        // 【I-1 的读数】这一行是"这段录音里有没有假洞"的唯一权威回答。
         //
-        // 两种成因在这行上直接分开（见 `timeline::LeadIn`）：`synthetic_frames` 是
-        // **覆盖表**宣称不属于我们的帧数，`first_signal_sec` 是第一个非零样本的位置。
-        // 两者接近 ⇒ 覆盖表正确（那一段本来就不是我们的）；前者为 0 而用户仍听到
-        // 起播咔 ⇒ 覆盖表错误地宣称了宿主静音（R1）。
+        // 四个数各自回答一件事：
+        //   * `frames` / `rate`：素材有多长（换算成秒才对得上用户听到的时间）；
+        //   * `coverage`：我们真的拷到样本的区间数；`gaps` 是它们之间的洞；
+        //   * `lead_in`：第一个属于我们的帧在带内的偏移（**必须**是 0 或只剩开头的
+        //     真实缺失）；
+        //   * `migrated_from_v4`：这份 take 是从带 `trusted` 表的旧 sidecar 读回来的。
+        //
+        // 【为什么把 `lead_in` 与 `first_signal_at` 放在同一行】两者接近 ⇒ 覆盖表是对的
+        // （那一段本来就不是我们的）；`lead_in` 明显大于 `first_signal_at` ⇒ 我们把一段
+        // **真实录音**声明成了洞 —— 播放侧于是回退宿主原声（参数线不生效）并在边界处
+        // 咔一下。round 23 就是后者（0.658 s），而这条日志当时写的是 `INFO`，在 release
+        // 的默认 `Warn` 级别下**根本看不到**。
         let lead_in = timeline::lead_in(&all);
         let rate = sample_rate.max(1) as f64;
+        let (coverage_ranges, coverage_gaps) = coverage_shape(&all);
         log::warn!(
-            "[transfer] take {id} lead-in: synthetic_frames={} ({:.3}s) first_signal_at={} \
-             pre_roll_frames={} pending_stashed={} bridged_window_blocks={} \
-             resync_bridged_frames={}",
+            "[transfer] take {id}: frames={} ({:.3}s) rate={} coverage={} gaps={} \
+             lead_in={} ({:.3}s) first_signal_at={} pre_roll_frames={} pending_stashed={} \
+             bridged_window_blocks={} resync_bridged_frames={} carried_blocks={} \
+             carried_frames={} migrated_from_v4={}",
+            all.iter().map(|segment| segment.filled as u64).sum::<u64>(),
+            all.iter().map(|segment| segment.filled as u64).sum::<u64>() as f64 / rate,
+            sample_rate,
+            coverage_ranges,
+            coverage_gaps,
             lead_in.synthetic_frames,
             lead_in.synthetic_frames as f64 / rate,
             lead_in
@@ -1485,6 +1500,9 @@ impl TransferStore {
             diagnostics.pending_stashed,
             diagnostics.bridged_window_blocks,
             diagnostics.resync_bridged_frames,
+            diagnostics.carried_blocks,
+            diagnostics.carried_frames,
+            u8::from(all.iter().any(|segment| segment.migrated_from_v4)),
         );
         if diagnostics.pre_roll_frames == 0
             && (diagnostics.pending_stashed > 0 || diagnostics.bridged_window_blocks > 0)
@@ -1597,12 +1615,7 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         coverage: std::array::from_fn(|_| 0..0),
         coverage_len: 0,
         coverage_overrun: false,
-        trusted: std::array::from_fn(|_| 0..0),
-        trusted_len: 0,
-        // 【新段的初始状态：**记录过**可信度，且一帧都还不信】与 `coverage` 的空表
-        // 不同 —— 那一位区分的是"没有记录（旧档 ⇒ 全信）"与"记录了但一帧不可信"
-        // （整段都在钉住窗口里）。这里必须是后者。
-        trusted_known: true,
+        migrated_from_v4: false,
         _reservation: Some(reservation),
     })
 }
@@ -1638,6 +1651,40 @@ fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> 
         .collect()
 }
 
+/// 一次录制的覆盖形状：`(区间数, 洞数)`。
+///
+/// 【为什么值得单独一个函数】`[transfer] take` 行要回答的核心问题是"这段录音里有没有
+/// 我们**没录到**的帧"。区间数 1 且洞数 0 是健康形状；区间数 > 1 说明素材中间有洞，
+/// 而洞的两侧各是一次"宿主原声 ↔ 处理结果"的切换 —— 那正是"播放途中的随机咔"。
+///
+/// 【与 `lead_in` 的分工】`lead_in` 只看**第一个**区间的起点（"开头缺了多少"），本函数
+/// 只看**中间**有几个洞（"中途断了几次"）。两者一起才能区分"起播窗口那一次"与
+/// "每次 resync 各一次"。
+fn coverage_shape(segments: &[capture::Segment]) -> (usize, usize) {
+    let mut ranges = 0_usize;
+    let mut gaps = 0_usize;
+    for segment in segments {
+        if segment.coverage_overrun || segment.coverage_len == 0 {
+            // 没有记录（旧档 / 槽位用尽）= 整段都算录到：一个区间、零个洞。
+            ranges += 1;
+            continue;
+        }
+        let len = segment.coverage_len.min(segment.coverage.len());
+        ranges += len;
+        // 段内相邻区间之间的空档，加上"段首之前 / 段尾之后"两段（那两段同样是洞）。
+        let mut previous_end = 0_usize;
+        for range in &segment.coverage[..len] {
+            if range.start > previous_end {
+                gaps += 1;
+            }
+            previous_end = range.end;
+        }
+        if previous_end < segment.filled {
+            gaps += 1;
+        }
+    }
+    (ranges, gaps)
+}
 /// 投影后的覆盖起点若晚于**最早被捕获的段起点**，说明前导静音在投影阶段被丢掉了。
 ///
 /// 【为什么这条日志值得存在】快照的 `origin_sample` 直接取自最早 clip 的起点
@@ -2066,9 +2113,7 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            trusted: std::array::from_fn(|_| 0..0),
-            trusted_len: 0,
-            trusted_known: false,
+            migrated_from_v4: false,
             _reservation: None,
         }
     }

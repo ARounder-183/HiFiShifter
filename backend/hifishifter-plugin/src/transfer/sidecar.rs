@@ -44,7 +44,15 @@ const MAGIC: &[u8; 8] = b"HFSXFER1";
 ///
 /// v2 在每段几何后多写一个 `loop_start`（`i64::MIN` = 非循环段）；v1 仍可读。
 /// v3 再多写一段 coverage（段内相对帧的覆盖区间）；v1/v2 仍可读，读出来是"整段都算录到"。
-const VERSION: u32 = 4;
+/// v4 又写了一段"位置可信度"（`trusted`）。**v5 起不再写它，读 v4 时丢弃。**
+///
+/// 【为什么 v4 的字段必须"读但忽略"而不是删掉解析】v4 已经落在用户的磁盘上（实测
+/// `take-1/2.hfx` 里 `trusted = [31568, …]`）。那个字段的判据是错的：它把"位置由插件
+/// 按块长接着数"（起播窗口）当成了"位置不可信"，于是一段**真实录音**被声明成洞 ——
+/// 播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次源切换（那一下"咔"）。
+/// 只删代码不会修好已经落盘的那些文件：读入侧必须**主动丢弃**这张表，让它们回到
+/// "拷到样本就是我们的素材"这条唯一自洽的语义。
+const VERSION: u32 = 5;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -92,22 +100,8 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
             payload.extend_from_slice(&(range.start as u32).to_le_bytes());
             payload.extend_from_slice(&(range.end as u32).to_le_bytes());
         }
-        // v4：**位置可信**区间。写 0 个区间有两种含义，用一位区分（见下）。
-        //
-        // 【为什么不把两种含义压进"空表"】"整段都可信"（旧档）与"整段都不可信"
-        // （整段都在钉住窗口里）在形状上完全相同，而它们的结论**相反**。压进一个
-        // 空表就是把这两件事混成一件 —— 那正是这个字段存在的理由。
-        payload.push(u8::from(segment.trusted_known));
-        let trusted = if !segment.trusted_known {
-            &segment.trusted[..0]
-        } else {
-            &segment.trusted[..segment.trusted_len.min(segment.trusted.len())]
-        };
-        payload.extend_from_slice(&(trusted.len() as u32).to_le_bytes());
-        for range in trusted {
-            payload.extend_from_slice(&(range.start as u32).to_le_bytes());
-            payload.extend_from_slice(&(range.end as u32).to_le_bytes());
-        }
+        // 【v5 不再写 v4 的"位置可信度"段】见 `VERSION` 的说明：那条判据把真实录音
+        // 声明成了洞。读入侧仍会跳过 v4 的那一段（老文件要能读），但新文件里它不存在。
         for plane in &segment.planes {
             for sample in plane {
                 payload.extend_from_slice(&sample.to_le_bytes());
@@ -205,13 +199,18 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
                 coverage_len += 1;
             }
         }
-        // v4：位置可信区间。缺这一段的旧档 ⇒ `trusted_known = false` ⇒ 全部可信，
-        // 行为与改动前逐字相同。
-        let mut trusted = std::array::from_fn(|_| 0_usize..0_usize);
-        let mut trusted_len = 0_usize;
-        let mut trusted_known = false;
-        if version >= 4 {
-            let known = cursor.u8()? != 0;
+        // 【v4 的"位置可信度"段：**读但丢弃**】
+        //
+        // v4 写过一个 `u8 known` + 一段区间表。那段数据的判据是错的（见 `VERSION` 的
+        // 说明）：它把起播窗口里"位置由插件按块长接着数"的帧标成"不是我们的"，于是
+        // 一段真实录音被声明成洞。已经落盘的文件必须在这里被**主动忽略** —— 只删写入侧
+        // 不会修好用户机器上那些文件。
+        //
+        // 【为什么仍然完整解析而不跳过字节】跳过长度未知的段需要先知道它多长，而
+        // 长度本身就在段里。照原格式读过去（并校验边界），是唯一能保持摘要与后续字段
+        // 对齐的做法。
+        if version == 4 {
+            let _known = cursor.u8()? != 0;
             let count = cursor.u32()?;
             let count = usize::try_from(count).unwrap_or(usize::MAX);
             if count > frames as usize {
@@ -220,7 +219,6 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
                     path.display()
                 ));
             }
-            let mut parsed = 0_usize;
             for _ in 0..count {
                 let start = cursor.u32()? as usize;
                 let end = cursor.u32()? as usize;
@@ -230,18 +228,6 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
                         path.display()
                     ));
                 }
-                if parsed >= super::capture::COVERAGE_SLOTS {
-                    // 与覆盖同一退化：槽位用尽 ⇒ 视为"没有可信度记录"。
-                    trusted_known = false;
-                    parsed = 0;
-                    break;
-                }
-                trusted[parsed] = start..end;
-                parsed += 1;
-            }
-            if parsed > 0 || known {
-                trusted_len = parsed;
-                trusted_known = known;
             }
         }
         if !(1..=2).contains(&channels) || frames == 0 || frames > MAX_FRAMES {
@@ -276,9 +262,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             coverage,
             coverage_len,
             coverage_overrun: false,
-            trusted,
-            trusted_len,
-            trusted_known,
+            migrated_from_v4: version == 4,
             _reservation: None,
         });
     }
@@ -362,9 +346,7 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            trusted: std::array::from_fn(|_| 0..0),
-            trusted_len: 0,
-            trusted_known: false,
+            migrated_from_v4: false,
             _reservation: None,
         }
     }
@@ -502,6 +484,56 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].loop_start, None);
         assert_eq!(restored[0].planes[0], vec![0.25, 0.5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **v4 文件里那张"位置可信度"表必须被丢弃。**
+    ///
+    /// 【为什么这是一条回归测试而不是兼容性测试】v4 的 `trusted` 判据把起播窗口里
+    /// "位置由插件按块长接着数"的帧标成"不是我们的"。实测用户机器上的 `take-1/2.hfx`
+    /// 里就是 `trusted = [31568, …]`（0.658 s）。只删写入侧不会修好它们：读入侧必须
+    /// 主动忽略，否则那些 take 会**永远**在开头留一个 0.658 s 的假洞 —— 播放时回退
+    /// 宿主原声（参数线不生效）并在边界处咔一下。
+    #[test]
+    fn a_version_four_sidecar_drops_its_trusted_table() {
+        let dir = temp_dir();
+        let path = dir.join("v4.hfx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(MAGIC);
+        payload.extend_from_slice(&4_u32.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&0_i64.to_le_bytes());
+        payload.extend_from_slice(&48_000_u32.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&8_u64.to_le_bytes());
+        payload.extend_from_slice(&i64::MIN.to_le_bytes());
+        // coverage：整段都拷到了。
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+        payload.extend_from_slice(&8_u32.to_le_bytes());
+        // v4 的 trusted：`known = 1`，一段 `4..8`（前一半被判成"不可信"）。
+        payload.push(1);
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&4_u32.to_le_bytes());
+        payload.extend_from_slice(&8_u32.to_le_bytes());
+        for index in 0..8 {
+            payload.extend_from_slice(&(index as f32 * 0.1).to_le_bytes());
+        }
+        let digest = blake3::hash(&payload);
+        payload.extend_from_slice(digest.as_bytes());
+        std::fs::write(&path, payload).unwrap();
+
+        let restored = read(&path).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].coverage_len, 1,
+            "覆盖必须原样读回：v4 的 coverage 是对的"
+        );
+        assert_eq!(
+            restored[0].coverage[0],
+            0..8,
+            "覆盖必须整段，不受 v4 的 trusted 表影响"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
