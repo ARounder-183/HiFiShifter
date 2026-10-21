@@ -3290,8 +3290,28 @@ impl TimelineState {
             }
         }
 
+        /// 只增长、**绝不截断**。
+        ///
+        /// 【为什么必须去掉截断】数组长度是**存储**，工程时长是**几何**。让几何去裁剪
+        /// 数据，等于"把最后一个 clip 往左拖一格，整条轨的参数线就短一格" —— 而那条
+        /// 线是用户画的东西，不是可以随窗口变小的缓存。
+        ///
+        /// 【它为什么会命中"编辑 clip 就重置"】`target` 来自 `project_duration_sec()`，
+        /// 而把最后一个 clip 左移 / 裁短都会让它变小 ⇒ `pitch_edit` / `tension_edit` /
+        /// 所有 `extra_curves` 一起被截断，且**移回去也补不回来**（只补 `fill`）。
+        ///
+        /// 【渲染窗口怎么办】裁剪是**读取方**的事：合成只看它需要的那一段。存储保持
+        /// 单调，才可能让"改回去"恢复原样。
         #[allow(clippy::ptr_arg)]
         fn resize_curve(v: &mut Vec<f32>, target: usize, fill: f32) {
+            if v.len() < target {
+                v.extend(std::iter::repeat_n(fill, target - v.len()));
+            }
+        }
+
+        /// 分析产物的缩放：**两端都裁**，长度恒等于本轮窗口。
+        #[allow(clippy::ptr_arg)]
+        fn resize_exact(v: &mut Vec<f32>, target: usize, fill: f32) {
             if v.len() < target {
                 v.extend(std::iter::repeat_n(fill, target - v.len()));
             } else if v.len() > target {
@@ -3299,9 +3319,14 @@ impl TimelineState {
             }
         }
 
-        resize_curve(&mut entry.pitch_orig, target, 0.0);
+        // 【为什么分析产物与用户曲线用两种缩放】`*_orig` 是**缓存**（分析结果），
+        // 它的长度必须等于本轮窗口 —— 分析调度与门禁都按 `pitch_orig.len() == target`
+        // 判"是否最新"，截断与补零都是正确语义。
+        //
+        // `*_edit` 是**用户数据**，只能增长（见 `resize_curve` 的说明）。
+        resize_exact(&mut entry.pitch_orig, target, 0.0);
         resize_curve(&mut entry.pitch_edit, target, 0.0);
-        resize_curve(&mut entry.tension_orig, target, 0.0);
+        resize_exact(&mut entry.tension_orig, target, 0.0);
         resize_curve(&mut entry.tension_edit, target, 0.0);
 
         // Backward compatibility: older projects didn't have `pitch_edit_user_modified`.
