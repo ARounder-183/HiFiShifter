@@ -1329,14 +1329,30 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
         previous_view: &BTreeMap<String, TrackParamsState>,
     ) -> Result<Self, String> {
-        self.capture_inner(timeline, identities, Some(previous_view))
+        self.capture_inner(timeline, identities, Some(previous_view), default_anchor())
     }
     pub fn capture(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
-        self.capture_inner(timeline, identities, None)
+        self.capture_inner(timeline, identities, None, default_anchor())
+    }
+    /// 与 `capture_changes` 相同，但**显式给定锚点**。
+    ///
+    /// 【为什么生产路径不走这里】锚点的唯一权威来源是「锁定参数线」的当前设置
+    /// （`default_anchor()`）。本函数只服务于测试：进程级设置是全局状态，并行用例
+    /// 不能改它，于是"工程域那一支"只能由调用方把锚点直接喂到同一个下游参数上。
+    /// 与 `project_with_anchor` 同一条纪律。
+    #[cfg(test)]
+    pub(crate) fn capture_changes_with_anchor(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        previous_view: &BTreeMap<String, TrackParamsState>,
+        anchor: ParamAnchor,
+    ) -> Result<Self, String> {
+        self.capture_inner(timeline, identities, Some(previous_view), anchor)
     }
     /// 只把相对旧GUI投影的delta送回源authority；重叠选区外保留该region自己的值。
     fn capture_inner(
@@ -1344,6 +1360,7 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
         previous_view: Option<&BTreeMap<String, TrackParamsState>>,
+        anchor: ParamAnchor,
     ) -> Result<Self, String> {
         let mut candidate = self.clone();
         candidate.capture_gaps(timeline, previous_view)?;
@@ -1390,14 +1407,17 @@ impl ParameterAtlas {
             let (begin, end) = frame_range(&geometry, params.frame_period_ms)?;
             // 旧曲线取**权威侧**（modification），旧存档未迁移时退回 per-clip 记录。
             let authority = self.authority(identity, &root, &geometry)?;
-            // 【锚点在一次捕获时定下】既有权威沿用自己那份锚点（用户在编辑途中切换
-            // 「锁定参数线」不该重新解释已有曲线）；全新的权威取当前设置。
+            // 【锚点**永远**取当前设置】这是一处曾经写反的地方，也是"开关无效"的直接原因。
+            //
+            // 旧实现让既有权威**沿用入库时**定下的锚点。于是读路径用当前设置、写路径用
+            // 入库值，两者可以相反：用户关掉「锁定参数线」之后，投影按工程域解释一份
+            // 源域数组（界面上每条线整体偏移一个源窗起点），而任何一次自动写回又按源域
+            // 把它写回去 —— 错位被固化，且不可逆。
+            //
+            // 现在只有一个来源：`settings_store::lock_param_lines()`。它变了，曲线就在
+            // 那一次捕获里被**烘焙**到新域（见下面的 `bake_curve_to_anchor`），之后读写
+            // 继续共用同一个判断。读与写不可能再相反。
             let key_for_anchor = authority_key(identity.item.as_deref(), &identity.modification);
-            let anchor = key_for_anchor
-                .as_deref()
-                .and_then(|key| candidate.authorities.get(key))
-                .map(|existing| existing.anchor)
-                .unwrap_or_else(default_anchor);
             let mut curves = BTreeMap::new();
             // 【U-10 的读数】这一轮有没有"编辑器读到的那份"可比。`absent` 出现在写日志里
             // 就说明 U-4 的守卫被绕过（那会把默认值当成用户改动写回）。
@@ -1476,6 +1496,9 @@ impl ParameterAtlas {
                 // 曲线按错误的映射读一遍再写回。那正是"关掉锁定之后一编辑就重置"。
                 // 所以 `bake_curve_to_anchor` 会在发现两者不一致时**先烘焙一次**，
                 // 让数组换到新域，之后读写继续共用同一个判断。
+                // 【烘焙的目标是**当前设置**，不是入库值】这是 round 24 那条烘焙恒为
+                // no-op 的原因：它的 target 就是曲线的入库锚点，而 `curve.domain` 当初
+                // 也是按同一个值写的 ⇒ `domain == wanted` 恒成立 ⇒ 永远不搬。
                 let baked = authority.as_ref().and_then(|authority| {
                     authority.curves().get(&key).and_then(|curve| {
                         bake_curve_to_anchor(curve, anchor, &geometry, &key, params.frame_period_ms)
@@ -1542,16 +1565,33 @@ impl ParameterAtlas {
                         existing.unseen_rounds = existing.unseen_rounds.saturating_add(1);
                     }
                 } else {
-
                     let before = candidate
                         .authorities
                         .get(&key)
                         .map(|existing| non_default_frames(&existing.curves))
                         .unwrap_or(0);
+                    // 【I-6：只有用户能减少曲线，自动捕获不能】任何一次自动写回若让
+                    // "非默认帧"变少，就说明有用户数据被抹平了。
+                    //
+                    // 这不是一个"记下来就好"的读数（round 24 就是这么做的：打一行
+                    // ERROR，然后照样写）。`after < before` 时**整条权威保持原样** ——
+                    // 一次被拒绝的写回，用户还可以再画；一次被抹掉的曲线，用户再也画
+                    // 不回来。两件事的代价不对称，所以闸门必须向着"拒绝"。
+                    let after = non_default_frames(&curves);
+                    let accepted = after >= before;
+                    let written = if accepted {
+                        curves.clone()
+                    } else {
+                        candidate
+                            .authorities
+                            .get(&key)
+                            .map(|existing| existing.curves.clone())
+                            .unwrap_or_default()
+                    };
                     candidate.set_authority(
                         &key,
                         AuthorityParameters {
-                            curves: curves.clone(),
+                            curves: written,
                             template: template.clone(),
                             anchor,
                             // 正在被一条活 region 认领 ⇒ 宽限期清零。
@@ -1564,11 +1604,10 @@ impl ParameterAtlas {
                     // （自动捕获路径）而不是只在提交路径上，是因为**自动路径也能删数据**：
                     // 只要某一轮的视图里出现了默认值，`incoming != prior` 就会把它当成
                     // 用户改动写回。I-4 的判据就靠这一行兑现。
-                    let after = non_default_frames(&curves);
-                    let level = if after < before {
-                        log::Level::Error
-                    } else {
+                    let level = if accepted {
                         log::Level::Warn
+                    } else {
+                        log::Level::Error
                     };
                     hifishifter_kernel::log_limiter::emit_limited_key(
                         level,
@@ -1576,11 +1615,12 @@ impl ParameterAtlas {
                         format_args!(
                             "[ara] line write: root={root} key={key} anchor={anchor:?} \
                              curves={} frames={}..{} baseline={} before_nondefault={before} \
-                             after_nondefault={after}",
+                             after_nondefault={after} accepted={}",
                             curves.len(),
                             begin,
                             end,
                             if baseline_present { "present" } else { "absent" },
+                            u8::from(accepted),
                         ),
                     );
                 }
@@ -2582,6 +2622,84 @@ impl SourceCurve {
         self.sample_at(domain_time, key)
     }
 
+    /// 本曲线在**它自己那个索引域**上覆盖的格点区间（含端点，闭区间）。
+    ///
+    /// 【为什么需要它与 `source_extent` 并存】两者回答不同的问题：
+    ///   * `index_extent` —— "这条曲线的第 0 格到第 N 格对应哪一段"，用于并集
+    ///     （不能裁掉别的半段已经写过的区间）；
+    ///   * `source_extent` —— "这条曲线覆盖哪一段**源素材**"，只用于诊断。
+    ///
+    /// 工程域曲线的格号是**绝对工程帧**，拿它去和 `geometry.source_start` 比是
+    /// 两种单位相减 —— 那会打出一条假的 `split-source-window`，并可能让整条曲线
+    /// 投影成默认值。
+    fn index_extent(&self) -> Option<(usize, usize)> {
+        if self.values.is_empty() {
+            return None;
+        }
+        Some((self.first_frame, self.first_frame + self.values.len() - 1))
+    }
+
+    /// 取本曲线在**工程时刻** `project_sec` 处的值。
+    ///
+    /// 【为什么不能直接用 `sample_at`】`sample_at` 吃的是**本曲线自己那个索引域**
+    /// 的时刻：源域曲线吃源秒、工程域曲线吃工程秒。把工程秒直接喂给源域曲线，等于
+    /// 把两个不同的时间轴相减 —— 那正是"关掉锁定之后线整体偏一个源窗起点"的形状。
+    fn value_at_project(
+        &self,
+        current: &SourceTimeMap,
+        project_sec: f64,
+        key: &str,
+    ) -> Option<f32> {
+        match (&self.basis, self.domain) {
+            // 工程域（新形状）：格号就是绝对工程帧，直接取样。
+            (None, CurveDomain::Project) => self.sample_at(project_sec, key),
+            // 源域：先把工程时刻折成源秒。
+            _ => {
+                let source_sec = current.project_to_source(project_sec)?;
+                self.value_at_source(source_sec, key)
+            }
+        }
+    }
+
+    /// 本曲线在**工程帧**上覆盖的区间（闭区间）。空曲线返回 `None`。
+    ///
+    /// 【为什么要单独一个】并集必须表达在**目标域**上，而"既有曲线覆盖到哪"是它自己
+    /// 那个域的事实。把两者混在一起就会裁掉别的半段已经写过的区间 —— 那正是"分割后
+    /// 参数完全重置"的原形。
+    ///
+    /// 【换算失败时返回 `None` 而不是一个猜测值】调用方会退回"只用本 region 的窗口"，
+    /// 也就是**不缩并集**；猜一个更小的区间才是会丢数据的那个方向。
+    fn project_frame_extent(&self, current: &SourceTimeMap, frame_ms: f64) -> Option<(usize, usize)> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let step = frame_ms / 1000.;
+        if !(step.is_finite() && step > 0.) {
+            return None;
+        }
+        let span = (self.values.len() - 1) as f64 * self.frame_ms / 1000.;
+        let lo = self.first_frame as f64 * self.frame_ms / 1000.;
+        let hi = lo + span;
+        let (lo, hi) = match (&self.basis, self.domain) {
+            // 工程域（新形状）：格号本来就是工程秒。
+            (None, CurveDomain::Project) => (lo, hi),
+            // 源域 / 旧形状：先折成工程秒。
+            (None, _) => (current.source_to_project(lo)?, current.source_to_project(hi)?),
+            (Some(basis), _) => {
+                let map = basis.map().ok()?;
+                let a = current.project_to_source(lo)?;
+                let b = current.project_to_source(hi)?;
+                (
+                    map.source_to_project(a.min(b))?,
+                    map.source_to_project(a.max(b))?,
+                )
+            }
+        };
+        let first = (lo.min(hi) / step).floor().max(0.) as usize;
+        let last = (lo.max(hi) / step).ceil() as usize;
+        (last >= first).then_some((first, last))
+    }
+
     /// 本曲线在**源域**上覆盖的秒区间（含端点）。空曲线返回 `None`。
     fn source_extent(&self) -> Option<(f64, f64)> {
         if self.values.is_empty() {
@@ -2590,6 +2708,11 @@ impl SourceCurve {
         let span = self.values.len() - 1;
         let lo = self.first_frame as f64 * self.frame_ms / 1000.;
         let hi = (self.first_frame + span) as f64 * self.frame_ms / 1000.;
+        // 【工程域曲线没有"源区间"】它的格号是绝对工程帧，把它当源秒用等于两种单位
+        // 相减。返回 `None` 让调用方（诊断）跳过它，而不是打一条假的告警。
+        if self.basis.is_none() && self.domain == CurveDomain::Project {
+            return None;
+        }
         match &self.basis {
             None => Some((lo, hi)),
             Some(basis) => {
@@ -2869,10 +2992,6 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
             samples[k - first_frame] = incoming;
         }
     }
-    let bytes = samples.len() * 4;
-    let reservation = crate::render::budget::global_budget()
-        .reserve(bytes)
-        .ok_or("source parameter memory budget exceeded")?;
     // 【存储域由锚点决定 —— 这是「锁定参数线」真正落地的地方】
     //
     // 锁定 ⇒ 源域：`values[i]` 是"源第 first_frame+i 格"，读取时用当前几何折成源秒，
@@ -2884,11 +3003,67 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
         ParamAnchor::Source => CurveDomain::Source,
         ParamAnchor::Project => CurveDomain::Project,
     };
-    let first_frame = match domain {
-        // 工程域的格号是**绝对工程帧**；源域的是源帧（上面已算好）。
-        CurveDomain::Project => (geometry.project_start * 1000. / frame_ms).floor().max(0.) as usize,
-        _ => first_frame,
-    };
+    // 【工程域必须**另算一遍**，不能只换 `first_frame`】
+    //
+    // 上面那段是按**源帧**填的：`samples[k-first]` 的值来自源秒 `k·step`。而工程域
+    // 声称"第 `first` 格是绝对工程帧 `first`"。速率 = 1 且源窗从 0 起时两者恰好重合
+    // （所以测试全绿）；一旦 clip 被拉伸，越到后段偏得越多 —— 用户看到的是"关掉锁定
+    // 之后那条线整体歪了"。
+    if domain == CurveDomain::Project {
+        let (region_first, region_last) = frame_range(geometry, frame_ms)?;
+        let (first, last) = match existing.and_then(|curve| {
+            curve.project_frame_extent(current, frame_ms)
+        }) {
+            Some((e_first, e_last)) => (region_first.min(e_first), region_last.max(e_last)),
+            // 【换算不出来就**不缩并集**】只用本 region 的窗口，别的半段保持原样。
+            None => (region_first, region_last),
+        };
+        if last >= 1_000_000 || last < first {
+            return Err("source parameter projection frame budget exceeded".into());
+        }
+        let mut samples = Vec::with_capacity(last - first + 1);
+        for k in first..=last {
+            let project_sec = k as f64 * step;
+            samples.push(
+                existing
+                    .and_then(|curve| curve.value_at_project(current, project_sec, key))
+                    .unwrap_or_else(|| pad(key)),
+            );
+        }
+        for k in region_first..=region_last.min(last) {
+            let project_sec = k as f64 * step;
+            if project_sec < geometry.project_start || project_sec > project_end {
+                continue;
+            }
+            if protected.is_some_and(|(lo, hi)| project_sec >= lo && project_sec <= hi) {
+                continue;
+            }
+            let project_frame = project_sec * 1000. / frame_ms;
+            let incoming = sample_project_frames(values, project_frame, key);
+            let prior = old_view
+                .map(|view| sample_project_frames(view, project_frame, key))
+                .unwrap_or_else(|| pad(key));
+            if incoming != prior {
+                samples[k - first] = incoming;
+            }
+        }
+        let bytes = samples.len() * 4;
+        let reservation = crate::render::budget::global_budget()
+            .reserve(bytes)
+            .ok_or("source parameter memory budget exceeded")?;
+        return Ok(SourceCurve {
+            basis: None,
+            domain,
+            first_frame: first,
+            frame_ms,
+            values: Arc::new(samples),
+            reservation: Some(Arc::new(reservation)),
+        });
+    }
+    let bytes = samples.len() * 4;
+    let reservation = crate::render::budget::global_budget()
+        .reserve(bytes)
+        .ok_or("source parameter memory budget exceeded")?;
     Ok(SourceCurve {
         basis: None,
         domain,
@@ -4555,4 +4730,107 @@ mod tests {
             );
         }
     }
+    /// **工程锚定的曲线在拉伸过的 clip 上必须逐格还原。**
+    ///
+    /// 【为什么这条是本轮的回归】旧实现把 `domain = Project` 只当成"换一下
+    /// `first_frame`"：格号改成了绝对工程帧，但 `samples` 仍然按**源帧**填充。
+    /// 速率 = 1 且源窗从 0 起时两者恰好重合（所以所有既有用例都是绿的），一旦 clip
+    /// 被拉伸，越到后段偏得越多 —— 用户看到的就是"关掉锁定之后那条线整体歪了"。
+    ///
+    /// 【为什么走 `capture_changes_with_anchor`】`default_anchor()` 在测试替身里固定为
+    /// 源域（进程级设置是全局状态，并行用例不能改）。要覆盖工程域那一支，只能把锚点
+    /// 显式喂进内部入口 —— 那正是生产路径上 `default_anchor()` 返回值被传到的同一个参数。
+    #[test]
+    fn a_project_anchored_curve_round_trips_through_a_stretched_clip() {
+        let ids = identities();
+        let frame_ms = 250.;
+        // 2× 拉伸：工程 1 s、源 2 s。
+        let mut timeline = host(1., 1., 0., 2.);
+        // 视图：工程 [0, 2) 每 250 ms 一格，全程平线 60。
+        // 【为什么给 12 格而不是 8】clip 的帧范围是 4..=8（含右端哨兵），视图必须
+        // 覆盖到第 8 格，否则那一格会读成 `pad` —— 那是夹具的错，不是实现的错。
+        let mut view = TrackParamsState {
+            frame_period_ms: frame_ms,
+            pitch_edit: vec![60.; 12],
+            ..Default::default()
+        };
+        view.pitch_edit_user_modified = true;
+        timeline
+            .params_by_root_track
+            .insert("a".to_owned(), view.clone());
+
+        // 【为什么基线是空的】基线缺席时 `prior` 退化成 `pad`，于是"视图里每一个
+        // 非默认格"都被当成用户改动 —— 那正是"用户刚画完一条线"的形状，也正是这里
+        // 要验证的写入路径。
+        let atlas = ParameterAtlas::default()
+            .capture_changes_with_anchor(
+                &timeline,
+                &ids,
+                &BTreeMap::new(),
+                ParamAnchor::Project,
+            )
+            .expect("捕获必须成功");
+        let authority = atlas.authorities.get("mod:mod").expect("必须建立权威");
+        assert_eq!(authority.anchor, ParamAnchor::Project);
+        let curve = authority.curves.get("pitch_edit").expect("必须写出曲线");
+        assert_eq!(
+            curve.domain,
+            CurveDomain::Project,
+            "工程锚定必须写工程域（格号 = 绝对工程帧）"
+        );
+        // 逐格投影回来：整段必须仍然是 60 —— 只要"值"与"索引"来自同一个域。
+        let projected = atlas
+            .project_with_anchor(&timeline, &ids, ParamAnchor::Project)
+            .expect("投影必须成功");
+        let clip = &projected["clip"];
+        let first = (1. * 1000. / frame_ms) as usize;
+        let last = ((1. + 1.) * 1000. / frame_ms) as usize;
+        assert!(
+            clip.pitch_edit[first..=last].iter().all(|value| *value == 60.),
+            "工程域曲线在 2× 拉伸的 clip 上必须逐格还原，实测 {:?}",
+            &clip.pitch_edit[first..=last]
+        );
+    }
+
+    /// **一次会让"非默认帧"变少的自动写回必须被拒绝。**
+    ///
+    /// 【为什么这是一条闸而不是一行日志】round 24 只把它记成一行 ERROR，然后照样写 ——
+    /// 知道要丢还是丢。一次被拒绝的写回，用户还可以再画；一次被抹掉的曲线，用户再也
+    /// 画不回来。两件事的代价不对称，所以闸门必须向着"拒绝"。
+    #[test]
+    fn a_write_that_would_erase_frames_is_refused() {
+        let ids = identities();
+        let frame_ms = 250.;
+        let mut atlas = ParameterAtlas::default();
+        // 权威里有一条**远多于**本 region 覆盖范围的用户曲线。
+        atlas.seed_test_pitch_curve_anchored(
+            "mod:mod",
+            frame_ms,
+            1.,
+            (0..16).map(|index| 60. + index as f32).collect(),
+            ParamAnchor::Source,
+        );
+        let before = non_default_frames(&atlas.authorities["mod:mod"].curves);
+        assert!(before > 4, "夹具必须有一条足够长的曲线：{before}");
+        // 视图里这条 clip 的整段都是默认值（0），且**没有基线** —— 旧实现会把
+        // "prior = pad" 当成用户意图，把整条窗口写成 pad。
+        let mut timeline = host(1., 1., 0., 1.);
+        let mut view = TrackParamsState {
+            frame_period_ms: frame_ms,
+            ..Default::default()
+        };
+        view.pitch_edit = vec![0.; 8];
+        timeline
+            .params_by_root_track
+            .insert("a".to_owned(), view.clone());
+        let after_atlas = atlas
+            .capture_changes(&timeline, &ids, &BTreeMap::new())
+            .expect("捕获必须成功");
+        let after = non_default_frames(&after_atlas.authorities["mod:mod"].curves);
+        assert!(
+            after >= before,
+            "自动写回不得让非默认帧变少：before={before} after={after}"
+        );
+    }
+
 }

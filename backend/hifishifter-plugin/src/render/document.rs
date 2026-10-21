@@ -432,7 +432,13 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     ///
     /// 【为什么不进存档】它是**本次会话**的显示事实，跨会话没有意义：重开工程时
     /// 编辑器会重新读一份，指纹随之更新。
-    last_workspace_view: Mutex<Option<(String, std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>)>>,
+    ///
+    /// 【为什么是**多槽**而不是一格】编辑器每读一次投影就换一次指纹，而宿主可以在
+    /// 两次读之间推进模型（一次自动保存、一次后台分析完成都会）。单槽存储下，"编辑器
+    /// 读到的那份"会在提交到达之前被**下一次**读取覆盖 —— 实测现场日志里
+    /// `baseline=absent` 出现了 3 次，而每一次都让整条 clip 窗口被当成用户改动写回。
+    /// 保留最近 8 份，提交时按它回传的指纹精确取回。
+    last_workspace_views: Mutex<Vec<(String, std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>)>>,
     /// 【G5】此刻是否处在一次 ARA 编辑会话里（`beginEditing` … `endEditing`）。
     ///
     /// 【为什么它是判据】SDK 明确说明**还原会话在概念上就是一次编辑会话**
@@ -570,9 +576,35 @@ mod rebase_tests {
             document.workspace_baseline("fingerprint-b").is_none(),
             "别的指纹不得命中（那会把一次编辑重基到另一份视图上）"
         );
-        // 换一份视图 ⇒ 旧指纹不再可用。
+        // 换一份视图 ⇒ 两份都还在（多槽）：编辑器可能在上一次读之后、提交之前又读了
+        // 一次，而那次编辑的基线仍是它**原来读到**的那份。
         document.remember_workspace_view("fingerprint-b", &params);
-        assert!(document.workspace_baseline("fingerprint-a").is_none());
+        assert!(
+            document.workspace_baseline("fingerprint-a").is_some(),
+            "前一份视图必须仍然可用：提交按它回传的指纹取回基线"
+        );
+        assert!(document.workspace_baseline("fingerprint-b").is_some());
+    }
+
+    /// 多槽有上界：读得再多也不会无限增长，且总是丢最旧的。
+    #[test]
+    fn the_remembered_views_are_bounded_and_drop_the_oldest() {
+        let document = DocumentSession::new(3);
+        let params = std::collections::BTreeMap::from([(
+            "root".to_owned(),
+            hifishifter_kernel::state::TrackParamsState::default(),
+        )]);
+        for index in 0..16 {
+            document.remember_workspace_view(&format!("fingerprint-{index}"), &params);
+        }
+        assert!(
+            document.workspace_baseline("fingerprint-0").is_none(),
+            "最旧的一份必须被丢掉"
+        );
+        assert!(
+            document.workspace_baseline("fingerprint-15").is_some(),
+            "最新的一份必须在"
+        );
     }
 
     /// 没有基线时**仍然拒绝**：猜一份基线等于把曲线写到错误的帧上。
@@ -1296,8 +1328,20 @@ impl DocumentSession {
             hifishifter_kernel::state::TrackParamsState,
         >,
     ) {
-        *self.last_workspace_view.lock_or_recover() =
-            Some((projection.to_owned(), params.clone()));
+        /// 记住多少份视图。
+        ///
+        /// 【为什么是 8】一次用户编辑在提交之前，编辑器最多会读一两次；8 份足以覆盖
+        /// "读一次、宿主动一次、再读一次、再动一次"这种最常见的交错，又不会把整条
+        /// 轨道的参数数组无限留着。
+        const REMEMBERED_VIEWS: usize = 8;
+        let mut stored = self.last_workspace_views.lock_or_recover();
+        // 同一指纹重复读：刷新位置即可，不必存两份。
+        stored.retain(|(fingerprint, _)| fingerprint != projection);
+        stored.push((projection.to_owned(), params.clone()));
+        if stored.len() > REMEMBERED_VIEWS {
+            let excess = stored.len() - REMEMBERED_VIEWS;
+            stored.drain(..excess);
+        }
     }
 
     /// 【G5】当前是否处在一次 ARA 编辑会话里。
@@ -1329,9 +1373,12 @@ impl DocumentSession {
         &self,
         projection: &str,
     ) -> Option<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>> {
-        let stored = self.last_workspace_view.lock_or_recover();
-        let (fingerprint, params) = stored.as_ref()?;
-        (fingerprint == projection).then(|| params.clone())
+        let stored = self.last_workspace_views.lock_or_recover();
+        stored
+            .iter()
+            .rev()
+            .find(|(fingerprint, _)| fingerprint == projection)
+            .map(|(_, params)| params.clone())
     }
 
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
