@@ -70,6 +70,81 @@ pub(crate) struct EditState {
     pub unbound: BTreeSet<String>,
 }
 
+/// 一次冷恢复身份匹配的三种结论（见 [`pick_binding`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BindingPick {
+    /// 唯一候选：接受。
+    Unique(String),
+    /// 多条候选并列：**拒绝**（挑一个等于把参数挂到别人的轨上）。
+    Ambiguous,
+    /// 一条候选都没有交集：这一轮还没观测到，继续等。
+    Unobserved,
+}
+
+/// 冷恢复时给一份保存身份找宿主轨道：**唯一最大交集**。
+///
+/// 【为什么不是相等】保存的身份是"那条轨上所有 region 的 (modification, source) 对"。
+/// 宿主每做一次编辑都可能让它多一条、少一条或换掉 modification（分割、删除、REAPER
+/// 重建 item），于是"逐项相等"在真实工程里几乎永远不成立 —— 存档再也合不进来。
+/// 而交集为零时它仍然是零证据，不能猜。
+///
+/// 【为什么平局必须拒绝】两条候选同样像，说明这次的模型图不足以区分它们；挑一个就是
+/// 把用户的参数挂到错误的轨道上。宁可继续等，也不要那种错误。
+fn pick_binding(current: &TrackBindings, saved: &[(String, String)]) -> BindingPick {
+    // 【一、逐项相等优先】它是最强的证据：宿主原样把这份身份还了回来。
+    let exact: Vec<&String> = current
+        .iter()
+        .filter(|(_, known)| *known == saved)
+        .map(|(id, _)| id)
+        .collect();
+    match exact.len() {
+        1 => return BindingPick::Unique(exact[0].clone()),
+        0 => {}
+        _ => return BindingPick::Ambiguous,
+    }
+    // 【二、交集】"多一条 / 少一条 region"是同一条轨的正常形状。
+    let pair_overlap = |known: &Vec<(String, String)>| {
+        known.iter().filter(|pair| saved.contains(pair)).count()
+    };
+    if let Some(pick) = unique_best(current, pair_overlap) {
+        return pick;
+    }
+    // 【三、仅按源降级】宿主重建 item 时可能给新的 modification id 而 source 不变。
+    // 只在"源的交集"唯一最大时接受 —— 同一文件被两个 item 共用时必然平局，仍拒绝。
+    let saved_sources: BTreeSet<&str> = saved.iter().map(|pair| pair.1.as_str()).collect();
+    let source_overlap = |known: &Vec<(String, String)>| {
+        known
+            .iter()
+            .filter(|pair| saved_sources.contains(pair.1.as_str()))
+            .count()
+    };
+    unique_best(current, source_overlap).unwrap_or(BindingPick::Unobserved)
+}
+
+/// 取"得分唯一最大"的候选；最高分为 0 视为没有候选。
+fn unique_best(
+    current: &TrackBindings,
+    score: impl Fn(&Vec<(String, String)>) -> usize,
+) -> Option<BindingPick> {
+    let mut best = 0usize;
+    let mut winners: Vec<&String> = Vec::new();
+    for (id, known) in current {
+        let value = score(known);
+        if value > best {
+            best = value;
+            winners.clear();
+            winners.push(id);
+        } else if value == best && value > 0 {
+            winners.push(id);
+        }
+    }
+    match winners.len() {
+        0 => None,
+        1 => Some(BindingPick::Unique(winners[0].clone())),
+        _ => Some(BindingPick::Ambiguous),
+    }
+}
+
 impl EditState {
     /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
     fn validate_fades(&self) -> Result<(), String> {
@@ -128,16 +203,35 @@ impl EditState {
                     unbound.insert(old.clone());
                     continue;
                 }
-                let matches: Vec<_> = current
-                    .iter()
-                    .filter(|(_, known)| **known == saved)
-                    .collect();
-                if matches.len() != 1 {
-                    return Err(
-                        "ARA edit identity missing or ambiguous in rebuilt host graph".into(),
-                    );
+                // 【T-D1：身份不是"集合相等"，是"唯一最大交集"】
+                //
+                // 旧判据要求宿主**这一次**给出的身份向量与存档**逐项相等**。而
+                // `bindings` 的值是"这条轨上所有 region 的 (modification, source) 对"，
+                // 宿主每做一次编辑就可能让它多一条、少一条或换一个 modification：
+                // 分割、删除、REAPER 重建 item 全都命中。于是"集合相等"在真实宿主里
+                // 几乎**永远不成立**，存档从此再也合不进来 —— 用户看到的每次编辑都
+                // 报"没能读回上次保存的参数"，就是这条契约的直接后果。
+                //
+                // 改判据而不改红线：
+                //   * 交集为 0 ⇒ 不做任何猜测，仍报错（等待下一轮，载荷保留）；
+                //   * 只有一条有交集 ⇒ 接受（多/少一条 region 是同一批源）；
+                //   * 多条并**并列最大** ⇒ 仍然拒绝（那才是真正的歧义）。
+                // 平局拒绝这一条是"I2 身份单调"的底线：两条候选同样像，就不能挑一个。
+                match pick_binding(current, &saved) {
+                    BindingPick::Unique(id) => (id, saved),
+                    BindingPick::Ambiguous => {
+                        return Err(
+                            "ARA saved edit identity is ambiguous; multiple host tracks \
+                             overlap it equally"
+                                .into(),
+                        )
+                    }
+                    BindingPick::Unobserved => {
+                        return Err(
+                            "ARA edit identity missing or ambiguous in rebuilt host graph".into(),
+                        )
+                    }
                 }
-                (matches[0].0.clone(), saved)
             } else {
                 // live轨道已由真实sequence边明确关联，不因轨内成员增删而丢掉编辑。
                 let Some(identity) = current.get(old) else {
@@ -665,6 +759,98 @@ mod tests {
             .unwrap();
         assert_eq!(state.bindings, original);
         assert_eq!(state.tracks[0].volume, 0.25);
+    }
+
+    /// **T-D1：多一条 region 不该让整条轨的身份失效。**
+    ///
+    /// 【为什么这是症状三的主回归】保存的身份是"这条轨上所有 region 的对"。宿主分割
+    /// 一次就多一条，而旧判据要求逐项相等 —— 于是存档从此再也合不进来，用户每次编辑
+    /// 都看到"没能读回上次保存的参数"。交集唯一时接受，才符合"身份是同一批源"的事实。
+    #[test]
+    fn an_extra_region_does_not_invalidate_the_track_identity() {
+        let mut edited = host();
+        edited.tracks[0].volume = 0.25;
+        let mut state = EditState::default().merge(&host(), &edited, 0).unwrap();
+        state
+            .reconcile(&BTreeMap::from([(
+                "track".into(),
+                vec![("mod".into(), "source".into())],
+            )]))
+            .unwrap();
+        let bytes = state.encode().unwrap();
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        // 宿主这次交付了**两条**同源 region（分割后的形状）。
+        let current = BTreeMap::from([(
+            "track".into(),
+            vec![
+                ("mod".into(), "source".into()),
+                ("mod-2".into(), "source".into()),
+            ],
+        )]);
+        restored.reconcile(&current).unwrap();
+        assert_eq!(restored.tracks[0].volume, 0.25);
+        assert!(!restored.needs_rebind);
+    }
+
+    /// **T-D2：modification 被宿主重建、源没变时，按源唯一匹配。**
+    ///
+    /// 【为什么要这一档】REAPER 重建 item 会给新的 modification id，而音频源还是同一个
+    /// 文件。只按 (modification, source) 对匹配等于"每次重建都失联"；只按源匹配又要
+    /// 防止同一文件被两条轨共用 —— 所以只在唯一最大时接受。
+    #[test]
+    fn a_rebuilt_modification_still_matches_by_source_when_unique() {
+        let mut edited = host();
+        edited.tracks[0].volume = 0.25;
+        let mut state = EditState::default().merge(&host(), &edited, 0).unwrap();
+        state
+            .reconcile(&BTreeMap::from([(
+                "track".into(),
+                vec![("mod".into(), "source".into())],
+            )]))
+            .unwrap();
+        let bytes = state.encode().unwrap();
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        let current = BTreeMap::from([(
+            "track".into(),
+            vec![("mod-rebuilt".into(), "source".into())],
+        )]);
+        restored.reconcile(&current).unwrap();
+        assert_eq!(restored.tracks[0].volume, 0.25);
+    }
+
+    /// **T-D1 的反面：两条轨并列最大时仍然拒绝。**
+    ///
+    /// 【为什么必须有这一条】放宽"集合相等"之后，唯一还能保护用户的是"平局不猜"。
+    /// 两个候选同样像，说明这一轮的图不足以区分它们。
+    #[test]
+    fn equal_overlap_between_two_tracks_is_still_refused() {
+        let mut edited = host();
+        edited.tracks[0].volume = 0.25;
+        let mut state = EditState::default().merge(&host(), &edited, 0).unwrap();
+        // 保存的是**两条** region。
+        state
+            .reconcile(&BTreeMap::from([(
+                "track".into(),
+                vec![
+                    ("mod".into(), "source".into()),
+                    ("mod-2".into(), "source-2".into()),
+                ],
+            )]))
+            .unwrap();
+        let bytes = state.encode().unwrap();
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        // 现场拆成两条轨，各带其中一条 —— 交集都是 1、没有任何一条"逐项相等"，
+        // 所以必须拒绝（"挑一个"等于把参数挂到别人的轨上）。
+        let current = BTreeMap::from([
+            ("a".into(), vec![("mod".into(), "source".into())]),
+            ("b".into(), vec![("mod-2".into(), "source-2".into())]),
+        ]);
+        let error = restored.reconcile(&current).unwrap_err();
+        assert!(error.contains("identit"), "{error}");
+        assert!(restored.needs_rebind, "拒绝后必须保留待绑标记");
     }
 
     #[test]
