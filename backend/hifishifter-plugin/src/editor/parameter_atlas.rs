@@ -344,6 +344,111 @@ pub(crate) struct ParameterAtlas {
     ara_copy_seeds: BTreeMap<String, RegionParameters>,
 }
 
+/// 一条根轨的**根视图投影**：参数 + 这一轮真的投影到了哪些帧。
+///
+/// 【为什么必须带上 `frames`】`project_roots` 只能投影"有权威且几何可解"的 clip。
+/// 任何一条拿不到权威（日志里 `keys=0` 的那种）都会让它的帧段停在默认值上。
+/// 只交一份参数数组时，调用方唯一的合并方式是**整值替换**整条根轨 —— 于是那一段
+/// 默认值会把用户曲线抹平。带上 `frames`，合并就能只覆盖真正有信息的帧。
+///
+/// 【`complete` 与 `frames` 各回答什么】`frames` 回答"哪些帧有信息"；`complete`
+/// 回答"这条根轨上**所有** clip 都有信息吗"。前者决定合并范围，后者只用于诊断
+/// （"某条 clip 掉了"必须能被看见，而不是被一段默认值安静地盖过去）。
+#[derive(Clone, Debug)]
+pub(crate) struct RootProjection {
+    pub params: TrackParamsState,
+    /// 这一轮真的写入过的帧（升序、不重叠；`0..usize::MAX` = 整轨）。
+    pub frames: Vec<std::ops::Range<usize>>,
+    /// 这条根轨上每一条 clip 都拿到权威了吗。
+    pub complete: bool,
+}
+
+impl RootProjection {
+    /// 覆盖整条根轨（空白编辑与"没有曲线的根"用它）。
+    pub(crate) fn whole(params: TrackParamsState) -> Self {
+        Self {
+            params,
+            frames: vec![0..usize::MAX],
+            complete: true,
+        }
+    }
+}
+
+/// 把一份根视图投影并进 `target`：**只覆盖 `frames` 里的帧**。
+///
+/// 【为什么不 `extend`】`BTreeMap::extend` 对已存在的键是整值替换。而投影可能只
+/// 覆盖了半条轨道（有一条 clip 没查到权威），替换等于用"一段默认值 + 半条真曲线"
+/// 盖掉用户原来的整条曲线 —— 用户看到的就是"移动一下 item，参数回退了"。
+pub(crate) fn merge_root_projection(
+    target: &mut BTreeMap<String, TrackParamsState>,
+    roots: BTreeMap<String, RootProjection>,
+) {
+    for (root, projection) in roots {
+        let Some(existing) = target.get_mut(&root) else {
+            // 新根：没有旧值可保护，整份装上。
+            target.insert(root, projection.params);
+            continue;
+        };
+        // 帧周期不一致时无法按帧合并（数组的时间轴不同）。此时保留旧值并留痕：
+        // 用错误的时间轴合并比"这一轮不更新"更糟。
+        if existing.frame_period_ms != projection.params.frame_period_ms {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.root-frame-period-changed",
+                format_args!(
+                    "[ara] root {root} changes its frame period from {} ms to {} ms; the root \
+                     view is kept as it was until the curves are re-captured",
+                    existing.frame_period_ms, projection.params.frame_period_ms
+                ),
+            );
+            continue;
+        }
+        if !projection.complete {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.root-projection-incomplete",
+                format_args!(
+                    "[ara] root {root}: only {} of its clips were projected this round; the \
+                     frames that were not projected keep their previous curves",
+                    projection.frames.len()
+                ),
+            );
+        }
+        for (key, values) in parameter_curves(&projection.params) {
+            if values.is_empty() {
+                continue;
+            }
+            let mut merged = parameter_curves(existing)
+                .into_iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, current)| current.to_vec())
+                .unwrap_or_default();
+            for frame in &projection.frames {
+                let from = (*frame).start;
+                // `usize::MAX` 是"整轨"的哨兵：它必须夹到数组长度上，不能直接当索引。
+                let to = frame.end.min(values.len());
+                if from >= to {
+                    continue;
+                }
+                merged.resize(to, pad(&key));
+                merged[from..to].copy_from_slice(&values[from..to]);
+            }
+            set_curve(existing, &key, merged);
+        }
+        existing.pitch_edit_user_modified |= projection.params.pitch_edit_user_modified;
+    }
+}
+
+/// 把一个区间并进**升序、不重叠**的帧列表（相邻或相交就合并）。
+fn push_frame_range(frames: &mut Vec<std::ops::Range<usize>>, range: std::ops::Range<usize>) {
+    if range.start >= range.end {
+        return;
+    }
+    match frames.last_mut() {
+        Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+        _ => frames.push(range),
+    }
+}
 /// 一条 clip 的参数权威：新路径查权威表，旧存档退回 per-clip 记录。
 enum Authority<'a> {
     Current(&'a AuthorityParameters),
@@ -1094,13 +1199,38 @@ impl ParameterAtlas {
         Ok(bound)
     }
     /// GUI仍用原track网格：显示投影可选重叠区，音频始终保留每region自己的参数。
+    ///
+    /// 只要参数数组时用它；需要"这一轮投影到了哪些帧"（按帧合并）时用
+    /// [`Self::project_root_records`]。
     pub fn project_roots(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<BTreeMap<String, TrackParamsState>, String> {
+        Ok(self
+            .project_root_records(timeline, identities)?
+            .into_iter()
+            .map(|(root, projection)| (root, projection.params))
+            .collect())
+    }
+
+    /// 与 [`Self::project_roots`] 相同，但**带上"这一轮真的投影到了哪些帧"**。
+    ///
+    /// 【G4：只给参数数组是不够的】任何一条 clip 拿不到权威（日志里 `keys=0` 的那种）
+    /// 都会让它的帧段落成默认值。只交一份参数数组时，调用方唯一的合并方式是
+    /// **整值替换**整条根轨 —— 于是那一段默认值会把用户曲线抹平。带上 `frames` 之后，
+    /// 合并可以只覆盖这一轮真的投影过的帧（见 `merge_root_projection`）。
+    ///
+    /// 【为什么两个入口】绝大多数调用方只要参数数组（渲染、编辑器）。只有需要
+    /// **按帧合并**的地方（`merge_root_projection`）才需要 `frames`，而它们正是
+    /// "整值替换会抹平用户曲线"的那几处。
+    pub fn project_root_records(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+    ) -> Result<BTreeMap<String, RootProjection>, String> {
         let clips = self.project(timeline, identities)?;
-        let mut roots = BTreeMap::<String, TrackParamsState>::new();
+        let mut roots = BTreeMap::<String, RootProjection>::new();
         for (root, gaps) in &self.gaps {
             if !timeline.tracks.iter().any(|track| &track.id == root) {
                 continue;
@@ -1113,8 +1243,24 @@ impl ParameterAtlas {
                     gap_values(curve, key, gaps.template.frame_period_ms)?,
                 );
             }
-            roots.insert(root.clone(), params);
+            // 空白编辑覆盖整条根轨：它本身就是"整轨数组"，因此算作完整。
+            roots.insert(
+                root.clone(),
+                RootProjection {
+                    params,
+                    frames: vec![0..usize::MAX],
+                    complete: true,
+                },
+            );
         }
+        // 每条根轨上**应该**投影多少条 clip（`complete` 的分母）。
+        let mut expected = BTreeMap::<String, usize>::new();
+        for clip in &timeline.clips {
+            if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
+                *expected.entry(root).or_default() += 1;
+            }
+        }
+        let mut projected = BTreeMap::<String, usize>::new();
         let mut order = timeline.clips.iter().collect::<Vec<_>>();
         order.sort_by_key(|clip| Some(&clip.id) == timeline.selected_clip_id.as_ref());
         for clip in order {
@@ -1136,12 +1282,17 @@ impl ParameterAtlas {
             let Some((begin, end)) = covered_frame_range(&geometry, params.frame_period_ms)? else {
                 continue;
             };
-            let entry = roots.entry(root).or_insert_with(|| {
+            *projected.entry(root.clone()).or_default() += 1;
+            let entry = roots.entry(root.clone()).or_insert_with(|| {
                 let mut entry = params.clone();
                 clear_curves(&mut entry);
-                entry
+                RootProjection {
+                    params: entry,
+                    frames: Vec::new(),
+                    complete: true,
+                }
             });
-            if entry.frame_period_ms != params.frame_period_ms {
+            if entry.params.frame_period_ms != params.frame_period_ms {
                 // 【为什么不再整份失败】同一根轨道上两条片段声明了不同的帧周期，
                 // 合并它们的曲线会把值按错误的时间轴插值。此前这里 `Err` ⇒ 整份投影
                 // 失败 ⇒ 整份编辑被拒。改为跳过这一条片段：它的曲线本次不并入根视图，
@@ -1152,7 +1303,7 @@ impl ParameterAtlas {
                     format_args!(
                         "[ara] clip {} declares {} ms frames but its root already uses {} ms; \
                          its curves are not merged into the root view",
-                        clip.id, params.frame_period_ms, entry.frame_period_ms
+                        clip.id, params.frame_period_ms, entry.params.frame_period_ms
                     ),
                 );
                 continue;
@@ -1164,20 +1315,28 @@ impl ParameterAtlas {
                 if key == "pitch_edit" {
                     // 根视图上也要标记，否则编辑器/渲染路径的 `ensure_params_for_root`
                     // 会把这条来自权威的曲线当陈旧分析结果清掉。
-                    entry.pitch_edit_user_modified = true;
+                    entry.params.pitch_edit_user_modified = true;
                 }
-                let mut merged = parameter_curves(entry)
+                let mut merged = parameter_curves(&entry.params)
                     .into_iter()
                     .find(|(name, _)| *name == key)
                     .map(|(_, v)| v.to_vec())
                     .unwrap_or_default();
                 merged.resize(end.max(merged.len().saturating_sub(1)) + 1, pad(&key));
                 merged[begin..=end].copy_from_slice(&values[begin..=end]);
-                set_curve(entry, &key, merged);
+                set_curve(&mut entry.params, &key, merged);
             }
+            push_frame_range(&mut entry.frames, begin..end.saturating_add(1));
+        }
+        for (root, record) in roots.iter_mut() {
+            // 只有"这一轮**所有**该投影的 clip 都投影了"才算完整。少了任何一条，
+            // 它覆盖的那段帧就是**没有信息**，而不是"用户清空了曲线"。
+            record.complete = expected.get(root).copied().unwrap_or(0)
+                == projected.get(root).copied().unwrap_or(0);
         }
         Ok(roots)
     }
+
     /// 接受当前投影上的真实编辑；未改动的曲线继续保留原始源坐标basis。
     pub fn capture_changes(
         &self,

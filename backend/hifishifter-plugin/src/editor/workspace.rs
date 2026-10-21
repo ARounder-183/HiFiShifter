@@ -408,10 +408,12 @@ impl DocumentSession {
             .groups
             .apply(timeline, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
-            timeline.params_by_root_track.extend(
-                edits
-                    .atlas
-                    .project_roots(timeline, &self.parameter_identities_locked(timeline)?)?,
+            let roots = edits
+                .atlas
+                .project_root_records(timeline, &self.parameter_identities_locked(timeline)?)?;
+            crate::editor::parameter_atlas::merge_root_projection(
+                &mut timeline.params_by_root_track,
+                roots,
             );
         }
         let roots = timeline
@@ -440,10 +442,12 @@ impl DocumentSession {
         edits.apply(&mut flat);
         self.add_group_view_tracks(&mut flat);
         if !edits.atlas.is_empty() {
-            flat.params_by_root_track.extend(
-                edits
-                    .atlas
-                    .project_roots(&flat, &self.parameter_identities_locked(&flat)?)?,
+            let roots = edits
+                .atlas
+                .project_root_records(&flat, &self.parameter_identities_locked(&flat)?)?;
+            crate::editor::parameter_atlas::merge_root_projection(
+                &mut flat.params_by_root_track,
+                roots,
             );
         }
         let mut grouped = flat.clone();
@@ -451,10 +455,12 @@ impl DocumentSession {
             .unwrap_or(&edits.groups)
             .apply(&mut grouped, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
-            grouped.params_by_root_track.extend(
-                edits
-                    .atlas
-                    .project_roots(&grouped, &self.parameter_identities_locked(&grouped)?)?,
+            let roots = edits
+                .atlas
+                .project_root_records(&grouped, &self.parameter_identities_locked(&grouped)?)?;
+            crate::editor::parameter_atlas::merge_root_projection(
+                &mut grouped.params_by_root_track,
+                roots,
             );
         }
         let roots = grouped

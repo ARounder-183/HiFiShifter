@@ -86,6 +86,19 @@ pub struct ModelHandle {
     sequence_persistent_ids: Vec<String>,
     /// 已销毁的 region sequence 槽位（与 `destroyed_regions` 同口径）。
     destroyed_sequences: HashSet<usize>,
+    /// 【G3】已销毁序列的**待认领身份**：`(order_index, name, persistent key)`。
+    ///
+    /// 【为什么需要它】轨道 id 来自 `context.realtime_key()`（ARA 的 region sequence
+    /// **没有** persistentID），而宿主重建序列时这个 key 必然改变。于是一次"切屏回来
+    /// 重载 take"就会让整条轨的参数因为"查不到宿主身份"被丢掉。
+    ///
+    /// 认领规则：新序列若与一条待认领的死亡序列在 `(order_index, name)` 上**唯一**
+    /// 匹配，就沿用它的 key —— 轨道 id 不变，参数自动续上。匹配不到（或并列）就用
+    /// 新 key，与改动前完全一致。
+    ///
+    /// 【为什么不进存档】它是**本次会话**的重建窗口，跨会话没有任何意义（进程重启后
+    /// 所有 key 都会重新分配）。
+    pending_sequence_deaths: Vec<(i32, Option<String>, String)>,
     head_tail: Option<Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
@@ -252,6 +265,7 @@ impl Default for ModelHandle {
             region_keys: Vec::new(),
             sequence_persistent_ids: Vec::new(),
             destroyed_sequences: HashSet::new(),
+            pending_sequence_deaths: Vec::new(),
             head_tail: {
                 // 【为什么不用 expect】`Default for ModelHandle` 在**每次文档创建**时
                 // 都会跑，而它在宿主进程里 —— 一次 panic 会带走整个 DAW 会话。容量常量
@@ -644,6 +658,39 @@ impl ModelHandle {
     ///
     /// 【为什么不是 `insert`】见 `create_region_sequence` 的说明：这里要的是**覆盖**
     /// 一个已存在的槽位。`insert` 在 `index < len` 时会右移，把身份表整体错位。
+    /// 【G3】记下一条被销毁序列的身份，供紧接着的重建认领。
+    ///
+    /// 【为什么有上界】宿主可能整批重建序列（切屏重载 take）。留着最近 64 条足够覆盖
+    /// 任何一次重建窗口，又不会在长会话里无界增长。
+    fn remember_sequence_death(&mut self, order: i32, name: Option<String>, key: String) {
+        const MAX_PENDING_SEQUENCE_DEATHS: usize = 64;
+        self.pending_sequence_deaths
+            .retain(|(_, _, known)| *known != key);
+        self.pending_sequence_deaths.push((order, name, key));
+        while self.pending_sequence_deaths.len() > MAX_PENDING_SEQUENCE_DEATHS {
+            self.pending_sequence_deaths.remove(0);
+        }
+    }
+
+    /// 【G3】新序列能否认领一条已销毁序列的身份。
+    ///
+    /// 【为什么要求唯一】两条待认领序列在 `(order_index, name)` 上并列时，挑一条等于
+    /// 把参数挂到别人的轨上 —— 那比"这次没续上"严重得多。
+    fn claim_sequence_death(&mut self, order: i32, name: Option<&str>) -> Option<String> {
+        let matches = self
+            .pending_sequence_deaths
+            .iter()
+            .enumerate()
+            .filter(|(_, (known_order, known_name, _))| {
+                *known_order == order && known_name.as_deref() == name
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [index] = matches.as_slice() else {
+            return None;
+        };
+        Some(self.pending_sequence_deaths.remove(*index).2)
+    }
     fn set_sequence_slot<T: Default>(slots: &mut Vec<T>, index: usize, value: T) {
         if slots.len() <= index {
             slots.resize_with(index + 1, T::default);
@@ -1052,14 +1099,20 @@ impl ModelHandle {
                     if !edits.atlas.is_empty() && !edits.needs_rebind {
                         let projection = (|| {
                             let identities = self.session.parameter_identities_locked(&timeline)?;
-                            let roots = edits.atlas.project_roots(&timeline, &identities)?;
+                            let roots = edits.atlas.project_root_records(&timeline, &identities)?;
                             let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
                             Ok::<_, String>((roots, followed))
                         })();
                         match projection {
                             Ok((roots, followed)) => {
                                 // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
-                                edits.params.extend(roots);
+                                // 【G4】按**帧**合并，不整值替换：这一轮投影可能只覆盖了
+                                // 半条根轨（有一条 clip 没查到权威 —— 日志里那种
+                                // `keys=0`），整值替换会把其余帧连同用户曲线一起抹成默认值。
+                                crate::editor::parameter_atlas::merge_root_projection(
+                                    &mut edits.params,
+                                    roots,
+                                );
                                 edits.atlas = followed;
                                 edits
                                     .tracks
@@ -1109,6 +1162,7 @@ impl ModelHandle {
                 // "region 是宿主没发、还是我们拒了"。
                 log::info!("[ara] {}", self.ledger.summary());
                 self.log_published_revisions(&timeline);
+                self.log_identity_readings(&timeline);
                 *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
@@ -1162,6 +1216,45 @@ impl ModelHandle {
     ///
     /// 【为什么单独一个方法】`remap_and_log` 已经很长，且这行日志的**取值**
     /// 要在测试里断言 —— 抽出来才好读，也才好复用（幂等分支也想知道读数）。
+    /// 【T-A0-5】把"身份链现在长什么样"打成一行。
+    ///
+    /// 【为什么与 `[ara] stuck` 分开】那一行回答"渲染链断在哪一环"，这一行回答
+    /// "参数权威还认不认得这些 clip"。两者同时出问题时会互相掩盖：`stuck` 说
+    /// `regions=11/11 sources=1` 看起来完全健康，而 `authorities=0` 才是用户
+    /// "参数全回退"的直接原因。
+    fn log_identity_readings(&self, timeline: &TimelineState) {
+        let live: Vec<u64> = self
+            .region_keys
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.destroyed_regions.contains(slot))
+            .map(|(_, key)| *key)
+            .collect();
+        let bound = {
+            let items = self.session.region_items.lock_or_recover();
+            live.iter().filter(|key| items.contains_key(key)).count()
+        };
+        let (authorities, derived, unbound) = {
+            let edits = self.session.edits.lock_or_recover();
+            (
+                edits.atlas.authorities.len(),
+                edits.atlas.regions.len(),
+                edits.unbound.len(),
+            )
+        };
+        log::info!(
+            "[ara] identity: regions={} bound={} unmatched={} clips={} authorities={} \
+             derived={} unbound={}",
+            live.len(),
+            bound,
+            live.len().saturating_sub(bound),
+            timeline.clips.len(),
+            authorities,
+            derived,
+            unbound,
+        );
+    }
+
     fn log_published_revisions(&self, timeline: &TimelineState) {
         // 【为什么直接读原子量而不调 `editor_versions()`】后者自己取文档
         // `transaction` 锁。`remap_and_log` 的调用点持着同一把锁（它在
@@ -1212,6 +1305,9 @@ impl DocumentLifecycle for ModelHandle {
     /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
         self.editing = true;
+        // 【G5】把"编辑会话中"这个事实推给文档：存档载荷到达时据此判断它是
+        // "一次撤销/重做"（必须覆盖）还是"宿主交回一份旧载荷"（必须补缺）。
+        self.session.set_in_edit_session(true);
         // 【T23】连同**开始时刻**一起记：`editing_session` 只回答"在不在会话里"，
         // 而"在会话里多久了"才是插件侧判定"宿主不会再来收口"的唯一依据。
         self.session.note_editing_started();
@@ -1225,6 +1321,7 @@ impl DocumentLifecycle for ModelHandle {
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         self.editing = false;
+        self.session.set_in_edit_session(false);
         self.session.note_editing_finished();
         self.remap_and_log();
         Ok(())
@@ -1632,11 +1729,13 @@ impl RegionSequences for ModelHandle {
         // 覆盖语义只能用 `assign`。三张表（`sequence_persistent_ids` /
         // `sequence_refs` / `region_sequences`）必须**严格同长、同下标**，
         // 否则 `MappingIdentities::live_sequences`（按第一张表的长度生成）会错位。
-        Self::set_sequence_slot(
-            &mut self.sequence_persistent_ids,
-            index,
-            sequence_key.to_string(),
-        );
+        // 【G3】优先认领一条刚被销毁的序列的身份：宿主重建序列时 `realtime_key`
+        // 必然改变，而轨道 id 是从它派生的 —— 不认领就等于"整条轨换了一个人"，
+        // 它的参数会被判成"查不到宿主身份"。
+        let identity = self
+            .claim_sequence_death(properties.order_index(), properties.name())
+            .unwrap_or_else(|| sequence_key.to_string());
+        Self::set_sequence_slot(&mut self.sequence_persistent_ids, index, identity);
         // 与扁平序列槽位一一对应：region 的 `sequence_model_ref` 靠它翻译回槽位。
         Self::set_sequence_slot(&mut self.document.sequence_refs, index, sequence_key);
         if let Some(handle) = context.object_handle() {
@@ -1699,6 +1798,25 @@ impl RegionSequences for ModelHandle {
         // 映射层看到空身份就退回位置身份，而 `sequence_track_index` 由下方清除，
         // 于是这条序列不再被认成参数根。
         self.destroyed_sequences.insert(state);
+        // 【G3】先把它记成"待认领"，再抹空。顺序不能反：抹空之后就没有身份可认领了。
+        {
+            let key = self
+                .sequence_persistent_ids
+                .get(state)
+                .cloned()
+                .unwrap_or_default();
+            if !key.is_empty() {
+                let (order, name) = self
+                    .document
+                    .musical_contexts
+                    .iter()
+                    .flat_map(|context| context.region_sequences.iter())
+                    .nth(state)
+                    .map(|sequence| (sequence.order_index, sequence.name.clone()))
+                    .unwrap_or((0, None));
+                self.remember_sequence_death(order, name, key);
+            }
+        }
         if let Some(id) = self.sequence_persistent_ids.get_mut(state) {
             id.clear();
         }

@@ -314,11 +314,23 @@ mod tests {
             .lock_or_recover()
             .atlas
             .seed_test_pitch_curve("mod:held", 250., vec![60., 62.]);
-        let mut provider = ArchivePersistence::new(&document);
+        // 【为什么载荷来自**另一份**文档】存档到达的目标文档本来就不是发出它的那一个
+        // （重开工程 = 新文档；撤销 = 另一条通道）。同一份文档"存完立刻读回"会被
+        // 回声判据识别成"宿主把刚才那份还给我"并忽略 —— 那是 G5 的**正确**行为，
+        // 而本用例要钉的是"没有 owner 时载荷不被丢掉"，所以载荷必须真的来自别处。
+        let source = DocumentSession::new(70);
+        source.ready.store(true, Ordering::Release);
+        source
+            .edits
+            .lock_or_recover()
+            .atlas
+            .seed_test_pitch_curve("mod:held", 250., vec![60., 62.]);
+        let mut provider = ArchivePersistence::new(&source);
         let bytes = provider.store_document().expect("archive encodes");
+        let mut consumer = ArchivePersistence::new(&document);
         // 载荷先落进一份没有任何 renderer 的文档。
         *document.pending_archive_restore.lock_or_recover() = None;
-        provider.restore_document(&bytes).expect("restore succeeds");
+        consumer.restore_document(&bytes).expect("restore succeeds");
         let held = document.pending_archive_restore.lock_or_recover();
         assert!(
             held.is_some(),

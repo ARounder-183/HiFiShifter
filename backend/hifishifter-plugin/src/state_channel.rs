@@ -68,6 +68,24 @@ pub(crate) struct EditState {
     /// 恢复时由 [`EditState::restore`] 按同一判据重新算出来，因此不占格式代际。
     #[serde(skip)]
     pub unbound: BTreeSet<String>,
+    /// 【G5】这份载荷**到达时**我们是否正处在一次 ARA 编辑会话里。
+    ///
+    /// 【为什么它是"要不要覆盖在线状态"的判据】撤销/重做的还原会话在概念上就是一次
+    /// 编辑会话（`ARAInterface.h:2938-2943`），那种场合存档**必须**覆盖（undo 是权威）。
+    /// 而切屏/重载 take 时交回来的旧载荷不是 —— 那时在线状态比它新，覆盖就是回退。
+    ///
+    /// 【为什么不进存档】它是"这一份载荷是怎么来的"这个**事件**的属性，不是用户数据。
+    #[serde(skip)]
+    pub arrived_in_edit_session: bool,
+    /// 【G5】这份载荷来自 **ARA 文档存档**通道（而不是 VST3 组件状态）。
+    ///
+    /// 【为什么必须区分】两条通道的权威语义不同：
+    ///   * 组件状态是**本实例**的存档，宿主用它做 undo / 复制轨 —— 恢复即权威。
+    ///   * 文档存档在切屏、重载 take、重开工程时都会到达，其中**只有**重开工程
+    ///     （在线状态为空）与撤销（编辑会话里）才是权威；其余携带的是**更旧**的值，
+    ///     覆盖就是用户看到的"参数回退"。
+    #[serde(skip)]
+    pub from_archive: bool,
 }
 
 /// 一次冷恢复身份匹配的三种结论（见 [`pick_binding`]）。
@@ -146,6 +164,19 @@ fn unique_best(
 }
 
 impl EditState {
+    /// 这份状态是否**从未装过任何东西**（重开工程 / 刚插上插件）。
+    ///
+    /// 【为什么它决定"覆盖还是补缺"】冷启动时在线状态是空的，存档就是唯一的数据源 ——
+    /// 必须整份装上。而运行中到达的旧载荷不是：它携带的是**更旧**的参数，覆盖就是
+    /// 用户看到的"参数回退"。
+    pub fn is_pristine(&self) -> bool {
+        self.params.is_empty()
+            && self.tracks.is_empty()
+            && self.atlas.is_empty()
+            && self.fades.is_empty()
+            && self.clip_local.is_empty()
+    }
+
     /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
     fn validate_fades(&self) -> Result<(), String> {
         if self.fades.len() > 10000 {
@@ -185,6 +216,20 @@ impl EditState {
     /// 参数挂到别人的轨道上，那是比"少恢复一条"严重得多的错误。两者的区别是
     /// "这条从来没被绑定过"与"这条被绑定过、但现在对不上"。
     pub fn reconcile(&mut self, current: &TrackBindings) -> Result<(), String> {
+        // 【G2】一张**空**的绑定图不是证据，是"这一轮什么都没看到"。
+        //
+        // 【为什么必须在这里挡住】本函数在**每一次** `end_editing` 都被调用。宿主刚
+        // 启动、正在重建序列、或这一轮还没交付几何时，`track_bindings` 会是空的；
+        // 若让它继续走下去，"每一条记录都查不到宿主身份"会被判成"这些轨都被删了"，
+        // 于是整份编辑状态被清空 —— 用户看到的是"什么都没做，参数全没了"。
+        //
+        // 【为什么只挡 live 分支】冷恢复（`needs_rebind`）的严格契约必须保留：那时
+        // "宿主一个身份都没给"就是"还不能合入"，继续走下去会把存档判成"身份缺失"
+        // 并整份拒绝（那正是 `restored_edits_refuse_…` 钉住的语义）。而 live 分支
+        // 的空图只是"这一轮什么都没看到"。
+        if current.is_empty() && !self.needs_rebind {
+            return Ok(());
+        }
         let mut candidate = self.clone();
         let mut mapping = BTreeMap::new();
         let mut unbound: BTreeSet<String> = BTreeSet::new();
@@ -235,6 +280,15 @@ impl EditState {
             } else {
                 // live轨道已由真实sequence边明确关联，不因轨内成员增删而丢掉编辑。
                 let Some(identity) = current.get(old) else {
+                    // 【G2】这条轨这一轮没出现在绑定表里。它可能只是**暂时**看不到
+                    // （宿主正在重建 region sequence、几何还没交付、编辑中途），也可能
+                    // 真的被删了。两种情况下"保留数据、不套用"都比删除安全：
+                    // 删除是**不可逆**的数据销毁，而保留只让这条记录这一轮不参与投影。
+                    //
+                    // 此前这里 `continue` ⇒ 不建 mapping ⇒ 下面的 filter_map 把它删掉。
+                    // 而轨道 id 来自宿主的 **realtime key**（`create_region_sequence`），
+                    // 宿主重建序列时必然改变 —— 于是"切个屏回来，整轨参数消失"。
+                    unbound.insert(old.clone());
                     continue;
                 };
                 // mute/空轨不是身份丢失；live序列仍明确，保留此前持久成员供解除/保存。

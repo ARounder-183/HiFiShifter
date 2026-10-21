@@ -423,6 +423,22 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// 【G1】编辑器**上一次读到的**参数视图：`(投影指纹, params_by_root_track)`。
+    ///
+    /// 【为什么必须有】提交闸要回答"这次编辑基于哪一份视图"。唯一权威的答案是
+    /// "编辑器**读到**的那一份"，而它随时会被下一次投影覆盖。把它存下来，冲突时
+    /// 才有基线可重基；不存就只能拒绝，而拒绝的下游是用户这一次的曲线被丢弃 ——
+    /// 用户看到的就是"移动一下 item，参数回退了"。
+    ///
+    /// 【为什么不进存档】它是**本次会话**的显示事实，跨会话没有意义：重开工程时
+    /// 编辑器会重新读一份，指纹随之更新。
+    last_workspace_view: Mutex<Option<(String, std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>)>>,
+    /// 【G5】此刻是否处在一次 ARA 编辑会话里（`beginEditing` … `endEditing`）。
+    ///
+    /// 【为什么它是判据】SDK 明确说明**还原会话在概念上就是一次编辑会话**
+    /// （`ARAInterface.h:2938-2943`）。于是"载荷到达时我们在编辑会话里"就是
+    /// "这是一次撤销/重做"的权威证据，那种场合**必须**让它覆盖在线状态。
+    in_edit_session: std::sync::atomic::AtomicBool,
     /// ARA 2 **部分存档**的暂存载荷（`restoreObjectsFromArchive` 的 `Selected` 分支）。
     ///
     /// 【为什么不复用 `pending_archive_restore`】那条路径经 `apply` + `merge` 走"整份
@@ -1004,6 +1020,11 @@ impl DocumentSession {
         // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
         // 静默丢失，症状正是"重载工程后参数被重置"。
         restored.atlas.remap_authorities(remap);
+        // 【G5】记下"它到达时我们在不在一次编辑会话里"：撤销/重做的还原会话在概念上
+        // 就是一次编辑会话（`ARAInterface.h:2938-2943`），那是它**必须**覆盖在线
+        // 状态的唯一权威证据。
+        restored.arrived_in_edit_session = self.in_edit_session();
+        restored.from_archive = true;
         // 【为什么不再把 `restored` 重编码后写回 cache】恢复后到合入前，宿主可能再次
         // 保存（甚至还没等模型图 ready），需要一份"能交回去的东西" —— 那已经在函数
         // 开头存好了：**宿主给的原始字节**。再写一份重编码的副本有两个害处：
@@ -1226,6 +1247,57 @@ impl DocumentSession {
             blake3::hash(&bytes).to_hex()
         ))
     }
+    /// 【G1】记下"编辑器这一次读到的参数视图"（连同它的指纹）。
+    ///
+    /// 【为什么按指纹存而不是按代次】指纹是 `ensure_loaded` 已经用来判断"要不要重载"
+    /// 的**同一个**值，也是编辑器回传的那一个。两者能对上，才说明"这份视图就是那次
+    /// 编辑的基线"；换成任何别的键（代次、时间戳）都要多一条可能对不上的判据。
+    pub(crate) fn remember_workspace_view(
+        &self,
+        projection: &str,
+        params: &std::collections::BTreeMap<
+            String,
+            hifishifter_kernel::state::TrackParamsState,
+        >,
+    ) {
+        *self.last_workspace_view.lock_or_recover() =
+            Some((projection.to_owned(), params.clone()));
+    }
+
+    /// 【G5】当前是否处在一次 ARA 编辑会话里。
+    pub(crate) fn in_edit_session(&self) -> bool {
+        self.in_edit_session.load(Ordering::Acquire)
+    }
+
+    /// 【G5】此刻到达的载荷**是否应当覆盖**在线状态。
+    ///
+    /// 两种情形是"撤销/重做"，它们必须覆盖：
+    ///   * ARA 的还原会话（`beginEditing` … `endEditing`）—— SDK 明说它概念上就是
+    ///     一次编辑会话（`ARAInterface.h:2938-2943`）；
+    ///   * 宿主正在一个**原生 undo 组**里 —— 组件 `setState` 在那种时刻就是 undo 的
+    ///     回放，而不是"宿主把刚才那份还给我"。
+    ///
+    /// 其余时刻到达的载荷按"补缺"处理：它可能比在线状态**旧**，覆盖就是回退。
+    pub(crate) fn authoritative_restore(&self) -> bool {
+        self.in_edit_session.load(Ordering::Acquire)
+            || self.host_undo.pending.load(Ordering::Acquire)
+    }
+
+    /// 【G5】编辑会话开关（`ModelHandle::begin_editing` / `end_editing` 各调一次）。
+    pub(crate) fn set_in_edit_session(&self, editing: bool) {
+        self.in_edit_session.store(editing, Ordering::Release);
+    }
+
+    /// 取回某个指纹对应的编辑器视图（没有则 `None`）。见 [`Self::remember_workspace_view`]。
+    pub(crate) fn workspace_baseline(
+        &self,
+        projection: &str,
+    ) -> Option<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>> {
+        let stored = self.last_workspace_view.lock_or_recover();
+        let (fingerprint, params) = stored.as_ref()?;
+        (fingerprint == projection).then(|| params.clone())
+    }
+
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
     pub(crate) fn workspace_projection(&self) -> Result<String, String> {
         let _transaction = self.transaction.lock_or_recover();
@@ -1310,6 +1382,9 @@ impl DocumentSession {
         let projection = self.workspace_projection_locked(&edits)?;
         self.project_ui_fades_locked(&mut timeline, &edits.fades);
         self.project_private_group_view(&mut timeline, &edits)?;
+        // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起记下。
+        // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）。
+        self.remember_workspace_view(&projection, &timeline.params_by_root_track);
         Ok((
             WorkspaceSnapshot {
                 timeline,
@@ -1389,21 +1464,60 @@ impl DocumentSession {
                     .into(),
             );
         }
-        if self.workspace_projection_locked(&edits)? != previous || base_edit > edits.revision {
-            return Err(
-                "Conflict: workspace scope or curves changed; local curves preserved".into(),
-            );
-        }
+        // 【G1：提交闸从"拒绝"改成"重基"】
+        //
+        // 旧实现只要"宿主在我编辑期间动过"就整条拒绝。而那条冲突是**可重基**的：
+        // 用户的意图是"这条曲线的这几个帧改成这些值"，与"宿主在这期间移动了 item"
+        // 在语义上并不冲突 —— 只要把 delta 落到**编辑器看到的那份基线**上。
+        //
+        // 【为什么基线必须是"编辑器读到的"而不是"现在算出来的"】`capture_changes`
+        // 只记录 `client` 与 `previous_view` 的**差异**。拿现在算出来的投影当基线时，
+        // 宿主移动造成的几何差异会被当成"用户改了参数"写回源曲线（抹平）；而拿
+        // 编辑器读到的那一份当基线，用户没碰的片段两侧**逐字相同** ⇒ 一条都不写回，
+        // 权威（源域）原样保留，几何变化由投影吸收。后者才是正确的那一半。
+        let current_projection = self.workspace_projection_locked(&edits)?;
+        let rebased = if current_projection == previous {
+            None
+        } else {
+            // 冲突：取回编辑器上一次读到的视图。
+            match self.workspace_baseline(&previous) {
+                Some(baseline) => Some(baseline),
+                None => {
+                    // 没有基线可重基（编辑器还没读过 / 进程重启过 / 指纹来自另一个
+                    // 会话）。此时**仍然拒绝**：猜一份基线等于把曲线写到错误的帧上，
+                    // 那比"这次编辑没生效"严重得多。
+                    log::warn!(
+                        "[ara] workspace edit refused: no baseline for the editor's projection \
+                         fingerprint; the edit is dropped instead of being rebased onto a guess"
+                    );
+                    return Err(
+                        "Conflict: workspace edits could not be rebased (no baseline for the \
+                         editor's view)"
+                            .into(),
+                    );
+                }
+            }
+        };
         Self::validate_workspace_geometry(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
         let identities = self.parameter_identities_locked(&host)?;
-        let mut previous_view = edits.params.clone();
-        if !edits.atlas.is_empty() {
-            let mut selected = host.clone();
-            selected.selected_clip_id = client.selected_clip_id.clone();
-            previous_view.extend(edits.atlas.project_roots(&selected, &identities)?);
-        }
+        let previous_view = match rebased {
+            Some(baseline) => baseline,
+            None => {
+                let mut view = edits.params.clone();
+                if !edits.atlas.is_empty() {
+                    let mut selected = host.clone();
+                    selected.selected_clip_id = client.selected_clip_id.clone();
+                    crate::editor::parameter_atlas::merge_root_projection(
+                        &mut view,
+                        edits.atlas.project_root_records(&selected, &identities)?,
+                    );
+                }
+                view
+            }
+        };
+
         candidate.atlas = edits
             .atlas
             .capture_changes(client, &identities, &previous_view)?;
