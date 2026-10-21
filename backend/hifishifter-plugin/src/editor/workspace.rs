@@ -316,6 +316,39 @@ fn sync_host_takes(
     clip.normalize_takes();
 }
 
+/// 文档级 clip id（无命名空间）→ 本回合**呈现**用的 id（带命名空间）。
+///
+/// 【为什么必须有这一层】`clip_ids` / `region_items` 是**文档**事实，值形如
+/// `ara-region-{key}` / `ara-item-{guid}`；而 `present_host_inventory` 拿到的
+/// 时间线是**编辑器**时间线，里面每一个 id 都被 `EditorSession::rewrite_ids` 加过
+/// 命名空间前缀。两者的唯一差别就是前缀 —— 而这一点此前散落在四处、错了三处：
+///
+///   * `claimed_id` 用无前缀 id 去比带前缀的时间线 ⇒ 永远配不上 ⇒ **每轮新建一条
+///     无前缀的副本 clip**，而 retain 又对无前缀 id 一律放行 ⇒ 同一个宿主 item 被
+///     画成两条 clip（一条有波形、一条永远"等待宿主提供音频"，且后者盖住前者）；
+///   * `resolve_model_track` 同理，于是宿主轨的模型身份解析永远失败。
+///
+/// 把换算收敛到**一个类型**之后，"文档 id 与呈现 id 混用"这件事在类型上就写不出来。
+#[derive(Debug, Default)]
+pub(crate) struct PresentedIds(std::collections::HashMap<u64, String>);
+
+impl PresentedIds {
+    fn build(prefix: &impl Fn(&str) -> String, ids: &std::collections::HashMap<u64, String>) -> Self {
+        Self(
+            ids.iter()
+                .map(|(key, id)| (*key, prefix(id)))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+    /// region key → 本回合的呈现 id。
+    fn get(&self, key: u64) -> Option<&str> {
+        self.0.get(&key).map(String::as_str)
+    }
+    fn values(&self) -> impl Iterator<Item = &String> {
+        self.0.values()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
@@ -544,6 +577,12 @@ impl DocumentSession {
             }
             facts
         };
+        // 【T-S2-1：文档 id → 呈现 id 的唯一换算点】
+        //
+        // 这里的 `timeline` 是**编辑器**时间线（id 带命名空间），而 `clip_ids` 是
+        // **文档**事实（id 无命名空间）。取一次快照之后立刻释放锁，后面所有比较都用它 ——
+        // 混用两者正是"同一个 item 被画成两条 clip"的根因（见 `PresentedIds`）。
+        let presented = PresentedIds::build(&prefix, &self.clip_ids.lock_or_recover());
         let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
             // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
@@ -601,7 +640,7 @@ impl DocumentSession {
         fn resolve_model_track(
             timeline: &hifishifter_kernel::state::TimelineState,
             items: &std::collections::HashMap<u64, String>,
-            ids: &std::collections::HashMap<u64, String>,
+            presented: &PresentedIds,
             host: &crate::host::UiTrack,
         ) -> Option<String> {
             for item in &host.items {
@@ -611,10 +650,10 @@ impl DocumentSession {
                 else {
                     continue;
                 };
-                let Some(clip_id) = ids.get(key) else {
+                let Some(clip_id) = presented.get(*key) else {
                     continue;
                 };
-                if let Some(clip) = timeline.clips.iter().find(|clip| &clip.id == clip_id) {
+                if let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) {
                     return Some(clip.track_id.clone());
                 }
             }
@@ -624,8 +663,7 @@ impl DocumentSession {
             // 解析成功 ⇒ 用模型轨；解析不到 ⇒ 退回宿主 id（未认领的 item 走占位路径）。
             let resolved = {
                 let items = self.region_items.lock_or_recover();
-                let ids = self.clip_ids.lock_or_recover();
-                resolve_model_track(&timeline, &items, &ids, host)
+                resolve_model_track(&timeline, &items, &presented, host)
             };
             let track_id = resolved.clone().unwrap_or_else(|| prefix(&host.id));
             owned.insert(track_id.clone());
@@ -678,11 +716,10 @@ impl DocumentSession {
                 // 解析得到就复用那条 clip 的身份，不再凭空造一条。
                 let claimed_id = {
                     let items = self.region_items.lock_or_recover();
-                    let ids = self.clip_ids.lock_or_recover();
                     items
                         .iter()
                         .find(|(_, guid)| **guid == g.item_id)
-                        .and_then(|(key, _)| ids.get(key).cloned())
+                        .and_then(|(key, _)| presented.get(*key).map(str::to_owned))
                 };
                 let id = claimed_id.unwrap_or_else(|| prefix(&format!("ara-item-{}", g.item_id)));
                 present.insert(id.clone());
@@ -792,6 +829,66 @@ impl DocumentSession {
                 }
             }
         }
+        // 【T-S2-2：一个宿主身份只允许一条呈现 clip】
+        //
+        // retain 保证"认得出身份的才留下"，但认得出的**两条**仍可能同时存在：两个
+        // region 认领同一个 item、或身份升级那一轮新旧两种形态各有一条。此时画布按
+        // 数组顺序绘制，后画的那条会盖住先画的 —— 而"后画的"很可能正是还没有源的
+        // 那条占位（它是在 `materialize` **之后**才被造出来的，因此永远拿不到波形）。
+        // 用户看到的就是"一条正常的 clip 被一条永远等音频的 clip 盖住"。
+        //
+        // 判据取**宿主身份**（item GUID / region key），不取 id 字符串相等 ——
+        // 字符串相等正是上一代实现漏掉这条副本的原因。
+        let mut collapsed = 0_usize;
+        {
+            let rank = |clip: &hifishifter_kernel::state::Clip| -> u8 {
+                let media = u8::from(clip.source_path.is_some());
+                let named = u8::from(namespace.is_empty() || clip.id.starts_with(namespace));
+                (media << 1) | named
+            };
+            let mut kept: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut drop = vec![false; timeline.clips.len()];
+            for index in 0..timeline.clips.len() {
+                let Some(identity) = presented_identity(&timeline.clips[index].id) else {
+                    continue;
+                };
+                match kept.get(&identity).copied() {
+                    None => {
+                        kept.insert(identity, index);
+                    }
+                    Some(previous) => {
+                        // 保留优先级：有源 > 带命名空间 > 先出现。
+                        if rank(&timeline.clips[index]) > rank(&timeline.clips[previous]) {
+                            drop[previous] = true;
+                            kept.insert(identity, index);
+                        } else {
+                            drop[index] = true;
+                        }
+                        collapsed += 1;
+                    }
+                }
+            }
+            if collapsed > 0 {
+                let mut index = 0_usize;
+                timeline.clips.retain(|_| {
+                    let keep = !drop[index];
+                    index += 1;
+                    keep
+                });
+            }
+        }
+        self.presentation_dupes
+            .store(collapsed, Ordering::Release);
+        if collapsed > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.inventory.duplicate-clip",
+                format_args!(
+                    "[ara] presentation collapsed {collapsed} duplicate clip(s): one host identity                      must present exactly one clip; the one with media was kept"
+                ),
+            );
+        }
         // 【T8：clip 的去留按**实体**判定，不按 id 的字符串前缀】
         //
         // 旧实现有两条按前缀的 retain：`ara-item-*` 必须在本轮 `present` 里，
@@ -807,16 +904,15 @@ impl DocumentSession {
         {
             let live = self.regions.lock_or_recover();
             let region_items = self.region_items.lock_or_recover();
-            let clip_ids = self.clip_ids.lock_or_recover();
-            // 活着的 region 当前登记的 clip id（可能仍是 key 形态，也可能已升级）。
+            // 活着的 region 当前登记的**呈现** id（可能仍是 key 形态，也可能已升级）。
             let mut live_clip_ids: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
             // 活着的 region 绑定的宿主 item GUID。
             let mut live_item_ids: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
             for key in live.keys() {
-                if let Some(id) = clip_ids.get(key) {
-                    live_clip_ids.insert(id.clone());
+                if let Some(id) = presented.get(*key) {
+                    live_clip_ids.insert(id.to_owned());
                 }
                 live_clip_ids.insert(format!("{namespace}ara-region-{key}"));
                 if let Some(item) = region_items.get(key) {
@@ -841,7 +937,16 @@ impl DocumentSession {
                     // 剔除（它认领不到 item GUID，界面无法给出可操作的读数）。
                     return !owned.contains(&clip.track_id);
                 }
-                true
+                // 【T-S2-3：认不出身份的 id 一律不留】
+                //
+                // 走到这里说明 id 既不是本回合的 `{ns}ara-item-*` / `{ns}ara-region-*` /
+                // `{ns}ara-clip-*`。在**带命名空间**的呈现里，这只可能是上一代命名的
+                // 残留 —— 而它正是"同一个 item 两条 clip、其中一条永远等音频、还盖住
+                // 另一条"里那条永生的副本：旧 `claimed_id` 用无前缀 id 比带前缀时间线
+                // 恒不命中，于是每轮新建一条无前缀副本，而这条 `true` 又让它活下来。
+                // 判据只取"能不能认出身份"，不取"长得像不像 ARA id"：私有 clip 的 id
+                // 同样带命名空间，因此不受影响。
+                namespace.is_empty() || clip.id.starts_with(namespace)
             });
         }
         // 分割谱系回收：两段都不在宿主清单里时删掉这条边，免得它随分割次数无限增长
@@ -1301,21 +1406,42 @@ impl DocumentSession {
         {
             let (mut ready, mut pending, mut unavailable, mut unknown) = (0usize, 0usize, 0usize, 0usize);
             let mut total = 0usize;
+            // 【T-S2-7：把"哪一条"也打出来】只给计数时，"一个 item 两条 clip"与
+            // "一条 clip 没源"在日志里完全同形。这里给**呈现 id**（去掉命名空间前缀）
+            // 加上状态与原因码 —— 但**只列非 ready 的那些**：一切正常时这行仍然是一行。
+            let mut notable: Vec<String> = Vec::new();
             if let Some(clips) = payload["clips"].as_array() {
                 total = clips.len();
                 for clip in clips {
-                    match clip["host_media"].as_str() {
-                        Some("ready") => ready += 1,
-                        Some("pending") => pending += 1,
-                        Some("unavailable") => unavailable += 1,
+                    let state = clip["host_media"].as_str().unwrap_or("unknown");
+                    match state {
+                        "ready" => {
+                            ready += 1;
+                            continue;
+                        }
+                        "pending" => pending += 1,
+                        "unavailable" => unavailable += 1,
                         _ => unknown += 1,
                     }
+                    if notable.len() >= 8 {
+                        continue;
+                    }
+                    let id = clip["id"].as_str().unwrap_or("");
+                    let id = id.strip_prefix(namespace).unwrap_or(id);
+                    let reason = clip["host_media_reason"].as_str().unwrap_or("-");
+                    let source = if clip["source_path"].is_null() { "-" } else { "src" };
+                    notable.push(format!("{id}={state}/{reason}/{source}"));
+                }
+                if notable.len() < total.saturating_sub(ready) {
+                    notable.push(format!("+{}", total.saturating_sub(ready) - notable.len()));
                 }
             }
             let line = format!(
                 "[hfs] media ready={ready} pending={pending} unavailable={unavailable} \
-unknown={unknown} clips={total} facts={}",
-                self.media_facts.lock_or_recover().len()
+unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
+                self.media_facts.lock_or_recover().len(),
+                self.presentation_dupes.load(Ordering::Acquire),
+                notable.join(", ")
             );
             let mut last = self.last_media_diag.lock_or_recover();
             if last.as_deref() != Some(line.as_str()) {
@@ -2237,6 +2363,24 @@ unknown={unknown} clips={total} facts={}",
 /// **静默空转**（返回 `None` ⇒ 整条 clip 被跳过），于是"界面上倒放窗口是镜像、
 /// 声音却是对的"—— 这正是用户报障的"倒放 Offset 逻辑不对"的根因之一。
 /// 按**后缀**取键，两种 id 都能命中。
+/// 一个呈现 id 的**宿主身份**（`item:{guid}` / `region:{key}`），认不出时 `None`。
+///
+/// 【为什么按后缀取键】同一个插件里有两种 clip id 形态：渲染时间线是原生
+/// `ara-item-{guid}`，编辑器时间线带 GUI 命名空间前缀（见 `host_item_guid`）。
+/// 按后缀取键，两种都能命中；按前缀取键会让编辑器路径**静默空转**。
+///
+/// 【为什么需要"身份"而不是"id 相等"】"同一个宿主 item 被画成两条 clip"正是
+/// 因为两条 clip 的 id **不相等**却指向同一个 item。去重必须比较身份。
+fn presented_identity(clip_id: &str) -> Option<String> {
+    if let Some(guid) = host_item_guid(clip_id) {
+        return Some(format!("item:{guid}"));
+    }
+    const REGION_TAG: &str = "ara-region-";
+    clip_id
+        .rfind(REGION_TAG)
+        .map(|index| format!("region:{}", &clip_id[index + REGION_TAG.len()..]))
+}
+
 fn host_item_guid(clip_id: &str) -> Option<&str> {
     const ITEM_TAG: &str = "ara-item-";
     clip_id

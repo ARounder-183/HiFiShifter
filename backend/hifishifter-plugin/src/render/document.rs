@@ -273,6 +273,13 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     last_diag: Mutex<Option<String>>,
     /// 上一次打印的逐 clip 媒体读数（去重用；见 `decorate_host_media_locked`）。
     pub(crate) last_media_diag: Mutex<Option<String>>,
+    /// 上一轮呈现里被**收敛掉**的重复 clip 数（见 `present_host_inventory` 的 T-S2-2）。
+    ///
+    /// 【为什么是一个文档级读数】"同一个宿主 item 被画成两条 clip"是**呈现层**的事实，
+    /// 而渲染时间线（`timeline`）里始终只有一条 —— 此前所有诊断读数都读渲染时间线，
+    /// 于是这个问题在日志里完全隐形，四轮排查都在"为什么真 clip 没有源"上打转。
+    /// 把这个数放进 `diag_line` 之后，"多余的一条"在日志里就是可数的。
+    pub(crate) presentation_dupes: std::sync::atomic::AtomicUsize,
     /// 最近一次**完整**宿主清单采集的代次令牌 `(change_count, model, scope)`。
     ///
     /// 【为什么是文档级、不是实例级】`ui_tracks` / `render_facts` 都是文档级共享状态，
@@ -2327,10 +2334,14 @@ impl DocumentSession {
             });
             (clips, with_source)
         };
+        // 【T-S2-7】`dupes` 是**呈现层**的读数：上一轮 `present_host_inventory` 收敛掉了
+        // 几条重复 clip。渲染时间线里永远只有一条，所以这个数此前完全不可观测 ——
+        // 而"同一个 item 被画成两条 clip"正是用户报的那条症状。
+        let dupes = self.presentation_dupes.load(Ordering::Acquire);
         format!(
             "[hfs] diag v1 ara{{regions={regions} items={items} authorized={authorized} \
 pcm={pcm} facts={facts} published={published} failed={failed} clips={clips} \
-clips_src={clips_src}}}"
+clips_src={clips_src} dupes={dupes}}}"
         )
     }
 

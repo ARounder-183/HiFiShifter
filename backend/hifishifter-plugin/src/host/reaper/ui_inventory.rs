@@ -576,6 +576,215 @@ mod tests {
         assert_eq!(payload["clips"][0]["host_media"], "pending");
     }
 
+    /// 一个已被 ARA 认领的 item，在**带命名空间**的呈现里只能有一条 clip。
+    ///
+    /// 【为什么这是"同一个 Item 两条 Clip"的回归】`claimed_id` 此前拿**文档级**
+    /// （无命名空间）的 `clip_ids` 去比**带命名空间**的编辑器时间线 —— 恒不命中，
+    /// 于是每一轮都新建一条无前缀的副本。真 clip 有波形、副本永远"等待宿主提供音频"，
+    /// 而副本是后 push 的，画布上盖住前者。
+    ///
+    /// 【为什么这条以前不存在】`present_host_inventory` 的单测清一色用**空命名空间**，
+    /// 而空命名空间下 `prefix()` 是恒等函数 —— bug 天然隐身。
+    #[test]
+    fn a_claimed_item_presents_exactly_one_clip() {
+        let fixture = claimed_host();
+        let (document, item_id) = claimed_item(&fixture, 9901);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        timeline
+            .clips
+            .push(editor_clip(&item_id, Some("ara://source")));
+        document.present_host_inventory(&mut timeline, "ui-");
+        let ids: Vec<&str> = timeline.clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec![format!("ui-ara-item-{item_id}").as_str()]);
+        assert_eq!(
+            timeline.clips[0].source_path.as_deref(),
+            Some("ara://source"),
+            "真 clip 的媒体身份不得被清单刷新剥掉"
+        );
+        assert_eq!(
+            document
+                .presentation_dupes
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "没有副本可收敛"
+        );
+        document.close();
+    }
+
+    /// 身份从 `ara-region-{key}` 升级成 `ara-item-{guid}` 的那一轮，仍然只有一条 clip。
+    ///
+    /// 【为什么必须单独钉】升级是**换一套过滤规则**的时刻：旧实现按 id 前缀决定去留，
+    /// 于是"升级完成、清单尚未枚举到新 GUID"的那一轮会把真 clip 删掉、留下副本。
+    #[test]
+    fn a_pre_upgrade_region_clip_is_not_duplicated_after_the_upgrade() {
+        let fixture = claimed_host();
+        let (document, item_id) = claimed_item(&fixture, 9902);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        // 第一轮：clip_ids 还是 key 形态，时间线里是 region 形态的 clip。
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(7, "ara-region-7".into());
+        let mut before = editor_clip(&item_id, Some("ara://source"));
+        before.id = "ui-ara-region-7".into();
+        timeline.clips.push(before);
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(timeline.clips.len(), 1, "升级前也只有一条");
+        // 第二轮：身份升级成 item GUID。
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(7, format!("ara-item-{item_id}"));
+        timeline.clips[0].id = format!("ui-ara-item-{item_id}");
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(
+            timeline.clips.len(),
+            1,
+            "升级那一轮不得同时留下旧形态与副本：{:?}",
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.clone())
+                .collect::<Vec<_>>()
+        );
+        document.close();
+    }
+
+    /// 无命名空间前缀的 ARA clip 在带命名空间的呈现里必须被丢掉。
+    ///
+    /// 【为什么这是那条"永生副本"的直接回归】旧 retain 的末支是 `true`：任何认不出
+    /// 前缀的 id 都**一律保留**。而副本的 id 恰恰没有前缀 —— 于是它一旦被造出来就
+    /// 再也不会消失。
+    #[test]
+    fn a_stray_unprefixed_clip_is_dropped_from_a_namespaced_presentation() {
+        let fixture = claimed_host();
+        let (document, item_id) = claimed_item(&fixture, 9903);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        timeline
+            .clips
+            .push(editor_clip(&item_id, Some("ara://source")));
+        // 上一代命名留下的副本：同一个 item、无前缀、没有源。
+        let mut stray = editor_clip(&item_id, None);
+        stray.id = format!("ara-item-{item_id}");
+        timeline.clips.push(stray);
+        document.present_host_inventory(&mut timeline, "ui-");
+        assert_eq!(
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.clone())
+                .collect::<Vec<_>>(),
+            vec![format!("ui-ara-item-{item_id}")],
+            "无前缀的残留必须被剔除"
+        );
+        document.close();
+    }
+
+    /// 连续多轮呈现不会累积出第二条 clip。
+    ///
+    /// 【为什么是 5 轮】旧实现在**每一轮**都会 push 一条副本，而 retain 从不删它 ——
+    /// 一轮就够复现，多轮用来钉住"它不会随刷新次数增长"。
+    #[test]
+    fn the_duplicate_never_outlives_one_refresh() {
+        let fixture = claimed_host();
+        let (document, item_id) = claimed_item(&fixture, 9904);
+        let mut timeline = hifishifter_kernel::state::TimelineState::default();
+        timeline.tracks.clear();
+        timeline
+            .clips
+            .push(editor_clip(&item_id, Some("ara://source")));
+        for round in 0..5 {
+            document.present_host_inventory(&mut timeline, "ui-");
+            assert_eq!(
+                timeline.clips.len(),
+                1,
+                "第 {round} 轮出现第二条 clip：{:?}",
+                timeline
+                    .clips
+                    .iter()
+                    .map(|clip| clip.id.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        document.close();
+    }
+
+    /// GUI 定位返回的是**原生** id，调用方补上命名空间后必须能在编辑器时间线里命中。
+    ///
+    /// 【为什么钉的是"能命中"而不是"带前缀"】`gui_clip_for_host_item` 的契约是
+    /// "文档级 id"（调用方统一 `format!("{namespace}{native}")`，见 `host_split.rs`
+    /// 与 `clipboard.rs`）。真正会出错的是这条组合的结果对不上时间线 —— 那会让
+    /// 分割/粘贴回执永远判"宿主没跟上"。
+    #[test]
+    fn the_gui_lookup_composes_into_the_presented_id() {
+        let fixture = claimed_host();
+        let (document, item_id) = claimed_item(&fixture, 9905);
+        let native = document
+            .gui_clip_for_host_item(&item_id)
+            .expect("已认领的 item 必须能被定位");
+        let presented = format!("ui-{native}");
+        assert_eq!(presented, format!("ui-ara-item-{item_id}"));
+        document.close();
+    }
+
+    /// 一个"item 已被 ARA 认领、且 region 活着"的最小文档。
+    ///
+    /// 【为什么把 `MockHost` 交回给调用方】它持有客户端指向的共享状态；helper 里
+    /// 丢掉它会让测试结束时访问已释放内存（`STATUS_ACCESS_VIOLATION`），而那个崩溃
+    /// 与真正的回归无法区分。
+    fn claimed_item(
+        fixture: &super::super::MockHost,
+        id: u64,
+    ) -> (Arc<crate::render::document::DocumentSession>, String) {
+        let host = Arc::new(fixture.client());
+        let track = host.ui_track(&|| true).unwrap();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let document = crate::render::document::DocumentSession::new(id);
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(7, item_id.clone());
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(7, format!("ara-item-{item_id}"));
+        document.regions.lock_or_recover().insert(7, Default::default());
+        document.ready.store(true, std::sync::atomic::Ordering::Release);
+        (document, item_id)
+    }
+
+    /// 一个"清单里有一条带 item 的轨道"的宿主夹具。
+    fn claimed_host() -> Box<super::super::MockHost> {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_writer();
+        fixture.enable_media();
+        fixture.clear_markers();
+        fixture.inventory_enabled.set(true);
+        fixture
+    }
+
+    /// 编辑器时间线上的一条 clip（id 带命名空间前缀）。
+    fn editor_clip(item_id: &str, source: Option<&str>) -> hifishifter_kernel::state::Clip {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": format!("ui-ara-item-{item_id}"),
+            "track_id": "ui-host-track",
+            "name": "real",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "takes": [{"id": "t1", "source_path": source}],
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        clip
+    }
+
     /// "宿主换了 active take"是**可证明**的事实：我们同时有"授权那一刻的 take GUID"
     /// 与"宿主现在报的 take GUID"，两者不同就立刻能说，不必等超时。
     ///
