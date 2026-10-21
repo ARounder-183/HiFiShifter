@@ -521,6 +521,20 @@ pub(crate) struct BlockEvidence {
 }
 
 /// 一条进程流自己的块几何（音频线程写，无锁）。
+///
+/// # 位置记账只有一只钟
+///
+/// 这里曾经有**两只**：宿主报的 `projectTimeSamples`，和插件按块长数出来的累积时钟
+/// （`virtual_position` + `host_clock_offset` + `pinned_frames` + 4 个窗口原子）。两者
+/// 之间的差用一个 1.5 s 的容差仲裁，容差之内一律相信累积时钟。
+///
+/// 那个设计的后果是：**用户回到起点再播（0.3–1.2 s 的循环）落在容差之内**，于是被
+/// 判成"宿主读数滞后"，位置被强制成"上一遍末尾 + 块长"，整遍内容偏移恰好一个循环
+/// 长度。这不是一个可以靠调容差修好的参数问题 —— 只要存在两只钟，就必须有一个仲裁，
+/// 而任何仲裁都会在某一种真实操作上判错。
+///
+/// 现在只有一条规则（见 `note_stream_geometry` 的 R1–R4）：
+/// **宿主每报一次位置就以它为准；两次报告之间按收到的帧数前进；跨 pass 一律归零。**
 #[derive(Default)]
 struct StreamGeometry {
     seen: AtomicBool,
@@ -531,35 +545,70 @@ struct StreamGeometry {
     same_start: AtomicU32,
     /// 本块首上是否已经允许过一次“显著更大”的扩展块。
     extension_used: AtomicBool,
-    /// 有效位置的连续性锚点。
+
+    // ── PassClock ──────────────────────────────────────────────────────
+    /// 本 pass 的锚点：宿主**最后一次**报告的位置。
+    ///
+    /// 【为什么只需要一个 i64】`R1`（新 pass）与 `R3`（宿主报了新位置）都会把它覆盖成
+    /// 宿主刚给的值；`R2`（宿主没动）只读不写。于是"锚点是否有效"由 `seen` 与
+    /// `pass` 共同回答，不需要一个独立的 `anchor_valid`。
+    anchor: AtomicI64,
+    /// 自 `anchor` 以来**已经送来**的帧数（不含当前块）。
+    ///
+    /// 【为什么是"已送来的帧数"而不是"上一位置 + 本块长"】钉住的起点不一定落在第一个
+    /// 块上；累加"已送来的帧数"让位置从一开始就对齐，而不必依赖 latch 在哪一块打开。
+    frames_since_anchor: AtomicU64,
+    /// 本 pass 里"**内容没变也可以按块长推进**"的剩余预算（帧）。`0` = 不推进。
+    ///
+    /// 【为什么必须有它】宿主停播时会用**同一个位置**反复调 `process`。那时
+    /// `raw_start` 不动，但也没有任何证据说明时间在走 —— 按块长推进会让停播的光标
+    /// 一直"前进"，捕获于是把同一小段内容反复写成新素材（FL Studio 的既有回归）。
+    ///
+    /// 唯一的例外是**起播窗口**：`kPlaying` 上升沿之后的前 1 秒里，前段往往是静音或
+    /// 持续音，内容证据还没到，但那段时间确实是播放时间。所以预算只在上升沿打开，
+    /// 并且只在**内容在变化**或**预算未耗尽**时才允许计数器前进。
+    ///
+    /// 【为什么它是帧数而不是布尔】"窗口有多宽"与"已经用掉多少"是同一件事的两面；
+    /// 存一个剩余量让两者不可能互相漂移。
+    advance_limit: AtomicU32,
+    /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
+    pass: AtomicU64,
+    /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
+    ///
+    /// 【为什么存锚而不是累加增量】两者都是**绝对**读数（相对工程起点）。把"本块与
+    /// 上一块的差"再叠到计数器上，会把同一段时间算两遍 —— 实测就是"位置钉住 +
+    /// continuous 前进"时位置翻倍。存锚之后位置恒为
+    /// `anchor + (continuous − continuous_anchor)`，与计数器互不叠加。
+    continuous_anchor: AtomicI64,
+    music_anchor: AtomicU64,
+
     last_raw_start: AtomicI64,
     last_continuous: AtomicI64,
     last_music_bits: AtomicU64,
-    anchor_valid: AtomicBool,
-    virtual_position: AtomicI64,
     last_position: AtomicI64,
     last_source: AtomicU8,
-    /// 【T-A1-2】宿主时钟与我们累积时钟之间的**锁存偏移**：`position = raw_start + offset`。
-    ///
-    /// 【为什么需要锁存而不是逐块纠正】起播窗口收口时，宿主的位置字段比它已经播放过的
-    /// 时间**滞后**一个窗口。旧实现只在那一个块里把位置拉回累积时钟，下一块又去读
-    /// 宿主位置 —— 于是 $\Delta$ 帧的错位不是消失，只是被推迟了一块，接着再跳一次。
-    /// 把差值锁存下来，"记录"与"回放"从此读同一个数，错位从定义上不存在。
-    host_clock_offset: AtomicI64,
-    /// 偏移是否有效（真实 seek / 新一次起播会清掉它）。
-    offset_valid: AtomicBool,
-    /// 应用过偏移的块数（诊断）。
-    offset_used: AtomicU64,
-    /// 【I-3 的读数】本流里位置**没有**按"上一块位置 + 上一块帧数"续接的块数。
-    ///
-    /// 【为什么这一位值得存在】"播放途中的随机咔"有相当一部分来自位置记账的回退：
-    /// 宿主把 `projectTimeSamples` 钉住时我们按块长推进，一旦某个分支忘了叠加锁存
-    /// 偏移，位置就退回宿主读数那一侧 —— 写入端于是覆盖上一块的内容、读出端倒着读，
-    /// 两处各是一次阶跃。这个计数把它从"听起来像咔"变成"这一块回退了 N 帧"。
+
+    // ── 读数（I-3：位置是否逐块续接）─────────────────────────────────
+    /// 位置**倒退**的块数。稳态下恒为 0。
     clock_rewinds: AtomicU64,
-    /// 最近一块的位置增量（帧）。稳态下它恒等于块长。
-    clock_delta_min: AtomicI64,
-    clock_delta_max: AtomicI64,
+    /// 位置增量绝对值的最小/最大（帧）。稳态下两者都等于块长。
+    clock_delta_min: AtomicU64,
+    clock_delta_max: AtomicU64,
+    /// 已经量过增量的块数（`delta_min` 的惰性初始化用）。
+    clock_deltas: AtomicU64,
+    /// `R3` 里"宿主报的位置与计数器不同"的次数。
+    jumps: AtomicU64,
+    /// 最近一次 jump 的带符号幅度（帧）。正 = 计数器落后于宿主。
+    last_jump: AtomicI64,
+    /// 位置由**计数器**推进的块数 / 帧数（R2 且没有更好的宿主时钟）。
+    ///
+    /// 【为什么它必须与 `position_source` 分开】"位置由我们数"与"位置来自哪条宿主
+    /// 时钟"是两个正交的事实。混进一个枚举，就得到了 round 24 那个粘住整场会话的
+    /// `Carried` 标签 —— 它让"宿主钉住过位置"这件事在读数上无法与"宿主一直在报位置"
+    /// 区分。
+    counted_blocks: AtomicU64,
+    counted_frames: AtomicU64,
+
     blocks: AtomicU64,
     rolling_blocks: AtomicU64,
     resting_blocks: AtomicU64,
@@ -569,6 +618,7 @@ struct StreamGeometry {
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
+
     /// 最近 8 个块里"输入内容与上一块不同"的位图。
     ///
     /// 【为什么是"内容变化"而不是"有信号"】停播时宿主也可能持续送同一份非零内容
@@ -587,82 +637,33 @@ struct StreamGeometry {
     /// 【为什么要单独记】`unchanged_run` 在内容一变就清零，而相位判定发生在那之后；
     /// 想回答"这一块是不是刚从静止转入流动"就必须把结论留到那时。
     was_stationary: AtomicBool,
-    /// 位置被钉住、但音频在流动 ⇒ 有效位置由本插件按块长推进（见
-    /// [`crate::transfer::capture::PositionSource::Carried`]）。
-    carried: AtomicBool,
-    /// 位置被钉住期间**已送来**的帧数（不含当前块）。
-    ///
-    /// 【为什么需要它而不是"上一位置 + 本块长"】钉住的起点不一定在第一个块上：
-    /// 起播窗口可能先有几个静音块。累加"已送来的帧数"让位置从一开始就对齐，
-    /// 而不必依赖 latch 在哪一块打开。
-    pinned_frames: AtomicU64,
     /// 本流在位置钉住期间**紧接在本块之前**的连续静音帧数。
     ///
     /// 【为什么需要】宿主可能先送 0.4 s 静音再送内容（VEGAS 起播窗口）。这段静音
     /// 没有被写入捕获时，快照会从内容起点才开始覆盖，播放时就在 0.4 s 发生一次
     /// 块内源切换（"咔"）。捕获侧只需要帧数，不需要 PCM —— 它可以在第一段开头
-    /// 合成等长静音，把段起点前移到播放起点。上限由 `PINNED_PLAYBACK_SEC` 约束。
+    /// 合成等长静音，把段起点前移到播放起点。
     trailing_silent_frames: AtomicU64,
-    /// 用 `Carried` 记账过的块数（诊断）。
-    carried_blocks: AtomicU64,
-    /// 起播/录音上升沿之后剩余的"内容不变也推进"帧数。
-    ///
-    /// 【为什么需要】VEGAS 的钉住窗口里前段可能是静音或持续音；只按"内容变化"
-    /// 判流动会把这 0.4 s 当成停播，resync 时整段缺失。上升沿给出一次性的
-    /// [`PINNED_PLAYBACK_SEC`] 窗口，窗口内每一块都按块长推进。
-    pinned_advance_frames: AtomicU64,
-    /// 由锁存（而非内容变化）推进的块数（诊断）。
-    pinned_advance_blocks: AtomicU64,
-    /// 起播/录音上升沿之后，"内容不变也按块长前进"的窗口是否仍然有效。
-    ///
-    /// 【为什么必须是区间而不是逐块】VEGAS 的钉住窗口约 0.66 s，前 0.4 s 几乎一定是
-    /// 静音或持续音。逐块判据只保护静音块；内容一变化，`was_stationary` 清零与
-    /// `CARRIED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
-    /// 那正是用户听到的"0.4 s 处咔"与"0.66 s 断成两个 clip"。区间锁存在窗口内
-    /// 压制这两条内容证据，让整段窗口都按真实播放时间记账。
-    pinned_window_open: AtomicBool,
-    /// 窗口被打开过的次数（诊断）。
-    pinned_window_open_count: AtomicU64,
-    /// 窗口内实际按块长推进的帧数（诊断）。
-    pinned_advance_frames_used: AtomicU64,
-    /// 窗口最近一次收口的原因（诊断；见 `PINNED_WINDOW_*`）。
-    pinned_window_closed_by: AtomicU32,
     /// 本块是否全零。
     ///
-    /// 【为什么还需要它】它不再参与"要不要推进"的判定（那是区间做的事），只作为
-    /// 诊断读数：窗口内有多少块是静音，用来判断宿主起播窗口的形状。
+    /// 【为什么还需要它】它不参与位置推进，只作为诊断读数与"停播重复投递"的
+    /// 判据：窗口内有多少块是静音，用来判断宿主起播窗口的形状。
     last_block_silent: AtomicBool,
 }
 
-/// 起播窗口因宿主位置恢复前进而收口。
-pub(crate) const PINNED_WINDOW_HOST_MOVED: u32 = 1;
-/// 起播窗口因帧窗口耗尽而收口。
-pub(crate) const PINNED_WINDOW_EXHAUSTED: u32 = 2;
-/// 起播窗口因宿主撤掉 `playing` / `recording` 而收口。
-pub(crate) const PINNED_WINDOW_PLAYING_FELL: u32 = 3;
-/// 起播窗口因出现"逐块完全相同的非零内容"（停播重复投递）而收口。
-pub(crate) const PINNED_WINDOW_REPEATED_CONTENT: u32 = 4;
-
 /// "音频在流动"的观测窗口（块数）。
 ///
-/// 【为什么是 8】窗口同时决定两件事：判据的灵敏度（至少 2 块有变化才成立）与
-/// **停播后的尾巴**（最多 8 块 ≈ 85 ms @ 512/48k）。再大就会让"停下之后"继续出声；
-/// 再小则一次气口（静音块）就能把起播窗口打断。
+/// 【为什么是 8】窗口同时决定两件事：判据的灵敏度（至少 1 块有变化才成立）与
+/// **停播后的尾巴**（最多 8 块 ≈ 170 ms @ 1024/48k）。再大就会让"停下之后"继续出声；
+/// 再小则一次气口（静音块）就能把"在流动"判成"停了"。
 const ACTIVITY_WINDOW_BLOCKS: u32 = 8;
 /// 窗口内至少这么多块的内容有变化，才认为音频在流动。
 ///
 /// 【为什么是 1】停播时宿主重复投递的是**同一份**内容（逐块相同），而真正在播放
 /// 时相邻块几乎不可能完全相同。要求 2 块会让起播第一块被判成停播而丢失（那正是
-/// 用户报的"开头一小段录不到"）。单块误判的代价只是多出一块（约 5 ms），
+/// 用户报的"开头一小段录不到"）。单块误判的代价只是多出一块（约 21 ms），
 /// 与丢一块的代价同量级，而"宁可多录"是本轮的既定方向。
 const ACTIVITY_MIN_CHANGES: u32 = 1;
-/// 位置钉住后，连续这么多块内容不变就撤销"自行推进"。
-///
-/// 【为什么是 16】它只在**已经观测到内容变化**之后才生效（停播时 latch 从不打开），
-/// 因此只需要容忍起播窗口里的短暂静音；16 块 ≈ 170 ms 足够覆盖一个气口，又不会让
-/// 停止后的输出拖得太久。
-const CARRIED_STALL_BLOCKS: u32 = 16;
-
 /// 持久化状态从未尝试恢复。
 pub(crate) const RESTORE_NEVER: u8 = 0;
 /// 持久化状态已成功合并（`0` = 从未尝试）。
@@ -701,33 +702,12 @@ struct RestoreProgress {
     /// 这一次等待是否已经报过"没等到"（避免每轮重报）。
     reported: bool,
 }
-/// 起播/录音上升沿之后，允许"内容不变也按块长前进"的时长（秒）。
+/// 一个 pass 里允许累积的**前导静音**上限（秒）。
 ///
-/// 【为什么是 1 秒且不续期】VEGAS 的钉住窗口约 0.66 s，1 秒足够覆盖；它是一次性窗口，
-/// 不因为"内容在变"而续期，于是 FL 停播（`kPlaying` 仍为 1）最多在起播后 1 秒耗尽，
-/// 不会在停播后继续推进。超过 1 秒的静音由捕获侧的 resync 零桥接补齐。
-const PINNED_PLAYBACK_SEC: f64 = 1.0;
-
-/// 宿主位置与我们的累积时钟相差多少以内就**忽略宿主读数**（秒）。
-///
-/// 【为什么必须大于一个起播窗口】VEGAS 的钉住窗口最长 1.0 s（`PINNED_PLAYBACK_SEC`）。
-/// 窗口收口时，宿主的位置只前进了"它承认的那一段"，与我们已经送出的帧数相差几百
-/// 毫秒 —— 那是**宿主的位置字段滞后**，不是用户跳了。取 1.5 s 把它整段包住。
-///
-/// 【为什么不能更大】一次真实的 seek 通常远大于 1.5 s；再放宽就会把"用户拖了光标"
-/// 也当成滞后，于是播放停在原地读旧内容。
-///
-/// 【为什么不做成可配置项】它是**推导出来的**：下界是钉住窗口、上界是一次 seek 的
-/// 典型量级，两者之间没有第三种真实形状。
-const POSITION_DRIFT_TOLERANCE_SEC: f64 = 1.5;
-
-/// 锁存偏移在"多像一次真实 seek"时失效：`|候选 - 预期| > 250 ms` 就重新以宿主为准。
-///
-/// 【为什么不是 1.5 s】1.5 s 是**单块**容差（判"宿主读数滞后"）；锁存之后每一块都在
-/// 用它，容差必须更紧，否则一次 1 秒的跳转会被当成"仍然滞后"而继续读旧内容。
-/// 250 ms 小于任何用户能感知为"跳转"的位移，又大于块长抖动带来的误差。
-const SEEK_SLACK_SEC: f64 = 0.25;
-
+/// 【它约束什么，不约束什么】只约束 `trailing_silent_frames` 的累积与 `start_window`
+/// 的宽度（两者都是"这次播放刚开始"的证据）；**不约束位置推进**。VEGAS 的起播窗口
+/// 约 0.66 s，1 秒足够覆盖；超过 1 秒的静音由捕获侧的 resync 零桥接补齐。
+const PRE_ROLL_CAP_SEC: f64 = 1.0;
 impl StreamGeometry {
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
     fn note_activity(&self, hash: u64) -> bool {
@@ -813,19 +793,19 @@ struct StreamBlock {
     new_pass: bool,
     /// 本流最近是否观测到"输入内容在变化"（音频在流动）。
     activity_moving: bool,
-    /// 本块是位置回退结束后的第一块（`Carried`/`Continuous`/`Music` → `Project`）。
+    /// 本块是宿主**纠正了我们数出来的位置**（见 `note_stream_geometry` 的 R3）。
     resync: bool,
     /// 允许当作"记账纠正"的最大帧差（钉住期间送来的帧数 + 本块）。
     resync_limit_frames: u64,
     /// 本块之前连续静音的帧数（见 `StreamGeometry::trailing_silent_frames`）。
     preceding_silent_frames: u64,
-    /// 本块是钉住区间结束后的第一块（记账差值应视为纠正，不是 seek）。
+    /// 本块位置由**计数器**推进（宿主没有报新位置）。
     ///
-    /// 【为什么不能只看 `resync`】`resync` 由 `last_source` 是否曾为
-    /// Continuous/Music/Carried 决定；没有上升沿的钉住窗口里它一直是 Project。
-    /// 但"刚刚还在钉住区间里"本身就是记账纠正的证据 —— 宿主位置恢复后哪怕只差
-    /// 几帧，也不能另起一段。
-    pinned_recent: bool,
+    /// 【为什么与 `position_source` 分开】"位置由我们数"与"位置来自哪条宿主时钟"
+    /// 是两个正交的事实：计数器推进时标签仍是 `Project`（宿主给的那个起点确实是
+    /// `Project`），只是这一块没有新的宿主报告。混进一个枚举就得到了 round 24 那个
+    /// 粘住整场会话的 `Carried`。
+    counted: bool,
     /// 本块是停播很久之后的上升沿：此前累积的静音必须从 take 前导里扣掉。
     discard_pre_roll: bool,
     /// 起播/录音上升沿打开的窗口仍开着（门控据此放行窗口内静音）。
@@ -834,12 +814,11 @@ struct StreamBlock {
     repeated_nonzero: bool,
     /// 本块是否全零（门控/前导静音判据）。
     silent: bool,
-    /// 本块有效位置的来源（见 `PositionSource`）。
+    /// 本块有效位置来自哪条**宿主时钟**（见 `PositionSource`）。
     ///
-    /// 【为什么捕获侧需要它】`Carried` 表示"这个位置是从宿主给的起点按宿主自己的块长
-    /// 接着数下去的"。它**不**影响覆盖（覆盖只回答"这一段我们拷过吗"），但它是
-    /// `[transfer] clock` 与 `[ara] stuck` 上区分"宿主给的坐标"与"我们接着数的坐标"
-    /// 的唯一依据 —— 而这两者的混用正是 round 23 把一段真实录音声明成洞的原因。
+    /// 【它不再表示"位置可不可信"】位置只有一只钟（见 `note_stream_geometry` 的
+    /// R1–R4），所以这个字段只回答"宿主用哪个字段给的"。它**不**影响覆盖 ——
+    /// 覆盖只回答"这一段样本我们拷过吗"。
     position_source: PositionSource,
 }
 
@@ -954,17 +933,6 @@ impl Seam {
         matches!(self, Self::FadeIn | Self::WideCrossfade | Self::FirstBlock)
     }
 }
-
-/// 读游标跳变超过这个宽度就**整块直通**宿主原声（而不是淡化）。
-///
-/// 【为什么有两条阈值】64 帧（1.3 ms）以内是"接缝抖动"，一次等功率交叉就够；
-/// 64 帧到 50 ms 之间是"读到了另一小段同一素材"，交叉淡化仍然连续；超过 50 ms
-/// 就已经不是同一段内容了，读快照等于把另一段写进总线 —— 那时直通宿主原声才是
-/// 用户在那一刻真正听到的东西。
-///
-/// 【为什么是固定帧数而不是秒】音频线程没有采样率，而 48 kHz 下的 2400 帧 = 50 ms，
-/// 是本插件全部输出路径的工作采样率；更高采样率下它只会更短（更保守）。
-const POSITION_RESYNC_PASS_THROUGH_FRAMES: u64 = 2_400;
 
 /// 一条进程流的输出接缝状态（音频线程写，无锁）。
 ///
@@ -1236,18 +1204,13 @@ pub(crate) struct ExtensionOwner {
     rt_last_read_frames: AtomicU32,
     /// 本块要求做一次**强制**接缝淡化（同一源内部的读位置跳变）。
     force_declick: [AtomicBool; 3],
-    /// 【T3】本块**不读快照**（读游标跳过了超过一个淡化带）。
+    /// 上一次实际写出内容时所在的 **pass 序号**（`StreamGeometry::pass`）。
     ///
-    /// 【为什么是"不读"而不是"淡一次"】跳变的幅度可能远大于一个淡化带（起播窗口
-    /// 收口时可达数十毫秒）。那时候读快照会把**另一段**内容写进总线；淡一次只是把
-    /// 阶跃抹软，内容仍然是错的那一段。不读 ⇒ 这一段回退宿主原声，下一块从新位置
-    /// 继续 —— 那一小段是宿主演示过的真实内容，用户听到的是连续的音乐。
-    ///
-    /// 【为什么不用"把 token 清零"表达】token 的低 8 位是**种类**；清零会让
-    /// `apply_output_declick` 把"没有种类"当成一次种类切换，进而走交叉淡化分支 ——
-    /// 而 `tail` 在短块会话的前几块里是**从未写过的零**，淡出来等于把输出静音
-    /// 一小段（实测打出 `a_stale_prefetch_block_does_not_silence_the_playback_start` 回归）。
-    skip_snapshot_read: [AtomicBool; 3],
+    /// 【为什么需要它】`read_position_jump` 的判据是"本块起点 != 上一块起点 + 上一块
+    /// 帧数"。跨 pass 时那个差值必然巨大（一次起播/回退），但**那不是读游标跳变**：
+    /// pass 边界本来就要重新开始，而上一块输出的尾巴属于**另一个位置**的内容。拿它
+    /// 做交叉淡化等于把两段不相干的信号叠在一起 —— 反而制造了一次咔。
+    rt_last_read_pass: AtomicU64,
     rt_last_emitted_frames: AtomicU32,
     rt_last_emitted_valid: AtomicBool,
     /// 每条进程流的上一块 `kRecording` 位（用于上升沿覆盖写）。
@@ -1272,8 +1235,6 @@ pub(crate) struct ExtensionOwner {
     stream_rolling_blocks: [AtomicU64; 3],
     continuous_used: AtomicU64,
     music_used: AtomicU64,
-    /// 起播窗口里"位置被钉住、由本插件按块长推进"的块数（诊断）。
-    carried_blocks: AtomicU64,
     /// 【I-2】上一次输出仲裁的档位，以及"是否已经记录过"（`0` 是 `Untouched` 的编码，
     /// 不能兼作"从未记录"）。
     rung_previous: AtomicU32,
@@ -1283,29 +1244,25 @@ pub(crate) struct ExtensionOwner {
     rung_last_from: AtomicU32,
     rung_last_to: AtomicU32,
     pass_switches: AtomicU64,
+    /// 【I-2】本 pass 锁定的内容源（`0` = 未锁定）。
+    ///
+    /// 【为什么必须锁存】旧实现每块都重新仲裁，于是 `Raw → Processed` 可以发生在
+    /// **音乐中途** —— 一次换源就是一次咔，而它恰好出现在"刚录完、后台合成刚好跑完"
+    /// 的那一刻，也就是用户起播后的 0.4–0.7 s。锁存之后，一次播放只有一个内容源，
+    /// 换源只可能发生在 pass 边界（那时本来就要重新开始）。
+    rung_locked: AtomicU8,
+    /// 锁存所属的 pass 序号（与 `StreamGeometry::pass` 同一口径）。
+    rung_pass: AtomicU64,
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
     cycle_splits: AtomicU64,
     /// 因“同一区间重复”被抑制输出的实时块数。
-    /// 【T3】上一块在**合成域**里的读位置（`-1` = 上一块不在合成域）。
-    ///
-    /// 【为什么按流记】两条流交替到达；跨流比较会把另一条流的位置当成纠正依据。
-    last_synthetic_position: [AtomicI64; 3],
-    /// 【B3】因「宿主位置滞后」而被忽略的次数（诊断）。
-    ///
-    /// 【为什么需要这个读数】忽略宿主读数是一件危险的事：它必须可数，否则没人能
-    /// 判断这条判据是在修接缝，还是在吞掉用户的 seek。正常会话里它只在起播窗口
-    /// 收口后的几块内增长。
-    drift_ignored: AtomicU64,
-    /// 【B3】被忽略的漂移的**最大**绝对值（帧）。与 drift_ignored 一起回答「偏差有多大」。
-    max_drift_frames: AtomicU64,
-    /// 【T3】读游标被纠正的次数（起播窗口收口、循环回卷、流交接）。
+    /// 【T3】读游标被纠正的次数（pass 边界、宿主纠正记账、流交接）。
     ///
     /// 【为什么必须是诊断】输出侧按块首 `position` 读快照，而捕获侧另有自己的一套
-    /// 记账（`expected_next`）。窗口收口时两侧可能出现几帧到几十帧的差；不纠正就是
-    /// 一次读游标跳变 —— 回退=重播已听内容，前进=跳过内容。两种都是"咔"。记下来才能
-    /// 在下一次复现时回答"到底跳了多少帧"。
+    /// 记账（`expected_next`）。两者出现几帧到几十帧的差时，读游标就会跳一次 ——
+    /// 回退=重播已听内容，前进=跳过内容。记下来才能在下一次复现时回答"跳了多少帧"。
     position_corrections: AtomicU64,
     /// 【T3】最近一次纠正的帧差（绝对值）。
     max_correction_frames: AtomicU64,
@@ -1579,16 +1536,17 @@ impl ExtensionOwner {
     ///
     /// 【为什么要有它】"起播 0.4~0.7 s 一次咔"最直接的量是"读位置跳了多少帧"。
     /// 没有这一行时，判断只能靠听感与代码推理；有了它，一次复现就能回答
-    /// "跳了几次、最大多少、锁存偏移是多少"。
+    /// "跳了几次、最大多少、宿主纠正过几次"。
     pub(crate) fn seam_summary(&self) -> String {
         let geometry = &self.streams[crate::transfer::capture::ProcessStream::Realtime.index()];
         format!(
-            "seam(pos={} corr={} max={} offset={} used={} cov(holes={} frames={}))",
+            "seam(pos={} corr={} max={} jumps={} last_jump={} counted={} cov(holes={} frames={}))",
             self.rt_last_read_position.load(Ordering::Acquire),
             self.position_corrections.load(Ordering::Relaxed),
             self.max_correction_frames.load(Ordering::Relaxed),
-            geometry.host_clock_offset.load(Ordering::Acquire),
-            geometry.offset_used.load(Ordering::Relaxed),
+            geometry.jumps.load(Ordering::Acquire),
+            geometry.last_jump.load(Ordering::Acquire),
+            geometry.counted_blocks.load(Ordering::Acquire),
             self.tape_holes.load(Ordering::Relaxed),
             self.tape_hole_frames.load(Ordering::Relaxed),
         )
@@ -3413,6 +3371,8 @@ impl ExtensionOwner {
         // 而一次神经合成要数秒。这一份也是"换 take 之后绝不播上一份"的保证
         // （见 `raw_tape_ready` 的 take 比对）。
         self.sync_raw_tape();
+        // 换 take / 清空 / 录制结束都会走到这里：内容换了，本 pass 锁存的内容源不再有效。
+        self.clear_rung_latch();
         if let Ok(session) = self.transfer_session() {
             session.request_reload();
         }
@@ -3754,19 +3714,79 @@ impl ExtensionOwner {
             // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
             return TransferOutput::PassThrough;
         }
-        if self.processed_ready() {
-            return TransferOutput::Processed;
-        }
-        if self.raw_tape_ready() {
+        let candidate = if self.processed_ready() {
+            TransferOutput::Processed
+        } else if self.raw_tape_ready() {
             // 【为什么在这里置位】有素材、但处理结果不是当前代次 ⇒ 该有一次合成在跑。
             // 音频线程只记一个原子；调度仍由会话 actor 完成（见 `render_wanted`）。
             self.render_wanted.store(true, Ordering::Release);
-            return TransferOutput::Raw;
+            TransferOutput::Raw
+        } else {
+            // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
+            // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
+            self.render_wanted.store(true, Ordering::Release);
+            TransferOutput::PendingSynthesis
+        };
+        self.latch_rung(candidate, evidence)
+    }
+
+    /// 撤掉本 pass 锁存的内容源（换 take / 清空之后）。
+    ///
+    /// 【为什么必须在换 take 时清】锁存的意义是"这一遍只播一个源"，而"这一遍"
+    /// 的前提是内容没变。换了 take 之后，上一遍锁存的 `Raw`/`Processed` 指向的是
+    /// **另一份素材** —— 继续沿用等于用旧录音盖住新演奏。
+    pub(crate) fn clear_rung_latch(&self) {
+        self.rung_locked.store(0, Ordering::Release);
+    }
+
+    /// 把本块的候选档位**锁存到本 pass**（I-2：一次播放只有一个内容源）。
+    ///
+    /// # 为什么必须锁存
+    ///
+    /// 旧实现每块都重新仲裁，于是 `Raw → Processed` 可以发生在**音乐中途** ——
+    /// 而那恰好出现在"刚录完、后台合成刚好跑完"的那一刻，也就是用户起播后的
+    /// 0.4–0.7 s。一次换源就是一次咔，而它不是用户做错了什么。
+    ///
+    /// 锁存之后，一次 pass 只有一个内容源；换源只可能发生在 pass 边界，而那时
+    /// 本来就要重新开始（第一块走 `Seam::FirstBlock` / `Seam::FadeIn`）。
+    ///
+    /// # 代价与它为什么值得
+    ///
+    /// 若某一遍恰好在"处理结果还没算出来"时起播，那一遍会全程播 `Raw`（原始捕获，
+    /// **仍然是这一份 take 的内容**，只是没处理）。用户听到的是"这一遍没生效"，
+    /// 而不是"听到一半突然换了"。前者可解释、可重试；后者不可解释。
+    /// 真正的解法是让处理结果在播放头之前就绪（见方案 §4.2.8 的水位渲染），
+    /// 那一步落地之后这个代价会消失。
+    ///
+    /// # 哪些档位不锁存
+    ///
+    /// * `Untouched`：绑定的 ARA 实例，根本不走这条通路（上面已早退）。
+    /// * `Recording`：录制中必须直通输入，而且它本身意味着一次新的传输 ——
+    ///   顺便把锁存清掉，让录完之后的那一遍重新选。
+    fn latch_rung(&self, candidate: TransferOutput, evidence: Option<BlockEvidence>) -> TransferOutput {
+        // 没有本块证据（离线 / 预取 / 旧测试入口）时不锁存：它们的输出稍后才被播放，
+        // "此刻的传输状态"对它们不适用。
+        let Some(evidence) = evidence else {
+            return candidate;
+        };
+        if evidence.stream != ProcessStream::Realtime {
+            return candidate;
         }
-        // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
-        // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
-        self.render_wanted.store(true, Ordering::Release);
-        TransferOutput::PendingSynthesis
+        if candidate == TransferOutput::Recording {
+            self.rung_locked.store(0, Ordering::Release);
+            return candidate;
+        }
+        let pass = self.streams[ProcessStream::Realtime.index()]
+            .pass
+            .load(Ordering::Acquire);
+        let locked = self.rung_locked.load(Ordering::Acquire);
+        if locked != 0 && self.rung_pass.load(Ordering::Acquire) == pass {
+            // 本 pass 已经选过：沿用，不重新仲裁。
+            return TransferOutput::from_code(locked).unwrap_or(candidate);
+        }
+        self.rung_locked.store(candidate.code(), Ordering::Release);
+        self.rung_pass.store(pass, Ordering::Release);
+        candidate
     }
 
     /// 输出源 token：种类 + 快照代次。任一项变化都意味着"用户听到的信号换了源"。
@@ -3963,22 +3983,29 @@ impl ExtensionOwner {
         if blocks == 0 {
             return;
         }
+        // 【这一行的判读方式】稳态下 `delta_min == delta_max == 块长` 且
+        // `rewinds == 0`。任何别的形状都说明位置记账漏了一项 —— 而那就是咔。
+        //
+        // `counted=` 是"位置由计数器推进的块数"，`jumps=` 是"宿主报的位置与计数器
+        // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
+        // 位置，而每次它恢复报告时我们都跟上了。
         let line = format!(
-            "[transfer] clock: stream={} blocks={blocks} carried={} pinned={} \
-             offset_valid={} offset={} offset_used={} drift_max={} rewinds={} \
-             delta_min={} delta_max={} resyncs={} pinned_frames={}",
+            "[transfer] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
+             jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
+             rising={} continuous={} music={}",
             index.min(2),
-            geometry.carried_blocks.load(Ordering::Acquire),
-            geometry.pinned_frames.load(Ordering::Acquire),
-            u8::from(geometry.offset_valid.load(Ordering::Acquire)),
-            geometry.host_clock_offset.load(Ordering::Acquire),
-            geometry.offset_used.load(Ordering::Acquire),
-            self.max_drift_frames.load(Ordering::Acquire),
+            geometry.pass.load(Ordering::Acquire),
+            geometry.counted_blocks.load(Ordering::Acquire),
+            geometry.counted_frames.load(Ordering::Acquire),
+            geometry.jumps.load(Ordering::Acquire),
+            geometry.last_jump.load(Ordering::Acquire),
             geometry.clock_rewinds.load(Ordering::Acquire),
             geometry.clock_delta_min.load(Ordering::Acquire),
             geometry.clock_delta_max.load(Ordering::Acquire),
             geometry.position_resyncs.load(Ordering::Acquire),
-            geometry.pinned_frames.load(Ordering::Acquire),
+            geometry.rising_edges.load(Ordering::Acquire),
+            geometry.continuous_used.load(Ordering::Acquire),
+            geometry.music_used.load(Ordering::Acquire),
         );
         let mut last = self.last_clock_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {
@@ -4423,8 +4450,6 @@ impl ExtensionOwner {
             StreamTime::default(),
             false,
             false,
-            false,
-            false,
         );
         (block.phase != TransportPhase::Resting, block.had_previous)
     }
@@ -4451,17 +4476,45 @@ impl ExtensionOwner {
             StreamTime::from_context(context),
             playing_rising,
             recording_rising,
-            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
-            context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0,
         )
     }
 
     /// 每流几何 + 有效位置 + 相位。音频线程调用：只读写原子，不分配。
     ///
-    /// 【有效位置的两条回退】宿主在起播窗口里可能把 `projectTimeSamples` 钉住，
-    /// 但 `continuousTimeSamples`（或 `projectTimeMusic`）仍在前进。此时用**增量
-    /// 锚定**跟随它：只在“工程位置与上一块完全相同”时启用，且只累加差值，不比较
-    /// 绝对原点。循环播放不启用 continuous（它不回卷），改用会回卷的工程位置。
+    /// # 四条规则（没有第五条）
+    ///
+    /// ```text
+    /// R1  新 pass（!had / playing_rising / recording_rising / raw_start < last_raw）
+    ///         ⇒ anchor = raw_start，计数器归零，position = raw_start
+    /// R2  宿主没报新位置（raw_start == last_raw）
+    ///         ⇒ position = anchor + 已送来的帧数
+    ///            （若 continuousTimeSamples / projectTimeMusic 在前进，优先用它们）
+    /// R3  宿主报了新位置（raw_start != last_raw）
+    ///         ⇒ position = raw_start。宿主永远赢，永不"纠正"它
+    /// R4  任何 raw_start < last_raw
+    ///         ⇒ 按 R1 处理（新 pass）。**永不**当成"宿主读数滞后"
+    /// ```
+    ///
+    /// # 为什么删掉了 1.5 s 容差与"锁存偏移"
+    ///
+    /// 旧实现把"宿主报的位置比我们的累积时钟落后不超过 `POSITION_DRIFT_TOLERANCE_SEC`"
+    /// 判成"宿主读数滞后"，于是继续用累积时钟，并把差值**锁存**下来供后续每一块复用。
+    ///
+    /// 用户回到起点再播 0.7 s 时，那个差恰好是 −0.7 s —— **在容差之内** ⇒ 位置被强制成
+    /// "上一遍末尾 + 块长"，整遍内容偏移一个循环长度；而且锁存一生效，`offset_valid`
+    /// 就再也不清（只有新起播/循环/一次 >250 ms 的跳变能清它），于是**整场会话**都走
+    /// 这条路。这就是用户说的"反复播放 0.7 s，内容完全与它应该输出的对不上"。
+    ///
+    /// 教训是结构性的：**只要存在两只钟，就必须有一个仲裁，而任何仲裁都会在某一种
+    /// 真实操作上判错**。所以这里不仲裁 —— 宿主报了，就听宿主的（R3）；宿主没报，
+    /// 才按帧数接着数（R2），而那个数**可核对**：宿主下次报位置时 R3 立刻接管，
+    /// 差值记进 `jumps` 并交给捕获侧做记账纠正（桥接/裁剪），不会变成 seek。
+    ///
+    /// # 为什么 R2 仍然必须存在
+    ///
+    /// 实测 VEGAS 在 Transfer 播放期间会让 `projectTimeSamples` 停住不动。那时
+    /// "每块前进 frames"是唯一自洽的换算 —— 它是合法记账，不是猜测。把它删掉不会让
+    /// 宿主变好，只会让 take 变成一大片洞。
     #[allow(clippy::too_many_arguments)]
     fn note_stream_geometry(
         &self,
@@ -4472,12 +4525,16 @@ impl ExtensionOwner {
         time: StreamTime,
         playing_rising: bool,
         recording_rising: bool,
-        playing: bool,
-        recording: bool,
     ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
         let had = geometry.seen.load(Ordering::Acquire);
+        let rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            48_000.0
+        };
+        let pre_roll_cap = (rate * PRE_ROLL_CAP_SEC).round().max(1.0) as u64;
         if frames == 0 {
             // 零帧块是参数 flush，不代表时间轴在走。
             return StreamBlock {
@@ -4495,9 +4552,9 @@ impl ExtensionOwner {
                 resync: false,
                 resync_limit_frames: 0,
                 preceding_silent_frames: geometry.trailing_silent_frames.load(Ordering::Acquire),
-                pinned_recent: false,
+                counted: false,
                 discard_pre_roll: false,
-                start_window: geometry.pinned_window_open.load(Ordering::Acquire),
+                start_window: false,
                 repeated_nonzero: false,
                 silent: geometry.last_block_silent.load(Ordering::Acquire),
                 // 零帧块不写任何样本，位置来源对它没有意义；沿用上一块的结论即可。
@@ -4508,11 +4565,6 @@ impl ExtensionOwner {
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
-        let rate = if rate.is_finite() && rate > 0.0 {
-            rate
-        } else {
-            48_000.0
-        };
 
         let last_position = geometry.last_position.load(Ordering::Acquire);
         let last_raw = geometry.last_raw_start.load(Ordering::Acquire);
@@ -4520,7 +4572,13 @@ impl ExtensionOwner {
         let last_music = f64::from_bits(geometry.last_music_bits.load(Ordering::Acquire));
         let last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
             .unwrap_or(PositionSource::Project);
+        let anchor_before = geometry.anchor.load(Ordering::Acquire);
+        let advance_before = geometry.frames_since_anchor.load(Ordering::Acquire);
+        // 【为什么先读再判】`resync_limit_frames` 的语义是"计数器**可能**错过的范围"，
+        // 必须用本块处理**之前**的累积值；本块一写就被清零了。
+        let counted_before = advance_before.saturating_add(frames as u64);
 
+        // 【循环回卷】只有循环播放才有"回卷"这个形状：块首回退，或块首不变而时间前进。
         let cycle_wrap = if time.cycle_active {
             let continuous_advanced = time
                 .continuous
@@ -4539,401 +4597,186 @@ impl ExtensionOwner {
             false
         };
 
-        let mut position =
-            if had && raw_start == last_raw && geometry.anchor_valid.load(Ordering::Acquire) {
-                geometry.virtual_position.load(Ordering::Acquire)
-            } else {
-                raw_start
-            };
+        let host_rewound = had && raw_start < last_raw;
+        let host_moved = had && raw_start != last_raw;
+        // R1 + R4：新一次播放。回退**永远**是新 pass —— 它不是"读数滞后"。
+        let new_pass = !had || playing_rising || recording_rising || host_rewound;
+
+        // 本块位置的"锚 + 偏移"。R1/R3 时锚就是宿主刚报的值、偏移为 0；
+        // R2 时锚保持不动、偏移是已送来的帧数。两条路径因此共用同一句
+        // `anchor + advance`，不存在"两个域"。
+        let (anchor, advance) = if new_pass || host_moved {
+            (raw_start, 0_u64)
+        } else {
+            (anchor_before, advance_before)
+        };
+
+        // 【停播重复投递的判据】同一份**非零**内容逐块重复 ⇒ 宿主在停播时反复送同一
+        // 段缓冲，那不是播放时间。它与 VEGAS 起播窗口的区分点是内容：窗口送的是静音，
+        // FL Studio 停播送的是同一份非零内容。
+        let silent = geometry.last_block_silent.load(Ordering::Acquire);
+        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+
+        let mut position = raw_start;
         let mut source = if time.cycle_active {
             PositionSource::Cycle
         } else {
             PositionSource::Project
         };
-        if !time.cycle_active && had && raw_start == last_raw {
-            let sane = (frames as i64).saturating_mul(4).max(64);
-            if let Some(continuous) = time.continuous {
-                let delta = continuous.saturating_sub(last_continuous);
-                if delta > 0 && delta <= sane {
-                    position = position.saturating_add(delta);
-                    source = PositionSource::Continuous;
-                    self.continuous_used.fetch_add(1, Ordering::Relaxed);
-                    geometry.continuous_used.fetch_add(1, Ordering::Relaxed);
+        let mut counted = false;
+
+        if new_pass || host_moved {
+            // R1 / R3 / R4：宿主给了位置，它就是权威。
+            //
+            // R3 的差值只做**记账**（`jumps` + `last_jump`），绝不参与位置的选取 ——
+            // 那正是旧实现出错的地方。真正的纠正发生在捕获侧：它持有 `expected_next`，
+            // 才判得出"这个差值是桥接还是裁剪"。
+            if host_moved && !new_pass {
+                let expected = anchor_before.saturating_add(advance_before as i64);
+                let jump = raw_start.saturating_sub(expected);
+                if jump != 0 {
+                    geometry.jumps.fetch_add(1, Ordering::Relaxed);
+                    geometry.last_jump.store(jump, Ordering::Release);
                 }
             }
-            if source == PositionSource::Project {
-                if let (Some(music), Some(tempo)) = (time.music, time.tempo) {
-                    let beats = music - last_music;
-                    if beats > 0.0 {
-                        let delta = (beats * 60.0 / tempo * rate).round() as i64;
-                        if delta > 0 && delta <= sane {
-                            position = position.saturating_add(delta);
-                            source = PositionSource::Music;
-                            self.music_used.fetch_add(1, Ordering::Relaxed);
-                            geometry.music_used.fetch_add(1, Ordering::Relaxed);
+            geometry.anchor.store(raw_start, Ordering::Release);
+            geometry.continuous_anchor.store(
+                time.continuous.unwrap_or(last_continuous),
+                Ordering::Release,
+            );
+            geometry.music_anchor.store(
+                time.music.unwrap_or(last_music).to_bits(),
+                Ordering::Release,
+            );
+            // 【锚点在本块起点上】本块的偏移是 0，下一块（若连续）是一块长。
+            geometry
+                .frames_since_anchor
+                .store(frames as u64, Ordering::Release);
+            if new_pass {
+                // 【窗口只在上升沿打开】`!had` 单独不打开：第一块的位置本来就是宿主
+                // 给的，不需要推进；而"宿主重复投递同一位置"必须以不推进告终。
+                geometry.advance_limit.store(
+                    if playing_rising || recording_rising {
+                        pre_roll_cap.min(u64::from(u32::MAX)) as u32
+                    } else {
+                        0
+                    },
+                    Ordering::Release,
+                );
+                geometry.pass.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // R3：宿主报了新位置 ⇒ 计数器不再有权推进，窗口一并作废。
+                geometry.advance_limit.store(0, Ordering::Release);
+            }
+            position = raw_start;
+        } else {
+            // R2：宿主没报新位置。用最好的宿主时钟，最后才是计数器。
+            let sane = (frames as i64).saturating_mul(4).max(64);
+            //
+            // 见到"逐块完全相同的非零内容"就当场把窗口作废 —— 那是停播重复投递的
+            // 形状，继续推进会让停播的光标一直"前进"（FL Studio 的既有回归）。
+            if repeated_nonzero && advance < u64::from(geometry.advance_limit.load(Ordering::Acquire)) {
+                geometry.advance_limit.store(0, Ordering::Release);
+            }
+            let limit = u64::from(geometry.advance_limit.load(Ordering::Acquire));
+            let window_open = advance < limit;
+            let may_advance = window_open || geometry.activity_moving();
+            // 本块相对锚点的偏移；`advance` 是"按块长算，本块应该在哪"。
+            let mut offset = advance as i64;
+            let mut advanced = false;
+            if !time.cycle_active {
+                // 【宿主时钟优先，且它是**绝对**的】位置 = 锚点 + (当前读数 − 锚点读数)。
+                // 不与计数器叠加 —— 叠加会把同一段时间算两遍。
+                if let Some(continuous) = time.continuous {
+                    let from_anchor = continuous.saturating_sub(
+                        geometry.continuous_anchor.load(Ordering::Acquire),
+                    );
+                    let step = from_anchor.saturating_sub(offset);
+                    if from_anchor >= 0 && step >= 0 && step <= sane {
+                        offset = from_anchor;
+                        position = anchor.saturating_add(from_anchor);
+                        source = PositionSource::Continuous;
+                        advanced = true;
+                        self.continuous_used.fetch_add(1, Ordering::Relaxed);
+                        geometry.continuous_used.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if !advanced {
+                    if let (Some(music), Some(tempo)) = (time.music, time.tempo) {
+                        let anchor_music =
+                            f64::from_bits(geometry.music_anchor.load(Ordering::Acquire));
+                        let beats = music - anchor_music;
+                        if beats > 0.0 {
+                            let from_anchor = (beats * 60.0 / tempo * rate).round() as i64;
+                            let step = from_anchor.saturating_sub(offset);
+                            if step >= 0 && step <= sane {
+                                offset = from_anchor;
+                                position = anchor.saturating_add(from_anchor);
+                                source = PositionSource::Music;
+                                advanced = true;
+                                self.music_used.fetch_add(1, Ordering::Relaxed);
+                                geometry.music_used.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
             }
+            if !advanced && may_advance {
+                // 计数器：宿主没说，就按"收到了多少帧"接着数 —— 但只在有证据的时候。
+                position = anchor.saturating_add(offset);
+                counted = true;
+                advanced = true;
+                geometry.counted_blocks.fetch_add(1, Ordering::Relaxed);
+                geometry.counted_frames.fetch_add(frames as u64, Ordering::Relaxed);
+            }
+            if !advanced {
+                // 【停播：位置回到宿主报的那个点】没有任何证据说明时间在走，而宿主
+                // 反复投递的是同一个位置 —— 继续累加等于把停播时间算成播放时间，
+                // 捕获于是把同一小段反复写成新素材（FL Studio 的既有回归）。
+                position = anchor;
+                offset = 0;
+            }
+            geometry.frames_since_anchor.store(
+                offset.saturating_add(frames as i64).max(0) as u64,
+                Ordering::Release,
+            );
         }
 
-        // 【T-A1-2：锁存的时钟偏移】宿主位置滞后时，用"宿主读数 + 偏移"当同一个时钟。
-        //
-        // 判据不是"位置没变"（那是钉住），而是"位置变了、但与我们自己的续接只差
-        // 不到一次 seek"。差得更多就是用户真的跳了：清掉偏移，重新以宿主为准。
-        let host_moved = had && raw_start != last_raw;
-        if host_moved && !time.cycle_active && geometry.offset_valid.load(Ordering::Acquire) {
-            let offset = geometry.host_clock_offset.load(Ordering::Acquire);
-            let candidate = raw_start.saturating_add(offset);
-            let expected = last_position.saturating_add(frames as i64);
-            let slack = (rate * SEEK_SLACK_SEC).round().max(1.0) as i64;
-            if candidate.saturating_sub(expected).unsigned_abs() <= slack as u64 {
-                position = candidate;
-                geometry.offset_used.fetch_add(1, Ordering::Relaxed);
-            } else {
-                geometry.offset_valid.store(false, Ordering::Release);
-                geometry.host_clock_offset.store(0, Ordering::Release);
-            }
-        }
-        // 新一次起播 / 循环折返：上一段的偏移没有意义。
-        if (playing_rising || recording_rising || cycle_wrap)
-            && geometry.offset_valid.swap(false, Ordering::AcqRel)
-        {
-            geometry.host_clock_offset.store(0, Ordering::Release);
-        }
-        // 【起播窗口的位置记账】宿主把 `projectTimeSamples` 钉住、又不给
-        // `continousTimeSamples` / `projectTimeMusic` 时，上面两条回退都失效。此时
-        // **音频在流动**（内容逐块变化）是唯一还成立的证据：宿主既然按自己的块长
-        // 连续送时间上相邻的样本，有效位置就只能按"已送来的帧数"前进。
-        //
-        // 门是"内容有变化"而不是"有信号"：停播时宿主也可能持续送同一份非零内容，
-        // 那份内容逐块**相同** ⇒ latch 不打开 ⇒ 仍判 Resting（FL Studio 的既有回归）。
-        // 内容连续不变达到 `CARRIED_STALL_BLOCKS` 时撤销 latch，让"停止后继续
-        // 出声"最多只拖 170 ms。
-        let activity_moving = geometry.activity_moving();
-        // 【为什么 `!had` 也算钉住】第一块是"钉住区间"的起点：它的帧数必须计入，
-        // 下一块才能落在 `P + frames` 而不是 `P`。
-        let pinned = !had || (raw_start == last_raw && !time.cycle_active);
-        // 【为什么先记下来】`pinned_frames` 在位置恢复前进时会被清零；resync 的
-        // 允许误差必须用**清零前**的钉住帧数来算。
-        let prior_pinned_frames = geometry.pinned_frames.load(Ordering::Acquire);
-        let silent = geometry.last_block_silent.load(Ordering::Acquire);
-        // 【为什么先读旧值再更新】`preceding_silent_frames` 的语义是"本块之前连续
-        // 静音的帧数"。本块是内容块时必须返回之前累积的那一段，不能先把它清零。
-        let mut preceding_silent_frames =
-            geometry.trailing_silent_frames.load(Ordering::Acquire);
+        // ── 前导静音（诊断 + 门控）────────────────────────────────────
+        let mut preceding_silent_frames = geometry.trailing_silent_frames.load(Ordering::Acquire);
         let mut discard_pre_roll = false;
-        // 【T12：第一块也要算"钉住"】VEGAS 的起播窗口从**第一块**开始就在钉住位置。
-        // `had == false` 时旧判据为假，第一块的静音一次都没被累积 —— 于是窗口前段的
-        // 静音要么全丢、要么要多两块才立起来，恰好解释用户听到的"0.4 s 附近浮动"。
-        // 循环切分不是起播起点，仍排除。
-        let pinned_since_last = !time.cycle_active && (!had || raw_start == last_raw);
-        let max_pre_roll = (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64;
-        // 【T17："停播静音"必须与"起播窗口的静音"分开，而**帧数不是判据**】
+        // 【停播静音 vs 起播窗口静音】两者都是"全零块"，但只有后者是播放时间。
         //
-        // 用户停在光标处时宿主会反复投递同一块；那段不是播放时间，不能变成前导。
-        // 旧判据是"钉住帧数超过一个起播窗口"—— 而 `pinned_frames` **没有上界**，
-        // 只要宿主在停住的状态下继续调 `process` 就一直在涨。于是最常见的操作顺序
-        // 「武装 → 等一会儿（>1 s）→ 按播放」会让**第一次真实上升沿**带上一个巨大的
-        // 累积值，被判成"停播静音"而丢弃 —— 而 VEGAS 的 `kPlaying` 上升沿本来就晚
-        // （见 `capture.rs` 的说明），这条几乎必然命中。
-        //
-        // 真正能区分两者的是**上升沿之前那一块的内容**：
+        // 真正能区分它们的是**上升沿之前那一块的内容**：
         //   * 起播窗口：宿主先送**静音**，内容出现时才把播放位置置 1；
-        //   * 停播重复投递：宿主把**同一段有内容的音频**反复送（`repeated_nonzero`）。
-        // 所以判据改成"钉住够久 **且** 上一块不是静音"。静音的那一支保留前导 ——
-        // 那正是起播窗口的形状。
-        let last_block_silent = geometry.last_block_silent.load(Ordering::Acquire);
-        if (playing_rising || recording_rising)
-            && prior_pinned_frames > max_pre_roll
-            && !last_block_silent
-        {
+        //   * 停播重复投递：宿主把**同一段有内容的音频**反复送。
+        // 所以判据是"计数器已经累积超过一个窗口 **且** 上一块不是静音"。
+        if (playing_rising || recording_rising) && advance_before > pre_roll_cap && !silent {
             preceding_silent_frames = 0;
             discard_pre_roll = true;
         }
-        // 【为什么上升沿也要保留累积】起播窗口里 `kPlaying` 的上升沿可能落在**静音块**
-        // 上（宿主先送 0.4 s 静音、内容出现时才把播放位置置 1）。旧代码在上升沿那一块
-        // 直接清零，于是紧随其后的内容块读到的 `preceding_silent_frames` 是 0 ——
-        // round 15 的 T1 因此拿不到前导静音。
-        let keep_silence = silent && pinned_since_last;
-        if keep_silence {
+        // 宿主没报新位置时，静音块才是"播放中的静音"；停播重复投递不累积。
+        let pinned_since_last = !had || raw_start == last_raw;
+        if silent && pinned_since_last {
             geometry.trailing_silent_frames.store(
                 preceding_silent_frames
                     .saturating_add(frames as u64)
-                    .min(max_pre_roll),
+                    .min(pre_roll_cap),
                 Ordering::Release,
             );
         } else if !silent {
             geometry.trailing_silent_frames.store(0, Ordering::Release);
         }
-        let pinned_recent = had && raw_start != last_raw && prior_pinned_frames > 0;
-        // 【为什么要一个"区间开/关"而不是逐块判据】VEGAS 的钉住窗口约 0.66 s，
-        // 前 0.4 s 几乎一定是静音或持续音。逐块判据只保护**静音块**；内容一变化，
-        // `was_stationary` 清零与 `CARRIED_STALL_BLOCKS` 撤销立刻重新生效，
-        // 把已经记账的 0.4 s 抹掉 —— 那正是用户听到的"0.4 s 处咔"与
-        // "0.66 s 断成两个 clip"。区间锁存在窗口内压制这两条内容证据，
-        // 让整段窗口都按真实播放时间记账。
-        if playing_rising || recording_rising {
-            geometry.pinned_advance_frames.store(
-                (rate * PINNED_PLAYBACK_SEC).round().max(1.0) as u64,
-                Ordering::Release,
-            );
-            geometry.pinned_window_open.store(true, Ordering::Release);
-            geometry
-                .pinned_window_open_count
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        let latch_frames = geometry.pinned_advance_frames.load(Ordering::Acquire);
-        // 【为什么静音段要放行、而"同一份非零内容"不放行】窗口内有两种"内容没变"：
-        //   * VEGAS 起播窗口的前段是**静音**（或一段持续音的头几个采样全零）；
-        //   * FL Studio 停播时重复投递同一份**非零**内容。
-        // 前者是真实播放时间，必须记账；后者是宿主把同一段内容又送了一遍，
-        // 把它当成播放会让停播光标继续出声。判据用"内容没变**且**有信号"。
-        //
-        // 【为什么这也覆盖持续音】一段持续音在窗口内**逐块在变**（相邻块的样本值
-        // 不同），`unchanged_run == 0` ⇒ 不在这个分支里。真正会命中的只有
-        // "逐块完全相同"，而那正是重复投递的形状。
-        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0
-            && !geometry.last_block_silent.load(Ordering::Acquire);
-        // 【为什么要在这里收口】"逐块完全相同的非零内容"是 FL Studio 停播重复投递的
-        // 形状，也是唯一能与 VEGAS 起播窗口区分的证据。窗口一旦见到它就应当立刻作废：
-        // 否则窗口内剩余的时间还会把同一段内容判成播放，停播光标继续出声
-        // （`a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence`）。
-        if repeated_nonzero && geometry.pinned_window_open.load(Ordering::Acquire) {
-            geometry.pinned_window_open.store(false, Ordering::Release);
-            geometry.pinned_advance_frames.store(0, Ordering::Release);
-            geometry
-                .pinned_window_closed_by
-                .store(PINNED_WINDOW_REPEATED_CONTENT, Ordering::Release);
-        }
-        let window_open = geometry.pinned_window_open.load(Ordering::Acquire);
-        let latch = pinned && window_open;
-        let advancing = activity_moving || latch;
-        let mut pinned_before = if pinned {
-            geometry.pinned_frames.load(Ordering::Acquire)
-        } else {
-            0
-        };
-        // 【为什么上升沿要清零】上升沿是"这次播放从这里开始"的权威信号；它之前累积的
-        // 钉住帧属于停播/预卷，不能把真实起点推后。VEGAS 的起播窗口里这个值是 0；
-        // "停播一段再按播放"的宿主则靠这一步把停播时长扣掉。
-        if pinned && (playing_rising || recording_rising) {
-            pinned_before = 0;
-        }
-        let mut carrying = geometry.carried.load(Ordering::Acquire);
-        // 【为什么这里要补一次撤销】窗口因"逐块完全相同的非零内容"收口时，本块正是
-        // 那段重复内容的第一块 —— 而此时 `carrying` 可能已经在上一块被置真
-        // （起播第一块），`if !carrying` 的守卫会跳过撤销，于是位置继续按块长
-        // 推进，停播光标继续出声。这里显式按下来。
-        if repeated_nonzero && carrying {
-            carrying = false;
-            geometry.carried.store(false, Ordering::Release);
-        }
-        if pinned {
-            if advancing {
-                if !carrying {
-                    // 【为什么这里可能要清零】从"静止"转入"流动"时，之前累积的帧数是
-                    // 停播期间**重复投递**的块，不是时间推进。判据是"本块之前已经连续
-                    // 不变"（`was_stationary`）。
-                    //
-                    // 【为什么窗口内不清】窗口表示"宿主刚刚开始播放"；即使前段是静音或
-                    // 持续音，那段时间也是真实播放时间，不能从位置里扣掉。
-                    //
-                    // 【为什么钉住时间不超过一个起播窗口时也不清】VEGAS 在没有
-                    // `kPlaying` 上升沿时，前 0.4 s 静音 + 0.26 s 内容看起来和
-                    // "停播后内容变化"一模一样。把这段静音扣掉会把内容提前 0.4 s，
-                    // 随后宿主位置恢复时再补一次 Gap。钉住时间超过 `PINNED_PLAYBACK_SEC`
-                    // 才按停播处理 —— FL 的停播回归仍然成立，且误差被钉在上限内。
-                    //
-                    // 【为什么因 `repeated_nonzero` 收口的窗口不在这里塌回】窗口已经
-                    // 把"逐块完全相同的非零内容"判成停播重复；但位置是在这段时间里
-                    // 真实推进过的（宿主按块长送来了音频）。塌回起点会让内容与
-                    // `expected_next` 重叠。保留 `pinned_before`，让 T2 的
-                    // `pinned_recent` 把跳过的帧当记账纠正桥接掉。
-                    let collapse_after_stall = !window_open
-                        && geometry.pinned_window_closed_by.load(Ordering::Acquire)
-                            != PINNED_WINDOW_REPEATED_CONTENT;
-                    if collapse_after_stall
-                        && geometry.was_stationary.load(Ordering::Acquire)
-                        && pinned_before > max_pre_roll
-                    {
-                        pinned_before = 0;
-                    }
-                    carrying = true;
-                    geometry.carried.store(true, Ordering::Release);
-                }
-            } else if !window_open
-                && geometry.unchanged_run.load(Ordering::Acquire) >= CARRIED_STALL_BLOCKS
-            {
-                carrying = false;
-                geometry.carried.store(false, Ordering::Release);
-            }
-        } else {
-            carrying = false;
-            geometry.carried.store(false, Ordering::Release);
-            // 位置重新前进：窗口与钉住计数都归零，下一段钉住重新开始。
-            geometry.pinned_advance_frames.store(0, Ordering::Release);
-            geometry.pinned_window_open.store(false, Ordering::Release);
-            geometry
-                .pinned_window_closed_by
-                .store(PINNED_WINDOW_HOST_MOVED, Ordering::Release);
-            // 【T3：把"读游标跳了多少帧"变成可读的数】上一块还在合成域（我们按块长
-            // 推进），这一块回到宿主域。两侧的差就是用户在起播 0.4~0.7 s 听到的那次
-            // 阶跃的幅度：回退=重播已听内容，前进=跳过内容。
-            let previous = self.last_synthetic_position[stream.index()]
-                .swap(-1, Ordering::AcqRel);
-            if previous >= 0 {
-                let jump = raw_start.saturating_sub(previous).unsigned_abs();
-                self.position_corrections.fetch_add(1, Ordering::Relaxed);
-                self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
-            }
-        }
-        // 【T-A2：`pinned` 也必须叠加锁存偏移】
-        //
-        // `pinned` 的语义是"宿主的读数没动"，**不是**"时间没动"。偏移锁存生效时，
-        // 宿主读数与真实播放位置相差 `host_clock_offset`；只加 `pinned_before` 会把
-        // 位置打回宿主读数那一侧 —— 一块的回退（写入端覆盖上一块的内容、读出端倒着读，
-        // 两处各是一次阶跃）。这正是"播放途中随机咔"里最常出现的一种形状：宿主
-        // 中途卡一块（VEGAS 的位置字段本来就会间歇性停一格），下一块就倒退一整块。
-        //
-        // 【为什么条件里要有 `Carried`】上一块可能已经因为"宿主恢复前进 + 偏移锁存"
-        // 被标成 `Carried`；那时 `source` 不是 `Project`，而这个分支仍然必须执行 ——
-        // 否则位置会退回 `raw_start`（不带偏移的那一侧）。
-        if pinned && matches!(source, PositionSource::Project | PositionSource::Carried) && carrying {
-            let latched = geometry.offset_valid.load(Ordering::Acquire);
-            let offset = if latched {
-                geometry.host_clock_offset.load(Ordering::Acquire)
-            } else {
-                0
-            };
-            // 【两条重建路径，按"有没有锁存偏移"分叉】
-            //
-            // * **没有**锁存偏移（起播窗口的第一次钉住）：位置 = 宿主读数 + 已钉住帧数。
-            //   这是唯一可用的换算，也是 `pinned_before` 的塌回逻辑（停播后重新起播要
-            //   扣掉停播时长）得以生效的路径。
-            // * **有**锁存偏移：`raw_start + offset` 恰好是**本块开始处**的累积时钟，
-            //   而累积时钟的下一步永远是"上一块位置 + 上一块帧数"。用后者而不是再
-            //   重建一次，是因为 `pinned_before` 在宿主移动时会被清零 —— 拿它重建
-            //   会让位置**退回上一块**（写入端覆盖、读出端倒退，两处各一次阶跃）。
-            //   偏移已经与宿主对齐到块级，累积时钟因此是权威。
-            position = if latched {
-                last_position.saturating_add(frames as i64)
-            } else {
-                raw_start
-                    .saturating_add(offset)
-                    .saturating_add(pinned_before as i64)
-            };
-            source = PositionSource::Carried;
-            self.carried_blocks.fetch_add(1, Ordering::Relaxed);
-            geometry.carried_blocks.fetch_add(1, Ordering::Relaxed);
-            self.last_synthetic_position[stream.index()]
-                .store(position.saturating_add(frames as i64), Ordering::Release);
-        }
-        // 【B3：窗口收口后保持**累积时钟**，不让位置跳回去】
-        //
-        // 窗口内位置由「已送来的帧数」累积（pinned_before 与它是同一个量）；窗口一
-        // 收口，旧实现把位置换回宿主的 raw_start —— 而那个读数比我们已经送出的帧数
-        // **落后**一个钉住窗口。于是相邻两块之间读写位置相差 Δ 帧：记录时在 take 里
-        // 留下 Δ 帧的空洞或重叠，回放时同一处再跳一次 ⇒ 用户听到的
-        // 「起播 0.4~0.7 s 必有一次咔」。
-        //
-        // 现在：只要宿主位置与累积时钟的差落在 POSITION_DRIFT_TOLERANCE_SEC 之内，
-        // 就判成**宿主读数滞后**（VEGAS 的形状），继续用累积时钟。记录与回放共用这
-        // 一个位置，所以两者天然一致 —— 这一条把「两个域」从定义上消灭掉，而不是在
-        // 输出侧再补一次淡化。
-        //
-        // 【什么时候仍然听宿主的】起播/录音上升沿、循环回卷、门控静音（上一块停在
-        // Resting）以及 |drift| 超出容差（真实 seek）。它们都会让 last_source 不再是
-        // Synthesized，于是这条判据自然退出。
-        if !pinned && had && last_source == PositionSource::Carried {
-            let previous_frames = i64::from(geometry.last_frames.load(Ordering::Acquire));
-            let expected = last_position.saturating_add(previous_frames);
-            let drift = raw_start.saturating_sub(expected);
-            let tolerance = (rate * POSITION_DRIFT_TOLERANCE_SEC).round().max(1.0) as i64;
-            if drift.unsigned_abs() <= tolerance as u64 {
-                position = expected;
-                source = PositionSource::Carried;
-                // 【T-A1-2】把这个差值锁存下来：下一块起 `position = raw_start + offset`，
-                // 于是收口之后的每一块都严格续接，不再"纠正一块、再跳一块"。
-                geometry
-                    .host_clock_offset
-                    .store(expected.saturating_sub(raw_start), Ordering::Release);
-                geometry.offset_valid.store(true, Ordering::Release);
-                geometry.offset_used.fetch_add(1, Ordering::Relaxed);
-                self.drift_ignored.fetch_add(1, Ordering::Relaxed);
-                self.max_drift_frames
-                    .fetch_max(drift.unsigned_abs(), Ordering::Relaxed);
-            }
-        }
-        // 窗口收口：帧窗口耗尽、或宿主明确不再播放。两者都让"内容证据"重新说话 ——
-        // 于是 FL 停播（`kPlaying` 仍为 1、内容逐块相同）最多在起播后
-        // `PINNED_PLAYBACK_SEC` 耗尽，不会在停播后继续推进。
-        if latch {
-            let remaining = latch_frames.saturating_sub(frames as u64);
-            geometry
-                .pinned_advance_frames
-                .store(remaining, Ordering::Release);
-            geometry
-                .pinned_advance_frames_used
-                .fetch_add(frames as u64, Ordering::Relaxed);
-            geometry
-                .pinned_advance_blocks
-                .fetch_add(1, Ordering::Relaxed);
-            if remaining == 0 {
-                geometry.pinned_window_open.store(false, Ordering::Release);
-                geometry
-                    .pinned_window_closed_by
-                    .store(PINNED_WINDOW_EXHAUSTED, Ordering::Release);
-            }
-        }
-        // 宿主把 `playing` 撤了：窗口立刻收口，不等帧窗口耗尽。
-        if window_open && !playing && !recording {
-            geometry.pinned_window_open.store(false, Ordering::Release);
-            geometry.pinned_advance_frames.store(0, Ordering::Release);
-            geometry
-                .pinned_window_closed_by
-                .store(PINNED_WINDOW_PLAYING_FELL, Ordering::Release);
-        }
-        if pinned {
-            geometry.pinned_frames.store(
-                pinned_before.saturating_add(frames as u64),
-                Ordering::Release,
-            );
-        } else {
-            geometry.pinned_frames.store(0, Ordering::Release);
-        }
 
-        // 工程位置重新前进：以它为准，并记录一次 resync（说明回退曾被使用过）。
-        if had && raw_start != last_raw {
-            if matches!(
-                last_source,
-                PositionSource::Continuous | PositionSource::Music | PositionSource::Carried
-            ) {
-                self.position_resyncs.fetch_add(1, Ordering::Relaxed);
-                geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
-            }
-            // 【为什么不是无条件改回 `Project`】偏移锁存生效时，位置来自**累积时钟**
-            // （`raw_start + offset`），而 `offset != 0` 正说明宿主读数与真实播放位置
-            // 不是同一个坐标。把标签写成 `Project` 会让下一块走进 `pinned` 分支时
-            // 看起来"没在用偏移"—— 而那个分支一旦按 `raw_start` 算，位置就回退一块。
-            // 标签必须与"位置实际来自哪里"一致，否则判据与事实脱节。
-            source = if time.cycle_active {
-                PositionSource::Cycle
-            } else if geometry.offset_valid.load(Ordering::Acquire) {
-                PositionSource::Carried
-            } else {
-                PositionSource::Project
-            };
-        }
-
+        // ── 相位 ──────────────────────────────────────────────────────
+        let activity_moving = geometry.activity_moving();
         let phase = if !had {
             geometry.same_start.store(0, Ordering::Release);
             geometry.extension_used.store(false, Ordering::Release);
             TransportPhase::Start
         } else if cycle_wrap || position != last_position || activity_moving {
             // 【为什么音频在流动也算 Rolling】起播窗口里宿主可以把位置钉住，而音频
-            // 已经在按块长流动。此时"位置没变"不成立 —— 我们刚刚按块长推进了它，
-            // 或者（循环播放里）位置由宿主回卷而内容仍在变化。两条都是"时间在走"。
+            // 已经在按块长流动。此时"位置没变"不成立 —— 我们刚刚按块长推进了它。
             geometry.same_start.store(0, Ordering::Release);
             geometry.extension_used.store(false, Ordering::Release);
             TransportPhase::Rolling
@@ -4972,25 +4815,30 @@ impl ExtensionOwner {
             geometry.cycle_wraps.fetch_add(1, Ordering::Relaxed);
         } else if time.cycle_active && had && raw_start == last_raw && !playing_rising {
             // 同一块首、cycle 有效但没有可用的回卷证据：可能是短循环，也可能是停播。
-            // 不能据此写入；只记一个读数，交给 T2.5 的判据解释。
+            // 不能据此写入；只记一个读数，交给捕获侧的判据解释。
             geometry.cycle_wrap_unknown.fetch_add(1, Ordering::Relaxed);
         }
 
-        // 【I-3 的读数：本块位置是否按"上一块位置 + 上一块帧数"续接】
+        // ── I-3 的读数：位置是否逐块续接 ─────────────────────────────
         //
-        // 稳态下 `position - (last_position + last_frames)` 恒为 0。它不为 0 只有三种
-        // 解释：① 宿主真的 seek（用户动作，可接受）；② 起播/回绕（`had == false` 或
-        // `cycle_wrap`，可接受）；③ **我们的记账漏了一项**（不可接受，且它就是咔）。
-        // 这个计数把第 ③ 类从"听起来像咔"变成"这一块回退了 N 帧"。
-        if had && !cycle_wrap {
-            let expected = last_position.saturating_add(i64::from(frames32));
-            let delta = position.saturating_sub(expected);
-            if delta < 0 {
+        // 稳态下 `position - last_position` 恒等于块长。它不等于块长只有三种解释：
+        // ① 宿主真的 seek（用户动作，可接受）；② pass 边界（可接受）；
+        // ③ **我们的记账漏了一项**（不可接受，且它就是咔）。
+        if had && !new_pass && !cycle_wrap {
+            let step = position.saturating_sub(last_position);
+            if step < 0 {
                 geometry.clock_rewinds.fetch_add(1, Ordering::Relaxed);
             }
-            geometry.clock_delta_min.fetch_min(delta, Ordering::Relaxed);
-            geometry.clock_delta_max.fetch_max(delta, Ordering::Relaxed);
+            let magnitude = step.unsigned_abs();
+            if geometry.clock_deltas.load(Ordering::Acquire) == 0 {
+                geometry.clock_delta_min.store(magnitude, Ordering::Release);
+            } else {
+                geometry.clock_delta_min.fetch_min(magnitude, Ordering::Relaxed);
+            }
+            geometry.clock_delta_max.fetch_max(magnitude, Ordering::Relaxed);
+            geometry.clock_deltas.fetch_add(1, Ordering::Relaxed);
         }
+
         geometry.seen.store(true, Ordering::Release);
         geometry.last_start.store(position, Ordering::Release);
         geometry.last_frames.store(frames32, Ordering::Release);
@@ -5007,38 +4855,38 @@ impl ExtensionOwner {
             time.music.unwrap_or(last_music).to_bits(),
             Ordering::Release,
         );
-        geometry.virtual_position.store(position, Ordering::Release);
-        geometry.anchor_valid.store(true, Ordering::Release);
         geometry.last_source.store(source.code(), Ordering::Release);
         if stream == ProcessStream::Realtime {
             self.realtime_flow
                 .store(phase != TransportPhase::Resting, Ordering::Release);
         }
 
-        // 【resync 候选】上一块用的是位置回退（我们自己在记账），这一块宿主位置
-        // 重新前进 —— 这不是 seek，是宿主在纠正我们的记账。真正的差值判定在
-        // 捕获侧（它才持有 `expected_next`），这里只给上限。
+        // 【resync：宿主纠正了我们数出来的位置】这不是 seek，是记账纠正 —— 真正的
+        // 差值判定在捕获侧（它才持有 `expected_next`），这里只给上限与意图。
         let resync = had
-            && raw_start != last_raw
             && !time.cycle_active
-            && matches!(
-                last_source,
-                PositionSource::Continuous | PositionSource::Music | PositionSource::Carried
-            );
+            && !new_pass
+            && host_moved
+            && (counted_before > 0
+                || matches!(
+                    last_source,
+                    PositionSource::Continuous | PositionSource::Music
+                ));
         StreamBlock {
             position,
             raw_start,
             phase,
             had_previous: had,
             cycle_wrap,
-            new_pass: had && (cycle_wrap || position < last_position),
+            new_pass,
             activity_moving,
             resync,
-            resync_limit_frames: prior_pinned_frames.saturating_add(frames as u64),
+            resync_limit_frames: counted_before,
             preceding_silent_frames,
-            pinned_recent,
+            counted,
             discard_pre_roll,
-            start_window: geometry.pinned_window_open.load(Ordering::Acquire),
+            start_window: advance
+                < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
             repeated_nonzero,
             silent,
             position_source: source,
@@ -5275,7 +5123,7 @@ impl ExtensionOwner {
                     } else {
                         0
                     },
-                    pinned_recent: index == 0 && stream_block.pinned_recent,
+                    counted: index == 0 && stream_block.counted,
                     position_source: stream_block.position_source,
                     discard_pre_roll: index == 0 && stream_block.discard_pre_roll,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
@@ -5475,6 +5323,12 @@ impl ExtensionOwner {
             u32::try_from(evidence.frames).unwrap_or(u32::MAX),
             Ordering::Release,
         );
+        self.rt_last_read_pass.store(
+            self.streams[ProcessStream::Realtime.index()]
+                .pass
+                .load(Ordering::Acquire),
+            Ordering::Release,
+        );
         self.rt_last_emitted_start
             .store(evidence.position, Ordering::Release);
         self.rt_last_emitted_frames.store(
@@ -5484,17 +5338,6 @@ impl ExtensionOwner {
         self.rt_last_emitted_valid.store(true, Ordering::Release);
     }
 
-    /// 【T3】本块是否要**整块**回退宿主原声（读游标跳过了超过一个淡化带）。
-    ///
-    /// 【为什么由音频线程问、而不是让快照路径自己判】跳变判据依赖"上一块读到哪"，
-    /// 那在 `transfer_stage` 里才知道；而真正读快照的在 `vst3.rs` 的分支里。一个
-    /// 取走即清（swap）的访问器把两者接起来，不新增状态。
-    pub(crate) fn take_skip_snapshot_read(
-        &self,
-        stream: crate::transfer::capture::ProcessStream,
-    ) -> bool {
-        self.skip_snapshot_read[stream.index()].swap(false, Ordering::AcqRel)
-    }
     /// 测试专用：直接写"上一块读到哪个位置"（T3 判据的唯一输入）。
     #[cfg(test)]
     pub(crate) fn note_read_position_for_test(&self, position: i64) {
@@ -5513,17 +5356,27 @@ impl ExtensionOwner {
     }
     /// 【T3】这一块的读位置与上一块差了多少帧（`None` = 不存在跳变）。
     ///
-    /// 三条纪律（都是纯函数，可单测）：
+    /// 四条纪律（都是纯函数，可单测）：
     /// 1. **没有上一块就不存在跳变**：`rt_last_read_position <= 0` 或上一块没写出过
     ///    内容 ⇒ `None`。否则会话刚开始的两次不同位置会被当成跳变。
-    /// 2. **位置相同不是跳变**。
-    /// 3. **小于一个淡化带的差被淡化吸收**：那种场合读快照的那一小段与上一块只差几帧，
+    /// 2. **跨 pass 不是跳变**：那是"重新开始"，由起播接缝处理。
+    /// 3. **位置相同不是跳变**。
+    /// 4. **小于一个淡化带的差被淡化吸收**：那种场合读快照的那一小段与上一块只差几帧，
     ///    64 帧的交叉淡化足够；再淡一次反而多一次能量塌陷。
     fn read_position_jump(&self, evidence: Option<BlockEvidence>) -> Option<u64> {
         let evidence = evidence?;
         let previous = self.rt_last_read_position.load(Ordering::Acquire);
         let previous_frames = i64::from(self.rt_last_read_frames.load(Ordering::Acquire));
         if previous <= 0 || !self.rt_last_emitted_valid.load(Ordering::Acquire) {
+            return None;
+        }
+        // 【跨 pass 不是跳变】pass 边界是"重新开始"，不是"读游标跳了"。上一块输出的
+        // 尾巴属于另一个位置的内容，拿它做交叉淡化只会叠出两段不相干信号。
+        // 起播的接缝由 `Seam::FirstBlock` / `Seam::FadeIn` 在种类变化时处理。
+        let pass = self.streams[ProcessStream::Realtime.index()]
+            .pass
+            .load(Ordering::Acquire);
+        if pass != self.rt_last_read_pass.load(Ordering::Acquire) {
             return None;
         }
         // 【核心判据：预期续接，而不是"上一块起点"】上一块读了 `previous_frames` 帧，
@@ -5564,21 +5417,19 @@ impl ExtensionOwner {
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
         let output = self.transfer_output_with(evidence);
-        // 【T3：读游标跳变 ⇒ 这一块不读快照】种类与代次都没变，但这一块读的位置与
-        // 上一块不同（起播窗口收口、循环回卷、流交接）。那时读快照等于把**另一段**
+        // 【T3：读游标跳变 ⇒ 这一块做一次去咔】种类与代次都没变，但这一块读的位置与
+        // 上一块不同（pass 边界、宿主纠正记账、流交接）。那时读快照等于把**另一段**
         // 内容写进总线 —— 一次单样本阶跃。判据在 `read_position_jump`，纯函数、可单测。
+        //
+        // 【为什么不再"整块直通"】直通本身就是**换了一个信号源**：一个块最长可达 6 s，
+        // 把它整块换成宿主原声，前后各是一次硬切换 —— 用户听到的那一下"咔"其实是这个
+        // 保护动作自己（代码自己的注释早就这么写过）。现在位置只有一个权威
+        // （`note_stream_geometry` 的 R1–R4），跳变只可能发生在 pass 边界，而 pass
+        // 边界本来就要重新开始，一次交叉淡化就够。
         if let Some(jump) = self.read_position_jump(evidence) {
             self.position_corrections.fetch_add(1, Ordering::Relaxed);
             self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
-            if jump > POSITION_RESYNC_PASS_THROUGH_FRAMES {
-                // 超过 50 ms：已经读到另一段内容了，整块回退宿主当前真实播放的东西。
-                self.skip_snapshot_read[stream.index()].store(true, Ordering::Release);
-            } else {
-                // 1.3 ms ~ 50 ms：还是同一段素材，读新位置并由接缝去咔做一次交叉淡化。
-                // 以前这里也走"整块直通"，而直通本身就是**换了一个信号源** —— 用户听到的
-                // 那一下"咔"其实是这个保护动作自己。淡化让它变成一次听不见的过渡。
-                self.force_declick[stream.index()].store(true, Ordering::Release);
-            }
+            self.force_declick[stream.index()].store(true, Ordering::Release);
         }
         self.output_token[stream.index()]
             .store(self.output_token_for(output), Ordering::Release);
@@ -8316,45 +8167,33 @@ impl ExtensionOwner {
                 "gate_cleared": self.stream_gate_cleared[index].load(Ordering::Acquire),
                 "resting": self.stream_resting_blocks[index].load(Ordering::Acquire),
                 "rolling": self.stream_rolling_blocks[index].load(Ordering::Acquire),
-                "carried": self.streams[index]
-                    .carried_blocks
+                // 【位置记账的四个数】`counted` = 位置由计数器推进的块数；
+                // `jumps` = 宿主报的位置与计数器不同的次数；`rewinds` = 位置倒退的
+                // 块数（稳态恒为 0）；`passes` = 这一流经历过几次"新一次播放"。
+                "counted": self.streams[index]
+                    .counted_blocks
                     .load(Ordering::Acquire),
-                "pinned_advance": self.streams[index]
-                    .pinned_advance_blocks
+                "counted_frames": self.streams[index]
+                    .counted_frames
                     .load(Ordering::Acquire),
-                // 起播窗口：开过几次、窗口内推进了多少帧、最近一次为什么收口。
-                // 1 = 宿主位置前进、2 = 帧窗口耗尽、3 = 宿主撤掉 playing/recording。
-                "pinned_window_open": self.streams[index]
-                    .pinned_window_open_count
-                    .load(Ordering::Acquire),
-                "pinned_window_frames_used": self.streams[index]
-                    .pinned_advance_frames_used
-                    .load(Ordering::Acquire),
-                "pinned_window_closed_by": self.streams[index]
-                    .pinned_window_closed_by
-                    .load(Ordering::Acquire),
+                "jumps": self.streams[index].jumps.load(Ordering::Acquire),
+                "last_jump": self.streams[index].last_jump.load(Ordering::Acquire),
+                "rewinds": self.streams[index].clock_rewinds.load(Ordering::Acquire),
+                "passes": self.streams[index].pass.load(Ordering::Acquire),
             })
         };
-        // 起播窗口读数：开过几次、窗口内推进了多少帧、最近一次为什么收口。
-        // `serde_json::json!` 不接受语句块作为值，所以先算好。
-        let (pinned_window_opens, pinned_window_frames, pinned_window_closed_by) = self
-            .streams
-            .iter()
-            .fold((0u64, 0u64, 0u32), |(opens, frames, _), geometry| {
+        // 【位置记账的汇总读数】三条流加起来：位置由计数器推进的块数、宿主纠正的次数、
+        // 以及"这一流经历过几次新一次播放"。
+        let (counted_blocks, jumps, passes) = self.streams.iter().fold(
+            (0u64, 0u64, 0u64),
+            |(counted, jumps, passes), geometry| {
                 (
-                    opens.saturating_add(geometry.pinned_window_open_count.load(Ordering::Acquire)),
-                    frames.saturating_add(
-                        geometry.pinned_advance_frames_used.load(Ordering::Acquire),
-                    ),
-                    geometry.pinned_window_closed_by.load(Ordering::Acquire),
+                    counted.saturating_add(geometry.counted_blocks.load(Ordering::Acquire)),
+                    jumps.saturating_add(geometry.jumps.load(Ordering::Acquire)),
+                    passes.saturating_add(geometry.pass.load(Ordering::Acquire)),
                 )
-            });
-        // 从未开过窗口：归零读数，避免把"未初始化"显示成"因 0 号原因收口"。
-        let pinned_window_closed_by = if pinned_window_opens == 0 && pinned_window_frames == 0 {
-            0
-        } else {
-            pinned_window_closed_by
-        };
+            },
+        );
         serde_json::json!({
             "blocks_seen": self.blocks_seen.load(Ordering::Acquire),
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
@@ -8363,7 +8202,9 @@ impl ExtensionOwner {
             "bound_snapshot_fallback": self.bound_snapshot_fallback.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),
-            "carried_blocks": self.carried_blocks.load(Ordering::Acquire),
+            "counted_blocks": counted_blocks,
+            "jumps": jumps,
+            "passes": passes,
             "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
             "bound_fallback": {
                 "snapshot_missing_blocks": self.bound_snapshot_fallback.load(Ordering::Acquire),
@@ -8385,10 +8226,10 @@ impl ExtensionOwner {
                     .restore_applied_generation
                     .load(Ordering::Relaxed),
             },
-            "pinned_window": {
-                "opens": pinned_window_opens,
-                "frames_used": pinned_window_frames,
-                "last_closed_by": pinned_window_closed_by,
+            "clock": {
+                "counted_blocks": counted_blocks,
+                "jumps": jumps,
+                "passes": passes,
             },
             "cycle_wraps": self.cycle_wraps.load(Ordering::Acquire),
             "cycle_wrap_unknown": self.cycle_wrap_unknown.load(Ordering::Acquire),

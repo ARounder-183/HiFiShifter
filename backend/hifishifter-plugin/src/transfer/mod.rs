@@ -1483,8 +1483,8 @@ impl TransferStore {
         log::warn!(
             "[transfer] take {id}: frames={} ({:.3}s) rate={} coverage={} gaps={} \
              lead_in={} ({:.3}s) first_signal_at={} pre_roll_frames={} pending_stashed={} \
-             bridged_window_blocks={} resync_bridged_frames={} carried_blocks={} \
-             carried_frames={} migrated_from_v4={}",
+             bridged_window_blocks={} resync_bridged_frames={} counted_blocks={} \
+             counted_frames={} migrated_from_v4={}",
             all.iter().map(|segment| segment.filled as u64).sum::<u64>(),
             all.iter().map(|segment| segment.filled as u64).sum::<u64>() as f64 / rate,
             sample_rate,
@@ -1500,8 +1500,8 @@ impl TransferStore {
             diagnostics.pending_stashed,
             diagnostics.bridged_window_blocks,
             diagnostics.resync_bridged_frames,
-            diagnostics.carried_blocks,
-            diagnostics.carried_frames,
+            diagnostics.counted_blocks,
+            diagnostics.counted_frames,
             u8::from(all.iter().any(|segment| segment.migrated_from_v4)),
         );
         if diagnostics.pre_roll_frames == 0

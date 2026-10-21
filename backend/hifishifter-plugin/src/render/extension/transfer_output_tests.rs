@@ -1055,22 +1055,21 @@ fn a_pinned_project_position_follows_continuous_time() {
     assert_eq!(third.phase, TransportPhase::Rolling);
 }
 
-/// **偏移锁存生效后，"宿主位置钉住"的块必须按累积时钟前进，而不是退回宿主读数。**
+/// **宿主报出新位置时，计数器立刻让位（R3）。**
 ///
-/// 【为什么这条是"播放途中随机咔"的回归测试】`pinned` 的语义是"宿主的读数没动"，
-/// **不是**"时间没动"。偏移锁存生效时，宿主读数与真实播放位置相差一个窗口（实测
-/// VEGAS 是 0.658 s）。若这个分支按 `raw_start` 重建位置，它就退回宿主读数那一侧 ——
-/// 一块的回退：写入端覆盖上一块的内容、读出端倒着读，两处各是一次阶跃。
+/// 【为什么这条取代了"偏移锁存"那条】旧实现把"宿主报的位置比累积时钟落后"锁存成一个
+/// 偏移，之后每一块都用它重建位置。锁存一生效就再也不清，于是**整场会话**都走"我们
+/// 自己的位置"；而用户回到起点再播 0.7 s 时，那个差恰好落在 1.5 s 容差之内 ⇒ 位置被
+/// 强制成"上一遍末尾 + 块长"，整遍内容偏移一个循环长度。
 ///
-/// 【为什么用累积时钟而不是"宿主读数 + 已钉住帧数"】后者依赖 `pinned_before`，而它
-/// 在宿主移动时会被清零 —— 于是"前进、卡一格、前进"这种真实形状里，每一次"卡一格"
-/// 之后都会回退一整块。偏移已经与宿主对齐到块级，累积时钟因此才是权威（I-3）。
+/// 现在没有偏移：宿主每报一次位置，锚点就搬到那里（R3），计数器归零。差值只记进
+/// `jumps`，交给捕获侧做记账纠正。
 #[test]
-fn a_pinned_block_after_an_offset_lock_still_advances_by_one_block() {
+fn a_host_position_report_re_anchors_the_counter() {
     use crate::audio_abi::ProcessContext;
     let owner = insert_owner();
     let geometry = &owner.streams[ProcessStream::Realtime.index()];
-    let context = ProcessContext {
+    let mut context = ProcessContext {
         state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
         sample_rate: 48_000.0,
         project_time_samples: 0,
@@ -1081,26 +1080,85 @@ fn a_pinned_block_after_an_offset_lock_still_advances_by_one_block() {
     assert_eq!(first.position, 0);
     let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(second.position, 512, "钉住期间按块长前进");
-    // 宿主读数与真实播放位置相差一个窗口 ⇒ 偏移被锁存（`offset = expected - raw`）。
-    // 此时 `raw_start + offset` 等于**本块开始处**的累积时钟，而它远落后于续接点。
-    geometry.host_clock_offset.store(256, Ordering::Release);
-    geometry.offset_valid.store(true, Ordering::Release);
     let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
-    assert_eq!(
-        third.position, 1_024,
-        "偏移锁存后必须按累积时钟前进，而不是按宿主读数重建"
-    );
+    assert_eq!(third.position, 1_024);
+    // 宿主恢复报告：它说真实位置是 1 500，而我们数到了 1 024。
+    context.project_time_samples = 1_500;
     let fourth = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(
-        fourth.position, 1_536,
-        "钉住 + 偏移锁存 ⇒ 位置仍按块长前进（回退一整块就是那一下咔）"
+        fourth.position, 1_500,
+        "宿主报的位置永远赢 —— 不做任何'纠正'"
     );
+    assert_eq!(
+        geometry.jumps.load(Ordering::Acquire),
+        1,
+        "差值必须被记成一次 jump（交给捕获侧纠正）"
+    );
+    assert_eq!(
+        geometry.last_jump.load(Ordering::Acquire),
+        1_500 - 1_536,
+        "jump 是带符号的：正 = 计数器落后于宿主（计数器已经数到 1 536）"
+    );
+    assert!(fourth.resync, "宿主纠正了我们数出来的位置 ⇒ 交给捕获侧桥接/裁剪");
+    // 之后继续按块长前进：锚点已经是宿主的读数，计数器从它起算。
+    // 内容在变化 ⇒ 计数器有权推进（第一块的指纹只建立基线，第二次才有"变化"）。
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xB001);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xB002);
+    let fifth = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(fifth.position, 2_012, "新锚点 + 一块长");
+}
+
+/// **用户回到起点再播（0.7 s 循环）必须是新 pass，不是"读数滞后"。**
+///
+/// 【为什么这是本轮最重要的一条回归】这是用户报障的原话：「反复播放 0.7 s 左右的长度，
+/// 播放的内容完全与它应该输出的内容对不上」。0.7 s 小于旧实现的 1.5 s 容差，于是回退
+/// 被当成"宿主读数滞后"吞掉，位置被强制成"上一遍末尾 + 块长" —— 整遍偏移一个循环长度。
+#[test]
+fn a_short_rewind_is_a_new_pass_not_a_drift() {
+    use crate::audio_abi::ProcessContext;
+    let owner = insert_owner();
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    let context = |position: i64| ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+        sample_rate: 48_000.0,
+        project_time_samples: position,
+        ..Default::default()
+    };
+    // 第一遍：从 10 000 起播，播 0.7 s（33 块 @ 1024），宿主**每块都报位置**。
+    let mut last = 0;
+    for index in 0..33_i64 {
+        let block = owner.note_stream_block(
+            ProcessStream::Realtime,
+            &context(10_000 + index * 1_024),
+            1_024,
+            index == 0,
+            false,
+        );
+        last = block.position;
+    }
+    assert_eq!(last, 10_000 + 32 * 1_024);
     assert_eq!(
         geometry.clock_rewinds.load(Ordering::Acquire),
         0,
-        "I-3：位置不得倒退"
+        "第一遍全程前进：不得有任何回退"
     );
+    // 用户回到起点，再播一遍：宿主报的位置**退回** 10 000。
+    let replay = owner.note_stream_block(ProcessStream::Realtime, &context(10_000), 1_024, false, false);
+    assert_eq!(
+        replay.position, 10_000,
+        "回退必须从宿主报的位置重新开始，不能被当成'宿主读数滞后'而接着上一遍的末尾"
+    );
+    assert!(replay.new_pass, "回退 = 新 pass");
+    assert_eq!(
+        geometry.jumps.load(Ordering::Acquire),
+        0,
+        "pass 边界不是 jump：它是用户动作，不需要记账纠正"
+    );
+    // 第三遍：再播一次，位置仍从 10 000 起算（不是从上一遍末尾）。
+    let third = owner.note_stream_block(ProcessStream::Realtime, &context(10_000), 1_024, false, false);
+    assert_eq!(third.position, 10_000, "同一位置重复起播仍然落在同一处");
 }
+
 /// **短循环：块首相同但 continuous 前进 ⇒ cycle_wrap，强制 Rolling。**
 #[test]
 fn a_short_cycle_wrap_is_not_resting() {
@@ -1298,7 +1356,8 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
                 .last_source
                 .load(Ordering::Acquire)
         ),
-        Some(PositionSource::Carried)
+        Some(PositionSource::Project),
+        "计数器推进时标签仍是 Project：宿主给的那个起点确实是 Project"
     );
     for (position, phase) in &seen[1..] {
         assert_eq!(
@@ -1308,9 +1367,11 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
         );
     }
     assert_eq!(
-        owner.carried_blocks.load(Ordering::Acquire),
-        5,
-        "起播窗口是**区间**：上升沿之后的 5 块都按块长推进，包括首块"
+        owner.streams[stream.index()]
+            .counted_blocks
+            .load(Ordering::Acquire),
+        4,
+        "起播那一块的位置来自宿主（R1），之后 4 块由计数器推进"
     );
 }
 
@@ -1337,7 +1398,13 @@ fn a_pinned_silent_repeat_stays_resting() {
             assert_eq!(block.position, 1_000, "位置必须保持钉住");
         }
     }
-    assert_eq!(owner.carried_blocks.load(Ordering::Acquire), 0);
+    assert_eq!(
+        owner.streams[stream.index()]
+            .counted_blocks
+            .load(Ordering::Acquire),
+        0,
+        "停播重复投递一块都不许推进"
+    );
 }
 
 /// **起播窗口里的静音/持续音也必须按块长推进。**
@@ -1366,10 +1433,10 @@ fn a_pinned_silent_start_advances_the_position() {
     );
     assert!(
         owner.streams[stream.index()]
-            .pinned_advance_blocks
+            .counted_blocks
             .load(Ordering::Acquire)
             > 0,
-        "必须记录锁存推进的块数"
+        "必须记录计数器推进的块数"
     );
     assert_eq!(
         PositionSource::from_code(
@@ -1377,7 +1444,8 @@ fn a_pinned_silent_start_advances_the_position() {
                 .last_source
                 .load(Ordering::Acquire)
         ),
-        Some(PositionSource::Carried)
+        Some(PositionSource::Project),
+        "计数器推进时标签仍是 Project（位置由谁给与来自哪条时钟是两件事）"
     );
 }
 
@@ -1417,28 +1485,24 @@ fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
     }
     let geometry = &owner.streams[stream.index()];
     assert_eq!(
-        geometry.pinned_window_open_count.load(Ordering::Acquire),
+        geometry.pass.load(Ordering::Acquire),
         1,
-        "一次起播只开一个窗口"
-    );
-    assert_eq!(
-        geometry.pinned_window_closed_by.load(Ordering::Acquire),
-        0,
-        "40 块还在 1 s 窗口内：窗口尚未收口，因此没有收口原因"
+        "一次起播只开一个 pass"
     );
     assert!(
-        geometry.pinned_window_open.load(Ordering::Acquire),
-        "窗口仍然开着"
+        geometry.frames_since_anchor.load(Ordering::Acquire)
+            < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
+        "40 块还在 1 s 窗口内：窗口仍然开着"
     );
     assert_eq!(
-        geometry.pinned_advance_frames_used.load(Ordering::Acquire),
-        40 * 256,
-        "窗口内推进的帧数必须覆盖整个窗口"
+        geometry.counted_frames.load(Ordering::Acquire),
+        39 * 256,
+        "窗口内由计数器推进的帧数必须覆盖整个窗口（首块由宿主给位置）"
     );
     assert_eq!(
-        owner.carried_blocks.load(Ordering::Acquire),
-        40,
-        "40 块全部按块长记账：静音段与内容段都不能被抹掉"
+        geometry.counted_blocks.load(Ordering::Acquire),
+        39,
+        "首块的位置来自宿主，其余 39 块按块长记账：静音段与内容段都不能被抹掉"
     );
 }
 
@@ -1520,14 +1584,14 @@ fn a_repeated_nonzero_block_closes_the_window_immediately() {
     }
     let geometry = &owner.streams[stream.index()];
     assert_eq!(
-        geometry.pinned_window_closed_by.load(Ordering::Acquire),
-        super::PINNED_WINDOW_REPEATED_CONTENT,
-        "窗口必须因重复内容而收口"
+        geometry.advance_limit.load(Ordering::Acquire),
+        0,
+        "窗口必须因重复内容而当场作废"
     );
     assert_eq!(
-        owner.carried_blocks.load(Ordering::Acquire),
-        1,
-        "只有起播那一块被记账，之后的重复内容不得继续推进"
+        geometry.counted_blocks.load(Ordering::Acquire),
+        0,
+        "起播那一块的位置来自宿主，重复内容一块都不许推进 —— 计数器一次都不该动"
     );
 }
 

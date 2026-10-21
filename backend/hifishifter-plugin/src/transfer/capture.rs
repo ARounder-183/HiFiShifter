@@ -410,20 +410,29 @@ impl TransportPhase {
     }
 }
 
-/// 本块有效工程位置的来源。
+/// 本块有效工程位置的**来源**。
 ///
-/// 【唯一的纪律：这些都是**合法记账**，没有一档是"不可信"】
+/// 【唯一的一档不是"宿主说的"】
 ///
-/// 宿主在起播窗口里可能把 `projectTimeSamples` 钉在起点不动，却已经按自己的块长
-/// 连续送时间上相邻的样本。此时"每块前进 frames"是唯一自洽的换算 —— 它同时也是
-/// **可核对**的：宿主位置一恢复前进，插件立刻用宿主读数校正自己的累积时钟，而校正量
-/// 必须落在 `POSITION_DRIFT_TOLERANCE_SEC` 之内才被接受。实测 VEGAS 的偏移是 0.658 s，
-/// 一直被接受 —— 那正是"我们接着数的位置与宿主一致到块级"的最强证据。
+/// `Project` / `Continuous` / `Music` / `Cycle` 都是宿主在 `ProcessContext` 里直接
+/// 给的坐标。宿主在起播窗口里可能把 `projectTimeSamples` 钉在起点不动，却已经按自己的
+/// 块长连续送时间上相邻的样本 —— 那时唯一自洽的换算就是"每块前进 frames"，而它由
+/// `StreamGeometry::note_stream_geometry` 的 R2 完成，**不经过这个枚举**。
 ///
-/// 【所以它不参与覆盖判定】覆盖只回答一件事："这一段样本，我们从宿主块里拷过吗"。
-/// round 23 曾把 `Carried` 判成"位置不可信"并排除出覆盖，结果是把一段真实录音声明成
-/// 洞：播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次源切换 ——
-/// 那一下就是用户听到的"咔"。
+/// 【为什么不再有 `Carried` 这一档】它曾经同时表示两件不同的事：
+///   * "宿主读数没动，位置由我们按块长数出来"（真·计数器）；
+///   * "宿主读数在动，但因为锁存了偏移，标签仍是我们"（宿主说的）。
+///
+/// 两者在读数上不可区分，于是 `[transfer] clock` 的 `carried=` 在任何会话里都接近
+/// 100% —— 它既不能证明宿主钉住过位置，也不能证明没有。标签粘住之后，下游每一条判据
+/// （1.5 s 容差、锁存偏移）都建立在一个"不知道这一块到底是宿主给的还是我们数的"
+/// 基础之上。现在：**位置由计数器给出时，`counted_blocks` 单独计数，而标签永远是
+/// `Project`** —— 两种事实分开记，谁也不冒充谁。
+///
+/// 【它不参与覆盖判定】覆盖只回答一件事："这一段样本，我们从宿主块里拷过吗"。
+/// round 23 曾把"位置由插件接着数"判成"位置不可信"并排除出覆盖，结果是把一段真实
+/// 录音声明成洞：播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次
+/// 源切换 —— 那一下就是用户听到的"咔"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PositionSource {
     /// `projectTimeSamples`（正常路径）。
@@ -435,12 +444,6 @@ pub(crate) enum PositionSource {
     Music,
     /// 循环播放：使用会回卷的工程位置（不是 continuous）。
     Cycle,
-    /// 工程位置钉住、但输入音频在流动：位置由本插件按块长**接着数**下去。
-    ///
-    /// 【名字为什么是 `Carried` 而不是 `Carried`】后者会被读成"我们编的"，而
-    /// 实际语义是"从宿主给的起点开始，按宿主自己的块长接着数"。名字决定读代码的人
-    /// 怎么想 —— round 23 的整条错判就建立在那个名字的暗示上。
-    Carried,
 }
 
 impl PositionSource {
@@ -450,7 +453,7 @@ impl PositionSource {
             Self::Continuous => 2,
             Self::Music => 3,
             Self::Cycle => 4,
-            Self::Carried => 5,
+            // 5 是已删除的 `Carried`；编码值只增不改，故留空。
         }
     }
 
@@ -460,7 +463,6 @@ impl PositionSource {
             2 => Some(Self::Continuous),
             3 => Some(Self::Music),
             4 => Some(Self::Cycle),
-            5 => Some(Self::Carried),
             _ => None,
         }
     }
@@ -537,8 +539,8 @@ pub(crate) struct BlockContext {
     /// 本块有效工程位置的来源（见 [`PositionSource`]）。
     ///
     /// 【为什么捕获需要它】它让诊断能区分"宿主给的坐标"与"我们按块长接着数的坐标"。
-    /// 两者**都是合法记账**（见 `PositionSource::Carried` 的说明），所以它**不**参与
-    /// 覆盖判定 —— 覆盖只回答一件事："这一段样本我们拷过吗"。
+    /// 两者**都是合法记账**，所以它**不**参与覆盖判定 —— 覆盖只回答一件事：
+    /// "这一段样本我们拷过吗"。
     pub position_source: PositionSource,
     /// 本块的 `kPlaying`（与样本一起使用的强证据）。
     pub playing: bool,
@@ -564,13 +566,17 @@ pub(crate) struct BlockContext {
     /// 循环回卷时块首也会回到同一位置，但内容仍在变化。只按几何无法区分两者 ——
     /// 前者必须丢弃，后者必须另起一段。
     pub advancing: bool,
-    /// 本块是**位置回退结束后的第一块**（`Carried`/`Continuous`/`Music` → `Project`）。
+    /// 本块**宿主报出了一个与计数器不同的位置**（`StreamGeometry` 的 R3）。
     ///
-    /// 【为什么捕获需要它】起播窗口里我们自己推进的位置与宿主恢复后的位置可能差
-    /// 一小段。那不是 seek，是我们记账的纠正：向前用静音桥接、向后裁掉多记的尾巴，
+    /// 【为什么捕获需要它】起播窗口里位置由计数器推进；宿主恢复报告后，那个读数才是
+    /// 权威。两者的差不是 seek，是记账纠正：向前用静音桥接、向后裁掉多记的尾巴，
     /// 两种都**继续同一段**，不能切 clip。
     pub resync: bool,
-    /// 允许当作"记账纠正"的最大帧差（本流钉住期间送来的帧数 + 本块）。
+    /// 允许当作"记账纠正"的最大帧差（本 pass 内计数器已推进的帧数 + 本块）。
+    ///
+    /// 【为什么它就是"计数器的权威范围"】`0` 表示本 pass 里计数器一个字节都没记过
+    /// （位置一直来自宿主），于是任何差值都只能是真 seek。非零则说明"这一段是我们
+    /// 数出来的，最多可能差这么多" —— 用事实当上限，而不是用常量。
     pub resync_limit_frames: u64,
     /// 本块之前连续静音的帧数（起播窗口的前导静音）。
     ///
@@ -578,8 +584,13 @@ pub(crate) struct BlockContext {
     /// 早退丢掉时，快照会从内容起点才开始覆盖，播放时就在 0.4 s 发生块内源切换。
     /// 捕获侧只需要帧数，就能在段首合成等长静音，把段起点前移到播放起点。
     pub preceding_silent_frames: u64,
-    /// 本块是钉住区间结束后的第一块：位置差值应视为记账纠正，不是 seek。
-    pub pinned_recent: bool,
+    /// 本块位置是否由**计数器**推进（`StreamGeometry` 的 R2，宿主没报新位置）。
+    ///
+    /// 【为什么单独一位而不是 `position_source` 的一个取值】"位置由我们数"与
+    /// "位置来自哪条宿主时钟"是**两个正交的事实**：计数器推进时标签仍是 `Project`
+    /// （宿主给的那个起点确实是 `Project`），只是这一块没有新的宿主报告。把它们
+    /// 混进一个枚举，就得到了 round 24 那个粘住整场会话的 `Carried`。
+    pub counted: bool,
     /// 本块在**插件记账域**里的位置（起播窗口里它不等于宿主报的位置）。
     ///
     /// 【为什么需要它】起播窗口内宿主把 `projectTimeSamples` 钉在 `P`，而插件按块长
@@ -619,7 +630,7 @@ impl BlockContext {
             resync: false,
             resync_limit_frames: 0,
             preceding_silent_frames: 0,
-            pinned_recent: false,
+            counted: false,
             accounting_start: 0,
             discard_pre_roll: false,
         }
@@ -778,14 +789,14 @@ pub(crate) struct CaptureDiagnostics {
     pub bridged_window_blocks: u64,
     /// 因前导静音扩展段首的帧数（诊断）。
     pub pre_roll_frames: u64,
-    /// 位置由插件**接着数**（`PositionSource::Carried`）而写入的块数 / 帧数。
+    /// 位置由**计数器**推进（`BlockContext::counted`）而写入的块数 / 帧数。
     ///
     /// 【为什么这是 I-3 的读数】起播窗口里宿主钉住 `projectTimeSamples`，我们按块长
     /// 推进位置。这些帧**是**我们的素材（见 `Segment::coverage` 的说明），但"位置是
     /// 我们接着数的"这件事必须可观测：它是"宿主时钟偏移锁存是否生效"的唯一证据，
     /// 也是下一轮排查"位置为什么会跳"时第一个要看的数。
-    pub carried_blocks: u64,
-    pub carried_frames: u64,
+    pub counted_blocks: u64,
+    pub counted_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -853,16 +864,15 @@ pub(crate) struct Capture {
     /// 本块有效位置的来源（见 [`PositionSource`]）。
     ///
     /// 【为什么放在 `self` 上而不是加一个参数】`write_block` 已经有 9 个参数，而
-    /// 这是**当前块**的属性，与 `block_preceding_silent` / `block_pinned_recent`
+    /// 这是**当前块**的属性，与 `block_preceding_silent` / `block_counted`
     /// 同源、同寿命、同写法。三者一起在 `on_block_with_context` 里落下。
-    /// 本块位置是否由我们接着数（见 `PositionSource::Carried`）。
-    ///
-    /// 【为什么保留这个读数】它不再参与覆盖判定（覆盖只回答"这一段我们拷过吗"），
-    /// 但"位置是谁给的"是诊断里最需要分开的一件事：`carried_blocks` 突然变多，
-    /// 说明宿主在钉住位置；`carried_frames` 与写入帧数一致，说明时钟没被丢掉。
     block_position_source: PositionSource,
-    /// 当前块是钉住区间结束后的第一块（位置差值应视为记账纠正）。
-    block_pinned_recent: bool,
+    /// 本块位置是否由**计数器**推进（见 `BlockContext::counted`）。
+    ///
+    /// 【为什么保留这个读数】它不参与覆盖判定（覆盖只回答"这一段我们拷过吗"），
+    /// 但"位置是谁给的"是诊断里最需要分开的一件事：`counted_blocks` 突然变多，
+    /// 说明宿主在钉住位置；`counted_frames` 与写入帧数一致，说明时钟没被丢掉。
+    block_counted: bool,
     /// 整张 take 第一段的前导静音帧数（只消费一次）。
     ///
     /// 【为什么不是"将要成为段首那一块的值"】lookbehind 会先把首块暂存、由**第二块**
@@ -943,8 +953,8 @@ pub(crate) struct Capture {
     /// 只要它 > 0，说明暂存/提交链路上仍有漏，但 T2 保证了时间线不断。
     pub bridged_window_blocks: u64,
     /// 位置由插件接着数而写入的块数 / 帧数（见 `CaptureDiagnostics` 的同名字段）。
-    pub carried_blocks: u64,
-    pub carried_frames: u64,
+    pub counted_blocks: u64,
+    pub counted_frames: u64,
 }
 
 impl Default for Capture {
@@ -966,7 +976,7 @@ impl Default for Capture {
             window_rolled: false,
             block_preceding_silent: 0,
             block_position_source: PositionSource::Project,
-            block_pinned_recent: false,
+            block_counted: false,
             take_pre_roll: 0,
             take_pre_roll_taken: false,
             pre_roll_frames: 0,
@@ -1003,8 +1013,8 @@ impl Default for Capture {
             cycle_splits: 0,
             resync_bridged_frames: 0,
             bridged_window_blocks: 0,
-            carried_blocks: 0,
-            carried_frames: 0,
+            counted_blocks: 0,
+            counted_frames: 0,
         }
     }
 }
@@ -1177,8 +1187,8 @@ impl Capture {
             resync_bridged_frames: self.resync_bridged_frames,
             bridged_window_blocks: self.bridged_window_blocks,
             pre_roll_frames: self.pre_roll_frames,
-            carried_blocks: self.carried_blocks,
-            carried_frames: self.carried_frames,
+            counted_blocks: self.counted_blocks,
+            counted_frames: self.counted_frames,
         }
     }
 
@@ -1302,6 +1312,7 @@ impl Capture {
         // 也会暂存首块，而那条路径不经过 `capture_elected`。
         self.block_preceding_silent = ctx.preceding_silent_frames;
         self.block_position_source = ctx.position_source;
+        self.block_counted = ctx.counted;
         // 停播很久之后的上升沿：此前暂存的前导属于停播时间，整段作废。
         if ctx.discard_pre_roll && !self.take_pre_roll_taken {
             self.take_pre_roll = 0;
@@ -1397,7 +1408,7 @@ impl Capture {
             ctx.resync,
             ctx.resync_limit_frames,
             ctx.preceding_silent_frames,
-            ctx.pinned_recent,
+            ctx.counted,
         )
     }
 
@@ -1602,10 +1613,10 @@ impl Capture {
         resync: bool,
         resync_limit_frames: u64,
         preceding_silent_frames: u64,
-        pinned_recent: bool,
+        counted: bool,
     ) -> CaptureOutcome {
         self.block_preceding_silent = preceding_silent_frames;
-        self.block_pinned_recent = pinned_recent;
+        self.block_counted = counted;
         // 【为什么取 max 而不是覆盖】内容块读到的是完整跨度（它之前累积的静音），
         // 紧随其后的连续块读到的是 0；覆盖会把已经观察到的跨度抹掉。只增不减
         // 同时保证"停播很久后的上升沿"由上层传 0 时不会被旧值污染。
@@ -2205,15 +2216,19 @@ impl Capture {
                 Some(expected) => {
                     let delta = start.saturating_sub(expected);
                     let limit = resync_limit_frames.max(64);
-                    // 【为什么 `pinned_recent` 也能开启纠正】`resync` 由流级证据算出；
-                    // 没有上升沿的钉住窗口里 `last_source` 一直是 Project，于是窗口
-                    // 结束时哪怕只差几帧也会被判成 `Gap` 并另起一段。只要"刚刚还在
-                    // 钉住区间里"，这个差值就是记账纠正，不是 seek。
-                    let correction = resync
-                        || (self.block_pinned_recent
-                            && delta.unsigned_abs() <= limit
-                            && delta.unsigned_abs()
-                                <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC));
+                    // 【纠正的判据只有一条：这个差值落在"计数器可能错过的范围"之内】
+                    //
+                    // `resync_limit_frames` 由 `StreamGeometry` 用**事实**给出：本 pass
+                    // 里计数器推进过的帧数 + 本块。它为 0 时说明位置一直来自宿主，
+                    // 于是任何差值都只能是真 seek（不纠正）。
+                    //
+                    // 早先还有一条"刚刚还在钉住区间里"的旁证（`pinned_recent`）——
+                    // 那是为"没有上升沿的钉住窗口里 `last_source` 一直是 Project"
+                    // 这个盲区打的补丁。现在位置与来源分开记账（`counted`），
+                    // 盲区本身不存在了，旁证也就不需要了。
+                    let bridgeable = delta.unsigned_abs() <= limit
+                        && delta.unsigned_abs() <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC);
+                    let correction = resync || (self.block_counted && bridgeable);
                     if correction {
                         if delta > 0
                             && delta as u64 <= limit
@@ -2238,7 +2253,7 @@ impl Capture {
                     // clip 才能从窗口起点开始、内容位置才正确。
                     //
                     // 【为什么这一支不再要求 `resync`】`resync` 由**流级**位置证据算出
-                    // （`last_source ∈ Continuous/Music/Carried`）。起播窗口里宿主
+                    // （`last_source ∈ Continuous/Music` 或计数器推进过）。起播窗口里宿主
                     // 位置被钉住、位置回退从未启用时，`last_source` 停在 `Project` ——
                     // 于是"窗口整段没写"这个最需要兜底的形状恰好拿不到 `resync`，
                     // 兜底代码从未执行。把判据换成**本捕获自己的状态**（一段都没写过）
@@ -2484,9 +2499,9 @@ impl Capture {
             active.peak[channel] = active.peak[channel].max(peak);
         }
         active.filled += writable;
-        if self.block_position_source == PositionSource::Carried {
-            self.carried_blocks = self.carried_blocks.saturating_add(1);
-            self.carried_frames = self.carried_frames.saturating_add(writable as u64);
+        if self.block_counted {
+            self.counted_blocks = self.counted_blocks.saturating_add(1);
+            self.counted_frames = self.counted_frames.saturating_add(writable as u64);
         }
         if transcribed
             && !cover_range(
@@ -2680,7 +2695,7 @@ mod tests {
             resync: false,
             resync_limit_frames: 0,
             preceding_silent_frames: 0,
-            pinned_recent: false,
+            counted: false,
             accounting_start: 0,
             discard_pre_roll: false,
         }
@@ -3741,7 +3756,7 @@ mod tests {
         let mut context = ctx(ProcessStream::Realtime, true, false, true);
         context.resync = false;
         context.resync_limit_frames = 64;
-        context.pinned_recent = true;
+        context.counted = true;
         capture.on_block_with_context(view, context);
 
         let sealed = capture.finish(ClosedReason::Stopped);
@@ -3769,7 +3784,7 @@ mod tests {
         let (_, view) = block(4, 4, 48_000.0);
         let mut context = ctx(ProcessStream::Realtime, true, false, true);
         context.resync_limit_frames = 64;
-        context.pinned_recent = true;
+        context.counted = true;
         capture.on_block_with_context(view, context);
 
         let sealed = capture.finish(ClosedReason::Stopped);

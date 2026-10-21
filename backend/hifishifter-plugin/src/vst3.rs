@@ -1941,34 +1941,14 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             if layered {
                 owner.note_layered_probe(declick_stream, layered_probe);
             }
-            // 【T3：读游标跳过了一个淡化带 ⇒ 这一块整块回退宿主原声】
-            // 跳变的幅度可能远大于一个淡化带（起播窗口收口时可达数十毫秒）。读快照会把
-            // **另一段**内容写进总线；淡一次只把阶跃抹软，内容仍是错的那一段。
-            // 这里把整块写成宿主输入，下一块从新位置继续 —— 那一小段是宿主真实播放过的
-            // 内容，用户听到的是连续的音乐。
-            if owner.take_skip_snapshot_read(declick_stream) {
-                // SAFETY: 与 `transfer_stage` 的录制分支同一份数据与同一道校验。
-                let skipped = unsafe { crate::audio_abi::pass_through(data) };
-                if skipped.is_err() {
-                    return K_RESULT_FALSE;
-                }
-                // 回退也算一次接缝：与上一块的处理结果之间仍然要淡一下。
-                unsafe {
-                    owner.apply_output_declick(
-                        declick_stream,
-                        &mut *data.outputs,
-                        data.num_samples as usize,
-                    )
-                };
-                if data.process_mode == 2 {
-                    return K_RESULT_FALSE;
-                }
-                if crate::audio_abi::input_output_share_bus(data) {
-                    // SAFETY: 输出总线已在上面校验过。
-                    unsafe { (*data.outputs).silence_flags = 0 };
-                }
-                return K_RESULT_OK;
-            }
+            // 【这里曾经有一条"整块直通宿主原声"的保护，现已删除】
+            //
+            // 它的判据是"读游标跳过了超过 50 ms"，动作是**把整块**（宿主块最大可达 6 s）
+            // 换成宿主输入。而直通本身就是换了一个信号源 —— 前后各一次硬切换，用户听到
+            // 的那一下"咔"其实是这个保护动作自己。
+            //
+            // 现在位置只有一个权威（`StreamGeometry` 的 R1–R4），跳变只可能发生在 pass
+            // 边界，而 pass 边界本来就要重新开始；接缝去咔的一次交叉淡化就够。
             unsafe {
                 owner.apply_output_declick(
                     declick_stream,
