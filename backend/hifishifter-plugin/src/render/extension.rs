@@ -387,15 +387,17 @@ pub(crate) enum TransferOutput {
     Recording,
     /// 有素材，且处理结果就是**当前** take：输出处理结果。
     Processed,
-    /// 有素材、有已发布的处理结果，但那一份属于**上一个** take（新的合成还没跑完）。
-    ///
-    /// 【为什么要有这一档而不是掉到 `PassThrough`】`promote()` 会 `bump_revision()`，
-    /// 于是换 take 的瞬间 `processed_ready()` 立刻变假，而一次神经合成要数秒。此前这段
-    /// 空档落到"透传宿主原声" —— 用户刚录完，听到的却是与自己素材无关的那一轨。
-    /// 上一版处理结果虽然不是当前 take，但它是**这份素材的上一版**，且
-    /// `copy_block_layered` 仍按区间取输入总线，区间外不会变成静音。
-    /// 与 `Processed` 分成两个变体是为了让界面能如实说"上一版"，而不是假装是最新的。
-    StaleProcessed,
+    // 【这一档被删掉了】它曾经表示"有已发布的处理结果，但那一份属于**上一个** take"。
+    //
+    // 删除的理由是它违反 I-2（一次播放只有一个内容源）：那一档的产物是
+    // `SnapshotSource::Processed`，读的就是 `snapshots[index]` —— 也就是**上一段素材**。
+    // 换 take 之后播它，等于用旧录音盖住新演奏，而用户会把它当成"编辑生效了"。
+    //
+    // 它当初存在的理由是"`promote()` 会 `bump_revision()`，于是换 take 的瞬间
+    // `processed_ready()` 立刻变假，空档会掉到透传宿主原声"。而这条空档现在由
+    // `Raw` 覆盖：`sync_raw_tape()` 在 promote 的同一条路径上**同步**发布当前 take 的
+    // 原始捕获，于是那段空档播的是"这一份 take 的内容，只是还没处理"—— 同源、
+    // 同 take、可解释。
     /// 有素材，但处理结果还不是当前 take：输出**原始磁带**（未处理的捕获）。
     Raw,
     /// 有素材，但**两份发布器都还没就绪**（刚录完、后台合成尚未完成）。
@@ -421,10 +423,22 @@ impl TransferOutput {
             TransferOutput::Untouched => "untouched",
             TransferOutput::Recording => "recording",
             TransferOutput::Processed => "processed",
-            TransferOutput::StaleProcessed => "stale_processed",
             TransferOutput::Raw => "raw",
             TransferOutput::PendingSynthesis => "pending_synthesis",
             TransferOutput::PassThrough => "passthrough",
+        }
+    }
+
+    /// 编码值 → 档位。未知编码（含已删除的 `3`）返回 `None`。
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(TransferOutput::Untouched),
+            1 => Some(TransferOutput::Recording),
+            2 => Some(TransferOutput::Processed),
+            4 => Some(TransferOutput::Raw),
+            5 => Some(TransferOutput::PendingSynthesis),
+            6 => Some(TransferOutput::PassThrough),
+            _ => None,
         }
     }
 
@@ -434,7 +448,7 @@ impl TransferOutput {
             TransferOutput::Untouched => 0,
             TransferOutput::Recording => 1,
             TransferOutput::Processed => 2,
-            TransferOutput::StaleProcessed => 3,
+            // 3 是已删除的 `StaleProcessed`；编码值只增不改，故留空。
             TransferOutput::Raw => 4,
             TransferOutput::PendingSynthesis => 5,
             TransferOutput::PassThrough => 6,
@@ -536,6 +550,16 @@ struct StreamGeometry {
     offset_valid: AtomicBool,
     /// 应用过偏移的块数（诊断）。
     offset_used: AtomicU64,
+    /// 【I-3 的读数】本流里位置**没有**按"上一块位置 + 上一块帧数"续接的块数。
+    ///
+    /// 【为什么这一位值得存在】"播放途中的随机咔"有相当一部分来自位置记账的回退：
+    /// 宿主把 `projectTimeSamples` 钉住时我们按块长推进，一旦某个分支忘了叠加锁存
+    /// 偏移，位置就退回宿主读数那一侧 —— 写入端于是覆盖上一块的内容、读出端倒着读，
+    /// 两处各是一次阶跃。这个计数把它从"听起来像咔"变成"这一块回退了 N 帧"。
+    clock_rewinds: AtomicU64,
+    /// 最近一块的位置增量（帧）。稳态下它恒等于块长。
+    clock_delta_min: AtomicI64,
+    clock_delta_max: AtomicI64,
     blocks: AtomicU64,
     rolling_blocks: AtomicU64,
     resting_blocks: AtomicU64,
@@ -564,8 +588,8 @@ struct StreamGeometry {
     /// 想回答"这一块是不是刚从静止转入流动"就必须把结论留到那时。
     was_stationary: AtomicBool,
     /// 位置被钉住、但音频在流动 ⇒ 有效位置由本插件按块长推进（见
-    /// [`crate::transfer::capture::PositionSource::Synthesized`]）。
-    synthesized: AtomicBool,
+    /// [`crate::transfer::capture::PositionSource::Carried`]）。
+    carried: AtomicBool,
     /// 位置被钉住期间**已送来**的帧数（不含当前块）。
     ///
     /// 【为什么需要它而不是"上一位置 + 本块长"】钉住的起点不一定在第一个块上：
@@ -579,8 +603,8 @@ struct StreamGeometry {
     /// 块内源切换（"咔"）。捕获侧只需要帧数，不需要 PCM —— 它可以在第一段开头
     /// 合成等长静音，把段起点前移到播放起点。上限由 `PINNED_PLAYBACK_SEC` 约束。
     trailing_silent_frames: AtomicU64,
-    /// 用 `Synthesized` 记账过的块数（诊断）。
-    synthesized_blocks: AtomicU64,
+    /// 用 `Carried` 记账过的块数（诊断）。
+    carried_blocks: AtomicU64,
     /// 起播/录音上升沿之后剩余的"内容不变也推进"帧数。
     ///
     /// 【为什么需要】VEGAS 的钉住窗口里前段可能是静音或持续音；只按"内容变化"
@@ -593,7 +617,7 @@ struct StreamGeometry {
     ///
     /// 【为什么必须是区间而不是逐块】VEGAS 的钉住窗口约 0.66 s，前 0.4 s 几乎一定是
     /// 静音或持续音。逐块判据只保护静音块；内容一变化，`was_stationary` 清零与
-    /// `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
+    /// `CARRIED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
     /// 那正是用户听到的"0.4 s 处咔"与"0.66 s 断成两个 clip"。区间锁存在窗口内
     /// 压制这两条内容证据，让整段窗口都按真实播放时间记账。
     pinned_window_open: AtomicBool,
@@ -637,7 +661,7 @@ const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 【为什么是 16】它只在**已经观测到内容变化**之后才生效（停播时 latch 从不打开），
 /// 因此只需要容忍起播窗口里的短暂静音；16 块 ≈ 170 ms 足够覆盖一个气口，又不会让
 /// 停止后的输出拖得太久。
-const SYNTHESIZED_STALL_BLOCKS: u32 = 16;
+const CARRIED_STALL_BLOCKS: u32 = 16;
 
 /// 持久化状态从未尝试恢复。
 pub(crate) const RESTORE_NEVER: u8 = 0;
@@ -789,7 +813,7 @@ struct StreamBlock {
     new_pass: bool,
     /// 本流最近是否观测到"输入内容在变化"（音频在流动）。
     activity_moving: bool,
-    /// 本块是位置回退结束后的第一块（`Synthesized`/`Continuous`/`Music` → `Project`）。
+    /// 本块是位置回退结束后的第一块（`Carried`/`Continuous`/`Music` → `Project`）。
     resync: bool,
     /// 允许当作"记账纠正"的最大帧差（钉住期间送来的帧数 + 本块）。
     resync_limit_frames: u64,
@@ -798,7 +822,7 @@ struct StreamBlock {
     /// 本块是钉住区间结束后的第一块（记账差值应视为纠正，不是 seek）。
     ///
     /// 【为什么不能只看 `resync`】`resync` 由 `last_source` 是否曾为
-    /// Continuous/Music/Synthesized 决定；没有上升沿的钉住窗口里它一直是 Project。
+    /// Continuous/Music/Carried 决定；没有上升沿的钉住窗口里它一直是 Project。
     /// 但"刚刚还在钉住区间里"本身就是记账纠正的证据 —— 宿主位置恢复后哪怕只差
     /// 几帧，也不能另起一段。
     pinned_recent: bool,
@@ -812,9 +836,10 @@ struct StreamBlock {
     silent: bool,
     /// 本块有效位置的来源（见 `PositionSource`）。
     ///
-    /// 【为什么捕获侧需要它】`Synthesized` 表示"这个位置是我们按块长推的，不是宿主
-    /// 说的"。捕获据此把这些帧排除在覆盖之外 —— 否则宿主在钉住窗口里送来的静音/重复
-    /// 内容会被当成"我们录到的素材"按满幅输出，内容起点就是一次 0 → 满电平的阶跃。
+    /// 【为什么捕获侧需要它】`Carried` 表示"这个位置是从宿主给的起点按宿主自己的块长
+    /// 接着数下去的"。它**不**影响覆盖（覆盖只回答"这一段我们拷过吗"），但它是
+    /// `[transfer] clock` 与 `[ara] stuck` 上区分"宿主给的坐标"与"我们接着数的坐标"
+    /// 的唯一依据 —— 而这两者的混用正是 round 23 把一段真实录音声明成洞的原因。
     position_source: PositionSource,
 }
 
@@ -1248,7 +1273,16 @@ pub(crate) struct ExtensionOwner {
     continuous_used: AtomicU64,
     music_used: AtomicU64,
     /// 起播窗口里"位置被钉住、由本插件按块长推进"的块数（诊断）。
-    synthesized_blocks: AtomicU64,
+    carried_blocks: AtomicU64,
+    /// 【I-2】上一次输出仲裁的档位，以及"是否已经记录过"（`0` 是 `Untouched` 的编码，
+    /// 不能兼作"从未记录"）。
+    rung_previous: AtomicU32,
+    rung_valid: AtomicBool,
+    /// 档位切换的总次数 / 最近一次切换的两端 / 本次 pass 内的切换次数。
+    rung_switches: AtomicU64,
+    rung_last_from: AtomicU32,
+    rung_last_to: AtomicU32,
+    pass_switches: AtomicU64,
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
@@ -1285,6 +1319,9 @@ pub(crate) struct ExtensionOwner {
     tape_hole_frames: AtomicU64,
     /// 上一次打印的素材覆盖读数（去重用）。
     last_tape_diag: Mutex<Option<String>>,
+    /// `[transfer] pass` / `[transfer] clock` 两行的去重指纹（非实时线程用）。
+    last_pass_diag: Mutex<Option<String>>,
+    last_clock_diag: Mutex<Option<String>>,
     repeats_suppressed: AtomicU64,
     /// 连续多少块被判定为"不该出声"（停播 / 重复区间）。
     ///
@@ -3726,17 +3763,6 @@ impl ExtensionOwner {
             self.render_wanted.store(true, Ordering::Release);
             return TransferOutput::Raw;
         }
-        // 【为什么"上一版处理结果"好过宿主原声】换 take 到合成完成之间的空档里，
-        // 唯一与"用户刚录的东西"有关的内容就是上一版处理结果。透传宿主原声听起来
-        // **有声音**，反而更难发现编辑没生效 —— 那是比静音更坏的失败。
-        //
-        // 【为什么只在这一档里才敢放宽】`has_material()` 已为真（上面的早退保证），
-        // 所以"发布过一份"不可能来自另一个实例或另一个文档；而从未发布过时不凭空生效
-        // （`snapshots` 为空 ⇒ 落到下面的 `PendingSynthesis`）。
-        if self.snapshots.iter().any(|publisher| publisher.is_ready()) {
-            self.render_wanted.store(true, Ordering::Release);
-            return TransferOutput::StaleProcessed;
-        }
         // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
         // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
         self.render_wanted.store(true, Ordering::Release);
@@ -3758,9 +3784,7 @@ impl ExtensionOwner {
             // 【为什么两份都编】真正被读的是 `snapshots[snapshot_index_for_rate(...)]`
             // （48 kHz 及倍率工程读索引 1）。只编索引 0 会让"实际读的是另一份"的宿主
             // 在换版时拿不到去咔。
-            TransferOutput::Processed
-            | TransferOutput::StaleProcessed
-            | TransferOutput::Untouched => {
+            TransferOutput::Processed | TransferOutput::Untouched => {
                 self.snapshots[0].generation() ^ self.snapshots[1].generation().rotate_left(32)
             }
             TransferOutput::Raw => self.raw_tape.generation(),
@@ -3819,6 +3843,8 @@ impl ExtensionOwner {
         let mut peak = 0.0_f32;
         let mut first = 0.0_f32;
         let mut last = 0.0_f32;
+        let mut energy = 0.0_f64;
+        let mut energy_frames = 0_u32;
         for channel in 0..channels {
             // SAFETY: 调用方保证总线有 `channels` 个可读平面，且至少 `frames` 帧。
             let plane = unsafe { *output.channel_buffers.add(channel) };
@@ -3834,6 +3860,8 @@ impl ExtensionOwner {
                 }
                 peak = peak.max(value.abs());
                 max_step = max_step.max((value - previous).abs());
+                energy += f64::from(value) * f64::from(value);
+                energy_frames += 1;
                 if channel == 0 {
                     if index == 0 {
                         first = value;
@@ -3846,6 +3874,19 @@ impl ExtensionOwner {
         let (uncovered, input_peak, edge) = self
             .take_layered_probe(stream)
             .unwrap_or((0, f32::NAN, false));
+        // 【覆盖边也是一种接缝】没有源切换、但块内有"宿主原声 ↔ 处理结果"的翻转点：
+        // 那一下同样是用户听到的一次信号更换。把它标进账本，round 23 那种"假洞"
+        // 就不必再靠用户复述才能被发现。
+        let seam = if seam == crate::render::click::SeamCode::None && edge {
+            crate::render::click::SeamCode::CoverageEdge
+        } else {
+            seam
+        };
+        let rms = if energy_frames == 0 {
+            0.0
+        } else {
+            (energy / f64::from(energy_frames)).sqrt() as f32
+        };
         self.click.record(crate::render::click::BlockSample {
             stream: stream.index() as u8,
             kind,
@@ -3860,6 +3901,7 @@ impl ExtensionOwner {
             peak,
             input_peak,
             uncovered,
+            rms,
             edge,
             first_of_stream,
         });
@@ -3872,6 +3914,76 @@ impl ExtensionOwner {
     pub(crate) fn log_click_report(&self) {
         for line in self.click.drain_suspicious() {
             log::warn!("[click] {line}");
+        }
+    }
+
+    /// 【B0】把 I-2 / I-3 的读数打成两行。**非实时线程**（UI 定时器）。
+    ///
+    /// 【为什么要这两行】本轮之前，排查"咔"只能靠"用户再听一遍"：插件里没有
+    /// "这一块换了源"与"这一块位置回退了"的读数，于是同一个症状被反复归因到
+    /// 不同机理。这两行把它变成可判定的数字：
+    ///   * `[transfer] pass` —— 一次播放里换了几次内容源（I-2，理想为 0）；
+    ///   * `[transfer] clock` —— 位置是否逐块续接（I-3，`rewinds` 理想为 0）。
+    ///
+    /// 【为什么去重】它们由 20 ms 的界面定时器驱动；不去重就是每秒 50 行。判据取
+    /// "内容变没变"：所有计数都进了指纹，变了才打印。
+    pub(crate) fn log_transfer_report(&self) {
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            // ARA 实例不走 Transfer 仲裁：这两行的数字对它是无意义的零。
+            return;
+        }
+        if !self.transfer.has_material() {
+            return;
+        }
+        let switches = self.rung_switches.load(Ordering::Acquire);
+        let from = self.rung_last_from.load(Ordering::Acquire);
+        let to = self.rung_last_to.load(Ordering::Acquire);
+        let pass_switches = self.pass_switches.load(Ordering::Acquire);
+        let output = self.transfer_output();
+        let prepared = self.transfer_prepared.load(Ordering::Acquire);
+        let ready = self.transfer_ready_revision.load(Ordering::Acquire);
+        let line = format!(
+            "[transfer] pass: take={} prepared={prepared} ready_revision={ready} \
+             output={} switches={switches} pass_switches={pass_switches} last={}->{}",
+            self.transfer.revision(),
+            output.as_str(),
+            TransferOutput::from_code(from as u8).map_or("none", |value| value.as_str()),
+            TransferOutput::from_code(to as u8).map_or("none", |value| value.as_str()),
+        );
+        {
+            let mut last = self.last_pass_diag.lock_or_recover();
+            if last.as_deref() != Some(line.as_str()) {
+                *last = Some(line.clone());
+                log::warn!("{line}");
+            }
+        }
+        let index = self.snapshot_index_for_rate(self.setup_sample_rate());
+        let geometry = &self.streams[index.min(2)];
+        let blocks = geometry.blocks.load(Ordering::Acquire);
+        if blocks == 0 {
+            return;
+        }
+        let line = format!(
+            "[transfer] clock: stream={} blocks={blocks} carried={} pinned={} \
+             offset_valid={} offset={} offset_used={} drift_max={} rewinds={} \
+             delta_min={} delta_max={} resyncs={} pinned_frames={}",
+            index.min(2),
+            geometry.carried_blocks.load(Ordering::Acquire),
+            geometry.pinned_frames.load(Ordering::Acquire),
+            u8::from(geometry.offset_valid.load(Ordering::Acquire)),
+            geometry.host_clock_offset.load(Ordering::Acquire),
+            geometry.offset_used.load(Ordering::Acquire),
+            self.max_drift_frames.load(Ordering::Acquire),
+            geometry.clock_rewinds.load(Ordering::Acquire),
+            geometry.clock_delta_min.load(Ordering::Acquire),
+            geometry.clock_delta_max.load(Ordering::Acquire),
+            geometry.position_resyncs.load(Ordering::Acquire),
+            geometry.pinned_frames.load(Ordering::Acquire),
+        );
+        let mut last = self.last_clock_diag.lock_or_recover();
+        if last.as_deref() != Some(line.as_str()) {
+            *last = Some(line.clone());
+            log::warn!("{line}");
         }
     }
 
@@ -4496,7 +4608,7 @@ impl ExtensionOwner {
         //
         // 门是"内容有变化"而不是"有信号"：停播时宿主也可能持续送同一份非零内容，
         // 那份内容逐块**相同** ⇒ latch 不打开 ⇒ 仍判 Resting（FL Studio 的既有回归）。
-        // 内容连续不变达到 `SYNTHESIZED_STALL_BLOCKS` 时撤销 latch，让"停止后继续
+        // 内容连续不变达到 `CARRIED_STALL_BLOCKS` 时撤销 latch，让"停止后继续
         // 出声"最多只拖 170 ms。
         let activity_moving = geometry.activity_moving();
         // 【为什么 `!had` 也算钉住】第一块是"钉住区间"的起点：它的帧数必须计入，
@@ -4557,7 +4669,7 @@ impl ExtensionOwner {
         let pinned_recent = had && raw_start != last_raw && prior_pinned_frames > 0;
         // 【为什么要一个"区间开/关"而不是逐块判据】VEGAS 的钉住窗口约 0.66 s，
         // 前 0.4 s 几乎一定是静音或持续音。逐块判据只保护**静音块**；内容一变化，
-        // `was_stationary` 清零与 `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，
+        // `was_stationary` 清零与 `CARRIED_STALL_BLOCKS` 撤销立刻重新生效，
         // 把已经记账的 0.4 s 抹掉 —— 那正是用户听到的"0.4 s 处咔"与
         // "0.66 s 断成两个 clip"。区间锁存在窗口内压制这两条内容证据，
         // 让整段窗口都按真实播放时间记账。
@@ -4608,18 +4720,18 @@ impl ExtensionOwner {
         if pinned && (playing_rising || recording_rising) {
             pinned_before = 0;
         }
-        let mut synthesizing = geometry.synthesized.load(Ordering::Acquire);
+        let mut carrying = geometry.carried.load(Ordering::Acquire);
         // 【为什么这里要补一次撤销】窗口因"逐块完全相同的非零内容"收口时，本块正是
-        // 那段重复内容的第一块 —— 而此时 `synthesizing` 可能已经在上一块被置真
-        // （起播第一块），`if !synthesizing` 的守卫会跳过撤销，于是位置继续按块长
+        // 那段重复内容的第一块 —— 而此时 `carrying` 可能已经在上一块被置真
+        // （起播第一块），`if !carrying` 的守卫会跳过撤销，于是位置继续按块长
         // 推进，停播光标继续出声。这里显式按下来。
-        if repeated_nonzero && synthesizing {
-            synthesizing = false;
-            geometry.synthesized.store(false, Ordering::Release);
+        if repeated_nonzero && carrying {
+            carrying = false;
+            geometry.carried.store(false, Ordering::Release);
         }
         if pinned {
             if advancing {
-                if !synthesizing {
+                if !carrying {
                     // 【为什么这里可能要清零】从"静止"转入"流动"时，之前累积的帧数是
                     // 停播期间**重复投递**的块，不是时间推进。判据是"本块之前已经连续
                     // 不变"（`was_stationary`）。
@@ -4647,18 +4759,18 @@ impl ExtensionOwner {
                     {
                         pinned_before = 0;
                     }
-                    synthesizing = true;
-                    geometry.synthesized.store(true, Ordering::Release);
+                    carrying = true;
+                    geometry.carried.store(true, Ordering::Release);
                 }
             } else if !window_open
-                && geometry.unchanged_run.load(Ordering::Acquire) >= SYNTHESIZED_STALL_BLOCKS
+                && geometry.unchanged_run.load(Ordering::Acquire) >= CARRIED_STALL_BLOCKS
             {
-                synthesizing = false;
-                geometry.synthesized.store(false, Ordering::Release);
+                carrying = false;
+                geometry.carried.store(false, Ordering::Release);
             }
         } else {
-            synthesizing = false;
-            geometry.synthesized.store(false, Ordering::Release);
+            carrying = false;
+            geometry.carried.store(false, Ordering::Release);
             // 位置重新前进：窗口与钉住计数都归零，下一段钉住重新开始。
             geometry.pinned_advance_frames.store(0, Ordering::Release);
             geometry.pinned_window_open.store(false, Ordering::Release);
@@ -4676,11 +4788,44 @@ impl ExtensionOwner {
                 self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
             }
         }
-        if pinned && source == PositionSource::Project && synthesizing {
-            position = raw_start.saturating_add(pinned_before as i64);
-            source = PositionSource::Synthesized;
-            self.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
-            geometry.synthesized_blocks.fetch_add(1, Ordering::Relaxed);
+        // 【T-A2：`pinned` 也必须叠加锁存偏移】
+        //
+        // `pinned` 的语义是"宿主的读数没动"，**不是**"时间没动"。偏移锁存生效时，
+        // 宿主读数与真实播放位置相差 `host_clock_offset`；只加 `pinned_before` 会把
+        // 位置打回宿主读数那一侧 —— 一块的回退（写入端覆盖上一块的内容、读出端倒着读，
+        // 两处各是一次阶跃）。这正是"播放途中随机咔"里最常出现的一种形状：宿主
+        // 中途卡一块（VEGAS 的位置字段本来就会间歇性停一格），下一块就倒退一整块。
+        //
+        // 【为什么条件里要有 `Carried`】上一块可能已经因为"宿主恢复前进 + 偏移锁存"
+        // 被标成 `Carried`；那时 `source` 不是 `Project`，而这个分支仍然必须执行 ——
+        // 否则位置会退回 `raw_start`（不带偏移的那一侧）。
+        if pinned && matches!(source, PositionSource::Project | PositionSource::Carried) && carrying {
+            let latched = geometry.offset_valid.load(Ordering::Acquire);
+            let offset = if latched {
+                geometry.host_clock_offset.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            // 【两条重建路径，按"有没有锁存偏移"分叉】
+            //
+            // * **没有**锁存偏移（起播窗口的第一次钉住）：位置 = 宿主读数 + 已钉住帧数。
+            //   这是唯一可用的换算，也是 `pinned_before` 的塌回逻辑（停播后重新起播要
+            //   扣掉停播时长）得以生效的路径。
+            // * **有**锁存偏移：`raw_start + offset` 恰好是**本块开始处**的累积时钟，
+            //   而累积时钟的下一步永远是"上一块位置 + 上一块帧数"。用后者而不是再
+            //   重建一次，是因为 `pinned_before` 在宿主移动时会被清零 —— 拿它重建
+            //   会让位置**退回上一块**（写入端覆盖、读出端倒退，两处各一次阶跃）。
+            //   偏移已经与宿主对齐到块级，累积时钟因此是权威。
+            position = if latched {
+                last_position.saturating_add(frames as i64)
+            } else {
+                raw_start
+                    .saturating_add(offset)
+                    .saturating_add(pinned_before as i64)
+            };
+            source = PositionSource::Carried;
+            self.carried_blocks.fetch_add(1, Ordering::Relaxed);
+            geometry.carried_blocks.fetch_add(1, Ordering::Relaxed);
             self.last_synthetic_position[stream.index()]
                 .store(position.saturating_add(frames as i64), Ordering::Release);
         }
@@ -4700,14 +4845,14 @@ impl ExtensionOwner {
         // 【什么时候仍然听宿主的】起播/录音上升沿、循环回卷、门控静音（上一块停在
         // Resting）以及 |drift| 超出容差（真实 seek）。它们都会让 last_source 不再是
         // Synthesized，于是这条判据自然退出。
-        if !pinned && had && last_source == PositionSource::Synthesized {
+        if !pinned && had && last_source == PositionSource::Carried {
             let previous_frames = i64::from(geometry.last_frames.load(Ordering::Acquire));
             let expected = last_position.saturating_add(previous_frames);
             let drift = raw_start.saturating_sub(expected);
             let tolerance = (rate * POSITION_DRIFT_TOLERANCE_SEC).round().max(1.0) as i64;
             if drift.unsigned_abs() <= tolerance as u64 {
                 position = expected;
-                source = PositionSource::Synthesized;
+                source = PositionSource::Carried;
                 // 【T-A1-2】把这个差值锁存下来：下一块起 `position = raw_start + offset`，
                 // 于是收口之后的每一块都严格续接，不再"纠正一块、再跳一块"。
                 geometry
@@ -4762,13 +4907,20 @@ impl ExtensionOwner {
         if had && raw_start != last_raw {
             if matches!(
                 last_source,
-                PositionSource::Continuous | PositionSource::Music | PositionSource::Synthesized
+                PositionSource::Continuous | PositionSource::Music | PositionSource::Carried
             ) {
                 self.position_resyncs.fetch_add(1, Ordering::Relaxed);
                 geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
             }
+            // 【为什么不是无条件改回 `Project`】偏移锁存生效时，位置来自**累积时钟**
+            // （`raw_start + offset`），而 `offset != 0` 正说明宿主读数与真实播放位置
+            // 不是同一个坐标。把标签写成 `Project` 会让下一块走进 `pinned` 分支时
+            // 看起来"没在用偏移"—— 而那个分支一旦按 `raw_start` 算，位置就回退一块。
+            // 标签必须与"位置实际来自哪里"一致，否则判据与事实脱节。
             source = if time.cycle_active {
                 PositionSource::Cycle
+            } else if geometry.offset_valid.load(Ordering::Acquire) {
+                PositionSource::Carried
             } else {
                 PositionSource::Project
             };
@@ -4824,6 +4976,21 @@ impl ExtensionOwner {
             geometry.cycle_wrap_unknown.fetch_add(1, Ordering::Relaxed);
         }
 
+        // 【I-3 的读数：本块位置是否按"上一块位置 + 上一块帧数"续接】
+        //
+        // 稳态下 `position - (last_position + last_frames)` 恒为 0。它不为 0 只有三种
+        // 解释：① 宿主真的 seek（用户动作，可接受）；② 起播/回绕（`had == false` 或
+        // `cycle_wrap`，可接受）；③ **我们的记账漏了一项**（不可接受，且它就是咔）。
+        // 这个计数把第 ③ 类从"听起来像咔"变成"这一块回退了 N 帧"。
+        if had && !cycle_wrap {
+            let expected = last_position.saturating_add(i64::from(frames32));
+            let delta = position.saturating_sub(expected);
+            if delta < 0 {
+                geometry.clock_rewinds.fetch_add(1, Ordering::Relaxed);
+            }
+            geometry.clock_delta_min.fetch_min(delta, Ordering::Relaxed);
+            geometry.clock_delta_max.fetch_max(delta, Ordering::Relaxed);
+        }
         geometry.seen.store(true, Ordering::Release);
         geometry.last_start.store(position, Ordering::Release);
         geometry.last_frames.store(frames32, Ordering::Release);
@@ -4856,7 +5023,7 @@ impl ExtensionOwner {
             && !time.cycle_active
             && matches!(
                 last_source,
-                PositionSource::Continuous | PositionSource::Music | PositionSource::Synthesized
+                PositionSource::Continuous | PositionSource::Music | PositionSource::Carried
             );
         StreamBlock {
             position,
@@ -5473,7 +5640,7 @@ impl ExtensionOwner {
             }
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
             // 那段被替换成处理结果，其余保持宿主原声。见 `copy_block_layered`。
-            TransferOutput::Processed | TransferOutput::StaleProcessed => {
+            TransferOutput::Processed => {
                 self.note_emitted(evidence);
                 TransferStage::Snapshot {
                     source: SnapshotSource::Processed,
@@ -7591,6 +7758,7 @@ impl ExtensionOwner {
         // 【B0】先报告上一批可疑块。放在早退**之前**：Transfer 实例在没有素材时
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
+        self.log_transfer_report();
         if !self.renders() {
             return;
         }
@@ -7993,9 +8161,28 @@ impl ExtensionOwner {
     }
 
     /// 本块最终走了哪一档输出仲裁（由 `transfer_stage` 在决定后调用）。
+    ///
+    /// 【I-2 的读数在这里攒】"一次播放只有一个内容源"是可以直接数出来的：只要
+    /// 相邻两块之间的档位不同，那一次切换就可能在听感上表现为一次咔。音频线程只做
+    /// 一次整数比较与两次原子写；报告留给非实时线程（见 `log_transfer_report`）。
     pub(crate) fn note_output_rung(&self, output: TransferOutput) {
         if let Some(ring) = self.block_trace.get() {
             ring.update_last_rung(output.code());
+        }
+        let code = u32::from(output.code());
+        let previous = self.rung_previous.swap(code, Ordering::AcqRel);
+        // `0` 是 `Untouched` 的编码，也是"从未记录"的初值 —— 用独立的 valid 位区分，
+        // 否则首块会被算成一次切换（与 `apply_output_declick` 里 `primed` 的教训相同）。
+        if !self.rung_valid.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if previous != code {
+            self.rung_switches.fetch_add(1, Ordering::Relaxed);
+            self.rung_last_from.store(previous, Ordering::Release);
+            self.rung_last_to.store(code, Ordering::Release);
+            // 起播/换 take 会让"这一次播放"重新开始计数：切换数归零由非实时线程
+            // 依据 `pass_epoch` 完成（音频线程不能分配、也不该做字符串格式化）。
+            self.pass_switches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -8129,8 +8316,8 @@ impl ExtensionOwner {
                 "gate_cleared": self.stream_gate_cleared[index].load(Ordering::Acquire),
                 "resting": self.stream_resting_blocks[index].load(Ordering::Acquire),
                 "rolling": self.stream_rolling_blocks[index].load(Ordering::Acquire),
-                "synthesized": self.streams[index]
-                    .synthesized_blocks
+                "carried": self.streams[index]
+                    .carried_blocks
                     .load(Ordering::Acquire),
                 "pinned_advance": self.streams[index]
                     .pinned_advance_blocks
@@ -8176,7 +8363,7 @@ impl ExtensionOwner {
             "bound_snapshot_fallback": self.bound_snapshot_fallback.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),
-            "synthesized_blocks": self.synthesized_blocks.load(Ordering::Acquire),
+            "carried_blocks": self.carried_blocks.load(Ordering::Acquire),
             "position_resyncs": self.position_resyncs.load(Ordering::Acquire),
             "bound_fallback": {
                 "snapshot_missing_blocks": self.bound_snapshot_fallback.load(Ordering::Acquire),

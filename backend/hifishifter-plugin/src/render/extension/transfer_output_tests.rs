@@ -175,17 +175,15 @@ fn a_rung_change_between_unrelated_signals_fades_in() {
     let code = TransferOutput::code as fn(TransferOutput) -> u8;
     let raw = code(TransferOutput::Raw);
     let processed = code(TransferOutput::Processed);
-    let stale = code(TransferOutput::StaleProcessed);
     let passthrough = code(TransferOutput::PassThrough);
     // Two processings of the same take: a wide equal-power crossfade.
     assert_eq!(ExtensionOwner::seam(processed, raw), Seam::WideCrossfade);
     assert_eq!(ExtensionOwner::seam(raw, processed), Seam::WideCrossfade);
-    assert_eq!(ExtensionOwner::seam(stale, raw), Seam::WideCrossfade);
     // A passthrough on either side is a different source: fade in.
     assert_eq!(ExtensionOwner::seam(passthrough, processed), Seam::FadeIn);
     assert_eq!(ExtensionOwner::seam(processed, passthrough), Seam::FadeIn);
     // Same content family (a re-render of the same take): plain crossfade.
-    assert_eq!(ExtensionOwner::seam(processed, stale), Seam::Crossfade);
+    assert_eq!(ExtensionOwner::seam(processed, processed), Seam::Crossfade);
     assert_eq!(ExtensionOwner::seam(raw, raw), Seam::Crossfade);
 }
 
@@ -422,25 +420,33 @@ fn a_new_take_invalidates_both_publishers() {
     assert_eq!(owner.transfer_output(), TransferOutput::Processed);
 
     // 又录一遍：take 号前进，两份发布都还停留在上一个 take。
+    //
+    // 【为什么这里**不能**播上一版处理结果】它读的是 `snapshots[index]`，也就是
+    // 上一段素材。用它等于用旧录音盖住新演奏，而用户会把它当成"编辑生效了"
+    // （I-2：一次播放只有一个内容源）。原始磁带是**这一份 take 的内容**，
+    // 只是还没处理 —— 同源、同 take、可解释。
     record(&owner, 256);
-    assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::StaleProcessed,
-        "新 take 的合成还没跑完时，上一版处理结果好过宿主原声"
-    );
     owner.sync_raw_tape();
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::Raw,
-        "原始磁带跟上新 take 之后就该听到它 —— 它比上一版处理结果新"
+        "新 take 的合成还没跑完时，播这一份 take 的原始捕获，而不是上一段素材"
+    );
+    // 原始磁带也跟不上（预算不足 / 还没发布）⇒ 只能透传宿主原声并如实报"等待合成"。
+    owner.raw_tape.clear();
+    owner.raw_tape_revision.store(0, Ordering::Release);
+    assert_eq!(
+        owner.transfer_output(),
+        TransferOutput::PendingSynthesis,
+        "两份都不是这一份 take 的时候，不得把上一段素材当成结果播出去"
     );
 }
 
 /// **从未发布过处理结果时不凭空造一档**：那时只能报"等待合成"。
 ///
-/// 【为什么这条必须单独钉住】`StaleProcessed` 的判据是"发布器非空"。若它在
-/// `has_material()` 为真时无条件生效，第一次录制之后、第一次合成之前就会凭空出现
-/// 一个"上一版结果"，而那时根本不存在任何一版。
+/// 【为什么这条必须单独钉住】"发布器非空"不等于"这一份 take 有结果"。若拿它当判据，
+/// 第一次录制之后、第一次合成之前就会凭空出现一个"上一版结果"，而那时根本不存在
+/// 任何一版 —— 而且那个"结果"属于**上一段素材**。
 #[test]
 fn no_published_result_never_invents_a_stale_one() {
     let owner = insert_owner();
@@ -457,7 +463,7 @@ fn no_published_result_never_invents_a_stale_one() {
     assert_eq!(
         owner.transfer_output(),
         TransferOutput::PendingSynthesis,
-        "没有发布过任何结果时不得凭空造一档（既不是 StaleProcessed，也不是 Raw）"
+        "没有发布过任何结果时不得凭空造一档"
     );
 }
 
@@ -1049,6 +1055,52 @@ fn a_pinned_project_position_follows_continuous_time() {
     assert_eq!(third.phase, TransportPhase::Rolling);
 }
 
+/// **偏移锁存生效后，"宿主位置钉住"的块必须按累积时钟前进，而不是退回宿主读数。**
+///
+/// 【为什么这条是"播放途中随机咔"的回归测试】`pinned` 的语义是"宿主的读数没动"，
+/// **不是**"时间没动"。偏移锁存生效时，宿主读数与真实播放位置相差一个窗口（实测
+/// VEGAS 是 0.658 s）。若这个分支按 `raw_start` 重建位置，它就退回宿主读数那一侧 ——
+/// 一块的回退：写入端覆盖上一块的内容、读出端倒着读，两处各是一次阶跃。
+///
+/// 【为什么用累积时钟而不是"宿主读数 + 已钉住帧数"】后者依赖 `pinned_before`，而它
+/// 在宿主移动时会被清零 —— 于是"前进、卡一格、前进"这种真实形状里，每一次"卡一格"
+/// 之后都会回退一整块。偏移已经与宿主对齐到块级，累积时钟因此才是权威（I-3）。
+#[test]
+fn a_pinned_block_after_an_offset_lock_still_advances_by_one_block() {
+    use crate::audio_abi::ProcessContext;
+    let owner = insert_owner();
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    let context = ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    // 起播窗口：位置钉住，我们按块长接着数。
+    let first = owner.note_stream_block(ProcessStream::Realtime, &context, 512, true, false);
+    assert_eq!(first.position, 0);
+    let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(second.position, 512, "钉住期间按块长前进");
+    // 宿主读数与真实播放位置相差一个窗口 ⇒ 偏移被锁存（`offset = expected - raw`）。
+    // 此时 `raw_start + offset` 等于**本块开始处**的累积时钟，而它远落后于续接点。
+    geometry.host_clock_offset.store(256, Ordering::Release);
+    geometry.offset_valid.store(true, Ordering::Release);
+    let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(
+        third.position, 1_024,
+        "偏移锁存后必须按累积时钟前进，而不是按宿主读数重建"
+    );
+    let fourth = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
+    assert_eq!(
+        fourth.position, 1_536,
+        "钉住 + 偏移锁存 ⇒ 位置仍按块长前进（回退一整块就是那一下咔）"
+    );
+    assert_eq!(
+        geometry.clock_rewinds.load(Ordering::Acquire),
+        0,
+        "I-3：位置不得倒退"
+    );
+}
 /// **短循环：块首相同但 continuous 前进 ⇒ cycle_wrap，强制 Rolling。**
 #[test]
 fn a_short_cycle_wrap_is_not_resting() {
@@ -1246,7 +1298,7 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
                 .last_source
                 .load(Ordering::Acquire)
         ),
-        Some(PositionSource::Synthesized)
+        Some(PositionSource::Carried)
     );
     for (position, phase) in &seen[1..] {
         assert_eq!(
@@ -1256,7 +1308,7 @@ fn a_pinned_start_with_live_audio_advances_the_position() {
         );
     }
     assert_eq!(
-        owner.synthesized_blocks.load(Ordering::Acquire),
+        owner.carried_blocks.load(Ordering::Acquire),
         5,
         "起播窗口是**区间**：上升沿之后的 5 块都按块长推进，包括首块"
     );
@@ -1285,7 +1337,7 @@ fn a_pinned_silent_repeat_stays_resting() {
             assert_eq!(block.position, 1_000, "位置必须保持钉住");
         }
     }
-    assert_eq!(owner.synthesized_blocks.load(Ordering::Acquire), 0);
+    assert_eq!(owner.carried_blocks.load(Ordering::Acquire), 0);
 }
 
 /// **起播窗口里的静音/持续音也必须按块长推进。**
@@ -1325,7 +1377,7 @@ fn a_pinned_silent_start_advances_the_position() {
                 .last_source
                 .load(Ordering::Acquire)
         ),
-        Some(PositionSource::Synthesized)
+        Some(PositionSource::Carried)
     );
 }
 
@@ -1333,7 +1385,7 @@ fn a_pinned_silent_start_advances_the_position() {
 ///
 /// 【为什么这是问题一 1a 的回归】VEGAS 的窗口约 0.66 s：前 0.4 s 静音、后 0.26 s 内容。
 /// 旧的逐块锁存只保护静音块；内容一变化，`was_stationary` 清零与
-/// `SYNTHESIZED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
+/// `CARRIED_STALL_BLOCKS` 撤销立刻重新生效，把已记账的 0.4 s 抹掉 ——
 /// 用户听到的就是"0.4 s 处咔"与"0.66 s 断成两个 clip"。区间锁存必须让两段连起来。
 #[test]
 fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
@@ -1384,7 +1436,7 @@ fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
         "窗口内推进的帧数必须覆盖整个窗口"
     );
     assert_eq!(
-        owner.synthesized_blocks.load(Ordering::Acquire),
+        owner.carried_blocks.load(Ordering::Acquire),
         40,
         "40 块全部按块长记账：静音段与内容段都不能被抹掉"
     );
@@ -1473,7 +1525,7 @@ fn a_repeated_nonzero_block_closes_the_window_immediately() {
         "窗口必须因重复内容而收口"
     );
     assert_eq!(
-        owner.synthesized_blocks.load(Ordering::Acquire),
+        owner.carried_blocks.load(Ordering::Acquire),
         1,
         "只有起播那一块被记账，之后的重复内容不得继续推进"
     );
