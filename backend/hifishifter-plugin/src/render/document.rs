@@ -1538,20 +1538,42 @@ impl DocumentSession {
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
         let identities = self.parameter_identities_locked(&host)?;
+        // 【U-4：基线**只能**来自"编辑器真正读到的那一份"】
+        //
+        // `capture_changes` 只记录 `client` 与 `previous_view` 的**差异**。基线一旦
+        // 不是编辑器看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"
+        // 里既有用户的编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成
+        // 用户意图写回源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
+        //
+        // 先取记住的那份（按指纹，唯一能对上"编辑器读到的"的键）；只有在没有基线时才
+        // 退回现算 —— 那种场合是"编辑器还没读过 / 进程重启过"，现算至少不会把旧值当成
+        // 新值写回，但它**不是**权威，所以留一行读数。
         let previous_view = match rebased {
             Some(baseline) => baseline,
-            None => {
-                let mut view = edits.params.clone();
-                if !edits.atlas.is_empty() {
-                    let mut selected = host.clone();
-                    selected.selected_clip_id = client.selected_clip_id.clone();
-                    crate::editor::parameter_atlas::merge_root_projection(
-                        &mut view,
-                        edits.atlas.project_root_records(&selected, &identities)?,
+            None => match self.workspace_baseline(previous) {
+                Some(baseline) => baseline,
+                None => {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.workspace.baseline-absent",
+                        format_args!(
+                            "[ara] line write: baseline=absent (no remembered view for the \
+                             editor fingerprint); the delta is derived from the freshly computed \
+                             projection instead of the view the editor actually read"
+                        ),
                     );
+                    let mut view = edits.params.clone();
+                    if !edits.atlas.is_empty() {
+                        let mut selected = host.clone();
+                        selected.selected_clip_id = client.selected_clip_id.clone();
+                        crate::editor::parameter_atlas::merge_root_projection(
+                            &mut view,
+                            edits.atlas.project_root_records(&selected, &identities)?,
+                        );
+                    }
+                    view
                 }
-                view
-            }
+            },
         };
 
         candidate.atlas = edits

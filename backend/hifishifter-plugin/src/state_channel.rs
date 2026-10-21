@@ -356,14 +356,21 @@ impl EditState {
                 record.root = root.clone();
             }
         }
+        // 【U-7：`gaps` 必须与 `params` 用同一条规则】
+        //
+        // "未锁定"的参数线里，**没有 clip 覆盖的那一段**住在这一层（`atlas.gaps`）。
+        // round 23 修好了 `params` 的 unbound 保留，却漏了这里：宿主重建 region sequence
+        // ⇒ 根轨 id 变 ⇒ 这一层被整片清空。用户看到的是"那个 clip 附近的那段线没了" ——
+        // 而那正是他们最可能在两段音频之间画的那一段。
         candidate.atlas.gaps = self
             .atlas
             .gaps
             .iter()
-            .filter_map(|(root, params)| {
-                mapping
-                    .get(root)
-                    .map(|(new, _)| (new.clone(), params.clone()))
+            .filter_map(|(root, params)| match mapping.get(root) {
+                Some((new, _)) => Some((new.clone(), params.clone())),
+                // 这一轮认不出是谁的 ⇒ 数据留着、不套用（与 `params` 同一纪律）。
+                None if candidate.unbound.contains(root) => Some((root.clone(), params.clone())),
+                None => None,
             })
             .collect();
         candidate.needs_rebind = false;

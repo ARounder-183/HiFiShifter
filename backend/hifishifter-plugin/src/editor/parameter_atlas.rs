@@ -52,21 +52,16 @@ impl RegionGeometry {
     }
     /// **工程锚定**的投影映射：项目时间原地不动。
     ///
-    /// 【为什么需要它】「锁定参数线」关闭时，参数应当留在**工程位置**而不是跟着素材走。
-    /// 用恒等映射（项目→项目）做 `current`，`domain_time` 便退化成"同一项目时刻"，
-    /// 曲线按**绝对项目帧**索引，因此不随片段移动（见 `SourceCurve::domain_time`）。
+    /// 【它服务的存储形状】「锁定参数线」关闭时，曲线以**绝对工程帧**索引存放
+    /// （`CurveDomain::Project`，见 `capture_source_curve`）。于是"工程时刻 → 索引域
+    /// 时刻"这一步必须是恒等映射：查询按绝对工程秒进来，索引也按绝对工程帧取。
     ///
-    /// 【为什么两条轴都必须从 0 起】这一条是本轮用户报障的直接根因。早先这里写
-    /// `project_start` / `project_start`，于是宿主把片段从 [1,2) 移到 [3,4) 之后，
-    /// 映射跟着变成 [3,4) → [3,4)，`domain_time` 取值仍是 0..1 —— 也就是**跟着片段
-    /// 一起搬了家**，"不锁定"于是表现得和"锁定"一模一样，开关完全失效。
-    /// 轴锚在绝对 0 上，映射才真正是"工程时刻原地不动"：片段移走后，
-    /// 新位置 [3,4) 会去读 3..4 秒处的曲线，而那里什么也没有 ⇒ 读出默认值，
-    /// 而原位置 [1,2) 仍留着旧值。这正是"参数留在工程位置"。
+    /// 【为什么两条轴都从 0 起】早先这里写 `project_start`，于是片段从 [1,2) 移到 [3,4)
+    /// 之后映射跟着变成 [3,4)→[3,4)，取值仍是 0..1 —— 也就是**跟着片段一起搬了家**，
+    /// "不锁定"表现得和"锁定"一模一样。轴锚在绝对 0 上，映射才真正是"工程时刻原地不动"。
     ///
-    /// 【为什么长度取 `project_start + duration` 而不是 `duration`】查询是按
-    /// 绝对工程秒进来的（`SourceCurve::project` 传的是 `frame·frame_ms`），
-    /// 映射必须覆盖到该片段末端，否则片段时间稍靠后就越界、整段读成默认值。
+    /// 【为什么长度取 `project_start + duration`】查询是按绝对工程秒进来的，映射必须
+    /// 覆盖到该片段末端，否则片段时间稍靠后就越界、整段读成默认值。
     fn project_map(&self) -> Result<SourceTimeMap, String> {
         SourceTimeMap::linear(
             0.0,
@@ -260,6 +255,7 @@ pub(crate) struct AuthorityParameters {
     /// 参数随宿主编辑如何移动（见 [`ParamAnchor`]）。
     #[serde(default)]
     pub(crate) anchor: ParamAnchor,
+
     /// 连续多少轮它的 modification 已不在文档图里（孤儿回收的宽限期计数）。
     ///
     /// 【为什么 `serde(skip)`】这是**运行时**状态，不是存档数据：它只在本次会话里
@@ -471,21 +467,6 @@ impl Authority<'_> {
             Self::Current(params) => &params.curves,
             Self::Legacy(record) => &record.curves,
         }
-    }
-    /// 这份权威随宿主编辑如何移动。
-    ///
-    /// 【为什么是"当前设置"而不是"捕获时定下的那个值】用户在编辑途中切换
-    /// 「锁定参数线」时期望的是**从现在起**移动片段不再带走参数（或反之）。
-    /// 若沿用捕获时的锚点，开关被切下去之后什么都不会发生 —— 一个看起来生效、
-    /// 实际被忽略的设置，比一个明确禁用掉的菜单更糟（这正是"功能不可用"的一类）。
-    ///
-    /// 【为什么这不会让既有曲线被"重新解释"】锚点只决定**投影时怎么读**曲线，
-    /// 不改变曲线的 `values` / `basis` / `domain`：源域曲线继续按源帧读
-    /// （移动时跟着素材走），工程域曲线继续按绝对工程帧读（留在原位置）。
-    /// 切换开关改变的是"下一次投影选哪套映射"，旧数据一个字节都不动。
-    fn anchor(&self) -> ParamAnchor {
-        // 旧 per-clip 记录没有锚点字段：按源域读，语义与改动前一致。
-        default_anchor()
     }
 
     /// 是否持有一条音高编辑曲线。
@@ -1418,6 +1399,12 @@ impl ParameterAtlas {
                 .map(|existing| existing.anchor)
                 .unwrap_or_else(default_anchor);
             let mut curves = BTreeMap::new();
+            // 【U-10 的读数】这一轮有没有"编辑器读到的那份"可比。`absent` 出现在写日志里
+            // 就说明 U-4 的守卫被绕过（那会把默认值当成用户改动写回）。
+            let view = previous_view
+                .and_then(|view| view.get(&root))
+                .filter(|view| view.frame_period_ms == params.frame_period_ms);
+            let baseline_present = view.is_some();
             for (key, values) in parameter_curves(params) {
                 if values.is_empty() {
                     continue;
@@ -1431,15 +1418,29 @@ impl ParameterAtlas {
                     .and_then(|key| candidate.authorities.get(key))
                     .and_then(|params| params.curves.get(&key))
                     .or_else(|| authority.as_ref().and_then(|a| a.curves().get(&key)));
-                let view = previous_view
-                    .and_then(|view| view.get(&root))
-                    .filter(|view| view.frame_period_ms == params.frame_period_ms);
                 let old_view = view.and_then(|view| {
                     parameter_curves(view)
                         .into_iter()
                         .find(|(name, _)| *name == key)
                         .map(|(_, values)| values)
                 });
+                // 【U-4：有曲线但**没有基线**时，这一轮对这条曲线没有任何可证实的
+                // 用户意图】`capture_source_curve` 的判据是 `incoming != prior`，而 `prior`
+                // 在没有基线时退化到 `pad` —— 于是"当前视图里每一个非默认的帧"都会被
+                // 当成用户改过，整条视图被写回权威。若这份视图本身是"投影范围变窄后的
+                // 默认值"，写回就是把默认值固化成用户数据（不可逆）。
+                //
+                // 保留旧曲线、跳过这一条，是唯一不会丢数据的选择。
+                // 【作用域：只在**确实提供了基线**时生效】`capture()` 的整份捕获
+                // （`previous_view == None`）是"把当前时间线整份采下来"的语义，那时
+                // "整份视图都是用户数据"是唯一可用的解释；而只要调用方给了一份基线，
+                // "基线里没有这一条"就不再等于"用户把它改成了默认值"。
+                if previous_view.is_some() {
+                    if let (Some(existing_curve), None) = (old, old_view) {
+                        curves.insert(key, existing_curve.clone());
+                        continue;
+                    }
+                }
                 if let (Some(old), Some(old_view)) = (old, old_view) {
                     if values == old_view {
                         curves.insert(key, old.clone());
@@ -1464,6 +1465,23 @@ impl ParameterAtlas {
                             && selected.id != clip.id
                     })
                     .map(|selected| (selected.start_sec, selected.start_sec + selected.length_sec));
+                // 【U-1：映射与存储域必须由同一个值决定】
+                //
+                // 锁定（`Source`）⇒ 曲线按源秒存、映射折成源秒 ⇒ 片段移动后仍读到同一段；
+                // 不锁定（`Project`）⇒ 曲线按绝对工程帧存、映射恒等 ⇒ 片段移走后新位置
+                // 落在覆盖之外，原位置仍留着旧值。
+                //
+                // 【为什么不能"读用当前设置、写用入库时定下的值"】用户拨一下开关，两者
+                // 对"这份数组按什么时间索引"的判断就相反 —— 之后任何一次自动应用都会把
+                // 曲线按错误的映射读一遍再写回。那正是"关掉锁定之后一编辑就重置"。
+                // 所以 `bake_curve_to_anchor` 会在发现两者不一致时**先烘焙一次**，
+                // 让数组换到新域，之后读写继续共用同一个判断。
+                let baked = authority.as_ref().and_then(|authority| {
+                    authority.curves().get(&key).and_then(|curve| {
+                        bake_curve_to_anchor(curve, anchor, &geometry, &key, params.frame_period_ms)
+                    })
+                });
+                let old = baked.as_ref().or(old);
                 let current = match anchor {
                     ParamAnchor::Source => geometry.map()?,
                     ParamAnchor::Project => geometry.project_map()?,
@@ -1477,6 +1495,7 @@ impl ParameterAtlas {
                     key: &key,
                     frame_ms: params.frame_period_ms,
                     protected,
+                    anchor,
                 })?;
                 // 内容没变就保留旧对象：避免无谓的代际推进与存档改写。
                 //
@@ -1513,11 +1532,22 @@ impl ParameterAtlas {
             // 【为什么锚点沿用已有值】用户在编辑途中切换「锁定参数线」时，既有曲线不应被
             // 重新解释。第一次播种时定下，之后沿用。
             if let Some(key) = key_for_anchor {
+                // 【U-5：**永不删除**】"这一轮没看到曲线"有三种成因：身份没跟上、几何不可解、
+                // 以及用户真的清空了。旧实现在这里 `remove` —— 前两种会被误判成第三种，
+                // 而删除是**不可逆**的数据销毁（权威是唯一被持久化的那一份）。
+                // 现在只累加宽限期，真正的回收留给 `reclaim_orphans`（它要求"宿主图里
+                // 确实没有这条 modification"且连续多轮成立）。
                 if curves.is_empty() {
-                    // 没有任何曲线 ⇒ 不留空条目。空条目与"从没编辑过"在投影上完全等价，
-                    // 却会让存档带上一个无意义的权威段（并抬高状态代际）。
-                    candidate.authorities.remove(&key);
+                    if let Some(existing) = candidate.authorities.get_mut(&key) {
+                        existing.unseen_rounds = existing.unseen_rounds.saturating_add(1);
+                    }
                 } else {
+
+                    let before = candidate
+                        .authorities
+                        .get(&key)
+                        .map(|existing| non_default_frames(&existing.curves))
+                        .unwrap_or(0);
                     candidate.set_authority(
                         &key,
                         AuthorityParameters {
@@ -1527,6 +1557,31 @@ impl ParameterAtlas {
                             // 正在被一条活 region 认领 ⇒ 宽限期清零。
                             unseen_rounds: 0,
                         },
+                    );
+                    // 【U-10：每一次写都必须有一行，且必须能回答"少了没有"】
+                    //
+                    // `before > after` 就是"用户数据被抹平"的直接证据。它出现在这里
+                    // （自动捕获路径）而不是只在提交路径上，是因为**自动路径也能删数据**：
+                    // 只要某一轮的视图里出现了默认值，`incoming != prior` 就会把它当成
+                    // 用户改动写回。I-4 的判据就靠这一行兑现。
+                    let after = non_default_frames(&curves);
+                    let level = if after < before {
+                        log::Level::Error
+                    } else {
+                        log::Level::Warn
+                    };
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        level,
+                        "ara.atlas.line-write",
+                        format_args!(
+                            "[ara] line write: root={root} key={key} anchor={anchor:?} \
+                             curves={} frames={}..{} baseline={} before_nondefault={before} \
+                             after_nondefault={after}",
+                            curves.len(),
+                            begin,
+                            end,
+                            if baseline_present { "present" } else { "absent" },
+                        ),
                     );
                 }
             }
@@ -2395,18 +2450,16 @@ impl SourceCurve {
             // 捕获侧的对照投影都用它，行为与域显式化之前完全一致。
             _ => frame_range(geometry, frame_ms)?,
         };
-        // **锚点**决定用哪条映射 —— 这是「锁定参数线」真正生效的地方：
-        //   * 锁定（`Source`）：工程时刻 → 源秒，再按本曲线的索引域取样。
-        //     宿主移动 / 裁剪 / 拉伸片段时，同一条源位置在新的源窗里仍被读到
-        //     ⇒ 参数跟着素材走。
-        //   * 不锁定（`Project`）：工程时刻原地不动（恒等映射
-        //     `RegionGeometry::project_map`）。片段移走之后，新位置对应的
-        //     工程时刻落在曲线覆盖之外 ⇒ 该处读出默认值，而原位置仍留着旧值
-        //     ⇒ 参数留在工程位置。
+        // **锚点决定用哪条映射**，而映射必须与曲线的**存储域**一致 —— 这是本模块
+        // 最容易出错的一处，所以两者由同一个枚举值决定（见 `capture_source_curve`）：
+        //   * 锁定（`Source`）：曲线按源秒存储，映射折成源秒 ⇒ 片段移动后仍读到同一段；
+        //   * 不锁定（`Project`）：曲线按绝对工程帧存储，映射是恒等 ⇒ 片段移走后新位置
+        //     落在曲线覆盖之外（读出默认值），原位置仍留着旧值。
         //
-        // 【为什么不能改用曲线的 `domain` 选映射】那样做会让两种锚点读出同一份
-        // 值 —— 开关看起来能动，实际永远只有一种效果。这正是用户报的
-        // "没有尊重锁定参数线是否启用"。
+        // 【为什么读和写必须共用同一个判断】早先读用当前设置、写用入库时定下的值。
+        // 用户在编辑途中拨一下开关，两者对"这份数组按什么时间索引"的判断就相反 ——
+        // 于是任何一次自动应用都会把曲线按错误的映射读一遍、再按"用户改过"写回。
+        // 那正是用户报的"关掉锁定之后一编辑就重置"。
         let current = match anchor {
             ParamAnchor::Source => geometry.map()?,
             ParamAnchor::Project => geometry.project_map()?,
@@ -2592,6 +2645,92 @@ fn sample_project_frames(values: &[f32], frame: f64, key: &str) -> f32 {
 ///
 /// 【为什么只比这三项】`reservation` 是预算登记的句柄，不是数据；把它算进来会让
 /// "内容没变"被误判成"变了"，于是每次捕获都推进代际、重写存档。
+/// 把一条曲线**换到另一个存储域**（「锁定参数线」被拨动时的一次性烘焙）。
+///
+/// 【为什么必须烘焙，而不是"换个映射去读"】曲线的存储域决定 `values[i]` 是"源第 i 格"
+/// 还是"工程第 i 格"。用另一种映射去读同一个数组，得到的是**整体偏移一个源窗起点**
+/// 的一串数 —— 用户看到的是"参数线被搬走了"，而随后的写回又把这个错误位置固化成
+/// 新数据（不可逆）。烘焙把这个歧义一次性消掉：数据真的搬到新域，之后读写继续共用
+/// 同一个判断。
+///
+/// 【返回 `None` 的三种情形】域已经一致（无事可做）、几何不可解、或者曲线为空。
+/// 三种都不该改动任何东西。
+fn bake_curve_to_anchor(
+    curve: &SourceCurve,
+    target: ParamAnchor,
+    geometry: &RegionGeometry,
+    key: &str,
+    frame_ms: f64,
+) -> Option<SourceCurve> {
+    let wanted = match target {
+        ParamAnchor::Source => CurveDomain::Source,
+        ParamAnchor::Project => CurveDomain::Project,
+    };
+    if curve.domain == wanted || curve.values.is_empty() {
+        return None;
+    }
+    if !(frame_ms.is_finite() && (0.1..=1000.).contains(&frame_ms)) {
+        return None;
+    }
+    match wanted {
+        CurveDomain::Source => {
+            // 工程域 → 源域：按**当前**源窗逐格取工程时刻，再采样旧曲线。
+            let step = frame_ms / 1000.;
+            let lo = geometry.source_start;
+            let hi = geometry.source_start + geometry.source_duration;
+            let map = geometry.map().ok()?;
+            let first = (lo / step).floor().max(0.) as usize;
+            let last = (hi / step).ceil() as usize;
+            if last < first || last >= 1_000_000 {
+                return None;
+            }
+            let mut values = Vec::with_capacity(last - first + 1);
+            for k in first..=last {
+                let source_sec = (k as f64 * step).clamp(lo, hi);
+                let project_sec = map.source_to_project(source_sec)?;
+                values.push(
+                    curve
+                        .sample_indexed(project_sec, key, frame_ms)
+                        .unwrap_or_else(|| pad(key)),
+                );
+            }
+            Some(SourceCurve {
+                basis: None,
+                domain: CurveDomain::Source,
+                first_frame: first,
+                frame_ms,
+                values: Arc::new(values),
+                reservation: None,
+            })
+        }
+        _ => {
+            // 源域 → 工程域：用当前几何投影一次，得到按绝对工程帧索引的数组。
+            let (first, _) = frame_range(geometry, frame_ms).ok()?;
+            let projected = curve
+                .project(
+                    geometry,
+                    key,
+                    frame_ms,
+                    ParamAnchor::Source,
+                    CurveDomain::Project,
+                )
+                .ok()?;
+            // 【为什么切掉前 `first` 格】`project` 返回的是**绝对工程帧索引**的数组
+            // （下标就是帧号），而本模块的曲线一律用 `first_frame` 记"第 0 格是第几帧"。
+            // 两种约定混用会让 `sample_indexed` 少减一次 `first_frame`，整条曲线偏移。
+            let values = projected.get(first..).unwrap_or(&[]).to_vec();
+            Some(SourceCurve {
+                basis: None,
+                domain: CurveDomain::Project,
+                first_frame: first,
+                frame_ms,
+                values: Arc::new(values),
+                reservation: None,
+            })
+        }
+    }
+}
+
 fn same_curve(a: &SourceCurve, b: &SourceCurve) -> bool {
     let domain_equal = match (&a.basis, &b.basis) {
         (None, None) => true,
@@ -2620,6 +2759,12 @@ struct SourceCapture<'a> {
     frame_ms: f64,
     /// 被另一条选中片段覆盖的工程区间（该区间不写）。
     protected: Option<(f64, f64)>,
+    /// 「锁定参数线」的当前取值：它决定这条曲线写进**哪个存储域**。
+    ///
+    /// 【为什么写入侧也要它】读与写必须对"`values[i]` 是什么时间"给出同一个回答。
+    /// 早先写入侧恒写源域、而"不锁定"的读法按工程域解释同一个数组 —— 两者相反，
+    /// 于是用户拨一下开关，之后任何一次自动应用都会把曲线按错误的映射读一遍再写回。
+    anchor: ParamAnchor,
 }
 
 /// 把一次捕获写回**源域**，返回这条曲线的新形状。
@@ -2631,6 +2776,23 @@ struct SourceCapture<'a> {
 ///
 /// 【为什么要与既有曲线取并集】别的半段已经写过的源区间不能被这一次捕获裁掉
 /// （那正是旧实现 `set_authority` 整份覆盖的翻版）。
+/// 一条根轨的曲线里"非默认帧"的总数（I-4 的判据）。
+///
+/// 【为什么这个数就够】用户曲线的价值全在"与默认值不同的帧"上。任何一次自动写回
+/// 若让这个数**变小**，就说明有用户数据被抹平了 —— 而那正是"参数回退"的定义。
+/// 把判据收敛成一个整数，才能让 `[ara] line write` 那一行既可读又可断言。
+fn non_default_frames(curves: &BTreeMap<String, SourceCurve>) -> usize {
+    let mut total = 0_usize;
+    for (key, curve) in curves {
+        let default = pad(key);
+        total += curve
+            .values
+            .iter()
+            .filter(|value| value.is_finite() && (**value - default).abs() > 1e-6)
+            .count();
+    }
+    total
+}
 fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, String> {
     let SourceCapture {
         existing,
@@ -2641,6 +2803,7 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
         key,
         frame_ms,
         protected,
+        anchor: request_anchor,
     } = request;
     if !frame_ms.is_finite() || !(0.1..=1000.).contains(&frame_ms) {
         return Err("invalid source parameter frame domain".into());
@@ -2710,9 +2873,25 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
     let reservation = crate::render::budget::global_budget()
         .reserve(bytes)
         .ok_or("source parameter memory budget exceeded")?;
+    // 【存储域由锚点决定 —— 这是「锁定参数线」真正落地的地方】
+    //
+    // 锁定 ⇒ 源域：`values[i]` 是"源第 first_frame+i 格"，读取时用当前几何折成源秒，
+    // 于是片段移动后仍读到同一段（参数跟着素材走）。
+    //
+    // 不锁定 ⇒ 工程域：`values[i]` 是"工程第 first_frame+i 格"，读取时是恒等映射，
+    // 于是片段移走后新位置落在覆盖之外（读出默认值），原位置仍留着旧值。
+    let domain = match request_anchor {
+        ParamAnchor::Source => CurveDomain::Source,
+        ParamAnchor::Project => CurveDomain::Project,
+    };
+    let first_frame = match domain {
+        // 工程域的格号是**绝对工程帧**；源域的是源帧（上面已算好）。
+        CurveDomain::Project => (geometry.project_start * 1000. / frame_ms).floor().max(0.) as usize,
+        _ => first_frame,
+    };
     Ok(SourceCurve {
         basis: None,
-        domain: CurveDomain::Source,
+        domain,
         first_frame,
         frame_ms,
         values: Arc::new(samples),
@@ -3924,7 +4103,48 @@ mod tests {
     /// id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**。图集修好了
     /// 但这里不标记，GUI 上仍然会看到"参数没了"。
     #[test]
-    fn projecting_an_authority_pitch_curve_marks_it_as_user_data() {
+     /// **拨动「锁定参数线」是一次烘焙，而不是一次重新解释。**
+    ///
+    /// 【为什么这条是"关掉锁定之后一编辑就重置"的回归测试】曲线的存储域决定
+    /// `values[i]` 是"源第 i 格"还是"工程第 i 格"。早先写入侧恒写源域，而"不锁定"
+    /// 的读法按工程域解释同一个数组 —— 读与写对"这是什么时间"的回答相反。用户拨一下
+    /// 开关，之后任何一次自动应用都会把曲线按错误的映射读一遍、再按"用户改过"写回：
+    /// 一条整体偏移一个源窗起点的假曲线被固化成新数据，且不可逆。
+    ///
+    /// 烘焙把歧义一次性消掉：数据真的搬到新域，之后读写继续共用同一个判断。
+    #[test]
+    fn toggling_the_lock_bakes_the_curve_instead_of_reinterpreting_it() {
+        let geometry = geometry(&host(1., 1., 0., 1.).clips[0]).unwrap();
+        let mut atlas = ParameterAtlas::default();
+        // 锁定状态下捕获到的形状：源域，格号从源窗起点（源 0s）起。
+        atlas.seed_test_pitch_curve("mod:mod", 250., vec![60., 62., 64., 66.]);
+        let source_curve = atlas.authorities["mod:mod"].curves["pitch_edit"].clone();
+        assert_eq!(source_curve.domain, CurveDomain::Source, "锁定 ⇒ 源域");
+
+        // 关掉锁定：烘焙到工程域。格号必须变成**绝对工程帧**（工程 1s ⇒ 第 4 格）。
+        let baked = bake_curve_to_anchor(
+            &source_curve,
+            ParamAnchor::Project,
+            &geometry,
+            "pitch_edit",
+            250.,
+        )
+        .expect("域不同 ⇒ 必须烘焙");
+        assert_eq!(baked.domain, CurveDomain::Project, "不锁定 ⇒ 工程域");
+        assert_eq!(baked.first_frame, 4, "工程域的格号是绝对工程帧");
+        assert_eq!(
+            &baked.values[..4],
+            &[60., 62., 64., 66.],
+            "烘焙后同一段工程时间上的值必须逐点相同"
+        );
+
+        // 已经在新域 ⇒ 不再烘焙（幂等）。
+        assert!(
+            bake_curve_to_anchor(&baked, ParamAnchor::Project, &geometry, "pitch_edit", 250.).is_none(),
+            "域一致时不得再动数据"
+        );
+    }
+   fn projecting_an_authority_pitch_curve_marks_it_as_user_data() {
         let ids = identities();
         let original = edited();
         let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();
