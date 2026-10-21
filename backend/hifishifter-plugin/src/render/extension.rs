@@ -810,6 +810,12 @@ struct StreamBlock {
     repeated_nonzero: bool,
     /// 本块是否全零（门控/前导静音判据）。
     silent: bool,
+    /// 本块有效位置的来源（见 `PositionSource`）。
+    ///
+    /// 【为什么捕获侧需要它】`Synthesized` 表示"这个位置是我们按块长推的，不是宿主
+    /// 说的"。捕获据此把这些帧排除在覆盖之外 —— 否则宿主在钉住窗口里送来的静音/重复
+    /// 内容会被当成"我们录到的素材"按满幅输出，内容起点就是一次 0 → 满电平的阶跃。
+    position_source: PositionSource,
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
@@ -865,6 +871,26 @@ const DECLICK_HISTORY_FRAMES: usize = 960;
 /// 只够躲开阶跃，躲不开"音色突变"的听感 —— 用户描述的"播放中途随机咔"里有一份
 /// 正是渲染恰好在起播后 0.4~0.7 s 完成、把 Raw 换成 Processed 的那一下。
 const OUTPUT_WIDE_CROSSFADE_FRAMES: usize = 960;
+/// 本流**第一块**的淡入宽度（帧）。48 kHz 下 5 ms。
+///
+/// 【为什么比 `OUTPUT_DECLICK_FRAMES` 宽】接缝淡化有"上一块输出的尾巴"作为旧侧，
+/// 1.3 ms 就够把两条连续信号接上；首块**没有任何旧侧**，1.3 ms 在听感上仍是一次
+/// 突变。5 ms 是"听不出渐强、但足以消掉阶跃"的那一档。
+///
+/// 【为什么不是 20 ms】首块之后马上就是真实内容；20 ms 的起播淡入会被听成
+/// "开头有点闷"。
+const OUTPUT_FIRST_BLOCK_FADE_FRAMES: usize = 240;
+
+/// 输出源的**内容家族**（接缝判据的输入，见 `ExtensionOwner::family`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContentFamily {
+    /// 宿主原声（透传 / 待合成 / ARA 未接管）。
+    Passthrough,
+    /// 原始捕获磁带（未处理）。
+    Raw,
+    /// 算出来的处理结果。
+    Processed,
+}
 
 /// 一次接缝该怎么处理。
 ///
@@ -878,6 +904,30 @@ enum Seam {
     Crossfade,
     /// 同一段素材的两种处理（Raw ↔ Processed）：等功率交叉，宽度 20 ms。
     WideCrossfade,
+    /// 本流的**第一块**：没有"上一块输出的尾巴"，按零起点淡入。
+    ///
+    /// 【为什么需要它】"真首块原样输出"这条旧契约的理由是"从零淡入会改变宿主直通
+    /// 的样本"。那只对**透传**成立（透传的样本就是宿主正在播的东西，它自己已经
+    /// 连续）。当第一块是**我们算出来的内容**（Raw / Processed）时，它从哪一相位
+    /// 开始是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。
+    FirstBlock,
+}
+
+impl Seam {
+    /// 诊断编码（进块账本）。**只增不改**：日志里已经出现过的数字必须保持含义。
+    fn code(self) -> crate::render::click::SeamCode {
+        match self {
+            Self::FadeIn => crate::render::click::SeamCode::FadeIn,
+            Self::Crossfade => crate::render::click::SeamCode::Crossfade,
+            Self::WideCrossfade => crate::render::click::SeamCode::WideCrossfade,
+            Self::FirstBlock => crate::render::click::SeamCode::FadeIn,
+        }
+    }
+
+    /// 这一次淡化是否用等功率权重（见 `arm_seam` 的说明）。
+    fn uses_equal_power(self) -> bool {
+        matches!(self, Self::FadeIn | Self::WideCrossfade | Self::FirstBlock)
+    }
 }
 
 /// 读游标跳变超过这个宽度就**整块直通**宿主原声（而不是淡化）。
@@ -904,8 +954,19 @@ struct OutputDeclickState {
     fade_active: AtomicBool,
     /// 本次淡化用多宽（帧）。0 = 还没设过（按 `OUTPUT_DECLICK_FRAMES` 处理）。
     fade_len: AtomicU32,
+    /// 本次淡化用哪条权重（`1` = 等功率，`0` = 线性）。见 `Seam::uses_equal_power`。
+    ///
+    /// 【为什么权重也要进状态】淡化可以跨块继续，而"两条不同源"与"同一份内容的
+    /// 两次渲染"需要**不同**的数学。把结论存下来，跨块的每一帧才用同一条曲线。
+    fade_curve: AtomicU32,
     last_token: AtomicU64,
-    /// 本流上一次输出源的**种类**（0 = 还没见过任何输出）。
+    /// 本流是否已经输出过**至少一块**。
+    ///
+    /// 【为什么不能用 `primed_kind == 0` 表达"没见过"】`TransferOutput::Untouched` 的
+    /// 编码值**就是 0**，而 ARA 实例的输出仲裁恒为它。于是"从没见过"与"一直见到 0"
+    /// 在旧判据下无法区分：ARA 的每一块都会被当成"真首块"。
+    primed: AtomicBool,
+    /// 本流上一次输出源的**种类**（`primed` 为假时无意义）。
     ///
     /// 【为什么记种类而不是一个 bool】真首块没有"上一块输出的尾巴"，从零淡入会改变
     /// 宿主直通/录制监听的样本（测试与真实行为都要求第一块原样输出）。但"上一轮播放
@@ -927,10 +988,30 @@ impl Default for OutputDeclickState {
             fade_pos: AtomicU32::new(0),
             fade_active: AtomicBool::new(false),
             fade_len: AtomicU32::new(0),
+            fade_curve: AtomicU32::new(0),
             last_token: AtomicU64::new(0),
+            primed: AtomicBool::new(false),
             primed_kind: AtomicU32::new(0),
         }
     }
+}
+
+/// 一块分层拷贝的**覆盖读数**（音频线程写、同块读走）。
+///
+/// 【为什么用原子而不是局部变量】写它的地方在 `snapshot.rs`（只知道"哪一帧属于
+/// 快照"），读它的地方在 `apply_output_declick`（只知道"这一块输出了什么"）。
+/// 两者之间隔着一次跨模块调用，而那块缓冲的生命周期不允许我们把闭包传出去 ——
+/// 一个每流一格、每块重置的原子单元是最小耦合。
+#[derive(Default)]
+struct LayeredProbeCell {
+    /// 本块里**不属于我们**的帧数。
+    uncovered: AtomicU32,
+    /// 那些帧上宿主输入的峰值（`NaN` 位模式 = 本块没有未覆盖帧）。
+    input_peak: AtomicU32,
+    /// 覆盖边（覆盖 ↔ 未覆盖的翻转点）是否落在本块内。
+    edge: AtomicBool,
+    /// 本块写过这份读数（否则读走的是上一块的值）。
+    valid: AtomicBool,
 }
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
@@ -1086,6 +1167,17 @@ pub(crate) struct ExtensionOwner {
     output_token: [AtomicU64; 3],
     /// 每条进程流的输出接缝状态。
     declick: [OutputDeclickState; 3],
+    /// 【B0】输出接缝的块账本：音频线程只写原子量，UI 线程读它打印 `[click]`。
+    ///
+    /// 【为什么它是账本而不是计数器】"咔"的五个可能机理（假静音、空回退、线性交叉
+    /// 淡化、首块原样输出、位置跳变）只能靠**同一块上的多个读数**互相区分。只数
+    /// "发生过几次"的计数器永远回答不了"这一次是哪一种"。
+    click: crate::render::click::ClickLedger,
+    /// 【B0】本块分层拷贝的覆盖读数（音频线程写，`apply_output_declick` 读走）。
+    ///
+    /// 【为什么按流分开】prefetch 与 realtime 交替到达；共用一格会让一条流的
+    /// "未覆盖帧数"被另一条流当成自己的。
+    layered_probe: [LayeredProbeCell; 3],
     /// 已发布处理结果对应的**素材代次**（`0` = 还没发过）。
     ///
     /// 【为什么单独记而不是从 `transfer_prepared` 里拆位】那个版本号是
@@ -3677,6 +3769,112 @@ impl ExtensionOwner {
         kind | (revision << 8)
     }
 
+    /// 【B0】记下本块分层拷贝的覆盖读数（音频线程）。
+    pub(crate) fn note_layered_probe(
+        &self,
+        stream: ProcessStream,
+        probe: crate::render::snapshot::LayeredProbe,
+    ) {
+        let Some(cell) = self.layered_probe.get(stream.index()) else {
+            return;
+        };
+        cell.uncovered.store(probe.uncovered as u32, Ordering::Relaxed);
+        cell.input_peak.store(
+            probe.input_peak.unwrap_or(f32::NAN).to_bits(),
+            Ordering::Relaxed,
+        );
+        cell.edge.store(probe.edge, Ordering::Relaxed);
+        cell.valid.store(true, Ordering::Release);
+    }
+
+    /// 【B0】取走本块的覆盖读数（音频线程；取走即失效，避免下一块读到陈旧值）。
+    fn take_layered_probe(&self, stream: ProcessStream) -> Option<(u32, f32, bool)> {
+        let cell = self.layered_probe.get(stream.index())?;
+        if !cell.valid.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        Some((
+            cell.uncovered.load(Ordering::Relaxed),
+            f32::from_bits(cell.input_peak.load(Ordering::Relaxed)),
+            cell.edge.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// 【B0】量一块输出的形状并记进账本。**音频线程**：只读缓冲、只写原子量。
+    ///
+    /// 【为什么量 `max_step` 而不是别的】"咔"在波形上就是相邻样本的一次大跳变。
+    /// 峰值、RMS、过零率都看不见它 —— 一个 20 ms 的音乐片段可以峰值不变而中间
+    /// 跳一下。相邻差分是唯一直接对应听感的读数。
+    fn record_click_sample(
+        &self,
+        stream: ProcessStream,
+        kind: u8,
+        seam: crate::render::click::SeamCode,
+        first_of_stream: bool,
+        output: &crate::audio_abi::AudioBusBuffers,
+        frames: usize,
+    ) {
+        let channels = (output.num_channels as usize).min(2);
+        let mut max_step = 0.0_f32;
+        let mut peak = 0.0_f32;
+        let mut first = 0.0_f32;
+        let mut last = 0.0_f32;
+        for channel in 0..channels {
+            // SAFETY: 调用方保证总线有 `channels` 个可读平面，且至少 `frames` 帧。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            let mut previous = 0.0_f32;
+            for index in 0..frames {
+                // SAFETY: `index < frames`。
+                let value = unsafe { *plane.add(index) };
+                if !value.is_finite() {
+                    continue;
+                }
+                peak = peak.max(value.abs());
+                max_step = max_step.max((value - previous).abs());
+                if channel == 0 {
+                    if index == 0 {
+                        first = value;
+                    }
+                    last = value;
+                }
+                previous = value;
+            }
+        }
+        let (uncovered, input_peak, edge) = self
+            .take_layered_probe(stream)
+            .unwrap_or((0, f32::NAN, false));
+        self.click.record(crate::render::click::BlockSample {
+            stream: stream.index() as u8,
+            kind,
+            seam,
+            fade_len: self.declick[stream.index()]
+                .fade_len
+                .load(Ordering::Acquire),
+            frames: frames as u32,
+            first,
+            last,
+            max_step,
+            peak,
+            input_peak,
+            uncovered,
+            edge,
+            first_of_stream,
+        });
+    }
+
+    /// 【B0】把尚未报告过的可疑块打印成 `[click]` 行。**非实时线程**（UI 定时器）。
+    ///
+    /// 【为什么由 UI 定时器驱动】它是唯一稳定存在、且不在音频线程上的周期点；
+    /// 音频线程只负责记录。报告本身是"扫 256 个原子 + 格式化"，与一次界面刷新同量级。
+    pub(crate) fn log_click_report(&self) {
+        for line in self.click.drain_suspicious() {
+            log::warn!("[click] {line}");
+        }
+    }
+
     /// 记录本块输出源，并做接缝去咔。
     ///
     /// 【为什么在写完输出之后调用】先用新源写满整块，再把前 `OUTPUT_DECLICK_FRAMES`
@@ -3697,22 +3895,42 @@ impl ExtensionOwner {
     /// 因此判据是**异源**：只要两侧有一个是透传类，或者两侧不属于同一个"已算出的"
     /// 内容族（Raw 与 Processed 分属不同族），就淡入。
     fn seam(previous_kind: u8, kind: u8) -> Seam {
-        let passthrough = |code: u8| {
-            code == TransferOutput::PendingSynthesis.code()
-                || code == TransferOutput::PassThrough.code()
-                || code == TransferOutput::Untouched.code()
-        };
-        // 任一侧是透传 ⇒ 异源：另一侧是我们算出来的内容，叠起来就是"两声并发"。
-        if passthrough(previous_kind) || passthrough(kind) {
-            return Seam::FadeIn;
+        match (Self::family(previous_kind), Self::family(kind)) {
+            // 两侧都是宿主原声：同一份信号，短交叉就够。
+            (ContentFamily::Passthrough, ContentFamily::Passthrough) => Seam::Crossfade,
+            // 任一侧是透传 ⇒ 异源：另一侧是我们算出来的内容，叠起来就是"两声并发"。
+            (ContentFamily::Passthrough, _) | (_, ContentFamily::Passthrough) => Seam::FadeIn,
+            // Raw 与 Processed 是**同一段素材的两种处理**：内容相关但相位不同，
+            // 该用 20 ms 等功率交叉，而不是 1.3 ms 的淡入。
+            (ContentFamily::Raw, ContentFamily::Processed)
+            | (ContentFamily::Processed, ContentFamily::Raw) => Seam::WideCrossfade,
+            // 同族、同源、只是版本变了：内容几乎相同，短交叉即可。
+            _ => Seam::Crossfade,
         }
-        // Raw 与 Processed/StaleProcessed 是**同一段素材的两种处理**：内容高度相关，
-        // 该用 20 ms 等功率交叉，而不是 1.3 ms 的淡入。
-        let is_raw = |code: u8| code == TransferOutput::Raw.code();
-        if is_raw(previous_kind) != is_raw(kind) {
-            return Seam::WideCrossfade;
+    }
+
+    /// 输出源的内容家族。接缝判据只关心"这一侧是什么内容"，不关心具体是哪一档。
+    ///
+    /// 【为什么收敛成三档】`TransferOutput` 有七个取值，但接缝只需要回答一个问题：
+    /// 两侧的信号**是否同源**。透传类（宿主原声）与算出来的内容之间必须淡入；
+    /// Raw 与 Processed 是同一段素材的两种处理，可以交叉；其余同族切换同理。
+    /// 按七个取值逐个写分支，每加一档就要重审一遍全部组合 —— 那正是这里曾经出过
+    /// 两次错的原因：`Processed` 与 `Raw` 曾被当成"同源切换"，于是 64 帧里把两段
+    /// 不相干的信号线性叠在一起。
+    fn family(kind: u8) -> ContentFamily {
+        if kind == TransferOutput::Raw.code() {
+            ContentFamily::Raw
+        } else if kind == TransferOutput::PendingSynthesis.code()
+            || kind == TransferOutput::PassThrough.code()
+            // 录制监听送出去的也是**宿主原声**：`Recording` 分支把输入总线原样写出，
+            // 它从哪一相位开始是宿主的事，我们不该给它加淡入（那会把录制监听的前
+            // 5 ms 削掉）。
+            || kind == TransferOutput::Recording.code()
+        {
+            ContentFamily::Passthrough
+        } else {
+            ContentFamily::Processed
         }
-        Seam::Crossfade
     }
 
     /// 按接缝种类装填一次淡化：抓下旧信号、定宽度、复位进度。
@@ -3723,12 +3941,20 @@ impl ExtensionOwner {
         let len = match seam {
             Seam::FadeIn | Seam::Crossfade => OUTPUT_DECLICK_FRAMES,
             Seam::WideCrossfade => OUTPUT_WIDE_CROSSFADE_FRAMES,
+            Seam::FirstBlock => OUTPUT_FIRST_BLOCK_FADE_FRAMES,
         };
         // 淡入 = 把旧信号掩成 0；交叉淡化保留旧信号。
         let keep = match seam {
-            Seam::FadeIn => 0,
+            Seam::FadeIn | Seam::FirstBlock => 0,
             _ => u32::MAX,
         };
+        // 【等功率只在"两条不同源"时用】FadeIn / FirstBlock 的旧侧恒为 0，等功率
+        // 退化成一条两端平缓的斜坡（比线性更平滑）；WideCrossfade 两侧是互不相关的
+        // 信号，线性会在中点掉 6 dB。Crossfade 两侧是**同一份内容**的两次渲染
+        // （相关性接近 1），等功率会在中点叠出 +3 dB 的鼓包 —— 那种场合线性才对。
+        state
+            .fade_curve
+            .store(u32::from(seam.uses_equal_power()), Ordering::Release);
         // 旧信号是"上一块输出的最后 `len` 帧"，在历史缓冲里位于末尾。
         let base = DECLICK_HISTORY_FRAMES - len;
         for channel in 0..2 {
@@ -3760,15 +3986,40 @@ impl ExtensionOwner {
         // 由下面的 `last_token` 分支处理。第一块的种类若与本流已知的最后种类不同，
         // 说明上一轮播放停在另一种源上 —— 那一跳正是"咔声位置不固定"的来源之一。
         let kind = (token & 0xFF) as u32;
-        let first_kind = state.primed_kind.swap(kind, Ordering::AcqRel);
-        if first_kind == 0 {
-            // 真首块：没有"上一块输出的尾巴"，原样输出。
+        // `None` = 本流还没输出过任何一块（真首块）；`Some(prev)` = 上一块的种类。
+        // 【为什么两行而不是 `then(|| …)`】`bool::then` 在条件为假时**不调用**闭包，
+        // 于是首块那一轮 `primed_kind` 永远不会被写入 —— 下一块就会拿"0"当上一块的
+        // 种类（而 0 恰好是 `Untouched` 的编码），把一次真实的源切换判成"同族"。
+        let was_primed = state.primed.swap(true, Ordering::AcqRel);
+        let previous_kind = state.primed_kind.swap(kind, Ordering::AcqRel);
+        let first_kind = was_primed.then_some(previous_kind);
+        // 【B0】本块装填的是哪一种接缝（`None` = 没有源切换）。账本要它来区分
+        // "这一下咔来自源切换"与"这一下咔来自覆盖边界"。
+        let mut armed = crate::render::click::SeamCode::None;
+        if first_kind.is_none() {
+            // 真首块：没有"上一块输出的尾巴"。
+            //
+            // 【为什么不是无条件原样输出】旧契约是"从零淡入会改变宿主直通的样本"，
+            // 而那**只对透传成立**：透传的样本就是宿主正在播的东西，它自己已经连续。
+            // 当第一块是**我们算出来的内容**（Raw / Processed）时，它从哪一相位开始
+            // 是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。
+            // 【作用域：只给 Transfer 的播放通路】首块淡入要解决的是"我们自己算出来的
+            // 内容从任意相位开始"—— 那是 Transfer 通路（插件直接对着一条轨出声）的形状。
+            // ARA 通路由宿主按 region 调度，区块起点与 item 淡化都是宿主的事；在那里
+            // 再叠一层淡入会改动宿主自己的包络（且没有任何报障指向它）。
+            let transfer_content = !self.is_bound() && self.transfer.has_material();
+            if transfer_content && Self::family(kind as u8) != ContentFamily::Passthrough {
+                self.arm_seam(state, Seam::FirstBlock);
+                armed = crate::render::click::SeamCode::FadeIn;
+            }
             state.last_token.store(token, Ordering::Release);
-        } else if first_kind != kind {
+        } else if first_kind != Some(kind) {
             // 本轮从未去过咔、但上一轮停在另一种源上：仍然要去咔。至于是交叉淡化
-            // 还是淡入，取决于上一个源是不是透传（见 `should_fade_in_...`）。
-            let previous_kind = first_kind as u8;
-            self.arm_seam(state, Self::seam(previous_kind, kind as u8));
+            // 还是淡入，取决于上一个源是不是透传（见 `seam`）。
+            let previous_kind = first_kind.unwrap_or(kind) as u8;
+            let seam = Self::seam(previous_kind, kind as u8);
+            self.arm_seam(state, seam);
+            armed = seam.code();
             state.last_token.store(token, Ordering::Release);
         } else if self.force_declick[stream.index()].swap(false, Ordering::AcqRel) {
             // 【T-A1-1：同一份源内部的读位置跳变】token 没变，但音频在块边界上确实
@@ -3776,7 +4027,9 @@ impl ExtensionOwner {
             // 输出的样本，与旧位置连续 —— 用它做一次等功率交叉，比"整块换源"轻得多。
             let previous_token = state.last_token.load(Ordering::Acquire);
             let previous_kind = (previous_token & 0xFF) as u8;
-            self.arm_seam(state, Self::seam(previous_kind, kind as u8));
+            let seam = Self::seam(previous_kind, kind as u8);
+            self.arm_seam(state, seam);
+            armed = seam.code();
             state.last_token.store(token, Ordering::Release);
         } else {
             // 【为什么先取旧的再交换】"要不要交叉淡化"取决于**上一个**源是什么；
@@ -3787,11 +4040,13 @@ impl ExtensionOwner {
             } else {
                 // 【为什么"透传 → 处理结果"不交叉淡化】`PendingSynthesis` / `PassThrough`
                 // 输出的是**宿主原声**，`Processed` 输出的是神经声码器结果。两者内容根本
-                // 不同源，交叉淡化会把两段不同内容叠在一起（听感是"两声并发"）。
-                // 那种场合改为对结果做一次线性淡入。
+                // 不同源，交叉淡化会把两段不同内容叠在一起（听声是"两声并发"）。
+                // 那种场合改为对结果做一次淡入。
                 let previous_kind = (previous_token & 0xFF) as u8;
                 let current_kind = (token & 0xFF) as u8;
-                self.arm_seam(state, Self::seam(previous_kind, current_kind));
+                let seam = Self::seam(previous_kind, current_kind);
+                self.arm_seam(state, seam);
+                armed = seam.code();
             }
         }
         let channels = (output.num_channels as usize).min(2);
@@ -3810,6 +4065,7 @@ impl ExtensionOwner {
                 if plane.is_null() {
                     continue;
                 }
+                let equal_power = state.fade_curve.load(Ordering::Acquire) != 0;
                 for index in 0..count {
                     let t = (position + index + 1) as f32 / len as f32;
                     let old = f32::from_bits(
@@ -3817,8 +4073,17 @@ impl ExtensionOwner {
                     );
                     // SAFETY: `index < frames`，调用方保证平面至少这么长。
                     let current = unsafe { *plane.add(index) };
+                    // 【为什么权重不能只有一套】见 `Seam::uses_equal_power`：
+                    // 两条不相关信号的线性混合在中点掉 6 dB（听感是一次凹陷/咔），
+                    // 而同一份内容的两次渲染用等功率会在中点叠出 +3 dB 的鼓包。
+                    let mixed = if equal_power {
+                        let (out_gain, in_gain) = crate::render::crossfade::equal_power(t);
+                        old * out_gain + current * in_gain
+                    } else {
+                        old * (1.0 - t) + current * t
+                    };
                     unsafe {
-                        *plane.add(index) = old * (1.0 - t) + current * t;
+                        *plane.add(index) = mixed;
                     }
                 }
             }
@@ -3872,6 +4137,20 @@ impl ExtensionOwner {
                 }
             }
         }
+
+        // 【B0】把这一块的形状记进账本。音频线程：只写原子量。
+        //
+        // 【为什么放在最后】这里读到的就是**已经输出**的样本（去咔之后），于是
+        // `max_step` 描述的正是用户听到的那一段。放在去咔之前会量到被淡化前的阶跃，
+        // 那对"到底有没有响一下"没有意义。
+        self.record_click_sample(
+            stream,
+            kind as u8,
+            armed,
+            first_kind.is_none(),
+            output,
+            frames,
+        );
     }
 
     /// 门控清零时的去咔：把上一块的尾巴在首段内线性淡到零，其余帧写零。
@@ -4109,6 +4388,11 @@ impl ExtensionOwner {
                 start_window: geometry.pinned_window_open.load(Ordering::Acquire),
                 repeated_nonzero: false,
                 silent: geometry.last_block_silent.load(Ordering::Acquire),
+                // 零帧块不写任何样本，位置来源对它没有意义；沿用上一块的结论即可。
+                position_source: PositionSource::from_code(
+                    geometry.last_source.load(Ordering::Acquire),
+                )
+                .unwrap_or(PositionSource::Project),
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
@@ -4590,6 +4874,7 @@ impl ExtensionOwner {
             start_window: geometry.pinned_window_open.load(Ordering::Acquire),
             repeated_nonzero,
             silent,
+            position_source: source,
         }
     }
 
@@ -4824,6 +5109,7 @@ impl ExtensionOwner {
                         0
                     },
                     pinned_recent: index == 0 && stream_block.pinned_recent,
+                    position_source: stream_block.position_source,
                     discard_pre_roll: index == 0 && stream_block.discard_pre_roll,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
                     // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
@@ -5655,6 +5941,15 @@ impl ExtensionOwner {
         }
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state.edits)?;
+        // 【G5】它到达时我们在不在一次编辑会话里（见 `EditState::arrived_in_edit_session`）。
+        restored.arrived_in_edit_session = self
+            .document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|document| document.in_edit_session());
+        // 组件通道：这份载荷是**本实例**的存档，宿主用它做 undo / 复制轨 —— 恢复即权威。
+        restored.from_archive = false;
         // 【T-D5】同一份载荷已经合入过就别再排队：宿主重复交回同一份存档时（重开编辑器、
         // 撤销后重做、文档重建），重放只会重复劳动，并在失败时重新点燃"没读回来"。
         if Self::restore_digest(&restored).is_some_and(|digest| {
@@ -5670,6 +5965,15 @@ impl ExtensionOwner {
         self.note_restore_pending();
         self.refresh_document();
         Ok(())
+    }
+
+    /// 【G5】此刻的载荷是否应当覆盖在线状态（见 `DocumentSession::authoritative_restore`）。
+    fn authoritative_restore(&self) -> bool {
+        self.document
+            .lock_or_recover()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|document| document.authoritative_restore())
     }
 
     /// 暂存 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
@@ -5949,10 +6253,11 @@ impl ExtensionOwner {
         let mut client = host.clone();
         restored.apply(&mut client);
         if changed_geometry {
-            client.params_by_root_track.extend(
+            crate::editor::parameter_atlas::merge_root_projection(
+                &mut client.params_by_root_track,
                 restored
                     .atlas
-                    .project_roots(&host, &document.parameter_identities_locked(&host)?)?,
+                    .project_root_records(&host, &document.parameter_identities_locked(&host)?)?,
             );
         } else if restored.atlas.is_empty() && !restored.params.is_empty() {
             // 旧v2只有项目帧：在首次真实绑定的宿主布局建立source basis，随后移动/拉伸沿此迁移。
@@ -5968,9 +6273,34 @@ impl ExtensionOwner {
             .iter()
             .map(|clip| clip.id.clone())
             .collect::<BTreeSet<_>>();
-        // 权威侧合并：参数按稳定宿主身份覆盖（恢复的那一份更权威）。
+        // 【G5：权威侧合并分两种，不能一律覆盖】
+        //
+        // 旧规则是"恢复的那一份更权威"，理由写得很直白 —— 它只在**重开工程**时成立
+        // （在线状态是空的）。而切屏重载 take 时交回来的载荷携带的是**更旧**的参数，
+        // 那时"恢复的更权威"就等于"回退"。
+        //
+        // 三种情况分开处置：
+        //   * 在线状态是**空的**（冷启动）⇒ 整份装上。没有别的数据源。
+        //   * 载荷到达时我们正处在**一次编辑会话**里 ⇒ 覆盖。撤销/重做在 ARA 里就是
+        //     一次还原会话（`ARAInterface.h:2938-2943`），undo 必须生效。
+        //   * 其余（宿主交回一份旧载荷）⇒ **按键补缺**：只补在线状态里没有的键。
+        let authoritative = !restored.from_archive
+            || edits.is_pristine()
+            || restored.arrived_in_edit_session
+            || document.authoritative_restore();
+        let mut kept_live = 0_usize;
         for (key, params) in restored.atlas.authorities.clone() {
-            merged.atlas.set_authority(&key, params);
+            if authoritative || !merged.atlas.authorities.contains_key(&key) {
+                merged.atlas.set_authority(&key, params);
+            } else {
+                kept_live += 1;
+            }
+        }
+        if kept_live > 0 {
+            log::info!(
+                "[ara] restore kept {kept_live} live parameter set(s); the payload carries older \
+                 values for them and the live state is newer"
+            );
         }
         merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
         merged.atlas.regions.extend(restored.atlas.regions);
@@ -7258,6 +7588,9 @@ impl ExtensionOwner {
     }
 
     pub fn prepare(&self) {
+        // 【B0】先报告上一批可疑块。放在早退**之前**：Transfer 实例在没有素材时
+        // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
+        self.log_click_report();
         if !self.renders() {
             return;
         }

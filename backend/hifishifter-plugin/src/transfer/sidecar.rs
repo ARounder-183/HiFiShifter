@@ -44,7 +44,7 @@ const MAGIC: &[u8; 8] = b"HFSXFER1";
 ///
 /// v2 在每段几何后多写一个 `loop_start`（`i64::MIN` = 非循环段）；v1 仍可读。
 /// v3 再多写一段 coverage（段内相对帧的覆盖区间）；v1/v2 仍可读，读出来是"整段都算录到"。
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -89,6 +89,22 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
         };
         payload.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
         for range in ranges {
+            payload.extend_from_slice(&(range.start as u32).to_le_bytes());
+            payload.extend_from_slice(&(range.end as u32).to_le_bytes());
+        }
+        // v4：**位置可信**区间。写 0 个区间有两种含义，用一位区分（见下）。
+        //
+        // 【为什么不把两种含义压进"空表"】"整段都可信"（旧档）与"整段都不可信"
+        // （整段都在钉住窗口里）在形状上完全相同，而它们的结论**相反**。压进一个
+        // 空表就是把这两件事混成一件 —— 那正是这个字段存在的理由。
+        payload.push(u8::from(segment.trusted_known));
+        let trusted = if !segment.trusted_known {
+            &segment.trusted[..0]
+        } else {
+            &segment.trusted[..segment.trusted_len.min(segment.trusted.len())]
+        };
+        payload.extend_from_slice(&(trusted.len() as u32).to_le_bytes());
+        for range in trusted {
             payload.extend_from_slice(&(range.start as u32).to_le_bytes());
             payload.extend_from_slice(&(range.end as u32).to_le_bytes());
         }
@@ -189,6 +205,45 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
                 coverage_len += 1;
             }
         }
+        // v4：位置可信区间。缺这一段的旧档 ⇒ `trusted_known = false` ⇒ 全部可信，
+        // 行为与改动前逐字相同。
+        let mut trusted = std::array::from_fn(|_| 0_usize..0_usize);
+        let mut trusted_len = 0_usize;
+        let mut trusted_known = false;
+        if version >= 4 {
+            let known = cursor.u8()? != 0;
+            let count = cursor.u32()?;
+            let count = usize::try_from(count).unwrap_or(usize::MAX);
+            if count > frames as usize {
+                return Err(format!(
+                    "{}: implausible trusted range count ({count} > {frames})",
+                    path.display()
+                ));
+            }
+            let mut parsed = 0_usize;
+            for _ in 0..count {
+                let start = cursor.u32()? as usize;
+                let end = cursor.u32()? as usize;
+                if start >= end || end > frames as usize {
+                    return Err(format!(
+                        "{}: invalid trusted range {start}..{end} (frames={frames})",
+                        path.display()
+                    ));
+                }
+                if parsed >= super::capture::COVERAGE_SLOTS {
+                    // 与覆盖同一退化：槽位用尽 ⇒ 视为"没有可信度记录"。
+                    trusted_known = false;
+                    parsed = 0;
+                    break;
+                }
+                trusted[parsed] = start..end;
+                parsed += 1;
+            }
+            if parsed > 0 || known {
+                trusted_len = parsed;
+                trusted_known = known;
+            }
+        }
         if !(1..=2).contains(&channels) || frames == 0 || frames > MAX_FRAMES {
             return Err(format!(
                 "{}: implausible segment shape (channels={channels}, frames={frames})",
@@ -221,6 +276,9 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             coverage,
             coverage_len,
             coverage_overrun: false,
+            trusted,
+            trusted_len,
+            trusted_known,
             _reservation: None,
         });
     }
@@ -261,6 +319,11 @@ impl<'a> Cursor<'a> {
         Ok(slice)
     }
 
+    fn u8(&mut self) -> Result<u8, String> {
+        let bytes = self.take(1)?;
+        Ok(bytes[0])
+    }
+
     fn u32(&mut self) -> Result<u32, String> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -299,6 +362,9 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
+            trusted: std::array::from_fn(|_| 0..0),
+            trusted_len: 0,
+            trusted_known: true,
             _reservation: None,
         }
     }

@@ -1463,6 +1463,29 @@ impl TransferStore {
         // 播放起点 —— 播放时会在那个位置发生一次"宿主原声 → 处理结果"的切换，
         // 听感就是用户报的"起播 0.7 s 内的一次咔"。这条日志把那个结论变成可观测事实，
         // 不改任何行为。
+        // 【T-A0-4】把"这次录制的前导到底长什么样"打成一行可判定的读数。
+        //
+        // 两种成因在这行上直接分开（见 `timeline::LeadIn`）：`synthetic_frames` 是
+        // **覆盖表**宣称不属于我们的帧数，`first_signal_sec` 是第一个非零样本的位置。
+        // 两者接近 ⇒ 覆盖表正确（那一段本来就不是我们的）；前者为 0 而用户仍听到
+        // 起播咔 ⇒ 覆盖表错误地宣称了宿主静音（R1）。
+        let lead_in = timeline::lead_in(&all);
+        let rate = sample_rate.max(1) as f64;
+        log::warn!(
+            "[transfer] take {id} lead-in: synthetic_frames={} ({:.3}s) first_signal_at={} \
+             pre_roll_frames={} pending_stashed={} bridged_window_blocks={} \
+             resync_bridged_frames={}",
+            lead_in.synthetic_frames,
+            lead_in.synthetic_frames as f64 / rate,
+            lead_in
+                .first_signal_sec
+                .map(|sec| format!("{sec:.3}s"))
+                .unwrap_or_else(|| "none".to_owned()),
+            diagnostics.pre_roll_frames,
+            diagnostics.pending_stashed,
+            diagnostics.bridged_window_blocks,
+            diagnostics.resync_bridged_frames,
+        );
         if diagnostics.pre_roll_frames == 0
             && (diagnostics.pending_stashed > 0 || diagnostics.bridged_window_blocks > 0)
         {
@@ -1574,6 +1597,9 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         coverage: std::array::from_fn(|_| 0..0),
         coverage_len: 0,
         coverage_overrun: false,
+        trusted: std::array::from_fn(|_| 0..0),
+        trusted_len: 0,
+        trusted_known: true,
         _reservation: Some(reservation),
     })
 }
@@ -2037,6 +2063,9 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
+            trusted: std::array::from_fn(|_| 0..0),
+            trusted_len: 0,
+            trusted_known: true,
             _reservation: None,
         }
     }

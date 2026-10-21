@@ -12,6 +12,8 @@ use hifishifter_kernel::mixdown::{render_mixdown_interleaved, MixdownOptions, Qu
 use hifishifter_kernel::state::TimelineState;
 
 pub(crate) mod budget;
+pub(crate) mod click;
+pub(crate) mod crossfade;
 pub(crate) mod document;
 pub(crate) mod extension;
 pub(crate) mod input;

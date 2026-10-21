@@ -1516,6 +1516,11 @@ fn a_stationary_stretch_does_not_offset_the_real_start() {
 #[test]
 fn a_source_kind_change_on_the_first_block_still_fades() {
     let owner = insert_owner();
+    // 【为什么先录一段】首块淡入只作用于 **Transfer 播放通路**（未绑定 + 有素材）：
+    // 那才是"我们自己算出来的内容从任意相位开始"的形状。没有素材时本流是"未录制、
+    // 不动输出"，不该被淡化。
+    record(&owner, 256);
+    owner.sync_raw_tape();
     let stream = ProcessStream::Realtime;
     // 【T-S1-4：块长必须覆盖整条淡化带】Raw → Processed 是**同一段素材的两种处理**，
     // 走 20 ms 等功率交叉。用 64 帧的块去验一条 960 帧的淡化，"最后一帧到达新值"
@@ -1533,15 +1538,32 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         channel_buffers: first_planes.as_mut_ptr(),
     };
 
-    // 第一块：真首块（种类 4）。`primed_kind` 从 0 变成 4 ⇒ 原样输出。
+    // 第一块：真首块（种类 4 = Raw，**我们自己算出来的内容**）。
+    //
+    // 【契约变了】旧实现"真首块一律原样输出"，理由只对**透传**成立（透传的样本就是
+    // 宿主正在播的东西，它自己已经连续）。当第一块是我们算出来的内容时，它从哪一
+    // 相位开始是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。现在它按
+    // `OUTPUT_FIRST_BLOCK_FADE_FRAMES`（5 ms）淡入，之后保持满幅。
     owner
         .output_token[stream.index()]
         .store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut first, frames) };
+    assert!(
+        first_left[0] < 0.05,
+        "首块必须从零附近起（实测 {}）",
+        first_left[0]
+    );
+    let fade = super::OUTPUT_FIRST_BLOCK_FADE_FRAMES;
+    assert!(
+        (first_left[fade - 1] - 0.5).abs() < 1e-3,
+        "首块淡入必须在 {} 帧内到满幅（实测 {}）",
+        fade,
+        first_left[fade - 1]
+    );
     assert_eq!(
-        first_left,
-        vec![0.5; frames],
-        "真首块必须原样输出：没有上一块可淡"
+        &first_left[fade..],
+        &vec![0.5_f32; frames - fade][..],
+        "淡入之后必须保持满幅"
     );
 
     // 第二块：换到 Processed（种类 2），内容也完全不同。
@@ -1568,11 +1590,17 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         "淡化的最后一帧必须到达新值（实测 {}）",
         second_left[frames - 1]
     );
-    // 等功率：中点两侧各约 0.707，且不得出现线性混合那种能量凹陷。
+    // 等功率：中点两侧各 0.707。旧值 0.5、新值 1.0 ⇒ 中点应为
+    // `0.5·cos + 1.0·sin` ≈ 1.06 —— **高于**线性混合的 0.75，这正是"没有能量凹陷"。
     let middle = second_left[frames / 2];
+    let expected = 0.5 * std::f32::consts::FRAC_1_SQRT_2 + 1.0 * std::f32::consts::FRAC_1_SQRT_2;
     assert!(
-        (0.35..0.95).contains(&middle),
-        "中点必须落在两条信号的等功率交叠区（实测 {middle}）"
+        (middle - expected).abs() < 0.02,
+        "中点必须落在等功率交叠区（期望 ≈ {expected:.3}，实测 {middle}）"
+    );
+    assert!(
+        middle > 0.85,
+        "等功率的中点必须显著高于线性混合的 0.75（实测 {middle}）"
     );
 }
 
@@ -1584,8 +1612,12 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
 #[test]
 fn a_carryover_source_kind_still_triggers_a_fade() {
     let owner = insert_owner();
+    // 同上：首块淡入只在 Transfer 播放通路上生效。
+    record(&owner, 256);
+    owner.sync_raw_tape();
     let stream = ProcessStream::Realtime;
-    let frames = super::OUTPUT_DECLICK_FRAMES;
+    // 块长必须容得下首块的 5 ms 淡入带（否则"淡入之后满幅"这条断言无从成立）。
+    let frames = super::OUTPUT_FIRST_BLOCK_FADE_FRAMES;
     let mut tail_left = vec![0.5_f32; frames];
     let mut tail_right = vec![0.5_f32; frames];
     let mut tail_planes = [tail_left.as_mut_ptr(), tail_right.as_mut_ptr()];
@@ -1600,7 +1632,18 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
         .output_token[stream.index()]
         .store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut tail, frames) };
-    assert_eq!(tail_left, vec![0.5; frames], "上一轮首块原样输出");
+    // 上一轮首块是 `Raw`（我们算出来的内容）⇒ 现在按 5 ms 淡入，之后满幅。
+    let fade = super::OUTPUT_FIRST_BLOCK_FADE_FRAMES;
+    assert!(
+        tail_left[0] < 0.05,
+        "首块必须从零附近起（实测 {}）",
+        tail_left[0]
+    );
+    assert_eq!(
+        &tail_left[fade..],
+        &vec![0.5_f32; frames - fade][..],
+        "淡入之后必须保持满幅"
+    );
 
     // 这一轮：首块直接是 Processed（种类 2），内容 1.0。
     let mut left = vec![1.0_f32; frames];
@@ -1729,8 +1772,20 @@ fn the_emit_gate_fades_to_zero_instead_of_stepping() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    // 先让上一块输出满幅信号，把尾巴存进去（用同一块长，保证尾巴真实）。
-    unsafe { owner.apply_output_declick(stream, &mut bus, frames) };
+    // 直接把"上一块输出的尾巴"置成满幅。
+    //
+    // 【为什么不再先跑一块】首块是**我们算出来的内容**时会按
+    // `OUTPUT_FIRST_BLOCK_FADE_FRAMES`（5 ms = 240 帧）淡入，而本用例的块长是 8 帧
+    // —— 淡化会横跨 30 块，尾巴里存的是那条上升斜坡。用它去验"淡出单调下降"没有
+    // 意义（斜坡上升 × 增益下降，结果不单调）。这里要验的是**门控淡出**本身，
+    // 所以尾巴直接置成稳态满幅。
+    for channel in 0..2 {
+        for index in 0..super::DECLICK_HISTORY_FRAMES {
+            owner.declick[stream.index()].tail[channel][index]
+                .store(1.0_f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _ = &mut bus;
     left.fill(1.0);
     right.fill(1.0);
     unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };

@@ -1865,6 +1865,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             };
             // SAFETY: 缓冲经 validate 校验；`layered` 时未清但由 `copy_block_layered_at`
             // 逐帧覆盖，其余路径已由上面的 clear_outputs 清过。publisher 由 owner 保留。
+            // 【B0】本块分层拷贝的覆盖读数。两段（循环切分）各自写一份，这里合并。
+            let mut layered_probe = crate::render::snapshot::LayeredProbe::default();
             let ready = unsafe {
                 if layered {
                     // 【为什么要重新取一次输入视图】Transfer 要"录过的那一段被替换、其余
@@ -1880,7 +1882,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         Some(evidence) => {
                             let mut ready = true;
                             for part in evidence.split.iter() {
-                                ready &= publisher.copy_block_layered_at(
+                                let mut part_probe = crate::render::snapshot::LayeredProbe::default();
+                                ready &= publisher.copy_block_layered_at_probed(
                                     part.position,
                                     output_rate.max(1.0) as u32,
                                     &mut *data.outputs,
@@ -1888,16 +1891,21 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                                     part.frames,
                                     &input.planes,
                                     part.input_offset,
+                                    &mut part_probe,
                                 );
+                                layered_probe.merge(part_probe);
                             }
                             ready
                         }
-                        None => publisher.copy_block_layered(
+                        None => publisher.copy_block_layered_at_probed(
                             context.project_time_samples,
                             output_rate.max(1.0) as u32,
                             &mut *data.outputs,
+                            0,
                             data.num_samples as usize,
                             &input.planes,
+                            0,
+                            &mut layered_probe,
                         ),
                     }
                 } else {
@@ -1930,6 +1938,9 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 crate::transfer::capture::ProcessStream::Realtime,
                 |evidence| evidence.stream,
             );
+            if layered {
+                owner.note_layered_probe(declick_stream, layered_probe);
+            }
             // 【T3：读游标跳过了一个淡化带 ⇒ 这一块整块回退宿主原声】
             // 跳变的幅度可能远大于一个淡化带（起播窗口收口时可达数十毫秒）。读快照会把
             // **另一段**内容写进总线；淡一次只把阶跃抹软，内容仍是错的那一段。

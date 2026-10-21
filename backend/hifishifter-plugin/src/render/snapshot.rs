@@ -85,6 +85,36 @@ pub(crate) fn compact_prepared(snapshots: &mut [PlaybackSnapshot]) -> Result<(),
     Ok(())
 }
 
+/// 一次分层拷贝的**覆盖读数**：这一块里有多少帧不属于我们、宿主输入在那一段有没有信号。
+///
+/// 【为什么由混音循环报告而不是调用方另算一遍】"哪一帧属于快照"这件事只在这里知道
+/// （覆盖表在快照域、而块在宿主帧域，换算只有一处）。调用方若自己再算一遍，就是
+/// 第二份实现 —— 两份实现必然漂移，而漂移的表现是"日志说没有洞、耳朵听到咔"。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LayeredProbe {
+    /// 本块里**不属于我们**的帧数（未覆盖，或整块没有快照）。
+    pub uncovered: usize,
+    /// 那些帧上宿主输入的峰值；`None` = 本块没有未覆盖帧。
+    pub input_peak: Option<f32>,
+    /// 覆盖边（覆盖 ↔ 未覆盖的翻转点）是否落在本块内。
+    pub edge: bool,
+}
+
+impl LayeredProbe {
+    /// 把另一段（循环切分的第 2 段）的读数并进来。
+    ///
+    /// 【为什么需要】一个宿主块可以按循环边界切成两段，两段各自做一次分层拷贝。
+    /// "这一块有多少帧不属于我们"是两段之和；"覆盖边在不在块内"是或；峰值取大。
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.uncovered = self.uncovered.saturating_add(other.uncovered);
+        self.edge |= other.edge;
+        self.input_peak = match (self.input_peak, other.input_peak) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum SnapshotError {
     InvalidGeometry,
@@ -625,6 +655,7 @@ impl SnapshotPublisher {
     ///
     /// # Safety
     /// 与 [`Self::copy_block`] 相同；`planes` 中每个非空切片至少含 `frames` 帧。
+    #[allow(dead_code)]
     pub unsafe fn copy_block_layered(
         &self,
         sample: i64,
@@ -633,18 +664,29 @@ impl SnapshotPublisher {
         frames: usize,
         planes: &[Option<&[f32]>; 2],
     ) -> bool {
-        // SAFETY: 与 `copy_block_layered_at` 相同；输入/输出偏移均为 0。
-        unsafe { self.copy_block_layered_at(sample, rate, output, 0, frames, planes, 0) }
+        // SAFETY: 与 `copy_block_layered_at_probed` 相同；输入/输出偏移均为 0。
+        unsafe {
+            self.copy_block_layered_at_probed(
+                sample,
+                rate,
+                output,
+                0,
+                frames,
+                planes,
+                0,
+                &mut LayeredProbe::default(),
+            )
+        }
     }
 
-    /// [`Self::copy_block_layered`] 的带偏移版本。
+    /// [`Self::copy_block_layered`] 的带偏移版本（不关心覆盖读数）。
     ///
     /// `out_offset` = 写到输出缓冲的哪里；`input_offset` = 从输入平面读的起点。
     /// 循环切分的第 2 段两者都等于第一段的帧数。
     ///
     /// # Safety
-    /// 与 [`Self::copy_block_layered`] 相同，且非空输入平面至少含
-    /// `input_offset + frames` 帧、非空输出平面至少含 `out_offset + frames` 个样本。
+    /// 与 [`Self::copy_block_layered_at_probed`] 相同。
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn copy_block_layered_at(
         &self,
@@ -655,6 +697,41 @@ impl SnapshotPublisher {
         frames: usize,
         planes: &[Option<&[f32]>; 2],
         input_offset: usize,
+    ) -> bool {
+        // SAFETY: 由调用方保证（与 `copy_block_layered_at_probed` 相同）。
+        unsafe {
+            self.copy_block_layered_at_probed(
+                sample,
+                rate,
+                output,
+                out_offset,
+                frames,
+                planes,
+                input_offset,
+                &mut LayeredProbe::default(),
+            )
+        }
+    }
+
+    /// [`Self::copy_block_layered`] 的带偏移版本，并把覆盖读数写进 `probe`。
+    ///
+    /// `out_offset` = 写到输出缓冲的哪里；`input_offset` = 从输入平面读的起点。
+    /// 循环切分的第 2 段两者都等于第一段的帧数。
+    ///
+    /// # Safety
+    /// 与 [`Self::copy_block_layered`] 相同，且非空输入平面至少含
+    /// `input_offset + frames` 帧、非空输出平面至少含 `out_offset + frames` 个样本。
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn copy_block_layered_at_probed(
+        &self,
+        sample: i64,
+        rate: u32,
+        output: &mut AudioBusBuffers,
+        out_offset: usize,
+        frames: usize,
+        planes: &[Option<&[f32]>; 2],
+        input_offset: usize,
+        probe: &mut LayeredProbe,
     ) -> bool {
         if output.num_channels == 0 || output.channel_buffers.is_null() {
             return false;
@@ -828,13 +905,11 @@ impl SnapshotPublisher {
             if position < coverage_start + start {
                 let t = ((position - coverage_start) as f32 / start as f32).clamp(0.0, 1.0);
                 // 等功率：out² + in² = 1。
-                let angle = t * std::f32::consts::FRAC_PI_2;
-                return (angle.cos(), angle.sin());
+                return crate::render::crossfade::equal_power(t);
             }
             if position >= coverage_end - end {
                 let t = ((coverage_end - position) as f32 / end as f32).clamp(0.0, 1.0);
-                let angle = t * std::f32::consts::FRAC_PI_2;
-                return (angle.cos(), angle.sin());
+                return crate::render::crossfade::equal_power(t);
             }
             // 【B4：空洞的**两侧**都要淡化】
             //
@@ -865,14 +940,12 @@ impl SnapshotPublisher {
                 if width >= end.saturating_mul(2) {
                     if position >= hole.end && position < hole.end + end {
                         let t = ((position - hole.end) as f32 / end as f32).clamp(0.0, 1.0);
-                        let angle = t * std::f32::consts::FRAC_PI_2;
-                        return (angle.cos(), angle.sin());
+                        return crate::render::crossfade::equal_power(t);
                     }
                     if position >= hole.start - end && position < hole.start {
                         // 与出口同一条等功率曲线，方向相反：`t = 0` 处满内容、`t = 1` 处满原声。
                         let t = ((hole.start - position) as f32 / end as f32).clamp(0.0, 1.0);
-                        let angle = t * std::f32::consts::FRAC_PI_2;
-                        return (angle.cos(), angle.sin());
+                        return crate::render::crossfade::equal_power(t);
                     }
                 } else {
                     let half = (end / 2).max(1);
@@ -942,6 +1015,37 @@ impl SnapshotPublisher {
                 old * out_gain + current * in_gain
             }
         };
+        // 【B0】覆盖读数：这一块里哪些帧**不属于我们**，宿主输入在那一段有没有信号。
+        //
+        // 【为什么在混音循环之外单独扫一遍】"哪一帧属于快照"由 `is_covered` 按**帧**
+        // 判定，与声道无关；放进内层循环会让同一次判定被两个声道各做一遍，而且只能
+        // 数到一半的帧（`uncovered` 会凭空翻倍/减半）。
+        probe.uncovered = 0;
+        probe.input_peak = None;
+        probe.edge = false;
+        if snapshot.is_some() {
+            let mut peak = 0.0_f32;
+            let mut previous: Option<bool> = None;
+            for offset in 0..frames {
+                let covered = is_covered(snapshot_frame(offset));
+                if !covered {
+                    probe.uncovered += 1;
+                    if let Some(value) = input_at(0, offset) {
+                        peak = peak.max(value.abs());
+                    }
+                }
+                if previous.is_some_and(|known| known != covered) {
+                    probe.edge = true;
+                }
+                previous = Some(covered);
+            }
+            if probe.uncovered > 0 {
+                probe.input_peak = Some(peak);
+            }
+        } else {
+            // 没有快照 ⇒ 整块都是宿主原声。这里没有"覆盖边"可言（每一帧都是未覆盖）。
+            probe.uncovered = frames;
+        }
         for channel in 0..channels {
             // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。
             let plane = unsafe { *output.channel_buffers.add(channel) };

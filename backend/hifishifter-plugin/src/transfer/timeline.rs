@@ -141,16 +141,23 @@ impl<'a> Tape<'a> {
                 (lo < hi).then_some((*segment, lo - base, hi - base))
             })
             .flat_map(move |(segment, lo, hi)| {
-                // 没有记录、或槽位用尽时退化为"整段都算录到"（旧语义）。
-                let has = segment.coverage_len > 0 && !segment.coverage_overrun;
-                if !has {
-                    return Vec::from([(segment, lo, hi)]);
-                }
-                segment.coverage[..segment.coverage_len]
-                    .iter()
-                    .filter_map(move |range| {
-                        let a = lo.max(range.start);
-                        let b = hi.min(range.end);
+                // 与 `covered_ranges` 同一口径：**样本 ∩ 可信位置**。
+                let samples = segment_ranges(
+                    &segment.coverage,
+                    segment.coverage_len,
+                    segment.coverage_overrun,
+                    segment.filled,
+                );
+                let trusted = if segment.trusted_known {
+                    segment_ranges(&segment.trusted, segment.trusted_len, false, segment.filled)
+                } else {
+                    vec![0..segment.filled]
+                };
+                intersect(&samples, &trusted)
+                    .into_iter()
+                    .filter_map(move |(start, end)| {
+                        let a = lo.max(start);
+                        let b = hi.min(end);
                         (a < b).then_some((segment, a, b))
                     })
                     .collect::<Vec<_>>()
@@ -169,15 +176,33 @@ impl<'a> Tape<'a> {
     pub(crate) fn covered_ranges(&self) -> Vec<Range<usize>> {
         let mut covered: Vec<Range<usize>> = Vec::new();
         for (segment, base) in self.segments.iter().zip(&self.offsets) {
-            let has = segment.coverage_len > 0 && !segment.coverage_overrun;
-            if !has {
-                // 没有记录（旧 sidecar / 测试夹具）：整段都算录到。
-                push_merged(&mut covered, *base..*base + segment.filled);
-                continue;
-            }
-            for range in &segment.coverage[..segment.coverage_len] {
-                let start = (*base + range.start).min(*base + segment.filled);
-                let end = (*base + range.end).min(*base + segment.filled);
+            let limit = *base + segment.filled;
+            // 【T-A1-1】"有没有样本"与"这个位置算不算数"是两个独立的事实，取交集：
+            //   * `coverage` —— 我们真的从宿主块里拷过样本；
+            //   * `trusted`  —— 那些样本属于的位置是宿主**权威给出**的。
+            // 只有两者都成立，这一段才属于我们。起播窗口里宿主把位置钉住、由我们按
+            // 块长自行推进（`Synthesized`）时，样本在、位置不在 —— 交集为空，于是
+            // 播放侧回退宿主原声，而那正是那段时间里真实播放的内容。
+            let samples = segment_ranges(
+                &segment.coverage,
+                segment.coverage_len,
+                segment.coverage_overrun,
+                segment.filled,
+            );
+            let trusted = if segment.trusted_known {
+                segment_ranges(
+                    &segment.trusted,
+                    segment.trusted_len,
+                    false,
+                    segment.filled,
+                )
+            } else {
+                // 没有可信度记录（旧 sidecar / 测试夹具 / 槽位用尽）：按"整段都可信"。
+                vec![0..segment.filled]
+            };
+            for (a, b) in intersect(&samples, &trusted) {
+                let start = (*base + a).min(limit);
+                let end = (*base + b).min(limit);
                 if start < end {
                     push_merged(&mut covered, start..end);
                 }
@@ -219,6 +244,47 @@ impl<'a> Tape<'a> {
         }
         planes
     }
+}
+
+/// 一张定长区间表 → `Vec`（`overrun` 或空表 ⇒ 整段）。
+///
+/// 【为什么空表要解释成"整段"】那是`coverage` 的旧语义（没有记录 = 都算录到）。
+/// `trusted` 的"没有记录"由 `trusted_known` 单独表达，不靠空表 —— 两者共用一个
+/// 形状但语义相反，所以解释权必须留在调用方。
+fn segment_ranges(
+    ranges: &[Range<usize>],
+    len: usize,
+    overrun: bool,
+    filled: usize,
+) -> Vec<Range<usize>> {
+    if overrun || len == 0 {
+        return vec![0..filled];
+    }
+    ranges[..len.min(ranges.len())]
+        .iter()
+        .filter(|range| range.start < range.end)
+        .cloned()
+        .collect()
+}
+
+/// 两张**升序、不重叠**的区间表的交集（结果同样升序、不重叠）。
+fn intersect(left: &[Range<usize>], right: &[Range<usize>]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let (mut a, mut b) = (0_usize, 0_usize);
+    while a < left.len() && b < right.len() {
+        let start = left[a].start.max(right[b].start);
+        let end = left[a].end.min(right[b].end);
+        if start < end {
+            out.push((start, end));
+        }
+        // 谁先结束就推进谁：另一段还可能覆盖它之后的部分。
+        if left[a].end <= right[b].end {
+            a += 1;
+        } else {
+            b += 1;
+        }
+    }
+    out
 }
 
 /// 把一个区间并进**升序、不重叠**的列表（相邻或相交就合并）。
@@ -418,14 +484,23 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         let name = format!("#{index} @ {start_sec:.3}s");
         // 短 clip 不能两侧各淡 2 ms（会叠在一起），按半长夹一下。
         let edge_fade = TRANSFER_EDGE_FADE_SEC.min(length_sec / 2.0);
+        // 【T-A1-5】2 ms 边缘淡化只加在**这条 take 的真实外沿**上。
+        //
+        // 【为什么】洞把 take 切成两片时，中间那条边界不是"内容开始/结束"，而是
+        // "我们没录到的那一段"。在那里再加一次 2 ms 淡化，会与覆盖边界的 20 ms
+        // 等功率过渡叠在同一位置，形成"先掉到零、再爬回来"的双斜坡 —— 听感是
+        // 一次被吞掉的 2 ms，而它还会污染诊断读数（看起来像覆盖边没接好）。
+        // 内部边界交给 `edge_gain` 一份实现统一负责。
+        let at_take_head = piece.offset == 0;
+        let at_take_tail = piece.offset + frames >= tape.frames();
         let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
             "id": id,
             "track_id": TRANSFER_TRACK_ID,
             "name": name,
             "start_sec": start_sec,
             "length_sec": length_sec,
-            "fade_in_sec": edge_fade,
-            "fade_out_sec": edge_fade,
+            "fade_in_sec": if at_take_head { edge_fade } else { 0.0 },
+            "fade_out_sec": if at_take_tail { edge_fade } else { 0.0 },
         }))
         .expect("片段的必填字段是固定的");
         // 【为什么 `duration_*` 是整条带的长度】它是"这份媒体有多长"，而不是"这一片有多
@@ -541,6 +616,56 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
     // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
     let _ = snapshot.compact_mono();
     Some(snapshot)
+}
+
+/// 一次录制的**前导读数**：我们宣称拥有之前，有多少帧是我们没拿到的。
+///
+/// 【为什么这条读数值得存在】"起播 0.4~0.7 s 一次咔"这个症状的两种成因（覆盖表宣称了
+/// 不可信的帧 / 覆盖表正确但回退目标为空）在**同一条日志**上就能分开：
+///   * `synthetic_frames` > 0 且 `first_signal_sec` ≈ 它 ⇒ 覆盖表是对的，那一段确实
+///     不是我们的 —— 咔若仍在，问题在回退（R2）；
+///   * `synthetic_frames` == 0 而用户仍然听到 0.4~0.7 s 的咔 ⇒ 覆盖表**错误地**宣称了
+///     那段（R1 没有被修掉）。
+///
+/// 两个读数都只读事实，不改任何行为。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LeadIn {
+    /// 第一个"属于我们"的帧在带内的偏移（帧）。空 = 整条带都不属于我们。
+    pub synthetic_frames: u64,
+    /// 第一个**非零**样本在带内的偏移（秒）。`None` = 整条带都是零。
+    pub first_signal_sec: Option<f64>,
+}
+
+/// 量一次录制的前导（见 [`LeadIn`]）。**纯读**。
+pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
+    let takes = [ProjectionTake {
+        id: 0,
+        segments,
+    }];
+    let (tapes, _) = build_tapes(&takes);
+    let Some(tape) = tapes.first() else {
+        return LeadIn::default();
+    };
+    let synthetic_frames = tape
+        .covered_ranges()
+        .first()
+        .map(|range| range.start as u64)
+        .unwrap_or(tape.frames() as u64);
+    let rate = tape.sample_rate.max(1) as f64;
+    let mut first_signal_sec = None;
+    for (segment, base) in tape.segments.iter().zip(&tape.offsets) {
+        let Some(plane) = segment.planes.first() else {
+            continue;
+        };
+        if let Some(index) = plane.iter().position(|sample| *sample != 0.0) {
+            first_signal_sec = Some((*base + index) as f64 / rate);
+            break;
+        }
+    }
+    LeadIn {
+        synthetic_frames,
+        first_signal_sec,
+    }
 }
 
 /// 单个 take 的投影（便利入口；语义与 [`project`] 逐字段一致）。
@@ -742,6 +867,9 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
+            trusted: std::array::from_fn(|_| 0..0),
+            trusted_len: 0,
+            trusted_known: true,
             _reservation: None,
         }
     }
