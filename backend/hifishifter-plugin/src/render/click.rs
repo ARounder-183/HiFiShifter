@@ -54,6 +54,13 @@ pub(crate) enum SeamCode {
     Crossfade,
     /// Raw ↔ Processed：宽等功率交叉淡化。
     WideCrossfade,
+    /// 本块内发生了**覆盖边**（"宿主原声 ↔ 处理结果"的翻转点），没有源切换。
+    ///
+    /// 【为什么单独一档】它与 `FadeIn` 的听感几乎一样（都是一次信号更换），但机理
+    /// 完全不同：`FadeIn` 是**输出源**换了（Raw/Processed/透传之间），本档是**同一份
+    /// 源内部**的覆盖归属换了。把两者混成一个 `none` 会让"覆盖表宣称了不该宣称的
+    /// 帧"这类问题在读数上完全隐形 —— round 23 的假洞就是这样躲过了一轮验证。
+    CoverageEdge,
 }
 
 impl SeamCode {
@@ -63,6 +70,7 @@ impl SeamCode {
             Self::FadeIn => 1,
             Self::Crossfade => 2,
             Self::WideCrossfade => 3,
+            Self::CoverageEdge => 4,
         }
     }
 
@@ -72,6 +80,7 @@ impl SeamCode {
             Self::FadeIn => "fade-in",
             Self::Crossfade => "crossfade",
             Self::WideCrossfade => "wide",
+            Self::CoverageEdge => "coverage-edge",
         }
     }
 }
@@ -94,6 +103,13 @@ pub(crate) struct BlockSample {
     pub input_peak: f32,
     /// 本块里**不属于我们**的帧数（快照未覆盖 / 无快照）。
     pub uncovered: u32,
+    /// 本块的 RMS（左右声道的均方根）。
+    ///
+    /// 【为什么阶跃之外还要一个能量读数】20 ms 的等功率过渡**不掉阶跃**：它把
+    /// 两段不相关的信号按 cos/sin 叠起来，波形逐样本连续，`max_step` 只有 0.01 量级，
+    /// 而听感是一次明显的"抿"。那种事件只能从**包络**上看出来 —— 相邻块的 RMS
+    /// 比值离开 [0.5, 2] 就说明这一块的能量被换掉了。
+    pub rms: f32,
     /// 覆盖边（覆盖 ↔ 未覆盖的翻转点）是否落在本块内。
     pub edge: bool,
     /// 本流的第一块（`primed_kind` 从 0 开始）。
@@ -115,6 +131,7 @@ struct Slot {
     peak: AtomicU32,
     input_peak: AtomicU32,
     uncovered: AtomicU32,
+    rms: AtomicU32,
     edge: AtomicBool,
     first_of_stream: AtomicBool,
 }
@@ -174,6 +191,7 @@ impl ClickLedger {
         slot.input_peak
             .store(sample.input_peak.to_bits(), Ordering::Relaxed);
         slot.uncovered.store(sample.uncovered, Ordering::Relaxed);
+        slot.rms.store(sample.rms.to_bits(), Ordering::Relaxed);
         slot.edge.store(sample.edge, Ordering::Relaxed);
         slot.first_of_stream
             .store(sample.first_of_stream, Ordering::Relaxed);
@@ -203,6 +221,7 @@ impl ClickLedger {
                     peak: f32::from_bits(slot.peak.load(Ordering::Relaxed)),
                     input_peak: f32::from_bits(slot.input_peak.load(Ordering::Relaxed)),
                     uncovered: slot.uncovered.load(Ordering::Relaxed),
+                    rms: f32::from_bits(slot.rms.load(Ordering::Relaxed)),
                     edge: slot.edge.load(Ordering::Relaxed),
                     first_of_stream: slot.first_of_stream.load(Ordering::Relaxed),
                 },
@@ -222,11 +241,22 @@ impl ClickLedger {
         self.suspicious.load(Ordering::Acquire)
     }
 
-    /// 取出**尚未报告过**的可疑块，并格式化成一行的主体（不含级别前缀）。
+    /// 取出**尚未报告过**的事件，并格式化成一行的主体（不含级别前缀）。
     ///
     /// 【为什么"报告过"要单独记】本函数由 UI 定时器驱动（20 ms 一次）。没有游标时
     /// 同一块会在环里存活 2.7 秒、被打印上百遍，日志立刻失去价值。
-    pub(crate) fn drain_suspicious(&self) -> Vec<String> {
+    ///
+    /// # 三类事件，各自回答一个不同的问题
+    ///
+    /// 【为什么必须分三类】此前只有"阶跃显著"一类，于是：
+    ///   * **包络类**（20 ms 等功率过渡）逐样本连续，`max_step` 只有 0.01 量级 ⇒
+    ///     一条都不报。用户的"咔"在读数上**完全隐形**，我们只能靠猜；
+    ///   * **源切换**本身就是用户听到那一下的位置，却被"可疑"这个过滤器挡在门外 ——
+    ///     只有当它恰好也产生大阶跃时才露头。
+    ///
+    /// 现在：`switch` 无条件报告（一次播放本该只有极少几次），`envelope` 看相邻块的
+    /// 能量比，`step` 保留原有的阶跃判据。
+    pub(crate) fn drain_reports(&self) -> Vec<String> {
         let blocks = self.recorded();
         if blocks.is_empty() {
             return Vec::new();
@@ -237,20 +267,77 @@ impl ClickLedger {
         steps.sort_by(|a, b| a.total_cmp(b));
         let median = steps[steps.len() / 2];
         let reported = self.reported.load(Ordering::Acquire);
-        let mut fresh: Vec<&RecordedBlock> = blocks
-            .iter()
-            .filter(|block| block.seq > reported && is_suspicious(block.sample.max_step, median))
-            .collect();
-        if fresh.is_empty() {
+        let mut out = Vec::new();
+        let mut highest = reported;
+        let mut counted = 0_u64;
+        for (index, block) in blocks.iter().enumerate() {
+            if block.seq <= reported {
+                continue;
+            }
+            highest = highest.max(block.seq);
+            let sample = &block.sample;
+            // `switch`：源切换 / 首块 / 覆盖边 —— 它们本身就是"边界在哪"，无条件打印。
+            let switching = sample.seam != SeamCode::None || sample.first_of_stream;
+            if switching {
+                counted += 1;
+                out.push(format!("switch {}", format_block(block, median)));
+                continue;
+            }
+            if is_suspicious(sample.max_step, median) {
+                counted += 1;
+                out.push(format!("step {}", format_block(block, median)));
+                continue;
+            }
+            // `envelope`：同一条流、上一块非静音时的能量比。
+            if let Some(ratio) = envelope_ratio(&blocks, index) {
+                if !(ENVELOPE_MIN..=ENVELOPE_MAX).contains(&ratio) {
+                    counted += 1;
+                    out.push(format!("envelope ratio={ratio:.3} {}", format_block(block, median)));
+                }
+            }
+        }
+        if out.is_empty() {
             return Vec::new();
         }
-        let highest = fresh.iter().map(|block| block.seq).max().unwrap_or(reported);
         self.reported.store(highest, Ordering::Release);
-        self.suspicious
-            .fetch_add(fresh.len() as u64, Ordering::Relaxed);
-        fresh.truncate(REPORT_LIMIT);
-        fresh.iter().map(|block| format_block(block, median)).collect()
+        self.suspicious.fetch_add(counted, Ordering::Relaxed);
+        out.truncate(REPORT_LIMIT);
+        out
     }
+
+    /// 兼容入口：只取 `step` 类（既有测试与诊断包的调用方仍可用）。
+    pub(crate) fn drain_suspicious(&self) -> Vec<String> {
+        self.drain_reports()
+    }
+}
+
+/// 相邻块能量比的**健康带**。离开它就说明这一块的能量被换掉了。
+///
+/// 【为什么是 0.5 ~ 2.0】正常音乐在 10 ms 尺度上的块间 RMS 比值极少超出 ±6 dB；
+/// 而一次 20 ms 等功率过渡（两侧互不相关）在中点掉 3 dB，叠加相位抵消后实测可以
+/// 掉到 0.5 以下。带宽放到 ±6 dB 是为了让"真正的包络事件"露头，而不把普通音符
+/// 起落算进来。
+const ENVELOPE_MIN: f32 = 0.5;
+const ENVELOPE_MAX: f32 = 2.0;
+
+/// 本块相对**同一条流上一块**的 RMS 比值（`None` = 没有可比的上文）。
+///
+/// 【为什么必须限定同一条流】实时流与预取流描述的是两段互不相邻的时间；把它们
+/// 互相比较得到的比值毫无意义，却会稳定地落在健康带之外 —— 那会让每一块都被报一次。
+fn envelope_ratio(blocks: &[RecordedBlock], index: usize) -> Option<f32> {
+    let current = &blocks.get(index)?.sample;
+    if !(current.rms.is_finite() && current.rms > 1e-5) {
+        return None;
+    }
+    let previous = blocks[..index]
+        .iter()
+        .rev()
+        .find(|block| block.sample.stream == current.stream)?
+        .sample;
+    if !(previous.rms.is_finite() && previous.rms > 1e-5) {
+        return None;
+    }
+    Some(current.rms / previous.rms)
 }
 
 /// 这一块是否可疑。**纯函数**：判定规则本身要被单测钉住。
@@ -270,6 +357,7 @@ fn seam_from_code(code: u8) -> SeamCode {
         1 => SeamCode::FadeIn,
         2 => SeamCode::Crossfade,
         3 => SeamCode::WideCrossfade,
+        4 => SeamCode::CoverageEdge,
         _ => SeamCode::None,
     }
 }
@@ -327,6 +415,7 @@ mod tests {
             peak: max_step,
             input_peak: f32::NAN,
             uncovered: 0,
+            rms: max_step.max(0.01),
             edge: false,
             first_of_stream: false,
         }
@@ -339,21 +428,68 @@ mod tests {
         for _ in 0..4 {
             ledger.record(sample(0.001));
         }
+        // 【为什么这里不带 `seam`】带上的话它会被归成 `switch` 类（那一类无条件
+        // 打印），本条要钉的是 `step` 判据本身。
         ledger.record(BlockSample {
-            seam: SeamCode::WideCrossfade,
             uncovered: 96,
-            edge: true,
+            edge: false,
             input_peak: 0.0,
             ..sample(0.8)
         });
         let lines = ledger.drain_suspicious();
         assert_eq!(lines.len(), 1, "只应有那一条：{lines:?}");
         let line = &lines[0];
+        // 每一行都以**事件类**开头：`step` / `envelope` / `switch`。没有这个前缀，
+        // 一条日志无法回答"这一下是阶跃、包络还是换源"，而那正是排查的第一步。
+        assert!(line.starts_with("step "), "{line}");
         assert!(line.contains("max_step=0.8000"), "{line}");
-        assert!(line.contains("seam=wide"), "{line}");
         assert!(line.contains("uncovered=96"), "{line}");
-        assert!(line.contains("edge=true"), "{line}");
+        assert!(line.contains("edge=false"), "{line}");
         assert!(line.contains("input_peak=0.0000"), "{line}");
+    }
+
+    /// **源切换无条件报告**：它是"用户听到那一下"的位置，不能被"可疑"过滤器挡在门外。
+    ///
+    /// 【为什么这条必须单独钉住】旧账本只有"阶跃显著"一类判据。而一次 20 ms 等功率
+    /// 过渡逐样本连续（`max_step` 只有 0.01 量级）—— 一条都不报。于是用户的"咔"在
+    /// 读数上完全隐形，每一轮修复都只能靠"再听一遍"来判定。
+    #[test]
+    fn a_source_switch_is_always_reported() {
+        let ledger = ClickLedger::new();
+        for _ in 0..8 {
+            ledger.record(sample(0.001));
+        }
+        // 一个平滑、但**换了源**的块：阶跃很小，包络也正常。
+        ledger.record(BlockSample {
+            seam: SeamCode::WideCrossfade,
+            ..sample(0.002)
+        });
+        let lines = ledger.drain_reports();
+        assert_eq!(lines.len(), 1, "换源必须报一次：{lines:?}");
+        assert!(lines[0].starts_with("switch "), "{}", lines[0]);
+        assert!(lines[0].contains("seam=wide"), "{}", lines[0]);
+    }
+
+    /// **包络类事件**：20 ms 等功率过渡掉 3 dB 就是这一类。
+    ///
+    /// 【为什么阶跃判据看不见它】等功率混合的两侧信号是连续的，`max_step` 只有
+    /// 0.01 量级；但能量在中点掉一半，听感就是一次"抿"。只有 RMS 比值能抓住它。
+    #[test]
+    fn an_envelope_dip_is_reported_even_without_a_step() {
+        let ledger = ClickLedger::new();
+        for _ in 0..6 {
+            ledger.record(BlockSample {
+                rms: 0.2,
+                ..sample(0.001)
+            });
+        }
+        ledger.record(BlockSample {
+            rms: 0.05,
+            ..sample(0.001)
+        });
+        let lines = ledger.drain_reports();
+        assert_eq!(lines.len(), 1, "包络塌陷必须报一次：{lines:?}");
+        assert!(lines[0].starts_with("envelope "), "{}", lines[0]);
     }
 
     /// 同一块只报告一次（UI 定时器 20 ms 一次，环里会存活 2.7 s）。
