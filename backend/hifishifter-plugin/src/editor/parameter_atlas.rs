@@ -2622,28 +2622,11 @@ impl SourceCurve {
         self.sample_at(domain_time, key)
     }
 
-    /// 本曲线在**它自己那个索引域**上覆盖的格点区间（含端点，闭区间）。
+    /// 取本曲线在**工程时刻** project_sec 处的值。
     ///
-    /// 【为什么需要它与 `source_extent` 并存】两者回答不同的问题：
-    ///   * `index_extent` —— "这条曲线的第 0 格到第 N 格对应哪一段"，用于并集
-    ///     （不能裁掉别的半段已经写过的区间）；
-    ///   * `source_extent` —— "这条曲线覆盖哪一段**源素材**"，只用于诊断。
-    ///
-    /// 工程域曲线的格号是**绝对工程帧**，拿它去和 `geometry.source_start` 比是
-    /// 两种单位相减 —— 那会打出一条假的 `split-source-window`，并可能让整条曲线
-    /// 投影成默认值。
-    fn index_extent(&self) -> Option<(usize, usize)> {
-        if self.values.is_empty() {
-            return None;
-        }
-        Some((self.first_frame, self.first_frame + self.values.len() - 1))
-    }
-
-    /// 取本曲线在**工程时刻** `project_sec` 处的值。
-    ///
-    /// 【为什么不能直接用 `sample_at`】`sample_at` 吃的是**本曲线自己那个索引域**
-    /// 的时刻：源域曲线吃源秒、工程域曲线吃工程秒。把工程秒直接喂给源域曲线，等于
-    /// 把两个不同的时间轴相减 —— 那正是"关掉锁定之后线整体偏一个源窗起点"的形状。
+    /// 【为什么不能直接用 sample_at】sample_at 吃的是**本曲线自己那个索引域**的时刻：
+    /// 源域曲线吃源秒、工程域曲线吃工程秒。把工程秒直接喂给源域曲线，等于把两个不同的
+    /// 时间轴相减 —— 那正是"关掉锁定之后线整体偏一个源窗起点"的形状。
     fn value_at_project(
         &self,
         current: &SourceTimeMap,
@@ -2661,15 +2644,19 @@ impl SourceCurve {
         }
     }
 
-    /// 本曲线在**工程帧**上覆盖的区间（闭区间）。空曲线返回 `None`。
+    /// 本曲线在**工程帧**上覆盖的区间（闭区间）。空曲线返回 None。
     ///
     /// 【为什么要单独一个】并集必须表达在**目标域**上，而"既有曲线覆盖到哪"是它自己
     /// 那个域的事实。把两者混在一起就会裁掉别的半段已经写过的区间 —— 那正是"分割后
     /// 参数完全重置"的原形。
     ///
-    /// 【换算失败时返回 `None` 而不是一个猜测值】调用方会退回"只用本 region 的窗口"，
+    /// 【换算失败时返回 None 而不是一个猜测值】调用方会退回"只用本 region 的窗口"，
     /// 也就是**不缩并集**；猜一个更小的区间才是会丢数据的那个方向。
-    fn project_frame_extent(&self, current: &SourceTimeMap, frame_ms: f64) -> Option<(usize, usize)> {
+    fn project_frame_extent(
+        &self,
+        current: &SourceTimeMap,
+        frame_ms: f64,
+    ) -> Option<(usize, usize)> {
         if self.values.is_empty() {
             return None;
         }
@@ -2684,7 +2671,10 @@ impl SourceCurve {
             // 工程域（新形状）：格号本来就是工程秒。
             (None, CurveDomain::Project) => (lo, hi),
             // 源域 / 旧形状：先折成工程秒。
-            (None, _) => (current.source_to_project(lo)?, current.source_to_project(hi)?),
+            (None, _) => (
+                current.source_to_project(lo)?,
+                current.source_to_project(hi)?,
+            ),
             (Some(basis), _) => {
                 let map = basis.map().ok()?;
                 let a = current.project_to_source(lo)?;

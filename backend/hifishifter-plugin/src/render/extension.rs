@@ -8072,7 +8072,7 @@ impl BlockTraceRing {
             "[transfer] ctx: stream={} mode={mode} state=0x{state:x} \
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
-             cont={}{} music={}{} rate={rate:.0} counted={} capture={} \
+             cycle_meta={} cont={}{} music={}{} rate={rate:.0} counted={} capture={} \
              emitted={}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             position.saturating_sub(raw_start),
@@ -8080,6 +8080,7 @@ impl BlockTraceRing {
             u8::from(playing_rising),
             cycle_wrap,
             u8::from(had_previous),
+            cycle,
             if continuous_valid { continuous } else { 0 },
             if continuous_valid { "(valid)" } else { "(absent)" },
             if music_valid { music } else { 0.0 },
