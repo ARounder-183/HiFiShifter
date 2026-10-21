@@ -525,6 +525,17 @@ struct StreamGeometry {
     virtual_position: AtomicI64,
     last_position: AtomicI64,
     last_source: AtomicU8,
+    /// 【T-A1-2】宿主时钟与我们累积时钟之间的**锁存偏移**：`position = raw_start + offset`。
+    ///
+    /// 【为什么需要锁存而不是逐块纠正】起播窗口收口时，宿主的位置字段比它已经播放过的
+    /// 时间**滞后**一个窗口。旧实现只在那一个块里把位置拉回累积时钟，下一块又去读
+    /// 宿主位置 —— 于是 $\Delta$ 帧的错位不是消失，只是被推迟了一块，接着再跳一次。
+    /// 把差值锁存下来，"记录"与"回放"从此读同一个数，错位从定义上不存在。
+    host_clock_offset: AtomicI64,
+    /// 偏移是否有效（真实 seek / 新一次起播会清掉它）。
+    offset_valid: AtomicBool,
+    /// 应用过偏移的块数（诊断）。
+    offset_used: AtomicU64,
     blocks: AtomicU64,
     rolling_blocks: AtomicU64,
     resting_blocks: AtomicU64,
@@ -636,22 +647,36 @@ pub(crate) const RESTORE_APPLIED: u8 = 1;
 pub(crate) const RESTORE_PENDING: u8 = 2;
 /// 持久化状态合并失败，且没有可重试的路径（真故障）。
 pub(crate) const RESTORE_FAILED: u8 = 3;
-/// 一份恢复载荷最多等宿主图重建多久，之后改报"没等到"并转入慢重试。
+/// 宿主图**一次都没变**的时长上界：超过它就改报"没等到"并转入慢重试。
 ///
-/// 【为什么必须有上界】此前"身份对不上 ⇒ 继续等"（T18）**没有截止时刻**：载荷永远
-/// 挂着、界面永远说"正在等待"，而 `encode_archive` 在此期间会把这份**没合入**的
-/// 状态当成权威写回磁盘。用户看到的是"参数没了"，日志里一行错都没有。
+/// 【为什么必须有上界】"身份对不上 ⇒ 继续等"如果没有截止时刻，载荷永远挂着、界面
+/// 永远说"正在等待"，而 `encode_archive` 在此期间会把这份**没合入**的状态当成权威
+/// 写回磁盘 —— 用户看到的是"参数没了"，日志里一行错都没有。
 ///
-/// 【为什么是 10 秒】重开工程时宿主交付几何的典型跨度是几百毫秒到几秒；10 秒足够
-/// 覆盖慢宿主与磁盘慢的工程，又短到让用户在"参数没回来"时能立刻得到一个可读的结论。
-pub(crate) const RESTORE_GIVE_UP_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
-/// 放弃等待之后的重试间隔。
+/// 【为什么是 10 秒，且必须按"宿主没动"计】重开工程时宿主交付几何的典型跨度是
+/// 几百毫秒到几秒。旧实现按**我们自己 poll 的次数**计时（`RESTORE_GIVE_UP_ATTEMPTS`），
+/// 于是界面刷新得越快、预算烧得越快：10 秒的窗口能打印出 38.2 秒，那个数字既不是
+/// "等了多久"也不是"宿主多久没动"。现在只有一个起点 —— 图签名最后一次变化的时刻。
+pub(crate) const RESTORE_WAIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// 报过"没等到"之后的重试间隔。
 ///
 /// 【为什么"放弃"还要重试】放弃的只是**界面读数**（从"等待"改成"没等到"），载荷本身
 /// 必须留着：宿主随时可能补发几何，而那时合入一次就能把用户参数全部找回来。
 pub(crate) const RESTORE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-/// 兜底的尝试次数上界（宿主 tick 极快时，时间窗可能还没到就已经试了很多次）。
-pub(crate) const RESTORE_GIVE_UP_ATTEMPTS: u32 = 400;
+
+/// 一份恢复载荷的等待账：**只由宿主图的变化推进**。
+///
+/// 【为什么是一个结构而不是三个原子】"等了多久 / 变过没有 / 报过没有"必须一起读、
+/// 一起写，否则又会出现上一版那种"三个计数器凑出一个数字"的状态。
+#[derive(Default)]
+struct RestoreProgress {
+    /// 图签名最后一次变化的时刻（`None` = 还没有载荷）。
+    since: Option<std::time::Instant>,
+    /// 上一次看到的图签名。
+    signature: u64,
+    /// 这一次等待是否已经报过"没等到"（避免每轮重报）。
+    reported: bool,
+}
 /// 起播/录音上升沿之后，允许"内容不变也按块长前进"的时长（秒）。
 ///
 /// 【为什么是 1 秒且不续期】VEGAS 的钉住窗口约 0.66 s，1 秒足够覆盖；它是一次性窗口，
@@ -671,6 +696,13 @@ const PINNED_PLAYBACK_SEC: f64 = 1.0;
 /// 【为什么不做成可配置项】它是**推导出来的**：下界是钉住窗口、上界是一次 seek 的
 /// 典型量级，两者之间没有第三种真实形状。
 const POSITION_DRIFT_TOLERANCE_SEC: f64 = 1.5;
+
+/// 锁存偏移在"多像一次真实 seek"时失效：`|候选 - 预期| > 250 ms` 就重新以宿主为准。
+///
+/// 【为什么不是 1.5 s】1.5 s 是**单块**容差（判"宿主读数滞后"）；锁存之后每一块都在
+/// 用它，容差必须更紧，否则一次 1 秒的跳转会被当成"仍然滞后"而继续读旧内容。
+/// 250 ms 小于任何用户能感知为"跳转"的位移，又大于块长抖动带来的误差。
+const SEEK_SLACK_SEC: f64 = 0.25;
 
 impl StreamGeometry {
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
@@ -814,6 +846,17 @@ impl StreamTime {
 
 /// 输出源切换的去咔长度（帧）。48 kHz 下约 1.3 ms，足以消除阶跃。
 const OUTPUT_DECLICK_FRAMES: usize = 64;
+
+/// 读游标跳变超过这个宽度就**整块直通**宿主原声（而不是淡化）。
+///
+/// 【为什么有两条阈值】64 帧（1.3 ms）以内是"接缝抖动"，一次等功率交叉就够；
+/// 64 帧到 50 ms 之间是"读到了另一小段同一素材"，交叉淡化仍然连续；超过 50 ms
+/// 就已经不是同一段内容了，读快照等于把另一段写进总线 —— 那时直通宿主原声才是
+/// 用户在那一刻真正听到的东西。
+///
+/// 【为什么是固定帧数而不是秒】音频线程没有采样率，而 48 kHz 下的 2400 帧 = 50 ms，
+/// 是本插件全部输出路径的工作采样率；更高采样率下它只会更短（更保守）。
+const POSITION_RESYNC_PASS_THROUGH_FRAMES: u64 = 2_400;
 
 /// 一条进程流的输出接缝状态（音频线程写，无锁）。
 ///
@@ -1035,6 +1078,11 @@ pub(crate) struct ExtensionOwner {
     rt_last_emitted_start: AtomicI64,
     /// 【T3】实时流上一次**实际读快照**的位置（用于发现读游标跳变）。
     rt_last_read_position: AtomicI64,
+    /// 【T3】上一次实际读的**帧数**：判据必须拿"上一块起点 + 它的帧数"当预期续接，
+    /// 否则任何正常推进都会被算成跳变（那是"每块都直通"的成因）。
+    rt_last_read_frames: AtomicU32,
+    /// 本块要求做一次**强制**接缝淡化（同一源内部的读位置跳变）。
+    force_declick: [AtomicBool; 3],
     /// 【T3】本块**不读快照**（读游标跳过了超过一个淡化带）。
     ///
     /// 【为什么是"不读"而不是"淡一次"】跳变的幅度可能远大于一个淡化带（起播窗口
@@ -1125,12 +1173,18 @@ pub(crate) struct ExtensionOwner {
     render_wanted: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
-    /// 第一份恢复载荷到达的时刻（"有界等待"的起点；成功后清空）。
-    restore_first_attempt: Mutex<Option<std::time::Instant>>,
-    /// 放弃等待之后的下一次重试时刻（`None` = 不在退避中）。
+    /// 等待账：起点与签名（见 [`RestoreProgress`]）。**唯一**的时间来源。
+    restore_progress: Mutex<RestoreProgress>,
+    /// 报过"没等到"之后的下一次重试时刻（`None` = 不在退避中）。
     restore_next_attempt: Mutex<Option<std::time::Instant>>,
-    /// 已尝试合并的次数（诊断：区分"刚来"与"等了两百轮"）。
+    /// 已尝试合并的次数（**只是诊断**：不再参与任何预算判断）。
     restore_attempts: std::sync::atomic::AtomicU32,
+    /// 本实例最近一次**成功合入**的载荷摘要（T-D5）。
+    ///
+    /// 【为什么记摘要】同一份存档会被宿主重复交回（重开编辑器、撤销后重做、文档重建）。
+    /// 已经合入过的那一份再走一遍 reconcile 只会重复劳动，并在失败时重新点燃横幅。
+    /// 摘要相同且手里没有未合入载荷 ⇒ 直接认作已合入。
+    restore_applied_digest: Mutex<Option<u64>>,
     /// 最后一次成功编码的 ARA `EditState` 字节。
     ///
     /// 【为什么需要】文档已经关闭（`bound_once == true && document == None`）时，
@@ -1341,6 +1395,26 @@ impl ExtensionOwner {
     /// 复用会把已销毁文档的绑定交给宿主，复位则会把还在用的绑定拆掉。
     pub(crate) fn was_bound_before(&self) -> bool {
         self.bound_once.load(Ordering::Acquire)
+    }
+    /// 实时流此刻是否在推进（供"内容更新要不要撤渲染许可"判断）。
+    pub(crate) fn realtime_flow_active(&self) -> bool {
+        self.realtime_flow.load(Ordering::Acquire)
+    }
+    /// 读游标接缝读数（诊断线程读；音频线程只写原子）。
+    ///
+    /// 【为什么要有它】"起播 0.4~0.7 s 一次咔"最直接的量是"读位置跳了多少帧"。
+    /// 没有这一行时，判断只能靠听感与代码推理；有了它，一次复现就能回答
+    /// "跳了几次、最大多少、锁存偏移是多少"。
+    pub(crate) fn seam_summary(&self) -> String {
+        let geometry = &self.streams[crate::transfer::capture::ProcessStream::Realtime.index()];
+        format!(
+            "seam(pos={} corr={} max={} offset={} used={})",
+            self.rt_last_read_position.load(Ordering::Acquire),
+            self.position_corrections.load(Ordering::Relaxed),
+            self.max_correction_frames.load(Ordering::Relaxed),
+            geometry.host_clock_offset.load(Ordering::Acquire),
+            geometry.offset_used.load(Ordering::Relaxed),
+        )
     }
     /// 记录一次 companion 绑定复位（见 [`Self::companion_reset_count`]）。
     pub(crate) fn note_companion_reset(&self) {
@@ -3575,6 +3649,26 @@ impl ExtensionOwner {
             state.fade_pos.store(0, Ordering::Release);
             state.fade_active.store(true, Ordering::Release);
             state.last_token.store(token, Ordering::Release);
+        } else if self.force_declick[stream.index()].swap(false, Ordering::AcqRel) {
+            // 【T-A1-1：同一份源内部的读位置跳变】token 没变，但音频在块边界上确实
+            // 错开了一小段（起播窗口收口、循环折返、流交接）。尾巴里存的是上一块真正
+            // 输出的样本，与旧位置连续 —— 用它做一次等功率交叉，比"整块换源"轻得多。
+            let previous_token = state.last_token.load(Ordering::Acquire);
+            let previous_kind = (previous_token & 0xFF) as u8;
+            let keep = if Self::should_fade_in_instead_of_crossfading(previous_kind, kind as u8) {
+                0
+            } else {
+                u32::MAX
+            };
+            for channel in 0..2 {
+                for index in 0..OUTPUT_DECLICK_FRAMES {
+                    let old = state.tail[channel][index].load(Ordering::Relaxed);
+                    state.fade_from[channel][index].store(old & keep, Ordering::Relaxed);
+                }
+            }
+            state.fade_pos.store(0, Ordering::Release);
+            state.fade_active.store(true, Ordering::Release);
+            state.last_token.store(token, Ordering::Release);
         } else {
             // 【为什么先取旧的再交换】"要不要交叉淡化"取决于**上一个**源是什么；
             // `swap` 一执行旧值就没了，所以必须先读。
@@ -3994,6 +4088,30 @@ impl ExtensionOwner {
             }
         }
 
+        // 【T-A1-2：锁存的时钟偏移】宿主位置滞后时，用"宿主读数 + 偏移"当同一个时钟。
+        //
+        // 判据不是"位置没变"（那是钉住），而是"位置变了、但与我们自己的续接只差
+        // 不到一次 seek"。差得更多就是用户真的跳了：清掉偏移，重新以宿主为准。
+        let host_moved = had && raw_start != last_raw;
+        if host_moved && !time.cycle_active && geometry.offset_valid.load(Ordering::Acquire) {
+            let offset = geometry.host_clock_offset.load(Ordering::Acquire);
+            let candidate = raw_start.saturating_add(offset);
+            let expected = last_position.saturating_add(frames as i64);
+            let slack = (rate * SEEK_SLACK_SEC).round().max(1.0) as i64;
+            if candidate.saturating_sub(expected).unsigned_abs() <= slack as u64 {
+                position = candidate;
+                geometry.offset_used.fetch_add(1, Ordering::Relaxed);
+            } else {
+                geometry.offset_valid.store(false, Ordering::Release);
+                geometry.host_clock_offset.store(0, Ordering::Release);
+            }
+        }
+        // 新一次起播 / 循环折返：上一段的偏移没有意义。
+        if (playing_rising || recording_rising || cycle_wrap)
+            && geometry.offset_valid.swap(false, Ordering::AcqRel)
+        {
+            geometry.host_clock_offset.store(0, Ordering::Release);
+        }
         // 【起播窗口的位置记账】宿主把 `projectTimeSamples` 钉住、又不给
         // `continousTimeSamples` / `projectTimeMusic` 时，上面两条回退都失效。此时
         // **音频在流动**（内容逐块变化）是唯一还成立的证据：宿主既然按自己的块长
@@ -4213,6 +4331,13 @@ impl ExtensionOwner {
             if drift.unsigned_abs() <= tolerance as u64 {
                 position = expected;
                 source = PositionSource::Synthesized;
+                // 【T-A1-2】把这个差值锁存下来：下一块起 `position = raw_start + offset`，
+                // 于是收口之后的每一块都严格续接，不再"纠正一块、再跳一块"。
+                geometry
+                    .host_clock_offset
+                    .store(expected.saturating_sub(raw_start), Ordering::Release);
+                geometry.offset_valid.store(true, Ordering::Release);
+                geometry.offset_used.fetch_add(1, Ordering::Relaxed);
                 self.drift_ignored.fetch_add(1, Ordering::Relaxed);
                 self.max_drift_frames
                     .fetch_max(drift.unsigned_abs(), Ordering::Relaxed);
@@ -4796,8 +4921,14 @@ impl ExtensionOwner {
             return;
         }
         // 【T3：读位置单独记一份】输出侧按 `position` 读快照；跳变就是读游标阶跃。
+        // 【为什么连帧数一起记】下一块的"预期续接"是 `位置 + 帧数`；只记位置会把
+        // 每一次正常推进都算成跳变（见 `read_position_jump`）。
         self.rt_last_read_position
             .store(evidence.position, Ordering::Release);
+        self.rt_last_read_frames.store(
+            u32::try_from(evidence.frames).unwrap_or(u32::MAX),
+            Ordering::Release,
+        );
         self.rt_last_emitted_start
             .store(evidence.position, Ordering::Release);
         self.rt_last_emitted_frames.store(
@@ -4824,6 +4955,11 @@ impl ExtensionOwner {
         self.rt_last_read_position.store(position, Ordering::Release);
     }
 
+    /// 测试专用：写"上一块读了多少帧"（预期续接的第二个输入）。
+    #[cfg(test)]
+    pub(crate) fn note_read_frames_for_test(&self, frames: u32) {
+        self.rt_last_read_frames.store(frames, Ordering::Release);
+    }
     /// 测试专用：标记"上一块写出过内容"（T3 判据的第二个输入）。
     #[cfg(test)]
     pub(crate) fn mark_emitted_for_test(&self) {
@@ -4840,13 +4976,16 @@ impl ExtensionOwner {
     fn read_position_jump(&self, evidence: Option<BlockEvidence>) -> Option<u64> {
         let evidence = evidence?;
         let previous = self.rt_last_read_position.load(Ordering::Acquire);
-        if previous <= 0
-            || previous == evidence.position
-            || !self.rt_last_emitted_valid.load(Ordering::Acquire)
-        {
+        let previous_frames = i64::from(self.rt_last_read_frames.load(Ordering::Acquire));
+        if previous <= 0 || !self.rt_last_emitted_valid.load(Ordering::Acquire) {
             return None;
         }
-        let jump = evidence.position.saturating_sub(previous).unsigned_abs();
+        // 【核心判据：预期续接，而不是"上一块起点"】上一块读了 `previous_frames` 帧，
+        // 那么本块的起点**应当**是 `previous + previous_frames`。旧实现直接拿本块起点
+        // 减上一块起点，于是任何连续播放（差值 = 块长 > 64）都被判成跳变 ⇒ 整块直通
+        // 宿主原声 ⇒ 每一块都在干声与合成结果之间硬接一次。那就是"咔"。
+        let expected = previous.saturating_add(previous_frames);
+        let jump = evidence.position.saturating_sub(expected).unsigned_abs();
         (jump > u64::try_from(OUTPUT_DECLICK_FRAMES).unwrap_or(u64::MAX)).then_some(jump)
     }
     /// 音频线程上的 Transfer **输出**阶段。
@@ -4885,7 +5024,15 @@ impl ExtensionOwner {
         if let Some(jump) = self.read_position_jump(evidence) {
             self.position_corrections.fetch_add(1, Ordering::Relaxed);
             self.max_correction_frames.fetch_max(jump, Ordering::Relaxed);
-            self.skip_snapshot_read[stream.index()].store(true, Ordering::Release);
+            if jump > POSITION_RESYNC_PASS_THROUGH_FRAMES {
+                // 超过 50 ms：已经读到另一段内容了，整块回退宿主当前真实播放的东西。
+                self.skip_snapshot_read[stream.index()].store(true, Ordering::Release);
+            } else {
+                // 1.3 ms ~ 50 ms：还是同一段素材，读新位置并由接缝去咔做一次交叉淡化。
+                // 以前这里也走"整块直通"，而直通本身就是**换了一个信号源** —— 用户听到的
+                // 那一下"咔"其实是这个保护动作自己。淡化让它变成一次听不见的过渡。
+                self.force_declick[stream.index()].store(true, Ordering::Release);
+            }
         }
         self.output_token[stream.index()]
             .store(self.output_token_for(output), Ordering::Release);
@@ -5415,6 +5562,16 @@ impl ExtensionOwner {
         }
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state.edits)?;
+        // 【T-D5】同一份载荷已经合入过就别再排队：宿主重复交回同一份存档时（重开编辑器、
+        // 撤销后重做、文档重建），重放只会重复劳动，并在失败时重新点燃"没读回来"。
+        if Self::restore_digest(&restored).is_some_and(|digest| {
+            *self.restore_applied_digest.lock_or_recover() == Some(digest)
+                && !self.has_pending_restore()
+        }) {
+            log::info!("[ara] persisted state unchanged since the last merge; not replaying it");
+            self.refresh_document();
+            return Ok(());
+        }
         *self.pending_restore.lock_or_recover() = Some(restored);
         self.reset_restore_budget();
         self.note_restore_pending();
@@ -5437,15 +5594,53 @@ impl ExtensionOwner {
     /// "重开工程宿主未响应"。合入由 `prepare_renderers` 紧随其后的
     /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
     pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
+        // 【T-D5】与 `restore_state` 同一条纪律：已经合入过的同一份载荷不再重放。
+        if Self::restore_digest(&restored).is_some_and(|digest| {
+            *self.restore_applied_digest.lock_or_recover() == Some(digest)
+                && !self.has_pending_restore()
+        }) {
+            log::info!("[ara] archive payload unchanged since the last merge; not replaying it");
+            return;
+        }
         *self.pending_restore.lock_or_recover() = Some(restored);
         self.reset_restore_budget();
         self.note_restore_pending();
     }
-    /// 新载荷到达 ⇒ 等待预算从头计时（否则上一份载荷用完的 10 s 会立刻压到这一份上）。
+    /// 新载荷到达 ⇒ 等待账从头开始（否则上一份载荷用完的 10 s 会立刻压到这一份上）。
     fn reset_restore_budget(&self) {
         self.restore_attempts.store(0, Ordering::Relaxed);
-        *self.restore_first_attempt.lock_or_recover() = None;
+        *self.restore_progress.lock_or_recover() = RestoreProgress::default();
         *self.restore_next_attempt.lock_or_recover() = None;
+    }
+    /// 一份载荷的摘要（T-D5）：同一份存档重复交回时不再重放。
+    ///
+    /// 【为什么用编码后的字节】它能覆盖"用户真的改了参数"与"宿主只是把同一份又给了
+    /// 一遍"这两种形状，而字段级比较会因为 schema 演进而漏判。
+    fn restore_digest(state: &crate::state_channel::EditState) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let bytes = state.encode().ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+    /// 宿主图的形状摘要：**它是等待时间的唯一时钟**（T-D3）。
+    ///
+    /// 【为什么是摘要而不是计数】"宿主有没有动过"要一次比较得出结论。把
+    /// `track_bindings` / `regions` / `region_items` 一起哈希，任何一次真实的交付
+    /// 都会改变它，而我们的轮询不会 —— 于是"十秒"第一次真的是"十秒宿主没动"。
+    fn restore_signature(&self, document: &super::document::DocumentSession) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        {
+            let bindings = document.track_bindings.lock_or_recover();
+            for (id, members) in bindings.iter() {
+                id.hash(&mut hasher);
+                members.hash(&mut hasher);
+            }
+        }
+        document.regions.lock_or_recover().len().hash(&mut hasher);
+        document.region_items.lock_or_recover().len().hash(&mut hasher);
+        hasher.finish()
     }
     /// 是否还有一份**没合入**的持久化载荷（组件状态或 ARA 存档）。
     ///
@@ -5466,6 +5661,11 @@ impl ExtensionOwner {
     /// 【为什么外面再包一层】恢复失败此前只有调用点的 `log::warn!`，用户与诊断包都
     /// 看不到"参数到底读回来没有"。包装层把结果写进 `restore_status`，四个调用点
     /// 不必各自重复这件事。
+    ///
+    /// 【T-D3：等待只由宿主图的变化推进】旧实现用"我们 poll 了多少次"当预算，
+    /// 于是界面刷新得越快、预算烧得越快，10 秒的窗口能打印出 38.2 秒。现在只有一个
+    /// 起点：图签名最后一次变化的时刻。签名不变且超过 `RESTORE_WAIT_WINDOW` 才报一次
+    /// "没等到"，之后**不再重报**，直到宿主图再次变化。
     pub(super) fn merge_pending_restore(
         &self,
         document: &super::document::DocumentSession,
@@ -5473,59 +5673,65 @@ impl ExtensionOwner {
         // 【为什么要先看有没有载荷】成功路径会 `take()` 掉 pending；只有"进来时有、
         // 出去时没有"才说明这一次真的把状态合进去了。没有这个前提，一个从未收到
         // 载荷的实例也会被记成"恢复成功"。
-        let had_pending = self.pending_restore.lock_or_recover().is_some();
-        if had_pending {
-            // 【退避中：不重试、也不改读数】"放弃等待"只改**界面读数**，不改载荷的
-            // 去留。这一条挡住的是"每一轮 prepare 都把 failed 翻回 pending"——
-            // 那样用户永远看不到结论，而日志会刷满。
-            if self
-                .restore_next_attempt
-                .lock_or_recover()
-                .is_some_and(|at| std::time::Instant::now() < at)
-            {
-                return Ok(());
+        if !self.pending_restore.lock_or_recover().is_some() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let signature = self.restore_signature(document);
+        let (waited, reported, changed) = {
+            let mut progress = self.restore_progress.lock_or_recover();
+            let changed = progress.signature != signature;
+            if progress.since.is_none() || changed {
+                progress.signature = signature;
+                progress.since = Some(now);
+                progress.reported = false;
             }
+            (
+                now.duration_since(progress.since.unwrap_or(now)),
+                progress.reported,
+                changed,
+            )
+        };
+        if changed {
+            // 宿主动了 ⇒ 退避失效，立刻重试一次（否则"改完工程还得再等十秒"）。
             *self.restore_next_attempt.lock_or_recover() = None;
-            // 本轮重新判定"在等什么"；inner 会为已知原因写回。
             *self.restore_pending_reason.lock_or_recover() = None;
         }
-        let first = if had_pending {
-            *self
-                .restore_first_attempt
-                .lock_or_recover()
-                .get_or_insert_with(std::time::Instant::now)
-        } else {
-            std::time::Instant::now()
-        };
-        let attempts = if had_pending {
-            self.restore_attempts
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1)
-        } else {
-            self.restore_attempts.load(Ordering::Relaxed)
-        };
+        {
+            let mut next = self.restore_next_attempt.lock_or_recover();
+            if let Some(at) = *next {
+                if now < at {
+                    return Ok(());
+                }
+                *next = None;
+            }
+        }
+        self.restore_attempts.fetch_add(1, Ordering::Relaxed);
+        // 摘要要在 inner 之前取：成功路径会把 pending `take()` 掉。
+        let pending_digest = self
+            .pending_restore
+            .lock_or_recover()
+            .as_ref()
+            .and_then(Self::restore_digest);
         let result = self.merge_pending_restore_inner(document);
         match &result {
             Ok(()) => {
                 if self.pending_restore.lock_or_recover().is_some() {
-                    // 【有界等待】"身份对不上 ⇒ 继续等"必须有一个上界，否则界面永远停在
-                    // "正在等待"，而用户无法判断"再等等"与"它不会来了"。超过上界后：
-                    // 报一次可读的失败原因（含它在等什么），**载荷留着**，转入慢重试。
-                    let waited = first.elapsed();
-                    if attempts >= RESTORE_GIVE_UP_ATTEMPTS || waited >= RESTORE_GIVE_UP_WINDOW {
+                    if waited >= RESTORE_WAIT_WINDOW && !reported {
                         let reason = self
                             .restore_pending_reason
                             .lock_or_recover()
                             .clone()
                             .unwrap_or_else(|| "waiting-for-host-model".to_owned());
                         self.note_restore_failed(&format!(
-                            "the host graph did not rebuild within {:.1}s ({reason}); the saved payload is kept and retried every {}s",
+                            "the host graph has not changed for {:.1}s ({reason}); the saved payload is kept and retried every {}s",
                             waited.as_secs_f64(),
                             RESTORE_RETRY_INTERVAL.as_secs()
                         ));
+                        self.restore_progress.lock_or_recover().reported = true;
                         *self.restore_next_attempt.lock_or_recover() =
-                            Some(std::time::Instant::now() + RESTORE_RETRY_INTERVAL);
-                    } else {
+                            Some(now + RESTORE_RETRY_INTERVAL);
+                    } else if !reported {
                         // 仍有载荷挂着（文档未就绪 / 空轨 / 缺 fade 元数据）：不是失败，
                         // 只是还不能收口。
                         self.note_restore_pending();
@@ -5534,19 +5740,19 @@ impl ExtensionOwner {
                                 Some("waiting-for-host-model".to_owned());
                         }
                     }
-                } else if had_pending {
+                } else {
                     self.note_restore_applied();
-                    // 收口成功 ⇒ 等待预算归零，下一份载荷从头计时。
-                    self.restore_attempts.store(0, Ordering::Relaxed);
-                    *self.restore_first_attempt.lock_or_recover() = None;
-                    *self.restore_next_attempt.lock_or_recover() = None;
+                    if let Some(digest) = pending_digest {
+                        *self.restore_applied_digest.lock_or_recover() = Some(digest);
+                    }
+                    self.reset_restore_budget();
                 }
             }
             Err(error) => {
                 self.note_restore_failed(error);
-                // 真失败也要退避：否则每一轮 prepare 都重试一次、刷一行 warn。
+                self.restore_progress.lock_or_recover().reported = true;
                 *self.restore_next_attempt.lock_or_recover() =
-                    Some(std::time::Instant::now() + RESTORE_RETRY_INTERVAL);
+                    Some(now + RESTORE_RETRY_INTERVAL);
             }
         }
         result
@@ -6820,6 +7026,10 @@ impl ExtensionOwner {
         );
         *current = Some(owned.0);
         self.bound_document_id.store(document.id, Ordering::Release);
+        // 【T-B0-1】账本里的 `bound` 此前没有任何写者，于是它恒为 false —— 读数在说谎。
+        if let Some(ledger) = document.graph_ledger() {
+            ledger.note_bound();
+        }
         // 绑定成功即置"曾经绑定过"。此后 `editor_document()` 的措辞走 DOCUMENT_CLOSED
         // 而不是 ARA_NOT_BOUND —— 两者对用户的含义完全不同（见该访问器的说明）。
         self.bound_once.store(true, Ordering::Release);

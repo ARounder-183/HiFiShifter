@@ -1910,7 +1910,12 @@ impl AudioSources for ModelHandle {
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
         self.mark_model_dirty();
-        self.session.clear_renderers();
+        // 【T-A1-4：播放中不撤渲染许可】播放中撤掉快照等于在用户的耳朵里挖一个洞；
+        // 旧快照对应的是上一版内容（与 `StaleProcessed` 同一条纪律），比一次静音好。
+        // 停播后第一次 prepare 会照常清，所以"内容过期"不会被永久忽略。
+        if !self.session.realtime_playing() {
+            self.session.clear_renderers();
+        }
         // 【T12：读到新版本之后再替换】旧实现在这里**先删**已发布的编辑侧副本，再尝试重读。
         // 那一刻若样本访问还没开（后台、undo 历史、宿主整理缓存），新版本读不出来，
         // 而旧版本已经删了 ⇒ 编辑侧 PCM 永久消失，界面只能显示占位（用户看到的
@@ -1930,6 +1935,9 @@ impl AudioSources for ModelHandle {
         if let Some(source) = self.document.audio_sources.get_mut(*state) {
             source.sample_access_enabled = enable;
         }
+        // 【T-B0-1】账本里的 `access=0/0` 此前没有写者：它恒为 0/0，读起来像
+        // "宿主一次都没授权过"。补上之后，"授权了几次、收回了几次"第一次可读。
+        self.ledger.note_enable_access(enable);
         if enable {
             self.session
                 .samples_access_granted
@@ -1983,7 +1991,10 @@ impl ModelHandle {
     /// 而 `SourcePcm` 带 `version`，渲染缓存键含它。保留旧 PCM 的那一窗口里渲染读到
     /// 的是**上一版内容**——与 Transfer 的 `StaleProcessed` 是同一条既有纪律。
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
-        self.session.revoke_renderers();
+        // 【T-A1-4：这里**不能**无条件撤渲染权威】本函数被宿主每一次内容/访问变化调用，
+        // 也被我们自己的 1 s 重试调用。旧实现在最开头 `revoke_renderers()`，于是
+        // "一次重试"就硬清全部快照 ⇒ 每个重试周期一次静音。真正需要撤的只有一件事：
+        // **我们已经有的那份 PCM 现在读不到**（那条分支里才撤）。
         let Some(source) = self.document.audio_sources.get(index) else {
             return;
         };
@@ -2008,6 +2019,11 @@ impl ModelHandle {
                 // 【锁序】`edit_sources` 先于 `source_states`（与 `publish_readiness` 同向）。
                 self.session.edit_sources.lock_or_recover().contains_key(&id)
             };
+            if had_pcm {
+                // 宿主收回了访问：继续播旧采样等于播一份已经失效的结果，这一刻必须撤。
+                // 与"一次重试"不同 —— 这是**真的**失去了输入。
+                self.session.revoke_renderers();
+            }
             let mut states = self.session.source_states.lock_or_recover();
             if had_pcm {
                 states.insert(id, crate::render::document::SourceState::Revoked);

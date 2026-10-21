@@ -834,16 +834,45 @@ impl SnapshotPublisher {
             // 宿主原声；所以淡化必须发生在覆盖范围**之内** —— 在 `hole.start - end`
             // 处还是纯处理结果，到 `hole.start` 降到纯原声。
             for hole in &holes {
-                if position >= hole.end && position < hole.end + end {
-                    let t = ((position - hole.end) as f32 / end as f32).clamp(0.0, 1.0);
-                    let angle = t * std::f32::consts::FRAC_PI_2;
-                    return (angle.cos(), angle.sin());
+                let width = hole.end - hole.start;
+                // 【T-A1-3：洞宽决定用几条斜坡】
+                //
+                // 宽洞（>= 2 个淡化带）两侧各一条斜坡，中间留出稳定段 —— 那是"停止、
+                // 再开始"的正确形状。
+                //
+                // 窄洞（2 帧 ~ 2 个淡化带）**不能**用两条独立斜坡：出口那条还没升到
+                // 满，入口那条已经开始降，两条在洞里叠成一个深谷 —— 一个 1~5 ms 的
+                // 记录空洞会因此变得比硬切还响（用户听到的"随机咔"）。这种洞改用
+                // 一条跨过整个洞的 U 形等功率曲线：处理 → 原声 → 处理，全程连续。
+                //
+                // 1 帧及以下的洞不做任何淡化：两个采样之间的阶跃人耳不可闻，而两次
+                // 乘法反而会在块边界上制造一个 dibit。
+                if width <= 1 {
+                    continue;
                 }
-                if position >= hole.start - end && position < hole.start {
-                    // 与出口同一条等功率曲线，方向相反：`t = 0` 处满内容、`t = 1` 处满原声。
-                    let t = ((hole.start - position) as f32 / end as f32).clamp(0.0, 1.0);
-                    let angle = t * std::f32::consts::FRAC_PI_2;
-                    return (angle.cos(), angle.sin());
+                if width >= end.saturating_mul(2) {
+                    if position >= hole.end && position < hole.end + end {
+                        let t = ((position - hole.end) as f32 / end as f32).clamp(0.0, 1.0);
+                        let angle = t * std::f32::consts::FRAC_PI_2;
+                        return (angle.cos(), angle.sin());
+                    }
+                    if position >= hole.start - end && position < hole.start {
+                        // 与出口同一条等功率曲线，方向相反：`t = 0` 处满内容、`t = 1` 处满原声。
+                        let t = ((hole.start - position) as f32 / end as f32).clamp(0.0, 1.0);
+                        let angle = t * std::f32::consts::FRAC_PI_2;
+                        return (angle.cos(), angle.sin());
+                    }
+                } else {
+                    let half = (end / 2).max(1);
+                    let from = hole.start - half;
+                    let to = hole.end + half;
+                    if position >= from && position < to {
+                        let span = (to - from).max(1) as f32;
+                        let t = ((position - from) as f32 / span).clamp(0.0, 1.0);
+                        // `w` 是快照权重：两端 1、洞心 0，用正弦保持导数连续。
+                        let w = 1.0 - (t * std::f32::consts::PI).sin();
+                        return (1.0 - w, w);
+                    }
                 }
             }
             (0.0, 1.0)

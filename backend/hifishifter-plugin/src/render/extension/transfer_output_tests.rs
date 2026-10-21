@@ -118,6 +118,47 @@ fn the_read_position_jump_is_a_pure_judgement() {
     owner.note_read_position_for_test(96_000);
     assert_eq!(owner.read_position_jump(Some(evidence)), Some(48_000));
 }
+/// **T-A1-1：连续推进不是跳变。**
+///
+/// 【为什么这是"起播 0.4~0.7 s 一次咔 + 随机咔"的主回归】旧判据拿本块起点减**上一块
+/// 起点**，而连续播放时那个差恒等于**块长**（256、512…）。于是每一块都被判成"读游标
+/// 跳变" ⇒ 整块回退宿主原声 ⇒ 上一块是合成结果、这一块是干声，中间只有 64 帧混合。
+/// 用户听到的就是那一下咔。
+#[test]
+fn a_contiguous_block_advance_is_not_a_jump() {
+    let owner = insert_owner();
+    let evidence = BlockEvidence {
+        stream: crate::transfer::capture::ProcessStream::Realtime,
+        position: 48_256,
+        frames: 256,
+        playing: true,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: crate::transfer::capture::TransportPhase::Rolling,
+        had_previous: true,
+        allow_output: true,
+        start_window: false,
+        repeated_nonzero: false,
+        split: BlockSplit::whole(48_256, 256),
+    };
+    owner.mark_emitted_for_test();
+    owner.note_read_position_for_test(48_000);
+    owner.note_read_frames_for_test(256);
+    assert_eq!(
+        owner.read_position_jump(Some(evidence)),
+        None,
+        "紧接上一块的推进不是跳变"
+    );
+    // 但真的错位仍然要判出来：预期续接 48_256，本块却从 96_000 开始。
+    let jumped = BlockEvidence {
+        position: 96_000,
+        split: BlockSplit::whole(96_000, 256),
+        ..evidence
+    };
+    assert_eq!(owner.read_position_jump(Some(jumped)), Some(47_744));
+}
+
 /// **T5: Raw and Processed are different sources, so switching between them fades in.**
 ///
 /// Why this is a regression for the random click: the old judgement looked only at the
