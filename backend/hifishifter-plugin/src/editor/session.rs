@@ -329,6 +329,17 @@ pub(crate) struct EditorSession {
     /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
     /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
     timeline_revision: AtomicU64,
+    /// 【B4 归因】渲染版本是**谁**推进的，分成三档。
+    ///
+    /// 【为什么需要它】`edit` 只告诉我们"版本动了"，不告诉我们"谁动的"。现场
+    /// 排查时这两种情形在日志里完全同形：用户在编辑（该重渲染），与某条内部路径
+    /// 每轮都在推进版本（不该重渲染）。上一轮就是因为无法区分，把 24 次版本推进
+    /// 归因到了音高分析上 —— 而分析其实只跑了 3 次。
+    revision_bumps_dirty: AtomicU64,
+    revision_bumps_publish: AtomicU64,
+    revision_bumps_analysis: AtomicU64,
+    /// 上一次打过的三档计数；只在变化时打印（20 ms 定时器驱动，不去重就是每秒 50 行）。
+    last_revision_report: Mutex<Option<(u64, u64, u64)>>,
     /// 已发布时间线的片段数（健康探活用，避免取 `timeline` 锁）。
     ///
     /// 【为什么不在 `plugin_health` 里直接读 `timeline.lock()`】探活发生在宿主 UI
@@ -582,6 +593,10 @@ impl EditorSession {
             analysis_workers: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
             timeline_revision: AtomicU64::new(0),
+            revision_bumps_dirty: AtomicU64::new(0),
+            revision_bumps_publish: AtomicU64::new(0),
+            revision_bumps_analysis: AtomicU64::new(0),
+            last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
             submitted: AtomicU64::new(0),
@@ -647,6 +662,34 @@ impl EditorSession {
     /// 而那套读数问的是"编辑应用了没有"，与"渲染读的东西变没变"是两件事。
     pub(crate) fn timeline_revision(&self) -> u64 {
         self.timeline_revision.load(Ordering::Acquire)
+    }
+
+    /// 【B4】把"渲染版本是被谁推进的"打成一行（非音频线程，20 ms 定时器驱动）。
+    ///
+    /// 【判读方式】`dirty` 是用户/命令编辑，`analysis` 是原线补齐，
+    /// `publish` 是全部发布（含 analysis）。健康状态是：播放期间三者都**不涨**；
+    /// 用户在画线时 `dirty` 与 `publish` 同步涨、`analysis` 不涨。
+    ///
+    /// 若播放期间 `analysis` 与 `publish` 同步上涨而用户没碰任何东西，
+    /// 那就是"内部路径每轮都在推进版本"—— 它会经版本闸变成周期性重渲染。
+    pub(crate) fn log_revision_bumps(&self) {
+        let triple = (
+            self.revision_bumps_dirty.load(Ordering::Relaxed),
+            self.revision_bumps_publish.load(Ordering::Relaxed),
+            self.revision_bumps_analysis.load(Ordering::Relaxed),
+        );
+        let total = self.timeline_revision.load(Ordering::Acquire);
+        let mut last = self.last_revision_report.lock_or_recover();
+        if *last == Some(triple) {
+            return;
+        }
+        *last = Some(triple);
+        log::warn!(
+            "[transfer] revision: total={total} dirty={} publish={} analysis={}",
+            triple.0,
+            triple.1,
+            triple.2,
+        );
     }
 
     /// 时间线是否已经加载过（Transfer 的渲染要等这一份就绪才用得上用户曲线）。
@@ -996,6 +1039,9 @@ impl EditorSession {
                     owner.log_transfer_context();
                     owner.log_transfer_report();
                     owner.log_buffer_audit();
+                    // 【B4】版本推进的归因。上面几行回答"输出了什么"，这一行回答
+                    // "谁让它重算的" —— 后者此前只能靠猜。
+                    session.log_revision_bumps();
                 }
                 // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。
@@ -1441,23 +1487,37 @@ impl EditorSession {
                 let Some(current) = timeline.params_by_root_track.get_mut(&root) else {
                     continue;
                 };
+                // 【原线补齐不等于内容变了】`pitch_orig_key` 是**缓存失效标记**，
+                // 不是内容本身：清掉它之后重新组装出的数组可能逐值相同（同一份
+                // 素材、同一份分析结果）。那时渲染结果一个字都不会变，就不该推进
+                // 渲染版本。
+                //
+                // 旧实现无条件 `changed = true`，于是"分析完成"这个本该一次性的
+                // 事件变成了每轮都推进版本：版本闸触发重渲染 → 快照换版 →
+                // 输出 token 变 → 装填一次接缝淡化（用户听到的咔）。
+                //
+                // 【为什么键仍然要写】它是失效标记：不写回去，下一轮 `roots` 仍然
+                // 包含它，组装会无限重复。写键、但不推进版本 —— 这两件事必须分开。
                 if current.pitch_orig_key.is_none() && next.pitch_orig_key.is_some() {
+                    let edit_differs = !current.pitch_edit_user_modified
+                        && current.pitch_edit != next.pitch_edit;
+                    changed |= current.pitch_orig != next.pitch_orig || edit_differs;
                     current.pitch_orig = next.pitch_orig.clone();
                     if !current.pitch_edit_user_modified {
                         current.pitch_edit = next.pitch_edit.clone();
                     }
                     current.pitch_orig_key = next.pitch_orig_key.clone();
                     current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
-                    changed = true;
                 }
                 if current.dyn_orig_key.is_none() && next.dyn_orig_key.is_some() {
+                    changed |= current.dyn_orig != next.dyn_orig;
                     current.dyn_orig = next.dyn_orig.clone();
                     current.dyn_orig_key = next.dyn_orig_key.clone();
-                    changed = true;
                 }
             }
         }
         if changed {
+            self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
             let updated = self.timeline.lock_or_recover().clone();
             self.publish_timeline(updated);
             self.render_requested.store(true, Ordering::Release);
@@ -2612,6 +2672,7 @@ impl ParamHost for EditorSession {
         );
     }
     fn mark_dirty(&self) {
+        self.revision_bumps_dirty.fetch_add(1, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::AcqRel);
         // 见 `timeline_revision` 的字段说明：它是"编辑 ∪ 发布"的并集。
         self.timeline_revision.fetch_add(1, Ordering::AcqRel);
@@ -2627,6 +2688,7 @@ impl ParamHost for EditorSession {
         // （set_param_frames / restore / convert_mix_param / set_static_param /
         // stretch_track_linked_params）与撤销重做都会走到这里。Transfer 的渲染版本闸
         // 以它为据，因此不标脏的改动也不会被跳过（见字段说明）。
+        self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
         self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
