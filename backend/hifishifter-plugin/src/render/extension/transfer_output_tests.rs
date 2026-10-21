@@ -2111,3 +2111,147 @@ fn the_context_line_reports_the_host_time_fields() {
     assert!(line.contains("rate=48000"), "{line}");
     assert!(line.contains("counted=0"), "{line}");
 }
+
+/// **宿主停播却仍在送预取音频时，计数器不得一路前进。**
+///
+/// 【这是"反复播 0.7 s 内容完全对不上"的直接判据】现场日志里 `raw` 冻结在 99484、
+/// `playing=0`，而 `pos` 一路走到 262476 —— 漂移 162992 帧（3.4 s）。重播时我们从
+/// `anchor + 漂移` 读，读到的是素材里另一段，于是"0.7 s 的内容完全对不上"。
+///
+/// 【为什么额度绑在 pass 上】"内容在流动"这条证据服务的本来就是**起播窗口**：
+/// 宿主把位置钉住、却已经在按块长送音频。一次播放只有一个开头，所以它的可信长度
+/// 也只该有一个开头那么多（`PRE_ROLL_CAP_SEC`）。
+#[test]
+fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let rate = 48_000.0_f64;
+    let frames = 512_usize;
+    let cap = (rate * PRE_ROLL_CAP_SEC).round() as i64;
+    // 起播：宿主把位置钉在 1000，且给了一个上升沿。
+    let first = owner.note_stream_geometry(
+        stream,
+        1_000,
+        frames,
+        rate,
+        StreamTime::default(),
+        true,
+        false,
+        false,
+    );
+    assert_eq!(first.position, 1_000, "起播块的位置就是宿主报的那个");
+    // 之后 200 块：宿主位置一直不动，而内容一直在变（预取音频）。
+    let mut last = first;
+    for index in 0..200_u64 {
+        owner.streams[stream.index()].note_activity(index);
+        last = owner.note_stream_geometry(
+            stream,
+            1_000,
+            frames,
+            rate,
+            StreamTime::default(),
+            false,
+            false,
+            false,
+        );
+    }
+    let drifted = last.position - 1_000;
+    assert!(
+        drifted <= cap,
+        "停播时计数器最多只可信一个起播窗口：漂移 {drifted} 帧 > {cap} 帧",
+    );
+    assert!(drifted > 0, "起播窗口内仍然必须能推进（否则前 0.66 s 静音）");
+}
+
+/// **真实播放（`kPlaying` 为真）时，计数器不受起播窗口限制。**
+///
+/// 【为什么必须钉住这一条】收紧"内容在流动"这条证据时，最容易顺手把真实播放
+/// 一起收掉 —— 那会让宿主位置读数滞后时输出停在原地（听感是持续的卡顿）。
+/// `kPlaying` 是这两件事唯一可靠的分界：宿主说 transport 在走，就允许接着数。
+#[test]
+fn a_rolling_transport_may_keep_advancing_the_counter() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let rate = 48_000.0_f64;
+    let frames = 512_usize;
+    let cap = (rate * PRE_ROLL_CAP_SEC).round() as i64;
+    let mut last = owner.note_stream_geometry(
+        stream,
+        1_000,
+        frames,
+        rate,
+        StreamTime::default(),
+        true,
+        false,
+        true,
+    );
+    for index in 0..200_u64 {
+        owner.streams[stream.index()].note_activity(index);
+        last = owner.note_stream_geometry(
+            stream,
+            1_000,
+            frames,
+            rate,
+            StreamTime::default(),
+            false,
+            false,
+            true,
+        );
+    }
+    let drifted = last.position - 1_000;
+    assert!(
+        drifted > cap,
+        "transport 在走时计数器必须继续（否则位置读数滞后会让输出卡住）：{drifted} <= {cap}",
+    );
+}
+
+/// **同一份内容重新发布一次，不得被当成"换源"。**
+///
+/// 【为什么这是那个周期性"咔"的判据】`output_token` 此前编的是 `generation`
+/// （发布次数）。于是同一份素材被重新合成一次（曲线没变、只是版本号动了）就让
+/// token 变，`apply_output_declick` 装填一次 64 帧接缝 —— 现场日志里每 0.68 s
+/// 一次，`max_step` 最高 0.2264（满幅 23%）。
+///
+/// 判据必须问**内容**，不是问发布了几次。
+#[test]
+fn re_publishing_the_same_content_does_not_arm_a_seam() {
+    let owner = insert_owner();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    let first = owner.output_token_for(TransferOutput::Processed);
+    let published = owner.snapshots[0].generation();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    assert_ne!(
+        owner.snapshots[0].generation(),
+        published,
+        "夹具必须真的又发布了一次"
+    );
+    assert_eq!(
+        owner.output_token_for(TransferOutput::Processed),
+        first,
+        "同一份内容重新发布不是换源：token 必须不变，否则每次都装一次接缝淡化"
+    );
+}
+
+/// **内容真的变了，token 必须变。** 上一条的防线：别把"不装缝"做成了"永不装缝"。
+#[test]
+fn publishing_different_content_changes_the_token() {
+    let owner = insert_owner();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    let first = owner.output_token_for(TransferOutput::Processed);
+    let changed = || {
+        let mut snapshot = processed_snapshot();
+        snapshot.left = vec![0.7, 0.2];
+        snapshot.right = vec![0.7, 0.2];
+        snapshot
+    };
+    owner.snapshots[0].publish(changed()).unwrap();
+    owner.snapshots[1].publish(changed()).unwrap();
+    assert_ne!(
+        owner.output_token_for(TransferOutput::Processed),
+        first,
+        "内容变了就必须换 token，否则真正的换版拿不到去咔"
+    );
+}

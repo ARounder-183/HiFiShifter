@@ -571,6 +571,15 @@ struct StreamGeometry {
     /// 【为什么它是帧数而不是布尔】"窗口有多宽"与"已经用掉多少"是同一件事的两面；
     /// 存一个剩余量让两者不可能互相漂移。
     advance_limit: AtomicU32,
+    /// "内容在流动"这条证据还剩多少帧可信（只在 `playing == false` 时消耗）。
+    ///
+    /// 【为什么与 `advance_limit` 分开】两者管的是**不同的通路**：
+    ///   * `advance_limit` 只在上升沿打开，管"宿主还没开始报位置"；
+    ///   * `activity_budget` 在每次 `new_pass` 充满，管"宿主钉住位置但音频在流动"。
+    /// 后者此前完全没有额度，于是宿主停播后仍在送预取音频时，计数器可以一路
+    /// 前进 —— 实测 3.4 s。把它绑到 pass 上（一次播放只有一个开头），语义与它
+    /// 所服务的起播窗口完全一致。
+    activity_budget: AtomicU64,
     /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
     pass: AtomicU64,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
@@ -3824,10 +3833,19 @@ impl ExtensionOwner {
             // 【为什么两份都编】真正被读的是 `snapshots[snapshot_index_for_rate(...)]`
             // （48 kHz 及倍率工程读索引 1）。只编索引 0 会让"实际读的是另一份"的宿主
             // 在换版时拿不到去咔。
+            // 【为什么用 `content` 而不是 `generation`】token 的用途只有一个：
+            // 让 `apply_output_declick` 判断"这一块与上一块是不是同一份输出"。
+            // `generation` 回答的是"发布过几次"，于是同一份素材被重新合成一次
+            // （曲线没变、只是版本号动了）就会让 token 变、装填一次 64 帧接缝 ——
+            // 实测每 0.68 s 一次，正是用户听到的那个周期性"咔"。
+            //
+            // 【为什么仍然保留 `kind`】种类（Raw / Processed / Passthrough）回答的是
+            // "这一侧是什么内容"，与内容指纹正交：两者都必须参与，缺一个就会把
+            // 一次真实换源或一次重新合成判反。
             TransferOutput::Processed | TransferOutput::Untouched => {
-                self.snapshots[0].generation() ^ self.snapshots[1].generation().rotate_left(32)
+                self.snapshots[0].content() ^ self.snapshots[1].content().rotate_left(32)
             }
-            TransferOutput::Raw => self.raw_tape.generation(),
+            TransferOutput::Raw => self.raw_tape.content(),
             _ => 0,
         };
         kind | (revision << 8)
@@ -4493,6 +4511,11 @@ impl ExtensionOwner {
             StreamTime::default(),
             false,
             false,
+            // 【这个入口没有 transport 状态】它只回答"这一块的几何形状变了没有"
+            // （`(flow, had_previous)`），调用点全在测试里。没有 `ProcessContext`
+            // 就没有 `kPlaying`，取"transport 在走"是与它原有契约一致的假设 ——
+            // 生产路径走 `note_stream_block`，那里的 `playing` 来自真实上下文。
+            true,
         );
         (block.phase != TransportPhase::Resting, block.had_previous)
     }
@@ -4519,6 +4542,9 @@ impl ExtensionOwner {
             StreamTime::from_context(context),
             playing_rising,
             recording_rising,
+            // kPlaying 是 SDK 对"transport 是否在走"的权威回答，与位置、采样率、
+            // 样本同属**同一个块**。计数器的推进权必须以它为准（见 may_advance）。
+            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
         )
     }
 
@@ -4568,6 +4594,7 @@ impl ExtensionOwner {
         time: StreamTime,
         playing_rising: bool,
         recording_rising: bool,
+        playing: bool,
     ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
@@ -4706,6 +4733,11 @@ impl ExtensionOwner {
                     },
                     Ordering::Release,
                 );
+                // 【活动额度随 pass 充满】一次播放只有一个开头，所以"内容在流动"这条
+                // 证据的可信长度也只有一个开头那么多。用完就不再借它。
+                geometry
+                    .activity_budget
+                    .store(pre_roll_cap, Ordering::Release);
                 geometry.pass.fetch_add(1, Ordering::Relaxed);
             } else {
                 // R3：宿主报了新位置 ⇒ 计数器不再有权推进，窗口一并作废。
@@ -4723,7 +4755,56 @@ impl ExtensionOwner {
             }
             let limit = u64::from(geometry.advance_limit.load(Ordering::Acquire));
             let window_open = advance < limit;
-            let may_advance = window_open || geometry.activity_moving();
+            // 【计数器凭什么有权推进】只有两种情形，且**两者都有明确预算**：
+            //
+            //   (a) 起播窗口（window_open）—— 本 pass 刚开始，宿主还没接管位置，
+            //       预算由 advance_limit 给（PRE_ROLL_CAP_SEC）。
+            //   (b) 真实播放（playing）且内容在流动 —— 宿主说 transport 在走，
+            //       位置读数可能滞后，用块长接着数是对的。
+            //
+            // 【为什么 (b) 必须带 playing】旧实现只看"内容在流动"，于是宿主
+            // **停播**（kPlaying 为假）却仍在送预取音频时，计数器照样一路前进 ——
+            // 实测一次跑掉 162992 帧（3.4 s），而宿主报的位置只挪了 1220 帧。
+            // 那 3.4 s 的偏移正是"反复播 0.7 s 内容完全对不上"：重播时我们从
+            // anchor + 偏移 读，读到的是素材里另一段。
+            //
+            // 【为什么不是"按秒数封顶"】封顶需要一个固定常数（比如 0.25 s），
+            // 而实测的 VEGAS 起播窗口是 0.66 s —— 任何小于它的常数都会把起播切断。
+            // 预算本来就该由"本 pass 是不是刚开始"给出，而不是一个与宿主无关的秒数。
+            // 【"内容在流动"这条证据也必须有限额】它是起播窗口的第二条通路：
+            // VEGAS 的起播窗口里宿主把位置钉在 0、却已经在按块长送音频，那时
+            // `playing_rising` 早已过去，`window_open` 也已用完，只有"内容在变"
+            // 还能说明时间在走。
+            //
+            // 但这条证据**无限用**就成了缺陷：宿主停播后仍在送预取音频时，内容
+            // 同样在变，计数器于是一路前进 —— 实测一次跑掉 162992 帧（3.4 s），
+            // 而宿主报的位置只挪了 1220 帧。那正是"反复播 0.7 s 内容完全对不上"。
+            //
+            // 所以给它与本 pass 起播窗口**同一份额度**：`activity_budget` 在
+            // `new_pass` 时充满，用一帧扣一帧。额度用完，位置就回到宿主报的那个点，
+            // 等宿主恢复报数由 R3 接管。
+            //
+            // 【为什么额度不能是"每次 pass 都重新充满"之外的东西】起播窗口本身就是
+            // 一次性的：一次播放只有一个开头。额度绑在 pass 上，语义与它完全一致。
+            // 【`kPlaying` 在这里的作用】它把"内容在流动"这条证据分成两种用法：
+            //
+            //   * 宿主说 transport 在走（`playing`）⇒ 位置读数滞后是常态，
+            //     计数器就是正确来源，**不设额度**；
+            //   * 宿主说没在走（停播 / 起播窗口）⇒ 位置才是权威，
+            //     只在"本 pass 刚开始"的额度内才允许猜。
+            //
+            // 现场日志里跑飞的那 3.4 s 全部发生在 `playing=0` 的块上，所以第二档
+            // 一收紧，漂移就没有了；而真实播放（`playing=1`）一个行为都没变。
+            let mut may_advance = window_open;
+            let mut uses_activity_budget = false;
+            if !may_advance && geometry.activity_moving() {
+                if playing {
+                    may_advance = true;
+                } else if geometry.activity_budget.load(Ordering::Acquire) >= frames as u64 {
+                    may_advance = true;
+                    uses_activity_budget = true;
+                }
+            }
             // 本块相对锚点的偏移；`advance` 是"按块长算，本块应该在哪"。
             let mut offset = advance as i64;
             let mut advanced = false;
@@ -4769,6 +4850,14 @@ impl ExtensionOwner {
                 position = anchor.saturating_add(offset);
                 counted = true;
                 advanced = true;
+                if uses_activity_budget {
+                    geometry.activity_budget.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |budget| Some(budget.saturating_sub(frames as u64)),
+                    )
+                    .ok();
+                }
                 geometry.counted_blocks.fetch_add(1, Ordering::Relaxed);
                 geometry.counted_frames.fetch_add(frames as u64, Ordering::Relaxed);
             }
@@ -7888,6 +7977,12 @@ struct BlockTraceRecord {
     continuous_valid: AtomicBool,
     music_bits: AtomicU64,
     music_valid: AtomicBool,
+    /// 【为什么要 tempo】`[transfer] ctx` 只打 `music=` 时，读者无法判断
+    /// "Music 分支为什么没生效"：那一条要求 `music` 与 `tempo` **同时**有效。
+    /// 现场日志里 `music=841.5(valid)` 连着几块不变，而 `counted=1` —— 只有
+    /// 把 tempo 也打出来，才能一眼区分"宿主没给 tempo"与"music 冻结了"。
+    tempo_bits: AtomicU64,
+    tempo_valid: AtomicBool,
     /// `0` = 非循环；`1` = 循环且元数据完整；`2` = 循环但元数据不完整。
     cycle: AtomicU8,
     rate_bits: AtomicU64,
@@ -7975,6 +8070,10 @@ impl BlockTraceRing {
             .music_bits
             .store(time.music.unwrap_or(f64::NAN).to_bits(), Ordering::Relaxed);
         record.music_valid.store(time.music.is_some(), Ordering::Relaxed);
+        record
+            .tempo_bits
+            .store(time.tempo.unwrap_or(f64::NAN).to_bits(), Ordering::Relaxed);
+        record.tempo_valid.store(time.tempo.is_some(), Ordering::Relaxed);
         record.cycle.store(
             if time.cycle_active {
                 1 + u8::from(!time.cycle_valid)
@@ -8033,6 +8132,8 @@ impl BlockTraceRing {
                 record.continuous_valid.load(Ordering::Relaxed),
                 record.music_bits.load(Ordering::Relaxed),
                 record.music_valid.load(Ordering::Relaxed),
+                record.tempo_bits.load(Ordering::Relaxed),
+                record.tempo_valid.load(Ordering::Relaxed),
                 record.cycle.load(Ordering::Relaxed),
                 record.rate_bits.load(Ordering::Relaxed),
                 record.counted.load(Ordering::Relaxed),
@@ -8060,6 +8161,8 @@ impl BlockTraceRing {
             continuous_valid,
             music_bits,
             music_valid,
+            tempo_bits,
+            tempo_valid,
             cycle,
             rate_bits,
             counted,
@@ -8068,11 +8171,12 @@ impl BlockTraceRing {
         ) = values;
         let rate = f64::from_bits(rate_bits);
         let music = f64::from_bits(music_bits);
+        let tempo = f64::from_bits(tempo_bits);
         Some(format!(
             "[transfer] ctx: stream={} mode={mode} state=0x{state:x} \
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
-             cycle_meta={} cont={}{} music={}{} rate={rate:.0} counted={} capture={} \
+             cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} capture={} \
              emitted={}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             position.saturating_sub(raw_start),
@@ -8085,6 +8189,8 @@ impl BlockTraceRing {
             if continuous_valid { "(valid)" } else { "(absent)" },
             if music_valid { music } else { 0.0 },
             if music_valid { "(valid)" } else { "(absent)" },
+            if tempo_valid { tempo } else { 0.0 },
+            if tempo_valid { "(valid)" } else { "(absent)" },
             u8::from(counted),
             emitted,
             capture,

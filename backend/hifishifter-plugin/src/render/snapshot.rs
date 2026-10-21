@@ -66,6 +66,41 @@ impl PlaybackSnapshot {
         drop(refund);
         Ok(())
     }
+    /// 【本份快照"是什么内容"的指纹】只由采样率、起点与样本值决定，
+    /// **与发布了几次无关**。
+    ///
+    /// 【为什么不能再用 `generation` 判断"输出源变了"】`generation` 回答的是
+    /// "发布过几次"。同一份素材被重新合成一次（曲线没变、只是版本号动了），
+    /// `generation` 会前进，于是音频线程以为换源、装填一次 64 帧接缝 —— 用户
+    /// 听到的就是那个周期性的"咔"。真正的判据是内容：内容相同 ⇒ 不必淡化。
+    ///
+    /// 【为什么抽样就够】它只回答"这两份是不是同一段音频"。任何真实的编辑都会
+    /// 让成片的样本变化，抽样到 65536 个点不可能全部相同；而代价与素材长度无关。
+    fn content_fingerprint(&self) -> u64 {
+        // FNV-1a：无需依赖，逐点累加即可。
+        fn fold(hash: &mut u64, value: u64) {
+            *hash ^= value;
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        fold(&mut hash, u64::from(self.sample_rate));
+        fold(&mut hash, self.origin_sample as u64);
+        fold(&mut hash, self.left.len() as u64);
+        fold(&mut hash, self.right.len() as u64);
+        let len = self.left.len().max(self.right.len());
+        let step = (len / 65_536).max(1);
+        let mut index = 0;
+        while index < len {
+            if let Some(value) = self.left.get(index) {
+                fold(&mut hash, u64::from(value.to_bits()));
+            }
+            if let Some(value) = self.right.get(index) {
+                fold(&mut hash, u64::from(value.to_bits()));
+            }
+            index += step;
+        }
+        hash
+    }
     /// 实际平面占用；mono归并和退役快照均按存储字节而不是固定stereo倍率计费。
     fn storage_bytes(&self) -> Option<usize> {
         self.left
@@ -321,8 +356,16 @@ pub(crate) struct SnapshotPublisher {
     registering: AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
-    /// 快照内容代次：每次 `publish` / `clear` 前进。音频线程据此判断"输出源变了"。
+    /// 快照内容代次：每次 `publish` / `clear` 前进。
+    ///
+    /// 【它回答的是"发布过几次"，不是"内容变了没有"】需要后者时用 `content`。
     generation: AtomicU64,
+    /// 当前快照的内容指纹（见 `PlaybackSnapshot::content_fingerprint`）。
+    ///
+    /// 【为什么它与 `generation` 并存】`generation` 仍要表达"发布过"（版本闸、
+    /// `is_ready` 的收敛判断都依赖它单调前进）；而"要不要为这次换版做一次接缝
+    /// 淡化"必须问内容。把两者合成一个数会让"重新合成同一份内容"看起来像换源。
+    content: AtomicU64,
 }
 impl Default for SnapshotPublisher {
     /// 【为什么从全局预算派生而不是写死 512 MiB】每个 owner 有 **2 个** publisher（两个
@@ -382,12 +425,20 @@ impl SnapshotPublisher {
             limit,
             misses: AtomicU64::new(0),
             generation: AtomicU64::new(0),
+            content: AtomicU64::new(0),
         }
     }
 
     /// 当前快照代次；音频线程无锁读取。
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+    /// 当前快照的**内容**指纹；音频线程无锁读取。
+    ///
+    /// 【用途】接缝淡化问的是"这一块要写的内容与上一块是不是同一段音频"。
+    /// 用 `generation` 回答这个问题会把"重新合成了一次"误判成换源。
+    pub(crate) fn content(&self) -> u64 {
+        self.content.load(Ordering::Acquire)
     }
     /// 非实时发布。
     pub fn publish(&self, mut snapshot: PlaybackSnapshot) -> Result<(), SnapshotError> {
@@ -397,6 +448,8 @@ impl SnapshotPublisher {
             return Err(SnapshotError::InvalidGeometry);
         }
         snapshot.compact_mono()?;
+        // 【在移动进 RetainedSnapshot 之前取指纹】之后 `snapshot` 就不再被本栈帧独占。
+        let content = snapshot.content_fingerprint();
         let bytes = snapshot
             .storage_bytes()
             .ok_or(SnapshotError::BudgetExceeded)?;
@@ -422,6 +475,7 @@ impl SnapshotPublisher {
         retained.0.push(entry);
         retained.1 = total;
         self.current.store(pointer, Ordering::SeqCst);
+        self.content.store(content, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.reclaim(&mut retained);
         Ok(())
@@ -433,6 +487,9 @@ impl SnapshotPublisher {
     /// 会让 bound 实例的每一个音频块都写出纯零 —— 用户听到的就是间歇性完全无声。
     pub fn clear(&self) {
         self.current.store(std::ptr::null_mut(), Ordering::SeqCst);
+        // 撤掉快照之后"内容"不再存在：归零让下一个真实内容必然被当作一次换源，
+        // 而不是与某个已经消失的旧指纹相等。
+        self.content.store(0, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
