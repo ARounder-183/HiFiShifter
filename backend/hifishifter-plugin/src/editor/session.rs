@@ -6251,7 +6251,10 @@ pub(crate) mod tests {
         }
         let outcome = editor.apply(0, None);
         assert!(outcome.is_err(), "未分析的全零原线不能渲染原声并假报成功");
-        assert!(outcome.unwrap_err().contains("analysis"));
+        // 【为什么把消息打进断言】"是错误"与"是**哪一种**错误"是两件事：前者可能来自
+        // 任何一条守卫，只有后者才说明"渲染门禁在等分析"这条契约仍然成立。
+        let error = outcome.unwrap_err();
+        assert!(error.contains("analysis"), "unexpected error: {error}");
         let bytes = owner.encode_state().unwrap();
         let saved: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(saved["edits"]["params"]["track"]["pitch_edit"][0], 64.);
