@@ -59,3 +59,49 @@ test("a clip with neither audio nor notes is marked as waiting for host audio", 
 test("a MIDI clip is not a placeholder", () => {
     expect(flags([clip({ id: "a", midiNoteCount: 3 })])).toEqual([false]);
 });
+
+/*
+ * 【T-S2-5：占位永远画在底层】
+ *
+ * 画布按数组顺序绘制，后画的盖住先画的。占位是"缺少信息"的表达，它永远不该挡住
+ * 已经有内容的东西 —— 哪怕后端又出现一次"同一个 item 两条 clip"，用户看到的也
+ * 仍然是那条有波形的。
+ */
+test("placeholders paint underneath clips that have content", () => {
+    const ordered = buildSparseClipRenderModel({
+        visibleTracks: [{ id: "track", color: "#ff7a00" }],
+        startTrackIndex: 0,
+        visibleTrackClipsById: {
+            track: [
+                clip({ id: "placeholder", startSec: 0 }),
+                clip({ id: "real", startSec: 0, sourcePath: "ara://source" }),
+            ],
+        },
+        axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 1000 }),
+        rowHeight: 48,
+        selectedClipId: null,
+        multiSelectedClipIds: [],
+        renamingClipId: null,
+    }).drawClips.map((model) => model.id);
+    expect(ordered).toEqual(["placeholder", "real"]);
+});
+
+/* 同一层内的相对顺序承载"后来的在上"，必须原样保留。 */
+test("clips with content keep their relative order", () => {
+    const ordered = buildSparseClipRenderModel({
+        visibleTracks: [{ id: "track", color: "#ff7a00" }],
+        startTrackIndex: 0,
+        visibleTrackClipsById: {
+            track: [
+                clip({ id: "first", startSec: 0, sourcePath: "ara://a" }),
+                clip({ id: "second", startSec: 0.5, sourcePath: "ara://b" }),
+            ],
+        },
+        axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 1000 }),
+        rowHeight: 48,
+        selectedClipId: null,
+        multiSelectedClipIds: [],
+        renamingClipId: null,
+    }).drawClips.map((model) => model.id);
+    expect(ordered).toEqual(["first", "second"]);
+});

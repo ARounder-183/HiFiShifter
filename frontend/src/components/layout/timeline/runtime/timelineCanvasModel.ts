@@ -655,8 +655,28 @@ export function buildSparseClipRenderModel(args: {
         }
     }
 
+    /*
+     * 【T-S2-5：占位永远画在底层】
+     *
+     * 画布按数组顺序绘制，后画的盖住先画的。而"等待宿主提供音频"的占位是**缺少
+     * 信息**的表达 —— 它永远不该挡住已经有内容的东西。这一条与后端是否修好无关，
+     * 是呈现层的独立不变量：哪怕将来又出现一次"同一个 item 两条 clip"，用户看到的
+     * 也仍然是那条有波形的。
+     *
+     * 【为什么是稳定分区而不是排序】同一层内的相对顺序承载了"后来的在上"这一既有
+     * 语义（重叠片段、粘贴到同一位置）。只把占位挑到最前面，其余保持原序。
+     */
+    const paintOrder = <T extends { sourcePath?: string; midiNoteCount?: number }>(
+        clips: T[],
+    ): T[] => {
+        if (clips.length < 2) return clips;
+        const placeholders = clips.filter((clip) => isAwaitingHostAudio(clip));
+        if (placeholders.length === 0 || placeholders.length === clips.length) return clips;
+        return [...placeholders, ...clips.filter((clip) => !isAwaitingHostAudio(clip))];
+    };
+
     const drawClips = args.visibleTracks.flatMap((track, visibleIndex) =>
-        (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
+        paintOrder(args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
             trackId: clip.trackId,
             name: clipDisplayName(clip),
