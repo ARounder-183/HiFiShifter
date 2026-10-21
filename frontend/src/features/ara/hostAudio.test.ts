@@ -188,14 +188,17 @@ describe("hostMediaState", () => {
     test("未知分类名不被当成已知状态", () => {
         // 旧前端遇到新后端的新分类时，按"没带该字段"处理（这里回落到 source_path 推断）。
         expect(hostMediaState({ sourcePath: "x", hostMedia: "something-new" })).toBe("ready");
+        // 【缺字段不是断言】没有分类名时只能是"在途"：说成 unavailable 等于替宿主
+        // 断言"它不会给你了"，而那正是"所有 Clip 都在等"的文案。
         expect(hostMediaState({ sourcePath: undefined, hostMedia: "something-new" })).toBe(
-            "unavailable",
+            "pending",
         );
     });
 
     test("独立 App（无该字段）沿用旧行为", () => {
         expect(hostMediaState({ sourcePath: "C:/a.wav" })).toBe("ready");
-        expect(hostMediaState({ sourcePath: undefined })).toBe("unavailable");
+        // 没有源、也没有分类 ⇒ 在途（不是"宿主不会给"）。
+        expect(hostMediaState({ sourcePath: undefined })).toBe("pending");
         // MIDI 片段有内容可画，不是占位。
         expect(hostMediaState({ sourcePath: undefined, midiNoteCount: 3 })).toBe("ready");
     });

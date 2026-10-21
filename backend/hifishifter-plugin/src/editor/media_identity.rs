@@ -94,6 +94,13 @@ pub(crate) struct PcmFacts {
     pub sample_rate: u32,
     pub channels: u16,
     pub frames: usize,
+    /// 这份 PCM **这一轮真的能物化**吗？
+    ///
+    /// 【为什么必须与"知道身份"分开】"我们知道这条 clip 的源是哪个 ARA source"与
+    /// "这一轮我们手里有它的采样"是两件事：宿主随时可以收回样本访问，而身份并不因此
+    /// 消失。把它们压成一个布尔，就会在收回访问的那一轮把**整条轨的身份**清掉
+    /// （用户看到的"所有 Clip 都在等音频"）。
+    pub has_pcm: bool,
 }
 
 impl PcmFacts {
@@ -160,6 +167,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             frames: 96_000,
+            has_pcm: true,
         };
         let mut take: hifishifter_kernel::state::ClipTake = serde_json::from_value(
             serde_json::json!({"id": "t", "source_start_sec": 1.5, "playback_rate": 2.0}),

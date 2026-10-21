@@ -2151,7 +2151,13 @@ impl EditorSession {
             if !restore && clip.source_path.is_some() {
                 cache.insert(clip.id.clone(), (take.clone(), clip.clone()));
             }
-            if restore && clip.muted && clip.source_path.is_none() {
+            // 【T-C3：任何"这一轮丢了源"的 clip 都复用上一份显示波形，不再只限 mute】
+            //
+            // 【为什么】占位（"等待宿主提供音频"）与"波形稍旧"是两个量级完全不同的
+            // 体验：前者让用户以为片段坏了，后者只是一次短暂的内容过期。缓存键含
+            // take GUID（见上面的 `retain`），所以换了 take 绝不会复用旧波形。
+            // 物化出来的文件是**内容哈希**命名的，旧路径指向的是上一版内容，不会错位。
+            if restore && clip.source_path.is_none() {
                 if let Some((_, old)) = cache.get(&clip.id) {
                     clip.source_path = old.source_path.clone();
                     clip.duration_sec = old.duration_sec;

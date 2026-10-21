@@ -111,6 +111,13 @@ pub fn materialize_with_byte_limit(
     // 被隔离（跳过物化）的倒放 clip。第二趟改写路径时也要跳过它们 ——
     // 它们已经没有源引用，`known[...]` 会失败。
     let mut isolated: BTreeSet<String> = BTreeSet::new();
+    // 【T-C2：缺 PCM 的 clip 逐条降级，而不是让整份快照失败】
+    //
+    // 旧契约是"任意一条 clip 的源不在本次 sources 里 ⇒ 整份失败"。而它唯一的消费者
+    // （插件的工作区快照）只能靠"提前把所有缺源的 clip 清掉"来绕开 —— 代价是
+    // "这一轮有没有 PCM"直接决定"这一轮有没有身份"，一次收回访问就让所有片段变占位。
+    // 现在：缺源的那几条**只**在这份快照里没有源（界面按占位渲染），其余全部照常。
+    let mut missing: BTreeSet<String> = BTreeSet::new();
     for clip in &mut timeline.clips {
         clip.normalize_takes();
         if clip.reversed || clip.takes.iter().any(|t| t.reversed) {
@@ -147,12 +154,19 @@ pub fn materialize_with_byte_limit(
         {
             return Err("invalid or unsupported host clip geometry".into());
         }
+        let mut lacking = false;
         for id in
             std::iter::once(&clip.source_path).chain(clip.takes.iter().map(|t| &t.source_path))
         {
-            if !known.contains_key(id.as_deref().ok_or("missing host PCM reference")?) {
-                return Err("missing host PCM".into());
+            match id.as_deref() {
+                // 本来就没有源：占位片段，不是缺 PCM。
+                None => {}
+                Some(id) if !known.contains_key(id) => lacking = true,
+                Some(_) => {}
             }
+        }
+        if lacking {
+            missing.insert(clip.id.clone());
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -209,6 +223,17 @@ pub fn materialize_with_byte_limit(
         if isolated.contains(&clip.id) {
             continue;
         }
+        // 【T-C2】这一轮没有 PCM 的 clip：只清掉它**这份快照里**的源引用，
+        // 身份本身留在文档侧（下一次读到 PCM 就恢复），其余 clip 不受影响。
+        if missing.contains(&clip.id) {
+            clip.source_path = None;
+            clip.source_path_relative = None;
+            for take in &mut clip.takes {
+                take.source_path = None;
+                take.source_path_relative = None;
+            }
+            continue;
+        }
         clip.source_path = clip
             .source_path
             .as_deref()
@@ -229,6 +254,18 @@ pub fn materialize_with_byte_limit(
             take.pitch_range = None;
         }
         clip.normalize_takes();
+    }
+    if !missing.is_empty() {
+        // 【T-C2】只记一行，不打断流程：这是"这一轮没读到"，不是"这些片段坏了"。
+        log::warn!(
+            "[host-pcm] {} clip(s) have no PCM this round and are shown as placeholders: {}",
+            missing.len(),
+            missing
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     Ok((timeline, reverse))
 }
@@ -398,6 +435,49 @@ mod tests {
         )
         .unwrap();
         assert_ne!(next.clips[0].source_path.as_deref(), Some(path.as_str()));
+    }
+
+    /// **T-C2：一条 clip 缺 PCM 不再让整份快照失败。**
+    ///
+    /// 【为什么这是"所有 Clip 都在等音频"的一半根因】旧契约是"任意一条 clip 的源不在
+    /// 本次 sources 里 ⇒ 整份返回 Err"，而它唯一的消费者（插件的工作区快照）只能靠
+    /// "提前把所有缺源的 clip 清掉"来绕开 —— 于是"这一轮有没有 PCM"直接决定
+    /// "这一轮有没有身份"。改成逐条降级之后，清源那一步就可以彻底删掉。
+    #[test]
+    fn one_clip_without_pcm_degrades_only_that_clip() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-host-pcm-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"T","order":0}],"bpm":120,"project_sec":4,
+            "clips":[
+                {"id":"with","name":"A","track_id":"track","start_sec":0,"length_sec":0.1,
+                 "takes":[{"id":"t1","source_path":"known","source_end_sec":0.1}]},
+                {"id":"without","name":"B","track_id":"track","start_sec":1,"length_sec":0.1,
+                 "takes":[{"id":"t2","source_path":"unknown","source_end_sec":0.1}]}
+            ]
+        }))
+        .unwrap();
+        let planes = vec![vec![0.1, 0.2, 0.3, 0.4]];
+        let view = PcmView {
+            persistent_id: "known",
+            sample_rate: 44100,
+            planes: &planes,
+        };
+        let (out, _) = materialize(timeline, &[view], &dir).unwrap();
+        assert!(
+            out.clips[0].source_path.is_some(),
+            "有 PCM 的 clip 必须照常物化"
+        );
+        assert!(
+            out.clips[1].source_path.is_none(),
+            "缺 PCM 的 clip 只在这份快照里没有源，其余照常"
+        );
     }
 
     /// 倒放的三种策略：独立 App 保持"整份拒绝"；插件在 F-4 之前"逐 clip 隔离"、

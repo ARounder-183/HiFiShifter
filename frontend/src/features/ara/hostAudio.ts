@@ -194,7 +194,14 @@ export function hostMediaState(clip: {
     if (typeof raw === "string" && HOST_MEDIA_STATES.has(raw)) {
         return raw as HostMediaState;
     }
-    return isAwaitingHostAudio(clip) ? "unavailable" : "ready";
+    // 【缺字段只能推"在途"，不能推"拿不到了"】
+    //
+    // "unavailable" 是一句**断言**（宿主要么没分配、要么用法错了、要么读不出来），
+    // 它对应的文案是"等待宿主提供音频"。而"这份载荷没带 host_media"只是"这一轮
+    // 没说"—— 直接推成 unavailable，会让任何一条没来得及装饰的 clip 都显示成
+    // "等待"，而 20 轮排查里那个"所有 Clip 都在等"的症状正是这么来的。
+    // 缺字段 ⇒ pending（在途，会自己好），只有后端明确说 unavailable 才允许断言。
+    return isAwaitingHostAudio(clip) ? "pending" : "ready";
 }
 
 /**
