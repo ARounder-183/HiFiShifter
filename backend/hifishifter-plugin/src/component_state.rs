@@ -7,25 +7,27 @@
 //! 都会坏：旧版本读新块会解析失败（`EditState::restore` 拿到多余的尾巴），新版本读
 //! 旧块也会。
 //!
-//! 用一个带魔数的容器把"这是新版"与"这是旧版"分开，且**旧块仍然可读** ——
-//! 没有魔数就按"整块是 `EditState`"处理。这条兼容不是可选项：用户已经存过的工程
-//! 里就是旧格式，读不出来等于把他们的编辑弄丢了。
+//! 用一个带魔数的容器把"这是本插件的载荷"与"裸 `EditState`"分开。没有魔数就按
+//! "整块是 `EditState`"处理 —— 那条分支**保留**，但它的理由不是"兼容旧版本"：
+//! `decode` 同时是 `EditState` 自己的解码入口，裸字节块在别处仍然可能出现。
 //!
 //! # 格式
 //!
 //! ```text
 //! magic     8 字节  "HFSSTATE"
-//! version   u32     = 2（v1 仍可读）
+//! version   u32     = 1
 //! edits_len u32
 //! edits     edits_len 字节（`EditState::encode()` 的输出）
-//! xfer_len  u32     （0 = 没有 Capture 清单）
-//! xfer      xfer_len 字节（清单 JSON）
-//! tedits_len u32    （v2 起；0 = 没有 Capture 用户编辑）
-//! tedits    tedits_len 字节（`CaptureEdits` 的 JSON）
+//! capture_len u32   （0 = 没有 Capture 清单）
+//! capture   capture_len 字节（清单 JSON）
+//! cedits_len u32    （0 = 没有 Capture 用户编辑）
+//! cedits    cedits_len 字节（`CaptureEdits` 的 JSON）
 //! ```
 //!
-//! 【为什么 v2 只**追加**一段】v1 的每个字段都是长度前缀，读到 `xfer` 结束就是一个
-//! 完整载荷。追加段让旧工程（v1）照样读得出来，新版本也不会把旧载荷误判成截断。
+//! 【为什么版本号回到 1、且不再有"v1 兼容"分支】此前 v2 为了能读 v1（一个少了
+//! `capture_edits` 段的形状）保留了"按剩余长度判断"的分支。而 VST3 侧从未向任何
+//! 用户分发过 —— 宿主工程里不存在这种旧块。为一份不存在的数据保留一条会把"截断"
+//! 误读成"没有编辑"的分支，收益为负，所以格式在这里重置为单版本。
 //!
 //! 【为什么清单是 JSON 而不是二进制】它是几十到几百字节的元数据，且**需要能被诊断
 //! 工具读**（"这个 take 的 sidecar 在哪"是排查"重启后录音不见了"的第一个问题）。
@@ -33,10 +35,8 @@
 
 /// 容器魔数。
 const MAGIC: &[u8; 8] = b"HFSSTATE";
-/// 容器版本。
-///
-/// v2 追加 Capture 用户编辑段（曲线 / 音阶 / Tempo Map / 轨道设置）。
-const VERSION: u32 = 2;
+/// 容器版本（重置后的第一版：编辑 + 清单 + Capture 用户编辑，三段俱全）。
+const VERSION: u32 = 1;
 
 /// 一次组件 state 的载荷。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -80,13 +80,13 @@ impl ComponentState {
         }
         let mut cursor = MAGIC.len();
         let version = read_u32(bytes, &mut cursor)?;
-        // 【为什么 v1 与 v2 都接受、更高版本拒绝】v1 是已经存在于用户工程里的格式，
-        // 读不出来等于把他们的编辑弄丢；v3 及以后我们不知道它追加了什么，硬按 v2
-        // 解析会把未知段当成截断错误 —— 明确拒绝并说明"来自更新的版本"才是可执行的。
-        if !(1..=VERSION).contains(&version) {
+        // 【为什么只认一个版本】格式已重置（见文件头）。不匹配只可能是两种情况：
+        // 更旧的构建写下的（本机残留），或更新的构建写下的（用户降级了应用）。
+        // 两者都无从按当前形状解析，明确拒绝并说清方向才是可执行的。
+        if version != VERSION {
             return Err(format!(
-                "unsupported component state version {version} (expected <= {VERSION}); \
-                 this project was written by a newer build"
+                "unsupported component state version {version} (this build writes {VERSION}); \
+                 the state was written by a different build of this plug-in"
             ));
         }
         let edits_len = read_u32(bytes, &mut cursor)? as usize;
@@ -99,18 +99,16 @@ impl ComponentState {
         } else {
             Some(take(bytes, &mut cursor, capture_len)?.to_vec())
         };
-        // v1 到此结束；v2 后面还有一段。**按剩余长度判断**而不是只看版本号：
-        // 这样即便某个宿主把载荷补零（或未来出现 v1 的变体），也不会把 0 字节当成
-        // 一段有效的空编辑。
-        let capture_edits = if version >= 2 && cursor < bytes.len() {
-            let len = read_u32(bytes, &mut cursor)? as usize;
-            if len == 0 {
-                None
-            } else {
-                Some(take(bytes, &mut cursor, len)?.to_vec())
-            }
-        } else {
+        // 第三段：Capture 用户编辑。长度前缀，0 = 没有。
+        //
+        // 【为什么不再"按剩余长度判断有没有这一段"】那个判据存在的前提是"v1 载荷到
+        // 这里就结束了"，而 v1 已随格式重置一起消失。留着它只会把**截断**误读成
+        // "没有编辑"—— 那是一次静默的数据丢失，而明确报错还能让用户换回旧构建。
+        let cedits_len = read_u32(bytes, &mut cursor)? as usize;
+        let capture_edits = if cedits_len == 0 {
             None
+        } else {
+            Some(take(bytes, &mut cursor, cedits_len)?.to_vec())
         };
         Ok(Self {
             edits,
@@ -161,26 +159,29 @@ mod tests {
         assert_eq!(ComponentState::decode(&state.encode()).unwrap(), state);
     }
 
-    /// **v1 载荷必须仍然可读**：用户已经存过的工程里就是带清单的 v1。
+    /// **重置前构建写下的载荷必须被明确拒绝，而不是被"读成没有编辑"。**
     ///
-    /// 【为什么这是本文件第二重要的一条】v2 只是追加一段；把 v1 判成"截断"会让
-    /// 所有既有工程在升级后**完全读不出编辑**。
+    /// 【为什么这条取代了原来的 v1 兼容测试】格式已重置（见文件头）：v1（少了
+    /// `capture_edits` 段）不再存在。留一条"按剩余长度判断"的分支，只会把**截断**
+    /// 误读成"这个实例没有 Capture 编辑"—— 那是静默的数据丢失。
     #[test]
-    fn a_v1_container_is_read_without_a_capture_edits_section() {
+    fn a_pre_reset_container_is_rejected_instead_of_losing_the_edits() {
         let edits = b"edit-bytes";
         let capture = br#"{"version":1,"takes":[]}"#;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        // 旧版本号（重置前是 2）。
+        bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&(edits.len() as u32).to_le_bytes());
         bytes.extend_from_slice(edits);
         bytes.extend_from_slice(&(capture.len() as u32).to_le_bytes());
         bytes.extend_from_slice(capture);
 
-        let decoded = ComponentState::decode(&bytes).unwrap();
-        assert_eq!(decoded.edits, edits.to_vec());
-        assert_eq!(decoded.capture, Some(capture.to_vec()));
-        assert_eq!(decoded.capture_edits, None);
+        let error = ComponentState::decode(&bytes).unwrap_err();
+        assert!(
+            error.contains("different build of this plug-in"),
+            "错误要指向可执行的结论：{error}"
+        );
     }
 
     /// **历史格式必须仍然可读**：用户已经存过的工程里就是裸的 `EditState` 字节。
@@ -217,7 +218,7 @@ mod tests {
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
         let error = ComponentState::decode(&bytes).unwrap_err();
         assert!(
-            error.contains("newer build"),
+            error.contains("different build of this plug-in"),
             "错误要指向可执行的结论：{error}"
         );
     }

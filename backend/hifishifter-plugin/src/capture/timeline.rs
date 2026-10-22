@@ -855,7 +855,6 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            migrated_from_v4: false,
             _reservation: None,
         }
     }

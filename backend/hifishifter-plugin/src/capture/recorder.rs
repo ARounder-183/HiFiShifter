@@ -197,13 +197,6 @@ pub(crate) struct Segment {
     pub coverage: [std::ops::Range<usize>; COVERAGE_SLOTS],
     pub coverage_len: usize,
     pub coverage_overrun: bool,
-    /// 本段是从一份**带 `trusted` 表的 v4 sidecar** 读回来的（那张表已被丢弃）。
-    ///
-    /// 【为什么留这个读数】"读了旧文件"与"新录了一段"在音频上无法区分，但在排查上
-    /// 完全不同：前者意味着这次播放的覆盖形状来自一份**用错判据写出来的存档**，
-    /// 而我们已经主动忽略了那段数据。它出现在 `[capture] take` 行里，用户报障时
-    /// 一眼就能看出"这段素材是旧版本录的"。
-    pub migrated_from_v4: bool,
     /// 该段 PCM 占用的全局预算额度。
     ///
     /// 【为什么额度跟着段走而不是由 store 统一持有】段一旦封口就不再增长，
@@ -2628,7 +2621,6 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            migrated_from_v4: false,
             _reservation: None,
         }
     }

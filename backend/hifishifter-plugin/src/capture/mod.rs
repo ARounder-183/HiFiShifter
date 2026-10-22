@@ -1470,7 +1470,6 @@ impl CaptureStore {
         //   * `coverage`：我们真的拷到样本的区间数；`gaps` 是它们之间的洞；
         //   * `lead_in`：第一个属于我们的帧在带内的偏移（**必须**是 0 或只剩开头的
         //     真实缺失）；
-        //   * `migrated_from_v4`：这份 take 是从带 `trusted` 表的旧 sidecar 读回来的。
         //
         // 【为什么把 `lead_in` 与 `first_signal_at` 放在同一行】两者接近 ⇒ 覆盖表是对的
         // （那一段本来就不是我们的）；`lead_in` 明显大于 `first_signal_at` ⇒ 我们把一段
@@ -1497,7 +1496,7 @@ impl CaptureStore {
             "[capture] take {id}: frames={} ({:.3}s) rate={} coverage={} gaps={} \
              lead_in={} ({:.3}s) first_signal_at={} pre_roll_frames={} pending_stashed={} \
              bridged_window_blocks={} resync_bridged_frames={} counted_blocks={} \
-             counted_frames={} migrated_from_v4={} falsified_lead_in={}",
+             counted_frames={} falsified_lead_in={}",
             all.iter().map(|segment| segment.filled as u64).sum::<u64>(),
             all.iter().map(|segment| segment.filled as u64).sum::<u64>() as f64 / rate,
             sample_rate,
@@ -1515,7 +1514,6 @@ impl CaptureStore {
             diagnostics.resync_bridged_frames,
             diagnostics.counted_blocks,
             diagnostics.counted_frames,
-            u8::from(all.iter().any(|segment| segment.migrated_from_v4)),
             u8::from(lead_in.falsified),
         );
         if diagnostics.pre_roll_frames == 0
@@ -1629,7 +1627,6 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         coverage: std::array::from_fn(|_| 0..0),
         coverage_len: 0,
         coverage_overrun: false,
-        migrated_from_v4: false,
         _reservation: Some(reservation),
     })
 }
@@ -2127,7 +2124,6 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            migrated_from_v4: false,
             _reservation: None,
         }
     }

@@ -13,17 +13,18 @@
 //! # 文件格式
 //!
 //! ```text
-//! magic    8 字节  "HFSXFER1"
-//! version  u32     = 2（v1 仍可读）
-//! segments u32
+//! magic     8 字节  "HFSXFERC"
+//! version   u32     = 1
+//! segments  u32
 //! 每段:
 //!   origin   i64    工程采样起点
 //!   rate     u32    采样率
 //!   channels u32
 //!   frames   u64
-//!   loop     i64    循环起点（`i64::MIN` = 非循环段；仅 v2）
+//!   loop     i64    循环起点（`i64::MIN` = 非循环段）
+//!   coverage u32 个 (start u32, end u32) —— 段内**真正拷到宿主样本**的帧区间
 //!   samples  frames × channels × f32（小端，平面顺序）
-//! digest   32 字节 BLAKE3（覆盖以上全部内容）
+//! digest    32 字节 BLAKE3（覆盖以上全部内容）
 //! ```
 //!
 //! 【为什么要有尾部摘要】截断的写入（磁盘满、进程被杀）会留下一个"看起来合法、
@@ -32,27 +33,39 @@
 //!
 //! 【为什么不是 WAV】sidecar 只在插件与自己的渲染管线之间传递，不需要互操作性；
 //! 而 WAV 的头部字段（fmt 块、块对齐、容器位深）带来的是一整类"写对了但读错了"
-//! 的问题。这里的格式只有五个字段，且有测试钉住。
+//! 的问题。这里的格式只有几个字段，且有测试钉住。
+//!
+//! # 为什么版本号是 1，且没有任何向后兼容分支
+//!
+//! 这个格式此前演进到过 v5，每一版都在读入侧留了分支：`loop_start`（v2+）、
+//! `coverage`（v3+），以及 v4 那段必须"读但丢弃"的 `trusted` 表。那些分支保护的是
+//! **已经落在某台机器磁盘上的数据** —— 而 VST3 侧（含这条捕获通路）从未向任何用户
+//! 分发过，那些文件只存在于开发者的测试机上。
+//!
+//! 为一份没有第二份拷贝的数据保留五条读路径，代价是持续的：每段多三个版本判断、
+//! 一个只为报告"这是旧文件"而存在的 `Segment::migrated_from_v4` 字段（十处引用）、
+//! 两条钉住"不再会产生"的数据的测试，以及一条会把"未来版本"误报成
+//! `unsupported version` 的判据。所以格式在这里**重置**：版本回到 1，读入侧只认
+//! 这一种形状，魔数也去掉那个早已与 `VERSION` 不一致的版本位。
+//!
+//! 旧文件不会被静默误读：魔数与版本不匹配时返回一句可执行的错误（见 `read`），
+//! 而 `CaptureStore::restore_manifest` 本来就会跳过读不出来的 take。
 
 use super::recorder::{ClosedReason, Segment, SegmentLoss};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// 文件魔数（含版本，便于将来一眼分辨）。
-const MAGIC: &[u8; 8] = b"HFSXFER1";
-/// 载荷版本。
+/// 文件魔数。只回答"这是不是 HiFiShifter 的捕获 sidecar"，**不含版本**。
 ///
-/// v2 在每段几何后多写一个 `loop_start`（`i64::MIN` = 非循环段）；v1 仍可读。
-/// v3 再多写一段 coverage（段内相对帧的覆盖区间）；v1/v2 仍可读，读出来是"整段都算录到"。
-/// v4 又写了一段"位置可信度"（`trusted`）。**v5 起不再写它，读 v4 时丢弃。**
+/// 【为什么去掉版本位】此前的 `HFSXFER1` 里那个 `1` 与载荷里的 `VERSION`（当时是 5）
+/// 早已不一致 —— 魔数里的版本位是个死的副本，真正被解析的只有载荷里那个 u32。
+/// 两份真相必然漂移，所以只留一份。
 ///
-/// 【为什么 v4 的字段必须"读但忽略"而不是删掉解析】v4 已经落在用户的磁盘上（实测
-/// `take-1/2.hfx` 里 `trusted = [31568, …]`）。那个字段的判据是错的：它把"位置由插件
-/// 按块长接着数"（起播窗口）当成了"位置不可信"，于是一段**真实录音**被声明成洞 ——
-/// 播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次源切换（那一下"咔"）。
-/// 只删代码不会修好已经落盘的那些文件：读入侧必须**主动丢弃**这张表，让它们回到
-/// "拷到样本就是我们的素材"这条唯一自洽的语义。
-const VERSION: u32 = 5;
+/// 【为什么仍然占满 8 字节】`MAGIC.len()` 参与最小长度判据，8 是齐整字长，
+/// 且 `&[u8; 8]` 与旧类型一致 —— 改动面最小。
+const MAGIC: &[u8; 8] = b"HFSXFERC";
+/// 载荷版本（重置后的第一版）。
+const VERSION: u32 = 1;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -60,6 +73,10 @@ const DIGEST_LEN: usize = 32;
 /// 【为什么需要一个上限】`frames` 是文件里的一个 u64。损坏或被篡改的文件可以让它
 /// 变成 2^63，而"按声明的长度分配"就是一次必然的 OOM。上限取 2 小时 @ 384 kHz。
 const MAX_FRAMES: u64 = 384_000 * 3600 * 2;
+/// 临时文件后缀（写完后原子改名为目标文件）。
+const TEMP_EXT: &str = "hfscap.part";
+/// 最终文件的扩展名。
+const FILE_EXT: &str = "hfscap";
 
 /// sidecar 目录：本机数据目录下的 `capture/`。
 ///
@@ -70,14 +87,48 @@ pub(crate) fn default_dir() -> Option<PathBuf> {
 }
 
 /// 一个 take 的 sidecar 路径。
-pub(crate) fn take_path(dir: &Path, take_id: u64) -> PathBuf {
-    dir.join(format!("take-{take_id}.hfx"))
+///
+/// 【为什么文件名里有一个 nonce，而不只是 `take-{id}`】`take_id` 是**插件实例级**的
+/// 计数器：两个不同的宿主工程各自录第一个 take，都叫 `take-1` —— 而它们共用同一个
+/// 缓存目录。只按号命名时，后录的会**覆盖**先录的：打开第一个工程会读到第二个工程
+/// 的音频，而且没有任何报错。
+///
+/// 【为什么不是 `{工程id}-take-{id}`】捕获通路**根本没有工程身份**（宿主不给几何，
+/// 也不给工程路径 —— 那正是这条通路存在的理由）。给每个 take 一个一次性 nonce
+/// 不需要任何跨层管道，而且比"每个工程一个前缀"更强：它连"同一工程的两个实例"
+/// 都分得开。
+///
+/// 清单里存的是**绝对路径**，所以恢复不依赖这条命名规则。
+fn take_path(dir: &Path, take_id: u64, nonce: &str) -> PathBuf {
+    dir.join(format!("capture-{take_id}-{nonce}.{FILE_EXT}"))
+}
+
+/// 生成一个 take 的一次性文件名后缀（16 位十六进制）。
+///
+/// 【为什么不引入 uuid/rand】本 crate 没有那两个依赖，而这里要的只是"同一进程内
+/// 单调、跨进程几乎不撞"。进程号 + 单调计数 + 墙钟纳秒足够，且不需要新依赖 ——
+/// 与 `hifishifter-host-link` 的 `link_id` 同一套取舍。
+fn take_nonce(take_id: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"hfs-capture-take-v1");
+    hasher.update(&std::process::id().to_le_bytes());
+    hasher.update(&nanos.to_le_bytes());
+    hasher.update(&seq.to_le_bytes());
+    hasher.update(&take_id.to_le_bytes());
+    hasher.finalize().to_hex()[..16].to_string()
 }
 
 /// 把段写成 sidecar。返回实际写入的路径。
 pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let path = take_path(dir, take_id);
+    let path = take_path(dir, take_id, &take_nonce(take_id));
     let mut payload = Vec::new();
     payload.extend_from_slice(MAGIC);
     payload.extend_from_slice(&VERSION.to_le_bytes());
@@ -89,7 +140,8 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
         payload.extend_from_slice(&channels.to_le_bytes());
         payload.extend_from_slice(&(segment.filled as u64).to_le_bytes());
         payload.extend_from_slice(&segment.loop_start.unwrap_or(i64::MIN).to_le_bytes());
-        // v3：覆盖区间。槽位用尽时写 0 个区间 —— 读回来就是"整段都算录到"。
+        // 覆盖区间。槽位用尽时写 0 个区间 —— 读回来就是"整段都算录到"。
+        // 见 `Segment::coverage` 的说明：那四类零都是"我们没拿到样本"，不是"录到静音"。
         let ranges = if segment.coverage_overrun {
             &segment.coverage[..0]
         } else {
@@ -100,8 +152,6 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
             payload.extend_from_slice(&(range.start as u32).to_le_bytes());
             payload.extend_from_slice(&(range.end as u32).to_le_bytes());
         }
-        // 【v5 不再写 v4 的"位置可信度"段】见 `VERSION` 的说明：那条判据把真实录音
-        // 声明成了洞。读入侧仍会跳过 v4 的那一段（老文件要能读），但新文件里它不存在。
         for plane in &segment.planes {
             for sample in plane {
                 payload.extend_from_slice(&sample.to_le_bytes());
@@ -113,7 +163,7 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
     // 【为什么先写临时文件再改名】直接写目标路径时，进程被杀会留下半个文件 ——
     // 而它在名字上已经是"完整"的。改名是原子的，于是磁盘上要么是旧版本、要么是
     // 完整的新版本，不存在中间态。
-    let temp = path.with_extension("hfx.part");
+    let temp = path.with_extension(TEMP_EXT);
     {
         let mut file =
             std::fs::File::create(&temp).map_err(|e| format!("create {}: {e}", temp.display()))?;
@@ -130,6 +180,10 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
 }
 
 /// 读回一个 sidecar。
+///
+/// 【错误文案为什么是可执行的】重置格式之后，开发者自己机器上还留着旧版文件。
+/// 一句"`unsupported version 5`"只会让人去翻代码；这里直接说明"这是重置前构建留下的"
+/// 并给出下一步（删掉或重录）。
 pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if bytes.len() < MAGIC.len() + 4 + 4 + DIGEST_LEN {
@@ -145,13 +199,18 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         ));
     }
     let mut cursor = Cursor::new(payload);
-    if cursor.take(8)? != MAGIC {
-        return Err(format!("{}: not a capture sidecar", path.display()));
+    if cursor.take(MAGIC.len())? != MAGIC {
+        return Err(format!(
+            "{}: not a HiFiShifter capture sidecar (stale file from a pre-reset build?); \
+             delete it or re-capture",
+            path.display()
+        ));
     }
     let version = cursor.u32()?;
-    if !(1..=VERSION).contains(&version) {
+    if version != VERSION {
         return Err(format!(
-            "{}: unsupported capture sidecar version {version}",
+            "{}: capture sidecar version {version}, this build writes {VERSION} \
+             (stale file from a pre-reset build?); delete it or re-capture",
             path.display()
         ));
     }
@@ -162,73 +221,36 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         let sample_rate = cursor.u32()?;
         let channels = cursor.u32()?;
         let frames = cursor.u64()?;
-        let loop_start = if version >= 2 {
-            let raw = cursor.i64()?;
-            (raw != i64::MIN).then_some(raw)
-        } else {
-            None
-        };
-        // v3：覆盖区间。按声明长度读，越界就是文件损坏。
-        // 槽位用尽 ⇒ 整段都算录到（旧语义）：宁可少过滤，也不能分配。
+        let raw_loop = cursor.i64()?;
+        let loop_start = (raw_loop != i64::MIN).then_some(raw_loop);
+        // 覆盖区间：按声明长度读，越界就是文件损坏。
+        // 槽位用尽 ⇒ 整段都算录到（宁可少过滤，也不能分配）。
         let mut coverage = std::array::from_fn(|_| 0_usize..0_usize);
         let mut coverage_len = 0_usize;
-        if version >= 3 {
-            let count = cursor.u32()?;
-            let count = usize::try_from(count).unwrap_or(usize::MAX);
-            if count > frames as usize {
-                return Err(format!(
-                    "{}: implausible coverage range count ({count} > {frames})",
-                    path.display()
-                ));
-            }
-            for _ in 0..count {
-                let start = cursor.u32()? as usize;
-                let end = cursor.u32()? as usize;
-                if start >= end || end > frames as usize {
-                    return Err(format!(
-                        "{}: invalid coverage range {start}..{end} (frames={frames})",
-                        path.display()
-                    ));
-                }
-                if coverage_len >= super::recorder::COVERAGE_SLOTS {
-                    // 超出版本允许的槽位：整段都算录到。
-                    coverage_len = 0;
-                    break;
-                }
-                coverage[coverage_len] = start..end;
-                coverage_len += 1;
-            }
+        let range_count = cursor.u32()?;
+        let range_count = usize::try_from(range_count).unwrap_or(usize::MAX);
+        if range_count > frames as usize {
+            return Err(format!(
+                "{}: implausible coverage range count ({range_count} > {frames})",
+                path.display()
+            ));
         }
-        // 【v4 的"位置可信度"段：**读但丢弃**】
-        //
-        // v4 写过一个 `u8 known` + 一段区间表。那段数据的判据是错的（见 `VERSION` 的
-        // 说明）：它把起播窗口里"位置由插件按块长接着数"的帧标成"不是我们的"，于是
-        // 一段真实录音被声明成洞。已经落盘的文件必须在这里被**主动忽略** —— 只删写入侧
-        // 不会修好用户机器上那些文件。
-        //
-        // 【为什么仍然完整解析而不跳过字节】跳过长度未知的段需要先知道它多长，而
-        // 长度本身就在段里。照原格式读过去（并校验边界），是唯一能保持摘要与后续字段
-        // 对齐的做法。
-        if version == 4 {
-            let _known = cursor.u8()? != 0;
-            let count = cursor.u32()?;
-            let count = usize::try_from(count).unwrap_or(usize::MAX);
-            if count > frames as usize {
+        for _ in 0..range_count {
+            let start = cursor.u32()? as usize;
+            let end = cursor.u32()? as usize;
+            if start >= end || end > frames as usize {
                 return Err(format!(
-                    "{}: implausible trusted range count ({count} > {frames})",
+                    "{}: invalid coverage range {start}..{end} (frames={frames})",
                     path.display()
                 ));
             }
-            for _ in 0..count {
-                let start = cursor.u32()? as usize;
-                let end = cursor.u32()? as usize;
-                if start >= end || end > frames as usize {
-                    return Err(format!(
-                        "{}: invalid trusted range {start}..{end} (frames={frames})",
-                        path.display()
-                    ));
-                }
+            if coverage_len >= super::recorder::COVERAGE_SLOTS {
+                // 超出版本允许的槽位：整段都算录到。
+                coverage_len = 0;
+                break;
             }
+            coverage[coverage_len] = start..end;
+            coverage_len += 1;
         }
         if !(1..=2).contains(&channels) || frames == 0 || frames > MAX_FRAMES {
             return Err(format!(
@@ -262,7 +284,6 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             coverage,
             coverage_len,
             coverage_overrun: false,
-            migrated_from_v4: version == 4,
             _reservation: None,
         });
     }
@@ -303,11 +324,6 @@ impl<'a> Cursor<'a> {
         Ok(slice)
     }
 
-    fn u8(&mut self) -> Result<u8, String> {
-        let bytes = self.take(1)?;
-        Ok(bytes[0])
-    }
-
     fn u32(&mut self) -> Result<u32, String> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -346,7 +362,6 @@ mod tests {
             coverage: std::array::from_fn(|_| 0..0),
             coverage_len: 0,
             coverage_overrun: false,
-            migrated_from_v4: false,
             _reservation: None,
         }
     }
@@ -416,9 +431,37 @@ mod tests {
     #[test]
     fn a_foreign_file_is_rejected() {
         let dir = temp_dir();
-        let path = dir.join("foreign.hfx");
+        let path = dir.join("foreign.hfscap");
         std::fs::write(&path, vec![0u8; 128]).unwrap();
         assert!(read(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **重置前构建留下的旧文件必须被明确拒绝，且错误要可执行。**
+    ///
+    /// 【为什么这条取代了原来的两条版本兼容测试】格式已重置（见模块头）：
+    /// v1..v5 的读路径与 `Segment::migrated_from_v4` 一起删掉了。留下的唯一义务是
+    /// 别把旧文件**误读**成新文件 —— 魔数变了，所以这里钉住"报错且说清怎么办"。
+    #[test]
+    fn a_pre_reset_sidecar_is_rejected_with_an_actionable_error() {
+        let dir = temp_dir();
+        let path = dir.join("legacy.hfscap");
+        // 旧魔数 + 旧版本号 + 一段几何，摘要按新规则附在尾部（这样摘要校验会通过，
+        // 真正被检验的是魔数/版本判据本身）。
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"HFSXFER1");
+        payload.extend_from_slice(&5_u32.to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+        let digest = blake3::hash(&payload);
+        payload.extend_from_slice(digest.as_bytes());
+        std::fs::write(&path, payload).unwrap();
+
+        let error = read(&path).unwrap_err();
+        assert!(
+            error.contains("not a HiFiShifter capture sidecar")
+                && error.contains("delete it or re-capture"),
+            "旧文件必须被明确拒绝并给出下一步：{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -429,25 +472,29 @@ mod tests {
         let path = write(&dir, 3, &[segment(0, &[0.5])]).unwrap();
         assert!(path.exists());
         assert!(
-            !path.with_extension("hfx.part").exists(),
+            !path.with_extension(TEMP_EXT).exists(),
             "临时文件必须已被改名消费掉"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// take 号决定文件名：同一个 take 重写会覆盖同一路径（不产生孤儿）。
+    /// **同一个 take 号写两次不得互相覆盖，也不得跨工程串味。**
+    ///
+    /// 【为什么这条是回归】`take_id` 是插件实例级计数器：两个不同的宿主工程各自
+    /// 录第一个 take，都叫 `take-1`，而它们共用同一个缓存目录。只按号命名时后写的
+    /// 会覆盖先写的 —— 打开第一个工程会读到第二个工程的音频，且没有任何报错。
     #[test]
-    fn the_path_is_derived_from_the_take_id() {
+    fn two_takes_with_the_same_id_do_not_overwrite_each_other() {
         let dir = temp_dir();
-        assert_eq!(take_path(&dir, 12), dir.join("take-12.hfx"));
         let first = write(&dir, 12, &[segment(0, &[0.1])]).unwrap();
         let second = write(&dir, 12, &[segment(0, &[0.9])]).unwrap();
-        assert_eq!(first, second);
+        assert_ne!(first, second, "同号 take 必须落在不同文件上");
+        assert_eq!(read(&first).unwrap()[0].planes[0], vec![0.1]);
         assert_eq!(read(&second).unwrap()[0].planes[0], vec![0.9]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// v2 往返必须保留循环 pass 的起点；None 也必须原样回来。
+    /// 循环 pass 的起点必须原样往返；`None` 也必须原样回来。
     #[test]
     fn a_round_trip_preserves_the_loop_start_metadata() {
         let dir = temp_dir();
@@ -461,79 +508,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// v1 文件（没有 loop_start 字段）仍必须可读，且按“非循环段”解释。
+    /// 覆盖区间必须原样往返 —— 它是"我们没有这一段"的唯一证据。
     #[test]
-    fn a_version_one_sidecar_still_loads() {
+    fn a_round_trip_preserves_the_coverage_ranges() {
         let dir = temp_dir();
-        let path = dir.join("legacy.hfx");
-        let mut payload = Vec::new();
-        payload.extend_from_slice(MAGIC);
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&0_i64.to_le_bytes());
-        payload.extend_from_slice(&48_000_u32.to_le_bytes());
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&2_u64.to_le_bytes());
-        payload.extend_from_slice(&0.25_f32.to_le_bytes());
-        payload.extend_from_slice(&0.5_f32.to_le_bytes());
-        let digest = blake3::hash(&payload);
-        payload.extend_from_slice(digest.as_bytes());
-        std::fs::write(&path, payload).unwrap();
-
+        let mut holed = segment(0, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        holed.coverage[0] = 0..2;
+        holed.coverage[1] = 4..6;
+        holed.coverage_len = 2;
+        let path = write(&dir, 5, &[holed]).unwrap();
         let restored = read(&path).unwrap();
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].loop_start, None);
-        assert_eq!(restored[0].planes[0], vec![0.25, 0.5]);
+        assert_eq!(restored[0].coverage_len, 2);
+        assert_eq!(restored[0].coverage[0], 0..2);
+        assert_eq!(restored[0].coverage[1], 4..6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **v4 文件里那张"位置可信度"表必须被丢弃。**
-    ///
-    /// 【为什么这是一条回归测试而不是兼容性测试】v4 的 `trusted` 判据把起播窗口里
-    /// "位置由插件按块长接着数"的帧标成"不是我们的"。实测用户机器上的 `take-1/2.hfx`
-    /// 里就是 `trusted = [31568, …]`（0.658 s）。只删写入侧不会修好它们：读入侧必须
-    /// 主动忽略，否则那些 take 会**永远**在开头留一个 0.658 s 的假洞 —— 播放时回退
-    /// 宿主原声（参数线不生效）并在边界处咔一下。
+    /// 覆盖槽位溢出时退化为"整段都算录到"，而不是写出一份读不回来的文件。
     #[test]
-    fn a_version_four_sidecar_drops_its_trusted_table() {
+    fn an_overrun_coverage_writes_zero_ranges() {
         let dir = temp_dir();
-        let path = dir.join("v4.hfx");
-        let mut payload = Vec::new();
-        payload.extend_from_slice(MAGIC);
-        payload.extend_from_slice(&4_u32.to_le_bytes());
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&0_i64.to_le_bytes());
-        payload.extend_from_slice(&48_000_u32.to_le_bytes());
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&8_u64.to_le_bytes());
-        payload.extend_from_slice(&i64::MIN.to_le_bytes());
-        // coverage：整段都拷到了。
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&0_u32.to_le_bytes());
-        payload.extend_from_slice(&8_u32.to_le_bytes());
-        // v4 的 trusted：`known = 1`，一段 `4..8`（前一半被判成"不可信"）。
-        payload.push(1);
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&4_u32.to_le_bytes());
-        payload.extend_from_slice(&8_u32.to_le_bytes());
-        for index in 0..8 {
-            payload.extend_from_slice(&(index as f32 * 0.1).to_le_bytes());
-        }
-        let digest = blake3::hash(&payload);
-        payload.extend_from_slice(digest.as_bytes());
-        std::fs::write(&path, payload).unwrap();
-
+        let mut overrun = segment(0, &[0.1, 0.2]);
+        overrun.coverage[0] = 0..1;
+        overrun.coverage_len = 1;
+        overrun.coverage_overrun = true;
+        let path = write(&dir, 6, &[overrun]).unwrap();
         let restored = read(&path).unwrap();
-        assert_eq!(restored.len(), 1);
-        assert_eq!(
-            restored[0].coverage_len, 1,
-            "覆盖必须原样读回：v4 的 coverage 是对的"
-        );
-        assert_eq!(
-            restored[0].coverage[0],
-            0..8,
-            "覆盖必须整段，不受 v4 的 trusted 表影响"
-        );
+        assert_eq!(restored[0].coverage_len, 0, "溢出 ⇒ 整段都算录到");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
