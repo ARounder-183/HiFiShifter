@@ -119,6 +119,22 @@ pub(crate) struct CaptureTake {
     pub sidecar: Option<PathBuf>,
 }
 
+/// 一份**清单里有、但本机读不出来**的捕获音频。
+///
+/// 【为什么它是产品行为而不是诊断读数】sidecar 落在本机缓存目录，而清单随宿主工程
+/// 走 —— 用户把工程拷到另一台机器时，音频不会跟过去。没有这个结构，界面只能给出
+/// 一片空白时间轴 + 一条日志；有了它才能说"丢了 3 段、共 42 秒，请在原设备导出音频
+/// 或重新捕获"。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MissingCapture {
+    pub id: u64,
+    /// 该 take 的帧数（清单里记的；文件没了就再也问不出来）。
+    pub frames: u64,
+    pub start_sec: Option<f64>,
+    pub end_sec: Option<f64>,
+    pub sample_rate: u32,
+}
+
 /// 录制中的读数（给状态栏）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RecordingStatus {
@@ -265,6 +281,10 @@ pub(crate) struct CaptureStore {
     /// **绝不阻塞**。非音频线程持有它做补缓冲/收段/promote。
     capture: Mutex<Capture>,
     takes: Mutex<Vec<CaptureTake>>,
+    /// 上一次恢复时**读不出来**的 take（见 [`MissingCapture`]）。
+    ///
+    /// 只在 `restore_manifest` 里写；界面据此给出"这些音频不在本机"的提示。
+    missing: Mutex<Vec<MissingCapture>>,
     next_take_id: AtomicU64,
     /// "手上有可渲染的素材"的 O(1) 读数。
     ///
@@ -340,6 +360,7 @@ impl Default for CaptureStore {
             capture_started: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
+            missing: Mutex::new(Vec::new()),
             next_take_id: AtomicU64::new(1),
             material_present: AtomicBool::new(false),
             revision: AtomicU64::new(0),
@@ -735,6 +756,11 @@ impl CaptureStore {
         self.bump_revision();
     }
 
+    /// 上一次恢复时读不出来的捕获音频（空 = 全都恢复了）。
+    pub(crate) fn missing_captures(&self) -> Vec<MissingCapture> {
+        self.missing.lock_or_recover().clone()
+    }
+
     /// 组件 state 里的 Capture 清单。
     ///
     /// 【为什么只存路径而不存 PCM】组件 state 的预算是 64 MiB，而 4 分钟立体声 96 kHz
@@ -745,12 +771,36 @@ impl CaptureStore {
         let entries: Vec<_> = takes
             .iter()
             .map(|take| {
+                // 【为什么要记几何而不只是路径】sidecar 落在**本机**缓存目录，而清单
+                // 随宿主工程走。把工程拷到另一台机器时，文件不会跟过去 —— 那时用户
+                // 看到的必须是"有 N 段、共 X 秒的捕获音频不在本机"，而不是一条日志
+                // 加一片空白时间轴。这些数字**只有**在录制时才知道（文件没了就再也
+                // 问不出来），所以必须写进清单。
+                let frames: u64 = take.segments.iter().map(|s| s.filled as u64).sum();
+                let rate = take.sample_rate.max(1) as f64;
+                // 先按整数求极值再换算：`f64` 不实现 `Ord`，而段起点本来就是整数帧。
+                let start_sec = take
+                    .segments
+                    .iter()
+                    .map(|s| s.origin)
+                    .min()
+                    .map(|origin| origin as f64 / rate);
+                let end_sec = take
+                    .segments
+                    .iter()
+                    .map(|s| s.origin + s.filled as i64)
+                    .max()
+                    .map(|end| end as f64 / rate);
                 serde_json::json!({
                     "id": take.id,
                     "sidecar": take.sidecar.as_ref().map(|path| path.to_string_lossy()),
                     // 【为什么保留这个字段】它是清单格式的一部分（老工程里有），
                     // 语义是"最近一次录制"。读回时只用于显示，不再决定渲染什么。
                     "active": Some(take.id) == latest,
+                    "sampleRate": take.sample_rate,
+                    "frames": frames,
+                    "startSec": start_sec,
+                    "endSec": end_sec,
                 })
             })
             .collect();
@@ -767,6 +817,7 @@ impl CaptureStore {
         };
         let mut highest = 0_u64;
         let mut restored = 0_usize;
+        let mut missing: Vec<MissingCapture> = Vec::new();
         for entry in entries {
             let Some(id) = entry["id"].as_u64() else {
                 continue;
@@ -787,6 +838,17 @@ impl CaptureStore {
                 Ok(segments) => segments,
                 Err(error) => {
                     log::warn!("[capture] take {id} could not be restored: {error}");
+                    // 【为什么把失败也报出来】这条路径最常见的成因不是"文件损坏"，而是
+                    // **工程被拷到了另一台机器**：sidecar 在本机缓存目录里，清单随宿主
+                    // 工程走。静默跳过会让用户看到"参数还在、声音没了"，而且完全不知
+                    // 道发生了什么。记下清单里的几何，界面才能说清"丢了哪几段、共多久"。
+                    missing.push(MissingCapture {
+                        id,
+                        frames: entry["frames"].as_u64().unwrap_or(0),
+                        start_sec: entry["startSec"].as_f64(),
+                        end_sec: entry["endSec"].as_f64(),
+                        sample_rate: entry["sampleRate"].as_u64().unwrap_or(0) as u32,
+                    });
                     continue;
                 }
             };
@@ -815,6 +877,7 @@ impl CaptureStore {
             self.refresh_material_present();
             self.bump_revision();
         }
+        *self.missing.lock_or_recover() = missing;
         Ok(())
     }
 
@@ -2163,6 +2226,57 @@ mod tests {
         store.restore_manifest(&manifest).unwrap();
         assert_eq!(store.status().take_count, 1, "只有存在的那个 take 被恢复");
         assert_eq!(store.latest_take(), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **清单里有、本机没有的音频必须被报出来**，而且带着录制时的几何。
+    ///
+    /// 【为什么这条是迁移场景的核心】sidecar 落在本机缓存目录，清单随宿主工程走。
+    /// 用户把工程拷到另一台机器时音频不会跟过去 —— 若只是 `log::warn!` 然后跳过，
+    /// 用户看到的是"参数还在、声音没了"，且完全不知道发生了什么。清单里记的
+    /// `frames` / `startSec` 是**唯一**还能说明"丢了多久、从哪开始"的信息，
+    /// 因为文件已经不在了。
+    #[test]
+    fn a_manifest_entry_whose_sidecar_is_gone_is_reported_not_just_logged() {
+        let dir = temp_dir();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "takes": [{
+                "id": 3,
+                "sidecar": dir.join("moved-to-another-machine.hfscap").to_string_lossy(),
+                "active": true,
+                "sampleRate": 48_000,
+                "frames": 96_000,
+                "startSec": 1.5,
+                "endSec": 3.5,
+            }],
+        });
+        let store = CaptureStore::default();
+        store.restore_manifest(&manifest).unwrap();
+
+        assert_eq!(store.status().take_count, 0, "文件不在 ⇒ 没有 take 可恢复");
+        let missing = store.missing_captures();
+        assert_eq!(missing.len(), 1, "缺失必须被记下来，而不是只写一行日志");
+        assert_eq!(missing[0].id, 3);
+        assert_eq!(missing[0].frames, 96_000, "帧数来自清单（文件没了就问不到了）");
+        assert_eq!(missing[0].sample_rate, 48_000);
+        assert_eq!(missing[0].start_sec, Some(1.5));
+        assert_eq!(missing[0].end_sec, Some(3.5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 全部恢复成功时不得留下"缺失"记录（否则界面会一直报警）。
+    #[test]
+    fn a_clean_restore_reports_no_missing_captures() {
+        let dir = temp_dir();
+        let path = sidecar::write(&dir, 4, &[captured_segment()]).unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "takes": [{ "id": 4, "sidecar": path.to_string_lossy(), "active": true }],
+        });
+        let store = CaptureStore::default();
+        store.restore_manifest(&manifest).unwrap();
+        assert!(store.missing_captures().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

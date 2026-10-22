@@ -2155,6 +2155,9 @@ export const zhTW = {
         "捕獲把宿主正在播放的音訊錄進外掛自己的時間軸，之後即可正常調參與匯出。它只在宿主沒有提供 ARA 時需要。",
     capture_status: "狀態",
     capture_last_error: "最近一次錯誤",
+    capture_missing_title: "本機缺失的捕獲音訊",
+    capture_missing_body:
+        "這份工程裡有 {count} 段捕獲的音訊不在本機（共 {seconds} 秒）。它們不會隨宿主工程一起遷移 —— 請在原裝置上用「匯出音訊」把它們匯出成一般媒體檔案，或在新裝置上重新捕獲。",
     capture_unavailable: "目前不可用",
     capture_waiting: "等待宿主播放",
     capture_start_hint: "開始捕獲",

@@ -140,8 +140,30 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             })
         })
         .collect::<Vec<_>>();
+    // 【为什么把"清单里有、本机没有"的音频发出来】工程被拷到另一台机器时 sidecar
+    // 不会跟过去；界面必须能说清"丢了哪几段、共多久"，而不是只留一条日志。
+    let missing = owner
+        .capture()
+        .missing_captures()
+        .into_iter()
+        .map(|entry| {
+            let rate = if entry.sample_rate > 0 {
+                entry.sample_rate as f64
+            } else {
+                1.0
+            };
+            json!({
+                "id": entry.id,
+                "frames": entry.frames,
+                "seconds": entry.frames as f64 / rate,
+                "startSec": entry.start_sec,
+                "endSec": entry.end_sec,
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "state": status.state,
+        "missingTakes": missing,
         // 【为什么"待命"是一个独立读数】武装之后、宿主播放之前，素材一定还是零 —— 而那
         // 与"正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。前端据此
         // 说"等待宿主播放"而不是"已录 0.0 秒"（后者看起来像失败）。

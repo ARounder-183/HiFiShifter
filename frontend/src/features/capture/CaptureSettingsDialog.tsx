@@ -136,6 +136,23 @@ export function CaptureSettingsDialog({
                     />
                 </AppField>
 
+                {/* **本机缺失的捕获音频**。
+                    sidecar 落在本机缓存目录，清单随宿主工程走 —— 把工程拷到另一台
+                    机器时音频不会跟过去。这里必须说清"丢了什么、有多少、怎么办"，
+                    而不是让用户面对一片空白的时间轴。 */}
+                {status && status.missingTakes.length > 0 ? (
+                    <AppField label={t("capture_missing_title")}>
+                        <span role="alert" style={{ color: "var(--qt-warning-text)" }}>
+                            {tVars("capture_missing_body", {
+                                count: String(status.missingTakes.length),
+                                seconds: status.missingTakes
+                                    .reduce((sum, take) => sum + take.seconds, 0)
+                                    .toFixed(1),
+                            })}
+                        </span>
+                    </AppField>
+                ) : null}
+
                 {/* take 清单：这是"操作"，不是"读数" —— 用户真的会按那个删除键。 */}
                 {status && status.takes.length > 0 ? (
                     <AppField label={t("capture_field_takes")}>

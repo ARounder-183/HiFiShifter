@@ -2218,6 +2218,9 @@ export const enUS = {
         "Capture records what the host is playing into the plug-in's own timeline; you can then edit and export as usual. It is only needed when the host does not provide ARA.",
     capture_status: "Status",
     capture_last_error: "Last error",
+    capture_missing_title: "Captured audio missing from this machine",
+    capture_missing_body:
+        "{count} captured take(s) totalling {seconds}s are not on this machine. They do not travel with the host project — export them as ordinary media files on the original machine, or capture again here.",
     capture_unavailable: "Unavailable right now",
     capture_waiting: "Waiting for the host to play",
     capture_start_hint: "Start capture",

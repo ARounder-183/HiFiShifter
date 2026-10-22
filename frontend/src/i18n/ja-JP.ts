@@ -2235,6 +2235,9 @@ export const jaJP = {
         "キャプチャはホストが再生中の音声をプラグイン自身のタイムラインに取り込みます。その後は通常どおり調整・書き出しができます。ホストが ARA を提供しない場合にのみ必要です。",
     capture_status: "状態",
     capture_last_error: "直近のエラー",
+    capture_missing_title: "このマシンに無いキャプチャ音声",
+    capture_missing_body:
+        "このプロジェクトには、このマシンに無いキャプチャ音声が {count} 件（合計 {seconds} 秒）あります。ホストのプロジェクトと一緒には移動しません —— 元のマシンで「音声を書き出す」から通常のメディアファイルとして書き出すか、このマシンで取り直してください。",
     capture_unavailable: "現在は使用できません",
     capture_waiting: "ホストの再生を待機中",
     capture_start_hint: "キャプチャを開始",

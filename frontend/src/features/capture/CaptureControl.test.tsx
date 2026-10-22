@@ -58,6 +58,7 @@ function status(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
         hasMaterial: false,
         span: null,
         takes: [],
+        missingTakes: [],
         options: { maxDurationSec: 600, segmentSec: 8, monitor: true, outsidePassthrough: true },
         takeCount: 0,
         activeTake: null,

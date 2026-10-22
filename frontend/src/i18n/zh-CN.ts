@@ -2151,6 +2151,9 @@ export const zhCN = {
         "捕获把宿主正在播放的音频录进插件自己的时间轴，随后即可正常调参与导出。它只在宿主没有提供 ARA 时需要。",
     capture_status: "状态",
     capture_last_error: "最近一次错误",
+    capture_missing_title: "本机缺失的捕获音频",
+    capture_missing_body:
+        "这份工程里有 {count} 段捕获的音频不在本机（共 {seconds} 秒）。它们不会随宿主工程一起迁移 —— 请在原设备上用「导出音频」把它们导出成普通媒体文件，或在新设备上重新捕获。",
     capture_unavailable: "当前不可用",
     capture_waiting: "等待宿主播放",
     capture_start_hint: "开始捕获",

@@ -2204,6 +2204,9 @@ export const koKR = {
         "캡처는 호스트가 재생 중인 오디오를 플러그인 자체 타임라인에 기록합니다. 이후 평소처럼 조정하고 내보낼 수 있습니다. 호스트가 ARA를 제공하지 않을 때만 필요합니다.",
     capture_status: "상태",
     capture_last_error: "마지막 오류",
+    capture_missing_title: "이 컴퓨터에 없는 캡처 오디오",
+    capture_missing_body:
+        "이 프로젝트에는 이 컴퓨터에 없는 캡처 오디오가 {count}개(총 {seconds}초) 있습니다. 호스트 프로젝트와 함께 이동하지 않습니다 — 원래 컴퓨터에서 '오디오 내보내기'로 일반 미디어 파일로 내보내거나, 이 컴퓨터에서 다시 캡처하세요.",
     capture_unavailable: "지금은 사용할 수 없습니다",
     capture_waiting: "호스트 재생 대기 중",
     capture_start_hint: "캡처 시작",

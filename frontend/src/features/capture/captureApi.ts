@@ -70,6 +70,22 @@ export interface CaptureOptions {
     outsidePassthrough: boolean;
 }
 
+/**
+ * 清单里有、但**本机读不出来**的捕获音频。
+ *
+ * 【为什么这是一条产品信息而不是诊断读数】sidecar 落在本机缓存目录，清单随宿主工程
+ * 走 —— 把工程拷到另一台机器时音频不会跟过去。没有这一项，用户只会看到"参数还在、
+ * 声音没了"，且不知道为什么。
+ */
+export interface CaptureMissingTake {
+    id: number;
+    frames: number;
+    /** 该 take 的时长（秒）。 */
+    seconds: number;
+    startSec: number | null;
+    endSec: number | null;
+}
+
 export interface CaptureStatus {
     /**
      * `"empty"` / `"standby"` / `"recording"` / `"ready"`。
@@ -87,6 +103,8 @@ export interface CaptureStatus {
     hasMaterial: boolean;
     span: CaptureSpan | null;
     takes: CaptureTake[];
+    /** 本机缺失的捕获音频（空 = 全都恢复了）。 */
+    missingTakes: CaptureMissingTake[];
     options: CaptureOptions;
     takeCount: number;
     /** 最近一次录制的 take 号（派生读数；投影取全部 take，见后端 `latest_take`）。 */
