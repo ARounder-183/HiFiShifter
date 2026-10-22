@@ -37,8 +37,21 @@ function walk(dir: string, out: string[] = []): string[] {
 /** 判据：装了 window/document 级 pointermove（拖拽手势的构造特征）。 */
 const POINTER_MOVE_MARKER = 'addEventListener("pointermove"';
 
-/** 失焦收尾的三条合法写法。 */
-const FOCUS_HANDLING = ["registerDragAbort(", 'addEventListener("blur"', "visibilitychange"];
+/**
+ * 失焦收尾的合法写法。
+ *
+ * 【第四条为什么也算】参数编辑器的手势不走 `registerDragAbort`，而是把自己的一次性
+ * 收尾登记进 `setActivePointerGestureEnd`（`usePianoRollInteractions` 里的
+ * `activePointerGestureEndRef`）—— 那个 ref 由同一文件里一个 `blur` +
+ * `visibilitychange` 的 effect 消费。也就是说：**登记点可以离监听点很远**，
+ * 但只要手势把自己的收尾交了出去，失焦时它就会执行。判据因此认这条登记调用。
+ */
+const FOCUS_HANDLING = [
+    "registerDragAbort(",
+    'addEventListener("blur"',
+    "visibilitychange",
+    "setActivePointerGestureEnd(",
+];
 
 /**
  * 装了 pointermove 但**不是拖拽手势**的模块：它们没有"手势期间才存在"的视觉状态，
