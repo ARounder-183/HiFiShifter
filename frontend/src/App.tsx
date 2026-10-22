@@ -13,7 +13,6 @@ import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
-import { CapturePanel } from "./features/capture/CapturePanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
@@ -96,7 +95,6 @@ import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
     PANEL_HOST_LINK,
-    PANEL_CAPTURE,
     PANEL_FILE_BROWSER,
     PANEL_NOTEBOOK,
     PANEL_PARAM_EDITOR,
@@ -1541,7 +1539,6 @@ function AppInner() {
         //
         // （此前自动浮出的理由是"用户不知道要先播放再录制"，而那件事现在由控件自己的
         // tooltip 与状态说明承担 —— 它就在用户要点的地方。）
-        const unsubscribeCapturePanel = () => undefined;
 
         const unsubscribeApply = isPluginMode()
             ? subscribePluginApply(() => {
@@ -1566,7 +1563,6 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
             if (unsubscribeApply) unsubscribeApply();
-            unsubscribeCapturePanel();
         };
     }, [dispatch]);
 
@@ -3741,7 +3737,6 @@ function AppInner() {
     ));
     // Capture 面板（仅在不支持 ARA 的宿主里出现）：录制宿主播放中的音频。
     // 与 ARA 面板互斥 —— 由后端 `hostKind` 决定，前端不需要自己判断。
-    setPanelRenderer(PANEL_CAPTURE, () => <CapturePanel />);
     // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
     setPanelRenderer(PANEL_NOTEBOOK, () => (
         <Suspense fallback={null}>

@@ -2151,6 +2151,15 @@ export const zhTW = {
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
     // ── 捕獲（不支援 ARA 的宿主裡，把宿主播放的音訊錄進外掛）──────────────
+    capture_settings_title: "捕獲設定",
+    capture_settings_desc:
+        "捕獲把宿主正在播放的音訊錄進外掛自己的時間軸，之後即可正常調參與匯出。它只在宿主沒有提供 ARA 時需要。",
+    capture_status: "狀態",
+    capture_last_error: "最近一次錯誤",
+    capture_unavailable: "目前不可用",
+    capture_waiting: "等待宿主播放",
+    capture_start_hint: "開始捕獲",
+    capture_open_settings: "開啟捕獲設定",
     panel_capture: "捕獲",
     menu_capture: "從宿主捕獲...",
     capture_status_empty: "尚未錄製",

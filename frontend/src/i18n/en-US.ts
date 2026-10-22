@@ -2214,6 +2214,15 @@ export const enUS = {
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",
     // ── Capture (hosts without ARA: record what the host is playing) ──────
+    capture_settings_title: "Capture settings",
+    capture_settings_desc:
+        "Capture records what the host is playing into the plug-in's own timeline; you can then edit and export as usual. It is only needed when the host does not provide ARA.",
+    capture_status: "Status",
+    capture_last_error: "Last error",
+    capture_unavailable: "Unavailable right now",
+    capture_waiting: "Waiting for the host to play",
+    capture_start_hint: "Start capture",
+    capture_open_settings: "Open capture settings",
     panel_capture: "Capture",
     menu_capture: "Capture from Host...",
     capture_status_empty: "Nothing recorded",

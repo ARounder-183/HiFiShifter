@@ -343,7 +343,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const playheadLineRef = React.useRef<HTMLDivElement | null>(null);
     /** 吸附高亮内容层容器（宿主在 rAF 内整层平移，跟随视口）。 */
     const snapContentRef = React.useRef<HTMLDivElement | null>(null);
-    const captureCaptureRef = React.useRef<HTMLDivElement | null>(null);
+    const captureRangeRef = React.useRef<HTMLDivElement | null>(null);
     /** copy ghost 内容层容器（同上）。 */
     const ghostContentRef = React.useRef<HTMLDivElement | null>(null);
     /** 拖入预览内容层容器（同上）。 */
@@ -699,7 +699,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     rulerPlayheadLine: () => rulerPlayheadLineRef?.current ?? null,
                     rulerPlayheadHead: () => rulerPlayheadHeadRef?.current ?? null,
                     snapHighlightContent: () => snapContentRef.current,
-                    captureCaptureContent: () => captureCaptureRef.current,
+                    captureRangeContent: () => captureRangeRef.current,
                     ghostContent: () => ghostContentRef.current,
                     dropPreviewContent: () => dropPreviewContentRef.current,
                     newTrackDropContent: () => newTrackDropContentRef.current,
@@ -928,8 +928,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 仍是 null。层内没有录制时自身返回 null，不留可见痕迹。 */}
             {snapHighlight !== undefined ? (
                 <div
-                    ref={captureCaptureRef}
-                    data-hs-capture-capture="1"
+                    ref={captureRangeRef}
+                    data-hs-capture-range="1"
                     className="pointer-events-none absolute left-0 top-0 z-3 overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,

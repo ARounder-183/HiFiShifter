@@ -2200,6 +2200,15 @@ export const koKR = {
     plugin_reverse_unavailable:
         "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
     // ── 캡처（ARA 미지원 호스트에서 호스트 재생음을 가져오기）─────────────
+    capture_settings_title: "캡처 설정",
+    capture_settings_desc:
+        "캡처는 호스트가 재생 중인 오디오를 플러그인 자체 타임라인에 기록합니다. 이후 평소처럼 조정하고 내보낼 수 있습니다. 호스트가 ARA를 제공하지 않을 때만 필요합니다.",
+    capture_status: "상태",
+    capture_last_error: "마지막 오류",
+    capture_unavailable: "지금은 사용할 수 없습니다",
+    capture_waiting: "호스트 재생 대기 중",
+    capture_start_hint: "캡처 시작",
+    capture_open_settings: "캡처 설정 열기",
     panel_capture: "캡처",
     menu_capture: "호스트에서 캡처...",
     capture_status_empty: "녹음 없음",

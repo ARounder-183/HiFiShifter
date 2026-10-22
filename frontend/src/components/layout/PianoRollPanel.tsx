@@ -282,6 +282,7 @@ import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../utils/devicePixelLine";
+import { CaptureRangeOverlay } from "./pianoRoll/CaptureRangeOverlay";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { subscribeDevicePixelRatio, useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import {
@@ -9155,48 +9156,60 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
                 {/* Right: ruler + scrollable canvas */}
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
-                    <TimeRuler
-                        scrollLeft={scrollLeft}
-                        scrollLeftLive={getScrollLeftLive}
-                        tickWindowAnchorPx={prTickAxis.anchorPx}
-                        ticks={timelineTicks}
-                        pxPerSec={pxPerSec}
-                        viewportWidth={viewSize.w}
-                        playheadSec={s.playheadSec}
-                        positionPlayheadFromProps={false}
-                        playheadLineRef={attachRulerPlayheadLine}
-                        playheadHeadRef={attachRulerPlayheadHead}
-                        contentRef={rulerContentRef}
-                        timeContext={timeContext}
-                        primaryUnit={s.primaryTimeUnit}
-                        secondaryUnit={s.secondaryTimeUnit}
-                        onPrimaryUnitChange={handlePrimaryUnitChange}
-                        onSecondaryUnitChange={handleSecondaryUnitChange}
-                        onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
-                        onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-                        t={tf}
-                        tempoMap={s.tempoMap}
-                        tempoMapVisible={s.tempoMapVisible}
-                        projectSec={dynamicProjectSec}
-                        grid={s.grid}
-                        snapEnabled={s.snapEnabled}
-                        timelineSnap={s.timelineSnap}
-                        projectScale={effectiveProjectScale}
-                        projectScaleName={
-                            s.project.useCustomScale
-                                ? (s.project.customScale?.name ?? undefined)
-                                : undefined
-                        }
-                        fallbackDenominator={s.project.timeSignatureDenominator}
-                        customScalePresets={s.customScalePresets}
-                        onTempoMapChange={handleTempoMapChange}
-                        onTempoMapCommit={handleTempoMapCommit}
-                        subscribeViewport={pianoRollViewportBus.subscribe}
-                        onRulerWheel={handleRulerWheel}
-                        onMouseDown={(e) => {
-                            interactions.onRulerMouseDown(e);
-                        }}
-                    />
+                    {/* 标尺 + 捕获区间指示。
+                        【为什么包一层 relative】捕获带要贴在标尺下缘、并随横向滚动平移，
+                        而 `TimeRuler` 本身是共享组件（时间轴也用它）—— 在它内部加一层
+                        只服务参数编辑器的覆盖层会把两个面板的职责搅在一起。
+                        包一层之后，覆盖层是这个容器的绝对定位子元素，TimeRuler 一行不改。 */}
+                    <div className="relative">
+                        <TimeRuler
+                            scrollLeft={scrollLeft}
+                            scrollLeftLive={getScrollLeftLive}
+                            tickWindowAnchorPx={prTickAxis.anchorPx}
+                            ticks={timelineTicks}
+                            pxPerSec={pxPerSec}
+                            viewportWidth={viewSize.w}
+                            playheadSec={s.playheadSec}
+                            positionPlayheadFromProps={false}
+                            playheadLineRef={attachRulerPlayheadLine}
+                            playheadHeadRef={attachRulerPlayheadHead}
+                            contentRef={rulerContentRef}
+                            timeContext={timeContext}
+                            primaryUnit={s.primaryTimeUnit}
+                            secondaryUnit={s.secondaryTimeUnit}
+                            onPrimaryUnitChange={handlePrimaryUnitChange}
+                            onSecondaryUnitChange={handleSecondaryUnitChange}
+                            onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                            onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                            t={tf}
+                            tempoMap={s.tempoMap}
+                            tempoMapVisible={s.tempoMapVisible}
+                            projectSec={dynamicProjectSec}
+                            grid={s.grid}
+                            snapEnabled={s.snapEnabled}
+                            timelineSnap={s.timelineSnap}
+                            projectScale={effectiveProjectScale}
+                            projectScaleName={
+                                s.project.useCustomScale
+                                    ? (s.project.customScale?.name ?? undefined)
+                                    : undefined
+                            }
+                            fallbackDenominator={s.project.timeSignatureDenominator}
+                            customScalePresets={s.customScalePresets}
+                            onTempoMapChange={handleTempoMapChange}
+                            onTempoMapCommit={handleTempoMapCommit}
+                            subscribeViewport={pianoRollViewportBus.subscribe}
+                            onRulerWheel={handleRulerWheel}
+                            onMouseDown={(e) => {
+                                interactions.onRulerMouseDown(e);
+                            }}
+                        />
+                        <CaptureRangeOverlay
+                            pxPerSec={pxPerSec}
+                            scrollLeft={scrollLeft}
+                            viewportWidth={viewSize.w}
+                        />
+                    </div>
 
                     {/* 自绘滚动条的定位容器：滚动条必须是**滚动容器之外**
                         的兄弟节点。放在滚动容器内部会被内容一起滚走（绝对定位在滚动

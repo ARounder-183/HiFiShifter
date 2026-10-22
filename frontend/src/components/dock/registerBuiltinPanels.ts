@@ -21,7 +21,6 @@ export const PANEL_NOTEBOOK = "notebook";
 export const PANEL_UNDO_HISTORY = "undoHistory";
 export const PANEL_APPEARANCE = "appearance";
 export const PANEL_HOST_LINK = "hostLink";
-export const PANEL_CAPTURE = "capture";
 
 /**
  * 记事本默认浮窗尺寸。
@@ -171,29 +170,6 @@ export function registerBuiltinPanels(): void {
         detachable: false,
         // 排在最后：它是低频入口，顺序上也不该插进工作面板之间。
         order: 90,
-    });
-
-    registerPanel({
-        id: PANEL_CAPTURE,
-        titleKey: "panel_capture",
-        singleton: true,
-        defaultWidth: 460,
-        defaultHeight: 320,
-        minWidth: 380,
-        /*
-         * 与 ARA 宿主连接同属"低频、打开、办完一轮、离开"的表面，因此同样居中浮出。
-         *
-         * 【为什么默认关闭】它是插件形态下**只有一部分宿主**才出现的通路（不支持
-         * ARA 的那些）。常驻会占掉工作区高度，而多数会话根本不录制。
-         */
-        openAsFloating: { width: 460, height: 320, anchor: "center" },
-        // 不进「视图 → 窗口」：与 ARA 宿主连接同理由（低频会话入口会稀释常用项）。
-        excludeFromWindowMenu: true,
-        // 不可停靠：录制是"打开、按一次、关掉"的会话，编入工作布局没有意义。
-        dockable: false,
-        detachable: false,
-        // 排在「ARA 宿主连接」之后：同为低频入口，且两者互斥出现。
-        order: 96,
     });
 
     registerPanel({

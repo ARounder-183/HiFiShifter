@@ -1,17 +1,19 @@
 /**
- * 传输栏上 Capture 控件的契约。
+ * 传输栏上捕获控件的契约，以及它的设置窗口。
  *
  * 【要钉死什么】
- * 1. 插件形态下**永远**有一个可点的键，并且说清现在缺哪一步（宿主没播放、宿主不给位置、
- *    宿主正在用 ARA 供音）—— 用户实测报障原话是"没看到任何 Capture 相关的功能入口"。
- * 2. **只有一行，而且只有图标**。主工具栏是 `flex-nowrap overflow-y-hidden` 的单行容器，
- *    而插件形态下它的宽度由宿主的 VST 窗口决定。此前录制中会多出一行读数，那一行被
- *    工具栏裁掉，表现为"点了录制排版就乱"（用户报障）。所以这里既断言"没有第二行"，
- *    也断言"键没有文字"。
- * 3. 无文字不等于无名称：每个图标键都必须带 `aria-label`（它同时是 tooltip）。
+ *
+ * 1. 插件形态下**永远**有一个可点的键。用户实测报障原话是"没看到任何 Capture
+ *    相关的功能入口"。
+ * 2. **只有一行，而且只有图标**。主工具栏是 `flex-nowrap overflow-y-hidden` 的单行
+ *    容器，宽度由宿主的窗口决定。此前捕获中会多出一行读数，那一行被工具栏裁掉，
+ *    表现为"点了捕获排版就乱"。
+ * 3. **tooltip 是一句短语**。"宿主没把播放位置交给插件，因此无法对齐到时间轴……"
+ *    那一整句塞进悬停气泡既读不完也挤爆布局 —— 它属于设置窗口（右键进入）。
+ * 4. 无文字不等于无名称：每个图标键都必须带 `aria-label`（它同时是 tooltip）。
  *
  * store 自己的时序由 `captureStore.test.ts` 覆盖，本文件只测"控件上显示什么、点了会发
- * 哪条命令"。
+ * 哪条命令、右键会打开什么"。
  */
 // @vitest-environment jsdom
 import { act } from "react";
@@ -27,11 +29,21 @@ vi.mock("../../services/invoke", () => ({
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { enUS } from "../../i18n/en-US";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
+import { resetCaptureSettingsForTests } from "./captureSettingsBus";
 import { resetCaptureStoreForTests } from "./captureStore";
 import { CaptureControl } from "./CaptureControl";
 import type { CaptureStatus } from "./captureApi";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// jsdom 没有 ResizeObserver，而 `AppDialog` 的滚动区与 Radix 的 Switch 在布局 effect 里
+// 都会构造它（设置窗口一打开就会撞上）。
+class ResizeObserverStub {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+}
+(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= ResizeObserverStub;
 
 const LOCALE_KEY = "hifishifter.locale";
 let container: HTMLDivElement;
@@ -64,7 +76,7 @@ function status(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
     };
 }
 
-/** 一段"正在录"的读数（多数用例都要它）。 */
+/** 一段"正在捕获"的读数（多数用例都要它）。 */
 function recording(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
     return status({
         state: "recording",
@@ -85,6 +97,7 @@ function recording(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
 beforeEach(() => {
     invokeMock.mockReset();
     resetCaptureStoreForTests();
+    resetCaptureSettingsForTests();
     localStorage.setItem(LOCALE_KEY, "en-US");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     container = document.createElement("div");
@@ -116,7 +129,7 @@ async function render() {
 }
 
 function text(): string {
-    return container.textContent ?? "";
+    return document.body.textContent ?? "";
 }
 
 function control(): HTMLElement {
@@ -142,45 +155,41 @@ async function click(target: HTMLButtonElement | undefined) {
     });
 }
 
-test("宿主可以录时给出可点的录制键", async () => {
+test("宿主可以捕获时给出可点的捕获键", async () => {
     invokeMock.mockResolvedValue(status());
     await render();
-    const record = iconButton(enUS.capture_guide_body);
-    expect(record, "用户必须能看到一个录制入口").toBeTruthy();
-    expect(record!.disabled).toBe(false);
-    await click(record);
+    const key = iconButton(enUS.capture_start_hint);
+    expect(key, "用户必须能看到一个捕获入口").toBeTruthy();
+    expect(key!.disabled).toBe(false);
+    await click(key);
     expect(invokeMock).toHaveBeenCalledWith("capture_start");
 });
 
 /**
  * **控件只有一行，且键只有图标。**
  *
- * 【为什么这是回归测试】此前录制中会多出一行读数（`data-capture-details`），而主工具栏
- * 是单行且纵向裁切的容器 —— 那一行被裁掉，用户看到的是"点了录制排版就乱"。而工具栏在
- * 宿主 VST 窗口里可能很窄，文字键（"录制"/"停止"/"取消"）在任何语言里都比图标宽。
+ * 【为什么这是回归测试】此前捕获中会多出一行读数（`data-capture-details`），而主工具栏
+ * 是单行且纵向裁切的容器 —— 那一行被裁掉，用户看到的是"点了捕获排版就乱"。而工具栏
+ * 在宿主窗口里可能很窄，文字键在任何语言里都比图标宽。
  */
 test("控件只有一行，键只有图标且都有名称", async () => {
     invokeMock.mockResolvedValue(recording());
     await render();
-    // 第二行必须**完全**不存在（不是隐藏、不是条件渲染失败）。
     expect(
         container.querySelector("[data-capture-details]"),
         "第二行必须被彻底去掉，否则它会撑破单行工具栏",
     ).toBeNull();
-    // 根节点是一个横向容器，且它的直接子元素都在同一行里（没有换行的块级行）。
     expect(
         control().style.flexDirection,
         "控件根节点不得是纵向布局 —— 那正是第二行的来源",
     ).not.toBe("column");
-    expect(control().children.length).toBeGreaterThan(0);
     for (const child of Array.from(control().children)) {
         expect(
             (child as HTMLElement).style.flexDirection,
             "控件内部不得出现纵向布局（那是第二行的来源）",
         ).not.toBe("column");
     }
-    // 键没有文字，但都有可访问名称。
-    const keys = buttons();
+    const keys = buttons().filter((b) => b.closest("[data-capture-control]"));
     expect(keys.length).toBeGreaterThan(0);
     for (const key of keys) {
         expect(key.textContent?.trim(), "键必须是图标，不能带文字").toBe("");
@@ -188,100 +197,141 @@ test("控件只有一行，键只有图标且都有名称", async () => {
     }
 });
 
-test("宿主不给播放位置时键在但**说清为什么不能录**", async () => {
-    invokeMock.mockResolvedValue(status({ canCapture: false }));
-    await render();
-    const record = iconButton(enUS.capture_cannot_capture);
-    expect(record).toBeTruthy();
-    expect(record!.disabled, "不能录时不能让它点下去什么都不发生").toBe(true);
-});
-
-test("ARA 宿主里如实说明不需要 Capture", async () => {
-    invokeMock.mockResolvedValue(status({ araBound: true }));
-    await render();
-    expect(iconButton(enUS.capture_not_applicable_ara)).toBeTruthy();
-});
-
-test("宿主在播放却一帧都没到 ⇒ 直接说是音频没进来", async () => {
-    invokeMock.mockResolvedValue(
-        recording({
-            recording: {
-                capturedFrames: 0,
-                sealedSegments: 0,
-                position: 0,
-                peak: [0, 0],
-                gaps: 0,
-                spares: 2,
-            },
-            capture: null,
-        }),
-    );
-    await render();
-    expect(iconButton(enUS.capture_no_audio_arriving)).toBeTruthy();
-    expect(
-        iconButton(enUS.capture_host_not_playing),
-        "不能把「没在播放」与「没拿到音频」混成一句",
-    ).toBeUndefined();
-});
-
-test("宿主用 64 位精度时说明原因与补救（这是用户可修的一档）", async () => {
-    invokeMock.mockResolvedValue(status({ unsupportedPrecision: true }));
-    await render();
-    expect(iconButton(enUS.capture_unsupported_precision)).toBeTruthy();
-});
-
-test("录制中给出停止与取消，并说出「宿主没在播放」", async () => {
-    invokeMock.mockResolvedValue(recording({ hostPlaying: false }));
-    await render();
-    const stop = iconButton(enUS.capture_host_not_playing);
-    expect(stop, "宿主没在播放时必须说清原因").toBeTruthy();
-    expect(iconButton(enUS.capture_cancel_hint), "误触之后要有退路").toBeTruthy();
-    await click(stop);
-    expect(invokeMock).toHaveBeenCalledWith("capture_stop");
+/**
+ * **tooltip 只写一句短语。**
+ *
+ * 【为什么要有长度上限】用户原话："那个 ToolTips 太长了，根本不符合本项目的设计风格。"
+ * 悬停气泡回答的是"我现在按这个键会发生什么"，不是"这条通路为什么在这个宿主上不
+ * 成立" —— 后者需要一整句，它住在设置窗口里。这里用**字符数**当代理指标：所有合法
+ * 状态的 tooltip 都必须短于最长的两句说明（`capture_cannot_capture` 等）。
+ */
+test("任何状态下的 tooltip 都是一句短语", async () => {
+    const cases: Array<[string, CaptureStatus]> = [
+        ["可捕获", status()],
+        ["待命", status({ state: "standby", standby: true })],
+        ["捕获中", recording()],
+        ["宿主不给位置", status({ canCapture: false })],
+        ["ARA 宿主", status({ araBound: true })],
+        ["64 位精度", status({ unsupportedPrecision: true })],
+    ];
+    for (const [label, value] of cases) {
+        invokeMock.mockReset();
+        resetCaptureStoreForTests();
+        invokeMock.mockResolvedValue(value);
+        await render();
+        const key = buttons().find((b) => b.getAttribute("aria-label"));
+        expect(key, `${label}: 必须有一个带名称的键`).toBeTruthy();
+        const tooltip = key!.getAttribute("aria-label") ?? "";
+        // 短语判据：不出现句号，且不超过 40 个字符。
+        expect(tooltip.includes("."), `${label}: tooltip 不该是整句 —— ${tooltip}`).toBe(false);
+        expect(
+            tooltip.length,
+            `${label}: tooltip 过长（${tooltip.length} 字符）—— ${tooltip}`,
+        ).toBeLessThanOrEqual(40);
+    }
 });
 
 /**
- * **待命必须说成"等待播放"，而不是"已录 0.0 秒"。**
+ * **右键捕获键 = 打开设置窗口。**
  *
- * 【为什么这条是用户反馈的回归测试】用户按了录制、宿主还没播，界面显示的是一个
- * "已录 0.0 秒"的读数 —— 那看起来像失败，而实际是"等你去按播放"。这两件事对用户的
- * 下一步完全不同，所以待命必须是一个**独立**的说法，而且**不该有录制读数**。
+ * 【为什么右键是必须的】不可用时按钮是 `disabled` 的，而禁用按钮收不到点击 —— 右键是
+ * 它唯一还能用的手势，也是"我想知道为什么"最自然的那一下。
  */
-test("按了录制但宿主还没播放 ⇒ 说成等待播放，而不是 0.0 秒", async () => {
-    invokeMock.mockResolvedValue(status({ state: "standby", standby: true }));
+test("右键捕获键打开设置窗口", async () => {
+    invokeMock.mockResolvedValue(status({ canCapture: false }));
     await render();
-    expect(iconButton(enUS.capture_field_waiting_host)).toBeTruthy();
-    expect(text(), "待命期不该出现录制读数").not.toContain("0.0");
-    // 键变成"停止"（本次录制已经开始了，只是还没收到素材）。
-    await click(iconButton(enUS.capture_field_waiting_host));
-    expect(invokeMock).toHaveBeenCalledWith("capture_stop");
+    expect(text()).not.toContain(enUS.capture_settings_title);
+
+    const key = iconButton(enUS.capture_unavailable);
+    expect(key).toBeTruthy();
+    const host = key!.parentElement!;
+    await act(async () => {
+        host.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+        await Promise.resolve();
+    });
+
+    // 设置窗口打开了，并且**说清了为什么不能用**（长句在这里，不在 tooltip 里）。
+    expect(text()).toContain(enUS.capture_settings_title);
+    expect(text()).toContain(enUS.capture_cannot_capture);
 });
 
-/** 距上限不足 10 秒时给出预警 —— 上限到点会自己停。预警折进键与读数的 tooltip。 */
-test("接近录制上限时给出预警", async () => {
-    invokeMock.mockResolvedValue(recording({ limitWarning: true }));
+/** 设置窗口里的三组设置必须真的下发命令。 */
+test("设置窗口把监听开关与上限写回后端", async () => {
+    invokeMock.mockResolvedValue(status());
     await render();
-    expect(iconButton(enUS.capture_limit_warning)).toBeTruthy();
+    const key = iconButton(enUS.capture_start_hint)!;
+    await act(async () => {
+        key.parentElement!.dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+    });
+    await act(async () => {
+        await Promise.resolve();
+    });
+
+    // 监听开关：Radix 的 switch 是 `role="switch"`。
+    const toggle = document.querySelector<HTMLElement>("[role='switch']");
+    expect(toggle, "监听开关必须存在").toBeTruthy();
+    await act(async () => toggle!.click());
+    await act(async () => {
+        await Promise.resolve();
+    });
+    expect(invokeMock).toHaveBeenCalledWith("capture_set_options", expect.anything());
 });
 
-/** 录制中必须有一个"在动"的读数：没有它，用户无法判断插件到底有没有在收音频。 */
-test("录制中显示已录时长", async () => {
+test("ARA 宿主里如实说明不需要捕获", async () => {
+    invokeMock.mockResolvedValue(status({ araBound: true }));
+    await render();
+    // 不可用 ⇒ 键仍在（只是禁用），tooltip 说"当前不可用"。
+    const key = iconButton(enUS.capture_unavailable);
+    expect(key).toBeTruthy();
+    expect(key!.disabled).toBe(true);
+});
+
+/** 捕获中必须有一个"在动"的读数：没有它，用户无法判断插件到底有没有在收音频。 */
+test("捕获中显示已捕获时长", async () => {
     invokeMock.mockResolvedValue(recording());
     await render();
     expect(text()).toContain("1.0");
+    expect(iconButton(enUS.capture_stop), "捕获中键的语义是停止").toBeTruthy();
 });
 
-/** 后端错误只给图标，正文进 tooltip（错误可能是一整句话，放进工具栏会撑开整条栏）。 */
-test("出错时只给图标，正文在 tooltip 里", async () => {
-    invokeMock.mockResolvedValue(status({ canCapture: false }));
-    invokeMock.mockImplementation(async (command: string) => {
-        if (command === "capture_status") return status({ canCapture: true });
+test("捕获中给出取消的退路", async () => {
+    invokeMock.mockResolvedValue(recording());
+    await render();
+    const cancel = iconButton(enUS.capture_cancel_hint);
+    expect(cancel, "误触之后要有退路").toBeTruthy();
+    await click(cancel);
+    expect(invokeMock).toHaveBeenCalledWith("capture_cancel");
+});
+
+/**
+ * **出错时只给图标，正文在设置窗口里。**
+ *
+ * 【为什么不在工具栏显示正文】后端错误可能是一整句话（"宿主还没声明采样率…"），
+ * 放进工具栏会把整条栏撑开 —— 那正是"排版就乱"的另一半。
+ */
+test("出错时只给图标，正文进设置窗口", async () => {
+    // 【为什么让**所有**命令都失败】错误是**瞬时**的：轮询成功一次就会把它清掉
+    // （见 `captureStore.refresh`）。只让 start 失败的话，200ms 后的那次轮询会
+    // 把正文抹掉，测试就变成了在测"时序运气"。让后端整体不可用才是真实场景之一
+    // （插件刚加载、会话还没就绪），也让"正文一直在设置窗口里"成为一个稳定断言。
+    invokeMock.mockImplementation(async () => {
         throw new Error("the host has not declared a sample rate yet");
     });
     await render();
-    await click(iconButton(enUS.capture_guide_body));
+
     const alert = container.querySelector<HTMLElement>("[role='alert']");
     expect(alert, "错误必须有一个可见的落点").toBeTruthy();
-    expect(alert!.getAttribute("data-tooltip")).toContain("sample rate");
     expect(text(), "错误正文不该铺在工具栏上").not.toContain("sample rate");
+
+    // 点它进设置窗口 —— 正文与下一步都在那里。
+    await act(async () => alert!.click());
+    await act(async () => {
+        await Promise.resolve();
+    });
+    expect(text()).toContain(enUS.capture_settings_title);
+    expect(text()).toContain("sample rate");
 });

@@ -367,7 +367,7 @@ export interface TimelineKernelDomSync {
      * 而它每 200 ms 才更新一次 —— 让它自己跟随滚动就等于把 60 Hz 的滚动也绑在 5 Hz 的
      * 数据上。整层平移把这个矛盾解掉：层内不重排，滚动只写一次 transform。
      */
-    readonly captureCaptureContent?: () => HTMLElement | null;
+    readonly captureRangeContent?: () => HTMLElement | null;
     /**
      * copy 拖拽 ghost 的内容层：整层写 `translate(-scrollLeft, -scrollTop)`。
      *
@@ -400,7 +400,7 @@ function resolveDomSync(sync: TimelineKernelDomSync): {
     rulerPlayheadLine: HTMLElement | null;
     rulerPlayheadHead: HTMLElement | null;
     snapHighlightContent: HTMLElement | null;
-    captureCaptureContent: HTMLElement | null;
+    captureRangeContent: HTMLElement | null;
     ghostContent: HTMLElement | null;
     dropPreviewContent: HTMLElement | null;
     newTrackDropContent: HTMLElement | null;
@@ -412,7 +412,7 @@ function resolveDomSync(sync: TimelineKernelDomSync): {
         rulerPlayheadLine: sync.rulerPlayheadLine?.() ?? null,
         rulerPlayheadHead: sync.rulerPlayheadHead?.() ?? null,
         snapHighlightContent: sync.snapHighlightContent?.() ?? null,
-        captureCaptureContent: sync.captureCaptureContent?.() ?? null,
+        captureRangeContent: sync.captureRangeContent?.() ?? null,
         ghostContent: sync.ghostContent?.() ?? null,
         dropPreviewContent: sync.dropPreviewContent?.() ?? null,
         newTrackDropContent: sync.newTrackDropContent?.() ?? null,
@@ -2564,11 +2564,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // Capture 实时录制带：与吸附高亮同一机制（内容坐标 + 整层平移）。
-        const captureCapture = dom.captureCaptureContent;
-        if (captureCapture != null) {
+        const captureRange = dom.captureRangeContent;
+        if (captureRange != null) {
             layerTransformWriter(
-                "capture-capture",
-                captureCapture,
+                "capture-range",
+                captureRange,
                 `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
                 (target, value) => {
                     target.style.transform = value;

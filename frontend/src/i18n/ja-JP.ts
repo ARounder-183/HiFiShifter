@@ -2231,6 +2231,15 @@ export const jaJP = {
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
     // ── キャプチャ（ARA 非対応ホストで、ホストの再生音を取り込む）────────────
+    capture_settings_title: "キャプチャ設定",
+    capture_settings_desc:
+        "キャプチャはホストが再生中の音声をプラグイン自身のタイムラインに取り込みます。その後は通常どおり調整・書き出しができます。ホストが ARA を提供しない場合にのみ必要です。",
+    capture_status: "状態",
+    capture_last_error: "直近のエラー",
+    capture_unavailable: "現在は使用できません",
+    capture_waiting: "ホストの再生を待機中",
+    capture_start_hint: "キャプチャを開始",
+    capture_open_settings: "キャプチャ設定を開く",
     panel_capture: "キャプチャ",
     menu_capture: "ホストからキャプチャ...",
     capture_status_empty: "未録音",

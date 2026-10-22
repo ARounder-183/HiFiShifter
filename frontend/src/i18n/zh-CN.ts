@@ -2147,6 +2147,15 @@ export const zhCN = {
     plugin_feature_unavailable: "该功能尚未在 VST/ARA 插件里提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；请在宿主里倒放这一条",
     // ── 捕获（不支持 ARA 的宿主里，把宿主播放的音频录进插件）──────────────
+    capture_settings_title: "捕获设置",
+    capture_settings_desc:
+        "捕获把宿主正在播放的音频录进插件自己的时间轴，随后即可正常调参与导出。它只在宿主没有提供 ARA 时需要。",
+    capture_status: "状态",
+    capture_last_error: "最近一次错误",
+    capture_unavailable: "当前不可用",
+    capture_waiting: "等待宿主播放",
+    capture_start_hint: "开始捕获",
+    capture_open_settings: "打开捕获设置",
     panel_capture: "捕获",
     menu_capture: "从宿主捕获...",
     capture_status_empty: "尚未录制",
