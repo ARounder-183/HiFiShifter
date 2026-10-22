@@ -12,19 +12,11 @@
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
 import React from "react";
 import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
-import {
-    ChevronDownIcon,
-    CursorArrowIcon,
-    Link2Icon,
-    LinkBreak2Icon,
-    CheckIcon,
-} from "@radix-ui/react-icons";
+import { ChevronDownIcon, CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
     setEditParam,
     setEdgeSmoothnessPercent,
     setTrackStateRemote,
-    togglePitchSnap,
-    setPitchSnapUnit,
     setScaleHighlightMode,
     toggleLockParamLines,
     cycleDragDirection,
@@ -42,10 +34,11 @@ import {
     formatKeybindingList,
     isNoneBindingList,
 } from "../../../../features/keybindings/keybindingsSlice";
-import { AppAnchoredMenu, AppIconButton, AppSelect } from "../../../../ui";
+import { AppIconButton, AppSelect } from "../../../../ui";
 import { ToolbarSlot, ParamToolbarPill } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
+import { PitchSnapMenu } from "./PitchSnapMenu";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -144,7 +137,6 @@ export function ParamToolbar({ m }: Props) {
         devicePixelRatio,
         dispatch,
         editParam,
-        effectivePitchSnapVisual,
         getProcessorParamLabel,
         getStaticOptionLabel,
         handleOpenMidiDialog,
@@ -155,12 +147,7 @@ export function ParamToolbar({ m }: Props) {
         pitchGroupLabel,
         pitchGroupTooltip,
         pitchHardDisableReason,
-        pitchSnapMenuAnchorRef,
-        pitchSnapMenuOpen,
-        pitchSnapMenuRef,
         pitchSnapOpen,
-        pitchSnapScaleIcon,
-        pitchSnapSemitoneIcon,
         processorStaticParams,
         processorStaticValues,
         referenceRootTrackOptions,
@@ -170,7 +157,6 @@ export function ParamToolbar({ m }: Props) {
         secondaryParamVisible,
         selectedIsChildTrack,
         setHoveredReferenceRootTrackId,
-        setPitchSnapMenuOpen,
         setPitchSnapOpen,
         setTimeDisplaySettingsOpen,
         t,
@@ -310,176 +296,7 @@ export function ParamToolbar({ m }: Props) {
                         }
                     />
 
-                    {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu）。 */}
-                    <Box ref={pitchSnapMenuAnchorRef} data-hs-context-menu>
-                        <AppIconButton
-                            active={effectivePitchSnapVisual}
-                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                            emphasis="accent"
-                            tooltip={`${t("pitch_snap")}: ${
-                                effectivePitchSnapVisual
-                                    ? s.pitchSnapUnit === "semitone"
-                                        ? tf("quantize_semitone")
-                                        : tf("quantize_scale")
-                                    : tf("pitch_snap_off")
-                            }`}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(togglePitchSnap());
-                                void dispatch(persistUiSettings());
-                            }}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setPitchSnapMenuOpen(true);
-                            }}
-                            icon={
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                    }}
-                                >
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            inset: 0,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
-                                        }}
-                                    >
-                                        {!effectivePitchSnapVisual ? (
-                                            <Box
-                                                style={{
-                                                    position: "relative",
-                                                    width: 15,
-                                                    height: 15,
-                                                    opacity: 0.45,
-                                                }}
-                                            >
-                                                {pitchSnapSemitoneIcon}
-                                                <svg
-                                                    className="absolute inset-0"
-                                                    width="15"
-                                                    height="15"
-                                                    viewBox="0 0 15 15"
-                                                    fill="none"
-                                                    xmlns="http://www.w3.org/2000/svg"
-                                                >
-                                                    <path
-                                                        d="M3 3L12 12"
-                                                        stroke="currentColor"
-                                                        strokeWidth="1.2"
-                                                        strokeLinecap="round"
-                                                    />
-                                                </svg>
-                                            </Box>
-                                        ) : s.pitchSnapUnit === "semitone" ? (
-                                            pitchSnapSemitoneIcon
-                                        ) : (
-                                            pitchSnapScaleIcon
-                                        )}
-                                    </Box>
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            right: -1,
-                                            bottom: -1,
-                                            width: 6,
-                                            height: 6,
-                                            opacity: 0.7,
-                                        }}
-                                    >
-                                        <svg
-                                            width="6"
-                                            height="6"
-                                            viewBox="0 0 6 6"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
-                                        >
-                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
-                                        </svg>
-                                    </Box>
-                                </Box>
-                            }
-                        />
-
-                        <AppAnchoredMenu
-                            open={pitchSnapMenuOpen}
-                            anchorRef={pitchSnapMenuAnchorRef}
-                            menuRef={pitchSnapMenuRef}
-                        >
-                            <button
-                                type="button"
-                                className="hs-menu__item"
-                                onClick={() => {
-                                    dispatch(setPitchSnapUnit("semitone"));
-                                    if (!s.pitchSnapEnabled) {
-                                        dispatch(togglePitchSnap());
-                                    }
-                                    void dispatch(persistUiSettings());
-                                    setPitchSnapMenuOpen(false);
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span className="flex min-w-0 items-center gap-2">
-                                    <Box className="hs-menu__icon">{pitchSnapSemitoneIcon}</Box>
-                                    <span className="hs-menu__label-text">
-                                        {tf("pitch_snap_menu_semitone")}
-                                    </span>
-                                </span>
-                                <span className="hs-menu__trail">
-                                    {s.pitchSnapUnit === "semitone" ? (
-                                        <span className="hs-menu__check">
-                                            <CheckIcon />
-                                        </span>
-                                    ) : null}
-                                </span>
-                            </button>
-                            <button
-                                type="button"
-                                className="hs-menu__item"
-                                onClick={() => {
-                                    dispatch(setPitchSnapUnit("scale"));
-                                    if (!s.pitchSnapEnabled) {
-                                        dispatch(togglePitchSnap());
-                                    }
-                                    void dispatch(persistUiSettings());
-                                    setPitchSnapMenuOpen(false);
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span className="flex min-w-0 items-center gap-2">
-                                    <Box className="hs-menu__icon">{pitchSnapScaleIcon}</Box>
-                                    <span className="hs-menu__label-text">
-                                        {tf("pitch_snap_menu_scale")}
-                                    </span>
-                                </span>
-                                <span className="hs-menu__trail">
-                                    {s.pitchSnapUnit === "scale" ? (
-                                        <span className="hs-menu__check">
-                                            <CheckIcon />
-                                        </span>
-                                    ) : null}
-                                </span>
-                            </button>
-                            <div className="hs-menu__separator" role="separator" />
-                            <button
-                                type="button"
-                                className="hs-menu__item"
-                                onClick={() => {
-                                    setPitchSnapMenuOpen(false);
-                                    setPitchSnapOpen(true);
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span className="hs-menu__label-text">
-                                    {tf("pitch_snap_settings_action")}
-                                </span>
-                            </button>
-                        </AppAnchoredMenu>
-                    </Box>
+                    <PitchSnapMenu m={m} />
                     <AppIconButton
                         active={s.scaleHighlightMode === "always"}
                         // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
