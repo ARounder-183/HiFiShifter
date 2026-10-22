@@ -17,12 +17,10 @@ import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
 import {
     persistUiSettings,
-    seekPlayhead,
     setActiveVibratoPreset,
     setToolModePersistent,
-    setplayheadSec,
 } from "../../../features/session/sessionSlice";
-import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
+import { clamp } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
 import type { DrawToolMode } from "../../../features/session/sessionTypes";
 import type {
@@ -52,11 +50,7 @@ import {
     isNoneBinding,
     isNoneBindingList,
 } from "../../../features/keybindings/keybindingsSlice";
-import {
-    matchesAnyKeybinding,
-    matchKeybindingAllowingFineModifier,
-} from "../../../features/keybindings/useKeybindings";
-import { ACTION_META } from "../../../features/keybindings/defaultKeybindings";
+import { matchKeybindingAllowingFineModifier } from "../../../features/keybindings/useKeybindings";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { KeybindingMap, ActionId } from "../../../features/keybindings/types";
 import { snapToScale, snapToSemitone } from "../../../utils/musicalScales";
@@ -66,22 +60,9 @@ import {
     isChildPitchOffsetDegreesParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
-import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
-import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
-import { nativeScrollbarZoneAt } from "../../../utils/nativeScrollbar";
-import { isLegacyMouseEventFromStylus } from "../../../utils/penInput";
 import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
-import {
-    accumulatePinchSteps,
-    createPinchStepState,
-    pinchDeltaFromWheel,
-    type PinchStepState,
-} from "../../../utils/pinchGesture";
-import {
-    getParamEditorWheelAction,
-    getVibratoDragWheelTarget,
-    type ScrollbarZone,
-} from "./wheelGesture";
+import { createPinchStepState, type PinchStepState } from "../../../utils/pinchGesture";
+import { type ScrollbarZone } from "./wheelGesture";
 import {
     applyEdgeBlend,
     drawSmoothSigmaMsFromStrength,
@@ -126,12 +107,15 @@ import {
 import { vibratoSeedForPreset } from "../../../features/vibrato/vibratoSeed";
 import { nextVibratoHudAnchor, vibratoHudState, type VibratoHudAnchor } from "./vibratoHudState";
 import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
-import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 import { frameFromViewportClientX, secFromViewportClientX } from "./seekPlayheadMapping";
 import { resolvePanelRenderViewport } from "./kernel/viewportSource";
 import { createTimelineAxis, secToViewportPx } from "../renderKernel/timelineAxis.js";
 import { handleCanvasPointerDown } from "./gestures/canvasPointerDown";
 import type { CanvasCursor } from "./gestures/pointerSupport";
+import { handleScrollerWheel } from "./gestures/scrollerWheel";
+import { handleCanvasPointerMove } from "./gestures/canvasPointerMove";
+import { handleRulerPointerDown } from "./gestures/rulerPointerDown";
+import { handleScrollerKeyDown } from "./gestures/scrollerKeyDown";
 
 export function usePianoRollInteractions(args: {
     dispatch: AppDispatch;
@@ -1733,74 +1717,14 @@ export function usePianoRollInteractions(args: {
     );
 
     const onRulerMouseDown = useCallback(
-        (e: ReactMouseEvent<HTMLDivElement>) => {
-            // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
-            // pointerType）会让"悬停画线起笔"误定位播放头；悬停时间气泡
-            // （只读）不受影响。按"最近一次真实 pointer 事件"的设备类型判定。
-            if (isLegacyMouseEventFromStylus()) return;
-            if (e.button !== 0) return;
-            const ruler = e.currentTarget as HTMLDivElement;
-            let moved = false;
-
-            const updateAt = (clientX: number, commit: boolean): number => {
-                const bounds = ruler.getBoundingClientRect();
-                const sec = clamp(
-                    secFromViewportClientX({
-                        clientX,
-                        viewportLeft: bounds.left,
-                        // 同上：seek 的投影也必须取内核真值，否则滚动后点标尺会落到
-                        // 与画面播放头不同的位置（量化残差）。
-                        axis: axisFromRefs(),
-                    }),
-                    0,
-                    1e12,
-                );
-
-                if (commit) {
-                    dispatch(setplayheadSec(sec));
-                    void dispatch(seekPlayhead(sec));
-                }
-                return sec;
-            };
-
-            // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
-            let lastSec = updateAt(e.clientX, true);
-
-            // 拖动中的 setplayheadSec 逐事件派发会让所有订阅 session 的组件
-            // 随 mousemove 频率重渲；rAF 合帧后与画布重绘节奏一致。
-            let rafId: number | null = null;
-            let queuedSec: number | null = null;
-
-            const onMove = (ev: MouseEvent) => {
-                moved = true;
-                queuedSec = updateAt(ev.clientX, false);
-                if (rafId == null) {
-                    rafId = requestAnimationFrame(() => {
-                        rafId = null;
-                        if (queuedSec == null) return;
-                        dispatch(setplayheadSec(queuedSec));
-                        queuedSec = null;
-                    });
-                }
-            };
-
-            const onEnd = (ev: MouseEvent) => {
-                window.removeEventListener("mousemove", onMove, true);
-                window.removeEventListener("mouseup", onEnd, true);
-                window.removeEventListener("mouseleave", onEnd, true);
-                if (rafId != null) {
-                    cancelAnimationFrame(rafId);
-                    rafId = null;
-                }
-                if (!moved) return;
-                lastSec = updateAt(ev.clientX, true);
-                void dispatch(seekPlayhead(lastSec));
-            };
-
-            window.addEventListener("mousemove", onMove, true);
-            window.addEventListener("mouseup", onEnd, true);
-            window.addEventListener("mouseleave", onEnd, true);
-        },
+        (e: ReactMouseEvent<HTMLDivElement>) =>
+            handleRulerPointerDown(
+                {
+                    axisFromRefs,
+                    dispatch,
+                },
+                e,
+            ),
         [axisFromRefs, dispatch],
     );
 
@@ -1835,72 +1759,18 @@ export function usePianoRollInteractions(args: {
     );
 
     const onScrollerKeyDown = useCallback(
-        (e: KeyboardEvent<HTMLDivElement>) => {
-            const key = e.key.toLowerCase();
-            if (
-                key === "arrowup" ||
-                key === "arrowdown" ||
-                key === "arrowleft" ||
-                key === "arrowright"
-            ) {
-                e.preventDefault();
-            }
-
-            if (!rootTrackId) return;
-            if (editParam === "pitch" && !pitchEnabled) return;
-
-            // pianoRoll.shiftParamUp / shiftParamDown 已移至全局 handleKeybindingAction 处理
-
-            // Handle edit.* keybindings passed through from useKeybindings global handler
-            // (must be before the selectionRef guard since selectAll/deselect work without selection)
-            if (keybindingMap && onEditAction) {
-                const editActionEntries = (
-                    Object.entries(keybindingMap) as [ActionId, readonly Keybinding[]][]
-                ).filter(([id]) => id.startsWith("edit."));
-                // 需要弹出对话框的操作列表
-                const dialogOps = new Set([
-                    "transposeCents",
-                    "transposeDegrees",
-                    "setPitch",
-                    "average",
-                    "smooth",
-                    "addVibrato",
-                    "quantize",
-                    "meanQuantize",
-                ]);
-                for (const [actionId, bindings] of editActionEntries) {
-                    // 动作可绑多个键：任一槽位命中即触发（与全局路由同一约定）。
-                    if (bindings.some((kb) => kb.modifierOnly)) continue;
-                    if (!matchesAnyKeybinding(e.nativeEvent, bindings)) continue;
-                    {
-                        const meta = ACTION_META[actionId];
-                        // paramEditorSelect-scoped actions only work with "select" tool
-                        if (meta?.scopedContext === "paramEditorSelect" && toolMode !== "select") {
-                            continue;
-                        }
-                        const op = actionId.replace("edit.", "");
-                        // undo/redo handled globally, skip here
-                        if (op === "undo" || op === "redo") continue;
-                        e.preventDefault();
-                        // 需要弹窗的操作 → 派发 openEditDialog 事件打开对话框
-                        if (dialogOps.has(op)) {
-                            window.dispatchEvent(
-                                new CustomEvent("hifi:openEditDialog", { detail: { dialog: op } }),
-                            );
-                        } else {
-                            onEditAction(op);
-                        }
-                        return;
-                    }
-                }
-            }
-
-            // 复制/粘贴（pianoRoll.copy / pianoRoll.paste）已上移：由全局路由
-            // （useKeybindings → focusRouting.resolveEditOpRoute）按活动编辑
-            // 表面定向派发到 PianoRollPanel.handleEditOp 唯一执行，本地不再
-            // 维护平行的键位匹配分支（旧分支与 handleEditOp 重复且行为已
-            // 分叉，是复制/粘贴冲突的放大器）。
-        },
+        (e: KeyboardEvent<HTMLDivElement>) =>
+            handleScrollerKeyDown(
+                {
+                    editParam,
+                    keybindingMap,
+                    onEditAction,
+                    pitchEnabled,
+                    rootTrackId,
+                    toolMode,
+                },
+                e,
+            ),
         [rootTrackId, editParam, pitchEnabled, keybindingMap, onEditAction, toolMode],
     );
 
@@ -2010,265 +1880,45 @@ export function usePianoRollInteractions(args: {
      *   之外 ⇒ 判定为 null ⇒ 走的就是画布内的那一套 keybinding 语义。
      */
     const onScrollerWheelNative = useCallback(
-        (e: globalThis.WheelEvent, forcedScrollbarZone?: ScrollbarZone) => {
-            const el = scrollerRef.current;
-            if (!el) return;
-
-            const vib = vibratoStateRef.current;
-            if (vib) {
-                e.preventDefault();
-                /*
-                 * 捏合（`ctrl`/`meta` + wheel）在拖拽期间 = **连续**调深度。
-                 *
-                 * 【为什么放在最前】它必须先于下面那套"按轴向与修饰键判定深度/速率"
-                 * 的离散逻辑被拦下：捏合是一串高频小 delta，走离散路径会被
-                 * `Math.max(1, …)` 放大成"深度飞走"。累积成整步后与滚轮同速，
-                 * 且因为是连续的，手感比一格一格的滚轮平滑得多。
-                 */
-                const pinchDelta = pinchDeltaFromWheel(e);
-                if (pinchDelta != null) {
-                    const steps = accumulatePinchSteps(
-                        vibratoPinchRef.current,
-                        pinchDelta,
-                        performance.now(),
-                    );
-                    if (steps !== 0) {
-                        applyVibratoDragAdjustment({
-                            target: "depth",
-                            direction: steps > 0 ? 1 : -1,
-                            steps: Math.abs(steps),
-                            shiftHeld: e.shiftKey,
-                            fineEvent: e,
-                            clientX: e.clientX,
-                            clientY: e.clientY,
-                        });
-                    }
-                    return;
-                }
-                const ampRequested =
-                    isNoneBinding(vibratoAmplitudeAdjustKb) ||
-                    isModifierActive(vibratoAmplitudeAdjustKb, e);
-                const freqRequested =
-                    isNoneBinding(vibratoFrequencyAdjustKb) ||
-                    isModifierActive(vibratoFrequencyAdjustKb, e);
-                const wheelTarget = getVibratoDragWheelTarget({
-                    deltaX: e.deltaX,
-                    deltaY: e.deltaY,
-                    deltaMode: e.deltaMode,
-                    depthRequested: ampRequested,
-                    rateRequested: freqRequested,
-                });
-
-                // During vibrato drag, wheel always adjusts vibrato (amplitude by default,
-                // frequency via modifier or horizontal scroll). If no modifier is held and
-                // neither binding is "None", fall back to amplitude adjustment so the wheel
-                // never gets blocked or interpreted as zoom/scroll.
-                const resolvedTarget = wheelTarget !== "none" ? wheelTarget : "depth";
-
-                e.preventDefault();
-                const controlDelta =
-                    resolvedTarget === "rate" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
-                        ? e.deltaX
-                        : e.deltaY;
-                // 【与捏合分支同源】把 wheel 增量按 deltaMode 折算成像素（行 16 / 页
-                // 400，与 `pinchDeltaFromWheel` 同一约定），再交给整步累积器。
-                // 逐事件 `Math.max(1, …)` 是给"一格一个事件"的机械滚轮设计的；高分辨率
-                // / 触控板吐出的是一串小 delta，每个都放大成整步会让深度 / 速率以事件
-                // 频率飞走。累积到满一格（100 单位）才走一步，与滚轮同速。
-                const wheelMode = e.deltaMode ?? 0;
-                const wheelModeScale = wheelMode === 1 ? 16 : wheelMode === 2 ? 400 : 1;
-                const steps = accumulatePinchSteps(
-                    vibratoPinchRef.current,
-                    controlDelta * wheelModeScale,
-                    performance.now(),
-                );
-                if (steps === 0) return;
-                const direction =
-                    resolvedTarget === "depth"
-                        ? controlDelta < 0
-                            ? 1
-                            : -1
-                        : controlDelta < 0
-                          ? -1
-                          : 1;
-                applyVibratoDragAdjustment({
-                    target: resolvedTarget,
-                    direction,
-                    steps: Math.abs(steps),
-                    shiftHeld: e.shiftKey,
-                    fineEvent: e,
-                    // 滚轮事件自带指针位置：用它当锚点，气泡不会因为"指针没动过"
-                    // 而停在旧坐标上。
-                    clientX: e.clientX,
-                    clientY: e.clientY,
-                });
-                return;
-            }
-
-            const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-            const isWheelBindingRequested = (kb: Keybinding) => {
-                if (isNoneBinding(kb)) return noModifierPressed;
-                return isModifierActive(kb, e);
-            };
-            // ── 悬停原生滚动条：滚轮语义只归属该滚动条的轴 ──────────────
-            // 无修饰键 = 该轴滚动（竖直条 → 视口纵向平移；水平条 → 横向滚动）；
-            // 按住 modifier.scrollbarZoom（默认 Alt）= 该轴缩放。优先于全局绑定。
-            const scrollbarZone =
-                forcedScrollbarZone ?? nativeScrollbarZoneAt(el, e.clientX, e.clientY);
-            const scrollbarZoomRequested =
-                scrollbarZone != null &&
-                !isNoneBinding(scrollbarZoomKb) &&
-                isModifierActive(scrollbarZoomKb, e);
-            const horizontalScrollModifierActive = isWheelBindingRequested(scrollHorizontalKb);
-            const wheelAction = getParamEditorWheelAction({
-                deltaX: e.deltaX,
-                deltaY: e.deltaY,
-                horizontalScrollRequested: horizontalScrollModifierActive,
-                verticalPanRequested: isWheelBindingRequested(scrollVerticalKb),
-                verticalZoomRequested: isWheelBindingRequested(prVerticalZoomKb),
-                horizontalZoomRequested: isWheelBindingRequested(horizontalZoomKb),
-                scrollbarZone,
-                scrollbarZoomRequested,
-            });
-
-            const applyVerticalPanDelta = (deltaY: number) => {
-                const h = Math.max(1, el.clientHeight);
-                const delta = (-deltaY / h) * 0.5;
-                if (editParam === "pitch") {
-                    const cur = pitchViewRef.current;
-                    const next = clampViewport("pitch", {
-                        span: cur.span,
-                        center: cur.center + delta * cur.span,
-                    });
-                    setPitchView(next);
-                } else {
-                    const fallbackRange = currentParamRange ?? { min: 0, max: 1 };
-                    const cur = paramViewsRef.current[editParam] ?? {
-                        center: (fallbackRange.min + fallbackRange.max) / 2,
-                        span: Math.max(1e-6, fallbackRange.max - fallbackRange.min),
-                    };
-                    const next = clampViewport(editParam, {
-                        span: cur.span,
-                        center: cur.center + delta * cur.span,
-                    });
-                    setParamViewport(editParam, next);
-                }
-                invalidate();
-            };
-
-            const horizontalDelta = Math.abs(e.deltaX) > 0.5 ? e.deltaX : e.deltaY;
-
-            if (wheelAction === "free-scroll") {
-                e.preventDefault();
-                el.scrollLeft += e.deltaX;
-                syncScrollLeft(el);
-                applyVerticalPanDelta(e.deltaY);
-                return;
-            }
-
-            // Scroll modifier: convert wheel to horizontal scroll
-            if (wheelAction === "horizontal-scroll") {
-                e.preventDefault();
-                el.scrollLeft += horizontalDelta;
-                syncScrollLeft(el);
-                return;
-            }
-
-            // Scroll modifier: convert wheel to vertical scroll
-            if (wheelAction === "vertical-pan") {
-                e.preventDefault();
-                applyVerticalPanDelta(e.deltaY);
-                return;
-            }
-
-            // Anchor zoom to the actual drawable viewport (canvas), not the scroller.
-            // The scroller may include rulers/padding, which makes zoom feel off-center.
-            const canvas = canvasRef.current;
-            const bounds = (canvas ?? el).getBoundingClientRect();
-
-            const pointerXRaw = e.clientX - bounds.left;
-            const pointerYRaw = e.clientY - bounds.top;
-
-            // We rely on preventDefault to stop native scrolling while zooming.
-            e.preventDefault();
-
-            if (wheelAction === "vertical-zoom") {
-                if (
-                    pointerXRaw < 0 ||
-                    pointerYRaw < 0 ||
-                    pointerXRaw > bounds.width ||
-                    pointerYRaw > bounds.height
-                ) {
-                    return;
-                }
-                const h = Math.max(1, bounds.height);
-                const y = clamp(pointerYRaw, 0, h);
-                const t = yToViewportT(y, h);
-                const valueAtPointer = yToValue(editParam, y, h);
-
-                const factor = e.deltaY < 0 ? 0.9 : 1.1;
-                if (editParam === "pitch") {
-                    const cur = pitchViewRef.current;
-                    const nextSpan = cur.span * factor;
-                    const next = clampViewport("pitch", {
-                        span: nextSpan,
-                        center: valueAtPointer - (0.5 - t) * nextSpan,
-                    });
-                    setPitchView(next);
-                } else {
-                    const fallbackRange = currentParamRange ?? { min: 0, max: 1 };
-                    const cur = paramViewsRef.current[editParam] ?? {
-                        center: (fallbackRange.min + fallbackRange.max) / 2,
-                        span: Math.max(1e-6, fallbackRange.max - fallbackRange.min),
-                    };
-                    const nextSpan = cur.span * factor;
-                    const next = clampViewport(editParam, {
-                        span: nextSpan,
-                        center: valueAtPointer - (0.5 - t) * nextSpan,
-                    });
-                    setParamViewport(editParam, next);
-                }
-                invalidate();
-                return;
-            }
-
-            // Wheel: horizontal zoom (time axis)
-            if (wheelAction !== "horizontal-zoom") {
-                return;
-            }
-            const dir = e.deltaY < 0 ? 1 : -1;
-            const factor = dir > 0 ? 1.1 : 0.9;
-            const totalSec = Math.max(0, dynamicProjectSec);
-            const minPxPerSec = resolveTimelineMinPxPerSec({
-                baseMinPxPerSec: MIN_PX_PER_SEC,
-                projectSec: totalSec,
-                viewportWidthPx: el.clientWidth,
-            });
-            // 与轨道视图共用同一套水平缩放逻辑（秒为单位）：
-            // 鼠标锚点 / 播放光标锚点 / 平滑右延滚动范围全部一致。
-            const pendingZoom = horizontalZoomChainRef.current;
-            const zoomResult = resolveHorizontalWheelZoom({
-                factor,
-                basePxPerSec: pendingZoom?.nextPxPerSec ?? pxPerSecRef.current,
-                baseScrollLeft: pendingZoom?.nextScrollLeft ?? scrollLeftRef.current,
-                totalSec,
-                viewportWidth: el.clientWidth,
-                playheadZoomEnabled: Boolean(playheadZoomEnabled),
-                playheadSec: getPlayheadSec?.() ?? null,
-                anchorScreenX: pointerXRaw,
-                minPxPerSec,
-                maxPxPerSec: MAX_PX_PER_SEC,
-                minScrollLeft: syncTimelineEnabled ? -timelineOffsetRef.current : 0,
-                anchorOffsetPx: syncTimelineEnabled ? timelineOffsetRef.current : 0,
-            });
-            if (!zoomResult) return;
-
-            horizontalZoomChainRef.current = {
-                nextPxPerSec: zoomResult.nextPxPerSec,
-                nextScrollLeft: zoomResult.nextScrollLeft,
-            };
-            onHorizontalZoom(zoomResult.nextPxPerSec, zoomResult.nextScrollLeft);
-        },
+        (e: globalThis.WheelEvent, forcedScrollbarZone?: ScrollbarZone) =>
+            handleScrollerWheel(
+                {
+                    applyVibratoDragAdjustment,
+                    canvasRef,
+                    clampViewport,
+                    currentParamRange,
+                    dynamicProjectSec,
+                    editParam,
+                    getPlayheadSec,
+                    horizontalZoomChainRef,
+                    horizontalZoomKb,
+                    invalidate,
+                    onHorizontalZoom,
+                    paramViewsRef,
+                    pitchViewRef,
+                    playheadZoomEnabled,
+                    prVerticalZoomKb,
+                    pxPerSecRef,
+                    scrollHorizontalKb,
+                    scrollLeftRef,
+                    scrollVerticalKb,
+                    scrollbarZoomKb,
+                    scrollerRef,
+                    setParamViewport,
+                    setPitchView,
+                    syncScrollLeft,
+                    syncTimelineEnabled,
+                    timelineOffsetRef,
+                    vibratoAmplitudeAdjustKb,
+                    vibratoFrequencyAdjustKb,
+                    vibratoPinchRef,
+                    vibratoStateRef,
+                    yToValue,
+                    yToViewportT,
+                },
+                e,
+                forcedScrollbarZone,
+            ),
         [
             scrollerRef,
             canvasRef,
@@ -2627,85 +2277,36 @@ export function usePianoRollInteractions(args: {
     );
 
     const onCanvasPointerMove = useCallback(
-        (e: ReactPointerEvent<HTMLCanvasElement>) => {
-            lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
-            if (paramValuePopupEnabled) {
-                const draggingLeft = Boolean(strokeRef.current) && (e.buttons & 1) === 1;
-                if (draggingLeft) {
-                    const rawPreviewValue = pointerValue(e.clientY);
-                    const dragPreviewValue =
-                        toolMode === "draw"
-                            ? getDrawPreviewValue({
-                                  editParam,
-                                  rawValue: rawPreviewValue,
-                                  effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
-                                  pitchSnapUnit,
-                                  projectScale: scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
-                                  pitchSnapToleranceCents,
-                              })
-                            : rawPreviewValue;
-                    onParamValuePreviewChange?.({
-                        clientX: e.clientX,
-                        clientY: e.clientY,
-                        value: dragPreviewValue,
-                    });
-                } else {
-                    const nearCurveValue = getCurveValueNearPointer(
-                        e.clientX,
-                        e.clientY,
-                        e.nativeEvent.pointerType,
-                    );
-                    // 记录悬停激活状态：数据刷新（refreshParamValuePreview）
-                    // 只续显已激活的浮窗。
-                    hoverPreviewNearCurveRef.current = nearCurveValue != null;
-                    if (nearCurveValue == null) {
-                        onParamValuePreviewChange?.(null);
-                    } else {
-                        onParamValuePreviewChange?.({
-                            clientX: e.clientX,
-                            clientY: e.clientY,
-                            value: nearCurveValue,
-                        });
-                    }
-                }
-            }
-
-            // 拖拽中（平移/绘制/Alt 形变）跳过悬停链：指针捕获会把 move 重定向到
-            // 画布，悬停命中测试会反过来覆盖拖拽路径设置的光标（grabbing 等）。
-            if (panRef.current || strokeRef.current || morphDragRef.current) return;
-            // 光标提示的顺序与 pointerdown 的手势优先级**逐条对应**（否则会出现
-            // "显示可拉伸、按下却在拖曲线"的错位）：
-            //   1. **已选中的参数线** → 抓取。参数线的命中范围最窄（10px 带 + 必须
-            //      落在选区段内），而且它在画面里可能只有很短一截、很难瞄准；选区的
-            //      边缘则是两条贯穿整个高度的竖线，用户想抓边缘时会自己去对着线抓。
-            //      因此参数线的交互优先级**永远**高于选区自身（边缘 / 多选 / 平移）。
-            //   2. Alt（显式修饰键）压住边缘 → 拉伸（参数线未命中时才轮到它）；
-            //   3. 多选修饰键提示框选 / 切换段（同样让位给参数线，否则按住修饰键就
-            //      再也拖不动选区内的曲线）；
-            //   4. 无修饰键的边缘 → 调整边界。
-            if (isPointerNearDraggableSelection(e.clientX, e.clientY, e.nativeEvent.pointerType)) {
-                setCanvasCursor("grab");
-                return;
-            }
-            if (isPointerNearStretchSelectionEdge(e)) {
-                setCanvasCursor("ew-resize");
-                return;
-            }
-            // 多选修饰键按下时提示"可框选/可切换段"（Alt 拉伸更具体，优先）
-            if (
-                toolMode === "select" &&
-                !isModifierActive(paramStretchKb, e.nativeEvent) &&
-                isModifierActive(paramMultiSelectKb, e.nativeEvent)
-            ) {
-                setCanvasCursor("crosshair");
-                return;
-            }
-            if (isPointerNearSelectionEdge(e)) {
-                setCanvasCursor("ew-resize");
-                return;
-            }
-            setCanvasCursor(getDefaultCanvasCursor());
-        },
+        (e: ReactPointerEvent<HTMLCanvasElement>) =>
+            handleCanvasPointerMove(
+                {
+                    editParam,
+                    getCurveValueNearPointer,
+                    getDefaultCanvasCursor,
+                    hoverPreviewNearCurveRef,
+                    isEffectivePitchSnapActive,
+                    isPointerNearDraggableSelection,
+                    isPointerNearSelectionEdge,
+                    isPointerNearStretchSelectionEdge,
+                    lastPointerClientRef,
+                    morphDragRef,
+                    onParamValuePreviewChange,
+                    panRef,
+                    paramMultiSelectKb,
+                    paramStretchKb,
+                    paramValuePopupEnabled,
+                    pitchSnapToleranceCents,
+                    pitchSnapUnit,
+                    pointerSec,
+                    pointerValue,
+                    projectScale,
+                    scaleAtSec,
+                    setCanvasCursor,
+                    strokeRef,
+                    toolMode,
+                },
+                e,
+            ),
         [
             paramValuePopupEnabled,
             onParamValuePreviewChange,
