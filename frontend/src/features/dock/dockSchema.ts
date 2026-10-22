@@ -23,6 +23,7 @@ import {
     collectTabsets,
     findTabsetOfForm,
     insertForm,
+    isFormActiveVisible,
     isFormVisible,
     isPanelForm,
     makeTabset,
@@ -91,7 +92,28 @@ export function normalizeTabPosition(value: unknown): DockTabPosition {
     return value === "top" ? "top" : "bottom";
 }
 
-export function createDefaultDockLayout(): DockLayout {
+/**
+ * 出厂布局。
+ *
+ * 【为什么按形态分叉】插件窗口由宿主决定、下限 640x400，而**参数编辑器才是插件里的
+ * 主要工作面** —— 宿主自己的时间轴轨道已经承担了 HiFiShifter 时间轴的大部分职责。
+ * 因此插件里把两者做成**同一位置的标签页**，活动标签默认落在参数编辑器上；
+ * 独立 App 仍是"上时间轴 / 下参数编辑器"的上下堆叠。
+ *
+ * 标签顺序两个形态一致（时间轴在前），只有"当前显示谁"不同 —— 这样用户在插件里
+ * 切到时间轴时，看到的位置与独立 App 的上下关系对得上。
+ */
+export function createDefaultDockLayout(mode: DockMode = "standalone"): DockLayout {
+    return mode === "plugin"
+        ? createPluginDefaultDockLayout()
+        : createStandaloneDefaultDockLayout();
+}
+
+/** 布局所属的运行形态（决定出厂排布）。 */
+export type DockMode = "standalone" | "plugin";
+
+/** 独立 App 的出厂布局：上时间轴 / 下参数编辑器（与重构前的默认视觉一致）。 */
+function createStandaloneDefaultDockLayout(): DockLayout {
     const tree: DockSplitNode = {
         t: "split",
         id: "z1",
@@ -125,6 +147,50 @@ export function createDefaultDockLayout(): DockLayout {
         order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
         floatOrder: [],
         gutters: { ...DEFAULT_GUTTER_SIZES },
+        tabPosition: "bottom",
+        presets: {},
+        activePreset: null,
+    };
+}
+
+/**
+ * 插件形态的出厂布局：时间轴与参数编辑器**并列成标签页**，活动标签是参数编辑器。
+ *
+ * 【为什么不是上下堆叠】插件窗口的宽度与高度都由宿主给（下限 640x400）。上下堆叠在
+ * 那个尺寸下会把两边都压到最小尺寸 —— 而用户绝大多数时间是在参数编辑器里工作，
+ * 时间轴只是偶尔切过去看一眼。同一位置的标签页把"两个面板都要占高度"变成
+ * "一个位置两个视图"，参数编辑器因此拿到全部高度。
+ *
+ * 【为什么活动标签是参数编辑器】见上。标签顺序仍是"时间轴、参数编辑器"，
+ * 与独立 App 的上下顺序一致。
+ */
+function createPluginDefaultDockLayout(): DockLayout {
+    const tree: DockTabsetNode = {
+        t: "tabset",
+        id: "z1",
+        tabs: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+        active: MAIN_FORM_PARAM_EDITOR,
+    };
+    return {
+        schema: DOCK_LAYOUT_SCHEMA,
+        roots: { [MAIN_ROOT_ID]: tree },
+        forms: {
+            [MAIN_FORM_TIMELINE]: {
+                id: MAIN_FORM_TIMELINE,
+                panelId: MAIN_FORM_TIMELINE,
+                float: null,
+            },
+            [MAIN_FORM_PARAM_EDITOR]: {
+                id: MAIN_FORM_PARAM_EDITOR,
+                panelId: MAIN_FORM_PARAM_EDITOR,
+                float: null,
+            },
+        },
+        order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+        floatOrder: [],
+        // 轨道头宽度直接并进来 —— 此前由 `hydrateDock` 的 `pluginFirstRun` 补丁单独
+        // 覆盖，那是"两处表达同一件事"，必然有一处会漏。
+        gutters: { ...DEFAULT_GUTTER_SIZES, timelineTrackHeaderPx: PLUGIN_DEFAULT_TRACK_HEADER_PX },
         tabPosition: "bottom",
         presets: {},
         activePreset: null,
@@ -689,12 +755,18 @@ export function findVisibleFormForPanel(layout: DockLayout, panelId: string): st
 }
 
 /**
- * 解析"同步时间轴视图"所需的两个窗体 —— 判据是**两个面板都可见**。
+ * 解析"同步时间轴视图"所需的两个窗体 —— 判据是**两个面板都活动可见**。
  *
  * 【为什么需要这个函数，以及为什么它必须被测试】偏移 = 轨道区左缘 − 参数编辑器
  * 绘制区左缘，把参数编辑器的内容按它平移后，同一时刻会落在**同一个屏幕 x** 上。
- * 只要两个面板同时可见，这个对齐就有意义（上下相邻是主场景；并排、或一个浮在另
- * 一个之上同样成立 —— 偏移可正可负，负值由滚动下限兜住）。
+ * 只要两个面板**同时出现在屏幕上**，这个对齐就有意义（上下相邻是主场景；并排、或
+ * 一个浮在另一个之上同样成立 —— 偏移可正可负，负值由滚动下限兜住）。
+ *
+ * 【为什么判据是"活动可见"而不是"没被关闭"】同一标签组里的非活动标签被停在视口外，
+ * 它的左缘量不到（见 `isFormActiveVisible`）。用"没被关闭"当判据，就会在并列
+ * 标签页布局下套用上一次测出的偏移 —— 而那时两个面板根本不同屏，错位量恰好是
+ * 轨道头宽度减去键盘列宽度。并列标签页下两者不可能同时是活动标签，因此这里
+ * 必然返回 null（偏移固定为 0，各用各的视口）。
  *
  * 这里曾经出过一个**静默失效**的缺陷：调用方把"时间轴窗体 id"写成了参数编辑器
  * 自己的窗体 id，两个参数于是是同一个窗体，判定必然为假、偏移被强制为 0，
@@ -710,17 +782,28 @@ export function resolveSyncOffsetForms(
     /** 本参数编辑器窗体的 id（多实例时由面板注入）；不属于该面板时忽略。 */
     paramFormId?: string,
 ): { timelineFormId: string; paramFormId: string } | null {
-    const timelineFormId = findVisibleFormForPanel(layout, timelinePanelId);
+    const timelineFormId = findActiveVisibleFormForPanel(layout, timelinePanelId);
     if (!timelineFormId) return null;
 
     const injected =
         paramFormId && layout.forms[paramFormId]?.panelId === paramPanelId ? paramFormId : null;
-    const resolvedParamFormId = injected ?? findVisibleFormForPanel(layout, paramPanelId);
+    const resolvedParamFormId = injected ?? findActiveVisibleFormForPanel(layout, paramPanelId);
     if (!resolvedParamFormId) return null;
+    // 注入的窗体也必须是**活动可见**的（调用方可能拿着一个刚被切走的窗体 id）。
+    if (!isFormActiveVisible(layout, resolvedParamFormId)) return null;
     // 同一个窗体（参数写反的典型后果）：偏移没有意义，且必然算错。
     if (resolvedParamFormId === timelineFormId) return null;
 
     return { timelineFormId, paramFormId: resolvedParamFormId };
+}
+
+/** 找出该面板当前**活动可见**的窗体 id（多实例时取第一个）。 */
+function findActiveVisibleFormForPanel(layout: DockLayout, panelId: string): string | null {
+    for (const formId of layout.order) {
+        if (layout.forms[formId]?.panelId !== panelId) continue;
+        if (isFormActiveVisible(layout, formId)) return formId;
+    }
+    return null;
 }
 
 /** 找出该面板已关闭的窗体 id（用于重开时复用记录，保住标题与 props）。 */

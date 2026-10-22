@@ -45,9 +45,10 @@ export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () =
         settings: stored,
         // 布局的**取值**由前端的 `normalizeDockLayout` 收口，这里不做假设。
         layout: (stored as { layout?: unknown } | null)?.layout ?? null,
-        // 插件形态第一次打开（还没有自己的布局）时改用更小的默认轨道头宽度：
-        // 默认的 256px 会吃掉 640px 窗口的 40%（见 `PLUGIN_DEFAULT_TRACK_HEADER_PX`）。
-        pluginFirstRun: stored === null && hostMode() === "plugin",
+        // 形态决定**出厂布局**（插件里是"时间轴 / 参数编辑器"并列标签页，活动标签是
+        // 参数编辑器）以及插件首次使用的轨道头宽度。两者都是"正确取值取决于窗口有多少
+        // 像素"的同一类决定，因此一起由形态决定 —— 见 `createDefaultDockLayout`。
+        mode: hostMode(),
     };
 });
 

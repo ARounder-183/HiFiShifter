@@ -12,6 +12,15 @@
 import { getPanel, registerPanel } from "../../features/dock/panelRegistry";
 import { MAIN_FORM_PARAM_EDITOR, MAIN_FORM_TIMELINE } from "../../features/dock/dockSchema";
 import { NOTEBOOK_PANEL_MIN_WIDTH } from "../layout/notebook/notebookSettings";
+import { RULER_BASE_HEIGHT_PX } from "../layout/timeline/rulerHeight";
+import { MIN_ROW_HEIGHT } from "../layout/timeline/constants";
+
+/**
+ * 时间轴面板的最小高度（px）。
+ *
+ * 见 `PANEL_TIMELINE` 注册处的长注释：标尺 + 一条最矮的轨道行。
+ */
+const TIMELINE_PANEL_MIN_HEIGHT_PX = RULER_BASE_HEIGHT_PX + MIN_ROW_HEIGHT;
 
 /** 面板 id 常量（同时是持久化 JSON 里的键，一旦发布不可更改）。 */
 export const PANEL_TIMELINE = MAIN_FORM_TIMELINE;
@@ -48,12 +57,24 @@ export function registerBuiltinPanels(): void {
     registerPanel({
         id: PANEL_TIMELINE,
         titleKey: "panel_timeline",
-        // 主编辑区面板：不允许被普通面板挤出去，最小高度沿用重构前的 200px。
+        /*
+         * 最小高度 = **时间标尺 + 一条最矮的轨道行**。
+         *
+         * 【为什么不是沿用来的 200】200 是个魔法值（重构前的偶然产物），而它带来一个
+         * 真实的可用性问题：默认布局是"上时间轴 / 下参数编辑器"，而 `DockNodeView`
+         * 对子树取**所有面板最小值的最大值** —— 于是时间轴那一侧永远至少 200px，
+         * 用户想把时间轴压小、把高度让给参数编辑器时会被硬顶住。
+         *
+         * 时间轴真正不能小于的是"标尺还看得见、至少一行轨道还在"：
+         * `RULER_BASE_HEIGHT_PX`(48) + `MIN_ROW_HEIGHT`(80) = 128。
+         * 行高由用户另调（80–192），但**纵向是可以滚动的**，所以按最矮行算就够 ——
+         * 拉得比一行还矮才是真的不可用。
+         */
         preferMain: true,
         singleton: true,
         defaultWidth: 1000,
         defaultHeight: 420,
-        minHeight: 200,
+        minHeight: TIMELINE_PANEL_MIN_HEIGHT_PX,
         minWidth: 320,
         order: 10,
     });

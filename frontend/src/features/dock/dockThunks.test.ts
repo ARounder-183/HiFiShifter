@@ -99,22 +99,34 @@ test("the two modes never write into each other's field", async () => {
 });
 
 /**
- * 插件首次打开时不能套用 App 的默认轨道头宽度。
+ * 插件首次打开时**整套出厂布局**都是插件版，不只是轨道头宽度。
  *
- * 【为什么这条值得单独测】256px 占 640px 窗口的 40%，时间轴几乎看不见 ——
- * 用户第一件事必然是把它拖小。这是"第一次打开就不好用"，而不是"挤一点"。
+ * 【为什么这条值得单独测】两个都是"第一次打开就不好用"的问题：
+ * - 256px 轨道头占 640px 窗口的 40%，时间轴几乎看不见；
+ * - 上下堆叠把时间轴与参数编辑器各压到最小尺寸，而插件里绝大多数时间是在
+ *   参数编辑器里工作。
+ *
+ * 【为什么要断言"标签页 + 活动标签"】那正是插件默认视图的定义：两者并列在同一
+ * 位置，活动标签是参数编辑器。
  */
-test("a plugin with no stored layout starts with a narrower track header", async () => {
+test("a plugin with no stored layout gets the plugin default layout", async () => {
     enterPluginMode();
     const store = buildStore();
     api.getUiSettings.mockResolvedValue({});
 
     const payload = await store.dispatch(loadDockSettings()).unwrap();
-    expect(payload.pluginFirstRun).toBe(true);
+    expect(payload.mode).toBe("plugin");
     store.dispatch(hydrateDock(payload));
-    expect(store.getState().dock.layout.gutters.timelineTrackHeaderPx).toBe(
-        PLUGIN_DEFAULT_TRACK_HEADER_PX,
-    );
+
+    const layout = store.getState().dock.layout;
+    expect(layout.gutters.timelineTrackHeaderPx).toBe(PLUGIN_DEFAULT_TRACK_HEADER_PX);
+
+    // 主根是一棵**标签组**（不是分割）：时间轴与参数编辑器同处一格。
+    const root = layout.roots.main;
+    expect(root.t).toBe("tabset");
+    if (root.t !== "tabset") throw new Error("unreachable");
+    expect(root.tabs).toEqual(["timeline", "paramEditor"]);
+    expect(root.active, "插件默认停在参数编辑器上").toBe("paramEditor");
 });
 
 test("a plugin that already has a layout keeps the stored gutter", async () => {
@@ -125,7 +137,6 @@ test("a plugin that already has a layout keeps the stored gutter", async () => {
     });
 
     const payload = await store.dispatch(loadDockSettings()).unwrap();
-    expect(payload.pluginFirstRun).toBe(false);
     store.dispatch(hydrateDock(payload));
     expect(store.getState().dock.layout.gutters.timelineTrackHeaderPx).toBe(300);
 });
@@ -134,7 +145,13 @@ test("the standalone default is untouched", async () => {
     const store = buildStore();
     api.getUiSettings.mockResolvedValue({});
     const payload = await store.dispatch(loadDockSettings()).unwrap();
-    expect(payload.pluginFirstRun).toBe(false);
+    expect(payload.mode).toBe("standalone");
     store.dispatch(hydrateDock(payload));
-    expect(store.getState().dock.layout.gutters.timelineTrackHeaderPx).toBe(256);
+    const layout = store.getState().dock.layout;
+    expect(layout.gutters.timelineTrackHeaderPx).toBe(256);
+    // 独立 App 仍是"上时间轴 / 下参数编辑器"的上下堆叠。
+    const root = layout.roots.main;
+    expect(root.t).toBe("split");
+    if (root.t !== "split") throw new Error("unreachable");
+    expect(root.dir).toBe("col");
 });

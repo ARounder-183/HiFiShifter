@@ -185,6 +185,11 @@ export function measureTimelineViewportOffsetPx(): number | null {
  */
 function readableLeftPx(element: HTMLElement | null): number | null {
     if (element === null) return null;
+    // 【身份判据优先于坐标判据】停泊区的元素坐标是 −20000，但它**是什么**比它在哪
+    // 更可靠：`data-dock-parking` 由 `panelHostRegistry.ensureParking` 写在容器上，
+    // 而"坐标小于 −1000"只是一个恰好成立的巧合 —— 浮动窗允许适度出屏，多显示器
+    // 布局下也可能出现合法的负坐标。先按身份拒绝，再按坐标兜底。
+    if (element.closest("[data-dock-parking]") !== null) return null;
     const rect = element.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return null;
     // 停泊区在视口外约 −20000；浮动窗允许适度出屏，因此阈值放到 1000。

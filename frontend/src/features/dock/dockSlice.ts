@@ -23,9 +23,9 @@ import {
     openPanelInLayout,
     placeForm,
     type DockPlacement,
+    type DockMode,
     normalizeFloatMode,
     normalizeTabPosition,
-    PLUGIN_DEFAULT_TRACK_HEADER_PX,
 } from "./dockSchema";
 import {
     addFormToTabset,
@@ -157,25 +157,24 @@ const dockSlice = createSlice({
                 settings?: DockSettings | null;
                 layout?: unknown;
                 /**
-                 * 插件形态且还没有自己的布局：改用更小的轨道头默认宽度。
+                 * 当前运行形态。
                  *
                  * 【为什么由载荷带进来而不是在这里读 `window`】本 reducer 保持纯粹；
                  * 形态判断在 thunk 里做一次（那里已经调用了 `hostMode()`）。
+                 *
+                 * 【为什么它同时决定出厂布局与轨道头宽度】两者都是"正确取值取决于窗口
+                 * 有多少像素"的同一类决定（插件窗口下限 640x400）。此前轨道头宽度走一个
+                 * 单独的 `pluginFirstRun` 补丁，而布局本身没有分叉 —— 于是插件拿到的是
+                 * 为整屏设计的上下堆叠，两条都被压到最小尺寸。
                  */
-                pluginFirstRun?: boolean;
+                mode?: DockMode;
             }>,
         ) {
             const raw = action.payload ?? {};
-            state.layout = installLayout(normalizeDockLayout(raw.layout));
-            if (raw.pluginFirstRun && raw.layout == null) {
-                state.layout = {
-                    ...state.layout,
-                    gutters: {
-                        ...state.layout.gutters,
-                        timelineTrackHeaderPx: PLUGIN_DEFAULT_TRACK_HEADER_PX,
-                    },
-                };
-            }
+            state.layout =
+                raw.layout == null
+                    ? installLayout(createDefaultDockLayout(raw.mode ?? "standalone"))
+                    : installLayout(normalizeDockLayout(raw.layout));
             state.settings = normalizeDockSettings(raw.settings);
             state.hydrated = true;
         },
@@ -200,13 +199,13 @@ const dockSlice = createSlice({
         setDockLayout(state, action: PayloadAction<unknown>) {
             state.layout = installLayout(normalizeDockLayout(action.payload));
         },
-        resetDockLayout(state) {
+        resetDockLayout(state, action: PayloadAction<{ mode?: DockMode } | undefined>) {
             // 重置 = 回到出厂排布。**预设是用户的资产，不属于"被重置的排布"**
             // —— 确认对话框承诺"已保存的预设会保留"，重置后用户仍能一键回到
             // 自己的排布。activePreset 同步清空：此刻是出厂布局，不属于任何
             // 预设；保留旧值会让布局菜单的勾选错误地暗示某预设仍然生效。
             state.layout = ensureRegisteredPanels({
-                ...createDefaultDockLayout(),
+                ...createDefaultDockLayout(action.payload?.mode ?? "standalone"),
                 presets: state.layout.presets ?? {},
                 activePreset: null,
             });

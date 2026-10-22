@@ -155,6 +155,34 @@ export function isFormVisible(layout: DockLayout, formId: string): boolean {
     return false;
 }
 
+/**
+ * 窗体的**活动可见性**：它不但没被关闭，而且它所在的标签组正把它显示为活动标签
+ * （或它处于浮动状态）。
+ *
+ * 【为什么必须与 `isFormVisible` 分开】`isFormVisible` 回答"这个窗体有没有被关闭"，
+ * 用于「窗口」菜单与"重开时复用记录"—— 那里"可见"的意思是"用户还能把它调出来"。
+ * 而"它的像素此刻在不在屏幕上"是另一个问题：同一标签组里的**非活动标签**的宿主
+ * 被停在视口外（`left: -20000px`，见 `panelHostRegistry.parkPanelHost`），它的
+ * `getBoundingClientRect()` 不能用来做任何几何测量。
+ *
+ * 两者混用的后果是实测过的：插件默认视图把时间轴与参数编辑器放进同一标签组，
+ * 于是两个面板都"可见"，同步偏移照旧套用上一次（上下堆叠时）测出的值 —— 而此刻
+ * 两个面板根本不同屏，错位量恰好是轨道头宽度减去键盘列宽度。
+ */
+export function isFormActiveVisible(layout: DockLayout, formId: string): boolean {
+    if (isFormFloating(layout, formId)) return true;
+    for (const rootId of collectReachableRootIds(layout)) {
+        const tree = layout.roots[rootId];
+        if (!tree) continue;
+        const host = findTabsetOfForm(tree, formId);
+        if (!host) continue;
+        // 与 `DockZone` 的"实际渲染谁"同一判据：`active` 非法时退回第一个标签。
+        const shown = host.active && host.tabs.includes(host.active) ? host.active : host.tabs[0];
+        if (shown === formId) return true;
+    }
+    return false;
+}
+
 /** 当前可见的窗体 id（停靠 + 浮动），供"窗口"菜单使用。 */
 export function collectVisibleForms(layout: DockLayout): string[] {
     const docked: string[] = [];

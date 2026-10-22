@@ -18,10 +18,12 @@ import {
 import {
     collectTabsets,
     findTabsetOfForm,
+    isFormActiveVisible,
     isFormVisible,
     MAX_SPLIT_RATIO,
     MIN_SPLIT_RATIO,
     addFormToTabset,
+    setActiveTab,
 } from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import { DOCK_LAYOUT_SCHEMA, type DockSplitNode, type DockTabsetNode } from "./dockTypes.ts";
@@ -777,6 +779,51 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             resolveSyncOffsetForms(layout, "timeline", "timeline"),
             null,
             "resolving to the SAME form as the timeline is rejected",
+        );
+
+        // ── 活动可见性：同一标签组里只有一个标签"在屏幕上" ─────────────
+        {
+            const tabbedLayout = createDefaultDockLayout("plugin");
+            assertEqual(
+                isFormActiveVisible(tabbedLayout, "paramEditor"),
+                true,
+                "the active tab is on screen",
+            );
+            assertEqual(
+                isFormActiveVisible(tabbedLayout, "timeline"),
+                false,
+                "a non-active tab is parked off-screen, so it is NOT on screen",
+            );
+            // 但两者都"没被关闭" —— 这正是两个判据必须分开的原因。
+            assertEqual(isFormVisible(tabbedLayout, "timeline"), true, "still open, just hidden");
+        }
+
+        // ── 同一标签组里并列（插件默认视图）─────────────────────────
+        //
+        // 【为什么这条是回归】插件默认视图把时间轴与参数编辑器放进**同一个标签组**，
+        // 活动标签是参数编辑器。此时两者都"没被关闭"（旧判据为真），但只有一个是
+        // 真的画在屏幕上 —— 非活动标签的宿主被停在视口外（left: -20000px）。
+        // 旧判据因此会套用上一次（上下堆叠时）测出的偏移，而两个面板根本不同屏：
+        // 错位量恰好是轨道头宽度减去键盘列宽度。
+        const tabbed = createDefaultDockLayout("plugin");
+        assertEqual(
+            resolveSyncOffsetForms(tabbed, "timeline", "paramEditor"),
+            null,
+            "two tabs in ONE tabset are never both on screen; the offset must not apply",
+        );
+
+        // 反过来切到时间轴标签也一样：参数编辑器成了非活动标签。
+        const tabbedOnTimeline = {
+            ...tabbed,
+            roots: {
+                ...tabbed.roots,
+                main: setActiveTab(tabbed.roots.main!, "z1", "timeline"),
+            },
+        };
+        assertEqual(
+            resolveSyncOffsetForms(tabbedOnTimeline, "timeline", "paramEditor"),
+            null,
+            "whichever tab is active, the other one is not on screen",
         );
     }
 });
