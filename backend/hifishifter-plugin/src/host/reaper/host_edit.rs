@@ -585,7 +585,17 @@ pub(crate) fn execute_managed(
         if !host_value_compatible(target.geometry.start_sec, edit.before.start_sec)
             || !host_value_compatible(target.geometry.duration_sec, edit.before.length_sec)
         {
-            return Err("host clip changed before GUI commit; refresh required".into());
+            // 【为什么把数值写进消息】这句话是用户与开发者**唯一**能拿到的现场：
+            // 状态条只显示"音频块编辑被拒绝"，日志里也只有这一行。没有数字时，
+            // "差一个轨道头""差一个镜像域""真的差了一次拖动"在外部完全不可区分。
+            // 保留原前缀是因为前端按子串把它归为可重试（见 clipEditFailure）。
+            return Err(format!(
+                "host clip changed before GUI commit; refresh required (host start={:.9} length={:.9}, editor start={:.9} length={:.9})",
+                target.geometry.start_sec,
+                target.geometry.duration_sec,
+                edit.before.start_sec,
+                edit.before.length_sec,
+            ));
         }
         if (edit.patch.source_start_sec.is_some()
             || edit.patch.source_end_sec.is_some()
@@ -606,9 +616,16 @@ pub(crate) fn execute_managed(
                 edit.before.playback_rate as f64,
             ))
         {
-            return Err(
-                "host source window/rate changed before GUI commit; refresh required".into(),
-            );
+            return Err(format!(
+                "host source window/rate changed before GUI commit; refresh required (host start={:.9} rate={:.9}, editor start={:.9} rate={:.9})",
+                host_forward_window_start(
+                    &target.geometry,
+                    hifishifter_kernel::state::clip_source_media_duration_sec(&edit.before),
+                ),
+                target.geometry.playback_rate,
+                edit.before.source_start_sec,
+                edit.before.playback_rate as f64,
+            ));
         }
         let destination = if edit.source_track == edit.destination_track {
             None
@@ -722,8 +739,12 @@ pub(crate) fn execute_managed(
     } else {
         Some(targets[0].1.begin_undo(&authorized)?)
     };
+    // 已开始写入的片段。**在写入之前**登记：写入中途失败时，最后一个片段可能只写了
+    // 一半（例如位置已改、长度还没改），它同样必须被回滚。
+    let mut applied: Vec<(&ClipEdit, &HostClipTarget)> = Vec::new();
     let result: Result<(), String> = (|| {
         for (edit, target, destination) in &targets {
+            applied.push((edit, target));
             let before = &edit.before;
             let after = &edit.after;
             // 写速率时明确保调；普通移动/裁切不擅自改变用户B_PPITCH。
@@ -952,8 +973,56 @@ pub(crate) fn execute_managed(
             }
         }
     }
+    let result = match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // 【为什么必须回滚】写循环是逐片段提交的：第 N 个失败时前 N−1 个已经落到
+            // 宿主上。若不回滚，用户看到的是"部分片段移动了 + 一条拒绝"，而那句
+            // "被拒绝"会被理解成"什么都没发生" —— 两者的差别正是用户报障里最刺眼的
+            // 部分（编辑明明生效了却报错）。回滚让"拒绝"与"没改"重新成为同一件事。
+            match restore_applied_geometry(&applied, &authorized) {
+                Ok(()) => Err(format!(
+                    "host clip edit rolled back; nothing was changed ({error})"
+                )),
+                Err(rollback) => Err(format!(
+                    "host clip edit failed and could not be rolled back; use host Undo ({error}; rollback: {rollback})"
+                )),
+            }
+        }
+    };
     drop(undo);
     result.map_err(|error| format!("host clip edit failed (Undo block retained): {error}"))
+}
+
+/// 把已写入的片段**按编辑前的几何**写回去。
+///
+/// 范围刻意限定为几何（位置 / 长度 / 源起点）：批量移动只改这些，回滚它们才能让
+/// "拒绝 = 没改"成立。音量与淡变**不回滚** —— 在 item / take 两层增益模型落地前，
+/// 它们的"原值"是含糊的（patch.gain 目前写 item 的 D_VOL，而 before.gain 是 take 级），
+/// 用错的来源写回去比不写更糟。这类失败仍会如实报告，并保留 Undo 块。
+fn restore_applied_geometry(
+    applied: &[(&ClipEdit, &HostClipTarget)],
+    authorized: &impl Fn() -> bool,
+) -> Result<(), String> {
+    let mut first_error: Option<String> = None;
+    for (edit, target) in applied.iter().rev() {
+        let before = &edit.before;
+        let restore = (|| -> Result<(), String> {
+            if let Some(offset) = host_start_offset(before) {
+                target.set_take(c"D_STARTOFFS", offset, authorized)?;
+            }
+            target.set_item(c"D_POSITION", before.start_sec, authorized)?;
+            target.set_item(c"D_LENGTH", before.length_sec, authorized)?;
+            target.update(authorized)
+        })();
+        if let Err(error) = restore {
+            first_error.get_or_insert(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

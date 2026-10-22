@@ -68,6 +68,32 @@ export class BackendInvokeError extends Error {
     }
 }
 
+/**
+ * 取出后端**原文**（沿 `cause` 链取最内层的一条 message）。
+ *
+ * 【为什么需要它】`BackendInvokeError.message` 是通用包装（`Backend invoke failed: plugin:x`），
+ * 后端真正那句话在 `cause` 里；RTK 的 `miniSerializeError` 又会把 `cause` 丢掉。
+ * 需要按文案分类的调用方（见 `features/session/clipEditFailure`）必须在 thunk 里
+ * **趁错误还完整**时把原文取出来，随 `rejectWithValue` 一起传下去。
+ *
+ * 链上出现循环（`error.cause === error`）时立刻停下 —— 诊断信息不值得死循环。
+ */
+export function backendDetail(error: unknown): string | undefined {
+    let current: unknown = error;
+    let innermost: string | undefined;
+    const seen = new Set<unknown>();
+    for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+        if (seen.has(current)) break;
+        seen.add(current);
+        const message = (current as { message?: unknown }).message;
+        if (typeof message === "string" && message.trim()) {
+            innermost = message;
+        }
+        current = (current as { cause?: unknown }).cause;
+    }
+    return innermost;
+}
+
 /** 从任意错误对象里取出后端给出的分类；非插件错误一律视为 `transient`。 */
 export function invokeErrorKind(error: unknown): "terminal" | "transient" {
     if (error instanceof BackendInvokeError) return error.kind;

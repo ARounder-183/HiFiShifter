@@ -10,10 +10,35 @@ import type {
 import type { ClipTemplate } from "../sessionTypes";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
+import { invokeErrorCode, invokeErrorKind, backendDetail } from "../../../services/invoke";
 
 // 注意：这个 thunk 依赖 SessionState（目前仍然在 sessionSlice.ts 内部定义），
 // 我们在此处用 type-only import，避免运行时循环依赖。
 import type { SessionState } from "../sessionSlice";
+
+/**
+ * 片段编辑失败的 `rejectWithValue` 载荷。
+ *
+ * 【为什么必须在这里取出后端原文】`createAsyncThunk` 默认用 RTK 的
+ * `miniSerializeError` 序列化失败的 Promise —— 它只复制 `name` / `message` /
+ * `stack` / `code` 四个**字符串**属性，而插件错误的真话在 `cause` 里、
+ * 分类在 `kind` 里（数字 `code` 也会因为不是字符串被丢掉）。
+ * 结果下游只能看到 `Backend invoke failed: plugin:set_clip_state`，
+ * 按文案分类的白名单永远匹配不到 —— 见 `features/session/clipEditFailure.ts`。
+ */
+export function clipEditRejection(error: unknown): {
+    message: string;
+    kind: "terminal" | "transient";
+    code: number | null;
+    detail: string | undefined;
+} {
+    return {
+        message: error instanceof Error ? error.message : String(error),
+        kind: invokeErrorKind(error),
+        code: invokeErrorCode(error),
+        detail: backendDetail(error),
+    };
+}
 
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
@@ -301,8 +326,12 @@ export const moveClipRemote = createAsyncThunk(
         startSec: number;
         trackId?: string;
         moveLinkedParams?: boolean;
-    }) => {
-        return webApi.moveClip(payload);
+    }, { rejectWithValue }) => {
+        try {
+            return await webApi.moveClip(payload);
+        } catch (error) {
+            return rejectWithValue(clipEditRejection(error));
+        }
     },
 );
 
@@ -315,8 +344,12 @@ export const moveClipsRemote = createAsyncThunk(
             trackId?: string;
         }>;
         moveLinkedParams?: boolean;
-    }) => {
-        return webApi.moveClips(payload);
+    }, { rejectWithValue }) => {
+        try {
+            return await webApi.moveClips(payload);
+        } catch (error) {
+            return rejectWithValue(clipEditRejection(error));
+        }
     },
 );
 
@@ -355,8 +388,12 @@ export const setClipStateRemote = createAsyncThunk(
         /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
         fadeInS?: number;
         fadeOutS?: number;
-    }) => {
-        return webApi.setClipState(payload);
+    }, { rejectWithValue }) => {
+        try {
+            return await webApi.setClipState(payload);
+        } catch (error) {
+            return rejectWithValue(clipEditRejection(error));
+        }
     },
 );
 
@@ -513,8 +550,12 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             channelMode?: number;
         }>;
         checkpoint?: boolean;
-    }) => {
-        return webApi.setClipsStateBulk(payload);
+    }, { rejectWithValue }) => {
+        try {
+            return await webApi.setClipsStateBulk(payload);
+        } catch (error) {
+            return rejectWithValue(clipEditRejection(error));
+        }
     },
 );
 

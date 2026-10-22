@@ -801,6 +801,15 @@ export interface SessionState {
 
     busy: boolean;
     status: string;
+    /**
+     * 状态行的**补充说明**（后端原文），渲染为状态文字的 ToolTip。
+     *
+     * 【为什么需要它】"音频块编辑被拒绝"这句话本身零信息：到底是宿主还没追上、
+     * 是宿主拒绝了某个字段，还是校验失败？用户报障时只能截一句无信息的话，
+     * 开发者只能靠日志猜。原文放进 ToolTip 之后，截图本身就能定位。
+     * 只在下一条状态覆盖 `status` 时一起清掉，避免旧原因挂在新的状态上。
+     */
+    statusDetail: string | null;
     error?: string;
     lastResult?: unknown;
     vocalShifterSkippedFilesDialog: string[] | null;
@@ -2491,6 +2500,7 @@ const initialState: SessionState = {
 
     busy: false,
     status: "Ready",
+    statusDetail: null,
     vocalShifterSkippedFilesDialog: null,
     reaperSkippedFilesDialog: null,
     saveVersionConflictDialog: null,
@@ -6269,8 +6279,11 @@ const sessionSlice = createSlice({
                 // 冲突在 set_clip_state 上会报"音频块编辑被拒绝"，在移动上却什么都不说，
                 // 用户只看到片段弹回原位。现在与状态编辑用同一套分类：瞬时失败仍静默
                 // （后端自行收敛），只有需要用户处置的才提示。
-                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                if (classifyClipEditFailure(action.payload) === "permanent") {
                     state.status = "Clip edit rejected";
+                    // 后端原文（`detail`）落到 ToolTip：截图即含诊断信息。
+                    state.statusDetail =
+                        (action.payload as { detail?: string } | undefined)?.detail ?? null;
                 }
             })
             .addCase(moveClipsRemote.pending, (state, action) => {
@@ -6292,8 +6305,11 @@ const sessionSlice = createSlice({
             })
             .addCase(moveClipsRemote.rejected, (state, action) => {
                 // 与 moveClipRemote.rejected 同一分类口径（此前完全静默）。
-                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                if (classifyClipEditFailure(action.payload) === "permanent") {
                     state.status = "Clip edit rejected";
+                    // 后端原文（`detail`）落到 ToolTip：截图即含诊断信息。
+                    state.statusDetail =
+                        (action.payload as { detail?: string } | undefined)?.detail ?? null;
                 }
             })
 
@@ -6556,8 +6572,11 @@ const sessionSlice = createSlice({
                 // 【为什么不一律报错】"宿主还在追上几何/媒体"是**瞬时**失败，后端会自己
                 // 重试并收敛，用户不需要做任何事。此前它和"真正被拒绝"共用一句
                 // "音频块编辑被拒绝"，于是每次编辑都闪一次错 —— 即使编辑其实生效了。
-                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                if (classifyClipEditFailure(action.payload) === "permanent") {
                     state.status = "Clip edit rejected";
+                    // 后端原文（`detail`）落到 ToolTip：截图即含诊断信息。
+                    state.statusDetail =
+                        (action.payload as { detail?: string } | undefined)?.detail ?? null;
                 }
             })
 
@@ -6584,8 +6603,11 @@ const sessionSlice = createSlice({
                 // 后端拒绝：保留乐观值（用户意图可见）；分类理由见
                 // `setClipStateRemote.rejected`。
                 applyOptimisticBulkClipState(state, action.meta.arg.updates);
-                if (classifyClipEditFailure(action.error?.message) === "permanent") {
+                if (classifyClipEditFailure(action.payload) === "permanent") {
                     state.status = "Clip edit rejected";
+                    // 后端原文（`detail`）落到 ToolTip：截图即含诊断信息。
+                    state.statusDetail =
+                        (action.payload as { detail?: string } | undefined)?.detail ?? null;
                 }
             })
 

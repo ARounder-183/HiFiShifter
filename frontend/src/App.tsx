@@ -838,6 +838,13 @@ function AppInner() {
         settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
     }, []);
 
+    /**
+     * 当前状态行的补充说明（后端原文）。只在"音频块编辑被拒绝"时展示 ——
+     * 那一条本身没有信息量，而原文能直接指出是宿主还没追上、还是某个字段被拒。
+     */
+    const statusDetail = useAppSelector((state) => state.session.statusDetail);
+    const statusDetailText =
+        status === "Clip edit rejected" && statusDetail ? statusDetail : undefined;
     const statusText = useMemo(
         () =>
             resolveStatusText(status, statusKey, (key, count) =>
@@ -4452,7 +4459,12 @@ function AppInner() {
                     <AppStatusProgressChips />
                     <span
                         className="hs-type-label truncate"
-                        style={error ? { color: "var(--qt-danger-text)" } : undefined}
+                        style={{
+                            ...(error ? { color: "var(--qt-danger-text)" } : {}),
+                            ...(statusDetailText ? { cursor: "help" } : {}),
+                        }}
+                        title={statusDetailText}
+                        data-status-detail={statusDetailText ? "1" : undefined}
                     >
                         {errorText}
                     </span>

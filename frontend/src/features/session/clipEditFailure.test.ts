@@ -53,4 +53,44 @@ test("features/session/clipEditFailure.test.ts scripted checks", () => {
     assertEqual(classifyClipEditFailure("something new went wrong"), "permanent", "未知文案");
     assertEqual(classifyClipEditFailure(""), "permanent", "空文案");
     assertEqual(classifyClipEditFailure(undefined), "permanent", "缺失文案");
+
+    // ── 结构化入参（thunk 的 rejectWithValue 载荷）───────────────────────
+    //
+    // 【为什么这四条必须一起存在】真缺陷的根因是"调用方传的是通用包装文案"，
+    // 于是白名单永远匹配不到；修法是把后端原文与协议分类一起带下来。
+    // 第 3 条是**防修过头**的闸：协议的 kind 只说"会话是否还能继续"，
+    // 校验失败也是 transient —— 若按 kind 静默，就会把"你的输入不被支持"一起吞掉。
+
+    // 1) 会话已结束 ⇒ 必须提示。
+    assertEqual(
+        classifyClipEditFailure({ kind: "terminal", detail: "document closed" }),
+        "permanent",
+        "终态错误必须可见",
+    );
+
+    // 2) 后端原文里的瞬时冲突 ⇒ 静默（后端自己会收敛）。
+    assertEqual(
+        classifyClipEditFailure({
+            kind: "transient",
+            message: "Backend invoke failed: plugin:set_clip_state",
+            detail:
+                "host clip edit failed (Undo block retained): host clip changed before GUI commit; refresh required (host start=1.0 length=2.0, editor start=1.0 length=2.0)",
+        }),
+        "transient",
+        "后端原文的瞬时冲突不得提示",
+    );
+
+    // 3) 校验失败虽然也是 transient，但必须提示。
+    assertEqual(
+        classifyClipEditFailure({ kind: "transient", detail: "invalid host channel mode" }),
+        "permanent",
+        "校验失败必须仍然可见（不能按 kind 一刀切）",
+    );
+
+    // 4) 只有包装文案（旧后端 / 取不到 cause）⇒ 保守判定为永久。
+    assertEqual(
+        classifyClipEditFailure({ message: "Backend invoke failed: plugin:set_clip_state" }),
+        "permanent",
+        "取不到原文时按永久处理",
+    );
 });

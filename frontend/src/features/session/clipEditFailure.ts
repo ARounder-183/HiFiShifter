@@ -7,9 +7,15 @@
  * 收敛，不需要用户做任何事）。结果用户每做一次编辑都被报一次错，即使编辑其实生效了。
  *
  * 【为什么按文案匹配而不是后端给 code】这些字符串由后端在宿主回调边界产出，是既有的
- * 稳定契约（且都有对应测试钉住）。加一个 `kind` 字段会同时改协议、webview 与前端三处，
- * 收益只是省掉一次子串匹配。**但方向是明确的**：日后若后端加上机器可读的 `kind`，
- * 这个函数就是唯一需要改的地方。
+ * 稳定契约（且都有对应测试钉住）。
+ *
+ * 【为什么入参是一个结构而不是一个字符串（这是一个真实缺陷的根因）】此前调用方传的是
+ * `action.error.message` —— 而那是 Tauri/插件的**通用包装文案**
+ * （`Backend invoke failed: plugin:set_clip_state`），后端原文在 `cause` 里，
+ * `kind` / `code` 在 RTK 的 `miniSerializeError`（只复制 name/message/stack/code
+ * 四个字符串属性）里被丢掉。于是白名单**永远匹配不到任何一条**，所有失败都被判成
+ * 永久 —— 用户看到的正是"编辑明明生效了，却报音频块编辑被拒绝"。
+ * 现在入参带上后端原文（`detail`）与协议分类（`kind`），白名单才真正生效。
  *
  * 【默认必须偏"永久"】未知文案判为 `permanent`：宁可多报一次可见错误，也不能把一个
  * 真正需要处置的失败静默掉。
@@ -44,9 +50,45 @@ const TRANSIENT_MARKERS: readonly string[] = [
     "host model not ready",
 ];
 
-/** 把一次片段编辑失败归类为瞬时或永久。空/未知文案一律按永久处理。 */
-export function classifyClipEditFailure(message: unknown): ClipEditFailureKind {
-    const text = typeof message === "string" ? message.trim() : "";
+/** 一次片段编辑失败的**可分类信息**（由 thunk 的 `rejectWithValue` 提供）。 */
+export interface ClipEditFailureInput {
+    /** 插件协议给出的分类：`terminal` = 会话已结束。 */
+    kind?: string;
+    /** 通用包装文案（`Backend invoke failed: …`），拿不到后端原文时的兜底。 */
+    message?: string;
+    /** 后端原文（沿 `cause` 链取到的最内层 message）。 */
+    detail?: string;
+}
+
+/**
+ * 把一次片段编辑失败归类为瞬时或永久。空/未知文案一律按永久处理。
+ *
+ * 判据顺序：
+ * 1. `kind === "terminal"` ⇒ 永久（会话已结束，重试无意义）；
+ * 2. 有后端原文就按白名单判 —— 白名单本来就是为这些原文写的；
+ * 3. 没有原文（旧后端 / 非插件形态）退回包装文案，仍然匹配不到 ⇒ 永久（保守）。
+ *
+ * 【为什么不直接按 `kind === "transient"` 静默】协议的 `kind` 只回答"会话是否还能
+ * 继续"，**不是**"这条错误该不该给用户看"。`invalid host channel mode` 这类校验失败
+ * 同样被判成 transient，按 kind 静默就会把"你的输入不被支持"一起吞掉 —— 比误报更糟。
+ */
+export function classifyClipEditFailure(input: unknown): ClipEditFailureKind {
+    if (typeof input === "string") {
+        // 兼容旧调用点：纯字符串按文案判（等价于"没有 kind、没有 detail"）。
+        return classifyByText(input);
+    }
+    if (!input || typeof input !== "object") {
+        return "permanent";
+    }
+    const { kind, message, detail } = input as ClipEditFailureInput;
+    if (kind === "terminal") {
+        return "permanent";
+    }
+    return classifyByText(detail ?? message ?? "");
+}
+
+function classifyByText(value: unknown): ClipEditFailureKind {
+    const text = typeof value === "string" ? value.trim() : "";
     if (!text) {
         return "permanent";
     }
