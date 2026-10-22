@@ -321,12 +321,15 @@ export const removeSilenceRemote = createAsyncThunk(
 
 export const moveClipRemote = createAsyncThunk(
     "session/moveClipRemote",
-    async (payload: {
-        clipId: string;
-        startSec: number;
-        trackId?: string;
-        moveLinkedParams?: boolean;
-    }, { rejectWithValue }) => {
+    async (
+        payload: {
+            clipId: string;
+            startSec: number;
+            trackId?: string;
+            moveLinkedParams?: boolean;
+        },
+        { rejectWithValue },
+    ) => {
         try {
             return await webApi.moveClip(payload);
         } catch (error) {
@@ -337,14 +340,17 @@ export const moveClipRemote = createAsyncThunk(
 
 export const moveClipsRemote = createAsyncThunk(
     "session/moveClipsRemote",
-    async (payload: {
-        moves: Array<{
-            clipId: string;
-            startSec: number;
-            trackId?: string;
-        }>;
-        moveLinkedParams?: boolean;
-    }, { rejectWithValue }) => {
+    async (
+        payload: {
+            moves: Array<{
+                clipId: string;
+                startSec: number;
+                trackId?: string;
+            }>;
+            moveLinkedParams?: boolean;
+        },
+        { rejectWithValue },
+    ) => {
         try {
             return await webApi.moveClips(payload);
         } catch (error) {
@@ -355,40 +361,43 @@ export const moveClipsRemote = createAsyncThunk(
 
 export const setClipStateRemote = createAsyncThunk(
     "session/setClipStateRemote",
-    async (payload: {
-        clipId: string;
-        name?: string;
-        color?: string;
-        startSec?: number;
-        lengthSec?: number;
-        gain?: number;
-        muted?: boolean;
-        sourceStartSec?: number;
-        sourceEndSec?: number;
-        playbackRate?: number;
-        clipPlaybackRate?: number;
-        reversed?: boolean;
-        loopEnabled?: boolean;
-        snapOffsetSec?: number;
-        fadeInSec?: number;
-        fadeOutSec?: number;
-        fadeInShape?: number;
-        fadeOutShape?: number;
-        fadeInDir?: number;
-        fadeOutDir?: number;
-        autoFadeInSec?: number;
-        autoFadeOutSec?: number;
-        formantMorph?: {
-            enabled: boolean;
-            targetF1Hz: number;
-            targetF2Hz: number;
-            strength: number;
-        };
-        checkpoint?: boolean;
-        /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
-        fadeInS?: number;
-        fadeOutS?: number;
-    }, { rejectWithValue }) => {
+    async (
+        payload: {
+            clipId: string;
+            name?: string;
+            color?: string;
+            startSec?: number;
+            lengthSec?: number;
+            gain?: number;
+            muted?: boolean;
+            sourceStartSec?: number;
+            sourceEndSec?: number;
+            playbackRate?: number;
+            clipPlaybackRate?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
+            snapOffsetSec?: number;
+            fadeInSec?: number;
+            fadeOutSec?: number;
+            fadeInShape?: number;
+            fadeOutShape?: number;
+            fadeInDir?: number;
+            fadeOutDir?: number;
+            autoFadeInSec?: number;
+            autoFadeOutSec?: number;
+            formantMorph?: {
+                enabled: boolean;
+                targetF1Hz: number;
+                targetF2Hz: number;
+                strength: number;
+            };
+            checkpoint?: boolean;
+            /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
+            fadeInS?: number;
+            fadeOutS?: number;
+        },
+        { rejectWithValue },
+    ) => {
         try {
             return await webApi.setClipState(payload);
         } catch (error) {
@@ -522,35 +531,38 @@ export const addClipTakeFromMediaRemote = createAsyncThunk(
 
 export const setClipsStateBulkRemote = createAsyncThunk(
     "session/setClipsStateBulkRemote",
-    async (payload: {
-        updates: Array<{
-            clipId: string;
-            gain?: number;
-            muted?: boolean;
-            startSec?: number;
-            lengthSec?: number;
-            sourceStartSec?: number;
-            sourceEndSec?: number;
-            snapOffsetSec?: number;
-            clipPlaybackRate?: number;
-            fadeInSec?: number;
-            fadeOutSec?: number;
-            fadeInShape?: number;
-            fadeInDir?: number;
-            fadeOutShape?: number;
-            fadeOutDir?: number;
-            /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
-            fadeInS?: number;
-            fadeOutS?: number;
-            autoFadeInSec?: number;
-            autoFadeOutSec?: number;
-            reversed?: boolean;
-            loopEnabled?: boolean;
-            /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
-            channelMode?: number;
-        }>;
-        checkpoint?: boolean;
-    }, { rejectWithValue }) => {
+    async (
+        payload: {
+            updates: Array<{
+                clipId: string;
+                gain?: number;
+                muted?: boolean;
+                startSec?: number;
+                lengthSec?: number;
+                sourceStartSec?: number;
+                sourceEndSec?: number;
+                snapOffsetSec?: number;
+                clipPlaybackRate?: number;
+                fadeInSec?: number;
+                fadeOutSec?: number;
+                fadeInShape?: number;
+                fadeInDir?: number;
+                fadeOutShape?: number;
+                fadeOutDir?: number;
+                /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
+                fadeInS?: number;
+                fadeOutS?: number;
+                autoFadeInSec?: number;
+                autoFadeOutSec?: number;
+                reversed?: boolean;
+                loopEnabled?: boolean;
+                /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+                channelMode?: number;
+            }>;
+            checkpoint?: boolean;
+        },
+        { rejectWithValue },
+    ) => {
         try {
             return await webApi.setClipsStateBulk(payload);
         } catch (error) {

@@ -73,8 +73,7 @@ test("features/session/clipEditFailure.test.ts scripted checks", () => {
         classifyClipEditFailure({
             kind: "transient",
             message: "Backend invoke failed: plugin:set_clip_state",
-            detail:
-                "host clip edit failed (Undo block retained): host clip changed before GUI commit; refresh required (host start=1.0 length=2.0, editor start=1.0 length=2.0)",
+            detail: "host clip edit failed (Undo block retained): host clip changed before GUI commit; refresh required (host start=1.0 length=2.0, editor start=1.0 length=2.0)",
         }),
         "transient",
         "后端原文的瞬时冲突不得提示",

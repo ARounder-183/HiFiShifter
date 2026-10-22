@@ -1,6 +1,11 @@
 // 插件通信回归：覆盖真实bridge的实例隔离、错误、取消和超时，不模拟编辑成功。
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { commandTimeoutMs, createPluginHost, DEFAULT_COMMAND_TIMEOUT_MS, type WebViewMessagePort } from "./pluginHost";
+import {
+    commandTimeoutMs,
+    createPluginHost,
+    DEFAULT_COMMAND_TIMEOUT_MS,
+    type WebViewMessagePort,
+} from "./pluginHost";
 
 /** 只替代原生WebView边界；Promise关联、事件与生命周期全部执行生产bridge。 */
 function nativePort() {
