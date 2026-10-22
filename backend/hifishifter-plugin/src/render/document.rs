@@ -86,13 +86,6 @@ pub(crate) enum SourceState {
 }
 
 impl SourceState {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Published => "published",
-            Self::Revoked => "revoked",
-            Self::Failed => "failed",
-        }
-    }
 }
 
 /// 输入可用性的**综合判定**。
@@ -1517,7 +1510,12 @@ impl DocumentSession {
     /// 组根处理设置与参数delta同一事务提交，避免空父轨设置在音频准备时退回默认值。
     pub(crate) fn accept_workspace_edits_with_groups(
         &self,
-        base_edit: u64,
+        // 【为什么这个参数没有被读】它原本用来做"编辑代次是否仍然一致"的判据，但那个
+        // 检查从未实现 —— 真正挡住陈旧写回的是下面的 `base_model`（模型代次）与
+        // `previous`（编辑器读到的那份投影的指纹）。保留形参是为了不动六个调用点
+        // （其中四个在测试里），同时用下划线把"它确实没被读"写在签名上，而不是让它
+        // 悄悄看起来像一个生效的守卫。
+        _base_edit: u64,
         base_model: u64,
         client: &hifishifter_kernel::state::TimelineState,
         previous: &str,

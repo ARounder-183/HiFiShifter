@@ -1044,7 +1044,9 @@ impl SnapshotPublisher {
                 .is_some_and(|range| range.start <= frame)
         };
         let mix = |channel: usize, offset: usize| -> f32 {
-            let global = sample.saturating_add(offset as i64);
+            // 这里曾有一个 `let global = sample + offset`，算完从未被读过 ——
+            // 帧号由下面的 `snapshot_frame(offset)` 统一换算（覆盖表与快照都在
+            // **快照帧域**），再算一次原始帧号只会让人以为有第二套坐标系。
             let old = input_at(channel, offset).unwrap_or(0.0);
             if snapshot.is_none() {
                 return old;

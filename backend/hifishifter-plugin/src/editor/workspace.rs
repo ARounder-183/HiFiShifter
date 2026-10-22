@@ -344,9 +344,6 @@ impl PresentedIds {
     fn get(&self, key: u64) -> Option<&str> {
         self.0.get(&key).map(String::as_str)
     }
-    fn values(&self) -> impl Iterator<Item = &String> {
-        self.0.values()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

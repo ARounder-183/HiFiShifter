@@ -7,13 +7,16 @@ mod events;
 mod formant;
 pub(crate) mod media_identity;
 mod notebook;
+// 只在非测试构建里存在：唯一调用点 `EditorSession::run` 的空闲分支本身是
+// `#[cfg(not(test))]`（测试进程不该扫描/删除真实的用户临时目录）。
+#[cfg(not(test))]
+mod temp_sweep;
 pub(crate) mod parameter_atlas;
 mod plugin_diagnostics;
 pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;
 pub(crate) mod session;
-mod temp_sweep;
 pub(crate) mod capture_edits;
 mod view;
 #[cfg(windows)]

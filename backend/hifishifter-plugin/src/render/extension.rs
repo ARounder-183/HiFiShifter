@@ -163,13 +163,6 @@ pub(crate) enum ScopeSource {
 }
 
 impl ScopeSource {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::HostAssignment => "host-assignment",
-            Self::DocumentDerived => "document-derived",
-            Self::Empty => "empty",
-        }
-    }
 }
 
 /// [`ScopeSource`] 与 region 集合的配对。
@@ -226,6 +219,15 @@ pub(crate) enum HostAudioState {
     /// bind 失败、文档控制器缺失或旧文档仍占着实例 —— 再等也不会来，用户唯一
     /// 能做的是重载插件。此前界面沿用上一次的 `awaiting_regions`，把一个终态
     /// 显示成无限期等待。
+    ///
+    /// 【⚠ 当前没有生产者】`classify_host_audio` 的所有调用点都在"某份文档正在刷新"
+    /// 的路径上，因此它永远拿不到"这个实例根本没有文档"这个事实。要真正产出这一态，
+    /// 需要先回答一个产品问题：**捕获形态本来就没有文档**，若按"无文档 ⇒ NotBound"
+    /// 分类，捕获用户会被告知"插件没有绑定到 ARA 文档"——那是误导。正确的判据是
+    /// "这个宿主本应提供 ARA 却没绑上"，而那需要 `IHostApplication` 侧的证据。
+    /// 前端（`hostAudio.ts` 的 `isNotBound` 与 `HostAudioNotice`）已经按这一态
+    /// 做好了界面，所以**保留定义**而不是删掉；等生产者落地时只需接线。
+    #[allow(dead_code)]
     NotBound,
 }
 
@@ -343,30 +345,6 @@ impl InstanceMode {
             InstanceMode::Ara => 1,
             InstanceMode::Capture => 2,
         }
-    }
-}
-
-/// 本实例此刻**素材从哪来**。
-///
-/// 【为什么与 `InstanceMode` 是两个概念而不是一个】形态是"宿主打算怎么用我们"，
-/// 信号来源是"我们手上有没有东西可渲染"。同一个形态会先后经历两个信号来源：
-/// Capture 形态在录制之前是 `None`（没有任何素材，界面该显示引导），录制之后是 `Bus`。
-/// 合成一个枚举会让"还没录"与"宿主不给我们音频"变成同一个值 —— 而它们的用户可见
-/// 行为完全不同（前者要引导，后者要报错）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SignalSource {
-    /// ARA 授权 PCM（宿主逐个 region 交给我们）。
-    Ara,
-    /// 从 VST3 输入总线捕获的 PCM（Capture）。
-    Bus,
-    /// 两者都没有：没有可渲染的素材。
-    None,
-}
-
-impl SignalSource {
-    /// 本信号来源此刻有没有可渲染的素材。
-    pub(crate) fn has_material(self) -> bool {
-        matches!(self, SignalSource::Ara | SignalSource::Bus)
     }
 }
 
@@ -821,8 +799,6 @@ struct StreamBlock {
     start_window: bool,
     /// 本块与上一块逐块完全相同且非零（FL 停播重复投递的形状）。
     repeated_nonzero: bool,
-    /// 本块是否全零（门控/前导静音判据）。
-    silent: bool,
     /// 本块有效位置来自哪条**宿主时钟**（见 `PositionSource`）。
     ///
     /// 【它不再表示"位置可不可信"】位置只有一只钟（见 `note_stream_geometry` 的
@@ -832,8 +808,12 @@ struct StreamBlock {
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。
+///
+/// 【为什么是 `pub(crate)`】它出现在 `ExtensionOwner::note_block_trace` 的参数里，
+/// 而那个方法是 `pub(crate)`（`vst3` 的音频回调要调它）。私有类型泄进更宽可见度的
+/// 签名是 `private_interfaces` 告警的来源；把类型提到同一档即可，不需要放宽方法。
 #[derive(Clone, Copy, Default)]
-struct StreamTime {
+pub(crate) struct StreamTime {
     continuous: Option<i64>,
     music: Option<f64>,
     tempo: Option<f64>,
@@ -3181,10 +3161,6 @@ impl ExtensionOwner {
             self.roles.load(Ordering::Acquire)
         );
     }
-    /// 被提升为渲染者的次数（诊断）。
-    pub(crate) fn promoted_renderer_count(&self) -> u64 {
-        self.promoted_to_renderer.load(Ordering::Acquire)
-    }
     /// 文档关闭后重绑到另一份文档的次数（诊断）。
     pub(crate) fn rebind_generation_count(&self) -> u64 {
         self.rebind_generation.load(Ordering::Acquire)
@@ -4626,7 +4602,6 @@ impl ExtensionOwner {
                 discard_pre_roll: false,
                 start_window: false,
                 repeated_nonzero: false,
-                silent: geometry.last_block_silent.load(Ordering::Acquire),
                 // 零帧块不写任何样本，位置来源对它没有意义；沿用上一块的结论即可。
                 position_source: PositionSource::from_code(
                     geometry.last_source.load(Ordering::Acquire),
@@ -5020,7 +4995,6 @@ impl ExtensionOwner {
             start_window: advance
                 < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
             repeated_nonzero,
-            silent,
             position_source: source,
         }
     }
@@ -6118,15 +6092,6 @@ impl ExtensionOwner {
         self.note_restore_pending();
         self.refresh_document();
         Ok(())
-    }
-
-    /// 【G5】此刻的载荷是否应当覆盖在线状态（见 `DocumentSession::authoritative_restore`）。
-    fn authoritative_restore(&self) -> bool {
-        self.document
-            .lock_or_recover()
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .is_some_and(|document| document.authoritative_restore())
     }
 
     /// 暂存 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。

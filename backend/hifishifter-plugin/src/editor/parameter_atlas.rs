@@ -372,6 +372,10 @@ pub(crate) struct RootProjection {
 
 impl RootProjection {
     /// 覆盖整条根轨（空白编辑与"没有曲线的根"用它）。
+    ///
+    /// 【为什么带 `#[cfg(test)]`】生产路径总是从真实曲线构造投影；这个"整条覆盖"
+    /// 的便捷构造只被测试用到。
+    #[cfg(test)]
     pub(crate) fn whole(params: TrackParamsState) -> Self {
         Self {
             params,

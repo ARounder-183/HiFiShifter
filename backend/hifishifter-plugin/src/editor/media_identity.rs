@@ -8,19 +8,6 @@
 //! 只有"本来就不知道"才可以是不知道。实现上就是 `choose_link` 的返回序 ——
 //! 只要有任一环给出证据，就绝不返回 `Link::None`。
 
-/// 媒体身份的证据来源，按**可信度**从高到低。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Provenance {
-    /// 宿主**这一次**的观察与 item 对得上（`authorized_takes` / `authorized_sources`）。
-    Authorized,
-    /// 分割谱系：父段已被授权，右半段与它是同一份素材。
-    Inherited,
-    /// 本实例**手里有 PCM**（`edit_sources`），且活着的 region 指向它。
-    Pcm,
-    /// 上一轮已经挂在这条 clip 上的身份。只在前三环都缺席时使用。
-    LastKnown,
-}
-
 /// 这一轮该挂哪一环。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Link {
@@ -30,19 +17,6 @@ pub(crate) enum Link {
     LastKnown,
     /// 不挂：按无源占位显示。
     None,
-}
-
-impl Link {
-    /// 语言无关的名字（进诊断与日志）。
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Link::Authorized => "authorized",
-            Link::Inherited => "inherited",
-            Link::Pcm => "pcm",
-            Link::LastKnown => "last_known",
-            Link::None => "none",
-        }
-    }
 }
 
 /// 决定本轮的媒体身份来源。

@@ -910,16 +910,6 @@ impl CaptureStore {
         self.on_block_with_context(block, BlockContext::realtime(false))
     }
 
-    /// 与 [`Self::on_block`] 相同，但带上“块流在推进”的弱证据（见
-    /// [`Capture::on_block_with_context`]）。兼容既有测试/调用。
-    pub(crate) fn on_block_with_flow(
-        &self,
-        block: InputBlock<'_>,
-        flow: bool,
-    ) -> CaptureBlockOutcome {
-        self.on_block_with_context(block, BlockContext::realtime(flow))
-    }
-
     /// 音频线程入口：带进程流与块流证据。
     pub(crate) fn on_block_with_context(
         &self,
@@ -939,7 +929,7 @@ impl CaptureStore {
             // 补写本身也要拿到同一把锁；拿不到就原样还回去（下一轮再补），
             // 绝不因为一次补写失败而丢掉整段。
             if let Ok(mut capture) = self.capture.try_lock() {
-                for mut block in deferred {
+                for block in deferred {
                     let input = recorder::InputBlock {
                         start: block.start,
                         frames: block.frames,

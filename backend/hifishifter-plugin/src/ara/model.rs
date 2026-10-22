@@ -4245,7 +4245,7 @@ mod tests {
         let key = (&*identity as *const u8) as u64;
         let document_id;
         {
-            let mut model = ModelHandle::new();
+            let model = ModelHandle::new();
             document_id = model.document_id;
             region_owners()
                 .lock_or_recover()
