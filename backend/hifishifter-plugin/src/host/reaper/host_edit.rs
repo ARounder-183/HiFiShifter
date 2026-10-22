@@ -374,6 +374,36 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
     Ok(patch)
 }
 
+/// 移动类命令是否要**带着参数线一起搬**。
+///
+/// 优先级：请求里显式给的 `moveLinkedParams` > 用户设置 `lock_param_lines`。
+/// 请求优先是有意的：前端在拖拽开始时就把当时的开关快照发过来，拖拽途中用户改设置
+/// 也不会让这一次移动前后不一致。
+fn wants_linked_param_move(requests: &[Value]) -> bool {
+    requests
+        .first()
+        .and_then(|request| request["moveLinkedParams"].as_bool())
+        .unwrap_or_else(crate::settings_store::lock_param_lines)
+}
+
+/// 把一批宿主编辑请求翻译成内核的移动载荷。
+///
+/// 只认三个字段：`clipId` / `startSec` / 可选 `trackId`（同轨移动时不带）。
+/// 缺 `startSec` 的请求**跳过** —— 那不是一次移动（例如同一批里的纯属性编辑），
+/// 交给后面的 patch 路径处理。
+fn linked_move_payloads(requests: &[Value]) -> Vec<hifishifter_kernel::state::MoveClipPayload> {
+    requests
+        .iter()
+        .filter_map(|request| {
+            Some(hifishifter_kernel::state::MoveClipPayload {
+                clip_id: request["clipId"].as_str()?.to_owned(),
+                start_sec: request["startSec"].as_f64()?,
+                track_id: request["trackId"].as_str().map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
 impl EditorSession {
     /// UI只短暂读取当前clip身份/几何；源参数大数组不复制，不在这里materialize或分析。
     pub(crate) fn plan_host_edit(
@@ -400,7 +430,7 @@ impl EditorSession {
         // 某线程的 panic 毒化过，`lock_or_recover` 会交回一份**可能半写**的 clip 状态；
         // 拿它去改 DAW 会把一次局部 panic 升级成工程级损坏（S1）。因此这里在恢复即
         // 拒绝本次写回，让用户走"刷新/重开"这条明确的恢复路径，而不是默默写坏。
-        let (timeline, recovered) = self.timeline.lock_or_recover_checked();
+        let (mut timeline, recovered) = self.timeline.lock_or_recover_checked();
         if recovered {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Error,
@@ -411,6 +441,36 @@ impl EditorSession {
             );
             return Err("editor state was reset after an internal error; refresh required".into());
         }
+        // ── 移动类命令：先让编辑器时间线**自己**搬一遍参数线 ─────────────────
+        //
+        // 【为什么必须走 TimelineState::move_clips】移动 clip 时，参数曲线是否跟着走完全
+        // 由这一个人决定（提取区间 → 清空 → 平移到新位置）。此前本函数把请求里的
+        // `moveLinkedParams` **删掉**、随后逐 clip `patch_clip_state`，于是无论开关是开
+        // 是关，曲线都不动 —— 用户在 ARA 里移动 clip 后旧参数线留在原地，而独立 App 里
+        // 同一操作是跟着走的。
+        //
+        // 【为什么先把 before 克隆出来】`move_clips` 会就地改写 clip 的位置，而下面的
+        // 预检要拿"编辑前"的位置去比宿主的当前几何。读晚了就会拿新值比旧值，把一次
+        // 正常编辑误判成"宿主在我们编辑期间变过"。
+        let mut before_by_id: std::collections::HashMap<
+            String,
+            hifishifter_kernel::state::Clip,
+        > = std::collections::HashMap::new();
+        for request in &requests {
+            let Some(id) = request["clipId"].as_str() else {
+                continue;
+            };
+            if let Some(clip) = timeline.clips.iter().find(|clip| clip.id == id) {
+                before_by_id.insert(id.to_owned(), clip.clone());
+            }
+        }
+        if matches!(command, "move_clip" | "move_clips") {
+            let moves = linked_move_payloads(&requests);
+            if !moves.is_empty() {
+                timeline.move_clips(&moves, wants_linked_param_move(&requests));
+            }
+        }
+
         let mut seen = std::collections::HashSet::new();
         let mut edits = Vec::new();
         for request in requests {
@@ -418,10 +478,8 @@ impl EditorSession {
             if !seen.insert(id.to_owned()) {
                 return Err("duplicate clip in host edit batch".into());
             }
-            let before = timeline
-                .clips
-                .iter()
-                .find(|clip| clip.id == id)
+            let before = before_by_id
+                .get(id)
                 .cloned()
                 .ok_or("unknown editor clip")?;
             let destination = request["trackId"].as_str().unwrap_or(&before.track_id);
@@ -1029,6 +1087,44 @@ fn restore_applied_geometry(
 mod tests {
     use super::*;
     use serde_json::json;
+    /// 移动请求里的 `moveLinkedParams` 必须被读出来并落到内核调用上。
+    ///
+    /// 【为什么这条是回归】宿主编辑计划曾把这面旗**删掉**，于是"锁定参数线"在 ARA 里
+    /// 对任何宿主编辑都不起作用：曲线留在原地，而 clip 已经移走。这里钉住"旗子被读到"，
+    /// 曲线真正搬运由 `TimelineState::move_clips` 自己的测试覆盖。
+    #[test]
+    fn the_linked_param_flag_is_honoured_for_moves() {
+        let on = vec![json!({ "clipId": "a", "startSec": 1., "moveLinkedParams": true })];
+        let off = vec![json!({ "clipId": "a", "startSec": 1., "moveLinkedParams": false })];
+        assert!(wants_linked_param_move(&on), "显式的 true 必须生效");
+        assert!(!wants_linked_param_move(&off), "显式的 false 必须生效");
+        // 缺旗时回落到用户设置，而不是默默当成 false。
+        let absent = vec![json!({ "clipId": "a", "startSec": 1. })];
+        assert_eq!(
+            wants_linked_param_move(&absent),
+            crate::settings_store::lock_param_lines(),
+            "缺省值必须取当前设置"
+        );
+    }
+
+    /// 移动载荷只从"带 startSec 的请求"里产生，且字段逐一对应。
+    #[test]
+    fn move_payloads_carry_only_actual_moves() {
+        let requests = vec![
+            json!({ "clipId": "a", "startSec": 2.5, "trackId": "t2" }),
+            json!({ "clipId": "b", "startSec": 3.0 }),
+            // 纯属性编辑混在同一批里：没有 startSec，不该被当成移动。
+            json!({ "clipId": "c", "gain": 0.5 }),
+        ];
+        let moves = linked_move_payloads(&requests);
+        assert_eq!(moves.len(), 2);
+        assert_eq!(moves[0].clip_id, "a");
+        assert!((moves[0].start_sec - 2.5).abs() < 1e-9);
+        assert_eq!(moves[0].track_id.as_deref(), Some("t2"));
+        assert_eq!(moves[1].clip_id, "b");
+        assert_eq!(moves[1].track_id, None, "同轨移动不带 trackId");
+    }
+
     /// clip音量写真实item D_VOL，支持零；不能写take音量/极性或靠本地gain冒充成功。
     #[test]
     fn host_clip_gain_writes_item_volume_and_preserves_take_polarity() {
