@@ -406,7 +406,10 @@ export const timelineApi = {
     setClipsStateBulk: (payload: {
         updates: Array<{
             clipId: string;
+            /** Take 级增益（take 面板）。 */
             gain?: number;
+            /** Item 级增益（时间轴旋钮；REAPER 的 `D_VOL`）。 */
+            itemGain?: number;
             muted?: boolean;
             startSec?: number;
             lengthSec?: number;

@@ -29,6 +29,7 @@
  *
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
+import { clipItemGain } from "./timeline/clipGain";
 import React, { useMemo, Profiler } from "react";
 import {
     isPluginMode,
@@ -4794,7 +4795,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             const clip = session.clips.find(
                                 (item) => item.id === participant.clipId,
                             );
-                            return [participant.clipId, Number(clip?.gain ?? 1)] as const;
+                            // 旋钮编辑 item 层（见 clipGain.ts）：基准值必须取自同一层，
+                            // 否则第一次拖动会从 take 增益"跳"到 item 增益。
+                            return [participant.clipId, clipItemGain(clip)] as const;
                         }),
                     ),
                     // 轴向状态以「相对按下点的位移」为 raw：状态内部只比较增量，
@@ -4847,8 +4850,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                       ) as HTMLElement | null);
             if (anchor !== null) {
                 const baseGain = origin.baseGainById.get(args.clipId);
+                // 浮标读的也是 item 层（与旋钮、header 标签同一口径）。
                 const currentGain =
-                    sessionRef.current.clips.find((item) => item.id === args.clipId)?.gain ??
+                    clipItemGain(
+                        sessionRef.current.clips.find((item) => item.id === args.clipId),
+                    ) ??
                     baseGain ??
                     1;
                 const clamped = clampGainDb(gainToDbSafe(currentGain));
@@ -4902,10 +4908,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const session = sessionRef.current;
             void dispatch(
                 setClipsStateBulkRemote({
-                    updates: origin.clipIds.map((clipId) => ({
-                        clipId,
-                        gain: Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1),
-                    })),
+                    updates: origin.clipIds.map((clipId) => {
+                        // 旋钮写 item 层（REAPER 的 D_VOL）；take 层由 take 面板负责。
+                        const clip = session.clips.find((item) => item.id === clipId);
+                        return { clipId, itemGain: clipItemGain(clip) };
+                    }),
                 }),
             )
                 .unwrap()

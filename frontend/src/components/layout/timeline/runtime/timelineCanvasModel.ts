@@ -24,6 +24,7 @@
  *   执行 `sec * pxPerSec`，否则会与波形、网格产生错位。
  */
 
+import { clipItemGain } from "../clipGain";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
 import { clipDisplayName, type ClipInfo } from "../../../../features/session/sessionTypes";
 import { resolveTakeLaneLayouts } from "../takeLanes";
@@ -53,7 +54,13 @@ type SparseRenderClip = {
     name: string;
     startSec: number;
     lengthSec: number;
+    /** Take 级增益（旧字段；画布样式改用 item 层，见下方 `clip_gain`）。 */
     gain: number;
+    /**
+     * Item 级增益（旋钮拧的那层）。宿主把 `ClipInfo` 直接当本类型用
+     * （见 `timelineKernelHost` 里的 `as never`），所以线上一定有值。
+     */
+    clip_gain?: number;
     playbackRate: number;
     muted: boolean;
     /**
@@ -704,7 +711,8 @@ export function buildSparseClipRenderModel(args: {
                     : args.selectedClipId === clip.id,
             hovered: args.hoveredClipId === clip.id && clip.groupId == null,
             muted: clip.muted,
-            gain: clip.gain,
+            // 渲染块与命中块同口径：item 层增益（见 clipGain.ts）。
+            gain: clipItemGain(clip),
             playbackRate: clip.playbackRate,
             groupId: clip.groupId,
             isMidiClip: clip.midiNoteCount != null,

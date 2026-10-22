@@ -535,7 +535,10 @@ export const setClipsStateBulkRemote = createAsyncThunk(
         payload: {
             updates: Array<{
                 clipId: string;
+                /** Take 级增益（take 属性面板）。 */
                 gain?: number;
+                /** Item 级增益（时间轴旋钮；REAPER 的 `D_VOL`）。 */
+                itemGain?: number;
                 muted?: boolean;
                 startSec?: number;
                 lengthSec?: number;

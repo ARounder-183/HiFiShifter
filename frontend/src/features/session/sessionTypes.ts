@@ -270,7 +270,10 @@ export interface ClipInfo {
     durationSec?: number;
     durationFrames?: number; // 精确frame总数
     sourceSampleRate?: number; // 源文件采样率
+    /** Take 级增益（active take 投影；take 属性面板编辑它）。 */
     gain: number;
+    /** Item 级增益（时间轴旋钮编辑它；REAPER 的 `D_VOL`）。缺省按 1.0。 */
+    clip_gain?: number;
     muted: boolean;
     /** When set, this clip belongs to a group of clips sharing the same UUID. */
     groupId?: string;

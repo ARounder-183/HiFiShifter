@@ -152,7 +152,14 @@ pub struct TimelineClip {
     pub waveform_preview: Option<Vec<f32>>,
     pub pitch_range: Option<PitchRange>,
 
+    /// Take 级增益（active take 投影；take 属性面板编辑它）。
     pub gain: Option<f32>,
+    /// Item 级增益（时间轴旋钮编辑它；REAPER 的 `D_VOL`）。
+    ///
+    /// 【为什么单列】REAPER 的 item 增益与 take 增益是两个旋钮。前端把两者都渲染出来
+    /// 之后，屏幕上任何一个"增益读数"必须说清它是哪一层 —— 混用会显示成
+    /// "旋钮在 0 dB、声音却是 −6 dB"。
+    pub clip_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,

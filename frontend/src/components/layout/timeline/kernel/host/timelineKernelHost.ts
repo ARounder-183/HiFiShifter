@@ -43,6 +43,7 @@
  * 才由内核自绘。
  */
 
+import { clipItemGain } from "../../clipGain";
 import type { ClipInfo, TrackInfo } from "../../../../../features/session/sessionTypes";
 import {
     isModifierActive,
@@ -2441,7 +2442,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 以下字段 `hitTest` 本身不消费，只做透传：header 控件级命中需要
                 // 它们构造 `buildTimelineClipVisualStyle`（与绘制端同一份样式）。
                 muted: clip.muted,
-                gain: clip.gain,
+                // 视图片段只带**一层**增益：item 层（旋钮拧的那层）。
+                gain: clipItemGain(clip),
                 playbackRate: clip.playbackRate,
                 name: clip.name,
                 groupId: clip.groupId,
@@ -6251,7 +6253,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     startSec: clip.startSec,
                     lengthSec: clip.lengthSec,
                     muted: clip.muted,
-                    gain: clip.gain,
+                    gain: clipItemGain(clip),
                     playbackRate: clip.playbackRate,
                     name: clip.name,
                     groupId: clip.groupId,

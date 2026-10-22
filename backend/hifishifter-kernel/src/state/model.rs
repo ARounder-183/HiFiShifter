@@ -7823,6 +7823,7 @@ impl TimelineState {
                 waveform_preview: c.waveform_preview.clone(),
                 pitch_range: c.pitch_range.clone(),
                 gain: Some(c.gain),
+                clip_gain: Some(c.clip_gain),
                 muted: Some(c.muted),
                 source_start_sec: Some(c.source_start_sec),
                 source_end_sec: Some(c.source_end_sec),
@@ -7917,6 +7918,7 @@ impl TimelineState {
                 waveform_preview: None, // skip — frontend caches separately
                 pitch_range: None,      // skip — frontend caches separately
                 gain: Some(c.gain),
+                clip_gain: Some(c.clip_gain),
                 muted: Some(c.muted),
                 source_start_sec: Some(c.source_start_sec),
                 source_end_sec: Some(c.source_end_sec),

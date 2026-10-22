@@ -1220,7 +1220,10 @@ function applyOptimisticClipState(
         color?: string;
         startSec?: number;
         lengthSec?: number;
+        /** Take 级增益（take 面板）。 */
         gain?: number;
+        /** Item 级增益（时间轴旋钮）。 */
+        itemGain?: number;
         muted?: boolean;
         sourceStartSec?: number;
         sourceEndSec?: number;
@@ -1260,6 +1263,9 @@ function applyOptimisticClipState(
         if (payload.snapOffsetSec === undefined) {
             clip.snapOffsetSec = Math.min(Math.max(0, clip.snapOffsetSec), clip.lengthSec);
         }
+    }
+    if (payload.itemGain !== undefined) {
+        clip.clip_gain = clampGain(Number(payload.itemGain));
     }
     if (payload.gain !== undefined) {
         clip.gain = clampGain(Number(payload.gain));
@@ -1371,7 +1377,10 @@ function applyOptimisticBulkClipState(
     state: SessionState,
     updates: Array<{
         clipId: string;
+        /** Take 级增益（take 面板）。 */
         gain?: number;
+        /** Item 级增益（时间轴旋钮）。 */
+        itemGain?: number;
         muted?: boolean;
         startSec?: number;
         lengthSec?: number;
@@ -1401,6 +1410,9 @@ function applyOptimisticBulkClipState(
     for (const update of updates) {
         const clip = clipsById.get(update.clipId);
         if (!clip) continue;
+        if (update.itemGain !== undefined) {
+            clip.clip_gain = clampGain(Number(update.itemGain));
+        }
         if (update.gain !== undefined) {
             clip.gain = clampGain(Number(update.gain));
         }
@@ -1964,7 +1976,11 @@ function applyTimelineState(
             durationSec: Number(clip.duration_sec ?? 0) || undefined,
             durationFrames: clip.duration_frames,
             sourceSampleRate: clip.source_sample_rate,
+            // Take 级增益（active take 投影）。
             gain: clampGain(Number(clip.gain ?? 1)),
+            // Item 级增益（时间轴旋钮）。后端未提供时按 1.0 —— 注意 0 是合法静音值，
+            // 不能用 `|| 1` 兜底。
+            clip_gain: clampGain(Number(clip.clip_gain ?? 1)),
             muted: Boolean(clip.muted),
             // Allow negative sourceStartSec to represent leading silence (slip-edit past source start).
             sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
@@ -3617,10 +3633,16 @@ const sessionSlice = createSlice({
                 clip.autoFadeOutSec = Math.max(0, action.payload.autoFadeOutSec);
             }
         },
+        /**
+         * 乐观预览"旋钮的增益"。
+         *
+         * 【为什么写 clip_gain 而不是 gain】旋钮编辑的是 **item** 层（REAPER 的 D_VOL），
+         * take 层归 take 属性面板。写错层会让 header 读数与实际听感分叉。
+         */
         setClipGain(state, action: PayloadAction<{ clipId: string; gain: number }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
-            clip.gain = clampGain(Number(action.payload.gain));
+            clip.clip_gain = clampGain(Number(action.payload.gain));
         },
         setClipMuted(state, action: PayloadAction<{ clipId: string; muted: boolean }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
