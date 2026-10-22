@@ -18,13 +18,37 @@ export const GAIN_MIN_LINEAR = 0;
 export const GAIN_MAX_LINEAR = 16;
 
 /**
- * dB 显示的**实用**下界。
+ * dB 的**显示**下界（REAPER 口径）。
  *
- * 【为什么不是 −Infinity】−inf 无法参与 `+delta` 运算、也无法映射成旋钮角度。
- * −60 dB（线性 0.001）是"听不见"的实用表达，再往下对听感没有区别；而
- * `formatGainDb` 在接近它时会显示成 `-inf dB`，与 REAPER 的写法一致。
+ * 【为什么是 −150】REAPER 的电平读数一路能下探到 −150 dB，低于它才显示 `-inf`。
+ * 此前这里写死 −60：于是 −90 dB 的增益在界面上显示成 `-inf`，而它其实还听得见一点点，
+ * 用户按 REAPER 的读数去核对时对不上。
  */
-export const GAIN_MIN_DB = -60;
+export const GAIN_DISPLAY_FLOOR_DB = -150;
+
+/** dB 下界（= 显示下界，供"输入框 / 数值 / 提示"使用）。 */
+export const GAIN_MIN_DB = GAIN_DISPLAY_FLOOR_DB;
+
+/**
+ * 旋钮**锥度**的下界。
+ *
+ * 【为什么与显示下界分开】旋钮角度与拖拽分辨率都按"到 0 dB 的距离"铺开。若按下界
+ * −150 dB 铺，有用的 −12~+12 dB 会被压进整条弧的 4% —— 一动就飞，正是用户明确要求
+ * 避免的手感崩坏。锥度仍按 −60 dB 铺满下半程，更低的取值（例如手输 −140）停在弧底，
+ * 读数照常显示真实值。
+ */
+export const GAIN_TAPER_FLOOR_DB = -60;
+
+/**
+ * 底部的**静音棘齿**（CSS px）。
+ *
+ * 行程最后这 1px 直接落到 0（线性）= `-inf`，与 REAPER 推子最底下那段一致。
+ *
+ * 【为什么只有 1px】锥度是 `−60 dB / 48 px`（= 1.25 dB/px，与第一轮定下的手感逐像素
+ * 一致）。棘齿若占 6px，下半程就只剩 42px，灵敏度变成 1.43 dB/px —— 用户明确要求过
+ * "范围变大不能让旋钮变灵敏"，所以宁可让棘齿只是一格"到底"的吸附。
+ */
+export const GAIN_SILENCE_DETENT_PX = 1;
 
 /** dB 上界（由线性上界反算，见文件头）。 */
 export const GAIN_MAX_DB = 20 * Math.log10(GAIN_MAX_LINEAR);
@@ -59,6 +83,34 @@ export function gainToDbSafe(linear: number): number {
     return clampGainDb(20 * Math.log10(g));
 }
 
+/**
+ * 线性增益 → 展示文本（**唯一**的增益格式化入口）。
+ *
+ * 规则与 REAPER 一致：
+ * - 0（静音）或低于 −150 dB ⇒ `-inf`；
+ * - 其余四舍五入到一位小数，正数带 `+`；
+ * - 恰好 0 dB 显示 `0`（不带符号、不带小数），免得界面上出现 `+0.0`。
+ *
+ * 【为什么要收口】此前仓里有**四套**格式化：轨道推子自己写 `-inf dB`、canvas 上直接
+ * `toFixed(1)`（增益为 0 时打印 `-InfinitydB`）、时间轴用一个不带 −inf 分支的
+ * `formatGainDbValue`、编辑框用 `formatEditNumber`。同一个值在四个地方四种写法。
+ */
+export function formatGainDbLabel(linear: number): string {
+    const gain = clampGain(linear);
+    // 线性 0 就是静音：不能借 gainToDbSafe 的"实用下界"回退（那会显示成 −150）。
+    if (!(gain > 0)) return "-inf";
+    return formatGainDbValue(20 * Math.log10(gain));
+}
+
+/** dB 值 → 展示文本（与 [`formatGainDbLabel`] 同一套规则，供已经是 dB 的调用点使用）。 */
+export function formatGainDbValue(db: number): string {
+    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB) return "-inf";
+    const rounded = Math.round(db * 10) / 10;
+    if (Math.abs(rounded) < 0.05) return "0";
+    const sign = rounded > 0 ? "+" : "";
+    return Number.isInteger(rounded) ? `${sign}${rounded}` : `${sign}${rounded.toFixed(1)}`;
+}
+
 /** dB → 线性。 */
 export function dbToGainSafe(db: number): number {
     return clampGain(Math.pow(10, clampGainDb(db) / 20));
@@ -74,7 +126,8 @@ export function dbToGainSafe(db: number): number {
 export function gainKnobAngleDeg(db: number): number {
     const value = clampGainDb(db);
     if (value >= 0) return (value / GAIN_MAX_DB) * KNOB_MAX_ANGLE_DEG;
-    return (value / -GAIN_MIN_DB) * KNOB_MAX_ANGLE_DEG;
+    // 低于锥度下界（例如手输 −140）一律停在 −135°：读数仍是真实值，只是指针到底了。
+    return (Math.max(value, -GAIN_TAPER_FLOOR_DB) / GAIN_TAPER_FLOOR_DB) * KNOB_MAX_ANGLE_DEG;
 }
 
 /**
@@ -105,10 +158,19 @@ export function gainDbFromKnobTravel(startDb: number, deltaPx: number): number {
     if (!Number.isFinite(deltaPx)) return clampGainDb(startDb);
     const start = clampGainDb(startDb);
     // 起点在归一化行程上的位置（两段各自线性，见上方映射）。
-    const startU = start >= 0 ? start / GAIN_MAX_DB : start / -GAIN_MIN_DB;
-    const u = Math.min(1, Math.max(-1, startU + deltaPx / KNOB_HALF_TRAVEL_PX));
+    // 起点低于锥度下界时按弧底算 —— 否则从 −140 往上一拉，前 80px 都在"追"回 −60。
+    const startU =
+        start >= 0
+            ? start / GAIN_MAX_DB
+            : Math.max(start, -GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB;
+    const travel = startU + deltaPx / KNOB_HALF_TRAVEL_PX;
+    // 棘齿：行程**最后那 1px** 直接落 0（线性）= −inf。判据用严格小于，
+    // 让刚好推到边界时仍读到 −60 dB（同一个位置不能既算"到底"又算"−60"）。
+    const detent = 1 - GAIN_SILENCE_DETENT_PX / KNOB_HALF_TRAVEL_PX;
+    if (travel < -detent) return 0;
+    const u = Math.min(1, Math.max(-1, travel));
     // 上段：u ∈ [0, 1] ⇒ db ∈ [0, GAIN_MAX_DB]。
     if (u >= 0) return clampGainDb(u * GAIN_MAX_DB);
-    // 下段：u ∈ [−1, 0) ⇒ db ∈ [GAIN_MIN_DB, 0)。u = −1 时必须恰好落在 GAIN_MIN_DB。
-    return clampGainDb(GAIN_MIN_DB * -u);
+    // 下段：u ∈ (−1, 0) ⇒ db ∈ (−GAIN_TAPER_FLOOR_DB, 0)。
+    return clampGainDb(GAIN_TAPER_FLOOR_DB * -u);
 }

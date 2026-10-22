@@ -215,7 +215,8 @@ test("buildTimelineClipVisualStyle exposes label pixel widths", () => {
         trackColor: "#ff7a00",
         selected: false,
         muted: false,
-        gain: 0,
+        // 增益是**线性**值：这里用单位增益（0 dB），而不是 0（那是静音，文案是 -inf）。
+        gain: 1,
         playbackRate: 1,
         name: "Take 1",
     };
@@ -229,7 +230,8 @@ test("buildTimelineClipVisualStyle exposes label pixel widths", () => {
     assert(style.rateLabelWidth > 0, "速率 = 1 时 rateLabelWidth 仍应大于 0");
 
     // 宽度随文本变长而增大（确认测量真的用了当前标签文案）。
-    const longer = buildTimelineClipVisualStyle({ ...base, gain: -11.5 });
+    // −11.4 dB 的文案比 "0dB" 长 —— 用线性值表达（负的线性增益是域外值，会被钳成静音）。
+    const longer = buildTimelineClipVisualStyle({ ...base, gain: 0.27 });
     assert(longer.gainLabelWidth > style.gainLabelWidth, "增益文案变长时 gainLabelWidth 应增大");
 
     // 窄 clip 隐藏标签时宽度归零（与 trailingReservePx 的既有语义一致）。

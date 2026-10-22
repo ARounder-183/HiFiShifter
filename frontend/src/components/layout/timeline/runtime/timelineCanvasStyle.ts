@@ -19,7 +19,7 @@
  *   （Bug 修复，2026-06-30）。
  */
 import { gainToDb } from "../math.js";
-import { clampGainDb, gainKnobAngleDeg } from "../../../../utils/gainDb";
+import { clampGainDb, formatGainDbValue, gainKnobAngleDeg } from "../../../../utils/gainDb";
 import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
 
 // ── Font helpers ─────────────────────────────────────────────────────────
@@ -617,7 +617,9 @@ export function buildTimelineClipVisualStyle(args: {
     const playbackRate =
         Number.isFinite(args.playbackRate) && args.playbackRate > 0 ? args.playbackRate : 1;
     const playbackRateLabel = formatPlaybackRateLabel(playbackRate);
-    const gainLabel = `${gainDb >= 0 ? "+" : ""}${gainDb.toFixed(1)}dB`;
+    // 【必须走共享格式化】这里曾直接 `toFixed(1)`：增益为 0 时 `Math.log10(0) = -Infinity`，
+    // 标签会渲染成 `-InfinitydB`；而 −60 dB 以下的取值也显示不出 REAPER 的 `-inf`。
+    const gainLabel = `${formatGainDbValue(gainDb)}dB`;
 
     // Font-aware trailing reserve: measure actual label widths
     const gainLabelWidth = showGainLabel

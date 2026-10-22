@@ -1,9 +1,14 @@
+import { formatGainDbValue as formatGainDbValueFromGainModel } from "../../../utils/gainDb";
+
 export function clamp(value: number, minValue: number, maxValue: number): number {
     return Math.min(maxValue, Math.max(minValue, value));
 }
 
 export function gainToDb(gain: number): number {
-    const g = Math.max(1e-4, Number(gain) || 1);
+    // 【不要再夹一个 1e-4 的下限】那会让 −80 dB 以下全部并成同一个值，而展示需要
+    // 一路下探到 −150 dB（低于它才显示 −inf，见 utils/gainDb 的显示下界）。
+    const g = Number(gain);
+    if (!Number.isFinite(g) || g <= 0) return Number.NEGATIVE_INFINITY;
     return 20 * Math.log10(g);
 }
 
@@ -11,12 +16,15 @@ export function dbToGain(db: number): number {
     return Math.pow(10, db / 20);
 }
 
+/**
+ * 增益 dB 的展示文本。
+ *
+ * 【为什么只是转手】增益格式化必须**只有一套**规则（含 `-inf` 与 −150 dB 的边界）。
+ * 这里曾有一份自己的实现（没有 −inf 分支、也没有下界概念），于是同一个值在时间轴、
+ * 轨道推子与参数编辑器上写法不同。权威实现见 `utils/gainDb`。
+ */
 export function formatGainDbValue(db: number): string {
-    const rounded = Math.round(db * 10) / 10;
-    if (Math.abs(rounded) < 0.05) return "0";
-    const sign = rounded > 0 ? "+" : "";
-    const value = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
-    return `${sign}${value}`;
+    return formatGainDbValueFromGainModel(db);
 }
 
 /**

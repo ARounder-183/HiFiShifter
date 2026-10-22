@@ -24,7 +24,13 @@ import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
-import { GAIN_MAX_DB, GAIN_MIN_DB } from "../../../utils/gainDb";
+import {
+    GAIN_DISPLAY_FLOOR_DB,
+    GAIN_MAX_DB,
+    GAIN_MIN_DB,
+    GAIN_TAPER_FLOOR_DB,
+    formatGainDbValue,
+} from "../../../utils/gainDb";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
@@ -32,7 +38,6 @@ import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fine
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
-import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
@@ -323,13 +328,17 @@ const TRACK_METER_MAX_DB = 3;
 // 而混音侧按 4.0 线性（= +12.04 dB）钳制 —— 两处都写死，改一处就会分叉。
 const TRACK_GAIN_MIN_DB = GAIN_MIN_DB;
 const TRACK_GAIN_MAX_DB = GAIN_MAX_DB;
+/** 推子**锥度**的下界：与旋钮同一条纪律，见 `utils/gainDb` 的 `GAIN_TAPER_FLOOR_DB`。 */
+const TRACK_GAIN_TAPER_DB = GAIN_TAPER_FLOOR_DB;
 const TRACK_GAIN_WHEEL_STEP_DB = 0.5;
 const TRACK_GAIN_WHEEL_FINE_STEP_DB = 0.1;
 const TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS = 120;
 const TRACK_GAIN_DRAG_DB_PER_PX = 0.2;
 
 function gainToDb(gain: number): number {
-    if (!Number.isFinite(gain) || gain <= 1e-4) return TRACK_GAIN_MIN_DB;
+    // 【不要在这里夹 1e-4】那会把 −80 dB 以下并成一个值，而显示要一路下探到 −150 dB
+    // （低于它才写 `-inf`）。判定"是否静音"由 `formatGainLabel` / `dbToGain` 各自负责。
+    if (!Number.isFinite(gain) || gain <= 0) return Number.NEGATIVE_INFINITY;
     return 20 * Math.log10(gain);
 }
 
@@ -339,11 +348,10 @@ function dbToGain(db: number): number {
 }
 
 function formatGainLabel(gain: number): string {
+    // 与 clip 增益、参数编辑器共用同一个格式化函数（含 −150 dB 边界与 `-inf`）。
     const db = gainToDb(gain);
-    if (!Number.isFinite(db) || db <= TRACK_GAIN_MIN_DB + 0.05) return "-inf dB";
-    const clampedDb = Math.min(TRACK_GAIN_MAX_DB, Math.max(TRACK_GAIN_MIN_DB, db));
-    if (Math.abs(clampedDb) < 0.05) return "0.0 dB";
-    return `${clampedDb > 0 ? "+" : ""}${clampedDb.toFixed(1)} dB`;
+    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB) return "-inf dB";
+    return `${formatGainDbValue(db)} dB`;
 }
 
 function clampGainDb(db: number): number {
@@ -1476,10 +1484,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             const maxPeakLinear = meter?.maxPeakLinear ?? 0;
                             const clipped = Boolean(meter?.clipped);
                             const volumeDb = clampGainDb(gainToDb(volume));
+                            // 锥度按 `TRACK_GAIN_TAPER_DB` 铺开（不是显示下界 −150）：
+                            // 按下界铺会把有用的 −12~+12 dB 压进弧的 4%，推子会变得一动就飞。
                             const knobDeg =
                                 volumeDb >= 0
                                     ? (volumeDb / TRACK_GAIN_MAX_DB) * 135
-                                    : (volumeDb / Math.abs(TRACK_GAIN_MIN_DB)) * 135;
+                                    : (Math.max(volumeDb, -TRACK_GAIN_TAPER_DB) /
+                                          TRACK_GAIN_TAPER_DB) *
+                                      135;
                             const volumeTooltip = buildVolumeTooltip(track.id, volume);
 
                             // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。
