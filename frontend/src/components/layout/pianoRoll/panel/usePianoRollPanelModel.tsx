@@ -64,7 +64,7 @@ import { effectiveScaleAtSec } from "../../../../utils/tempoMap";
 import { setTempoMapRemote } from "../../../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../../../utils/pianoRollSelectionBus";
 import { resolveTimelineScrollRange } from "../../timeline/runtime/timelineScrollRange";
-import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "../constants";
+import { AXIS_W } from "../constants";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "../render";
 import {
     buildReferencePitchStrokeColor,
@@ -135,8 +135,6 @@ import {
     isChildPitchOffsetParam,
 } from "../childPitchOffsetParams";
 import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
-import { getParamEditorWheelAction } from "../wheelGesture";
-import type { Keybinding } from "../../../../features/keybindings/types";
 import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
@@ -211,6 +209,7 @@ import {
 import { drawPianoRollFrame } from "./drawFrame";
 import { usePianoRollViewport } from "./usePianoRollViewport";
 import { usePianoRollAxisInteractions } from "./usePianoRollAxisInteractions";
+import { usePianoRollAxisWheel } from "./usePianoRollAxisWheel";
 
 /**
  * 装配参数编辑器面板的模型。
@@ -3664,179 +3663,25 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         contentWidth,
     ]);
 
-    // Piano keys (axis) area: keep touchpad wheel behavior aligned with the main editor.
-    useEffect(() => {
-        const el = axisWrapRef.current;
-        if (!el) return;
-
-        const handler = (e: WheelEvent) => {
-            // During vibrato/line drag, wheel always adjusts vibrato parameters.
-            // Defer to the scroller's wheel handler which has full vibrato drag logic.
-            if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
-                e.preventDefault();
-                return;
-            }
-
-            const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-            const isWheelBindingRequested = (kb: Keybinding) => {
-                if (isNoneBinding(kb)) return noModifierPressed;
-                return isModifierActive(kb, e);
-            };
-            const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
-            const pianoVerticalScrollRequested = isWheelBindingRequested(pianoKeysVerticalScrollKb);
-            const pianoVerticalZoomRequested = isWheelBindingRequested(pianoKeysVerticalZoomKb);
-            const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
-
-            const bounds = el.getBoundingClientRect();
-            // 竖直分母必须用**绘图区**高度（`viewSize.h`），不是纵轴列的高度：
-            // 列比滚动视口高出一条自绘水平滚动条的行，且轴位图/琴键是按
-            // `viewSize.h` 投影的（见内核的 AXIS_TICK_LABEL_DESCENT_PX 说明）。
-            // 用列高会让滚轮/悬停算出的值比渲染出来的位置偏低。
-            const h = Math.max(1, viewSizeRef.current.h);
-            const pointerY = clamp(e.clientY - bounds.top, 0, h);
-            // t: 0=top, 1=bottom — same semantics as usePianoRollInteractions
-            const t = pointerY / h;
-
-            const wheelAction = getParamEditorWheelAction({
-                deltaX: e.deltaX,
-                deltaY: e.deltaY,
-                horizontalScrollRequested,
-                verticalPanRequested: pianoVerticalScrollRequested,
-                verticalZoomRequested: pianoVerticalZoomRequested,
-                horizontalZoomRequested,
-            });
-
-            const applyVerticalPanDelta = (deltaY: number) => {
-                const delta = (-deltaY / h) * 0.5;
-                if (editParam === "pitch") {
-                    const cur = pitchViewRef.current;
-                    const next = clampViewport("pitch", {
-                        span: cur.span,
-                        center: cur.center + delta * cur.span,
-                    });
-                    setPitchView(next);
-                } else {
-                    const cur = paramViewsRef.current[editParam] ?? {
-                        center: 0.5,
-                        span: 1,
-                    };
-                    const next = clampViewport(editParam, {
-                        span: cur.span,
-                        center: cur.center + delta * cur.span,
-                    });
-                    setParamViewport(editParam, next);
-                }
-                invalidate();
-            };
-
-            const horizontalDelta = Math.abs(e.deltaX) > 0.5 ? e.deltaX : e.deltaY;
-
-            if (wheelAction === "free-scroll") {
-                e.preventDefault();
-                const scroller = scrollerRef.current;
-                if (scroller) {
-                    scroller.scrollLeft += e.deltaX;
-                    syncScrollLeftRef.current(scroller);
-                }
-                applyVerticalPanDelta(e.deltaY);
-                return;
-            }
-
-            if (wheelAction === "horizontal-scroll") {
-                e.preventDefault();
-                const scroller = scrollerRef.current;
-                if (!scroller) return;
-                scroller.scrollLeft += horizontalDelta;
-                syncScrollLeftRef.current(scroller);
-                return;
-            }
-
-            if (wheelAction === "vertical-pan") {
-                e.preventDefault();
-                applyVerticalPanDelta(e.deltaY);
-                return;
-            }
-
-            if (wheelAction === "horizontal-zoom") {
-                // 主画布/轨道视图负责水平缩放；钢琴键区只拦截，避免原生滚动抢走事件。
-                e.preventDefault();
-                return;
-            }
-
-            if (wheelAction !== "vertical-zoom") {
-                return;
-            }
-
-            e.preventDefault();
-
-            const valueAtPointer =
-                editParam === "pitch"
-                    ? (() => {
-                          const view = pitchViewRef.current;
-                          const absMin = PITCH_MIN_MIDI;
-                          const absMax = PITCH_MAX_MIDI;
-                          const span = clamp(view.span, 1e-6, absMax - absMin);
-                          const min = clamp(view.center - span / 2, absMin, absMax - span);
-                          return clamp(min + (1 - t) * span, absMin, absMax);
-                      })()
-                    : (() => {
-                          const desc = processorParamsRef.current?.find(
-                              (d: ProcessorParamDescriptor) => d.id === editParam,
-                          );
-                          const absMin =
-                              desc?.kind.type === "automation_curve" ? desc.kind.min_value : 0;
-                          const absMax =
-                              desc?.kind.type === "automation_curve" ? desc.kind.max_value : 1;
-                          const view = paramViewsRef.current[editParam] ?? {
-                              center: (absMin + absMax) / 2,
-                              span: absMax - absMin || 1,
-                          };
-                          const span = clamp(view.span, 1e-6, absMax - absMin || 1);
-                          const min = clamp(view.center - span / 2, absMin, absMax - span);
-                          return clamp(min + (1 - t) * span, absMin, absMax);
-                      })();
-
-            const factor = e.deltaY < 0 ? 0.9 : 1.1;
-
-            if (editParam === "pitch") {
-                const cur = pitchViewRef.current;
-                const nextSpan = cur.span * factor;
-                const next = clampViewport("pitch", {
-                    span: nextSpan,
-                    center: valueAtPointer - (0.5 - t) * nextSpan,
-                });
-                setPitchView(next);
-            } else {
-                const cur = paramViewsRef.current[editParam] ?? {
-                    center: 0.5,
-                    span: 1,
-                };
-                const nextSpan = cur.span * factor;
-                const next = clampViewport(editParam, {
-                    span: nextSpan,
-                    center: valueAtPointer - (0.5 - t) * nextSpan,
-                });
-                setParamViewport(editParam, next);
-            }
-            invalidate();
-        };
-
-        el.addEventListener("wheel", handler, {
-            passive: false,
-        } as globalThis.AddEventListenerOptions);
-        return () => {
-            el.removeEventListener("wheel", handler);
-        };
-    }, [
+    // 左轴列的滚轮路由（与主画布同一套 keybinding / 投影 / 上下限）。
+    usePianoRollAxisWheel({
+        axisWrapRef,
+        viewSizeRef,
         editParam,
+        pitchViewRef,
+        paramViewsRef,
+        processorParamsRef,
         setPitchView,
         setParamViewport,
         invalidate,
+        clampViewport,
+        scrollerRef,
+        syncScrollLeftRef,
         scrollHorizontalKb,
         pianoKeysVerticalScrollKb,
         pianoKeysVerticalZoomKb,
         horizontalZoomKb,
-    ]);
+    });
 
     // 左轴列（琴键 / 数值刻度）的三个交互：试听、单位切换、悬浮读数。
     usePianoRollAxisInteractions({
