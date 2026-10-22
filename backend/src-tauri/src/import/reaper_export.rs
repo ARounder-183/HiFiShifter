@@ -157,6 +157,12 @@ fn fill_reaper_take(
     bpm: f64,
     is_item_default: bool,
     output_playback_rate: f32,
+    // Item 级增益（`Clip::clip_gain`）；写进 `VOLPAN[0]`。
+    //
+    // 【为什么必须分开写】REAPER 的 item 增益与 take 增益是两个字段、两个旋钮。
+    // 此前这里把 clip 的唯一增益写进 `VOLPAN[2]`（take 音量），于是用户在
+    // HiFiShifter 里拧的旋钮回到 REAPER 里跑到 take 上，item 旋钮始终是 0 dB。
+    item_gain: f32,
 ) -> bool {
     let rate = output_playback_rate.clamp(0.01, 100.0) as f64;
     dest.name = take.name.clone();
@@ -165,7 +171,7 @@ fn fill_reaper_take(
     // - 显式 take：`TAKEVOLPAN <pan> <take volume> <pan law>`，
     //   默认值为 `0 1 -1`；不能沿用 Item 默认 take 的四元组写法。
     dest.vol_pan = if is_item_default {
-        vec![1.0, 0.0, take.gain as f64, -1.0]
+        vec![item_gain as f64, 0.0, take.gain as f64, -1.0]
     } else {
         vec![0.0, take.gain as f64, -1.0]
     };
@@ -301,6 +307,7 @@ fn build_item(
         bpm,
         true,
         combined_rate_f32,
+        working.clip_gain,
     ) {
         return None;
     }
@@ -333,6 +340,7 @@ fn build_item(
             bpm,
             false,
             clip_rate * take.playback_rate,
+            working.clip_gain,
         ) {
             dest.selected = false;
             item.takes.push(dest);

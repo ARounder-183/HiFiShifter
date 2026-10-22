@@ -362,6 +362,8 @@ export const timelineApi = {
         fadeInS?: number;
         /** 淡出 S 轴（语义同 fadeInS）。 */
         fadeOutS?: number;
+        /** Item 级增益（时间轴旋钮写的那一层；REAPER 的 `D_VOL`）。 */
+        itemGain?: number;
     }) =>
         invoke<TimelineResult>(
             "set_clip_state",
@@ -391,6 +393,7 @@ export const timelineApi = {
             payload.checkpoint,
             payload.fadeInS,
             payload.fadeOutS,
+            payload.itemGain,
         ),
 
     /**

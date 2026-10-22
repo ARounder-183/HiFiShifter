@@ -874,6 +874,8 @@ pub(super) fn set_clip_state(
     // 轴），前端在独立模式下也不会发送，这里只做透传以保持两端命令签名一致。
     fade_in_s: Option<f64>,
     fade_out_s: Option<f64>,
+    // Item 级增益（时间轴旋钮；REAPER 的 D_VOL）。追加在末尾，见命令层说明。
+    item_gain: Option<f32>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let previous_clip = tl.clips.iter().find(|clip| clip.id == clip_id).cloned();
@@ -890,6 +892,7 @@ pub(super) fn set_clip_state(
             start_sec,
             length_sec,
             gain,
+            item_gain,
             muted,
             source_start_sec,
             source_end_sec,
@@ -1961,6 +1964,7 @@ pub(super) fn import_media_files_as_takes(
         waveform_preview: None,
         pitch_range: None,
         gain: 1.0,
+        clip_gain: 1.0,
         muted: false,
         source_start_sec: 0.0,
         source_end_sec: length,

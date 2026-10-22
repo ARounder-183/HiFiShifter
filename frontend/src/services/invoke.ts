@@ -350,6 +350,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[23],
                 fadeInS: args[24],
                 fadeOutS: args[25],
+                // 追加在末尾（与后端命令签名同序），避免中间插入导致其后全部错位。
+                ...(args[26] !== undefined ? { itemGain: args[26] } : {}),
             };
 
         case "set_clips_state_bulk":

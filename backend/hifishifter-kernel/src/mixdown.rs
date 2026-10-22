@@ -1151,7 +1151,8 @@ fn render_mixdown_internal(
             .get(&clip.track_id)
             .cloned()
             .unwrap_or((1.0, false, true));
-        let gain = crate::gain::clamp_gain(clip.gain.max(0.0) * track_gain_value);
+        // item × take：两层增益都要算进来（见 Clip::audible_gain）。
+        let gain = crate::gain::clamp_gain(clip.audible_gain() * track_gain_value);
         if gain <= 0.0 {
             continue;
         }
@@ -2566,6 +2567,7 @@ mod tests {
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
+                clip_gain: 1.0,
                 muted: false,
                 source_start_sec: 0.0,
                 source_end_sec: 1.0,
@@ -2701,6 +2703,7 @@ mod tests {
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
+                clip_gain: 1.0,
                 muted: false,
                 source_start_sec: 0.0,
                 source_end_sec: 1.0,
@@ -2821,6 +2824,7 @@ mod tests {
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
+                clip_gain: 1.0,
                 muted: false,
                 source_start_sec: 0.0,
                 source_end_sec: 1.0,
@@ -2961,6 +2965,7 @@ mod tests {
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
+            clip_gain: 1.0,
             muted: false,
             source_start_sec: 0.0,
             source_end_sec: 0.5,

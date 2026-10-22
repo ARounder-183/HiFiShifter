@@ -49,6 +49,7 @@ export interface TimelineTrack {
 export interface TimelineClipTake {
     id: string;
     name: string;
+    /** Take 级增益（take 属性面板）。与 `TimelineClip.clip_gain` 相乘得到可听增益。 */
     gain: number;
     source_path?: string;
     source_path_relative?: string;
@@ -90,6 +91,8 @@ export interface TimelineClip {
     color: string;
     takes?: TimelineClipTake[];
     active_take_id?: string;
+    /** Item 级增益（时间轴旋钮写的那一层；REAPER 的 `D_VOL`）。缺省按 1.0。 */
+    clip_gain?: number;
     source_path?: string;
     source_path_relative?: string;
     duration_sec?: number;

@@ -263,7 +263,9 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "sourceEndSec"
                 | "playbackRate"
                 | "clipPlaybackRate"
+                // 两层增益：`itemGain` 写宿主 item 的 D_VOL，`gain` 写 take 的 D_VOL。
                 | "gain"
+                | "itemGain"
                 | "muted"
                 | "snapOffsetSec"
                 | "fadeInSec"
@@ -840,8 +842,17 @@ pub(crate) fn execute_managed(
             if let Some(value) = edit.patch.muted {
                 target.set_item(c"B_MUTE", if value { 1. } else { 0. }, &authorized)?;
             }
-            if let Some(value) = edit.patch.gain {
+            // Item 增益 → 宿主 item 的 D_VOL（用户在时间轴旋钮上拧的那一层）。
+            if let Some(value) = edit.patch.item_gain {
                 target.set_item(c"D_VOL", value as f64, &authorized)?;
+            }
+            // Take 增益 → 宿主 take 的 D_VOL（take 属性面板那一层）。
+            //
+            // 【为什么必须分开写】两者在 REAPER 里是两个字段、两个旋钮。此前只有
+            // 一个 `gain` 且写向 item，take 侧永远写不到；反过来（早期）又把一个
+            // 值写进 take，用户在时间轴拧的旋钮就跑到 take 上去了。
+            if let Some(value) = edit.patch.gain {
+                target.set_take(c"D_VOL", value as f64, &authorized)?;
             }
             if let Some(enabled) = edit.patch.loop_enabled {
                 // 双向：`B_LOOPSRC` 是 item 属性，读回来的就是它（见 `HostClipGeometry`）。
@@ -1146,7 +1157,7 @@ mod tests {
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
         for gain in [0.5, 0.] {
             let plan = editor
-                .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":gain}))
+                .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"itemGain":gain}))
                 .unwrap();
             let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
             host.reset();

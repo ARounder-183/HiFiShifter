@@ -843,6 +843,7 @@ mod tests {
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
+            clip_gain: 1.0,
             muted: false,
             source_start_sec: 0.0,
             source_end_sec: length_sec,

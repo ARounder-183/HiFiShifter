@@ -199,6 +199,20 @@ fn reaper_take_volume(values: &[f64], explicit_take: bool) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// item 级的 **trim**（`VOLPAN[0]`，即 REAPER 的 item 增益 / `D_VOL`）。
+///
+/// 【为什么要与 take 音量分开】用户在 REAPER 时间轴的旋钮上拧的是 **item** 增益，
+/// take 增益是另一个旋钮。此前这里把两者乘成一个数写进 `ClipTake.gain`，导出时只能
+/// 猜一层，于是"在 HiFiShifter 里拧的增益"回到 REAPER 就落到 take 上。
+fn item_trim_gain(item: &ReaperItem) -> f64 {
+    item.default_take
+        .vol_pan
+        .first()
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0)
+}
+
 fn take_linear_gain(item: &ReaperItem, take: &ReaperTake, take_volume_overridden: bool) -> f64 {
     // REAPER 的可听增益 = item trim（VOLPAN[0]，item 级） × take volume
     // （VOLPAN[2] / TAKEVOLPAN[1]）。只取 take volume 会丢掉用户在 item
@@ -211,21 +225,14 @@ fn take_linear_gain(item: &ReaperItem, take: &ReaperTake, take_volume_overridden
         .takes
         .iter()
         .any(|candidate| std::ptr::eq(candidate, take));
-    let trim = item
-        .default_take
-        .vol_pan
-        .first()
-        .copied()
-        .filter(|v| v.is_finite())
-        .unwrap_or(1.0);
-
     let vol = if take_volume_overridden {
         1.0
     } else {
         reaper_take_volume(&take.vol_pan, explicit_take)
     };
     if vol != 0.0 {
-        return trim * vol;
+        // **只返回 take 音量**：item trim 由 `item_trim_gain` 单独进 `Clip::clip_gain`。
+        return vol;
     }
 
     // 兼容部分 Reaper 多 Take 工程：非主 take 的 TAKEVOLPAN 可能写成 0，
@@ -236,7 +243,7 @@ fn take_linear_gain(item: &ReaperItem, take: &ReaperTake, take_volume_overridden
 
     let fallback = reaper_take_volume(&item.default_take.vol_pan, false);
     if fallback != 0.0 {
-        trim * fallback
+        fallback
     } else {
         0.0
     }
@@ -1415,6 +1422,7 @@ fn process_item(
                     max: 24.0,
                 }),
                 gain: convert_volume(take_gain),
+                clip_gain: convert_volume(item_trim_gain(item)),
                 muted: item_muted,
                 // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
                 // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
@@ -1596,6 +1604,7 @@ fn process_item(
                 max: 24.0,
             }),
             gain: convert_volume(take_gain),
+            clip_gain: convert_volume(item_trim_gain(item)),
             muted: item_muted,
             // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
             // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
@@ -2247,6 +2256,7 @@ fn process_midi_item(
             max: max_note,
         }),
         gain: convert_volume(take_gain),
+        clip_gain: convert_volume(item_trim_gain(item)),
         muted: item_muted,
         source_start_sec: 0.0,
         source_end_sec: item_length * play_rate,

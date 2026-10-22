@@ -1266,6 +1266,7 @@ impl ClipTake {
         }
     }
 
+
     /// 把该 Take 的内容写入 Clip 的 active-take 内存投影。
     /// `Clip.playback_rate` 始终保存 Clip×Take 的有效播放倍率。
     pub fn apply_to_clip(&self, clip: &mut Clip) {
@@ -1584,9 +1585,22 @@ pub struct Clip {
     #[serde(default, skip_serializing)]
     pub pitch_range: Option<PitchRange>,
 
-    /// 增益（active take 投影；Take 级音量）。
+    /// Take 级增益（active take 投影；权威值在 `ClipTake::gain`）。
+    ///
+    /// 与 `clip_gain` 相乘得到可听增益，见 [`Clip::audible_gain`]。
     #[serde(default = "default_gain", skip_serializing)]
     pub gain: f32,
+    /// **Item 级增益**（REAPER 的 `D_VOL` / `VOLPAN[0]`）。
+    ///
+    /// 【为什么必须单独一层】REAPER 的 item 增益与 take 增益是两个独立量，用户在时间轴
+    /// 旋钮上拧的是 **item** 增益。此前本模型只有 take 一层，于是这里拧出来的值在导出
+    /// 时被写进 `TAKEVOLPAN`，回到 REAPER 里看 item 旋钮仍是 0 dB —— 两层信息在
+    /// 导入时被乘成一个数，导出时只能猜一层。
+    ///
+    /// 【为什么不与 `gain` 合并】合并就回到上面那个问题：item 与 take 是**两个**旋钮，
+    /// 合成一个数之后无论导出到哪一层都会与用户的另一层设置对不上。
+    #[serde(default = "default_gain")]
+    pub clip_gain: f32,
     #[serde(default)]
     pub muted: bool,
     #[serde(alias = "trim_start_sec", default, skip_serializing)]
@@ -1738,6 +1752,15 @@ pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
 }
 
 impl Clip {
+    /// 该片段当前**可听**的线性增益（item × take）。
+    ///
+    /// 【为什么要一个入口】两层增益相乘这件事若散落在渲染、混音、导出、波形各处，
+    /// 漏乘一处的表现是"某个环节声音大了/小了一半"，而这类偏差在单测里几乎看不出来。
+    /// 统一走这里，谁要增益谁调它。
+    pub fn audible_gain(&self) -> f32 {
+        crate::gain::clamp_gain(self.clip_gain.max(0.0) * self.gain.max(0.0))
+    }
+
     /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
     ///
     /// `all_takes` 为真时覆盖全部 Take（跟随"同步编辑所有 Take"设置），否则只盖
@@ -1996,7 +2019,12 @@ pub struct ClipStatePatch {
     pub name: Option<String>,
     pub start_sec: Option<f64>,
     pub length_sec: Option<f64>,
+    /// Take 级增益（take 属性面板用）。
     pub gain: Option<f32>,
+    /// **Item 级增益**（时间轴旋钮用；REAPER 的 `D_VOL`）。
+    ///
+    /// 与 `gain` 分开：两者在 REAPER 里是两个旋钮，合成一个数就再也分不回去。
+    pub item_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,
@@ -8887,6 +8915,7 @@ impl TimelineState {
                     max: 24.0,
                 })),
             gain: 1.0,
+            clip_gain: 1.0,
             muted: false,
             source_start_sec: 0.0,
             source_end_sec: computed_duration_sec.unwrap_or(ls),
@@ -9491,6 +9520,7 @@ impl TimelineState {
                 formant_morph: None,
                 channel_mode: None,
                 host_group_id: None,
+                item_gain: None,
             },
         );
     }
@@ -9509,7 +9539,11 @@ impl TimelineState {
                 c.length_sec = v.max(0.0);
             }
             if let Some(v) = patch.gain {
+                // take 级：写投影，并同步进 active take（权威值在那里）。
                 c.gain = crate::gain::clamp_gain(v);
+            }
+            if let Some(v) = patch.item_gain {
+                c.clip_gain = crate::gain::clamp_gain(v);
             }
             if let Some(v) = patch.muted {
                 c.muted = v;
@@ -9804,6 +9838,7 @@ impl TimelineState {
                     //（见 commands::timeline::create_clips_bulk）。
                     channel_mode: None,
                     host_group_id: None,
+                    item_gain: None,
                 },
             );
 
@@ -10080,6 +10115,7 @@ impl TimelineState {
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
+            clip_gain: 1.0,
             muted: false,
             source_start_sec: 0.0,
             source_end_sec: length,

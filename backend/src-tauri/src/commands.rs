@@ -1703,6 +1703,9 @@ pub fn set_clip_state(
     checkpoint: Option<bool>,
     fade_in_s: Option<f64>,
     fade_out_s: Option<f64>,
+    // 【为什么追加在最后】Tauri 命令按位次映射前端的位置参数。插在中间会让其后
+    // 每一个参数整体错位一格（历史已发生过同类事故）。
+    item_gain: Option<f32>,
 ) -> crate::models::TimelineStatePayload {
     timeline::set_clip_state(
         state,
@@ -1732,6 +1735,7 @@ pub fn set_clip_state(
         checkpoint,
         fade_in_s,
         fade_out_s,
+        item_gain,
     )
 }
 
