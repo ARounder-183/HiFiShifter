@@ -10,7 +10,6 @@
  * 工具栏能碰到的东西一目了然，越界即类型错误。
  */
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
-import React from "react";
 import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
 import { ChevronDownIcon, CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
@@ -22,12 +21,9 @@ import {
     setToolModePersistent,
     persistUiSettings,
     setParamEditorSyncTimeline,
-    toggleVisibleReferenceRootTrackId,
 } from "../../../../features/session/sessionSlice";
 import { resolvePitchAlgoSelectValue } from "../../../../features/tracks/pitchAlgoOptions";
 import { TimelineDisplaySettingsDialog } from "../../TimelineDisplaySettingsDialog";
-import { buildReferencePitchStrokeColor } from "../referenceRootTracks";
-import { buildReferenceRootTrackTriggerElement } from "../referenceRootTrackTrigger";
 import { wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import { AppIconButton, AppSelect } from "../../../../ui";
 import { ToolbarSlot, ParamToolbarPill } from "./toolbarParts";
@@ -35,6 +31,7 @@ import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
 import { PitchSnapMenu } from "./PitchSnapMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
+import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -132,24 +129,19 @@ export function ParamToolbar({ m }: Props) {
         editParam,
         getProcessorParamLabel,
         getStaticOptionLabel,
-        handleOpenMidiDialog,
         handleStaticParamChange,
         pitchAlgoOptions,
-        pitchEnabled,
         pitchGroupActive,
         pitchGroupLabel,
         pitchGroupTooltip,
-        pitchHardDisableReason,
         pitchSnapOpen,
         processorStaticParams,
         processorStaticValues,
-        referenceRootTrackOptions,
         rootTrack,
         rootTrackId,
         s,
         secondaryParamVisible,
         selectedIsChildTrack,
-        setHoveredReferenceRootTrackId,
         setPitchSnapOpen,
         setTimeDisplaySettingsOpen,
         t,
@@ -158,8 +150,6 @@ export function ParamToolbar({ m }: Props) {
         toggleSecondaryParam,
         toolbarRowRef,
         toolbarTier,
-        updateVisibleReferenceRootTrackIds,
-        visibleReferenceRootTrackIds,
     } = m;
 
     return (
@@ -423,112 +413,7 @@ export function ParamToolbar({ m }: Props) {
 
             <Flex gap="2" align="center">
                 <Flex gap="1" align="center">
-                    {/* 参考轨道组 / 导入 MIDI：仅当切换到“音高”参数时显示（位置固定在“音高”左侧）。
-                        按钮样式与其他工具按钮一致（Radix soft），简写 + ToolTip 保留全称。 */}
-                    {rootTrack && editParam === "pitch" ? (
-                        <React.Fragment>
-                            <DropdownMenu.Root>
-                                <DropdownMenu.Trigger data-tooltip={t("reference_root_tracks")}>
-                                    <Button
-                                        size="1"
-                                        variant="soft"
-                                        color="gray"
-                                        style={{ cursor: "pointer" }}
-                                    >
-                                        {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
-                                            快捷键入口，是**唯一入口**，不能整块隐藏，
-                                            只能瘦身；全称仍在按钮的 ToolTip 里。 */}
-                                        <ToolbarSlot hideAt={9} tier={toolbarTier}>
-                                            {buildReferenceRootTrackTriggerElement(
-                                                `${tf("reference_root_tracks_short")}${
-                                                    visibleReferenceRootTrackIds.length > 0
-                                                        ? ` (${visibleReferenceRootTrackIds.length})`
-                                                        : ""
-                                                }`,
-                                            )}
-                                        </ToolbarSlot>
-                                        <ChevronDownIcon width="12" height="12" />
-                                    </Button>
-                                </DropdownMenu.Trigger>
-                                <DropdownMenu.Content variant="soft" color="gray">
-                                    <DropdownMenu.Item
-                                        onSelect={() =>
-                                            updateVisibleReferenceRootTrackIds(
-                                                referenceRootTrackOptions.map((track) => track.id),
-                                            )
-                                        }
-                                    >
-                                        {t("reference_root_tracks_all")}
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        onSelect={() => updateVisibleReferenceRootTrackIds([])}
-                                    >
-                                        {t("reference_root_tracks_clear")}
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Separator />
-                                    {referenceRootTrackOptions.length === 0 ? (
-                                        <DropdownMenu.Item disabled>
-                                            {t("reference_root_tracks_empty")}
-                                        </DropdownMenu.Item>
-                                    ) : (
-                                        referenceRootTrackOptions.map((track) => (
-                                            <DropdownMenu.CheckboxItem
-                                                key={track.id}
-                                                checked={visibleReferenceRootTrackIds.includes(
-                                                    track.id,
-                                                )}
-                                                onCheckedChange={() => {
-                                                    dispatch(
-                                                        toggleVisibleReferenceRootTrackId(track.id),
-                                                    );
-                                                    void dispatch(persistUiSettings());
-                                                }}
-                                                onPointerEnter={() =>
-                                                    setHoveredReferenceRootTrackId(track.id)
-                                                }
-                                                onPointerLeave={() =>
-                                                    setHoveredReferenceRootTrackId(null)
-                                                }
-                                            >
-                                                <Flex align="center" gap="2">
-                                                    <span
-                                                        className="inline-block h-2.5 w-2.5 rounded-full"
-                                                        style={{
-                                                            background:
-                                                                buildReferencePitchStrokeColor(
-                                                                    track.color,
-                                                                    true,
-                                                                ),
-                                                        }}
-                                                    />
-                                                    <span>{track.name}</span>
-                                                </Flex>
-                                            </DropdownMenu.CheckboxItem>
-                                        ))
-                                    )}
-                                </DropdownMenu.Content>
-                            </DropdownMenu.Root>
-                            {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
-                                （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
-                            <ToolbarSlot hideAt={8} tier={toolbarTier}>
-                                <span
-                                    className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
-                                >
-                                    <Button
-                                        size="1"
-                                        /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
-                                        variant="soft"
-                                        onClick={handleOpenMidiDialog}
-                                        disabled={!pitchEnabled}
-                                        style={{ cursor: "pointer" }}
-                                    >
-                                        {tf("midi_import")}
-                                    </Button>
-                                </span>{" "}
-                            </ToolbarSlot>
-                        </React.Fragment>
-                    ) : null}
+                    <ReferenceTrackGroup m={m} />
                     {selectedIsChildTrack &&
                     (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
                         <DropdownMenu.Root>
