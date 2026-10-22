@@ -2147,7 +2147,6 @@ export const zhTW = {
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暫停",
     plugin_transport_host_only: "外掛無法啟動宿主播放 —— 請在宿主裡按播放",
-    plugin_standalone_only: "僅在獨立 App 中可用",
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
     // ── 捕獲（不支援 ARA 的宿主裡，把宿主播放的音訊錄進外掛）──────────────

@@ -2143,7 +2143,6 @@ export const zhCN = {
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暂停",
     plugin_transport_host_only: "插件无法启动宿主播放 —— 请在宿主里按播放",
-    plugin_standalone_only: "仅在独立 App 中可用",
     plugin_feature_unavailable: "该功能尚未在 VST/ARA 插件里提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；请在宿主里倒放这一条",
     // ── 捕获（不支持 ARA 的宿主里，把宿主播放的音频录进插件）──────────────

@@ -88,6 +88,23 @@ pub(crate) const FACTORY_ID: &str = "com.hifishifter.ara";
 /// ARA 文档归档 ID。
 pub(crate) const ARCHIVE_ID: &str = "com.hifishifter.ara.archive";
 
+/// 「关于」对话框与诊断包里的**形态标识**。
+///
+/// 【为什么不能写死 "ARA plugin"】宿主不提供 ARA 时，本插件仍然可作为常规 VST3
+/// 使用（主要靠捕获通路）。写死 ARA 会让用户拿着一张与实际运行形态不符的截图报障，
+/// 而开发者第一眼要判断的正是"这份日志来自哪条通路"。
+///
+/// 【判据为什么是"有没有捕获存储且未绑定 ARA"】捕获存储只在"宿主没走 ARA"的实例上
+/// 才有意义；已绑定 ARA 时几何由宿主给，捕获通路不适用。
+pub(crate) fn plugin_form_label(
+    owner: Option<&crate::render::extension::ExtensionOwner>,
+) -> &'static str {
+    match owner {
+        Some(owner) if !owner.is_ara_bound() => "VST3 plug-in (capture)",
+        _ => "VST3 / ARA plug-in",
+    }
+}
+
 /// 写一行诊断信息。
 ///
 /// 【为什么不用 `println!`】插件跑在宿主进程里，stdout 通常无处可去。`log` 会走宿主

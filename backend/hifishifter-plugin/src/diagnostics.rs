@@ -23,7 +23,12 @@ use std::sync::{Mutex, Once, OnceLock};
 const PLUGIN_LOG_FILE: &str = "plugin.log";
 
 /// 会话头里的产品标识：两个形态的日志放在一起时要能一眼分清。
-const PRODUCT: &str = "HiFiShifter ARA plugin";
+///
+/// 【为什么不再写 `ARA plugin`】宿主不提供 ARA 时，这个插件仍然可作为常规 VST3
+/// 使用（主要靠捕获通路）。写死 ARA 会让日志与「关于」对不上实际运行形态 ——
+/// 用户拿着截图报障时，开发者会先怀疑"你装的到底是哪个"。这里写的是**构建形态**，
+/// 运行时具体走 ARA 还是捕获由 `get_about_info` 的 `host` 字段如实给出。
+const PRODUCT: &str = "HiFiShifter VST3 / ARA plugin";
 
 static INIT: Once = Once::new();
 static LOGGER: FileLogger = FileLogger;

@@ -2209,7 +2209,6 @@ export const enUS = {
     plugin_transport_play: "Play or pause in the host",
     plugin_transport_host_only:
         "The plug-in cannot start the host's transport — press play in the host",
-    plugin_standalone_only: "Only available in the standalone app",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",

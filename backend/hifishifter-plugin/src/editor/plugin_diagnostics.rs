@@ -1,9 +1,12 @@
 //! 插件侧**精简**诊断导出：日志 + 构建身份 + 运行时 + 宿主版本。
 //!
-//! 【为什么是精简版】App 的完整诊断包会跑推理设备基准测试、枚举 GPU/DML 设备、
-//! 统计音高缓存 —— `src-tauri/src/commands/diagnostics.rs` 自己写着基准测试在
-//! GPU/驱动异常的环境下**可能硬崩**。在 DAW 进程里跑它等于把用户的整个会话一起
-//! 带走。因此插件里只做**不会崩**的部分，基准测试保持拒绝（见 `commands.rs`）。
+//! 【为什么是精简版】App 的完整诊断包会**自动**跑一遍推理设备基准测试（20–60 秒）
+//! 并枚举 GPU/DML 设备。诊断包是"用户报障时随手导出"的东西，在它里面塞一个要等
+//! 一分钟的推理动作并不合适 —— 用户要的是立刻拿到日志。
+//!
+//! 【基准测试本身在插件里是可用的】它有自己的入口（选项 → 推理设备 → 运行基准测试），
+//! 用户主动点击、有明确的"运行中"提示，并且内核侧自带单飞锁租约与烟测超时收敛。
+//! 精简的只是**诊断包不自动跑它**，不是"插件不支持它"。
 //!
 //! 【为什么放这里而不是 `commands.rs`】打包要碰文件系统与 zip，而 `commands.rs`
 //! 的 dispatch 跑在 actor 线程上、只处理纯数据命令。这里由 UI 线程调用（保存对话框
@@ -114,7 +117,7 @@ mod tests {
         let out = dir.join("package.zip");
         write_package(
             &out,
-            &serde_json::json!({"product": "HiFiShifter ARA plugin"}),
+            &serde_json::json!({"product": "HiFiShifter VST3 / ARA plugin"}),
             &serde_json::json!({"ui": {"locale": "zh-CN"}}),
         )
         .unwrap();
@@ -139,7 +142,7 @@ mod tests {
         let mut info = String::new();
         std::io::Read::read_to_string(&mut archive.by_name("system_info.json").unwrap(), &mut info)
             .unwrap();
-        assert!(info.contains("HiFiShifter ARA plugin"), "{info}");
+        assert!(info.contains("HiFiShifter VST3 / ARA plugin"), "{info}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

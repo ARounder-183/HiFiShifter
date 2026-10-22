@@ -185,7 +185,7 @@ fn export_output_path(
 /// 导出计划预检：只算路径与冲突，不渲染。
 fn preview_export_audio_plan(request: &serde_json::Value) -> Result<Value, String> {
     if request["mode"].as_str().unwrap_or("project") != "project" {
-        return Err("separated export is not available in the ARA plugin".into());
+        return Err("separated export is not available in the plug-in".into());
     }
     let spec = export_spec(request)?;
     let path = export_output_path(request, spec.format)?;
@@ -208,7 +208,7 @@ fn export_audio_to_file(
     request: &serde_json::Value,
 ) -> Result<Value, String> {
     if request["mode"].as_str().unwrap_or("project") != "project" {
-        return Err("separated export is not available in the ARA plugin".into());
+        return Err("separated export is not available in the plug-in".into());
     }
     let spec = export_spec(request)?;
     let path = export_output_path(request, spec.format)?;
@@ -604,7 +604,7 @@ pub(super) fn dispatch(
             // 原先这里返回 `{name, version, host}`，于是插件里版本号显示错、
             // commit 恒空、仓库链接恒走前端兜底值。
             return Ok(hifishifter_kernel::build_info::about_payload(
-                "ARA plugin",
+                crate::plugin_form_label(session.capture_owner().as_deref()),
                 crate::VERSION,
             ));
         }
@@ -639,11 +639,22 @@ pub(super) fn dispatch(
             }));
         }
         // 诊断导出与基准测试：导出走 UI 线程的精简实现（见 `webview.rs`，命令名与
-        // 独立 App **相同**，前端不必按模式分支），基准测试在插件里**保持拒绝** ——
-        // `src-tauri` 的完整实现会初始化 ORT 会话，在 GPU/驱动异常的环境下可能硬崩，
-        // 而在 DAW 进程里崩会带走用户的整个会话。
+        // 独立 App **相同**，前端不必按模式分支）。
+        //
+        // 【为什么基准测试现在也放行】此前它在这里被拒绝，理由是"初始化 ORT 会话可能
+        // 在 GPU/驱动异常的环境下硬崩，而在 DAW 进程里崩会带走用户的整个会话"。那个
+        // 顾虑在**当前内核**里已经被系统性缓解（见 `vocoder_ort_session` 的文件头）：
+        // 全局单飞锁带租约抢占、烟测有超时且超时即禁用该 EP、GPU 候选创建失败只记
+        // 日志并换下一个。而剩下的真正风险是"驱动在 `run()` 里崩"——那是进程级故障，
+        // 无论跑不跑基准测试，用户下一次渲染一样会撞上。
+        //
+        // 反过来，基准测试是用户排查"该选哪个推理设备"的**唯一**手段。用"可能崩"
+        // 封掉一个用户主动触发、且自带收敛保护的入口，代价大于收益。
         "run_vocoder_benchmark" => {
-            return Err("the vocoder benchmark is not available in ARA plugin mode".into())
+            return match hifishifter_kernel::nsf_hifigan_onnx::run_benchmark() {
+                Ok(results) => value(results),
+                Err(error) => Err(error),
+            };
         }
         "plugin_history_barrier" => {
             session.suppress_history.store(false, Ordering::Release);
@@ -998,7 +1009,7 @@ pub(super) fn dispatch(
             "compiled": false,
             "available": false,
             "version": serde_json::Value::Null,
-            "error": "vslib is not bundled with the ARA plugin",
+            "error": "vslib is not bundled with the plug-in",
         })),
         // 推理设备（ORT Execution Provider）只读状态。插件与独立 App **共用同一份设置、
         // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_id` 下发给
@@ -1726,6 +1737,6 @@ pub(super) fn dispatch(
                 &json!({"mode": "project", "projectOutputPath": path}),
             )
         }
-        _ => Err(format!("Command unavailable in ARA plugin mode: {command}")),
+        _ => Err(format!("Command unavailable in plug-in mode: {command}")),
     }
 }

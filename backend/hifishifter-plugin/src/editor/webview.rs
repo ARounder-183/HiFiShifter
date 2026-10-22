@@ -1288,11 +1288,11 @@ fn configure_browser(
                     request["args"]=serde_json::json!({"clipId":clip_id,"name":name,"checkpoint":request["args"]["checkpoint"]});
                 } else {
                     // 【为什么给明确错误而不是让它掉进 catch-all】此前这条命令原样落到
-                    // `Command unavailable in ARA plugin mode: rename_clip_take` ——
+                    // `Command unavailable in plug-in mode: rename_clip_take` ——
                     // 用户看到的是"命令不可用"，而不是"只有当前 Take 能改名"。后者才是
                     // 可操作的。
                     let reply=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
-                        "error":"only the active take can be renamed in the ARA plugin; switch to it in the host first"}).to_string());
+                        "error":"only the active take can be renamed in the plug-in; switch to it in the host first"}).to_string());
                     browser.PostWebMessageAsJson(PCWSTR(reply.as_ptr()))?;
                     return Ok(());
                 }
@@ -1520,8 +1520,8 @@ fn configure_browser(
                     let document=owner.editor_document().ok();
                     let backend=owner.host_backend();
                     let system=serde_json::json!({
-                        "product":"HiFiShifter ARA plugin",
-                        "about":hifishifter_kernel::build_info::about_payload("ARA plugin",crate::VERSION),
+                        "product":"HiFiShifter VST3 / ARA plugin",
+                        "about":hifishifter_kernel::build_info::about_payload(crate::plugin_form_label(Some(owner.as_ref())),crate::VERSION),
                         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,
                         "generatedAt":chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
                         // 用户报障时"你是哪个宿主"是第一个要问的问题。宿主名来自

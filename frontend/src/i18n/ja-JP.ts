@@ -2226,7 +2226,6 @@ export const jaJP = {
     plugin_transport_play: "ホストの再生/一時停止",
     plugin_transport_host_only:
         "プラグインからホストの再生は開始できません — ホストで再生してください",
-    plugin_standalone_only: "スタンドアロン版でのみ利用できます",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",

@@ -4,11 +4,9 @@ import {
     canImportHostAudio,
     canCreateHostTracks,
     canImportAsTakes,
-    dawControlledReason,
 } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { MessageKey } from "../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import { store, type RootState } from "../../app/store";
@@ -141,39 +139,6 @@ function timeUnitLabelKey(unit: TimeUnit): string {
         case "clock":
             return "time_unit_clock";
     }
-}
-
-/**
- * 插件里不可用、且必须**说明原因**的菜单项。
- *
- * 【为什么不用 title / data-tooltip】两条悬停通道在菜单弹出期间都不可用：
- * 自定义气泡被 `AppTooltipProvider` 全局抑制（菜单开着就不弹悬停提示，
- * `components/AppTooltip.tsx:123-130`），原生 `title` 则在原生深色主题下撞色、
- * 且不受本项目排版控制（多行会被折成一行）。所以这里把原因**常驻**渲染成
- * 第二行弱化小字：不需要用户猜到要悬停，"为什么点不了"始终可见
- * （与 `ui/Menu.tsx:75-77` 同一条要求）。
- */
-function StandaloneOnlyItem({
-    labelKey,
-    onSelect,
-}: {
-    labelKey: MessageKey;
-    onSelect?: () => void;
-}) {
-    const { tf } = useI18n();
-    return (
-        <DropdownMenu.Item
-            disabled
-            className="flex-wrap"
-            // 禁用项本就不会触发 onSelect；保留它只为语义完整（不可用时不应有动作）。
-            onSelect={onSelect}
-        >
-            <span className="basis-full">{tf(labelKey)}</span>
-            <span className="basis-full text-qt-2xs text-qt-text-muted">
-                {tf("plugin_standalone_only")}
-            </span>
-        </DropdownMenu.Item>
-    );
 }
 
 /** MenuBar 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
@@ -649,25 +614,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         <DropdownMenu.Item
                             disabled={!canImportHostAudio()}
                             onSelect={() => void handleImportAudioFromMenu()}
-                            // 【为什么禁用理由单独占一行显示】菜单弹出期间自定义气泡
-                            // 被全局抑制（自定义 tooltip 通道的既定规则：菜单开着就不弹
-                            // 悬停提示，`components/AppTooltip.tsx:123-130`），而原生
-                            // `title` 在原生深色主题下撞色、也不受本项目排版控制。
-                            // 因此这里不用任何"悬停提示"，而是把理由**常驻**渲染成
-                            // 一行弱化小字 —— 禁用项的原因必须始终可见（与 `ui/Menu.tsx:75-77`
-                            // 同一条要求："为什么点不了"应当可见），而这比悬停多一步更直接。
-                            // 【为什么它不会挤占高度】`flex-wrap` + `text-qt-2xs`：
-                            // 启用态（插件模式且可导入）下这一行根本不渲染。
+                            // 【为什么禁用项不再附一行原因】那一行会把菜单项撑成两行，
+                            // 而菜单的行高与对齐是按单行排的 —— 混进去之后整块菜单的节奏就乱了
+                            // （用户原话："这些提示被加进来时根本没有考虑到菜单的布局，很丑陋"）。
+                            // "为什么点不了"由**位置**回答：它就在插件形态的文件菜单里，旁边
+                            // 就是能点的"导出音频"。需要长句解释的地方是设置窗口与悬停提示，
+                            // 不是菜单项内部。
                         >
                             {t("menu_import_media")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                 {shortcutLabel("project.importMedia")}
                             </div>
-                            {!canImportHostAudio() ? (
-                                <div className="basis-full text-qt-2xs text-qt-text-muted">
-                                    {dawControlledReason()}
-                                </div>
-                            ) : null}
                         </DropdownMenu.Item>
                         <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
                             {t("menu_export_audio")}
@@ -676,18 +633,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </div>
                         </DropdownMenu.Item>
                         <DropdownMenu.Separator />
-                        {/* 【为什么不再写死 `· REAPER`】菜单标签对所有宿主可见；宿主
-                            身份由 `hostKind()` 决定，说明"由宿主管理"用既有的本地化
-                            文案，而不是把 REAPER 当成唯一宿主。 */}
-                        {/* 【为什么理由常驻显示】菜单开着时自定义气泡被全局抑制，
-                            原生 `title` 又不跟随本项目样式 —— 两条悬停通道在这里都
-                            不可用，于是把"由宿主控制"直接渲染成第二行弱化小字。 */}
-                        <DropdownMenu.Item disabled className="flex-wrap">
-                            <span className="basis-full">{t("menu_save_project")}</span>
-                            <span className="basis-full text-qt-2xs text-qt-text-muted">
-                                {dawControlledReason()}
-                            </span>
-                        </DropdownMenu.Item>
+                        {/* 保存工程由宿主负责：插件没有"工程文件"这个概念（工程就是
+                            宿主的那个文件）。禁用项**不附第二行说明** —— 见上方
+                            "为什么禁用项不再附一行原因"。 */}
+                        <DropdownMenu.Item disabled>{t("menu_save_project")}</DropdownMenu.Item>
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
             ) : (
@@ -961,13 +910,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {t("track_add_host")}
                             </DropdownMenu.Item>
                         ) : (
-                            // 不能建轨时菜单里只留一条禁用项 + 它的原因。
-                            <DropdownMenu.Item disabled className="flex-wrap">
-                                <span className="basis-full">{t("track_add_host")}</span>
-                                <span className="basis-full text-qt-2xs text-qt-text-muted">
-                                    {dawControlledReason()}
-                                </span>
-                            </DropdownMenu.Item>
+                            // 不能建轨时菜单里只留一条禁用项（不附第二行原因，见上）。
+                            <DropdownMenu.Item disabled>{t("track_add_host")}</DropdownMenu.Item>
                         )
                     ) : (
                         <>
@@ -1200,15 +1144,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
                         {t("action_refresh")}
                     </DropdownMenu.Item>
-                    {/* 【为什么在插件里禁用】`clear_waveform_cache` 只存在于独立 App；
-                        插件里点它会得到一句 `Command unavailable` 的内部措辞。禁用它并
-                        说明原因才是有用的反馈 —— 与 `menu_export_diagnostics` 同一套做法。 */}
-                    {isPluginMode() ? (
-                        <StandaloneOnlyItem
-                            labelKey="menu_clear_waveform_cache"
-                            onSelect={() => setWaveformCacheConfirmOpen(true)}
-                        />
-                    ) : (
+                    {/* 【为什么插件里**整项不渲染**】`clear_waveform_cache` 只存在于独立
+                        App。摆一个永远点不动的灰项只会让用户困惑"为什么有这一项却不能用" ——
+                        它在本形态下是**结构性不存在**的能力，不是"暂时禁用"。 */}
+                    {!isPluginMode() && (
                         <DropdownMenu.Item onSelect={() => setWaveformCacheConfirmOpen(true)}>
                             {t("menu_clear_waveform_cache")}
                         </DropdownMenu.Item>
@@ -1463,31 +1402,21 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             )}
 
                             <DropdownMenu.Separator />
-                            {/* 【为什么在插件里禁用】`run_vocoder_benchmark` 在插件里明确
-                                不可用（`editor/commands.rs` 回 "the vocoder benchmark is
-                                not available in ARA plugin mode"）。它是**整块**不可用、
-                                不是部分失败，所以照 `menu_clear_waveform_cache` 的做法
-                                直接禁用并说明原因，而不是让用户点开一个只会报错的对话框。 */}
-                            {isPluginMode() ? (
-                                <StandaloneOnlyItem
-                                    labelKey="menu_run_benchmark"
-                                    onSelect={() => setBenchmarkDialogOpen(true)}
-                                />
-                            ) : (
-                                <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>
-                                    {t("menu_run_benchmark")}
-                                </DropdownMenu.Item>
-                            )}
+                            {/* 【为什么插件里也能跑】内核的 `run_benchmark` 自带全局单飞锁
+                                租约、烟测超时与 EP 禁用收敛（见 `vocoder_ort_session` 的文件头），
+                                "可能在 DAW 进程里硬崩"这个前提已不成立。而它是用户排查
+                                "推理设备选哪个"的唯一手段，在插件里同样需要。 */}
+                            <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>
+                                {t("menu_run_benchmark")}
+                            </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
 
                     {/* Background Pre-render — same level as Inference Device, no separator */}
-                    {/* 【为什么在插件里禁用】插件的渲染由宿主按需驱动
+                    {/* 【为什么插件里**整项不渲染**】插件的渲染由宿主按需驱动
                         （`editor/session.rs` 的 `schedule_analysis`），从不读这个开关 ——
                         勾选它只会写下一个没人读的值，看起来像生效了。 */}
-                    {isPluginMode() ? (
-                        <StandaloneOnlyItem labelKey="menu_background_prerender" />
-                    ) : (
+                    {!isPluginMode() && (
                         <DropdownMenu.Item
                             onSelect={async () => {
                                 dispatch(toggleAutoBackgroundRender());
@@ -1539,15 +1468,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
 
                     {/* Render cache manager — above Keyboard Shortcuts */}
-                    {/* 【为什么在插件里禁用】插件没有渲染缓存（`get_render_cache_stats` /
-                        `clear_render_cache` / `open_render_cache_dir` 都不存在），对话框里
-                        每个动作都会报错。 */}
-                    {isPluginMode() ? (
-                        <StandaloneOnlyItem
-                            labelKey="menu_render_cache_manager"
-                            onSelect={() => setRenderCacheDialogOpen(true)}
-                        />
-                    ) : (
+                    {/* 【为什么插件里**整项不渲染**】插件没有渲染缓存
+                        （`get_render_cache_stats` / `clear_render_cache` /
+                        `open_render_cache_dir` 都不存在），对话框里每个动作都会报错。 */}
+                    {!isPluginMode() && (
                         <DropdownMenu.Item onSelect={() => setRenderCacheDialogOpen(true)}>
                             {tf("menu_render_cache_manager")}
                         </DropdownMenu.Item>
