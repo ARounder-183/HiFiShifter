@@ -3,10 +3,10 @@
  *
  * 【为什么需要这个文件】模型的类型是 `ReturnType<typeof usePianoRollPanelModel>`，
  * 而拆出去的执行体（`editOperations` / `sceneBuilders` / `drawFrame` /
- * `pitchReferenceOps`）都要声明"我需要模型里的哪几个字段"。若它们直接写
- * `Pick<PianoRollPanelModel, …>`，类型检查会绕成一个环：模型返回类型 ← 这些函数的
- * 类型 ← `Pick<模型返回类型>` ← 模型返回类型。**一两个模块时 TS 还能兜住，再多一个
- * 就整条链退化成 `any`** —— 症状是下游文件一片 implicit any（本轮实测踩到过）。
+ * `pitchReferenceOps` / `useMidiImport` …）都要声明"我需要模型里的哪几个字段"。
+ * 若它们直接写 `Pick<PianoRollPanelModel, …>`，类型检查会绕成一个环：模型返回类型 ←
+ * 这些函数的类型 ← `Pick<模型返回类型>` ← 模型返回类型。**一两个模块时 TS 还能兜住，
+ * 再多一个就整条链退化成 `any`** —— 症状是下游文件一片 implicit any（本轮实测踩到过）。
  *
  * 所以把这份字段类型单独放在这里：它只引用各字段的**声明类型**，不引用模型本身，
  * 环就断了。拆出去的模块写 `Pick<ModelDeps, …>`，仍然只声明自己真正用到的字段。
@@ -40,79 +40,81 @@ import type { Store } from "redux";
 
 /** 拆出去的执行体可以取用的模型字段（各自按需 `Pick`）。 */
 export type ModelDeps = {
+    activeVibratoPresetId: string;
+    axisCanvasRef: RefObject<HTMLCanvasElement | null>;
+    buildCurveLayers: (axis: TimelineAxis) => PianoRollCurveLayer[];
+    buildSelectionBandSpec: (selection: ParamSelection | null) => PianoRollSelectionBandSpec | null;
+    bumpRefreshToken: () => void;
+    canvasRef: RefObject<HTMLCanvasElement | null>;
+    childPitchHardDisableReason: string | null;
+    clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
+    clipboardRef: RefObject<ParamClipboardData | null>;
+    currentParamDefaultValue: number;
+    currentParamQuantizeUnit: number;
+    currentParamRange: { min: number; max: number } | undefined;
+    detectedPitchCurves: DetectedPitchCurve[];
     dispatch: AppDispatch;
-    store: Store<RootState>;
-    setParamView: Dispatch<SetStateAction<ParamViewSegment | null>>;
+    editParam: string;
+    editParamAxisUnit: ParamAxisUnit;
+    effectiveProjectScale: ScaleLike;
+    fontFamily: string;
+    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
+    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
+    handleEditOp: (op: string, data?: Record<string, unknown>) => Promise<void>;
+    hostRef: RefObject<PianoRollKernelHost | null>;
+    invalidate: () => void;
+    kernelDataRef: RefObject<MutablePianoRollKernelData>;
+    lastMirroredScrollTopRef: RefObject<number>;
     liveEditOverrideRef: RefObject<LiveEditOverride | null>;
-    secondaryParamViews: Partial<Record<string, ParamViewSegment>>;
+    loudnessAnalysisPending: boolean;
+    midiDialogOpenParamsRef: RefObject<{ editParam: string; toolMode: string }>;
+    midiDialogSourceRef: RefObject<"reaperClipboard" | "paramEditor">;
+    paramEditorRef: RefObject<HTMLDivElement | null>;
+    paramMorphOverlays: ParamMorphOverlay[] | null;
+    paramView: ParamViewSegment | null;
     paramViewRef: RefObject<ParamViewSegment | null>;
+    paramViewsRef: RefObject<Record<string, ValueViewport>>;
+    pitchDeltaToDegreeSteps: (basePitch: number, targetPitch: number, scale: ScaleLike) => number;
+    pitchEnabled: boolean;
+    pitchHardDisableReason: string | null;
+    pitchViewRef: RefObject<ValueViewport>;
+    prAxis: TimelineAxis;
+    processorParamsRef: RefObject<ProcessorParamDescriptor[]>;
+    projectScaleAtSec: (sec: number) => ScaleLike | undefined;
+    pxPerSecRef: RefObject<number>;
+    referencePitchOverlays: ReferencePitchOverlay[];
+    refreshNow: () => Promise<void>;
+    resolveScaleFromToken: (scaleToken: string, atSec?: number) => ScaleLike;
+    resolvedVibratoPresets: VibratoPreset[];
+    rootTrackId: string | null;
+    s: SessionState;
+    scrollLeftRef: RefObject<number>;
+    scrollerRef: RefObject<HTMLDivElement | null>;
     secSpanClipRect: (
         axis: TimelineAxis,
         startSec: number,
         endSec: number,
     ) => { x: number; y: number; w: number; h: number } | null;
-    paramView: ParamViewSegment | null;
-    editParamAxisUnit: ParamAxisUnit;
+    secondaryParamViews: Partial<Record<string, ParamViewSegment>>;
+    selectAllParamRange: () => boolean;
     selectionClipRect: (
         axis: TimelineAxis,
         range: FrameRange,
     ) => { x: number; y: number; w: number; h: number } | null;
-    s: SessionState;
-    vibratoBaseline: BaselineMode;
+    selectionRef: RefObject<ParamSelection | null>;
+    setClipboardGuid: Dispatch<SetStateAction<string | null>>;
+    setMidiDialogOpen: Dispatch<SetStateAction<boolean>>;
+    setMidiDialogSelection: Dispatch<SetStateAction<ParamSelection | null>>;
+    setMidiPath: Dispatch<SetStateAction<string | null>>;
+    setParamView: Dispatch<SetStateAction<ParamViewSegment | null>>;
+    setSelectionUi: Dispatch<SetStateAction<ParamSelection | null>>;
+    store: Store<RootState>;
     t: (key: MessageKey) => string;
     themeMode: ThemeMode;
-    buildSelectionBandSpec: (selection: ParamSelection | null) => PianoRollSelectionBandSpec | null;
-    handleEditOp: (op: string, data?: Record<string, unknown>) => Promise<void>;
-    setMidiDialogSelection: Dispatch<SetStateAction<ParamSelection | null>>;
-    setSelectionUi: Dispatch<SetStateAction<ParamSelection | null>>;
-    midiDialogOpenParamsRef: RefObject<{ editParam: string; toolMode: string }>;
-    clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
-    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
-    setClipboardGuid: Dispatch<SetStateAction<string | null>>;
-    setMidiPath: Dispatch<SetStateAction<string | null>>;
-    midiDialogSourceRef: RefObject<"reaperClipboard" | "paramEditor">;
     valueToY: (param: ParamName, v: number, h: number) => number;
-    resolveScaleFromToken: (scaleToken: string, atSec?: number) => ScaleLike;
-    paramViewsRef: RefObject<Record<string, ValueViewport>>;
-    buildCurveLayers: (axis: TimelineAxis) => PianoRollCurveLayer[];
-    setMidiDialogOpen: Dispatch<SetStateAction<boolean>>;
-    hostRef: RefObject<PianoRollKernelHost | null>;
-    kernelDataRef: RefObject<MutablePianoRollKernelData>;
-    processorParamsRef: RefObject<ProcessorParamDescriptor[]>;
-    clipboardRef: RefObject<ParamClipboardData | null>;
-    viewSizeRef: RefObject<{ w: number; h: number }>;
-    axisCanvasRef: RefObject<HTMLCanvasElement | null>;
-    canvasRef: RefObject<HTMLCanvasElement | null>;
-    currentParamRange: { min: number; max: number } | undefined;
-    projectScaleAtSec: (sec: number) => ScaleLike | undefined;
-    scrollerRef: RefObject<HTMLDivElement | null>;
-    selectionRef: RefObject<ParamSelection | null>;
-    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
-    pitchViewRef: RefObject<ValueViewport>;
-    paramMorphOverlays: ParamMorphOverlay[] | null;
+    vibratoBaseline: BaselineMode;
     viewSize: { w: number; h: number };
-    lastMirroredScrollTopRef: RefObject<number>;
-    pxPerSecRef: RefObject<number>;
-    referencePitchOverlays: ReferencePitchOverlay[];
-    scrollLeftRef: RefObject<number>;
-    visualPlayheadSecRef: RefObject<number>;
-    detectedPitchCurves: DetectedPitchCurve[];
-    resolvedVibratoPresets: VibratoPreset[];
-    childPitchHardDisableReason: string | null;
-    pitchHardDisableReason: string | null;
-    rootTrackId: string | null;
-    selectAllParamRange: () => boolean;
-    prAxis: TimelineAxis;
-    bumpRefreshToken: () => void;
-    invalidate: () => void;
-    effectiveProjectScale: ScaleLike;
+    viewSizeRef: RefObject<{ w: number; h: number }>;
     visibleSecondaryParamIds: string[];
-    loudnessAnalysisPending: boolean;
-    pitchEnabled: boolean;
-    activeVibratoPresetId: string;
-    currentParamDefaultValue: number;
-    currentParamQuantizeUnit: number;
-    editParam: string;
-    fontFamily: string;
-    pitchDeltaToDegreeSteps: (basePitch: number, targetPitch: number, scale: ScaleLike) => number;
+    visualPlayheadSecRef: RefObject<number>;
 };

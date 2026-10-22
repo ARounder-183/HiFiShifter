@@ -1,28 +1,3 @@
-/**
- * 参数编辑器面板的**模型**：把整个面板的状态、派生值与回调装配成一份可传递的对象。
- *
- * 【为什么是"返回对象"的 hook，而不是一堆小 hook】
- * 这个面板里有近四百个顶层绑定，几乎每一个都被 JSX 与别的回调同时引用
- * （`invalidate` 被画布、标尺、滚动条、交互层共用；`handleEditOp` 被工具栏、
- * 右键菜单、快捷键共用）。按"功能"切成十几个小 hook 需要给每个 hook 手写一份
- * 输入接口 —— 那既是一份会过期的类型拷贝，又会让 hook 之间互相引用同一批 ref。
- * 返回对象 + `ReturnType` 让**类型由实现推出**：视图层拿到的类型永远等于模型真正
- * 返回的东西，没有第二份声明可以漂移。
- *
- * 【为什么视图层要 `Pick<>` 而不是整个模型】
- * 每个视图文件只声明自己真正用到的那几个字段（列表由 AST 扫描得出，不是手抄；
- * 属性名与对象字面量键不算依赖）。于是"工具栏开始依赖 `handleSaveAsPitchRef`"
- * 这种越界会立刻变成类型错误 —— 依赖被钉在文件头上，而不是藏在闭包里。
- *
- * 【拆出去的执行体为什么用 `Pick<ModelDeps, …>` 而不是 `Pick<PianoRollPanelModel, …>`】
- * 见 `modelDeps.ts`：让"模型返回类型"与"执行体的入参类型"互相引用会成环，模块一多
- * 整条链就退化成 `any`。字段类型单独放在 `modelDeps.ts` 里，环才断得干净。
- *
- * 【边界】这里只做"装配"：不渲染任何东西。视图在 `ParamToolbar` / `EditorArea` /
- * `PanelOverlays`；计算与绘制在 `sceneBuilders` / `drawFrame`；命令在 `editOperations` /
- * `pitchReferenceOps`。
- */
-import { loadStandaloneWindowApi } from "../../../../services/hostWindow";
 import { readUiValue, writeUiValue } from "../../../../services/uiStorage";
 import React, {
     type CSSProperties,
@@ -51,7 +26,6 @@ import {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setVisibleReferenceRootTrackIds,
-    importMidiAsClip,
     setTempoMap,
     setParamSelectionActive,
 } from "../../../../features/session/sessionSlice";
@@ -87,7 +61,6 @@ import {
 } from "../../../../features/pitch/separationGate";
 import { useNonPassiveWheel } from "../../../../utils/useNonPassiveWheel";
 import { getActiveSurface } from "../../../../features/uiFocus/focusSurface";
-import { findFirstExternalPathAction } from "../../timeline/dnd";
 import { shiftPitchValue } from "../../timeline/clipPitchDrag";
 import type { ScaleLike } from "../../../../utils/musicalScales";
 import {
@@ -122,7 +95,6 @@ import {
     normalizeSelection,
     selectionBoundingSpan,
     selectionFromFrames,
-    selectionToFrameRanges,
     type FrameRange,
     type ParamSelection,
 } from "../paramSelection";
@@ -210,7 +182,6 @@ import {
 } from "../../../../features/keybindings/keybindingsSlice";
 import { clearPianoRollLoading, setPianoRollLoading } from "../../../../utils/pianoRollStatusBus";
 import { createLiveEditFlag } from "../liveEditFlag";
-import { settingsApi } from "../../../../services/api/settings";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../../../utils/scaleSelection";
 import { centerFromVerticalScrollTop } from "../verticalScrollMapping";
@@ -235,6 +206,7 @@ import {
     sameStringArray,
 } from "./panelHelpers";
 import { runEditOp } from "./editOperations";
+import { useMidiImport } from "./useMidiImport";
 import {
     handleSaveAsPitchRef as handleSaveAsPitchRefImpl,
     handleExtractVibratoPreset as handleExtractVibratoPresetImpl,
@@ -648,82 +620,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const effectivePitchSnapVisual =
         snapGestureActive && snapToggleHeld ? !s.pitchSnapEnabled : s.pitchSnapEnabled;
 
-    // MIDI 导入弹窗状态
-    const [midiDialogOpen, setMidiDialogOpen] = useState(false);
-    const [midiPath, setMidiPath] = useState<string | null>(null);
-    const [clipboardGuid, setClipboardGuid] = useState<string | null>(null);
-    // 导入位置选项（持久化到软件设置）
-    const [importPosition, setImportPosition] = useState<string>("selection");
-    // 填补空隙选项（持久化到软件设置）
-    const [fillGaps, setFillGaps] = useState<boolean>(false);
-    // BPM 选项（持久化到软件设置）
-    const [importBpmAsProject, setImportBpmAsProject] = useState(false);
-    const [noteBpmMode, setNoteBpmMode] = useState<string>("midi");
-    const [specifiedBpm, setSpecifiedBpm] = useState<number>(120);
-    const [multiTrackMerge, setMultiTrackMerge] = useState<boolean>(true);
-    const [closeLeadingGap, setCloseLeadingGap] = useState<boolean>(true);
-    const [importTempoMapEnabled, setImportTempoMapEnabled] = useState(false);
-    const [importTempoMapTempo, setImportTempoMapTempo] = useState(true);
-    const [importTempoMapTimeSignature, setImportTempoMapTimeSignature] = useState(true);
-    const [importTempoMapKeySignature, setImportTempoMapKeySignature] = useState(false);
-    const [importTargetReaperClipboard, setImportTargetReaperClipboard] =
-        useState<string>("pitchParam");
-    const [importTargetParamEditor, setImportTargetParamEditor] = useState<string>("pitchParam");
-    const midiDialogSourceRef = useRef<"reaperClipboard" | "paramEditor">("paramEditor");
-    // 启动时从设置加载
-    useEffect(() => {
-        settingsApi
-            .getUiSettings()
-            .then((s) => {
-                if (s?.midiImportPosition) {
-                    setImportPosition(s.midiImportPosition);
-                }
-                if (s?.midiFillGaps != null) {
-                    setFillGaps(s.midiFillGaps);
-                }
-                if (s?.midiImportBpmAsProject != null) {
-                    setImportBpmAsProject(s.midiImportBpmAsProject);
-                }
-                if (s?.midiNoteBpmMode != null) {
-                    setNoteBpmMode(s.midiNoteBpmMode);
-                }
-                if (s?.midiSpecifiedBpm != null) {
-                    setSpecifiedBpm(s.midiSpecifiedBpm);
-                }
-                if (s?.midiMultiTrackMerge != null) {
-                    setMultiTrackMerge(s.midiMultiTrackMerge);
-                }
-                if (s?.midiCloseLeadingGap != null) {
-                    setCloseLeadingGap(s.midiCloseLeadingGap);
-                }
-                if (s?.midiImportAsTempoMap != null) {
-                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-                }
-                if (s?.midiImportTempoMapTempo != null) {
-                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-                }
-                if (s?.midiImportTempoMapTimeSignature != null) {
-                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-                }
-                if (s?.midiImportTempoMapKeySignature != null) {
-                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-                }
-                if (s?.midiImportTargetReaperClipboard != null) {
-                    setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-                }
-                if (s?.midiImportTargetParamEditor != null) {
-                    setImportTargetParamEditor(s.midiImportTargetParamEditor);
-                }
-            })
-            // 传输层失败（invoke 拒绝）按"保持出厂默认"降级：本 effect 是
-            // fire-and-forget，不接住会把拒绝漏成 unhandledrejection。
-            .catch(() => {});
-    }, []);
-    // 记录打开弹窗时的选区（拍数，多段），用于后续计算帧偏移。
-    // 注意：MIDI 导入的「选区约束」只有单个时间窗接口，因此用包围区间
-    // （首段起点 → 末段终点）—— 见 midiSelArgs。
-    const [midiDialogSelection, setMidiDialogSelection] = useState<ParamSelection | null>(null);
-
     // 右键编辑菜单状态
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
@@ -893,170 +789,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         };
     }, [drawToolMenuOpen, measurePresetFlyoutMaxHeight]);
 
-    /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
-     *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
-    const openParamEditorMidiImport = useCallback(
-        (midiPath: string | null) => {
-            midiDialogSourceRef.current = "paramEditor";
-            // 快照当前选区（拍为单位）
-            const sel = selectionRef.current;
-            setMidiDialogSelection(sel ? sel.map((range) => ({ ...range })) : null);
-            // 快照当前的 editParam 和 toolMode，保证异步加载轨道期间 selectionAvailable 不变
-            midiDialogOpenParamsRef.current = {
-                editParam: s.editParam,
-                toolMode: s.toolMode,
-            };
-            setMidiPath(midiPath);
-            setClipboardGuid(null);
-            setMidiDialogOpen(true);
-        },
-        [s.editParam, s.toolMode],
-    );
-
-    const handleOpenMidiDialog = useCallback(() => {
-        openParamEditorMidiImport(null);
-    }, [openParamEditorMidiImport]);
-
     // ── MIDI 拖放到参数编辑器（文件浏览器拖拽 + Tauri 系统文件拖放）────────
     // 与“导入 MIDI”按钮同属参数编辑器场景：导入目标默认 Pitch Param，并持久化
     // 到 midiImportTargetParamEditor（与按钮共用同一设置项）。
     const paramEditorRef = useRef<HTMLDivElement | null>(null);
-    const [paramEditorMidiDragOver, setParamEditorMidiDragOver] = useState(false);
-
-    const isPointOverParamEditor = useCallback((clientX: number, clientY: number) => {
-        const el = paramEditorRef.current;
-        if (!el) return false;
-        const rect = el.getBoundingClientRect();
-        return (
-            clientX >= rect.left &&
-            clientX <= rect.right &&
-            clientY >= rect.top &&
-            clientY <= rect.bottom
-        );
-    }, []);
-
-    useEffect(() => {
-        // 从拖拽载荷中取第一个 MIDI 文件路径（无则 null）。
-        const firstMidiPath = (
-            paths: string[] | null | undefined,
-            primary: string | null | undefined,
-        ): string | null => {
-            const all = Array.isArray(paths) && paths.length > 0 ? paths : primary ? [primary] : [];
-            const found = findFirstExternalPathAction(all);
-            return found && found.kind === "importMidi" ? found.path : null;
-        };
-
-        // 文件浏览器面板的自定义拖拽事件（无 leave/end 事件，drop 即结束）。
-        const onHifiFileDrag = (e: Event) => {
-            const detail = (e as CustomEvent).detail as {
-                type?: string;
-                filePath?: string;
-                filePaths?: string[];
-                clientX?: number;
-                clientY?: number;
-            } | null;
-            if (!detail) return;
-            const clientX = Number(detail.clientX);
-            const clientY = Number(detail.clientY);
-            const x = Number.isFinite(clientX) ? clientX : undefined;
-            const y = Number.isFinite(clientY) ? clientY : undefined;
-            const over = x !== undefined && y !== undefined && isPointOverParamEditor(x, y);
-            if (detail.type === "start" || detail.type === "move") {
-                setParamEditorMidiDragOver(
-                    Boolean(over && firstMidiPath(detail.filePaths, detail.filePath)),
-                );
-                return;
-            }
-            if (detail.type === "cancel") {
-                // 拖拽被打断 / 取消：清掉落点高亮，不触发任何导入。
-                setParamEditorMidiDragOver(false);
-                return;
-            }
-            if (detail.type === "drop") {
-                const midiPath = firstMidiPath(detail.filePaths, detail.filePath);
-                setParamEditorMidiDragOver(false);
-                if (over && midiPath) {
-                    openParamEditorMidiImport(midiPath);
-                }
-            }
-        };
-        window.addEventListener("hifi-file-drag", onHifiFileDrag);
-
-        // Tauri 系统文件拖放：与时间轴的 useTimelineDragDrop 各自独立监听，
-        // 按坐标区域互斥处理（落在参数编辑器内的 MIDI 才在此导入）。
-        // ⚠️ 必须先持有 Window 实例再调用方法：onDragDropEvent 依赖 `this`
-        // （内部 this.listen），直接取方法引用会丢失绑定并静默失效。
-        let disposed = false;
-        let unlisten: null | (() => void) = null;
-        void loadStandaloneWindowApi()
-            .then((mod) => mod.getCurrentWindow())
-            .then((win) =>
-                win.onDragDropEvent((event: unknown) => {
-                    if (disposed) return;
-                    const payload = (
-                        event && typeof event === "object" && "payload" in event
-                            ? (event as { payload?: unknown }).payload
-                            : event
-                    ) as
-                        | {
-                              type?: string;
-                              event?: string;
-                              paths?: string[];
-                              position?: { x?: number; y?: number };
-                              pos?: { x?: number; y?: number };
-                              cursorPosition?: { x?: number; y?: number };
-                          }
-                        | undefined;
-                    if (!payload) return;
-                    const type = String(payload.type ?? payload.event ?? "");
-                    const paths: string[] = Array.isArray(payload.paths) ? payload.paths : [];
-                    const pos = (payload.position ?? payload.pos ?? payload.cursorPosition) as
-                        { x?: number; y?: number } | undefined;
-                    const dpr = window.devicePixelRatio || 1;
-                    const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
-                    const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
-                    const over =
-                        clientX !== undefined &&
-                        clientY !== undefined &&
-                        isPointOverParamEditor(clientX, clientY);
-                    if (type === "enter" || type === "over") {
-                        setParamEditorMidiDragOver(Boolean(over && firstMidiPath(paths, null)));
-                        return;
-                    }
-                    if (type === "leave") {
-                        setParamEditorMidiDragOver(false);
-                        return;
-                    }
-                    if (type === "drop") {
-                        const midiPath = firstMidiPath(paths, null);
-                        setParamEditorMidiDragOver(false);
-                        if (over && midiPath) {
-                            openParamEditorMidiImport(midiPath);
-                        }
-                    }
-                }),
-            )
-            .then((fn) => {
-                if (disposed) {
-                    // 卸载竞态兜底：注册完成后组件已卸载，立即解绑。
-                    fn();
-                    return;
-                }
-                unlisten = fn;
-            })
-            .catch((err) => {
-                console.warn(
-                    "[param-editor-midi-drop] Failed to attach Tauri drag-drop listener",
-                    err,
-                );
-            });
-
-        return () => {
-            disposed = true;
-            window.removeEventListener("hifi-file-drag", onHifiFileDrag);
-            if (unlisten) unlisten();
-        };
-    }, [isPointOverParamEditor, openParamEditorMidiImport]);
 
     const effectiveSelectedTrackId = useMemo(() => {
         if (s.selectedTrackId) return s.selectedTrackId;
@@ -3169,11 +2905,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     /** 多选区（升序、互不相交、相邻已合并的**帧**区间列表；null = 无选区） */
     const selectionRef = useRef<ParamSelection | null>(null);
-    // 记录打开 MIDI 弹窗时的 editParam / toolMode 快照，避免异步加载轨道期间 Redux 状态变化导致 selectionAvailable 跳变
-    const midiDialogOpenParamsRef = useRef<{
-        editParam: string;
-        toolMode: string;
-    }>({ editParam: "pitch", toolMode: "select" });
     const [selectionUi, setSelectionUi] = useState<ParamSelection | null>(null);
     // 参数线选区存在性入仓（session.paramSelectionActive）：复制/剪切按
     // "当前选中了什么"路由时以此判定参数侧（selectionRef 的每次变更都
@@ -3507,115 +3238,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         invalidate();
     }, [invalidate, rootTrackId, visibleReferenceRootTrackIds, visibleSecondaryParamIds]);
 
-    const handleMidiImported = useCallback(() => {
-        refreshNow();
-    }, [refreshNow]);
-
-    const handleImportAsClip = useCallback(
-        (result: {
-            trackIndices: number[];
-            notesCount: number;
-            midiPath: string;
-            fillGaps: boolean;
-            multiTrackMerge?: boolean;
-            noteBpmMode?: string;
-            specifiedBpm?: number;
-            importBpmAsProject?: boolean;
-            importAsTempoMap?: boolean;
-            importTempo?: boolean;
-            importTimeSignature?: boolean;
-            importKeySignature?: boolean;
-            clipboardGuid?: string;
-            closeLeadingGap?: boolean;
-        }) => {
-            void dispatch(
-                importMidiAsClip({
-                    midiPath: result.midiPath,
-                    trackIndices: result.trackIndices,
-                    trackId: s.selectedTrackId,
-                    startSec: s.playheadSec,
-                    fillGaps: result.fillGaps || undefined,
-                    multiTrackMerge: result.multiTrackMerge,
-                    noteBpmMode: result.noteBpmMode,
-                    specifiedBpm: result.specifiedBpm,
-                    importBpmAsProject: result.importBpmAsProject,
-                    clipboardGuid: result.clipboardGuid,
-                    closeLeadingGap: result.closeLeadingGap,
-                    importAsTempoMap: result.importAsTempoMap,
-                    importTempo: result.importTempo,
-                    importTimeSignature: result.importTimeSignature,
-                    importKeySignature: result.importKeySignature,
-                }),
-            );
-        },
-        [dispatch, s.selectedTrackId, s.playheadSec],
-    );
-
-    // 导入位置变更时持久化保存
-    const handleImportPositionChange = useCallback((position: string) => {
-        setImportPosition(position);
-        void settingsApi.saveUiSettings({ midiImportPosition: position });
-    }, []);
-
-    // 填补空隙选项变更时持久化保存
-    const handleFillGapsChange = useCallback((value: boolean) => {
-        setFillGaps(value);
-        void settingsApi.saveUiSettings({ midiFillGaps: value });
-    }, []);
-
-    // BPM 选项变更时持久化保存
-    const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
-        setImportBpmAsProject(v);
-        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
-    }, []);
-
-    const handleNoteBpmModeChange = useCallback((v: string) => {
-        setNoteBpmMode(v);
-        void settingsApi.saveUiSettings({ midiNoteBpmMode: v });
-    }, []);
-
-    const handleSpecifiedBpmChange = useCallback((v: number) => {
-        setSpecifiedBpm(v);
-        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
-    }, []);
-
-    const handleMultiTrackMergeChange = useCallback((v: boolean) => {
-        setMultiTrackMerge(v);
-        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
-    }, []);
-
-    const handleCloseLeadingGapChange = useCallback((v: boolean) => {
-        setCloseLeadingGap(v);
-        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
-    }, []);
-
-    const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
-        setImportTempoMapEnabled(v);
-        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
-    }, []);
-    const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
-        setImportTempoMapTempo(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
-    }, []);
-    const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
-        setImportTempoMapTimeSignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
-    }, []);
-    const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
-        setImportTempoMapKeySignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
-    }, []);
-
-    const handleImportTargetChange = useCallback((v: string) => {
-        if (midiDialogSourceRef.current === "reaperClipboard") {
-            setImportTargetReaperClipboard(v);
-            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v });
-        } else {
-            setImportTargetParamEditor(v);
-            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v });
-        }
-    }, []);
-
     const handleRequestEnableCompose = useCallback(() => {
         const rtId = rootTrackId;
         if (!rtId) return;
@@ -3627,20 +3249,53 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         );
     }, [dispatch, rootTrackId]);
 
-    // 计算 MIDI 导入的多选区帧约束：与参数编辑器选区逐段一致，导入只写入
-    // 落在任一段内的帧（断层保持原值），对齐基准为首段起点。
-    const midiSelRanges = useMemo(() => {
-        if (!midiDialogSelection) return undefined;
-        const ranges = selectionToFrameRanges(midiDialogSelection);
-        return ranges.length > 0 ? ranges : undefined;
-    }, [midiDialogSelection]);
-
-    // selection 导入模式是否可用（基于弹窗打开时的快照，避免异步加载轨道时状态变化）
-    const midiSelectionAvailable = useMemo(() => {
-        if (!midiDialogSelection) return false;
-        const p = midiDialogOpenParamsRef.current;
-        return p.editParam === "pitch" && p.toolMode === "select";
-    }, [midiDialogSelection]);
+    /*
+     * MIDI 导入：对话框状态、导入参数、拖放接入与「导入为 Clip」都归这一个 hook
+     * （见 `useMidiImport.ts`）。它自带 15 个 useState 与一条独立通路，与画布、滚动、
+     * 绘制没有交集 —— 是面板里少数几个边界清楚、可以整块搬走的功能。
+     */
+    const {
+        clipboardGuid,
+        closeLeadingGap,
+        fillGaps,
+        handleCloseLeadingGapChange,
+        handleFillGapsChange,
+        handleImportAsClip,
+        handleImportBpmAsProjectChange,
+        handleImportPositionChange,
+        handleImportTargetChange,
+        handleImportTempoMapEnabledChange,
+        handleImportTempoMapKeySignatureChange,
+        handleImportTempoMapTempoChange,
+        handleImportTempoMapTimeSignatureChange,
+        handleMidiImported,
+        handleMultiTrackMergeChange,
+        handleNoteBpmModeChange,
+        handleOpenMidiDialog,
+        handleSpecifiedBpmChange,
+        importBpmAsProject,
+        importPosition,
+        importTargetParamEditor,
+        importTargetReaperClipboard,
+        importTempoMapEnabled,
+        importTempoMapKeySignature,
+        importTempoMapTempo,
+        importTempoMapTimeSignature,
+        midiDialogOpen,
+        midiDialogOpenParamsRef,
+        midiDialogSourceRef,
+        midiPath,
+        midiSelRanges,
+        midiSelectionAvailable,
+        multiTrackMerge,
+        noteBpmMode,
+        paramEditorMidiDragOver,
+        setClipboardGuid,
+        setMidiDialogOpen,
+        setMidiDialogSelection,
+        setMidiPath,
+        specifiedBpm,
+    } = useMidiImport({ dispatch, paramEditorRef, refreshNow, s, selectionRef });
 
     // 将当前选区发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
     // 多选区发布**包围区间**（首段起点 → 末段终点）：该提示只关心"选区覆盖的
