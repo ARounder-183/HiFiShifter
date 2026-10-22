@@ -43,12 +43,21 @@ pub const K_INVALID_ARGUMENT: TResult = 0x8007_0057u32 as i32;
 /// `PClassInfo::kManyInstances`。
 const K_MANY_INSTANCES: i32 = 0x7FFF_FFFF;
 
-/// 处理器组件类 ID（探针自定，稳定即可）。
-const PROCESSOR_CID: Tuid = *b"HFSARAProbe.Prc1";
-/// 编辑器控制器类 ID（探针自定，稳定即可）。
-const CONTROLLER_CID: Tuid = *b"HFSARAProbe.Ctl1";
-/// ARA 主工厂类 ID（探针自定，稳定即可）。
-const FACTORY_CID: Tuid = *b"HFSARAProbe.Fac1";
+/// 处理器 / 控制器 / ARA 工厂的类 ID。
+///
+/// 【为什么是 GUID 而不是 16 个 ASCII 字符】ASCII 形式（如 `HFSARAProbe.Prc1`）看着像
+/// 名字，实际只是 16 个字节：谁"顺手改一个字符"ID 就变了，却看不出这是一次身份变更。
+/// GUID 有明确的字形与生成方式，能对着工具核对；编码沿用本文件的 [`uid_guid`]
+/// （Windows VST3 的 GUID 内存布局，见该函数的三段注释与实测依据）。
+///
+/// 【这三个值一旦发布就再也不能改】它们写在宿主工程里，换掉等于让所有已存在的实例
+/// 认不出来（表现为"插件丢失"）。当前仍是开发期（从未分发），因此这一轮把探针时代的
+/// 名字一并换掉；此后的任何改动都必须视为破坏性变更。
+const PROCESSOR_CID: Tuid = uid_guid([0x9C3A_4F17, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
+/// 编辑器控制器类 ID。
+const CONTROLLER_CID: Tuid = uid_guid([0x9C3A_4F18, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
+/// ARA 主工厂类 ID。
+const FACTORY_CID: Tuid = uid_guid([0x9C3A_4F19, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
 
 /// `Component Controller Class`（`kVstComponentControllerClass`）。
 const COMPONENT_CONTROLLER_CLASS: &str = "Component Controller Class";
@@ -1204,7 +1213,7 @@ unsafe extern "system" fn component_get_controller_class_id(
             // 探针提供一个最小编辑器控制器：REAPER 需要它才能完成 ARA 插入。
             // SAFETY: class_id 是宿主提供的可写 TUID。
             unsafe { std::ptr::copy_nonoverlapping(CONTROLLER_CID.as_ptr(), class_id, 16) };
-            crate::log_line("IComponent::getControllerClassId -> HFSARAProbe.Ctl1");
+            crate::log_line("IComponent::getControllerClassId -> controller class id");
             K_RESULT_OK
         })
     }

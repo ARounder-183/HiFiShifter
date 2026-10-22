@@ -233,3 +233,34 @@ fn the_main_factory_instance_honours_the_requested_iid() {
     // SAFETY: 归还 `get_plugin_factory` 多拿的那一份工厂引用。
     unsafe { factory_release(factory) };
 }
+
+/// 三个类 ID 必须互不相同、非全零，且与探针时代的 ASCII 形式不同。
+///
+/// 【为什么值得一条用例】它们在本轮之前是 `HFSARAProbe.Prc1` 之类的 16 个 ASCII 字节
+/// —— 看起来像名字，改起来也像改名字，而实际上那是插件在宿主工程里的**身份**。
+/// 断言"三者互不相同"防的是复制粘贴把两个 ID 写成一样（宿主会把两种对象混为一谈）；
+/// 断言"不是旧值"防的是改名改漏（只改常量名不改值，日志里一切正常，宿主里认的仍是旧身份）。
+#[test]
+fn the_class_ids_are_distinct_and_no_longer_the_probe_ones() {
+    let ids = [PROCESSOR_CID, CONTROLLER_CID, FACTORY_CID];
+    for (index, id) in ids.iter().enumerate() {
+        assert!(
+            id.iter().any(|byte| *byte != 0),
+            "class id #{index} must not be all zeroes"
+        );
+        for other in ids.iter().skip(index + 1) {
+            assert_ne!(id, other, "class ids must be pairwise distinct");
+        }
+    }
+    for legacy in [
+        *b"HFSARAProbe.Prc1",
+        *b"HFSARAProbe.Ctl1",
+        *b"HFSARAProbe.Fac1",
+    ] {
+        assert!(
+            !ids.contains(&legacy),
+            "a class id still carries the probe-era value: {:?}",
+            String::from_utf8_lossy(&legacy)
+        );
+    }
+}
