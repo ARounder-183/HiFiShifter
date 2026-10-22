@@ -41,10 +41,25 @@ function dockFieldKey(): "dock" | "dockPlugin" {
 export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () => {
     const ui = await settingsApi.getUiSettings();
     const stored = ui[dockFieldKey()] ?? null;
+    /**
+     * 插件槽位里的布局必须带 `mode: "plugin"` 标记。
+     *
+     * 【为什么需要它】历史上有一条后端迁移会把独立 App 的 `dock` **复制**进
+     * `dockPlugin`（删于本轮）。那些被写坏的副本没有标记，若照常采纳，插件的出厂
+     * 布局（并列标签页）永远不会生效 —— 用户看到的是为大窗口设计的上下堆叠。
+     * 判据放在这里而不是布局内部：布局 schema 由前端整体归一化，多一个顶层字段
+     * 会跟着导入/导出/预设一起流动，没必要。
+     */
+    const isPluginSlot = dockFieldKey() === "dockPlugin";
+    const storedMode = (stored as { mode?: unknown } | null)?.mode;
+    const layout =
+        isPluginSlot && storedMode !== "plugin"
+            ? null
+            : ((stored as { layout?: unknown } | null)?.layout ?? null);
     return {
         settings: stored,
         // 布局的**取值**由前端的 `normalizeDockLayout` 收口，这里不做假设。
-        layout: (stored as { layout?: unknown } | null)?.layout ?? null,
+        layout,
         // 形态决定**出厂布局**（插件里是"时间轴 / 参数编辑器"并列标签页，活动标签是
         // 参数编辑器）以及插件首次使用的轨道头宽度。两者都是"正确取值取决于窗口有多少
         // 像素"的同一类决定，因此一起由形态决定 —— 见 `createDefaultDockLayout`。
@@ -59,11 +74,13 @@ export const persistDockSettings = createAsyncThunk(
         const { dock } = getState() as RootState;
         // 行为选项平铺 + 一份完整布局，一次写入同时落盘（见 `dockSettings`
         // 里 `DockPersistedSettings` 的注释）。
-        const payload = { ...dock.settings, layout: dock.layout };
         // 显式分支而不是计算键：计算键在 `Partial<UiSettings>` 上会退化成索引签名，
         // 写错字段名也不会被类型检查抓到。
         await settingsApi.saveUiSettings(
-            hostMode() === "plugin" ? { dockPlugin: payload } : { dock: payload },
+            hostMode() === "plugin"
+                ? // `mode` 是插件槽位的归属标记，见 `loadDockSettings`。
+                  { dockPlugin: { ...dock.settings, mode: "plugin", layout: dock.layout } }
+                : { dock: { ...dock.settings, layout: dock.layout } },
         );
     },
 );

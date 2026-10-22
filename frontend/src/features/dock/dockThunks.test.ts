@@ -133,12 +133,40 @@ test("a plugin that already has a layout keeps the stored gutter", async () => {
     enterPluginMode();
     const store = buildStore();
     api.getUiSettings.mockResolvedValue({
-        dockPlugin: { layout: { schema: 2, gutters: { timelineTrackHeaderPx: 300 } } },
+        dockPlugin: {
+            mode: "plugin",
+            layout: { schema: 2, gutters: { timelineTrackHeaderPx: 300 } },
+        },
     });
 
     const payload = await store.dispatch(loadDockSettings()).unwrap();
     store.dispatch(hydrateDock(payload));
     expect(store.getState().dock.layout.gutters.timelineTrackHeaderPx).toBe(300);
+});
+
+/**
+ * 没有归属标记的插件槽位一律当"没存过"。
+ *
+ * 【为什么这条是回归】后端曾有一条迁移把独立 App 的 `dock` 复制进 `dockPlugin`。
+ * 那些副本是**上下堆叠**的排布，一旦被采纳，插件永远看不到自己的出厂布局（并列
+ * 标签页）—— 而且它还会被写回磁盘，形成自我延续。标记让它们一次性失效。
+ */
+test("an unmarked plug-in slot is ignored so the plug-in default can apply", async () => {
+    enterPluginMode();
+    const store = buildStore();
+    api.getUiSettings.mockResolvedValue({
+        // 旧迁移的产物：一份从独立 App 复制过来的堆叠布局，没有 mode 标记。
+        dockPlugin: { layout: { schema: 2, gutters: { timelineTrackHeaderPx: 300 } } },
+    });
+
+    const payload = await store.dispatch(loadDockSettings()).unwrap();
+    expect(payload.layout).toBeNull();
+    store.dispatch(hydrateDock(payload));
+
+    const layout = store.getState().dock.layout;
+    expect(layout.gutters.timelineTrackHeaderPx).toBe(PLUGIN_DEFAULT_TRACK_HEADER_PX);
+    const root = layout.roots.main;
+    expect(root.t).toBe("tabset");
 });
 
 test("the standalone default is untouched", async () => {

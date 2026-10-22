@@ -827,3 +827,28 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         );
     }
 });
+
+/**
+ * 插件的**整体回退**必须回退到插件自己的出厂布局。
+ *
+ * 【为什么这条是回归】归一化里的两处"回退默认"曾经无参调用
+ * `createDefaultDockLayout()`（= 独立 App 的上下堆叠）。于是只要布局读到一坨
+ * 读不懂的东西（旧 schema、被写坏的副本、超出深度上限…），插件就会得到一份
+ * 为大窗口设计的排布 —— 面板被压到最小尺寸之下。形态必须一路传到这里。
+ */
+test("a layout that cannot be normalized falls back to the layout of the running form", () => {
+    for (const mode of ["plugin", "standalone"] as const) {
+        const layout = normalizeDockLayout({ schema: -1, roots: "nonsense" }, mode);
+        const main = layout.roots.main;
+        assertEqual(main?.t, mode === "plugin" ? "tabset" : "split", "root shape follows the form");
+        const titles =
+            main?.t === "tabset"
+                ? main.tabs
+                : collectTabsets(main!).flatMap((tabset) => tabset.tabs);
+        assertEqual(titles.includes("timeline"), true, "timeline present");
+        assertEqual(titles.includes("paramEditor"), true, "parameter editor present");
+        if (mode === "plugin" && main?.t === "tabset") {
+            assertEqual(main.active, "paramEditor", "the plug-in opens on the parameter editor");
+        }
+    }
+});

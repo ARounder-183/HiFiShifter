@@ -413,14 +413,20 @@ function normalizeFloat(raw: unknown): DockForm["float"] {
     return float;
 }
 
-/** 归一化一份布局（来自磁盘、预设或 API）。 */
-export function normalizeDockLayout(raw: unknown): DockLayout {
+/**
+ * 归一化一份布局（来自磁盘、预设或 API）。
+ *
+ * @param raw 磁盘 / 预设 / API 给来的原始值。
+ * @param mode 运行形态：决定"整体回退"时套哪一份**出厂布局**。插件的出厂布局是
+ *   并列标签页，独立 App 是上下堆叠 —— 两者不可互相顶替（见 createDefaultDockLayout）。
+ */
+export function normalizeDockLayout(raw: unknown, mode: DockMode = "standalone"): DockLayout {
     // 迁移入口先行（见 migrateDockLayout）：来自更新版本的布局当前构建读不懂，
     // 逐项修补只会得到一份被曲解的布局 —— 整体回退默认。布局的全部导入/恢复
     // 路径（hydrateDock / setDockLayout / applyDockPreset）都汇聚到这里，版本
     // 判断因此只需这一处。
     const migrated = migrateDockLayout(raw);
-    if (migrated === null || typeof migrated !== "object") return createDefaultDockLayout();
+    if (migrated === null || typeof migrated !== "object") return createDefaultDockLayout(mode);
     const input = migrated as Partial<DockLayout>;
 
     // ── 窗体：剔除面板已不存在的记录（插件被卸载等）────────────────
@@ -467,7 +473,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     // （窗体去重）同源，一份共享给下面每一次 normalizeTree。
     const seenZoneIds = new Set<string>();
     const roots: Record<string, DockNode> = {};
-    const defaultTree = createDefaultDockLayout().roots[MAIN_ROOT_ID] as DockNode;
+    const defaultTree = createDefaultDockLayout(mode).roots[MAIN_ROOT_ID] as DockNode;
     // 主根缺失或不可用 → 出厂布局。主是不可渲染的空缺，属于可以整体回退的一类。
     const mainNorm = normalizeTree(
         rawRoots[MAIN_ROOT_ID] ?? defaultTree,

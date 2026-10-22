@@ -80,6 +80,14 @@ export type ResolvedDockSettings = Required<DockSettings>;
  */
 export interface DockPersistedSettings extends DockSettings {
     layout?: unknown;
+    /**
+     * 插件槽位（`UiSettings.dockPlugin`）的归属标记。
+     *
+     * 只由插件形态写入，读的时候必须等于 `"plugin"` 才采纳 —— 历史上有一条后端
+     * 迁移会把独立 App 的 `dock` 复制进 `dockPlugin`，那些副本没有这个标记，
+     * 靠它一次性失效（见 `loadDockSettings`）。独立 App 的槽位不写这个字段。
+     */
+    mode?: "plugin";
 }
 
 export const DEFAULT_DOCK_SETTINGS: ResolvedDockSettings = {

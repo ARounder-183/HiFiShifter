@@ -84,6 +84,15 @@ import {
 import { getPanel } from "./panelRegistry";
 
 export interface DockState {
+    /**
+     * 当前运行形态：决定"整体回退出厂布局"时套哪一份默认值。
+     *
+     * 【为什么必须存在切片里】出厂布局是形态相关的（插件是并列标签页、独立 App 是
+     * 上下堆叠）。归一化在多个入口被调用（hydrateDock / setDockLayout / reset /
+     * 预设），每个入口若各自猜一次形态，迟早有一处猜错 —— 而错的后果是给用户一份
+     * 根本不能用的排布。形态只在这里登记一次，其余入口一律读它。
+     */
+    mode: DockMode;
     layout: DockLayout;
     settings: ResolvedDockSettings;
     /** 最后获得焦点的窗体（键盘操作的目标）。 */
@@ -114,6 +123,7 @@ export interface DockState {
 }
 
 const initialState: DockState = {
+    mode: "standalone",
     layout: createDefaultDockLayout(),
     settings: DEFAULT_DOCK_SETTINGS,
     activeFormId: null,
@@ -171,10 +181,11 @@ const dockSlice = createSlice({
             }>,
         ) {
             const raw = action.payload ?? {};
+            state.mode = raw.mode ?? "standalone";
             state.layout =
                 raw.layout == null
-                    ? installLayout(createDefaultDockLayout(raw.mode ?? "standalone"))
-                    : installLayout(normalizeDockLayout(raw.layout));
+                    ? installLayout(createDefaultDockLayout(state.mode))
+                    : installLayout(normalizeDockLayout(raw.layout, state.mode));
             state.settings = normalizeDockSettings(raw.settings);
             state.hydrated = true;
         },
@@ -197,15 +208,16 @@ const dockSlice = createSlice({
             state.settings = normalizeDockSettings({ ...state.settings, ...action.payload });
         },
         setDockLayout(state, action: PayloadAction<unknown>) {
-            state.layout = installLayout(normalizeDockLayout(action.payload));
+            state.layout = installLayout(normalizeDockLayout(action.payload, state.mode));
         },
         resetDockLayout(state, action: PayloadAction<{ mode?: DockMode } | undefined>) {
             // 重置 = 回到出厂排布。**预设是用户的资产，不属于"被重置的排布"**
             // —— 确认对话框承诺"已保存的预设会保留"，重置后用户仍能一键回到
             // 自己的排布。activePreset 同步清空：此刻是出厂布局，不属于任何
             // 预设；保留旧值会让布局菜单的勾选错误地暗示某预设仍然生效。
+            state.mode = action.payload?.mode ?? state.mode;
             state.layout = ensureRegisteredPanels({
-                ...createDefaultDockLayout(action.payload?.mode ?? "standalone"),
+                ...createDefaultDockLayout(state.mode),
                 presets: state.layout.presets ?? {},
                 activePreset: null,
             });
@@ -633,17 +645,20 @@ const dockSlice = createSlice({
         applyDockPreset(state, action: PayloadAction<string>) {
             const preset = state.layout.presets?.[action.payload];
             if (!preset) return;
-            const next = normalizeDockLayout({
-                schema: state.layout.schema,
-                roots: preset.roots,
-                forms: preset.forms,
-                order: preset.order,
-                floatOrder: preset.floatOrder,
-                gutters: preset.gutters,
-                tabPosition: preset.tabPosition,
-                presets: state.layout.presets,
-                activePreset: preset.name,
-            });
+            const next = normalizeDockLayout(
+                {
+                    schema: state.layout.schema,
+                    roots: preset.roots,
+                    forms: preset.forms,
+                    order: preset.order,
+                    floatOrder: preset.floatOrder,
+                    gutters: preset.gutters,
+                    tabPosition: preset.tabPosition,
+                    presets: state.layout.presets,
+                    activePreset: preset.name,
+                },
+                state.mode,
+            );
             state.layout = ensureRegisteredPanels(next);
             // 预设替换一切：旧的活动窗体若已不存在，清空以免指向幽灵记录。
             if (!state.layout.forms[state.activeFormId ?? ""]) state.activeFormId = null;
