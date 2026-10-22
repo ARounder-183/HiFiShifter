@@ -589,6 +589,29 @@ const BreathAirIcon: React.FC<{ off?: boolean }> = ({ off = false }) => (
     </svg>
 );
 
+/**
+ * 工具栏里的一个**可让位槽位**。
+ *
+ * 【为什么它不是条件渲染】层级判据要靠"量出每个层级的内容宽度"（见
+ * `toolbarGauge`）。若被让位的项直接从 DOM 里消失，就再也量不到"少藏一级要多宽"——
+ * 于是只能靠"先撑开、再一级级收回去"来试探，用户看到的正是那个抽动。
+ * 常挂载 + 由层级控制 `display` 之后，测量可以在**看不见的克隆**上一次做完。
+ *
+ * 【为什么是 `display: contents`】包装元素自己不参与 flex 布局，子元素直接成为祖父
+ * 的 flex 项 —— 加了一层包装也不会改变原来的间距与对齐。
+ */
+const ToolbarSlot: React.FC<{
+    /** 达到这个层级时隐藏本槽位。 */
+    hideAt: number;
+    /** 当前层级。 */
+    tier: number;
+    children: React.ReactNode;
+}> = ({ hideAt, tier, children }) => (
+    <span data-hide-at={hideAt} style={{ display: tier >= hideAt ? "none" : "contents" }}>
+        {children}
+    </span>
+);
+
 type ParamToolbarPillProps = {
     /** 参数按钮上的简短标签（如 PIT / 共振峰） */
     label: string;
@@ -7859,11 +7882,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     />
                     {/* 第 1 级隐藏：面板身份已由 dock 标签 / 浮窗标题表达，
                         这里是重复提示，横向不足时最先让位。 */}
-                    {toolbarTier < 1 ? (
+                    <ToolbarSlot hideAt={1} tier={toolbarTier}>
                         <span className="hs-type-label font-semibold">
                             {tf("param_editor_short")}
-                        </span>
-                    ) : null}
+                        </span>{" "}
+                    </ToolbarSlot>
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -8463,7 +8486,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
                                 看起来是有意的降级，而不是渲染出错的半截字。
                                 第 5 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
-                            {toolbarTier < 5 ? (
+                            <ToolbarSlot hideAt={5} tier={toolbarTier}>
                                 <span
                                     className="hs-type-label"
                                     data-tooltip={tf("edge_smoothness")}
@@ -8475,12 +8498,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     }}
                                 >
                                     {tf("edge_smoothness_short")}:
-                                </span>
-                            ) : null}
+                                </span>{" "}
+                            </ToolbarSlot>
                             {/* 第 7 级才隐藏滑块：它是**控件**，比只读的百分比数值（第 6 级）
                                 更该留到最后。悬停时用 ToolTip 报出当前百分比 —— 数值被隐藏
                                 （第 6 级）之后仍能读到。 */}
-                            {toolbarTier < 7 ? (
+                            <ToolbarSlot hideAt={7} tier={toolbarTier}>
                                 <input
                                     ref={attachEdgeSmoothnessWheel}
                                     className="qt-range"
@@ -8520,19 +8543,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         minWidth: 16,
                                         maxWidth: 120,
                                     }}
-                                />
-                            ) : null}
+                                />{" "}
+                            </ToolbarSlot>
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
                                 但不再是 36px 那种"宁可溢出也不缩"的宽度。
                                 第 6 级隐藏：它只是**读数**，比滑块（第 7 级）先让位。 */}
-                            {toolbarTier < 6 ? (
+                            <ToolbarSlot hideAt={6} tier={toolbarTier}>
+                                {/* data-toolbar-volatile：这个读数在拖滑块时每帧都变，
+                                    布局签名对它只记长度，否则每一帧都会触发一次测量。 */}
                                 <span
                                     className="hs-type-label"
+                                    data-toolbar-volatile
                                     style={{ minWidth: 28, textAlign: "right" }}
                                 >
                                     {Math.round(s.edgeSmoothnessPercent)}%
                                 </span>
-                            ) : null}
+                            </ToolbarSlot>
                         </Flex>
                     </Flex>
                 </Flex>
@@ -8561,15 +8587,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
                                                 快捷键入口，是**唯一入口**，不能整块隐藏，
                                                 只能瘦身；全称仍在按钮的 ToolTip 里。 */}
-                                            {toolbarTier < 9
-                                                ? buildReferenceRootTrackTriggerElement(
-                                                      `${tf("reference_root_tracks_short")}${
-                                                          visibleReferenceRootTrackIds.length > 0
-                                                              ? ` (${visibleReferenceRootTrackIds.length})`
-                                                              : ""
-                                                      }`,
-                                                  )
-                                                : null}
+                                            <ToolbarSlot hideAt={9} tier={toolbarTier}>
+                                                {buildReferenceRootTrackTriggerElement(
+                                                    `${tf("reference_root_tracks_short")}${
+                                                        visibleReferenceRootTrackIds.length > 0
+                                                            ? ` (${visibleReferenceRootTrackIds.length})`
+                                                            : ""
+                                                    }`,
+                                                )}
+                                            </ToolbarSlot>
                                             <ChevronDownIcon width="12" height="12" />
                                         </Button>
                                     </DropdownMenu.Trigger>
@@ -8637,7 +8663,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 </DropdownMenu.Root>
                                 {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
                                     （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
-                                {toolbarTier < 8 ? (
+                                <ToolbarSlot hideAt={8} tier={toolbarTier}>
                                     <span
                                         className="inline-flex"
                                         data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
@@ -8652,8 +8678,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         >
                                             {tf("midi_import")}
                                         </Button>
-                                    </span>
-                                ) : null}
+                                    </span>{" "}
+                                </ToolbarSlot>
                             </React.Fragment>
                         ) : null}
                         {selectedIsChildTrack &&
@@ -9040,11 +9066,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             })}
                             {/* 第 2 级隐藏：紧邻的下拉本身就显示当前算法名，
                                 "算法"二字只是重复提示（全称在 ToolTip 里）。 */}
-                            {toolbarTier < 2 ? (
+                            <ToolbarSlot hideAt={2} tier={toolbarTier}>
                                 <span className="hs-type-label" data-tooltip={tf("algo_label")}>
                                     {tf("algo_label_short")}
-                                </span>
-                            ) : null}
+                                </span>{" "}
+                            </ToolbarSlot>
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"
