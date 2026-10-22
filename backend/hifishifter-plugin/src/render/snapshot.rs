@@ -1851,6 +1851,7 @@ mod tests {
                 left: vec![0.0_f32; frames],
                 right: vec![0.0_f32; frames],
                 // 前 4096 帧是洞（起播窗口的形状），之后才是我们录到的。
+                #[allow(clippy::single_range_in_vec_init)]
                 covered: vec![4096..8192],
                 _reservation: None,
             })
@@ -1900,6 +1901,7 @@ mod tests {
                 origin_sample: 0,
                 left: vec![0.0_f32; frames],
                 right: vec![0.0_f32; frames],
+                #[allow(clippy::single_range_in_vec_init)]
                 covered: vec![4096..8192],
                 _reservation: None,
             })

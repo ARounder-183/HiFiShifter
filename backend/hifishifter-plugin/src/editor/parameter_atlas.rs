@@ -379,7 +379,9 @@ impl RootProjection {
     pub(crate) fn whole(params: TrackParamsState) -> Self {
         Self {
             params,
-            frames: vec![0..usize::MAX],
+            // 同 `project_root_records`：`frames` 常态是多个区间，整轨只是特例。
+            #[allow(clippy::single_range_in_vec_init)]
+            frames: [0..usize::MAX].to_vec(),
             complete: true,
         }
     }
@@ -1268,7 +1270,12 @@ impl ParameterAtlas {
                 root.clone(),
                 RootProjection {
                     params,
-                    frames: vec![0..usize::MAX],
+                    // 【为什么是 Vec】`frames` 的语义是"这一轮覆盖了哪些帧区间"，多数
+                    // 情况下是**多个**区间（半条轨被投影时）。整轨覆盖只是它的一个特例，
+                    // 为特例单开一个 `Box<[T]>` 分支会让消费方多一次判断。
+                    // clippy::single_range_in_vec_init 在此已知为假警报。
+                    #[allow(clippy::single_range_in_vec_init)]
+                    frames: [0..usize::MAX].to_vec(),
                     complete: true,
                 },
             );
@@ -2570,6 +2577,7 @@ impl SourceCurve {
     ///   * `domain`（曲线自己的存储域）决定**返回数组按什么索引**：`ClipLocal`
     ///     从 0 起，`Project` 按绝对工程帧。它只影响下游怎么用这份数组，
     ///     不影响读到哪些值。
+    ///
     /// 早先一度只用 `domain` 选映射，结果是开关完全失效 —— 两种情况读法相同。
     #[allow(clippy::too_many_arguments)]
     fn project(
@@ -3237,7 +3245,8 @@ mod tests {
                 "a".to_owned(),
                 RootProjection {
                     params: partial,
-                    frames: vec![10..20],
+                    #[allow(clippy::single_range_in_vec_init)]
+                    frames: [10..20].to_vec(),
                     complete: false,
                 },
             )]),

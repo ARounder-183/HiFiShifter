@@ -2255,9 +2255,11 @@ impl ModelHandle {
             crate::render::document::InputVerdict::AwaitingRegions
         } else if failed > 0 {
             crate::render::document::InputVerdict::Degraded
-        } else if authorized == 0 {
-            crate::render::document::InputVerdict::AwaitingSamples
-        } else if published == 0 {
+        }
+        // 【两个条件给同一个结论：合并成一支】"没有任何已授权源"与"一个都没发布"
+        // 都是"等宿主把素材真正交过来"，分开写只会让读者以为它们将走向不同的处置。
+        // 计数仍然各自上报给 `note_readiness`（下面的三个字段），诊断粒度不丢。
+        else if authorized == 0 || published == 0 {
             crate::render::document::InputVerdict::AwaitingSamples
         } else {
             crate::render::document::InputVerdict::Ready

@@ -201,7 +201,10 @@ fn a_wide_crossfade_is_twenty_milliseconds() {
         state.fade_len.load(Ordering::Acquire) as usize,
         OUTPUT_WIDE_CROSSFADE_FRAMES
     );
-    assert!(
+    // 【为什么用 const 断言而不是 assert!】`clippy::assertions_on_constants` 报的是
+    // "这个条件编译期就已知" —— 那正是这里想要的：这条不是运行时检查，而是把
+    // "宽淡化必须至少 20 ms"钉成**编译期**不变量。常量被改小，构建直接失败。
+    const _: () = assert!(
         OUTPUT_WIDE_CROSSFADE_FRAMES >= 15 * 48,
         "20 ms at 48 kHz is the floor for two different timbres"
     );

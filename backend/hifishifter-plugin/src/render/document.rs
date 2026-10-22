@@ -47,6 +47,7 @@ pub(crate) struct WorkspaceSnapshot {
 ///   不会互相阻塞到死锁。
 /// - 单把锁内的长操作（宿主 API 调用、神经推理）必须先把数据 `clone` 出来再解锁 ——
 ///   见 `render/extension.rs` 的"宿主调用始终不持内部锁"。
+///
 /// 宿主内容变化后等待其收口的宽限期。
 ///
 /// 与 bridge 的 `DEFERRED_EDITING_GRACE` 同量级：一次编辑从内容回调到

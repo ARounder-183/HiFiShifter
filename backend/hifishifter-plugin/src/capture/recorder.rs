@@ -413,7 +413,9 @@ impl TransportPhase {
 /// `StreamGeometry::note_stream_geometry` 的 R2 完成，**不经过这个枚举**。
 ///
 /// 【为什么不再有 `Carried` 这一档】它曾经同时表示两件不同的事：
+///
 ///   * "宿主读数没动，位置由我们按块长数出来"（真·计数器）；
+///
 ///   * "宿主读数在动，但因为锁存了偏移，标签仍是我们"（宿主说的）。
 ///
 /// 两者在读数上不可区分，于是 `[capture] clock` 的 `carried=` 在任何会话里都接近
@@ -826,10 +828,13 @@ pub(crate) struct Capture {
     /// 暂存块里是否出现过"流在推进"的证据（`phase == Rolling`）。
     ///
     /// 【为什么必须区分】暂存发生在两种完全不同的处境：
+    ///
     ///   * 宿主停在光标处反复送同一块（用户先按录制、后按播放）—— 那些帧**不是**
     ///     播放时间，绝不能桥接；
+    ///
     ///   * 起播窗口内宿主把位置钉住、但相位是 `Rolling`（内容在按块长流动）——
     ///     那些帧是真实播放过的时间，事后必须补出来。
+    ///
     /// 两者的唯一差别就是这里。没有它，`the_first_frame_follows_the_host_not_the_button`
     /// 会把"按下录制时停的位置"桥进素材。
     window_rolled: bool,
@@ -1321,19 +1326,23 @@ impl Capture {
                 return self.capture_elected(
                     ctx.stream,
                     &block,
-                    start,
-                    frames,
-                    skip,
-                    rate,
-                    true,
-                    ctx.playing_rising || ctx.recording_rising,
-                    ctx.part,
-                    ctx.advancing,
-                    false,
-                    0,
-                    // 循环切分的第二段不是起播起点：前导静音/钉住纠正只属于第一段。
-                    0,
-                    false,
+                    BlockGeometry {
+                        start,
+                        frames,
+                        skip,
+                        rate,
+                    },
+                    BlockEvidence {
+                        flow: true,
+                        rising: ctx.playing_rising || ctx.recording_rising,
+                        part: ctx.part,
+                        advancing: ctx.advancing,
+                        resync: false,
+                        resync_limit_frames: 0,
+                        // 循环切分的第二段不是起播起点：前导静音/钉住纠正只属于第一段。
+                        preceding_silent_frames: 0,
+                        counted: false,
+                    },
                 );
             }
             return CaptureOutcome::NotPlaying;
@@ -1379,18 +1388,22 @@ impl Capture {
         self.capture_elected(
             ctx.stream,
             &block,
-            start,
-            frames,
-            skip,
-            rate,
-            ctx.phase == TransportPhase::Rolling,
-            ctx.playing_rising || ctx.recording_rising,
-            ctx.part,
-            ctx.advancing,
-            ctx.resync,
-            ctx.resync_limit_frames,
-            ctx.preceding_silent_frames,
-            ctx.counted,
+            BlockGeometry {
+                start,
+                frames,
+                skip,
+                rate,
+            },
+            BlockEvidence {
+                flow: ctx.phase == TransportPhase::Rolling,
+                rising: ctx.playing_rising || ctx.recording_rising,
+                part: ctx.part,
+                advancing: ctx.advancing,
+                resync: ctx.resync,
+                resync_limit_frames: ctx.resync_limit_frames,
+                preceding_silent_frames: ctx.preceding_silent_frames,
+                counted: ctx.counted,
+            },
         )
     }
 
@@ -1580,23 +1593,34 @@ impl Capture {
     }
 
     /// 被选举流上的 lookbehind + 写入判定。
+    ///
+    /// 【为什么几何与证据各一个参数】`start` / `frames` / `skip` / `rate` 永远是
+    /// 一起出现的（它们共同描述"本块写哪一段"），`BlockEvidence` 里的 8 个字段也
+    /// 永远是同一批事实。分成两个参数后签名是 5 个（self / stream / block / geom /
+    /// evidence），加一条证据不必再改四个调用点。
     fn capture_elected(
         &mut self,
         stream: ProcessStream,
         block: &InputBlock<'_>,
-        start: i64,
-        frames: usize,
-        skip: usize,
-        rate: u32,
-        flow: bool,
-        rising: bool,
-        part: u8,
-        advancing: bool,
-        resync: bool,
-        resync_limit_frames: u64,
-        preceding_silent_frames: u64,
-        counted: bool,
+        geometry: BlockGeometry,
+        evidence: BlockEvidence,
     ) -> CaptureOutcome {
+        let BlockGeometry {
+            start,
+            frames,
+            skip,
+            rate,
+        } = geometry;
+        let BlockEvidence {
+            flow,
+            rising,
+            part,
+            advancing,
+            resync,
+            resync_limit_frames,
+            preceding_silent_frames,
+            counted,
+        } = evidence;
         self.block_preceding_silent = preceding_silent_frames;
         self.block_counted = counted;
         // 【为什么取 max 而不是覆盖】内容块读到的是完整跨度（它之前累积的静音），
@@ -2546,6 +2570,52 @@ impl Capture {
             self.stopped = Some(reason);
         }
     }
+}
+
+/// 记录器写入判定需要的**本块几何**。
+///
+/// 【为什么不是复用 `render::extension::BlockEvidence`】同一个理由：那个结构体服务
+/// 输出仲裁，字段远多于此。这四个量（起点 / 帧数 / 跳过 / 采样率）在记录器里永远
+/// 一起出现 —— 它们共同描述"本块写哪一段"，拆成四个位置参数只会让调用点反复核对
+/// 顺序（`start, frames, skip, rate` 的顺序错了不会报错，只会录出错位的内容）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockGeometry {
+    /// 本块在工程域的有效起点（已夹掉负位置）。
+    pub start: i64,
+    /// 有效帧数（已扣掉 `skip`）。
+    pub frames: usize,
+    /// 本块开头被夹掉的帧数（宿主 pre-roll）。
+    pub skip: usize,
+    /// 本块的工程采样率。
+    pub rate: u32,
+}
+
+/// 记录器写入判定需要的**块级证据**子集。
+///
+/// 【为什么不是复用 `render::extension::BlockEvidence`】那个结构体服务的是输出仲裁，
+/// 带着位置、切分、门控结论等十几个字段；记录器只用到其中 8 个。把整个结构体传进来，
+/// 每次"给记录器加一条证据"都要先给输出仲裁加一条 —— 两个关注点被迫同步演进。
+///
+/// 因此这里是它的一个**显式子集**：由调用方从 `BlockContext` / `BlockEvidence`
+/// 里挑出来（见 `on_block_with_context` 的两个构造点），字段一一对应。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockEvidence {
+    /// 位置流在推进的弱证据（宿主没报 `kPlaying` 时唯一的起播依据）。
+    pub flow: bool,
+    /// `kPlaying` / `kRecording` 的上升沿。
+    pub rising: bool,
+    /// 本块属于第几段切分（0 = 没有切分）。
+    pub part: u8,
+    /// 本块是否让记账位置前进。
+    pub advancing: bool,
+    /// 位置被重新对齐过（回退 seek）。
+    pub resync: bool,
+    /// 本次 resync 允许的最大帧数。
+    pub resync_limit_frames: u64,
+    /// 本块之前连续静音的帧数（前导静音计入）。
+    pub preceding_silent_frames: u64,
+    /// 本块的位置是按插件记账域推进出来的。
+    pub counted: bool,
 }
 /// 封口：把平面截到实际写入长度，让"平面长度 == 段长度"成为交付不变式。
 ///

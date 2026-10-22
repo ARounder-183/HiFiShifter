@@ -552,8 +552,10 @@ struct StreamGeometry {
     /// "内容在流动"这条证据还剩多少帧可信（只在 `playing == false` 时消耗）。
     ///
     /// 【为什么与 `advance_limit` 分开】两者管的是**不同的通路**：
+    ///
     ///   * `advance_limit` 只在上升沿打开，管"宿主还没开始报位置"；
     ///   * `activity_budget` 在每次 `new_pass` 充满，管"宿主钉住位置但音频在流动"。
+    ///
     /// 后者此前完全没有额度，于是宿主停播后仍在送预取音频时，计数器可以一路
     /// 前进 —— 实测 3.4 s。把它绑到 pass 上（一次播放只有一个开头），语义与它
     /// 所服务的起播窗口完全一致。
@@ -1079,8 +1081,10 @@ pub(crate) struct ExtensionOwner {
     /// instance(s) but NONE holds the playback role`），于是 `process` 全部走
     /// `pass_through` —— 用户听到的永远是宿主原声，再正确的编辑也听不出来。
     /// 有了这个读数就能区分两种在文档级**不同形**的形态：
+    ///
     ///   * REAPER：编辑器实例 + 播放实例并存 ⇒ 本实例 `playback_covered = true` ⇒ 继续透传
     ///     （`vst3/audio_boundary_tests` 的既有契约不变）；
+    ///
     ///   * Cubase 单实例：没有任何实例持 playback ⇒ `false` ⇒ 该实例接管渲染。
     playback_covered: std::sync::atomic::AtomicBool,
     /// 文档关闭后重绑到另一份文档的次数（诊断）。
@@ -3980,7 +3984,9 @@ impl ExtensionOwner {
     /// 【为什么要这两行】本轮之前，排查"咔"只能靠"用户再听一遍"：插件里没有
     /// "这一块换了源"与"这一块位置回退了"的读数，于是同一个症状被反复归因到
     /// 不同机理。这两行把它变成可判定的数字：
+    ///
     ///   * `[capture] pass` —— 一次播放里换了几次内容源（I-2，理想为 0）；
+    ///
     ///   * `[capture] clock` —— 位置是否逐块续接（I-3，`rewinds` 理想为 0）。
     ///
     /// 【为什么去重】它们由 20 ms 的界面定时器驱动；不去重就是每秒 50 行。判据取
@@ -4455,8 +4461,11 @@ impl ExtensionOwner {
     /// 【判据：块首变化，或同头块变长】块长由宿主决定（SDK 只承诺
     /// `numSamples <= maxSamplesPerBlock`），起播第一个块可以很大，也可以与停播块
     /// 同头。因此：
+    ///
     ///   * 块首移动 ⇒ 时间轴在走（seek / 循环回卷也算，代价是至多一块瞬态）；
+    ///
     ///   * 块首没动但块变长 ⇒ 起播给了更大的块，也是在走；
+    ///
     ///   * 块首没动且块不变长/变短 ⇒ 钉住/重复（或宿主在停播时缩小了块）。
     ///
     /// 【为什么不比较块尾/历史高水位】那会让停播/预渲染留下的旧位置把起播块
@@ -5104,8 +5113,10 @@ impl ExtensionOwner {
     /// 这两件事此前都长在 [`Self::capture_stage`] 里，而后者被 `process` 在
     /// `num_samples == 0 || num_outputs == 0` 的早退**之后**才调用。于是"宿主没接我们的
     /// 输出总线"这一个与录制**无关**的事实，会让插件：
+    ///
     ///   * 永远捕获不到任何东西（录制静音）；
     ///   * `saw_context` 永不置位 ⇒ 界面上的录制键一直是灰的（连录都录不了）。
+    ///
     /// 录制只关心两件事：宿主给的**工程位置**、宿主给的**输入**。
     ///
     /// 前置条件（由调用方保证）：`data` 的样本是 32-bit 浮点、`process_context` 非空。
@@ -5323,12 +5334,16 @@ impl ExtensionOwner {
             return BlockSplit::whole(position, frames);
         }
         let loop_beats = time.cycle_end_music - time.cycle_start_music;
-        if !(loop_beats > 0.0) {
+        // 【为什么写成 `<= 0.0` 而不是 `!(x > 0.0)`】两者在有限数上等价，但否定的
+        // 比较让"这里到底要不要 NaN"变得要读者自己想。这里要的就是"循环长度必须是正的"
+        // 这一个陈述。
+        if loop_beats <= 0.0 {
             return BlockSplit::whole(position, frames);
         }
         let beats_to_end = time.cycle_end_music - music;
         let to_end = (beats_to_end * 60.0 / tempo * rate).round();
-        if !(to_end > 0.0) || to_end >= frames as f64 {
+        // 同上：直接陈述"到循环尾的距离必须是正的、且必须在本块之内"。
+        if to_end <= 0.0 || to_end >= frames as f64 {
             return BlockSplit::whole(position, frames);
         }
         let length = (loop_beats * 60.0 / tempo * rate).round() as i64;
