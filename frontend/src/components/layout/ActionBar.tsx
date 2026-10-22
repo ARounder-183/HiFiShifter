@@ -15,7 +15,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
-import { TransferControl } from "../../features/transfer/TransferControl";
+import { CaptureControl } from "../../features/capture/CaptureControl";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
@@ -1191,7 +1191,7 @@ export function ActionBar() {
              * 用 `aria-disabled` 保留提示通道，点击处理里直接早退。
              *
              * 录音键在插件里没有对应命令（`recording.*` 全被 `pluginAllowsAction` 拒掉），
-             * 仍然只在独立 App 里出现；插件形态下那个位置是 Transfer 控件。
+             * 仍然只在独立 App 里出现；插件形态下那个位置是 Capture 控件。
              */}
             {(() => {
                 const hostTransport = canControlHostTransport();
@@ -1525,9 +1525,9 @@ export function ActionBar() {
                 );
             })()}
 
-            {/* Transfer：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
-                "录制"的心智模型就是一个传输栏上的键（见 `TransferControl` 的文件头）。 */}
-            {isPluginMode() && <TransferControl />}
+            {/* Capture：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
+                "录制"的心智模型就是一个传输栏上的键（见 `CaptureControl` 的文件头）。 */}
+            {isPluginMode() && <CaptureControl />}
 
             <AppToolbarSeparator />
 

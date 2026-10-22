@@ -1,16 +1,16 @@
 /**
- * 传输栏上 Transfer 控件的契约。
+ * 传输栏上 Capture 控件的契约。
  *
  * 【要钉死什么】
  * 1. 插件形态下**永远**有一个可点的键，并且说清现在缺哪一步（宿主没播放、宿主不给位置、
- *    宿主正在用 ARA 供音）—— 用户实测报障原话是"没看到任何 Transfer 相关的功能入口"。
+ *    宿主正在用 ARA 供音）—— 用户实测报障原话是"没看到任何 Capture 相关的功能入口"。
  * 2. **只有一行，而且只有图标**。主工具栏是 `flex-nowrap overflow-y-hidden` 的单行容器，
  *    而插件形态下它的宽度由宿主的 VST 窗口决定。此前录制中会多出一行读数，那一行被
  *    工具栏裁掉，表现为"点了录制排版就乱"（用户报障）。所以这里既断言"没有第二行"，
  *    也断言"键没有文字"。
  * 3. 无文字不等于无名称：每个图标键都必须带 `aria-label`（它同时是 tooltip）。
  *
- * store 自己的时序由 `transferStore.test.ts` 覆盖，本文件只测"控件上显示什么、点了会发
+ * store 自己的时序由 `captureStore.test.ts` 覆盖，本文件只测"控件上显示什么、点了会发
  * 哪条命令"。
  */
 // @vitest-environment jsdom
@@ -27,9 +27,9 @@ vi.mock("../../services/invoke", () => ({
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { enUS } from "../../i18n/en-US";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
-import { resetTransferStoreForTests } from "./transferStore";
-import { TransferControl } from "./TransferControl";
-import type { TransferStatus } from "./transferApi";
+import { resetCaptureStoreForTests } from "./captureStore";
+import { CaptureControl } from "./CaptureControl";
+import type { CaptureStatus } from "./captureApi";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -37,7 +37,7 @@ const LOCALE_KEY = "hifishifter.locale";
 let container: HTMLDivElement;
 let root: Root;
 
-function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
+function status(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
     return {
         state: "empty",
         recording: null,
@@ -65,7 +65,7 @@ function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
 }
 
 /** 一段"正在录"的读数（多数用例都要它）。 */
-function recording(overrides: Partial<TransferStatus> = {}): TransferStatus {
+function recording(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
     return status({
         state: "recording",
         hostPlaying: true,
@@ -84,7 +84,7 @@ function recording(overrides: Partial<TransferStatus> = {}): TransferStatus {
 
 beforeEach(() => {
     invokeMock.mockReset();
-    resetTransferStoreForTests();
+    resetCaptureStoreForTests();
     localStorage.setItem(LOCALE_KEY, "en-US");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     container = document.createElement("div");
@@ -105,7 +105,7 @@ async function render() {
         root.render(
             <AppThemeProvider>
                 <I18nProvider>
-                    <TransferControl />
+                    <CaptureControl />
                 </I18nProvider>
             </AppThemeProvider>,
         );
@@ -120,7 +120,7 @@ function text(): string {
 }
 
 function control(): HTMLElement {
-    const found = container.querySelector<HTMLElement>("[data-transfer-control]");
+    const found = container.querySelector<HTMLElement>("[data-capture-control]");
     expect(found, "控件必须挂载").toBeTruthy();
     return found!;
 }
@@ -145,17 +145,17 @@ async function click(target: HTMLButtonElement | undefined) {
 test("宿主可以录时给出可点的录制键", async () => {
     invokeMock.mockResolvedValue(status());
     await render();
-    const record = iconButton(enUS.transfer_guide_body);
+    const record = iconButton(enUS.capture_guide_body);
     expect(record, "用户必须能看到一个录制入口").toBeTruthy();
     expect(record!.disabled).toBe(false);
     await click(record);
-    expect(invokeMock).toHaveBeenCalledWith("transfer_start");
+    expect(invokeMock).toHaveBeenCalledWith("capture_start");
 });
 
 /**
  * **控件只有一行，且键只有图标。**
  *
- * 【为什么这是回归测试】此前录制中会多出一行读数（`data-transfer-details`），而主工具栏
+ * 【为什么这是回归测试】此前录制中会多出一行读数（`data-capture-details`），而主工具栏
  * 是单行且纵向裁切的容器 —— 那一行被裁掉，用户看到的是"点了录制排版就乱"。而工具栏在
  * 宿主 VST 窗口里可能很窄，文字键（"录制"/"停止"/"取消"）在任何语言里都比图标宽。
  */
@@ -164,7 +164,7 @@ test("控件只有一行，键只有图标且都有名称", async () => {
     await render();
     // 第二行必须**完全**不存在（不是隐藏、不是条件渲染失败）。
     expect(
-        container.querySelector("[data-transfer-details]"),
+        container.querySelector("[data-capture-details]"),
         "第二行必须被彻底去掉，否则它会撑破单行工具栏",
     ).toBeNull();
     // 根节点是一个横向容器，且它的直接子元素都在同一行里（没有换行的块级行）。
@@ -191,15 +191,15 @@ test("控件只有一行，键只有图标且都有名称", async () => {
 test("宿主不给播放位置时键在但**说清为什么不能录**", async () => {
     invokeMock.mockResolvedValue(status({ canCapture: false }));
     await render();
-    const record = iconButton(enUS.transfer_cannot_capture);
+    const record = iconButton(enUS.capture_cannot_capture);
     expect(record).toBeTruthy();
     expect(record!.disabled, "不能录时不能让它点下去什么都不发生").toBe(true);
 });
 
-test("ARA 宿主里如实说明不需要 Transfer", async () => {
+test("ARA 宿主里如实说明不需要 Capture", async () => {
     invokeMock.mockResolvedValue(status({ araBound: true }));
     await render();
-    expect(iconButton(enUS.transfer_not_applicable_ara)).toBeTruthy();
+    expect(iconButton(enUS.capture_not_applicable_ara)).toBeTruthy();
 });
 
 test("宿主在播放却一帧都没到 ⇒ 直接说是音频没进来", async () => {
@@ -217,9 +217,9 @@ test("宿主在播放却一帧都没到 ⇒ 直接说是音频没进来", async 
         }),
     );
     await render();
-    expect(iconButton(enUS.transfer_no_audio_arriving)).toBeTruthy();
+    expect(iconButton(enUS.capture_no_audio_arriving)).toBeTruthy();
     expect(
-        iconButton(enUS.transfer_host_not_playing),
+        iconButton(enUS.capture_host_not_playing),
         "不能把「没在播放」与「没拿到音频」混成一句",
     ).toBeUndefined();
 });
@@ -227,17 +227,17 @@ test("宿主在播放却一帧都没到 ⇒ 直接说是音频没进来", async 
 test("宿主用 64 位精度时说明原因与补救（这是用户可修的一档）", async () => {
     invokeMock.mockResolvedValue(status({ unsupportedPrecision: true }));
     await render();
-    expect(iconButton(enUS.transfer_unsupported_precision)).toBeTruthy();
+    expect(iconButton(enUS.capture_unsupported_precision)).toBeTruthy();
 });
 
 test("录制中给出停止与取消，并说出「宿主没在播放」", async () => {
     invokeMock.mockResolvedValue(recording({ hostPlaying: false }));
     await render();
-    const stop = iconButton(enUS.transfer_host_not_playing);
+    const stop = iconButton(enUS.capture_host_not_playing);
     expect(stop, "宿主没在播放时必须说清原因").toBeTruthy();
-    expect(iconButton(enUS.transfer_cancel_hint), "误触之后要有退路").toBeTruthy();
+    expect(iconButton(enUS.capture_cancel_hint), "误触之后要有退路").toBeTruthy();
     await click(stop);
-    expect(invokeMock).toHaveBeenCalledWith("transfer_stop");
+    expect(invokeMock).toHaveBeenCalledWith("capture_stop");
 });
 
 /**
@@ -250,18 +250,18 @@ test("录制中给出停止与取消，并说出「宿主没在播放」", async
 test("按了录制但宿主还没播放 ⇒ 说成等待播放，而不是 0.0 秒", async () => {
     invokeMock.mockResolvedValue(status({ state: "standby", standby: true }));
     await render();
-    expect(iconButton(enUS.transfer_field_waiting_host)).toBeTruthy();
+    expect(iconButton(enUS.capture_field_waiting_host)).toBeTruthy();
     expect(text(), "待命期不该出现录制读数").not.toContain("0.0");
     // 键变成"停止"（本次录制已经开始了，只是还没收到素材）。
-    await click(iconButton(enUS.transfer_field_waiting_host));
-    expect(invokeMock).toHaveBeenCalledWith("transfer_stop");
+    await click(iconButton(enUS.capture_field_waiting_host));
+    expect(invokeMock).toHaveBeenCalledWith("capture_stop");
 });
 
 /** 距上限不足 10 秒时给出预警 —— 上限到点会自己停。预警折进键与读数的 tooltip。 */
 test("接近录制上限时给出预警", async () => {
     invokeMock.mockResolvedValue(recording({ limitWarning: true }));
     await render();
-    expect(iconButton(enUS.transfer_limit_warning)).toBeTruthy();
+    expect(iconButton(enUS.capture_limit_warning)).toBeTruthy();
 });
 
 /** 录制中必须有一个"在动"的读数：没有它，用户无法判断插件到底有没有在收音频。 */
@@ -275,11 +275,11 @@ test("录制中显示已录时长", async () => {
 test("出错时只给图标，正文在 tooltip 里", async () => {
     invokeMock.mockResolvedValue(status({ canCapture: false }));
     invokeMock.mockImplementation(async (command: string) => {
-        if (command === "transfer_status") return status({ canCapture: true });
+        if (command === "capture_status") return status({ canCapture: true });
         throw new Error("the host has not declared a sample rate yet");
     });
     await render();
-    await click(iconButton(enUS.transfer_guide_body));
+    await click(iconButton(enUS.capture_guide_body));
     const alert = container.querySelector<HTMLElement>("[role='alert']");
     expect(alert, "错误必须有一个可见的落点").toBeTruthy();
     expect(alert!.getAttribute("data-tooltip")).toContain("sample rate");

@@ -162,7 +162,7 @@ pub(crate) fn status() -> serde_json::Value {
 
 /// 监视回写：有新的 `edits.hfsedit` 就合并它，并把回答落盘。
 ///
-/// 【为什么挂在会话 actor 上】与 Transfer 的补缓冲同一个理由：actor 由**会话**创建，
+/// 【为什么挂在会话 actor 上】与 Capture 的补缓冲同一个理由：actor 由**会话**创建，
 /// 与「插件窗口开没开」无关，而且它本来就在做需要串行化的编辑工作。
 /// 挂在 WebView 的定时器上会让「关掉窗口」等于「不再接受回写」。
 pub(crate) fn poll(owner: &Arc<ExtensionOwner>) {

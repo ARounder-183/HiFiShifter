@@ -1,8 +1,8 @@
 /**
- * Transfer 的**设置与诊断**面板（仅在不支持 ARA 的宿主里出现）。
+ * Capture 的**设置与诊断**面板（仅在不支持 ARA 的宿主里出现）。
  *
- * 【为什么录制键不在这里】主入口是传输栏上的 [`TransferControl`] —— 用户对"录制"的
- * 心智模型就是传输栏上的一个键（Melodyne 的 Transfer 也长在那里）。这个面板回答的是
+ * 【为什么录制键不在这里】主入口是传输栏上的 [`CaptureControl`] —— 用户对"录制"的
+ * 心智模型就是传输栏上的一个键（Melodyne 的 Capture 也长在那里）。这个面板回答的是
  * 另外几个问题：**刚发生了什么**（读数、take 列表、为什么没有声音、为什么自己停了）
  * 与**怎么改变行为**（监听、区间外处理、单次录制上限）。
  *
@@ -22,8 +22,8 @@ import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppButton, AppEmptyState, AppField, AppStatusChip, AppSwitchRow } from "../../ui";
-import { framesToSeconds, type TransferStatus } from "./transferApi";
-import { startTransferPolling, transferActions, useTransferSnapshot } from "./transferStore";
+import { framesToSeconds, type CaptureStatus } from "./captureApi";
+import { startCapturePolling, captureActions, useCaptureSnapshot } from "./captureStore";
 
 /** 帧→秒显示用的兜底采样率；后端还没收到宿主上下文时给 0。 */
 const FALLBACK_SAMPLE_RATE = 48_000;
@@ -31,11 +31,11 @@ const FALLBACK_SAMPLE_RATE = 48_000;
 /** 单次录制上限的可选档位（秒）。0 = 不限。 */
 const LIMIT_CHOICES_SEC = [60, 120, 300, 600, 1800, 0] as const;
 
-export function TransferPanel() {
+export function CapturePanel() {
     const { t, tVars } = useI18n();
-    const { status, busy, error } = useTransferSnapshot();
+    const { status, busy, error } = useCaptureSnapshot();
 
-    useEffect(() => startTransferPolling(), []);
+    useEffect(() => startCapturePolling(), []);
 
     const recording = status?.state === "recording";
     const standby = status?.state === "standby";
@@ -52,13 +52,13 @@ export function TransferPanel() {
                 </AppStatusChip>
                 {recording ? (
                     <span>
-                        {tVars("transfer_recording_progress", {
+                        {tVars("capture_recording_progress", {
                             seconds: framesToSeconds(status?.recording?.capturedFrames ?? 0, rate),
                         })}
                     </span>
                 ) : null}
                 {status?.hostPlaying ? (
-                    <AppStatusChip tone="success">{t("transfer_host_playing")}</AppStatusChip>
+                    <AppStatusChip tone="success">{t("capture_host_playing")}</AppStatusChip>
                 ) : null}
             </Flex>
 
@@ -69,7 +69,7 @@ export function TransferPanel() {
                 空白、面板却说"已录制" —— 两个读数互相矛盾。这一条把原因说穿。 */}
             {status?.material?.silent ? (
                 <span role="alert" style={{ color: "var(--qt-warning-text)" }}>
-                    {tVars("transfer_recorded_silent", {
+                    {tVars("capture_recorded_silent", {
                         seconds: framesToSeconds(status.material.capturedFrames, rate),
                     })}
                 </span>
@@ -79,14 +79,14 @@ export function TransferPanel() {
                 因为要做的事完全不同（检查路由 vs 去按播放）。 */}
             {recording && status.hostPlaying && (status.recording?.capturedFrames ?? 0) === 0 ? (
                 <span role="alert" style={{ color: "var(--qt-danger-text)" }}>
-                    {t("transfer_no_audio_arriving")}
+                    {t("capture_no_audio_arriving")}
                 </span>
             ) : null}
 
             {/* 上限预警：上限到点会**自己停**，而那是用户设的一个数值。 */}
             {status?.limitWarning ? (
                 <span role="alert" style={{ color: "var(--qt-warning-text)" }}>
-                    {t("transfer_limit_warning")}
+                    {t("capture_limit_warning")}
                 </span>
             ) : null}
 
@@ -101,29 +101,29 @@ export function TransferPanel() {
                 <AppButton
                     intent="danger"
                     disabled={busy || (status?.takeCount ?? 0) === 0}
-                    onClick={() => void transferActions.clear()}
+                    onClick={() => void captureActions.clear()}
                 >
-                    {t("transfer_clear")}
+                    {t("capture_clear")}
                 </AppButton>
             </Flex>
 
             {recording ? (
                 <Flex direction="column" gap="2">
-                    <AppField label={t("transfer_field_segments")}>
+                    <AppField label={t("capture_field_segments")}>
                         {String(status?.recording?.sealedSegments ?? 0)}
                     </AppField>
-                    <AppField label={t("transfer_field_gaps")}>
+                    <AppField label={t("capture_field_gaps")}>
                         {String(status?.recording?.gaps ?? 0)}
                     </AppField>
                     {/* 备用缓冲见底 = 录制即将停止；这条读数让"为什么停了"有据可查。 */}
-                    <AppField label={t("transfer_field_spares")}>
+                    <AppField label={t("capture_field_spares")}>
                         {String(status?.recording?.spares ?? 0)}
                     </AppField>
                     {/* 【为什么峰值读数在这一栏】它此前长在工具栏上，而工具栏是宿主窗口
                         里的一条单行容器 —— 峰值与分段数、备用缓冲同一性质（都是"刚发生了
                         什么"），所以它们应当在一起（面板），而不是挤在键旁边。 */}
-                    <AppField label={t("transfer_field_peak")}>
-                        {tVars("transfer_field_peak_value", {
+                    <AppField label={t("capture_field_peak")}>
+                        {tVars("capture_field_peak_value", {
                             left: (status?.recording?.peak?.[0] ?? 0).toFixed(2),
                             right: (status?.recording?.peak?.[1] ?? 0).toFixed(2),
                         })}
@@ -133,20 +133,20 @@ export function TransferPanel() {
 
             {status && status.takes.length > 0 ? (
                 <Flex direction="column" gap="2">
-                    <AppField label={t("transfer_field_takes")}>
+                    <AppField label={t("capture_field_takes")}>
                         {String(status.takes.length)}
                     </AppField>
                     {status.takes.map((take) => (
                         <Flex key={take.id} align="center" gap="2">
                             <AppStatusChip tone={take.active ? "accent" : "neutral"} tabular>
-                                {tVars("transfer_take_label", {
+                                {tVars("capture_take_label", {
                                     id: String(take.id),
                                     clips: String(take.clips),
                                 })}
                             </AppStatusChip>
                             {take.startSec !== null && take.endSec !== null ? (
                                 <span className="hs-type-caption">
-                                    {tVars("transfer_take_span", {
+                                    {tVars("capture_take_span", {
                                         start: take.startSec.toFixed(2),
                                         end: take.endSec.toFixed(2),
                                     })}
@@ -156,42 +156,42 @@ export function TransferPanel() {
                                 size="sm"
                                 intent="subtle"
                                 disabled={busy}
-                                onClick={() => void transferActions.deleteTake(take.id)}
+                                onClick={() => void captureActions.deleteTake(take.id)}
                             >
-                                {t("transfer_take_delete")}
+                                {t("capture_take_delete")}
                             </AppButton>
                         </Flex>
                     ))}
                 </Flex>
             ) : (
-                <AppEmptyState size="compact">{t("transfer_status_empty")}</AppEmptyState>
+                <AppEmptyState size="compact">{t("capture_status_empty")}</AppEmptyState>
             )}
 
             <Flex direction="column" gap="2">
                 <AppSwitchRow
                     control="switch"
-                    label={t("transfer_option_monitor")}
-                    hint={t("transfer_option_monitor_hint")}
+                    label={t("capture_option_monitor")}
+                    hint={t("capture_option_monitor_hint")}
                     checked={status?.options.monitor ?? true}
                     disabled={busy}
                     onCheckedChange={(checked) =>
-                        void transferActions.setOptions({ monitor: checked })
+                        void captureActions.setOptions({ monitor: checked })
                     }
                 />
                 <AppSwitchRow
                     control="switch"
-                    label={t("transfer_option_outside")}
-                    hint={t("transfer_option_outside_hint")}
+                    label={t("capture_option_outside")}
+                    hint={t("capture_option_outside_hint")}
                     checked={status?.options.outsidePassthrough ?? true}
                     disabled={busy}
                     onCheckedChange={(checked) =>
-                        void transferActions.setOptions({ outsidePassthrough: checked })
+                        void captureActions.setOptions({ outsidePassthrough: checked })
                     }
                 />
                 {/* 【为什么上限必须是可见选项】它此前是一个**从未被执行**的设置：
                     默认 10 分钟，但没有任何一处比较它与已捕获的帧数。一个不生效的上限
                     比没有上限更糟 —— 用户以为到点会自动停，于是放心去干别的。 */}
-                <AppField label={t("transfer_option_limit")}>
+                <AppField label={t("capture_option_limit")}>
                     <Flex gap="1" wrap="wrap">
                         {LIMIT_CHOICES_SEC.map((seconds) => {
                             const current = Math.round(status?.options.maxDurationSec ?? 0);
@@ -202,14 +202,14 @@ export function TransferPanel() {
                                     intent={current === seconds ? "primary" : "subtle"}
                                     disabled={busy}
                                     onClick={() =>
-                                        void transferActions.setOptions({
+                                        void captureActions.setOptions({
                                             maxDurationSec: seconds === 0 ? 1 : seconds,
                                         })
                                     }
                                 >
                                     {seconds === 0
-                                        ? t("transfer_option_limit_unlimited")
-                                        : tVars("transfer_option_limit_seconds", {
+                                        ? t("capture_option_limit_unlimited")
+                                        : tVars("capture_option_limit_seconds", {
                                               seconds: String(seconds),
                                           })}
                                 </AppButton>
@@ -217,13 +217,13 @@ export function TransferPanel() {
                         })}
                     </Flex>
                 </AppField>
-                <span className="hs-type-caption">{t("transfer_option_limit_hint")}</span>
+                <span className="hs-type-caption">{t("capture_option_limit_hint")}</span>
             </Flex>
 
             {/* 观察位：宿主**实际**做了什么。它是"为什么现在不能录"的唯一判据来源。 */}
             <Flex direction="column" gap="1">
                 <span className="hs-type-caption">
-                    {tVars("transfer_diagnostics", {
+                    {tVars("capture_diagnostics", {
                         context: yesNo(t, status?.sawContext),
                         input: yesNo(t, status?.sawInput),
                         offline: yesNo(t, status?.sawOffline),
@@ -234,7 +234,7 @@ export function TransferPanel() {
                     用户无法自己判断。后端已经在仲裁，这里只是把它说出来。 */}
                 {status?.output ? (
                     <span className="hs-type-caption">
-                        {tVars("transfer_now_playing", { what: outputText(t, status.output) })}
+                        {tVars("capture_now_playing", { what: outputText(t, status.output) })}
                     </span>
                 ) : null}
             </Flex>
@@ -244,63 +244,63 @@ export function TransferPanel() {
     );
 }
 
-function yesNo(t: (key: TransferMessageKey) => string, value: boolean | undefined): string {
-    return value ? t("transfer_yes") : t("transfer_no");
+function yesNo(t: (key: CaptureMessageKey) => string, value: boolean | undefined): string {
+    return value ? t("capture_yes") : t("capture_no");
 }
 
 /** 状态 → 词表键。不拼字符串。 */
-function statusKey(state: TransferStatus["state"] | undefined) {
+function statusKey(state: CaptureStatus["state"] | undefined) {
     switch (state) {
         case "standby":
-            return "transfer_status_standby" as const;
+            return "capture_status_standby" as const;
         case "recording":
-            return "transfer_status_recording" as const;
+            return "capture_status_recording" as const;
         case "ready":
-            return "transfer_status_ready" as const;
+            return "capture_status_ready" as const;
         default:
-            return "transfer_status_empty" as const;
+            return "capture_status_empty" as const;
     }
 }
 
 /** 后端 `ClosedReason::as_str` → 词表键。未知取值原样透出（不猜）。 */
-function stoppedReasonText(t: (key: TransferMessageKey) => string, reason: string): string {
+function stoppedReasonText(t: (key: CaptureMessageKey) => string, reason: string): string {
     switch (reason) {
         case "limit_reached":
-            return t("transfer_stopped_limit");
+            return t("capture_stopped_limit");
         case "no_spare":
-            return t("transfer_stopped_no_spare");
+            return t("capture_stopped_no_spare");
         case "rate_changed":
-            return t("transfer_stopped_rate_changed");
+            return t("capture_stopped_rate_changed");
         case "budget_full":
-            return t("transfer_stopped_budget_full");
+            return t("capture_stopped_budget_full");
         case "jump":
-            return t("transfer_stopped_jump");
+            return t("capture_stopped_jump");
         default:
             return reason;
     }
 }
 
-/** 后端 `TransferOutput::as_str` → 词表键。未知取值原样透出（不猜）。 */
-function outputText(t: (key: TransferMessageKey) => string, output: string): string {
+/** 后端 `CaptureOutput::as_str` → 词表键。未知取值原样透出（不猜）。 */
+function outputText(t: (key: CaptureMessageKey) => string, output: string): string {
     switch (output) {
         case "processed":
-            return t("transfer_output_processed");
+            return t("capture_output_processed");
         // 【`stale_processed` 这一档已经被后端删掉】它曾经表示"上一版处理结果，新的
         // 还没合成好"。而那一档的产物读的是 `snapshots[...]`，也就是**上一段素材**：
         // 换 take 之后播它，等于用旧录音盖住新演奏，而用户会把它当成"编辑生效了"。
         // 现在那段空档由 `raw`（这一份 take 的原始捕获）覆盖，所以这里不再有对应键。
         case "raw":
-            return t("transfer_output_raw");
+            return t("capture_output_raw");
         case "recording":
-            return t("transfer_output_recording");
+            return t("capture_output_recording");
         // 【为什么要单独一档】它说的不是"还没有素材"，而是"素材已经在了，但处理
         // 结果还没算出来"。两者输出内容相同（都是宿主原声），含义却完全不同：
         // 后者是"该有结果却没有"，用户据此知道该等、还是该报障。
         case "pending_synthesis":
-            return t("transfer_output_pending");
+            return t("capture_output_pending");
         case "passthrough":
         case "untouched":
-            return t("transfer_output_passthrough");
+            return t("capture_output_passthrough");
         default:
             return output;
     }
@@ -314,57 +314,57 @@ function outputText(t: (key: TransferMessageKey) => string, output: string): str
  * （去按停止）。合成一句"不可用"等于让用户自己猜。
  */
 function guideText(
-    t: (key: TransferMessageKey) => string,
-    status: TransferStatus | null,
+    t: (key: CaptureMessageKey) => string,
+    status: CaptureStatus | null,
     canCapture: boolean,
 ): string {
-    if (status?.unsupportedPrecision) return t("transfer_unsupported_precision");
-    if (status?.araBound) return t("transfer_not_applicable_ara");
-    if (status?.state === "standby") return t("transfer_guide_standby");
-    if (status?.state === "recording") return t("transfer_guide_recording");
-    if (status?.state === "ready") return t("transfer_guide_ready");
-    if (status?.sawOffline) return t("transfer_guide_offline");
+    if (status?.unsupportedPrecision) return t("capture_unsupported_precision");
+    if (status?.araBound) return t("capture_not_applicable_ara");
+    if (status?.state === "standby") return t("capture_guide_standby");
+    if (status?.state === "recording") return t("capture_guide_recording");
+    if (status?.state === "ready") return t("capture_guide_ready");
+    if (status?.sawOffline) return t("capture_guide_offline");
     if (canCapture) {
         // 有位置、没有输入：这条通路在这个宿主上"通了但没料"，用户要检查的是路由。
-        return status?.sawInput ? t("transfer_guide_body") : t("transfer_no_input_audio");
+        return status?.sawInput ? t("capture_guide_body") : t("capture_no_input_audio");
     }
-    return t("transfer_cannot_capture");
+    return t("capture_cannot_capture");
 }
 
-type TransferMessageKey =
-    | "transfer_not_applicable_ara"
-    | "transfer_host_not_playing"
-    | "transfer_host_playing"
-    | "transfer_guide_body"
-    | "transfer_guide_standby"
-    | "transfer_guide_recording"
-    | "transfer_guide_ready"
-    | "transfer_guide_offline"
-    | "transfer_cannot_capture"
-    | "transfer_no_input_audio"
-    | "transfer_no_audio_arriving"
-    | "transfer_unsupported_precision"
-    | "transfer_option_monitor"
-    | "transfer_option_monitor_hint"
-    | "transfer_option_outside"
-    | "transfer_option_outside_hint"
-    | "transfer_option_limit"
-    | "transfer_option_limit_hint"
-    | "transfer_option_limit_seconds"
-    | "transfer_option_limit_unlimited"
-    | "transfer_take_delete"
-    | "transfer_limit_warning"
-    | "transfer_stopped_limit"
-    | "transfer_stopped_no_spare"
-    | "transfer_stopped_rate_changed"
-    | "transfer_stopped_budget_full"
-    | "transfer_stopped_jump"
-    | "transfer_now_playing"
-    | "transfer_output_processed"
-    | "transfer_output_raw"
-    | "transfer_output_recording"
-    | "transfer_output_pending"
-    | "transfer_output_passthrough"
-    | "transfer_status_standby"
-    | "transfer_yes"
-    | "transfer_no";
+type CaptureMessageKey =
+    | "capture_not_applicable_ara"
+    | "capture_host_not_playing"
+    | "capture_host_playing"
+    | "capture_guide_body"
+    | "capture_guide_standby"
+    | "capture_guide_recording"
+    | "capture_guide_ready"
+    | "capture_guide_offline"
+    | "capture_cannot_capture"
+    | "capture_no_input_audio"
+    | "capture_no_audio_arriving"
+    | "capture_unsupported_precision"
+    | "capture_option_monitor"
+    | "capture_option_monitor_hint"
+    | "capture_option_outside"
+    | "capture_option_outside_hint"
+    | "capture_option_limit"
+    | "capture_option_limit_hint"
+    | "capture_option_limit_seconds"
+    | "capture_option_limit_unlimited"
+    | "capture_take_delete"
+    | "capture_limit_warning"
+    | "capture_stopped_limit"
+    | "capture_stopped_no_spare"
+    | "capture_stopped_rate_changed"
+    | "capture_stopped_budget_full"
+    | "capture_stopped_jump"
+    | "capture_now_playing"
+    | "capture_output_processed"
+    | "capture_output_raw"
+    | "capture_output_recording"
+    | "capture_output_pending"
+    | "capture_output_passthrough"
+    | "capture_status_standby"
+    | "capture_yes"
+    | "capture_no";

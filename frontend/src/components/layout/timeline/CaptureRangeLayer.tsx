@@ -10,20 +10,20 @@
  * 滚动由宿主整层 translate 跟随 —— 层内不重排。录制读数 5 Hz 更新、滚动 60 Hz，
  * 让这一层自己跟滚动等于把两者绑在一起。
  *
- * 【为什么画在 Transfer 轨道上】Transfer 的素材只有一条流（宿主输入总线），时间轴上
- * 也只有一条轨（见后端 `TRANSFER_TRACK_ID`）。带子画在那条轨上，于是"录到的东西会
+ * 【为什么画在 Capture 轨道上】Capture 的素材只有一条流（宿主输入总线），时间轴上
+ * 也只有一条轨（见后端 `CAPTURE_TRACK_ID`）。带子画在那条轨上，于是"录到的东西会
  * 出现在哪里"这件事在录制过程中就看得见 —— 而不是录完才揭晓。
  */
 import React, { useSyncExternalStore } from "react";
 
-import { frameToSec } from "../../../features/transfer/transferApi";
-import { getTransferSnapshot, subscribeTransfer } from "../../../features/transfer/transferStore";
+import { frameToSec } from "../../../features/capture/captureApi";
+import { getCaptureSnapshot, subscribeCapture } from "../../../features/capture/captureStore";
 import { CLIP_BODY_PADDING_Y } from "./constants";
 
 /** 单行高度里留给带子的竖直内缩（与 clip 主体同一内缩，视觉上对齐）。 */
 const BAND_INSET_Y = CLIP_BODY_PADDING_Y;
 
-export const TransferCaptureLayer: React.FC<{
+export const CaptureRangeLayer: React.FC<{
     pxPerSec: number;
     rowHeight: number;
     /** 轨道顺序（决定带子画在第几行）。 */
@@ -31,17 +31,17 @@ export const TransferCaptureLayer: React.FC<{
     contentWidth: number;
     contentHeight: number;
 }> = ({ pxPerSec, rowHeight, tracks, contentWidth, contentHeight }) => {
-    const snapshot = useSyncExternalStore(subscribeTransfer, getTransferSnapshot);
+    const snapshot = useSyncExternalStore(subscribeCapture, getCaptureSnapshot);
     const capture = snapshot.status?.capture ?? null;
     if (capture === null) return null;
     const rate = capture.sampleRate;
     if (!(rate > 0) || !(pxPerSec > 0)) return null;
 
-    // 带子所在的轨道：Transfer 只有一条轨，取第一条即可 —— 与后端投影一致
-    // （见 `transfer::timeline::TRANSFER_TRACK_ID`）。
+    // 带子所在的轨道：Capture 只有一条轨，取第一条即可 —— 与后端投影一致
+    // （见 `capture::timeline::CAPTURE_TRACK_ID`）。
     const rowIndex = Math.max(
         0,
-        tracks.findIndex((track) => track.id === "transfer-track"),
+        tracks.findIndex((track) => track.id === "capture-track"),
     );
     const safeRowHeight = Math.max(1, rowHeight);
     const startSec = frameToSec(capture.startFrame, rate);
@@ -55,11 +55,11 @@ export const TransferCaptureLayer: React.FC<{
         <div
             className="pointer-events-none absolute left-0 top-0 overflow-hidden"
             style={{ width: contentWidth, height: contentHeight }}
-            data-transfer-capture-layer
+            data-capture-capture-layer
         >
             {/* 已录区间：实心带。它表达"这一段已经有素材了"。 */}
             <div
-                data-transfer-capture-band
+                data-capture-capture-band
                 style={{
                     position: "absolute",
                     left,
@@ -74,7 +74,7 @@ export const TransferCaptureLayer: React.FC<{
             {/* 当前位置：右边缘的一道细线。录制中唯一"在动"的东西 —— 没有它，
                 用户无法判断插件到底有没有在收音频。 */}
             <div
-                data-transfer-capture-head
+                data-capture-capture-head
                 style={{
                     position: "absolute",
                     left: left + width,

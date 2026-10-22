@@ -1,12 +1,12 @@
 /**
- * Transfer 状态的**唯一**拉取点。
+ * Capture 状态的**唯一**拉取点。
  *
- * 【为什么是一个共享 store 而不是各自 useState】Transfer 现在有两个消费方：传输栏上的
- * 录制控件（主入口）与「Transfer 设置与诊断」面板。各拉各的会让同一条 200ms 轮询
+ * 【为什么是一个共享 store 而不是各自 useState】Capture 现在有两个消费方：传输栏上的
+ * 录制控件（主入口）与「Capture 设置与诊断」面板。各拉各的会让同一条 200ms 轮询
  * 跑两遍（插件 webview 的每次往返都要过宿主消息循环），而且两处的读数会**错开一帧**
  * —— 控件显示"录制中"、面板显示"已录好"这种事，用户会当成 bug。
  *
- * 【为什么是轮询】录制进度每 100ms 变一次，宿主不会推送；后端 `transfer_status` 不取
+ * 【为什么是轮询】录制进度每 100ms 变一次，宿主不会推送；后端 `capture_status` 不取
  * 渲染锁，代价只是一个整数读取。
  *
  * 【为什么订阅判据是引用相等】轮询每 200ms 产生一个新对象。`useSyncExternalStore`
@@ -15,18 +15,13 @@
  */
 import { useSyncExternalStore } from "react";
 
-import {
-    transferApi,
-    transferError,
-    type TransferOptions,
-    type TransferStatus,
-} from "./transferApi";
+import { captureApi, captureError, type CaptureOptions, type CaptureStatus } from "./captureApi";
 
-/** 轮询间隔：与后端录制读数的更新节奏一致（见 `transfer/mod.rs` 的说明）。 */
+/** 轮询间隔：与后端录制读数的更新节奏一致（见 `capture/mod.rs` 的说明）。 */
 const POLL_MS = 200;
 
-export interface TransferSnapshot {
-    status: TransferStatus | null;
+export interface CaptureSnapshot {
+    status: CaptureStatus | null;
     /** 最近一次失败的原文（面板与控件各自决定怎么呈现）。 */
     error: string;
     /** 有命令在途（按钮据此禁用，避免重复提交）。 */
@@ -42,7 +37,7 @@ export interface TransferSnapshot {
     recordedSpanSec: [number, number] | null;
 }
 
-const EMPTY: TransferSnapshot = {
+const EMPTY: CaptureSnapshot = {
     status: null,
     error: "",
     busy: false,
@@ -50,60 +45,60 @@ const EMPTY: TransferSnapshot = {
     recordedSpanSec: null,
 };
 
-let snapshot: TransferSnapshot = EMPTY;
+let snapshot: CaptureSnapshot = EMPTY;
 const listeners = new Set<() => void>();
 
-function publish(next: TransferSnapshot): void {
+function publish(next: CaptureSnapshot): void {
     if (snapshot === next) return;
     snapshot = next;
     for (const listener of listeners) listener();
 }
 
 /** 内容相同就保留旧引用：订阅者不该因为"又轮询了一次"而重渲染。 */
-function withStatus(status: TransferStatus): TransferSnapshot {
+function withStatus(status: CaptureStatus): CaptureSnapshot {
     if (snapshot.status === status) return snapshot;
     return { ...snapshot, status };
 }
 
-export function subscribeTransfer(listener: () => void): () => void {
+export function subscribeCapture(listener: () => void): () => void {
     listeners.add(listener);
     return () => {
         listeners.delete(listener);
     };
 }
 
-export function getTransferSnapshot(): TransferSnapshot {
+export function getCaptureSnapshot(): CaptureSnapshot {
     return snapshot;
 }
 
 /** 订阅版：返回整个快照（控件与面板都读它）。 */
-export function useTransferSnapshot(): TransferSnapshot {
-    return useSyncExternalStore(subscribeTransfer, getTransferSnapshot, getTransferSnapshot);
+export function useCaptureSnapshot(): CaptureSnapshot {
+    return useSyncExternalStore(subscribeCapture, getCaptureSnapshot, getCaptureSnapshot);
 }
 
 /** 只关心状态的那部分调用方（多数）用这个，避免为 `busy` 的变化重渲染。 */
-export function useTransferStatus(): TransferStatus | null {
+export function useCaptureStatus(): CaptureStatus | null {
     return useSyncExternalStore(
-        subscribeTransfer,
+        subscribeCapture,
         () => snapshot.status,
         () => snapshot.status,
     );
 }
 
 /** 仅供测试重置模块级状态。 */
-export function resetTransferStoreForTests(): void {
+export function resetCaptureStoreForTests(): void {
     snapshot = EMPTY;
     listeners.clear();
 }
 
 async function refresh(): Promise<void> {
     try {
-        publish(withStatus(await transferApi.status()));
+        publish(withStatus(await captureApi.status()));
         if (snapshot.error !== "") publish({ ...snapshot, error: "" });
     } catch (cause) {
         // 【为什么不停止轮询】状态查询失败是暂时的（会话未就绪等），而面板的职责是
         // 持续反映真实状态。终态判定由 `invoke` 的统一闸门做。
-        const error = transferError(cause);
+        const error = captureError(cause);
         if (snapshot.error !== error) publish({ ...snapshot, error });
     }
 }
@@ -117,7 +112,7 @@ let timer: number | undefined;
  * 【为什么用引用计数】控件与面板各自在挂载时开始、卸载时停止；两者同时在场时只有
  * 一条轮询在跑，其中一个卸载也不会让另一个断流。
  */
-export function startTransferPolling(): () => void {
+export function startCapturePolling(): () => void {
     running += 1;
     void refresh();
     if (timer === undefined) {
@@ -137,7 +132,7 @@ export function startTransferPolling(): () => void {
 }
 
 /** 一次录制完成的后果：推进票据 + 记下区间（视口据此定位）。 */
-function noteRecorded(status: TransferStatus | undefined): void {
+function noteRecorded(status: CaptureStatus | undefined): void {
     // 【为什么容忍 undefined】`stop` 的回信是 `{take, status}`；后端若改了形状（或
     // 调用方拿错了字段），这里宁可什么都不做，也不能把一个"录制完成"的假信号推给视口。
     if (!status) return;
@@ -158,8 +153,8 @@ function noteRecorded(status: TransferStatus | undefined): void {
 
 /** 跑一条会改变状态的动作：置忙、执行、用返回的状态刷新。 */
 async function act(
-    run: () => Promise<TransferStatus>,
-    onDone?: (status: TransferStatus | undefined) => void,
+    run: () => Promise<CaptureStatus>,
+    onDone?: (status: CaptureStatus | undefined) => void,
 ) {
     publish({ ...snapshot, busy: true });
     try {
@@ -167,25 +162,25 @@ async function act(
         if (onDone) onDone(status);
         else publish({ ...snapshot, status, error: "" });
     } catch (cause) {
-        publish({ ...snapshot, error: transferError(cause) });
+        publish({ ...snapshot, error: captureError(cause) });
     } finally {
         publish({ ...snapshot, busy: false });
     }
 }
 
-export const transferActions = {
-    start: () => act(() => transferApi.start()),
+export const captureActions = {
+    start: () => act(() => captureApi.start()),
     /** 停止并 promote：这是"录制完成"，视口要跳到刚录好的区间。 */
-    stop: () => act(() => transferApi.stop().then((reply) => reply.status), noteRecorded),
-    cancel: () => act(() => transferApi.cancel()),
-    clear: () => act(() => transferApi.clear()),
-    deleteTake: (takeId: number) => act(() => transferApi.deleteTake(takeId)),
-    setOptions: (patch: Partial<TransferOptions>) => act(() => transferApi.setOptions(patch)),
+    stop: () => act(() => captureApi.stop().then((reply) => reply.status), noteRecorded),
+    cancel: () => act(() => captureApi.cancel()),
+    clear: () => act(() => captureApi.clear()),
+    deleteTake: (takeId: number) => act(() => captureApi.deleteTake(takeId)),
+    setOptions: (patch: Partial<CaptureOptions>) => act(() => captureApi.setOptions(patch)),
     /** 手动刷新（面板打开时用一次，不必等 200ms）。 */
     refresh,
 };
 
 /** 供测试注入一条状态（不发命令）。 */
-export function publishTransferStatusForTests(status: TransferStatus | null): void {
+export function publishCaptureStatusForTests(status: CaptureStatus | null): void {
     publish({ ...snapshot, status });
 }

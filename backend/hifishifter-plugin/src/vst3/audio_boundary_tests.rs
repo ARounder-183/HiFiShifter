@@ -170,7 +170,7 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
     let model = crate::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     // 【为什么必须绑定文档】本用例测的是"播放实例把快照送出去"。未绑定的实例是
-    // Transfer 形态（没有素材时透明、有素材时出自己的内容），根本不是这条通路的形状；
+    // Capture 形态（没有素材时透明、有素材时出自己的内容），根本不是这条通路的形状；
     // 用一个未绑定实例当"播放实例"的替身，只会让用例在别的改动上误报。
     processor
         .extension_owner
@@ -827,30 +827,30 @@ fn setup_rejects_invalid_rate_block_and_format() {
     }
 }
 
-/// **Transfer 通路的端到端**：宿主播放中的音频按 `projectTimeSamples` 录进插件时间轴。
+/// **Capture 通路的端到端**：宿主播放中的音频按 `projectTimeSamples` 录进插件时间轴。
 ///
-/// 【为什么值得一条走真实 `process` 的用例】`transfer::` 自己的用例测的是机制，
+/// 【为什么值得一条走真实 `process` 的用例】`capture::` 自己的用例测的是机制，
 /// 而这条测的是**接线**：输入总线怎么读、`ProcessContext` 怎么被用、输出走哪条路。
 /// 接线错了（例如把输入当成输出、或用了 `context.sample_rate` 而不是声明率）
 /// 机制测试全绿也发现不了。
 #[test]
-fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
+fn the_capture_path_records_the_host_playback_at_its_project_positions() {
     let mut processor = Processor::create().unwrap();
     // 【为什么先取裸指针】`process` 需要 `*mut Processor`，而 owner 要从同一个对象里
     // 借出来。经由裸指针取 owner 之后两者不再互相借，调用点保持原样。
     let raw = (&mut *processor) as *mut Processor;
     // SAFETY: processor 在本次用例期间存活；extension_owner 是它的字段。
     let owner = unsafe { &(*raw).extension_owner };
-    // 过了宽限期仍未绑定 ⇒ 本实例是 Transfer 形态。
+    // 过了宽限期仍未绑定 ⇒ 本实例是 Capture 形态。
     owner.note_binding_window_closed_without_ara();
     assert_eq!(
         owner.mode(),
-        crate::render::extension::InstanceMode::Transfer,
-        "未绑定 ARA 的实例必须被判成 Transfer，否则下面这条通路根本不会被走到"
+        crate::render::extension::InstanceMode::Capture,
+        "未绑定 ARA 的实例必须被判成 Capture，否则下面这条通路根本不会被走到"
     );
     owner.set_setup_sample_rate(48_000.0);
     owner
-        .transfer()
+        .capture()
         .start()
         .expect("48 kHz 已声明，可以开始录制");
 
@@ -901,8 +901,8 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
         assert_eq!(right, [0.5_f32; 8]);
     }
 
-    let take = owner.transfer().stop().expect("应当产生一个 take");
-    let (timeline, regions, sources) = owner.transfer().render_input().expect("有素材");
+    let take = owner.capture().stop().expect("应当产生一个 take");
+    let (timeline, regions, sources) = owner.capture().render_input().expect("有素材");
     assert_eq!(timeline.clips.len(), 1, "三个连续块应合成一个片段");
     assert_eq!(regions.len(), 1);
     assert_eq!(sources.len(), 1);
@@ -910,7 +910,7 @@ fn the_transfer_path_records_the_host_playback_at_its_project_positions() {
     // 24 帧 @ 48 kHz = 0.0005 秒，起点是工程位置 0。
     assert!(clip.start_sec.abs() < 1e-12);
     assert!((clip.length_sec - 24.0 / 48_000.0).abs() < 1e-12);
-    assert_eq!(owner.transfer().status().active_take, Some(take));
+    assert_eq!(owner.capture().status().active_take, Some(take));
 }
 
 /// **in-place 宿主下录制必须拿到宿主的音频**（而不是我们自己写下的静音掩码）。
@@ -926,7 +926,7 @@ fn in_place_buffers_still_capture_the_host_audio() {
     let owner = unsafe { &(*raw).extension_owner };
     owner.note_binding_window_closed_without_ara();
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().expect("48 kHz 已声明");
+    owner.capture().start().expect("48 kHz 已声明");
 
     let frames = 16_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.3_f32; frames].into_boxed_slice());
@@ -960,8 +960,8 @@ fn in_place_buffers_still_capture_the_host_audio() {
         );
         assert_eq!(bus.silence_flags, 0, "in-place 时不能写下自己的静音掩码");
     }
-    owner.transfer().stop().expect("应当产生一个 take");
-    let (_, _, sources) = owner.transfer().render_input().expect("有素材");
+    owner.capture().stop().expect("应当产生一个 take");
+    let (_, _, sources) = owner.capture().render_input().expect("有素材");
     let plane = sources
         .values()
         .next()
@@ -1038,7 +1038,7 @@ fn a_silence_flagged_input_bus_is_still_captured_and_passed_through() {
     let owner = unsafe { &(*raw).extension_owner };
     owner.note_binding_window_closed_without_ara();
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().expect("48 kHz 已声明");
+    owner.capture().start().expect("48 kHz 已声明");
 
     let frames = 16_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.25_f32; frames].into_boxed_slice());
@@ -1081,8 +1081,8 @@ fn a_silence_flagged_input_bus_is_still_captured_and_passed_through() {
     assert_eq!(right, [0.25_f32; 16]);
     assert_eq!(output.silence_flags, 0, "有非零输出就不该报静音");
 
-    owner.transfer().stop().expect("应当产生一个 take");
-    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    owner.capture().stop().expect("应当产生一个 take");
+    let (timeline, _, _) = owner.capture().render_input().expect("有素材");
     assert_eq!(timeline.clips.len(), 1, "被标成静音的输入也必须录进时间轴");
 }
 
@@ -1099,7 +1099,7 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
     let owner = unsafe { &(*raw).extension_owner };
     owner.note_binding_window_closed_without_ara();
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().expect("48 kHz 已声明");
+    owner.capture().start().expect("48 kHz 已声明");
 
     let frames = 16_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.4_f32; frames].into_boxed_slice());
@@ -1128,16 +1128,16 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
         unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) },
         K_RESULT_OK
     );
-    let status = owner.transfer().status();
+    let status = owner.capture().status();
     assert!(
         status.saw_context,
         "有工程位置就必须记下来，否则录制键永远是灰的"
     );
     assert!(status.saw_input, "有输入总线就必须记下来");
-    owner.transfer().stop().expect("应当产生一个 take");
+    owner.capture().stop().expect("应当产生一个 take");
     assert_eq!(
         owner
-            .transfer()
+            .capture()
             .render_input()
             .map(|(t, _, _)| t.clips.len()),
         Some(1),
@@ -1145,12 +1145,12 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
     );
 }
 
-/// 未录制时 Transfer 通路必须**完全不介入**：既不写输出，也不碰任何状态。
+/// 未录制时 Capture 通路必须**完全不介入**：既不写输出，也不碰任何状态。
 ///
 /// 【为什么这条是契约】它是"插进任何宿主都不会改变原有行为"的全部依据。
 /// 一旦未录制时它也写输出，ARA 宿主上正常渲染的实例就会被静音或直通掉。
 #[test]
-fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
+fn an_unarmed_capture_path_leaves_the_snapshot_output_alone() {
     let model = crate::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     processor
@@ -1216,8 +1216,8 @@ fn an_unarmed_transfer_path_leaves_the_snapshot_output_alone() {
 
 /// **渲染旁路**：录完之后插件必须发布自己的快照，而不是永远静音。
 ///
-/// 【为什么这条是 Transfer 的验收核心】捕获、投影、时间线都可以全绿，而插件**没有
-/// 声音** —— 只要 `renders()` 没算上 Transfer，或者 `prepare()` 因为没有 ARA 文档
+/// 【为什么这条是 Capture 的验收核心】捕获、投影、时间线都可以全绿，而插件**没有
+/// 声音** —— 只要 `renders()` 没算上 Capture，或者 `prepare()` 因为没有 ARA 文档
 /// 而静默早退。这条用例走完整条路：录 → 停 → `renders()` → 准备 → 读快照。
 #[test]
 fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
@@ -1229,7 +1229,7 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
     owner.set_setup_sample_rate(48_000.0);
     assert!(!owner.renders(), "还没录，不该渲染（应保持静音）");
 
-    owner.transfer().start().expect("已声明 48 kHz");
+    owner.capture().start().expect("已声明 48 kHz");
     let frames = 64_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.6_f32; frames].into_boxed_slice());
     for block in 0..8_i64 {
@@ -1266,13 +1266,13 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
         let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
         assert_eq!(result, K_RESULT_OK);
     }
-    owner.transfer().stop().expect("应当产生一个 take");
+    owner.capture().stop().expect("应当产生一个 take");
     assert!(owner.renders(), "有素材之后必须接管渲染");
 
-    owner.arm_transfer_rendering();
+    owner.arm_capture_rendering();
     // 同步准备一次（生产路径由 UI 定时器排队驱动；这里直接调以免依赖线程调度）。
     owner
-        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        .capture_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
         )))
         .expect("准备必须成功");
@@ -1298,7 +1298,7 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
 /// **负的 pre-roll 通过真实 process 入口也会被夹到工程 0。**
 ///
 /// 【为什么在 ABI 边界再测一次】Capture 的单元测试只证明状态机；这里证明
-/// `audio_process_inner` → `transfer_observe` → `on_block_with_flow` 这条真实链路
+/// `audio_process_inner` → `capture_observe` → `on_block_with_flow` 这条真实链路
 /// 也把负位置夹掉，从而不会再生成负起点 clip。
 #[test]
 fn a_negative_preroll_block_is_recorded_from_project_zero() {
@@ -1308,7 +1308,7 @@ fn a_negative_preroll_block_is_recorded_from_project_zero() {
     let owner = unsafe { &(*raw).extension_owner };
     owner.note_binding_window_closed_without_ara();
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().unwrap();
+    owner.capture().start().unwrap();
 
     let block_frames = 8_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
@@ -1345,15 +1345,15 @@ fn a_negative_preroll_block_is_recorded_from_project_zero() {
     };
     let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
     assert_eq!(result, K_RESULT_OK);
-    let take = owner.transfer().stop().unwrap();
+    let take = owner.capture().stop().unwrap();
     assert_eq!(take, 1);
-    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    let (timeline, _, _) = owner.capture().render_input().expect("有素材");
     let clip = &timeline.clips[0];
     assert_eq!(clip.start_sec, 0.0, "负 pre-roll 不得进入 clip");
     assert!((clip.length_sec - 4.0 / 48_000.0).abs() < 1e-12);
     assert_eq!(
         owner
-            .transfer()
+            .capture()
             .capture_diagnostics()
             .unwrap()
             .preroll_frames_dropped,
@@ -1370,7 +1370,7 @@ fn a_lagging_playing_bit_still_captures_the_first_process_block() {
     let owner = unsafe { &(*raw).extension_owner };
     owner.note_binding_window_closed_without_ara();
     owner.set_setup_sample_rate(48_000.0);
-    owner.transfer().start().unwrap();
+    owner.capture().start().unwrap();
 
     let block_frames = 8_usize;
     let source: &'static mut [f32] = Box::leak(vec![0.5_f32; block_frames].into_boxed_slice());
@@ -1410,9 +1410,9 @@ fn a_lagging_playing_bit_still_captures_the_first_process_block() {
         assert_eq!(result, K_RESULT_OK);
     }
 
-    let take = owner.transfer().stop().unwrap();
+    let take = owner.capture().stop().unwrap();
     assert_eq!(take, 1);
-    let (timeline, _, _) = owner.transfer().render_input().expect("有素材");
+    let (timeline, _, _) = owner.capture().render_input().expect("有素材");
     let clip = &timeline.clips[0];
     assert_eq!(clip.start_sec, 0.0);
     assert!(
@@ -1421,7 +1421,7 @@ fn a_lagging_playing_bit_still_captures_the_first_process_block() {
     );
     assert_eq!(
         owner
-            .transfer()
+            .capture()
             .capture_diagnostics()
             .unwrap()
             .pending_committed,
@@ -1631,7 +1631,7 @@ fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {
         .extension_owner
         .note_binding_window_closed_without_ara();
     processor.extension_owner.set_setup_sample_rate(48_000.0);
-    processor.extension_owner.transfer().start().unwrap();
+    processor.extension_owner.capture().start().unwrap();
     let frames = 1024_usize;
     for (mode, start, length) in [
         (1_i32, 0_i64, frames),
@@ -1641,20 +1641,20 @@ fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {
     ] {
         let _ = run_stream_block(&mut processor, mode, 0, start, length, 0.5);
     }
-    let take = processor.extension_owner.transfer().stop().unwrap();
+    let take = processor.extension_owner.capture().stop().unwrap();
     assert_eq!(take, 1);
     let diagnostics = processor
         .extension_owner
-        .transfer()
+        .capture()
         .capture_diagnostics()
         .unwrap();
     assert_eq!(
         diagnostics.elected,
-        Some(crate::transfer::capture::ProcessStream::Prefetch),
+        Some(crate::capture::recorder::ProcessStream::Prefetch),
         "prefetch-only 的起播窗口必须由 prefetch 供料"
     );
     assert_eq!(diagnostics.stream_switches, 0);
-    let (timeline, _, _) = processor.extension_owner.transfer().render_input().unwrap();
+    let (timeline, _, _) = processor.extension_owner.capture().render_input().unwrap();
     assert_eq!(timeline.clips.len(), 1);
     let clip = &timeline.clips[0];
     assert_eq!(clip.start_sec, 0.0);

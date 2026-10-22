@@ -109,7 +109,7 @@ fn host_group_id_for(clip_ids: &[String]) -> i32 {
 /// * **文档租约代次**（只有 ARA 形态有）—— 它回答"还属于同一份文档吗"。同一 owner 上换了
 ///   ARA 文档时 owner 指针不变，光看它会让对话框选出的路径落到新文档上。
 ///
-/// 【为什么不能只用 `authorize`】它需要一份文档，而 Transfer 形态**永远没有**文档 ——
+/// 【为什么不能只用 `authorize`】它需要一份文档，而 Capture 形态**永远没有**文档 ——
 /// 那些对话框（文件夹选择、另存为、打开 MIDI、导出布局/主题/记事本）与"哪个文档"无关，
 /// 却会因为一个与它们无关的前置条件整块不可用。
 type InteractionIdentity = (usize, Option<u64>);
@@ -120,7 +120,7 @@ fn interaction_identity(
     let owner = link.owner()?;
     let lease = match owner.editor_document() {
         Ok(document) => Some(link.authorize(&document)?),
-        // Transfer：没有文档可租；身份退化成 owner 本身。
+        // Capture：没有文档可租；身份退化成 owner 本身。
         Err(_) => None,
     };
     Ok((Arc::as_ptr(&owner) as usize, lease))
@@ -254,7 +254,7 @@ struct HostReply {
 }
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
-    transferred: Rc<Cell<bool>>,
+    capturered: Rc<Cell<bool>>,
     token: usize,
 }
 impl Drop for WindowData {
@@ -437,10 +437,10 @@ impl NativeEditor {
             history_cache: None,
             last_history: None,
         }));
-        let transferred = Rc::new(Cell::new(false));
+        let capturered = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData {
             state: state.clone(),
-            transferred: transferred.clone(),
+            capturered: capturered.clone(),
             token,
         }));
         let result = unsafe {
@@ -463,7 +463,7 @@ impl NativeEditor {
             Ok(hwnd) => hwnd,
             Err(error) => {
                 // NCCREATE之前失败时系统未接管data；之后失败则NCDESTROY已负责释放。
-                if !transferred.get() {
+                if !capturered.get() {
                     unsafe {
                         drop(Box::from_raw(data));
                     }
@@ -629,7 +629,7 @@ unsafe extern "system" fn window_proc(
         if message == WM_NCCREATE {
             let create = &*(lparam.0 as *const CREATESTRUCTW);
             let data = &*(create.lpCreateParams as *const WindowData);
-            data.transferred.set(true);
+            data.capturered.set(true);
             data.state.borrow_mut().hwnd = hwnd;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
             WINDOWS.fetch_add(1, Ordering::AcqRel);
@@ -1074,24 +1074,24 @@ struct BootstrapFlags {
     host_kind: &'static str,
     /// **生效的**能力位快照：写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源。
     host_capabilities: hifishifter_kernel::editor::host::HostCapabilities,
-    /// Transfer 通路的观察位；非 Transfer 后端时为 `None`。
+    /// Capture 通路的观察位；非 Capture 后端时为 `None`。
     ///
     /// 【为什么是"观察位"而不是能力位】它们描述宿主**实际**做了什么（给过位置吗、
     /// 给过音频吗、走过离线吗），而宿主不会声明这些。前端据此决定显示哪一条引导语：
     /// 见过位置就能录；没见过位置就该说"这个宿主没有把播放位置交给插件"，
     /// 而不是让用户对着一个点得动、永远不进度的按钮猜。
-    transfer_caps: Option<TransferBootstrap>,
+    capture_caps: Option<CaptureBootstrap>,
 }
 
-/// Transfer 的观察位（`hostKind == "transfer"` 时才有值）。
+/// Capture 的观察位（`hostKind == "capture"` 时才有值）。
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TransferBootstrap {
+struct CaptureBootstrap {
     /// 宿主给过可用的 `ProcessContext` —— **录制的唯一硬前提**。
     saw_context: bool,
     /// 宿主在输入总线上给过音频。
     saw_input: bool,
-    /// 宿主走过 `kOffline`（bounce / 导出）—— Transfer 体验最好的那条通路。
+    /// 宿主走过 `kOffline`（bounce / 导出）—— Capture 体验最好的那条通路。
     saw_offline: bool,
     /// 现在能不能录（等价于 `sawContext`，单独给出是为了让前端读一个字段就够）。
     can_capture: bool,
@@ -1110,8 +1110,8 @@ impl BootstrapFlags {
             // trackCreate / undoStack 都从这里读，不再有并存的顶层布尔。
             "hostKind": self.host_kind,
             "hostCapabilities": self.host_capabilities,
-            // Transfer 的观察位（非 Transfer 后端为 null）：前端据此选择引导语。
-            "transferCaps": self.transfer_caps,
+            // Capture 的观察位（非 Capture 后端为 null）：前端据此选择引导语。
+            "captureCaps": self.capture_caps,
             // 【为什么是常量 true，而不是复用 mediaImport】它守卫的是
             // `move_private_track`（`editor/session.rs`）—— 那条路径只改插件自己的
             // timeline 与私有参数分组，注释里明写"不调用任何宿主轨道 setter"，因此
@@ -1149,15 +1149,15 @@ fn bootstrap_json(
             .as_ref()
             .map(|owner| owner.host_backend().kind().as_str())
             .unwrap_or("ara_only"),
-        transfer_caps: owner
+        capture_caps: owner
             .as_ref()
             .filter(|owner| {
                 owner.host_backend().kind()
-                    == hifishifter_kernel::editor::host::HostKind::Transfer
+                    == hifishifter_kernel::editor::host::HostKind::Capture
             })
             .map(|owner| {
-                let status = owner.transfer().status();
-                TransferBootstrap {
+                let status = owner.capture().status();
+                CaptureBootstrap {
                     saw_context: status.saw_context,
                     saw_input: status.saw_input,
                     saw_offline: status.saw_offline,
@@ -1333,10 +1333,10 @@ fn configure_browser(
                 link.owner().map(|owner| {
                     let health = owner.health_snapshot();
                     let clip_count = health["clip_count"].as_u64().unwrap_or(0);
-                    let transfer = health["host_kind"].as_str() == Some("transfer");
+                    let capture = health["host_kind"].as_str() == Some("capture");
                     serde_json::json!({
                         "ok": true,
-                        "device": if transfer { "Host / Transfer" } else { "Host / ARA" },
+                        "device": if capture { "Host / Capture" } else { "Host / ARA" },
                         "model_loaded": health["model_available"].as_bool().unwrap_or(false),
                         "audio_loaded": clip_count > 0,
                         "has_synthesized": false,
@@ -1514,7 +1514,7 @@ fn configure_browser(
                     let out=std::path::PathBuf::from(output);
                     if !out.is_absolute() {return Err("diagnostics output path must be absolute".into());}
                     let owner=link.owner()?;
-                    // Transfer 形态没有文档：时钟退化到 owner 自己的那份，渲染者列表为空
+                    // Capture 形态没有文档：时钟退化到 owner 自己的那份，渲染者列表为空
                     // （没有 ARA renderer 租约）。诊断包在两种形态下都必须能导出 ——
                     // 用户报障时它正是第一件要拿到的东西。
                     let document=owner.editor_document().ok();
@@ -1678,7 +1678,7 @@ fn configure_browser(
             Some("get_history_state")=>{
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
                     // 【为什么不再先取文档】历史权威有两套实现：宿主栈（需要文档）与本地栈
-                    // （不需要）。此前这里无条件先取文档，于是 Transfer 形态 —— 它**只有**
+                    // （不需要）。此前这里无条件先取文档，于是 Capture 形态 —— 它**只有**
                     // 本地栈 —— 连"读一次历史状态"都失败。
                     let owner=link.owner()?;
                     let identity=interaction_identity(&link)?;
@@ -1722,15 +1722,15 @@ fn configure_browser(
                 }
             },
             Some(command)=>{
-                // 【为什么 Transfer 命令在视图层拦下】它的全部状态都在
+                // 【为什么 Capture 命令在视图层拦下】它的全部状态都在
                 // `ExtensionOwner` 上（捕获存储、take、观察位），而会话分发只拿得到
                 // `EditorSession`（它到不了 owner）。这里已经有 `link.owner()`，
                 // 与 `set_transport` 取宿主播放控制是同一条路。
-                if crate::transfer::commands::is_transfer_command(command) {
+                if crate::capture::commands::is_capture_command(command) {
                     let link=state.borrow().link.clone();
                     let outcome=(||->Result<serde_json::Value,String>{
                         let owner=link.owner()?;
-                        crate::transfer::commands::handle(&owner,command,&request["args"])
+                        crate::capture::commands::handle(&owner,command,&request["args"])
                     })();
                     let reply=match outcome {
                         Ok(value)=>serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,"value":value}),
@@ -1953,7 +1953,7 @@ mod bootstrap_tests {
     fn track_grouping_does_not_depend_on_host_media_apis() {
         for media_import in [true, false] {
             let flags = BootstrapFlags {
-                transfer_caps: None,
+                capture_caps: None,
                 transport_control: false,
                 fade_axes: None,
                 history_backend: "local",
@@ -1975,7 +1975,7 @@ mod bootstrap_tests {
     #[test]
     fn host_capabilities_pass_through_unchanged() {
         let flags = BootstrapFlags {
-            transfer_caps: None,
+            capture_caps: None,
             transport_control: true,
             fade_axes: Some("legacy"),
             history_backend: "local",
@@ -2020,7 +2020,7 @@ mod bootstrap_tests {
     #[test]
     fn host_write_capabilities_have_a_single_source() {
         let flags = BootstrapFlags {
-            transfer_caps: None,
+            capture_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -2049,7 +2049,7 @@ mod bootstrap_tests {
     #[test]
     fn track_creation_is_independent_of_audio_import() {
         let flags = BootstrapFlags {
-            transfer_caps: None,
+            capture_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -2075,7 +2075,7 @@ mod bootstrap_tests {
     #[test]
     fn an_unknown_fade_axis_set_is_reported_as_null() {
         let flags = BootstrapFlags {
-            transfer_caps: None,
+            capture_caps: None,
             transport_control: false,
             fade_axes: None,
             history_backend: "local",
@@ -2089,7 +2089,7 @@ mod bootstrap_tests {
     #[test]
     fn a_continuous_fade_axis_host_is_reported_as_such() {
         let flags = BootstrapFlags {
-            transfer_caps: None,
+            capture_caps: None,
             transport_control: false,
             fade_axes: Some("continuous"),
             history_backend: "local",

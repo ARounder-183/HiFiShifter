@@ -6,10 +6,10 @@ import { describe, expect, it } from "vitest";
 import backendLibSource from "../../../backend/src-tauri/src/lib.rs?raw";
 import pluginCommandSource from "../../../backend/hifishifter-plugin/src/editor/commands.rs?raw";
 import pluginWebviewSource from "../../../backend/hifishifter-plugin/src/editor/webview.rs?raw";
-// Transfer 的命令入口是独立模块（视图层按前缀分流，不进 actor match）。
+// Capture 的命令入口是独立模块（视图层按前缀分流，不进 actor match）。
 // 【为什么必须一起扫】漏掉它就等于给这套穷举检查开了一个后门：新模块里的命令
 // 永远不会被发现，而它们正是"前端调了、后端没有"这类静默分叉的又一来源。
-import transferCommandSource from "../../../backend/hifishifter-plugin/src/transfer/commands.rs?raw";
+import captureCommandSource from "../../../backend/hifishifter-plugin/src/capture/commands.rs?raw";
 import invokeSource from "./invoke.ts?raw";
 
 import { buildTauriArgs } from "./invoke";
@@ -164,7 +164,7 @@ describe("invoke wiring", () => {
             ...extractBackendHandlers(backendLibSource),
             ...extractPluginHandlers(pluginCommandSource),
             ...extractPluginHandlers(pluginWebviewSource),
-            ...extractPluginHandlers(transferCommandSource),
+            ...extractPluginHandlers(captureCommandSource),
         ]);
         const referenced = new Set<string>([
             ...invoked,

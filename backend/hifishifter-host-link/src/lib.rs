@@ -33,7 +33,7 @@
 //!
 //! # 术语
 //!
-//! * **生产者**：写 `manifest.hfslink` 的一侧。ARA 插件、Transfer 录制、第三方桥接都是。
+//! * **生产者**：写 `manifest.hfslink` 的一侧。ARA 插件、Capture 录制、第三方桥接都是。
 //! * **消费者**：写 `edits.hfsedit` 的一侧。今天只有独立 App。
 //!
 //! 两侧**各写各的文件**，因此不需要锁、不需要协商、不需要令牌。
@@ -116,8 +116,8 @@ pub enum SourceKind {
     /// ARA 插件实例。
     #[default]
     Ara,
-    /// 非 ARA 的 VST3 实时录制通路。
-    Transfer,
+    /// 非 ARA 的 VST3 实时捕获通路。
+    Capture,
     /// 宿主侧扩展桥接（第三方）。
     Bridge,
 }
@@ -132,7 +132,7 @@ impl SourceKind {
     pub fn admission(self) -> Admission {
         match self {
             SourceKind::Ara => Admission::Strict,
-            SourceKind::Transfer | SourceKind::Bridge => Admission::Degrade,
+            SourceKind::Capture | SourceKind::Bridge => Admission::Degrade,
         }
     }
 
@@ -140,7 +140,7 @@ impl SourceKind {
     pub fn tag(self) -> &'static str {
         match self {
             SourceKind::Ara => "ara",
-            SourceKind::Transfer => "transfer",
+            SourceKind::Capture => "capture",
             SourceKind::Bridge => "bridge",
         }
     }
@@ -170,7 +170,7 @@ pub enum Admission {
     /// 任何不合格条目 ⇒ 整份拒绝。ARA 用。
     #[default]
     Strict,
-    /// 逐条降级并报告。Transfer / Bridge 用。
+    /// 逐条降级并报告。Capture / Bridge 用。
     Degrade,
 }
 
@@ -482,7 +482,7 @@ pub mod error_code {
 /// 在宿主删除后会整体前移）。用 `link_id` 把「这是哪一次交接」记下来，
 /// 消费者重开工程时才能判断「我这份编辑还是不是对着同一个宿主工程」。
 ///
-/// `doc_key` 由生产者给：ARA 侧取 `TrackBindings` 的签名，Transfer 侧取首个 take，
+/// `doc_key` 由生产者给：ARA 侧取 `TrackBindings` 的签名，Capture 侧取首个 take，
 /// 桥接侧自报。它只回答「是不是同一个」，不承担 clip 身份的职责。
 pub fn link_id(source_kind: SourceKind, host_label: &str, doc_key: &str) -> String {
     format!(
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn admission_follows_the_source_kind() {
         assert_eq!(SourceKind::Ara.admission(), Admission::Strict);
-        assert_eq!(SourceKind::Transfer.admission(), Admission::Degrade);
+        assert_eq!(SourceKind::Capture.admission(), Admission::Degrade);
         assert_eq!(SourceKind::Bridge.admission(), Admission::Degrade);
     }
 
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(link_id(SourceKind::Bridge, "  ", ""), "bridge:unnamed:unnamed");
         assert_ne!(
             link_id(SourceKind::Ara, "REAPER", "x"),
-            link_id(SourceKind::Transfer, "REAPER", "x")
+            link_id(SourceKind::Capture, "REAPER", "x")
         );
     }
 

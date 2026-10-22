@@ -65,7 +65,7 @@ export interface TimelineViewportAccess {
      * 当前横向缩放（px/s）。
      *
      * 【为什么需要它】"把某个工程区间带进视野"要判断区间装不装得下，而那需要知道
-     * 当前缩放（见 `useTransferReveal`）。旧实现只能靠调用方自己持有 `pxPerSecRef`，
+     * 当前缩放（见 `useCaptureReveal`）。旧实现只能靠调用方自己持有 `pxPerSecRef`，
      * 于是同一个读数有了两个来源。
      *
      * @returns 当前缩放；内核宿主不存在时返回 0（未知，调用方据此不要动视口）。

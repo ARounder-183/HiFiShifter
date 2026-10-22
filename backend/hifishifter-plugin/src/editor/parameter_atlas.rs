@@ -1775,7 +1775,7 @@ impl ParameterAtlas {
         for clip in &timeline.clips {
             // 【为什么身份/根缺席也只跳过】与下面几何失败同一条纪律。此前这两处
             // `ok_or(...)?` 排在几何 `continue` 之前，于是"身份表/轨道身份这一轮还没
-            // 跟上"会让整个渲染输入准备失败（本函数在 `capture_render_input` 上）⇒
+            // 跟上"会让整个渲染输入准备失败（本函数在 `ara_render_input` 上）⇒
             // 快照永不发布 ⇒ 声音停在旧版本。跳过这一条片段即可。
             let Some(identity) = identities.get(&clip.id) else {
                 continue;
@@ -1784,7 +1784,7 @@ impl ParameterAtlas {
                 continue;
             };
             // 几何不可解只跳过该片段：否则整个渲染输入准备都会失败
-            // （本函数在 `capture_render_input` 上）。
+            // （本函数在 `ara_render_input` 上）。
             //
             // 【为什么不再 `mut`】投影不再改写几何 —— 输出索引的域由
             // `CurveDomain::ClipLocal` 显式声明（见 `SourceCurve::project`），
@@ -4364,14 +4364,7 @@ mod tests {
         );
     }
 
-    /// **投影必须把"权威持有音高曲线"翻译成内核的"用户数据"标记。**
-    ///
-    /// 【为什么这是一条独立的重置路径】内核 `ensure_params_for_root` 在
-    /// `build_root_pitch_key` 变化时清 `pitch_edit`，而那个 key 把每条 clip 的
-    /// id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**。图集修好了
-    /// 但这里不标记，GUI 上仍然会看到"参数没了"。
-    #[test]
-     /// **拨动「锁定参数线」是一次烘焙，而不是一次重新解释。**
+    /// **拨动「锁定参数线」是一次烘焙，而不是一次重新解释。**
     ///
     /// 【为什么这条是"关掉锁定之后一编辑就重置"的回归测试】曲线的存储域决定
     /// `values[i]` 是"源第 i 格"还是"工程第 i 格"。早先写入侧恒写源域，而"不锁定"
@@ -4412,7 +4405,15 @@ mod tests {
             "域一致时不得再动数据"
         );
     }
-   fn projecting_an_authority_pitch_curve_marks_it_as_user_data() {
+
+    /// **投影必须把"权威持有音高曲线"翻译成内核的"用户数据"标记。**
+    ///
+    /// 【为什么这是一条独立的重置路径】内核 `ensure_params_for_root` 在
+    /// `build_root_pitch_key` 变化时清 `pitch_edit`，而那个 key 把每条 clip 的
+    /// id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**。图集修好了
+    /// 但这里不标记，GUI 上仍然会看到"参数没了"。
+    #[test]
+    fn projecting_an_authority_pitch_curve_marks_it_as_user_data() {
         let ids = identities();
         let original = edited();
         let atlas = ParameterAtlas::default().capture(&original, &ids).unwrap();

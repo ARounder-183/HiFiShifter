@@ -36,7 +36,7 @@ import { selectKeybinding } from "../../../../features/keybindings/keybindingsSl
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { SnapHighlightLayer } from "../SnapHighlightLayer";
-import { TransferCaptureLayer } from "../TransferCaptureLayer";
+import { CaptureRangeLayer } from "../CaptureRangeLayer";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants";
 import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
 import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis";
@@ -343,7 +343,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const playheadLineRef = React.useRef<HTMLDivElement | null>(null);
     /** 吸附高亮内容层容器（宿主在 rAF 内整层平移，跟随视口）。 */
     const snapContentRef = React.useRef<HTMLDivElement | null>(null);
-    const transferCaptureRef = React.useRef<HTMLDivElement | null>(null);
+    const captureCaptureRef = React.useRef<HTMLDivElement | null>(null);
     /** copy ghost 内容层容器（同上）。 */
     const ghostContentRef = React.useRef<HTMLDivElement | null>(null);
     /** 拖入预览内容层容器（同上）。 */
@@ -699,7 +699,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     rulerPlayheadLine: () => rulerPlayheadLineRef?.current ?? null,
                     rulerPlayheadHead: () => rulerPlayheadHeadRef?.current ?? null,
                     snapHighlightContent: () => snapContentRef.current,
-                    transferCaptureContent: () => transferCaptureRef.current,
+                    captureCaptureContent: () => captureCaptureRef.current,
                     ghostContent: () => ghostContentRef.current,
                     dropPreviewContent: () => dropPreviewContentRef.current,
                     newTrackDropContent: () => newTrackDropContentRef.current,
@@ -923,20 +923,20 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     />
                 </div>
             ) : null}
-            {/* Transfer 实时录制带：与吸附高亮同一机制（内容坐标 + 整层平移）。
+            {/* Capture 实时录制带：与吸附高亮同一机制（内容坐标 + 整层平移）。
                 容器**常驻**：宿主每帧调 getter 取元素，按需挂载会让它在需要平移时
                 仍是 null。层内没有录制时自身返回 null，不留可见痕迹。 */}
             {snapHighlight !== undefined ? (
                 <div
-                    ref={transferCaptureRef}
-                    data-hs-transfer-capture="1"
+                    ref={captureCaptureRef}
+                    data-hs-capture-capture="1"
                     className="pointer-events-none absolute left-0 top-0 z-3 overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,
                         height: snapHighlight.contentHeight,
                     }}
                 >
-                    <TransferCaptureLayer
+                    <CaptureRangeLayer
                         pxPerSec={snapHighlight.pxPerSec}
                         rowHeight={rowHeight}
                         tracks={tracks}

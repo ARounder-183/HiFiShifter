@@ -1,73 +1,73 @@
-//! Transfer 命令：UI 驱动录制与 take 管理的唯一入口。
+//! Capture 命令：UI 驱动录制与 take 管理的唯一入口。
 //!
 //! 【为什么这些命令不走 `editor/commands.rs` 的会话分发】那条路面向 `EditorSession`，
 //! 而 `EditorSession` 只持有 `Weak<DocumentSession>` —— 它到不了 `ExtensionOwner`，
-//! 也就到不了捕获存储。Transfer 的全部状态都在 owner 上，所以入口挂在**视图层**
+//! 也就到不了捕获存储。Capture 的全部状态都在 owner 上，所以入口挂在**视图层**
 //! （那里已经有 `link.owner()`，`set_transport` 走的是同一条路）。
 //!
-//! 【为什么返回 `Option`】视图层先问一次"这是不是 Transfer 命令"；不是就照旧交给会话。
+//! 【为什么返回 `Option`】视图层先问一次"这是不是 Capture 命令"；不是就照旧交给会话。
 //! 于是这个模块的接入对既有命令**零影响**。
 
 use crate::render::extension::ExtensionOwner;
-use crate::transfer::TransferOptions;
+use crate::capture::CaptureOptions;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// 本命令是否属于 Transfer。视图层据此决定要不要拦下来。
-pub(crate) fn is_transfer_command(command: &str) -> bool {
-    command.starts_with("transfer_")
+/// 本命令是否属于 Capture。视图层据此决定要不要拦下来。
+pub(crate) fn is_capture_command(command: &str) -> bool {
+    command.starts_with("capture_")
 }
 
-/// 处理一条 Transfer 命令。调用方必须先确认 [`is_transfer_command`]。
+/// 处理一条 Capture 命令。调用方必须先确认 [`is_capture_command`]。
 pub(crate) fn handle(
     owner: &Arc<ExtensionOwner>,
     command: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let transfer = owner.transfer();
+    let capture = owner.capture();
     match command {
-        "transfer_status" => Ok(status_json(owner)),
+        "capture_status" => Ok(status_json(owner)),
         // 整圈块级 trace（诊断包/前端按需拉取）。不做限流：这是用户显式动作。
-        "transfer_block_trace" => Ok(owner.block_diagnostics_json(256)),
-        "transfer_start" => {
+        "capture_block_trace" => Ok(owner.block_diagnostics_json(256)),
+        "capture_start" => {
             // 【为什么必须先挡这一条】宿主已经把音频经 ARA 交给我们时，再从输入总线录一遍
             // 是**另一条**素材来源，两者会互相覆盖。此前它静默地允许了 —— 用户会在 ARA
             // 宿主里录出一份与界面显示无关的东西。
             if owner.is_ara_bound() {
-                return Err("transfer_not_applicable_ara".into());
+                return Err("capture_not_applicable_ara".into());
             }
-            transfer.start()?;
+            capture.start()?;
             Ok(status_json(owner))
         }
-        "transfer_stop" => {
-            let take = transfer.stop()?;
+        "capture_stop" => {
+            let take = capture.stop()?;
             // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
             // 下一次某个不相关的动作把它带起来。
-            owner.request_transfer_reload();
+            owner.request_capture_reload();
             Ok(json!({ "take": take, "status": status_json(owner) }))
         }
-        "transfer_cancel" => {
-            transfer.cancel();
+        "capture_cancel" => {
+            capture.cancel();
             Ok(status_json(owner))
         }
-        "transfer_clear" => {
-            transfer.clear();
+        "capture_clear" => {
+            capture.clear();
             // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
-            owner.request_transfer_reload();
+            owner.request_capture_reload();
             Ok(status_json(owner))
         }
-        "transfer_delete_take" => {
+        "capture_delete_take" => {
             let id = args["takeId"]
                 .as_u64()
-                .ok_or("transfer_delete_take needs a numeric takeId")?;
-            transfer.delete_take(id)?;
+                .ok_or("capture_delete_take needs a numeric takeId")?;
+            capture.delete_take(id)?;
             // 时间线、原始磁带与合成结果都要跟着走：删掉的可能正是活动 take。
-            owner.request_transfer_reload();
+            owner.request_capture_reload();
             Ok(status_json(owner))
         }
-        "transfer_set_options" => {
-            let current = transfer.options();
-            transfer.set_options(TransferOptions {
+        "capture_set_options" => {
+            let current = capture.options();
+            capture.set_options(CaptureOptions {
                 max_duration_sec: args["maxDurationSec"]
                     .as_f64()
                     .unwrap_or(current.max_duration_sec),
@@ -79,7 +79,7 @@ pub(crate) fn handle(
             });
             Ok(status_json(owner))
         }
-        other => Err(format!("unknown transfer command: {other}")),
+        other => Err(format!("unknown capture command: {other}")),
     }
 }
 
@@ -87,11 +87,11 @@ pub(crate) fn handle(
 ///
 /// 【为什么 camelCase】与既有 bootstrap / 命令载荷一致；前端只认这一种命名。
 ///
-/// `ara_bound` 让界面能说清"这个宿主不需要 Transfer"，而不是让按钮点了没反应 ——
-/// 入口现在是**无条件**可见的（见 `transferEntry`：形态判定要等 5 秒宽限期，不能拿它
+/// `ara_bound` 让界面能说清"这个宿主不需要 Capture"，而不是让按钮点了没反应 ——
+/// 入口现在是**无条件**可见的（见 `captureEntry`：形态判定要等 5 秒宽限期，不能拿它
 /// 当可见性判据），所以面板必须自己回答"我在这里有没有用"。
 fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
-    let status = owner.transfer().status();
+    let status = owner.capture().status();
     let ara_bound = owner.is_ara_bound();
     let recording = status.recording.map(|recording| {
         json!({
@@ -186,12 +186,12 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
         "stoppedReason": status.stopped_reason,
         // 【为什么把"现在听到的是哪一版"报出来】处理结果、原始录音与宿主原声听起来都
         // "像那么回事"，而它们之间的差别正是"我的编辑生效了没有" —— 用户无法自己判断。
-        // 如实报出仲裁结论，他就不必猜（见 `TransferOutput::as_str`）。
-        "output": owner.transfer_output().as_str(),
+        // 如实报出仲裁结论，他就不必猜（见 `CaptureOutput::as_str`）。
+        "output": owner.capture_output().as_str(),
         // 块级诊断（计数 + 捕获侧 lookbehind 结果）。trace 本身走独立命令，
         // 避免 200ms 的状态轮询拖着 256 条记录。
         "blockDiagnostics": owner.block_diagnostics_json(0),
-        // 宿主是否**正在**通过 ARA 供音（那时 Transfer 不适用，见 `transfer_start`）。
+        // 宿主是否**正在**通过 ARA 供音（那时 Capture 不适用，见 `capture_start`）。
         "araBound": ara_bound,
     })
 }
@@ -208,36 +208,36 @@ mod tests {
 
     /// 命令名前缀是视图层分流的唯一依据。
     #[test]
-    fn only_the_transfer_prefix_is_claimed() {
-        assert!(is_transfer_command("transfer_start"));
-        assert!(is_transfer_command("transfer_status"));
-        assert!(!is_transfer_command("set_transport"));
-        assert!(!is_transfer_command("get_timeline_state"));
+    fn only_the_capture_prefix_is_claimed() {
+        assert!(is_capture_command("capture_start"));
+        assert!(is_capture_command("capture_status"));
+        assert!(!is_capture_command("set_transport"));
+        assert!(!is_capture_command("get_timeline_state"));
     }
 
     /// 录制按钮（`canCapture`）必须**在武装之前**就能变真。
     ///
     /// 【为什么这条必须有】此前 `saw_context` 只在武装之后更新，而按钮由它门控 ——
-    /// 于是"必须先录一次才能录"：按钮永远是灰的，Transfer 在所有宿主上都用不了。
-    /// 这条走的是面板真正读的那条路（`transfer_status`）。
+    /// 于是"必须先录一次才能录"：按钮永远是灰的，Capture 在所有宿主上都用不了。
+    /// 这条走的是面板真正读的那条路（`capture_status`）。
     #[test]
     fn the_record_button_unlocks_before_anything_is_recorded() {
         let owner = owner();
         assert_eq!(
-            handle(&owner, "transfer_status", &json!({})).unwrap()["canCapture"],
+            handle(&owner, "capture_status", &json!({})).unwrap()["canCapture"],
             false,
             "还没见过宿主上下文时不能声称可以录制"
         );
         let samples: &'static [f32] = Box::leak(vec![0.1_f32; 64].into_boxed_slice());
-        // 注意：**没有** `transfer_start` —— 观察必须与武装无关。
-        owner.transfer().observe(&crate::transfer::InputBlock {
+        // 注意：**没有** `capture_start` —— 观察必须与武装无关。
+        owner.capture().observe(&crate::capture::InputBlock {
             start: 0,
             frames: 64,
             sample_rate: 48_000.0,
             planes: [Some(samples), None],
             playing: false,
         });
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(
             status["canCapture"], true,
             "见过宿主上下文之后按钮必须可用，否则用户没有办法开始"
@@ -245,21 +245,21 @@ mod tests {
         assert_eq!(status["hostPlaying"], false, "此刻宿主没在播放，如实报出来");
     }
 
-    /// 宿主正在通过 ARA 供音时，Transfer 必须**明确拒绝**而不是偷偷再录一份。
+    /// 宿主正在通过 ARA 供音时，Capture 必须**明确拒绝**而不是偷偷再录一份。
     ///
-    /// 【为什么这条必须有】`transfer_start` 此前不检查这件事：在 ARA 宿主里按下录制会
+    /// 【为什么这条必须有】`capture_start` 此前不检查这件事：在 ARA 宿主里按下录制会
     /// 从输入总线再采一份**与界面显示无关**的素材，两条来源互相覆盖，用户听到的东西
-    /// 与他看到的时间线对不上。入口现在无条件可见（见 `transferEntry`），所以后端必须
+    /// 与他看到的时间线对不上。入口现在无条件可见（见 `captureEntry`），所以后端必须
     /// 是那道真正的门。
     #[test]
     fn arming_is_refused_while_the_host_provides_audio_through_ara() {
         let (_model, owner, _id) = crate::editor::session::tests::fixture();
         assert!(owner.is_ara_bound(), "这个夹具的宿主是绑定了 ARA 的");
-        let error = handle(&owner, "transfer_start", &json!({})).unwrap_err();
-        assert_eq!(error, "transfer_not_applicable_ara");
-        assert!(!owner.transfer().is_armed(), "拒绝之后不能留下已武装状态");
-        // 状态里也要如实报出来，面板才能说清"这个宿主不需要 Transfer"。
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        let error = handle(&owner, "capture_start", &json!({})).unwrap_err();
+        assert_eq!(error, "capture_not_applicable_ara");
+        assert!(!owner.capture().is_armed(), "拒绝之后不能留下已武装状态");
+        // 状态里也要如实报出来，面板才能说清"这个宿主不需要 Capture"。
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["araBound"], true);
     }
 
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn an_untouched_instance_reports_that_it_cannot_capture_yet() {
         let owner = owner();
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["state"], "empty");
         assert_eq!(status["takeCount"], 0);
         assert_eq!(status["activeTake"], Value::Null);
@@ -276,7 +276,7 @@ mod tests {
             "没见过 ProcessContext 之前不能声称可以录制"
         );
         assert_eq!(status["recording"], Value::Null);
-        assert_eq!(status["araBound"], false, "没绑定 ARA 的实例就是 Transfer 的适用对象");
+        assert_eq!(status["araBound"], false, "没绑定 ARA 的实例就是 Capture 的适用对象");
     }
 
     /// 选项补丁是**逐字段**的：只传一个字段不该把其余字段清掉。
@@ -285,11 +285,11 @@ mod tests {
         let owner = owner();
         handle(
             &owner,
-            "transfer_set_options",
+            "capture_set_options",
             &json!({ "maxDurationSec": 120.0 }),
         )
         .unwrap();
-        let options = owner.transfer().options();
+        let options = owner.capture().options();
         assert_eq!(options.max_duration_sec, 120.0);
         assert!(options.monitor, "没提 monitor 就不能改它");
         assert!(options.segment_sec > 0.0);
@@ -297,23 +297,23 @@ mod tests {
 
     /// 未知命令明确报错，而不是静默成功。
     #[test]
-    fn an_unknown_transfer_command_is_an_error() {
+    fn an_unknown_capture_command_is_an_error() {
         let owner = owner();
-        assert!(handle(&owner, "transfer_frobnicate", &json!({})).is_err());
+        assert!(handle(&owner, "capture_frobnicate", &json!({})).is_err());
     }
 
     /// 删除不存在的 take 是错误，而不是静默成功。
     #[test]
     fn deleting_an_unknown_take_is_rejected() {
         let owner = owner();
-        assert!(handle(&owner, "transfer_delete_take", &json!({ "takeId": 99 })).is_err());
+        assert!(handle(&owner, "capture_delete_take", &json!({ "takeId": 99 })).is_err());
     }
 
     /// 没声明工程率时不能开始录制，且错误要说明**怎么才能行**。
     #[test]
     fn starting_without_a_declared_rate_explains_what_to_do() {
         let owner = Arc::new(ExtensionOwner::default());
-        let error = handle(&owner, "transfer_start", &json!({})).unwrap_err();
+        let error = handle(&owner, "capture_start", &json!({})).unwrap_err();
         assert!(
             error.contains("setupProcessing"),
             "错误必须指向可执行的下一步，而不是只说'失败'：{error}"
@@ -321,9 +321,9 @@ mod tests {
     }
 
     /// 一个长度为 `frames` 的播放中的块。
-    fn playing_block(frames: usize) -> crate::transfer::InputBlock<'static> {
+    fn playing_block(frames: usize) -> crate::capture::InputBlock<'static> {
         let samples: &'static [f32] = Box::leak(vec![0.2_f32; frames].into_boxed_slice());
-        crate::transfer::InputBlock {
+        crate::capture::InputBlock {
             start: 0,
             frames,
             sample_rate: 48_000.0,
@@ -339,16 +339,16 @@ mod tests {
     #[test]
     fn arming_before_the_host_plays_reports_standby() {
         let owner = owner();
-        handle(&owner, "transfer_start", &json!({})).unwrap();
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        handle(&owner, "capture_start", &json!({})).unwrap();
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["state"], "standby", "宿主还没播放 ⇒ 待命");
         assert_eq!(status["standby"], true);
         assert_eq!(status["recording"], Value::Null, "待命期没有任何读数");
         assert_eq!(status["canCapture"], false, "没见过上下文 ⇒ 还不能录");
 
         // 宿主开始播放 ⇒ 进入录制中。
-        owner.transfer().on_block(playing_block(64));
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        owner.capture().on_block(playing_block(64));
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["state"], "recording");
         assert_eq!(status["standby"], false);
         assert!(status["recording"].is_object(), "录制中必须有读数");
@@ -363,27 +363,27 @@ mod tests {
         let owner = owner();
         handle(
             &owner,
-            "transfer_set_options",
+            "capture_set_options",
             &json!({ "maxDurationSec": 20.0 }),
         )
         .unwrap();
-        handle(&owner, "transfer_start", &json!({})).unwrap();
+        handle(&owner, "capture_start", &json!({})).unwrap();
         // 一秒一块（48000 帧）。上限 20 秒，录到 1 秒时还剩 19 秒 ⇒ 不该预警。
-        let second = |index: i64| crate::transfer::InputBlock {
+        let second = |index: i64| crate::capture::InputBlock {
             start: index * 48_000,
             frames: 48_000,
             sample_rate: 48_000.0,
             planes: [None, None],
             playing: true,
         };
-        owner.transfer().on_block(second(0));
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        owner.capture().on_block(second(0));
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["limitWarning"], false, "还剩 19 秒时不该预警");
         // 录到 11 秒 ⇒ 还剩 9 秒 < 预警线 10 秒 ⇒ 必须预警。
         for index in 1..11_i64 {
-            owner.transfer().on_block(second(index));
+            owner.capture().on_block(second(index));
         }
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["limitWarning"], true, "还剩不到 10 秒必须预警");
         assert_eq!(status["stoppedReason"], Value::Null, "还没停，没有停止原因");
     }
@@ -392,7 +392,7 @@ mod tests {
     ///
     /// 【为什么这是"到点自动停"的正面验收】捕获自己停下时没有任何用户动作。若没有
     /// 自动 promote，那些段会一直留在捕获里 —— 界面显示"尚未录制"、素材却在内存里，
-    /// 而下一次 `transfer_start` 会把它们覆盖掉："自动停"于是变成"自动丢"。
+    /// 而下一次 `capture_start` 会把它们覆盖掉："自动停"于是变成"自动丢"。
     #[test]
     fn a_capture_that_stopped_itself_is_promoted_by_the_service_tick() {
         let owner = owner();
@@ -400,13 +400,13 @@ mod tests {
         // 下面每块 24000 帧（0.5 秒）⇒ 第二块到点。
         handle(
             &owner,
-            "transfer_set_options",
+            "capture_set_options",
             &json!({ "maxDurationSec": 1.0 }),
         )
         .unwrap();
-        handle(&owner, "transfer_start", &json!({})).unwrap();
+        handle(&owner, "capture_start", &json!({})).unwrap();
         for index in 0..4_i64 {
-            owner.transfer().on_block(crate::transfer::InputBlock {
+            owner.capture().on_block(crate::capture::InputBlock {
                 start: index * 24_000,
                 frames: 24_000,
                 sample_rate: 48_000.0,
@@ -414,10 +414,10 @@ mod tests {
                 playing: true,
             });
         }
-        assert!(!owner.transfer().is_armed(), "到上限后必须已解除武装");
+        assert!(!owner.capture().is_armed(), "到上限后必须已解除武装");
         // 会话 actor 的心跳：这一轮应当把素材收成一个 take。
-        owner.transfer().service();
-        let status = handle(&owner, "transfer_status", &json!({})).unwrap();
+        owner.capture().service();
+        let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(
             status["takeCount"], 1,
             "自己停下的捕获必须被 promote，否则素材会随下一次录制一起消失"

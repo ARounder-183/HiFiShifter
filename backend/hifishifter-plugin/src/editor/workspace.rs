@@ -1862,7 +1862,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             // 【为什么身份/区域缺席也只跳过】与下面缺宿主几何那条 `continue` 同一条
             // 纪律。此前这两处 `ok_or(...)?` 让"身份表这一轮还没跟上"（region 已建、
             // 派生表未同步的窗口）把整份 `project_audio_fades_locked` 打失败 ——
-            // 而那经 `capture_render_input` 的后果是**整轨静音**。
+            // 而那经 `ara_render_input` 的后果是**整轨静音**。
             // 一条片段的淡化身份查不到，只是这一条不投影委托淡化。
             let Some(key) = identities
                 .iter()
@@ -1889,7 +1889,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             let Some(geometry) = geometries.get(&key).cloned() else {
                 // 【为什么降级而不是整份失败】宿主几何在 ARA-only 宿主上**恒缺**
                 // （没有原生扩展就没有 `D_FADE*LEN`）。此前这里 `?` 上抛，经
-                // `capture_render_input` 让整条 renderer 永远不发布快照 ——
+                // `ara_render_input` 让整条 renderer 永远不发布快照 ——
                 // Studio One / Cubase / Nuendo / Logic 上只要有一个内容淡化，
                 // **整轨彻底静音**。而"某一段的淡化长度取不到"只是局部信息缺失：
                 // 保留 ARA 自己给的淡化信息，其余照常渲染。
@@ -1933,7 +1933,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
     /// 【为什么必须每次重建后做】`ara::mapping::ara_document_to_timeline` 只能从 ARA
     /// 图重建 clip，而 ARA **没有**方向位、没有循环源、没有声道模式
     /// （见 `ara::mapping::LOST_FIELDS`）。不播种就等于：界面显示"倒放 · 由 REAPER
-    /// 处理"，**渲染却在按正放合成**（`capture_render_input` 读的正是这条时间线）。
+    /// 处理"，**渲染却在按正放合成**（`ara_render_input` 读的正是这条时间线）。
     /// 这与 [`Self::project_host_mutes_locked`] / [`Self::project_plugin_musical_context_locked`]
     /// 是同一条纪律：宿主权威的、影响渲染的状态，每次重建后重新投影。
     ///
@@ -3188,7 +3188,7 @@ mod tests {
     ///
     /// 【为什么这是回归测试】宿主几何在 ARA-only 宿主上**恒缺**（没有原生扩展就没有
     /// `D_FADE*LEN`）。此前 `project_audio_fades_locked` 直接 `?` 上抛，经
-    /// `capture_render_input` 让整条 renderer 永远不发布快照 —— Studio One / Cubase /
+    /// `ara_render_input` 让整条 renderer 永远不发布快照 —— Studio One / Cubase /
     /// Nuendo / Logic 上只要有一个内容淡化，**整轨彻底静音**。而"某一段的淡化长度取不到"
     /// 只是局部信息缺失：保留 ARA 自己声明的淡化，其余照常渲染。
     #[test]

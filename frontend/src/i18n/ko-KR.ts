@@ -2070,7 +2070,7 @@ export const koKR = {
     host_link_item_option: "{label} · {directory}",
     host_link_unreadable_option: "{directory} · {error}",
     host_link_source_ara: "ARA",
-    host_link_source_transfer: "Transfer",
+    host_link_source_capture: "캡처",
     host_link_source_bridge: "브리지",
     host_link_commit_unsupported: "이 호스트는 편집을 받지 않습니다. 변경은 로컬에만 남습니다.",
     host_link_geometry_local_only:
@@ -2199,82 +2199,81 @@ export const koKR = {
     plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
     plugin_reverse_unavailable:
         "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
-    // ── Transfer（ARA 미지원 호스트에서의 녹음）─────────────────────────
-    panel_transfer: "Transfer",
-    menu_transfer: "호스트에서 Transfer...",
-    transfer_status_empty: "녹음 없음",
-    transfer_status_standby: "재생 대기 중",
-    transfer_field_peak: "피크",
-    transfer_field_peak_value: "{left} / {right}",
-    transfer_guide_standby:
+    // ── 캡처（ARA 미지원 호스트에서 호스트 재생음을 가져오기）─────────────
+    panel_capture: "캡처",
+    menu_capture: "호스트에서 캡처...",
+    capture_status_empty: "녹음 없음",
+    capture_status_standby: "재생 대기 중",
+    capture_field_peak: "피크",
+    capture_field_peak_value: "{left} / {right}",
+    capture_guide_standby:
         "준비되었습니다. 호스트를 재생하세요 —— 재생과 함께 녹음이 시작됩니다. 정지는 일시정지이며, 다시 재생하면 같은 테이크를 이어서 녹음합니다.",
-    transfer_limit_warning: "녹음 한계까지 10초 미만 남았습니다. 자동으로 정지합니다.",
-    transfer_stopped_limit: "녹음 한계에 도달해 자동으로 정지했습니다.",
-    transfer_stopped_no_spare:
+    capture_limit_warning: "녹음 한계까지 10초 미만 남았습니다. 자동으로 정지합니다.",
+    capture_stopped_limit: "녹음 한계에 도달해 자동으로 정지했습니다.",
+    capture_stopped_no_spare:
         "메모리가 따라가지 못해 자동으로 정지했습니다. 한계를 줄이거나 오래된 테이크를 지우세요.",
-    transfer_stopped_rate_changed: "호스트가 샘플레이트를 바꿔 정지했습니다.",
-    transfer_stopped_budget_full:
+    capture_stopped_rate_changed: "호스트가 샘플레이트를 바꿔 정지했습니다.",
+    capture_stopped_budget_full:
         "PCM 메모리 예산이 소진되어 정지했습니다. 오래된 테이크를 지우세요.",
-    transfer_stopped_jump: "재생 위치가 건너뛰었습니다. 그 이후 내용은 연속적이지 않습니다.",
-    transfer_option_limit: "1회 녹음 한계(초)",
-    transfer_option_limit_hint:
+    capture_stopped_jump: "재생 위치가 건너뛰었습니다. 그 이후 내용은 연속적이지 않습니다.",
+    capture_option_limit: "1회 녹음 한계(초)",
+    capture_option_limit_hint:
         "한계에 도달하면 자동으로 정지하고 녹음된 내용은 유지됩니다. 한계가 클수록 메모리를 더 쓵니다.",
-    transfer_option_limit_seconds: "{seconds}초",
-    transfer_option_limit_unlimited: "제한 없음",
-    transfer_output_processed: "처리 결과",
-    transfer_output_raw: "원본 녹음(합성 중)",
-    transfer_output_passthrough: "호스트 원음",
-    transfer_output_pending: "소재 준비됨, 합성 대기",
-    transfer_output_recording: "호스트 통과 중",
-    transfer_now_playing: "지금 듣는 것: {what}",
-    transfer_status_recording: "녹음 중",
-    transfer_status_ready: "녹음됨",
-    transfer_start: "녹음",
-    transfer_stop: "정지",
-    transfer_clear: "모든 테이크 버리기",
-    transfer_cancel_hint: "이 녹음을 버리고 테이크를 남기지 않습니다",
-    transfer_guide_body:
+    capture_option_limit_seconds: "{seconds}초",
+    capture_option_limit_unlimited: "제한 없음",
+    capture_output_processed: "처리 결과",
+    capture_output_raw: "원본 녹음(합성 중)",
+    capture_output_passthrough: "호스트 원음",
+    capture_output_pending: "소재 준비됨, 합성 대기",
+    capture_output_recording: "호스트 통과 중",
+    capture_now_playing: "지금 듣는 것: {what}",
+    capture_status_recording: "녹음 중",
+    capture_status_ready: "녹음됨",
+    capture_start: "녹음",
+    capture_stop: "정지",
+    capture_clear: "모든 테이크 버리기",
+    capture_cancel_hint: "이 녹음을 버리고 테이크를 남기지 않습니다",
+    capture_guide_body:
         "호스트에서 재생을 시작한 뒤 「녹음」을 누르세요. 플러그인이 지나가는 오디오를 받아 호스트 타임라인에 맞춰 정렬합니다.",
-    transfer_guide_recording:
+    capture_guide_recording:
         "녹음 중입니다. 재생 위치를 옮기거나 탐색하지 마세요. 끝나면 「정지」를 누릅니다. 녹음 중에는 호스트의 원음이 들리며, 정지하면 처리 결과로 돌아옵니다.",
-    transfer_guide_ready:
+    capture_guide_ready:
         "녹음되었습니다. 녹음한 구간부터 호스트를 재생하면 처리 결과를 들을 수 있습니다. 다시 녹음하면 대체됩니다.",
-    transfer_guide_offline:
+    capture_guide_offline:
         "이 호스트는 오프라인 렌더도 지원합니다. 오프라인은 두 단계입니다. 「녹음」을 누르고 한 번 내보내면 수집되고(이 회차는 무음), 녹음을 해제하고 다시 내보내면 처리 결과가 나옵니다.",
-    transfer_host_not_playing: "호스트가 재생 중이 아닙니다. 녹음되지 않습니다.",
-    transfer_not_applicable_ara:
-        "이 호스트는 ARA로 오디오를 제공합니다. Transfer는 필요하지 않습니다.",
-    transfer_cannot_capture:
+    capture_host_not_playing: "호스트가 재생 중이 아닙니다. 녹음되지 않습니다.",
+    capture_not_applicable_ara: "이 호스트는 ARA로 오디오를 제공합니다. 캡처가 필요하지 않습니다.",
+    capture_cannot_capture:
         "이 호스트는 재생 위치를 플러그인에 전달하지 않아 오디오를 타임라인에 맞출 수 없습니다. 호스트 자체 편집 기능을 쓰거나 ARA를 지원하는 호스트를 사용하세요.",
-    transfer_no_input_audio:
+    capture_no_input_audio:
         "이 호스트는 재생 위치는 주지만 입력 버스로 오디오를 보내지 않습니다 — 처리할 트랙에 플러그인을 두고, 그 트랙의 오디오가 플러그인으로 라우팅되는지 확인하세요.",
-    transfer_no_audio_arriving:
+    capture_no_audio_arriving:
         "호스트는 재생 중이지만 이 인스턴스에 오디오가 도달하지 않습니다 — 플러그인이 처리할 트랙에 있는지, 그 트랙이 플러그인으로 라우팅되는지 확인하세요.",
-    transfer_field_no_audio: "오디오가 들어오지 않음",
-    transfer_unsupported_precision:
+    capture_field_no_audio: "오디오가 들어오지 않음",
+    capture_unsupported_precision:
         "이 호스트는 플러그인을 64비트 정밀도로 처리합니다. 플러그인이 그 샘플을 읽을 수 없어 무음으로 남습니다. 호스트의 처리 정밀도를 32비트 부동소수점으로 바꾸세요.",
-    transfer_field_precision: "호스트가 64비트",
-    transfer_recording_progress: "{seconds}초 녹음됨",
-    transfer_recording_elapsed: "{seconds}초",
-    transfer_field_segments: "세그먼트 수",
-    transfer_field_gaps: "점프 횟수",
-    transfer_field_spares: "남은 버퍼",
-    transfer_field_takes: "테이크 수",
-    transfer_host_playing: "호스트 재생 중",
-    transfer_field_waiting_host: "호스트 재생 대기 중",
-    transfer_recorded_silent:
+    capture_field_precision: "호스트가 64비트",
+    capture_recording_progress: "{seconds}초 녹음됨",
+    capture_recording_elapsed: "{seconds}초",
+    capture_field_segments: "세그먼트 수",
+    capture_field_gaps: "점프 횟수",
+    capture_field_spares: "남은 버퍼",
+    capture_field_takes: "테이크 수",
+    capture_host_playing: "호스트 재생 중",
+    capture_field_waiting_host: "호스트 재생 대기 중",
+    capture_recorded_silent:
         "{seconds}초를 녹음했지만 입력이 무음입니다 — 이 트랙의 오디오가 실제로 플러그인에 들어오는지 확인하세요.",
-    transfer_option_monitor: "녹음 중 입력 모니터",
-    transfer_option_monitor_hint: "녹음 중인 소리가 들립니다. 끄면 녹음 중에는 무음이 됩니다.",
-    transfer_option_outside: "녹음 구간 밖은 호스트 원음을 재생",
-    transfer_option_outside_hint:
+    capture_option_monitor: "녹음 중 입력 모니터",
+    capture_option_monitor_hint: "녹음 중인 소리가 들립니다. 끄면 녹음 중에는 무음이 됩니다.",
+    capture_option_outside: "녹음 구간 밖은 호스트 원음을 재생",
+    capture_option_outside_hint:
         "녹음한 구간만 처리 결과로 바뀌고 나머지는 그대로입니다. 끄면 구간 밖은 무음이 됩니다.",
-    transfer_take_label: "테이크 {id} · 클립 {clips}개",
-    transfer_take_span: "{start}초 – {end}초",
-    transfer_take_delete: "삭제",
-    transfer_yes: "있음",
-    transfer_no: "없음",
-    transfer_diagnostics:
+    capture_take_label: "테이크 {id} · 클립 {clips}개",
+    capture_take_span: "{start}초 – {end}초",
+    capture_take_delete: "삭제",
+    capture_yes: "있음",
+    capture_no: "없음",
+    capture_diagnostics:
         "호스트 제공: 재생 위치 {context} · 입력 오디오 {input} · 오프라인 렌더 {offline}",
     plugin_apply_analyzing: "피치 분석 중...",
     plugin_apply_analyzing_hint:

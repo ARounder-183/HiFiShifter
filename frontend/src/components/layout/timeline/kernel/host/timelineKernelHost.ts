@@ -360,14 +360,14 @@ export interface TimelineKernelDomSync {
      */
     readonly snapHighlightContent?: () => HTMLElement | null;
     /**
-     * Transfer 实时录制带的内容层：与 `snapHighlightContent` 同一机制
+     * Capture 实时录制带的内容层：与 `snapHighlightContent` 同一机制
      * （内容坐标 + 整层平移）。
      *
      * 【为什么要单独一层】录制中那条带子由工程帧换算成内容坐标（`sec × pxPerSec`），
      * 而它每 200 ms 才更新一次 —— 让它自己跟随滚动就等于把 60 Hz 的滚动也绑在 5 Hz 的
      * 数据上。整层平移把这个矛盾解掉：层内不重排，滚动只写一次 transform。
      */
-    readonly transferCaptureContent?: () => HTMLElement | null;
+    readonly captureCaptureContent?: () => HTMLElement | null;
     /**
      * copy 拖拽 ghost 的内容层：整层写 `translate(-scrollLeft, -scrollTop)`。
      *
@@ -400,7 +400,7 @@ function resolveDomSync(sync: TimelineKernelDomSync): {
     rulerPlayheadLine: HTMLElement | null;
     rulerPlayheadHead: HTMLElement | null;
     snapHighlightContent: HTMLElement | null;
-    transferCaptureContent: HTMLElement | null;
+    captureCaptureContent: HTMLElement | null;
     ghostContent: HTMLElement | null;
     dropPreviewContent: HTMLElement | null;
     newTrackDropContent: HTMLElement | null;
@@ -412,7 +412,7 @@ function resolveDomSync(sync: TimelineKernelDomSync): {
         rulerPlayheadLine: sync.rulerPlayheadLine?.() ?? null,
         rulerPlayheadHead: sync.rulerPlayheadHead?.() ?? null,
         snapHighlightContent: sync.snapHighlightContent?.() ?? null,
-        transferCaptureContent: sync.transferCaptureContent?.() ?? null,
+        captureCaptureContent: sync.captureCaptureContent?.() ?? null,
         ghostContent: sync.ghostContent?.() ?? null,
         dropPreviewContent: sync.dropPreviewContent?.() ?? null,
         newTrackDropContent: sync.newTrackDropContent?.() ?? null,
@@ -2563,12 +2563,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             );
         }
 
-        // Transfer 实时录制带：与吸附高亮同一机制（内容坐标 + 整层平移）。
-        const transferCapture = dom.transferCaptureContent;
-        if (transferCapture != null) {
+        // Capture 实时录制带：与吸附高亮同一机制（内容坐标 + 整层平移）。
+        const captureCapture = dom.captureCaptureContent;
+        if (captureCapture != null) {
             layerTransformWriter(
-                "transfer-capture",
-                transferCapture,
+                "capture-capture",
+                captureCapture,
                 `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
                 (target, value) => {
                     target.style.transform = value;

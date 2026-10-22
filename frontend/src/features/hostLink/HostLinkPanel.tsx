@@ -330,18 +330,18 @@ export function HostLinkPanel({
     );
 }
 
-/** 来源词条：ARA / Transfer / 桥接。都是词表里的既有键，不拼字符串。 */
+/** 来源词条：ARA / Capture / 桥接。都是词表里的既有键，不拼字符串。 */
 function sourceKindLabel(
     kind: HostLinkSourceKind,
     t: (
-        key: "host_link_source_ara" | "host_link_source_transfer" | "host_link_source_bridge",
+        key: "host_link_source_ara" | "host_link_source_capture" | "host_link_source_bridge",
     ) => string,
 ): string {
     switch (kind) {
         case "ara":
             return t("host_link_source_ara");
-        case "transfer":
-            return t("host_link_source_transfer");
+        case "capture":
+            return t("host_link_source_capture");
         case "bridge":
             return t("host_link_source_bridge");
     }

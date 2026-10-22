@@ -76,7 +76,7 @@ export function resetHostLinkPluginStoreForTests(): void {
  * 开始轮询；返回停止函数（多次调用只保留一条轮询，引用计数）。
  *
  * 【为什么用引用计数】控件与详情对话框各自在挂载时开始、卸载时停止；两者同时在场时
- * 只有一条轮询在跑，其中一个卸载也不会让另一个断流（与 `transferStore` 同一取舍）。
+ * 只有一条轮询在跑，其中一个卸载也不会让另一个断流（与 `captureStore` 同一取舍）。
  */
 export function startHostLinkPluginPolling(): () => void {
     running += 1;

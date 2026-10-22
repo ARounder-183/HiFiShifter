@@ -44,11 +44,11 @@ export type PluginBootstrap = {
     /**
      * 当前编辑后端身份。
      *
-     * `"transfer"` = 宿主没给 ARA，素材从 VST3 输入总线录进来（见 Transfer 方案）。
-     * 它与 `"ara_only"` 的区别是**实质性的**：Transfer 的时间线由捕获存储构建、
+     * `"capture"` = 宿主没给 ARA，素材从 VST3 输入总线录进来（见 Capture 方案）。
+     * 它与 `"ara_only"` 的区别是**实质性的**：Capture 的时间线由捕获存储构建、
      * 完全属于插件自己，而 ara_only 的时间线是宿主投影。
      */
-    hostKind?: "reaper" | "ara_only" | "transfer";
+    hostKind?: "reaper" | "ara_only" | "capture";
     /**
      * 生效的宿主能力位快照：**写片段 / 分割 / 剪贴板 / 导入 / 建轨 / 撤销栈的唯一来源**。
      *
@@ -78,7 +78,7 @@ export type PluginBootstrap = {
         exportData: boolean;
     };
     /**
-     * Transfer 通路的**观察位**（`hostKind === "transfer"` 时才有值，否则 `null`）。
+     * Capture 通路的**观察位**（`hostKind === "capture"` 时才有值，否则 `null`）。
      *
      * 【为什么是"观察到过"而不是能力声明】它们描述宿主**实际**做了什么 —— 给过播放
      * 位置吗、把音频送到输入总线了吗、走过离线（bounce）吗。宿主不会声明这些，
@@ -88,7 +88,7 @@ export type PluginBootstrap = {
      * 【为什么不放进 `hostCapabilities`】那里回答"宿主能做什么"，这里回答
      * "我们观察到了什么"。混在一起会让"宿主不支持"与"还没播放过"变成同一个值。
      */
-    transferCaps?: {
+    captureCaps?: {
         sawContext: boolean;
         sawInput: boolean;
         sawOffline: boolean;

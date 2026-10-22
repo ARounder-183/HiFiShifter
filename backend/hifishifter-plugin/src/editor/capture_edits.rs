@@ -1,12 +1,12 @@
-//! Transfer 形态的用户编辑：随 VST3 组件 state 一起存取的载荷。
+//! Capture 形态的用户编辑：随 VST3 组件 state 一起存取的载荷。
 //!
 //! # 为什么需要一份独立载荷
 //!
-//! ARA 形态的编辑权威是 `DocumentSession::edits`（一份 `EditState`），而 Transfer
+//! ARA 形态的编辑权威是 `DocumentSession::edits`（一份 `EditState`），而 Capture
 //! **没有文档** —— 用户的曲线直接活在本会话的 `TimelineState` 上（见
-//! `SessionBacking::Transfer` 的注释）。`EditState` 的字段（`atlas` / `authorities` /
+//! `SessionBacking::Capture` 的注释）。`EditState` 的字段（`atlas` / `authorities` /
 //! `copy_seeds` / `fades`）全部按 **ARA 身份**（region key、persistentID）索引，
-//! Transfer 里那些身份根本不存在；硬套会让恢复走一整套"对不上就静默丢失"的路径。
+//! Capture 里那些身份根本不存在；硬套会让恢复走一整套"对不上就静默丢失"的路径。
 //!
 //! 所以这里只带**用户真正拥有的那一部分时间线**：曲线、音阶、Tempo Map、私有分组
 //! 开关、以及轨道级的可编辑设置。**不带几何**（`clips` / 轨道集合）—— 几何由捕获
@@ -14,7 +14,7 @@
 //!
 //! # 为什么是 JSON
 //!
-//! 与 Transfer 清单同一口径：它是几十 KB 的元数据，需要能被诊断工具读。
+//! 与 Capture 清单同一口径：它是几十 KB 的元数据，需要能被诊断工具读。
 //! 二进制只换来"多写一个解析器"。
 
 use hifishifter_kernel::state::model::{PitchAnalysisAlgo, TempoPointData, TrackParamsState};
@@ -34,7 +34,7 @@ const COMPRESS_THRESHOLD: usize = 1024 * 1024;
 /// 会改变渲染结果，`muted` / `solo` / `volume` / `name` / `color` 是用户直接编辑的
 /// 呈现与混音状态 —— 两类都必须跟着工程走。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TransferTrackSettings {
+pub(crate) struct CaptureTrackSettings {
     #[serde(default)]
     pub compose_enabled: bool,
     #[serde(default)]
@@ -55,9 +55,9 @@ fn default_volume() -> f32 {
     1.0
 }
 
-/// Transfer 会话里"属于用户"的那一份时间线。
+/// Capture 会话里"属于用户"的那一份时间线。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct TransferEdits {
+pub(crate) struct CaptureEdits {
     /// 根轨道 id → 曲线（含 `pitch_edit` 与全部自动化曲线）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params_by_root_track: BTreeMap<String, TrackParamsState>,
@@ -69,13 +69,13 @@ pub(crate) struct TransferEdits {
     pub disabled_group_ids: HashSet<String>,
     /// 轨道 id → 用户设置。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub track_settings: BTreeMap<String, TransferTrackSettings>,
+    pub track_settings: BTreeMap<String, CaptureTrackSettings>,
 }
 
-impl TransferEdits {
+impl CaptureEdits {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         let json = serde_json::to_vec(self)
-            .map_err(|error| format!("transfer edits encode: {error}"))?;
+            .map_err(|error| format!("capture edits encode: {error}"))?;
         if json.len() <= COMPRESS_THRESHOLD {
             return Ok(json);
         }
@@ -85,15 +85,15 @@ impl TransferEdits {
         );
         encoder
             .write_all(&json)
-            .map_err(|error| format!("transfer edits compress: {error}"))?;
+            .map_err(|error| format!("capture edits compress: {error}"))?;
         let compressed = encoder
             .finish()
-            .map_err(|error| format!("transfer edits compress: {error}"))?;
+            .map_err(|error| format!("capture edits compress: {error}"))?;
         if compressed.len() >= json.len() {
             return Ok(json);
         }
         log::info!(
-            "[transfer] edits payload compressed {} -> {} byte(s)",
+            "[capture] edits payload compressed {} -> {} byte(s)",
             json.len(),
             compressed.len()
         );
@@ -109,13 +109,13 @@ impl TransferEdits {
             let mut out = Vec::new();
             decoder
                 .read_to_end(&mut out)
-                .map_err(|error| format!("transfer edits decompress: {error}"))?;
+                .map_err(|error| format!("capture edits decompress: {error}"))?;
             out
         } else {
             bytes.to_vec()
         };
         let mut edits: Self = serde_json::from_slice(&json)
-            .map_err(|error| format!("transfer edits decode: {error}"))?;
+            .map_err(|error| format!("capture edits decode: {error}"))?;
         // 【为什么解码时就归一化】旧版本把会话命名空间写进了键。解码是唯一能
         // 同时覆盖"新会话读取旧载荷"与"旧会话读取旧载荷"的位置。
         edits.stabilize();
@@ -130,7 +130,7 @@ impl TransferEdits {
 
     /// 把稳定键绑定到**当前会话**的命名空间。
     ///
-    /// 【为什么必须做】`load_transfer_timeline` 会把投影时间线的 id 改写成当前
+    /// 【为什么必须做】`load_capture_timeline` 会把投影时间线的 id 改写成当前
     /// 命名空间；载荷里的键如果不跟着改，`kept.get(root)` 永远 miss，曲线被静默丢弃。
     pub(crate) fn bind_to_namespace(&mut self, namespace: &str) {
         bind_map(&mut self.params_by_root_track, namespace);
@@ -143,14 +143,14 @@ impl TransferEdits {
 pub(crate) fn capture(
     timeline: &hifishifter_kernel::state::TimelineState,
     namespace: &str,
-) -> TransferEdits {
+) -> CaptureEdits {
     let mut params_by_root_track = BTreeMap::new();
     for (root, params) in &timeline.params_by_root_track {
         if let Some(compact) = compact_params(params) {
             params_by_root_track.insert(root.clone(), compact);
         }
     }
-    let mut edits = TransferEdits {
+    let mut edits = CaptureEdits {
         params_by_root_track,
         project_scale_notes: timeline.project_scale_notes.clone(),
         tempo_map: timeline.tempo_map.clone(),
@@ -161,7 +161,7 @@ pub(crate) fn capture(
             .map(|track| {
                 (
                     track.id.clone(),
-                    TransferTrackSettings {
+                    CaptureTrackSettings {
                         compose_enabled: track.compose_enabled,
                         pitch_analysis_algo: track.pitch_analysis_algo.clone(),
                         muted: track.muted,
@@ -291,12 +291,12 @@ fn strip_session_namespace(key: &str) -> &str {
 ///
 /// 【为什么只有测试在用】生产路径必须让曲线经过 `ensure_params_for_root` 的规整，
 /// 所以它调用 [`apply_project_state`] 并把曲线并进 `kept`（见
-/// `EditorSession::load_transfer_timeline`）。这里保留完整版本，供往返测试断言
+/// `EditorSession::load_capture_timeline`）。这里保留完整版本，供往返测试断言
 /// "两部分合起来就是全部用户内容"。
 #[cfg(test)]
 pub(crate) fn apply(
     timeline: &mut hifishifter_kernel::state::TimelineState,
-    edits: &TransferEdits,
+    edits: &CaptureEdits,
 ) {
     for (root, params) in &edits.params_by_root_track {
         timeline
@@ -308,13 +308,13 @@ pub(crate) fn apply(
 
 /// 只叠"曲线以外"的用户内容（音阶 / Tempo Map / 私有分组 / 轨道设置）。
 ///
-/// 【为什么要与曲线分开】`load_transfer_timeline` 必须让曲线经过
+/// 【为什么要与曲线分开】`load_capture_timeline` 必须让曲线经过
 /// `ensure_params_for_root` 的规整（按工程长度取目标帧数、清掉对不上的原线缓存）。
 /// 若在那里直接 `insert` 恢复的曲线，它就绕过了规整 —— 长度对不上时界面会画出一条
 /// 超出工程末尾的曲线。所以那条路径把曲线并进 `kept`，只用本函数叠其余字段。
 pub(crate) fn apply_project_state(
     timeline: &mut hifishifter_kernel::state::TimelineState,
-    edits: &TransferEdits,
+    edits: &CaptureEdits,
 ) {
     if !edits.project_scale_notes.is_empty() {
         timeline.project_scale_notes = edits.project_scale_notes.clone();
@@ -352,8 +352,8 @@ mod tests {
         let mut timeline = TimelineState::default();
         timeline.tracks.clear();
         timeline.tracks.push(hifishifter_kernel::state::Track {
-            id: "transfer-track".into(),
-            name: "Transfer".into(),
+            id: "capture-track".into(),
+            name: "Capture".into(),
             parent_id: None,
             order: 0,
             muted: false,
@@ -368,7 +368,7 @@ mod tests {
         params.pitch_edit_user_modified = true;
         timeline
             .params_by_root_track
-            .insert("transfer-track".into(), params);
+            .insert("capture-track".into(), params);
         timeline
     }
 
@@ -380,37 +380,37 @@ mod tests {
     fn a_curve_round_trips_through_the_payload() {
         let timeline = timeline_with_curve();
         let bytes = capture(&timeline, "").encode().unwrap();
-        let restored = TransferEdits::decode(&bytes).unwrap();
+        let restored = CaptureEdits::decode(&bytes).unwrap();
         let mut target = TimelineState::default();
         target.tracks = timeline.tracks.clone();
         apply(&mut target, &restored);
         assert_eq!(
-            target.params_by_root_track["transfer-track"].pitch_edit,
+            target.params_by_root_track["capture-track"].pitch_edit,
             vec![60.0, 62.0]
         );
-        assert!(target.params_by_root_track["transfer-track"].pitch_edit_user_modified);
+        assert!(target.params_by_root_track["capture-track"].pitch_edit_user_modified);
     }
 
     /// **曲线必须跨会话命名空间存活。**
     ///
-    /// 【为什么这是回归测试】`TransferEdits` 的键曾经带 `hfs-ui-{pid}-{n}-` 前缀；
-    /// 重开工程后新会话的前缀不同，`load_transfer_timeline` 的 `kept.get(root)`
+    /// 【为什么这是回归测试】`CaptureEdits` 的键曾经带 `hfs-ui-{pid}-{n}-` 前缀；
+    /// 重开工程后新会话的前缀不同，`load_capture_timeline` 的 `kept.get(root)`
     /// 永远 miss，曲线被静默丢弃 —— 用户看到的就是"完全未编辑"。
     #[test]
     fn curves_survive_a_new_session_namespace() {
         let mut timeline = timeline_with_curve();
-        let old_key = "hfs-ui-1234-1-transfer-track".to_string();
+        let old_key = "hfs-ui-1234-1-capture-track".to_string();
         timeline.tracks[0].id = old_key.clone();
         let params = timeline
             .params_by_root_track
-            .remove("transfer-track")
+            .remove("capture-track")
             .unwrap();
         timeline.params_by_root_track.insert(old_key, params);
 
         let bytes = capture(&timeline, "hfs-ui-1234-1-").encode().unwrap();
-        let mut restored = TransferEdits::decode(&bytes).unwrap();
+        let mut restored = CaptureEdits::decode(&bytes).unwrap();
         assert!(
-            restored.params_by_root_track.contains_key("transfer-track"),
+            restored.params_by_root_track.contains_key("capture-track"),
             "载荷必须写稳定键"
         );
 
@@ -418,7 +418,7 @@ mod tests {
         assert!(
             restored
                 .params_by_root_track
-                .contains_key("hfs-ui-1234-2-transfer-track"),
+                .contains_key("hfs-ui-1234-2-capture-track"),
             "恢复时必须绑定到当前会话的命名空间"
         );
     }
@@ -426,15 +426,15 @@ mod tests {
     /// **旧载荷里的命名空间前缀在解码时被剥掉。**
     #[test]
     fn legacy_namespaced_keys_are_normalized_on_decode() {
-        let mut payload = TransferEdits::default();
+        let mut payload = CaptureEdits::default();
         payload.params_by_root_track.insert(
-            "hfs-ui-9-9-transfer-track".into(),
+            "hfs-ui-9-9-capture-track".into(),
             TrackParamsState::default(),
         );
-        let decoded = TransferEdits::decode(&payload.encode().unwrap()).unwrap();
+        let decoded = CaptureEdits::decode(&payload.encode().unwrap()).unwrap();
         assert!(decoded
             .params_by_root_track
-            .contains_key("transfer-track"));
+            .contains_key("capture-track"));
     }
 
     /// **派生分析数组不落盘。**
@@ -443,7 +443,7 @@ mod tests {
         let mut timeline = timeline_with_curve();
         let params = timeline
             .params_by_root_track
-            .get_mut("transfer-track")
+            .get_mut("capture-track")
             .unwrap();
         params.pitch_orig = vec![60.0; 1024];
         params.tension_orig = vec![0.5; 1024];
@@ -455,7 +455,7 @@ mod tests {
             .insert("derived-only".into(), derived_only);
 
         let edits = capture(&timeline, "");
-        let stored = &edits.params_by_root_track["transfer-track"];
+        let stored = &edits.params_by_root_track["capture-track"];
         assert!(stored.pitch_orig.is_empty(), "pitch_orig 是分析产物");
         assert!(stored.tension_orig.is_empty(), "tension_orig 是分析产物");
         assert_eq!(
@@ -475,17 +475,17 @@ mod tests {
         let mut timeline = timeline_with_curve();
         let params = timeline
             .params_by_root_track
-            .get_mut("transfer-track")
+            .get_mut("capture-track")
             .unwrap();
         params.pitch_edit = vec![f32::NAN, f32::INFINITY, 62.0];
         params.pitch_edit_user_modified = true;
         let edits = capture(&timeline, "");
-        let stored = &edits.params_by_root_track["transfer-track"].pitch_edit;
+        let stored = &edits.params_by_root_track["capture-track"].pitch_edit;
         assert!(stored.iter().all(|value| value.is_finite()));
         assert_eq!(stored[2], 62.0);
         // 清洗后的载荷必须能真正往返（NaN 写成 null 会让恢复端解析失败）。
         let bytes = edits.encode().unwrap();
-        TransferEdits::decode(&bytes).unwrap();
+        CaptureEdits::decode(&bytes).unwrap();
     }
 
     /// **大载荷压缩后仍能原样恢复。**
@@ -494,7 +494,7 @@ mod tests {
         let mut timeline = timeline_with_curve();
         let params = timeline
             .params_by_root_track
-            .get_mut("transfer-track")
+            .get_mut("capture-track")
             .unwrap();
         params.pitch_edit = (0..400_000).map(|index| 60.0 + index as f32 * 0.0001).collect();
         params.pitch_edit_user_modified = true;
@@ -503,15 +503,15 @@ mod tests {
             bytes.starts_with(COMPRESS_MAGIC),
             "超过 1 MiB 的载荷必须压缩"
         );
-        let restored = TransferEdits::decode(&bytes).unwrap();
-        let curve = &restored.params_by_root_track["transfer-track"].pitch_edit;
+        let restored = CaptureEdits::decode(&bytes).unwrap();
+        let curve = &restored.params_by_root_track["capture-track"].pitch_edit;
         assert_eq!(curve.len(), 400_000);
         assert!((curve[399_999] - (60.0 + 399_999.0 * 0.0001)).abs() < 1e-3);
     }
 
     /// **应用是叠加，不是替换。**
     ///
-    /// 【为什么必须钉住】`load_transfer_timeline` 在重新投影之后应用载荷；若它把
+    /// 【为什么必须钉住】`load_capture_timeline` 在重新投影之后应用载荷；若它把
     /// `params_by_root_track` 整体替换，投影刚建立的其它轨道曲线会被静默清掉。
     #[test]
     fn applying_a_payload_keeps_keys_it_does_not_mention() {
@@ -528,11 +528,11 @@ mod tests {
         only.pitch_edit_user_modified = true;
         payload_source
             .params_by_root_track
-            .insert("transfer-track".into(), only);
+            .insert("capture-track".into(), only);
 
         apply(&mut timeline, &capture(&payload_source, ""));
         assert_eq!(
-            timeline.params_by_root_track["transfer-track"].pitch_edit,
+            timeline.params_by_root_track["capture-track"].pitch_edit,
             vec![70.0],
             "载荷里带的键必须被覆盖"
         );
@@ -546,8 +546,8 @@ mod tests {
     /// 空载荷仍然可以往返：它只是一段没有键的 JSON，不是错误。
     #[test]
     fn an_empty_payload_round_trips() {
-        let edits = TransferEdits::default();
-        let restored = TransferEdits::decode(&edits.encode().unwrap()).unwrap();
+        let edits = CaptureEdits::default();
+        let restored = CaptureEdits::decode(&edits.encode().unwrap()).unwrap();
         assert!(restored.params_by_root_track.is_empty());
         assert!(restored.track_settings.is_empty());
     }

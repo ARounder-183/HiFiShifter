@@ -40,13 +40,13 @@ export interface PluginApplyState {
      */
     analysis_pending?: boolean;
     /**
-     * 本实例的运行形态（`"transfer"` / `"ara"`）。
+     * 本实例的运行形态（`"capture"` / `"ara"`）。
      *
      * 【为什么不能只读 bootstrap 的 `hostKind`】bootstrap 是窗口创建那一刻算的，而形态
      * 判定要等 `setActive` 之后 5 秒宽限期才落定 —— 那时读到的永远是 `ara_only`。
      * 状态快照每 250ms 轮询一次，是不依赖时序的那条通道。
      */
-    mode?: "transfer" | "ara";
+    mode?: "capture" | "ara";
 }
 
 export interface PluginApplySnapshot {

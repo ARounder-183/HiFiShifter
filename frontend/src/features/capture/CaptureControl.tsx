@@ -1,8 +1,8 @@
 /**
- * 传输栏上的 Transfer 控件（插件形态的主入口）。
+ * 传输栏上的 Capture 控件（插件形态的主入口）。
  *
  * 【为什么入口在这里而不是一个浮动面板】用户对"录制"这件事的心智模型就是传输栏上的
- * 一个键：Melodyne 的 Transfer 也长在那里。此前面板是 460×320 的浮窗、只有几个调试
+ * 一个键：Melodyne 的 Capture 也长在那里。此前面板是 460×320 的浮窗、只有几个调试
  * 读数，用户找不到它、也不知道它和播放有什么关系。
  *
  * # 为什么这里只有**一个图标 + 一个读数**
@@ -16,7 +16,7 @@
  * - **键用图标而不是文字**。"录制"/"停止"/"取消"在任何语言里都比一个图标宽得多，
  *   而它们的含义由图标本身与 tooltip 表达。图标按钮的 `tooltip` 同时是 `aria-label`，
  *   所以无文字不等于无名称。
- * - **诊断读数搬去面板**（`TransferPanel`）。宿主在不在播放、峰值、分段数、为什么没
+ * - **诊断读数搬去面板**（`CapturePanel`）。宿主在不在播放、峰值、分段数、为什么没
  *   声音 —— 那些是"刚发生了什么"，属于面板；工具栏只回答"现在按这个键会发生什么"。
  *   这与 ActionBar 里"插件形态不渲染节拍器"是同一条取舍：宿主窗口很窄时，不常用的
  *   东西不该占位置。
@@ -39,18 +39,18 @@ import {
 
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppIconButton, AppStatusChip } from "../../ui";
-import { framesToSeconds } from "./transferApi";
-import { startTransferPolling, transferActions, useTransferSnapshot } from "./transferStore";
+import { framesToSeconds } from "./captureApi";
+import { startCapturePolling, captureActions, useCaptureSnapshot } from "./captureStore";
 
 /** 显示用采样率兜底：后端在还没收到上下文时给 0，取不到就按 48k 显示量级。 */
 const FALLBACK_SAMPLE_RATE = 48_000;
 
-export function TransferControl() {
+export function CaptureControl() {
     const { t, tVars } = useI18n();
-    const { status, busy, error } = useTransferSnapshot();
+    const { status, busy, error } = useCaptureSnapshot();
 
     // 控件常驻（插件形态），因此它承担"启动唯一那条轮询"的职责。
-    useEffect(() => startTransferPolling(), []);
+    useEffect(() => startCapturePolling(), []);
 
     const recording = status?.state === "recording";
     const standby = status?.state === "standby";
@@ -85,29 +85,29 @@ export function TransferControl() {
      * （到上限 / 没在播放 / 没拿到音频 / 正在录），最后才是"录好了"与"怎么开始"。
      */
     const tooltip = status?.unsupportedPrecision
-        ? t("transfer_unsupported_precision")
+        ? t("capture_unsupported_precision")
         : araBound
-          ? t("transfer_not_applicable_ara")
+          ? t("capture_not_applicable_ara")
           : !canCapture
-            ? t("transfer_cannot_capture")
+            ? t("capture_cannot_capture")
             : noInput
-              ? t("transfer_no_input_audio")
+              ? t("capture_no_input_audio")
               : limitWarning
-                ? t("transfer_limit_warning")
+                ? t("capture_limit_warning")
                 : standby
-                  ? t("transfer_field_waiting_host")
+                  ? t("capture_field_waiting_host")
                   : silentInput
-                    ? t("transfer_no_audio_arriving")
+                    ? t("capture_no_audio_arriving")
                     : stalled
-                      ? t("transfer_host_not_playing")
+                      ? t("capture_host_not_playing")
                       : recording
-                        ? t("transfer_guide_recording")
+                        ? t("capture_guide_recording")
                         : (status?.takeCount ?? 0) > 0
-                          ? t("transfer_guide_ready")
-                          : t("transfer_guide_body");
+                          ? t("capture_guide_ready")
+                          : t("capture_guide_body");
 
     return (
-        <Flex align="center" gap="1" className="shrink-0" data-transfer-control>
+        <Flex align="center" gap="1" className="shrink-0" data-capture-control>
             {/* 录制 / 停止：一个图标键切换。武装时用实心 + 危险色 —— 那是"这个键现在
                 处于开着的状态"，扫一眼就知道录制还没结束。 */}
             <AppIconButton
@@ -117,7 +117,7 @@ export function TransferControl() {
                 icon={armed ? <StopIcon /> : <DotFilledIcon />}
                 tooltip={tooltip}
                 disabled={busy || (!armed && !canCapture)}
-                onClick={() => void (armed ? transferActions.stop() : transferActions.start())}
+                onClick={() => void (armed ? captureActions.stop() : captureActions.start())}
             />
             {/* 取消：只在武装期出现。录制键就在工具栏上，误触很便宜 —— 而没有取消的话，
                 唯一的出路是"先停止（产生一个 take）再删掉它"。 */}
@@ -125,9 +125,9 @@ export function TransferControl() {
                 <AppIconButton
                     size="sm"
                     icon={<Cross2Icon />}
-                    tooltip={t("transfer_cancel_hint")}
+                    tooltip={t("capture_cancel_hint")}
                     disabled={busy}
-                    onClick={() => void transferActions.cancel()}
+                    onClick={() => void captureActions.cancel()}
                 />
             ) : null}
             {/* 已录时长：录制中唯一"在动"的东西。没有它，用户无法判断插件到底有没有在
@@ -135,7 +135,7 @@ export function TransferControl() {
                 上限预警折进它的颜色与 tooltip：接近上限时变危险色，不额外占位置。 */}
             {recording ? (
                 <AppStatusChip tone={limitWarning ? "danger" : "warning"} tabular tooltip={tooltip}>
-                    {tVars("transfer_recording_elapsed", { seconds: captured ?? "0.0" })}
+                    {tVars("capture_recording_elapsed", { seconds: captured ?? "0.0" })}
                 </AppStatusChip>
             ) : null}
             {/* 出错：只给一个图标 + tooltip。错误正文可能是后端的一整句话（例如

@@ -217,7 +217,7 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 最近一次由**模型侧**算出的输入可用性读数（`None` = 还没算过，按旧行为处理）。
     ///
     /// 【为什么由模型侧写、文档侧读】`audio_sources` 是 `ModelHandle` 的私有数据，
-    /// 文档看不到；而判定结果要给 `ensure_loaded` / `capture_render_input` / 诊断包用。
+    /// 文档看不到；而判定结果要给 `ensure_loaded` / `ara_render_input` / 诊断包用。
     /// 让模型在每次源变化之后写一份读数，是两者之间唯一不需要反向引用的通道。
     ///
     /// 【`None` 为什么等于旧行为】没有跑过任何源回调的会话（测试夹具、纯几何会话）
@@ -1690,7 +1690,7 @@ impl DocumentSession {
                 .into_iter()
                 .filter(|owner| owner.renders_playback())
                 .map(|owner| {
-                    let (keys, input) = owner.capture_render_input(self, &edits, true)?;
+                    let (keys, input) = owner.ara_render_input(self, &edits, true)?;
                     Ok((owner, keys, input))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -2182,7 +2182,7 @@ impl DocumentSession {
         // 界面一片"等待宿主音频"、而日志里没有任何异常。
         //
         // 【为什么**不**在这里按 `input_verdict` 置假】那样会把"宿主还没交音频"
-        // 变成"渲染许可失效"，让 `capture_render_input` 在每一次正常的加载窗口里
+        // 变成"渲染许可失效"，让 `ara_render_input` 在每一次正常的加载窗口里
         // 都失败一次 —— 而失败的下游是"快照停在上一版"，比静音更难排查。
         // 判据的真正消费者是**呈现**：`ensure_loaded` 据此区分"等音频"与"真冲突"，
         // `decorate_host_audio` 据此给出可行动的分类（见 `input_verdict` 的读者）。

@@ -1,11 +1,11 @@
-//! Transfer 输出仲裁与"形态由素材证明"的回归。
+//! Capture 输出仲裁与"形态由素材证明"的回归。
 //!
 //! 【为什么这一组必须有】用户报障的全部现象（播放没输出、时间轴看不到内容、播放光标不动）
 //! 都指向同一类失效：**某个环节没准备好，而插件把它表现成了静音**。这里把"什么情况下
 //! 该出什么声"钉成一张真值表，让"静音"只剩"确实没有素材"一个含义。
 
 use super::*;
-use crate::transfer::InputBlock;
+use crate::capture::InputBlock;
 
 /// 一个"宿主把本插件当普通插入"的 owner：从未绑定、形态未定、窗口也没开过。
 ///
@@ -18,10 +18,10 @@ fn insert_owner() -> Arc<ExtensionOwner> {
 
 /// 录一段并 promote 成一个 take。
 fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
-    owner.transfer().start().unwrap();
+    owner.capture().start().unwrap();
     let samples: &'static [f32] = Box::leak(vec![0.25_f32; frames].into_boxed_slice());
     for index in 0..2_i64 {
-        owner.transfer().on_block(InputBlock {
+        owner.capture().on_block(InputBlock {
             start: index * frames as i64,
             frames,
             sample_rate: 48_000.0,
@@ -29,7 +29,7 @@ fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
             playing: true,
         });
     }
-    owner.transfer().stop().unwrap();
+    owner.capture().stop().unwrap();
 }
 
 /// 一份可发布的最小快照（处理结果的替身）。
@@ -47,14 +47,14 @@ fn processed_snapshot() -> crate::render::snapshot::PlaybackSnapshot {
 /// **关着窗口、形态从未落定的会话，也必须能合成并发布处理结果。**
 ///
 /// 【为什么这条是"永远是直通"的正面验收】处理结果的唯一生产者此前只在两处出现：
-/// `prepare_job` 的 Transfer 分流（条件 `mode() == Transfer`），以及会话 actor。
+/// `prepare_job` 的 Capture 分流（条件 `mode() == Capture`），以及会话 actor。
 /// 而形态由 `note_editor_tick` 落定 —— 它的唯一调用点是 WebView 的 20ms 定时器；
 /// 会话则只在 `webview.rs` 的命令分发里惰性创建。**两者都要求窗口开着。**
 /// 于是宿主把插件当普通插入、用户录完关掉窗口再播放时，一条处理结果都没合成过，
 /// 仲裁落到 `PassThrough`：用户听到的永远是直通。
 ///
 /// 【为什么不跑真神经合成】本用例钉的是"分流与产出链通不通"，不是合成质量。
-/// `transfer_prepare_job` 走的是与生产同一份 `RenderInput::render`。
+/// `capture_prepare_job` 走的是与生产同一份 `RenderInput::render`。
 #[test]
 fn a_closed_window_session_still_reaches_the_processed_output() {
     let owner = insert_owner();
@@ -62,15 +62,15 @@ fn a_closed_window_session_still_reaches_the_processed_output() {
     assert_eq!(owner.mode(), InstanceMode::Undetermined);
     record(&owner, 256);
     // `setupProcessing` 装载合成队列；不碰任何 UI 定时器。
-    owner.clone().arm_transfer_rendering();
+    owner.clone().arm_capture_rendering();
     owner
-        .transfer_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        .capture_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
         )))
         .expect("有素材就必须能准备出处理结果");
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Processed,
+        owner.capture_output(),
+        CaptureOutput::Processed,
         "关着窗口、形态未落定也得出处理结果 —— 否则播放时永远是直通"
     );
 }
@@ -84,14 +84,14 @@ fn a_closed_window_session_still_reaches_the_processed_output() {
 fn the_read_position_jump_is_a_pure_judgement() {
     let owner = insert_owner();
     let evidence = BlockEvidence {
-        stream: crate::transfer::capture::ProcessStream::Realtime,
+        stream: crate::capture::recorder::ProcessStream::Realtime,
         position: 48_000,
         frames: 256,
         playing: true,
         recording: false,
         playing_rising: false,
         recording_rising: false,
-        phase: crate::transfer::capture::TransportPhase::Rolling,
+        phase: crate::capture::recorder::TransportPhase::Rolling,
         had_previous: true,
         allow_output: true,
         start_window: false,
@@ -128,14 +128,14 @@ fn the_read_position_jump_is_a_pure_judgement() {
 fn a_contiguous_block_advance_is_not_a_jump() {
     let owner = insert_owner();
     let evidence = BlockEvidence {
-        stream: crate::transfer::capture::ProcessStream::Realtime,
+        stream: crate::capture::recorder::ProcessStream::Realtime,
         position: 48_256,
         frames: 256,
         playing: true,
         recording: false,
         playing_rising: false,
         recording_rising: false,
-        phase: crate::transfer::capture::TransportPhase::Rolling,
+        phase: crate::capture::recorder::TransportPhase::Rolling,
         had_previous: true,
         allow_output: true,
         start_window: false,
@@ -172,10 +172,10 @@ fn a_contiguous_block_advance_is_not_a_jump() {
 /// so that case must still fade in rather than crossfade.
 #[test]
 fn a_rung_change_between_unrelated_signals_fades_in() {
-    let code = TransferOutput::code as fn(TransferOutput) -> u8;
-    let raw = code(TransferOutput::Raw);
-    let processed = code(TransferOutput::Processed);
-    let passthrough = code(TransferOutput::PassThrough);
+    let code = CaptureOutput::code as fn(CaptureOutput) -> u8;
+    let raw = code(CaptureOutput::Raw);
+    let processed = code(CaptureOutput::Processed);
+    let passthrough = code(CaptureOutput::PassThrough);
     // Two processings of the same take: a wide equal-power crossfade.
     assert_eq!(ExtensionOwner::seam(processed, raw), Seam::WideCrossfade);
     assert_eq!(ExtensionOwner::seam(raw, processed), Seam::WideCrossfade);
@@ -218,14 +218,14 @@ fn a_wide_crossfade_is_twenty_milliseconds() {
 }
 /// **分流判据必须是"未绑定 + 有素材"，而不是 `mode()`。**
 ///
-/// 【为什么单独钉这一条】上面那条走的是 `arm_transfer_rendering` 之后的完整链路；
+/// 【为什么单独钉这一条】上面那条走的是 `arm_capture_rendering` 之后的完整链路；
 /// 这里单独钉 `prepare_job` 的分流本身，免得将来有人把判据改回 `mode()` 而只有
 /// 集成用例能发现。
 #[test]
 fn the_prepare_split_does_not_depend_on_the_binding_mode() {
     let owner = insert_owner();
     record(&owner, 256);
-    owner.clone().arm_transfer_rendering();
+    owner.clone().arm_capture_rendering();
     assert_eq!(
         owner.mode(),
         InstanceMode::Undetermined,
@@ -239,14 +239,14 @@ fn the_prepare_split_does_not_depend_on_the_binding_mode() {
     );
 }
 
-/// **素材本身就是"这个实例是 Transfer"的证明。**
+/// **素材本身就是"这个实例是 Capture"的证明。**
 ///
 /// 【为什么这是回归测试】形态判定此前只由编辑器窗口的 20ms 定时器写入，且要等
 /// `setActive` 之后 5 秒。宿主把插件当普通插入时用户很可能**根本没开窗口**，于是
 /// `mode()` 永远是 `Undetermined` ⇒ `renders()` 恒假 ⇒ 一条快照都不发布 ⇒
 /// 录制正常、界面正常、**播放时全静音**。素材是比时钟更早、更硬的证据。
 #[test]
-fn material_alone_makes_an_unbound_instance_transfer() {
+fn material_alone_makes_an_unbound_instance_capture() {
     let owner = insert_owner();
     assert_eq!(
         owner.mode(),
@@ -262,9 +262,9 @@ fn material_alone_makes_an_unbound_instance_transfer() {
     assert!(
         matches!(
             owner.host_backend(),
-            crate::host::adapter::HostBackend::Transfer(_)
+            crate::host::adapter::HostBackend::Capture(_)
         ),
-        "有素材的未绑定实例必须是 Transfer 后端，而不是退成 ARA-only"
+        "有素材的未绑定实例必须是 Capture 后端，而不是退成 ARA-only"
     );
 }
 
@@ -283,8 +283,8 @@ fn a_missing_processed_result_asks_the_actor_to_render() {
     );
     owner.sync_raw_tape();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Raw,
+        owner.capture_output(),
+        CaptureOutput::Raw,
         "原始磁带可播、但处理结果缺失"
     );
     assert!(
@@ -295,9 +295,9 @@ fn a_missing_processed_result_asks_the_actor_to_render() {
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_revision
-        .store(owner.transfer.revision(), Ordering::Release);
-    assert_eq!(owner.transfer_output(), TransferOutput::Processed);
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    assert_eq!(owner.capture_output(), CaptureOutput::Processed);
     assert!(
         !owner.take_render_wanted(),
         "结果已就绪时不得再请求合成（否则会无谓地反复重算）"
@@ -309,14 +309,14 @@ fn a_missing_processed_result_asks_the_actor_to_render() {
 fn the_output_arbiter_degrades_instead_of_going_silent() {
     let owner = insert_owner();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PassThrough,
+        owner.capture_output(),
+        CaptureOutput::PassThrough,
         "没有素材时插件必须**透明** —— 静音会让「插上插件这条轨就哑了」"
     );
     record(&owner, 256);
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PendingSynthesis,
+        owner.capture_output(),
+        CaptureOutput::PendingSynthesis,
         "素材有了但两份都还没发布：输出仍是宿主原声，但必须**如实报成等待合成** \
          （与「没有素材」共用 `passthrough` 会让「合成从没被调度」完全不可见）"
     );
@@ -326,24 +326,24 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     );
     owner.sync_raw_tape();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Raw,
+        owner.capture_output(),
+        CaptureOutput::Raw,
         "处理结果还没合成好时必须能听到**原始磁带**"
     );
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_revision
-        .store(owner.transfer.revision(), Ordering::Release);
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Processed,
+        owner.capture_output(),
+        CaptureOutput::Processed,
         "处理结果就绪且属于当前 take 时优先听它"
     );
-    owner.transfer().start().unwrap();
+    owner.capture().start().unwrap();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Processed,
+        owner.capture_output(),
+        CaptureOutput::Processed,
         "武装之后、宿主还没播的那一段是**待命**：没有任何素材在产生，因此没有\
          「用旧内容盖住新演奏」的风险。此时仍须输出处理结果 —— 否则用户画完参数线\
          听不到任何变化（「参数线不生效」）"
@@ -352,7 +352,7 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     // （in-place 宿主里输入与输出是同一块缓冲）。
     owner.note_block_position(0, 480);
     owner.note_block_position(480, 480);
-    owner.transfer().observe(&crate::transfer::InputBlock {
+    owner.capture().observe(&crate::capture::InputBlock {
         start: 480,
         frames: 480,
         sample_rate: 48_000.0,
@@ -360,21 +360,21 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
         playing: true,
     });
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Recording,
+        owner.capture_output(),
+        CaptureOutput::Recording,
         "宿主一开始播放就必须直通，而不是播上一次的快照"
     );
-    owner.transfer().cancel();
+    owner.capture().cancel();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Processed,
+        owner.capture_output(),
+        CaptureOutput::Processed,
         "取消之后回到处理结果（素材还在）"
     );
 }
 
 /// **还没有素材时一律透传**，而不是把整条轨静音。
 ///
-/// 【为什么这条是"没声音"的回归测试】此前只有"形态已落定为 Transfer"才透传，于是
+/// 【为什么这条是"没声音"的回归测试】此前只有"形态已落定为 Capture"才透传，于是
 /// 窗口没开过、宽限期未过的会话（`Undetermined`）在**任何素材之前**都是静音 ——
 /// 用户把插件插到一条有声音的轨道上，得到的是"整条轨哑了"。
 /// 真正的契约是"不要覆盖一个正常渲染的 ARA 实例的输出"，而那由 `is_bound()` /
@@ -388,14 +388,14 @@ fn an_instance_without_material_is_transparent_regardless_of_mode() {
         "窗口没开过、宽限期未过"
     );
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PassThrough,
+        owner.capture_output(),
+        CaptureOutput::PassThrough,
         "形态未定也不是把这条轨静音的理由"
     );
     owner.note_binding_window_closed_without_ara();
-    assert_eq!(owner.mode(), InstanceMode::Transfer);
+    assert_eq!(owner.mode(), InstanceMode::Capture);
     assert!(!owner.renders(), "没有素材就没什么可发布的");
-    assert_eq!(owner.transfer_output(), TransferOutput::PassThrough);
+    assert_eq!(owner.capture_output(), CaptureOutput::PassThrough);
 }
 
 /// **换 take 之后绝不播上一份的原始磁带；但上一版处理结果比宿主原声更接近真相。**
@@ -415,9 +415,9 @@ fn a_new_take_invalidates_both_publishers() {
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_revision
-        .store(owner.transfer.revision(), Ordering::Release);
-    assert_eq!(owner.transfer_output(), TransferOutput::Processed);
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    assert_eq!(owner.capture_output(), CaptureOutput::Processed);
 
     // 又录一遍：take 号前进，两份发布都还停留在上一个 take。
     //
@@ -428,16 +428,16 @@ fn a_new_take_invalidates_both_publishers() {
     record(&owner, 256);
     owner.sync_raw_tape();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Raw,
+        owner.capture_output(),
+        CaptureOutput::Raw,
         "新 take 的合成还没跑完时，播这一份 take 的原始捕获，而不是上一段素材"
     );
     // 原始磁带也跟不上（预算不足 / 还没发布）⇒ 只能透传宿主原声并如实报"等待合成"。
     owner.raw_tape.clear();
     owner.raw_tape_revision.store(0, Ordering::Release);
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PendingSynthesis,
+        owner.capture_output(),
+        CaptureOutput::PendingSynthesis,
         "两份都不是这一份 take 的时候，不得把上一段素材当成结果播出去"
     );
 }
@@ -453,16 +453,16 @@ fn no_published_result_never_invents_a_stale_one() {
     record(&owner, 256);
     owner.sync_raw_tape();
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Raw,
+        owner.capture_output(),
+        CaptureOutput::Raw,
         "原始磁带先到位"
     );
     // 撤掉原始磁带、且从未发布过处理结果 ⇒ 只能是"等待合成"。
     owner.raw_tape.clear();
     owner.raw_tape_revision.store(0, Ordering::Release);
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PendingSynthesis,
+        owner.capture_output(),
+        CaptureOutput::PendingSynthesis,
         "没有发布过任何结果时不得凭空造一档"
     );
 }
@@ -473,7 +473,7 @@ fn clearing_the_takes_retracts_the_raw_tape() {
     let owner = insert_owner();
     record(&owner, 256);
     owner.sync_raw_tape();
-    let revision = owner.transfer.revision();
+    let revision = owner.capture.revision();
     assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), revision);
     assert!(owner.raw_tape.is_ready());
 
@@ -481,21 +481,21 @@ fn clearing_the_takes_retracts_the_raw_tape() {
     owner.sync_raw_tape();
     assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), revision);
 
-    owner.transfer().clear();
+    owner.capture().clear();
     owner.sync_raw_tape();
     assert_eq!(owner.raw_tape_revision.load(Ordering::Acquire), 0);
     assert!(!owner.raw_tape.is_ready(), "没有 take 就不该留下指针");
     assert!(!owner.renders());
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::PassThrough,
+        owner.capture_output(),
+        CaptureOutput::PassThrough,
         "素材清空之后回到「透明」，而不是继续播一份已经不存在的原始磁带"
     );
 }
 
-/// **ARA 实例的仲裁完全不受 Transfer 改动影响。**
+/// **ARA 实例的仲裁完全不受 Capture 改动影响。**
 ///
-/// 【为什么必须钉住】`transfer_stage` 在 `process` 里对所有实例都被调用（包括绑定了
+/// 【为什么必须钉住】`capture_stage` 在 `process` 里对所有实例都被调用（包括绑定了
 /// ARA 的）。若"没有素材就透传"这条规则也套到 ARA 实例上，ARA 宿主里插件会开始输出
 /// **宿主原声**而不是处理结果 —— 那是整条 ARA 通路静默失效。
 #[test]
@@ -503,9 +503,9 @@ fn a_bound_instance_stays_on_the_ara_path() {
     let (model, owner, _identity) = crate::editor::session::tests::fixture();
     assert!(owner.is_bound(), "夹具的实例是绑定在 ARA 文档上的");
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Untouched,
-        "绑定的实例永远走 ARA 快照通路，哪怕它恰好有一份 Transfer 素材"
+        owner.capture_output(),
+        CaptureOutput::Untouched,
+        "绑定的实例永远走 ARA 快照通路，哪怕它恰好有一份 Capture 素材"
     );
     model.session().close();
 }
@@ -514,14 +514,14 @@ fn a_bound_instance_stays_on_the_ara_path() {
 #[test]
 fn the_recording_monitor_option_is_reachable() {
     let owner = insert_owner();
-    assert!(owner.transfer().options().monitor, "默认监听");
+    assert!(owner.capture().options().monitor, "默认监听");
     owner
-        .transfer()
-        .set_options(crate::transfer::TransferOptions {
+        .capture()
+        .set_options(crate::capture::CaptureOptions {
             monitor: false,
-            ..owner.transfer().options()
+            ..owner.capture().options()
         });
-    assert!(!owner.transfer().options().monitor);
+    assert!(!owner.capture().options().monitor);
 }
 
 /// 按音频线程的真实顺序喂两个块位置，回答"守卫认为宿主在不在推进位置"。
@@ -535,7 +535,7 @@ fn transport_running_after(
 ) -> bool {
     owner.note_block_position(previous.0, previous.1);
     owner.note_block_position(current.0, current.1);
-    owner.transfer_transport_running()
+    owner.capture_transport_running()
 }
 
 /// **起播的第一个块不能被吞掉。**
@@ -550,7 +550,7 @@ fn the_first_blocks_of_playback_are_not_swallowed() {
     // 第一个块：本流的首次出现 ⇒ 允许出音一次（重复由 last_emitted 抑制）。
     owner.note_block_position(0, 480);
     assert!(
-        owner.transfer_transport_running(),
+        owner.capture_transport_running(),
         "本流第一块必须能出音一次，而不是保守清空"
     );
     // 停播：同一个块被反复 process ⇒ 块尾不动 ⇒ 不前进 ⇒ 清输出是对的。
@@ -575,7 +575,7 @@ fn a_single_long_block_at_playback_start_is_not_swallowed() {
     owner.note_block_position(0, 512); // 停播时的光标块
     owner.note_block_position(0, 48_000); // 起播：宿主一次给 1 秒
     assert!(
-        owner.transfer_transport_running(),
+        owner.capture_transport_running(),
         "一个长块也必须算前进，否则整秒会被清空"
     );
 }
@@ -610,7 +610,7 @@ fn a_forward_jump_while_stopped_costs_at_most_one_block() {
     owner.note_block_position(0, 480);
     owner.note_block_position(0, 480);
     owner.note_block_position(480_000, 480);
-    assert!(owner.transfer_transport_running(), "前进一次即算在走");
+    assert!(owner.capture_transport_running(), "前进一次即算在走");
     // 下一块钉在新位置 ⇒ 立刻回到静音，不会持续出声。
     assert!(
         !transport_running_after(&owner, (480_000, 480), (480_000, 480)),
@@ -696,13 +696,13 @@ fn an_armed_lagging_start_does_not_play_the_previous_result() {
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_revision
-        .store(owner.transfer.revision(), Ordering::Release);
-    owner.transfer().start().unwrap();
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    owner.capture().start().unwrap();
     // 起播：位置前进，但宿主还没置 kPlaying。
     owner.note_block_position(0, 512);
     owner.note_block_position(512, 512);
-    owner.transfer().observe(&crate::transfer::InputBlock {
+    owner.capture().observe(&crate::capture::InputBlock {
         start: 512,
         frames: 512,
         sample_rate: 48_000.0,
@@ -710,11 +710,11 @@ fn an_armed_lagging_start_does_not_play_the_previous_result() {
         playing: false,
     });
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Recording,
+        owner.capture_output(),
+        CaptureOutput::Recording,
         "位置流在推进 ⇒ 不能再把上一版处理结果盖在新演奏上"
     );
-    owner.transfer().cancel();
+    owner.capture().cancel();
 }
 
 /// **待命时重复块最终回到处理结果。**
@@ -726,12 +726,12 @@ fn armed_standby_returns_to_the_processed_result() {
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
     owner
-        .transfer_ready_revision
-        .store(owner.transfer.revision(), Ordering::Release);
-    owner.transfer().start().unwrap();
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    owner.capture().start().unwrap();
     owner.note_block_position(0, 512);
     assert!(!owner.note_block_position(0, 512), "钉住 = 停播");
-    owner.transfer().observe(&crate::transfer::InputBlock {
+    owner.capture().observe(&crate::capture::InputBlock {
         start: 0,
         frames: 512,
         sample_rate: 48_000.0,
@@ -739,11 +739,11 @@ fn armed_standby_returns_to_the_processed_result() {
         playing: false,
     });
     assert_eq!(
-        owner.transfer_output(),
-        TransferOutput::Processed,
+        owner.capture_output(),
+        CaptureOutput::Processed,
         "待命不是录制：重复块必须回到处理结果（否则参数线又不生效）"
     );
-    owner.transfer().cancel();
+    owner.capture().cancel();
 }
 
 /// **块级 trace 能区分“kPlaying 滞后但位置在推进”的起播窗口。**
@@ -751,8 +751,8 @@ fn armed_standby_returns_to_the_processed_result() {
 fn the_block_trace_records_a_lagging_start() {
     let owner = insert_owner();
     owner.init_block_trace();
-    owner.transfer().note_project_rate(48_000.0);
-    owner.transfer().start().unwrap();
+    owner.capture().note_project_rate(48_000.0);
+    owner.capture().start().unwrap();
     for start in [0_i64, 512] {
         owner.note_block_trace(
             0,
@@ -768,7 +768,7 @@ fn the_block_trace_records_a_lagging_start() {
             1,
             true,
             true,
-            crate::transfer::TransferBlockOutcome::NotPlaying.code(),
+            crate::capture::CaptureBlockOutcome::NotPlaying.code(),
             false,
             super::StreamTime::default(),
             48_000.0,
@@ -786,7 +786,7 @@ fn the_block_trace_records_a_lagging_start() {
     assert_eq!(trace[1]["start"], 512);
     assert!(owner.take_trace_wanted(), "可疑窗口必须请求一次落盘");
     assert!(!owner.take_trace_wanted(), "同一次窗口不得重复请求");
-    owner.transfer().cancel();
+    owner.capture().cancel();
 }
 
 /// **prefetch 的移动不能替实时流的重复块作“在前进”的证。**
@@ -812,7 +812,7 @@ fn prefetch_movement_does_not_unlock_a_repeated_realtime_block() {
         !flow,
         "同一个实时块在 prefetch 移动之后仍然是“重复”，不得被解锁"
     );
-    assert!(!owner.transfer_transport_running());
+    assert!(!owner.capture_transport_running());
 }
 
 /// **起播窗口内的静音不能被门控清掉。**
@@ -839,7 +839,7 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         split: BlockSplit::whole(0, 512),
     };
     assert!(
-        owner.transfer_should_emit(Some(evidence), false),
+        owner.capture_should_emit(Some(evidence), false),
         "窗口内静音必须放行，否则内容出现时是零→内容的阶跃"
     );
     let repeated = BlockEvidence {
@@ -847,7 +847,7 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         ..evidence
     };
     assert!(
-        !owner.transfer_should_emit(Some(repeated), false),
+        !owner.capture_should_emit(Some(repeated), false),
         "FL 停播的重复非零内容仍然必须被门控"
     );
 }
@@ -907,7 +907,7 @@ fn prefetch_and_offline_never_look_stopped() {
             split: BlockSplit::whole(0, 512),
         };
         assert!(
-            owner.transfer_should_emit(Some(evidence), false),
+            owner.capture_should_emit(Some(evidence), false),
             "{stream:?} 的输出稍后才被播放，不能因为此刻 kPlaying=0 被清空"
         );
     }
@@ -926,8 +926,8 @@ fn prefetch_and_offline_never_look_stopped() {
         repeated_nonzero: false,
         split: BlockSplit::whole(0, 512),
     };
-    assert!(!owner.transfer_should_emit(Some(realtime), false));
-    assert!(owner.transfer_should_emit(
+    assert!(!owner.capture_should_emit(Some(realtime), false));
+    assert!(owner.capture_should_emit(
         Some(BlockEvidence {
             allow_output: true,
             ..realtime
@@ -949,20 +949,20 @@ fn prefetch_playing_zero_does_not_clear_realtime_playing() {
         playing: true,
     };
     owner
-        .transfer()
+        .capture()
         .observe_with_stream(&realtime, ProcessStream::Realtime);
     let prefetch = InputBlock {
         playing: false,
         ..realtime
     };
     owner
-        .transfer()
+        .capture()
         .observe_with_stream(&prefetch, ProcessStream::Prefetch);
     assert!(
-        owner.transfer().host_playing(),
+        owner.capture().host_playing(),
         "prefetch 的 kPlaying=0 不得覆盖实时流的 kPlaying=1"
     );
-    assert!(!owner.transfer().capture_stream_playing(), "尚未选举捕获流");
+    assert!(!owner.capture().capture_stream_playing(), "尚未选举捕获流");
 }
 
 /// **位置钉住：第一块之后进入 Resting，块长抖动不能把它重新判成前进。**
@@ -1217,15 +1217,15 @@ fn a_block_crossing_the_cycle_end_is_split() {
     assert_eq!(split.parts[1].frames, 100);
 }
 
-/// 在会话时间线上写一条用户曲线（Transfer 形态下"处理"的全部内容）。
-fn seed_transfer_curve(owner: &Arc<ExtensionOwner>) -> Arc<crate::editor::session::EditorSession> {
-    let session = owner.transfer_session().expect("transfer session");
+/// 在会话时间线上写一条用户曲线（Capture 形态下"处理"的全部内容）。
+fn seed_capture_curve(owner: &Arc<ExtensionOwner>) -> Arc<crate::editor::session::EditorSession> {
+    let session = owner.capture_session().expect("capture session");
     {
         let mut timeline = session.timeline.lock_or_recover();
         timeline.tracks.clear();
         timeline.tracks.push(hifishifter_kernel::state::Track {
-            id: "transfer-track".into(),
-            name: "Transfer".into(),
+            id: "capture-track".into(),
+            name: "Capture".into(),
             parent_id: None,
             order: 0,
             muted: false,
@@ -1240,7 +1240,7 @@ fn seed_transfer_curve(owner: &Arc<ExtensionOwner>) -> Arc<crate::editor::sessio
         params.pitch_edit_user_modified = true;
         timeline
             .params_by_root_track
-            .insert("transfer-track".into(), params);
+            .insert("capture-track".into(), params);
     }
     session
 }
@@ -1248,28 +1248,28 @@ fn seed_transfer_curve(owner: &Arc<ExtensionOwner>) -> Arc<crate::editor::sessio
 /// **非 ARA 的曲线必须进组件 state。**
 ///
 /// 【为什么这是本轮最重要的回归之一】用户报"保存工程后重开，参数全丢"。根因是
-/// `encode_state` 在没有 ARA 文档时序列化 `self.edits` —— 一个从未被 Transfer
+/// `encode_state` 在没有 ARA 文档时序列化 `self.edits` —— 一个从未被 Capture
 /// 路径写过的默认字段。这条钉住真正的权威（会话时间线）确实被存了进去。
 #[test]
-fn transfer_curves_are_saved_with_the_component_state() {
+fn capture_curves_are_saved_with_the_component_state() {
     let owner = insert_owner();
     record(&owner, 256);
-    let session = seed_transfer_curve(&owner);
+    let session = seed_capture_curve(&owner);
 
     let bytes = owner.encode_state().expect("save succeeds");
     let state = crate::component_state::ComponentState::decode(&bytes).unwrap();
-    let edits = crate::editor::transfer_edits::TransferEdits::decode(
+    let edits = crate::editor::capture_edits::CaptureEdits::decode(
         state
-            .transfer_edits
+            .capture_edits
             .as_deref()
-            .expect("Transfer 编辑必须随组件 state 保存"),
+            .expect("Capture 编辑必须随组件 state 保存"),
     )
     .unwrap();
     assert_eq!(
-        edits.params_by_root_track["transfer-track"].pitch_edit,
+        edits.params_by_root_track["capture-track"].pitch_edit,
         vec![61.0, 63.0]
     );
-    assert!(edits.params_by_root_track["transfer-track"].pitch_edit_user_modified);
+    assert!(edits.params_by_root_track["capture-track"].pitch_edit_user_modified);
     session.close();
 }
 
@@ -1278,25 +1278,25 @@ fn transfer_curves_are_saved_with_the_component_state() {
 /// 【为什么必须有这一条】`setState` 到达时用户往往从没开过编辑器窗口 —— 那一刻没有
 /// 会话可投递。若那条路直接返回，恢复就静默丢失（与修复前的症状完全一样）。
 #[test]
-fn a_saved_transfer_curve_reaches_the_session_created_after_restore() {
+fn a_saved_capture_curve_reaches_the_session_created_after_restore() {
     let source = insert_owner();
     record(&source, 256);
-    let session = seed_transfer_curve(&source);
+    let session = seed_capture_curve(&source);
     let bytes = source.encode_state().expect("save succeeds");
     session.close();
 
     let target = insert_owner();
     assert!(
-        target.transfer_session_if_initialized().is_none(),
+        target.capture_session_if_initialized().is_none(),
         "前提：目标实例还没有会话"
     );
     target.restore_state(&bytes).expect("restore succeeds");
     let restored = target
-        .transfer_session()
+        .capture_session()
         .expect("session is created on demand");
     assert_eq!(
-        restored.staged_transfer_edit_roots(),
-        vec!["transfer-track".to_string()],
+        restored.staged_capture_edit_roots(),
+        vec!["capture-track".to_string()],
         "恢复的曲线必须在会话创建时补投"
     );
     restored.close();
@@ -1307,7 +1307,7 @@ fn a_saved_transfer_curve_reaches_the_session_created_after_restore() {
 /// 【为什么必须钉住】`encode_state` 会把 `Err` 变成 `K_RESULT_FALSE`，宿主据此提示
 /// "插件存档失败"。用户没开窗口只是"没有曲线"，不是错误。
 #[test]
-fn saving_without_an_open_editor_succeeds_and_has_no_transfer_edits() {
+fn saving_without_an_open_editor_succeeds_and_has_no_capture_edits() {
     let owner = insert_owner();
     record(&owner, 256);
     let bytes = owner
@@ -1315,10 +1315,10 @@ fn saving_without_an_open_editor_succeeds_and_has_no_transfer_edits() {
         .expect("save succeeds without a session");
     let state = crate::component_state::ComponentState::decode(&bytes).unwrap();
     assert!(
-        state.transfer_edits.is_none(),
+        state.capture_edits.is_none(),
         "没有会话 ⇒ 没有用户曲线可存，但清单仍然要在"
     );
-    assert!(state.transfer.is_some(), "take 清单必须仍然随存档走");
+    assert!(state.capture.is_some(), "take 清单必须仍然随存档走");
 }
 
 /// 一个"位置钉住、音频在流动"的宿主上下文（VEGAS 起播窗口的形状）。
@@ -1541,7 +1541,7 @@ fn the_first_silent_block_accumulates_the_lead_in() {
 /// "宿主标了静音"被当成"没有证据" —— 整段起播窗口的静音一次都记不下来。
 #[test]
 fn a_block_without_audio_planes_counts_as_silent() {
-    let block = crate::transfer::capture::InputBlock {
+    let block = crate::capture::recorder::InputBlock {
         start: 0,
         frames: 8,
         sample_rate: 48_000.0,
@@ -1550,7 +1550,7 @@ fn a_block_without_audio_planes_counts_as_silent() {
     };
     assert!(block_is_silent(&block), "空平面必须被判成静音");
     let zeros: &'static [f32] = Box::leak(vec![0.0_f32; 8].into_boxed_slice());
-    let block = crate::transfer::capture::InputBlock {
+    let block = crate::capture::recorder::InputBlock {
         start: 0,
         frames: 8,
         sample_rate: 48_000.0,
@@ -1635,7 +1635,7 @@ fn a_stationary_stretch_does_not_offset_the_real_start() {
 #[test]
 fn a_source_kind_change_on_the_first_block_still_fades() {
     let owner = insert_owner();
-    // 【为什么先录一段】首块淡入只作用于 **Transfer 播放通路**（未绑定 + 有素材）：
+    // 【为什么先录一段】首块淡入只作用于 **Capture 播放通路**（未绑定 + 有素材）：
     // 那才是"我们自己算出来的内容从任意相位开始"的形状。没有素材时本流是"未录制、
     // 不动输出"，不该被淡化。
     record(&owner, 256);
@@ -1731,7 +1731,7 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
 #[test]
 fn a_carryover_source_kind_still_triggers_a_fade() {
     let owner = insert_owner();
-    // 同上：首块淡入只在 Transfer 播放通路上生效。
+    // 同上：首块淡入只在 Capture 播放通路上生效。
     record(&owner, 256);
     owner.sync_raw_tape();
     let stream = ProcessStream::Realtime;
@@ -1976,7 +1976,7 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         split: BlockSplit::whole(0, 512),
     };
     assert!(
-        owner.transfer_should_emit(Some(prefetch), false),
+        owner.capture_should_emit(Some(prefetch), false),
         "预取输出稍后才被播放，不能因为此刻 kPlaying=0 被清空"
     );
     let realtime = BlockEvidence {
@@ -1984,11 +1984,11 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         ..prefetch
     };
     assert!(
-        !owner.transfer_should_emit(Some(realtime), false),
+        !owner.capture_should_emit(Some(realtime), false),
         "实时流的光标重复块仍然必须静音"
     );
     assert!(
-        owner.transfer_should_emit(Some(realtime), true),
+        owner.capture_should_emit(Some(realtime), true),
         "真实播放时实时流照常出声"
     );
 }
@@ -1996,7 +1996,7 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
 /// **快照就绪探测必须查"实际会被读取的那一份"。**
 ///
 /// 【为什么是 48 kHz】`snapshot_index_for_rate` 对 48 kHz 及倍率返回 1。此前
-/// `transfer_stage` 固定查 `snapshots[0]`，于是"48 kHz 那份还没就绪"会被判成
+/// `capture_stage` 固定查 `snapshots[0]`，于是"48 kHz 那份还没就绪"会被判成
 /// 就绪 ⇒ `layered == false` ⇒ 预清后逐样本写零。
 #[test]
 fn the_snapshot_readiness_probe_uses_the_publisher_that_is_read() {
@@ -2046,17 +2046,17 @@ fn a_failed_restore_is_reported_not_swallowed() {
 #[test]
 fn an_ara_snapshot_publish_changes_the_output_token() {
     let owner = insert_owner();
-    let before = owner.output_token_for(TransferOutput::Untouched);
+    let before = owner.output_token_for(CaptureOutput::Untouched);
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
-    let after = owner.output_token_for(TransferOutput::Untouched);
+    let after = owner.output_token_for(CaptureOutput::Untouched);
     assert_ne!(
         before, after,
         "快照发布必须改变 token，否则 ARA 的接缝拿不到 1.3 ms 淡化"
     );
 }
 
-/// **[transfer] ctx 必须把宿主给的时间字段如实报出来。**
+/// **[capture] ctx 必须把宿主给的时间字段如实报出来。**
 ///
 /// 【为什么这条要有】排查"起播窗口/位置钉住"时唯一的硬事实是**宿主到底给了什么**。
 /// 这一行此前根本不存在，于是每一轮都只能靠"用户再听一遍"猜是哪一种形状。
@@ -2087,7 +2087,7 @@ fn the_context_line_reports_the_host_time_fields() {
         1,
         true,
         true,
-        crate::transfer::TransferBlockOutcome::Capturing.code(),
+        crate::capture::CaptureBlockOutcome::Capturing.code(),
         true,
         time,
         48_000.0,
@@ -2098,7 +2098,7 @@ fn the_context_line_reports_the_host_time_fields() {
         .get()
         .and_then(|ring| ring.last_context_line())
         .expect("必须能格式化出一行 ctx");
-    assert!(line.starts_with("[transfer] ctx:"), "{line}");
+    assert!(line.starts_with("[capture] ctx:"), "{line}");
     assert!(line.contains("raw=4096"), "宿主报的位置必须出现：{line}");
     assert!(
         line.contains("cont=4200(valid)"),
@@ -2218,7 +2218,7 @@ fn re_publishing_the_same_content_does_not_arm_a_seam() {
     let owner = insert_owner();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
-    let first = owner.output_token_for(TransferOutput::Processed);
+    let first = owner.output_token_for(CaptureOutput::Processed);
     let published = owner.snapshots[0].generation();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
@@ -2228,7 +2228,7 @@ fn re_publishing_the_same_content_does_not_arm_a_seam() {
         "夹具必须真的又发布了一次"
     );
     assert_eq!(
-        owner.output_token_for(TransferOutput::Processed),
+        owner.output_token_for(CaptureOutput::Processed),
         first,
         "同一份内容重新发布不是换源：token 必须不变，否则每次都装一次接缝淡化"
     );
@@ -2240,7 +2240,7 @@ fn publishing_different_content_changes_the_token() {
     let owner = insert_owner();
     owner.snapshots[0].publish(processed_snapshot()).unwrap();
     owner.snapshots[1].publish(processed_snapshot()).unwrap();
-    let first = owner.output_token_for(TransferOutput::Processed);
+    let first = owner.output_token_for(CaptureOutput::Processed);
     let changed = || {
         let mut snapshot = processed_snapshot();
         snapshot.left = vec![0.7, 0.2];
@@ -2250,7 +2250,7 @@ fn publishing_different_content_changes_the_token() {
     owner.snapshots[0].publish(changed()).unwrap();
     owner.snapshots[1].publish(changed()).unwrap();
     assert_ne!(
-        owner.output_token_for(TransferOutput::Processed),
+        owner.output_token_for(CaptureOutput::Processed),
         first,
         "内容变了就必须换 token，否则真正的换版拿不到去咔"
     );

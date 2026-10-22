@@ -1,19 +1,19 @@
 /**
- * Transfer 命令的前端门面。
+ * Capture 命令的前端门面。
  *
  * 【为什么与 `hostLinkApi` 分开】两条通路的目标完全不同：`hostLinkApi` 面向
- * **独立 App** 打开宿主导出的工作区，走 Tauri 命令；Transfer 面向**插件自己的窗口**，
+ * **独立 App** 打开宿主导出的工作区，走 Tauri 命令；Capture 面向**插件自己的窗口**，
  * 走插件 webview 的命令通道（`invoke` 在插件模式下就是 postMessage）。放在一起会让
  * "这个命令在哪种形态下可用"变得要靠读者推断。
  *
  * 【为什么状态是拉取式】录制进度每 100ms 变一次，而宿主不会推送；轮询是唯一可行的
- * 形态，且它的代价只是一个整数读取（后端 `transfer_status` 不取渲染锁）。
+ * 形态，且它的代价只是一个整数读取（后端 `capture_status` 不取渲染锁）。
  */
 import { invoke } from "../../services/invoke";
 import type { MessageKey } from "../../i18n/messages";
 
 /** 录制中的读数。 */
-export interface TransferRecording {
+export interface CaptureRecording {
     capturedFrames: number;
     sealedSegments: number;
     position: number;
@@ -23,7 +23,7 @@ export interface TransferRecording {
 }
 
 /** 录制中正在长出来的工程区间（时间轴据此画实时录制带）。 */
-export interface TransferCapture {
+export interface CaptureCapture {
     startFrame: number;
     endFrame: number;
     positionFrame: number;
@@ -31,7 +31,7 @@ export interface TransferCapture {
 }
 
 /** 活动素材的摘要。 */
-export interface TransferMaterial {
+export interface CaptureMaterial {
     clips: number;
     capturedFrames: number;
     coveredFrames: number;
@@ -47,14 +47,14 @@ export interface TransferMaterial {
 }
 
 /** 已 promote 素材的工程跨度。 */
-export interface TransferSpan {
+export interface CaptureSpan {
     startFrame: number;
     endFrame: number;
     sampleRate: number;
 }
 
 /** 一个 take 的清单条目。 */
-export interface TransferTake {
+export interface CaptureTake {
     id: number;
     active: boolean;
     clips: number;
@@ -62,7 +62,7 @@ export interface TransferTake {
     endSec: number | null;
 }
 
-export interface TransferOptions {
+export interface CaptureOptions {
     maxDurationSec: number;
     segmentSec: number;
     monitor: boolean;
@@ -70,7 +70,7 @@ export interface TransferOptions {
     outsidePassthrough: boolean;
 }
 
-export interface TransferStatus {
+export interface CaptureStatus {
     /**
      * `"empty"` / `"standby"` / `"recording"` / `"ready"`。
      *
@@ -81,13 +81,13 @@ export interface TransferStatus {
     state: "empty" | "standby" | "recording" | "ready";
     /** 已武装但宿主还没播过（= `state === "standby"` 的布尔形式）。 */
     standby: boolean;
-    recording: TransferRecording | null;
-    capture: TransferCapture | null;
-    material: TransferMaterial | null;
+    recording: CaptureRecording | null;
+    capture: CaptureCapture | null;
+    material: CaptureMaterial | null;
     hasMaterial: boolean;
-    span: TransferSpan | null;
-    takes: TransferTake[];
-    options: TransferOptions;
+    span: CaptureSpan | null;
+    takes: CaptureTake[];
+    options: CaptureOptions;
     takeCount: number;
     /** 最近一次录制的 take 号（派生读数；投影取全部 take，见后端 `latest_take`）。 */
     activeTake: number | null;
@@ -99,7 +99,7 @@ export interface TransferStatus {
     /**
      * 宿主**此刻**是否在播放。
      *
-     * 【为什么要它】Transfer 的用法是"先按录制、再按播放"，所以"按了录制却忘了播放"
+     * 【为什么要它】Capture 的用法是"先按录制、再按播放"，所以"按了录制却忘了播放"
      * 是这条通路最常见的失败。实时读数让面板直接说出来，而不是让用户对着一个 0.00 秒的
      * 读数猜。`canCapture` 不依赖它：那条只回答"这个宿主给不给位置"。
      */
@@ -129,14 +129,14 @@ export interface TransferStatus {
     /**
      * 宿主是否**正在**通过 ARA 供音。
      *
-     * 【为什么状态里要有它】Transfer 入口现在无条件可见（形态判定要等 5 秒宽限期，
+     * 【为什么状态里要有它】Capture 入口现在无条件可见（形态判定要等 5 秒宽限期，
      * 不能拿它当可见性判据），所以面板必须自己回答"我在这里有没有用"。
      */
     araBound: boolean;
     /**
      * **此刻听到的是哪一版**（后端输出仲裁的结论）。
      *
-     * 取值与后端 `TransferOutput::as_str` 一致：`"processed"` / `"raw"` /
+     * 取值与后端 `CaptureOutput::as_str` 一致：`"processed"` / `"raw"` /
      * `"passthrough"` / `"pending_synthesis"` / `"recording"` / `"untouched"`。
      *
      * `pending_synthesis` 与 `passthrough` 的**输出内容**相同（都是宿主原声），
@@ -149,35 +149,35 @@ export interface TransferStatus {
     output: string;
 }
 
-export const transferApi = {
-    status: () => invoke<TransferStatus>("transfer_status"),
-    start: () => invoke<TransferStatus>("transfer_start"),
-    stop: () => invoke<{ take: number; status: TransferStatus }>("transfer_stop"),
-    cancel: () => invoke<TransferStatus>("transfer_cancel"),
-    clear: () => invoke<TransferStatus>("transfer_clear"),
-    deleteTake: (takeId: number) => invoke<TransferStatus>("transfer_delete_take", takeId),
-    setOptions: (patch: Partial<TransferOptions>) =>
-        invoke<TransferStatus>("transfer_set_options", patch),
+export const captureApi = {
+    status: () => invoke<CaptureStatus>("capture_status"),
+    start: () => invoke<CaptureStatus>("capture_start"),
+    stop: () => invoke<{ take: number; status: CaptureStatus }>("capture_stop"),
+    cancel: () => invoke<CaptureStatus>("capture_cancel"),
+    clear: () => invoke<CaptureStatus>("capture_clear"),
+    deleteTake: (takeId: number) => invoke<CaptureStatus>("capture_delete_take", takeId),
+    setOptions: (patch: Partial<CaptureOptions>) =>
+        invoke<CaptureStatus>("capture_set_options", patch),
 };
 
 /** 后端错误的可读文本；与 `hostLinkError` 同一套解包口径。 */
 /**
- * 语言无关的分类：宿主正在通过 ARA 供音，Transfer 不适用。
+ * 语言无关的分类：宿主正在通过 ARA 供音，Capture 不适用。
  *
  * 【为什么分类在后端、文案在前端】与 `hostLinkApi` 同一条纪律：后端只给稳定的分类串，
  * 文案按 catalog 本地化。这里因此不解析后端的中文/英文句子。
  */
-const TRANSFER_NOT_APPLICABLE_ARA = "transfer_not_applicable_ara";
+const CAPTURE_NOT_APPLICABLE_ARA = "capture_not_applicable_ara";
 
 /** 后端分类 → 本地化文案；其余错误原样透传（由调用方按既有分支处理）。 */
-export function transferErrorText(error: unknown, t: (key: MessageKey) => string): string {
-    const raw = transferError(error);
-    return raw.includes(TRANSFER_NOT_APPLICABLE_ARA) ? t(TRANSFER_NOT_APPLICABLE_ARA) : raw;
+export function captureErrorText(error: unknown, t: (key: MessageKey) => string): string {
+    const raw = captureError(error);
+    return raw.includes(CAPTURE_NOT_APPLICABLE_ARA) ? t(CAPTURE_NOT_APPLICABLE_ARA) : raw;
 }
 
-export function transferError(error: unknown): string {
+export function captureError(error: unknown): string {
     if (error instanceof Error)
-        return error.cause !== undefined ? transferError(error.cause) : error.message;
+        return error.cause !== undefined ? captureError(error.cause) : error.message;
     return String(error);
 }
 

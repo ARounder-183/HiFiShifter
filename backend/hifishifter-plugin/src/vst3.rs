@@ -304,14 +304,14 @@ fn class_declaration(index: i32) -> Option<ClassDeclaration> {
             // 作为普通插入插件不工作"（`ivstaudioprocessor.h`）。这在**当时**是事实：
             // 非 ARA 插入时没有文档、没有授权 PCM，`audio_process` 只能输出静音。
             //
-            // 现在它不再是事实 —— 插件有了 **Transfer** 通路：在非 ARA 实例上，
+            // 现在它不再是事实 —— 插件有了 **Capture** 通路：在非 ARA 实例上，
             // 音频从 VST3 输入总线实时（或离线）捕获，按 `ProcessContext` 的
             // `projectTimeSamples` 对到插件自己的时间轴上，再照常处理并输出。
             // 于是"作为普通插入插件"是**真的能工作**的，继续声明 `OnlyARA`
             // 会变成一句会误导宿主的谎：多数宿主据此不把插件列进普通 FX 列表，
             // 用户连试都试不了。
             //
-            // 【为什么绝不能顺手加 `kNoOfflineProcess`】bounce / 导出是 Transfer 的
+            // 【为什么绝不能顺手加 `kNoOfflineProcess`】bounce / 导出是 Capture 的
             // 第二条（且质量最好的）通路：宿主以 `kOffline` 快于实时地跑完整个区间。
             // 声明"我不参与离线处理"等于自断一臂。
             //
@@ -1599,12 +1599,12 @@ unsafe extern "system" fn audio_setup_processing(
             // SAFETY: this 为存活音频接口。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             owner.set_setup_sample_rate(setup.sample_rate);
-            // 【为什么在这里装载 Transfer 的渲染基础设施】`setupProcessing` 是 SDK 保证
+            // 【为什么在这里装载 Capture 的渲染基础设施】`setupProcessing` 是 SDK 保证
             // 在任何 `process` 之前、且在宿主 UI 线程上被调用的唯一时刻，而宿主时钟、
             // 合成队列与 `prepare_owner` 都是"第一次 process 之前必须就位"的东西。
             // 此前它们由 WebView 的 20ms 定时器装载 —— 于是**没开窗口**的会话里宿主位置
             // 根本没有地方落：插件 UI 的播放光标永远是 0，而用户以为宿主没在播放。
-            owner.arm_transfer_rendering();
+            owner.arm_capture_rendering();
             crate::log_line(&format!(
                 "IAudioProcessor::setupProcessing mode={} rate={}",
                 setup.process_mode, setup.sample_rate
@@ -1799,7 +1799,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         return K_INVALID_ARGUMENT;
     }
     let shape = unsafe { crate::audio_abi::validate(data.cast()) };
-    // 【为什么 Transfer 的观察与捕获在形状判定**之前】** 见 `ExtensionOwner::transfer_observe`：
+    // 【为什么 Capture 的观察与捕获在形状判定**之前】** 见 `ExtensionOwner::capture_observe`：
     // 录制只依赖"宿主给的位置"与"宿主给的输入"，与输出总线的形状无关。此前它在下面的
     // `num_outputs == 0` 早退之后 —— 于是"宿主没接我们的输出"这一个无关事实会让插件
     // 既录不到东西，又让 `sawContext` 永不置位（界面上的录制键一直是灰的）。
@@ -1819,16 +1819,16 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         // `try_lock`，拿不到就跳过）—— 下一次块（10 ms 后）会再来。
         owner.request_settle_if_overdue();
         // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而"静音"在界面上必须能
-        // 说清原因（见 `TransferStore::unsupported_precision`）。这一行与形状判定无关，
+        // 说清原因（见 `CaptureStore::unsupported_precision`）。这一行与形状判定无关，
         // 所以在 `InvalidArgument` 之外一律记录。
-        owner.transfer().note_precision(probe.symbolic_sample_size);
+        owner.capture().note_precision(probe.symbolic_sample_size);
         // 【为什么必须要求 32-bit 浮点】非 32-bit 时 `channelBuffers32` 那个联合体成员
         // 实际是 `channelBuffers64`，按 `f32` 读会读到垃圾。
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
             owner.observe_transport(context, probe.process_mode);
-            evidence = owner.transfer_observe(probe, context);
+            evidence = owner.capture_observe(probe, context);
         }
     }
     match shape {
@@ -1868,7 +1868,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
                 let stream =
-                    crate::transfer::capture::ProcessStream::from_mode((*data).process_mode);
+                    crate::capture::recorder::ProcessStream::from_mode((*data).process_mode);
                 let frames = (*data).num_samples as usize;
                 let outputs = (*data).outputs;
                 if outputs.is_null() {
@@ -1897,20 +1897,20 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // "停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前只按
             // 播放位判断，于是**每次播放都吞掉开头**（用户报障：播放后约 1 秒没有输出）。
             // 位置在前进是宿主无关的硬事实 —— 真在播就必然前进（见
-            // `ExtensionOwner::transfer_transport_running`）。
+            // `ExtensionOwner::capture_transport_running`）。
             //
-            // 【为什么这一支必须排在 `transfer_stage` **之前**】门控判"要静音"时若已经
+            // 【为什么这一支必须排在 `capture_stage` **之前**】门控判"要静音"时若已经
             // 写过快照，清输出就清不掉那一块的内容 —— 于是每次停播/移动光标都会漏出一
             // 小块**新位置**的音频（用户报障："很短、内容不对的一声"）。先判、后写，
             // "清输出"才是真的清。
             // 【为什么不能再以 `kPlaying == 0` 为前提】FL Studio 停播时仍可能保持
             // `kPlaying == 1`；此时门控必须由“本块是否真的在推进”（`allow_output`）
-            // 独立决定。`transfer_should_emit` 对 ARA 实例仍返回 `kPlaying`，所以
+            // 独立决定。`capture_should_emit` 对 ARA 实例仍返回 `kPlaying`，所以
             // “停播即静音”的既有语义不变。
             let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
-            if data.process_mode != 2 && !owner.transfer_should_emit(evidence, playing) {
+            if data.process_mode != 2 && !owner.capture_should_emit(evidence, playing) {
                 owner.note_gate_cleared(
-                    evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
+                    evidence.map_or(crate::capture::recorder::ProcessStream::Realtime, |ev| {
                         ev.stream
                     }),
                 );
@@ -1923,7 +1923,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 一遍。本函数自己按"尾巴 → 0"写满整块，因此**不能再调用**清零。
                 unsafe {
                     owner.apply_gate_fade_out(
-                        evidence.map_or(crate::transfer::capture::ProcessStream::Realtime, |ev| {
+                        evidence.map_or(crate::capture::recorder::ProcessStream::Realtime, |ev| {
                             ev.stream
                         }),
                         &mut *data.outputs,
@@ -1932,13 +1932,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 }
                 return K_RESULT_OK;
             }
-            // 【Transfer 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
+            // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
             // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
             // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
-            // 而不是把整条轨静音（见 `ExtensionOwner::transfer_output`）。
-            let (snapshot_source, layered) = match owner.transfer_stage(data, evidence) {
-                crate::render::extension::TransferStage::Handled => return K_RESULT_OK,
-                crate::render::extension::TransferStage::Snapshot { source, layered } => {
+            // 而不是把整条轨静音（见 `ExtensionOwner::capture_output`）。
+            let (snapshot_source, layered) = match owner.capture_stage(data, evidence) {
+                crate::render::extension::CaptureStage::Handled => return K_RESULT_OK,
+                crate::render::extension::CaptureStage::Snapshot { source, layered } => {
                     (source, layered)
                 }
             };
@@ -1974,7 +1974,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             let mut layered_probe = crate::render::snapshot::LayeredProbe::default();
             let ready = unsafe {
                 if layered {
-                    // 【为什么要重新取一次输入视图】Transfer 要"录过的那一段被替换、其余
+                    // 【为什么要重新取一次输入视图】Capture 要"录过的那一段被替换、其余
                     // 保持宿主原声"，而"范围外"这个区别只在写之前知道（见
                     // `copy_block_layered_at`）。这里不分配：`capture_view` 只借用宿主缓冲。
                     let input = crate::audio_abi::capture_view(
@@ -2040,7 +2040,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 【为什么在快照写完以后】接缝去咔需要"上一块输出的尾巴"与"这一块的新信号"
             // 做交叉淡化；写完再混，才不会把新源的第一帧直接硬切到旧源的最后帧。
             let declick_stream = evidence.map_or(
-                crate::transfer::capture::ProcessStream::Realtime,
+                crate::capture::recorder::ProcessStream::Realtime,
                 |evidence| evidence.stream,
             );
             if layered {
@@ -2647,18 +2647,18 @@ unsafe fn base_from_context_requirements(this: *mut c_void) -> *mut Processor {
 const NEED_SYSTEM_TIME: u32 = 1 << 0;
 /// `kContTimeValid`：诊断读数；也是"这一块是不是循环回卷"的旁证。
 const NEED_CONTINUOUS_TIME_SAMPLES: u32 = 1 << 1;
-/// `kProjectTimeMusicValid`：小节/拍显示，以及 Transfer 的区间按小节对齐。
+/// `kProjectTimeMusicValid`：小节/拍显示，以及 Capture 的区间按小节对齐。
 const NEED_PROJECT_TIME_MUSIC: u32 = 1 << 2;
-/// `kBarPositionValid`：网格吸附（Transfer 的 punch 区间要吸到小节线）。
+/// `kBarPositionValid`：网格吸附（Capture 的 punch 区间要吸到小节线）。
 const NEED_BAR_POSITION_MUSIC: u32 = 1 << 3;
-/// `kCycleValid`：Transfer 的"只录循环区间"需要循环起止。
+/// `kCycleValid`：Capture 的"只录循环区间"需要循环起止。
 const NEED_CYCLE_MUSIC: u32 = 1 << 4;
 /// `kTempoValid`：`TransportClock::tempo()` 的**唯一**来源。
 const NEED_TEMPO: u32 = 1 << 6;
 /// `kTimeSigValid`：`TransportClock::time_signature()` 的唯一来源。
 const NEED_TIME_SIGNATURE: u32 = 1 << 7;
 /// `kPlaying` / `kCycleActive` / `kRecording`。**没有这一位，`kPlaying` 是未定义的**，
-/// 而 `audio_process_inner` 与 Transfer 录制都靠它区分"停播"与"播放"。
+/// 而 `audio_process_inner` 与 Capture 录制都靠它区分"停播"与"播放"。
 const NEED_TRANSPORT_STATE: u32 = 1 << 10;
 
 /// `IProcessContextRequirements::getProcessContextRequirements` 的返回值。
@@ -2666,7 +2666,7 @@ const NEED_TRANSPORT_STATE: u32 = 1 << 10;
 /// 【为什么是**并集**而不是按当前模式二选一】这个值在 Setup Done 时被问一次，
 /// 而那时我们还**不知道**宿主会不会绑定 ARA（ARA 绑定允许发生在这个调用之前，
 /// 见 `ARAVST3.h:165`；但宿主也可以完全不绑）。两条路径的需求不同：
-/// ARA 路径要 tempo / 拍号，Transfer 路径要 transportState / 循环。
+/// ARA 路径要 tempo / 拍号，Capture 路径要 transportState / 循环。
 /// 二选一必然有一半场景拿不到数据，所以取并集。
 pub(crate) fn process_context_requirements() -> u32 {
     NEED_SYSTEM_TIME

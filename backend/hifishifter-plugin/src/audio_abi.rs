@@ -375,11 +375,11 @@ pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferEr
     Ok(())
 }
 
-/// 从输入总线构造捕获视图（Transfer 通路）。
+/// 从输入总线构造捕获视图（Capture 通路）。
 ///
-/// 【为什么放在本文件而不是 `transfer/`】读输入总线是 **VST3 ABI** 的知识：
+/// 【为什么放在本文件而不是 `capture/`】读输入总线是 **VST3 ABI** 的知识：
 /// `AudioBusBuffers` 的字段布局、`silence_flags` 的位序、inactive plane 可以为 null。
-/// `transfer::capture` 刻意不认识这些（它只面对 `InputBlock`），这样捕获逻辑可以
+/// `capture::capture` 刻意不认识这些（它只面对 `InputBlock`），这样捕获逻辑可以
 /// 在完全不碰宿主 ABI 的情况下单测。
 ///
 /// 【为什么不看 `silence_flags`】SDK 原文：该位"置位表示每个样本都是 0"，
@@ -404,7 +404,7 @@ pub(crate) unsafe fn capture_view<'a>(
     start: i64,
     sample_rate: f64,
     playing: bool,
-) -> crate::transfer::capture::InputBlock<'a> {
+) -> crate::capture::recorder::InputBlock<'a> {
     // SAFETY: 调用方保证 data 在本调用期间可读。
     let data = unsafe { &*data };
     let frames = data.num_samples.max(0) as usize;
@@ -427,7 +427,7 @@ pub(crate) unsafe fn capture_view<'a>(
             }
         }
     }
-    crate::transfer::capture::InputBlock {
+    crate::capture::recorder::InputBlock {
         start,
         frames,
         sample_rate,

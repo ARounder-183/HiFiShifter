@@ -21,7 +21,7 @@ export const PANEL_NOTEBOOK = "notebook";
 export const PANEL_UNDO_HISTORY = "undoHistory";
 export const PANEL_APPEARANCE = "appearance";
 export const PANEL_HOST_LINK = "hostLink";
-export const PANEL_TRANSFER = "transfer";
+export const PANEL_CAPTURE = "capture";
 
 /**
  * 记事本默认浮窗尺寸。
@@ -174,8 +174,8 @@ export function registerBuiltinPanels(): void {
     });
 
     registerPanel({
-        id: PANEL_TRANSFER,
-        titleKey: "panel_transfer",
+        id: PANEL_CAPTURE,
+        titleKey: "panel_capture",
         singleton: true,
         defaultWidth: 460,
         defaultHeight: 320,

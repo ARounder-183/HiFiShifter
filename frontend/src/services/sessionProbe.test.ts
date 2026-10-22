@@ -3,9 +3,9 @@
  * 探活的**终态判定**契约。
  *
  * 【为什么这条必须有测试】`ARA_NOT_BOUND` 被当成终态时，整页会替换成"插件会话不可用"。
- * 对 ARA 形态那是对的（宿主从不走 ARA 路径，关窗重开一万次也一样）；但 Transfer 形态
+ * 对 ARA 形态那是对的（宿主从不走 ARA 路径，关窗重开一万次也一样）；但 Capture 形态
  * **本来就不需要 ARA 文档** —— 把它也判成终态，等于让所有不支持 ARA 的宿主（Cubase 也
- * 在内）永远打不开界面，而那正是 Transfer 存在的理由。这条断言把两种形态分开钉住。
+ * 在内）永远打不开界面，而那正是 Capture 存在的理由。这条断言把两种形态分开钉住。
  */
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
@@ -37,16 +37,16 @@ describe("探活的终态判定", () => {
         expect(sessionUnavailableFrom(transient)).toBe(false);
     });
 
-    test("Transfer 形态：终态也不整页替换（它不需要 ARA 文档）", () => {
-        bootstrap("transfer");
+    test("Capture 形态：终态也不整页替换（它不需要 ARA 文档）", () => {
+        bootstrap("capture");
         expect(
             sessionUnavailableFrom(terminal),
-            "Transfer 的宿主正是会报 ARA_NOT_BOUND 的那些；判成不可用会让界面永远打不开",
+            "Capture 的宿主正是会报 ARA_NOT_BOUND 的那些；判成不可用会让界面永远打不开",
         ).toBe(false);
         expect(sessionUnavailableFrom(transient)).toBe(false);
     });
 
-    test("REAPER 形态：与非 Transfer 形态一致", () => {
+    test("REAPER 形态：与非 Capture 形态一致", () => {
         bootstrap("reaper");
         expect(sessionUnavailableFrom(terminal)).toBe(true);
     });

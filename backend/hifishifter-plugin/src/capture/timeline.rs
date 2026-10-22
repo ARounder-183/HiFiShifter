@@ -44,30 +44,30 @@
 //! 各自独立换算（段起点、段长、段内偏移），不合到一起算 —— 合起来写会掩盖
 //! "用了哪个率"这个唯一重要的问题。
 
-use super::capture::Segment;
+use super::recorder::Segment;
 use crate::render::snapshot::PlaybackSnapshot;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
 use std::ops::Range;
 
-/// Transfer 时间轴上唯一的轨道 id。
+/// Capture 时间轴上唯一的轨道 id。
 ///
-/// 【为什么只有一条轨】Transfer 捕获的是"到达本插件的混音"这一条流：宿主的输入总线
+/// 【为什么只有一条轨】Capture 捕获的是"到达本插件的混音"这一条流：宿主的输入总线
 /// 不给逐轨素材（要逐轨就得多实例）。因此一条轨是诚实的形状，而"多次录制"表达成
 /// **时间上的覆盖**（后录的胜出），不是并列的轨。
 ///
 /// 【为什么是常量而不是按宿主派生】宿主连名字都没给我们（没有原生扩展），
-/// 而且 Transfer 形态下素材只有一条流。派生一个假名字进日志与工程文件，比一个
+/// 而且 Capture 形态下素材只有一条流。派生一个假名字进日志与工程文件，比一个
 /// 诚实的固定名字更糟。
-pub(crate) const TRANSFER_TRACK_ID: &str = "transfer-track";
+pub(crate) const CAPTURE_TRACK_ID: &str = "capture-track";
 /// 轨道显示名。
-pub(crate) const TRANSFER_TRACK_NAME: &str = "Transfer";
+pub(crate) const CAPTURE_TRACK_NAME: &str = "Capture";
 /// 每个投影 clip 的外部边界淡化（秒）。
 ///
-/// 【为什么需要】Transfer 的 clip 起点/终点可能落在波形中间；硬切会产生"咔"。
+/// 【为什么需要】Capture 的 clip 起点/终点可能落在波形中间；硬切会产生"咔"。
 /// 2 ms 在听感上不可闻，却足以消除阶跃。内部段边界在 `coalesce` 之后已经不存在，
 /// 因此这个淡化只作用于真正的 take 边界。
-const TRANSFER_EDGE_FADE_SEC: f64 = 0.002;
+const CAPTURE_EDGE_FADE_SEC: f64 = 0.002;
 
 /// 投影的输入：一个 take 的 id 与它的段（按录制顺序）。
 #[derive(Clone, Copy)]
@@ -406,11 +406,11 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     // 独立 App 的"新建工程"）。留着它会多出一条永远没有片段的轨道 —— 用户会看到
     // 一个空轨，并以为录制漏了一条。
     timeline.tracks.clear();
-    timeline.selected_track_id = Some(TRANSFER_TRACK_ID.to_owned());
+    timeline.selected_track_id = Some(CAPTURE_TRACK_ID.to_owned());
     timeline.tracks.push(
         serde_json::from_value(json!({
-            "id": TRANSFER_TRACK_ID,
-            "name": TRANSFER_TRACK_NAME,
+            "id": CAPTURE_TRACK_ID,
+            "name": CAPTURE_TRACK_NAME,
             "order": 0,
             // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
             // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
@@ -424,7 +424,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
             "compose_enabled": true,
         }))
-        .expect("Transfer 轨道的必填字段是固定的"),
+        .expect("Capture 轨道的必填字段是固定的"),
     );
 
     let pieces = resolved_pieces(&tapes);
@@ -454,7 +454,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         let id = clip_id(tape.take, piece.offset);
         let name = format!("#{index} @ {start_sec:.3}s");
         // 短 clip 不能两侧各淡 2 ms（会叠在一起），按半长夹一下。
-        let edge_fade = TRANSFER_EDGE_FADE_SEC.min(length_sec / 2.0);
+        let edge_fade = CAPTURE_EDGE_FADE_SEC.min(length_sec / 2.0);
         // 【T-A1-5】2 ms 边缘淡化只加在**这条 take 的真实外沿**上。
         //
         // 【为什么】洞把 take 切成两片时，中间那条边界不是"内容开始/结束"，而是
@@ -466,7 +466,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         let at_take_tail = piece.offset + frames >= tape.frames();
         let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
             "id": id,
-            "track_id": TRANSFER_TRACK_ID,
+            "track_id": CAPTURE_TRACK_ID,
             "name": name,
             "start_sec": start_sec,
             "length_sec": length_sec,
@@ -511,7 +511,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
 /// 【为什么必须直接拷样本，而不是复用 `mix_plain_regions`】那个函数服务的是 **ARA** 通路，
 /// 它的 `start_in_modification_time` 遵循**宿主**的单位约定（见该函数的说明与
 /// `the_plain_path_converts_the_project_rate_before_indexing_the_source`）。
-/// Transfer 的区间用的是**我们自己的**单位（源速率秒），两者并不相同 —— 实测按它读时
+/// Capture 的区间用的是**我们自己的**单位（源速率秒），两者并不相同 —— 实测按它读时
 /// 会把"秒"当成"样本下标"，铺出来是一段阶梯状的垃圾：**听感上就是噪音**。
 ///
 /// 原始磁带要表达的东西极其简单："把捕获到的样本原样播一遍"。那就**直接拷样本**：
@@ -677,7 +677,7 @@ pub(crate) fn build(
 /// 段一份源会让跨段片段无法表达。带上 take 号是必须的：两次录制的内容不同，
 /// 共用一个 id 会让"上一次 take 的源"被这一次引用。
 pub(crate) fn source_id(take_id: u64) -> String {
-    format!("transfer://{take_id}")
+    format!("capture://{take_id}")
 }
 
 /// 片段 id。**稳定**：同一个 take 的同一段带内音频永远是同一个 id。
@@ -688,14 +688,14 @@ pub(crate) fn source_id(take_id: u64) -> String {
 /// `(take, 带内偏移)` 只描述"这是哪一次录制的哪一段音频"：没被覆盖的片保持 id 不变，
 /// 被覆盖的片本来就该换一个身份。
 pub(crate) fn clip_id(take_id: u64, offset: usize) -> String {
-    format!("transfer-clip-{take_id}-{offset}")
+    format!("capture-clip-{take_id}-{offset}")
 }
 
-/// 把一条**已经组装好的** Transfer 时间线里的负起点 clip 夹到工程 0。
+/// 把一条**已经组装好的** Capture 时间线里的负起点 clip 夹到工程 0。
 ///
 /// 【为什么投影之外还要这一层】旧工程/旧会话可能在本次修复之前就投影出了负起点
 /// clip。渲染器拿到负起点时只会把窗口起点夹到 0，**不会**平移源窗口；这里在
-/// Transfer 的渲染输入上做同样的裁剪（窗口 + 源偏移 + 淡入/吸附偏移同时移动），
+/// Capture 的渲染输入上做同样的裁剪（窗口 + 源偏移 + 淡入/吸附偏移同时移动），
 /// 于是即使投影这一层被绕过，raw 与 processed 也不会相差一个 pre-roll。
 ///
 /// 返回被裁剪的 clip 数（调用方据此记一次限流日志）。
@@ -840,7 +840,7 @@ fn coalesce(pieces: Vec<Piece>) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transfer::capture::{ClosedReason, SegmentLoss};
+    use crate::capture::recorder::{ClosedReason, SegmentLoss};
 
     fn segment(origin: i64, values: &[f32]) -> Segment {
         Segment {
@@ -996,7 +996,7 @@ mod tests {
 
     /// **投影 clip 的外部边界必须有微淡化。**
     ///
-    /// 【为什么这是问题一的回归】Transfer 的 clip 可能从波形中间开始；没有淡化时
+    /// 【为什么这是问题一的回归】Capture 的 clip 可能从波形中间开始；没有淡化时
     /// 播放/停止会听到阶跃。2 ms 不可闻，但足以消除"咔"。
     #[test]
     fn projected_clips_get_a_micro_fade_at_their_edges() {
@@ -1048,7 +1048,7 @@ mod tests {
         assert!(timeline.clips[1]
             .takes
             .first()
-            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1")));
+            .is_some_and(|take| take.source_path.as_deref() == Some("capture://1")));
     }
 
     /// 后来的段完全盖住早先的段 ⇒ 早先那段整个消失。
@@ -1061,7 +1061,7 @@ mod tests {
         assert!(timeline.clips[0]
             .takes
             .first()
-            .is_some_and(|take| take.source_path.as_deref() == Some("transfer://1")));
+            .is_some_and(|take| take.source_path.as_deref() == Some("capture://1")));
     }
 
     /// **补录一句只替换它盖住的那一段**（跨 take 的 later-wins）。
@@ -1103,7 +1103,7 @@ mod tests {
             .collect();
         assert_eq!(
             sources,
-            vec!["transfer://1", "transfer://2", "transfer://1"],
+            vec!["capture://1", "capture://2", "capture://1"],
             "补录只替换它盖住的那一段，两侧仍是第一次录制"
         );
         // 尾片的源偏移必须跟着被切掉的长度走（否则源窗会跨过不存在的素材）。
@@ -1144,7 +1144,7 @@ mod tests {
         assert!((take.source_start_sec - 0.0).abs() < 1e-9);
         assert!((take.source_end_sec - 0.04).abs() < 1e-9);
         // 整条带一份源。
-        assert_eq!(take.source_path.as_deref(), Some("transfer://3"));
+        assert_eq!(take.source_path.as_deref(), Some("capture://3"));
     }
 
     /// **静音留在片段里**：起唱前的静音不再把乐句切成两半。
@@ -1216,7 +1216,7 @@ mod tests {
         // 键是 `(take, 带内偏移)`：段 2 落在带上的第 10 帧。
         assert_eq!(
             ids(&first),
-            vec!["transfer-clip-42-0", "transfer-clip-42-10"]
+            vec!["capture-clip-42-0", "capture-clip-42-10"]
         );
 
         // 再录一遍（盖住后半段）：前一片的 id 不变，尾片的偏移变了 ⇒ 换 id。
@@ -1235,7 +1235,7 @@ mod tests {
             120.0,
         )
         .0;
-        assert_eq!(ids(&merged)[0], "transfer-clip-42-0", "未被覆盖的片保持 id");
+        assert_eq!(ids(&merged)[0], "capture-clip-42-0", "未被覆盖的片保持 id");
     }
 
     /// 投影出的时间线必须能被内核的渲染入口接受（源窗与几何自洽）。
@@ -1253,7 +1253,7 @@ mod tests {
             // 1:1 映射：clip 长度 == 源窗长度。
             assert!(
                 ((take.source_end_sec - take.source_start_sec) - clip.length_sec).abs() < 1e-9,
-                "Transfer 是 1:1 映射，源窗长度必须等于片段长度"
+                "Capture 是 1:1 映射，源窗长度必须等于片段长度"
             );
         }
         assert!(timeline.project_sec > 0.0);
@@ -1263,7 +1263,7 @@ mod tests {
     ///
     /// 【为什么这是"录出来是噪音"的回归测试】此前原始磁带用 ARA 通路的
     /// `mix_plain_regions` 铺片，而那个函数的 `start_in_modification_time` 遵循**宿主**的
-    /// 单位约定（工程速率秒）。Transfer 给的是**源速率秒**，于是"秒"被当成"样本下标"读：
+    /// 单位约定（工程速率秒）。Capture 给的是**源速率秒**，于是"秒"被当成"样本下标"读：
     /// 一秒之内反复读同一个样本，铺出来是阶梯状的垃圾 —— 听感上就是噪音。
     #[test]
     fn the_raw_tape_is_a_verbatim_copy_of_the_captured_samples() {
@@ -1330,19 +1330,19 @@ mod tests {
         assert_eq!(summary.covered_frames, 0, "没有任何可听内容");
     }
 
-    /// **Transfer 轨道默认开启合成** —— 否则"画完参数线不生效"是默认行为。
+    /// **Capture 轨道默认开启合成** —— 否则"画完参数线不生效"是默认行为。
     ///
     /// 【为什么这条必须钉住】`compose_enabled` 是"要不要处理这条轨"的总开关。这条轨道
     /// 只为被处理而存在（它是插件自己造的编辑轨，宿主那边没有"原声"语义要保留），
     /// 所以默认必须是开。默认关着的时候，用户画完线拿到的是一份**静默未处理**的结果。
     #[test]
-    fn the_transfer_track_processes_by_default() {
+    fn the_capture_track_processes_by_default() {
         let (timeline, _) = one(1, &[segment(0, &[0.5; 10])]);
         let track = &timeline.tracks[0];
-        assert_eq!(track.id, TRANSFER_TRACK_ID);
+        assert_eq!(track.id, CAPTURE_TRACK_ID);
         assert!(
             track.compose_enabled,
-            "Transfer 轨道默认必须开启合成，否则画完参数线不会有任何变化"
+            "Capture 轨道默认必须开启合成，否则画完参数线不会有任何变化"
         );
     }
     /// **负 origin 的段在投影时被夹到工程 0，源窗口同步前移。**
@@ -1527,12 +1527,12 @@ mod tests {
         assert_eq!(timeline.clips.len(), 2);
         assert_eq!(
             timeline.clips[0].active_take().source_path.as_deref(),
-            Some("transfer://2"),
+            Some("capture://2"),
             "被新 take 覆盖的开头来自新 take"
         );
         assert_eq!(
             timeline.clips[1].active_take().source_path.as_deref(),
-            Some("transfer://1"),
+            Some("capture://1"),
             "新 take 没走到的尾部必须保留旧 take"
         );
         assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);

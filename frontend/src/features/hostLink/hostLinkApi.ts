@@ -8,12 +8,12 @@
 // 【为什么与插件侧的导出分两组】独立 App 走 Tauri 命令（`host_link_list/open/…`），
 // 插件窗口走插件自己的命令通道（`host_link_export/status/release`，与
 // `plugin_get_apply_state` 同一条）。两者目标不同、返回形状也不同，放在一起会让
-// "这个命令在哪种形态下可用"要靠读者推断（与 `transferApi` 的取舍一致）。
+// "这个命令在哪种形态下可用"要靠读者推断（与 `captureApi` 的取舍一致）。
 import { invoke } from "../../services/invoke";
 import type { MessageKey } from "../../i18n/messages";
 
-/** 工作区的来源：ARA 插件实例、Transfer 录制、或宿主侧扩展桥接。 */
-export type HostLinkSourceKind = "ara" | "transfer" | "bridge";
+/** 工作区的来源：ARA 插件实例、Capture 录制、或宿主侧扩展桥接。 */
+export type HostLinkSourceKind = "ara" | "capture" | "bridge";
 
 /** 工作区音频的完整度读数。 */
 export interface HostLinkAudio {

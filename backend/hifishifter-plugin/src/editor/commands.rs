@@ -240,13 +240,13 @@ fn export_audio_to_file(
     };
     // 渲染输入与播放路径**同一份**（PCM + 逐 clip 参数）；
     // 导出与播放因此共用同一条混合数学（`RenderInput::mix_interleaved`）。
-    let input = if session.is_transfer() {
-        // Transfer：几何与 PCM 在捕获存储上，用户曲线在会话时间线上 —— owner 是唯一
-        // 同时够得着两边的对象（见 `ExtensionOwner::transfer_render_input`）。
+    let input = if session.is_capture() {
+        // Capture：几何与 PCM 在捕获存储上，用户曲线在会话时间线上 —— owner 是唯一
+        // 同时够得着两边的对象（见 `ExtensionOwner::capture_render_input`）。
         session
-            .transfer_owner()
-            .ok_or("the Transfer host is gone")?
-            .transfer_render_input()?
+            .capture_owner()
+            .ok_or("the Capture host is gone")?
+            .capture_render_input()?
             .3
     } else {
         let document = session
@@ -258,7 +258,7 @@ fn export_audio_to_file(
             .next()
             .ok_or("no ARA instance is bound to this document yet")?;
         let edits = document.edits.lock_or_recover().clone();
-        owner.capture_render_input(&document, &edits, false)?.1
+        owner.ara_render_input(&document, &edits, false)?.1
     };
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     *EXPORT_CANCEL
@@ -431,10 +431,10 @@ pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     payload.redo_depth = Some(redo);
     let project = session.project.lock_or_recover().clone();
     payload.project = Some(hifishifter_kernel::models::ProjectMetaPayload {
-        // 形态名字要说实话：Transfer 实例与 ARA 文档是两种东西（用户报障时这是
+        // 形态名字要说实话：Capture 实例与 ARA 文档是两种东西（用户报障时这是
         // 第一个要问的问题）。
-        name: if session.is_transfer() {
-            "HiFiShifter Transfer"
+        name: if session.is_capture() {
+            "HiFiShifter Capture"
         } else {
             "HiFiShifter ARA"
         }
@@ -616,7 +616,7 @@ pub(super) fn dispatch(
         // 然后去独立 App 里编辑"正是这个功能唯一的用法。结果由 `host_link_status` 轮询。
         "host_link_export" => {
             let owner = session
-                .transfer_owner()
+                .capture_owner()
                 .ok_or("host link needs this instance to be bound to a host document")?;
             return crate::render::link::start_export(owner);
         }

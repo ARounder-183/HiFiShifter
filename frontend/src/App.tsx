@@ -13,7 +13,7 @@ import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
-import { TransferPanel } from "./features/transfer/TransferPanel";
+import { CapturePanel } from "./features/capture/CapturePanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
@@ -96,7 +96,7 @@ import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
     PANEL_HOST_LINK,
-    PANEL_TRANSFER,
+    PANEL_CAPTURE,
     PANEL_FILE_BROWSER,
     PANEL_NOTEBOOK,
     PANEL_PARAM_EDITOR,
@@ -1535,13 +1535,13 @@ function AppInner() {
         // 事件用 `try_send`（队列满即丢），丢一个 `active:false` 就会让状态栏片
         // **永久亮着**。快照说"不在渲染"时强制熄灭；事件只负责进度与快速点亮。
         // 独立 App 不订阅：那边没有插件 actor，也没有这条丢包路径。
-        // 【Transfer 面板为什么不再自动浮出】录制的主入口现在是**传输栏上的控件**
-        // （`ActionBar` 里的 `TransferControl`），而面板退成了"设置与诊断"。自动弹一个
+        // 【Capture 面板为什么不再自动浮出】录制的主入口现在是**传输栏上的控件**
+        // （`ActionBar` 里的 `CaptureControl`），而面板退成了"设置与诊断"。自动弹一个
         // 诊断面板是噪音：用户要的是那个键，不是一屏读数。入口留在「视图」菜单里。
         //
         // （此前自动浮出的理由是"用户不知道要先播放再录制"，而那件事现在由控件自己的
         // tooltip 与状态说明承担 —— 它就在用户要点的地方。）
-        const unsubscribeTransferPanel = () => undefined;
+        const unsubscribeCapturePanel = () => undefined;
 
         const unsubscribeApply = isPluginMode()
             ? subscribePluginApply(() => {
@@ -1566,7 +1566,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
             if (unsubscribeApply) unsubscribeApply();
-            unsubscribeTransferPanel();
+            unsubscribeCapturePanel();
         };
     }, [dispatch]);
 
@@ -3739,9 +3739,9 @@ function AppInner() {
             }}
         />
     ));
-    // Transfer 面板（仅在不支持 ARA 的宿主里出现）：录制宿主播放中的音频。
+    // Capture 面板（仅在不支持 ARA 的宿主里出现）：录制宿主播放中的音频。
     // 与 ARA 面板互斥 —— 由后端 `hostKind` 决定，前端不需要自己判断。
-    setPanelRenderer(PANEL_TRANSFER, () => <TransferPanel />);
+    setPanelRenderer(PANEL_CAPTURE, () => <CapturePanel />);
     // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
     setPanelRenderer(PANEL_NOTEBOOK, () => (
         <Suspense fallback={null}>

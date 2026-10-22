@@ -102,7 +102,7 @@ fn snapshot_covered(
             .map(|take| f64::from(take.playback_rate))
             .unwrap_or(f64::from(clip.playback_rate));
         // 【为什么倒放/循环源退回"整段都算"】倒放把源窗口镜像、循环源对整份媒体取模
-        // 回绕，两种映射都比这里能表达的复杂。它们**不是**本缺陷的现场（Transfer 的
+        // 回绕，两种映射都比这里能表达的复杂。它们**不是**本缺陷的现场（Capture 的
         // 片段恒为正向、不循环），而为它们猜一个近似映射会在真正的洞上制造假的边界。
         // 退回整段 = 与改动前逐字相同，不引入新的错误方向。
         if clip.reversed || take.is_some_and(|take| take.loop_enabled) {

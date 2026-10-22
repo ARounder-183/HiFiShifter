@@ -106,8 +106,8 @@ import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
 import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
-import { PANEL_APPEARANCE, PANEL_HOST_LINK, PANEL_TRANSFER } from "../dock/registerBuiltinPanels";
-import { showsTransferEntry } from "../../features/transfer/transferEntry";
+import { PANEL_APPEARANCE, PANEL_HOST_LINK, PANEL_CAPTURE } from "../dock/registerBuiltinPanels";
+import { showsCaptureEntry } from "../../features/capture/captureEntry";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
 import { logFolderNotice } from "./logFolderNotice";
@@ -233,8 +233,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
     // 随之失效，若直接订阅 state.session，全部菜单定义会以 ≥30Hz 重建。
     const s = useAppSelector(selectMenuBarSession, shallowEqual);
-    // Transfer 录制入口的可见性（见 `transferEntry`）：插件形态下恒可见。
-    const transferInstance = showsTransferEntry();
+    // Capture 录制入口的可见性（见 `captureEntry`）：插件形态下恒可见。
+    const captureInstance = showsCaptureEntry();
     const gpuBackend = useAppSelector((state: RootState) => state.session.runtime.gpuBackend);
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
@@ -1186,18 +1186,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </DropdownMenu.Item>
                     )}
                     {/*
-                      Transfer 录制**只在插件形态**里出现。判据刻意**不**看"宿主给不给
+                      Capture 录制**只在插件形态**里出现。判据刻意**不**看"宿主给不给
                       ARA"：那要等 5 秒宽限期才落定，拿它当可见性判据会让入口在窗口开得早的
                       会话里彻底消失（用户实测）。宿主正在走 ARA 时，面板自己会说清
-                      "不需要 Transfer"（见 `transfer_status.araBound`）。
+                      "不需要 Capture"（见 `capture_status.araBound`）。
                     */}
-                    {transferInstance && (
+                    {captureInstance && (
                         <DropdownMenu.Item
                             onSelect={() =>
-                                togglePanelVisible(dispatch, store.getState, PANEL_TRANSFER)
+                                togglePanelVisible(dispatch, store.getState, PANEL_CAPTURE)
                             }
                         >
-                            {tf("menu_transfer")}
+                            {tf("menu_capture")}
                         </DropdownMenu.Item>
                     )}
                     <DropdownMenu.Separator />

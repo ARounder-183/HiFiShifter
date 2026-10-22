@@ -137,12 +137,12 @@ export function historyBackend(): "host" | "local" {
  * 【为什么需要】ARA-only 后端上片段几何只读。缺省按 `"ara_only"`（非插件模式 / 旧后端
  * 没有这个字段时），与后端 [`HostCapabilities::ara_only`] 的保守缺省一致。
  */
-export function hostKind(): "reaper" | "ara_only" | "transfer" {
-    // 【为什么三值原样透传】此前非 reaper 一律折成 `ara_only`，于是后端发的 `transfer`
+export function hostKind(): "reaper" | "ara_only" | "capture" {
+    // 【为什么三值原样透传】此前非 reaper 一律折成 `ara_only`，于是后端发的 `capture`
     // 在前端消失 —— 任何按 `hostKind` 分流的地方（几何只读、引导页、探活）都区分不出
-    // Transfer。缺省仍按最保守的 `ara_only`（旧后端没有这个字段时）。
+    // Capture。缺省仍按最保守的 `ara_only`（旧后端没有这个字段时）。
     const kind = pluginBootstrap()?.hostKind;
-    return kind === "reaper" || kind === "transfer" ? kind : "ara_only";
+    return kind === "reaper" || kind === "capture" ? kind : "ara_only";
 }
 
 /**

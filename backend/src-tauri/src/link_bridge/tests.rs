@@ -176,10 +176,10 @@ fn tampered_audio_fails_the_import() {
 #[test]
 fn admission_follows_the_source_kind() {
     assert_eq!(admission_of(SourceKind::Ara), Admission::Strict);
-    assert_eq!(admission_of(SourceKind::Transfer), Admission::Degrade);
+    assert_eq!(admission_of(SourceKind::Capture), Admission::Degrade);
     assert_eq!(admission_of(SourceKind::Bridge), Admission::Degrade);
     assert_eq!(prefix_for(SourceKind::Ara), "ARA");
-    assert_eq!(prefix_for(SourceKind::Transfer), "Transfer");
+    assert_eq!(prefix_for(SourceKind::Capture), "Capture");
     assert_eq!(prefix_for(SourceKind::Bridge), "Host");
 }
 

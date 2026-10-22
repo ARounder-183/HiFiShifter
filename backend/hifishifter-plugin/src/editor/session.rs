@@ -263,35 +263,35 @@ struct Loaded {
 /// 本会话的**时间线/参数从哪里来**。
 ///
 /// 【为什么需要一个显式来源，而不是"有没有文档"这个隐含判据】`EditorSession` 此前
-/// 只服务 ARA：文档既是时间线的来源，也是几何/撤销的权威。Transfer 形态（宿主没给
+/// 只服务 ARA：文档既是时间线的来源，也是几何/撤销的权威。Capture 形态（宿主没给
 /// ARA，音频从 VST3 输入总线录进来）**永远没有文档**，但它的编辑界面必须能用 ——
 /// 否则"录进来由插件处理"这件事根本无从发生（用户改不了音高）。
 ///
 /// 两者的差别被收敛成两件事，其余（历史、参数、分析、波形、命令分发）完全共用：
-///   * 时间线从哪来：ARA 是宿主投影；Transfer 是捕获存储。
-///   * 谁是权威：ARA 的几何/撤销属于宿主；Transfer 的一切都属于本会话。
+///   * 时间线从哪来：ARA 是宿主投影；Capture 是捕获存储。
+///   * 谁是权威：ARA 的几何/撤销属于宿主；Capture 的一切都属于本会话。
 #[derive(Clone)]
 pub(crate) enum SessionBacking {
     /// ARA 文档：时间线是宿主投影，几何/撤销由宿主拥有。
     Ara(Weak<DocumentSession>),
-    /// Transfer：没有 ARA 文档；时间线由捕获存储构建，之后完全由本会话拥有。
-    Transfer(Weak<crate::render::extension::ExtensionOwner>),
+    /// Capture：没有 ARA 文档；时间线由捕获存储构建，之后完全由本会话拥有。
+    Capture(Weak<crate::render::extension::ExtensionOwner>),
 }
 
 pub(crate) struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
     /// 【为什么不拆成两个字段】两者互斥，而且几乎每个使用点都要先回答"我有没有文档"。
-    /// 一个枚举让"Transfer 没有文档"成为**编译期可见**的事实，而不是一个可能被忽略的
+    /// 一个枚举让"Capture 没有文档"成为**编译期可见**的事实，而不是一个可能被忽略的
     /// `Option`。取值一律通过 [`Self::document`] / [`Self::require_document`]。
     backing: SessionBacking,
     pub(crate) timeline: Mutex<TimelineState>,
-    /// 组件 state 恢复出来的 Transfer 用户编辑，等待下一次时间线加载时叠上去。
+    /// 组件 state 恢复出来的 Capture 用户编辑，等待下一次时间线加载时叠上去。
     ///
     /// 【为什么放在会话上而不是 owner 上】它是"要应用进本会话时间线的数据"，
-    /// 与 `load_transfer_timeline` 的 `kept` 机制是同一件事。owner 只负责在会话
-    /// **还不存在**时把字节块暂存下来（见 `ExtensionOwner::pending_transfer_edits`）。
-    pub(super) pending_transfer_edits: Mutex<Option<super::transfer_edits::TransferEdits>>,
+    /// 与 `load_capture_timeline` 的 `kept` 机制是同一件事。owner 只负责在会话
+    /// **还不存在**时把字节块暂存下来（见 `ExtensionOwner::pending_capture_edits`）。
+    pub(super) pending_capture_edits: Mutex<Option<super::capture_edits::CaptureEdits>>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
@@ -317,7 +317,7 @@ pub(crate) struct EditorSession {
     pub(super) generation: AtomicU64,
     /// 时间线代次：`mark_dirty`（编辑）与 `publish_timeline`（发布）**任一**都推进它。
     ///
-    /// 【为什么必须是两者的并集】Transfer 的渲染版本闸以它为据，而它要回答的是
+    /// 【为什么必须是两者的并集】Capture 的渲染版本闸以它为据，而它要回答的是
     /// "渲染读的东西变了没有"。两个来源各有一半：
     ///
     /// - `mark_dirty` 覆盖"编辑"这一层语义，但它**不是**曲线改动的必要条件 ——
@@ -344,7 +344,7 @@ pub(crate) struct EditorSession {
     ///
     /// 【为什么不在 `plugin_health` 里直接读 `timeline.lock()`】探活发生在宿主 UI
     /// 线程上，而 actor 可能正在做长任务并持有时间线锁；一个只回答"几段"的状态查询
-    /// 不该排在那后面。写入点只有 `publish_timeline` / `load_transfer_timeline` /
+    /// 不该排在那后面。写入点只有 `publish_timeline` / `load_capture_timeline` /
     /// `ensure_loaded` 三处。
     clip_count: AtomicU64,
     /// 已经**放弃等待**原线分析的根轨道（见 [`RetryState::classify`] 的上限分支）。
@@ -380,9 +380,9 @@ pub(crate) struct EditorSession {
     host_selection: Mutex<Option<String>>,
     /// "下一轮 tick 重新加载时间线"的一次性请求。
     ///
-    /// 【为什么需要它】ARA 形态下宿主变化由文档版本推动（`refresh_host`）。Transfer
+    /// 【为什么需要它】ARA 形态下宿主变化由文档版本推动（`refresh_host`）。Capture
     /// 形态**没有任何宿主回调**：录制结束、切换 take、清空 take 都发生在视图层
-    /// （`transfer::commands`），而加载时间线要做文件 I/O —— 不能在那条 UI 线程上做。
+    /// （`capture::commands`），而加载时间线要做文件 I/O —— 不能在那条 UI 线程上做。
     /// 于是那里只置一个标志，由 actor 线程在下一轮自己加载。
     reload_requested: AtomicBool,
     /// 首次加载失败后的下一次重试时刻（见 `refresh_host` 的慢速重试）。
@@ -456,7 +456,7 @@ impl EditorSession {
         {
             return Err("private track parent is missing or cyclic".into());
         }
-        // Transfer：轨道是本会话自己的，父子边**就是**权威（没有宿主会覆盖它）。
+        // Capture：轨道是本会话自己的，父子边**就是**权威（没有宿主会覆盖它）。
         // 只记一次历史并通知，不走宿主分组通道 —— 那条通道写的是宿主撤销栈。
         let Some(document) = self.document() else {
             self.checkpoint_timeline(&before, HistoryOp::MoveTrack);
@@ -519,15 +519,15 @@ impl EditorSession {
         Self::new_with(SessionBacking::Ara(Arc::downgrade(document)))
     }
 
-    /// Transfer 形态的会话：宿主没给 ARA，时间线来自捕获存储。
+    /// Capture 形态的会话：宿主没给 ARA，时间线来自捕获存储。
     ///
-    /// 【为什么可以没有文档】Transfer 的全部内容都是本插件自己录进来的：没有宿主
+    /// 【为什么可以没有文档】Capture 的全部内容都是本插件自己录进来的：没有宿主
     /// 几何、没有宿主撤销栈、参数就是权威。文档在这里唯一的作用是"时间线从哪来"，
     /// 而那件事由 [`SessionBacking`] 回答。
-    pub(crate) fn new_transfer(
+    pub(crate) fn new_capture(
         owner: &Arc<crate::render::extension::ExtensionOwner>,
     ) -> Result<Arc<Self>, String> {
-        Self::new_with(SessionBacking::Transfer(Arc::downgrade(owner)))
+        Self::new_with(SessionBacking::Capture(Arc::downgrade(owner)))
     }
 
     fn new_with(backing: SessionBacking) -> Result<Arc<Self>, String> {
@@ -571,7 +571,7 @@ impl EditorSession {
         let session = Arc::new(Self {
             backing,
             timeline: Mutex::new(TimelineState::default()),
-            pending_transfer_edits: Mutex::new(None),
+            pending_capture_edits: Mutex::new(None),
             history: Mutex::new(Default::default()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
@@ -627,36 +627,36 @@ impl EditorSession {
         Ok(session)
     }
 
-    /// 本会话是否服务 Transfer 形态（没有 ARA 文档）。
-    pub(crate) fn is_transfer(&self) -> bool {
-        matches!(self.backing, SessionBacking::Transfer(_))
+    /// 本会话是否服务 Capture 形态（没有 ARA 文档）。
+    pub(crate) fn is_capture(&self) -> bool {
+        matches!(self.backing, SessionBacking::Capture(_))
     }
 
-    /// 活着的 ARA 文档；Transfer 形态恒为 `None`。
+    /// 活着的 ARA 文档；Capture 形态恒为 `None`。
     pub(super) fn document(&self) -> Option<Arc<DocumentSession>> {
         match &self.backing {
             SessionBacking::Ara(document) => document.upgrade(),
-            SessionBacking::Transfer(_) => None,
+            SessionBacking::Capture(_) => None,
         }
     }
 
-    /// 需要文档的路径用这个取；Transfer 形态给出与"文档已关闭"同一句错误。
+    /// 需要文档的路径用这个取；Capture 形态给出与"文档已关闭"同一句错误。
     fn require_document(&self) -> Result<Arc<DocumentSession>, String> {
         self.document()
             .ok_or(crate::editor::errors::DOCUMENT_CLOSED.error())
     }
 
-    /// Transfer 形态的 owner；ARA 形态恒为 `None`。
-    pub(super) fn transfer_owner(&self) -> Option<Arc<crate::render::extension::ExtensionOwner>> {
+    /// Capture 形态的 owner；ARA 形态恒为 `None`。
+    pub(super) fn capture_owner(&self) -> Option<Arc<crate::render::extension::ExtensionOwner>> {
         match &self.backing {
-            SessionBacking::Transfer(owner) => owner.upgrade(),
+            SessionBacking::Capture(owner) => owner.upgrade(),
             SessionBacking::Ara(_) => None,
         }
     }
 
     /// 时间线代次（`mark_dirty` 与 `publish_timeline` 任一都推进）。
     ///
-    /// 【用途】Transfer 渲染的版本闸。它比 `generation` 更贴近"渲染读的东西变没变"：
+    /// 【用途】Capture 渲染的版本闸。它比 `generation` 更贴近"渲染读的东西变没变"：
     /// 任何改了时间线的路径都会推进它，包括不标脏的那些（见字段说明）。
     /// `generation` 本身不再对外暴露 —— 它留在 `pending`/`applied` 那套进度读数里，
     /// 而那套读数问的是"编辑应用了没有"，与"渲染读的东西变没变"是两件事。
@@ -685,14 +685,14 @@ impl EditorSession {
         }
         *last = Some(triple);
         log::warn!(
-            "[transfer] revision: total={total} dirty={} publish={} analysis={}",
+            "[capture] revision: total={total} dirty={} publish={} analysis={}",
             triple.0,
             triple.1,
             triple.2,
         );
     }
 
-    /// 时间线是否已经加载过（Transfer 的渲染要等这一份就绪才用得上用户曲线）。
+    /// 时间线是否已经加载过（Capture 的渲染要等这一份就绪才用得上用户曲线）。
     pub(crate) fn is_loaded(&self) -> bool {
         self.loaded.lock_or_recover().initialized
     }
@@ -707,7 +707,7 @@ impl EditorSession {
     /// 【为什么不能只看 `is_loaded`】`setState` 恢复后、actor 第一次加载前，时间线
     /// 可能已经被测试/恢复路径直接写入；此时 live 编辑就是权威，不能因为"还没走
     /// 加载流程"而回落到空载荷。
-    pub(crate) fn has_live_transfer_edits(&self) -> bool {
+    pub(crate) fn has_live_capture_edits(&self) -> bool {
         let timeline = self.timeline.lock_or_recover();
         !timeline.params_by_root_track.is_empty()
             || !timeline.tracks.is_empty()
@@ -716,7 +716,7 @@ impl EditorSession {
             || !timeline.disabled_group_ids.is_empty()
     }
 
-    /// 把界面时间线还原成**音频权威**形态，供 Transfer 渲染使用。
+    /// 把界面时间线还原成**音频权威**形态，供 Capture 渲染使用。
     ///
     /// 【为什么必须还原】界面上的 `source_path` 是本会话的私有分析副本路径（波形要从
     /// 磁盘读），而 `RenderInput.sources` 按**源 id** 索引 —— 不做这一步，渲染会因为
@@ -725,25 +725,25 @@ impl EditorSession {
         self.native_timeline(self.timeline.lock_or_recover().clone())
     }
 
-    /// 把本会话里**属于用户**的那一部分时间线序列化出来（Transfer 存档用）。
+    /// 把本会话里**属于用户**的那一部分时间线序列化出来（Capture 存档用）。
     ///
     /// 【为什么只带用户内容】几何（片段、轨道集合）由捕获存储重新投影 —— 素材变了，
     /// 几何就必须跟着变。把旧几何存回去会让片段指向不存在的音频。详见
-    /// `editor::transfer_edits`。
+    /// `editor::capture_edits`。
     ///
     /// 【为什么 ARA 形态也允许调用】调用方已经按形态分支；这里不做形态判断，
     /// 是为了让"存的是不是用户内容"这一条只有一个定义。
-    pub(crate) fn serialize_transfer_edits(&self) -> Result<Vec<u8>, String> {
-        super::transfer_edits::capture(&self.timeline.lock_or_recover(), &self.namespace).encode()
+    pub(crate) fn serialize_capture_edits(&self) -> Result<Vec<u8>, String> {
+        super::capture_edits::capture(&self.timeline.lock_or_recover(), &self.namespace).encode()
     }
 
     /// 会话尚未加载时间线时，序列化**恢复载荷**。
     ///
     /// 【为什么需要】`setState` 恢复出来的曲线先暂存在这里；用户重开工程后如果
-    /// 没打开插件窗口就再次保存，`serialize_transfer_edits()` 会读到一份空的
+    /// 没打开插件窗口就再次保存，`serialize_capture_edits()` 会读到一份空的
     /// `self.timeline`，把恢复出来的曲线覆盖成默认值。
-    pub(crate) fn serialize_pending_transfer_edits(&self) -> Option<Vec<u8>> {
-        self.pending_transfer_edits
+    pub(crate) fn serialize_pending_capture_edits(&self) -> Option<Vec<u8>> {
+        self.pending_capture_edits
             .lock_or_recover()
             .as_ref()
             .and_then(|edits| edits.encode().ok())
@@ -751,22 +751,22 @@ impl EditorSession {
 
     /// 暂存从组件 state 恢复出来的用户内容，等下一次时间线加载时叠上去。
     ///
-    /// 【为什么只暂存、不立刻应用】`load_transfer_timeline` 会用投影重建整份时间线；
+    /// 【为什么只暂存、不立刻应用】`load_capture_timeline` 会用投影重建整份时间线；
     /// 在它之前写进 `self.timeline` 的内容要么被重建覆盖，要么与 `kept` 机制打架。
     /// 暂存下来、由加载路径统一叠加，是唯一不会丢失的时序。
-    pub(crate) fn stash_serialized_transfer_edits(&self, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn stash_serialized_capture_edits(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() {
             return Ok(());
         }
-        let edits = super::transfer_edits::TransferEdits::decode(bytes)?;
-        *self.pending_transfer_edits.lock_or_recover() = Some(edits);
+        let edits = super::capture_edits::CaptureEdits::decode(bytes)?;
+        *self.pending_capture_edits.lock_or_recover() = Some(edits);
         Ok(())
     }
 
     /// 暂存里的根轨道 id（测试用）。
     #[cfg(test)]
-    pub(crate) fn staged_transfer_edit_roots(&self) -> Vec<String> {
-        self.pending_transfer_edits
+    pub(crate) fn staged_capture_edit_roots(&self) -> Vec<String> {
+        self.pending_capture_edits
             .lock_or_recover()
             .as_ref()
             .map(|edits| edits.params_by_root_track.keys().cloned().collect())
@@ -775,19 +775,19 @@ impl EditorSession {
 
     /// 宿主撤销栈是否在途（"宿主正在写，别插队"）。
     ///
-    /// 【为什么 Transfer 恒为 false】宿主撤销栈是有原生扩展 / ARA 写口的后端才有的
-    /// 概念，Transfer 的每一次写入都是本会话自己的。文档缺席同理不是理由：ARA 下
-    /// "文档消失"意味着会话已结束，而 Transfer 根本没有文档。
+    /// 【为什么 Capture 恒为 false】宿主撤销栈是有原生扩展 / ARA 写口的后端才有的
+    /// 概念，Capture 的每一次写入都是本会话自己的。文档缺席同理不是理由：ARA 下
+    /// "文档消失"意味着会话已结束，而 Capture 根本没有文档。
     fn host_write_pending(&self) -> bool {
         match self.document() {
             Some(document) => document.host_undo.pending.load(Ordering::Acquire),
-            None => !self.is_transfer(),
+            None => !self.is_capture(),
         }
     }
 
     /// 请求"下一轮 tick 重新加载时间线"。
     ///
-    /// 由视图层的 `transfer_*` 命令在录制结束 / 切换 take / 清空之后调用。加载要读
+    /// 由视图层的 `capture_*` 命令在录制结束 / 切换 take / 清空之后调用。加载要读
     /// 捕获存储并物化分析副本（文件 I/O），不能在那条 UI 线程上做。
     pub(crate) fn request_reload(&self) {
         self.reload_requested.store(true, Ordering::Release);
@@ -808,8 +808,8 @@ impl EditorSession {
         if self.closed.load(Ordering::Acquire) {
             return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
         }
-        // 【为什么 Transfer 允许没有文档】ARA 形态下 route 租约回答的是"这个视图属于
-        // **这份文档**吗"（`EditorLink::authorize` 最后比的正是文档身份）。Transfer
+        // 【为什么 Capture 允许没有文档】ARA 形态下 route 租约回答的是"这个视图属于
+        // **这份文档**吗"（`EditorLink::authorize` 最后比的正是文档身份）。Capture
         // 没有文档，视图的归属由 `EditorLink` 自己的 owner 决定 —— 那条校验在
         // `webview` 建链时已经做过一次，这里不必（也无法）再比文档。
         let document = self.document();
@@ -990,10 +990,10 @@ impl EditorSession {
                 // 采样率变化），而那些时刻没有任何用户动作。没有这一条，已经录好的段会
                 // 一直留在捕获里：界面显示"尚未录制"、素材却在内存里，而下一次
                 // `start()` 会把它们覆盖掉 —— "到点自动停"于是变成"到点丢掉"。
-                if let Some(owner) = session.transfer_owner() {
-                    owner.transfer().service();
+                if let Some(owner) = session.capture_owner() {
+                    owner.capture().service();
                     // 【为什么原始磁带也要在这里补】它此前只在**用户动作**上发布
-                    // （`transfer_stop` / 清空 / 删 take 都走 `request_transfer_reload`）。
+                    // （`capture_stop` / 清空 / 删 take 都走 `request_capture_reload`）。
                     // 而 take 还有第二条来源：宿主重开工程时从组件 state 的清单恢复
                     // （`restore_manifest`）。那种会话里没有任何用户动作，原始磁带就
                     // 一份都没有 —— 于是输出仲裁落到"透传宿主原声"：用户播放时听到的
@@ -1002,12 +1002,12 @@ impl EditorSession {
                     // 幂等：素材代次没变时它只做一次原子比较。
                     owner.sync_raw_tape();
                     // 一次性诊断：宿主给了位置却从来没给过输入（见该方法的说明）。
-                    owner.transfer().report_missing_input_once();
+                    owner.capture().report_missing_input_once();
                     // 宿主链接的回写监视。与补缓冲同一个理由挂在会话 actor 上：
                     // actor 由**会话**创建，与"插件窗口开没开"无关（见 `render::link::poll`）。
                     crate::render::link::poll(&owner);
                     // 【为什么这里补一次调度】音频线程发现"有素材但处理结果不是当前代次"
-                    // 时只置一个原子（`ExtensionOwner::transfer_stage` 的 `render_wanted`）。
+                    // 时只置一个原子（`ExtensionOwner::capture_stage` 的 `render_wanted`）。
                     // 真正的合成仍由本 actor 的渲染任务执行 —— 它自带在途检查、取消与
                     // 重试预算。此前合成只由用户动作触发，一次票据事故就能让它无限期
                     // 停摆，而界面照样显示素材已就绪（用户报障："永远是直通"）。
@@ -1023,27 +1023,27 @@ impl EditorSession {
                     // 一次即可回答“0.7 s 是一个大块还是很多 kPlaying=0 的小块”。
                     if owner.take_trace_wanted() {
                         log::info!(
-                            "[transfer] suspicious start-window block trace {}",
+                            "[capture] suspicious start-window block trace {}",
                             owner.block_diagnostics_json(64)
                         );
                     }
-                    // 【为什么这些读数挂在这里】`[transfer] pass` / `[transfer] clock` /
-                    // `[transfer] ctx` 此前只由 `ExtensionOwner::prepare()` 驱动，而
+                    // 【为什么这些读数挂在这里】`[capture] pass` / `[capture] clock` /
+                    // `[capture] ctx` 此前只由 `ExtensionOwner::prepare()` 驱动，而
                     // VST3 宿主**在播放期间根本不会调 prepare()** —— 40 分钟的现场日志里
                     // 这三行一行都没有，于是每一轮排查都只能靠"用户再听一遍"。
                     //
                     // 会话 actor 是唯一"与窗口开没开无关、又不在音频线程上"的周期点：
-                    // 它在录制结束时就存在（`arm_transfer_rendering` 建它），并且每轮
+                    // 它在录制结束时就存在（`arm_capture_rendering` 建它），并且每轮
                     // 都会跑。音频线程只写原子，格式化留在这里。
                     owner.log_click_report();
-                    owner.log_transfer_context();
-                    owner.log_transfer_report();
+                    owner.log_capture_context();
+                    owner.log_capture_report();
                     owner.log_buffer_audit();
                     // 【B4】版本推进的归因。上面几行回答"输出了什么"，这一行回答
                     // "谁让它重算的" —— 后者此前只能靠猜。
                     session.log_revision_bumps();
                 }
-                // Transfer：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
+                // Capture：录制结束 / 切换 take / 清空由视图层置位（那里是 UI 线程，
                 // 不能做文件 I/O）。加载在这里消费。
                 if session.reload_requested.swap(false, Ordering::AcqRel) {
                     if let Err(error) = session.ensure_loaded(true) {
@@ -1154,8 +1154,8 @@ impl EditorSession {
                     let mutates = super::commands::mutates_audio(&request.command);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Some(link) = &request.link {
-                            // 【为什么 Transfer 跳过租约复核】租约是"视图属于这份文档"的
-                            // 凭据（`authorize` 比的是文档身份）；Transfer 没有文档，
+                            // 【为什么 Capture 跳过租约复核】租约是"视图属于这份文档"的
+                            // 凭据（`authorize` 比的是文档身份）；Capture 没有文档，
                             // 视图身份由下面的 view 表比对回答。
                             if let Some(document) = session.document() {
                                 if Some(link.authorize(&document)?) != lease {
@@ -1264,8 +1264,8 @@ impl EditorSession {
         Ok((document, edit, model, projection))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
-        if self.is_transfer() {
-            return self.start_transfer_render(ticket);
+        if self.is_capture() {
+            return self.start_capture_render(ticket);
         }
         let (document, edit, model, projection) = self.prepare_apply()?;
         let generation = self.generation.load(Ordering::Acquire);
@@ -1318,17 +1318,17 @@ impl EditorSession {
         Ok(())
     }
 
-    /// Transfer 形态的渲染：把**带用户曲线的时间线**交给 owner 的 Transfer 渲染准备。
+    /// Capture 形态的渲染：把**带用户曲线的时间线**交给 owner 的 Capture 渲染准备。
     ///
-    /// 【为什么参数在这里能生效】Transfer 的时间线**就是**参数权威（没有宿主会重建它），
+    /// 【为什么参数在这里能生效】Capture 的时间线**就是**参数权威（没有宿主会重建它），
     /// 于是 `RenderInput.timeline` 里带着 `params_by_root_track`；`clip_parameters` 为空
     /// 时内核直接按时间线合成（见 `render/input.rs::mix_interleaved` 的第一支）。
     /// ARA 之所以需要参数图谱（`atlas.project_local`），是因为它的时间线每次都被宿主
-    /// 重建、clip 身份由 region key 派生 —— Transfer 没有那个问题。
+    /// 重建、clip 身份由 region key 派生 —— Capture 没有那个问题。
     ///
     /// 【为什么要票据复核】渲染期间用户又改了参数 ⇒ 本次结果作废。与 ARA 的
     /// `apply_workspace_edits_with_progress` 的收尾复核同一条语义。
-    fn start_transfer_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
+    fn start_capture_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
@@ -1339,8 +1339,8 @@ impl EditorSession {
         if self.requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
-        let Some(owner) = self.transfer_owner() else {
-            return Err("transfer host is gone".into());
+        let Some(owner) = self.capture_owner() else {
+            return Err("capture host is gone".into());
         };
         let generation = self.generation.load(Ordering::Acquire);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1351,7 +1351,7 @@ impl EditorSession {
             json!({"active":true,"progress":0.0,"target":"background"}),
         );
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
-            owner.transfer_prepare_job(job_cancel.clone())?;
+            owner.capture_prepare_job(job_cancel.clone())?;
             if current.closed.load(Ordering::Acquire) {
                 return Ok(());
             }
@@ -1360,7 +1360,7 @@ impl EditorSession {
             {
                 // 有更新的编辑在等着，本次结果已被后来者取代：让 actor 重新排一次。
                 current.render_requested.store(true, Ordering::Release);
-                return Err("transfer render superseded".into());
+                return Err("capture render superseded".into());
             }
             Ok(())
         })?;
@@ -1566,8 +1566,8 @@ impl EditorSession {
     }
 
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
-        if self.is_transfer() {
-            return self.load_transfer_timeline(force);
+        if self.is_capture() {
+            return self.load_capture_timeline(force);
         }
         let document = self.require_document()?;
         // GUI清单有独立代次：粘贴/删除可以先于ARA模型回调，不能被模型缓存早退吞掉。
@@ -1790,7 +1790,7 @@ impl EditorSession {
         Ok(())
     }
 
-    /// Transfer 形态的加载：几何来自捕获存储，参数保留本会话已编辑的曲线。
+    /// Capture 形态的加载：几何来自捕获存储，参数保留本会话已编辑的曲线。
     ///
     /// 【为什么每次都重建几何】捕获存储只有"活动 take"这一个版本量，没有 ARA 那样的
     /// 多级代次。重建的代价被 `materialize` 的内容寻址摊平（同一份 PCM 直接复用已有的
@@ -1799,24 +1799,24 @@ impl EditorSession {
     ///
     /// 【为什么参数要**保留**】`params_by_root_track` 是用户在这个会话里做的编辑，而捕获
     /// 存储产出的时间线只有几何：整份替换会把曲线清掉（那正是"改了音高，一录就又没了"
-    /// 那类不可见错误）。轨道身份（`transfer-track`）跨 take 稳定，因此按键保留是安全的。
-    fn load_transfer_timeline(&self, force: bool) -> Result<(), String> {
-        let owner = self.transfer_owner().ok_or("transfer host is gone")?;
+    /// 那类不可见错误）。轨道身份（`capture-track`）跨 take 稳定，因此按键保留是安全的。
+    fn load_capture_timeline(&self, force: bool) -> Result<(), String> {
+        let owner = self.capture_owner().ok_or("capture host is gone")?;
         // 【为什么版本是"素材代次"而不是 take 号】投影跨全部 take（后录的胜出），
         // 删掉一个较早的 take 同样会改变时间线 —— 而那一刻 take 号没变。
-        let version = owner.transfer().revision();
+        let version = owner.capture().revision();
         {
             let loaded = self.loaded.lock_or_recover();
             if loaded.initialized && !force && loaded.model == version {
                 return Ok(());
             }
         }
-        let (timeline, sources) = owner.transfer().session_timeline();
+        let (timeline, sources) = owner.capture().session_timeline();
         // 【为什么恢复载荷要并进 `kept`】它必须与"本会话已编辑的曲线"走同一条规整
         // （`ensure_params_for_root`）。直接 insert 会绕过那一步，曲线长度对不上工程时
         // 界面会画到末尾之外。存档只在工程打开时到达，此时 `kept` 为空，因此让 `kept`
         // 覆盖存档是安全的：真同时存在时，用户当前的编辑更权威。
-        let mut restored = self.pending_transfer_edits.lock_or_recover().take();
+        let mut restored = self.pending_capture_edits.lock_or_recover().take();
         // 【为什么在这里绑定命名空间】载荷里的键是稳定的（不带 `hfs-ui-...-`），而
         // 下面 `rewrite_ids` 会把投影时间线改写成**当前会话**的命名空间。不绑定，
         // `kept.get(root)` 永远 miss —— 那正是"重开工程参数全丢"的直接原因。
@@ -1876,7 +1876,7 @@ impl EditorSession {
         // 曲线已随 `kept` 过完规整；其余用户内容（音阶 / Tempo Map / 私有分组 /
         // 轨道设置）只在这里叠一次 —— 它们在投影里没有对应来源。
         if let Some(edits) = restored.as_ref() {
-            super::transfer_edits::apply_project_state(&mut timeline, edits);
+            super::capture_edits::apply_project_state(&mut timeline, edits);
         }
         // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
         // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
@@ -1885,7 +1885,7 @@ impl EditorSession {
             params.pitch_orig_key = None;
             params.dyn_orig_key = None;
         }
-        // 宿主音乐读数是**只读**的宿主权威：Transfer 没有文档，读 owner 自己的时钟。
+        // 宿主音乐读数是**只读**的宿主权威：Capture 没有文档，读 owner 自己的时钟。
         if let Some(clock) = owner.clock.get() {
             if let Some(tempo) = clock.tempo() {
                 if tempo.is_finite() && tempo > 0.0 {
@@ -1918,7 +1918,7 @@ impl EditorSession {
             // 关掉了合成 / 换了分析算法"会在下一次录制或删 take 之后被静默重置 ——
             // 而那两件事都会触发一次重新加载。轨道级设置与选择同性质：它们是**用户的
             // 选择**，不属于"素材的几何"。只在同名轨道确实存在过时才带过，因此
-            // "第一次创建"仍然拿到投影给的默认值（合成开启，见 `transfer/timeline.rs`）。
+            // "第一次创建"仍然拿到投影给的默认值（合成开启，见 `capture/timeline.rs`）。
             for track in &mut timeline.tracks {
                 let Some(old) = previous.tracks.iter().find(|t| t.id == track.id) else {
                     continue;
@@ -1948,7 +1948,7 @@ impl EditorSession {
             scope: version,
             audio: version,
             reverse_paths,
-            projection: format!("transfer:{version}"),
+            projection: format!("capture:{version}"),
         };
         *self.error.lock_or_recover() = None;
         *self.render_error.lock_or_recover() = None;
@@ -2347,20 +2347,20 @@ impl EditorSession {
         // 保存冷恢复没有本地generation，原线完成仍须重应用，不能永久沿旧源F0快照。
         true
     }
-    /// 本会话的宿主时钟：ARA 形态是文档的，Transfer 形态是 owner 自己的。
+    /// 本会话的宿主时钟：ARA 形态是文档的，Capture 形态是 owner 自己的。
     ///
     /// 【为什么必须有这一条】`transport()` 与 `playback_state()` 此前只读**文档**时钟，
-    /// 而 Transfer 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
+    /// 而 Capture 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
     /// 钉在 0，且永远认为宿主没在播放。而宿主位置其实一直写着（`observe_transport` 在
     /// **每个音频块**上写 owner 的时钟），只是没有任何一条命令去读它。
     ///
     /// 【为什么 owner 的时钟在这里就一定有值】它由 `setupProcessing` 装载
-    /// （见 `ExtensionOwner::arm_transfer_rendering` 的调用点），而那是宿主在任何
+    /// （见 `ExtensionOwner::arm_capture_rendering` 的调用点），而那是宿主在任何
     /// `process` 之前的确定性时刻 —— 与窗口开没开无关。
     fn host_clock(&self) -> Option<Arc<crate::render::transport::TransportClock>> {
         match self.document() {
             Some(document) => Some(document.clock.clone()),
-            None => self.transfer_owner()?.clock.get().cloned(),
+            None => self.capture_owner()?.clock.get().cloned(),
         }
     }
 
@@ -2393,7 +2393,7 @@ impl EditorSession {
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
             // 【为什么如实报而不是恒真】这个字段的语义是"上面那个位置来自宿主"。
-            // Transfer 形态下时钟来自 owner（同样是宿主写入的），因此也为真；
+            // Capture 形态下时钟来自 owner（同样是宿主写入的），因此也为真；
             // 两条都没有时它是假 —— 前端据此知道那个 0 不是"宿主在 0"。
             "host_authoritative":clock.is_some()})
     }
@@ -2562,7 +2562,7 @@ impl EditorSession {
         {
             return Ok(());
         }
-        // Transfer：没有"宿主的 region 参数"可投影 —— 时间线里的曲线本来就是权威，
+        // Capture：没有"宿主的 region 参数"可投影 —— 时间线里的曲线本来就是权威，
         // 不存在"选中的那条素材另有一份曲线"这件事。
         let Some(document) = self.document() else {
             return Ok(());
@@ -2638,7 +2638,7 @@ impl EditorSession {
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
             // `ara_only`，前端按形态分流的地方（录制面板的自动浮出）拿不到真实答案。
             // 状态快照每 250ms 轮询一次，是现成的、不依赖时序的通道。
-            "mode":if self.is_transfer(){"transfer"}else{"ara"},
+            "mode":if self.is_capture(){"capture"}else{"ara"},
             "generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
             // 【为什么把"在等分析"单独报出来】它是**唯一会持续很久**的一步（几分钟素材的
             // 神经分析本来就慢），而它此前被 `pending` 一句话盖住 —— 用户无法区分
@@ -2686,15 +2686,15 @@ impl ParamHost for EditorSession {
     fn publish_timeline(&self, timeline: TimelineState) {
         // 【为什么在分支之前】这是"时间线变了"的**唯一**统一信号：所有曲线写入
         // （set_param_frames / restore / convert_mix_param / set_static_param /
-        // stretch_track_linked_params）与撤销重做都会走到这里。Transfer 的渲染版本闸
+        // stretch_track_linked_params）与撤销重做都会走到这里。Capture 的渲染版本闸
         // 以它为据，因此不标脏的改动也不会被跳过（见字段说明）。
         self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
         self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
-        // Transfer：没有宿主可写回 —— 参数就是权威，落在本会话的时间线上。
-        // 只需要排一次重渲染（owner 的 Transfer 渲染准备会读这份时间线）。
-        if self.is_transfer() {
+        // Capture：没有宿主可写回 —— 参数就是权威，落在本会话的时间线上。
+        // 只需要排一次重渲染（owner 的 Capture 渲染准备会读这份时间线）。
+        if self.is_capture() {
             self.render_requested.store(true, Ordering::Release);
             return;
         }
@@ -2993,10 +2993,10 @@ pub(crate) mod tests {
     ///
     /// 【为什么这条是那个 bug 的回归】形态要等 `setActive` 之后 `ARA_BINDING_GRACE`
     /// （5 秒）才落定，而**窗口打开的那一刻必然早于它**。此前 `editor_session()` 要求
-    /// `mode() == Transfer`，于是探活拿到 `ARA_NOT_BOUND`（终态）⇒ 整页替换成
+    /// `mode() == Capture`，于是探活拿到 `ARA_NOT_BOUND`（终态）⇒ 整页替换成
     /// "插件会话不可用"，且不可恢复 —— 非 ARA 宿主永远打不开界面。
     #[test]
-    fn an_instance_that_never_bound_ara_is_served_by_the_transfer_session() {
+    fn an_instance_that_never_bound_ara_is_served_by_the_capture_session() {
         let owner = Arc::new(ExtensionOwner::default());
         assert_eq!(
             owner.mode(),
@@ -3006,7 +3006,7 @@ pub(crate) mod tests {
         let first = owner
             .editor_session()
             .expect("未绑定的实例必须有可用的编辑器会话");
-        assert!(first.is_transfer());
+        assert!(first.is_capture());
         assert!(
             Arc::ptr_eq(&first, &owner.editor_session().unwrap()),
             "同一实例必须是同一份会话"
@@ -3014,21 +3014,21 @@ pub(crate) mod tests {
         first.close();
     }
 
-    /// **Transfer 形态的宿主时钟来自 owner，不是文档。**
+    /// **Capture 形态的宿主时钟来自 owner，不是文档。**
     ///
     /// 【为什么这是回归测试】`transport()` / `playback_state()` 此前只读**文档**时钟，
-    /// 而 Transfer 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
+    /// 而 Capture 形态没有文档 —— 于是两者恒定返回 `(0, false)`：插件 UI 的播放光标
     /// 钉在 0，且永远认为宿主没在播放。而宿主位置其实一直在写（`observe_transport` 在
     /// **每个音频块**上写 owner 的时钟），只是没有任何一条命令去读它。
     #[test]
-    fn a_transfer_session_reads_the_host_clock_instead_of_a_document() {
+    fn a_capture_session_reads_the_host_clock_instead_of_a_document() {
         let owner = Arc::new(ExtensionOwner::default());
         owner.set_setup_sample_rate(48_000.0);
         owner.note_binding_window_closed_without_ara();
         // 时钟的装载点与 `setupProcessing` 里调的是同一个函数。
-        owner.arm_transfer_rendering();
-        let session = owner.transfer_session().unwrap();
-        assert!(session.is_transfer());
+        owner.arm_capture_rendering();
+        let session = owner.capture_session().unwrap();
+        assert!(session.is_capture());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert_eq!(session.transport(), (0.0, false), "还没收到宿主上下文");
             // 时钟**已经装载**（`setupProcessing` 会做这件事），只是还没收到任何上下文：
@@ -3073,23 +3073,23 @@ pub(crate) mod tests {
         }
     }
 
-    /// 建一个**真的录过一段**的 Transfer 实例：没有 ARA 文档，素材来自输入总线。
-    fn transfer_owner_with_a_take() -> Arc<ExtensionOwner> {
+    /// 建一个**真的录过一段**的 Capture 实例：没有 ARA 文档，素材来自输入总线。
+    fn capture_owner_with_a_take() -> Arc<ExtensionOwner> {
         let owner = Arc::new(ExtensionOwner::default());
         owner.set_setup_sample_rate(48_000.0);
-        // 绑定窗口关闭且没有绑定 ⇒ 形态是 Transfer（宿主没给 ARA）。
+        // 绑定窗口关闭且没有绑定 ⇒ 形态是 Capture（宿主没给 ARA）。
         owner.note_binding_window_closed_without_ara();
         assert_eq!(
             owner.mode(),
-            crate::render::extension::InstanceMode::Transfer,
+            crate::render::extension::InstanceMode::Capture,
             "这个夹具的全部意义就是宿主没给 ARA"
         );
-        let transfer = owner.transfer();
-        transfer.note_project_rate(48_000.0);
-        transfer.start().unwrap();
+        let capture = owner.capture();
+        capture.note_project_rate(48_000.0);
+        capture.start().unwrap();
         let samples: &'static [f32] = Box::leak(vec![0.4_f32; 4096].into_boxed_slice());
         for index in 0..4_i64 {
-            transfer.on_block(crate::transfer::InputBlock {
+            capture.on_block(crate::capture::InputBlock {
                 start: index * 4096,
                 frames: 4096,
                 sample_rate: 48_000.0,
@@ -3097,24 +3097,24 @@ pub(crate) mod tests {
                 playing: true,
             });
         }
-        transfer.stop().unwrap();
+        capture.stop().unwrap();
         owner
     }
 
-    /// **Transfer 形态没有 ARA 文档，但界面必须能用。**
+    /// **Capture 形态没有 ARA 文档，但界面必须能用。**
     ///
     /// 【为什么这条必须有】`EditorSession` 此前只能从 `DocumentSession` 创建，于是非 ARA
     /// 宿主里每一条会话级命令都返回 `ARA_NOT_BOUND` —— 界面整页报"会话不可用"，用户既录
     /// 不了也改不了音高。这条钉住四件事：会话存在、时间线来自捕获存储、用户曲线在重投影
     /// 之后仍然在、渲染用的时间线回到源 id 域。
     #[test]
-    fn a_transfer_session_edits_without_any_ara_document() {
-        let owner = transfer_owner_with_a_take();
-        let session = owner.editor_session().expect("Transfer 形态必须有会话");
+    fn a_capture_session_edits_without_any_ara_document() {
+        let owner = capture_owner_with_a_take();
+        let session = owner.editor_session().expect("Capture 形态必须有会话");
         // 【为什么要包 catch_unwind】断言失败会 unwind，而会话的 worker 线程只在
         // `close()` 里 join —— 不兜住就会留下一个活着的线程与进程，整套测试挂住。
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            transfer_session_body(&session);
+            capture_session_body(&session);
         }));
         session.close();
         if let Err(payload) = outcome {
@@ -3122,17 +3122,17 @@ pub(crate) mod tests {
         }
     }
 
-    /// Transfer 的渲染输入：带**用户曲线**的时间线 + 捕获存储的 PCM，且与导出共用。
+    /// Capture 的渲染输入：带**用户曲线**的时间线 + 捕获存储的 PCM，且与导出共用。
     ///
-    /// 【为什么这条必须存在】播放（`transfer_prepare_job`）与导出
+    /// 【为什么这条必须存在】播放（`capture_prepare_job`）与导出
     /// （`export_audio_to_file`）都取这一份。若其中一条退回"只有几何的捕获存储时间线"，
     /// 用户就会听到处理后的声音、导出未处理的（或反过来）—— 而那是最难排查的一类不一致。
     #[test]
-    fn transfer_render_input_carries_the_user_curves_for_both_playback_and_export() {
-        let owner = transfer_owner_with_a_take();
+    fn capture_render_input_carries_the_user_curves_for_both_playback_and_export() {
+        let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, with_curves, input) = owner.transfer_render_input().unwrap();
+        let (take, edit, with_curves, input) = owner.capture_render_input().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
         assert!(
             with_curves,
@@ -3148,7 +3148,7 @@ pub(crate) mod tests {
                 .source_path
                 .as_deref()
                 .unwrap()
-                .starts_with("transfer://"),
+                .starts_with("capture://"),
             "渲染时间线必须在源 id 域（`RenderInput.sources` 按 id 索引）"
         );
         assert!(!input.sources.is_empty(), "素材必须随输入一起给出");
@@ -3158,7 +3158,7 @@ pub(crate) mod tests {
         let before = edit;
         session.mark_dirty();
         assert_ne!(
-            owner.transfer_render_input().unwrap().1,
+            owner.capture_render_input().unwrap().1,
             before,
             "参数写入必须推进渲染版本"
         );
@@ -3182,13 +3182,13 @@ pub(crate) mod tests {
             let owner = Arc::new(ExtensionOwner::default());
             owner.set_setup_sample_rate(48_000.0);
             owner.note_binding_window_closed_without_ara();
-            let transfer = owner.transfer();
-            transfer.note_project_rate(48_000.0);
-            transfer.start().unwrap();
+            let capture = owner.capture();
+            capture.note_project_rate(48_000.0);
+            capture.start().unwrap();
             let frames = 48_000_usize;
             let samples: &'static [f32] = Box::leak(vec![0.4_f32; frames].into_boxed_slice());
             for index in 0..i64::from(seconds) {
-                transfer.on_block(crate::transfer::InputBlock {
+                capture.on_block(crate::capture::InputBlock {
                     start: index * frames as i64,
                     frames,
                     sample_rate: 48_000.0,
@@ -3196,7 +3196,7 @@ pub(crate) mod tests {
                     playing: true,
                 });
             }
-            transfer.stop().unwrap();
+            capture.stop().unwrap();
             let session = owner.editor_session().unwrap();
             session.ensure_loaded(true).unwrap();
             let root = session
@@ -3247,16 +3247,16 @@ pub(crate) mod tests {
     /// **画完参数线之后，播放必须真的听到处理结果 —— 由 actor 自己收敛。**
     ///
     /// 【为什么这条必须存在】前面两条只钉到"渲染输入里带着曲线"，而用户的判据是
-    /// **听到**。中间还有三步会各自静默失效：分析门禁（`start_transfer_render` 早退）、
+    /// **听到**。中间还有三步会各自静默失效：分析门禁（`start_capture_render` 早退）、
     /// 版本闸（跳过这次合成）、输出仲裁（发布出来的不是处理结果）。
     ///
     /// 【为什么必须让**真 actor** 跑】自动应用的重试与放弃全部发生在 actor 循环里
     /// （`RetryState::classify` 的 2 秒判定、60 秒上限、`settled`）。手工一步步调
-    /// `start_transfer_render` 会把那一整套绕过去 —— 而用户报障的正是"卡在正在自动
+    /// `start_capture_render` 会把那一整套绕过去 —— 而用户报障的正是"卡在正在自动
     /// 应用"：那恰恰是 `settled` 之后的状态。所以这里只投一条真实命令，剩下交给 actor。
     #[test]
     fn a_drawn_curve_reaches_the_processed_output() {
-        let owner = transfer_owner_with_a_take();
+        let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             session.ensure_loaded(true).unwrap();
@@ -3268,7 +3268,7 @@ pub(crate) mod tests {
                 .next()
                 .unwrap()
                 .clone();
-            assert!(owner.transfer().has_material(), "夹具必须真的录到了素材");
+            assert!(owner.capture().has_material(), "夹具必须真的录到了素材");
             // 与前端完全同一条路：排队 → actor 分发 → `params::set_param_frames`。
             // 这就是"用户画了一条音高线"，而 actor 会因此自己排一次自动渲染。
             let (reply, reply_rx) = mpsc::channel();
@@ -3301,14 +3301,14 @@ pub(crate) mod tests {
             let deadline = Instant::now() + Duration::from_secs(180);
             while Instant::now() < deadline
                 && (session.state()["pending"] == true
-                    || owner.transfer_output()
-                        != crate::render::extension::TransferOutput::Processed)
+                    || owner.capture_output()
+                        != crate::render::extension::CaptureOutput::Processed)
             {
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(
-                owner.transfer_output(),
-                crate::render::extension::TransferOutput::Processed,
+                owner.capture_output(),
+                crate::render::extension::CaptureOutput::Processed,
                 "画完参数线之后必须听到处理结果，而不是直通/原始磁带"
             );
             assert_eq!(
@@ -3332,16 +3332,16 @@ pub(crate) mod tests {
     /// "画完参数线不生效"。这里按同一形状喂（只发布），把这条钉住。
     #[test]
     fn a_published_timeline_change_advances_the_render_version_without_marking_dirty() {
-        let owner = transfer_owner_with_a_take();
+        let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let before = owner.transfer_render_input().unwrap().1;
+            let before = owner.capture_render_input().unwrap().1;
             // 模拟 `convert_mix_param` 的收尾：发布，但不标脏。
             let snapshot = session.timeline.lock_or_recover().clone();
             session.publish_timeline(snapshot);
             assert_ne!(
-                owner.transfer_render_input().unwrap().1,
+                owner.capture_render_input().unwrap().1,
                 before,
                 "发布过的时间线必须推进渲染版本，否则这类改动会被版本闸静默跳过"
             );
@@ -3356,7 +3356,7 @@ pub(crate) mod tests {
     ///
     /// 【为什么这是"永远是直通"的回归测试】`request_reload` 此前自增 `submitted`，
     /// 而 `processed` 只在 `Job::Request` 到达且 `mutates_audio` 为真时兑付
-    /// （`transfer_*` 不在那个名单里，它也不产生 `Job::Request`）。于是
+    /// （`capture_*` 不在那个名单里，它也不产生 `Job::Request`）。于是
     /// `processed < submitted` 恒真 ⇒ actor 每 1ms 空转一次、`start_render` 永远
     /// 走不到 ⇒ 一次合成都排不出去 ⇒ 用户听到的永远是直通。
     #[test]
@@ -3398,12 +3398,12 @@ pub(crate) mod tests {
         session.close();
     }
 
-    fn transfer_session_body(session: &Arc<EditorSession>) {
+    fn capture_session_body(session: &Arc<EditorSession>) {
         session.ensure_loaded(true).unwrap();
 
         let (root, path) = {
             let timeline = session.timeline.lock_or_recover();
-            assert_eq!(timeline.tracks.len(), 1, "Transfer 只有一条自建轨道");
+            assert_eq!(timeline.tracks.len(), 1, "Capture 只有一条自建轨道");
             assert_eq!(timeline.clips.len(), 1, "录进来的音频必须出现在时间线上");
             assert_eq!(
                 timeline.params_by_root_track.len(),
@@ -3454,19 +3454,19 @@ pub(crate) mod tests {
         let render = session.render_timeline().unwrap();
         let id = render.clips[0].source_path.clone().unwrap();
         assert!(
-            id.starts_with("transfer://"),
+            id.starts_with("capture://"),
             "渲染时间线的源引用必须是源 id：{id}"
         );
         assert_ne!(id, path);
 
         // 没有文档时播放读数、传输读数、发布都仍然可用（界面每 250ms 问一次）。
         assert_eq!(session.playback_state()["ok"], true);
-        assert!(!session.transport().1, "Transfer 没有宿主播放控制");
+        assert!(!session.transport().1, "Capture 没有宿主播放控制");
         let current = session.timeline.lock_or_recover().clone();
         session.publish_timeline(current);
         assert!(
             session.error.lock_or_recover().is_none(),
-            "Transfer 的发布不得因为没有文档而失败：{:?}",
+            "Capture 的发布不得因为没有文档而失败：{:?}",
             session.error.lock_or_recover()
         );
 
@@ -3476,7 +3476,7 @@ pub(crate) mod tests {
             "get_timeline_state",
             serde_json::json!({}),
         )
-        .expect("Transfer 形态下时间线命令必须可用");
+        .expect("Capture 形态下时间线命令必须可用");
         assert!(
             payload["clips"]
                 .as_array()

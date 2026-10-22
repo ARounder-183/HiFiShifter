@@ -14,7 +14,7 @@ pub(crate) mod resources;
 pub(crate) mod routing;
 pub(crate) mod session;
 mod temp_sweep;
-pub(crate) mod transfer_edits;
+pub(crate) mod capture_edits;
 mod view;
 #[cfg(windows)]
 mod webview;

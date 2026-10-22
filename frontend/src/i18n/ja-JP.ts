@@ -2099,7 +2099,7 @@ export const jaJP = {
     host_link_item_option: "{label} · {directory}",
     host_link_unreadable_option: "{directory} · {error}",
     host_link_source_ara: "ARA",
-    host_link_source_transfer: "Transfer",
+    host_link_source_capture: "キャプチャ",
     host_link_source_bridge: "ブリッジ",
     host_link_commit_unsupported: "このホストは編集を受け付けません。変更はローカルに留まります。",
     host_link_geometry_local_only:
@@ -2230,81 +2230,81 @@ export const jaJP = {
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
-    // ── Transfer（ARA 非対応ホストでの録音）────────────────────────────
-    panel_transfer: "Transfer",
-    menu_transfer: "ホストから Transfer...",
-    transfer_status_empty: "未録音",
-    transfer_status_standby: "再生待ち",
-    transfer_field_peak: "ピーク",
-    transfer_field_peak_value: "{left} / {right}",
-    transfer_guide_standby:
+    // ── キャプチャ（ARA 非対応ホストで、ホストの再生音を取り込む）────────────
+    panel_capture: "キャプチャ",
+    menu_capture: "ホストからキャプチャ...",
+    capture_status_empty: "未録音",
+    capture_status_standby: "再生待ち",
+    capture_field_peak: "ピーク",
+    capture_field_peak_value: "{left} / {right}",
+    capture_guide_standby:
         "準備完了。ホストを再生してください —— 再生と同時に録音が始まります。停止は一時停止で、再び再生すると同じテイクの続きを録ります。",
-    transfer_limit_warning: "録音上限まで残り 10 秒未満です。自動的に停止します。",
-    transfer_stopped_limit: "録音上限に達したため自動的に停止しました。",
-    transfer_stopped_no_spare:
+    capture_limit_warning: "録音上限まで残り 10 秒未満です。自動的に停止します。",
+    capture_stopped_limit: "録音上限に達したため自動的に停止しました。",
+    capture_stopped_no_spare:
         "メモリが追いつかず自動的に停止しました。上限を短くするか古いテイクを消してください。",
-    transfer_stopped_rate_changed: "ホストのサンプルレートが変わったため停止しました。",
-    transfer_stopped_budget_full:
+    capture_stopped_rate_changed: "ホストのサンプルレートが変わったため停止しました。",
+    capture_stopped_budget_full:
         "PCM のメモリ予算を使い切ったため停止しました。古いテイクを消してください。",
-    transfer_stopped_jump: "再生位置がジャンプしました。その先の内容は連続していません。",
-    transfer_option_limit: "1 回の録音上限（秒）",
-    transfer_option_limit_hint:
+    capture_stopped_jump: "再生位置がジャンプしました。その先の内容は連続していません。",
+    capture_option_limit: "1 回の録音上限（秒）",
+    capture_option_limit_hint:
         "上限に達すると自動停止し、録れた内容は保持されます。上限が大きいほどメモリを使います。",
-    transfer_option_limit_seconds: "{seconds} 秒",
-    transfer_option_limit_unlimited: "無制限",
-    transfer_output_processed: "処理結果",
-    transfer_output_raw: "生録音（合成中）",
-    transfer_output_passthrough: "ホストの原音",
-    transfer_output_pending: "素材は準備済み、合成待ち",
-    transfer_output_recording: "ホストをスルー中",
-    transfer_now_playing: "再生中: {what}",
-    transfer_status_recording: "録音中",
-    transfer_status_ready: "録音済み",
-    transfer_start: "録音",
-    transfer_stop: "停止",
-    transfer_clear: "すべてのテイクを破棄",
-    transfer_cancel_hint: "この録音を破棄する（テイクを残さない）",
-    transfer_guide_body:
+    capture_option_limit_seconds: "{seconds} 秒",
+    capture_option_limit_unlimited: "無制限",
+    capture_output_processed: "処理結果",
+    capture_output_raw: "生録音（合成中）",
+    capture_output_passthrough: "ホストの原音",
+    capture_output_pending: "素材は準備済み、合成待ち",
+    capture_output_recording: "ホストをスルー中",
+    capture_now_playing: "再生中: {what}",
+    capture_status_recording: "録音中",
+    capture_status_ready: "録音済み",
+    capture_start: "録音",
+    capture_stop: "停止",
+    capture_clear: "すべてのテイクを破棄",
+    capture_cancel_hint: "この録音を破棄する（テイクを残さない）",
+    capture_guide_body:
         "ホストで再生を開始してから「録音」を押してください。プラグインは通ってきた音声を取り込み、ホストのタイムラインに合わせます。",
-    transfer_guide_recording:
+    capture_guide_recording:
         "録音中です。再生位置を動かしたりシークしたりしないでください。終わったら「停止」を押します。録音中はホストの原音が聞こえ、停止すると処理結果に戻ります。",
-    transfer_guide_ready:
+    capture_guide_ready:
         "録音できました。録音した範囲からホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
-    transfer_guide_offline:
+    capture_guide_offline:
         "このホストはオフライン書き出しにも対応しています。オフラインは二段階です。「録音」を押して一度書き出すと取り込み（この回は無音）、録音を解除してもう一度書き出すと処理結果が得られます。",
-    transfer_host_not_playing: "ホストが再生していません。録音されません。",
-    transfer_not_applicable_ara: "このホストは ARA で音声を提供しています。Transfer は不要です。",
-    transfer_cannot_capture:
+    capture_host_not_playing: "ホストが再生していません。録音されません。",
+    capture_not_applicable_ara: "このホストは ARA で音声を提供しています。キャプチャは不要です。",
+    capture_cannot_capture:
         "このホストは再生位置をプラグインに渡さないため、音声をタイムラインに合わせられません。ホスト側の編集機能を使うか、ARA 対応のホストをご利用ください。",
-    transfer_no_input_audio:
+    capture_no_input_audio:
         "このホストは再生位置は渡しますが、入力バスに音声を送っていません — 処理したいトラックにプラグインを挿し、そのトラックの音声がプラグインにルーティングされているか確認してください。",
-    transfer_no_audio_arriving:
+    capture_no_audio_arriving:
         "ホストは再生中ですが、このインスタンスには音声が届いていません — プラグインが目的のトラックに挿さっているか、そのトラックがプラグインにルーティングされているか確認してください。",
-    transfer_field_no_audio: "音声が届いていません",
-    transfer_unsupported_precision:
+    capture_field_no_audio: "音声が届いていません",
+    capture_unsupported_precision:
         "このホストはプラグインを 64 ビット精度で処理しています。プラグインはそのサンプルを読めないため無音のままです。ホストの処理精度を 32 ビット浮動小数点に切り替えてください。",
-    transfer_field_precision: "ホストが 64 ビット",
-    transfer_recording_progress: "録音済み {seconds} 秒",
-    transfer_recording_elapsed: "{seconds}秒",
-    transfer_field_segments: "セグメント数",
-    transfer_field_gaps: "ジャンプ回数",
-    transfer_field_spares: "残りバッファ",
-    transfer_field_takes: "テイク数",
-    transfer_host_playing: "ホストが再生中",
-    transfer_field_waiting_host: "ホストの再生待ち",
-    transfer_recorded_silent:
+    capture_field_precision: "ホストが 64 ビット",
+    capture_recording_progress: "録音済み {seconds} 秒",
+    capture_recording_elapsed: "{seconds}秒",
+    capture_field_segments: "セグメント数",
+    capture_field_gaps: "ジャンプ回数",
+    capture_field_spares: "残りバッファ",
+    capture_field_takes: "テイク数",
+    capture_host_playing: "ホストが再生中",
+    capture_field_waiting_host: "ホストの再生待ち",
+    capture_recorded_silent:
         "{seconds} 秒録音しましたが、入力が無音でした — このトラックの音声が本当にプラグインに届いているか確認してください。",
-    transfer_option_monitor: "録音中に入力をモニター",
-    transfer_option_monitor_hint: "録音中の音が聞こえます。オフにすると録音中は無音になります。",
-    transfer_option_outside: "録音範囲の外はホストの音声を再生",
-    transfer_option_outside_hint:
+    capture_option_monitor: "録音中に入力をモニター",
+    capture_option_monitor_hint: "録音中の音が聞こえます。オフにすると録音中は無音になります。",
+    capture_option_outside: "録音範囲の外はホストの音声を再生",
+    capture_option_outside_hint:
         "録音した範囲だけが処理結果に置き換わり、それ以外はそのままです。オフにすると範囲外は無音になります。",
-    transfer_take_label: "テイク {id} · {clips} クリップ",
-    transfer_take_span: "{start} 秒 – {end} 秒",
-    transfer_take_delete: "削除",
-    transfer_yes: "あり",
-    transfer_no: "なし",
-    transfer_diagnostics:
+    capture_take_label: "テイク {id} · {clips} クリップ",
+    capture_take_span: "{start} 秒 – {end} 秒",
+    capture_take_delete: "削除",
+    capture_yes: "あり",
+    capture_no: "なし",
+    capture_diagnostics:
         "ホストが提供：再生位置 {context} · 入力音声 {input} · オフライン書き出し {offline}",
     plugin_apply_analyzing: "ピッチを解析中...",
     plugin_apply_analyzing_hint:

@@ -221,7 +221,7 @@ pub(crate) fn open(
 fn prefix_for(source_kind: SourceKind) -> &'static str {
     match source_kind {
         SourceKind::Ara => "ARA",
-        SourceKind::Transfer => "Transfer",
+        SourceKind::Capture => "Capture",
         SourceKind::Bridge => "Host",
     }
 }
@@ -318,7 +318,7 @@ struct PreparedImport {
 fn admission_of(source_kind: SourceKind) -> Admission {
     match source_kind {
         SourceKind::Ara => Admission::Strict,
-        SourceKind::Transfer | SourceKind::Bridge => Admission::Degrade,
+        SourceKind::Capture | SourceKind::Bridge => Admission::Degrade,
     }
 }
 

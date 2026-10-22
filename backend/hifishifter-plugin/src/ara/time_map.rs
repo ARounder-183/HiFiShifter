@@ -299,7 +299,7 @@ mod tests {
 
     /// 倒放曲线迁移：同一源位置在新旧倒放布局间继承，不按项目位置猜。
     #[test]
-    fn reversed_maps_transfer_curves_by_source_position() {
+    fn reversed_maps_capture_curves_by_source_position() {
         let old = SourceTimeMap::piecewise(vec![
             TimeAnchor {
                 project_sec: 0.0,

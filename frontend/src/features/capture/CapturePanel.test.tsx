@@ -1,5 +1,5 @@
 /**
- * Transfer 设置与诊断面板的渲染契约。
+ * Capture 设置与诊断面板的渲染契约。
  *
  * 【为什么值得一条冒烟测试】这个面板整块重写过（从"录制面板"变成"设置与诊断"），
  * 而它只在**非 ARA 宿主**里出现 —— 那是用户报障最多的形态，也是自动化最难覆盖的形态。
@@ -19,9 +19,9 @@ vi.mock("../../services/invoke", () => ({
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { enUS } from "../../i18n/en-US";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
-import { resetTransferStoreForTests } from "./transferStore";
-import { TransferPanel } from "./TransferPanel";
-import type { TransferStatus } from "./transferApi";
+import { resetCaptureStoreForTests } from "./captureStore";
+import { CapturePanel } from "./CapturePanel";
+import type { CaptureStatus } from "./captureApi";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,7 +36,7 @@ const LOCALE_KEY = "hifishifter.locale";
 let container: HTMLDivElement;
 let root: Root;
 
-function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
+function status(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
     return {
         state: "ready",
         recording: null,
@@ -75,7 +75,7 @@ function status(overrides: Partial<TransferStatus> = {}): TransferStatus {
 
 beforeEach(() => {
     invokeMock.mockReset();
-    resetTransferStoreForTests();
+    resetCaptureStoreForTests();
     localStorage.setItem(LOCALE_KEY, "en-US");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     container = document.createElement("div");
@@ -96,7 +96,7 @@ async function render() {
         root.render(
             <AppThemeProvider>
                 <I18nProvider>
-                    <TransferPanel />
+                    <CapturePanel />
                 </I18nProvider>
             </AppThemeProvider>,
         );
@@ -113,31 +113,31 @@ function text(): string {
 test("列出全部 take，并允许删除其中一个", async () => {
     invokeMock.mockResolvedValue(status());
     await render();
-    expect(text()).toContain(enUS.transfer_field_takes);
+    expect(text()).toContain(enUS.capture_field_takes);
     expect(text()).toContain("2");
     const deletes = Array.from(container.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes(enUS.transfer_take_delete),
+        b.textContent?.includes(enUS.capture_take_delete),
     );
     expect(deletes.length, "每个 take 都要能删").toBe(2);
     await act(async () => deletes[1].click());
     await act(async () => {
         await Promise.resolve();
     });
-    expect(invokeMock).toHaveBeenCalledWith("transfer_delete_take", 2);
+    expect(invokeMock).toHaveBeenCalledWith("capture_delete_take", 2);
 });
 
 test("两个行为选项都可切换，且把补丁发出去", async () => {
     invokeMock.mockResolvedValue(status());
     await render();
-    expect(text()).toContain(enUS.transfer_option_monitor);
-    expect(text()).toContain(enUS.transfer_option_outside);
+    expect(text()).toContain(enUS.capture_option_monitor);
+    expect(text()).toContain(enUS.capture_option_outside);
     const switches = Array.from(container.querySelectorAll("button[role='switch']"));
     expect(switches.length).toBe(2);
     await act(async () => (switches[0] as HTMLButtonElement).click());
     await act(async () => {
         await Promise.resolve();
     });
-    expect(invokeMock).toHaveBeenCalledWith("transfer_set_options", { monitor: false });
+    expect(invokeMock).toHaveBeenCalledWith("capture_set_options", { monitor: false });
 });
 
 test("录到了但没有内容时说清是输入静音", async () => {
@@ -157,11 +157,11 @@ test("录到了但没有内容时说清是输入静音", async () => {
     );
     await render();
     // "录到了 2.0 秒，但输入是静音…"
-    expect(text()).toContain(enUS.transfer_recorded_silent.replace("{seconds}", "2.0"));
+    expect(text()).toContain(enUS.capture_recorded_silent.replace("{seconds}", "2.0"));
 });
 
-test("ARA 宿主里说不需要 Transfer，而不是显示一个空面板", async () => {
+test("ARA 宿主里说不需要 Capture，而不是显示一个空面板", async () => {
     invokeMock.mockResolvedValue(status({ araBound: true, takes: [], takeCount: 0 }));
     await render();
-    expect(text()).toContain(enUS.transfer_not_applicable_ara);
+    expect(text()).toContain(enUS.capture_not_applicable_ara);
 });

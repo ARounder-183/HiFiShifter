@@ -1,4 +1,4 @@
-//! Transfer 音频的落盘：sidecar 文件。
+//! Capture 音频的落盘：sidecar 文件。
 //!
 //! # 为什么不能嵌进组件 state
 //!
@@ -34,7 +34,7 @@
 //! 而 WAV 的头部字段（fmt 块、块对齐、容器位深）带来的是一整类"写对了但读错了"
 //! 的问题。这里的格式只有五个字段，且有测试钉住。
 
-use super::capture::{ClosedReason, Segment, SegmentLoss};
+use super::recorder::{ClosedReason, Segment, SegmentLoss};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -61,12 +61,12 @@ const DIGEST_LEN: usize = 32;
 /// 变成 2^63，而"按声明的长度分配"就是一次必然的 OOM。上限取 2 小时 @ 384 kHz。
 const MAX_FRAMES: u64 = 384_000 * 3600 * 2;
 
-/// sidecar 目录：本机数据目录下的 `transfer/`。
+/// sidecar 目录：本机数据目录下的 `capture/`。
 ///
 /// 【为什么不是配置目录】配置目录会随用户配置漫游/同步，而这是可能上百 MB 的缓存；
 /// 把它放进同步目录是给用户的网络与配额添麻烦。
 pub(crate) fn default_dir() -> Option<PathBuf> {
-    hifishifter_kernel::config_location::default_local_data_dir().map(|dir| dir.join("transfer"))
+    hifishifter_kernel::config_location::default_local_data_dir().map(|dir| dir.join("capture"))
 }
 
 /// 一个 take 的 sidecar 路径。
@@ -133,25 +133,25 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
 pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if bytes.len() < MAGIC.len() + 4 + 4 + DIGEST_LEN {
-        return Err(format!("{}: truncated transfer sidecar", path.display()));
+        return Err(format!("{}: truncated capture sidecar", path.display()));
     }
     // 摘要校验必须在**任何解析之前**：先信内容再验摘要，等于让损坏的字段参与解析。
     let split = bytes.len() - DIGEST_LEN;
     let (payload, digest) = bytes.split_at(split);
     if blake3::hash(payload).as_bytes() != digest {
         return Err(format!(
-            "{}: transfer sidecar digest mismatch (truncated or corrupted)",
+            "{}: capture sidecar digest mismatch (truncated or corrupted)",
             path.display()
         ));
     }
     let mut cursor = Cursor::new(payload);
     if cursor.take(8)? != MAGIC {
-        return Err(format!("{}: not a transfer sidecar", path.display()));
+        return Err(format!("{}: not a capture sidecar", path.display()));
     }
     let version = cursor.u32()?;
     if !(1..=VERSION).contains(&version) {
         return Err(format!(
-            "{}: unsupported transfer sidecar version {version}",
+            "{}: unsupported capture sidecar version {version}",
             path.display()
         ));
     }
@@ -190,7 +190,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
                         path.display()
                     ));
                 }
-                if coverage_len >= super::capture::COVERAGE_SLOTS {
+                if coverage_len >= super::recorder::COVERAGE_SLOTS {
                     // 超出版本允许的槽位：整段都算录到。
                     coverage_len = 0;
                     break;
@@ -276,7 +276,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
 pub(crate) fn remove(path: &Path) {
     if path.exists() {
         if let Err(error) = trash::delete(path) {
-            log::warn!("[transfer] could not trash {}: {error}", path.display());
+            log::warn!("[capture] could not trash {}: {error}", path.display());
         }
     }
 }
@@ -297,7 +297,7 @@ impl<'a> Cursor<'a> {
             .at
             .checked_add(count)
             .filter(|end| *end <= self.bytes.len())
-            .ok_or("transfer sidecar ends mid-field")?;
+            .ok_or("capture sidecar ends mid-field")?;
         let slice = &self.bytes[self.at..end];
         self.at = end;
         Ok(slice)

@@ -109,13 +109,13 @@ fn the_host_reads_the_mask_through_the_real_query_interface_path() {
 fn the_mask_covers_every_field_the_plugin_consumes() {
     let mask = process_context_requirements();
 
-    // kPlaying / kCycleActive：`audio_process_inner` 的停播判据与 Transfer 录制的前提。
+    // kPlaying / kCycleActive：`audio_process_inner` 的停播判据与 Capture 录制的前提。
     // 【没有这一位，kPlaying 是未定义的，不是"不准"】—— SDK 只在插件声明
     // kNeedTransportState 时才保证 kPlaying 有意义。
     assert_ne!(
         mask & NEED_TRANSPORT_STATE,
         0,
-        "kPlaying 是停播判据与 Transfer 录制的前提，必须声明"
+        "kPlaying 是停播判据与 Capture 录制的前提，必须声明"
     );
     // kTempoValid / kTimeSigValid：`TransportClock::tempo()` / `time_signature()` 的唯一来源。
     assert_ne!(mask & NEED_TEMPO, 0, "TransportClock 的 BPM 依赖这一位");
@@ -131,7 +131,7 @@ fn the_mask_covers_every_field_the_plugin_consumes() {
         0,
         "循环回卷的旁证依赖 continuousTimeSamples"
     );
-    // 音乐位置与循环：Transfer 的区间对齐与"只录循环区间"。
+    // 音乐位置与循环：Capture 的区间对齐与"只录循环区间"。
     assert_ne!(mask & NEED_PROJECT_TIME_MUSIC, 0);
     assert_ne!(mask & NEED_BAR_POSITION_MUSIC, 0);
     assert_ne!(mask & NEED_CYCLE_MUSIC, 0);

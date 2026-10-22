@@ -23,15 +23,15 @@ import { invoke, invokeErrorKind } from "./invoke";
  * 【为什么瞬时失败不算】"编辑器尚未连上处理器"这类是**暂时**的：组件创建与绑定之间必然
  * 经历它，正常挂载后 App 自己会重试（见 `editor/mod.rs` 的分类测试）。
  *
- * 【为什么 Transfer 形态不看终态】`ARA_NOT_BOUND` 对 ARA 形态是终态（宿主从不走 ARA
- * 路径，关窗重开一万次也一样），但 Transfer 形态**本来就不需要 ARA 文档**：它的编辑会话
+ * 【为什么 Capture 形态不看终态】`ARA_NOT_BOUND` 对 ARA 形态是终态（宿主从不走 ARA
+ * 路径，关窗重开一万次也一样），但 Capture 形态**本来就不需要 ARA 文档**：它的编辑会话
  * 由捕获存储供时间线（`EditorSession::SessionBacking`）。把这条码当终态会让所有不支持
- * ARA 的宿主（Cubase 也在内）永远停在"会话不可用"整页 —— 而那正是 Transfer 存在的理由。
- * 其它终态（组件已销毁、实例已关闭）在 Transfer 下仍由闸门正常反映。
+ * ARA 的宿主（Cubase 也在内）永远停在"会话不可用"整页 —— 而那正是 Capture 存在的理由。
+ * 其它终态（组件已销毁、实例已关闭）在 Capture 下仍由闸门正常反映。
  */
 export function sessionUnavailableFrom(error: unknown): boolean {
     if (invokeErrorKind(error) !== "terminal") return false;
-    return hostKind() !== "transfer";
+    return hostKind() !== "capture";
 }
 
 /** 探活结论。`unavailable` ⇒ 渲染整页提示而不是 App。 */

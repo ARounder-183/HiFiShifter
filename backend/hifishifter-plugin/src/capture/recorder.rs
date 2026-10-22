@@ -71,7 +71,7 @@ pub(crate) enum ClosedReason {
     Jump,
     /// 用户停止。
     Stopped,
-    /// 到达用户设定的单次录制上限（`TransferOptions::max_duration_sec`）。
+    /// 到达用户设定的单次录制上限（`CaptureOptions::max_duration_sec`）。
     ///
     /// 【为什么它必须是一个**结束**原因】上限的意义就是"不要超过它"：到点必须真的停，
     /// 而不是记一笔然后继续录。它是本文件里唯一由**用户设置**触发的中止，因此也是唯一
@@ -201,7 +201,7 @@ pub(crate) struct Segment {
     ///
     /// 【为什么留这个读数】"读了旧文件"与"新录了一段"在音频上无法区分，但在排查上
     /// 完全不同：前者意味着这次播放的覆盖形状来自一份**用错判据写出来的存档**，
-    /// 而我们已经主动忽略了那段数据。它出现在 `[transfer] take` 行里，用户报障时
+    /// 而我们已经主动忽略了那段数据。它出现在 `[capture] take` 行里，用户报障时
     /// 一眼就能看出"这段素材是旧版本录的"。
     pub migrated_from_v4: bool,
     /// 该段 PCM 占用的全局预算额度。
@@ -423,7 +423,7 @@ impl TransportPhase {
 ///   * "宿主读数没动，位置由我们按块长数出来"（真·计数器）；
 ///   * "宿主读数在动，但因为锁存了偏移，标签仍是我们"（宿主说的）。
 ///
-/// 两者在读数上不可区分，于是 `[transfer] clock` 的 `carried=` 在任何会话里都接近
+/// 两者在读数上不可区分，于是 `[capture] clock` 的 `carried=` 在任何会话里都接近
 /// 100% —— 它既不能证明宿主钉住过位置，也不能证明没有。标签粘住之后，下游每一条判据
 /// （1.5 s 容差、锁存偏移）都建立在一个"不知道这一块到底是宿主给的还是我们数的"
 /// 基础之上。现在：**位置由计数器给出时，`counted_blocks` 单独计数，而标签永远是
@@ -746,7 +746,7 @@ pub(crate) enum CaptureOutcome {
     LimitReached,
 }
 
-/// 捕获侧诊断快照（`transfer_status` 与诊断包读取）。
+/// 捕获侧诊断快照（`capture_status` 与诊断包读取）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CaptureDiagnostics {
     pub preroll_frames_dropped: u64,
@@ -2372,7 +2372,7 @@ impl Capture {
                     // 用户让宿主循环播放，唱一遍、再唱一遍。每一圈都是**新内容**，
                     // 丢掉第二圈等于把用户刚唱的那一遍扔了。另起一段之后，覆盖关系交给
                     // 时间线视图按"后来的胜出"解决（`timeline.rs`），默认留下最后一圈 ——
-                    // 这正是 Melodyne 式 Transfer 的默认语义。
+                    // 这正是 Melodyne 式 Capture 的默认语义。
                     self.backwards = self.backwards.saturating_add(1);
                     SegmentLoss::Backward
                 }

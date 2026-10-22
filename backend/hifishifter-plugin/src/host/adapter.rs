@@ -11,10 +11,10 @@
 //! |---|---|---|
 //! | 有 | （无所谓） | [`HostBackend::Native`] |
 //! | 无 | 有 | [`HostBackend::AraOnly`] |
-//! | 无 | 无 | [`HostBackend::Transfer`] |
+//! | 无 | 无 | [`HostBackend::Capture`] |
 //!
 //! 第二、三行的**唯一**差别是"片段几何从哪来"：ARA 交给我们 region 几何，
-//! Transfer 一个片段都不给。混成一个"没有原生扩展"会让这两种形态无法区分，
+//! Capture 一个片段都不给。混成一个"没有原生扩展"会让这两种形态无法区分，
 //! 而它们的用户可见行为完全不同（一个有完整时间线，一个要先录制）。
 //!
 //! 【为什么这里不出现 REAPER 名字】本模块属于**通用层**（`host/reaper/` 之外）。它
@@ -25,7 +25,7 @@ use hifishifter_kernel::editor::host::{EditorHost, HostCapabilities, HostKind};
 use std::sync::Arc;
 
 use super::ara_only::AraOnlyHost;
-use super::transfer::TransferHost;
+use super::capture::CaptureHost;
 use super::NativeHost;
 
 /// 当前生效的编辑后端。
@@ -35,17 +35,17 @@ pub(crate) enum HostBackend {
     Native(Arc<NativeHost>),
     /// 宿主只提供 ARA 2.0。
     AraOnly(AraOnlyHost),
-    /// 宿主既没有原生扩展、也没绑定 ARA：素材靠 Transfer 从输入总线捕获。
-    Transfer(TransferHost),
+    /// 宿主既没有原生扩展、也没绑定 ARA：素材靠 Capture 从输入总线捕获。
+    Capture(CaptureHost),
 }
 
 impl HostBackend {
     /// 按"宿主有没有给出原生扩展"选择后端。
     ///
-    /// 【为什么这里仍退到 `AraOnly` 而不是 `Transfer`】本函数在 `initialize` 期间被调用，
+    /// 【为什么这里仍退到 `AraOnly` 而不是 `Capture`】本函数在 `initialize` 期间被调用，
     /// 而那时 ARA 绑定窗口**还开着**（绑定允许发生在 `setActive` 之前）。此刻断言
     /// "没有 ARA"是早的 —— 多数支持 ARA 的宿主正是在这段时间里完成绑定。
-    /// 真正的 Transfer 判定由 `ExtensionOwner::host_backend` 在窗口关闭后给出。
+    /// 真正的 Capture 判定由 `ExtensionOwner::host_backend` 在窗口关闭后给出。
     pub(crate) fn from_native(native: Option<Arc<NativeHost>>) -> Self {
         match native {
             Some(host) => HostBackend::Native(host),
@@ -57,7 +57,7 @@ impl HostBackend {
         match self {
             HostBackend::Native(_) => HostKind::Reaper,
             HostBackend::AraOnly(host) => host.kind(),
-            HostBackend::Transfer(host) => host.kind(),
+            HostBackend::Capture(host) => host.kind(),
         }
     }
 
@@ -65,7 +65,7 @@ impl HostBackend {
         match self {
             HostBackend::Native(host) => host.capabilities(),
             HostBackend::AraOnly(host) => host.capabilities(),
-            HostBackend::Transfer(host) => host.capabilities(),
+            HostBackend::Capture(host) => host.capabilities(),
         }
     }
 
@@ -74,9 +74,9 @@ impl HostBackend {
         match self {
             HostBackend::Native(host) => host.app_name(),
             HostBackend::AraOnly(host) => host.app_name(),
-            // Transfer 后端不知道宿主名：宿主没给原生扩展，也就没有"宿主自称什么"
+            // Capture 后端不知道宿主名：宿主没给原生扩展，也就没有"宿主自称什么"
             // 这一读数。返回 `None` 而不是猜一个 —— 猜出来的名字会进日志与诊断包。
-            HostBackend::Transfer(_) => None,
+            HostBackend::Capture(_) => None,
         }
     }
 
@@ -84,7 +84,7 @@ impl HostBackend {
         match self {
             HostBackend::Native(host) => host.app_version(),
             HostBackend::AraOnly(host) => host.app_version(),
-            HostBackend::Transfer(_) => None,
+            HostBackend::Capture(_) => None,
         }
     }
 
@@ -95,7 +95,7 @@ impl HostBackend {
     pub(crate) fn native(&self) -> Option<&Arc<NativeHost>> {
         match self {
             HostBackend::Native(host) => Some(host),
-            HostBackend::AraOnly(_) | HostBackend::Transfer(_) => None,
+            HostBackend::AraOnly(_) | HostBackend::Capture(_) => None,
         }
     }
 }
@@ -116,22 +116,22 @@ mod tests {
 
     /// 三种后端的能力必须**互不相同**，否则"后端是谁"这个问题没有实际含义。
     ///
-    /// 【为什么值得一条用例】最容易犯的错是让 Transfer 与 ARA-only 报同一套能力
+    /// 【为什么值得一条用例】最容易犯的错是让 Capture 与 ARA-only 报同一套能力
     /// （例如从 `ara_only()` 复制一份），那样 `HostKind` 的区分就只是装饰：
     /// 前端读到 `clipGeometry: true` 就会去渲染一份不存在的宿主几何。
     #[test]
-    fn the_transfer_backend_is_distinguishable_from_ara_only() {
+    fn the_capture_backend_is_distinguishable_from_ara_only() {
         let ara_only = HostBackend::AraOnly(AraOnlyHost::new());
-        let transfer = HostBackend::Transfer(TransferHost::new());
-        assert_ne!(ara_only.kind(), transfer.kind());
+        let capture = HostBackend::Capture(CaptureHost::new());
+        assert_ne!(ara_only.kind(), capture.kind());
         assert_ne!(
             ara_only.capabilities(),
-            transfer.capabilities(),
+            capture.capabilities(),
             "两者唯一的差别是片段几何来源，但这一差别必须在能力位里可见"
         );
         assert!(ara_only.capabilities().clip_geometry);
-        assert!(!transfer.capabilities().clip_geometry);
-        assert!(transfer.capabilities().transfer);
-        assert!(!ara_only.capabilities().transfer);
+        assert!(!capture.capabilities().clip_geometry);
+        assert!(capture.capabilities().capture);
+        assert!(!ara_only.capabilities().capture);
     }
 }

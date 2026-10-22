@@ -2085,7 +2085,7 @@ export const enUS = {
     host_link_item_option: "{label} · {directory}",
     host_link_unreadable_option: "{directory} · {error}",
     host_link_source_ara: "ARA",
-    host_link_source_transfer: "Transfer",
+    host_link_source_capture: "Capture",
     host_link_source_bridge: "Bridge",
     host_link_commit_unsupported: "This host does not accept edits; changes stay local.",
     host_link_geometry_local_only:
@@ -2213,84 +2213,84 @@ export const enUS = {
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",
-    // ── Transfer（不支持 ARA 的宿主里录制宿主播放）──────────────────────
-    panel_transfer: "Transfer",
-    menu_transfer: "Transfer from Host...",
-    transfer_status_empty: "Nothing recorded",
-    transfer_status_standby: "Waiting for playback",
-    transfer_field_peak: "Peak",
-    transfer_field_peak_value: "{left} / {right}",
-    transfer_guide_standby:
+    // ── Capture (hosts without ARA: record what the host is playing) ──────
+    panel_capture: "Capture",
+    menu_capture: "Capture from Host...",
+    capture_status_empty: "Nothing recorded",
+    capture_status_standby: "Waiting for playback",
+    capture_field_peak: "Peak",
+    capture_field_peak_value: "{left} / {right}",
+    capture_guide_standby:
         "Ready. Play the host - recording starts with playback. Stopping the transport only pauses; playing again resumes the same take.",
-    transfer_limit_warning:
+    capture_limit_warning:
         "Less than 10 seconds until the recording limit; it will stop automatically.",
-    transfer_stopped_limit: "The recording limit was reached, so recording stopped automatically.",
-    transfer_stopped_no_spare:
+    capture_stopped_limit: "The recording limit was reached, so recording stopped automatically.",
+    capture_stopped_no_spare:
         "The capture fell behind on memory and stopped. Shorten the limit or discard older takes.",
-    transfer_stopped_rate_changed: "The host changed its sample rate, so recording stopped.",
-    transfer_stopped_budget_full:
+    capture_stopped_rate_changed: "The host changed its sample rate, so recording stopped.",
+    capture_stopped_budget_full:
         "The PCM memory budget ran out, so recording stopped. Discard older takes.",
-    transfer_stopped_jump: "The playhead jumped; content after that point is not continuous.",
-    transfer_option_limit: "Recording limit (seconds)",
-    transfer_option_limit_hint:
+    capture_stopped_jump: "The playhead jumped; content after that point is not continuous.",
+    capture_option_limit: "Recording limit (seconds)",
+    capture_option_limit_hint:
         "Recording stops automatically at the limit and keeps what was captured. A larger limit uses more memory.",
-    transfer_option_limit_seconds: "{seconds} s",
-    transfer_option_limit_unlimited: "No limit",
-    transfer_output_processed: "Processed",
-    transfer_output_raw: "Raw take (synthesising)",
-    transfer_output_passthrough: "Host audio",
-    transfer_output_pending: "Take ready, waiting for synthesis",
-    transfer_output_recording: "Passing the host through",
-    transfer_now_playing: "Now hearing: {what}",
-    transfer_status_recording: "Recording",
-    transfer_status_ready: "Recorded",
-    transfer_start: "Record",
-    transfer_stop: "Stop",
-    transfer_clear: "Discard all takes",
-    transfer_cancel_hint: "Discard this recording without keeping a take",
-    transfer_guide_body:
+    capture_option_limit_seconds: "{seconds} s",
+    capture_option_limit_unlimited: "No limit",
+    capture_output_processed: "Processed",
+    capture_output_raw: "Raw take (synthesising)",
+    capture_output_passthrough: "Host audio",
+    capture_output_pending: "Take ready, waiting for synthesis",
+    capture_output_recording: "Passing the host through",
+    capture_now_playing: "Now hearing: {what}",
+    capture_status_recording: "Recording",
+    capture_status_ready: "Recorded",
+    capture_start: "Record",
+    capture_stop: "Stop",
+    capture_clear: "Discard all takes",
+    capture_cancel_hint: "Discard this recording without keeping a take",
+    capture_guide_body:
         "Press play in the host, then Record. The plug-in captures what passes through it and lines it up with the host's timeline.",
-    transfer_guide_recording:
+    capture_guide_recording:
         "Recording. Keep the playhead moving and do not seek; press Stop when the part is done. You hear the host's own audio while recording; the processed result comes back when you stop.",
-    transfer_guide_ready:
+    capture_guide_ready:
         "Recorded. Play the host from the recorded range to hear the processed result; record again to replace it.",
-    transfer_guide_offline:
+    capture_guide_offline:
         "This host also renders offline. Offline renders are two passes: arm Record and export once to capture (that pass is silent), then disarm and export again to get the processed result.",
-    transfer_host_not_playing: "The host is not playing, so nothing is being recorded.",
-    transfer_host_playing: "Host is playing",
-    transfer_field_waiting_host: "Waiting for the host to play",
-    transfer_recorded_silent:
+    capture_host_not_playing: "The host is not playing, so nothing is being recorded.",
+    capture_host_playing: "Host is playing",
+    capture_field_waiting_host: "Waiting for the host to play",
+    capture_recorded_silent:
         "Captured {seconds}s, but the input was silent — check that this track's audio actually reaches the plug-in.",
-    transfer_option_monitor: "Monitor the input while recording",
-    transfer_option_monitor_hint:
+    capture_option_monitor: "Monitor the input while recording",
+    capture_option_monitor_hint:
         "You hear what is being recorded. Off means silence while recording.",
-    transfer_option_outside: "Play the host's audio outside the recorded range",
-    transfer_option_outside_hint:
+    capture_option_outside: "Play the host's audio outside the recorded range",
+    capture_option_outside_hint:
         "Only the recorded range is replaced by the processed result; everything else stays untouched. Off means the whole track goes silent outside it.",
-    transfer_take_label: "Take {id} · {clips} clips",
-    transfer_take_span: "{start}s – {end}s",
-    transfer_take_delete: "Delete",
-    transfer_yes: "yes",
-    transfer_no: "no",
-    transfer_diagnostics:
+    capture_take_label: "Take {id} · {clips} clips",
+    capture_take_span: "{start}s – {end}s",
+    capture_take_delete: "Delete",
+    capture_yes: "yes",
+    capture_no: "no",
+    capture_diagnostics:
         "Host gives: playhead {context} · input audio {input} · offline render {offline}",
-    transfer_not_applicable_ara: "This host provides audio through ARA, so Transfer is not needed.",
-    transfer_cannot_capture:
+    capture_not_applicable_ara: "This host provides audio through ARA, so Capture is not needed.",
+    capture_cannot_capture:
         "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",
-    transfer_no_input_audio:
+    capture_no_input_audio:
         "This host gives the plug-in a playhead but no audio on its input bus — put the plug-in on the track whose audio you want, and check that the host routes that track into it.",
-    transfer_no_audio_arriving:
+    capture_no_audio_arriving:
         "The host is playing, but no audio is reaching this instance — check that the plug-in sits on the track you want and that the host routes that track into it.",
-    transfer_field_no_audio: "No audio arriving",
-    transfer_unsupported_precision:
+    capture_field_no_audio: "No audio arriving",
+    capture_unsupported_precision:
         "This host processes the plug-in at 64-bit sample precision, which the plug-in cannot read yet, so it stays silent. Switch the host's processing precision to 32-bit float.",
-    transfer_field_precision: "64-bit host",
-    transfer_recording_progress: "Recorded {seconds}s",
-    transfer_recording_elapsed: "{seconds}s",
-    transfer_field_segments: "Segments",
-    transfer_field_gaps: "Jumps",
-    transfer_field_spares: "Buffers left",
-    transfer_field_takes: "Takes",
+    capture_field_precision: "64-bit host",
+    capture_recording_progress: "Recorded {seconds}s",
+    capture_recording_elapsed: "{seconds}s",
+    capture_field_segments: "Segments",
+    capture_field_gaps: "Jumps",
+    capture_field_spares: "Buffers left",
+    capture_field_takes: "Takes",
     plugin_apply_analyzing: "Analysing pitch...",
     plugin_apply_analyzing_hint:
         "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",

@@ -2,7 +2,7 @@
 
 use super::ownership::{region_owners, RegionKey};
 use crate::sync::MutexExt;
-use crate::transfer::capture::{
+use crate::capture::recorder::{
     BlockContext, BlockSplit, PositionSource, ProcessStream, SubBlock, TransportPhase,
 };
 use ara2_bridge::core::{ApiGeneration, AraError};
@@ -324,15 +324,15 @@ pub(crate) enum InstanceMode {
     Undetermined,
     /// 宿主把本实例绑到了 ARA 文档：素材由 ARA 逐个 region 授权。
     Ara,
-    /// 宿主没有绑定 ARA：素材只能从 VST3 输入总线捕获（Transfer 通路）。
-    Transfer,
+    /// 宿主没有绑定 ARA：素材只能从 VST3 输入总线捕获（Capture 通路）。
+    Capture,
 }
 
 impl InstanceMode {
     const fn from_raw(raw: i32) -> Self {
         match raw {
             1 => InstanceMode::Ara,
-            2 => InstanceMode::Transfer,
+            2 => InstanceMode::Capture,
             _ => InstanceMode::Undetermined,
         }
     }
@@ -341,7 +341,7 @@ impl InstanceMode {
         match self {
             InstanceMode::Undetermined => 0,
             InstanceMode::Ara => 1,
-            InstanceMode::Transfer => 2,
+            InstanceMode::Capture => 2,
         }
     }
 }
@@ -350,14 +350,14 @@ impl InstanceMode {
 ///
 /// 【为什么与 `InstanceMode` 是两个概念而不是一个】形态是"宿主打算怎么用我们"，
 /// 信号来源是"我们手上有没有东西可渲染"。同一个形态会先后经历两个信号来源：
-/// Transfer 形态在录制之前是 `None`（没有任何素材，界面该显示引导），录制之后是 `Bus`。
+/// Capture 形态在录制之前是 `None`（没有任何素材，界面该显示引导），录制之后是 `Bus`。
 /// 合成一个枚举会让"还没录"与"宿主不给我们音频"变成同一个值 —— 而它们的用户可见
 /// 行为完全不同（前者要引导，后者要报错）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SignalSource {
     /// ARA 授权 PCM（宿主逐个 region 交给我们）。
     Ara,
-    /// 从 VST3 输入总线捕获的 PCM（Transfer）。
+    /// 从 VST3 输入总线捕获的 PCM（Capture）。
     Bus,
     /// 两者都没有：没有可渲染的素材。
     None,
@@ -370,18 +370,18 @@ impl SignalSource {
     }
 }
 
-/// 本块在 Transfer 通路上的输出结论（见 [`ExtensionOwner::transfer_output`]）。
+/// 本块在 Capture 通路上的输出结论（见 [`ExtensionOwner::capture_output`]）。
 ///
 /// 【为什么把它做成一个值而不是几个布尔】"没素材时会听到什么"是这条通路唯一的对外
-/// 行为，此前散在 `transfer_stage` 的早退与 `vst3` 的后续分支里。收敛成一个值之后，
+/// 行为，此前散在 `capture_stage` 的早退与 `vst3` 的后续分支里。收敛成一个值之后，
 /// 每个分支都能被单独断言，而"静音"只剩"确实没有素材"一个含义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransferOutput {
+pub(crate) enum CaptureOutput {
     /// 本阶段**不介入**：继续走既有快照通路。
     ///
     /// 两种场合落在这里：绑在 ARA 文档上的实例（素材由 ARA 授权），以及形态还没落定
     /// 且**没有**素材的实例。后者是刻意的：那时宿主可能正要绑定 ARA，而
-    /// "未录制就不动输出"是既有契约（见 `an_unarmed_transfer_path_leaves_the_snapshot_output_alone`）。
+    /// "未录制就不动输出"是既有契约（见 `an_unarmed_capture_path_leaves_the_snapshot_output_alone`）。
     Untouched,
     /// 正在录制：输出直通（监听）或静音。
     Recording,
@@ -408,11 +408,11 @@ pub(crate) enum TransferOutput {
     /// 正常状态，后者是**该有结果却没有**。此前两者共用一个名字，于是"合成从来没被
     /// 调度过"这件事在界面上完全看不出来（用户报障时只能看到"宿主原声"）。
     PendingSynthesis,
-    /// 已确知本实例走 Transfer、但还没有素材：透传宿主原声。
+    /// 已确知本实例走 Capture、但还没有素材：透传宿主原声。
     PassThrough,
 }
 
-impl TransferOutput {
+impl CaptureOutput {
     /// 语言无关的分类名；前端按此查 catalog。
     ///
     /// 【为什么要有它】"现在听到的是哪一版"是用户**无法自己判断**的一件事：处理结果、
@@ -420,24 +420,24 @@ impl TransferOutput {
     /// 没有"。把仲裁结论如实报给界面，用户就不必猜。
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            TransferOutput::Untouched => "untouched",
-            TransferOutput::Recording => "recording",
-            TransferOutput::Processed => "processed",
-            TransferOutput::Raw => "raw",
-            TransferOutput::PendingSynthesis => "pending_synthesis",
-            TransferOutput::PassThrough => "passthrough",
+            CaptureOutput::Untouched => "untouched",
+            CaptureOutput::Recording => "recording",
+            CaptureOutput::Processed => "processed",
+            CaptureOutput::Raw => "raw",
+            CaptureOutput::PendingSynthesis => "pending_synthesis",
+            CaptureOutput::PassThrough => "passthrough",
         }
     }
 
     /// 编码值 → 档位。未知编码（含已删除的 `3`）返回 `None`。
     pub(crate) fn from_code(code: u8) -> Option<Self> {
         match code {
-            0 => Some(TransferOutput::Untouched),
-            1 => Some(TransferOutput::Recording),
-            2 => Some(TransferOutput::Processed),
-            4 => Some(TransferOutput::Raw),
-            5 => Some(TransferOutput::PendingSynthesis),
-            6 => Some(TransferOutput::PassThrough),
+            0 => Some(CaptureOutput::Untouched),
+            1 => Some(CaptureOutput::Recording),
+            2 => Some(CaptureOutput::Processed),
+            4 => Some(CaptureOutput::Raw),
+            5 => Some(CaptureOutput::PendingSynthesis),
+            6 => Some(CaptureOutput::PassThrough),
             _ => None,
         }
     }
@@ -445,19 +445,19 @@ impl TransferOutput {
     /// 稳定的编码值（只用于块级诊断）。**只增不改**。
     pub(crate) fn code(self) -> u8 {
         match self {
-            TransferOutput::Untouched => 0,
-            TransferOutput::Recording => 1,
-            TransferOutput::Processed => 2,
+            CaptureOutput::Untouched => 0,
+            CaptureOutput::Recording => 1,
+            CaptureOutput::Processed => 2,
             // 3 是已删除的 `StaleProcessed`；编码值只增不改，故留空。
-            TransferOutput::Raw => 4,
-            TransferOutput::PendingSynthesis => 5,
-            TransferOutput::PassThrough => 6,
+            CaptureOutput::Raw => 4,
+            CaptureOutput::PendingSynthesis => 5,
+            CaptureOutput::PassThrough => 6,
         }
     }
 }
 
-/// [`ExtensionOwner::transfer_stage`] 给调用方的结论。
-pub(crate) enum TransferStage {
+/// [`ExtensionOwner::capture_stage`] 给调用方的结论。
+pub(crate) enum CaptureStage {
     /// 本阶段已经写完输出：调用方直接返回，不要再走快照通路。
     Handled,
     /// 继续走既有快照通路。
@@ -466,7 +466,7 @@ pub(crate) enum TransferStage {
         source: SnapshotSource,
         /// 快照覆盖范围**之外**的帧是否直通宿主原声。
         ///
-        /// Transfer 是（只替换录过的那一段）；ARA 不是（整条轨由 ARA 接管，区间外静音）。
+        /// Capture 是（只替换录过的那一段）；ARA 不是（整条轨由 ARA 接管，区间外静音）。
         layered: bool,
     },
 }
@@ -485,7 +485,7 @@ pub(crate) enum SnapshotSource {
 /// 【为什么在同一个回调内传递】门控（停播清空）、输出仲裁（直通/处理结果）与捕获
 /// （lookbehind）必须看到**同一块**。此前它们分别读实例级 `position_advancing` /
 /// `host_playing`，而另一条进程流或另一个线程可以在两次读之间覆盖结论。这个值由
-/// `transfer_observe` 算出，原样交给 `transfer_stage` 与记录器。
+/// `capture_observe` 算出，原样交给 `capture_stage` 与记录器。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockEvidence {
     pub stream: ProcessStream,
@@ -747,7 +747,7 @@ impl StreamGeometry {
         changed
     }
 
-    /// 记录本块是否全零（由 `transfer_observe` 在几何判定之前调用）。
+    /// 记录本块是否全零（由 `capture_observe` 在几何判定之前调用）。
     fn note_block_silence(&self, silent: bool) {
         self.last_block_silent.store(silent, Ordering::Release);
     }
@@ -767,7 +767,7 @@ impl StreamGeometry {
 /// 【为什么把块长也拌进去】宿主在停播时可能把块长缩小/放大而内容不变 —— 那不是
 /// 时间在前进。
 /// 本块是否全零（锁存推进只对静音块生效）。
-fn block_is_silent(block: &crate::transfer::capture::InputBlock<'_>) -> bool {
+fn block_is_silent(block: &crate::capture::recorder::InputBlock<'_>) -> bool {
     block
         .planes
         .iter()
@@ -775,7 +775,7 @@ fn block_is_silent(block: &crate::transfer::capture::InputBlock<'_>) -> bool {
         .all(|plane| plane.iter().all(|sample| *sample == 0.0))
 }
 
-fn block_activity_hash(block: &crate::transfer::capture::InputBlock<'_>) -> u64 {
+fn block_activity_hash(block: &crate::capture::recorder::InputBlock<'_>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for plane in block.planes.iter().flatten() {
         let mut index = 0;
@@ -964,7 +964,7 @@ struct OutputDeclickState {
     last_token: AtomicU64,
     /// 本流是否已经输出过**至少一块**。
     ///
-    /// 【为什么不能用 `primed_kind == 0` 表达"没见过"】`TransferOutput::Untouched` 的
+    /// 【为什么不能用 `primed_kind == 0` 表达"没见过"】`CaptureOutput::Untouched` 的
     /// 编码值**就是 0**，而 ARA 实例的输出仲裁恒为它。于是"从没见过"与"一直见到 0"
     /// 在旧判据下无法区分：ARA 的每一块都会被当成"真首块"。
     primed: AtomicBool,
@@ -1062,7 +1062,7 @@ pub(crate) struct ExtensionOwner {
     /// ARA 绑定发生后，需要给已经打开的视图补发一次 bootstrap。
     ///
     /// 【为什么需要】窗口可能在绑定之前打开，那时 `hostKind` 只能报
-    /// `ara_only`/`transfer`；绑定后能力位与形态都变了，而 bootstrap 是导航前注入的
+    /// `ara_only`/`capture`；绑定后能力位与形态都变了，而 bootstrap 是导航前注入的
     /// 静态快照。视图定时器看到这个标记就推一条 `plugin_bootstrap_changed`。
     bootstrap_changed: AtomicBool,
     /// companion 层"已绑定过"被复位重建的次数（诊断）。
@@ -1152,7 +1152,7 @@ pub(crate) struct ExtensionOwner {
     #[cfg(test)]
     prepare_requests: AtomicU64,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
-    /// 活动 Transfer take 的**未处理** PCM，与处理结果同形（一份 `PlaybackSnapshot`）。
+    /// 活动 Capture take 的**未处理** PCM，与处理结果同形（一份 `PlaybackSnapshot`）。
     ///
     /// 【为什么需要它】处理结果要经过神经合成（数秒），而"录完就想听到东西"是用户的
     /// 最低预期。有了这一份，输出通路的兜底顺序就是"处理后 → 原始 → 区间外直通"，
@@ -1182,10 +1182,10 @@ pub(crate) struct ExtensionOwner {
     layered_probe: [LayeredProbeCell; 3],
     /// 已发布处理结果对应的**素材代次**（`0` = 还没发过）。
     ///
-    /// 【为什么单独记而不是从 `transfer_prepared` 里拆位】那个版本号是
+    /// 【为什么单独记而不是从 `capture_prepared` 里拆位】那个版本号是
     /// `revision ^ (edit << 32)` 的位运算结果；音频线程要回答的是"已发布的那份是不是
     /// **当前**素材"，一个显式读数比拆位可靠得多（也免得代次增长过 32 位时出错）。
-    transfer_ready_revision: AtomicU64,
+    capture_ready_revision: AtomicU64,
     /// 已发布原始磁带对应的素材代次（`0` = 还没发过）。
     raw_tape_revision: AtomicU64,
     /// 上一次"有素材但没有处理结果"已经警告过的素材代次（`0` = 还没警告过）。
@@ -1285,10 +1285,10 @@ pub(crate) struct ExtensionOwner {
     tape_hole_frames: AtomicU64,
     /// 上一次打印的素材覆盖读数（去重用）。
     last_tape_diag: Mutex<Option<String>>,
-    /// `[transfer] pass` / `[transfer] clock` 两行的去重指纹（非实时线程用）。
+    /// `[capture] pass` / `[capture] clock` 两行的去重指纹（非实时线程用）。
     last_pass_diag: Mutex<Option<String>>,
     last_clock_diag: Mutex<Option<String>>,
-    /// `[transfer] ctx` 的去重指纹（非实时线程用）。
+    /// `[capture] ctx` 的去重指纹（非实时线程用）。
     last_ctx_diag: Mutex<Option<String>>,
     /// 输出写满审计的读数（`HIFISHIFTER_BUFFER_AUDIT=1`；音频线程只写原子）。
     buffer_audit_channels: AtomicU32,
@@ -1314,7 +1314,7 @@ pub(crate) struct ExtensionOwner {
     /// 预分配的块级环形记录（非音频线程初始化；音频线程只写，不分配）。
     block_trace: std::sync::OnceLock<Box<BlockTraceRing>>,
     /// 音频线程发现"有素材、但处理结果不是当前代次"时置位；actor 心跳消费它并
-    /// 重新排一次渲染（见 [`Self::transfer_stage`]）。
+    /// 重新排一次渲染（见 [`Self::capture_stage`]）。
     ///
     /// 【为什么音频线程只置位、不调度】合成要数秒且要取锁/分配，绝不能进音频线程。
     /// 这里只是一次原子写；真正的调度仍由会话 actor 的渲染任务完成 —— 它自带
@@ -1337,7 +1337,7 @@ pub(crate) struct ExtensionOwner {
     /// 最后一次成功编码的 ARA `EditState` 字节。
     ///
     /// 【为什么需要】文档已经关闭（`bound_once == true && document == None`）时，
-    /// 宿主仍可能调用 `getState`。此前会落到 Transfer 分支，序列化一份从未被 ARA
+    /// 宿主仍可能调用 `getState`。此前会落到 Capture 分支，序列化一份从未被 ARA
     /// 写过的空 `EditState`，把用户的 ARA 编辑覆盖掉。这里保留最后一份成功载荷。
     last_ara_state: Mutex<Option<Vec<u8>>>,
     /// 后台准备队列。
@@ -1382,40 +1382,40 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么不能省】退避不能牺牲响应速度：用户拖完 item 必须立刻看到新几何，
     /// 而不是等 4 秒。代次一变就清零档位，这条是唯一的保证。
     last_failed_revision: Mutex<Option<Option<i32>>>,
-    /// Transfer 形态的编辑器会话（**没有** ARA 文档的那一份）。
+    /// Capture 形态的编辑器会话（**没有** ARA 文档的那一份）。
     ///
-    /// 【为什么挂在 owner 上而不是文档上】文档是 ARA 的容器，而 Transfer 实例永远没有
+    /// 【为什么挂在 owner 上而不是文档上】文档是 ARA 的容器，而 Capture 实例永远没有
     /// 文档 —— 会话必须有一个不依赖文档的归属。它与 ARA 会话是同一个类型：时间线、历史、
     /// 参数、分析、命令分发全部共用，差别只在 `SessionBacking`（见 `editor::session`）。
-    transfer_session:
+    capture_session:
         std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>, String>>,
-    /// 组件 state 里恢复出来、但**会话还没创建**的 Transfer 用户编辑。
+    /// 组件 state 里恢复出来、但**会话还没创建**的 Capture 用户编辑。
     ///
     /// 【为什么需要 owner 级暂存】`IComponent::setState` 到达时用户可能从没开过编辑器
     /// 窗口 —— 那一刻没有会话可投递。而 `getState` 又**不能**为了存档去创建一个会话
     /// （那会拉起 actor 与文件 I/O）。所以字节块先落在这里，由
-    /// [`Self::transfer_session`] 在会话真正创建时补投一次。
-    pending_transfer_edits: Mutex<Option<Vec<u8>>>,
+    /// [`Self::capture_session`] 在会话真正创建时补投一次。
+    pending_capture_edits: Mutex<Option<Vec<u8>>>,
     /// 宿主调用 `setActive(true)` 的时刻；`None` = 还没激活。
     ///
     /// 【为什么必须记下来】ARA 规定 `bindToDocumentControllerWithRoles` 只能在
     /// `setActive` **之前**调用。宿主一旦激活组件就再也不会给这个实例绑定机会 ——
-    /// 那一刻之后仍无绑定，就是"宿主把本插件当普通插入"的确证，也就是 Transfer 形态
+    /// 那一刻之后仍无绑定，就是"宿主把本插件当普通插入"的确证，也就是 Capture 形态
     /// （见 [`InstanceMode`]）。此前这件事只能靠读者对比两个会话的日志才能推断出来。
     set_active_at: Mutex<Option<std::time::Instant>>,
     /// "激活后仍无 ARA 绑定"这条诊断是否已经报过（一次性）。
     ara_binding_absent_reported: std::sync::atomic::AtomicBool,
-    /// Transfer 通路的捕获存储。
+    /// Capture 通路的捕获存储。
     ///
     /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
     /// 一个在放；共享存储会让它们互相覆盖对方的 take。
-    transfer: crate::transfer::TransferStore,
-    /// 最近一次为 Transfer 发布快照的 take 号（`0` = 还没发过）。
+    capture: crate::capture::CaptureStore,
+    /// 最近一次为 Capture 发布快照的 take 号（`0` = 还没发过）。
     ///
     /// 【为什么需要它】`prepare()` 由 UI 定时器每 20ms 驱动一次，而一次合成要好几秒。
     /// 没有这道闸，同一次录制会被反复排队 —— 每次都在音频线程之外占满 CPU，
     /// 用户看到的是界面变卡而声音没有任何变化。
-    transfer_prepared: AtomicU64,
+    capture_prepared: AtomicU64,
 }
 
 /// `setActive(true)` 之后允许 ARA 绑定出现的宽限时间（见 [`ExtensionOwner::note_editor_tick`]）。
@@ -1555,7 +1555,7 @@ impl ExtensionOwner {
     /// 没有这一行时，判断只能靠听感与代码推理；有了它，一次复现就能回答
     /// "跳了几次、最大多少、宿主纠正过几次"。
     pub(crate) fn seam_summary(&self) -> String {
-        let geometry = &self.streams[crate::transfer::capture::ProcessStream::Realtime.index()];
+        let geometry = &self.streams[crate::capture::recorder::ProcessStream::Realtime.index()];
         format!(
             "seam(pos={} corr={} max={} jumps={} last_jump={} counted={} cov(holes={} frames={}))",
             self.rt_last_read_position.load(Ordering::Acquire),
@@ -1684,7 +1684,7 @@ impl ExtensionOwner {
     /// `Backend invoke failed: plugin:get_runtime_info`。探活只需要回答"会话还在不在、
     /// 形态是什么、有没有片段"，这些都能从原子读数得到。
     pub(crate) fn health_snapshot(&self) -> serde_json::Value {
-        let transfer = self.transfer_session_if_initialized();
+        let capture = self.capture_session_if_initialized();
         let document = self
             .document
             .lock_or_recover()
@@ -1693,7 +1693,7 @@ impl ExtensionOwner {
         let document_alive = document
             .as_ref()
             .is_some_and(|document| document.is_alive());
-        let clip_count = transfer
+        let clip_count = capture
             .as_ref()
             .map_or(0, |session| session.clip_count())
             .max(
@@ -1703,7 +1703,7 @@ impl ExtensionOwner {
             );
         let mode = match self.mode() {
             InstanceMode::Ara => "ara",
-            InstanceMode::Transfer => "transfer",
+            InstanceMode::Capture => "capture",
             InstanceMode::Undetermined => "undetermined",
         };
         serde_json::json!({
@@ -1713,7 +1713,7 @@ impl ExtensionOwner {
             "bound_once": self.bound_once.load(Ordering::Acquire),
             "mode": mode,
             "document_alive": document_alive,
-            "session_initialized": transfer.is_some()
+            "session_initialized": capture.is_some()
                 || document.as_ref().is_some_and(|document| document.editor_initialized()),
             "host_kind": self.host_backend().kind().as_str(),
             "model_available": hifishifter_kernel::world_vocoder::is_available(),
@@ -1738,7 +1738,7 @@ impl ExtensionOwner {
     /// 【为什么先看 `bound_once` 再看原子】两者本该一致，但 `bound_once` 是既有的、
     /// 已被测试覆盖的读数，而 `binding_mode` 是本轮新增的。取"任一说 ARA 就是 ARA"
     /// 的交集语义，让新字段在任何写入点漏掉时**退化成旧行为**（AraOnly），
-    /// 而不是退化成 Transfer —— 后者会让一个正常绑定的实例去录制自己的输出。
+    /// 而不是退化成 Capture —— 后者会让一个正常绑定的实例去录制自己的输出。
     pub(crate) fn mode(&self) -> InstanceMode {
         if self.bound_once.load(Ordering::Acquire) {
             return InstanceMode::Ara;
@@ -1759,20 +1759,20 @@ impl ExtensionOwner {
         self.bootstrap_changed.swap(false, Ordering::AcqRel)
     }
 
-    /// 记录"绑定窗口已关闭且没有绑定" —— 本实例是 Transfer 形态。
+    /// 记录"绑定窗口已关闭且没有绑定" —— 本实例是 Capture 形态。
     ///
     /// 【为什么由调用方判定"窗口已关闭"而不是这里自己看时钟】判据是
     /// `setActive` 之后过了宽限期（见 [`Self::note_editor_tick`]），那需要读
     /// `set_active_at` 这个锁下的值。这里只负责**写入结论**，判定留在唯一的调用点，
     /// 避免同一判据出现两份。
     pub(crate) fn note_binding_window_closed_without_ara(&self) {
-        // 已经绑过就不回落：那会把一个正常工作的 ARA 实例降级成 Transfer。
+        // 已经绑过就不回落：那会把一个正常工作的 ARA 实例降级成 Capture。
         if self.bound_once.load(Ordering::Acquire) {
             return;
         }
         let _ = self.binding_mode.compare_exchange(
             InstanceMode::Undetermined.raw(),
-            InstanceMode::Transfer.raw(),
+            InstanceMode::Capture.raw(),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -1803,7 +1803,7 @@ impl ExtensionOwner {
     /// 绑定窗口是否已经关闭：宿主激活过，且过了宽限期仍没有 ARA 绑定。
     ///
     /// 【为什么不能只看 UI 定时器】UI 定时器要等 WebView 起来才跑，而 bootstrap
-    /// （`hostKind` / `transferCaps`）与编辑器会话都在**那之前**就要读形态 ——
+    /// （`hostKind` / `captureCaps`）与编辑器会话都在**那之前**就要读形态 ——
     /// 于是"窗口打开的那一刻"读到的永远是 `Undetermined`，`host_backend()` 退成
     /// ARA-only，前端所有按形态分流的地方（面板、探活）在前 5 秒里全是错的。
     /// 判定因此必须能按需求值，而不是只在一个定时器里发生。
@@ -1832,7 +1832,7 @@ impl ExtensionOwner {
         }
         // 【为什么形态判定在这里落地】这里正是"过了宽限期仍未绑定"这个结论的判定点：
         // `set_active_at` 只有这里与 `binding_window_closed` 读，宽限常数只有这两处用。
-        // 形态一旦确定，后端选择、能力位与前端面板都会跟着翻到 Transfer（见
+        // 形态一旦确定，后端选择、能力位与前端面板都会跟着翻到 Capture（见
         // `host_backend`）。判定写在"只报一次"的早退**之前** —— 形态是事实，与是否要
         // 打日志无关。
         if !self.binding_window_closed() {
@@ -1843,7 +1843,7 @@ impl ExtensionOwner {
         // 【为什么这里不再做任何维护】备用缓冲与宿主时钟此前挂在 UI 定时器上，于是
         // "关掉窗口就断录"（备用缓冲 2 粒 × 8 秒 = 24 秒后 `NoSpare`）而且没开窗口的
         // 会话里宿主位置根本没有地方落。现在两者都有与窗口无关的归属：
-        //   * 时钟/合成队列 → `setupProcessing`（见 `arm_transfer_rendering` 的调用点）；
+        //   * 时钟/合成队列 → `setupProcessing`（见 `arm_capture_rendering` 的调用点）；
         //   * 备用缓冲       → 会话 actor（见 `EditorSession::run` 的 `top_up` 调用）。
         // 这里只剩"形态落定 + 一次性说明"，形态本身仍然是这个 tick 的职责 ——
         // 它是唯一同时握有 `setActive` 时刻与宽限期的地方。
@@ -1861,13 +1861,13 @@ impl ExtensionOwner {
             .unwrap_or_default();
         // 【为什么措辞变了、级别也变了】此前这条是 `warn` 且说"宿主把本插件当普通插入
         // 效果器运行"，并把用户引向"请从 ARA 入口插入"。现在普通插入是**受支持**的
-        // 形态（Transfer 通路，见 `docs/plans/2026-10-15-vst-transfer-mode.md`）：
+        // 形态（Capture 通路，见 `docs/plans/2026-10-15-vst-capture-mode.md`）：
         // 音频从输入总线捕获、按工程时间对到插件时间轴、处理后输出。
         // 因此这不再是一条错误，而是一条**形态说明** —— 级别降到 `info`，
-        // 内容改为"本实例走 Transfer；想直接编辑宿主片段就从 ARA 入口插入"。
+        // 内容改为"本实例走 Capture；想直接编辑宿主片段就从 ARA 入口插入"。
         log::info!(
             "[ara] no ARA binding {:.0}s after setActive: {host} is running this instance as a \
-             plain insert, so this instance uses the Transfer path (capture the host's playback \
+             plain insert, so this instance uses the Capture path (capture the host's playback \
              into the plug-in). Insert the plug-in from the host's ARA entry instead if you want \
              to edit the host's clips directly.",
             elapsed.as_secs_f32()
@@ -1948,10 +1948,10 @@ impl ExtensionOwner {
                 // 第一行。此前它失败时什么都不写，于是"重开工程后界面停在等待宿主音频"
                 // 与"宿主没给原生扩展"在日志里完全同形（T6）。
                 //
-                // 【为什么 Transfer 实例不报】它**永远**没有 ARA 文档 —— 那不是故障，
+                // 【为什么 Capture 实例不报】它**永远**没有 ARA 文档 —— 那不是故障，
                 // 是形态。此前这一行每 10 秒报一次，40 分钟的现场日志里刷了 480 行，
                 // 把真正的错误整片淹掉；而"看不到读数"正是本轮要修的第一件事。
-                if self.mode() != InstanceMode::Transfer {
+                if self.mode() != InstanceMode::Capture {
                     hifishifter_kernel::log_limiter::emit_limited_key(
                         log::Level::Warn,
                         "ara.stamp.no-document",
@@ -3206,10 +3206,10 @@ impl ExtensionOwner {
         let hz = rate.round();
         if hz.is_finite() && hz > 0.0 && hz <= f64::from(i32::MAX) {
             self.setup_sample_rate.store(hz as i32, Ordering::Release);
-            // Transfer 的段容量也按这个率算（一"段"是 8 **秒**，不是 8 万帧）。
+            // Capture 的段容量也按这个率算（一"段"是 8 **秒**，不是 8 万帧）。
             // 在这里转发而不是让调用点各记一次：宿主声明的工程率只有一个来源，
             // 两处分别记录必然漂移。
-            self.transfer.note_project_rate(hz);
+            self.capture.note_project_rate(hz);
         }
     }
     /// `setupProcessing` 声明的采样率（Hz；未声明为 `0`）。
@@ -3310,8 +3310,8 @@ impl ExtensionOwner {
     }
     /// 真实组件仅作为授权入口，原GUI共享同文档唯一actor/history。
     ///
-    /// 【为什么 Transfer 走另一支】宿主没给 ARA 时 `editor_document()` 必然失败
-    /// （那是 `ARA_NOT_BOUND` 的语义），而 Transfer 的编辑界面**必须**能用 ——
+    /// 【为什么 Capture 走另一支】宿主没给 ARA 时 `editor_document()` 必然失败
+    /// （那是 `ARA_NOT_BOUND` 的语义），而 Capture 的编辑界面**必须**能用 ——
     /// 否则"录进来由插件处理"无从发生：用户改不了音高，也就没有处理可言。
     /// 两个分支产出同一个类型，因此命令分发、历史、参数、分析全部共用。
     pub(crate) fn editor_session(
@@ -3322,33 +3322,33 @@ impl ExtensionOwner {
             // `ARA_BINDING_GRACE`（5 秒）才落定，而**窗口打开的那一刻必然早于它**：
             // 那时拒绝服务就等于"非 ARA 宿主永远打不开界面"—— 探活拿到
             // `ARA_NOT_BOUND`（终态），整页替换成"插件会话不可用"，而且不可恢复。
-            // 从未绑定过 ARA 的实例只有一条能服务界面的路（Transfer 会话），所以这里
+            // 从未绑定过 ARA 的实例只有一条能服务界面的路（Capture 会话），所以这里
             // 不按形态分支。宿主**真的**绑上 ARA 之后 `is_bound()` 为真，自然走文档那份。
-            return self.transfer_session();
+            return self.capture_session();
         }
-        // 绑定过又关闭：那才是真的"会话已结束"，必须如实报错而不是悄悄变成 Transfer。
+        // 绑定过又关闭：那才是真的"会话已结束"，必须如实报错而不是悄悄变成 Capture。
         self.editor_document()?.editor_session()
     }
 
-    /// Transfer 形态的会话；每个实例唯一（`OnceLock`）。
+    /// Capture 形态的会话；每个实例唯一（`OnceLock`）。
     ///
     /// 【为什么与 ARA 会话分开持有】ARA 会话按**文档**唯一（文档上多个实例共享一个
-    /// actor，这样同文档的视图能看到同一份编辑）。Transfer 实例不在任何文档上，
-    /// 因此"每个实例一份"才是与 ARA 同构的粒度（见 Transfer 方案 §5.1 第 3 条：
+    /// actor，这样同文档的视图能看到同一份编辑）。Capture 实例不在任何文档上，
+    /// 因此"每个实例一份"才是与 ARA 同构的粒度（见 Capture 方案 §5.1 第 3 条：
     /// 同一文档上两个实例必须能独立工作）。
-    pub(crate) fn transfer_session(
+    pub(crate) fn capture_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         let session = self
-            .transfer_session
-            .get_or_init(|| crate::editor::session::EditorSession::new_transfer(self))
+            .capture_session
+            .get_or_init(|| crate::editor::session::EditorSession::new_capture(self))
             .clone();
         // 【为什么在这里补投】`setState` 可能早于会话创建（用户从没开过窗口）。
         // 取走即清，幂等；失败只记日志 —— 一份读不出来的存档不该让界面打不开。
         let session = session?;
-        if let Some(bytes) = self.pending_transfer_edits.lock_or_recover().take() {
-            if let Err(error) = session.stash_serialized_transfer_edits(&bytes) {
-                log::warn!("[transfer] restored edits could not be applied: {error}");
+        if let Some(bytes) = self.pending_capture_edits.lock_or_recover().take() {
+            if let Err(error) = session.stash_serialized_capture_edits(&bytes) {
+                log::warn!("[capture] restored edits could not be applied: {error}");
             } else {
                 session.request_reload();
             }
@@ -3356,25 +3356,25 @@ impl ExtensionOwner {
         Ok(session)
     }
 
-    /// 已经创建过的 Transfer 会话；**不会**创建。
+    /// 已经创建过的 Capture 会话；**不会**创建。
     ///
     /// 【为什么 `getState` 必须用这个】存档发生在宿主的主线程上，而创建一个会话会拉起
     /// actor 线程、扫临时目录、初始化模型资源。用户没开过窗口时"没有曲线可存"是正确
     /// 结论，不需要为此付出一次会话的代价。
-    pub(crate) fn transfer_session_if_initialized(
+    pub(crate) fn capture_session_if_initialized(
         &self,
     ) -> Option<Arc<crate::editor::session::EditorSession>> {
-        self.transfer_session
+        self.capture_session
             .get()
             .and_then(|result| result.as_ref().ok())
             .cloned()
     }
 
-    /// 已经存在的编辑器会话（Transfer 或 ARA），**不创建**。
+    /// 已经存在的编辑器会话（Capture 或 ARA），**不创建**。
     pub(crate) fn existing_editor_session(
         &self,
     ) -> Option<Arc<crate::editor::session::EditorSession>> {
-        if let Some(session) = self.transfer_session_if_initialized() {
+        if let Some(session) = self.capture_session_if_initialized() {
             return Some(session);
         }
         self.document
@@ -3384,19 +3384,19 @@ impl ExtensionOwner {
             .and_then(|document| document.existing_editor_session())
     }
 
-    /// 让 Transfer 编辑器会话重新加载时间线并重渲染（录制结束 / 切换 take / 清空之后）。
+    /// 让 Capture 编辑器会话重新加载时间线并重渲染（录制结束 / 切换 take / 清空之后）。
     ///
-    /// 【为什么不在命令里直接做】`transfer_*` 命令在视图层（UI 线程）执行，而加载要读
+    /// 【为什么不在命令里直接做】`capture_*` 命令在视图层（UI 线程）执行，而加载要读
     /// 捕获存储、物化分析副本 —— 那是文件 I/O。这里只置一个标志，由会话的 actor 线程
     /// 在下一轮自己加载（加载成功会顺带排一次渲染）。
-    pub(crate) fn request_transfer_reload(self: &Arc<Self>) {
+    pub(crate) fn request_capture_reload(self: &Arc<Self>) {
         // 原始磁带要**立刻**跟着 take 走，不能等合成：用户按下停止之后马上就想听到东西，
         // 而一次神经合成要数秒。这一份也是"换 take 之后绝不播上一份"的保证
         // （见 `raw_tape_ready` 的 take 比对）。
         self.sync_raw_tape();
         // 换 take / 清空 / 录制结束都会走到这里：内容换了，本 pass 锁存的内容源不再有效。
         self.clear_rung_latch();
-        if let Ok(session) = self.transfer_session() {
+        if let Ok(session) = self.capture_session() {
             session.request_reload();
         }
     }
@@ -3406,29 +3406,29 @@ impl ExtensionOwner {
     /// 【为什么幂等】它由命令（UI 线程）与合成准备（actor）两处调用；take 号没变时
     /// 直接返回，不重复拷贝几十 MB 的 PCM。
     pub(crate) fn sync_raw_tape(&self) {
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             // 没有素材（清空 / 还没录 / 全是静音）：撤掉指针，让仲裁落到透传。
             self.raw_tape.clear();
             self.raw_tape_revision.store(0, Ordering::Release);
             return;
         }
-        let revision = self.transfer.revision();
+        let revision = self.capture.revision();
         if self.raw_tape_revision.load(Ordering::Acquire) == revision {
             return;
         }
-        let Some(snapshot) = self.transfer.raw_tape() else {
+        let Some(snapshot) = self.capture.raw_tape() else {
             return;
         };
         self.raw_tape.collect_retired();
         if !self.raw_tape.has_capacity(&snapshot) {
             log::warn!(
-                "[transfer] raw tape does not fit the snapshot budget; keeping the previous one"
+                "[capture] raw tape does not fit the snapshot budget; keeping the previous one"
             );
             return;
         }
         match self.raw_tape.publish(snapshot) {
             Ok(()) => self.raw_tape_revision.store(revision, Ordering::Release),
-            Err(error) => log::warn!("[transfer] raw tape publish failed: {error:?}"),
+            Err(error) => log::warn!("[capture] raw tape publish failed: {error:?}"),
         }
     }
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
@@ -3462,65 +3462,65 @@ impl ExtensionOwner {
     /// 【为什么是"一等后端"而不是 `None`】ARA-only 后端照样能看 / 能听 / 能渲染 /
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
-    /// Transfer 通路的捕获存储。
-    pub(crate) fn transfer(&self) -> &crate::transfer::TransferStore {
-        &self.transfer
+    /// Capture 通路的捕获存储。
+    pub(crate) fn capture(&self) -> &crate::capture::CaptureStore {
+        &self.capture
     }
 
     /// 本实例是否**应当**发布快照。
     ///
     /// 【为什么不能直接改 `renders_playback()`】那个读数的语义是"本文档的播放由本实例
     /// 渲染"，它被 `report_playback_ownership` 与诊断用于回答"文档上还有没有人在渲染"。
-    /// Transfer 实例**不在任何 ARA 文档上**，把它算进去会让那两处以为文档有播放实例。
+    /// Capture 实例**不在任何 ARA 文档上**，把它算进去会让那两处以为文档有播放实例。
     /// 这里另立一个"要不要出音"的判据，只在渲染准入点使用。
     pub(crate) fn renders(&self) -> bool {
         if self.is_bound() {
             return !self.is_editor_only();
         }
-        // 【为什么"有素材"本身就是充分证据】素材只有一条产生路径：`transfer_start`
-        // （ARA 绑定时被显式拒绝，见 `transfer/commands.rs`）或组件 state 恢复（绑定的
-        // 实例走上面那一支）。因此"未绑定 + 有素材"只可能是 Transfer。
+        // 【为什么"有素材"本身就是充分证据】素材只有一条产生路径：`capture_start`
+        // （ARA 绑定时被显式拒绝，见 `capture/commands.rs`）或组件 state 恢复（绑定的
+        // 实例走上面那一支）。因此"未绑定 + 有素材"只可能是 Capture。
         //
         // 【为什么不能只问 `mode()`】形态判定此前完全依赖编辑器窗口的 20ms 定时器
         // （`note_editor_tick`）与 `setActive` 之后 5 秒的宽限期。宿主把插件当普通插入
         // 用时用户很可能**根本没开窗口**，于是 `mode()` 永远是 `Undetermined` ⇒ 这里
         // 恒假 ⇒ 一条快照都不发布 ⇒ 录制正常、界面正常、**播放时全静音**。
         // 素材是比时钟更早、更硬的证据：它已经存在，就说明这个实例在录宿主。
-        self.transfer.has_material()
+        self.capture.has_material()
     }
 
-    /// Transfer 形态的渲染准备（不经过 ARA 文档）。
+    /// Capture 形态的渲染准备（不经过 ARA 文档）。
     ///
     /// 【为什么必须有一份独立的实现】`prepare_job` 的第一件事就是取 ARA 文档，
-    /// 取不到直接返回错误。Transfer 实例**永远**没有文档，所以那条路对它等于
+    /// 取不到直接返回错误。Capture 实例**永远**没有文档，所以那条路对它等于
     /// "永远不准备 ⇒ 永远静音"。
     ///
-    /// 【为什么复用 `RenderInput` 而不是另写一条】Transfer 的投影产出的正是
+    /// 【为什么复用 `RenderInput` 而不是另写一条】Capture 的投影产出的正是
     /// `(TimelineState, Vec<AraPlaybackRegion>, sources)` —— 与 ARA 路径同一组类型
-    /// （见 `transfer::TransferStore::render_input`）。于是校验、渲染、压缩、双率发布
-    /// 全部是同一份代码，Transfer 不需要第二条渲染通路。
-    /// Transfer 形态的渲染输入，以及它的版本 `(take, edit)`。
+    /// （见 `capture::CaptureStore::render_input`）。于是校验、渲染、压缩、双率发布
+    /// 全部是同一份代码，Capture 不需要第二条渲染通路。
+    /// Capture 形态的渲染输入，以及它的版本 `(take, edit)`。
     ///
     /// 【为什么只有 owner 够得着两边】几何与 PCM 在捕获存储上，用户曲线在编辑器会话上。
     /// **播放与导出共用这一份** —— 于是"导出的音频与听到的不一样"这一类漂移不可能发生。
     ///
-    /// 【为什么优先用会话的那份时间线】它带着用户的参数曲线，而曲线就是 Transfer 形态下
+    /// 【为什么优先用会话的那份时间线】它带着用户的参数曲线，而曲线就是 Capture 形态下
     /// "处理"的全部内容。用捕获存储那份（只有几何）会让"改了音高却不重算"变成一个静默的
     /// 失效：界面变了，声音还是旧的。
     /// 返回 `(素材代次, 编辑代次, 这份时间线带不带用户曲线, 渲染输入)`。
     ///
     /// 【为什么"带不带曲线"要作为一项返回】会话还没加载时拿到的是**不含用户曲线**的
     /// 几何，而那时 `edit` 恒为 0 —— 若调用方把它当成"已准备"，会话加载之后版本不变、
-    /// 这次渲染被跳过，用户画完线永远听不到变化（见 `transfer_prepare_job` 的版本闸）。
-    pub(crate) fn transfer_render_input(
+    /// 这次渲染被跳过，用户画完线永远听不到变化（见 `capture_prepare_job` 的版本闸）。
+    pub(crate) fn capture_render_input(
         &self,
     ) -> Result<(u64, u64, bool, super::input::RenderInput), String> {
-        if !self.transfer.has_material() {
-            return Err("no Transfer material".into());
+        if !self.capture.has_material() {
+            return Err("no Capture material".into());
         }
-        let revision = self.transfer.revision();
+        let revision = self.capture.revision();
         let session = self
-            .transfer_session
+            .capture_session
             .get()
             .and_then(|session| session.as_ref().ok())
             .filter(|session| session.is_loaded())
@@ -3537,40 +3537,40 @@ impl ExtensionOwner {
             ),
             // 会话还没加载（窗口还没开、或前端还没问过时间线）：退回捕获存储的几何。
             // 那时也没有用户在编辑，两者等价 —— 但**必须把这个事实带进版本号**
-            // （见 `transfer_prepare_job` 的 `with_curves` 位）。
-            None => (self.transfer.session_timeline().0, 0, false),
+            // （见 `capture_prepare_job` 的 `with_curves` 位）。
+            None => (self.capture.session_timeline().0, 0, false),
         };
-        let trimmed = crate::transfer::timeline::clamp_timeline_to_project(&mut timeline);
+        let trimmed = crate::capture::timeline::clamp_timeline_to_project(&mut timeline);
         if trimmed > 0 {
             log::warn!(
-                "[transfer] removed pre-roll from {trimmed} clip(s) before rendering; the material domain starts at project time 0"
+                "[capture] removed pre-roll from {trimmed} clip(s) before rendering; the material domain starts at project time 0"
             );
         }
         let input = super::input::RenderInput {
-            regions: self.transfer.regions_for_timeline(&timeline),
-            sources: self.transfer.material_sources(),
+            regions: self.capture.regions_for_timeline(&timeline),
+            sources: self.capture.material_sources(),
             timeline: Some(timeline),
             project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
-            // 【为什么参数曲线这里为空】Transfer 的曲线就在时间线里（它**就是**参数权威），
+            // 【为什么参数曲线这里为空】Capture 的曲线就在时间线里（它**就是**参数权威），
             // 于是 `mix_interleaved` 走"直接按时间线合成"那一支。ARA 需要图谱投影是因为
-            // 它的时间线每次都被宿主重建、clip 身份由 region key 派生 —— Transfer 没有
+            // 它的时间线每次都被宿主重建、clip 身份由 region key 派生 —— Capture 没有
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
         };
         Ok((revision, edit, with_curves, input))
     }
 
-    pub(crate) fn transfer_prepare_job(
+    pub(crate) fn capture_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             return Ok(());
         }
-        // 【为什么这里也要补一次】命令那条路（`request_transfer_reload`）只在用户动作时
+        // 【为什么这里也要补一次】命令那条路（`request_capture_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let (revision, edit, with_curves, input) = self.transfer_render_input()?;
+        let (revision, edit, with_curves, input) = self.capture_render_input()?;
         // 【T-S1-6】发布前把"素材里有多少个洞"变成可读的数（去重打印）。
         self.note_tape_coverage(&input);
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
@@ -3582,7 +3582,7 @@ impl ExtensionOwner {
         // 渲染被跳过 ⇒ 用户画完线永远听不到变化。把这个事实编进版本号，会话一加载
         // 版本就变，于是恰好补一次渲染，而没加载时也不会反复重算。
         let version = revision ^ (edit << 32) ^ if with_curves { 0 } else { 1 << 63 };
-        if self.transfer_prepared.load(Ordering::Acquire) == version
+        if self.capture_prepared.load(Ordering::Acquire) == version
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
         {
             return Ok(());
@@ -3621,12 +3621,12 @@ impl ExtensionOwner {
                 .publish(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
-        self.transfer_prepared.store(version, Ordering::Release);
+        self.capture_prepared.store(version, Ordering::Release);
         // 处理结果与当前 take 的对应关系：音频线程据此在"处理结果"与"原始磁带"之间选
         // （见 `processed_ready`）。换 take 之后这里才更新，所以中间那段空窗由原始磁带兜底。
-        self.transfer_ready_revision
+        self.capture_ready_revision
             .store(revision, Ordering::Release);
-        log::warn!("[transfer] prepared material revision {revision} edit {edit} in {render_ms} ms");
+        log::warn!("[capture] prepared material revision {revision} edit {edit} in {render_ms} ms");
         Ok(())
     }
 
@@ -3674,7 +3674,7 @@ impl ExtensionOwner {
             return;
         }
         let line = format!(
-            "[transfer] tape coverage: sources={covered_sources} holes={holes} \
+            "[capture] tape coverage: sources={covered_sources} holes={holes} \
              hole_frames={hole_frames}"
         );
         let mut last = self.last_tape_diag.lock_or_recover();
@@ -3684,20 +3684,20 @@ impl ExtensionOwner {
         }
     }
 
-    /// 本块在 Transfer 通路上该怎么输出。**无锁、无分配**，可从音频线程调用。
+    /// 本块在 Capture 通路上该怎么输出。**无锁、无分配**，可从音频线程调用。
     ///
-    /// 【为什么要有这个枚举】"没素材时会听到什么"此前要读者把 `transfer_stage` 的早退
+    /// 【为什么要有这个枚举】"没素材时会听到什么"此前要读者把 `capture_stage` 的早退
     /// 与 `vst3` 的后续分支拼起来才能回答。收敛成一个值之后，每个分支都能被单独断言，
     /// 而"静音"只剩下"确实没有素材"这一个含义。
-    pub(crate) fn transfer_output(&self) -> TransferOutput {
-        self.transfer_output_with(None)
+    pub(crate) fn capture_output(&self) -> CaptureOutput {
+        self.capture_output_with(None)
     }
 
-    /// 与 [`Self::transfer_output`] 相同，但使用**本块**的流/播放证据。
-    pub(crate) fn transfer_output_with(&self, evidence: Option<BlockEvidence>) -> TransferOutput {
+    /// 与 [`Self::capture_output`] 相同，但使用**本块**的流/播放证据。
+    pub(crate) fn capture_output_with(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
         // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
         // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
-        // 形态一旦是 ARA，任何 Transfer 结论都不适用。
+        // 形态一旦是 ARA，任何 Capture 结论都不适用。
         //
         // 【已知边界】`bound_once` 为真而文档已关的实例（宿主绑定过 ARA、文档后来又关掉）
         // 在这里仍然判成"不介入"。那种实例在界面上本来就是终态（`editor_session` 会以
@@ -3705,7 +3705,7 @@ impl ExtensionOwner {
         // 现场；要收掉这条边界得先给"文档是否还活着"一个**无锁**读数（音频线程不能取
         // `document` 那把锁），那是独立一期的事。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            return TransferOutput::Untouched;
+            return CaptureOutput::Untouched;
         }
         /*
          * 【为什么"武装"不再直接等于"录制中"】武装之后、宿主开始播放之前是**待命**：
@@ -3716,7 +3716,7 @@ impl ExtensionOwner {
          *
          * 一旦宿主开始播放就立刻回到 `Recording`：捕获读的是输入总线，而输出可能写进
          * 同一块缓冲（in-place 宿主），直通才不会让捕获录到我们自己的输出。
-         * `transfer_observe` 在 `transfer_stage` 之前更新 `host_playing`，所以起播的
+         * `capture_observe` 在 `capture_stage` 之前更新 `host_playing`，所以起播的
          * 第一块就已经是 `Recording`，捕获读到的是宿主原声。
          */
         // 【为什么把块流证据也算进"录制中"】`kPlaying` 可能在起播第一块才滞后置位；
@@ -3724,37 +3724,37 @@ impl ExtensionOwner {
         // 输出上一版 `Processed` —— 旧内容盖在新演奏上。位置流在推进时按录制中直通，
         // 最多在几何变化的瞬间多直通一块；重复块随即回到 `Processed`，待命语义不变。
         // 没有本块证据的调用（旧测试/旧入口）退回实例级实时流读数；生产路径
-        // 永远由 `transfer_observe` 提供证据，因此不会读到另一条流的结论。
+        // 永远由 `capture_observe` 提供证据，因此不会读到另一条流的结论。
         let recording = if evidence.is_some() {
-            self.transfer.is_recording_with_evidence(evidence)
+            self.capture.is_recording_with_evidence(evidence)
         } else {
-            self.transfer
-                .is_recording_with_flow(self.transfer_transport_running())
+            self.capture
+                .is_recording_with_flow(self.capture_transport_running())
         };
         if recording {
-            return TransferOutput::Recording;
+            return CaptureOutput::Recording;
         }
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             // 【为什么没有素材就一定透传】"不要覆盖一个正常渲染的 ARA 实例的输出"
             // 这条契约由上面的 `is_bound()` 守卫负责：有活的文档时这里根本走不到。
-            // 此前这里还额外要求"形态已落定为 Transfer"，于是窗口没开过、宽限期未过的
+            // 此前这里还额外要求"形态已落定为 Capture"，于是窗口没开过、宽限期未过的
             // 会话（`Undetermined`）在**任何素材之前**都是静音 —— 用户把插件插到一条
             // 有声音的轨道上，得到的是"整条轨哑了"。
             // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
-            return TransferOutput::PassThrough;
+            return CaptureOutput::PassThrough;
         }
         let candidate = if self.processed_ready() {
-            TransferOutput::Processed
+            CaptureOutput::Processed
         } else if self.raw_tape_ready() {
             // 【为什么在这里置位】有素材、但处理结果不是当前代次 ⇒ 该有一次合成在跑。
             // 音频线程只记一个原子；调度仍由会话 actor 完成（见 `render_wanted`）。
             self.render_wanted.store(true, Ordering::Release);
-            TransferOutput::Raw
+            CaptureOutput::Raw
         } else {
             // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
             // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
             self.render_wanted.store(true, Ordering::Release);
-            TransferOutput::PendingSynthesis
+            CaptureOutput::PendingSynthesis
         };
         self.latch_rung(candidate, evidence)
     }
@@ -3792,7 +3792,7 @@ impl ExtensionOwner {
     /// * `Untouched`：绑定的 ARA 实例，根本不走这条通路（上面已早退）。
     /// * `Recording`：录制中必须直通输入，而且它本身意味着一次新的传输 ——
     ///   顺便把锁存清掉，让录完之后的那一遍重新选。
-    fn latch_rung(&self, candidate: TransferOutput, evidence: Option<BlockEvidence>) -> TransferOutput {
+    fn latch_rung(&self, candidate: CaptureOutput, evidence: Option<BlockEvidence>) -> CaptureOutput {
         // 没有本块证据（离线 / 预取 / 旧测试入口）时不锁存：它们的输出稍后才被播放，
         // "此刻的传输状态"对它们不适用。
         let Some(evidence) = evidence else {
@@ -3801,7 +3801,7 @@ impl ExtensionOwner {
         if evidence.stream != ProcessStream::Realtime {
             return candidate;
         }
-        if candidate == TransferOutput::Recording {
+        if candidate == CaptureOutput::Recording {
             self.rung_locked.store(0, Ordering::Release);
             return candidate;
         }
@@ -3811,7 +3811,7 @@ impl ExtensionOwner {
         let locked = self.rung_locked.load(Ordering::Acquire);
         if locked != 0 && self.rung_pass.load(Ordering::Acquire) == pass {
             // 本 pass 已经选过：沿用，不重新仲裁。
-            return TransferOutput::from_code(locked).unwrap_or(candidate);
+            return CaptureOutput::from_code(locked).unwrap_or(candidate);
         }
         self.rung_locked.store(candidate.code(), Ordering::Release);
         self.rung_pass.store(pass, Ordering::Release);
@@ -3819,13 +3819,13 @@ impl ExtensionOwner {
     }
 
     /// 输出源 token：种类 + 快照代次。任一项变化都意味着"用户听到的信号换了源"。
-    fn output_token_for(&self, output: TransferOutput) -> u64 {
+    fn output_token_for(&self, output: CaptureOutput) -> u64 {
         let kind = u64::from(output.code());
         let revision = match output {
             // 处理结果换版（曲线编辑 / 换 take）也要去咔。
             //
             // 【为什么 `Untouched` 也要编进代次】bound 实例的输出仲裁恒为 `Untouched`
-            // （它走既有快照通路），而 `transfer_stage` 存下的 token 只含"种类"。
+            // （它走既有快照通路），而 `capture_stage` 存下的 token 只含"种类"。
             // 于是快照第一次发布（此前逐样本写零）或换版时 token 不变 ⇒
             // `apply_output_declick` 认为"没有切换"⇒ 用户听到一次从零到有声的硬切。
             // 把两份发布器的代次编进来，ARA 的接缝也能拿到同样的 1.3 ms 淡化。
@@ -3842,10 +3842,10 @@ impl ExtensionOwner {
             // 【为什么仍然保留 `kind`】种类（Raw / Processed / Passthrough）回答的是
             // "这一侧是什么内容"，与内容指纹正交：两者都必须参与，缺一个就会把
             // 一次真实换源或一次重新合成判反。
-            TransferOutput::Processed | TransferOutput::Untouched => {
+            CaptureOutput::Processed | CaptureOutput::Untouched => {
                 self.snapshots[0].content() ^ self.snapshots[1].content().rotate_left(32)
             }
-            TransferOutput::Raw => self.raw_tape.content(),
+            CaptureOutput::Raw => self.raw_tape.content(),
             _ => 0,
         };
         kind | (revision << 8)
@@ -3984,7 +3984,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么读环形记录而不是新开一组原子】环里已经逐块记下了全部字段（音频线程
     /// 只写原子、不分配），复用它就不必再维护第二份会漂移的读数。
-    pub(crate) fn log_transfer_context(&self) {
+    pub(crate) fn log_capture_context(&self) {
         let Some(ring) = self.block_trace.get() else {
             return;
         };
@@ -4003,33 +4003,33 @@ impl ExtensionOwner {
     /// 【为什么要这两行】本轮之前，排查"咔"只能靠"用户再听一遍"：插件里没有
     /// "这一块换了源"与"这一块位置回退了"的读数，于是同一个症状被反复归因到
     /// 不同机理。这两行把它变成可判定的数字：
-    ///   * `[transfer] pass` —— 一次播放里换了几次内容源（I-2，理想为 0）；
-    ///   * `[transfer] clock` —— 位置是否逐块续接（I-3，`rewinds` 理想为 0）。
+    ///   * `[capture] pass` —— 一次播放里换了几次内容源（I-2，理想为 0）；
+    ///   * `[capture] clock` —— 位置是否逐块续接（I-3，`rewinds` 理想为 0）。
     ///
     /// 【为什么去重】它们由 20 ms 的界面定时器驱动；不去重就是每秒 50 行。判据取
     /// "内容变没变"：所有计数都进了指纹，变了才打印。
-    pub(crate) fn log_transfer_report(&self) {
+    pub(crate) fn log_capture_report(&self) {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            // ARA 实例不走 Transfer 仲裁：这两行的数字对它是无意义的零。
+            // ARA 实例不走 Capture 仲裁：这两行的数字对它是无意义的零。
             return;
         }
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             return;
         }
         let switches = self.rung_switches.load(Ordering::Acquire);
         let from = self.rung_last_from.load(Ordering::Acquire);
         let to = self.rung_last_to.load(Ordering::Acquire);
         let pass_switches = self.pass_switches.load(Ordering::Acquire);
-        let output = self.transfer_output();
-        let prepared = self.transfer_prepared.load(Ordering::Acquire);
-        let ready = self.transfer_ready_revision.load(Ordering::Acquire);
+        let output = self.capture_output();
+        let prepared = self.capture_prepared.load(Ordering::Acquire);
+        let ready = self.capture_ready_revision.load(Ordering::Acquire);
         let line = format!(
-            "[transfer] pass: take={} prepared={prepared} ready_revision={ready} \
+            "[capture] pass: take={} prepared={prepared} ready_revision={ready} \
              output={} switches={switches} pass_switches={pass_switches} last={}->{}",
-            self.transfer.revision(),
+            self.capture.revision(),
             output.as_str(),
-            TransferOutput::from_code(from as u8).map_or("none", |value| value.as_str()),
-            TransferOutput::from_code(to as u8).map_or("none", |value| value.as_str()),
+            CaptureOutput::from_code(from as u8).map_or("none", |value| value.as_str()),
+            CaptureOutput::from_code(to as u8).map_or("none", |value| value.as_str()),
         );
         {
             let mut last = self.last_pass_diag.lock_or_recover();
@@ -4051,7 +4051,7 @@ impl ExtensionOwner {
         // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
         // 位置，而每次它恢复报告时我们都跟上了。
         let line = format!(
-            "[transfer] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
+            "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
              rising={} continuous={} music={}",
             index.min(2),
@@ -4111,21 +4111,21 @@ impl ExtensionOwner {
 
     /// 输出源的内容家族。接缝判据只关心"这一侧是什么内容"，不关心具体是哪一档。
     ///
-    /// 【为什么收敛成三档】`TransferOutput` 有七个取值，但接缝只需要回答一个问题：
+    /// 【为什么收敛成三档】`CaptureOutput` 有七个取值，但接缝只需要回答一个问题：
     /// 两侧的信号**是否同源**。透传类（宿主原声）与算出来的内容之间必须淡入；
     /// Raw 与 Processed 是同一段素材的两种处理，可以交叉；其余同族切换同理。
     /// 按七个取值逐个写分支，每加一档就要重审一遍全部组合 —— 那正是这里曾经出过
     /// 两次错的原因：`Processed` 与 `Raw` 曾被当成"同源切换"，于是 64 帧里把两段
     /// 不相干的信号线性叠在一起。
     fn family(kind: u8) -> ContentFamily {
-        if kind == TransferOutput::Raw.code() {
+        if kind == CaptureOutput::Raw.code() {
             ContentFamily::Raw
-        } else if kind == TransferOutput::PendingSynthesis.code()
-            || kind == TransferOutput::PassThrough.code()
+        } else if kind == CaptureOutput::PendingSynthesis.code()
+            || kind == CaptureOutput::PassThrough.code()
             // 录制监听送出去的也是**宿主原声**：`Recording` 分支把输入总线原样写出，
             // 它从哪一相位开始是宿主的事，我们不该给它加淡入（那会把录制监听的前
             // 5 ms 削掉）。
-            || kind == TransferOutput::Recording.code()
+            || kind == CaptureOutput::Recording.code()
         {
             ContentFamily::Passthrough
         } else {
@@ -4203,12 +4203,12 @@ impl ExtensionOwner {
             // 而那**只对透传成立**：透传的样本就是宿主正在播的东西，它自己已经连续。
             // 当第一块是**我们算出来的内容**（Raw / Processed）时，它从哪一相位开始
             // 是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。
-            // 【作用域：只给 Transfer 的播放通路】首块淡入要解决的是"我们自己算出来的
-            // 内容从任意相位开始"—— 那是 Transfer 通路（插件直接对着一条轨出声）的形状。
+            // 【作用域：只给 Capture 的播放通路】首块淡入要解决的是"我们自己算出来的
+            // 内容从任意相位开始"—— 那是 Capture 通路（插件直接对着一条轨出声）的形状。
             // ARA 通路由宿主按 region 调度，区块起点与 item 淡化都是宿主的事；在那里
             // 再叠一层淡入会改动宿主自己的包络（且没有任何报障指向它）。
-            let transfer_content = !self.is_bound() && self.transfer.has_material();
-            if transfer_content && Self::family(kind as u8) != ContentFamily::Passthrough {
+            let capture_content = !self.is_bound() && self.capture.has_material();
+            if capture_content && Self::family(kind as u8) != ContentFamily::Passthrough {
                 self.arm_seam(state, Seam::FirstBlock);
                 armed = crate::render::click::SeamCode::FadeIn;
             }
@@ -4434,7 +4434,7 @@ impl ExtensionOwner {
         // 它让 `apply_output_declick` 把 `fade_from` 视为全零，于是下一块做一次
         // 线性淡入。
         state.primed_kind.store(
-            u32::from(TransferOutput::PassThrough.code()),
+            u32::from(CaptureOutput::PassThrough.code()),
             Ordering::Release,
         );
         state.last_token.store(0, Ordering::Release);
@@ -4451,11 +4451,11 @@ impl ExtensionOwner {
     /// `passthrough` 读数，用户和我们都看不出区别。这条日志把结论直接写下来：
     /// 素材代次是多少、处理结果代次停在哪。合成成功后它自然不再出现。
     pub(crate) fn report_pending_synthesis_once(&self) {
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             return;
         }
-        let revision = self.transfer.revision();
-        let ready = self.transfer_ready_revision.load(Ordering::Acquire);
+        let revision = self.capture.revision();
+        let ready = self.capture_ready_revision.load(Ordering::Acquire);
         if ready == revision {
             return;
         }
@@ -4468,7 +4468,7 @@ impl ExtensionOwner {
             return;
         }
         log::warn!(
-            "[transfer] material revision {revision} has no processed result yet \
+            "[capture] material revision {revision} has no processed result yet \
              (last published revision {ready}); the render scheduler has not caught up"
         );
     }
@@ -4581,7 +4581,7 @@ impl ExtensionOwner {
     ///
     /// # 为什么 R2 仍然必须存在
     ///
-    /// 实测 VEGAS 在 Transfer 播放期间会让 `projectTimeSamples` 停住不动。那时
+    /// 实测 VEGAS 在 Capture 播放期间会让 `projectTimeSamples` 停住不动。那时
     /// "每块前进 frames"是唯一自洽的换算 —— 它是合法记账，不是猜测。把它删掉不会让
     /// 宿主变好，只会让 take 变成一大片洞。
     #[allow(clippy::too_many_arguments)]
@@ -5040,7 +5040,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么 ARA 实例恒为假】它的输出语义由 ARA 通路决定，这个守卫必须对它完全无效
     /// （见 `a_bound_instance_keeps_its_output`）。返回假 ⇒ 保持"停播即静音"的既有行为。
-    pub(crate) fn transfer_transport_running(&self) -> bool {
+    pub(crate) fn capture_transport_running(&self) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return false;
         }
@@ -5052,7 +5052,7 @@ impl ExtensionOwner {
     /// 【真值表】ARA 实例：`false`（保持“停播即静音”的既有语义，由调用方的
     /// `!kPlaying` 决定）。未绑定实例：offline/prefetch 恒真（它们的输出稍后才被
     /// 播放，不能用此刻的传输状态挖洞）；实时流看本块证据。
-    pub(crate) fn transfer_should_emit(
+    pub(crate) fn capture_should_emit(
         &self,
         evidence: Option<BlockEvidence>,
         playing: bool,
@@ -5061,7 +5061,7 @@ impl ExtensionOwner {
             // 【为什么 ARA 实例也要区分流】REAPER 在预取 / 擦洗 / 循环折返时会
             // **合法地**以 `kPlaying == 0` 调用 `process`，而预取块会被它缓存并真的
             // 播出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
-            // offline / prefetch 与 Transfer 实例同一判据：输出稍后才被播放，此刻的
+            // offline / prefetch 与 Capture 实例同一判据：输出稍后才被播放，此刻的
             // 传输状态不适用。实时流仍保持 ARA 的"停播即静音"语义：光标处的重复块
             // 不该循环出声，而真实起播由 `kPlaying` 与捕获侧证据驱动。
             return match evidence {
@@ -5098,11 +5098,11 @@ impl ExtensionOwner {
     /// —— 那是倒退。只比 take 号：曲线编辑不改 take，于是仍然读处理结果（听到上一版处理，
     /// 与既有行为一致）；换 take 才回落。
     fn processed_ready(&self) -> bool {
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             return false;
         }
-        let revision = self.transfer.revision();
-        self.transfer_ready_revision.load(Ordering::Acquire) == revision
+        let revision = self.capture.revision();
+        self.capture_ready_revision.load(Ordering::Acquire) == revision
             // 【为什么不能 any()】实际读取的是
             // `snapshots[snapshot_index_for_rate(...)]`；只就绪另一份发布器时
             // `any()` 会误判"就绪"，随后在空发布器上逐样本写零 ⇒ 从有声阶跃到零。
@@ -5114,17 +5114,17 @@ impl ExtensionOwner {
     /// 【为什么要比 take 号】否则换 take 之后会继续播上一份原始磁带 —— 用户听到的是
     /// 上一次录制的内容，而界面上已经是新 take。
     fn raw_tape_ready(&self) -> bool {
-        if !self.transfer.has_material() {
+        if !self.capture.has_material() {
             return false;
         }
-        self.raw_tape_revision.load(Ordering::Acquire) == self.transfer.revision()
+        self.raw_tape_revision.load(Ordering::Acquire) == self.capture.revision()
             && self.raw_tape.is_ready()
     }
 
     /// 每个音频块的**观察与捕获**：只依赖输入总线与工程位置，**不依赖输出形状**。
     ///
     /// 【为什么必须与输出阶段分开 —— 这是"录制与输出全静音"的一个直接原因】
-    /// 这两件事此前都长在 [`Self::transfer_stage`] 里，而后者被 `process` 在
+    /// 这两件事此前都长在 [`Self::capture_stage`] 里，而后者被 `process` 在
     /// `num_samples == 0 || num_outputs == 0` 的早退**之后**才调用。于是"宿主没接我们的
     /// 输出总线"这一个与录制**无关**的事实，会让插件：
     ///   * 永远捕获不到任何东西（录制静音）；
@@ -5133,19 +5133,19 @@ impl ExtensionOwner {
     ///
     /// 前置条件（由调用方保证）：`data` 的样本是 32-bit 浮点、`process_context` 非空。
     /// 非 32-bit 时平面是 64 位（联合体同地址），按 `f32` 读会读到垃圾。
-    pub(crate) fn transfer_observe(
+    pub(crate) fn capture_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: &crate::audio_abi::ProcessContext,
     ) -> Option<BlockEvidence> {
-        let transfer = self.transfer();
+        let capture = self.capture();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let mode = unsafe { (*data).process_mode };
         let stream = ProcessStream::from_mode(mode);
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
-        // "点一次 Transfer 然后导出"，而实时宿主必须真的播一遍。
+        // "点一次 Capture 然后导出"，而实时宿主必须真的播一遍。
         if stream == ProcessStream::Offline {
-            transfer.note_offline();
+            capture.note_offline();
         }
         // 【为什么采样率有兜底】`ProcessContext::sample_rate` 是 SDK 标注 always valid 的
         // 字段，但真出现过宿主不填它的情形；而**没有率就无法把工程帧换算成秒**，
@@ -5166,9 +5166,9 @@ impl ExtensionOwner {
         };
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
-        // "必须先录一次才能录"——按钮永远是灰的，Transfer 在所有宿主上都用不了。
+        // "必须先录一次才能录"——按钮永远是灰的，Capture 在所有宿主上都用不了。
         // 代价是几个原子写 + 一次缓冲形状检查（不分配、不读样本）。
-        let playing_rising = transfer.observe_with_stream(&block, stream);
+        let playing_rising = capture.observe_with_stream(&block, stream);
         let was_recording = self.stream_recording[stream.index()].swap(recording, Ordering::AcqRel);
         let recording_rising = recording && !was_recording;
         // 【为什么要在相位判定之前记】`note_stream_geometry` 的"音频在流动"证据
@@ -5220,20 +5220,20 @@ impl ExtensionOwner {
         );
         // 【为什么捕获不再需要外面的门】`on_block` 自己先读一次 `is_armed` 就早退，
         // 代价与这里再判一次相同；而少一层门就少一处"两个判据漂移"的机会。
-        let mut outcome = crate::transfer::TransferBlockOutcome::Idle;
+        let mut outcome = crate::capture::CaptureBlockOutcome::Idle;
         for (index, part) in split.iter().enumerate() {
             let planes = [
                 slice_plane(block.planes[0], part),
                 slice_plane(block.planes[1], part),
             ];
-            let sub = crate::transfer::capture::InputBlock {
+            let sub = crate::capture::recorder::InputBlock {
                 start: part.position,
                 frames: part.frames,
                 sample_rate: block.sample_rate,
                 planes,
                 playing,
             };
-            let part_outcome = transfer.on_block_with_context(
+            let part_outcome = capture.on_block_with_context(
                 sub,
                 BlockContext {
                     stream,
@@ -5266,7 +5266,7 @@ impl ExtensionOwner {
             outcome = if index == 0 {
                 part_outcome
             } else {
-                combine_transfer_outcomes(outcome, part_outcome)
+                combine_capture_outcomes(outcome, part_outcome)
             };
         }
         self.note_block_trace(
@@ -5284,7 +5284,7 @@ impl ExtensionOwner {
             stream_block.had_previous,
             allow_output,
             outcome.code(),
-            transfer.capture_started(),
+            capture.capture_started(),
             StreamTime::from_context(context),
             rate,
             stream_block.counted,
@@ -5388,14 +5388,14 @@ impl ExtensionOwner {
     fn allow_output_for(
         &self,
         stream: ProcessStream,
-        block: &crate::transfer::capture::InputBlock<'_>,
+        block: &crate::capture::recorder::InputBlock<'_>,
         position: i64,
         phase: TransportPhase,
         playing_rising: bool,
         recording_rising: bool,
     ) -> bool {
         // 【为什么 bound 实例不参与这里的判据】它的"停播即静音"由
-        // `transfer_should_emit` 直接读 `kPlaying` 决定（见那里的说明：预取/offline
+        // `capture_should_emit` 直接读 `kPlaying` 决定（见那里的说明：预取/offline
         // 恒真、实时流看播放位）。若这里也参与，`evidence.allow_output` 会在"停播
         // 光标处的重复块"上翻假，把 ARA 的既有语义改掉。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
@@ -5438,7 +5438,7 @@ impl ExtensionOwner {
         }
     }
 
-    /// 记录“本块确实写出了内容”（由 [`Self::transfer_stage`] 在写入分支调用）。
+    /// 记录“本块确实写出了内容”（由 [`Self::capture_stage`] 在写入分支调用）。
     fn note_emitted(&self, evidence: Option<BlockEvidence>) {
         let Some(evidence) = evidence else {
             return;
@@ -5522,7 +5522,7 @@ impl ExtensionOwner {
         let jump = evidence.position.saturating_sub(expected).unsigned_abs();
         (jump > u64::try_from(OUTPUT_DECLICK_FRAMES).unwrap_or(u64::MAX)).then_some(jump)
     }
-    /// 音频线程上的 Transfer **输出**阶段。
+    /// 音频线程上的 Capture **输出**阶段。
     ///
     /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
     /// 未录制时它只读几个原子就返回，代价与"没写这段代码"相同 —— 这是它能被放在
@@ -5532,18 +5532,18 @@ impl ExtensionOwner {
     /// 输出上一次的快照会让用户听到**旧内容盖在新演奏上**。所以录制中按选项输出
     /// 直通（默认，让用户听到宿主原声）或静音。
     ///
-    /// 【为什么捕获不在这里】见 [`Self::transfer_observe`]：它必须发生在任何输出形状
+    /// 【为什么捕获不在这里】见 [`Self::capture_observe`]：它必须发生在任何输出形状
     /// 判定之前，否则"宿主没接输出"会让录制一起失效。
-    pub(crate) fn transfer_stage(
+    pub(crate) fn capture_stage(
         &self,
         data: *mut crate::audio_abi::ProcessData,
         evidence: Option<BlockEvidence>,
-    ) -> TransferStage {
-        let transfer = self.transfer();
+    ) -> CaptureStage {
+        let capture = self.capture();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let offline = unsafe { (*data).process_mode } == 2;
-        // 选项是无锁快照（见 `TransferStore::options`）。
-        let options = transfer.options();
+        // 选项是无锁快照（见 `CaptureStore::options`）。
+        let options = capture.options();
         // 去咔状态按进程流隔离；块长取宿主本回调声明的帧数。
         let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
         let frames = unsafe { (*data).num_samples as usize };
@@ -5551,7 +5551,7 @@ impl ExtensionOwner {
         // （用户监听自己），它不该被"停播重复抑制"影响 —— 那个判据描述的是"同一段
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
-        let output = self.transfer_output_with(evidence);
+        let output = self.capture_output_with(evidence);
         // 【T3：读游标跳变 ⇒ 这一块做一次去咔】种类与代次都没变，但这一块读的位置与
         // 上一块不同（pass 边界、宿主纠正记账、流交接）。那时读快照等于把**另一段**
         // 内容写进总线 —— 一次单样本阶跃。判据在 `read_position_jump`，纯函数、可单测。
@@ -5571,7 +5571,7 @@ impl ExtensionOwner {
         self.note_output_rung(output);
         // 【防御】门控已经在 `vst3.rs` 里判过一次；这里再判一次实时流，避免未来
         // 改动绕过门控时把停播重复块写出去。ARA 实例保持原语义（不参与）。
-        if output != TransferOutput::Recording {
+        if output != CaptureOutput::Recording {
             if let Some(evidence) = evidence {
                 if evidence.stream == ProcessStream::Realtime
                     && !evidence.allow_output
@@ -5581,7 +5581,7 @@ impl ExtensionOwner {
                     // 从上一块尾巴淡到零。本函数写满整块，**不能**再调 `clear_outputs`
                     // —— 那会把刚写好的淡出一起抹掉（见其文档）。
                     unsafe { self.apply_gate_fade_out(stream, &mut *(*data).outputs, frames) };
-                    return TransferStage::Handled;
+                    return CaptureStage::Handled;
                 }
             }
         }
@@ -5595,15 +5595,15 @@ impl ExtensionOwner {
             // 于是每个音频块都是纯零，用户听到的就是"有概率完全没声音"。
             // layered 让 `copy_block_layered_at` 在快照缺失处回退取宿主输入
             // （`snapshot.rs` 的 `input_at`），至少保住宿主原声而不是静音。
-            TransferOutput::Untouched => {
+            CaptureOutput::Untouched => {
                 let ready = self.processed_snapshot_ready();
                 self.note_bound_snapshot_fallback(!ready);
-                TransferStage::Snapshot {
+                CaptureStage::Snapshot {
                     source: SnapshotSource::Processed,
                     layered: !ready,
                 }
             }
-            TransferOutput::Recording => {
+            CaptureOutput::Recording => {
                 // 【为什么离线那一趟不监听】离线渲染（bounce / 导出）若只有一趟，直通会把
                 // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
                 // 错误。静音是诚实的：这一趟的唯一作用是把素材拿进来；第二趟（解除武装后再
@@ -5622,20 +5622,20 @@ impl ExtensionOwner {
                     let _ = unsafe { crate::audio_abi::clear_outputs(data) };
                 }
                 unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
-                TransferStage::Handled
+                CaptureStage::Handled
             }
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
             // 那段被替换成处理结果，其余保持宿主原声。见 `copy_block_layered`。
-            TransferOutput::Processed => {
+            CaptureOutput::Processed => {
                 self.note_emitted(evidence);
-                TransferStage::Snapshot {
+                CaptureStage::Snapshot {
                     source: SnapshotSource::Processed,
                     layered: options.outside_passthrough,
                 }
             }
-            TransferOutput::Raw => {
+            CaptureOutput::Raw => {
                 self.note_emitted(evidence);
-                TransferStage::Snapshot {
+                CaptureStage::Snapshot {
                     source: SnapshotSource::Raw,
                     layered: options.outside_passthrough,
                 }
@@ -5643,13 +5643,13 @@ impl ExtensionOwner {
             // 【为什么与 `PassThrough` 输出相同】素材在，但还没有任何可播的版本；
             // 唯一诚实的输出仍是宿主原声（静音会让整条轨"哑掉"）。区别只在**读数**：
             // 这一档让界面能说"素材已就绪，等待合成"，从而把"合成没跑"暴露出来。
-            // `transfer_output` 已置好 `render_wanted`，actor 会补排一次合成。
-            TransferOutput::PendingSynthesis | TransferOutput::PassThrough => {
+            // `capture_output` 已置好 `render_wanted`，actor 会补排一次合成。
+            CaptureOutput::PendingSynthesis | CaptureOutput::PassThrough => {
                 // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                 let _ = unsafe { crate::audio_abi::pass_through(data) };
                 self.note_emitted(evidence);
                 unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
-                TransferStage::Handled
+                CaptureStage::Handled
             }
         }
     }
@@ -5660,7 +5660,7 @@ impl ExtensionOwner {
     /// 窗口还开着（见 `HostBackend::from_native` 的说明），所以字段里那份在
     /// "宿主会绑定 ARA"的场合是 `AraOnly`、在"宿主不会绑定"的场合**也是** `AraOnly` ——
     /// 它区分不了这两种形态。形态由 [`Self::mode`] 在窗口关闭后给出，这里据此把
-    /// "无原生扩展且无 ARA" 解析成 [`crate::host::adapter::HostBackend::Transfer`]。
+    /// "无原生扩展且无 ARA" 解析成 [`crate::host::adapter::HostBackend::Capture`]。
     ///
     /// 【为什么原生扩展优先】REAPER 既有原生扩展**又**会绑定 ARA；只要字段里有
     /// `Native`，形态问题就不存在（它一定走 ARA），直接返回它。
@@ -5672,16 +5672,16 @@ impl ExtensionOwner {
             }
         }
         match self.mode() {
-            InstanceMode::Transfer => crate::host::adapter::HostBackend::Transfer(
-                crate::host::transfer::TransferHost::new(),
+            InstanceMode::Capture => crate::host::adapter::HostBackend::Capture(
+                crate::host::capture::CaptureHost::new(),
             ),
             // 【为什么 `Undetermined` 也要看素材】形态要等 `setActive` 之后 5 秒才落定，
             // 而"宿主把本插件当普通插入"的会话里用户可能从不打开窗口 —— 那时形态永远
-            // 停在 `Undetermined`，按 ARA-only 准备会让 Transfer 的渲染准入失败。
-            // 素材存在本身就是 Transfer 的证明（见 `renders`）。
-            InstanceMode::Undetermined if self.transfer.has_material() => {
-                crate::host::adapter::HostBackend::Transfer(
-                    crate::host::transfer::TransferHost::new(),
+            // 停在 `Undetermined`，按 ARA-only 准备会让 Capture 的渲染准入失败。
+            // 素材存在本身就是 Capture 的证明（见 `renders`）。
+            InstanceMode::Undetermined if self.capture.has_material() => {
+                crate::host::adapter::HostBackend::Capture(
+                    crate::host::capture::CaptureHost::new(),
                 )
             }
             // 剩下的 `Undetermined` 是"还没确定"（此时按 ARA 准备是安全的，ARA 是更丰富的
@@ -6063,32 +6063,32 @@ impl ExtensionOwner {
         // 容器解析对**历史格式**（裸 `EditState`）是透明的：没有魔数就整块按旧格式读。
         // 读不出来的后果是把用户已有的编辑弄丢，所以这条兼容不是可选项。
         let state = crate::component_state::ComponentState::decode(bytes)?;
-        if let Some(manifest) = state.transfer.as_deref() {
+        if let Some(manifest) = state.capture.as_deref() {
             match serde_json::from_slice::<serde_json::Value>(manifest) {
                 // 【为什么清单失败只记日志】PCM 丢了不该让参数曲线也读不出来 ——
                 // 那是两件独立的用户资产，而参数是更贵的那一份。
                 Ok(value) => {
-                    if let Err(error) = self.transfer.restore_manifest(&value) {
-                        log::warn!("[transfer] manifest restore failed: {error}");
+                    if let Err(error) = self.capture.restore_manifest(&value) {
+                        log::warn!("[capture] manifest restore failed: {error}");
                     }
                 }
-                Err(error) => log::warn!("[transfer] manifest is not valid JSON: {error}"),
+                Err(error) => log::warn!("[capture] manifest is not valid JSON: {error}"),
             }
         }
-        // 【Transfer 的用户曲线走会话，不走 `pending_restore`】`pending_restore` 的读者
+        // 【Capture 的用户曲线走会话，不走 `pending_restore`】`pending_restore` 的读者
         // 是 `merge_pending_restore`，它只服务 ARA 文档；没有文档时那条路是 no-op
         // （见 `refresh_document`）。把曲线投给会话，它会在下一次时间线加载时叠上去。
         //
         // 会话可能还不存在（用户从没开过窗口）—— 那时先暂存在 owner 上，
-        // `transfer_session()` 创建会话时补投。
-        if let Some(transfer_edits) = state.transfer_edits.as_deref() {
-            match self.transfer_session_if_initialized() {
+        // `capture_session()` 创建会话时补投。
+        if let Some(capture_edits) = state.capture_edits.as_deref() {
+            match self.capture_session_if_initialized() {
                 Some(session) => {
-                    session.stash_serialized_transfer_edits(transfer_edits)?;
+                    session.stash_serialized_capture_edits(capture_edits)?;
                     session.request_reload();
                 }
                 None => {
-                    *self.pending_transfer_edits.lock_or_recover() = Some(transfer_edits.to_vec());
+                    *self.pending_capture_edits.lock_or_recover() = Some(capture_edits.to_vec());
                 }
             }
         }
@@ -6492,7 +6492,7 @@ impl ExtensionOwner {
             .lock_or_recover()
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let (edits, transfer_edits) = if let Some(document) = document {
+        let (edits, capture_edits) = if let Some(document) = document {
             // 【为什么 flush 失败不再传播】actor 可能正在跑一次长合成；等 10 秒再失败
             // 会把宿主保存线程冻住，而且仍然存不下。短预算 + 用当前权威继续编码。
             if let Err(error) =
@@ -6598,8 +6598,8 @@ impl ExtensionOwner {
                 }
             }
         } else if self.bound_once.load(Ordering::Acquire) {
-            // 【为什么不能落到 Transfer 分支】这个实例曾经绑定过 ARA，只是文档已经
-            // 关闭。Transfer 的 `self.edits` 从未被 ARA 写过；序列化它等于用一份空
+            // 【为什么不能落到 Capture 分支】这个实例曾经绑定过 ARA，只是文档已经
+            // 关闭。Capture 的 `self.edits` 从未被 ARA 写过；序列化它等于用一份空
             // 状态覆盖用户全部编辑。保留最后一份成功载荷（或尚未合入的恢复载荷）。
             let edits = self
                 .last_ara_state
@@ -6614,13 +6614,13 @@ impl ExtensionOwner {
                 .unwrap_or_else(default_edit_state_bytes);
             (edits, None)
         } else {
-            // 【Transfer 形态：用户曲线在会话上，不在这里】`self.edits` 从未被任何
-            // Transfer 生产路径写过 —— 序列化它只会得到一个语法合法、语义为空的
+            // 【Capture 形态：用户曲线在会话上，不在这里】`self.edits` 从未被任何
+            // Capture 生产路径写过 —— 序列化它只会得到一个语法合法、语义为空的
             // `EditState`（那正是"重开工程参数全丢"的直接原因）。真正的权威是
-            // `EditorSession::timeline`，见 `editor::transfer_edits`。
+            // `EditorSession::timeline`，见 `editor::capture_edits`。
             //
             // `edits` 仍然写一份默认 `EditState`：`restore_state` 要能把它读回来，
-            // 而 ARA 字段在 Transfer 下本来就该是空的。
+            // 而 ARA 字段在 Capture 下本来就该是空的。
             let edits = self
                 .pending_restore
                 .lock_or_recover()
@@ -6628,78 +6628,78 @@ impl ExtensionOwner {
                 .and_then(|state| state.encode().ok())
                 .or_else(|| self.edits.lock_or_recover().encode().ok())
                 .unwrap_or_else(default_edit_state_bytes);
-            let transfer_edits = self.transfer_edits_for_save();
-            (edits, transfer_edits)
+            let capture_edits = self.capture_edits_for_save();
+            (edits, capture_edits)
         };
-        self.wrap_component_state(edits, transfer_edits)
+        self.wrap_component_state(edits, capture_edits)
     }
 
-    /// 保存 Transfer 用户编辑：优先 live 会话，其次恢复载荷，最后 owner 暂存。
+    /// 保存 Capture 用户编辑：优先 live 会话，其次恢复载荷，最后 owner 暂存。
     ///
     /// 【为什么顺序不能反】live 编辑是用户刚做的事，最权威；恢复载荷是"还没合入
     /// 时间线"的存档；owner 暂存是"连会话都还没建"。反过来会让一次保存把用户刚
     /// 画的曲线覆盖成旧存档。
-    fn transfer_edits_for_save(&self) -> Option<Vec<u8>> {
-        match self.transfer_session_if_initialized() {
+    fn capture_edits_for_save(&self) -> Option<Vec<u8>> {
+        match self.capture_session_if_initialized() {
             Some(session) => {
                 // 【为什么不是只看 `is_loaded`】恢复后、actor 第一次加载前，时间线可能
                 // 已经被写入（恢复路径/测试）；那仍是 live 权威，不能回落到空载荷。
-                let live = if session.is_loaded() || session.has_live_transfer_edits() {
+                let live = if session.is_loaded() || session.has_live_capture_edits() {
                     if let Err(error) =
                         session.flush_with_budget(std::time::Duration::from_millis(200))
                     {
                         log::warn!(
-                            "[transfer] flush before save exceeded the budget: {error}; using \
+                            "[capture] flush before save exceeded the budget: {error}; using \
                              the last committed curves"
                         );
                     }
-                    match session.serialize_transfer_edits() {
+                    match session.serialize_capture_edits() {
                         Ok(bytes) => Some(bytes),
                         Err(error) => {
-                            log::error!("[transfer] serialize before save failed: {error}");
+                            log::error!("[capture] serialize before save failed: {error}");
                             None
                         }
                     }
                 } else {
                     None
                 };
-                live.or_else(|| session.serialize_pending_transfer_edits())
+                live.or_else(|| session.serialize_pending_capture_edits())
             }
-            None => self.pending_transfer_edits.lock_or_recover().clone(),
+            None => self.pending_capture_edits.lock_or_recover().clone(),
         }
     }
 
-    /// 把 `EditState` 字节与 Transfer 清单包成组件 state。
+    /// 把 `EditState` 字节与 Capture 清单包成组件 state。
     ///
-    /// 【为什么清单只带路径】PCM 在 sidecar 文件里（见 `transfer::sidecar`）：
+    /// 【为什么清单只带路径】PCM 在 sidecar 文件里（见 `capture::sidecar`）：
     /// 组件 state 的预算是 `MAX_COMPONENT_STATE`（64 MiB），而 4 分钟立体声 96 kHz 已是 184 MB，何况组件 state
     /// 会进宿主的每一次保存与撤销快照。清单是几 KB。
     fn wrap_component_state(
         &self,
         edits: Vec<u8>,
-        transfer_edits: Option<Vec<u8>>,
+        capture_edits: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
-        let transfer = self.transfer.manifest();
-        let has_takes = transfer["takes"]
+        let capture = self.capture.manifest();
+        let has_takes = capture["takes"]
             .as_array()
             .is_some_and(|takes| !takes.is_empty());
-        // 【为什么没有 Transfer 数据时返回**裸** `EditState` 字节】两重理由：
+        // 【为什么没有 Capture 数据时返回**裸** `EditState` 字节】两重理由：
         //
         // 1. 那些实例没有任何额外信息要存，套一层容器纯是开销；
         // 2. 更重要的是**兼容性**：此前 `encode_state` 的输出就是 `EditState` 的
         //    编码（ARA 路径下是一段 JSON）。加容器会让每一个既有消费者与既有工程
         //    都读到看不懂的东西 —— 而它们本来完全正常。
         //
-        // 于是格式变成"有 Transfer 数据才是容器，否则是历史格式"，而 `decode`
+        // 于是格式变成"有 Capture 数据才是容器，否则是历史格式"，而 `decode`
         // 两种都认。这条不对称是有意的：新信息需要新格式，旧信息不需要。
-        let transfer_edits = transfer_edits.filter(|bytes| !bytes.is_empty());
-        if !has_takes && transfer_edits.is_none() {
+        let capture_edits = capture_edits.filter(|bytes| !bytes.is_empty());
+        if !has_takes && capture_edits.is_none() {
             return Ok(edits);
         }
         Ok(crate::component_state::ComponentState {
             edits,
-            transfer: has_takes.then(|| transfer.to_string().into_bytes()),
-            transfer_edits,
+            capture: has_takes.then(|| capture.to_string().into_bytes()),
+            capture_edits,
         }
         .encode())
     }
@@ -7068,7 +7068,7 @@ impl ExtensionOwner {
                     .filter(|owner| owner.renders_playback())
                     .map(|owner| {
                         let (keys, input) =
-                            owner.capture_render_input(&document, &candidate, true)?;
+                            owner.ara_render_input(&document, &candidate, true)?;
                         Ok((owner, keys, input))
                     })
                     .collect::<Result<Vec<_>, String>>()
@@ -7193,7 +7193,7 @@ impl ExtensionOwner {
         )
     }
     /// 调用方在短事务内冻结几何/参数/PCM，只复制本renderer授权源，不执行合成。
-    pub(crate) fn capture_render_input(
+    pub(crate) fn ara_render_input(
         &self,
         document: &super::document::DocumentSession,
         edits: &crate::state_channel::EditState,
@@ -7237,7 +7237,7 @@ impl ExtensionOwner {
         let geometry = document.regions.lock_or_recover();
         // 【为什么消失的 region 只跳过】此前这里 `ok_or("assigned region disappeared")?`
         // + `collect::<Result<_,_>>()?`：只要**一条**已分配的 key 不在 `regions` 表里
-        // （宿主销毁了 region、分配还没撤销的窗口），整份 `capture_render_input` 失败 ⇒
+        // （宿主销毁了 region、分配还没撤销的窗口），整份 `ara_render_input` 失败 ⇒
         // `prepare_job` 不发布快照 ⇒ 声音停在旧版本，且界面上只有一条内部错误。
         // 逐条过滤：消失的那条本次不参与渲染，其余照常。`keys` 与 `regions` 必须
         // **同长同序**（它们一起进 `RenderInput`），所以两者一起筛。
@@ -7341,7 +7341,7 @@ impl ExtensionOwner {
         //
         // 【为什么无效键只跳过】`clip_id_for` 只对 key==0 返回 `None`。此前这里的
         // `ok_or(...)?` + `collect::<Result>()` 会让**一个**无效键把整份
-        // `assigned_timeline` 打失败 —— 而它是 `capture_render_input` /
+        // `assigned_timeline` 打失败 —— 而它是 `ara_render_input` /
         // `merge_pending_restore` / `encode_state` 的共同入口 ⇒ 快照不发布 +
         // 存档保存失败。逐条过滤：那一条 region 本次不参与渲染，其余照常。
         let mut invalid_keys = 0_usize;
@@ -7697,21 +7697,21 @@ impl ExtensionOwner {
     /// "播放实例收到了多少次通知" —— 这正是 `render_input_invalidation_…`
     /// 那条不变量测试锁的东西（此前漏掉播放实例的回归就在这里）。放在前面
     /// 会把编辑器实例的 no-op 也数进去，测试就再也分不出"通知了谁"。
-    /// 为 Transfer 形态准备渲染基础设施。
+    /// 为 Capture 形态准备渲染基础设施。
     ///
     /// 【为什么必须有这一步】`prepare()` 依赖 `prepare_owner` 与 `preparation`，而这两样
-    /// 此前**只在 ARA 绑定时**建立（`bind_to_document`）。Transfer 实例从不绑定，于是
+    /// 此前**只在 ARA 绑定时**建立（`bind_to_document`）。Capture 实例从不绑定，于是
     /// 它的 `prepare()` 会在第一个早退处静默返回 —— 录制正常、界面正常、就是没有声音。
     /// 这类"线都接好了但没插电"的故障最难归因，所以这里显式补上那部分与 ARA 无关的
     /// 初始化。
     ///
     /// 【为什么可以重复调用】三处都是 `OnceLock` / 覆盖式赋值，重复调用无副作用；
     /// 它由 20ms 的 UI 定时器驱动，因此必须幂等。
-    pub(crate) fn arm_transfer_rendering(self: &Arc<Self>) {
+    pub(crate) fn arm_capture_rendering(self: &Arc<Self>) {
         self.init_block_trace();
         self.ensure_preparation();
         *self.prepare_owner.lock_or_recover() = Some(Arc::downgrade(self));
-        // 时钟：Transfer 没有 ARA 文档的共享时钟，自己起一个。宿主播放位置由
+        // 时钟：Capture 没有 ARA 文档的共享时钟，自己起一个。宿主播放位置由
         // `audio_process_inner` 的 `observe_transport` 照常写入（它与 ARA 无关）。
         let _ = self
             .clock
@@ -7722,7 +7722,7 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         // 【为什么在这里也要把会话立起来】处理结果的**唯一**生产者是会话 actor
-        // （`start_transfer_render` → `transfer_prepare_job`），而会话此前只在
+        // （`start_capture_render` → `capture_prepare_job`），而会话此前只在
         // `webview.rs` 的命令分发里惰性创建 —— 于是"从未打开过插件窗口"的会话里
         // 没有任何东西会把带曲线的渲染排出去：录制正常、时间轴有内容、
         // **播放时永远直通宿主原声**（用户报障）。
@@ -7732,8 +7732,8 @@ impl ExtensionOwner {
         // 【为什么只在有素材时才建】会话会起一个线程、初始化模型并建临时目录
         // （`EditorSession::new_with`）。一个插在母线上、用户早已忘记的实例不该在
         // 每次 `setupProcessing` 上都付这份代价；而没有素材时它也没有任何东西可渲染。
-        if self.transfer.has_material() {
-            if let Ok(session) = self.clone().transfer_session() {
+        if self.capture.has_material() {
+            if let Ok(session) = self.clone().capture_session() {
                 // 让 actor 下一轮加载时间线并排一次渲染（幂等：已加载时它只推票据）。
                 session.request_reload();
             }
@@ -7741,10 +7741,10 @@ impl ExtensionOwner {
     }
 
     pub fn prepare(&self) {
-        // 【B0】先报告上一批可疑块。放在早退**之前**：Transfer 实例在没有素材时
+        // 【B0】先报告上一批可疑块。放在早退**之前**：Capture 实例在没有素材时
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
-        self.log_transfer_report();
+        self.log_capture_report();
         if !self.renders() {
             return;
         }
@@ -7790,14 +7790,14 @@ impl ExtensionOwner {
     }
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
     pub(crate) fn prepare_offline_until(&self, deadline: std::time::Instant) -> Result<(), String> {
-        // 【为什么 Transfer 要在这里同步准备】bounce / 导出是 Transfer 的**第二条通路**，
+        // 【为什么 Capture 要在这里同步准备】bounce / 导出是 Capture 的**第二条通路**，
         // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
         // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
         // 【为什么判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里
         // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
         // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
-        if !self.is_bound() && self.transfer.has_material() {
-            return self.transfer_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        if !self.is_bound() && self.capture.has_material() {
+            return self.capture_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
         }
         if !self.renders_playback() {
             return Ok(());
@@ -7855,8 +7855,8 @@ impl ExtensionOwner {
     }
     /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
     fn prepare_job(&self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Result<(), String> {
-        // Transfer 形态没有 ARA 文档；在取文档**之前**分流，否则它会以
-        // "document closed" 收场，而那条路对 Transfer 是常态而非错误。
+        // Capture 形态没有 ARA 文档；在取文档**之前**分流，否则它会以
+        // "document closed" 收场，而那条路对 Capture 是常态而非错误。
         //
         // 【为什么判据是"未绑定 + 有素材"而不是 `mode()`】形态由 `note_editor_tick`
         // 落定，而它的唯一调用点是 WebView 的 20ms 定时器 —— **窗口不开就没有这个
@@ -7865,8 +7865,8 @@ impl ExtensionOwner {
         // ⇒ 一条处理结果都没合成过 ⇒ 仲裁落到直通。
         // `renders()` 早就因为同一理由绕开了 `mode()`（见它的注释）；准入侧与产出侧
         // 必须问同一个问题，否则"该出声"与"还没到时候"会各自漂移。
-        if !self.is_bound() && self.transfer.has_material() {
-            return self.transfer_prepare_job(cancel);
+        if !self.is_bound() && self.capture.has_material() {
+            return self.capture_prepare_job(cancel);
         }
         let Some(document) = self
             .document
@@ -7882,7 +7882,7 @@ impl ExtensionOwner {
                 return Ok(());
             }
             let edits = document.edits.lock_or_recover().clone();
-            let (keys, input) = self.capture_render_input(&document, &edits, edits.revision > 0)?;
+            let (keys, input) = self.ara_render_input(&document, &edits, edits.revision > 0)?;
             // actor可能已发布本代两率结果；同版本重排队不应再争预算或留下伪失败状态。
             let version = PreparedVersion {
                 model: document.revision.load(Ordering::Acquire),
@@ -7972,12 +7972,12 @@ struct BlockTraceRecord {
     capture: AtomicU8,
     capture_started: AtomicBool,
     rung: AtomicU8,
-    // ── 宿主时间字段（`[transfer] ctx` 用它回答"宿主到底给了什么"）──
+    // ── 宿主时间字段（`[capture] ctx` 用它回答"宿主到底给了什么"）──
     continuous: AtomicI64,
     continuous_valid: AtomicBool,
     music_bits: AtomicU64,
     music_valid: AtomicBool,
-    /// 【为什么要 tempo】`[transfer] ctx` 只打 `music=` 时，读者无法判断
+    /// 【为什么要 tempo】`[capture] ctx` 只打 `music=` 时，读者无法判断
     /// "Music 分支为什么没生效"：那一条要求 `music` 与 `tempo` **同时**有效。
     /// 现场日志里 `music=841.5(valid)` 连着几块不变，而 `counted=1` —— 只有
     /// 把 tempo 也打出来，才能一眼区分"宿主没给 tempo"与"music 冻结了"。
@@ -8099,7 +8099,7 @@ impl BlockTraceRing {
         record.seq.fetch_add(1, Ordering::Release);
     }
 
-    /// 最近一块的宿主上下文，格式化成 `[transfer] ctx: …` 一行。
+    /// 最近一块的宿主上下文，格式化成 `[capture] ctx: …` 一行。
     ///
     /// 【为什么只有一块】它回答的是"宿主此刻给的是什么形状"，不是历史。需要历史时
     /// 用 `snapshot`（诊断包里的块级 trace）。
@@ -8173,7 +8173,7 @@ impl BlockTraceRing {
         let music = f64::from_bits(music_bits);
         let tempo = f64::from_bits(tempo_bits);
         Some(format!(
-            "[transfer] ctx: stream={} mode={mode} state=0x{state:x} \
+            "[capture] ctx: stream={} mode={mode} state=0x{state:x} \
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
              cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} capture={} \
@@ -8300,7 +8300,7 @@ impl ExtensionOwner {
             "[buf] audit: channels={} frames={} unwritten={unwritten} output={}",
             self.buffer_audit_channels.load(Ordering::Acquire),
             self.buffer_audit_frames.load(Ordering::Acquire),
-            self.transfer_output().as_str(),
+            self.capture_output().as_str(),
         );
         let mut last = self.last_buffer_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {
@@ -8319,19 +8319,19 @@ impl ExtensionOwner {
         self.stream_gate_cleared[stream.index()].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// ARA 实例因快照未就绪而退回宿主原声（见 `transfer_stage` 的 `Untouched` 分支）。
+    /// ARA 实例因快照未就绪而退回宿主原声（见 `capture_stage` 的 `Untouched` 分支）。
     pub(crate) fn note_bound_snapshot_fallback(&self, fell_back: bool) {
         if fell_back {
             self.bound_snapshot_fallback.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// 本块最终走了哪一档输出仲裁（由 `transfer_stage` 在决定后调用）。
+    /// 本块最终走了哪一档输出仲裁（由 `capture_stage` 在决定后调用）。
     ///
     /// 【I-2 的读数在这里攒】"一次播放只有一个内容源"是可以直接数出来的：只要
     /// 相邻两块之间的档位不同，那一次切换就可能在听感上表现为一次咔。音频线程只做
-    /// 一次整数比较与两次原子写；报告留给非实时线程（见 `log_transfer_report`）。
-    pub(crate) fn note_output_rung(&self, output: TransferOutput) {
+    /// 一次整数比较与两次原子写；报告留给非实时线程（见 `log_capture_report`）。
+    pub(crate) fn note_output_rung(&self, output: CaptureOutput) {
         if let Some(ring) = self.block_trace.get() {
             ring.update_last_rung(output.code());
         }
@@ -8396,17 +8396,17 @@ impl ExtensionOwner {
                 .fetch_add(1, Ordering::Relaxed);
             self.stream_flow_without_playing[stream.index()].fetch_add(1, Ordering::Relaxed);
         }
-        // 只在确实与 Transfer 有关的实例上留证，避免给纯 ARA 实例刷日志。
+        // 只在确实与 Capture 有关的实例上留证，避免给纯 ARA 实例刷日志。
         // 同一次可疑窗口只报一次：`trace_logged` 由 actor 在 dump 后置位，
         // 直到宿主回到“钉住/停播”才复位，下一次起播再报。
         let suspicious = (!playing && flow) || raw_start < 0;
-        if (self.transfer.is_armed() || self.transfer.has_material())
+        if (self.capture.is_armed() || self.capture.has_material())
             && suspicious
             && !self.trace_logged.load(Ordering::Relaxed)
         {
             self.trace_wanted.store(true, Ordering::Release);
         }
-        if !playing && !flow && (self.transfer.is_armed() || self.transfer.has_material()) {
+        if !playing && !flow && (self.capture.is_armed() || self.capture.has_material()) {
             self.trace_logged.store(false, Ordering::Release);
         }
         if let Some(ring) = self.block_trace.get() {
@@ -8443,7 +8443,7 @@ impl ExtensionOwner {
 
     /// 块级诊断的 JSON（非音频线程）。`trace_limit` 控制环形记录条数。
     pub(crate) fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
-        let capture = self.transfer.capture_diagnostics().map(|capture| {
+        let capture = self.capture.capture_diagnostics().map(|capture| {
             serde_json::json!({
                 "preroll_frames_dropped": capture.preroll_frames_dropped,
                 "pending_stashed": capture.pending_stashed,
@@ -8476,7 +8476,7 @@ impl ExtensionOwner {
                 "pre_roll_frames": capture.pre_roll_frames,
                 // T19：旁路队列。竞争时暂存、下一次进锁时补写；`dropped > 0` 说明
                 // 槽全满而竞争又在持续 —— 那时快照里会有洞。
-                "bypass_pending": self.transfer.bypass_pending(),
+                "bypass_pending": self.capture.bypass_pending(),
             })
         });
         let stream = |index: usize| {
@@ -8584,15 +8584,15 @@ fn slice_plane<'a>(plane: Option<&'a [f32]>, part: &SubBlock) -> Option<&'a [f32
 }
 
 /// 合并循环切分两段的捕获结论：只要有一段真的写了，就报 `Capturing`。
-fn combine_transfer_outcomes(
-    first: crate::transfer::TransferBlockOutcome,
-    second: crate::transfer::TransferBlockOutcome,
-) -> crate::transfer::TransferBlockOutcome {
-    use crate::transfer::TransferBlockOutcome;
-    if first == TransferBlockOutcome::Capturing || second == TransferBlockOutcome::Capturing {
-        return TransferBlockOutcome::Capturing;
+fn combine_capture_outcomes(
+    first: crate::capture::CaptureBlockOutcome,
+    second: crate::capture::CaptureBlockOutcome,
+) -> crate::capture::CaptureBlockOutcome {
+    use crate::capture::CaptureBlockOutcome;
+    if first == CaptureBlockOutcome::Capturing || second == CaptureBlockOutcome::Capturing {
+        return CaptureBlockOutcome::Capturing;
     }
-    if first != TransferBlockOutcome::Idle {
+    if first != CaptureBlockOutcome::Idle {
         first
     } else {
         second
@@ -8614,4 +8614,4 @@ mod host_geometries_tests;
 #[cfg(test)]
 mod region_geometry_match_tests;
 #[cfg(test)]
-mod transfer_output_tests;
+mod capture_output_tests;

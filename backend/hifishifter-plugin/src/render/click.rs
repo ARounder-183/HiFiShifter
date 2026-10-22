@@ -89,7 +89,7 @@ impl SeamCode {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BlockSample {
     pub stream: u8,
-    /// 本块的输出源种类（`TransferOutput::code()`）。
+    /// 本块的输出源种类（`CaptureOutput::code()`）。
     pub kind: u8,
     pub seam: SeamCode,
     pub fade_len: u32,

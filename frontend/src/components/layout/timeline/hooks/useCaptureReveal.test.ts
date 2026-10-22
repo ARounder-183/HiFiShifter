@@ -8,7 +8,7 @@
 // @vitest-environment jsdom
 import { expect, test, vi } from "vitest";
 
-import { revealSpan } from "./useTransferReveal";
+import { revealSpan } from "./useCaptureReveal";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
 function viewport(args: { pxPerSec: number; viewportWidth?: number }) {

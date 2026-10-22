@@ -2107,7 +2107,7 @@ impl ModelHandle {
     ///
     /// 【为什么不会让旧音频盖住新内容】内容变化时 `source_content_version` 会前进，
     /// 而 `SourcePcm` 带 `version`，渲染缓存键含它。保留旧 PCM 的那一窗口里渲染读到
-    /// 的是**上一版内容**——与 Transfer 的 `StaleProcessed` 是同一条既有纪律。
+    /// 的是**上一版内容**——与 Capture 的 `StaleProcessed` 是同一条既有纪律。
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
         // 【T-A1-4：这里**不能**无条件撤渲染权威】本函数被宿主每一次内容/访问变化调用，
         // 也被我们自己的 1 s 重试调用。旧实现在最开头 `revoke_renderers()`，于是
@@ -2995,14 +2995,6 @@ mod tests {
         (model, key)
     }
 
-    /// 同一份模型重复交付时**不重算**。
-    ///
-    /// 【为什么必须钉住】实测 Cubase 15 的一次分割里同一份模型被算了 4 遍（日志
-    /// 22:20:54：同一条 `playback_region #0` 的映射读数连着出现 4 次）。每次重算都会
-    /// 重跑参数投影与宿主清单刷新、并可能失效渲染输入 —— 那是自动应用
-    /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic
-    /// apply` 的直接来源。
-    #[test]
     /// **被推迟的编辑收口之后，时间线必须仍然被发布。**
     ///
     /// 【为什么这是问题二 2c 的回归】`endEditing` 在 content reader 存活时被推迟
@@ -3047,6 +3039,14 @@ mod tests {
         );
     }
 
+    /// 同一份模型重复交付时**不重算**。
+    ///
+    /// 【为什么必须钉住】实测 Cubase 15 的一次分割里同一份模型被算了 4 遍（日志
+    /// 22:20:54：同一条 `playback_region #0` 的映射读数连着出现 4 次）。每次重算都会
+    /// 重跑参数投影与宿主清单刷新、并可能失效渲染输入 —— 那是自动应用
+    /// "冻结 → 发布"窗口被自己打断、报 `Conflict: host model changed during automatic
+    /// apply` 的直接来源。
+    #[test]
     fn end_editing_skips_the_remap_when_the_model_did_not_change() {
         let (mut model, _key) = model_with_one_region();
         // 还没发布过时间线 ⇒ 必须算。
