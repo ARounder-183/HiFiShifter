@@ -19,7 +19,6 @@ import {
     setTrackStateRemote,
     setScaleHighlightMode,
     toggleLockParamLines,
-    cycleDragDirection,
     setToolModePersistent,
     persistUiSettings,
     setParamEditorSyncTimeline,
@@ -30,15 +29,12 @@ import { TimelineDisplaySettingsDialog } from "../../TimelineDisplaySettingsDial
 import { buildReferencePitchStrokeColor } from "../referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "../referenceRootTrackTrigger";
 import { wholeDevicePxLength } from "../../../../utils/devicePixelLine";
-import {
-    formatKeybindingList,
-    isNoneBindingList,
-} from "../../../../features/keybindings/keybindingsSlice";
 import { AppIconButton, AppSelect } from "../../../../ui";
 import { ToolbarSlot, ParamToolbarPill } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
 import { PitchSnapMenu } from "./PitchSnapMenu";
+import { DragDirectionButton } from "./DragDirectionButton";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -128,12 +124,9 @@ type Props = {
 
 export function ParamToolbar({ m }: Props) {
     const {
-        activeDragDirection,
-        activeDragDirectionTool,
         attachEdgeSmoothnessWheel,
         childPitchOffsetCentsParam,
         childPitchOffsetDegreesParam,
-        cycleDragDirectionKb,
         devicePixelRatio,
         dispatch,
         editParam,
@@ -230,71 +223,7 @@ export function ParamToolbar({ m }: Props) {
                             opacity: 0.9,
                         }}
                     />
-                    {/* 拖动方向按钮 */}
-                    <AppIconButton
-                        active={activeDragDirection !== "free"}
-                        tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
-                            isNoneBindingList(cycleDragDirectionKb)
-                                ? ""
-                                : ` (${formatKeybindingList(cycleDragDirectionKb, "")})`
-                        }`}
-                        tabIndex={-1}
-                        onClick={() => {
-                            dispatch(cycleDragDirection(activeDragDirectionTool));
-                            void dispatch(persistUiSettings());
-                        }}
-                        icon={
-                            activeDragDirection === "free" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M3.5 11.5L11.5 3.5M11.5 3.5L8 3.5M11.5 3.5L11.5 7M3.5 11.5L7 11.5M3.5 11.5L3.5 8"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : activeDragDirection === "x-only" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M2 7.5H13M2 7.5L4.5 5M2 7.5L4.5 10M13 7.5L10.5 5M13 7.5L10.5 10"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M7.5 2V13M7.5 2L5 4.5M7.5 2L10 4.5M7.5 13L5 10.5M7.5 13L10 10.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            )
-                        }
-                    />
+                    <DragDirectionButton m={m} />
 
                     <PitchSnapMenu m={m} />
                     <AppIconButton
