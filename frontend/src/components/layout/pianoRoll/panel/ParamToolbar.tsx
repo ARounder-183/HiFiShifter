@@ -10,10 +10,9 @@
  * 工具栏能碰到的东西一目了然，越界即类型错误。
  */
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
-import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
-import { ChevronDownIcon, CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
+import { Flex, Button, Box } from "@radix-ui/themes";
+import { CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
-    setEditParam,
     setEdgeSmoothnessPercent,
     setTrackStateRemote,
     setScaleHighlightMode,
@@ -26,12 +25,13 @@ import { resolvePitchAlgoSelectValue } from "../../../../features/tracks/pitchAl
 import { TimelineDisplaySettingsDialog } from "../../TimelineDisplaySettingsDialog";
 import { wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import { AppIconButton, AppSelect } from "../../../../ui";
-import { ToolbarSlot, ParamToolbarPill } from "./toolbarParts";
+import { ToolbarSlot } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
 import { PitchSnapMenu } from "./PitchSnapMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
+import { ChildPitchGroup } from "./ChildPitchGroup";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -122,32 +122,23 @@ type Props = {
 export function ParamToolbar({ m }: Props) {
     const {
         attachEdgeSmoothnessWheel,
-        childPitchOffsetCentsParam,
-        childPitchOffsetDegreesParam,
         devicePixelRatio,
         dispatch,
-        editParam,
         getProcessorParamLabel,
         getStaticOptionLabel,
         handleStaticParamChange,
         pitchAlgoOptions,
-        pitchGroupActive,
-        pitchGroupLabel,
-        pitchGroupTooltip,
         pitchSnapOpen,
         processorStaticParams,
         processorStaticValues,
         rootTrack,
         rootTrackId,
         s,
-        secondaryParamVisible,
-        selectedIsChildTrack,
         setPitchSnapOpen,
         setTimeDisplaySettingsOpen,
         t,
         tf,
         timeDisplaySettingsOpen,
-        toggleSecondaryParam,
         toolbarRowRef,
         toolbarTier,
     } = m;
@@ -414,91 +405,7 @@ export function ParamToolbar({ m }: Props) {
             <Flex gap="2" align="center">
                 <Flex gap="1" align="center">
                     <ReferenceTrackGroup m={m} />
-                    {selectedIsChildTrack &&
-                    (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
-                        <DropdownMenu.Root>
-                            <ParamToolbarPill
-                                label={pitchGroupLabel}
-                                labelTooltip={pitchGroupTooltip}
-                                active={pitchGroupActive}
-                                onSelect={() => dispatch(setEditParam("pitch"))}
-                                eyeMode={
-                                    pitchGroupActive
-                                        ? "main"
-                                        : secondaryParamVisible["pitch"]
-                                          ? "on"
-                                          : "off"
-                                }
-                                onToggleEye={() => toggleSecondaryParam("pitch")}
-                                eyeTooltip={
-                                    secondaryParamVisible["pitch"]
-                                        ? t("secondary_overlay_tooltip_visible")
-                                        : t("secondary_overlay_tooltip_hidden")
-                                }
-                                eyeLabel={
-                                    secondaryParamVisible["pitch"]
-                                        ? t("hide_secondary_param")
-                                        : t("show_secondary_param")
-                                }
-                                dropdown={
-                                    <DropdownMenu.Trigger
-                                        className="param-pill__seg param-pill__seg--chev"
-                                        data-tooltip={pitchGroupTooltip}
-                                        tabIndex={-1}
-                                    >
-                                        <ChevronDownIcon width="12" height="12" />
-                                    </DropdownMenu.Trigger>
-                                }
-                            />
-                            <DropdownMenu.Content variant="soft" color="gray">
-                                <DropdownMenu.RadioGroup
-                                    value={editParam}
-                                    onValueChange={(value) => dispatch(setEditParam(value))}
-                                >
-                                    <DropdownMenu.RadioItem value="pitch">
-                                        {t("child_pitch_root_option")}
-                                    </DropdownMenu.RadioItem>
-                                    {childPitchOffsetCentsParam ? (
-                                        <DropdownMenu.RadioItem value={childPitchOffsetCentsParam}>
-                                            {t("child_pitch_cents_option")}
-                                        </DropdownMenu.RadioItem>
-                                    ) : null}
-                                    {childPitchOffsetDegreesParam ? (
-                                        <DropdownMenu.RadioItem
-                                            value={childPitchOffsetDegreesParam}
-                                        >
-                                            {t("child_pitch_degrees_option")}
-                                        </DropdownMenu.RadioItem>
-                                    ) : null}
-                                </DropdownMenu.RadioGroup>
-                            </DropdownMenu.Content>
-                        </DropdownMenu.Root>
-                    ) : (
-                        <ParamToolbarPill
-                            label={t("param_btn_pitch")}
-                            labelTooltip={t("common_pitch")}
-                            active={editParam === "pitch"}
-                            onSelect={() => dispatch(setEditParam("pitch"))}
-                            eyeMode={
-                                editParam === "pitch"
-                                    ? "main"
-                                    : secondaryParamVisible["pitch"]
-                                      ? "on"
-                                      : "off"
-                            }
-                            onToggleEye={() => toggleSecondaryParam("pitch")}
-                            eyeTooltip={
-                                secondaryParamVisible["pitch"]
-                                    ? t("secondary_overlay_tooltip_visible")
-                                    : t("secondary_overlay_tooltip_hidden")
-                            }
-                            eyeLabel={
-                                secondaryParamVisible["pitch"]
-                                    ? t("hide_secondary_param")
-                                    : t("show_secondary_param")
-                            }
-                        />
-                    )}
+                    <ChildPitchGroup m={m} />
                     {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                     <ParamButtons m={m} />
                 </Flex>
