@@ -480,6 +480,24 @@ impl Authority<'_> {
         }
     }
 
+    /// 这份权威的曲线**按哪个域索引**。
+    ///
+    /// 【为什么读路径必须用它，而不是 `default_anchor()`】`capture_inner` 会把
+    /// `landed_anchor` 写进权威（与落地的数据同源），但读路径此前只信"当前设置"。
+    /// 两者可以相反：用户拨动「锁定参数线」之后，读路径会按另一种映射解释同一个
+    /// 数组 —— 整条曲线偏移一个源窗起点，而数据一格都没丢。用户看到的就是
+    /// "移动片段后参数线留在原地/偏了"。
+    ///
+    /// `Legacy`（旧存档的 per-clip 记录）没有 `anchor` 字段，`serde(default)` 也
+    /// 补不出"当初是怎么写的"，只能按当前设置解释 —— 而那条路径只是迁移窗口，
+    /// `EditState::encode` 已在写出前清空它。
+    fn anchor(&self, fallback: ParamAnchor) -> ParamAnchor {
+        match self {
+            Self::Current(params) => params.anchor,
+            Self::Legacy(_) => fallback,
+        }
+    }
+
     /// 是否持有一条音高编辑曲线。
     ///
     /// 【为什么这是"内核不得清空"的判据】内核 `ensure_params_for_root` 在
@@ -1740,12 +1758,12 @@ impl ParameterAtlas {
     ) -> Result<BTreeMap<String, TrackParamsState>, String> {
         self.project_in_domain(timeline, identities, true)
     }
-    /// 与 `project` 相同，但**显式给定锚点**。
+    /// 与 `project` 相同，但**显式给定旧存档的兜底锚点**。
     ///
-    /// 【为什么生产路径不走这里】`project` 走 `authority.anchor()`，而它读
-    /// 「锁定参数线」的当前设置 —— 那是唯一权威来源。本函数只服务于测试：
-    /// 进程级设置是全局状态，并行用例不能改它，于是"另一支"只能由调用方把锚点
-    /// 直接喂到同一个下游参数上。
+    /// 【注意：它不再决定"用哪条映射"】权威曲线按它自己的 `anchor` 解释
+    /// （见 `Authority::anchor`）；这个参数只在**旧存档的 per-clip 记录**上生效
+    /// （那种记录没有锚点字段）。测试因此可以直接构造两种域的数据，而不必改
+    /// 进程级设置。
     #[cfg(test)]
     pub(crate) fn project_with_anchor(
         &self,
@@ -1845,6 +1863,11 @@ impl ParameterAtlas {
                     ),
                 );
             }
+            // 【读必须与写同源】这条曲线的存储域由**它自己的 anchor** 决定（见
+            // `Authority::anchor`）。用调用方传进来的"当前设置"去读，会在用户拨动
+            // 「锁定参数线」之后按另一种映射解释同一个数组 —— 那正是"移动片段后
+            // 参数线留在原地"的形状。`anchor` 参数因此退化为**旧存档的兜底**。
+            let curve_anchor = authority.anchor(anchor);
             for (key, curve) in authority.curves() {
                 // 本曲线的输出索引域：局部投影 ⇒ clip 局部零点；否则绝对工程帧。
                 let out_domain = if local {
@@ -1855,7 +1878,7 @@ impl ParameterAtlas {
                 set_curve(
                     &mut params,
                     key,
-                    curve.project(&geometry, key, frame_ms, anchor, out_domain)?,
+                    curve.project(&geometry, key, frame_ms, curve_anchor, out_domain)?,
                 );
             }
             params.pitch_orig_key = None;
@@ -4320,48 +4343,62 @@ mod tests {
         );
     }
 
-    /// **投影读当前设置，不读捕获时定死的锚点（第八轮 C2）。**
+    /// **投影按权威自己的锚点解释曲线，而不是按调用方传进来的"当前设置"。**
     ///
-    /// 【为什么这条是必须的】用户切换「锁定参数线」后期望**下一次投影**就换向。
-    /// 沿用捕获时的值意味着开关是死的：切下去之后画面一动不动。这里构造一份
-    /// 锚点是 `Source` 的权威，再把当前设置翻到不锁定，断言投影立刻换成
-    /// "参数留在工程位置"的语义。
+    /// 【为什么这是"移动片段后参数线留在原地"的根因】`capture_inner` 早就把
+    /// `landed_anchor` 写进了权威（与落地的数据同源），但读路径此前只信
+    /// `default_anchor()`。两者可以相反：烘焙被拒时（工程域会让曲线变短）
+    /// `landed_anchor` 保留**旧**锚点，而"当前设置"已经是新值 —— 于是投影按另一种
+    /// 映射去读同一个数组，整条曲线偏移一个源窗起点。数据一格都没丢，用户看到的
+    /// 却是"参数线不动了"。
     ///
-    /// 【为什么不改进程级设置】那是全局状态且测试并行，改了会污染别的用例
-    /// （与 `default_anchor` 测试替身同一条理由）。这里直接替换锚点解析函数
-    /// 的输入变量 —— 由 `default_anchor` 读，因此这条测试把夹具的
-    /// `anchor` 字段当作"捕获时的值"，而断言的是**投影时用的是当前值**。
+    /// 【那"切换开关立刻生效"怎么办】它由**烘焙**实现（见
+    /// `toggling_the_lock_bakes_the_curve_instead_of_reinterpreting_it`）：
+    /// 捕获时把数据真的搬到新域，并把 `anchor` 一起写新。于是"读当前设置"与
+    /// "读权威锚点"在正常情况下是同一件事，只在烘焙被拒时分开 —— 而那时正确的
+    /// 只能是数据自己的锚点。
     #[test]
-    fn projection_follows_the_current_lock_setting_not_the_captured_anchor() {
+    fn projection_uses_the_authority_anchor_not_the_callers_fallback() {
         let ids = identities();
-        // 夹具：一条**源域**权威 —— 生产曲线一律如此（第七轮起
-        // `capture_source_curve` 写 `basis: None`，格号从源帧 0 起）。
-        // 注意它**不带** `ParamAnchor::Source` 的捕获值：锚点不是曲线的一部分，
-        // 它是每次投影时读的设置。早先把锚点存进权威里"一次定终身"，于是用户
-        // 切换开关之后投影毫无变化 —— 那正是本测试要钉死的回归。
         let mut atlas = ParameterAtlas::default();
+        // 种子：源域曲线 + `anchor = Source`（生产路径的常态）。
         atlas.seed_test_pitch_curve("mod:mod", 250., vec![60., 62., 64., 66.]);
 
-        // 锁定 ⇒ 参数跟素材走：片段从 [1,2) 移到 [3,4)，曲线跟着搬家。
+        // 即便调用方说"当前设置是 Project"，投影也必须按源域读 ——
+        // 片段从 [1,2) 移到 [3,4) 时曲线跟着素材走。
         let moved = atlas
-            .project_with_anchor(&host(3., 1., 0., 1.), &ids, ParamAnchor::Source)
+            .project_with_anchor(&host(3., 1., 0., 1.), &ids, ParamAnchor::Project)
             .unwrap();
         assert_eq!(
             &moved["clip"].pitch_edit[12..16],
             &[60., 62., 64., 66.],
-            "锁定时参数必须跟着素材移动"
+            "权威锚点是 Source ⇒ 曲线必须跟着素材移动，不能被调用方的兜底值改写"
         );
+    }
 
-        // 不锁定 ⇒ 参数留在工程位置。同一个权威、同一条曲线，只把锚点换成
-        // `Project`：片段搬到 [3,4) 之后，3..4 秒处没有任何曲线 ⇒ 读出默认值。
-        let unlocked = atlas
-            .project_with_anchor(&host(3., 1., 0., 1.), &ids, ParamAnchor::Project)
-            .unwrap();
-        assert_eq!(
-            &unlocked["clip"].pitch_edit[12..16],
-            &[0., 0., 0., 0.],
-            "不锁定时参数必须留在原工程位置，而不是跟着片段搬家"
-        );
+    /// **不变式：权威里每条曲线的存储域必须等于它自己锚点对应的域。**
+    ///
+    /// 【为什么单独钉一条】上一条测试测的是"读的时候用了谁"，这条测的是"数据本身
+    /// 自洽不自洽"。两者一起才排除"读对了但数据是错的"这种更隐蔽的形态。
+    #[test]
+    fn every_authority_curve_domain_matches_its_own_anchor() {
+        let ids = identities();
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &ids)
+            .expect("捕获必须成功");
+        for (key, params) in &atlas.authorities {
+            let wanted = match params.anchor {
+                ParamAnchor::Source => CurveDomain::Source,
+                ParamAnchor::Project => CurveDomain::Project,
+            };
+            for (curve_key, curve) in &params.curves {
+                assert_eq!(
+                    curve.domain, wanted,
+                    "权威 {key} 的曲线 {curve_key} 存储域与它自己的锚点不一致：\
+                     读路径会按锚点解释它，于是整条曲线偏移一个源窗起点"
+                );
+            }
+        }
     }
 
     /// **拨动「锁定参数线」是一次烘焙，而不是一次重新解释。**
