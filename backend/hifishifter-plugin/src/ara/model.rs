@@ -2063,7 +2063,7 @@ impl AudioSources for ModelHandle {
         }
         log::info!("[ara] audio_source samples_access enable={enable}");
         self.refresh_source_pcm(*state, host);
-        if enable && std::env::var_os("HIFISHIFTER_ARA_PCM_PROBE").is_some() {
+        if enable && std::env::var_os("HIFISHIFTER_PLUGIN_PCM_PROBE").is_some() {
             // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
             let result = (|| {
                 let source = self

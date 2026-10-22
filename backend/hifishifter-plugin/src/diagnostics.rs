@@ -1,6 +1,6 @@
 //! 插件 DLL 的轻量诊断日志。
 //!
-//! 【为什么默认就该写日志】原先只有在 `HIFISHIFTER_ARA_LOG` 有值时才写文件 ——
+//! 【为什么默认就该写日志】原先只有在 `HIFISHIFTER_PLUGIN_LOG` 有值时才写文件 ——
 //! 而那是探针脚本专用的环境变量，普通用户根本不会设。于是"插件出问题时去 Help →
 //! 打开日志目录拿日志"这条路是断的：那里既没有日志，菜单项本身也会因为命令未实现
 //! 而报错。REAPER 不提供插件日志后端，所以文件日志是唯一的排查手段。
@@ -12,8 +12,14 @@
 //! 唯一的差异是**文件名**（`plugin.log` vs `hifishifter.log`），这是有意的：
 //! 同目录不冲突，轮转也各按自己的文件名进行。
 //!
-//! 覆盖顺序：`HIFISHIFTER_ARA_LOG`（探针的精确落点，一个**文件**路径）>
+//! 覆盖顺序：`HIFISHIFTER_PLUGIN_LOG`（精确落点，一个**文件**路径）>
 //! `HIFISHIFTER_LOG_DIR`（与 App 同名同义的**目录**）> 平台默认。
+//!
+//! 【为什么这两个变量不再叫 `HIFISHIFTER_ARA_*`】宿主不提供 ARA 时本插件仍然可作为
+//! 常规 VST3 使用（主要靠捕获通路），"ARA" 只描述其中一条通路。同一个前缀下还有几个
+//! 探针/开发用的变量（`_PCM_PROBE` / `_TRANSPORT_PROBE` / `_EDITOR_ASSETS` …），
+//! 它们一并改成了 `HIFISHIFTER_PLUGIN_*` —— 这组变量此前只存在于开发者脚本里，
+//! 没有对外承诺，因此不保留旧名。
 
 use hifishifter_kernel::logfile::RotatingLog;
 use std::path::{Path, PathBuf};
@@ -67,7 +73,7 @@ impl log::Log for FileLogger {
 /// 解析日志文件路径（结果只算一次）。
 fn log_path() -> Option<&'static PathBuf> {
     Some(LOG_PATH.get_or_init(|| {
-        for variable in ["HIFISHIFTER_ARA_LOG", "HIFISHIFTER_LOG_DIR"] {
+        for variable in ["HIFISHIFTER_PLUGIN_LOG", "HIFISHIFTER_LOG_DIR"] {
             if let Some(raw) = std::env::var_os(variable) {
                 let raw = raw.to_string_lossy().trim().to_owned();
                 if raw.is_empty() {
@@ -75,7 +81,7 @@ fn log_path() -> Option<&'static PathBuf> {
                 }
                 let path = PathBuf::from(&raw);
                 // `HIFISHIFTER_LOG_DIR` 是**目录**（与 App 同名同义）；
-                // `HIFISHIFTER_ARA_LOG` 是探针用的**文件**路径。
+                // `HIFISHIFTER_PLUGIN_LOG` 是探针用的**文件**路径。
                 return if variable == "HIFISHIFTER_LOG_DIR" {
                     path.join(PLUGIN_LOG_FILE)
                 } else {
@@ -218,7 +224,7 @@ mod tests {
     /// 这条断言把"同一个目录"钉住；文件名不同是另一件事（见下一条）。
     #[test]
     fn the_plugin_log_shares_the_app_log_directory() {
-        if std::env::var_os("HIFISHIFTER_ARA_LOG").is_some()
+        if std::env::var_os("HIFISHIFTER_PLUGIN_LOG").is_some()
             || std::env::var_os("HIFISHIFTER_LOG_DIR").is_some()
         {
             return;
@@ -252,7 +258,7 @@ mod tests {
     #[test]
     fn the_env_overrides_take_precedence() {
         // 不实际设置环境变量（会与并行测试互踩），只断言**未设置**时用的是默认目录。
-        if std::env::var_os("HIFISHIFTER_ARA_LOG").is_some()
+        if std::env::var_os("HIFISHIFTER_PLUGIN_LOG").is_some()
             || std::env::var_os("HIFISHIFTER_LOG_DIR").is_some()
         {
             return;

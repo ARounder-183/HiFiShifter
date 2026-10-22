@@ -543,7 +543,7 @@ fn pin_callback_code() -> Result<(), String> {
         .clone()
 }
 fn assets() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("HIFISHIFTER_ARA_EDITOR_ASSETS") {
+    if let Some(path) = std::env::var_os("HIFISHIFTER_PLUGIN_EDITOR_ASSETS") {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
             return Err("editor asset override must be absolute".into());

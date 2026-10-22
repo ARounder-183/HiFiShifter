@@ -611,7 +611,7 @@ impl EditorSession {
             render_task: Mutex::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
-            transport_probe: std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),
+            transport_probe: std::env::var_os("HIFISHIFTER_PLUGIN_TRANSPORT_PROBE").is_some(),
             transport_probe_next: Mutex::new(Instant::now()),
             host_selection: Mutex::new(None),
             reload_requested: AtomicBool::new(false),

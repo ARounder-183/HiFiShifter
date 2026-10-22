@@ -1,5 +1,13 @@
-//! ARA宿主mono合成PCM的内容磁盘缓存；不参与文件App缓存，不在实时线程调用。
-//! 完整内容/模型键与完整payload摘要校验，固定配额、原子替换；缓存失败只退回原推理。
+//! 宿主 mono 合成 PCM 的内容磁盘缓存（宿主经 ARA 交来的素材）；不参与文件 App 缓存，
+//! 不在实时线程调用。完整内容/模型键与完整 payload 摘要校验，固定配额、原子替换；
+//! 缓存失败只退回原推理。
+//!
+//! 【为什么这里不再出现 "ARA"】它缓存的是"宿主交来的 PCM 经处理器之后"的中间产物，
+//! 与 ARA 本身无关（捕获通路不经过它，但同属插件侧的宿主素材）。此前目录名、魔数、
+//! 哈希盐里都带着 `ara`，而覆盖变量又叫 `HIFISHIFTER_ARA_CACHE_DIR` —— 同一个概念
+//! 在四处各写一遍 "ARA"，改一处就会漏三处。现在统一成 `plugin` / `HFS...`。
+//!
+//! 全部改名是安全的：这是**可重算**的缓存，旧条目读不出来只会被丢弃并重算一次。
 
 use crate::renderer::ClipProcessContext;
 use std::fs::{self, File};
@@ -7,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAGIC: &[u8; 8] = b"HFSARA01";
+const MAGIC: &[u8; 8] = b"HFSPCM01";
 const HEADER: usize = 96;
 const ENTRY_LIMIT: usize = 64 * 1024 * 1024;
 const DISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
@@ -17,7 +25,7 @@ static MAINTENANCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 独立命名空间；测试可显式指向worktree，不改变App的磁盘设置/缓存世代。
 fn root() -> PathBuf {
-    if let Some(path) = std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR").filter(|p| !p.is_empty()) {
+    if let Some(path) = std::env::var_os("HIFISHIFTER_PLUGIN_CACHE_DIR").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
     }
     let base = if cfg!(windows) {
@@ -31,7 +39,7 @@ fn root() -> PathBuf {
     };
     base.unwrap_or_else(std::env::temp_dir)
         .join("HiFiShifter")
-        .join("ara-content-v1")
+        .join("plugin-content-v1")
 }
 
 /// 不包含clip名/声道序号，实际mono内容自行区分平面；共通混音参数不属于合成输入。
@@ -41,7 +49,7 @@ pub(crate) fn key(
     separator: Option<&str>,
 ) -> blake3::Hash {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"ara-host-processor-pcm-v1");
+    hash.update(b"plugin-host-processor-pcm-v1");
     hash.update(&crate::synth_clip_cache::RENDER_PIPELINE_VERSION.to_le_bytes());
     hash.update(&(vocoder.len() as u64).to_le_bytes());
     hash.update(vocoder.as_bytes());

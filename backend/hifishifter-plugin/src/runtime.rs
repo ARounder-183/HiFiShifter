@@ -73,7 +73,7 @@ pub struct Runtime {
 /// 没有这两个量，插件只能猜一条淡化曲线，那比让宿主用它自己那条正确的曲线更糟。
 ///
 /// 【为什么这里没有可分析内容类型】`analyzeableContentTypes` 保持为空。曾有一个
-/// `HIFISHIFTER_ARA_PROBE_ANALYSIS` 探针用来验证"Cubase 是否因为插件广告不出素材的
+/// `HIFISHIFTER_PLUGIN_PROBE_ANALYSIS` 探针用来验证"Cubase 是否因为插件广告不出素材的
 /// 音乐时值而不交事件"，该假设已被日志否证：整个会话里宿主**一次都没有**调用
 /// `getAudioSourceContentGrade` / `isAudioSourceContentAvailable` /
 /// `createAudioSourceContentReader`，也没有发起任何分析请求 —— 它压根没问过内容。

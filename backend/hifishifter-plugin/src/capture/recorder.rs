@@ -691,6 +691,7 @@ fn candidate_evidence(candidate: &StreamCandidate) -> (u8, u32, u32, u32) {
 ///
 /// 【为什么每流一份】候选首块在选举之前就要暂存；两条流共用一个 `pending` 会让
 /// 后到的流覆盖先到的流。备用缓冲在 `start()` 里一次性分配，音频线程只改 `filled`。
+#[derive(Default)]
 struct Pending {
     buffer: Option<Segment>,
     ready: bool,
@@ -698,7 +699,6 @@ struct Pending {
     /// 这块候选属于哪条流。离线与实时共用 0 号槽，因此不能只看槽位。
     stream: Option<ProcessStream>,
 }
-
 
 /// 一次 `on_block` 的结果（给调用方决定输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

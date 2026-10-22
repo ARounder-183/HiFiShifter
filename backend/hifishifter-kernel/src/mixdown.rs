@@ -1963,17 +1963,17 @@ mod tests {
         #[ignore = "真实CPU磁盘冷恢复诊断：显式运行，父子进程均无UI"]
         fn real_model_host_cache_cold_process_and_corruption() {
             crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
-            let child = std::env::var("HIFISHIFTER_ARA_CACHE_TEST_PHASE")
+            let child = std::env::var("HIFISHIFTER_PLUGIN_CACHE_TEST_PHASE")
                 .ok()
                 .as_deref()
                 == Some("warm");
-            let previous_cache_dir = std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR");
+            let previous_cache_dir = std::env::var_os("HIFISHIFTER_PLUGIN_CACHE_DIR");
             let dir = if child {
-                std::path::PathBuf::from(std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR").unwrap())
+                std::path::PathBuf::from(std::env::var_os("HIFISHIFTER_PLUGIN_CACHE_DIR").unwrap())
             } else {
                 std::env::temp_dir().join(format!("hfs-ara-cold-{}", uuid::Uuid::new_v4()))
             };
-            std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR", &dir);
+            std::env::set_var("HIFISHIFTER_PLUGIN_CACHE_DIR", &dir);
             let identity = "ara://persistent-test";
             let mut tl = timeline(identity);
             tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
@@ -2010,7 +2010,7 @@ mod tests {
                 assert_eq!(crate::hnsep_onnx::separation_cache_stats().1, separation);
                 assert_eq!(
                     pcm_hash,
-                    std::env::var("HIFISHIFTER_ARA_EXPECT_PCM").unwrap()
+                    std::env::var("HIFISHIFTER_PLUGIN_EXPECT_PCM").unwrap()
                 );
                 assert_eq!(crate::host_pcm_cache::stats().0, 1);
                 println!("ARA_DISK_COLD_PROCESS hit=1 neural_runs=0 HNSEP_runs=0 pcm_exact=true elapsed_ms={}",began.elapsed().as_millis());
@@ -2027,8 +2027,8 @@ mod tests {
                     "--test-threads=1",
                     "--nocapture",
                 ])
-                .env("HIFISHIFTER_ARA_CACHE_TEST_PHASE", "warm")
-                .env("HIFISHIFTER_ARA_EXPECT_PCM", &pcm_hash)
+                .env("HIFISHIFTER_PLUGIN_CACHE_TEST_PHASE", "warm")
+                .env("HIFISHIFTER_PLUGIN_EXPECT_PCM", &pcm_hash)
                 .status()
                 .unwrap();
             assert!(child.success());
@@ -2048,9 +2048,9 @@ mod tests {
             assert_eq!(crate::host_pcm_cache::stats().1, 2);
             std::fs::remove_dir_all(&dir).unwrap();
             if let Some(previous) = previous_cache_dir {
-                std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR", previous);
+                std::env::set_var("HIFISHIFTER_PLUGIN_CACHE_DIR", previous);
             } else {
-                std::env::remove_var("HIFISHIFTER_ARA_CACHE_DIR");
+                std::env::remove_var("HIFISHIFTER_PLUGIN_CACHE_DIR");
             }
             println!(
                 "ARA_DISK_PARENT corrupt_rebuilt=true stores=2 elapsed_ms={}",
