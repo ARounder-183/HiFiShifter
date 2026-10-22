@@ -19,6 +19,7 @@
  *   （Bug 修复，2026-06-30）。
  */
 import { gainToDb } from "../math.js";
+import { clampGainDb, gainKnobAngleDeg } from "../../../../utils/gainDb";
 import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
 
 // ── Font helpers ─────────────────────────────────────────────────────────
@@ -612,7 +613,7 @@ export function buildTimelineClipVisualStyle(args: {
 
     // Compute labels early so we can measure their widths with the correct font
     const gainDb = gainToDb(args.gain);
-    const clampedGainDb = clamp(gainDb, -12, 12);
+    const clampedGainDb = clampGainDb(gainDb);
     const playbackRate =
         Number.isFinite(args.playbackRate) && args.playbackRate > 0 ? args.playbackRate : 1;
     const playbackRateLabel = formatPlaybackRateLabel(playbackRate);
@@ -778,7 +779,7 @@ export function buildTimelineClipVisualStyle(args: {
         gainKnobStroke: darkMode ? "rgba(255, 255, 255, 0.32)" : "rgba(0, 0, 0, 0.38)",
         gainKnobIndicator: darkMode ? "rgba(235, 240, 248, 0.95)" : "rgba(28, 32, 40, 0.95)",
         gainKnobCoreFill: darkMode ? "rgba(0, 0, 0, 0.35)" : "rgba(255, 255, 255, 0.4)",
-        gainKnobAngleDeg: (clampedGainDb / 12) * 135,
+        gainKnobAngleDeg: gainKnobAngleDeg(clampedGainDb),
         gainKnobRadius,
         gainKnobCenterOffsetX,
         gainKnobCenterOffsetY,

@@ -250,8 +250,13 @@ impl<'a> MixdownProgress<'a> {
     }
 }
 
+/// 轨道推子的有效增益。
+///
+/// 【为什么转发到 `gain::clamp_gain`】推子与 clip 增益共用一个值域（REAPER 的
+/// +24.08 dB）。此前这里是独立的字面量 `4.0`，于是"把推子推到底"在混音里是 +12 dB、
+/// 在界面上却可以显示 +24 —— 同一个数在两处有不同的含义。
 fn clamp_track_volume(x: f32) -> f32 {
-    x.clamp(0.0, 4.0)
+    crate::gain::clamp_gain(x)
 }
 
 fn clamp11(x: f32) -> f32 {
@@ -1146,7 +1151,7 @@ fn render_mixdown_internal(
             .get(&clip.track_id)
             .cloned()
             .unwrap_or((1.0, false, true));
-        let gain = (clip.gain.max(0.0) * track_gain_value).clamp(0.0, 4.0);
+        let gain = crate::gain::clamp_gain(clip.gain.max(0.0) * track_gain_value);
         if gain <= 0.0 {
             continue;
         }

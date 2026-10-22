@@ -54,6 +54,7 @@ import {
     type FolderImportOptions,
 } from "../fileBrowser/folderImportOptions";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
+import { clampGain } from "../../utils/gainDb";
 import { normalizeChannelMode } from "../../utils/channelMode";
 // 工具切换的落盘收口（`setToolModePersistent`）需要它。与下面的 re-export 同源；
 // runtimeThunks 对本切片只有 type-only 依赖，因此不构成运行时循环。
@@ -1252,7 +1253,7 @@ function applyOptimisticClipState(
         }
     }
     if (payload.gain !== undefined) {
-        clip.gain = clamp(Number(payload.gain), 0, 4);
+        clip.gain = clampGain(Number(payload.gain));
     }
     if (payload.muted !== undefined) {
         clip.muted = Boolean(payload.muted);
@@ -1392,7 +1393,7 @@ function applyOptimisticBulkClipState(
         const clip = clipsById.get(update.clipId);
         if (!clip) continue;
         if (update.gain !== undefined) {
-            clip.gain = clamp(Number(update.gain), 0, 4);
+            clip.gain = clampGain(Number(update.gain));
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);
@@ -1526,7 +1527,7 @@ function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
     return {
         id: take.id,
         name: take.name ?? "",
-        gain: clamp(Number(take.gain ?? 1), 0, 4),
+        gain: clampGain(Number(take.gain ?? 1)),
         sourcePath: take.source_path,
         sourcePathRelative: take.source_path_relative,
         durationSec: Number(take.duration_sec ?? 0) || undefined,
@@ -1954,7 +1955,7 @@ function applyTimelineState(
             durationSec: Number(clip.duration_sec ?? 0) || undefined,
             durationFrames: clip.duration_frames,
             sourceSampleRate: clip.source_sample_rate,
-            gain: clamp(Number(clip.gain ?? 1), 0, 4),
+            gain: clampGain(Number(clip.gain ?? 1)),
             muted: Boolean(clip.muted),
             // Allow negative sourceStartSec to represent leading silence (slip-edit past source start).
             sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
@@ -3609,7 +3610,7 @@ const sessionSlice = createSlice({
         setClipGain(state, action: PayloadAction<{ clipId: string; gain: number }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
-            clip.gain = clamp(Number(action.payload.gain), 0, 4);
+            clip.gain = clampGain(Number(action.payload.gain));
         },
         setClipMuted(state, action: PayloadAction<{ clipId: string; muted: boolean }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);

@@ -27,7 +27,7 @@ pub(crate) fn compute_track_gains(tracks: &[Track]) -> HashMap<&str, (f32, bool,
 
         while let Some(id) = cur {
             if let Some(node) = by_id.get(id) {
-                gain *= node.volume.clamp(0.0, 4.0);
+                gain *= crate::gain::clamp_gain(node.volume);
                 muted |= node.muted;
                 soloed |= node.solo;
                 cur = node.parent_id.as_deref();
@@ -288,7 +288,7 @@ pub(crate) fn build_snapshot(
         }
 
         // 直接用刚才提出来的 track_gain_value
-        let gain = (clip.gain.max(0.0) * track_gain_value).clamp(0.0, 4.0);
+        let gain = crate::gain::clamp_gain(clip.gain.max(0.0) * track_gain_value);
         if gain <= 0.0 {
             continue;
         }

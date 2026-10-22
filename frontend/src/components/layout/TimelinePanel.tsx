@@ -244,8 +244,14 @@ import {
 import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
+import {
+    GAIN_MAX_DB,
+    GAIN_MIN_DB,
+    clampGainDb,
+    gainDbFromKnobTravel,
+    gainToDbSafe,
+} from "../../utils/gainDb";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../../utils/fineAxisDrag";
-import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
     buildStretchGroupState,
@@ -3907,7 +3913,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 case "gain-knob":
                     text = t("gain_value_tooltip").replace(
                         "{gain}",
-                        formatGainDbValue(Math.min(12, Math.max(-12, gainToDb(clip.gain)))),
+                        formatGainDbValue(clampGainDb(gainToDbSafe(clip.gain))),
                     );
                     break;
                 default:
@@ -4755,10 +4761,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     } | null>(null);
 
     /**
-     * 内核音量旋钮预览：竖直位移 → dB → 逐 clip 钳制 ±12dB 写乐观值。
+     * 内核音量旋钮预览：竖直位移 → dB → 逐 clip 钳制后写乐观值。
      *
-     * 与旧实现同源：`deltaDb = 位移 × CLIP_GAIN_DRAG_DB_PER_PX`（向上拖 = 增益变大），
-     * 精细调整修饰键经 `advanceFineAxisDrag` 减速，钳制与换算复用 `applyBulkGainDeltaDb`。
+     * 位移先经 `gainDbFromKnobTravel` 换算（归一化行程，全程 96px，与值域大小无关），
+     * 精细调整修饰键经 `advanceFineAxisDrag` 减速，钳制与多选平移复用
+     * `applyBulkGainDeltaDb`。
      */
     const handleKernelGainDragPreview = React.useCallback(
         (args: {
@@ -4804,14 +4811,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 args.deltaYPx,
                 isModifierActive(paramFineAdjustKb, args.modifiers),
             );
+            // 【映射：先让**被抓住的那个 clip** 跟手，其余按同一个 dB 增量平移】
+            //
+            // 旧实现是 `deltaDb = 位移 × CLIP_GAIN_DRAG_DB_PER_PX`（固定 0.25 dB/px）。
+            // 值域从 ±12 扩到 (−60, +24.1) 之后，固定 dB/px 会让拖 145px 就走完全程 ——
+            // 用户明确要求"范围扩大不得让旋钮一动就大幅调整"。
+            //
+            // 现在位移先换算成**归一化行程**上的位置（见 `gainDbFromKnobTravel`），
+            // 全程恒为 96px（与旧实现逐像素一致）；再把"锚点 clip 的新 dB − 旧 dB"
+            // 作为增量应用给整个多选集合 —— 这样多选时各 clip 的相对关系仍然保留。
+            const anchorBaseGain = origin.baseGainById.get(args.clipId) ?? 1;
+            const anchorBaseDb = gainToDbSafe(anchorBaseGain);
+            // 向上拖 = 变大 ⇒ 屏幕位移（向下为正）要取反。
+            const anchorNextDb = gainDbFromKnobTravel(anchorBaseDb, -adjustedY);
             const updates = applyBulkGainDeltaDb({
                 clipIds: origin.clipIds,
                 clipsById: new Map(
                     [...origin.baseGainById].map(([clipId, gain]) => [clipId, { gain }]),
                 ),
-                deltaDb: -adjustedY * CLIP_GAIN_DRAG_DB_PER_PX,
-                minDb: -12,
-                maxDb: 12,
+                deltaDb: anchorNextDb - anchorBaseDb,
+                minDb: GAIN_MIN_DB,
+                maxDb: GAIN_MAX_DB,
             });
             batch(() => {
                 for (const update of updates) dispatch(setClipGain(update));
@@ -4831,7 +4851,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     sessionRef.current.clips.find((item) => item.id === args.clipId)?.gain ??
                     baseGain ??
                     1;
-                const clamped = Math.min(12, Math.max(-12, gainToDb(currentGain)));
+                const clamped = clampGainDb(gainToDbSafe(currentGain));
                 publishFadeRichTooltip(
                     anchor,
                     baseGain === undefined
@@ -4951,7 +4971,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const initialValue =
                 field === "rate"
                     ? formatEditNumber(clip.playbackRate)
-                    : formatEditNumber(Math.min(12, Math.max(-12, gainToDb(clip.gain))));
+                    : formatEditNumber(clampGainDb(gainToDbSafe(clip.gain)));
             setKernelInlineEdit({ clipId, field, initialValue, inputMode: "decimal" });
         },
         [sessionRef],

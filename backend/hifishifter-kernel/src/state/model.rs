@@ -3220,7 +3220,7 @@ impl TimelineState {
             let Some(node) = self.tracks.iter().find(|t| t.id == id) else {
                 break;
             };
-            gain *= node.volume.clamp(0.0, 4.0);
+            gain *= crate::gain::clamp_gain(node.volume);
             cur = node.parent_id.clone();
             safety += 1;
             if safety > 256 {
@@ -8656,7 +8656,7 @@ impl TimelineState {
                 t.solo = v;
             }
             if let Some(v) = volume {
-                t.volume = v.clamp(0.0, 4.0);
+                t.volume = crate::gain::clamp_gain(v);
             }
 
             if let Some(v) = compose_enabled {
@@ -9509,7 +9509,7 @@ impl TimelineState {
                 c.length_sec = v.max(0.0);
             }
             if let Some(v) = patch.gain {
-                c.gain = v.clamp(0.0, 4.0);
+                c.gain = crate::gain::clamp_gain(v);
             }
             if let Some(v) = patch.muted {
                 c.muted = v;
@@ -9664,7 +9664,7 @@ impl TimelineState {
                 let clip_len_for_sync = c.length_sec;
                 for take in &mut c.takes {
                     if let Some(v) = content_sync_patch.gain {
-                        take.gain = v.clamp(0.0, 4.0);
+                        take.gain = crate::gain::clamp_gain(v);
                     }
                     if let Some(v) = content_sync_patch.source_start_sec {
                         if v.is_finite() {

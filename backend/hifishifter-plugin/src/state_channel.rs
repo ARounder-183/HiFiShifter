@@ -421,7 +421,7 @@ impl EditState {
             || tracks.iter().any(|track| {
                 !host.tracks.iter().any(|known| known.id == track.id)
                     || !track.volume.is_finite()
-                    || !(0.0..=4.0).contains(&track.volume)
+                    || !(0.0..=hifishifter_kernel::gain::GAIN_MAX).contains(&track.volume)
             })
         {
             return Err("invalid or unknown track".into());

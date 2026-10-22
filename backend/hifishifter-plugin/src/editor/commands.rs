@@ -1453,7 +1453,7 @@ pub(super) fn dispatch(
             track_exists(session, id)?;
             if patch
                 .volume
-                .is_some_and(|n| !n.is_finite() || !(0.0..=4.0).contains(&n))
+                .is_some_and(|n| !n.is_finite() || !(0.0..=hifishifter_kernel::gain::GAIN_MAX).contains(&n))
             {
                 return Err("track volume out of range".into());
             }

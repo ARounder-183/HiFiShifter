@@ -345,8 +345,11 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
             if key == "channelMode" && (number.fract() != 0. || number > 4.) {
                 return Err("invalid host channel mode".into());
             }
-            if key == "gain" && number > 4. {
-                return Err("clip volume outside original GUI range 0..4".into());
+            if key == "gain" && number > f64::from(hifishifter_kernel::gain::GAIN_MAX) {
+                return Err(format!(
+                    "clip volume outside the supported range 0..{}",
+                    hifishifter_kernel::gain::GAIN_MAX
+                ));
             }
             if key == "hostGroupId"
                 && (!(0.0..=HOST_GROUP_ID_MAX as f64).contains(&number) || number.fract() != 0.)
@@ -996,12 +999,20 @@ mod tests {
             stale["clips"][0]["gain"] = json!(1.);
             assert!(!receipt.matches(&stale));
         }
+        // 负增益没有意义（反相是宿主的 take 极性，不是增益），必须拒绝。
         assert!(editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":-1.}))
             .is_err());
-        assert!(editor
-            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":5.}))
-            .is_err());
+        // **+24 dB（线性 16）现在必须被接受** —— 这正是值域扩大的目的：REAPER 的
+        // item 增益上限是 +24.08 dB，此前上界是 4.0（+12 dB），于是任何超过 +12 dB
+        // 的 clip 在写回宿主时都会被整条拒绝。
+        //
+        // 【为什么直接调 `patch` 而不是 `plan_host_edit`】这里要钉的是**值域判据**，
+        // 而 `plan_host_edit` 会顺带走一遍宿主几何查询（那是另一件事，且已由上面
+        // 那个循环覆盖）。只验判据能让这条断言在没有任何宿主夹具的情况下成立。
+        assert!(patch(&json!({"clipId":clip.id,"gain":16.})).is_ok());
+        // 超出宿主自己的上限才拒绝。
+        assert!(patch(&json!({"clipId":clip.id,"gain":17.})).is_err());
         document.close();
     }
     /// S1：编辑器时间线被 panic 毒化后，**不得**拿半写状态去改宿主 —— 规划必须拒绝。

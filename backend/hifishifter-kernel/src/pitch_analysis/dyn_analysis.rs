@@ -131,7 +131,7 @@ pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> 
 
         let media_total = crate::state::clip_source_media_duration_sec(clip);
         let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, media_total);
-        let clip_gain = (clip.gain.max(0.0) as f64).clamp(0.0, 4.0);
+        let clip_gain = crate::gain::clamp_gain(clip.gain.max(0.0)) as f64;
 
         // 淡化权重只作**纳入门限**（= 0：前导静音 / clip 末尾之外 → 不可听）；
         // 权重本身不进电平 —— 见文件头"电平的物理口径"。不可听帧贡献 0 能量。

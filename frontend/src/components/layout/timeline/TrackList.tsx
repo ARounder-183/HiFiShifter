@@ -24,6 +24,7 @@ import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
+import { GAIN_MAX_DB, GAIN_MIN_DB } from "../../../utils/gainDb";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
@@ -318,8 +319,10 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
 
 const TRACK_METER_MIN_DB = -48;
 const TRACK_METER_MAX_DB = 3;
-const TRACK_GAIN_MIN_DB = -60;
-const TRACK_GAIN_MAX_DB = 12;
+// 推子与 clip 增益共用同一个值域（见 `utils/gainDb`）。此前这里的上界是 12，
+// 而混音侧按 4.0 线性（= +12.04 dB）钳制 —— 两处都写死，改一处就会分叉。
+const TRACK_GAIN_MIN_DB = GAIN_MIN_DB;
+const TRACK_GAIN_MAX_DB = GAIN_MAX_DB;
 const TRACK_GAIN_WHEEL_STEP_DB = 0.5;
 const TRACK_GAIN_WHEEL_FINE_STEP_DB = 0.1;
 const TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS = 120;

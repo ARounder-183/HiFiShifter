@@ -83,14 +83,18 @@ fn is_audio_supported(path: &str) -> bool {
     crate::media::is_media_extension(Path::new(path))
 }
 
-/// 将 Reaper 的线性音量倍率转换为 HiFiShifter 的增益（0.0–4.0）。
+/// 将 Reaper 的线性音量倍率转换为 HiFiShifter 的增益。
 ///
-/// REAPER 的音量是线性倍率（0.5 = −6 dB、1.0 = 0 dB、2.0 = +6 dB），
-/// item trim 与 take volume 相乘后最高可达 +24 dB（16×）；负值表示相位
-/// 反转。HiFiShifter 的 gain 支持 [0, 4]（0..+12 dB）且无反相概念：
-/// 负值取绝对值保留响度，超出上限截断到 4.0。
+/// REAPER 的音量是线性倍率（0.5 = −6 dB、1.0 = 0 dB、2.0 = +6 dB），item trim 与
+/// take volume 相乘后最高可达 **+24 dB（16x）** —— 而 HiFiShifter 的 gain 值域
+/// （`hifishifter_kernel::gain`）正是按这个上限定的，所以超过 +12 dB 的 item
+/// 现在能**如实导入**。此前这里的上界是 4.0（+12 dB），与它自己上面这句注释矛盾，
+/// 于是 REAPER 工程里一切超过 +12 dB 的 item 在导入后都被静默压小 12 dB。
+///
+/// REAPER 用负的 take volume 表达**相位反转**，而 HiFiShifter 没有反相概念：
+/// 负值取绝对值保留响度（既有语义，不变）。
 fn convert_volume(vol: f64) -> f32 {
-    (vol.abs() as f32).clamp(0.0, 4.0)
+    crate::gain::clamp_gain(vol.abs() as f32)
 }
 
 /// 将 REAPER fade 数组换算为（浮点形状 id, 曲率）。
@@ -1950,7 +1954,7 @@ pub(crate) fn build_extra_curves_from_accum(
                     }
                 }
             }
-            let value = (value as f32).clamp(0.0, 4.0);
+            let value = crate::gain::clamp_gain(value as f32);
             if (value - 1.0).abs() > 1e-6 {
                 non_default = true;
             }
@@ -2483,6 +2487,20 @@ mod tests {
         );
     }
 
+    /// **REAPER 的 +24 dB 必须被如实导入**，而不是被压到 +12。
+    ///
+    /// 【为什么这条是回归】`convert_volume` 的上界此前是 4.0（+12 dB），而它自己的
+    /// 注释已经写明"item trim 与 take volume 相乘后最高可达 +24 dB（16x）" ——
+    /// 注释承认的上界与钳制不一致，于是 REAPER 工程里一切超过 +12 dB 的 item
+    /// 在导入后都被静默压小 12 dB（听感上"导入之后变小声了"，且没有任何提示）。
+    #[test]
+    fn convert_volume_keeps_the_full_reaper_boost_range() {
+        assert!((convert_volume(16.0) - 16.0).abs() < 1e-6);
+        assert!((convert_volume(8.0) - 8.0).abs() < 1e-6);
+        // 超出 REAPER 自己的上限（trim x take 可能超过 16）才截断。
+        assert!((convert_volume(64.0) - 16.0).abs() < 1e-6);
+    }
+
     #[test]
     fn convert_volume_keeps_boost_and_inverts_phase_to_amplitude() {
         // HiFiShifter 增益范围 [0, 4]：0 dB → 1.0、+6 dB → 2.0 原样保留；
@@ -2491,7 +2509,7 @@ mod tests {
         assert!((convert_volume(0.5) - 0.5).abs() < 1e-6);
         assert!((convert_volume(2.0) - 2.0).abs() < 1e-6);
         assert!((convert_volume(-0.8) - 0.8).abs() < 1e-6);
-        assert!((convert_volume(16.0) - 4.0).abs() < 1e-6);
+        assert!((convert_volume(16.0) - 16.0).abs() < 1e-6);
         assert!((convert_volume(0.0) - 0.0).abs() < 1e-6);
     }
 

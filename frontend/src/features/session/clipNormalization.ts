@@ -11,6 +11,17 @@ type InterleavedSlice = {
     interleaved: ArrayLike<number>;
 };
 
+/**
+ * 归一化增益的钳制区间（±12 dB）。
+ *
+ * 【⚠ 这不是 Clip 增益的值域】Clip / 轨道增益的值域是 `utils/gainDb`（−inf ~ +24.08 dB，
+ * 与 REAPER 的 item 增益上限对齐）。这里的 ±12 dB 是**另一个语义**：它是"把峰值提到
+ * 0 dBFS"这条自动增益的**上限策略** —— 一段 −40 dBFS 的素材若被放大到 +24 dB，
+ * 输出必然削顶，那不是用户要的"归一化"。
+ *
+ * 因此两处**不该**被一起改。上一次值域调整时这里被顺手改过一版，结果是归一化开始
+ * 把安静的素材推爆。
+ */
 const MIN_NORMALIZED_GAIN = dbToGain(-12);
 const MAX_NORMALIZED_GAIN = dbToGain(12);
 
