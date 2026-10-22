@@ -96,7 +96,7 @@ mod tests {
     /// 「关于」对话框少半屏信息却无人发现的原因。
     #[test]
     fn about_payload_carries_every_key_the_dialog_reads() {
-        let payload = about_payload("ARA plugin", "1.2.3");
+        let payload = about_payload("VST3 / ARA plug-in", "1.2.3");
         for key in [
             "version",
             "commit",
@@ -111,7 +111,7 @@ mod tests {
             );
         }
         assert_eq!(payload["version"], "1.2.3");
-        assert_eq!(payload["host"], "ARA plugin");
+        assert_eq!(payload["host"], "VST3 / ARA plug-in");
     }
 
     /// 版本展示串始终以传入的版本号开头（commit 只是后缀）。

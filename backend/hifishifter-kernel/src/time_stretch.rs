@@ -399,7 +399,7 @@ pub fn time_stretch_interleaved(
             }
         }
         StretchAlgorithm::ElastiqueSoloist => {
-            // TODO: integrate Elastique SDK and implement true pitch/formant-preserving stretch.
+            // ROADMAP(elastique): 商业 SDK，未集成。集成前此分支不可达（见枚举上的说明）。
             // For now, fall back to the existing linear method to keep the app functional.
             linear_time_stretch_interleaved(input, channels, out_frames)
         }

@@ -3,7 +3,7 @@ name = "hifishifter-plugin"
 version = "0.1.0-beta.15"
 edition = "2021"
 publish = false
-description = "HiFiShifter 的 ARA 插件侧适配层（复用本体离线内核）"
+description = "HiFiShifter 的 VST3 / ARA 插件适配层（复用本体离线内核）"
 
 # lock 由 `backend/` workspace 统一持有（见 backend/Cargo.toml 的说明）。
 

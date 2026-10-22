@@ -725,9 +725,9 @@ pub struct UiSettings {
     /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
     #[serde(default)]
     pub dock: serde_json::Value,
-    /// ARA 插件形态的停靠布局（与 `dock` **同形**，但两者互不干扰）。
+    /// 插件形态的停靠布局（与 `dock` **同形**，但两者互不干扰）。
     ///
-    /// 【为什么必须分开】ARA 窗口下限是 640×400，而独立 App 是整屏。用户在插件里
+    /// 【为什么必须分开】插件窗口下限是 640×400，而独立 App 是整屏。用户在插件里
     /// 为了能用必然折叠面板、把分隔条拖到极端比例；这份布局若与 App 共用同一个字段，
     /// 下次在 2560×1440 上开 App 恢复的就是一个为小视口调过的排布，反之亦然 ——
     /// 两个形态会互相覆盖对方的布局，谁都留不住。
@@ -740,7 +740,7 @@ pub struct UiSettings {
     /// 的共享**（locale / 快捷键 / 主题 / 设备选择仍然共用）。
     #[serde(default)]
     pub dock_plugin: serde_json::Value,
-    /// ARA 插件形态的音乐上下文。
+    /// 插件形态的音乐上下文。
     ///
     /// 【为什么必须存在】REAPER **没有工程调号概念**（`src-tauri/src/import/reaper_import.rs`
     /// 里明写"音阶全部为跟随工程音阶"），所以音阶只能是 HiFiShifter 自有的用户设置。
@@ -2742,7 +2742,7 @@ impl AppConfig {
     }
 }
 
-/// ARA 插件形态的音乐上下文（音阶）。
+/// 插件形态的音乐上下文（音阶）。
 ///
 /// 与 `ProjectState` 的同名字段同形，但**持久化在用户设置里**而不是某个 ARA 文档里 ——
 /// 理由见 [`UiSettings::plugin_musical_context`]。
