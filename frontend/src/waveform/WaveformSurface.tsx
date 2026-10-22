@@ -435,7 +435,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      * 帧在总线 paint 之外又全量重绘一次，这正是 P1 要消除的重复绘制。
      *
      * 但**缩放不能剔**：参数编辑器缩放只 `flushSync` 写 state
-     * （`PianoRollPanel.tsx:1214`），若锚点恰好让 scrollLeft 不变就不会触发
+     * （`usePianoRollPanelModel` 的缩放提交），若锚点恰好让 scrollLeft 不变就不会触发
      * 原生 scroll 事件 → 不 emit → 波形停帧。故单独保留 `pxPerSec`。
      * 非总线驱动时 axis 是唯一视口来源，整体进签名。
      */

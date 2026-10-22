@@ -225,8 +225,15 @@ describe("门禁不负责点亮曲线（渲染口径的回归护栏）", () => {
      * 判据取 `SEPARATION_GATED_PARAMS`：该列表若出现在面板里，只可能是又拿它去改
      * 渲染可见性 —— 面板其余的门禁判断都走 `isEffectParamGated` / `gatedParamHideOrder`。
      */
+    /*
+     * 【扫哪个文件】面板的逻辑（含副参数可见性的推导）在模型文件里；`PianoRollPanel.tsx`
+     * 本身只剩三十行装配代码。护栏跟着代码走，否则它会变成"扫一个已经不存在的文件"。
+     */
     const panelSource = readFileSync(
-        new URL("../../components/layout/PianoRollPanel.tsx", import.meta.url),
+        new URL(
+            "../../components/layout/pianoRoll/panel/usePianoRollPanelModel.tsx",
+            import.meta.url,
+        ),
         "utf8",
     );
 

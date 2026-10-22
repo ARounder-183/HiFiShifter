@@ -32,7 +32,7 @@ const EXEMPT_MARKER = "hs-interaction-exempt";
  * 已审计并接受的豁免清单。
  *
  * 这四个文件的共同点：都是**紧凑 chrome**（主工具栏 / 标尺行 / 淡变面板 /
- * 参数编辑器），控件尺寸与行高耦合、需要内联底色，而能力层原语是表单尺寸。
+ * 参数编辑器工具栏），控件尺寸与行高耦合、需要内联底色，而能力层原语是表单尺寸。
  * 它们的滚轮与精细调整接线**已经完备** —— 豁免的理由是"原语不适用"，
  * 不是"能力缺失"。
  */
@@ -40,7 +40,7 @@ const ACCEPTED_EXEMPTIONS = [
     join("src", "components", "layout", "ActionBar.tsx"),
     join("src", "components", "layout", "timeline", "FadeContextMenu.tsx"),
     join("src", "components", "layout", "timeline", "TempoMapRulerRow.tsx"),
-    join("src", "components", "layout", "PianoRollPanel.tsx"),
+    join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx"),
 ];
 
 interface Violation {

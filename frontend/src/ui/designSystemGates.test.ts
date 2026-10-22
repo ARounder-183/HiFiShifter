@@ -44,7 +44,7 @@ const NO_CONSUMER_ALLOWED: Record<string, string> = {
  * 与 `PALETTE_ALLOWED` 同一约定：每条都要写明理由，且是**已审计的记录**。
  */
 const RADIX_VAR_ALLOWED: Record<string, string> = {
-    [join("src", "components", "layout", "PianoRollPanel.tsx")]:
+    [join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx")]:
         "设备像素分隔线：`--gray-8` 是唯一与画布 1 设备像素对齐的灰阶，改用语义令牌会与" +
         "画布内容脱节（该行有就地注释说明）。",
 };

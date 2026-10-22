@@ -260,7 +260,7 @@ describe("表单控件：走设计系统原语", () => {
         const ALLOWED: Record<string, string> = {
             [join("src", "App.tsx")]:
                 "局部组件 WheelSelect：给原生 <select> 补滚轮换项，早于 AppSelect 存在。",
-            [join("src", "components", "layout", "PianoRollPanel.tsx")]:
+            [join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx")]:
                 "边缘平滑度的裸 range（带 .qt-range），早于 AppSlider；迁移要单独核对步长语义。",
             [join("src", "components", "layout", "timeline", "FadeContextMenu.tsx")]:
                 "淡变曲率的裸 range，早于 AppSlider；迁移要单独核对步长语义。",
@@ -308,7 +308,7 @@ describe("令牌：不绕过 --qt-* 取值", () => {
          * 换过去会改变观感）。改它属于视觉调整，不在本轮范围。
          */
         const ALLOWED: Record<string, string> = {
-            [join("src", "components", "layout", "PianoRollPanel.tsx")]:
+            [join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx")]:
                 "设备像素对齐的竖分隔线，刻意取 gray-8 的可见度。",
         };
         const files = consumerFiles().filter((file) => !(file in ALLOWED));
