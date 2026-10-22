@@ -2582,7 +2582,7 @@ fn benchmark_gpu_ep(
         return Err(format!("{ep} did not complete any timed run"));
     }
 
-    gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    gpu_times.sort_by(|a, b| a.total_cmp(b));
     let median = gpu_times[gpu_times.len() / 2];
     let rtf = audio_sec / (median / 1000.0);
     log::warn!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x");
@@ -2665,21 +2665,27 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         let mel = vec![0.0f32; cfg.num_mels * frames];
         let f0 = vec![440.0f32; frames];
         let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
-            .unwrap();
-        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
-        let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
+            .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
+        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+            .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
+        cpu_session
+            .run(ort::inputs![mt, ft])
+            .map_err(|error| format!("benchmark CPU warmup failed: {error}"))?;
 
         for _ in 0..runs {
             let mt =
                 Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
-                    .unwrap();
-            let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                    .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
+            let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+                .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
             let t = std::time::Instant::now();
-            let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
+            cpu_session
+                .run(ort::inputs![mt, ft])
+                .map_err(|error| format!("benchmark CPU run failed: {error}"))?;
             cpu_times.push(t.elapsed().as_secs_f64() * 1000.0);
         }
     }
-    cpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    cpu_times.sort_by(|a, b| a.total_cmp(b));
     let cpu_median = cpu_times[cpu_times.len() / 2];
     let cpu_rt_factor = audio_sec / (cpu_median / 1000.0);
     log::warn!(
@@ -2744,24 +2750,27 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                 // Warmup
                 let mt =
                     Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
-                        .unwrap();
-                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                        .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
+                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+                    .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
                 if dml_session.run(ort::inputs![mt, ft]).is_ok() {
                     for run_i in 0..runs {
                         let mt = Tensor::from_array((
                             [1, cfg.num_mels, frames],
                             mel.clone().into_boxed_slice(),
                         ))
-                        .unwrap();
+                        .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
                         let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
-                            .unwrap();
+                            .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
                         let t = std::time::Instant::now();
-                        let _ = dml_session.run(ort::inputs![mt, ft]).unwrap();
+                        dml_session
+                            .run(ort::inputs![mt, ft])
+                            .map_err(|error| format!("benchmark DirectML run failed: {error}"))?;
                         let ms = t.elapsed().as_secs_f64() * 1000.0;
                         log::warn!("[benchmark] DirectML run {run_i}: {ms:.1}ms");
                         dml_times.push(ms);
                     }
-                    dml_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    dml_times.sort_by(|a, b| a.total_cmp(b));
                     let median = dml_times[dml_times.len() / 2];
                     dml_median = Some(median);
                     dml_rt_factor = Some(audio_sec / (median / 1000.0));

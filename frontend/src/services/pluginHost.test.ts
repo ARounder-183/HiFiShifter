@@ -1,6 +1,6 @@
 // 插件通信回归：覆盖真实bridge的实例隔离、错误、取消和超时，不模拟编辑成功。
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPluginHost, type WebViewMessagePort } from "./pluginHost";
+import { commandTimeoutMs, createPluginHost, DEFAULT_COMMAND_TIMEOUT_MS, type WebViewMessagePort } from "./pluginHost";
 
 /** 只替代原生WebView边界；Promise关联、事件与生命周期全部执行生产bridge。 */
 function nativePort() {
@@ -133,5 +133,25 @@ describe("plugin host protocol", () => {
         const broken = createPluginHost(native.port, { version: 1, viewId: "b" });
         await expect(broken.invoke("ping")).rejects.toThrow("native gone");
         broken.dispose();
+    });
+});
+
+/**
+ * 长命令必须拿到比默认值更宽的等待预算。
+ *
+ * 【为什么钉住】`run_vocoder_benchmark` 实测跑 134 秒，而桥接层曾对**所有**命令
+ * 写死 30 秒：前端在第 30 秒 reject，后端继续跑完并把回执丢在地上 —— 用户看到
+ * "Backend invoke failed: plugin:run_vocoder_benchmark"，日志里却只有一份正常结果。
+ */
+describe("command timeouts", () => {
+    it("gives the vocoder benchmark room to finish", () => {
+        expect(commandTimeoutMs("run_vocoder_benchmark")).toBeGreaterThanOrEqual(10 * 60_000);
+        // 134 s 的实测值必须落在预算内，且留出足够的余量给更慢的机器。
+        expect(commandTimeoutMs("run_vocoder_benchmark")).toBeGreaterThan(134_000 * 2);
+    });
+
+    it("keeps the default budget for ordinary commands", () => {
+        expect(commandTimeoutMs("set_clip_state")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
+        expect(commandTimeoutMs("get_timeline_state")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
     });
 });

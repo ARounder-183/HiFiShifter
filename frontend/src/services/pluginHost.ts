@@ -121,6 +121,33 @@ type Pending = {
 };
 
 /**
+ * 每条插件命令的等待上限（毫秒）。
+ *
+ * 【为什么不能只有一个 30 s】`run_vocoder_benchmark` 会依次建 CPU 会话、跑 5 轮、
+ * 再建 DirectML 会话、再跑 5 轮 —— 实测在 RTX 3050 上**134 秒**。此前所有命令共用
+ * 30 s，于是前端在第 30 秒就 reject，用户看到 `Backend invoke failed:
+ * plugin:run_vocoder_benchmark`，而后端其实正常跑完、回执因为待办项已删而被丢弃。
+ * 日志里只有一份正常结果，与"报错"完全对不上——这正是该缺陷难定位的原因。
+ *
+ * 【为什么是白名单而不是统一调大】默认值承担的是"插件卡死时别把界面挂住"的职责。
+ * 把它一起调大，一个真正卡死的命令会让窗口僵 15 分钟。只有明确知道会跑很久的命令
+ * 才给长预算，且它们都有用户可见的进度（见基准测试对话框）。
+ */
+const COMMAND_TIMEOUT_MS: Readonly<Record<string, number>> = {
+    run_vocoder_benchmark: 15 * 60_000,
+    // 导出诊断包要读模型摘要 + 打包日志，大工程上远超 30 s。
+    export_diagnostics: 5 * 60_000,
+};
+
+/** 默认等待上限（毫秒）。 */
+export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+
+/** 某条命令的等待上限。导出供回归测试锁定"基准测试必须拿到长预算"。 */
+export function commandTimeoutMs(command: string): number {
+    return COMMAND_TIMEOUT_MS[command] ?? DEFAULT_COMMAND_TIMEOUT_MS;
+}
+
+/**
  * 命令失败的**机器可读分类**，由后端随 IPC 回执一起给出。
  *
  * - `terminal`：这个编辑会话已经**永久**结束（文档/组件已关闭），再问一万次也一样。
@@ -250,8 +277,8 @@ export function createPluginHost(
             return new Promise<T>((resolve, reject) => {
                 const timer = setTimeout(() => {
                     pending.delete(id);
-                    reject(new Error(`Plugin command timed out: ${command}`));
-                }, 30_000);
+                    reject(new Error("Plugin command timed out: " + command));
+                }, commandTimeoutMs(command));
                 pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
                 try {
                     const message = { version: 1, viewId: boot.viewId, id, command, args };
