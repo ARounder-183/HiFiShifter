@@ -31,8 +31,6 @@ import {
 } from "../../../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../../../theme/waveformColors";
-import type { ProcessorParamDescriptor } from "../../../../types/api";
-import { paramsApi } from "../../../../services/api/params";
 import { isScaleKey } from "../../../../utils/musicalScales";
 import {
     timelineViewportSync,
@@ -82,7 +80,6 @@ import {
 } from "../paramSelection";
 import { type ParamClipboardData } from "../paramClipboardMapping";
 import { createClipboardPreviewSync } from "../clipboardPreviewSync";
-import { isDynParam } from "../paramRanges";
 import { usePianoRollData } from "../usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "../useClipsPeaksForPianoRoll";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
@@ -126,9 +123,6 @@ import {
     buildChildPitchOffsetDegreesParam,
     buildChildFormantOffsetCentsParam,
     childPitchOffsetValueToDisplay,
-    CHILD_PITCH_OFFSET_CENTS_RANGE,
-    CHILD_PITCH_OFFSET_DEGREES_RANGE,
-    CHILD_FORMANT_OFFSET_CENTS_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
@@ -179,7 +173,6 @@ import {
     PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
     PIANO_ROLL_SYNC_ORIGIN,
     shouldWriteNumber,
-    getParamToolbarRank,
     sameStringArray,
 } from "./panelHelpers";
 import { runEditOp } from "./editOperations";
@@ -210,6 +203,7 @@ import { drawPianoRollFrame } from "./drawFrame";
 import { usePianoRollViewport } from "./usePianoRollViewport";
 import { usePianoRollAxisInteractions } from "./usePianoRollAxisInteractions";
 import { usePianoRollAxisWheel } from "./usePianoRollAxisWheel";
+import { useProcessorParams } from "./useProcessorParams";
 
 /**
  * 装配参数编辑器面板的模型。
@@ -921,278 +915,28 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
               ? t("child_pitch_offset_degrees_label")
               : t("common_pitch");
 
-    // 声码器参数描述符（由 algo 动态定制面板）
-    const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
-    const processorParamsRef = useRef<ProcessorParamDescriptor[]>([]);
-    const [processorStaticParams, setProcessorStaticParams] = useState<ProcessorParamDescriptor[]>(
-        [],
-    );
-    const [processorStaticValues, setProcessorStaticValues] = useState<Record<string, number>>({});
-
-    // 工具栏参数按钮按“音高 → 中间参数（随算法变化）→ 音量/声像”的顺序排列
-    const orderedProcessorParams = useMemo(() => {
-        const algo = rootTrack?.pitchAnalysisAlgo;
-        return [...processorParams].sort(
-            (a, b) => getParamToolbarRank(a.id, algo) - getParamToolbarRank(b.id, algo),
-        );
-    }, [processorParams, rootTrack?.pitchAnalysisAlgo]);
-    const currentParamRange = useMemo(() => {
-        if (editParam === "pitch") {
-            return { min: 24, max: 108 };
-        }
-        if (isChildPitchOffsetCentsParam(editParam)) {
-            return {
-                min: CHILD_PITCH_OFFSET_CENTS_RANGE.min,
-                max: CHILD_PITCH_OFFSET_CENTS_RANGE.max,
-            };
-        }
-        if (isChildPitchOffsetDegreesParam(editParam)) {
-            return {
-                min: CHILD_PITCH_OFFSET_DEGREES_RANGE.min,
-                max: CHILD_PITCH_OFFSET_DEGREES_RANGE.max,
-            };
-        }
-        if (isChildFormantOffsetCentsParam(editParam)) {
-            return {
-                min: CHILD_FORMANT_OFFSET_CENTS_RANGE.min,
-                max: CHILD_FORMANT_OFFSET_CENTS_RANGE.max,
-            };
-        }
-        const desc = processorParamsRef.current.find((d) => d.id === editParam);
-        if (desc?.kind.type === "automation_curve") {
-            return {
-                min: desc.kind.min_value,
-                max: desc.kind.max_value,
-            };
-        }
-        return undefined;
-    }, [editParam]);
-
-    const currentParamDefaultValue = useMemo(() => {
-        if (editParam === "pitch") return 60;
-        if (
-            isChildPitchOffsetCentsParam(editParam) ||
-            isChildPitchOffsetDegreesParam(editParam) ||
-            isChildFormantOffsetCentsParam(editParam)
-        ) {
-            return 0;
-        }
-        const desc = processorParamsRef.current.find((d) => d.id === editParam);
-        if (desc?.kind.type === "automation_curve") {
-            return Number(desc.kind.default_value) || 0;
-        }
-        if (editParam === "volume" || editParam === "dyn" || editParam === "dyn_edit") {
-            return 1;
-        }
-        return 0;
-    }, [editParam]);
-
-    const currentParamQuantizeUnit = useMemo(() => {
-        if (isChildPitchOffsetCentsParam(editParam)) return 100;
-        if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
-        if (isChildFormantOffsetCentsParam(editParam)) return 50;
-        if (editParam === "volume" || isDynParam(editParam)) {
-            return 0.05;
-        }
-        if (editParam === "formant_shift_cents") return 50;
-        if (editParam === "breath_gain" || editParam === "hifigan_tension") {
-            return 0.05;
-        }
-        if (editParam === "pan") return 0.1;
-        if (editParam === "breathiness") return 250;
-        const span = Math.abs((currentParamRange?.max ?? 1) - (currentParamRange?.min ?? 0));
-        if (span <= 0) return 0.01;
-        return Math.max(0.01, span / 20);
-    }, [editParam, currentParamRange]);
-
-    useEffect(() => {
-        if (!isChildPitchOffsetParam(editParam)) return;
-        if (paramViewsRef.current[editParam]) return;
-        const range = isChildPitchOffsetCentsParam(editParam)
-            ? CHILD_PITCH_OFFSET_CENTS_RANGE
-            : isChildPitchOffsetDegreesParam(editParam)
-              ? CHILD_PITCH_OFFSET_DEGREES_RANGE
-              : CHILD_FORMANT_OFFSET_CENTS_RANGE;
-        paramViewsRef.current = {
-            ...paramViewsRef.current,
-            [editParam]: {
-                center: (range.min + range.max) / 2,
-                span: range.max - range.min,
-            },
-        };
-        invalidate();
-    }, [editParam, invalidate]);
-
-    // 当 algo 变化时，重新抓取参数描述符
-    useEffect(() => {
-        const algo = rootTrack?.pitchAnalysisAlgo ?? "nsf_hifigan_onnx";
-        let cancelled = false;
-        paramsApi
-            .getProcessorParams(algo)
-            .then((params) => {
-                if (cancelled) return;
-                // 只保留 AutomationCurve 类型（可以绘制曲线的）
-                const curvable = params.filter((p) => p.kind.type === "automation_curve");
-                const staticParams = params.filter((p) => p.kind.type === "static_enum");
-                processorParamsRef.current = curvable;
-                setProcessorParams(curvable);
-                setProcessorStaticParams(staticParams);
-                // 初始化还没有视口的参数 (优化，直接读写 Ref)
-                const nextViews = { ...paramViewsRef.current };
-                let viewsChanged = false;
-                for (const p of curvable) {
-                    if (!nextViews[p.id] && p.kind.type === "automation_curve") {
-                        const { min_value, max_value, default_value } = p.kind;
-                        const span = max_value - min_value;
-                        nextViews[p.id] = {
-                            center: default_value,
-                            span: span > 0 ? span : 1,
-                        };
-                        viewsChanged = true;
-                    }
-                }
-                if (viewsChanged) {
-                    paramViewsRef.current = nextViews;
-                    invalidate(); // 数据有初始化，通知画布重绘
-                }
-
-                if (!rootTrackId || staticParams.length === 0) {
-                    setProcessorStaticValues({});
-                    return;
-                }
-
-                Promise.all(
-                    staticParams.map((param) => paramsApi.getStaticParam(rootTrackId, param.id)),
-                )
-                    .then((values) => {
-                        if (cancelled) return;
-                        const nextValues: Record<string, number> = {};
-                        for (const item of values) {
-                            if (item.ok) {
-                                nextValues[item.param] = item.value;
-                            }
-                        }
-                        setProcessorStaticValues(nextValues);
-                    })
-                    .catch(() => {
-                        if (!cancelled) {
-                            setProcessorStaticValues({});
-                        }
-                    });
-            })
-            .catch(() => {
-                if (!cancelled) {
-                    processorParamsRef.current = [];
-                    setProcessorParams([]);
-                    setProcessorStaticParams([]);
-                    setProcessorStaticValues({});
-                }
-            });
-        return () => {
-            cancelled = true;
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [rootTrack?.pitchAnalysisAlgo, rootTrackId]);
-
-    const handleStaticParamChange = useCallback(
-        async (paramId: string, value: number) => {
-            if (!rootTrackId) return;
-            try {
-                const result = await paramsApi.setStaticParam(rootTrackId, paramId, value, true);
-                if (result.ok) {
-                    setProcessorStaticValues((prev) => ({
-                        ...prev,
-                        [paramId]: value,
-                    }));
-                }
-            } catch (err) {
-                // 静态参数调整是滑块 onValueChange 的 fire-and-forget 调用，
-                // IPC 失败必须兜底，否则 unhandledrejection 且滑块值不一致。
-                console.error("[setStaticParam] failed:", err);
-            }
-        },
-        [rootTrackId],
-    );
-
-    const getProcessorParamLabel = useCallback(
-        (param: ProcessorParamDescriptor) => {
-            switch (param.id) {
-                case "breath_enabled":
-                    // 完整参数名。语义是「是否做谐波/噪声分离」，不是「气声开关」
-                    // —— 气声与张力都依赖它。工具栏上开关以**纯图标**呈现（见渲染处），
-                    // 全称只在需要完整名字的场合使用。
-                    return t("breath_separation_label");
-                case "breath_gain":
-                    return t("breath_gain_label");
-                case "hifigan_tension":
-                    return t("hifigan_tension_label");
-                case "formant_shift_cents":
-                    return t("formant_shift_label");
-                case "hifigan_volume":
-                case "volume":
-                    return t("volume_label");
-                case "dyn":
-                case "dyn_edit":
-                    return t("dyn_label");
-                case "synth_mode":
-                    return t("vslib_synth_mode_label");
-                case "pan":
-                    return t("pan_label");
-                case "breathiness":
-                    return t("vslib_breathiness_label");
-                default:
-                    return param.display_name;
-            }
-        },
-        [t],
-    );
-
-    // 工具栏参数按钮的简写标签（非中文语系用三个大写字形的缩写，如 PIT/BRE/VOL）。
-    // 全称仍通过 getProcessorParamLabel() 提供，用于 ToolTip。
-    const getProcessorParamShortLabel = useCallback(
-        (param: ProcessorParamDescriptor) => {
-            switch (param.id) {
-                case "breath_gain":
-                    return t("param_btn_breath");
-                // `breath_enabled`（谐波/噪声分离）不在这条短标签路径上 ——
-                // 它以**纯图标分段**渲染在被门禁组的组首（见工具栏渲染处），
-                // 不显示任何文字，因此没有"短标签"可返回。
-                case "hifigan_tension":
-                case "tension":
-                    return t("param_btn_tension");
-                case "formant_shift_cents":
-                    return t("param_btn_formant");
-                case "hifigan_volume":
-                case "volume":
-                case "vslib_volume":
-                    return t("param_btn_volume");
-                case "dyn":
-                case "dyn_edit":
-                    return t("param_btn_dyn");
-                case "pan":
-                    return t("param_btn_pan");
-                case "breathiness":
-                    return t("param_btn_breathiness");
-                default:
-                    return getProcessorParamLabel(param);
-            }
-        },
-        [getProcessorParamLabel, t],
-    );
-
-    const getStaticOptionLabel = useCallback(
-        (paramId: string, label: string, value: number) => {
-            // `breath_enabled` 不在此列：它以纯图标分段渲染在参数组内，
-            // 不再走"静态选项 → 文本"的路径（见工具栏渲染处）。
-            if (paramId === "synth_mode") {
-                if (value === 0) return t("vslib_synth_mode_mono");
-                if (value === 1) return t("vslib_synth_mode_mono_formant");
-                if (value === 2) return t("vslib_synth_mode_chorus");
-            }
-            return label;
-        },
-        [t],
-    );
+    // 声码器参数描述符 + 当前参数元数据 + 三个标签映射。
+    const {
+        processorParams,
+        processorParamsRef,
+        processorStaticParams,
+        processorStaticValues,
+        orderedProcessorParams,
+        currentParamRange,
+        currentParamDefaultValue,
+        currentParamQuantizeUnit,
+        handleStaticParamChange,
+        getProcessorParamLabel,
+        getProcessorParamShortLabel,
+        getStaticOptionLabel,
+    } = useProcessorParams({
+        rootTrack,
+        rootTrackId,
+        editParam,
+        paramViewsRef,
+        invalidate,
+        t,
+    });
 
     // 当 processorParams 变化时，若 editParam 不在可用集合内，自动回退到 pitch
     useEffect(() => {
