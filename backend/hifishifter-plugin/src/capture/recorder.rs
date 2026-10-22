@@ -699,16 +699,6 @@ struct Pending {
     stream: Option<ProcessStream>,
 }
 
-impl Default for Pending {
-    fn default() -> Self {
-        Self {
-            buffer: None,
-            ready: false,
-            key: None,
-            stream: None,
-        }
-    }
-}
 
 /// 一次 `on_block` 的结果（给调用方决定输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -248,7 +248,9 @@ fn segment_ranges(
     filled: usize,
 ) -> Vec<Range<usize>> {
     if overrun || len == 0 {
-        return vec![0..filled];
+        // `filled` 只有一个区间：用单元素切片转 Vec，避免 `vec!` 的"看起来像
+        // 动态列表"（clippy::single_range_in_vec_init）。
+        return [0..filled].to_vec();
     }
     ranges[..len.min(ranges.len())]
         .iter()
