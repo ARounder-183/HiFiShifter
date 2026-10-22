@@ -501,6 +501,10 @@ impl CaptureStore {
     /// 【为什么"录完之后没按停止"不会卡住这里】`stop()` / `cancel()` / `clear()` 都会清
     /// `armed`，而捕获自己停下时 `on_block` 也会清它（见 `Stopped` 分支）。所以"录完了
     /// 但还武装着"这个状态不存在 —— 那正是"处理结果被直通压过"的怀疑对象，实测不成立。
+    /// 【为什么带 `#[cfg(test)]`】生产路径一律走 `is_recording_with_evidence`（它带
+    /// 本块证据，能区分"停播"与"起播首块"）；这个不带证据的薄包装只被测试用来构造
+    /// "只问武装与播放位"的简单场景。
+    #[cfg(test)]
     pub(crate) fn is_recording(&self) -> bool {
         self.is_recording_with_flow(false)
     }
@@ -925,6 +929,9 @@ impl CaptureStore {
     /// **武装之后**的 `on_block` 里更新 —— 于是"必须先录一次才能录"：按钮永远是灰的，
     /// 用户根本没有办法开始。观察的代价只是几个原子写 + 一次缓冲形状检查
     /// （`capture_view` 不分配、不读样本），可以在每个音频块上做。
+    /// 【为什么带 `#[cfg(test)]`】生产路径用 `observe_with_stream`（音频线程知道自己在哪条
+    /// 流上）；这个默认实时流的包装只被测试用来喂块。
+    #[cfg(test)]
     pub(crate) fn observe(&self, block: &InputBlock<'_>) {
         self.observe_with_stream(block, ProcessStream::Realtime);
     }
@@ -969,6 +976,9 @@ impl CaptureStore {
         );
     }
 
+    /// 【为什么带 `#[cfg(test)]`】生产路径用 `on_block_with_context`（带进程流与块流
+    /// 证据）；这个"无 flow 的实时块"包装只被测试用来喂块。
+    #[cfg(test)]
     pub(crate) fn on_block(&self, block: InputBlock<'_>) -> CaptureBlockOutcome {
         self.on_block_with_context(block, BlockContext::realtime(false))
     }
@@ -1138,7 +1148,8 @@ impl CaptureStore {
         self.bypass.lock_or_recover().pending()
     }
 
-    /// 【T19】旁路计数：真正丢弃的块数与被救回的块数（诊断）。
+    /// 【T19】旁路计数：真正丢弃的块数与被救回的块数（诊断；测试断言用）。
+    #[cfg(test)]
     pub(crate) fn bypass_counters(&self) -> (u64, u64) {
         (
             self.blocks_dropped.load(Ordering::Acquire),
@@ -1433,6 +1444,10 @@ impl CaptureStore {
     /// 【为什么没有可渲染内容时返回 `None`】渲染那条路以"有没有东西可渲染"为判据
     /// （见 `renders()` 与 `capture_prepare_job` 的早退）。空时间线在那里是"还没录"，
     /// 不是"有一条空轨"。
+    /// 【为什么带 `#[cfg(test)]`】生产侧走 `ExtensionOwner::capture_render_input`
+    /// （它还要把会话时间线里的用户曲线合进来）；这个"只用捕获存储几何"的版本
+    /// 只被测试用来验证投影本身。
+    #[cfg(test)]
     pub(crate) fn render_input(
         &self,
     ) -> Option<(
@@ -1755,6 +1770,7 @@ fn coverage_shape(segments: &[recorder::Segment]) -> (usize, usize) {
 /// （`render/input.rs`）。一旦它晚于最早的段起点，播放时就会在那个位置从"宿主原声"
 /// 切到"处理结果" —— 用户听到的就是一次"咔"。这条日志把"覆盖起点悬空"从
 /// 一句无法归因的现象变成可测量的差值（T14）。它只读事实，不改变任何行为。
+#[cfg(test)]
 fn note_coverage_start_gap(takes: &[ProjectionTake<'_>], timeline: &TimelineState) {
     let earliest_segment = takes
         .iter()

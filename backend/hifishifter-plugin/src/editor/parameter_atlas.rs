@@ -435,7 +435,7 @@ pub(crate) fn merge_root_projection(
                 .map(|(_, current)| current.to_vec())
                 .unwrap_or_default();
             for frame in &projection.frames {
-                let from = (*frame).start;
+                let from = frame.start;
                 // `usize::MAX` 是"整轨"的哨兵：它必须夹到数组长度上，不能直接当索引。
                 let to = frame.end.min(values.len());
                 if from >= to {
@@ -1221,6 +1221,7 @@ impl ParameterAtlas {
     ///
     /// 只要参数数组时用它；需要"这一轮投影到了哪些帧"（按帧合并）时用
     /// [`Self::project_root_records`]。
+    #[cfg(test)]
     pub fn project_roots(
         &self,
         timeline: &TimelineState,

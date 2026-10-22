@@ -3161,7 +3161,8 @@ impl ExtensionOwner {
             self.roles.load(Ordering::Acquire)
         );
     }
-    /// 文档关闭后重绑到另一份文档的次数（诊断）。
+    /// 文档关闭后重绑到另一份文档的次数（诊断；测试断言用）。
+    #[cfg(test)]
     pub(crate) fn rebind_generation_count(&self) -> u64 {
         self.rebind_generation.load(Ordering::Acquire)
     }
@@ -4464,6 +4465,7 @@ impl ExtensionOwner {
     ///
     /// 【首块】`flow == true`（本流第一次出现）。门控允许它出音一次；重复抑制由
     /// [`Self::rt_last_emitted`] 负责，不再靠“首块保守静音”。
+    #[cfg(test)]
     pub(crate) fn note_block_position(&self, start: i64, frames: usize) -> bool {
         self.note_stream_position(ProcessStream::Realtime, start, frames)
             .0
@@ -4473,6 +4475,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么必须带 stream】`kPrefetch` 与 `kRealtime` 的位置节奏不同；跨流比较
     /// 会让 prefetch 的移动给实时块的重复投递作“在前进”的伪证。
+    #[cfg(test)]
     pub(crate) fn note_stream_position(
         &self,
         stream: ProcessStream,
@@ -4508,7 +4511,7 @@ impl ExtensionOwner {
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
-            f64::from(self.setup_sample_rate())
+            self.setup_sample_rate()
         };
         self.note_stream_geometry(
             stream,
@@ -5129,7 +5132,7 @@ impl ExtensionOwner {
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
-            f64::from(declared)
+            declared
         };
         let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
         let recording = context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0;
@@ -5234,7 +5237,6 @@ impl ExtensionOwner {
                     discard_pre_roll: index == 0 && stream_block.discard_pre_roll,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
                     // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
-                    accounting_start: part.position,
                 },
             );
             outcome = if index == 0 {
@@ -7720,17 +7722,14 @@ impl ExtensionOwner {
         let Some(weak) = weak else {
             return;
         };
-        match self.preparation() {
-            Some(worker) => {
-                if let Err(error) = worker.request(Box::new(move |cancel| {
-                    weak.upgrade()
-                        .ok_or("renderer closed".to_owned())?
-                        .prepare_job(cancel)
-                })) {
-                    log::warn!("[ara] preparation unavailable: {error}");
-                }
+        if let Some(worker) = self.preparation() {
+            if let Err(error) = worker.request(Box::new(move |cancel| {
+                weak.upgrade()
+                    .ok_or("renderer closed".to_owned())?
+                    .prepare_job(cancel)
+            })) {
+                log::warn!("[ara] preparation unavailable: {error}");
             }
-            None => {}
         }
     }
     /// 调用者持document事务；完整两输出率发布成功后才登记，不额外持有源或快照。
@@ -8077,7 +8076,7 @@ impl BlockTraceRing {
         let record = &self.records[index];
         // seqlock：读两遍一致才算稳定（音频线程可能正在写同一个槽）。
         let first = record.seq.load(Ordering::Acquire);
-        if first % 2 != 0 {
+        if !first.is_multiple_of(2) {
             return None;
         }
         let read = || {

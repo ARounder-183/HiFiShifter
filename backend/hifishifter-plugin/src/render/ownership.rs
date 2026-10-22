@@ -10,15 +10,27 @@ pub(crate) type DocumentId = u64;
 pub(crate) enum OwnershipError {
     InvalidIdentity,
     DuplicateRegion,
+    // 下面三个只由 `resolve` 产出，而 `resolve` 目前只有测试在用（见它的 `#[cfg(test)]`）。
+    // 保留定义而不是删掉：它们描述的是"整批解析"的三种拒绝理由，删了会让那张表
+    // 看起来只有登记语义、没有解析语义。
+    #[cfg(test)]
     MissingRegion,
+    #[cfg(test)]
     CrossDocument,
+    #[cfg(test)]
     EmptyAssignment,
 }
 
 #[derive(Default)]
 pub(crate) struct RegionOwners {
     regions: HashMap<RegionKey, (DocumentId, usize)>,
-    /// 本次进程里"文档已销毁"的次数（诊断：宿主是否按 leaf-first 销毁）。
+    /// 本次进程里"文档已销毁、key 被新文档认领"的次数。
+    ///
+    /// 【为什么只在测试构建里存在】它唯一的读者是下面的 `reclaimed()`，而那个访问器
+    /// 只被测试用来断言"跨文档重复是认领、不是错误"。生产侧的同一事实由
+    /// `register` 里那行 `log::info!` 说出来 —— 留着字段只会让 lib 构建报
+    /// "field is never read"。
+    #[cfg(test)]
     reclaimed: u64,
 }
 
@@ -45,7 +57,10 @@ impl RegionOwners {
             Some((owner, _)) if owner == document => return Err(OwnershipError::DuplicateRegion),
             Some((owner, _)) => {
                 // 上一个文档的遗留：撤销旧归属，按新文档登记。
-                self.reclaimed = self.reclaimed.saturating_add(1);
+                #[cfg(test)]
+                {
+                    self.reclaimed = self.reclaimed.saturating_add(1);
+                }
                 log::info!(
                     "[ara] region key {key} reclaimed by document {document} from dead document \
                      {owner}"
@@ -78,6 +93,12 @@ impl RegionOwners {
     }
 
     /// 解析 renderer 分配；跨文档、未知、已销毁或空分配都不能被默认为完整时间线。
+    ///
+    /// 【为什么带 `#[cfg(test)]`】生产路径目前不做"整批解析"：renderer 的分配键在
+    /// `ExtensionOwner` 侧按 `assigned_regions` 直接用，不经过这张表。这里保留实现
+    /// 并让测试继续钉住它的三条拒绝语义，而不是删掉 —— 删掉会让"跨文档/未知/空分配
+    /// 都不可默认成完整时间线"这条不变量失去唯一的执行点。
+    #[cfg(test)]
     pub fn resolve(&self, keys: &[RegionKey]) -> Result<(DocumentId, Vec<usize>), OwnershipError> {
         let first = keys.first().ok_or(OwnershipError::EmptyAssignment)?;
         let (document, _) = self
@@ -127,6 +148,7 @@ impl RegionOwners {
     }
 
     /// 跨文档认领发生的次数（诊断）。
+    #[cfg(test)]
     pub fn reclaimed(&self) -> u64 {
         self.reclaimed
     }

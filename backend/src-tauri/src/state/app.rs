@@ -192,12 +192,6 @@ impl AppState {
     }
 }
 
-/// 仅命令状态回归使用的显式fixture；没有ambient模式，也不影响其他Default调用。
-#[cfg(test)]
-pub(crate) fn command_test_state_without_audio_output() -> AppState {
-    AppState::with_audio_engine(crate::audio_engine::command_test_support::detached_engine())
-}
-
 impl AppState {
     pub fn bump_timeline_version(&self) -> u64 {
         self.timeline_version

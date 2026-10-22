@@ -231,12 +231,14 @@ impl ClickLedger {
         out
     }
 
-    /// 已记录的块总数。
+    /// 已记录的块总数（测试断言用）。
+    #[cfg(test)]
     pub(crate) fn blocks(&self) -> u64 {
         self.seq.load(Ordering::Acquire)
     }
 
-    /// 被判为可疑的块总数。
+    /// 被判为可疑的块总数（测试断言用）。
+    #[cfg(test)]
     pub(crate) fn suspicious(&self) -> u64 {
         self.suspicious.load(Ordering::Acquire)
     }

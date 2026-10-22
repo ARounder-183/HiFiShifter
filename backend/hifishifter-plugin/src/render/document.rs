@@ -1561,7 +1561,7 @@ impl DocumentSession {
             None
         } else {
             // 冲突：取回编辑器上一次读到的视图。
-            match self.workspace_baseline(&previous) {
+            match self.workspace_baseline(previous) {
                 Some(baseline) => Some(baseline),
                 None => {
                     // 没有基线可重基（编辑器还没读过 / 进程重启过 / 指纹来自另一个
@@ -2502,7 +2502,7 @@ impl DocumentSession {
             assignments,
             ui_tracks,
             region_items,
-            graph.map_or_else(|| "graph=unbound".to_owned(), |line| line),
+            graph.unwrap_or_else(|| "graph=unbound".to_owned()),
             seam,
         ) + "\n"
             + &self.diag_line()

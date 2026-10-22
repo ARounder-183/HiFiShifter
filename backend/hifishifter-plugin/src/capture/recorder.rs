@@ -584,15 +584,6 @@ pub(crate) struct BlockContext {
     /// （宿主给的那个起点确实是 `Project`），只是这一块没有新的宿主报告。把它们
     /// 混进一个枚举，就得到了 round 24 那个粘住整场会话的 `Carried`。
     pub counted: bool,
-    /// 本块在**插件记账域**里的位置（起播窗口里它不等于宿主报的位置）。
-    ///
-    /// 【为什么需要它】起播窗口内宿主把 `projectTimeSamples` 钉在 `P`，而插件按块长
-    /// 推进，于是第一块的记账位置是 `P`、第二块已经是 `P + frames`。暂存/提交的
-    /// 连续性判据若比宿主管道域的位置，就永远判不出连续 —— 每一块都被
-    /// `discard_pending` 丢掉，`expected_next` 始终是 `None`，等宿主位置恢复前进时
-    /// resync 分支整段跳过 ⇒ 窗口内容全丢 + `SegmentLoss::Gap` ⇒ 两个 clip。
-    /// 改比记账域后第二块就能续上，`expected_next` 及时置位。
-    pub accounting_start: i64,
     /// 本块是"停播很久之后的上升沿"：之前累积的静音属于停播，不是播放时间。
     ///
     /// 【为什么需要单独一位】`preceding_silent_frames` 在这一块被置 0，但捕获侧
@@ -602,6 +593,11 @@ pub(crate) struct BlockContext {
 }
 
 impl BlockContext {
+    /// "无证据的实时块"构造器：只被测试用来喂块。
+    ///
+    /// 【为什么带 `#[cfg(test)]`】生产路径从 `ProcessContext` 逐字段构造
+    /// （`BlockContext::from_process` 一类），这个便捷构造器没有生产调用点。
+    #[cfg(test)]
     pub(crate) fn realtime(flow: bool) -> Self {
         Self {
             stream: ProcessStream::Realtime,
@@ -624,7 +620,6 @@ impl BlockContext {
             resync_limit_frames: 0,
             preceding_silent_frames: 0,
             counted: false,
-            accounting_start: 0,
             discard_pre_roll: false,
         }
     }
@@ -1225,6 +1220,9 @@ impl Capture {
     }
 
     /// 音频线程入口（兼容既有调用：没有块流证据时等价于“只在 `kPlaying` 时写”）。
+    /// 【为什么带 `#[cfg(test)]`】生产路径走 `on_block_with_context`（带进程流与块流
+    /// 证据）；这两个"只带 flow"的包装只被测试用来喂块。
+    #[cfg(test)]
     pub(crate) fn on_block(&mut self, block: InputBlock<'_>) -> CaptureOutcome {
         self.on_block_with_flow(block, false)
     }
@@ -1233,6 +1231,7 @@ impl Capture {
     ///
     /// 【为什么 `flow` 不能直接等于“写”】位置推进既可能是起播，也可能是停播时
     /// 拖了一次播放头。弱证据先暂存一块，下一块**首尾相接**才提交（lookbehind）。
+    #[cfg(test)]
     pub(crate) fn on_block_with_flow(
         &mut self,
         block: InputBlock<'_>,
@@ -2678,7 +2677,6 @@ mod tests {
             resync_limit_frames: 0,
             preceding_silent_frames: 0,
             counted: false,
-            accounting_start: 0,
             discard_pre_roll: false,
         }
     }
@@ -3486,7 +3484,6 @@ mod tests {
             let (_, view) = block(start, 4, 48_000.0);
             let mut context = ctx(ProcessStream::Realtime, false, false, false);
             context.phase = TransportPhase::Start;
-            context.accounting_start = start;
             capture.on_block_with_context(paused(view), context);
         }
         assert_eq!(capture.window_anchor, Some(0), "暂存要记下最早记账位置");
@@ -3505,7 +3502,6 @@ mod tests {
         context.phase = TransportPhase::Rolling;
         context.resync = true;
         context.resync_limit_frames = 64;
-        context.accounting_start = 16;
         capture.on_block_with_context(view, context);
 
         assert_eq!(
@@ -3543,7 +3539,6 @@ mod tests {
             let (_, view) = block(start, 4, 48_000.0);
             let mut context = ctx(ProcessStream::Realtime, false, false, false);
             context.phase = TransportPhase::Start;
-            context.accounting_start = start;
             capture.on_block_with_context(paused(view), context);
         }
         capture.expected_next = None;
@@ -3558,7 +3553,6 @@ mod tests {
         context.phase = TransportPhase::Rolling;
         context.resync = false;
         context.resync_limit_frames = 0;
-        context.accounting_start = 16;
         capture.on_block_with_context(view, context);
 
         assert_eq!(

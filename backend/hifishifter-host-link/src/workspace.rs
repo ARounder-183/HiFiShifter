@@ -489,7 +489,7 @@ fn decode_wav(bytes: &[u8]) -> Result<LoadedAudio, String> {
         .samples::<f32>()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    if samples.len() % channels != 0 {
+    if !samples.len().is_multiple_of(channels) {
         return Err("WAV sample count is not a whole number of frames".into());
     }
     let frames = samples.len() / channels;

@@ -429,7 +429,8 @@ impl SnapshotPublisher {
         }
     }
 
-    /// 当前快照代次；音频线程无锁读取。
+    /// 当前快照代次（测试断言用；接缝淡化问的是下面的 `content`）。
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
@@ -926,7 +927,7 @@ impl SnapshotPublisher {
             .windows(2)
             .filter_map(|pair| {
                 let (left, right) = (&pair[0], &pair[1]);
-                (left.end < right.start).then(|| left.end..right.start)
+                (left.end < right.start).then_some(left.end..right.start)
             })
             .collect();
         let edge_gain = |position: i64| -> (f32, f32) {

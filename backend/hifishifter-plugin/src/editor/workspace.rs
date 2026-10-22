@@ -666,7 +666,7 @@ impl DocumentSession {
             // 解析成功 ⇒ 用模型轨；解析不到 ⇒ 退回宿主 id（未认领的 item 走占位路径）。
             let resolved = {
                 let items = self.region_items.lock_or_recover();
-                resolve_model_track(&timeline, &items, &presented, host)
+                resolve_model_track(timeline, &items, &presented, host)
             };
             let track_id = resolved.clone().unwrap_or_else(|| prefix(&host.id));
             owned.insert(track_id.clone());

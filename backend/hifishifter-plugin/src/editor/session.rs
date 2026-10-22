@@ -3478,7 +3478,7 @@ pub(crate) mod tests {
 
         // 命令分发走的是同一条会话（前端启动扇出全是它）。
         let payload = crate::editor::commands::dispatch(
-            &session,
+            session,
             "get_timeline_state",
             serde_json::json!({}),
         )

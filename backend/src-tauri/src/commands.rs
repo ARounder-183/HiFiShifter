@@ -91,12 +91,6 @@ pub(crate) use hifishifter_kernel::editor::selection as param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
 // 无GUI回归直接调用同一参数命令实现，避免伪造Tauri State或替换写入行为。
-#[cfg(test)]
-pub(crate) use params::{
-    restore_param_frames as restore_param_frames_for_test,
-    set_param_frames as write_param_frames_for_test, set_static_param as set_static_param_for_test,
-    stretch_track_linked_params as stretch_track_linked_params_for_test,
-};
 #[path = "commands/pitch_cache.rs"]
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]

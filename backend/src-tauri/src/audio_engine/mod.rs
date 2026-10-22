@@ -14,8 +14,6 @@ pub(crate) mod snapshot;
 pub(crate) mod types;
 pub(crate) use hifishifter_kernel::util;
 
-#[cfg(test)]
-pub(crate) use engine::command_test_support;
 pub use engine::AudioEngine;
 #[allow(unused_imports)]
 pub use types::AudioEngineStateSnapshot;
