@@ -1885,12 +1885,41 @@ impl Clip {
         }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
+            self.migrate_gain_split();
             return;
         }
+        self.migrate_gain_split();
         let idx = self.active_take_index().min(self.takes.len() - 1);
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
+    }
+
+    /// 把"唯一那层增益"提升到 item 层（幂等）。
+    ///
+    /// 【为什么必须做】在 item / take 拆成两层之前，工程里只有一个增益，而且存在
+    /// **take** 上。旋钮从此编辑 item 层 —— 不提升的话，用户打开旧工程会看到旋钮
+    /// 停在 0 dB，却仍然听见当初那个 −6 dB，两边对不上。
+    ///
+    /// 【判据】只有"item 层仍是 1.0 且所有 take 增益彼此相同"时才提升：把 G 搬到
+    /// item、把各 take 置 1，可听增益 `clip_gain × take.gain` **逐位不变**。
+    /// 多 take 各自不同时无法用一个数代表整组，原样保留。
+    fn migrate_gain_split(&mut self) {
+        if self.takes.is_empty() || (self.clip_gain - 1.0).abs() > f32::EPSILON {
+            return;
+        }
+        let first = self.takes[0].gain;
+        if !self.takes.iter().all(|take| (take.gain - first).abs() < 1e-6) {
+            return;
+        }
+        if (first - 1.0).abs() < 1e-6 {
+            return;
+        }
+        self.clip_gain = crate::gain::clamp_gain(first);
+        for take in &mut self.takes {
+            take.gain = 1.0;
+        }
+        self.gain = 1.0;
     }
 
     /// 活跃 take 的声道模式（takes 为空时按 Normal；不依赖投影物化）。
@@ -12243,4 +12272,58 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
     }
 
     out
+
+}
+
+#[cfg(test)]
+mod gain_split_tests {
+    use super::*;
+
+
+/// 旧工程里"唯一那层增益"必须被提升到 item 层，且**可听增益不变**。
+///
+/// 【为什么这条是回归】旋钮从此编辑 item 层。若不提升，用户打开旧工程会看到
+/// 旋钮停在 0 dB，却仍听见当初那个 −6 dB —— 界面与听感对不上。
+#[test]
+fn legacy_take_gain_is_hoisted_into_the_item_layer() {
+    let mut timeline = TimelineState::default();
+    let track_id = timeline.tracks[0].id.clone();
+    let clip_id = timeline.add_clip(
+        Some(track_id),
+        Some("Legacy".into()),
+        Some(0.0),
+        Some(1.0),
+        Some("C:/audio/a.wav".into()),
+    );
+    {
+        // 旧工程的样子：增益只有一层，且躺在 take 上。
+        let clip = timeline.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+        clip.takes[0].gain = 0.5;
+        clip.gain = 0.5;
+        clip.clip_gain = 1.0;
+    }
+    let audible_before = timeline
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .unwrap()
+        .audible_gain();
+
+    {
+        let clip = timeline.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+        clip.normalize_takes();
+        assert!(
+            (clip.clip_gain - 0.5).abs() < 1e-6,
+            "the single gain must move to the item layer, got {}",
+            clip.clip_gain
+        );
+        assert!(
+            (clip.audible_gain() - audible_before).abs() < 1e-6,
+            "hoisting must not change what the clip sounds like"
+        );
+        // 幂等：再跑一遍不会把值乘两次。
+        clip.normalize_takes();
+        assert!((clip.audible_gain() - audible_before).abs() < 1e-6);
+    }
+}
 }
