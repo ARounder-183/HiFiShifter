@@ -1160,6 +1160,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    {/* 工程拉伸设置：**工程自带**渲染口径。
+                        之前这里是"工程覆盖 / 继承全局"两级，且"继承全局"让工程文件
+                        根本不携带这个决定 —— 工程换台机器就换个声音。现在保存时会把当时
+                        生效的值固化进工程，菜单因此只呈现"当前值 + 三个算法"，不再有
+                        "继承"这个选项。 */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tf("stretch_project_override")}
@@ -1170,22 +1175,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     {`${tf("stretch_algorithm")}: ${stretchAlgorithmLabel(effectiveProjectStretchAlgorithm)}`}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
-                                    <DropdownMenu.Item
-                                        onSelect={() =>
-                                            void dispatch(
-                                                setProjectStretchSettingsRemote({
-                                                    stretchAlgorithmOverride: null,
-                                                    hifiganMelStretchOverride:
-                                                        s.project.hifiganMelStretchOverride,
-                                                }),
-                                            )
-                                        }
-                                    >
-                                        {withCheck(
-                                            s.project.stretchAlgorithmOverride == null,
-                                            `${tf("stretch_inherit_global")} (${stretchAlgorithmLabel(s.defaultStretchAlgorithm)})`,
-                                        )}
-                                    </DropdownMenu.Item>
                                     {(["linear", "signalsmith", "soundtouch"] as const).map(
                                         (algorithm) => (
                                             <DropdownMenu.Item
@@ -1195,14 +1184,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                                         setProjectStretchSettingsRemote({
                                                             stretchAlgorithmOverride: algorithm,
                                                             hifiganMelStretchOverride:
-                                                                s.project.hifiganMelStretchOverride,
+                                                                effectiveProjectHifiganMelStretch,
                                                         }),
                                                     )
                                                 }
                                             >
                                                 {withCheck(
-                                                    s.project.stretchAlgorithmOverride ===
-                                                        algorithm,
+                                                    effectiveProjectStretchAlgorithm === algorithm,
                                                     stretchAlgorithmLabel(algorithm),
                                                 )}
                                             </DropdownMenu.Item>
@@ -1220,30 +1208,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                             void dispatch(
                                                 setProjectStretchSettingsRemote({
                                                     stretchAlgorithmOverride:
-                                                        s.project.stretchAlgorithmOverride,
-                                                    hifiganMelStretchOverride: null,
-                                                }),
-                                            )
-                                        }
-                                    >
-                                        {withCheck(
-                                            s.project.hifiganMelStretchOverride == null,
-                                            `${tf("stretch_inherit_global")} (${s.defaultHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")})`,
-                                        )}
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        onSelect={() =>
-                                            void dispatch(
-                                                setProjectStretchSettingsRemote({
-                                                    stretchAlgorithmOverride:
-                                                        s.project.stretchAlgorithmOverride,
+                                                        effectiveProjectStretchAlgorithm,
                                                     hifiganMelStretchOverride: true,
                                                 }),
                                             )
                                         }
                                     >
                                         {withCheck(
-                                            s.project.hifiganMelStretchOverride === true,
+                                            effectiveProjectHifiganMelStretch,
                                             tf("stretch_toggle_on"),
                                         )}
                                     </DropdownMenu.Item>
@@ -1252,14 +1224,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                             void dispatch(
                                                 setProjectStretchSettingsRemote({
                                                     stretchAlgorithmOverride:
-                                                        s.project.stretchAlgorithmOverride,
+                                                        effectiveProjectStretchAlgorithm,
                                                     hifiganMelStretchOverride: false,
                                                 }),
                                             )
                                         }
                                     >
                                         {withCheck(
-                                            s.project.hifiganMelStretchOverride === false,
+                                            !effectiveProjectHifiganMelStretch,
                                             tf("stretch_toggle_off"),
                                         )}
                                     </DropdownMenu.Item>
@@ -1270,9 +1242,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Separator />
 
+                    {/* 全局默认 = **只影响新建工程**的初值。已有工程在保存时固化了
+                        自己的值（见后端 build_project_file_snapshot），这里改它不会
+                        动到任何已存在的工程 —— 标题因此写明"新建工程"。 */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {tf("stretch_global_default")}
+                            {`${tf("stretch_global_default")}（${tf("stretch_new_project_only")}）`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>

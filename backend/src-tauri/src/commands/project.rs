@@ -379,6 +379,26 @@ fn atomic_write_project_snapshot_to_path(
     Ok(())
 }
 
+/// 保存时把"当前生效的拉伸设置"固化成具体值。
+///
+/// 【为什么保存要固化】这两个字段在工程文件里曾是"覆盖值；None = 继承全局"。
+/// 于是工程**根本不携带**渲染口径：换一台机器、换一个人的全局默认，同一份工程
+/// 听到与渲染出来的都不一样。工程必须自带它的决定。
+///
+/// 【为什么"None 读全局"的运行时语义不一起改】旧文件与"从未保存过的新工程"里
+/// 仍是 None，读时回退全局是既有行为；改它需要一次工程文件版本迁移。这里先保证
+/// **任何一次保存**都会写出具体值 —— 保存过的工程从此自洽，历史文件保持原样。
+fn pinned_stretch_settings(
+    algorithm_override: Option<crate::time_stretch::UserStretchAlgorithm>,
+    mel_override: Option<bool>,
+    settings: &hifishifter_kernel::config::UiSettings,
+) -> (crate::time_stretch::UserStretchAlgorithm, bool) {
+    (
+        algorithm_override.unwrap_or(settings.default_stretch_algorithm),
+        mel_override.unwrap_or(settings.default_hifigan_mel_stretch),
+    )
+}
+
 fn build_project_file_snapshot(
     state: &AppState,
     project_path: &Path,
@@ -437,8 +457,21 @@ fn build_project_file_snapshot(
     pf.custom_scale = custom_scale;
     pf.notes_markdown = notes_markdown;
     pf.notebook_assets = notebook_assets;
-    pf.synth_config.stretch_algorithm_override = stretch_algorithm_override;
-    pf.synth_config.hifigan_mel_stretch_override = hifigan_mel_stretch_override;
+    // ── 拉伸设置：保存时**固化成具体值** ────────────────────────────────
+    //
+    // 【为什么必须固化】这两个字段此前是"工程覆盖；None = 继承全局"。于是工程文件
+    // 根本不携带这个决定：用户 A 做好工程发给 B，B 的全局默认不同 ⇒ 同一份工程
+    // 听到的、渲染出来的都不一样。工程必须自带它的渲染口径。
+    //
+    // 运行时语义不变（None 仍读全局），但**任何一次保存都会把当时生效的值写进去**，
+    // 于是"保存过的工程"从此自洽；未保存过的旧文件仍旧按全局回退（历史无法追溯）。
+    let (pinned_algorithm, pinned_mel) = pinned_stretch_settings(
+        stretch_algorithm_override,
+        hifigan_mel_stretch_override,
+        &state.ui_settings_snapshot(),
+    );
+    pf.synth_config.stretch_algorithm_override = Some(pinned_algorithm);
+    pf.synth_config.hifigan_mel_stretch_override = Some(pinned_mel);
     // 工程级开关：是否随工程保存 UNDO 数据（与全局「新建工程默认值」相互独立）。
     pf.save_undo_history = save_undo_history;
     pf
@@ -1581,5 +1614,45 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod stretch_pinning_tests {
+    use super::pinned_stretch_settings;
+    use hifishifter_kernel::config::UiSettings;
+    use hifishifter_kernel::time_stretch::UserStretchAlgorithm;
+
+    /// 显式选择必须原样写进工程文件。
+    #[test]
+    fn an_explicit_choice_is_written_as_is() {
+        let settings = UiSettings::default();
+        let (algorithm, mel) = pinned_stretch_settings(
+            Some(UserStretchAlgorithm::Soundtouch),
+            Some(false),
+            &settings,
+        );
+        assert_eq!(algorithm, UserStretchAlgorithm::Soundtouch);
+        assert!(!mel);
+    }
+
+    /// 没有显式选择（新工程 / 旧文件）时，保存那一刻的全局值被固化下来。
+    ///
+    /// 【为什么这条是核心】工程此前是"None = 继承全局"，于是文件里没有这个决定，
+    /// 换台机器就换个声音。现在保存会把当时生效的值写死，工程从此自洽。
+    #[test]
+    fn an_inherited_value_is_pinned_at_save_time() {
+        let mut settings = UiSettings::default();
+        settings.default_stretch_algorithm = UserStretchAlgorithm::Linear;
+        settings.default_hifigan_mel_stretch = false;
+
+        let (algorithm, mel) = pinned_stretch_settings(None, None, &settings);
+        assert_eq!(algorithm, UserStretchAlgorithm::Linear);
+        assert!(!mel);
+
+        // 固化之后即便全局再变，工程里那个值也不该跟着变。
+        settings.default_stretch_algorithm = UserStretchAlgorithm::Signalsmith;
+        let (again, _) = pinned_stretch_settings(Some(algorithm), Some(mel), &settings);
+        assert_eq!(again, UserStretchAlgorithm::Linear);
     }
 }
