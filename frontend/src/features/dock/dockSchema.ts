@@ -761,25 +761,21 @@ export function findVisibleFormForPanel(layout: DockLayout, panelId: string): st
 }
 
 /**
- * 解析"同步时间轴视图"所需的两个窗体 —— 判据是**两个面板都活动可见**。
+ * 解析"同步时间轴视图"所需的两个窗体。
  *
- * 【为什么需要这个函数，以及为什么它必须被测试】偏移 = 轨道区左缘 − 参数编辑器
- * 绘制区左缘，把参数编辑器的内容按它平移后，同一时刻会落在**同一个屏幕 x** 上。
- * 只要两个面板**同时出现在屏幕上**，这个对齐就有意义（上下相邻是主场景；并排、或
- * 一个浮在另一个之上同样成立 —— 偏移可正可负，负值由滚动下限兜住）。
+ * 判据放宽成两种成立情形：
+ * 1. **两者都活动可见**（上下堆叠 / 并排 / 一浮一嵌）—— 偏移按屏幕左缘之差算；
+ * 2. **两者同处一个标签组**（插件默认视图）—— 同一时刻只有一个在屏幕上，但两个宿主
+ *    占的是同一个槽位，偏移退化成"内容内边距之差"（见 `measureTabbedViewportOffsetPx`）。
  *
- * 【为什么判据是"活动可见"而不是"没被关闭"】同一标签组里的非活动标签被停在视口外，
- * 它的左缘量不到（见 `isFormActiveVisible`）。用"没被关闭"当判据，就会在并列
- * 标签页布局下套用上一次测出的偏移 —— 而那时两个面板根本不同屏，错位量恰好是
- * 轨道头宽度减去键盘列宽度。并列标签页下两者不可能同时是活动标签，因此这里
- * 必然返回 null（偏移固定为 0，各用各的视口）。
+ * 【为什么必须包含第 2 种】此前判据只认"都可见"，而并列标签页下必然只有一个可见，
+ * 于是返回 null ⇒ 偏移固定 0 ⇒ 用户在时间轴与参数编辑器之间切换时，同一屏幕位置
+ * 对应的时间整整差一个轨道头宽度（140px vs 56px）。用户报障正是"切回去视线位置变了"。
  *
- * 这里曾经出过一个**静默失效**的缺陷：调用方把"时间轴窗体 id"写成了参数编辑器
- * 自己的窗体 id，两个参数于是是同一个窗体，判定必然为假、偏移被强制为 0，
- * 整个像素对齐功能失效，且没有任何报错。因此本函数返回**两个不同的**窗体 id，
- * 并显式拒绝"同一个窗体"这一情形。
+ * 【为什么仍要拒绝"同一个窗体"】调用方曾把"时间轴窗体 id"写成了参数编辑器自己的 id，
+ * 两个参数是同一个窗体 ⇒ 判定必然为假且偏移恒为 0，整个像素对齐静默失效。
  *
- * @returns 两个窗体 id；任一不可见、或解析到同一个窗体时返回 null（调用方据此退回偏移 0）。
+ * @returns 两个窗体 id + 是否同处一个标签组；任一不可用时返回 null。
  */
 export function resolveSyncOffsetForms(
     layout: DockLayout,
@@ -787,29 +783,30 @@ export function resolveSyncOffsetForms(
     paramPanelId: string,
     /** 本参数编辑器窗体的 id（多实例时由面板注入）；不属于该面板时忽略。 */
     paramFormId?: string,
-): { timelineFormId: string; paramFormId: string } | null {
-    const timelineFormId = findActiveVisibleFormForPanel(layout, timelinePanelId);
+): { timelineFormId: string; paramFormId: string; sameTabset: boolean } | null {
+    const timelineFormId = findVisibleFormForPanel(layout, timelinePanelId);
     if (!timelineFormId) return null;
 
     const injected =
         paramFormId && layout.forms[paramFormId]?.panelId === paramPanelId ? paramFormId : null;
-    const resolvedParamFormId = injected ?? findActiveVisibleFormForPanel(layout, paramPanelId);
+    const resolvedParamFormId = injected ?? findVisibleFormForPanel(layout, paramPanelId);
     if (!resolvedParamFormId) return null;
-    // 注入的窗体也必须是**活动可见**的（调用方可能拿着一个刚被切走的窗体 id）。
-    if (!isFormActiveVisible(layout, resolvedParamFormId)) return null;
     // 同一个窗体（参数写反的典型后果）：偏移没有意义，且必然算错。
     if (resolvedParamFormId === timelineFormId) return null;
 
-    return { timelineFormId, paramFormId: resolvedParamFormId };
-}
+    const root = layout.roots[MAIN_ROOT_ID];
+    const timelineTabset = root ? findTabsetOfForm(root, timelineFormId) : null;
+    const paramTabset = root ? findTabsetOfForm(root, resolvedParamFormId) : null;
+    const sameTabset =
+        timelineTabset !== null && paramTabset !== null && timelineTabset.id === paramTabset.id;
 
-/** 找出该面板当前**活动可见**的窗体 id（多实例时取第一个）。 */
-function findActiveVisibleFormForPanel(layout: DockLayout, panelId: string): string | null {
-    for (const formId of layout.order) {
-        if (layout.forms[formId]?.panelId !== panelId) continue;
-        if (isFormActiveVisible(layout, formId)) return formId;
+    if (!sameTabset) {
+        // 不同标签组时必须两者都真的在屏幕上，否则测不到绝对坐标。
+        if (!isFormActiveVisible(layout, timelineFormId)) return null;
+        if (!isFormActiveVisible(layout, resolvedParamFormId)) return null;
     }
-    return null;
+
+    return { timelineFormId, paramFormId: resolvedParamFormId, sameTabset };
 }
 
 /** 找出该面板已关闭的窗体 id（用于重开时复用记录，保住标题与 props）。 */

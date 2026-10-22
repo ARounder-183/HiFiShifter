@@ -711,8 +711,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         const resolved = resolveSyncOffsetForms(layout, "timeline", "paramEditor");
         assertEqual(
             resolved,
-            { timelineFormId: "timeline", paramFormId: "paramEditor" },
-            "the default stacked layout resolves two DISTINCT forms",
+            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: false },
+            "the default stacked layout resolves two DISTINCT forms in different tabsets",
         );
 
         // 并排 / 浮动同样成立：判据是"都可见"，不是"必须上下堆叠"。
@@ -771,7 +771,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         // 注入的 formId 不属于本面板 → 忽略它，按面板 id 回退。
         assertEqual(
             resolveSyncOffsetForms(layout, "timeline", "paramEditor", "fileBrowser"),
-            { timelineFormId: "timeline", paramFormId: "paramEditor" },
+            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: false },
             "an unrelated injected formId is ignored",
         );
         // 参数写反（两个面板 id 传成同一个）→ 拒绝，而不是算出一个必然错的值。
@@ -808,8 +808,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         const tabbed = createDefaultDockLayout("plugin");
         assertEqual(
             resolveSyncOffsetForms(tabbed, "timeline", "paramEditor"),
-            null,
-            "two tabs in ONE tabset are never both on screen; the offset must not apply",
+            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: true },
+            "two tabs in ONE tabset still resolve: the offset falls back to content insets",
         );
 
         // 反过来切到时间轴标签也一样：参数编辑器成了非活动标签。
@@ -822,8 +822,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         };
         assertEqual(
             resolveSyncOffsetForms(tabbedOnTimeline, "timeline", "paramEditor"),
-            null,
-            "whichever tab is active, the other one is not on screen",
+            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: true },
+            "the mapping must not depend on which of the two tabs is active",
         );
     }
 });

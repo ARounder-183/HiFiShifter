@@ -211,3 +211,42 @@ export function timelineViewportStateToNative(stateScrollLeft: number, offsetPx:
 export function timelineViewportNativeToState(nativeScrollLeft: number, offsetPx: number): number {
     return nativeScrollLeft - offsetPx;
 }
+
+/**
+ * 内容左缘相对**本面板宿主**的偏移（CSS px）。
+ *
+ * 【为什么这个量比"屏幕左缘"可靠】面板宿主在非活动标签上会被搬到停泊区
+ * （`left: -20000px`）。此时它的绝对坐标没有意义（`readableLeftPx` 必须拒绝它），
+ * 但"内容相对宿主"的差值是面板**内部**几何 —— 宿主与内容一起被搬走，差值不变。
+ * 于是并排标签页（同一时刻只有一个可见）也能算出正确偏移。
+ */
+export function contentInsetPx(scrollerSelector: string): number | null {
+    if (typeof document === "undefined") return null;
+    const scroller = document.querySelector<HTMLElement>(scrollerSelector);
+    if (scroller === null) return null;
+    const host = scroller.closest<HTMLElement>("[data-dock-host]");
+    if (host === null) return null;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    if (hostRect.width < 1 || hostRect.height < 1) return null;
+    if (scrollerRect.width < 1 || scrollerRect.height < 1) return null;
+    return scrollerRect.left - hostRect.left;
+}
+
+/**
+ * 两个面板并列成**标签页**时的水平偏移。
+ *
+ * 【为什么它成立】两个宿主占据同一个槽位（同一个 rect），所以"宿主左缘之差"恒为 0，
+ * 偏移退化成"内容内边距之差"：轨道视图减去轨道头宽度，参数编辑器减去键盘列宽度。
+ * 把参数编辑器的内容按它平移后，**同一屏幕 x 上出现的是同一时刻** —— 用户在两个标签
+ * 之间来回切换时视线位置不变。
+ *
+ * 【为什么不能沿用绝对坐标】非活动标签的宿主在停泊区，绝对坐标是 −20000；旧实现据此
+ * 返回 null，偏移被固定成 0，切回去时整段区间平移了一个轨道头宽度。
+ */
+export function measureTabbedViewportOffsetPx(): number | null {
+    const timelineInset = contentInsetPx("[data-timeline-scroller]");
+    const paramInset = contentInsetPx("[data-piano-roll-scroller]");
+    if (timelineInset === null || paramInset === null) return null;
+    return timelineInset - paramInset;
+}

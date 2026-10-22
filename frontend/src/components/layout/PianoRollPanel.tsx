@@ -77,6 +77,7 @@ import {
     transposePitchByScaleSteps,
 } from "../../utils/musicalScales";
 import {
+    measureTabbedViewportOffsetPx,
     measureTimelineViewportOffsetPx,
     timelineViewportSync,
     timelineViewportNativeToState,
@@ -1738,12 +1739,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      * **整个失效**。这里改为分别取时间轴与本面板的窗体 id，并只要求"都可见"。
      */
     const dockLayout = useAppSelector((state) => state.dock.layout);
-    const syncOffsetApplicable = useMemo(
-        () =>
-            resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId) !==
-            null,
+    /**
+     * 同步所需的两个窗体。`sameTabset` 决定偏移怎么算：
+     * 同一标签组时用"内容内边距之差"（两个宿主同槽位），否则用屏幕左缘之差。
+     */
+    const syncPair = useMemo(
+        () => resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId),
         [dockFormId, dockLayout],
     );
+    const syncOffsetApplicable = syncPair !== null;
+    const syncOffsetTabbed = syncPair?.sameTabset === true;
 
     // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
     // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
@@ -1828,6 +1833,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (track) observer.observe(track);
         };
 
+        /**
+         * 量一次偏移。
+         *
+         * 同一标签组（插件默认视图）里两个面板永不共屏，绝对坐标不可用（非活动标签的
+         * 宿主停在视口外），改用"内容内边距之差"；其余布局仍是屏幕左缘之差。
+         */
+        const measureOffset = () =>
+            syncOffsetTabbed ? measureTabbedViewportOffsetPx() : measureTimelineViewportOffsetPx();
+
         /** 采用一次有效测量（并停止重试）。 */
         const applyMeasured = (value: number) => {
             stopRetry();
@@ -1842,7 +1856,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             const tick = () => {
                 frame = null;
                 if (stopped) return;
-                const next = measureTimelineViewportOffsetPx();
+                const next = measureOffset();
                 if (next !== null) {
                     applyMeasured(next);
                     return;
@@ -1860,7 +1874,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
         function measureAndApply(): void {
             if (stopped) return;
-            const next = measureTimelineViewportOffsetPx();
+            const next = measureOffset();
             if (next !== null) {
                 applyMeasured(next);
                 return;
@@ -1884,7 +1898,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // 完全不变** —— 那样 ResizeObserver 不会触发，本 effect 若只挂载时跑一次，
         // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
         // 一次尺寸变化时才自愈）。因此布局一变就重测。
-    }, [syncOffsetApplicable, dockLayout]);
+    }, [syncOffsetApplicable, syncOffsetTabbed, dockLayout]);
 
     useEffect(() => {
         const timer = setTimeout(() => {
