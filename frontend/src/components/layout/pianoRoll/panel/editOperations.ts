@@ -7,7 +7,7 @@
  * 同一个 hook 里，翻到它要滚过七千行。
  *
  * 【依赖怎么拿】33 个捕获值（store 快照、ref、setState、派生值）由调用方打包成
- * 一个对象传进来，类型是 `Pick<PianoRollPanelModel, …>` —— 字段清单由 AST 扫描
+ * 一个对象传进来，类型是 `Pick<ModelDeps, …>` —— 字段清单由 AST 扫描
  * 得出，不是手抄。函数体一字未改：开头把那 33 个名字解构回局部变量，下面就是
  * 原样搬过来的实现。
  *
@@ -92,11 +92,11 @@ import {
 } from "../../../../utils/systemClipboard";
 import { SELECTION_SCOPE_EXEMPT_OPS, clipTimeRangeToFrameBounds } from "./panelHelpers";
 
-import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
+import type { ModelDeps } from "./modelDeps";
 
 /** 执行一条编辑命令所需的全部捕获值（字段清单由 AST 扫描得出）。 */
 type EditOpDeps = Pick<
-    PianoRollPanelModel,
+    ModelDeps,
     | "activeVibratoPresetId"
     | "bumpRefreshToken"
     | "clipboardRef"

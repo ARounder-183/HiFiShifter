@@ -1,3 +1,21 @@
+/**
+ * 参数编辑器的"画什么"：网格规格、曲线图层、选区与块的矩形、纵轴取值换算。
+ *
+ * 【为什么单独成文件】这些函数是**纯计算**：给一组参数，算出该往画布上放什么。
+ * 它们不写 React 状态、不碰 DOM（除读画布尺寸）、也不发请求。此前它们与状态、
+ * 副作用、命令分发混在同一个 hook 里 —— 一个"纵轴怎么把值映射成像素"的问题
+ * 要在几千行里找。
+ *
+ * 【依赖怎么拿】每个函数需要的捕获值由调用方打包传入（`Pick<ModelDeps, …>`，
+ * 字段清单由 AST 扫描得出；函数体自己声明的同名局部变量不算依赖）。函数体原样
+ * 搬过来，开头解构回局部变量。
+ *
+ * 【为什么有的函数还要收参数】`buildCurveLayers(axis)` 这类是被"当次绘制"调用的，
+ * 参数是当次的数据；捕获值是跨渲染稳定的那部分。两者分开传，避免每次绘制都
+ * 重建一个大对象。
+ *
+ * 【边界】只算不画：把结果交给画布的是 `drawFrame.ts`。
+ */
 import { resolveScaleNotes, transposePitchByScaleSteps } from "../../../../utils/musicalScales";
 import type { ScaleLike } from "../../../../utils/musicalScales";
 import { clamp } from "../../timeline";
@@ -41,7 +59,7 @@ import type {
 import { normalizeCssColor, resolvePianoRollColors } from "../colors";
 import { parseRgbaColor } from "../../timeline/runtime/timelineClipGlRenderer";
 import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX, toDashTuple } from "./panelHelpers";
-import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
+import type { ModelDeps } from "./modelDeps";
 
 export function pitchDeltaToDegreeSteps(
     basePitch: number,
@@ -83,7 +101,7 @@ export function pitchDeltaToDegreeSteps(
 
 export function buildGridSpec(
     deps: Pick<
-        PianoRollPanelModel,
+        ModelDeps,
         | "clampViewport"
         | "editParam"
         | "editParamAxisUnit"
@@ -235,7 +253,7 @@ export function buildGridSpec(
 }
 
 export function valueToY(
-    deps: Pick<PianoRollPanelModel, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
     param: ParamName,
     v: number,
     h: number,
@@ -298,7 +316,7 @@ export function yToViewportT(y: number, h: number): number {
 }
 
 export function yToValue(
-    deps: Pick<PianoRollPanelModel, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
     param: ParamName,
     y: number,
     h: number,
@@ -353,7 +371,7 @@ export function yToValue(
 }
 
 export function clampViewport(
-    deps: Pick<PianoRollPanelModel, "processorParamsRef">,
+    deps: Pick<ModelDeps, "processorParamsRef">,
     param: ParamName,
     v: ValueViewport,
 ): ValueViewport {
@@ -390,7 +408,7 @@ export function clampViewport(
 }
 
 export function getParamValueBoundsForScrollbar(
-    deps: Pick<PianoRollPanelModel, "processorParamsRef">,
+    deps: Pick<ModelDeps, "processorParamsRef">,
     param: ParamName,
 ): { min: number; max: number } {
     const { processorParamsRef } = deps;
@@ -428,10 +446,7 @@ export function getParamValueBoundsForScrollbar(
 }
 
 export function getCurrentViewportForScrollbar(
-    deps: Pick<
-        PianoRollPanelModel,
-        "getParamValueBoundsForScrollbar" | "paramViewsRef" | "pitchViewRef"
-    >,
+    deps: Pick<ModelDeps, "getParamValueBoundsForScrollbar" | "paramViewsRef" | "pitchViewRef">,
     param: ParamName,
 ): ValueViewport {
     const { getParamValueBoundsForScrollbar, paramViewsRef, pitchViewRef } = deps;
@@ -461,7 +476,7 @@ export function getCurrentViewportForScrollbar(
 
 export function syncVerticalScrollbarForViewport(
     deps: Pick<
-        PianoRollPanelModel,
+        ModelDeps,
         | "clampViewport"
         | "getParamValueBoundsForScrollbar"
         | "hostRef"
@@ -515,7 +530,7 @@ export function syncVerticalScrollbarForViewport(
 
 export function buildCurveLayers(
     deps: Pick<
-        PianoRollPanelModel,
+        ModelDeps,
         | "clipboardRef"
         | "detectedPitchCurves"
         | "editParam"
@@ -737,7 +752,7 @@ export function buildCurveLayers(
 }
 
 export function buildSelectionBandSpec(
-    deps: Pick<PianoRollPanelModel, "paramView" | "themeMode">,
+    deps: Pick<ModelDeps, "paramView" | "themeMode">,
     selection: ParamSelection | null,
 ): PianoRollSelectionBandSpec | null {
     const { paramView, themeMode } = deps;
@@ -756,7 +771,7 @@ export function buildSelectionBandSpec(
 }
 
 export function secSpanClipRect(
-    deps: Pick<PianoRollPanelModel, "viewSizeRef">,
+    deps: Pick<ModelDeps, "viewSizeRef">,
     axis: TimelineAxis,
     startSec: number,
     endSec: number,
@@ -771,7 +786,7 @@ export function secSpanClipRect(
 }
 
 export function selectionClipRect(
-    deps: Pick<PianoRollPanelModel, "paramView" | "secSpanClipRect">,
+    deps: Pick<ModelDeps, "paramView" | "secSpanClipRect">,
     axis: TimelineAxis,
     range: FrameRange,
 ): { x: number; y: number; w: number; h: number } | null {

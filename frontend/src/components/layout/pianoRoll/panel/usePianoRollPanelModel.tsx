@@ -1,3 +1,27 @@
+/**
+ * 参数编辑器面板的**模型**：把整个面板的状态、派生值与回调装配成一份可传递的对象。
+ *
+ * 【为什么是"返回对象"的 hook，而不是一堆小 hook】
+ * 这个面板里有近四百个顶层绑定，几乎每一个都被 JSX 与别的回调同时引用
+ * （`invalidate` 被画布、标尺、滚动条、交互层共用；`handleEditOp` 被工具栏、
+ * 右键菜单、快捷键共用）。按"功能"切成十几个小 hook 需要给每个 hook 手写一份
+ * 输入接口 —— 那既是一份会过期的类型拷贝，又会让 hook 之间互相引用同一批 ref。
+ * 返回对象 + `ReturnType` 让**类型由实现推出**：视图层拿到的类型永远等于模型真正
+ * 返回的东西，没有第二份声明可以漂移。
+ *
+ * 【为什么视图层要 `Pick<>` 而不是整个模型】
+ * 每个视图文件只声明自己真正用到的那几个字段（列表由 AST 扫描得出，不是手抄；
+ * 属性名与对象字面量键不算依赖）。于是"工具栏开始依赖 `handleSaveAsPitchRef`"
+ * 这种越界会立刻变成类型错误 —— 依赖被钉在文件头上，而不是藏在闭包里。
+ *
+ * 【拆出去的执行体为什么用 `Pick<ModelDeps, …>` 而不是 `Pick<PianoRollPanelModel, …>`】
+ * 见 `modelDeps.ts`：让"模型返回类型"与"执行体的入参类型"互相引用会成环，模块一多
+ * 整条链就退化成 `any`。字段类型单独放在 `modelDeps.ts` 里，环才断得干净。
+ *
+ * 【边界】这里只做"装配"：不渲染任何东西。视图在 `ParamToolbar` / `EditorArea` /
+ * `PanelOverlays`；计算与绘制在 `sceneBuilders` / `drawFrame`；命令在 `editOperations` /
+ * `pitchReferenceOps`。
+ */
 import { loadStandaloneWindowApi } from "../../../../services/hostWindow";
 import { readUiValue, writeUiValue } from "../../../../services/uiStorage";
 import React, {
@@ -23,13 +47,10 @@ import {
     setTrackStateRemote,
     cycleDragDirection,
     persistUiSettings,
-    setActiveVibratoPreset,
     toggleParamAxisUnit,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setVisibleReferenceRootTrackIds,
-    createClipsRemote,
-    addTrackRemote,
     importMidiAsClip,
     setTempoMap,
     setParamSelectionActive,
@@ -43,9 +64,7 @@ import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../../../types/api";
 import { paramsApi } from "../../../../services/api/params";
-import { coreApi } from "../../../../services/api/core";
-import type { ParamFramesPayload } from "../../../../types/api";
-import { isScaleKey, SCALE_NOTES } from "../../../../utils/musicalScales";
+import { isScaleKey } from "../../../../utils/musicalScales";
 import {
     measureTabbedViewportOffsetPx,
     measureTimelineViewportOffsetPx,
@@ -100,7 +119,6 @@ import {
 import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
 import { useToolbarOverflowTier } from "../useToolbarOverflowTier";
 import {
-    frameRangeEnd,
     normalizeSelection,
     selectionBoundingSpan,
     selectionFromFrames,
@@ -116,7 +134,7 @@ import { useClipsPeaksForPianoRoll } from "../useClipsPeaksForPianoRoll";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
 import { clampParamWriteValue } from "../paramRanges";
 import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
-import { framesToTime, midiToLabel, timeToFrame } from "../utils";
+import { midiToLabel, timeToFrame } from "../utils";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
@@ -138,9 +156,7 @@ import {
 } from "../../renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "../usePianoRollInteractions";
 import { resolveMenuMaxHeight } from "../../menuPlacement";
-import { extractVibratoPreset } from "../../../../features/vibrato/vibratoExtract";
 import type { VibratoPreset } from "../../../../features/vibrato/vibratoTypes";
-import { upsertVibratoPreset } from "../../../../features/session/sessionSlice";
 import {
     enabledVibratoPresets,
     resolveActiveVibratoPreset,
@@ -213,13 +229,19 @@ import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import {
     NOTE_NAMES_SHARP,
     PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-    VIBRATO_APPLY_PREVIEW_FRAMES,
     PIANO_ROLL_SYNC_ORIGIN,
     shouldWriteNumber,
     getParamToolbarRank,
     sameStringArray,
 } from "./panelHelpers";
 import { runEditOp } from "./editOperations";
+import {
+    handleSaveAsPitchRef as handleSaveAsPitchRefImpl,
+    handleExtractVibratoPreset as handleExtractVibratoPresetImpl,
+    handleExportMidiFromEditor as handleExportMidiFromEditorImpl,
+    loadVibratoApplyOriginal as loadVibratoApplyOriginalImpl,
+    handleApplyVibrato as handleApplyVibratoImpl,
+} from "./pitchReferenceOps";
 import {
     pitchDeltaToDegreeSteps,
     buildGridSpec as buildGridSpecImpl,
@@ -5086,55 +5108,29 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 【为什么用第一段选区】多种选区下"提取一个预设"的语义是模糊的；取第一段
      * 最符合直觉（也是 `runPerRange` 之外唯一不需要用户再做选择的解释）。
      */
-    const handleExtractVibratoPreset = useCallback(async (): Promise<VibratoPreset | null> => {
-        if (!rootTrackId) return null;
-        if (!selectionRef.current || selectionRef.current.length === 0) {
-            selectAllParamRange();
-        }
-        const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
-        const range = ranges[0];
-        if (!range || range.frameCount < 8) return null;
-
-        const fp = paramView?.framePeriodMs ?? 5;
-        const res = await paramsApi.getParamFrames(
+    const handleExtractVibratoPreset = useCallback(
+        () =>
+            handleExtractVibratoPresetImpl({
+                currentParamRange,
+                dispatch,
+                editParam,
+                paramView,
+                rootTrackId,
+                selectAllParamRange,
+                selectionRef,
+                t,
+            }),
+        [
             rootTrackId,
+            selectionRef,
+            selectAllParamRange,
+            paramView,
             editParam,
-            range.startFrame,
-            range.frameCount,
-            1,
-            true,
-            isDynParam(editParam),
-        );
-        if (!res?.ok) return null;
-        const payload = res as ParamFramesPayload;
-        const values = (payload.edit ?? []).map((value) => Number(value) || 0);
-        const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
-        const extracted = extractVibratoPreset({
-            values,
-            framePeriodMs: fpMs,
-            param: editParam,
-            range: currentParamRange,
-        });
-        if (!extracted.ok) return null;
-
-        const preset = {
-            ...extracted.preset,
-            name: t("vibrato_from_selection"),
-        };
-        dispatch(upsertVibratoPreset(preset));
-        dispatch(setActiveVibratoPreset(preset.id));
-        void dispatch(persistUiSettings());
-        return preset;
-    }, [
-        rootTrackId,
-        selectionRef,
-        selectAllParamRange,
-        paramView?.framePeriodMs,
-        editParam,
-        currentParamRange,
-        dispatch,
-        t,
-    ]);
+            currentParamRange,
+            dispatch,
+            t,
+        ],
+    );
 
     /**
      * 取颤音窗口「套用到选区」页签的预览数据：首个选区段的前 400 帧（≈2s）。
@@ -5143,36 +5139,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 是整条曲线，这里只取开头一段来预览，避免为预览拉整条曲线）。400 帧足够看清
      * 若干周期与渐入，开销可忽略。
      */
-    const loadVibratoApplyOriginal = useCallback(async () => {
-        if (!rootTrackId) return null;
-        const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
-        const range = ranges[0] ?? { startFrame: 0, frameCount: VIBRATO_APPLY_PREVIEW_FRAMES };
-        const frameCount = Math.min(range.frameCount, VIBRATO_APPLY_PREVIEW_FRAMES);
-        if (frameCount < 2) return null;
-
-        const fp = paramView?.framePeriodMs ?? 5;
-        const res = await paramsApi.getParamFrames(
-            rootTrackId,
-            editParam,
-            range.startFrame,
-            frameCount,
-            1,
-            true,
-            isDynParam(editParam),
-        );
-        if (!res?.ok) return null;
-        const payload = res as ParamFramesPayload;
-        const values = (payload.edit ?? []).map((value) => Number(value) || 0);
-        if (values.length < 2) return null;
-        const framePeriodMs = Number(payload.frame_period_ms ?? fp) || fp;
-        return { values, framePeriodMs };
-    }, [rootTrackId, selectionRef, paramView?.framePeriodMs, editParam]);
+    const loadVibratoApplyOriginal = useCallback(
+        () => loadVibratoApplyOriginalImpl({ editParam, paramView, rootTrackId, selectionRef }),
+        [rootTrackId, selectionRef, paramView, editParam],
+    );
 
     /** 颤音窗口的「应用」：把完整预设交给编辑管线（本地微调随之传入）。 */
     const handleApplyVibrato = useCallback(
-        (preset: VibratoPreset) => {
-            void handleEditOp("addVibrato", { preset });
-        },
+        (preset: VibratoPreset) => handleApplyVibratoImpl({ handleEditOp }, preset),
         [handleEditOp],
     );
 
@@ -5200,210 +5174,34 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 无选区时先做一次隐式全选（作用域 = 整条参数曲线），与右键菜单里其它
      * 以选区为作用域的操作一致 —— 否则这个菜单项点下去会毫无反应。
      */
-    const handleSaveAsPitchRef = useCallback(async () => {
-        if (!rootTrackId) return;
-        if (!selectionRef.current || selectionRef.current.length === 0) {
-            selectAllParamRange();
-        }
-        const sel = selectionRef.current;
-        if (!sel || sel.length === 0) return;
-
-        const fp = paramView?.framePeriodMs ?? 5;
-        const selFrameRanges = selectionToFrameRanges(sel);
-        if (selFrameRanges.length === 0) return;
-
-        // 逐段取 pitch → MIDI 音符事件（与旧单选区同一转换，保留浮点音高）
-        const clipTemplates: Array<{
-            startSec: number;
-            lengthSec: number;
-            midiNoteData: Array<{
-                startSec: number;
-                endSec: number;
-                note: number;
-                velocity: number;
-                channel: number;
-            }>;
-        }> = [];
-        for (const range of selFrameRanges) {
-            const res = await paramsApi.getParamFrames(
+    const handleSaveAsPitchRef = useCallback(
+        () =>
+            handleSaveAsPitchRefImpl({
+                dispatch,
+                paramView,
                 rootTrackId,
-                "pitch",
-                range.startFrame,
-                range.frameCount,
-                1,
-            );
-            if (!res?.ok || !res.edit) continue;
-            const pitchValues: number[] = (res.edit as number[]).map((v) => Number(v) || 0);
-            if (pitchValues.length === 0) continue;
-
-            const startSec = (range.startFrame * fp) / 1000;
-            const lengthSec = Math.max(0.01, (pitchValues.length * fp) / 1000);
-
-            // Convert pitch values (semitones) to MIDI note events
-            // 保留原始浮点音高值，不进行半音量化
-            const fpSec = fp / 1000;
-            const midiNoteData: Array<{
-                startSec: number;
-                endSec: number;
-                note: number;
-                velocity: number;
-                channel: number;
-            }> = [];
-            let segStartFrame = 0;
-            let currentNote = pitchValues[0];
-            for (let i = 1; i < pitchValues.length; i++) {
-                const note = pitchValues[i];
-                if (Math.abs(note - currentNote) > 0.001) {
-                    midiNoteData.push({
-                        startSec: segStartFrame * fpSec,
-                        endSec: i * fpSec,
-                        note: currentNote,
-                        velocity: 100,
-                        channel: 0,
-                    });
-                    segStartFrame = i;
-                    currentNote = note;
-                }
-            }
-            midiNoteData.push({
-                startSec: segStartFrame * fpSec,
-                endSec: pitchValues.length * fpSec,
-                note: currentNote,
-                velocity: 100,
-                channel: 0,
-            });
-            clipTemplates.push({ startSec, lengthSec, midiNoteData });
-        }
-        if (clipTemplates.length === 0) return;
-
-        // Determine target track: try the track above the currently selected track.
-        // If no track above exists, or the above track has overlapping clips
-        // in the import time range, create a new track above the current track.
-        const orderedTrackIds = s.tracks.map((t) => t.id);
-        const trackIndexById: Record<string, number> = {};
-        orderedTrackIds.forEach((id, idx) => {
-            trackIndexById[id] = idx;
-        });
-
-        const currentIdx = s.selectedTrackId ? (trackIndexById[s.selectedTrackId] ?? -1) : -1;
-        let targetTrackId: string | null = null;
-
-        if (currentIdx > 0) {
-            const aboveTrackId = orderedTrackIds[currentIdx - 1];
-
-            const hasOverlap = s.clips.some(
-                (c) =>
-                    c.trackId === aboveTrackId &&
-                    clipTemplates.some(
-                        (template) =>
-                            c.startSec < template.startSec + template.lengthSec &&
-                            c.startSec + c.lengthSec > template.startSec,
-                    ),
-            );
-            if (!hasOverlap) {
-                const currentTrack = s.tracks.find((t) => t.id === s.selectedTrackId);
-                const aboveTrack = s.tracks.find((t) => t.id === aboveTrackId);
-                if (
-                    currentTrack &&
-                    aboveTrack &&
-                    currentTrack.depth != null &&
-                    aboveTrack.depth != null &&
-                    currentTrack.depth >= aboveTrack.depth
-                ) {
-                    targetTrackId = aboveTrackId;
-                }
-            }
-        }
-
-        if (!targetTrackId) {
-            // Create a new track above the current track
-            const currentTrack = s.tracks.find((t) => t.id === s.selectedTrackId);
-            const newTrackPayload: Record<string, unknown> = {
-                name: undefined,
-                parentTrackId: currentTrack?.parentId ?? null,
-            };
-            if (currentIdx >= 0) {
-                newTrackPayload.index = currentIdx;
-            }
-            const result = await dispatch(
-                addTrackRemote(newTrackPayload as { name?: string; parentTrackId?: string | null }),
-            ).unwrap();
-            const added = result as {
-                selected_track_id?: string;
-                tracks?: Array<{ id: string }>;
-            };
-            targetTrackId =
-                added.selected_track_id ?? added.tracks?.[added.tracks.length - 1]?.id ?? null;
-        }
-
-        if (!targetTrackId) return;
-
-        await dispatch(
-            createClipsRemote({
-                templates: clipTemplates.map((template) => ({
-                    trackId: targetTrackId as string,
-                    name: "Pitch Ref",
-                    startSec: template.startSec,
-                    lengthSec: template.lengthSec,
-                    midiNoteData: template.midiNoteData,
-                    midiFillGaps: true,
-                })),
+                s,
+                selectAllParamRange,
+                selectionRef,
             }),
-        );
-    }, [
-        selectionRef,
-        rootTrackId,
-        paramView,
-        s.tracks,
-        s.selectedTrackId,
-        s.clips,
-        dispatch,
-        selectAllParamRange,
-    ]);
+        [selectionRef, rootTrackId, paramView, s, dispatch, selectAllParamRange],
+    );
 
     /**
      * 「导出 MIDI」：每个选区段作为一条独立的导出条目
      * （后端按 track 条目逐条导出，断层因此不会被填上音符）。
      */
-    const handleExportMidiFromEditor = useCallback(async () => {
-        if (!rootTrackId) return;
-        // 无选区时先隐式全选（作用域 = 整条参数曲线），与菜单里其它以选区为
-        // 作用域的操作一致。
-        if (!selectionRef.current || selectionRef.current.length === 0) {
-            selectAllParamRange();
-        }
-        const sel = selectionRef.current;
-        if (!sel || sel.length === 0) return;
-
-        const saveResult = await coreApi.pickMidiOutputPath();
-        if (!saveResult.ok || saveResult.canceled || !saveResult.path) return;
-
-        const selectedTrack = s.tracks.find((t) => t.id === s.selectedTrackId);
-        const trackName = selectedTrack?.name ?? "Track";
-        const scaleNotes =
-            SCALE_NOTES[(s.project?.baseScale as keyof typeof SCALE_NOTES) ?? "C"] ?? SCALE_NOTES.C;
-
-        await paramsApi.exportPitchToMidi({
-            outputPath: saveResult.path,
-            tracks: sel.map((range) => {
-                // 半开帧区间 → 秒（右端是最后一帧的右缘）。
-                const fp = paramView?.framePeriodMs ?? 5;
-                const startSec = framesToTime(range.startFrame, fp);
-                const endSec = Math.max(startSec + 0.01, framesToTime(frameRangeEnd(range), fp));
-                return {
-                    trackId: s.selectedTrackId ?? rootTrackId,
-                    rootTrackId,
-                    name: trackName,
-                    startSec,
-                    endSec,
-                };
+    const handleExportMidiFromEditor = useCallback(
+        () =>
+            handleExportMidiFromEditorImpl({
+                paramView,
+                rootTrackId,
+                s,
+                selectAllParamRange,
+                selectionRef,
             }),
-            bpm: s.bpm,
-            beatsPerBar: s.project?.beatsPerBar ?? 4,
-            baseScale: s.project?.baseScale ?? "C",
-            projectScaleNotes: scaleNotes,
-        });
-    }, [rootTrackId, selectionRef, paramView?.framePeriodMs, s, selectAllParamRange]);
+        [rootTrackId, selectionRef, paramView, s, selectAllParamRange],
+    );
 
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);

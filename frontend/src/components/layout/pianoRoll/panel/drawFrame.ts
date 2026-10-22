@@ -1,3 +1,15 @@
+/**
+ * 参数编辑器主画布的**一帧**：把当前视口、曲线、选区、剪贴板预览交给渲染内核。
+ *
+ * 【为什么单独成文件】它是 `drawRef.current` 的函数体，每帧被内核的 rAF 调一次。
+ * 它只读捕获值、写画布、不 setState —— 是"绘制"这件事的完整定义。留在模型里时，
+ * 读它要先翻过命令分发与滚动同步。
+ *
+ * 【依赖怎么拿】捕获值由模型打包传入，类型 `Pick<ModelDeps, …>`。函数体原样搬过来，
+ * 开头解构回局部变量。
+ *
+ * 【边界】只画一帧；调度（何时画、脏标记、滚动对齐）仍在 `pianoRollKernelHost`。
+ */
 import { drawPianoRoll } from "../render";
 import type { MainCanvasSignature } from "../mainCanvasSignature";
 import { isDynParam } from "../paramRanges";
@@ -5,11 +17,11 @@ import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { getCaptureRange } from "../../../../features/capture/captureRange";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { resolvePlayheadRgba } from "./panelHelpers";
-import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
+import type { ModelDeps } from "./modelDeps";
 
 /** 画一帧所需的全部捕获值（字段清单由 AST 扫描得出）。 */
 type DrawFrameDeps = Pick<
-    PianoRollPanelModel,
+    ModelDeps,
     | "axisCanvasRef"
     | "buildCurveLayers"
     | "buildSelectionBandSpec"
