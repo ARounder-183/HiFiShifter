@@ -112,6 +112,9 @@ unsafe fn record_host_name(host: *mut c_void) {
         return;
     };
     *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
+    // 日志按宿主分文件：拿到名字的这一刻把日志切到 `plugin-<slug>.log`
+    // （此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
+    crate::diagnostics::note_host_application(&name);
     crate::log_line(&format!("host application: {name}"));
 }
 

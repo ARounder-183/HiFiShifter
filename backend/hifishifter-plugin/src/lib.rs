@@ -55,6 +55,7 @@ mod ara_entry;
 mod audio_abi;
 mod component_state;
 mod diagnostics;
+mod plugin_log_name;
 mod editor;
 mod fade;
 pub mod render;

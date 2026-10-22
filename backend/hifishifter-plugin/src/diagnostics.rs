@@ -25,8 +25,9 @@ use hifishifter_kernel::logfile::RotatingLog;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 
-/// 插件日志文件名。与 App 的 `hifishifter.log` 不同 —— 见模块文档。
-const PLUGIN_LOG_FILE: &str = "plugin.log";
+/// 未知宿主时的日志文件名。真正的文件名由 `plugin_log_name::log_file_name` 决定
+/// （`plugin-<slug>.log`）；App 的 `hifishifter.log` 是另一回事，见模块文档。
+const PLUGIN_LOG_FILE: &str = "plugin-unknown.log";
 
 /// 会话头里的产品标识：两个形态的日志放在一起时要能一眼分清。
 ///
@@ -38,7 +39,22 @@ const PRODUCT: &str = "HiFiShifter VST3 / ARA plugin";
 
 static INIT: Once = Once::new();
 static LOGGER: FileLogger = FileLogger;
-static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// 最终日志路径。宿主名要到 `setActive` 才拿得到，而日志在 DLL 初始化时就要能写 ——
+/// 因此这里**可变**：先按"未知宿主"确定一次，宿主名到达后改写并重建写入器。
+static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// 宿主名（文件名用的原文）。由 `note_host_application` 写入。
+static HOST_NAME: Mutex<Option<String>> = Mutex::new(None);
+/// 写入器确定之前攒下的日志行。上限见 `MAX_PENDING_LINES`。
+static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// 攒多少行就放弃等待宿主名、直接落到 `plugin-unknown.log`。
+const MAX_PENDING_LINES: usize = 512;
+/// 日志器装好之后的宽限期：超过它还没等到宿主名就直接落 unknown。
+///
+/// 【为什么需要】纯 VST3（未绑定 ARA）时 `IHostApplication` 也可能拿不到名字 ——
+/// 若只按"缓冲满"才落盘，一个安静的会话可能一行日志都不写。
+const HOST_NAME_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// 日志器装好的时刻（见 `HOST_NAME_GRACE`）。
+static STARTED: OnceLock<std::time::Instant> = OnceLock::new();
 /// 持久的轮转写入器。取不到锁时按"内部错误"处理（`into_inner`），
 /// 不因为日志本身让宿主进程 panic。
 static WRITER: Mutex<Option<RotatingLog>> = Mutex::new(None);
@@ -62,6 +78,36 @@ impl log::Log for FileLogger {
             &record.args().to_string(),
         );
         let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            // 落点未定（宿主名还没到、也没过宽限期）：先攒着，别急着创建
+            // `plugin-unknown.log` —— 那会让"按宿主分文件"在真拿到宿主名之前就定死。
+            let buffered = {
+                let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+                if pending.len() < MAX_PENDING_LINES {
+                    pending.push(line.clone());
+                    true
+                } else {
+                    false
+                }
+            };
+            // 缓冲满、或已经等过了宽限期：直接落到 unknown，宁可文件名不完美也不能丢日志。
+            let timed_out = STARTED
+                .get()
+                .is_some_and(|started| started.elapsed() >= HOST_NAME_GRACE);
+            if buffered && !timed_out {
+                return;
+            }
+            match open_writer() {
+                Ok(mut writer) => {
+                    drain_pending_into(&mut writer);
+                    *guard = Some(writer);
+                }
+                Err(error) => {
+                    eprintln!("hifishifter: plugin log unavailable: {error}");
+                    return;
+                }
+            }
+        }
         if let Some(writer) = guard.as_mut() {
             let _ = writer.write_line(&line);
         }
@@ -70,27 +116,82 @@ impl log::Log for FileLogger {
     fn flush(&self) {}
 }
 
-/// 解析日志文件路径（结果只算一次）。
-fn log_path() -> Option<&'static PathBuf> {
-    Some(LOG_PATH.get_or_init(|| {
-        for variable in ["HIFISHIFTER_PLUGIN_LOG", "HIFISHIFTER_LOG_DIR"] {
-            if let Some(raw) = std::env::var_os(variable) {
-                let raw = raw.to_string_lossy().trim().to_owned();
-                if raw.is_empty() {
-                    continue;
-                }
-                let path = PathBuf::from(&raw);
-                // `HIFISHIFTER_LOG_DIR` 是**目录**（与 App 同名同义）；
-                // `HIFISHIFTER_PLUGIN_LOG` 是探针用的**文件**路径。
-                return if variable == "HIFISHIFTER_LOG_DIR" {
-                    path.join(PLUGIN_LOG_FILE)
-                } else {
-                    path
-                };
+/// 环境变量给出的精确落点（探针用）。设了它就不再按宿主分文件。
+fn env_override_path() -> Option<PathBuf> {
+    for variable in ["HIFISHIFTER_PLUGIN_LOG", "HIFISHIFTER_LOG_DIR"] {
+        if let Some(raw) = std::env::var_os(variable) {
+            let raw = raw.to_string_lossy().trim().to_owned();
+            if raw.is_empty() {
+                continue;
             }
+            let path = PathBuf::from(&raw);
+            // `HIFISHIFTER_LOG_DIR` 是**目录**（与 App 同名同义）；
+            // `HIFISHIFTER_PLUGIN_LOG` 是探针用的**文件**路径。
+            return Some(if variable == "HIFISHIFTER_LOG_DIR" {
+                path.join(PLUGIN_LOG_FILE)
+            } else {
+                path
+            });
         }
-        default_log_dir().join(PLUGIN_LOG_FILE)
-    }))
+    }
+    None
+}
+
+/// 当前应当使用的日志文件路径。
+///
+/// 【为什么不缓存成 OnceLock】宿主名要到 `setActive` 才拿得到，而在此之前日志已经
+/// 开始写了。路径必须能随宿主名"改名"一次，见 `note_host_application`。
+fn log_path() -> PathBuf {
+    if let Some(path) = env_override_path() {
+        return path;
+    }
+    let host = HOST_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let file = crate::plugin_log_name::log_file_name(host.as_deref());
+    default_log_dir().join(file)
+}
+
+/// 按当前路径开一个写入器（会话头由 `RotatingLog::open` 写）。
+fn open_writer() -> Result<RotatingLog, String> {
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let writer = RotatingLog::open(path, PRODUCT, crate::VERSION).map_err(|e| e.to_string())?;
+    *LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer.path().to_path_buf());
+    Ok(writer)
+}
+
+/// 把攒下的日志行补写进刚打开的写入器。
+fn drain_pending_into(writer: &mut RotatingLog) {
+    let pending: Vec<String> = {
+        let mut guard = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for line in pending {
+        let _ = writer.write_line(&line);
+    }
+}
+
+/// 记下宿主应用名，并把日志切到 `plugin-<slug>.log`。
+///
+/// 【为什么必须在起日志之后才调】`IHostApplication::getName` 只有 `setActive` 之后
+/// 可用，而日志在 DLL 加载时就要能写。于是先攒着、拿到名字时再一次性落地：
+/// 会话头会开在**正确的文件**里，早期几行也不会丢。
+pub fn note_host_application(name: &str) {
+    {
+        *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+    }
+    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    match open_writer() {
+        Ok(mut writer) => {
+            drain_pending_into(&mut writer);
+            *guard = Some(writer);
+        }
+        Err(error) => eprintln!("hifishifter: plugin log unavailable: {error}"),
+    }
 }
 
 /// 平台默认日志目录。与 App **同一个目录**，解析不出来时退回临时目录。
@@ -104,16 +205,25 @@ fn default_log_dir() -> PathBuf {
 
 /// 日志文件所在目录（供 Help 菜单展示 / 打开）。
 pub fn log_directory() -> PathBuf {
-    log_path()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
+    log_file()
+        .parent()
+        .map(Path::to_path_buf)
         .unwrap_or_else(default_log_dir)
 }
 
 /// 当前日志文件路径（供"复制路径"用）。
 pub fn log_file() -> PathBuf {
+    // 【为什么优先读实际打开的路径】`log_path()` 是"按当前宿主名应当用的路径"，
+    // 而写入器一旦打开就以它为准（宿主名可能再变，但文件已经在那儿了）。
+    // 两者在"名字还没到"的那段时间里不同，报给用户的必须是**真的写着日志**那个。
+    if let Some(path) = LOG_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return path;
+    }
     log_path()
-        .cloned()
-        .unwrap_or_else(|| default_log_dir().join(PLUGIN_LOG_FILE))
 }
 
 /// 日志级别：release 默认 `Warn`，debug 默认 `Info`，`HIFISHIFTER_LOG` 可覆盖。
@@ -148,27 +258,16 @@ pub fn init() {
         if log::set_logger(&LOGGER).is_ok() {
             log::set_max_level(log_level_from_env());
         }
+        let _ = STARTED.set(std::time::Instant::now());
         // 目录不存在就创建：用户第一次打开 Help 菜单之前，日志文件必须已经可写。
-        if let Some(dir) = log_path().and_then(|path| path.parent()) {
+        let dir = log_path();
+        if let Some(dir) = dir.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        // 会话头 + 轮转都在共享实现里：打开即写一行 `==== … log started at … ====`，
-        // 用户事后拿到日志时第一眼就能看到版本号与日期。
-        match RotatingLog::open(
-            log_path()
-                .cloned()
-                .unwrap_or_else(|| default_log_dir().join(PLUGIN_LOG_FILE)),
-            PRODUCT,
-            crate::VERSION,
-        ) {
-            Ok(writer) => {
-                *WRITER.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer);
-            }
-            Err(error) => {
-                // 落不了盘也不影响本次会话使用；下一行 log 会因为 writer 为 None 而跳过。
-                eprintln!("hifishifter: plugin log unavailable: {error}");
-            }
-        }
+        // 【为什么这里不直接开文件】宿主名（`IHostApplication::getName`）要到
+        // `setActive` 之后才有，而按宿主分文件要求文件名里带它。此处只把 logger 装上：
+        // 早期日志行先进内存缓冲，`note_host_application` 到达时再一次性落到
+        // `plugin-<slug>.log`（见该函数与 `FileLogger::log` 的说明）。
         install_panic_hook();
     });
 }
@@ -243,12 +342,16 @@ mod tests {
     }
 
     /// 文件名与 App 不同 —— 同目录下才不会被覆盖，轮转也互不影响。
+    ///
+    /// 具体形状是 `plugin-<宿主>.log` / `plugin-unknown.log`（见 `plugin_log_name`）；
+    /// 这里只钉住"插件前缀 + 与 App 的 `hifishifter.log` 不同名"。
     #[test]
     fn the_plugin_log_file_name_differs_from_the_app() {
-        assert_eq!(
-            log_file().file_name().and_then(|n| n.to_str()),
-            Some("plugin.log")
-        );
+        let name = log_file().file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        let name = name.expect("log file name");
+        assert!(name.starts_with("plugin-"), "{name}");
+        assert!(name.ends_with(".log"), "{name}");
+        assert_ne!(name, "hifishifter.log");
     }
 
     /// 覆盖变量优先于平台默认目录。
@@ -263,7 +366,8 @@ mod tests {
         {
             return;
         }
-        assert!(log_file().ends_with(PLUGIN_LOG_FILE));
+        let name = log_file().file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+        assert!(name.starts_with("plugin-"), "{name}");
         assert!(log_directory()
             .to_string_lossy()
             .contains("com.arounder.hifishifter"));
