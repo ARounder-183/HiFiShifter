@@ -625,6 +625,7 @@ export const zhCN = {
     about_version: "版本",
     about_commit: "Commit",
     about_dirty: "本地有未提交修改",
+    about_commit_unavailable: "这份构建不含 Commit 信息（非 git 源码包）",
     about_open_repo: "前往 GitHub 仓库",
     about_copy_repo_link: "复制仓库链接",
     about_copy_commit_link: "复制 Commit 链接",

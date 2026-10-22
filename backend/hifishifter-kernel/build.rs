@@ -17,6 +17,18 @@
 //! 【为什么 `third_party/` 不一起搬】它被 `tauri.conf.json` 的三份配置以相对路径引用
 //! 做资源打包。把它移出 `src-tauri/` 会让 Tauri 的资源路径指向 crate 之外，
 //! 风险大于收益。所以这里用相对路径引用它，并在下面写明这个耦合。
+//!
+//! 【为什么构建身份（commit / 脏标志 / 仓库链接）也在这里注入】`build_info` 住在
+//! **内核**里，而 `rustc-env` 是**按 crate** 注入的。此前只有 app 与插件的 build
+//! script 调 `git_info::emit`，内核没有 —— 于是 `build_info` 在自己那个编译单元里
+//! 读到的四个变量**全部未定义**，独立 App 与插件的「关于」对话框、日志会话头、
+//! 诊断包里的 commit 一律为空（而键名测试照样全绿）。注入必须发生在**读取者所在的
+//! crate**，这是 `option_env!` 的语义，不是可以绕过的约定。
+
+#[path = "../build-support/git_info.rs"]
+mod git_info;
+#[path = "../build-support/product_version.rs"]
+mod product_version;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,6 +41,22 @@ use std::process::Command;
 const THIRD_PARTY: &str = "../src-tauri/third_party";
 
 fn main() {
+    // ── 构建身份（必须**先于**任何早退）────────────────────────────────
+    //
+    // 【为什么放在跳过开关之前】`HIFISHIFTER_SKIP_NATIVE_BUILD=1` 只跳过**原生库**构建；
+    // 构建身份是纯 `git` 查询（毫秒级），与原生库无关。放在早退之后，CI 的类型检查
+    // 构建就会得到一份"没有 commit"的 `build_info`，而那个差异只会在 CI 上出现 ——
+    // 正是本仓库反复吃过的一类"本地正常、CI 才炸"的陷阱。
+    //
+    // 监视集只有 `src`：内核进二进制的输入只有自己的源码（模型与前端产物归 app 与
+    // 插件各自监视）。脏标志回答"这份二进制对应哪次提交"，多监视无关目录只会让它
+    // 变成"总是脏的"，等于没有信号。
+    git_info::emit(&["src"]);
+    product_version::emit(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_VERSION"),
+    );
+
     // 与 app 的 build.rs 共用同一个跳过开关：CI 只做类型检查时可以整体跳过原生构建。
     let skip_native = std::env::var("HIFISHIFTER_SKIP_NATIVE_BUILD").unwrap_or_default();
     if skip_native == "1" {

@@ -122,3 +122,35 @@ test("plugin makes the commit selectable text", async () => {
     // 短哈希必须能被选中 —— 否则用户连抄给开发者都做不到。
     expect(selectable).toContain(ABOUT.commitShort);
 });
+
+/**
+ * **没有 commit 时仍要说明"这份构建不含 Commit"。**
+ *
+ * 【为什么这条必须有】此前 `showCommit` 为假时整行消失 —— 而「关于」是用户报 bug
+ * 时唯一会截图的地方。"没有这一行"与"加载失败"在截图里长得一模一样，开发者
+ * 第一眼要看的信息反而被藏了起来。非 git 构建（源码 zip）必须**显式**说出这件事。
+ */
+test("a build without a commit says so instead of hiding the row", async () => {
+    const core = await import("../../services/api/core");
+    vi.spyOn(core.coreApi, "getAboutInfo").mockResolvedValue({
+        version: "1.2.3",
+        commit: null,
+        commitShort: null,
+        dirty: false,
+        repoUrl: "https://github.com/example/repo",
+    } as never);
+
+    await render();
+
+    // 说明必须可见（而不是整行消失）。
+    //
+    // 【为什么读 document.body 而不是 container】Radix 的 Dialog 走 portal，
+    // 真实 DOM 挂在 body 下，container 里只剩一个空的挂载点 —— 读 container
+    // 会永远拿到空串，测试就会以"没渲染"的样子失败（与"没显示文案"同形）。
+    const text = document.body.textContent ?? "";
+    expect(text).toContain(enUS.about_commit_unavailable);
+    // 标签仍在，读者才知道这一行说的是什么。
+    expect(text).toContain(enUS.about_commit);
+    // 没有 commit 就没有可点的永久链接。
+    expect(buttonNamed(enUS.about_copy_commit_link)).toBeUndefined();
+});

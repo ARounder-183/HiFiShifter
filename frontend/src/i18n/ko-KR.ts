@@ -715,6 +715,7 @@ export const koKR = {
     about_version: "버전",
     about_commit: "Commit",
     about_dirty: "커밋되지 않은 로컬 변경 있음",
+    about_commit_unavailable: "이 빌드에는 Commit 정보가 없습니다 (git 저장소가 아님)",
     about_open_repo: "GitHub 저장소 열기",
     about_copy_repo_link: "저장소 링크 복사",
     about_copy_commit_link: "Commit 링크 복사",

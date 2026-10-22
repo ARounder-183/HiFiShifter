@@ -784,6 +784,7 @@ export const enUS = {
     about_version: "Version",
     about_commit: "Commit",
     about_dirty: "Uncommitted local changes",
+    about_commit_unavailable: "This build carries no commit id (not a git checkout)",
     about_open_repo: "Open GitHub Repository",
     about_copy_repo_link: "Copy repository link",
     about_copy_commit_link: "Copy commit link",

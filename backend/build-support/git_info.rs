@@ -44,6 +44,26 @@ fn git_output(args: &[&str]) -> Option<String> {
     }
 }
 
+/// `git` 这个**可执行文件**本身能不能跑起来（与"跑起来了但不是仓库"分开）。
+///
+/// 【为什么必须分开这两件事】`git rev-parse HEAD` 返回 None 有两种成因，而它们的
+/// 处置完全不同：
+/// - **`git` 不在 PATH 上**（构建机没装 git、或 CI 镜像精简过）⇒ 这是**构建环境**
+///   的问题，与代码无关；
+/// - **在 PATH 上，但这个目录不是 git 仓库**（GitHub 源码 zip）⇒ 这是**预期**的
+///   非 git 构建，注入空值是正确行为。
+///
+/// 混成一句"没有 commit"会让门禁测试无法判断"注入接线断了"（真缺陷）与"这台机器
+/// 没装 git"（环境），于是要么误报、要么被无条件跳过。`--version` 是唯一能回答
+/// "可执行文件在不在"的调用，且不依赖 cwd。
+fn git_is_runnable() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// 声明 rerun-if-changed（路径存在时才声明，避免不存在路径的指令干扰缓存指纹）。
 fn declare_rerun_if_exists(path: &Path) {
     if path.exists() {
@@ -68,9 +88,22 @@ fn declare_rerun_if_exists(path: &Path) {
 /// build script"默认行为即被替换 —— 调用方的 build.rs 其余部分需各自显式
 /// 声明其依赖路径。
 pub fn emit(watched: &[&str]) {
+    // 【探针标记：无论成败都写】`build_info` 的门禁测试靠它区分两件事：
+    // - `=git`        —— 注入路径通着，且这次构建拿到了 commit；
+    // - `=no-git`     —— `git` 可执行文件不在 PATH 上（构建环境问题，非代码缺陷）；
+    // - `=not-a-repo` —— git 在，但当前目录不是仓库（源码 zip，预期行为）。
+    //
+    // 少了这个标记，"没有 commit"在测试里无法与"build script 根本没跑"区分开 ——
+    // 而后者正是本仓库此前真实发生过的缺陷（内核 crate 从来没有 build script）。
+    let runnable = git_is_runnable();
+
     // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
     // 不打印任何 git 相关的 rerun 指令，保持既有指令集不变。
     let Some(full) = git_output(&["rev-parse", "HEAD"]) else {
+        println!(
+            "cargo:rustc-env=HIFISHIFTER_GIT_PROBE={}",
+            if runnable { "not-a-repo" } else { "no-git" }
+        );
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT=");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT_SHORT=");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_DIRTY=false");
@@ -80,6 +113,7 @@ pub fn emit(watched: &[&str]) {
         }
         return;
     };
+    println!("cargo:rustc-env=HIFISHIFTER_GIT_PROBE=git");
 
     // 真实 git 目录（绝对路径；worktree 下为 .git/worktrees/<name>）。
     let git_dir = git_output(&["rev-parse", "--absolute-git-dir"]);

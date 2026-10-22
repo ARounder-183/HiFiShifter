@@ -626,6 +626,7 @@ export const zhTW = {
     about_version: "版本",
     about_commit: "Commit",
     about_dirty: "本地有未提交修改",
+    about_commit_unavailable: "這份建置不含 Commit 資訊（非 git 原始碼包）",
     about_open_repo: "前往 GitHub 儲存庫",
     about_copy_repo_link: "複製儲存庫連結",
     about_copy_commit_link: "複製 Commit 連結",

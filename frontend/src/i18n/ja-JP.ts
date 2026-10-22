@@ -655,6 +655,7 @@ export const jaJP = {
     about_version: "バージョン",
     about_commit: "Commit",
     about_dirty: "未コミットの変更があります",
+    about_commit_unavailable: "このビルドには Commit 情報がありません（git 管理外のソース）",
     about_open_repo: "GitHub リポジトリを開く",
     about_copy_repo_link: "リポジトリのリンクをコピー",
     about_copy_commit_link: "Commit のリンクをコピー",

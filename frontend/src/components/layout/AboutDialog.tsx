@@ -3,10 +3,15 @@
  *
  * 展示项目简介、版本号与构建 Commit，并提供前往 GitHub 仓库的入口。
  *
- * 数据来源（get_about_info，构建期由 build.rs 烘进二进制）：
- * - commit：非 git 构建（源码 zip 等）为 null → 不展示 Commit；
+ * 数据来源（get_about_info，构建期由各 crate 的 build.rs 烘进二进制）：
+ * - commit：非 git 构建（源码 zip 等）为 null → 改为展示一句"这份构建不含 Commit"
+ *   （见下方 showCommit 分支的说明：整行消失会让用户无从判断"是没构建进去还是加载失败"）；
  * - repoUrl：remote.origin.url 归一化后的 GitHub 链接，上游不是 GitHub 或
  *   非 git 构建为 null → 回退到 FALLBACK_REPO_URL。
+ *
+ * 【为什么 commit 缺失时仍然要占一行】「关于」是用户报 bug 时唯一会截图的地方。
+ * 整行不渲染等于把"这份构建没有身份信息"这个事实藏起来 —— 而它恰恰是开发者
+ * 第一眼要看的：同一句"有问题"在 git 构建与非 git 构建里，排查起点完全不同。
  *
  * 【为什么插件形态要换一套表现】插件跑在宿主进程里，WebView2 会取消任何指向
  * 外部域的导航（`editor/webview.rs` 的 `NavigationStarting`），也没有任何打开
@@ -190,6 +195,20 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                                     {commitShort}
                                 </button>
                             )}
+                        </Flex>
+                    ) : info !== null ? (
+                        /*
+                         * 没有 commit（非 git 构建）：**仍然占一行**，只是换成说明。
+                         *
+                         * 【为什么判据是 `info !== null` 而不是直接 else】`info` 在拉取
+                         * 完成前是 null。若在这里直接渲染"不含 Commit"，打开对话框的头
+                         * 一帧会闪一句错误结论，随后被真实值替换 —— 那比不显示更糟。
+                         */
+                        <Flex align="center" gap="2">
+                            <span className="hs-type-muted">{tf("about_commit")}</span>
+                            <span className="hs-type-caption">
+                                {tf("about_commit_unavailable")}
+                            </span>
                         </Flex>
                     ) : null}
                     {/*
