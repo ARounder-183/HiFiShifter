@@ -211,6 +211,14 @@ export interface PianoRollOverlaySpec {
     readonly playheadSec?: number | null;
     /** 播放头颜色；缺省用主题的 `playheadLine`。 */
     readonly playheadRgba?: readonly [number, number, number, number];
+    /**
+     * 捕获中的工程秒区间；null / 缺省表示当前没有在捕获。
+     *
+     * 特殊说明：与播放头同一层 ---- 它**每帧**都可能变（录制推进时每秒十几次），
+     * 而曲线几何完全不受影响。放进叠加层是为了让"捕获带推进"只走只画叠加层的那条
+     * 帧路径，而不是每 100ms 重建一次曲线几何。
+     */
+    readonly captureRange?: { readonly startSec: number; readonly endSec: number } | null;
 }
 
 /** 宿主每帧读取的数据镜像。 */

@@ -94,6 +94,7 @@ import {
 import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import type { FlatInstance } from "../../../renderKernel/instanceTypes";
 import { wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
+import { captureBandGeometry } from "../scene/captureBandGeometry";
 import {
     buildPitchGridInstances,
     buildValueGridInstances,
@@ -158,6 +159,14 @@ export interface PianoRollKernelDomSync {
      */
     readonly rulerPlayheadLine?: () => HTMLElement | null;
     readonly rulerPlayheadHead?: () => HTMLElement | null;
+    /**
+     * 标尺上的**捕获区间带**（插件形态录制时的高亮条）。
+     *
+     * 【为什么由内核写】与播放头线同一理由，且更强：这条带子的位置每秒变十几次，
+     * 而它的参照物（标尺刻度）是内核按绘制坐标平移的。任何"第二个时钟"都会让它
+     * 与刻度分离 —— 用户报障里那句"伪影像是和参数编辑器标尺完全分离了一样"就是它。
+     */
+    readonly captureBand?: () => HTMLElement | null;
     /** 背景网格层：经 `gridRedrawBridge` 重绘（自行判定是否真的重画）。 */
     readonly gridLayer?: () => HTMLElement | null;
 }
@@ -1639,6 +1648,33 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 吸附方式刻意与 GL 一致：先在**视口坐标**吸附，再换算回内容坐标。标尺线
         // 所在的层会被平移 `-drawingScrollLeft`（可能是小数），若改在内容坐标吸附，
         // 落点会与 GL 差最多一个设备像素；先吸附再回算则两条线逐设备像素重合。
+        // 捕获带：与标尺/播放头**同源同帧**（见 `captureBand` 的说明）。
+        //
+        // 【为什么放在 syncDom 里】这个函数在**每一帧提交**都会跑（包括"只画叠加层"
+        // 的播放帧），所以录制推进时带子也会跟着走，不需要额外的失效入口。
+        const captureBand = sync?.captureBand?.() ?? null;
+        if (captureBand !== null) {
+            const captureRange = data().overlay?.captureRange ?? null;
+            const rect =
+                captureRange === null || viewportWidthPx <= 0
+                    ? null
+                    : captureBandGeometry({
+                          startSec: captureRange.startSec,
+                          endSec: captureRange.endSec,
+                          pxPerSec: view.pxPerSec,
+                          scrollLeftPx: drawingScrollLeft,
+                          viewportWidthPx,
+                          dpr: readDevicePixelRatio(),
+                      });
+            if (rect === null || !rect.visible) {
+                if (captureBand.style.display !== "none") captureBand.style.display = "none";
+            } else {
+                captureBand.style.display = "block";
+                captureBand.style.transform = "translateX(" + rect.left + "px)";
+                captureBand.style.width = rect.width + "px";
+            }
+        }
+
         const playheadSec = data().overlay?.playheadSec;
         // 元素**现读**（见 `PianoRollKernelDomSync` 的说明）：标尺可能晚于宿主挂载。
         const rulerPlayheadLine = sync?.rulerPlayheadLine?.() ?? null;

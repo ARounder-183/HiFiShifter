@@ -283,7 +283,7 @@ import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../utils/devicePixelLine";
-import { CaptureRangeOverlay } from "./pianoRoll/CaptureRangeOverlay";
+import { getCaptureRange, subscribeCapture } from "../../features/capture/captureRange";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { subscribeDevicePixelRatio, useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import {
@@ -869,6 +869,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 轮询的 store 滞后值——播放中缩放以滞后值锚定会让播放头跳变 δ·Δpx。
     const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
+    /** 标尺上的捕获区间带（几何由内核写，见宿主里的 captureBand）。 */
+    const captureBandRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     /**
      * 内核宿主的稳定引用。
@@ -1899,6 +1901,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
         // 一次尺寸变化时才自愈）。因此布局一变就重测。
     }, [syncOffsetApplicable, syncOffsetTabbed, dockLayout]);
+
+    useEffect(() => {
+        // 捕获区间推进：只请内核补一帧**叠加层**（不重建曲线几何，也不触发 React
+        // 渲染）。带子的几何由内核在帧提交里按最新视口写（见 `overlay.captureRange`）。
+        return subscribeCapture(() => {
+            hostRef.current?.invalidatePlayhead();
+        });
+    }, []);
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -3437,6 +3447,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 // 避免"面板按自己的缩放写、GL 按内核缩放画"造成的水平分离。
                 rulerPlayheadLine: () => rulerPlayheadLineRef.current,
                 rulerPlayheadHead: () => rulerPlayheadHeadRef.current,
+                // 捕获带：与标尺同源同帧（见 host 里 captureBand 的说明）。
+                captureBand: () => captureBandRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
             // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，
@@ -5353,6 +5365,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         kernelDataRef.current.overlay = {
             playheadSec: visualPlayheadSecRef.current,
             playheadRgba: resolvePlayheadRgba(themeMode),
+            // 捕获区间：读**非订阅**快照。订阅会随录制每秒重渲染十几次整个面板，
+            // 而带子只需要内核在帧提交里读到最新值（见下方的 subscribeCapture）。
+            captureRange: getCaptureRange(),
         };
         // 选区块镜像（每帧刷新）：选区是**拍**为单位，宿主只认秒，因此这里先换算。
         // 空选区时喂 null，宿主据此清空本帧的实例（否则旧带子会留在画布上）。
@@ -9244,10 +9259,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 interactions.onRulerMouseDown(e);
                             }}
                         />
-                        <CaptureRangeOverlay
-                            pxPerSec={pxPerSec}
-                            scrollLeft={scrollLeft}
-                            viewportWidth={viewSize.w}
+                        {/* 捕获区间带：几何由**内核**在帧提交里写（与标尺平移同源同帧），
+                            这里只留一个空元素。此前是一个 React 组件、读 state 的量化
+                            scrollLeft —— 滚动时带子几乎不动，开同步时还差一个偏移量。 */}
+                        <div
+                            ref={captureBandRef}
+                            data-capture-band
+                            aria-hidden
+                            style={{
+                                display: "none",
+                                position: "absolute",
+                                left: 0,
+                                bottom: 0,
+                                height: 4,
+                                background: "var(--qt-danger-border)",
+                                opacity: 0.55,
+                                pointerEvents: "none",
+                                willChange: "transform",
+                            }}
                         />
                     </div>
 

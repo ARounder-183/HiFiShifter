@@ -16,6 +16,8 @@ import { useSyncExternalStore } from "react";
 import { frameToSec, type CaptureStatus } from "./captureApi";
 import { getCaptureSnapshot, subscribeCapture } from "./captureStore";
 
+export { subscribeCapture };
+
 /** 捕获中的工程秒区间（`null` = 当前没有在捕获）。 */
 export interface CaptureRange {
     /** 已覆盖区间的左端（工程秒）。 */
@@ -65,6 +67,17 @@ function snapshotRange(): CaptureRange | null {
         cachedRange = deriveCaptureRange(status);
     }
     return cachedRange;
+}
+
+/**
+ * 读一次当前区间（**不订阅**）。
+ *
+ * 【为什么需要非订阅读法】参数编辑器的带子由内核在**帧提交**里画：它只需要"这一帧
+ * 的最新值"。若走 `useCaptureRange`，录制推进时整个面板会以十几 Hz 重渲染 ——
+ * 为了画一条 4px 的带子重渲染一棵含 WebGL 宿主的树，代价荒谬。
+ */
+export function getCaptureRange(): CaptureRange | null {
+    return snapshotRange();
 }
 
 /** 订阅捕获区间。两个面板都调用它，因此看到的必然是同一份。 */
