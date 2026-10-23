@@ -7,7 +7,7 @@
 //! | 宿主 | getName 返回 | 结果 |
 //! |---|---|---|
 //! | REAPER | reaper | 正确 |
-//! | VEGAS Pro | 扫描期 audio_plugin_scan_server_vst3_x64，运行期 sfvstwrap | 认不出是 VEGAS |
+//! | VEGAS Creative Software 家族 | 扫描期 audio_plugin_scan_server_vst3_x64，运行期 sfvstwrap | 认不出是哪个 DAW |
 //! | FL Studio | fruity-wrapper | 同上 |
 //! | Cubase | 加载期 unknown，使用期 cubase | 只读一次 ⇒ 永远停在 unknown |
 //!
@@ -24,8 +24,16 @@
 //! 4. 祖先进程链（近 → 远，最多 4 层）；
 //! 5. VST3 getName。
 //!
-//! 包装器命中且祖先也命中时取**祖先**那条，并在显示名里注明经由哪个包装器 ——
-//! 那才是用户认得的名字。
+//! 包装器命中且祖先也命中时取**祖先**那条 —— 那才是用户认得的名字；包装器本身只留在
+//! `evidence` 里（`via` 只在**没有**产品级证据时才有值，见下）。
+//!
+//! # 包装器只证明"哪个家族"，不证明"哪个产品"
+//!
+//! `sfvstwrap` 是 VEGAS Creative Software **全家**（VEGAS Pro、ACID Pro、Sound Forge、
+//! Movie Studio …）共用的 VST 宿主壳，`audio_plugin_scan_server_vst3_x64` 同样是家族
+//! 共用的组件名 —— 两个名字里都不含产品名。因此它们能证明的只有"属于这个家族"。
+//! 产品名只能由**祖先链里那个真正的 DAW 进程**给出（`vegas180.exe` / `acidpro.exe` /
+//! `soundforge.exe` …）；祖先认不出来时如实报家族，绝不猜成 VEGAS Pro。
 //!
 //! # 为什么证据要留着
 //!
@@ -122,9 +130,17 @@ impl HostIdentity {
 /// 用子串而不是全等：vegas180.exe / VEGAS Pro 21 / FL64.exe 这些变体必须命中同一条。
 const HOST_ALIASES: &[(&str, &str)] = &[
     ("reaper", "REAPER"),
+    // VEGAS Creative Software 家族：产品名只能由各自的可执行文件名给出；家族共用的
+    // 壳与扫描器**不在**这张表里，见 `FAMILY_MARKERS`。
     ("vegas", "VEGAS Pro"),
-    ("sfvstwrap", "VEGAS Pro"),
-    ("audio_plugin_scan_server", "VEGAS Pro (VST3 scan server)"),
+    ("acidpro", "ACID Pro"),
+    ("acid", "ACID Pro"),
+    ("sound forge", "Sound Forge"),
+    ("sound_forge", "Sound Forge"),
+    ("soundforge", "Sound Forge"),
+    ("movie studio", "Movie Studio"),
+    ("movie_studio", "Movie Studio"),
+    ("moviestudio", "Movie Studio"),
     ("fruity-wrapper", "FL Studio"),
     ("fl64", "FL Studio"),
     ("cubase", "Cubase"),
@@ -151,17 +167,29 @@ const HOST_ALIASES: &[(&str, &str)] = &[
     ("sadie", "SADiE"),
 ];
 
-/// 包装器进程：它们自己就是别名表里的键（于是能认出来），但**显示名要取祖先**。
+/// 包装器进程：宿主**故意**的隔离层，显示名要取祖先。
 ///
-/// 只放"确实是隔离层"的：sfvstwrap 是 VEGAS 的 VST 宿主壳，fruity-wrapper 是 FL 的。
+/// 只放"确实是隔离层"的：`sfvstwrap` 是 VEGAS Creative Software 家族的 VST 宿主壳，
+/// `fruity-wrapper` 是 FL Studio 的。
 const WRAPPER_MARKERS: &[&str] = &["sfvstwrap", "fruity-wrapper"];
+
+/// 家族级标记：**同一个名字被家族里多个产品共用**，因此只能证明"属于哪个家族"。
+///
+/// 【为什么必须单列，而不是放进别名表】别名表的值是**产品名**。此前 `sfvstwrap` 直接
+/// 映射成 "VEGAS Pro"，于是 ACID Pro / Sound Forge / Movie Studio 的用户在日志里看到的
+/// 是 VEGAS Pro —— 一个凭证据得不出的结论。这些名字里没有产品信息，产品只能由祖先链
+/// 里那个真正的 DAW 进程给出；给不出来就如实报家族。
+///
+/// 【为什么 `fruity-wrapper` 不在这里】那个壳就是 FL Studio 自己的，没有兄弟产品与它
+/// 共用，所以它留在别名表里按产品报。
+const FAMILY_MARKERS: &[(&str, &str)] = &[
+    ("sfvstwrap", "VEGAS Creative Software"),
+    ("audio_plugin_scan_server", "VEGAS Creative Software"),
+];
 
 /// 规范化：小写、去路径、去 .exe。
 fn normalize(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name);
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let lower = base.to_ascii_lowercase();
     lower
         .strip_suffix(".exe")
@@ -185,6 +213,18 @@ fn lookup(name: &str) -> Option<&'static str> {
 fn is_wrapper(name: &str) -> bool {
     let key = normalize(name);
     WRAPPER_MARKERS.iter().any(|marker| key.contains(marker))
+}
+
+/// 家族级命中：返回家族显示名（**不含产品**，见 [`FAMILY_MARKERS`]）。
+fn family_of(name: &str) -> Option<&'static str> {
+    let key = normalize(name);
+    if key.is_empty() || key == "unknown" {
+        return None;
+    }
+    FAMILY_MARKERS
+        .iter()
+        .find(|(needle, _)| key.contains(needle))
+        .map(|(_, family)| *family)
 }
 
 /// 从证据链里定出宿主。
@@ -248,7 +288,38 @@ pub fn resolve_identity(evidence: &[Evidence]) -> HostIdentity {
         }
     }
 
-    // 4'. 只剩包装器命中：报包装器认出的宿主，并注明经由谁。
+    // 4a. 只有家族级证据（家族共用的壳 / 扫描器）：报到家族，并说清经由谁。
+    //     产品名这里给不出来，也**不猜** —— 见 `FAMILY_MARKERS`。
+    let family_hit = evidence
+        .iter()
+        .filter(|item| {
+            item.source == EvidenceSource::ProcessImage
+                || item.source == EvidenceSource::Ancestor
+                || item.source == EvidenceSource::Vst3Name
+        })
+        .find_map(|item| family_of(&item.name).map(|family| (item, family)));
+    if let Some((item, family)) = family_hit {
+        let via = evidence
+            .iter()
+            .filter(|other| {
+                other.source == EvidenceSource::ProcessImage
+                    || other.source == EvidenceSource::Ancestor
+            })
+            .find(|other| is_wrapper(&other.name))
+            .map(|other| normalize(&other.name));
+        return HostIdentity {
+            display: match &via {
+                Some(wrapper) => format!("{family} (via {wrapper})"),
+                None => family.to_string(),
+            },
+            source: Some(item.source),
+            matched: Some(item.name.clone()),
+            via,
+            ..identity
+        };
+    }
+
+    // 4b. 只剩**产品名包装器**命中（`fruity-wrapper`）：报它，并注明经由谁。
     if let Some(wrapper) = evidence
         .iter()
         .find(|item| {
@@ -434,14 +505,63 @@ mod tests {
         assert_eq!(identity.via.as_deref(), Some("fruity-wrapper"));
     }
 
-    /// 扫描服务器不是 DAW 本体：能认出它是谁的扫描器，但必须标出来。
+    /// 扫描服务器是家族共用组件，名字里没有产品信息：只能报到家族。
     #[test]
-    fn vegas_scan_server_is_reported_as_a_scan_server() {
+    fn the_scan_server_only_proves_the_family() {
         let identity = resolve_identity(&[evidence(
             EvidenceSource::Vst3Name,
             "audio_plugin_scan_server_vst3_x64",
         )]);
-        assert_eq!(identity.display, "VEGAS Pro (VST3 scan server)");
+        assert_eq!(identity.display, "VEGAS Creative Software");
+        assert_eq!(identity.via, None);
+    }
+
+    /// `sfvstwrap` 是 VEGAS Creative Software **全家**共用的壳：单独出现时只能证明家族，
+    /// **推不出** VEGAS Pro（ACID Pro / Sound Forge / Movie Studio 用的是同一个壳）。
+    #[test]
+    fn the_vegas_wrapper_alone_only_proves_the_family() {
+        let identity = resolve_identity(&[
+            evidence(EvidenceSource::ProcessImage, "sfvstwrap.exe"),
+            evidence(EvidenceSource::Vst3Name, "sfvstwrap"),
+        ]);
+        assert_eq!(identity.display, "VEGAS Creative Software (via sfvstwrap)");
+        assert_eq!(identity.via.as_deref(), Some("sfvstwrap"));
+        assert!(
+            !identity.display.contains("VEGAS Pro"),
+            "包装器名里没有产品信息，不能猜成 VEGAS Pro"
+        );
+    }
+
+    /// 同一个壳后面的兄弟产品：祖先链认出来就报它，而不是 VEGAS Pro。
+    #[test]
+    fn a_sibling_product_in_the_family_is_named_instead_of_vegas_pro() {
+        for (exe, expected) in [
+            ("vegas180.exe", "VEGAS Pro"),
+            ("acidpro.exe", "ACID Pro"),
+            ("soundforge.exe", "Sound Forge"),
+            ("movie_studio_17.exe", "Movie Studio"),
+        ] {
+            let identity = resolve_identity(&[
+                evidence(EvidenceSource::ProcessImage, "sfvstwrap.exe"),
+                evidence(EvidenceSource::Ancestor, exe),
+            ]);
+            assert_eq!(identity.display, expected, "{exe}");
+            assert_eq!(identity.source, Some(EvidenceSource::Ancestor), "{exe}");
+            assert_eq!(identity.via, None, "{exe}");
+        }
+    }
+
+    /// 祖先认不出来时如实报家族 —— 这正是此前会错报 VEGAS Pro 的那个形状。
+    #[test]
+    fn an_unrecognised_ancestor_behind_the_wrapper_does_not_become_vegas_pro() {
+        let identity = resolve_identity(&[
+            evidence(EvidenceSource::ProcessImage, "sfvstwrap.exe"),
+            evidence(EvidenceSource::Ancestor, "some-unknown-daw.exe"),
+        ]);
+        assert_eq!(identity.display, "VEGAS Creative Software (via sfvstwrap)");
+        assert!(identity
+            .describe()
+            .contains("process-ancestor:some-unknown-daw.exe"));
     }
 
     /// Cubase 加载期只给 unknown：此时**不能**编一个名字出来。
@@ -494,5 +614,14 @@ mod tests {
         assert_eq!(lookup("REAPER.exe"), Some("REAPER"));
         assert_eq!(lookup("C:/Program Files/REAPER/reaper.exe"), Some("REAPER"));
         assert_eq!(lookup("Cubase15.exe"), Some("Cubase"));
+        // 家族共用的壳与扫描器**不是**产品名，别名表必须查不到它们。
+        assert_eq!(lookup("sfvstwrap.exe"), None);
+        assert_eq!(lookup("audio_plugin_scan_server_vst3_x64"), None);
+        assert_eq!(family_of("sfvstwrap.exe"), Some("VEGAS Creative Software"));
+        assert_eq!(
+            family_of("audio_plugin_scan_server_vst3_x64"),
+            Some("VEGAS Creative Software")
+        );
+        assert_eq!(family_of("fruity-wrapper"), None);
     }
 }
