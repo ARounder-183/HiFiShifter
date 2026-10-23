@@ -1310,7 +1310,7 @@ mod tests {
         assert!(calls.contains(&"write-take:D_PLAYRATE".into()));
         let geometry = owner.host_geometry().unwrap_err();
         assert!(
-            geometry.contains("incompatible"),
+            geometry.to_string().contains("incompatible"),
             "未模拟ARA回流，不能伪造已同步模型"
         );
         assert_eq!(editor.timeline.lock_or_recover().clips[0].start_sec, 0.);

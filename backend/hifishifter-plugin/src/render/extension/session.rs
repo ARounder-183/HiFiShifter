@@ -190,7 +190,9 @@ impl ExtensionOwner {
                 continue;
             }
             let stamp = owner.host_query_stamp()?;
-            let bound = owner.host_geometry()?;
+            let bound = owner
+                .host_geometry()
+                .map_err(GeometryFailure::into_message)?;
             if bound.region_key != key {
                 return Err("host region binding changed".into());
             }

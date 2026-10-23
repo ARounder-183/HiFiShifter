@@ -10,7 +10,7 @@ pub(super) struct CachedHostGeometry {
     pub(super) model: u64,
     pub(super) scope: u64,
     pub(super) change: Option<i32>,
-    pub(super) value: Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
+    pub(super) value: Result<Vec<crate::host::geometry::BoundHostGeometry>, GeometryFailure>,
 }
 
 /// 一次 region → 宿主 item 绑定求解的**可判等读数**。
@@ -32,25 +32,67 @@ pub(super) struct BindingReport {
     pub(super) candidates: usize,
 }
 
-/// 绑定求解失败的两条**结构性**措辞（产生点与分类点共用同一常量）。
+/// 两条**结构性**绑定失败的措辞（`GeometryFailure::Structural` 携带的显示文本）。
 ///
-/// 【为什么不用字面量】与 `editor::errors` 的终态常量同一条纪律：产生点与分类点
-/// 分处不同函数，两边各写字面量时任何一处改措辞都会让分类**静默失效**（退避停摆，
-/// 或对状态变化误退避），且没有编译期信号。
+/// 【为什么仍然用常量】措辞会出现在日志与界面里，产生点与报障人看到的是同一份文本。
+/// 但**分类不再靠这些字符串**：要不要退避由 [`GeometryFailure`] 的变体决定，改一句
+/// 措辞不会再让退避静默失效 —— 那正是此前那条子串匹配的失败模式。
 pub(super) const BINDING_NO_UNIQUE_ITEM: &str = "no assigned ARA region matched a unique host item";
 pub(super) const BINDING_GEOMETRY_INCOMPATIBLE: &str =
     "direct take geometry incompatible with assigned ARA playback window";
 
-/// 绑定失败是否属于"由宿主工程结构决定、不会自行变化"的一类。
+/// 一次 region → 宿主 item 的几何求解为什么失败。
 ///
-/// 【为什么必须区分】只有这一类才值得退避：它是"重试一万次也一样"的读数。授权撤销、
-/// 文档关闭、扩展接口消失都是**状态变化**，它们要么很快自愈、要么已经是终态 ——
-/// 对它们退避只会拖慢恢复。
-///
-/// 【为什么用"包含"而不是全等】与 `editor::errors::classify_error` 同一理由：措辞
-/// 可能带上下文前缀（`host split: …`），常量保证的是**子串出现**。
-pub(super) fn is_structural_binding_failure(error: &str) -> bool {
-    error.contains(BINDING_NO_UNIQUE_ITEM) || error.contains(BINDING_GEOMETRY_INCOMPATIBLE)
+/// 【为什么是类型而不是字符串】这条失败只喂给一个决策：要不要退避重枚举。此前那个
+/// 决策是对错误文本做子串匹配，于是"改一句措辞"就能让退避静默停摆、或对状态变化
+/// 误退避，而且没有编译期信号。现在"是不是结构性失败"放进变体，措辞只用于显示。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GeometryFailure {
+    /// 由宿主工程结构决定：重试一万次也一样，值得退避。
+    Structural(&'static str),
+    /// 状态变化（授权撤销 / 文档关闭 / 扩展接口消失）：会自愈或已是终态，不该退避。
+    Transient(String),
+}
+
+impl GeometryFailure {
+    /// 是否属于"由宿主工程结构决定、不会自行变化"的一类。
+    ///
+    /// 【为什么必须区分】只有这一类才值得退避：它是"重试一万次也一样"的读数。授权撤销、
+    /// 文档关闭、扩展接口消失都是**状态变化**，它们要么很快自愈、要么已经是终态 ——
+    /// 对它们退避只会拖慢恢复。
+    pub(super) fn is_structural(&self) -> bool {
+        matches!(self, Self::Structural(_))
+    }
+
+    /// 人读的措辞（日志 / 界面 / 测试断言）。
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Structural(message) => message.to_string(),
+            Self::Transient(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for GeometryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Structural(message) => message,
+            Self::Transient(message) => message,
+        })
+    }
+}
+
+// 其余失败点仍然只写一句人读的话 —— 它们都是"状态变化"，默认走 `Transient`。
+impl From<&str> for GeometryFailure {
+    fn from(message: &str) -> Self {
+        Self::Transient(message.to_string())
+    }
+}
+
+impl From<String> for GeometryFailure {
+    fn from(message: String) -> Self {
+        Self::Transient(message)
+    }
 }
 
 /// 两个宿主/ARA 浮点量是否相容；判据全局唯一，见 `host::geometry::host_value_compatible`

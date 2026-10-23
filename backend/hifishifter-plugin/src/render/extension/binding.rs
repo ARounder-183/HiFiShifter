@@ -646,7 +646,9 @@ impl ExtensionOwner {
     /// 这条路径的身份来自宿主直接 parent take —— 是强证据，因此**只在恰好一个
     /// region 时**成立。多 region（folder 轨上的 FX）走
     /// [`Self::host_geometries`]，那里没有直接 parent 可用，只能按几何唯一匹配。
-    pub(crate) fn host_geometry(&self) -> Result<crate::host::geometry::BoundHostGeometry, String> {
+    pub(crate) fn host_geometry(
+        &self,
+    ) -> Result<crate::host::geometry::BoundHostGeometry, GeometryFailure> {
         let stamp = self.host_query_stamp()?;
         let [region_key] = stamp.3.as_slice() else {
             return Err("host geometry requires exactly one assigned ARA region".into());
@@ -663,7 +665,7 @@ impl ExtensionOwner {
         if !compatible(geometry.start_sec, region.start_in_playback_time)
             || !compatible(geometry.duration_sec, region.duration_in_playback_time)
         {
-            return Err(BINDING_GEOMETRY_INCOMPATIBLE.into());
+            return Err(GeometryFailure::Structural(BINDING_GEOMETRY_INCOMPATIBLE));
         }
         if !self.host_query_authorized(&stamp) {
             return Err("host geometry authorization revoked".into());
@@ -685,7 +687,7 @@ impl ExtensionOwner {
     /// `ui_folder_tracks` 的线程/授权/预算纪律取得。
     pub(super) fn host_geometries(
         &self,
-    ) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, String> {
+    ) -> Result<Vec<crate::host::geometry::BoundHostGeometry>, GeometryFailure> {
         let stamp = self.host_query_stamp()?;
         if stamp.3.is_empty() {
             return Err("no assigned ARA region".into());
@@ -738,7 +740,7 @@ impl ExtensionOwner {
             candidates: candidates.len(),
         });
         if bound.is_empty() {
-            return Err(BINDING_NO_UNIQUE_ITEM.into());
+            return Err(GeometryFailure::Structural(BINDING_NO_UNIQUE_ITEM));
         }
         if !self.host_query_authorized(&stamp) {
             return Err("host geometry authorization revoked".into());
@@ -813,7 +815,7 @@ impl ExtensionOwner {
     /// 按一次几何求解的结果更新退避档位（见 [`ExtensionOwner::enumeration_interval`]）。
     pub(super) fn note_geometry_outcome(
         &self,
-        geometry: &Result<Vec<crate::host::geometry::BoundHostGeometry>, String>,
+        geometry: &Result<Vec<crate::host::geometry::BoundHostGeometry>, GeometryFailure>,
         revision: Option<i32>,
     ) {
         let Err(error) = geometry else {
@@ -822,7 +824,7 @@ impl ExtensionOwner {
             *self.last_failed_revision.lock_or_recover() = None;
             return;
         };
-        if !is_structural_binding_failure(error) {
+        if !error.is_structural() {
             // 授权撤销 / 文档关闭 / 扩展接口消失：状态变化，不是结构性问题。
             // 退避它们只会拖慢恢复，且它们本来就不会以 10Hz 重放。
             return;
@@ -860,7 +862,7 @@ impl ExtensionOwner {
         {
             return Err("host geometry metadata superseded".into());
         }
-        cached.value
+        cached.value.map_err(GeometryFailure::into_message)
     }
     /// 调用者已持所属doc事务，只消费已授权Rust缓存，不嵌套加锁或调用宿主。
     ///

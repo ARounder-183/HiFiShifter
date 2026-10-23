@@ -633,7 +633,11 @@ fn task38a_owner_geometry_requires_unique_actual_assignment_and_compatible_playb
         owner.bind_host_adapter(host.context());
     }
     host.reset();
-    assert!(owner.host_geometry().unwrap_err().contains("incompatible"));
+    assert!(owner
+        .host_geometry()
+        .unwrap_err()
+        .to_string()
+        .contains("incompatible"));
     {
         let mut regions = document.regions.lock_or_recover();
         let region = regions.get_mut(&first).unwrap();
@@ -651,7 +655,11 @@ fn task38a_owner_geometry_requires_unique_actual_assignment_and_compatible_playb
         );
     }
     host.reset();
-    assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
+    assert!(owner
+        .host_geometry()
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one"));
     assert!(host.calls().is_empty());
     unsafe {
         let ext = &*raw;
@@ -668,7 +676,11 @@ fn task38a_owner_geometry_requires_unique_actual_assignment_and_compatible_playb
         );
     }
     host.reset();
-    assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
+    assert!(owner
+        .host_geometry()
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one"));
     assert!(host.calls().is_empty());
     unsafe {
         let ext = &*raw;
@@ -679,7 +691,11 @@ fn task38a_owner_geometry_requires_unique_actual_assignment_and_compatible_playb
         }
     }
     host.reset();
-    assert!(owner.host_geometry().unwrap_err().contains("exactly one"));
+    assert!(owner
+        .host_geometry()
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one"));
     assert!(host.calls().is_empty());
     document.close();
 }
@@ -713,7 +729,10 @@ fn task38a_owner_geometry_getter_reentry_discards_closed_or_changed_scope() {
         let result = owner.host_geometry();
         let calls = host.calls();
         document.close();
-        assert!(result.unwrap_err().contains("authorization revoked"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("authorization revoked"));
         assert_eq!(calls.last().unwrap(), "D_LENGTH", "{change}");
     }
 }
@@ -1271,7 +1290,7 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
             },
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains(if model_changed {
+        assert!(result.unwrap_err().to_string().contains(if model_changed {
             "host model changed"
         } else {
             "superseded"

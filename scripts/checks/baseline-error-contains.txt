@@ -12,7 +12,12 @@
 # message by substring. They are substring matches on purpose: the wording can
 # carry a context prefix (`host split: …`), so an exact match would miss it.
 # The wordings they match against are named constants that live next to the
-# messages they describe (editor::errors, render::extension).
+# messages they describe (editor::errors, render::extension::session).
+#
+# 2026-10-23: `render/extension.rs` was split into a module directory. Its two
+# remaining sites went down to one — the binding-geometry pair is no longer
+# classified by substring at all (it travels as `GeometryFailure`), so only the
+# restore-identity match in `extension/session.rs` is left.
 hifishifter-plugin/src/editor/errors.rs:2
 hifishifter-plugin/src/editor/webview.rs:2
-hifishifter-plugin/src/render/extension.rs:2
+hifishifter-plugin/src/render/extension/session.rs:1

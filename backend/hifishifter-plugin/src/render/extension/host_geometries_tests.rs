@@ -189,8 +189,10 @@ fn structural_binding_failures_back_off_and_cap() {
         super::HOST_ENUMERATION_INTERVAL,
         "无失败时保持 100ms"
     );
-    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, String> =
-        Err("no assigned ARA region matched a unique host item".into());
+    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, super::GeometryFailure> =
+        Err(super::GeometryFailure::Structural(
+            super::BINDING_NO_UNIQUE_ITEM,
+        ));
     // 第一次失败：记录代次，档位保持 0 ⇒ 下一次重试仍是 100ms（不牺牲首次重试速度）。
     owner.note_geometry_outcome(&failure, Some(7));
     assert_eq!(
@@ -222,8 +224,10 @@ fn structural_binding_failures_back_off_and_cap() {
 #[test]
 fn a_host_change_resets_the_backoff_immediately() {
     let owner = super::ExtensionOwner::default();
-    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, String> =
-        Err("no assigned ARA region matched a unique host item".into());
+    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, super::GeometryFailure> =
+        Err(super::GeometryFailure::Structural(
+            super::BINDING_NO_UNIQUE_ITEM,
+        ));
     for _ in 0..20 {
         owner.note_geometry_outcome(&failure, Some(7));
     }
@@ -250,7 +254,7 @@ fn non_structural_failures_do_not_back_off() {
         "host extension unavailable",
         "host project changed during cached geometry refresh",
     ] {
-        let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, String> =
+        let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, super::GeometryFailure> =
             Err(error.into());
         for _ in 0..10 {
             owner.note_geometry_outcome(&failure, Some(1));
@@ -267,8 +271,10 @@ fn non_structural_failures_do_not_back_off() {
 #[test]
 fn a_successful_solve_resets_the_backoff() {
     let owner = super::ExtensionOwner::default();
-    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, String> =
-        Err("no assigned ARA region matched a unique host item".into());
+    let failure: Result<Vec<crate::host::geometry::BoundHostGeometry>, super::GeometryFailure> =
+        Err(super::GeometryFailure::Structural(
+            super::BINDING_NO_UNIQUE_ITEM,
+        ));
     for _ in 0..20 {
         owner.note_geometry_outcome(&failure, Some(1));
     }
