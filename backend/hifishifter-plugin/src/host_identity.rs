@@ -159,7 +159,7 @@ const WRAPPER_MARKERS: &[&str] = &["sfvstwrap", "fruity-wrapper"];
 /// 规范化：小写、去路径、去 .exe。
 fn normalize(name: &str) -> String {
     let base = name
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(name);
     let lower = base.to_ascii_lowercase();
