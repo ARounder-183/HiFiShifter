@@ -112,10 +112,34 @@ unsafe fn record_host_name(host: *mut c_void) {
         return;
     };
     *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
-    // 日志按宿主分文件：拿到名字的这一刻把日志切到 `plugin-<slug>.log`
-    // （此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
-    crate::diagnostics::note_host_application(&name);
-    crate::log_line(&format!("host application: {name}"));
+    crate::log_line(&format!("host application (vst3 name): {name}"));
+    // 宿主名不是「问一次」就能得到的：包装器进程（sfvstwrap / fruity-wrapper）会冒充
+    // 宿主，Cubase 加载期只给 unknown。真正的判定在 `host_identity` 里，靠证据链
+    // （环境变量 / ARA 名 / 进程映像 / 祖先链 / VST3 名）取第一个能认出的。
+    resolve_and_record_host_identity();
+}
+
+/// 收集全部证据、定出宿主、把日志切到 `plugin-<slug>.log`。
+///
+/// 【为什么可以重复调用】Cubase 在加载期只给 unknown，真正使用时的名字更晚才到。
+/// 第一次拿不到就留 unknown，后续调用（首次 process）再解析一次；一旦得到非 unknown
+/// 的结果就不再重算 —— 否则日志文件名会来回跳。
+pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostIdentity {
+    let mut evidence = crate::host_identity::process_evidence();
+    if let Some(name) = host_application_name() {
+        evidence.push(crate::host_identity::Evidence {
+            source: crate::host_identity::EvidenceSource::Vst3Name,
+            name,
+        });
+    }
+    let identity = crate::host_identity::resolve_identity(&evidence);
+    crate::log_line(&identity.describe());
+    if identity.display != "unknown" {
+        // 日志按宿主分文件：拿到名字的这一刻把日志切过去
+        //（此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
+        crate::diagnostics::note_host_application(&identity.display);
+    }
+    identity
 }
 
 /// `String128`（NUL 结尾的 UTF-16）→ `String`；空串/非法 UTF-16 返回 `None`。
