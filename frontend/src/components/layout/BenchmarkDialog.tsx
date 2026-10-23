@@ -105,7 +105,16 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
     const [phase, setPhase] = useState<BenchmarkPhase>("idle");
     const [result, setResult] = useState<BenchmarkResult | null>(null);
     const [errorText, setErrorText] = useState<string>("");
-    const abortRef = useRef(false);
+    /**
+     * 运行代际：`handleRun` 入口自增并捕获局部值，完成回调只在代际仍是自己时落地。
+     *
+     * 【为什么不是布尔】关闭对话框弃用的是**那一次**运行，重开则是新会话。曾用共享
+     * 布尔：关闭置 true、打开的 effect 又复位 false —— 而 `runVocoderBenchmark` 在
+     * 插件后端要跑 36–134 秒，"中途关掉、过一会儿重开"完全来得及落在旧 promise
+     * 完成之前，上一轮的结果/错误就写进了这个从未点过 Run 的新会话。代际计数让
+     * 每一次打开/关闭都作废一切在途运行，旧 promise 的落地被拦在本会话之外。
+     */
+    const runIdRef = useRef(0);
 
     useEffect(() => {
         if (!open) return;
@@ -113,11 +122,11 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
         setPhase("idle");
         setResult(null);
         setErrorText("");
-        abortRef.current = false;
+        runIdRef.current += 1;
     }, [open]);
 
     async function handleRun() {
-        abortRef.current = false;
+        const myRun = ++runIdRef.current;
         setPhase("running");
         setResult(null);
         setErrorText("");
@@ -151,18 +160,19 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
 
         try {
             const res = await coreApi.runVocoderBenchmark();
-            if (abortRef.current) return;
+            if (myRun !== runIdRef.current) return;
             setResult(res);
             setPhase("done");
         } catch (e: unknown) {
-            if (abortRef.current) return;
+            if (myRun !== runIdRef.current) return;
             setErrorText(e instanceof Error ? e.message : String(e));
             setPhase("error");
         }
     }
 
     function handleClose() {
-        abortRef.current = true;
+        // 关闭即作废在途运行：旧 promise 落地时被代际判据拦下，不会写进任何会话。
+        runIdRef.current += 1;
         onOpenChange(false);
     }
 
