@@ -126,7 +126,20 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
         // 线程挤到没有时间片 —— 结果是断续与爆音。内核在诊断期间会**静音但不停钟**，
         // 但"播放头在走、突然没声音"仍需一句解释；先停下播放，用户看到的就是一个
         // 明确的"我要开始跑基准了"，而不是"播着播着哑了"。
-        dispatch(stopAudioPlayback({ restoreAnchor: true }));
+        //
+        // 【为什么必须 await，且必须容错】`createAsyncThunk` 的 payload 是异步的：
+        // `dispatch` 只是把 `stop_audio` 排进微任务，紧接着的 `runVocoderBenchmark()`
+        // 会**先**发出。而插件里基准测试会占住命令线程几十秒，于是 `stop_audio` 排在
+        // 它后面、等桥接层超时 —— 用户看到的是 "Backend invoke failed:
+        // plugin:stop_audio"，而不是基准结果（实测日志里同期还有一串
+        // `[ara] editor request … expired without a reply`）。
+        //
+        // 容错同样是必需的：纯 VST3（非 ARA）形态的宿主不提供播放控制，
+        // `stop_audio` 会返回 "host does not provide ARA playback control"。
+        // 那与基准测试无关 —— 诊断期间内核本来就会静音（`diagnostics_busy`）。
+        await Promise.resolve(dispatch(stopAudioPlayback({ restoreAnchor: true }))).catch(
+            () => undefined,
+        );
 
         try {
             const res = await coreApi.runVocoderBenchmark();

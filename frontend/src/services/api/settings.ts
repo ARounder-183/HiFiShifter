@@ -235,7 +235,8 @@ export interface UiSettings {
     midiImportTempoMapKeySignature?: boolean;
     ortEp?: string;
     gpuDeviceId?: number;
-    ortDeviceId?: number | null;
+    /** 稳定的 DirectML 适配器标识 `vendor:device`（不是本进程的 DXGI 序号）。 */
+    ortDeviceKey?: string | null;
     autoBackgroundRender?: boolean;
     /** 自动重新加载已修改的媒体文件（默认开启）。 */
     autoReloadModifiedMedia?: boolean;

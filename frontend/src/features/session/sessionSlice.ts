@@ -581,7 +581,7 @@ export interface SessionState {
     defaultHifiganMelStretch: boolean;
     ortEp: string;
     gpuDeviceId: number;
-    ortDeviceId: number | null;
+    ortDeviceKey: string | null;
     /**
      * vslib 是否可用（启动时经 `get_vslib_status` 探测）。
      *
@@ -2410,7 +2410,7 @@ const initialState: SessionState = {
     defaultHifiganMelStretch: true,
     ortEp: "auto",
     gpuDeviceId: 0,
-    ortDeviceId: null,
+    ortDeviceKey: null,
     vslibAvailable: null,
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
@@ -3199,8 +3199,8 @@ const sessionSlice = createSlice({
         setGpuDeviceId(state, action: PayloadAction<number>) {
             state.gpuDeviceId = action.payload;
         },
-        setOrtDeviceId(state, action: PayloadAction<number | null>) {
-            state.ortDeviceId = action.payload;
+        setOrtDeviceKey(state, action: PayloadAction<string | null>) {
+            state.ortDeviceKey = action.payload;
         },
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
@@ -4096,9 +4096,9 @@ const sessionSlice = createSlice({
                 if (s.gpuDeviceId != null) {
                     state.gpuDeviceId = Number(s.gpuDeviceId);
                 }
-                if (s.ortDeviceId !== undefined) {
-                    const val = s.ortDeviceId;
-                    state.ortDeviceId = val == null ? null : Number(val);
+                if (s.ortDeviceKey !== undefined) {
+                    const val = s.ortDeviceKey;
+                    state.ortDeviceKey = val == null ? null : String(val);
                 }
                 if (s.autoBackgroundRender != null) {
                     state.autoBackgroundRender = Boolean(s.autoBackgroundRender);
@@ -7450,7 +7450,7 @@ export const {
     setOrtEp,
     setVslibAvailable,
     setGpuDeviceId,
-    setOrtDeviceId,
+    setOrtDeviceKey,
     toggleAutoBackgroundRender,
     setRenderCacheSettings,
     setChannelImportPolicy,

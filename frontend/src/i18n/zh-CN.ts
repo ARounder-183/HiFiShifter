@@ -1660,7 +1660,6 @@ export const zhCN = {
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU 设备",
     menu_gpu_auto_select: "自动选择",
-    menu_gpu_auto_ignores_pinned: "自动模式忽略手动选择的设备",
     menu_run_benchmark: "运行基准测试...",
     menu_background_prerender: "后台预渲染",
 

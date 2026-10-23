@@ -1693,7 +1693,6 @@ export const koKR = {
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU 장치",
     menu_gpu_auto_select: "자동 선택",
-    menu_gpu_auto_ignores_pinned: "자동 모드에서는 수동으로 선택한 장치를 무시합니다",
     menu_run_benchmark: "벤치마크 실행...",
     menu_background_prerender: "백그라운드 사전 렌더링",
 

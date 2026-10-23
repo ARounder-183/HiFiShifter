@@ -27,7 +27,7 @@ import {
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
-    setOrtDeviceId,
+    setOrtDeviceKey,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setSearchSettingsDialogOpen,
@@ -154,7 +154,7 @@ const selectMenuBarSession = (state: RootState) => {
         historyRedoDepth: session.historyRedoDepth,
         historyUndoDepth: session.historyUndoDepth,
         multiSelectedClipIds: session.multiSelectedClipIds,
-        ortDeviceId: session.ortDeviceId,
+        ortDeviceKey: session.ortDeviceKey,
         ortEp: session.ortEp,
         paramSelectionActive: session.paramSelectionActive,
         pitchSnapToleranceCents: session.pitchSnapToleranceCents,
@@ -230,8 +230,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
     const [penInputDialogOpen, setPenInputDialogOpen] = useState(false);
+    // `vendorId` / `deviceIdPci` 是持久化用的稳定标识（`vendor:device`）；
+    // `deviceId` 只用于显示与本次进程内的对照，**不能**存盘（见 `UiSettings::ort_device_key`）。
     const [dmlAdapters, setDmlAdapters] = useState<
-        { deviceId: number; name: string; memoryMb: number }[]
+        {
+            deviceId: number;
+            name: string;
+            memoryMb: number;
+            vendorId: number;
+            deviceIdPci: number;
+        }[]
     >([]);
 
     // Fetch DML adapters on mount for GPU device selector.
@@ -249,6 +257,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             deviceId: a.deviceId,
                             name: a.name,
                             memoryMb: a.dedicatedVideoMemoryMb,
+                            vendorId: a.vendorId,
+                            deviceIdPci: a.deviceIdPci,
                         })),
                     );
                 }
@@ -1348,62 +1358,47 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 );
                             })}
 
-                            {/* `auto` 下设备不可选，但**必须显示实际会用的那块卡**。
-                                【为什么】设备序号是持久化的：用户可能在 `gpu` 下选过集显后
-                                切回 `auto`。旧实现里此时没有任何 UI 提示，于是看起来是"自动"，
-                                实际被钉在集显上（实测日志：`choice=auto` 却
-                                `DirectML device_id=1`，独显从未被尝试）。现在 `auto` 明确
-                                忽略手动选择，并把自动挑中的卡写出来 —— 状态永远可见。
-                                【为什么是 `[0]`】`get_dml_adapters` 已按专用显存降序排好，
-                                内核的 `resolve_dml_device_id` 取的就是同一个 `first()`。 */}
-                            {s.ortEp === "auto" && dmlAdapters.length > 0 && (
-                                <>
-                                    <DropdownMenu.Separator />
-                                    <DropdownMenu.Label>{tf("menu_gpu_device")}</DropdownMenu.Label>
-                                    <DropdownMenu.Item disabled>
-                                        {withCheck(
-                                            true,
-                                            `${tf("menu_gpu_auto_select")} — ${dmlAdapters[0].name}`,
-                                        )}
-                                    </DropdownMenu.Item>
-                                    {s.ortDeviceId != null && (
-                                        <DropdownMenu.Item disabled>
-                                            {tf("menu_gpu_auto_ignores_pinned")}
-                                        </DropdownMenu.Item>
-                                    )}
-                                </>
-                            )}
-
-                            {/* GPU Device Selector — shown when GPU EP is selected */}
-                            {s.ortEp === "gpu" && dmlAdapters.length > 0 && (
+                            {/* GPU Device Selector —— 只要 EP 可能用到 GPU 就显示（`auto` 也算）。
+                                【为什么不是只在 `gpu` 下显示】设备选择与 EP 选择是两件事，
+                                `auto` 也会走 DirectML。此前只在 `gpu` 下渲染，于是"上次选过
+                                某块卡、后来切回 auto"成了一个看不见也改不掉的状态（实测日志：
+                                `choice=auto` 却 `DirectML device_id=1`）。
+                                【为什么按 `vendorId:deviceIdPci` 记】DXGI 序号是**本进程**的，
+                                同一分钟内独立 App 与 VEGAS 插件可以互换（`1` 在 App 里是独显、
+                                在插件里是集显）。PCI 标识与枚举顺序无关，见
+                                `UiSettings::ort_device_key`。 */}
+                            {s.ortEp !== "cpu" && dmlAdapters.length > 0 && (
                                 <>
                                     <DropdownMenu.Separator />
                                     <DropdownMenu.Label>{tf("menu_gpu_device")}</DropdownMenu.Label>
                                     <DropdownMenu.Item
                                         onSelect={() => {
-                                            dispatch(setOrtDeviceId(null));
+                                            dispatch(setOrtDeviceKey(null));
                                             void dispatch(persistUiSettings());
                                         }}
                                     >
                                         {withCheck(
-                                            s.ortDeviceId == null,
+                                            s.ortDeviceKey == null,
                                             tf("menu_gpu_auto_select"),
                                         )}
                                     </DropdownMenu.Item>
-                                    {dmlAdapters.map((adapter) => (
-                                        <DropdownMenu.Item
-                                            key={adapter.deviceId}
-                                            onSelect={() => {
-                                                dispatch(setOrtDeviceId(adapter.deviceId));
-                                                void dispatch(persistUiSettings());
-                                            }}
-                                        >
-                                            {withCheck(
-                                                s.ortDeviceId === adapter.deviceId,
-                                                `${adapter.name} (${adapter.memoryMb} MB)`,
-                                            )}
-                                        </DropdownMenu.Item>
-                                    ))}
+                                    {dmlAdapters.map((adapter) => {
+                                        const key = `${adapter.vendorId}:${adapter.deviceIdPci}`;
+                                        return (
+                                            <DropdownMenu.Item
+                                                key={key}
+                                                onSelect={() => {
+                                                    dispatch(setOrtDeviceKey(key));
+                                                    void dispatch(persistUiSettings());
+                                                }}
+                                            >
+                                                {withCheck(
+                                                    s.ortDeviceKey === key,
+                                                    `${adapter.name} (${adapter.memoryMb} MB)`,
+                                                )}
+                                            </DropdownMenu.Item>
+                                        );
+                                    })}
                                 </>
                             )}
 
