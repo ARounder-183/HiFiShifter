@@ -41,7 +41,7 @@ type Props = {
         | "axisWrapRef"
         | "canvasCursor"
         | "canvasRef"
-        | "captureBandRef"
+        | "captureBandsRef"
         | "clipPeaks"
         | "contentWidth"
         | "currentParamRange"
@@ -99,7 +99,7 @@ export function EditorArea({ m }: Props) {
         axisWrapRef,
         canvasCursor,
         canvasRef,
-        captureBandRef,
+        captureBandsRef,
         clipPeaks,
         contentWidth,
         currentParamRange,
@@ -277,23 +277,15 @@ export function EditorArea({ m }: Props) {
                         }}
                     />
                     {/* 捕获区间带：几何由**内核**在帧提交里写（与标尺平移同源同帧），
-                        这里只留一个空元素。此前是一个 React 组件、读 state 的量化
-                        scrollLeft —— 滚动时带子几乎不动，开同步时还差一个偏移量。 */}
+                        这里只留一个空容器。此前是一个 React 组件、读 state 的量化
+                        scrollLeft —— 滚动时带子几乎不动，开同步时还差一个偏移量。
+                        【为什么是容器】捕获可以是**多段**（用户跳播再继续录），
+                        内核按段数池化增删子元素，见宿主里的 `syncCaptureBands`。 */}
                     <div
-                        ref={captureBandRef}
-                        data-capture-band
+                        ref={captureBandsRef}
+                        data-capture-bands
                         aria-hidden
-                        style={{
-                            display: "none",
-                            position: "absolute",
-                            left: 0,
-                            bottom: 0,
-                            height: 4,
-                            background: "var(--qt-danger-border)",
-                            opacity: 0.55,
-                            pointerEvents: "none",
-                            willChange: "transform",
-                        }}
+                        style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
                     />
                 </div>
 

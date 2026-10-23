@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::ops::Range;
 
 /// 单段容量（秒）。
 ///
@@ -153,14 +154,25 @@ pub(crate) struct RecordingStatus {
 }
 
 /// 录制中的工程几何（给时间轴上的实时录制带）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CaptureSpan {
     /// 已经覆盖到的工程区间（并集）。
+    ///
+    /// 保留它是为了两件事：旧读数的兜底，以及"当前段还在往里写"时前端能算出右缘。
     pub start_frame: i64,
     pub end_frame: i64,
     /// 当前块首（= 实时右边缘）。
     pub position_frame: i64,
     pub sample_rate: u32,
+    /// 已覆盖区间的**列表**（升序、互不相交、相邻已合并）。
+    ///
+    /// 【为什么还要它】`start_frame..end_frame` 是并集：宿主 seek 到 30 秒再继续录时，
+    /// 并集是"0 秒到 33 秒连续一段"，而中间 30 秒什么都没录到 —— 带子会撒谎。列表才是
+    /// "我录过哪些地方"的答案。见 `Recorder::covered_runs`。
+    ///
+    /// 【为什么去掉了 `Copy`】`Vec` 不能 `Copy`。这个类型只在状态投影里用，没有热路径，
+    /// 编译器会把所有按值使用点列全。
+    pub runs: Vec<Range<i64>>,
 }
 
 /// 活动素材的摘要。
@@ -1279,6 +1291,7 @@ impl CaptureStore {
                 end_frame: span.end,
                 position_frame: capture.last_position().unwrap_or(span.end),
                 sample_rate,
+                runs: capture.covered_runs(),
             }),
         }
     }
@@ -1630,7 +1643,7 @@ impl CaptureStore {
 }
 
 /// 一次取锁读出的全部捕获读数（见 [`CaptureStore::capture_readings`]）。
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct CaptureReadings {
     /// 宿主是否已经播过至少一块（`false` = 待命）。
     started: bool,

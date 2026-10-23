@@ -166,7 +166,13 @@ export interface PianoRollKernelDomSync {
      * 而它的参照物（标尺刻度）是内核按绘制坐标平移的。任何"第二个时钟"都会让它
      * 与刻度分离 —— 用户报障里那句"伪影像是和参数编辑器标尺完全分离了一样"就是它。
      */
-    readonly captureBand?: () => HTMLElement | null;
+    /**
+     * 捕获带的**容器**：内核按段数池化增删子元素（见 `syncCaptureBands`）。
+     *
+     * 【为什么是容器而不是单个元素】捕获可以是多段（用户跳播再继续录），而并集会把
+     * 中间没录到的部分也画成"已录"。段数由后端给，元素由内核管。
+     */
+    readonly captureBands?: () => HTMLElement | null;
     /** 背景网格层：经 `gridRedrawBridge` 重绘（自行判定是否真的重画）。 */
     readonly gridLayer?: () => HTMLElement | null;
 }
@@ -1630,6 +1636,58 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      *
      * @param view 当前视口真值（原生坐标）。
      */
+    /**
+     * 把捕获带写进容器：**逐段**一个 div，池化复用。
+     *
+     * 【为什么要池化而不是每帧重建】这条路径在**每一帧提交**里都会跑（录制推进时带子
+     * 必须跟着走）。每帧 `innerHTML = ""` + 重建会让 DOM 抖动、也让浏览器反复分配。
+     * 池子只在段数变化时增删，稳定时只写 transform / width。
+     *
+     * 【为什么只写 transform】宽度与位移分开写（transform + width）与播放头线同一约定：
+     * 位移走合成层，不触发重排。
+     */
+    function syncCaptureBands(
+        container: HTMLElement,
+        bands: readonly { readonly startSec: number; readonly endSec: number }[] | null,
+        view: TimelineViewportState,
+        drawingScrollLeft: number,
+    ): void {
+        const rects =
+            bands === null || viewportWidthPx <= 0
+                ? []
+                : bands
+                      .map((band) =>
+                          captureBandGeometry({
+                              startSec: band.startSec,
+                              endSec: band.endSec,
+                              pxPerSec: view.pxPerSec,
+                              scrollLeftPx: drawingScrollLeft,
+                              viewportWidthPx,
+                              dpr: readDevicePixelRatio(),
+                          }),
+                      )
+                      .filter((rect) => rect.visible);
+        const children = container.children;
+        while (children.length < rects.length) {
+            const band = document.createElement("div");
+            band.setAttribute("data-capture-band", "");
+            band.style.cssText =
+                "position:absolute;left:0;bottom:0;height:4px;background:var(--qt-danger-border);opacity:0.55;pointer-events:none;will-change:transform;";
+            container.appendChild(band);
+        }
+        while (children.length > rects.length) {
+            children[children.length - 1].remove();
+        }
+        for (let index = 0; index < rects.length; index += 1) {
+            const element = children[index] as HTMLElement;
+            const rect = rects[index];
+            const transform = "translateX(" + rect.left + "px)";
+            if (element.style.transform !== transform) element.style.transform = transform;
+            const width = rect.width + "px";
+            if (element.style.width !== width) element.style.width = width;
+        }
+    }
+
     function syncDom(view: TimelineViewportState): void {
         // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
         const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
@@ -1652,27 +1710,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         //
         // 【为什么放在 syncDom 里】这个函数在**每一帧提交**都会跑（包括"只画叠加层"
         // 的播放帧），所以录制推进时带子也会跟着走，不需要额外的失效入口。
-        const captureBand = sync?.captureBand?.() ?? null;
-        if (captureBand !== null) {
-            const captureRange = data().overlay?.captureRange ?? null;
-            const rect =
-                captureRange === null || viewportWidthPx <= 0
-                    ? null
-                    : captureBandGeometry({
-                          startSec: captureRange.startSec,
-                          endSec: captureRange.endSec,
-                          pxPerSec: view.pxPerSec,
-                          scrollLeftPx: drawingScrollLeft,
-                          viewportWidthPx,
-                          dpr: readDevicePixelRatio(),
-                      });
-            if (rect === null || !rect.visible) {
-                if (captureBand.style.display !== "none") captureBand.style.display = "none";
-            } else {
-                captureBand.style.display = "block";
-                captureBand.style.transform = "translateX(" + rect.left + "px)";
-                captureBand.style.width = rect.width + "px";
-            }
+        const captureBands = sync?.captureBands?.() ?? null;
+        if (captureBands !== null) {
+            syncCaptureBands(
+                captureBands,
+                data().overlay?.captureBands ?? null,
+                view,
+                drawingScrollLeft,
+            );
         }
 
         const playheadSec = data().overlay?.playheadSec;

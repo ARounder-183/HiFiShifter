@@ -136,8 +136,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 轮询的 store 滞后值——播放中缩放以滞后值锚定会让播放头跳变 δ·Δpx。
     const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
-    /** 标尺上的捕获区间带（几何由内核写，见宿主里的 captureBand）。 */
-    const captureBandRef = useRef<HTMLDivElement | null>(null);
+    /** 标尺上的捕获区间带**容器**（几何由内核按段写，见宿主里的 captureBands）。 */
+    const captureBandsRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     /**
      * 内核宿主的稳定引用。
@@ -1250,7 +1250,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         visualPlayheadSecRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        captureBandRef,
+        captureBandsRef,
         rulerContentRef,
         gridLayerRef,
         drawRef,
@@ -2453,7 +2453,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         axisWrapRef,
         canvasCursor,
         canvasRef,
-        captureBandRef,
+        captureBandsRef,
         clipPeaks,
         contentWidth,
         currentParamRange,

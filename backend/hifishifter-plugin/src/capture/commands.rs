@@ -107,11 +107,19 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
     // 用户只能看到一个"已录 0.0 秒"的数字，而时间轴毫无变化 —— 这正是"不知道自己
     // 录了什么"的来源。带子由前端画，几何由这里给。
     let capture = status.capture.map(|capture| {
+        // 【为什么给"区间列表"而不只是并集】并集会把"跳到 30 秒再继续录"画成一条
+        // 0..33 秒的连续带子 —— 中间那 30 秒其实什么都没录到。见 `Recorder::covered_runs`。
+        let runs: Vec<Value> = capture
+            .runs
+            .iter()
+            .map(|run| json!({ "startFrame": run.start, "endFrame": run.end }))
+            .collect();
         json!({
             "startFrame": capture.start_frame,
             "endFrame": capture.end_frame,
             "positionFrame": capture.position_frame,
             "sampleRate": capture.sample_rate,
+            "runs": runs,
         })
     });
     // 【为什么把"录到了但没有内容"单独报出来】全静音的录制不产生片段，于是时间轴空白、

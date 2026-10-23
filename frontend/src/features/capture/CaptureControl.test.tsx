@@ -90,7 +90,13 @@ function recording(overrides: Partial<CaptureStatus> = {}): CaptureStatus {
             gaps: 0,
             spares: 2,
         },
-        capture: { startFrame: 0, endFrame: 48_000, positionFrame: 48_000, sampleRate: 48_000 },
+        capture: {
+            startFrame: 0,
+            endFrame: 48_000,
+            positionFrame: 48_000,
+            sampleRate: 48_000,
+            runs: [{ startFrame: 0, endFrame: 48_000 }],
+        },
         ...overrides,
     });
 }

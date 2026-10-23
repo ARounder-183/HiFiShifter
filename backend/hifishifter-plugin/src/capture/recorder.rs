@@ -48,6 +48,53 @@
 
 use std::ops::Range;
 
+/// 一次捕获最多上报多少个"已覆盖区间"（见 `Recorder::covered_runs`）。
+pub(crate) const MAX_CAPTURE_RUNS: usize = 256;
+
+/**
+ * 把任意顺序的区间合并成**升序、互不相交、相邻合并**的列表，最多 `cap` 条。
+ *
+ * 【为什么是自由函数】它是"跳播之后界面该画几条带子"这件事的全部逻辑，而它要处理的
+ * 只是区间，与捕获状态机无关。抽成纯函数之后可以脱离音频线程与段容器单独验证 ——
+ * 这正是本项最容易写错的地方（把并集当列表、把相邻当分离）。
+ *
+ * 合并规则与 `timeline::project` 的"相邻即合并"同口径：`next.start <= cur.end`
+ * 就并进去。相邻必须合并，否则一次 40 秒录制（五个 8 秒段）会画成五条紧贴的带子，
+ * 接缝处出现抗锯齿缝。
+ *
+ * 超过 `cap` 时反复合并**最小的间隙**：丢掉的是"这里有一点小空隙"，保留的是
+ * "大段没录到"—— 后者才是用户需要看见的信息。
+ */
+pub(crate) fn merge_runs(
+    runs: impl IntoIterator<Item = Range<i64>>,
+    cap: usize,
+) -> Vec<Range<i64>> {
+    let mut sorted: Vec<Range<i64>> = runs.into_iter().filter(|run| run.end > run.start).collect();
+    sorted.sort_by_key(|run| run.start);
+    let mut merged: Vec<Range<i64>> = Vec::with_capacity(sorted.len());
+    for run in sorted {
+        match merged.last_mut() {
+            Some(last) if run.start <= last.end => {
+                last.end = last.end.max(run.end);
+            }
+            _ => merged.push(run),
+        }
+    }
+    while merged.len() > cap.max(1) {
+        let Some((index, _)) = merged
+            .windows(2)
+            .enumerate()
+            .map(|(index, pair)| (index, pair[1].start - pair[0].end))
+            .min_by_key(|(_, gap)| *gap)
+        else {
+            break;
+        };
+        let tail = merged.remove(index + 1);
+        merged[index].end = tail.end;
+    }
+    merged
+}
+
 /// 距单次录制上限还有这么多秒时开始预警。
 ///
 /// 【为什么是 10 秒】它要足够长到用户能**做完手上的事**（唱完这一句、把光标挪开），
@@ -1094,6 +1141,31 @@ impl Capture {
             end = end.max(position);
         }
         (start < end).then_some(start..end)
+    }
+
+    /// 本次捕获**已经覆盖**的工程区间**列表**（升序、互不相交、相邻已合并）。
+    ///
+    /// 【为什么不能只给并集】宿主 seek 跳到 30 秒再继续录时，并集是"0 秒到 33 秒连续
+    /// 一段" —— 而中间那 30 秒什么都没录到。界面据此画出来的带子在撒谎：用户以为自己
+    /// 录满了，回放时那一段是空的。要如实表达"录过哪些地方"，只能给区间列表。
+    ///
+    /// 【为什么在这里合并而不是让前端合并】区间来自段（8 秒定长容器），相邻段首尾相接
+    /// 是常态；不合并的话一次 40 秒录制就是五段、界面画五条紧贴的带子，接缝处会出现
+    /// 抗锯齿缝。合并规则与 `timeline::project` 的"相邻即合并"同口径。
+    ///
+    /// 【为什么有上限】区间列表每 200 ms 走一次 IPC。跳播极多时它会长到几百条，
+    /// 而画面上根本分辨不出 1 毫秒的缝隙。超过上限就反复合并**最小的间隙**，
+    /// 丢掉的是"这里有一点点空隙"的信息，保留的是"大段没录到"的信息 —— 那才是用户
+    /// 需要看见的东西。
+    pub(crate) fn covered_runs(&self) -> Vec<Range<i64>> {
+        merge_runs(
+            self.sealed.iter().chain(self.active.iter()).map(|segment| {
+                let start = segment.origin.max(0);
+                let end = segment.origin.saturating_add(segment.filled as i64);
+                start..end
+            }),
+            MAX_CAPTURE_RUNS,
+        )
     }
 
     /// 已写入的工程帧总数。
@@ -3191,6 +3263,54 @@ mod tests {
         assert!(capture.pending_discarded >= 1);
     }
 
+    /// **跳播产生的多段必须逐段上报，而不是被并成一段。**
+    ///
+    /// 用户按下录制 → 录 3 秒 → 把播放光标跳到 30 秒 → 再录 3 秒。并集是 0..33 秒
+    /// 连续一段，界面据此画出的带子会说"整段都录到了"，而中间 27 秒是空的。
+    #[test]
+    fn merge_runs_keeps_a_jump_as_two_islands() {
+        assert_eq!(
+            merge_runs([0..4, 4..8, 3000..3004], MAX_CAPTURE_RUNS),
+            vec![0..8, 3000..3004],
+        );
+    }
+
+    /// 相邻段必须合并：一次 40 秒录制是**一个**区间，不是五个。
+    #[test]
+    fn merge_runs_joins_touching_segments() {
+        assert_eq!(
+            merge_runs([0..4, 4..8, 8..12], MAX_CAPTURE_RUNS),
+            vec![0..12]
+        );
+        // 重叠也要并（循环回卷会让后一段压住前一段的尾巴）。
+        assert_eq!(merge_runs([0..10, 6..14], MAX_CAPTURE_RUNS), vec![0..14]);
+    }
+
+    /// 乱序输入必须先排序，否则"最小间隙"会选错、输出也不再升序。
+    #[test]
+    fn merge_runs_sorts_its_input() {
+        assert_eq!(
+            merge_runs([3000..3004, 0..4, 4..8], MAX_CAPTURE_RUNS),
+            vec![0..8, 3000..3004],
+        );
+    }
+
+    /// 零长度区间不算"录到了"（位置推进但没写样本时会出现）。
+    #[test]
+    fn merge_runs_drops_empty_ranges() {
+        assert_eq!(merge_runs([5..5, 0..4], MAX_CAPTURE_RUNS), vec![0..4]);
+        assert!(merge_runs([], MAX_CAPTURE_RUNS).is_empty());
+    }
+
+    /// 超过上限时合并**最小的间隙**：大段空洞必须留着，细缝可以牺牲。
+    #[test]
+    fn merge_runs_collapses_the_smallest_gaps_first() {
+        // 三个 1 帧的段，间隙分别是 1 与 1000。
+        let merged = merge_runs([0..1, 2..3, 1003..1004], 2);
+        assert_eq!(merged, vec![0..3, 1003..1004], "应当先吃掉 1 帧那条缝");
+        // 上限为 1 时只剩一个区间，覆盖全跨度。
+        assert_eq!(merge_runs([0..1, 2..3, 1003..1004], 1), vec![0..1004]);
+    }
     fn capture_with_both_streams(capacity: usize, spares: usize) -> Capture {
         let mut capture = Capture::default();
         capture.start(

@@ -84,7 +84,7 @@ type PianoRollScrollKernelInputs = {
     visualPlayheadSecRef: { current: number };
     rulerPlayheadLineRef: { current: HTMLDivElement | null };
     rulerPlayheadHeadRef: { current: HTMLDivElement | null };
-    captureBandRef: { current: HTMLDivElement | null };
+    captureBandsRef: { current: HTMLDivElement | null };
     rulerContentRef: { current: HTMLDivElement | null };
     gridLayerRef: { current: HTMLDivElement | null };
     /** 面板自己的帧绘制入口（Canvas2D 细节层）。 */
@@ -131,7 +131,7 @@ export function usePianoRollScrollKernel({
     visualPlayheadSecRef,
     rulerPlayheadLineRef,
     rulerPlayheadHeadRef,
-    captureBandRef,
+    captureBandsRef,
     rulerContentRef,
     gridLayerRef,
     drawRef,
@@ -407,8 +407,8 @@ export function usePianoRollScrollKernel({
                 // 避免"面板按自己的缩放写、GL 按内核缩放画"造成的水平分离。
                 rulerPlayheadLine: () => rulerPlayheadLineRef.current,
                 rulerPlayheadHead: () => rulerPlayheadHeadRef.current,
-                // 捕获带：与标尺同源同帧（见 host 里 captureBand 的说明）。
-                captureBand: () => captureBandRef.current,
+                // 捕获带：与标尺同源同帧（见 host 里 captureBands 的说明）。
+                captureBands: () => captureBandsRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
             // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，

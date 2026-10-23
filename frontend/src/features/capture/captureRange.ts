@@ -18,35 +18,59 @@ import { getCaptureSnapshot, subscribeCapture } from "./captureStore";
 
 export { subscribeCapture };
 
-/** 捕获中的工程秒区间（`null` = 当前没有在捕获）。 */
-export interface CaptureRange {
-    /** 已覆盖区间的左端（工程秒）。 */
+/** 一段已经录到的工程秒区间。 */
+export interface CaptureBand {
     startSec: number;
-    /** 已覆盖区间的右端（工程秒）。录制推进时向右长。 */
     endSec: number;
-    /** 当前位置（工程秒）。与 `endSec` 取较大者用于绘制右缘。 */
+}
+
+/**
+ * 捕获中的工程秒区间**列表**（`null` = 当前没有在捕获）。
+ *
+ * 【为什么是列表而不是一个区间】用户在捕获过程中可以把播放光标跳到任意位置再继续
+ * 录。并集会把"录了 0..3 秒、跳到 30 秒、又录了 30..33 秒"画成一条 0..33 秒的连续
+ * 带子 —— 中间 27 秒其实什么都没录到。带子必须逐段画。
+ */
+export interface CaptureBands {
+    bands: CaptureBand[];
+    /** 当前位置（工程秒）：捕获中唯一"在动"的东西。 */
     positionSec: number;
 }
 
 /**
- * 从一次状态快照里取出捕获区间。
+ * 从一次状态快照里取出捕获区间列表。
  *
- * 【为什么 `endSec` 要取 `max(endFrame, positionFrame)`】后端报的 `endFrame` 是"已封口
- * 段的右端"，而当前段的样本还在往里写 —— 只看 `endFrame` 会让带子在每个段边界上
- * "停一下再跳"，看起来像卡住了。
+ * 【为什么 `positionSec` 只延长**最后一段**】后端报的 `endFrame` 是"已封口段的右端"，
+ * 而当前段的样本还在往里写 —— 只看 `endFrame` 会让带子在每个段边界上"停一下再跳"，
+ * 看起来像卡住了。但把这个 `max` 应用到**每一段**就会让跳播之后所有历史段的右端都被
+ * 拉到当前位置，等于又并成一整条 —— 那正是本函数要避免的错误。
  */
-export function deriveCaptureRange(status: CaptureStatus | null): CaptureRange | null {
+export function deriveCaptureBands(status: CaptureStatus | null): CaptureBands | null {
     const capture = status?.capture ?? null;
     if (capture === null) return null;
     const rate = capture.sampleRate;
     if (!(rate > 0)) return null;
-    const startSec = frameToSec(capture.startFrame, rate);
-    const endSec = frameToSec(Math.max(capture.endFrame, capture.positionFrame), rate);
-    return {
-        startSec,
-        endSec: Math.max(endSec, startSec),
-        positionSec: frameToSec(capture.positionFrame, rate),
-    };
+
+    // 旧载荷 / 空载荷兜底：没有列表时退回并集那一段。
+    const source =
+        Array.isArray(capture.runs) && capture.runs.length > 0
+            ? capture.runs
+            : [{ startFrame: capture.startFrame, endFrame: capture.endFrame }];
+
+    const bands: CaptureBand[] = [];
+    for (const run of source) {
+        const startSec = frameToSec(run.startFrame, rate);
+        const endSec = frameToSec(run.endFrame, rate);
+        if (!(endSec > startSec)) continue;
+        bands.push({ startSec, endSec });
+    }
+    if (bands.length === 0) return null;
+    bands.sort((a, b) => a.startSec - b.startSec);
+
+    const positionSec = frameToSec(capture.positionFrame, rate);
+    const last = bands[bands.length - 1];
+    if (positionSec > last.endSec) last.endSec = positionSec;
+    return { bands, positionSec: Math.max(positionSec, last.startSec) };
 }
 
 /**
@@ -58,29 +82,29 @@ export function deriveCaptureRange(status: CaptureStatus | null): CaptureRange |
  * 做缓存键即可 —— 快照没换，区间就一定没变。
  */
 let cachedStatus: CaptureStatus | null | undefined;
-let cachedRange: CaptureRange | null = null;
+let cachedBands: CaptureBands | null = null;
 
-function snapshotRange(): CaptureRange | null {
+function snapshotBands(): CaptureBands | null {
     const status = getCaptureSnapshot().status;
     if (status !== cachedStatus) {
         cachedStatus = status;
-        cachedRange = deriveCaptureRange(status);
+        cachedBands = deriveCaptureBands(status);
     }
-    return cachedRange;
+    return cachedBands;
 }
 
 /**
- * 读一次当前区间（**不订阅**）。
+ * 读一次当前区间列表（**不订阅**）。
  *
  * 【为什么需要非订阅读法】参数编辑器的带子由内核在**帧提交**里画：它只需要"这一帧
- * 的最新值"。若走 `useCaptureRange`，录制推进时整个面板会以十几 Hz 重渲染 ——
- * 为了画一条 4px 的带子重渲染一棵含 WebGL 宿主的树，代价荒谬。
+ * 的最新值"。若走 `useCaptureBands`，录制推进时整个面板会以十几 Hz 重渲染 ——
+ * 为了画几条 4px 的带子重渲染一棵含 WebGL 宿主的树，代价荒谬。
  */
-export function getCaptureRange(): CaptureRange | null {
-    return snapshotRange();
+export function getCaptureBands(): CaptureBands | null {
+    return snapshotBands();
 }
 
 /** 订阅捕获区间。两个面板都调用它，因此看到的必然是同一份。 */
-export function useCaptureRange(): CaptureRange | null {
-    return useSyncExternalStore(subscribeCapture, snapshotRange, () => null);
+export function useCaptureBands(): CaptureBands | null {
+    return useSyncExternalStore(subscribeCapture, snapshotBands, () => null);
 }

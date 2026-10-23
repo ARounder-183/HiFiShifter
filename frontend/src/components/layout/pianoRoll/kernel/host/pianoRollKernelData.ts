@@ -218,7 +218,14 @@ export interface PianoRollOverlaySpec {
      * 而曲线几何完全不受影响。放进叠加层是为了让"捕获带推进"只走只画叠加层的那条
      * 帧路径，而不是每 100ms 重建一次曲线几何。
      */
-    readonly captureRange?: { readonly startSec: number; readonly endSec: number } | null;
+    /**
+     * 捕获中的工程秒区间**列表**（`null` = 没在捕获）。
+     *
+     * 【为什么是列表】跳播会让捕获分成好几段；并集会把中间没录到的部分也画成"已录"。
+     * 见 `features/capture/captureRange`。
+     */
+    readonly captureBands?:
+        readonly { readonly startSec: number; readonly endSec: number }[] | null;
 }
 
 /** 宿主每帧读取的数据镜像。 */

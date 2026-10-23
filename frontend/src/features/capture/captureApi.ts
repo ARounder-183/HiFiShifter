@@ -22,12 +22,27 @@ export interface CaptureRecording {
     spares: number;
 }
 
+/** 一段已经录到的工程区间（帧）。 */
+export interface CaptureRun {
+    startFrame: number;
+    endFrame: number;
+}
+
 /** 录制中正在长出来的工程区间（时间轴据此画实时录制带）。 */
 export interface CaptureCapture {
+    /** 已覆盖区间的**并集**（首段起点 .. 末段终点）。 */
     startFrame: number;
     endFrame: number;
     positionFrame: number;
     sampleRate: number;
+    /**
+     * 已覆盖区间的**列表**（升序、互不相交、相邻已合并）。
+     *
+     * 【为什么不能只用并集】宿主 seek 跳到 30 秒再继续录时，并集是"0 秒到 33 秒连续
+     * 一段"—— 而中间 30 秒什么都没录到。带子据此画出来会撒谎。列表才是"我录过哪些
+     * 地方"的答案（见后端 `Recorder::covered_runs`）。
+     */
+    runs: CaptureRun[];
 }
 
 /** 活动素材的摘要。 */
