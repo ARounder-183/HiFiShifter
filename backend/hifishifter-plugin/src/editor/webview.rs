@@ -47,6 +47,17 @@ const PENDING_BUDGET: usize = 32;
 /// 请求已被丢弃。超时后剔除该条目，避免永久占用预算。
 const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 慢车道请求的存活预算。
+///
+/// 【为什么不是 `PENDING_TTL`】那 30 秒回答的是"一次正常的宿主回流多久没回就该判丢"。
+/// 慢车道的任务以分钟计（基准测试实测 31–134 秒），用同一个数字只会把"正在跑"判成
+/// "回执丢了"，并打出那条误导性的 `expired without a reply`。
+///
+/// 【为什么是 30 分钟而不是"永不过期"】它只是**绊线**：前端 15 分钟就放弃了，这里留
+/// 双倍余量，只为不让一个真正卡住的条目永久占着 map。永远不过期等于把"卡死"变成
+/// "静默占位"，那是更难查的一类缺陷。
+const SLOW_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// 单个编辑请求最多重投多少次（等待宿主几何/媒体追上）。
 ///
 /// 【为什么必须有上限】回复泵由 20 ms 定时器驱动。没有上限时，一个**永不收敛**的
@@ -114,9 +125,7 @@ fn host_group_id_for(clip_ids: &[String]) -> i32 {
 /// 却会因为一个与它们无关的前置条件整块不可用。
 type InteractionIdentity = (usize, Option<u64>);
 
-fn interaction_identity(
-    link: &super::routing::EditorLink,
-) -> Result<InteractionIdentity, String> {
+fn interaction_identity(link: &super::routing::EditorLink) -> Result<InteractionIdentity, String> {
     let owner = link.owner()?;
     let lease = match owner.editor_document() {
         Ok(document) => Some(link.authorize(&document)?),
@@ -141,13 +150,16 @@ struct BrowserState {
     sink: super::session::UiSink,
     replies: mpsc::Receiver<serde_json::Value>,
     events: mpsc::Receiver<serde_json::Value>,
-    /// 在途请求 id → 插入时刻。
+    /// 在途请求 id → 它的插入时刻与预算。
     ///
     /// 【为什么带时刻】`pending` 只在**收到回复**时移除（`deliver` 的 `retain_mut`）。
     /// 若某个请求永远不回（文档关闭、`PostWebMessageAsJson` 失败、actor 丢弃），条目会
     /// 永久残留；累积到 32（各处的预算上限）后，本视图会**拒绝一切后续命令**。
     /// 带时刻就能在定时器里超时剔除，把"永久失效"降级成"这一次超时"。
-    pending: std::collections::HashMap<u64, std::time::Instant>,
+    ///
+    /// 【为什么预算跟着请求走】见 [`SLOW_PENDING_TTL`]：慢车道的任务是分钟级的，
+    /// 用 30 秒去判它"没有回复"只会把"正在跑"误判成"丢了"。
+    pending: std::collections::HashMap<u64, Pending>,
     forwarded_keys: HashSet<char>,
     host_replies: std::collections::HashMap<u64, HostReply>,
     undo_requests:
@@ -161,18 +173,50 @@ struct BrowserState {
     last_history: Option<serde_json::Value>,
 }
 
+/// 在途预算判据（纯函数：`BrowserState` 要 COM 才建得起来，判据本身必须可测）。
+fn budget_exhausted(in_flight: usize, id_present: bool, slow: bool) -> bool {
+    !slow && (in_flight >= PENDING_BUDGET || id_present)
+}
+
+/// 一个在途请求的存活预算。
+struct Pending {
+    since: std::time::Instant,
+    /// 是否跑在慢车道上（见 [`crate::editor::slow_lane`]）。
+    slow: bool,
+}
+
+impl Pending {
+    fn ttl(&self) -> std::time::Duration {
+        if self.slow {
+            SLOW_PENDING_TTL
+        } else {
+            PENDING_TTL
+        }
+    }
+}
+
 impl BrowserState {
     /// 记录一个在途请求。
-    fn mark_pending(&mut self, id: u64) {
-        self.pending.insert(id, std::time::Instant::now());
+    fn mark_pending(&mut self, id: u64, slow: bool) {
+        self.pending.insert(
+            id,
+            Pending {
+                since: std::time::Instant::now(),
+                slow,
+            },
+        );
     }
 
     /// 在途请求是否已满（或该 id 已在途）。
     ///
     /// 先剔除超时条目，再判预算 —— 否则一个永不回复的请求会永久占用一个名额。
-    fn pending_full(&mut self, id: u64) -> bool {
+    ///
+    /// 【为什么慢车道不占名额】那 32 个名额护的是"宿主写入的回执没回来"：每条都持有
+    /// 一份宿主 Undo 块。慢任务不持有任何宿主写入，而它跑着的时候编辑器还在轮询 ——
+    /// 让轮询把它挤出预算，正是要修的那个故障。
+    fn pending_full(&mut self, id: u64, slow: bool) -> bool {
         self.expire_pending();
-        self.pending.len() >= PENDING_BUDGET || self.pending.contains_key(&id)
+        budget_exhausted(self.pending.len(), self.pending.contains_key(&id), slow)
     }
 
     /// 剔除超过 [`PENDING_TTL`] 仍无回复的请求，并同步释放它占用的关联状态。
@@ -185,17 +229,17 @@ impl BrowserState {
             return;
         }
         let now = std::time::Instant::now();
-        let expired: Vec<u64> = self
+        let expired: Vec<(u64, bool)> = self
             .pending
             .iter()
-            .filter(|(_, at)| now.duration_since(**at) >= PENDING_TTL)
-            .map(|(id, _)| *id)
+            .filter(|(_, entry)| now.duration_since(entry.since) >= entry.ttl())
+            .map(|(id, entry)| (*id, entry.slow))
             .collect();
         if expired.is_empty() {
             return;
         }
         let view_id = self.view_id.clone();
-        for id in &expired {
+        for (id, slow) in &expired {
             self.pending.remove(id);
             let reply = self.host_replies.remove(id);
             let document = reply
@@ -215,7 +259,17 @@ impl BrowserState {
                     document.host_undo.finish_history(&view_id, *id);
                 }
             }
-            log::warn!("[ara] editor request {id} expired without a reply");
+            if *slow {
+                // 慢车道的条目只在"真的卡死"时才该被清掉：前端 15 分钟就放弃了，
+                // 这条绊线只为不让一个卡住的条目永久占着 map。措辞必须与"丢了回执"
+                // 分开，否则排查时会把"还在跑"读成"回执没到"。
+                log::warn!(
+                    "[ara] slow request {id} still running after {:?} — the long task is stuck",
+                    SLOW_PENDING_TTL
+                );
+            } else {
+                log::warn!("[ara] editor request {id} expired without a reply");
+            }
         }
     }
 }
@@ -663,10 +717,8 @@ unsafe extern "system" fn window_proc(
                     if owner.take_bootstrap_changed() {
                         if let Some(session) = owner.existing_editor_session() {
                             let view_id = state.borrow().view_id.clone();
-                            session.emit(
-                                "plugin_bootstrap_changed",
-                                bootstrap_json(&link, &view_id),
-                            );
+                            session
+                                .emit("plugin_bootstrap_changed", bootstrap_json(&link, &view_id));
                         }
                     }
                 }
@@ -1124,10 +1176,7 @@ impl BootstrapFlags {
 }
 
 /// 当前 bootstrap 快照。导航前注入与绑定后的补发共用同一份事实。
-fn bootstrap_json(
-    link: &super::routing::EditorLink,
-    view_id: &str,
-) -> serde_json::Value {
+fn bootstrap_json(link: &super::routing::EditorLink, view_id: &str) -> serde_json::Value {
     let owner = link.owner().ok();
     // 【为什么先落定形态】窗口打开时可能还在 ARA 绑定宽限期内；不按需求值，
     // `hostKind` 会停在 `ara_only`，非 ARA 宿主会被当成 ARA-only 对待。
@@ -1152,8 +1201,7 @@ fn bootstrap_json(
         capture_caps: owner
             .as_ref()
             .filter(|owner| {
-                owner.host_backend().kind()
-                    == hifishifter_kernel::editor::host::HostKind::Capture
+                owner.host_backend().kind() == hifishifter_kernel::editor::host::HostKind::Capture
             })
             .map(|owner| {
                 let status = owner.capture().status();
@@ -1394,7 +1442,7 @@ fn configure_browser(
                 })()
             },
             Some("import_audio_item")=>{
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native import request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
@@ -1418,7 +1466,7 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             // 独立的"添加宿主轨道"入口。
             //
@@ -1429,7 +1477,7 @@ fn configure_browser(
             // 【为什么插入位置要锚定】用户说的"最下方"是**本实例能看到的最下方**，
             // 不是整个工程的最底下 —— 后者会把新轨道丢到别的 FX 实例的轨道下面。
             Some("create_host_track")=>{
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native track request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1450,7 +1498,7 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             // 精简诊断导出（Help 菜单）。命令名与独立 App **相同** —— 前端不需要按
             // 模式分支，也不需要一个"插件能不能导出"的能力标志。
@@ -1508,8 +1556,13 @@ fn configure_browser(
                 })()
             },
             Some("export_diagnostics")=>{
-                let link=state.borrow().link.clone();
-                (||->Result<serde_json::Value,String>{
+                // 【为什么结果在慢车道上回执】打包要读最多两份 32 MB 日志并 deflate，
+                // 而这里是宿主 UI 线程 —— 同步写完，编辑器在整个导出期间不响应（前端给
+                // 它的预算是 5 分钟）。下面那些读（宿主版本、时钟、渲染器诊断、设置）
+                // 都是纯读 + JSON，且只有 UI 线程拿得到，所以留在原地：
+                // 这就是"**先在 UI 线程取快照，再把慢 I/O 下放**"的样板。
+                let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
+                let outcome=(||->Result<(),String>{
                     let output=request["args"]["outputPath"].as_str().ok_or("diagnostics output path missing")?;
                     let out=std::path::PathBuf::from(output);
                     if !out.is_absolute() {return Err("diagnostics output path must be absolute".into());}
@@ -1540,16 +1593,32 @@ fn configure_browser(
                         "audioPanicCount":crate::vst3::audio_panic_count(),
                         "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
                             .unwrap_or_else(||serde_json::json!([])),
+                        // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的
+                        // 事实，让它随诊断包一起走。
+                        "slowLane":super::slow_lane::snapshot(),
                     });
                     let settings=serde_json::json!({
                         "plugin":crate::settings_store::settings(),
                         "frontendPrefs":crate::settings_store::frontend_prefs(),
                         "frontend":request["args"]["frontendSettings"].clone(),
                     });
-                    super::plugin_diagnostics::write_package(&out,&system,&settings)?;
-                    crate::log_line(&format!("[diagnostics] plugin package exported: {}",out.display()));
-                    Ok(serde_json::json!({"ok":true,"path":output}))
-                })()
+                    super::slow_lane::submit(super::slow_lane::SlowTask {
+                        id,
+                        command:"export_diagnostics".into(),
+                        sink,
+                        work:Box::new(move||{
+                            super::plugin_diagnostics::write_package(&out,&system,&settings)?;
+                            crate::log_line(&format!("[diagnostics] plugin package exported: {}",out.display()));
+                            Ok(serde_json::json!({"ok":true,"path":out.to_string_lossy()}))
+                        }),
+                    })?;
+                    Ok(())
+                })();
+                match outcome {
+                    // 回执由慢车道发出：这里**不能**再走尾部的通用回执，否则同一个 id 会收到两条。
+                    Ok(())=>{state.borrow_mut().mark_pending(id,true);return Ok(());}
+                    Err(error)=>Err(error),
+                }
             },
             // 记事本导出 / 附件另存为：需要系统保存对话框（HWND 只有 UI 线程有），
             // 因此不走 actor dispatch。
@@ -1607,7 +1676,7 @@ fn configure_browser(
                 })()
             },
             Some(command @ ("split_clip"|"split_clips_at"))=>{
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
                 let outcome=(||->Result<HostReply,String> {
                     if full {return Err("native split request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1623,10 +1692,10 @@ fn configure_browser(
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             Some(command) if crate::host::host_edit::is_clip_edit(command)=>{
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
                 let outcome=(||->Result<HostReply,String> {
                     if full {return Err("native host edit request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1650,13 +1719,13 @@ fn configure_browser(
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry,split:None,media:None,action:None})
                 })();
                 match outcome {
-                    Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.host_replies.insert(id,reply);return Ok(());},
+                    Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return Ok(());},
                     Err(error)=>Err(error),
                 }
             },
             Some("has_timeline_clipboard")=>crate::host::clipboard::available(),
             Some(command @ ("copy_timeline_clips"|"paste_timeline_clipboard"|"duplicate_clips_bulk"|"remove_clip"|"remove_clips"))=>{
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
                 let outcome=(||->Result<HostReply,String>{
                     if full {return Err("native media request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
@@ -1669,7 +1738,7 @@ fn configure_browser(
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,
                         imported:None,geometry:None,split:None,media:None,action:Some(MediaAction {command:command.into(),input:request.get("args").cloned().unwrap_or_else(||serde_json::json!({}))})})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.undo_document=Some(reply.document.clone());state.mark_pending(id,false);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             // 【无条件处理，不再用 `is_some()` 做 guard】此前这两条 arm 只在宿主提供撤销栈
             // 时才匹配，非 REAPER 宿主会落到下面的 `Some(command)` 分支并被静默丢弃 ——
@@ -1699,16 +1768,16 @@ fn configure_browser(
                 if !uses_host {
                     // 本地权威栈 ⇒ 与普通命令同一条队列：本地命令天然排在已入队写入之后，
                     // 不需要额外的 barrier，也不会被 `host_undo.pending` 的门控挡住。
-                    let full=state.borrow_mut().pending_full(id);
+                    let full=state.borrow_mut().pending_full(id,false);
                     let outcome=if full {Err("pending request budget exceeded".into())} else {
                         link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
                             id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,link:Some(link.clone()),
                         }))
                     };
-                    match outcome {Ok(())=>{state.borrow_mut().mark_pending(id);Ok(serde_json::Value::Null)},Err(error)=>Err(error)}
+                    match outcome {Ok(())=>{state.borrow_mut().mark_pending(id,false);Ok(serde_json::Value::Null)},Err(error)=>Err(error)}
                 } else {
                 let outcome=(||->Result<HostReply,String>{
-                    if state.borrow_mut().pending_full(id) {return Err("native history request budget exceeded".into());}
+                    if state.borrow_mut().pending_full(id,false) {return Err("native history request budget exceeded".into());}
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
                     let jump=match command {"undo_timeline"=>HistoryJump::Undo,"redo_timeline"=>HistoryJump::Redo,_=>HistoryJump::Position(request["args"]["position"].as_i64().filter(|v|(0..10000).contains(v)).ok_or("invalid host history position")? as i32)};
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
@@ -1718,7 +1787,7 @@ fn configure_browser(
                     }
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:Some(jump),imported:None,geometry:None,split:None,media:None,action:None})
                 })();
-                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
                 }
             },
             Some(command)=>{
@@ -1755,7 +1824,10 @@ fn configure_browser(
                         browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))?;return Ok(());
                     }
                 }
-                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id))};
+                // 慢车道的命令不占那 32 个在途名额，也不按 30 秒判"没有回复"（见
+                // `SLOW_PENDING_TTL`）。判据只有一处来源：`commands::lane`。
+                let slow=super::commands::is_slow(command);
+                let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,slow))};
                 let history_context=link.owner().ok().and_then(|owner|{
                     let document=owner.editor_document().ok()?;let host=owner.project_history_host()?;
                     let lease=link.authorize(&document).ok()?;Some((document,host,lease))
@@ -1779,7 +1851,7 @@ fn configure_browser(
                     }))
                 };
                 match outcome {
-                    Ok(())=>{let mut state=state.borrow_mut();state.mark_pending(id);if undo_started {if let Some((document,_,_))=&history_context {state.undo_requests.insert(id,Arc::downgrade(document));}}return Ok(());},
+                    Ok(())=>{let mut state=state.borrow_mut();state.mark_pending(id,slow);if undo_started {if let Some((document,_,_))=&history_context {state.undo_requests.insert(id,Arc::downgrade(document));}}return Ok(());},
                     Err(error)=>{
                         if let Some((document,_,_))=&history_context {
                             if undo_started {document.host_undo.finish_request(&view_id,id);}
@@ -1829,6 +1901,56 @@ fn configure_browser(
             Ok(())
         }));
     unsafe { browser.AddScriptToExecuteOnDocumentCreated(PCWSTR(script.as_ptr()), &ready) }
+}
+
+#[cfg(test)]
+mod pending_budget_tests {
+    use super::*;
+
+    /// **不变量：慢车道不占那 32 个在途名额。**
+    ///
+    /// 【为什么这是回归测试】那 32 个名额护的是"宿主写入的回执没回来"（每条都持有
+    /// 一份宿主 Undo 块）。慢任务不持有任何宿主写入，而它跑着的时候编辑器还在轮询 ——
+    /// 让轮询把它挤出预算，正是要修的那个故障。
+    #[test]
+    fn a_slow_request_does_not_consume_the_fast_budget() {
+        assert!(
+            budget_exhausted(PENDING_BUDGET, false, false),
+            "快车道满了就该拒"
+        );
+        assert!(
+            !budget_exhausted(PENDING_BUDGET, false, true),
+            "慢车道不占那 32 个名额"
+        );
+        assert!(
+            budget_exhausted(PENDING_BUDGET - 1, true, false),
+            "同一个 id 重复在途必须拒（否则回执会串号）"
+        );
+        assert!(!budget_exhausted(0, false, false));
+    }
+
+    /// **不变量：慢请求拿到分钟级预算，而不是 30 秒。**
+    ///
+    /// 【为什么】`PENDING_TTL` 回答的是"正常的宿主回流多久没回就该判丢"。用同一个数字
+    /// 去量一次 31–134 秒的基准测试，只会把"正在跑"判成"回执丢了"，并打出那条误导性的
+    /// `expired without a reply`。
+    #[test]
+    fn a_slow_request_gets_the_long_budget() {
+        let fast = Pending {
+            since: std::time::Instant::now(),
+            slow: false,
+        };
+        let slow = Pending {
+            since: std::time::Instant::now(),
+            slow: true,
+        };
+        assert_eq!(fast.ttl(), PENDING_TTL);
+        assert_eq!(slow.ttl(), SLOW_PENDING_TTL);
+        assert!(
+            SLOW_PENDING_TTL >= PENDING_TTL * 10,
+            "慢车道的预算必须是分钟级，否则等于没改"
+        );
+    }
 }
 
 #[cfg(test)]

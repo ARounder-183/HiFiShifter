@@ -183,7 +183,8 @@ pub(crate) struct UiSink {
     pub closed: Arc<AtomicBool>,
 }
 impl UiSink {
-    fn response(&self, value: Value) {
+    /// 唯一的回执出口（actor 与慢车道共用）。
+    pub(crate) fn response(&self, value: Value) {
         if !self.closed.load(Ordering::Acquire) {
             let _ = self.reply.send(value);
         }
@@ -804,6 +805,11 @@ impl EditorSession {
         let _ = self.queue.try_send(Job::Wake);
     }
     /// 有界32任务FIFO；关view取消回信，真实组件入口撤销则拒绝排队请求执行。
+    ///
+    /// 【为什么慢命令不在这条 FIFO 上】它跑几十秒，而这条队列是**单线程**消费的：
+    /// 排一条进去，后面每一次编辑、每一次轮询、以及宿主保存的 flush 全部到期
+    /// （用户看到的就是一串 `editor request N expired without a reply`）。慢命令改投
+    /// [`super::slow_lane`]，回执仍经 `UiSink`，与本函数末尾那条路径完全同构。
     pub fn enqueue(&self, request: UiRequest) -> Result<(), String> {
         if self.closed.load(Ordering::Acquire) {
             return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
@@ -860,6 +866,26 @@ impl EditorSession {
             sink.response(
                 json!({"version":1,"viewId":sink.view_id,"id":request.id,"ok":true,"value":value}),
             );
+            return Ok(());
+        }
+        // 慢车道：长任务不进 actor 队列（判据只有一处来源：`commands::lane`）。
+        // 上面那些校验（租约、view 身份、closed）已经全部做完 —— 分流发生在它们**之后**，
+        // 不绕过任何安全判据。
+        if super::commands::is_slow(&request.command) {
+            let command = request.command.clone();
+            let args = request.args.clone();
+            super::slow_lane::submit(super::slow_lane::SlowTask {
+                id: request.id,
+                command: request.command,
+                sink: sink.clone(),
+                work: Box::new(move || {
+                    super::commands::dispatch_slow(&command, &args).unwrap_or_else(|| {
+                        Err("command is not dispatchable on the slow lane".into())
+                    })
+                }),
+            })?; // 队列满 ⇒ Err ⇒ 视图层立刻回执（不让调用方等到超时）
+                 // 与普通命令一样登记 view：`emit_state` 等事件仍要能到这个视图。
+            views.insert(sink.view_id.clone(), RegisteredView { sink, route });
             return Ok(());
         }
         let mutates = super::commands::mutates_audio(&request.command);
@@ -1505,8 +1531,8 @@ impl EditorSession {
                 // 【为什么键仍然要写】它是失效标记：不写回去，下一轮 `roots` 仍然
                 // 包含它，组装会无限重复。写键、但不推进版本 —— 这两件事必须分开。
                 if current.pitch_orig_key.is_none() && next.pitch_orig_key.is_some() {
-                    let edit_differs = !current.pitch_edit_user_modified
-                        && current.pitch_edit != next.pitch_edit;
+                    let edit_differs =
+                        !current.pitch_edit_user_modified && current.pitch_edit != next.pitch_edit;
                     changed |= current.pitch_orig != next.pitch_orig || edit_differs;
                     current.pitch_orig = next.pitch_orig.clone();
                     if !current.pitch_edit_user_modified {
@@ -3307,8 +3333,7 @@ pub(crate) mod tests {
             let deadline = Instant::now() + Duration::from_secs(180);
             while Instant::now() < deadline
                 && (session.state()["pending"] == true
-                    || owner.capture_output()
-                        != crate::render::extension::CaptureOutput::Processed)
+                    || owner.capture_output() != crate::render::extension::CaptureOutput::Processed)
             {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -3477,12 +3502,9 @@ pub(crate) mod tests {
         );
 
         // 命令分发走的是同一条会话（前端启动扇出全是它）。
-        let payload = crate::editor::commands::dispatch(
-            session,
-            "get_timeline_state",
-            serde_json::json!({}),
-        )
-        .expect("Capture 形态下时间线命令必须可用");
+        let payload =
+            crate::editor::commands::dispatch(session, "get_timeline_state", serde_json::json!({}))
+                .expect("Capture 形态下时间线命令必须可用");
         assert!(
             payload["clips"]
                 .as_array()
@@ -3582,6 +3604,55 @@ pub(crate) mod tests {
         assert_eq!(result["ok"], true, "{result}");
         result["value"].clone()
     }
+    /// **不变量：慢命令不进 actor 队列，回执照常到达，票据一个数都不动。**
+    ///
+    /// 【为什么这是回归测试】基准测试此前在 actor 上同步执行 31–134 秒，于是同队列上的
+    /// 每一次编辑与轮询都排队到期。这里用**透传车道**（回执但不真的跑推理，见
+    /// `slow_lane::tests::Passthrough`）证明三件事：回执到达调用方、`submitted` /
+    /// `processed` 不动、actor 在慢命令之后照常服务普通命令。
+    #[test]
+    fn a_slow_command_replies_without_touching_the_actor_queue() {
+        let _passthrough = crate::editor::slow_lane::tests::Passthrough::enable();
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (reply, rx) = mpsc::channel();
+        let (events, event_receiver) = mpsc::sync_channel(64);
+        let sink = UiSink {
+            view_id: "slow-lane-diagnostic".into(),
+            reply,
+            events,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let submitted = editor.submitted.load(Ordering::Acquire);
+        let processed = editor.processed.load(Ordering::Acquire);
+        let value = call(&editor, &sink, &rx, 1, "run_vocoder_benchmark", json!({}));
+        assert_eq!(
+            value["dry_run"], true,
+            "慢车道必须回执（透传模式下不真的跑推理）"
+        );
+        assert_eq!(
+            editor.submitted.load(Ordering::Acquire),
+            submitted,
+            "慢命令不是用户编辑，不得推进票据"
+        );
+        assert_eq!(editor.processed.load(Ordering::Acquire), processed);
+        // actor 仍然活着：紧接着的一条普通命令照常得到回答。
+        let track = editor.timeline.lock_or_recover().tracks[0].id.clone();
+        let frames = call(
+            &editor,
+            &sink,
+            &rx,
+            2,
+            "get_param_frames",
+            json!({"trackId":track,"param":"hifigan_tension","startFrame":0,"frameCount":4,"binary":false}),
+        );
+        assert!(frames["edit"].is_array(), "{frames}");
+        drop(event_receiver);
+        document.close();
+    }
+
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
     pub(crate) fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();
@@ -4072,10 +4143,7 @@ pub(crate) mod tests {
         assert_eq!(editor.state()["pending"], true);
         // 【为什么不再要求失败】宿主保存线程不能因为"图还没就绪"而拿不到状态；
         // 保存一份当前可用的载荷，恢复端再逐条 reconcile。
-        assert!(
-            owners[0].encode_state().is_ok(),
-            "图未就绪时保存也必须成功"
-        );
+        assert!(owners[0].encode_state().is_ok(), "图未就绪时保存也必须成功");
         document.close();
     }
     /// 最后一个renderer入口撤销后，actor屏障/空范围应用/文档join都不等待不存在的renderer。

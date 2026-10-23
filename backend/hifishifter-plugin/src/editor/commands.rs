@@ -30,6 +30,53 @@ pub(super) fn mutates_audio(command: &str) -> bool {
     )
 }
 
+/// 一条命令在哪条线上执行。
+///
+/// 三条线的划分依据只有一个：**它需要什么**。
+/// * 需要 HWND / COM / 宿主回调 ⇒ 宿主 UI 线程（`webview.rs` 的内联 arm）；
+/// * 需要 `&EditorSession`（时间线、参数、历史）⇒ actor 队列；
+/// * 什么都不需要、但要跑几十秒 ⇒ 慢车道（[`super::slow_lane`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lane {
+    Actor,
+    Slow,
+}
+
+/// 慢车道命令表 —— **唯一**的分发依据（`lane` 与 `dispatch_slow` 都从它读）。
+///
+/// 【加一条新命令时】必须在 [`dispatch_slow`] 里加同名 arm；
+/// `every_slow_command_is_dispatchable` 会立刻发现漏加。
+const SLOW_COMMANDS: &[&str] = &["run_vocoder_benchmark"];
+
+/// 某条命令该走哪条线。
+pub(crate) fn lane(command: &str) -> Lane {
+    if SLOW_COMMANDS.contains(&command) {
+        Lane::Slow
+    } else {
+        Lane::Actor
+    }
+}
+
+/// 该命令是否走慢车道（`webview` 的账本也读这一个判据）。
+pub(crate) fn is_slow(command: &str) -> bool {
+    lane(command) == Lane::Slow
+}
+
+/// 慢车道的实现。
+///
+/// 【为什么签名里没有 `&EditorSession`】这是"慢任务不得触碰会话状态"的**编译期**保证：
+/// 时间线、参数、历史全都只能经由会话访问，签名里没有它，就写不出越界的代码。
+/// （`SlowTask.work` 的闭包入口靠纪律，见 `slow_lane` 的模块头；这条按名字分发的路
+/// 则把最常用的那条锁死在类型层面。）
+pub(crate) fn dispatch_slow(command: &str, _args: &Value) -> Option<Result<Value, String>> {
+    match command {
+        "run_vocoder_benchmark" => {
+            Some(hifishifter_kernel::nsf_hifigan_onnx::run_benchmark().and_then(value))
+        }
+        _ => None,
+    }
+}
+
 // 回归诊断测试仅在cfg(test)编译；产品分组历史路径由已加载分支实际执行。
 #[cfg(test)]
 #[path = "commands_tests.rs"]
@@ -40,6 +87,49 @@ fn value<T: serde::Serialize>(input: T) -> Result<Value, String> {
 fn args<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid editor arguments: {e}"))
 }
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    /// **不变量：慢车道表里的每条命令都真的能在慢车道上执行。**
+    ///
+    /// 【为什么这是回归测试】表是分发的**唯一**真相。若只在表里加一条而忘了
+    /// `dispatch_slow` 的 arm，调用方会收到 "command is not dispatchable on the slow
+    /// lane" —— 一条只会在用户点下去时才出现的错误。让它在测试里先出现。
+    #[test]
+    fn every_slow_command_is_dispatchable() {
+        for command in SLOW_COMMANDS {
+            assert_eq!(lane(command), Lane::Slow, "{command} 必须在慢车道表里");
+            assert!(
+                dispatch_slow(command, &serde_json::json!({})).is_some(),
+                "{command} 在表里但 dispatch_slow 没有对应 arm"
+            );
+        }
+        assert!(
+            !SLOW_COMMANDS.is_empty(),
+            "表为空时这条测试没有意义：慢车道至少要有一条命令"
+        );
+    }
+
+    /// **不变量：基准测试绝不在 actor 上执行。**
+    ///
+    /// 【为什么这是回归测试】它跑 31–134 秒。此前它在 actor 上同步执行，于是同队列的
+    /// 每一次编辑、每一次轮询、以及宿主保存的 flush 全部排队到期 —— 用户看到一串
+    /// `editor request N expired without a reply` 和一个不响应的编辑器。
+    #[test]
+    fn the_benchmark_is_never_on_the_actor_lane() {
+        assert_eq!(lane("run_vocoder_benchmark"), Lane::Slow);
+        for command in [
+            "get_timeline_state",
+            "set_param_frames",
+            "get_playback_state",
+            "export_pitch_to_midi",
+        ] {
+            assert_eq!(lane(command), Lane::Actor, "{command} 必须留在 actor 上");
+        }
+    }
+}
+
 #[cfg(test)]
 mod export_request_tests {
     use super::*;
@@ -249,9 +339,7 @@ fn export_audio_to_file(
             .capture_render_input()?
             .3
     } else {
-        let document = session
-            .document()
-            .ok_or("the ARA document is closed")?;
+        let document = session.document().ok_or("the ARA document is closed")?;
         let owner = document
             .renderer_owners()
             .into_iter()
@@ -651,10 +739,11 @@ pub(super) fn dispatch(
         // 反过来，基准测试是用户排查"该选哪个推理设备"的**唯一**手段。用"可能崩"
         // 封掉一个用户主动触发、且自带收敛保护的入口，代价大于收益。
         "run_vocoder_benchmark" => {
-            return match hifishifter_kernel::nsf_hifigan_onnx::run_benchmark() {
-                Ok(results) => value(results),
-                Err(error) => Err(error),
-            };
+            // 不可达：`lane()` 把它路由到慢车道（见 `SLOW_COMMANDS`），由
+            // `slow_lane` 在独立线程上执行 `dispatch_slow`。留这条 arm 是为了万一
+            // 有人绕过 `enqueue` 直接调 `dispatch` 时给出**可诊断**的失败 ——
+            // 而不是让一次 31 秒的推理悄悄占住 actor（那正是本方案要消灭的故障）。
+            return Err("run_vocoder_benchmark must run on the slow lane".into());
         }
         "plugin_history_barrier" => {
             session.suppress_history.store(false, Ordering::Release);
@@ -1462,10 +1551,9 @@ pub(super) fn dispatch(
             }
             let id = patch.track_id.as_str();
             track_exists(session, id)?;
-            if patch
-                .volume
-                .is_some_and(|n| !n.is_finite() || !(0.0..=hifishifter_kernel::gain::GAIN_MAX).contains(&n))
-            {
+            if patch.volume.is_some_and(|n| {
+                !n.is_finite() || !(0.0..=hifishifter_kernel::gain::GAIN_MAX).contains(&n)
+            }) {
                 return Err("track volume out of range".into());
             }
             let mut timeline = session.timeline.lock_or_recover();
