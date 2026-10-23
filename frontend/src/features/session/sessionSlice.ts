@@ -4917,7 +4917,17 @@ const sessionSlice = createSlice({
                 // 轮询响应（其采样可能来自停止前后的任意一侧）。
                 state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
             })
-            .addCase(stopAudioPlayback.rejected, setRejected)
+            .addCase(stopAudioPlayback.rejected, (state, action) => {
+                // `quiet`：调用方只是"尽力停一下"（基准测试），宿主不提供 ARA 播放
+                // 控制时不该把"停不了"变成用户可见的错误 —— 那与它要做的事无关。
+                // 其余情况（用户按 Stop）照旧报错。
+                if ((action.meta.arg as { quiet?: boolean } | undefined)?.quiet) {
+                    state.busy = false;
+                    state.status = "Ready";
+                    return;
+                }
+                setRejected(state, action);
+            })
 
             .addCase(syncPlaybackState.fulfilled, (state, action) => {
                 const payload = action.payload as {

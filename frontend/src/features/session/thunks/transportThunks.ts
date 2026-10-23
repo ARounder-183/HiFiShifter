@@ -95,12 +95,22 @@ function enqueueTransportCommand<T>(run: () => Promise<T>): Promise<T> {
     return result;
 }
 
+/** `stopAudioPlayback` 的参数。
+ *
+ * `quiet`：调用方只是"尽力停一下"，**不是**用户按了 Stop。宿主不提供 ARA 播放
+ * 控制时（VEGAS 这类纯 VST3 形态）`stop_audio` 必然失败，那是宿主能力问题而不是
+ * 操作失败 —— 让它在界面上报错只会盖住调用方真正要做的事（基准测试要先静音，
+ * 而诊断期间内核自己就会静音）。rejected reducer 据此不写 `state.error`。
+ */
+export interface StopAudioOptions {
+    restoreAnchor?: boolean;
+    quiet?: boolean;
+}
+
 export const stopAudioPlayback = createAsyncThunk(
     "session/stopAudioPlayback",
-    async (options: { restoreAnchor?: boolean } | void, { getState }) => {
-        const restoreAnchor = Boolean(
-            (options as { restoreAnchor?: boolean } | undefined)?.restoreAnchor,
-        );
+    async (options: StopAudioOptions | void, { getState }) => {
+        const restoreAnchor = Boolean((options as StopAudioOptions | undefined)?.restoreAnchor);
         const state = getState() as { session: SessionState };
         // pending reducer 在本 thunk 运行前已把 runtime.isPlaying 乐观置 false，
         // "停止时是否真的打断了播放"以它捕获的翻转前快照为准 —— 任何基于

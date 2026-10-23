@@ -1087,3 +1087,45 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
     assertEqual(refrozen.runtime.playbackPositionSec, 0, "re-entering wait re-zeroes the position");
     assertEqual(refrozen.playheadSec, raced.playheadSec, "re-entering wait freezes in place");
 });
+
+/**
+ * `quiet` 停止：宿主不提供 ARA 播放控制时，"停不了"不该变成用户可见的错误。
+ *
+ * 【为什么钉住】VEGAS 这类纯 VST3 形态的宿主没有 playback controller，
+ * `stop_audio` 必然失败。基准测试只是"尽力先静音再跑"，它失败时 reducer 若照旧
+ * 写 `state.error`，用户看到的就是一条 `Backend invoke failed: plugin:stop_audio`，
+ * 盖住真正要看的基准结果。注意 `.catch()` 兜不住：`createAsyncThunk` 的 promise
+ * 失败时是 resolve 成 rejected action，错误是经这个 reducer 冒出来的。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts a quiet stop swallows the failure, a user stop does not", async () => {
+    const init = reducer(undefined, { type: "@@INIT" }) as any;
+    const args = { restoreAnchor: true, quiet: true };
+    const pending = reducer(init, stopAudioPlayback.pending("req-quiet", args));
+    if (pending.busy !== true) throw new Error("pending must mark the session busy");
+
+    const quiet = reducer(
+        pending,
+        stopAudioPlayback.rejected(
+            new Error("Backend invoke failed: plugin:stop_audio"),
+            "req-quiet",
+            args,
+        ),
+    );
+    if (quiet.error !== undefined) {
+        throw new Error(`quiet stop must not surface an error, got ${String(quiet.error)}`);
+    }
+    if (quiet.busy !== false) throw new Error("quiet stop must clear busy");
+
+    // 用户按 Stop（没有 quiet）时必须照旧报错 —— 否则"按了没反应"更难排查。
+    const loud = reducer(
+        pending,
+        stopAudioPlayback.rejected(
+            new Error("Backend invoke failed: plugin:stop_audio"),
+            "req-loud",
+            { restoreAnchor: true },
+        ),
+    );
+    if (typeof loud.error !== "string" || !loud.error.includes("stop_audio")) {
+        throw new Error(`a user stop must still report the failure, got ${String(loud.error)}`);
+    }
+});

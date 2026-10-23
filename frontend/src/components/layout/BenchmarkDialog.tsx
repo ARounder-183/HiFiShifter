@@ -134,12 +134,17 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
         // plugin:stop_audio"，而不是基准结果（实测日志里同期还有一串
         // `[ara] editor request … expired without a reply`）。
         //
-        // 容错同样是必需的：纯 VST3（非 ARA）形态的宿主不提供播放控制，
-        // `stop_audio` 会返回 "host does not provide ARA playback control"。
+        // 容错同样是必需的：VEGAS 这类纯 VST3 形态的宿主不提供 ARA 播放控制，
+        // `stop_audio` 必然返回 "host does not provide ARA playback control"。
         // 那与基准测试无关 —— 诊断期间内核本来就会静音（`diagnostics_busy`）。
-        await Promise.resolve(dispatch(stopAudioPlayback({ restoreAnchor: true }))).catch(
-            () => undefined,
-        );
+        //
+        // 【为什么是 `quiet` 而不是 `.catch()`】`createAsyncThunk` 的 promise 在失败时
+        // 是 **resolve 成 rejected action**，`.catch()` 永远不触发；错误是通过
+        // `stopAudioPlayback.rejected` reducer 写进 `state.error` 的，于是界面上仍会
+        // 出现 "Backend invoke failed: plugin:stop_audio"。`quiet` 让 reducer 跳过那一步。
+        await Promise.resolve(
+            dispatch(stopAudioPlayback({ restoreAnchor: true, quiet: true })),
+        ).catch(() => undefined);
 
         try {
             const res = await coreApi.runVocoderBenchmark();
