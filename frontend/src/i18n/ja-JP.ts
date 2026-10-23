@@ -489,6 +489,7 @@ export const jaJP = {
         "このトラックを削除しますか？トラックとその上のすべてのクリップが削除されます。この操作は取り消せません。",
 
     param_editor_short: "パラメータ",
+    param_toolbar_more: "その他のパラメータ",
     pitch_requires_compose:
         "ルートトラックで Compose（C）を有効にしてピッチカーブを生成してください",
     pitch_requires_algo:

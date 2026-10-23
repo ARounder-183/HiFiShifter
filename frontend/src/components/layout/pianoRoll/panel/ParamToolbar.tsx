@@ -31,6 +31,8 @@ import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
 import { ChildPitchGroup } from "./ChildPitchGroup";
 import { SmoothingSlider } from "./SmoothingSlider";
 import { ParamStaticControls } from "./ParamStaticControls";
+import { ToolbarOverflowMenu } from "./ToolbarOverflowMenu";
+import { TIER_ALL_PILLS, TIER_STATIC_PARAMS } from "../toolbarOverflow";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -40,7 +42,7 @@ import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
  * 其中 9 个只**透传**给 `<ParamButtons>`（不在这里解构）：它们是参数按钮那条链的
  * 输入，工具栏本身不读。
  */
-type Props = {
+export type Props = {
     m: Pick<
         PianoRollPanelModel,
         | "activeDragDirection"
@@ -117,6 +119,9 @@ type Props = {
         | "visibleReferenceRootTrackIds"
     >;
 };
+
+/** 工具栏能拿到的模型字段集合（子组件与「⋯」菜单共用这一份）。 */
+export type ParamToolbarModel = Props["m"];
 
 export function ParamToolbar({ m }: Props) {
     const {
@@ -319,14 +324,23 @@ export function ParamToolbar({ m }: Props) {
             />
 
             <Flex gap="2" align="center">
-                <Flex gap="1" align="center">
-                    <ReferenceTrackGroup m={m} />
-                    <ChildPitchGroup m={m} />
-                    {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
-                    <ParamButtons m={m} />
-                </Flex>
+                {/* 第 11 级：药丸整排搬进「⋯」。它们是唯一入口，所以是"搬走"不是"藏掉"。 */}
+                <ToolbarSlot hideAt={TIER_ALL_PILLS} tier={toolbarTier}>
+                    <Flex gap="1" align="center">
+                        <ReferenceTrackGroup m={m} />
+                        <ChildPitchGroup m={m} />
+                        {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
+                        <ParamButtons m={m} />
+                    </Flex>
+                </ToolbarSlot>
 
-                <ParamStaticControls m={m} />
+                {/* 第 10 级：静态枚举参数与算法下拉搬进「⋯」。 */}
+                <ToolbarSlot hideAt={TIER_STATIC_PARAMS} tier={toolbarTier}>
+                    <ParamStaticControls m={m} />
+                </ToolbarSlot>
+
+                {/* 只有真的收走了东西才出现（见组件里的层级判据）。 */}
+                <ToolbarOverflowMenu m={m} />
             </Flex>
         </Flex>
     );

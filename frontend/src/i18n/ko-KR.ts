@@ -555,6 +555,7 @@ export const koKR = {
         "이 트랙을 삭제할까요? 트랙과 그 위의 모든 클립이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
 
     param_editor_short: "파라미터",
+    param_toolbar_more: "추가 매개변수",
     pitch_requires_compose: "루트 트랙에서 Compose(C)를 활성화하여 피치 커브를 생성하세요",
     pitch_requires_algo: "피치 편집을 활성화하려면 '없음' 이외의 피치 알고리즘을 선택하세요",
     midi_compose_required_title: "Compose가 비활성화됨",

@@ -467,6 +467,7 @@ export const zhCN = {
     track_remove_confirm: "删除此轨道？轨道及其上的所有片段都会被删除。此操作无法撤销。",
 
     param_editor_short: "参数编辑器",
+    param_toolbar_more: "更多参数",
     pitch_requires_compose: "请在根轨开启 Compose（C）以生成音高曲线",
     pitch_requires_algo: "请选择算法以启用编辑",
     midi_compose_required_title: "根轨未开启合成",

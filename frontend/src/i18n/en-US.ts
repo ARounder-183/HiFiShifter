@@ -624,6 +624,7 @@ export const enUS = {
         "Remove this track? The track and all of its clips are deleted. This cannot be undone.",
 
     param_editor_short: "Param Editor",
+    param_toolbar_more: "More parameters",
     pitch_requires_compose: "Enable Compose (C) on the root track to generate pitch curve",
     pitch_requires_algo: "Select a non-None pitch algorithm to enable pitch editing",
     midi_compose_required_title: "Compose Not Enabled",

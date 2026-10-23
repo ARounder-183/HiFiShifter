@@ -468,6 +468,7 @@ export const zhTW = {
     track_remove_confirm: "刪除此軌道？軌道及其上的所有片段都會被刪除。此操作無法復原。",
 
     param_editor_short: "參數編輯器",
+    param_toolbar_more: "更多參數",
     pitch_requires_compose: "請在根軌開啟 Compose（C）以產生音高曲線",
     pitch_requires_algo: "請選擇演算法以啟用編輯",
     midi_compose_required_title: "根軌未開啟合成",
