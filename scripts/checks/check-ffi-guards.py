@@ -84,10 +84,22 @@ def count_braces(src, start):
     raise ValueError('unbalanced braces')
 
 
+# 【为什么不是一句 `#[cfg(test)]\s*mod \w+`】那样只认裸 `mod`。测试模块普遍写成
+# `#[cfg(test)]\n pub(crate) mod tests {`（`editor/session.rs` 就是），带可见性的那一种
+# 匹配不上，整个模块体于是被当成**生产代码**扫描 —— 里面每一句断言都会被算成违规。
+# 这个门禁曾经因此对着一个只出现在 `assert!` 里的 `error.contains(` 报红，而基线允许 0。
+CFG_TEST_MOD = re.compile(
+    r'#\[cfg\(test\)\]'                 # the attribute itself
+    r'(?:\s*#\[[^\]]*\])*'              # any further attributes on the item
+    r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?'  # optional visibility (pub / pub(crate) / …)
+    r'mod\s+\w+\s*\{'                    # the module body
+)
+
+
 def cfg_test_module_ranges(src):
     """Byte ranges of `#[cfg(test)] mod X { ... }` bodies."""
     ranges = []
-    for m in re.finditer(r'#\[cfg\(test\)\]\s*\n\s*mod \w+[^{]*\{', src):
+    for m in CFG_TEST_MOD.finditer(src):
         try:
             close = count_braces(src, m.end() - 1)
         except ValueError:
