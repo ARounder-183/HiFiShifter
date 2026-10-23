@@ -593,7 +593,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     return (
         <Flex
             align="center"
-            className="h-qt-bar-main bg-qt-panel border-b border-qt-border px-1 select-none z-50 flex-nowrap gap-1 overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
+            /* 【为什么也换行】菜单栏此前是 flex-nowrap + overflow-x-auto，与主工具栏
+               同一形态：窄窗口下出现横向滚动条，而 ui/Toolbar 已经把"滚动条吃高度、
+               并把容器变成裁剪上下文"写成已知问题。菜单项都是唯一入口，不能像参数
+               工具栏那样分级隐藏，因此同样按"行"降级：min-h- 让条形自然长高。
+               下拉弹层由 Radix portal 到 body，不受 overflow-hidden 影响。 */
+            className="min-h-qt-bar-main bg-qt-panel border-b border-qt-border px-1 py-1 select-none z-50 flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden min-w-0"
         >
             {/**
              * Note: @radix-ui/themes DropdownMenu.Trigger does not support asChild.
