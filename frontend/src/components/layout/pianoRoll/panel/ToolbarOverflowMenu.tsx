@@ -14,6 +14,7 @@
  * `ToolbarSlot` 用 `display: none` 留在 DOM 里（测量需要它还在），而菜单里的这一份
  * 只在用户真的打开时挂载 —— 于是同一时刻最多只有一份在跑。
  */
+import type React from "react";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { MixerHorizontalIcon } from "@radix-ui/react-icons";
 
@@ -25,6 +26,11 @@ import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
 import { TIER_ALL_PILLS, TIER_STATIC_PARAMS } from "../toolbarOverflow";
 import type { ParamToolbarModel } from "./ParamToolbar";
 
+/** `DropdownMenu.Trigger` 加一个运行时存在、类型里没声明的 `asChild`。 */
+const TriggerAsChild = DropdownMenu.Trigger as unknown as React.ComponentType<
+    React.ComponentProps<typeof DropdownMenu.Trigger> & { asChild?: boolean }
+>;
+
 export function ToolbarOverflowMenu({ m }: { m: ParamToolbarModel }) {
     const { tf, toolbarTier } = m;
     // 前 9 级只砍冗余，右簇全在行内 —— 没有东西可收，也就不该多出一个按钮。
@@ -33,14 +39,22 @@ export function ToolbarOverflowMenu({ m }: { m: ParamToolbarModel }) {
 
     return (
         <DropdownMenu.Root>
-            <DropdownMenu.Trigger>
+            {/* 【为什么是 asChild】`DropdownMenu.Trigger` 默认渲染自己的 `<button>`，把
+                `AppIconButton`（也是 `<button>`）放进去就成了 `<button><button/></button>` ——
+                无效 HTML，而且实测点击与键盘都打不开菜单（外层按钮吃掉了事件）。
+                `asChild` 让 Radix 把 props 合并到 `AppIconButton` 的那一个按钮上。
+
+                【为什么要 cast】Radix Themes 的 `DropdownMenu.Trigger` 类型没有声明
+                `asChild`，而它在运行时就是 `DropdownMenuPrimitive.Trigger`（支持 asChild，
+                props 原样透传）。这里只补一个类型，不改行为。 */}
+            <TriggerAsChild>
                 <AppIconButton
                     tooltip={tf("param_toolbar_more")}
                     aria-label={tf("param_toolbar_more")}
                     tabIndex={-1}
                     icon={<MixerHorizontalIcon />}
                 />
-            </DropdownMenu.Trigger>
+            </TriggerAsChild>
             <DropdownMenu.Content variant="soft" color="gray" side="bottom" align="end">
                 <Flex direction="column" gap="2" p="1">
                     {pillsCollapsed ? (
