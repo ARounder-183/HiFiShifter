@@ -153,6 +153,8 @@ describe("command timeouts", () => {
         expect(commandTimeoutMs("run_vocoder_benchmark")).toBeGreaterThanOrEqual(10 * 60_000);
         // 134 s 的实测值必须落在预算内，且留出足够的余量给更慢的机器。
         expect(commandTimeoutMs("run_vocoder_benchmark")).toBeGreaterThan(134_000 * 2);
+        // 诊断包要读最多两份 32 MB 日志并 deflate，远超默认 30 s。
+        expect(commandTimeoutMs("export_diagnostics")).toBeGreaterThanOrEqual(5 * 60_000);
     });
 
     it("keeps the default budget for ordinary commands", () => {
