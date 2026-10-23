@@ -142,7 +142,11 @@ export function ParamToolbar({ m }: Props) {
             /* 当前隐藏层级（0 = 全部显示）：观测与调试出口，见 toolbarOverflow.ts。 */
             data-toolbar-tier={toolbarTier}
         >
-            <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
+            <Flex
+                align="center"
+                gap="2"
+                style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden" }}
+            >
                 <AppIconButton
                     active={s.paramEditorSyncTimeline}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）

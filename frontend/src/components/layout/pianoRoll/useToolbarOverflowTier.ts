@@ -1,16 +1,16 @@
 import { useEffect, useState, type RefObject } from "react";
 
 import { TOOLBAR_MAX_TIER } from "./toolbarOverflow";
-import { chooseTier, layoutSignature, measureTierWidths } from "./toolbarGauge";
+import { chooseTier, layoutSignature, measureTierFits } from "./toolbarGauge";
 
 /**
  * 观察工具栏行容器，返回当前应隐藏到第几级。
  *
  * # 一次决策，而不是逐帧收敛
  *
- * 每次内容或宽度变化时，在**不可见的克隆**上量出所有层级的内容宽度（见
- * `measureTierWidths`），再一次性算出目标层级。真实 DOM 只变一次 ——
- * 用户不会看到"先撑满再收回去"的中间态，也不会看到被让位的药丸闪一下。
+ * 每次内容或宽度变化时，在**真实行**上于一个同步任务里逐级问"放不放得下"
+ * （见 `measureTierFits`），再一次性算出目标层级。浏览器只在任务结束时绘制，
+ * 因此用户看不到"先撑满再收回去"的中间态，也不会看到被让位的药丸闪一下。
  *
  * # 触发时机（两条路，缺一不可）
  * - `ResizeObserver`：容器尺寸变化（拖拽分栏 / 浮窗拉伸）——不会触发 React 渲染；
@@ -54,9 +54,10 @@ export function useToolbarOverflowTier(
             lastSignature = signature;
             lastAvailable = available;
 
-            const widths = measureTierWidths(row, maxTier);
-            if (widths.length === 0) return;
-            const next = chooseTier(widths, available);
+            // 测量在真实行上完成，并把行留在选中的那一级（见 `measureTierFits`）。
+            const fitsByTier = measureTierFits(row, maxTier);
+            if (fitsByTier.length === 0) return;
+            const next = chooseTier(fitsByTier);
             setTier((previous) => (previous === next ? previous : next));
         };
 

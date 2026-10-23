@@ -1,96 +1,104 @@
 /**
- * 工具栏「看不见的影子测量」：一次量出**每个隐藏层级**的内容宽度。
+ * 工具栏「放不放得下」的判据：在**真实行**上、一个同步任务里逐级试一遍。
  *
  * # 为什么需要它
  * 旧实现把"测量"和"呈现"绑在同一个 state 上：内容一变就把层级**重置为 0**，再指望
  * 逐帧收敛（每次只肯藏一级）。用户看到的就是"先撑成完整长度、再一级一级收回去"——
  * 最多 9 帧、约 150ms 的可见抽动，且期间被让位的药丸会重新点亮（副参数曲线跟着闪）。
  *
- * 根因是结构性的：**测量必须改变被测量的对象**。只要"量第 N 级"意味着"真的渲染到
- * 第 N 级"，就必然要经过中间态。
+ * # 为什么不再用"不可见的克隆"
  *
- * # 做法
- * 把测量搬到**不可见的克隆**上：克隆里所有可让位项都仍在 DOM 中（真实 DOM 里它们也
- * 一直挂着，只由 `data-hide-at` 控制显隐），于是可以在同一个任务里把克隆逐级隐藏、
- * 逐级读 `scrollWidth`，拿到完整的宽度表。调用方据此一次决策 —— 真实 DOM 只变一次，
- * 浏览器一次都没画过中间态。
+ * 上一版把行克隆到视口外，撑到 `max-content` 再读 `scrollWidth` 当"这一级需要多宽"。
+ * 两条都错，且实测差 ~100px：
  *
- * # 为什么用 max-content 容器
- * 真实行里的项会被 flex 压缩，量到的是"当前被压扁后的宽度"。容器给 `max-content` 之后
- * 没有任何收缩压力，量到的才是"自然宽度"——这才是判据需要的值。
+ * 1. `max-content` 对 `flex: 1 1 0` 的子项（平滑度滑块）与 `full-width` 的下拉给出 0，
+ *    判据因此永远觉得"还放得下"；
+ * 2. 克隆与真实行的布局并不等价（实测同一宽度下左 / 右簇的分配差 10px），
+ *    于是量到的是"另一个页面"的答案。
+ *
+ * 现在直接量真实行：**所有层级在同一个同步任务里试完**。浏览器只在任务结束时绘制，
+ * 因此中间态一次都不会出现在屏幕上 —— 这正是原设计想要的性质，而且不需要克隆。
+ *
+ * # 判据：溢出，而不是"内容宽度"
+ *
+ * 把可用宽度摆好之后问：**它溢出吗？** 两处都要看：
+ *
+ * 1. 行本身 `scrollWidth > clientWidth` —— 右簇（`min-width: auto`）放不下；
+ * 2. **任一直接子项** `scrollWidth > clientWidth` —— 左簇（`min-width: 0`）被压到
+ *    内容宽度以下。这一条是上一版完全看不见的那一半，也正是"控件互相重叠"的直接成因。
+ *
+ * 两者合起来 = "用户会看到重叠或裁切"，这才是"放不下"的定义。
  */
 
 import { TOOLBAR_MAX_TIER } from "./toolbarOverflow";
 
-/** 克隆里控制显隐的钩子。真实 DOM 与克隆共用同一套属性。 */
+/** 克隆与真实 DOM 共用的显隐钩子。 */
 export const HIDE_ATTR = "data-hide-at";
 
 /**
- * 把某个层级应用到一棵子树：达到 `hideAt` 的项隐藏，其余恢复成"不占盒子的包装"。
+ * 把某个层级应用到一组槽位：达到 `hideAt` 的项隐藏，其余恢复成"不占盒子的包装"。
  *
  * `display: contents` 让包装元素自己不参与 flex 布局，子元素直接成为祖父的 flex 项 ——
- * 与真实 DOM 的呈现方式一致（`ToolbarSlot` 用的也是它）。
+ * 与 `ToolbarSlot` 的呈现方式一致。
  */
-function applyTier(root: HTMLElement, tier: number): void {
-    for (const element of Array.from(root.querySelectorAll<HTMLElement>(`[${HIDE_ATTR}]`))) {
+function applyTier(slots: readonly HTMLElement[], tier: number): void {
+    for (const element of slots) {
         const hideAt = Number(element.dataset.hideAt);
         element.style.display = Number.isFinite(hideAt) && tier >= hideAt ? "none" : "contents";
     }
 }
 
-/**
- * 量出 `tier = 0..maxTier` 各自的内容宽度（CSS px，含行的左右内边距）。
- *
- * 返回的表**单调不增**：藏得越多只会更窄。量不出来时返回空数组（调用方保持现状）。
- */
-export function measureTierWidths(row: HTMLElement, maxTier = TOOLBAR_MAX_TIER): number[] {
-    if (typeof document === "undefined") return [];
-    const stage = document.createElement("div");
-    stage.setAttribute("aria-hidden", "true");
-    // 视口外 + 不绘制：既不闪、也不产生滚动条。宽度交给内容。
-    stage.style.cssText =
-        "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;width:max-content;";
-    const clone = row.cloneNode(true) as HTMLElement;
-    // 去掉会与外层重复的身份与全局钩子：id 会造成重复标识，data-tooltip 会挂上
-    // 真实的 Tooltip 监听器（克隆是临时节点，不该参与任何交互）。
-    const candidates: HTMLElement[] = [clone, ...Array.from(clone.querySelectorAll("*"))].filter(
-        (node): node is HTMLElement => node instanceof HTMLElement,
+/** 元素是否被压到自己的内容宽度以下（= 内部正在互相重叠 / 被裁掉）。 */
+function isSqueezed(element: HTMLElement): boolean {
+    return element.scrollWidth > element.clientWidth + 1;
+}
+
+/** 这一级在当前可用宽度下放不放得下（见模块头的两条判据）。 */
+function fits(row: HTMLElement): boolean {
+    if (isSqueezed(row)) return false;
+    return !Array.from(row.children).some(
+        (child) => child instanceof HTMLElement && isSqueezed(child),
     );
-    for (const element of candidates) {
-        element.removeAttribute("id");
-        element.removeAttribute("for");
-        element.removeAttribute("aria-describedby");
-        element.removeAttribute("data-tooltip");
-        element.removeAttribute("data-hs-context-menu");
-    }
-    stage.appendChild(clone);
-    document.body.appendChild(stage);
-    const widths: number[] = [];
-    try {
-        for (let tier = 0; tier <= maxTier; tier += 1) {
-            applyTier(clone, tier);
-            widths.push(clone.scrollWidth);
-        }
-    } finally {
-        stage.remove();
-    }
-    return widths;
 }
 
 /**
- * 在宽度表里选出**最小**的、放得下的层级。
+ * 量出 `tier = 0..maxTier` 各自放不放得下，并把行**留在选中的那一级**上。
  *
- * 全是纯函数：同一张表 + 同一宽度 ⇒ 同一结果。压缩与恢复因此走的是同一条判据，
- * 不存在"进入用阈值 A、退出用 A−H"那种两条路径排版不一致的问题。
+ * 返回的表单调不降（藏得越多越容易放下）。量不出来时返回空数组（调用方保持现状）。
+ *
+ * 【为什么它自己写回最终层级】测量期间行被逐级改过 `display`。函数返回时若停在
+ * "最后试过的那一级"，在 React 提交新状态之前的那一帧就会显示错层级。这里直接写回
+ * 选中的那一级，于是**从测量到呈现没有中间态**，与是否走 React 无关。
+ *
+ * @param row 工具栏行容器（真实 DOM）
+ * @param maxTier 最大隐藏层级
  */
-export function chooseTier(widths: readonly number[], available: number): number {
-    if (widths.length === 0) return 0;
-    if (!(available > 0)) return widths.length - 1;
-    for (let tier = 0; tier < widths.length; tier += 1) {
-        const needed = widths[tier];
-        if (Number.isFinite(needed) && needed <= available) return tier;
+export function measureTierFits(row: HTMLElement, maxTier = TOOLBAR_MAX_TIER): boolean[] {
+    if (typeof document === "undefined") return [];
+    const slots = Array.from(row.querySelectorAll<HTMLElement>(`[${HIDE_ATTR}]`));
+    if (slots.length === 0) return [];
+    const fitsByTier: boolean[] = [];
+    try {
+        for (let tier = 0; tier <= maxTier; tier += 1) {
+            applyTier(slots, tier);
+            fitsByTier.push(fits(row));
+        }
+    } finally {
+        applyTier(slots, chooseTier(fitsByTier));
     }
-    return widths.length - 1;
+    return fitsByTier;
+}
+
+/**
+ * 在"哪一级放得下"的表里选出**最小**的、放得下的那一级；全放不下时停在最大级。
+ *
+ * 纯函数：同一张表 ⇒ 同一结果。压缩与恢复因此走的是同一条判据，不存在"进入用
+ * 阈值 A、退出用 A−H"那种两条路径排版不一致的问题。
+ */
+export function chooseTier(fitsByTier: readonly boolean[]): number {
+    if (fitsByTier.length === 0) return 0;
+    const firstFitting = fitsByTier.indexOf(true);
+    return firstFitting >= 0 ? firstFitting : fitsByTier.length - 1;
 }
 
 /**
