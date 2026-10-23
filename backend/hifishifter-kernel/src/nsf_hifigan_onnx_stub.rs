@@ -73,6 +73,7 @@ pub struct BenchmarkResults {
     pub gpu_rt_factor: Option<f64>,
     pub dml_median_ms: Option<f64>,
     pub dml_rt_factor: Option<f64>,
+    pub dml_error: Option<String>,
     pub benchmark_samples: usize,
     pub gpu_available: bool,
     pub dml_available: bool,

@@ -2357,6 +2357,12 @@ pub struct BenchmarkResults {
     pub gpu_rt_factor: Option<f64>,
     pub dml_median_ms: Option<f64>,
     pub dml_rt_factor: Option<f64>,
+    /// DirectML 没能给出数字时的**具体**原因（`None` = 已测出或未尝试）。
+    ///
+    /// 【为什么必须有】此前 DirectML 分支失败时什么都不留：会话静默退化成 CPU，
+    /// 结果里只有 `dml_median_ms: None`，UI 显示"GPU (DirectML) 失败"，日志里
+    /// 也没有一句原因。用户唯一能做的就是猜。
+    pub dml_error: Option<String>,
     pub benchmark_samples: usize,
     /// True when WebGPU EP was available for the GPU benchmark.
     pub gpu_available: bool,
@@ -2366,9 +2372,17 @@ pub struct BenchmarkResults {
     /// Detailed error message when the GPU benchmark could not be completed
     /// (None when the GPU benchmark succeeded or was not attempted).
     pub gpu_error: Option<String>,
-    /// True when DirectML EP was available for the benchmark.
+    /// True when the ORT build **exposes** the DirectML provider.
+    ///
+    /// 注意这是**能力**，不是**结果**：DLL 里有 `DmlExecutionProvider` 并不代表
+    /// 这台机器能跑。能否真的跑通由 `dml_median_ms`（有数字）与 `dml_error`
+    /// （为什么没有）表达 —— 把两者混为一谈会让 UI 永远显示"DirectML 可用"，
+    /// 而实测一次都没跑成。
     pub dml_available: bool,
-    /// GPU device ID that was used (0 if GPU not available).
+    /// DirectML 实际使用的设备序号（`0` = 无法确定，例如非 Windows）。
+    ///
+    /// 【为什么不能再硬写成 0】设备由设置/自动探测决定（`resolve_dml_device_id`），
+    /// 硬写成 0 会在"实际跑在集显 device 1"时打印 `device 0`，与日志其余部分矛盾。
     pub gpu_device_id: i32,
     /// Execution providers available in the ONNX Runtime DLL.
     pub available_providers: Vec<String>,
@@ -2498,6 +2512,46 @@ fn provider_probed_available(available_providers: &[String], provider: &str) -> 
     }
 }
 
+/// 在已建好的会话上跑 1 次预热 + `runs` 次计时推理，返回 `(每轮耗时, 中位数)`。
+///
+/// 每次推理都在辅助线程上带超时：一个真正挂起的 EP 绝不能把基准测试（以及宿主
+/// 进程）永久卡住。每轮都重新构造输入张量，避免把上一轮输出缓冲的复用成本
+/// 算进计时。
+fn time_session_runs(
+    session: &Arc<Mutex<Session>>,
+    frames: usize,
+    runs: usize,
+    timeout: std::time::Duration,
+) -> Result<(Vec<f64>, f64), String> {
+    let inputs =
+        |session: &Arc<Mutex<Session>>| -> Result<Vec<(String, ort::value::Value)>, String> {
+            let guard = session.lock().map_err(|e| e.to_string())?;
+            build_benchmark_inputs(&guard, frames)
+        };
+
+    // 预热：首次推理包含着色器/图编译，绝不能计入计时。
+    match timed_session_run(session, inputs(session)?, timeout) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(format!("warmup inference timed out after {timeout:?}")),
+        Err(e) => return Err(format!("warmup inference failed: {e}")),
+    }
+
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        match timed_session_run(session, inputs(session)?, timeout) {
+            Ok(Some(ms)) => times.push(ms),
+            Ok(None) => return Err(format!("inference timed out after {timeout:?}")),
+            Err(e) => return Err(format!("inference failed: {e}")),
+        }
+    }
+    if times.len() < 2 {
+        return Err("did not complete any timed run".to_string());
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    let median = times[times.len() / 2];
+    Ok((times, median))
+}
+
 /// Benchmark a single GPU execution provider for the vocoder.
 ///
 /// Returns `(median_ms, rt_factor, ep_name)` when the EP both registered and
@@ -2535,61 +2589,17 @@ fn benchmark_gpu_ep(
     let gpu_session = Arc::new(Mutex::new(gpu_session));
     let timeout = std::time::Duration::from_secs(120);
 
-    // Warmup on a helper thread (same execution model as the session smoke
-    // test) so a hung EP inference can never freeze the benchmark.
-    {
-        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
-        let inputs = build_benchmark_inputs(&guard, frames)?;
-        drop(guard);
-        match timed_session_run(&gpu_session, inputs, timeout) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let msg = format!("{ep} warmup inference timed out after {timeout:?}");
-                log::warn!("[benchmark] WARNING: {msg}");
-                if ep == "coreml" {
-                    crate::vocoder_ort_session::disable_coreml("benchmark warmup timed out");
-                }
-                return Err(msg);
-            }
-            Err(e) => {
-                let msg = format!("{ep} warmup inference failed: {e}");
-                log::warn!("[benchmark] WARNING: {msg}");
-                return Err(msg);
-            }
+    let (times, median) = time_session_runs(&gpu_session, frames, runs, timeout).map_err(|e| {
+        let msg = format!("{ep} {e}");
+        log::warn!("[benchmark] WARNING: {msg}");
+        if ep == "coreml" && e.contains("timed out") {
+            crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
         }
-    }
+        msg
+    })?;
 
-    let mut gpu_times = Vec::new();
-    for _ in 0..runs {
-        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
-        let inputs = build_benchmark_inputs(&guard, frames)?;
-        drop(guard);
-        match timed_session_run(&gpu_session, inputs, timeout) {
-            Ok(Some(ms)) => gpu_times.push(ms),
-            Ok(None) => {
-                let msg = format!("{ep} inference timed out after {timeout:?}");
-                log::warn!("[benchmark] WARNING: {msg}");
-                if ep == "coreml" {
-                    crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
-                }
-                return Err(msg);
-            }
-            Err(e) => {
-                let msg = format!("{ep} inference failed: {e}");
-                log::warn!("[benchmark] WARNING: {msg}");
-                return Err(msg);
-            }
-        }
-    }
-
-    if gpu_times.len() < 2 {
-        return Err(format!("{ep} did not complete any timed run"));
-    }
-
-    gpu_times.sort_by(|a, b| a.total_cmp(b));
-    let median = gpu_times[gpu_times.len() / 2];
     let rtf = audio_sec / (median / 1000.0);
-    log::warn!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x");
+    log::warn!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x runs={times:?}");
     Ok((median, rtf, ep))
 }
 
@@ -2733,76 +2743,81 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         }
     }
 
-    // 3. Benchmark DirectML if available
+    // 3. Benchmark DirectML if the ORT build exposes the provider.
+    //
+    // 【为什么走诊断入口而不是 `build_ort_session_with_ep`】后者尊重进程级
+    // DirectML 禁用记账：插件加载时集显（device 1）首次推理超时 → 记账置位 →
+    // 这里会静默拿到一个 **CPU** 会话（日志 "DirectML session created in 85ms
+    // (ep=cpu)"），随后 `ep == "directml"` 为假、整段被跳过，连一行原因都没有。
+    // 基准测试的全部意义就是回答"这块卡到底行不行"，必须能重新去试。
     let dml_available = available_providers.iter().any(|p| p.contains("Dml"));
     let mut dml_median = None;
     let mut dml_rt_factor = None;
+    let mut dml_error: Option<String> = None;
 
     if dml_available {
         let dml_total = std::time::Instant::now();
-        let dml_session_res = crate::vocoder_ort_session::build_ort_session_with_ep(
+        match crate::vocoder_ort_session::build_diagnostic_session(
             &onnx_path,
             crate::vocoder_ort_session::OrtSessionRole::Vocoder,
-            Some("directml"),
-        );
-
-        if let Ok((mut dml_session, ep)) = dml_session_res {
-            log::warn!(
-                "[benchmark] DirectML session created in {}ms (ep={ep})",
-                dml_total.elapsed().as_millis()
-            );
-            if ep == "directml" {
-                let mut dml_times = Vec::new();
-                let mel = vec![0.0f32; cfg.num_mels * frames];
-                let f0 = vec![440.0f32; frames];
-
-                // Warmup
-                let mt =
-                    Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
-                        .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
-                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
-                    .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
-                if dml_session.run(ort::inputs![mt, ft]).is_ok() {
-                    for run_i in 0..runs {
-                        let mt = Tensor::from_array((
-                            [1, cfg.num_mels, frames],
-                            mel.clone().into_boxed_slice(),
-                        ))
-                        .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
-                        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
-                            .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
-                        let t = std::time::Instant::now();
-                        dml_session
-                            .run(ort::inputs![mt, ft])
-                            .map_err(|error| format!("benchmark DirectML run failed: {error}"))?;
-                        let ms = t.elapsed().as_secs_f64() * 1000.0;
-                        log::warn!("[benchmark] DirectML run {run_i}: {ms:.1}ms");
-                        dml_times.push(ms);
+            "directml",
+        ) {
+            Ok(built) if built.ep != "directml" => {
+                let msg = format!(
+                    "DirectML session creation fell back to '{}' (requested directml) — see the log above for the EP error",
+                    built.ep
+                );
+                log::error!("[benchmark] {msg}");
+                dml_error = Some(msg);
+            }
+            Ok(built) => {
+                let device = built.dml_device_id;
+                let device_desc = match device {
+                    Some(id) => format!("#{id}"),
+                    None => "(auto)".to_string(),
+                };
+                log::warn!(
+                    "[benchmark] DirectML session created in {}ms (ep=directml, device={device_desc})",
+                    dml_total.elapsed().as_millis()
+                );
+                let session = Arc::new(Mutex::new(built.session));
+                let timeout = std::time::Duration::from_secs(120);
+                match time_session_runs(&session, frames, runs, timeout) {
+                    Ok((times, median)) => {
+                        let rtf = audio_sec / (median / 1000.0);
+                        dml_median = Some(median);
+                        dml_rt_factor = Some(rtf);
+                        // 实测跑通 ⇒ 撤销这台设备的禁用记账：用户不必重启应用，
+                        // 渲染就能重新用上它。
+                        crate::vocoder_ort_session::enable_directml(device);
+                        log::warn!(
+                            "[benchmark] DirectML(device={device_desc}): total={}ms runs={times:?} median={median:.1}ms rtf={rtf:.3}x",
+                            dml_total.elapsed().as_millis()
+                        );
                     }
-                    dml_times.sort_by(|a, b| a.total_cmp(b));
-                    let median = dml_times[dml_times.len() / 2];
-                    dml_median = Some(median);
-                    dml_rt_factor = Some(audio_sec / (median / 1000.0));
-                    log::info!("[benchmark] DirectML: total={}ms runs={dml_times:?} median={median:.1}ms rtf={:.3}x",
-                        dml_total.elapsed().as_millis(), audio_sec / (median / 1000.0));
-                } else {
-                    log::error!(
-                        "[benchmark] WARNING: DirectML EP registered but warmup inference FAILED."
-                    );
+                    Err(e) => {
+                        let msg = format!("DirectML on device {device_desc}: {e}");
+                        log::error!("[benchmark] {msg}");
+                        dml_error = Some(msg);
+                    }
                 }
             }
-        } else {
-            log::error!("[benchmark] DirectML session creation FAILED");
+            Err(e) => {
+                let msg = format!("DirectML session creation FAILED: {e}");
+                log::error!("[benchmark] {msg}");
+                dml_error = Some(msg);
+            }
         }
     }
 
     // Log diagnostic info for debugging
     log::warn!(
-        "[benchmark] Providers: {:?} | GPU device_id: {} | GPU works: {} | DirectML available: {}",
+        "[benchmark] Providers: {:?} | GPU device_id: {} | GPU works: {} | DirectML provider present: {} | DirectML error: {:?}",
         available_providers,
         gpu_device_id,
         gpu_actually_working,
-        dml_available
+        dml_available,
+        dml_error
     );
 
     let gpu_backend_name = match gpu_ep_name.as_str() {
@@ -2825,6 +2840,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         gpu_rt_factor,
         dml_median_ms: dml_median,
         dml_rt_factor,
+        dml_error,
         benchmark_samples: runs,
         gpu_available,
         gpu_backend_name,
@@ -3621,6 +3637,25 @@ mod tests {
         assert!(
             (2.0..=12.0).contains(&secs),
             "chunk duration {secs:.2}s should stay in a sane range"
+        );
+    }
+
+    /// 声码器的烟测探针长度必须等于生产推理长度。
+    ///
+    /// 【为什么必须钉住】这两个数分居两个模块，历史上**各自改过**：分块从
+    /// 4096 帧降到 512 帧（v6）时，烟测探针停在 4096 —— 于是烟测要求 GPU 一次
+    /// 合成 47.6 s 音频，比生产里任何一次推理都大 8 倍。实测（Intel UHD
+    /// Graphics，device_id=1）：探针 10 s 内不返回 → 被判为"首次推理挂起" →
+    /// 整个进程的 DirectML 被禁用 → 基准测试的 DirectML 分支静默退化成 CPU。
+    ///
+    /// 探针不需要"更大更保险"：它要证明的是"这个 EP 能在**生产形状**上跑通
+    /// 一次推理"，而生产形状必然合法。
+    #[test]
+    fn vocoder_smoke_probe_matches_the_render_chunk() {
+        assert_eq!(
+            crate::vocoder_ort_session::VOCODER_SMOKE_FRAMES,
+            super::CHUNK_MAX_FRAMES_DEFAULT,
+            "the vocoder smoke probe must be exactly one production chunk",
         );
     }
 

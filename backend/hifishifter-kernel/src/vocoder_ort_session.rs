@@ -29,31 +29,51 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Mel-frame length used by the post-creation GPU smoke test.
+/// 声码器烟测探针的 mel 帧数：**等于生产推理长度**（`CHUNK_MAX_FRAMES_DEFAULT`
+/// = 512 帧 ≈ 5.9 s @ hop 512 / 44.1 kHz）。
 ///
-/// The NSF-HiFiGAN model's f0 pre-processing subgraph derives a `Pad` size
-/// from the f0 tensor, so tiny inputs make ORT's buffer-reuse optimizer
-/// collide with the model's fixed intermediate shapes ("{1,4,1} !=
-/// {1,2048,1}").  Probing at the renderer's chunk size keeps every
-/// intermediate shape valid.  This is *only* a smoke-test probe length —
-/// sessions themselves stay fully dynamic.
-pub const SMOKE_TEST_FRAMES: usize = 4096;
+/// # 为什么必须等于生产长度，而不是"越大越保险"
+///
+/// 探针只需证明"这个 EP 能在真实形状上跑通一次推理"，所以最合适的长度就是
+/// 生产里真实使用的长度 —— 它**必然合法**（渲染每块就是这么大），且代价最小。
+///
+/// 这里曾经是 4096：那是**旧**分块方案（`RENDER_PIPELINE_VERSION` v6 之前，
+/// 每块 47.6 s）的遗留值，分块降到 512 后没有跟着改。后果不是"多花一点时间"，
+/// 而是把一台**能用的设备判成挂起**：烟测要求 GPU 一次合成 47.6 s 音频，比生产
+/// 中任何一次推理都大 8 倍。实测（`pc_nsf_hifigan.onnx`，Intel UHD Graphics，
+/// device_id=1）：4096 帧探针 10 s 内不返回 → 被判为"首次推理挂起" →
+/// `disable_directml` 把**整个进程**的 DirectML 关掉，于是同一台机器上的
+/// RTX 3050 从未被尝试，基准测试的 DirectML 分支静默退化成 CPU。
+///
+/// 该值与生产分块长度的耦合由 `nsf_hifigan_onnx` 的
+/// `vocoder_smoke_probe_matches_the_render_chunk` 测试钉住。
+pub(crate) const VOCODER_SMOKE_FRAMES: usize = 512;
 
-/// 烟测探针里 `time`/`n_frames` 这类**帧轴**用的长度上限。
+/// 音高检测（FCPE）烟测探针的 mel 帧数。
 ///
-/// 【为什么不能对所有动态维都用 [`SMOKE_TEST_FRAMES`]】该值是为声码器的 1-D
-/// `time` 轴选的。HNSEP 的 mask-only 模型输入是 `[batch, 2, 1025, n_frames]`，
-/// 若把 4096 套到**每一个**动态维，探针张量会变成 `[1, 2, 1025, 4096]` ——
-/// **32 MB**，而波形域旧模型只要 16 KB（差 2000 倍）。烟测只需证明"EP 能跑通
-/// 一次推理"，不需要真实批量，故按角色给一个小而合法的帧数。
+/// 与声码器不同，FCPE 没有可对齐的"生产分块长度"（它按整段分析），而 4096
+/// 帧在这台机器的集显上 3.4 s 返回、从未被误判 —— 没有实测证据支持收紧，
+/// 改了只会引入未经验证的风险，故保持原值。
+const PITCH_SMOKE_FRAMES: usize = 4096;
+
+/// 声码器的探针必须比音高检测的更便宜（前者对齐生产分块，后者是历史值）。
+/// 编译期断言：两个常量若被改成相同量级，这里先失败，不必等运行时才发现。
+const _: () = assert!(VOCODER_SMOKE_FRAMES < PITCH_SMOKE_FRAMES);
+
+/// 烟测探针的帧轴长度（按角色）。
+///
+/// 【为什么不能对所有动态维都用同一个值】HNSEP 的 mask-only 模型输入是
+/// `[batch, 2, 1025, n_frames]`，若把 4096 套到**每一个**动态维，探针张量
+/// 会变成 `[1, 2, 1025, 4096]` —— **32 MB**，而波形域旧模型只要 16 KB
+/// （差 2000 倍）。烟测只需证明"EP 能跑通一次推理"，不需要真实批量。
 ///
 /// 取值须满足各模型对帧轴的整除约束：HNSEP 要求 `n_frames % 32 == 0`。
 fn smoke_probe_frames(role: OrtSessionRole) -> usize {
     match role {
         // 32 帧 = 一个完整 segment，是模型要求的最小合法长度。
         OrtSessionRole::Separator => 32,
-        // 声码器/音高检测沿用原值：它们的中间形状依赖该长度才能与固定维对齐。
-        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector => SMOKE_TEST_FRAMES,
+        OrtSessionRole::Vocoder => VOCODER_SMOKE_FRAMES,
+        OrtSessionRole::PitchDetector => PITCH_SMOKE_FRAMES,
     }
 }
 
@@ -97,33 +117,112 @@ fn creation_timeout(ep_name: &str) -> std::time::Duration {
 /// hung CoreML inference can never block the benchmark or rendering again.
 static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
-/// 与 CoreML 同构：DirectML 烟测一旦超时（首次推理挂起），本进程内后续
-/// 所有 DirectML 会话构建直接跳过、立即走 CPU。
+/// DirectML 的"坏设备"记账。
+///
+/// 【为什么按**设备**记账，而不是按进程】DirectML 的 `device_id` 是 DXGI
+/// 适配器序号：一台机器上通常既有独显（0）又有集显（1）。旧实现用一个
+/// `AtomicBool` 把"某台设备首次推理超时"升级成"本进程再也不用 DirectML" ——
+/// 集显上的一次超时会把独显一起废掉，而**基准测试正是用来分辨这两者的工具**。
+/// 实测：集显超时后，基准测试的 DirectML 分支静默退化成 CPU，用户看到的是
+/// "DirectML 可用 / 失败"，日志里连一句原因都没有。
+///
+/// 记账规则：
+///   - `devices`：已知在该设备上挂起/超时的适配器序号；
+///   - `all`：无法确定设备（DXGI 枚举失败、只能走 DML2 自动选择）时的整体禁用。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+struct DmlDisableState {
+    all: bool,
+    devices: std::collections::BTreeSet<i32>,
+}
+
+#[cfg(target_os = "windows")]
+impl DmlDisableState {
+    /// 该设备是否已被判为不可用。`None` = 不知道设备，只有整体禁用才算数。
+    fn is_disabled(&self, device: Option<i32>) -> bool {
+        self.all || device.is_some_and(|d| self.devices.contains(&d))
+    }
+
+    /// 记下一次失败。返回"此前是否可用"（只在状态真正翻转时打日志）。
+    fn disable(&mut self, device: Option<i32>) -> bool {
+        match device {
+            Some(d) => self.devices.insert(d),
+            None => !std::mem::replace(&mut self.all, true),
+        }
+    }
+
+    /// 撤销禁用（基准测试实测跑通该设备时调用）。返回"此前是否被禁用"。
+    fn enable(&mut self, device: Option<i32>) -> bool {
+        match device {
+            Some(d) => self.devices.remove(&d),
+            None => std::mem::replace(&mut self.all, false),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn dml_disable_state() -> &'static Mutex<DmlDisableState> {
+    static SLOT: OnceLock<Mutex<DmlDisableState>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(DmlDisableState::default()))
+}
+
+#[cfg(target_os = "windows")]
+fn directml_disabled(device: Option<i32>) -> bool {
+    dml_disable_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_disabled(device)
+}
+
+/// 把某台设备（`None` = 无法确定设备，即全部）标记为不可用。
 ///
 /// 触发场景：设备切换后重建 DirectML 会话时首次推理挂起。不这样做的话，
 /// strict 与回退两次尝试各要等一次超时，且其他模型（FCPE/HNSEP）的预热
 /// 也排队在全局构建锁后，整条 ORT 链冻结。禁用后：一次超时（≤10s）即收敛，
-/// 渲染随即在 CPU 上继续推进；用户重启应用即可重新尝试 GPU。
-static DIRECTML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
-
+/// 渲染随即在 CPU 上继续推进。
 #[cfg(target_os = "windows")]
-fn directml_disabled() -> bool {
-    DIRECTML_DISABLED
-        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
-        .load(std::sync::atomic::Ordering::Relaxed)
+pub(crate) fn disable_directml(device: Option<i32>, reason: &str) {
+    let newly = dml_disable_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .disable(device);
+    if newly {
+        let device_desc = describe_dml_device(device);
+        log::error!(
+            "ort_session: disabling DirectML for device {device_desc}: {reason}. \
+             Rendering continues on CPU for that device; run the benchmark to re-test it."
+        );
+    }
+}
+
+/// 撤销某台设备的禁用（基准测试实测跑通时调用）。
+///
+/// 【为什么必须能撤销】旧实现只能"重启应用重试" —— 用户明明刚在基准测试里看到
+/// 这台设备 300 ms 跑完一轮，渲染却仍被闩锁挡在 CPU 上，直到下次启动。
+pub(crate) fn enable_directml(device: Option<i32>) {
+    #[cfg(target_os = "windows")]
+    {
+        let was = dml_disable_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .enable(device);
+        if was {
+            let device_desc = describe_dml_device(device);
+            log::warn!(
+                "ort_session: DirectML re-enabled for device {device_desc} (a diagnostic run completed on it)"
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = device;
 }
 
 #[cfg(target_os = "windows")]
-pub fn disable_directml(reason: &str) {
-    if !directml_disabled() {
-        log::error!(
-            "ort_session: disabling DirectML EP for this process: {reason}. \
-             Rendering continues on CPU; restart the app to retry GPU."
-        );
+fn describe_dml_device(device: Option<i32>) -> String {
+    match device {
+        Some(id) => format!("#{id}"),
+        None => "(auto)".to_string(),
     }
-    DIRECTML_DISABLED
-        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
-        .store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -366,9 +465,21 @@ pub fn acquire_session_build_lock(
 }
 
 /// Resolve the DirectML device ID to use, in priority order:
-/// 1. Runtime override (set via UI/settings)
+/// 1. Runtime override (set via UI/settings) — **only when the user pinned a GPU**
 /// 2. `HIFISHIFTER_DML_DEVICE_ID` env var
 /// 3. Auto-detect via DXGI: pick the GPU with most VRAM
+///
+/// # 为什么 `auto` 必须无视"上次选过的那台设备"
+///
+/// 设备序号是**持久化**的，而菜单里的设备列表曾经只在 EP 选成 `gpu` 时才渲染。
+/// 于是存在一个用户完全看不见、也改不掉的状态：在 `gpu` 下选过集显 → 切回
+/// `auto` → 设备序号仍是集显，而 `auto` 的语义是"自动挑一台"。实测日志：
+/// `choice=auto` 却 `DirectML device_id=1`（Intel UHD），独显（device_id=0）
+/// 从未被尝试 —— 集显上首次推理超时，随后整个进程的 DirectML 被禁用。
+///
+/// 现在的规则：`auto` 只认显式环境变量与自动探测；想钉住某台设备必须显式
+/// 选择 `gpu`（此时菜单会展示设备列表）。`auto` 忽略旧值时打一条日志，
+/// 免得"我明明选了 auto 却跑在集显上"再次无从排查。
 ///
 /// Always returns an explicit device_id. This uses `with_device_id(n)`
 /// which calls `SessionOptionsAppendExecutionProvider_DML` (old API).
@@ -378,22 +489,29 @@ pub fn acquire_session_build_lock(
 /// Ada Lovelace (RTX 4060) GPUs despite passing HighPerformance hints.
 /// The old API with explicit device_id performs consistently across
 /// all GPU architectures tested (Ampere, Ada, Pascal).
-// DirectML 是 Windows-only EP：唯一调用方是下方 Windows 版
-// try_register_directml_ep，非 Windows 目标不编译（否则 CI 上是死代码）。
+// DirectML 是 Windows-only EP：调用方只有下方 Windows 版会话构建，
+// 非 Windows 目标不编译（否则 CI 上是死代码）。
 #[cfg(target_os = "windows")]
-fn resolve_dml_device_id() -> Option<i32> {
-    // 1. Runtime override (set via UI/settings) — user explicitly chose
+fn resolve_dml_device_id(choice: &str) -> Option<i32> {
+    // 1. Runtime override (set via UI/settings) — only for an explicit GPU request.
+    let explicit_gpu = matches!(choice, "gpu" | "directml");
     if let Some(id) = RUNTIME_DML_DEVICE_ID
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
         .and_then(|g| *g)
     {
-        return Some(id);
+        if explicit_gpu {
+            return Some(id);
+        }
+        log::warn!(
+            "ort_session: ignoring the stored DirectML device_id={id} because the inference device is '{choice}' — auto-detection picks the adapter with most VRAM (choose \"GPU\" in the menu to pin a device)"
+        );
     }
-    // 2. Env var — explicit override
+    // 2. Env var — explicit override, honoured for every choice.
     if let Ok(val) = std::env::var("HIFISHIFTER_DML_DEVICE_ID") {
         if let Ok(id) = val.trim().parse::<i32>() {
+            log::warn!("ort_session: HIFISHIFTER_DML_DEVICE_ID={id}");
             return Some(id);
         }
     }
@@ -410,6 +528,22 @@ fn resolve_dml_device_id() -> Option<i32> {
     }
     // 4. No DXGI adapters — must rely on DML2 as last resort
     None
+}
+
+/// 当前设置下 DirectML 会落在哪台设备上（`None` = 非 Windows，或没有 DXGI 适配器）。
+///
+/// 【为什么需要它】诊断/基准测试要报告"实际用的是哪块卡"。旧实现把
+/// `gpu_device_id` 硬写成 0，于是日志里永远显示 device 0（独显），而实际会话
+/// 建在 device 1（集显）上 —— 两个数字互相矛盾，排查时只会把人带偏。
+pub fn effective_dml_device_id() -> Option<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        resolve_dml_device_id(&ep_choice_for_role(OrtSessionRole::Vocoder))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 /// Default EP for each role when nothing is explicitly configured.
@@ -724,9 +858,9 @@ fn log_vulkan_diagnostics() {
 fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
     role: OrtSessionRole,
+    device_id: Option<i32>,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    log::warn!("ort_session: try_register_directml_ep");
-    let device_id = resolve_dml_device_id();
+    // 设备序号由调用方解析并传进来：禁用闩锁按设备记账，二者必须是同一个值。
     let dml = if let Some(id) = device_id {
         log::warn!("ort_session[{role:?}]: DirectML device_id={id} (old API)");
         ort::ep::DirectML::default().with_device_id(id).build()
@@ -781,6 +915,54 @@ pub fn build_ort_session_with_ep(
     role: OrtSessionRole,
     ep_override: Option<&str>,
 ) -> Result<(Session, String), String> {
+    build_session_inner(onnx_path, role, ep_override, false)
+        .map(|(session, ep, _device)| (session, ep))
+}
+
+/// 诊断/基准测试用的一次性会话，附带它**实际**落在哪台 DirectML 设备上。
+pub struct DiagnosticSession {
+    pub session: Session,
+    /// 实际生效的 EP（`"directml"` / `"cpu"` / …）。
+    pub ep: String,
+    /// 建在 DirectML 的哪台设备上（非 DirectML 会话为 `None`）。
+    pub dml_device_id: Option<i32>,
+}
+
+/// 建一个**诊断用**会话：显式指定 EP，并**无视进程级 DirectML 禁用闩锁**。
+///
+/// 【为什么必须能无视闩锁】[`build_ort_session_with_ep`] 尊重"这台设备首次推理
+/// 超时过"的记账 —— 渲染路径需要它，否则每次播放都要重付一次超时。但基准测试
+/// 的**全部意义**就是回答"这块卡到底行不行"；如果它也被闩锁挡住，用户看到的
+/// 就只有"DirectML 可用 / 失败"，而原因藏在另一个进程状态里。
+///
+/// 实测（VST 插件内）：加载时集显首次推理超时 → 闩锁置位 → 基准测试的 DirectML
+/// 分支静默拿到一个 CPU 会话（日志 `DirectML session created in 85ms (ep=cpu)`），
+/// 随后 `ep == "directml"` 为假，整段被跳过且**不留下任何错误信息**。
+///
+/// 诊断跑通后调用方应 [`enable_directml`] 撤销闩锁 —— 用户不必重启应用。
+pub fn build_diagnostic_session(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    ep: &str,
+) -> Result<DiagnosticSession, String> {
+    let (session, ep, dml_device_id) = build_session_inner(onnx_path, role, Some(ep), true)?;
+    Ok(DiagnosticSession {
+        session,
+        ep,
+        dml_device_id,
+    })
+}
+
+/// 会话构建的实际实现。
+///
+/// `bypass_disable_latch` 只由 [`build_diagnostic_session`] 置真：渲染路径必须
+/// 尊重"这台设备挂起过"的记账，诊断路径必须能重新验证它。
+fn build_session_inner(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    ep_override: Option<&str>,
+    bypass_disable_latch: bool,
+) -> Result<(Session, String, Option<i32>), String> {
     let choice = match ep_override {
         Some(ep) => ep.trim().to_ascii_lowercase(),
         None => ep_choice_for_role(role),
@@ -790,35 +972,39 @@ pub fn build_ort_session_with_ep(
     // "cpu" by default via `ep_choice_for_role`, but a per-model override
     // (HIFISHIFTER_HNSEP_ORT_EP=coreml) must be able to reach the GPU path.
     if choice == "cpu" {
-        return build_cpu_session(onnx_path, role, &choice);
+        return build_cpu_session(onnx_path, role, &choice).map(|(s, ep)| (s, ep, None));
     }
 
     // ── Windows: DirectML first (proven stable, no crash risk) ─────────
     #[cfg(target_os = "windows")]
     if choice == "auto" || choice == "directml" || choice == "gpu" {
-        if directml_disabled() {
+        // 设备只解析一次：闩锁按设备记账，构建与记账必须是同一个值。
+        let device = resolve_dml_device_id(&choice);
+        if !bypass_disable_latch && directml_disabled(device) {
+            let device_desc = describe_dml_device(device);
             log::warn!(
-                "ort_session[{role:?}]: DirectML disabled for this process (earlier smoke test hung) — using CPU"
+                "ort_session[{role:?}]: DirectML is disabled for device {device_desc} in this process (an earlier first inference timed out) — using CPU. Run the benchmark to re-test that device."
             );
-            return build_cpu_session(onnx_path, role, &choice);
+            return build_cpu_session(onnx_path, role, &choice).map(|(s, ep)| (s, ep, None));
         }
         // DirectML with strict mode first, then with fallback
-        match build_dml_session_inner(onnx_path, role, &choice, true) {
-            Ok((session, ep)) => return Ok((session, ep)),
+        match build_dml_session_inner(onnx_path, role, &choice, true, device) {
+            Ok((session, ep)) => return Ok((session, ep, device)),
             Err(e) => log::error!(
                 "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
             ),
         }
-        // 烟测超时会把 DirectML 标记为不可用（见 disable_directml）——
+        // 烟测超时会把该设备标记为不可用（见 disable_directml）——
         // 此时第二次尝试无需再建会话，直接走 CPU，避免第二次超时冻结。
-        if directml_disabled() {
+        if !bypass_disable_latch && directml_disabled(device) {
+            let device_desc = describe_dml_device(device);
             log::warn!(
-                "ort_session[{role:?}]: DirectML disabled after strict-attempt timeout — using CPU"
+                "ort_session[{role:?}]: DirectML disabled for device {device_desc} after strict-attempt timeout — using CPU"
             );
-            return build_cpu_session(onnx_path, role, &choice);
+            return build_cpu_session(onnx_path, role, &choice).map(|(s, ep)| (s, ep, None));
         }
-        match build_dml_session_inner(onnx_path, role, &choice, false) {
-            Ok((session, ep)) => return Ok((session, ep)),
+        match build_dml_session_inner(onnx_path, role, &choice, false, device) {
+            Ok((session, ep)) => return Ok((session, ep, device)),
             Err(e) => log::error!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
         }
     }
@@ -841,7 +1027,7 @@ pub fn build_ort_session_with_ep(
             Ok(builder) => match try_register_webgpu_ep(builder, role) {
                 Ok((b, ep)) => {
                     let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
-                    return Ok((session, ep.to_string()));
+                    return Ok((session, ep.to_string(), None));
                 }
                 Err(e) => {
                     log::warn!("ort_session[{role:?}]: WebGPU unavailable — {e}");
@@ -879,7 +1065,7 @@ pub fn build_ort_session_with_ep(
                     match try_register_coreml_ep(builder) {
                         Ok((b, ep)) => {
                             match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
-                            Ok(session) => return Ok((session, ep.to_string())),
+                            Ok(session) => return Ok((session, ep.to_string(), None)),
                             Err(e) => log::error!(
                                 "ort_session[{role:?}]: CoreML session creation failed (will try WebGPU): {e}"
                             ),
@@ -896,7 +1082,7 @@ pub fn build_ort_session_with_ep(
         match Session::builder() {
             Ok(builder) => match try_register_webgpu_ep(builder, role) {
                 Ok((b, ep)) => match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
-                    Ok(session) => return Ok((session, ep.to_string())),
+                    Ok(session) => return Ok((session, ep.to_string(), None)),
                     Err(e) => log::error!(
                         "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
                     ),
@@ -911,7 +1097,7 @@ pub fn build_ort_session_with_ep(
         }
     }
 
-    build_cpu_session(onnx_path, role, &choice)
+    build_cpu_session(onnx_path, role, &choice).map(|(session, ep)| (session, ep, None))
 }
 
 /// Run a minimal inference through a newly-created GPU session to
@@ -923,6 +1109,8 @@ fn smoke_test_gpu_session(
     mut session: Session,
     role: OrtSessionRole,
     ep_name: &str,
+    // DirectML 设备序号：超时时要按设备记账（`None` = 非 DirectML 会话）。
+    dml_device: Option<i32>,
 ) -> Result<Session, String> {
     use ort::value::{Tensor, ValueType};
 
@@ -1056,9 +1244,11 @@ fn smoke_test_gpu_session(
             ));
             #[cfg(target_os = "windows")]
             if ep_name == "DirectML" {
-                disable_directml(&format!(
-                    "DirectML smoke test exceeded {timeout:?} (first inference hung)"
-                ));
+                // 只禁用**这台设备**：集显超时不该把独显一起废掉。
+                disable_directml(
+                    dml_device,
+                    &format!("DirectML smoke test exceeded {timeout:?} (first inference hung)"),
+                );
             }
             Err(format!(
                 "{ep_name} smoke test timed out after {timeout:?}.                  The EP registered but the first inference did not complete.                  Falling back to WebGPU/CPU."
@@ -1149,7 +1339,7 @@ fn build_gpu_session_finalize(
     // but compute shader execution fails at runtime.  Running a tiny
     // inference now catches this early and lets us fall back to CPU
     // instead of silently returning a broken session.
-    match smoke_test_gpu_session(session, role, ep_name) {
+    match smoke_test_gpu_session(session, role, ep_name, None) {
         Ok(s) => session = s,
         Err(e) => {
             log::error!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
@@ -1167,6 +1357,7 @@ fn build_dml_session_inner(
     role: OrtSessionRole,
     choice: &str,
     strict: bool,
+    device: Option<i32>,
 ) -> Result<(Session, String), String> {
     // ★ 创建（含 builder 配置）在辅助线程内完成并施加超时。
     // ORT 的 `commit_from_file` 没有超时 API，且 `SessionBuilder` 不是 Send
@@ -1180,7 +1371,13 @@ fn build_dml_session_inner(
     std::thread::Builder::new()
         .name("ort-dml-commit".to_string())
         .spawn(move || {
-            let _ = tx.send(create_dml_session(&path, role, &choice_owned, strict));
+            let _ = tx.send(create_dml_session(
+                &path,
+                role,
+                &choice_owned,
+                strict,
+                device,
+            ));
         })
         .map_err(|e| format!("spawn DirectML session creation thread failed: {e}"))?;
 
@@ -1192,9 +1389,10 @@ fn build_dml_session_inner(
             // 预期"快速失败"（图节点不支持 DML），超时意味着驱动层挂起而非
             // 能力问题 —— 直接禁用 DirectML，使回退立即以 CPU 完成，把最坏
             // 情况锁定为一次性 ~10s。
-            disable_directml(&format!(
-                "DirectML session creation exceeded {timeout:?} (commit hung)"
-            ));
+            disable_directml(
+                device,
+                &format!("DirectML session creation exceeded {timeout:?} (commit hung)"),
+            );
             return Err(format!(
                 "DirectML session creation timed out after {timeout:?} (ORT commit hung); falling back"
             ));
@@ -1223,7 +1421,7 @@ fn build_dml_session_inner(
         );
     }
 
-    match smoke_test_gpu_session(session, role, "DirectML") {
+    match smoke_test_gpu_session(session, role, "DirectML", device) {
         Ok(s) => session = s,
         Err(e) => {
             log::error!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
@@ -1245,14 +1443,16 @@ fn create_dml_session(
     role: OrtSessionRole,
     choice: &str,
     strict: bool,
+    device: Option<i32>,
 ) -> Result<(Session, &'static str, usize, u128), String> {
     let builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
-    let (builder, selected) = try_register_directml_ep(builder, role)?;
+    let (builder, selected) = try_register_directml_ep(builder, role, device)?;
 
+    let device_desc = describe_dml_device(device);
     log::warn!(
-        "ort_session[{role:?}]: model={} ep={selected} strict={strict} (choice={choice}, global_env={})",
+        "ort_session[{role:?}]: model={} ep={selected} device={device_desc} strict={strict} (choice={choice}, global_env={})",
         onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         env_ep_choice(),
     );
@@ -1652,10 +1852,16 @@ const fn probe_directml_ep_available() -> bool {
 /// Full GPU diagnostic: providers, device info.
 ///
 /// Does NOT include a smoke test (that requires a model, handled by nsf_hifigan_onnx).
+///
+/// 【两个字段都必须是"实际生效"的取值，不能是默认值】
+/// `selected_ep` 曾经取 `env_ep_choice()`（只读环境变量，UI 设置完全不参与），
+/// `gpu_device_id` 曾经硬写成 `0`。于是插件日志里写着 `device 0`（独显），
+/// 而会话实际建在 `device 1`（集显）上 —— 排查"GPU 为什么没跑起来"时，
+/// 这两个数字互相矛盾，只会把人带偏。
 pub fn diagnose_gpu() -> GpuDiagnostic {
     let available_providers = diagnose_available_providers();
-    let selected_ep = env_ep_choice();
-    let gpu_device_id = 0;
+    let selected_ep = ep_choice_for_role(OrtSessionRole::Vocoder);
+    let gpu_device_id = effective_dml_device_id().unwrap_or(0);
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
 
@@ -1674,11 +1880,15 @@ mod tests {
     fn the_diagnostic_cap_only_ever_shrinks_the_thread_budget() {
         assert_eq!(super::apply_diagnostic_cap(16, 0), 16, "0 = 不限制");
         assert_eq!(super::apply_diagnostic_cap(16, 2), 2);
-        assert_eq!(super::apply_diagnostic_cap(2, 8), 2, "上限比基础值大时不得放大");
+        assert_eq!(
+            super::apply_diagnostic_cap(2, 8),
+            2,
+            "上限比基础值大时不得放大"
+        );
         assert_eq!(super::apply_diagnostic_cap(1, 2), 1);
         assert_eq!(super::apply_diagnostic_cap(0, 2), 1, "下限恒为 1");
     }
-    use super::{smoke_probe_frames, OrtSessionRole, SMOKE_TEST_FRAMES};
+    use super::{smoke_probe_frames, OrtSessionRole, PITCH_SMOKE_FRAMES, VOCODER_SMOKE_FRAMES};
     /// 动态整段分离不复用巨型工作区；其它角色和Intel macOS原策略保持。
     #[test]
     fn cpu_allocator_reuse_is_role_specific() {
@@ -1762,10 +1972,15 @@ mod tests {
 
     /// 烟测探针的帧数必须按角色区分。
     ///
-    /// 【为什么必须钉住】`SMOKE_TEST_FRAMES`(4096) 是为声码器的 1-D `time` 轴选的。
-    /// HNSEP 的 mask-only 模型输入是 `[batch, 2, 1025, n_frames]`；若把 4096 套到
-    /// **每个**动态维，探针张量是 `[1, 2, 1025, 4096]` = **32 MB**（旧波形域模型
-    /// 只要 16 KB）。烟测只为证明"EP 能跑通一次推理"，不该分配几十 MB。
+    /// 【为什么必须钉住】HNSEP 的 mask-only 模型输入是 `[batch, 2, 1025, n_frames]`；
+    /// 若把声码器的帧数套到**每个**动态维，探针张量是 `[1, 2, 1025, 4096]`
+    /// = **32 MB**（旧波形域模型只要 16 KB）。烟测只为证明"EP 能跑通一次推理"，
+    /// 不该分配几十 MB。
+    ///
+    /// 声码器的探针还必须等于**生产推理长度**（512 帧）—— 见
+    /// [`VOCODER_SMOKE_FRAMES`] 的说明：探针比生产大 8 倍，会把"慢"误判成"挂起"。
+    /// 该值与 `nsf_hifigan_onnx::CHUNK_MAX_FRAMES_DEFAULT` 的耦合由那边的
+    /// `vocoder_smoke_probe_matches_the_render_chunk` 测试钉住。
     #[test]
     fn smoke_probe_frames_are_role_specific() {
         assert_eq!(
@@ -1775,11 +1990,11 @@ mod tests {
         );
         assert_eq!(
             smoke_probe_frames(OrtSessionRole::Vocoder),
-            SMOKE_TEST_FRAMES
+            VOCODER_SMOKE_FRAMES
         );
         assert_eq!(
             smoke_probe_frames(OrtSessionRole::PitchDetector),
-            SMOKE_TEST_FRAMES
+            PITCH_SMOKE_FRAMES
         );
     }
 
@@ -1812,12 +2027,44 @@ mod tests {
             bytes / 1024
         );
         // 与旧值对比：若误用 4096 会是 32 MB
-        let wrong_shape = [1usize, 2, bins, SMOKE_TEST_FRAMES];
+        let wrong_shape = [1usize, 2, bins, PITCH_SMOKE_FRAMES];
         let wrong = wrong_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
         assert!(
             wrong > 16 * 1024 * 1024,
             "sanity: the naive 4096 would indeed be huge ({})",
             wrong
         );
+    }
+
+    /// DirectML 的禁用记账必须**按设备**，不能按进程。
+    ///
+    /// 【为什么必须钉住】旧实现是一个 `AtomicBool`：集显（device 1）首次推理
+    /// 超时就把整个进程的 DirectML 关掉 —— 独显（device 0）从此不会被尝试，
+    /// 而基准测试的 DirectML 分支会静默退化成 CPU（用户只看到"DirectML 可用 /
+    /// 失败"）。实测日志：`disable_directml` 之后紧跟
+    /// `DirectML disabled for this process (earlier smoke test hung) — using CPU`。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_directml_disable_latch_is_per_device() {
+        let mut state = super::DmlDisableState::default();
+        assert!(!state.is_disabled(Some(0)));
+        assert!(!state.is_disabled(Some(1)));
+
+        // 只禁用集显：独显必须保持可用。
+        assert!(state.disable(Some(1)), "first disable flips the state");
+        assert!(state.is_disabled(Some(1)));
+        assert!(!state.is_disabled(Some(0)), "the dGPU must survive");
+        assert!(!state.disable(Some(1)), "second disable is a no-op");
+
+        // 诊断跑通后可以撤销，用户不必重启应用。
+        assert!(state.enable(Some(1)));
+        assert!(!state.is_disabled(Some(1)));
+        assert!(!state.enable(Some(1)), "re-enabling twice is a no-op");
+
+        // 不知道设备时（DXGI 枚举失败）只能整体禁用，且此时任何设备都算禁用。
+        assert!(state.disable(None));
+        assert!(state.is_disabled(None));
+        assert!(state.is_disabled(Some(0)));
+        assert!(state.is_disabled(Some(1)));
     }
 }
