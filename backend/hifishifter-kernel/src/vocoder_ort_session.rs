@@ -554,27 +554,6 @@ pub fn begin_diagnostic_run(label: &'static str) -> Result<DiagnosticRun, String
     Ok(DiagnosticRun { lease })
 }
 
-/// 诊断期间渲染侧让路的错误文本（唯一来源，便于逐字比较）。
-pub const DIAGNOSTIC_BUILD_DEFERRED: &str =
-    "a diagnostic (benchmark / prewarm) is running; rendering resumes when it finishes";
-
-/// 渲染侧在慢路径入口调用：**别的线程**的诊断正在跑就让路。
-///
-/// 【为什么是 fail-soft 而不是等待】渲染侧对"会话构建失败"早有既定语义：本次会话加载
-/// 失败 → 该 clip 失败 → **pass 继续推进** → 下次请求重试（见各模块
-/// `get_or_init_shared_session` 的说明）。用它来让路比"等 20 秒再失败"好得多：
-/// 前者不占住渲染线程，后者把一次诊断放大成一次渲染停摆。
-///
-/// 【为什么排除本线程】预热自己就是一个诊断（`diagnostics_busy`），而它要建的正是
-/// 会话；不排除自己的话，预热会拒绝自己。
-pub fn defer_to_running_diagnostic() -> Result<(), String> {
-    if crate::diagnostics_busy::blocks_session_build() {
-        log::info!("ort_session: rendering gives way — {DIAGNOSTIC_BUILD_DEFERRED}");
-        return Err(DIAGNOSTIC_BUILD_DEFERRED.to_string());
-    }
-    Ok(())
-}
-
 /// 预热失败里哪些**不构成**"模型不可用"的结论。
 ///
 /// 【为什么必须有】预热把结果缓存进各模块的 `PREWARM`，而 `is_available() == false`
@@ -582,10 +561,10 @@ pub fn defer_to_running_diagnostic() -> Result<(), String> {
 /// 一次永久停机：预热在租约上等到 20 秒超时 → 缓存 Err → 模型被判不可用。
 /// 这两类失败回答的是"**现在**建不了"，不是"建不起来"，所以不记账，并允许下一次重试。
 pub fn prewarm_verdict(outcome: Result<(), String>) -> Option<Result<(), String>> {
+    // 【为什么只认"租约被占"】诊断运行现在整段持有构建租约（见 `DiagnosticRun`），
+    // 于是预热有可能在它上面等到超时。那回答的是"**现在**建不了"，不是"建不起来"。
     let transient = match &outcome {
-        Err(error) => {
-            error == DIAGNOSTIC_BUILD_DEFERRED || error.contains("session build lock busy")
-        }
+        Err(error) => error.contains("session build lock busy"),
         Ok(()) => false,
     };
     if transient {
@@ -2120,17 +2099,13 @@ mod tests {
         );
     }
 
-    /// **不变量：让路/占用不算"模型不可用"。**
+    /// **不变量：租约被占不算"模型不可用"。**
     ///
     /// 【为什么这是回归测试】预热把结果缓存进 `PREWARM`，而 `is_available() == false`
     /// 会让渲染链整条跳过直到重启。于是"用户恰好在预热跑完前点了基准测试"会变成
     /// 一次永久停机 —— 除非这两类失败不被记账。
     #[test]
     fn a_deferred_prewarm_is_not_verdict_about_the_model() {
-        assert!(
-            prewarm_verdict(Err(DIAGNOSTIC_BUILD_DEFERRED.to_string())).is_none(),
-            "诊断期间的让路不是结论"
-        );
         assert!(
             prewarm_verdict(Err(
                 "session build lock busy for 20s (another build appears stuck)".to_string()
