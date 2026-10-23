@@ -20,7 +20,7 @@ import sys
 
 GUARD_MARKERS = ('guard_ffi(', 'catch_unwind', 'boundary(')
 sig_re = re.compile(r'^[ ]*(?:pub )?unsafe extern "system" fn (\w+)\(', re.M)
-# All paths come from this file's own location. `SCAN_ROOTS` are relative to
+# All paths come from this file's own location. Scan roots are relative to
 # `backend/`, so the backend root must never be derived from a caller-supplied
 # plugin `src/` path: that produced
 # `backend/hifishifter-plugin/hifishifter-plugin/src`, `os.walk` found nothing
@@ -30,7 +30,32 @@ REPO_ROOT = os.path.abspath(os.path.join(CHECKS_DIR, '..', '..'))
 BACKEND_ROOT = os.path.join(REPO_ROOT, 'backend')
 PLUGIN_SRC = os.path.join(BACKEND_ROOT, 'hifishifter-plugin', 'src')
 BASELINE_DIR = CHECKS_DIR
-SCAN_ROOTS = ['hifishifter-plugin/src', 'hifishifter-kernel/src', 'src-tauri/src']
+
+
+def scan_roots():
+    """Scan roots derived from the backend workspace members, so a new crate
+    joins the baseline gates automatically instead of when someone remembers
+    to extend a hand-maintained list (that gap is how the gate went red for
+    months without anyone noticing the crates it never looked at).
+
+    A member without a `src/` directory is a hard failure, never a silent
+    skip: an empty walk means "no violations" and the gate would go green
+    while checking nothing (exactly the bug the missing-root check below
+    exists for).
+    """
+    with open(os.path.join(BACKEND_ROOT, 'Cargo.toml'), encoding='utf-8') as f:
+        cargo = f.read()
+    block = re.search(r'^members\s*=\s*\[(.*?)\]', cargo, re.M | re.S)
+    if not block:
+        raise SystemExit('check-ffi-guards: no `members = [...]` in backend/Cargo.toml')
+    members = re.findall(r'"([^"]+)"', block.group(1))
+    if not members:
+        raise SystemExit('check-ffi-guards: backend/Cargo.toml lists no workspace members')
+    roots = [member.replace('\\', '/').rstrip('/') + '/src' for member in members]
+    missing = [root for root in roots if not os.path.isdir(os.path.join(BACKEND_ROOT, root))]
+    if missing:
+        raise SystemExit(f'check-ffi-guards: workspace member(s) without src/: {missing}')
+    return roots
 
 
 def count_braces(src, start):
@@ -142,7 +167,7 @@ def baseline_gate(backend_root, pattern, baseline_file, label):
                 rel, count = line.rsplit(':', 1)
                 baseline[rel.replace('\\', '/')] = int(count)
     current = {}
-    for scan_root in SCAN_ROOTS:
+    for scan_root in scan_roots():
         root = os.path.join(backend_root, scan_root)
         if not os.path.isdir(root):
             # A missing scan root must be a hard failure, never a silent pass:

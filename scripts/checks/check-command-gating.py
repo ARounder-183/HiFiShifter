@@ -7,16 +7,23 @@ dispatches is a *silent* dead control: the UI renders, the click produces a
 promise rejection nobody surfaces. This check makes that class of drift fail in
 CI instead of in a user's session.
 
-Two surfaces exist, and both are legitimate:
+Four surfaces exist, and all are legitimate:
 
   * the standalone app registers its commands in `backend/src-tauri/src/lib.rs`
     (`tauri::generate_handler![...]`);
-  * the ARA plugin dispatches its own in `editor/commands.rs` (actor thread) and
-    `editor/webview.rs` (UI thread, for anything needing an HWND).
+  * the ARA plugin dispatches its own in `editor/commands.rs` (actor thread),
+    `editor/webview.rs` (UI thread, for anything needing an HWND), and
+    `capture/commands.rs` (forwarded from webview via `is_capture_command()`).
 
 A frontend method must appear in at least one of them. The reverse direction is
 deliberately *not* checked: a backend command with no frontend caller is normal
 (plugin-only control paths, diagnostic entry points).
+
+MAINTENANCE RULE: a new dispatch surface (a module with its own
+`"command" => ...` match) MUST be registered in the constants below — the same
+obligation `check-ffi-guards.py` documents for its SCAN_ROOTS. An unregistered
+surface makes this gate report live commands as dead ones, which trains people
+to ignore the gate.
 
 Exit code 0 when every method is accounted for, 1 otherwise.
 """
@@ -32,6 +39,7 @@ INVOKE = ROOT / "frontend" / "src" / "services" / "invoke.ts"
 APP_LIB = ROOT / "backend" / "src-tauri" / "src" / "lib.rs"
 PLUGIN_ACTOR = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "commands.rs"
 PLUGIN_WEBVIEW = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "webview.rs"
+PLUGIN_CAPTURE = ROOT / "backend" / "hifishifter-plugin" / "src" / "capture" / "commands.rs"
 
 
 def read(path: pathlib.Path) -> str:
@@ -79,7 +87,9 @@ def plugin_commands(*sources: str) -> set[str]:
 def main() -> int:
     methods = frontend_methods(read(INVOKE))
     app = app_commands(read(APP_LIB))
-    plugin = plugin_commands(read(PLUGIN_ACTOR), read(PLUGIN_WEBVIEW))
+    plugin = plugin_commands(
+        read(PLUGIN_ACTOR), read(PLUGIN_WEBVIEW), read(PLUGIN_CAPTURE)
+    )
     known = app | plugin
 
     missing = sorted(methods - known)
