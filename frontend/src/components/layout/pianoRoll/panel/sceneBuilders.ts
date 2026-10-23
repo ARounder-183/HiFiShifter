@@ -192,7 +192,7 @@ export function buildGridSpec(
         // 其余参数保持缺省 —— 签名里的 `axisUnit ?? ""` 因此不会给非切换参数
         // 附加一个无意义的常量。
         ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
-        // 与传给 drawPianoRoll 的 fontFamily 同一个值（第 3268 行），
+        // 与传给 drawPianoRoll 的 fontFamily 同一个值（见 `drawPianoRoll` 的入参），
         // 保证两种渲染模式的字形完全一致。
         fontFamily,
         tensionLabelRgba: toRgba(colors.tensionLabel),
