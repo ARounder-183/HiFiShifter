@@ -2292,6 +2292,10 @@ export const koKR = {
     plugin_apply_rendering: "합성 중...",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
+    cap_reason_host_owns: "이 단계는 호스트가 담당합니다(플러그인이 넘겨받지 않습니다)",
+    cap_reason_unsupported_by_host: "현재 호스트가 이 인터페이스를 제공하지 않습니다",
+    cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
+    cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_shape_axes_owned_by_host:

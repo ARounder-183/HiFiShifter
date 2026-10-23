@@ -2308,6 +2308,10 @@ export const enUS = {
     plugin_apply_rendering: "Synthesising...",
     plugin_daw_controlled_reason:
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
+    cap_reason_host_owns: "The host owns this step; the plug-in does not take it over",
+    cap_reason_unsupported_by_host: "The current host does not expose this interface",
+    cap_reason_app_only: "Only available in the standalone app",
+    cap_reason_piano_roll_only: "Only applies to the parameter editor",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:

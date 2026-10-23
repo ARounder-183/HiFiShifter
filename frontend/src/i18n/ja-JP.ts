@@ -2323,6 +2323,10 @@ export const jaJP = {
     plugin_apply_rendering: "合成中...",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
+    cap_reason_host_owns: "この操作はホストが担当します（プラグインは引き受けません）",
+    cap_reason_unsupported_by_host: "現在のホストはこのインターフェースを提供していません",
+    cap_reason_app_only: "スタンドアロン版でのみ使用できます",
+    cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:

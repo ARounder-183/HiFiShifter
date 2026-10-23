@@ -1,5 +1,6 @@
 // 原GUI的运行模式与能力边界；独立app保持原窗口/文件/设备行为，插件由DAW供源。
 import { translateOutsideReact } from "../i18n/I18nProvider";
+import type { MessageKey } from "../i18n/messages";
 import { hostMode as detectHostMode, pluginBootstrap } from "./hostDetect";
 import type { PluginBootstrap } from "./pluginHost";
 
@@ -292,71 +293,203 @@ export function dawControlledReason(): string {
     return translateOutsideReact("plugin_daw_controlled_reason");
 }
 
-/** 原编辑工具与查看操作保留；不将DAW几何操作发到独立app命令路径。 */
-export function pluginAllowsAction(action: string, surface: string | null): boolean {
-    if (!isPluginMode()) return true;
-    if (["playback.toggle", "playback.stop"].includes(action)) return canControlHostTransport();
-    if (action === "project.importMedia") return canImportHostAudio();
-    // MIDI 导入的**快捷键**必须与菜单同一条判据：菜单项已经可用（导入到音高曲线），
-    // 而下面那条 `project.` 前缀规则会把它一并拒掉 —— 结果就是"菜单能用、快捷键
-    // 按了没反应"，正是本仓明令禁止的静默失效。
-    if (action === "project.importMidi") return canImportMidiToPitch();
-    // 导出同理：菜单已经涨开导出对话框（`MenuBar.tsx`），而 `project.*` 前缀规则
-    // 会把 `Ctrl+E` 一并拒掉。导出只读授权 PCM + 写用户选定的文件，插件里成立。
-    if (action === "project.export") return canExportAudio();
-    if (action === "clip.split") return canSplitHostClips();
-    // 新建**宿主**轨道：与 `track.*` 的其余动作不同，它明确要写宿主工程，且已有
-    // 原生实现（`create_host_track`）。用独立动作名，免得被下面那条 `track.` 规则
-    // 一刀切掉。
-    if (action === "track.createHost") return canCreateHostTracks();
-    if (action === "clip.delete" || action === "edit.pasteTracks") return canClipboardHostClips();
-    // 归一化只改HFS音频处理参数，不改REAPER item几何，可在插件中继续使用。
-    if (action === "clip.normalize") return true;
-    if (["clip.group", "clip.ungroup"].includes(action)) return canEditHostClips();
-    if (
-        action.startsWith("project.") ||
-        action.startsWith("transport.") ||
-        action.startsWith("recording.") ||
-        ["playback.toggle", "playback.stop", "playback.metronome"].includes(action)
-    )
-        return false;
-    if (
-        action.startsWith("track.") &&
-        !["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(
-            action,
-        )
-    )
-        return false;
-    // 共享剪贴板键的别名不决定目标；换轨后clip.paste也可能粘贴参数线。
-    // 必须先解析内容/选区，再按实际事件通道拒绝宿主几何操作。
-    // 共享快捷键先按剪贴板内容路由；参数剪贴板在没有clipClipboard时仍必须可用。
-    if (["clip.copy", "clip.cut", "clip.paste"].includes(action)) return true;
-    if (action.startsWith("clip.") && surface !== "pianoRoll") return false;
-    if (action.startsWith("edit.") && surface !== "pianoRoll") {
-        return [
-            "edit.undo",
-            "edit.redo",
-            "edit.selectAll",
-            "edit.deselect",
-            "edit.addClipsToParamSelection",
-            "edit.removeClipsFromParamSelection",
-            // 纯参数操作：只改插件自己持有的曲线（`set_param_frames` 一族），
-            // 不写任何宿主几何。此前它们被前缀规则一并拒掉，于是钢琴卷帘里
-            // 的移调 / 平滑 / 平均 / 颤音 / 量化全是灰的。
-            "edit.initialize",
-            "edit.setPitch",
-            "edit.transposeCents",
-            "edit.transposeDegrees",
-            "edit.average",
-            "edit.smooth",
-            "edit.addVibrato",
-            "edit.quantize",
-            "edit.meanQuantize",
-        ].includes(action);
-    }
-    return true;
+// ── 能力矩阵 ────────────────────────────────────────────────────────────────
+
+/**
+ * 一条能力。**每一条都必须能回答「为什么不能」** —— 这正是此前缺的那一半。
+ *
+ * 【为什么要有这张表】在此之前，二十条谓词各自被二十处调用点直接使用，而「不能做」
+ * 时的说明只有一句通用文案（dawControlledReason）。于是用户看到的是「宿主接管」，
+ * 而真实原因可能是「宿主没给播放位置」「这条命令没实现」「只在独立 App 有意义」——
+ * 三者对用户意味着完全不同的下一步。
+ */
+export type CapabilityId =
+    | "transport.control"
+    | "clip.edit"
+    | "clip.split"
+    | "clip.clipboard"
+    | "clip.geometry"
+    | "clip.normalize"
+    | "track.create"
+    | "track.group"
+    | "track.edit"
+    | "fade.length"
+    | "fade.shape"
+    | "fade.curvature"
+    | "fade.s"
+    | "tempo.bpm"
+    | "media.import"
+    | "midi.importPitch"
+    | "midi.importClip"
+    | "export.audio"
+    | "export.data"
+    | "take.import"
+    | "project.file"
+    | "recording.local"
+    | "playback.metronome"
+    | "surface.pianoRollOnly";
+
+/** 一条能力的判定结果。 */
+export interface CapabilityDecision {
+    allowed: boolean;
+    /** 不可用时的理由 key；可用时为 null（不需要解释）。 */
+    reason: MessageKey | null;
 }
 
+/**
+ * 能力 → 判定。表里每一条要么给谓词，要么给常量 false（永远不成立的能力）。
+ *
+ * 【为什么把「永远不成立」也写进表】它们此前是散在 pluginAllowsAction 里的裸 false。
+ * 裸 false 没有地方挂理由，于是界面上只能退化成通用文案。
+ */
+const CAPABILITIES: Record<CapabilityId, { allowed: () => boolean; reason: MessageKey }> = {
+    "transport.control": {
+        allowed: canControlHostTransport,
+        reason: "cap_reason_unsupported_by_host",
+    },
+    "clip.edit": { allowed: canEditHostClips, reason: "cap_reason_unsupported_by_host" },
+    "clip.split": { allowed: canSplitHostClips, reason: "cap_reason_unsupported_by_host" },
+    "clip.clipboard": { allowed: canClipboardHostClips, reason: "cap_reason_unsupported_by_host" },
+    "clip.geometry": { allowed: () => false, reason: "cap_reason_host_owns" },
+    "clip.normalize": { allowed: () => true, reason: "cap_reason_host_owns" },
+    "track.create": { allowed: canCreateHostTracks, reason: "cap_reason_unsupported_by_host" },
+    "track.group": { allowed: canGroupPluginTracks, reason: "cap_reason_unsupported_by_host" },
+    "track.edit": { allowed: () => false, reason: "cap_reason_host_owns" },
+    "fade.length": { allowed: canEditFadeLength, reason: "cap_reason_unsupported_by_host" },
+    "fade.shape": { allowed: canEditFadeShape, reason: "cap_reason_unsupported_by_host" },
+    "fade.curvature": { allowed: canEditFadeCurvature, reason: "cap_reason_unsupported_by_host" },
+    "fade.s": { allowed: canEditFadeS, reason: "cap_reason_unsupported_by_host" },
+    "tempo.bpm": { allowed: canEditTempoMapTempo, reason: "cap_reason_host_owns" },
+    "media.import": { allowed: canImportHostAudio, reason: "cap_reason_unsupported_by_host" },
+    "midi.importPitch": { allowed: canImportMidiToPitch, reason: "cap_reason_unsupported_by_host" },
+    "midi.importClip": { allowed: canImportMidiAsClip, reason: "cap_reason_unsupported_by_host" },
+    "export.audio": { allowed: canExportAudio, reason: "cap_reason_unsupported_by_host" },
+    "export.data": { allowed: canExportDataFiles, reason: "cap_reason_unsupported_by_host" },
+    "take.import": { allowed: canImportAsTakes, reason: "cap_reason_unsupported_by_host" },
+    "project.file": { allowed: () => false, reason: "cap_reason_app_only" },
+    "recording.local": { allowed: () => false, reason: "cap_reason_app_only" },
+    "playback.metronome": { allowed: () => false, reason: "cap_reason_app_only" },
+    "surface.pianoRollOnly": { allowed: () => false, reason: "cap_reason_piano_roll_only" },
+};
+
+/**
+ * 查询一条能力。独立 App 形态下绝大多数能力恒真（谓词内部已经处理了这一点）。
+ *
+ * 【为什么返回对象而不是布尔】布尔能回答「能不能」，回答不了「为什么不能」。
+ * 界面上每一个 aria-disabled 的键都该有一条说得清的理由，理由只能从这里来。
+ */
+export function capability(id: CapabilityId): CapabilityDecision {
+    const entry = CAPABILITIES[id];
+    const allowed = entry.allowed();
+    return { allowed, reason: allowed ? null : entry.reason };
+}
+
+/**
+ * 一条能力不可用时的**文案**（已按当前语言翻译）。
+ *
+ * 【为什么走 translateOutsideReact】调用点大多不在组件里（右键菜单项的 tooltip、
+ * 命令式异常），与 dawControlledReason 同一取舍：无浏览器环境时回落英文词典。
+ */
+export function capabilityReasonText(id: CapabilityId): string {
+    const decision = capability(id);
+    if (decision.allowed || decision.reason === null) return "";
+    return translateOutsideReact(decision.reason);
+}
+
+/**
+ * 某个动作在某个界面上归哪条能力。
+ *
+ * 【为什么动作名不直接等于能力 id】动作名是快捷键 / 菜单的标识，能力是产品语义；
+ * 一个能力可能对应多个动作（clip.copy / cut / paste 都是剪贴板）。把映射写在一处，
+ * 才不会出现「菜单按能力判、快捷键按动作名判」这种两套判据。
+ *
+ * 返回 null 表示「这条动作不受宿主能力限制」。
+ */
+export function capabilityForAction(action: string, surface: string | null): CapabilityId | null {
+    if (action === "playback.toggle" || action === "playback.stop") return "transport.control";
+    if (action === "playback.metronome") return "playback.metronome";
+    if (action === "project.importMedia") return "media.import";
+    if (action === "project.importMidi") return "midi.importPitch";
+    if (action === "project.export") return "export.audio";
+    if (action === "clip.split") return "clip.split";
+    if (action === "track.createHost") return "track.create";
+    if (action === "clip.delete" || action === "edit.pasteTracks") return "clip.clipboard";
+    if (action === "clip.normalize") return "clip.normalize";
+    if (action === "clip.group" || action === "clip.ungroup") return "clip.edit";
+    if (action.startsWith("transport.") || action.startsWith("recording.")) {
+        return action.startsWith("recording.") ? "recording.local" : "transport.control";
+    }
+    if (action.startsWith("project.")) return "project.file";
+    // 共享剪贴板键的别名不决定目标；换轨后 clip.paste 也可能粘贴参数线。
+    // 必须先解析内容 / 选区，再按实际事件通道拒绝宿主几何操作。
+    if (action === "clip.copy" || action === "clip.cut" || action === "clip.paste") return null;
+    if (action.startsWith("track.")) {
+        if (
+            ["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(
+                action,
+            )
+        )
+            return null;
+        return "track.edit";
+    }
+    if (action.startsWith("clip.") && surface !== "pianoRoll") return "clip.geometry";
+    if (action.startsWith("edit.") && surface !== "pianoRoll") return "surface.pianoRollOnly";
+    return null;
+}
+
+/**
+ * 「这个动作为什么不能做」—— 给 tooltip / 提示用；可用或不受限时返回 null。
+ *
+ * 【为什么单独导出】UI 需要的往往只是这一句，而不是先问 allowed 再问 reason。
+ */
+export function capabilityDeniedReason(action: string, surface: string | null): MessageKey | null {
+    if (!isPluginMode()) return null;
+    const id = capabilityForAction(action, surface);
+    if (id === null) return null;
+    return capability(id).reason;
+}
+
+/**
+ * 插件里这条动作是否放行。
+ *
+ * 【判据只有一个来源】此前这里是一张前缀表，与上面二十条谓词各写一遍，于是两者必然
+ * 漂移 —— 代码里已经记过两次因此出的事故（MIDI 导入、导出：菜单能用、快捷键是死的）。
+ * 现在动作名先经 capabilityForAction 映射到能力，再问能力矩阵；前缀表只剩「哪些动作
+ * 归哪条能力」这一件事。
+ *
+ * 【为什么参数面（pianoRoll）的 edit.* 要单独一条白名单】那些是纯参数操作，只改插件
+ * 自己持有的曲线（set_param_frames 一族），不写任何宿主几何 —— 用「edit.* 只在
+ * pianoRoll 可用」一刀切会把它们一起拒掉，钢琴卷帘里的移调 / 平滑 / 平均 / 颤音 /
+ * 量化就全灰了。
+ */
+const PIANO_ROLL_EDIT_ACTIONS = [
+    "edit.undo",
+    "edit.redo",
+    "edit.selectAll",
+    "edit.deselect",
+    "edit.addClipsToParamSelection",
+    "edit.removeClipsFromParamSelection",
+    "edit.initialize",
+    "edit.setPitch",
+    "edit.transposeCents",
+    "edit.transposeDegrees",
+    "edit.average",
+    "edit.smooth",
+    "edit.addVibrato",
+    "edit.quantize",
+    "edit.meanQuantize",
+];
+
+export function pluginAllowsAction(action: string, surface: string | null): boolean {
+    if (!isPluginMode()) return true;
+    const id = capabilityForAction(action, surface);
+    // 【为什么先查映射再看界面】edit.pasteTracks 虽然以 edit. 开头，但它是一条**宿主
+    // 剪贴板**动作（映射到 clip.clipboard）。先按 edit. 前缀一刀切会把它当成「只在
+    // 参数编辑器可用」而拒掉 —— 那正是这类两套判据最典型的失效方式。
+    if (id === "surface.pianoRollOnly") return PIANO_ROLL_EDIT_ACTIONS.includes(action);
+    if (id === null) return true;
+    return capability(id).allowed;
+}
 /** 插件共享编辑快捷键只允许发给参数面板；不向宿主轨道派发几何写操作。 */
 export function pluginAllowsEditChannel(channel: string | null, op?: string): channel is string {
     return (

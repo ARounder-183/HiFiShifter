@@ -6,6 +6,7 @@ import { AppContextMenu, useMenuShortcut } from "../../../ui";
 import {
     canClipboardHostClips,
     canSplitHostClips,
+    capabilityReasonText,
     dawControlledReason,
     isPluginMode,
 } from "../../../services/hostCapabilities";
@@ -49,7 +50,10 @@ export const TrackAreaContextMenu: React.FC<{
                     label: t("menu_paste"),
                     shortcut: pasteShortcut,
                     disabled: !pasteAllowed,
-                    tooltip: plugin && !canClipboardHostClips() ? dawControlledReason() : undefined,
+                    tooltip:
+                        plugin && !canClipboardHostClips()
+                            ? capabilityReasonText("clip.clipboard")
+                            : undefined,
                     onSelect: () => {
                         if (pasteAllowed) onPaste();
                     },
@@ -59,7 +63,10 @@ export const TrackAreaContextMenu: React.FC<{
                     label: t("ctx_split_at_playhead"),
                     shortcut: splitShortcut,
                     disabled: !splitAllowed,
-                    tooltip: plugin && !canSplitHostClips() ? dawControlledReason() : undefined,
+                    tooltip:
+                        plugin && !canSplitHostClips()
+                            ? capabilityReasonText("clip.split")
+                            : undefined,
                     onSelect: () => {
                         if (splitAllowed) onSplit();
                     },

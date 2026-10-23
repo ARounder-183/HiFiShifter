@@ -2236,6 +2236,10 @@ export const zhTW = {
     plugin_apply_analyzing_hint: "這一步要按素材長度跑，通常幾秒到幾分鐘。分析期間先播原始錄音。",
     plugin_apply_rendering: "正在合成...",
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
+    cap_reason_host_owns: "這一步由宿主完成，外掛不接管",
+    cap_reason_unsupported_by_host: "目前宿主沒有提供這個介面",
+    cap_reason_app_only: "僅在獨立 App 中可用",
+    cap_reason_piano_roll_only: "僅適用於參數編輯器",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "讀不出宿主的淡化軸版本，無法確定用哪套軸；請用下方曲率滑桿調整",

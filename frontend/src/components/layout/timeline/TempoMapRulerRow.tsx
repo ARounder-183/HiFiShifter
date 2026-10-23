@@ -10,7 +10,7 @@ import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
 import { anchoredDeltaSec } from "./runtime/dragAnchor";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
-import { canEditTempoMapTempo, dawControlledReason } from "../../../services/hostCapabilities";
+import { canEditTempoMapTempo, capabilityReasonText } from "../../../services/hostCapabilities";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
     clampBpm,
@@ -198,7 +198,10 @@ function TempoPointDialog({
      * 插件不写。音阶字段不受影响 —— 那一轴是 HiFiShifter 自有的。
      */
     const tempoEditable = canEditTempoMapTempo();
-    const tempoReadOnlyReason = tempoEditable ? undefined : dawControlledReason();
+    // 【为什么用能力矩阵的文案而不是通用文案】BPM / 拍号在插件里不能改的**具体原因**是
+    // 「宿主权威」；通用文案讲的是文件、片段几何、速度、拍号与播放全都归宿主，对这一个
+    // 输入框来说太长也太笼统。
+    const tempoReadOnlyReason = tempoEditable ? undefined : capabilityReasonText("tempo.bpm");
     // 拍号：跟随之前的拍号时，输入框展示“上一变化点实际生效”的拍号（禁用态）。
     // 初始点即工程基准记录，必须显式携带拍号，不能跟随。
     const [sigFollow, setSigFollow] = useState(() =>
