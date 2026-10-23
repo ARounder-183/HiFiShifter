@@ -10,20 +10,18 @@
  * 工具栏能碰到的东西一目了然，越界即类型错误。
  */
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
-import { Flex, Button, Box } from "@radix-ui/themes";
+import { Flex, Box } from "@radix-ui/themes";
 import { CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
-    setTrackStateRemote,
     setScaleHighlightMode,
     toggleLockParamLines,
     setToolModePersistent,
     persistUiSettings,
     setParamEditorSyncTimeline,
 } from "../../../../features/session/sessionSlice";
-import { resolvePitchAlgoSelectValue } from "../../../../features/tracks/pitchAlgoOptions";
 import { TimelineDisplaySettingsDialog } from "../../TimelineDisplaySettingsDialog";
 import { wholeDevicePxLength } from "../../../../utils/devicePixelLine";
-import { AppIconButton, AppSelect } from "../../../../ui";
+import { AppIconButton } from "../../../../ui";
 import { ToolbarSlot } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
@@ -32,6 +30,7 @@ import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
 import { ChildPitchGroup } from "./ChildPitchGroup";
 import { SmoothingSlider } from "./SmoothingSlider";
+import { ParamStaticControls } from "./ParamStaticControls";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -123,15 +122,7 @@ export function ParamToolbar({ m }: Props) {
     const {
         devicePixelRatio,
         dispatch,
-        getProcessorParamLabel,
-        getStaticOptionLabel,
-        handleStaticParamChange,
-        pitchAlgoOptions,
         pitchSnapOpen,
-        processorStaticParams,
-        processorStaticValues,
-        rootTrack,
-        rootTrackId,
         s,
         setPitchSnapOpen,
         setTimeDisplaySettingsOpen,
@@ -331,115 +322,7 @@ export function ParamToolbar({ m }: Props) {
                     <ParamButtons m={m} />
                 </Flex>
 
-                {rootTrack ? (
-                    <Flex align="center" gap="2">
-                        {processorStaticParams.map((param) => {
-                            if (param.kind.type !== "static_enum") return null;
-                            const currentValue =
-                                processorStaticValues[param.id] ?? param.kind.default_value;
-
-                            // 气声分离（breath_enabled）**不在本段渲染**：它已改在
-                            // 第一段（动态参数区）以纯图标分段渲染在被门禁组
-                            // （气声 + 张力）的组首 —— 见上方 `orderedProcessorParams`
-                            // 循环里的说明。留在本段（算法下拉之前）会让切换算法时
-                            // 把音量 / 声像 / 算法整段推移，那正是本次要修的病根。
-                            // 这里必须显式 `return null`：否则会落到下方的通用分支，
-                            // 又渲染出一个带文本的按钮。
-                            if (param.id === "breath_enabled") return null;
-
-                            // vslib 的合成模式：改为支持滚轮切换的下拉栏。
-                            if (param.id === "synth_mode") {
-                                const currentString = String(currentValue);
-                                const selectOptions = param.kind.options.map(([label, value]) => ({
-                                    value,
-                                    label: getStaticOptionLabel(param.id, label, value),
-                                }));
-                                const currentOptionLabel =
-                                    selectOptions.find((opt) => String(opt.value) === currentString)
-                                        ?.label ?? currentString;
-                                return (
-                                    <span
-                                        key={param.id}
-                                        data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
-                                        className="inline-flex"
-                                    >
-                                        <AppSelect
-                                            // 参数编辑器头部是 32px 的紧凑 chrome，邻居是 24px 图标按钮
-                                            density="compact"
-                                            value={currentString}
-                                            onValueChange={(v) =>
-                                                void handleStaticParamChange(param.id, Number(v))
-                                            }
-                                            fullWidth={false}
-                                            // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变
-                                            className="w-[140px]"
-                                            ariaLabel={t("vslib_synth_mode_label")}
-                                            options={selectOptions.map((opt) => ({
-                                                value: String(opt.value),
-                                                label: opt.label,
-                                            }))}
-                                        />
-                                    </span>
-                                );
-                            }
-
-                            return (
-                                <Flex key={param.id} align="center" gap="1">
-                                    <span
-                                        className="hs-type-label"
-                                        data-tooltip={getProcessorParamLabel(param)}
-                                    >
-                                        {getProcessorParamLabel(param)}
-                                    </span>
-                                    {param.kind.options.map(([label, value]) => (
-                                        <Button
-                                            key={`${param.id}-${value}`}
-                                            size="1"
-                                            variant={currentValue === value ? "solid" : "soft"}
-                                            color={currentValue === value ? "blue" : "gray"}
-                                            onClick={() => {
-                                                void handleStaticParamChange(param.id, value);
-                                            }}
-                                            style={{
-                                                cursor: "pointer",
-                                            }}
-                                        >
-                                            {getStaticOptionLabel(param.id, label, value)}
-                                        </Button>
-                                    ))}
-                                </Flex>
-                            );
-                        })}
-                        {/* 第 2 级隐藏：紧邻的下拉本身就显示当前算法名，
-                            "算法"二字只是重复提示（全称在 ToolTip 里）。 */}
-                        <ToolbarSlot hideAt={2} tier={toolbarTier}>
-                            <span className="hs-type-label" data-tooltip={tf("algo_label")}>
-                                {tf("algo_label_short")}
-                            </span>{" "}
-                        </ToolbarSlot>
-                        <AppSelect
-                            // 同上：头部紧凑条内的控件
-                            density="compact"
-                            value={resolvePitchAlgoSelectValue(
-                                rootTrack.pitchAnalysisAlgo,
-                                pitchAlgoOptions,
-                            )}
-                            onValueChange={(v) => {
-                                if (!rootTrackId) return;
-                                dispatch(
-                                    setTrackStateRemote({
-                                        trackId: rootTrackId,
-                                        pitchAnalysisAlgo: v,
-                                    }),
-                                );
-                            }}
-                            fullWidth={false}
-                            className="min-w-[140px]"
-                            ariaLabel={tf("algo_label")}
-                            options={pitchAlgoOptions}
-                        />
-                    </Flex>
-                ) : null}
+                <ParamStaticControls m={m} />
             </Flex>
         </Flex>
     );
