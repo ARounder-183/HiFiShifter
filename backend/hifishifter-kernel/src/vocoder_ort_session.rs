@@ -490,16 +490,64 @@ impl Drop for SessionBuildLease {
     }
 }
 
+/// 会话构建失败的两类原因：**租约忙**（瞬态：等一会儿就能成）与其余失败。
+///
+/// 【为什么是类型而不是字符串】预热（`prewarm_verdict`）与 nsf 的线程本地缓存都要
+/// 区分"**现在**建不了"与"建不起来"：前者不记账、允许重试，后者要让渲染链整条
+/// 跳过。曾经的实现按错误文本的**子串**分类（匹配 "session build lock busy"），
+/// 被 `check-ffi-guards.py` 的结构化错误门禁拦下 —— 本仓的协议语义必须以结构化
+/// 形式旅行（见 `scripts/checks/baseline-error-contains.txt` 的头注），字符串只用于显示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionBuildError {
+    /// 全局构建租约被占（诊断运行整段持有它），等了 `waited` 没等到。
+    Busy {
+        /// 等待了多久才放弃。
+        waited: std::time::Duration,
+    },
+    /// 其余失败（模型缺失、构建失败、配置非法……）。文本面向日志与用户。
+    Failed(String),
+}
+
+impl std::fmt::Display for SessionBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy { waited } => write!(
+                f,
+                "session build lock busy for {waited:?} (another build appears stuck)"
+            ),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<String> for SessionBuildError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for SessionBuildError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
+
+impl From<SessionBuildError> for String {
+    fn from(error: SessionBuildError) -> String {
+        error.to_string()
+    }
+}
+
 /// 有界地获取全局会话构建租约（供各模块 `get_or_init_shared_session` 使用）。
 ///
 /// - 等待每 5s 打一次警告（日志可直接指认"卡在会话构建锁上"）；
-/// - 超过 `timeout` 返回 Err，调用方的会话加载失败 → 该 Clip 失败 →
-///   **渲染 pass 继续推进**（而不是整条链停摆），下次请求会重试；
+/// - 超过 `timeout` 返回 [`SessionBuildError::Busy`]，调用方的会话加载失败 → 该
+///   Clip 失败 → **渲染 pass 继续推进**（而不是整条链停摆），下次请求会重试；
 /// - 持有者超过 `LEASE_STEAL_AFTER` 未释放 → **抢占**（ERROR 日志），
 ///   保证应用不会因一个卡死的构建而永久失去渲染能力。
 pub fn acquire_session_build_lock(
     timeout: std::time::Duration,
-) -> Result<SessionBuildLease, String> {
+) -> Result<SessionBuildLease, SessionBuildError> {
     // 重入：本线程已持有 ⇒ 直接给一个"不释放"的空守卫，绝不等自己。
     // 但 TLS 里记的是**票据**：租约若已被他人抢走（对不上自己的票据），
     // 这里必须如实清掉记录、按普通路径竞争 —— 布尔判据在这里会交出
@@ -566,9 +614,7 @@ pub fn acquire_session_build_lock(
                 "ort_session: could not acquire the global session build lock within {timeout:?}; \
                  another session build appears to be stuck. Failing this request so rendering can continue."
             );
-            return Err(format!(
-                "session build lock busy for {timeout:?} (another build appears stuck)"
-            ));
+            return Err(SessionBuildError::Busy { waited: timeout });
         }
         if started.elapsed() >= next_log {
             log::warn!(
@@ -617,20 +663,18 @@ pub fn begin_diagnostic_run(label: &'static str) -> Result<DiagnosticRun, String
 /// 会让渲染链**整条跳过**直到重启。于是"用户恰好在预热跑完前点了基准测试"就会变成
 /// 一次永久停机：预热在租约上等到 20 秒超时 → 缓存 Err → 模型被判不可用。
 /// 这两类失败回答的是"**现在**建不了"，不是"建不起来"，所以不记账，并允许下一次重试。
-pub fn prewarm_verdict(outcome: Result<(), String>) -> Option<Result<(), String>> {
+pub fn prewarm_verdict(outcome: Result<(), SessionBuildError>) -> Option<Result<(), String>> {
     // 【为什么只认"租约被占"】诊断运行现在整段持有构建租约（见 `DiagnosticRun`），
     // 于是预热有可能在它上面等到超时。那回答的是"**现在**建不了"，不是"建不起来"。
-    let transient = match &outcome {
-        Err(error) => error.contains("session build lock busy"),
-        Ok(()) => false,
-    };
+    // 判据是类型匹配，不再是字符串 —— 分类在编译期成立，措辞改动不再影响判定。
+    let transient = matches!(&outcome, Err(SessionBuildError::Busy { .. }));
     if transient {
         log::info!(
             "[prewarm] session build deferred (a diagnostic is running); it will be built on demand"
         );
         None
     } else {
-        Some(outcome)
+        Some(outcome.map_err(|error| error.to_string()))
     }
 }
 
@@ -2297,14 +2341,17 @@ mod tests {
     #[test]
     fn a_deferred_prewarm_is_not_verdict_about_the_model() {
         assert!(
-            prewarm_verdict(Err(
-                "session build lock busy for 20s (another build appears stuck)".to_string()
-            ))
+            prewarm_verdict(Err(SessionBuildError::Busy {
+                waited: std::time::Duration::from_secs(20)
+            }))
             .is_none(),
             "租约被占不是结论"
         );
         assert!(
-            prewarm_verdict(Err("model file missing".to_string())).is_some(),
+            prewarm_verdict(Err(SessionBuildError::Failed(
+                "model file missing".to_string()
+            )))
+            .is_some(),
             "真失败仍必须记账"
         );
         assert!(prewarm_verdict(Ok(())).is_some());

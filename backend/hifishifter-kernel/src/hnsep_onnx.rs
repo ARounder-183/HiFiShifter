@@ -209,7 +209,8 @@ pub fn cache_identity() -> Result<String, String> {
     Ok(get_or_init_shared_session()?.identity.to_hex().to_string())
 }
 
-fn get_or_init_shared_session() -> Result<Arc<SeparatorSession>, String> {
+fn get_or_init_shared_session(
+) -> Result<Arc<SeparatorSession>, crate::vocoder_ort_session::SessionBuildError> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
     if let Some(session) = mutex
@@ -264,7 +265,7 @@ fn get_or_init_shared_session() -> Result<Arc<SeparatorSession>, String> {
         *guard = Some(arc.clone());
         return Ok(arc);
     }
-    Err("inference device kept changing during session build".to_string())
+    Err("inference device kept changing during session build".into())
 }
 
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.

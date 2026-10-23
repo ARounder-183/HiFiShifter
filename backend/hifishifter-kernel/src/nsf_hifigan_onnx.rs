@@ -765,7 +765,8 @@ pub fn drop_shared_session() {
 /// → 容器锁写回。构建前后比对 EP 设置代数：构建期间用户再次切换设备时
 /// 丢弃陈旧结果并按当前设置重建（最多重试 3 次）。D3D12/DML 的**创建**由
 /// `session_build_lock` 在构建器内部串行化，**烟测在创建锁之外**执行。
-fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
+fn get_or_init_shared_session(
+) -> Result<Arc<SharedVocoder>, crate::vocoder_ort_session::SessionBuildError> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
     if let Some(session) = mutex
@@ -843,7 +844,7 @@ fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
         *guard = Some(arc.clone());
         return Ok(arc);
     }
-    Err("inference device kept changing during session build".to_string())
+    Err("inference device kept changing during session build".into())
 }
 
 pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
@@ -931,13 +932,16 @@ fn session_batch_pinned_to_one(session: &Arc<Mutex<Session>>) -> bool {
 }
 
 impl NsfHifiganOnnx {
-    fn load() -> Result<Self, String> {
+    /// 错误是 [`SessionBuildError`](crate::vocoder_ort_session::SessionBuildError)
+    /// 而不是裸 `String`：调用方（线程本地缓存的写入点）必须能区分"租约忙"
+    /// （瞬态，**不缓存**）与其余失败（记账）—— 见缓存写入处。
+    fn load() -> Result<Self, crate::vocoder_ort_session::SessionBuildError> {
         let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
         let shared = get_or_init_shared_session()?;
         let cfg = shared.cfg.clone();
 
         if cfg.sampling_rate == 0 || cfg.num_mels == 0 || cfg.hop_size == 0 || cfg.n_fft == 0 {
-            return Err("invalid NSF-HiFiGAN config.json".to_string());
+            return Err("invalid NSF-HiFiGAN config.json".into());
         }
         // `win_size` 必须为正且不小于 `hop_size`：`mel_frame_count` 的帧数契约
         // （`1 + (n - hop)/hop`）隐含 `win >= hop`，否则它与 `mel_from_audio_fast`
@@ -947,7 +951,8 @@ impl NsfHifiganOnnx {
             return Err(format!(
                 "invalid NSF-HiFiGAN config.json: win_size ({}) must be >= hop_size ({})",
                 cfg.win_size, cfg.hop_size
-            ));
+            )
+            .into());
         }
 
         // 获取（或初始化）全局共享 Session，消除每线程冷启动。
@@ -1318,6 +1323,31 @@ static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static TLS_SESSION: RefCell<Option<Result<NsfHifiganOnnx, String>>> = const { RefCell::new(None) };
+}
+
+/// 把 `load()` 的结果写进线程本地缓存槽；**瞬态失败（租约忙）不缓存**。
+///
+/// 【为什么两类失败分开走】epoch 失效只清 Ok 条目，把 Busy 缓存成 Err 会让本线程
+/// 到死都拿不到会话 —— 而"租约忙"回答的是"**现在**建不了"，不是"建不起来"。
+/// [`SessionBuildError`] 的类型化让这个判据在编译期成立，而不是靠字符串匹配。
+/// 返回 `Err` 时缓存保持为空，下一次调用重新尝试。
+fn load_into_tls_cache(slot: &mut Option<Result<NsfHifiganOnnx, String>>) -> Result<(), String> {
+    match NsfHifiganOnnx::load() {
+        Ok(session) => {
+            *slot = Some(Ok(session));
+            Ok(())
+        }
+        Err(error @ crate::vocoder_ort_session::SessionBuildError::Busy { .. }) => {
+            log::info!(
+                "[nsf_hifigan] session build deferred (a diagnostic is running); the per-thread cache stays empty and retries"
+            );
+            Err(error.to_string())
+        }
+        Err(crate::vocoder_ort_session::SessionBuildError::Failed(error)) => {
+            *slot = Some(Err(error.clone()));
+            Err(error)
+        }
+    }
 }
 
 /// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
@@ -1787,7 +1817,7 @@ pub fn infer_pitch_edit_chunked_optimized(
         }
 
         if opt.is_none() {
-            *opt = Some(NsfHifiganOnnx::load());
+            load_into_tls_cache(&mut opt)?;
         }
         let sess = opt
             .as_mut()
@@ -2218,7 +2248,7 @@ pub fn infer_pitch_edit_mono_mel_stretch(
     TLS_SESSION.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
-            *opt = Some(NsfHifiganOnnx::load());
+            load_into_tls_cache(&mut opt)?;
         }
         let sess = opt
             .as_mut()

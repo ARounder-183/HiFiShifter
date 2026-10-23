@@ -145,7 +145,8 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
     Ok(session)
 }
 
-fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
+fn get_or_init_shared_session(
+) -> Result<Arc<Mutex<Session>>, crate::vocoder_ort_session::SessionBuildError> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
     if let Some(session) = mutex
@@ -202,7 +203,7 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
         *guard = Some(arc.clone());
         return Ok(arc);
     }
-    Err("inference device kept changing during session build".to_string())
+    Err("inference device kept changing during session build".into())
 }
 
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.
