@@ -43,10 +43,29 @@ $vsArgs = @(
     '-property', 'installationPath'
 )
 $vsPath = & $vswhere @vsArgs
+if ($vsPath) { $vsPath = $vsPath.Trim() }
+
+# 【为什么还要兜底】vswhere 只认 Installer 登记的实例。实测存在这样一种机器：
+# vcvars64.bat 能正常跑（cl.exe / link.exe 都在），但 vswhere 返回空 —— 于是本脚本
+# 报「没装 C++ 工作负载」，而 cmake 的 "Visual Studio 17 2022" 生成器也找不到实例
+# （它同样走 vswhere / 注册表），第三方 C 库（opus）的构建就卡在
+#   CMake Error: could not find any instance of Visual Studio.
+# 按已知安装位置再找一遍，找不到才报错。
+if (-not $vsPath) {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\Community'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\Professional'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\Enterprise'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\BuildTools'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\BuildTools')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path (Join-Path $candidate 'VC\Auxiliary\Build\vcvars64.bat')) { $vsPath = $candidate; break }
+    }
+}
 if (-not $vsPath) {
     throw "No Visual Studio instance with VC.Tools.x86.x64 -- install the 'Desktop development with C++' workload"
 }
-$vsPath = $vsPath.Trim()
 
 $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
 if (-not (Test-Path $vcvars)) {
@@ -64,6 +83,13 @@ foreach ($line in $dump) {
     $value = $line.Substring($idx + 1)
     Set-Item -Force -Path "Env:$name" -Value $value
 }
+
+# 【为什么把 cmake 生成器钉成 NMake Makefiles】cmake 的 "Visual Studio 17 2022" 生成器
+# 靠 vswhere / 注册表找实例。上面那种「vcvars 能用但 vswhere 看不见」的机器上，它一定失败，
+# 而 opusic-sys 的 build.rs 显式请求这个生成器 —— 表现为 `cargo test` 在 opusic-sys 处挂掉，
+# 所有 Rust 测试都跑不起来（`cargo check` 不受影响，因为它不构建 C 依赖）。
+# NMake 只要 PATH 上有 cl.exe 与 nmake.exe，两个都是 vcvars 刚导进来的。
+$env:CMAKE_GENERATOR = 'NMake Makefiles'
 
 # 校验：这几个变量是 cl.exe 能正常工作的最小充分集合。
 $required = @('INCLUDE', 'LIB', 'VCINSTALLDIR', 'WindowsSdkDir', 'VCToolsVersion')
