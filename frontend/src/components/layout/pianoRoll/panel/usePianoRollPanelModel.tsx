@@ -18,9 +18,6 @@ import {
     setTrackStateRemote,
     cycleDragDirection,
     persistUiSettings,
-    setPrimaryTimeUnit,
-    setSecondaryTimeUnit,
-    setTempoMap,
     setParamSelectionActive,
 } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
@@ -43,11 +40,8 @@ import {
 } from "../../../../features/pitch/separationGate";
 import { useNonPassiveWheel } from "../../../../utils/useNonPassiveWheel";
 import type { ScaleLike } from "../../../../utils/musicalScales";
-import { clamp, formatCursorTime } from "../../timeline";
-import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "../../timeline";
-import type { TempoMap } from "../../../../utils/tempoMap";
+import { clamp } from "../../timeline";
 import { effectiveScaleAtSec } from "../../../../utils/tempoMap";
-import { setTempoMapRemote } from "../../../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../../../utils/pianoRollSelectionBus";
 import { resolveTimelineScrollRange } from "../../timeline/runtime/timelineScrollRange";
 import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
@@ -74,7 +68,6 @@ import {
     type ClipGeometrySnapshot,
 } from "../../timeline/clipGeometryPreviewBus";
 import { createRenderLoop, type RenderLoop } from "../../renderKernel/renderLoop.js";
-import { buildTimelineTicks } from "../../timeline/runtime/buildTimelineTicks.js";
 import { createTimelineAxis, playheadLineLeftPx } from "../../renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "../usePianoRollInteractions";
 import { resolveMenuMaxHeight } from "../../menuPlacement";
@@ -132,6 +125,7 @@ import { runEditOp } from "./editOperations";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
+import { useTimelineDisplayControls } from "./useTimelineDisplayControls";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
 import { usePianoRollScrollKernel } from "./usePianoRollScrollKernel";
 import { useMidiImport } from "./useMidiImport";
@@ -2622,85 +2616,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             <Pencil1Icon />
         );
 
-    // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
-    // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
-    const timelineTicks = useMemo(
-        () =>
-            buildTimelineTicks({
-                axis: prTickAxis.axis,
-                bpm: s.bpm,
-                beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-                grid: s.grid,
-                primaryUnit: s.primaryTimeUnit,
-                secondaryUnit: s.secondaryTimeUnit,
-                minLabelSpacingPx: s.rulerLabelSpacingPx,
-                minGridSpacingPx: s.timelineSnap.gridMinSpacingPx,
-                swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
-                tempoMap: s.tempoMap,
-            }),
-        [
-            prTickAxis,
-            s.bpm,
-            s.beats,
-            s.grid,
-            s.primaryTimeUnit,
-            s.secondaryTimeUnit,
-            s.rulerLabelSpacingPx,
-            s.timelineSnap,
-            s.tempoMap,
-        ],
-    );
-    const timeContext = useMemo<TimeFormatContext>(
-        () => ({
-            bpm: s.bpm,
-            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-            grid: s.grid,
-            tempoMap: s.tempoMap,
-        }),
-        [s.bpm, s.beats, s.grid, s.tempoMap],
-    );
-
-    const handlePrimaryUnitChange = useCallback(
-        (unit: TimeUnit) => {
-            dispatch(setPrimaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-    const handleSecondaryUnitChange = useCallback(
-        (unit: TimeUnitChoice) => {
-            dispatch(setSecondaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-
-    const handleTempoMapChange = useCallback(
-        (next: TempoMap | null) => {
-            dispatch(setTempoMap(next));
-        },
-        [dispatch],
-    );
-    const handleTempoMapCommit = useCallback(
-        (next: TempoMap | null) => {
-            dispatch(setTempoMap(next));
-            void dispatch(setTempoMapRemote(next));
-        },
-        [dispatch],
-    );
-    const handleCopyPlayheadTime = useCallback(async () => {
-        const text = formatCursorTime(
-            s.primaryTimeUnit,
-            s.secondaryTimeUnit,
-            Number(s.playheadSec ?? 0),
-            timeContext,
-        ).combined;
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch {
-            // 忽略复制失败
-        }
-    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
+    // 标尺刻度 / 时间格式 / 单位切换 / 复制播放头时间整块在
+    // `useTimelineDisplayControls` 里（见该文件头）。它们只依赖会话切片与刻度轴。
+    const {
+        timelineTicks,
+        timeContext,
+        handlePrimaryUnitChange,
+        handleSecondaryUnitChange,
+        handleTempoMapChange,
+        handleTempoMapCommit,
+        handleCopyPlayheadTime,
+    } = useTimelineDisplayControls({ dispatch, s, prTickAxis });
 
     /*
      * 【这个返回对象就是视图层的全部输入】字段清单是三个视图文件 AST 扫描结果的并集
