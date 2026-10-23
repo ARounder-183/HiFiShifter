@@ -21,7 +21,7 @@ import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
-import { AppToolbarSeparator } from "../../ui/Toolbar";
+import { AppToolbarGroup } from "../../ui/Toolbar";
 import { AppIconButton, AppSlider, AppSliderReadout } from "../../ui";
 
 import {
@@ -638,10 +638,16 @@ export function ActionBar() {
         <Flex
             align="center"
             gap="3"
-            className="h-qt-bar-main bg-qt-window border-b border-qt-border px-1 text-qt-text flex-nowrap overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
+            // 【为什么是 flex-wrap 而不是横向滚动】滚动条会吃掉横条的高度（26/32px 里
+            // 再扣 10px），而 CSS 规定 `overflow-x: auto` 时 `overflow-y` 计算为 `auto`，
+            // 于是容器成为裁剪上下文 —— 这正是 `AppToolbar` 把 `scrollable` 默认设成
+            // false 的原因（见 ui/Toolbar.tsx）。主工具栏的功能都很重要，不能像参数
+            // 编辑器那样分级隐藏，所以按**功能组**换行：`min-h-` 而不是 `h-`，让条形
+            // 自然长高，下面的内容区自己让位。
+            className="min-h-qt-bar-main bg-qt-window border-b border-qt-border px-1 py-1 text-qt-text flex-wrap items-center overflow-hidden"
         >
             {/* BPM & Time */}
-            <Flex align="center" gap="2" className="shrink-0">
+            <AppToolbarGroup>
                 {/* Metronome */}
                 {/*
                  * 【为什么插件里整块不渲染】节拍器由宿主播放（REAPER 自己的 metronome
@@ -1175,9 +1181,7 @@ export function ActionBar() {
                         </Select.Group>
                     </Select.Content>
                 </Select.Root>
-            </Flex>
-
-            <AppToolbarSeparator />
+            </AppToolbarGroup>
 
             {/* Transport */}
             {/*
@@ -1197,7 +1201,7 @@ export function ActionBar() {
                 const hostTransport = canControlHostTransport();
                 const inert = isPluginMode() && !hostTransport;
                 return (
-                    <Flex gap="1" className="shrink-0">
+                    <AppToolbarGroup>
                         <Button
                             variant="soft"
                             color="gray"
@@ -1521,20 +1525,22 @@ export function ActionBar() {
                                 {recordingErrorMessage(recording.error)}
                             </span>
                         ) : null}
-                    </Flex>
+                    </AppToolbarGroup>
                 );
             })()}
 
             {/* Capture：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
                 "录制"的心智模型就是一个传输栏上的键（见 `CaptureControl` 的文件头）。 */}
-            {isPluginMode() && <CaptureControl />}
-
-            <AppToolbarSeparator />
+            {isPluginMode() ? (
+                <AppToolbarGroup>
+                    <CaptureControl />
+                </AppToolbarGroup>
+            ) : null}
 
             {/* ── 撤销 / 重做 ──────────────────────────────────────────
                 独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
                 （非模态浮动窗口，打开期间照常编辑轨道，条目实时刷新）。 */}
-            <Flex gap="1" className="shrink-0">
+            <AppToolbarGroup>
                 <IconButton
                     ref={undoButtonRef}
                     size="1"
@@ -1568,12 +1574,10 @@ export function ActionBar() {
                 >
                     <RedoIcon />
                 </IconButton>
-            </Flex>
-
-            <AppToolbarSeparator />
+            </AppToolbarGroup>
 
             {/* File Browser Toggle */}
-            <Flex gap="1" className="shrink-0">
+            <AppToolbarGroup>
                 <AppIconButton
                     active={fileBrowserVisible}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
@@ -1603,354 +1607,359 @@ export function ActionBar() {
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
                     icon={<Pencil1Icon />}
                 />
-            </Flex>
-
-            <AppToolbarSeparator />
+            </AppToolbarGroup>
 
             {/* Toolbar Toggles */}
-            <Flex align="center" gap="1" className="shrink-0">
-                {/* Auto Crossfade */}
-                <AppIconButton
-                    active={s.autoCrossfadeEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("auto_crossfade")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleAutoCrossfade());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={
-                        /* X icon for crossfade */
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 15 15"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path
-                                d="M2 12L7.5 3L13 12"
-                                stroke="currentColor"
-                                strokeWidth="1.2"
+            <>
+                <AppToolbarGroup>
+                    {/* Auto Crossfade */}
+                    <AppIconButton
+                        active={s.autoCrossfadeEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("auto_crossfade")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleAutoCrossfade());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            /* X icon for crossfade */
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
                                 fill="none"
-                            />
-                            <path
-                                d="M2 3L7.5 12L13 3"
-                                stroke="currentColor"
-                                strokeWidth="1.2"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="M2 12L7.5 3L13 12"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                    fill="none"
+                                />
+                                <path
+                                    d="M2 3L7.5 12L13 3"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                    fill="none"
+                                    opacity="0.5"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Split Transition */}
+                    <AppIconButton
+                        active={s.splitTransitionEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("split_transition_tooltip")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleSplitTransition());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setSplitTransitionOpen(true);
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
                                 fill="none"
-                                opacity="0.5"
-                            />
-                        </svg>
-                    }
-                />
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                                    fill="currentColor"
+                                    opacity="0.85"
+                                />
+                                <path
+                                    d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                                    fill="currentColor"
+                                    opacity="0.45"
+                                />
+                            </svg>
+                        }
+                    />
 
-                {/* Split Transition */}
-                <AppIconButton
-                    active={s.splitTransitionEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("split_transition_tooltip")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleSplitTransition());
-                        void dispatch(persistUiSettings());
-                    }}
-                    onContextMenu={(e) => {
-                        e.preventDefault();
-                        setSplitTransitionOpen(true);
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 15 15"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
-                            <path
-                                d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
-                                fill="currentColor"
-                                opacity="0.85"
-                            />
-                            <path
-                                d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
-                                fill="currentColor"
-                                opacity="0.45"
-                            />
-                        </svg>
-                    }
-                />
+                    {/* Snap */}
+                    <AppIconButton
+                        active={effectiveSnapVisual}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={`${tf("common_snap")}${
+                            snapGestureActive && snapToggleHeld
+                                ? ` · ${tf("common_snap")}: ${tf("snap_toggle_inverted")}`
+                                : ""
+                        }`}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleSnap());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setSnapSettingsOpen(true);
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                                <path
+                                    d="m5 8 4 4"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                                <path
+                                    d="m12 15 4 4"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                            </svg>
+                        }
+                    />
 
-                {/* Snap */}
-                <AppIconButton
-                    active={effectiveSnapVisual}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={`${tf("common_snap")}${
-                        snapGestureActive && snapToggleHeld
-                            ? ` · ${tf("common_snap")}: ${tf("snap_toggle_inverted")}`
-                            : ""
-                    }`}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleSnap());
-                        void dispatch(persistUiSettings());
-                    }}
-                    onContextMenu={(e) => {
-                        e.preventDefault();
-                        setSnapSettingsOpen(true);
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path
-                                d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                    {/* Ripple Edit (Auto Follow) */}
+                    <RippleModeButton
+                        mode={s.rippleMode}
+                        onCycle={() => {
+                            dispatch(cycleRippleMode());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onSelect={(next) => {
+                            dispatch(setRippleMode(next));
+                            void dispatch(persistUiSettings());
+                        }}
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup>
+                    {/* Playhead Zoom */}
+                    <AppIconButton
+                        active={s.playheadZoomEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("playhead_zoom")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(togglePlayheadZoom());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M6 3.5L7.5 2L9 3.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <path
+                                    d="M5.5 5.5L4 7.5L5.5 9.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                />
+                                <path
+                                    d="M9.5 5.5L11 7.5L9.5 9.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                />
+                                <path
+                                    d="M3 12H12"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Auto Scroll (horizontal arrows) */}
+                    <AppIconButton
+                        active={s.autoScrollEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("auto_scroll")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleAutoScroll());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={<DoubleArrowRightIcon width="15" height="15" />}
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup>
+                    <AppIconButton
+                        active={s.paramEditorSeekPlayheadEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("param_editor_seek_playhead")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleParamEditorSeekPlayhead());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="M2 2.5H13"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                                <path
+                                    d="M2 12.5H13"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                                <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M6 4.5L7.5 3L9 4.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <path
+                                    d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
+                                    fill="currentColor"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Allow timeline clicks to switch the parameter editor track */}
+                    <AppIconButton
+                        active={s.paramEditorTimelineClickSelectTrackEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("param_editor_timeline_click_select_track")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleParamEditorTimelineClickSelectTrack());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <defs>
+                                    <marker
+                                        id="hs-track-switch-arrow"
+                                        viewBox="0 0 6 6"
+                                        refX="3"
+                                        refY="3"
+                                        markerWidth="5"
+                                        markerHeight="5"
+                                        orient="auto-start-reverse"
+                                    >
+                                        <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                                    </marker>
+                                </defs>
+                                <rect
+                                    x="1.5"
+                                    y="2"
+                                    width="8"
+                                    height="3"
+                                    rx="1"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <rect
+                                    x="5.5"
+                                    y="10"
+                                    width="8"
+                                    height="3"
+                                    rx="1"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <line
+                                    x1="9.5"
+                                    y1="4.5"
+                                    x2="5.5"
+                                    y2="10.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                    markerStart="url(#hs-track-switch-arrow)"
+                                    markerEnd="url(#hs-track-switch-arrow)"
+                                />
+                            </svg>
+                        }
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup divider={false}>
+                    {/* Ignore Grouping (broken chain) */}
+                    <AppIconButton
+                        active={s.ignoreGrouping}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("ignore_grouping")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleIgnoreGrouping());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
                                 stroke="currentColor"
                                 strokeWidth="2"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
-                            />
-                            <path
-                                d="m5 8 4 4"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                            />
-                            <path
-                                d="m12 15 4 4"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                            />
-                        </svg>
-                    }
-                />
-
-                {/* Ripple Edit (Auto Follow) */}
-                <RippleModeButton
-                    mode={s.rippleMode}
-                    onCycle={() => {
-                        dispatch(cycleRippleMode());
-                        void dispatch(persistUiSettings());
-                    }}
-                    onSelect={(next) => {
-                        dispatch(setRippleMode(next));
-                        void dispatch(persistUiSettings());
-                    }}
-                />
-
-                <AppToolbarSeparator />
-
-                {/* Playhead Zoom */}
-                <AppIconButton
-                    active={s.playheadZoomEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("playhead_zoom")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(togglePlayheadZoom());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 15 15"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                            <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
-                            <path
-                                d="M5.5 5.5L4 7.5L5.5 9.5"
-                                stroke="currentColor"
-                                strokeWidth="1.2"
-                            />
-                            <path
-                                d="M9.5 5.5L11 7.5L9.5 9.5"
-                                stroke="currentColor"
-                                strokeWidth="1.2"
-                            />
-                            <path
-                                d="M3 12H12"
-                                stroke="currentColor"
-                                strokeWidth="0.8"
-                                opacity="0.5"
-                            />
-                        </svg>
-                    }
-                />
-
-                {/* Auto Scroll (horizontal arrows) */}
-                <AppIconButton
-                    active={s.autoScrollEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("auto_scroll")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleAutoScroll());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={<DoubleArrowRightIcon width="15" height="15" />}
-                />
-
-                <AppToolbarSeparator />
-
-                <AppIconButton
-                    active={s.paramEditorSeekPlayheadEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("param_editor_seek_playhead")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleParamEditorSeekPlayhead());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 15 15"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path
-                                d="M2 2.5H13"
-                                stroke="currentColor"
-                                strokeWidth="0.8"
-                                opacity="0.5"
-                            />
-                            <path
-                                d="M2 12.5H13"
-                                stroke="currentColor"
-                                strokeWidth="0.8"
-                                opacity="0.5"
-                            />
-                            <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
-                            <path d="M6 4.5L7.5 3L9 4.5" stroke="currentColor" strokeWidth="1" />
-                            <path
-                                d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
-                                fill="currentColor"
-                            />
-                        </svg>
-                    }
-                />
-
-                {/* Allow timeline clicks to switch the parameter editor track */}
-                <AppIconButton
-                    active={s.paramEditorTimelineClickSelectTrackEnabled}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("param_editor_timeline_click_select_track")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleParamEditorTimelineClickSelectTrack());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 15 15"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <defs>
-                                <marker
-                                    id="hs-track-switch-arrow"
-                                    viewBox="0 0 6 6"
-                                    refX="3"
-                                    refY="3"
-                                    markerWidth="5"
-                                    markerHeight="5"
-                                    orient="auto-start-reverse"
-                                >
-                                    <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
-                                </marker>
-                            </defs>
-                            <rect
-                                x="1.5"
-                                y="2"
-                                width="8"
-                                height="3"
-                                rx="1"
-                                stroke="currentColor"
-                                strokeWidth="1"
-                            />
-                            <rect
-                                x="5.5"
-                                y="10"
-                                width="8"
-                                height="3"
-                                rx="1"
-                                stroke="currentColor"
-                                strokeWidth="1"
-                            />
-                            <line
-                                x1="9.5"
-                                y1="4.5"
-                                x2="5.5"
-                                y2="10.5"
-                                stroke="currentColor"
-                                strokeWidth="1"
-                                markerStart="url(#hs-track-switch-arrow)"
-                                markerEnd="url(#hs-track-switch-arrow)"
-                            />
-                        </svg>
-                    }
-                />
-
-                <AppToolbarSeparator />
-
-                {/* Ignore Grouping (broken chain) */}
-                <AppIconButton
-                    active={s.ignoreGrouping}
-                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                    emphasis="accent"
-                    tooltip={tf("ignore_grouping")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleIgnoreGrouping());
-                        void dispatch(persistUiSettings());
-                    }}
-                    icon={
-                        <svg
-                            width="15"
-                            height="15"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        >
-                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                            <line
-                                x1="2"
-                                y1="2"
-                                x2="22"
-                                y2="22"
-                                stroke="currentColor"
-                                strokeWidth="2.5"
-                                opacity="0.7"
-                            />
-                        </svg>
-                    }
-                />
-            </Flex>
+                            >
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                                <line
+                                    x1="2"
+                                    y1="2"
+                                    x2="22"
+                                    y2="22"
+                                    stroke="currentColor"
+                                    strokeWidth="2.5"
+                                    opacity="0.7"
+                                />
+                            </svg>
+                        }
+                    />
+                </AppToolbarGroup>
+            </>
 
             {/* Pitch Snap Settings Dialog */}
             {pitchSnapOpen && (

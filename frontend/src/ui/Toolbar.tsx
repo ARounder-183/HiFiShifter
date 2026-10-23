@@ -115,3 +115,34 @@ export function AppToolbarSeparator({ className }: { className?: string }) {
         <div aria-hidden="true" className={cx("mx-1 h-4 w-px shrink-0 bg-qt-border", className)} />
     );
 }
+
+/**
+ * 一个**功能组**：换行时的最小单位。
+ *
+ * 【为什么必须自成一体】`shrink-0` 保证组内绝不折行（否则 `BPM:` 会和它的输入框分到
+ * 两行）；`whitespace-nowrap` 保证组内文字不逐字断行。两者合起来，换行只能发生在
+ * **组与组之间**，这正是"按功能分组换行"的定义。
+ *
+ * 【为什么分隔线在组**内部**（`divider`）而不是组与组之间】
+ * 分隔线若是一个独立兄弟元素，它后面那一组换行时会把它留在**行首** —— 屏幕最左边
+ * 孤零零一根竖线。CSS 没有"行首选择器"，靠测量 `offsetTop` 去补丁则要在每次
+ * 重排后重新判断（实测窗口缩放时会有一次算错、之后不再重算的窗口）。
+ * 把分隔线挂在组尾之后，"它跟着谁换行"由布局本身决定：组换行，分隔线跟着走，
+ * 永远落在上一行的末尾 —— 一个像素的 JS 都不需要。
+ *
+ * `divider` 为 `false` 时组尾不带分隔线（最后那一组用）。
+ */
+export function AppToolbarGroup({
+    children,
+    divider = true,
+}: {
+    children: ReactNode;
+    divider?: boolean;
+}) {
+    return (
+        <div data-toolbar-group className="flex shrink-0 items-center gap-1 whitespace-nowrap">
+            {children}
+            {divider ? <AppToolbarSeparator /> : null}
+        </div>
+    );
+}
