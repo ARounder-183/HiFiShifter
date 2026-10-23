@@ -15,6 +15,7 @@ import { timeToFrame } from "../utils";
 import type { StrokeMode } from "../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { PointerDeps } from "./pointerDeps";
+import { handleFreehandPointerDown } from "./freehandPointerDown";
 import { handleVibratoPointerDown } from "./vibratoPointerDown";
 import { handleSelectPointerDown } from "./selectPointerDown";
 
@@ -129,6 +130,22 @@ type CanvasPointerDownDeps = Pick<
  * "已处理"返回值；后者只需把 `onEdgeScrolled` 换成一个可变持有者（它被
  * `edgeScroll` 的闭包读、被分支写）。两件事都是改语义，必须单独验证。
  */
+/** 指针按下要走的分支。`select` 在函数里单独分派（它有自己的"已处理"返回语义）。 */
+export type PointerDownBranch = "select" | "vibrato" | "freehand";
+
+/**
+ * 工具 → 分支的**唯一**映射。
+ *
+ * 【为什么是一张表而不是散落的 if】`710ff764` 把这里拆成两个模块时，自由绘制那一支
+ * 整块丢失了，而没有任何东西能发现"少了一个分支"。把映射提成可穷举的纯函数之后，
+ * "每个工具都有归属"变成一条能失败的测试，而不是要靠读 645 行 if/else 才知道。
+ */
+export function pointerDownBranchFor(toolMode: string): PointerDownBranch {
+    if (toolMode === "select") return "select";
+    if (toolMode === "line" || toolMode === "vibrato") return "vibrato";
+    return "freehand";
+}
+
 export function handleCanvasPointerDown(
     deps: CanvasPointerDownDeps,
     e: ReactPointerEvent<HTMLCanvasElement>,
@@ -561,7 +578,8 @@ export function handleCanvasPointerDown(
     // —— 差别只有起手预设。把它们合成一个谓词，是为了让这条等价关系由
     // 结构保证，而不是靠两处分支各自记得同步。
     const isLineTool = toolMode === "line";
-    const usesVibratoPath = isLineTool || toolMode === "vibrato";
+    const branch = pointerDownBranchFor(toolMode);
+    const usesVibratoPath = branch === "vibrato";
     const dragPreset = isLineTool ? straightVibratoPreset : vibratoPreset;
 
     strokeRef.current = {
@@ -587,7 +605,7 @@ export function handleCanvasPointerDown(
     // 与 move 路径同一约定：live 覆盖不进 React，波形需显式重绘。
     requestWaveformRepaint();
 
-    if (usesVibratoPath) {
+    if (branch === "vibrato") {
         handleVibratoPointerDown(
             {
                 applyDenseToLiveEdit,
@@ -636,6 +654,44 @@ export function handleCanvasPointerDown(
                 vibratoFrequencyAdjustKb,
                 vibratoHudAnchorRef,
                 vibratoPresetCycleList,
+                vibratoStateRef,
+            },
+            e,
+        );
+    } else {
+        handleFreehandPointerDown(
+            {
+                applyDenseToLiveEdit,
+                applyPostStrokeSmoothing,
+                clearActivePointerGestureEnd,
+                commitStroke,
+                createFineAdjustedPointerState,
+                disposeFineAdjustedPointerState,
+                dragDirection,
+                editParam,
+                edgeScroll,
+                fp,
+                getFineAdjustedPointerPosition,
+                installDragDirectionKeyCycler,
+                invalidate,
+                isDrawMode,
+                isSnapToggleModifierHeld,
+                liveEditActiveRef,
+                liveEditOverrideRef,
+                mode,
+                onCycleDragDirection,
+                onEdgeScrolledRef,
+                onPitchSnapGestureActiveChange,
+                paramViewRef,
+                penEraserDown,
+                pointerSec,
+                pointerValue,
+                requestWaveformRepaint,
+                setActivePointerGestureEnd,
+                setVibratoDragCaptureActive,
+                snapDrawValue,
+                strokeRef,
+                value,
                 vibratoStateRef,
             },
             e,
