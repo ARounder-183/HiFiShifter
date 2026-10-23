@@ -367,19 +367,42 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
 static BUILD_LEASE: OnceLock<AtomicU64> = OnceLock::new();
 static LEASE_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// 持有者超过该时长仍未释放即视为卡死，可被抢占。
-const LEASE_STEAL_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+/// 持有者超过该时长仍未释放（且无心跳推进）即视为卡死，可被抢占。
+///
+/// 【为什么必须是"最坏构建 + 最慢单轮"的上界】心跳只在每轮推理（含预热轮）之间
+/// 调用，相邻两次心跳之间隔着：严格构建 10s + 烟测 10s + 回退构建 10s + 烟测 10s
+/// + 最慢单轮推理 120s。阈值低于这个间隔，就会把"慢而活着"的持有者判死 ——
+/// 误抢的后果正是这把锁要防的驱动层挂起。240s 留出一倍余量。
+const LEASE_STEAL_AFTER: std::time::Duration = std::time::Duration::from_secs(240);
 
 fn lease() -> &'static AtomicU64 {
     BUILD_LEASE.get_or_init(|| AtomicU64::new(0))
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    // 测试钩子：租约用例用它把"持有时长"拨到任意值，免去真实等待一个
+    // 抢占阈值。u64::MAX 表示"未接管"。只有 `LEASE_SERIAL` 串行的用例会写它，
+    // 生产路径永远走下面的单调时钟。
+    #[cfg(test)]
+    {
+        let faked = TEST_CLOCK_MS.load(Ordering::Relaxed);
+        if faked != u64::MAX {
+            return faked;
+        }
+    }
+    process_start().elapsed().as_millis() as u64
 }
+
+/// `now_ms()` 的零点。票据只在本进程内有意义、从不持久化，因此用单调时钟
+/// 而不是 Unix 时间：系统时钟前跳（NTP 校时）会把"持有时长"虚增过抢占阈值，
+/// 让健康的持有者被误抢 —— 而误抢的后果正是这把锁要防的驱动层挂起。
+fn process_start() -> &'static std::time::Instant {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now)
+}
+
+#[cfg(test)]
+static TEST_CLOCK_MS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn make_ticket() -> u64 {
     ((now_ms() & 0x0000_FFFF_FFFF_FFFF) << 16)
@@ -391,12 +414,17 @@ fn ticket_ms(ticket: u64) -> u64 {
 }
 
 thread_local! {
-    /// 本线程是否已持有会话构建租约（可重入判据）。
+    /// 本线程持有的**票据**（0 = 未持有）。可重入判据。
+    ///
+    /// 【为什么记票据而不是记布尔】租约可被抢占。只记"我持过"的话，被抢后本线程
+    /// 仍会被记为持锁者，嵌套获取会拿到一个不设防的空守卫直接去建会话 —— 重新
+    /// 打开两种致命并发。记票据才能发现"我的租约已经不在我手里"，如实按普通
+    /// 路径重新竞争。
     ///
     /// 【为什么必须可重入】诊断运行现在**整段**持有租约（见 [`begin_diagnostic_run`]），
     /// 而它内部要调构建路径。不可重入的话，嵌套的 `acquire_session_build_lock` 会看到
     /// "租约被占用"（占用者其实是自己），等满超时后失败 —— 一次纯粹的自锁。
-    static LEASE_HELD: Cell<bool> = const { Cell::new(false) };
+    static LEASE_HELD: Cell<u64> = const { Cell::new(0) };
 }
 
 /// 会话构建租约守卫：`Drop` 时释放。
@@ -414,7 +442,7 @@ impl SessionBuildLease {
     ///
     /// 【为什么必须有它】抢占阈值 [`LEASE_STEAL_AFTER`] 想回答的是"持有者多久没有进展"，
     /// 而它读的是**取得时刻** —— 于是一个**合法但慢**的持有者（基准测试实测 31–134 秒）
-    /// 会在 90 秒处被判成卡死并被抢占。抢占的后果恰恰是这把锁存在的理由：两个线程并发
+    /// 会在阈值处被判成卡死并被抢占。抢占的后果恰恰是这把锁存在的理由：两个线程并发
     /// 建 DML 会话、或建会话时另一个会话正在推理，都会在驱动层挂起。有心跳之后，
     /// "跑得久"与"卡死了"才真正可分。
     pub fn heartbeat(&self) {
@@ -433,6 +461,13 @@ impl SessionBuildLease {
                 .is_ok()
             {
                 self.ticket.set(refreshed);
+                // TLS 里的可重入判据跟着刷新：它记的是票据本身，心跳改了高位
+                // 时间戳之后若不同步，下一次重入会误判"我的租约不在了"。
+                LEASE_HELD.with(|held| {
+                    if held.get() == stored {
+                        held.set(refreshed);
+                    }
+                });
                 return;
             }
         }
@@ -445,7 +480,13 @@ impl Drop for SessionBuildLease {
             return;
         }
         let _ = lease().compare_exchange(self.ticket.get(), 0, Ordering::AcqRel, Ordering::Acquire);
-        LEASE_HELD.with(|held| held.set(false));
+        // 只有 TLS 里记的确实是**本守卫**的票据才清零：守卫可能跨线程 Drop，
+        // 或本线程已重新持有了一张新票据 —— 两种情况下清零都会弄丢真记录。
+        LEASE_HELD.with(|held| {
+            if held.get() == self.ticket.get() {
+                held.set(0);
+            }
+        });
     }
 }
 
@@ -459,12 +500,19 @@ impl Drop for SessionBuildLease {
 pub fn acquire_session_build_lock(
     timeout: std::time::Duration,
 ) -> Result<SessionBuildLease, String> {
-    // 重入：本线程已经持有 ⇒ 直接给一个"不释放"的空守卫，绝不等自己。
-    if LEASE_HELD.with(|held| held.get()) {
-        return Ok(SessionBuildLease {
-            ticket: Cell::new(0),
-            nested: true,
-        });
+    // 重入：本线程已持有 ⇒ 直接给一个"不释放"的空守卫，绝不等自己。
+    // 但 TLS 里记的是**票据**：租约若已被他人抢走（对不上自己的票据），
+    // 这里必须如实清掉记录、按普通路径竞争 —— 布尔判据在这里会交出
+    // 一个不设防的空守卫。
+    let held = LEASE_HELD.with(Cell::get);
+    if held != 0 {
+        if lease().load(Ordering::Acquire) == held {
+            return Ok(SessionBuildLease {
+                ticket: Cell::new(0),
+                nested: true,
+            });
+        }
+        LEASE_HELD.with(|held| held.set(0));
     }
     let started = std::time::Instant::now();
     let mut next_log = std::time::Duration::from_secs(5);
@@ -478,7 +526,7 @@ pub fn acquire_session_build_lock(
                         started.elapsed()
                     );
                 }
-                LEASE_HELD.with(|held| held.set(true));
+                LEASE_HELD.with(|held| held.set(ticket));
                 return Ok(SessionBuildLease {
                     ticket: Cell::new(ticket),
                     nested: false,
@@ -493,14 +541,23 @@ pub fn acquire_session_build_lock(
                         held_ms,
                         LEASE_STEAL_AFTER
                     );
-                    // 抢占；若恰好被释放/被他人抢占，下一轮重试即可。
-                    let _ = lease().compare_exchange(
-                        current,
-                        ticket,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
-                    continue;
+                    // 抢占成功 ⇒ 本线程就是新持有者：必须把守卫交出去。若这里
+                    // continue 而不是 return，下一轮看到的是自己刚写入的票据，
+                    // CAS(0, …) 永远不再成立，等待者只会等满超时失败 —— 而租约
+                    // 停在一个无人持有的票据上（原持有者释放不掉、抢占者没拿到
+                    // 守卫），之后所有会话构建都会失败到进程重启。
+                    if lease()
+                        .compare_exchange(current, ticket, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        LEASE_HELD.with(|held| held.set(ticket));
+                        return Ok(SessionBuildLease {
+                            ticket: Cell::new(ticket),
+                            nested: false,
+                        });
+                    }
+                    // CAS 失败（恰好被释放/被他人抢走）⇒ 落到下面的超时检查与
+                    // 50ms 睡眠，下一轮按最新状态重试。
                 }
             }
         }
@@ -2030,6 +2087,17 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 每个租约用例的收尾：无论成败（panic 也走 Drop），把进程级租约与测试时钟
+    /// 复位。进程级状态 + cargo 并行测试意味着一个用例留下的孤儿票据会把
+    /// 后续**所有**租约用例污染成"busy" —— 失败必须失败得干净。
+    struct LeaseReset;
+    impl Drop for LeaseReset {
+        fn drop(&mut self) {
+            lease().store(0, Ordering::SeqCst);
+            TEST_CLOCK_MS.store(u64::MAX, Ordering::Relaxed);
+        }
+    }
+
     /// **不变量：租约挡得住别的线程、挡不住自己、释放后能再取。**
     ///
     /// 【为什么这三条必须一起钉】诊断运行现在整段持有它（`begin_diagnostic_run`）：
@@ -2039,6 +2107,7 @@ mod tests {
     #[test]
     fn the_build_lease_is_held_exclusively_and_is_reentrant_on_its_own_thread() {
         let _serial = serial();
+        let _reset = LeaseReset;
         let outer = acquire_session_build_lock(std::time::Duration::from_secs(5))
             .expect("空闲时租约必须可得");
 
@@ -2075,6 +2144,7 @@ mod tests {
     #[test]
     fn a_heartbeat_refreshes_the_hold_timestamp_and_keeps_the_ticket() {
         let _serial = serial();
+        let _reset = LeaseReset;
         let run_lease = acquire_session_build_lock(std::time::Duration::from_secs(5))
             .expect("空闲时租约必须可得");
         let before = run_lease.ticket.get();
@@ -2097,6 +2167,126 @@ mod tests {
             acquire_session_build_lock(std::time::Duration::from_secs(5)).is_ok(),
             "心跳之后 Drop 仍必须释放租约"
         );
+    }
+
+    /// **不变量：抢占成功必须把守卫交给抢占者，而不是把租约孤立。**
+    ///
+    /// 【为什么这是回归测试】曾经的实现里，抢占 CAS 成功后走的是 `continue`：下一轮
+    /// 看到的是**自己上一轮写入的票据**，`CAS(0, …)` 永远不再成立，等待者只能等满
+    /// 超时失败 —— 而租约从此停在一个无人持有的票据上：原持有者的心跳与 Drop 都
+    /// 对不上号，抢占者没拿到守卫。之后每一次会话构建都会等满超时失败，直到进程
+    /// 重启 —— 恰好是这把锁要防的"永久失去渲染能力"。
+    #[test]
+    fn a_successful_steal_returns_a_usable_guard() {
+        let _serial = serial();
+        let _reset = LeaseReset;
+        // 伪造一个远超阈值前取得、再无人推进的票据（模拟持有者卡死）。
+        // 【为什么拨快测试时钟】单调时钟的零点是进程启动，刚起进程时 now_ms 很小，
+        // "now - 100s" 会饱和成 0 —— 票据反而显得年轻。测试时钟把时刻抬到
+        // 1000s，伪造与真实取锁共用同一时钟，读数一致。
+        TEST_CLOCK_MS.store(1_000_000, Ordering::Relaxed);
+        let age = LEASE_STEAL_AFTER.as_millis() as u64 + 30_000;
+        let stale = ((now_ms().saturating_sub(age) & 0x0000_FFFF_FFFF_FFFF) << 16) | 0x0B0B;
+        lease().store(stale, Ordering::SeqCst);
+
+        let stolen = acquire_session_build_lock(std::time::Duration::from_millis(300))
+            .expect("卡死的持有者必须可被抢占，且抢占者必须拿到守卫");
+        assert_ne!(
+            lease().load(Ordering::Acquire),
+            0,
+            "抢占成功后租约必须由抢占者持有"
+        );
+
+        drop(stolen);
+        assert_eq!(
+            lease().load(Ordering::Acquire),
+            0,
+            "抢占得到的守卫必须能释放租约"
+        );
+        assert!(
+            acquire_session_build_lock(std::time::Duration::from_millis(50)).is_ok(),
+            "抢占与释放之后，下一个请求必须能正常拿到租约"
+        );
+    }
+
+    /// **不变量：本线程的租约被抢占后，再获取必须是真实持有，不得走嵌套旁路。**
+    ///
+    /// 【为什么这是回归测试】可重入判据若只记"我持过锁"（布尔）而不记票据，被抢后
+    /// 本线程仍会被记为持锁者，嵌套获取会拿到一个**不设防的空守卫**直接去建会话
+    /// —— 重新打开两种致命并发（并发建 DML 会话、建会话撞上首次推理）。这里让
+    /// "小偷"拿完就走（租约归零），隔离出纯粹的"TLS 记录 vs 实际租约"失配场景。
+    #[test]
+    fn a_thread_whose_lease_was_stolen_re_acquires_normally() {
+        let _serial = serial();
+        let _reset = LeaseReset;
+        let victim = acquire_session_build_lock(std::time::Duration::from_secs(5))
+            .expect("空闲时租约必须可得");
+        // 模拟"被抢走又释放"：租约现在是空的，victim 的 TLS 记录还指着自己的票据。
+        lease().store(0, Ordering::SeqCst);
+
+        let again = acquire_session_build_lock(std::time::Duration::from_secs(5))
+            .expect("租约空闲时本线程必须能重新真实持有");
+        assert!(!again.nested, "TLS 记录失配时不得返回空守卫（嵌套旁路）");
+
+        // 而且这次持有是真的：另一线程必须拿不到。
+        let blocked = std::thread::spawn(|| {
+            acquire_session_build_lock(std::time::Duration::from_millis(50)).is_err()
+        })
+        .join()
+        .expect("join");
+        assert!(blocked, "重新持有期间其它线程必须拿不到租约");
+
+        drop(again);
+        drop(victim); // 它的释放 CAS 对不上号，必须无害
+        assert_eq!(lease().load(Ordering::Acquire), 0, "最终租约必须归零");
+    }
+
+    /// **不变量：持续心跳的合法长跑绝不遭抢占；静默超过阈值才可被抢。**
+    ///
+    /// 【为什么两条钉在一起】心跳机制的全部意义就是把"跑得久"与"卡死了"分开：
+    /// 单轮推理的超时（120s）一度大于抢占阈值（90s），且预热轮之前没有心跳 ——
+    /// 健康但慢的基准测试会被误判卡死，抢占者与被抢占者同时在驱动层操作 DML。
+    /// 用测试时钟拨快"持有时长"，免去真实等待。
+    #[test]
+    fn a_heartbeating_holder_is_never_stolen_and_a_silent_one_is() {
+        let _serial = serial();
+        let _reset = LeaseReset;
+        // 阶段一：持有者持续心跳，时钟推进远超阈值 —— 等待者必须等满自己的超时失败。
+        TEST_CLOCK_MS.store(1_000, Ordering::Relaxed);
+        let holder = acquire_session_build_lock(std::time::Duration::from_secs(5))
+            .expect("空闲时租约必须可得");
+        let waiter = std::thread::spawn(|| {
+            acquire_session_build_lock(std::time::Duration::from_secs(2)).is_err()
+        });
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            // 每 50ms 真实时间把虚拟时钟推 30s：远超阈值，但心跳总在前头。
+            TEST_CLOCK_MS.fetch_add(30_000, Ordering::Relaxed);
+            holder.heartbeat();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            waiter.join().expect("join"),
+            "心跳中的持有者不得被抢占（等待者应超时失败）"
+        );
+
+        // 阶段二：停止心跳，把时钟推过阈值 —— 等待者必须抢占成功并拿到守卫。
+        let holder_ticket = holder.ticket.get();
+        TEST_CLOCK_MS.fetch_add(4 * LEASE_STEAL_AFTER.as_millis() as u64, Ordering::Relaxed);
+        let stealer = std::thread::spawn(|| {
+            acquire_session_build_lock(std::time::Duration::from_secs(2))
+                .expect("静默超阈值的持有者必须可被抢占")
+        })
+        .join()
+        .expect("join");
+        assert_ne!(
+            stealer.ticket.get(),
+            holder_ticket,
+            "抢占者必须拿到自己的新票据"
+        );
+        drop(stealer);
+        drop(holder); // 它的释放 CAS 对不上号（租约已易主又归零），必须无害
+        assert_eq!(lease().load(Ordering::Acquire), 0, "收尾时租约必须归零");
     }
 
     /// **不变量：租约被占不算"模型不可用"。**

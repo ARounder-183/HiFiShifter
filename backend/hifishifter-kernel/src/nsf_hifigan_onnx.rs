@@ -2540,6 +2540,10 @@ fn time_session_runs(
         };
 
     // 预热：首次推理包含着色器/图编译，绝不能计入计时。
+    // 【预热轮之前也要心跳】心跳的全部意义是让抢占判据读到的"无进展时长"不超过
+    // 阈值；预热轮是相邻心跳之间最长的一跳（首次推理最慢可达单轮超时），漏掉它
+    // 就等于告诉别人"这个持有者卡死了"。
+    heartbeat();
     match timed_session_run(session, inputs(session)?, timeout) {
         Ok(Some(_)) => {}
         Ok(None) => return Err(format!("warmup inference timed out after {timeout:?}")),
