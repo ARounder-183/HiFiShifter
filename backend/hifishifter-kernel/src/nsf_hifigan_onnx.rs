@@ -786,6 +786,10 @@ fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
     // 等待有界，绝不永久卡死。
     // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
     // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
+    // 【让路】别的线程正在跑诊断（基准测试 / 预热）⇒ 本次会话构建让路：
+    // 该 clip 失败、pass 继续推进、稍后重试。等 20 秒再失败会把一次诊断放大成一次
+    // 渲染停摆，而且与 DML 建会话并发本身就会在驱动层挂起。
+    crate::vocoder_ort_session::defer_to_running_diagnostic()?;
     let _build_flight =
         crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
@@ -1338,10 +1342,17 @@ pub fn ensure_background_prewarm() {
             let _busy = crate::diagnostics_busy::enter("prewarm-nsf-hifigan");
             let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
             let res = get_or_init_shared_session().map(|_| ());
-            *PREWARM
-                .get_or_init(|| Mutex::new(None))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(res);
+            // 【让路不是结论】见 `prewarm_verdict`：诊断期间的构建失败既不代表模型坏，
+            // 也不该被缓存成"不可用"（那会让渲染链整条跳过直到重启）。
+            match crate::vocoder_ort_session::prewarm_verdict(res) {
+                Some(verdict) => {
+                    *PREWARM
+                        .get_or_init(|| Mutex::new(None))
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(verdict);
+                }
+                None => PREWARM_STARTED.store(false, Ordering::Release),
+            }
         });
 }
 
@@ -2522,6 +2533,8 @@ fn time_session_runs(
     frames: usize,
     runs: usize,
     timeout: std::time::Duration,
+    // 每轮推理前调一次：长跑的诊断靠它证明"我还在干活"（见 DiagnosticRun）。
+    heartbeat: &dyn Fn(),
 ) -> Result<(Vec<f64>, f64), String> {
     let inputs =
         |session: &Arc<Mutex<Session>>| -> Result<Vec<(String, ort::value::Value)>, String> {
@@ -2538,6 +2551,7 @@ fn time_session_runs(
 
     let mut times = Vec::with_capacity(runs);
     for _ in 0..runs {
+        heartbeat();
         match timed_session_run(session, inputs(session)?, timeout) {
             Ok(Some(ms)) => times.push(ms),
             Ok(None) => return Err(format!("inference timed out after {timeout:?}")),
@@ -2564,6 +2578,7 @@ fn benchmark_gpu_ep(
     audio_sec: f64,
     runs: usize,
     gpu_ep_choice: &str,
+    run: &crate::vocoder_ort_session::DiagnosticRun,
 ) -> Result<(f64, f64, String), String> {
     // 【为什么把 EP 当参数传】旧实现改进程级 override，会推进 EP 设置代数，
     // 让渲染侧正在构建的会话被判为陈旧并重建（见 `build_ort_session_with_ep`）。
@@ -2589,14 +2604,17 @@ fn benchmark_gpu_ep(
     let gpu_session = Arc::new(Mutex::new(gpu_session));
     let timeout = std::time::Duration::from_secs(120);
 
-    let (times, median) = time_session_runs(&gpu_session, frames, runs, timeout).map_err(|e| {
-        let msg = format!("{ep} {e}");
-        log::warn!("[benchmark] WARNING: {msg}");
-        if ep == "coreml" && e.contains("timed out") {
-            crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
-        }
-        msg
-    })?;
+    let (times, median) =
+        time_session_runs(&gpu_session, frames, runs, timeout, &|| run.heartbeat()).map_err(
+            |e| {
+                let msg = format!("{ep} {e}");
+                log::warn!("[benchmark] WARNING: {msg}");
+                if ep == "coreml" && e.contains("timed out") {
+                    crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
+                }
+                msg
+            },
+        )?;
 
     let rtf = audio_sec / (median / 1000.0);
     log::warn!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x runs={times:?}");
@@ -2610,6 +2628,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let _busy = crate::diagnostics_busy::enter("benchmark");
     // 线程预算压到 2：用渲染级预算（cores/2）会把实时音频线程挤没。
     let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
+    // 【为什么整段持有构建租约】本测试会连建 CPU / 各 GPU 候选 / DirectML 三种会话，
+    // 并在它们上面各跑 5 轮真实推理。内核记录了两种致命并发（并发建 DML 会话、建会话时
+    // 另一个会话正在推理）都会在驱动层挂起 —— 此前这里两种都不占租约，靠"命令线程只有
+    // 一条"顺带护住。一旦它被挪到独立线程（插件的慢车道），就必须自己把窗口关上。
+    // 心跳由每轮推理推进，所以 31–134 秒的合法长跑不会被判成卡死而遭抢占。
+    let run = crate::vocoder_ort_session::begin_diagnostic_run("benchmark")?;
     ensure_ort_init()?;
     let (onnx_path, cfg_path) = resolve_model_paths()?;
     let cfg = read_config(&cfg_path)?;
@@ -2694,6 +2718,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
             .map_err(|error| format!("benchmark CPU warmup failed: {error}"))?;
 
         for _ in 0..runs {
+            run.heartbeat();
             let mt =
                 Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
                     .map_err(|error| format!("benchmark tensor build failed: {error}"))?;
@@ -2726,7 +2751,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
 
     if gpu_available {
         for candidate in &gpu_candidates {
-            match benchmark_gpu_ep(&onnx_path, frames, audio_sec, runs, candidate) {
+            match benchmark_gpu_ep(&onnx_path, frames, audio_sec, runs, candidate, &run) {
                 Ok((median, rtf, ep)) => {
                     gpu_median = Some(median);
                     gpu_rt_factor = Some(rtf);
@@ -2782,7 +2807,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                 );
                 let session = Arc::new(Mutex::new(built.session));
                 let timeout = std::time::Duration::from_secs(120);
-                match time_session_runs(&session, frames, runs, timeout) {
+                match time_session_runs(&session, frames, runs, timeout, &|| run.heartbeat()) {
                     Ok((times, median)) => {
                         let rtf = audio_sec / (median / 1000.0);
                         dml_median = Some(median);

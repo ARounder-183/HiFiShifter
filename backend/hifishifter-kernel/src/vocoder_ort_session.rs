@@ -25,6 +25,7 @@
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use serde::Serialize;
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -389,14 +390,62 @@ fn ticket_ms(ticket: u64) -> u64 {
     ticket >> 16
 }
 
+thread_local! {
+    /// 本线程是否已持有会话构建租约（可重入判据）。
+    ///
+    /// 【为什么必须可重入】诊断运行现在**整段**持有租约（见 [`begin_diagnostic_run`]），
+    /// 而它内部要调构建路径。不可重入的话，嵌套的 `acquire_session_build_lock` 会看到
+    /// "租约被占用"（占用者其实是自己），等满超时后失败 —— 一次纯粹的自锁。
+    static LEASE_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
 /// 会话构建租约守卫：`Drop` 时释放。
+///
+/// 票据的**高位时间戳**是可变的（见 [`Self::heartbeat`]），所以它是 `Cell` 而不是裸
+/// `u64`：心跳要推进时间戳，而 `Drop` 必须用**当前**票据去释放，否则释放不掉。
 pub struct SessionBuildLease {
-    ticket: u64,
+    ticket: Cell<u64>,
+    /// 重入得到的守卫：外层已经持有租约，`Drop` 什么都不做。
+    nested: bool,
+}
+
+impl SessionBuildLease {
+    /// 把"最后一次有进展"的时刻推到此刻。
+    ///
+    /// 【为什么必须有它】抢占阈值 [`LEASE_STEAL_AFTER`] 想回答的是"持有者多久没有进展"，
+    /// 而它读的是**取得时刻** —— 于是一个**合法但慢**的持有者（基准测试实测 31–134 秒）
+    /// 会在 90 秒处被判成卡死并被抢占。抢占的后果恰恰是这把锁存在的理由：两个线程并发
+    /// 建 DML 会话、或建会话时另一个会话正在推理，都会在驱动层挂起。有心跳之后，
+    /// "跑得久"与"卡死了"才真正可分。
+    pub fn heartbeat(&self) {
+        if self.nested {
+            return;
+        }
+        loop {
+            let stored = lease().load(Ordering::Acquire);
+            // 租约已经不属于自己（被抢占 / 已释放）：不要把它"复活"成自己的。
+            if stored != self.ticket.get() {
+                return;
+            }
+            let refreshed = (now_ms() & 0x0000_FFFF_FFFF_FFFF) << 16 | (stored & 0xFFFF);
+            if lease()
+                .compare_exchange(stored, refreshed, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.ticket.set(refreshed);
+                return;
+            }
+        }
+    }
 }
 
 impl Drop for SessionBuildLease {
     fn drop(&mut self) {
-        let _ = lease().compare_exchange(self.ticket, 0, Ordering::AcqRel, Ordering::Acquire);
+        if self.nested {
+            return;
+        }
+        let _ = lease().compare_exchange(self.ticket.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+        LEASE_HELD.with(|held| held.set(false));
     }
 }
 
@@ -410,6 +459,13 @@ impl Drop for SessionBuildLease {
 pub fn acquire_session_build_lock(
     timeout: std::time::Duration,
 ) -> Result<SessionBuildLease, String> {
+    // 重入：本线程已经持有 ⇒ 直接给一个"不释放"的空守卫，绝不等自己。
+    if LEASE_HELD.with(|held| held.get()) {
+        return Ok(SessionBuildLease {
+            ticket: Cell::new(0),
+            nested: true,
+        });
+    }
     let started = std::time::Instant::now();
     let mut next_log = std::time::Duration::from_secs(5);
     loop {
@@ -422,7 +478,11 @@ pub fn acquire_session_build_lock(
                         started.elapsed()
                     );
                 }
-                return Ok(SessionBuildLease { ticket });
+                LEASE_HELD.with(|held| held.set(true));
+                return Ok(SessionBuildLease {
+                    ticket: Cell::new(ticket),
+                    nested: false,
+                });
             }
             Err(current) => {
                 let held_ms = now_ms().saturating_sub(ticket_ms(current));
@@ -461,6 +521,80 @@ pub fn acquire_session_build_lock(
             next_log += std::time::Duration::from_secs(5);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// 一次诊断运行独占会话构建的**整个窗口**（建会话 + 全部计时推理）。
+///
+/// 【为什么必须整段持有，而不是只在建会话时持有】本模块已经把两种致命并发写清楚了
+/// （见 [`BUILD_LEASE`] 的说明）：两个线程并发建 DML 会话、或一个会话正在跑首次推理
+/// 时另一个线程建会话，**都会在驱动层挂起**。基准测试两条都占 —— 它自己建会话时不取
+/// 租约，跑推理时也不取。此前它跑在"命令线程"上，恰好被单线程**顺带**护住；一旦把它
+/// 挪到独立线程（插件的慢车道），这个窗口就从"几毫秒偶发"变成"31 秒必然"。
+/// 所以"把长任务挪走"的前提，是先把窗口关上。
+pub struct DiagnosticRun {
+    lease: SessionBuildLease,
+}
+
+impl DiagnosticRun {
+    /// 见 [`SessionBuildLease::heartbeat`]：长任务每跑一两轮推理调一次。
+    pub fn heartbeat(&self) {
+        self.lease.heartbeat();
+    }
+}
+
+/// 开始一次诊断运行：整段持有会话构建租约。
+///
+/// 【为什么等不到就失败，而不是排队】诊断是用户主动触发、且自带"运行中"提示的动作。
+/// 若另一个诊断已经在跑，让第二个静默等两分钟，比直接告诉用户"已经有一条在跑"更糟。
+pub fn begin_diagnostic_run(label: &'static str) -> Result<DiagnosticRun, String> {
+    let lease = acquire_session_build_lock(std::time::Duration::from_secs(20))
+        .map_err(|error| format!("another diagnostic is already running: {error}"))?;
+    log::info!("ort_session: diagnostic '{label}' holds the session build lease");
+    Ok(DiagnosticRun { lease })
+}
+
+/// 诊断期间渲染侧让路的错误文本（唯一来源，便于逐字比较）。
+pub const DIAGNOSTIC_BUILD_DEFERRED: &str =
+    "a diagnostic (benchmark / prewarm) is running; rendering resumes when it finishes";
+
+/// 渲染侧在慢路径入口调用：**别的线程**的诊断正在跑就让路。
+///
+/// 【为什么是 fail-soft 而不是等待】渲染侧对"会话构建失败"早有既定语义：本次会话加载
+/// 失败 → 该 clip 失败 → **pass 继续推进** → 下次请求重试（见各模块
+/// `get_or_init_shared_session` 的说明）。用它来让路比"等 20 秒再失败"好得多：
+/// 前者不占住渲染线程，后者把一次诊断放大成一次渲染停摆。
+///
+/// 【为什么排除本线程】预热自己就是一个诊断（`diagnostics_busy`），而它要建的正是
+/// 会话；不排除自己的话，预热会拒绝自己。
+pub fn defer_to_running_diagnostic() -> Result<(), String> {
+    if crate::diagnostics_busy::blocks_session_build() {
+        log::info!("ort_session: rendering gives way — {DIAGNOSTIC_BUILD_DEFERRED}");
+        return Err(DIAGNOSTIC_BUILD_DEFERRED.to_string());
+    }
+    Ok(())
+}
+
+/// 预热失败里哪些**不构成**"模型不可用"的结论。
+///
+/// 【为什么必须有】预热把结果缓存进各模块的 `PREWARM`，而 `is_available() == false`
+/// 会让渲染链**整条跳过**直到重启。于是"用户恰好在预热跑完前点了基准测试"就会变成
+/// 一次永久停机：预热在租约上等到 20 秒超时 → 缓存 Err → 模型被判不可用。
+/// 这两类失败回答的是"**现在**建不了"，不是"建不起来"，所以不记账，并允许下一次重试。
+pub fn prewarm_verdict(outcome: Result<(), String>) -> Option<Result<(), String>> {
+    let transient = match &outcome {
+        Err(error) => {
+            error == DIAGNOSTIC_BUILD_DEFERRED || error.contains("session build lock busy")
+        }
+        Ok(()) => false,
+    };
+    if transient {
+        log::info!(
+            "[prewarm] session build deferred (a diagnostic is running); it will be built on demand"
+        );
+        None
+    } else {
+        Some(outcome)
     }
 }
 
@@ -1905,6 +2039,112 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// 全局租约是进程级的：涉及它的用例必须串行，否则一个用例持锁会让另一个用例
+    /// 读到"别人在构建"。
+    static LEASE_SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        LEASE_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// **不变量：租约挡得住别的线程、挡不住自己、释放后能再取。**
+    ///
+    /// 【为什么这三条必须一起钉】诊断运行现在整段持有它（`begin_diagnostic_run`）：
+    /// * 挡不住别的线程 ⇒ 两个 DML 会话并发创建 ⇒ 驱动层挂起；
+    /// * 挡不住自己 ⇒ 诊断内部的构建路径等满 20 秒后失败 ⇒ 基准测试永远跑不完；
+    /// * 释放不掉 ⇒ 之后所有渲染都拿不到会话。
+    #[test]
+    fn the_build_lease_is_held_exclusively_and_is_reentrant_on_its_own_thread() {
+        let _serial = serial();
+        let outer = acquire_session_build_lock(std::time::Duration::from_secs(5))
+            .expect("空闲时租约必须可得");
+
+        // 同线程重入：立刻成功（1 ms 预算），而不是等满再失败。
+        let nested = acquire_session_build_lock(std::time::Duration::from_millis(1))
+            .expect("同线程重入必须立刻成功，否则诊断会自锁");
+        drop(nested);
+        // 内层释放不得放掉外层。
+        assert!(
+            lease().load(Ordering::Acquire) != 0,
+            "内层守卫 Drop 不得释放外层租约"
+        );
+
+        // 另一个线程：有界失败，而不是永久阻塞。
+        let blocked = std::thread::spawn(|| {
+            acquire_session_build_lock(std::time::Duration::from_millis(50)).is_err()
+        })
+        .join()
+        .expect("join");
+        assert!(blocked, "持有期间其它线程必须拿不到租约");
+
+        drop(outer);
+        let again = acquire_session_build_lock(std::time::Duration::from_secs(5));
+        assert!(again.is_ok(), "释放后必须可以再取");
+    }
+
+    /// **不变量：心跳推进持有时间戳，但不改变票据身份。**
+    ///
+    /// 【为什么这是回归测试】抢占阈值读的是票据里的时间戳。若心跳改写了票据本身
+    /// （而不只是高位时间戳），`Drop` 的 `compare_exchange` 就对不上 —— 租约永远
+    /// 释放不掉，之后所有会话构建都会在 20 秒后失败。若没有心跳，一次合法但慢的
+    /// 基准测试（实测 31–134 秒）会在 90 秒处被判卡死并遭抢占，而抢占的后果正是
+    /// 那把锁要防的驱动层挂起。
+    #[test]
+    fn a_heartbeat_refreshes_the_hold_timestamp_and_keeps_the_ticket() {
+        let _serial = serial();
+        let run_lease = acquire_session_build_lock(std::time::Duration::from_secs(5))
+            .expect("空闲时租约必须可得");
+        let before = run_lease.ticket.get();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        run_lease.heartbeat();
+        let after = run_lease.ticket.get();
+        assert!(
+            ticket_ms(after) >= ticket_ms(before) + 20,
+            "心跳必须把持有时间戳推到此刻（before={} after={}）",
+            ticket_ms(before),
+            ticket_ms(after)
+        );
+        assert_eq!(
+            after & 0xFFFF,
+            before & 0xFFFF,
+            "心跳不得改变票据身份（低位序号），否则 Drop 释放不掉"
+        );
+        drop(run_lease);
+        assert!(
+            acquire_session_build_lock(std::time::Duration::from_secs(5)).is_ok(),
+            "心跳之后 Drop 仍必须释放租约"
+        );
+    }
+
+    /// **不变量：让路/占用不算"模型不可用"。**
+    ///
+    /// 【为什么这是回归测试】预热把结果缓存进 `PREWARM`，而 `is_available() == false`
+    /// 会让渲染链整条跳过直到重启。于是"用户恰好在预热跑完前点了基准测试"会变成
+    /// 一次永久停机 —— 除非这两类失败不被记账。
+    #[test]
+    fn a_deferred_prewarm_is_not_verdict_about_the_model() {
+        assert!(
+            prewarm_verdict(Err(DIAGNOSTIC_BUILD_DEFERRED.to_string())).is_none(),
+            "诊断期间的让路不是结论"
+        );
+        assert!(
+            prewarm_verdict(Err(
+                "session build lock busy for 20s (another build appears stuck)".to_string()
+            ))
+            .is_none(),
+            "租约被占不是结论"
+        );
+        assert!(
+            prewarm_verdict(Err("model file missing".to_string())).is_some(),
+            "真失败仍必须记账"
+        );
+        assert!(prewarm_verdict(Ok(())).is_some());
+    }
+
     /// 诊断预算只能**收紧**线程数，绝不能把它放大到超过渲染级预算。
     #[test]
     fn the_diagnostic_cap_only_ever_shrinks_the_thread_budget() {

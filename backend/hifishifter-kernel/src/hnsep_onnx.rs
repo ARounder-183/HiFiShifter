@@ -232,6 +232,10 @@ fn get_or_init_shared_session() -> Result<Arc<SeparatorSession>, String> {
     // 等待有界，绝不永久卡死。
     // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
     // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
+    // 【让路】别的线程正在跑诊断（基准测试 / 预热）⇒ 本次会话构建让路：
+    // 该 clip 失败、pass 继续推进、稍后重试。等 20 秒再失败会把一次诊断放大成一次
+    // 渲染停摆，而且与 DML 建会话并发本身就会在驱动层挂起。
+    crate::vocoder_ort_session::defer_to_running_diagnostic()?;
     let _build_flight =
         crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
@@ -327,10 +331,17 @@ pub fn ensure_background_prewarm() {
             let _busy = crate::diagnostics_busy::enter("prewarm-hnsep");
             let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
             let res = get_or_init_shared_session().map(|_| ());
-            *PREWARM
-                .get_or_init(|| Mutex::new(None))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(res);
+            // 【让路不是结论】见 `prewarm_verdict`：诊断期间的构建失败既不代表模型坏，
+            // 也不该被缓存成"不可用"（那会让渲染链整条跳过直到重启）。
+            match crate::vocoder_ort_session::prewarm_verdict(res) {
+                Some(verdict) => {
+                    *PREWARM
+                        .get_or_init(|| Mutex::new(None))
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(verdict);
+                }
+                None => PREWARM_STARTED.store(false, Ordering::Release),
+            }
         });
 }
 
