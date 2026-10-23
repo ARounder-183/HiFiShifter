@@ -385,6 +385,23 @@ export function capability(id: CapabilityId): CapabilityDecision {
 }
 
 /**
+ * 这条动作**为什么不能做**的成句文案；能做的或不受宿主限制的返回 null。
+ *
+ * 【为什么用 pluginAllowsAction 作闸门】这样它与真正的判据逐字节同源 —— 若哪天两者
+ * 分叉，这里会跟着一起错，而不会出现「提示说不能、实际能做」这种更坏的情形。
+ *
+ * 【为什么需要它】快捷键被拒此前是**静默 no-op**：按了没反应、也没有任何说明。
+ * tooltip 能解释菜单项，但键盘没有可以挂 tooltip 的表面。
+ */
+export function capabilityDeniedText(action: string, surface: string | null): string | null {
+    if (pluginAllowsAction(action, surface)) return null;
+    const id = capabilityForAction(action, surface);
+    if (id === null) return null;
+    const decision = capability(id);
+    return decision.reason === null ? null : translateOutsideReact(decision.reason);
+}
+
+/**
  * 一条能力不可用时的**文案**（已按当前语言翻译）。
  *
  * 【为什么走 translateOutsideReact】调用点大多不在组件里（右键菜单项的 tooltip、

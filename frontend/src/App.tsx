@@ -20,6 +20,7 @@ import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/plu
 import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
     isPluginMode,
+    capabilityDeniedText,
     pluginAllowsAction,
     pluginAllowsEditChannel,
 } from "./services/hostCapabilities";
@@ -138,6 +139,7 @@ const NotebookErrorBoundary = lazy(() =>
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
 import { AppStatusChip } from "./ui";
+import type { AppStatusTone } from "./ui/StatusChip";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
@@ -1581,12 +1583,23 @@ function AppInner() {
         (state) => state.session.renderCache.showHitStats,
     );
     const [noticeText, setNoticeText] = useState("");
-    const showNotice = useCallback((text: string, holdMs = 15_000) => {
-        if (!text) return;
-        setNoticeText(text);
-        if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
-        noticeHideTimerRef.current = setTimeout(() => setNoticeText(""), holdMs);
-    }, []);
+    /**
+     * 提示位的语义色。
+     *
+     * 【为什么需要】这个位此前只有"后台做完了某件事"一种来源（成功）。加了"这条命令
+     * 为什么被拒"之后，用绿色报告一件**没做成**的事会让用户以为它成了。
+     */
+    const [noticeTone, setNoticeTone] = useState<AppStatusTone>("success");
+    const showNotice = useCallback(
+        (text: string, holdMs = 15_000, tone: AppStatusTone = "success") => {
+            if (!text) return;
+            setNoticeTone(tone);
+            setNoticeText(text);
+            if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
+            noticeHideTimerRef.current = setTimeout(() => setNoticeText(""), holdMs);
+        },
+        [],
+    );
     const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     useEffect(() => {
         if (!renderCacheShowHitStats) return;
@@ -2766,7 +2779,15 @@ function AppInner() {
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
         (actionId: ActionId) => {
-            if (!pluginAllowsAction(actionId, getActiveSurface())) return false;
+            if (!pluginAllowsAction(actionId, getActiveSurface())) {
+                // 【为什么不再静默】快捷键被拒此前是彻底的 no-op：菜单项上有 tooltip 说明，
+                // 键盘却没有任何可以挂说明的表面 —— 用户按了没反应，只能当成 bug。
+                // 状态栏是现成的短时效提示位（渲染缓存统计 / 自动声道折叠都在用它），
+                // 因此这里只补一句"为什么"，不引入新的 UI 表面。
+                const deniedText = capabilityDeniedText(actionId, getActiveSurface());
+                if (deniedText) showNotice(deniedText, 4000, "warning");
+                return false;
+            }
             // ── 编辑操作统一路由 ──
             // clip.* 与 pianoRoll.* 的同义绑定（Ctrl+C/X/V）归一为同一编辑 op
             // 后定向派发到唯一执行者 —— 事件名即契约：hifi:editOp 只属于
@@ -3493,6 +3514,9 @@ function AppInner() {
             handleOpenProject,
             handleImportMidiFromMenu,
             handleImportProject,
+            // 被拒快捷键的说明要写进状态栏提示位（见函数顶部）。`showNotice` 本身是
+            // 空依赖的 useCallback，引用恒定，放进依赖不会引起额外重渲染。
+            showNotice,
         ],
     );
 
@@ -4442,7 +4466,9 @@ function AppInner() {
                         若把进度片放在前面，它每出现/消失一次，后面所有片就整体
                         横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
                         短的插在它右侧，左侧位置就永远稳定。 */}
-                    {noticeText ? <AppStatusChip tone="success">{noticeText}</AppStatusChip> : null}
+                    {noticeText ? (
+                        <AppStatusChip tone={noticeTone}>{noticeText}</AppStatusChip>
+                    ) : null}
                     {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
                         位置紧跟长时效提示位之后、短时效进度片之前。 */}
                     {importBusy ? (

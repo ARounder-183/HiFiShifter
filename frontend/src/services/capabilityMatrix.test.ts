@@ -17,6 +17,7 @@ import {
     capability,
     capabilityDeniedReason,
     capabilityForAction,
+    capabilityDeniedText,
     capabilityReasonText,
     pluginAllowsAction,
     type CapabilityId,
@@ -171,4 +172,16 @@ test("被拒的动作都带得出一条具体理由（不再只有一句通用�
     expect(capabilityDeniedReason("edit.smooth", "timeline")).toBe("cap_reason_piano_roll_only");
     // 放行的动作没有理由。
     expect(capabilityDeniedReason("clip.copy", "timeline")).toBeNull();
+});
+
+test("被拒的动作能给出一句可以直接显示的话（快捷键不再静默）", () => {
+    // 与 pluginAllowsAction 同源：能做的就返回 null。
+    expect(capabilityDeniedText("clip.copy", "timeline")).toBeNull();
+    expect(capabilityDeniedText("edit.smooth", "pianoRoll")).toBeNull();
+
+    // 被拒的给一句翻译过的成句文案，而不是 key。
+    const reason = capabilityDeniedText("project.open", null);
+    expect(reason).toBeTruthy();
+    expect(reason).not.toContain("cap_reason_");
+    expect(capabilityDeniedText("recording.start", null)).toBe(reason);
 });
