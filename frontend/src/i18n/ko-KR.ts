@@ -207,7 +207,6 @@ export const koKR = {
         "Reaper 가져오기 중 다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
     common_language: "언어",
     stretch_project_override: "프로젝트 스트레치 재정의",
-    stretch_new_project_only: "새 프로젝트만",
     stretch_global_default: "새 프로젝트 기본값",
     stretch_algorithm: "알고리즘",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",

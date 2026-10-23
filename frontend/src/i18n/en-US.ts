@@ -276,7 +276,6 @@ export const enUS = {
     reaper_import_skipped_header:
         "Some media files were skipped during Reaper import (unsupported format or file not found):",
     stretch_project_override: "Project Stretch Override",
-    stretch_new_project_only: "new projects only",
     stretch_global_default: "New project default",
     stretch_algorithm: "Algorithm",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",

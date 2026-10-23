@@ -1247,7 +1247,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         动到任何已存在的工程 —— 标题因此写明"新建工程"。 */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {`${tf("stretch_global_default")}（${tf("stretch_new_project_only")}）`}
+                            {tf("stretch_global_default")}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>

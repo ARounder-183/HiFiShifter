@@ -130,7 +130,6 @@ export const zhTW = {
     reaper_import_skipped_header: "Reaper 匯入時略過了以下媒體檔案（格式不支援或檔案不存在）：",
     common_language: "語言",
     stretch_project_override: "工程拉伸覆寫",
-    stretch_new_project_only: "僅影響新建工程",
     stretch_global_default: "新建工程預設",
     stretch_algorithm: "演算法",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",

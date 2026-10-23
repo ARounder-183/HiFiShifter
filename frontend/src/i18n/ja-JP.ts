@@ -139,7 +139,6 @@ export const jaJP = {
         "Reaper インポート時に以下のメディアファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
     common_language: "言語",
     stretch_project_override: "プロジェクトストレッチ上書き",
-    stretch_new_project_only: "新規のみ",
     stretch_global_default: "新規プロジェクトの既定",
     stretch_algorithm: "アルゴリズム",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",
