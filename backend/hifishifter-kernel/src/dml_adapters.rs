@@ -29,6 +29,20 @@ pub struct DmlAdapterInfo {
     pub device_id_pci: u32,
 }
 
+impl DmlAdapterInfo {
+    /// 跨进程稳定的设备标识：PCI 厂商号 + 设备号（如 `4318:9634` = RTX 3050）。
+    ///
+    /// 【为什么不能持久化 `device_id`】它是**本进程**的 DXGI 适配器序号，
+    /// 在混合显卡笔记本上会随进程而变。实测同一分钟内：独立 App 进程枚举到
+    /// `RTX 3050 = 1 / Intel UHD = 0`，而 VEGAS 插件进程枚举到
+    /// `RTX 3050 = 0 / Intel UHD = 1`（见 `docs/plans/2026-10-23-audit-round-3-plan.md`
+    /// §12）。于是持久化的 `1` 在 App 里是独显、在插件里是集显 —— 同一份设置，
+    /// 两种硬件。PCI 标识不随枚举顺序变化，这才是该存的东西。
+    pub fn stable_key(&self) -> String {
+        format!("{}:{}", self.vendor_id, self.device_id_pci)
+    }
+}
+
 /// All DXGI GPU adapters discovered in the system.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,4 +140,42 @@ fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
         index
     );
     Ok(adapters)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::DmlAdapterInfo;
+
+    fn adapter(device_id: u32, name: &str, vendor_id: u32, device_id_pci: u32) -> DmlAdapterInfo {
+        DmlAdapterInfo {
+            device_id,
+            name: name.to_string(),
+            dedicated_video_memory_mb: 0,
+            shared_system_memory_mb: 0,
+            vendor_id,
+            device_id_pci,
+        }
+    }
+
+    /// 稳定标识必须只由 PCI 身份决定，**不含** DXGI 序号。
+    ///
+    /// 【为什么必须钉住】实测同一分钟内，独立 App 进程枚举到
+    /// `RTX 3050 = 1 / Intel UHD = 0`，VEGAS 插件进程枚举到
+    /// `RTX 3050 = 0 / Intel UHD = 1`。持久化序号会让"同一份设置"在两个进程里
+    /// 指向两块不同的卡：App 里 420 ms 跑完的 DirectML，在插件里落到集显上，
+    /// 47.6 s 的烟测探针 10 s 不返回，整条 DirectML 被禁用。
+    #[test]
+    fn the_stable_key_ignores_the_dxgi_index() {
+        let dgpu_first = adapter(0, "NVIDIA GeForce RTX 3050 Laptop GPU", 4318, 9634);
+        let igpu_first = adapter(1, "NVIDIA GeForce RTX 3050 Laptop GPU", 4318, 9634);
+        assert_eq!(dgpu_first.stable_key(), "4318:9634");
+        assert_eq!(
+            dgpu_first.stable_key(),
+            igpu_first.stable_key(),
+            "the key must survive a different enumeration order"
+        );
+        let igpu = adapter(1, "Intel(R) UHD Graphics", 32902, 17958);
+        assert_ne!(dgpu_first.stable_key(), igpu.stable_key());
+    }
 }

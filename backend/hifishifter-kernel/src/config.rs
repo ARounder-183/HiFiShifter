@@ -657,13 +657,19 @@ pub struct UiSettings {
     /// Persisted so the user's GPU/CPU choice survives restarts.
     #[serde(default = "default_ort_ep")]
     pub ort_ep: String,
-    /// DirectML device ID override (Windows only).
-    /// When set, DirectML will use the specified GPU adapter index.
-    /// When `None`, DirectML auto-selects the best GPU using
-    /// PerformancePreference::HighPerformance + DeviceFilter::Gpu.
-    /// GPU adapter indices are 0-based and match DXGI adapter enumeration order.
+    /// 选定的 DirectML 适配器：**稳定的 PCI 标识** `vendor:device`（如 `4318:9634`）。
+    ///
+    /// 【为什么不是 DXGI 序号】序号是**本进程**的，在混合显卡笔记本上会随进程
+    /// 变化。实测同一分钟内：独立 App 进程枚举到 `RTX 3050 = 1 / Intel UHD = 0`，
+    /// 而 VEGAS 插件进程枚举到 `RTX 3050 = 0 / Intel UHD = 1`。于是持久化的 `1`
+    /// 在 App 里是独显、在插件里是集显 —— 同一份设置，两种硬件：插件里 47.6 s 的
+    /// 烟测探针在集显上 10 s 不返回，整条 DirectML 被禁用，而 App 里 420 ms 跑完。
+    /// 换成 PCI 标识后与枚举顺序无关，由
+    /// `vocoder_ort_session::dml_device_index_for_key` 在每个进程内换算成本地序号。
+    ///
+    /// `None` = 自动选择（专用显存最大的那块）。
     #[serde(default)]
-    pub ort_device_id: Option<i32>,
+    pub ort_device_key: Option<String>,
     /// GPU 设备 ID（对应前端 gpuDeviceId，0 表示默认）。
     #[serde(default)]
     pub gpu_device_id: i32,
@@ -1757,7 +1763,7 @@ impl Default for UiSettings {
             midi_import_tempo_map_time_signature: true,
             midi_import_tempo_map_key_signature: false,
             ort_ep: default_ort_ep(),
-            ort_device_id: None,
+            ort_device_key: None,
             gpu_device_id: 0,
             auto_background_render: true,
             auto_reload_modified_media: true,

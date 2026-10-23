@@ -21,7 +21,8 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Clone, PartialEq)]
 struct AppliedKey {
     ort_ep: String,
-    ort_device_id: Option<i32>,
+    /// 稳定的 PCI 标识（不是本进程的 DXGI 序号），见 `UiSettings::ort_device_key`。
+    ort_device_key: Option<String>,
     default_stretch_algorithm: UserStretchAlgorithm,
     default_hifigan_mel_stretch: bool,
 }
@@ -47,7 +48,7 @@ fn changes_between(previous: Option<&AppliedKey>, next: &AppliedKey) -> AppliedC
     match previous {
         Some(previous) => AppliedChanges {
             inference_device_changed: previous.ort_ep != next.ort_ep
-                || previous.ort_device_id != next.ort_device_id,
+                || previous.ort_device_key != next.ort_device_key,
             stretch_defaults_changed: previous.default_stretch_algorithm
                 != next.default_stretch_algorithm
                 || previous.default_hifigan_mel_stretch != next.default_hifigan_mel_stretch,
@@ -73,17 +74,24 @@ fn record(next: AppliedKey) -> AppliedChanges {
 pub fn apply(settings: &UiSettings) -> AppliedChanges {
     let changes = record(AppliedKey {
         ort_ep: settings.ort_ep.clone(),
-        ort_device_id: settings.ort_device_id,
+        ort_device_key: settings.ort_device_key.clone(),
         default_stretch_algorithm: settings.default_stretch_algorithm,
         default_hifigan_mel_stretch: settings.default_hifigan_mel_stretch,
     });
 
     if changes.inference_device_changed {
+        // 稳定标识 → **本进程**的 DXGI 序号。换算必须在这里做（每个进程各一次），
+        // 因为枚举顺序随进程而变（见 `UiSettings::ort_device_key` 的说明）。
+        // 适配器已不在时解析为 `None`，会话按"显存最大"自动选择。
+        let device_index = settings
+            .ort_device_key
+            .as_deref()
+            .and_then(crate::vocoder_ort_session::dml_device_index_for_key);
         // 三个模型模块各自持有会话；只重建取值真的变了的那一类也要全部走一遍，
         // 因为 EP 是全局选择（`update_ort_ep` 内部按 EP 去重，重复调用是廉价的）。
-        crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-        crate::hnsep_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-        crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
+        crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, device_index);
+        crate::hnsep_onnx::update_ort_ep(&settings.ort_ep, device_index);
+        crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, device_index);
     }
 
     // 以下三项是廉价的纯赋值，不做去重 —— 它们没有"重建会话"那种代价，
@@ -104,10 +112,10 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
 mod tests {
     use super::*;
 
-    fn key(ep: &str, device: Option<i32>) -> AppliedKey {
+    fn key(ep: &str, device_key: Option<&'static str>) -> AppliedKey {
         AppliedKey {
             ort_ep: ep.to_string(),
-            ort_device_id: device,
+            ort_device_key: device_key.map(str::to_string),
             default_stretch_algorithm: UserStretchAlgorithm::default(),
             default_hifigan_mel_stretch: true,
         }
@@ -132,18 +140,18 @@ mod tests {
     /// 每次读设置都会重建全部 ONNX 会话（CoreML 上单个模型重编译 0.4~1.2 秒）。
     #[test]
     fn identical_values_report_no_change() {
-        let previous = key("gpu", Some(0));
+        let previous = key("gpu", Some("4318:9634"));
         assert_eq!(
-            changes_between(Some(&previous), &key("gpu", Some(0))),
+            changes_between(Some(&previous), &key("gpu", Some("4318:9634"))),
             AppliedChanges::default()
         );
     }
 
-    /// 只改设备序号也必须被识别为变化 —— 只比较 EP 会让"换一张显卡"静默失效。
+    /// 只改设备也必须被识别为变化 —— 只比较 EP 会让"换一张显卡"静默失效。
     #[test]
     fn changing_only_the_device_id_counts_as_a_change() {
-        let previous = key("gpu", Some(0));
-        let changes = changes_between(Some(&previous), &key("gpu", Some(1)));
+        let previous = key("gpu", Some("4318:9634"));
+        let changes = changes_between(Some(&previous), &key("gpu", Some("8086:17958")));
         assert!(changes.inference_device_changed);
         assert!(!changes.stretch_defaults_changed);
     }
@@ -177,17 +185,17 @@ mod tests {
         static SERIAL: Mutex<()> = Mutex::new(());
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
-        let first = record(key("cpu", Some(7)));
+        let first = record(key("cpu", Some("4318:9634")));
         assert!(first.inference_device_changed, "首次记录应视为变化");
 
-        let second = record(key("cpu", Some(7)));
+        let second = record(key("cpu", Some("4318:9634")));
         assert_eq!(
             second,
             AppliedChanges::default(),
             "同一取值被重复记录为变化"
         );
 
-        let third = record(key("cpu", Some(8)));
-        assert!(third.inference_device_changed, "设备序号变化未被识别");
+        let third = record(key("cpu", Some("8086:17958")));
+        assert!(third.inference_device_changed, "设备变化未被识别");
     }
 }

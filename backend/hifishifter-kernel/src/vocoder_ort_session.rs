@@ -469,17 +469,13 @@ pub fn acquire_session_build_lock(
 /// 2. `HIFISHIFTER_DML_DEVICE_ID` env var
 /// 3. Auto-detect via DXGI: pick the GPU with most VRAM
 ///
-/// # 为什么 `auto` 必须无视"上次选过的那台设备"
+/// # 设备序号是**本进程**的，不是身份
 ///
-/// 设备序号是**持久化**的，而菜单里的设备列表曾经只在 EP 选成 `gpu` 时才渲染。
-/// 于是存在一个用户完全看不见、也改不掉的状态：在 `gpu` 下选过集显 → 切回
-/// `auto` → 设备序号仍是集显，而 `auto` 的语义是"自动挑一台"。实测日志：
-/// `choice=auto` 却 `DirectML device_id=1`（Intel UHD），独显（device_id=0）
-/// 从未被尝试 —— 集显上首次推理超时，随后整个进程的 DirectML 被禁用。
-///
-/// 现在的规则：`auto` 只认显式环境变量与自动探测；想钉住某台设备必须显式
-/// 选择 `gpu`（此时菜单会展示设备列表）。`auto` 忽略旧值时打一条日志，
-/// 免得"我明明选了 auto 却跑在集显上"再次无从排查。
+/// 第 1 步的运行时覆盖由 [`dml_device_index_for_key`] 从**稳定的 PCI 标识**
+/// （`vendor:device`）解析而来，见 `dml_adapters::DmlAdapterInfo::stable_key`。
+/// 这里拿到的是**本进程**当前的 DXGI 序号 —— 实测同一分钟内 App 进程与 VEGAS
+/// 插件进程的序号是互换的，所以持久化序号会让"同一份设置"在两个进程里指向
+/// 两块不同的卡。
 ///
 /// Always returns an explicit device_id. This uses `with_device_id(n)`
 /// which calls `SessionOptionsAppendExecutionProvider_DML` (old API).
@@ -492,21 +488,17 @@ pub fn acquire_session_build_lock(
 // DirectML 是 Windows-only EP：调用方只有下方 Windows 版会话构建，
 // 非 Windows 目标不编译（否则 CI 上是死代码）。
 #[cfg(target_os = "windows")]
-fn resolve_dml_device_id(choice: &str) -> Option<i32> {
-    // 1. Runtime override (set via UI/settings) — only for an explicit GPU request.
-    let explicit_gpu = matches!(choice, "gpu" | "directml");
+fn resolve_dml_device_id() -> Option<i32> {
+    // 1. Runtime override (set via UI/settings) — already resolved to this
+    //    process's DXGI index by `ui_settings_apply` (see `dml_device_index_for_key`).
     if let Some(id) = RUNTIME_DML_DEVICE_ID
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
         .and_then(|g| *g)
     {
-        if explicit_gpu {
-            return Some(id);
-        }
-        log::warn!(
-            "ort_session: ignoring the stored DirectML device_id={id} because the inference device is '{choice}' — auto-detection picks the adapter with most VRAM (choose \"GPU\" in the menu to pin a device)"
-        );
+        log::warn!("ort_session: DirectML device_id={id} (from the stored adapter key)");
+        return Some(id);
     }
     // 2. Env var — explicit override, honoured for every choice.
     if let Ok(val) = std::env::var("HIFISHIFTER_DML_DEVICE_ID") {
@@ -538,10 +530,48 @@ fn resolve_dml_device_id(choice: &str) -> Option<i32> {
 pub fn effective_dml_device_id() -> Option<i32> {
     #[cfg(target_os = "windows")]
     {
-        resolve_dml_device_id(&ep_choice_for_role(OrtSessionRole::Vocoder))
+        resolve_dml_device_id()
     }
     #[cfg(not(target_os = "windows"))]
     {
+        None
+    }
+}
+
+/// 把持久化的**稳定设备标识**（`vendor:device`）解析成**本进程**的 DXGI 序号。
+///
+/// 【为什么必须在这一层解析】设置里存的是 PCI 标识（见
+/// `crate::dml_adapters::DmlAdapterInfo::stable_key`），而 DirectML 的
+/// `with_device_id` 只认本进程的适配器序号。两者之间的换算**只能**在枚举之后做，
+/// 且必须每个进程各做一次 —— 实测同一分钟内独立 App 进程与 VEGAS 插件进程的
+/// 序号是互换的：`1` 在 App 里是 RTX 3050，在插件里是 Intel UHD。
+///
+/// 找不到（换了显卡 / 拔了 eGPU）时返回 `None` 并记一条日志，调用方回落到
+/// 自动探测（显存最大的那块）。
+pub fn dml_device_index_for_key(key: &str) -> Option<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        let adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
+        match adapters.iter().find(|a| a.stable_key() == key) {
+            Some(adapter) => {
+                log::warn!(
+                    "ort_session: stored DirectML adapter {key} ('{}') is device_id={} in this process",
+                    adapter.name,
+                    adapter.device_id
+                );
+                Some(adapter.device_id as i32)
+            }
+            None => {
+                log::warn!(
+                    "ort_session: stored DirectML adapter {key} is not present on this system — falling back to auto-detect"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = key;
         None
     }
 }
@@ -979,7 +1009,7 @@ fn build_session_inner(
     #[cfg(target_os = "windows")]
     if choice == "auto" || choice == "directml" || choice == "gpu" {
         // 设备只解析一次：闩锁按设备记账，构建与记账必须是同一个值。
-        let device = resolve_dml_device_id(&choice);
+        let device = resolve_dml_device_id();
         if !bypass_disable_latch && directml_disabled(device) {
             let device_desc = describe_dml_device(device);
             log::warn!(
