@@ -193,11 +193,8 @@ fn is_wrapper(name: &str) -> bool {
 /// 而用户要的是壳里那个 DAW 的名字。
 pub fn resolve_identity(evidence: &[Evidence]) -> HostIdentity {
     let identity = HostIdentity {
-        display: "unknown".to_string(),
-        source: None,
-        matched: None,
-        via: None,
         evidence: evidence.to_vec(),
+        ..HostIdentity::unknown()
     };
 
     // 1. 环境变量覆盖优先，且不参与别名表（用户写的名字就是答案）。
