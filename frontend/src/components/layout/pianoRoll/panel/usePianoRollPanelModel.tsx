@@ -1,12 +1,4 @@
-import React, {
-    type CSSProperties,
-    useCallback,
-    useEffect,
-    useLayoutEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector, useAppStore } from "../../../../app/hooks";
 import type { RootState } from "../../../../app/store";
@@ -17,7 +9,6 @@ import {
     setTrackStateRemote,
     cycleDragDirection,
     persistUiSettings,
-    setParamSelectionActive,
 } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
@@ -45,8 +36,7 @@ import { publishPianoRollSelection } from "../../../../utils/pianoRollSelectionB
 import { resolveTimelineScrollRange } from "../../timeline/runtime/timelineScrollRange";
 import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
 import { useToolbarOverflowTier } from "../useToolbarOverflowTier";
-import { normalizeSelection, selectionBoundingSpan, type ParamSelection } from "../paramSelection";
-import { type ParamClipboardData } from "../paramClipboardMapping";
+import { selectionBoundingSpan } from "../paramSelection";
 import { usePianoRollData } from "../usePianoRollData";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
 import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
@@ -90,20 +80,13 @@ import {
     useDevicePixelRatio,
 } from "../../../../hooks/useDevicePixelRatio";
 import { toggleSecondaryParamVisibility } from "../secondaryOverlaySelection";
-import type {
-    ParamMorphOverlay,
-    ParamName,
-    StrokeMode,
-    StrokePoint,
-    ValueViewport,
-} from "../types";
+import type { ParamName, ValueViewport } from "../types";
 import {
     selectKeybinding,
     selectKeybindings,
     selectMergedKeybindings,
 } from "../../../../features/keybindings/keybindingsSlice";
 import { clearPianoRollLoading, setPianoRollLoading } from "../../../../utils/pianoRollStatusBus";
-import { createLiveEditFlag } from "../liveEditFlag";
 import { parseCustomScaleToken } from "../../../../utils/scaleSelection";
 import { type PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 import type {
@@ -118,6 +101,7 @@ import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
 import { useTimelineDisplayControls } from "./useTimelineDisplayControls";
 import { buildToolIcons } from "./toolIcons";
 import { usePianoRollEditCommands } from "./usePianoRollEditCommands";
+import { usePianoRollEditSession } from "./usePianoRollEditSession";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
 import { usePianoRollScrollKernel } from "./usePianoRollScrollKernel";
 import { useMidiImport } from "./useMidiImport";
@@ -1546,72 +1530,22 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * `syncVerticalScrollbarForViewport` 提供。
      */
 
-    /** 多选区（升序、互不相交、相邻已合并的**帧**区间列表；null = 无选区） */
-    const selectionRef = useRef<ParamSelection | null>(null);
-    const [selectionUi, setSelectionUi] = useState<ParamSelection | null>(null);
-    // 参数线选区存在性入仓（session.paramSelectionActive）：复制/剪切按
-    // "当前选中了什么"路由时以此判定参数侧（selectionRef 的每次变更都
-    // 成对经过 setSelectionUi，见 usePianoRollInteractions）。拖拽期间的
-    // 重复派发值不变，immer 判定无修改直接跳过。
-    useEffect(() => {
-        dispatch(setParamSelectionActive(selectionUi !== null));
-    }, [dispatch, selectionUi]);
-    // 撤销/重做/跳转恢复参数编辑器选区：请求由后端载荷驱动 —— 只有「边缘拉伸」
-    // 这类同时改变选区的步骤才在后端记了快照（见 state.rs 的
-    // `HistoryRecord::param_selection`），撤销/重做时随载荷带回；其余操作不带该
-    // 字段，因此**不会**动用户手动调整过的选区。requestId 单调，按 id 幂等应用一次。
-    const appliedParamSelectionRestoreRef = useRef(0);
-    useEffect(() => {
-        const request = s.pendingParamSelectionRestore;
-        if (!request || request.requestId === appliedParamSelectionRestoreRef.current) return;
-        appliedParamSelectionRestoreRef.current = request.requestId;
-        const next = normalizeSelection(request.selection);
-        selectionRef.current = next;
-        setSelectionUi(next);
-        invalidate();
-    }, [invalidate, s.pendingParamSelectionRestore]);
-    const [paramMorphOverlays, setParamMorphOverlays] = useState<ParamMorphOverlay[] | null>(null);
-    const [canvasCursor, setCanvasCursor] = useState<CSSProperties["cursor"]>(
-        s.toolMode === "select" ? "default" : "crosshair",
-    );
-
-    const strokeRef = useRef<{
-        mode: StrokeMode;
-        pointerId: number;
-        param: ParamName;
-        points: StrokePoint[];
-    } | null>(null);
-
-    const panRef = useRef<{
-        pointerId: number;
-        startClientX: number;
-        startClientY: number;
-        startScrollLeft: number;
-        startView: ValueViewport;
-        startRectH: number;
-    } | null>(null);
-
-    /**
-     * 参数线剪贴板（多选区）：每段带**相对复制起点**的帧偏移，断层以偏移空洞
-     * 的形式保留 —— 粘贴/预览按 paramClipboardMapping 的唯一映射规则求交。
-     */
-    const clipboardRef = useRef<ParamClipboardData | null>(null);
-
-    /**
-     * 笔画进行中标志（pointer down 期间为 true）。
-     *
-     * 读它的是两个取数 hook（`usePianoRollData` / `useLoudnessCurves`）：笔画期间的
-     * 回包必须推迟落地，否则换掉 `paramView` 或响度快照都会打断进行中的笔画。
-     *
-     * 写它的有十余处手势收尾分支（见 `usePianoRollInteractions`），因此这里用
-     * **带边沿回调**的受控标志：任何 `= false` 的写入都自动补触发一次推迟的刷新，
-     * 不需要在十余处逐一记得调用 —— 漏一处就会让曲线停在旧数据上。
-     */
-    const liveEditEndHandlerRef = useRef<(() => void) | null>(null);
-    const liveEditActiveRef = useMemo(
-        () => createLiveEditFlag(() => liveEditEndHandlerRef.current?.()),
-        [],
-    );
+    // 编辑会话状态（选区 / 变形叠加 / 光标 / 笔画与平移手势 / 剪贴板槽位 /
+    // "笔画进行中"标志）整块在 `usePianoRollEditSession` 里（见该文件头）。
+    const {
+        selectionRef,
+        selectionUi,
+        setSelectionUi,
+        paramMorphOverlays,
+        setParamMorphOverlays,
+        canvasCursor,
+        setCanvasCursor,
+        strokeRef,
+        panRef,
+        clipboardRef,
+        liveEditEndHandlerRef,
+        liveEditActiveRef,
+    } = usePianoRollEditSession({ dispatch, invalidate, s });
 
     const {
         paramView,
