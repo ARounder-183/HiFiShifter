@@ -686,6 +686,8 @@ export interface BenchmarkResult {
     dmlMedianMs?: number | null;
     /** DirectML GPU real-time factor, null if unavailable or failed. */
     dmlRtFactor?: number | null;
+    /** DirectML 没能给出数字时的具体原因（会话回退到 CPU / 推理超时等）。 */
+    dmlError?: string | null;
     benchmarkSamples: number;
     /** True when WebGPU EP was available for the GPU benchmark. */
     gpuAvailable: boolean;
@@ -699,6 +701,8 @@ export interface BenchmarkResult {
     ortBuildInfo: string;
     /** All GPUs discovered (name, memory, device ID). */
     gpuDevices: GpuDeviceInfo[];
+    /** All DirectML-capable DXGI adapters (deviceId → name), sorted by VRAM desc. */
+    dmlAdapters?: DmlAdapterInfo[];
 }
 
 export interface BenchmarkResult_simple {

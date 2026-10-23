@@ -1348,6 +1348,32 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 );
                             })}
 
+                            {/* `auto` 下设备不可选，但**必须显示实际会用的那块卡**。
+                                【为什么】设备序号是持久化的：用户可能在 `gpu` 下选过集显后
+                                切回 `auto`。旧实现里此时没有任何 UI 提示，于是看起来是"自动"，
+                                实际被钉在集显上（实测日志：`choice=auto` 却
+                                `DirectML device_id=1`，独显从未被尝试）。现在 `auto` 明确
+                                忽略手动选择，并把自动挑中的卡写出来 —— 状态永远可见。
+                                【为什么是 `[0]`】`get_dml_adapters` 已按专用显存降序排好，
+                                内核的 `resolve_dml_device_id` 取的就是同一个 `first()`。 */}
+                            {s.ortEp === "auto" && dmlAdapters.length > 0 && (
+                                <>
+                                    <DropdownMenu.Separator />
+                                    <DropdownMenu.Label>{tf("menu_gpu_device")}</DropdownMenu.Label>
+                                    <DropdownMenu.Item disabled>
+                                        {withCheck(
+                                            true,
+                                            `${tf("menu_gpu_auto_select")} — ${dmlAdapters[0].name}`,
+                                        )}
+                                    </DropdownMenu.Item>
+                                    {s.ortDeviceId != null && (
+                                        <DropdownMenu.Item disabled>
+                                            {tf("menu_gpu_auto_ignores_pinned")}
+                                        </DropdownMenu.Item>
+                                    )}
+                                </>
+                            )}
+
                             {/* GPU Device Selector — shown when GPU EP is selected */}
                             {s.ortEp === "gpu" && dmlAdapters.length > 0 && (
                                 <>

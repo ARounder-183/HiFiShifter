@@ -1837,6 +1837,7 @@ export const enUS = {
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU Device",
     menu_gpu_auto_select: "Auto-select",
+    menu_gpu_auto_ignores_pinned: "Auto mode ignores the manually picked device",
     menu_run_benchmark: "Run Benchmark...",
     menu_background_prerender: "Background Pre-render",
 

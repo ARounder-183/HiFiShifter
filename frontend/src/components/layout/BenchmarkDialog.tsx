@@ -39,6 +39,19 @@ interface EpRow {
     available: boolean;
 }
 
+/**
+ * DirectML 行要标出**实际**用的是哪块卡。
+ *
+ * 【为什么】"GPU (DirectML) 800 ms"在双显卡机器上没有信息量：独显与集显可以差
+ * 十倍，而用户选了哪台、`auto` 最终挑了哪台，只有把适配器名写出来才看得见。
+ * `gpuDeviceId` 是后端解析后**实际**使用的 DXGI 序号（旧实现恒为 0，见
+ * `diagnose_gpu` 的说明）。
+ */
+function dmlRowLabel(result: BenchmarkResult): string {
+    const adapter = result.dmlAdapters?.find((a) => a.deviceId === result.gpuDeviceId);
+    return adapter ? `GPU (DirectML — ${adapter.name})` : "GPU (DirectML)";
+}
+
 function buildRows(result: BenchmarkResult): EpRow[] {
     const rows: EpRow[] = [
         {
@@ -69,7 +82,7 @@ function buildRows(result: BenchmarkResult): EpRow[] {
     // GPU (DirectML)
     if (result.dmlMedianMs != null && result.dmlRtFactor != null) {
         rows.push({
-            label: "GPU (DirectML)",
+            label: dmlRowLabel(result),
             medianMs: result.dmlMedianMs,
             rtf: result.dmlRtFactor,
             available: true,
@@ -349,6 +362,22 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 >
                                     {t("benchmark_gpu_failed_desc")}
                                 </span>
+                                {/* 【为什么必须显示原因】此前这里只有一个"失败"，
+                                    而真正的原因（会话回退到 CPU / 推理超时 / 该设备
+                                    在本进程内被禁用过）只存在于后端日志里。用户看到
+                                    的是一句无从下手的"失败"。 */}
+                                {result.dmlError && (
+                                    <span
+                                        className="hs-type-mono"
+                                        style={{
+                                            color: "var(--qt-danger-text)",
+                                            whiteSpace: "pre-wrap",
+                                            wordBreak: "break-word",
+                                        }}
+                                    >
+                                        {result.dmlError}
+                                    </span>
+                                )}
                             </Flex>
                         )}
 

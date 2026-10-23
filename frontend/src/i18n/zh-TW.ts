@@ -1663,6 +1663,7 @@ export const zhTW = {
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU 裝置",
     menu_gpu_auto_select: "自動選擇",
+    menu_gpu_auto_ignores_pinned: "自動模式忽略手動選擇的裝置",
     menu_run_benchmark: "執行基準測試...",
     menu_background_prerender: "背景預渲染",
 
