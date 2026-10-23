@@ -39,6 +39,15 @@ function walk(dir: string, out: string[] = []): string[] {
     return out;
 }
 
+/**
+ * 一个模块是否把指针手势交给了协议（`startPointerGesture`）。
+ *
+ * 【为什么要认它】协议本身就注册并注销 move / up / cancel，因此"调了协议"与
+ * "手写了那六行"是同一条不变量的两种实现。不认它，门禁会把迁移过的模块当成
+ * "没有手势"而**静默停止覆盖** —— 那比误报更糟。
+ */
+const USES_PROTOCOL = "startPointerGesture(";
+
 /** 数某个字面量在源码里出现的次数。 */
 function count(source: string, needle: string): number {
     let total = 0;
@@ -51,20 +60,26 @@ function count(source: string, needle: string): number {
 }
 
 describe("指针手势的生命周期门禁", () => {
-    it("★ 自检：确实扫到了若干手势模块（否则下面的断言是空转）", () => {
+    it("★ 自检：确实扫到了若干接管指针的模块（否则下面的断言是空转）", () => {
         const files = walk(GESTURES_DIR);
-        const capturing = files.filter((file) =>
-            readFileSync(file, "utf8").includes("setPointerCapture"),
-        );
+        const capturing = files.filter((file) => {
+            const source = readFileSync(file, "utf8");
+            return source.includes("setPointerCapture") || source.includes(USES_PROTOCOL);
+        });
         expect(files.length).toBeGreaterThanOrEqual(8);
+        // 迁移到协议之后仍有 11 个模块接管指针；门槛留 8 是为了容忍文件增删。
         expect(capturing.length).toBeGreaterThanOrEqual(8);
     });
 
-    it("★ 每个 setPointerCapture 的模块都注册并注销了 move / up / cancel", () => {
+    it("★ 每个接管指针的模块都注册并注销了 move / up / cancel", () => {
         const offenders: string[] = [];
         for (const file of walk(GESTURES_DIR)) {
             const source = readFileSync(file, "utf8");
-            if (!source.includes("setPointerCapture")) continue;
+            const captures = source.includes("setPointerCapture");
+            const delegates = source.includes(USES_PROTOCOL);
+            if (!captures && !delegates) continue;
+            // 交给协议的模块由协议保证成对；这里只要求它确实交了。
+            if (delegates) continue;
             for (const event of ["pointermove", "pointerup", "pointercancel"]) {
                 const added = count(source, `addEventListener("${event}"`);
                 const removed = count(source, `removeEventListener("${event}"`);

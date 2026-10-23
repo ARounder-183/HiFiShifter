@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { isDynParam } from "../../paramRanges";
 import { selectionToFrameSpans } from "../../paramSelection";
@@ -202,13 +203,13 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         ev.stopImmediatePropagation();
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & 2) !== 2) {
-            onUp(ev);
+            gesture?.end("up", ev);
             return;
         }
-        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
-        if (ev.pointerId !== pid) return;
         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
         const dy = startClientY - adjusted.clientY;
         if (Math.abs(dy) >= 2) {
@@ -266,13 +267,10 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         }
     };
 
-    const onUp = async (ev?: globalThis.PointerEvent) => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-        window.removeEventListener("contextmenu", suppressContextMenu, true);
+    const onEnd = async (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
         disposeFineAdjustedPointerState(finePointerState);
-        clearActivePointerGestureEnd(onUp);
+        // 取消路径没有可信的指针位置，因此不打开菜单；其余收尾两种原因相同。
+        const allowContextMenu = reason === "up";
         if (previewRafId != null) {
             cancelAnimationFrame(previewRafId);
             previewRafId = null;
@@ -285,7 +283,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
                 liveEditActiveRef.current = false;
             }
             setCanvasCursor("grab");
-            if (onContextMenu && document.hasFocus() && ev) {
+            if (allowContextMenu && onContextMenu && document.hasFocus() && ev) {
                 onContextMenu(ev.clientX, ev.clientY);
             }
             invalidate();
@@ -396,12 +394,16 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         invalidate();
     };
 
-    window.addEventListener("contextmenu", suppressContextMenu, true);
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: pid,
+        captureTarget: e.currentTarget,
+        onMove,
+        onEnd: (reason, event) => {
+            void onEnd(reason, event);
+        },
+        extra: [{ type: "contextmenu", listener: suppressContextMenu, capture: true }],
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
     return true;
-
-    return false;
 }

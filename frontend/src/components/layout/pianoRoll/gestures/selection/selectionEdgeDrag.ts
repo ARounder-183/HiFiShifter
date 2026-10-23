@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import { SELECTION_EDGE_MIN_WIDTH_PX } from "../../kernel/gestureHitTest";
 import {
     frameRangeEndCut,
@@ -61,7 +62,6 @@ export function handleSelectionEdgeDrag(
     // 也靠这一点保持稳定（固定端始终是"按下时的对侧边界"）。
     const baseSelection = sel;
     const pid = e.pointerId;
-    (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
     setCanvasCursor("ew-resize");
 
     const applyEdgePointer = (clientX: number, allowAutoScroll: boolean) => {
@@ -75,20 +75,16 @@ export function handleSelectionEdgeDrag(
         invalidate();
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & 1) !== 1) {
-            onUp();
+            gesture?.end("up", ev);
             return;
         }
-        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
-        if (ev.pointerId !== pid) return;
         applyEdgePointer(ev.clientX, true);
     };
-    const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-        clearActivePointerGestureEnd(onUp);
+    const onEnd = () => {
         // 收尾：把被拖到**不可见宽度**的段丢掉（与"单击不留零宽
         // 选区"同一条规则）。判据与边缘命中同源 —— 像素宽度不足
         // `SELECTION_EDGE_MIN_WIDTH_PX` 的段既看不到区域，也再也
@@ -112,11 +108,13 @@ export function handleSelectionEdgeDrag(
         invalidate();
     };
 
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: pid,
+        captureTarget: e.currentTarget,
+        onMove,
+        onEnd,
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
     return true;
-
-    return false;
 }

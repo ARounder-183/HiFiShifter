@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import {
     cycleVibratoChoice,
     vibratoCycleAnchorId,
@@ -282,9 +283,11 @@ export function handleVibratoPointerDown(
         if (ev != null) processLineEvent(ev);
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 selection 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-            onUp();
+            gesture?.end("up", ev);
             return;
         }
         const st = strokeRef.current;
@@ -308,7 +311,8 @@ export function handleVibratoPointerDown(
         pendingLineEvent = null;
     };
 
-    const onUp = () => {
+    /** 正常松手：冲刷挂起采样并提交。 */
+    const finishUp = () => {
         const st = strokeRef.current;
         const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
         const vib = isOwnStroke ? vibratoStateRef.current : null;
@@ -330,12 +334,6 @@ export function handleVibratoPointerDown(
         // 停掉边缘自动滚屏：松手后视图绝不能继续滚（见 driver 的 `stop`）。
         onEdgeScrolledRef.current = null;
         edgeScroll.stop();
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onCancel);
-        window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
-        window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
-        clearActivePointerGestureEnd(onUp);
         invalidate();
         if (!isOwnStroke || !st) return;
         if (
@@ -377,7 +375,8 @@ export function handleVibratoPointerDown(
      * 接管 / 掌拒 / 笔离开感应区）意味着手势不可信，半截笔画
      * 不应写进后端 —— 后端从未收到数据，丢弃 live 预览层即可。
      */
-    const onCancel = () => {
+    /** pointercancel：回滚而不是提交（见上方注释）。 */
+    const finishCancel = () => {
         const st = strokeRef.current;
         const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
         if (isOwnStroke) {
@@ -391,13 +390,7 @@ export function handleVibratoPointerDown(
         // 取消路径同样必须停掉自动滚屏（否则视图会一直滚下去）。
         onEdgeScrolledRef.current = null;
         edgeScroll.stop();
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onCancel);
-        window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
-        window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
-        clearActivePointerGestureEnd(onUp);
-        // 与 `onUp` 同款收尾：HUD 气泡（深度 / 速率 / 预设）挂在面板状态上，
+        // 与 `finishUp` 同款收尾：HUD 气泡（深度 / 速率 / 预设）挂在面板状态上，
         // 只有 `onVibratoDragEnd` 会把它撤下。取消路径漏掉这一步，气泡会
         // 永久停在画面上 —— 取消本就"什么都没发生"，却留下一个读数框。
         //（`blur` 路径不受影响：它经 `activePointerGestureEnd` 走 `onUp`。）
@@ -419,7 +412,9 @@ export function handleVibratoPointerDown(
             onCycleDragDirection(usesVibratoPath ? "vibrato" : "draw");
         }
     };
-    const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
+    const onMouseDownDuringDraw = (event: Event) => {
+        // 注册在 window 的 `mousedown` 上，因此类型是 Event；这里收窄回 MouseEvent。
+        const ev = event as globalThis.MouseEvent;
         // 鼠标侧键（X1 / X2）在颤音拖拽期间切换预设。
         //
         // 【为什么在这里而不是画布的 pointerdown】见
@@ -489,10 +484,19 @@ export function handleVibratoPointerDown(
     // 触控板替代：拖拽中按下快捷键与右键同义。
     const disposeDragDirKey = installDragDirectionKeyCycler(cycleLineDragDir);
 
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onCancel);
-    window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
-    window.addEventListener("mousedown", onMouseDownDuringDraw, true);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: e.pointerId,
+        // 指针捕获由 canvasPointerDown 统一做（这条分支是被调用方），见 freehand 分支。
+        onMove,
+        onEnd: (reason) => {
+            if (reason === "up") finishUp();
+            else finishCancel();
+        },
+        extra: [
+            { type: "contextmenu", listener: onContextMenuDuringDraw, capture: true },
+            { type: "mousedown", listener: onMouseDownDuringDraw, capture: true },
+        ],
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
 }

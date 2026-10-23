@@ -1,4 +1,5 @@
 import { clamp } from "../../../timeline";
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import { isDynParam } from "../../paramRanges";
 import {
     frameBoundLeftFromPointer,
@@ -332,13 +333,13 @@ export function handleStretchSelectionEdge(
         requestWaveformRepaint();
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & 1) !== 1) {
-            onUp();
+            gesture?.end("up", ev);
             return;
         }
-        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
-        if (ev.pointerId !== pid) return;
         // 点击死区：未越过阈值前不预览、不更新（画面上没有任何变化），
         // 松手时按"点击"处理 —— 不回写数据、不打撤销点。拉伸路径的
         // 收尾同样会整段回写并打检查点，没有位移时那是纯粹的噪音。
@@ -361,12 +362,8 @@ export function handleStretchSelectionEdge(
         }
     };
 
-    const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
+    const onEnd = () => {
         disposeFineAdjustedPointerState(finePointerState);
-        clearActivePointerGestureEnd(onUp);
         // 取消挂起的预览帧：松手后的提交路径负责重建。
         if (previewRafId != null) {
             cancelAnimationFrame(previewRafId);
@@ -493,11 +490,13 @@ export function handleStretchSelectionEdge(
         invalidate();
     };
 
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: pid,
+        captureTarget: e.currentTarget,
+        onMove,
+        onEnd,
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
     return true;
-
-    return false;
 }

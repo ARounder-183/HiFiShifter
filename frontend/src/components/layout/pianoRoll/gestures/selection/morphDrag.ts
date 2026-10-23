@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import { secToViewportPx } from "../../../renderKernel/timelineAxis.js";
 import { clamp } from "../../../timeline";
 import { isDynParam } from "../../paramRanges";
@@ -134,7 +135,6 @@ export function handleMorphPointerDown(
         setCanvasCursor("grabbing");
         ensureLiveEditBase(pvForMorph);
         if (liveEditActiveRef) liveEditActiveRef.current = true;
-        (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
         const finePointerState = createFineAdjustedPointerState(
             e.nativeEvent,
             e.currentTarget as HTMLCanvasElement,
@@ -176,15 +176,13 @@ export function handleMorphPointerDown(
             }
         };
 
+        /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+        let gesture: PointerGesture | null = null;
         const onMove = (ev: globalThis.PointerEvent) => {
             if ((ev.buttons & 1) !== 1) {
-                onUp();
+                gesture?.end("up", ev);
                 return;
             }
-            // 只接受本指针的 move：第二指针（掌压触摸等）的
-            // buttons 恒为 1，不校验 pointerId 会驱动本次手势，
-            // 松手还会把掌压驱动的曲线提交到后端。
-            if (ev.pointerId !== e.pointerId) return;
             const drag = morphDragRef.current;
             const overlayNow = morphOverlayRef.current;
             const pvNow = paramViewRef.current;
@@ -235,16 +233,12 @@ export function handleMorphPointerDown(
             }
         };
 
-        const onUp = () => {
+        const onEnd = () => {
             const drag = morphDragRef.current;
             const overlayNow = morphOverlayRef.current;
             const pvNow = paramViewRef.current;
             morphDragRef.current = null;
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            window.removeEventListener("pointercancel", onUp);
             disposeFineAdjustedPointerState(finePointerState);
-            clearActivePointerGestureEnd(onUp);
             // 最后一次 move 的预览若还在 rAF 队列里，必须在提交前
             // 同步冲刷：提交读 overlayNow / live 层，漏冲刷会把
             // 末段位移丢掉（与选区拖拽"松手即取消"不同——这里
@@ -325,10 +319,14 @@ export function handleMorphPointerDown(
             setCanvasCursor("default");
         };
 
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        window.addEventListener("pointercancel", onUp);
-        setActivePointerGestureEnd(onUp);
+        gesture = startPointerGesture({
+            pointerId: e.pointerId,
+            captureTarget: e.currentTarget,
+            onMove,
+            onEnd,
+            registerEnd: setActivePointerGestureEnd,
+            clearEnd: clearActivePointerGestureEnd,
+        });
         return true;
     }
 

@@ -14,6 +14,7 @@
  * 【为什么边缘滚屏要经 `onEdgeScrolledRef`】驱动在 `canvasPointerDown` 里构造时就闭包读了
  * 那个槽位；按值传进来会得到一份副本，写入到不了驱动的闭包。与颤音分支同一约定。
  */
+import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import { PEN_ERASER_BUTTONS_MASK, coalescedEventsOf } from "../../../../utils/penInput";
 import {
     isChildPitchOffsetCentsParam,
@@ -208,11 +209,11 @@ export function handleFreehandPointerDown(
         }
         invalidate();
         // live 覆盖只改 ref，波形面收不到通知 —— 重绘请求由本帧的
-        // 处理循环末尾统一发出（见 flushPendingMoves / onUp）：
+        // 处理循环末尾统一发出（见 flushPendingMoves / finishUp）：
         // 同一帧内的全部 coalesced 采样只重绘一次。
     };
 
-    // 待处理事件队列 + rAF 合帧状态。flush 后队列即清空；onUp/
+    // 待处理事件队列 + rAF 合帧状态。flush 后队列即清空；finishUp/
     // onCancel 里取消挂起帧（挂起的帧只能看到"队列已消费"的状态，
     // 不取消也不会重复处理，但显式取消避免收尾后还跑一次回调）。
     let pendingMoveEvents: globalThis.PointerEvent[] = [];
@@ -237,13 +238,15 @@ export function handleFreehandPointerDown(
         if (processed) requestWaveformRepaint();
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 selection 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-            onUp();
+            gesture?.end("up", ev);
             return;
         }
         const st = strokeRef.current;
-        if (!st || st.pointerId !== e.pointerId) return;
+        if (!st) return;
         // 边缘自动滚屏：`track` 会立刻滚一帧并维持 rAF 循环（指针停在
         // 边缘不动时也继续滚）。**不在这里读坐标做处理** —— 事件仍走
         // 下面的合帧队列，滚动引发的重算由 `onEdgeScrolled` 负责。
@@ -262,7 +265,8 @@ export function handleFreehandPointerDown(
         pendingMoveEvents = [];
     };
 
-    const onUp = () => {
+    /** 正常松手：冲刷挂起采样并提交。 */
+    const finishUp = () => {
         const st = strokeRef.current;
         const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
         // 提交前先同步消费挂起的采样队列：processStrokeEvent 依赖
@@ -294,12 +298,6 @@ export function handleFreehandPointerDown(
         // 停掉边缘自动滚屏：松手后视图绝不能继续滚（见 driver 的 `stop`）。
         onEdgeScrolledRef.current = null;
         edgeScroll.stop();
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onCancel);
-        window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
-        window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
-        clearActivePointerGestureEnd(onUp);
         invalidate();
         if (!isOwnStroke || !st) return;
         if (
@@ -319,7 +317,8 @@ export function handleFreehandPointerDown(
      * pointercancel 收尾：**回滚**而不是提交（与直线 / 颤音工具分支
      * 同一语义）。OS 主动取消意味着手势不可信，半截笔画不写后端。
      */
-    const onCancel = () => {
+    /** pointercancel：回滚而不是提交（见下方注释）。 */
+    const finishCancel = () => {
         const st = strokeRef.current;
         const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
         if (isOwnStroke) {
@@ -333,12 +332,6 @@ export function handleFreehandPointerDown(
         // 取消路径同样必须停掉自动滚屏（否则视图会一直滚下去）。
         onEdgeScrolledRef.current = null;
         edgeScroll.stop();
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onCancel);
-        window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
-        window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
-        clearActivePointerGestureEnd(onUp);
         liveEditOverrideRef.current = null;
         if (liveEditActiveRef) liveEditActiveRef.current = false;
         invalidate();
@@ -355,7 +348,9 @@ export function handleFreehandPointerDown(
             onCycleDragDirection("draw");
         }
     };
-    const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
+    const onMouseDownDuringDraw = (event: Event) => {
+        // 注册在 window 的 `mousedown` 上，因此类型是 Event；这里收窄回 MouseEvent。
+        const ev = event as globalThis.MouseEvent;
         if (ev.button !== 2) return;
         if (!canCycleDragDirection) return;
         // 仅在左键拖拽进行中时，右键才切换拖拽方向。
@@ -367,10 +362,20 @@ export function handleFreehandPointerDown(
     // 触控板替代：拖拽中按下快捷键与右键同义。
     const disposeDragDirKey = installDragDirectionKeyCycler(cycleFreehandDragDir);
 
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onCancel);
-    window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
-    window.addEventListener("mousedown", onMouseDownDuringDraw, true);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: e.pointerId,
+        // 指针捕获由 canvasPointerDown 在分派之前统一做（这条分支是被调用方，
+        // 不是入口），因此这里不接管捕获，也不释放它。
+        onMove,
+        onEnd: (reason) => {
+            if (reason === "up") finishUp();
+            else finishCancel();
+        },
+        extra: [
+            { type: "contextmenu", listener: onContextMenuDuringDraw, capture: true },
+            { type: "mousedown", listener: onMouseDownDuringDraw, capture: true },
+        ],
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
 }

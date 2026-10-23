@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import { armRightDragContextMenuGuard } from "../../../../utils/rightDragContextMenuGuard";
 import { clamp } from "../../timeline";
@@ -337,24 +338,19 @@ export function handleSelectPointerDown(
         const pressMask = e.button === 2 ? 2 : 1;
         const isRightDrag = e.button === 2;
 
-        (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
         // 右键手势的收尾菜单：拖拽期间一律吞掉，**没拖动**时按"右键点击"
         // 处理（手工打开菜单）—— 与选区平移 / 曲线形变两处右键分支同一套。
         const suppressContextMenu = (ev: Event) => {
             ev.preventDefault();
             ev.stopImmediatePropagation();
         };
-        if (isRightDrag) {
-            window.addEventListener("contextmenu", suppressContextMenu, true);
-        }
+        /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+        let gesture: PointerGesture | null = null;
         const onMove = (ev: globalThis.PointerEvent) => {
             if ((ev.buttons & pressMask) !== pressMask) {
-                onUp(ev);
+                gesture?.end("up", ev);
                 return;
             }
-            // 只接受本指针的 move：第二指针（掌压触摸等）的
-            // buttons 恒为 1，不校验 pointerId 会驱动本次手势。
-            if (ev.pointerId !== e.pointerId) return;
             // 3px 死区：区分「点击切换」与「拖动追加」，避免手抖误删段
             if (!moved && Math.abs(ev.clientX - startClientX) > 3) {
                 moved = true;
@@ -368,24 +364,20 @@ export function handleSelectPointerDown(
             updateSelectionUi(selectionRef.current);
             invalidate();
         };
-        const onUp = (ev?: globalThis.PointerEvent) => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            window.removeEventListener("pointercancel", onUp);
-            if (isRightDrag) {
-                window.removeEventListener("contextmenu", suppressContextMenu, true);
-            }
-            clearActivePointerGestureEnd(onUp);
+        const onEnd = (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
             // 「原地点击已有段 = 取消该段」只属于**修饰键**路径：右键起手的
             // 分支只在未选中区域触发，右键点击在那里是"交回菜单"（见下），
             // 不应借帧坐标的边界夹取误差误删某一段。
-            if (!moved && hitExistingRange && !isRightDrag) {
+            // 【为什么要求 reason === "up"】pointercancel 意味着手势不可信（OS 打断 /
+            // 指针被抢）。把"原地点击 = 取消该段"用在一条被取消的手势上，等于凭一个
+            // 不可信的落点删掉用户的选区。
+            if (reason === "up" && !moved && hitExistingRange && !isRightDrag) {
                 // 切换取消：移除被点击的那一段
                 // （removeRangeAtFrame 已覆盖"按点击帧定位该段"的语义）
                 selectionRef.current = removeRangeAtFrame(selectionRef.current, startFrame);
                 updateSelectionUi(selectionRef.current);
             }
-            if (isRightDrag && !moved) {
+            if (isRightDrag && !moved && reason === "up") {
                 // 右键点击（没有拖动）：未选中区域起手时既没有可取消的段，
                 // 也没有要追加的范围 —— 原样交回上下文菜单。
                 if (onContextMenu && document.hasFocus() && ev) {
@@ -394,10 +386,18 @@ export function handleSelectPointerDown(
             }
             invalidate();
         };
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        window.addEventListener("pointercancel", onUp);
-        setActivePointerGestureEnd(onUp);
+        gesture = startPointerGesture({
+            pointerId: e.pointerId,
+            captureTarget: e.currentTarget,
+            onMove,
+            onEnd,
+            // 只有右键起手才吞菜单：左键分支不需要，也不该多装一个全局监听。
+            extra: isRightDrag
+                ? [{ type: "contextmenu", listener: suppressContextMenu, capture: true }]
+                : [],
+            registerEnd: setActivePointerGestureEnd,
+            clearEnd: clearActivePointerGestureEnd,
+        });
         return true;
     }
 
@@ -610,7 +610,6 @@ export function handleSelectPointerDown(
         // 并 invalidate，缓存随之失效。
         const entrySelection = selectionRef.current;
         const pid = e.pointerId;
-        (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
         const finePointerState = createFineAdjustedPointerState(
             e.nativeEvent,
             e.currentTarget as HTMLCanvasElement,
@@ -622,13 +621,13 @@ export function handleSelectPointerDown(
         // 选区；松手时的收尾也靠它决定"这一次到底是单击还是框选"。
         const startClientX = e.clientX;
         let moved = false;
+        /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+        let gesture: PointerGesture | null = null;
         const onMove = (ev: globalThis.PointerEvent) => {
             if ((ev.buttons & 1) !== 1) {
-                onUp();
+                gesture?.end("up", ev);
                 return;
             }
-            // 只接受本指针的 move（掌压拒识的 move 侧防线）。
-            if (ev.pointerId !== pid) return;
             if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
             // 拖拽途中选区被外部清除（如 BackSpace / 取消选择）时不再续建。
             // 判据必须带上"按下时本来**有**选区"：本次拖拽正要创建第一个
@@ -647,12 +646,8 @@ export function handleSelectPointerDown(
             updateSelectionUi(selectionRef.current);
             invalidate(); // 实时重绘选区
         };
-        const onUp = () => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            window.removeEventListener("pointercancel", onUp);
+        const onEnd = () => {
             disposeFineAdjustedPointerState(finePointerState);
-            clearActivePointerGestureEnd(onUp);
             if (!moved) {
                 // 单击（含笔/触摸的抖动）：没有拖动就没有新选区，同时把
                 // 按下前的那一段清掉 —— 与"单击空白处 = 取消选择"一致。
@@ -661,10 +656,14 @@ export function handleSelectPointerDown(
             }
             invalidate();
         };
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        window.addEventListener("pointercancel", onUp);
-        setActivePointerGestureEnd(onUp);
+        gesture = startPointerGesture({
+            pointerId: pid,
+            captureTarget: e.currentTarget,
+            onMove,
+            onEnd,
+            registerEnd: setActivePointerGestureEnd,
+            clearEnd: clearActivePointerGestureEnd,
+        });
         return true;
     }
     // 右键：不在 pointerdown 时清除或重建选区，交由 contextmenu 或右键拖拽逻辑处理

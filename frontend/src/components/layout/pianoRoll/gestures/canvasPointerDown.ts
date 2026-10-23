@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
 import {
     isEraserButton,
@@ -426,14 +427,14 @@ export function handleCanvasPointerDown(
             startRectH:
                 (canvasRef.current?.getBoundingClientRect().height ?? viewSizeRef.current.h) || 1,
         };
-        (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
+        /** 手势句柄（onMove 需要主动收尾，见 selection 分支的同名字段）。 */
+        let gesture: PointerGesture | null = null;
         const onMove = (ev: globalThis.PointerEvent) => {
-            // 掌侧误触防御（与同文件其余手势一致）：第二指针的 move 若
-            // 先过 buttons 检查，touch 的 buttons 恒不满足 &4，会把
-            // 进行中的平移整个终止掉；先校验 pointerId 直接忽略。
-            if (ev.pointerId !== pid) return;
+            // 掌侧误触防御：协议已经按 pointerId 过滤，因此第二指针的 move
+            // 到不了这里 —— touch 的 buttons 恒不满足 &4，若让它过 buttons
+            // 检查会把进行中的平移整个终止掉。
             if ((ev.buttons & 4) !== 4) {
-                onUp();
+                gesture?.end("up", ev);
                 return;
             }
             const pan = panRef.current;
@@ -463,18 +464,18 @@ export function handleCanvasPointerDown(
             }
             invalidate();
         };
-        const onUp = () => {
+        const onEnd = () => {
             panRef.current = null;
             setCanvasCursor(getDefaultCanvasCursor());
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            window.removeEventListener("pointercancel", onUp);
-            clearActivePointerGestureEnd(onUp);
         };
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        window.addEventListener("pointercancel", onUp);
-        setActivePointerGestureEnd(onUp);
+        gesture = startPointerGesture({
+            pointerId: pid,
+            captureTarget: e.currentTarget,
+            onMove,
+            onEnd,
+            registerEnd: setActivePointerGestureEnd,
+            clearEnd: clearActivePointerGestureEnd,
+        });
         return;
     }
 

@@ -1,3 +1,4 @@
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import {
     scaleStepDeltaBetween,
     transposePitchByScaleSteps,
@@ -359,13 +360,12 @@ export function handleParamLineNearDrag(
         }
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
-        // 掌侧误触防御（与同文件其余手势一致）：触控笔/手指的
-        // pointermove 在 touch 场景同样满足 buttons&1，不加
-        // pointerId 卫兵会让第二指改写本次拖拽的位移状态。
-        if (ev.pointerId !== pid) return;
+        // 掌侧误触防御：协议已按 pointerId 过滤，第二指的 move 到不了这里。
         if ((ev.buttons & 1) !== 1) {
-            onUp();
+            gesture?.end("up", ev);
             return;
         }
         // 点击死区：越过阈值之前一律按"还没开始拖"处理 ——
@@ -448,13 +448,9 @@ export function handleParamLineNearDrag(
         schedulePreview();
     };
 
-    const onUp = async () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
+    const onEnd = async () => {
         disposeDragDirKey();
         disposeFineAdjustedPointerState(finePointerState);
-        clearActivePointerGestureEnd(onUp);
         // 取消挂起的预览帧：松手后由提交路径以全分辨率
         // 数据重建，预览层不得再覆盖提交结果。
         if (previewRafId != null) {
@@ -632,7 +628,9 @@ export function handleParamLineNearDrag(
         // Also cycle the global setting
         if (onCycleDragDirection) onCycleDragDirection("select");
     };
-    const onMouseDownDuringDrag = (ev: globalThis.MouseEvent) => {
+    const onMouseDownDuringDrag = (event: Event) => {
+        // 注册在 window 的 `mousedown` 上，因此类型是 Event；这里收窄回 MouseEvent。
+        const ev = event as globalThis.MouseEvent;
         if (ev.button !== 2) return;
         // 仅在左键拖拽进行中时，右键才切换拖拽方向。
         if ((ev.buttons & 1) !== 1) return;
@@ -643,13 +641,19 @@ export function handleParamLineNearDrag(
     // 触控板替代：拖拽中按下快捷键与右键同义。
     const disposeDragDirKey = installDragDirectionKeyCycler(cycleSelectDragDir);
 
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    window.addEventListener("contextmenu", onContextMenuDuringDrag, true);
-    window.addEventListener("mousedown", onMouseDownDuringDrag, true);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: pid,
+        captureTarget: e.currentTarget,
+        onMove,
+        onEnd: () => {
+            void onEnd();
+        },
+        extra: [
+            { type: "contextmenu", listener: onContextMenuDuringDrag, capture: true },
+            { type: "mousedown", listener: onMouseDownDuringDrag, capture: true },
+        ],
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
     return true;
-
-    return false;
 }

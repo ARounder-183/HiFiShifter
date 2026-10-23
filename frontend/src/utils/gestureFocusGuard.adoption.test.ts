@@ -34,8 +34,18 @@ function walk(dir: string, out: string[] = []): string[] {
     return out;
 }
 
-/** 判据：装了 window/document 级 pointermove（拖拽手势的构造特征）。 */
-const POINTER_MOVE_MARKER = 'addEventListener("pointermove"';
+/**
+ * 判据：装了 window/document 级 pointermove（拖拽手势的构造特征）。
+ *
+ * 【为什么还要认 `startPointerGesture(`】参数编辑器的手势现在多数交给
+ * `gestures/pointerGesture` 协议；它内部装的就是 window pointermove。只认字面量会让
+ * 迁移过的模块**从扫描范围里消失**，门禁静默失效。
+ */
+const POINTER_MOVE_MARKERS = ['addEventListener("pointermove"', "startPointerGesture("];
+
+function installsPointerMove(source: string): boolean {
+    return POINTER_MOVE_MARKERS.some((marker) => source.includes(marker));
+}
 
 /**
  * 失焦收尾的合法写法。
@@ -51,6 +61,8 @@ const FOCUS_HANDLING = [
     'addEventListener("blur"',
     "visibilitychange",
     "setActivePointerGestureEnd(",
+    // 交给协议并且把收尾登记给了面板：失焦时面板会调它（见 pointerGesture 的模块头）。
+    "registerEnd:",
 ];
 
 /**
@@ -64,6 +76,9 @@ const NON_GESTURE: Record<string, string> = {
         "只把最近一次指针坐标记进 ref（打开时用它定位），不产生任何视觉状态",
     [join("src", "utils", "penInput.ts")]:
         "被动记录器（capture + passive，只读不拦截），与拖拽无关",
+    [join("src", "components", "layout", "pianoRoll", "gestures", "pointerGesture.ts")]:
+        "手势协议本身（它替调用方装 pointermove）；失焦收尾由调用方传 registerEnd 接上，" +
+        "本文件不产生任何拖拽态",
 };
 
 function scan(): { offenders: string[]; scanned: number } {
@@ -72,7 +87,7 @@ function scan(): { offenders: string[]; scanned: number } {
     for (const file of walk(join("src"))) {
         if (/\.test\.tsx?$/.test(file)) continue;
         const source = readFileSync(file, "utf8");
-        if (!source.includes(POINTER_MOVE_MARKER)) continue;
+        if (!installsPointerMove(source)) continue;
         scanned += 1;
         if (file in NON_GESTURE) continue;
         if (FOCUS_HANDLING.some((marker) => source.includes(marker))) continue;

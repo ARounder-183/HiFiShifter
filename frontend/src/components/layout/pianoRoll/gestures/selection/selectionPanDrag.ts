@@ -1,4 +1,5 @@
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
+import { startPointerGesture, type PointerGesture } from "../pointerGesture";
 import { clampSelectionShift, normalizeSelection, snapFrame } from "../../paramSelection";
 import type { ParamSelection } from "../../paramSelection";
 import type { PointerEvent as ReactPointerEvent } from "react";
@@ -59,7 +60,6 @@ export function handleSelectionPanDrag(
     // 它们不会限制本次平移的可用范围。
     const startRange = sel[shiftRangeIndex];
     const pid = e.pointerId;
-    (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
 
     // 右键手势的收尾菜单：拖拽期间一律吞掉（否则松手会弹出上下文
     // 菜单）；**没拖动**时按"右键点击"处理，手工打开菜单 —— 与
@@ -70,13 +70,19 @@ export function handleSelectionPanDrag(
         ev.preventDefault();
         ev.stopImmediatePropagation();
     };
+    /**
+     * 手势句柄。
+     *
+     * 【为什么是可变槽】onMove 在"右键已松开"时要主动收尾，而句柄只有在
+     * startPointerGesture 返回之后才存在。槽位在事件到来前一定已赋值。
+     */
+    let gesture: PointerGesture | null = null;
     const onMove = (ev: globalThis.PointerEvent) => {
         if ((ev.buttons & 2) !== 2) {
-            onUp(ev);
+            // 右键松在画布外：自己收尾（指针 id 已由协议过滤）。
+            gesture?.end("up", ev);
             return;
         }
-        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
-        if (ev.pointerId !== pid) return;
         // 3px 死区：区分「右键点击」与「右键拖拽」，手抖不该被判成
         // 拖拽（否则正常右键点击的菜单会被吞掉）。
         if (!didDrag && Math.abs(ev.clientX - startClientX) > 3) {
@@ -117,13 +123,10 @@ export function handleSelectionPanDrag(
         updateSelectionUi(selectionRef.current);
         invalidate();
     };
-    const onUp = (ev?: globalThis.PointerEvent) => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-        window.removeEventListener("contextmenu", suppressContextMenu, true);
-        clearActivePointerGestureEnd(onUp);
-        if (!didDrag) {
+    const onEnd = (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
+        // 【为什么取消也要走这里】取消时没有"右键点击"语义（没有可信的指针位置），
+        // 因此不打开菜单；其余收尾（重绘）两种原因相同。
+        if (!didDrag && reason === "up") {
             // 右键点击（没有平移）：选区原样保留，交回菜单。
             if (onContextMenu && document.hasFocus() && ev) {
                 onContextMenu(ev.clientX, ev.clientY);
@@ -133,12 +136,14 @@ export function handleSelectionPanDrag(
         invalidate();
     };
 
-    window.addEventListener("contextmenu", suppressContextMenu, true);
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    setActivePointerGestureEnd(onUp);
+    gesture = startPointerGesture({
+        pointerId: pid,
+        captureTarget: e.currentTarget,
+        onMove,
+        onEnd,
+        extra: [{ type: "contextmenu", listener: suppressContextMenu, capture: true }],
+        registerEnd: setActivePointerGestureEnd,
+        clearEnd: clearActivePointerGestureEnd,
+    });
     return true;
-
-    return false;
 }
