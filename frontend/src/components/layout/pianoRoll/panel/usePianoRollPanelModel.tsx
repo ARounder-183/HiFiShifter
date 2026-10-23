@@ -44,7 +44,6 @@ import {
 import { useNonPassiveWheel } from "../../../../utils/useNonPassiveWheel";
 import type { ScaleLike } from "../../../../utils/musicalScales";
 import { clamp, formatCursorTime } from "../../timeline";
-import { isMirrorEcho } from "../../timeline/scrollEcho";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "../../timeline";
 import type { TempoMap } from "../../../../utils/tempoMap";
 import { effectiveScaleAtSec } from "../../../../utils/tempoMap";
@@ -132,6 +131,7 @@ import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { NOTE_NAMES_SHARP } from "./panelHelpers";
 import { runEditOp } from "./editOperations";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
+import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
 import { usePianoRollScrollKernel } from "./usePianoRollScrollKernel";
 import { useMidiImport } from "./useMidiImport";
@@ -154,8 +154,6 @@ import {
     syncVerticalScrollbarForViewport as syncVerticalScrollbarForViewportImpl,
 } from "./sceneBuilders";
 import { usePianoRollViewport } from "./usePianoRollViewport";
-import { usePianoRollAxisInteractions } from "./usePianoRollAxisInteractions";
-import { usePianoRollAxisWheel } from "./usePianoRollAxisWheel";
 import { useProcessorParams } from "./useProcessorParams";
 
 /**
@@ -2300,209 +2298,54 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         refreshParamValuePreview();
     }, [paramView, refreshParamValuePreview]);
 
-    const onScrollerWheelNative = interactions.onScrollerWheelNative;
-    /**
-     * 原生滚动容器的 `scroll` 事件（面板侧的唯一入口）。
-     *
-     * 【绝大部分是镜像回声，但不是全部】
-     * 内核是唯一渲染路径，原生 scroller 只是**镜像**：`onFrame` 每帧把内核真值写回
-     * 它，该写入会触发原生 `scroll` 事件。旧代码在这里**无条件**读回位置再写回内核，
-     * 而那一刻读到的是上一帧镜像的旧值（实测内核已到 548.054、事件里读到 540.5），
-     * 使内核被回退 7.554px，逐帧往复即用户报告的「上下拖经常拖不动 / 阶梯感」。
-     *
-     * 但"无条件忽略"同样不对：原生容器仍是 `overflow: scroll`，**触摸拖拽 /
-     * 触控板惯性 / 焦点滚入视口**这三类输入只会产生原生 `scroll`，没有任何显式
-     * 入口——忽略它等于这些输入完全失效（旧实现在这里读回位置正是为了它们）。
-     *
-     * 【判据：与「上次镜像写入值」比，**不是**与「内核当前值」比】
-     * 本处理函数一度拿事件值与 `host.getViewport()`（内核**当前**值）比较。那在连续
-     * 滚动 / 缩放时必然失效：事件报的是**上一帧**写下的值，内核此刻已前进一整帧，
-     * 两者必然不等 → 回声被稳定地误收成"容器自己动了" → 采纳并（同步开启时）把它
-     * 推回共享视口。推回的还带着浏览器的设备像素量化误差（≤0.5px），于是两个面板
-     * 进入亚像素往复——即用户报告的「启用同步后滚轮缩放仍然抽动」（同步关闭时不会
-     * 推回共享视口，所以看不到）。
-     *
-     * 基准必须是**我上次写进容器的值**（`lastMirroredScroll*Ref`）：回声报的正是它
-     * （误差仅来自浏览器量化，有界），而真实输入会把容器带到别的值上。这正是
-     * `timeline/scrollEcho` 为轨道头写下的同一条结论（判来源，不判与真值的距离），
-     * 现在两个容器共用同一个纯函数。
-     *
-     * @param event 原生 `scroll` 事件。
-     * @returns 无返回值。
-     */
-    const onScrollerScroll = useCallback(
-        (event: React.UIEvent<HTMLDivElement>) => {
-            // 应用共享视口写入期间不采纳：那一刻原生镜像还停在上一帧的旧值
-            //（与 `timelineSyncApplyingRef` 的既有用法同一理由）。
-            if (timelineSyncApplyingRef.current) return;
-            const scroller = event.currentTarget;
-            const host = hostRef.current;
-            if (host === null) return;
-            if (
-                !isMirrorEcho({
-                    mirroredPx: lastMirroredScrollLeftRef.current,
-                    nativePx: scroller.scrollLeft,
-                })
-            ) {
-                syncScrollLeft(scroller);
-            }
-            if (
-                !isMirrorEcho({
-                    mirroredPx: lastMirroredScrollTopRef.current,
-                    nativePx: scroller.scrollTop,
-                })
-            ) {
-                host.setScrollTop(scroller.scrollTop);
-                // 原生滚动事件驱动的竖向滚动（触摸 / 触控板 / 焦点滚入）：
-                // 与横向同因——内核写完后必须**同任务**提交各图层，否则竖向内容
-                // （音高键 / 数值轴 / 曲线 / 播放头）比原生滚动慢一帧（见 `paintNow`）。
-                host.paintNow();
-            }
-        },
-        [syncScrollLeft],
-    );
-    const scrollerWheelHandlerRef = useRef(onScrollerWheelNative);
-
-    useLayoutEffect(() => {
-        scrollerWheelHandlerRef.current = onScrollerWheelNative;
-    });
-
-    useEffect(() => {
-        const el = scrollerRef.current;
-        if (!el) return;
-
-        const handler: EventListener = (evt) => {
-            scrollerWheelHandlerRef.current(evt as globalThis.WheelEvent);
-        };
-
-        el.addEventListener("wheel", handler, {
-            passive: false,
-        } as globalThis.AddEventListenerOptions);
-        return () => {
-            el.removeEventListener("wheel", handler);
-        };
-    }, []); // 空依赖
-
-    // ── 自绘滚动条 / 标尺上的滚轮 ──────────────────────────────────────
-    // 自绘滚动条是滚动容器的**兄弟节点**（见下方轨道注释），标尺则在滚动容器
-    // **之上**，两者都不在 `scroller` 的事件路径里，原生 `wheel` 不会冒泡到它。
-    // 于是它们各自把「轴」显式托付给同一个入口：命中判定不同，语义同源
-    //（无修饰键 = 该轴滚动，`modifier.scrollbarZoom` = 该轴缩放），不存在第二套口径。
-    //
-    // 用回调 ref（而非 `useEffect(..., [])` + `ref.current`）挂监听：轨道与标尺
-    // 会随停靠重排重建 DOM，回调 ref 把「元素出现」本身当作挂载时机。
-    const attachVerticalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
-        scrollerWheelHandlerRef.current(event, "vertical");
-    });
-    const attachHorizontalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
-        scrollerWheelHandlerRef.current(event, "horizontal");
-    });
-    const attachVerticalScrollbarTrack = useCallback(
-        (element: HTMLDivElement | null) => {
-            vScrollbarTrackRef.current = element;
-            attachVerticalScrollbarWheel(element);
-        },
-        [attachVerticalScrollbarWheel],
-    );
-    const attachHorizontalScrollbarTrack = useCallback(
-        (element: HTMLDivElement | null) => {
-            hScrollbarTrackRef.current = element;
-            attachHorizontalScrollbarWheel(element);
-        },
-        [attachHorizontalScrollbarWheel],
-    );
-    /**
-     * 标尺上的滚轮：**与画布内的滚轮完全同义**。
-     *
-     * 标尺在滚动容器**之上**，不在 `scroller` 的事件路径里；这里只做"转交"，不指定
-     * 滚动条轴 —— 交给画布滚轮总入口后，命中判定由 `nativeScrollbarZoneAt` 按指针
-     * 位置自行得出（标尺在容器矩形之外 ⇒ 返回 null），keybinding 判定、锚点换算、
-     * 上下限全部与画布同一套，标尺不定义第二种语义。
-     */
-    const handleRulerWheel = useCallback((event: WheelEvent) => {
-        scrollerWheelHandlerRef.current(event);
-    }, []);
-
-    // 参数切换或参数描述符变化后，刷新竖向滚动条位置，保证滚动条与当前视口保持一致。
-    useLayoutEffect(() => {
-        syncVerticalScrollbarForViewport(editParam, getCurrentViewportForScrollbar(editParam));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [editParam, processorParams]);
-
-    // Auto-scroll: keep playhead visible in parameter editor during playback
-    useEffect(() => {
-        if (s.paramEditorSyncTimeline) return;
-        if (!s.autoScrollEnabled || !s.runtime.isPlaying) return;
-        const scroller = scrollerRef.current;
-        if (!scroller) return;
-        const next = computeAutoFollowScrollLeft({
-            playheadSec: visualPlayheadSecRef.current,
-            pxPerSec,
-            viewportWidth: scroller.clientWidth,
-            contentWidth,
-        });
-        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-            scroller.scrollLeft = next;
-            syncScrollLeft(scroller);
-        }
-        // syncScrollLeft reads the latest scroll state through refs; see onFrame above.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [
-        s.paramEditorSyncTimeline,
-        s.autoScrollEnabled,
-        s.runtime.isPlaying,
-        s.playheadSec,
+    // 滚动容器与轴列的输入接线（原生 scroll 采纳、滚动条滚轮/翻页、标尺滚轮、
+    // 轴列两个交互 hook、工具模式的光标与右键菜单复位）整块在
+    // `usePianoRollScrollerWiring` 里（见该文件头）。调用点留在原位：轴列两个 hook
+    // 的状态槽与 effect 顺序取决于这个位置。
+    const {
+        onScrollerScroll,
+        attachVerticalScrollbarTrack,
+        attachHorizontalScrollbarTrack,
+        handleRulerWheel,
+    } = usePianoRollScrollerWiring({
+        s,
+        dispatch,
+        editParam,
         pxPerSec,
         contentWidth,
-    ]);
-
-    // 左轴列的滚轮路由（与主画布同一套 keybinding / 投影 / 上下限）。
-    usePianoRollAxisWheel({
+        scrollerRef,
         axisWrapRef,
+        hScrollbarTrackRef,
+        vScrollbarTrackRef,
         viewSizeRef,
-        editParam,
+        hostRef,
+        lastMirroredScrollLeftRef,
+        lastMirroredScrollTopRef,
+        timelineSyncApplyingRef,
+        syncScrollLeftRef,
+        visualPlayheadSecRef,
         pitchViewRef,
         paramViewsRef,
         processorParamsRef,
-        setPitchView,
-        setParamViewport,
+        processorParams,
         invalidate,
         clampViewport,
-        scrollerRef,
-        syncScrollLeftRef,
+        getCurrentViewportForScrollbar,
+        yToValue,
+        setPitchView,
+        setParamViewport,
+        syncVerticalScrollbarForViewport,
+        syncScrollLeft,
+        formatParamValuePreview,
+        interactions,
+        horizontalZoomKb,
         scrollHorizontalKb,
         pianoKeysVerticalScrollKb,
         pianoKeysVerticalZoomKb,
-        horizontalZoomKb,
-    });
-
-    // 左轴列（琴键 / 数值刻度）的三个交互：试听、单位切换、悬浮读数。
-    usePianoRollAxisInteractions({
-        s,
-        editParam,
-        axisWrapRef,
-        viewSizeRef,
-        pitchViewRef,
-        dispatch,
-        yToValue,
-        formatParamValuePreview,
+        setCanvasCursor,
+        setCtxMenu,
         setAxisValuePreview,
     });
-
-    // 选区在所有工具模式下保留并持续渲染（选区带 / 剪贴板预览在 render.ts
-    // 不按工具门控）：绘制 / 直线颤音工具下不再自动清空，用户可以换轨后
-    // 直接对保留的选区做复制/剪切（路由见 focusRouting.resolveCopyCutRoute，
-    // 依据 session.paramSelectionActive / selectionContext）。与选区的交互
-    // （拖拽 / 右键菜单 / 变形）仍只在选择工具下生效（各交互路径已有
-    // toolMode 门控）。
-
-    useEffect(() => {
-        setCanvasCursor(s.toolMode === "select" ? "default" : "crosshair");
-    }, [s.toolMode]);
-
-    useEffect(() => {
-        setCtxMenu(null);
-    }, [s.toolMode]);
 
     // 同步数据加载状态到状态栏。
     //
