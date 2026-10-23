@@ -798,6 +798,18 @@ fn mix_into_scratch_stereo(
         scratch.resize(frames * 2, 0.0);
     }
 
+    // 【诊断期间必须静音】见 hifishifter_kernel::diagnostics_busy 的模块说明。
+    //
+    // 零已经在上面的 fill/resize 里写过，这里只补上位置推进 —— **不停钟**：播放头
+    // 照常走，用户看到的是"没有声音"而不是"卡住了"。推进必须走同一条
+    // advance_playback_position，否则诊断结束后位置会跳。
+    if hifishifter_kernel::diagnostics_busy::active() {
+        if is_playing.load(Ordering::Relaxed) {
+            advance_playback_position(frames, is_playing, position_frames, duration_frames);
+        }
+        return None;
+    }
+
     if !is_playing.load(Ordering::Relaxed) {
         return None;
     }

@@ -26,7 +26,7 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use serde::Serialize;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Mel-frame length used by the post-creation GPU smoke test.
@@ -442,8 +442,9 @@ fn default_ep_for_role(role: OrtSessionRole) -> &'static str {
 /// Resolve the EP choice for one model, in priority order:
 /// 1. Per-model env var (e.g. `HIFISHIFTER_HNSEP_ORT_EP=coreml`) — an
 ///    explicit, per-model request always wins, including for HNSEP.
-/// 2. The process-wide runtime override (set by the UI settings or the
-///    benchmark's [`EpOverrideGuard`]).
+/// 2. The process-wide runtime override (set only by the UI settings; the
+///    benchmark passes its EP as an argument instead — see
+///    [`build_ort_session_with_ep`]).
 /// 3. The global `HIFISHIFTER_ORT_EP` env var.
 /// 4. The role's default (see [`default_ep_for_role`]).
 fn ep_choice_for_role(role: OrtSessionRole) -> String {
@@ -764,7 +765,26 @@ pub fn build_ort_session(
     onnx_path: &Path,
     role: OrtSessionRole,
 ) -> Result<(Session, String), String> {
-    let choice = ep_choice_for_role(role);
+    build_ort_session_with_ep(onnx_path, role, None)
+}
+
+/// 同 [`build_ort_session`]，但**显式指定** EP，不改任何进程级设置。
+///
+/// 【为什么必须有它】基准测试要分别建 CPU / 各 GPU 候选 / DirectML 三种会话。此前的
+/// 做法是在每段开头改**进程级**的 `RUNTIME_EP_OVERRIDE`（旧 `EpOverrideGuard`），而那个
+/// setter 会推进 `EP_SETTINGS_GENERATION` —— 于是渲染侧正在构建的会话被判为陈旧并
+/// 重试，播放中可能整条重建。一次基准测试要改 6 次，撞上的概率并不小。
+///
+/// 把 EP 当参数传进来就没有这个问题：诊断只影响它自己建的那几个会话。
+pub fn build_ort_session_with_ep(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    ep_override: Option<&str>,
+) -> Result<(Session, String), String> {
+    let choice = match ep_override {
+        Some(ep) => ep.trim().to_ascii_lowercase(),
+        None => ep_choice_for_role(role),
+    };
 
     // Only an explicit "cpu" choice short-circuits here.  HNSEP resolves to
     // "cpu" by default via `ep_choice_for_role`, but a per-model override
@@ -1328,6 +1348,45 @@ fn create_dml_session(
     Ok((session, selected, threads, create_ms))
 }
 
+/// 诊断期间的 CPU 线程预算上限（0 = 不限制）。
+///
+/// 【为什么需要】基准测试与预热会跑真实推理。用渲染级预算（`cores/2`，多核机器上
+/// 是 8~16 条）会把实时音频线程挤到没有时间片，用户听到断续与爆音。
+///
+/// 【为什么是进程级静态而不是参数】线程预算在四个构建器的最深处取值
+/// （`cpu_intra_threads`），把它一路穿下去要改四层签名；而它**只在一个很窄的时间窗**
+/// 内有值（`DiagnosticBudget` 的存活期）。诊断期间不会有新的**渲染**会话被构建 ——
+/// 渲染会话在预热 / 首次使用时就已经建好并复用，因此这个窗口是安全的。
+static DIAGNOSTIC_THREAD_CAP: AtomicUsize = AtomicUsize::new(0);
+
+/// 诊断期间的线程预算租约：进入时把上限压到 `threads`，离开时恢复。
+pub struct DiagnosticBudget {
+    previous: usize,
+}
+
+impl DiagnosticBudget {
+    /// 进入诊断预算。建议 `threads = 2`。
+    pub fn enter(threads: usize) -> Self {
+        let previous = DIAGNOSTIC_THREAD_CAP.swap(threads.max(1), Ordering::AcqRel);
+        Self { previous }
+    }
+}
+
+impl Drop for DiagnosticBudget {
+    fn drop(&mut self) {
+        DIAGNOSTIC_THREAD_CAP.store(self.previous, Ordering::Release);
+    }
+}
+
+/// 把诊断上限套到基础预算上（纯函数，便于单测）。
+fn apply_diagnostic_cap(base: usize, cap: usize) -> usize {
+    if cap == 0 {
+        base
+    } else {
+        base.min(cap).max(1)
+    }
+}
+
 /// Intra-op thread budget for sessions whose ops run on the CPU (the whole
 /// graph for a CPU session, or the unsupported ops of a GPU session).
 ///
@@ -1346,7 +1405,7 @@ fn cpu_intra_threads(role: OrtSessionRole) -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .max(2);
-    match role {
+    let base = match role {
         OrtSessionRole::Separator => cores,
         OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -1355,7 +1414,8 @@ fn cpu_intra_threads(role: OrtSessionRole) -> usize {
                 (cores / 2).max(2)
             }
         }
-    }
+    };
+    apply_diagnostic_cap(base, DIAGNOSTIC_THREAD_CAP.load(Ordering::Acquire))
 }
 
 /// 整段HNSEP尺寸随素材长度变化，CPU arena/pattern会留住整段巨型中间块。
@@ -1607,44 +1667,17 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
     }
 }
 
-/// RAII guard that temporarily overrides the EP choice for the duration of a
-/// benchmark session, restoring the previous value on drop.
-///
-/// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
-/// "webgpu") without permanently changing the process-wide setting.
-///
-/// Only sets the runtime override (mutex-protected), NOT the env var.
-/// The runtime override takes precedence in `ep_choice()` over the env var,
-/// so setting the env var is unnecessary (and would be unsafe in Rust).
-pub struct EpOverrideGuard {
-    prev_override: Option<String>,
-}
-
-impl EpOverrideGuard {
-    pub fn new(ep: String) -> Self {
-        // Save previous runtime override
-        let prev_override = RUNTIME_EP_OVERRIDE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
-
-        // Set new runtime override
-        set_runtime_ep_override(Some(ep.clone()));
-
-        Self { prev_override }
-    }
-}
-
-impl Drop for EpOverrideGuard {
-    fn drop(&mut self) {
-        // Restore runtime override
-        set_runtime_ep_override(self.prev_override.clone());
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    /// 诊断预算只能**收紧**线程数，绝不能把它放大到超过渲染级预算。
+    #[test]
+    fn the_diagnostic_cap_only_ever_shrinks_the_thread_budget() {
+        assert_eq!(super::apply_diagnostic_cap(16, 0), 16, "0 = 不限制");
+        assert_eq!(super::apply_diagnostic_cap(16, 2), 2);
+        assert_eq!(super::apply_diagnostic_cap(2, 8), 2, "上限比基础值大时不得放大");
+        assert_eq!(super::apply_diagnostic_cap(1, 2), 1);
+        assert_eq!(super::apply_diagnostic_cap(0, 2), 1, "下限恒为 1");
+    }
     use super::{smoke_probe_frames, OrtSessionRole, SMOKE_TEST_FRAMES};
     /// 动态整段分离不复用巨型工作区；其它角色和Intel macOS原策略保持。
     #[test]

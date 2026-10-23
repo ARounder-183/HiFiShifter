@@ -202,6 +202,7 @@ pub mod gpu_info;
 pub mod gpu_info;
 
 #[cfg(target_os = "windows")]
+pub mod diagnostics_busy;
 pub mod dml_adapters;
 #[cfg(not(target_os = "windows"))]
 #[path = "dml_adapters_stub.rs"]

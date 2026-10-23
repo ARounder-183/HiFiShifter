@@ -1919,7 +1919,7 @@ export const enUS = {
     // ── Benchmark ────────────────────────────────────────────────────────
     benchmark_title: "Inference Device Benchmark",
     benchmark_desc:
-        "Runs ~12 s of audio through the vocoder on each available device and reports median latency. Use the result to pick the fastest provider.",
+        "Runs ~12 s of audio through the vocoder on each available device and reports median latency. Use the result to pick the fastest provider. Playback is stopped first and stays silent for the whole run.",
     benchmark_running: "Running benchmark — this may take 20–60 seconds...",
     benchmark_results: "Results ({samples} frame chunks · 44.1 kHz):",
     benchmark_device_header: "Device",

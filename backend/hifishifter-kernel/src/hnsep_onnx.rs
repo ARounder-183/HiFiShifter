@@ -322,6 +322,10 @@ pub fn ensure_background_prewarm() {
     let _ = std::thread::Builder::new()
         .name("ort-prewarm-hnsep".to_string())
         .spawn(|| {
+            // 【预热也要静音】预热做的是"建会话 + 首推理烟测"，与基准测试同一类负载，
+            // 而且它在**启动时**自动跑 —— 用户报的"启动就有杂音"正是它。
+            let _busy = crate::diagnostics_busy::enter("prewarm-hnsep");
+            let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
             let res = get_or_init_shared_session().map(|_| ());
             *PREWARM
                 .get_or_init(|| Mutex::new(None))

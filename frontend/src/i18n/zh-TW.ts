@@ -1738,7 +1738,7 @@ export const zhTW = {
 
     benchmark_title: "推理裝置基準測試",
     benchmark_desc:
-        "將約 12 秒的音訊透過各個可用裝置的聲碼器進行推理，報告中位延遲。使用測試結果來選擇最快的推理裝置。",
+        "將約 12 秒的音訊透過各個可用裝置的聲碼器進行推理，報告中位延遲。使用測試結果來選擇最快的推理裝置。執行時會先停止播放，並在整個過程中保持靜音。",
     benchmark_running: "正在執行基準測試 — 可能需要 20–60 秒...",
     benchmark_results: "結果（{samples} 幀片段 · 44.1 kHz）：",
     benchmark_device_header: "裝置",

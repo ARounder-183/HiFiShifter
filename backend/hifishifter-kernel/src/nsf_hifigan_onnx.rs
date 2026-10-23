@@ -1333,6 +1333,10 @@ pub fn ensure_background_prewarm() {
     let _ = std::thread::Builder::new()
         .name("ort-prewarm-nsf-hifigan".to_string())
         .spawn(|| {
+            // 【预热也要静音】预热做的是"建会话 + 首推理烟测"，与基准测试同一类负载，
+            // 而且它在**启动时**自动跑 —— 用户报的"启动就有杂音"正是它。
+            let _busy = crate::diagnostics_busy::enter("prewarm-nsf-hifigan");
+            let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
             let res = get_or_init_shared_session().map(|_| ());
             *PREWARM
                 .get_or_init(|| Mutex::new(None))
@@ -2507,13 +2511,13 @@ fn benchmark_gpu_ep(
     runs: usize,
     gpu_ep_choice: &str,
 ) -> Result<(f64, f64, String), String> {
-    let gpu_session_res = {
-        let _guard = crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
-        crate::vocoder_ort_session::build_ort_session(
-            onnx_path,
-            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
-        )
-    };
+    // 【为什么把 EP 当参数传】旧实现改进程级 override，会推进 EP 设置代数，
+    // 让渲染侧正在构建的会话被判为陈旧并重建（见 `build_ort_session_with_ep`）。
+    let gpu_session_res = crate::vocoder_ort_session::build_ort_session_with_ep(
+        onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        Some(gpu_ep_choice),
+    );
 
     let (gpu_session, ep) = gpu_session_res.map_err(|e| {
         log::error!("[benchmark] GPU session creation FAILED for '{gpu_ep_choice}': {e}");
@@ -2590,6 +2594,12 @@ fn benchmark_gpu_ep(
 }
 
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
+    // 【为什么在这里就上静音】见 `hifishifter_kernel::diagnostics_busy`：诊断期间实时
+    // 通路没有任何时间片保证，唯一诚实的做法是**静音但不停钟**。guard 活在函数体里，
+    // 因此任何提前 return / `?` 都会把它释放。
+    let _busy = crate::diagnostics_busy::enter("benchmark");
+    // 线程预算压到 2：用渲染级预算（cores/2）会把实时音频线程挤没。
+    let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
     ensure_ort_init()?;
     let (onnx_path, cfg_path) = resolve_model_paths()?;
     let cfg = read_config(&cfg_path)?;
@@ -2650,11 +2660,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let mut cpu_times = Vec::new();
     let t_cpu_total = std::time::Instant::now();
     {
-        let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cpu".to_string());
         let t_session = std::time::Instant::now();
-        let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session(
+        // EP 当参数传：不改进程级设置，见 `build_ort_session_with_ep`。
+        let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session_with_ep(
             &onnx_path,
             crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+            Some("cpu"),
         )?;
         log::warn!(
             "[benchmark] CPU session created in {}ms",
@@ -2729,13 +2740,11 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
 
     if dml_available {
         let dml_total = std::time::Instant::now();
-        let dml_session_res = {
-            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("directml".to_string());
-            crate::vocoder_ort_session::build_ort_session(
-                &onnx_path,
-                crate::vocoder_ort_session::OrtSessionRole::Vocoder,
-            )
-        };
+        let dml_session_res = crate::vocoder_ort_session::build_ort_session_with_ep(
+            &onnx_path,
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+            Some("directml"),
+        );
 
         if let Ok((mut dml_session, ep)) = dml_session_res {
             log::warn!(

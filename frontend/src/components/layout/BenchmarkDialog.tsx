@@ -7,6 +7,8 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useAppDispatch } from "../../app/hooks";
+import { stopAudioPlayback } from "../../features/session/sessionSlice";
 import { Flex } from "@radix-ui/themes";
 import type { BenchmarkResult } from "../../types/api";
 import { coreApi } from "../../services/api/core";
@@ -86,6 +88,7 @@ function buildRows(result: BenchmarkResult): EpRow[] {
 
 export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
     const { t, tVars } = useI18n();
+    const dispatch = useAppDispatch();
     const [phase, setPhase] = useState<BenchmarkPhase>("idle");
     const [result, setResult] = useState<BenchmarkResult | null>(null);
     const [errorText, setErrorText] = useState<string>("");
@@ -105,6 +108,12 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
         setPhase("running");
         setResult(null);
         setErrorText("");
+
+        // 【为什么先停播】基准测试会连建三个 ONNX 会话并各跑 5 轮真实推理，把实时音频
+        // 线程挤到没有时间片 —— 结果是断续与爆音。内核在诊断期间会**静音但不停钟**，
+        // 但"播放头在走、突然没声音"仍需一句解释；先停下播放，用户看到的就是一个
+        // 明确的"我要开始跑基准了"，而不是"播着播着哑了"。
+        dispatch(stopAudioPlayback({ restoreAnchor: true }));
 
         try {
             const res = await coreApi.runVocoderBenchmark();

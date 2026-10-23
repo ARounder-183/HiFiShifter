@@ -1771,7 +1771,7 @@ export const koKR = {
 
     benchmark_title: "추론 장치 벤치마크",
     benchmark_desc:
-        "약 12초의 오디오를 각 사용 가능한 장치의 보코더로 추론하여 중간 지연 시간을 보고합니다. 결과로 가장 빠른 추론 장치를 선택하세요.",
+        "약 12초의 오디오를 각 사용 가능한 장치의 보코더로 추론하여 중간 지연 시간을 보고합니다. 결과로 가장 빠른 추론 장치를 선택하세요.（실행 전에 재생을 멈추고 실행 중에는 무음이 됩니다.）",
     benchmark_running: "벤치마크 실행 중 — 20~60초 소요될 수 있습니다...",
     benchmark_results: "결과 ({samples} 프레임 · 44.1 kHz):",
     benchmark_device_header: "장치",

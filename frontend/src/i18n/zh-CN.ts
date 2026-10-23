@@ -1735,7 +1735,7 @@ export const zhCN = {
 
     benchmark_title: "推理设备基准测试",
     benchmark_desc:
-        "将约 12 秒的音频通过各个可用设备的声码器进行推理，报告中位延迟。使用测试结果来选择最快的推理设备。",
+        "将约 12 秒的音频通过各个可用设备的声码器进行推理，报告中位延迟。使用测试结果来选择最快的推理设备。运行时会先停止播放，并在整个过程中保持静音。",
     benchmark_running: "正在运行基准测试 — 可能需要 20–60 秒...",
     benchmark_results: "结果（{samples} 帧片段 · 44.1 kHz）：",
     benchmark_device_header: "设备",
