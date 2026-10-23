@@ -1098,6 +1098,23 @@ impl ExtensionOwner {
         let jump = evidence.position.saturating_sub(expected).unsigned_abs();
         (jump > u64::try_from(OUTPUT_DECLICK_FRAMES).unwrap_or(u64::MAX)).then_some(jump)
     }
+    /// 诊断（基准测试 / 预热）进行中时，**实时**输出必须静音。
+    ///
+    /// 【为什么必须静音】诊断与实时音频线程抢同一批核（ORT 的 CPU EP 默认自旋
+    /// 等待），线程预算只能降低概率，给不出"一定不出声"的保证。与独立 App 的音频
+    /// 回调同一判据（`hifishifter_kernel::diagnostics_busy`，`src-tauri` 的 `mix.rs`
+    /// 有同款注释）—— 此前只有 App 侧消费它，模块文档承诺的插件读数并不存在。
+    ///
+    /// 【为什么只压实时流】导出/bounce 的离线渲染要的是**产物**；诊断静音只对
+    /// "现在正在听"负责，把离线产物也写成静音是最难发现的一类错误。
+    ///
+    /// 【为什么不动采集与时钟】`capture_observe` 是独立阶段照常录制，位置照常推进
+    /// —— 静音的含义是"这段时间的输出是零"，不是"这块没发生过"。
+    pub(super) fn diagnostic_silence_applies(evidence: Option<BlockEvidence>) -> bool {
+        matches!(evidence, Some(evidence) if evidence.stream == ProcessStream::Realtime)
+            && hifishifter_kernel::diagnostics_busy::active()
+    }
+
     /// 音频线程上的 Capture **输出**阶段。
     ///
     /// 【为什么未录制时要早退而不是统一处理】本函数在**每个音频块**上被调用。
@@ -1110,6 +1127,12 @@ impl ExtensionOwner {
     ///
     /// 【为什么捕获不在这里】见 [`Self::capture_observe`]：它必须发生在任何输出形状
     /// 判定之前，否则"宿主没接输出"会让录制一起失效。
+    ///
+    /// # 诊断静音
+    ///
+    /// 基准测试 / 预热进行中时，实时输出由 [`Self::diagnostic_silence_applies`] 压成
+    /// 静音（见该判据的说明）—— 这是模块文档承诺的"诊断期间音频通路静音"在插件侧
+    /// 的落点，与独立 App 音频回调同判据。
     pub(crate) fn capture_stage(
         &self,
         data: *mut crate::audio_abi::ProcessData,
@@ -1160,6 +1183,12 @@ impl ExtensionOwner {
                     return CaptureStage::Handled;
                 }
             }
+        }
+        // 【诊断期间必须静音】见 [`Self::diagnostic_silence_applies`]。同一套淡出
+        // 写法：淡到零并写满整块，不用再清（也**不能**再清）。
+        if Self::diagnostic_silence_applies(evidence) {
+            unsafe { self.apply_gate_fade_out(stream, &mut *(*data).outputs, frames) };
+            return CaptureStage::Handled;
         }
         match output {
             // 不介入：与改动前的 `return false` 完全等价，继续走既有快照通路。

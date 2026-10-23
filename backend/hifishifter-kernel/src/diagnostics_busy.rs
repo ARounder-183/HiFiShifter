@@ -21,8 +21,10 @@
 //!
 //! # 为什么放在 kernel
 //!
-//! 写方在 kernel（基准测试、预热），读方在 src-tauri（App 实时回调）与
-//! hifishifter-plugin（插件 process）。两边都依赖 kernel，住在这里才不需要反向依赖。
+//! 写方在 kernel（基准测试、预热），读方在 src-tauri 的音频回调
+//! （`audio_engine/mix.rs`，输出静音）与 hifishifter-plugin 的实时输出阶段
+//! （`render/extension/playback.rs` 的 `capture_stage`，只压实时流、不动离线渲染）。
+//! 两边都依赖 kernel，住在这里才不需要反向依赖。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

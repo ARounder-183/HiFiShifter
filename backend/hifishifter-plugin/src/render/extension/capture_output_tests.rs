@@ -455,11 +455,7 @@ fn no_published_result_never_invents_a_stale_one() {
     let owner = insert_owner();
     record(&owner, 256);
     owner.sync_raw_tape();
-    assert_eq!(
-        owner.capture_output(),
-        CaptureOutput::Raw,
-        "原始磁带先到位"
-    );
+    assert_eq!(owner.capture_output(), CaptureOutput::Raw, "原始磁带先到位");
     // 撤掉原始磁带、且从未发布过处理结果 ⇒ 只能是"等待合成"。
     owner.raw_tape.clear();
     owner.raw_tape_revision.store(0, Ordering::Release);
@@ -518,12 +514,10 @@ fn a_bound_instance_stays_on_the_ara_path() {
 fn the_recording_monitor_option_is_reachable() {
     let owner = insert_owner();
     assert!(owner.capture().options().monitor, "默认监听");
-    owner
-        .capture()
-        .set_options(crate::capture::CaptureOptions {
-            monitor: false,
-            ..owner.capture().options()
-        });
+    owner.capture().set_options(crate::capture::CaptureOptions {
+        monitor: false,
+        ..owner.capture().options()
+    });
     assert!(!owner.capture().options().monitor);
 }
 
@@ -1105,7 +1099,10 @@ fn a_host_position_report_re_anchors_the_counter() {
         1_500 - 1_536,
         "jump 是带符号的：正 = 计数器落后于宿主（计数器已经数到 1 536）"
     );
-    assert!(fourth.resync, "宿主纠正了我们数出来的位置 ⇒ 交给捕获侧桥接/裁剪");
+    assert!(
+        fourth.resync,
+        "宿主纠正了我们数出来的位置 ⇒ 交给捕获侧桥接/裁剪"
+    );
     // 之后继续按块长前进：锚点已经是宿主的读数，计数器从它起算。
     // 内容在变化 ⇒ 计数器有权推进（第一块的指纹只建立基线，第二次才有"变化"）。
     owner.streams[ProcessStream::Realtime.index()].note_activity(0xB001);
@@ -1149,7 +1146,13 @@ fn a_short_rewind_is_a_new_pass_not_a_drift() {
         "第一遍全程前进：不得有任何回退"
     );
     // 用户回到起点，再播一遍：宿主报的位置**退回** 10 000。
-    let replay = owner.note_stream_block(ProcessStream::Realtime, &context(10_000), 1_024, false, false);
+    let replay = owner.note_stream_block(
+        ProcessStream::Realtime,
+        &context(10_000),
+        1_024,
+        false,
+        false,
+    );
     assert_eq!(
         replay.position, 10_000,
         "回退必须从宿主报的位置重新开始，不能被当成'宿主读数滞后'而接着上一遍的末尾"
@@ -1161,7 +1164,13 @@ fn a_short_rewind_is_a_new_pass_not_a_drift() {
         "pass 边界不是 jump：它是用户动作，不需要记账纠正"
     );
     // 第三遍：再播一次，位置仍从 10 000 起算（不是从上一遍末尾）。
-    let third = owner.note_stream_block(ProcessStream::Realtime, &context(10_000), 1_024, false, false);
+    let third = owner.note_stream_block(
+        ProcessStream::Realtime,
+        &context(10_000),
+        1_024,
+        false,
+        false,
+    );
     assert_eq!(third.position, 10_000, "同一位置重复起播仍然落在同一处");
 }
 
@@ -1666,9 +1675,7 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
     // 宿主正在播的东西，它自己已经连续）。当第一块是我们算出来的内容时，它从哪一
     // 相位开始是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。现在它按
     // `OUTPUT_FIRST_BLOCK_FADE_FRAMES`（5 ms）淡入，之后保持满幅。
-    owner
-        .output_token[stream.index()]
-        .store(4, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut first, frames) };
     assert!(
         first_left[0] < 0.05,
@@ -1697,9 +1704,7 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         silence_flags: 0,
         channel_buffers: second_planes.as_mut_ptr(),
     };
-    owner
-        .output_token[stream.index()]
-        .store(2, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut second, frames) };
     // 开头必须还在旧值附近（从 0.5 走向 1.0），不能第一帧就是 1.0。
     assert!(
@@ -1750,9 +1755,7 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
     };
 
     // 上一轮：输出过 Raw（种类 4），给 tail 留下 0.5。
-    owner
-        .output_token[stream.index()]
-        .store(4, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(4, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut tail, frames) };
     // 上一轮首块是 `Raw`（我们算出来的内容）⇒ 现在按 5 ms 淡入，之后满幅。
     let fade = super::OUTPUT_FIRST_BLOCK_FADE_FRAMES;
@@ -1776,9 +1779,7 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    owner
-        .output_token[stream.index()]
-        .store(2, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut output, frames) };
     assert!(
         left[0] < 0.9,
@@ -1808,9 +1809,7 @@ fn a_passthrough_first_block_is_left_verbatim() {
         channel_buffers: planes.as_mut_ptr(),
     };
     // 种类 6 = `PassThrough`（宿主原声）。
-    owner
-        .output_token[stream.index()]
-        .store(6, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(6, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut bus, frames) };
     assert_eq!(left, vec![0.5_f32; frames], "透传首块必须逐样本原样输出");
 }
@@ -1835,9 +1834,7 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
     };
 
     // 第一块：透传宿主原声（种类 5 = PendingSynthesis）。
-    owner
-        .output_token[stream.index()]
-        .store(5, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(5, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut host, frames) };
     assert_eq!(host_left, vec![0.8; frames], "透传首块原样输出");
 
@@ -1850,9 +1847,7 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    owner
-        .output_token[stream.index()]
-        .store(2, std::sync::atomic::Ordering::Release);
+    owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
     unsafe { owner.apply_output_declick(stream, &mut output, frames) };
 
     // 淡入：不应出现"宿主原声 × (1-t) + 结果 × t"的叠加值。
@@ -2163,7 +2158,10 @@ fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
         drifted <= cap,
         "停播时计数器最多只可信一个起播窗口：漂移 {drifted} 帧 > {cap} 帧",
     );
-    assert!(drifted > 0, "起播窗口内仍然必须能推进（否则前 0.66 s 静音）");
+    assert!(
+        drifted > 0,
+        "起播窗口内仍然必须能推进（否则前 0.66 s 静音）"
+    );
 }
 
 /// **真实播放（`kPlaying` 为真）时，计数器不受起播窗口限制。**
@@ -2256,5 +2254,58 @@ fn publishing_different_content_changes_the_token() {
         owner.output_token_for(CaptureOutput::Processed),
         first,
         "内容变了就必须换 token，否则真正的换版拿不到去咔"
+    );
+}
+
+/// **诊断（基准测试 / 预热）进行中，实时输出必须静音，离线渲染不受影响。**
+///
+/// 【为什么必须有】`diagnostics_busy` 的模块文档一直承诺"插件 process 也消费它"，
+/// 但此前全插件 crate 没有任何读点 —— 承诺是假的，用户在插件里跑基准测试时实时
+/// 通路照常出声（并且被诊断抢时间片）。这条测试钉住静音判据的两个半边：实时流
+/// 受 `diagnostics_busy` 门控，离线流（导出/bounce 的产物）**永远不**受它影响。
+#[test]
+fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
+    let realtime = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        position: 0,
+        frames: 512,
+        playing: true,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Rolling,
+        had_previous: false,
+        allow_output: true,
+        start_window: false,
+        repeated_nonzero: false,
+        split: BlockSplit::whole(0, 512),
+    };
+    let offline = BlockEvidence {
+        stream: ProcessStream::Offline,
+        ..realtime
+    };
+
+    assert!(
+        !ExtensionOwner::diagnostic_silence_applies(Some(realtime)),
+        "没有诊断在跑时，实时输出照常"
+    );
+
+    let _busy = hifishifter_kernel::diagnostics_busy::enter("test");
+    assert!(
+        ExtensionOwner::diagnostic_silence_applies(Some(realtime)),
+        "诊断进行中，实时输出必须静音"
+    );
+    assert!(
+        !ExtensionOwner::diagnostic_silence_applies(Some(offline)),
+        "离线渲染是产物，不受诊断静音影响"
+    );
+    assert!(
+        !ExtensionOwner::diagnostic_silence_applies(None),
+        "没有本块证据的调用（旧测试/退化路径）不参与诊断静音"
+    );
+    drop(_busy);
+    assert!(
+        !ExtensionOwner::diagnostic_silence_applies(Some(realtime)),
+        "最后一个诊断离开后必须恢复"
     );
 }
