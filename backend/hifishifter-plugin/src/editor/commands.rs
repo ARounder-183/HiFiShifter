@@ -1101,7 +1101,7 @@ pub(super) fn dispatch(
             "error": "vslib is not bundled with the plug-in",
         })),
         // 推理设备（ORT Execution Provider）只读状态。插件与独立 App **共用同一份设置、
-        // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_id` 下发给
+        // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_key` 下发给
         // 会话，所以这几条读数在插件里同样成立。
         //
         // 【为什么必须补】此前它们落到 `Command unavailable`，于是 `MenuBar` 把整个

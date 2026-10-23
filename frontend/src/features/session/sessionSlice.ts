@@ -580,7 +580,6 @@ export interface SessionState {
     /** 全局默认 HiFiGAN mel stretch 开关 */
     defaultHifiganMelStretch: boolean;
     ortEp: string;
-    gpuDeviceId: number;
     ortDeviceKey: string | null;
     /**
      * vslib 是否可用（启动时经 `get_vslib_status` 探测）。
@@ -2409,7 +2408,6 @@ const initialState: SessionState = {
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
     ortEp: "auto",
-    gpuDeviceId: 0,
     ortDeviceKey: null,
     vslibAvailable: null,
     autoBackgroundRender: true,
@@ -3195,9 +3193,6 @@ const sessionSlice = createSlice({
         /** 记录 vslib 可用性（启动探测一次）。null = 未知，按不可用处理。 */
         setVslibAvailable(state, action: PayloadAction<boolean | null>) {
             state.vslibAvailable = action.payload;
-        },
-        setGpuDeviceId(state, action: PayloadAction<number>) {
-            state.gpuDeviceId = action.payload;
         },
         setOrtDeviceKey(state, action: PayloadAction<string | null>) {
             state.ortDeviceKey = action.payload;
@@ -4092,9 +4087,6 @@ const sessionSlice = createSlice({
                 if (s.ortEp != null) {
                     const normalized = String(s.ortEp).toLowerCase();
                     state.ortEp = ["auto", "cpu", "gpu"].includes(normalized) ? normalized : "auto";
-                }
-                if (s.gpuDeviceId != null) {
-                    state.gpuDeviceId = Number(s.gpuDeviceId);
                 }
                 if (s.ortDeviceKey !== undefined) {
                     const val = s.ortDeviceKey;
@@ -7459,7 +7451,6 @@ export const {
     setDefaultHifiganMelStretch,
     setOrtEp,
     setVslibAvailable,
-    setGpuDeviceId,
     setOrtDeviceKey,
     toggleAutoBackgroundRender,
     setRenderCacheSettings,

@@ -1324,7 +1324,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Inference Device。
                         【为什么插件里可用】插件与独立 App 共用同一份设置与同一个内核：
-                        `ui_settings_apply::apply` 会把 `ort_ep` / `ort_device_id` 下发给
+                        `ui_settings_apply::apply` 会把 `ort_ep` / `ort_device_key` 下发给
                         会话，渲染管线按它选 EP。此前子菜单在插件里被整体禁用，用户能在
                         独立 App 选 GPU、在插件里却只能看着 CPU。设备清单由内核的 DXGI
                         枚举提供（`get_dml_adapters`），不初始化 ORT。 */}

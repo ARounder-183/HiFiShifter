@@ -96,7 +96,6 @@ export const persistUiSettings = createAsyncThunk(
             defaultStretchAlgorithm: s.defaultStretchAlgorithm,
             defaultHifiganMelStretch: s.defaultHifiganMelStretch,
             ortEp: s.ortEp,
-            gpuDeviceId: s.gpuDeviceId,
             ortDeviceKey: s.ortDeviceKey,
             autoBackgroundRender: s.autoBackgroundRender,
             renderCache: s.renderCache,

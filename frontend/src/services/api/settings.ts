@@ -41,13 +41,13 @@ export interface RenderCacheSettings {
     verifyChecksum: boolean;
     /** 可用磁盘空间低于该值（MB）时暂停写入（0 = 不检查）。 */
     minFreeDiskMb: number;
-    /** 打开工程后显示命中统计（默认开启）。 */
     /**
      * 导出音频时复用渲染缓存（默认开启）。
      *
      * 关闭后导出总是自行渲染（与引入复用之前一致）；缓存仍照常服务预览与播放。
      */
     exportReuseEnabled: boolean;
+    /** 打开工程后显示命中统计（默认开启）。 */
     showHitStats: boolean;
 }
 
@@ -234,7 +234,6 @@ export interface UiSettings {
     midiImportTempoMapTimeSignature?: boolean;
     midiImportTempoMapKeySignature?: boolean;
     ortEp?: string;
-    gpuDeviceId?: number;
     /** 稳定的 DirectML 适配器标识 `vendor:device`（不是本进程的 DXGI 序号）。 */
     ortDeviceKey?: string | null;
     autoBackgroundRender?: boolean;

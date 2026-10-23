@@ -2,7 +2,7 @@
 //
 // 推理设备（ORT Execution Provider）相关的两个函数是本文件的重点：
 // `get_ui_settings`（读路径）和 `save_ui_settings`（写路径）都会把
-// `ort_ep` / `ort_device_id` 下发给三个 ONNX 模型模块。下发会销毁并重建
+// `ort_ep` / `ort_device_key` 下发给三个 ONNX 模型模块。下发会销毁并重建
 // 全部 ORT 会话，成本很高（CoreML 单个模型重编译就要 0.4~1.2s），因此这里
 // 用 `apply_ort_ep_settings()` 做去重，只在取值真正变化时重建。
 

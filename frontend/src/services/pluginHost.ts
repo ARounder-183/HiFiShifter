@@ -36,16 +36,12 @@ export type PluginBootstrap = {
      */
     historyBackend?: "host" | "local";
     /**
-     * 当前编辑后端身份：`"reaper"`（宿主给了原生扩展）或 `"ara_only"`（只有 ARA 2.0）。
+     * 当前编辑后端身份：`"reaper"`（宿主给了原生扩展）、`"ara_only"`（只有 ARA 2.0）
+     * 或 `"capture"`（宿主没给 ARA，素材从 VST3 输入总线录进来，见 Capture 方案）。
      *
-     * 【为什么前端需要它】ARA-only 后端上片段几何**只读**（ARA 2.0 不允许插件改 region
-     * 几何），前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
-     */
-    /**
-     * 当前编辑后端身份。
-     *
-     * `"capture"` = 宿主没给 ARA，素材从 VST3 输入总线录进来（见 Capture 方案）。
-     * 它与 `"ara_only"` 的区别是**实质性的**：Capture 的时间线由捕获存储构建、
+     * 【为什么前端需要它】ARA-only 后端上片段几何**只读**（ARA 2.0 不允许插件改
+     * region 几何），前端据此显示只读横幅，而不是让用户点了写操作再撞一个错误。
+     * 它与 `"capture"` 的区别是**实质性的**：Capture 的时间线由捕获存储构建、
      * 完全属于插件自己，而 ara_only 的时间线是宿主投影。
      */
     hostKind?: "reaper" | "ara_only" | "capture";
