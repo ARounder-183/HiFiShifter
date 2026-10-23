@@ -18,7 +18,7 @@
 - 分支：`feature/ara-bridge-probe`。开工前 `git status --short` 必须为空。
 - **宿主版本**：REAPER 7.81，配置目录 `C:\Users\ARounder\AppData\Roaming\REAPER`，其中 `ara=2` 已启用。
 - **ARA SDK 许可**：Apache-2.0（[Celemony/ARA_SDK](https://github.com/Celemony/ARA_SDK)）。
-- **`vslib` 不参与任何探针步骤**：闭源、仅 Windows、文件 IO 型，本计划不触碰。
+- **`vslib` 不参与任何探针步骤**：闭源、仅 Windows、素材输入依赖文件路径，本计划不触碰。
 
 ## 环境前提（开工前必须成立）
 

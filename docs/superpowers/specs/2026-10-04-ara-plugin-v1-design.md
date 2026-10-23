@@ -549,7 +549,7 @@ Phase 3b 再引入宿主 PCM 注入式内核渲染、内容指纹、修音差异
 
 ## 9. 不承诺
 
-1. `vslib` 的分发（闭源、仅 Windows、文件 IO 型）。
+1. `vslib` 的分发（闭源、仅 Windows、素材输入依赖文件路径）。
 2. FL Studio（宿主不支持 ARA）。
 3. Linux（`vslib` 仅 Windows；ARA 宿主生态也不在 Linux）。
 4. macOS 纳入 v1 与否仍待定（ARA 宿主存在，但 `vslib` 缺失且打包链路不同）。

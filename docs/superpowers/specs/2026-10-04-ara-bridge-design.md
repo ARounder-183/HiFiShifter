@@ -207,7 +207,7 @@ ARA 的 `ARAAudioSource` 指向宿主托管的音频。一旦源的权威在 DAW
 
 ## 7. 明确不承诺的事项
 
-1. **vslib 的分发**。`vslib` 是闭源 DLL + 闭源 C API（C API 为文件 IO 型，每次渲染写 `%TEMP%\hs_vslib_{uuid}.wav`），且仅 Windows。在 MIT 项目里作为插件分发需要单独处理，v1 不承诺。
+1. **vslib 的分发**。`vslib` 是闭源 DLL + 闭源 C API（素材输入为文件路径型，每次渲染需把输入 PCM 写成 `%TEMP%\hs_vslib_{uuid}.wav` 再交给 `VslibAddItemEx`；混音输出由 `VslibGetMixData` 直接写入内存），且仅 Windows。在 MIT 项目里作为插件分发需要单独处理，v1 不承诺。
 2. **FL Studio 支持**。宿主不支持 ARA。
 3. **Linux 支持**。见 §3。
 4. **目标机器上的 ARA 宿主可得性**。见 §8。

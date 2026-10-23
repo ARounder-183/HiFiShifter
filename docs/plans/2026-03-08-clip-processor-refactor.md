@@ -585,7 +585,7 @@ pub fn clear_cache(state: tauri::State<AppState>) -> Result<u64, String> {
 ## 风险与注意事项
 
 1. **vslib Windows-only**：`VslibProcessor` 在 feature gate `vslib` 下编译，macOS/Linux 构建不受影响
-2. **vslib 磁盘 I/O**：`VslibAddItemEx` 需要一个 WAV 文件路径，临时 WAV 写入 `<exe_dir>/cache/vslib_tmp/`，处理完立即删除；`VslibGetMixData` 读取输出后同步删除。不适合实时预览，仅用于离线渲染（mixdown）或预合成缓存
+2. **vslib 输入文件 I/O**：`VslibAddItemEx` 需要一个 WAV 文件路径，临时 WAV 写入 `<exe_dir>/cache/vslib_tmp/`，处理完立即删除；`VslibGetMixData` 直接把混音 PCM 读入调用方缓冲区，不产生输出临时文件。不适合实时预览，仅用于离线渲染（mixdown）或预合成缓存
 3. **缓存目录跨版本兼容**：`<exe_dir>/cache/synth/` 中的文件名基于参数哈希，升级版本后哈希算法若有变化需在启动时清空旧缓存目录
 3. **compat 层 RubberBand 双重处理**：compat 层对 World/HiFiGAN 仍需先 RubberBand 拉伸再合成，相比直接原生时间拉伸有额外开销；可在未来实现 World 原生时间拉伸后去掉 compat
 4. **extra_curves 内存**：逐帧 Vec<f32> 在长 clip 下可能占用可观内存，需在缓存层控制粒度
