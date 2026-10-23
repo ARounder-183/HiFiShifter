@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};
 
-/// 车道容量（含正在执行的那条）。
+/// 队列槽位数。在途上限 = 队列 4 + 正在执行 1 = **5**。
 ///
 /// 【为什么这么小】长任务以分钟计。允许排 10 条等于承诺一个 5 分钟的等待，而调用方拿到
 /// 的回执会早已超时。宁可立刻说「已经有一条在跑」。
@@ -104,27 +104,34 @@ pub(crate) struct Lane {
 }
 
 impl Lane {
-    fn new() -> Self {
+    fn new() -> Result<Self, String> {
         let shared = std::sync::Arc::new(Shared::default());
         let (queue, receiver) = sync_channel(SLOW_CAPACITY);
         let worker_shared = std::sync::Arc::clone(&shared);
+        // 【为什么不是 expect】首条慢任务可能在宿主 UI 线程（wndproc 的 WM_TIMER →
+        // deliver → enqueue）上触发车道初始化，那条路径没有 catch_unwind 包裹 ——
+        // panic 会穿透窗口过程边界带走宿主进程。失败降级成「车道不可用」的
+        // 可操作错误，由 submit 的调用方按既有错误回执路径交付。
         std::thread::Builder::new()
             .name("hfs-slow-lane".into())
             .spawn(move || worker(receiver, worker_shared))
-            .expect("spawn the slow lane worker");
-        Self { queue, shared }
+            .map(|_handle| Self { queue, shared })
+            .map_err(|error| format!("the slow lane worker failed to start: {error}"))
     }
 
     fn submit(&self, task: SlowTask) -> Result<(), String> {
         let (id, command) = (task.id, task.command.clone());
-        // 先入队再记账：try_send 失败时不能留下「已排队」的假读数。
+        // 先记账再入队：worker 侧的 fetch_sub 若插在「入队成功」与「记账」之间，
+        // 计数会瞬态下溢回绕（诊断快照读出巨数）。先加后发最多把计数多报 1
+        // （入队失败立刻减回），绝不会回绕。
+        self.shared.in_flight.fetch_add(1, Ordering::AcqRel);
         match self.queue.try_send(task) {
             Ok(()) => {
-                self.shared.in_flight.fetch_add(1, Ordering::AcqRel);
                 log::info!("[ara] slow lane: queued {command} (id={id})");
                 Ok(())
             }
             Err(_) => {
+                self.shared.in_flight.fetch_sub(1, Ordering::AcqRel);
                 log::warn!(
                     "[ara] slow lane: rejected {command} (id={id}) — another long task is running"
                 );
@@ -138,19 +145,33 @@ impl Lane {
     }
 }
 
-fn lane() -> &'static Lane {
-    static LANE: OnceLock<Lane> = OnceLock::new();
-    LANE.get_or_init(Lane::new)
+/// 进程级车道的惰性句柄。
+///
+/// 【为什么缓存 Result】spawn 失败（OOM 级）之后，下一次 submit 重试一次初始化是
+/// 合理的；但 OnceLock 只能存一个值，于是把 Result 整个存下来 —— 成功路径照常，
+/// 失败路径把同一句可操作的话交给每一次后续 submit。
+fn lane() -> Result<&'static Lane, String> {
+    static LANE: OnceLock<Result<Lane, String>> = OnceLock::new();
+    LANE.get_or_init(Lane::new).as_ref().map_err(String::clone)
 }
 
 /// 提交一条慢任务。立即返回；回执由车道线程发出。
 pub(crate) fn submit(task: SlowTask) -> Result<(), String> {
-    lane().submit(task)
+    lane()?.submit(task)
 }
 
 /// 车道状态（诊断包用）。
 pub(crate) fn snapshot() -> Value {
-    lane().snapshot()
+    match lane() {
+        Ok(lane) => lane.snapshot(),
+        Err(error) => json!({
+            "running": null,
+            "inFlight": 0,
+            "capacity": SLOW_CAPACITY,
+            "available": false,
+            "error": error,
+        }),
+    }
 }
 
 /// 车道线程：一条一条地跑，每条都**必然**得到一条回执。
@@ -248,7 +269,7 @@ pub(crate) mod tests {
     /// **不变量：一条任务恰好一条回执，形状与 actor 完全一致。**
     #[test]
     fn a_task_replies_exactly_once_with_the_actor_protocol() {
-        let lane = Lane::new();
+        let lane = Lane::new().expect("车道线程必须能启动");
         let (sink, replies) = fake_sink();
         lane.submit(SlowTask {
             id: 7,
@@ -279,7 +300,7 @@ pub(crate) mod tests {
     /// 「任务失败」与「插件卡死」。
     #[test]
     fn a_failing_task_replies_with_a_classified_error() {
-        let lane = Lane::new();
+        let lane = Lane::new().expect("车道线程必须能启动");
         let (sink, replies) = fake_sink();
         lane.submit(SlowTask {
             id: 8,
@@ -300,7 +321,7 @@ pub(crate) mod tests {
     /// **不变量：panic 不带走宿主进程，也不吞掉回执。**
     #[test]
     fn a_panicking_task_still_replies_and_the_lane_survives() {
-        let lane = Lane::new();
+        let lane = Lane::new().expect("车道线程必须能启动");
         let (sink, replies) = fake_sink();
         lane.submit(SlowTask {
             id: 9,
@@ -339,7 +360,7 @@ pub(crate) mod tests {
     /// 两条都变慢，并且在内核的构建租约上互相挡。
     #[test]
     fn the_lane_runs_one_task_at_a_time() {
-        let lane = Arc::new(Lane::new());
+        let lane = Arc::new(Lane::new().expect("车道线程必须能启动"));
         let peak = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
         let mut receivers = Vec::new();
@@ -373,7 +394,7 @@ pub(crate) mod tests {
     /// **不变量：队列满时立刻给出可操作的话，而不是让调用方等到超时。**
     #[test]
     fn a_full_lane_is_refused_with_an_actionable_error() {
-        let lane = Lane::new();
+        let lane = Lane::new().expect("车道线程必须能启动");
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
         let gate = Arc::new(Mutex::new(gate_rx));
         // 第一条：占住车道，直到测试放行。
@@ -424,7 +445,7 @@ pub(crate) mod tests {
     /// **不变量：视图已关闭时回执被丢弃，车道继续工作。**
     #[test]
     fn a_closed_view_swallows_the_reply() {
-        let lane = Lane::new();
+        let lane = Lane::new().expect("车道线程必须能启动");
         let (sink, replies) = fake_sink();
         sink.closed.store(true, Ordering::Release);
         lane.submit(SlowTask {
