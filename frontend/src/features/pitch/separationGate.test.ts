@@ -226,26 +226,39 @@ describe("门禁不负责点亮曲线（渲染口径的回归护栏）", () => {
      * 渲染可见性 —— 面板其余的门禁判断都走 `isEffectParamGated` / `gatedParamHideOrder`。
      */
     /*
-     * 【扫哪个文件】面板的逻辑（含副参数可见性的推导）在模型文件里；`PianoRollPanel.tsx`
-     * 本身只剩三十行装配代码。护栏跟着代码走，否则它会变成"扫一个已经不存在的文件"。
+     * 【扫哪些文件】面板的逻辑在模型文件里；`PianoRollPanel.tsx` 本身只剩三十行装配
+     * 代码。副参数可见性的推导与两道门禁一起搬进了 `usePianoRollParamGates.ts`，因此
+     * 两个文件都在扫描范围内 —— 护栏跟着代码走，否则它会变成"扫一个已经不存在的
+     * 文件"（这条约定见本块的上一段）。
      */
-    const panelSource = readFileSync(
-        new URL(
-            "../../components/layout/pianoRoll/panel/usePianoRollPanelModel.tsx",
-            import.meta.url,
-        ),
-        "utf8",
-    );
+    const panelSources = [
+        "../../components/layout/pianoRoll/panel/usePianoRollPanelModel.tsx",
+        "../../components/layout/pianoRoll/panel/usePianoRollParamGates.ts",
+    ].map((relative) => ({
+        relative,
+        source: readFileSync(new URL(relative, import.meta.url), "utf8"),
+    }));
 
     it("PianoRollPanel 不拿被门禁参数列表去决定曲线是否绘制", () => {
-        // 去掉注释再判断：说明里提到这个列表是允许的（而且正是本护栏的用意）。
-        const withoutComments = panelSource.replace(/^\s*(\/\/|\*|\/\*).*$/gm, "");
-        expect(withoutComments).not.toContain("SEPARATION_GATED_PARAMS");
+        for (const { relative, source } of panelSources) {
+            // 去掉注释再判断：说明里提到这个列表是允许的（而且正是本护栏的用意）。
+            const withoutComments = source.replace(/^\s*(\/\/|\*|\/\*).*$/gm, "");
+            expect(withoutComments, relative).not.toContain("SEPARATION_GATED_PARAMS");
+        }
     });
 
     it("副参数列表的可见性直接来自眼睛状态，不经过中间映射", () => {
-        const callSite = /getVisibleSecondaryParamIds\(\{([\s\S]*?)\}\)/.exec(panelSource);
-        expect(callSite, "没有找到 getVisibleSecondaryParamIds 的调用点").not.toBeNull();
-        expect(callSite![1]).toMatch(/secondaryParamVisible\s*,/);
+        const callSites = panelSources
+            .map(({ relative, source }) => ({
+                relative,
+                callSite: /getVisibleSecondaryParamIds\(\{([\s\S]*?)\}\)/.exec(source),
+            }))
+            .filter((entry) => entry.callSite !== null);
+        expect(callSites.length, "没有找到 getVisibleSecondaryParamIds 的调用点").toBeGreaterThan(
+            0,
+        );
+        for (const { relative, callSite } of callSites) {
+            expect(callSite![1], relative).toMatch(/secondaryParamVisible\s*,/);
+        }
     });
 });
