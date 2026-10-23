@@ -45,18 +45,11 @@ import { publishPianoRollSelection } from "../../../../utils/pianoRollSelectionB
 import { resolveTimelineScrollRange } from "../../timeline/runtime/timelineScrollRange";
 import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
 import { useToolbarOverflowTier } from "../useToolbarOverflowTier";
-import {
-    normalizeSelection,
-    selectionBoundingSpan,
-    selectionFromFrames,
-    type ParamSelection,
-} from "../paramSelection";
+import { normalizeSelection, selectionBoundingSpan, type ParamSelection } from "../paramSelection";
 import { type ParamClipboardData } from "../paramClipboardMapping";
-import { createClipboardPreviewSync } from "../clipboardPreviewSync";
 import { usePianoRollData } from "../usePianoRollData";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
 import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
-import { timeToFrame } from "../utils";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
@@ -89,7 +82,6 @@ import {
     isChildFormantOffsetCentsParam,
     isChildPitchOffsetParam,
 } from "../childPitchOffsetParams";
-import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
 import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
@@ -120,12 +112,12 @@ import type {
 } from "../kernel/host/pianoRollKernelData";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { NOTE_NAMES_SHARP } from "./panelHelpers";
-import { runEditOp } from "./editOperations";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
 import { useTimelineDisplayControls } from "./useTimelineDisplayControls";
 import { buildToolIcons } from "./toolIcons";
+import { usePianoRollEditCommands } from "./usePianoRollEditCommands";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
 import { usePianoRollScrollKernel } from "./usePianoRollScrollKernel";
 import { useMidiImport } from "./useMidiImport";
@@ -2351,164 +2343,44 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 卸载时注销（否则本实例的最后状态会永远粘住，状态栏再也不会收起）。
     useEffect(() => () => clearPianoRollLoading(loadingPublisherId), [loadingPublisherId]);
 
-    /**
-     * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
-     *
-     * 独立成函数有两个用途：`selectAll` 菜单命令本身，以及 `handleEditOp` 开头的
-     * **隐式全选**（无选区时先把作用域铺满整条曲线，再执行原本需要选区的操作）。
-     *
-     * @returns 是否真的设置了选区；工具模式不是「选择」时为 `false`（与菜单命令
-     *   同一守卫：绘制 / 直线 / 颤音工具下不产生选区），调用方据此保持原行为。
-     */
-    const selectAllParamRange = useCallback((): boolean => {
-        if (s.toolMode !== "select") return false;
-        // 整条曲线 = 帧 [0, 工程末端)。**数据路径**直接按整数帧构造：全选的边界就是
-        // 首帧与末帧，不该被"最近中点"再挪半帧（见 paramSelection 的两个构造器）。
-        const totalFrames = Math.max(
-            0,
-            timeToFrame(dynamicProjectSec, paramView?.framePeriodMs ?? 5),
-        );
-        selectionRef.current = selectionFromFrames(0, totalFrames);
-        setSelectionUi(selectionRef.current);
-        invalidate();
-        return true;
-    }, [s.toolMode, dynamicProjectSec, paramView?.framePeriodMs, invalidate]);
-
-    // ── Edit operation handler (shared by context menu + MenuBar events) ──
-    const handleEditOp = useCallback(
-        async (op: string, data?: Record<string, unknown>) =>
-            runEditOp(
-                {
-                    activeVibratoPresetId,
-                    bumpRefreshToken,
-                    clipboardRef,
-                    currentParamDefaultValue,
-                    currentParamQuantizeUnit,
-                    currentParamRange,
-                    dispatch,
-                    editParam,
-                    effectiveProjectScale,
-                    invalidate,
-                    midiDialogOpenParamsRef,
-                    midiDialogSourceRef,
-                    paramView,
-                    paramViewRef,
-                    pitchDeltaToDegreeSteps,
-                    pitchEnabled,
-                    processorParamsRef,
-                    projectScaleAtSec,
-                    resolveScaleFromToken,
-                    resolvedVibratoPresets,
-                    rootTrackId,
-                    s,
-                    scrollerRef,
-                    selectAllParamRange,
-                    selectionRef,
-                    setClipboardGuid,
-                    setMidiDialogOpen,
-                    setMidiDialogSelection,
-                    setMidiPath,
-                    setParamView,
-                    setSelectionUi,
-                    store,
-                    vibratoBaseline,
-                },
-                op,
-                data,
-            ),
-        [
-            rootTrackId,
-            editParam,
-            s.tracks,
-            paramView?.framePeriodMs,
-            dynamicProjectSec,
-            s.edgeSmoothnessPercent,
-            effectiveProjectScale,
-            projectScaleAtSec,
-            resolveScaleFromToken,
-            currentParamRange,
-            currentParamDefaultValue,
-            currentParamQuantizeUnit,
-            pitchEnabled,
-            bumpRefreshToken,
-            invalidate,
-            dispatch,
-            selectAllParamRange,
-            // 颤音预设：`case "addVibrato"` 读这两个值来决定"套用哪个预设"。
-            // 漏掉它们会让闭包拿到旧列表，表现为"点了新预设却套用了旧的"。
-            resolvedVibratoPresets,
-            activeVibratoPresetId,
-            vibratoBaseline,
-        ],
-    );
-
-    // Keep the ref in sync so usePianoRollInteractions can dispatch edit ops
-    handleEditActionRef.current = (op: string) => void handleEditOp(op);
-
-    // Listen for edit operations dispatched from MenuBar / 全局路由
-    // hifi:editOp 是参数编辑器专属通道（事件名即契约）：全局路由
-    // （focusRouting.resolveEditOpRoute）按活动编辑表面把编辑操作定向派发
-    // 到这里，消费者信任事件、不再自行判断焦点 —— 旧版在此重猜
-    // activeElement / body 属性，与时间轴侧判断互相矛盾，正是复制/剪切/
-    // 粘贴冲突的根因。selectAll/deselect 的工具模式守卫在 handleEditOp 内。
-    useEffect(() => {
-        const handler = (e: Event) => {
-            const detail = (e as CustomEvent).detail;
-            if (!detail?.op) return;
-            const { op, ...data } = detail;
-            void handleEditOp(op, data);
-        };
-        window.addEventListener("hifi:editOp", handler);
-        return () => window.removeEventListener("hifi:editOp", handler);
-    }, [handleEditOp]);
-
-    /**
-     * 快捷键「添加颤音」→ 打开颤音窗口（落在「套用到选区」页签）。
-     *
-     * `edit.addVibrato` 在交互层被归入"需要弹窗"的一类（派发 `hifi:openEditDialog`），
-     * 但该事件由菜单栏消费，而窗口宿主在本面板（预览要选区数据）。这里补上本面板的
-     * 消费分支，快捷键与右键菜单才走同一个入口。
-     */
-    useEffect(() => {
-        const handler = (e: Event) => {
-            if ((e as CustomEvent).detail?.dialog === "addVibrato") {
-                openVibratoDialog("apply");
-            }
-        };
-        window.addEventListener("hifi:openEditDialog", handler);
-        return () => window.removeEventListener("hifi:openEditDialog", handler);
-    }, [openVibratoDialog]);
-
-    // 单剪贴板纪律：槽位被别的表面整体替换后（时间轴复制/剪切，或记事本暂存块
-    // 的「恢复到剪贴板」），内部剪贴板缓存必须**重新对齐槽位** —— 否则
-    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被替换掉的参数线数据从
-    // 内部缓存复活。
-    //
-    // 【只清不读是不够的】清空只解决了"槽位里不再是参数线数据"的一半；另一半
-    // 是"槽位里（重新）是参数线数据"：从记事本恢复一份参数线载荷时，数据明明
-    // 可粘贴，预览却始终空白 —— 而预览画的正是"粘贴会落下的数据"，它必须跟着
-    // 槽位走。因此这里清空之后立刻回读一次。
-    useEffect(() => {
-        const sync = createClipboardPreviewSync(() => readSystemClipboardObject("param"));
-        const handler = () => {
-            // 先清空：待读取期间也绝不展示已经过期的曲线。读取到（或读不到）
-            // 参数线数据后，结果统一由 apply 落地。
-            clipboardRef.current = null;
-            invalidate();
-            void sync.sync((data) => {
-                clipboardRef.current = data;
-                invalidate();
-            });
-        };
-        window.addEventListener("hifi:clipboardReplaced", handler);
-        // 面板首次挂载时也对齐一次：槽位可能在面板被打开之前就已经恢复好了
-        // （恢复动作发生在记事本，参数编辑器当时还没有挂载）。
-        handler();
-        return () => {
-            sync.cancel();
-            window.removeEventListener("hifi:clipboardReplaced", handler);
-        };
-    }, [invalidate]);
+    // 编辑命令（全选、命令分发、剪贴板键盘与外部同步接线）整块在
+    // `usePianoRollEditCommands` 里（见该文件头）。
+    const { selectAllParamRange, handleEditOp } = usePianoRollEditCommands({
+        activeVibratoPresetId,
+        bumpRefreshToken,
+        clipboardRef,
+        currentParamDefaultValue,
+        currentParamQuantizeUnit,
+        currentParamRange,
+        dispatch,
+        dynamicProjectSec,
+        editParam,
+        effectiveProjectScale,
+        handleEditActionRef,
+        invalidate,
+        midiDialogOpenParamsRef,
+        midiDialogSourceRef,
+        openVibratoDialog,
+        paramView,
+        paramViewRef,
+        pitchEnabled,
+        processorParamsRef,
+        projectScaleAtSec,
+        resolvedVibratoPresets,
+        resolveScaleFromToken,
+        rootTrackId,
+        s,
+        scrollerRef,
+        selectionRef,
+        setClipboardGuid,
+        setMidiDialogOpen,
+        setMidiDialogSelection,
+        setMidiPath,
+        setParamView,
+        setSelectionUi,
+        store,
+        vibratoBaseline,
+    });
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
     const openEditDialog = useCallback((dialog: string) => {
