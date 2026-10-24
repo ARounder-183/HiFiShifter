@@ -5,7 +5,12 @@ import { describe, expect, it } from "vitest";
 // 不需要手工维护一份副本。
 import backendLibSource from "../../../backend/src-tauri/src/lib.rs?raw";
 import pluginCommandSource from "../../../backend/hifishifter-plugin/src/editor/commands.rs?raw";
-import pluginWebviewSource from "../../../backend/hifishifter-plugin/src/editor/webview.rs?raw";
+// 视图层的命令分流：2026-10-24 起它在 `editor/gui/client.rs`（Policy），
+// `editor/webview.rs` 已按平台拆进 `editor/gui/{windows,macos,linux}.rs`。
+// 【为什么要跟着改路径而不是删掉这一行】这一份源码就是"UI 线程就地处理、不进 actor"
+// 那一半命令的唯一登记处；漏扫它，`create_host_track` / 记事本导出这类命令就会变成
+// 前端调了、后端没人接的静默分叉 —— 这正是本测试存在的理由。
+import pluginClientSource from "../../../backend/hifishifter-plugin/src/editor/gui/client.rs?raw";
 // Capture 的命令入口是独立模块（视图层按前缀分流，不进 actor match）。
 // 【为什么必须一起扫】漏掉它就等于给这套穷举检查开了一个后门：新模块里的命令
 // 永远不会被发现，而它们正是"前端调了、后端没有"这类静默分叉的又一来源。
@@ -163,7 +168,7 @@ describe("invoke wiring", () => {
         const backend = new Set([
             ...extractBackendHandlers(backendLibSource),
             ...extractPluginHandlers(pluginCommandSource),
-            ...extractPluginHandlers(pluginWebviewSource),
+            ...extractPluginHandlers(pluginClientSource),
             ...extractPluginHandlers(captureCommandSource),
         ]);
         const referenced = new Set<string>([

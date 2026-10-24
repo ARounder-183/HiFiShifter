@@ -17,6 +17,12 @@ import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
+import { listen as listenHostEvent } from "./services/hostEvents";
+import { getPluginHost } from "./services/pluginHost";
+import {
+    importAudioAtPosition,
+    importMultipleAudioAtPosition,
+} from "./features/session/thunks/importThunks";
 import { getSessionGateSnapshot, subscribeSessionGate } from "./services/sessionGate";
 import {
     isPluginMode,
@@ -3595,6 +3601,73 @@ function AppInner() {
             showNotice(tVars(key, { action }), 6000, "warning");
         });
     }, [showNotice, t, tVars]);
+
+    /*
+     * 页面就绪上报：让原生侧知道"这套 UI 真的跑起来了"。
+     *
+     * 【为什么需要它】macOS / Linux 的 WebKit 平台由原生注入一段垫片才有
+     * `chrome.webview`（见 `editor/gui/bridge.js`）。页面到底有没有跑起来，只有页面
+     * 自己说一句话才算数 —— 否则"白屏"在宿主侧只表现为"面板是空的"，日志里一行都没有。
+     * 原生侧收到后打一行 `[gui] page ready after {n}ms`。
+     *
+     * 【为什么吞掉错误】旧版原生侧没有这条命令（比如 Windows 的构建落后一个版本）。
+     * 一条诊断消息的失败绝不该冒到用户面前。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        void getPluginHost()
+            ?.invoke("plugin_ready")
+            .catch(() => undefined);
+    }, []);
+
+    /*
+     * 原生拖放：把"拖进窗口的文件"变成一次普通导入。
+     *
+     * 【为什么路径只能由原生给】WebKit 的 `File` 没有磁盘路径（沙箱），所以拖进来的
+     * 文件在页面侧只是一坨字节。macOS / Linux 的原语接 `NSDraggingDestination` /
+     * `drag-data-received`，把真实路径作为 `native_drop` 事件推上来（见
+     * `editor/gui/macos.rs` 与 `linux.rs`）。Windows 走的是 WebView2 的
+     * `AdditionalObjects`，那条路在原生侧就改写成 `import_audio_item`，不会到这里。
+     *
+     * 【为什么落点是播放头】原生交得出"拖进来的是什么文件"，交不出"落在时间线第几秒"
+     * —— 拖动根本没进 DOM，没有坐标可算。播放头 + 当前选中轨道是唯一能预期的答案，
+     * 也与"文件菜单导入"完全一致。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        let disposed = false;
+        let unsubscribe: (() => void) | null = null;
+        void listenHostEvent<{ paths?: unknown }>("native_drop", (event) => {
+            const paths = Array.isArray(event.payload?.paths)
+                ? event.payload.paths.filter(
+                      (path): path is string => typeof path === "string" && path.length > 0,
+                  )
+                : [];
+            if (paths.length === 0) return;
+            const session = store.getState().session;
+            const startSec = session.playheadSec ?? 0;
+            const trackId = session.selectedTrackId ?? null;
+            if (paths.length === 1) {
+                void dispatch(importAudioAtPosition({ audioPath: paths[0], trackId, startSec }));
+            } else {
+                void dispatch(
+                    importMultipleAudioAtPosition({
+                        audioPaths: paths,
+                        mode: "across-tracks",
+                        trackId,
+                        startSec,
+                    }),
+                );
+            }
+        }).then((off) => {
+            if (disposed) off();
+            else unsubscribe = off;
+        });
+        return () => {
+            disposed = true;
+            unsubscribe?.();
+        };
+    }, [dispatch]);
 
     // 活动编辑表面跟踪：document 捕获阶段解析 pointerdown / focusin 落点，
     // 为编辑快捷键（复制/剪切/粘贴等）的归属裁决提供单一事实源 —— 捕获
