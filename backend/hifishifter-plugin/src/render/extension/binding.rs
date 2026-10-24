@@ -908,6 +908,32 @@ impl ExtensionOwner {
     pub(crate) fn host_audio_status(&self) -> HostAudioStatus {
         *self.host_audio.lock_or_recover()
     }
+    /// 本实例的宿主时钟：ARA 形态是文档的，Capture 形态是 owner 自己的。
+    ///
+    /// 【为什么是**唯一**来源】此前 `EditorSession::host_clock` 自己也写了一遍同样的
+    /// 分支判断。两处各自演化的结果是"Capture 形态读哪个时钟"有两个答案 —— 而它只在
+    /// Capture 里出错，最难被发现。现在 Capture 分支只在这里存在，会话侧调它。
+    pub(crate) fn host_clock(&self) -> Option<Arc<super::transport::TransportClock>> {
+        match self.editor_document() {
+            Ok(document) => Some(document.clock.clone()),
+            Err(_) => self.clock.get().cloned(),
+        }
+    }
+
+    /// 宿主播放态读数。`None` = **还没收到过**任何 process 上下文（不是"没在播放"）。
+    ///
+    /// 【为什么让路判定需要它】"投递之后宿主动没动"只能靠观察 `kPlaying` 的翻转；
+    /// 没有读数时任何判断都是猜。`None` 让调用方知道"这一次无法验证"，而不是把一个
+    /// 假的 `false` 当成"宿主没接"。
+    pub(crate) fn transport_reading(&self) -> Option<crate::editor::host_key_relay::Reading> {
+        let clock = self.host_clock()?;
+        if !clock.has_reading() {
+            return None;
+        }
+        let (_, playing) = clock.read();
+        Some(crate::editor::host_key_relay::Reading { playing })
+    }
+
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
     pub(crate) fn refresh_host_transport(&self) {
         self.refresh_host_transport_inner(false);

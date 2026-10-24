@@ -30,6 +30,8 @@ pub(crate) struct TransportClock {
     editor_stops: AtomicU64,
     stop_writer: AtomicU64,
     stop_role: AtomicI32,
+    /// 是否**收到过**任何宿主 process 上下文（不论播没播）。
+    received: AtomicBool,
 }
 impl TransportClock {
     /// UI线程发布所属工程实际听到位置；bool占f64最低位，误差小于1ULP且元组原子一致。
@@ -130,6 +132,7 @@ impl TransportClock {
     /// VST3锁定header中kPlaying=1<<1；project_time_samples不需要音乐时间valid位。
     pub fn update(&self, context: &crate::audio_abi::ProcessContext) {
         if context.sample_rate.is_finite() && context.sample_rate > 0. {
+            self.received.store(true, Ordering::Release);
             self.position.store(
                 (context.project_time_samples as f64 / context.sample_rate).to_bits(),
                 Ordering::Release,
@@ -170,6 +173,15 @@ impl TransportClock {
         let numerator = self.time_sig_numerator.load(Ordering::Acquire);
         let denominator = self.time_sig_denominator.load(Ordering::Acquire);
         (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+    }
+    /// 是否**收到过**任何宿主 process 上下文。
+    ///
+    /// 【为什么不能用 `read()` 的返回值代替】`read()` 在"宿主在 0 秒处没播放"与"宿主
+    /// 从未送过上下文"两种情况下都给 `(0.0, false)`。对展示来说两者一样（都显示 0），
+    /// 但对**让路判定**完全不同：前者可以用来判断"宿主动没动"，后者不能 —— 把"还没
+    /// 收到读数"当成"宿主没动"，会让探针每次都误判，于是每次都白白多等一个探针窗口。
+    pub fn has_reading(&self) -> bool {
+        self.host_valid.load(Ordering::Acquire) || self.received.load(Ordering::Acquire)
     }
     /// 多个renderer可能并行发布同一文档块；展示容忍一块误差，不参与DSP寻址。
     pub fn read(&self) -> (f64, bool) {

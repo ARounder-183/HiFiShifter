@@ -1,4 +1,5 @@
 //! 原生WebView2子窗口：借用REAPER消息循环，取消异步创建，不启动Tauri/app。
+use super::host_key_relay;
 use crate::sync::MutexExt;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -171,6 +172,17 @@ struct BrowserState {
     // 上一份文档）。
     history_cache: Option<((String, u64, i32, i32), serde_json::Value)>,
     last_history: Option<serde_json::Value>,
+    /// 宿主专属快捷键的让路状态机（见 `editor::host_key_relay`）。
+    relay: host_key_relay::Arbiter,
+    /// 本平台的"把键交回宿主"原语。自报 `Fidelity`，状态机据此决定要不要探针/提示。
+    escape: Box<dyn host_key_relay::HostKeyEscape>,
+    /// 前端声明的"属于宿主"的按键集合（`host_key_escape_set` 的产物）。
+    escape_set: host_key_relay::StrokeSet,
+    /// 待发给前端的**非回执**事件（让路没成的回报）。
+    ///
+    /// 【为什么与 `replies` 分开】回执按 id 对应一次 `invoke`；这里的事件没有 id，
+    /// 是"后台发生了一件事"。共用一条通道会逼前端去猜"这条到底对应哪个 promise"。
+    view_events: std::collections::VecDeque<serde_json::Value>,
 }
 
 /// 在途预算判据（纯函数：`BrowserState` 要 COM 才建得起来，判据本身必须可测）。
@@ -472,6 +484,9 @@ impl NativeEditor {
             events: event_sender,
             closed: Arc::new(AtomicBool::new(false)),
         };
+        // 原语先建：状态机要知道本平台能做什么（`Fidelity`）才能决定要不要探针。
+        let escape = host_key_relay::escape_for_platform();
+        let relay = host_key_relay::Arbiter::new(escape.fidelity());
         let state = Rc::new(RefCell::new(BrowserState {
             hwnd: HWND::default(),
             closed: false,
@@ -490,6 +505,10 @@ impl NativeEditor {
             history_requests: HashSet::new(),
             history_cache: None,
             last_history: None,
+            relay,
+            escape,
+            escape_set: host_key_relay::StrokeSet::default(),
+            view_events: std::collections::VecDeque::new(),
         }));
         let capturered = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData {
@@ -721,6 +740,17 @@ unsafe extern "system" fn window_proc(
                                 .emit("plugin_bootstrap_changed", bootstrap_json(&link, &view_id));
                         }
                     }
+                    // 让路状态机：与宿主时钟同一个节拍（20 ms）。
+                    //
+                    // 【为什么用视图定时器而不是自己的计时器】探针/观察窗要判的是"宿主动没动"，
+                    // 而宿主的播放态只有 `TransportClock` 知道；这个定时器已经在读它，
+                    // 而且它是"宿主不再回调时唯一还会跑的节拍"（见 `refresh_host_transport_tick`）。
+                    let reading = owner.transport_reading();
+                    let effects = state
+                        .borrow_mut()
+                        .relay
+                        .tick(std::time::Instant::now(), reading);
+                    apply_relay_effects(&state, effects);
                 }
                 if !state.borrow().closed {
                     deliver(&state);
@@ -911,6 +941,23 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
         if done_history {if let Some(document)=document {document.host_undo.finish_history(&view_id,id);}}
         true
     });
+    // 让路事件与回执同一条出口（同一把"只在本线程发"的伞）。
+    //
+    // 每次只取 16 条：一次 tick 最多产生一两条，但宿主被按住不放时可能积压；
+    // 分批发不会让一个卡住的 `PostWebMessageAsJson` 把整批都吞掉。
+    {
+        let mut state = state.borrow_mut();
+        let mut taken = 0;
+        while taken < 16 {
+            match state.view_events.pop_front() {
+                Some(event) => {
+                    replies.push(event);
+                    taken += 1;
+                }
+                None => break,
+            }
+        }
+    }
     replies.extend(events);
     let history = link.owner().ok().and_then(|owner| {
         let document = owner.editor_document().ok()?;
@@ -963,6 +1010,86 @@ fn deliver(state: &Rc<RefCell<BrowserState>>) {
             break;
         }
     }
+}
+
+/// 执行让路状态机声明的副作用。
+///
+/// 【为什么副作用不在状态机里做】`host_key_relay::Arbiter` 要保持纯逻辑（可单测、
+/// 不碰窗口/COM/日志）。这里只做三件机械的事：投递、记账、写一行诊断。
+fn apply_relay_effects(state: &Rc<RefCell<BrowserState>>, effects: Vec<host_key_relay::Effect>) {
+    for effect in effects {
+        match effect {
+            host_key_relay::Effect::Trace(trace) => {
+                let fidelity = state.borrow().relay.fidelity();
+                log_relay(&format!("fidelity={} {}", fidelity.as_str(), trace));
+            }
+            host_key_relay::Effect::Notice { action, reason } => {
+                log_relay(&format!("action={action} notice={reason}"));
+                push_relay_notice(state, &action, reason);
+            }
+            host_key_relay::Effect::Escape { action, stroke } => {
+                // 【一致性闸】页面只能让"它自己声明过"的键。集合为空 = 前端还没发布
+                // （旧前端 / 启动瞬间），此时按"前端已经判定过"处理 —— 与引入集合之前的
+                // 行为一致；集合非空时它就是一份白名单。
+                let declared = {
+                    let state = state.borrow();
+                    state.escape_set.is_empty() || state.escape_set.contains(&stroke)
+                };
+                if !declared {
+                    refuse_relay(state, &action, "unsupported-key");
+                    continue;
+                }
+                let (fidelity, result) = {
+                    let mut state = state.borrow_mut();
+                    let fidelity = state.escape.fidelity();
+                    // 句柄在 `WM_NCCREATE` 之后才有效；在此之前按下按键是不可能的
+                    // （窗口还没显示），因此这里不做额外判空。
+                    let window = state.hwnd.0 as usize;
+                    let result = state.escape.escape(window, &stroke);
+                    (fidelity, result)
+                };
+                match result {
+                    Ok(()) => log_relay(&format!(
+                        "fidelity={} key={:?} relayed",
+                        fidelity.as_str(),
+                        stroke.token
+                    )),
+                    // 没投成：结构化原因进日志，并且**回报用户一次**（每个动作一次）。
+                    Err(error) => refuse_relay(state, &action, error.as_str()),
+                }
+            }
+        }
+    }
+}
+
+/// 让路失败：记一行日志，并按"每个动作每次会话一次"回报用户。
+///
+/// 【为什么记账在状态机里】"每个动作只说一次"是判定的一部分，不是 UI 的偏好；
+/// 放在状态机里，前端看到的与日志里记的是同一个事实。
+fn refuse_relay(state: &Rc<RefCell<BrowserState>>, action: &str, reason: &str) {
+    log_relay(&format!("action={action} refused reason={reason}"));
+    let newly = state.borrow_mut().relay.note_refusal(action);
+    if newly {
+        push_relay_notice(state, action, "refused");
+    }
+}
+
+fn push_relay_notice(state: &Rc<RefCell<BrowserState>>, action: &str, reason: &str) {
+    let view_id = state.borrow().view_id.clone();
+    state.borrow_mut().view_events.push_back(serde_json::json!({
+        "version": 1,
+        "viewId": view_id,
+        "event": "host_key_relay_notice",
+        "payload": { "action": action, "reason": reason },
+    }));
+}
+
+/// 让路的诊断日志。
+///
+/// 【为什么不需要额外限流】投递本身已被状态机的 60 ms 硬间隔与"10 秒 20 次"限流，
+/// 稳态最多 2 行/秒 —— 比给这里再加一个节流器更简单，也更不会掩盖真实节奏。
+fn log_relay(text: &str) {
+    crate::log_line(&format!("[relay] {text}"));
 }
 
 fn show_error(state: &Rc<RefCell<BrowserState>>, error: &str) {
@@ -1790,6 +1917,56 @@ fn configure_browser(
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
                 }
             },
+            // ── 宿主专属快捷键的让路（Host Key Relay）────────────────────────────
+            //
+            // 【为什么在视图层内联】全部状态都在 BrowserState 上（状态机、平台原语、
+            // 待发事件），而会话分发只拿得到 EditorSession —— 与 `set_transport` 取宿主
+            // 播放控制同一条路。
+            //
+            // 【为什么立即回执】探针（90 ms）与观察窗（400 ms）是**之后**的事；前端此刻
+            // 要的只是"这一下接不接手"。把回执拖到探针之后，会让连按的第二下永远撞上
+            // "in-flight"。
+            Some("host_key_relay")=>{
+                let action=request["args"]["action"].as_str().unwrap_or_default().to_owned();
+                // 【为什么不在这里用 `?`】本闭包返回的是 `windows::core::Result`（COM 调用），
+                // 而命令失败要变成 `Err(String)` 交给下面的统一回执分支。两种错误类型混用
+                // 会让 `?` 去找一个不存在的 `From<&str>` —— 这里显式分支即可。
+                match host_key_relay::Stroke::from_json(&request["args"]) {
+                    Some(stroke)=>{
+                        let reading=state.borrow().link.owner().ok().and_then(|owner|owner.transport_reading());
+                        let outcome=state.borrow_mut().relay.on_key(std::time::Instant::now(),&action,stroke,reading);
+                        apply_relay_effects(&state,outcome.effects);
+                        Ok(serde_json::json!({
+                            "accepted":matches!(outcome.verdict,host_key_relay::KeyVerdict::Accepted),
+                            "reason":outcome.verdict.reason(),
+                        }))
+                    }
+                    // 键不在表里 / 载荷不合法：**让不成立**。回执里说清楚，让前端回落
+                    // 旧文案；而不是让整条命令失败 —— 那会连带触发前端错误上报，噪声更大。
+                    None=>Ok(serde_json::json!({
+                        "accepted":false,
+                        "reason":host_key_relay::RejectReason::UnsupportedKey.as_str(),
+                    })),
+                }
+            }
+            // 把键盘焦点交还宿主：让路的**确定**那条路（不投递任何键，只换焦点）。
+            //
+            // 【为什么要有它】投递窗口消息要看宿主脸色（有的宿主只看自己的前台焦点
+            // 窗口）。当投递不灵时，用户至少需要一条一定能生效的路 —— 代价是焦点真的
+            // 走了，之后要点击插件才能回来。所以它不做默认，只做显式菜单项。
+            Some("host_key_focus")=>{
+                let result={let mut state=state.borrow_mut();let window=state.hwnd.0 as usize;state.escape.focus_host(window)};
+                Ok(match result {
+                    Ok(())=>{log_relay("fidelity=focus handed the keyboard back to the host");serde_json::json!({"ok":true})},
+                    Err(error)=>serde_json::json!({"ok":false,"reason":error.as_str()}),
+                })
+            }
+            Some("host_key_escape_set")=>{
+                let set=host_key_relay::StrokeSet::from_json(&request["args"]["strokes"]);
+                let count=set.len();
+                state.borrow_mut().escape_set=set;
+                Ok(serde_json::json!({"ok":true,"count":count}))
+            }
             Some(command)=>{
                 // 【为什么 Capture 命令在视图层拦下】它的全部状态都在
                 // `ExtensionOwner` 上（捕获存储、take、观察位），而会话分发只拿得到

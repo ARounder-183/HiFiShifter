@@ -2392,7 +2392,9 @@ impl EditorSession {
     fn host_clock(&self) -> Option<Arc<crate::render::transport::TransportClock>> {
         match self.document() {
             Some(document) => Some(document.clock.clone()),
-            None => self.capture_owner()?.clock.get().cloned(),
+            // Capture 分支只有一处定义：owner 的 `host_clock`。会话与 owner 各写一遍
+            // 同样的判断时，"Capture 读哪个时钟"会有两个答案 —— 而它只在 Capture 里出错。
+            None => self.capture_owner()?.host_clock(),
         }
     }
 
