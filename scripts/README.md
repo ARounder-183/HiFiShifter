@@ -11,6 +11,7 @@
 | `build/` | 构建与打包：App/插件统一构建、便携包、Linux/macOS 产物、模型清单、CoreML 补丁生成。 |
 | `release/` | 发布物组装：VST3 打包与 NSIS 安装器（`.nsi` + 五语词表），版本号同步。 |
 | `checks/` | CI 门禁：FFI panic 守卫、产品一致性守卫。 |
+| `vst3/unix/` | **macOS / Linux** 的 VST3 构建：`build.sh`（SDK→编译→bundle→自检→打包）与 `verify.sh` + `probe.c`（dlopen 黑盒加载验证）。Windows 的插件构建仍在 `build/`、`release/`。 |
 | `dev/` | 开发期辅助：`tauri dev` 的前端启动脚本、音高分析内存计量。 |
 
 前端专用的浏览器验证脚本（`dev-shot.mjs` 等）留在 `frontend/scripts/`，因为它们依赖
@@ -23,6 +24,13 @@
 .\scripts\build\pack-portable.ps1 -SkipBuild         # 只打包已有产物
 .\scripts\setup\prepare-plugin-sdks.ps1              # 首次构建 VST3 插件前执行一次
 .\scripts\checks\check-product-consistency.ps1       # 跨文件一致性守卫（CI 同款）
+```
+
+macOS / Linux 的 VST3 构建不经过 PowerShell（CI 的 Unix runner 上不该为此装 pwsh）：
+
+```bash
+scripts/vst3/unix/build.sh                     # 一条命令：SDK → 编译 → bundle → 自检 → tar.gz
+scripts/vst3/unix/verify.sh <HiFiShifter.vst3> # 只跑自检（布局/符号/依赖/dlopen 探针）
 ```
 
 各脚本的完整参数见其文件头注释；第三方源码的获取与无网络构建见根 `README.md` 的
