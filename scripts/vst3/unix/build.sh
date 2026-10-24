@@ -11,7 +11,8 @@
 #     frontend 构建前端产物（vite）：bundle 里必须有 Contents/Resources/frontend
 #     build    cargo build -p hifishifter-plugin（默认 release 档：strip，与 Windows 出货档一致）
 #     bundle   按 VST3 3.7+ 的目录规范组装 HiFiShifter.vst3（含依赖、模型、Info.plist）
-#     verify   布局 / 符号 / 依赖自洽 / 黑盒加载（调用 verify.sh）
+#     verify   布局 / 符号 / 依赖自洽 / 黑盒加载 / 前端产物（调用 verify.sh）
+#     install  把 bundle 装进 ~/.vst3（macOS：~/Library/Audio/Plug-Ins/VST3）
 #     package  tar.gz + .sha256 + 许可证
 #
 # 设计取舍见 docs/plans/2026-10-24-vst3-unix-build-plan.md。三条硬规则：
@@ -42,6 +43,7 @@ OUT_DIR=""
 SKIP_VERIFY=0
 SKIP_FRONTEND=0
 ALLOW_NODE_DOWNLOAD=1
+WANT_INSTALL=0
 
 log()  { printf "[vst3] %s\n" "$*"; }
 step() { printf "\n[vst3] ── %s\n" "$*"; }
@@ -58,6 +60,7 @@ usage() {
   --out=DIR                                     产物目录（默认 .build-tmp/vst3-unix）
   --skip-frontend                               跳过前端构建（本地只改 Rust 时用；要求 dist 已存在）
   --no-node-download                            缺少可用的 Node 时不去下载（离线机器用）
+  --install                                     组装后装进 ~/.vst3（macOS 是 ~/Library/…/VST3）
   --no-verify                                   跳过 verify（只在该平台跑不了探针时用）
   -h, --help                                    显示本说明
 USAGE
@@ -71,6 +74,7 @@ while [ $# -gt 0 ]; do
         --out=*)     OUT_DIR="${1#*=}"; shift ;;
         --skip-frontend) SKIP_FRONTEND=1; shift ;;
         --no-node-download) ALLOW_NODE_DOWNLOAD=0; shift ;;
+        --install) WANT_INSTALL=1; shift ;;
         --no-verify) SKIP_VERIFY=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           die "unknown argument: $1（--help 看用法）" ;;
@@ -78,8 +82,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$STAGE" in
-    all|sdk|frontend|build|bundle|verify|package) ;;
-    *) die "--stage 只能是 all|sdk|frontend|build|bundle|verify|package，收到：$STAGE" ;;
+    all|sdk|frontend|build|bundle|verify|install|package) ;;
+    *) die "--stage 只能是 all|sdk|frontend|build|bundle|verify|install|package，收到：$STAGE" ;;
 esac
 
 # ── 平台 ─────────────────────────────────────────────────────────────────────
@@ -524,7 +528,30 @@ stage_verify() {
     bash "$SCRIPT_DIR/verify.sh" "$BUNDLE_DIR"
 }
 
-# ── 阶段 6：打包 ─────────────────────────────────────────────────────────────
+# ── 阶段 6：装进用户的 VST3 目录（开发循环用）─────────────────────────────
+#
+# 【为什么要有它】Linux/macOS 上的"改一行 → 在宿主里看效果"需要一个**确定性**的
+# 拷贝步骤。手工 cp -R 容易留下旧文件（忘了先删、或只覆盖了 .so 而资源还是上一版），
+# 而"宿主里看到旧界面"是最难自查的一类问题 —— 你会以为代码没生效。
+#
+# 默认不执行（--stage=install 或 --install），因为往用户的插件目录写东西
+# 不该是"构建"的隐含副作用。
+stage_install() {
+    step "安装到用户的 VST3 目录"
+    [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：$BUNDLE_DIR（先跑 --stage=bundle）"
+    local target
+    if [ "$HOST_OS" = "macos" ]; then
+        target="$HOME/Library/Audio/Plug-Ins/VST3"
+    else
+        target="$HOME/.vst3"
+    fi
+    mkdir -p "$target"
+    rm -rf "${target:?}/$API_NAME.vst3"
+    cp -R "$BUNDLE_DIR" "$target/$API_NAME.vst3"
+    log "已安装：$target/$API_NAME.vst3（$(du -sh "$target/$API_NAME.vst3" | cut -f1)）"
+}
+
+# ── 阶段 7：打包 ─────────────────────────────────────────────────────────────
 stage_package() {
     step "打包 $ARTIFACT_BASE"
     local stage="$OUT_DIR/stage"
@@ -570,8 +597,14 @@ case "$STAGE" in
     build)    stage_sdk; stage_frontend; stage_build ;;
     bundle)   stage_sdk; stage_frontend; stage_build; stage_bundle ;;
     verify)   stage_verify ;;
+    install)  stage_sdk; stage_frontend; stage_build; stage_bundle; stage_install ;;
     package)  stage_sdk; stage_frontend; stage_build; stage_bundle; maybe_verify; stage_package ;;
     all)      stage_sdk; stage_frontend; stage_build; stage_bundle; maybe_verify; stage_package ;;
 esac
+
+# --install 是"顺便装一下"，与 --stage 正交：all/package 之后也能装。
+if [ "$WANT_INSTALL" = "1" ] && [ "$STAGE" != "install" ]; then
+    stage_install
+fi
 
 log "完成"
