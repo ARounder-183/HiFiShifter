@@ -160,6 +160,14 @@ pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
     crate::guard_ffi(std::ptr::null_mut(), || {
         diagnostics::init();
+        // 【为什么在工厂入口打一行】宿主扫描插件也会走到这里。有了这一行，日志就能
+        // 区分"宿主只是扫描了我"与"宿主真的在用我" —— 前者之后再没有任何行是正常的。
+        crate::gui_log_line(&format!(
+            "module loaded: {} ({} {})",
+            crate::VERSION,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
         editor::resources::initialize_models();
         let _ = runtime::runtime();
         vst3::get_plugin_factory()

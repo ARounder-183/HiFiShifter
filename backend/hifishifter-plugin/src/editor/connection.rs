@@ -104,8 +104,8 @@ unsafe fn record_host_name(host: *mut c_void) {
     // SAFETY: host 指向 IHostApplication vtable；name 的签名为 `TResult(String128)`，
     // 即写入一个 128 个 UTF-16 单元的调用方缓冲（VST3 SDK 的 String128）。
     let table = unsafe { &**host.cast::<*const HostVtbl>() };
-    let mut buffer = [0u16; 128];
-    if unsafe { (table.name)(host, buffer.as_mut_ptr()) } != K_RESULT_OK {
+    let mut buffer: HostNameBuffer = [0; 128];
+    if unsafe { (table.name)(host, buffer.as_mut_ptr().cast()) } != K_RESULT_OK {
         return;
     }
     let Some(name) = decode_string128(&buffer) else {
@@ -142,16 +142,47 @@ pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostId
     identity
 }
 
-/// `String128`（NUL 结尾的 UTF-16）→ `String`；空串/非法 UTF-16 返回 `None`。
+/// 装 `IHostApplication::getName` 结果的缓冲。
+///
+/// 【为什么类型随平台变】VST3 的 `String128` **不是一种编码**：
+///
+/// `cpp
+/// #if SMTG_OS_WINDOWS
+/// typedef char16 String128[128];   // UTF-16
+/// #else
+/// typedef char   String128[128];   // UTF-8
+/// #endif
+/// `
+///
+/// 按 UTF-16 解 Linux 的缓冲会得到一串乱码 ⇒ `from_utf16` 失败 ⇒ 宿主名永远是
+/// `unknown` ⇒ 日志文件名永远停在 `plugin-unknown.log`。用户报的"日志没有按宿主名分类"
+/// 就是这一条：这段代码只在 Windows 上被跑过。
+#[cfg(windows)]
+type HostNameBuffer = [u16; 128];
+#[cfg(not(windows))]
+type HostNameBuffer = [u8; 128];
+
+/// `String128` → `String`；空串/非法编码返回 `None`。
 ///
 /// 【为什么单独抽出来】宿主名是纯诊断信息，绝不能因为一次读名失败影响加载；把"怎么
 /// 解释这段缓冲"独立出来，边界就能单测，不必造一个真实宿主接口。
-fn decode_string128(buffer: &[u16]) -> Option<String> {
+#[cfg(windows)]
+fn decode_string128(buffer: &HostNameBuffer) -> Option<String> {
     let end = buffer
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(buffer.len());
     let name = String::from_utf16(&buffer[..end]).ok()?;
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(not(windows))]
+fn decode_string128(buffer: &HostNameBuffer) -> Option<String> {
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    let name = std::str::from_utf8(&buffer[..end]).ok()?.to_owned();
     (!name.is_empty()).then_some(name)
 }
 
@@ -167,6 +198,11 @@ mod host_name_tests {
         assert!(name.is_none() || !name.unwrap().is_empty());
     }
 
+    /// **不变量：`String128` 按平台的真实编码解码。**
+    ///
+    /// 【为什么钉死】Linux 上按 UTF-16 解会得到乱码，宿主名永远是 `unknown`，日志文件
+    /// 永远叫 `plugin-unknown.log` —— 一个"什么都没坏、但诊断全废"的静默缺陷。
+    #[cfg(windows)]
     #[test]
     fn string128_decoding_stops_at_the_terminator() {
         let mut buffer = [0u16; 128];
@@ -183,6 +219,28 @@ mod host_name_tests {
         );
         // 非法 UTF-16（孤立高位代理）⇒ None，不 panic。
         assert_eq!(decode_string128(&[0xD800, 0]), None);
+    }
+
+    /// Unix：`String128` 是 `char[128]`（UTF-8），不是 UTF-16。
+    #[cfg(not(windows))]
+    #[test]
+    fn string128_decoding_stops_at_the_terminator() {
+        let mut buffer = [0u8; 128];
+        for (slot, byte) in "Reaper".bytes().enumerate() {
+            buffer[slot] = byte;
+        }
+        assert_eq!(decode_string128(&buffer).as_deref(), Some("Reaper"));
+        assert_eq!(decode_string128(&[0u8; 128]), None);
+
+        // 非 ASCII 的宿主名（中文/日文宿主名并不罕见）必须原样解出来。
+        let mut wide = [0u8; 128];
+        for (slot, byte) in "宿主".as_bytes().iter().enumerate() {
+            wide[slot] = *byte;
+        }
+        assert_eq!(decode_string128(&wide).as_deref(), Some("宿主"));
+
+        // 非法 UTF-8 ⇒ None，不 panic。
+        assert_eq!(decode_string128(&[0xFF, 0xFE, 0]), None);
     }
 }
 #[derive(Default)]

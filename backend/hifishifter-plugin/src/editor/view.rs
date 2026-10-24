@@ -162,6 +162,17 @@ unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> T
                 return K_INVALID_ARGUMENT;
             }
             let kind = unsafe { CStr::from_ptr(kind) }.to_bytes();
+            // 【为什么记这一行】"宿主问了哪个平台类型、我们答了什么"是空面板的第一现场：
+            // 如果 REAPER 问的类型我们全都不认，它**根本不会调 attached**，日志里于是
+            // 什么都不出现 —— 那正是最难自查的形态。按类型各自限流，稳态不会刷屏。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                &format!("gui.platform.{}", String::from_utf8_lossy(kind)),
+                format_args!(
+                    "[gui] host asked platform type {:?}",
+                    String::from_utf8_lossy(kind)
+                ),
+            );
             #[cfg(windows)]
             if kind == b"HWND" {
                 return K_RESULT_OK;
@@ -197,8 +208,26 @@ unsafe extern "system" fn attached(
     kind: *const c_char,
 ) -> TResult {
     if parent.is_null() || unsafe { platform(this, kind) } != K_RESULT_OK {
+        // 【为什么要记】走到这里说明**宿主给了一个我们不认的平台类型**（或者 parent
+        // 是空）。这是一条"宿主想开窗、我们拒绝了"的现场证据，此前完全静默。
+        crate::gui_log_line(&format!(
+            "attached rejected: parent={:?} type={:?}",
+            parent,
+            if kind.is_null() {
+                "<null>".to_string()
+            } else {
+                unsafe { CStr::from_ptr(kind) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        ));
         return K_INVALID_ARGUMENT;
     }
+    crate::gui_log_line(&format!(
+        "attached: parent=0x{:x} type={:?}",
+        parent as usize,
+        unsafe { CStr::from_ptr(kind) }.to_string_lossy()
+    ));
     boundary(|| {
         let (width, height, generation) = {
             let mut state = unsafe { view(this) }

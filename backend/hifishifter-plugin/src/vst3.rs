@@ -2583,7 +2583,9 @@ unsafe extern "system" fn edit_controller_create_view(
             {
                 return std::ptr::null_mut();
             }
-            crate::log_line("IEditController::createView -> native editor");
+            // 【为什么是 WARN】它是"宿主真的要开窗了"的唯一证据。放在 INFO 上时，
+            // 用户日志里连这一行都没有，于是"面板空白"到底是没开窗还是开窗失败无从判断。
+            crate::gui_log_line("IEditController::createView -> native editor");
             let controller = unsafe { &*(this as *const EditController) };
             let view = crate::editor::create_view_with_link(controller.editor_link.clone());
             // 视图创建后路由可能已可用；把早到的控制器状态补投一次（不可用则放回）。

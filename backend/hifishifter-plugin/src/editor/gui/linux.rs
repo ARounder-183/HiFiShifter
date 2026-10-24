@@ -22,7 +22,6 @@ use super::port::{EditorHost, EditorPort, GuiFidelity, NativeWindow};
 use super::protocol;
 use gtk::gio;
 use gtk::glib;
-use gtk::glib::translate::{FromGlibPtrFull, ToGlibPtr};
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use std::cell::{Cell, RefCell};
@@ -52,21 +51,6 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// `ExitDll` 等 GTK 线程确认退出的上限。
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 手写 `gdkx.h` 里的一个函数。
-///
-/// 【为什么不用 gdk-rs】gdk 0.18 **没有** `x11` 模块（那个能力在更晚的版本里才有），
-/// 而"把自己的 GdkWindow 挂到一个外来 X11 窗口下面"只有它表达得了。手写 5 行比升级
-/// 整条 gtk 依赖链便宜得多，也与本仓 `vst3.rs` 手写 SDK 接口的风格一致。
-mod x11 {
-    extern "C" {
-        /// `GdkWindow *gdk_x11_window_foreign_new_for_display (GdkDisplay*, Window)`
-        pub fn gdk_x11_window_foreign_new_for_display(
-            display: *mut gdk::ffi::GdkDisplay,
-            window: libc::c_ulong,
-        ) -> *mut gdk::ffi::GdkWindow;
-    }
-}
-
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
@@ -83,8 +67,6 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
-    /// 挂载用的外来 X11 窗口（§Some§ 时容器是嵌进宿主的；§None§ 时是浮窗）。
-    foreign: Option<gdk::Window>,
     /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
     ///
     /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
@@ -594,9 +576,6 @@ fn close_view(token: usize) {
     view.client.borrow_mut().close();
     view.port.close();
     view.webview.stop_loading();
-    // 外来窗口是 §gdk_x11_window_foreign_new_for_display§ 给我们的**一份引用**，
-    // 不还回去就每开一次窗口泄漏一个 GdkWindow。
-    drop(view.foreign);
     // SAFETY: 容器由本视图独占；GTK 的 destroy 只要求在同一线程上调用。
     unsafe { view.container.destroy() };
     LIVE_VIEWS.fetch_sub(1, Ordering::AcqRel);
@@ -711,82 +690,75 @@ fn attach_view(
 
     // ── 把视图塞进宿主给的窗口（或者只能自己开窗）──────────────────────────
     //
-    // 【为什么不再用 `GtkPlug`】实测（`scripts/vst3/unix/gui_probe.c`）：
-    //   * Wayland 后端下 `gtk_plug_new` **返回一个非空但永远不映射的 widget** ——
-    //     没有报错、没有日志，用户看到的就是一块空面板；
-    //   * 即使 X11 后端，`GtkPlug` 也要求父窗口是真正的 **XEmbed socket**，
-    //     而一般宿主的窗口只是被 reparent 的普通 X11 窗口（GTK 会打印
-    //     "Can't create GtkPlug as child of non-GtkSocket"，然后同样不映射）。
+    // 【为什么是 `GtkPlug`】实测（`scripts/vst3/unix/gui_probe.c`）：
+    //   * `GtkPlug` 挂在**普通 X11 窗口**下会自己 map 出来，并成为该窗口的子窗口
+    //     （`realized=1 mapped=1 viewable=1`，`XQueryTree` 里能看到它的 XID）；
+    //   * 而"`gtk_widget_set_parent_window` + 外来 GdkWindow"**永远不会映射** ——
+    //     GTK3 要求被 realize 的 widget 必须 anchored（在某个 toplevel 里），
+    //     否则直接断言失败（`widget->priv->anchored || GTK_IS_INVISIBLE`）。
+    //     这条路试过，页面能加载（WebKit 离屏渲染），屏幕上什么都没有。
     //
-    // 因此改用"把自己的 GdkWindow 挂到外来的 X11 窗口下面"：这是 GTK 官方给
-    // "嵌入到别的 toolkit" 的手法，**不需要**宿主实现任何协议，只需要它是 X11。
+    // 【唯一不能用的情形是后端不是 X11】Wayland 上 `gtk_plug_new` 返回一个非空、
+    // 永不映射、不报错的 widget —— 那种情况必须开浮窗，而不是假装嵌进去了。
     let display =
         gdk::Display::default().ok_or_else(|| "GTK has no default display".to_string())?;
     let display_kind = display.type_().name().to_string();
-    let x11_parent = if request.embedded && display_kind.contains("X11") {
-        // SAFETY: `gdk_x11_window_foreign_new_for_display` 只要求一个存在的 X11 窗口 ID；
-        // 宿主在 `attached` 期间保证它有效（VST3 契约）。返回的 GdkWindow 由我们持有
-        // 一份引用，`close_view` 里随 `View` 一起释放。
-        unsafe {
-            let pointer = x11::gdk_x11_window_foreign_new_for_display(
-                display.to_glib_none().0,
-                request.parent as libc::c_ulong,
-            );
-            if pointer.is_null() {
-                None
-            } else {
-                Some(gdk::Window::from_glib_full(pointer))
-            }
-        }
+    let embedded_ok = request.embedded && display_kind.contains("X11");
+    let fidelity = if embedded_ok {
+        GuiFidelity::Embedded
     } else {
-        None
+        GuiFidelity::FloatingWindow
     };
-
-    let (container, foreign, fidelity) = match x11_parent {
-        Some(foreign) => {
-            // `GtkEventBox` 自带 GdkWindow（`has_window == TRUE`），是挂 parent window 的最小容器。
-            let boxed = gtk::EventBox::new();
-            boxed.set_parent_window(&foreign);
-            boxed.add(&webview);
-            (
-                boxed.upcast::<gtk::Widget>(),
-                Some(foreign),
-                GuiFidelity::Embedded,
-            )
-        }
-        None => {
-            let reason = if !request.embedded {
-                "the host did not hand us an embeddable X11 window"
-            } else if display_kind.contains("X11") {
-                "the host window is not a live X11 window"
-            } else {
-                // 【这一行就是 WSLg / Wayland 会话下的现场证据】GTK 在 Wayland 后端上
-                // 没有"外来窗口"这个概念，嵌入无从谈起。
-                "GTK is running on a non-X11 backend, so the host's X11 window cannot be embedded"
-            };
-            crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
-            let window = gtk::Window::new(gtk::WindowType::Toplevel);
-            window.set_title("HiFiShifter");
-            window.set_default_size(request.width, request.height);
-            window.add(&webview);
-            let weak = Rc::downgrade(&client);
-            window.connect_delete_event(move |_, _| {
-                if let Some(client) = weak.upgrade() {
-                    client.borrow_mut().close();
-                }
-                // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表
-                // 与节拍）；这里只拒绝"由 GTK 自己删窗口"那条路。
-                gtk::glib::Propagation::Proceed
-            });
-            (
-                window.upcast::<gtk::Widget>(),
-                None,
-                GuiFidelity::FloatingWindow,
-            )
-        }
+    let container: gtk::Widget = if embedded_ok {
+        let plug = gtk::Plug::new(request.parent as gtk::xlib::Window);
+        plug.add(&webview);
+        plug.upcast()
+    } else {
+        let reason = if !request.embedded {
+            "the host did not hand us an embeddable X11 window"
+        } else {
+            // 【这一行就是 WSLg / Wayland 会话下的现场证据】GTK 在 Wayland 后端上
+            // 没有 XEmbed，`GtkPlug` 会静默地永不映射。
+            "GTK is running on a non-X11 backend, so the host's X11 window cannot be embedded"
+        };
+        crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("HiFiShifter");
+        window.set_default_size(request.width, request.height);
+        window.add(&webview);
+        let weak = Rc::downgrade(&client);
+        window.connect_delete_event(move |_, _| {
+            if let Some(client) = weak.upgrade() {
+                client.borrow_mut().close();
+            }
+            // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表
+            // 与节拍）；这里只拒绝"由 GTK 自己删窗口"那条路。
+            gtk::glib::Propagation::Proceed
+        });
+        window.upcast()
     };
     container.set_size_request(request.width, request.height);
     container.show_all();
+
+    // ── 一次性自检：视图真的到屏幕上了吗 ─────────────────────────────────────
+    //
+    // 【为什么必须自检】"`attached` 成功 + 页面加载完成"与"用户看得见"是**两件事**。
+    // 实测过的最坏形态：宿主给的父窗口还没映射、或者我们的 GdkWindow 建在了它下面却
+    // 始终没被 map —— 页面照样加载完成、日志照样全绿，屏幕上一片空白。
+    // 这三行把"到底映射没有、尺寸多大、父窗口可见不可见"变成日志里的事实。
+    {
+        let widget = container.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+            let window = widget.window();
+            crate::gui_log_line(&format!(
+                "view self-check: widget_mapped={} window_viewable={} size={}x{}",
+                widget.is_mapped(),
+                window.as_ref().is_some_and(|w| w.is_viewable()),
+                window.as_ref().map(|w| w.width()).unwrap_or(0),
+                window.as_ref().map(|w| w.height()).unwrap_or(0),
+            ));
+        });
+    }
 
     VIEWS.with(|views| {
         views.borrow_mut().insert(
@@ -796,7 +768,6 @@ fn attach_view(
                 port: port.clone(),
                 container: container.clone(),
                 webview: webview.clone(),
-                foreign,
                 on_host_thread,
             },
         );
