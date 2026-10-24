@@ -41,7 +41,8 @@ const MAX_WIDTH_RETRIES = 4;
  * # 两条"不打断用户"的规则
  *
  * 1. **指针按下期间不测量**。测量会临时把一排槽位 `display: none`；正被拖动的那只
- *    滑块一旦被隐藏，拖动会立刻中断（元素离开布局，指针捕获失效）。抬起后再补一次。
+ *    滑块一旦被隐藏，拖动会立刻中断（元素离开布局，指针捕获失效）。抬起（或窗口失焦）
+ *    后再补一次。
  * 2. **测量前后保存/恢复行内焦点**。隐藏含焦点元素的槽位会让它 `blur`，而恢复
  *    `display` 并不会把焦点还回去 —— 键盘用户会莫名其妙掉焦点。
  *
@@ -131,8 +132,10 @@ export function useToolbarOverflowTier(
         mutationObserver.observe(row, { childList: true, subtree: true, characterData: true });
         cleanups.push(() => mutationObserver.disconnect());
 
-        // 指针守卫：按下时挂起测量，抬起（或指针以"没按键"的姿态移动，说明抬起发生
-        // 在窗口外，我们收不到 pointerup）时恢复并补测一次。
+        // 指针守卫：按下时挂起测量，抬起后补测一次。
+        //
+        // 【为什么还要监听 blur】用户在拖动途中 Alt+Tab 切走时，pointerup 未必送回来；
+        // 少了这一条，"按住"的标记会一直挂着，工具栏从此再也不重新测量。
         const onPointerDown = () => {
             pointerDown = true;
         };
@@ -141,18 +144,20 @@ export function useToolbarOverflowTier(
             pointerDown = false;
             schedule();
         };
-        const onPointerMove = (event: PointerEvent) => {
-            if (pointerDown && event.buttons === 0) onPointerRelease();
+        const onWindowBlur = () => {
+            if (!pointerDown) return;
+            pointerDown = false;
+            schedule();
         };
         row.addEventListener("pointerdown", onPointerDown, true);
         window.addEventListener("pointerup", onPointerRelease, true);
         window.addEventListener("pointercancel", onPointerRelease, true);
-        window.addEventListener("pointermove", onPointerMove, true);
+        window.addEventListener("blur", onWindowBlur);
         cleanups.push(() => {
             row.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("pointerup", onPointerRelease, true);
             window.removeEventListener("pointercancel", onPointerRelease, true);
-            window.removeEventListener("pointermove", onPointerMove, true);
+            window.removeEventListener("blur", onWindowBlur);
         });
 
         // 字体是**迟到**的宽度来源：替换字体不改 DOM，签名不会变。`ready` 覆盖
