@@ -1,0 +1,148 @@
+name: HiFiShifter VST3 (macOS / Linux)
+
+# 与 `vst3.yml`（Windows）**并列**，而不是它的跨平台版。
+#
+# 【为什么另起一条流水线】Windows 那条的组织方式是 MSVC 环境导入 + WebView2 + NSIS
+# 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz、
+# 验证靠真正 dlopen 一次的黑盒探针。硬把两者塞进一个矩阵，只会得到一堆
+# `if: runner.os == ...`，而每一条都是只在一个平台上被跑过的分支。
+#
+# 两条流水线共享的只有两条约定：产物命名（HiFiShifter_v<版本>_<os>-<arch>-vst3）
+# 与「门禁必须真的跑」。
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vst3-unix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # fmt 不编译、不下载 SDK，几十秒覆盖全部 crate。放在这条流水线里，是为了让
+  # 「只改了 Unix 构建脚本」的 PR 不必去等 Windows 那条六平台流水线。
+  rust-fmt:
+    name: Check Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+      - name: Check rustfmt
+        run: cargo fmt --manifest-path backend/Cargo.toml --all --check
+
+  # 【为什么 clippy 不在这里】本 crate 有一半是 Windows 专属（WebView2 编辑器、REAPER
+  # 宿主扩展）。在 Unix 上那半边只留下成百条 dead_code 告警：把它们静音会让
+  # `-D warnings` 失去意义，放开判死又会让这条流水线长期红着没人看。clippy 的权威
+  # 仍然是 Windows 的 build.yml / vst3.yml —— 它们编译的是同一份源码。Unix 这边的
+  # 判据是「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
+  vst3-unix:
+    name: VST3 ${{ matrix.name }}
+    needs: rust-fmt
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            platform: linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            platform: linux-aarch64
+          # macOS 两个架构分开出包，不做 universal2：arm64 走 CoreML + WebGPU，
+          # x86_64 走 ort-tract(CPU)，链接的是**不同的** ONNX 后端；lipo 只会把两份
+          # 静态推理运行时塞进同一个文件（体积翻倍），换不来任何一个架构的性能。
+          - name: macos-arm64
+            os: macos-15
+            platform: macos-arm64
+          - name: macos-x86_64
+            os: macos-15-intel
+            platform: macos-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      # 插件只需要 C 工具链 + CMake（SoundTouch 走 cmake）+ libxcb（剪贴板）。
+      # 刻意不装 GTK/WebKit：Unix 上插件没有内嵌编辑器，装了也不会被链接。
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake || true
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: vst3-${{ matrix.platform }}
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      # 一条命令做完：取 SDK → 编译 → 组装 bundle → 六项自检（含 dlopen 探针）→ tar.gz。
+      # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
+      - name: Build, verify and package
+        run: bash scripts/vst3/unix/build.sh
+
+      # 文件名本身已经带版本与平台（build.sh 生成），这里只是读出来，
+      # 免得 artifact 列表里四个平台长成一模一样。
+      - name: Determine artifact name
+        id: artifact-name
+        run: echo "base=$(basename .build-tmp/vst3-unix/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload VST3 bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.base }}
+          path: |
+            .build-tmp/vst3-unix/*.tar.gz
+            .build-tmp/vst3-unix/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # 【为什么测试排在产物之后】产物是这条流水线的主目的；测试挂了应当**既看到
+      # 红灯、也拿到可复现的产物**。反过来会让一次偶发失败连产物一起吞掉。
+      #
+      # `timeout`：本 crate 的单元测试里有等待后台线程收敛的用例，卡死过一次就是
+      # 6 小时的 job。宁可 25 分钟后明确失败，也不要挂到超时上限。
+      - name: Run plugin unit tests
+        run: |
+          timeout 1500 cargo test --manifest-path backend/Cargo.toml --locked \
+            -p hifishifter-plugin --lib -- --test-threads=1
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vst3-${{ matrix.platform }}-diagnostics
+          path: |
+            .build-tmp/vst3-unix/*.log
+          if-no-files-found: ignore
+          retention-days: 7
