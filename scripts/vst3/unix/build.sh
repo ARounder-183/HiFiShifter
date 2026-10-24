@@ -217,6 +217,14 @@ stage_frontend() {
         warn "按 --skip-frontend 跳过前端构建"
         [ -f "$FRONTEND_DIST/plugin.html" ] \
             || die "跳过前端构建但 $FRONTEND_DIST/plugin.html 不存在"
+        # 【为什么还要比时间】`--skip-frontend` 的用途是"只改 Rust 时省一次 npm"。
+        # 但改了前端却忘了重建，产出的就是一个**看起来正常、内容是旧的**包 ——
+        # 用户报的每一个界面 bug 都会被"我本地是对的"糊过去。这里只警告不失败：
+        # 有时确实要用一份手工构建的 dist。
+        if [ -n "$(find "$REPO_ROOT/frontend/src" -newer "$FRONTEND_DIST/plugin.html" \
+                -name '*.ts' -o -name '*.tsx' -newer "$FRONTEND_DIST/plugin.html" 2>/dev/null | head -1)" ]; then
+            warn "frontend/dist 比 frontend/src 旧：这个包里是**旧前端**（去掉 --skip-frontend 重建）"
+        fi
         return
     fi
     step "构建前端（vite，含 plugin.html 入口）"
