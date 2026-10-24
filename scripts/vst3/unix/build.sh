@@ -247,6 +247,46 @@ ensure_node() {
     log "使用 Node $("$dir/bin/node" -v)（$dir）"
 }
 
+
+# ── Rust 工具链：钉死的那个没装时，找一个 rustc 版本**完全相同**的已装工具链 ──
+#
+# 【为什么必须管这件事】`rust-toolchain.toml` 钉死了 `channel = "1.97.1"`。在只装过
+# `rustup default stable` 的机器上，rustup 看到仓库里这个文件就会去**下载**那个具体
+# 版本 —— 离线/受限网络下它会长时间重试，表现是构建"卡在编译阶段一动不动"（实测
+# 卡了 20 分钟以上，日志里只有一句 `downloading component 'cargo'`）。
+#
+# 而 `stable` 常常就是同一个 rustc（本机实测 `stable` = rustc 1.97.1）。此时正确
+# 做法不是降级、也不是让用户去装网络，而是：**版本相同就复用**，把 `RUSTUP_TOOLCHAIN`
+# 指过去。版本不同则明确失败 —— 悄悄换工具链比卡住更糟。
+ensure_toolchain() {
+    if [ -n "${RUSTUP_TOOLCHAIN:-}" ]; then
+        log "工具链由 RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN 指定"
+        return 0
+    fi
+    command -v rustup >/dev/null 2>&1 || return 0
+    local pinned
+    pinned="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$REPO_ROOT/rust-toolchain.toml" 2>/dev/null | head -1)"
+    [ -n "$pinned" ] || return 0
+    if rustup toolchain list 2>/dev/null | grep -qE "^${pinned}([-[:space:]]|$)"; then
+        return 0
+    fi
+    local line name version
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        name="${line%%[[:space:]]*}"
+        version="$(RUSTUP_TOOLCHAIN="$name" rustc -V 2>/dev/null | awk '{ print $2 }')"
+        if [ "$version" = "$pinned" ]; then
+            export RUSTUP_TOOLCHAIN="$name"
+            log "钉死的工具链 $pinned 未安装；复用已装的 $name（rustc $version，版本相同）"
+            return 0
+        fi
+    done <<< "$(rustup toolchain list 2>/dev/null)"
+    die "本机没有 rustup 工具链 $pinned（rust-toolchain.toml 钉死），也没有 rustc 版本相同的替代。
+  有网络时：rustup toolchain install $pinned
+  或临时指定：export RUSTUP_TOOLCHAIN=<已装工具链名>
+  已装：$(rustup toolchain list 2>/dev/null | tr '\n' ' ')"
+}
+
 # 读 plugin-sdks.json 的某个字段（python3 是唯一跨平台且一定在 CI 镜像里的解析器）。
 pin() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])' "$SDK_PINS" "$1" "$2"
@@ -368,6 +408,9 @@ stage_frontend() {
 stage_build() {
     step "编译 hifishifter-plugin（profile=$PROFILE）"
     command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
+    ensure_toolchain
+    # 把实际用的 rustc 记进日志：产物与 CI 的差异里，"用的哪把编译器"排第一位。
+    log "$(rustc -V 2>/dev/null || echo 'rustc 版本未知')"
     mkdir -p "$OUT_DIR"
     local cargo_log="$OUT_DIR/cargo-build.log"
     # --locked：构建必须证明"提交的锁"能编译，而不是让 CI 现解一棵依赖树。
