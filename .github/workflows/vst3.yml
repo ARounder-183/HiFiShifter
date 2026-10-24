@@ -67,7 +67,8 @@ jobs:
           # 全绿的情况下合入。
           npm --prefix frontend ci
           if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
-          npm --prefix frontend run lint
+          # 预算门禁（同 build.yml）：140 条警告是只许降不许升的棘轮。
+          npm --prefix frontend run lint:budget
           if ($LASTEXITCODE -ne 0) { throw 'Frontend lint failed.' }
           npm --prefix frontend run format:check
           if ($LASTEXITCODE -ne 0) { throw 'Frontend formatting check failed.' }

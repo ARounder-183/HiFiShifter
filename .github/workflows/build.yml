@@ -65,7 +65,9 @@ jobs:
           npm --prefix frontend run build
 
       - name: Lint frontend
-        run: npm --prefix frontend run lint
+        # 用预算门禁而不是裸 lint：警告预算（只许降不许升）的权威执行在 vitest 的
+        # lintBudget.test.ts，但那里要等整套测试跑完；这一步提前几分钟给出反馈。
+        run: npm --prefix frontend run lint:budget
 
       - name: Check frontend formatting
         run: npm --prefix frontend run format:check

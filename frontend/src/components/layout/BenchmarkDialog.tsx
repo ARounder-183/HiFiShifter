@@ -276,7 +276,13 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                 <td style={{ padding: "6px 12px" }}>
                                                     <Flex align="center" gap="1">
                                                         {isFastest && (
-                                                            <span data-tooltip="Fastest">⚡</span>
+                                                            <span
+                                                                data-tooltip={t(
+                                                                    "benchmark_fastest_tooltip",
+                                                                )}
+                                                            >
+                                                                ⚡
+                                                            </span>
                                                         )}
                                                         <span
                                                             style={{
@@ -314,6 +320,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                               : "var(--qt-danger-text)",
                                                     }}
                                                 >
+                                                    {/* "N/A" 是数字列的技术占位符（该行已在延迟列标出失败），保持英文。 */}
                                                     {isUnavailable ? "N/A" : formatRtf(row.rtf)}
                                                 </td>
                                             </tr>
@@ -416,13 +423,15 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                         <span className="hs-type-caption" style={{ marginTop: 4 }}>
                             {tVars("common_label_value", {
                                 label: t("benchmark_providers_label"),
-                                value: result.availableProviders.join(", ") || "unknown",
+                                value:
+                                    result.availableProviders.join(", ") ||
+                                    "unknown" /* 技术载荷，占位符保持英文 */,
                             })}
                         </span>
                         <span className="hs-type-caption">
                             {tVars("common_label_value", {
                                 label: t("benchmark_ort_info_label"),
-                                value: result.ortBuildInfo || "unknown",
+                                value: result.ortBuildInfo || "unknown" /* 同上 */,
                             })}
                         </span>
 

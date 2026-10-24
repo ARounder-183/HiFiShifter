@@ -1747,6 +1747,7 @@ export const zhCN = {
     benchmark_run_btn: "运行基准测试",
     benchmark_running_btn: "运行中...",
     benchmark_close: "关闭",
+    benchmark_fastest_tooltip: "当前最快的一档",
     benchmark_idle_hint: "点击「运行基准测试」开始。需要先加载模型。",
     benchmark_error_default: "基准测试失败。请确保模型已加载。",
     benchmark_gpu_failed_title: "⚠ GPU 基准测试失败",

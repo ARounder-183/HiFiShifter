@@ -1750,6 +1750,7 @@ export const zhTW = {
     benchmark_run_btn: "執行基準測試",
     benchmark_running_btn: "執行中...",
     benchmark_close: "關閉",
+    benchmark_fastest_tooltip: "目前最快的一檔",
     benchmark_idle_hint: "點擊「執行基準測試」開始。需要先載入模型。",
     benchmark_error_default: "基準測試失敗。請確保模型已載入。",
     benchmark_gpu_failed_title: "⚠ GPU 基準測試失敗",

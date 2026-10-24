@@ -1783,6 +1783,7 @@ export const koKR = {
     benchmark_run_btn: "벤치마크 실행",
     benchmark_running_btn: "실행 중...",
     benchmark_close: "닫기",
+    benchmark_fastest_tooltip: "현재 가장 빠른 결과",
     benchmark_idle_hint: '"벤치마크 실행"을 클릭하여 시작하세요. 모델이 로드되어 있어야 합니다.',
     benchmark_error_default: "벤치마크에 실패했습니다. 모델이 로드되었는지 확인하세요.",
     benchmark_gpu_failed_title: "⚠ GPU 벤치마크 실패",

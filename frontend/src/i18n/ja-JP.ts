@@ -1806,6 +1806,7 @@ export const jaJP = {
     benchmark_run_btn: "ベンチマークを実行",
     benchmark_running_btn: "実行中...",
     benchmark_close: "閉じる",
+    benchmark_fastest_tooltip: "現在 最も速い結果",
     benchmark_idle_hint: "「ベンチマークを実行」をクリックして開始。モデルをロードしてください。",
     benchmark_error_default:
         "ベンチマークに失敗しました。モデルがロードされているか確認してください。",

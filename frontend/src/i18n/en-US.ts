@@ -1931,6 +1931,7 @@ export const enUS = {
     benchmark_run_btn: "Run Benchmark",
     benchmark_running_btn: "Running...",
     benchmark_close: "Close",
+    benchmark_fastest_tooltip: "Fastest",
     benchmark_idle_hint: 'Click "Run Benchmark" to start. A model must be loaded first.',
     benchmark_error_default: "Benchmark failed. Ensure a model is loaded.",
     benchmark_gpu_failed_title: "⚠ GPU benchmark failed",
