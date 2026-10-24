@@ -6,7 +6,7 @@
 //!
 //! 前置：先 `cargo build -p hifishifter-plugin`（cdylib 由它产出，`cargo test` 不产出）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// 各平台的模块产物文件名。
@@ -39,7 +39,7 @@ fn expected_entry_points() -> &'static [&'static str] {
 
 /// 列出动态导出表。
 #[cfg(target_os = "windows")]
-fn exported_symbols(artifact: &PathBuf) -> String {
+fn exported_symbols(artifact: &Path) -> String {
     let output = Command::new("dumpbin")
         .args(["/exports", artifact.to_str().unwrap()])
         .output()
@@ -49,7 +49,7 @@ fn exported_symbols(artifact: &PathBuf) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn exported_symbols(artifact: &PathBuf) -> String {
+fn exported_symbols(artifact: &Path) -> String {
     let output = Command::new("nm")
         .args(["-D", "--defined-only", artifact.to_str().unwrap()])
         .output()
@@ -59,7 +59,7 @@ fn exported_symbols(artifact: &PathBuf) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn exported_symbols(artifact: &PathBuf) -> String {
+fn exported_symbols(artifact: &Path) -> String {
     let output = Command::new("nm")
         .args(["-gU", artifact.to_str().unwrap()])
         .output()

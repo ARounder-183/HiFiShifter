@@ -8,7 +8,7 @@
 #
 # 阶段（--stage=…，默认 all）：
 #     sdk      按 scripts/env/plugin-sdks.json 的 pin 取 ARA_SDK / vst3sdk 并校验
-#     build    cargo build -p hifishifter-plugin（默认 dist 档：LTO + strip）
+#     build    cargo build -p hifishifter-plugin（默认 release 档：strip，与 Windows 出货档一致）
 #     bundle   按 VST3 3.7+ 的目录规范组装 HiFiShifter.vst3（含依赖、模型、Info.plist）
 #     verify   布局 / 符号 / 依赖自洽 / 黑盒加载（调用 verify.sh）
 #     package  tar.gz + .sha256 + 许可证
@@ -28,7 +28,7 @@ readonly SDK_PINS="$REPO_ROOT/scripts/env/plugin-sdks.json"
 readonly API_NAME="HiFiShifter"
 
 STAGE="all"
-PROFILE="dist"
+PROFILE="release"
 OUT_DIR=""
 SKIP_VERIFY=0
 
@@ -42,7 +42,7 @@ usage() {
 用法：scripts/vst3/unix/build.sh [选项]
 
   --stage=all|sdk|build|bundle|verify|package   只跑到某个阶段（默认 all）
-  --profile=dist|release|dev                    cargo profile（默认 dist）
+  --profile=release|dist|dev                    cargo profile（默认 release）
   --out=DIR                                     产物目录（默认 .build-tmp/vst3-unix）
   --no-verify                                   跳过 verify（只在该平台跑不了探针时用）
   -h, --help                                    显示本说明
