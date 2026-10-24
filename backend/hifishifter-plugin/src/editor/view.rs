@@ -219,11 +219,21 @@ unsafe extern "system" fn attached(
         // 不能持有 view 锁。
         // 宿主给的是"可嵌入的父窗口"还是"我们只能自己开窗"（Wayland）。
         let embedded = unsafe { CStr::from_ptr(kind) }.to_bytes() == b"X11EmbedWindowID";
+        // 宿主的 `IPlugFrame*`：Linux 用它查 `Linux::IRunLoop`（见 gui/linux.rs），
+        // 另外两个平台忽略。典型宿主在 `attached` 之前就调过 `setFrame`。
+        let frame = {
+            let state = unsafe { view(this) }
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.frame
+        };
         let native = super::gui::create_for(
             parent as usize,
             width,
             height,
             embedded,
+            frame,
             unsafe { view(this) }.link.clone(),
         );
         let mut state = unsafe { view(this) }

@@ -246,6 +246,7 @@ pub(super) fn create(
     width: i32,
     height: i32,
     embedded: bool,
+    frame: usize,
     link: Arc<crate::editor::routing::EditorLink>,
 ) -> Result<Rc<dyn EditorHost>, String> {
     let request = AttachRequest {
@@ -255,6 +256,23 @@ pub(super) fn create(
         embedded,
         link: link.clone(),
     };
+    // 宿主是否提供 §Linux::IRunLoop§（"正规解"，见方案 §10.3）。
+    //
+    // 【为什么现在只探测、不注册】IRunLoop 让 GTK 跑在**宿主线程**上、由宿主的
+    // 定时器驱动 —— 但它要求我们同时把 Gdk 的 X 连接 fd 注册给宿主（否则 GTK 收不到
+    // 输入，窗口会"画一次就冻住"）。这两步里任何一步在真宿主上不如预期，代价都是
+    // 一个**冻住的界面**，而现在的情形 B（私有 GTK 线程 + 浮窗）虽然降级但确实能用。
+    // 本机没有任何提供 IRunLoop 的宿主可以验证，所以这里只把"宿主有没有这条路"
+    // 记进日志 —— 报障日志里有这一行，下一次就能拿着真实证据决定要不要翻这个开关。
+    //
+    // 【抄错 IID 会怎样】只会让探测恒为 §false§，也就是永远走情形 B —— 不会崩、
+    // 不会静默改行为。这条探测是纯只读的：拿到接口立刻释放，不注册任何东西。
+    let run_loop = probe_run_loop(frame);
+    crate::log_line(&format!(
+        "[gui] host IRunLoop: {} (frame={})",
+        if run_loop { "available" } else { "absent" },
+        if frame == 0 { "unset" } else { "set" }
+    ));
     if gdk_is_initialized() {
         // 情形 A：宿主的 GTK 已经在这条线程上跑着。
         //
@@ -512,6 +530,60 @@ fn close_view(token: usize) {
     // SAFETY: 容器由本视图独占；GTK 的 destroy 只要求在同一线程上调用。
     unsafe { view.container.destroy() };
     LIVE_VIEWS.fetch_sub(1, Ordering::AcqRel);
+}
+
+// ── Steinberg::Linux::IRunLoop 的探测 ───────────────────────────────────────
+//
+// 【为什么手写】本仓的 vst3sdk 是 sparse checkout（只有 `pluginterfaces/{base,gui,vst}`），
+// 里面**没有** `base/irunloop.h`。手写 30 行比去改 Windows 的 SDK 拉取脚本便宜得多，
+// 也与 `vst3.rs` / `view.rs` 手写 `iplugview` 的风格一致。
+//
+// 【抄错的后果是什么】只有一个：`queryInterface` 返回失败 ⇒ 探测恒为 `false` ⇒
+// 永远走情形 B（现状）。不会崩、不会改变任何行为 —— 这正是"先只探测"的前提。
+
+/// `IRunLoop` 的 IID：`18C35366-9776-4F1A-9C5B-83857A871389`
+/// （`DECLARE_CLASS_IID (IRunLoop, 0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389)`）。
+const IID_RUN_LOOP: [u32; 4] = [0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389];
+
+/// `FUnknown` 的三项（`IPlugFrame` 与 `IRunLoop` 都从它派生，vtable 前缀一致）。
+#[repr(C)]
+struct UnknownVtbl {
+    query: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const u8,
+        *mut *mut std::ffi::c_void,
+    ) -> i32,
+    add: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+}
+
+/// 宿主给的 `IPlugFrame*` 上有没有 `Linux::IRunLoop`。
+///
+/// 【为什么拿到就立刻 `release`】探测不该改变任何引用计数；宿主在 `attached` 之后
+/// 可能还会换 frame，留着一个引用只会让"谁持有它"变得说不清。
+fn probe_run_loop(frame: usize) -> bool {
+    if frame == 0 {
+        return false;
+    }
+    // SAFETY: frame 由宿主在 `IPlugFrame::queryInterface` 的契约下给出（本次调用期间
+    // 有效）。我们只读它的 vtable 前两项，拿到结果立刻 release。
+    unsafe {
+        let object = frame as *mut std::ffi::c_void;
+        let vtbl = *(frame as *const *const UnknownVtbl);
+        if vtbl.is_null() {
+            return false;
+        }
+        let mut out: *mut std::ffi::c_void = std::ptr::null_mut();
+        let result = ((*vtbl).query)(object, IID_RUN_LOOP.as_ptr().cast(), &mut out);
+        if result != 0 || out.is_null() {
+            return false;
+        }
+        let vtbl = *(out as *const *const UnknownVtbl);
+        if !vtbl.is_null() {
+            ((*vtbl).release)(out);
+        }
+        true
+    }
 }
 
 /// 在拥有视图的线程上真正建视图。
@@ -792,4 +864,37 @@ thread_local! {
     static TICK_SOURCE: RefCell<Option<glib::SourceId>> = RefCell::new(None);
     static CONTROL: RefCell<Option<std::sync::mpsc::Receiver<Control>>> = RefCell::new(None);
     static CONTEXT: RefCell<Option<webkit2gtk::WebContext>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **不变量：`IRunLoop` 的 IID 在内存里逐字节等于 SDK 声明的那 16 个字节。**
+    ///
+    /// 【为什么钉死】`queryInterface` 是**逐字节**比较 IID 的。抄错一个十六进制位，
+    /// 后果不是崩溃，而是"探测恒为 false" ⇒ 永远走情形 B ⇒ 宿主明明有正规解却没人用，
+    /// 而日志里看不出来 —— 这是本仓最讨厌的一类静默退化。
+    ///
+    /// 期望值逐字来自 `DECLARE_CLASS_IID (IRunLoop, 0x18C35366, 0x97764F1A,
+    /// 0x9C5B8385, 0x7A871389)`，按 VST3 的 FUID 约定以四个 u32 依次存放（主机字节序）。
+    #[test]
+    fn the_run_loop_iid_is_byte_identical_to_the_sdk_declaration() {
+        let expected: [u8; 16] = [
+            0x66, 0x53, 0xC3, 0x18, // 0x18C35366
+            0x1A, 0x4F, 0x76, 0x97, // 0x97764F1A
+            0x85, 0x83, 0x5B, 0x9C, // 0x9C5B8385
+            0x89, 0x13, 0x87, 0x7A, // 0x7A871389
+        ];
+        // SAFETY: IID_RUN_LOOP 是 [u32; 4]，长度恰好 16 字节，读成 [u8; 16] 是安全的。
+        let actual: &[u8; 16] = unsafe { &*(IID_RUN_LOOP.as_ptr().cast::<[u8; 16]>()) };
+        assert_eq!(actual, &expected);
+        assert_eq!(std::mem::size_of_val(&IID_RUN_LOOP), 16);
+    }
+
+    /// 没有 frame 时探测必须直接说"没有"，不能解引用空指针。
+    #[test]
+    fn probing_without_a_host_frame_is_a_no_op() {
+        assert!(!probe_run_loop(0));
+    }
 }

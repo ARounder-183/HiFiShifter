@@ -41,11 +41,14 @@ pub(crate) fn create_for(
     // 宿主给的是不是"可嵌入的父窗口"：Linux 上 `X11EmbedWindowID` 才能内嵌，
     // `WaylandSurfaceID` 只能开浮窗（见 `view.rs` 的 `platform()`）。Windows/macOS 恒为 `true`。
     embedded: bool,
+    // 宿主的 `IPlugFrame*`（`0` = 还没给）。Linux 用它查 `Linux::IRunLoop`；
+    // 另外两个平台用不上 —— 它们的主循环是现成的（`NSApplication` / 宿主自己的消息泵）。
+    frame: usize,
     link: std::sync::Arc<crate::editor::routing::EditorLink>,
 ) -> Result<Rc<dyn EditorHost>, String> {
     #[cfg(windows)]
     {
-        let _ = embedded;
+        let _ = (embedded, frame);
         Ok(Rc::new(windows::WindowsHost::attach(
             parent, width, height, link,
         )?))
@@ -59,11 +62,11 @@ pub(crate) fn create_for(
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        linux::create(parent, width, height, embedded, link)
+        linux::create(parent, width, height, embedded, frame, link)
     }
     #[cfg(not(any(windows, unix)))]
     {
-        let _ = (parent, width, height, embedded, link);
+        let _ = (parent, width, height, embedded, frame, link);
         Err(unavailable::reason().to_owned())
     }
 }
