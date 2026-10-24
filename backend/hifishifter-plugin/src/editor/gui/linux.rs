@@ -327,7 +327,6 @@ pub(super) fn create(
     frame: usize,
     link: Arc<crate::editor::routing::EditorLink>,
 ) -> Result<Rc<dyn EditorHost>, String> {
-
     let request = AttachRequest {
         parent,
         width,
@@ -954,18 +953,26 @@ fn attach_view(
     // 让它抢焦点会把手感变成"点了插件之后宿主不再响应键盘"。
     window.set_accept_focus(false);
     window.set_focus_on_map(false);
-    // 【为什么还要这三个】`accept-focus` 只管"映射时要不要焦点"。我们这块画布在
+    // 【已停用：见下方 probe】`accept-focus` 只管"映射时要不要焦点"。我们这块画布在
     // GTK 眼里仍是 toplevel：用户在里面点一下，GTK 会走 `gtk_window_present` ——
     // 向窗口管理器请求激活、把输入焦点从宿主手里拿走。Weston/XWayland 照办之后，
     // 宿主就"点不动了"（而且它自己的重绘也停摆，拖窗口时一片黑）。
     //
     // `Dock` 提示 + 跳过任务栏/分页器，让窗口管理器从一开始就不把这块当应用窗口看。
-    window.set_type_hint(gdk::WindowTypeHint::Dock);
-    window.set_skip_taskbar_hint(true);
-    window.set_skip_pager_hint(true);
-    window.set_modal(false);
+    // 【为什么全部去掉】这三个（Dock 类型提示 + 跳过任务栏/分页器）是"让窗口管理器
+    // 别管我们"的尝试。实测它们会把 WSLg 的合成器场景弄坏：从那一刻起**所有**窗口
+    // 都取不到内容（xwd 对 REAPER 自己的窗口也返回 0 字节），宿主自己的对话框变成
+    // 黑块，整个进程像冻住一样。窗口保持最朴素的形态。
     window.set_default_size(width, height);
-    window.add(&webview);
+    // 【探针】HIFISHIFTER_NO_WEBKIT=1 时窗口里只放一个标签，完全不创建 WebKit ——
+    // 用来判定"整个进程画不出东西"是 GTK 窗口本身，还是 WebKit。
+    let no_webkit = std::env::var("HIFISHIFTER_NO_WEBKIT").is_ok_and(|v| v.trim() == "1");
+    if no_webkit {
+        crate::gui_log_line("webkit disabled by HIFISHIFTER_NO_WEBKIT (plain GTK window)");
+        window.add(&gtk::Label::new(Some("HiFiShifter (no webkit)")));
+    } else {
+        window.add(&webview);
+    }
     let mut embedded_xid = 0u64;
     if embedded_ok {
         // 先 realize 拿到 GdkWindow，再标 override-redirect（WM 就不会去管它），
