@@ -51,6 +51,58 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// `ExitDll` 等 GTK 线程确认退出的上限。
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 手写几个 `gdkx.h` / `Xlib` 函数。
+///
+/// 【为什么手写】gdk 0.18 没有 `x11` 模块，而"把一个 GtkWindow 的 X 窗口塞进宿主窗口"
+/// 只有这几个函数表达得了。它们不随 gtk-rs 版本变化，比升级整条依赖链便宜得多。
+mod x11 {
+    use std::ffi::c_void;
+
+    pub type XWindow = libc::c_ulong;
+
+    extern "C" {
+        /// `Display *gdk_x11_get_default_xdisplay (void)`
+        pub fn gdk_x11_get_default_xdisplay() -> *mut c_void;
+        /// `Window gdk_x11_window_get_xid (GdkWindow*)`
+        pub fn gdk_x11_window_get_xid(window: *mut c_void) -> XWindow;
+        /// `void gdk_window_set_override_redirect (GdkWindow*, gboolean)`
+        pub fn gdk_window_set_override_redirect(window: *mut c_void, override_redirect: i32);
+        /// `int XReparentWindow (Display*, Window, Window, int, int)`
+        pub fn XReparentWindow(
+            display: *mut c_void,
+            window: XWindow,
+            parent: XWindow,
+            x: i32,
+            y: i32,
+        ) -> i32;
+        /// `int XMoveResizeWindow (Display*, Window, int, int, unsigned, unsigned)`
+        pub fn XMoveResizeWindow(
+            display: *mut c_void,
+            window: XWindow,
+            x: i32,
+            y: i32,
+            width: u32,
+            height: u32,
+        ) -> i32;
+        /// `int XSync (Display*, Bool)`
+        pub fn XSync(display: *mut c_void, discard: i32) -> i32;
+    }
+}
+
+/// 手写 `cairo_surface_write_to_png`。
+///
+/// 【为什么手写】cairo 0.18 的 `Surface` 是个 struct，只有 `type_()`/`flush()`；
+/// `write_to_png` 长在 `ImageSurface` 上，而 WebKit 的 snapshot 回调给的是通用
+/// `Surface`。一个 `extern` 声明比"猜怎么转类型"便宜，也不会随 cairo-rs 版本漂移。
+mod cairo_ffi {
+    extern "C" {
+        pub fn cairo_surface_write_to_png(
+            surface: *mut std::ffi::c_void,
+            filename: *const std::ffi::c_char,
+        ) -> i32;
+    }
+}
+
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
@@ -67,6 +119,8 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
+    /// 嵌进宿主时我们自己的 X 窗口 id（§0§ = 浮窗）。resize 要直接对它发 X 请求。
+    embedded_xid: u64,
     /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
     ///
     /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
@@ -496,6 +550,26 @@ fn run_inline(command: Control) {
             if let Some(view) = views.borrow().get(&token) {
                 // 坐标是**物理像素**（iplugview.h 对 X11 的约定），与 Windows 一致。
                 view.container.set_size_request(width, height);
+                if let Some(window) = view.container.downcast_ref::<gtk::Window>() {
+                    window.resize(width, height);
+                }
+                if view.embedded_xid != 0 {
+                    // 【为什么还要直接发 X 请求】被 reparent 之后窗口不再由 WM 摆放，
+                    // GTK 的 resize 只更新它自己的记录；尺寸真正生效要靠 X。
+                    // SAFETY: embedded_xid 是本进程在同一个 display 上创建的窗口。
+                    unsafe {
+                        let dpy = x11::gdk_x11_get_default_xdisplay();
+                        x11::XMoveResizeWindow(
+                            dpy,
+                            view.embedded_xid,
+                            0,
+                            0,
+                            width as u32,
+                            height as u32,
+                        );
+                        x11::XSync(dpy, 0);
+                    }
+                }
             }
         }),
         Control::Focus { token } => VIEWS.with(|views| {
@@ -721,16 +795,17 @@ fn attach_view(
 
     // ── 把视图塞进宿主给的窗口（或者只能自己开窗）──────────────────────────
     //
-    // 【为什么是 `GtkPlug`】实测（`scripts/vst3/unix/gui_probe.c`）：
-    //   * `GtkPlug` 挂在**普通 X11 窗口**下会自己 map 出来，并成为该窗口的子窗口
-    //     （`realized=1 mapped=1 viewable=1`，`XQueryTree` 里能看到它的 XID）；
-    //   * 而"`gtk_widget_set_parent_window` + 外来 GdkWindow"**永远不会映射** ——
-    //     GTK3 要求被 realize 的 widget 必须 anchored（在某个 toplevel 里），
-    //     否则直接断言失败（`widget->priv->anchored || GTK_IS_INVISIBLE`）。
-    //     这条路试过，页面能加载（WebKit 离屏渲染），屏幕上什么都没有。
+    // 【为什么既不是 `GtkPlug` 也不是 `set_parent_window`】两条路都实测过：
+    //   * `set_parent_window`：GTK3 拒绝 realize（`widget->priv->anchored` 断言），
+    //     widget 永远拿不到 GdkWindow；
+    //   * `GtkPlug`：能映射、X 侧一切正常（`IsViewable`、尺寸正确、父子关系正确），
+    //     但 **WebKit 在里面渲染不出来** —— 用 `webkit_web_view_get_snapshot` 一测就现形：
+    //     toplevel 里 `snapshot OK`，GtkPlug 里 `snapshot FAILED: There was an error
+    //     creating the snapshot`。屏幕上是黑的，而所有别的判据全绿。
     //
-    // 【唯一不能用的情形是后端不是 X11】Wayland 上 `gtk_plug_new` 返回一个非空、
-    // 永不映射、不报错的 widget —— 那种情况必须开浮窗，而不是假装嵌进去了。
+    // 正确的做法是**让 GTK 以为自己在管一个普通 toplevel**，再在 X 层把那个窗口搬进
+    // 宿主窗口：`GtkWindow(override-redirect)` + `XReparentWindow`。实测：
+    // `snapshot OK`、`XQueryTree(host)` 里能看到我们的 XID、WebKit 正常出图。
     let display =
         gdk::Display::default().ok_or_else(|| "GTK has no default display".to_string())?;
     let display_kind = display.type_().name().to_string();
@@ -740,34 +815,67 @@ fn attach_view(
     } else {
         GuiFidelity::FloatingWindow
     };
-    let container: gtk::Widget = if embedded_ok {
-        let plug = gtk::Plug::new(request.parent as gtk::xlib::Window);
-        plug.add(&webview);
-        plug.upcast()
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    window.set_decorated(false);
+    window.set_title("HiFiShifter");
+    window.set_default_size(request.width, request.height);
+    window.add(&webview);
+    let mut embedded_xid = 0u64;
+    if embedded_ok {
+        // 先 realize 拿到 GdkWindow，再标 override-redirect（WM 就不会去管它），
+        // 最后 show 并把 X 窗口搬进宿主。
+        window.realize();
+        if let Some(gdk_window) = window.window() {
+            use gtk::glib::translate::ToGlibPtr;
+            let raw: *mut gdk::ffi::GdkWindow = gdk_window.to_glib_none().0;
+            // SAFETY: raw 是本窗口的 GdkWindow*；两个调用都只读写它自己的状态。
+            unsafe {
+                x11::gdk_window_set_override_redirect(raw.cast(), 1);
+                embedded_xid = x11::gdk_x11_window_get_xid(raw.cast());
+            }
+        }
+        window.show_all();
+        if embedded_xid != 0 {
+            // SAFETY: 两个 XID 都来自同一个 display 连接，且宿主窗口在 attached 期间有效。
+            unsafe {
+                let dpy = x11::gdk_x11_get_default_xdisplay();
+                x11::XReparentWindow(dpy, embedded_xid, request.parent as x11::XWindow, 0, 0);
+                x11::XMoveResizeWindow(
+                    dpy,
+                    embedded_xid,
+                    0,
+                    0,
+                    request.width as u32,
+                    request.height as u32,
+                );
+                x11::XSync(dpy, 0);
+            }
+            crate::gui_log_line(&format!(
+                "reparented editor window 0x{embedded_xid:x} into host 0x{:x}",
+                request.parent
+            ));
+        } else {
+            crate::gui_log_line("could not resolve our X window id; the editor may stay hidden");
+        }
     } else {
         let reason = if !request.embedded {
             "the host did not hand us an embeddable X11 window"
         } else {
-            // 【这一行就是 WSLg / Wayland 会话下的现场证据】GTK 在 Wayland 后端上
-            // 没有 XEmbed，`GtkPlug` 会静默地永不映射。
+            // 【这一行就是 WSLg / Wayland 会话下的现场证据】非 X11 后端上没有外来窗口。
             "GTK is running on a non-X11 backend, so the host's X11 window cannot be embedded"
         };
         crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("HiFiShifter");
-        window.set_default_size(request.width, request.height);
-        window.add(&webview);
         let weak = Rc::downgrade(&client);
         window.connect_delete_event(move |_, _| {
             if let Some(client) = weak.upgrade() {
                 client.borrow_mut().close();
             }
-            // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表
-            // 与节拍）；这里只拒绝"由 GTK 自己删窗口"那条路。
+            // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍）。
             gtk::glib::Propagation::Proceed
         });
-        window.upcast()
-    };
+        window.show_all();
+    }
+    let container: gtk::Widget = window.clone().upcast();
     container.set_size_request(request.width, request.height);
     container.show_all();
 
@@ -799,12 +907,65 @@ fn attach_view(
                 port: port.clone(),
                 container: container.clone(),
                 webview: webview.clone(),
+                embedded_xid,
                 on_host_thread,
             },
         );
     });
     LIVE_VIEWS.fetch_add(1, Ordering::AcqRel);
     ensure_tick();
+
+    // ── 绘制自检：把 WebKit 的渲染结果写成 PNG ───────────────────────────────
+    //
+    // 【为什么必须这么做】"映射成功 + 页面就绪"仍不等于"画出来了"，而宿主进程里的
+    // 像素**从外面拿不到**：WSLg（XWayland + Weston）下 `xwd` 连 REAPER 自己的
+    // FX 链窗口都读成纯黑（实测 `unique=1`），"黑屏"这个读数没有信息量。
+    //
+    // `snapshot` 取的是 WebKit 自己的渲染结果，与 X 合成无关。写成 PNG 之后：
+    // 纯色 1100x720 压出来是**几百字节**，真实 UI 是**几十 KB** —— 一个数字就能回答
+    // "WebKit 到底画了没有"，而且这个文件还能被外部工具打开来看。
+    {
+        let view = webview.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(3000), move || {
+            view.snapshot(
+                webkit2gtk::SnapshotRegion::Visible,
+                webkit2gtk::SnapshotOptions::NONE,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    let surface = match result {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            // 【为什么要打错误文本】§snapshot§ 失败就是"WebKit 拿不出渲染
+                            // 结果"，那正是黑屏的机制。错误信息里写着它卡在哪一步
+                            // （进程崩溃 / 没有可绘制的帧 / 区域为空）。
+                            crate::gui_log_line(&format!(
+                                "paint self-check: snapshot failed: {error}"
+                            ));
+                            return;
+                        }
+                    };
+                    // 固定文件名：每开一次窗口覆盖上一次，不在日志目录里堆积。
+                    let path = crate::diagnostics::log_directory().join("gui-snapshot.png");
+                    let Ok(c_path) = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+                    else {
+                        return;
+                    };
+                    use gtk::glib::translate::ToGlibPtr;
+                    let status = unsafe {
+                        cairo_ffi::cairo_surface_write_to_png(
+                            surface.to_glib_none().0.cast(),
+                            c_path.as_ptr(),
+                        )
+                    };
+                    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                    crate::gui_log_line(&format!(
+                        "paint self-check: status={status} png_bytes={bytes} path={}",
+                        path.display()
+                    ));
+                },
+            );
+        });
+    }
 
     webview.load_uri(protocol::PAGE_URL);
     crate::gui_log_line(&format!(
