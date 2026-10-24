@@ -12,7 +12,7 @@ fn align_with_fixture_item(region: &mut crate::ara::AraPlaybackRegion) {
     region.duration_in_modification_time = 2.;
 }
 
-fn fixture_host() -> Box<crate::host::MockHost> {
+fn fixture_host() -> &'static crate::host::MockHost {
     let host = crate::host::MockHost::new();
     host.enable_media();
     host.clear_markers();

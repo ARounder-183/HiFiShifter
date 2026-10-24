@@ -69,8 +69,18 @@ pub(crate) struct Fixture {
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
 }
 impl Fixture {
-    pub fn new() -> Box<Self> {
-        let value = Box::new(Self {
+    /// 夹具的指针会交给 `NativeHost` 持有（`IMainFactory` 那条 QI 通路），而
+    /// `NativeHost` 的析构顺序由各测试的声明顺序决定 —— 测试里 `host` 往往比
+    /// `owner` 先声明，于是它先被释放，之后 `Interface::drop` 会对着已释放的
+    /// 内存调 `release`。Windows 的堆不擦除首字，这个 use-after-free 表现为
+    /// "碰巧还能跑"；glibc 会把 tcache 指针写进首字，于是 vtbl 指针变成一个奇数
+    /// 地址，debug 构建的未对齐检查直接 abort。
+    ///
+    /// 夹具本来就是进程级的（`ACTIVE` 是 thread_local、`fixture()` 返回
+    /// `&'static Fixture`），那就让它真的活到进程结束：泄漏一份，换掉一整类
+    /// 与执行顺序耦合的偶发崩溃。
+    pub fn new() -> &'static Self {
+        let value: &'static Self = Box::leak(Box::new(Self {
             table: &TABLE,
             refs: AtomicU32::new(1),
             take_token: 1,
@@ -147,8 +157,8 @@ impl Fixture {
             change: Cell::new(-9),
             track_value: Cell::new(1.),
             hook: RefCell::new(None),
-        });
-        ACTIVE.set((&*value as *const Self) as usize);
+        }));
+        ACTIVE.set(value as *const Self as usize);
         value
     }
     pub fn context(&self) -> *mut c_void {
@@ -1074,16 +1084,24 @@ fn host_media_new_track_honours_the_anchor_and_falls_back_to_the_end() {
     assert_eq!(f.extra_tracks.borrow().len(), 5);
     assert!(f.calls().contains(&"insert-track:5".into()));
 }
+/// 测试用的绝对路径：三个平台写法不同，而被测的校验恰恰是 `Path::is_absolute()`。
+/// 在 Linux 上 `E:\x.wav` 不是绝对路径，直接用 Windows 字面量会让用例在非 Windows
+/// 平台上测到一个**正确**的拒绝，然后误报成回归。
+fn abs_path(relative: &str) -> String {
+    if cfg!(windows) {
+        format!(r"E:\{relative}")
+    } else {
+        format!("/tmp/hifishifter-tests/{relative}")
+    }
+}
+
 #[test]
 fn host_media_multi_picker_preserves_complete_unicode_paths_and_cancel_is_empty() {
     let f = Fixture::new();
     f.enable_media();
     let host = std::sync::Arc::new(f.client());
     assert!(host.pick_audio_paths(true, &|| true).unwrap().is_empty());
-    let paths = vec![
-        r"E:\声音\第一段.wav".to_owned(),
-        r"E:\声音\第二段.wav".to_owned(),
-    ];
+    let paths = vec![abs_path("声音/第一段.wav"), abs_path("声音/第二段.wav")];
     *f.picker_paths.borrow_mut() = paths.clone();
     assert_eq!(host.pick_audio_paths(true, &|| true).unwrap(), paths);
 }
@@ -1095,10 +1113,10 @@ fn host_media_import_preserves_utf8_and_transfers_source_ownership() {
     f.enable_media();
     let host = std::sync::Arc::new(f.client());
     let target = host.direct_track_target(&|| true).unwrap();
-    let path = r"E:\素材\辅音和元音.wav";
-    let guid = target.import_audio(path, 3., &|| true).unwrap();
+    let path = abs_path("素材/辅音和元音.wav");
+    let guid = target.import_audio(&path, 3., &|| true).unwrap();
     assert_eq!(guid, "{11111111-1111-1111-1111-111111111111}");
-    assert_eq!(f.media_path.borrow().as_str(), path);
+    assert_eq!(f.media_path.borrow().as_str(), path.as_str());
     assert_eq!(f.values.borrow()["D_POSITION"], 3.);
     assert_eq!(f.values.borrow()["D_LENGTH"], 2.);
     assert_eq!(f.media_sources.borrow().len(), 1);
@@ -1114,7 +1132,7 @@ fn host_media_import_failure_removes_only_created_item_and_frees_unattached_sour
     let host = std::sync::Arc::new(f.client());
     let target = host.direct_track_target(&|| true).unwrap();
     assert!(target
-        .import_audio(r"E:\clip.wav", 0., &|| true)
+        .import_audio(&abs_path("clip.wav"), 0., &|| true)
         .unwrap_err()
         .contains("take creation"));
     assert!(f.calls().contains(&"media-item-delete".into()));

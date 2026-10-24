@@ -766,7 +766,7 @@ mod tests {
     }
 
     /// 一个"清单里有一条带 item 的轨道"的宿主夹具。
-    fn claimed_host() -> Box<super::super::MockHost> {
+    fn claimed_host() -> &'static super::super::MockHost {
         let fixture = super::super::MockHost::new();
         fixture.enable_writer();
         fixture.enable_media();
