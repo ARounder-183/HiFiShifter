@@ -238,6 +238,16 @@ unsafe extern "system" fn attached(
         }
         state.attaching = false;
         match native {
+            // 【Unavailable 是"结论"，不是错误】宿主拿不到 GUI 时看到的是空面板 +
+            // 日志里一行可搜到的原因；§attached§ 必须如实返回失败，否则宿主会以为
+            // 面板里有一个能用的编辑器（见方案 §3.4）。
+            Ok(host) if matches!(host.fidelity(), super::gui::GuiFidelity::Unavailable(_)) => {
+                let reason = host.fidelity().as_str();
+                drop(state);
+                drop(host);
+                crate::log_line(&format!("[gui] no embedded editor: {reason}"));
+                K_RESULT_FALSE
+            }
             Ok(host) => {
                 let fidelity = host.fidelity();
                 state.native = Some(host);

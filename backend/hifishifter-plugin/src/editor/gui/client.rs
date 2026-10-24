@@ -172,6 +172,11 @@ pub(crate) struct EditorClient {
     /// 【为什么预算跟着请求走】见 `SLOW_PENDING_TTL`：慢车道的任务是分钟级的，
     /// 用 30 秒去判它"没有回复"只会把"正在跑"误判成"丢了"。
     pending: std::collections::HashMap<u64, Pending>,
+    /// 已按下未松开的共享编辑键（去重用）。
+    ///
+    /// 【为什么 Linux 上是死字段】那里键盘事件直达 WebView，宿主根本不会把 Ctrl+C
+    /// 交给 §IPlugView::keyDown§，于是 §forward_edit_key§ 永远不会被调用。
+    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     forwarded_keys: HashSet<char>,
     host_replies: std::collections::HashMap<u64, HostReply>,
     undo_requests:
@@ -513,6 +518,7 @@ impl EditorClient {
     /// 【为什么去重在这里】按住不放的自动重复会被宿主反复投递；页面侧的
     /// `keydown` 处理按 `repeat` 字段区分。判据是"这个键是否已经按下未松开"，
     /// 属于 Policy —— 平台只管把键送进来。
+    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     pub(crate) fn forward_edit_key(&mut self, key: char, mods: i16, down: bool) -> bool {
         if self.closed {
             return false;

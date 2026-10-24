@@ -67,6 +67,12 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
+    /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
+    ///
+    /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
+    /// 让路状态机），只有宿主线程能调；情形 B 的节拍在私有 GTK 线程上，只能
+    /// §client::pump§（纯投递）。搞反了是"在错误线程上调宿主"—— 最难查的一类。
+    on_host_thread: bool,
     /// `GtkPlug`（XEmbed）或 `GtkWindow`（浮窗）。
     container: gtk::Widget,
     webview: webkit2gtk::WebView,
@@ -157,12 +163,14 @@ impl EditorHost for LinuxHost {
 
     /// 【为什么 Linux 不转交编辑键】键盘事件直达 `WebKitWebView`，宿主不会先把
     /// Ctrl+C 交给 `IPlugView::keyDown` —— 这条通路在本平台不存在。
+    #[allow(dead_code)]
     fn forward_edit_key(&self, _key: char, _mods: i16, _down: bool) -> bool {
         false
     }
 
     fn host_tick(&self) {
-        // 情形 A：节拍就在宿主线程上，已经由 `g_timeout_add` 做过。
+        // 情形 A：节拍就在宿主线程上，§g_timeout_add§ 那条已经调过 §client::tick§，
+        // 其中包含这里的全部内容 —— 再做一次只是重复一次 §flush_dirty§，无害但没必要。
         // 情形 B：泵在私有线程上，宿主侧的事只能在这里补做。
         if matches!(self.fidelity, GuiFidelity::FloatingWindow) {
             client::host_tick(&self.link);
@@ -254,7 +262,7 @@ pub(super) fn create(
         // `unsafe-assume-initialized`：gtk-rs 因此认为"GTK 已在本线程初始化"，
         // `assert_initialized_main_thread!` 全部放行。代价是它不再替我们守线程纪律 ——
         // 由 `VIEWS`（thread_local）与 `LinuxHost::submit`（先比线程身份）来守。
-        let token = attach_view(request)?;
+        let token = attach_view(request, true)?;
         crate::log_line("[gui] hosting the host's GTK main loop (embedded)");
         return Ok(Rc::new(LinuxHost {
             token,
@@ -265,7 +273,21 @@ pub(super) fn create(
         }));
     }
     // 情形 B：进程里没有 GTK 主循环，只能自己起一条。
-    let thread = gui_thread()?;
+    //
+    // 【为什么这里不返回 §Err§】"这台机器上没有可用的 GTK/WebKit"是一个**环境事实**，
+    // 不是一个错误：宿主应当看到空面板 + 一行可搜到的日志，而不是一个没人读的字符串。
+    // 真正的编程错误（父窗口为空、线程身份不对）仍然走 §Err§。
+    let thread = match gui_thread() {
+        Ok(thread) => thread,
+        Err(_) => {
+            crate::log_line(
+                "[gui] no usable GTK/WebKit in this process; the editor panel stays empty",
+            );
+            return Ok(Rc::new(super::unavailable::UnavailableHost::new(
+                "no usable GTK/WebKit in this host",
+            )));
+        }
+    };
     let (reply, replies) = std::sync::mpsc::sync_channel(1);
     thread
         .control
@@ -416,7 +438,7 @@ fn run_inline(command: Control) {
         }),
         Control::Close { token } => close_view(token),
         Control::Attach { request, reply } => {
-            let _ = reply.send(attach_view(request));
+            let _ = reply.send(attach_view(request, false));
         }
         Control::Shutdown { reply } => {
             let _ = reply.send(());
@@ -441,11 +463,18 @@ fn tick() -> glib::ControlFlow {
         views
             .borrow()
             .values()
-            .map(|view| (view.client.clone(), view.container.clone()))
+            .map(|view| (view.client.clone(), view.on_host_thread))
             .collect::<Vec<_>>()
     });
-    for (client, container) in clients {
-        client::pump(&client);
+    for (client, on_host_thread) in clients {
+        if on_host_thread {
+            // 情形 A：节拍就在宿主线程上，于是宿主侧的事（私有状态通知、宿主时钟、
+            // 让路状态机）能在这里做 —— 与 Windows 的 §WM_TIMER§、macOS 的 §NSTimer§ 等价。
+            client::tick(&client);
+        } else {
+            // 情形 B：这里不是宿主线程，只推进投递；宿主侧由 §LinuxHost::host_tick§ 补做。
+            client::pump(&client);
+        }
         if client.borrow().is_dead() {
             let dead = VIEWS.with(|views| {
                 views
@@ -459,7 +488,6 @@ fn tick() -> glib::ControlFlow {
                 close_view(token);
             }
         }
-        let _ = container;
     }
     glib::ControlFlow::Continue
 }
@@ -487,7 +515,7 @@ fn close_view(token: usize) {
 }
 
 /// 在拥有视图的线程上真正建视图。
-fn attach_view(request: AttachRequest) -> Result<usize, String> {
+fn attach_view(request: AttachRequest, on_host_thread: bool) -> Result<usize, String> {
     let assets = crate::editor::resources::frontend_directory()?;
     let context = web_context(&assets);
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) as usize;
@@ -568,6 +596,7 @@ fn attach_view(request: AttachRequest) -> Result<usize, String> {
                 port: port.clone(),
                 container: container.clone(),
                 webview: webview.clone(),
+                on_host_thread,
             },
         );
     });
@@ -668,8 +697,10 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
             if let Some(navigation) =
                 decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
             {
+                // §request()§ 自 WebKit 2.6 起废弃，用 §navigation_action().request()§。
                 let allowed = navigation
-                    .request()
+                    .navigation_action()
+                    .and_then(|action| action.request())
                     .and_then(|request| request.uri())
                     .is_some_and(|uri| protocol::is_allowed_navigation(&uri));
                 if !allowed {
