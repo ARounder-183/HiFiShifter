@@ -32,8 +32,8 @@ use std::sync::mpsc::{channel, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use webkit2gtk::{
-    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, SettingsExt,
-    URIRequestExt, URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
+    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, SettingsExt, URIRequestExt,
+    URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
 };
 
 /// 回执泵的节拍：与 Windows 的 `WM_TIMER`、macOS 的 `NSTimer` 同频。
@@ -659,7 +659,8 @@ fn attach_view(
     //
     // 【为什么不干脆全平台都关】有可用 GPU 时加速合成本来更省电也更顺滑；所以
     // `HIFISHIFTER_WEBKIT_ACCEL=1` 可以把它打开，日志里会写明用的是哪一种。
-    let accelerate = std::env::var("HIFISHIFTER_WEBKIT_ACCEL").is_ok_and(|value| value.trim() == "1");
+    let accelerate =
+        std::env::var("HIFISHIFTER_WEBKIT_ACCEL").is_ok_and(|value| value.trim() == "1");
     if let Some(settings) = WebViewExt::settings(&webview) {
         settings.set_hardware_acceleration_policy(if accelerate {
             webkit2gtk::HardwareAccelerationPolicy::OnDemand
@@ -668,7 +669,11 @@ fn attach_view(
         });
         crate::gui_log_line(&format!(
             "webkit hardware acceleration: {}",
-            if accelerate { "on-demand" } else { "never (CPU compositing)" }
+            if accelerate {
+                "on-demand"
+            } else {
+                "never (CPU compositing)"
+            }
         ));
     }
     let manager = webview
