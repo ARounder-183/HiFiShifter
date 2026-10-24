@@ -601,11 +601,19 @@ fn run_inline(command: Control) {
 ///
 /// 【为什么只 `pump` 不 `tick`】`client::tick` 会碰宿主 API，而这里可能不在宿主 UI
 /// 线程上（情形 B）。宿主侧的事由 `LinuxHost::host_tick` 在宿主线程上补做。
+/// 看门狗：任何一个跑在**宿主 UI 线程**上的入口超过这个时长，就落一行 WARN。
+///
+/// 【为什么需要它】"宿主卡住"最难受的地方是无法归因：CPU 不高、X 也没被 grab，
+/// 但宿主就是不刷新。唯一能把"我们挡住了它"和"它在等别的东西"分开的，是**我们
+/// 自己每个入口的耗时**。50 ms 已经远超一次正常回执的成本。
+const SLOW_ENTRY: Duration = Duration::from_millis(50);
+
 fn tick() -> glib::ControlFlow {
     // 【为什么要数节拍】宿主线程上的 `g_timeout_add` **只在宿主迭代 GTK 主循环时才跑**。
     // 宿主迭代得慢，回执泵就慢，前端就会报 "Backend invoke failed"、手感像卡死 ——
     // 而这个数字是唯一能把"宿主没在转"和"我们算得慢"分开的证据。
     let ticks = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let started = std::time::Instant::now();
     if ticks == 250 || ticks == 1000 {
         crate::gui_log_line(&format!(
             "pump: {ticks} ticks (~{} ms of wall clock at 20 ms)",
@@ -648,6 +656,15 @@ fn tick() -> glib::ControlFlow {
                 close_view(token);
             }
         }
+    }
+    // 【为什么在这里也量】回执泵跑在宿主 UI 线程上：它一旦变慢，宿主就跟着卡。
+    let elapsed = started.elapsed();
+    if elapsed > SLOW_ENTRY {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "gui.slow.pump",
+            format_args!("[gui] slow entry: pump took {} ms", elapsed.as_millis()),
+        );
     }
     glib::ControlFlow::Continue
 }
