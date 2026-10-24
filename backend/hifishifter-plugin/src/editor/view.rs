@@ -657,8 +657,15 @@ mod tests {
                 (table.on_size)(ptr, std::ptr::null_mut()),
                 K_INVALID_ARGUMENT
             );
+            // 【为什么这里期望 `K_RESULT_OK` 而不是 `K_INVALID_ARGUMENT`】尺寸协商是宿主的
+            // 控制回路：`onSize` 回失败会让宿主无限重试（实测能把它的 UI 线程钉死）。
+            // 现在的契约是"先如实记录，再尽力应用，**永远回 OK**"，所以不合法矩形也必须
+            // 被记下、并由随后的 `getSize` 原样读回 —— 这条断言钉的正是那个契约。
             rect.right = i32::MIN;
-            assert_eq!((table.on_size)(ptr, &mut rect), K_INVALID_ARGUMENT);
+            assert_eq!((table.on_size)(ptr, &mut rect), K_RESULT_OK);
+            let mut echoed = ViewRect::default();
+            assert_eq!((table.get_size)(ptr, &mut echoed), K_RESULT_OK);
+            assert_eq!(echoed.dimensions(), None);
             assert_eq!((table.platform)(ptr, c"NSView".as_ptr()), K_RESULT_FALSE);
             assert_eq!(
                 (table.attached)(ptr, std::ptr::null_mut(), c"HWND".as_ptr()),
