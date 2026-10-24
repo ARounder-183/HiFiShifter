@@ -1,0 +1,17 @@
+[package]
+name = "hfs-gui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 【为什么是独立 crate】它是**另一个进程**：只依赖 GTK/WebKit，不链接插件本体。
+# 放进 plugin crate 的 src/bin 会让插件自己的构建也被牵连（链接失败）。
+[workspace]
+
+# 【为什么不加 unsafe-assume-initialized】那个特性让 gtk-rs 认为"GTK 已初始化"，
+# 于是 `gtk::init()` 变成空操作 —— 本进程里 GTK 其实从未初始化，第一次用控件就
+# 触发 `_gtk_css_lookup_resolve` 断言并 abort。这里我们是唯一的 GTK 使用者，
+# 老老实实自己初始化。
+[dependencies]
+gtk = "0.18"
+libc = "0.2"
