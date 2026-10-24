@@ -86,6 +86,15 @@ mod x11 {
         ) -> i32;
         /// `int XSync (Display*, Bool)`
         pub fn XSync(display: *mut c_void, discard: i32) -> i32;
+        /// `Status XGetWindowAttributes (Display*, Window, XWindowAttributes*)`
+        ///
+        /// 只用到结构体开头的 `width/height`，所以按"足够大的不透明缓冲"接收 —— 这比
+        /// 逐字段复刻 `XWindowAttributes`（后面还跟着 `Colormap`、`Visual*` 等）稳。
+        pub fn XGetWindowAttributes(
+            display: *mut c_void,
+            window: XWindow,
+            attributes: *mut c_void,
+        ) -> i32;
     }
 }
 
@@ -104,6 +113,9 @@ mod cairo_ffi {
 }
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// 回执泵已跑的节拍数（见 §tick§ 里的说明）。
+static TICKS: AtomicU64 = AtomicU64::new(0);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
 
@@ -593,6 +605,16 @@ fn run_inline(command: Control) {
 /// 【为什么只 `pump` 不 `tick`】`client::tick` 会碰宿主 API，而这里可能不在宿主 UI
 /// 线程上（情形 B）。宿主侧的事由 `LinuxHost::host_tick` 在宿主线程上补做。
 fn tick() -> glib::ControlFlow {
+    // 【为什么要数节拍】宿主线程上的 `g_timeout_add` **只在宿主迭代 GTK 主循环时才跑**。
+    // 宿主迭代得慢，回执泵就慢，前端就会报 "Backend invoke failed"、手感像卡死 ——
+    // 而这个数字是唯一能把"宿主没在转"和"我们算得慢"分开的证据。
+    let ticks = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if ticks == 250 || ticks == 1000 {
+        crate::gui_log_line(&format!(
+            "pump: {ticks} ticks (~{} ms of wall clock at 20 ms)",
+            ticks * 20
+        ));
+    }
     CONTROL.with(|slot| {
         if let Some(commands) = slot.borrow().as_ref() {
             while let Ok(command) = commands.try_recv() {
@@ -815,10 +837,49 @@ fn attach_view(
     } else {
         GuiFidelity::FloatingWindow
     };
+    // 【为什么用宿主窗口的几何而不是 `request.width/height`】宿主给的 `ViewRect`
+    // 可以是 0x0（"你看着办"），而我们默认的 1100x720 只是"一个够大的窗口"。两者都会
+    // 让我们**盖不满**宿主留出的那块区域 —— 屏幕上就是一圈黑边。父窗口的实际尺寸才是
+    // 我们要填满的东西。
+    let mut width = request.width;
+    let mut height = request.height;
+    if embedded_ok {
+        // SAFETY: parent 是宿主给的有效 XID；缓冲区按 `XWindowAttributes` 的真实大小开。
+        unsafe {
+            let mut attributes = [0u8; 256];
+            let dpy = x11::gdk_x11_get_default_xdisplay();
+            if x11::XGetWindowAttributes(
+                dpy,
+                request.parent as x11::XWindow,
+                attributes.as_mut_ptr().cast(),
+            ) != 0
+            {
+                // `XWindowAttributes` 的第 4、5 个字段是 `int width, height`（前面是
+                // x, y, width, height —— 各 4 字节，偏移 8 和 12）。
+                let read = |offset: usize| {
+                    i32::from_ne_bytes([
+                        attributes[offset],
+                        attributes[offset + 1],
+                        attributes[offset + 2],
+                        attributes[offset + 3],
+                    ])
+                };
+                let (host_width, host_height) = (read(8), read(12));
+                if host_width > 0 && host_height > 0 {
+                    width = host_width as i32;
+                    height = host_height as i32;
+                }
+            }
+        }
+    }
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_decorated(false);
     window.set_title("HiFiShifter");
-    window.set_default_size(request.width, request.height);
+    // 【为什么关掉焦点】我们的窗口只是宿主窗口里的一块画布，不是独立的应用窗口。
+    // 让它抢焦点会把手感变成"点了插件之后宿主不再响应键盘"。
+    window.set_accept_focus(false);
+    window.set_focus_on_map(false);
+    window.set_default_size(width, height);
     window.add(&webview);
     let mut embedded_xid = 0u64;
     if embedded_ok {
@@ -840,14 +901,7 @@ fn attach_view(
             unsafe {
                 let dpy = x11::gdk_x11_get_default_xdisplay();
                 x11::XReparentWindow(dpy, embedded_xid, request.parent as x11::XWindow, 0, 0);
-                x11::XMoveResizeWindow(
-                    dpy,
-                    embedded_xid,
-                    0,
-                    0,
-                    request.width as u32,
-                    request.height as u32,
-                );
+                x11::XMoveResizeWindow(dpy, embedded_xid, 0, 0, width as u32, height as u32);
                 x11::XSync(dpy, 0);
             }
             crate::gui_log_line(&format!(
