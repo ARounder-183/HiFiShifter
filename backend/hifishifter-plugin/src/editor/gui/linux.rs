@@ -114,6 +114,9 @@ mod cairo_ffi {
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+/// 只记一次"宿主回调不再做宿主侧工作"的说明。
+static ONCE_HOST_TICK: std::sync::Once = std::sync::Once::new();
+
 /// 回执泵已跑的节拍数（见 §tick§ 里的说明）。
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
@@ -235,12 +238,21 @@ impl EditorHost for LinuxHost {
     }
 
     fn host_tick(&self) {
-        // 情形 A：节拍就在宿主线程上，§g_timeout_add§ 那条已经调过 §client::tick§，
-        // 其中包含这里的全部内容 —— 再做一次只是重复一次 §flush_dirty§，无害但没必要。
-        // 情形 B：泵在私有线程上，宿主侧的事只能在这里补做。
-        if matches!(self.fidelity, GuiFidelity::FloatingWindow) {
-            client::host_tick(&self.link);
-        }
+        // ── 这里什么都不做，是刻意的 ─────────────────────────────────────────
+        //
+        // 这个函数被 `onSize` / `onFocus` / `setFrame` 调用 —— 也就是说它跑在
+        // **宿主的 UI 线程上、宿主自己的回调栈里**。此前它会做一整轮宿主侧工作
+        // （`flush_dirty`、宿主时钟、私有状态通知），那些都会回头调宿主的 API。
+        // 在宿主的回调栈里回调宿主，等于把一条本来就很脆的链子再套一圈：宿主
+        // 如果在那条 API 里同步等我们另一条线程（GTK/WebKit），两边就互等到死。
+        //
+        // 实测症状正是"宿主整体冻住、我们的界面照常响应、CPU 只有 13%"。
+        //
+        // 现在宿主线程上只做**记录**，工作留给回执泵。代价是宿主侧的 flush 晚一个
+        // 节拍（20 ms 量级），换来的是宿主永远不会被我们的回调链卡住。
+        ONCE_HOST_TICK.call_once(|| {
+            crate::gui_log_line("host callbacks no longer run host-side work; the pump owns it");
+        });
     }
 
     fn close(&self) {
