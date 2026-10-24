@@ -28,12 +28,20 @@ readonly BACKEND_DIR="$REPO_ROOT/backend"
 readonly SDK_PINS="$REPO_ROOT/scripts/env/plugin-sdks.json"
 readonly API_NAME="HiFiShifter"
 readonly FRONTEND_DIST="$REPO_ROOT/frontend/dist"
+# 前端构建用的 Node：钉死一个版本，装不下就装到仓库自己的 .build-tmp/tools 下。
+#
+# 【为什么钉 22.12.0 而不是"最新 LTS"】它正好是 vite 8 / rolldown 那条
+# `engines: ^20.19.0 || >=22.12.0` 的下界 —— 比它新的任何 22/24 都行，但"最新"
+# 会随上游漂移，而构建脚本不该每天换一个工具链。`--node-download-version` 可覆盖。
+readonly NODE_PIN="22.12.0"
+readonly NODE_TOOLS="$REPO_ROOT/.build-tmp/tools"
 
 STAGE="all"
 PROFILE="release"
 OUT_DIR=""
 SKIP_VERIFY=0
 SKIP_FRONTEND=0
+ALLOW_NODE_DOWNLOAD=1
 
 log()  { printf "[vst3] %s\n" "$*"; }
 step() { printf "\n[vst3] ── %s\n" "$*"; }
@@ -49,6 +57,7 @@ usage() {
   --profile=release|dist|dev                    cargo profile（默认 release）
   --out=DIR                                     产物目录（默认 .build-tmp/vst3-unix）
   --skip-frontend                               跳过前端构建（本地只改 Rust 时用；要求 dist 已存在）
+  --no-node-download                            缺少可用的 Node 时不去下载（离线机器用）
   --no-verify                                   跳过 verify（只在该平台跑不了探针时用）
   -h, --help                                    显示本说明
 USAGE
@@ -61,6 +70,7 @@ while [ $# -gt 0 ]; do
         --profile=*) PROFILE="${1#*=}"; shift ;;
         --out=*)     OUT_DIR="${1#*=}"; shift ;;
         --skip-frontend) SKIP_FRONTEND=1; shift ;;
+        --no-node-download) ALLOW_NODE_DOWNLOAD=0; shift ;;
         --no-verify) SKIP_VERIFY=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           die "unknown argument: $1（--help 看用法）" ;;
@@ -142,6 +152,99 @@ import hashlib, sys
 with open(sys.argv[1], 'rb') as handle:
     print(hashlib.sha256(handle.read()).hexdigest())
 PY
+}
+
+
+# ── 前端工具链：找到（或装一个）能跑 vite 的 Node ───────────────────────────
+#
+# 【为什么构建脚本要管这件事】本仓的 vite 8 用 rolldown，它的原生绑定声明了
+# `engines: ^20.19.0 || >=22.12.0`。而 Ubuntu 24.04 的 `nodejs` 包是 18.19 ——
+# 一台"只装了 apt 那些包"的开发机**必然**不满足，而它的报错（`styleText` 缺失、
+# `@rolldown/binding-*` 找不到）看起来都像是前端代码的问题。
+# 让用户自己去装 Node 是把这个坑推给下一个人；这里直接把一个钉死版本的 Node
+# 装进仓库自己的 `.build-tmp/tools`（已被 gitignore），`./build.sh` 就能开箱即用。
+
+# 判定式照抄 vite/rolldown 原生绑定的 `engines`，不自己发明区间。
+node_version_ok() {
+    local binary="${1:-}"
+    [ -n "$binary" ] && [ -x "$binary" ] || return 1
+    [ "$("$binary" -p 'const [a, b] = process.versions.node.split(".").map(Number);
+        (a === 20 && b >= 19) || a > 22 || (a === 22 && b >= 12) ? "yes" : "no"' 2>/dev/null)" = "yes" ]
+}
+
+# Node 官方压缩包的平台标签。
+node_platform() {
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)  printf 'linux-x64' ;;
+        Linux-aarch64) printf 'linux-arm64' ;;
+        Linux-arm64)   printf 'linux-arm64' ;;
+        Darwin-x86_64) printf 'darwin-x64' ;;
+        Darwin-arm64)  printf 'darwin-arm64' ;;
+        *)             printf '' ;;
+    esac
+}
+
+# 已装好的候选：仓库内缓存 → `~/.nvm` → `~/.local` → PATH 上那个。
+node_candidates() {
+    printf '%s\n' "$NODE_TOOLS"/node-v"$NODE_PIN"-*/bin/node
+    printf '%s\n' "$HOME"/.nvm/versions/node/*/bin/node
+    printf '%s\n' "$HOME"/.local/node-v*/bin/node
+    printf '%s\n' "$(command -v node 2>/dev/null || true)"
+}
+
+ensure_node() {
+    local candidate
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if node_version_ok "$candidate"; then
+            export PATH="$(dirname "$candidate"):$PATH"
+            log "使用 Node $("$candidate" -v)（$candidate）"
+            return 0
+        fi
+    done <<< "$(node_candidates)"
+
+    local platform
+    platform="$(node_platform)"
+    if [ -z "$platform" ]; then
+        die "本平台（$(uname -s)-$(uname -m)）没有自动安装 Node 的路径；请自行安装 Node ^20.19.0 或 >=22.12.0 后重跑"
+    fi
+    local name="node-v$NODE_PIN-$platform"
+    local dir="$NODE_TOOLS/$name"
+    if [ "$ALLOW_NODE_DOWNLOAD" != "1" ]; then
+        die "缺少可用的 Node（需要 ^20.19.0 或 >=22.12.0），且按 --no-node-download 不下载。
+  手动装一个即可：
+      mkdir -p ~/.local && curl -fsSL https://nodejs.org/dist/v$NODE_PIN/$name.tar.xz | tar -xJ -C ~/.local
+      export PATH=~/.local/$name/bin:\$PATH
+  然后再跑本脚本（它会自动认 ~/.local 下的那份）。"
+    fi
+    command -v curl >/dev/null 2>&1 || die "缺少 curl，无法下载 Node（或用 --no-node-download 自行安装）"
+
+    local base="https://nodejs.org/dist/v$NODE_PIN"
+    local tmp="$NODE_TOOLS/.download"
+    mkdir -p "$NODE_TOOLS" "$tmp"
+    log "当前 Node 太旧（$(node -v 2>/dev/null || echo none)），正在装 $name → $NODE_TOOLS"
+    curl -fsSL -o "$tmp/$name.tar.xz" "$base/$name.tar.xz" \
+        || die "下载 Node 失败：$base/$name.tar.xz（离线机器请用 --no-node-download 并自行安装）"
+
+    # 【为什么校验和不硬编码在脚本里】四个平台各一份，钉死只会随上游漂移而失效；
+    # 官方 `SHASUMS256.txt` 是同一批发布的清单，拿它比对才是"钉版本"的正确姿势。
+    if curl -fsSL -o "$tmp/SHASUMS256.txt" "$base/SHASUMS256.txt"; then
+        local expected actual
+        expected="$(awk -v f="$name.tar.xz" '$2 == f { print $1 }' "$tmp/SHASUMS256.txt")"
+        actual="$(hash_file "$tmp/$name.tar.xz")"
+        [ -n "$expected" ] && [ "$expected" = "$actual" ] \
+            || die "Node 压缩包校验失败（期望 ${expected:-无}，实际 $actual）"
+        log "Node 压缩包 sha256 校验通过"
+    else
+        warn "拿不到 SHASUMS256.txt，跳过完整性校验"
+    fi
+
+    rm -rf "$dir"
+    tar -xJf "$tmp/$name.tar.xz" -C "$NODE_TOOLS" || die "解压 Node 失败"
+    rm -rf "$tmp"
+    node_version_ok "$dir/bin/node" || die "解压出来的 Node 仍不可用：$dir/bin/node"
+    export PATH="$dir/bin:$PATH"
+    log "使用 Node $("$dir/bin/node" -v)（$dir）"
 }
 
 # 读 plugin-sdks.json 的某个字段（python3 是唯一跨平台且一定在 CI 镜像里的解析器）。
@@ -228,21 +331,10 @@ stage_frontend() {
         return
     fi
     step "构建前端（vite，含 plugin.html 入口）"
-    command -v npm >/dev/null 2>&1 || die "缺少 npm"
-    # 【为什么要显式判 Node 版本】vite 8 用 rolldown 打包，而 rolldown 的原生绑定声明了
-    # engines: ^20.19.0 || >=22.12.0。不满足时它不会"构建失败"，而是**两段完全误导的报错**：
-    #
-    #   * Node 18 → "node:util does not provide an export named 'styleText'"（像前端代码问题）
-    #   * Node 22.11 → npm 把可选依赖静默跳过，于是 "Cannot find module
-    #     '@rolldown/binding-linux-x64-gnu'"（像依赖没装）
-    #
-    # 判在入口，报错才指向原因。区间照抄 lock 里的 engines，不自己发明。
-    local node_ok
-    node_ok="$(node -p 'const [a, b] = process.versions.node.split(".").map(Number);
-        (a === 20 && b >= 19) || a > 22 || (a === 22 && b >= 12) ? "yes" : "no"' 2>/dev/null || echo no)"
-    if [ "$node_ok" != "yes" ]; then
-        die "前端构建需要 Node ^20.19.0 或 >=22.12.0（当前 $(node -v 2>/dev/null || echo none)）：vite 8 / rolldown 的 engines 就是这两个区间"
-    fi
+    # 前端工具链：PATH 上的 Node 太旧就找一个能用的（必要时装一个钉死版本）。
+    # 见文件上方的 ensure_node —— 这一句就是"为什么报错不再指向前端代码"的全部答案。
+    ensure_node
+    command -v npm >/dev/null 2>&1 || die "缺少 npm（Node 装好了却没有 npm？检查压缩包是否完整）"
     # 【为什么用 `package-lock.json` 的哈希当判据，而不是"`node_modules` 存在吗"】
     # "存在但残缺"是最常见的形态：一次被中断的 `npm ci`、一次从别处拷来的目录、
     # 或者上游刚加了依赖。那三种情况下"存在"都是 true，而 `npm run build` 会以
