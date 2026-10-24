@@ -1083,23 +1083,29 @@ unsafe extern "system" fn component_query_interface(
             // 它永远会成功。若宿主问的是别的接口（实测会问 IEditController），
             // 无条件返回 ARA 指针会让宿主用错误的 vtable 调用方法而崩溃。
             // SAFETY: processor 是活动对象；entry 在对象生命周期内有效。
-            if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
-                for kind in [
-                    Ara2Vst3InterfaceKind::PluginEntry,
-                    Ara2Vst3InterfaceKind::PluginEntry2,
-                ] {
-                    let Some(words) = ara_iid_words(kind) else {
-                        continue;
-                    };
-                    if unsafe { iid_matches(iid, words) } {
-                        if let Ok(interface) = entry.query_interface(kind) {
-                            crate::log_line(&format!(
-                                "component queryInterface ARA hit iid={}",
-                                unsafe { hex_iid(iid) }
-                            ));
-                            // SAFETY: 输出槽非空。
-                            unsafe { *obj = interface };
-                            return K_RESULT_OK;
+            // 【临时探针】HIFISHIFTER_NO_ARA=1 时不暴露任何 ARA 接口，用来判定
+            // "打开 FX 窗口就冻结"是否来自 ARA 这一侧。
+            let ara_disabled =
+                std::env::var("HIFISHIFTER_NO_ARA").is_ok_and(|value| value.trim() == "1");
+            if !ara_disabled {
+                if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
+                    for kind in [
+                        Ara2Vst3InterfaceKind::PluginEntry,
+                        Ara2Vst3InterfaceKind::PluginEntry2,
+                    ] {
+                        let Some(words) = ara_iid_words(kind) else {
+                            continue;
+                        };
+                        if unsafe { iid_matches(iid, words) } {
+                            if let Ok(interface) = entry.query_interface(kind) {
+                                crate::log_line(&format!(
+                                    "component queryInterface ARA hit iid={}",
+                                    unsafe { hex_iid(iid) }
+                                ));
+                                // SAFETY: 输出槽非空。
+                                unsafe { *obj = interface };
+                                return K_RESULT_OK;
+                            }
                         }
                     }
                 }
@@ -2586,6 +2592,12 @@ unsafe extern "system" fn edit_controller_create_view(
             // 【为什么是 WARN】它是"宿主真的要开窗了"的唯一证据。放在 INFO 上时，
             // 用户日志里连这一行都没有，于是"面板空白"到底是没开窗还是开窗失败无从判断。
             crate::gui_log_line("IEditController::createView -> native editor");
+            // 【临时探针】HIFISHIFTER_NO_VIEW=1 时完全不产生 IPlugView，用来判定
+            // "宿主冻结"是否出在我们这套视图实现上。
+            if std::env::var("HIFISHIFTER_NO_VIEW").is_ok_and(|value| value.trim() == "1") {
+                crate::gui_log_line("createView suppressed by HIFISHIFTER_NO_VIEW");
+                return std::ptr::null_mut();
+            }
             let controller = unsafe { &*(this as *const EditController) };
             let view = crate::editor::create_view_with_link(controller.editor_link.clone());
             // 视图创建后路由可能已可用；把早到的控制器状态补投一次（不可用则放回）。
