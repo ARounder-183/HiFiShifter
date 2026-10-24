@@ -447,8 +447,8 @@ impl EditorClient {
         }
         self.ready = true;
         let queued = self.queue.len();
-        crate::log_line(&format!(
-            "[gui] page ready after {}ms ({queued} queued)",
+        crate::gui_log_line(&format!(
+            "page ready after {}ms ({queued} queued)",
             self.opened_at.elapsed().as_millis()
         ));
         while let Some(text) = self.queue.pop_front() {
@@ -474,8 +474,8 @@ impl EditorClient {
             if self.queue.len() >= QUEUE_BUDGET {
                 self.queue.pop_front();
                 let waited = self.opened_at.elapsed().as_millis();
-                crate::log_line(&format!(
-                    "[gui] dropping the oldest queued message: the page has not become ready after {waited}ms"
+                crate::gui_log_line(&format!(
+                    "dropping the oldest queued message: the page has not become ready after {waited}ms"
                 ));
                 // 队列满了 = 页面根本没起来。这时候**必须**让用户看见一句话，
                 // 否则界面是一块空面板，而日志在宿主的日志目录里没人会去翻。
@@ -505,8 +505,8 @@ impl EditorClient {
         self.post_failures = self.post_failures.saturating_add(1);
         if self.post_failures >= POST_FAILURE_LIMIT && !self.dead {
             self.dead = true;
-            crate::log_line(&format!(
-                "[gui] {} consecutive deliveries failed — the embedded page is gone",
+            crate::gui_log_line(&format!(
+                "{} consecutive deliveries failed — the embedded page is gone",
                 self.post_failures
             ));
         }

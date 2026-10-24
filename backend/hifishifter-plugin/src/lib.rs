@@ -183,7 +183,10 @@ fn module_initialize() -> bool {
 
 /// 模块级卸载：宿主在最后一次释放模块前的清理点。
 fn module_shutdown() -> bool {
-    crate::guard_ffi(false, editor::shutdown)
+    // 先收尾 GUI（它会写诊断行），再把还攒在缓冲里的日志落盘。
+    let result = crate::guard_ffi(false, editor::shutdown);
+    diagnostics::flush_pending();
+    result
 }
 
 /// VST3 模块初始化入口（Windows：REAPER 在 `LoadLibrary` 之后显式调用）。

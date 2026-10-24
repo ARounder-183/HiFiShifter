@@ -305,7 +305,7 @@ fn register_class() -> Result<(), String> {
 /// 不留指向已卸载DLL的window class；打开中的child明确阻止正常卸载。
 pub(super) fn shutdown() -> bool {
     if WINDOWS.load(Ordering::Acquire) != 0 {
-        crate::log_line("ExitDll refused: native editor windows still alive");
+        crate::gui_log_line("ExitDll refused: native editor windows still alive");
         return false;
     }
     let mut registered = CLASS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -447,8 +447,8 @@ unsafe extern "system" fn window_proc(
                 // 一张死图。继续留着它只会让预算被占满、后续命令全部被拒 —— 那比
                 // "明确关掉"更难排查。
                 if client.borrow().is_dead() {
-                    crate::log_line(
-                        "[gui] closing the editor view: the embedded page stopped responding",
+                    crate::gui_log_line(
+                        "closing the editor view: the embedded page stopped responding",
                     );
                     let _ = DestroyWindow(hwnd);
                 }
@@ -802,9 +802,7 @@ fn configure_browser(
             unsafe {
                 navigate.Navigate(w!("https://hifishifter.invalid/plugin.html"))?;
             }
-            crate::log_line(
-                "Native editor frontend navigation started (commands pending session binding)",
-            );
+            crate::gui_log_line("frontend navigation started (commands pending session binding)");
             Ok(())
         }));
     unsafe { browser.AddScriptToExecuteOnDocumentCreated(PCWSTR(script.as_ptr()), &ready) }

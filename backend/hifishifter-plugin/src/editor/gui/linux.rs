@@ -133,7 +133,7 @@ impl EditorPort for LinuxPort {
     }
 
     fn show_error(&self, text: &str) {
-        crate::log_line(&format!("Native editor error: {text}"));
+        crate::gui_log_line(&format!("Native editor error: {text}"));
         // WebKit 没有"画一个错误控件"的接口；把错误写进 `document.title` 与 body，
         // 用户至少能看到一行字，而不是对着白屏猜。
         let webview = self.webview.borrow().clone();
@@ -371,7 +371,7 @@ pub(super) fn create(
 /// 严重得多。所以只等一个"命令已收到"的回执，超时就放弃。
 pub(super) fn shutdown() -> bool {
     if LIVE_VIEWS.load(Ordering::Acquire) != 0 {
-        crate::log_line("ExitDll refused: native editor views still alive");
+        crate::gui_log_line("ExitDll refused: native editor views still alive");
         return false;
     }
     let Some(Some(thread)) = GUI_THREAD.get() else {
@@ -382,7 +382,7 @@ pub(super) fn shutdown() -> bool {
         return true;
     }
     if replies.recv_timeout(SHUTDOWN_TIMEOUT).is_err() {
-        crate::log_line("ExitDll: the GTK thread did not stop in time; abandoning it");
+        crate::gui_log_line("ExitDll: the GTK thread did not stop in time; abandoning it");
     }
     // 句柄直接丢掉（线程分离），见上面的理由。
     let _ = thread

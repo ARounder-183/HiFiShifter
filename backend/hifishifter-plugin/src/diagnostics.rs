@@ -79,23 +79,26 @@ impl log::Log for FileLogger {
         );
         let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            // 落点未定（宿主名还没到、也没过宽限期）：先攒着，别急着创建
-            // `plugin-unknown.log` —— 那会让"按宿主分文件"在真拿到宿主名之前就定死。
-            let buffered = {
-                let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-                if pending.len() < MAX_PENDING_LINES {
-                    pending.push(line.clone());
-                    true
-                } else {
-                    false
-                }
-            };
             // 缓冲满、或已经等过了宽限期：直接落到 unknown，宁可文件名不完美也不能丢日志。
             let timed_out = STARTED
                 .get()
                 .is_some_and(|started| started.elapsed() >= HOST_NAME_GRACE);
-            if buffered && !timed_out {
-                return;
+            // 【为什么显式路径不缓冲】设了 `HIFISHIFTER_PLUGIN_LOG`/`HIFISHIFTER_LOG_DIR`
+            // 的人要的就是**那个文件**：这时还按"等宿主名"攒着，等于让排查者对着一个
+            // 空目录猜。实测过一个合成宿主：宿主名没到、宽限期又没新记录触发，
+            // 整段缓冲就随进程退出一起消失了。
+            let explicit = env_override_path().is_some();
+            // 【顺序很重要】只有"确实要攒着"时才入队：先入队再决定要不要落盘，
+            // 会让同一条日志既进缓冲又被 `drain_pending_into` 写一遍 —— 输出里出现
+            // 两条一模一样、时间戳也一样的行。这个缺陷真的发生过。
+            if !timed_out && !explicit {
+                let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+                if pending.len() < MAX_PENDING_LINES {
+                    // 落点未定（宿主名还没到、也没过宽限期）：先攒着，别急着创建
+                    // `plugin-unknown.log` —— 那会让"按宿主分文件"在真拿到宿主名之前就定死。
+                    pending.push(line.clone());
+                    return;
+                }
             }
             match open_writer() {
                 Ok(mut writer) => {
@@ -169,6 +172,27 @@ fn drain_pending_into(writer: &mut RotatingLog) {
     };
     for line in pending {
         let _ = writer.write_line(&line);
+    }
+}
+
+/// 把还在缓冲里的日志行落盘。
+///
+/// 【为什么必须有】缓冲只在"下一条记录到达且已过宽限期"时才会落盘。宿主不给名字、
+/// 之后也不再有任何日志的进程（合成宿主、无头探针、崩在 `setActive` 之前的宿主）
+/// 会把整段缓冲**随退出一起丢掉** —— 而那段恰恰是最需要的东西。卸载入口调一次，
+/// 成本是一行 `write`。
+pub fn flush_pending() {
+    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let Ok(mut writer) = open_writer() else {
+            return;
+        };
+        drain_pending_into(&mut writer);
+        *guard = Some(writer);
+        return;
+    }
+    if let Some(writer) = guard.as_mut() {
+        let _ = writer.write_line(""); // 触发一次落盘（write_line 内部按行写）
     }
 }
 

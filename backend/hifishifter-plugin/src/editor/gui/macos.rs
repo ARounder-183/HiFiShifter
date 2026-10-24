@@ -312,7 +312,7 @@ impl EditorPort for MacPort {
     }
 
     fn show_error(&self, text: &str) {
-        crate::log_line(&format!("Native editor error: {text}"));
+        crate::gui_log_line(&format!("Native editor error: {text}"));
         // WebKit 没有"画一个错误控件"的接口；把错误写进页面，用户至少能看到一行字。
         let webview = self.webview.borrow().clone();
         if let Some(webview) = webview {
@@ -558,10 +558,7 @@ impl MacHost {
         unsafe {
             webview.loadRequest(&NSURLRequest::requestWithURL(&url));
         }
-        crate::log_line(&format!(
-            "[gui] wkwebview {token} created ({}x{})",
-            width, height
-        ));
+        crate::gui_log_line(&format!("wkwebview {token} created ({}x{})", width, height));
         Ok(Self { token })
     }
 }
@@ -608,7 +605,7 @@ fn close_view(token: usize) {
 /// 卸载前收尾：还有活视图就明确拒绝（留着一个指向已卸载代码段的委托 = 野跳转）。
 pub(super) fn shutdown() -> bool {
     if LIVE_VIEWS.load(Ordering::Acquire) != 0 {
-        crate::log_line("ExitDll refused: native editor views still alive");
+        crate::gui_log_line("ExitDll refused: native editor views still alive");
         return false;
     }
     true

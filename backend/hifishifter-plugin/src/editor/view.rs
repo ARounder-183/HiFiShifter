@@ -255,22 +255,19 @@ unsafe extern "system" fn attached(
                 let reason = host.fidelity().as_str();
                 drop(state);
                 drop(host);
-                crate::log_line(&format!("[gui] no embedded editor: {reason}"));
+                crate::gui_log_line(&format!("no embedded editor: {reason}"));
                 K_RESULT_FALSE
             }
             Ok(host) => {
                 let fidelity = host.fidelity();
                 state.native = Some(host);
                 drop(state);
-                crate::log_line(&format!(
-                    "[gui] editor view attached ({})",
-                    fidelity.as_str()
-                ));
+                crate::gui_log_line(&format!("editor view attached ({})", fidelity.as_str()));
                 // 【为什么要单独一行】"浮窗"是一种**有损**的降级：泵不在宿主线程上，
                 // 宿主 Undo 的合并粒度会变粗。用户报"撤销一次退两步"时这行是关键线索。
                 if matches!(fidelity, super::gui::GuiFidelity::FloatingWindow) {
-                    crate::log_line(
-                        "[gui] running on a private GUI thread; host undo coalescing degraded",
+                    crate::gui_log_line(
+                        "running on a private GUI thread; host undo coalescing degraded",
                     );
                 }
                 K_RESULT_OK
