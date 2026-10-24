@@ -85,8 +85,43 @@ fn model_directory() -> Result<PathBuf, String> {
             .ok_or("VST3 Contents unavailable")?
             .join("Resources/models"))
     }
-    #[cfg(all(not(windows), not(test)))]
+    // 【Unix】用 dladdr 反查本模块自己的路径：宿主加载的是
+    // `<bundle>/Contents/<arch>/HiFiShifter.so`（macOS 是 `Contents/MacOS/HiFiShifter`），
+    // 往上两级就是 `Contents` —— 与 Windows 的 `Contents\Resources\models` 同构，
+    // 因此模型清单与 `model_store` 一个字都不用改。
+    //
+    // 【为什么不是 `std::env::current_exe`】插件跑在宿主进程里，那是**宿主**的路径。
+    // 【为什么不用 `/proc/self/maps`】只有 Linux 有；dladdr 两个平台都有。
+    #[cfg(all(unix, not(test)))]
     {
-        Err("embedded plugin model paths are Windows-only".into())
+        use std::ffi::CStr;
+        let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
+        // SAFETY: dladdr 只写它自己的 out 参数；地址取自本 crate 内的函数，
+        // 必然落在本模块的映射区间里。
+        let found = unsafe {
+            libc::dladdr(
+                initialize_models as *const () as *const libc::c_void,
+                info.as_mut_ptr(),
+            )
+        };
+        if found == 0 {
+            return Err("plugin module path unavailable".into());
+        }
+        // SAFETY: found != 0 时 dladdr 已把 info 初始化完毕。
+        let info = unsafe { info.assume_init() };
+        if info.dli_fname.is_null() {
+            return Err("plugin module path unavailable".into());
+        }
+        // SAFETY: dli_fname 指向 dladdr 内部的 NUL 结尾字符串。
+        let module = PathBuf::from(
+            unsafe { CStr::from_ptr(info.dli_fname) }
+                .to_string_lossy()
+                .into_owned(),
+        );
+        Ok(module
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or("VST3 Contents unavailable")?
+            .join("Resources/models"))
     }
 }

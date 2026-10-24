@@ -21,4 +21,31 @@ fn main() {
         &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         env!("CARGO_PKG_VERSION"),
     );
+    link_runtime_search_paths();
+}
+
+/// 让本 cdylib 只依赖**同 bundle 内**的共享库，不依赖构建机的任何绝对路径。
+///
+/// 【为什么必须写在这里】kernel 的 build script 里确实有 `-Wl,-rpath,$ORIGIN`，
+/// 但 kernel 只是 rlib：cargo 对非 cdylib/bin 目标的 `cargo:rustc-link-arg` 是**丢弃**的，
+/// 于是产物的 `readelf -d` 里一个 RPATH 都没有，`ldd` 直接报 `libwebgpu_dawn.so`、
+/// `libSoundTouchDLL.so` "not found"。真正产出 cdylib 的是本 crate，所以只能写在这里。
+///
+/// 【为什么是 `$ORIGIN` 而不是改 `LD_LIBRARY_PATH`】插件跑在宿主进程里，那是用户的
+/// 环境；能改的只有自己的 ELF 动态段。macOS 对应的是 `@loader_path`（Mach-O 没有
+/// 进程级搜索路径可言）。
+fn link_runtime_search_paths() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        // 同目录：`Contents/x86_64-linux/` 里同时放模块与它的两个 .so。
+        "linux" | "freebsd" | "android" => {
+            println!("cargo:rustc-link-arg=-Wl,--enable-new-dtags");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        }
+        // `Contents/MacOS/HiFiShifter` + `Contents/Frameworks/*.dylib`。
+        "macos" => {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../Frameworks");
+        }
+        _ => {}
+    }
 }

@@ -38,6 +38,12 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # 自己实现等于把三个平台各写一遍。与 App 侧同版本。
 trash = "5.2.9"
 
+[target.'cfg(unix)'.dependencies]
+# Unix 上「本模块在哪个 bundle 里」只能靠 `dladdr` 反查（见 editor/resources.rs）。
+# kernel 已经为 `statvfs` 声明过同一份 libc；这里是插件自己的直接依赖，
+# 不靠传递依赖 —— 传递依赖一旦被上游裁剪，失败会发生在链接期而不是编译期。
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # 二期仅原生WebView2，没有Tauri/wry主循环；与 workspace 其余部分同版（0.39 ↔ windows-core 0.62）。
 webview2-com = "0.39"

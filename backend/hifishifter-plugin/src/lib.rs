@@ -155,14 +155,13 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
     })
 }
 
-/// VST3 模块初始化入口（REAPER 在 `LoadLibrary` 之后显式调用）。
+/// 模块级初始化：三个平台的入口做的是同一件事，所以只有这一份实现。
 ///
-/// 【为什么初始化失败也返回 `true`】让宿主把类列出来，失败原因记在日志里。返回
-/// `false` 会让 REAPER 直接跳过插件 —— 那就什么信息都拿不到了。探针期实测过这个取舍。
+/// 【为什么失败也要返回 `true`】让宿主把类列出来，原因记在日志里。返回 `false` 会让
+/// 宿主直接跳过插件 —— 那就什么信息都拿不到了。探针期实测过这个取舍。
 /// panic 除外：`guard_ffi` 已把 panic 原文记进日志，此时模块状态未知，宁可让宿主
 /// 跳过也不要带着坏 runtime 插进 N 个轨道。
-#[no_mangle]
-pub extern "system" fn InitDll() -> bool {
+fn module_initialize() -> bool {
     crate::guard_ffi(false, || {
         diagnostics::init();
         editor::resources::initialize_models();
@@ -171,8 +170,59 @@ pub extern "system" fn InitDll() -> bool {
     })
 }
 
-/// VST3 模块卸载入口。
+/// 模块级卸载：宿主在最后一次释放模块前的清理点。
+fn module_shutdown() -> bool {
+    crate::guard_ffi(false, editor::shutdown)
+}
+
+/// VST3 模块初始化入口（Windows：REAPER 在 `LoadLibrary` 之后显式调用）。
+#[no_mangle]
+pub extern "system" fn InitDll() -> bool {
+    module_initialize()
+}
+
+/// VST3 模块卸载入口（Windows）。
 #[no_mangle]
 pub extern "system" fn ExitDll() -> bool {
-    crate::guard_ffi(false, editor::shutdown)
+    module_shutdown()
+}
+
+// ── Unix 模块入口 ───────────────────────────────────────────────────────────
+//
+// 【为什么需要它们】VST3 的模块 ABI 不是"有 `GetPluginFactory` 就行"：Windows 的
+// 约定是 `InitDll`/`ExitDll`，Linux 是 `ModuleEntry`/`ModuleExit`，macOS 是
+// `bundleEntry`/`bundleExit`（且必须先有 `Contents/Info.plist`，宿主靠 CFBundle
+// 找本模块的二进制）。宿主查不到入口符号时**不会报错**，表现是"这个插件 0 个类" ——
+// 与符号拼错完全同一个症状，所以三组入口都显式导出，不赌宿主的宽容度。
+//
+// 【为什么 macOS 的参数是 `*mut c_void`】签名里的 `CFBundleRef` 就是一个指针；
+// 本模块不需要读它（不查 CFBundle 元数据），声明成裸指针即可，省掉对
+// CoreFoundation 的链接依赖。
+
+/// Linux 模块入口。SDK 会在 `dlopen` 之后调用它（参数是模块句柄，本模块不用）。
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn ModuleEntry(_module: *mut c_void) -> bool {
+    module_initialize()
+}
+
+/// Linux 模块卸载入口。
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn ModuleExit() -> bool {
+    module_shutdown()
+}
+
+/// macOS bundle 入口（`CFBundleRef` 以裸指针传入）。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn bundleEntry(_bundle: *mut c_void) -> bool {
+    module_initialize()
+}
+
+/// macOS bundle 卸载入口。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn bundleExit() -> bool {
+    module_shutdown()
 }

@@ -2079,6 +2079,7 @@ dependencies = [
  "hifishifter-clipboard",
  "hifishifter-host-link",
  "hifishifter-kernel",
+ "libc",
  "log",
  "serde",
  "serde_json",
